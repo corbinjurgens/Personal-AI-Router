@@ -21,13 +21,8 @@ import (
 )
 
 func TestModelCopyBlockedSourceRetryReachesDownloadFence(t *testing.T) {
-	source := copyTestExecutor(t, "ollama", t.TempDir(), true)
-	_, sourceStore, err := source.modelStoreFor("ollama")
-	if err != nil {
-		t.Fatalf("source store: %v", err)
-	}
-	writeOllamaModel(t, sourceStore.root, "tiny-fenced", 16, 3)
-	nativeCalls := copyTestNativeModels(t, source, "ollama", "tiny-fenced")
+	source := namedCustomCopyFixture(t, "tiny-fenced", 16, 3).source
+	nativeCalls := copyTestNativeModels(t, source, "llamacpp", "tiny-fenced")
 	control := &controlServer{exec: source}
 	listings, bodies := 0, 0
 	// Exercise the real source listing fence and client decoder in memory.
@@ -46,15 +41,15 @@ func TestModelCopyBlockedSourceRetryReachesDownloadFence(t *testing.T) {
 		}
 		return response.Result(), nil
 	})}}
-	if _, err := client.modelFiles(context.Background(), "ollama", "tiny-fenced", nil); err != nil {
+	if _, err := client.modelFiles(context.Background(), "llamacpp", "tiny-fenced", nil); err != nil {
 		t.Fatalf("positive source listing control: %v", err)
 	}
 	if listings != 1 || bodies != 0 {
 		t.Fatalf("positive source control: listings = %d, bodies = %d", listings, bodies)
 	}
 
-	destination := copyTestExecutor(t, "ollama", t.TempDir(), true)
-	_, destinationStore, err := destination.modelStoreFor("ollama")
+	destination := copyTestExecutor(t, "llamacpp", t.TempDir(), true)
+	_, destinationStore, err := destination.modelStoreFor("llamacpp")
 	if err != nil {
 		t.Fatalf("destination store: %v", err)
 	}
@@ -70,7 +65,7 @@ func TestModelCopyBlockedSourceRetryReachesDownloadFence(t *testing.T) {
 	d.copiesComplete = true
 	m := &Manager{copyJournal: d, copyRegistry: destination.reg}
 	t.Cleanup(m.stopCopies)
-	attempt := reserveModelDownload(t, source.downloads, "ollama", "tiny-fenced", engines.ModelNamingExact)
+	attempt := reserveModelDownload(t, source.downloads, "llamacpp", "tiny-fenced", engines.ModelNamingExact)
 	if _, err := source.downloads.changeMarker(attempt, false); err != nil {
 		t.Fatalf("persist unsafe source download: %v", err)
 	}
@@ -83,7 +78,7 @@ func TestModelCopyBlockedSourceRetryReachesDownloadFence(t *testing.T) {
 		if len(before.Entries) != 1 || before.Entries[0].Phase != phase || !before.Entries[0].BlocksReadiness {
 			t.Fatalf("source download fence = %+v", before)
 		}
-		p := copyRequest{OpID: newOpID(), Engine: "ollama", Model: "tiny-fenced", SourceNodeID: "source", DestinationNodeID: "destination"}
+		p := copyRequest{OpID: newOpID(), Engine: "llamacpp", Model: "tiny-fenced", SourceNodeID: "source", DestinationNodeID: "destination"}
 		ctx, release, err := m.reserveCopy(context.Background(), p)
 		if err != nil {
 			t.Fatalf("reserve blocked-source copy: %v", err)

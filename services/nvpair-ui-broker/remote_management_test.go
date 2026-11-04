@@ -373,7 +373,7 @@ func TestRemoteManagementAvailabilityAcceptance(t *testing.T) {
 
 func rmSettings(t *testing.T) (*settingsHarness, settings.Request) {
 	t.Helper()
-	h := newSettingsHarness(t)
+	h := newLlamaCPPSettingsHarness(t)
 	clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")
 	grantRemoteManagement(t, h.b.clusterDir, "cluster", "target", "peer", true)
 	return h, h.changedRequest(t, "--pg2")
@@ -395,7 +395,7 @@ func rmSettingsUnchanged(t *testing.T, h *settingsHarness, before settings.Snaps
 	if !bytes.Equal(data, journal) {
 		t.Fatal("denied settings changed journal")
 	}
-	if _, ok := h.b.engineSettings["ollama"].Receipts[requestID]; ok {
+	if _, ok := h.b.engineSettings[h.engine].Receipts[requestID]; ok {
 		t.Fatal("denied settings created receipt")
 	}
 }
@@ -428,10 +428,10 @@ func TestRemoteManagementSettingsAcceptance(t *testing.T) {
 }
 
 func TestRemoteManagementDeniedSettingsCreatesNoJournal(t *testing.T) {
-	h := newSettingsHarness(t)
+	h := newLlamaCPPSettingsHarness(t)
 	clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")
 	grantRemoteManagement(t, h.b.clusterDir, "cluster", "target", "peer", false)
-	_, err := h.b.applyEngineSettings(context.Background(), settings.Request{Engine: "ollama", RequestID: "unaccepted"}, "peer")
+	_, err := h.b.applyEngineSettings(context.Background(), settings.Request{Engine: "llamacpp", RequestID: "unaccepted"}, "peer")
 	rmDeny(t, err)
 	path, err := h.b.engineSettingsPath()
 	if err != nil {
@@ -750,7 +750,7 @@ func TestRemoteManagementBlankRelayCaller(t *testing.T) {
 				payload       any
 			}{
 				{policyRelayRequestMethod, policyRelayReplyMethod, policyRelayRequest{ID: "blank-policy", Method: "get", Caller: caller}},
-				{"engine:settings-request", "engine:settings-reply", settings.Relay{ID: "blank-settings", Method: "get", Caller: caller, Request: settings.Request{Engine: "ollama"}}},
+				{"engine:settings-request", "engine:settings-reply", settings.Relay{ID: "blank-settings", Method: "get", Caller: caller, Request: settings.Request{Engine: "llamacpp"}}},
 				{"engine:switch-request", "engine:switch-reply", map[string]any{"id": "blank-switch", "method": settings.SwitchStatusMethod, "caller": caller, "params": map[string]any{}}},
 			} {
 				rb.b.forwardEngineNotificationFrom(rb.source, family.method, rmJSON(t, family.payload))
@@ -780,7 +780,7 @@ func TestRemoteManagementStaleWorkerDropped(t *testing.T) {
 		params any
 	}{
 		{policyRelayRequestMethod, rmPolicyRequest(t, rb)},
-		{"engine:settings-request", settings.Relay{ID: "stale-settings", Method: "apply", Caller: "pinned-peer", Request: settings.Request{RequestID: "bad", Engine: "ollama"}}},
+		{"engine:settings-request", settings.Relay{ID: "stale-settings", Method: "apply", Caller: "pinned-peer", Request: settings.Request{RequestID: "bad", Engine: "llamacpp"}}},
 		{"engine:switch-request", map[string]any{"id": "stale-switch", "method": settings.SwitchMethod, "caller": "pinned-peer", "params": map[string]any{}}},
 	} {
 		rb.b.forwardEngineNotificationFrom(old, notification.method, rmJSON(t, notification.params))
@@ -981,7 +981,7 @@ func TestRemoteManagementOriginRelaysPreserveCode(t *testing.T) {
 					}
 				}
 			}()
-			b.handleMessage(clientRequest(1, method, map[string]any{"nodeId": "peer", "engine": "ollama", "requestId": "origin"}))
+			b.handleMessage(clientRequest(1, method, map[string]any{"nodeId": "peer", "engine": "llamacpp", "requestId": "origin"}))
 			response := out.waitFrame(t, method+" origin denial", isResponse(1))
 			if response.Error == nil || response.Error.Code != -32012 || response.Error.Message != remoteManagementDeniedMessage {
 				t.Fatalf("origin %s = %+v", method, response)

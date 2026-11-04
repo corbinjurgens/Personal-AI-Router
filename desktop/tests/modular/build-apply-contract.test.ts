@@ -159,7 +159,7 @@ function preview(): BuildApplyPreview {
             pauseOrigin: known('peer'),
             engines: known([
                 {
-                    engine: 'ollama',
+                    engine: 'llamacpp',
                     active: known(false),
                     running: absent(),
                     loadedModels: known([]),
@@ -169,7 +169,7 @@ function preview(): BuildApplyPreview {
                 }
             ]),
             activeWork: absent(),
-            modelOperations: known([{ engine: 'ollama', kind: 'copy', blocksApply: true }]),
+            modelOperations: known([{ engine: 'llamacpp', kind: 'copy', blocksApply: true }]),
             settingsDifferences: known([
                 {
                     field: 'pause.stopEngines',

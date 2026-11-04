@@ -26,7 +26,6 @@ import (
 
 const (
 	tornOpenAIMarker = "TORN-OPENAI-FRAGMENT"
-	tornOllamaMarker = "TORN-OLLAMA-FRAGMENT"
 )
 
 func TestStreamFrameNumericInputBoundary(t *testing.T) {
@@ -60,14 +59,10 @@ func TestStreamFrameNumericInputBoundary(t *testing.T) {
 }
 
 func TestStreamFrameNumericScratchRefusal(t *testing.T) {
-	for _, protocol := range []streamProtocol{streamProtocolSSE, streamProtocolNDJSON} {
+	for _, protocol := range []streamProtocol{streamProtocolSSE} {
 		t.Run(strconv.Itoa(int(protocol)), func(t *testing.T) {
 			input := "data: {\"choices\":[]}\n\ndata: [DONE]\n\n"
 			want := wantSSEInterruption(streamInterruptReasonBudget)
-			if protocol == streamProtocolNDJSON {
-				input = `{"done":true}`
-				want = wantNDJSONInterruption(streamInterruptReasonBudget)
-			}
 			budget := newFrameBudget(64 << 10)
 			calls := 0
 			r, err := newStreamFrameReader(streamFrameConfig{Protocol: protocol, Upstream: io.NopCloser(strings.NewReader(input)), Budget: budget, Extract: func([]byte) performanceExtractMetadata { calls++; return performanceExtractMetadata{} }})
@@ -148,16 +143,10 @@ func TestStreamFrameAdmittedAllowanceBound(t *testing.T) {
 
 func TestStreamFramePeerInterruptionPreserved(t *testing.T) {
 	for reason, frames := range streamInterruptionFramesByReason {
-		for _, protocol := range []streamProtocol{streamProtocolSSE, streamProtocolNDJSON} {
+		for _, protocol := range []streamProtocol{streamProtocolSSE} {
 			name := "SSE"
-			if protocol == streamProtocolNDJSON {
-				name = "NDJSON"
-			}
 			t.Run(reason+"/"+name, func(t *testing.T) {
 				payload := frames.sse
-				if protocol == streamProtocolNDJSON {
-					payload = frames.ndjson
-				}
 				var calls int
 				r, err := newStreamFrameReader(streamFrameConfig{
 					Budget:   newFrameBudget(64 << 20),
@@ -197,10 +186,6 @@ func mustReadFixture(t *testing.T, name string) []byte {
 func wantSSEInterruption(reason string) []byte {
 	return []byte("data: {\"error\":{\"message\":\"stream interrupted: " + reason +
 		"\",\"type\":\"server_error\",\"code\":\"stream_interrupted\"}}\n\ndata: [DONE]\n\n")
-}
-
-func wantNDJSONInterruption(reason string) []byte {
-	return []byte("{\"error\":\"stream interrupted: " + reason + "\"}\n")
 }
 
 // chunkedStreamBody hands out a fixed script of byte chunks and then reports
@@ -479,34 +464,6 @@ func assertSSEInterruption(t *testing.T, out []byte, reason string) {
 	}
 }
 
-func decodeFinalNDJSONError(t *testing.T, out []byte) string {
-	t.Helper()
-	lines := bytes.Split(bytes.TrimRight(out, "\n"), []byte("\n"))
-	if len(lines) == 0 {
-		t.Fatalf("no NDJSON line in %q", out)
-	}
-	var object struct {
-		Error string `json:"error"`
-	}
-	if err := json.Unmarshal(lines[len(lines)-1], &object); err != nil {
-		t.Fatalf("decode final NDJSON object %q: %v", lines[len(lines)-1], err)
-	}
-	return object.Error
-}
-
-func assertNDJSONInterruption(t *testing.T, out []byte, reason string) {
-	t.Helper()
-	if !bytes.HasSuffix(out, wantNDJSONInterruption(reason)) {
-		t.Fatalf("stream does not end with the NDJSON interruption object for %q:\n%q", reason, out)
-	}
-	if got := bytes.Count(out, []byte("stream interrupted")); got != 1 {
-		t.Fatalf("stream carries %d interruption objects, want exactly 1", got)
-	}
-	if message := decodeFinalNDJSONError(t, out); message != "stream interrupted: "+reason {
-		t.Fatalf("error message = %q, want %q", message, "stream interrupted: "+reason)
-	}
-}
-
 func TestStreamFrameOpenAICompleteStream(t *testing.T) {
 	content := mustReadFixture(t, "openai-complete.txt")
 
@@ -539,38 +496,6 @@ func TestStreamFrameOpenAITornStreamDropsFragment(t *testing.T) {
 		t.Fatalf("torn fragment reached the client: %q", out)
 	}
 	assertSSEInterruption(t, out, streamInterruptReasonPrematureEOF)
-	assertOutcome(t, result, streamOutcomeInterrupted, streamInterruptReasonPrematureEOF)
-}
-
-func TestStreamFrameOllamaCompleteStream(t *testing.T) {
-	content := mustReadFixture(t, "ollama-complete.txt")
-
-	out, result := runStreamFrame(t, streamFrameCase{protocol: streamProtocolNDJSON, upstream: newChunkedStreamBody(content, 0)})
-
-	if !bytes.Equal(out, content) {
-		t.Fatalf("forwarded bytes differ from the upstream stream:\ngot  %q\nwant %q", out, content)
-	}
-	assertOutcome(t, result, streamOutcomeCompleted, "")
-}
-
-func TestStreamFrameOllamaTornStreamDropsFragment(t *testing.T) {
-	content := mustReadFixture(t, "ollama-torn.txt")
-	tornAt := bytes.Index(content, []byte(tornOllamaMarker))
-	if tornAt < 0 {
-		t.Fatalf("fixture %q does not carry the torn marker", content)
-	}
-	lineStart := bytes.LastIndexByte(content[:tornAt], '\n') + 1
-	want := append(append([]byte{}, content[:lineStart]...), wantNDJSONInterruption(streamInterruptReasonPrematureEOF)...)
-
-	out, result := runStreamFrame(t, streamFrameCase{protocol: streamProtocolNDJSON, upstream: newChunkedStreamBody(content, 0)})
-
-	if !bytes.Equal(out, want) {
-		t.Fatalf("forwarded bytes differ:\ngot  %q\nwant %q", out, want)
-	}
-	if bytes.Contains(out, []byte(tornOllamaMarker)) {
-		t.Fatalf("torn fragment reached the client: %q", out)
-	}
-	assertNDJSONInterruption(t, out, streamInterruptReasonPrematureEOF)
 	assertOutcome(t, result, streamOutcomeInterrupted, streamInterruptReasonPrematureEOF)
 }
 
@@ -672,36 +597,6 @@ func TestStreamFrameFinishReasonCompletion(t *testing.T) {
 	})
 }
 
-func TestStreamFrameFinalNDJSONObjectWithoutNewline(t *testing.T) {
-	first := "{\"model\":\"qwen2.5\",\"message\":{\"role\":\"assistant\",\"content\":\"hi\"},\"done\":false}\n"
-	final := "{\"model\":\"qwen2.5\",\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true}"
-
-	t.Run("final object carries the done marker", func(t *testing.T) {
-		content := []byte(first + final)
-		out, result := runStreamFrame(t, streamFrameCase{protocol: streamProtocolNDJSON, upstream: newChunkedStreamBody(content, 0)})
-
-		if !bytes.Equal(out, content) {
-			t.Fatalf("forwarded bytes differ:\ngot  %q\nwant %q", out, content)
-		}
-		assertOutcome(t, result, streamOutcomeCompleted, "")
-	})
-
-	t.Run("final object without the done marker is interrupted", func(t *testing.T) {
-		unfinished := "{\"model\":\"qwen2.5\",\"message\":{\"role\":\"assistant\",\"content\":\"more\"},\"done\":false}"
-		content := []byte(first + unfinished)
-		want := append(append([]byte{}, content...), '\n')
-		want = append(want, wantNDJSONInterruption(streamInterruptReasonPrematureEOF)...)
-
-		out, result := runStreamFrame(t, streamFrameCase{protocol: streamProtocolNDJSON, upstream: newChunkedStreamBody(content, 0)})
-
-		if !bytes.Equal(out, want) {
-			t.Fatalf("forwarded bytes differ:\ngot  %q\nwant %q", out, want)
-		}
-		assertNDJSONInterruption(t, out, streamInterruptReasonPrematureEOF)
-		assertOutcome(t, result, streamOutcomeInterrupted, streamInterruptReasonPrematureEOF)
-	})
-}
-
 func TestStreamFrameUpstreamProtocolErrorIsFailure(t *testing.T) {
 	t.Run("sse error event", func(t *testing.T) {
 		good := "data: {\"id\":\"err\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"a\"},\"finish_reason\":null}]}\n\n"
@@ -726,22 +621,6 @@ func TestStreamFrameUpstreamProtocolErrorIsFailure(t *testing.T) {
 		}
 	})
 
-	t.Run("ndjson error object", func(t *testing.T) {
-		good := "{\"model\":\"qwen2.5\",\"message\":{\"content\":\"a\"},\"done\":false}\n"
-		bad := "{\"error\":\"engine exploded\"}\n"
-		out, result := runStreamFrame(t, streamFrameCase{
-			protocol: streamProtocolNDJSON,
-			upstream: newChunkedStreamBody([]byte(good+bad), 0),
-		})
-
-		if !bytes.Equal(out, []byte(good+bad)) {
-			t.Fatalf("upstream error object was not preserved:\ngot  %q\nwant %q", out, good+bad)
-		}
-		if got := bytes.Count(out, []byte("stream interrupted")); got != 0 {
-			t.Fatalf("synthetic interruption object was appended to an upstream error: %q", out)
-		}
-		assertOutcome(t, result, streamOutcomeUpstreamError, streamInterruptReasonUpstreamError)
-	})
 }
 
 func TestStreamFrameMalformedFrameIsInterrupted(t *testing.T) {
@@ -764,24 +643,6 @@ func TestStreamFrameMalformedFrameIsInterrupted(t *testing.T) {
 		assertOutcome(t, result, streamOutcomeInterrupted, streamInterruptReasonMalformed)
 	})
 
-	t.Run("ndjson line is not json", func(t *testing.T) {
-		good := "{\"model\":\"qwen2.5\",\"message\":{\"content\":\"ok\"},\"done\":false}\n"
-		bad := "MALFORMED-NDJSON-PAYLOAD\n"
-		want := append([]byte(good), wantNDJSONInterruption(streamInterruptReasonMalformed)...)
-
-		out, result := runStreamFrame(t, streamFrameCase{
-			protocol: streamProtocolNDJSON,
-			upstream: newChunkedStreamBody([]byte(good+bad), 0),
-		})
-
-		if !bytes.Equal(out, want) {
-			t.Fatalf("forwarded bytes differ:\ngot  %q\nwant %q", out, want)
-		}
-		if bytes.Contains(out, []byte("MALFORMED-NDJSON-PAYLOAD")) {
-			t.Fatalf("malformed frame reached the client: %q", out)
-		}
-		assertOutcome(t, result, streamOutcomeInterrupted, streamInterruptReasonMalformed)
-	})
 }
 
 func TestStreamFrameIdleTimeoutClosesStream(t *testing.T) {
@@ -971,17 +832,6 @@ func TestStreamFrameRejectsNonObjectPayloads(t *testing.T) {
 			assertSSEInterruption(t, out, streamInterruptReasonMalformed)
 			assertOutcome(t, result, streamOutcomeInterrupted, streamInterruptReasonMalformed)
 		})
-		t.Run("ndjson "+payload, func(t *testing.T) {
-			out, result := runStreamFrame(t, streamFrameCase{
-				protocol: streamProtocolNDJSON,
-				upstream: newChunkedStreamBody([]byte(payload+"\n"), 1),
-			})
-			if !bytes.Equal(out, wantNDJSONInterruption(streamInterruptReasonMalformed)) {
-				t.Fatalf("non-object NDJSON reached client: %q", out)
-			}
-			assertNDJSONInterruption(t, out, streamInterruptReasonMalformed)
-			assertOutcome(t, result, streamOutcomeInterrupted, streamInterruptReasonMalformed)
-		})
 	}
 }
 
@@ -996,7 +846,6 @@ func TestStreamFrameInvalidUTF8IsDropped(t *testing.T) {
 		})
 	}
 	test("sse", streamProtocolSSE, []byte("data: {\"text\":\"\xff\"}\n\n"), wantSSEInterruption(streamInterruptReasonMalformed))
-	test("ndjson", streamProtocolNDJSON, []byte("{\"text\":\"\xff\"}\n"), wantNDJSONInterruption(streamInterruptReasonMalformed))
 }
 
 func TestStreamFrameCompleteFrameSizeBoundary(t *testing.T) {
@@ -1017,9 +866,6 @@ func TestStreamFrameCompleteFrameSizeBoundary(t *testing.T) {
 				oversized = append(oversized, suffix...)
 				out, result := runStreamFrame(t, streamFrameCase{protocol: protocol, upstream: newChunkedStreamBody(oversized, 997)})
 				want := wantSSEInterruption(streamInterruptReasonFrameTooLarge)
-				if protocol == streamProtocolNDJSON {
-					want = wantNDJSONInterruption(streamInterruptReasonFrameTooLarge)
-				}
 				if !bytes.Equal(out, want) {
 					t.Fatalf("oversized complete frame reached client: %d bytes", len(out))
 				}
@@ -1028,7 +874,6 @@ func TestStreamFrameCompleteFrameSizeBoundary(t *testing.T) {
 		})
 	}
 	test("sse", streamProtocolSSE, `data: {"text":"`, "\"}\n\n", "data: [DONE]\n\n")
-	test("ndjson", streamProtocolNDJSON, `{"response":"`, "\",\"done\":false}\n", "{\"done\":true}\n")
 }
 
 func TestStreamFrameHeartbeatRefreshesIdle(t *testing.T) {
@@ -1180,8 +1025,6 @@ func TestStreamFrameTerminalBytesWithReadError(t *testing.T) {
 	}
 	test("sse done with eof", streamProtocolSSE, "data: [DONE]\n\n", io.EOF)
 	test("sse done with transport error", streamProtocolSSE, "data: [DONE]\n\n", io.ErrUnexpectedEOF)
-	test("ndjson done with eof", streamProtocolNDJSON, "{\"done\":true}\n", io.EOF)
-	test("ndjson done with transport error", streamProtocolNDJSON, "{\"done\":true}\n", io.ErrUnexpectedEOF)
 }
 
 func TestStreamFrameFinishReasonRequiresCleanEOF(t *testing.T) {
@@ -1242,17 +1085,4 @@ func TestStreamFrameJSONFieldScanning(t *testing.T) {
 		t.Fatalf("nested JSON frame changed: %q", out)
 	}
 	assertOutcome(t, result, streamOutcomeCompleted, "")
-}
-
-func TestStreamFrameOllamaArbitraryReadSplits(t *testing.T) {
-	content := []byte("{\"response\":\"héllo → 世界\",\"done\":false}\r\n{\"done\":true}\r\n")
-	for _, size := range []int{1, 2, 3, 7, 64} {
-		t.Run("chunk/"+strconv.Itoa(size), func(t *testing.T) {
-			out, result := runStreamFrame(t, streamFrameCase{protocol: streamProtocolNDJSON, upstream: newChunkedStreamBody(content, size)})
-			if !bytes.Equal(out, content) {
-				t.Fatalf("split NDJSON changed raw bytes: %q", out)
-			}
-			assertOutcome(t, result, streamOutcomeCompleted, "")
-		})
-	}
 }

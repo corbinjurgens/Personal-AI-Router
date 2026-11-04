@@ -235,7 +235,6 @@ func TestResidentDailyAdapterUnsafeShapes(t *testing.T) {
 	test("load wrong schema type", load(func(a *Action) { a.HTTP.BodySchema = json.RawMessage(`{"model":"number"}`) }))
 	test("load command", load(func(a *Action) { a.Cmd = []string{"forbidden"} }))
 	test("load remove", load(func(a *Action) { a.RemovePath = &ActionRemovePath{} }))
-	test("load model resolution", load(func(a *Action) { a.ModelResolution = "lms-get" }))
 	test("load progress", load(func(a *Action) { a.ProgressProtocol = "ndjson" }))
 	test("different model parameter", func(m *Manifest) {
 		b := m.Operations[engines.OperationLoad]
@@ -581,7 +580,7 @@ func TestResidentContextBoundConfigured(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			p := nodepolicy.ReconcileResidentParams{Model: "m", Load: nodepolicy.ResidentLoadOptions{ContextLength: context}}
 			readback := &engines.ServingReadback{Configured: envelopes}
-			if got := residentConfiguredContext(p, engines.ModelNamingImpliedLatestTag, readback); got != want {
+			if got := residentConfiguredContext(p, engines.ModelNamingExact, readback); got != want {
 				t.Fatalf("configured context accepted=%v, want %v", got, want)
 			}
 		})
@@ -639,7 +638,7 @@ func TestResidentContextBoundColdPreflight(t *testing.T) {
 				t.Fatalf("native resident execution escaped restriction: %+v, grants=%d", result, f.dispatches)
 			}
 			f.noCalls(t)
-			assertNoLlamaSpawn(t, cold)
+			assertNoSpawn(t, cold)
 		})
 	}
 	// NE identity requires an owned launch; an exact cold bound cannot bypass the earlier identity check.

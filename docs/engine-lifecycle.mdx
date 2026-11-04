@@ -6,9 +6,9 @@ SPDX-License-Identifier: Apache-2.0
 # Managing Engines in NVIDIA Personal AI Router
 
 An **engine** is the local inference runtime Personal AI Router (PAIR) uses to
-run models. Today that means Ollama, LM Studio, or llama.cpp on a given machine.
-PAIR can install and run those engines for you, or work with a supported
-existing Ollama or LM Studio installation. This page explains what you can
+run models. Today that means llama.cpp on a given machine.
+PAIR can install and run it for you, or work with an engine already running on
+its usual port. This page explains what you can
 expect when you install, start, stop, update, or remove an engine.
 
 For first-time setup, refer to [Getting started](getting-started.mdx). To change
@@ -77,9 +77,8 @@ When you install an engine, consider the following:
   configures it, and owns it from then on.
 - A successful install **starts the engine** as part of the same flow, so you
   normally do not need a separate start step right after install.
-- If Ollama or LM Studio is already running on the machine, PAIR can **adopt**
-  that install instead of downloading another copy. Adoption helps when the
-  usual engine port is already in use.
+- If an engine is already running on its usual port, PAIR can **adopt** that
+  instance instead of starting another copy.
 - llama.cpp is always a PAIR-managed install. Windows and Linux download fixed
   checksum-pinned CUDA server/runtime archives; macOS downloads the standard
   Metal-capable archive. The roughly 0.6–0.8 GiB engine download happens on
@@ -97,7 +96,7 @@ To download models:
 1. Use **Add model**.
 2. Use **Load** when the engine requires an explicit load.
 
-![The Install engines dialog with Ollama downloading, reporting progress as it installs.](assets/onboarding/engine-lifecycle/01-engine-installing.png)
+![The Install engines dialog with an engine downloading, reporting progress as it installs.](assets/onboarding/engine-lifecycle/01-engine-installing.png)
 
 ## Starting and Stopping an Engine
 
@@ -127,8 +126,7 @@ Both actions apply only to an engine PAIR installed:
   no longer want PAIR to own that engine on the machine.
 
 Uninstalling an engine does **not** remove its models. Downloaded model files stay
-on disk in the engine's own storage — `~/.ollama`, `~/.llamacpp`, or
-`~/.lmstudio/models` — so uninstalling and reinstalling does not cost you
+on disk in the engine's own storage — `~/.llamacpp` for llama.cpp — so uninstalling and reinstalling does not cost you
 re-downloading them. The same is true of removing PAIR itself, or of resetting
 its data. Both remove the engines PAIR installed as far as they can, and never
 your models: a reset stops and tells you if an engine cannot be removed, while
@@ -136,26 +134,15 @@ uninstalling PAIR leaves that engine in place and finishes. To reclaim that
 space, use **Delete** on individual models, or remove the engine's storage
 directory yourself.
 
-PAIR keeps the model folder at the engine's default location. If you moved LM
-Studio's models folder somewhere else inside `~/.lmstudio`, removing an LM
-Studio that PAIR installed — by uninstalling it, or by removing PAIR's data —
-deletes that folder with the rest of `~/.lmstudio`. A models folder outside
-`~/.lmstudio`, or one linked back to `~/.lmstudio/models`, is kept.
-
 PAIR also leaves alone any engine you installed yourself. **Uninstall** acts only
 on a copy PAIR installed; remove the others with the engine's own uninstaller.
 
 Port changes for an NVPAIR-installed engine also live in **Engine settings**.
 Prefer the controls in PAIR over editing the engine's own config when PAIR is
 managing it. If PAIR **adopted** an engine that was already running, meaning it
-did not start the process, what it can do depends on how that engine is
-controlled:
-
-- **Ollama** is managed as a process, so PAIR will not move an adopted one. It
-  refuses the port change rather than killing something it did not start. Stop
-  the engine in its own application first if you want PAIR to manage it fully.
-- **LM Studio** publishes an official stop command, so PAIR can stop an adopted
-  instance that way and restart it on the port you chose.
+did not start the process, PAIR will not move it. It refuses the port change
+rather than killing something it did not start. Stop the engine in its own
+application first if you want PAIR to manage it fully.
 
 Refer to [Engines and Ports](architecture.mdx#engines-and-ports) in the
 architecture guide.
@@ -231,7 +218,7 @@ uninstalls every model at once.
 
 Applications need a **running** engine plus an available model. Copy API URLs
 from **Endpoints** after an engine is running. Do not assume a fixed port such as
-`11434` or `1234`.
+`8080`.
 
 ## Tips
 

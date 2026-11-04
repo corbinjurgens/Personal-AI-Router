@@ -23,6 +23,7 @@ import (
 
 	"nvpair-shared/clustertrusttest"
 	"nvpair-shared/durablefile"
+	"nvpair-shared/engines"
 	"nvpair-shared/nodepolicy"
 )
 
@@ -531,6 +532,7 @@ func newPolicyBroker(t *testing.T) (*Broker, *syncBuffer) {
 	t.Helper()
 	out := &syncBuffer{}
 	b := &Broker{codec: NewCodec(out), nodeID: "self-node", clusterDir: filepath.Join(t.TempDir(), "cluster")}
+	b.setDynamicEngines([]engines.Descriptor{customEngineDescriptor()}, func(int) bool { return true })
 	return b, out
 }
 
@@ -629,7 +631,7 @@ func TestNodePolicyLoadDefaultsCorruptAndPersist(t *testing.T) {
 
 func TestModelControlPolicyLoadPreservesDiskAndAvailability(t *testing.T) {
 	path := filepath.Join(t.TempDir(), nodepolicy.FileName)
-	raw := []byte(`{"version":2,"revision":"42","availability":"available","servedModels":[{"engine":"ollama","model":"bad\nname"}],"roles":{"weak":{"engine":"ollama","model":"good"},"strong":{"engine":"ollama","model":"bad\u0085name"}},"admission":{"memoryBudgetBytes":12345}}`)
+	raw := []byte(`{"version":2,"revision":"42","availability":"available","servedModels":[{"engine":"llamacpp","model":"bad\nname"}],"roles":{"weak":{"engine":"llamacpp","model":"good"},"strong":{"engine":"llamacpp","model":"bad\u0085name"}},"admission":{"memoryBudgetBytes":12345}}`)
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -656,7 +658,7 @@ func TestModelControlPolicyLoadPreservesDiskAndAvailability(t *testing.T) {
 
 func TestModelControlPolicyLoadMalformedShapeRequiresRecovery(t *testing.T) {
 	path := filepath.Join(t.TempDir(), nodepolicy.FileName)
-	raw := []byte(`{"version":2,"revision":"42","servedModels":[{"engine":"ollama","model":false}]}`)
+	raw := []byte(`{"version":2,"revision":"42","servedModels":[{"engine":"llamacpp","model":false}]}`)
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -680,7 +682,7 @@ func TestModelControlPolicyLoadDiagnosticsNoEcho(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&output, nil)))
 	t.Cleanup(func() { slog.SetDefault(previous) })
 	path := filepath.Join(t.TempDir(), nodepolicy.FileName)
-	raw := []byte(`{"roles":{"weak":{"engine":"ollama","model":"PRIVATE-MODEL\nunsafe"}}}`)
+	raw := []byte(`{"roles":{"weak":{"engine":"llamacpp","model":"PRIVATE-MODEL\nunsafe"}}}`)
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -721,7 +723,7 @@ func TestModelControlPolicyLoadDiagnosticsNoEcho(t *testing.T) {
 
 func TestModelControlPolicyLoadLegacyKeepsDisk(t *testing.T) {
 	path := filepath.Join(t.TempDir(), nodepolicy.FileName)
-	raw := []byte(`{"version":1,"availability":"paused","roles":{"weak":{"engine":"ollama","model":"good"},"strong":{"engine":"ollama","model":"bad\nname"}},"tiers":{"weak":[{"engine":"ollama","model":"good"}]}}`)
+	raw := []byte(`{"version":1,"availability":"paused","roles":{"weak":{"engine":"llamacpp","model":"good"},"strong":{"engine":"llamacpp","model":"bad\nname"}},"tiers":{"weak":[{"engine":"llamacpp","model":"good"}]}}`)
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -744,7 +746,7 @@ func TestModelControlPolicyLoadKeepsWritesStrictAndAtomic(t *testing.T) {
 	path := filepath.Join(t.TempDir(), nodepolicy.FileName)
 	p := nodepolicy.Default()
 	p.Revision = "42"
-	p.Roles[nodepolicy.TierWeak] = nodepolicy.Role{Engine: "ollama", Model: "good"}
+	p.Roles[nodepolicy.TierWeak] = nodepolicy.Role{Engine: "llamacpp", Model: "good"}
 	writePolicyFile(t, path, p)
 	before, err := os.ReadFile(path)
 	if err != nil {
@@ -753,9 +755,9 @@ func TestModelControlPolicyLoadKeepsWritesStrictAndAtomic(t *testing.T) {
 	b, _ := newPolicyBroker(t)
 	b.loadNodePolicy(path)
 	for _, raw := range []string{
-		`{"roles":{"weak":{"engine":"ollama","model":"PRIVATE-MODEL\nunsafe"}}}`,
-		`{"roles":{"weak":{"engine":"ollama","model":"PRIVATE-MODEL\nunsafe"}},"Roles":{}}`,
-		`{"roles":{"weak":{"engine":"ollama","model":"PRIVATE-MODEL\nunsafe","model":"good"}}}`,
+		`{"roles":{"weak":{"engine":"llamacpp","model":"PRIVATE-MODEL\nunsafe"}}}`,
+		`{"roles":{"weak":{"engine":"llamacpp","model":"PRIVATE-MODEL\nunsafe"}},"Roles":{}}`,
+		`{"roles":{"weak":{"engine":"llamacpp","model":"PRIVATE-MODEL\nunsafe","model":"good"}}}`,
 	} {
 		if _, err := setCurrent(b, json.RawMessage(raw)); err == nil {
 			t.Fatal("invalid write accepted")
@@ -962,14 +964,14 @@ func TestPolicyStateReplayedToRestartedProxy(t *testing.T) {
 	r.mu.Lock()
 	r.current.Availability = nodepolicy.Paused
 	r.live = nodepolicy.Paused
-	r.drains["ollama"] = true
+	r.drains["llamacpp"] = true
 	r.haveAdmission = true
 	r.admission.Active = 4
 	r.mu.Unlock()
 	source := b.activateEngineManagerSource()
-	b.observeIntentFrom(source, map[string]bool{"ollama": true, "lmstudio": false})
-	b.observeEngineRunningFrom(source, "ollama", true)
-	b.observeLoadedFrom(source, map[string][]string{"ollama": {"qwen3:8b"}})
+	b.observeIntentFrom(source, map[string]bool{"llamacpp": true, "llamacpp-custom": false})
+	b.observeEngineRunningFrom(source, "llamacpp", true)
+	b.observeLoadedFrom(source, map[string][]string{"llamacpp": {"qwen3:8b"}})
 
 	waitPushesSettled(t, b)
 	pp, proxy, acks := attachAckingProxy(t, b)
@@ -997,11 +999,11 @@ func TestPolicyStateReplayedToRestartedProxy(t *testing.T) {
 	for _, c := range calls {
 		switch c.method {
 		case nodepolicy.MethodSetResidency:
-			if !strings.Contains(string(c.params), `"ollama":["qwen3:8b"]`) {
+			if !strings.Contains(string(c.params), `"llamacpp":["qwen3:8b"]`) {
 				t.Errorf("residency = %s", c.params)
 			}
 		case nodepolicy.MethodSetEngineIntent:
-			if !strings.Contains(string(c.params), `"ollama":true`) || !strings.Contains(string(c.params), `"lmstudio":false`) {
+			if !strings.Contains(string(c.params), `"llamacpp":true`) || !strings.Contains(string(c.params), `"llamacpp-custom":false`) {
 				t.Errorf("intent = %s", c.params)
 			}
 		case nodepolicy.MethodSetEngineDrain:
@@ -1035,12 +1037,12 @@ func TestPolicyStateReplayedToRestartedProxy(t *testing.T) {
 
 func TestProxyAdmissionNotificationsReachThePolicy(t *testing.T) {
 	b, _ := newPolicyBroker(t)
-	b.forwardProxyProcessNotification(0, 0, nodepolicy.NotifyAdmissionState, json.RawMessage(`{"active":3,"activeByEngine":{"ollama":3},"queued":1,"lastActivityMs":{"ollama":5}}`))
+	b.forwardProxyProcessNotification(nodepolicy.NotifyAdmissionState, json.RawMessage(`{"active":3,"activeByEngine":{"llamacpp":3},"queued":1,"lastActivityMs":{"llamacpp":5}}`))
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
 	st, have := r.admission, r.haveAdmission
 	r.mu.Unlock()
-	if !have || st.Active != 3 || st.ActiveByEngine["ollama"] != 3 || st.LastActivityMs["ollama"] != 5 {
+	if !have || st.Active != 3 || st.ActiveByEngine["llamacpp"] != 3 || st.LastActivityMs["llamacpp"] != 5 {
 		t.Fatalf("admission state = %+v (have %v)", st, have)
 	}
 }
@@ -1058,15 +1060,15 @@ func TestResidencyFollowsEngineManager(t *testing.T) {
 		}
 		return last
 	}
-	models := `{"engine":"ollama","models":{"models":["a"],"loadedByEngine":{"ollama":["a"]}}}`
+	models := `{"engine":"llamacpp","models":{"models":["a"],"loadedByEngine":{"llamacpp":["a"]}}}`
 	b.forwardEngineNotificationFrom(source, engineModelsChangedMethod, json.RawMessage(models))
-	proxy.waitFor("residency with a", func(calls []policyCall) bool { return residency(calls) == `{"loadedByEngine":{"ollama":["a"]}}` })
-	b.forwardEngineNotificationFrom(source, engineStateChangedMethod, json.RawMessage(`{"engine":"ollama","running":false}`))
-	proxy.waitFor("residency without ollama", func(calls []policyCall) bool { return residency(calls) == `{"loadedByEngine":{}}` })
-	b.forwardEngineNotificationFrom(source, engineIntentChanged, json.RawMessage(`{"enabledByEngine":{"ollama":true},"offByEngine":{}}`))
+	proxy.waitFor("residency with a", func(calls []policyCall) bool { return residency(calls) == `{"loadedByEngine":{"llamacpp":["a"]}}` })
+	b.forwardEngineNotificationFrom(source, engineStateChangedMethod, json.RawMessage(`{"engine":"llamacpp","running":false}`))
+	proxy.waitFor("residency without llamacpp", func(calls []policyCall) bool { return residency(calls) == `{"loadedByEngine":{}}` })
+	b.forwardEngineNotificationFrom(source, engineIntentChanged, json.RawMessage(`{"enabledByEngine":{"llamacpp":true},"offByEngine":{}}`))
 	proxy.waitFor("intent push", func(calls []policyCall) bool {
 		for _, c := range calls {
-			if c.method == nodepolicy.MethodSetEngineIntent && strings.Contains(string(c.params), `"ollama":true`) {
+			if c.method == nodepolicy.MethodSetEngineIntent && strings.Contains(string(c.params), `"llamacpp":true`) {
 				return true
 			}
 		}
@@ -1077,7 +1079,7 @@ func TestResidencyFollowsEngineManager(t *testing.T) {
 func TestIntentRequestRelayPreservesSnapshot(t *testing.T) {
 	b, out := newPolicyBroker(t)
 	engine := attachFakeEngine(t, b)
-	raw := json.RawMessage(`{"enabledByEngine":{"ollama":false,"lmstudio":false,"llamacpp":true},"offByEngine":{"ollama":"peer","lmstudio":"local"},"relayMarker":"unchanged"}`)
+	raw := json.RawMessage(`{"enabledByEngine":{"llamacpp":false,"llamacpp-custom":false,"strata":true},"offByEngine":{"llamacpp":"peer","llamacpp-custom":"local"},"relayMarker":"unchanged"}`)
 	engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
 		if method == engineIntentMethod {
 			return raw, ""
@@ -1099,20 +1101,20 @@ func TestEnginePolicyIntentHydrationAndChanges(t *testing.T) {
 	_, proxy := attachFakeProxy(t, b)
 	engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
 		if method == engineIntentMethod {
-			return json.RawMessage(`{"enabledByEngine":{"ollama":true,"lmstudio":false,"llamacpp":false},"offByEngine":{"lmstudio":"local","llamacpp":"peer"}}`), ""
+			return json.RawMessage(`{"enabledByEngine":{"llamacpp":true,"llamacpp-custom":false,"strata":false},"offByEngine":{"llamacpp-custom":"local","strata":"peer"}}`), ""
 		}
 		return map[string]bool{"ok": true}, ""
 	})
 	source := b.activateEngineManagerSource()
 	b.refreshEnginePolicySnapshotFrom(b.getEngineMgr(), source)
 	waitPushesSettled(t, b)
-	requirePolicyIntent(t, b, map[string]bool{"ollama": true, "lmstudio": false, "llamacpp": false})
-	requireProxyIntent(t, proxy, `{"enabledByEngine":{"ollama":true,"lmstudio":false,"llamacpp":false}}`)
+	requirePolicyIntent(t, b, map[string]bool{"llamacpp": true, "llamacpp-custom": false, "strata": false})
+	requireProxyIntent(t, proxy, `{"enabledByEngine":{"llamacpp":true,"llamacpp-custom":false,"strata":false}}`)
 
-	b.forwardEngineNotificationFrom(source, engineIntentChanged, json.RawMessage(`{"enabledByEngine":{"ollama":false,"lmstudio":true,"llamacpp":false},"offByEngine":{"ollama":"peer","llamacpp":"local"}}`))
+	b.forwardEngineNotificationFrom(source, engineIntentChanged, json.RawMessage(`{"enabledByEngine":{"llamacpp":false,"llamacpp-custom":true,"strata":false},"offByEngine":{"llamacpp":"peer","strata":"local"}}`))
 	waitPushesSettled(t, b)
-	requirePolicyIntent(t, b, map[string]bool{"ollama": false, "lmstudio": true, "llamacpp": false})
-	requireProxyIntent(t, proxy, `{"enabledByEngine":{"ollama":false,"lmstudio":true,"llamacpp":false}}`)
+	requirePolicyIntent(t, b, map[string]bool{"llamacpp": false, "llamacpp-custom": true, "strata": false})
+	requireProxyIntent(t, proxy, `{"enabledByEngine":{"llamacpp":false,"llamacpp-custom":true,"strata":false}}`)
 }
 
 func requirePolicyIntent(t *testing.T, b *Broker, want map[string]bool) {
@@ -1155,19 +1157,19 @@ func requireProxyIntent(t *testing.T, proxy *fakeWorker, want string) {
 
 func TestEnginePolicyIntentRejectsMalformedSnapshot(t *testing.T) {
 	cases := []struct{ name, raw string }{
-		{"case variants without canonical maps", `{"EnabledByEngine":{"ollama":false},"OffByEngine":{"ollama":"local"}}`},
-		{"case variant without canonical enabled map", `{"EnabledByEngine":{"ollama":false},"offByEngine":{"ollama":"local"}}`},
-		{"case variant without canonical origins", `{"enabledByEngine":{"ollama":false},"OffByEngine":{"ollama":"local"}}`},
-		{"case variant cannot hide origin for On", `{"enabledByEngine":{"ollama":true},"EnabledByEngine":{"ollama":false},"offByEngine":{"ollama":"local"}}`},
-		{"last enabled object leaves unreported origin", `{"enabledByEngine":{"ollama":false},"enabledByEngine":{},"offByEngine":{"ollama":"local"}}`},
-		{"missing origins", `{"enabledByEngine":{"ollama":false}}`},
-		{"null origins", `{"enabledByEngine":{"ollama":false},"offByEngine":null}`},
+		{"case variants without canonical maps", `{"EnabledByEngine":{"llamacpp":false},"OffByEngine":{"llamacpp":"local"}}`},
+		{"case variant without canonical enabled map", `{"EnabledByEngine":{"llamacpp":false},"offByEngine":{"llamacpp":"local"}}`},
+		{"case variant without canonical origins", `{"enabledByEngine":{"llamacpp":false},"OffByEngine":{"llamacpp":"local"}}`},
+		{"case variant cannot hide origin for On", `{"enabledByEngine":{"llamacpp":true},"EnabledByEngine":{"llamacpp":false},"offByEngine":{"llamacpp":"local"}}`},
+		{"last enabled object leaves unreported origin", `{"enabledByEngine":{"llamacpp":false},"enabledByEngine":{},"offByEngine":{"llamacpp":"local"}}`},
+		{"missing origins", `{"enabledByEngine":{"llamacpp":false}}`},
+		{"null origins", `{"enabledByEngine":{"llamacpp":false},"offByEngine":null}`},
 		{"missing booleans", `{"offByEngine":{}}`},
-		{"invalid boolean", `{"enabledByEngine":{"ollama":"off"},"offByEngine":{}}`},
-		{"null boolean", `{"enabledByEngine":{"ollama":null},"offByEngine":{}}`},
-		{"invalid origin", `{"enabledByEngine":{"ollama":false},"offByEngine":{"ollama":"other"}}`},
-		{"origin for On", `{"enabledByEngine":{"ollama":true},"offByEngine":{"ollama":"local"}}`},
-		{"unreported engine origin", `{"enabledByEngine":{"ollama":false},"offByEngine":{"lmstudio":"peer"}}`},
+		{"invalid boolean", `{"enabledByEngine":{"llamacpp":"off"},"offByEngine":{}}`},
+		{"null boolean", `{"enabledByEngine":{"llamacpp":null},"offByEngine":{}}`},
+		{"invalid origin", `{"enabledByEngine":{"llamacpp":false},"offByEngine":{"llamacpp":"other"}}`},
+		{"origin for On", `{"enabledByEngine":{"llamacpp":true},"offByEngine":{"llamacpp":"local"}}`},
+		{"unreported engine origin", `{"enabledByEngine":{"llamacpp":false},"offByEngine":{"llamacpp-custom":"peer"}}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1198,7 +1200,7 @@ func TestEnginePolicyIntentRejectsMalformedSnapshot(t *testing.T) {
 	}
 }
 
-// pausingBroker is a broker with a fake proxy and engine-manager, ollama
+// pausingBroker is a broker with a fake proxy and engine-manager, llamacpp
 // running with one model loaded, and the given pause settings.
 func pausingBroker(t *testing.T, pause nodepolicy.PauseConfig) (*Broker, *syncBuffer, *fakeWorker, *fakeWorker) {
 	t.Helper()
@@ -1209,14 +1211,14 @@ func pausingBroker(t *testing.T, pause nodepolicy.PauseConfig) (*Broker, *syncBu
 	r.mu.Lock()
 	r.current.Pause = pause
 	r.mu.Unlock()
-	b.observeIntent(map[string]bool{"ollama": true})
-	b.observeLoaded(map[string][]string{"ollama": {"m1"}})
+	b.observeIntent(map[string]bool{"llamacpp": true})
+	b.observeLoaded(map[string][]string{"llamacpp": {"m1"}})
 	return b, out, proxy, engine
 }
 
 func TestPauseFinishWaitsForDrainThenUnloadsAndStops(t *testing.T) {
 	b, out, proxy, engine := pausingBroker(t, nodepolicy.PauseConfig{OnActive: nodepolicy.FinishActive, DrainTimeoutSeconds: 30, UnloadModels: true, StopEngines: true})
-	b.observeAdmission(nodepolicy.AdmissionState{Active: 1, ActiveByEngine: map[string]int{"ollama": 1}})
+	b.observeAdmission(nodepolicy.AdmissionState{Active: 1, ActiveByEngine: map[string]int{"llamacpp": 1}})
 
 	done := make(chan nodepolicy.Availability, 1)
 	go func() {
@@ -1260,10 +1262,10 @@ func TestPauseFinishWaitsForDrainThenUnloadsAndStops(t *testing.T) {
 	if err := json.Unmarshal(calls[0].params, &slept); err != nil {
 		t.Fatalf("decode Sleep params: %v", err)
 	}
-	if slept.Engine != "ollama" {
-		t.Fatalf("Sleep targeted %q, want ollama", slept.Engine)
+	if slept.Engine != "llamacpp" {
+		t.Fatalf("Sleep targeted %q, want llamacpp", slept.Engine)
 	}
-	requirePauseManagerCleanup(t, b, "ollama")
+	requirePauseManagerCleanup(t, b, "llamacpp")
 	pushes := availabilityPushes(proxy.snapshot())
 	if last := pushes[len(pushes)-1]; last.State != nodepolicy.Paused {
 		t.Fatalf("final availability push = %+v", last)
@@ -1289,7 +1291,7 @@ func TestPauseCancelPushesCancelActiveImmediately(t *testing.T) {
 	if len(calls) != 1 || calls[0].method != engineSleepMethod {
 		t.Fatalf("legacy false pause options skipped manager-owned cleanup: %v", engine.methods(""))
 	}
-	requirePauseManagerCleanup(t, b, "ollama")
+	requirePauseManagerCleanup(t, b, "llamacpp")
 }
 
 func TestPauseDrainTimeoutCancelsActiveWork(t *testing.T) {
@@ -1317,7 +1319,7 @@ func TestResumeWakesEnginesThePauseStopped(t *testing.T) {
 	}
 	engine.waitFor("engine:wake after resume", func(calls []policyCall) bool {
 		for _, c := range calls {
-			if c.method == engineWakeMethod && strings.Contains(string(c.params), `"ollama"`) {
+			if c.method == engineWakeMethod && strings.Contains(string(c.params), `"llamacpp"`) {
 				return true
 			}
 		}
@@ -1442,37 +1444,37 @@ func TestWakeRefusedWhenPausedOrSavedOff(t *testing.T) {
 	r.mu.Lock()
 	r.live = nodepolicy.Paused
 	r.mu.Unlock()
-	b.handleMessage(clientRequest(1, engineWakeMethod, map[string]string{"engine": "ollama"}))
+	b.handleMessage(clientRequest(1, engineWakeMethod, map[string]string{"engine": "llamacpp"}))
 	resp := out.waitFrame(t, "engine:wake refusal", isResponse(1))
 	if resp.Error == nil || !strings.Contains(resp.Error.Message, "paused") {
 		t.Fatalf("engine:wake while paused = %+v", resp)
 	}
-	b.wakeOnDemand("ollama")
+	b.wakeOnDemand("llamacpp")
 
 	r.mu.Lock()
 	r.live = nodepolicy.Available
 	r.mu.Unlock()
-	b.observeIntent(map[string]bool{"ollama": false, "lmstudio": true})
-	b.wakeOnDemand("ollama")
+	b.observeIntent(map[string]bool{"llamacpp": false, "llamacpp-custom": true})
+	b.wakeOnDemand("llamacpp")
 	if got := engine.methods(engineWakeMethod); len(got) != 0 {
 		t.Fatalf("wake reached engine-manager while paused or for an engine saved Off: %v", got)
 	}
 
-	b.handleAdmissionNotification(nodepolicy.NotifyAdmissionWake, json.RawMessage(`{"engine":"lmstudio"}`))
+	b.handleAdmissionNotification(nodepolicy.NotifyAdmissionWake, json.RawMessage(`{"engine":"llamacpp-custom"}`))
 	engine.waitFor("on-demand wake", func(calls []policyCall) bool {
-		return len(calls) == 1 && calls[0].method == engineWakeMethod && strings.Contains(string(calls[0].params), "lmstudio")
+		return len(calls) == 1 && calls[0].method == engineWakeMethod && strings.Contains(string(calls[0].params), "llamacpp-custom")
 	})
-	b.handleMessage(clientRequest(2, engineWakeMethod, map[string]string{"engine": "lmstudio"}))
+	b.handleMessage(clientRequest(2, engineWakeMethod, map[string]string{"engine": "llamacpp-custom"}))
 	engine.waitFor("relayed client wake", func(calls []policyCall) bool { return len(calls) == 2 })
 }
 
 func TestAdmissionUnloadUnloadsThoseModels(t *testing.T) {
 	b, _ := newPolicyBroker(t)
 	engine := attachFakeEngine(t, b)
-	b.handleAdmissionNotification(nodepolicy.NotifyAdmissionUnload, json.RawMessage(`{"engine":"ollama","models":["a","b"]}`))
+	b.handleAdmissionNotification(nodepolicy.NotifyAdmissionUnload, json.RawMessage(`{"engine":"llamacpp","models":["a","b"]}`))
 	calls := engine.waitFor("two unloads", func(calls []policyCall) bool { return len(calls) == 2 })
 	for i, model := range []string{"a", "b"} {
-		if calls[i].method != engineUnloadModelMethod || !strings.Contains(string(calls[i].params), `"model":"`+model+`"`) || !strings.Contains(string(calls[i].params), `"engine":"ollama"`) {
+		if calls[i].method != engineUnloadModelMethod || !strings.Contains(string(calls[i].params), `"model":"`+model+`"`) || !strings.Contains(string(calls[i].params), `"engine":"llamacpp"`) {
 			t.Fatalf("call %d = %s %s", i, calls[i].method, calls[i].params)
 		}
 	}
@@ -1488,9 +1490,9 @@ func TestIdlePolicyUnloadsThenStopsOnSchedule(t *testing.T) {
 	r.current.Idle.UnloadAfterMinutes = 5
 	r.current.Idle.StopEngineAfterMinutes = 20
 	r.mu.Unlock()
-	b.observeIntent(map[string]bool{"ollama": true, "lmstudio": false})
-	b.observeLoaded(map[string][]string{"ollama": {"m1"}, "lmstudio": {"x"}})
-	b.observeAdmission(nodepolicy.AdmissionState{LastActivityMs: map[string]int64{"ollama": clock.Add(2 * time.Minute).UnixMilli()}})
+	b.observeIntent(map[string]bool{"llamacpp": true, "llamacpp-custom": false})
+	b.observeLoaded(map[string][]string{"llamacpp": {"m1"}, "llamacpp-custom": {"x"}})
+	b.observeAdmission(nodepolicy.AdmissionState{LastActivityMs: map[string]int64{"llamacpp": clock.Add(2 * time.Minute).UnixMilli()}})
 
 	tick := func(at time.Duration) {
 		r.mu.Lock()
@@ -1502,35 +1504,35 @@ func TestIdlePolicyUnloadsThenStopsOnSchedule(t *testing.T) {
 	if got := engine.methods(""); len(got) != 0 {
 		t.Fatalf("idle policy acted before any threshold: %v", got)
 	}
-	tick(6 * time.Minute) // lmstudio idle 6m, ollama idle 4m since its last request
+	tick(6 * time.Minute) // llamacpp-custom idle 6m, llamacpp idle 4m since its last request
 	calls := engine.snapshot()
-	if len(calls) != 1 || !strings.Contains(string(calls[0].params), `"lmstudio"`) {
+	if len(calls) != 1 || !strings.Contains(string(calls[0].params), `"llamacpp-custom"`) {
 		t.Fatalf("calls at 6m = %v %v", engine.methods(""), calls)
 	}
-	tick(8 * time.Minute) // ollama now idle 6m
+	tick(8 * time.Minute) // llamacpp now idle 6m
 	calls = engine.snapshot()
-	if len(calls) != 2 || calls[1].method != engineUnloadModelMethod || !strings.Contains(string(calls[1].params), `"ollama"`) {
+	if len(calls) != 2 || calls[1].method != engineUnloadModelMethod || !strings.Contains(string(calls[1].params), `"llamacpp"`) {
 		t.Fatalf("calls at 8m = %v", engine.methods(""))
 	}
 	tick(9 * time.Minute)
 	if n := len(engine.snapshot()); n != 2 {
 		t.Fatalf("idle unload repeated for the same idle period: %v", engine.methods(""))
 	}
-	tick(23 * time.Minute) // ollama idle 21m; lmstudio idle too but saved Off
+	tick(23 * time.Minute) // llamacpp idle 21m; llamacpp-custom idle too but saved Off
 	calls = engine.snapshot()
-	if len(calls) != 3 || calls[2].method != engineSleepMethod || !strings.Contains(string(calls[2].params), `"ollama"`) {
+	if len(calls) != 3 || calls[2].method != engineSleepMethod || !strings.Contains(string(calls[2].params), `"llamacpp"`) {
 		t.Fatalf("calls at 23m = %v", engine.methods(""))
 	}
 	for _, c := range calls {
-		if c.method == engineSleepMethod && strings.Contains(string(c.params), "lmstudio") {
+		if c.method == engineSleepMethod && strings.Contains(string(c.params), "llamacpp-custom") {
 			t.Fatal("idle policy stopped an engine that is not saved On")
 		}
 	}
 
 	// A new request resets the clock.
 	b.observeAdmission(nodepolicy.AdmissionState{
-		ActiveByEngine: map[string]int{"ollama": 1},
-		LastActivityMs: map[string]int64{"ollama": clock.Add(30 * time.Minute).UnixMilli()},
+		ActiveByEngine: map[string]int{"llamacpp": 1},
+		LastActivityMs: map[string]int64{"llamacpp": clock.Add(30 * time.Minute).UnixMilli()},
 	})
 	tick(60 * time.Minute)
 	if n := len(engine.snapshot()); n != 3 {
@@ -1650,7 +1652,7 @@ const routedPolicyDocument = `{
   "revision": "12",
   "tiers": {
     "weak": [
-      {"kind": "local", "engine": "ollama", "model": "qwen3:8b"},
+      {"kind": "local", "engine": "llamacpp", "model": "qwen3:8b"},
       {"kind": "api", "deployment": "free-small"}
     ],
     "strong": [{"kind": "api", "deployment": "free-small"}]
@@ -1838,7 +1840,7 @@ func remoteSettingLockedBroker(t *testing.T) *routedBroker {
 	p := rb.b.localPolicy().Policy
 	p.Profiles = []nodepolicy.Profile{
 		{Name: "private-display", Engine: "llamacpp", Model: "stored-model", LocalOnly: true, RequestOptions: json.RawMessage(`{"temperature":0.1}`)},
-		{Name: "unlocked", Engine: "lmstudio", Model: "other-model", RequestOptions: json.RawMessage(`{"temperature":0.2}`)},
+		{Name: "unlocked", Engine: "llamacpp-custom", Model: "other-model", RequestOptions: json.RawMessage(`{"temperature":0.2}`)},
 	}
 	if _, err := setCurrent(rb.b, rmJSON(t, p)); err != nil {
 		t.Fatalf("install locked target profile: %v", err)
@@ -1892,10 +1894,10 @@ func TestRemoteSettingLockedRefusesWholeWrite(t *testing.T) {
 	test("unlock", func(p *nodepolicy.PeerPolicy) { p.Profiles[0].LocalOnly = false }, stored)
 	test("remove", func(p *nodepolicy.PeerPolicy) { p.Profiles = p.Profiles[1:] }, stored)
 	test("replace identity", func(p *nodepolicy.PeerPolicy) { p.Profiles[0].Model = "submitted-model" }, stored)
-	test("replace engine", func(p *nodepolicy.PeerPolicy) { p.Profiles[0].Engine = "ollama" }, stored)
-	test("lock existing", func(p *nodepolicy.PeerPolicy) { p.Profiles[1].LocalOnly = true }, `inference settings are locked on the target device for engine "lmstudio" model "other-model"`)
+	test("replace engine", func(p *nodepolicy.PeerPolicy) { p.Profiles[0].Engine = "llamacpp-custom" }, stored)
+	test("lock existing", func(p *nodepolicy.PeerPolicy) { p.Profiles[1].LocalOnly = true }, `inference settings are locked on the target device for engine "llamacpp-custom" model "other-model"`)
 	test("lock new profile", func(p *nodepolicy.PeerPolicy) {
-		p.Profiles = append(p.Profiles, nodepolicy.Profile{Name: "submitted-display", Engine: "ollama", Model: "submitted-model", LocalOnly: true, RequestOptions: json.RawMessage(`{"submitted-option":"secret-value"}`)})
+		p.Profiles = append(p.Profiles, nodepolicy.Profile{Name: "submitted-display", Engine: "llamacpp", Model: "submitted-model", LocalOnly: true, RequestOptions: json.RawMessage(`{"submitted-option":"secret-value"}`)})
 	}, "inference settings can only be locked on the target device")
 }
 
@@ -1955,7 +1957,7 @@ func TestPeerPolicyGetReturnsTheProjection(t *testing.T) {
 	if err := json.Unmarshal(result, &got); err != nil {
 		t.Fatalf("decode relayed get: %v", err)
 	}
-	wantTiers := map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "qwen3:8b"}}}
+	wantTiers := map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "qwen3:8b"}}}
 	if !reflect.DeepEqual(got.Policy.Tiers, wantTiers) {
 		t.Errorf("relayed tiers = %+v, want %+v", got.Policy.Tiers, wantTiers)
 	}
@@ -2108,10 +2110,10 @@ func TestPeerPolicySetRejectsProtectedChangesWithoutEffect(t *testing.T) {
 	}
 
 	test("changed tier entry", func(doc map[string]any) {
-		doc["tiers"].(map[string]any)["weak"] = []any{map[string]any{"kind": "local", "engine": "ollama", "model": "llama3:8b"}}
+		doc["tiers"].(map[string]any)["weak"] = []any{map[string]any{"kind": "local", "engine": "llamacpp", "model": "llama3:8b"}}
 	})
 	test("added tier entry", func(doc map[string]any) {
-		doc["tiers"].(map[string]any)["medium"] = []any{map[string]any{"kind": "local", "engine": "ollama", "model": "llama3:8b"}}
+		doc["tiers"].(map[string]any)["medium"] = []any{map[string]any{"kind": "local", "engine": "llamacpp", "model": "llama3:8b"}}
 	})
 	test("changed tier policy", func(doc map[string]any) {
 		doc["tierPolicy"].(map[string]any)["allowWeaker"] = true
@@ -2130,7 +2132,7 @@ func TestPeerPolicySetRejectsProtectedChangesWithoutEffect(t *testing.T) {
 	})
 	test("injected api tier entry", func(doc map[string]any) {
 		doc["tiers"].(map[string]any)["weak"] = []any{
-			map[string]any{"kind": "local", "engine": "ollama", "model": "qwen3:8b"},
+			map[string]any{"kind": "local", "engine": "llamacpp", "model": "qwen3:8b"},
 			map[string]any{"kind": "api", "deployment": "paid-big"},
 		}
 	})
@@ -2225,7 +2227,7 @@ func TestPeerPolicySetFromAStaleSnapshotIsAConflict(t *testing.T) {
 		rb := newRoutedBroker(t)
 		stale := rb.peerSnapshot(t)
 		rb.localSet(t, func(doc map[string]any) {
-			doc["tiers"].(map[string]any)["weak"] = []any{map[string]any{"kind": "local", "engine": "ollama", "model": "llama3:8b"}}
+			doc["tiers"].(map[string]any)["weak"] = []any{map[string]any{"kind": "local", "engine": "llamacpp", "model": "llama3:8b"}}
 		})
 		base := rb.baseline(t)
 		stale["idle"].(map[string]any)["unloadAfterMinutes"] = 9
@@ -2233,7 +2235,7 @@ func TestPeerPolicySetFromAStaleSnapshotIsAConflict(t *testing.T) {
 			t.Fatalf("a stale snapshot restored the old tiers: %q %s", errText, result)
 		}
 		base.requireUnchanged(t)
-		want := []nodepolicy.TierEntry{{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "llama3:8b"}}
+		want := []nodepolicy.TierEntry{{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "llama3:8b"}}
 		if got := rb.b.localPolicy().Policy.Tiers["weak"]; !reflect.DeepEqual(got, want) {
 			t.Errorf("weak tier = %+v, want the local owner's %+v", got, want)
 		}
@@ -3102,8 +3104,8 @@ func TestAvailabilityLandedReplacementCompletesEngineActions(t *testing.T) {
 			waitBrokerLeaseAnnouncement(t, rb.b.nodePolicyRuntime())
 			r := rb.b.nodePolicyRuntime()
 			r.mu.Lock()
-			r.running["ollama"] = true
-			r.loaded["ollama"] = []string{"m1"}
+			r.running["llamacpp"] = true
+			r.loaded["llamacpp"] = []string{"m1"}
 			r.mu.Unlock()
 			if to == nodepolicy.Available {
 				if _, err := rb.b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally); err != nil {
@@ -3144,8 +3146,8 @@ func TestAvailabilityLandedReplacementCompletesEngineActions(t *testing.T) {
 				if err := json.Unmarshal(call.params, &params); err != nil {
 					t.Fatalf("decode %s params: %v", call.method, err)
 				}
-				if params.Engine != "ollama" || params.Model != "" {
-					t.Errorf("engine action %s params = %+v, want intent-neutral lifecycle operation for ollama", call.method, params)
+				if params.Engine != "llamacpp" || params.Model != "" {
+					t.Errorf("engine action %s params = %+v, want intent-neutral lifecycle operation for llamacpp", call.method, params)
 				}
 			}
 			// Known engines begin stopping independently of the first inventory.
@@ -3158,7 +3160,7 @@ func TestAvailabilityLandedReplacementCompletesEngineActions(t *testing.T) {
 				t.Errorf("landed transition engine actions = %v, want %v", gotMethods, wantMethods)
 			}
 			if to == nodepolicy.Paused {
-				requirePauseManagerCleanup(t, rb.b, "ollama")
+				requirePauseManagerCleanup(t, rb.b, "llamacpp")
 			}
 		})
 	}

@@ -49,7 +49,7 @@ func (t *toast) info(format string, args ...any) { t.set(toastInfo, format, args
 //
 // An RPC here is allowed 35 seconds and an engine start or a model download
 // routinely uses them, while an ordinary note expires in 6 — so "start
-// Ollama..." vanished long before the outcome arrived, leaving a screen
+// llama.cpp..." vanished long before the outcome arrived, leaving a screen
 // indistinguishable from a keypress the terminal had dropped. This is bounded
 // by the call instead of by a timer: the reply's ok or error replaces it.
 func (t *toast) busy(format string, args ...any) {

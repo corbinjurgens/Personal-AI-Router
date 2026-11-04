@@ -49,7 +49,7 @@ const (
 	streamFrameMetadataBytes = 8 << 10
 	streamFrameSyntaxBytes   = 16 << 10
 	streamFrameNumericBytes  = 96 << 10
-	// Even the smallest reader (syntax-only NDJSON) needs this storage in
+	// Even the smallest syntax-only reader needs this storage in
 	// addition to its choice bitmap. Larger counts cannot fit any reader.
 	streamFrameMaxChoices = streamFrameRequestLimitBytes - streamFrameMetadataBytes - streamFrameSyntaxBytes - 2*streamFrameReadChunk
 
@@ -259,7 +259,9 @@ type streamProtocol int
 const (
 	streamProtocolUnknown streamProtocol = iota
 	streamProtocolSSE
-	streamProtocolNDJSON
+	// streamProtocolJSON is only the public nonstreaming error envelope.
+	// It is never selected by an inference route or accepted by the reader.
+	streamProtocolJSON
 )
 
 // streamOutcome is the explicit result of reading one stream. Only
@@ -319,9 +321,8 @@ var streamInterruptionReasons = []string{
 // bounded reason. The slices are shared and read-only, so terminating a stream
 // never has to reserve memory after the budget has already been exhausted.
 type streamInterruptionFrames struct {
-	sse               []byte
-	ndjson            []byte
-	ndjsonAfterObject []byte
+	sse  []byte
+	json []byte
 }
 
 var streamInterruptionFramesByReason = buildStreamInterruptionFrames()
@@ -333,13 +334,12 @@ func buildStreamInterruptionFrames() map[string]streamInterruptionFrames {
 		// Initialization-owned immutable templates use no encoding/json pool.
 		payload := appendJSONString([]byte(`{"error":{"message":`), message)
 		payload = append(payload, []byte(`,"type":"server_error","code":"stream_interrupted"}}`)...)
-		ndjsonPayload := appendJSONString([]byte(`{"error":`), message)
-		ndjsonPayload = append(ndjsonPayload, '}')
+		jsonPayload := appendJSONString([]byte(`{"error":`), message)
+		jsonPayload = append(jsonPayload, '}')
 
 		frames[reason] = streamInterruptionFrames{
-			sse:               append(append([]byte("data: "), payload...), []byte("\n\ndata: [DONE]\n\n")...),
-			ndjson:            append(ndjsonPayload, '\n'),
-			ndjsonAfterObject: append(append([]byte{'\n'}, ndjsonPayload...), '\n'),
+			sse:  append(append([]byte("data: "), payload...), []byte("\n\ndata: [DONE]\n\n")...),
+			json: append(jsonPayload, '\n'),
 		}
 	}
 	return frames
@@ -429,7 +429,7 @@ func newStreamFrameReader(config streamFrameConfig) (*streamFrameReader, error) 
 	if config.Upstream == nil {
 		return nil, errors.New("stream frame reader: an upstream body is required")
 	}
-	if config.Protocol != streamProtocolSSE && config.Protocol != streamProtocolNDJSON {
+	if config.Protocol != streamProtocolSSE {
 		return nil, errStreamFrameProtocol
 	}
 	idleTimeout := config.IdleTimeout
@@ -753,10 +753,9 @@ func (r *streamFrameReader) handleReadErrorLocked(err error) {
 }
 
 // handleCleanEOFLocked decides what an EOF without a protocol end marker means.
-// A final NDJSON object without a newline is a complete frame; a final SSE event
-// still needs its blank line. Anything else is a torn tail, and a finish_reason
-// only completes the stream when every requested choice finished and the body
-// ended cleanly.
+// A final SSE event still needs its blank line. Anything else is a torn tail.
+// A finish_reason only completes the stream when every requested choice
+// finished and the body ended cleanly.
 func (r *streamFrameReader) handleCleanEOFLocked() {
 	if r.pendingTerminal {
 		if !r.validatePendingPeerLocked() {
@@ -783,41 +782,6 @@ func (r *streamFrameReader) handleCleanEOFLocked() {
 			r.sink.planInterruption(reason)
 		}
 		r.finishLocked(r.pendingOutcome, reason, nil)
-		return
-	}
-	pending := r.buf[r.readyEnd:]
-	if len(pending) > 0 && r.protocol == streamProtocolNDJSON {
-		verdict := r.assessNDJSONFrameLocked(pending)
-		if verdict == frameBudgetExhausted {
-			r.finishInterruptedLocked(streamInterruptReasonBudget)
-			return
-		}
-		if verdict == frameMalformed {
-			r.finishInterruptedLocked(streamInterruptReasonPrematureEOF)
-			return
-		}
-		if r.peerTrailer != nil && (verdict == frameCompleted || verdict == frameUpstreamError) {
-			outcome, reason := streamOutcomeCompleted, ""
-			if verdict == frameUpstreamError {
-				outcome, reason = streamOutcomeUpstreamError, streamInterruptReasonUpstreamError
-			}
-			r.holdPeerTerminalLocked(len(pending), outcome, reason, nil)
-			r.handleCleanEOFLocked()
-			return
-		}
-		r.readyEnd += len(pending)
-		switch verdict {
-		case frameCompleted:
-			r.finishLocked(streamOutcomeCompleted, "", nil)
-			return
-		case frameUpstreamError:
-			r.finishLocked(streamOutcomeUpstreamError, streamInterruptReasonUpstreamError, nil)
-			return
-		}
-		// Preserve the object's bytes and add its missing record separator
-		// before appending a synthetic error object.
-		r.finishInterruptedLocked(streamInterruptReasonPrematureEOF)
-		r.terminator = streamInterruptionFramesByReason[streamInterruptReasonPrematureEOF].ndjsonAfterObject
 		return
 	}
 	if len(r.buf) > r.readyEnd {
@@ -878,16 +842,10 @@ func (r *streamFrameReader) parseLocked() {
 		frame := pending[:n]
 		if r.peerNormalized {
 			for reason, terminator := range streamInterruptionFramesByReason {
-				canonical := terminator.ndjson
-				if r.protocol == streamProtocolSSE {
-					canonical = bytes.TrimSuffix(terminator.sse, []byte("data: [DONE]\n\n"))
-				}
+				canonical := bytes.TrimSuffix(terminator.sse, []byte("data: [DONE]\n\n"))
 				if bytes.Equal(frame, canonical) {
 					if r.peerTrailer != nil {
-						expected := terminator.ndjson
-						if r.protocol == streamProtocolSSE {
-							expected = terminator.sse
-						}
+						expected := terminator.sse
 						r.holdPeerTerminalLocked(len(expected), streamOutcomeInterrupted, reason, expected)
 						return
 					}
@@ -902,8 +860,6 @@ func (r *streamFrameReader) parseLocked() {
 		switch r.protocol {
 		case streamProtocolSSE:
 			verdict = r.assessSSEFrameLocked(frame)
-		case streamProtocolNDJSON:
-			verdict = r.assessNDJSONFrameLocked(frame)
 		default:
 			verdict = frameMalformed
 		}
@@ -961,15 +917,6 @@ func (r *streamFrameReader) validatePendingPeerLocked() bool {
 }
 
 func (r *streamFrameReader) nextFrameLocked(pending []byte) (int, bool) {
-	if r.protocol == streamProtocolNDJSON {
-		if i := bytes.IndexByte(pending[r.scanOff:], '\n'); i >= 0 {
-			end := r.scanOff + i + 1
-			r.scanOff = 0
-			return end, true
-		}
-		r.scanOff = len(pending)
-		return 0, false
-	}
 	// Scan each byte once, retaining only offsets across arbitrary read splits.
 	for r.scanOff < len(pending) {
 		i := r.scanOff
@@ -1160,34 +1107,6 @@ func streamJSONField(object []byte, name string) []byte {
 	return result
 }
 
-func (r *streamFrameReader) assessNDJSONFrameLocked(frame []byte) frameVerdict {
-	if !utf8.Valid(frame) {
-		return frameMalformed
-	}
-	line := bytes.TrimSuffix(frame, []byte("\n"))
-	line = bytes.TrimSuffix(line, []byte("\r"))
-	if len(bytes.TrimSpace(line)) == 0 {
-		return frameMalformed
-	}
-	if !validStreamObject(line) {
-		return frameMalformed
-	}
-	if r.extract != nil {
-		r.numeric.merge(r.extract(line))
-	}
-	if value := streamJSONField(line, "error"); len(value) > 0 && !bytes.Equal(value, []byte("null")) {
-		return frameUpstreamError
-	}
-	done := streamJSONField(line, "done")
-	if bytes.Equal(done, []byte("true")) {
-		return frameCompleted
-	}
-	if len(done) > 0 && !bytes.Equal(done, []byte("false")) && !bytes.Equal(done, []byte("null")) {
-		return frameMalformed
-	}
-	return frameContinue
-}
-
 // forEachSSELine visits complete event lines without copying their bytes.
 func forEachSSELine(frame []byte, visit func([]byte)) {
 	for i := 0; i < len(frame); {
@@ -1229,9 +1148,6 @@ func (r *streamFrameReader) finishInterruptedLocked(reason string) {
 	}
 	r.sink.planInterruption(reason)
 	terminator := frames.sse
-	if r.protocol == streamProtocolNDJSON {
-		terminator = frames.ndjson
-	}
 	r.finishLocked(streamOutcomeInterrupted, reason, terminator)
 }
 

@@ -22,10 +22,6 @@ import (
 
 var engineFileReplacer durablefile.Replacer
 
-func canMoveAdoptedEngine(mode string, stop *StopSpec) bool {
-	return mode == "command" && stop != nil && len(stop.Cmd) > 0
-}
-
 // SetPort persists an engine's chosen server port as a manifest override and
 // applies it: the running session is bounced onto the new port (if running)
 // and the cached port is updated so a later start/adopt uses it. Persistence
@@ -33,8 +29,7 @@ func canMoveAdoptedEngine(mode string, stop *StopSpec) bool {
 // the port survives a restart with no separate override store. Held under the
 // engine's op lock so it can't interleave with another lifecycle op.
 //
-// A running, adopted process-mode engine is refused. An identified command-mode
-// engine may be moved only when its manifest provides an official stop command.
+// A running, adopted engine is refused: it is externally managed.
 func (e *Executor) SetPort(ctx context.Context, engine string, port int) (EngineStatus, error) {
 	done, err := e.admitMutation(engine)
 	if err != nil {
@@ -82,15 +77,13 @@ func (e *Executor) SetPort(ctx context.Context, engine string, port int) (Engine
 	oldPort := st.port
 	st.mu.Unlock()
 
-	// Adopted process-mode engines and command-mode engines without an official
-	// stop command remain externally managed. Refuse rather than killing an
+	// Adopted engines remain externally managed. Refuse rather than killing an
 	// unknown process or spawning a duplicate listener on the new port.
-	if wasRunning && adopted && !canMoveAdoptedEngine(st.plat.Runtime.Mode, st.plat.Runtime.Stop) {
+	if wasRunning && adopted {
 		return EngineStatus{}, fmt.Errorf("cannot change %s's port: it is running under external management (NVPAIR adopted it rather than starting it), so NVPAIR cannot move it — stop it in its own app first, then set the port", engine)
 	}
 
-	// Stop on the old port before switching, so a port-dependent stop (e.g.
-	// a command-mode engine) targets the address it actually started on.
+	// Stop on the old port before switching.
 	if wasRunning {
 		if err := e.doStop(st, engine); err != nil {
 			return EngineStatus{}, err

@@ -767,7 +767,7 @@ func TestLoadedServingOlderSweepCannotRestoreProof(t *testing.T) {
 // Runtime observation updates use mu independently of opMu. Lifecycle copies
 // must synchronize with them even when no serving declaration is configured.
 func TestLoadedServingInvalidationConcurrentLifecycle(t *testing.T) {
-	for _, operation := range []string{"start", "stop", "failed stop reconciliation"} {
+	for _, operation := range []string{"start", "stop"} {
 		t.Run(operation, func(t *testing.T) {
 			manifest := testEngineManifest(fakeEngineBin)
 			for platform, value := range manifest.Platforms {
@@ -775,7 +775,6 @@ func TestLoadedServingInvalidationConcurrentLifecycle(t *testing.T) {
 				manifest.Platforms[platform] = value
 			}
 			ex := newTestExecutor(t, manifest)
-			st := settingsState(t, ex)
 			stop, done, started := make(chan struct{}), make(chan struct{}), make(chan struct{})
 			go func() {
 				defer close(done)
@@ -806,15 +805,6 @@ func TestLoadedServingInvalidationConcurrentLifecycle(t *testing.T) {
 				for range 128 {
 					if err := ex.Stop("fake"); err != nil {
 						t.Fatal(err)
-					}
-				}
-			case "failed stop reconciliation":
-				stopErr := fmt.Errorf("injected fake stop refusal")
-				st.opMu.Lock()
-				defer st.opMu.Unlock()
-				for range 128 {
-					if err := ex.reconcileFailedCommandStop(st, "fake", true, stopErr); err != stopErr {
-						t.Fatalf("stop refusal = %v, want original refusal", err)
 					}
 				}
 			}

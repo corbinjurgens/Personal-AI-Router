@@ -303,10 +303,7 @@ export default function ModelSettingsPanel({
                             <Select
                                 aria-label="Model engine"
                                 value={identity.engine}
-                                items={[
-                                    { value: 'llamacpp', children: 'llama.cpp' },
-                                    { value: 'lmstudio', children: 'LM Studio' }
-                                ]}
+                                items={[{ value: 'llamacpp', children: 'llama.cpp' }]}
                                 onValueChange={engine => setPickedIdentity({ ...identity, engine })}
                             />
                         </FormField>

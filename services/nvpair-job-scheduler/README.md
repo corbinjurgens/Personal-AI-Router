@@ -66,8 +66,8 @@ the order, pending counts, or pressure actually changed.
 
 ## Output
 
-One `schedule:priority` notification per engine: the built-in `ollama`,
-`lmstudio` and `llamacpp`, plus each descriptor engine ID (for example
+One `schedule:priority` notification per engine: the built-in `llamacpp`,
+plus each descriptor engine ID (for example
 `llamacpp-custom`) that has work in the catalogue, sorted and capped at
 `engines.MaxDynamicEngines`. `scheduler:get-status` reports the same set. Work
 under any engine ID counts toward its node's load:
@@ -77,7 +77,7 @@ under any engine ID counts toward its node's load:
   "jsonrpc": "2.0",
   "method": "schedule:priority",
   "params": {
-    "engine": "ollama",
+    "engine": "llamacpp",
     "nodes": ["node-a-uuid", "node-b-uuid"],
     "ranks": [
       { "id": "node-a-uuid", "pending": 0, "gpuPressure": 0, "rank": 0 },

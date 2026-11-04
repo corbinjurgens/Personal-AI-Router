@@ -27,18 +27,18 @@ func memoryTestSourceField() string {
 }
 
 func memoryTestQualifiedJSON() string {
-	return `{"version":1,"entries":[{"engine":"ollama","model":"llama3:8b","state":"qualified","uncertainty":[],` +
+	return `{"version":1,"entries":[{"engine":"llamacpp","model":"llama3-8b","state":"qualified","uncertainty":[],` +
 		memoryTestSourceField() + `,` +
 		`"appliedSettings":{"epoch":"epoch-1","revision":7},` +
 		`"envelope":{"domain":"dedicated-device","effectiveContextTokens":8192,"concurrentExecutions":2,"offloadMode":"gpu-full"},` +
-		`"observed":{"allocatedBytes":9000,"extractorRevision":"ollama-0.12.3"},` +
+		`"observed":{"allocatedBytes":9000,"extractorRevision":"llamacpp-b12020"},` +
 		`"qualification":{"upperBytes":10000,"id":"mq-1","revision":"3","artifactDigest":"` + memoryTestDigest('c') + `","procedureDigest":"` + memoryTestDigest('d') + `"},` +
 		`"provenance":{"procedureId":"mem-proc","procedureRevision":"2","hardwareFingerprint":"gpu-abc","runtimeRevision":"runtime-1","hardwareDescription":"NVIDIA RTX 4090 24GB","driverRevision":"driver-555.42","scope":"operator-attested-current-run"},` +
 		`"freshness":{"sampleAgeMs":1200,"qualificationAgeMs":60000,"observationGeneration":42,"readingValidForMs":15000}}],"omittedEntries":0}`
 }
 
 func memoryTestAdvisoryJSON() string {
-	return `{"version":1,"entries":[{"engine":"ollama","model":"llama3:8b","state":"advisory","uncertainty":["missing-reading"],` +
+	return `{"version":1,"entries":[{"engine":"llamacpp","model":"llama3-8b","state":"advisory","uncertainty":["missing-reading"],` +
 		memoryTestSourceField() + `,` +
 		`"appliedSettings":{"epoch":"epoch-1","revision":7},` +
 		`"envelope":{"domain":"dedicated-device","effectiveContextTokens":null,"concurrentExecutions":null,"offloadMode":null},` +
@@ -49,7 +49,7 @@ func memoryTestAdvisoryJSON() string {
 }
 
 func memoryTestUnknownJSON() string {
-	return `{"version":1,"entries":[{"engine":"ollama","model":"llama3:8b","state":"unknown","uncertainty":["identity-unknown"],` +
+	return `{"version":1,"entries":[{"engine":"llamacpp","model":"llama3-8b","state":"unknown","uncertainty":["identity-unknown"],` +
 		`"source":{"hostUuid":null,"managerIncarnation":null,"engineRunId":null,"launchDigest":null,"modelDigest":null},` +
 		`"appliedSettings":{"epoch":null,"revision":null},` +
 		`"envelope":{"domain":null,"effectiveContextTokens":null,"concurrentExecutions":null,"offloadMode":null},` +
@@ -128,7 +128,7 @@ func TestMemoryEvidenceRoundTripStatesAndEmpty(t *testing.T) {
 				if decoded.Entries[0].State != tc.wantState {
 					t.Fatalf("state %q, want %q", decoded.Entries[0].State, tc.wantState)
 				}
-				if decoded.Entries[0].Engine != "ollama" || decoded.Entries[0].Model != "llama3:8b" {
+				if decoded.Entries[0].Engine != "llamacpp" || decoded.Entries[0].Model != "llama3-8b" {
 					t.Fatalf("entry identity changed: %q %q", decoded.Entries[0].Engine, decoded.Entries[0].Model)
 				}
 			}
@@ -203,8 +203,8 @@ func TestMemoryEvidenceMeasuredZeroAndUnknownStayDistinct(t *testing.T) {
 	measured := MemoryEvidence{
 		Version: 1,
 		Entries: []MemoryEvidenceEntry{{
-			Engine:      "ollama",
-			Model:       "llama3:8b",
+			Engine:      "llamacpp",
+			Model:       "llama3-8b",
 			State:       MemoryStateAdvisory,
 			Uncertainty: []MemoryUncertainty{},
 			Observed:    MemoryObservation{AllocatedBytes: memoryTestInt64(0)},
@@ -251,10 +251,10 @@ func TestMemoryEvidenceRejectsStructuralInput(t *testing.T) {
 		{name: "unknown root key", raw: memoryTestMutate(t, base, `{"version":1`, `{"extra":1,"version":1`)},
 		{name: "duplicate root key", raw: memoryTestMutate(t, base, `{"version":1`, `{"version":1,"version":1`)},
 		{name: "case variant root key", raw: memoryTestMutate(t, base, `"version":1`, `"Version":1`)},
-		{name: "unknown entry key", raw: memoryTestMutate(t, base, `"engine":"ollama"`, `"engine":"ollama","extra":1`)},
-		{name: "duplicate entry key", raw: memoryTestMutate(t, base, `"engine":"ollama"`, `"engine":"ollama","engine":"other"`)},
-		{name: "case variant entry key", raw: memoryTestMutate(t, base, `"engine":"ollama"`, `"Engine":"ollama"`)},
-		{name: "null required entry field", raw: memoryTestMutate(t, base, `"engine":"ollama"`, `"engine":null`)},
+		{name: "unknown entry key", raw: memoryTestMutate(t, base, `"engine":"llamacpp"`, `"engine":"llamacpp","extra":1`)},
+		{name: "duplicate entry key", raw: memoryTestMutate(t, base, `"engine":"llamacpp"`, `"engine":"llamacpp","engine":"other"`)},
+		{name: "case variant entry key", raw: memoryTestMutate(t, base, `"engine":"llamacpp"`, `"Engine":"llamacpp"`)},
+		{name: "null required entry field", raw: memoryTestMutate(t, base, `"engine":"llamacpp"`, `"engine":null`)},
 		{name: "null uncertainty", raw: memoryTestMutate(t, base, `"uncertainty":[]`, `"uncertainty":null`)},
 		{name: "null source group", raw: memoryTestMutate(t, base, memoryTestSourceField(), `"source":null`)},
 		{name: "missing nested key", raw: memoryTestMutate(t, base, `"hostUuid":"host-a",`, ``)},
@@ -284,10 +284,10 @@ func TestMemoryEvidenceRejectsMalformedStringsAndEnums(t *testing.T) {
 		name string
 		raw  string
 	}{
-		{name: "control character in engine", raw: memoryTestMutate(t, base, `"engine":"ollama"`, `"engine":"oll\u0000ama"`)},
-		{name: "control character in model", raw: memoryTestMutate(t, base, `"model":"llama3:8b"`, `"model":"llama3\u0000:8b"`)},
-		{name: "oversize engine", raw: memoryTestMutate(t, base, `"engine":"ollama"`, `"engine":"`+longID+`"`)},
-		{name: "oversize model", raw: memoryTestMutate(t, base, `"model":"llama3:8b"`, `"model":"`+longModel+`"`)},
+		{name: "control character in engine", raw: memoryTestMutate(t, base, `"engine":"llamacpp"`, `"engine":"llama\u0000cpp"`)},
+		{name: "control character in model", raw: memoryTestMutate(t, base, `"model":"llama3-8b"`, `"model":"llama3\u0000-8b"`)},
+		{name: "oversize engine", raw: memoryTestMutate(t, base, `"engine":"llamacpp"`, `"engine":"`+longID+`"`)},
+		{name: "oversize model", raw: memoryTestMutate(t, base, `"model":"llama3-8b"`, `"model":"`+longModel+`"`)},
 		{name: "unsupported state", raw: memoryTestMutate(t, base, `"state":"qualified"`, `"state":"measured"`)},
 		{name: "unsupported uncertainty", raw: memoryTestMutate(t, base, `"uncertainty":[]`, `"uncertainty":["other"]`)},
 		{name: "duplicate uncertainty", raw: memoryTestMutate(t, base, `"uncertainty":[]`, `"uncertainty":["stale","stale"]`)},
@@ -305,7 +305,7 @@ func TestMemoryEvidenceRejectsMalformedStringsAndEnums(t *testing.T) {
 		{name: "control driver revision", raw: memoryTestMutate(t, base, `"driverRevision":"driver-555.42"`, `"driverRevision":"driver\u0000"`)},
 		{name: "space in epoch", raw: memoryTestMutate(t, base, `"epoch":"epoch-1"`, `"epoch":"epoch 1"`)},
 		{name: "empty offload mode", raw: memoryTestMutate(t, base, `"offloadMode":"gpu-full"`, `"offloadMode":""`)},
-		{name: "control extractor revision", raw: memoryTestMutate(t, base, `"extractorRevision":"ollama-0.12.3"`, `"extractorRevision":"ollama\u0000"`)},
+		{name: "control extractor revision", raw: memoryTestMutate(t, base, `"extractorRevision":"llamacpp-b12020"`, `"extractorRevision":"llamacpp\u0000"`)},
 		{name: "space in qualification id", raw: memoryTestMutate(t, base, `"id":"mq-1"`, `"id":"mq 1"`)},
 		{name: "space in host uuid", raw: memoryTestMutate(t, base, `"hostUuid":"host-a"`, `"hostUuid":"host a"`)},
 	}
@@ -375,7 +375,7 @@ func TestMemoryEvidenceRejectsUnsafeQualification(t *testing.T) {
 		{name: "missing concurrency", raw: memoryTestMutate(t, base, `"concurrentExecutions":2`, `"concurrentExecutions":null`)},
 		{name: "missing offload mode", raw: memoryTestMutate(t, base, `"offloadMode":"gpu-full"`, `"offloadMode":null`)},
 		{name: "missing allocation", raw: memoryTestMutate(t, base, `"allocatedBytes":9000`, `"allocatedBytes":null`)},
-		{name: "missing extractor revision", raw: memoryTestMutate(t, base, `"extractorRevision":"ollama-0.12.3"`, `"extractorRevision":null`)},
+		{name: "missing extractor revision", raw: memoryTestMutate(t, base, `"extractorRevision":"llamacpp-b12020"`, `"extractorRevision":null`)},
 		{name: "missing upper", raw: memoryTestMutate(t, base, `"upperBytes":10000`, `"upperBytes":null`)},
 		{name: "missing qualification id", raw: memoryTestMutate(t, base, `"id":"mq-1"`, `"id":null`)},
 		{name: "missing qualification revision", raw: memoryTestMutate(t, base, `"revision":"3"`, `"revision":null`)},
@@ -539,7 +539,7 @@ func TestMemoryEvidenceAllJSONPathsRejectOversize(t *testing.T) {
 
 func TestMemoryEvidenceRejectsInvalidUTF8(t *testing.T) {
 	valid := []byte(memoryTestQualifiedJSON())
-	malformed := bytes.Replace(valid, []byte("llama3:8b"), []byte{0xff}, 1)
+	malformed := bytes.Replace(valid, []byte("llama3-8b"), []byte{0xff}, 1)
 	if _, err := DecodeMemoryEvidence(malformed); err == nil {
 		t.Fatal("decoder replaced malformed model bytes instead of rejecting them")
 	}

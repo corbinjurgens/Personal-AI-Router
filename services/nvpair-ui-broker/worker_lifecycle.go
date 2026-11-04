@@ -152,7 +152,7 @@ func (b *Broker) spawnNodeInfo() (supervisedHandle, error) {
 }
 
 // proxyArgs builds the child's argv. Only process-scoped flags remain: which
-// engines it fronts, on which ports, and with which alias addresses all travel
+// engines it fronts and their ports travel
 // in facade/enable, because the broker plans a different port per engine and a
 // single-valued flag cannot carry two plans.
 func (b *Broker) proxyArgs() []string {
@@ -160,25 +160,6 @@ func (b *Broker) proxyArgs() []string {
 	// ingress (and dial peers over mTLS) once this node is clustered; empty/
 	// absent certs leave it loopback-plaintext only.
 	return b.clusterDirArgs()
-}
-
-// ollamaFacadeSpec is the enable request for Ollama's facade under one alias
-// snapshot. Taken as a parameter rather than read here so the caller keeps the
-// generation bump — beginOllamaProxyGeneration has a side effect — and so the
-// spec is assertable on its own.
-func (b *Broker) ollamaFacadeSpec(alias ollamaHostAlias) enableFacadeRequest {
-	spec := enableFacadeRequest{Engine: ollamaProxyProfile.Name}
-	if port := int(b.ollamaState().startupPort.Load()); port != 0 {
-		spec.Port = port
-		spec.IgnorePersistedPort = true
-	}
-	if alias.Address != "" {
-		spec.AliasAddresses = append(spec.AliasAddresses, alias.Address)
-	}
-	if alias.AlternateAddress != "" {
-		spec.AliasAddresses = append(spec.AliasAddresses, alias.AlternateAddress)
-	}
-	return spec
 }
 
 // setServeCtx records the broker's own lifetime so work started on a spawn
@@ -237,71 +218,36 @@ func (b *Broker) proxyBringUpContext() (context.Context, context.CancelFunc) {
 }
 
 // enableEngineFacade brings up one engine's facade with that engine's port plan
-// and fallback policy. The alias snapshot is only meaningful to an engine with
-// an inherited host variable, so the others ignore it.
+// and fallback policy.
 func (b *Broker) enableEngineFacade(
-	ctx context.Context, pp *proxyProcess, profile engineProxyProfile, alias ollamaHostAlias,
+	ctx context.Context, pp *proxyProcess, profile engineProxyProfile,
 ) error {
-	return b.enableEngineFacadeWithPortCheck(ctx, pp, profile, alias, b.portAvailable)
+	return b.enableEngineFacadeWithPortCheck(ctx, pp, profile, b.portAvailable)
 }
 
 func (b *Broker) enableEngineFacadeWithPortCheck(
 	ctx context.Context,
 	pp *proxyProcess,
 	profile engineProxyProfile,
-	alias ollamaHostAlias,
 	available func(int) bool,
 ) error {
-	switch profile.Name {
-	case ollamaProxyProfile.Name:
-		return b.enableProxyFacadeWithFallback(ctx, pp, b.ollamaFacadeSpec(alias), b.ollamaFallbackPort)
-	case lmstudioProxyProfile.Name:
-		return b.enableProxyFacadeWithFallback(ctx, pp, b.lmstudioFacadeSpec(), b.lmstudioFallbackPort)
-	default:
-		if _, dynamic := b.dynamicEngineProfile(profile.Name); dynamic {
-			spec, err := b.dynamicEngineFacadeSpec(profile)
-			if err != nil {
-				return err
-			}
-			return b.enableProxyFacadeWithFallback(ctx, pp, spec, func(failed int) int {
-				return b.dynamicEngineFallbackPort(profile, failed, available)
-			})
+	if _, dynamic := b.dynamicEngineProfile(profile.Name); dynamic {
+		spec, err := b.dynamicEngineFacadeSpec(profile)
+		if err != nil {
+			return err
 		}
-		return b.enableProxyFacadeWithFallback(
-			ctx,
-			pp,
-			b.defaultEngineFacadeSpec(profile),
-			func(failed int) int {
-				return b.defaultEngineFallbackPortWithCheck(profile, failed, available)
-			},
-		)
+		return b.enableProxyFacadeWithFallback(ctx, pp, spec, func(failed int) int {
+			return b.dynamicEngineFallbackPort(profile, failed, available)
+		})
 	}
-}
-
-// blockAndFinishEngineProxy gives up one engine's managed claim, reports it, and
-// releases its startup gate — the treatment for an engine whose facade will not
-// come up in a process that is otherwise staying.
-//
-// The block and the finish are both needed. Blocking gives up the compatibility
-// port and plans a fallback but deliberately leaves the OLLAMA_HOST alias
-// reserved, because most of its callers still have a live facade serving that
-// alias. Finishing is what returns the alias, which is only correct once this
-// engine is known not to be coming up.
-func (b *Broker) blockAndFinishEngineProxy(profile engineProxyProfile) {
-	switch profile.Name {
-	case ollamaProxyProfile.Name:
-		if b.ollamaState().managedFacade.Load() {
-			b.blockManagedOllamaFacade("the Ollama proxy facade could not be brought up")
-		}
-		b.finishOllamaProxyTerminal()
-	case lmstudioProxyProfile.Name:
-		if b.lmstudioState().managedFacade.Load() {
-			_, _ = b.blockManagedLMStudioFacade("the LM Studio proxy facade could not be brought up", nil)
-		}
-		b.finishLMStudioProxyTerminal()
-	default:
-		// Other engines have no compatibility-port claim or startup gate.
-	}
+	return b.enableProxyFacadeWithFallback(
+		ctx,
+		pp,
+		b.defaultEngineFacadeSpec(profile),
+		func(failed int) int {
+			return b.defaultEngineFallbackPortWithCheck(profile, failed, available)
+		},
+	)
 }
 
 // facadeCameUpAnyway reports whether a facade that failed to answer its enable
@@ -341,24 +287,6 @@ func isTransportAmbiguous(err error) bool {
 	return err != nil && !stderrors.Is(err, errRPCAnswered)
 }
 
-// ollamaFallbackPort is the port to retry an Ollama facade on after a lost bind
-// race.
-//
-// The child's bind-failed notification precedes the enable response on the same
-// stream, and forwardProxyNotification handles it inline — so by the time the
-// response is dispatched, that path has usually already chosen a fallback and
-// reported the ownership block to the UI. Prefer its choice: it also decides
-// whether the managed facade is off, which a port picked here would not.
-//
-// Recomputed only when that did not happen, because the notification is
-// best-effort on the child side.
-func (b *Broker) ollamaFallbackPort(failed int) int {
-	if planned := int(b.ollamaState().startupPort.Load()); planned != 0 && planned != failed {
-		return planned
-	}
-	return b.setOllamaProxyFallback(failed)
-}
-
 // spawnProxy starts the one nvpair-proxy process and brings up a facade in it
 // for every enabled engine.
 //
@@ -378,21 +306,9 @@ func (b *Broker) spawnProxy() (supervisedHandle, error) {
 	if ctx := b.getServeCtx(); ctx != nil && ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
-	// Both generations are captured before the spawn and advance together: they
-	// are per-incarnation stale-notification filters, and with one process the
-	// facades are re-created as a set. Each engine keeps its own counter so its
-	// existing port choreography is untouched.
-	ollamaGeneration, alias := b.beginOllamaProxyGeneration()
-	// Bumped without lmstudioReadyMu. Reconciliation holds that mutex across
-	// its set-port and engine:status round trips, so taking it here would make
-	// a replacement spawn wait out the dead process's RPC timeouts before it
-	// could even start. The generation itself is atomic, and
-	// lmstudioProxyGenerationIsCurrent is what drops the stale run.
-	lmstudioGeneration := b.lmstudioProxyGeneration.Add(1)
-
 	pp, err := startProxyWithHistory(b.routingHistory, engines.ProxyComponent, b.proxyPath, applog.LevelString(), b.proxyCredentialRefs(), b.relayDir,
 		func(source *proxyProcess, method string, params json.RawMessage) {
-			b.forwardProxyNotificationFrom(source, ollamaGeneration, lmstudioGeneration, method, params)
+			b.forwardProxyNotificationFrom(source, method, params)
 		}, b.proxyArgs()...)
 	if err != nil {
 		return nil, err
@@ -407,7 +323,6 @@ func (b *Broker) spawnProxy() (supervisedHandle, error) {
 			b.setEngineProxyHandle(profile, pp)
 		}
 	}
-	b.lmstudioProxyPublishedGeneration.Store(lmstudioGeneration)
 	slog.Info("proxy started", "path", b.proxyPath, "pid", pp.cmd.Process.Pid)
 
 	// The child is serving its JSON-RPC channel but has no listeners yet, so
@@ -437,7 +352,7 @@ func (b *Broker) spawnProxy() (supervisedHandle, error) {
 		if !b.proxyEnabled(profile) {
 			continue
 		}
-		err := b.enableEngineFacade(bringUp, pp, profile, alias)
+		err := b.enableEngineFacade(bringUp, pp, profile)
 		switch {
 		case err == nil:
 			enabled++
@@ -461,26 +376,9 @@ func (b *Broker) spawnProxy() (supervisedHandle, error) {
 			r.incarnation = nil
 		}
 		r.mu.Unlock()
-		// The whole spawn failed, so the supervisor will retry it. Leave every
-		// engine's managed claim and its OLLAMA_HOST alias reservation exactly
-		// as they are: the retry needs them, and releasing the alias here would
-		// let engine-manager take that port in between, so a retry that would
-		// otherwise have succeeded comes up without the inherited endpoint.
-		//
-		// A first-spawn failure and an exhausted restart budget are the paths
-		// that give up for good, and the supervisor owns both.
+		// The supervisor retries with the existing facade port plans.
 		pp.Stop()
 		b.clearProxyHandles()
-		// The startup gates open anyway, because they are a separate concern
-		// from the claim: the alias reservation has to survive a retry, the
-		// gates must not wait for one. waitForManagedPortOwnership is unbounded
-		// apart from the Serve context and the gates also hold client
-		// requests, so keeping them shut across a 1→16s backoff budget defers
-		// desired-state restore and makes every engine:status wait out its call
-		// timeout and answer "retry" — the exact symptom finishOllamaProxyTerminal
-		// exists to prevent. A later successful spawn re-derives the real state.
-		b.markOllamaPortReady()
-		b.markLMStudioPortReady()
 		return nil, fmt.Errorf("no engine facade could be brought up in %s", b.proxyPath)
 	}
 
@@ -489,19 +387,6 @@ func (b *Broker) spawnProxy() (supervisedHandle, error) {
 	// for it.
 	for _, profile := range failed {
 		b.setEngineProxyHandle(profile, nil)
-		b.blockAndFinishEngineProxy(profile)
-	}
-
-	// A facade can announce ready before its handle was published, so replay
-	// the reconciliation now. Both gates are sync.Once-guarded, which makes
-	// this safe when the notification goroutine already handled it.
-	if b.ollamaState().managedFacade.Load() {
-		if ready, port := pp.Status(ollamaProxyProfile.Name); ready && port > 0 {
-			go b.reconcileProxyPortOnReady(port)
-		}
-	}
-	if ready, port := pp.Status(lmstudioProxyProfile.Name); ready && port > 0 {
-		go b.reconcileLMStudioProxyPortOnReadyForGeneration(lmstudioGeneration, port)
 	}
 	if b.beforeProxySpawnPublished != nil {
 		b.beforeProxySpawnPublished()
@@ -568,9 +453,6 @@ func (b *Broker) spawnEngineMgr() (supervisedHandle, error) {
 		"--http-port", fmt.Sprintf("%d", httpPort),
 		"--control-port", fmt.Sprintf("%d", controlPort),
 		"--control-host", b.engineMgrControlHost)
-	if aliasPort := b.currentOllamaHostAlias().Port; aliasPort > 0 {
-		args = append(args, "--reserved-port", fmt.Sprintf("%d", aliasPort))
-	}
 	args = append(args, b.clusterDirArgs()...)
 	// Serialize source replacement and pending settings invalidation with readers.
 	// Keep the established engineConfigMu -> policy runtime mutex order.
@@ -606,14 +488,9 @@ func (b *Broker) spawnEngineMgr() (supervisedHandle, error) {
 	// The recovery loop owns all retries; this continuation runs once, only
 	// after successful cleanup of this still-current replacement.
 	go b.refreshEnginePolicySnapshotFrom(w, source)
-	// Re-push the alias reservation before anything can drive this worker: a
-	// respawned engine-manager starts with an empty reservation and must not
-	// adopt or start a backend on the port the proxy alias owns.
-	b.syncCurrentEngineOllamaHostAliasReservation()
-	b.reconcileLMStudioProxyAfterEngineManagerReady()
-	// Initial restore waits for both managed compatibility ports below. A later
-	// engine-manager respawn sees the already-open gates and restores here.
-	if b.managedPortOwnershipReady() {
+	// Initial restore waits for facade startup. A later engine-manager respawn
+	// restores here after that shared startup boundary has completed.
+	if b.facadeStartupReady() {
 		b.restoreEnabledEngines(w)
 	}
 	// Register engine-manager's HTTP surface so the daemon advertises em= on this

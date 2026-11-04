@@ -36,7 +36,7 @@ func localErr(id, nodeID string, ts int64) ServiceError {
 func TestCompositeKeyAvoidsCrossNodeCollision(t *testing.T) {
 	m := managerForNode("node-a")
 
-	const id = "ollama-local:not-running"
+	const id = "llamacpp-local:not-running"
 	m.upsert(localErr(id, "node-a", 1000))
 	m.upsert(localErr(id, "node-b", 1000))
 

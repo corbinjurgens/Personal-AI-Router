@@ -37,7 +37,7 @@ operations from start and stop.
 
 ### How the proxy fronts Strata
 
-`nvpair-proxy` has a compiled table for Ollama, LM Studio and llama.cpp only.
+`nvpair-proxy` has a compiled table for llama.cpp only.
 Any other engine is fronted from its descriptor, and Strata takes that path.
 When PAIR starts, the broker reads the engine descriptors once. It fronts every
 engine that is available on the host (the manifest defines the host's platform)

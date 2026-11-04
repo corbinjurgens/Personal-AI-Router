@@ -12,13 +12,10 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"nvpair-shared/engines"
 )
@@ -87,26 +84,6 @@ func (e *Executor) Action(ctx context.Context, engine, action string, params jso
 	if err := st.manifest.validateActionModelParams(action, params, true); err != nil {
 		return nil, err
 	}
-	// Ollama's raw generate endpoint loads by default, even when reached through
-	// an action named unload_model. Resolve that action through the unload
-	// binding, dropping caller-supplied generation fields and fixed-param edits.
-	if st.manifest.FamilyOrDefault() == "ollama" && act.HTTP != nil && act.HTTP.Path == "/api/generate" {
-		if binding, ok := st.manifest.operationBinding(engines.OperationUnload); ok && binding.Action == action {
-			var zero *float64
-			if json.Unmarshal(binding.Params["keep_alive"], &zero) != nil || zero == nil || *zero != 0 || len(binding.Params) != 1 {
-				return nil, fmt.Errorf("engine %q: unload binding does not prove a generation-free unload", engine)
-			}
-			var fields map[string]json.RawMessage
-			var model string
-			if json.Unmarshal(params, &fields) != nil || json.Unmarshal(fields[binding.modelParam()], &model) != nil || model == "" {
-				return nil, fmt.Errorf("engine %q: unload requires its bound model identifier", engine)
-			}
-			params, err = binding.params(model)
-			if err != nil {
-				return nil, err
-			}
-		}
-	}
 	if action == pullModelAction {
 		return e.PullModelStream(ctx, engine, "", params)
 	}
@@ -121,7 +98,7 @@ func (e *Executor) Action(ctx context.Context, engine, action string, params jso
 		defer done()
 	}
 	run := func() (json.RawMessage, error) {
-		loadCtx, releaseServingLoad, err := e.guardActionExecution(ctx, st, action, params)
+		loadCtx, releaseServingLoad, err := e.guardServingLoad(ctx, st, action, params)
 		if err != nil {
 			return nil, err
 		}
@@ -167,34 +144,6 @@ func (e *Executor) Action(ctx context.Context, engine, action string, params jso
 		return nil, err
 	}
 	return res, nil
-}
-
-// LM Studio chat can JIT-load a model without invoking its load binding. Share
-// the activation veto, cancellation registry and lifecycle lock with loads so
-// Pause also cancels an accepted native chat on a protected external listener.
-func (e *Executor) guardActionExecution(ctx context.Context, st *engineState, action string, params json.RawMessage) (context.Context, func(), error) {
-	if st.manifest.FamilyOrDefault() != "lmstudio" || action != "chat" {
-		return e.guardServingLoad(ctx, st, action, params)
-	}
-	noop := func() {}
-	if err := e.activationVeto(st.manifest.Engine); err != nil {
-		return ctx, noop, err
-	}
-	ctx, cleanup := registerServingLoad(ctx, st)
-	if !residentLock(ctx, &st.opMu) {
-		cleanup()
-		return ctx, noop, vetoCause(ctx, ctx.Err())
-	}
-	release := sync.OnceFunc(func() { st.opMu.Unlock(); cleanup() })
-	if err := e.activationVeto(st.manifest.Engine); err != nil {
-		release()
-		return ctx, noop, err
-	}
-	if err := vetoCause(ctx, ctx.Err()); err != nil {
-		release()
-		return ctx, noop, err
-	}
-	return e.activationDispatchContext(ctx, st.manifest.Engine), release, nil
 }
 
 // restartAfterAction restarts a running engine after one of its actions
@@ -310,9 +259,8 @@ func (e *Executor) dispatchAction(ctx context.Context, st *engineState, engine, 
 		req.Header.Set("Content-Type", "application/json")
 	}
 	req.Header.Set(engineIdentityProbeHeader, "1")
-	// An action a model operation binds with a longer response budget (Ollama
-	// answers a cold load only once the model is resident) gets that budget on
-	// every call, engine:action included.
+	// An action a model operation binds with a longer response budget gets that
+	// budget on every call, engine:action included.
 	client := e.clientFor(st.manifest.actionResponseBudget(action))
 	observation := action == "list_models" || action == "loaded_models"
 	if observation {
@@ -440,30 +388,6 @@ func (e *Executor) runRemovePathAction(ctx context.Context, st *engineState, act
 	}
 	root = expandPath(root)
 
-	if act.ModelResolution == modelResolutionLMSDiskPath {
-		cli := st.plat.Runtime.CLI
-		targets, err := e.lmsDiskPathsToDelete(ctx, cli, root, vars["model"])
-		if err != nil {
-			return nil, err
-		}
-		if len(targets) == 0 {
-			fallback := expandPath(filepath.Join(root, vars["model"]))
-			if _, statErr := os.Stat(fallback); statErr == nil {
-				targets = []string{fallback}
-			} else if os.IsNotExist(statErr) {
-				return nil, fmt.Errorf("delete_model: model %q not found on disk", vars["model"])
-			} else {
-				return nil, fmt.Errorf("delete_model: %w", statErr)
-			}
-		}
-		for _, target := range targets {
-			if err := safeRemoveUnderRoot(root, target); err != nil {
-				return nil, err
-			}
-		}
-		return json.RawMessage("null"), nil
-	}
-
 	target, err := resolvePlaceholders(act.RemovePath.Path, vars)
 	if err != nil {
 		return nil, err
@@ -480,10 +404,9 @@ func (e *Executor) runRemovePathAction(ctx context.Context, st *engineState, act
 // result (parsed as JSON when it is valid JSON, else a JSON string).
 func (e *Executor) runCmdAction(ctx context.Context, st *engineState, act Action, port int, params json.RawMessage) (json.RawMessage, error) {
 	// A caller param can never override a runner-owned placeholder
-	// ({bin},{cli},{port},{download},{install_dir}): those keys are dropped
+	// ({bin},{port},{download},{install_dir}): those keys are dropped
 	// from params, then seeded from trusted values — so a malicious param
-	// can't hijack argv[0]. Param values are also not env-expanded (only
-	// the manifest-authored {cli} value is).
+	// can't hijack argv[0]. Param values are also not env-expanded.
 	vars := map[string]string{}
 	if len(params) > 0 {
 		var pm map[string]any
@@ -500,49 +423,14 @@ func (e *Executor) runCmdAction(ctx context.Context, st *engineState, act Action
 	for name, value := range st.pathVars() {
 		vars[name] = value
 	}
-	if cli := st.plat.Runtime.CLI; cli != "" {
-		vars["cli"] = expandPath(cli)
-	}
 
-	// Most cmd actions run once with the params as given. An action that
-	// opts into model_resolution expands {model} into ordered fallback
-	// candidates (e.g. lms-get: as-given → Hub id → Hugging Face URL),
-	// tried in turn until one resolves. Fallback only advances on a
-	// resolution failure, never on a download/runtime error.
-	candidates := []string{vars["model"]}
-	lmsGet := act.ModelResolution == modelResolutionLMSGet
-	if lmsGet {
-		if c := lmsGetCandidates(vars["model"]); len(c) > 0 {
-			candidates = c
-		}
+	argv, err := resolveArgs(act.Cmd, vars)
+	if err != nil {
+		return nil, err
 	}
-
-	var out string
-	var lastErr error
-	for i, cand := range candidates {
-		vars["model"] = cand
-		argv, err := resolveArgs(act.Cmd, vars)
-		if err != nil {
-			return nil, err
-		}
-		// An lms-get download resumes on re-run, so a transient stall or
-		// timeout is retried in place before we give up. A resolution
-		// failure is *not* retried in place — it falls through to the next
-		// source below (and runWithResume returns it immediately).
-		if lmsGet {
-			out, lastErr = e.runWithResume(ctx, argv)
-		} else {
-			out, lastErr = e.runCommandOutput(ctx, argv)
-		}
-		if lastErr == nil {
-			break
-		}
-		if i == len(candidates)-1 || !isLMSResolveFailure(lastErr) {
-			break
-		}
-	}
-	if lastErr != nil {
-		return nil, fmt.Errorf("action command failed: %w", lastErr)
+	out, err := e.runCommandOutput(ctx, argv)
+	if err != nil {
+		return nil, fmt.Errorf("action command failed: %w", err)
 	}
 	out = strings.TrimSpace(out)
 	if out == "" {
@@ -595,42 +483,4 @@ func (e *Executor) runCommandOutput(ctx context.Context, argv []string) (string,
 		return "", err
 	}
 	return stdout.String(), nil
-}
-
-// lmsGetResumeAttempts bounds how many times a transient `lms get` download
-// failure is retried in place before giving up; lms get resumes a partial
-// download on re-run, so a stalled or timed-out transfer recovers without
-// the user re-issuing the pull. lmsGetResumeBackoff spaces the retries.
-// Vars (not consts) so tests can shrink them. The whole sequence is still
-// bounded by the caller's actionTimeout context.
-var (
-	lmsGetResumeAttempts = 3
-	lmsGetResumeBackoff  = 2 * time.Second
-)
-
-// runWithResume runs argv like runCommandOutput but retries the same command
-// in place on a transient download failure (see isLMSTransientDownloadError),
-// up to lmsGetResumeAttempts and honoring ctx. Used only on the lms-get
-// model-pull path, where re-running resumes the partial download. A
-// resolution failure or any hard error returns immediately, so the caller's
-// source-fallback (or final error) is reached.
-func (e *Executor) runWithResume(ctx context.Context, argv []string) (string, error) {
-	var out string
-	var err error
-	for attempt := 1; ; attempt++ {
-		out, err = e.runCommandOutput(ctx, argv)
-		if err == nil {
-			return out, nil
-		}
-		if attempt >= lmsGetResumeAttempts || ctx.Err() != nil || !isLMSTransientDownloadError(err) {
-			return out, err
-		}
-		slog.Warn("lms get download failed transiently; resuming",
-			"attempt", attempt, "of", lmsGetResumeAttempts, "err", err)
-		select {
-		case <-ctx.Done():
-			return out, err
-		case <-time.After(lmsGetResumeBackoff):
-		}
-	}
 }

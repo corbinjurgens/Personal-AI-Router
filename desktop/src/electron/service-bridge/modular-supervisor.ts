@@ -208,26 +208,13 @@ function normalizeLogLevel(value: string | undefined): ModularLogLevel {
 }
 
 /**
- * Shape the `pull_model` action params for an engine family. Ollama's
- * `pull_model` body is sent verbatim to `/api/pull` (reads `name`); every other
- * manifest consumes `model` either as an HTTP body field or a CLI template.
- * Sending the wrong key leaves the placeholder unresolved or fails body-schema
- * validation. Pull is the one model operation without a typed engine-manager
- * method, so its body is still spelled here; load, unload and delete use
- * `engine:load-model` / `engine:unload-model` / `engine:delete-model`.
- */
-export function pullModelParams(family: string, model: string): JsonObject {
-    return family === 'ollama' ? { name: model } : { model }
-}
-
-/**
  * Distinguish "the model was not deleted" from "the model was deleted but the
  * engine did not come back".
  *
  * An action that declares `restart_after` runs the destructive part first and
  * only then bounces the engine, and `nvpair-engine-manager` reports a failed
  * bounce as a failed action:
- * `action "delete_model": engine "lmstudio" failed to restart: …`
+ * `action "delete_model": engine "llamacpp" failed to restart: …`
  * (`actions.go`, `restartAfterAction`). Reporting that as "Failed to delete"
  * would be wrong twice over — the files really are gone, and a user who retries
  * on that advice just hits `model … not found on disk`.
@@ -256,30 +243,6 @@ function remoteRefusalMessage(err: unknown, action: string): string | undefined 
               : undefined
     if (explanation === undefined) return undefined
     return `${explanation} Target: ${err.message.slice(0, MAX_REFUSAL_DETAIL_LENGTH)}`
-}
-
-/**
- * Inspect a `pull_model` action result for an explicit failure. The backend
- * buffers the engine's whole pull stream into one response string; Ollama's
- * `/api/pull` emits an `{"error":"…"}` NDJSON line on failure. Returns the error
- * text, or `null` when nothing in the stream looks like a failure (LM Studio's
- * CLI text has no such line, so it is treated as success and confirmed by the
- * post-pull canonical inventory refresh).
- */
-function pullResultError(result: JsonValue | undefined): string | null {
-    if (typeof result !== 'string' || result.length === 0) return null
-    for (const line of result.split('\n')) {
-        const trimmed = line.trim()
-        if (!trimmed || trimmed[0] !== '{') continue
-        try {
-            const parsed: JsonValue = JSON.parse(trimmed)
-            const err = stringValue(objectValue(parsed)?.error).trim()
-            if (err) return err
-        } catch {
-            /* non-JSON line (e.g. LM Studio CLI output) — ignore */
-        }
-    }
-    return null
 }
 
 /**
@@ -2166,8 +2129,7 @@ class ModularSupervisor {
      *   1. show an optimistic `pulling` entry immediately (so the modal closing
      *      isn't followed by dead silence) that the streamed progress advances,
      *   2. await the action response with a bounded timeout,
-     *   3. parse it for an explicit error and otherwise refresh the authoritative
-     *      inventory. RPC settlement clears only request-local progress;
+     *   3. refresh the authoritative inventory. RPC settlement clears only request-local progress;
      *      target snapshots retain operation outcomes independently.
      * Fire-and-forget from the caller's perspective: it is `void`-ed so the UI
      * command returns immediately.
@@ -2186,27 +2148,17 @@ class ModularSupervisor {
 
         state.beginModelPull(engineType, model)
         try {
-            const result = await this.callProcess(
+            await this.callProcess(
                 'broker',
                 'engine:action',
                 {
                     engine,
                     action: 'pull_model',
-                    params: pullModelParams(state.engineFamily(engine), model)
+                    params: { model }
                 },
                 PULL_TIMEOUT_MS
             )
-            const failure = pullResultError(result)
-            if (failure) {
-                this.reportError(failure, 'error', `engine-pull:${engine}:${model}`, {
-                    engineType,
-                    operation: 'pull',
-                    modelName: model,
-                    action: 'retry'
-                })
-            } else {
-                await this.refreshEngineModels(engine, engineType)
-            }
+            await this.refreshEngineModels(engine, engineType)
         } catch (err) {
             const message = getErrorString(err) ?? ''
             const pullError = resolvePullCatchError(message)
@@ -2229,8 +2181,8 @@ class ModularSupervisor {
      * on real completion instead of the safety-net timeout.
      *
      * Whether deleting also restarts the engine is the manifest's decision
-     * (`restart_after`, which LM Studio declares because it serves its model list
-     * from an index built at startup). The action does not reply until that
+     * (`restart_after`, for an engine that serves its model list from an index
+     * built at startup). The action does not reply until that
      * restart finishes, so the refresh below already reads the restarted engine.
      *
      * Every reported failure carries `engineType` + `modelName` so
@@ -2569,8 +2521,8 @@ class ModularSupervisor {
     /**
      * Load, unload (eject), or delete a model on a remote peer via the ec surface.
      *
-     * A peer runs the same manifests we do, so a remote delete on LM Studio also
-     * bounces the peer's engine and can fail the same restart-after way — the
+     * A peer runs the same manifests we do, so a remote delete on an engine that
+     * declares `restart_after` also bounces the peer's engine and can fail the same restart-after way — the
      * message distinguishes the two cases exactly as the local path does. The
      * error is stamped with the *peer's* nodeId (not our selfId) plus
      * `engineType`/`modelName` so `pending-actions.store` clears the right row's
@@ -2849,9 +2801,8 @@ class ModularSupervisor {
         // proxy would forward requests to itself (127.0.0.1:proxyPort →
         // 127.0.0.1:proxyPort), recursing until the client cancels — a flood of
         // `proxy/request` 502 "context canceled" events. This collision happens
-        // when the proxy occupies the engine's native port (the Ollama proxy
-        // binds 11434 so dumb clients reach the cluster) while the engine's real
-        // port also resolves to that value. Treat a self-target as "do not
+        // when the proxy occupies the engine's native port while the engine's
+        // real port also resolves to that value. Treat a self-target as "do not
         // bridge" and fall through to remove any stale self-pointing entry.
         const proxyPort = getModularBridgeState().getProxyPort(engine)
         // Only a known, matching proxy port is a self-target; an unknown

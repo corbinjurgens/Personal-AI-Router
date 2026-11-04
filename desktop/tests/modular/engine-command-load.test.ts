@@ -34,10 +34,10 @@ describe('local model load command', () => {
         mocks.supervisor.hasProcess.mockReturnValue(true)
     })
 
-    it('observes and attributes an Ollama load rejection to the pending model row', async () => {
+    it('observes and attributes a llama.cpp load rejection to the pending model row', async () => {
         await handleServiceBridgeInvoke('engine:command', {
             command: 'loadModel',
-            engineType: 'ollama',
+            engineType: 'llama-cpp',
             nodeId: 'local-node',
             model: 'llama3.2'
         })
@@ -48,18 +48,18 @@ describe('local model load command', () => {
         expect([name, method, params, observeResponse]).toEqual([
             'broker',
             'engine:load-model',
-            { engine: 'ollama', model: 'llama3.2' },
+            { engine: 'llamacpp', model: 'llama3.2' },
             true
         ])
 
         onFailure('timeout awaiting response headers', true)
         expect(mocks.supervisor.reportError).toHaveBeenCalledWith(
-            'Failed to load model on ollama: timeout awaiting response headers',
+            'Failed to load model on llamacpp: timeout awaiting response headers',
             'error',
-            'engine-cmd:load model:ollama',
+            'engine-cmd:load model:llamacpp',
             {
                 nodeId: 'local-node',
-                engineType: 'ollama',
+                engineType: 'llama-cpp',
                 operation: 'load',
                 modelName: 'llama3.2'
             }
@@ -69,7 +69,7 @@ describe('local model load command', () => {
     it('loads every engine through the typed operation, never an engine:action body', async () => {
         await handleServiceBridgeInvoke('engine:command', {
             command: 'loadModel',
-            engineType: 'lm-studio',
+            engineType: 'llama-cpp',
             nodeId: 'local-node',
             model: 'publisher/demo'
         })
@@ -78,7 +78,7 @@ describe('local model load command', () => {
         expect(mocks.supervisor.sendProcess).toHaveBeenCalledWith(
             'broker',
             'engine:load-model',
-            { engine: 'lmstudio', model: 'publisher/demo' },
+            { engine: 'llamacpp', model: 'publisher/demo' },
             expect.any(Function),
             true
         )

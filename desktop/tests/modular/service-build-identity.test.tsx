@@ -92,8 +92,8 @@ function baseline(serviceBuildId?: JsonValue) {
         port: 14318,
         lastSeen: 100,
         models: ['model-a'],
-        modelsByEngine: { ollama: ['model-a'] },
-        policy: { revision: '7', roles: { medium: { engine: 'ollama', model: 'model-a' } } },
+        modelsByEngine: { llamacpp: ['model-a'] },
+        policy: { revision: '7', roles: { medium: { engine: 'llamacpp', model: 'model-a' } } },
         trusted: true,
         clustered: true,
         serviceBuildId
@@ -140,11 +140,11 @@ describe('node build projection', () => {
         expect(state.getAvailableNodes()[0]).toMatchObject({ trusted: true, clustered: true })
         expect(state.getAvailableNodes()[0].policy).toEqual({
             revision: '7',
-            roles: { medium: { engine: 'ollama', model: 'model-a' } }
+            roles: { medium: { engine: 'llamacpp', model: 'model-a' } }
         })
         const parsed = brokerNodesValue({ nodes: [{ ...baseline(), serviceBuildId: [] }] })[0]
         expect(parsed.models).toEqual(['model-a'])
-        expect(parsed.modelsByEngine).toEqual({ ollama: ['model-a'] })
+        expect(parsed.modelsByEngine).toEqual({ llamacpp: ['model-a'] })
     })
 
     it('compares and pushes a build-only change', () => {
@@ -166,9 +166,9 @@ describe('node build projection', () => {
         publish(SHA1)
         const state = getModularBridgeState()
         state.handleNotification({
-            source: 'ollama-proxy',
+            source: 'llamacpp-proxy',
             method: 'node/updated',
-            params: { id: 'build-peer', host: 'peer', ip: '192.0.2.9', port: 11434 }
+            params: { id: 'build-peer', host: 'peer', ip: '192.0.2.9', port: 8080 }
         })
         expect(state.getNodesInitial().nodes['build-peer'].serviceBuildId).toBe(SHA1)
         state.handleNotification({

@@ -36,6 +36,13 @@ type bindingRequestFixture struct {
 
 func newBindingRequestFixture(t *testing.T) *bindingRequestFixture {
 	t.Helper()
+	return newBindingRequestFixtureFor(t, llamacppCase(t).profile)
+}
+
+// newBindingRequestFixtureFor is newBindingRequestFixture with a chosen engine
+// for the fixture's own facade.
+func newBindingRequestFixtureFor(t *testing.T, profile engineProfile) *bindingRequestFixture {
+	t.Helper()
 	fx := &bindingRequestFixture{requests: make(chan nodepolicy.PrepareBoundEngineRequest, 8), cancels: make(chan nodepolicy.CancelBoundEngineRequest, 8), wakes: make(chan nodepolicy.WakeRequest, 8)}
 	w := bufferAckWriter(func(raw []byte) (int, error) {
 		var msg Message
@@ -64,7 +71,6 @@ func newBindingRequestFixture(t *testing.T) *bindingRequestFixture {
 		}
 		return len(raw), nil
 	})
-	profile := ollamaCase(t).profile
 	fx.p = newTestProxy(profile, NewCodec(w), NewDiscovery(), profile.FacadePort)
 	fx.p.originNodeID = "self"
 	fx.f = fx.p.soleFacade()
@@ -167,7 +173,7 @@ func newBindingEngine(t *testing.T, model string, inventoryRelease <-chan struct
 	t.Helper()
 	e := &bindingEngine{inventoryEntered: make(chan struct{}), inventoryRelease: inventoryRelease}
 	e.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !(r.Method == http.MethodGet && (r.URL.Path == "/api/tags" || r.URL.Path == "/api/version" || r.URL.Path == "/v1/models")) && !(r.Method == http.MethodPost && (r.URL.Path == "/api/generate" || r.URL.Path == "/api/chat" || openAICompatibleInference[r.URL.Path])) {
+		if !(r.Method == http.MethodGet && (r.URL.Path == "/models" || r.URL.Path == "/props" || r.URL.Path == "/v1/models")) && !(r.Method == http.MethodPost && openAICompatibleInference[r.URL.Path]) {
 			http.NotFound(w, r)
 			return
 		}
@@ -184,11 +190,7 @@ func newBindingEngine(t *testing.T, model string, inventoryRelease <-chan struct
 					return
 				}
 			}
-			if r.URL.Path == "/api/tags" {
-				_ = json.NewEncoder(w).Encode(map[string]any{"models": []map[string]string{{"model": model}}})
-			} else {
-				_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]string{{"id": model}}})
-			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]string{{"id": model}}})
 			return
 		}
 		body, err := io.ReadAll(r.Body)
@@ -200,11 +202,7 @@ func newBindingEngine(t *testing.T, model string, inventoryRelease <-chan struct
 		e.header, e.body = r.Header.Clone(), body
 		e.mu.Unlock()
 		e.hits.Add(1)
-		if openAICompatibleInference[r.URL.Path] {
-			_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"fixture"},"finish_reason":"stop"}]}`)
-		} else {
-			_, _ = io.WriteString(w, `{"done":true}`)
-		}
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"fixture"},"finish_reason":"stop"}]}`)
 	}))
 	t.Cleanup(e.Close)
 	return e
@@ -215,9 +213,9 @@ func TestEngineBindingRequestsSelfPreparationBeforeAdmission(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			fx := newBindingRequestFixture(t)
 			e := newBindingEngine(t, "fixture", nil)
-			w, done := runBindingHTTP(t, fx.f, bindingRequest(model, "/api/generate"))
+			w, done := runBindingHTTP(t, fx.f, bindingRequest(model, "/v1/chat/completions"))
 			in := fx.next(t)
-			if in.Model != "fixture" || in.Engine != "ollama" || in.PolicyRevision != "1" || in.PeerID != "" || in.PeerIncarnation != "" || in.BudgetMs < 1 || in.BudgetMs > 90000 {
+			if in.Model != "fixture" || in.Engine != "llamacpp" || in.PolicyRevision != "1" || in.PeerID != "" || in.PeerIncarnation != "" || in.BudgetMs < 1 || in.BudgetMs > 90000 {
 				t.Fatalf("request=%+v", in)
 			}
 			select {
@@ -240,7 +238,7 @@ func TestEngineBindingRequestsSelfPreparationBeforeAdmission(t *testing.T) {
 			if w.Code != http.StatusOK || e.hits.Load() != 1 {
 				t.Fatalf("status=%d hits=%d body=%s", w.Code, e.hits.Load(), w.Body)
 			}
-			if w.Header().Get(nodepolicy.ModelHeader) != "fixture" || w.Header().Get(nodepolicy.EngineHeader) != "ollama" || w.Header().Get(nodepolicy.NodeHeader) != "self" {
+			if w.Header().Get(nodepolicy.ModelHeader) != "fixture" || w.Header().Get(nodepolicy.EngineHeader) != "llamacpp" || w.Header().Get(nodepolicy.NodeHeader) != "self" {
 				t.Fatalf("final headers=%v", w.Header())
 			}
 			if model == "weak" && w.Header().Get(nodepolicy.TierHeader) != "weak" {
@@ -259,7 +257,7 @@ func TestEngineBindingRequestsRefusalReasons(t *testing.T) {
 	test := func(reason string, transient bool) {
 		t.Run(reason, func(t *testing.T) {
 			fx := newBindingRequestFixture(t)
-			w, done := runBindingHTTP(t, fx.f, bindingRequest("fixture", "/api/generate"))
+			w, done := runBindingHTTP(t, fx.f, bindingRequest("fixture", "/v1/chat/completions"))
 			in := fx.next(t)
 			fx.reply(t, in, nodepolicy.BoundEnginePrepared{Reason: reason, SwitchRequestID: "binding:run:1"})
 			waitChan(t, done, "refused preparation")
@@ -288,12 +286,12 @@ func TestEngineBindingRequestsRefusalReasons(t *testing.T) {
 func TestEngineBindingRequestsReceiptDoesNotProveModelPresence(t *testing.T) {
 	fx := newBindingRequestFixture(t)
 	e := newBindingEngine(t, "different-model", nil)
-	w, done := runBindingHTTP(t, fx.f, bindingRequest("fixture", "/api/generate"))
+	w, done := runBindingHTTP(t, fx.f, bindingRequest("fixture", "/v1/chat/completions"))
 	in := fx.next(t)
 	setBackend(t, fx.f, e.URL, true)
 	// Even stale positive discovery cannot override fresh canonical inventory.
 	n := selfNode("self", fx.f.profile.FacadePort, "fixture")
-	n.PolicyRevision, n.EngineBindingOffers = "1", bindingOffer("ollama", "fixture")
+	n.PolicyRevision, n.EngineBindingOffers = "1", bindingOffer("llamacpp", "fixture")
 	fx.f.discovery.AddManual(n)
 	fx.reply(t, in, nodepolicy.BoundEnginePrepared{Success: true, SwitchRequestID: "binding:run:1"})
 	waitChan(t, done, "model absence refusal")
@@ -312,8 +310,8 @@ func TestEngineBindingRequestsRevalidateAfterInventoryWait(t *testing.T) {
 			unblock := func() { once.Do(func() { close(release) }) }
 			e := newBindingEngine(t, "fixture", release)
 			t.Cleanup(unblock)
-			fx.p.admission.setModelIdentity(map[string]nodepolicy.EngineIdentity{"ollama": {EngineRunID: "initial", ModelDigests: map[string]string{"fixture:latest": "content"}}})
-			w, done := runBindingHTTP(t, fx.f, bindingRequest("weak", "/api/generate"))
+			fx.p.admission.setModelIdentity(map[string]nodepolicy.EngineIdentity{"llamacpp": {EngineRunID: "initial", ModelDigests: map[string]string{"fixture": "content"}}})
+			w, done := runBindingHTTP(t, fx.f, bindingRequest("weak", "/v1/chat/completions"))
 			in := fx.next(t)
 			setBackend(t, fx.f, e.URL, true)
 			fx.reply(t, in, nodepolicy.BoundEnginePrepared{Success: true})
@@ -328,7 +326,7 @@ func TestEngineBindingRequestsRevalidateAfterInventoryWait(t *testing.T) {
 		})
 	}
 	test("changed engine identity", func(fx *bindingRequestFixture) {
-		fx.p.admission.setModelIdentity(map[string]nodepolicy.EngineIdentity{"ollama": {EngineRunID: "replacement"}})
+		fx.p.admission.setModelIdentity(map[string]nodepolicy.EngineIdentity{"llamacpp": {EngineRunID: "replacement"}})
 	})
 	test("removed binding", func(fx *bindingRequestFixture) {
 		pol := fx.p.admission.currentPolicy()
@@ -345,11 +343,11 @@ func TestEngineBindingRequestsRevalidateAfterInventoryWait(t *testing.T) {
 	test("tier context changed", func(fx *bindingRequestFixture) {
 		pol := fx.p.admission.currentPolicy()
 		pol.Revision = "2"
-		pol.Tiers = map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "other", ContextTokens: 1}}}
+		pol.Tiers = map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "other", ContextTokens: 1}}}
 		fx.p.admission.setPolicy(pol)
 	})
 	test("backend withdrawn", func(fx *bindingRequestFixture) {
-		if err := fx.f.setLocalBackend(localBackend{Engine: "ollama"}); err != nil {
+		if err := fx.f.setLocalBackend(localBackend{Engine: "llamacpp"}); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -358,7 +356,7 @@ func TestEngineBindingRequestsRevalidateAfterInventoryWait(t *testing.T) {
 func TestEngineBindingRequestsCancellationHasNoEarlyOutput(t *testing.T) {
 	fx := newBindingRequestFixture(t)
 	ctx, cancel := context.WithCancel(context.Background())
-	w, done := runBindingHTTP(t, fx.f, bindingRequest("fixture", "/api/generate").WithContext(ctx))
+	w, done := runBindingHTTP(t, fx.f, bindingRequest("fixture", "/v1/chat/completions").WithContext(ctx))
 	in := fx.next(t)
 	cancel()
 	waitChan(t, done, "caller cancellation")
@@ -388,7 +386,7 @@ func TestEngineBindingRequestsCancellationHasNoEarlyOutput(t *testing.T) {
 
 func TestEngineBindingRequestsExpiredBudgetHasNoAcceptanceID(t *testing.T) {
 	fx := newBindingRequestFixture(t)
-	req := bindingRequest("fixture", "/api/generate")
+	req := bindingRequest("fixture", "/v1/chat/completions")
 	req.Header.Set(nodepolicy.EnginePrepareBudgetHeader, "40")
 	w, done := runBindingHTTP(t, fx.f, req)
 	in := fx.next(t)
@@ -410,11 +408,11 @@ func TestEngineBindingRequestsExpiredBudgetHasNoAcceptanceID(t *testing.T) {
 
 func TestEngineBindingRequestsCrossFacadeUsesFinalEngineAndDefaults(t *testing.T) {
 	fx := newBindingRequestFixture(t)
-	lm := newFacade(fx.p, lmstudioCase(t).profile, NewDiscovery(), lmstudioCase(t).profile.FacadePort)
+	lm := newFacade(fx.p, customCase(t).profile, NewDiscovery(), customCase(t).profile.FacadePort)
 	fx.p.facades[lm.profile.Name] = lm
 	pol := fx.p.admission.currentPolicy()
-	pol.EngineBindings = nodepolicy.EngineBindings{{Engine: "lmstudio", Model: "fixture"}}
-	pol.Profiles = []nodepolicy.Profile{{Engine: "ollama", Model: "fixture", RequestOptions: json.RawMessage(`{"temperature":0.1}`)}, {Engine: "lmstudio", Model: "fixture", RequestOptions: json.RawMessage(`{"temperature":0.7}`)}}
+	pol.EngineBindings = nodepolicy.EngineBindings{{Engine: "llamacpp-custom", Model: "fixture"}}
+	pol.Profiles = []nodepolicy.Profile{{Engine: "llamacpp", Model: "fixture", RequestOptions: json.RawMessage(`{"temperature":0.1}`)}, {Engine: "llamacpp-custom", Model: "fixture", RequestOptions: json.RawMessage(`{"temperature":0.7}`)}}
 	fx.p.admission.setPolicy(pol)
 	fx.offer(t, lm, "fixture")
 	e := newBindingEngine(t, "fixture", nil)
@@ -427,7 +425,7 @@ func TestEngineBindingRequestsCrossFacadeUsesFinalEngineAndDefaults(t *testing.T
 	req.Header.Set("X-Ordinary-Option", "keep")
 	w, done := runBindingHTTP(t, fx.f, req)
 	in := fx.next(t)
-	if in.Engine != "lmstudio" || in.PeerID != "" || in.PeerIncarnation != "" {
+	if in.Engine != "llamacpp-custom" || in.PeerID != "" || in.PeerIncarnation != "" {
 		t.Fatalf("cross-facade demand=%+v", in)
 	}
 	setBackend(t, lm, e.URL, true)
@@ -438,7 +436,7 @@ func TestEngineBindingRequestsCrossFacadeUsesFinalEngineAndDefaults(t *testing.T
 	}
 	fx.reply(t, in, nodepolicy.BoundEnginePrepared{Success: true})
 	waitChan(t, done, "cross-facade request")
-	if w.Code != http.StatusOK || e.hits.Load() != 1 || w.Header().Get(nodepolicy.EngineHeader) != "lmstudio" || w.Header().Get(nodepolicy.ModelHeader) != "fixture" || w.Header().Get(nodepolicy.NodeHeader) != "self" {
+	if w.Code != http.StatusOK || e.hits.Load() != 1 || w.Header().Get(nodepolicy.EngineHeader) != "llamacpp-custom" || w.Header().Get(nodepolicy.ModelHeader) != "fixture" || w.Header().Get(nodepolicy.NodeHeader) != "self" {
 		t.Fatalf("status=%d headers=%v body=%s", w.Code, w.Header(), w.Body)
 	}
 	e.mu.Lock()
@@ -464,15 +462,15 @@ func TestEngineBindingRequestsCrossFacadeUsesFinalEngineAndDefaults(t *testing.T
 }
 
 func TestEngineBindingRequestsUnboundAndNativeStayEngineLocal(t *testing.T) {
-	test := func(name, path string, bound bool) {
+	test := func(name, path string, bound bool, first engineProfile) {
 		t.Run(name, func(t *testing.T) {
-			fx := newBindingRequestFixture(t)
-			lm := newFacade(fx.p, lmstudioCase(t).profile, NewDiscovery(), lmstudioCase(t).profile.FacadePort)
+			fx := newBindingRequestFixtureFor(t, first)
+			lm := newFacade(fx.p, customCase(t).profile, NewDiscovery(), customCase(t).profile.FacadePort)
 			fx.p.facades[lm.profile.Name] = lm
 			pol := fx.p.admission.currentPolicy()
 			pol.EngineBindings = nil
 			if bound {
-				pol.EngineBindings = nodepolicy.EngineBindings{{Engine: "lmstudio", Model: "fixture"}}
+				pol.EngineBindings = nodepolicy.EngineBindings{{Engine: "llamacpp-custom", Model: "fixture"}}
 			}
 			fx.p.admission.setPolicy(pol)
 			fx.f.discovery.RemoveManual("self")
@@ -486,8 +484,7 @@ func TestEngineBindingRequestsUnboundAndNativeStayEngineLocal(t *testing.T) {
 			}
 		})
 	}
-	test("unbound OpenAI name", routeChatCompletions, false)
-	test("bound name on native Ollama protocol", "/api/generate", true)
+	test("unbound OpenAI name", routeChatCompletions, false, llamacppCase(t).profile)
 }
 
 func TestEngineBindingRequestsDirectConflictingIngressRefuses(t *testing.T) {
@@ -495,7 +492,7 @@ func TestEngineBindingRequestsDirectConflictingIngressRefuses(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			fx := newBindingRequestFixture(t)
 			pol := fx.p.admission.currentPolicy()
-			pol.EngineBindings = nodepolicy.EngineBindings{{Engine: "lmstudio", Model: "fixture"}}
+			pol.EngineBindings = nodepolicy.EngineBindings{{Engine: "llamacpp-custom", Model: "fixture"}}
 			fx.p.admission.setPolicy(pol)
 			e := newBindingEngine(t, "fixture", nil)
 			setBackend(t, fx.f, e.URL, true)
@@ -528,7 +525,7 @@ func TestEngineBindingRequestsReadyAlternativeBeatsSchedulerCold(t *testing.T) {
 	fx.f.discovery.AddManual(nodeForModel(t, "ready", ready.URL, "fixture"))
 	applySnapshot(fx.p, schedulerwire.Priority{Nodes: []string{"self", "ready"}, Ranks: []schedulerwire.NodeRank{{ID: "self"}, {ID: "ready", Pending: 100}}})
 	w := httptest.NewRecorder()
-	fx.f.handleHTTP(w, bindingRequest("fixture", "/api/generate"))
+	fx.f.handleHTTP(w, bindingRequest("fixture", "/v1/chat/completions"))
 	if w.Code != http.StatusOK || ready.hits.Load() != 1 || w.Header().Get(nodepolicy.NodeHeader) != "ready" {
 		t.Fatalf("ready preference: status=%d headers=%v", w.Code, w.Header())
 	}
@@ -693,7 +690,7 @@ func TestEngineBindingRequestsPinnedPrincipalAndReadyPermission(t *testing.T) {
 	// submits another activation nor inherits caller-supplied identities.
 	e := newBindingEngine(t, "fixture", nil)
 	setBackend(t, fx.f, e.URL, true)
-	fx.p.noteSelf("self", "ollama", []string{"fixture"})
+	fx.p.noteSelf("self", "llamacpp", []string{"fixture"})
 	resp, err := client.Do(request())
 	if err != nil {
 		t.Fatal(err)
@@ -702,7 +699,7 @@ func TestEngineBindingRequestsPinnedPrincipalAndReadyPermission(t *testing.T) {
 	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
 		t.Fatal(err)
 	}
-	if resp.StatusCode != http.StatusOK || e.hits.Load() != 1 || resp.Header.Get(nodepolicy.EngineHeader) != "ollama" || resp.Header.Get(nodepolicy.NodeHeader) != "self" {
+	if resp.StatusCode != http.StatusOK || e.hits.Load() != 1 || resp.Header.Get(nodepolicy.EngineHeader) != "llamacpp" || resp.Header.Get(nodepolicy.NodeHeader) != "self" {
 		t.Fatalf("ready inference: status=%d headers=%v", resp.StatusCode, resp.Header)
 	}
 	select {
@@ -713,7 +710,7 @@ func TestEngineBindingRequestsPinnedPrincipalAndReadyPermission(t *testing.T) {
 }
 
 func TestEngineBindingRequestsTotalBudgetAcrossFailover(t *testing.T) {
-	fx := newProxyReverseFixture(t, "ollama", http.NotFoundHandler())
+	fx := newProxyReverseFixture(t, "llamacpp", http.NotFoundHandler())
 	fx.directHealthy.Store(true)
 	// Preparation metadata belongs to pinned PAIR endpoints. These facade
 	// fixtures verify the certificate before recording the received allowance.
@@ -766,24 +763,24 @@ func TestEngineBindingRequestsTotalBudgetAcrossFailover(t *testing.T) {
 		}
 		writeBoundEngineRefusal(w, boundEngineRefusal("engine-switch-timeout"))
 	}))
-	oll := fx.p.soleFacade()
+	lcpp := fx.p.soleFacade()
 	ready := nodeForModel(t, "a-ready", first.URL, "fixture")
 	ready.ClusterUUID = "uuid-peer"
-	oll.discovery.SetSubscribed([]Node{ready})
-	lm := newFacade(fx.p, lmstudioCase(t).profile, NewDiscovery(), lmstudioCase(t).profile.FacadePort)
+	lcpp.discovery.SetSubscribed([]Node{ready})
+	lm := newFacade(fx.p, customCase(t).profile, NewDiscovery(), customCase(t).profile.FacadePort)
 	fx.p.facades[lm.profile.Name] = lm
 	cold := nodeFor(t, "b-cold", second.URL)
 	cold.PolicyRevision, cold.ClusterUUID = "1", "uuid-peer"
-	cold.EngineBindingOffers = bindingOffer("lmstudio", "fixture")
+	cold.EngineBindingOffers = bindingOffer("llamacpp-custom", "fixture")
 	lm.discovery.SetSubscribed([]Node{cold})
 	pol := nodepolicy.Default()
-	pol.Tiers = map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "fixture"}, {Kind: nodepolicy.EntryLocal, Engine: "lmstudio", Model: "fixture"}}}
+	pol.Tiers = map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "fixture"}, {Kind: nodepolicy.EntryLocal, Engine: "llamacpp-custom", Model: "fixture"}}}
 	fx.p.admission.setPolicy(pol)
 	req := bindingRequest("weak", routeChatCompletions)
 	req.Header.Set(nodepolicy.EnginePrepareBudgetHeader, "250")
 	w := httptest.NewRecorder()
 	started := time.Now()
-	oll.handleHTTP(w, req)
+	lcpp.handleHTTP(w, req)
 	assertBindingRefusal(t, w, "engine-switch-timeout")
 	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
 		t.Fatalf("total preparation wait reset: %v", elapsed)
@@ -797,10 +794,10 @@ func TestEngineBindingRequestsTotalBudgetAcrossFailover(t *testing.T) {
 
 func TestEngineBindingRequestsOldStreamDrainsWithoutWaitingTicket(t *testing.T) {
 	fx := newBindingRequestFixture(t)
-	lm := newFacade(fx.p, lmstudioCase(t).profile, NewDiscovery(), lmstudioCase(t).profile.FacadePort)
+	lm := newFacade(fx.p, customCase(t).profile, NewDiscovery(), customCase(t).profile.FacadePort)
 	fx.p.facades[lm.profile.Name] = lm
 	pol := fx.p.admission.currentPolicy()
-	pol.EngineBindings = nodepolicy.EngineBindings{{Engine: "lmstudio", Model: "fixture"}}
+	pol.EngineBindings = nodepolicy.EngineBindings{{Engine: "llamacpp-custom", Model: "fixture"}}
 	fx.p.admission.setPolicy(pol)
 	fx.offer(t, lm, "fixture")
 	entered, release := make(chan struct{}), make(chan struct{})
@@ -822,12 +819,12 @@ func TestEngineBindingRequestsOldStreamDrainsWithoutWaitingTicket(t *testing.T) 
 	defer func() { unblock(); old.Close() }()
 	setBackend(t, fx.f, old.URL, true)
 	fx.f.discovery.AddManual(selfNode("self", fx.f.profile.FacadePort, "old"))
-	fx.p.noteSelf("self", "ollama", []string{"old"})
+	fx.p.noteSelf("self", "llamacpp", []string{"old"})
 	_, oldDone := runBindingHTTP(t, fx.f, httptest.NewRequest(http.MethodPost, routeChatCompletions, strings.NewReader(`{"model":"old","stream":true}`)))
 	waitChan(t, entered, "old streaming execution")
 	w, newDone := runBindingHTTP(t, fx.f, bindingRequest("fixture", routeChatCompletions))
 	in := fx.next(t)
-	fx.p.admission.setDrain("ollama", true)
+	fx.p.admission.setDrain("llamacpp", true)
 	if fx.p.admission.currentActive() != 1 {
 		t.Fatalf("waiting replacement changed drain count: %d", fx.p.admission.currentActive())
 	}
@@ -844,7 +841,7 @@ func TestEngineBindingRequestsOldStreamDrainsWithoutWaitingTicket(t *testing.T) 
 	if fx.p.admission.currentActive() != 0 {
 		t.Fatal("old stream did not release drain count")
 	}
-	if err := fx.f.setLocalBackend(localBackend{Engine: "ollama"}); err != nil {
+	if err := fx.f.setLocalBackend(localBackend{Engine: "llamacpp"}); err != nil {
 		t.Fatal(err)
 	}
 	e := newBindingEngine(t, "fixture", nil)
@@ -929,7 +926,7 @@ func TestEngineBindingRequestsPinnedPreparationStaysTerminalAndFresh(t *testing.
 				if got.status != http.StatusServiceUnavailable || refusal.Reason != "model-unavailable" || e.hits.Load() != 0 {
 					t.Fatalf("stale peer dispatched: status=%d refusal=%+v hits=%d", got.status, refusal, e.hits.Load())
 				}
-			} else if got.status != http.StatusOK || e.hits.Load() != 1 || got.header.Get(nodepolicy.ModelHeader) != "fixture" || got.header.Get(nodepolicy.EngineHeader) != "ollama" || got.header.Get(nodepolicy.NodeHeader) != "self" {
+			} else if got.status != http.StatusOK || e.hits.Load() != 1 || got.header.Get(nodepolicy.ModelHeader) != "fixture" || got.header.Get(nodepolicy.EngineHeader) != "llamacpp" || got.header.Get(nodepolicy.NodeHeader) != "self" {
 				t.Fatalf("prepared peer status=%d hits=%d headers=%v", got.status, e.hits.Load(), got.header)
 			}
 			if onward.hits.Load() != 0 {
@@ -943,19 +940,19 @@ func TestEngineBindingRequestsPinnedPreparationStaysTerminalAndFresh(t *testing.
 
 func TestEngineBindingRequestsCompetingTargetsAndCooldown(t *testing.T) {
 	fx := newBindingRequestFixture(t)
-	lm := newFacade(fx.p, lmstudioCase(t).profile, NewDiscovery(), lmstudioCase(t).profile.FacadePort)
+	lm := newFacade(fx.p, customCase(t).profile, NewDiscovery(), customCase(t).profile.FacadePort)
 	fx.p.facades[lm.profile.Name] = lm
 	pol := fx.p.admission.currentPolicy()
-	pol.EngineBindings = nodepolicy.EngineBindings{{Engine: "ollama", Model: "fixture"}, {Engine: "lmstudio", Model: "other"}}
+	pol.EngineBindings = nodepolicy.EngineBindings{{Engine: "llamacpp", Model: "fixture"}, {Engine: "llamacpp-custom", Model: "other"}}
 	fx.p.admission.setPolicy(pol)
 	fx.offer(t, lm, "other")
-	first, firstDone := runBindingHTTP(t, fx.f, bindingRequest("fixture", "/api/generate"))
+	first, firstDone := runBindingHTTP(t, fx.f, bindingRequest("fixture", "/v1/chat/completions"))
 	second, secondDone := runBindingHTTP(t, fx.f, bindingRequest("other", routeChatCompletions))
 	a, b := fx.next(t), fx.next(t)
-	if a.Engine != "ollama" {
+	if a.Engine != "llamacpp" {
 		a, b = b, a
 	}
-	if a.Engine != "ollama" || b.Engine != "lmstudio" {
+	if a.Engine != "llamacpp" || b.Engine != "llamacpp-custom" {
 		t.Fatalf("competing demands=%+v %+v", a, b)
 	}
 	fx.reply(t, b, nodepolicy.BoundEnginePrepared{Reason: "engine-switch-busy"})
@@ -987,7 +984,7 @@ func TestEngineBindingRequestsMalformedBudgetCannotActivate(t *testing.T) {
 	test := func(name string, values []string) {
 		t.Run(name, func(t *testing.T) {
 			fx := newBindingRequestFixture(t)
-			req := bindingRequest("fixture", "/api/generate")
+			req := bindingRequest("fixture", "/v1/chat/completions")
 			for _, value := range values {
 				req.Header.Add(nodepolicy.EnginePrepareBudgetHeader, value)
 			}
@@ -1016,12 +1013,12 @@ func TestEngineBindingRequestsQueuedIdentityChangeDoesNotResubmitAcceptance(t *t
 	unblock := func() { once.Do(func() { close(release) }) }
 	e := newBindingEngine(t, "fixture", release)
 	t.Cleanup(unblock)
-	w, done := runBindingHTTP(t, fx.f, bindingRequest("fixture", "/api/generate"))
+	w, done := runBindingHTTP(t, fx.f, bindingRequest("fixture", "/v1/chat/completions"))
 	in := fx.next(t)
 	setBackend(t, fx.f, e.URL, true)
 	fx.reply(t, in, nodepolicy.BoundEnginePrepared{Success: true, SwitchRequestID: "binding:run:1"})
 	waitChan(t, e.inventoryEntered, "queued request inventory")
-	first := fx.p.admission.admit(context.Background(), admissionRequest{engine: "ollama", model: "fixture", waitCap: 0})
+	first := fx.p.admission.admit(context.Background(), admissionRequest{engine: "llamacpp", model: "fixture", waitCap: 0})
 	if first.ticket == nil {
 		t.Fatalf("competing ordinary admission=%+v", first)
 	}
@@ -1037,7 +1034,7 @@ func TestEngineBindingRequestsQueuedIdentityChangeDoesNotResubmitAcceptance(t *t
 		t.Fatal("queued request emitted early output")
 	default:
 	}
-	fx.p.admission.setModelIdentity(map[string]nodepolicy.EngineIdentity{"ollama": {EngineRunID: "replacement"}})
+	fx.p.admission.setModelIdentity(map[string]nodepolicy.EngineIdentity{"llamacpp": {EngineRunID: "replacement"}})
 	waitChan(t, done, "queued freshness refusal")
 	assertBindingRefusal(t, w.ResponseRecorder, "model-unavailable")
 	if w.Header().Get(nodepolicy.SwitchRequestIDHeader) != "binding:run:1" || e.hits.Load() != 0 || fx.p.admission.currentActive() != 1 {
@@ -1060,7 +1057,7 @@ func TestEngineBindingRequestsRemovedBindingCannotBorrowStaleOffer(t *testing.T)
 	// The old offer is still in discovery, but no canonical inventory has
 	// established this model on the now-running engine.
 	w := httptest.NewRecorder()
-	fx.f.handleHTTP(w, bindingRequest("fixture", "/api/generate"))
+	fx.f.handleHTTP(w, bindingRequest("fixture", "/v1/chat/completions"))
 	assertBindingRefusal(t, w, "model-unavailable")
 	if e.hits.Load() != 0 {
 		t.Fatal("removed binding borrowed stale offer as dispatch authority")
@@ -1074,7 +1071,7 @@ func TestEngineBindingRequestsRemovedBindingCannotBorrowStaleOffer(t *testing.T)
 
 func coldBindingPeer(fx *proxyReverseFixture) {
 	fx.node.Models, fx.node.PolicyRevision = nil, "1"
-	fx.node.EngineBindingOffers = bindingOffer("ollama", "fixture-model")
+	fx.node.EngineBindingOffers = bindingOffer("llamacpp", "fixture-model")
 	fx.p.soleFacade().discovery.SetSubscribed([]Node{fx.node})
 	fx.directHealthy.Store(true)
 }
@@ -1084,7 +1081,7 @@ func TestEngineBindingRequestsReviewColdPinnedSlotBudget(t *testing.T) {
 	var once sync.Once
 	unblock := func() { once.Do(func() { close(release) }) }
 	var held, inference atomic.Int32
-	fx := newProxyReverseFixture(t, "ollama", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	fx := newProxyReverseFixture(t, "llamacpp", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			held.Add(1)
 			select {
@@ -1103,7 +1100,7 @@ func TestEngineBindingRequestsReviewColdPinnedSlotBudget(t *testing.T) {
 	transport := fx.p.candidateTransport(cand)
 	var occupying sync.WaitGroup
 	for range 8 {
-		req := proxyReverseRequest(t, http.MethodGet, cand.url.String()+"/api/tags", nil)
+		req := proxyReverseRequest(t, http.MethodGet, cand.url.String()+"/models", nil)
 		occupying.Add(1)
 		go func() {
 			defer occupying.Done()
@@ -1121,7 +1118,7 @@ func TestEngineBindingRequestsReviewColdPinnedSlotBudget(t *testing.T) {
 	waitForCond(t, 3*time.Second, "all pinned peer slots occupied", func() bool { return held.Load() == 8 })
 	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
 	defer cancel()
-	req := bindingRequest("fixture-model", "/api/generate").WithContext(ctx)
+	req := bindingRequest("fixture-model", "/v1/chat/completions").WithContext(ctx)
 	req.Header.Set(nodepolicy.EnginePrepareBudgetHeader, "80")
 	started := time.Now()
 	w, done := runBindingHTTP(t, fx.p.soleFacade(), req)
@@ -1143,7 +1140,7 @@ func TestEngineBindingRequestsReviewColdPinnedHeaderBudgetAndStream(t *testing.T
 	unblock := func() { once.Do(func() { close(release) }) }
 	var calls atomic.Int32
 	var streamCancelled atomic.Bool
-	fx := newProxyReverseFixture(t, "ollama", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	fx := newProxyReverseFixture(t, "llamacpp", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, err := io.Copy(io.Discard, r.Body); err != nil {
 			t.Error(err)
 			return
@@ -1155,8 +1152,8 @@ func TestEngineBindingRequestsReviewColdPinnedHeaderBudgetAndStream(t *testing.T
 			}
 			return
 		}
-		w.Header().Set("Content-Type", "application/x-ndjson")
-		_, _ = io.WriteString(w, "{\"response\":\"first\",\"done\":false}\n")
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, continuitySSEEvent)
 		if err := http.NewResponseController(w).Flush(); err != nil {
 			t.Error(err)
 			return
@@ -1168,13 +1165,13 @@ func TestEngineBindingRequestsReviewColdPinnedHeaderBudgetAndStream(t *testing.T
 			streamCancelled.Store(true)
 			return
 		}
-		_, _ = io.WriteString(w, "{\"response\":\"tail\",\"done\":true}\n")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"tail\"}}]}\n\ndata: [DONE]\n\n")
 	}))
 	t.Cleanup(unblock)
 	coldBindingPeer(fx)
 	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
 	defer cancel()
-	req := bindingRequest("fixture-model", "/api/generate").WithContext(ctx)
+	req := bindingRequest("fixture-model", "/v1/chat/completions").WithContext(ctx)
 	req.Header.Set(nodepolicy.EnginePrepareBudgetHeader, "80")
 	started := time.Now()
 	w, done := runBindingHTTP(t, fx.p.soleFacade(), req)
@@ -1187,7 +1184,7 @@ func TestEngineBindingRequestsReviewColdPinnedHeaderBudgetAndStream(t *testing.T
 	assertBindingRefusal(t, w.ResponseRecorder, "engine-switch-timeout")
 	// A later cold request that produces its headers in time owns its healthy
 	// stream beyond that preparation bound. The header timer must be retired.
-	streamReq := httptest.NewRequest(http.MethodPost, "/api/generate", strings.NewReader(`{"model":"fixture-model","stream":true}`))
+	streamReq := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"fixture-model","stream":true}`))
 	streamReq.Header.Set(nodepolicy.EnginePrepareBudgetHeader, "150")
 	stream, streamDone := runBindingHTTP(t, fx.p.soleFacade(), streamReq)
 	waitChan(t, streamEntered, "accepted stream")
@@ -1205,18 +1202,8 @@ func TestEngineBindingRequestsReviewColdPinnedHeaderBudgetAndStream(t *testing.T
 	if stream.Code != http.StatusOK || streamCancelled.Load() {
 		t.Fatalf("accepted stream status=%d cancelled=%v", stream.Code, streamCancelled.Load())
 	}
-	var last struct {
-		Response string
-		Done     bool
-	}
-	decoder := json.NewDecoder(strings.NewReader(stream.Body.String()))
-	for decoder.More() {
-		if err := decoder.Decode(&last); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if !last.Done || last.Response != "tail" {
-		t.Fatalf("stream tail=%+v body=%s", last, stream.Body)
+	if body := stream.Body.String(); !strings.Contains(body, `"content":"tail"`) || !strings.HasSuffix(body, "data: [DONE]\n\n") {
+		t.Fatalf("stream tail missing from body=%s", body)
 	}
 }
 
@@ -1246,7 +1233,7 @@ func TestEngineBindingRequestsReviewPinnedRelationshipBeforeBodyWait(t *testing.
 	if !ok {
 		t.Fatal("missing initial relationship")
 	}
-	req, err := http.NewRequest(http.MethodPost, ingressURL+"/api/generate", strings.NewReader(`{"model":"fixture","stream":false}`))
+	req, err := http.NewRequest(http.MethodPost, ingressURL+"/v1/chat/completions", strings.NewReader(`{"model":"fixture","stream":false}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1304,14 +1291,14 @@ func TestEngineBindingRequestsReviewBoundReadyPeerCannotLegacyWake(t *testing.T)
 	fx := newBindingRequestFixture(t)
 	e := newBindingEngine(t, "fixture", nil)
 	setBackend(t, fx.f, e.URL, true)
-	fx.p.noteSelf("self", "ollama", []string{"fixture"})
+	fx.p.noteSelf("self", "llamacpp", []string{"fixture"})
 	pol := fx.p.admission.currentPolicy()
 	pol.Admission.MaxConcurrentPerModel = 1
 	pol.Idle.StartOnDemand = true
 	pol.Idle.WakeTimeoutSeconds = 1
 	fx.p.admission.setPolicy(pol)
-	fx.p.admission.setIntent(map[string]bool{"ollama": true})
-	first := fx.p.admission.admit(context.Background(), admissionRequest{engine: "ollama", model: "fixture", waitCap: 0})
+	fx.p.admission.setIntent(map[string]bool{"llamacpp": true})
+	first := fx.p.admission.admit(context.Background(), admissionRequest{engine: "llamacpp", model: "fixture", waitCap: 0})
 	if first.ticket == nil {
 		t.Fatalf("first admission=%+v", first)
 	}
@@ -1319,7 +1306,7 @@ func TestEngineBindingRequestsReviewBoundReadyPeerCannotLegacyWake(t *testing.T)
 	client, ingressURL, _ := pinnedBindingClient(t, fx)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ingressURL+"/api/generate", strings.NewReader(`{"model":"fixture","stream":false}`))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ingressURL+"/v1/chat/completions", strings.NewReader(`{"model":"fixture","stream":false}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1409,7 +1396,7 @@ func TestEngineBindingRequestsReviewManualEngineStripsPrivateHeaders(t *testing.
 			}
 		})
 	}
-	test("inference", http.MethodPost, "/api/generate")
-	test("control", http.MethodGet, "/api/version")
-	test("model inventory", http.MethodGet, "/api/tags")
+	test("inference", http.MethodPost, "/v1/chat/completions")
+	test("control", http.MethodGet, "/props")
+	test("model inventory", http.MethodGet, "/models")
 }

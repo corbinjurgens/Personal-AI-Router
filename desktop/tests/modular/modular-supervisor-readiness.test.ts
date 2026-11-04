@@ -76,8 +76,8 @@ vi.mock('@/electron/service-bridge/modular-state', () => ({
     getModularBridgeState: () => mocks.bridgeState,
     isUpstreamUnreachableError: () => false,
     parseServiceErrors: () => [],
-    PROXY_ENGINES: ['ollama', 'lm-studio'],
-    PROXY_NODE_SOURCES: ['ollama-proxy', 'lmstudio-proxy']
+    PROXY_ENGINES: ['llama-cpp'],
+    PROXY_NODE_SOURCES: ['llamacpp-proxy']
 }))
 
 vi.mock('@/electron/service-bridge/workload-projection', () => ({
@@ -154,7 +154,7 @@ describe('modular supervisor readiness', () => {
             settled = true
         })
 
-        notify('ollama-proxy:ready', { port: 11434 })
+        notify('llamacpp-proxy:ready', { port: 8080 })
         await Promise.resolve()
 
         expect(supervisor.ready).toBe(false)
@@ -212,15 +212,15 @@ describe('modular supervisor readiness', () => {
         mocks.emitBridgePush.mockClear()
         supervisor.brokerHydrationDone = true
 
-        notify('ollama-proxy:error', { message: 'address already in use' })
-        notify('ollama-proxy:ready', { port: 11435 })
+        notify('llamacpp-proxy:error', { message: 'address already in use' })
+        notify('llamacpp-proxy:ready', { port: 8081 })
 
         expect(supervisor.ready).toBe(true)
         expect(onReady).toHaveBeenCalledOnce()
         expect(mocks.bridgeState.handleNotification).toHaveBeenLastCalledWith({
-            source: 'ollama-proxy',
+            source: 'llamacpp-proxy',
             method: 'ready',
-            params: { port: 11435 }
+            params: { port: 8081 }
         })
         expect(mocks.emitBridgePush).toHaveBeenCalledWith('state:request-refresh', undefined)
     })

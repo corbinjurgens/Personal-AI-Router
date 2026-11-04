@@ -152,9 +152,9 @@ func TestResidentContextBound(t *testing.T) {
 
 func servedResidentPolicy() Policy {
 	p := Default()
-	p.ServedModels = ServedModels{{Engine: "ollama", Model: "m"}}
-	p.ResidentModels = ResidentModels{{Engine: "ollama", Model: "m"}}
-	p.Profiles = []Profile{{Name: "m", Engine: "ollama", Model: "m", ContextTokens: 4096,
+	p.ServedModels = ServedModels{{Engine: "llamacpp", Model: "m"}}
+	p.ResidentModels = ResidentModels{{Engine: "llamacpp", Model: "m"}}
+	p.Profiles = []Profile{{Name: "m", Engine: "llamacpp", Model: "m", ContextTokens: 4096,
 		MaxOutputTokens: 512, MaxConcurrent: 1, MemoryBytes: 1024,
 		Qualification: &QualificationRef{ID: "q", Revision: "1"}}}
 	return p
@@ -247,7 +247,7 @@ func TestServedResidentPolicyRawKeys(t *testing.T) {
 	for _, raw := range []string{
 		`{"servedModels":[],"servedModels":[]}`, `{"servedModels":[],"ServedModels":[]}`,
 		`{"residentModels":[],"ResidentModels":[]}`, `{"residentModels":null}`,
-		`{"servedModels":[{"engine":"ollama","engine":"ollama","model":"m"}]}`,
+		`{"servedModels":[{"engine":"llamacpp","engine":"llamacpp","model":"m"}]}`,
 	} {
 		var p Policy
 		if err := json.Unmarshal([]byte(raw), &p); err == nil {
@@ -269,7 +269,7 @@ func TestServedResidentSubset(t *testing.T) {
 	if err := p.Validate(); err == nil {
 		t.Fatal("resident outside empty served set accepted")
 	}
-	p.ServedModels = ServedModels{{Engine: "ollama", Model: "other"}}
+	p.ServedModels = ServedModels{{Engine: "llamacpp", Model: "other"}}
 	if err := p.Validate(); err == nil {
 		t.Fatal("resident outside served set accepted")
 	}
@@ -287,7 +287,7 @@ func TestServedResidentProfileBounds(t *testing.T) {
 	}
 	reject("missing profile", func(p *Policy) { p.Profiles = nil })
 	reject("wrong model", func(p *Policy) { p.Profiles[0].Model = "other" })
-	reject("wrong engine", func(p *Policy) { p.Profiles[0].Engine = "lmstudio" })
+	reject("wrong engine", func(p *Policy) { p.Profiles[0].Engine = "llamacpp-custom" })
 	reject("no context", func(p *Policy) { p.Profiles[0].ContextTokens = 0 })
 	reject("no output", func(p *Policy) { p.Profiles[0].MaxOutputTokens = 0 })
 	reject("output reaches context", func(p *Policy) { p.Profiles[0].MaxOutputTokens = 4096 })
@@ -304,7 +304,7 @@ func TestServedResidentListBounds(t *testing.T) {
 			var refs []Role
 			for i := range 256 {
 				model := fmt.Sprintf("m%d", i)
-				refs = append(refs, Role{Engine: "ollama", Model: model})
+				refs = append(refs, Role{Engine: "llamacpp", Model: model})
 				pr := servedResidentPolicy().Profiles[0]
 				pr.Name, pr.Model = model, model
 				p.Profiles = append(p.Profiles, pr)
@@ -320,7 +320,7 @@ func TestServedResidentListBounds(t *testing.T) {
 			if err := p.Validate(); err != nil {
 				t.Fatalf("256 entries: %v", err)
 			}
-			refs = append(refs, Role{Engine: "ollama", Model: "extra"})
+			refs = append(refs, Role{Engine: "llamacpp", Model: "extra"})
 			set()
 			if err := p.Validate(); err == nil {
 				t.Fatal("257 entries accepted")
@@ -369,7 +369,7 @@ func TestServedResidentPolicyRoundTrip(t *testing.T) {
 	}
 	test("absent", `{}`, false)
 	test("empty", `{"servedModels":[],"residentModels":[]}`, true)
-	test("restricted", `{"servedModels":[{"engine":"ollama","model":"m"}]}`, true)
+	test("restricted", `{"servedModels":[{"engine":"llamacpp","model":"m"}]}`, true)
 	raw, err := json.Marshal(servedResidentPolicy())
 	if err != nil {
 		t.Fatal(err)
@@ -513,25 +513,25 @@ func TestValidateRejects(t *testing.T) {
 			p.Profiles = []Profile{{Name: "a", Engine: strings.Repeat("e", engines.MaxDynamicIDLen+1), Model: "m"}}
 		},
 		"duplicate profile": func(p *Policy) {
-			p.Profiles = []Profile{{Name: "a", Engine: "ollama", Model: "m"}, {Name: "a", Engine: "ollama", Model: "n"}}
+			p.Profiles = []Profile{{Name: "a", Engine: "llamacpp", Model: "m"}, {Name: "a", Engine: "llamacpp", Model: "n"}}
 		},
 		"two profiles model": func(p *Policy) {
-			p.Profiles = []Profile{{Name: "a", Engine: "ollama", Model: "m"}, {Name: "b", Engine: "ollama", Model: "m"}}
+			p.Profiles = []Profile{{Name: "a", Engine: "llamacpp", Model: "m"}, {Name: "b", Engine: "llamacpp", Model: "m"}}
 		},
 		"unknown tier": func(p *Policy) {
-			p.Tiers = map[string][]TierEntry{"huge": {{Kind: EntryLocal, Engine: "ollama", Model: "m"}}}
+			p.Tiers = map[string][]TierEntry{"huge": {{Kind: EntryLocal, Engine: "llamacpp", Model: "m"}}}
 		},
 		"tier as model": func(p *Policy) {
-			p.Tiers = map[string][]TierEntry{"weak": {{Kind: EntryLocal, Engine: "ollama", Model: "strong"}}}
+			p.Tiers = map[string][]TierEntry{"weak": {{Kind: EntryLocal, Engine: "llamacpp", Model: "strong"}}}
 		},
 		"unknown capability": func(p *Policy) {
-			p.Tiers = map[string][]TierEntry{"weak": {{Kind: EntryLocal, Engine: "ollama", Model: "m", Capabilities: []Capability{"telepathy"}}}}
+			p.Tiers = map[string][]TierEntry{"weak": {{Kind: EntryLocal, Engine: "llamacpp", Model: "m", Capabilities: []Capability{"telepathy"}}}}
 		},
 		"options not object": func(p *Policy) {
-			p.Profiles = []Profile{{Name: "a", Engine: "ollama", Model: "m", RequestOptions: json.RawMessage(`[1]`)}}
+			p.Profiles = []Profile{{Name: "a", Engine: "llamacpp", Model: "m", RequestOptions: json.RawMessage(`[1]`)}}
 		},
 		"options set model": func(p *Policy) {
-			p.Profiles = []Profile{{Name: "a", Engine: "ollama", Model: "m", RequestOptions: json.RawMessage(`{"model":"x"}`)}}
+			p.Profiles = []Profile{{Name: "a", Engine: "llamacpp", Model: "m", RequestOptions: json.RawMessage(`{"model":"x"}`)}}
 		},
 		"negative budget": func(p *Policy) { p.Admission.MemoryBudgetBytes = -1 },
 		"bad preference":  func(p *Policy) { p.TierPolicy.PreferLoaded = "sometimes" },
@@ -547,14 +547,14 @@ func TestValidateRejects(t *testing.T) {
 
 func TestProfileForAndIsTier(t *testing.T) {
 	p := Default()
-	p.Profiles = []Profile{{Name: "q", Engine: "ollama", Model: "qwen3:8b", MaxConcurrent: 2}}
-	if pr, ok := p.ProfileFor("ollama", "qwen3:8b"); !ok || pr.MaxConcurrent != 2 {
+	p.Profiles = []Profile{{Name: "q", Engine: "llamacpp", Model: "qwen3-8b", MaxConcurrent: 2}}
+	if pr, ok := p.ProfileFor("llamacpp", "qwen3-8b"); !ok || pr.MaxConcurrent != 2 {
 		t.Fatalf("ProfileFor = %+v, %v", pr, ok)
 	}
-	if _, ok := p.ProfileFor("lmstudio", "qwen3:8b"); ok {
+	if _, ok := p.ProfileFor("llamacpp-custom", "qwen3-8b"); ok {
 		t.Fatal("ProfileFor matched the wrong engine")
 	}
-	if !IsTier("medium") || IsTier("qwen3:8b") {
+	if !IsTier("medium") || IsTier("qwen3-8b") {
 		t.Fatal("IsTier misclassified")
 	}
 }
@@ -572,12 +572,12 @@ const v1Document = `{
   "admission": {"maxResidentModels": 2, "maxConcurrentPerModel": 3, "queueTimeoutSeconds": 11,
     "memoryBudgetBytes": 8589934592, "switchModels": false, "switchTimeoutSeconds": 13},
   "idle": {"unloadAfterMinutes": 5, "stopEngineAfterMinutes": 9, "startOnDemand": false, "wakeTimeoutSeconds": 17},
-  "profiles": [{"name": "qwen", "engine": "ollama", "model": "qwen3:8b", "quantization": "q4",
+  "profiles": [{"name": "qwen", "engine": "llamacpp", "model": "qwen3-8b", "quantization": "q4",
     "contextTokens": 16384, "capabilities": ["tools"], "memoryBytes": 5000000000, "maxConcurrent": 2,
     "requestOptions": {  "options": { "num_ctx": 16384 }  }}],
   "tiers": {
-    "weak": [{"engine": "ollama", "model": "qwen3:8b", "contextTokens": 8192, "capabilities": ["tools", "structured"]}],
-    "strong": [{"engine": "lmstudio", "model": "big"}, {"engine": "ollama", "model": "qwen3:8b"}]
+    "weak": [{"engine": "llamacpp", "model": "qwen3-8b", "contextTokens": 8192, "capabilities": ["tools", "structured"]}],
+    "strong": [{"engine": "llamacpp-custom", "model": "big"}, {"engine": "llamacpp", "model": "qwen3-8b"}]
   },
   "tierPolicy": {"allowStronger": false, "allowWeaker": true, "preferLoaded": "any"}
 }`
@@ -598,16 +598,16 @@ func TestParseMigratesV1KeepingLocalSettings(t *testing.T) {
 		},
 		Idle: IdleConfig{UnloadAfterMinutes: 5, StopEngineAfterMinutes: 9, StartOnDemand: false, WakeTimeoutSeconds: 17},
 		Profiles: []Profile{{
-			Name: "qwen", Engine: "ollama", Model: "qwen3:8b", Quantization: "q4", ContextTokens: 16384,
+			Name: "qwen", Engine: "llamacpp", Model: "qwen3-8b", Quantization: "q4", ContextTokens: 16384,
 			Capabilities: []Capability{CapTools}, MemoryBytes: 5000000000, MaxConcurrent: 2,
 			RequestOptions: json.RawMessage(`{"options":{"num_ctx":16384}}`),
 		}},
 		Roles: map[string]Role{},
 		Tiers: map[string][]TierEntry{
-			"weak": {{Kind: EntryLocal, Engine: "ollama", Model: "qwen3:8b", ContextTokens: 8192, Capabilities: []Capability{CapTools, CapStructured}}},
+			"weak": {{Kind: EntryLocal, Engine: "llamacpp", Model: "qwen3-8b", ContextTokens: 8192, Capabilities: []Capability{CapTools, CapStructured}}},
 			"strong": {
-				{Kind: EntryLocal, Engine: "lmstudio", Model: "big"},
-				{Kind: EntryLocal, Engine: "ollama", Model: "qwen3:8b"},
+				{Kind: EntryLocal, Engine: "llamacpp-custom", Model: "big"},
+				{Kind: EntryLocal, Engine: "llamacpp", Model: "qwen3-8b"},
 			},
 		},
 		TierPolicy: TierPolicy{AllowStronger: false, AllowWeaker: true, PreferLoaded: "any"},
@@ -653,15 +653,15 @@ func TestParseIsIdempotent(t *testing.T) {
 		"minimal v1":         `{"version":1}`,
 		"full v1":            v1Document,
 		"v1 with null tier":  `{"version":1,"tiers":{"weak":null,"medium":[]}}`,
-		"v2 empty lists":     `{"version":2,"profiles":null,"tiers":{"weak":[{"kind":"local","engine":"ollama","model":"m","capabilities":[]}]}}`,
-		"v2 spaced options":  `{"version":2,"profiles":[{"name":"a","engine":"ollama","model":"m","capabilities":[],"requestOptions": { "keep_alive" : "10m" }}]}`,
+		"v2 empty lists":     `{"version":2,"profiles":null,"tiers":{"weak":[{"kind":"local","engine":"llamacpp","model":"m","capabilities":[]}]}}`,
+		"v2 spaced options":  `{"version":2,"profiles":[{"name":"a","engine":"llamacpp","model":"m","capabilities":[],"requestOptions": { "keep_alive" : "10m" }}]}`,
 		"v2 with revision":   `{"version":2,"revision":"9007199254740993"}`,
 		"v2 with api config": stagedRoutingDocument,
-		"v1 html options":    `{"version":1,"profiles":[{"name":"a","engine":"ollama","model":"m","requestOptions":{"stop":["</s>"]}}]}`,
-		"v2 html options":    `{"version":2,"profiles":[{"name":"a","engine":"ollama","model":"m","requestOptions":{"q":"a&b","c":"<x>"}}]}`,
-		"v2 escaped options": `{"version":2,"profiles":[{"name":"a","engine":"ollama","model":"m","requestOptions":{"q":"a\u0026b \u003c"}}]}`,
+		"v1 html options":    `{"version":1,"profiles":[{"name":"a","engine":"llamacpp","model":"m","requestOptions":{"stop":["</s>"]}}]}`,
+		"v2 html options":    `{"version":2,"profiles":[{"name":"a","engine":"llamacpp","model":"m","requestOptions":{"q":"a&b","c":"<x>"}}]}`,
+		"v2 escaped options": `{"version":2,"profiles":[{"name":"a","engine":"llamacpp","model":"m","requestOptions":{"q":"a\u0026b \u003c"}}]}`,
 		"v2 null roles":      `{"version":2,"roles":null}`,
-		"v2 with roles":      `{"version":2,"roles":{"weak":{"engine":"ollama","model":"m"},"strong":{"engine":"lmstudio","model":"big"}}}`,
+		"v2 with roles":      `{"version":2,"roles":{"weak":{"engine":"llamacpp","model":"m"},"strong":{"engine":"llamacpp-custom","model":"big"}}}`,
 		"v2 paused by peer":  `{"version":2,"availability":"paused","pausedBy":"peer"}`,
 	}
 	marshalers := map[string]func(any) ([]byte, error){
@@ -694,18 +694,18 @@ func TestParseIsIdempotent(t *testing.T) {
 func TestParseMigrationKeepsFilesVersion1Accepted(t *testing.T) {
 	t.Run("exact duplicate tier entry collapses to the first", func(t *testing.T) {
 		doc := `{"version":1,"availability":"paused",
-			"profiles":[{"name":"keep","engine":"ollama","model":"m"}],
+			"profiles":[{"name":"keep","engine":"llamacpp","model":"m"}],
 			"tiers":{"weak":[
-				{"engine":"ollama","model":"m","contextTokens":100},
-				{"engine":"lmstudio","model":"m"},
-				{"engine":"ollama","model":"m","contextTokens":100}]}}`
+				{"engine":"llamacpp","model":"m","contextTokens":100},
+				{"engine":"llamacpp-custom","model":"m"},
+				{"engine":"llamacpp","model":"m","contextTokens":100}]}}`
 		p, err := Parse([]byte(doc))
 		if err != nil {
 			t.Fatalf("Parse: %v", err)
 		}
 		want := []TierEntry{
-			{Kind: EntryLocal, Engine: "ollama", Model: "m", ContextTokens: 100},
-			{Kind: EntryLocal, Engine: "lmstudio", Model: "m"},
+			{Kind: EntryLocal, Engine: "llamacpp", Model: "m", ContextTokens: 100},
+			{Kind: EntryLocal, Engine: "llamacpp-custom", Model: "m"},
 		}
 		if !reflect.DeepEqual(p.Tiers["weak"], want) {
 			t.Errorf("weak entries = %+v, want %+v", p.Tiers["weak"], want)
@@ -716,8 +716,8 @@ func TestParseMigrationKeepsFilesVersion1Accepted(t *testing.T) {
 	})
 	t.Run("exact duplicate with reordered capabilities collapses", func(t *testing.T) {
 		doc := `{"version":1,"tiers":{"weak":[
-			{"engine":"ollama","model":"m","capabilities":["tools","structured"]},
-			{"engine":"ollama","model":"m","capabilities":["structured","tools"]}]}}`
+			{"engine":"llamacpp","model":"m","capabilities":["tools","structured"]},
+			{"engine":"llamacpp","model":"m","capabilities":["structured","tools"]}]}}`
 		p, err := Parse([]byte(doc))
 		if err != nil {
 			t.Fatalf("Parse: %v", err)
@@ -728,22 +728,22 @@ func TestParseMigrationKeepsFilesVersion1Accepted(t *testing.T) {
 	})
 	t.Run("entries differing in bounds stay separate", func(t *testing.T) {
 		doc := `{"version":1,"tiers":{"weak":[
-			{"engine":"ollama","model":"small:1b","contextTokens":100},
-			{"engine":"ollama","model":"small:1b","contextTokens":32000,"capabilities":["tools"]}]}}`
+			{"engine":"llamacpp","model":"small-1b","contextTokens":100},
+			{"engine":"llamacpp","model":"small-1b","contextTokens":32000,"capabilities":["tools"]}]}}`
 		p, err := Parse([]byte(doc))
 		if err != nil {
 			t.Fatalf("Parse: %v", err)
 		}
 		want := []TierEntry{
-			{Kind: EntryLocal, Engine: "ollama", Model: "small:1b", ContextTokens: 100},
-			{Kind: EntryLocal, Engine: "ollama", Model: "small:1b", ContextTokens: 32000, Capabilities: []Capability{CapTools}},
+			{Kind: EntryLocal, Engine: "llamacpp", Model: "small-1b", ContextTokens: 100},
+			{Kind: EntryLocal, Engine: "llamacpp", Model: "small-1b", ContextTokens: 32000, Capabilities: []Capability{CapTools}},
 		}
 		if !reflect.DeepEqual(p.Tiers["weak"], want) {
 			t.Errorf("weak entries = %+v, want %+v", p.Tiers["weak"], want)
 		}
 	})
 	t.Run("profile named like an alias", func(t *testing.T) {
-		p, err := Parse([]byte(`{"version":1,"profiles":[{"name":"weak","engine":"ollama","model":"m"}]}`))
+		p, err := Parse([]byte(`{"version":1,"profiles":[{"name":"weak","engine":"llamacpp","model":"m"}]}`))
 		if err != nil {
 			t.Fatalf("Parse: %v", err)
 		}
@@ -755,7 +755,7 @@ func TestParseMigrationKeepsFilesVersion1Accepted(t *testing.T) {
 
 func TestParseRejectsDuplicateTierEntryInV2(t *testing.T) {
 	doc := `{"version":2,"tiers":{"weak":[
-		{"kind":"local","engine":"ollama","model":"m"},{"kind":"local","engine":"ollama","model":"m"}]}}`
+		{"kind":"local","engine":"llamacpp","model":"m"},{"kind":"local","engine":"llamacpp","model":"m"}]}}`
 	if _, err := Parse([]byte(doc)); err == nil || !strings.Contains(err.Error(), "duplicate entry") {
 		t.Fatalf("Parse(v2 duplicate) err = %v, want duplicate entry", err)
 	}
@@ -806,7 +806,7 @@ func TestParseRejectsUnsupportedVersions(t *testing.T) {
 }
 
 func TestParseRequiresEntryKindInV2(t *testing.T) {
-	doc := `{"version":2,"tiers":{"weak":[{"engine":"ollama","model":"m"}]}}`
+	doc := `{"version":2,"tiers":{"weak":[{"engine":"llamacpp","model":"m"}]}}`
 	if _, err := Parse([]byte(doc)); err == nil || !strings.Contains(err.Error(), "kind") {
 		t.Fatalf("Parse(entry without kind) err = %v, want a kind error", err)
 	}
@@ -844,7 +844,7 @@ func TestParseV2DuplicateEntryKey(t *testing.T) {
 		return err
 	}
 	local := func(extra string) string {
-		return `{"kind":"local","engine":"ollama","model":"m"` + extra + `}`
+		return `{"kind":"local","engine":"llamacpp","model":"m"` + extra + `}`
 	}
 	t.Run("near duplicates differing in context validate", func(t *testing.T) {
 		if err := parse(local(`,"contextTokens":100`) + "," + local(`,"contextTokens":32000`)); err != nil {
@@ -890,19 +890,19 @@ func TestValidateRoles(t *testing.T) {
 
 	test("no roles", map[string]Role{}, "")
 	test("every tier declared", map[string]Role{
-		TierWeak: {Engine: "ollama", Model: "qwen3:8b"}, TierMedium: {Engine: "lmstudio", Model: "mid"}, TierStrong: {Engine: "ollama", Model: "big"},
+		TierWeak: {Engine: "llamacpp", Model: "qwen3-8b"}, TierMedium: {Engine: "llamacpp-custom", Model: "mid"}, TierStrong: {Engine: "llamacpp", Model: "big"},
 	}, "")
 	test("same model serves two tiers", map[string]Role{
-		TierWeak: {Engine: "ollama", Model: "qwen3:8b"}, TierMedium: {Engine: "ollama", Model: "qwen3:8b"},
+		TierWeak: {Engine: "llamacpp", Model: "qwen3-8b"}, TierMedium: {Engine: "llamacpp", Model: "qwen3-8b"},
 	}, "")
-	test("role without a profile", map[string]Role{TierStrong: {Engine: "ollama", Model: "not-profiled"}}, "")
-	test("unknown tier", map[string]Role{"huge": {Engine: "ollama", Model: "m"}}, `unknown tier "huge"`)
-	test("suffixed alias as tier", map[string]Role{"weak-local": {Engine: "ollama", Model: "m"}}, `unknown tier "weak-local"`)
+	test("role without a profile", map[string]Role{TierStrong: {Engine: "llamacpp", Model: "not-profiled"}}, "")
+	test("unknown tier", map[string]Role{"huge": {Engine: "llamacpp", Model: "m"}}, `unknown tier "huge"`)
+	test("suffixed alias as tier", map[string]Role{"weak-local": {Engine: "llamacpp", Model: "m"}}, `unknown tier "weak-local"`)
 	test("unknown engine", map[string]Role{TierWeak: {Engine: "no:pe", Model: "m"}}, `unknown engine "no:pe"`)
 	test("descriptor engine", map[string]Role{TierWeak: {Engine: "llamacpp-custom", Model: "m"}}, "")
-	test("missing model", map[string]Role{TierWeak: {Engine: "ollama"}}, "model is required")
-	test("tier name as model", map[string]Role{TierWeak: {Engine: "ollama", Model: "strong"}}, "reserved alias")
-	test("suffixed alias as model", map[string]Role{TierWeak: {Engine: "ollama", Model: "medium-api"}}, "reserved alias")
+	test("missing model", map[string]Role{TierWeak: {Engine: "llamacpp"}}, "model is required")
+	test("tier name as model", map[string]Role{TierWeak: {Engine: "llamacpp", Model: "strong"}}, "reserved alias")
+	test("suffixed alias as model", map[string]Role{TierWeak: {Engine: "llamacpp", Model: "medium-api"}}, "reserved alias")
 }
 
 func TestValidatePausedBy(t *testing.T) {
@@ -936,7 +936,7 @@ func TestValidatePausedBy(t *testing.T) {
 }
 
 func TestParseOlderFileWithoutRolesOrPausedBy(t *testing.T) {
-	p, err := Parse([]byte(`{"version":2,"availability":"paused","tiers":{"weak":[{"kind":"local","engine":"ollama","model":"m"}]}}`))
+	p, err := Parse([]byte(`{"version":2,"availability":"paused","tiers":{"weak":[{"kind":"local","engine":"llamacpp","model":"m"}]}}`))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -964,11 +964,11 @@ func TestParseOlderFileWithoutRolesOrPausedBy(t *testing.T) {
 
 func TestParseKeepsRolesAndPausedBy(t *testing.T) {
 	p, err := Parse([]byte(`{"version":2,"availability":"paused","pausedBy":"local",
-		"roles":{"weak":{"engine":"ollama","model":"qwen3:8b"},"strong":{"engine":"lmstudio","model":"big"}}}`))
+		"roles":{"weak":{"engine":"llamacpp","model":"qwen3-8b"},"strong":{"engine":"llamacpp-custom","model":"big"}}}`))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	want := map[string]Role{TierWeak: {Engine: "ollama", Model: "qwen3:8b"}, TierStrong: {Engine: "lmstudio", Model: "big"}}
+	want := map[string]Role{TierWeak: {Engine: "llamacpp", Model: "qwen3-8b"}, TierStrong: {Engine: "llamacpp-custom", Model: "big"}}
 	if !reflect.DeepEqual(p.Roles, want) {
 		t.Errorf("roles = %+v, want %+v", p.Roles, want)
 	}
@@ -983,7 +983,7 @@ func TestValidateProfileQualification(t *testing.T) {
 		t.Helper()
 		t.Run(name, func(t *testing.T) {
 			p := Default()
-			pr.Name, pr.Engine, pr.Model = "m", "ollama", "m:latest"
+			pr.Name, pr.Engine, pr.Model = "m", "llamacpp", "m"
 			p.Profiles = []Profile{pr}
 			err := p.Validate()
 			if wantErr == "" {
@@ -1013,7 +1013,7 @@ func TestValidateProfileQualification(t *testing.T) {
 }
 
 func TestParseKeepsProfileQualification(t *testing.T) {
-	doc := `{"version":2,"profiles":[{"name":"m","engine":"ollama","model":"m:latest","contextTokens":8192,
+	doc := `{"version":2,"profiles":[{"name":"m","engine":"llamacpp","model":"m","contextTokens":8192,
 		"maxOutputTokens":2048,"qualification":{"id":"msi-qwen3-8b","revision":"3"}}]}`
 	p, err := Parse([]byte(doc))
 	if err != nil {

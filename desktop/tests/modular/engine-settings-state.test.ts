@@ -3,6 +3,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { customEngine } from './engine-fixtures'
 import { act, createElement } from 'react'
 import { createRoot } from 'react-dom/client'
 import {
@@ -21,7 +22,7 @@ import { EngineSettingsSection } from '@/ui/components/BackendRow/EngineSettings
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import { redactSensitiveLogText } from '@/electron/redact-log'
 
-const target = { nodeId: 'remote', engine: 'ollama' } as const
+const target = { nodeId: 'remote', engine: 'llamacpp' } as const
 const modelLoads: NonNullable<EngineSettingsConfig['modelLoads']> = [
     {
         modelId: 'exact/model',
@@ -87,13 +88,13 @@ const baseline: EngineSettingsSnapshot = {
     epoch: 'one',
     sequence: 1,
     settings: {
-        serverPort: 1235,
-        proxyPort: 11434,
+        serverPort: 8081,
+        proxyPort: 8080,
         launchText: 'managed serve',
         modelLoads: structuredClone(modelLoads)
     },
-    effectiveServerPort: 1235,
-    effectiveProxyPort: 11434,
+    effectiveServerPort: 8081,
+    effectiveProxyPort: 8080,
     running: true,
     adopted: false,
     editable: true,
@@ -447,7 +448,7 @@ describe('engine settings restart confirmation', () => {
             root.render(
                 createElement(EngineSettingsSection, {
                     nodeId: 'remote',
-                    engineType: 'ollama',
+                    engineType: 'llama-cpp',
                     disabled: false
                 })
             )
@@ -482,7 +483,7 @@ describe('engine settings restart confirmation', () => {
             expect.objectContaining({ settings: { ...baseline.settings, proxyPort: 12500 } })
         )
         expect(apply).not.toHaveBeenCalled()
-        expect(usePendingActionsStore.getState().isSettingsPending('remote', 'ollama')).toBe(false)
+        expect(usePendingActionsStore.getState().isSettingsPending('remote', 'llama-cpp')).toBe(false)
 
         await act(async () => buttonNamed(dialog, 'Restart').click())
 
@@ -496,7 +497,7 @@ describe('engine settings restart confirmation', () => {
             })
         )
         expect(dialog.open).toBe(false)
-        expect(usePendingActionsStore.getState().isSettingsPending('remote', 'ollama')).toBe(true)
+        expect(usePendingActionsStore.getState().isSettingsPending('remote', 'llama-cpp')).toBe(true)
     })
 
     it('cancels a restart without applying and leaves the draft editable', async () => {
@@ -507,7 +508,7 @@ describe('engine settings restart confirmation', () => {
 
         expect(dialog.open).toBe(false)
         expect(apply).not.toHaveBeenCalled()
-        expect(usePendingActionsStore.getState().isSettingsPending('remote', 'ollama')).toBe(false)
+        expect(usePendingActionsStore.getState().isSettingsPending('remote', 'llama-cpp')).toBe(false)
         const input = container.querySelector('input[aria-label="Proxy port"]')
         if (!(input instanceof HTMLInputElement)) throw new Error('Proxy port input missing')
         expect(input.value).toBe('12500')
@@ -663,33 +664,33 @@ describe('settings applies use the shared pending-actions cover', () => {
 
     it('holds from the send until the first snapshot, then yields to phase', () => {
         const pending = usePendingActionsStore.getState()
-        expect(pending.isSettingsPending('remote', 'ollama')).toBe(false)
+        expect(pending.isSettingsPending('remote', 'llama-cpp')).toBe(false)
 
-        pending.beginSettings('remote', 'ollama', 'current-request')
-        expect(usePendingActionsStore.getState().isSettingsPending('remote', 'ollama')).toBe(true)
+        pending.beginSettings('remote', 'llama-cpp', 'current-request')
+        expect(usePendingActionsStore.getState().isSettingsPending('remote', 'llama-cpp')).toBe(true)
 
         // Another engine on the same device is untouched.
-        expect(usePendingActionsStore.getState().isSettingsPending('remote', 'lm-studio')).toBe(
+        expect(usePendingActionsStore.getState().isSettingsPending('remote', customEngine)).toBe(
             false
         )
 
         deliver({ ...baseline, phase: 'applying', requestId: 'older-request' })
-        expect(usePendingActionsStore.getState().isSettingsPending('remote', 'ollama')).toBe(true)
+        expect(usePendingActionsStore.getState().isSettingsPending('remote', 'llama-cpp')).toBe(true)
         deliver({ ...baseline, phase: 'idle' })
-        expect(usePendingActionsStore.getState().isSettingsPending('remote', 'ollama')).toBe(true)
+        expect(usePendingActionsStore.getState().isSettingsPending('remote', 'llama-cpp')).toBe(true)
         deliver({ ...baseline, phase: 'applying', requestId: 'current-request' })
-        expect(usePendingActionsStore.getState().isSettingsPending('remote', 'ollama')).toBe(false)
+        expect(usePendingActionsStore.getState().isSettingsPending('remote', 'llama-cpp')).toBe(false)
     })
 
     it('releases the cover when validation refuses before sending', () => {
         const pending = usePendingActionsStore.getState()
-        pending.beginSettings('remote', 'lm-studio', 'current-request')
-        pending.endSettings('remote', 'lm-studio', 'older-request')
-        expect(usePendingActionsStore.getState().isSettingsPending('remote', 'lm-studio')).toBe(
+        pending.beginSettings('remote', customEngine, 'current-request')
+        pending.endSettings('remote', customEngine, 'older-request')
+        expect(usePendingActionsStore.getState().isSettingsPending('remote', customEngine)).toBe(
             true
         )
-        pending.endSettings('remote', 'lm-studio', 'current-request')
-        expect(usePendingActionsStore.getState().isSettingsPending('remote', 'lm-studio')).toBe(
+        pending.endSettings('remote', customEngine, 'current-request')
+        expect(usePendingActionsStore.getState().isSettingsPending('remote', customEngine)).toBe(
             false
         )
     })

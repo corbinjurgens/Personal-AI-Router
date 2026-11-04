@@ -114,9 +114,9 @@ func TestMain(m *testing.M) {
 	// developer's real config. These are the variables appdir resolves
 	// through on each platform. They are set after the builds, because go
 	// derives its module and build caches from these variables.
-	// USERPROFILE is redirected too, so Windows engine manifests that
-	// resolve vendor CLIs from the user profile, such as LM Studio's
-	// lms.exe, cannot reach a real install.
+	// USERPROFILE is redirected too, so Windows engine manifests and model
+	// sources that resolve paths from the user profile cannot reach a real
+	// install.
 	testsConfigBase = filepath.Join(tmpDir, "config")
 	for _, key := range []string{"XDG_CONFIG_HOME", "HOME", "APPDATA", "LOCALAPPDATA", "USERPROFILE"} {
 		if err := os.Setenv(key, testsConfigBase); err != nil {
@@ -272,10 +272,10 @@ func isBindRace(e *jsonrpc.RPCError) bool {
 	return e.Code == codeFacadeBindFailed || strings.HasPrefix(e.Message, "failed to bind port")
 }
 
-// TestLMStudioFacadeChildPersistsUnderPrivateBase proves a real proxy child
-// writes its persisted LM Studio port under the TestMain config base, so no
+// TestLlamaCPPFacadeChildPersistsUnderPrivateBase proves a real proxy child
+// writes its persisted llama.cpp port under the TestMain config base, so no
 // cross-process test can clobber the developer's saved port.
-func TestLMStudioFacadeChildPersistsUnderPrivateBase(t *testing.T) {
+func TestLlamaCPPFacadeChildPersistsUnderPrivateBase(t *testing.T) {
 	cmd := exec.Command(proxyBin)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -301,7 +301,7 @@ func TestLMStudioFacadeChildPersistsUnderPrivateBase(t *testing.T) {
 			"id":      1,
 			"method":  "facade/enable",
 			"params": map[string]any{
-				"engine":              "lmstudio",
+				"engine":              engines.NameLlamaCPP,
 				"port":                port,
 				"ignorePersistedPort": true,
 			},
@@ -312,30 +312,30 @@ func TestLMStudioFacadeChildPersistsUnderPrivateBase(t *testing.T) {
 		return map[string]any{
 			"jsonrpc": "2.0",
 			"id":      2,
-			"method":  engines.AddressMethod("lmstudio", "set-port"),
+			"method":  engines.AddressMethod(engines.NameLlamaCPP, "set-port"),
 			"params":  map[string]any{"port": port},
 		}
 	})
 
-	path, err := appdir.Path("lmstudio-proxy-port.json")
+	path, err := appdir.Path("llamacpp-proxy-port.json")
 	if err != nil {
 		t.Fatal(err)
 	}
 	rel, err := filepath.Rel(testsConfigBase, path)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-		t.Fatalf("lmstudio port path %q is outside test config base %q", path, testsConfigBase)
+		t.Fatalf("llamacpp port path %q is outside test config base %q", path, testsConfigBase)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("read persisted lmstudio port: %v", err)
+		t.Fatalf("read persisted llamacpp port: %v", err)
 	}
 	var saved struct {
 		Port int `json:"port"`
 	}
 	if err := json.Unmarshal(data, &saved); err != nil {
-		t.Fatalf("parse persisted lmstudio port: %v", err)
+		t.Fatalf("parse persisted llamacpp port: %v", err)
 	}
 	if saved.Port != persistedPort {
-		t.Fatalf("persisted lmstudio port = %d, want %d", saved.Port, persistedPort)
+		t.Fatalf("persisted llamacpp port = %d, want %d", saved.Port, persistedPort)
 	}
 }

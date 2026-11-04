@@ -240,7 +240,7 @@ reserved for inference clients.
 | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
 | `app:ready`                                          | Complete broker startup and refresh snapshots                                                                                   | `state:request-refresh`                                   |
 | `discovery:nodes-changed`                            | Replace discovery snapshot and diff nodes                                                                                       | `discovery:nodes-changed`, `nodes:upsert`, `nodes:remove` |
-| `ollama-proxy:ready` / `lmstudio-proxy:ready` / `llamacpp-proxy:ready` | Record engine proxy port                                                                                          | `engines:state-changed`                                   |
+| `llamacpp-proxy:ready` | Record engine proxy port                                                                                          | `engines:state-changed`                                   |
 | proxy `node/*`                                       | Update per-engine node presence; the advertised port is the peer's promoted proxy port (not the engine's private loopback port) | node and engine pushes                                    |
 | `engine:ready` / `engine:state-changed`              | Update engine facts and models                                                                                                  | `engines:state-changed`                                   |
 | `engine:settings-changed`                            | Validate and republish the owning node's settings snapshot                                                                      | `engines:settings-changed`                                |
@@ -482,14 +482,12 @@ result through the discovery snapshot and must not add a second, shorter
 reachability verdict of its own — a failed `/v1/node-info` poll keeps the last
 good metrics and never marks a node offline.
 
-The model catalogue is backend-owned. `nvpair-engine-manager` serves the curated
-Ollama, LM Studio, and llama.cpp lists over `engine:catalog`, filtered for the
+The model catalogue is backend-owned. `nvpair-engine-manager` serves the
+llama.cpp list over `engine:catalog`, filtered for the
 operating system and CPU a model will install on; Electron relays the call and
 maps rows for the renderer, which then sends pull-ready model IDs back through
 the engine manager. llama.cpp's source is also searchable: the relay passes the
 model hub's query through, and the engine manager searches Hugging Face with it.
-The Ollama reply is a single multi-megabyte frame, so every hop on its path
-shares `jsonrpc.WorkerFrameBytes`.
 
 ## Pairing and security
 

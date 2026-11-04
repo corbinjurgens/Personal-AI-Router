@@ -20,6 +20,7 @@ import (
 
 	"nvpair-shared/clustertrusttest"
 	"nvpair-shared/durablefile"
+	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/nodepolicy"
 )
@@ -38,6 +39,8 @@ type switchHarness struct {
 	sleeping           map[string]bool
 	failStep           string
 	publicationFailure bool
+	// target is the engine a switch request moves to.
+	target string
 }
 
 func TestSwitchFenceAbsentRefusesLateOriginalWithoutEffects(t *testing.T) {
@@ -480,7 +483,15 @@ func TestSwitchFenceForeignReceiptDoesNotBypassStorageLatch(t *testing.T) {
 	}
 }
 
+// newSwitchHarness switches llamacpp to the llamacpp-custom descriptor engine.
 func newSwitchHarness(t *testing.T) *switchHarness {
+	return newSwitchHarnessFor(t, "llamacpp-custom")
+}
+
+// newSwitchHarnessFor switches llamacpp to target. A built-in target is
+// needed only by tests that depend on a second engine with settings, which
+// descriptor engines do not have.
+func newSwitchHarnessFor(t *testing.T, target string) *switchHarness {
 	t.Helper()
 	output := &syncBuffer{}
 	b := &Broker{nodeID: "target", codec: NewCodec(output), clusterDir: t.TempDir()}
@@ -489,7 +500,7 @@ func newSwitchHarness(t *testing.T) *switchHarness {
 	if err := c.store.Load(); err != nil {
 		t.Fatal(err)
 	}
-	h := &switchHarness{b: b, output: output, sleeping: make(map[string]bool), config: settings.SwitchConfigurationSnapshot{ManagerIncarnation: "manager-run", RegistryRuntimeFingerprint: "runtime", Engines: []settings.SwitchConfigurationEngine{{Engine: "llamacpp", Intent: settings.SwitchIntentOn}, {Engine: "lmstudio", Intent: settings.SwitchIntentOff}}}}
+	h := &switchHarness{b: b, output: output, sleeping: make(map[string]bool), config: settings.SwitchConfigurationSnapshot{ManagerIncarnation: "manager-run", RegistryRuntimeFingerprint: "runtime", Engines: []settings.SwitchConfigurationEngine{{Engine: "llamacpp", Intent: settings.SwitchIntentOn}, {Engine: target, Intent: settings.SwitchIntentOff}}}, target: target}
 	// Manager activation schedules an identity push. Keep it behind the push
 	// slot until the fake proxy can receive and acknowledge that startup work.
 	r := b.nodePolicyRuntime()
@@ -520,7 +531,7 @@ func newSwitchHarness(t *testing.T) *switchHarness {
 		case "engine:get-installed":
 			engines := make([]map[string]any, 0, len(h.config.Engines))
 			for _, config := range h.config.Engines {
-				running := config.Intent == settings.SwitchIntentOn || (config.Engine == "lmstudio" && h.runningTarget)
+				running := config.Intent == settings.SwitchIntentOn || (config.Engine == h.target && h.runningTarget)
 				if h.cp != nil {
 					state := h.cp.Source
 					if config.Engine == h.cp.TargetEngine {
@@ -667,7 +678,7 @@ func newSwitchHarness(t *testing.T) *switchHarness {
 			}
 			return result, ""
 		case "engine:get-launch":
-			return settings.LaunchState{Engine: "lmstudio", Running: true, EffectivePort: 12345}, ""
+			return settings.LaunchState{Engine: h.target, Running: true, EffectivePort: 12345}, ""
 		case "engine:switch-recovery-ready":
 			var p struct {
 				ManagerIncarnation string `json:"managerIncarnation"`
@@ -681,7 +692,13 @@ func newSwitchHarness(t *testing.T) *switchHarness {
 		}
 	})
 	h.pp, h.proxy = attachFakeProxy(t, b)
-	h.pp.facadeState = map[string]proxyFacadeState{"llamacpp": {ready: true, port: 12346}, "lmstudio": {ready: true, port: 12347}}
+	h.pp.facadeState = map[string]proxyFacadeState{"llamacpp": {ready: true, port: 12346}, target: {ready: true, port: 12347}}
+	setLocalBackend := target + ":node/set-local-backend"
+	if _, builtin := engines.ByName(target); !builtin {
+		b.setDynamicEngines([]engines.Descriptor{testDescriptor(target, engines.ProtocolLlamaCPPRouter, engines.ProtocolOpenAIV1)}, func(int) bool { return true })
+		b.setEngineProxyHandle(b.dynamicEngineProfiles()[0], h.pp)
+		setLocalBackend = "e-" + target + ":node/set-local-backend"
+	}
 	startupIdentity := make(chan struct{})
 	var startupOnce sync.Once
 	h.proxy.setAnswer(func(method string, raw json.RawMessage) (any, string) {
@@ -692,7 +709,7 @@ func newSwitchHarness(t *testing.T) *switchHarness {
 			return nodepolicy.InvalidateEngineResult{OK: true, RunID: "proxy-run"}, ""
 		case nodepolicy.MethodAdmissionSnapshot:
 			return nodepolicy.AdmissionSnapshotResult{RunID: "proxy-run", AdmissionState: nodepolicy.AdmissionState{Active: int(h.active.Load()), ActiveByEngine: map[string]int{"llamacpp": int(h.active.Load())}}}, ""
-		case "lmstudio:node/set-local-backend":
+		case setLocalBackend:
 			if h.publicationFailure {
 				return nil, "publication refused"
 			}
@@ -818,7 +835,7 @@ func (h *switchHarness) request(t *testing.T, id string) settings.SwitchRequest 
 	if err != nil {
 		t.Fatal(err)
 	}
-	return settings.SwitchRequest{RequestID: id, SourceEngine: "llamacpp", TargetEngine: "lmstudio", ExpectedRevision: status.ConfigurationRevision}
+	return settings.SwitchRequest{RequestID: id, SourceEngine: "llamacpp", TargetEngine: h.target, ExpectedRevision: status.ConfigurationRevision}
 }
 
 func (h *switchHarness) waitIdle(t *testing.T) {
@@ -908,7 +925,7 @@ func TestSwitchCoordinatorCompletesAfterDurablePhasesAndPublication(t *testing.T
 func TestSettingsServingFullSwitchPreservesDeclarations(t *testing.T) {
 	test := func(name, failStep string) {
 		t.Run(name, func(t *testing.T) {
-			h := newSwitchHarness(t)
+			h := newSwitchHarnessFor(t, "llamacpp-custom")
 			h.failStep = failStep
 			serving := brokerServingFixture()
 			base := h.engine.answer
@@ -924,7 +941,7 @@ func TestSettingsServingFullSwitchPreservesDeclarations(t *testing.T) {
 				}
 				return settings.LaunchState{Engine: p.Engine, ServerPort: 12345, EffectivePort: 12345, Running: true, Editable: true, Format: "pair-arguments-v1", Serving: serving.Clone()}, ""
 			})
-			for _, engine := range []string{"llamacpp", "lmstudio"} {
+			for _, engine := range []string{"llamacpp", "llamacpp-custom"} {
 				snapshot, err := h.b.getEngineSettings(context.Background(), settings.Request{Engine: engine}, "")
 				if err != nil || !snapshot.Settings.Serving.Equal(serving) {
 					t.Fatal("switch baseline lost serving")
@@ -938,7 +955,7 @@ func TestSettingsServingFullSwitchPreservesDeclarations(t *testing.T) {
 			if !receipt.Terminal || (failStep == "" && receipt.Phase != settings.SwitchCompleted) || (failStep != "" && receipt.Phase == settings.SwitchCompleted) {
 				t.Fatalf("unexpected switch phase %s", receipt.Phase)
 			}
-			for _, engine := range []string{"llamacpp", "lmstudio"} {
+			for _, engine := range []string{"llamacpp", "llamacpp-custom"} {
 				snapshot, err := h.b.getEngineSettings(context.Background(), settings.Request{Engine: engine}, "")
 				if err != nil || !snapshot.Settings.Serving.Equal(serving) {
 					t.Fatal("switch completion/compensation lost declaration")
@@ -1237,7 +1254,7 @@ func TestSwitchPauseRecoveryReleasesBeforePinnedShutdown(t *testing.T) {
 }
 
 func TestSwitchPauseRecoveryRequiresPhysicalStopProof(t *testing.T) {
-	const stopped = `{"engines":[{"engine":"llamacpp","running":false},{"engine":"lmstudio","running":false}]}`
+	const stopped = `{"engines":[{"engine":"llamacpp","running":false},{"engine":"llamacpp-custom","running":false}]}`
 	for _, tc := range []struct {
 		name           string
 		inventory      string
@@ -1247,8 +1264,8 @@ func TestSwitchPauseRecoveryRequiresPhysicalStopProof(t *testing.T) {
 		{name: "failed reclaim with surviving PID", inventory: stopped, wantDetail: "llamacpp: stop unverified"},
 		{name: "final inventory unavailable", inventoryError: "inventory unavailable", wantDetail: "engine shutdown readback unavailable"},
 		{name: "final inventory truncated entry", inventory: `{"engines":[{}]}`, wantDetail: "engine shutdown readback unavailable"},
-		{name: "final inventory missing running", inventory: `{"engines":[{"engine":"llamacpp"},{"engine":"lmstudio","running":false}]}`, wantDetail: "engine shutdown readback unavailable"},
-		{name: "final inventory omits failed engine", inventory: `{"engines":[{"engine":"lmstudio","running":false}]}`, wantDetail: "llamacpp: stop unverified"},
+		{name: "final inventory missing running", inventory: `{"engines":[{"engine":"llamacpp"},{"engine":"llamacpp-custom","running":false}]}`, wantDetail: "engine shutdown readback unavailable"},
+		{name: "final inventory omits failed engine", inventory: `{"engines":[{"engine":"llamacpp-custom","running":false}]}`, wantDetail: "llamacpp: stop unverified"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newSwitchHarness(t)
@@ -1289,7 +1306,7 @@ func TestSwitchPauseRecoveryRequiresPhysicalStopProof(t *testing.T) {
 					}
 					return json.RawMessage(tc.inventory), tc.inventoryError
 				case "engine:descriptors":
-					return json.RawMessage(`{"engines":[{"version":1,"engine":"llamacpp","available":true},{"version":1,"engine":"lmstudio","available":true}]}`), ""
+					return json.RawMessage(`{"engines":[{"version":1,"engine":"llamacpp","available":true},{"version":1,"engine":"llamacpp-custom","available":true}]}`), ""
 				case engineSleepMethod:
 					var p struct {
 						Engine string `json:"engine"`
@@ -1624,13 +1641,13 @@ func TestSwitchLocalOffVetoOnlyMatchesReservedEngines(t *testing.T) {
 	defer cancel()
 	c := h.b.switchCoordinator()
 	c.waitMu.Lock()
-	c.remoteCancel, c.remoteSource, c.remoteTarget = cancel, "llamacpp", "lmstudio"
+	c.remoteCancel, c.remoteSource, c.remoteTarget = cancel, "llamacpp", "llamacpp-custom"
 	c.waitMu.Unlock()
-	h.b.cancelRemoteEngineSwitch("ollama")
+	h.b.cancelRemoteEngineSwitch("strata")
 	if ctx.Err() != nil {
 		t.Fatal("unrelated local Off cancelled remote switch")
 	}
-	h.b.cancelRemoteEngineSwitch("lmstudio")
+	h.b.cancelRemoteEngineSwitch("llamacpp-custom")
 	if ctx.Err() == nil {
 		t.Fatal("target local Off did not cancel remote switch")
 	}
@@ -1667,7 +1684,7 @@ func TestSwitchLocalOffReachesManagerWhileTargetReadinessIsHeld(t *testing.T) {
 			if p.VerifyStop {
 				return base(method, raw)
 			}
-			if err := os.WriteFile(vetoPath, settingsJSON(map[string]string{"lmstudio": "off"}), 0600); err != nil {
+			if err := os.WriteFile(vetoPath, settingsJSON(map[string]string{"llamacpp-custom": "off"}), 0600); err != nil {
 				return nil, err.Error()
 			}
 			h.mu.Lock()
@@ -1686,7 +1703,7 @@ func TestSwitchLocalOffReachesManagerWhileTargetReadinessIsHeld(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		id := json.RawMessage(`91`)
-		h.b.relayToEngineNow(&Message{ID: &id, Method: "engine:stop", Params: settingsJSON(map[string]string{"engine": "lmstudio"})})
+		h.b.relayToEngineNow(&Message{ID: &id, Method: "engine:stop", Params: settingsJSON(map[string]string{"engine": "llamacpp-custom"})})
 		close(done)
 	}()
 	select {
@@ -1703,7 +1720,7 @@ func TestSwitchLocalOffReachesManagerWhileTargetReadinessIsHeld(t *testing.T) {
 	if err := json.Unmarshal(data, &intents); err != nil {
 		t.Fatal(err)
 	}
-	if intents["lmstudio"] != settings.SwitchIntentOff {
+	if intents["llamacpp-custom"] != settings.SwitchIntentOff {
 		t.Fatalf("persisted intent = %v", intents)
 	}
 	r := h.receipt(t, p.RequestID)
@@ -1727,7 +1744,7 @@ func TestSwitchLocalOffDuringLocalSwitchIsBusy(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		id := json.RawMessage(`92`)
-		h.b.relayToEngineNow(&Message{ID: &id, Method: "engine:stop", Params: settingsJSON(map[string]string{"engine": "lmstudio"})})
+		h.b.relayToEngineNow(&Message{ID: &id, Method: "engine:stop", Params: settingsJSON(map[string]string{"engine": "llamacpp-custom"})})
 		close(done)
 	}()
 	select {
@@ -1881,7 +1898,7 @@ func TestSwitchPublicationRechecksRoutability(t *testing.T) {
 			}
 			if step.Step == settings.SwitchStepTargetStart {
 				h.pp.readyMu.Lock()
-				h.pp.facadeState["lmstudio"] = proxyFacadeState{}
+				h.pp.facadeState["llamacpp-custom"] = proxyFacadeState{}
 				h.pp.readyMu.Unlock()
 			}
 		}
@@ -1895,7 +1912,7 @@ func TestSwitchPublicationRechecksRoutability(t *testing.T) {
 		t.Fatalf("publication outcome = %+v", r)
 	}
 	for _, call := range h.proxy.snapshot() {
-		if call.method == "lmstudio:node/set-local-backend" {
+		if call.method == "e-llamacpp-custom:node/set-local-backend" {
 			t.Fatal("published a target whose facade disappeared")
 		}
 	}

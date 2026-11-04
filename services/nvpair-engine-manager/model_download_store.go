@@ -44,7 +44,7 @@ func downloadKey(engine, model, naming string) (downloadContentKey, error) {
 	if err := nodepolicy.ValidateModelIdentifier(model); err != nil {
 		return downloadContentKey{}, err
 	}
-	if naming != engines.ModelNamingExact && naming != engines.ModelNamingImpliedLatestTag {
+	if naming != engines.ModelNamingExact {
 		return downloadContentKey{}, errors.New("unsupported model naming")
 	}
 	key := engines.NormalizeModelName(model, naming)

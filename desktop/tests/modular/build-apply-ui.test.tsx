@@ -68,7 +68,7 @@ function preview(): BuildApplyPreview {
             pauseOrigin: known('peer'),
             engines: known([
                 {
-                    engine: 'ollama',
+                    engine: 'llamacpp',
                     active: known(false),
                     running: known(false),
                     loadedModels: known(['model']),

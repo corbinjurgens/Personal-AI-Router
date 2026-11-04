@@ -405,7 +405,7 @@ A reconnect, restart or idle status alone is not proof of abandonment.
 as one line:
 
 ```text
-OLLAMA_KEEP_ALIVE=5m OLLAMA_ORIGINS="https://example.com" --flag "two words"
+CUDA_VISIBLE_DEVICES=0 --flag "two words"
 ```
 
 Environment assignments come first, then arguments. Quoting works the way it
@@ -462,9 +462,8 @@ searches all of Hugging Face instead of filtering the list. Press `c` to go back
 to the starting list.
 
 Press `n` instead if you already know exactly what you want and would rather type
-it. Each engine names models its own way: an Ollama tag such as `llama3.2`, a
-Hugging Face repository for LM Studio, and a repository with its quantization
-for llama.cpp, such as `ggml-org/gemma-3-1b-it-GGUF:Q4_K_M`. Either way,
+it. llama.cpp names a model by its repository and quantization, such as
+`ggml-org/gemma-3-1b-it-GGUF:Q4_K_M`. Either way,
 downloading needs a running engine, and progress appears on the status line.
 
 Restart and uninstall need PAIR to own the engine process, so they only apply

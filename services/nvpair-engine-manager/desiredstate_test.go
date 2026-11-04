@@ -17,7 +17,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"nvpair-shared/durablefile"
 	"nvpair-shared/engineintent"
@@ -705,71 +704,5 @@ func TestDeclinedAdoptedStopStillPersistsOffIntent(t *testing.T) {
 	}
 	if st, err := fresh.Status("fake"); err != nil || st.Running {
 		t.Fatalf("declined-OFF engine was restarted: status=%+v err=%v", st, err)
-	}
-}
-
-func TestConfirmedStopPersistsOffDespiteCommandExitError(t *testing.T) {
-	baseDir := t.TempDir()
-	marker := filepath.Join(t.TempDir(), "stop-attempted")
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	t.Cleanup(srv.Close)
-	u, err := url.Parse(srv.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	port, err := strconv.Atoi(u.Port())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	manifest := testEngineManifest(fakeEngineBin)
-	key := runtime.GOOS + "/" + runtime.GOARCH
-	platform := manifest.Platforms[key]
-	platform.Runtime = Runtime{
-		Mode:  "command",
-		Port:  port,
-		Ready: &Probe{HTTP: srv.URL, Status: http.StatusOK},
-		Stop:  &StopSpec{Cmd: []string{fakeEngineBin, "failmark", marker}, GraceS: 2},
-	}
-	manifest.Platforms[key] = platform
-
-	first := desiredTestExecutor(t, manifest, baseDir)
-	if err := first.Start(context.Background(), "fake"); err != nil {
-		t.Fatalf("adopt and save ON: %v", err)
-	}
-	state, err := first.state("fake")
-	if err != nil {
-		t.Fatal(err)
-	}
-	// This endpoint and stop command model a PAIR-owned daemon. External
-	// refusal and its untouched sentinel are covered by
-	// TestCommandStopRefusesAdoptedExternalOwner.
-	state.mu.Lock()
-	state.adopted = false
-	state.mu.Unlock()
-	closed := make(chan struct{})
-	go func() {
-		for !fileExists(marker) {
-			time.Sleep(10 * time.Millisecond)
-		}
-		srv.Close()
-		close(closed)
-	}()
-	if err := first.Stop("fake"); err != nil {
-		t.Fatalf("endpoint-down stop should succeed despite command exit: %v", err)
-	}
-	<-closed
-	if enabled, known, err := first.desired.get("fake"); err != nil || !known || enabled {
-		t.Fatalf("saved state after confirmed stop = (%v, %v, %v), want known OFF", enabled, known, err)
-	}
-
-	fresh := desiredTestExecutor(t, manifest, baseDir)
-	if err := fresh.RestoreEnabled(context.Background()); err != nil {
-		t.Fatalf("restore after confirmed OFF: %v", err)
-	}
-	if st, err := fresh.Status("fake"); err != nil || st.Running {
-		t.Fatalf("confirmed OFF was restored unexpectedly: status=%+v err=%v", st, err)
 	}
 }

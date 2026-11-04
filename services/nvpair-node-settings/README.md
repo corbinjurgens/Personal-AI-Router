@@ -76,7 +76,7 @@ Bidirectional newline-delimited JSON-RPC 2.0. Stdio by default; `--ipc <path>` s
 
 The four stored fields:
 
-- `force_ports` (bool) — when true, NVPAIR attempts to reserve the Ollama compatibility port for its proxy. Running or unidentified owners are left untouched and reported as blocked; this setting does not authorize a generic process kill. An explicitly saved `false` is preserved as an opt-out.
+- `force_ports` (bool) — when true, NVPAIR attempts to reserve each engine's compatibility port (for llama.cpp, `8080`) for its proxy. Running or unidentified owners are left untouched and reported as blocked; this setting does not authorize a generic process kill. An explicitly saved `false` is preserved as an opt-out.
 - `cluster_auto_sync` (bool) — stored preference; no service currently acts on it or grants peer management permission because of it.
 - `cluster_id` (string) — opaque, stable identifier for the cluster this node belongs to. Empty means "not in a cluster". The wire format is byte-for-byte (no normalization, no trimming) so a future migration of the id format doesn't have to coordinate with the datastore.
 - `cluster_friendly_name` (string) — human-presentable label for the cluster (e.g. "Lab 3 desks"). Display only — anything operational keys off `cluster_id`.

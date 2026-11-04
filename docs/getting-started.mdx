@@ -33,9 +33,8 @@ inference; two or more on the same local network let you try pairing and routing
 
 Nothing else has to be in place first:
 
-- **Engines.** PAIR installs and starts Ollama, LM Studio, or llama.cpp for you
-  in step 4. Existing Ollama and LM Studio installations can also be detected
-  and used.
+- **Engines.** PAIR installs and starts llama.cpp for you in step 4. An engine
+  already running on its usual port can also be detected and used.
 - **Models.** PAIR downloads models for you in step 4. A request needs only one
   eligible node, so a single node holding the model is enough. Prepare the same
   model on additional nodes when you want any of them to be able to serve it.
@@ -101,7 +100,7 @@ builds and for running the services directly.
 ## 2. Complete First-Run Setup
 
 On first launch, PAIR opens a setup window that can install available inference
-engines on the local system. PAIR preselects Ollama, LM Studio, and llama.cpp when they are
+engines on the local system. PAIR preselects llama.cpp when it is
 available for your platform.
 
 1. Review the available engines.
@@ -110,7 +109,7 @@ available for your platform.
 3. Finish the setup and wait for the selected engine to report that it is
    running.
 
-![PAIR's first-run setup window listing the available inference engines, with Ollama selected.](assets/onboarding/getting-started/01-first-run-setup.png)
+![PAIR's first-run setup window listing the available inference engines, with llama.cpp selected.](assets/onboarding/getting-started/01-first-run-setup.png)
 
 The first start takes a little longer than later ones, because PAIR is starting
 its background services for the first time. If **Overview** is still showing
@@ -192,6 +191,11 @@ offers one verified `Q4_K_M` option per result. Load, Eject, and Delete use that
 same exact model id; Delete removes the selected entry from llama.cpp's
 persistent cache.
 
+llama.cpp also lists GGUF models that other applications keep on the node, in
+Ollama and LM Studio model folders, with IDs such as `ollama/<name>@<tag>` and
+`lmstudio/<path>`. PAIR reads those folders in place and never writes to them;
+see [Model sources](../services/nvpair-engine-manager/README.md#model-sources).
+
 Refer to [Managing engines](engine-lifecycle.mdx) for details about:
 
 - Installing, starting, stopping, updating, and uninstalling engines.
@@ -219,13 +223,9 @@ which machine ends up doing the work.
 ### Why the Port May Not Be the One You Expect
 
 PAIR places a proxy in front of each engine. The proxy uses the port that the
-engine would normally listen on:
+engine would normally listen on: `8080` for llama.cpp.
 
-- `11434` for Ollama.
-- `1234` for LM Studio.
-- `8080` for llama.cpp.
-
-Tools already pointed at those ports keep working without reconfiguration, and
+Tools already pointed at that port keep working without reconfiguration, and
 the engine moves to the next free port.
 
 Your application connects to PAIR's proxy, not directly to the engine. A port
@@ -242,49 +242,16 @@ value and `<MODEL_NAME>` with a model you prepared in step 4.
 The prompt below uses a familiar topic that any model can answer. A sensible
 reply confirms that the full path is working.
 
-### Choose a Request Style
+### Send a Request
 
-There are two request styles because there are two different chat APIs in common use. PAIR passes your request through to
-the engine rather than rewriting it.
-The engine therefore has to understand the style you send.
-
-| Endpoint  | OpenAI `/v1/chat/completions` | Ollama `/api/chat` |
-| --------- | ----------------------------- | ------------------ |
-| Ollama    | Works                         | Works              |
-| LM Studio | Works                         | Not available      |
-| llama.cpp | Works                         | Not available      |
-
-**If you are unsure, send the OpenAI-style request.** It works with every
-supported engine, and most tools and SDKs use it. Use the Ollama style
-only when something you already have is written against Ollama's `/api/...` API.
-
-The choice does not affect routing. Both styles are routed across your cluster the
-same way, and neither one changes which node serves the request.
-
-### OpenAI-Style Request (Works With Every Engine)
+PAIR passes your request through to the engine rather than rewriting it, so the
+request has to be one the engine understands. The OpenAI-style
+`/v1/chat/completions` request below is what llama.cpp serves, and most tools
+and SDKs use it. It is routed across your cluster, and the request style does
+not change which node serves it.
 
 ```bash
 curl <PAIR_BASE_URL>/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "<MODEL_NAME>",
-    "messages": [
-      {
-        "role": "user",
-        "content": "Tell me a short story about a dog who learns to skateboard."
-      }
-    ]
-  }'
-```
-
-### Ollama-Style Request (Ollama Endpoint Only)
-
-Sending this to the LM Studio or llama.cpp endpoint fails, because those engines
-do not implement Ollama's API. The `-N` flag tells `curl` not to buffer, so it
-displays the response stream as it is generated.
-
-```bash
-curl -N <PAIR_BASE_URL>/api/chat \
   -H "Content-Type: application/json" \
   -d '{
     "model": "<MODEL_NAME>",
@@ -327,22 +294,12 @@ its actual serving bounds before submitting coding work. See
 
 | What an application connects to     | Default port |
 | ----------------------------------- | ------------ |
-| Ollama-compatible proxy             | `11434`      |
-| LM Studio / OpenAI-compatible proxy | `1234`       |
 | llama.cpp / OpenAI-compatible proxy | `8080`       |
 
-When PAIR takes one of those ports, the engine behind it moves:
-
-- Ollama moves to `11435` or higher.
-- LM Studio moves to `1235` or higher.
-- PAIR's managed llama.cpp router runs on `8081`.
+When PAIR takes that port, the engine behind it moves: PAIR's managed llama.cpp
+router runs on `8081`.
 
 **Endpoints** is the authoritative source for the URL to use.
-
-If you already have `OLLAMA_HOST` set to a different local address, PAIR serves
-that address too when the port is free, so tools configured through the variable
-reach the router unchanged. This applies to loopback addresses only. PAIR leaves
-a remote or HTTPS `OLLAMA_HOST` alone.
 
 PAIR also uses these ports for node-to-node communication. You do not connect to
 them yourself, but they must be reachable between systems in a cluster. The
@@ -397,39 +354,34 @@ with its own command-line interface (CLI). Two things make that less obvious:
 - The binaries are not on your `PATH` yet.
 - The engine is not on the port its CLI expects by default.
 
-**Ollama** is installed inside PAIR's own data directory:
+**llama.cpp** is installed inside PAIR's own data directory:
 
-| Platform | Path                                                                                |
-| -------- | ----------------------------------------------------------------------------------- |
-| Windows  | `%LOCALAPPDATA%\Nvidia Corporation\Personal AI Router\engine-bin\ollama\ollama.exe` |
-| Linux    | `~/.config/Nvidia Corporation/Personal AI Router/engine-bin/ollama/bin/ollama`      |
+| Platform | Path                                                                                        |
+| -------- | ------------------------------------------------------------------------------------------- |
+| Windows  | `%LOCALAPPDATA%\Nvidia Corporation\Personal AI Router\engine-bin\llamacpp\llama-server.exe` |
+| Linux    | `~/.config/Nvidia Corporation/Personal AI Router/engine-bin/llamacpp/llama-server`          |
 
-On Linux it needs its bundled libraries on the library path:
+On Linux it needs its own directory on the library path:
 
 ```bash
-ENGINE="$HOME/.config/Nvidia Corporation/Personal AI Router/engine-bin/ollama"
-LD_LIBRARY_PATH="$ENGINE/lib/ollama" OLLAMA_HOST=127.0.0.1:11435 "$ENGINE/bin/ollama" list
+ENGINE="$HOME/.config/Nvidia Corporation/Personal AI Router/engine-bin/llamacpp"
+LD_LIBRARY_PATH="$ENGINE" "$ENGINE/llama-server" --version
 ```
 
 ```powershell
-$ollama = "$env:LOCALAPPDATA\Nvidia Corporation\Personal AI Router\engine-bin\ollama\ollama.exe"
-$env:OLLAMA_HOST = "127.0.0.1:11435"
-& $ollama list
+$llama = "$env:LOCALAPPDATA\Nvidia Corporation\Personal AI Router\engine-bin\llamacpp\llama-server.exe"
+& $llama --version
 ```
 
-**LM Studio** installs to its own standard location instead, because PAIR runs its
-official installer: `~/.lmstudio/bin/lms`, or
-`%USERPROFILE%\.lmstudio\bin\lms.exe` on Windows.
+**Set the port explicitly.** PAIR's proxy answers on `8080` and shows the
+cluster's view. The managed engine itself listens on a different port. Use the
+**Server** value under **Engine settings > Ports** to address the local engine
+directly. It defaults to `8081`.
 
 ```bash
-~/.lmstudio/bin/lms status
+curl http://127.0.0.1:8080/v1/models   # models the cluster can serve
+curl http://127.0.0.1:8081/models      # models installed on this machine
 ```
-
-**Set the port explicitly.** Set `OLLAMA_HOST` to the engine's own port.
-Otherwise, the CLI connects to `11434`, which is PAIR's proxy, and `ollama list`
-returns the cluster's view instead of the local machine's. Use the **Server**
-value under **Engine settings > Ports** to address the local engine directly.
-It defaults to `11435` for Ollama and `1235` for LM Studio.
 
 Use the proxy port to check what your cluster can serve. Use the engine port to
 check what is installed on the local machine.
@@ -443,20 +395,14 @@ Any client that lets you set a base URL and a model name can use PAIR — Hermes
 for example. Point the base URL at the endpoint you copied in step 5, and use a
 model you prepared in step 4.
 
-What that base URL serves depends on the engine behind it:
+For llama.cpp the default base URL is `http://127.0.0.1:8080`. It serves the
+OpenAI-compatible paths (`/v1/chat/completions`, `/v1/completions`,
+`/v1/embeddings`, `/v1/models`).
 
-| Endpoint  | Default base URL         | Paths it serves                                                                                                                                                                                                                  |
-| --------- | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Ollama    | `http://127.0.0.1:11434` | Ollama's own API — `/api/chat`, `/api/generate`, `/api/embed`, `/api/tags` — and the OpenAI-compatible `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models`, plus the Anthropic Messages API `/v1/messages` |
-| LM Studio | `http://127.0.0.1:1234`  | The OpenAI-compatible paths (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models`) and the Anthropic Messages API `/v1/messages`                                                                            |
-
-The distinction matters when you fill in an application's settings. A client
-written against the OpenAI API usually wants the `/v1` included, as in
-`http://127.0.0.1:11434/v1`, and appends the rest of the path itself. A client
-written against Ollama wants the host on its own,
-`http://127.0.0.1:11434`. Either way, copy the current value from **Endpoints**
-rather than typing a port from memory, because a port you changed moves the
-endpoint with it.
+A client written against the OpenAI API usually wants the `/v1` included, as in
+`http://127.0.0.1:8080/v1`, and appends the rest of the path itself. Either way,
+copy the current value from **Endpoints** rather than typing a port from memory,
+because a port you changed moves the endpoint with it.
 
 For what PAIR supports, operating systems, engines, and client applications,
 refer to [What is supported](../README.md#what-is-supported) in the README.
@@ -471,7 +417,7 @@ This is the part that surprises people, so it is worth stating directly.
 **An endpoint only accepts requests from the machine it is on.** A PAIR proxy
 serves plaintext HTTP to loopback only. PAIR refuses a request arriving from
 anywhere else on the network with `403`, and the message says so. You cannot
-point an application on a fourth machine at `http://some-node:11434` and have it
+point an application on a fourth machine at `http://some-node:8080` and have it
 work.
 
 **Run PAIR where you work.** The intended pattern is to install PAIR on the

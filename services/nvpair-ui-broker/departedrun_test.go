@@ -31,11 +31,11 @@ func TestDepartedRunHistoryApplyFence(t *testing.T) {
 	update.Seq = 2
 	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	b.routingHistory.beforeApply = func() { close(entered); <-release }
-	b.forwardProxyNotificationFrom(old, 0, 0, nodepolicy.NotifyRoutingHistoryWindow, historyMarshal(t, historyManifest(t, "2", update)))
-	b.forwardProxyNotificationFrom(old, 0, 0, nodepolicy.NotifyRoutingRequest, historyMarshal(t, update))
+	b.forwardProxyNotificationFrom(old, nodepolicy.NotifyRoutingHistoryWindow, historyMarshal(t, historyManifest(t, "2", update)))
+	b.forwardProxyNotificationFrom(old, nodepolicy.NotifyRoutingRequest, historyMarshal(t, update))
 	end := historyMarshal(t, nodepolicy.RoutingHistoryWindowEnd{Schema: 1, Generation: "2"})
 	go func() {
-		b.forwardProxyNotificationFrom(old, 0, 0, nodepolicy.NotifyRoutingHistoryWindowEnd, end)
+		b.forwardProxyNotificationFrom(old, nodepolicy.NotifyRoutingHistoryWindowEnd, end)
 		close(done)
 	}()
 	<-entered
@@ -212,7 +212,7 @@ func TestDepartedRunHistoryReadWaitsForHistoryCallback(t *testing.T) {
 	if err := p.attachRoutingHistoryPeer(b, readWriter{strings.NewReader(input), io.Discard}, func() {}); err != nil {
 		t.Fatal(err)
 	}
-	p.onNotify = func(method string, params json.RawMessage) { b.forwardProxyNotificationFrom(p, 0, 0, method, params) }
+	p.onNotify = func(method string, params json.RawMessage) { b.forwardProxyNotificationFrom(p, method, params) }
 	entered, release, pumpDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	var once sync.Once
 	finish := func() { once.Do(func() { close(release) }) }
@@ -244,7 +244,7 @@ func TestDepartedRunHistoryReadWaitsForHistoryCallback(t *testing.T) {
 
 func departedRunInput(t *testing.T, id, origin, runID, state, destination string) workloadstore.Incoming {
 	t.Helper()
-	in := storeIncoming(id, origin, "ollama", runID, state, destination)
+	in := storeIncoming(id, origin, "llamacpp", runID, state, destination)
 	fields := privacyObject(t, in.Info)
 	fields["seq"] = json.RawMessage(`7`)
 	fields["startedAt"] = json.RawMessage(`2`)
@@ -397,7 +397,7 @@ func TestDepartedRun(t *testing.T) {
 			for key, expected := range map[string]string{
 				"error": `"proxy exited before the request finished"`, "createdAt": `1`,
 				"startedAt": `2`, "requesterId": `"requester"`, "requestedModel": `"requested"`,
-				"model": `"m"`, "engine": `"ollama"`, "originatedFrom": `"host"`,
+				"model": `"m"`, "engine": `"llamacpp"`, "originatedFrom": `"host"`,
 			} {
 				if string(fields[key]) != expected {
 					t.Fatalf("%s %s = %s, want %s", id, key, fields[key], expected)
@@ -439,7 +439,7 @@ func TestDepartedRun(t *testing.T) {
 		pp := &proxyProcess{done: make(chan struct{})}
 		b.setProxyProcessHandle(pp)
 		in := departedRunInput(t, "one", "host", "r1", "running", "peer")
-		b.forwardProxyNotificationFrom(pp, 0, 0, "workload:started", departedRunEnvelope(t, in.Info))
+		b.forwardProxyNotificationFrom(pp, "workload:started", departedRunEnvelope(t, in.Info))
 		b.failWorkloadsForNode("peer", "peer")
 		rec := departedRunRecord(t, b, "host", "one", "failed")
 		if !rec.Inferred || rec.Seq != 7 {
@@ -508,7 +508,7 @@ func TestDepartedRun(t *testing.T) {
 		pp := &proxyProcess{done: make(chan struct{})}
 		b.setProxyProcessHandle(pp)
 		live := departedRunInput(t, "live", "host", "r2", "queued", "host")
-		b.forwardProxyNotificationFrom(pp, 0, 0, "workload:submitted", departedRunEnvelope(t, live.Info))
+		b.forwardProxyNotificationFrom(pp, "workload:submitted", departedRunEnvelope(t, live.Info))
 		frames := client.frames()
 		if len(frames) != 2 {
 			t.Fatalf("first event frames = %d, want old failure then new queued", len(frames))
@@ -522,7 +522,7 @@ func TestDepartedRun(t *testing.T) {
 		departedRunRecord(t, b, "host", "already-live", "running")
 		// This sentinel would be retired by an unnecessary second r2 scan.
 		seedDepartedRun(t, b, departedRunInput(t, "sentinel", "host", "r3", "running", "peer"))
-		b.forwardProxyNotificationFrom(pp, 0, 0, "workload:started", departedRunEnvelope(t, departedRunInput(t, "live", "host", "r2", "running", "host").Info))
+		b.forwardProxyNotificationFrom(pp, "workload:started", departedRunEnvelope(t, departedRunInput(t, "live", "host", "r2", "running", "host").Info))
 		departedRunRecord(t, b, "host", "sentinel", "running")
 		if b.lastLocalRunID != "r2" {
 			t.Fatalf("fence = %s, want r2", b.lastLocalRunID)
@@ -663,11 +663,11 @@ func TestDepartedRun(t *testing.T) {
 			}
 		}
 		late := departedRunEnvelope(t, departedRunInput(t, "late-old", "host", "r1", "queued", "host").Info)
-		go func() { defer close(done); b.forwardProxyNotificationFrom(old, 0, 0, "workload:submitted", late) }()
+		go func() { defer close(done); b.forwardProxyNotificationFrom(old, "workload:submitted", late) }()
 		waitDepartedRun(t, entered, "callback past initial handle guard")
 		close(old.done)
 		b.setProxyProcessHandle(replacement)
-		b.forwardProxyNotificationFrom(replacement, 0, 0, "workload:submitted", departedRunEnvelope(t, departedRunInput(t, "live", "host", "r2", "queued", "host").Info))
+		b.forwardProxyNotificationFrom(replacement, "workload:submitted", departedRunEnvelope(t, departedRunInput(t, "live", "host", "r2", "queued", "host").Info))
 		releaseOld()
 		waitDepartedRun(t, done, "late old callback")
 		departedRunRecord(t, b, "host", "old", "failed")
@@ -748,7 +748,7 @@ func TestDepartedRun(t *testing.T) {
 			pp := &proxyProcess{done: make(chan struct{})}
 			b.setProxyProcessHandle(pp)
 			in := departedRunInput(t, "one", "host", "r1", "running", "host")
-			b.forwardProxyNotificationFrom(pp, 0, 0, "workload:started", departedRunEnvelope(t, in.Info))
+			b.forwardProxyNotificationFrom(pp, "workload:started", departedRunEnvelope(t, in.Info))
 			entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
 			var once sync.Once
 			releaseTail := func() { once.Do(func() { close(release) }) }
@@ -765,14 +765,14 @@ func TestDepartedRun(t *testing.T) {
 				method = "workload:errored"
 			}
 			params := markWorkloadTerminal(in.Info, state, time.UnixMilli(200), "actual outcome", 8)
-			go func() { defer close(done); b.forwardProxyNotificationFrom(pp, 0, 0, method, params) }()
+			go func() { defer close(done); b.forwardProxyNotificationFrom(pp, method, params) }()
 			waitDepartedRun(t, entered, "delivered terminal past initial source guard")
 			close(pp.done)
 			if replaced {
 				b.clearProxyHandles()
 				next := &proxyProcess{done: make(chan struct{})}
 				b.setProxyProcessHandle(next)
-				b.forwardProxyNotificationFrom(next, 0, 0, "workload:submitted", departedRunEnvelope(t, departedRunInput(t, "replacement", "host", "r2", "queued", "host").Info))
+				b.forwardProxyNotificationFrom(next, "workload:submitted", departedRunEnvelope(t, departedRunInput(t, "replacement", "host", "r2", "queued", "host").Info))
 			}
 			releaseTail()
 			waitDepartedRun(t, done, "delivered terminal after Done")

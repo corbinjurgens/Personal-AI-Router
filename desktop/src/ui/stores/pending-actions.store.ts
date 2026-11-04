@@ -28,7 +28,6 @@
  * state.
  */
 import { create } from 'zustand'
-import { engineCapabilities } from '@/ui/constants/engine-capabilities'
 import type { EngineCommandPayload, EngineCommandType } from '@/shared/types/engine-api'
 import type { EngineProcessStatus, EngineStatusData, EngineType } from '@/shared/types/engines'
 import type { ServiceStatus } from '@/shared/types/ipc-channels'
@@ -44,20 +43,9 @@ const PENDING_TIMEOUT_MS = 60_000
  * Margin past a declared load budget. engine-manager may take the descriptor's
  * `responseTimeoutS` to begin answering a load and the bridge one more default
  * interval to report it; the net stays one interval beyond that, which for
- * Ollama's 10-minute budget is 12 minutes.
+ * a 10-minute budget is 12 minutes.
  */
 const LOAD_BUDGET_MARGIN_MS = 2 * PENDING_TIMEOUT_MS
-/**
- * Safety net for a delete on an engine whose backend restarts to pick the
- * deletion up (`EngineCaps.restartsOnModelDelete` / the manifest's
- * `restart_after`). That delete does not reply until the engine has stopped and
- * passed its readiness probe again — for LM Studio, `ready.timeout_s` alone is
- * 60s — so the default net would expire mid-flight and drop the spinner while
- * the operation is still running. Keep this above
- * `MODULAR_MODEL_ACTION_TIMEOUT_MS` (120s) so the real result, success or
- * failure, always wins the race against the net.
- */
-const RESTART_DELETE_TIMEOUT_MS = 180_000
 /** How often the sweep drops expired entries. */
 const SWEEP_INTERVAL_MS = 1_000
 
@@ -121,21 +109,14 @@ interface PendingAction {
 
 /**
  * How long the safety net waits for a command before re-enabling its control.
- * A load whose descriptor declares a longer response budget (Ollama's) and a
- * restart-backed delete outlast the default net; every other command keeps 60
- * seconds.
+ * A load whose descriptor declares a longer response budget outlasts the
+ * default net; every other command keeps 60 seconds.
  */
 function timeoutFor(command: EngineCommandType, engineType: EngineType): number {
     const descriptor = useEngineStatusStore.getState().descriptors.get(engineType)
     const loadBudgetS = descriptor?.operations.load?.responseTimeoutS ?? 0
     if (command === 'loadModel' && loadBudgetS > 0) {
         return loadBudgetS * 1000 + LOAD_BUDGET_MARGIN_MS
-    }
-    if (
-        command === 'deleteModel' &&
-        engineCapabilities(engineType, descriptor).restartsOnModelDelete
-    ) {
-        return RESTART_DELETE_TIMEOUT_MS
     }
     return PENDING_TIMEOUT_MS
 }

@@ -353,12 +353,12 @@ describe('paired node-info polling', () => {
             name: 'broker removal with a retained proxy source',
             replace: () => {
                 state.handleNotification({
-                    source: 'ollama-proxy',
+                    source: 'llamacpp-proxy',
                     method: 'node/discovered',
                     params: {
                         id: 'peer',
                         host: 'paired-host',
-                        port: 11434,
+                        port: 8080,
                         addresses: ['192.0.2.10'],
                         ip: '192.0.2.10'
                     }
@@ -366,7 +366,7 @@ describe('paired node-info polling', () => {
                 publish([])
                 publish([peer])
                 state.handleNotification({
-                    source: 'ollama-proxy',
+                    source: 'llamacpp-proxy',
                     method: 'node/removed',
                     params: { id: 'peer' }
                 })

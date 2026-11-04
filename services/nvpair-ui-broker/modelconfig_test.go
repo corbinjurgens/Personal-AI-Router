@@ -1619,20 +1619,20 @@ func TestModelConfigResidentSetNormalizedPerEngine(t *testing.T) {
 	f := newModelConfigFixture(t)
 	p := f.b.captureModelConfig().Policy
 	p.ResidentModels = nodepolicy.ResidentModels{
-		{Engine: "ollama", Model: "m"}, {Engine: "llamacpp", Model: "resident"},
-		{Engine: "ollama", Model: "m:latest"}, {Engine: "ollama", Model: "other"},
+		{Engine: "llamacpp-custom", Model: " m "}, {Engine: "llamacpp", Model: "resident"},
+		{Engine: "llamacpp-custom", Model: "m"}, {Engine: "llamacpp-custom", Model: "other"},
 	}
 	e := f.b.captureModelConfig()
 	e.Policy = p
-	_, _, _, count := f.b.modelConfigEntry(e, nodepolicy.Role{Engine: "ollama", Model: "m:latest"})
+	_, _, _, count := f.b.modelConfigEntry(e, nodepolicy.Role{Engine: "llamacpp-custom", Model: "m"})
 	if count != 2 {
-		t.Fatalf("normalized ollama resident count=%d, want 2", count)
+		t.Fatalf("normalized descriptor resident count=%d, want 2", count)
 	}
 	_, _, _, count = f.b.modelConfigEntry(e, nodepolicy.Role{Engine: "llamacpp", Model: "resident"})
 	if count != 1 {
 		t.Fatalf("llamacpp count=%d, want 1", count)
 	}
-	want := []nodepolicy.Role{{Engine: "llamacpp", Model: "resident"}, {Engine: "ollama", Model: "m:latest"}, {Engine: "ollama", Model: "other:latest"}}
+	want := []nodepolicy.Role{{Engine: "llamacpp", Model: "resident"}, {Engine: "llamacpp-custom", Model: "m"}, {Engine: "llamacpp-custom", Model: "other"}}
 	if got := f.b.residentRefs(p); !reflect.DeepEqual(got, want) {
 		t.Fatalf("normalized deterministic resident set=%v, want %v", got, want)
 	}

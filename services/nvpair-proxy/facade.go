@@ -14,8 +14,6 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
-	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -60,15 +58,11 @@ type facade struct {
 	// across a live set-port rebind. The HTTP handlers never read port (they
 	// route by upstream node), so the only contention is set-port vs set-port
 	// (serialized) and the initial serveHTTP store vs a later rebind.
-	httpMu       sync.Mutex
-	port         int
-	aliasAddr    string
-	aliasAltAddr string
-	plainSrv     *http.Server
-	tlsSrv       *http.Server
-	split        *splitlisten.Splitter
-	aliasLn      net.Listener
-	aliasAltLn   net.Listener
+	httpMu   sync.Mutex
+	port     int
+	plainSrv *http.Server
+	tlsSrv   *http.Server
+	split    *splitlisten.Splitter
 
 	// discovery is this facade's routing overlay: the relay-fed set of peers
 	// advertising this engine, plus the manual nodes the broker bridged in.
@@ -77,7 +71,7 @@ type facade struct {
 	discovery *Discovery
 
 	// selectedMu guards selectedID, the user's manual route pin. Per facade
-	// because pinning a node for Ollama says nothing about LM Studio.
+	// because pinning a node for one engine says nothing about another.
 	selectedMu sync.RWMutex
 	selectedID string
 
@@ -190,9 +184,6 @@ type enableFacadeParams struct {
 	// Port is the port the broker wants this facade on. Zero means the
 	// engine's standalone default.
 	Port int `json:"port,omitempty"`
-	// AliasAddresses are extra loopback-only addresses to answer on, for an
-	// engine whose clients read an inherited host variable.
-	AliasAddresses []string `json:"aliasAddresses,omitempty"`
 	// IgnorePersistedPort uses Port even when this engine has a persisted one.
 	IgnorePersistedPort bool `json:"ignorePersistedPort,omitempty"`
 	// Descriptor fronts an engine that is not built in. It is required for
@@ -206,8 +197,8 @@ type enableFacadeParams struct {
 const facadeWithdrawGrace = 2 * time.Second
 
 // errFacadeBindFailed marks the one enable failure a different port could fix.
-// Every other rejection — unknown engine, unsupported alias, port out of range
-// — is a caller bug that retrying elsewhere would not help, so the broker must
+// Every other rejection, such as an unknown engine or port out of range,
+// is a caller bug that retrying elsewhere would not help, so the broker must
 // be able to tell them apart. It reaches the broker as codeFacadeBindFailed.
 var errFacadeBindFailed = stderrors.New("facade bind failed")
 
@@ -247,11 +238,6 @@ func (p *Proxy) enableFacade(params enableFacadeParams) (enableFacadeResult, err
 		// requested one, leaving a proxy the broker cannot locate.
 		return enableFacadeResult{}, fmt.Errorf("port must be between 1 and 65535 (got %d)", params.Port)
 	}
-	if len(params.AliasAddresses) > 0 && !profile.SupportsHostAlias {
-		return enableFacadeResult{}, fmt.Errorf(
-			"alias addresses are not supported for engine %q: it has no inherited host variable for the alias to stand in for",
-			profile.Name)
-	}
 
 	p.facadeMu.Lock()
 	defer p.facadeMu.Unlock()
@@ -273,11 +259,6 @@ func (p *Proxy) enableFacade(params enableFacadeParams) (enableFacadeResult, err
 	}
 
 	f := newFacade(p, profile, NewDiscovery(), port)
-	for _, address := range params.AliasAddresses {
-		if err := f.setLoopbackAlias(address); err != nil {
-			return enableFacadeResult{}, fmt.Errorf("invalid alias address %q: %w", address, err)
-		}
-	}
 	// Published before start so a request arriving on this facade's listener,
 	// which start opens, finds it.
 	if p.facades == nil {
@@ -487,7 +468,7 @@ func (f *facade) listen() (net.Listener, error) {
 	return f.host.routing.listenWildcard(f.port)
 }
 
-// start brings this facade up: bind, reserve the alias, announce readiness,
+// start brings this facade up: bind, announce readiness,
 // subscribe for routing targets, and serve. It is the single bring-up path, so
 // there is one place that decides what "the facade is up" means.
 //
@@ -523,14 +504,7 @@ func (f *facade) start(ctx context.Context) error {
 			return
 		}
 		_ = ln.Close()
-		f.closeLoopbackAlias()
 	}()
-
-	// Reserve the inherited OLLAMA_HOST alias before announcing readiness, so a
-	// successful ready event is truthful for clients that start the moment
-	// NVPAIR comes up. Alias conflicts are deliberately non-fatal: the primary
-	// facade stays available and the existing owner is untouched.
-	f.bindLoopbackAlias()
 
 	if err := f.notify("ready", ReadyParams{Version: Version, Port: f.port}); err != nil {
 		return fmt.Errorf("failed to send ready notification: %w", err)
@@ -555,7 +529,6 @@ func (f *facade) start(ctx context.Context) error {
 	// here on, so the deferred release above must stand down.
 	f.serveHTTP(ctx, ln)
 	serving = true
-	f.serveLoopbackAlias()
 	return nil
 }
 
@@ -613,184 +586,19 @@ func (f *facade) publishServers(ln net.Listener, plainSrv, tlsSrv *http.Server) 
 	f.startSplitLocked(ln)
 }
 
-// selfAddresses snapshots this facade's own bound port and alias addresses, so
-// the self-forward guard can recognize its own listeners.
-func (f *facade) selfAddresses() (selfPort int, aliasBound []string) {
+// selfPort snapshots this facade's bound port for the self-forward guard.
+func (f *facade) selfPort() int {
 	f.httpMu.Lock()
 	defer f.httpMu.Unlock()
-	if f.aliasLn != nil {
-		aliasBound = append(aliasBound, f.aliasLn.Addr().String())
-	}
-	if f.aliasAltLn != nil {
-		aliasBound = append(aliasBound, f.aliasAltLn.Addr().String())
-	}
-	return f.port, aliasBound
+	return f.port
 }
 
 // servingState snapshots what stopServing has to shut down, so the shutdowns
 // themselves run outside httpMu.
-func (f *facade) servingState() (plainSrv, tlsSrv *http.Server, split *splitlisten.Splitter, aliasLn, aliasAltLn net.Listener) {
+func (f *facade) servingState() (plainSrv, tlsSrv *http.Server, split *splitlisten.Splitter) {
 	f.httpMu.Lock()
 	defer f.httpMu.Unlock()
-	return f.plainSrv, f.tlsSrv, f.split, f.aliasLn, f.aliasAltLn
-}
-
-// aliasAddresses snapshots the configured alias addresses. Index 0 is empty
-// when no alias was requested.
-func (f *facade) aliasAddresses() []string {
-	f.httpMu.Lock()
-	defer f.httpMu.Unlock()
-	return []string{f.aliasAddr, f.aliasAltAddr}
-}
-
-// setAliasListeners records the reserved alias listeners in order.
-func (f *facade) setAliasListeners(listeners []net.Listener) {
-	f.httpMu.Lock()
-	defer f.httpMu.Unlock()
-	f.aliasLn = listeners[0]
-	if len(listeners) > 1 {
-		f.aliasAltLn = listeners[1]
-	}
-}
-
-// aliasServing snapshots what serveLoopbackAlias needs to start its goroutines
-// without holding httpMu across the Serve calls.
-func (f *facade) aliasServing() (addresses []string, listeners []net.Listener, plainSrv *http.Server) {
-	f.httpMu.Lock()
-	defer f.httpMu.Unlock()
-	return []string{f.aliasAddr, f.aliasAltAddr},
-		[]net.Listener{f.aliasLn, f.aliasAltLn},
-		f.plainSrv
-}
-
-// takeAliasListeners clears and returns the alias listeners so the caller can
-// close them outside the lock.
-func (f *facade) takeAliasListeners() []net.Listener {
-	f.httpMu.Lock()
-	defer f.httpMu.Unlock()
-	listeners := []net.Listener{f.aliasLn, f.aliasAltLn}
-	f.aliasLn = nil
-	f.aliasAltLn = nil
-	return listeners
-}
-
-// setLoopbackAlias validates and records the optional secondary plaintext
-// listener. The broker supplies this only for an inherited local HTTP
-// OLLAMA_HOST. Validate again here so a direct invocation can never turn the
-// alias flag into a LAN plaintext listener.
-func (f *facade) setLoopbackAlias(address string) error {
-	host, portText, err := net.SplitHostPort(address)
-	if err != nil {
-		return fmt.Errorf("expected host:port: %w", err)
-	}
-	port, err := strconv.Atoi(portText)
-	if err != nil || port < 1 || port > 65535 {
-		return fmt.Errorf("port must be between 1 and 65535")
-	}
-	ip := net.ParseIP(host)
-	if strings.EqualFold(strings.TrimSuffix(host, "."), "localhost") {
-		host = "127.0.0.1"
-		address = net.JoinHostPort(host, portText)
-	} else if ip == nil || !ip.IsLoopback() {
-		return fmt.Errorf("host %q is not loopback", host)
-	}
-	if port == f.port {
-		return fmt.Errorf("alias port %d is already the primary listener", port)
-	}
-	switch {
-	case f.aliasAddr == "":
-		f.aliasAddr = address
-	case f.aliasAddr == address || f.aliasAltAddr == address:
-		return nil
-	case f.aliasAltAddr == "":
-		_, firstPort, _ := net.SplitHostPort(f.aliasAddr)
-		if firstPort != portText {
-			return fmt.Errorf("alias addresses must use the same port")
-		}
-		f.aliasAltAddr = address
-	default:
-		return fmt.Errorf("at most two alias addresses are supported")
-	}
-	return nil
-}
-
-// bindLoopbackAlias reserves the configured alias before the proxy announces
-// ready. A conflict is non-fatal: the primary stays healthy, the existing owner
-// is untouched, and a sticky warning tells the user how to recover.
-func (f *facade) bindLoopbackAlias() {
-	addresses := f.aliasAddresses()
-	if addresses[0] == "" {
-		return
-	}
-
-	listeners := make([]net.Listener, 0, 2)
-	for _, address := range addresses {
-		if address == "" {
-			continue
-		}
-		ln, err := net.Listen("tcp", address)
-		if err != nil {
-			for _, opened := range listeners {
-				_ = opened.Close()
-			}
-			f.reportLoopbackAliasBlocked(address, err)
-			return
-		}
-		listeners = append(listeners, ln)
-	}
-	f.setAliasListeners(listeners)
-	if err := f.notify("errors:clear", errors.ClearParams{ID: ollamaHostAliasBlockedID}); err != nil {
-		slog.Debug("failed to clear OLLAMA_HOST alias warning", "err", err)
-	}
-	slog.Info("OLLAMA_HOST loopback alias reserved", "addresses", addresses)
-}
-
-func (f *facade) serveLoopbackAlias() {
-	addresses, listeners, plainSrv := f.aliasServing()
-	if listeners[0] == nil || plainSrv == nil {
-		return
-	}
-	for i, ln := range listeners {
-		if ln == nil {
-			continue
-		}
-		address := addresses[i]
-		go func() {
-			if err := plainSrv.Serve(ln); err != nil && err != http.ErrServerClosed && !stderrors.Is(err, net.ErrClosed) {
-				slog.Error("OLLAMA_HOST alias server exited", "address", address, "err", err)
-			}
-		}()
-	}
-	slog.Info("OLLAMA_HOST loopback alias listening", "addresses", addresses)
-}
-
-func (f *facade) closeLoopbackAlias() {
-	for _, ln := range f.takeAliasListeners() {
-		if ln != nil {
-			_ = ln.Close()
-		}
-	}
-}
-
-// The alias is gated to engines with SupportsHostAlias, which today is Ollama
-// alone, so this prefix is correct by construction rather than by convention —
-// enableFacade refuses alias addresses for any other engine. The broker matches
-// this exact id.
-const ollamaHostAliasBlockedID = "ollama-proxy:ollama-host-alias-blocked"
-
-func (f *facade) reportLoopbackAliasBlocked(address string, bindErr error) {
-	message := fmt.Sprintf(
-		"NVPAIR kept its primary Ollama compatibility proxy separate, but could not claim the local OLLAMA_HOST alias %s: %v. Stop or reconfigure the application using that port, or change or unset OLLAMA_HOST, then restart NVPAIR. No process was stopped.",
-		address, bindErr)
-	if err := f.notify("errors:report", errors.ServiceError{
-		ID:       ollamaHostAliasBlockedID,
-		Message:  message,
-		Severity: "warning",
-		Action:   "none",
-	}); err != nil {
-		slog.Debug("failed to report OLLAMA_HOST alias warning", "err", err)
-	}
-	slog.Warn("OLLAMA_HOST alias unavailable", "address", address, "err", bindErr)
+	return f.plainSrv, f.tlsSrv, f.split
 }
 
 // startSplitLocked wraps base in a first-byte splitter and starts both servers
@@ -825,7 +633,7 @@ func (f *facade) serveTLS(l net.Listener) {
 // pool: that is shared across facades, so closing it here would drop another
 // engine's pooled connections to every peer. Process teardown owns it.
 func (f *facade) stopServing(ctx context.Context) {
-	plainSrv, tlsSrv, split, aliasLn, aliasAltLn := f.servingState()
+	plainSrv, tlsSrv, split := f.servingState()
 	if plainSrv != nil {
 		_ = plainSrv.Shutdown(ctx)
 	}
@@ -834,12 +642,6 @@ func (f *facade) stopServing(ctx context.Context) {
 	}
 	if split != nil {
 		_ = split.Close()
-	}
-	if aliasLn != nil {
-		_ = aliasLn.Close()
-	}
-	if aliasAltLn != nil {
-		_ = aliasAltLn.Close()
 	}
 }
 
@@ -874,7 +676,7 @@ func (f *facade) setPort(newPort int) error {
 // leaves the current listener serving; ErrReplaced adopts the new listener to
 // match disk while reporting uncertain durability. The caller holds portMu.
 func (f *facade) swapListener(newPort int) (bool, error) {
-	port, _ := f.selfAddresses()
+	port := f.selfPort()
 	if newPort == port {
 		return false, savePersistedPort(f.profile, newPort, f.portFiles)
 	}

@@ -23,12 +23,29 @@ import (
 func TestBufferDecreasePreOutputRetryNewAdmission(t *testing.T) {
 	run := func(name string, insufficient bool) {
 		t.Run(name, func(t *testing.T) {
-			policy := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{
-				"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "small:1b"}},
+			policy := tierPolicy(map[string][]nodepolicy.TierEntry{
+				"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "small:1b"}},
 			})
-			fx := newTierFixture(t, ollamaCase(t), policy, map[string][]string{
+			fx := newTierFixture(t, llamacppCase(t), policy, map[string][]string{
 				"a": {"small:1b"}, "b": {"large:7b"},
 			}, nil)
+			var secondCalls atomic.Int32
+			var secondBody string
+			second := httptest.NewServer(fixtureRequestHandler(http.MethodPost, "/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Errorf("read replacement request: %v", err)
+					return
+				}
+				secondBody = string(body)
+				secondCalls.Add(1)
+				w.Header().Set("Content-Type", "text/event-stream")
+				if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {
+					t.Errorf("write replacement response: %v", err)
+				}
+			}))
+			defer second.Close()
+			fx.p.soleFacade().discovery.AddManual(nodeForModel(t, "b", second.URL, "large:7b"))
 			root := bufferTestBudget(t, 8<<20, 0)
 			fx.p.buffers = root
 			queued := make(chan struct{}, 1)
@@ -73,7 +90,7 @@ func TestBufferDecreasePreOutputRetryNewAdmission(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			recorder, done := httptest.NewRecorder(), make(chan struct{})
-			request := httptest.NewRequest(http.MethodPost, "/api/generate", strings.NewReader(`{"model":"weak","stream":true}`)).WithContext(ctx)
+			request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"weak","stream":true}`)).WithContext(ctx)
 			go func() {
 				defer close(done)
 				fx.p.soleFacade().handleHTTP(recorder, request)
@@ -87,8 +104,8 @@ func TestBufferDecreasePreOutputRetryNewAdmission(t *testing.T) {
 					t.Error("retry handler did not join during cleanup")
 				}
 			}()
-			waitChan(t, received, "first native upstream before output")
-			if firstCalls.Load() != 1 || fx.eng["a"].hits() != 0 || fx.eng["b"].hits() != 0 {
+			waitChan(t, received, "first upstream before output")
+			if firstCalls.Load() != 1 || fx.eng["a"].hits() != 0 || int(secondCalls.Load()) != 0 {
 				t.Fatal("first dispatch did not exclusively reach the fenced upstream")
 			}
 			owners := fx.p.activeRoutingRequests()
@@ -108,9 +125,9 @@ func TestBufferDecreasePreOutputRetryNewAdmission(t *testing.T) {
 			root.mu.Lock()
 			firstUsed := root.used
 			root.mu.Unlock()
-			// Manual peers forward NDJSON without local numeric extraction or
-			// the decoded-payload scratch used only by SSE.
-			wantResponseBytes := int64(streamFrameMetadataBytes + 1 + streamFrameSyntaxBytes + streamFrameReadChunk + 2*streamFrameMaxBytes)
+			// Manual peers forward SSE without local numeric extraction, retaining
+			// the decoded-payload scratch and replacement overlap.
+			wantResponseBytes := int64(streamFrameMetadataBytes + 1 + streamFrameSyntaxBytes + streamFrameReadChunk + 3*streamFrameMaxBytes)
 			if firstUsed < wantResponseBytes {
 				t.Fatalf("first root charge = %d bytes, want at least %d response bytes", firstUsed, wantResponseBytes)
 			}
@@ -126,7 +143,7 @@ func TestBufferDecreasePreOutputRetryNewAdmission(t *testing.T) {
 			// only b's model is eligible after this real activation transition.
 			policy = fx.p.admission.currentPolicy()
 			policy.Tiers = map[string][]nodepolicy.TierEntry{
-				"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "large:7b"}},
+				"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "large:7b"}},
 			}
 			token, err := fx.p.beginPublicActivation(policy)
 			if err != nil {
@@ -168,8 +185,8 @@ func TestBufferDecreasePreOutputRetryNewAdmission(t *testing.T) {
 				if err := json.Unmarshal(publications[len(publications)-1], &last); err != nil {
 					t.Fatal(err)
 				}
-				if claims != 0 || last.WorkloadInfo.ScheduledOn != "" || fx.p.admission.currentActive() != 0 || firstCalls.Load() != 1 || fx.eng["b"].hits() != 0 {
-					t.Fatalf("unprepared retry placed or dispatched: claims=%d placement=%q active=%d first=%d second=%d", claims, last.WorkloadInfo.ScheduledOn, fx.p.admission.currentActive(), firstCalls.Load(), fx.eng["b"].hits())
+				if claims != 0 || last.WorkloadInfo.ScheduledOn != "" || fx.p.admission.currentActive() != 0 || firstCalls.Load() != 1 || int(secondCalls.Load()) != 0 {
+					t.Fatalf("unprepared retry placed or dispatched: claims=%d placement=%q active=%d first=%d second=%d", claims, last.WorkloadInfo.ScheduledOn, fx.p.admission.currentActive(), firstCalls.Load(), int(secondCalls.Load()))
 				}
 				// Deterministically make the pending request individually impossible.
 				// reconfigure wakes it with bufferLimitError; no timer expiry is proof.
@@ -188,19 +205,13 @@ func TestBufferDecreasePreOutputRetryNewAdmission(t *testing.T) {
 				if err := json.Unmarshal(recorder.Body.Bytes(), &result); err != nil {
 					t.Fatalf("decode capacity refusal: %v; body=%q", err, recorder.Body.String())
 				}
-				if recorder.Code != bufferRequestStatus(&bufferLimitError{}) || result.Code != "inference-buffer" || fx.eng["b"].hits() != 0 {
-					t.Fatalf("capacity refusal status=%d code=%q second=%d", recorder.Code, result.Code, fx.eng["b"].hits())
+				if recorder.Code != bufferRequestStatus(&bufferLimitError{}) || result.Code != "inference-buffer" || int(secondCalls.Load()) != 0 {
+					t.Fatalf("capacity refusal status=%d code=%q second=%d", recorder.Code, result.Code, int(secondCalls.Load()))
 				}
 				blocker.close()
 			} else {
-				var result struct {
-					Done bool `json:"done"`
-				}
-				if err := json.Unmarshal(recorder.Body.Bytes(), &result); err != nil {
-					t.Fatalf("decode retry response: %v; body=%q", err, recorder.Body.String())
-				}
-				if recorder.Code != http.StatusOK || !result.Done || fx.eng["b"].hits() != 1 || fx.eng["b"].lastBody() != `{"model":"large:7b","stream":true}` {
-					t.Fatalf("retry control status=%d done=%t second=%d body=%q", recorder.Code, result.Done, fx.eng["b"].hits(), fx.eng["b"].lastBody())
+				if recorder.Code != http.StatusOK || recorder.Body.String() != "data: [DONE]\n\n" || secondCalls.Load() != 1 || secondBody != `{"model":"large:7b","stream":true}` {
+					t.Fatalf("retry control status=%d response=%q second=%d body=%q", recorder.Code, recorder.Body.String(), secondCalls.Load(), secondBody)
 				}
 			}
 			ownedAssertHandlerDrained(t, fx.p, control)

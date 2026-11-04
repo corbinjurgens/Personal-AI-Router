@@ -48,9 +48,9 @@ func requireIncarnationIdentity(t *testing.T, b *Broker, want map[string]engineM
 func TestEngineManagerIdentityIncarnationRejectsCallbackAfterRetirement(t *testing.T) {
 	f := newStrictFixture(t)
 	source := f.b.activateEngineManagerSource()
-	seedStrictIdentity(f.b, "ollama")
-	f.advertise(t, strictCapability(t, "ollama", "m:latest"))
-	decoded, resume, done := pauseIdentityAcceptance(f.b, source, engineManagerSnapshot("ollama"))
+	seedStrictIdentity(f.b, "llamacpp")
+	f.advertise(t, strictCapability(t, "llamacpp", "m:latest"))
+	decoded, resume, done := pauseIdentityAcceptance(f.b, source, engineManagerSnapshot("llamacpp"))
 	<-decoded
 	f.b.retireEngineManagerSource(source)
 	requireIncarnationIdentity(t, f.b, nil, false)
@@ -62,16 +62,16 @@ func TestEngineManagerIdentityIncarnationRejectsCallbackAfterRetirement(t *testi
 func TestEngineManagerIdentityIncarnationPreservesReplacement(t *testing.T) {
 	f := newStrictFixture(t)
 	old := f.b.activateEngineManagerSource()
-	seedStrictIdentity(f.b, "ollama")
-	f.advertise(t, strictCapability(t, "ollama", "m:latest"))
-	decoded, resume, done := pauseIdentityAcceptance(f.b, old, engineManagerSnapshot("ollama"))
+	seedStrictIdentity(f.b, "llamacpp")
+	f.advertise(t, strictCapability(t, "llamacpp", "m:latest"))
+	decoded, resume, done := pauseIdentityAcceptance(f.b, old, engineManagerSnapshot("llamacpp"))
 	<-decoded
 	f.b.retireEngineManagerSource(old)
 	current := f.b.activateEngineManagerSource()
-	replacement := decodeModelIdentity(engineManagerSnapshot("ollama"))
-	id := replacement["ollama"]
+	replacement := decodeModelIdentity(engineManagerSnapshot("llamacpp"))
+	id := replacement["llamacpp"]
 	id.EngineRunID = "engine-run-1"
-	replacement["ollama"] = id
+	replacement["llamacpp"] = id
 	f.b.acceptModelIdentity(current, replacement)
 	requireIncarnationIdentity(t, f.b, replacement, true)
 	close(resume)
@@ -79,7 +79,7 @@ func TestEngineManagerIdentityIncarnationPreservesReplacement(t *testing.T) {
 	requireIncarnationIdentity(t, f.b, replacement, true)
 	f.b.retireEngineManagerSource(old)
 	requireIncarnationIdentity(t, f.b, replacement, true)
-	f.b.forwardEngineNotificationFrom(old, engineStateChangedMethod, json.RawMessage(`{"engine":"ollama","running":false}`))
+	f.b.forwardEngineNotificationFrom(old, engineStateChangedMethod, json.RawMessage(`{"engine":"llamacpp","running":false}`))
 	requireIncarnationIdentity(t, f.b, replacement, true)
 }
 
@@ -88,26 +88,26 @@ func TestEngineManagerIdentityIncarnationAcceptsEarlyNotification(t *testing.T) 
 	source := ab.b.activateEngineManagerSource()
 	// No engine-manager handle is installed: this models the pump running
 	// before startRPCWorker returns to spawnEngineMgr.
-	ab.b.observeSettingsIdentity([]settings.Snapshot{appliedSnapshot("ollama", 1)})
-	ab.b.forwardEngineNotificationFrom(source, engineModelIdentityMethod, engineManagerSnapshot("ollama"))
+	ab.b.observeSettingsIdentity([]settings.Snapshot{appliedSnapshot("llamacpp", 1)})
+	ab.b.forwardEngineNotificationFrom(source, engineModelIdentityMethod, engineManagerSnapshot("llamacpp"))
 	r := ab.b.nodePolicyRuntime()
 	r.mu.Lock()
-	got := r.engineIdentity["ollama"]
+	got := r.engineIdentity["llamacpp"]
 	r.mu.Unlock()
-	if got.EngineRunID != "run-ollama" {
+	if got.EngineRunID != "run-llamacpp" {
 		t.Fatalf("early notification identity = %+v", got)
 	}
-	requireIncarnationIdentity(t, ab.b, decodeModelIdentity(engineManagerSnapshot("ollama")), false)
+	requireIncarnationIdentity(t, ab.b, decodeModelIdentity(engineManagerSnapshot("llamacpp")), false)
 }
 
 func TestEngineManagerIdentityIncarnationActivationWithdrawsPredecessor(t *testing.T) {
 	f := newStrictFixture(t)
 	old := f.b.activateEngineManagerSource()
-	seedStrictIdentity(f.b, "ollama")
-	f.advertise(t, strictCapability(t, "ollama", "m:latest"))
+	seedStrictIdentity(f.b, "llamacpp")
+	f.advertise(t, strictCapability(t, "llamacpp", "m:latest"))
 	f.b.activateEngineManagerSource()
 	requireIncarnationIdentity(t, f.b, nil, false)
-	f.b.observeModelIdentity(old, engineManagerSnapshot("ollama"))
+	f.b.observeModelIdentity(old, engineManagerSnapshot("llamacpp"))
 	requireIncarnationIdentity(t, f.b, nil, false)
 }
 
@@ -132,8 +132,8 @@ func TestEngineManagerIdentityIncarnationRetiresFailedStartup(t *testing.T) {
 func TestEngineManagerIdentityIncarnationCurrentStopWithdraws(t *testing.T) {
 	f := newStrictFixture(t)
 	source := f.b.activateEngineManagerSource()
-	seedStrictIdentity(f.b, "ollama")
-	f.advertise(t, strictCapability(t, "ollama", "m:latest"))
-	f.b.forwardEngineNotificationFrom(source, engineStateChangedMethod, json.RawMessage(`{"engine":"ollama","running":false}`))
+	seedStrictIdentity(f.b, "llamacpp")
+	f.advertise(t, strictCapability(t, "llamacpp", "m:latest"))
+	f.b.forwardEngineNotificationFrom(source, engineStateChangedMethod, json.RawMessage(`{"engine":"llamacpp","running":false}`))
 	requireIncarnationIdentity(t, f.b, nil, false)
 }

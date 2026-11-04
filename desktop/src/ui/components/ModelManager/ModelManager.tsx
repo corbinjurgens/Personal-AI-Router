@@ -10,7 +10,6 @@ import { formatModelDisplayName } from '@/ui/utils/format-model-display-name'
 import { ModelExpiry, type ModelItem } from '@/shared/types/engines'
 import { emptyEngineModels, engineManagerName } from '@/shared/utils/engines'
 
-import { ConfirmModal } from '@/ui/components/ConfirmModal'
 import { ModelHubModal } from '@/ui/components/ModelHub/ModelHubModal'
 import { useNodesStore } from '@/ui/stores/nodes.store'
 import { useEngineProgressStore } from '@/ui/stores/engine-progress.store'
@@ -28,11 +27,10 @@ import { useConnectionStore } from '@/ui/stores/connection.store'
 
 export function ModelManager({ backend, nodeId }: { backend: BackendInfo; nodeId: string }) {
     const [openModelHubModal, setOpenModelHubModal] = useState(false)
-    const [modelPendingDelete, setModelPendingDelete] = useState<string | null>(null)
     const [configureModel, setConfigureModel] = useState<string | null>(null)
     const selfId = useConnectionStore(state => state.selfId)
     const policyEngine = engineManagerName(backend.type)
-    const canConfigure = policyEngine === 'llamacpp' || policyEngine === 'lmstudio'
+    const canConfigure = policyEngine === 'llamacpp'
     const [copySelection, setCopySelection] = useState<{
         source: string
         model: string
@@ -86,10 +84,7 @@ export function ModelManager({ backend, nodeId }: { backend: BackendInfo; nodeId
     })
     void modelPendingFingerprint
 
-    const displayName = useCallback(
-        (name: string) => formatModelDisplayName(name, backend.type),
-        [backend.type]
-    )
+    const displayName = formatModelDisplayName
 
     // Canonical models already contain inventory, residency and lifecycle rows.
     // Progress may arrive first, so merge only exact model keys without making
@@ -162,14 +157,6 @@ export function ModelManager({ backend, nodeId }: { backend: BackendInfo; nodeId
     // the actual data is read from the store below.
     void pullProgressFingerprint
 
-    // Only an engine that restarts to pick a deletion up (LM Studio today)
-    // confirms first, because the restart interrupts in-flight inference.
-    // Ollama and every other engine delete straight away — this stays false for
-    // them, which `tests/modular/delete-model-restart.test.ts` pins against the
-    // engine-manager manifests. The restart itself belongs to the engine
-    // manager, not to this click.
-    const confirmBeforeDelete = caps.restartsOnModelDelete ?? false
-
     const actionAllowed = useCallback(
         (modelName: string, action: string) => {
             const current = useEngineModelsStore.getState().getModels(nodeId, backendType)
@@ -241,26 +228,12 @@ export function ModelManager({ backend, nodeId }: { backend: BackendInfo; nodeId
                     setCopySelection({ source: nodeId, model: modelName })
                     break
                 case 'delete':
-                    if (confirmBeforeDelete) {
-                        setModelPendingDelete(modelName)
-                        break
-                    }
                     window.pairApi.engines.deleteModel(backendType, nodeId, modelName)
                     break
             }
         },
-        [backendType, confirmBeforeDelete, nodeId, actionAllowed, canConfigure]
+        [backendType, nodeId, actionAllowed, canConfigure]
     )
-
-    // `ConfirmModal` closes (`onOpenChange(false)`) before it calls `onConfirm`,
-    // which clears `modelPendingDelete`. This still reads the right model: the
-    // callback closes over the value from the render that showed the modal, and
-    // React's state update does not mutate that binding.
-    const handleConfirmDelete = useCallback(() => {
-        if (modelPendingDelete && actionAllowed(modelPendingDelete, 'delete')) {
-            window.pairApi.engines.deleteModel(backendType, nodeId, modelPendingDelete)
-        }
-    }, [backendType, modelPendingDelete, nodeId, actionAllowed])
 
     const handleExpiryChange = useCallback(
         (modelName: string, value: ModelExpiry) => {
@@ -400,18 +373,6 @@ export function ModelManager({ backend, nodeId }: { backend: BackendInfo; nodeId
                     }}
                 />
             )}
-
-            <ConfirmModal
-                open={modelPendingDelete !== null}
-                onOpenChange={open => {
-                    if (!open) setModelPendingDelete(null)
-                }}
-                title="Delete model?"
-                message={`Deleting ${displayName(modelPendingDelete ?? '')} requires ${backend.displayName} to be restarted.`}
-                confirmLabel="Delete and restart"
-                confirmColor="danger"
-                onConfirm={handleConfirmDelete}
-            />
 
             {supportsSearch && (
                 <Flex justify="end">

@@ -113,7 +113,7 @@ func TestModelCopyCustomAliasServingBinding(t *testing.T) {
 			if err != nil && strings.Contains(err.Error(), f.root) {
 				t.Fatal("binding refusal disclosed host path")
 			}
-			assertNoLlamaSpawn(t, f)
+			assertNoSpawn(t, f)
 		})
 	}
 	test("applied exact declaration exports full asserted hashes", func(*testing.T, llamaServingFixture) {}, false)
@@ -147,7 +147,7 @@ func TestModelCopyCustomAliasServingBinding(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "full SHA256 disagrees") {
 			t.Fatalf("full assertion mismatch=%v", err)
 		}
-		assertNoLlamaSpawn(t, f)
+		assertNoSpawn(t, f)
 	})
 }
 
@@ -310,7 +310,7 @@ func applyLlamaServing(t *testing.T, f llamaServingFixture, preview settings.Pre
 	}
 }
 
-func assertNoLlamaSpawn(t *testing.T, f llamaServingFixture) {
+func assertNoSpawn(t *testing.T, f llamaServingFixture) {
 	t.Helper()
 	if _, err := os.Stat(f.startLog); !os.IsNotExist(err) {
 		t.Fatalf("invalid serving launch spawned a process: %v", err)
@@ -351,7 +351,7 @@ func TestLlamaServingPreviewDerivesDifferentModelsWithoutEffects(t *testing.T) {
 		t.Fatal("preview aliased its caller's declaration")
 	}
 	assertNoSettingsOverride(t, f.ex)
-	assertNoLlamaSpawn(t, f)
+	assertNoSpawn(t, f)
 	if calls.Load() != 0 {
 		t.Fatal("preview probed or loaded an engine")
 	}
@@ -493,7 +493,7 @@ func TestLlamaServingAcceptsOwnerRouterPreset(t *testing.T) {
 		}
 	}
 	assertNoSettingsOverride(t, f.ex)
-	assertNoLlamaSpawn(t, f)
+	assertNoSpawn(t, f)
 }
 
 // Problem 2 (MSI install, 2026-10-23): both models ran at context 8192 because
@@ -573,7 +573,7 @@ func TestLlamaServingMoEPlacementPreset(t *testing.T) {
 			t.Fatalf("placement=%v, want %s", weak.Placement, want)
 		}
 	}
-	assertNoLlamaSpawn(t, f)
+	assertNoSpawn(t, f)
 }
 
 func TestLlamaServingMoEPlacementLaunch(t *testing.T) {
@@ -594,7 +594,7 @@ func TestLlamaServingMoEPlacementLaunch(t *testing.T) {
 					t.Fatalf("placement=%v, want %s", envelope.Placement, want)
 				}
 			}
-			assertNoLlamaSpawn(t, f)
+			assertNoSpawn(t, f)
 		})
 	}
 	test("CPU expert layers CLI", "-ncmoe 38", "n-cpu-moe=38")
@@ -795,7 +795,7 @@ func TestLlamaServingExplicitNativePrecedence(t *testing.T) {
 			if err != nil || !slices.Contains(tokens, strings.Fields(text)[0]) {
 				t.Fatalf("explicit envelope option was lost: %v", err)
 			}
-			assertNoLlamaSpawn(t, f)
+			assertNoSpawn(t, f)
 		})
 	}
 	test("CLI overrides model preset", "--ctx-size 32768", 32768, 32768)
@@ -943,7 +943,7 @@ func TestLlamaServingRejectsInvalidInputsWithoutEffects(t *testing.T) {
 				t.Fatal("invalid apply succeeded")
 			}
 			assertNoSettingsOverride(t, f.ex)
-			assertNoLlamaSpawn(t, f)
+			assertNoSpawn(t, f)
 			if calls.Load() != 0 {
 				t.Fatal("invalid configuration reached an engine")
 			}
@@ -959,7 +959,7 @@ func TestLlamaServingChangedSourceAfterPreviewPreservesSettings(t *testing.T) {
 		t.Fatal("changed source accepted after preview")
 	}
 	assertNoSettingsOverride(t, f.ex)
-	assertNoLlamaSpawn(t, f)
+	assertNoSpawn(t, f)
 }
 
 // Keep this driven by the production table: adding an option must automatically
@@ -1029,7 +1029,7 @@ func TestLlamaServingOptionTableRejectsConflictsWithoutEffects(t *testing.T) {
 				if !reflect.DeepEqual(saved, readSettingsOverride(t, f.ex)) {
 					t.Fatal("rejected table entry changed saved configuration")
 				}
-				assertNoLlamaSpawn(t, f)
+				assertNoSpawn(t, f)
 				if calls.Load() != 0 {
 					t.Fatal("rejected table entry reached HTTP")
 				}
@@ -1151,7 +1151,7 @@ func TestLlamaServingRejectsPinnedAllocationControls(t *testing.T) {
 				t.Fatal("unsupported pinned allocation control applied")
 			}
 			assertNoSettingsOverride(t, f.ex)
-			assertNoLlamaSpawn(t, f)
+			assertNoSpawn(t, f)
 		})
 	}
 }
@@ -1172,7 +1172,7 @@ func TestLlamaServingStartRechecksApprovedSource(t *testing.T) {
 	if !reflect.DeepEqual(saved, readSettingsOverride(t, f.ex)) {
 		t.Fatal("rejected start changed saved configuration")
 	}
-	assertNoLlamaSpawn(t, f)
+	assertNoSpawn(t, f)
 }
 
 func TestLlamaServingFinalRecheckPreventsSpawn(t *testing.T) {
@@ -1208,7 +1208,7 @@ func TestLlamaServingFinalRecheckPreventsSpawn(t *testing.T) {
 		st.proc.stop(time.Second)
 		st.proc = nil
 	}
-	assertNoLlamaSpawn(t, f)
+	assertNoSpawn(t, f)
 }
 
 func TestLlamaServingRecoveryIsDeterministic(t *testing.T) {
@@ -1348,7 +1348,7 @@ func TestLlamaServingHFSymlinkRetargetFailsClosed(t *testing.T) {
 	if err := f.ex.Start(context.Background(), "fake"); err == nil {
 		t.Fatal("retargeted source symlink accepted")
 	}
-	assertNoLlamaSpawn(t, f)
+	assertNoSpawn(t, f)
 }
 
 func TestLlamaServingLegacyDefaultsUnchanged(t *testing.T) {
@@ -1384,7 +1384,7 @@ func TestLlamaServingMissingSecondShardRejectsApply(t *testing.T) {
 		t.Fatal("missing later shard applied")
 	}
 	assertNoSettingsOverride(t, f.ex)
-	assertNoLlamaSpawn(t, f)
+	assertNoSpawn(t, f)
 }
 
 func TestLlamaServingPresetSymlinkRetargetRejectsApply(t *testing.T) {
@@ -1413,7 +1413,7 @@ func TestLlamaServingPresetSymlinkRetargetRejectsApply(t *testing.T) {
 		t.Fatal("retargeted preset accepted")
 	}
 	assertNoSettingsOverride(t, f.ex)
-	assertNoLlamaSpawn(t, f)
+	assertNoSpawn(t, f)
 }
 
 func TestLlamaServingApplyRequiresReviewedDigestAndBindings(t *testing.T) {
@@ -1422,7 +1422,7 @@ func TestLlamaServingApplyRequiresReviewedDigestAndBindings(t *testing.T) {
 		t.Fatal("apply accepted unreviewed candidate bindings")
 	}
 	assertNoSettingsOverride(t, f.ex)
-	assertNoLlamaSpawn(t, f)
+	assertNoSpawn(t, f)
 }
 
 func TestLlamaServingCapDerivesTotalWithoutSourceContext(t *testing.T) {
@@ -1504,7 +1504,7 @@ func TestLlamaServingRejectsNativePadding(t *testing.T) {
 			if !errors.As(err, &field) || !strings.Contains(err.Error(), "medium") || !strings.Contains(err.Error(), "256-token") {
 				t.Fatalf("padding rejection lost its model field error: %v", err)
 			}
-			assertNoLlamaSpawn(t, f)
+			assertNoSpawn(t, f)
 			assertNoSettingsOverride(t, f.ex)
 		})
 	}
@@ -1533,7 +1533,7 @@ func TestLlamaServingRejectsNoncanonicalModelIDs(t *testing.T) {
 			if _, err := f.ex.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: f.request.Settings}, func() error { return nil }); err == nil {
 				t.Fatal("noncanonical IDs applied")
 			}
-			assertNoLlamaSpawn(t, f)
+			assertNoSpawn(t, f)
 			assertNoSettingsOverride(t, f.ex)
 		})
 	}
@@ -1588,7 +1588,7 @@ func TestLlamaServingRejectsUnrepresentableResolvedPaths(t *testing.T) {
 			if !errors.As(err, &field) || !strings.Contains(err.Error(), "medium") || strings.Contains(err.Error(), root) {
 				t.Fatalf("spawn boundary lost safe model field error: %v", err)
 			}
-			assertNoLlamaSpawn(t, f)
+			assertNoSpawn(t, f)
 			assertNoSettingsOverride(t, f.ex)
 		})
 	}
@@ -1769,14 +1769,13 @@ func TestLlamaServingColdCommandLoadCancelledByStop(t *testing.T) {
 	bin := servingPipeCommand(t)
 	for _, operation := range []string{"user Stop", "StopAll", "caller cancel"} {
 		t.Run(operation, func(t *testing.T) {
-			ex := newTestExecutor(t, testEngineManifest(fakeEngineBin))
+			ex := newTestExecutor(t, llamaTestEngineManifest(fakeEngineBin))
 			st, err := ex.state("fake")
 			if err != nil {
 				t.Fatal(err)
 			}
 			root := t.TempDir()
 			parentFile, childFile := filepath.Join(root, "parent"), filepath.Join(root, "child")
-			st.plat.Runtime.Mode = "command"
 			st.manifest.Actions["warm"] = Action{Cmd: []string{bin, "hold", parentFile, childFile}}
 			st.manifest.Operations = map[string]OperationBinding{engines.OperationLoad: {Action: "warm"}}
 			ex.actionTimeout = time.Hour
@@ -1890,14 +1889,13 @@ func TestLlamaServingCommandExitedParentPipeBound(t *testing.T) {
 	bin := servingPipeCommand(t)
 	for _, operation := range []string{"user Stop", "StopAll", "caller cancel"} {
 		t.Run(operation, func(t *testing.T) {
-			ex := newTestExecutor(t, testEngineManifest(fakeEngineBin))
+			ex := newTestExecutor(t, llamaTestEngineManifest(fakeEngineBin))
 			st, err := ex.state("fake")
 			if err != nil {
 				t.Fatal(err)
 			}
 			root := t.TempDir()
 			parentFile, childFile := filepath.Join(root, "parent"), filepath.Join(root, "child")
-			st.plat.Runtime.Mode = "command"
 			st.manifest.Actions["warm"] = Action{Cmd: []string{bin, "exit", parentFile, childFile}}
 			st.manifest.Operations = map[string]OperationBinding{engines.OperationLoad: {Action: "warm"}}
 			ex.actionTimeout = time.Hour
@@ -1986,7 +1984,7 @@ func TestLlamaServingShutdownReleasesColdGeneration(t *testing.T) {
 	if _, err := os.Stat(second); !os.IsNotExist(err) {
 		t.Fatalf("orderly shutdown leaked cold generation: %v", err)
 	}
-	assertNoLlamaSpawn(t, f)
+	assertNoSpawn(t, f)
 }
 
 func TestLlamaServingLegacyNativeOutputUnchanged(t *testing.T) {
@@ -2053,7 +2051,7 @@ func TestLlamaServingSafeStartFailures(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "NE preset validation") || strings.Contains(err.Error(), f.root) {
 			t.Fatalf("validation failure lost safe stage: %v", err)
 		}
-		assertNoLlamaSpawn(t, f)
+		assertNoSpawn(t, f)
 	})
 }
 

@@ -72,7 +72,7 @@ func TestStrataRuntimeRejectsMisclassifiedSelectedFilesBeforeHashing(t *testing.
 					t.Errorf("file fully hashed before role rejection: %s", path)
 				}
 			}
-			assertNoLlamaSpawn(t, f.llamaServingFixture)
+			assertNoSpawn(t, f.llamaServingFixture)
 			assertNoSettingsOverride(t, f.ex)
 		})
 	}
@@ -158,7 +158,7 @@ func TestStrataRuntimeRejectsHardlinkedModelAliasesBeforeHashing(t *testing.T) {
 			if hashed {
 				t.Error("hard-linked model alias was fully hashed")
 			}
-			assertNoLlamaSpawn(t, f.llamaServingFixture)
+			assertNoSpawn(t, f.llamaServingFixture)
 			assertNoSettingsOverride(t, f.ex)
 		})
 	}
@@ -538,7 +538,7 @@ func TestStrataFixtureClearsAmbientEnvironment(t *testing.T) {
 			if got, present := os.LookupEnv("PAIR_FIXTURE_UNRELATED"); !present || got != "retained" {
 				t.Fatal("fixture changed unrelated environment")
 			}
-			assertNoLlamaSpawn(t, f.llamaServingFixture)
+			assertNoSpawn(t, f.llamaServingFixture)
 			assertNoSettingsOverride(t, f.ex)
 		})
 	}
@@ -579,7 +579,7 @@ func TestStrataFixtureRestoresAmbientEnvironment(t *testing.T) {
 				if _, present := os.LookupEnv(key); present {
 					t.Fatal("fixture retained restoration sentinel")
 				}
-				assertNoLlamaSpawn(t, f.llamaServingFixture)
+				assertNoSpawn(t, f.llamaServingFixture)
 				return // The failure-cleanup control replaces only this return.
 			})
 			if !reflect.DeepEqual(snapshot(), before) {
@@ -606,7 +606,7 @@ func TestStrataFixturePreservesCommandEnvironmentRejection(t *testing.T) {
 			if _, err := strataLaunchSource(command); err == nil || !strings.Contains(err.Error(), "Strata/Python environment overrides are unsupported in prepared mode.") {
 				t.Fatal("production validator accepted a command environment key")
 			}
-			assertNoLlamaSpawn(t, f.llamaServingFixture)
+			assertNoSpawn(t, f.llamaServingFixture)
 		})
 	}
 }
@@ -730,7 +730,7 @@ func TestStrataServingColdPreviewAndApplyHaveNoEngineCalls(t *testing.T) {
 		t.Fatalf("unverified reason = %s", p.Serving.Reason)
 	}
 	assertNoSettingsOverride(t, f.ex)
-	assertNoLlamaSpawn(t, f.llamaServingFixture)
+	assertNoSpawn(t, f.llamaServingFixture)
 	if _, err := os.Stat(filepath.Join(f.ex.baseDir, "serving")); !os.IsNotExist(err) {
 		t.Fatalf("preview wrote snapshot: %v", err)
 	}
@@ -932,7 +932,7 @@ func TestStrataServingRejectsInvalidPreparedInputs(t *testing.T) {
 			if !reflect.DeepEqual(old, after) {
 				t.Fatal("invalid request changed prior settings")
 			}
-			assertNoLlamaSpawn(t, f.llamaServingFixture)
+			assertNoSpawn(t, f.llamaServingFixture)
 			assertNoSettingsOverride(t, f.ex)
 		})
 	}
@@ -962,7 +962,7 @@ func TestStrataServingRejectsChangedApprovedFiles(t *testing.T) {
 			if !bytes.Equal(before, after) {
 				t.Fatal("invalid apply changed saved settings")
 			}
-			assertNoLlamaSpawn(t, f.llamaServingFixture)
+			assertNoSpawn(t, f.llamaServingFixture)
 		})
 	}
 }
@@ -994,7 +994,7 @@ func TestStrataServingRejectsInputChangeBeforeSpawn(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "recheck") {
 		t.Fatalf("pre-spawn error = %v", err)
 	}
-	assertNoLlamaSpawn(t, f.llamaServingFixture)
+	assertNoSpawn(t, f.llamaServingFixture)
 }
 
 func TestStrataServingRejectsServerLaunchModes(t *testing.T) {
@@ -1023,7 +1023,7 @@ func TestStrataServingRejectsServerLaunchModes(t *testing.T) {
 			if _, err := strataLaunchSource(c); err == nil {
 				t.Fatal("invalid server launch accepted")
 			}
-			assertNoLlamaSpawn(t, f.llamaServingFixture)
+			assertNoSpawn(t, f.llamaServingFixture)
 		})
 	}
 }
@@ -1056,18 +1056,6 @@ func TestStrataServingConfigDigestRequiresApproval(t *testing.T) {
 	if _, err := compileStrataServing(c, rt, false); err == nil {
 		t.Fatal("conflicting digest accepted")
 	}
-}
-
-func TestStrataServingCommandLaunchRejectedBeforeEffects(t *testing.T) {
-	f := newStrataServingFixture(t)
-	st := settingsState(t, f.ex)
-	rt := st.plat.Runtime
-	rt.Serving = f.request.Settings.Serving
-	rt.Mode = "command"
-	if err := f.ex.bringUp(context.Background(), st, "fake", rt, st.port, st.pathVars()); err == nil || !strings.Contains(err.Error(), "requires an owned process") {
-		t.Fatalf("command mode error = %v", err)
-	}
-	assertNoLlamaSpawn(t, f.llamaServingFixture)
 }
 
 func TestStrataDirectoryRequiresCleanNativeSpelling(t *testing.T) {
@@ -1108,7 +1096,7 @@ func TestStrataServingRejectsAmbiguousDependencyPaths(t *testing.T) {
 			if len(p.Errors) != 1 || !strings.Contains(p.Errors["serving"], tc.want) {
 				t.Fatalf("dependency error = %+v; want %s", p.Errors, tc.want)
 			}
-			assertNoLlamaSpawn(t, f.llamaServingFixture)
+			assertNoSpawn(t, f.llamaServingFixture)
 			assertNoSettingsOverride(t, f.ex)
 		})
 	}
@@ -1123,7 +1111,7 @@ func TestStrataServingRejectsMultipleDeclaredModels(t *testing.T) {
 	if len(p.Errors) == 0 {
 		t.Fatal("multiple Strata model declarations accepted")
 	}
-	assertNoLlamaSpawn(t, f.llamaServingFixture)
+	assertNoSpawn(t, f.llamaServingFixture)
 	assertNoSettingsOverride(t, f.ex)
 }
 
@@ -1146,7 +1134,7 @@ func TestStrataServingRecheckRejectsChangedPreparedEnvelope(t *testing.T) {
 	if err := recheckPreparedServing(st, c, rt, prepared); err == nil {
 		t.Fatal("changed prepared envelope accepted")
 	}
-	assertNoLlamaSpawn(t, f.llamaServingFixture)
+	assertNoSpawn(t, f.llamaServingFixture)
 }
 
 func TestStrataServingRejectsNonObjectAtConfigBoundary(t *testing.T) {
@@ -1162,7 +1150,7 @@ func TestStrataServingRejectsOversizedSourceBeforeParsing(t *testing.T) {
 	if !strings.Contains(p.Errors["serving"], "missing, unstable or oversized") {
 		t.Fatalf("source size error = %+v", p.Errors)
 	}
-	assertNoLlamaSpawn(t, f.llamaServingFixture)
+	assertNoSpawn(t, f.llamaServingFixture)
 	assertNoSettingsOverride(t, f.ex)
 }
 
@@ -1193,6 +1181,6 @@ func TestStrataServingRejectsOversizedCanonicalSnapshot(t *testing.T) {
 	if !strings.Contains(p.Errors["serving"], "bounded Strata config snapshot") {
 		t.Fatalf("snapshot size error = %+v", p.Errors)
 	}
-	assertNoLlamaSpawn(t, f.llamaServingFixture)
+	assertNoSpawn(t, f.llamaServingFixture)
 	assertNoSettingsOverride(t, f.ex)
 }

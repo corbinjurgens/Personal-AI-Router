@@ -392,7 +392,7 @@ func TestStoredDecodeRejectsUnknownResolvedFieldOnOtherwiseValidRecord(t *testin
 }
 
 func TestRequestRestrictsMinPToExistingLlamaFieldSurface(t *testing.T) {
-	input := Request{Engine: "ollama", ModelChange: &modelconfig.ModelChange{ModelID: "m", ExpectedPolicyRevision: "0", Policy: &modelconfig.PolicyPatch{Generation: map[string]*json.Number{"min_p": nil}}}}
+	input := Request{Engine: "llamacpp-custom", ModelChange: &modelconfig.ModelChange{ModelID: "m", ExpectedPolicyRevision: "0", Policy: &modelconfig.PolicyPatch{Generation: map[string]*json.Number{"min_p": nil}}}}
 	if _, err := DecodeRequest(settingsJSON(t, input)); err == nil {
 		t.Fatal("non-llama selected min_p despite existing field surface")
 	}

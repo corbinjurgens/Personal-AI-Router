@@ -9,7 +9,7 @@ package main
 // it lists. The broker adds its settings fingerprint and gives the whole
 // identity to the proxy, which binds strict capacity and qualification to it.
 // Only runs this manager launched as an owned process report one: an adopted
-// service or a command-mode daemon was not started from a launch it can name.
+// service was not started from a launch it can name.
 
 import (
 	"crypto/rand"

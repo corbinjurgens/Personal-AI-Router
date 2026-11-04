@@ -94,7 +94,7 @@ function documentFor(
                 revision,
                 servedModels: null,
                 residentModels: [],
-                roles: { weak: { engine: 'ollama', model: 'role-model' } },
+                roles: { weak: { engine: 'llamacpp', model: 'role-model' } },
                 routing: { accounts: [{ id: 'private-account' }], tiers: { private: true } },
                 futureField: { enabled: false, values: ['retain', null, 0] },
                 ...extra
@@ -323,7 +323,7 @@ describe('model engine bindings in the shared policy form', () => {
         await mount()
         const remote = documentFor('42', {
             engineBindings: [
-                { engine: 'ollama', model: 'first' },
+                { engine: 'llamacpp', model: 'first' },
                 { engine: 'fixture-peer', model: 'second' }
             ]
         })
@@ -361,7 +361,7 @@ describe('model engine bindings in the shared policy form', () => {
                 ],
                 [
                     'other-engine',
-                    { nodeId: 'peer', engineType: 'ollama', models: [model('wrong-engine')] }
+                    { nodeId: 'peer', engineType: 'llama-cpp', models: [model('wrong-engine')] }
                 ]
             ])
         })
@@ -494,7 +494,7 @@ describe('model engine bindings in the shared policy form', () => {
     it('keeps an unsupported-target refusal explicit and retains the unsaved binding', async () => {
         await mount(documentFor(BASE, { engineBindings: [] }))
         await click('Add binding')
-        await selectEngine('ollama')
+        await selectEngine('llamacpp')
         await type(modelInput(), 'typed-native')
         const sent = policyEditor().value
         setPolicy.mockRejectedValueOnce(
@@ -513,7 +513,7 @@ describe('model engine bindings in the shared policy form', () => {
     })
 
     it('shows an unknown save outcome after a lost reply and failed readback without retrying or discarding the draft', async () => {
-        await mount(documentFor(BASE, { engineBindings: [{ engine: 'ollama', model: 'before' }] }))
+        await mount(documentFor(BASE, { engineBindings: [{ engine: 'llamacpp', model: 'before' }] }))
         await type(modelInput(), 'unsure-native')
         const sent = policyEditor().value
         setPolicy.mockRejectedValueOnce(new Error('Save reply lost'))
@@ -529,11 +529,11 @@ describe('model engine bindings in the shared policy form', () => {
     })
 
     it('retains a dirty binding across a newer push and uses its original CAS base, then exposes conflict readback', async () => {
-        await mount(documentFor(BASE, { engineBindings: [{ engine: 'ollama', model: 'before' }] }))
+        await mount(documentFor(BASE, { engineBindings: [{ engine: 'llamacpp', model: 'before' }] }))
         await type(modelInput(), 'unsent-native')
         const sent = policyEditor().value
         const latest = documentFor(NEXT, {
-            engineBindings: [{ engine: 'ollama', model: 'newly-saved' }]
+            engineBindings: [{ engine: 'llamacpp', model: 'newly-saved' }]
         })
         if (!emitPolicy) throw new Error('Missing policy push listener')
         await act(async () => emitPolicy?.({ nodeId: 'self', ...latest }))
@@ -578,7 +578,7 @@ describe('model engine bindings in the shared policy form', () => {
         'retains the binding draft after $name without bypassing the target refusal',
         async ({ code, detail, message }) => {
             await mount(
-                documentFor(BASE, { engineBindings: [{ engine: 'ollama', model: 'before' }] })
+                documentFor(BASE, { engineBindings: [{ engine: 'llamacpp', model: 'before' }] })
             )
             await type(modelInput(), 'unsent-native')
             const sent = policyEditor().value
@@ -595,7 +595,7 @@ describe('model engine bindings in the shared policy form', () => {
         await mount()
         getPolicy.mockResolvedValue({
             ...documentFor('42', {
-                engineBindings: [{ engine: 'ollama', model: 'paused-native' }]
+                engineBindings: [{ engine: 'llamacpp', model: 'paused-native' }]
             }),
             availability: 'paused'
         })

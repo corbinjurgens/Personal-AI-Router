@@ -15,7 +15,7 @@ import (
 )
 
 func TestWorkloadCancelWire(t *testing.T) {
-	testResidentWire(t, WorkloadCancelParams{OriginatedFrom: "origin-1", WorkloadID: "7", Engine: "ollama", RunID: "run-1"},
+	testResidentWire(t, WorkloadCancelParams{OriginatedFrom: "origin-1", WorkloadID: "7", Engine: "llamacpp", RunID: "run-1"},
 		"originatedFrom workloadId engine runId",
 		residentWireRejection{"missing origin value", "originatedFrom", ""},
 		residentWireRejection{"invalid origin", "originatedFrom", "other/origin"},
@@ -137,7 +137,7 @@ func residentIdentity() StrictModelIdentity {
 }
 
 func residentObservation() ResidentLoadedObservation {
-	return ResidentLoadedObservation{ManagerIncarnation: "manager-1", Generation: 9, Engine: "ollama", Model: "m:latest", Identity: residentIdentity(), Loaded: true}
+	return ResidentLoadedObservation{ManagerIncarnation: "manager-1", Generation: 9, Engine: "llamacpp", Model: "m", Identity: residentIdentity(), Loaded: true}
 }
 
 type residentWireRejection struct {
@@ -230,7 +230,7 @@ func testResidentWire[T interface{ Validate() error }](t *testing.T, valid T, re
 }
 
 func TestPrepareResidentWire(t *testing.T) {
-	valid := PrepareResidentParams{PolicyRevision: "1", ProxyRunID: "proxy-1", ManagerIncarnation: "manager-1", Engine: "ollama", Model: "m:latest", Identity: residentIdentity(), OperationID: "resident:1", TimeoutMs: 60_000}
+	valid := PrepareResidentParams{PolicyRevision: "1", ProxyRunID: "proxy-1", ManagerIncarnation: "manager-1", Engine: "llamacpp", Model: "m", Identity: residentIdentity(), OperationID: "resident:1", TimeoutMs: 60_000}
 	testResidentWire(t, valid, "policyRevision proxyRunId engine model identity operationId timeoutMs",
 		residentWireRejection{"noncanonical revision", "policyRevision", "01"},
 		residentWireRejection{"revision overflow", "policyRevision", strings.Repeat("9", 30)},
@@ -257,7 +257,7 @@ func TestPrepareResidentWire(t *testing.T) {
 }
 
 func TestResidentRefusalWire(t *testing.T) {
-	testResidentWire(t, ResidentRefusal{Engine: "ollama", Model: "m", Reason: ModelReasonNoFit}, "engine model reason",
+	testResidentWire(t, ResidentRefusal{Engine: "llamacpp", Model: "m", Reason: ModelReasonNoFit}, "engine model reason",
 		residentWireRejection{"invalid reference", "model", ""},
 		residentWireRejection{"unknown reason", "reason", "raw engine error"},
 		residentWireRejection{"load failure is status only", "reason", ModelReasonLoadFailed})
@@ -271,7 +271,7 @@ func TestResidentRefusalReasons(t *testing.T) {
 		ModelReasonOperationTimeout, ModelReasonObservationUnknown, ModelReasonProjectionUnknown,
 	} {
 		t.Run(string(reason), func(t *testing.T) {
-			refusal := ResidentRefusal{Engine: "ollama", Model: "m", Reason: reason}
+			refusal := ResidentRefusal{Engine: "llamacpp", Model: "m", Reason: reason}
 			prepared := PrepareResidentResult{EvidenceGeneration: 1, Refusals: []ResidentRefusal{refusal}}
 			dispatched := DispatchResidentResult{Reason: DispatchResidentReason(reason)}
 			if err := prepared.Validate(); err != nil {
@@ -301,7 +301,7 @@ func TestResidentRefusalReasons(t *testing.T) {
 }
 
 func TestResidentRefusalRejectsLoadFailed(t *testing.T) {
-	refusal := ResidentRefusal{Engine: "ollama", Model: "m", Reason: ModelReasonLoadFailed}
+	refusal := ResidentRefusal{Engine: "llamacpp", Model: "m", Reason: ModelReasonLoadFailed}
 	prepared := PrepareResidentResult{EvidenceGeneration: 1, Refusals: []ResidentRefusal{refusal}}
 	dispatched := DispatchResidentResult{Reason: DispatchResidentReason(ModelReasonLoadFailed)}
 	if err := refusal.Validate(); err == nil {
@@ -316,7 +316,7 @@ func TestResidentRefusalRejectsLoadFailed(t *testing.T) {
 }
 
 func TestPrepareResidentResultWire(t *testing.T) {
-	refusal := ResidentRefusal{Engine: "ollama", Model: "m", Reason: ModelReasonNoFit}
+	refusal := ResidentRefusal{Engine: "llamacpp", Model: "m", Reason: ModelReasonNoFit}
 	t.Run("grant", func(t *testing.T) {
 		testResidentWire(t, PrepareResidentResult{ReservationID: "r-1", EvidenceGeneration: 1}, "evidenceGeneration",
 			residentWireRejection{"missing grant", "reservationId", ""},
@@ -331,7 +331,7 @@ func TestPrepareResidentResultWire(t *testing.T) {
 			residentWireRejection{"duplicate refusal", "refusals", []ResidentRefusal{refusal, refusal}},
 			residentWireRejection{"too many refusals", "refusals", make([]ResidentRefusal, 257)},
 			residentWireRejection{"invalid refusal", "refusals", []ResidentRefusal{{}}},
-			residentWireRejection{"load failure is status only", "refusals", []ResidentRefusal{{Engine: "ollama", Model: "m", Reason: ModelReasonLoadFailed}}})
+			residentWireRejection{"load failure is status only", "refusals", []ResidentRefusal{{Engine: "llamacpp", Model: "m", Reason: ModelReasonLoadFailed}}})
 	})
 }
 
@@ -346,7 +346,7 @@ func TestResidentReservationEvidenceWire(t *testing.T) {
 }
 
 func TestReconcileResidentWire(t *testing.T) {
-	valid := ReconcileResidentParams{OperationID: "op-1", PolicyRevision: "1", DeclaredResidentCount: 1, Engine: "ollama", Model: "m:latest", Identity: residentIdentity(), TimeoutMs: 60_000, Reservation: ResidentReservationEvidence{ReservationID: "r-1", ProxyRunID: "p-1"}, Load: ResidentLoadOptions{ContextLength: 4096, KeepAliveSeconds: 300}}
+	valid := ReconcileResidentParams{OperationID: "op-1", PolicyRevision: "1", DeclaredResidentCount: 1, Engine: "llamacpp", Model: "m", Identity: residentIdentity(), TimeoutMs: 60_000, Reservation: ResidentReservationEvidence{ReservationID: "r-1", ProxyRunID: "p-1"}, Load: ResidentLoadOptions{ContextLength: 4096, KeepAliveSeconds: 300}}
 	testResidentWire(t, valid, "operationId policyRevision declaredResidentCount engine model identity timeoutMs reservation load",
 		residentWireRejection{"zero declared resident count", "declaredResidentCount", 0},
 		residentWireRejection{"negative declared resident count", "declaredResidentCount", -1},
@@ -389,7 +389,7 @@ func TestResidentLoadOptionsWire(t *testing.T) {
 }
 
 func TestDispatchResidentParamsWire(t *testing.T) {
-	valid := DispatchResidentParams{ReservationID: "r-1", ProxyRunID: "p-1", ManagerIncarnation: "m-1", OperationID: "op-1", PolicyRevision: "1", Engine: "ollama", Model: "m:latest", Identity: residentIdentity()}
+	valid := DispatchResidentParams{ReservationID: "r-1", ProxyRunID: "p-1", ManagerIncarnation: "m-1", OperationID: "op-1", PolicyRevision: "1", Engine: "llamacpp", Model: "m", Identity: residentIdentity()}
 	testResidentWire(t, valid, "reservationId proxyRunId managerIncarnation operationId policyRevision engine model identity",
 		residentWireRejection{"empty reservation", "reservationId", ""},
 		residentWireRejection{"invalid reservation", "reservationId", "r/1"},
@@ -447,7 +447,7 @@ func TestReconcileResidentResultWire(t *testing.T) {
 		observation *ResidentLoadedObservation
 	}{
 		{"missing loaded observation", nil},
-		{"unloaded observation", &ResidentLoadedObservation{ManagerIncarnation: "m-1", Engine: "ollama", Model: "m", Identity: residentIdentity()}},
+		{"unloaded observation", &ResidentLoadedObservation{ManagerIncarnation: "m-1", Engine: "llamacpp", Model: "m", Identity: residentIdentity()}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := (ReconcileResidentResult{Outcome: ResidentLoaded, Observation: tc.observation}).Validate(); err == nil {
@@ -479,7 +479,7 @@ func TestFinishResidentResultWire(t *testing.T) {
 
 func TestModelConfigurationEntryWire(t *testing.T) {
 	loaded := true
-	valid := ModelConfigurationEntry{Engine: "ollama", Model: "m", DesiredResident: true, ObservedLoaded: &loaded, State: ModelStateSatisfied}
+	valid := ModelConfigurationEntry{Engine: "llamacpp", Model: "m", DesiredResident: true, ObservedLoaded: &loaded, State: ModelStateSatisfied}
 	testResidentWire(t, valid, "engine model desiredResident state",
 		residentWireRejection{"invalid reference", "model", ""},
 		residentWireRejection{"unknown state", "state", "failed"},
@@ -494,7 +494,7 @@ func TestModelConfigurationEntryWire(t *testing.T) {
 }
 
 func TestModelConfigurationWire(t *testing.T) {
-	entry := ModelConfigurationEntry{Engine: "ollama", Model: "m", DesiredResident: true, State: ModelStateBlocked, Reason: ModelReasonUnqualified}
+	entry := ModelConfigurationEntry{Engine: "llamacpp", Model: "m", DesiredResident: true, State: ModelStateBlocked, Reason: ModelReasonUnqualified}
 	testResidentWire(t, ModelConfiguration{PolicyRevision: "1", ObservationGeneration: 2, Models: []ModelConfigurationEntry{entry}}, "policyRevision observationGeneration models",
 		residentWireRejection{"invalid revision", "policyRevision", "01"},
 		residentWireRejection{"negative generation", "observationGeneration", -1},
@@ -515,7 +515,7 @@ func TestModelConfigurationLoadFailedReasonWire(t *testing.T) {
 	test := func(name string, observed *bool) {
 		t.Run(name, func(t *testing.T) {
 			entry := ModelConfigurationEntry{
-				Engine: "ollama", Model: "m", DesiredResident: true,
+				Engine: "llamacpp", Model: "m", DesiredResident: true,
 				ObservedLoaded: observed, State: "unknown", Reason: "load-failed",
 			}
 			t.Run("entry", func(t *testing.T) {
@@ -539,7 +539,7 @@ func TestModelConfigurationLoadFailedReasonWire(t *testing.T) {
 func TestModelConfigurationPauseAndLockReasons(t *testing.T) {
 	test := func(name string, reason ModelConfigurationReason) {
 		t.Run(name, func(t *testing.T) {
-			entry := ModelConfigurationEntry{Engine: "ollama", Model: "m", DesiredResident: true, State: ModelStateBlocked, Reason: reason}
+			entry := ModelConfigurationEntry{Engine: "llamacpp", Model: "m", DesiredResident: true, State: ModelStateBlocked, Reason: reason}
 			testResidentWire(t, ModelConfiguration{
 				PolicyRevision: "1", ObservationGeneration: 2,
 				Models: []ModelConfigurationEntry{entry},
@@ -561,7 +561,7 @@ func TestResidentWireBoundsAccepted(t *testing.T) {
 	longID := strings.Repeat("i", 128)
 	for _, timeout := range []int{1, MaxResidentTimeoutMs} {
 		t.Run(fmt.Sprintf("timeout %d", timeout), func(t *testing.T) {
-			p := PrepareResidentParams{PolicyRevision: "9223372036854775807", ProxyRunID: longID, ManagerIncarnation: longID, Engine: "ollama", Model: strings.Repeat("m", MaxResidentModelBytes), Identity: residentIdentity(), OperationID: "resident:18446744073709551615", TimeoutMs: timeout}
+			p := PrepareResidentParams{PolicyRevision: "9223372036854775807", ProxyRunID: longID, ManagerIncarnation: longID, Engine: "llamacpp", Model: strings.Repeat("m", MaxResidentModelBytes), Identity: residentIdentity(), OperationID: "resident:18446744073709551615", TimeoutMs: timeout}
 			testResidentWire(t, p, "policyRevision proxyRunId engine model identity operationId timeoutMs")
 		})
 	}
@@ -569,8 +569,8 @@ func TestResidentWireBoundsAccepted(t *testing.T) {
 	refusals := make([]ResidentRefusal, MaxModelConfigurationEntries)
 	for i := range models {
 		model := fmt.Sprintf("m%d", i)
-		models[i] = ModelConfigurationEntry{Engine: "ollama", Model: model, State: ModelStateUnknown}
-		refusals[i] = ResidentRefusal{Engine: "ollama", Model: model, Reason: ModelReasonNoFit}
+		models[i] = ModelConfigurationEntry{Engine: "llamacpp", Model: model, State: ModelStateUnknown}
+		refusals[i] = ResidentRefusal{Engine: "llamacpp", Model: model, Reason: ModelReasonNoFit}
 	}
 	t.Run("max status list", func(t *testing.T) {
 		testResidentWire(t, ModelConfiguration{PolicyRevision: "0", ObservationGeneration: ^uint64(0), Models: models}, "policyRevision observationGeneration models")
@@ -589,13 +589,13 @@ func TestResidentWireBoundsAccepted(t *testing.T) {
 func TestResidentWireEnums(t *testing.T) {
 	for _, reason := range []ModelConfigurationReason{ModelReasonEngineOff, ModelReasonNoFit, ModelReasonPaused, ModelReasonEngineLocked, ModelReasonPausedLocal, ModelReasonEngineOffLocal, ModelReasonNotServed, ModelReasonNotInstalled, ModelReasonUnqualified, ModelReasonUnsupportedLoad, ModelReasonSwitchBusy, ModelReasonOperationTimeout, ModelReasonObservationUnknown, ModelReasonProjectionUnknown} {
 		t.Run(string(reason), func(t *testing.T) {
-			testResidentWire(t, ResidentRefusal{Engine: "ollama", Model: "m", Reason: reason}, "engine model reason")
+			testResidentWire(t, ResidentRefusal{Engine: "llamacpp", Model: "m", Reason: reason}, "engine model reason")
 		})
 	}
 	for _, state := range []ModelConfigurationState{ModelStateSatisfied, ModelStatePending, ModelStateBlocked, ModelStateUnknown} {
 		t.Run(string(state), func(t *testing.T) {
 			loaded := true
-			testResidentWire(t, ModelConfigurationEntry{Engine: "ollama", Model: "m", DesiredResident: true, ObservedLoaded: &loaded, State: state}, "engine model desiredResident state")
+			testResidentWire(t, ModelConfigurationEntry{Engine: "llamacpp", Model: "m", DesiredResident: true, ObservedLoaded: &loaded, State: state}, "engine model desiredResident state")
 		})
 	}
 	for _, outcome := range []ResidentOutcome{ResidentLoaded, ResidentNotDispatched, ResidentFailed, ResidentCancelled, ResidentTimeout, ResidentUnknown} {
@@ -619,8 +619,8 @@ func TestResidentWirePresence(t *testing.T) {
 		name, raw string
 		want      *bool
 	}{
-		{"unknown observation", `{"engine":"ollama","model":"m","desiredResident":false,"state":"unknown"}`, nil},
-		{"explicit unloaded", `{"engine":"ollama","model":"m","desiredResident":false,"observedLoaded":false,"state":"pending"}`, new(bool)},
+		{"unknown observation", `{"engine":"llamacpp","model":"m","desiredResident":false,"state":"unknown"}`, nil},
+		{"explicit unloaded", `{"engine":"llamacpp","model":"m","desiredResident":false,"observedLoaded":false,"state":"pending"}`, new(bool)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var entry ModelConfigurationEntry
@@ -654,7 +654,7 @@ func TestResidentWirePresence(t *testing.T) {
 	})
 	t.Run("optional case variant rejected", func(t *testing.T) {
 		var entry ModelConfigurationEntry
-		if err := json.Unmarshal([]byte(`{"engine":"ollama","model":"m","desiredResident":false,"ObservedLoaded":false,"state":"pending"}`), &entry); err == nil {
+		if err := json.Unmarshal([]byte(`{"engine":"llamacpp","model":"m","desiredResident":false,"ObservedLoaded":false,"state":"pending"}`), &entry); err == nil {
 			t.Fatal("accepted case variant optional key")
 		}
 	})
@@ -684,7 +684,7 @@ func TestResidentNestedValidation(t *testing.T) {
 }
 
 func TestPrepareResidentWithoutManagerIncarnation(t *testing.T) {
-	p := PrepareResidentParams{PolicyRevision: "1", ProxyRunID: "p-1", Engine: "ollama", Model: "m", Identity: residentIdentity(), OperationID: "resident:1", TimeoutMs: 1}
+	p := PrepareResidentParams{PolicyRevision: "1", ProxyRunID: "p-1", Engine: "llamacpp", Model: "m", Identity: residentIdentity(), OperationID: "resident:1", TimeoutMs: 1}
 	testResidentWire(t, p, "policyRevision proxyRunId engine model identity operationId timeoutMs")
 }
 
@@ -740,7 +740,7 @@ func TestServedResidentOrderedOperationIDs(t *testing.T) {
 }
 
 func TestServedResidentReconcileKeepsOpaqueManagerIDs(t *testing.T) {
-	valid := ReconcileResidentParams{OperationID: "legacy-opaque-op", PolicyRevision: "1", DeclaredResidentCount: 1, Engine: "ollama", Model: "m:latest", Identity: residentIdentity(), TimeoutMs: 1000,
+	valid := ReconcileResidentParams{OperationID: "legacy-opaque-op", PolicyRevision: "1", DeclaredResidentCount: 1, Engine: "llamacpp", Model: "m", Identity: residentIdentity(), TimeoutMs: 1000,
 		Reservation: ResidentReservationEvidence{ReservationID: "reservation", ProxyRunID: "proxy", ManagerIncarnation: "manager"}, Load: ResidentLoadOptions{ContextLength: 4096, KeepAliveSeconds: 300}}
 	testResidentWire(t, valid, "operationId policyRevision declaredResidentCount engine model identity timeoutMs reservation load")
 	prepare := PrepareResidentParams{PolicyRevision: valid.PolicyRevision, ProxyRunID: valid.Reservation.ProxyRunID, ManagerIncarnation: valid.Reservation.ManagerIncarnation,
@@ -760,7 +760,7 @@ func TestServedResidentRecoveryFinishResultWire(t *testing.T) {
 }
 
 func TestServedResidentCapacityObservationWire(t *testing.T) {
-	observation := ResidentCapacityObservation{ManagerIncarnation: "manager", Engine: "ollama", Model: "m:latest", Identity: residentIdentity(), Loaded: false}
+	observation := ResidentCapacityObservation{ManagerIncarnation: "manager", Engine: "llamacpp", Model: "m", Identity: residentIdentity(), Loaded: false}
 	testResidentWire(t, observation, "managerIncarnation engine model identity loaded",
 		residentWireRejection{"invalid manager", "managerIncarnation", ""},
 		residentWireRejection{"invalid reference", "model", " m"},
@@ -770,7 +770,7 @@ func TestServedResidentCapacityObservationWire(t *testing.T) {
 
 func TestServedResidentObserveWire(t *testing.T) {
 	valid := ObserveResidentParams{ReservationID: "reservation", ProxyRunID: "proxy", OperationID: "resident:1", RecoveryID: "recovery-1", Sequence: 1, OperationComplete: true,
-		Observation: ResidentCapacityObservation{ManagerIncarnation: "manager", Engine: "ollama", Model: "m:latest", Identity: residentIdentity(), Loaded: false}}
+		Observation: ResidentCapacityObservation{ManagerIncarnation: "manager", Engine: "llamacpp", Model: "m", Identity: residentIdentity(), Loaded: false}}
 	testResidentWire(t, valid, "reservationId proxyRunId operationId recoveryId sequence operationComplete observation",
 		residentWireRejection{"invalid reservation", "reservationId", ""},
 		residentWireRejection{"invalid proxy", "proxyRunId", "p/1"},
@@ -834,7 +834,7 @@ func TestStrictReadinessWithdrawalOmitsCapability(t *testing.T) {
 func TestSetModelIdentityParamsValidate(t *testing.T) {
 	digest := strings.Repeat("a", 64)
 	valid := func() EngineIdentity {
-		return EngineIdentity{EngineRunID: "run-1", SettingsFingerprint: digest, LaunchDigest: digest, ModelDigests: map[string]string{"m:latest": digest}}
+		return EngineIdentity{EngineRunID: "run-1", SettingsFingerprint: digest, LaunchDigest: digest, ModelDigests: map[string]string{"m": digest}}
 	}
 	for _, tc := range []struct {
 		name    string
@@ -859,7 +859,7 @@ func TestSetModelIdentityParamsValidate(t *testing.T) {
 			if params == nil {
 				id := valid()
 				tc.edit(&id)
-				params = &SetModelIdentityParams{Engines: map[string]EngineIdentity{"ollama": id}}
+				params = &SetModelIdentityParams{Engines: map[string]EngineIdentity{"llamacpp": id}}
 			}
 			err := params.Validate()
 			if tc.wantErr == "" {

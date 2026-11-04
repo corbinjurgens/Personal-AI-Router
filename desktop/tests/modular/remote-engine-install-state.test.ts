@@ -8,10 +8,10 @@ vi.mock('@/electron/window', () => ({ createOverviewWindow: vi.fn() }))
 
 import { getModularBridgeState } from '@/electron/service-bridge/modular-state'
 
-function lmStudioStatus(nodeId: string) {
+function llamaCPPStatus(nodeId: string) {
     return getModularBridgeState()
         .getEngineInitialState()
-        .statuses.find(status => status.nodeId === nodeId && status.engineType === 'lm-studio')
+        .statuses.find(status => status.nodeId === nodeId && status.engineType === 'llama-cpp')
 }
 
 describe('remote engine install state', () => {
@@ -39,8 +39,8 @@ describe('remote engine install state', () => {
 
         // Discovery alone creates the node with empty engine presence. Without
         // facts that must not become a confident "stopped" toggle.
-        expect(lmStudioStatus(remoteNodeId)).toBeUndefined()
-        expect(state.isRemoteEngineRunning(remoteNodeId, 'lm-studio')).toBe(false)
+        expect(llamaCPPStatus(remoteNodeId)).toBeUndefined()
+        expect(state.isRemoteEngineRunning(remoteNodeId, 'llama-cpp')).toBe(false)
     })
 
     it('maps authoritative installed:false to not-installed', () => {
@@ -55,7 +55,7 @@ describe('remote engine install state', () => {
                 nodes: [
                     {
                         hostUuid: remoteNodeId,
-                        name: 'peer-no-lms',
+                        name: 'peer-no-llamacpp',
                         ipAddress: '192.0.2.61',
                         port: 14318,
                         trusted: true,
@@ -68,7 +68,7 @@ describe('remote engine install state', () => {
         state.applyRemoteEngineFacts(remoteNodeId, {
             engines: [
                 {
-                    engine: 'lmstudio',
+                    engine: 'llamacpp',
                     installed: false,
                     running: false,
                     healthy: false
@@ -76,12 +76,12 @@ describe('remote engine install state', () => {
             ]
         })
 
-        expect(lmStudioStatus(remoteNodeId)).toMatchObject({
+        expect(llamaCPPStatus(remoteNodeId)).toMatchObject({
             processStatus: 'not-installed',
             enginePort: null,
             proxyPort: null
         })
-        expect(state.isRemoteEngineRunning(remoteNodeId, 'lm-studio')).toBe(false)
+        expect(state.isRemoteEngineRunning(remoteNodeId, 'llama-cpp')).toBe(false)
     })
 
     it('maps authoritative installed:true running:false to stopped', () => {
@@ -96,7 +96,7 @@ describe('remote engine install state', () => {
                 nodes: [
                     {
                         hostUuid: remoteNodeId,
-                        name: 'peer-stopped-lms',
+                        name: 'peer-stopped-llamacpp',
                         ipAddress: '192.0.2.62',
                         port: 14318,
                         trusted: true,
@@ -109,18 +109,18 @@ describe('remote engine install state', () => {
         state.applyRemoteEngineFacts(remoteNodeId, {
             engines: [
                 {
-                    engine: 'lmstudio',
+                    engine: 'llamacpp',
                     installed: true,
                     running: false,
                     healthy: false,
-                    port: 1234
+                    port: 8080
                 }
             ]
         })
 
-        expect(lmStudioStatus(remoteNodeId)).toMatchObject({
+        expect(llamaCPPStatus(remoteNodeId)).toMatchObject({
             processStatus: 'stopped',
-            enginePort: 1234,
+            enginePort: 8080,
             proxyPort: null
         })
     })
@@ -131,22 +131,22 @@ describe('remote engine install state', () => {
 
         state.setSelfId('local-self')
         state.handleNotification({
-            source: 'lmstudio-proxy',
+            source: 'llamacpp-proxy',
             method: 'node/discovered',
             params: {
                 id: remoteNodeId,
                 host: remoteNodeId,
-                port: 1234,
+                port: 8080,
                 addresses: ['192.0.2.63'],
                 ip: '192.0.2.63'
             }
         })
 
-        expect(state.isRemoteEngineRunning(remoteNodeId, 'lm-studio')).toBe(true)
-        expect(lmStudioStatus(remoteNodeId)).toMatchObject({
+        expect(state.isRemoteEngineRunning(remoteNodeId, 'llama-cpp')).toBe(true)
+        expect(llamaCPPStatus(remoteNodeId)).toMatchObject({
             processStatus: 'running',
             enginePort: null,
-            proxyPort: 1234
+            proxyPort: 8080
         })
     })
 
@@ -172,19 +172,19 @@ describe('remote engine install state', () => {
             }
         })
         state.handleNotification({
-            source: 'lmstudio-proxy',
+            source: 'llamacpp-proxy',
             method: 'node/discovered',
             params: {
                 id: remoteNodeId,
                 host: remoteNodeId,
-                port: 1234,
+                port: 8080,
                 addresses: ['192.0.2.65'],
                 ip: '192.0.2.65'
             }
         })
 
-        expect(lmStudioStatus(remoteNodeId)).toBeUndefined()
-        expect(state.isRemoteEngineRunning(remoteNodeId, 'lm-studio')).toBe(false)
+        expect(llamaCPPStatus(remoteNodeId)).toBeUndefined()
+        expect(state.isRemoteEngineRunning(remoteNodeId, 'llama-cpp')).toBe(false)
     })
 
     it('retracts a stale stopped projection when authoritative facts say not installed', () => {
@@ -212,27 +212,27 @@ describe('remote engine install state', () => {
         state.applyRemoteEngineFacts(remoteNodeId, {
             engines: [
                 {
-                    engine: 'lmstudio',
+                    engine: 'llamacpp',
                     installed: true,
                     running: false,
                     healthy: false,
-                    port: 1234
+                    port: 8080
                 }
             ]
         })
-        expect(lmStudioStatus(remoteNodeId)?.processStatus).toBe('stopped')
+        expect(llamaCPPStatus(remoteNodeId)?.processStatus).toBe('stopped')
 
         state.applyRemoteEngineFacts(remoteNodeId, {
             engines: [
                 {
-                    engine: 'lmstudio',
+                    engine: 'llamacpp',
                     installed: false,
                     running: false,
                     healthy: false
                 }
             ]
         })
-        expect(lmStudioStatus(remoteNodeId)).toMatchObject({
+        expect(llamaCPPStatus(remoteNodeId)).toMatchObject({
             processStatus: 'not-installed',
             enginePort: null
         })

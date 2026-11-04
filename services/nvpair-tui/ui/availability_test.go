@@ -83,10 +83,10 @@ func TestAvailabilityToggleAndResult(t *testing.T) {
 
 func TestFailedPauseLeavesAnAccurateIncompleteState(t *testing.T) {
 	a := availabilityState{value: availAvailable, pending: availPaused}
-	a.update(setAvailabilityMsg{target: availPaused, err: &rpc.RPCError{Code: -32000, Message: "Pause could not stop every engine: ollama still running"}})
+	a.update(setAvailabilityMsg{target: availPaused, err: &rpc.RPCError{Code: -32000, Message: "Pause could not stop every engine: llamacpp still running"}})
 	// The broker stays draining; its readback replaces the stale value.
 	a.update(policyGetMsg{availability: availDraining, guarded: true, epoch: a.epoch})
-	if a.value != availDraining || a.pending != "" || !strings.Contains(a.err, "ollama still running") {
+	if a.value != availDraining || a.pending != "" || !strings.Contains(a.err, "llamacpp still running") {
 		t.Fatalf("state after failed pause = %+v", a)
 	}
 	if got := a.label(); got != "Pause incomplete — P retries" {
@@ -109,11 +109,11 @@ func TestIncompletePauseKeepsDetailAndDesktopResumeVisible(t *testing.T) {
 		// The failure arrives the way a real one does: through the RPC error's
 		// text, then the draining readback.
 		m.avail = availabilityState{value: availAvailable, pending: availPaused}
-		m.avail.update(setAvailabilityMsg{target: availPaused, err: &rpc.RPCError{Code: -32000, Message: "Pause could not stop every engine: ollama still running"}})
+		m.avail.update(setAvailabilityMsg{target: availPaused, err: &rpc.RPCError{Code: -32000, Message: "Pause could not stop every engine: llamacpp still running"}})
 		m.avail.update(policyGetMsg{availability: availDraining, guarded: true, epoch: m.avail.epoch})
 		// The frame is clipped to the terminal, as View does it.
 		header := lipgloss.NewStyle().MaxWidth(width).Render(m.headerView())
-		for _, want := range []string{"Pause incomplete — P retries", "ollama still running"} {
+		for _, want := range []string{"Pause incomplete — P retries", "llamacpp still running"} {
 			if !strings.Contains(header, want) {
 				t.Fatalf("width %d: header %q lacks %q", width, header, want)
 			}

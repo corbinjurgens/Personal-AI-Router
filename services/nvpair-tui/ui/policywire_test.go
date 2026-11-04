@@ -18,7 +18,7 @@ func TestServedResidentPolicyWirePermission(t *testing.T) {
 	}{
 		{"legacy absent", `{}`, nil},
 		{"deny all", `{"servedModels":[]}`, nodepolicy.ServedModels{}},
-		{"restricted", `{"servedModels":[{"engine":"ollama","model":"m"}]}`, nodepolicy.ServedModels{{Engine: "ollama", Model: "m"}}},
+		{"restricted", `{"servedModels":[{"engine":"llamacpp","model":"m"}]}`, nodepolicy.ServedModels{{Engine: "llamacpp", Model: "m"}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := decodePolicyAdvertisement([]byte(tc.input))
@@ -48,8 +48,8 @@ func TestServedResidentPolicyWireRejectsInvalidPermission(t *testing.T) {
 		{"null", `{"servedModels":null}`},
 		{"alias", `{"ServedModels":[]}`},
 		{"duplicate key", `{"servedModels":[],"servedModels":[]}`},
-		{"duplicate reference key", `{"servedModels":[{"engine":"ollama","engine":"ollama","model":"m"}]}`},
-		{"malformed reference", `{"servedModels":[{"engine":"ollama"}]}`},
+		{"duplicate reference key", `{"servedModels":[{"engine":"llamacpp","engine":"llamacpp","model":"m"}]}`},
+		{"malformed reference", `{"servedModels":[{"engine":"llamacpp"}]}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := decodePolicyAdvertisement([]byte(tc.input)); err == nil {
@@ -66,7 +66,7 @@ func TestStrictPolicyWireCapabilityStates(t *testing.T) {
 	}{
 		{"old inventory", `{"revision":"0","roles":{}}`, nodepolicy.StrictCapabilityAbsent},
 		{"future inventory", `{"revision":"0","roles":{},"strictAdmission":{"version":2,"future":true}}`, nodepolicy.StrictCapabilityUnsupported},
-		{"valid inventory", `{"revision":"0","roles":{},"strictAdmission":{"version":1,"models":[{"engine":"ollama","model":"m:latest","maxConcurrent":1,"identity":{"engineRunId":"e-1","settingsFingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","modelDigest":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}]}}`, nodepolicy.StrictCapabilityValid},
+		{"valid inventory", `{"revision":"0","roles":{},"strictAdmission":{"version":1,"models":[{"engine":"llamacpp","model":"m","maxConcurrent":1,"identity":{"engineRunId":"e-1","settingsFingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","modelDigest":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}]}}`, nodepolicy.StrictCapabilityValid},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := decodePolicyAdvertisement([]byte(tc.input))

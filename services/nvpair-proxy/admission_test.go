@@ -36,8 +36,8 @@ func configureStrict(t *testing.T, a *admissionController, path string) {
 	p := a.currentPolicy()
 	p.Admission.MaxConcurrentPerModel = 1
 	a.setPolicy(p)
-	installQualified(t, a, admKey{engine: "ollama", model: "m"})
-	a.setResidency(map[string][]string{"ollama": {"m"}})
+	installQualified(t, a, admKey{engine: "llamacpp", model: "m"})
+	a.setResidency(map[string][]string{"llamacpp": {"m"}})
 }
 
 func newStrictHarness(t *testing.T) *admHarness {
@@ -106,7 +106,7 @@ type strictResult struct {
 
 func asyncStrict(a *admissionController, ctx context.Context, req nodepolicy.StrictAdmissionRequest) <-chan strictResult {
 	ch := make(chan strictResult, 1)
-	go func() { ticket, err := a.admitStrictNow(ctx, "ollama", "m", req); ch <- strictResult{ticket, err} }()
+	go func() { ticket, err := a.admitStrictNow(ctx, "llamacpp", "m", req); ch <- strictResult{ticket, err} }()
 	return ch
 }
 func awaitStrict(t *testing.T, ch <-chan strictResult) strictResult {
@@ -121,7 +121,7 @@ func awaitStrict(t *testing.T, ch <-chan strictResult) strictResult {
 }
 func mustStrictTicket(t *testing.T, a *admissionController) strictAdmissionTicket {
 	t.Helper()
-	ticket, err := a.admitStrictNow(context.Background(), "ollama", "m", strictRequest())
+	ticket, err := a.admitStrictNow(context.Background(), "llamacpp", "m", strictRequest())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,21 +133,21 @@ func TestStrictSharesConcreteCapacity(t *testing.T) {
 		h := newStrictHarness(t)
 		first := mustStrictTicket(t, h.a)
 		defer first.Finish(strictNotDispatched)
-		mustReject(t, h.admit("ollama", "m", 0), nodepolicy.RejectBusy)
+		mustReject(t, h.admit("llamacpp", "m", 0), nodepolicy.RejectBusy)
 		if h.a.currentActive() != 1 {
 			t.Fatal("concrete admission exceeded strict-held capacity")
 		}
 	})
 	t.Run("concrete first", func(t *testing.T) {
 		h := newStrictHarness(t)
-		first := h.admit("ollama", "m", -1)
+		first := h.admit("llamacpp", "m", -1)
 		if first.ticket == nil {
 			t.Fatalf("concrete admission=%+v", first)
 		}
 		defer first.ticket.release()
 		req := strictRequest()
 		req.QueueBudgetMs = 0
-		if ticket, err := h.a.admitStrictNow(context.Background(), "ollama", "m", req); ticket != nil || !errors.Is(err, errStrictOccupied) {
+		if ticket, err := h.a.admitStrictNow(context.Background(), "llamacpp", "m", req); ticket != nil || !errors.Is(err, errStrictOccupied) {
 			t.Fatalf("ticket=%v error=%v", ticket, err)
 		}
 		if h.a.currentActive() != 1 {
@@ -174,7 +174,7 @@ func TestStrictCapabilityTakesTheEffectiveConcurrency(t *testing.T) {
 			if err := h.a.activatePolicy(p); err != nil {
 				t.Fatal(err)
 			}
-			m, ok := h.a.strict.models[admKey{engine: "ollama", model: "m:latest"}]
+			m, ok := h.a.strict.models[admKey{engine: "llamacpp", model: "m"}]
 			if tc.want == 0 {
 				if ok {
 					t.Fatalf("unbounded concurrency installed %+v", m)
@@ -202,13 +202,13 @@ func TestStrictPolicyChangeWithdrawsCapability(t *testing.T) {
 		t.Fatalf("dispatch error=%v", err)
 	}
 	ticket.Finish(strictNotDispatched)
-	if next, err := h.a.admitStrictNow(context.Background(), "ollama", "m", strictRequest()); next != nil || !errors.Is(err, errStrictUnavailable) {
+	if next, err := h.a.admitStrictNow(context.Background(), "llamacpp", "m", strictRequest()); next != nil || !errors.Is(err, errStrictUnavailable) {
 		t.Fatalf("ticket=%v error=%v", next, err)
 	}
 }
 
 func TestStrictCapabilityGenerationFencesHeldTickets(t *testing.T) {
-	identity := map[string]nodepolicy.EngineIdentity{"ollama": testIdentity("m")}
+	identity := map[string]nodepolicy.EngineIdentity{"llamacpp": testIdentity("m")}
 	for _, scenario := range []string{"policy withdrawal and reinstall", "identity withdrawal and reinstall"} {
 		t.Run(scenario, func(t *testing.T) {
 			h := newStrictHarness(t)
@@ -257,18 +257,18 @@ func TestStrictCapabilityGenerationFencesHeldTickets(t *testing.T) {
 
 func TestStrictPendingUnloadBlocksZeroCold(t *testing.T) {
 	h := newStrictHarness(t)
-	k := admKey{engine: "ollama", model: "m:latest"}
+	k := admKey{engine: "llamacpp", model: "m"}
 	h.a.mu.Lock()
 	h.a.unloadLocked([]admKey{k}, h.a.policy)
 	h.a.mu.Unlock()
 	req := strictRequest()
 	req.ColdStartBudgetMs = 0
-	if ticket, err := h.a.admitStrictNow(context.Background(), "ollama", "m", req); ticket != nil || !errors.Is(err, errStrictCold) {
+	if ticket, err := h.a.admitStrictNow(context.Background(), "llamacpp", "m", req); ticket != nil || !errors.Is(err, errStrictCold) {
 		t.Fatalf("ticket=%v error=%v", ticket, err)
 	}
 	// A still-loaded report does not acknowledge the outstanding unload.
-	h.a.setResidency(map[string][]string{"ollama": {"m"}})
-	if ticket, err := h.a.admitStrictNow(context.Background(), "ollama", "m", req); ticket != nil || !errors.Is(err, errStrictCold) {
+	h.a.setResidency(map[string][]string{"llamacpp": {"m"}})
+	if ticket, err := h.a.admitStrictNow(context.Background(), "llamacpp", "m", req); ticket != nil || !errors.Is(err, errStrictCold) {
 		t.Fatalf("ticket=%v error=%v", ticket, err)
 	}
 }
@@ -281,7 +281,7 @@ func TestStrictWarmTicketRechecksResidency(t *testing.T) {
 			if scenario != "warm with cold allowance" {
 				req.ColdStartBudgetMs = 0
 			}
-			ticket, err := h.a.admitStrictNow(context.Background(), "ollama", "m", req)
+			ticket, err := h.a.admitStrictNow(context.Background(), "llamacpp", "m", req)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -289,7 +289,7 @@ func TestStrictWarmTicketRechecksResidency(t *testing.T) {
 				h.a.setResidency(map[string][]string{})
 			} else {
 				h.a.mu.Lock()
-				h.a.unloadLocked([]admKey{{engine: "ollama", model: "m:latest"}}, h.a.policy)
+				h.a.unloadLocked([]admKey{{engine: "llamacpp", model: "m"}}, h.a.policy)
 				h.a.mu.Unlock()
 			}
 			if err := ticket.BeforeStrictDispatch(); !errors.Is(err, errStrictCold) {
@@ -320,7 +320,7 @@ func TestStrictHeldModelExcludedFromEviction(t *testing.T) {
 			h.a.mu.Lock()
 			p := h.a.policy
 			p.Admission.MaxResidentModels = 1
-			plan, evict := h.a.fitLocked(admKey{engine: "ollama", model: "other:latest"}, p)
+			plan, evict := h.a.fitLocked(admKey{engine: "llamacpp", model: "other"}, p)
 			h.a.mu.Unlock()
 			if plan != fitWait || len(evict) != 0 {
 				t.Fatalf("plan=%v evictions=%v", plan, evict)
@@ -334,8 +334,8 @@ func TestStrictColdDeadlineSurvivesCapacityWait(t *testing.T) {
 		t.Run(scenario, func(t *testing.T) {
 			h := newStrictHarness(t)
 			c := useStrictClock(h.a)
-			h.a.setIntent(map[string]bool{"ollama": true})
-			h.setHealthy("ollama", false)
+			h.a.setIntent(map[string]bool{"llamacpp": true})
+			h.setHealthy("llamacpp", false)
 			req := strictRequest()
 			req.ColdStartBudgetMs = 100
 			ch := asyncStrict(h.a, context.Background(), req)
@@ -344,9 +344,9 @@ func TestStrictColdDeadlineSurvivesCapacityWait(t *testing.T) {
 			h.a.mu.Lock()
 			c.Advance(50 * time.Millisecond)
 			h.mu.Lock()
-			h.healthy["ollama"] = true
+			h.healthy["llamacpp"] = true
 			h.mu.Unlock()
-			k := admKey{engine: "ollama", model: "m:latest"}
+			k := admKey{engine: "llamacpp", model: "m"}
 			h.a.inflight[k]++
 			h.a.active++
 			h.a.activeByEngine[k.engine]++
@@ -385,7 +385,7 @@ func TestStrictTwoOriginsShareLastSlot(t *testing.T) {
 			req := strictRequest()
 			req.Request.OriginNodeID = origin
 			<-start
-			ticket, err := h.a.admitStrictNow(context.Background(), "ollama", "m:latest", req)
+			ticket, err := h.a.admitStrictNow(context.Background(), "llamacpp", "m", req)
 			results <- strictResult{ticket, err}
 		}(origin)
 	}
@@ -474,8 +474,8 @@ func TestStrictZeroColdHasNoWakeOrUnload(t *testing.T) {
 		t.Run(scenario, func(t *testing.T) {
 			h := newStrictHarness(t)
 			if scenario == "wake" {
-				h.a.setIntent(map[string]bool{"ollama": true})
-				h.setHealthy("ollama", false)
+				h.a.setIntent(map[string]bool{"llamacpp": true})
+				h.setHealthy("llamacpp", false)
 			}
 			if scenario == "switch" {
 				h.strictPolicy(func(p *nodepolicy.Policy) {
@@ -483,14 +483,14 @@ func TestStrictZeroColdHasNoWakeOrUnload(t *testing.T) {
 					p.Admission.MaxResidentModels = 1
 					p.Admission.SwitchModels = true
 				})
-				h.a.setResidency(map[string][]string{"ollama": {"other"}})
+				h.a.setResidency(map[string][]string{"llamacpp": {"other"}})
 			}
 			if scenario == "unloaded" {
 				h.a.setResidency(map[string][]string{})
 			}
 			req := strictRequest()
 			req.ColdStartBudgetMs = 0
-			_, err := h.a.admitStrictNow(context.Background(), "ollama", "m", req)
+			_, err := h.a.admitStrictNow(context.Background(), "llamacpp", "m", req)
 			if !errors.Is(err, errStrictCold) {
 				t.Fatalf("error=%v", err)
 			}
@@ -509,7 +509,7 @@ func TestStrictSwitchTimeoutRejects(t *testing.T) {
 		p.Admission.MaxResidentModels = 1
 		p.Admission.SwitchModels = true
 	})
-	h.a.setResidency(map[string][]string{"ollama": {"other"}})
+	h.a.setResidency(map[string][]string{"llamacpp": {"other"}})
 	req := strictRequest()
 	req.ColdStartBudgetMs = 150
 	ch := asyncStrict(h.a, context.Background(), req)
@@ -539,7 +539,7 @@ func TestStrictCapabilityRequiresFiniteCapacityAndIdentity(t *testing.T) {
 	}
 	t.Run("absent", func(t *testing.T) {
 		h := newAdmHarness(t)
-		_, err := h.a.admitStrictNow(context.Background(), "ollama", "m", strictRequest())
+		_, err := h.a.admitStrictNow(context.Background(), "llamacpp", "m", strictRequest())
 		if !errors.Is(err, errStrictUnavailable) {
 			t.Fatal(err)
 		}
@@ -548,7 +548,7 @@ func TestStrictCapabilityRequiresFiniteCapacityAndIdentity(t *testing.T) {
 		h := newStrictHarness(t)
 		req := strictRequest()
 		req.Identity.EngineRunID = "stale"
-		_, err := h.a.admitStrictNow(context.Background(), "ollama", "m", req)
+		_, err := h.a.admitStrictNow(context.Background(), "llamacpp", "m", req)
 		if !errors.Is(err, errStrictUnavailable) {
 			t.Fatal(err)
 		}
@@ -562,8 +562,8 @@ func TestStrictQueueAndColdSharePreOutputCap(t *testing.T) {
 	ch := asyncStrict(h.a, context.Background(), strictRequest())
 	awaitStrictTimer(t, c)
 	c.Advance(700 * time.Millisecond)
-	h.a.setIntent(map[string]bool{"ollama": true})
-	h.setHealthy("ollama", false)
+	h.a.setIntent(map[string]bool{"llamacpp": true})
+	h.setHealthy("llamacpp", false)
 	first.Finish(strictNotDispatched)
 	// Wake has only the remainder of the original deadline, never a fresh
 	// cold budget after the queue wait.
@@ -588,8 +588,8 @@ func TestStrictStateChangeAtBudgetDoesNotAdmit(t *testing.T) {
 			if scenario == "queue" {
 				first = mustStrictTicket(t, h.a)
 			} else {
-				h.a.setIntent(map[string]bool{"ollama": true})
-				h.setHealthy("ollama", false)
+				h.a.setIntent(map[string]bool{"llamacpp": true})
+				h.setHealthy("llamacpp", false)
 			}
 			req := strictRequest()
 			req.QueueBudgetMs = 100
@@ -602,7 +602,7 @@ func TestStrictStateChangeAtBudgetDoesNotAdmit(t *testing.T) {
 			c.Advance(100 * time.Millisecond)
 			if scenario == "cold" {
 				h.mu.Lock()
-				h.healthy["ollama"] = true
+				h.healthy["llamacpp"] = true
 				h.mu.Unlock()
 			}
 			h.a.signalLocked()
@@ -620,14 +620,14 @@ func TestStrictStateChangeAtBudgetDoesNotAdmit(t *testing.T) {
 func TestStrictWarmAfterWakeKeepsColdDeadline(t *testing.T) {
 	h := newStrictHarness(t)
 	c := useStrictClock(h.a)
-	h.a.setIntent(map[string]bool{"ollama": true})
-	h.setHealthy("ollama", false)
+	h.a.setIntent(map[string]bool{"llamacpp": true})
+	h.setHealthy("llamacpp", false)
 	req := strictRequest()
 	req.ColdStartBudgetMs = 200
 	ch := asyncStrict(h.a, context.Background(), req)
 	awaitStrictTimer(t, c)
 	c.Advance(150 * time.Millisecond)
-	h.setHealthy("ollama", true)
+	h.setHealthy("llamacpp", true)
 	r := awaitStrict(t, ch)
 	if r.err != nil {
 		t.Fatal(r.err)
@@ -647,11 +647,11 @@ func TestStrictAvailabilityAndOffAreTyped(t *testing.T) {
 			case "paused":
 				h.a.setAvailability(nodepolicy.Paused, false)
 			case "draining":
-				h.a.setDrain("ollama", true)
+				h.a.setDrain("llamacpp", true)
 			case "off":
-				h.a.setIntent(map[string]bool{"ollama": false})
+				h.a.setIntent(map[string]bool{"llamacpp": false})
 			}
-			_, err := h.a.admitStrictNow(context.Background(), "ollama", "m", strictRequest())
+			_, err := h.a.admitStrictNow(context.Background(), "llamacpp", "m", strictRequest())
 			var typed *strictAdmissionError
 			if !errors.Is(err, errStrictUnavailable) || !errors.As(err, &typed) {
 				t.Fatalf("error=%v", err)
@@ -672,7 +672,7 @@ func TestStrictInFlightDoesNotProveWarmResidency(t *testing.T) {
 	defer first.Finish(strictNotDispatched)
 	req := strictRequest()
 	req.ColdStartBudgetMs = 0
-	if _, err := h.a.admitStrictNow(context.Background(), "ollama", "m", req); !errors.Is(err, errStrictCold) {
+	if _, err := h.a.admitStrictNow(context.Background(), "llamacpp", "m", req); !errors.Is(err, errStrictCold) {
 		t.Fatalf("error=%v", err)
 	}
 }
@@ -685,13 +685,13 @@ func TestStrictPublishesActivityAndRelease(t *testing.T) {
 		t.Fatal("no active state published")
 	}
 	active, ok := notes[len(notes)-1].params.(nodepolicy.AdmissionState)
-	if !ok || active.ActiveByEngine["ollama"] != 1 {
+	if !ok || active.ActiveByEngine["llamacpp"] != 1 {
 		t.Fatalf("state=%+v", notes[len(notes)-1])
 	}
 	ticket.Finish(strictNotDispatched)
 	notes = h.notes(nodepolicy.NotifyAdmissionState)
 	idle, ok := notes[len(notes)-1].params.(nodepolicy.AdmissionState)
-	if !ok || idle.Active != 0 || idle.ActiveByEngine["ollama"] != 0 || idle.LastActivityMs["ollama"] == 0 {
+	if !ok || idle.Active != 0 || idle.ActiveByEngine["llamacpp"] != 0 || idle.LastActivityMs["llamacpp"] == 0 {
 		t.Fatalf("state=%+v", notes[len(notes)-1])
 	}
 }
@@ -719,7 +719,7 @@ type admHarness struct {
 
 func newAdmHarness(t *testing.T) *admHarness {
 	t.Helper()
-	h := &admHarness{healthy: map[string]bool{"ollama": true, "lmstudio": true, "llamacpp": true}}
+	h := &admHarness{healthy: map[string]bool{"llamacpp": true, "llamacpp-custom": true}}
 	h.a = newAdmissionController(
 		func(method string, params any) {
 			h.mu.Lock()
@@ -747,7 +747,7 @@ func TestOwnedInferenceBuffersAdmission(t *testing.T) {
 	t.Run("availability is rechecked after successful unlocked preparation", func(t *testing.T) {
 		h := newAdmHarness(t)
 		calls := 0
-		d := h.a.admit(context.Background(), admissionRequest{engine: "ollama", model: "m", waitCap: time.Second, prepare: func(context.Context, nodepolicy.Profile, bool, uint64) error {
+		d := h.a.admit(context.Background(), admissionRequest{engine: "llamacpp", model: "m", waitCap: time.Second, prepare: func(context.Context, nodepolicy.Profile, bool, uint64) error {
 			calls++
 			h.a.setAvailability(nodepolicy.Paused, false)
 			return nil
@@ -762,10 +762,10 @@ func TestOwnedInferenceBuffersAdmission(t *testing.T) {
 	})
 	t.Run("storage refusal precedes wake and ticket", func(t *testing.T) {
 		h := newAdmHarness(t)
-		h.a.setIntent(map[string]bool{"ollama": true})
-		h.setHealthy("ollama", false)
+		h.a.setIntent(map[string]bool{"llamacpp": true})
+		h.setHealthy("llamacpp", false)
 		calls := 0
-		d := h.a.admit(context.Background(), admissionRequest{engine: "ollama", model: "m", waitCap: time.Second, prepare: func(context.Context, nodepolicy.Profile, bool, uint64) error { calls++; return &bufferLimitError{} }})
+		d := h.a.admit(context.Background(), admissionRequest{engine: "llamacpp", model: "m", waitCap: time.Second, prepare: func(context.Context, nodepolicy.Profile, bool, uint64) error { calls++; return &bufferLimitError{} }})
 		if d.ticket != nil {
 			defer d.ticket.release()
 			t.Fatal("impossible storage received a ticket")
@@ -779,7 +779,7 @@ func TestOwnedInferenceBuffersAdmission(t *testing.T) {
 		h := newAdmHarness(t)
 		first := h.a.currentPolicy()
 		first.Revision = "1"
-		first.Profiles = []nodepolicy.Profile{{Engine: "ollama", Model: "m", RequestOptions: []byte(`{"a":1}`)}}
+		first.Profiles = []nodepolicy.Profile{{Engine: "llamacpp", Model: "m", RequestOptions: []byte(`{"a":1}`)}}
 		h.a.setPolicy(first)
 		entered, resume := make(chan struct{}), make(chan struct{})
 		release := sync.OnceFunc(func() { close(resume) })
@@ -789,7 +789,7 @@ func TestOwnedInferenceBuffersAdmission(t *testing.T) {
 		done := make(chan admissionDecision, 1)
 		var seen []string
 		go func() {
-			done <- h.a.admit(ctx, admissionRequest{engine: "ollama", model: "m", waitCap: time.Second, prepare: func(ctx context.Context, p nodepolicy.Profile, has bool, _ uint64) error {
+			done <- h.a.admit(ctx, admissionRequest{engine: "llamacpp", model: "m", waitCap: time.Second, prepare: func(ctx context.Context, p nodepolicy.Profile, has bool, _ uint64) error {
 				if !has {
 					return errors.New("missing authoritative profile")
 				}
@@ -813,7 +813,7 @@ func TestOwnedInferenceBuffersAdmission(t *testing.T) {
 		}
 		second := first
 		second.Revision = "2"
-		second.Profiles = []nodepolicy.Profile{{Engine: "ollama", Model: "m", RequestOptions: []byte(`{"b":2}`)}}
+		second.Profiles = []nodepolicy.Profile{{Engine: "llamacpp", Model: "m", RequestOptions: []byte(`{"b":2}`)}}
 		activated := make(chan error, 1)
 		go func() { activated <- h.a.activatePolicy(second) }()
 		select {
@@ -926,7 +926,7 @@ func assertPending(t *testing.T, ch <-chan admissionDecision) {
 
 func TestAdmission_DefaultPolicyAdmits(t *testing.T) {
 	h := newAdmHarness(t)
-	tk := mustAdmit(t, h.admit("ollama", "qwen3", -1))
+	tk := mustAdmit(t, h.admit("llamacpp", "qwen3", -1))
 	tk.release()
 	tk.release() // idempotent
 	if h.a.active != 0 {
@@ -937,27 +937,27 @@ func TestAdmission_DefaultPolicyAdmits(t *testing.T) {
 func TestAdmission_PausedAndDrainingReject(t *testing.T) {
 	h := newAdmHarness(t)
 	h.a.setAvailability(nodepolicy.Paused, false)
-	mustReject(t, h.admit("ollama", "qwen3", -1), nodepolicy.RejectPaused)
+	mustReject(t, h.admit("llamacpp", "qwen3", -1), nodepolicy.RejectPaused)
 
 	h.a.setAvailability(nodepolicy.Draining, false)
-	mustReject(t, h.admit("ollama", "qwen3", -1), nodepolicy.RejectDraining)
+	mustReject(t, h.admit("llamacpp", "qwen3", -1), nodepolicy.RejectDraining)
 
 	h.a.setAvailability(nodepolicy.Available, false)
-	h.a.setDrain("ollama", true)
-	mustReject(t, h.admit("ollama", "qwen3", -1), nodepolicy.RejectDraining)
+	h.a.setDrain("llamacpp", true)
+	mustReject(t, h.admit("llamacpp", "qwen3", -1), nodepolicy.RejectDraining)
 	// A settings-restart drain is per engine.
-	mustAdmit(t, h.admit("lmstudio", "qwen3-8b", -1)).release()
-	h.a.setDrain("ollama", false)
-	mustAdmit(t, h.admit("ollama", "qwen3", -1)).release()
+	mustAdmit(t, h.admit("llamacpp-custom", "qwen3-8b", -1)).release()
+	h.a.setDrain("llamacpp", false)
+	mustAdmit(t, h.admit("llamacpp", "qwen3", -1)).release()
 }
 
 // Draining refuses new work but lets admitted work finish, and reports the
 // moment the node has drained.
 func TestAdmission_DrainingFinishesActive(t *testing.T) {
 	h := newAdmHarness(t)
-	active := mustAdmit(t, h.admit("ollama", "qwen3", -1))
+	active := mustAdmit(t, h.admit("llamacpp", "qwen3", -1))
 	h.a.setAvailability(nodepolicy.Draining, false)
-	mustReject(t, h.admit("ollama", "qwen3", -1), nodepolicy.RejectDraining)
+	mustReject(t, h.admit("llamacpp", "qwen3", -1), nodepolicy.RejectDraining)
 	if h.a.active != 1 {
 		t.Fatalf("draining disturbed the active request: active = %d", h.a.active)
 	}
@@ -970,7 +970,7 @@ func TestAdmission_DrainingFinishesActive(t *testing.T) {
 	if last.Active != 0 {
 		t.Fatalf("last admission/state active = %d, want an immediate 0 once drained", last.Active)
 	}
-	if last.LastActivityMs["ollama"] == 0 {
+	if last.LastActivityMs["llamacpp"] == 0 {
 		t.Fatal("admission/state carries no lastActivityMs for the engine")
 	}
 }
@@ -979,7 +979,7 @@ func TestAdmission_CancelActiveCancelsAdmitted(t *testing.T) {
 	h := newAdmHarness(t)
 	var cancelled atomic.Int32
 	d := h.a.admit(context.Background(), admissionRequest{
-		engine: "ollama", model: "qwen3", waitCap: -1,
+		engine: "llamacpp", model: "qwen3", waitCap: -1,
 		cancel: func() { cancelled.Add(1) },
 	})
 	tk := mustAdmit(t, d)
@@ -997,19 +997,19 @@ func TestAdmission_CancelActiveCancelsAdmitted(t *testing.T) {
 
 func TestAdmission_EngineOffRejectsWithoutWake(t *testing.T) {
 	h := newAdmHarness(t)
-	h.setHealthy("ollama", false)
+	h.setHealthy("llamacpp", false)
 
-	h.a.setIntent(map[string]bool{"ollama": false})
-	mustReject(t, h.admit("ollama", "qwen3", -1), nodepolicy.RejectOff)
+	h.a.setIntent(map[string]bool{"llamacpp": false})
+	mustReject(t, h.admit("llamacpp", "qwen3", -1), nodepolicy.RejectOff)
 
 	// No saved intent at all: nothing would start it either.
 	h.a.setIntent(map[string]bool{})
-	mustReject(t, h.admit("ollama", "qwen3", -1), nodepolicy.RejectOff)
+	mustReject(t, h.admit("llamacpp", "qwen3", -1), nodepolicy.RejectOff)
 
 	// Saved On but start-on-demand off.
-	h.a.setIntent(map[string]bool{"ollama": true})
+	h.a.setIntent(map[string]bool{"llamacpp": true})
 	h.policy(func(p *nodepolicy.Policy) { p.Idle.StartOnDemand = false })
-	mustReject(t, h.admit("ollama", "qwen3", -1), nodepolicy.RejectOff)
+	mustReject(t, h.admit("llamacpp", "qwen3", -1), nodepolicy.RejectOff)
 
 	if got := h.notes(nodepolicy.NotifyAdmissionWake); len(got) != 0 {
 		t.Fatalf("sent %d admission/wake for an engine that must not be started", len(got))
@@ -1018,20 +1018,20 @@ func TestAdmission_EngineOffRejectsWithoutWake(t *testing.T) {
 
 func TestAdmission_WakeWaitsForHealthy(t *testing.T) {
 	h := newAdmHarness(t)
-	h.setHealthy("ollama", false)
-	h.a.setIntent(map[string]bool{"ollama": true})
+	h.setHealthy("llamacpp", false)
+	h.a.setIntent(map[string]bool{"llamacpp": true})
 
-	ch := h.admitAsync("ollama", "qwen3", -1)
+	ch := h.admitAsync("llamacpp", "qwen3", -1)
 	waitForCond(t, 2*time.Second, "admission/wake", func() bool {
 		return len(h.notes(nodepolicy.NotifyAdmissionWake)) == 1
 	})
 	wake, _ := h.notes(nodepolicy.NotifyAdmissionWake)[0].params.(nodepolicy.WakeRequest)
-	if wake.Engine != "ollama" {
-		t.Fatalf("wake names engine %q, want ollama", wake.Engine)
+	if wake.Engine != "llamacpp" {
+		t.Fatalf("wake names engine %q, want llamacpp", wake.Engine)
 	}
 	assertPending(t, ch)
 
-	h.setHealthy("ollama", true)
+	h.setHealthy("llamacpp", true)
 	mustAdmit(t, awaitDecision(t, ch, 2*time.Second)).release()
 }
 
@@ -1039,10 +1039,10 @@ func TestAdmission_WakeWaitsForHealthy(t *testing.T) {
 // starts the engine for next time.
 func TestAdmission_WakeTimeout(t *testing.T) {
 	h := newAdmHarness(t)
-	h.setHealthy("ollama", false)
-	h.a.setIntent(map[string]bool{"ollama": true})
+	h.setHealthy("llamacpp", false)
+	h.a.setIntent(map[string]bool{"llamacpp": true})
 	started := time.Now()
-	mustReject(t, h.admit("ollama", "qwen3", 0), nodepolicy.RejectWake)
+	mustReject(t, h.admit("llamacpp", "qwen3", 0), nodepolicy.RejectWake)
 	if time.Since(started) > time.Second {
 		t.Fatalf("a zero wait took %v", time.Since(started))
 	}
@@ -1050,7 +1050,7 @@ func TestAdmission_WakeTimeout(t *testing.T) {
 		t.Fatal("a zero-wait request still has to ask for the engine to start")
 	}
 	// Pausing mid-wake ends the wait as paused.
-	ch := h.admitAsync("ollama", "qwen3", -1)
+	ch := h.admitAsync("llamacpp", "qwen3", -1)
 	assertPending(t, ch)
 	h.a.setAvailability(nodepolicy.Paused, false)
 	mustReject(t, awaitDecision(t, ch, 2*time.Second), nodepolicy.RejectPaused)
@@ -1062,9 +1062,9 @@ func TestAdmission_ConcurrencyQueuesThenBusy(t *testing.T) {
 		p.Admission.MaxConcurrentPerModel = 1
 		p.Admission.MaxResidentModels = 0
 	})
-	first := mustAdmit(t, h.admit("ollama", "qwen3", -1))
+	first := mustAdmit(t, h.admit("llamacpp", "qwen3", -1))
 
-	queued := h.admitAsync("ollama", "qwen3", -1)
+	queued := h.admitAsync("llamacpp", "qwen3", -1)
 	assertPending(t, queued)
 	waitForCond(t, time.Second, "queued count", func() bool {
 		h.a.mu.Lock()
@@ -1075,11 +1075,11 @@ func TestAdmission_ConcurrencyQueuesThenBusy(t *testing.T) {
 	second := mustAdmit(t, awaitDecision(t, queued, 2*time.Second))
 
 	// Another model is unaffected by this model's limit.
-	mustAdmit(t, h.admit("ollama", "llama3", -1)).release()
+	mustAdmit(t, h.admit("llamacpp", "llama3", -1)).release()
 
 	// The queue wait is bounded; past it the request is handed back as busy.
 	started := time.Now()
-	mustReject(t, h.admit("ollama", "qwen3", 100*time.Millisecond), nodepolicy.RejectBusy)
+	mustReject(t, h.admit("llamacpp", "qwen3", 100*time.Millisecond), nodepolicy.RejectBusy)
 	if waited := time.Since(started); waited < 80*time.Millisecond {
 		t.Fatalf("busy after %v, want it to have queued first", waited)
 	}
@@ -1092,24 +1092,24 @@ func TestAdmission_ProfileConcurrencyUsesNormalizedModel(t *testing.T) {
 	h := newAdmHarness(t)
 	h.policy(func(p *nodepolicy.Policy) {
 		p.Admission.MaxResidentModels = 0
-		p.Profiles = []nodepolicy.Profile{{Name: "q", Engine: "ollama", Model: "qwen3", MaxConcurrent: 1}}
+		p.Profiles = []nodepolicy.Profile{{Name: "q", Engine: "llamacpp", Model: "qwen3", MaxConcurrent: 1}}
 	})
-	d := h.admit("ollama", "qwen3:latest", -1)
+	d := h.admit("llamacpp", "qwen3", -1)
 	tk := mustAdmit(t, d)
 	if !d.hasProfile || d.profile.Name != "q" {
 		t.Fatalf("profile = %+v (has=%v), want q", d.profile, d.hasProfile)
 	}
-	mustReject(t, h.admit("ollama", "qwen3", 0), nodepolicy.RejectBusy)
+	mustReject(t, h.admit("llamacpp", "qwen3", 0), nodepolicy.RejectBusy)
 	tk.release()
 }
 
 func TestAdmission_WaitHeaderZeroRejectsImmediately(t *testing.T) {
 	h := newAdmHarness(t)
 	h.policy(func(p *nodepolicy.Policy) { p.Admission.MaxConcurrentPerModel = 1 })
-	tk := mustAdmit(t, h.admit("ollama", "qwen3", -1))
+	tk := mustAdmit(t, h.admit("llamacpp", "qwen3", -1))
 	defer tk.release()
 	started := time.Now()
-	mustReject(t, h.admit("ollama", "qwen3", 0), nodepolicy.RejectBusy)
+	mustReject(t, h.admit("llamacpp", "qwen3", 0), nodepolicy.RejectBusy)
 	if waited := time.Since(started); waited > 50*time.Millisecond {
 		t.Fatalf("a zero wait queued for %v", waited)
 	}
@@ -1122,20 +1122,20 @@ func TestAdmission_ResidentSwitchUnloadsThenAdmits(t *testing.T) {
 		p.Admission.SwitchModels = true
 		p.Admission.SwitchTimeoutSeconds = 30
 	})
-	h.a.setResidency(map[string][]string{"lmstudio": {"old-model"}})
+	h.a.setResidency(map[string][]string{"llamacpp-custom": {"old-model"}})
 
-	ch := h.admitAsync("ollama", "qwen3", -1)
+	ch := h.admitAsync("llamacpp", "qwen3", -1)
 	waitForCond(t, 2*time.Second, "admission/unload", func() bool {
 		return len(h.notes(nodepolicy.NotifyAdmissionUnload)) == 1
 	})
 	unload, _ := h.notes(nodepolicy.NotifyAdmissionUnload)[0].params.(nodepolicy.UnloadRequest)
-	if unload.Engine != "lmstudio" || len(unload.Models) != 1 || unload.Models[0] != "old-model" {
-		t.Fatalf("unload = %+v, want lmstudio [old-model] (residency is across engines)", unload)
+	if unload.Engine != "llamacpp-custom" || len(unload.Models) != 1 || unload.Models[0] != "old-model" {
+		t.Fatalf("unload = %+v, want llamacpp-custom [old-model] (residency is across engines)", unload)
 	}
 	assertPending(t, ch)
 
 	// The broker unloads and reports the new residency.
-	h.a.setResidency(map[string][]string{"lmstudio": {}})
+	h.a.setResidency(map[string][]string{"llamacpp-custom": {}})
 	tk := mustAdmit(t, awaitDecision(t, ch, 2*time.Second))
 	tk.release()
 }
@@ -1146,11 +1146,11 @@ func TestAdmission_SwitchTimeoutAdmits(t *testing.T) {
 		p.Admission.MaxResidentModels = 1
 		p.Admission.SwitchTimeoutSeconds = 1
 	})
-	h.a.setResidency(map[string][]string{"ollama": {"llama3:latest"}})
+	h.a.setResidency(map[string][]string{"llamacpp": {"llama3"}})
 	started := time.Now()
 	// Even a zero queue wait does not cut an eviction short: the switch is
 	// bounded by its own timeout and ends in admission.
-	tk := mustAdmit(t, h.admit("ollama", "qwen3", 0))
+	tk := mustAdmit(t, h.admit("llamacpp", "qwen3", 0))
 	defer tk.release()
 	if waited := time.Since(started); waited < 900*time.Millisecond {
 		t.Fatalf("admitted after %v, want the switch timeout to elapse first", waited)
@@ -1166,13 +1166,13 @@ func TestAdmission_NoSwitchWaitsThenNoFit(t *testing.T) {
 		p.Admission.MaxResidentModels = 1
 		p.Admission.SwitchModels = false
 	})
-	h.a.setResidency(map[string][]string{"ollama": {"llama3"}})
-	mustReject(t, h.admit("ollama", "qwen3", 100*time.Millisecond), nodepolicy.RejectNoFit)
+	h.a.setResidency(map[string][]string{"llamacpp": {"llama3"}})
+	mustReject(t, h.admit("llamacpp", "qwen3", 100*time.Millisecond), nodepolicy.RejectNoFit)
 	if len(h.notes(nodepolicy.NotifyAdmissionUnload)) != 0 {
 		t.Fatal("unloaded a model with switchModels off")
 	}
 	// The resident model itself is always admitted.
-	mustAdmit(t, h.admit("ollama", "llama3:latest", 0)).release()
+	mustAdmit(t, h.admit("llamacpp", "llama3", 0)).release()
 }
 
 // A model with work in flight is resident and never evicted; one that just
@@ -1183,19 +1183,19 @@ func TestAdmission_InFlightAndRecentModelsCountAsResident(t *testing.T) {
 		p.Admission.MaxResidentModels = 1
 		p.Admission.SwitchTimeoutSeconds = 30
 	})
-	h.a.setResidency(map[string][]string{"ollama": {}})
-	a := mustAdmit(t, h.admit("ollama", "llama3", -1))
-	mustReject(t, h.admit("ollama", "qwen3", 100*time.Millisecond), nodepolicy.RejectNoFit)
+	h.a.setResidency(map[string][]string{"llamacpp": {}})
+	a := mustAdmit(t, h.admit("llamacpp", "llama3", -1))
+	mustReject(t, h.admit("llamacpp", "qwen3", 100*time.Millisecond), nodepolicy.RejectNoFit)
 	if len(h.notes(nodepolicy.NotifyAdmissionUnload)) != 0 {
 		t.Fatal("asked to unload a model with work in flight")
 	}
 	a.release()
 
-	ch := h.admitAsync("ollama", "qwen3", -1)
+	ch := h.admitAsync("llamacpp", "qwen3", -1)
 	waitForCond(t, 2*time.Second, "unload of the just-finished model", func() bool {
 		return len(h.notes(nodepolicy.NotifyAdmissionUnload)) == 1
 	})
-	h.a.setResidency(map[string][]string{"ollama": {}})
+	h.a.setResidency(map[string][]string{"llamacpp": {}})
 	mustAdmit(t, awaitDecision(t, ch, 2*time.Second)).release()
 }
 
@@ -1203,9 +1203,9 @@ func TestAdmission_InFlightAndRecentModelsCountAsResident(t *testing.T) {
 // nothing waits on an eviction nobody can confirm.
 func TestAdmission_UnknownResidencyCountsOnlyInFlight(t *testing.T) {
 	h := newAdmHarness(t)
-	a := mustAdmit(t, h.admit("ollama", "llama3", -1))
+	a := mustAdmit(t, h.admit("llamacpp", "llama3", -1))
 	a.release()
-	mustAdmit(t, h.admit("ollama", "qwen3", 0)).release()
+	mustAdmit(t, h.admit("llamacpp", "qwen3", 0)).release()
 	if len(h.notes(nodepolicy.NotifyAdmissionUnload)) != 0 {
 		t.Fatal("evicted on residency the broker never reported")
 	}
@@ -1219,18 +1219,18 @@ func TestAdmission_MemoryBudget(t *testing.T) {
 		p.Admission.MemoryBudgetBytes = 10 * gb
 		p.Admission.SwitchTimeoutSeconds = 30
 		p.Profiles = []nodepolicy.Profile{
-			{Name: "a", Engine: "ollama", Model: "a:1", MemoryBytes: 6 * gb},
-			{Name: "b", Engine: "ollama", Model: "b:1", MemoryBytes: 6 * gb},
-			{Name: "c", Engine: "ollama", Model: "c:1", MemoryBytes: 3 * gb},
-			{Name: "huge", Engine: "ollama", Model: "huge:1", MemoryBytes: 11 * gb},
+			{Name: "a", Engine: "llamacpp", Model: "a:1", MemoryBytes: 6 * gb},
+			{Name: "b", Engine: "llamacpp", Model: "b:1", MemoryBytes: 6 * gb},
+			{Name: "c", Engine: "llamacpp", Model: "c:1", MemoryBytes: 3 * gb},
+			{Name: "huge", Engine: "llamacpp", Model: "huge:1", MemoryBytes: 11 * gb},
 		}
 	})
-	h.a.setResidency(map[string][]string{"ollama": {"a:1"}})
+	h.a.setResidency(map[string][]string{"llamacpp": {"a:1"}})
 
 	// 6 + 3 fits.
-	c := mustAdmit(t, h.admit("ollama", "c:1", 0))
+	c := mustAdmit(t, h.admit("llamacpp", "c:1", 0))
 	// 6 + 3 + 6 does not; unloading idle a makes room, c is busy and stays.
-	ch := h.admitAsync("ollama", "b:1", -1)
+	ch := h.admitAsync("llamacpp", "b:1", -1)
 	waitForCond(t, 2*time.Second, "unload of a", func() bool {
 		return len(h.notes(nodepolicy.NotifyAdmissionUnload)) == 1
 	})
@@ -1238,13 +1238,13 @@ func TestAdmission_MemoryBudget(t *testing.T) {
 	if len(unload.Models) != 1 || unload.Models[0] != "a:1" {
 		t.Fatalf("unload = %+v, want only the idle a:1", unload)
 	}
-	h.a.setResidency(map[string][]string{"ollama": {"c:1"}})
+	h.a.setResidency(map[string][]string{"llamacpp": {"c:1"}})
 	b := mustAdmit(t, awaitDecision(t, ch, 2*time.Second))
 
 	// A model larger than the whole budget never fits.
-	mustReject(t, h.admit("ollama", "huge:1", -1), nodepolicy.RejectNoFit)
+	mustReject(t, h.admit("llamacpp", "huge:1", -1), nodepolicy.RejectNoFit)
 	// Unknown memory counts as zero.
-	mustAdmit(t, h.admit("ollama", "unprofiled", 0)).release()
+	mustAdmit(t, h.admit("llamacpp", "unprofiled", 0)).release()
 	b.release()
 	c.release()
 }
@@ -1252,11 +1252,11 @@ func TestAdmission_MemoryBudget(t *testing.T) {
 func TestAdmission_ContextCancelEndsWait(t *testing.T) {
 	h := newAdmHarness(t)
 	h.policy(func(p *nodepolicy.Policy) { p.Admission.MaxConcurrentPerModel = 1 })
-	tk := mustAdmit(t, h.admit("ollama", "qwen3", -1))
+	tk := mustAdmit(t, h.admit("llamacpp", "qwen3", -1))
 	defer tk.release()
 	ctx, cancel := context.WithCancel(context.Background())
 	ch := make(chan admissionDecision, 1)
-	go func() { ch <- h.a.admit(ctx, admissionRequest{engine: "ollama", model: "qwen3", waitCap: -1}) }()
+	go func() { ch <- h.a.admit(ctx, admissionRequest{engine: "llamacpp", model: "qwen3", waitCap: -1}) }()
 	assertPending(t, ch)
 	cancel()
 	d := awaitDecision(t, ch, time.Second)

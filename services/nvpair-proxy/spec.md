@@ -72,10 +72,10 @@ effective request options, API and extractor schema. Request content is excluded
 Unknown top-level overrides or missing required identity suppress observations;
 there is no placeholder digest. Finalization revalidates the identity/key and
 drops stale executions rather than relabeling them. Descriptor `Family` selects
-the pinned llama.cpp or Strata schema. Strengthened non-Ollama identity and
+the pinned llama.cpp or Strata schema. Strengthened engine identity and
 native acceptance remain later gates owned by their respective units.
 
-The existing SC SSE/NDJSON reader invokes a synchronous numeric extractor only
+The existing SC SSE reader invokes a synchronous numeric extractor only
 for validated genuine upstream JSON objects, including empty-choices usage
 objects. Neither `[DONE]` nor synthetic errors are extractor input. The callback
 does no IO, clock access, publication or external locking and retains no payload.
@@ -94,7 +94,7 @@ Monotonic elapsed times measure admission entry to grant, local `RoundTrip` to
 headers, first genuine body byte (before any peek), and finalization. Unreached
 milestones and `FirstTokenMs` remain nil. Daily adapters preserve native rate
 and duration in `EngineDecodeTokensPerSecond` and `EngineDecodeNs`, leaving
-legacy `DecodeNs` nil. Ollama keeps its original count/duration mapping.
+legacy `DecodeNs` nil.
 Aggregate `Entry.outputTokens` (`Entry.OutputTokens *int64`, JSON
 `outputTokens,omitempty`) sums independently known output counts only from
 successful, SC-complete local executions retained in the entry. Count
@@ -133,9 +133,7 @@ Strict requests carry exactly one shared-parser-validated
 use the existing process-wide admission controller, including its mutex,
 in-flight counters, residency, notifications and cancellation registry. Engine
 IDs are built-in names or valid descriptor engine IDs (`engines.ValidRoutingID`).
-Model keys use the engine's facade naming: Ollama's omitted tag becomes
-`:latest`, a descriptor engine follows its declared naming, and an engine with
-no facade here keeps its model ID exact. Equivalent normalized capability entries reject.
+Model keys match the engine inventory exactly. Equivalent normalized capability entries reject.
 
 Finite `maxConcurrent` and the matching authoritative model identity are
 required. The capability is derived (local qualification, B, below) with the
@@ -400,14 +398,14 @@ that every submission eventually runs.
 
 **Commitment and successful completion are distinct.** The first body byte
 commits the destination (§5.2), including a byte of an incomplete frame.
-Supported SSE/NDJSON streams are then read in bounded volatile memory, with
+Supported SSE streams are then read in bounded volatile memory, with
 complete frames preserved and torn tails withheld. `completed` requires valid
 protocol completion and successful delivery. An unrecovered interruption is
 `failed` with an operational reason even though HTTP status remains committed,
 usually at 200. Client cancellation or failed delivery is `cancelled` (§5.4).
 
-**Protocol coverage is bounded.** SC-a manages OpenAI chat/completions SSE and
-native Ollama chat/generate NDJSON under §5.2's stream rules. Other protocols and
+**Protocol coverage is bounded.** SC-a manages OpenAI chat/completions SSE under
+section 5.2 stream rules. Other protocols and
 explicit non-streaming responses retain raw forwarding; a copy abort fails
 their workload but receives no synthetic protocol repair. Qualified same-model
 continuation belongs to pending SC-b. Origin-local attempt history is projected
@@ -444,12 +442,11 @@ is a genuine limitation, not a safety margin (§5.6).
 ## 3. Process model
 
 The process starts with **no engine and no listener**. The broker then sends one
-`facade/enable` per engine, carrying that engine's port and any alias addresses,
+`facade/enable` per engine, carrying that engine's port,
 and for a descriptor engine its descriptor (README, "Descriptor engines").
 
 A flag cannot express this. The broker plans a different port for each engine —
-Ollama's managed facade wants `:11434`, LM Studio's wants `:1234`, and
-llama.cpp's managed facade wants `:8080`; any may be absent so the child keeps
+llama.cpp's managed facade wants `:8080`; a port may be absent so the child keeps
 its own persisted port — and a single-valued flag carries only one plan.
 
 ### 3.1 Why one process
@@ -458,7 +455,7 @@ Between scheduler snapshots a facade takes short-lived **reservations** for work
 it has dispatched but that the scheduler has not yet observed. Those live in the
 process, and every facade shares them. If each engine had its own proxy
 process, none could see the others' reservations, so simultaneous bursts across
-Ollama, LM Studio, and llama.cpp could select the same node, each incorrectly
+Different engine facades could select the same node, each incorrectly
 believing it was idle.
 Sharing the map is the reason the engines share a process.
 
@@ -487,8 +484,8 @@ Every facade-scoped message carries the engine it concerns, in both directions.
 Without it the engine would be implied by which process a message travelled
 through, which is precisely the property one process destroys.
 
-The address is a bare built-in engine id (`ollama:ready`), deliberately **not**
-the component name (`ollama-proxy:ready`). A descriptor engine is addressed by
+The address is a bare built-in engine id (`llamacpp:ready`), deliberately **not**
+the component name (`llamacpp-proxy:ready`). A descriptor engine is addressed by
 its service key, `e-<id>:ready`, because its user-chosen id could otherwise
 spell a process-scoped namespace such as `errors`. The component form is how a client
 addresses the component through the broker; the two meet in the broker's relay,
@@ -536,8 +533,7 @@ For a model-bearing inference request:
 
 1. Filter a request-local discovery snapshot to nodes whose per-engine inventory
    advertises the requested model, or whose supported explicit binding offer
-   can prepare it (section 12.2). Ollama normalizes the implicit `:latest` tag;
-   LM Studio and llama.cpp ids match exactly. An empty owner set returns a local
+   can prepare it (section 12.2). Model identifiers match exactly. An empty owner set returns a local
    `502` without contacting an engine.
 2. Order eligible owners: explicit `node/select` pin, then the ready class
    before preparation candidates, then scheduler priority and deterministic
@@ -671,7 +667,7 @@ behavior (§12.3), including registration before its early validation exits.
 
 The retry budget applies only to inference requests. Routes not classified in
 the engine's route table are still forwarded verbatim, and some perform
-state-changing operations; for example, `POST /api/pull` starts a model
+state-changing operations; for example, an engine control route starts a model
 download. Since any `5xx` is retryable regardless of route, re-resolving and
 redispatching such a request could start the operation several times, which is
 both non-obvious and wasteful. For a non-inference request the proxy therefore
@@ -805,19 +801,6 @@ timeout and prevent failover while the request remains queued inside the
 engine. The first content byte is the first engine-independent evidence that
 generation has begun.
 
-The difference is engine-specific and large. Measured against LM Studio 0.4.x
-with a model loaded at `--parallel 1`, probing while a long generation held the
-single slot:
-
-| Request | Headers | First body byte |
-| --- | --- | --- |
-| streaming | 12ms, on accept | 35.5s, when the slot freed |
-| non-streaming | 38.9s, withheld until complete | with the headers |
-
-Nothing arrived during that measured wait — no SSE keepalive or empty role
-delta. The commit gate itself also accepts heartbeat bytes; it does not require
-meaningful model output.
-
 **Only the existence of the byte matters to the claim, never its value.** The
 gate does not parse it. It is spliced back onto the front of the body before
 the origin's frame reader is installed, so supported stream parsing does not
@@ -850,13 +833,11 @@ byte commits even if later parsing rejects it or allocation fails.
 | Route | Managed response | Non-streaming override |
 | --- | --- | --- |
 | `/v1/chat/completions`, `/v1/completions` | `stream:true`, or response `text/event-stream` when the flag is omitted | Explicit `stream:false`; omission otherwise defaults false |
-| Native Ollama `/api/chat`, `/api/generate` | `stream:true` or omitted flag (native default true); `application/json` or `application/x-ndjson` | Explicit `stream:false` |
 
 The stream member must be a single boolean or null when present; duplicate
 members return 400 before defaults or dispatch, including duplicate nulls.
-Null has the same framing meaning as omission: OpenAI media selects management,
-while native Ollama declares streaming by default. Validation does not
-re-encode unrelated request bytes. SSE content type does not enable parsing for
+Null has the same framing meaning as omission: OpenAI media selects management.
+Validation does not re-encode unrelated request bytes. SSE content type does not enable parsing for
 Responses, Anthropic or other routes. A declared/default stream with an empty
 body, wrong media type or malformed framing fails rather than becoming a raw
 success. Management applies to committed successful HTTP responses; upstream
@@ -865,7 +846,7 @@ error statuses retain §5.4's handling.
 Framing settings (route protocol, declared/disabled state and requested choice
 count) are derived from the effective body dispatched by each attempt, after
 model rewriting and profile defaults. Defaults that add `n:2` require both
-choices at finish-reason-only EOF; defaults that set native `stream:false` keep
+choices at finish-reason-only EOF; defaults that set `stream:false` keep
 even a single JSON response larger than the stream frame limit on raw copying.
 An existing null member remains unchanged and prevents a profile default from
 replacing that member, as with any existing request member.
@@ -919,10 +900,9 @@ managed response with non-identity Content-Encoding still fails as malformed.
 
 The reader preserves complete raw frames and their delimiters across arbitrary
 read splits, including CRLF, multiline SSE and UTF-8. It withholds an incomplete
-tail. OpenAI `[DONE]` and Ollama `done:true` definitively terminate a stream.
+tail. OpenAI `[DONE]` definitively terminates a stream.
 Finish-reason-only OpenAI completion requires every requested choice to finish
-and clean EOF. A valid final NDJSON object without a newline is accepted at clean
-EOF. An upstream protocol error is a failure, including one followed by a normal
+and clean EOF. An upstream protocol error is a failure, including one followed by a normal
 terminal marker.
 
 The 60-second complete-event idle interval starts after commit and refreshes on
@@ -939,7 +919,7 @@ waiting for memory.
 Before dispatch, an effectively enabled managed stream reserves separate response
 working storage for metadata, choice tracking, read scratch, its parser,
 raw frame storage and, for SSE, multiline assembly. One bounded lease covers
-the fixed storage plus two 1 MiB arrays for NDJSON or three for SSE. Raw and
+the fixed storage plus three 1 MiB arrays for SSE. Raw and
 payload growth run synchronously under the reader lock: raw replacement keeps
 old/new raw arrays plus the retained payload; payload replacement keeps the raw
 array plus old/new payload arrays. Each array is bounded by 1 MiB. Both pairs
@@ -949,7 +929,7 @@ exclusive peaks. Actual frame allocations borrow that lease and their total
 cannot exceed its capacity. Local numeric
 streams reserve a 96 KiB parser; local syntax-only and peer streams reserve
 16 KiB. OpenAI `/v1` routes default to non-streaming when `stream` is omitted
-or null; native Ollama NDJSON routes default to streaming. An unexpected
+or null. An unexpected
 auto-SSE response to an omitted-flag OpenAI request acquires fresh reader
 grants as at base and is not protected against a prior capacity decrease.
 Local requests also retain their existing fixed and fingerprint
@@ -961,8 +941,7 @@ Each pre-dispatch aggregate acquisition may wait up to the configured I8
 tail with a fresh deadline and holds earlier grants while queued. Exhausted
 capacity returns 503, while a request or choice count that cannot fit the
 applicable limit returns 413, including an
-impossible OpenAI choice count on a non-streaming request. Native NDJSON routes
-ignore `n`. Reader growth does not wait.
+impossible OpenAI choice count on a non-streaming request. Reader growth does not wait.
 Existing and new per-request scopes keep the same individual limit when root
 capacity changes. A queued proposal reserves its request scope, but receives
 no root charge until its FIFO grant fits current root capacity. Independent
@@ -1017,8 +996,7 @@ default remains pending.
 On premature EOF, read failure, idle expiry, malformed framing or a memory bound,
 the old body closes and the torn tail is discarded. OpenAI receives
 `data: {"error":{"message":"stream interrupted: <reason>","type":"server_error","code":"stream_interrupted"}}`
-as an SSE event, then a `[DONE]` event; Ollama receives
-`{"error":"stream interrupted: <reason>"}` as a newline-terminated object.
+as an SSE event, then a `[DONE]` event.
 Reasons are a closed set of operational categories, never copied engine error
 text:
 
@@ -1044,7 +1022,7 @@ engine-owned CORS. HTTP status is already committed and is never rewritten to
 
 **After commit there is no retry or continuation in SC-a.** A peer or engine
 loss mid-stream ends a managed OpenAI stream with an error frame plus `[DONE]`,
-not a pause, until SC-b; managed Ollama streams use the error object above.
+not a pause, until SC-b.
 Delivery remains best effort if the client has disconnected or writes fail.
 The sink records continuation as unavailable. SC-b's qualified same-model
 continuation remains pending and must use this request owner and sink rather
@@ -1285,8 +1263,7 @@ synthetic error nor a parsed model end marker creates new release authority.
 This is accepted rather than overlooked: those internal queues are invisible and
 un-retargetable, which is the problem the retry policy works around rather than
 a mechanism it can build on. Do not reach for engine environment bounds or
-occupancy probes to "fix" it — LM Studio exposes no such signal at all, and an
-adopted engine keeps its own environment regardless. An engine that did offer a
+occupancy probes to "fix" it: adopted engines keep their own environment. An engine that did offer a
 real cancellation API would change this calculus, and the claim should be
 revisited per engine rather than assumed to hold forever.
 
@@ -1351,19 +1328,14 @@ than an engine.
 Membership and pins are re-derived per request and on a watch, so joining or
 leaving a cluster needs no restart.
 
-An engine with an inherited host variable (today Ollama alone) may also be given
-loopback-only **alias** addresses, so clients already using that variable enter
-the same routing path. An occupied alias is non-fatal: the existing owner is
-untouched, the primary listener stays up, and a warning is reported.
-
 ## 8. Ports
 
-| | Ollama | LM Studio | llama.cpp |
-| --- | --- | --- | --- |
-| Engine's own client-facing port | 11434 | 1234 | 8080 |
-| Where PAIR relocates the engine | 11435 | 1235 | 8081 |
-| Standalone port, when `port` is omitted | 11435 | 1234 | 8080 |
-| Persisted-port file | `proxy-port.json` | `lmstudio-proxy-port.json` | `llamacpp-proxy-port.json` |
+| | llama.cpp |
+| --- | --- |
+| Engine's own client-facing port | 8080 |
+| Where PAIR relocates the engine | 8081 |
+| Standalone port, when `port` is omitted | 8080 |
+| Persisted-port file | `llamacpp-proxy-port.json` |
 
 A port chosen at runtime via `set-port` is persisted per engine and restored
 when that facade is enabled, taking precedence over the requested port, so the
@@ -1848,11 +1820,11 @@ is resolved by the node it enters.
   version 1 file tags every entry `local`, so it resolves the candidates it
   resolved before.
 
-- **Needs**, read from the buffered body in OpenAI and Ollama shapes: `tools`
+- **Needs**, read from the buffered body: `tools`
   (non-empty `tools` or `functions`), `vision` (an `image_url`, `image` or
-  `input_image` content part, or non-empty Ollama `images`), `structured`
-  (`response_format.type` `json_schema`/`json_object`, or an Ollama `format`),
-  `embeddings` (`/v1/embeddings`, `/api/embed`, `/api/embeddings`), and a
+  `input_image` content part, or non-empty `images`), `structured`
+  (`response_format.type` `json_schema`/`json_object`, or a `format`),
+  `embeddings` (`/v1/embeddings`), and a
   context estimate of body bytes / 4 plus `max_tokens`,
   `max_completion_tokens` or a positive `options.num_predict`.
 - **Search order**: the requested tier, then stronger tiers nearest first with
@@ -1897,8 +1869,7 @@ is resolved by the node it enters.
   `-local` suffix are reserved exact model names. Matching is byte-for-byte
   after trimming surrounding whitespace, so `<alias>:latest`, case variants and
   qualified names such as `org/weak-api` are ordinary model names.
-  `normalizeModel` returns a reserved name unchanged, so Ollama's implied
-  `:latest` is never appended to one.
+  Model normalization preserves every exact identifier after trimming whitespace.
 - **Refusals**: a request is answered `400`
   `{"error":"...","code":"feature_unavailable","reason":"alias_not_inference_ready"|"unsupported_alias_use","model":"<alias>"}`
   before the CORS preflight, candidate resolution, admission, wake, reservation,
@@ -1909,10 +1880,8 @@ is resolved by the node it enters.
   - a `-api` or `-local` alias as the string value of any top-level JSON key
     equal under `strings.EqualFold` to `model` or `name`, repeated keys
     included, so a case-variant key the engine may read instead of the one the
-    router read is covered (Ollama `/api/pull`, `/api/show`, `/api/delete`,
-    `/api/create` use `name`); as any `model` query parameter value (llama.cpp
-    `GET /props?model=`); or as the whole remainder of a `/v1/models/` or
-    `/api/v0/models/` path (LM Studio model detail)
+    router read is covered; as any `model` query parameter value (llama.cpp
+    `GET /props?model=`); or as the whole remainder of a `/v1/models/` path
     (`alias_not_inference_ready`);
   - a bare tier in the body `model` on a route that is not a classified
     inference route (Responses, an unclassified native or passthrough path), or
@@ -1934,8 +1903,7 @@ is resolved by the node it enters.
   carry no credential, account, deployment or endpoint. An upstream model already named like an alias is left alone. When no
   upstream yields a list and at least one alias is configured, the aliases are
   returned with `200` instead of `503`; without a configured tier the statuses
-  are unchanged, and the browser `Origin` checks of §5.8 still apply. The
-  native Ollama list does not carry aliases.
+  are unchanged, and the browser `Origin` checks of §5.8 still apply.
 - **Readiness**: listed `-api` and `-local` aliases are not inference-ready
   until Phase 4 of the hybrid routing plan; they are refused as above. Declared
   roles are local destinations: when dispatch exists, `-api` excludes them and
@@ -2284,7 +2252,7 @@ port. Inference uses the existing request/workload notification contract.
   `nvpair-proxy:routing-listener-blocked` (severity `error`, action `none`).
   Each failed reconcile reports; there is no retry timer. The broker caches the
   report until the matching `errors:clear` and replays it to a restarted
-  `nvpair-errors`, as it does for the OLLAMA_HOST alias warning.
+  `nvpair-errors`.
   The revision still activates and acknowledges, so an unrelated setting is not
   held back by a port clash. Any later reconcile retries the bind. A bind,
   a no-op reconcile or a disable sends `errors:clear` for the same id the first

@@ -24,7 +24,7 @@ install or use the Software.
 3. Network Behavior.
    You acknowledge that the Software discovers and communicates with
    peer machines on your local network using mDNS, and that it
-   advertises information about your local Ollama instance (including
+   advertises information about your local inference engines (including
    the names of installed models) to other peers on the same network.
 
 4. No Warranty.

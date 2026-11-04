@@ -36,7 +36,7 @@ func TestBoundEngineCorrelatedNotification(t *testing.T) {
 	p := NewProxy(NewCodec(w))
 	done := make(chan nodepolicy.BoundEnginePrepared, 1)
 	go func() {
-		result, err := p.prepareBoundEngine(context.Background(), nodepolicy.PrepareBoundEngineRequest{PolicyRevision: "1", Engine: "ollama", Model: "model", BudgetMs: 1000})
+		result, err := p.prepareBoundEngine(context.Background(), nodepolicy.PrepareBoundEngineRequest{PolicyRevision: "1", Engine: "llamacpp", Model: "model", BudgetMs: 1000})
 		if err != nil {
 			result.Message = err.Error()
 		}
@@ -100,7 +100,7 @@ func TestBoundEngineCancellationRetiresWaiter(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		_, err := p.prepareBoundEngine(ctx, nodepolicy.PrepareBoundEngineRequest{PolicyRevision: "1", Engine: "ollama", Model: "model", BudgetMs: 1000})
+		_, err := p.prepareBoundEngine(ctx, nodepolicy.PrepareBoundEngineRequest{PolicyRevision: "1", Engine: "llamacpp", Model: "model", BudgetMs: 1000})
 		done <- err
 	}()
 	in := <-requests
@@ -131,7 +131,7 @@ func TestBoundEngineWaiterCapacity(t *testing.T) {
 	for i := 0; i < bufferBudgetMaxWaiters; i++ {
 		p.boundEngines.pending[string(rune(i))] = make(chan nodepolicy.BoundEnginePrepared, 1)
 	}
-	if _, err := p.prepareBoundEngine(context.Background(), nodepolicy.PrepareBoundEngineRequest{PolicyRevision: "1", Engine: "ollama", Model: "model", BudgetMs: 1000}); err == nil {
+	if _, err := p.prepareBoundEngine(context.Background(), nodepolicy.PrepareBoundEngineRequest{PolicyRevision: "1", Engine: "llamacpp", Model: "model", BudgetMs: 1000}); err == nil {
 		t.Fatal("full queue accepted waiter")
 	}
 }
@@ -157,7 +157,7 @@ func TestBoundEngineSendsOnlyRemainingCallerBudget(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		_, err := p.prepareBoundEngine(ctx, nodepolicy.PrepareBoundEngineRequest{PolicyRevision: "1", Engine: "ollama", Model: "model", BudgetMs: 90000})
+		_, err := p.prepareBoundEngine(ctx, nodepolicy.PrepareBoundEngineRequest{PolicyRevision: "1", Engine: "llamacpp", Model: "model", BudgetMs: 90000})
 		done <- err
 	}()
 	in := <-requests
@@ -182,7 +182,7 @@ func TestBoundEngineCancellationDuringNotificationWrite(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		_, err := p.prepareBoundEngine(ctx, nodepolicy.PrepareBoundEngineRequest{PolicyRevision: "1", Engine: "ollama", Model: "model", BudgetMs: 1000})
+		_, err := p.prepareBoundEngine(ctx, nodepolicy.PrepareBoundEngineRequest{PolicyRevision: "1", Engine: "llamacpp", Model: "model", BudgetMs: 1000})
 		done <- err
 	}()
 	lifetimeReceive(t, w.entered)
@@ -206,7 +206,7 @@ func TestBoundEngineCancellationDuringNotificationWrite(t *testing.T) {
 func TestBoundEngineDeadlineIsAbsoluteAndClamped(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	req := httptest.NewRequest("POST", "/api/generate", nil).WithContext(ctx)
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil).WithContext(ctx)
 	req.Header.Set(nodepolicy.EnginePrepareBudgetHeader, "900000")
 	start := time.Now().Add(-50 * time.Millisecond)
 	req = withBoundEngineDeadline(req, start)
@@ -223,7 +223,7 @@ func TestBoundEngineDeadlineIsAbsoluteAndClamped(t *testing.T) {
 	if got := boundEngineRemaining(refreshed); got > first || got > 200*time.Millisecond {
 		t.Fatalf("refresh reset budget: first=%v refreshed=%v", first, got)
 	}
-	old := httptest.NewRequest("POST", "/api/generate", nil)
+	old := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	old = withBoundEngineDeadline(old, time.Now().Add(-91*time.Second))
 	if got := boundEngineRemaining(old.Context()); got != 0 {
 		t.Fatalf("entry time was reset: %v", got)
@@ -238,22 +238,22 @@ func TestBoundEngineAdmissionRevalidatesAfterQueueWait(t *testing.T) {
 	pol.Admission.MaxConcurrentPerModel = 1
 	fx.p.admission.setPolicy(pol)
 	a := fx.p.admission
-	first := a.admit(context.Background(), admissionRequest{engine: "ollama", model: "fixture", waitCap: 0})
+	first := a.admit(context.Background(), admissionRequest{engine: "llamacpp", model: "fixture", waitCap: 0})
 	if first.ticket == nil {
 		t.Fatalf("initial admission=%+v", first)
 	}
 	defer first.ticket.release()
 	a.mu.Lock()
-	evidence := &boundEngineEvidence{backend: fx.f.currentLocalBackend(), policy: a.policyGeneration, identity: a.strict.identity["ollama"]}
+	evidence := &boundEngineEvidence{backend: fx.f.currentLocalBackend(), policy: a.policyGeneration, identity: a.strict.identity["llamacpp"]}
 	a.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	done := make(chan admissionDecision, 1)
 	go func() {
-		done <- a.admit(ctx, admissionRequest{engine: "ollama", model: "fixture", waitCap: time.Second, revalidate: func() bool { return fx.f.boundEvidenceCurrentLocked(evidence) }})
+		done <- a.admit(ctx, admissionRequest{engine: "llamacpp", model: "fixture", waitCap: time.Second, revalidate: func() bool { return fx.f.boundEvidenceCurrentLocked(evidence) }})
 	}()
 	waitForCond(t, time.Second, "bound request queued without a ticket", func() bool { a.mu.Lock(); defer a.mu.Unlock(); return a.queued == 1 })
-	a.setModelIdentity(map[string]nodepolicy.EngineIdentity{"ollama": {EngineRunID: "replacement"}})
+	a.setModelIdentity(map[string]nodepolicy.EngineIdentity{"llamacpp": {EngineRunID: "replacement"}})
 	select {
 	case result := <-done:
 		if result.ticket != nil || result.err != nil || result.reject != "model-unavailable" {
@@ -270,11 +270,14 @@ func TestBoundEngineAdmissionRevalidatesAfterQueueWait(t *testing.T) {
 func TestBoundEngineConcreteFacadeOrderIsStable(t *testing.T) {
 	fx := newBindingRequestFixture(t)
 	fx.f.discovery.RemoveManual("self")
-	for _, name := range []string{"lmstudio", "llamacpp"} {
-		profile, ok := profileFor(name)
-		if !ok {
-			t.Fatalf("missing fixture profile %s", name)
-		}
+	fork := customDescriptor()
+	fork.Engine = "llamacpp-fork"
+	forkProfile, err := dynamicProfile(fork)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, profile := range []engineProfile{forkProfile, customCase(t).profile} {
+		name := profile.Name
 		f := newFacade(fx.p, profile, NewDiscovery(), profile.FacadePort)
 		fx.p.facades[name] = f
 		n := prNode(name)
@@ -283,7 +286,7 @@ func TestBoundEngineConcreteFacadeOrderIsStable(t *testing.T) {
 	}
 	for range 32 {
 		cands := fx.f.resolveConcreteCandidates("fixture", routeChatCompletions)
-		if len(cands) != 2 || cands[0].engine != "llamacpp" || cands[1].engine != "lmstudio" {
+		if len(cands) != 2 || cands[0].engine != "llamacpp-custom" || cands[1].engine != "llamacpp-fork" {
 			t.Fatalf("unstable facade fallback: %+v", cands)
 		}
 	}

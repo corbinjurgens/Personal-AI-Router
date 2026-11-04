@@ -306,7 +306,7 @@ func TestSupervisorStopTearsDownCurrentHandle(t *testing.T) {
 // This replaces a test of the graceful-restart mechanism, which had no
 // production caller and is now deleted: its purpose — re-pointing a worker at
 // cluster certs it only read at startup — went away when the proxy gained a
-// live trust watch, and the last caller went with the LM Studio port restarts
+// live trust watch, and the last caller went with the engine port restarts
 // that became facade-scoped. What remains worth asserting is the invariant
 // that replaced it: nothing short of an actual exit replaces a running worker,
 // so a facade-level failure cannot cost every engine its listener.

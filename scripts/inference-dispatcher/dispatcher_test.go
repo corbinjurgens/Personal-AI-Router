@@ -56,13 +56,9 @@ func TestOmittedModelSelectsAvailableGenerationModel(t *testing.T) {
 	var receivedModel string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/tags":
-			_, _ = w.Write([]byte(`{"models":[
-				{"name":"z-embed","capabilities":["embedding"]},
-				{"name":"b-chat","capabilities":["chat"]},
-				{"name":"a-completion","capabilities":["completion"]}
-			]}`))
-		case "/api/generate":
+		case "/v1/models":
+			_, _ = w.Write([]byte(`{"data":[{"id":"z-model"},{"id":"b-model"},{"id":"a-model"}]}`))
+		case "/v1/chat/completions":
 			var request struct {
 				Model string `json:"model"`
 			}
@@ -70,7 +66,7 @@ func TestOmittedModelSelectsAvailableGenerationModel(t *testing.T) {
 				t.Fatalf("decode request: %v", err)
 			}
 			receivedModel = request.Model
-			_, _ = w.Write([]byte(`{"response":"hello"}`))
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"hello"}}]}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -89,8 +85,8 @@ func TestOmittedModelSelectsAvailableGenerationModel(t *testing.T) {
 	if exit != 0 {
 		t.Fatalf("exit=%d stderr=%s", exit, stderr.String())
 	}
-	if receivedModel != "a-completion" {
-		t.Fatalf("selected model %q, want deterministic first generation model", receivedModel)
+	if receivedModel != "a-model" {
+		t.Fatalf("selected model %q, want deterministic first model", receivedModel)
 	}
 	if !strings.Contains(stdout.String(), "Auto-selected available model") {
 		t.Fatalf("missing auto-selection output: %s", stdout.String())
@@ -99,10 +95,10 @@ func TestOmittedModelSelectsAvailableGenerationModel(t *testing.T) {
 
 func TestExplicitModelSkipsInventoryRequest(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/tags" {
+		if r.URL.Path == "/v1/models" {
 			t.Fatal("explicit model unexpectedly queried inventory")
 		}
-		_, _ = w.Write([]byte(`{"response":"ok"}`))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
 	}))
 	defer server.Close()
 
@@ -117,38 +113,6 @@ func TestExplicitModelSkipsInventoryRequest(t *testing.T) {
 	)
 	if exit != 0 {
 		t.Fatalf("exit=%d stderr=%s", exit, stderr.String())
-	}
-}
-
-func TestLMStudioFallsBackToOpenAIInventory(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/v1/models":
-			http.Error(w, "not found", http.StatusNotFound)
-		case "/v1/models":
-			_, _ = w.Write([]byte(`{"data":[{"id":"live-model"}]}`))
-		case "/v1/chat/completions":
-			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"done"}}]}`))
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-
-	var stdout, stderr bytes.Buffer
-	exit := runAgainstServer(
-		t,
-		context.Background(),
-		[]string{"--backend", "lmstudio", "--prompt", "test"},
-		server.URL,
-		&stdout,
-		&stderr,
-	)
-	if exit != 0 {
-		t.Fatalf("exit=%d stderr=%s", exit, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "live-model") {
-		t.Fatalf("selected model missing from output: %s", stdout.String())
 	}
 }
 
@@ -210,72 +174,9 @@ func TestLlamaCPPUsesOpenAIInventoryAndChat(t *testing.T) {
 	}
 }
 
-// A Personal AI Router proxy answers /v1/models with the whole cluster's
-// inventory and forwards /api/v1/models to one node, so the aggregated list must
-// win. The native list still supplies the type and capability fields the
-// generation filter needs.
-func TestLMStudioPrefersAggregatedInventory(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/v1/models":
-			_, _ = w.Write([]byte(`{"data":[
-				{"id":"remote-chat"},
-				{"id":"local-embed"},
-				{"id":"local-chat"}
-			]}`))
-		case "/api/v1/models":
-			_, _ = w.Write([]byte(`{"models":[
-				{"key":"local-embed","type":"embeddings"},
-				{"key":"local-chat","type":"llm"}
-			]}`))
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-
-	var stdout, stderr bytes.Buffer
-	exit := runAgainstServer(
-		t,
-		context.Background(),
-		[]string{"--backend", "lmstudio", "--list-models"},
-		server.URL,
-		&stdout,
-		&stderr,
-	)
-	if exit != 0 {
-		t.Fatalf("exit=%d stderr=%s", exit, stderr.String())
-	}
-	var models []RegisteredModel
-	if err := json.Unmarshal(stdout.Bytes(), &models); err != nil {
-		t.Fatalf("invalid JSON: %v", err)
-	}
-	byName := make(map[string]RegisteredModel, len(models))
-	for _, model := range models {
-		byName[model.Name] = model
-	}
-	if len(models) != 3 {
-		t.Fatalf("models=%v, want the aggregated three-model inventory", models)
-	}
-	if _, ok := byName["remote-chat"]; !ok {
-		t.Fatal("a model known only to the aggregated endpoint was dropped")
-	}
-	if byName["local-embed"].Type != "embeddings" {
-		t.Fatalf("native type metadata was not merged: %v", byName["local-embed"])
-	}
-	if supportsGeneration(byName["local-embed"]) {
-		t.Fatal("merged metadata did not restore the generation filter")
-	}
-	// No metadata arrived for the remote model, so it stays eligible rather than
-	// being excluded for something the single-node endpoint could not report.
-	if !supportsGeneration(byName["remote-chat"]) {
-		t.Fatal("a model without native metadata was wrongly excluded")
-	}
-}
-
 func TestListModelsEmitsJSON(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"models":[{"name":"test-model"}]}`))
+		_, _ = w.Write([]byte(`{"data":[{"id":"test-model"}]}`))
 	}))
 	defer server.Close()
 
@@ -319,9 +220,9 @@ func TestCancellationStopsInFlightRequestCleanly(t *testing.T) {
 	var once sync.Once
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/tags":
-			_, _ = w.Write([]byte(`{"models":[{"name":"available"}]}`))
-		case "/api/generate":
+		case "/v1/models":
+			_, _ = w.Write([]byte(`{"data":[{"id":"available"}]}`))
+		case "/v1/chat/completions":
 			once.Do(func() { close(requestStarted) })
 			<-releaseServer
 		}
@@ -378,20 +279,6 @@ func TestConnectionIsLocalOnly(t *testing.T) {
 	}
 }
 
-// The default must be the proxy facade (1234), not PAIR's managed LM Studio
-// backend (1235+). Defaulting to the backend would bypass lmstudio-proxy and
-// route nothing through the cluster.
-func TestLMStudioDefaultPort(t *testing.T) {
-	var stderr bytes.Buffer
-	cfg, err := parseConfig([]string{"--backend", "lmstudio"}, &stderr)
-	if err != nil {
-		t.Fatalf("parse config: %v", err)
-	}
-	if port := effectivePort(cfg); port != 1234 {
-		t.Fatalf("LM Studio default port=%d, want 1234", port)
-	}
-}
-
 func TestLlamaCPPDefaultPort(t *testing.T) {
 	var stderr bytes.Buffer
 	cfg, err := parseConfig([]string{"--backend", "llamacpp"}, &stderr)
@@ -407,10 +294,10 @@ func TestResponseTextNeverReachesStdout(t *testing.T) {
 	const secret = "the capital of France is Paris"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/tags":
-			_, _ = w.Write([]byte(`{"models":[{"name":"available"}]}`))
-		case "/api/generate":
-			_, _ = w.Write([]byte(`{"response":"` + secret + `"}`))
+		case "/v1/models":
+			_, _ = w.Write([]byte(`{"data":[{"id":"available"}]}`))
+		case "/v1/chat/completions":
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"` + secret + `"}}]}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -440,8 +327,8 @@ func TestUpstreamErrorBodyNeverReachesLogs(t *testing.T) {
 	const echoed = "invalid request: summarize the quarterly revenue memo"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/tags":
-			_, _ = w.Write([]byte(`{"models":[{"name":"available"}]}`))
+		case "/v1/models":
+			_, _ = w.Write([]byte(`{"data":[{"id":"available"}]}`))
 		default:
 			http.Error(w, `{"error":{"message":"`+echoed+`"}}`, http.StatusBadRequest)
 		}

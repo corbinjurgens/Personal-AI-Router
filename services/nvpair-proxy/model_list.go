@@ -56,7 +56,6 @@ type modelListResult struct {
 // client-facing path remains unchanged in telemetry and in the merged response.
 func (f *facade) serveModelList(w http.ResponseWriter, r *http.Request, matchedRoute route, candidates []candidate) (int, error) {
 	p := f.host
-	openAI := matchedRoute.Role == roleModelListOpenAIGET
 	writeJSON := func(status int, body []byte) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -139,17 +138,13 @@ func (f *facade) serveModelList(w http.ResponseWriter, r *http.Request, matchedR
 				return
 			}
 			var envelope struct {
-				Models *[]json.RawMessage `json:"models"`
-				Data   *[]json.RawMessage `json:"data"`
+				Data *[]json.RawMessage `json:"data"`
 			}
 			if err := json.Unmarshal(body, &envelope); err != nil {
 				results[i].err = err
 				return
 			}
-			models := envelope.Models
-			if openAI {
-				models = envelope.Data
-			}
+			models := envelope.Data
 			if models == nil {
 				results[i].err = fmt.Errorf("upstream response has no model array")
 				return
@@ -162,7 +157,7 @@ func (f *facade) serveModelList(w http.ResponseWriter, r *http.Request, matchedR
 				}
 				invalid, hasIdentity := false, false
 				visitObject(raw, func(field []byte, start, end int) {
-					if (openAI && jsonKeyEqual(field, "id", true)) || (!openAI && (jsonKeyEqual(field, "model", true) || jsonKeyEqual(field, "name", true))) {
+					if jsonKeyEqual(field, "id", true) {
 						hasIdentity = true
 					}
 					if (jsonKeyEqual(field, "id", true) || jsonKeyEqual(field, "model", true) || jsonKeyEqual(field, "name", true)) && nodepolicy.ValidateModelIdentifierJSON(raw[start:end]) != nil {
@@ -178,8 +173,6 @@ func (f *facade) serveModelList(w http.ResponseWriter, r *http.Request, matchedR
 				}
 				var identity struct {
 					ID     string `json:"id"`
-					Model  string `json:"model"`
-					Name   string `json:"name"`
 					Digest string `json:"digest"`
 				}
 				if err := json.Unmarshal(raw, &identity); err != nil {
@@ -187,16 +180,6 @@ func (f *facade) serveModelList(w http.ResponseWriter, r *http.Request, matchedR
 					return
 				}
 				key := identity.ID
-				if !openAI {
-					key = identity.Model
-					if key == "" {
-						key = identity.Name
-					}
-					if nodepolicy.ValidateModelIdentifier(key) != nil {
-						continue
-					}
-					key = f.profile.normalizeModel(key)
-				}
 				if nodepolicy.ValidateModelIdentifier(key) != nil {
 					continue
 				}
@@ -276,11 +259,8 @@ func (f *facade) serveModelList(w http.ResponseWriter, r *http.Request, matchedR
 			models = append(models, item.raw)
 		}
 	}
-	var aliasModels []json.RawMessage
-	if openAI {
-		aliasModels = f.tierModelEntries(seen)
-		models = append(models, aliasModels...)
-	}
+	aliasModels := f.tierModelEntries(seen)
+	models = append(models, aliasModels...)
 	// Configured aliases are served without any upstream. The Origin checks
 	// above still apply: they speak for the engines' own CORS policy.
 	if !success && len(aliasModels) == 0 {
@@ -288,18 +268,10 @@ func (f *facade) serveModelList(w http.ResponseWriter, r *http.Request, matchedR
 		writeJSON(http.StatusServiceUnavailable, []byte(`{"error":"model inventory unavailable"}`))
 		return http.StatusServiceUnavailable, err
 	}
-	var body []byte
-	var err error
-	if openAI {
-		body, err = json.Marshal(struct {
-			Object string            `json:"object"`
-			Data   []json.RawMessage `json:"data"`
-		}{Object: "list", Data: models})
-	} else {
-		body, err = json.Marshal(struct {
-			Models []json.RawMessage `json:"models"`
-		}{Models: models})
-	}
+	body, err := json.Marshal(struct {
+		Object string            `json:"object"`
+		Data   []json.RawMessage `json:"data"`
+	}{Object: "list", Data: models})
 	if err != nil {
 		writeJSON(http.StatusInternalServerError, []byte(`{"error":"failed to encode model inventory"}`))
 		return http.StatusInternalServerError, err

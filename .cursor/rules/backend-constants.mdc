@@ -19,7 +19,7 @@ Never hardcode a value the backend reports. Source it from the live contract and
 fall back to a constant only before the backend has reported (cold start):
 
 - Engine server port -> `engine:status` / `engine:state-changed` `port`.
-- Ollama proxy port -> `proxy:get-status`.
+- Engine proxy port -> `<engine>-proxy:get-status`.
 - Per-node node-info port -> discovery `AvailableNode.port`.
 
 If a value you need is **not** reported, record the current limitation in

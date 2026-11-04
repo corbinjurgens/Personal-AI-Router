@@ -85,7 +85,7 @@ func startProxyWithLog(t *testing.T, level string) (stdin io.WriteCloser, msgs <
 		"id":      enableID,
 		"method":  "facade/enable",
 		"params": map[string]any{
-			"engine":              "ollama",
+			"engine":              engines.NameLlamaCPP,
 			"port":                freePort(t),
 			"ignorePersistedPort": true,
 		},
@@ -141,7 +141,7 @@ func countLogLinesAtLevel(stderr string, tag string) int {
 	scanner := bufio.NewScanner(strings.NewReader(stderr))
 	for scanner.Scan() {
 		line := scanner.Text()
-		// Lines look like: "15:04:05.000 [ollama-proxy] DEBUG ..."
+		// Lines look like: "15:04:05.000 [llamacpp-proxy] DEBUG ..."
 		if strings.Contains(line, "] "+tag+" ") {
 			count++
 		}
@@ -266,7 +266,7 @@ func TestLogLevelEnvFallback(t *testing.T) {
 		"id":      901,
 		"method":  "facade/enable",
 		"params": map[string]any{
-			"engine":              "ollama",
+			"engine":              engines.NameLlamaCPP,
 			"port":                freePort(t),
 			"ignorePersistedPort": true,
 		},
@@ -274,7 +274,7 @@ func TestLogLevelEnvFallback(t *testing.T) {
 
 	// A facade announces itself addressed to its engine, so the broker can tell
 	// which one is ready when a process hosts several.
-	waitForMethod(t, msgs, engines.AddressMethod("ollama", "ready"), 5*time.Second)
+	waitForMethod(t, msgs, engines.AddressMethod(engines.NameLlamaCPP, "ready"), 5*time.Second)
 	// The first mDNS scan browse runs with a 3s timeout before emitting
 	// its DEBUG summary; wait longer than that to guarantee we see at
 	// least one DEBUG line.

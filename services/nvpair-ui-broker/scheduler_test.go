@@ -29,8 +29,8 @@ func TestSchedulerFeedBaselinePrecedesConcurrentLiveWorkload(t *testing.T) {
 	})
 	worker := &rpcWorker{peer: NewPeer(NewCodec(brokerSide))}
 	b := &Broker{workloads: workloadstore.New(), telemetry: newTelemetryCache()}
-	b.workloads.Apply(storeIncoming("active", "host", "ollama", "run", "running", "a"))
-	b.workloads.Apply(storeIncoming("historic", "host", "ollama", "run", "completed", "a"))
+	b.workloads.Apply(storeIncoming("active", "host", "llamacpp", "run", "running", "a"))
+	b.workloads.Apply(storeIncoming("historic", "host", "llamacpp", "run", "completed", "a"))
 	b.telemetry.Upsert(sourceScanner, noderec.NodeTelemetry{
 		HostUUID:          "a",
 		GPUUtilizationPct: 50,
@@ -55,7 +55,7 @@ func TestSchedulerFeedBaselinePrecedesConcurrentLiveWorkload(t *testing.T) {
 	}()
 	<-feedLocked
 
-	liveInfo := storeIncoming("live", "host", "lmstudio", "run", "queued", "a").Info
+	liveInfo := storeIncoming("live", "host", "llamacpp-custom", "run", "queued", "a").Info
 	liveParams, err := json.Marshal(map[string]json.RawMessage{"workloadInfo": liveInfo})
 	if err != nil {
 		t.Fatalf("marshal live workload: %v", err)
@@ -277,7 +277,7 @@ func TestRepushPriorityDeliversCompleteSnapshotToReplacementProxy(t *testing.T) 
 		},
 	}
 	b.cachePrioritySnapshot(want)
-	b.setProxy(proxy) // replacement proxy starts with no scheduler state
+	b.setEngineProxyHandle(mustEngineProxyProfile("llamacpp"), proxy) // replacement proxy starts with no scheduler state
 
 	replayed := make(chan struct{})
 	go func() {

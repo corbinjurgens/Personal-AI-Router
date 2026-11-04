@@ -15,7 +15,7 @@ func inferenceLockPolicy() Policy {
 	p := Default()
 	p.Profiles = []Profile{
 		{Name: "locked", Engine: "llamacpp", Model: "stored-model", LocalOnly: true, RequestOptions: json.RawMessage(`{"temperature":0.5,"nested":{"seed":9007199254740993},"stop":["a","b"]}`)},
-		{Name: "editable", Engine: "lmstudio", Model: "editable-model", RequestOptions: json.RawMessage(`{"temperature":1}`)},
+		{Name: "editable", Engine: "llamacpp-custom", Model: "editable-model", RequestOptions: json.RawMessage(`{"temperature":1}`)},
 	}
 	return p
 }
@@ -132,7 +132,7 @@ func TestPeerInferenceSettingsLockRefusesWholeWrite(t *testing.T) {
 	test("set existing unlocked lock", func(p *Policy) { p.Profiles[1].LocalOnly = true }, true)
 	test("delete protected identity", func(p *Policy) { p.Profiles = p.Profiles[1:] }, true)
 	test("change protected model", func(p *Policy) { p.Profiles[0].Model = "incoming-secret" }, true)
-	test("change protected engine", func(p *Policy) { p.Profiles[0].Engine = "lmstudio" }, true)
+	test("change protected engine", func(p *Policy) { p.Profiles[0].Engine = "llamacpp-custom" }, true)
 	test("change mode", func(p *Policy) { p.Profiles[0].RequestOptionsMode = RequestOptionsEnforced }, true)
 	test("remove options", func(p *Policy) { p.Profiles[0].RequestOptions = nil }, true)
 	test("add option", func(p *Policy) {
@@ -312,7 +312,7 @@ func TestServedResidentPeerRawKeys(t *testing.T) {
 	for _, raw := range []string{
 		`{"servedModels":[],"servedModels":[]}`, `{"servedModels":[],"ServedModels":[]}`,
 		`{"residentModels":null}`, `{"servedModels":null}`,
-		`{"residentModels":[{"engine":"ollama","engine":"ollama","model":"m"}]}`,
+		`{"residentModels":[{"engine":"llamacpp","engine":"llamacpp","model":"m"}]}`,
 	} {
 		var peer PeerPolicy
 		if err := json.Unmarshal([]byte(raw), &peer); err == nil {
@@ -328,7 +328,7 @@ func TestServedResidentRoleAuthority(t *testing.T) {
 	p := servedResidentPolicy()
 	p.ServedModels = ServedModels{}
 	p.ResidentModels = nil
-	p.Roles = map[string]Role{TierStrong: {Engine: "ollama", Model: "outside"}}
+	p.Roles = map[string]Role{TierStrong: {Engine: "llamacpp", Model: "outside"}}
 	if err := p.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -401,7 +401,7 @@ func TestPeerProjectionOmitsRoutingAndAPIEntries(t *testing.T) {
 	if err := json.Unmarshal(data, &got); err != nil {
 		t.Fatalf("decode projection: %v", err)
 	}
-	wantTiers := map[string][]TierEntry{"weak": {{Kind: EntryLocal, Engine: "ollama", Model: "qwen3:8b"}}}
+	wantTiers := map[string][]TierEntry{"weak": {{Kind: EntryLocal, Engine: "llamacpp", Model: "qwen3-8b"}}}
 	if !reflect.DeepEqual(got.Tiers, wantTiers) {
 		t.Errorf("projected tiers = %+v, want %+v (local entries only, no API-only tier)", got.Tiers, wantTiers)
 	}
@@ -452,11 +452,11 @@ func TestMergePeerSetAcceptsUnchangedProjection(t *testing.T) {
 	}, func(*Policy) {})
 	test("declared roles", func(doc map[string]any) {
 		doc["roles"] = map[string]any{
-			"weak":   map[string]any{"engine": "ollama", "model": "qwen3:8b"},
-			"strong": map[string]any{"engine": "lmstudio", "model": "big"},
+			"weak":   map[string]any{"engine": "llamacpp", "model": "qwen3-8b"},
+			"strong": map[string]any{"engine": "llamacpp-custom", "model": "big"},
 		}
 	}, func(p *Policy) {
-		p.Roles = map[string]Role{TierWeak: {Engine: "ollama", Model: "qwen3:8b"}, TierStrong: {Engine: "lmstudio", Model: "big"}}
+		p.Roles = map[string]Role{TierWeak: {Engine: "llamacpp", Model: "qwen3-8b"}, TierStrong: {Engine: "llamacpp-custom", Model: "big"}}
 	})
 	test("peer pausedBy is ignored", func(doc map[string]any) {
 		doc["pausedBy"] = "peer"
@@ -469,7 +469,7 @@ func TestMergePeerSetAcceptsUnchangedProjection(t *testing.T) {
 
 func TestPeerProjectionCarriesRolesAndPausedBy(t *testing.T) {
 	stored := stagedPolicy(t)
-	stored.Roles = map[string]Role{TierMedium: {Engine: "ollama", Model: "qwen3:8b"}}
+	stored.Roles = map[string]Role{TierMedium: {Engine: "llamacpp", Model: "qwen3-8b"}}
 	stored.Availability = Paused
 	stored.PausedBy = PausedLocally
 
@@ -481,7 +481,7 @@ func TestPeerProjectionCarriesRolesAndPausedBy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal projection: %v", err)
 	}
-	if !strings.Contains(string(data), `"roles":{"medium":{"engine":"ollama","model":"qwen3:8b"}}`) || !strings.Contains(string(data), `"pausedBy":"local"`) {
+	if !strings.Contains(string(data), `"roles":{"medium":{"engine":"llamacpp","model":"qwen3-8b"}}`) || !strings.Contains(string(data), `"pausedBy":"local"`) {
 		t.Errorf("projection JSON lacks roles or pausedBy: %s", data)
 	}
 }
@@ -551,36 +551,36 @@ func TestMergePeerSetRejectsProtectedChanges(t *testing.T) {
 		})
 	}
 	localEntry := func(model string) map[string]any {
-		return map[string]any{"kind": "local", "engine": "ollama", "model": model}
+		return map[string]any{"kind": "local", "engine": "llamacpp", "model": model}
 	}
 	weak := func(doc map[string]any, entries ...any) {
 		doc["tiers"].(map[string]any)["weak"] = entries
 	}
 
-	test("changed tier entry", func(doc map[string]any) { weak(doc, localEntry("llama3:8b")) }, "cannot change the tiers")
+	test("changed tier entry", func(doc map[string]any) { weak(doc, localEntry("llama3-8b")) }, "cannot change the tiers")
 	test("added local tier entry", func(doc map[string]any) {
-		weak(doc, localEntry("qwen3:8b"), localEntry("llama3:8b"))
+		weak(doc, localEntry("qwen3-8b"), localEntry("llama3-8b"))
 	}, "cannot change the tiers")
 	test("removed local tier entry", func(doc map[string]any) { weak(doc) }, "cannot change the tiers")
 	test("added tier", func(doc map[string]any) {
-		doc["tiers"].(map[string]any)["medium"] = []any{localEntry("llama3:8b")}
+		doc["tiers"].(map[string]any)["medium"] = []any{localEntry("llama3-8b")}
 	}, "cannot change the tiers")
 	// The incoming document is validated without the stored routing, so a peer
 	// cannot tell whether a deployment id it names exists on this node.
 	test("added api tier entry", func(doc map[string]any) {
-		weak(doc, localEntry("qwen3:8b"), map[string]any{"kind": "api", "deployment": "free-small"})
+		weak(doc, localEntry("qwen3-8b"), map[string]any{"kind": "api", "deployment": "free-small"})
 	}, "is not defined")
 	test("api entry replacing the local entry", func(doc map[string]any) {
 		weak(doc, map[string]any{"kind": "api", "deployment": "paid-big"})
 	}, "is not defined")
 	test("changed entry capabilities", func(doc map[string]any) {
-		entry := localEntry("qwen3:8b")
+		entry := localEntry("qwen3-8b")
 		entry["capabilities"] = []any{"tools"}
 		weak(doc, entry)
 	}, "cannot change the tiers")
 	test("changed tiers under a capitalized key", func(doc map[string]any) {
 		delete(doc, "tiers")
-		doc["Tiers"] = map[string]any{"weak": []any{localEntry("llama3:8b")}}
+		doc["Tiers"] = map[string]any{"weak": []any{localEntry("llama3-8b")}}
 	}, "cannot change the tiers")
 	test("changed tier policy under an uppercase key", func(doc map[string]any) {
 		delete(doc, "tierPolicy")
@@ -618,10 +618,10 @@ func TestMergePeerSetRejectsProtectedChanges(t *testing.T) {
 		doc["idle"].(map[string]any)["unloadAfterMinutes"] = -1
 	}, "idle.unloadAfterMinutes")
 	test("role for an unknown tier", func(doc map[string]any) {
-		doc["roles"] = map[string]any{"huge": map[string]any{"engine": "ollama", "model": "m"}}
+		doc["roles"] = map[string]any{"huge": map[string]any{"engine": "llamacpp", "model": "m"}}
 	}, `unknown tier "huge"`)
 	test("role naming a reserved alias", func(doc map[string]any) {
-		doc["roles"] = map[string]any{"weak": map[string]any{"engine": "ollama", "model": "strong-local"}}
+		doc["roles"] = map[string]any{"weak": map[string]any{"engine": "llamacpp", "model": "strong-local"}}
 	}, "reserved alias")
 	test("role for an unknown engine", func(doc map[string]any) {
 		doc["roles"] = map[string]any{"weak": map[string]any{"engine": "no/pe", "model": "m"}}
@@ -644,8 +644,8 @@ func TestMergePeerSetRejectsMalformedDocuments(t *testing.T) {
 
 func TestMergePeerSetRejectsDuplicateFields(t *testing.T) {
 	stored := stagedPolicy(t)
-	unchangedTiers := `{"weak":[{"kind":"local","engine":"ollama","model":"qwen3:8b"}]}`
-	changedTiers := `{"weak":[{"kind":"local","engine":"ollama","model":"llama3:8b"}]}`
+	unchangedTiers := `{"weak":[{"kind":"local","engine":"llamacpp","model":"qwen3-8b"}]}`
+	changedTiers := `{"weak":[{"kind":"local","engine":"llamacpp","model":"llama3-8b"}]}`
 	unchangedPolicy := `{"allowStronger":true,"allowWeaker":false,"preferLoaded":"tier"}`
 	changedPolicy := `{"allowStronger":true,"allowWeaker":true,"preferLoaded":"tier"}`
 	test := func(name, body string) {

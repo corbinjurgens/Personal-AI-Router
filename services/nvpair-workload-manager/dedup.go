@@ -104,12 +104,13 @@ func (d *dedupIndex) addLocked(key string) {
 }
 
 // keyLifecycle builds the dedup key for a lifecycle event. Workload.id is only
-// a per-process counter, and both engine proxies count from 1 and reset on
+// a per-process counter, and each engine facade counts from 1 and resets on
 // restart, so the workload's identity is (originatedFrom, engine, runId, id):
 // nodeId disambiguates nodes, and engine plus the per-process runId nonce
-// disambiguate the two local engines and successive proxy runs. Dropping any
-// component would collapse distinct workloads (e.g. a concurrent Ollama + LM
-// Studio job both id "1") and silently discard a legitimate peer event.
+// disambiguate the local engines and successive proxy runs. Dropping any
+// component would collapse distinct workloads (e.g. concurrent llamacpp and
+// llamacpp-custom jobs both id "1") and silently discard a legitimate peer
+// event.
 //
 // seq then completes the key, and it has to be the producer's event sequence
 // rather than any property of the workload's current shape. This index is a

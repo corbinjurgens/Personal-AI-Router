@@ -117,8 +117,8 @@ func TestProbeConfigManualExplicitZeroAndPrivateTargets(t *testing.T) {
 		want  []string
 	}{
 		{"worker defaults", nil, nil},
-		{"disabled", &manualProbePorts{}, []string{"--ollama-port", "0", "--lmstudio-port", "0", "--node-info-port", "0"}},
-		{"private", &manualProbePorts{25101, 25102, 25103}, []string{"--ollama-port", "25101", "--lmstudio-port", "25102", "--node-info-port", "25103"}},
+		{"disabled", &manualProbePorts{}, []string{"--node-info-port", "0"}},
+		{"private", &manualProbePorts{nodeInfo: 25103}, []string{"--node-info-port", "25103"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b := NewBroker(nil, workerPaths{manualProbePorts: tc.ports, clusterDir: filepath.Join(t.TempDir(), "cluster")})
@@ -134,7 +134,7 @@ func TestProbeConfigManualExplicitZeroAndPrivateTargets(t *testing.T) {
 }
 
 func TestProbeConfigManualRejectsInvalidTargets(t *testing.T) {
-	for _, ports := range []*manualProbePorts{{-1, 0, 0}, {0, 65536, 0}, {0, 0, -1}} {
+	for _, ports := range []*manualProbePorts{{nodeInfo: -1}, {nodeInfo: 65536}} {
 		if err := ports.validate(); err == nil {
 			t.Fatalf("invalid probe targets accepted: %+v", ports)
 		}

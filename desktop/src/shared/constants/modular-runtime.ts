@@ -61,7 +61,7 @@ export const MODULAR_NODE_INFO_SELF_HOST = '127.0.0.1'
 // user to Service settings instead of loading indefinitely.
 export const MODULAR_STARTUP_READY_TIMEOUT_MS = 90_000
 
-// Awaited engine lifecycle calls can include the bundled Ollama manifest's
+// Awaited engine lifecycle calls can include an engine manifest's
 // 10-minute readiness probe and the broker's combined settings operation. The
 // shared enginesettings/timeouts.go defines the ladder above that probe:
 // 10.5 minutes for configure, 11 minutes for the owner-side
@@ -71,15 +71,14 @@ export const MODULAR_STARTUP_READY_TIMEOUT_MS = 90_000
 export const MODULAR_ENGINE_LIFECYCLE_CALL_TIMEOUT_MS = 14 * 60_000
 
 // Upper bound for a local model load/unload/delete action. A delete on an
-// engine whose manifest declares `restart_after` (LM Studio) does not reply
-// until the engine has stopped and passed its readiness probe again — LM
-// Studio's `ready.timeout_s` alone is 60s — so this has to cover a full engine
-// bounce, not just the action. Every wait that observes such a delete is
+// engine whose manifest declares `restart_after` does not reply until the
+// engine has stopped and passed its readiness probe again, so this has to cover
+// a full engine bounce, not just the action. Every wait that observes such a delete is
 // derived from this so the budgets cannot drift apart; see
 // docs/services-parity.md.
 export const MODULAR_MODEL_ACTION_TIMEOUT_MS = 120_000
 
-// Upper bound for `engine:catalog`. The engine manager allows its own LM Studio
+// Upper bound for `engine:catalog`. The engine manager allows its own catalogue
 // fetch 20s, and only replies once that resolves, so the RPC envelope has to sit
 // outside that budget or a slow catalogue rejects here while the backend is
 // still working — and the modal renders its empty state, which reads as "this

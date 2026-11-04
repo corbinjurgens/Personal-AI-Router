@@ -3,8 +3,8 @@
 
 // Command fake-engine is a tiny, pure-Go stand-in for a real inference
 // engine, used by the engine-manager tests. It binds the loopback
-// address given in OLLAMA_HOST (or FAKE_ADDR) and serves just enough to
-// satisfy readiness/health probes and the bundled actions. Being pure
+// address given in FAKE_ADDR and serves just enough to satisfy
+// readiness/health probes and the actions the tests declare. Being pure
 // Go, it compiles and runs on every target OS, so the lifecycle tests
 // need no real engine, network, or installer.
 //
@@ -30,9 +30,9 @@ import (
 // A tiny stateful model registry so list/pull/delete actions are
 // observable across calls. Seeded with one model so existing
 // list_models assertions still see a non-empty list. loaded tracks which
-// of those models are "resident in memory" so the loaded_models endpoints
-// (/api/ps, /api/v1/models) have observable, mutable state; a test drives
-// it via /testctl/loaded. Both are guarded by modelsMu.
+// of those models are "resident in memory" so the loaded_models endpoint
+// (/api/ps) has observable, mutable state; a test drives it via
+// /testctl/loaded. Both are guarded by modelsMu.
 var (
 	modelsMu sync.Mutex
 	models   = map[string]bool{"llama3.2:1b": true}
@@ -43,6 +43,23 @@ var (
 	// tagsDelay holds every /api/tags answer back (/testctl/tags-delay).
 	tagsDelay time.Duration
 )
+
+// pullSubs are the open /models/sse streams a POST /models reports to.
+var (
+	pullMu   sync.Mutex
+	pullSubs = map[chan string]struct{}{}
+)
+
+func publishPullEvent(payload string) {
+	pullMu.Lock()
+	defer pullMu.Unlock()
+	for sub := range pullSubs {
+		select {
+		case sub <- payload:
+		default:
+		}
+	}
+}
 
 func modelDigest(name string) string {
 	modelsMu.Lock()
@@ -93,7 +110,7 @@ func main() {
 	}
 	if path := os.Getenv("PAIR_TEST_ENV_FILE"); path != "" {
 		values := map[string]string{}
-		for _, key := range []string{"OLLAMA_ORIGINS", "PAIR_TEST_LITERAL", "PAIR_TEST_EMPTY", "OLLAMA_HOST"} {
+		for _, key := range []string{"PAIR_TEST_LITERAL", "PAIR_TEST_EMPTY"} {
 			values[key] = os.Getenv(key)
 		}
 		data, _ := json.Marshal(values)
@@ -131,8 +148,8 @@ func main() {
 		_ = json.NewEncoder(file).Encode(os.Args[1:])
 		_ = file.Close()
 	}
-	// Subcommands used by command-mode + cmd-action tests. They run and
-	// exit (no server), standing in for a daemon's control CLI.
+	// Subcommands used by launch and cmd-action tests. They run and exit (no
+	// server), standing in for an engine's control CLI.
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "oversized-output":
@@ -156,20 +173,6 @@ func main() {
 		case "echo": // print args to stdout so a cmd-action can capture output
 			fmt.Println(strings.Join(os.Args[2:], " "))
 			return
-		case "resolvesim": // stand in for `lms get`: succeed only for a Hugging
-			// Face URL (and only when it doesn't name a "nope" repo), else emit
-			// LM Studio's resolve-failure on stderr and exit non-zero. Lets a
-			// cmd-action test exercise the lms-get Hub→Hugging-Face fallback.
-			arg := ""
-			if len(os.Args) > 2 {
-				arg = os.Args[2]
-			}
-			if strings.HasPrefix(arg, "https://huggingface.co/") && !strings.Contains(arg, "nope") {
-				fmt.Println("downloaded " + arg)
-				return
-			}
-			fmt.Fprintf(os.Stderr, "Error: Failed to resolve artifact %q: The artifact does not exist or you do not have permission to read it\n", strings.ToLower(arg))
-			os.Exit(1)
 		case "noserve": // run but never bind — used to test readiness timeout
 			time.Sleep(time.Hour)
 			return
@@ -181,36 +184,10 @@ func main() {
 				}
 			}
 			os.Exit(1)
-		case "downloadsim": // stand in for a flaky `lms get`: emit LM Studio's
-			// transient "Download failed: Timed-out" on the first <fails>
-			// invocations (counted in a file), then succeed — so a test can
-			// prove the runner resumes a transient download in place.
-			// args: downloadsim <counterfile> <fails> <model...>
-			if len(os.Args) < 4 {
-				fmt.Fprintln(os.Stderr, "downloadsim: need <counterfile> <fails>")
-				os.Exit(2)
-			}
-			counterFile := os.Args[2]
-			n := 1
-			if b, err := os.ReadFile(counterFile); err == nil {
-				if prev, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil {
-					n = prev + 1
-				}
-			}
-			_ = os.WriteFile(counterFile, []byte(strconv.Itoa(n)), 0o644)
-			if fails, _ := strconv.Atoi(os.Args[3]); n <= fails {
-				fmt.Fprintln(os.Stderr, "Error: Download failed: Timed-out. Please try to resume. - You can try to resume the download within LM Studio.")
-				os.Exit(1)
-			}
-			fmt.Println("downloaded")
-			return
 		}
 	}
 
 	addr := os.Getenv("FAKE_ADDR")
-	if addr == "" {
-		addr = strings.TrimPrefix(os.Getenv("OLLAMA_HOST"), "http://")
-	}
 	if addr == "" {
 		addr = "127.0.0.1:0"
 	}
@@ -231,7 +208,7 @@ func main() {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	// Ollama-shape model API (stateful).
+	// Stateful model API.
 	mux.HandleFunc("/api/tags", func(w http.ResponseWriter, r *http.Request) {
 		modelsMu.Lock()
 		delay := tagsDelay
@@ -244,30 +221,52 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"models": ms})
 	})
-	mux.HandleFunc("/api/pull", func(w http.ResponseWriter, r *http.Request) {
-		if n := bstr(decodeBody(r), "name"); n != "" {
-			modelsMu.Lock()
-			models[n] = true
-			modelsMu.Unlock()
-		}
-		// Stream Ollama-shape NDJSON status frames (a manifest line, two
-		// download frames carrying total/completed so the streaming pull path
-		// can compute a percentage, then a terminal success) so the
-		// engine:pull-progress path has real frames to relay. A buffered
-		// engine:action reader tolerates this too (it just concatenates).
-		w.Header().Set("Content-Type", "application/x-ndjson")
+	// llama.cpp router pull protocol: a client subscribes to /models/sse, POSTs
+	// /models, and the engine acknowledges at once and then reports two byte
+	// progress events and the terminal download_finished for that model.
+	mux.HandleFunc("/models/sse", func(w http.ResponseWriter, r *http.Request) {
+		sub := make(chan string, 16)
+		pullMu.Lock()
+		pullSubs[sub] = struct{}{}
+		pullMu.Unlock()
+		defer func() {
+			pullMu.Lock()
+			delete(pullSubs, sub)
+			pullMu.Unlock()
+		}()
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(": ready\n\n"))
 		flusher, _ := w.(http.Flusher)
-		for _, line := range []string{
-			`{"status":"pulling manifest"}`,
-			`{"status":"pulling","total":100,"completed":40}`,
-			`{"status":"pulling","total":100,"completed":100}`,
-			`{"status":"success"}`,
-		} {
-			_, _ = w.Write([]byte(line + "\n"))
-			if flusher != nil {
-				flusher.Flush()
+		if flusher != nil {
+			flusher.Flush()
+		}
+		for {
+			select {
+			case payload := <-sub:
+				_, _ = fmt.Fprintf(w, "data: %s\n\n", payload)
+				if flusher != nil {
+					flusher.Flush()
+				}
+			case <-r.Context().Done():
+				return
 			}
 		}
+	})
+	mux.HandleFunc("/models", func(w http.ResponseWriter, r *http.Request) {
+		n := bstr(decodeBody(r), "model")
+		if n == "" {
+			http.Error(w, "model is required", http.StatusBadRequest)
+			return
+		}
+		modelsMu.Lock()
+		models[n] = true
+		modelsMu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true}`))
+		for _, done := range []int{40, 100} {
+			publishPullEvent(fmt.Sprintf(`{"model":%q,"event":"download_progress","data":{"progress":{"model.gguf":{"done":%d,"total":100}}}}`, n, done))
+		}
+		publishPullEvent(fmt.Sprintf(`{"model":%q,"event":"download_finished","data":{}}`, n))
 	})
 	mux.HandleFunc("/api/delete", func(w http.ResponseWriter, r *http.Request) {
 		if n := bstr(decodeBody(r), "name"); n != "" {
@@ -309,9 +308,8 @@ func main() {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"model": model, "response": "ack:" + bstr(b, "prompt"), "done": true})
 	})
-	// Ollama-shape loaded-models API: /api/ps lists only resident models (every
-	// row is loaded), mirroring the real endpoint's {models:[{name,size_vram,
-	// expires_at}]} shape.
+	// Loaded-models API: /api/ps lists only resident models (every row is
+	// loaded) as {models:[{name,size_vram,expires_at}]}.
 	mux.HandleFunc("/api/ps", func(w http.ResponseWriter, r *http.Request) {
 		ms := make([]map[string]any, 0)
 		for _, n := range loadedNames() {
@@ -320,7 +318,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"models": ms})
 	})
-	// LM Studio-shape (OpenAI-compatible).
+	// OpenAI-compatible model list.
 	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
 		data := make([]map[string]string, 0)
 		for _, n := range modelNames() {
@@ -329,22 +327,12 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": data})
 	})
-	// LM Studio native REST v1 models API: /api/v1/models lists every model with
-	// a loaded_instances array, so the loaded_models nonempty-array row filter
-	// has something to match on.
-	mux.HandleFunc("/api/v1/models", func(w http.ResponseWriter, r *http.Request) {
-		modelsMu.Lock()
-		data := make([]map[string]any, 0, len(models))
-		for n := range models {
-			instances := []any{}
-			if loaded[n] {
-				instances = []any{map[string]any{"id": n, "config": map[string]any{}}}
-			}
-			data = append(data, map[string]any{"key": n, "type": "llm", "loaded_instances": instances})
-		}
-		modelsMu.Unlock()
+	// OpenAI-compatible chat: one fixed non-streaming completion.
+	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		b := decodeBody(r)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"models": data})
+		_ = json.NewEncoder(w).Encode(map[string]any{"model": bstr(b, "model"), "object": "chat.completion",
+			"choices": []map[string]any{{"index": 0, "message": map[string]string{"role": "assistant", "content": "ok"}, "finish_reason": "stop"}}})
 	})
 	// Test-control: delay every /api/tags answer by {"ms":N}, so a test can
 	// change state while an inventory request is in flight.
@@ -383,12 +371,6 @@ func main() {
 		modelsMu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	})
-	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
-		b := decodeBody(r)
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"model": bstr(b, "model"), "object": "chat.completion",
-			"choices": []map[string]any{{"index": 0, "message": map[string]string{"role": "assistant", "content": "ok"}, "finish_reason": "stop"}}})
-	})
 	mux.HandleFunc("/api/error", func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "boom", http.StatusInternalServerError)
 	})
@@ -404,11 +386,11 @@ func main() {
 	allowed := map[string]string{
 		"/": http.MethodGet, "/api/version": http.MethodGet,
 		"/api/tags": http.MethodGet, "/api/ps": http.MethodGet,
-		"/v1/models": http.MethodGet, "/api/v1/models": http.MethodGet,
+		"/v1/models": http.MethodGet, "/v1/chat/completions": http.MethodPost,
 		"/api/error": http.MethodGet, "/exit": http.MethodGet,
-		"/api/pull": http.MethodPost, "/api/generate": http.MethodPost,
-		"/v1/chat/completions": http.MethodPost,
-		"/testctl/tags-delay":  http.MethodPost, "/testctl/digest": http.MethodPost,
+		"/models": http.MethodPost, "/models/sse": http.MethodGet,
+		"/api/generate":       http.MethodPost,
+		"/testctl/tags-delay": http.MethodPost, "/testctl/digest": http.MethodPost,
 		"/testctl/loaded": http.MethodPost, "/api/delete": http.MethodDelete,
 	}
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

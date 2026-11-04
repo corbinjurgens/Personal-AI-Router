@@ -13,15 +13,15 @@ import (
 
 // removeTreePreserving deletes target, except for preserve and whatever leads
 // to it. This is what keeps an engine uninstall from taking the user's model
-// library: LM Studio installs into ~/.lmstudio and keeps its downloads in
-// ~/.lmstudio/models, so removing the engine means removing every other child
-// of that directory and stopping there.
+// library: when an engine keeps its downloads inside its own install directory,
+// removing the engine means removing every other child of that directory and
+// stopping there.
 //
 // The relationship between target and the store decides what happens:
 //
 //   - preserve empty: nothing to keep, so a plain removal.
-//   - disjoint: a plain removal, as for Ollama, whose models sit in ~/.ollama
-//     while the uninstall removes the install directory.
+//   - disjoint: a plain removal, as when the models sit outside the install
+//     directory the uninstall removes.
 //   - the store below target: descend, keeping the store.
 //   - target is the store, or inside it: refused. Both ask to delete the store
 //     or part of it, which is a manifest bug, and widening to a full removal

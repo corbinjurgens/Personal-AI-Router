@@ -49,19 +49,16 @@ func TestIdentityCurrentModel(t *testing.T) {
 			waitAdvertised(t, f, want)
 		})
 	}
-	test("replaced tag cannot borrow another tag digest", "ollama", "a:v1", map[string]string{"a:v1": otherDigest, "a:v2": modelDigestB}, false)
-	test("unchanged tag with repeated digest", "ollama", "a:v2", map[string]string{"a:v1": modelDigestB, "a:v2": modelDigestB}, true)
-	test("missing requested model", "ollama", "a:v1", map[string]string{"a:v2": modelDigestB}, false)
-	test("agreeing implied latest aliases", "ollama", "a", map[string]string{" a ": modelDigestB, "a:latest": modelDigestB}, true)
-	test("conflicting implied latest aliases", "ollama", "a", map[string]string{"a": modelDigestB, "a:latest": otherDigest}, false)
-	test("conflicting reverse alias digest assignment", "ollama", "a:latest", map[string]string{"a": otherDigest, "a:latest": modelDigestB}, false)
-	test("exact names do not imply latest", "lmstudio", "a", map[string]string{"a:latest": modelDigestB}, false)
-	test("exact names trim whitespace", "lmstudio", "org/a", map[string]string{" org/a ": modelDigestB}, true)
-	test("reserved alias stays exempt", "ollama", "weak:latest", map[string]string{"weak": modelDigestB}, false)
+	test("replaced tag cannot borrow another tag digest", "llamacpp", "a:v1", map[string]string{"a:v1": otherDigest, "a:v2": modelDigestB}, false)
+	test("unchanged tag with repeated digest", "llamacpp", "a:v2", map[string]string{"a:v1": modelDigestB, "a:v2": modelDigestB}, true)
+	test("missing requested model", "llamacpp", "a:v1", map[string]string{"a:v2": modelDigestB}, false)
+	test("exact names do not imply latest", "llamacpp", "a", map[string]string{"a:latest": modelDigestB}, false)
+	test("exact names trim whitespace", "llamacpp", "org/a", map[string]string{" org/a ": modelDigestB}, true)
+	test("reserved alias stays exempt", "llamacpp", "weak:latest", map[string]string{"weak": modelDigestB}, false)
 }
 
 func TestIdentityCurrentModelDescriptorSelection(t *testing.T) {
-	test := func(name, engine, naming string, install, wantReady bool) {
+	test := func(name, engine, naming string, install bool, digestModel string, wantReady bool) {
 		t.Run(name, func(t *testing.T) {
 			f := newStrictFixture(t)
 			if install {
@@ -69,7 +66,7 @@ func TestIdentityCurrentModelDescriptorSelection(t *testing.T) {
 				d.ModelNaming = naming
 				f.b.setDynamicEngines([]engines.Descriptor{d}, func(int) bool { return true })
 			}
-			seedStrictIdentity(f.b, engine)
+			seedStrictIdentity(f.b, engine, digestModel)
 			capability := strictCapability(t, engine, "m")
 			reportStrict(t, f.b, "0", f.acks.runID, capability)
 			var want *nodepolicy.StrictAdmissionCapability
@@ -83,8 +80,8 @@ func TestIdentityCurrentModelDescriptorSelection(t *testing.T) {
 			waitAdvertised(t, f, want)
 		})
 	}
-	test("dynamic implied latest", "custom-implied", engines.ModelNamingImpliedLatestTag, true, true)
-	test("dynamic exact", "custom-exact", engines.ModelNamingExact, true, false)
-	test("unknown engine", "unknown-engine", "", false, false)
-	test("unknown descriptor naming", "custom-unknown", "unknown", true, false)
+	test("dynamic exact", "custom-exact", engines.ModelNamingExact, true, "m", true)
+	test("dynamic exact does not imply latest", "custom-exact", engines.ModelNamingExact, true, "m:latest", false)
+	test("unknown engine", "unknown-engine", "", false, "m", false)
+	test("unknown descriptor naming", "custom-unknown", "unknown", true, "m", false)
 }

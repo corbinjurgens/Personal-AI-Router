@@ -604,9 +604,8 @@ func ownerEvidenceFixture(t *testing.T) (*Executor, *engineState, desiredOwnerEv
 	manifest := &Manifest{Engine: "fake", Platforms: map[string]Platform{runtime.GOOS + "/" + runtime.GOARCH: platform}}
 	st := &engineState{manifest: manifest, plat: &platform, installDir: filepath.Join(root, "fake"), modelsDir: platform.ModelsDir}
 	e := &Executor{switchIncarnation: "manager-fixture", reg: &Registry{engines: map[string]*Manifest{"fake": manifest}}, engines: map[string]*engineState{"fake": st}, stopOnly: map[string]*engineState{},
-		desired:   newDesiredStateStore(t.TempDir()),
-		processes: func(context.Context) ([]string, error) { panic("evidence invoked process lookup") },
-		client:    &http.Client{Transport: ownerEvidenceRejectHTTP{}}, emit: func(string, any) { panic("evidence notified") },
+		desired: newDesiredStateStore(t.TempDir()),
+		client:  &http.Client{Transport: ownerEvidenceRejectHTTP{}}, emit: func(string, any) { panic("evidence notified") },
 		inventory: map[string][]string{"fake": {"must-not-be-read"}},
 	}
 	return e, st, desiredOwnerEvidence{State: desiredStateFile{Engines: map[string]bool{}, OffBy: map[string]intentOrigin{}, Locked: map[string]bool{}}}
@@ -1126,19 +1125,17 @@ func TestOwnerEvidenceStopAuthority(t *testing.T) {
 	unknown("empty run", "unobserved", func(st *engineState) { st.runID = "" })
 	unknown("reclaim failure", "reclaim_unknown", func(st *engineState) { st.reclaimFailed = true })
 	unknown("PID only locator", "reclaim_unknown", func(st *engineState) { st.reclaimPID = 4321 })
-	unknown("command without scoped lifetime", "scoped_lifetime_unknown", func(st *engineState) {
+	unknown("running without scoped lifetime", "scoped_lifetime_unknown", func(st *engineState) {
 		st.proc = nil
-		st.plat.Runtime.Mode = "command"
 		st.observeOwnerPresenceLocked(false)
 	})
-	unknown("command endpoint stopped without physical process proof", "scoped_lifetime_unknown", func(st *engineState) {
+	unknown("endpoint stopped without physical process proof", "scoped_lifetime_unknown", func(st *engineState) {
 		st.proc, st.running, st.runID = nil, false, ""
-		st.plat.Runtime.Mode = "command"
 		st.observeOwnerPresenceLocked(false)
 	})
-	t.Run("adopted command is known false even with Stop configured", func(t *testing.T) {
+	t.Run("adopted engine is known false even with Stop configured", func(t *testing.T) {
 		e, st, saved := ownerEvidenceFixture(t)
-		st.plat.Runtime.Mode, st.plat.Runtime.Stop = "command", &StopSpec{Cmd: []string{"must-not-run"}}
+		st.plat.Runtime.Stop = &StopSpec{Signal: "term"}
 		st.running, st.adopted, st.runID = true, true, "external-run"
 		st.observeOwnerPresenceLocked(false)
 		entry := ownerFixtureEntry(t, readOwnerFixture(e, saved), "fake")

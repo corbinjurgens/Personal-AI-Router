@@ -11,9 +11,10 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
+
+	"nvpair-shared/engines"
 )
 
 func TestSetPortPreservesServingOverrideAndExplicitRemoval(t *testing.T) {
@@ -115,14 +116,23 @@ func portFixtureManifest(engine string, port int) map[string]any {
 	p := m.Platforms[hostKey()]
 	p.Runtime.Port = port
 	p.Runtime.Args = []string{"serve"}
-	p.Runtime.Env = map[string]string{
-		"OLLAMA_HOST": "{host}:{port}", "FAKE_ADDR": "{host}:{port}",
-	}
+	p.Runtime.Env = map[string]string{"FAKE_ADDR": "{host}:{port}"}
 	return map[string]any{
 		"engine": engine, "display_name": engine, "manifest_version": 1,
 		"runtime": p.Runtime, "actions": m.Actions,
 		"platforms": map[string]any{hostKey(): map[string]any{"detect": p.Detect}},
 	}
+}
+
+func llamaPortFixtureManifest(engine string, port int) map[string]any {
+	m := portFixtureManifest(engine, port)
+	rt := m["runtime"].(Runtime)
+	rt.Env = map[string]string{"FAKE_ADDR": "{host}:{port}"}
+	m["runtime"] = rt
+	m["family"] = "llamacpp"
+	m["model_naming"] = engines.ModelNamingExact
+	m["actions"] = map[string]Action{"list_models": {HTTP: &ActionHTTP{Method: "GET", Path: "/v1/models"}}}
+	return m
 }
 
 // Synthetic candidates implement only the listener contract; no socket is bound.
@@ -291,12 +301,17 @@ func reloadPortFixture(t *testing.T, base *Registry, overrideDir string) *Regist
 	return reg
 }
 
-func newPortFixtureExecutor(t *testing.T, overrideDir string) *Executor {
+func newLlamaPortFixtureExecutor(t *testing.T, overrideDir string) *Executor {
+	t.Helper()
+	return portFixtureExecutorFor(t, overrideDir, []string{engines.NameLlamaCPP, portFixtureCustomEngine(t).Name}, llamaPortFixtureManifest)
+}
+
+func portFixtureExecutorFor(t *testing.T, overrideDir string, names []string, manifest func(string, int) map[string]any) *Executor {
 	t.Helper()
 	base := NewRegistry()
-	ports := privateTestPorts(t, 2)
-	for i, engine := range []string{"ollama", "lmstudio"} {
-		raw, err := json.Marshal(portFixtureManifest(engine, ports[i]))
+	ports := privateTestPorts(t, len(names))
+	for i, engine := range names {
+		raw, err := json.Marshal(manifest(engine, ports[i]))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -308,9 +323,18 @@ func newPortFixtureExecutor(t *testing.T, overrideDir string) *Executor {
 	return ex
 }
 
+func portFixtureCustomEngine(t *testing.T) engines.Engine {
+	t.Helper()
+	engine, ok := engines.DynamicEngine("llamacpp-custom", "llama.cpp custom")
+	if !ok {
+		t.Fatal("invalid custom fixture engine")
+	}
+	return engine
+}
+
 func adoptedEngineFixture(t *testing.T, engine string, port int, rt Runtime) *Executor {
 	t.Helper()
-	m := testEngineManifest(fakeEngineBin)
+	m := llamaTestEngineManifest(fakeEngineBin)
 	m.Engine = engine
 	m.DisplayName = engine
 	for key, platform := range m.Platforms {
@@ -333,35 +357,6 @@ func adoptedEngineFixture(t *testing.T, engine string, port int, rt Runtime) *Ex
 	return ex
 }
 
-func adoptedCommandEngineFixture(t *testing.T, engine string, port int) (*Executor, func() bool, func(int) bool) {
-	t.Helper()
-	dir := t.TempDir()
-	stopMarker := filepath.Join(dir, "stopped-{port}")
-	startMarker := filepath.Join(dir, "started-{port}")
-	ex := adoptedEngineFixture(t, engine, port, Runtime{
-		Mode:  "command",
-		Port:  port,
-		Start: [][]string{{fakeEngineBin, "touch", startMarker}},
-		Stop:  &StopSpec{Cmd: []string{fakeEngineBin, "touch", stopMarker}},
-	})
-	return ex,
-		func() bool { return fileExists(filepath.Join(dir, "stopped-"+strconv.Itoa(port))) },
-		func(port int) bool { return fileExists(filepath.Join(dir, "started-"+strconv.Itoa(port))) }
-}
-
-func ownedCommandEngineFixture(t *testing.T, engine string, port int) (*Executor, func() bool, func(int) bool) {
-	t.Helper()
-	ex, stopped, started := adoptedCommandEngineFixture(t, engine, port)
-	state, err := ex.state(engine)
-	if err != nil {
-		t.Fatal(err)
-	}
-	state.mu.Lock()
-	state.adopted = false
-	state.mu.Unlock()
-	return ex, stopped, started
-}
-
 func adoptedProcessEngineFixture(t *testing.T, engine string, port int) *Executor {
 	t.Helper()
 	return adoptedEngineFixture(t, engine, port, Runtime{
@@ -371,43 +366,33 @@ func adoptedProcessEngineFixture(t *testing.T, engine string, port int) *Executo
 	})
 }
 
-func adoptedCommandEngineWithoutStopFixture(t *testing.T, engine string, port int) *Executor {
-	t.Helper()
-	return adoptedEngineFixture(t, engine, port, Runtime{
-		Mode:  "command",
-		Port:  port,
-		Start: [][]string{{fakeEngineBin, "echo", "up"}},
-	})
-}
-
 // TestOverrideDeepMergePreservesBundled proves a partial port-only override
 // file pins runtime.port while inheriting the rest of the bundled manifest
 // (the single-source-of-truth merge that backs engine:set-port persistence).
 func TestOverrideDeepMergePreservesBundled(t *testing.T) {
 	dir := t.TempDir()
-	override := []byte(`{"engine":"ollama","runtime":{"port":54321}}`)
-	if err := os.WriteFile(filepath.Join(dir, "ollama.json"), override, 0o644); err != nil {
+	override := []byte(`{"engine":"llamacpp","runtime":{"port":54321}}`)
+	if err := os.WriteFile(filepath.Join(dir, "llamacpp.json"), override, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	reg := loadWithOverrides(t, dir)
 
-	m, ok := reg.Get("ollama")
+	m, ok := reg.Get(engines.NameLlamaCPP)
 	if !ok {
-		t.Fatal("ollama not loaded")
+		t.Fatal("llama.cpp not loaded")
 	}
 	p, ok := m.HostPlatform()
 	if !ok {
-		t.Fatal("ollama has no host platform")
+		t.Fatal("llama.cpp has no host platform")
 	}
 	if p.Runtime.Port != 54321 {
 		t.Errorf("override port: got %d, want 54321", p.Runtime.Port)
 	}
-	// Bundled fields untouched: the top-level runtime.args ["serve"] is
-	// inherited by every platform, and the install fetch URL survives.
-	if len(p.Runtime.Args) != 1 || p.Runtime.Args[0] != "serve" {
+	// Shared launch arguments and the platform install source survive.
+	if !slices.Equal(p.Runtime.Args, []string{"--sleep-idle-seconds", "300", "--ctx-size", "8192", "--parallel", "1", "--cache-ram", "512", "--host", "{host}", "--port", "{port}", "--cors-origins", ""}) {
 		t.Errorf("bundled runtime.args not preserved through merge: %v", p.Runtime.Args)
 	}
-	if p.Install == nil || p.Install.Fetch == nil || p.Install.Fetch.URL == "" {
+	if p.Install == nil || ((p.Install.Fetch == nil || p.Install.Fetch.URL == "") && len(p.Install.Artifacts) == 0) {
 		t.Errorf("bundled install fetch not preserved through merge: %+v", p.Install)
 	}
 }
@@ -416,10 +401,10 @@ func TestOverrideDeepMergePreservesBundled(t *testing.T) {
 // a bundled engine that isn't running: the chosen port is written as a
 // manifest override and a fresh (startup-style) load comes back up on it.
 func TestSetPortPersistsAndRestores(t *testing.T) {
-	for _, engine := range []string{"ollama", "lmstudio"} {
+	for _, engine := range []string{engines.NameLlamaCPP, portFixtureCustomEngine(t).Name} {
 		t.Run(engine, func(t *testing.T) {
 			dir := t.TempDir()
-			ex := newPortFixtureExecutor(t, dir)
+			ex := newLlamaPortFixtureExecutor(t, dir)
 			bundled := hostPort(t, ex.reg, engine)
 			port := privateTestPorts(t, 1, bundled)[0]
 
@@ -466,93 +451,82 @@ func TestSetPortPersistsAndRestores(t *testing.T) {
 
 // TestSetPortRejectsOutOfRange guards the validation boundary.
 func TestSetPortRejectsOutOfRange(t *testing.T) {
-	ex := newPortFixtureExecutor(t, t.TempDir())
+	ex := newLlamaPortFixtureExecutor(t, t.TempDir())
 	for _, bad := range []int{0, -1, 70000} {
-		if _, err := ex.SetPort(context.Background(), "ollama", bad); err == nil {
+		if _, err := ex.SetPort(context.Background(), engines.NameLlamaCPP, bad); err == nil {
 			t.Errorf("SetPort(%d) should have been rejected", bad)
 		}
 	}
 }
 
-func TestSetPortRefusesAdoptedCommandEngine(t *testing.T) {
+func TestSetPortStillRejectsAdoptedProcessEngine(t *testing.T) {
 	ports := privateTestPorts(t, 2)
-	oldPort, newPort := ports[0], ports[1]
-	ex, stopped, started := adoptedCommandEngineFixture(t, "lmstudio", oldPort)
-	if _, err := ex.SetPort(context.Background(), "lmstudio", newPort); err == nil || !strings.Contains(err.Error(), "external management") {
-		t.Fatalf("external command move = %v, want ownership refusal", err)
+	ex := adoptedProcessEngineFixture(t, engines.NameLlamaCPP, ports[0])
+	if _, err := ex.SetPort(context.Background(), engines.NameLlamaCPP, ports[1]); err == nil {
+		t.Fatal("adopted process engine unexpectedly moved")
 	}
-	if stopped() || started(oldPort) || started(newPort) {
-		t.Fatal("refused external move invoked a stop or start command")
+	if status, err := ex.Status(engines.NameLlamaCPP); err != nil || status.Port != ports[0] || !status.Running {
+		t.Fatalf("rejected process engine changed: status=%+v err=%v", status, err)
 	}
-	if status, err := ex.Status("lmstudio"); err != nil || status.Port != oldPort || !status.Running || !status.Healthy {
-		t.Fatalf("refused external move changed state: %+v, %v", status, err)
-	}
-	if _, err := os.Stat(filepath.Join(ex.overrideDir, "lmstudio.json")); !os.IsNotExist(err) {
-		t.Fatalf("refused external move persisted an override: %v", err)
+	if _, err := os.Stat(filepath.Join(ex.overrideDir, "llamacpp.json")); !os.IsNotExist(err) {
+		t.Fatalf("rejected process engine persisted an override: %v", err)
 	}
 }
 
-func TestSetPortMovesOwnedCommandEngine(t *testing.T) {
-	ports := privateTestPorts(t, 2)
-	oldPort, newPort := ports[0], ports[1]
-	ex, stopped, started := ownedCommandEngineFixture(t, "lmstudio", oldPort)
-	status, err := ex.SetPort(context.Background(), "lmstudio", newPort)
+// ownedProcessEngineFixture starts the fake engine as an owned process serving
+// port, so a test can move it.
+func ownedProcessEngineFixture(t *testing.T, engine string, port int) *Executor {
+	t.Helper()
+	ex := adoptedEngineFixture(t, engine, port, Runtime{
+		Bin:   fakeEngineBin,
+		Env:   map[string]string{"FAKE_ADDR": "127.0.0.1:{port}"},
+		Port:  port,
+		Ready: &Probe{TCP: "127.0.0.1:{port}", TimeoutS: 10},
+		Stop:  &StopSpec{Signal: "term", GraceS: 3},
+	})
+	st, err := ex.state(engine)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !stopped() || !started(newPort) {
-		t.Fatal("identified command engine was not stopped on the old port and restarted on the new port")
+	st.mu.Lock()
+	st.running, st.healthy, st.adopted = false, false, false
+	st.mu.Unlock()
+	t.Cleanup(ex.StopAll)
+	if err := ex.Start(context.Background(), engine); err != nil {
+		t.Fatalf("start owned engine: %v", err)
+	}
+	return ex
+}
+
+func TestSetPortMovesOwnedProcessEngine(t *testing.T) {
+	ports := privateTestPorts(t, 2)
+	oldPort, newPort := ports[0], ports[1]
+	engine := portFixtureCustomEngine(t).Name
+	ex := ownedProcessEngineFixture(t, engine, oldPort)
+	status, err := ex.SetPort(context.Background(), engine, newPort)
+	if err != nil {
+		t.Fatal(err)
 	}
 	if status.Port != newPort || !status.Running {
 		t.Fatalf("moved status = %+v, want running on %d", status, newPort)
 	}
 }
 
-func TestSetPortStillRejectsAdoptedProcessEngine(t *testing.T) {
-	ports := privateTestPorts(t, 2)
-	ex := adoptedProcessEngineFixture(t, "ollama", ports[0])
-	if _, err := ex.SetPort(context.Background(), "ollama", ports[1]); err == nil {
-		t.Fatal("adopted process engine unexpectedly moved")
-	}
-	if status, err := ex.Status("ollama"); err != nil || status.Port != ports[0] || !status.Running {
-		t.Fatalf("rejected process engine changed: status=%+v err=%v", status, err)
-	}
-	if _, err := os.Stat(filepath.Join(ex.overrideDir, "ollama.json")); !os.IsNotExist(err) {
-		t.Fatalf("rejected process engine persisted an override: %v", err)
-	}
-}
-
-func TestSetPortRejectsCommandEngineWithoutStopCommand(t *testing.T) {
-	ports := privateTestPorts(t, 2)
-	ex := adoptedCommandEngineWithoutStopFixture(t, "external", ports[0])
-	if _, err := ex.SetPort(context.Background(), "external", ports[1]); err == nil {
-		t.Fatal("command engine without official stop unexpectedly moved")
-	}
-	if status, err := ex.Status("external"); err != nil || status.Port != ports[0] || !status.Running {
-		t.Fatalf("rejected command engine changed: status=%+v err=%v", status, err)
-	}
-	if _, err := os.Stat(filepath.Join(ex.overrideDir, "external.json")); !os.IsNotExist(err) {
-		t.Fatalf("rejected command engine persisted an override: %v", err)
-	}
-}
-
 func TestSetPortRestartsOldPortWhenPersistenceFails(t *testing.T) {
 	ports := privateTestPorts(t, 2)
 	oldPort, newPort := ports[0], ports[1]
-	ex, stopped, started := ownedCommandEngineFixture(t, "lmstudio", oldPort)
+	engine := portFixtureCustomEngine(t).Name
+	ex := ownedProcessEngineFixture(t, engine, oldPort)
 	blocked := filepath.Join(t.TempDir(), "not-a-directory")
 	if err := os.WriteFile(blocked, []byte("blocked"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	ex.overrideDir = blocked
 
-	if _, err := ex.SetPort(context.Background(), "lmstudio", newPort); err == nil {
+	if _, err := ex.SetPort(context.Background(), engine, newPort); err == nil {
 		t.Fatal("expected persistence failure")
 	}
-	if !stopped() || !started(oldPort) || started(newPort) {
-		t.Fatal("persistence failure did not stop and restore the engine on its old port")
-	}
-	if status, err := ex.Status("lmstudio"); err != nil || status.Port != oldPort || !status.Running {
+	if status, err := ex.Status(engine); err != nil || status.Port != oldPort || !status.Running {
 		t.Fatalf("restored status = %+v err=%v, want running on %d", status, err, oldPort)
 	}
 }

@@ -5,11 +5,12 @@ package main
 
 // memory_evidence.go is the engine-manager half of the local memory-evidence
 // contract: a bounded, source-bound producer that reads the fixed, read-only
-// operator qualification document and compares it with the same loaded-model
-// response the model sweep already fetches. It never queries an engine, starts
-// a process, or changes admission. A qualification is scoped to the current
-// manager incarnation, engine run, launch, model content and fully applied
-// settings; absent or mismatched authority leaves the qualified upper nil.
+// operator qualification document and reports one entry per documented model.
+// No engine has a supported loaded-memory extractor, so every entry is
+// unsupported with no observed allocation and the qualified upper stays nil.
+// The producer never queries an engine, starts a process, or changes admission.
+// A qualification would be scoped to the current manager incarnation, engine
+// run, launch, model content and fully applied settings.
 
 import (
 	"bytes"
@@ -41,14 +42,6 @@ const (
 	maxMemoryQualificationBytes = 256 << 10
 	// maxMemoryQualificationRecords bounds the records in one document.
 	maxMemoryQualificationRecords = 128
-	// memoryExtractorOllamaPSRevision is the one supported loaded-memory
-	// extractor: the official Ollama /api/ps shape. It is not a live runtime
-	// version acceptance claim.
-	memoryExtractorOllamaPSRevision = "ollama-ps-v1"
-	// memoryFamilyOllama is the registry descriptor family that owns the
-	// loaded-model memory extractor. An engine ID never grants support by
-	// itself.
-	memoryFamilyOllama = "ollama"
 )
 
 // memoryEvidenceProducer is the zero-value-safe producer state. Its zero value
@@ -62,7 +55,6 @@ type memoryEvidenceProducer struct {
 	generation uint64
 	authority  memoryEvidenceAuthority
 	artifact   *memoryQualificationState
-	readings   map[string]memoryReading
 }
 
 // memoryEvidenceAuthority is the one document-level high-water record retained
@@ -89,24 +81,11 @@ type memoryQualificationState struct {
 	lastWallMs     int64
 }
 
-// memoryReading is the last completed allocation observation for one source
-// model. observedAt retains the conservative pre-I/O capture anchor, rather
-// than the time this reading was projected. generation orders overlapping
-// sweeps; a late older completion never replaces a newer reading.
-type memoryReading struct {
-	generation uint64
-	observedAt time.Time
-	allocated  *int64
-	context    *int64
-	digest     string
-	ambiguous  bool
-}
-
 // memoryEvidenceCapture is taken before the existing loaded-model read. The
-// model owner passes the raw response to memoryEvidenceEntries afterwards, which
-// rechecks this same source before publishing anything. startedAt is a
-// conservative monotonic allocation-age anchor: source capture, the whole
-// sweep's I/O and buffering, and verification all count toward reading age.
+// model owner passes it to memoryEvidenceEntries afterwards, which rechecks this
+// same source before publishing anything. startedAt is a
+// conservative monotonic age anchor: source capture, the whole sweep's I/O and
+// buffering, and verification all count toward sample age.
 type memoryEvidenceCapture struct {
 	generation             uint64
 	startedAt              time.Time
@@ -121,10 +100,9 @@ type memoryEvidenceSourceSnapshot struct {
 	engines            map[string]engineModelIdentity
 	epochs             map[string]uint64
 	settings           map[string]memoryAppliedSettings
-	// families and naming come from the live registry descriptor, not from
-	// the artifact. They decide extractor support and canonical model names.
-	families map[string]string
-	naming   map[string]string
+	// naming comes from the live registry descriptor, not from the artifact.
+	// It decides canonical model names.
+	naming map[string]string
 }
 
 type memoryAppliedSettings struct {
@@ -240,15 +218,11 @@ func (e *Executor) captureMemoryEvidence() memoryEvidenceCapture {
 // memoryEvidenceEntries is the post-read verifier/producer. It rechecks the
 // capture's source, reads and validates the bounded fixed document outside the
 // state lock, and returns at most one entry per documented model for the engine.
-// Raw is the existing loaded_models response; this function performs no query.
-// A memory failure never removes model names and never widens the bound.
-func (e *Executor) memoryEvidenceEntries(capture memoryEvidenceCapture, engine string, raw json.RawMessage) []performancewire.MemoryEvidenceEntry {
-	naming := capture.source.naming[engine]
-	rows, rowsOK := parseOllamaLoadedMemory(raw, naming)
-	if capture.source.families[engine] != memoryFamilyOllama {
-		rowsOK = false
-	}
-
+// No engine has a supported loaded-memory extractor, so the engine's loaded_models
+// response is not read and every entry is unsupported with no observed
+// allocation. This function performs no query. A memory failure never removes
+// model names and never widens the bound.
+func (e *Executor) memoryEvidenceEntries(capture memoryEvidenceCapture, engine string) []performancewire.MemoryEvidenceEntry {
 	path := filepath.Join(e.baseDir, memoryQualificationFile)
 	data, present, readErr := readBoundedMemoryQualification(path)
 
@@ -276,7 +250,6 @@ func (e *Executor) memoryEvidenceEntries(capture memoryEvidenceCapture, engine s
 		p.authority.clockUncertain = true
 	}
 
-	qualifiedUpper := p.authority.withdrawn == false && p.authority.clockUncertain == false
 	state := p.artifact
 	records := []memoryQualificationRecord(nil)
 	if state != nil {
@@ -287,56 +260,17 @@ func (e *Executor) memoryEvidenceEntries(capture memoryEvidenceCapture, engine s
 	if state != nil {
 		if age, ok := p.qualificationAge(state, now); ok {
 			qualificationAge = &age
-		} else {
-			qualifiedUpper = false
 		}
 	}
 
-	if len(records) == 0 {
-		return memoryEvidenceLoadedUnknown(capture, engine, rows, rowsOK, sourceUnchanged, qualificationAge, now)
-	}
-
-	relevant := make([]memoryQualificationRecord, 0, len(records))
+	entries := make([]performancewire.MemoryEvidenceEntry, 0, len(records))
 	for _, record := range records {
 		if record.Source != nil && record.Source.Engine != nil && *record.Source.Engine == engine {
-			relevant = append(relevant, record)
+			entries = append(entries, p.recordEntry(record, capture, engine, sourceUnchanged, artifactCurrent, qualificationAge))
 		}
 	}
-	if len(relevant) == 0 {
-		return memoryEvidenceLoadedUnknown(capture, engine, rows, rowsOK, sourceUnchanged, qualificationAge, now)
-	}
-
-	// Contradictions survive overlapping sweeps even when their observations
-	// are too old to publish. Bind them to authority retained or read before
-	// I/O so a late response cannot withdraw replacement authority.
-	if sourceUnchanged && state != nil && (capture.artifactDigest == state.digest || capture.retainedArtifactDigest == state.digest) && !p.authority.withdrawn && rowsOK {
-		for _, record := range relevant {
-			if !recordMatchesCapture(record, capture.source, engine) || !memoryRecordSupported(record, capture.source) {
-				continue
-			}
-			model := memoryCanonicalModel(recordModel(record), naming)
-			reading, ok := rows[model]
-			if !ok || reading.ambiguous || reading.allocated == nil || reading.digest != recordModelDigest(record) {
-				continue
-			}
-			if *reading.allocated > *record.Qualification.UpperBytes {
-				p.authority.withdrawn = true
-				qualifiedUpper = false
-			}
-		}
-	}
-
-	entries := make([]performancewire.MemoryEvidenceEntry, 0, len(relevant))
-	covered := make(map[string]bool, len(relevant))
-	for _, record := range relevant {
-		entry := p.recordEntry(record, capture, engine, rows, rowsOK, sourceUnchanged, artifactCurrent, qualificationAge, qualifiedUpper)
-		entries = append(entries, entry)
-		covered[entry.Model] = true
-	}
-	for _, entry := range memoryEvidenceLoadedUnknown(capture, engine, rows, rowsOK, sourceUnchanged, nil, now) {
-		if !covered[entry.Model] {
-			entries = append(entries, entry)
-		}
+	if len(entries) == 0 {
+		return nil
 	}
 	return entries
 }
@@ -344,11 +278,11 @@ func (e *Executor) memoryEvidenceEntries(capture memoryEvidenceCapture, engine s
 // finalizeMemoryEvidence is the whole-sweep fence for the model publication
 // owner. Call it once, after every engine's raw response for one capture has
 // been passed to memoryEvidenceEntries and before freezing the payload. A
-// contradiction latched by any engine, a changed source/config/content, or a
+// withdrawal latched by any engine, a changed source/config/content, or a
 // newer capture invalidates every positive upper in the combined projection,
-// including entries that were built earlier in the same sweep. Advisory
-// observation ages and source bindings are fenced as well. It reads the current
-// source outside the producer lock and performs no I/O while holding it.
+// including entries that were built earlier in the same sweep. Sample ages and
+// source bindings are fenced as well. It reads the current source outside the
+// producer lock and performs no I/O while holding it.
 func (e *Executor) finalizeMemoryEvidence(capture memoryEvidenceCapture, entries []performancewire.MemoryEvidenceEntry) []performancewire.MemoryEvidenceEntry {
 	if len(entries) == 0 {
 		return entries
@@ -375,13 +309,6 @@ func (e *Executor) finalizeMemoryEvidence(capture memoryEvidenceCapture, entries
 			qualificationAge = &age
 		}
 	}
-	readings := make(map[string]memoryReading, len(p.readings))
-	for key, reading := range p.readings {
-		readings[key] = reading
-		if now.Before(reading.observedAt) {
-			p.authority.clockUncertain = true
-		}
-	}
 	clockUncertain = p.authority.clockUncertain
 	p.mu.Unlock()
 
@@ -391,18 +318,8 @@ func (e *Executor) finalizeMemoryEvidence(capture memoryEvidenceCapture, entries
 		entryCurrent := available && (out[i].Qualification.UpperBytes == nil ||
 			(out[i].Qualification.ArtifactDigest != nil && *out[i].Qualification.ArtifactDigest == digest))
 		if sourceUnchanged && !stale {
-			anchor := time.Time{}
-			if out[i].Freshness.Generation != nil {
-				if *out[i].Freshness.Generation == capture.generation {
-					anchor = capture.startedAt
-				}
-				if reading, ok := readings[memoryReadingKey(out[i].Engine, out[i].Model)]; ok &&
-					*out[i].Freshness.Generation == reading.generation {
-					anchor = reading.observedAt
-				}
-			}
-			if !anchor.IsZero() {
-				age := now.Sub(anchor).Milliseconds()
+			if out[i].Freshness.Generation != nil && *out[i].Freshness.Generation == capture.generation {
+				age := now.Sub(capture.startedAt).Milliseconds()
 				if age >= 0 && !clockUncertain {
 					out[i].Freshness.SampleAgeMs = &age
 				} else {
@@ -480,14 +397,12 @@ func (e *Executor) memoryEvidenceSource(provider func() string) memoryEvidenceSo
 		host = provider()
 	}
 	identity := e.modelIdentity()
-	families := map[string]string{}
 	naming := map[string]string{}
 	for _, name := range e.reg.Names() {
 		manifest, ok := e.reg.Get(name)
 		if !ok || manifest == nil {
 			continue
 		}
-		families[name] = manifest.FamilyOrDefault()
 		naming[name] = manifest.ModelNamingOrDefault()
 	}
 	return memoryEvidenceSourceSnapshot{
@@ -496,7 +411,6 @@ func (e *Executor) memoryEvidenceSource(provider func() string) memoryEvidenceSo
 		engines:            identity.Engines,
 		epochs:             identity.epochs,
 		settings:           e.memoryAppliedSettings(),
-		families:           families,
 		naming:             naming,
 	}
 }
@@ -563,11 +477,11 @@ func sameMemoryEvidenceSource(a, b memoryEvidenceSourceSnapshot) bool {
 			return false
 		}
 	}
-	if len(a.families) != len(b.families) || len(a.naming) != len(b.naming) {
+	if len(a.naming) != len(b.naming) {
 		return false
 	}
-	for name, family := range a.families {
-		if b.families[name] != family || b.naming[name] != a.naming[name] {
+	for name, naming := range a.naming {
+		if b.naming[name] != naming {
 			return false
 		}
 	}
@@ -888,23 +802,6 @@ func (p *memoryEvidenceProducer) acceptMemoryQualification(document memoryQualif
 		baseAgeMs: age, lastAgeMs: age,
 		lastWallMs: nowMs,
 	}
-	// Readings survive a new document; they are observations, not authority.
-	// Prune anything the new document no longer names so the map stays bounded.
-	if p.readings == nil {
-		p.readings = make(map[string]memoryReading)
-	}
-	allowed := make(map[string]bool, len(*document.Records))
-	for _, record := range *document.Records {
-		if record.Source != nil && record.Source.Engine != nil && record.Source.Model != nil {
-			naming := source.naming[*record.Source.Engine]
-			allowed[memoryReadingKey(*record.Source.Engine, memoryCanonicalModel(*record.Source.Model, naming))] = true
-		}
-	}
-	for key := range p.readings {
-		if !allowed[key] {
-			delete(p.readings, key)
-		}
-	}
 }
 
 func parseCanonicalRevision(revision string) (uint64, error) {
@@ -1031,81 +928,20 @@ func (p *memoryEvidenceProducer) qualificationAge(state *memoryQualificationStat
 	return age, true
 }
 
-func (p *memoryEvidenceProducer) recordEntry(record memoryQualificationRecord, capture memoryEvidenceCapture, engine string, rows map[string]memoryReading, rowsOK, sourceUnchanged, artifactCurrent bool, qualificationAge *int64, qualifiedUpper bool) performancewire.MemoryEvidenceEntry {
+// recordEntry projects one documented record. With no supported extractor the
+// entry never carries an allocation or a qualified upper: it is unknown, marked
+// unsupported with a missing reading, plus any identity, document or clock
+// reasons.
+func (p *memoryEvidenceProducer) recordEntry(record memoryQualificationRecord, capture memoryEvidenceCapture, engine string, sourceUnchanged, artifactCurrent bool, qualificationAge *int64) performancewire.MemoryEvidenceEntry {
 	model := memoryCanonicalModel(recordModel(record), capture.source.naming[engine])
-	reasons := make([]performancewire.MemoryUncertainty, 0, 4)
-	reading, hasReading := rows[model]
-	if !rowsOK {
-		hasReading = false
-	}
-	now := p.clock()
-	staleGeneration := capture.generation < p.generation
+	reasons := make([]performancewire.MemoryUncertainty, 0, 6)
 	entry := baseMemoryEvidenceEntry(record, capture, model)
-	if !recordMatchesCapture(record, capture.source, engine) || (hasReading && reading.digest != recordModelDigest(record)) {
+	recordMatches := recordMatchesCapture(record, capture.source, engine)
+	if !recordMatches {
 		// An old operator document is never current-run provenance for a
-		// fresh allocation from a replacement engine or model.
+		// replacement engine or model.
 		entry.Provenance = performancewire.MemoryProvenance{}
 		entry.Envelope = performancewire.MemoryEnvelope{}
-	}
-	entry.Observed = performancewire.MemoryObservation{
-		ExtractorRevision: memoryValue(memoryExtractorOllamaPSRevision),
-	}
-	if !memoryRecordSupported(record, capture.source) {
-		hasReading = false
-		entry.Observed.ExtractorRevision = nil
-	}
-	if hasReading {
-		key := memoryReadingKey(engine, model)
-		prior, seen := p.readings[key]
-		switch {
-		case staleGeneration:
-			// Keep the locally read values but publish no age or upper: this
-			// completion lost to a newer sweep.
-			reading.observedAt = time.Time{}
-		case seen && now.Before(prior.observedAt):
-			// A backward sample time makes every age unprovable.
-			p.authority.clockUncertain = true
-			reading = prior
-		case seen && capture.generation <= prior.generation:
-			// The same capture/generation is a duplicate, not a new read.
-			reading = prior
-		default:
-			if p.readings == nil {
-				p.readings = make(map[string]memoryReading)
-			}
-			p.readings[key] = memoryReading{
-				generation: capture.generation, observedAt: capture.startedAt, allocated: reading.allocated,
-				context: reading.context, digest: reading.digest, ambiguous: reading.ambiguous,
-			}
-			reading = p.readings[key]
-		}
-		entry.Observed.AllocatedBytes = reading.allocated
-		entry.Envelope.Domain = memoryValue(performancewire.MemoryDomainDedicatedDevice)
-		if entry.Source.ModelDigest != nil && *entry.Source.ModelDigest != reading.digest {
-			entry.Source.ModelDigest = nil
-		}
-		entry.Freshness.Generation = memoryValue(reading.generation)
-		if reading.generation == 0 {
-			entry.Freshness.Generation = nil
-		}
-		if !reading.observedAt.IsZero() {
-			sampleAge := now.Sub(reading.observedAt).Milliseconds()
-			if sampleAge < 0 {
-				p.authority.clockUncertain = true
-				reasons = appendMemoryUncertainty(reasons, performancewire.MemoryUncertaintyClockUncertain)
-				qualifiedUpper = false
-			} else {
-				entry.Freshness.SampleAgeMs = &sampleAge
-				if sampleAge > performancewire.MemoryReadingValidForMs {
-					reasons = appendMemoryUncertainty(reasons, performancewire.MemoryUncertaintyStale)
-					qualifiedUpper = false
-				}
-			}
-		}
-		if staleGeneration {
-			reasons = appendMemoryUncertainty(reasons, performancewire.MemoryUncertaintyStale)
-			qualifiedUpper = false
-		}
 	}
 	entry.Freshness.QualificationAgeMs = qualificationAge
 	if !sourceUnchanged {
@@ -1117,75 +953,22 @@ func (p *memoryEvidenceProducer) recordEntry(record memoryQualificationRecord, c
 		entry.Freshness.Generation = nil
 	}
 
-	if !sourceUnchanged || !recordMatchesCapture(record, capture.source, engine) {
+	if !sourceUnchanged || !recordMatches {
 		reasons = appendMemoryUncertainty(reasons, performancewire.MemoryUncertaintyIdentityChanged)
-		qualifiedUpper = false
 	}
 	if !artifactCurrent {
 		reasons = appendMemoryUncertainty(reasons, performancewire.MemoryUncertaintyQualificationMissing)
-		qualifiedUpper = false
 	}
 	if p.authority.clockUncertain {
 		reasons = appendMemoryUncertainty(reasons, performancewire.MemoryUncertaintyClockUncertain)
-		qualifiedUpper = false
 	}
 	if p.authority.withdrawn {
 		reasons = appendMemoryUncertainty(reasons, performancewire.MemoryUncertaintyBoundExceeded)
-		qualifiedUpper = false
 	}
-	if !memoryRecordSupported(record, capture.source) {
-		reasons = appendMemoryUncertainty(reasons, performancewire.MemoryUncertaintyUnsupported)
-		qualifiedUpper = false
-	}
-	if !hasReading {
-		reasons = appendMemoryUncertainty(reasons, performancewire.MemoryUncertaintyMissingReading)
-		qualifiedUpper = false
-	}
-	if hasReading && reading.ambiguous {
-		reasons = appendMemoryUncertainty(reasons, performancewire.MemoryUncertaintyQualificationMismatch)
-		qualifiedUpper = false
-	}
-	if hasReading && reading.allocated == nil {
-		reasons = appendMemoryUncertainty(reasons, performancewire.MemoryUncertaintyMissingReading)
-		qualifiedUpper = false
-	}
-	if hasReading && reading.digest != recordModelDigest(record) {
-		reasons = appendMemoryUncertainty(reasons, performancewire.MemoryUncertaintyQualificationMismatch)
-		qualifiedUpper = false
-	}
-	if hasReading && reading.context == nil {
-		reasons = appendMemoryUncertainty(reasons, performancewire.MemoryUncertaintyContextUnknown)
-		qualifiedUpper = false
-	}
-	if hasReading && reading.context != nil && record.Envelope != nil && record.Envelope.EffectiveContextTokens != nil && *reading.context != *record.Envelope.EffectiveContextTokens {
-		reasons = appendMemoryUncertainty(reasons, performancewire.MemoryUncertaintyQualificationMismatch)
-		qualifiedUpper = false
-	}
-	if hasReading && reading.allocated != nil && record.Qualification != nil && record.Qualification.UpperBytes != nil &&
-		*reading.allocated > *record.Qualification.UpperBytes {
-		reasons = appendMemoryUncertainty(reasons, performancewire.MemoryUncertaintyBoundExceeded)
-		qualifiedUpper = false
-	}
-	if qualifiedUpper && len(reasons) == 0 && hasReading && reading.allocated != nil &&
-		entry.Freshness.SampleAgeMs != nil && entry.Freshness.QualificationAgeMs != nil {
-		entry.State = performancewire.MemoryStateQualified
-		entry.Uncertainty = []performancewire.MemoryUncertainty{}
-		entry.Qualification = performancewire.MemoryQualification{
-			UpperBytes: record.Qualification.UpperBytes, ID: record.Qualification.ID,
-			Revision: memoryValue(p.artifact.revision), ArtifactDigest: memoryValue(p.artifact.digest),
-			ProcedureDigest: record.Procedure.Digest,
-		}
-		return entry
-	}
-	if hasReading && reading.allocated != nil {
-		entry.State = performancewire.MemoryStateAdvisory
-	} else {
-		entry.State = performancewire.MemoryStateUnknown
-	}
+	reasons = appendMemoryUncertainty(reasons, performancewire.MemoryUncertaintyUnsupported)
+	reasons = appendMemoryUncertainty(reasons, performancewire.MemoryUncertaintyMissingReading)
+	entry.State = performancewire.MemoryStateUnknown
 	entry.Uncertainty = reasons
-	if entry.Uncertainty == nil {
-		entry.Uncertainty = []performancewire.MemoryUncertainty{}
-	}
 	return entry
 }
 
@@ -1308,93 +1091,11 @@ func memoryUnknownLoadedNames(capture memoryEvidenceCapture, engine string, name
 		covered[name] = true
 		record := memoryQualificationRecord{Source: &memoryArtifactSource{Engine: memoryValue(engine)}}
 		entry := baseMemoryEvidenceEntry(record, capture, name)
-		entry.Uncertainty = []performancewire.MemoryUncertainty{performancewire.MemoryUncertaintyMissingReading}
+		entry.Uncertainty = []performancewire.MemoryUncertainty{performancewire.MemoryUncertaintyUnsupported}
 		entry.Freshness.Generation = nil
-		if capture.source.families[engine] != memoryFamilyOllama {
-			entry.Uncertainty = []performancewire.MemoryUncertainty{performancewire.MemoryUncertaintyUnsupported}
-		}
 		entries = append(entries, entry)
 	}
 	return entries
-}
-
-func memoryEvidenceLoadedUnknown(capture memoryEvidenceCapture, engine string, rows map[string]memoryReading, rowsOK, sourceUnchanged bool, qualificationAge *int64, now time.Time) []performancewire.MemoryEvidenceEntry {
-	if !rowsOK || len(rows) == 0 || capture.source.families[engine] != memoryFamilyOllama {
-		return nil
-	}
-	names := make([]string, 0, len(rows))
-	for name := range rows {
-		names = append(names, name)
-	}
-	slices.Sort(names)
-	if len(names) > maxMemoryQualificationRecords {
-		names = names[:maxMemoryQualificationRecords]
-	}
-	out := make([]performancewire.MemoryEvidenceEntry, 0, len(names))
-	for _, name := range names {
-		reading := rows[name]
-		entry := performancewire.MemoryEvidenceEntry{
-			Engine: engine, Model: name, State: performancewire.MemoryStateUnknown,
-			Uncertainty: []performancewire.MemoryUncertainty{performancewire.MemoryUncertaintyQualificationMissing},
-			Source: performancewire.MemorySource{
-				HostUUID: memoryOptionalID(capture.source.hostUUID), ManagerIncarnation: memoryOptionalID(capture.source.managerIncarnation),
-			},
-			AppliedSettings: performancewire.MemoryAppliedSettings{},
-			Envelope:        performancewire.MemoryEnvelope{},
-			Observed: performancewire.MemoryObservation{
-				AllocatedBytes: reading.allocated, ExtractorRevision: memoryValue(memoryExtractorOllamaPSRevision),
-			},
-			Qualification: performancewire.MemoryQualification{},
-			Provenance:    performancewire.MemoryProvenance{},
-			Freshness: performancewire.MemoryFreshness{
-				QualificationAgeMs: qualificationAge, Generation: memoryValue(capture.generation),
-				ReadingValidForMs: performancewire.MemoryReadingValidForMs,
-			},
-		}
-		entry.Envelope.Domain = memoryValue(performancewire.MemoryDomainDedicatedDevice)
-		if !capture.startedAt.IsZero() && !now.Before(capture.startedAt) && now.UnixMilli() >= capture.startedAt.UnixMilli() {
-			age := now.Sub(capture.startedAt).Milliseconds()
-			entry.Freshness.SampleAgeMs = &age
-			if age > performancewire.MemoryReadingValidForMs {
-				entry.Uncertainty = appendMemoryUncertainty(entry.Uncertainty, performancewire.MemoryUncertaintyStale)
-			}
-		} else {
-			entry.Uncertainty = appendMemoryUncertainty(entry.Uncertainty, performancewire.MemoryUncertaintyClockUncertain)
-		}
-		if identity, ok := capture.source.engines[engine]; ok {
-			entry.Source.EngineRunID = memoryOptionalID(identity.EngineRunID)
-			entry.Source.LaunchDigest = memoryOptionalDigest(identity.LaunchDigest)
-			if digest, ok := memoryInventoryDigest(identity.ModelDigests, capture.source.naming[engine], name); ok && digest == reading.digest {
-				entry.Source.ModelDigest = memoryOptionalDigest(digest)
-			}
-		}
-		if applied, ok := capture.source.settings[engine]; ok && applied.ok {
-			entry.AppliedSettings = performancewire.MemoryAppliedSettings{Epoch: memoryValue(applied.epoch), Revision: memoryValue(applied.revision)}
-		}
-		if reading.allocated != nil {
-			entry.State = performancewire.MemoryStateAdvisory
-		}
-		if !sourceUnchanged {
-			entry.Source = performancewire.MemorySource{}
-			entry.AppliedSettings = performancewire.MemoryAppliedSettings{}
-			entry.Envelope = performancewire.MemoryEnvelope{}
-			entry.Freshness.SampleAgeMs = nil
-			entry.Freshness.Generation = nil
-			entry.Uncertainty = appendMemoryUncertainty(entry.Uncertainty, performancewire.MemoryUncertaintyIdentityChanged)
-		}
-		out = append(out, entry)
-	}
-	return out
-}
-
-func memoryRecordSupported(record memoryQualificationRecord, source memoryEvidenceSourceSnapshot) bool {
-	if record.Source == nil || record.Envelope == nil || record.Envelope.Domain == nil ||
-		record.Envelope.ExtractorRevision == nil || record.Source.Engine == nil {
-		return false
-	}
-	return source.families[*record.Source.Engine] == memoryFamilyOllama &&
-		*record.Envelope.Domain == performancewire.MemoryDomainDedicatedDevice &&
-		*record.Envelope.ExtractorRevision == memoryExtractorOllamaPSRevision
 }
 
 func recordEngine(record memoryQualificationRecord) string {
@@ -1451,142 +1152,4 @@ func memoryOptionalDigest(value string) *string {
 		return nil
 	}
 	return &value
-}
-
-// parseOllamaLoadedMemory reads only the official /api/ps members this
-// extractor supports. Additional native fields are preserved from the response
-// but ignored here. A bounded structural check rejects duplicate or
-// case-variant keys in the response envelope and in every row before a decoder
-// can silently keep the last value. Any ambiguous field, normalized name or
-// digest ownership rejects the allocation response as a whole: dropping a row
-// must not hide a conflict with a clean sibling. size_vram is the
-// dedicated-device observation; missing, negative, fractional, overflowing or
-// null is unknown, never zero. context_length missing stays unknown.
-func parseOllamaLoadedMemory(raw json.RawMessage, naming string) (map[string]memoryReading, bool) {
-	if len(raw) == 0 || len(raw) > performancewire.MaxMemoryEvidenceBytes || !utf8.Valid(raw) {
-		return nil, false
-	}
-	object, duplicate, err := memoryStrictObjectFields(raw)
-	if err != nil || duplicate {
-		return nil, false
-	}
-	array, ok := object["models"]
-	if !ok || bytes.Equal(bytes.TrimSpace(array), []byte("null")) {
-		return nil, false
-	}
-	var elements []json.RawMessage
-	if err := json.Unmarshal(array, &elements); err != nil || len(elements) > maxMemoryQualificationRecords {
-		return nil, false
-	}
-	rows := make(map[string]memoryReading, len(elements))
-	digests := make(map[string]bool, len(elements))
-	for _, element := range elements {
-		elementFields, ambiguous, err := memoryStrictObjectFields(element)
-		if err != nil || ambiguous {
-			return nil, false
-		}
-		rawName := memoryJSONString(elementFields["name"])
-		rawModel := memoryJSONString(elementFields["model"])
-		digest := memoryJSONString(elementFields["digest"])
-		if rawName == "" || rawModel == "" || digest == "" {
-			return nil, false
-		}
-		name := memoryCanonicalModel(rawName, naming)
-		model := memoryCanonicalModel(rawModel, naming)
-		if name == "" || name != model {
-			return nil, false
-		}
-		if _, seen := rows[name]; seen {
-			return nil, false
-		}
-		if digests[digest] {
-			return nil, false
-		}
-		digests[digest] = true
-		rows[name] = memoryReading{
-			allocated: memoryJSONNonnegative(elementFields["size_vram"]),
-			context:   memoryJSONPositive(elementFields["context_length"]),
-			digest:    digest,
-		}
-	}
-	return rows, true
-}
-
-// memoryStrictObjectFields reads one JSON object, preserving additional native
-// fields but reporting any duplicate key, including a case variant. The first
-// value is retained only to identify the affected row; a duplicate is never
-// resolved by keeping the last value.
-func memoryStrictObjectFields(data []byte) (map[string]json.RawMessage, bool, error) {
-	notObject := errors.New("loaded model response is not a JSON object")
-	dec := json.NewDecoder(bytes.NewReader(data))
-	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
-		return nil, false, notObject
-	}
-	fields := map[string]json.RawMessage{}
-	seen := map[string]string{}
-	duplicate := false
-	for dec.More() {
-		tok, err := dec.Token()
-		if err != nil {
-			return nil, false, notObject
-		}
-		rawKey, err := json.Marshal(tok)
-		if err != nil {
-			return nil, false, notObject
-		}
-		var key string
-		if err := json.Unmarshal(rawKey, &key); err != nil {
-			return nil, false, notObject
-		}
-		for prior := range seen {
-			if strings.EqualFold(prior, key) {
-				duplicate = true
-			}
-		}
-		var value json.RawMessage
-		if err := dec.Decode(&value); err != nil {
-			return nil, false, notObject
-		}
-		if _, exists := fields[key]; !exists {
-			fields[key] = value
-			seen[key] = key
-		}
-	}
-	if _, err := dec.Token(); err != nil {
-		return nil, false, notObject
-	}
-	if _, err := dec.Token(); err != io.EOF {
-		return nil, false, notObject
-	}
-	return fields, duplicate, nil
-}
-
-func memoryJSONString(raw json.RawMessage) string {
-	if len(raw) == 0 {
-		return ""
-	}
-	var value string
-	if err := json.Unmarshal(raw, &value); err != nil {
-		return ""
-	}
-	return value
-}
-
-func memoryJSONNonnegative(raw json.RawMessage) *int64 {
-	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return nil
-	}
-	var value int64
-	if err := json.Unmarshal(raw, &value); err != nil || value < 0 || value > performancewire.MaxMemoryBytes {
-		return nil
-	}
-	return &value
-}
-
-func memoryJSONPositive(raw json.RawMessage) *int64 {
-	value := memoryJSONNonnegative(raw)
-	if value == nil || *value <= 0 {
-		return nil
-	}
-	return value
 }

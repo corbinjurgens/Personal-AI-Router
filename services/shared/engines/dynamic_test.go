@@ -60,9 +60,9 @@ func TestDynamicEngineIdentity(t *testing.T) {
 // A dynamic key can never collide with a fixed one, and every carrier of a
 // key has room for the longest.
 func TestDynamicServiceKeys(t *testing.T) {
-	for _, key := range []servicekey.Key{servicekey.NodeInfo, servicekey.Ollama, servicekey.LMStudio, servicekey.LlamaCPP,
+	for _, key := range []servicekey.Key{servicekey.NodeInfo, servicekey.LlamaCPP,
 		servicekey.Errors, servicekey.Workload, servicekey.Cluster, servicekey.EngineManager, servicekey.EngineControl,
-		"e-", "e-a/b", "e-ollama", "x-strata", servicekey.Key("e-" + strings.Repeat("a", MaxDynamicIDLen+1))} {
+		"e-", "e-a/b", "e-llamacpp", "x-strata", servicekey.Key("e-" + strings.Repeat("a", MaxDynamicIDLen+1))} {
 		if IsDynamicServiceKey(key) {
 			t.Errorf("IsDynamicServiceKey(%q) = true, want false", key)
 		}
@@ -114,7 +114,7 @@ func TestProxyCanFront(t *testing.T) {
 	if err := ProxyCanFront(frontableDescriptor()); err != nil {
 		t.Fatalf("llama.cpp fork rejected: %v", err)
 	}
-	for _, protocols := range [][]string{{ProtocolOpenAIChat}, {ProtocolOllamaAPI}, {ProtocolOpenAIV1, ProtocolAnthropicMessages}} {
+	for _, protocols := range [][]string{{ProtocolOpenAIChat}, {ProtocolOpenAIV1, ProtocolAnthropicMessages}} {
 		d := frontableDescriptor()
 		d.Protocols = protocols
 		if err := ProxyCanFront(d); err != nil {
@@ -122,7 +122,7 @@ func TestProxyCanFront(t *testing.T) {
 		}
 	}
 	builtin := frontableDescriptor()
-	builtin.Engine, builtin.Protocols = NameOllama, nil
+	builtin.Engine, builtin.Protocols = NameLlamaCPP, nil
 	if err := ProxyCanFront(builtin); err != nil {
 		t.Fatalf("built-in engine rejected: %v", err)
 	}

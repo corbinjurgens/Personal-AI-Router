@@ -54,7 +54,7 @@ func TestPeerServicesCarryDynamicEngineKeys(t *testing.T) {
 	}
 
 	d, claim = newPeerServicesScanner(t)
-	claim.Descriptor.Services = append(claim.Descriptor.Services, noderec.PeerService{Service: "e-ollama", Port: 18180})
+	claim.Descriptor.Services = append(claim.Descriptor.Services, noderec.PeerService{Service: "e-llamacpp", Port: 18180})
 	if d.acceptPeerServices(claim) {
 		t.Fatal("claim with a malformed dynamic key accepted")
 	}

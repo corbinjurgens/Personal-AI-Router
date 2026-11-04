@@ -260,8 +260,8 @@ func interruptionBytes(protocol streamProtocol, reason string) []byte {
 	if !ok {
 		frames = streamInterruptionFramesByReason[streamInterruptReasonReadFailed]
 	}
-	if protocol == streamProtocolNDJSON {
-		return frames.ndjson
+	if protocol == streamProtocolJSON {
+		return frames.json
 	}
 	return frames.sse
 }

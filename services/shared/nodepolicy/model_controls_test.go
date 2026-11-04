@@ -19,11 +19,11 @@ func TestModelControlPolicyWritesSelectedModels(t *testing.T) {
 					p := Default()
 					switch owner {
 					case "profiles":
-						p.Profiles = []Profile{{Name: "test", Engine: "ollama", Model: model}}
+						p.Profiles = []Profile{{Name: "test", Engine: "llamacpp", Model: model}}
 					case "roles":
-						p.Roles[TierWeak] = Role{Engine: "ollama", Model: model}
+						p.Roles[TierWeak] = Role{Engine: "llamacpp", Model: model}
 					case "tiers":
-						p.Tiers[TierWeak] = []TierEntry{{Kind: EntryLocal, Engine: "ollama", Model: model}}
+						p.Tiers[TierWeak] = []TierEntry{{Kind: EntryLocal, Engine: "llamacpp", Model: model}}
 					case "deployments":
 						p = stagedPolicy(t)
 						p.Routing.Deployments[0].Model = model
@@ -76,7 +76,7 @@ func TestModelControlAdvertisementStrictModelSiblings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	entry := `{"engine":"ollama","model":"MODEL","maxConcurrent":1,"identity":IDENTITY}`
+	entry := `{"engine":"llamacpp","model":"MODEL","maxConcurrent":1,"identity":IDENTITY}`
 	entry = strings.Replace(entry, "IDENTITY", string(id), 1)
 	good := strings.Replace(entry, "MODEL", "good", 1)
 	bad := strings.Replace(entry, "MODEL", `bad\nmodel`, 1)
@@ -97,11 +97,11 @@ func TestModelControlAdvertisementStrictModelSiblings(t *testing.T) {
 
 func TestModelControlPolicyWritesRawEncoding(t *testing.T) {
 	for _, raw := range []string{
-		`{"roles":{"weak":{"engine":"ollama","model":"RAW"}}}`,
-		`{"profiles":[{"name":"test","engine":"ollama","model":"RAW"}]}`,
-		`{"tiers":{"weak":[{"kind":"local","engine":"ollama","model":"RAW"}]}}`,
-		`{"servedModels":[{"engine":"ollama","model":"RAW"}]}`,
-		`{"residentModels":[{"engine":"ollama","model":"RAW"}]}`,
+		`{"roles":{"weak":{"engine":"llamacpp","model":"RAW"}}}`,
+		`{"profiles":[{"name":"test","engine":"llamacpp","model":"RAW"}]}`,
+		`{"tiers":{"weak":[{"kind":"local","engine":"llamacpp","model":"RAW"}]}}`,
+		`{"servedModels":[{"engine":"llamacpp","model":"RAW"}]}`,
+		`{"residentModels":[{"engine":"llamacpp","model":"RAW"}]}`,
 		strings.Replace(stagedRoutingDocument, "small-1", "RAW", 1),
 	} {
 		input := bytes.ReplaceAll([]byte(raw), []byte("RAW"), []byte{0xff})
@@ -112,7 +112,7 @@ func TestModelControlPolicyWritesRawEncoding(t *testing.T) {
 }
 
 func TestModelControlAdvertisementFiltersBeforeStrictDecode(t *testing.T) {
-	raw := []byte(`{"revision":"7","servedModels":[{"engine":"ollama","model":"good"},{"engine":"ollama","model":"bad\nname"}],"roles":{"weak":{"engine":"ollama","model":"good"},"strong":{"engine":"ollama","model":"RAW"}}}`)
+	raw := []byte(`{"revision":"7","servedModels":[{"engine":"llamacpp","model":"good"},{"engine":"llamacpp","model":"bad\nname"}],"roles":{"weak":{"engine":"llamacpp","model":"good"},"strong":{"engine":"llamacpp","model":"RAW"}}}`)
 	raw = bytes.ReplaceAll(raw, []byte("RAW"), []byte{0xff})
 	var a Advertisement
 	if err := json.Unmarshal(raw, &a); err != nil {
@@ -121,7 +121,7 @@ func TestModelControlAdvertisementFiltersBeforeStrictDecode(t *testing.T) {
 	if len(a.ServedModels) != 1 || a.ServedModels[0].Model != "good" || len(a.Roles) != 1 || a.Roles[TierWeak].Model != "good" || a.Revision != "7" {
 		t.Fatal("valid advertisement siblings lost")
 	}
-	if err := json.Unmarshal([]byte(`{"servedModels":[{"engine":"ollama","model":"bad\nname"}]}`), &a); err != nil {
+	if err := json.Unmarshal([]byte(`{"servedModels":[{"engine":"llamacpp","model":"bad\nname"}]}`), &a); err != nil {
 		t.Fatal(err)
 	}
 	if a.ServedModels == nil || len(a.ServedModels) != 0 {
@@ -160,7 +160,7 @@ func TestModelControlPolicyWritesDirectCapabilityRawTokens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	entry := `{"engine":"ollama","model":"PRIVATE-MODEL","maxConcurrent":1,"identity":` + string(id) + `}`
+	entry := `{"engine":"llamacpp","model":"PRIVATE-MODEL","maxConcurrent":1,"identity":` + string(id) + `}`
 	for _, tc := range []struct{ name, entry string }{
 		{"invalid UTF-8", strings.Replace(entry, "PRIVATE-MODEL", string([]byte{0xff}), 1)},
 		{"duplicate model before valid", strings.Replace(entry, `"model":"PRIVATE-MODEL"`, `"model":"PRIVATE-MODEL\n","model":"good"`, 1)},
@@ -192,7 +192,7 @@ func TestModelControlAdvertisementNumericVersions(t *testing.T) {
 	}
 	for _, spelling := range []string{"1", "1.0", "1e0"} {
 		t.Run(spelling, func(t *testing.T) {
-			raw := []byte(`{"version":` + spelling + `,"models":[{"engine":"ollama","model":"good","maxConcurrent":1,"identity":` + string(id) + `}]}`)
+			raw := []byte(`{"version":` + spelling + `,"models":[{"engine":"llamacpp","model":"good","maxConcurrent":1,"identity":` + string(id) + `}]}`)
 			var direct StrictAdmissionCapability
 			if err := json.Unmarshal(raw, &direct); err != nil {
 				t.Fatal(err)
@@ -245,7 +245,7 @@ func TestModelControlAdvertisementNumericVersions(t *testing.T) {
 
 func TestModelControlAdvertisementLegacyOuterFields(t *testing.T) {
 	var got Advertisement
-	raw := []byte(`{"revision":"1","Revision":"2","ROLES":{"weak":{"ENGINE":"ollama","MODEL":"good"}},"PAUSEDBY":"peer"}`)
+	raw := []byte(`{"revision":"1","Revision":"2","ROLES":{"weak":{"ENGINE":"llamacpp","MODEL":"good"}},"PAUSEDBY":"peer"}`)
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatal(err)
 	}
@@ -261,7 +261,7 @@ func TestModelControlPolicyWritesIdentityWhitespace(t *testing.T) {
 	digest := strings.Repeat("a", 64)
 	for _, model := range []string{"", " ", "\u2003"} {
 		i := EngineIdentity{EngineRunID: "run", SettingsFingerprint: digest, LaunchDigest: digest, ModelDigests: map[string]string{model: digest}}
-		p := SetModelIdentityParams{Engines: map[string]EngineIdentity{"ollama": i}}
+		p := SetModelIdentityParams{Engines: map[string]EngineIdentity{"llamacpp": i}}
 		if err := p.Validate(); err == nil || !strings.Contains(err.Error(), "modelDigests contains an empty model") {
 			t.Fatal("identity whitespace-empty compatibility changed")
 		}
@@ -269,7 +269,7 @@ func TestModelControlPolicyWritesIdentityWhitespace(t *testing.T) {
 }
 
 func TestModelControlPolicyWritesMissingModelCompatibility(t *testing.T) {
-	_, err := Parse([]byte(`{"roles":{"weak":{"engine":"ollama"}}}`))
+	_, err := Parse([]byte(`{"roles":{"weak":{"engine":"llamacpp"}}}`))
 	if err == nil || !strings.Contains(err.Error(), "model is required") {
 		t.Fatal("missing-model error compatibility changed")
 	}
@@ -279,7 +279,7 @@ func TestModelControlPolicyWritesPermissionDuplicateDiagnosticFirst(t *testing.T
 	for _, tc := range []struct{ name, raw, diagnostic string }{
 		{"served null then empty", `{"servedModels":null,"servedModels":[]}`, "duplicate or case-variant servedModels key"},
 		{"resident null then empty", `{"residentModels":null,"residentModels":[]}`, "duplicate or case-variant residentModels key"},
-		{"served empty then permission", `{"servedModels":[],"servedModels":[{"engine":"ollama","model":"good"}]}`, "duplicate or case-variant servedModels key"},
+		{"served empty then permission", `{"servedModels":[],"servedModels":[{"engine":"llamacpp","model":"good"}]}`, "duplicate or case-variant servedModels key"},
 		{"served diagnostic before invalid role", `{"roles":{"weak":{"model":false}},"servedModels":null,"servedModels":[]}`, "duplicate or case-variant servedModels key"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -300,7 +300,7 @@ func TestModelControlPolicyWritesLegacyRevisionOrder(t *testing.T) {
 		{"same spelling", `"revision":"11","revision":"22"`, "22"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			raw := []byte(`{` + tc.revisions + `,"roles":{"weak":{"engine":"ollama","model":"good"}}}`)
+			raw := []byte(`{` + tc.revisions + `,"roles":{"weak":{"engine":"llamacpp","model":"good"}}}`)
 			if err := CheckModelListKeys(raw); err != nil {
 				t.Fatal(err)
 			}
@@ -317,12 +317,12 @@ func TestModelControlPolicyWritesLegacyRevisionOrder(t *testing.T) {
 
 func TestModelControlPolicyWritesAmbiguousModelContainersRemainStrict(t *testing.T) {
 	for _, raw := range []string{
-		`{"roles":{"weak":{"engine":"ollama","model":"bad\nmodel"}},"Roles":{}}`,
+		`{"roles":{"weak":{"engine":"llamacpp","model":"bad\nmodel"}},"Roles":{}}`,
 		`{"profiles":[],"Profiles":[]}`,
 		`{"tiers":{},"Tiers":{}}`,
 		`{"routing":{},"Routing":{}}`,
 		`{"routing":{"deployments":[],"Deployments":[]}}`,
-		`{"roles":{"weak":{"engine":"ollama","model":"bad\nmodel","Model":"good"}}}`,
+		`{"roles":{"weak":{"engine":"llamacpp","model":"bad\nmodel","Model":"good"}}}`,
 	} {
 		if _, err := Parse([]byte(raw)); err == nil {
 			t.Fatal("strict write accepted ambiguous model container or field")

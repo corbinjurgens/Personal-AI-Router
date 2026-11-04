@@ -8,6 +8,7 @@ import path from 'node:path'
 import { BrowserWindow } from 'electron'
 import { getCliBinDir } from '@/electron/service-bridge/modular-supervisor'
 import { getModularBridgeState } from '@/electron/service-bridge/modular-state'
+import { isProxyEngine } from '@/electron/service-bridge/proxy-engines'
 import { inferenceDispatcherFileName } from '@/shared/constants/inference-dispatcher'
 import { currentPlatform } from '@/shared/utils/platform'
 import type { DispatcherBackend, DispatcherModel } from '@/shared/types/inference-dispatcher'
@@ -206,7 +207,7 @@ async function discoverTargets(executable: string): Promise<DemoTarget[]> {
     const bridge = getModularBridgeState()
     const reachable = DEMO_ENGINE_PROBES.map(probe => ({
         backend: probe.backend,
-        port: bridge.getProxyPort(probe.proxyEngine)
+        port: isProxyEngine(probe.proxyEngine) ? bridge.getProxyPort(probe.proxyEngine) : null
     })).filter(
         (probe): probe is { backend: DispatcherBackend; port: number } => probe.port !== null
     )
@@ -268,9 +269,6 @@ function submit(executable: string, request: ScheduledRequest, currentGeneration
         '--temperature',
         String(stage.temperature)
     ]
-    // Ollama's separate reasoning channel would inflate latency and token counts
-    // without changing what the demo is showing, so switch it off where supported.
-    if (target.backend === 'ollama') args.push('--ollama-think', 'false')
 
     const child = spawn(executable, args, {
         windowsHide: true,
@@ -363,7 +361,7 @@ export async function startInferenceDemo(): Promise<DemoState> {
         // Deliberately names no port: the proxies own their listeners, and
         // quoting a number here would be the same mistake as hardcoding one.
         throw new Error(
-            'No local inference engine exposed a text-generation model. Start Ollama, LM Studio, or llama.cpp, wait for it to appear in Settings, and try again.'
+            'No local inference engine exposed a text-generation model. Start llama.cpp, wait for it to appear in Settings, and try again.'
         )
     }
 

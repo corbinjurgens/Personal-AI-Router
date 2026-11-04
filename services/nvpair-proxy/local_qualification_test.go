@@ -173,7 +173,7 @@ func TestRequestOptionsQualificationMode(t *testing.T) {
 		{"unknown", "ENFORCED", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			q := testQualification("mode", "ollama", "m")
+			q := testQualification("mode", "llamacpp", "m")
 			q.RequestOptions = json.RawMessage(`{"temperature":0.1}`)
 			q.RequestOptionsMode = tc.mode
 			data, err := json.Marshal(struct {
@@ -223,8 +223,8 @@ func TestRequestOptionsStrictSamplerGrammar(t *testing.T) {
 		{"null repeat penalty", `"repeat_penalty":null`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			q := testQualification("samplers", "ollama", "m")
-			profile := nodepolicy.Profile{Engine: "ollama", Model: "m", ContextTokens: 4096, MaxOutputTokens: 1024}
+			q := testQualification("samplers", "llamacpp", "m")
+			profile := nodepolicy.Profile{Engine: "llamacpp", Model: "m", ContextTokens: 4096, MaxOutputTokens: 1024}
 			body := []byte(strings.TrimSuffix(strictBody("m"), "}") + "," + tc.fields + "}")
 			_, bound, err := q.validateRequest(profile, routeChatCompletions, body)
 			if tc.accepted {
@@ -277,7 +277,7 @@ func TestRequestOptionsPublicChatGrammarUnchanged(t *testing.T) {
 }
 
 func TestRequestOptionsQualificationModeFieldTypes(t *testing.T) {
-	q := testQualification("mode", "ollama", "m")
+	q := testQualification("mode", "llamacpp", "m")
 	q.RequestOptionsMode = nodepolicy.RequestOptionsDefaults
 	data, err := json.Marshal(struct {
 		Version        int                   `json:"version"`
@@ -883,7 +883,7 @@ func TestQualificationStoreNoOp(t *testing.T) {
 func TestQualificationDocumentRejects(t *testing.T) {
 	valid := func() map[string]any {
 		return map[string]any{
-			"id": "q", "revision": "1", "engine": "ollama", "model": "m:latest",
+			"id": "q", "revision": "1", "engine": "llamacpp", "model": "m",
 			"modelDigests": []string{strings.Repeat("1", 64)}, "launchDigests": []string{strings.Repeat("2", 64)},
 			"tokenizer": "t", "chatTemplate": "c", "contextTokens": 4096, "maxOutputTokens": 1024,
 			"routes":     []string{routeChatCompletions},
@@ -915,7 +915,7 @@ func TestQualificationDocumentRejects(t *testing.T) {
 			e["accounting"] = map[string]any{"method": "bytes-div-4"}
 			return doc(e)
 		}, "accounting method"},
-		{"unsupported route", func() []byte { e := valid(); e["routes"] = []string{"/api/chat"}; return doc(e) }, "route"},
+		{"unsupported route", func() []byte { e := valid(); e["routes"] = []string{"/unsupported"}; return doc(e) }, "route"},
 		{"no model digest", func() []byte { e := valid(); e["modelDigests"] = []string{}; return doc(e) }, "modelDigests"},
 		{"prefixed launch digest", func() []byte {
 			e := valid()
@@ -953,7 +953,7 @@ func TestQualificationShapesDocument(t *testing.T) {
 	}
 	document := func(t *testing.T, version int, shapes string) []byte {
 		t.Helper()
-		data, err := json.Marshal(testQualification("q", "ollama", "m"))
+		data, err := json.Marshal(testQualification("q", "llamacpp", "m"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -986,7 +986,7 @@ func TestQualificationShapesDocument(t *testing.T) {
 			}
 			// NE produces these opaque canonical digests; parsing must preserve
 			// them without adding another provenance acceptance field.
-			want := testQualification("q", "ollama", "m")
+			want := testQualification("q", "llamacpp", "m")
 			if !reflect.DeepEqual(q.ModelDigests, want.ModelDigests) || !reflect.DeepEqual(q.LaunchDigests, want.LaunchDigests) ||
 				q.Tokenizer != want.Tokenizer || q.ChatTemplate != want.ChatTemplate || q.ContextTokens != want.ContextTokens || q.MaxOutputTokens != want.MaxOutputTokens {
 				t.Fatalf("identity or bounds changed: %+v", q)
@@ -1068,7 +1068,7 @@ func TestStrictCapabilityDerivation(t *testing.T) {
 	installed := func(a *admissionController) (nodeStrictModel, bool) {
 		a.mu.Lock()
 		defer a.mu.Unlock()
-		m, ok := a.strict.models[admKey{engine: "ollama", model: "m:latest"}]
+		m, ok := a.strict.models[admKey{engine: "llamacpp", model: "m"}]
 		return m, ok
 	}
 	for _, tc := range []struct {
@@ -1096,7 +1096,7 @@ func TestStrictCapabilityDerivation(t *testing.T) {
 			h := newStrictHarness(t)
 			p := h.a.currentPolicy()
 			p.Profiles[0].Capabilities = tc.capabilities
-			q := testQualification("coverage", "ollama", "m")
+			q := testQualification("coverage", "llamacpp", "m")
 			q.Shapes.Tools = &tc.tools
 			q.Shapes.StructuredOutput = append([]string{}, tc.modes...)
 			ref := nodepolicy.QualificationRef{ID: q.ID, Revision: q.Revision}
@@ -1117,7 +1117,7 @@ func TestStrictCapabilityDerivation(t *testing.T) {
 				if readiness.Capability != nil {
 					t.Fatalf("uncovered profile advertised: %+v", readiness.Capability)
 				}
-				if _, err := h.a.qualifyStrict("ollama", "m", routeChatCompletions, []byte(strictBody("m")), strictRequest().Identity); !errors.Is(err, errStrictUnavailable) {
+				if _, err := h.a.qualifyStrict("llamacpp", "m", routeChatCompletions, []byte(strictBody("m")), strictRequest().Identity); !errors.Is(err, errStrictUnavailable) {
 					t.Fatalf("qualifyStrict = %v, want unavailable", err)
 				}
 			}
@@ -1126,7 +1126,7 @@ func TestStrictCapabilityDerivation(t *testing.T) {
 	t.Run("matching inputs install the identity", func(t *testing.T) {
 		h := newStrictHarness(t)
 		m, ok := installed(h.a)
-		want := nodeStrictModel{Engine: "ollama", Model: "m:latest", MaxConcurrent: 1, Identity: strictRequest().Identity}
+		want := nodeStrictModel{Engine: "llamacpp", Model: "m", MaxConcurrent: 1, Identity: strictRequest().Identity}
 		if !ok || m != want {
 			t.Fatalf("installed = %+v, %v; want %+v", m, ok, want)
 		}
@@ -1138,17 +1138,17 @@ func TestStrictCapabilityDerivation(t *testing.T) {
 		{"launch not qualified (changed context or template flag)", func(a *admissionController) {
 			id := testIdentity("m")
 			id.LaunchDigest = strings.Repeat("d", 64)
-			a.setModelIdentity(map[string]nodepolicy.EngineIdentity{"ollama": id})
+			a.setModelIdentity(map[string]nodepolicy.EngineIdentity{"llamacpp": id})
 		}},
 		{"same-name model replaced", func(a *admissionController) {
 			id := testIdentity()
-			id.ModelDigests["m:latest"] = strings.Repeat("e", 64)
-			a.setModelIdentity(map[string]nodepolicy.EngineIdentity{"ollama": id})
+			id.ModelDigests["m"] = strings.Repeat("e", 64)
+			a.setModelIdentity(map[string]nodepolicy.EngineIdentity{"llamacpp": id})
 		}},
 		{"model names disagree on content", func(a *admissionController) {
 			id := testIdentity("m")
-			id.ModelDigests["m:latest"] = strings.Repeat("e", 64)
-			a.setModelIdentity(map[string]nodepolicy.EngineIdentity{"ollama": id})
+			id.ModelDigests["m"] = strings.Repeat("e", 64)
+			a.setModelIdentity(map[string]nodepolicy.EngineIdentity{"llamacpp": id})
 		}},
 		{"settings withdrawn", func(a *admissionController) {
 			a.setModelIdentity(map[string]nodepolicy.EngineIdentity{})
@@ -1181,18 +1181,18 @@ func TestStrictCapabilityDerivation(t *testing.T) {
 		{"two qualified profiles name the model", func(a *admissionController) {
 			p := a.currentPolicy()
 			dup := p.Profiles[0]
-			dup.Name, dup.Model = "dup", "m:latest"
+			dup.Name, dup.Model = "dup", "m"
 			p.Profiles = append(p.Profiles, dup)
 			a.setPolicy(p)
 		}},
 		{"an unqualified profile names the model after it", func(a *admissionController) {
 			p := a.currentPolicy()
-			p.Profiles = append(p.Profiles, nodepolicy.Profile{Name: "dup", Engine: "ollama", Model: "m:latest", MaxConcurrent: 3})
+			p.Profiles = append(p.Profiles, nodepolicy.Profile{Name: "dup", Engine: "llamacpp", Model: "m", MaxConcurrent: 3})
 			a.setPolicy(p)
 		}},
 		{"an unqualified profile names the model before it", func(a *admissionController) {
 			p := a.currentPolicy()
-			p.Profiles = append([]nodepolicy.Profile{{Name: "dup", Engine: "ollama", Model: "m:latest", MaxConcurrent: 3}}, p.Profiles...)
+			p.Profiles = append([]nodepolicy.Profile{{Name: "dup", Engine: "llamacpp", Model: "m", MaxConcurrent: 3}}, p.Profiles...)
 			a.setPolicy(p)
 		}},
 		{"unbounded concurrency", func(a *admissionController) {
@@ -1212,17 +1212,17 @@ func TestStrictCapabilityDerivation(t *testing.T) {
 			if m, ok := installed(h.a); ok {
 				t.Fatalf("installed %+v", m)
 			}
-			if _, err := h.a.qualifyStrict("ollama", "m", routeChatCompletions, []byte(strictBody("m")), strictRequest().Identity); !errors.Is(err, errStrictUnavailable) {
+			if _, err := h.a.qualifyStrict("llamacpp", "m", routeChatCompletions, []byte(strictBody("m")), strictRequest().Identity); !errors.Is(err, errStrictUnavailable) {
 				t.Fatalf("qualifyStrict = %v, want unavailable", err)
 			}
 		})
 	}
 	t.Run("an unrelated identity change keeps the installation", func(t *testing.T) {
 		h := newStrictHarness(t)
-		before := h.a.strict.generation[admKey{engine: "ollama", model: "m:latest"}]
+		before := h.a.strict.generation[admKey{engine: "llamacpp", model: "m"}]
 		ticket := mustStrictTicket(t, h.a)
-		h.a.setModelIdentity(map[string]nodepolicy.EngineIdentity{"ollama": testIdentity("m"), "lmstudio": testIdentity("other")})
-		if after := h.a.strict.generation[admKey{engine: "ollama", model: "m:latest"}]; after != before {
+		h.a.setModelIdentity(map[string]nodepolicy.EngineIdentity{"llamacpp": testIdentity("m"), "llamacpp-custom": testIdentity("other")})
+		if after := h.a.strict.generation[admKey{engine: "llamacpp", model: "m"}]; after != before {
 			t.Fatalf("generation %d -> %d after another engine's identity changed", before, after)
 		}
 		if err := ticket.BeforeStrictDispatch(); err != nil {
@@ -1253,7 +1253,7 @@ func TestStrictQualifyThenAdmitIsFencedByReinstallation(t *testing.T) {
 			p := h.a.currentPolicy()
 			p.Profiles[0].Capabilities = []nodepolicy.Capability{nodepolicy.CapTools}
 			h.a.setPolicy(p)
-			validated, err := h.a.qualifyStrict("ollama", "m", routeChatCompletions, []byte(strictBody("m")), strictRequest().Identity)
+			validated, err := h.a.qualifyStrict("llamacpp", "m", routeChatCompletions, []byte(strictBody("m")), strictRequest().Identity)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1277,7 +1277,7 @@ func TestStrictQualifyThenAdmitIsFencedByReinstallation(t *testing.T) {
 			if readiness := h.a.StrictReadiness(); readiness.Capability != nil {
 				t.Fatalf("removed coverage still advertised: %+v", readiness.Capability)
 			}
-			if ticket, err := h.a.AdmitStrict(context.Background(), "ollama", "m", strictRequest(), validated.generation); ticket != nil || !errors.Is(err, errStrictUnavailable) {
+			if ticket, err := h.a.AdmitStrict(context.Background(), "llamacpp", "m", strictRequest(), validated.generation); ticket != nil || !errors.Is(err, errStrictUnavailable) {
 				t.Fatalf("ticket %v, error %v; want unavailable after coverage loss", ticket, err)
 			}
 			// Restore the original covered profile: the stale validation must
@@ -1289,7 +1289,7 @@ func TestStrictQualifyThenAdmitIsFencedByReinstallation(t *testing.T) {
 			if readiness := h.a.StrictReadiness(); readiness.Capability == nil {
 				t.Fatal("restored coverage did not reinstall readiness")
 			}
-			if ticket, err := h.a.AdmitStrict(context.Background(), "ollama", "m", strictRequest(), validated.generation); ticket != nil || !errors.Is(err, errStrictUnavailable) {
+			if ticket, err := h.a.AdmitStrict(context.Background(), "llamacpp", "m", strictRequest(), validated.generation); ticket != nil || !errors.Is(err, errStrictUnavailable) {
 				t.Fatalf("ticket %v, error %v; want stale generation refused", ticket, err)
 			}
 			if h.a.currentActive() != 0 || len(h.a.tickets) != 0 || len(h.a.strict.markers) != 0 || len(h.notes(nodepolicy.NotifyAdmissionWake)) != 0 || len(h.notes(nodepolicy.NotifyAdmissionUnload)) != 0 {
@@ -1298,7 +1298,7 @@ func TestStrictQualifyThenAdmitIsFencedByReinstallation(t *testing.T) {
 		})
 	}
 	h := newStrictHarness(t)
-	validated, err := h.a.qualifyStrict("ollama", "m", routeChatCompletions, []byte(strictBody("m")), strictRequest().Identity)
+	validated, err := h.a.qualifyStrict("llamacpp", "m", routeChatCompletions, []byte(strictBody("m")), strictRequest().Identity)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1306,7 +1306,7 @@ func TestStrictQualifyThenAdmitIsFencedByReinstallation(t *testing.T) {
 	p := h.a.currentPolicy()
 	p.Profiles[0].MaxOutputTokens = 8
 	h.a.setPolicy(p)
-	if ticket, err := h.a.AdmitStrict(context.Background(), "ollama", "m", strictRequest(), validated.generation); ticket != nil || !errors.Is(err, errStrictUnavailable) {
+	if ticket, err := h.a.AdmitStrict(context.Background(), "llamacpp", "m", strictRequest(), validated.generation); ticket != nil || !errors.Is(err, errStrictUnavailable) {
 		t.Fatalf("ticket %v, error %v; want unavailable", ticket, err)
 	}
 	if h.a.currentActive() != 0 || len(h.notes(nodepolicy.NotifyAdmissionWake)) != 0 || len(h.notes(nodepolicy.NotifyAdmissionUnload)) != 0 {
@@ -1334,11 +1334,11 @@ func TestStrictHTTPRejectsUnqualifiedRequestsBeforeSideEffects(t *testing.T) {
 			{name: "stale identity", body: strictBody("m"), setup: func(p *Proxy) {
 				id := testIdentity("m")
 				id.EngineRunID = "engine-restarted"
-				p.admission.setModelIdentity(map[string]nodepolicy.EngineIdentity{"ollama": id})
+				p.admission.setModelIdentity(map[string]nodepolicy.EngineIdentity{"llamacpp": id})
 			}, status: http.StatusServiceUnavailable, code: "strict-admission"},
 		} {
 			t.Run(path+"/"+tc.name, func(t *testing.T) {
-				profile, _ := profileFor("ollama")
+				profile, _ := profileFor("llamacpp")
 				out := &recordingWriter{}
 				p := newTestProxy(profile, NewCodec(out), NewDiscovery(), profile.FacadePort)
 				configureStrict(t, p.admission, filepath.Join(t.TempDir(), "capacity.json"))
@@ -1346,7 +1346,7 @@ func TestStrictHTTPRejectsUnqualifiedRequestsBeforeSideEffects(t *testing.T) {
 				// A cold model on a stopped engine with start on demand: any
 				// admission would ask for a wake.
 				p.admission.setResidency(map[string][]string{})
-				p.admission.setIntent(map[string]bool{"ollama": true})
+				p.admission.setIntent(map[string]bool{"llamacpp": true})
 				setBackend(t, p.soleFacade(), e.URL, false)
 				if tc.setup != nil {
 					tc.setup(p)

@@ -70,11 +70,11 @@ func assertMergedIncludeUsage(t *testing.T, body []byte, want bool) {
 }
 
 func TestRequestOptionsQualificationEffectiveAccounting(t *testing.T) {
-	q := testQualification("enforced", "ollama", "m")
+	q := testQualification("enforced", "llamacpp", "m")
 	q.ContextTokens, q.MaxOutputTokens = 64, 32
 	q.RequestOptions = json.RawMessage(`{"messages":[{"role":"user","content":"abc"}],"temperature":0.1,"top_k":0,"min_p":0.02,"repeat_penalty":1.1}`)
 	q.RequestOptionsMode = nodepolicy.RequestOptionsEnforced
-	profile := nodepolicy.Profile{Engine: "ollama", Model: "m", ContextTokens: 64, MaxOutputTokens: 32, RequestOptions: q.RequestOptions, RequestOptionsMode: q.RequestOptionsMode}
+	profile := nodepolicy.Profile{Engine: "llamacpp", Model: "m", ContextTokens: 64, MaxOutputTokens: 32, RequestOptions: q.RequestOptions, RequestOptionsMode: q.RequestOptionsMode}
 	body := []byte(`{"model":"m","messages":[{"role":"user","content":"` + strings.Repeat("x", 200) + `"}],"max_tokens":16,"temperature":0.8}`)
 	effective, bound, err := q.validateRequest(profile, routeChatCompletions, body)
 	if err != nil {
@@ -103,8 +103,8 @@ func TestRequestOptionsQualificationEffectiveAccounting(t *testing.T) {
 }
 
 func TestRequestOptionsStrictAllKeysRemainUnique(t *testing.T) {
-	q := testQualification("strict", "ollama", "m")
-	profile := nodepolicy.Profile{Engine: "ollama", Model: "m", ContextTokens: 4096, MaxOutputTokens: 1024, RequestOptions: json.RawMessage(`{"temperature":0.1,"messages":[{"role":"user","content":"replacement"}]}`), RequestOptionsMode: nodepolicy.RequestOptionsEnforced}
+	q := testQualification("strict", "llamacpp", "m")
+	profile := nodepolicy.Profile{Engine: "llamacpp", Model: "m", ContextTokens: 4096, MaxOutputTokens: 1024, RequestOptions: json.RawMessage(`{"temperature":0.1,"messages":[{"role":"user","content":"replacement"}]}`), RequestOptionsMode: nodepolicy.RequestOptionsEnforced}
 	body := []byte(`{"model":"m","messages":[{"role":"user","content":"hi","content":"hidden"}],"max_tokens":16}`)
 	_, _, err := q.validateRequest(profile, routeChatCompletions, body)
 	var invalid *strictQualificationError

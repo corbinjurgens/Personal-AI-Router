@@ -125,7 +125,7 @@ func (e *Executor) modelMemoryContext(ctx context.Context, engine string, target
 		st, err := e.state(engine)
 		if err == nil && native && e.activationVeto(engine) == nil {
 			st.mu.Lock()
-			permitted := !st.adopted && st.plat.Runtime.modeOrDefault() == "process"
+			permitted := !st.adopted
 			st.mu.Unlock()
 			snapshot, snapshotErr := inspectionSnapshot(st, engine)
 			if permitted && snapshotErr == nil {

@@ -388,7 +388,7 @@ func TestChatUnsupported(t *testing.T) {
 			}
 		})
 	}
-	for _, route := range []string{"/v1/responses", "/v1/messages", "/v1/completions", "/v1/embeddings", "/api/chat", routeChatCompletions + "?"} {
+	for _, route := range []string{"/v1/responses", "/v1/messages", "/v1/completions", "/v1/embeddings", "/unsupported", routeChatCompletions + "?"} {
 		t.Run(route, func(t *testing.T) {
 			q, target := chatFixture()
 			b := &chatTestBudget{}

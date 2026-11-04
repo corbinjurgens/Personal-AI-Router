@@ -8,14 +8,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -58,18 +55,15 @@ func TestStopAllStopsEveryEngine(t *testing.T) {
 	}
 }
 
-func TestStopAllCancelsCommandStartWithoutError(t *testing.T) {
+func TestStopAllCancelsPendingStartWithoutError(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "fake.pid")
 	t.Setenv("FAKE_PID_FILE", pidFile)
 
 	manifest := testEngineManifest(fakeEngineBin)
 	platform := manifest.Platforms[hostKey()]
-	platform.Runtime.Mode = "command"
-	platform.Runtime.Bin = ""
-	platform.Runtime.Start = [][]string{{fakeEngineBin}}
-	platform.Runtime.Ready = nil
+	// The engine publishes its PID, then stays unready until StopAll.
+	platform.Runtime.Env = map[string]string{"FAKE_ADDR": "127.0.0.1:{port}", "FAKE_START_DELAY": "1h"}
 	platform.Runtime.Health = nil
-	platform.Runtime.Stop = nil
 	manifest.Platforms[hostKey()] = platform
 	ex := newTestExecutor(t, manifest)
 
@@ -87,7 +81,7 @@ func TestStopAllCancelsCommandStartWithoutError(t *testing.T) {
 		}
 	}
 	if pid == 0 {
-		t.Fatal("command-mode fake engine did not publish its PID")
+		t.Fatal("fake engine did not publish its PID")
 	}
 	t.Cleanup(func() {
 		if pidAlive(pid) {
@@ -100,109 +94,13 @@ func TestStopAllCancelsCommandStartWithoutError(t *testing.T) {
 	select {
 	case <-started:
 	case <-time.After(5 * time.Second):
-		t.Fatal("command-mode start did not return after StopAll")
+		t.Fatal("start did not return after StopAll")
 	}
 	if pidAlive(pid) {
-		t.Fatalf("command-mode fake engine PID %d survived StopAll", pid)
+		t.Fatalf("fake engine PID %d survived StopAll", pid)
 	}
 	if hasErr(ex.Errors(), startFailedID("fake")) {
-		t.Fatalf("shutdown cancellation retained a command-mode start-failed error: %+v", ex.Errors())
-	}
-}
-
-func TestStopAllStopsDetachedCommandDaemonBeforeReadiness(t *testing.T) {
-	dir := t.TempDir()
-	startMarker := filepath.Join(dir, "started")
-	stopMarker := filepath.Join(dir, "stopped")
-	port, err := freePort()
-	if err != nil {
-		t.Fatalf("free port: %v", err)
-	}
-
-	manifest := testEngineManifest(fakeEngineBin)
-	platform := manifest.Platforms[hostKey()]
-	platform.Runtime.Mode = "command"
-	platform.Runtime.Bin = ""
-	platform.Runtime.Port = port
-	platform.Runtime.Start = [][]string{{fakeEngineBin, "touch", startMarker}}
-	platform.Runtime.Stop = &StopSpec{Cmd: []string{fakeEngineBin, "touch", stopMarker}, GraceS: 1}
-	platform.Runtime.Ready = &Probe{
-		HTTP:     "http://127.0.0.1:{port}/",
-		Status:   http.StatusOK,
-		TimeoutS: 60,
-	}
-	platform.Runtime.Health = nil
-	manifest.Platforms[hostKey()] = platform
-	ex := newTestExecutor(t, manifest)
-
-	// Model a control CLI that launches a detached daemon and returns before
-	// that daemon becomes ready. The daemon deliberately answers 503 until its
-	// stop CLI runs, which keeps Start inside waitReady.
-	daemon := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusServiceUnavailable)
-	})}
-	t.Cleanup(func() { _ = daemon.Close() })
-	daemonStarted := make(chan error, 1)
-	go func() {
-		deadline := time.Now().Add(5 * time.Second)
-		for !fileExists(startMarker) && time.Now().Before(deadline) {
-			time.Sleep(10 * time.Millisecond)
-		}
-		if !fileExists(startMarker) {
-			daemonStarted <- errors.New("start command did not run")
-			return
-		}
-		ln, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(port))
-		if err != nil {
-			daemonStarted <- err
-			return
-		}
-		daemonStarted <- nil
-		_ = daemon.Serve(ln)
-	}()
-
-	watchCtx, cancelWatch := context.WithCancel(context.Background())
-	defer cancelWatch()
-	go func() {
-		ticker := time.NewTicker(10 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-watchCtx.Done():
-				return
-			case <-ticker.C:
-				if fileExists(stopMarker) {
-					_ = daemon.Close()
-					return
-				}
-			}
-		}
-	}()
-
-	started := make(chan error, 1)
-	go func() { started <- ex.Start(context.Background(), "fake") }()
-	if err := <-daemonStarted; err != nil {
-		t.Fatalf("detached command daemon: %v", err)
-	}
-	if !portServing(port) {
-		t.Fatal("detached command daemon did not start serving")
-	}
-
-	ex.StopAll()
-
-	select {
-	case <-started:
-	case <-time.After(5 * time.Second):
-		t.Fatal("command-mode start did not return after StopAll")
-	}
-	if !fileExists(stopMarker) {
-		t.Fatal("StopAll skipped the command-mode stop CLI after start detached")
-	}
-	if !waitPortClosed(port, 5*time.Second) {
-		t.Fatalf("detached command daemon remained on port %d after StopAll", port)
-	}
-	if hasErr(ex.Errors(), startFailedID("fake")) {
-		t.Fatalf("shutdown cancellation retained a command-mode start-failed error: %+v", ex.Errors())
+		t.Fatalf("shutdown cancellation retained a start-failed error: %+v", ex.Errors())
 	}
 }
 
@@ -221,103 +119,6 @@ func runCommandTestHelper(url string) int {
 		return 1
 	}
 	return 0
-}
-
-func TestStopAllStopsDetachedDaemonWhileCommandStartIsPending(t *testing.T) {
-	helper, err := os.Executable()
-	if err != nil {
-		t.Fatalf("test helper executable: %v", err)
-	}
-	port, err := freePort()
-	if err != nil {
-		t.Fatalf("free port: %v", err)
-	}
-	daemon := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusServiceUnavailable)
-	})}
-	t.Cleanup(func() { _ = daemon.Close() })
-	daemonStarted := make(chan error, 1)
-	releaseStart := make(chan struct{})
-	var stopCalls atomic.Int32
-	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || (r.URL.Path != "/start" && r.URL.Path != "/stop") {
-			http.NotFound(w, r)
-			return
-		}
-		switch r.URL.Path {
-		case "/start":
-			ln, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(port))
-			if err != nil {
-				daemonStarted <- err
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			go func() { _ = daemon.Serve(ln) }()
-			daemonStarted <- nil
-			// The daemon outlives this CLI request. Do not acknowledge start:
-			// shutdown must cancel the CLI while it is still waiting here.
-			select {
-			case <-r.Context().Done():
-			case <-releaseStart:
-			}
-		case "/stop":
-			stopCalls.Add(1)
-			if err := daemon.Close(); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-			}
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	t.Cleanup(control.Close)
-	t.Cleanup(func() { close(releaseStart) })
-
-	manifest := testEngineManifest(fakeEngineBin)
-	platform := manifest.Platforms[hostKey()]
-	platform.Runtime = Runtime{
-		Mode:  "command",
-		Port:  port,
-		Start: [][]string{{helper, "command-test-helper", control.URL + "/start"}},
-		Stop:  &StopSpec{Cmd: []string{helper, "command-test-helper", control.URL + "/stop"}, GraceS: 1},
-		Ready: &Probe{HTTP: "http://127.0.0.1:{port}/", Status: http.StatusOK, TimeoutS: 60},
-	}
-	manifest.Platforms[hostKey()] = platform
-	ex := newTestExecutor(t, manifest)
-	started := make(chan error, 1)
-	go func() { started <- ex.Start(context.Background(), "fake") }()
-	t.Cleanup(ex.StopAll)
-	select {
-	case err := <-daemonStarted:
-		if err != nil {
-			t.Fatalf("detached daemon: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("start CLI did not launch its detached daemon")
-	}
-	if !portServing(port) {
-		t.Fatal("detached daemon did not start serving")
-	}
-
-	ex.StopAll()
-
-	select {
-	case err := <-started:
-		if err == nil || !strings.Contains(err.Error(), "start command failed:") {
-			t.Fatalf("Start() error = %v, want cancellation while the control CLI is pending", err)
-		}
-		t.Logf("pending control CLI returned: %v", err)
-	case <-time.After(5 * time.Second):
-		t.Fatal("pending command-mode start did not return after StopAll")
-	}
-	if got := stopCalls.Load(); got != 1 {
-		t.Fatalf("stop CLI calls = %d, want 1 after daemon detached with start CLI pending", got)
-	}
-	if portServing(port) {
-		t.Fatalf("detached daemon remained on port %d after StopAll", port)
-	}
-	if hasErr(ex.Errors(), startFailedID("fake")) {
-		t.Fatalf("shutdown cancellation retained a command-mode start-failed error: %+v", ex.Errors())
-	}
 }
 
 // TestE2EStdinCloseStopsEngine drives the real engine-manager binary and stops

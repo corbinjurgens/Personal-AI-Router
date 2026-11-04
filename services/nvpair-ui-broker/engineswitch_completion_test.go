@@ -69,7 +69,7 @@ func TestSwitchLocalOffAfterPublicationFailsBeforeStopReply(t *testing.T) {
 			if stop.VerifyStop {
 				return base(method, raw)
 			}
-			if stop.Engine != "lmstudio" || stop.SwitchOperationID != p.RequestID {
+			if stop.Engine != "llamacpp-custom" || stop.SwitchOperationID != p.RequestID {
 				t.Errorf("stop lost admitted switch identity: %+v", stop)
 			}
 			// Model admission's durable checkpoint/intent update separately
@@ -97,7 +97,7 @@ func TestSwitchLocalOffAfterPublicationFailsBeforeStopReply(t *testing.T) {
 	stopped := make(chan struct{})
 	go func() {
 		id := json.RawMessage(`101`)
-		h.b.relayToEngineNow(&Message{ID: &id, Method: "engine:stop", Params: settingsJSON(map[string]string{"engine": "lmstudio"})})
+		h.b.relayToEngineNow(&Message{ID: &id, Method: "engine:stop", Params: settingsJSON(map[string]string{"engine": "llamacpp-custom"})})
 		close(stopped)
 	}()
 	requireGateOpens(t, vetoDurable, "durable Off before stop reply")
@@ -244,7 +244,7 @@ func TestSwitchOffAdmissionRechecksAfterNegativeReservationLookup(t *testing.T) 
 func TestSwitchOffNegativeLookupAndOperationAdmissionAreOrdered(t *testing.T) {
 	h := newSwitchHarness(t)
 	p := h.request(t, "off-ordered")
-	remote, reserved, _, err := h.b.admitLocalEngineOff("lmstudio")
+	remote, reserved, _, err := h.b.admitLocalEngineOff("llamacpp-custom")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +258,7 @@ func TestSwitchOffNegativeLookupAndOperationAdmissionAreOrdered(t *testing.T) {
 }
 
 func TestSwitchLatchedOffCleanupPrecedesLocalStopAdmission(t *testing.T) {
-	for _, engine := range []string{"llamacpp", "lmstudio"} {
+	for _, engine := range []string{"llamacpp", "llamacpp-custom"} {
 		t.Run(engine, func(t *testing.T) {
 			h := newSwitchHarness(t)
 			clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")
@@ -610,7 +610,7 @@ func TestSwitchHeldInstallAllowsOffStatusAndAcceptanceAndPreservesDischarge(t *t
 	requireGateOpens(t, installed, "held installer")
 	go func() {
 		id := json.RawMessage(`117`)
-		h.b.relayToEngineNow(&Message{ID: &id, Method: "engine:stop", Params: json.RawMessage(`{"engine":"lmstudio"}`)})
+		h.b.relayToEngineNow(&Message{ID: &id, Method: "engine:stop", Params: json.RawMessage(`{"engine":"llamacpp-custom"}`)})
 		close(offDone)
 	}()
 	requireGateOpens(t, offDone, "unrelated Off while installer held")
@@ -1249,12 +1249,12 @@ func TestSwitchLateOffResponseDoesNotCancelLaterOperation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	c.activeID = "later-switch"
-	c.remoteCancel, c.remoteSource, c.remoteTarget = cancel, "llamacpp", "lmstudio"
-	h.b.cancelRemoteEngineSwitchOperation("lmstudio", "released-switch")
+	c.remoteCancel, c.remoteSource, c.remoteTarget = cancel, "llamacpp", "llamacpp-custom"
+	h.b.cancelRemoteEngineSwitchOperation("llamacpp-custom", "released-switch")
 	if ctx.Err() != nil || c.localVeto != nil {
 		t.Fatal("late Off response vetoed a later switch")
 	}
-	h.b.cancelRemoteEngineSwitchOperation("lmstudio", "later-switch")
+	h.b.cancelRemoteEngineSwitchOperation("llamacpp-custom", "later-switch")
 	if ctx.Err() == nil {
 		t.Fatal("matching Off response did not cancel its operation")
 	}

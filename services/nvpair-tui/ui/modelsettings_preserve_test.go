@@ -21,7 +21,7 @@ func TestModelSettingsPreservedByOrdinaryEdits(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d := localDetail()
-			snapshot := ollamaSettings()
+			snapshot := llamaCPPSettings()
 			slots := int32(2)
 			snapshot.Settings.ModelLoads = []modelconfig.ModelLoad{{ModelID: "exact/model", Requested: modelconfig.RequestedLoad{Slots: &slots}}}
 			request, ok := d.settingsRequest(snapshot, tc.mode, tc.value)

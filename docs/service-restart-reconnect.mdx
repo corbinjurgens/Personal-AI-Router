@@ -32,8 +32,7 @@ A private process-mode manifest identifies a loopback HTTP fixture without
 starting an engine executable. A public model read checks adoption. Bundled
 engines have private manifest overrides with absent executable paths and owned
 loopback endpoints that return unavailable; their status and
-model reads must remain empty. The fixture also isolates the Windows user profile
-and clears its inherited Ollama address.
+model reads must remain empty. The fixture also isolates the Windows user profile.
 
 A tokenized public HTTP action is held at the custom fixture while the exact
 service is killed. The pending call must fail promptly, and its POST must appear
@@ -128,7 +127,7 @@ before adding its own scanner path/control port. Node additionally removes
 inherited `NODE_*`, `ESBUILD_*`, `VITEST*`, `TINYPOOL*` and `PAIR_DESKTOP_*`, then receives
 fixture-owned endpoint, appdir, user-data, product-path and coordination values.
 The appdir variables (`HOME`, `XDG_CONFIG_HOME`, `APPDATA`, `LOCALAPPDATA`,
-`USERPROFILE`) and empty `OLLAMA_HOST` apply before startup. Clear the external
+`USERPROFILE`) apply before startup. Clear the external
 opt-in and Node selector after the lane.
 
 For the single desktop retry removal control, preserve the exact bytes of

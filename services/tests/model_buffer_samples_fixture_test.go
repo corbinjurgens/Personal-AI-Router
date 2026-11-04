@@ -28,7 +28,6 @@ import (
 	"testing"
 	"time"
 
-	"nvpair-shared/engines"
 	"nvpair-shared/modelconfig"
 	"nvpair-shared/testbin"
 )
@@ -457,10 +456,11 @@ func (f *modelBufferProcessFixture) start(t *testing.T) {
 	f.assertNativeRoot(t)
 	f.assertBufferEngineManifests(t)
 	f.assertMergedBufferInstall(t)
-	args := append([]string{"--scanner-path", f.scanner, "--engine-manager-path", engineMgrBin, "--engine-manager-control-host", "127.0.0.1", "--proxy-path", proxyBin, "--proxy-engines", "ollama,llamacpp", "--cluster-dir", filepath.Join(f.base, "cluster")}, f.ports.args()...)
-	f.p = startInteropProcess(t, f.base, brokerBin, f.ports.engineManagerHTTP, []string{"NVPAIR_TEST_SUBSCRIPTION_SCANNER=" + f.scanner, "NVPAIR_TEST_SUBSCRIPTION_PORT=" + strconv.Itoa(f.scannerPort)}, args...)
-	f.p.ports = append(f.p.ports, f.scannerPort, f.targetPort, f.sourcePort, f.facadePort, f.targetFacadePort, f.ports.engineControl)
-	for _, path := range []string{engineMgrBin, proxyBin, f.scanner} {
+	args := append([]string{"--scanner-path", f.scanner, "--engine-manager-path", engineMgrBin, "--engine-manager-control-host", "127.0.0.1", "--proxy-path", f.proxyControl.image, "--proxy-engines", "llamacpp", "--cluster-dir", filepath.Join(f.base, "cluster")}, f.ports.args()...)
+	env := append(f.proxyControl.env(), "NVPAIR_TEST_SUBSCRIPTION_SCANNER="+f.scanner, "NVPAIR_TEST_SUBSCRIPTION_PORT="+strconv.Itoa(f.scannerPort))
+	f.p = startInteropProcess(t, f.base, brokerBin, f.ports.engineManagerHTTP, env, args...)
+	f.p.ports = append(f.p.ports, f.scannerPort, f.targetPort, f.sourcePort, f.facadePort, f.targetFacadePort, f.ports.engineControl, f.proxyControl.port)
+	for _, path := range []string{engineMgrBin, proxyBin, f.scanner, f.proxyControl.image} {
 		canonical, err := canonicalServicePath(path)
 		if err != nil {
 			t.Fatal(err)
@@ -468,8 +468,8 @@ func (f *modelBufferProcessFixture) start(t *testing.T) {
 		f.p.paths = append(f.p.paths, canonical)
 	}
 	waitForMethod(t, f.p.msgs, "app:ready", 30*time.Second)
-	waitProxyReady(t, f.p.in, f.p.msgs, 20*time.Second)
-	waitEngineProxyReady(t, "llamacpp-proxy", f.p.in, f.p.msgs, 20*time.Second)
+	f.proxyControl.ready(t, "llamacpp-custom", f.facadePort)
+	f.proxyControl.ready(t, "llamacpp", f.targetFacadePort)
 }
 
 // The registry is a main package and cannot be imported here. This hermetic
@@ -535,9 +535,7 @@ func (f *modelBufferProcessFixture) assertBufferEngineManifests(t *testing.T) {
 	}
 	seen := map[int]bool{}
 	ports := []int{f.ports.nodeInfo, f.ports.errors, f.ports.workload, f.ports.clusterManager, f.ports.engineManagerHTTP, f.ports.engineControl, f.sourcePort, f.targetPort, f.facadePort, f.targetFacadePort, f.scannerPort, portOfURL(t, f.modelSettingsProcessFixture.control), portOfURL(t, f.switchProcessFixture.control.URL)}
-	if f.proxyProbeImage != "" {
-		ports = append(ports, f.proxyProbePort)
-	}
+	ports = append(ports, f.proxyControl.port)
 	for _, port := range ports {
 		if err := validateFixturePort(port); err != nil {
 			t.Fatal(err)
@@ -547,7 +545,7 @@ func (f *modelBufferProcessFixture) assertBufferEngineManifests(t *testing.T) {
 		}
 		seen[port] = true
 	}
-	for _, name := range engines.Names() {
+	for _, name := range privateFixtureEngineNames() {
 		var manifest struct {
 			ModelsDir string                    `json:"models_dir"`
 			Runtime   modelSettingsRuntimeCheck `json:"runtime"`
@@ -564,7 +562,7 @@ func (f *modelBufferProcessFixture) assertBufferEngineManifests(t *testing.T) {
 		}
 		expectedImage := filepath.Join(f.base, "absent-"+name)
 		expectedRoot := filepath.Join(f.base, "absent-models", name)
-		active := name == "llamacpp" || name == "ollama"
+		active := name == "llamacpp" || name == "llamacpp-custom"
 		if active {
 			expectedImage = f.image
 		}
@@ -586,7 +584,7 @@ func (f *modelBufferProcessFixture) assertBufferEngineManifests(t *testing.T) {
 			continue
 		}
 		expectedPort, selector := f.targetPort, modelBufferFixtureSelector
-		if name == "ollama" {
+		if name == "llamacpp-custom" {
 			expectedPort, selector = f.sourcePort, "NVPAIR_TEST_SWITCH_ENGINE"
 		}
 		for _, rt := range []modelSettingsRuntimeCheck{manifest.Runtime, platform.Runtime} {

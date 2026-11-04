@@ -28,7 +28,7 @@ describe('proxy engine identity', () => {
             const attributed = (models: string[]) =>
                 Object.fromEntries([
                     [engine, models],
-                    ['ollama', ['sibling']]
+                    ['llamacpp', ['sibling']]
                 ])
             const phases: {
                 name: string
@@ -89,7 +89,7 @@ describe('proxy engine identity', () => {
                     engines: [
                         { engine, installed: true, running: true, healthy: true, port: 24003 },
                         {
-                            engine: 'ollama',
+                            engine: 'llamacpp',
                             installed: true,
                             running: true,
                             healthy: true,
@@ -113,11 +113,11 @@ describe('proxy engine identity', () => {
                 if (
                     attribution !== undefined &&
                     attribution !== null &&
-                    Object.hasOwn(attribution, 'ollama')
+                    Object.hasOwn(attribution, 'llamacpp')
                 ) {
                     expect(
                         snapshot.models.find(
-                            entry => entry.nodeId === nodeId && entry.engineType === 'ollama'
+                            entry => entry.nodeId === nodeId && entry.engineType === 'llama-cpp'
                         )?.models,
                         phase.name
                     ).toEqual([expect.objectContaining({ name: 'sibling', status: 'idle' })])
@@ -144,12 +144,12 @@ describe('proxy engine identity', () => {
         { name: 'outer empty attribution suppresses flat fallback', attribution: {}, expected: [] },
         {
             name: 'per-engine empty attribution suppresses flat fallback',
-            attribution: { ollama: [] },
+            attribution: { llamacpp: [] },
             expected: []
         },
         {
             name: 'populated attribution preserves siblings and loaded state',
-            attribution: { ollama: ['first', 'good', 'last'] },
+            attribution: { llamacpp: ['first', 'good', 'last'] },
             expected: ['first', 'good', 'last']
         },
         {
@@ -179,7 +179,7 @@ describe('proxy engine identity', () => {
         },
         {
             name: 'malformed present engine list cannot create flat fallback',
-            attribution: { ollama: 'invalid' },
+            attribution: { llamacpp: 'invalid' },
             expected: []
         }
     ]
@@ -196,7 +196,7 @@ describe('proxy engine identity', () => {
                 ip: '192.0.2.40'
             }
             state.handleNotification({
-                source: 'ollama-proxy',
+                source: 'llamacpp-proxy',
                 method: 'node/discovered',
                 params: proxy
             })
@@ -206,7 +206,7 @@ describe('proxy engine identity', () => {
                 ipAddress: '192.0.2.40',
                 port: 24002,
                 models: ['good'],
-                loadedByEngine: { ollama: ['resident'] },
+                loadedByEngine: { llamacpp: ['resident'] },
                 lastSeen: 304
             }
             if (tc.attribution !== undefined) brokerNode.modelsByEngine = tc.attribution
@@ -219,7 +219,7 @@ describe('proxy engine identity', () => {
                 state
                     .getEngineInitialState()
                     .models.find(
-                        models => models.nodeId === nodeId && models.engineType === 'ollama'
+                        models => models.nodeId === nodeId && models.engineType === 'llama-cpp'
                     )
             const expectedNames = [...tc.expected, 'resident']
             expect(read()?.models.map(model => model.name)).toEqual(expectedNames)
@@ -232,12 +232,12 @@ describe('proxy engine identity', () => {
                 state
                     .getEngineInitialState()
                     .statuses.find(
-                        status => status.nodeId === nodeId && status.engineType === 'ollama'
+                        status => status.nodeId === nodeId && status.engineType === 'llama-cpp'
                     )
             ).toMatchObject({ processStatus: 'running', proxyPort: 24001 })
             // A later presence-only proxy update cannot overwrite attribution.
             state.handleNotification({
-                source: 'ollama-proxy',
+                source: 'llamacpp-proxy',
                 method: 'node/updated',
                 params: proxy
             })
@@ -250,7 +250,7 @@ describe('proxy engine identity', () => {
         const nodeId = 'j304-attribution-transition'
         state.setSelfId('j304-attribution-self')
         state.handleNotification({
-            source: 'ollama-proxy',
+            source: 'llamacpp-proxy',
             method: 'node/discovered',
             params: { id: nodeId, host: nodeId, port: 24001, addresses: ['192.0.2.40'] }
         })
@@ -260,13 +260,13 @@ describe('proxy engine identity', () => {
             ipAddress: '192.0.2.40',
             port: 24002,
             models: ['good'],
-            loadedByEngine: { ollama: ['good'] },
+            loadedByEngine: { llamacpp: ['good'] },
             lastSeen: 304
         }
         const models = () =>
             state
                 .getEngineInitialState()
-                .models.find(entry => entry.nodeId === nodeId && entry.engineType === 'ollama')
+                .models.find(entry => entry.nodeId === nodeId && entry.engineType === 'llama-cpp')
                 ?.models
         state.handleNotification({
             source: 'broker',
@@ -295,7 +295,7 @@ describe('proxy engine identity', () => {
         const nodeId = 'j304-local-attribution-transition'
         state.setSelfId(nodeId)
         state.applyEngineManagerStatus({
-            engine: 'ollama',
+            engine: 'llamacpp',
             installed: true,
             running: true,
             healthy: true,
@@ -307,7 +307,7 @@ describe('proxy engine identity', () => {
             ipAddress: '127.0.0.1',
             port: 24002,
             models: ['good'],
-            loadedByEngine: { ollama: ['good'] },
+            loadedByEngine: { llamacpp: ['good'] },
             lastSeen: 304
         }
         state.handleNotification({
@@ -324,7 +324,7 @@ describe('proxy engine identity', () => {
                 params: [{ ...node, modelsByEngine: {} }]
             })
             expect(refresh).toHaveBeenCalledTimes(1)
-            expect(refresh).toHaveBeenCalledWith('ollama')
+            expect(refresh).toHaveBeenCalledWith('llama-cpp')
             refresh.mockClear()
             state.handleNotification({
                 source: 'broker',
@@ -338,61 +338,17 @@ describe('proxy engine identity', () => {
                 params: [node]
             })
             expect(refresh).toHaveBeenCalledTimes(1)
-            expect(refresh).toHaveBeenCalledWith('ollama')
+            expect(refresh).toHaveBeenCalledWith('llama-cpp')
         } finally {
             state.setLocalDiscoveryModelRefresher(() => {})
         }
     })
 
-    it('keeps legacy multi-engine fallback conservative and explicit attribution useful', () => {
-        const state = getModularBridgeState()
-        const nodeId = 'j304-attribution-multiple-engines'
-        state.setSelfId('j304-attribution-self')
-        for (const source of PROXY_NODE_SOURCES.slice(0, 2)) {
-            state.handleNotification({
-                source,
-                method: 'node/discovered',
-                params: { id: nodeId, host: nodeId, port: 24001, addresses: ['192.0.2.40'] }
-            })
-        }
-        const node = {
-            hostUuid: nodeId,
-            name: nodeId,
-            ipAddress: '192.0.2.40',
-            port: 24002,
-            models: ['good', 'other'],
-            loadedByEngine: { ollama: ['good'], lmstudio: [] },
-            lastSeen: 304
-        }
-        const models = () =>
-            state.getEngineInitialState().models.filter(entry => entry.nodeId === nodeId)
-        state.handleNotification({
-            source: 'broker',
-            method: 'discovery:nodes-changed',
-            params: [node]
-        })
-        expect(models().find(entry => entry.engineType === 'ollama')?.models).toEqual([
-            expect.objectContaining({ name: 'good', status: 'loaded', downloaded: false })
-        ])
-        expect(models().find(entry => entry.engineType === 'lm-studio')?.models).toEqual([])
-        state.handleNotification({
-            source: 'broker',
-            method: 'discovery:nodes-changed',
-            params: [{ ...node, modelsByEngine: { ollama: ['good'], lmstudio: ['other'] } }]
-        })
-        expect(models().find(entry => entry.engineType === 'ollama')?.models).toEqual([
-            expect.objectContaining({ name: 'good', status: 'loaded' })
-        ])
-        expect(models().find(entry => entry.engineType === 'lm-studio')?.models).toEqual([
-            expect.objectContaining({ name: 'other', status: 'idle' })
-        ])
-    })
+
 
     it('declares the complete proxy set in stable order', () => {
-        expect(PROXY_ENGINES).toEqual(['ollama', 'lm-studio', 'llama-cpp'])
-        expect(PROXY_NODE_SOURCES).toEqual(['ollama-proxy', 'lmstudio-proxy', 'llamacpp-proxy'])
-        expect(isProxyEngine('ollama')).toBe(true)
-        expect(isProxyEngine('lm-studio')).toBe(true)
+        expect(PROXY_ENGINES).toEqual(['llama-cpp'])
+        expect(PROXY_NODE_SOURCES).toEqual(['llamacpp-proxy'])
         expect(isProxyEngine('llama-cpp')).toBe(true)
     })
 
@@ -412,28 +368,6 @@ describe('proxy engine identity', () => {
         const nodeId = 'proxy-identity-remote'
         state.setSelfId('proxy-identity-self')
 
-        state.handleNotification({
-            source: 'ollama-proxy',
-            method: 'node/discovered',
-            params: {
-                id: nodeId,
-                host: 'proxy-identity-host',
-                port: 11434,
-                addresses: ['192.0.2.40'],
-                ip: '192.0.2.40'
-            }
-        })
-        state.handleNotification({
-            source: 'lmstudio-proxy',
-            method: 'node/discovered',
-            params: {
-                id: nodeId,
-                host: 'proxy-identity-host',
-                port: 1234,
-                addresses: ['192.0.2.40'],
-                ip: '192.0.2.40'
-            }
-        })
         state.handleNotification({
             source: 'llamacpp-proxy',
             method: 'ready',
@@ -485,16 +419,6 @@ describe('proxy engine identity', () => {
             .getEngineInitialState()
             .statuses.filter(status => status.nodeId === nodeId)
         expect(statuses).toEqual([
-            expect.objectContaining({
-                engineType: 'ollama',
-                processStatus: 'running',
-                proxyPort: 11434
-            }),
-            expect.objectContaining({
-                engineType: 'lm-studio',
-                processStatus: 'running',
-                proxyPort: 1234
-            }),
             expect.objectContaining({
                 engineType: 'llama-cpp',
                 processStatus: 'running',

@@ -155,7 +155,7 @@ function parseServiceError(value: JsonValue | undefined): ServiceError | null {
     if (action) error.action = action
     const nodeId = stringValue(obj.nodeId)
     if (nodeId) error.nodeId = nodeId
-    // The engine-manager stamps its own id (`lmstudio`); map it onto our
+    // The engine-manager stamps its own id (`llamacpp`); map it onto our
     // `EngineType` spelling so the renderer's retry/display logic recognizes it.
     // Invalid ids fall through unchanged (no retry affordance will match).
     const engineType = stringValue(obj.engineType)
@@ -229,8 +229,6 @@ class ModularBridgeState {
     // we never fabricate a default — an unknown port surfaces as null, not a
     // guess. Keys map to relay sources through proxy-engines.ts.
     private proxyPorts: Record<ProxyEngine, number> = {
-        ollama: 0,
-        'lm-studio': 0,
         'llama-cpp': 0
     }
     private selfId: string | null = null
@@ -492,17 +490,6 @@ class ModularBridgeState {
 
     getEngineDescriptor(engineType: EngineType): EngineDescriptor | undefined {
         return this.engineDescriptors.get(engineType)
-    }
-
-    /**
-     * The family whose coded behavior an engine-manager engine shares: its
-     * descriptor's family, or the engine's own ID when no descriptor is known
-     * (a built-in engine's ID is its family).
-     */
-    engineFamily(engineManagerEngine: string): string {
-        const engineType = engineTypeFromManagerName(engineManagerEngine)
-        const descriptor = engineType ? this.engineDescriptors.get(engineType) : undefined
-        return descriptor?.family ?? engineManagerEngine
     }
 
     getEngineInitialState(): EngineInitialState {
@@ -910,7 +897,7 @@ class ModularBridgeState {
 
     /**
      * Clear a pending op when its lifecycle operation fails with an
-     * `errors:report` that carries no `engine:state-changed` (LM Studio
+     * `errors:report` that carries no `engine:state-changed` (a
      * start-command failure, uninstall failure, install failure). Called by the
      * supervisor's error demux. `operation` is the engine-manager error's
      * `operation` field (`start` | `install` | `uninstall`).
@@ -1859,7 +1846,7 @@ class ModularBridgeState {
     /**
      * Update the local node's per-engine loaded-in-memory model set from an
      * `engine:models-changed` push and re-publish the affected local
-     * engines, so an explicit load/unload, LM Studio JIT auto-load, or TTL/idle
+     * engines, so an explicit load/unload, a JIT auto-load, or TTL/idle
      * eviction reflects immediately instead of waiting for the next discovery
      * model-refresh sweep. The push carries the full `engine:models` snapshot, so
      * the whole loaded map is replaced: an engine absent from `loadedByEngine` is
@@ -2009,7 +1996,7 @@ class ModularBridgeState {
      * For the **local** node we prefer canonical `engine:models` whenever a
      * successful result is cached, including an explicit empty list. Cache
      * absence means unknown and falls back to discovery (for example, an
-     * externally-running Ollama that engine-manager has not adopted). This
+     * externally-running engine that engine-manager has not adopted). This
      * presence check prevents a last-model deletion from resurrecting stale
      * discovery data. The cache is re-pulled whenever discovery reports the
      * local model set changed (see {@link upsertNode}).

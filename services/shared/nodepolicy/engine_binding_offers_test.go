@@ -10,11 +10,11 @@ import (
 )
 
 func TestEngineBindingOffersOptionalValidation(t *testing.T) {
-	valid := `{"version":1,"models":[{"engine":"ollama","model":"fixture"}]}`
+	valid := `{"version":1,"models":[{"engine":"llamacpp","model":"fixture"}]}`
 	test := func(name, extension string, supported bool) {
 		t.Run(name, func(t *testing.T) {
 			var adv Advertisement
-			if err := json.Unmarshal([]byte(`{"revision":"1","roles":{"weak":{"engine":"ollama","model":"actual"}},`+extension+`}`), &adv); err != nil {
+			if err := json.Unmarshal([]byte(`{"revision":"1","roles":{"weak":{"engine":"llamacpp","model":"actual"}},`+extension+`}`), &adv); err != nil {
 				t.Fatal(err)
 			}
 			if (adv.EngineBindingOffers != nil) != supported || adv.Roles["weak"].Model != "actual" {
@@ -28,11 +28,11 @@ func TestEngineBindingOffersOptionalValidation(t *testing.T) {
 	test("null", `"engineBindingOffers":null`, false)
 	test("case variant", `"EngineBindingOffers":`+valid, false)
 	test("duplicate extension", `"engineBindingOffers":`+valid+`,"engineBindingOffers":`+valid, false)
-	test("duplicate reference", `"engineBindingOffers":{"version":1,"models":[{"engine":"ollama","model":"a"},{"engine":"lmstudio","model":"a"}]}`, false)
-	test("unknown field", `"engineBindingOffers":{"version":1,"models":[{"engine":"ollama","model":"a"}],"ready":true}`, false)
-	test("invalid raw model", "\"engineBindingOffers\":{\"version\":1,\"models\":[{\"engine\":\"ollama\",\"model\":\"\xff\"}]}", false)
-	test("escaped surrogate follows existing JSON decoding", `"engineBindingOffers":{"version":1,"models":[{"engine":"ollama","model":"\ud800"}]}`, true)
-	test("duplicate model key", `"engineBindingOffers":{"version":1,"models":[{"engine":"ollama","model":"a","model":"b"}]}`, false)
+	test("duplicate reference", `"engineBindingOffers":{"version":1,"models":[{"engine":"llamacpp","model":"a"},{"engine":"llamacpp-custom","model":"a"}]}`, false)
+	test("unknown field", `"engineBindingOffers":{"version":1,"models":[{"engine":"llamacpp","model":"a"}],"ready":true}`, false)
+	test("invalid raw model", "\"engineBindingOffers\":{\"version\":1,\"models\":[{\"engine\":\"llamacpp\",\"model\":\"\xff\"}]}", false)
+	test("escaped surrogate follows existing JSON decoding", `"engineBindingOffers":{"version":1,"models":[{"engine":"llamacpp","model":"\ud800"}]}`, true)
+	test("duplicate model key", `"engineBindingOffers":{"version":1,"models":[{"engine":"llamacpp","model":"a","model":"b"}]}`, false)
 	test("absent", `"future":true`, false)
 }
 

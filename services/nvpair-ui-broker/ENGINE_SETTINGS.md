@@ -206,8 +206,8 @@ reservation. Fully unrecognizable
 bytes cannot establish whether model work once existed; this fundamental ambiguity
 is reported as unknown, rather than asserted to be a model-free journal.
 
-The broker owns combined settings operations for Ollama, LM Studio, and
-llama.cpp. Each node owns its own configuration. `nodeId` selects a discovered,
+The broker owns combined settings operations for built-in and fronted descriptor engines.
+Each node owns its own configuration. `nodeId` selects a discovered,
 currently pinned peer; omission or the local host ID selects this node. Bulk
 propagation is not part of this API.
 
@@ -217,7 +217,15 @@ propagation is not part of this API.
 | `engine:preview-settings` | `{engine, nodeId?, expectedRevision, settings, modelChange?, resolution?}` | Normalized settings, errors, conflict, selected diff, review digest and runtime impact |
 | `engine:apply-settings` | Preview request plus `requestId`, and reviewed `modelChange.previewDigest` for selected edits | `{revision, phase}` attempt receipt after target-owned execution; lost replies require readback |
 
-`engine` is `ollama`, `lmstudio`, or `llamacpp`. `settings` contains
+`engine` is a built-in engine ID, such as `llamacpp`, or a registered descriptor
+engine ID that this broker fronts, such as `llamacpp-custom`. Both use the same
+settings journal, revision checks, apply owner and snapshot publication.
+After a broker restart, facade preparation restores the journal's explicit
+settings flag and server/proxy ports for both engine kinds. The explicit proxy
+port overrides the proxy's persisted port file; a bind failure is reported
+without automatically moving the chosen port. Descriptor engines without
+explicit settings retain their ordinary planned/persisted facade port selection.
+`settings` contains
 `serverPort`, `proxyPort`, `launchText`, and optional `workingSetLimitMiB`.
 The limit is an integer from 256 through 1048576, accepted only by Windows
 llama.cpp engines in process mode. Absence or null removes the limit. Preview
@@ -280,7 +288,11 @@ operation and retain their response shape. Legacy lifecycle port overrides and
 automatic port reconciliation share the node lock and revision reconciliation.
 
 Validate both ports together against the unchanged counterpart, registered
-PAIR services, aliases, other configured engines/proxies and occupied listeners.
+PAIR services, other configured engines/proxies and occupied listeners.
+Sibling checks include fronted descriptor engines' live facade ports and saved
+ports in the settings journal or proxy-port files, even while their proxy is
+stopped. Automatic facade fallback also excludes descriptor siblings' saved,
+planned and live facade ports.
 Only this engine's current running port and its proxy listener can be reused
 for a swap. Revalidation happens at Apply; OS bind remains the final arbiter of
 a competing process. Adopted process engines are read-only; command-mode
@@ -326,11 +338,8 @@ engine overrides and proxy-port files remain their owners' configuration.
 Acceptance is written and synced before component changes. Interrupted applying
 records replay before enabled-engine restoration. Explicit settings override
 automatic facade defaults on later startup. Unreadable journal data is preserved
-and suppresses automatic component rewrites. On first upgrade, a valid existing
-proxy-port choice is preserved as explicit when it differs from the engine port
-(except LM Studio's obsolete 1235 default). Old stores lack choice provenance,
-so a historical automatic move is conservatively preserved too. Unreadable data
-blocks automatic recovery. The journal retains up to 256 terminal receipts
+and suppresses automatic component rewrites. Unreadable data blocks automatic
+recovery. The journal retains up to 256 terminal receipts
 per engine; evicted retries must still pass the original expected revision.
 
 ## Paired transport

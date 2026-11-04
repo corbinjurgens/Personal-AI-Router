@@ -84,8 +84,8 @@ var (
 // comes from the backend's engine:catalog rather than being assembled here, so
 // the terminal interface and the desktop app offer the same models.
 //
-// Filtering is local over the whole fetched list. The catalogue is thousands of
-// entries for Ollama and its source cannot search, so a keystroke filters what
+// Filtering is local over the whole fetched list. A catalogue can be thousands
+// of entries and its source may not search, so a keystroke filters what
 // is already in memory instead of issuing a request. A source that reports
 // itself searchable is the exception: its browse list is a small slice of what
 // can be downloaded, so a search there is sent upstream instead.

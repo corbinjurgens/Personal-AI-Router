@@ -21,7 +21,7 @@ func TestEngineBindingsPolicySaveRestartWithoutLifecycleEffects(t *testing.T) {
 	waitPushesSettled(t, ab.b)
 	recorder := attachFakeEngine(t, ab.b)
 	p := ab.b.localPolicy().Policy
-	p.EngineBindings = nodepolicy.EngineBindings{{Engine: "ollama", Model: "Native/Model"}}
+	p.EngineBindings = nodepolicy.EngineBindings{{Engine: "llamacpp", Model: "Native/Model"}}
 	raw, err := json.Marshal(p)
 	if err != nil {
 		t.Fatal(err)
@@ -65,8 +65,7 @@ func TestEngineBindingsPolicyRejectsTargetOverlapBeforePersistence(t *testing.T)
 	test := func(name string, bindings nodepolicy.EngineBindings, served nodepolicy.ServedModels) {
 		t.Run(name, func(t *testing.T) {
 			ab := newActivatedBroker(t)
-			d := testDescriptor("custom-tagged", engines.ProtocolOpenAIV1)
-			d.ModelNaming = engines.ModelNamingImpliedLatestTag
+			d := testDescriptor("llamacpp-custom", engines.ProtocolOpenAIV1)
 			ab.b.setDynamicEngines([]engines.Descriptor{d}, func(int) bool { return true })
 			p := ab.b.localPolicy().Policy
 			p.EngineBindings, p.ServedModels = bindings, served
@@ -81,9 +80,8 @@ func TestEngineBindingsPolicyRejectsTargetOverlapBeforePersistence(t *testing.T)
 			}
 		})
 	}
-	test("builtin overlap", nodepolicy.EngineBindings{{Engine: "ollama", Model: "m:latest"}, {Engine: "llamacpp", Model: "m"}}, nil)
-	test("descriptor overlap", nodepolicy.EngineBindings{{Engine: "custom-tagged", Model: "m:latest"}, {Engine: "llamacpp", Model: "m"}}, nil)
-	test("deny all", nodepolicy.EngineBindings{{Engine: "ollama", Model: "m"}}, nodepolicy.ServedModels{})
+	test("descriptor overlap", nodepolicy.EngineBindings{{Engine: "llamacpp-custom", Model: "m"}, {Engine: "llamacpp", Model: "m"}}, nil)
+	test("deny all", nodepolicy.EngineBindings{{Engine: "llamacpp", Model: "m"}}, nodepolicy.ServedModels{})
 }
 
 func TestEngineBindingsPolicyPeerPermissionCASAndPrivateSections(t *testing.T) {
@@ -91,8 +89,8 @@ func TestEngineBindingsPolicyPeerPermissionCASAndPrivateSections(t *testing.T) {
 	waitPushesSettled(t, rb.b)
 	stored := rb.b.localPolicy().Policy
 	p := stored.PeerProjection()
-	p.EngineBindings = nodepolicy.EngineBindings{{Engine: "ollama", Model: "m:latest"}}
-	p.ServedModels = nodepolicy.ServedModels{{Engine: "ollama", Model: "m"}}
+	p.EngineBindings = nodepolicy.EngineBindings{{Engine: "llamacpp", Model: "m"}}
+	p.ServedModels = nodepolicy.ServedModels{{Engine: "llamacpp", Model: "m"}}
 	request := policyRelayRequest{ID: "bindings", Method: "set", Caller: "pinned-peer", Params: rmJSON(t, policyParams{Policy: rmJSON(t, p), ExpectedPersistedRevision: rmJSON(t, stored.Revision)})}
 	grantRemoteManagement(t, rb.b.clusterDir, "cluster-1", "self-node", "pinned-peer", false)
 	_, err := rb.b.servePolicyRelay(context.Background(), request)
@@ -117,8 +115,8 @@ func TestEngineBindingsPolicyPeerPermissionCASAndPrivateSections(t *testing.T) {
 func TestEngineBindingsPolicyMalformedDiskRequiresPausedRecovery(t *testing.T) {
 	for _, tc := range []struct{ name, raw string }{
 		{"null list", `{"engineBindings":null}`},
-		{"control token", `{"engineBindings":[{"engine":"ollama","model":"bad\u0000"}]}`},
-		{"invalid UTF8", "{\"engineBindings\":[{\"engine\":\"ollama\",\"model\":\"\xff\"}]}"},
+		{"control token", `{"engineBindings":[{"engine":"llamacpp","model":"bad\u0000"}]}`},
+		{"invalid UTF8", "{\"engineBindings\":[{\"engine\":\"llamacpp\",\"model\":\"\xff\"}]}"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			raw := tc.raw
@@ -150,11 +148,11 @@ func TestEngineBindingsPolicyReadbackSupport(t *testing.T) {
 		name, request, result string
 		refused               bool
 	}{
-		{"dropped binding", `{"engineBindings":[{"engine":"ollama","model":"m"}]}`, `{"policy":{}}`, true},
+		{"dropped binding", `{"engineBindings":[{"engine":"llamacpp","model":"m"}]}`, `{"policy":{}}`, true},
 		{"dropped explicit clearing", `{"engineBindings":[]}`, `{"policy":{}}`, true},
 		{"null clearing", `{"engineBindings":[]}`, `{"policy":{"engineBindings":null}}`, true},
 		{"preserved clearing", `{"engineBindings":[]}`, `{"policy":{"engineBindings":[]}}`, false},
-		{"preserved binding", `{"engineBindings":[{"engine":"ollama","model":"m"}]}`, `{"policy":{"engineBindings":[{"engine":"ollama","model":"m"}]}}`, false},
+		{"preserved binding", `{"engineBindings":[{"engine":"llamacpp","model":"m"}]}`, `{"policy":{"engineBindings":[{"engine":"llamacpp","model":"m"}]}}`, false},
 		{"old absent input", `{}`, `{"policy":{}}`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

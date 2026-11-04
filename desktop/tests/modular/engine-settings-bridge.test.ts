@@ -7,7 +7,7 @@ import type { getModularSupervisor } from '@/electron/service-bridge/modular-sup
 const mocks = vi.hoisted(() => ({
     state: {
         getSelfId: vi.fn(() => 'local-node'),
-        getProxyPort: vi.fn(() => 11434),
+        getProxyPort: vi.fn(() => 8080),
         beginLocalEngineOp: vi.fn(),
         failLocalEngineOp: vi.fn()
     },
@@ -25,7 +25,7 @@ vi.mock('@/electron/service-bridge/modular-supervisor', () => ({
 }))
 vi.mock('@/electron/service-bridge/modular-state', () => ({
     getModularBridgeState: () => mocks.state,
-    isProxyEngine: (value: string) => value === 'ollama' || value === 'lm-studio',
+    isProxyEngine: (value: string) => value === 'llama-cpp',
     isUpstreamUnreachableError: () => false,
     parseServiceErrors: () => []
 }))
@@ -76,16 +76,16 @@ const serving = {
 
 const baseline = {
     nodeId: 'local-node',
-    engine: 'ollama',
+    engine: 'llamacpp',
     revision: 4,
     appliedRevision: 4,
     epoch: 'epoch',
     sequence: 1,
     phase: 'idle',
     format: 'pair-arguments-v1',
-    settings: { serverPort: 1235, proxyPort: 11434, launchText: 'managed serve' },
-    effectiveServerPort: 1235,
-    effectiveProxyPort: 11434,
+    settings: { serverPort: 8081, proxyPort: 8080, launchText: 'managed serve' },
+    effectiveServerPort: 8081,
+    effectiveProxyPort: 8080,
     running: true,
     adopted: false,
     editable: true
@@ -436,7 +436,7 @@ describe('unified settings bridge', () => {
 
     it('preserves advisory estimate provenance in inspection', async () => {
         mocks.supervisor.callProcess.mockResolvedValue({
-            engine: 'ollama',
+            engine: 'llamacpp',
             modelId: 'exact/model',
             status: 'unavailable',
             estimate: {
@@ -451,7 +451,7 @@ describe('unified settings bridge', () => {
             }
         })
         const result = await handleServiceBridgeInvoke('engines:inspect-model', {
-            engine: 'ollama',
+            engine: 'llamacpp',
             modelId: 'exact/model'
         })
         expect(result).toMatchObject({
@@ -858,14 +858,14 @@ describe('unified settings bridge', () => {
 
     it('relays model inspection to the broker', async () => {
         mocks.supervisor.callProcess.mockResolvedValue({
-            engine: 'ollama',
+            engine: 'llamacpp',
             nodeId: 'remote',
             modelId: 'exact/model',
             status: 'unavailable',
             estimate: { status: 'unknown' }
         })
         const request: InspectModelRequest = {
-            engine: 'ollama',
+            engine: 'llamacpp',
             nodeId: 'remote',
             modelId: 'exact/model'
         }
@@ -991,7 +991,7 @@ describe('unified settings bridge', () => {
         ).toEqual(serving)
         await handleServiceBridgeInvoke('engines:apply-settings', {
             nodeId: 'local-node',
-            engine: 'ollama',
+            engine: 'llamacpp',
             expectedRevision: 4,
             requestId: 'serving-edit',
             settings: { ...parsed.settings, proxyPort: 12000 }
@@ -1053,19 +1053,19 @@ describe('unified settings bridge', () => {
     it('sends one node-owned apply with a lifecycle deadline', async () => {
         const receipt = await handleServiceBridgeInvoke('engines:apply-settings', {
             nodeId: 'local-node',
-            engine: 'ollama',
+            engine: 'llamacpp',
             expectedRevision: 4,
             requestId: 'request',
-            settings: { serverPort: 11434, proxyPort: 1235, launchText: 'managed serve' }
+            settings: { serverPort: 8080, proxyPort: 8081, launchText: 'managed serve' }
         })
         expect(receipt).toEqual({ revision: 5, phase: 'succeeded' })
         expect(mocks.supervisor.callProcess).toHaveBeenCalledWith(
             'broker',
             'engine:apply-settings',
             expect.objectContaining({
-                engine: 'ollama',
+                engine: 'llamacpp',
                 expectedRevision: 4,
-                settings: { serverPort: 11434, proxyPort: 1235, launchText: 'managed serve' }
+                settings: { serverPort: 8080, proxyPort: 8081, launchText: 'managed serve' }
             }),
             MODULAR_ENGINE_LIFECYCLE_CALL_TIMEOUT_MS
         )
@@ -1078,7 +1078,7 @@ describe('unified settings bridge', () => {
     it('addresses a remote node through the same broker relay', async () => {
         await handleServiceBridgeInvoke('engines:apply-settings', {
             nodeId: 'remote-node',
-            engine: 'ollama',
+            engine: 'llamacpp',
             expectedRevision: 4,
             requestId: 'request',
             settings: { ...baseline.settings, proxyPort: 12000 }
@@ -1099,7 +1099,7 @@ describe('unified settings bridge', () => {
         await expect(
             handleServiceBridgeInvoke('engines:get-settings', {
                 nodeId: 'remote',
-                engine: 'ollama'
+                engine: 'llamacpp'
             })
         ).rejects.toThrow()
     })

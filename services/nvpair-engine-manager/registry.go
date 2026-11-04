@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
-	"net/http"
 	"os"
 	"path"
 	"path/filepath"
@@ -42,7 +41,6 @@ const (
 // time with a mangled command line.
 var allowedPlaceholders = map[string]bool{
 	"bin":         true,
-	"cli":         true,
 	"host":        true,
 	"port":        true,
 	"download":    true,
@@ -172,12 +170,8 @@ type InstallArtifact struct {
 // also answers. The open default is an interim exception to loopback-only and
 // should be narrowed once authenticated inference transport is available.
 //
-// Mode selects the lifecycle model:
-//   - "process" (default): the engine is a foreground process this
-//     service spawns and owns; liveness = the process is alive.
-//   - "command": the engine is a daemon brought up/down by commands
-//     (e.g. LM Studio's `lms`); liveness = the readiness/health probe,
-//     and Stop.Cmd brings it down.
+// The engine is a foreground process this service spawns and owns; liveness
+// is the process being alive.
 type Runtime struct {
 	WorkingSetLimitMiB *int `json:"working_set_limit_mib,omitempty"`
 	// The owned process and value capped at its successful spawn.
@@ -199,32 +193,19 @@ type Runtime struct {
 	EditableLaunch *EditableLaunch   `json:"editable_launch,omitempty"`
 	LaunchArgs     *[]string         `json:"launch_args,omitempty"` // literal arguments after managed fields
 	LaunchEnv      *[]string         `json:"launch_env,omitempty"`  // complete literal explicit environment
-	Mode           string            `json:"mode,omitempty"`
 	Bin            string            `json:"bin,omitempty"`
 	Args           []string          `json:"args,omitempty"`
 	Env            map[string]string `json:"env,omitempty"`
-	Port           int               `json:"port"`            // 0 => auto-assign a free loopback port
-	Bind           string            `json:"bind,omitempty"`  // listen addr, substituted as {host}; "" => 127.0.0.1
-	Start          [][]string        `json:"start,omitempty"` // command mode: ordered bring-up commands
-	// CLI is the engine's control-CLI path for this platform, referenced
-	// elsewhere as {cli}. It lets the manifest's global actions resolve
-	// to the correct per-OS binary (e.g. lms.exe vs lms).
-	CLI    string    `json:"cli,omitempty"`
-	Ready  *Probe    `json:"ready,omitempty"`
-	Stop   *StopSpec `json:"stop,omitempty"`
-	Health *Probe    `json:"health,omitempty"`
-	// UserCredential declares support for a user-entered API key.
-	UserCredential bool `json:"user_credential,omitempty"`
-	// AuthStatuses identify credential-required responses from HTTP ready and health probes.
-	AuthStatuses []int `json:"auth_statuses,omitempty"`
-	// AppProcesses are app or daemon image base names used only for connection diagnosis.
-	AppProcesses []string `json:"app_processes,omitempty"`
+	Port           int               `json:"port"`           // 0 => auto-assign a free loopback port
+	Bind           string            `json:"bind,omitempty"` // listen addr, substituted as {host}; "" => 127.0.0.1
+	Ready          *Probe            `json:"ready,omitempty"`
+	Stop           *StopSpec         `json:"stop,omitempty"`
+	Health         *Probe            `json:"health,omitempty"`
 }
 
 type EditableLaunch struct {
-	FixedArgs  []string        `json:"fixed_args"`
-	Controls   []LaunchControl `json:"controls"`
-	StartIndex int             `json:"start_index,omitempty"`
+	FixedArgs []string        `json:"fixed_args"`
+	Controls  []LaunchControl `json:"controls"`
 }
 
 // LaunchControl binds CLI/environment syntax to PAIR policy fields. Value is a
@@ -235,13 +216,6 @@ type LaunchControl struct {
 	Env      []string `json:"env,omitempty"`
 	Value    string   `json:"value"`
 	Implicit *string  `json:"implicit,omitempty"`
-}
-
-func (r *Runtime) modeOrDefault() string {
-	if r.Mode == "" {
-		return "process"
-	}
-	return r.Mode
 }
 
 // hasCustomLaunch reports whether the user supplied any literal argument or
@@ -275,14 +249,13 @@ type Probe struct {
 // StopSpec is how to terminate the engine. Default is a graceful
 // signal followed by a forced kill after grace.
 type StopSpec struct {
-	Signal string   `json:"signal,omitempty"` // "term" (default) | "kill"
-	Cmd    []string `json:"cmd,omitempty"`    // optional explicit stop command
-	GraceS int      `json:"grace_s,omitempty"`
+	Signal string `json:"signal,omitempty"` // "term" (default) | "kill"
+	GraceS int    `json:"grace_s,omitempty"`
 }
 
 // Action is a config-declared operation exposed over engine:action.
 // Exactly one of HTTP (call the engine's loopback control API), Cmd
-// (run a CLI command, e.g. `lms get`), or RemovePath (guarded filesystem
+// (run a CLI command), or RemovePath (guarded filesystem
 // delete) is set. Only a Cmd action templates the action's params as
 // placeholders (e.g. {model}); an HTTP action sends params in its declared
 // body or query location.
@@ -296,23 +269,16 @@ type Action struct {
 	// behavior; named protocols are validated so a typo cannot silently fall
 	// back to the wrong completion semantics.
 	ProgressProtocol string `json:"progress_protocol,omitempty"`
-	// ModelResolution, when set, expands or resolves the model param:
-	//   - "lms-get" on Cmd actions: try as-given → Hub id → Hugging Face URL.
-	//   - "lms-disk-path" on RemovePath actions: map logical ids to on-disk
-	//     files via `lms ls --json`.
-	ModelResolution string `json:"model_resolution,omitempty"`
 	// Result, when set, declares how to extract a normalized string list from
 	// this action's JSON response — the top-level array field to iterate and the
 	// string field to pull from each element. engine:models uses it to turn
-	// engine-specific list_models shapes (Ollama {models:[{name}]}, LM Studio
-	// {models:[{key}]}) into a flat []string with no per-engine code in the runner.
+	// engine-specific list_models shapes ({models:[{name}]}, {models:[{key}]})
+	// into a flat []string with no per-engine code in the runner.
 	Result *ActionResult `json:"result,omitempty"`
 	// RestartAfter restarts the engine once this action succeeds, for an action
-	// that changes state the engine only reads at startup. LM Studio's
-	// delete_model removes the files, but its server keeps serving the model
-	// from an index it builds at startup and exposes no rescan operation, so
-	// only a restart makes the deletion visible to clients. A stopped engine is
-	// left stopped; a restart failure fails the action.
+	// that changes state the engine only reads at startup, such as a deletion
+	// the server only sees after rebuilding its startup index. A stopped engine
+	// is left stopped; a restart failure fails the action.
 	RestartAfter bool `json:"restart_after,omitempty"`
 }
 
@@ -322,15 +288,14 @@ type ActionResult struct {
 	Field string `json:"field"` // string field per element, e.g. "name" / "id"
 	// Digest, when set on list_models, names the per-element string field that
 	// holds the model's immutable content identity as lowercase SHA-256 hex
-	// (Ollama /api/tags "digest"). Engines without one report no content
+	// (for example a list endpoint's "digest" field). Engines without one report no content
 	// identity, which keeps their models out of strict admission.
 	Digest string `json:"digest,omitempty"`
 	// Match, when set, keeps only array elements that pass the ResultMatch
 	// filter. It lets loaded_models reuse the same extractor as list_models
-	// across engines whose list endpoint tags residency (LM Studio's
-	// /api/v1/models models[].loaded_instances nonempty, or a string state
-	// field) rather than returning a presence-only list (Ollama's /api/ps,
-	// every row of which is resident and so needs no Match).
+	// across engines whose list endpoint tags residency (a nonempty
+	// loaded_instances array, or a string state field) rather than returning
+	// a presence-only list, every row of which is resident and so needs no Match.
 	Match *ResultMatch `json:"match,omitempty"`
 }
 
@@ -339,7 +304,7 @@ type ActionResult struct {
 //   - In: keep the element when the dot-separated object path Field (decoded as
 //     a JSON string) equals one of In.
 //   - Nonempty: keep the element when Field resolves to a JSON array with length
-//     > 0 (LM Studio's /api/v1/models models[].loaded_instances).
+//     > 0 (for example a models[].loaded_instances array).
 type ResultMatch struct {
 	Field    string   `json:"field"`              // element field to test, e.g. "state" / "loaded_instances"
 	In       []string `json:"in,omitempty"`       // accepted string values, e.g. ["loaded"]
@@ -1004,9 +969,6 @@ func (p *Platform) validate(key string) error {
 		return fmt.Errorf("platform %q: invalid serving declaration: %v", key, fields)
 	}
 	if policy := p.Runtime.EditableLaunch; policy != nil {
-		if policy.StartIndex < 0 || (p.Runtime.modeOrDefault() == "command" && policy.StartIndex >= len(p.Runtime.Start)) {
-			return fmt.Errorf("platform %q: invalid editable launch definition", key)
-		}
 		if _, err := formatLaunchText(policy.FixedArgs); err != nil {
 			return fmt.Errorf("platform %q: invalid fixed launch arguments", key)
 		}
@@ -1030,17 +992,8 @@ func (p *Platform) validate(key string) error {
 			return fmt.Errorf("platform %q: invalid literal launch environment", key)
 		}
 	}
-	switch p.Runtime.modeOrDefault() {
-	case "process":
-		if strings.TrimSpace(p.Runtime.Bin) == "" {
-			return fmt.Errorf("platform %q: runtime.bin is required in process mode", key)
-		}
-	case "command":
-		if len(p.Runtime.Start) == 0 {
-			return fmt.Errorf("platform %q: runtime.start is required in command mode", key)
-		}
-	default:
-		return fmt.Errorf("platform %q: runtime.mode %q invalid (want \"process\" or \"command\")", key, p.Runtime.Mode)
+	if strings.TrimSpace(p.Runtime.Bin) == "" {
+		return fmt.Errorf("platform %q: runtime.bin is required", key)
 	}
 	if p.Install != nil {
 		hasArtifacts := len(p.Install.Artifacts) > 0
@@ -1126,29 +1079,6 @@ func (p *Platform) validate(key string) error {
 	if err := validateProbe(key, "health", p.Runtime.Health); err != nil {
 		return err
 	}
-	if len(p.Runtime.AuthStatuses) > 0 && (p.Runtime.Ready == nil || strings.TrimSpace(p.Runtime.Ready.HTTP) == "") {
-		return fmt.Errorf("platform %q: runtime.auth_statuses requires runtime.ready.http", key)
-	}
-	seenStatuses := make(map[int]bool, len(p.Runtime.AuthStatuses))
-	for _, status := range p.Runtime.AuthStatuses {
-		if status != http.StatusUnauthorized && status != http.StatusForbidden {
-			return fmt.Errorf("platform %q: runtime.auth_statuses value %d must be 401 or 403", key, status)
-		}
-		if seenStatuses[status] {
-			return fmt.Errorf("platform %q: runtime.auth_statuses value %d is listed twice", key, status)
-		}
-		seenStatuses[status] = true
-	}
-	for i, name := range p.Runtime.AppProcesses {
-		if strings.TrimSpace(name) == "" || strings.ContainsAny(name, `/\`) {
-			return fmt.Errorf("platform %q: runtime.app_processes entry %q must be a nonempty process image base name without path separators", key, name)
-		}
-		for _, previous := range p.Runtime.AppProcesses[:i] {
-			if strings.EqualFold(name, previous) {
-				return fmt.Errorf("platform %q: runtime.app_processes entry %q is listed twice (case-insensitive)", key, name)
-			}
-		}
-	}
 	return nil
 }
 
@@ -1216,6 +1146,8 @@ func (a *Action) validate(name string) error {
 		if a.ProgressProtocol != pullProgressProtocolLlamaCPPModelsSSE {
 			return fmt.Errorf("action %q: unsupported progress_protocol %q", name, a.ProgressProtocol)
 		}
+	} else if name == pullModelAction && hasHTTP {
+		return fmt.Errorf("action %q: an HTTP pull_model action requires a progress_protocol (%q)", name, pullProgressProtocolLlamaCPPModelsSSE)
 	}
 	if a.Result != nil && (strings.TrimSpace(a.Result.Array) == "" || strings.TrimSpace(a.Result.Field) == "") {
 		return fmt.Errorf("action %q: result.array and result.field are required when result is set", name)
@@ -1234,23 +1166,6 @@ func (a *Action) validate(name string) error {
 		hasIn := len(m.In) > 0
 		if hasIn == m.Nonempty {
 			return fmt.Errorf("action %q: result.match requires exactly one of a non-empty in or nonempty=true", name)
-		}
-	}
-	if a.ModelResolution != "" {
-		switch a.ModelResolution {
-		case modelResolutionLMSGet:
-			if !hasCmd {
-				return fmt.Errorf("action %q: model_resolution requires a cmd action", name)
-			}
-			if !cmdReferencesModel(a.Cmd) {
-				return fmt.Errorf("action %q: model_resolution requires the cmd to template {model}", name)
-			}
-		case modelResolutionLMSDiskPath:
-			if !hasRemovePath {
-				return fmt.Errorf("action %q: model_resolution %q requires remove_path", name, a.ModelResolution)
-			}
-		default:
-			return fmt.Errorf("action %q: model_resolution %q invalid (want %q or %q)", name, a.ModelResolution, modelResolutionLMSGet, modelResolutionLMSDiskPath)
 		}
 	}
 	return nil
@@ -1320,17 +1235,11 @@ func (p Platform) templatedStrings() []string {
 	}
 	out = append(out, p.Runtime.Bin)
 	out = append(out, p.Runtime.Args...)
-	for _, cmd := range p.Runtime.Start {
-		out = append(out, cmd...)
-	}
 	for _, v := range p.Runtime.Env {
 		out = append(out, v)
 	}
 	out = append(out, probeStrings(p.Runtime.Ready)...)
 	out = append(out, probeStrings(p.Runtime.Health)...)
-	if p.Runtime.Stop != nil {
-		out = append(out, p.Runtime.Stop.Cmd...)
-	}
 	return out
 }
 

@@ -14,7 +14,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -167,72 +166,9 @@ func newProxyReverseFixtureFor(t *testing.T, profile engineProfile, handler http
 	return f
 }
 
-func TestProxyReverseNativeNonstreamPeer(t *testing.T) {
-	const payload = `{"model":"m:latest","response":"complete","done":true}`
-	test := func(name string, direct bool) {
-		t.Run(name, func(t *testing.T) {
-			f := newProxyReverseFixture(t, "ollama", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				var body struct {
-					Model  string `json:"model"`
-					Stream *bool  `json:"stream"`
-				}
-				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-					t.Errorf("decode engine request: %v", err)
-					return
-				}
-				if r.Method != http.MethodPost || r.URL.Path != "/api/generate" || body.Model != "m:latest" || body.Stream == nil || *body.Stream {
-					t.Error("engine did not receive the native nonstreaming request")
-					return
-				}
-				w.Header().Set("Content-Type", "application/json")
-				w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
-				if _, err := io.WriteString(w, payload); err != nil {
-					t.Errorf("write engine response: %v", err)
-				}
-			}))
-			f.directHealthy.Store(direct)
-			f.node.Models = []string{"m:latest"}
-			f.p.soleFacade().discovery.SetSubscribed([]Node{f.node})
-			proxy := httptest.NewServer(http.HandlerFunc(f.p.soleFacade().handleHTTP))
-			t.Cleanup(proxy.Close)
-			request := proxyReverseRequest(t, http.MethodPost, proxy.URL+"/api/generate",
-				strings.NewReader(`{"model":"m:latest","stream":false}`))
-			response, err := proxy.Client().Do(request)
-			if err != nil {
-				t.Fatalf("request native nonstreaming response: %v", err)
-			}
-			data, readErr := io.ReadAll(response.Body)
-			closeErr := response.Body.Close()
-			if readErr != nil {
-				t.Fatalf("read native nonstreaming response: %v", readErr)
-			}
-			if closeErr != nil {
-				t.Fatalf("close native nonstreaming response: %v", closeErr)
-			}
-			if response.StatusCode != http.StatusOK {
-				t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusOK)
-			}
-			if string(data) != payload {
-				t.Fatalf("response body changed: length = %d, want %d", len(data), len(payload))
-			}
-			if f.directCalls.Load() == 0 {
-				t.Fatal("peer direct transport was not attempted")
-			}
-			if direct && f.reverseCalls.Load() != 0 {
-				t.Fatalf("direct response used %d reverse calls, want 0", f.reverseCalls.Load())
-			}
-			if !direct && f.reverseCalls.Load() == 0 {
-				t.Fatal("peer reverse transport was not used")
-			}
-		})
-	}
-	test("direct", true)
-	test("reverse", false)
-}
-
 func TestProxyReverseCrossEngineTierUsesPeerService(t *testing.T) {
 	var calls atomic.Int32
-	f := newProxyReverseFixture(t, "lmstudio", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	f := newProxyReverseFixtureFor(t, customCase(t).profile, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		var body struct {
 			Model string `json:"model"`
@@ -248,21 +184,21 @@ func TestProxyReverseCrossEngineTierUsesPeerService(t *testing.T) {
 			t.Error(err)
 		}
 	}))
-	profile, ok := profileFor("ollama")
+	profile, ok := profileFor("llamacpp")
 	if !ok {
-		t.Fatal("missing ollama profile")
+		t.Fatal("missing llamacpp profile")
 	}
-	ollama := newFacade(f.p, profile, NewDiscovery(), 0)
-	f.p.facades["ollama"] = ollama
+	lcpp := newFacade(f.p, profile, NewDiscovery(), 0)
+	f.p.facades["llamacpp"] = lcpp
 	policy := nodepolicy.Default()
-	policy.Tiers = map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "lmstudio", Model: "fixture-model"}}}
+	policy.Tiers = map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp-custom", Model: "fixture-model"}}}
 	if err := policy.Validate(); err != nil {
 		t.Fatal(err)
 	}
 	f.p.admission.setPolicy(policy)
 	recorder := httptest.NewRecorder()
-	ollama.handleHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"weak"}`)))
-	if recorder.Code != http.StatusOK || recorder.Body.String() != "tier-result" || recorder.Header().Get(nodepolicy.EngineHeader) != "lmstudio" {
+	lcpp.handleHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"weak"}`)))
+	if recorder.Code != http.StatusOK || recorder.Body.String() != "tier-result" || recorder.Header().Get(nodepolicy.EngineHeader) != "llamacpp-custom" {
 		t.Fatalf("tier status/body/engine = %d/%q/%q", recorder.Code, recorder.Body.String(), recorder.Header().Get(nodepolicy.EngineHeader))
 	}
 	if calls.Load() != 1 || f.reverseCalls.Load() != 1 {
@@ -274,7 +210,7 @@ func TestProxyReverseRejectsAuthorityChangedDuringSetup(t *testing.T) {
 	test := func(name string, change func(*testing.T, *proxyReverseFixture)) {
 		t.Run(name, func(t *testing.T) {
 			var calls atomic.Int32
-			f := newProxyReverseFixture(t, "ollama", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			f := newProxyReverseFixture(t, "llamacpp", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				calls.Add(1)
 				w.WriteHeader(http.StatusNoContent)
 			}))
@@ -304,7 +240,7 @@ func TestProxyReverseRejectsAuthorityChangedDuringSetup(t *testing.T) {
 
 func TestProxyReverseRejectsInvalidPinBeforeDial(t *testing.T) {
 	var calls atomic.Int32
-	f := newProxyReverseFixture(t, "ollama", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	f := newProxyReverseFixture(t, "llamacpp", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls.Add(1)
 		w.WriteHeader(http.StatusNoContent)
 	}))
@@ -325,7 +261,7 @@ func TestProxyReverseTransportDoesNotReplayDispatchedHTTP(t *testing.T) {
 	test := func(name string, direct bool, wantReverse int32) {
 		t.Run(name, func(t *testing.T) {
 			var calls atomic.Int32
-			f := newProxyReverseFixture(t, "ollama", http.NotFoundHandler())
+			f := newProxyReverseFixture(t, "llamacpp", http.NotFoundHandler())
 			f.directHealthy.Store(direct)
 			// Drop the pinned ingress after it has received HTTP but before headers.
 			f.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -366,7 +302,7 @@ func TestProxyReverseTransportDoesNotReplayDispatchedHTTP(t *testing.T) {
 func TestProxyReverseOwnerRetriesBeforeFirstBody(t *testing.T) {
 	setForTest(t, &retryBackoff, []time.Duration{time.Millisecond})
 	var calls atomic.Int32
-	f := newProxyReverseFixture(t, "ollama", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	f := newProxyReverseFixture(t, "llamacpp", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if calls.Add(1) == 1 {
 			// Fail before producing content, rather than timing out a sole
 			// owner's healthy prefill. The owner must still retry read errors.
@@ -395,7 +331,7 @@ func TestProxyReverseOwnerRetriesBeforeFirstBody(t *testing.T) {
 
 func TestProxyReverseInterruptedExposedStreamIsNotReplayed(t *testing.T) {
 	var calls atomic.Int32
-	f := newProxyReverseFixture(t, "ollama", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	f := newProxyReverseFixture(t, "llamacpp", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		w.Header().Set("Content-Type", "text/plain")
 		if _, err := io.WriteString(w, "first\n"); err != nil {
@@ -435,7 +371,7 @@ func TestProxyReverseInterruptedExposedStreamIsNotReplayed(t *testing.T) {
 func TestProxyReverseCancellationEndsExposedStream(t *testing.T) {
 	var calls atomic.Int32
 	cancelled := make(chan struct{})
-	f := newProxyReverseFixture(t, "ollama", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	f := newProxyReverseFixture(t, "llamacpp", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		w.Header().Set("Content-Type", "text/plain")
 		if _, err := io.WriteString(w, "first\n"); err != nil {
@@ -497,7 +433,7 @@ func reverseContinuityOrigin(t *testing.T, f *proxyReverseFixture) *continuityFi
 
 func TestProxyReverseManagedInterruption(t *testing.T) {
 	var calls atomic.Int32
-	f := newProxyReverseFixture(t, "ollama", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	f := newProxyReverseFixture(t, "llamacpp", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		w.Header().Set("Content-Type", "text/event-stream")
 		if _, err := io.WriteString(w, continuitySSEEvent+`data: {"TORN_SENTINEL":"`); err != nil {
@@ -532,7 +468,7 @@ func TestProxyReverseManagedInterruption(t *testing.T) {
 func TestProxyReverseManagedCancellation(t *testing.T) {
 	var calls atomic.Int32
 	cancelled := make(chan struct{})
-	f := newProxyReverseFixture(t, "ollama", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	f := newProxyReverseFixture(t, "llamacpp", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		w.Header().Set("Content-Type", "text/event-stream")
 		if _, err := io.WriteString(w, continuitySSEEvent); err != nil {
@@ -577,7 +513,8 @@ func TestProxyReverseManagedCancellation(t *testing.T) {
 func TestProxyReverseEffectiveFramingDefaults(t *testing.T) {
 	test := func(name, path, request, defaults, media, payload, reason string) {
 		t.Run(name, func(t *testing.T) {
-			f := newProxyReverseFixture(t, "ollama", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			engine := "llamacpp"
+			f := newProxyReverseFixture(t, engine, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				body, err := io.ReadAll(r.Body)
 				if err != nil {
 					t.Error(err)
@@ -596,7 +533,7 @@ func TestProxyReverseEffectiveFramingDefaults(t *testing.T) {
 				}
 			}))
 			pol := nodepolicy.Default()
-			pol.Profiles = []nodepolicy.Profile{{Name: "m", Engine: "ollama", Model: "fixture-model", RequestOptions: json.RawMessage(defaults)}}
+			pol.Profiles = []nodepolicy.Profile{{Name: "m", Engine: engine, Model: "fixture-model", RequestOptions: json.RawMessage(defaults)}}
 			f.peer.admission.setPolicy(pol)
 			fx := reverseContinuityOrigin(t, f)
 			resp, data, err := fx.request(t, path, request)
@@ -619,14 +556,13 @@ func TestProxyReverseEffectiveFramingDefaults(t *testing.T) {
 	}
 	test("destination n two truncated", "/v1/chat/completions", `{"model":"fixture-model","stream":true}`, `{"n":2}`, "text/event-stream", "data: {\"choices\":[{\"index\":0,\"finish_reason\":\"stop\"}]}\n\n", streamInterruptReasonPrematureEOF)
 	test("destination n two complete", "/v1/chat/completions", `{"model":"fixture-model","stream":true}`, `{"n":2}`, "text/event-stream", "data: {\"choices\":[{\"index\":0,\"finish_reason\":\"stop\"},{\"index\":1,\"finish_reason\":\"stop\"}]}\n\n", "")
-	test("destination disables streaming", "/api/generate", `{"model":"fixture-model"}`, `{"stream":false}`, "application/json", `{"response":"`+strings.Repeat("x", 1<<20)+`","done":true}`, "")
 }
 
 func TestProxyReverseRejectsIncompatibleFraming(t *testing.T) {
 	test := func(name string, metadata []string, fallback bool) {
 		t.Run(name, func(t *testing.T) {
 			setForTest(t, &retryBackoff, []time.Duration{time.Millisecond})
-			f := newProxyReverseFixture(t, "ollama", http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			f := newProxyReverseFixture(t, "llamacpp", http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 				t.Error("incompatible peer must bypass updated ingress")
 			}))
 			var peerCalls atomic.Int32
@@ -658,7 +594,7 @@ func TestProxyReverseRejectsIncompatibleFraming(t *testing.T) {
 			if err != nil || bytes.Contains(data, []byte("LEAK_SENTINEL")) || resp.Header.Get(peerStreamFramingHeader) != "" {
 				t.Fatalf("read=%v leaked body=%v metadata=%q", err, bytes.Contains(data, []byte("LEAK_SENTINEL")), resp.Header.Get(peerStreamFramingHeader))
 			}
-			started := notificationsOf(t, fx.w, "ollama:proxy/request-started")
+			started := notificationsOf(t, fx.w, "llamacpp:proxy/request-started")
 			if fallback {
 				if resp.StatusCode != http.StatusOK || string(data) != "data: [DONE]\n\n" || peerCalls.Load() != 1 || len(started) != 1 {
 					t.Fatalf("failover status=%d peer calls=%d starts=%d", resp.StatusCode, peerCalls.Load(), len(started))
@@ -677,7 +613,7 @@ func TestProxyReverseRejectsIncompatibleFraming(t *testing.T) {
 				if wl.Error == nil || *wl.Error != want {
 					t.Fatalf("terminal error=%v want=%s", wl.Error, want)
 				}
-				requests := notificationsOf(t, fx.w, "ollama:proxy/request")
+				requests := notificationsOf(t, fx.w, "llamacpp:proxy/request")
 				var event RequestEvent
 				if len(requests) != 1 {
 					t.Fatalf("proxy/request count=%d", len(requests))
@@ -709,7 +645,7 @@ func TestProxyReverseFramingMetadataValidation(t *testing.T) {
 }
 
 func TestProxyReverseFramingExcludesUnsupportedRoutes(t *testing.T) {
-	f := newProxyReverseFixture(t, "ollama", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	f := newProxyReverseFixture(t, "llamacpp", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set(peerStreamFramingHeader, "engine-spoof")
 		if _, err := io.WriteString(w, "raw"); err != nil {
 			t.Error(err)
@@ -717,7 +653,7 @@ func TestProxyReverseFramingExcludesUnsupportedRoutes(t *testing.T) {
 	}))
 	proxy := httptest.NewServer(http.HandlerFunc(f.p.soleFacade().handleHTTP))
 	defer proxy.Close()
-	for _, path := range []string{"/v1/responses", "/api/version"} {
+	for _, path := range []string{"/v1/responses", "/health"} {
 		t.Run(path, func(t *testing.T) {
 			resp, err := proxy.Client().Post(proxy.URL+path, "application/json", strings.NewReader(`{"model":"fixture-model","stream":true}`))
 			if err != nil {
@@ -755,7 +691,7 @@ func TestStreamContinuityPreservesUpgrade(t *testing.T) {
 	defer upstream.Close()
 	fx := newContinuityFixture(t, upstream.URL, time.Second)
 	proxy := fx.origin
-	req := proxyReverseRequest(t, http.MethodGet, proxy.URL+"/api/version", nil)
+	req := proxyReverseRequest(t, http.MethodGet, proxy.URL+"/props", nil)
 	req.Header.Set("Connection", "Upgrade")
 	req.Header.Set("Upgrade", "pair-fixture")
 	resp, err := proxy.Client().Do(req)
@@ -780,7 +716,7 @@ func TestStreamContinuityPreservesUpgrade(t *testing.T) {
 }
 
 func TestProxyReverseConnectFailureRetainsUnreachableInventoryOwner(t *testing.T) {
-	f := newProxyReverseFixture(t, "ollama", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	f := newProxyReverseFixture(t, "llamacpp", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	f.directConnectFails.Store(true)
@@ -788,7 +724,7 @@ func TestProxyReverseConnectFailureRetainsUnreachableInventoryOwner(t *testing.T
 	snapshot, err := json.Marshal(noderec.GetNodesResult{Nodes: []noderec.DirectoryNode{{
 		HostUUID: "host-peer", Name: "restricted", IP: f.node.Addresses[0], ClusterUUID: "uuid-peer",
 		Services:       map[noderec.ServiceKey]noderec.ServiceStatus{service: {Port: f.node.Port, Probe: noderec.ProbeUnreachable}},
-		ModelsByEngine: map[string][]string{"ollama": {"fixture-model"}},
+		ModelsByEngine: map[string][]string{"llamacpp": {"fixture-model"}},
 	}}})
 	if err != nil {
 		t.Fatal(err)
@@ -805,7 +741,7 @@ func TestProxyReverseConnectFailureRetainsUnreachableInventoryOwner(t *testing.T
 }
 
 func TestProxyReverseDirectPrefersConfirmedPublishedAddress(t *testing.T) {
-	f := newProxyReverseFixture(t, "ollama", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	f := newProxyReverseFixture(t, "llamacpp", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	f.directHealthy.Store(true)
@@ -831,7 +767,7 @@ func TestProxyReverseDirectPrefersConfirmedPublishedAddress(t *testing.T) {
 
 func TestProxyReversePinsInnerServerCertificate(t *testing.T) {
 	var calls atomic.Int32
-	f := newProxyReverseFixture(t, "ollama", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	f := newProxyReverseFixture(t, "llamacpp", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls.Add(1)
 		w.WriteHeader(http.StatusNoContent)
 	}))
@@ -915,10 +851,10 @@ func proxyReverseRoundTrip(t *testing.T, transport http.RoundTripper, target str
 func TestProxyReverseStreamsAllEngineServicesAndRuntimePorts(t *testing.T) {
 	const firstEvent = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"first\"}}]}\n\n"
 	const remainingEvents = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"second\"}}]}\n\ndata: [DONE]\n\n"
-	for _, engine := range []string{"ollama", "lmstudio", "llamacpp"} {
-		t.Run(engine, func(t *testing.T) {
+	for _, profile := range []engineProfile{llamacppCase(t).profile, customCase(t).profile} {
+		t.Run(profile.Name, func(t *testing.T) {
 			release := make(chan struct{})
-			f := newProxyReverseFixture(t, engine, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			f := newProxyReverseFixtureFor(t, profile, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				var body struct {
 					Model string `json:"model"`
 				}
@@ -1013,7 +949,7 @@ func TestProxyReverseRejectsRemovedOrAmbiguousEndpoint(t *testing.T) {
 	test := func(name string, change func(*proxyReverseFixture)) {
 		t.Run(name, func(t *testing.T) {
 			var calls atomic.Int32
-			f := newProxyReverseFixture(t, "ollama", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			f := newProxyReverseFixture(t, "llamacpp", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				calls.Add(1)
 				w.WriteHeader(http.StatusNoContent)
 			}))
@@ -1050,8 +986,8 @@ func TestProxyReverseHybridPeerSlotWaitIsBounded(t *testing.T) {
 	var releaseOnce sync.Once
 	stopHolding := func() { releaseOnce.Do(func() { close(release) }) }
 	var held atomic.Int32
-	fx := newProxyReverseFixture(t, "ollama", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/tags" {
+	fx := newProxyReverseFixture(t, "llamacpp", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
 			held.Add(1)
 			select {
 			case <-release:
@@ -1065,11 +1001,10 @@ func TestProxyReverseHybridPeerSlotWaitIsBounded(t *testing.T) {
 	defer stopHolding()
 	fx.node.Roles = map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("fixture-model")}
 	fx.node.PolicyRevision = "1"
-	// Ollama names the untagged model by its normalized tag.
-	fx.node.StrictAdmission = strictCapabilityFor("ollama", "fixture-model:latest")
+	fx.node.StrictAdmission = strictCapabilityFor("llamacpp", "fixture-model")
 	fx.p.soleFacade().discovery.SetSubscribed([]Node{fx.node})
 	policy := nodepolicy.Default()
-	policy.Tiers = map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "fixture-model"}}}
+	policy.Tiers = map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "fixture-model"}}}
 	if err := policy.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -1082,7 +1017,7 @@ func TestProxyReverseHybridPeerSlotWaitIsBounded(t *testing.T) {
 		occupying.Add(1)
 		go func() {
 			defer occupying.Done()
-			response, err := transport.RoundTrip(proxyReverseRequest(t, http.MethodGet, candidate.url.String()+"/api/tags", nil))
+			response, err := transport.RoundTrip(proxyReverseRequest(t, http.MethodGet, candidate.url.String()+"/v1/models", nil))
 			if err != nil {
 				return
 			}
@@ -1213,7 +1148,7 @@ func TestUnifiedDispatchHybridStrictBudgetsAfterPeerSlot(t *testing.T) {
 func TestProxyReverseHybridPeerSlotRecomputesSentBudgets(t *testing.T) {
 	test := func(name string, direct bool) {
 		t.Run(name, func(t *testing.T) {
-			fx := newProxyReverseFixture(t, "ollama", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			fx := newProxyReverseFixture(t, "llamacpp", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				if _, err := io.WriteString(w, "{}"); err != nil {
 					t.Errorf("write engine response: %v", err)
@@ -1222,9 +1157,9 @@ func TestProxyReverseHybridPeerSlotRecomputesSentBudgets(t *testing.T) {
 			fx.directHealthy.Store(direct)
 			fx.node.Roles = map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("fixture-model")}
 			fx.node.PolicyRevision = "1"
-			fx.node.StrictAdmission = strictCapabilityFor("ollama", "fixture-model:latest")
+			fx.node.StrictAdmission = strictCapabilityFor("llamacpp", "fixture-model")
 			fx.p.soleFacade().discovery.SetSubscribed([]Node{fx.node})
-			policy := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "fixture-model"}}})
+			policy := tierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "fixture-model"}}})
 			fx.p.admission.setPolicy(policy)
 			headers := make(chan http.Header, 1)
 			// Capture the envelope at authenticated ingress before strict admission.
@@ -1249,7 +1184,7 @@ func TestProxyReverseHybridPeerSlotRecomputesSentBudgets(t *testing.T) {
 				}
 			}()
 			for range 8 {
-				response, err := transport.RoundTrip(proxyReverseRequest(t, http.MethodGet, cand.url.String()+"/api/tags", nil))
+				response, err := transport.RoundTrip(proxyReverseRequest(t, http.MethodGet, cand.url.String()+"/v1/models", nil))
 				if err != nil {
 					t.Fatal(err)
 				}

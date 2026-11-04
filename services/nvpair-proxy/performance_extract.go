@@ -29,7 +29,7 @@ const (
 
 // performanceExtractMetadata contains optional engine-reported numbers and a
 // content-free phase-disqualification flag. Only pinned daily schemas establish
-// evaluated prompt/cache counts; Ollama keeps its original duration-only mapping.
+// evaluated prompt/cache counts.
 type performanceExtractMetadata struct {
 	PromptTokens                *int64
 	CachedPromptTokens          *int64
@@ -64,32 +64,7 @@ func extractPerformanceMetadata(payload []byte, q performanceExtractQualificatio
 			(q.EngineFamily == "strata" && q.SchemaID == performanceExtractStrataSchema)) {
 		return performanceExtractDaily(fields, q.EngineFamily == "strata")
 	}
-	if q.EngineFamily != "ollama" || q.SchemaID != "" {
-		return result
-	}
-	switch q.APIPath {
-	case "/api/chat", "/api/generate":
-		// There is no full-response collector or nonstreaming rate qualification.
-		if !q.Streaming {
-			return result
-		}
-		result.OutputTokens = performanceExtractNumber(fields.value("eval_count"), performancewire.MaxTokens)
-		result.DecodeNs = performanceExtractNumber(fields.value("eval_duration"), performancewire.MaxPhaseNs)
-		result.LoadNs = performanceExtractNumber(fields.value("load_duration"), performancewire.MaxPhaseNs)
-		result.PrefillNs = performanceExtractNumber(fields.value("prompt_eval_duration"), performancewire.MaxPhaseNs)
-		if result.OutputTokens != nil && result.DecodeNs != nil {
-			// Preserve the independently valid count, but refuse a duration that
-			// would make the pair impossible or exceed the shared rate contract.
-			if (*result.DecodeNs == 0 && *result.OutputTokens > 0) ||
-				(*result.DecodeNs > 0 && performancewire.TokensPerSecond(*result.OutputTokens, *result.DecodeNs) > performancewire.MaxTokensPerSecond) {
-				result.DecodeNs = nil
-			}
-		}
-	case "/v1/chat/completions", "/v1/completions":
-		usage := performanceExtractObject(fields.value("usage"))
-		result.OutputTokens = performanceExtractNumber(usage.value("completion_tokens"), performancewire.MaxTokens)
-		// Compatibility timing extensions are deliberately unqualified.
-	}
+
 	return result
 }
 

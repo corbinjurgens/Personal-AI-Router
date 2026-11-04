@@ -4,7 +4,7 @@
 // Cross-process tests for the two identity/anti-entropy guarantees the
 // workload store + workload-manager must uphold:
 //
-//   - Cross-engine identity: Ollama and LM Studio each begin their request
+//   - Cross-engine identity: llama.cpp and its descriptor engine each begin their request
 //     counter at 1, so two concurrent cross-engine jobs both mint workload id
 //     "1". They must remain DISTINCT records all the way to the client stream
 //     ((origin,engine,runId,id) key), not collapse into one.
@@ -28,6 +28,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -40,13 +41,13 @@ import (
 
 // TestWorkloadCrossEngineIdentityDistinct fires exactly one inference through
 // each supervised proxy — the first request each serves, so both mint workload
-// id "1". They differ only by engine (ollama vs lmstudio) and the proxy's
+// id "1". They differ only by engine (llamacpp vs llamacpp-custom) and the proxy's
 // per-process runId, which must keep them as two separate records on the
 // broker's workloads:* stream. Before the identity fix the (origin,id) store
 // key collapsed them into one.
 func TestWorkloadCrossEngineIdentityDistinct(t *testing.T) {
 	if portBusy(11435) || portBusy(1234) {
-		t.Skip("ollama-proxy (11435) or lmstudio-proxy (1234) default port already in use; skipping")
+		t.Skip("native default-port occupancy guard (11435/1234); skipping")
 	}
 
 	// Fake engines: 200 on any request so each inference completes promptly.
@@ -58,15 +59,22 @@ func TestWorkloadCrossEngineIdentityDistinct(t *testing.T) {
 			w.Write([]byte(body))
 		}))
 	}
-	ollama := fakeEngine(`{"done":true}`)
-	defer ollama.Close()
-	lmstudio := fakeEngine(`{"choices":[]}`)
-	defer lmstudio.Close()
-	ollamaPort := portOfURL(t, ollama.URL)
-	lmstudioPort := portOfURL(t, lmstudio.URL)
+	llamacpp := fakeEngine(`{"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+	defer llamacpp.Close()
+	custom := fakeEngine(`{"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+	defer custom.Close()
+	llamacppPort := portOfURL(t, llamacpp.URL)
+	customPort := portOfURL(t, custom.URL)
 
-	stdin, msgs, _, cleanup := startBrokerWith(t,
-		"--proxy-path", proxyBin, "--proxy-engines", "ollama,lmstudio",
+	configDir, clusterDir := t.TempDir(), filepath.Join(t.TempDir(), "cluster")
+	facades := map[string]int{"llamacpp": freePort(t), "llamacpp-custom": freePort(t)}
+	writePrivateBrokerEngineSettings(t, configDir, clusterDir, facades)
+	manifest := privateFixtureManifest(t, "llamacpp-custom", filepath.Join(configDir, "absent-models"), filepath.Join(configDir, "absent-engine"), map[string]any{"port": 0, "ready": nil, "health": nil}, "openai-v1")
+	jointWriteJSON(t, filepath.Join(jointAppDir(configDir), "engines", "llamacpp-custom.json"), manifest)
+	control := newFixtureProxyControl(t)
+	stdin, msgs, _, cleanup := startBrokerWithDirsAndEnv(t, configDir, clusterDir, control.env(),
+		"--proxy-path", control.image, "--proxy-engines", "llamacpp",
+		"--engine-manager-path", engineMgrBin,
 		"--workload-manager-path", workloadMgrBin,
 	)
 	t.Cleanup(cleanup)
@@ -81,21 +89,19 @@ func TestWorkloadCrossEngineIdentityDistinct(t *testing.T) {
 		t.Fatalf("workloads:subscribe ack = %s (err %v), want subscribed:true", ack.Result, err)
 	}
 
-	ollamaProxyPort := waitProxyReady(t, stdin, msgs, 15*time.Second)
-	lmstudioProxyPort := waitLMStudioProxyReady(t, stdin, msgs, 15*time.Second)
-	t.Logf("proxies ready: ollama=%d lmstudio=%d", ollamaProxyPort, lmstudioProxyPort)
-
-	// Pin each fake engine into its proxy so inference routes deterministically.
-	// These are stdio control notifications, not HTTP hits on the proxy port,
-	// so the first HTTP request each proxy serves is the inference below → id "1".
-	writeRawFrame(t, stdin, fmt.Sprintf(`{"jsonrpc":"2.0","id":50,"method":"ollama-proxy:node/add-manual","params":{"id":"fake-ollama","host":"127.0.0.1","port":%d,"addresses":["127.0.0.1"],"models":["crossengine-model"]}}`, ollamaPort))
-	waitForResponse(t, msgs, 5*time.Second)
-	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","id":51,"method":"ollama-proxy:node/select","params":{"id":"fake-ollama"}}`)
-	waitForResponse(t, msgs, 5*time.Second)
-	writeRawFrame(t, stdin, fmt.Sprintf(`{"jsonrpc":"2.0","id":52,"method":"lmstudio-proxy:node/add-manual","params":{"id":"fake-lmstudio","host":"127.0.0.1","port":%d,"addresses":["127.0.0.1"],"models":["crossengine-model"]}}`, lmstudioPort))
-	waitForResponse(t, msgs, 5*time.Second)
-	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","id":53,"method":"lmstudio-proxy:node/select","params":{"id":"fake-lmstudio"}}`)
-	waitForResponse(t, msgs, 5*time.Second)
+	control.ready(t, "llamacpp", facades["llamacpp"])
+	control.ready(t, "llamacpp-custom", facades["llamacpp-custom"])
+	// Setup through the transparent proxy relay preserves the first HTTP
+	// inference request as workload id "1" for each facade.
+	for engine, port := range map[string]int{"llamacpp": llamacppPort, "llamacpp-custom": customPort} {
+		params := map[string]any{"id": "fake-" + engine, "host": "127.0.0.1", "port": port, "addresses": []string{"127.0.0.1"}, "models": []string{"crossengine-model"}}
+		if result := control.call(t, engine, "node/add-manual", params); result.Error != nil {
+			t.Fatal(result.Error)
+		}
+		if result := control.call(t, engine, "node/select", map[string]string{"id": "fake-" + engine}); result.Error != nil {
+			t.Fatal(result.Error)
+		}
+	}
 	t.Log("both fake engines pinned as proxy targets")
 
 	client := &http.Client{Timeout: 5 * time.Second}
@@ -110,8 +116,8 @@ func TestWorkloadCrossEngineIdentityDistinct(t *testing.T) {
 			resp.Body.Close()
 		}
 	}
-	fire(ollamaProxyPort, "/api/chat")
-	fire(lmstudioProxyPort, "/v1/chat/completions")
+	fire(facades["llamacpp"], "/v1/chat/completions")
+	fire(facades["llamacpp-custom"], "/v1/chat/completions")
 
 	// Collect the first workload id observed per engine. Both cross-engine
 	// workloads must surface; the fix is proven when they share one id yet
@@ -132,21 +138,21 @@ func TestWorkloadCrossEngineIdentityDistinct(t *testing.T) {
 				continue
 			}
 			eng := p.WorkloadInfo.Engine
-			if (eng == "ollama" || eng == "lmstudio") && p.WorkloadInfo.ID != "" {
+			if (eng == "llamacpp" || eng == "llamacpp-custom") && p.WorkloadInfo.ID != "" {
 				if _, seen := engineIDs[eng]; !seen {
 					engineIDs[eng] = p.WorkloadInfo.ID
 					t.Logf("tracked %s workload id=%q state=%q", eng, p.WorkloadInfo.ID, p.WorkloadInfo.State)
 				}
 			}
 		case <-deadline:
-			t.Fatalf("timed out: only saw engine workloads %v, want both ollama and lmstudio (cross-engine records collapsed?)", engineIDs)
+			t.Fatalf("timed out: only saw engine workloads %v, want both llamacpp and llamacpp-custom (cross-engine records collapsed?)", engineIDs)
 		}
 	}
 
-	if engineIDs["ollama"] != engineIDs["lmstudio"] {
-		t.Fatalf("expected the two proxies to collide on one workload id (both counters start at 1); got ollama=%q lmstudio=%q — determinism assumption broke", engineIDs["ollama"], engineIDs["lmstudio"])
+	if engineIDs["llamacpp"] != engineIDs["llamacpp-custom"] {
+		t.Fatalf("expected the two proxies to collide on one workload id (both counters start at 1); got llamacpp=%q llamacpp-custom=%q — determinism assumption broke", engineIDs["llamacpp"], engineIDs["llamacpp-custom"])
 	}
-	t.Logf("cross-engine OK: ollama and lmstudio both tracked distinct workloads sharing id %q", engineIDs["ollama"])
+	t.Logf("cross-engine OK: llamacpp and llamacpp-custom both tracked distinct workloads sharing id %q", engineIDs["llamacpp"])
 }
 
 // TestWorkloadManagerRehydratesActiveWorkloadOnRestart drives the rehydration
@@ -157,7 +163,7 @@ func TestWorkloadCrossEngineIdentityDistinct(t *testing.T) {
 // hear the running workload AGAIN from the restarted manager — which only
 // happens if the broker rehydrated the fresh process's active set.
 func TestWorkloadManagerRehydratesActiveWorkloadOnRestart(t *testing.T) {
-	// Fake Ollama that starts a streaming response, flushes one chunk so the
+	// Fake llama.cpp that starts a streaming response, flushes one chunk so the
 	// proxy commits and the workload becomes "running", then blocks — keeping
 	// the proxied inference in-flight so it never reaches a terminal state. The
 	// handler also unblocks if the request is cancelled, so a client-side abort
@@ -170,11 +176,11 @@ func TestWorkloadManagerRehydratesActiveWorkloadOnRestart(t *testing.T) {
 	release := make(chan struct{})
 	var releaseOnce sync.Once
 	stopEngine := func() { releaseOnce.Do(func() { close(release) }) }
-	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	llamacpp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.Copy(io.Discard, r.Body)
-		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, `{"message":{"role":"assistant","content":""},"done":false}`+"\n")
+		_, _ = io.WriteString(w, `data: {"id":"fixture","model":"rehydrate-model","choices":[{"index":0,"delta":{"role":"assistant","content":"ready"},"finish_reason":null}]}`+"\n\n")
 		if fl, ok := w.(http.Flusher); ok {
 			fl.Flush()
 		}
@@ -182,15 +188,15 @@ func TestWorkloadManagerRehydratesActiveWorkloadOnRestart(t *testing.T) {
 		case <-release:
 		case <-r.Context().Done():
 		}
-		_, _ = io.WriteString(w, `{"done":true}`+"\n")
+		_, _ = io.WriteString(w, `data: [DONE]`+"\n\n")
 	}))
-	// Defer order matters: stopEngine() must run BEFORE ollama.Close(), because
+	// Defer order matters: stopEngine() must run BEFORE llamacpp.Close(), because
 	// Close() blocks until the deliberately-held request finishes, which only
-	// happens once release is closed. Registering ollama.Close() first makes it
+	// happens once release is closed. Registering llamacpp.Close() first makes it
 	// run last (LIFO).
-	defer ollama.Close()
+	defer llamacpp.Close()
 	defer stopEngine()
-	ollamaPort := portOfURL(t, ollama.URL)
+	llamacppPort := portOfURL(t, llamacpp.URL)
 
 	// Stub peer: a cross-pinned cluster peer that records every workload frame the
 	// manager fans out to it. The inter-node interface is cluster mTLS only, so the
@@ -199,11 +205,11 @@ func TestWorkloadManagerRehydratesActiveWorkloadOnRestart(t *testing.T) {
 	received := fx.startStubClusterPeer(t, "rehydrate-wm-peer", "rehydrate-peer-uuid")
 	configDir := t.TempDir()
 	privateProxyPort := freePort(t)
-	writePrivateBrokerEngineSettings(t, configDir, fx.nodeDir, map[string]int{"ollama": privateProxyPort})
+	writePrivateBrokerEngineSettings(t, configDir, fx.nodeDir, map[string]int{"llamacpp": privateProxyPort})
 
 	stdin, msgs, stderr, cleanup := startBrokerWithDirs(t, configDir, fx.nodeDir,
 		"--scanner-mdns=true", "--scanner-mdns-service", fx.namespace.Service,
-		"--proxy-path", proxyBin, "--proxy-engines", "ollama",
+		"--proxy-path", proxyBin, "--proxy-engines", "llamacpp",
 		"--workload-manager-path", workloadMgrBin,
 	)
 	t.Cleanup(cleanup)
@@ -226,27 +232,27 @@ func TestWorkloadManagerRehydratesActiveWorkloadOnRestart(t *testing.T) {
 	}()
 
 	waitForMethod(t, msgs, "app:ready", 10*time.Second)
-	proxyPort := waitProxyReady(t, stdin, msgs, 15*time.Second)
+	proxyPort := waitEngineProxyReady(t, "llamacpp-proxy", stdin, msgs, 15*time.Second)
 	if proxyPort != privateProxyPort {
-		t.Fatalf("Ollama proxy port=%d want private port=%d", proxyPort, privateProxyPort)
+		t.Fatalf("llama.cpp proxy port=%d want private port=%d", proxyPort, privateProxyPort)
 	}
 	t.Logf("broker ready; proxy on %d", proxyPort)
 
 	pid1 := awaitInt(t, wmPids, 10*time.Second, "initial workload-manager start")
 	t.Logf("original workload-manager pid=%d", pid1)
 
-	// Pin the fake ollama, then fire one inference in the background — the
+	// Pin the fake llamacpp, then fire one inference in the background — the
 	// backend blocks, so the workload stays running until teardown.
-	writeRawFrame(t, stdin, fmt.Sprintf(`{"jsonrpc":"2.0","id":50,"method":"ollama-proxy:node/add-manual","params":{"id":"fake-ollama","host":"127.0.0.1","port":%d,"addresses":["127.0.0.1"],"models":["rehydrate-model"]}}`, ollamaPort))
+	writeRawFrame(t, stdin, fmt.Sprintf(`{"jsonrpc":"2.0","id":50,"method":"llamacpp-proxy:node/add-manual","params":{"id":"fake-llamacpp","host":"127.0.0.1","port":%d,"addresses":["127.0.0.1"],"models":["rehydrate-model"]}}`, llamacppPort))
 	waitForResponse(t, msgs, 5*time.Second)
-	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","id":51,"method":"ollama-proxy:node/select","params":{"id":"fake-ollama"}}`)
+	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","id":51,"method":"llamacpp-proxy:node/select","params":{"id":"fake-llamacpp"}}`)
 	waitForResponse(t, msgs, 5*time.Second)
 	go func() {
 		c := &http.Client{Timeout: 120 * time.Second}
 		resp, err := c.Post(
-			fmt.Sprintf("http://127.0.0.1:%d/api/chat", proxyPort),
+			fmt.Sprintf("http://127.0.0.1:%d/v1/chat/completions", proxyPort),
 			"application/json",
-			strings.NewReader(`{"model":"rehydrate-model","messages":[]}`),
+			strings.NewReader(`{"model":"rehydrate-model","messages":[],"stream":true}`),
 		)
 		if err == nil {
 			io.Copy(io.Discard, resp.Body)
@@ -288,26 +294,26 @@ func TestWorkloadManagerRehydratesActiveWorkloadOnRestart(t *testing.T) {
 // state — otherwise a peer's wrongly-inferred "failed" (or a missed terminal)
 // can never be repaired after a restart.
 func TestWorkloadManagerRehydratesRecentTerminalOnRestart(t *testing.T) {
-	// Fake Ollama that completes immediately, so the workload reaches a terminal
+	// Fake llama.cpp that completes immediately, so the workload reaches a terminal
 	// (completed) state right away.
-	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	llamacpp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"done":true}`))
+		w.Write([]byte(`{"choices":[{"index":0,"message":{"role":"assistant","content":"finished"},"finish_reason":"stop"}]}`))
 	}))
-	defer ollama.Close()
-	ollamaPort := portOfURL(t, ollama.URL)
+	defer llamacpp.Close()
+	llamacppPort := portOfURL(t, llamacpp.URL)
 
 	fx := newInterNodeCluster(t)
 	received := fx.startStubClusterPeer(t, "rehydrate-term-peer", "rehydrate-term-peer-uuid")
 	configDir := t.TempDir()
 	privateProxyPort := freePort(t)
-	writePrivateBrokerEngineSettings(t, configDir, fx.nodeDir, map[string]int{"ollama": privateProxyPort})
+	writePrivateBrokerEngineSettings(t, configDir, fx.nodeDir, map[string]int{"llamacpp": privateProxyPort})
 
 	stdin, msgs, stderr, cleanup := startBrokerWithDirs(t, configDir, fx.nodeDir,
 		"--scanner-mdns=true", "--scanner-mdns-service", fx.namespace.Service,
-		"--proxy-path", proxyBin, "--proxy-engines", "ollama",
+		"--proxy-path", proxyBin, "--proxy-engines", "llamacpp",
 		"--workload-manager-path", workloadMgrBin,
 	)
 	t.Cleanup(cleanup)
@@ -327,21 +333,21 @@ func TestWorkloadManagerRehydratesRecentTerminalOnRestart(t *testing.T) {
 	}()
 
 	waitForMethod(t, msgs, "app:ready", 10*time.Second)
-	proxyPort := waitProxyReady(t, stdin, msgs, 15*time.Second)
+	proxyPort := waitEngineProxyReady(t, "llamacpp-proxy", stdin, msgs, 15*time.Second)
 	if proxyPort != privateProxyPort {
-		t.Fatalf("Ollama proxy port=%d want private port=%d", proxyPort, privateProxyPort)
+		t.Fatalf("llama.cpp proxy port=%d want private port=%d", proxyPort, privateProxyPort)
 	}
 	pid1 := awaitInt(t, wmPids, 10*time.Second, "initial workload-manager start")
 
-	writeRawFrame(t, stdin, fmt.Sprintf(`{"jsonrpc":"2.0","id":50,"method":"ollama-proxy:node/add-manual","params":{"id":"fake-ollama","host":"127.0.0.1","port":%d,"addresses":["127.0.0.1"],"models":["rehydrate-term-model"]}}`, ollamaPort))
+	writeRawFrame(t, stdin, fmt.Sprintf(`{"jsonrpc":"2.0","id":50,"method":"llamacpp-proxy:node/add-manual","params":{"id":"fake-llamacpp","host":"127.0.0.1","port":%d,"addresses":["127.0.0.1"],"models":["rehydrate-term-model"]}}`, llamacppPort))
 	waitForResponse(t, msgs, 5*time.Second)
-	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","id":51,"method":"ollama-proxy:node/select","params":{"id":"fake-ollama"}}`)
+	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","id":51,"method":"llamacpp-proxy:node/select","params":{"id":"fake-llamacpp"}}`)
 	waitForResponse(t, msgs, 5*time.Second)
 
 	// Fire one inference; it completes promptly → terminal workload.
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Post(
-		fmt.Sprintf("http://127.0.0.1:%d/api/chat", proxyPort),
+		fmt.Sprintf("http://127.0.0.1:%d/v1/chat/completions", proxyPort),
 		"application/json",
 		strings.NewReader(`{"model":"rehydrate-term-model","messages":[]}`),
 	)

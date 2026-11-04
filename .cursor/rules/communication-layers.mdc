@@ -56,7 +56,7 @@ field across bridge decoding and ordinary preserving clients.
 - PAIR must not implement a parallel node-to-node protocol.
 - Clustered backend peer channels use the trust and transport selected by the
   backend services; PAIR relays control-plane requests through the broker.
-- Public inference clients connect to local Ollama- or OpenAI-compatible proxy
+- Public inference clients connect to local OpenAI-compatible proxy
   endpoints.
 - Ask-to-join admission requests travel through `pairApi`, the existing local
   service endpoint and the generic broker `cluster:*` relay. Cluster-manager

@@ -24,9 +24,9 @@ func TestReplacementProxyReadinessStaysUnknownUntilReported(t *testing.T) {
 	v.SetSize(180, 35)
 	m := New(f.client, nil, []View{v})
 	t.Cleanup(v.close)
-	idx := v.proxy.indexForEngine("ollama")
+	idx := v.proxy.indexForEngine("llamacpp")
 	if idx < 0 {
-		t.Fatal("Ollama proxy missing from the tracker")
+		t.Fatal("llama.cpp proxy missing from the tracker")
 	}
 	proxyRow := func() string {
 		t.Helper()
@@ -46,7 +46,7 @@ func TestReplacementProxyReadinessStaysUnknownUntilReported(t *testing.T) {
 		if strings.Contains(row, "down") || (!strings.Contains(row, "unknown") && !strings.Contains(row, "?")) {
 			t.Errorf("%s: unconfirmed proxy rendered as %q, want unknown", stage, row)
 		}
-		if got, usable := v.proxy.portForEngine("ollama"); usable || got != port {
+		if got, usable := v.proxy.portForEngine("llamacpp"); usable || got != port {
 			t.Errorf("%s: endpoint port=%d usable=%v, want %d/false", stage, got, usable, port)
 		}
 	}
@@ -57,14 +57,14 @@ func TestReplacementProxyReadinessStaysUnknownUntilReported(t *testing.T) {
 		}
 		request, result := terminalControlsReply(t, f.broker,
 			sessionCommand(f.client, f.client.Generation(), v.proxy.statusCmd(f.client, idx)), reply)
-		if request.Method != "ollama-proxy:get-status" {
+		if request.Method != "llamacpp-proxy:get-status" {
 			t.Fatalf("proxy status request = %q", request.Method)
 		}
 		updated, _ := m.Update(result)
 		m = updated.(Model)
 	}
-	readStatus(&rpc.Message{Result: []byte(`{"ready":true,"port":11434}`)})
-	if port, usable := v.proxy.portForEngine("ollama"); !usable || port != 11434 {
+	readStatus(&rpc.Message{Result: []byte(`{"ready":true,"port":8080}`)})
+	if port, usable := v.proxy.portForEngine("llamacpp"); !usable || port != 8080 {
 		t.Fatal("initial successful status did not establish a usable endpoint")
 	}
 	if err := f.peer.Close(); err != nil {
@@ -98,17 +98,17 @@ func TestReplacementProxyReadinessStaysUnknownUntilReported(t *testing.T) {
 	if !strings.Contains(proxyRow(), "down") {
 		t.Error("explicit ready:false did not render the proxy down")
 	}
-	if _, usable := v.proxy.portForEngine("ollama"); usable {
+	if _, usable := v.proxy.portForEngine("llamacpp"); usable {
 		t.Error("explicit ready:false exposed a usable endpoint")
 	}
 	readStatus(&rpc.Message{Result: []byte(`{"ready":true,"port":12999}`)})
-	if port, usable := v.proxy.portForEngine("ollama"); !usable || port != 12999 || !strings.Contains(proxyRow(), ":12999") {
+	if port, usable := v.proxy.portForEngine("llamacpp"); !usable || port != 12999 || !strings.Contains(proxyRow(), ":12999") {
 		t.Error("successful ready status did not render its usable endpoint")
 	}
 	readStatus(&rpc.Message{Error: &rpc.RPCError{Code: -32000, Message: "status unavailable"}})
 	assertUnknown("failed read after known endpoint", 12999)
 	readStatus(&rpc.Message{Result: []byte(`{"ready":false,"port":0}`)})
-	if port, usable := v.proxy.portForEngine("ollama"); usable || port != 12999 || !strings.Contains(proxyRow(), "down") {
+	if port, usable := v.proxy.portForEngine("llamacpp"); usable || port != 12999 || !strings.Contains(proxyRow(), "down") {
 		t.Error("explicit down status did not preserve the unusable last-known port")
 	}
 }
@@ -191,13 +191,14 @@ func TestJobsKeyIsScopedByOrigin(t *testing.T) {
 
 // TestJobsKeyIsScopedByEngineAndRun is the same guard one level down. The ID
 // is a counter each engine's facade starts at 1 and every proxy restart resets,
-// so a concurrent Ollama and LM Studio job, or a job from before a restart and
-// one after it, share an origin and an ID while being different work.
+// so concurrent jobs on llama.cpp and a custom engine, or jobs from before a
+// restart and after it, share an origin and an ID while being different work.
 func TestJobsKeyIsScopedByEngineAndRun(t *testing.T) {
+	custom := tuiCustomEngine(t)
 	v := newJobsView(nil)
-	v.upsert(workload{ID: "1", OriginatedFrom: "node", Engine: "ollama", RunID: "r1", State: "running"})
-	v.upsert(workload{ID: "1", OriginatedFrom: "node", Engine: "lmstudio", RunID: "r2", State: "running"})
-	v.upsert(workload{ID: "1", OriginatedFrom: "node", Engine: "ollama", RunID: "r3", State: "queued"})
+	v.upsert(workload{ID: "1", OriginatedFrom: "node", Engine: "llamacpp", RunID: "r1", State: "running"})
+	v.upsert(workload{ID: "1", OriginatedFrom: "node", Engine: custom.Name, RunID: "r2", State: "running"})
+	v.upsert(workload{ID: "1", OriginatedFrom: "node", Engine: "llamacpp", RunID: "r3", State: "queued"})
 
 	if len(v.order) != 3 {
 		t.Errorf("three distinct jobs sharing an id collapsed into %d row(s)", len(v.order))
@@ -208,10 +209,11 @@ func TestJobsKeyIsScopedByEngineAndRun(t *testing.T) {
 // names. It carries only the origin and ID, so it cannot say which engine or
 // run it meant — the broker's own store drops them all, and so must this.
 func TestJobsRemovalDropsEveryGeneration(t *testing.T) {
+	custom := tuiCustomEngine(t)
 	v := newJobsView(nil)
-	v.upsert(workload{ID: "1", OriginatedFrom: "node", Engine: "ollama", RunID: "r1", State: "completed"})
-	v.upsert(workload{ID: "1", OriginatedFrom: "node", Engine: "lmstudio", RunID: "r2", State: "completed"})
-	v.upsert(workload{ID: "2", OriginatedFrom: "node", Engine: "ollama", RunID: "r1", State: "completed"})
+	v.upsert(workload{ID: "1", OriginatedFrom: "node", Engine: "llamacpp", RunID: "r1", State: "completed"})
+	v.upsert(workload{ID: "1", OriginatedFrom: "node", Engine: custom.Name, RunID: "r2", State: "completed"})
+	v.upsert(workload{ID: "2", OriginatedFrom: "node", Engine: "llamacpp", RunID: "r1", State: "completed"})
 
 	v.remove(workloadRef{origin: "node", id: "1"})
 
@@ -233,8 +235,8 @@ func TestJobsRemovalDropsEveryGeneration(t *testing.T) {
 // again.
 func TestRemovedJobStaysRemovedWhenTheSnapshotLandsLater(t *testing.T) {
 	v := newJobsView(nil)
-	gone := workload{ID: "1", OriginatedFrom: "node", Engine: "ollama", RunID: "r1", State: "completed"}
-	kept := workload{ID: "2", OriginatedFrom: "node", Engine: "ollama", RunID: "r1", State: "running"}
+	gone := workload{ID: "1", OriginatedFrom: "node", Engine: "llamacpp", RunID: "r1", State: "completed"}
+	kept := workload{ID: "2", OriginatedFrom: "node", Engine: "llamacpp", RunID: "r1", State: "running"}
 
 	v.remove(workloadRef{origin: "node", id: "1"})
 	v.Update(workloadsLoadedMsg{workloads: []workload{gone, kept}})
@@ -248,7 +250,7 @@ func TestRemovedJobStaysRemovedWhenTheSnapshotLandsLater(t *testing.T) {
 
 	// Once the baseline is in, the list is live and a new job with a reused
 	// id is simply new work.
-	again := workload{ID: "1", OriginatedFrom: "node", Engine: "ollama", RunID: "r2", State: "running"}
+	again := workload{ID: "1", OriginatedFrom: "node", Engine: "llamacpp", RunID: "r2", State: "running"}
 	v.upsert(again)
 	if _, ok := v.byKey[workloadKey(again)]; !ok {
 		t.Error("a later job reusing a removed id was refused")

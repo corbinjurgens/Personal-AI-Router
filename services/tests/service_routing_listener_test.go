@@ -492,7 +492,7 @@ func TestServiceRoutingListenerWithoutFacades(t *testing.T) {
 	setListener := func(id string, listener nodepolicy.Listener) setResult {
 		t.Helper()
 		want := servicePolicy(t, c)
-		want.Tiers["strong"] = []nodepolicy.TierEntry{{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "big:70b"}}
+		want.Tiers["strong"] = []nodepolicy.TierEntry{{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "big:70b"}}
 		want.Routing.Listener = listener
 		if err := want.Validate(); err != nil {
 			t.Fatalf("invalid listener fixture: %v", err)

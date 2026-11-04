@@ -46,7 +46,6 @@ const (
 	// detailInputLaunchArgs edits the arguments and environment an engine is
 	// started with, in the notation LAUNCH_TEXT.md describes.
 	detailInputLaunchArgs
-	detailInputCredential
 )
 
 // nodeDetail is the drill-down for one machine: its engines and the models each
@@ -140,7 +139,6 @@ type nodeDetail struct {
 	// write goes to it rather than to wherever the cursor now sits, which is
 	// not necessarily the same row.
 	settingsEngine string
-	credential     detailCredential
 
 	telemetry   nodeTelemetry
 	telemetryOK bool
@@ -188,17 +186,6 @@ type nodeDetail struct {
 	status toast
 
 	width, height int
-}
-
-// detailCredential holds only service-confirmed state and one transient call.
-// The editable key belongs exclusively to input while its masked field is open.
-type detailCredential struct {
-	engine      string
-	state       engines.CredentialState
-	known       bool
-	unavailable bool
-	mutation    bool
-	request     *credentialRequest
 }
 
 // awaitedSettings identifies one write, by engine and by the request id it
@@ -265,9 +252,6 @@ var (
 	// screen: the letter is taken on the Nodes list and the Jobs tab, but those
 	// are other views, and this one is full-screen.
 	detailArgsKey       = key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "arguments"))
-	detailCredentialKey = key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "API key"))
-	detailClearKey      = key.NewBinding(key.WithKeys("delete"), key.WithHelp("delete", "Clear key"))
-	detailKeyRetryKey   = key.NewBinding(key.WithKeys("ctrl+r"), key.WithHelp("ctrl+r", "retry key state"))
 	detailPullKey       = key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "browse models"))
 	detailPullByNameKey = key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "download by name"))
 	detailLoadKey       = key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "load"))
@@ -510,8 +494,6 @@ func (d *nodeDetail) own(cmd tea.Cmd) tea.Cmd {
 
 // close retires the detail's independent command and subscription lifetimes.
 func (d *nodeDetail) close() {
-	d.retireCredential()
-	d.credential = detailCredential{}
 	d.retireSwitch()
 	d.engineSwitch.transition(switchTransition{event: switchClose})
 	d.closePerformance()
@@ -558,10 +540,6 @@ func (d *nodeDetail) followNode(row nodeRow, found bool) {
 		d.node.membership = membershipNone
 	}
 	d.telemetryFound = found
-	if oldFound != found || oldHostUUID != d.hostUUID || oldSelf != d.telemetrySelf || (found && row.key != d.node.key) {
-		d.retireCredential()
-		d.credential = detailCredential{}
-	}
 	if oldFound != found || oldHostUUID != d.hostUUID || oldSelf != d.telemetrySelf {
 		d.performanceRoute++
 		d.performance = nil
@@ -887,8 +865,6 @@ func (d *nodeDetail) update(msg tea.Msg) (tea.Cmd, bool) {
 		return nil, true
 
 	case DisconnectedMsg:
-		d.retireCredential()
-		d.credential = detailCredential{unavailable: true}
 		d.modelsGeneration++
 		d.downloadsCurrent = false
 		d.retireSwitch()
@@ -973,26 +949,6 @@ func (d *nodeDetail) update(msg tea.Msg) (tea.Cmd, bool) {
 		}
 		return d.update(msg.msg)
 
-	case credentialMsg:
-		if msg.request != d.credential.request || msg.request == nil || !d.credentialLocal() {
-			return nil, true
-		}
-		if e := d.selectedEngine(); e == nil || e.Engine != d.credential.engine {
-			return d.syncCredentialSelection(), true
-		}
-		mutation := d.credential.mutation
-		d.retireCredential()
-		if msg.failed {
-			d.credential.unavailable = true
-			if mutation {
-				d.status.error("Credential update failed; last confirmed state retained. Press ctrl+r to retry state.")
-			}
-		} else {
-			d.credential.state, d.credential.known = msg.state, true
-			d.credential.unavailable = false
-		}
-		return nil, true
-
 	case descriptorsMsg:
 		d.descriptors = msg.descriptors
 		return nil, true
@@ -1035,7 +991,7 @@ func (d *nodeDetail) update(msg tea.Msg) (tea.Cmd, bool) {
 		d.engines = msg.engines
 		d.refreshEngines()
 		d.SetSize(d.width, d.height)
-		return d.syncCredentialSelection(), true
+		return nil, true
 
 	case detailModelsMsg:
 		if msg.generation != d.modelsGeneration || d.policyDisconnected {
@@ -1249,8 +1205,6 @@ func (d *nodeDetail) handleNotification(msg *rpc.Message) tea.Cmd {
 		return nil
 
 	case "service/broker-restarted":
-		d.retireCredential()
-		d.credential = detailCredential{unavailable: true}
 		d.modelsGeneration++
 		d.downloadsCurrent = false
 		d.models.current = false
@@ -1284,14 +1238,14 @@ func (d *nodeDetail) handleNotification(msg *rpc.Message) tea.Cmd {
 			if existing.Engine == e.Engine {
 				d.engines[i] = e
 				d.refreshEngines()
-				return d.syncCredentialSelection()
+				return nil
 			}
 		}
 		d.engines = append(d.engines, e)
 		d.refreshEngines()
 		// A new engine row changes the split between the two tables.
 		d.sizeEngineTable()
-		return d.syncCredentialSelection()
+		return nil
 
 	case "engine:settings-changed":
 		// The saved state, from whoever changed it — this screen, the desktop
@@ -1511,10 +1465,6 @@ func progressPercent(pct *int) string {
 }
 
 func (d *nodeDetail) handleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
-	if msg.String() == "esc" && d.credential.request != nil {
-		d.retireCredential()
-		return nil, true
-	}
 	if d.engineSwitch.open {
 		return d.switchKey(msg), true
 	}
@@ -1523,18 +1473,10 @@ func (d *nodeDetail) handleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 		case "enter":
 			return d.submitInput(), true
 		case "esc":
-			if d.mode == detailInputCredential {
-				d.retireCredential()
-				return nil, true
-			}
 			d.mode = detailInputNone
 			d.settingsEngine = ""
 			d.input.Blur()
 			return nil, true
-		case "ctrl+d":
-			if d.mode == detailInputCredential {
-				return d.changeCredential(""), true
-			}
 		}
 		var cmd tea.Cmd
 		d.input, cmd = d.input.Update(msg)
@@ -1560,12 +1502,10 @@ func (d *nodeDetail) handleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 		return nil, false
 	}
 	if key.Matches(msg, detailPerformanceKey) {
-		d.retireCredential()
 		d.performanceOpen = !d.performanceOpen
 		return nil, true
 	}
 	if key.Matches(msg, detailSwitchKey) && !d.performanceOpen {
-		d.retireCredential()
 		d.engineSwitch.open = true
 		d.remotePermissionFresh = false
 		if d.engineSwitch.source == "" {
@@ -1587,7 +1527,6 @@ func (d *nodeDetail) handleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 		return cmd, true
 	}
 	if key.Matches(msg, detailPaneKey) {
-		d.retireCredential()
 		if d.pane == detailEngines {
 			d.pane = detailModels
 		} else {
@@ -1613,12 +1552,6 @@ func (d *nodeDetail) handleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 func (d *nodeDetail) handleEngineKey(msg tea.KeyMsg) tea.Cmd {
 	engine := d.selectedEngine()
 	switch {
-	case key.Matches(msg, detailCredentialKey):
-		return d.editCredential()
-	case key.Matches(msg, detailClearKey):
-		return d.changeCredential("")
-	case key.Matches(msg, detailKeyRetryKey):
-		return d.readCredential()
 	case key.Matches(msg, detailInstallKey):
 		return d.lifecycle(engine, "install")
 	case key.Matches(msg, detailStartKey):
@@ -1646,129 +1579,7 @@ func (d *nodeDetail) handleEngineKey(msg tea.KeyMsg) tea.Cmd {
 	}
 	var cmd tea.Cmd
 	d.engineTable, cmd = d.engineTable.Update(msg)
-	return tea.Batch(cmd, d.syncCredentialSelection())
-}
-
-func (d *nodeDetail) credentialLocal() bool {
-	return !d.remote() && d.telemetrySelf && d.telemetryFound && !d.policyDisconnected
-}
-
-func (d *nodeDetail) retireCredential() {
-	if d.mode == detailInputCredential {
-		d.input = textinput.New()
-		d.mode = detailInputNone
-	}
-	if r := d.credential.request; r != nil {
-		r.drop()
-		d.credential.request = nil
-	}
-	d.credential.mutation = false
-}
-
-func (d *nodeDetail) syncCredentialSelection() tea.Cmd {
-	engine := ""
-	if e := d.selectedEngine(); e != nil && d.credentialLocal() {
-		engine = e.Engine
-	}
-	if engine == d.credential.engine {
-		return nil
-	}
-	d.retireCredential()
-	d.credential = detailCredential{engine: engine}
-	if engine != "" {
-		return d.readCredential()
-	}
-	return nil
-}
-
-func (d *nodeDetail) readCredential() tea.Cmd {
-	d.retireCredential()
-	if !d.credentialLocal() {
-		return nil
-	}
-	e := d.selectedEngine()
-	if e == nil {
-		return nil
-	}
-	if d.credential.engine != e.Engine {
-		d.credential = detailCredential{engine: e.Engine}
-	}
-	method, params, err := credentialStateRequest(d.nodeArg(), e.Engine)
-	if err != nil {
-		return nil
-	}
-	return d.credentialCmd(method, params, false)
-}
-
-func (d *nodeDetail) credentialCmd(method string, params map[string]any, mutation bool) tea.Cmd {
-	ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
-	r := &credentialRequest{ctx: ctx, cancel: cancel, params: params}
-	d.credential.request, d.credential.mutation = r, mutation
-	return r.cmd(d.client, method)
-}
-
-func (d *nodeDetail) editCredential() tea.Cmd {
-	if !d.credentialLocal() || d.credential.request != nil || d.settingsWanted != nil {
-		return nil
-	}
-	if e := d.selectedEngine(); e == nil || e.Engine != d.credential.engine || !d.credential.known {
-		return d.readCredential()
-	}
-	if !d.credential.state.Supported {
-		return nil
-	}
-	d.input = textinput.New()
-	d.input.EchoMode, d.input.EchoCharacter = textinput.EchoPassword, '*'
-	d.input.CharLimit = engines.MaxCredentialBytes
-	d.input.Placeholder = "API key"
-	d.mode = detailInputCredential
-	return d.input.Focus()
-}
-
-func (d *nodeDetail) saveCredential() tea.Cmd {
-	if d.input.Value() == "" {
-		d.retireCredential()
-		d.status.error("API key required for Save; use Clear to remove a saved key.")
-		return nil
-	}
-	return d.changeCredential(d.input.Value())
-}
-
-func (d *nodeDetail) changeCredential(value string) tea.Cmd {
-	// Even a refused submission discards the editable value. No retry closes
-	// over it; a retry must begin with a fresh masked field.
-	d.retireCredential()
-	e := d.selectedEngine()
-	if !d.credentialLocal() || e == nil || e.Engine != d.credential.engine ||
-		!d.credential.known || !d.credential.state.Supported {
-		return nil
-	}
-	if !engines.ValidCredential(value) {
-		d.status.error("API key must contain printable ASCII without spaces, up to 512 bytes.")
-		return nil
-	}
-	method, params, err := setCredentialRequest(d.nodeArg(), e.Engine, value)
-	if err != nil {
-		return nil
-	}
-	return d.credentialCmd(method, params, true)
-}
-
-func (d *nodeDetail) credentialLabel() string {
-	c := d.credential
-	if !c.known {
-		if c.unavailable {
-			return "Credential store unavailable"
-		}
-		return "Credential state unknown"
-	}
-	if !c.state.Supported {
-		return "Credentials not supported"
-	}
-	if c.state.Configured {
-		return "Key saved"
-	}
-	return "No key saved"
+	return cmd
 }
 
 // editSetting opens one of the three settings fields for an engine.
@@ -1815,7 +1626,6 @@ func (d *nodeDetail) openSettingsField(snap enginesettings.Snapshot, mode detail
 		d.status.error("%s", reason)
 		return nil
 	}
-	d.retireCredential()
 	d.mode = mode
 	d.settingsEngine = snap.Engine
 	switch mode {
@@ -1922,9 +1732,6 @@ func (d *nodeDetail) handleModelKey(msg tea.KeyMsg) tea.Cmd {
 }
 
 func (d *nodeDetail) submitInput() tea.Cmd {
-	if d.mode == detailInputCredential {
-		return d.saveCredential()
-	}
 	if d.policyDisconnected {
 		d.status.info("service disconnected - wait for recovery before submitting")
 		return nil
@@ -1970,7 +1777,7 @@ func (d *nodeDetail) submitSettings(mode detailInputMode, raw, trimmed string) t
 	// The engine the field was opened for, not the one under the cursor. A
 	// field can open after a settings read, and the cursor is free to move
 	// while that read is in flight — so reading the selection here wrote a
-	// value typed for Ollama into LM Studio's settings when the operator had
+	// value typed for one engine into another's settings when the operator had
 	// pressed down in the meantime.
 	engine := d.settingsEngine
 	d.settingsEngine = ""
@@ -2192,7 +1999,7 @@ func (d *nodeDetail) modelCmd(engine string, act modelAction, model string) tea.
 		d.status.error("%s: content readiness unknown or download blocks readiness", model)
 		return nil
 	}
-	return d.own(modelCmd(d.client, d.nodeArg(), engine, d.descriptors.family(engine), act, model))
+	return d.own(modelCmd(d.client, d.nodeArg(), engine, act, model))
 }
 
 func (d *nodeDetail) modelReady(engine, model string) bool {
@@ -2277,8 +2084,8 @@ func (d *nodeDetail) arm(prompt string, run func() tea.Cmd) tea.Cmd {
 // The verdict is the backend's, carried in the snapshot as a phase and, when it
 // failed, a reason. It is not inferred from comparing the saved ports against
 // the effective ones: the effective engine port is observed at the moment the
-// apply replies, and an engine that restarts onto its new port — LM Studio's
-// server re-launches detached, so the manager loses sight of it — finishes
+// apply replies, and an engine that restarts onto its new port and re-launches
+// detached, so the manager loses sight of it, finishes
 // after that. The reading then lags a change behind, and reading failure into
 // it reported a move that had plainly happened as one that had not, naming a
 // port nothing was listening on.
@@ -2631,8 +2438,8 @@ func (d *nodeDetail) engineLabel(key string) string {
 	// and a peer's can be empty — the manager not running, the read failing, or
 	// a reply that genuinely lists nothing — while the models table still has
 	// rows, because a remote node's models come from discovery instead. Falling
-	// back to the raw wire id made the same engine read "Ollama" on one machine
-	// and "ollama" on another, purely from whether that fetch had landed.
+	// back to the raw wire id made the same engine read "llama.cpp" on one machine
+	// and "llamacpp" on another, purely from whether that fetch had landed.
 	//
 	// A descriptor names an engine the list has not, such as a configured
 	// variant. engineDisplayName answers from the static proxy inventory, so it
@@ -2719,16 +2526,6 @@ func (d *nodeDetail) View() string {
 	case d.enginesStale:
 		enginesBody += "\n" + footerStyle.Render(fmt.Sprintf(
 			"  %s is not answering - this list may be out of date.", d.node.name))
-	}
-	if d.credentialLocal() && d.selectedEngine() != nil {
-		label := d.credentialLabel()
-		if d.credential.known && d.credential.unavailable {
-			label += " (credential store unavailable; last confirmed)"
-		}
-		if d.credential.request != nil {
-			label += " (waiting; esc cancels)"
-		}
-		enginesBody += "\n" + footerStyle.Render("  API key: "+label)
 	}
 	modelsEmpty := ""
 	if len(d.modelRows) == 0 {
@@ -2974,8 +2771,6 @@ func (d *nodeDetail) paneHeading(label string, pane detailPane) string {
 
 func (d *nodeDetail) inputLabel() string {
 	switch d.mode {
-	case detailInputCredential:
-		return "API key (enter Save, ctrl+d Clear, esc cancel): "
 	case detailInputEnginePort:
 		return "engine port: "
 	case detailInputProxyPort:
@@ -2999,8 +2794,6 @@ func (d *nodeDetail) Help() []key.Binding {
 	}
 	if d.mode != detailInputNone {
 		switch d.mode {
-		case detailInputCredential:
-			return append(inputHelp("Save"), key.NewBinding(key.WithKeys("ctrl+d"), key.WithHelp("ctrl+d", "Clear")))
 		case detailInputModelName:
 			return inputHelp("download")
 		case detailInputLaunchArgs:
@@ -3026,12 +2819,6 @@ func (d *nodeDetail) Help() []key.Binding {
 		bindings = append(bindings, detailPortKey, detailProxyKey, detailArgsKey)
 		if !d.remote() {
 			bindings = append(bindings, detailRestartKey, detailUninstKey)
-		}
-		if d.credentialLocal() {
-			bindings = append(bindings, detailKeyRetryKey)
-			if d.credential.known && d.credential.state.Supported {
-				bindings = append(bindings, detailCredentialKey, detailClearKey)
-			}
 		}
 		return bindings
 	}

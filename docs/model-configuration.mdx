@@ -11,7 +11,7 @@ identifier. Configuration is available while the engine is Off. A known row
 does not prove its model files are complete; Routing also accepts an exact
 model identifier when live inventory is unavailable.
 
-For llama.cpp and LM Studio, create a profile with a unique name, then edit the
+For llama.cpp, create a profile with a unique name, then edit the
 supported generation fields. Blank fields inherit the engine's behavior.
 Resetting a field removes its override. **Defaults** allows request values to
 override the configured defaults; **Enforced** replaces the configured keys in
@@ -117,8 +117,8 @@ service's supported batch, thread, KV/Flash Attention and idle/cache controls.
 RoPE/YaRN extension, explicit device/split selection, NUMA/RPC, tensor/MoE
 overrides, adapters, speculative/multimodal presets and remaining native
 allocation modes require later engine-specific support. Unsupported controls
-cannot be supplied as raw typed extras. Ollama and LM Studio native load
-configuration and automatic qualification are outside this workflow.
+cannot be supplied as raw typed extras. Automatic qualification is outside this
+workflow.
 
 ## Review before applying load changes
 

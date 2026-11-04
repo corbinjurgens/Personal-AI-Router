@@ -376,7 +376,7 @@ describe('model settings readback', () => {
 
     it('retains unavailable inspection and Auto without fake facts', () => {
         const result = parseInspectModel({
-            engine: 'ollama',
+            engine: 'llamacpp',
             modelId: 'model',
             status: 'unavailable',
             facts: { status: 'unavailable', unknowns: ['not implemented'] },

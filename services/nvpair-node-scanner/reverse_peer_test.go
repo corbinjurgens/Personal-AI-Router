@@ -92,7 +92,7 @@ type scannerReverseFixture struct {
 // with its model inventory.
 var scannerFixturePolicy = &nodepolicy.Advertisement{
 	Revision: "31",
-	Roles:    map[string]nodepolicy.AdvertisedRole{nodepolicy.TierMedium: {Engine: "ollama", Model: "model", ContextTokens: 16384}},
+	Roles:    map[string]nodepolicy.AdvertisedRole{nodepolicy.TierMedium: {Engine: "llamacpp", Model: "model", ContextTokens: 16384}},
 }
 
 const (
@@ -261,7 +261,7 @@ func newScannerReverseFixture(t *testing.T) *scannerReverseFixture {
 		if raw := f.policy.Load(); raw != nil {
 			policy = *raw
 		}
-		writeScannerFixtureResponse(t, w, map[string]any{"models": []string{model}, "modelsByEngine": map[string][]string{"ollama": {model}}, "loadedByEngine": map[string][]string{"ollama": {model}}, "policy": policy}, f.responseEnding.Load())
+		writeScannerFixtureResponse(t, w, map[string]any{"models": []string{model}, "modelsByEngine": map[string][]string{"llamacpp": {model}}, "loadedByEngine": map[string][]string{"llamacpp": {model}}, "policy": policy}, f.responseEnding.Load())
 	}))
 	models.TLS = peerMesh.ServerTLSConfig()
 	models.StartTLS()
@@ -420,7 +420,7 @@ func TestScannerReverseEnrichmentAndDirectRecovery(t *testing.T) {
 	if f.directInfo.Load() != 1 || f.directModels.Load() != 1 || f.reverseInfo.Load() != 1 || f.reverseModels.Load() != 1 {
 		t.Fatalf("initial direct/reverse attempts = ni %d/%d em %d/%d, want 1/1 each", f.directInfo.Load(), f.reverseInfo.Load(), f.directModels.Load(), f.reverseModels.Load())
 	}
-	if len(node.GPUs) != 1 || node.GPUs[0].Name != "reverse GPU" || !reflect.DeepEqual(node.Models, []string{"model"}) || !reflect.DeepEqual(node.ModelsByEngine, map[string][]string{"ollama": {"model"}}) || !reflect.DeepEqual(node.LoadedByEngine, map[string][]string{"ollama": {"model"}}) {
+	if len(node.GPUs) != 1 || node.GPUs[0].Name != "reverse GPU" || !reflect.DeepEqual(node.Models, []string{"model"}) || !reflect.DeepEqual(node.ModelsByEngine, map[string][]string{"llamacpp": {"model"}}) || !reflect.DeepEqual(node.LoadedByEngine, map[string][]string{"llamacpp": {"model"}}) {
 		t.Fatalf("reverse inventory = %+v", node)
 	}
 	var output bytes.Buffer
@@ -688,7 +688,7 @@ func TestScannerRejectsIncompleteInventoryFraming(t *testing.T) {
 				t.Fatalf("incomplete inventory changed membership: %+v", current)
 			}
 			wantModels := []string{"model"}
-			wantByEngine := map[string][]string{"ollama": {"model"}}
+			wantByEngine := map[string][]string{"llamacpp": {"model"}}
 			if !reflect.DeepEqual(current.Models, wantModels) || !reflect.DeepEqual(current.ModelsByEngine, wantByEngine) || !reflect.DeepEqual(current.LoadedByEngine, wantByEngine) || !reflect.DeepEqual(f.d.lastModels["peer"], wantModels) || !reflect.DeepEqual(f.d.lastModelsByEngine["peer"], wantByEngine) || !reflect.DeepEqual(f.d.lastLoadedByEngine["peer"], wantByEngine) {
 				t.Fatalf("incomplete body changed directory/cache inventory: node=%+v cache=%v/%v/%v", current, f.d.lastModels["peer"], f.d.lastModelsByEngine["peer"], f.d.lastLoadedByEngine["peer"])
 			}

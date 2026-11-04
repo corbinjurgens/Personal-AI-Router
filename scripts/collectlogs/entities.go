@@ -57,8 +57,8 @@ var (
 
 // Values that are never a hostname even when they arrive under a hostname key.
 var notHostnames = map[string]bool{
-	"": true, "localhost": true, "unknown": true, "ollama": true,
-	"lmstudio": true, "stdout": true, "stderr": true, "broker": true,
+	"": true, "localhost": true, "unknown": true, "llamacpp": true,
+	"stdout": true, "stderr": true, "broker": true,
 	"true": true, "false": true, "null": true,
 }
 
@@ -571,7 +571,7 @@ func isModelName(s string) bool {
 		return false
 	}
 	switch strings.ToLower(s) {
-	case "ollama", "lmstudio", "true", "false", "null", "unknown":
+	case "llamacpp", "true", "false", "null", "unknown":
 		return false
 	}
 	return true

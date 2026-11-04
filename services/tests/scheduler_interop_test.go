@@ -7,7 +7,7 @@
 //   - Scheduler process tests drive workload, telemetry, staleness, and restart
 //     baselines over stdin and inspect complete schedule:priority snapshots.
 //   - TestProxySetPriorityViaBroker exercises the proxy's node/set-priority
-//     through the broker's ollama-proxy:<method> relay end-to-end.
+//     through the broker's llamacpp-proxy:<method> relay end-to-end.
 //   - TestProxyConcurrentBurstDistribution holds real upstream requests open and
 //     verifies the proxy balances before scheduler feedback can arrive.
 //   - TestBrokerSpawnsScheduler confirms the broker comes up healthy with the
@@ -66,6 +66,17 @@ func startSchedulerProc(t *testing.T, args ...string) (io.WriteCloser, <-chan js
 	}
 }
 
+func seedSchedulerDescriptorEngine(t *testing.T, stdin io.Writer, msgs <-chan jsonrpc.Message) {
+	t.Helper()
+	// Work outside the ranked node universe registers the descriptor output
+	// without adding pressure to any node in the ranking under test.
+	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","method":"workloads:upsert","params":{"workloadInfo":{"id":"descriptor-fixture","engine":"llamacpp-custom","runId":"fixture","state":"queued","originatedFrom":"fixture","scheduledOn":"fixture"}}}`)
+	response := callRPC(t, stdin, msgs, "scheduler:get-status", nil, 5*time.Second)
+	if response.Error != nil {
+		t.Fatalf("initialize descriptor scheduler output: %+v", response.Error)
+	}
+}
+
 // waitForPriorityPair returns the next complete priority emission for both
 // engine outputs. A shared node-wide ranking changes both outputs together.
 func waitForPriorityPair(t *testing.T, ch <-chan jsonrpc.Message, timeout time.Duration) map[string]schedulerwire.EnginePriority {
@@ -85,7 +96,7 @@ func waitForPriorityPair(t *testing.T, ch <-chan jsonrpc.Message, timeout time.D
 			if json.Unmarshal(msg.Params, &p) != nil {
 				continue
 			}
-			if p.Engine == "ollama" || p.Engine == "lmstudio" {
+			if p.Engine == "llamacpp" || p.Engine == "llamacpp-custom" {
 				got[p.Engine] = p
 			}
 			if len(got) == 2 {
@@ -101,14 +112,14 @@ func waitForSchedulePair(t *testing.T, ch <-chan jsonrpc.Message, timeout time.D
 	t.Helper()
 	priorities := waitForPriorityPair(t, ch, timeout)
 	return map[string][]string{
-		"ollama":   priorities["ollama"].Nodes,
-		"lmstudio": priorities["lmstudio"].Nodes,
+		"llamacpp":        priorities["llamacpp"].Nodes,
+		"llamacpp-custom": priorities["llamacpp-custom"].Nodes,
 	}
 }
 
 func assertSchedulePair(t *testing.T, got map[string][]string, want []string) {
 	t.Helper()
-	for _, engine := range []string{"ollama", "lmstudio"} {
+	for _, engine := range []string{"llamacpp", "llamacpp-custom"} {
 		assertScheduleOrder(t, engine, got[engine], want)
 	}
 }
@@ -133,18 +144,19 @@ func TestSchedulerRanksNodeWideWithoutWaitingForTimer(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	waitForMethod(t, msgs, "ready", 10*time.Second)
+	seedSchedulerDescriptorEngine(t, stdin, msgs)
 
 	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","method":"discovery:nodes-changed","params":[{"id":"a","hostUuid":"a"},{"id":"b","hostUuid":"b"},{"id":"c","hostUuid":"c"}]}`)
 	assertSchedulePair(t, waitForSchedulePair(t, msgs, 5*time.Second), []string{"a", "b", "c"})
 
-	// A=3 (two Ollama, one LM Studio), B=1 (LM Studio), C=0.
-	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","method":"workloads:upsert","params":{"workloadInfo":{"id":"wl1","engine":"ollama","runId":"o","state":"running","originatedFrom":"x","scheduledOn":"a"}}}`)
+	// A=3 (two llama.cpp, one custom llama.cpp), B=1 (custom llama.cpp), C=0.
+	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","method":"workloads:upsert","params":{"workloadInfo":{"id":"wl1","engine":"llamacpp","runId":"o","state":"running","originatedFrom":"x","scheduledOn":"a"}}}`)
 	assertSchedulePair(t, waitForSchedulePair(t, msgs, 5*time.Second), []string{"b", "c", "a"})
-	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","method":"workloads:upsert","params":{"workloadInfo":{"id":"wl2","engine":"lmstudio","runId":"l","state":"queued","originatedFrom":"x","scheduledOn":"a"}}}`)
+	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","method":"workloads:upsert","params":{"workloadInfo":{"id":"wl2","engine":"llamacpp-custom","runId":"l","state":"queued","originatedFrom":"x","scheduledOn":"a"}}}`)
 	assertSchedulePair(t, waitForSchedulePair(t, msgs, 5*time.Second), []string{"b", "c", "a"})
-	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","method":"workloads:upsert","params":{"workloadInfo":{"id":"wl3","engine":"ollama","runId":"o","state":"queued","originatedFrom":"x","scheduledOn":"a"}}}`)
+	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","method":"workloads:upsert","params":{"workloadInfo":{"id":"wl3","engine":"llamacpp","runId":"o","state":"queued","originatedFrom":"x","scheduledOn":"a"}}}`)
 	assertSchedulePair(t, waitForSchedulePair(t, msgs, 5*time.Second), []string{"b", "c", "a"})
-	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","method":"workloads:upsert","params":{"workloadInfo":{"id":"wl4","engine":"lmstudio","runId":"l","state":"running","originatedFrom":"x","scheduledOn":"b"}}}`)
+	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","method":"workloads:upsert","params":{"workloadInfo":{"id":"wl4","engine":"llamacpp-custom","runId":"l","state":"running","originatedFrom":"x","scheduledOn":"b"}}}`)
 	assertSchedulePair(t, waitForSchedulePair(t, msgs, 5*time.Second), []string{"c", "b", "a"})
 }
 
@@ -153,6 +165,7 @@ func TestSchedulerRanksFreshUnknownAndStaleTelemetry(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	waitForMethod(t, msgs, "ready", 10*time.Second)
+	seedSchedulerDescriptorEngine(t, stdin, msgs)
 	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","method":"scheduler:telemetry","params":{"hostUuid":"a","gpuUtilizationPercent":0,"telemetryValid":true,"msSince":0}}`)
 	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","method":"scheduler:telemetry","params":{"hostUuid":"c","gpuUtilizationPercent":100,"telemetryValid":true,"msSince":10001}}`)
 	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","method":"scheduler:telemetry","params":{"hostUuid":"d","gpuUtilizationPercent":90,"telemetryValid":true,"msSince":0}}`)
@@ -193,6 +206,7 @@ func TestSchedulerRestartBaselineUsesTelemetryReplay(t *testing.T) {
 	stdin, msgs, stopFirst := startSchedulerProc(t, "--interval", "1h")
 	t.Cleanup(stopFirst)
 	waitForMethod(t, msgs, "ready", 10*time.Second)
+	seedSchedulerDescriptorEngine(t, stdin, msgs)
 	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","method":"discovery:nodes-changed","params":[{"hostUuid":"a"},{"hostUuid":"b"}]}`)
 	waitForSchedulePair(t, msgs, 5*time.Second)
 	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","method":"scheduler:telemetry","params":{"hostUuid":"a","gpuUtilizationPercent":90,"telemetryValid":true,"msSince":0}}`)
@@ -204,6 +218,7 @@ func TestSchedulerRestartBaselineUsesTelemetryReplay(t *testing.T) {
 	stdin, msgs, stopSecond := startSchedulerProc(t, "--interval", "1h")
 	t.Cleanup(stopSecond)
 	waitForMethod(t, msgs, "ready", 10*time.Second)
+	seedSchedulerDescriptorEngine(t, stdin, msgs)
 	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","method":"scheduler:telemetry","params":{"hostUuid":"a","gpuUtilizationPercent":90,"telemetryValid":true,"msSince":250}}`)
 	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","method":"discovery:nodes-changed","params":[{"hostUuid":"a"},{"hostUuid":"b"}]}`)
 	assertSchedulePair(t, waitForSchedulePair(t, msgs, 5*time.Second), []string{"b", "a"})
@@ -216,7 +231,7 @@ func assertPriorityPair(
 	wantPressure map[string]int,
 ) {
 	t.Helper()
-	for _, engine := range []string{"ollama", "lmstudio"} {
+	for _, engine := range []string{"llamacpp", "llamacpp-custom"} {
 		priority := got[engine]
 		assertScheduleOrder(t, engine, priority.Nodes, wantOrder)
 		if len(priority.Ranks) != len(wantPressure) {
@@ -243,6 +258,7 @@ func TestSchedulerSyntheticMixedEngineBurst(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	waitForMethod(t, msgs, "ready", 10*time.Second)
+	seedSchedulerDescriptorEngine(t, stdin, msgs)
 	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","method":"discovery:nodes-changed","params":[{"hostUuid":"a"},{"hostUuid":"b"},{"hostUuid":"c"}]}`)
 	initial := []string{"a", "b", "c"}
 	assertSchedulePair(t, waitForSchedulePair(t, msgs, 5*time.Second), initial)
@@ -251,9 +267,9 @@ func TestSchedulerSyntheticMixedEngineBurst(t *testing.T) {
 	current := initial
 	for i := 0; i < 50; i++ {
 		target := current[0]
-		engine := "ollama"
+		engine := "llamacpp"
 		if i%2 == 1 {
-			engine = "lmstudio"
+			engine = "llamacpp-custom"
 		}
 		depths[target]++
 		want := rankSyntheticDepths(depths)
@@ -348,11 +364,11 @@ func runBlockedProxyBurst(t *testing.T, pending, pressure []int, requests int) (
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"done":true}`)
+			_, _ = io.WriteString(w, `{"choices":[]}`)
 		}))
 	}
 
-	stdin, msgs, stderr, cleanup := startBrokerWith(t, "--proxy-path", proxyBin, "--proxy-engines", "ollama")
+	stdin, msgs, stderr, cleanup := startBrokerWith(t, "--proxy-path", proxyBin, "--proxy-engines", "llamacpp")
 	t.Cleanup(cleanup)
 	t.Cleanup(func() {
 		unblock()
@@ -366,11 +382,11 @@ func runBlockedProxyBurst(t *testing.T, pending, pressure []int, requests int) (
 	}()
 
 	waitForMethod(t, msgs, "app:ready", 10*time.Second)
-	proxyPort := waitProxyReady(t, stdin, msgs, 15*time.Second)
+	proxyPort := waitEngineProxyReady(t, "llamacpp-proxy", stdin, msgs, 15*time.Second)
 
 	requestID := 100
 	for i, server := range servers {
-		callBrokerRPC(t, stdin, msgs, requestID, "ollama-proxy:node/add-manual", map[string]any{
+		callBrokerRPC(t, stdin, msgs, requestID, "llamacpp-proxy:node/add-manual", map[string]any{
 			"id":        ids[i],
 			"host":      "127.0.0.1",
 			"port":      portOfURL(t, server.URL),
@@ -407,7 +423,7 @@ func runBlockedProxyBurst(t *testing.T, pending, pressure []int, requests int) (
 			Rank:        rank,
 		})
 	}
-	callBrokerRPC(t, stdin, msgs, requestID, "ollama-proxy:node/set-priority",
+	callBrokerRPC(t, stdin, msgs, requestID, "llamacpp-proxy:node/set-priority",
 		schedulerwire.Priority{Generation: 1, Nodes: order, Ranks: ranks})
 
 	// Workload and request notifications can exceed the reader's buffer while
@@ -427,7 +443,7 @@ func runBlockedProxyBurst(t *testing.T, pending, pressure []int, requests int) (
 		},
 	}
 	t.Cleanup(func() { client.CloseIdleConnections() })
-	endpoint := fmt.Sprintf("http://127.0.0.1:%d/api/chat", proxyPort)
+	endpoint := fmt.Sprintf("http://127.0.0.1:%d/v1/chat/completions", proxyPort)
 	start := make(chan struct{})
 	results := make(chan error, requests)
 	for range requests {
@@ -523,20 +539,20 @@ func assertBurstTotalsSkew(
 }
 
 // TestProxySetPriorityViaBroker: the proxy's node/set-priority is reachable
-// through the broker's ollama-proxy:<method> relay and returns {count}.
+// through the broker's llamacpp-proxy:<method> relay and returns {count}.
 func TestProxySetPriorityViaBroker(t *testing.T) {
 	stdin, msgs, cleanup := startBrokerProc(t,
 		"--scanner-path", scannerBin,
-		"--proxy-path", proxyBin, "--proxy-engines", "ollama",
+		"--proxy-path", proxyBin, "--proxy-engines", "llamacpp",
 	)
 	t.Cleanup(cleanup)
 
 	waitForMethod(t, msgs, "app:ready", 10*time.Second)
-	waitProxyReady(t, stdin, msgs, 15*time.Second)
+	waitEngineProxyReady(t, "llamacpp-proxy", stdin, msgs, 15*time.Second)
 
 	// A generation is required: an unversioned snapshot would clear the
 	// reservations without advancing the epoch, so the proxy rejects one.
-	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","id":70,"method":"ollama-proxy:node/set-priority","params":{"generation":1,"nodes":["alpha","beta","gamma"]}}`)
+	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","id":70,"method":"llamacpp-proxy:node/set-priority","params":{"generation":1,"nodes":["alpha","beta","gamma"]}}`)
 	resp := waitForResponse(t, msgs, 5*time.Second)
 	var r struct {
 		Count int `json:"count"`
@@ -550,20 +566,16 @@ func TestProxySetPriorityViaBroker(t *testing.T) {
 	t.Logf("proxy accepted priority list of %d nodes via broker relay", r.Count)
 }
 
-// TestLMStudioProxyIgnoresPriorityNodesAbsentFromDiscovery: the scheduler
-// emits a node-wide ranking that may include peers without LM Studio. The
-// lmstudio-proxy must intersect that list with its own discovery set and never
-// dial a priority id that never advertised the lm service.
-func TestLMStudioProxyIgnoresPriorityNodesAbsentFromDiscovery(t *testing.T) {
-	if portBusy(1234) {
-		t.Skip("lmstudio-proxy default port 1234 already in use; skipping")
-	}
-
+// TestLlamaCPPProxyIgnoresPriorityNodesAbsentFromDiscovery: the scheduler
+// emits a node-wide ranking that may include peers without llama.cpp. The
+// llamacpp-proxy must intersect that list with its own discovery set and never
+// dial a priority id that never advertised the lc service.
+func TestLlamaCPPProxyIgnoresPriorityNodesAbsentFromDiscovery(t *testing.T) {
 	var hitsMu sync.Mutex
 	hits := map[string]int{}
 	realEngine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hitsMu.Lock()
-		hits["real-lm"]++
+		hits["real-engine"]++
 		hitsMu.Unlock()
 		io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "application/json")
@@ -573,7 +585,7 @@ func TestLMStudioProxyIgnoresPriorityNodesAbsentFromDiscovery(t *testing.T) {
 	realPort := portOfURL(t, realEngine.URL)
 
 	stdin, msgs, stderr, cleanup := startBrokerWith(t,
-		"--proxy-path", proxyBin, "--proxy-engines", "lmstudio",
+		"--proxy-path", proxyBin, "--proxy-engines", "llamacpp",
 	)
 	t.Cleanup(cleanup)
 	go func() {
@@ -582,21 +594,21 @@ func TestLMStudioProxyIgnoresPriorityNodesAbsentFromDiscovery(t *testing.T) {
 	}()
 
 	waitForMethod(t, msgs, "app:ready", 10*time.Second)
-	proxyPort := waitLMStudioProxyReady(t, stdin, msgs, 15*time.Second)
+	proxyPort := waitProxyReady(t, stdin, msgs, 15*time.Second)
 
 	writeRawFrame(t, stdin, fmt.Sprintf(
-		`{"jsonrpc":"2.0","id":90,"method":"lmstudio-proxy:node/add-manual","params":{"id":"real-lm","host":"127.0.0.1","port":%d,"addresses":["127.0.0.1"],"models":["chat-model"]}}`,
+		`{"jsonrpc":"2.0","id":90,"method":"llamacpp-proxy:node/add-manual","params":{"id":"real-engine","host":"127.0.0.1","port":%d,"addresses":["127.0.0.1"],"models":["chat-model"]}}`,
 		realPort,
 	))
 	if resp := waitForResponse(t, msgs, 5*time.Second); resp.Error != nil {
-		t.Fatalf("lmstudio-proxy:node/add-manual rejected: %d %s", resp.Error.Code, resp.Error.Message)
+		t.Fatalf("llamacpp-proxy:node/add-manual rejected: %d %s", resp.Error.Code, resp.Error.Message)
 	}
 
-	// Priority puts a peer that never advertised LM Studio first. The proxy must
-	// skip it and route to the discovered real-lm node.
-	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","id":91,"method":"lmstudio-proxy:node/set-priority","params":{"generation":1,"nodes":["no-lm-peer","real-lm"]}}`)
+	// Priority puts a peer that never advertised llama.cpp first. The proxy must
+	// skip it and route to the discovered real-engine node.
+	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","id":91,"method":"llamacpp-proxy:node/set-priority","params":{"generation":1,"nodes":["no-engine-peer","real-engine"]}}`)
 	if resp := waitForResponse(t, msgs, 5*time.Second); resp.Error != nil {
-		t.Fatalf("lmstudio-proxy:node/set-priority rejected: %d %s", resp.Error.Code, resp.Error.Message)
+		t.Fatalf("llamacpp-proxy:node/set-priority rejected: %d %s", resp.Error.Code, resp.Error.Message)
 	}
 
 	client := &http.Client{Timeout: 5 * time.Second}
@@ -616,8 +628,8 @@ func TestLMStudioProxyIgnoresPriorityNodesAbsentFromDiscovery(t *testing.T) {
 
 	hitsMu.Lock()
 	defer hitsMu.Unlock()
-	if hits["real-lm"] != 1 {
-		t.Fatalf("real-lm hits = %d, want 1 (priority phantom should be ignored)", hits["real-lm"])
+	if hits["real-engine"] != 1 {
+		t.Fatalf("real-engine hits = %d, want 1 (priority phantom should be ignored)", hits["real-engine"])
 	}
 }
 

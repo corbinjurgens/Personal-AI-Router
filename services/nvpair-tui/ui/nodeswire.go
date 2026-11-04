@@ -157,8 +157,6 @@ type manualNode struct {
 	// HostUUID is the machine's own identity, read from its node-info. It is
 	// what joins a hand-typed hostname to the same machine discovered by IP.
 	HostUUID   string `json:"hostUuid"`
-	OllamaUp   bool   `json:"ollama_up"`
-	LMStudioUp bool   `json:"lmstudio_up"`
 	NodeInfoUp bool   `json:"node_info_up"`
 	// NodeInfoPort is the port the probe reached node-info on, and TLSEnabled
 	// whether that was over TLS.
@@ -189,9 +187,7 @@ func (m *manualNode) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// answered reports whether any service on the host responded to the worker's
-// last probe. The worker reports one flag per service, so an engine it starts
-// probing arrives as a new field here and joins this list.
+// answered reports whether node-info responded to the worker's last probe.
 func (m manualNode) answered() bool {
-	return m.NodeInfoUp || m.OllamaUp || m.LMStudioUp
+	return m.NodeInfoUp
 }

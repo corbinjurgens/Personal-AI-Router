@@ -345,13 +345,13 @@ describe('measured run performance', () => {
         const replacement = entry()
         replacement.key = {
             host: 'source-two',
-            engine: 'ollama',
+            engine: 'llamacpp-custom',
             model: 'model-two',
             fingerprint: 'fp-two'
         }
         replacement.samples = 16
         replacement.completed = 14
-        replacement.profile.engineFamily = 'ollama'
+        replacement.profile.engineFamily = 'llamacpp'
         render(performance([replacement]))
         expect(text()).toContain('Source host: source-two · Profile: fp-two')
         expect(text()).toContain('Samples: 16')

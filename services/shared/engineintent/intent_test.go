@@ -61,7 +61,7 @@ func TestSnapshotJSONRejectsNonBooleanEnabledValue(t *testing.T) {
 	for _, value := range []string{"null", `"false"`, "0", "[]", "{}"} {
 		t.Run(value, func(t *testing.T) {
 			var snapshot Snapshot
-			data := `{"enabledByEngine":{"ollama":` + value + `},"offByEngine":{}}`
+			data := `{"enabledByEngine":{"llamacpp":` + value + `},"offByEngine":{}}`
 			if err := json.Unmarshal([]byte(data), &snapshot); err == nil {
 				t.Fatalf("accepted non-boolean enabled value: %s", value)
 			}
@@ -93,11 +93,11 @@ func TestSnapshotJSONCanonicalKeys(t *testing.T) {
 		raw  string
 		want Snapshot
 	}{
-		{"case variants do not supply required maps", `{"EnabledByEngine":{"ollama":false},"OffByEngine":{"ollama":"local"}}`, Snapshot{}},
-		{"enabled case variant cannot override canonical On", `{"enabledByEngine":{"ollama":true},"EnabledByEngine":{"ollama":false},"offByEngine":{}}`, Snapshot{EnabledByEngine: map[string]bool{"ollama": true}, OffByEngine: map[string]Origin{}}},
-		{"origin case variant cannot override canonical origin", `{"enabledByEngine":{"ollama":false},"offByEngine":{"ollama":"local"},"OffByEngine":{"ollama":"peer"}}`, Snapshot{EnabledByEngine: map[string]bool{"ollama": false}, OffByEngine: map[string]Origin{"ollama": Local}}},
-		{"last enabled object replaces earlier object", `{"enabledByEngine":{"ollama":false},"enabledByEngine":{},"offByEngine":{}}`, Snapshot{EnabledByEngine: map[string]bool{}, OffByEngine: map[string]Origin{}}},
-		{"last origin object replaces earlier object", `{"enabledByEngine":{"ollama":false},"offByEngine":{"ollama":"local"},"offByEngine":{}}`, Snapshot{EnabledByEngine: map[string]bool{"ollama": false}, OffByEngine: map[string]Origin{}}},
+		{"case variants do not supply required maps", `{"EnabledByEngine":{"llamacpp":false},"OffByEngine":{"llamacpp":"local"}}`, Snapshot{}},
+		{"enabled case variant cannot override canonical On", `{"enabledByEngine":{"llamacpp":true},"EnabledByEngine":{"llamacpp":false},"offByEngine":{}}`, Snapshot{EnabledByEngine: map[string]bool{"llamacpp": true}, OffByEngine: map[string]Origin{}}},
+		{"origin case variant cannot override canonical origin", `{"enabledByEngine":{"llamacpp":false},"offByEngine":{"llamacpp":"local"},"OffByEngine":{"llamacpp":"peer"}}`, Snapshot{EnabledByEngine: map[string]bool{"llamacpp": false}, OffByEngine: map[string]Origin{"llamacpp": Local}}},
+		{"last enabled object replaces earlier object", `{"enabledByEngine":{"llamacpp":false},"enabledByEngine":{},"offByEngine":{}}`, Snapshot{EnabledByEngine: map[string]bool{}, OffByEngine: map[string]Origin{}}},
+		{"last origin object replaces earlier object", `{"enabledByEngine":{"llamacpp":false},"offByEngine":{"llamacpp":"local"},"offByEngine":{}}`, Snapshot{EnabledByEngine: map[string]bool{"llamacpp": false}, OffByEngine: map[string]Origin{}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var snapshot Snapshot

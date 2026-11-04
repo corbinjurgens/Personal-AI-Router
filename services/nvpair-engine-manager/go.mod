@@ -5,8 +5,6 @@ go 1.25.0
 require nvpair-shared v0.0.0-00010101000000-000000000000
 
 require (
-	github.com/danieljoos/wincred v1.2.3 // indirect
-	github.com/godbus/dbus/v5 v5.1.0 // indirect
 	github.com/gpustack/gguf-parser-go v0.27.0
 	github.com/hashicorp/yamux v0.1.2 // indirect
 	github.com/henvic/httpretty v0.1.4 // indirect

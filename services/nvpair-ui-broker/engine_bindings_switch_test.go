@@ -106,7 +106,7 @@ func TestEngineBindingsSwitchLegacyNamespace(t *testing.T) {
 	if err != nil || fence.Receipt == nil || !reflect.DeepEqual(*fence.Receipt, r) {
 		t.Fatalf("legacy fence=%+v, %v", fence, err)
 	}
-	p.TargetEngine = "ollama"
+	p.TargetEngine = "strata"
 	if _, err := h.b.acceptEngineSwitch(context.Background(), p, ""); err == nil || switchErrorDetail(err, "").Kind != settings.SwitchErrorReusedID {
 		t.Fatalf("legacy changed payload=%v", err)
 	}
@@ -164,12 +164,12 @@ func TestEngineBindingsSwitchLocalAutomaticOffObligation(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.b.engineConfigMu.Lock()
-	yields, reserved, id, err := h.b.switchLocalOffReservationLocked("lmstudio")
+	yields, reserved, id, err := h.b.switchLocalOffReservationLocked("llamacpp-custom")
 	h.b.engineConfigMu.Unlock()
 	if err != nil || !yields || !reserved || id != result.Receipt.RequestID {
 		t.Fatalf("automatic local Off yields=%t reserved=%t id=%s err=%v", yields, reserved, id, err)
 	}
-	h.b.cancelRemoteEngineSwitchOperation("lmstudio", id)
+	h.b.cancelRemoteEngineSwitchOperation("llamacpp-custom", id)
 	r := h.receipt(t, id)
 	if !r.Automatic || r.Caller != settings.SwitchOriginLocal || r.Error == nil || r.Error.Kind != settings.SwitchErrorRemoteVeto {
 		t.Fatalf("automatic local veto=%+v", r)

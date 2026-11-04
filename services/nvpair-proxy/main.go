@@ -48,7 +48,7 @@ func main() {
 	}
 
 	// The process starts with no engine facade and no listener. Which engines
-	// it fronts, on which ports, and with which alias addresses all arrive over
+	// it fronts and their ports arrive over
 	// facade/enable, because the broker computes a different port plan per
 	// engine and a flag cannot express more than one of them.
 	//

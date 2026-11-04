@@ -18,10 +18,25 @@ import (
 	"testing"
 )
 
+func overrideFailureRegistry(t *testing.T) *Registry {
+	t.Helper()
+	reg := buildBundledRegistry()
+	custom := portFixtureCustomEngine(t)
+	raw, err := json.Marshal(llamaPortFixtureManifest(custom.Name, 8082))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reg.addManifest("custom fixture", raw); err != nil {
+		t.Fatal(err)
+	}
+	reg.bundledRaw[custom.Name] = raw
+	return reg
+}
+
 func TestInvalidOverrideDoesNotUseBundledEngine(t *testing.T) {
 	dir := t.TempDir()
 	bundle := t.TempDir()
-	manifest := testEngineManifest(filepath.Join(t.TempDir(), "absent-engine"))
+	manifest := llamaTestEngineManifest(filepath.Join(t.TempDir(), "absent-engine"))
 	platform := manifest.Platforms[hostKey()]
 	platform.Runtime.Port = 0
 	platform.Install = &Install{Fetch: &Fetch{URL: "https://example.invalid/engine"}, Run: []string{"{download}"}}
@@ -81,7 +96,7 @@ func TestInvalidOverrideDoesNotUseBundledEngine(t *testing.T) {
 
 func TestOverrideFailureAndRepairFenceCachedState(t *testing.T) {
 	bundle, dir := t.TempDir(), t.TempDir()
-	manifest := testEngineManifest(filepath.Join(t.TempDir(), "absent"))
+	manifest := llamaTestEngineManifest(filepath.Join(t.TempDir(), "absent"))
 	data, err := json.Marshal(manifest)
 	if err != nil {
 		t.Fatal(err)
@@ -161,14 +176,14 @@ func TestOverrideFailureAndRepairFenceCachedState(t *testing.T) {
 }
 
 func TestInvalidOverrideDescriptorsRemainUnavailable(t *testing.T) {
-	reg := buildBundledRegistry()
-	reg.invalid["ollama"] = fmt.Errorf("invalid override fixture")
+	reg := overrideFailureRegistry(t)
+	reg.invalid["llamacpp"] = fmt.Errorf("invalid override fixture")
 	found := false
 	for _, descriptor := range reg.Descriptors() {
 		if err := descriptor.Validate(); err != nil {
 			t.Fatalf("descriptor is invalid: %v", err)
 		}
-		if descriptor.Engine == "ollama" {
+		if descriptor.Engine == "llamacpp" {
 			found = true
 			if descriptor.Available || len(descriptor.Operations) != 0 || descriptor.Catalog != "" || descriptor.ModelStore != "" {
 				t.Fatalf("invalid engine advertises capabilities: %+v", descriptor)
@@ -181,7 +196,7 @@ func TestInvalidOverrideDescriptorsRemainUnavailable(t *testing.T) {
 }
 
 func TestOverrideDirectoryReadFailureDisablesBundledEngines(t *testing.T) {
-	reg := buildBundledRegistry()
+	reg := overrideFailureRegistry(t)
 	path := filepath.Join(t.TempDir(), "not-a-directory")
 	if err := os.WriteFile(path, []byte("fixture"), 0o600); err != nil {
 		t.Fatal(err)
@@ -197,9 +212,9 @@ func TestOverrideDirectoryReadFailureDisablesBundledEngines(t *testing.T) {
 }
 
 func TestUnreadableOverrideDisablesNamedEngine(t *testing.T) {
-	reg := buildBundledRegistry()
+	reg := overrideFailureRegistry(t)
 	dir := t.TempDir()
-	if err := os.Symlink(filepath.Join(dir, "absent"), filepath.Join(dir, "ollama.json")); err != nil {
+	if err := os.Symlink(filepath.Join(dir, "absent"), filepath.Join(dir, "llamacpp.json")); err != nil {
 		if runtime.GOOS == "windows" && errors.Is(err, syscall.Errno(1314)) {
 			t.Skip("symlink fixture requires Windows symlink privileges or Developer Mode")
 		}
@@ -208,34 +223,34 @@ func TestUnreadableOverrideDisablesNamedEngine(t *testing.T) {
 	if err := reg.LoadOverrideDir(dir); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := reg.Get("ollama"); ok || reg.invalid["ollama"] == nil {
+	if _, ok := reg.Get("llamacpp"); ok || reg.invalid["llamacpp"] == nil {
 		t.Fatal("unreadable override fell back to the bundled manifest")
 	}
-	if _, ok := reg.Get("lmstudio"); !ok {
+	if _, ok := reg.Get("llamacpp-custom"); !ok {
 		t.Fatal("unrelated engine became unavailable")
 	}
 }
 
 func TestOverrideManifestDirectoryDisablesNamedEngine(t *testing.T) {
-	reg := buildBundledRegistry()
+	reg := overrideFailureRegistry(t)
 	dir := t.TempDir()
-	if err := os.Mkdir(filepath.Join(dir, "ollama.json"), 0o700); err != nil {
+	if err := os.Mkdir(filepath.Join(dir, "llamacpp.json"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := reg.LoadOverrideDir(dir); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := reg.Get("ollama"); ok || reg.invalid["ollama"] == nil {
+	if _, ok := reg.Get("llamacpp"); ok || reg.invalid["llamacpp"] == nil {
 		t.Fatal("manifest directory fell back to bundled engine")
 	}
-	if _, ok := reg.Get("lmstudio"); !ok {
+	if _, ok := reg.Get("llamacpp-custom"); !ok {
 		t.Fatal("unrelated engine became unavailable")
 	}
 }
 
 func TestInvalidOverrideDoesNotSkipOwnedShutdown(t *testing.T) {
 	reg := NewRegistry()
-	data, err := json.Marshal(testEngineManifest(filepath.Join(t.TempDir(), "absent")))
+	data, err := json.Marshal(llamaTestEngineManifest(filepath.Join(t.TempDir(), "absent")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,19 +272,19 @@ func TestInvalidOverrideDoesNotSkipOwnedShutdown(t *testing.T) {
 }
 
 func TestOverrideConflictingIdentityKeysRefuseWithoutNilManifest(t *testing.T) {
-	reg := buildBundledRegistry()
+	reg := overrideFailureRegistry(t)
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "ollama.json"), []byte(`{"engine":"lmstudio","Engine":"ollama"}`), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "llamacpp.json"), []byte(`{"engine":"llamacpp-custom","Engine":"llamacpp"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := reg.LoadOverrideDir(dir); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := reg.Get("ollama"); ok || reg.invalid["ollama"] == nil {
+	if _, ok := reg.Get("llamacpp"); ok || reg.invalid["llamacpp"] == nil {
 		t.Fatal("conflicting identity remained available")
 	}
 	ex := NewExecutor(reg, NewReporter(nil), nil, t.TempDir())
-	if _, err := ex.state("ollama"); err == nil {
+	if _, err := ex.state("llamacpp"); err == nil {
 		t.Fatal("conflicting identity admitted state")
 	}
 	for _, descriptor := range reg.Descriptors() {
@@ -281,13 +296,10 @@ func TestOverrideConflictingIdentityKeysRefuseWithoutNilManifest(t *testing.T) {
 
 func TestOverrideIdentityConflictCannotReactivateEngine(t *testing.T) {
 	dir := t.TempDir()
-	reg := NewRegistry()
-	if err := reg.LoadFS(bundledManifests, "manifests"); err != nil {
-		t.Fatal(err)
-	}
+	reg := overrideFailureRegistry(t)
 	for name, contents := range map[string]string{
-		"ollama.json": `{"engine":"ollama","display_name":"valid"}`,
-		"other.json":  `{"engine":"ollama","display_name":"conflict"}`,
+		"llamacpp.json": `{"engine":"llamacpp","display_name":"valid"}`,
+		"other.json":    `{"engine":"llamacpp","display_name":"conflict"}`,
 	} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(contents), 0o600); err != nil {
 			t.Fatal(err)
@@ -296,10 +308,10 @@ func TestOverrideIdentityConflictCannotReactivateEngine(t *testing.T) {
 	if err := reg.LoadOverrideDir(dir); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := reg.Get("ollama"); ok || reg.invalid["ollama"] == nil {
-		t.Fatal("conflicting override reactivated ollama")
+	if _, ok := reg.Get("llamacpp"); ok || reg.invalid["llamacpp"] == nil {
+		t.Fatal("conflicting override reactivated llamacpp")
 	}
-	if _, ok := reg.Get("lmstudio"); !ok {
+	if _, ok := reg.Get("llamacpp-custom"); !ok {
 		t.Fatal("unrelated engine was disabled")
 	}
 }
@@ -307,25 +319,22 @@ func TestOverrideIdentityConflictCannotReactivateEngine(t *testing.T) {
 func TestInvalidOverrideLeavesOtherEnginesAvailable(t *testing.T) {
 	for _, tc := range []struct{ name, contents string }{
 		{"malformed JSON", `{"engine":`},
-		{"validation failure", `{"engine":"ollama","platforms":{"linux/amd64":{"install":{"run":[]}}}}`},
-		{"merge failure", `{"engine":"ollama","platforms":42}`},
+		{"validation failure", `{"engine":"llamacpp","platforms":{"linux/amd64":{"install":{"run":[]}}}}`},
+		{"merge failure", `{"engine":"llamacpp","platforms":42}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			reg := NewRegistry()
-			if err := reg.LoadFS(bundledManifests, "manifests"); err != nil {
-				t.Fatal(err)
-			}
+			reg := overrideFailureRegistry(t)
 			dir := t.TempDir()
-			if err := os.WriteFile(filepath.Join(dir, "ollama.json"), []byte(tc.contents), 0o600); err != nil {
+			if err := os.WriteFile(filepath.Join(dir, "llamacpp.json"), []byte(tc.contents), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			if err := reg.LoadOverrideDir(dir); err != nil {
 				t.Fatal(err)
 			}
-			if _, ok := reg.Get("ollama"); ok || reg.invalid["ollama"] == nil {
+			if _, ok := reg.Get("llamacpp"); ok || reg.invalid["llamacpp"] == nil {
 				t.Fatal("invalid engine remained available")
 			}
-			if _, ok := reg.Get("lmstudio"); !ok {
+			if _, ok := reg.Get("llamacpp-custom"); !ok {
 				t.Fatal("unrelated engine became unavailable")
 			}
 		})
@@ -333,22 +342,19 @@ func TestInvalidOverrideLeavesOtherEnginesAvailable(t *testing.T) {
 }
 
 func TestValidPartialOverrideRetainsBundledFields(t *testing.T) {
-	reg := NewRegistry()
-	if err := reg.LoadFS(bundledManifests, "manifests"); err != nil {
-		t.Fatal(err)
-	}
-	base, ok := reg.Get("ollama")
+	reg := overrideFailureRegistry(t)
+	base, ok := reg.Get("llamacpp")
 	if !ok {
-		t.Fatal("missing bundled ollama")
+		t.Fatal("missing bundled llamacpp")
 	}
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "ollama.json"), []byte(`{"engine":"ollama","display_name":"Custom"}`), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "llamacpp.json"), []byte(`{"engine":"llamacpp","display_name":"Custom"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := reg.LoadOverrideDir(dir); err != nil {
 		t.Fatal(err)
 	}
-	got, ok := reg.Get("ollama")
+	got, ok := reg.Get("llamacpp")
 	if !ok || got.DisplayName != "Custom" || len(got.Platforms) != len(base.Platforms) {
 		t.Fatalf("partial overlay = %+v", got)
 	}

@@ -10,7 +10,7 @@
 // whose TXT map carries a schema version, the node's identity, its LAN address,
 // and one compact key per local service port, e.g.:
 //
-//	v=1;uuid=<hostUuid>;cluster-uuid=<clusterUuid>;ip=192.168.1.10;ni=14318;ol=11434;lm=1234;lc=8080;er=14319;wl=14320;cl=14321;em=14322
+//	v=1;uuid=<hostUuid>;cluster-uuid=<clusterUuid>;ip=192.168.1.10;ni=14318;lc=8080;er=14319;wl=14320;cl=14321;em=14322
 //
 // Design decisions this package encodes:
 //   - SRV port is a fixed, NON-authoritative constant; consumers ignore it and
@@ -97,8 +97,6 @@ type ServiceKey = servicekey.Key
 
 const (
 	ServiceNodeInfo      = servicekey.NodeInfo
-	ServiceOllama        = servicekey.Ollama
-	ServiceLMStudio      = servicekey.LMStudio
 	ServiceLlamaCPP      = servicekey.LlamaCPP
 	ServiceErrors        = servicekey.Errors
 	ServiceWorkload      = servicekey.Workload
@@ -118,7 +116,7 @@ const (
 
 // serviceKeyOrder is the deterministic emit order for service ports in TXT.
 var serviceKeyOrder = []ServiceKey{
-	ServiceNodeInfo, ServiceOllama, ServiceLMStudio, ServiceLlamaCPP,
+	ServiceNodeInfo, ServiceLlamaCPP,
 	ServiceErrors, ServiceWorkload, ServiceCluster, ServiceEngineManager,
 	ServiceEngineControl,
 }
@@ -313,7 +311,7 @@ const (
 	// above one it merely inferred.
 	MethodSetObservedAddresses = "discovery:set-observed-addresses"
 
-	// NotifyNodeActivity is ollama-proxy / lmstudio-proxy -> broker: a peer's
+	// NotifyNodeActivity is engine proxy -> broker: a peer's
 	// engine just returned inference response bytes to us.
 	//
 	// It is a liveness report, not a metric. A peer that is streaming a
@@ -469,8 +467,8 @@ type DirectoryNode struct {
 	Memory      *MemoryInfo                  `json:"memory,omitempty"`
 	Models      []string                     `json:"models,omitempty"` // enriched from engine-manager's em /v1/models
 	// ModelsByEngine attributes the enriched model list to the engine that
-	// serves each model, keyed by engine-manager engine name (e.g. "ollama",
-	// "lmstudio"). Models is the flat de-duplicated union of these lists and is
+	// serves each model, keyed by engine-manager engine name (e.g. "llamacpp",
+	// "llamacpp-custom"). Models is the flat de-duplicated union of these lists and is
 	// retained unchanged for consumers that only need the node-level set (e.g.
 	// the proxies' model-owner routing); ModelsByEngine is the additive, opt-in
 	// attribution a per-engine consumer (the UI's engine card) needs. Enriched
@@ -546,7 +544,7 @@ func (n DirectoryNode) HasService(s ServiceKey) bool {
 }
 
 // EngineModels returns the models a single engine serves on this node, by
-// engine-manager engine name (e.g. "ollama", "lmstudio"). It prefers the
+// engine-manager engine name (e.g. "llamacpp", "llamacpp-custom"). It prefers the
 // per-engine attribution in ModelsByEngine so a consumer that reasons about one
 // engine (a proxy ranking model owners for its own engine, or the UI's engine
 // card) never conflates another engine's models. When the node carries

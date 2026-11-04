@@ -13,11 +13,11 @@ import (
 )
 
 func TestInstallMarkerRoundTrip(t *testing.T) {
-	installDir := filepath.Join(t.TempDir(), "lmstudio")
+	installDir := filepath.Join(t.TempDir(), "llamacpp")
 	if installedByPAIR(installDir) {
 		t.Fatal("an install directory that does not exist cannot be ours")
 	}
-	if err := writeInstallMarker(installDir, "lmstudio"); err != nil {
+	if err := writeInstallMarker(installDir, "llamacpp"); err != nil {
 		t.Fatalf("writeInstallMarker: %v", err)
 	}
 	if !installedByPAIR(installDir) {
@@ -29,15 +29,12 @@ func TestInstallMarkerRoundTrip(t *testing.T) {
 	}
 }
 
-// vendorEngineManifest describes one vendor-script engine whose files land
-// outside the install directory, which is the LM Studio shape the install
-// marker exists for. removeTargets empty leaves the engine in place, which is
-// how a failing uninstall is reproduced.
+// vendorEngineManifest describes one installed engine whose binary lives in
+// vendorRoot. removeTargets empty leaves the engine in place, which is how a
+// failing uninstall is reproduced.
 func vendorEngineManifest(vendorRoot, modelsDir string, removeTargets []string) *Manifest {
-	ok := []string{"true"}
 	fail := []string{"false"}
 	if runtime.GOOS == "windows" {
-		ok = []string{"cmd", "/c", "exit", "0"}
 		fail = []string{"cmd", "/c", "exit", "1"}
 	}
 	uninstall := &Uninstall{Remove: removeTargets}
@@ -54,10 +51,8 @@ func vendorEngineManifest(vendorRoot, modelsDir string, removeTargets []string) 
 				ModelsDir: modelsDir,
 				Uninstall: uninstall,
 				Runtime: Runtime{
-					Mode:  "command",
-					Port:  45999,
-					Start: [][]string{ok},
-					Stop:  &StopSpec{Cmd: ok},
+					Bin:  filepath.Join(vendorRoot, "bin", "engine"),
+					Port: 45999,
 				},
 			},
 		},
@@ -81,17 +76,21 @@ func vendorEngineOnDisk(t *testing.T, vendorRoot string) (binary, weights string
 	return binary, weights
 }
 
-func managedExecutor(t *testing.T, manifest *Manifest) *Executor {
+func managedExecutor(t *testing.T, baseDir string, manifest *Manifest) *Executor {
 	t.Helper()
-	ex := newTestExecutor(t, manifest)
+	reg := NewRegistry()
+	reg.engines[manifest.Engine] = manifest
+	ex := NewExecutor(reg, NewReporter(nil), func(string, any) {}, baseDir)
+	acceptModelMutations(ex)
 	ex.detectTimeout = 100 * time.Millisecond
 	return ex
 }
 
 func TestUninstallManagedRemovesOnlyWhatPAIRInstalled(t *testing.T) {
-	vendorRoot := t.TempDir()
+	baseDir := t.TempDir()
+	vendorRoot := filepath.Join(baseDir, "vendor")
 	binary, weights := vendorEngineOnDisk(t, vendorRoot)
-	ex := managedExecutor(t, vendorEngineManifest(vendorRoot, filepath.Join(vendorRoot, "models"), []string{vendorRoot}))
+	ex := managedExecutor(t, baseDir, vendorEngineManifest(vendorRoot, filepath.Join(vendorRoot, "models"), []string{filepath.Join(vendorRoot, "bin")}))
 
 	// No marker: the user's own install, which PAIR must leave alone and must
 	// not report as a failure.
@@ -132,10 +131,11 @@ func TestUninstallManagedKeepsTheMarkerWhenRemovalFails(t *testing.T) {
 	uninstallRetries, uninstallBackoff = 1, time.Millisecond
 	defer func() { uninstallRetries, uninstallBackoff = oldRetries, oldBackoff }()
 
-	vendorRoot := t.TempDir()
+	baseDir := t.TempDir()
+	vendorRoot := filepath.Join(baseDir, "vendor")
 	binary, _ := vendorEngineOnDisk(t, vendorRoot)
 	// No remove targets, so the engine is still detected afterwards.
-	ex := managedExecutor(t, vendorEngineManifest(vendorRoot, filepath.Join(vendorRoot, "models"), nil))
+	ex := managedExecutor(t, baseDir, vendorEngineManifest(vendorRoot, filepath.Join(vendorRoot, "models"), nil))
 	installDir := filepath.Join(ex.baseDir, "vendor")
 	if err := writeInstallMarker(installDir, "vendor"); err != nil {
 		t.Fatal(err)
@@ -170,7 +170,8 @@ func TestUninstallManagedCarriesOnPastAPartialRemoval(t *testing.T) {
 	uninstallRetries, uninstallBackoff = 1, time.Millisecond
 	defer func() { uninstallRetries, uninstallBackoff = oldRetries, oldBackoff }()
 
-	stuckRoot := t.TempDir()
+	baseDir := t.TempDir()
+	stuckRoot := filepath.Join(baseDir, "stuck")
 	stuckBinary, stuckWeights := vendorEngineOnDisk(t, stuckRoot)
 	cache := filepath.Join(stuckRoot, "cache", "blob")
 	if err := os.MkdirAll(filepath.Dir(cache), 0o755); err != nil {
@@ -185,18 +186,18 @@ func TestUninstallManagedCarriesOnPastAPartialRemoval(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(filepath.Dir(stuckBinary), 0o700) })
-	stuck := vendorEngineManifest(stuckRoot, filepath.Join(stuckRoot, "models"), []string{stuckRoot})
+	stuck := vendorEngineManifest(stuckRoot, filepath.Join(stuckRoot, "models"), []string{filepath.Dir(cache), filepath.Dir(stuckBinary)})
 	stuck.Engine = "stuck"
 
-	cleanRoot := t.TempDir()
+	cleanRoot := filepath.Join(baseDir, "clean")
 	cleanBinary, _ := vendorEngineOnDisk(t, cleanRoot)
-	clean := vendorEngineManifest(cleanRoot, filepath.Join(cleanRoot, "models"), []string{cleanRoot})
+	clean := vendorEngineManifest(cleanRoot, filepath.Join(cleanRoot, "models"), []string{filepath.Join(cleanRoot, "bin")})
 	clean.Engine = "clean"
 
 	reg := NewRegistry()
 	reg.engines[stuck.Engine] = stuck
 	reg.engines[clean.Engine] = clean
-	ex := NewExecutor(reg, NewReporter(nil), func(string, any) {}, t.TempDir())
+	ex := NewExecutor(reg, NewReporter(nil), func(string, any) {}, baseDir)
 	ex.detectTimeout = 100 * time.Millisecond
 	for _, engine := range []string{stuck.Engine, clean.Engine} {
 		if err := writeInstallMarker(filepath.Join(ex.baseDir, engine), engine); err != nil {
@@ -237,9 +238,10 @@ func TestUninstallManagedCarriesOnPastAPartialRemoval(t *testing.T) {
 // directory, which is where ownership is recorded. With no way to tell whose
 // install an engine is, the safe answer is to remove none of them.
 func TestUninstallManagedWithoutDataDirRemovesNothing(t *testing.T) {
-	vendorRoot := t.TempDir()
+	baseDir := t.TempDir()
+	vendorRoot := filepath.Join(baseDir, "vendor")
 	binary, _ := vendorEngineOnDisk(t, vendorRoot)
-	ex := managedExecutor(t, vendorEngineManifest(vendorRoot, filepath.Join(vendorRoot, "models"), []string{vendorRoot}))
+	ex := managedExecutor(t, baseDir, vendorEngineManifest(vendorRoot, filepath.Join(vendorRoot, "models"), []string{filepath.Join(vendorRoot, "bin")}))
 	ex.baseDir = ""
 
 	if results := ex.UninstallManaged(context.Background()); results != nil {
@@ -250,30 +252,13 @@ func TestUninstallManagedWithoutDataDirRemovesNothing(t *testing.T) {
 	}
 }
 
-// TestUninstallDeclinesUnmarkedCommandEngine pins the interactive refusal. A
-// vendor script picks its own destination, so the managed-path test can never
-// vouch for a command-mode engine; without a marker this could be the user's
-// own install, holding the model library they built up in it.
-func TestUninstallDeclinesUnmarkedCommandEngine(t *testing.T) {
-	vendorRoot := t.TempDir()
-	vendorEngineOnDisk(t, vendorRoot)
-	ex := managedExecutor(t, vendorEngineManifest(vendorRoot, filepath.Join(vendorRoot, "models"), []string{vendorRoot}))
-
-	err := ex.Uninstall(context.Background(), "vendor")
-	if err == nil {
-		t.Fatal("expected uninstall to decline an engine PAIR has no record of installing")
-	}
-	if _, statErr := os.Stat(filepath.Join(vendorRoot, "bin", "engine")); statErr != nil {
-		t.Errorf("declined but still removed files: %v", statErr)
-	}
-}
-
 // TestUninstallClearsTheMarkerWhenAlreadyGone covers the engine removed by its
 // own uninstaller. Leaving the claim behind would authorise removing a copy the
 // user installs later.
 func TestUninstallClearsTheMarkerWhenAlreadyGone(t *testing.T) {
-	vendorRoot := t.TempDir() // nothing laid down, so detection fails
-	ex := managedExecutor(t, vendorEngineManifest(vendorRoot, filepath.Join(vendorRoot, "models"), []string{vendorRoot}))
+	baseDir := t.TempDir()
+	vendorRoot := filepath.Join(baseDir, "vendor") // nothing laid down, so detection fails
+	ex := managedExecutor(t, baseDir, vendorEngineManifest(vendorRoot, filepath.Join(vendorRoot, "models"), []string{filepath.Join(vendorRoot, "bin")}))
 	installDir := filepath.Join(ex.baseDir, "vendor")
 	if err := writeInstallMarker(installDir, "vendor"); err != nil {
 		t.Fatal(err)

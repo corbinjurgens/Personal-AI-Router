@@ -93,7 +93,7 @@ interface BinarySurface {
 }
 
 // The leading segment allows hyphens because every engine relay namespace is
-// its proxy's component id — "ollama-proxy:get-status", "lmstudio-proxy:ready".
+// its proxy's component id — "llamacpp-proxy:get-status", "llamacpp-proxy:ready".
 // Without the hyphen this silently matched nothing under either namespace and
 // the drift gate passed by seeing no methods at all.
 const METHOD_RE = /^(?:[a-z][a-zA-Z0-9-]*(?:[:/][a-zA-Z0-9.-]+)+|ready|error)$/

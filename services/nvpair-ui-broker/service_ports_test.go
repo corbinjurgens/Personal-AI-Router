@@ -93,7 +93,7 @@ func cachedRegistrations(b *Broker) map[noderec.ServiceKey]int {
 }
 
 func TestServicePortsDefaultPlanKeepsWorkerArgvAndRegistrations(t *testing.T) {
-	isolateOllamaHostTestConfig(t)
+	isolateBrokerTestConfig(t)
 	fixture := buildServicePortFixture(t)
 	base := t.TempDir()
 	clusterDir := filepath.Join(base, "cluster")
@@ -137,7 +137,7 @@ func TestServicePortsDefaultPlanKeepsWorkerArgvAndRegistrations(t *testing.T) {
 }
 
 func TestServicePortsAlternatePlanFlowsThroughSpawnRestartAndReplay(t *testing.T) {
-	isolateOllamaHostTestConfig(t)
+	isolateBrokerTestConfig(t)
 	fixture := buildServicePortFixture(t)
 	b := NewBroker(nil, workerPaths{
 		scanner: fixture, nodeInfo: fixture, errors: fixture, workloadMgr: fixture, clusterMgr: fixture,
@@ -225,7 +225,7 @@ func TestServicePortsAlternatePlanFlowsThroughSpawnRestartAndReplay(t *testing.T
 }
 
 func TestServicePortsInvalidPlansRejectedBeforeAnyChild(t *testing.T) {
-	isolateOllamaHostTestConfig(t)
+	isolateBrokerTestConfig(t)
 	fixture := buildServicePortFixture(t)
 	for _, tc := range []struct {
 		name  string
@@ -237,8 +237,8 @@ func TestServicePortsInvalidPlansRejectedBeforeAnyChild(t *testing.T) {
 		{name: "duplicate service ports", paths: workerPaths{nodeInfoPort: 25318, errorsPort: 25318}, want: "--node-info-port and --errors-port must differ (both are 25318)"},
 		{name: "override collides with a default", paths: workerPaths{workloadMgrPort: 14321}, want: "--workload-manager-port and --cluster-manager-port must differ (both are 14321)"},
 		{name: "service collides with engine-manager", paths: workerPaths{errorsPort: 25122, engineMgrHTTPPort: 25122}, want: "--errors-port and --engine-manager-http-port must differ (both are 25122)"},
-		{name: "compatibility facade reserved", paths: workerPaths{errorsPort: 1234}, want: "--errors-port 1234 is reserved: the LM Studio compatibility proxy uses port 1234"},
-		{name: "managed backend base reserved", paths: workerPaths{clusterMgrPort: 11435}, want: "--cluster-manager-port 11435 is reserved: the managed Ollama backend uses port 11435"},
+		{name: "compatibility facade reserved", paths: workerPaths{errorsPort: 8080}, want: "--errors-port 8080 is reserved: the llama.cpp compatibility proxy uses port 8080"},
+		{name: "managed backend base reserved", paths: workerPaths{clusterMgrPort: 8081}, want: "--cluster-manager-port 8081 is reserved: the managed llama.cpp backend uses port 8081"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			paths := tc.paths
@@ -262,25 +262,25 @@ func TestServicePortsReservationsFollowTheConfiguredPlan(t *testing.T) {
 		port int
 		want string
 	}{
-		{port: 25318, want: "the node-info service uses port 25318"},
-		{port: 25319, want: "the errors service uses port 25319"},
-		{port: 25320, want: "the workload service uses port 25320"},
-		{port: 25321, want: "the cluster manager uses port 25321"},
+		{port: 25318, want: "the node-info service"},
+		{port: 25319, want: "the errors service"},
+		{port: 25320, want: "the workload service"},
+		{port: 25321, want: "the cluster manager"},
 		{port: 14318},
 		{port: 14319},
 		{port: 14320},
 		{port: 14321},
 	} {
 		t.Run(strconv.Itoa(tc.port), func(t *testing.T) {
-			if got := b.reservedOllamaHostAliasPort(tc.port, nil, nil); got != tc.want {
-				t.Fatalf("alias reservation = %q, want %q", got, tc.want)
+			if got := b.servicePorts().owner(tc.port); got != tc.want {
+				t.Fatalf("service reservation = %q, want %q", got, tc.want)
 			}
 		})
 	}
 
 	for _, port := range []int{25318, 25319, 25320, 25321} {
-		err := b.validateSettingsPortsLocked(context.Background(), "ollama", settings.Config{ServerPort: port, ProxyPort: 25400}, settings.Snapshot{})
-		if err == nil || err.Error() != "a selected port is reserved by a PAIR service or proxy alias" {
+		err := b.validateSettingsPortsLocked(context.Background(), "llamacpp", settings.Config{ServerPort: port, ProxyPort: 25400}, settings.Snapshot{})
+		if err == nil || err.Error() != "a selected port is reserved by a PAIR service or routing listener" {
 			t.Fatalf("settings validation for %d = %v, want PAIR reservation", port, err)
 		}
 	}
@@ -298,7 +298,7 @@ func TestServicePortsReservationsFollowTheConfiguredPlan(t *testing.T) {
 		}
 	}()
 	current := settings.Snapshot{Running: true, EffectiveServerPort: 14318, EffectiveProxyPort: 14319}
-	if err := b.validateSettingsPortsLocked(context.Background(), "ollama", settings.Config{ServerPort: 14318, ProxyPort: 14319}, current); err != nil {
+	if err := b.validateSettingsPortsLocked(context.Background(), "llamacpp", settings.Config{ServerPort: 14318, ProxyPort: 14319}, current); err != nil {
 		t.Fatalf("unused default service ports remain reserved: %v", err)
 	}
 }

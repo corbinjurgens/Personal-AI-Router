@@ -7,11 +7,11 @@ import { BuiltinEngineType, ModelExpiry } from '@/shared/types/engines'
 // only ones PAIR can install and route to through a proxy facade. Any other
 // engine a node's engine-manager registers (a locally configured fork, for
 // example) is known only through its descriptor; see `EngineDescriptor`.
-export const EngineTypes = ['ollama', 'lm-studio', 'llama-cpp'] as const
+export const EngineTypes = ['llama-cpp'] as const
 
 // Kept as a distinct export so a future engine can ship behind it rather than
 // appearing the moment its type exists.
-export const EnabledEngineTypes: BuiltinEngineType[] = ['ollama', 'lm-studio', 'llama-cpp']
+export const EnabledEngineTypes: BuiltinEngineType[] = ['llama-cpp']
 
 /**
  * How `nvpair-engine-manager` spells each engine on the wire. This is the
@@ -19,16 +19,12 @@ export const EnabledEngineTypes: BuiltinEngineType[] = ['ollama', 'lm-studio', '
  * `engineTypeFromManagerName()` rather than re-deriving it from a literal.
  */
 export const EngineManagerNames = {
-    ollama: 'ollama',
-    'lm-studio': 'lmstudio',
     'llama-cpp': 'llamacpp'
 } as const satisfies Record<BuiltinEngineType, string>
 
 export const EngineSources = ['bundled', 'detected', 'installed'] as const
 
 export const EngineDisplayNames: Record<BuiltinEngineType, string> = {
-    ollama: 'Ollama',
-    'lm-studio': 'LM Studio',
     'llama-cpp': 'llama.cpp'
 } as const
 
@@ -37,8 +33,6 @@ export const EngineDefaultLinks: Record<
     BuiltinEngineType,
     { docsUrl: string; installUrl: string }
 > = {
-    ollama: { docsUrl: 'https://docs.ollama.com/', installUrl: 'https://ollama.com/download' },
-    'lm-studio': { docsUrl: 'https://lmstudio.ai/docs', installUrl: 'https://lmstudio.ai/' },
     'llama-cpp': {
         docsUrl: 'https://github.com/ggml-org/llama.cpp/tree/master/docs',
         installUrl: 'https://github.com/ggml-org/llama.cpp/releases'
@@ -97,7 +91,6 @@ export const ENGINE_DESCRIPTOR_VERSION = 1
 
 /** Protocol profiles a descriptor may declare (`engines.Protocols`). */
 export const EngineDescriptorProtocols = [
-    'ollama-api',
     'openai-v1',
     'openai-chat',
     'anthropic-messages',
@@ -105,7 +98,7 @@ export const EngineDescriptorProtocols = [
 ] as const
 
 /** Model naming rules a descriptor may declare (`engines.ModelNamings`). */
-export const EngineDescriptorModelNamings = ['exact', 'implied-latest-tag'] as const
+export const EngineDescriptorModelNamings = ['exact'] as const
 
 /** Upper bound on a declared operation response budget (`engines.MaxOperationResponseTimeoutS`). */
 export const ENGINE_OPERATION_MAX_RESPONSE_TIMEOUT_S = 30 * 60

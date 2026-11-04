@@ -15,7 +15,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 )
 
 // rwNop is a no-op io.ReadWriter so a Codec can be constructed in tests
@@ -407,111 +406,19 @@ func TestHandleHTTP_404FailoverInferenceOnly(t *testing.T) {
 	})
 }
 
-// TestHandleHTTP_AggregatesNativeModelList is Ollama-scoped because the
-// native "models" dialect is Ollama's alone — LM Studio serves no /api/tags.
-// The OpenAI dialect both engines share is covered by the sibling test below.
-func TestHandleHTTP_AggregatesNativeModelList(t *testing.T) {
-	entered := make(chan struct{}, 2)
-	release := make(chan struct{})
-	server := func(body string) *httptest.Server {
-		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodGet || r.URL.Path != "/api/tags" {
-				t.Errorf("upstream request = %s %s, want GET /api/tags", r.Method, r.URL.Path)
-			}
-			if r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" {
-				t.Errorf("client credentials leaked to fan-out target")
-			}
-			entered <- struct{}{}
-			<-release
-			_, _ = io.WriteString(w, body)
-		}))
-	}
-	a := server(`{"models":[{"name":"a","model":"a","digest":"a-only"},{"name":"shared","digest":"first"}]}`)
-	defer a.Close()
-	b := server(`{"models":[{"name":"shared:latest","model":"shared:latest","digest":"second"},{"name":"c","model":"c","digest":"c-only"}]}`)
-	defer b.Close()
-	malformed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = io.WriteString(w, `{"models":null}`)
-	}))
-	defer malformed.Close()
-	down := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	downNode := nodeFor(t, "down", down.URL)
-	down.Close()
-
-	disc := NewDiscovery()
-	disc.AddManual(nodeFor(t, "a", a.URL))
-	disc.AddManual(nodeFor(t, "b", b.URL))
-	disc.AddManual(downNode)
-	disc.AddManual(nodeFor(t, "malformed", malformed.URL))
-	events := &recRW{}
-	p := newTestProxy(ollamaOnlyProfile(t), NewCodec(events), disc, 11434)
-	p.soleFacade().SetSelected("a")
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/tags", nil)
-	req.Header.Set("Authorization", "Bearer client-secret")
-	req.Header.Set("Cookie", "session=client-secret")
-	done := make(chan struct{})
-	go func() {
-		p.soleFacade().handleHTTP(rec, req)
-		close(done)
-	}()
-
-	for range 2 {
-		select {
-		case <-entered:
-		case <-time.After(5 * time.Second):
-			close(release)
-			t.Fatal("model-list requests were not issued concurrently")
-		}
-	}
-	close(release)
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("aggregate request did not finish")
-	}
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	var got struct {
-		Models []struct {
-			Name   string `json:"name"`
-			Model  string `json:"model"`
-			Digest string `json:"digest"`
-		} `json:"models"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatal(err)
-	}
-	if len(got.Models) != 3 || got.Models[0].Model != "a" || got.Models[1].Name != "shared" || got.Models[1].Model != "" || got.Models[2].Model != "c" {
-		t.Fatalf("models = %+v, want a, shared, c", got.Models)
-	}
-	if got.Models[1].Digest != "first" {
-		t.Errorf("duplicate metadata = %q, want deterministic first candidate", got.Models[1].Digest)
-	}
-	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
-		t.Errorf("Access-Control-Allow-Origin = %q, want no CORS header", got)
-	}
-	// Addressed to the engine, like every facade-scoped notification: the
-	// broker's process-scoped router claims only workload and node-activity
-	// methods, so an unaddressed request event is dropped rather than relayed.
-	if !events.has(`"method":"ollama:proxy/request-started"`) ||
-		!events.has(`"method":"ollama:proxy/request"`) ||
-		!events.has(`"target":"cluster"`) {
-		t.Errorf("aggregate telemetry missing paired addressed cluster events: %s", events.b)
-	}
-}
-
 // TestHandleHTTP_AggregatesOpenAIModelList runs for both engines: /v1/models
 // is the one model-list route they share, and the dedupe must keep the first
 // candidate's metadata on either.
 func TestHandleHTTP_AggregatesOpenAIModelList(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, tc engineCase) {
+		listRoute, ok := tc.profile.routeFor(http.MethodGet, "/v1/models")
+		if !ok {
+			t.Fatalf("%s has no /v1/models route", tc.profile.Name)
+		}
 		serve := func(body string) *httptest.Server {
 			return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodGet || r.URL.Path != "/v1/models" {
-					t.Errorf("upstream request = %s %s, want GET /v1/models", r.Method, r.URL.Path)
+				if r.Method != http.MethodGet || r.URL.Path != listRoute.upstreamPath() {
+					t.Errorf("upstream request = %s %s, want GET %s", r.Method, r.URL.Path, listRoute.upstreamPath())
 				}
 				_, _ = io.WriteString(w, body)
 			}))
@@ -616,7 +523,7 @@ func TestHandleHTTP_ModelListRemapsUpstreamPath(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	profile := lmstudioCase(t).profile
+	profile := customCase(t).profile
 	profile.Routes = []route{{
 		Path:         "/v1/models",
 		UpstreamPath: "/models",
@@ -672,10 +579,9 @@ func TestHandleHTTP_ModelListEmptyAndUnavailable(t *testing.T) {
 }
 
 // TestHandleHTTP_StrictModelRouting proves capability is a gate before
-// selection and priority, on both engines. The matching node advertises the
-// model in the engine's own spelling — which for Ollama differs from what the
-// client requests, so this also pins that normalizeModel is applied on the
-// gate rather than only on the model list.
+// selection and priority, on every engine. The matching node advertises the
+// model in the engine's own spelling, as a client requests it. The gate
+// applies normalizeModel, which the model list also applies.
 func TestHandleHTTP_StrictModelRouting(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, tc engineCase) {
 		missHits, unknownHits, matchHits := 0, 0, 0
@@ -815,16 +721,12 @@ func TestHandleHTTP_InferenceRouting(t *testing.T) {
 		})
 	}
 
-	ollama := ollamaCase(t).profile
-	lmstudio := lmstudioCase(t).profile
-	test("native Ollama generate", "/api/generate", ollama)
-	test("native Ollama chat", "/api/chat", ollama)
-	test("native Ollama embeddings", "/api/embeddings", ollama)
-	test("native Ollama embed", "/api/embed", ollama)
-	test("OpenAI chat completions", "/v1/chat/completions", ollama, lmstudio)
-	test("OpenAI completions", "/v1/completions", ollama, lmstudio)
-	test("OpenAI embeddings", "/v1/embeddings", ollama, lmstudio)
-	test("Anthropic messages", "/v1/messages", ollama, lmstudio)
+	llamacpp := llamacppCase(t).profile
+	custom := customCase(t).profile
+	test("OpenAI chat completions", "/v1/chat/completions", llamacpp, custom)
+	test("OpenAI completions", "/v1/completions", llamacpp, custom)
+	test("OpenAI embeddings", "/v1/embeddings", llamacpp, custom)
+	test("Anthropic messages", "/v1/messages", custom)
 }
 
 func TestHandleHTTP_NoAdvertisedModelRejectsLocally(t *testing.T) {

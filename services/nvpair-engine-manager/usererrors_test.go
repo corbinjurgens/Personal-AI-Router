@@ -17,7 +17,7 @@ func TestUnwrapPullCause(t *testing.T) {
 			"action command failed: exit status 1: Error: Download failed: Timed-out. Please try to resume.",
 			"Download failed: Timed-out. Please try to resume.",
 		},
-		{`engine "lmstudio" is not running`, `engine "lmstudio" is not running`},
+		{`engine "llamacpp" is not running`, `engine "llamacpp" is not running`},
 		{"", ""},
 	}
 	for _, c := range cases {
@@ -33,14 +33,14 @@ func TestUnwrapPullCause(t *testing.T) {
 
 func TestFormatEnginePullError(t *testing.T) {
 	err := errors.New("action command failed: exit status 1: Error: Download failed: Timed-out. Please try to resume.")
-	got := formatEnginePullError("LM Studio", err)
-	want := "LM Studio experienced an error while downloading a model: Download failed: Timed-out. Please try to resume."
+	got := formatEnginePullError("llama.cpp", err)
+	want := "llama.cpp experienced an error while downloading a model: Download failed: Timed-out. Please try to resume."
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 
-	got = formatEnginePullError("LM Studio", errors.New(""))
-	if got != "LM Studio experienced an error while downloading a model." {
+	got = formatEnginePullError("llama.cpp", errors.New(""))
+	if got != "llama.cpp experienced an error while downloading a model." {
 		t.Fatalf("empty detail: got %q", got)
 	}
 }

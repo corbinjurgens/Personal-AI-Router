@@ -233,7 +233,7 @@ func TestCancel_AfterCommitAbortsAndCancels(t *testing.T) {
 
 func TestCancel_LookupRules(t *testing.T) {
 	p, w := policyProxy(t)
-	f := rpc(t, p, w, nodepolicy.MethodWorkloadCancel, nodepolicy.WorkloadCancelParams{OriginatedFrom: "test-origin", RunID: p.runID, Engine: "ollama", WorkloadID: "nope"})
+	f := rpc(t, p, w, nodepolicy.MethodWorkloadCancel, nodepolicy.WorkloadCancelParams{OriginatedFrom: "test-origin", RunID: p.runID, Engine: "llamacpp", WorkloadID: "nope"})
 	if f.Error != nil || !strings.Contains(string(f.Result), `"found":false`) {
 		t.Fatalf("unknown workload: %+v %s", f.Error, f.Result)
 	}
@@ -253,13 +253,13 @@ func TestCancel_LookupRules(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer p.unregisterRoutingRequest(rb)
-	if err := p.registerWorkload(ra, workloadKey{engine: "ollama", id: "4"}); err != nil {
+	if err := p.registerWorkload(ra, workloadKey{engine: "llamacpp", id: "4"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.registerWorkload(rb, workloadKey{engine: "lmstudio", id: "4"}); err != nil {
+	if err := p.registerWorkload(rb, workloadKey{engine: "llamacpp-custom", id: "4"}); err != nil {
 		t.Fatal(err)
 	}
-	valid := nodepolicy.WorkloadCancelParams{OriginatedFrom: "test-origin", RunID: p.runID, WorkloadID: "4", Engine: "ollama"}
+	valid := nodepolicy.WorkloadCancelParams{OriginatedFrom: "test-origin", RunID: p.runID, WorkloadID: "4", Engine: "llamacpp"}
 	test := func(name string, change func(*nodepolicy.WorkloadCancelParams), invalid bool) {
 		t.Run(name, func(t *testing.T) {
 			in := valid
@@ -286,7 +286,7 @@ func TestCancel_LookupRules(t *testing.T) {
 	test("wrong origin", func(p *nodepolicy.WorkloadCancelParams) { p.OriginatedFrom = "other" }, false)
 	test("old run with reused workload number", func(p *nodepolicy.WorkloadCancelParams) { p.RunID = "old-run" }, false)
 	test("wrong engine", func(p *nodepolicy.WorkloadCancelParams) { p.Engine = "vllm" }, false)
-	valid.Engine = "lmstudio"
+	valid.Engine = "llamacpp-custom"
 	rpcOK(t, p, w, nodepolicy.MethodWorkloadCancel, valid)
 	if cancelledA != 0 || cancelledB != 1 {
 		t.Fatalf("complete key selected wrong controller: a=%d b=%d", cancelledA, cancelledB)

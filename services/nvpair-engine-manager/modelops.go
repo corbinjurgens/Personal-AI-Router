@@ -36,8 +36,7 @@ const (
 //   - ModelParam is the parameter that carries the model ("model" when empty):
 //     the JSON body or query key of an HTTP action, or the {placeholder} of a
 //     cmd or remove_path action.
-//   - Params are fixed scalar parameters sent alongside the model, such as
-//     Ollama's "stream": false or "keep_alive": 0.
+//   - Params are fixed scalar parameters sent alongside the model.
 //   - ResponseTimeoutS is how long the engine may take to begin answering an
 //     HTTP action, in seconds; zero keeps the ordinary 30s budget. It applies to
 //     every call of that action, including engine:action, because the engine's
@@ -139,9 +138,9 @@ func (m *Manifest) validateOperations() error {
 		if !operationParamRe.MatchString(modelParam) || allowedPlaceholders[modelParam] {
 			return fmt.Errorf("operation %q: model_param %q must be an identifier that is not a runner placeholder", op, modelParam)
 		}
-		// The lms resolvers and the llama.cpp download protocol read the model
-		// from the "model" parameter itself.
-		if (act.ModelResolution != "" || act.ProgressProtocol != "") && modelParam != defaultModelParam {
+		// The llama.cpp download protocol reads the model from the "model"
+		// parameter itself.
+		if act.ProgressProtocol != "" && modelParam != defaultModelParam {
 			return fmt.Errorf("operation %q: action %q reads its model from %q, so model_param must be %q", op, b.Action, defaultModelParam, defaultModelParam)
 		}
 		switch {
@@ -149,7 +148,7 @@ func (m *Manifest) validateOperations() error {
 			if !templatesParam(act.Cmd, modelParam) {
 				return fmt.Errorf("operation %q: cmd action %q must template {%s}", op, b.Action, modelParam)
 			}
-		case act.RemovePath != nil && act.ModelResolution == "":
+		case act.RemovePath != nil:
 			if !templatesParam([]string{act.RemovePath.Path}, modelParam) {
 				return fmt.Errorf("operation %q: remove_path action %q must template {%s} in its path", op, b.Action, modelParam)
 			}
@@ -299,7 +298,7 @@ func (m *Manifest) validateActionModelParams(action string, params json.RawMessa
 		}
 	}
 	act := m.Actions[action]
-	if act.ModelResolution != "" || act.ProgressProtocol != "" || templatesParam(act.Cmd, defaultModelParam) ||
+	if act.ProgressProtocol != "" || templatesParam(act.Cmd, defaultModelParam) ||
 		(act.RemovePath != nil && templatesParam([]string{act.RemovePath.Root, act.RemovePath.Path}, defaultModelParam)) {
 		keys[defaultModelParam] = true
 		modelAction = true

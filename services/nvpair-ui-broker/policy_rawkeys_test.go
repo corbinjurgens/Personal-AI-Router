@@ -41,6 +41,6 @@ func TestPolicySetRawDuplicateKeys(t *testing.T) {
 	}{{"local", false}, {"peer", true}} {
 		test(setter.name+" served null then empty", setter.peer, `{"servedModels":null,"servedModels":[]}`)
 		test(setter.name+" resident null then empty", setter.peer, `{"residentModels":null,"residentModels":[]}`)
-		test(setter.name+" served empty then permission", setter.peer, `{"servedModels":[],"servedModels":[{"engine":"ollama","model":"m"}]}`)
+		test(setter.name+" served empty then permission", setter.peer, `{"servedModels":[],"servedModels":[{"engine":"llamacpp","model":"m"}]}`)
 	}
 }

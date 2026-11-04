@@ -21,8 +21,6 @@ import (
 
 func main() {
 	defaults := defaultProbePorts()
-	ollamaPort := flag.Int("ollama-port", defaults.ollama, "manual-node Ollama probe port (0 disables the probe)")
-	lmstudioPort := flag.Int("lmstudio-port", defaults.lmstudio, "manual-node LM Studio probe port (0 disables the probe)")
 	nodeInfoPort := flag.Int("node-info-port", defaults.nodeInfo, "manual-node plain node-info probe port (0 disables it; an entry's tls_port still takes precedence)")
 	ipcPath := flag.String("ipc", "", "IPC endpoint: Unix domain socket path or Windows named pipe (default: stdin/stdout)")
 	clientCert := flag.String("client-cert", "", "path to PEM client certificate to present when probing TLS-enabled manual nodes")
@@ -40,7 +38,7 @@ func main() {
 	}
 
 	applog.Init("nvpair-manual-nodes", resolveLevel())
-	ports := probePorts{ollama: *ollamaPort, lmstudio: *lmstudioPort, nodeInfo: *nodeInfoPort}
+	ports := probePorts{nodeInfo: *nodeInfoPort}
 	if err := ports.validate(); err != nil {
 		log.Fatal(err)
 	}

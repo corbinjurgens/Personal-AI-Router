@@ -136,8 +136,8 @@ func previewEngineSettingsCmd(client *rpc.Client, req enginesettings.Request) te
 // quietly repaired its own request would hide the bug that produced it.
 //
 // The broker replies only once the change is carried out, which can mean an
-// engine stopping, rebinding, and passing a readiness probe that Ollama allows
-// ten minutes. The budget is the one the backend works to, from the shared
+// engine stopping, rebinding, and passing a readiness probe that an engine manifest
+// allows ten minutes. The budget is the one the backend works to, from the shared
 // ladder, rather than a number restated here: restating it is how this path
 // ended up with the thirty-five seconds sized for control calls.
 func applyEngineSettingsCmd(client *rpc.Client, req enginesettings.Request) tea.Cmd {

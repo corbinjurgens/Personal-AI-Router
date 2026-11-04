@@ -73,7 +73,7 @@ func relayHarness(t *testing.T) (*Broker, <-chan *Message) {
 func TestActivityIsRelayedAsANotificationNotARequest(t *testing.T) {
 	b, relayed := relayHarness(t)
 
-	b.forwardProxyNotificationForGeneration(b.currentOllamaProxyGeneration(),
+	b.forwardProxyProcessNotification(
 		noderec.NotifyNodeActivity, json.RawMessage(`{"hostUuid":"busy-peer"}`))
 
 	msg := awaitRelay(t, relayed)
@@ -89,7 +89,7 @@ func TestUnacknowledgedReportsDoNotStallTheRelay(t *testing.T) {
 	b, relayed := relayHarness(t)
 
 	for i := 0; i < 3; i++ {
-		b.forwardProxyNotificationForGeneration(b.currentOllamaProxyGeneration(),
+		b.forwardProxyProcessNotification(
 			noderec.NotifyNodeActivity, json.RawMessage(`{"hostUuid":"busy-peer"}`))
 	}
 	// The harness reads exactly one frame; the point is that the two later
@@ -97,10 +97,10 @@ func TestUnacknowledgedReportsDoNotStallTheRelay(t *testing.T) {
 	awaitRelay(t, relayed)
 }
 
-func TestOllamaProxyActivityReachesTheScanner(t *testing.T) {
+func TestProxyActivityReachesTheScanner(t *testing.T) {
 	b, relayed := relayHarness(t)
 
-	b.forwardProxyNotificationForGeneration(b.currentOllamaProxyGeneration(),
+	b.forwardProxyProcessNotification(
 		noderec.NotifyNodeActivity, json.RawMessage(`{"hostUuid":"busy-peer"}`))
 
 	msg := awaitRelay(t, relayed)
@@ -116,28 +116,13 @@ func TestOllamaProxyActivityReachesTheScanner(t *testing.T) {
 	}
 }
 
-// Both proxies produce this signal, so both forwarding paths must carry it. The
-// LM Studio path is a separate function and has been missed by feature work
-// before.
-func TestLMStudioProxyActivityReachesTheScanner(t *testing.T) {
-	b, relayed := relayHarness(t)
-
-	b.forwardLMStudioProxyNotification(noderec.NotifyNodeActivity,
-		json.RawMessage(`{"hostUuid":"busy-peer"}`))
-
-	msg := awaitRelay(t, relayed)
-	if msg.Method != noderec.MethodNodeActivity {
-		t.Fatalf("relayed method = %q, want %q", msg.Method, noderec.MethodNodeActivity)
-	}
-}
-
 // The report crosses two pipes and a goroutine hop, and the scanner measures
 // freshness against the age it is given, so the delay in transit has to be added
 // to the age the proxy reported rather than replacing it.
 func TestRelayedActivityAgeAccumulatesTransitDelay(t *testing.T) {
 	b, relayed := relayHarness(t)
 
-	b.forwardProxyNotificationForGeneration(b.currentOllamaProxyGeneration(),
+	b.forwardProxyProcessNotification(
 		noderec.NotifyNodeActivity, json.RawMessage(`{"hostUuid":"busy-peer","msSince":4000}`))
 
 	var got noderec.NodeActivityParams
@@ -181,7 +166,7 @@ func TestReportedAgeIsClampedAtBothEnds(t *testing.T) {
 func TestActivityWithoutAHostUUIDIsNotRelayed(t *testing.T) {
 	b, relayed := relayHarness(t)
 
-	b.forwardProxyNotificationForGeneration(b.currentOllamaProxyGeneration(),
+	b.forwardProxyProcessNotification(
 		noderec.NotifyNodeActivity, json.RawMessage(`{"hostUuid":""}`))
 
 	select {
@@ -219,7 +204,7 @@ func TestActivityIsNotForwardedToClients(t *testing.T) {
 	b := &Broker{codec: NewCodec(clientSide)}
 	b.setScanner(sp)
 	b.proxyMu.Lock()
-	b.setEngineProxySubscribed(ollamaProxyProfile, true)
+	b.setEngineProxySubscribed(mustEngineProxyProfile("llamacpp"), true)
 	b.proxyMu.Unlock()
 
 	toClient := make(chan *Message, 1)
@@ -232,7 +217,7 @@ func TestActivityIsNotForwardedToClients(t *testing.T) {
 		toClient <- msg
 	}()
 
-	b.forwardProxyNotificationForGeneration(b.currentOllamaProxyGeneration(),
+	b.forwardProxyProcessNotification(
 		noderec.NotifyNodeActivity, json.RawMessage(`{"hostUuid":"busy-peer"}`))
 
 	select {

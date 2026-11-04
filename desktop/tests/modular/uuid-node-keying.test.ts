@@ -34,12 +34,12 @@ describe('UUID node keying', () => {
             }
         })
         state.handleNotification({
-            source: 'ollama-proxy',
+            source: 'llamacpp-proxy',
             method: 'node/discovered',
             params: {
                 id: 'uuid-merge-1',
                 host: 'merge-host-1',
-                port: 11434,
+                port: 8080,
                 addresses: ['192.0.2.11'],
                 ip: '192.0.2.11'
             }
@@ -56,18 +56,18 @@ describe('UUID node keying', () => {
         expect(available).toMatchObject({ trusted: true, clustered: true })
         // Clustered peers need authoritative facts before run state is inferred, even
         // after the proxy presence is merged onto the UUID-keyed entry.
-        expect(state.isRemoteEngineRunning('uuid-merge-1', 'ollama')).toBe(false)
+        expect(state.isRemoteEngineRunning('uuid-merge-1', 'llama-cpp')).toBe(false)
     })
 
     it('merges regardless of source order (proxy before broker)', () => {
         const state = getModularBridgeState()
         state.handleNotification({
-            source: 'lmstudio-proxy',
+            source: 'llamacpp-proxy',
             method: 'node/discovered',
             params: {
                 id: 'uuid-merge-2',
                 host: 'merge-host-2',
-                port: 1234,
+                port: 8080,
                 addresses: ['192.0.2.12'],
                 ip: '192.0.2.12'
             }
@@ -95,7 +95,7 @@ describe('UUID node keying', () => {
         expect(nodes['uuid-merge-2'].name).toBe('merge-host-2')
         const available = state.getAvailableNodes().find(node => node.id === 'uuid-merge-2')
         expect(available).toMatchObject({ clustered: true })
-        expect(state.isRemoteEngineRunning('uuid-merge-2', 'lm-studio')).toBe(false)
+        expect(state.isRemoteEngineRunning('uuid-merge-2', 'llama-cpp')).toBe(false)
     })
 
     it('skips a /v1/node-info response whose hostUuid disagrees with the polled node', () => {
@@ -175,7 +175,7 @@ describe('UUID node keying', () => {
         state.upsertWorkloadFromInfo({
             workloadInfo: {
                 id: 'job-live',
-                engine: 'ollama',
+                engine: 'llamacpp',
                 state: 'running',
                 model: 'live-model',
                 originatedFrom: 'uuid-wl-seed',
@@ -188,7 +188,7 @@ describe('UUID node keying', () => {
                 workloads: [
                     {
                         id: 'job-live',
-                        engine: 'ollama',
+                        engine: 'llamacpp',
                         state: 'completed',
                         model: 'stale-model',
                         originatedFrom: 'uuid-wl-seed',
@@ -196,7 +196,7 @@ describe('UUID node keying', () => {
                     },
                     {
                         id: 'job-new',
-                        engine: 'ollama',
+                        engine: 'llamacpp',
                         state: 'queued',
                         model: 'new-model',
                         originatedFrom: 'uuid-wl-seed',

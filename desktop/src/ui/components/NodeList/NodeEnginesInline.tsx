@@ -9,175 +9,9 @@ import { useConnectionStore } from '@/ui/stores/connection.store'
 import { useNodesStore } from '@/ui/stores/nodes.store'
 import { usePendingActionsStore } from '@/ui/stores/pending-actions.store'
 import { engineTypesForNode, getEnginesForNode } from '@/ui/utils/get-engines-for-node'
-import { Button, Flex, FormField, Switch, Text, TextInput } from '@nvidia/foundations-react-core'
+import { Button, Flex, Switch, Text } from '@nvidia/foundations-react-core'
 import { Download, Lock, LockOpen } from '@/ui/components/icons'
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import type { EngineCredentialState } from '@/shared/types/engine-api'
-
-function CredentialControl({
-    nodeId,
-    engineType,
-    name
-}: {
-    nodeId: string
-    engineType: EngineType
-    name: string
-}) {
-    const input = useRef<HTMLInputElement>(null)
-    const generation = useRef(0)
-    const mutation = useRef<{ cancelled: boolean } | null>(null)
-    const [state, setState] = useState<EngineCredentialState | null>(null)
-    const [confirmed, setConfirmed] = useState(false)
-    const [error, setError] = useState('')
-    const [pending, setPending] = useState(false)
-
-    const readState = useCallback(() => {
-        const current = ++generation.current
-        if (input.current) input.current.value = ''
-        setPending(true)
-        setError('')
-        window.pairApi.engines
-            .credentialState({ nodeId, engineType })
-            .then(result => {
-                if (generation.current === current) {
-                    setState(result)
-                    setConfirmed(true)
-                }
-            })
-            .catch(() => {
-                if (generation.current === current) setConfirmed(false)
-            })
-            .finally(() => {
-                if (generation.current === current) setPending(false)
-            })
-    }, [nodeId, engineType])
-
-    // KUI merges refs anew on rerender. Ref detach is not field teardown.
-    // Capture the actual DOM field so layout cleanup also clears a detached node.
-    useLayoutEffect(() => {
-        const field = input.current
-        return () => {
-            if (field) field.value = ''
-        }
-    }, [state?.supported, nodeId, engineType])
-
-    useEffect(() => {
-        const owner = generation
-        readState()
-        return () => {
-            owner.current++
-            mutation.current = null
-        }
-    }, [readState])
-
-    function cancel() {
-        if (input.current) input.current.value = ''
-        if (mutation.current) {
-            mutation.current.cancelled = true
-            setConfirmed(false)
-        }
-        setError('')
-    }
-
-    function submit(clear: boolean) {
-        if (pending || mutation.current || !confirmed) return
-        if (!clear && !input.current?.value) return
-        const current = ++generation.current
-        const operation = { cancelled: false }
-        mutation.current = operation
-        setPending(true)
-        setError('')
-        // Only the transport packet receives the key. Completion callbacks hold
-        // nonsecret ownership metadata, never a draft or a retryable mutation.
-        try {
-            window.pairApi.engines
-                .setCredential({
-                    nodeId,
-                    engineType,
-                    credential: clear ? '' : (input.current?.value ?? '')
-                })
-                .then(result => {
-                    if (generation.current === current && !operation.cancelled) {
-                        setState(result)
-                        setConfirmed(true)
-                    }
-                })
-                .catch(() => {
-                    if (generation.current === current && !operation.cancelled)
-                        setError('Could not update credential')
-                })
-                .finally(() => {
-                    if (generation.current !== current) return
-                    mutation.current = null
-                    if (input.current) input.current.value = ''
-                    // Cancel cannot stop the physical write. Keep mutations
-                    // disabled until it settles, then obtain fresh authority.
-                    if (operation.cancelled) readState()
-                    else setPending(false)
-                })
-        } catch {
-            mutation.current = null
-            setPending(false)
-            setError('Could not update credential')
-        } finally {
-            if (input.current) input.current.value = ''
-        }
-    }
-
-    if (state && !state.supported) return null
-    return (
-        <Flex direction="col" gap="1" className="no-drag-elements">
-            <Text kind="body/regular/sm">
-                {state && confirmed
-                    ? state.configured
-                        ? 'Key saved'
-                        : 'No key saved'
-                    : 'Credential store unavailable'}
-            </Text>
-            {state?.supported && (
-                <>
-                    <FormField slotLabel={`${name} API key`}>
-                        <TextInput
-                            ref={input}
-                            type="password"
-                            aria-label={`${name} API key`}
-                            disabled={pending || !confirmed}
-                        />
-                    </FormField>
-                    <Flex gap="1">
-                        <Button
-                            size="tiny"
-                            disabled={pending || !confirmed}
-                            onClick={() => submit(false)}
-                        >
-                            Save
-                        </Button>
-                        <Button
-                            size="tiny"
-                            disabled={pending || !confirmed}
-                            onClick={() => submit(true)}
-                        >
-                            Clear
-                        </Button>
-                        <Button size="tiny" onClick={cancel}>
-                            Cancel
-                        </Button>
-                    </Flex>
-                    {error && (
-                        <Text kind="body/regular/sm" role="alert">
-                            {error}
-                        </Text>
-                    )}
-                </>
-            )}
-            {!confirmed && (
-                <Button size="tiny" disabled={pending} onClick={readState}>
-                    Retry
-                </Button>
-            )}
-        </Flex>
-    )
-}
+import { useCallback, useMemo } from 'react'
 
 const LOCK_COPY = {
     locked: 'Locked',
@@ -276,11 +110,10 @@ export default function NodeEnginesInline({ nodeId }: { nodeId: string }) {
             const backend = selfEngines.find(b => b.engineType === type)
 
             // Show every engine the node has actually reported — not just ones
-            // with a proxy port. The broker fronts only Ollama with a proxy, so
-            // gating on `proxyPort` hid LM Studio (managed by nvpair-engine-manager,
-            // loopback-only, no proxy). Skip the padded `initializing`
-            // placeholder so engines a node never reports (e.g. LM Studio on a
-            // remote, undiscovered node) don't show a perpetual spinner.
+            // with a proxy port. Gating on `proxyPort` would hide an engine
+            // managed by nvpair-engine-manager that has no proxy. Skip the padded
+            // `initializing` placeholder so engines a node never reports (e.g. on
+            // a remote, undiscovered node) don't show a perpetual spinner.
             if (!backend || backend.processStatus === 'initializing') {
                 return []
             }
@@ -426,14 +259,6 @@ export default function NodeEnginesInline({ nodeId }: { nodeId: string }) {
                                 onChange={locked => handleLock(b.type, locked)}
                             />
                         </Flex>
-                        {!isRemote && (
-                            <CredentialControl
-                                key={`${nodeId}:${b.type}`}
-                                nodeId={nodeId}
-                                engineType={b.type}
-                                name={b.name}
-                            />
-                        )}
                     </Flex>
                 )
             })}

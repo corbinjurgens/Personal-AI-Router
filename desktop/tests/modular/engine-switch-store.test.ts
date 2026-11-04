@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { customEngine } from './engine-fixtures'
 import type { SwitchChanged, SwitchReceipt, SwitchRequest } from '@/shared/types/engine-switch'
 import type { PreloadServiceTransport } from '@/shared/types/service-bridge'
 import type { NodePolicyDocument } from '@/shared/types/node-policy'
@@ -23,8 +24,8 @@ const revision = `e3v1:${'a'.repeat(64)}`
 const request: SwitchRequest = {
     nodeId: 'node-a',
     requestId: 'other-client',
-    sourceEngine: 'ollama',
-    targetEngine: 'llamacpp',
+    sourceEngine: 'llamacpp',
+    targetEngine: 'llamacpp-custom',
     expectedRevision: revision
 }
 function receipt(changes: Partial<SwitchReceipt> = {}): SwitchReceipt {
@@ -254,7 +255,7 @@ describe('node-scoped engine switch store', () => {
                 data: { configurationRevision: revision }
             })
             invoke.mockResolvedValueOnce({ success: false, error: 'refused', code: -32011 })
-            const submitting = store.getState().submit('node-a', 'ollama', 'llamacpp')
+            const submitting = store.getState().submit('node-a', 'llamacpp', 'llamacpp-custom')
             await flush()
             return { policy, submitting }
         }
@@ -364,7 +365,7 @@ describe('node-scoped engine switch store', () => {
                 data: { configurationRevision: revision }
             })
             invoke.mockResolvedValueOnce({ success: false, error: message, code })
-            await store.getState().submit('node-a', 'ollama', 'llamacpp')
+            await store.getState().submit('node-a', 'llamacpp', 'llamacpp-custom')
             expect(store.getState().entries['node-a'].refused).toBe(
                 `${label}: refused before acceptance: ${message} (${code}).`
             )
@@ -389,22 +390,22 @@ describe('node-scoped engine switch store', () => {
                 [
                     'node-a',
                     new Map([
-                        ['llama-cpp', { ...emptyEngineStatus('node-a', 'llama-cpp'), locked: true }]
+                        [customEngine, { ...emptyEngineStatus('node-a', customEngine), locked: true }]
                     ])
                 ]
             ])
         })
-        await store.getState().submit('node-a', 'ollama', 'llamacpp')
+        await store.getState().submit('node-a', 'llamacpp', 'llamacpp-custom')
         expect(invoke.mock.calls.filter(([channel]) => channel === 'engines:switch')).toHaveLength(
             0
         )
         invoke.mockResolvedValueOnce({ success: true, data: { configurationRevision: revision } })
         invoke.mockResolvedValueOnce({ success: false, error: 'revision changed', code: -32010 })
-        await store.getState().submit('node-a', 'llamacpp', 'ollama')
+        await store.getState().submit('node-a', 'llamacpp-custom', 'llamacpp')
         expect(invoke.mock.calls.filter(([channel]) => channel === 'engines:switch')).toEqual([
             [
                 'engines:switch',
-                expect.objectContaining({ sourceEngine: 'llamacpp', targetEngine: 'ollama' })
+                expect.objectContaining({ sourceEngine: 'llamacpp-custom', targetEngine: 'llamacpp' })
             ]
         ])
     })
@@ -498,7 +499,7 @@ describe('node-scoped engine switch store', () => {
         })
         stops.push(watchEngineSwitch('node-a'))
         await flush()
-        const submit = store.getState().submit('node-a', 'ollama', 'llamacpp')
+        const submit = store.getState().submit('node-a', 'llamacpp', 'llamacpp-custom')
         await flush()
         const original = store.getState().entries['node-a'].request
         expect(original).toBeDefined()
@@ -516,13 +517,13 @@ describe('node-scoped engine switch store', () => {
         expect(permission).toHaveBeenCalledTimes(5)
         expect(store.getState().entries['node-a'].refused).toContain('refused before acceptance')
         expect(store.getState().entries['node-a'].request).toBe(original)
-        expect(store.getState().reserved('node-a', 'ollama')).toBe(false)
         expect(store.getState().reserved('node-a', 'llamacpp')).toBe(false)
+        expect(store.getState().reserved('node-a', 'llamacpp-custom')).toBe(false)
         for (let round = 0; round < 3; round++) await store.getState().refresh('node-a')
         expect(invoke.mock.calls.filter(([channel]) => channel === 'engines:switch')).toHaveLength(
             1
         )
-        await store.getState().submit('node-a', 'ollama', 'llamacpp')
+        await store.getState().submit('node-a', 'llamacpp', 'llamacpp-custom')
         expect(invoke.mock.calls.filter(([channel]) => channel === 'engines:switch')).toHaveLength(
             2
         )
@@ -567,7 +568,7 @@ describe('node-scoped engine switch store', () => {
                 data: { configurationRevision: revision }
             })
             invoke.mockReturnValueOnce(sent.promise)
-            const submit = store.getState().submit('node-a', 'ollama', 'llamacpp')
+            const submit = store.getState().submit('node-a', 'llamacpp', 'llamacpp-custom')
             await flush()
             const original = store.getState().entries['node-a'].request
             if (!original) throw new Error('Missing submitted request')
@@ -600,7 +601,7 @@ describe('node-scoped engine switch store', () => {
         const sent = deferred<Awaited<ReturnType<PreloadServiceTransport['invoke']>>>()
         invoke.mockResolvedValueOnce({ success: true, data: { configurationRevision: revision } })
         invoke.mockReturnValueOnce(sent.promise)
-        const submit = store.getState().submit('node-a', 'ollama', 'llamacpp')
+        const submit = store.getState().submit('node-a', 'llamacpp', 'llamacpp-custom')
         await flush()
         const original = store.getState().entries['node-a'].request
         if (!original) throw new Error('Missing submitted request')
@@ -831,7 +832,7 @@ describe('node-scoped engine switch store', () => {
             })
             const waitingB = deferred<Awaited<ReturnType<PreloadServiceTransport['invoke']>>>()
             invoke.mockReturnValueOnce(waitingB.promise)
-            await store.getState().submit('node-a', 'llamacpp', 'ollama')
+            await store.getState().submit('node-a', 'llamacpp-custom', 'llamacpp')
             const before = store.getState().entries['node-a']
             expect(before.request?.requestId).not.toBe(request.requestId)
             expect(before.receipt?.phase).toBe('draining')
@@ -869,7 +870,7 @@ describe('node-scoped engine switch store', () => {
                 data: { configurationRevision: revision }
             })
             invoke.mockReturnValueOnce(sent.promise)
-            const submitted = store.getState().submit('node-a', 'ollama', 'llamacpp')
+            const submitted = store.getState().submit('node-a', 'llamacpp', 'llamacpp-custom')
             await flush()
             const currentRequest = store.getState().entries['node-a'].request
             if (!currentRequest) throw new Error('Missing submitted request')
@@ -898,10 +899,10 @@ describe('node-scoped engine switch store', () => {
             change({ nodeId: 'node-a', requestId: currentRequest.requestId, sequence: 2 })
             await flush()
             expect(usePendingActionsStore.getState().switches.has('node-a')).toBe(false)
-            expect(store.getState().reserved('node-a', 'ollama')).toBe(
+            expect(store.getState().reserved('node-a', 'llamacpp')).toBe(
                 phase === 'failed-interrupted'
             )
-            expect(store.getState().reserved('node-a', 'llamacpp')).toBe(
+            expect(store.getState().reserved('node-a', 'llamacpp-custom')).toBe(
                 phase === 'failed-interrupted'
             )
             const authoritative = store.getState().entries['node-a']
@@ -968,8 +969,8 @@ describe('node-scoped engine switch store', () => {
         })
         const sent = deferred<Awaited<ReturnType<PreloadServiceTransport['invoke']>>>()
         invoke.mockReturnValueOnce(sent.promise)
-        const first = store.getState().submit('node-a', 'ollama', 'llamacpp')
-        const second = store.getState().submit('node-a', 'llamacpp', 'ollama')
+        const first = store.getState().submit('node-a', 'llamacpp', 'llamacpp-custom')
+        const second = store.getState().submit('node-a', 'llamacpp-custom', 'llamacpp')
         await flush()
         expect(invoke.mock.calls.filter(([channel]) => channel === 'engines:switch')).toEqual([
             [
@@ -977,8 +978,8 @@ describe('node-scoped engine switch store', () => {
                 {
                     nodeId: 'node-a',
                     requestId: expect.any(String),
-                    sourceEngine: 'ollama',
-                    targetEngine: 'llamacpp',
+                    sourceEngine: 'llamacpp',
+                    targetEngine: 'llamacpp-custom',
                     expectedRevision: 'fresh-revision'
                 }
             ]
@@ -997,14 +998,14 @@ describe('node-scoped engine switch store', () => {
         })
         await Promise.all([first, second])
         expect(store.getState().entries['node-a'].receipt?.phase).toBe('accepted')
-        expect(store.getState().reserved('node-a', 'ollama')).toBe(true)
         expect(store.getState().reserved('node-a', 'llamacpp')).toBe(true)
+        expect(store.getState().reserved('node-a', 'llamacpp-custom')).toBe(true)
         expect(store.getState().reserved('node-a', 'unrelated')).toBe(false)
     })
     it('refuses locally when fresh readback is unavailable', async () => {
         await idle()
         invoke.mockResolvedValueOnce({ success: false, error: 'offline' })
-        await store.getState().submit('node-a', 'ollama', 'llamacpp')
+        await store.getState().submit('node-a', 'llamacpp', 'llamacpp-custom')
         expect(invoke.mock.calls.filter(([channel]) => channel === 'engines:switch')).toHaveLength(
             0
         )
@@ -1019,7 +1020,7 @@ describe('node-scoped engine switch store', () => {
             requestId: 'other-client',
             afterSequence: 1
         })
-        await store.getState().submit('node-a', 'ollama', 'llamacpp')
+        await store.getState().submit('node-a', 'llamacpp', 'llamacpp-custom')
         expect(invoke.mock.calls.filter(([channel]) => channel === 'engines:switch')).toHaveLength(
             0
         )
@@ -1034,7 +1035,7 @@ describe('node-scoped engine switch store', () => {
         await flush()
         expect(store.getState().entries['node-a'].activeRequestId).toBe('foreign')
         expect(store.getState().entries['node-a'].unavailable).toContain('unknown receipt')
-        await store.getState().submit('node-a', 'ollama', 'llamacpp')
+        await store.getState().submit('node-a', 'llamacpp', 'llamacpp-custom')
         expect(invoke).toHaveBeenCalledTimes(2)
     })
     it.each(['node mismatch', 'request mismatch'])('ignores %s receipt', async mismatch => {
@@ -1172,7 +1173,7 @@ describe('node-scoped engine switch store', () => {
                 data: { configurationRevision: revision }
             })
             invoke.mockResolvedValueOnce({ success: false, error: 'lost response', code })
-            await store.getState().submit('node-a', 'ollama', 'llamacpp')
+            await store.getState().submit('node-a', 'llamacpp', 'llamacpp-custom')
             const original = store.getState().entries['node-a'].request
             if (!original) throw new Error('Missing original identity')
             expect(store.getState().entries['node-a'].unknown).toBe(true)
@@ -1191,10 +1192,10 @@ describe('node-scoped engine switch store', () => {
             await flush()
             expect(store.getState().entries['node-a'].unknown).toBe(true)
             expect(store.getState().entries['node-a'].request).toBe(original)
-            expect(store.getState().reserved('node-a', 'ollama')).toBe(true)
             expect(store.getState().reserved('node-a', 'llamacpp')).toBe(true)
+            expect(store.getState().reserved('node-a', 'llamacpp-custom')).toBe(true)
             const beforeRetry = invoke.mock.calls.length
-            await store.getState().submit('node-a', 'ollama', 'llamacpp')
+            await store.getState().submit('node-a', 'llamacpp', 'llamacpp-custom')
             expect(invoke).toHaveBeenCalledTimes(beforeRetry)
             invoke.mockResolvedValueOnce({
                 success: true,
@@ -1244,15 +1245,15 @@ describe('node-scoped engine switch store', () => {
                 data: { configurationRevision: revision }
             })
             invoke.mockResolvedValueOnce({ success: false, error: 'refused', code: Number(code) })
-            await store.getState().submit('node-a', 'ollama', 'llamacpp')
+            await store.getState().submit('node-a', 'llamacpp', 'llamacpp-custom')
             const original = store.getState().entries['node-a'].request
-            expect(original).toMatchObject({ sourceEngine: 'ollama', targetEngine: 'llamacpp' })
+            expect(original).toMatchObject({ sourceEngine: 'llamacpp', targetEngine: 'llamacpp-custom' })
             expect(store.getState().entries['node-a'].unknown).toBe(false)
             expect(store.getState().entries['node-a'].refused).toContain(
                 `${label}: refused before acceptance: refused`
             )
-            expect(store.getState().reserved('node-a', 'ollama')).toBe(false)
             expect(store.getState().reserved('node-a', 'llamacpp')).toBe(false)
+            expect(store.getState().reserved('node-a', 'llamacpp-custom')).toBe(false)
             expect(permission).toHaveBeenCalledTimes(code === -32012 ? 1 : 0)
             // The audit probe's unknown-receipt response must never be needed for
             // a definitely refused ID, even after repeated readback and remount.
@@ -1289,7 +1290,7 @@ describe('node-scoped engine switch store', () => {
                 error: String(label),
                 code: Number(code)
             })
-            await store.getState().submit('node-a', 'ollama', 'llamacpp')
+            await store.getState().submit('node-a', 'llamacpp', 'llamacpp-custom')
             expect(
                 invoke.mock.calls.filter(([channel]) => channel === 'engines:switch')
             ).toHaveLength(2)
@@ -1309,7 +1310,7 @@ describe('node-scoped engine switch store', () => {
         )
         expect(store.getState().entries['node-a'].receipt?.error?.message).toBe('broker restarted')
         expect(store.getState().entries['node-a'].receipt?.recoveryRequired).toBe(true)
-        expect(store.getState().reserved('node-a', 'ollama')).toBe(true)
+        expect(store.getState().reserved('node-a', 'llamacpp')).toBe(true)
         expect(invoke).toHaveBeenCalledTimes(2)
     })
     it('permission revocation before send prevents mutation', async () => {
@@ -1323,7 +1324,7 @@ describe('node-scoped engine switch store', () => {
                     management: new Map([['node-a', { state: 'denied', revision: '2' }]])
                 })
             })
-        await store.getState().submit('node-a', 'ollama', 'llamacpp')
+        await store.getState().submit('node-a', 'llamacpp', 'llamacpp-custom')
         expect(read).toHaveBeenCalledWith('node-a', 'node-a')
         expect(invoke.mock.calls.filter(([channel]) => channel === 'engines:switch')).toHaveLength(
             0

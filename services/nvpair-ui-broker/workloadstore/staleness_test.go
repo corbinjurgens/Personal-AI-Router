@@ -267,8 +267,8 @@ func TestStaleForeignSkipsCollidingClientKeys(t *testing.T) {
 
 	// Same origin and id, different engines: two distinct workloads to the broker,
 	// one key to the desktop.
-	s.Apply(mkInFull("7", "peer", "ollama", "runA", "running", "peer", 100))
-	s.Apply(mkInFull("7", "peer", "lmstudio", "runB", "running", "peer", 100))
+	s.Apply(mkInFull("7", "peer", "llamacpp", "runA", "running", "peer", 100))
+	s.Apply(mkInFull("7", "peer", "llamacpp-custom", "runB", "running", "peer", 100))
 	// An uncontested record, to prove the sweep is still working at all.
 	s.Apply(mkIn("solo", "peer", "running", "peer", 100))
 	*now = now.Add(ttl + time.Millisecond)
@@ -284,7 +284,7 @@ func TestStaleForeignSkipsCollidingClientKeys(t *testing.T) {
 
 	// Once the collision resolves (one generation reaches a real terminal), the
 	// survivor becomes eligible again.
-	s.Apply(mkInFull("7", "peer", "lmstudio", "runB", "completed", "peer", 100))
+	s.Apply(mkInFull("7", "peer", "llamacpp-custom", "runB", "completed", "peer", 100))
 	*now = now.Add(ttl + time.Millisecond)
 	found := false
 	for _, r := range s.StaleForeign("self", ttl) {

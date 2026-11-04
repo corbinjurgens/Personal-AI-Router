@@ -36,7 +36,7 @@ func mkTerm(id, origin string, createdAt, completedAt int64) Incoming {
 		"createdAt":      createdAt,
 		"completedAt":    completedAt,
 		"model":          "granite-embedding:latest",
-		"engine":         "ollama",
+		"engine":         "llamacpp",
 	}
 	b, _ := json.Marshal(m)
 	in, _ := ParseIncoming(b)
@@ -205,8 +205,8 @@ func TestPruneSuppressesPairStillInUse(t *testing.T) {
 	s := newStoreAt("", testNow)
 	s.historyCap = 1
 
-	s.Apply(mkTermFull("1", "a", "ollama", "run-old", testNow-5000, testNow-4000))
-	s.Apply(mkTermFull("1", "a", "ollama", "run-new", testNow-1000, testNow-100))
+	s.Apply(mkTermFull("1", "a", "llamacpp", "run-old", testNow-5000, testNow-4000))
+	s.Apply(mkTermFull("1", "a", "llamacpp", "run-new", testNow-1000, testNow-100))
 	if retired := s.PruneHistory(); len(retired) != 0 {
 		t.Fatalf("retired = %+v, want none while (a, 1) survives", retired)
 	}

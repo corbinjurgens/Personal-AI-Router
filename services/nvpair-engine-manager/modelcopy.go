@@ -105,7 +105,7 @@ func (e permanentCopyError) Unwrap() error { return e.error }
 
 // activeModelCopies refuses a second concurrent copy of the same model, and
 // copyDestLocks serializes writers of one destination file (two models can
-// share an Ollama blob).
+// share a blob).
 var (
 	activeModelCopies sync.Map
 	copyDestLocks     = &keyedLocks{m: map[string]*keyedLock{}}
@@ -470,8 +470,7 @@ func formatBytes(n int64) string {
 }
 
 // downloadPlannedFile brings one file into place: resumed download into
-// "<dest>.part", sha256 check, the plan's pre-rename check, then an atomic
-// rename. It returns the bytes fetched over the network, and skipped when
+// "<dest>.part", sha256 check, then an atomic rename. It returns the bytes fetched over the network, and skipped when
 // another writer placed a matching file while this one waited for its lock.
 func downloadPlannedFile(ctx context.Context, src modelFileSource, engine, model string, f plannedFile, onBytes func(int64)) (copied int64, skipped bool, err error) {
 	unlock, err := copyDestLocks.lock(ctx, f.dest)
@@ -500,7 +499,6 @@ func downloadPlannedFile(ctx context.Context, src modelFileSource, engine, model
 	if err := root.MkdirAll(filepath.Dir(destRel), 0o755); err != nil {
 		return 0, false, err
 	}
-	part := f.dest + ".part"
 	partRel := destRel + ".part"
 	retriedFresh := false
 	for attempt := 1; ; attempt++ {
@@ -522,11 +520,6 @@ func downloadPlannedFile(ctx context.Context, src modelFileSource, engine, model
 			}
 			if err := checkCopyPartial(root, partRel, verified); err != nil {
 				return copied, false, err
-			}
-			if f.check != nil {
-				if err := f.check(part); err != nil {
-					return copied, false, fmt.Errorf("%s: %w", f.Path, err)
-				}
 			}
 			if ok, err := destMatches(ctx, f); err != nil || ok {
 				return copied, ok, err

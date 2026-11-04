@@ -206,7 +206,7 @@ func (f *serviceFixture) withInertEngineManager() {
 	f.inventory.paths = append(f.inventory.paths, enginePath)
 	f.env = append(f.env, "NVPAIR_TEST_SUBSCRIPTION_SCANNER="+f.scannerPath,
 		"NVPAIR_TEST_SUBSCRIPTION_PORT="+strconv.Itoa(temporaryClusterPort(f.t)),
-		"OLLAMA_HOST=", "USERPROFILE="+f.configDir)
+		"USERPROFILE="+f.configDir)
 	inert := newFixtureHTTPServer(f.t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) }))
 	f.t.Cleanup(inert.Close)
 	jointIsolateEngines(f.t, f.configDir, inert.Listener.Addr().(*net.TCPAddr).Port)
@@ -238,7 +238,7 @@ func newRemoteServiceFixture(t *testing.T) *remoteServiceFixture {
 	f.inventory.paths = append(f.inventory.paths, enginePath, clusterPath)
 	scannerPort := temporaryClusterPort(t)
 	f.env = append(f.env, "NVPAIR_TEST_SUBSCRIPTION_SCANNER="+f.scannerPath,
-		"NVPAIR_TEST_SUBSCRIPTION_PORT="+strconv.Itoa(scannerPort), "OLLAMA_HOST=", "USERPROFILE="+f.configDir)
+		"NVPAIR_TEST_SUBSCRIPTION_PORT="+strconv.Itoa(scannerPort), "USERPROFILE="+f.configDir)
 	inert := newFixtureHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) }))
 	t.Cleanup(inert.Close)
 	jointIsolateEngines(t, f.configDir, inert.Listener.Addr().(*net.TCPAddr).Port)

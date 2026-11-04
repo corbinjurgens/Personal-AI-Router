@@ -110,7 +110,7 @@ func TestHandleHTTP_PrecommitBlockingCloseRetainsOwnership(t *testing.T) {
 			discovery := NewDiscovery()
 			discovery.AddManual(nodeForModel(t, "self", "http://127.0.0.1:11435", "m"))
 			discovery.AddManual(nodeForModel(t, "other", "http://127.0.0.1:11436", "m"))
-			p := testProxy(ollamaOnlyProfile(t), discovery, 11435)
+			p := testProxy(anyProfile(t), discovery, 11435)
 			p.SetPriority([]string{"self", "other"})
 			p.admission.setAvailability(nodepolicy.Available, false)
 			if err := p.soleFacade().setLocalBackend(localBackend{Host: "127.0.0.1", Port: 11434, Healthy: true}); err != nil {
@@ -226,7 +226,7 @@ func TestHandleHTTP_PrecommitBlockingCloseRetainsOwnership(t *testing.T) {
 func TestStrictHTTP_PrecommitBlockingCloseRetainsOwnership(t *testing.T) {
 	for _, path := range []string{"self", "ingress"} {
 		t.Run(path, func(t *testing.T) {
-			p := testProxy(ollamaOnlyProfile(t), NewDiscovery(), 11435)
+			p := testProxy(anyProfile(t), NewDiscovery(), 11435)
 			configureStrict(t, p.admission, filepath.Join(t.TempDir(), "capacity.json"))
 			if err := p.soleFacade().setLocalBackend(localBackend{Host: "127.0.0.1", Port: 11434, Healthy: true}); err != nil {
 				t.Fatal(err)
@@ -283,7 +283,7 @@ func TestHandleHTTP_CommittedBlockingCloseUsesSink(t *testing.T) {
 	discovery := NewDiscovery()
 	discovery.AddManual(nodeForModel(t, "a", "http://127.0.0.1:11434", "m"))
 	discovery.AddManual(nodeForModel(t, "b", "http://127.0.0.1:11436", "m"))
-	p := testProxy(ollamaOnlyProfile(t), discovery, 11435)
+	p := testProxy(anyProfile(t), discovery, 11435)
 	p.SetPriority([]string{"a", "b"})
 	upstream := installBlockingFirstBody(t, p, http.StatusAccepted, false)
 	rec, done := httptest.NewRecorder(), make(chan struct{})
@@ -526,7 +526,7 @@ func TestHandleHTTP_EmptyBodyCommits(t *testing.T) {
 			t.Run(name, func(t *testing.T) {
 				empty := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					mediaType := "application/json"
-					if streaming && tc.profile.Name != "ollama" {
+					if streaming {
 						mediaType = "text/event-stream"
 					}
 					w.Header().Set("Content-Type", mediaType)
@@ -572,13 +572,11 @@ func TestHandleHTTP_EmptyBodyCommits(t *testing.T) {
 					t.Fatalf("empty declared stream terminal = %+v, want failed with reason", terminal.WorkloadInfo)
 				}
 				errorFrame := strings.TrimSpace(rec.Body.String())
-				if tc.profile.Name != "ollama" {
-					events := strings.Split(errorFrame, "\n\n")
-					if len(events) != 2 || events[1] != "data: [DONE]" || !strings.HasPrefix(events[0], "data: ") {
-						t.Fatalf("empty stream SSE terminator = %q", errorFrame)
-					}
-					errorFrame = strings.TrimPrefix(events[0], "data: ")
+				events := strings.Split(errorFrame, "\n\n")
+				if len(events) != 2 || events[1] != "data: [DONE]" || !strings.HasPrefix(events[0], "data: ") {
+					t.Fatalf("empty stream SSE terminator = %q", errorFrame)
 				}
+				errorFrame = strings.TrimPrefix(events[0], "data: ")
 				if frame := decodeJSONBody(t, errorFrame); frame["error"] == nil {
 					t.Fatal("empty declared stream has no protocol error")
 				}

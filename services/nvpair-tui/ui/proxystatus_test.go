@@ -16,19 +16,19 @@ import (
 func TestProxyErrorTakesProxyDown(t *testing.T) {
 	p := newProxyTracker()
 	p.handleNotification(&rpc.Message{
-		Method: "ollama-proxy:ready",
-		Params: []byte(`{"port":11434}`),
+		Method: "llamacpp-proxy:ready",
+		Params: []byte(`{"port":8080}`),
 	})
-	if port, ready := p.portForEngine("ollama"); !ready || port != 11434 {
+	if port, ready := p.portForEngine("llamacpp"); !ready || port != 8080 {
 		t.Fatalf("after ready: port=%d ready=%v", port, ready)
 	}
 
-	p.handleNotification(&rpc.Message{Method: "ollama-proxy:error", Params: []byte(`{}`)})
-	port, ready := p.portForEngine("ollama")
+	p.handleNotification(&rpc.Message{Method: "llamacpp-proxy:error", Params: []byte(`{}`)})
+	port, ready := p.portForEngine("llamacpp")
 	if ready {
 		t.Error("proxy still reads ready after an error frame")
 	}
-	if port != 11434 {
+	if port != 8080 {
 		t.Errorf("port = %d; the configured port should survive so the strip can name "+
 			"which endpoint is down", port)
 	}
@@ -36,36 +36,34 @@ func TestProxyErrorTakesProxyDown(t *testing.T) {
 		t.Errorf("strip does not report the proxy down: %s", p.strip())
 	}
 
-	// The other proxy is untouched.
-	if _, ready := p.portForEngine("lmstudio"); ready {
-		t.Error("an ollama-proxy error changed the LM Studio proxy")
+	// Unknown facades are not tracked.
+	if _, ready := p.portForEngine("unknown"); ready {
+		t.Error("an unknown facade became ready")
 	}
 }
 
-// TestProxyNotificationsAreScopedByPrefix checks the two proxies are told apart.
-// Their methods share a suffix, so a mix-up would report one proxy's state
-// against the other.
+// TestProxyNotificationsAreScopedByPrefix checks unknown facades are ignored.
 func TestProxyNotificationsAreScopedByPrefix(t *testing.T) {
 	p := newProxyTracker()
 	p.handleNotification(&rpc.Message{
-		Method: "lmstudio-proxy:ready",
+		Method: "unknown-proxy:ready",
 		Params: []byte(`{"port":1234}`),
 	})
 
-	if port, ready := p.portForEngine("lmstudio"); !ready || port != 1234 {
-		t.Errorf("lmstudio proxy: port=%d ready=%v, want 1234/true", port, ready)
+	if port, ready := p.portForEngine("unknown"); ready || port != 0 {
+		t.Errorf("unknown proxy: port=%d ready=%v, want 0/false", port, ready)
 	}
-	if _, ready := p.portForEngine("ollama"); ready {
-		t.Error("an lmstudio-proxy frame marked the ollama proxy ready")
+	if _, ready := p.portForEngine("llamacpp"); ready {
+		t.Error("an unknown-proxy frame marked the llamacpp proxy ready")
 	}
 }
 
-// TestProxyPushesUseTheFacadePrefix is the regression guard for the Ollama
+// TestProxyPushesUseTheFacadePrefix is the regression guard for a facade
 // proxy's pushes being dropped.
 //
 // The broker forwards each facade's pushes as <engine>-proxy:<method>. Routing
 // still looked for the bare "proxy:" of the single-engine proxy this replaced,
-// so Ollama readiness and failure only ever reached the screen through the
+// so a facade's readiness and failure only ever reached the screen through the
 // periodic status poll — and a proxy that died read as up until the next one.
 func TestProxyPushesUseTheFacadePrefix(t *testing.T) {
 	p := newProxyTracker()
@@ -91,13 +89,13 @@ func TestProxyPushesUseTheFacadePrefix(t *testing.T) {
 // port nothing may be listening on — for as long as the reads kept failing.
 func TestFailedStatusReadTakesTheProxyDown(t *testing.T) {
 	p := newProxyTracker()
-	p.apply(proxyStatusMsg{idx: 0, ready: true, port: 11434})
+	p.apply(proxyStatusMsg{idx: 0, ready: true, port: 8080})
 	p.apply(proxyStatusMsg{idx: 0, err: errFake{}})
-	port, ready := p.portForEngine("ollama")
+	port, ready := p.portForEngine("llamacpp")
 	if ready {
 		t.Error("the proxy still reads ready after its status read failed")
 	}
-	if port != 11434 {
+	if port != 8080 {
 		t.Errorf("port = %d; the last known port should stay, shown as down", port)
 	}
 }
@@ -107,10 +105,10 @@ func TestFailedStatusReadTakesTheProxyDown(t *testing.T) {
 // error push already followed, so the two paths no longer disagree.
 func TestNotRunningKeepsTheLastKnownPort(t *testing.T) {
 	p := newProxyTracker()
-	p.apply(proxyStatusMsg{idx: 0, ready: true, port: 11434})
+	p.apply(proxyStatusMsg{idx: 0, ready: true, port: 8080})
 	p.apply(proxyStatusMsg{idx: 0, ready: false, port: 0})
-	if port, ready := p.portForEngine("ollama"); ready || port != 11434 {
-		t.Errorf("port=%d ready=%v, want 11434 shown as down", port, ready)
+	if port, ready := p.portForEngine("llamacpp"); ready || port != 8080 {
+		t.Errorf("port=%d ready=%v, want 8080 shown as down", port, ready)
 	}
 }
 
@@ -119,7 +117,7 @@ func TestNotRunningKeepsTheLastKnownPort(t *testing.T) {
 // down both have to read as unusable.
 func TestPortForEngineDistinguishesDownFromUnknown(t *testing.T) {
 	p := newProxyTracker()
-	if _, ready := p.portForEngine("ollama"); ready {
+	if _, ready := p.portForEngine("llamacpp"); ready {
 		t.Error("a proxy that has never reported reads as ready")
 	}
 	if port, ready := p.portForEngine("vllm"); ready || port != 0 {

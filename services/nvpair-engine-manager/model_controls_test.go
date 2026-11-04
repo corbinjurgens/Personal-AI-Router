@@ -41,13 +41,12 @@ func TestModelControlsInventoryFailureDiagnostics(t *testing.T) {
 		{"separate transport failures", false, true, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h, _ := memoryModelsFixture(t)
-			ex := h.ex
-			st := ex.engines["ollama"]
+			ex := modelDownloadInventoryExecutor(t)
+			st := ex.engines["llamacpp"]
 			st.port = 24001
 			if tc.shared {
 				act := st.manifest.Actions["loaded_models"]
-				act.HTTP = &ActionHTTP{Method: http.MethodGet, Path: "/api/tags"}
+				act.HTTP = &ActionHTTP{Method: http.MethodGet, Path: "/models"}
 				st.manifest.Actions["loaded_models"] = act
 			}
 			for _, action := range []string{"list_models", "loaded_models"} {
@@ -58,20 +57,24 @@ func TestModelControlsInventoryFailureDiagnostics(t *testing.T) {
 				st.manifest.Actions[action] = act
 			}
 			healthy := *st.manifest
-			healthy.Engine = "healthy"
-			ex.reg.engines["healthy"] = &healthy
-			ex.engines["healthy"] = &engineState{manifest: &healthy, plat: &Platform{}, running: true, port: 24002, proc: &managedProc{}}
+			descriptor, ok := engines.DynamicEngine("llamacpp-custom", "llama.cpp custom")
+			if !ok {
+				t.Fatal("invalid descriptor engine")
+			}
+			healthy.Engine, healthy.DisplayName, healthy.Family = descriptor.Name, descriptor.DisplayName, engines.NameLlamaCPP
+			ex.reg.engines[descriptor.Name] = &healthy
+			ex.engines[descriptor.Name] = &engineState{manifest: &healthy, plat: &Platform{}, running: true, port: 24002, proc: &managedProc{}}
 			phase := "seed"
 			ex.client.Transport = memoryModelsTransport(func(r *http.Request) (*http.Response, error) {
 				if r.Method != http.MethodGet || (r.URL.Host != "127.0.0.1:24001" && r.URL.Host != "127.0.0.1:24002") ||
-					(r.URL.Path != "/api/tags" && r.URL.Path != "/api/ps") {
+					(r.URL.Path != "/models" && r.URL.Path != "/v1/models") {
 					t.Errorf("unexpected inventory request: %s %s", r.Method, r.URL)
 					return nil, errors.New("unexpected inventory request")
 				}
 				if r.URL.Host == "127.0.0.1:24002" {
-					return mutationJSON(http.StatusOK, `{"models":[{"name":"sibling"}]}`)
+					return mutationJSON(http.StatusOK, `{"data":[{"id":"sibling"}]}`)
 				}
-				failing := phase == "failure" && ((r.URL.Path == "/api/tags" && tc.failList) || (r.URL.Path == "/api/ps" && tc.failLoaded))
+				failing := phase == "failure" && ((r.URL.Path == "/models" && tc.failList) || (r.URL.Path == "/v1/models" && tc.failLoaded))
 				if failing {
 					if tc.transport {
 						return nil, errors.New("j304-transport-secret https://credential:private@fixture.invalid/secret")
@@ -79,12 +82,12 @@ func TestModelControlsInventoryFailureDiagnostics(t *testing.T) {
 					return mutationJSON(http.StatusServiceUnavailable, "j304-body-secret")
 				}
 				if phase == "empty" {
-					return mutationJSON(http.StatusOK, `{"models":[{"name":""}]}`)
+					return mutationJSON(http.StatusOK, `{"data":[{"id":""}]}`)
 				}
-				return mutationJSON(http.StatusOK, `{"models":[{"name":"seed"}]}`)
+				return mutationJSON(http.StatusOK, `{"data":[{"id":"seed"}]}`)
 			})
 			_, baseline, seed := ex.sweepLoaded(context.Background(), nil, false)
-			if !reflect.DeepEqual(seed.ByEngine["ollama"], []string{"seed"}) || !reflect.DeepEqual(baseline["ollama"], []string{"seed"}) {
+			if !reflect.DeepEqual(seed.ByEngine["llamacpp"], []string{"seed"}) || !reflect.DeepEqual(baseline["llamacpp"], []string{"seed"}) {
 				t.Fatal("inventory/loaded positive did not seed the existing owner")
 			}
 			var capture bytes.Buffer
@@ -94,12 +97,12 @@ func TestModelControlsInventoryFailureDiagnostics(t *testing.T) {
 			slog.Debug("j304 diagnostic capture enabled")
 			phase = "failure"
 			_, next, result := ex.sweepLoaded(context.Background(), baseline, false)
-			if !reflect.DeepEqual(result.ByEngine["healthy"], []string{"sibling"}) || !reflect.DeepEqual(result.LoadedByEngine["healthy"], []string{"sibling"}) ||
-				!reflect.DeepEqual(next["ollama"], []string{"seed"}) {
+			if !reflect.DeepEqual(result.ByEngine["llamacpp-custom"], []string{"sibling"}) || !reflect.DeepEqual(result.LoadedByEngine["llamacpp-custom"], []string{"sibling"}) ||
+				!reflect.DeepEqual(next["llamacpp"], []string{"seed"}) {
 				t.Fatal("inventory failure lost healthy sibling or last-good loaded baseline")
 			}
-			_, listPresent := result.ByEngine["ollama"]
-			_, loadedPresent := result.LoadedByEngine["ollama"]
+			_, listPresent := result.ByEngine["llamacpp"]
+			_, loadedPresent := result.LoadedByEngine["llamacpp"]
 			if listPresent == tc.failList || loadedPresent == tc.failLoaded {
 				t.Fatal("failed action manufactured known-empty or removed its successful sibling action")
 			}
@@ -124,7 +127,7 @@ func TestModelControlsInventoryFailureDiagnostics(t *testing.T) {
 					marker = true
 					continue
 				}
-				if record.Engine == "ollama" && (record.Action == "list_models" || record.Action == "loaded_models") {
+				if record.Engine == "llamacpp" && (record.Action == "list_models" || record.Action == "loaded_models") {
 					category, status := "http-status", http.StatusServiceUnavailable
 					if tc.transport {
 						category, status = "action-failed", 0
@@ -152,8 +155,8 @@ func TestModelControlsInventoryFailureDiagnostics(t *testing.T) {
 			}
 			phase = "empty"
 			_, _, empty := ex.sweepLoaded(context.Background(), next, false)
-			if empty.ByEngine["ollama"] == nil || len(empty.ByEngine["ollama"]) != 0 || empty.LoadedByEngine["ollama"] == nil || len(empty.LoadedByEngine["ollama"]) != 0 ||
-				!reflect.DeepEqual(empty.ByEngine["healthy"], []string{"sibling"}) {
+			if empty.ByEngine["llamacpp"] == nil || len(empty.ByEngine["llamacpp"]) != 0 || empty.LoadedByEngine["llamacpp"] == nil || len(empty.LoadedByEngine["llamacpp"]) != 0 ||
+				!reflect.DeepEqual(empty.ByEngine["llamacpp-custom"], []string{"sibling"}) {
 				t.Fatal("post-failure all-invalid success lost known-empty or useful sibling")
 			}
 		})
@@ -162,16 +165,17 @@ func TestModelControlsInventoryFailureDiagnostics(t *testing.T) {
 
 // These tests reuse the existing in-memory inventory fixture and HTTP seam.
 // They never start an engine, manager, catalog server, listener or command.
-func modelControlsExecutor(t *testing.T) *Executor {
+func llamaModelControlsExecutor(t *testing.T) *Executor {
 	t.Helper()
-	h := newMemoryEvidenceHarness(t)
-	st := h.ex.engines["ollama"]
+	ex := modelDownloadInventoryExecutor(t)
+	st := ex.engines["llamacpp"]
+	st.runID = memoryTestRun
 	st.manifest.ModelNaming = engines.ModelNamingExact
 	st.manifest.Actions = map[string]Action{
 		"warm":          {HTTP: &ActionHTTP{Method: http.MethodPost, Path: "/load"}},
 		"cool":          {HTTP: &ActionHTTP{Method: http.MethodPost, Path: "/unload"}},
 		"erase":         {HTTP: &ActionHTTP{Method: http.MethodDelete, Path: "/delete"}},
-		pullModelAction: {HTTP: &ActionHTTP{Method: http.MethodPost, Path: "/pull"}},
+		pullModelAction: llamaPullAction(),
 		"opaque":        {HTTP: &ActionHTTP{Method: http.MethodPost, Path: "/opaque"}},
 		"list_models":   {HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/list"}, Result: &ActionResult{Array: "models", Field: "name"}},
 		"loaded_models": {HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/loaded"}, Result: &ActionResult{Array: "models", Field: "name"}},
@@ -180,17 +184,27 @@ func modelControlsExecutor(t *testing.T) *Executor {
 		engines.OperationLoad:   {Action: "warm", ModelParam: "target"},
 		engines.OperationUnload: {Action: "cool", ModelParam: "target"},
 		engines.OperationDelete: {Action: "erase", ModelParam: "target"},
-		engines.OperationPull:   {Action: pullModelAction, ModelParam: "target"},
+		engines.OperationPull:   {Action: pullModelAction},
 	}
-	h.ex.client = &http.Client{Transport: memoryModelsTransport(func(*http.Request) (*http.Response, error) {
+	ex.client = &http.Client{Transport: memoryModelsTransport(func(*http.Request) (*http.Response, error) {
 		t.Error("unexpected engine request")
 		return nil, errors.New("unexpected engine request")
 	})}
-	h.ex.modelMutationParent = func(context.Context, string) error {
+	ex.modelMutationParent = func(context.Context, string) error {
 		t.Error("unexpected model mutation")
 		return errors.New("unexpected model mutation")
 	}
-	return h.ex
+	return ex
+}
+
+// modelControlsKey is the parameter key that carries the model for action in
+// llamaModelControlsExecutor: pull reads the pinned protocol's "model", the
+// other bound actions a custom key.
+func modelControlsKey(action string) string {
+	if action == pullModelAction {
+		return "model"
+	}
+	return "target"
 }
 
 func modelControlsJSON(t *testing.T, value any) json.RawMessage {
@@ -204,7 +218,7 @@ func modelControlsJSON(t *testing.T, value any) json.RawMessage {
 
 func modelControlsPullEntry(t *testing.T, event ProgressEvent, source, id, model string) modeldownload.Entry {
 	t.Helper()
-	if id == "" || event.ID != id || event.Engine != "ollama" || event.Model != model || event.Op != "pull" || event.Message != "" {
+	if id == "" || event.ID != id || event.Engine != "llamacpp" || event.Model != model || event.Op != "pull" || event.Message != "" {
 		t.Fatalf("pull progress lost target identity or exposed a message: %+v", event)
 	}
 	state := event.DownloadState
@@ -247,32 +261,24 @@ func TestModelDownloadPullIdentityFollowsDeclaredBinding(t *testing.T) {
 }
 
 func TestModelDownloadFailedBoundPullFencesActualNativeModel(t *testing.T) {
-	ex := modelControlsExecutor(t)
+	ex := llamaModelControlsExecutor(t)
 	acceptModelMutations(ex)
 	root := t.TempDir()
-	t.Setenv("OLLAMA_MODELS", root)
-	params := json.RawMessage(`{"target":"actual","name":"other"}`)
+	t.Setenv("LLAMA_CACHE", root)
+	const model, artifact = "owner/actual:Q4_K_M", "actual-Q4_K_M.gguf"
+	params := json.RawMessage(`{"model":"` + model + `","name":"other"}`)
 	var effects int
-	var artifact ollamaFixture
-	ex.client.Transport = memoryModelsTransport(func(r *http.Request) (*http.Response, error) {
+	ex.client.Transport = llamaPullTransport("download_failed", func(r *http.Request, body []byte) (*http.Response, error) {
 		effects++
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			return nil, err
-		}
-		if r.Method != http.MethodPost || r.URL.Path != "/pull" || !bytes.Equal(body, params) {
+		if !bytes.Equal(body, params) {
 			return nil, errors.New("pull changed its native dispatch or caller params")
 		}
-		var native struct{ Target string }
-		if err := json.Unmarshal(body, &native); err != nil {
-			return nil, err
-		}
-		artifact = writeOllamaModel(t, root, native.Target, 16, 3)
-		return mutationJSON(http.StatusOK, `{"error":"fixture native failure after content write"}`)
+		writeLlamaCache(t, root, "owner/actual", strings.Repeat("a", 40), map[string][]byte{artifact: testBytes(16, 3)})
+		return mutationJSON(http.StatusOK, `{"success":true}`)
 	})
-	result, err := ex.Action(context.Background(), "ollama", pullModelAction, params)
-	if err == nil || result != nil || effects != 1 || artifact.manifestRel == "" {
-		t.Fatalf("failed native pull result=%s error=%v effects=%d artifact=%+v", result, err, effects, artifact)
+	result, err := ex.Action(context.Background(), "llamacpp", pullModelAction, params)
+	if err == nil || result != nil || effects != 1 {
+		t.Fatalf("failed native pull result=%s error=%v effects=%d", result, err, effects)
 	}
 	snapshot := ex.downloads.snapshot()
 	if err := snapshot.Validate(); err != nil {
@@ -282,34 +288,34 @@ func TestModelDownloadFailedBoundPullFencesActualNativeModel(t *testing.T) {
 		t.Fatalf("failed pull entries=%+v", snapshot)
 	}
 	entry := snapshot.Entries[0]
-	if entry.Model != "actual" || entry.Phase != modeldownload.PhaseFailed || entry.Reason != modeldownload.ReasonDownloadFailed || !entry.BlocksReadiness {
+	if entry.Model != model || entry.Phase != modeldownload.PhaseFailed || entry.Reason != modeldownload.ReasonDownloadFailed || !entry.BlocksReadiness {
 		t.Fatalf("failed native model was not fenced: %+v", entry)
 	}
 	markers, err := ex.downloads.store.load()
 	if err != nil {
 		t.Fatalf("read failed pull journal: %v", err)
 	}
-	marker, found := markers[downloadContentKey{"ollama", "actual"}]
-	if !found || len(markers) != 1 || marker.ID != entry.ID || marker.Model != "actual" {
+	marker, found := markers[downloadContentKey{"llamacpp", model}]
+	if !found || len(markers) != 1 || marker.ID != entry.ID || marker.Model != model {
 		t.Fatalf("journal does not identify native target: %+v", markers)
 	}
-	if _, err := ex.ModelLoad(context.Background(), "ollama", "actual"); !errors.Is(err, errDownloadBusy) {
+	if _, err := ex.ModelLoad(context.Background(), "llamacpp", model); !errors.Is(err, errDownloadBusy) {
 		t.Fatalf("typed Load bypassed actual-model fence: %v", err)
 	}
-	if _, err := ex.Action(context.Background(), "ollama", "warm", params); !errors.Is(err, errDownloadBusy) {
+	if _, err := ex.Action(context.Background(), "llamacpp", "warm", json.RawMessage(`{"target":"`+model+`"}`)); !errors.Is(err, errDownloadBusy) {
 		t.Fatalf("raw Load bypassed actual-model fence: %v", err)
 	}
 	server := &controlServer{exec: ex}
-	query := modelQueryValues("ollama", "actual")
+	query := modelQueryValues("llamacpp", model)
 	listing := httptest.NewRecorder()
 	server.handleModelFiles(listing, httptest.NewRequest(http.MethodGet, controlModelFilesPath+"?"+query.Encode(), nil))
-	query.Set("path", artifact.manifestRel)
+	query.Set("path", artifact)
 	file := httptest.NewRecorder()
 	server.handleModelFile(file, httptest.NewRequest(http.MethodGet, controlModelFilePath+"?"+query.Encode(), nil))
 	if listing.Code != http.StatusConflict || listing.Flushed || file.Code != http.StatusConflict || file.Flushed || effects != 1 {
 		t.Fatalf("failed model escaped export/Load fence: listing=%d file=%d native effects=%d", listing.Code, file.Code, effects)
 	}
-	release, err := ex.acquireModelRead("ollama", "other", false)
+	release, err := ex.acquireModelRead("llamacpp", "other", false)
 	if err != nil {
 		t.Fatalf("unrelated name alias was incorrectly fenced: %v", err)
 	}
@@ -317,16 +323,16 @@ func TestModelDownloadFailedBoundPullFencesActualNativeModel(t *testing.T) {
 }
 
 func TestModelDownloadTypedPullRejectsMismatchWithDeclaredTargetBeforeEffects(t *testing.T) {
-	ex := modelControlsExecutor(t)
+	ex := llamaModelControlsExecutor(t)
 	var effects, withdrawals, notifications int
 	ex.modelMutationParent = func(context.Context, string) error { withdrawals++; return nil }
 	ex.emit = func(string, any) { notifications++ }
 	ex.client.Transport = memoryModelsTransport(func(*http.Request) (*http.Response, error) {
 		effects++
-		return mutationJSON(http.StatusOK, `{"status":"success"}`)
+		return mutationJSON(http.StatusOK, `{"success":true}`)
 	})
 	before := ex.downloads.snapshot()
-	result, err := ex.PullModelStream(context.Background(), "ollama", "other", json.RawMessage(`{"target":"actual","name":"other"}`))
+	result, err := ex.PullModelStream(context.Background(), "llamacpp", "other", json.RawMessage(`{"model":"actual","name":"other"}`))
 	if err == nil || err.Error() != "pull model does not match action parameters" || result != nil ||
 		effects != 0 || withdrawals != 0 || notifications != 0 || !before.Equal(ex.downloads.snapshot()) || len(ex.Errors()) != 0 {
 		t.Fatalf("typed mismatch crossed reservation/effect boundary: result=%s error=%v effects=%d withdrawals=%d notifications=%d", result, err, effects, withdrawals, notifications)
@@ -368,12 +374,6 @@ func TestModelControlsCatalogRawBeforeTrimAndFallback(t *testing.T) {
 			continue // An absent optional primary identifier may use its alias.
 		}
 		t.Run(tc.name, func(t *testing.T) {
-			if got := normalizeOllamaRows([]ollamaLibraryRow{{Name: tc.model, Model: "fallback"}, {Name: "sibling"}}); len(got) != 1 || got[0].ID != "sibling" {
-				t.Fatalf("Ollama retained a malformed row or lost sibling: %+v", got)
-			}
-			if got := normalizeHFRows([]hfModelRow{{ID: tc.model, ModelID: "owner/fallback"}, {ID: "owner/sibling"}}); len(got) != 1 || got[0].ID != "owner/sibling" {
-				t.Fatalf("HF retained a malformed row or lost sibling: %+v", got)
-			}
 			bad, good := modelControlsLlamaRow(tc.model), modelControlsLlamaRow("owner/sibling")
 			bad.ModelID = "owner/fallback"
 			if got := normalizeLlamaCPPRows([]hfModelRow{bad, good}); len(got) != 1 || got[0].ID != "owner/sibling:Q4_K_M" {
@@ -389,10 +389,8 @@ func TestModelControlsCatalogRawBeforeTrimAndFallback(t *testing.T) {
 		{"512 multibyte bytes", strings.Repeat("界", 170) + "aa", "", strings.Repeat("界", 170) + "aa"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ollama := normalizeOllamaRows([]ollamaLibraryRow{{Name: tc.primary, Model: tc.fallback}})
-			hf := normalizeHFRows([]hfModelRow{{ID: tc.primary, ModelID: tc.fallback}})
-			if len(ollama) != 1 || ollama[0].ID != tc.want || len(hf) != 1 || hf[0].ID != tc.want {
-				t.Fatalf("valid identifier changed: Ollama=%+v HF=%+v", ollama, hf)
+			if got, ok := catalogIdentifier(tc.primary, tc.fallback); !ok || got != tc.want {
+				t.Fatalf("valid identifier changed: %q, %v", got, ok)
 			}
 		})
 	}
@@ -432,19 +430,18 @@ func TestModelControlsCatalogJSONSkipsIndividualInvalidFields(t *testing.T) {
 		{"513 bytes", `"` + strings.Repeat("s", 513) + `"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var ollama []ollamaLibraryRow
-			if err := json.Unmarshal([]byte(`[{"name":`+tc.raw+`,"model":"fallback"},{"name":"sibling"}]`), &ollama); err != nil {
-				t.Fatalf("decode Ollama listing: %v", err)
-			}
-			if got := normalizeOllamaRows(ollama); len(got) != 1 || got[0].ID != "sibling" {
-				t.Fatalf("Ollama filtering = %+v", got)
-			}
 			var hf []hfModelRow
 			if err := json.Unmarshal([]byte(`[{"id":`+tc.raw+`,"modelId":"owner/fallback"},{"id":"owner/sibling"}]`), &hf); err != nil {
 				t.Fatalf("decode HF listing: %v", err)
 			}
-			if got := normalizeHFRows(hf); len(got) != 1 || got[0].ID != "owner/sibling" {
-				t.Fatalf("HF filtering = %+v", got)
+			if len(hf) != 2 {
+				t.Fatalf("decoded %d rows, want 2", len(hf))
+			}
+			if _, ok := catalogIdentifier(hf[0].ID, hf[0].ModelID); ok && !hf[0].invalidIdentifier {
+				t.Fatalf("malformed row accepted: %+v", hf[0])
+			}
+			if id, ok := catalogIdentifier(hf[1].ID, hf[1].ModelID); !ok || hf[1].invalidIdentifier || id != "owner/sibling" {
+				t.Fatalf("sibling lost: %q, %v, %+v", id, ok, hf[1])
 			}
 		})
 	}
@@ -488,10 +485,10 @@ func TestModelControlsInventoryAndDigestFiltering(t *testing.T) {
 }
 
 func TestModelControlsInventoryCacheAndKnownEmptyRefresh(t *testing.T) {
-	ex := modelControlsExecutor(t)
+	ex := llamaModelControlsExecutor(t)
 	var listingCalls atomic.Int32
 	var body atomic.Value
-	body.Store(`{"models":[{"name":"sibling"}]}`)
+	body.Store(`{"models":[{"name":"sibling","status":{"value":"unloaded"}}]}`)
 	ex.client.Transport = memoryModelsTransport(func(r *http.Request) (*http.Response, error) {
 		if r.Method != http.MethodGet || (r.URL.Path != "/list" && r.URL.Path != "/loaded") {
 			return nil, fmt.Errorf("unexpected inventory request")
@@ -508,7 +505,7 @@ func TestModelControlsInventoryCacheAndKnownEmptyRefresh(t *testing.T) {
 	body.Store(`{"models":[{"name":"private\nmodel"}]}`)
 	second := ex.modelsSweep(context.Background(), true)
 	for _, inventory := range []map[string][]string{second.ByEngine, second.LoadedByEngine} {
-		models, present := inventory["ollama"]
+		models, present := inventory["llamacpp"]
 		if !present || models == nil || len(models) != 0 {
 			t.Fatalf("all-bad presence = %v, want known-empty", inventory)
 		}
@@ -518,13 +515,13 @@ func TestModelControlsInventoryCacheAndKnownEmptyRefresh(t *testing.T) {
 	}
 	before := listingCalls.Load()
 	third := ex.modelsSweep(context.Background(), false)
-	if listingCalls.Load() != before || third.ByEngine["ollama"] == nil || len(third.ByEngine["ollama"]) != 0 {
+	if listingCalls.Load() != before || third.ByEngine["llamacpp"] == nil || len(third.ByEngine["llamacpp"]) != 0 {
 		t.Fatalf("empty inventory cache missed or revived last-good: %+v", third)
 	}
 	ex.inventoryMu.Lock()
-	ex.inventory["ollama"] = []string{"private\nmodel", strings.Repeat("x", 513), strings.Repeat("v", 512)}
+	ex.inventory["llamacpp"] = []string{"private\nmodel", strings.Repeat("x", 513), strings.Repeat("v", 512)}
 	ex.inventoryMu.Unlock()
-	if got := ex.cachedInventory()["ollama"]; !reflect.DeepEqual(got, []string{strings.Repeat("v", 512)}) {
+	if got := ex.cachedInventory()["llamacpp"]; !reflect.DeepEqual(got, []string{strings.Repeat("v", 512)}) {
 		t.Fatalf("cached identifier filtering = %v", got)
 	}
 }
@@ -557,24 +554,16 @@ func TestModelControlsCatalogCacheReturnBoundaries(t *testing.T) {
 			t.Fatalf("target return retained invalid ID/name: %+v", got)
 		}
 	}
-	c := newCatalogService()
-	c.ollamaOnce.Do(func() { c.ollama = rows })
-	got, err := c.Catalog(context.Background(), "ollama", "windows", "amd64", "")
-	if err != nil || !reflect.DeepEqual(got.Models, []CatalogModel{valid}) {
-		t.Fatalf("embedded cached return = %+v, %v", got, err)
-	}
 }
 
 func TestModelControlsCatalogFilteredRefreshReplacesLastGood(t *testing.T) {
-	for _, source := range []string{"lmstudio", "llamacpp", "search"} {
+	for _, source := range []string{"llamacpp", "search"} {
 		t.Run(source, func(t *testing.T) {
 			var calls int
 			cache := &listingCache{label: source, models: []CatalogModel{{ID: "old", Name: "old"}}, fetched: time.Now().Add(-2 * catalogCacheTTL)}
 			cache.fetch = func(context.Context) ([]CatalogModel, error) {
 				calls++
 				switch source {
-				case "lmstudio":
-					return normalizeHFRows([]hfModelRow{{ID: "\nprivate-model", ModelID: "fallback"}}), nil
 				case "llamacpp":
 					return normalizeLlamaCPPRows([]hfModelRow{modelControlsLlamaRow("\nowner/model")}), nil
 				default:
@@ -674,25 +663,25 @@ func TestModelControlsTypedOperationsRejectBeforeEffects(t *testing.T) {
 				call func(*Executor, string) (json.RawMessage, error)
 			}{
 				{"load", func(ex *Executor, model string) (json.RawMessage, error) {
-					return ex.ModelLoad(context.Background(), "ollama", model)
+					return ex.ModelLoad(context.Background(), "llamacpp", model)
 				}},
 				{"unload", func(ex *Executor, model string) (json.RawMessage, error) {
-					return ex.ModelUnload(context.Background(), "ollama", model)
+					return ex.ModelUnload(context.Background(), "llamacpp", model)
 				}},
 				{"delete", func(ex *Executor, model string) (json.RawMessage, error) {
-					return ex.ModelDelete(context.Background(), "ollama", model)
+					return ex.ModelDelete(context.Background(), "llamacpp", model)
 				}},
 				{"pull", func(ex *Executor, model string) (json.RawMessage, error) {
-					return ex.PullModelStream(context.Background(), "ollama", model, nil)
+					return ex.PullModelStream(context.Background(), "llamacpp", model, nil)
 				}},
 			} {
 				t.Run(op.name, func(t *testing.T) {
-					ex := modelControlsExecutor(t)
-					before := ex.inventoryDigests["ollama"]
+					ex := llamaModelControlsExecutor(t)
+					before := ex.inventoryDigests["llamacpp"]
 					ex.emit = func(string, any) { t.Error("rejection emitted a notification") }
 					result, err := op.call(ex, tc.model)
 					modelControlsWantRefusal(t, err, tc.model)
-					if result != nil || !reflect.DeepEqual(before, ex.inventoryDigests["ollama"]) {
+					if result != nil || !reflect.DeepEqual(before, ex.inventoryDigests["llamacpp"]) {
 						t.Fatal("rejection returned a value or changed identity state")
 					}
 				})
@@ -714,15 +703,15 @@ func TestModelControlsBoundActionsRejectRawBeforeEffects(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, action := range []string{"warm", "cool", "erase", pullModelAction} {
 				t.Run(action, func(t *testing.T) {
-					ex := modelControlsExecutor(t)
+					ex := llamaModelControlsExecutor(t)
 					ex.emit = func(string, any) { t.Error("rejection emitted a notification") }
-					before := ex.inventoryDigests["ollama"]
-					result, err := ex.Action(context.Background(), "ollama", action, json.RawMessage(`{"target":`+tc.raw+`}`))
+					before := ex.inventoryDigests["llamacpp"]
+					result, err := ex.Action(context.Background(), "llamacpp", action, json.RawMessage(`{"`+modelControlsKey(action)+`":`+tc.raw+`}`))
 					want := nodepolicy.ValidateModelIdentifierJSON(json.RawMessage(tc.raw))
 					if err == nil || want == nil || err.Error() != want.Error() || result != nil {
 						t.Fatalf("Action refusal = %s, %v; want fixed %v", result, err, want)
 					}
-					if !reflect.DeepEqual(before, ex.inventoryDigests["ollama"]) {
+					if !reflect.DeepEqual(before, ex.inventoryDigests["llamacpp"]) {
 						t.Fatal("invalid action entered mutation")
 					}
 				})
@@ -734,31 +723,34 @@ func TestModelControlsBoundActionsRejectRawBeforeEffects(t *testing.T) {
 func TestModelControlsValidBoundActionsPreserveRequestAndPermissions(t *testing.T) {
 	for _, action := range []string{"warm", "cool", "erase", pullModelAction, "opaque"} {
 		t.Run(action, func(t *testing.T) {
-			ex := modelControlsExecutor(t)
+			ex := llamaModelControlsExecutor(t)
 			var calls, mutations int
 			ex.modelMutationParent = func(context.Context, string) error { mutations++; return nil }
-			params := modelControlsJSON(t, map[string]string{"target": strings.Repeat("v", 512), "prompt": "opaque\ncontent\u0085"})
+			params := modelControlsJSON(t, map[string]string{modelControlsKey(action): strings.Repeat("v", 512), "prompt": "opaque\ncontent\u0085"})
 			if action == "opaque" {
 				params = json.RawMessage(`{"model":"opaque\ncontent","name":"opaque\u0085content"}`)
 			}
-			ex.client.Transport = memoryModelsTransport(func(r *http.Request) (*http.Response, error) {
+			serve := func(body []byte) (*http.Response, error) {
 				calls++
+				if !bytes.Equal(body, params) {
+					return nil, errors.New("valid action bytes changed")
+				}
+				return mutationJSON(http.StatusOK, `{"accepted":true,"success":true}`)
+			}
+			ex.client.Transport = memoryModelsTransport(func(r *http.Request) (*http.Response, error) {
 				body, err := io.ReadAll(r.Body)
 				if err != nil {
 					return nil, err
 				}
-				if !bytes.Equal(body, params) {
-					return nil, errors.New("valid action bytes changed")
-				}
-				if action == pullModelAction {
-					return mutationJSON(http.StatusOK, `{"accepted":true,"status":"success"}`)
-				}
-				return mutationJSON(http.StatusOK, `{"accepted":true}`)
+				return serve(body)
 			})
-			result, err := ex.Action(context.Background(), "ollama", action, params)
+			if action == pullModelAction {
+				ex.client.Transport = llamaPullTransport("download_finished", func(_ *http.Request, body []byte) (*http.Response, error) { return serve(body) })
+			}
+			result, err := ex.Action(context.Background(), "llamacpp", action, params)
 			var response struct {
-				Accepted bool   `json:"accepted"`
-				Status   string `json:"status"`
+				Accepted bool `json:"accepted"`
+				Success  bool `json:"success"`
 			}
 			if err != nil {
 				t.Fatalf("valid Action: %v", err)
@@ -766,8 +758,8 @@ func TestModelControlsValidBoundActionsPreserveRequestAndPermissions(t *testing.
 			if err := json.Unmarshal(result, &response); err != nil || !response.Accepted || calls != 1 {
 				t.Fatalf("valid action result=%s calls=%d decode=%v", result, calls, err)
 			}
-			if action == pullModelAction && response.Status != "success" {
-				t.Fatalf("pull omitted native success terminal: %+v", response)
+			if action == pullModelAction && !response.Success {
+				t.Fatalf("pull omitted the engine's start response: %+v", response)
 			}
 			wantMutations := 0
 			if action == "erase" || action == pullModelAction {
@@ -781,11 +773,11 @@ func TestModelControlsValidBoundActionsPreserveRequestAndPermissions(t *testing.
 }
 
 func TestModelControlsValidIdentifierStillRequiresMutationPermission(t *testing.T) {
-	ex := modelControlsExecutor(t)
+	ex := llamaModelControlsExecutor(t)
 	denied := errors.New("fixture mutation permission denied")
 	var admissions int
 	ex.modelMutationParent = func(context.Context, string) error { admissions++; return denied }
-	_, err := ex.ModelDelete(context.Background(), "ollama", strings.Repeat("v", 512))
+	_, err := ex.ModelDelete(context.Background(), "llamacpp", strings.Repeat("v", 512))
 	if !errors.Is(err, denied) || admissions != 1 {
 		t.Fatalf("valid identifier bypassed mutation permission: %v, admissions=%d", err, admissions)
 	}
@@ -794,9 +786,9 @@ func TestModelControlsValidIdentifierStillRequiresMutationPermission(t *testing.
 func TestModelControlsTyped512UsesCustomOperationKey(t *testing.T) {
 	for _, operation := range engines.Operations() {
 		t.Run(operation, func(t *testing.T) {
-			ex := modelControlsExecutor(t)
+			ex := llamaModelControlsExecutor(t)
 			model := strings.Repeat("v", 512)
-			action, raw, err := ex.modelOperationCall("ollama", operation, model)
+			action, raw, err := ex.modelOperationCall("llamacpp", operation, model)
 			if err != nil {
 				t.Fatalf("resolve valid model: %v", err)
 			}
@@ -804,8 +796,8 @@ func TestModelControlsTyped512UsesCustomOperationKey(t *testing.T) {
 			if err := json.Unmarshal(raw, &params); err != nil {
 				t.Fatalf("decode resolved params: %v", err)
 			}
-			binding, ok := ex.engines["ollama"].manifest.operationBinding(operation)
-			if !ok || action != binding.Action || !reflect.DeepEqual(params, map[string]string{"target": model}) {
+			binding, ok := ex.engines["llamacpp"].manifest.operationBinding(operation)
+			if !ok || action != binding.Action || !reflect.DeepEqual(params, map[string]string{modelControlsKey(binding.Action): model}) {
 				t.Fatalf("binding changed: %s %+v", action, params)
 			}
 		})
@@ -813,12 +805,12 @@ func TestModelControlsTyped512UsesCustomOperationKey(t *testing.T) {
 }
 
 func TestModelControlsPullExplicitParametersRejectBeforeMutation(t *testing.T) {
-	for _, key := range []string{"target", "model", "name"} {
+	for _, key := range []string{"model", "name"} {
 		t.Run(key, func(t *testing.T) {
-			ex := modelControlsExecutor(t)
+			ex := llamaModelControlsExecutor(t)
 			bad := strings.Repeat("s", 513)
-			params := modelControlsJSON(t, map[string]string{"target": "valid", key: bad})
-			result, err := ex.PullModelStream(context.Background(), "ollama", "valid", params)
+			params := modelControlsJSON(t, map[string]string{"model": "valid", key: bad})
+			result, err := ex.PullModelStream(context.Background(), "llamacpp", "valid", params)
 			modelControlsWantRefusal(t, err, bad)
 			if result != nil {
 				t.Fatalf("invalid pull returned %s", result)
@@ -831,18 +823,18 @@ func TestModelControlsManagerPullRefusesBeforeProgressAndReporter(t *testing.T) 
 	for _, tc := range []struct{ name, params string }{
 		{"name before fallback", `{"name":"\nprivate-model","model":"valid"}`},
 		{"secondary model", `{"name":"valid","model":"private\u0085model"}`},
-		{"bound key", `{"target":"private\u007fmodel"}`},
-		{"invalid UTF8", "{\"target\":\"private\xffmodel\"}"},
+		{"bound key", `{"model":"private\u007fmodel"}`},
+		{"invalid UTF8", "{\"model\":\"private\xffmodel\"}"},
 		{"case folded alias invalid UTF8", "{\"NAME\":\"private\xffmodel\"}"},
-		{"513 bytes", `{"target":"` + strings.Repeat("s", 513) + `"}`},
+		{"513 bytes", `{"model":"` + strings.Repeat("s", 513) + `"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ex := modelControlsExecutor(t)
+			ex := llamaModelControlsExecutor(t)
 			ex.emit = func(string, any) { t.Error("invalid manager request emitted progress/identity") }
 			var output bytes.Buffer
 			manager := &Manager{exec: ex, codec: NewCodec(&output)}
 			id := json.RawMessage("1")
-			params := json.RawMessage(`{"engine":"ollama","action":"pull_model","params":` + tc.params + `}`)
+			params := json.RawMessage(`{"engine":"llamacpp","action":"pull_model","params":` + tc.params + `}`)
 			manager.runAction(context.Background(), &Message{ID: &id, Params: params})
 			var response Message
 			if err := json.NewDecoder(&output).Decode(&response); err != nil {
@@ -861,26 +853,26 @@ func TestModelControlsManagerPullRefusesBeforeProgressAndReporter(t *testing.T) 
 	}
 }
 
-func TestModelControlsManagerPullAccepts512CustomKey(t *testing.T) {
-	ex := modelControlsExecutor(t)
+func TestModelControlsManagerPullAccepts512Model(t *testing.T) {
+	ex := llamaModelControlsExecutor(t)
 	acceptModelMutations(ex)
 	model := strings.Repeat("v", 512)
 	var calls int
-	ex.client.Transport = memoryModelsTransport(func(r *http.Request) (*http.Response, error) {
+	ex.client.Transport = llamaPullTransport("download_finished", func(_ *http.Request, raw []byte) (*http.Response, error) {
 		calls++
 		var body map[string]string
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if err := json.Unmarshal(raw, &body); err != nil {
 			return nil, err
 		}
-		if !reflect.DeepEqual(body, map[string]string{"target": model}) {
-			return nil, errors.New("custom pull key changed")
+		if !reflect.DeepEqual(body, map[string]string{"model": model}) {
+			return nil, errors.New("pull model key changed")
 		}
-		return mutationJSON(http.StatusOK, `{"status":"success"}`)
+		return mutationJSON(http.StatusOK, `{"success":true}`)
 	})
 	var output bytes.Buffer
 	manager := &Manager{exec: ex, codec: NewCodec(&output)}
 	id := json.RawMessage("1")
-	manager.runAction(context.Background(), &Message{ID: &id, Params: modelControlsJSON(t, map[string]any{"engine": "ollama", "action": pullModelAction, "params": map[string]string{"target": model}})})
+	manager.runAction(context.Background(), &Message{ID: &id, Params: modelControlsJSON(t, map[string]any{"engine": "llamacpp", "action": pullModelAction, "params": map[string]string{"model": model}})})
 	var response Message
 	if err := json.NewDecoder(&output).Decode(&response); err != nil {
 		t.Fatalf("decode manager response: %v", err)
@@ -891,22 +883,17 @@ func TestModelControlsManagerPullAccepts512CustomKey(t *testing.T) {
 }
 
 func TestModelControlsParamsOnlyPullPreserves512Identifier(t *testing.T) {
-	for _, key := range []string{"target", "name", "model"} {
-		t.Run(key, func(t *testing.T) {
-			ex := modelControlsExecutor(t)
-			ex.engines["ollama"].manifest.Operations[engines.OperationPull] = OperationBinding{Action: pullModelAction, ModelParam: key}
-			acceptModelMutations(ex)
-			model := strings.Repeat("v", 512)
-			var calls int
-			ex.client.Transport = memoryModelsTransport(func(*http.Request) (*http.Response, error) {
-				calls++
-				return mutationJSON(http.StatusOK, `{"status":"success"}`)
-			})
-			result, err := ex.PullModelStream(context.Background(), "ollama", "", modelControlsJSON(t, map[string]string{key: model}))
-			if err != nil || calls != 1 || !json.Valid(result) {
-				t.Fatalf("params-only pull = %s, %v, calls=%d", result, err, calls)
-			}
-		})
+	ex := llamaModelControlsExecutor(t)
+	acceptModelMutations(ex)
+	model := strings.Repeat("v", 512)
+	var calls int
+	ex.client.Transport = llamaPullTransport("download_finished", func(*http.Request, []byte) (*http.Response, error) {
+		calls++
+		return mutationJSON(http.StatusOK, `{"success":true}`)
+	})
+	result, err := ex.PullModelStream(context.Background(), "llamacpp", "", modelControlsJSON(t, map[string]string{"model": model}))
+	if err != nil || calls != 1 || !json.Valid(result) {
+		t.Fatalf("params-only pull = %s, %v, calls=%d", result, err, calls)
 	}
 }
 
@@ -915,22 +902,22 @@ func TestModelControlsCopyAndSourceQueriesRejectBeforeEffects(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var ex *Executor
 			source := &fakeModelSource{}
-			result, err := ex.CopyModelFrom(context.Background(), source, "ollama", tc.model, func(copyProgress) { t.Error("invalid copy emitted progress") })
+			result, err := ex.CopyModelFrom(context.Background(), source, "llamacpp", tc.model, func(copyProgress) { t.Error("invalid copy emitted progress") })
 			modelControlsWantRefusal(t, err, tc.model)
 			if result != (copyModelResult{}) || source.listed != 0 || len(source.fetchedPaths()) != 0 {
 				t.Fatal("invalid copy reached source or returned a result")
 			}
 			var remote *remoteClient
-			if _, err := remote.modelFiles(context.Background(), "ollama", tc.model, nil); err == nil {
+			if _, err := remote.modelFiles(context.Background(), "llamacpp", tc.model, nil); err == nil {
 				t.Fatal("remote file listing accepted invalid model")
 			}
-			body, start, err := remote.modelFile(context.Background(), "ollama", tc.model, "file", "", 0)
+			body, start, err := remote.modelFile(context.Background(), "llamacpp", tc.model, "file", "", 0)
 			modelControlsWantRefusal(t, err, tc.model)
 			if body != nil || start != 0 {
 				t.Fatal("invalid file request returned a value")
 			}
 			for _, path := range []string{controlModelFilesPath, controlModelFilePath} {
-				q := url.Values{"engine": {"ollama"}, "model": {tc.model}, "path": {"file"}}
+				q := url.Values{"engine": {"llamacpp"}, "model": {tc.model}, "path": {"file"}}
 				req := httptest.NewRequest(http.MethodGet, path+"?"+q.Encode(), nil)
 				recorder := httptest.NewRecorder()
 				server := &controlServer{}
@@ -950,10 +937,10 @@ func TestModelControlsCopyAndSourceQueriesRejectBeforeEffects(t *testing.T) {
 func TestModelControlsSourceQueryAccepts512Unchanged(t *testing.T) {
 	model := strings.Repeat("界", 170) + "aa"
 	for _, method := range []string{http.MethodGet, http.MethodHead} {
-		req := httptest.NewRequest(method, controlModelFilesPath+"?"+modelQueryValues("ollama", model).Encode(), nil)
+		req := httptest.NewRequest(method, controlModelFilesPath+"?"+modelQueryValues("llamacpp", model).Encode(), nil)
 		recorder := httptest.NewRecorder()
 		engine, got, ok := modelQuery(recorder, req)
-		if !ok || engine != "ollama" || got != model {
+		if !ok || engine != "llamacpp" || got != model {
 			t.Fatalf("valid query changed: %q %q %v", engine, got, ok)
 		}
 	}
@@ -962,12 +949,12 @@ func TestModelControlsSourceQueryAccepts512Unchanged(t *testing.T) {
 func TestModelControlsRemoteManagerRejectsBeforePeerLookup(t *testing.T) {
 	for _, method := range []string{"engine:remote-load-model", "engine:remote-unload-model", "engine:remote-delete-model", "engine:remote-copy-model", "engine:remote-pull-model"} {
 		t.Run(method, func(t *testing.T) {
-			ex := modelControlsExecutor(t)
+			ex := llamaModelControlsExecutor(t)
 			var output bytes.Buffer
 			// No peer directory or transport: crossing preflight cannot succeed.
 			manager := &Manager{exec: ex, codec: NewCodec(&output)}
 			id := json.RawMessage("1")
-			msg := &Message{ID: &id, Method: method, Params: json.RawMessage(`{"node":"private-peer","engine":"ollama","model":"private\u0085model"}`)}
+			msg := &Message{ID: &id, Method: method, Params: json.RawMessage(`{"node":"private-peer","engine":"llamacpp","model":"private\u0085model"}`)}
 			if method == "engine:remote-copy-model" {
 				manager.runRemoteCopy(context.Background(), msg)
 			} else {
@@ -985,7 +972,7 @@ func TestModelControlsRemoteManagerRejectsBeforePeerLookup(t *testing.T) {
 }
 
 func TestModelControlsTypedJSONRefusesOriginalInvalidUTF8(t *testing.T) {
-	raw := json.RawMessage("{\"engine\":\"ollama\",\"model\":\"private\xffmodel\"}")
+	raw := json.RawMessage("{\"engine\":\"llamacpp\",\"model\":\"private\xffmodel\"}")
 	var request modelActionRequest
 	if err := json.Unmarshal(raw, &request); err == nil {
 		t.Fatal("typed decode repaired invalid model UTF-8")
@@ -1005,36 +992,33 @@ func TestModelControlsTypedJSONRefusesOriginalInvalidUTF8(t *testing.T) {
 }
 
 func TestModelControlsPullFailureReporterRejectsInvalidModel(t *testing.T) {
-	ex := modelControlsExecutor(t)
+	ex := llamaModelControlsExecutor(t)
 	ex.emit = func(string, any) { t.Error("invalid failure identifier was published") }
 	bad := "private\nmodel"
 	want := nodepolicy.ValidateModelIdentifier(bad)
-	if got := ex.reportPullFailed("ollama", bad, errors.New("fixture failure")); got != want.Error() || len(ex.Errors()) != 0 {
+	if got := ex.reportPullFailed("llamacpp", bad, errors.New("fixture failure")); got != want.Error() || len(ex.Errors()) != 0 {
 		t.Fatalf("invalid failure reached reporter: %q, %+v", got, ex.Errors())
 	}
 }
 
-func TestModelControlsHTTPPullCustomKeyRefusalDoesNotReportFailure(t *testing.T) {
-	ex := modelControlsExecutor(t)
+func TestModelControlsHTTPPullInvalidModelDoesNotReportFailure(t *testing.T) {
+	ex := llamaModelControlsExecutor(t)
 	ex.emit = func(string, any) { t.Error("invalid HTTP pull emitted an engine notification") }
 	server := &controlServer{exec: ex}
-	params := modelControlsJSON(t, map[string]any{"engine": "ollama", "model": "valid", "params": map[string]string{"target": strings.Repeat("s", 513)}})
+	params := modelControlsJSON(t, map[string]any{"engine": "llamacpp", "model": "valid", "params": map[string]string{"model": strings.Repeat("s", 513)}})
 	recorder := httptest.NewRecorder()
 	server.handlePull(recorder, httptest.NewRequest(http.MethodPost, controlPullPath, bytes.NewReader(params)))
-	var frame streamFrame
-	if err := json.NewDecoder(recorder.Body).Decode(&frame); err != nil {
-		t.Fatalf("decode pull refusal frame: %v", err)
-	}
-	want := nodepolicy.ValidateModelIdentifier(strings.Repeat("s", 513))
-	if frame.Type != "error" || frame.Message != want.Error() || len(ex.Errors()) != 0 {
-		t.Fatalf("custom key rejection reached reporter or lost fixed error: %+v, %+v", frame, ex.Errors())
+	// The conventional model key is checked when the request is decoded, so the
+	// refusal is the plain early one.
+	if recorder.Code != http.StatusBadRequest || recorder.Flushed || recorder.Body.String() != "invalid JSON body\n" || len(ex.Errors()) != 0 {
+		t.Fatalf("invalid model reached reporter or stream: HTTP %d body=%q reports=%+v", recorder.Code, recorder.Body.String(), ex.Errors())
 	}
 }
 
 func TestModelControlsTyped512ReachesOnlyFakeEngine(t *testing.T) {
 	for _, op := range []string{engines.OperationLoad, engines.OperationUnload, engines.OperationDelete} {
 		t.Run(op, func(t *testing.T) {
-			ex := modelControlsExecutor(t)
+			ex := llamaModelControlsExecutor(t)
 			acceptModelMutations(ex)
 			model := strings.Repeat("v", 512)
 			var calls int
@@ -1052,11 +1036,11 @@ func TestModelControlsTyped512ReachesOnlyFakeEngine(t *testing.T) {
 			var err error
 			switch op {
 			case engines.OperationLoad:
-				_, err = ex.ModelLoad(context.Background(), "ollama", model)
+				_, err = ex.ModelLoad(context.Background(), "llamacpp", model)
 			case engines.OperationUnload:
-				_, err = ex.ModelUnload(context.Background(), "ollama", model)
+				_, err = ex.ModelUnload(context.Background(), "llamacpp", model)
 			case engines.OperationDelete:
-				_, err = ex.ModelDelete(context.Background(), "ollama", model)
+				_, err = ex.ModelDelete(context.Background(), "llamacpp", model)
 			}
 			if err != nil || calls != 1 {
 				t.Fatalf("typed operation = %v, calls=%d", err, calls)
@@ -1075,11 +1059,8 @@ func TestModelControlsLoadedRowsKeepValidSiblingsAndMatch(t *testing.T) {
 }
 
 func TestModelControlsCatalogInvalidSecondaryCannotHideBehindPrimary(t *testing.T) {
-	if got := normalizeOllamaRows([]ollamaLibraryRow{{Name: "valid", Model: "private\nmodel"}}); len(got) != 0 {
-		t.Fatalf("Ollama retained invalid alias: %+v", got)
-	}
-	if got := normalizeHFRows([]hfModelRow{{ID: "valid", ModelID: "private\u0085model"}}); len(got) != 0 {
-		t.Fatalf("HF retained invalid alias: %+v", got)
+	if got, ok := catalogIdentifier("valid", "private\u0085model"); ok {
+		t.Fatalf("catalog retained invalid alias: %q", got)
 	}
 	row := modelControlsLlamaRow("owner/valid")
 	row.ModelID = "private\nmodel"
@@ -1108,8 +1089,8 @@ func TestModelControlsServingDeclarationOwnersRejectBeforeDerivation(t *testing.
 			if err := platform.validate("windows/amd64"); err == nil || strings.Contains(err.Error(), "private") {
 				t.Fatalf("platform accepted or echoed invalid model: %v", err)
 			}
-			ex := modelControlsExecutor(t)
-			st := ex.engines["ollama"]
+			ex := llamaModelControlsExecutor(t)
+			st := ex.engines["llamacpp"]
 			preview := ex.previewLaunch(st, settings.Request{Settings: settings.Config{Serving: config}}, func(launchCommand, Runtime) (*llamaServingLaunch, error) {
 				t.Error("invalid declaration reached compiler")
 				return nil, errors.New("unexpected compiler")
@@ -1127,7 +1108,7 @@ func TestModelControlsServingDeclarationOwnersRejectBeforeDerivation(t *testing.
 				t.Fatalf("native model validator accepted or echoed invalid model: %v", err)
 			}
 			var nilExecutor *Executor
-			_, _, err := nilExecutor.currentServingEnvelope(context.Background(), "ollama", tc.model)
+			_, _, err := nilExecutor.currentServingEnvelope(context.Background(), "llamacpp", tc.model)
 			var refusal *ServingIdentityRefusal
 			if !errors.As(err, &refusal) || strings.Contains(err.Error(), "private") {
 				t.Fatalf("cold envelope acceptance = %v", err)
@@ -1152,10 +1133,10 @@ func TestModelControlsServingEnvelopePublicationBoundaries(t *testing.T) {
 			config := modelControlsServing(tc.declaration)
 			envelope := engines.ServingEnvelope{ModelID: tc.envelope, PerSlotContextTokens: 8192, TotalContextTokens: 8192, Slots: 1, MaxOutputTokens: 128, Memory: config.Models[0].Memory, NativeSourceDigest: memoryTestDigest}
 			prepared := &llamaServingLaunch{Config: config, Envelopes: []engines.ServingEnvelope{envelope}}
-			ex := modelControlsExecutor(t)
-			st := ex.engines["ollama"]
+			ex := llamaModelControlsExecutor(t)
+			st := ex.engines["llamacpp"]
 			st.plat.Runtime.Serving, st.plat.Runtime.servingLaunch = config, prepared
-			id := ex.modelIdentity().Engines["ollama"]
+			id := ex.modelIdentity().Engines["llamacpp"]
 			if tc.valid {
 				if len(servingDeclarationErrors(config)) != 0 || validateLlamaModelID(tc.declaration) != nil || len(id.ModelDigests) != 1 || id.Serving[tc.declaration].ModelID != tc.declaration {
 					t.Fatalf("valid serving ID failed publication: %+v", id)
@@ -1168,10 +1149,10 @@ func TestModelControlsServingEnvelopePublicationBoundaries(t *testing.T) {
 }
 
 func TestModelControlsDigestCachePublicationFiltersInvalidKeys(t *testing.T) {
-	ex := modelControlsExecutor(t)
+	ex := llamaModelControlsExecutor(t)
 	valid := strings.Repeat("v", 512)
-	ex.inventoryDigests["ollama"] = observedDigests{runID: memoryTestRun, models: map[string]string{valid: memoryTestDigest, "private\nmodel": memoryTestDigest, strings.Repeat("s", 513): memoryTestDigest}}
-	if got := ex.modelIdentity().Engines["ollama"].ModelDigests; !reflect.DeepEqual(got, map[string]string{valid: memoryTestDigest}) {
+	ex.inventoryDigests["llamacpp"] = observedDigests{runID: memoryTestRun, models: map[string]string{valid: memoryTestDigest, "private\nmodel": memoryTestDigest, strings.Repeat("s", 513): memoryTestDigest}}
+	if got := ex.modelIdentity().Engines["llamacpp"].ModelDigests; !reflect.DeepEqual(got, map[string]string{valid: memoryTestDigest}) {
 		t.Fatalf("digest cache retained bad keys: %+v", got)
 	}
 }
@@ -1227,7 +1208,7 @@ func TestModelControlsOtherServingConstraintsRemainActive(t *testing.T) {
 
 func TestModelControlsSettingsHTTPValidatesCompleteRawRequestBeforeRelay(t *testing.T) {
 	request := func(model string) string {
-		return `{"nodeId":"ignored-peer","engine":"ollama","settings":{"serving":{"models":[{"modelId":` + model + `}]}}}`
+		return `{"nodeId":"ignored-peer","engine":"llamacpp","settings":{"serving":{"models":[{"modelId":` + model + `}]}}}`
 	}
 	for _, tc := range []struct {
 		name, body, model string
@@ -1236,8 +1217,8 @@ func TestModelControlsSettingsHTTPValidatesCompleteRawRequestBeforeRelay(t *test
 		{name: "original invalid UTF8", body: request("\"private\xffmodel\"")},
 		{name: "escaped control", body: request(`"private\nmodel"`)},
 		{name: "513 bytes", body: request(`"` + strings.Repeat("s", 513) + `"`)},
-		{name: "unknown root field", body: `{"engine":"ollama","private":true}`},
-		{name: "unknown settings field", body: `{"engine":"ollama","settings":{"private":true}}`},
+		{name: "unknown root field", body: `{"engine":"llamacpp","private":true}`},
+		{name: "unknown settings field", body: `{"engine":"llamacpp","settings":{"private":true}}`},
 		{name: "trailing document", body: request(`"valid"`) + `{}`},
 		{name: "malformed tail", body: request(`"valid"`) + `x`},
 		{name: "overflow after valid prefix", body: request(`"valid"`) + strings.Repeat(" ", 64*1024)},
@@ -1245,11 +1226,11 @@ func TestModelControlsSettingsHTTPValidatesCompleteRawRequestBeforeRelay(t *test
 		{name: "512 bytes", body: request(`"` + strings.Repeat("v", 512) + `"`), model: strings.Repeat("v", 512), accepted: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ex := modelControlsExecutor(t)
+			ex := llamaModelControlsExecutor(t)
 			var relays int
 			ex.settingsParent = func(_ context.Context, method string, p settings.Request, caller string) (json.RawMessage, error) {
 				relays++
-				if !tc.accepted || method != "get" || caller != "pinned-peer" || p.NodeID != "" || p.Engine != "ollama" ||
+				if !tc.accepted || method != "get" || caller != "pinned-peer" || p.NodeID != "" || p.Engine != "llamacpp" ||
 					p.Settings.Serving == nil || len(p.Settings.Serving.Models) != 1 || p.Settings.Serving.Models[0].ModelID != tc.model {
 					t.Errorf("unexpected settings relay: method=%s caller=%s request=%+v", method, caller, p)
 				}
@@ -1285,12 +1266,12 @@ func TestModelControlsBoundActionsRequireModelPresenceBeforeEffects(t *testing.T
 		t.Run(tc.name, func(t *testing.T) {
 			for _, action := range []string{"warm", "cool", "erase", pullModelAction} {
 				t.Run(action, func(t *testing.T) {
-					ex := modelControlsExecutor(t)
+					ex := llamaModelControlsExecutor(t)
 					ex.emit = func(string, any) { t.Error("missing model emitted a notification") }
-					before := ex.inventoryDigests["ollama"]
-					result, err := ex.Action(context.Background(), "ollama", action, json.RawMessage(tc.params))
+					before := ex.inventoryDigests["llamacpp"]
+					result, err := ex.Action(context.Background(), "llamacpp", action, json.RawMessage(tc.params))
 					want := nodepolicy.ValidateModelIdentifierJSON(nil)
-					if err == nil || err.Error() != want.Error() || result != nil || !reflect.DeepEqual(before, ex.inventoryDigests["ollama"]) || len(ex.Errors()) != 0 {
+					if err == nil || err.Error() != want.Error() || result != nil || !reflect.DeepEqual(before, ex.inventoryDigests["llamacpp"]) || len(ex.Errors()) != 0 {
 						t.Fatalf("missing bound model: result=%s error=%v", result, err)
 					}
 				})
@@ -1307,7 +1288,7 @@ func TestModelControlsUnboundActionPreservesAbsentAndOpaqueParams(t *testing.T) 
 		{"opaque model fields", `{"model":null,"name":"opaque\ntext","target":"opaque\u0085text"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ex := modelControlsExecutor(t)
+			ex := llamaModelControlsExecutor(t)
 			var calls int
 			ex.client.Transport = memoryModelsTransport(func(r *http.Request) (*http.Response, error) {
 				calls++
@@ -1328,7 +1309,7 @@ func TestModelControlsUnboundActionPreservesAbsentAndOpaqueParams(t *testing.T) 
 				}
 				return mutationJSON(http.StatusOK, `{"accepted":true}`)
 			})
-			result, err := ex.Action(context.Background(), "ollama", "opaque", json.RawMessage(tc.params))
+			result, err := ex.Action(context.Background(), "llamacpp", "opaque", json.RawMessage(tc.params))
 			if err != nil || calls != 1 || !json.Valid(result) {
 				t.Fatalf("unbound action: result=%s error=%v calls=%d", result, err, calls)
 			}
@@ -1340,9 +1321,9 @@ func TestModelControlsRemoteRequiredModelsRejectAbsentBeforePeerLookup(t *testin
 	for _, tc := range []struct{ name, params string }{
 		{"root null", "null"},
 		{"empty object", "{}"},
-		{"absent model", `{"node":"private-peer","engine":"ollama"}`},
-		{"null model", `{"node":"private-peer","engine":"ollama","model":null}`},
-		{"empty model", `{"node":"private-peer","engine":"ollama","model":""}`},
+		{"absent model", `{"node":"private-peer","engine":"llamacpp"}`},
+		{"null model", `{"node":"private-peer","engine":"llamacpp","model":null}`},
+		{"empty model", `{"node":"private-peer","engine":"llamacpp","model":""}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, method := range []string{"engine:remote-load-model", "engine:remote-unload-model", "engine:remote-delete-model", "engine:remote-copy-model", "engine:remote-pull-model"} {
@@ -1372,7 +1353,7 @@ func TestModelControlsRemoteRequiredModelsRejectAbsentBeforePeerLookup(t *testin
 func TestModelControlsPullRejectsSuppliedEmptyOrNullModelBeforeEffects(t *testing.T) {
 	for _, rawModel := range []string{`null`, `""`} {
 		t.Run(rawModel, func(t *testing.T) {
-			raw := json.RawMessage(`{"node":"private-peer","engine":"ollama","model":` + rawModel + `,"params":{"target":"valid"}}`)
+			raw := json.RawMessage(`{"node":"private-peer","engine":"llamacpp","model":` + rawModel + `,"params":{"target":"valid"}}`)
 			var request pullRequest
 			if err := json.Unmarshal(raw, &request); err == nil {
 				t.Fatal("pull decoder accepted supplied invalid optional model")
@@ -1400,30 +1381,36 @@ func TestModelControlsPullRejectsSuppliedEmptyOrNullModelBeforeEffects(t *testin
 
 func TestModelControlsHTTPPullRejectsBeforeStreamAdmission(t *testing.T) {
 	for _, tc := range []struct{ name, params string }{
-		{"custom control", `{"target":"private\nmodel"}`},
-		{"custom invalid UTF8", "{\"target\":\"private\xffmodel\"}"},
-		{"null bound field", `{"target":null}`},
+		{"custom control", `{"model":"private\nmodel"}`},
+		{"custom invalid UTF8", "{\"model\":\"private\xffmodel\"}"},
+		{"null bound field", `{"model":null}`},
 		{"empty params", `{}`},
 		{"opaque params without model", `{"prompt":"opaque\ntext"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ex := modelControlsExecutor(t)
+			ex := llamaModelControlsExecutor(t)
 			ex.emit = func(string, any) { t.Error("invalid HTTP pull emitted a notification") }
-			before := ex.inventoryDigests["ollama"]
+			before := ex.inventoryDigests["llamacpp"]
 			server := &controlServer{exec: ex}
 			recorder := httptest.NewRecorder()
-			raw := json.RawMessage(`{"engine":"ollama","model":"valid","params":` + tc.params + `}`)
+			raw := json.RawMessage(`{"engine":"llamacpp","model":"valid","params":` + tc.params + `}`)
 			server.handlePull(recorder, httptest.NewRequest(http.MethodPost, controlPullPath, bytes.NewReader(raw)))
+			// A malformed conventional model key is refused while decoding, with a
+			// plain body; a missing one is refused with an error frame.
 			var frame streamFrame
-			if err := json.NewDecoder(recorder.Body).Decode(&frame); err != nil {
-				t.Fatalf("decode cold pull refusal: %v", err)
+			if recorder.Header().Get("Content-Type") == "application/json" {
+				if err := json.NewDecoder(recorder.Body).Decode(&frame); err != nil {
+					t.Fatalf("decode cold pull refusal: %v", err)
+				}
+			} else if recorder.Body.String() == "invalid JSON body\n" {
+				frame = streamFrame{Type: "error", Message: "invalid JSON body"}
 			}
 			ex.progress.mu.Lock()
 			admissions, subscribers := ex.progress.next, len(ex.progress.subs)
 			ex.progress.mu.Unlock()
-			if recorder.Code != http.StatusBadRequest || recorder.Flushed || recorder.Header().Get("Content-Type") != "application/json" ||
+			if recorder.Code != http.StatusBadRequest || recorder.Flushed ||
 				admissions != 0 || subscribers != 0 || frame.Type != "error" || frame.Message == "" || strings.Contains(frame.Message, "private") ||
-				len(ex.Errors()) != 0 || !reflect.DeepEqual(before, ex.inventoryDigests["ollama"]) {
+				len(ex.Errors()) != 0 || !reflect.DeepEqual(before, ex.inventoryDigests["llamacpp"]) {
 				t.Fatalf("cold refusal crossed stream/effect boundary: HTTP %d flushed=%v admissions=%d subs=%d frame=%+v", recorder.Code, recorder.Flushed, admissions, subscribers, frame)
 			}
 		})
@@ -1458,19 +1445,20 @@ func TestModelControlsCatalogCompleteBodyBeforeCacheReplacement(t *testing.T) {
 			}
 			previous := []CatalogModel{{ID: "owner/previous", Name: "owner/previous"}}
 			previousAt := time.Now().Add(-2 * catalogCacheTTL)
-			catalog.lmStudio.models, catalog.lmStudio.fetched = previous, previousAt
-			got, at, err := catalog.lmStudio.get(context.Background())
+			search := catalog.llamaCPPSearch("query")
+			search.models, search.fetched = previous, previousAt
+			got, at, err := search.get(context.Background())
 			if err != nil {
 				t.Fatalf("refresh with last-good cache: %v", err)
 			}
 			if tc.accepted {
-				if got == nil || len(got) != 0 || !at.After(previousAt) || !catalog.lmStudio.failed.IsZero() {
+				if got == nil || len(got) != 0 || !at.After(previousAt) || !search.failed.IsZero() {
 					t.Fatalf("valid filtered refresh was not authoritative empty: models=%+v at=%v", got, at)
 				}
-			} else if !reflect.DeepEqual(got, previous) || !at.Equal(previousAt) || catalog.lmStudio.failed.IsZero() {
+			} else if !reflect.DeepEqual(got, previous) || !at.Equal(previousAt) || search.failed.IsZero() {
 				t.Fatalf("incomplete body replaced last-good: models=%+v at=%v", got, at)
 			}
-			if _, _, err := catalog.lmStudio.get(context.Background()); err != nil || calls != 2 {
+			if _, _, err := search.get(context.Background()); err != nil || calls != 2 {
 				t.Fatalf("cache/backoff missed after refresh: error=%v calls=%d", err, calls)
 			}
 		})
@@ -1478,14 +1466,14 @@ func TestModelControlsCatalogCompleteBodyBeforeCacheReplacement(t *testing.T) {
 }
 
 func TestModelControlsHTTPParamsOnlyForwardingPreserves512Identifier(t *testing.T) {
-	ex := modelControlsExecutor(t)
+	ex := llamaModelControlsExecutor(t)
 	model := strings.Repeat("v", 512)
-	params := modelControlsJSON(t, map[string]string{"target": model, "prompt": "opaque\ntext"})
+	params := modelControlsJSON(t, map[string]string{"model": model, "prompt": "opaque\ntext"})
 	var output bytes.Buffer
 	manager := &Manager{exec: ex, codec: NewCodec(&output)}
 	id := json.RawMessage("1")
 	var p remoteParam
-	if !manager.parse(&Message{ID: &id, Method: "engine:remote-pull-model", Params: modelControlsJSON(t, remoteParam{Node: "peer", Engine: "ollama", Params: params})}, &p) {
+	if !manager.parse(&Message{ID: &id, Method: "engine:remote-pull-model", Params: modelControlsJSON(t, remoteParam{Node: "peer", Engine: "llamacpp", Params: params})}, &p) {
 		t.Fatalf("params-only initiating preflight refused valid request: %s", output.String())
 	}
 	// This is the producer in runRemote, including its omitted optional Model.
@@ -1506,16 +1494,12 @@ func TestModelControlsHTTPParamsOnlyForwardingPreserves512Identifier(t *testing.
 	}
 	var calls, mutations int
 	ex.modelMutationParent = func(context.Context, string) error { mutations++; return nil }
-	ex.client.Transport = memoryModelsTransport(func(r *http.Request) (*http.Response, error) {
+	ex.client.Transport = llamaPullTransport("download_finished", func(_ *http.Request, body []byte) (*http.Response, error) {
 		calls++
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			return nil, err
-		}
 		if !bytes.Equal(body, params) {
 			return nil, errors.New("forwarded params changed at engine boundary")
 		}
-		return mutationJSON(http.StatusOK, `{"status":"success"}`)
+		return mutationJSON(http.StatusOK, `{"success":true}`)
 	})
 	server := &controlServer{exec: ex}
 	recorder := httptest.NewRecorder()
@@ -1531,112 +1515,26 @@ func TestModelControlsHTTPParamsOnlyForwardingPreserves512Identifier(t *testing.
 		}
 		terminal = frame
 	}
-	var result struct{ Status string }
+	var result struct{ Success bool }
 	if err := json.Unmarshal(terminal.Result, &result); err != nil {
 		t.Fatalf("decode terminal pull result: %v", err)
 	}
 	if recorder.Code != http.StatusOK || !recorder.Flushed || terminal.Type != "result" || terminal.OpID != "forwarded-op" ||
-		result.Status != "success" || calls != 1 || mutations != 1 || ex.progress.next != 1 || len(ex.progress.subs) != 0 || len(ex.Errors()) != 0 {
+		!result.Success || calls != 1 || mutations != 1 || ex.progress.next != 1 || len(ex.progress.subs) != 0 || len(ex.Errors()) != 0 {
 		t.Fatalf("valid forwarded pull lost stream semantics: HTTP %d terminal=%+v calls=%d mutations=%d", recorder.Code, terminal, calls, mutations)
-	}
-}
-
-func TestModelControlsForwardedPullUsesDestinationBindingBeforeEffects(t *testing.T) {
-	for _, tc := range []struct {
-		name, model string
-		accepted    bool
-	}{
-		{name: "invalid destination-only model", model: "private\nmodel"},
-		{name: "original invalid UTF8 destination-only model", model: "private\xffmodel"},
-		{name: "valid destination-only model", model: strings.Repeat("v", 512), accepted: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			initiator := modelControlsExecutor(t)
-			destination := modelControlsExecutor(t)
-			destination.engines["ollama"].manifest.Operations[engines.OperationPull] = OperationBinding{Action: pullModelAction, ModelParam: "remote_target"}
-			rawModel := modelControlsJSON(t, tc.model)
-			if tc.name == "original invalid UTF8 destination-only model" {
-				rawModel = json.RawMessage("\"private\xffmodel\"")
-			}
-			params := json.RawMessage(`{"target":"opaque\ntext","remote_target":` + string(rawModel) + `,"prompt":"opaque\ntext"}`)
-			var output bytes.Buffer
-			manager := &Manager{exec: initiator, codec: NewCodec(&output)}
-			id := json.RawMessage("1")
-			var p remoteParam
-			if !manager.parse(&Message{ID: &id, Method: "engine:remote-pull-model", Params: modelControlsJSON(t, remoteParam{Node: "peer", Engine: "ollama", Params: params})}, &p) {
-				t.Fatalf("initiator inferred destination-only binding: %s", output.String())
-			}
-			wire := modelControlsJSON(t, pullRequest{OpID: "different-binding", Engine: p.Engine, Model: p.Model, Params: p.Params})
-			var decoded pullRequest
-			if err := json.Unmarshal(wire, &decoded); err != nil {
-				t.Fatalf("destination decode of actual forwarded shape: %v", err)
-			}
-			if decoded.Model != "" || !bytes.Equal(decoded.Params, params) {
-				t.Fatal("forwarded params-only shape changed")
-			}
-			var calls, mutations, notifications int
-			destination.modelMutationParent = func(context.Context, string) error { mutations++; return nil }
-			destination.emit = func(string, any) { notifications++ }
-			destination.client.Transport = memoryModelsTransport(func(r *http.Request) (*http.Response, error) {
-				calls++
-				body, err := io.ReadAll(r.Body)
-				if err != nil {
-					return nil, err
-				}
-				if !bytes.Equal(body, params) {
-					return nil, errors.New("destination changed opaque or custom params")
-				}
-				return mutationJSON(http.StatusOK, `{"status":"success"}`)
-			})
-			server := &controlServer{exec: destination}
-			recorder := httptest.NewRecorder()
-			server.handlePull(recorder, httptest.NewRequest(http.MethodPost, controlPullPath, bytes.NewReader(wire)))
-			if !tc.accepted {
-				var refusal streamFrame
-				if err := json.NewDecoder(recorder.Body).Decode(&refusal); err != nil {
-					t.Fatalf("decode destination refusal: %v", err)
-				}
-				want := nodepolicy.ValidateModelIdentifierJSON(rawModel)
-				if recorder.Code != http.StatusBadRequest || recorder.Flushed || calls != 0 || mutations != 0 || notifications != 0 ||
-					destination.progress.next != 0 || len(destination.progress.subs) != 0 || len(destination.Errors()) != 0 ||
-					refusal.Type != "error" || refusal.Message != want.Error() {
-					t.Fatalf("destination-only invalid model crossed effect boundary: HTTP %d refusal=%+v calls=%d mutations=%d notifications=%d", recorder.Code, refusal, calls, mutations, notifications)
-				}
-				return
-			}
-			decoder := json.NewDecoder(recorder.Body)
-			var terminal streamFrame
-			for {
-				var frame streamFrame
-				if err := decoder.Decode(&frame); err == io.EOF {
-					break
-				} else if err != nil {
-					t.Fatalf("decode destination pull stream: %v", err)
-				}
-				terminal = frame
-			}
-			var result struct{ Status string }
-			if err := json.Unmarshal(terminal.Result, &result); err != nil {
-				t.Fatalf("decode destination terminal result: %v", err)
-			}
-			if recorder.Code != http.StatusOK || !recorder.Flushed || terminal.Type != "result" || terminal.OpID != "different-binding" ||
-				result.Status != "success" || calls != 1 || mutations != 1 || destination.progress.next != 1 || len(destination.progress.subs) != 0 || len(destination.Errors()) != 0 {
-				t.Fatalf("valid destination custom pull: HTTP %d terminal=%+v calls=%d mutations=%d", recorder.Code, terminal, calls, mutations)
-			}
-		})
 	}
 }
 
 func TestModelControlsRemotePullExplicitCommonFieldsRejectBeforePeerLookup(t *testing.T) {
 	for _, key := range []string{"name", "model", "NAME", "MODEL"} {
 		t.Run(key, func(t *testing.T) {
-			ex := modelControlsExecutor(t)
+			ex := llamaModelControlsExecutor(t)
 			ex.emit = func(string, any) { t.Error("invalid common model emitted a notification") }
 			var output bytes.Buffer
 			manager := &Manager{exec: ex, codec: NewCodec(&output)}
 			id := json.RawMessage("1")
 			params := modelControlsJSON(t, map[string]string{"target": "valid", "remote_target": "valid", key: "private\nmodel"})
-			manager.runRemote(context.Background(), &Message{ID: &id, Method: "engine:remote-pull-model", Params: modelControlsJSON(t, remoteParam{Node: "private-peer", Engine: "ollama", Params: params})})
+			manager.runRemote(context.Background(), &Message{ID: &id, Method: "engine:remote-pull-model", Params: modelControlsJSON(t, remoteParam{Node: "private-peer", Engine: "llamacpp", Params: params})})
 			var response Message
 			if err := json.NewDecoder(&output).Decode(&response); err != nil {
 				t.Fatalf("decode initiating common-field refusal: %v", err)
@@ -1644,43 +1542,6 @@ func TestModelControlsRemotePullExplicitCommonFieldsRejectBeforePeerLookup(t *te
 			want := nodepolicy.ValidateModelIdentifier("private\nmodel")
 			if response.Error == nil || response.Error.Code != -32602 || response.Error.Message != want.Error() || len(ex.Errors()) != 0 {
 				t.Fatalf("invalid explicit common model reached peer lookup: %+v", response)
-			}
-		})
-	}
-}
-
-func TestModelControlsHTTPPullRequiresDestinationCustomBindingBeforeEffects(t *testing.T) {
-	for _, tc := range []struct{ name, model, params string }{
-		{"name cannot replace bound target", "", `{"name":"valid"}`},
-		{"model cannot replace bound target", "", `{"model":"valid"}`},
-		{"top-level model cannot replace bound target", "valid", `{"name":"valid","model":"valid"}`},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			ex := modelControlsExecutor(t)
-			before := ex.inventoryDigests["ollama"]
-			var calls, mutations, notifications int
-			ex.modelMutationParent = func(context.Context, string) error { mutations++; return nil }
-			ex.emit = func(string, any) { notifications++ }
-			ex.client.Transport = memoryModelsTransport(func(*http.Request) (*http.Response, error) {
-				calls++
-				return nil, errors.New("missing bound model reached engine transport")
-			})
-			wire := modelControlsJSON(t, pullRequest{Engine: "ollama", Model: tc.model, Params: json.RawMessage(tc.params)})
-			server := &controlServer{exec: ex}
-			recorder := httptest.NewRecorder()
-			server.handlePull(recorder, httptest.NewRequest(http.MethodPost, controlPullPath, bytes.NewReader(wire)))
-			var refusal streamFrame
-			if err := json.NewDecoder(recorder.Body).Decode(&refusal); err != nil {
-				t.Fatalf("decode missing-binding refusal: %v", err)
-			}
-			ex.progress.mu.Lock()
-			admissions, subscribers := ex.progress.next, len(ex.progress.subs)
-			ex.progress.mu.Unlock()
-			want := nodepolicy.ValidateModelIdentifierJSON(nil)
-			if recorder.Code != http.StatusBadRequest || recorder.Flushed || recorder.Header().Get("Content-Type") != "application/json" ||
-				refusal.Type != "error" || refusal.Message != want.Error() || calls != 0 || mutations != 0 || notifications != 0 ||
-				admissions != 0 || subscribers != 0 || len(ex.Errors()) != 0 || !reflect.DeepEqual(before, ex.inventoryDigests["ollama"]) {
-				t.Fatalf("missing destination binding crossed effect boundary: HTTP %d refusal=%+v calls=%d mutations=%d notifications=%d admissions=%d subscribers=%d", recorder.Code, refusal, calls, mutations, notifications, admissions, subscribers)
 			}
 		})
 	}
@@ -1696,14 +1557,14 @@ func TestModelControlsActionRequiresExactCustomKeyBeforeEffects(t *testing.T) {
 		{"delete command", "erase", "command"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ex := modelControlsExecutor(t)
-			st := ex.engines["ollama"]
+			ex := llamaModelControlsExecutor(t)
+			st := ex.engines["llamacpp"]
 			if tc.form == "query" {
 				st.manifest.Actions[tc.action].HTTP.ParamsIn = actionHTTPParamsQuery
 			} else if tc.form == "command" {
 				st.manifest.Actions[tc.action] = Action{Cmd: []string{"unreachable-f6-child", "{target}"}}
 			}
-			before, beforeProc, beforeRun := ex.inventoryDigests["ollama"], st.proc, st.runID
+			before, beforeProc, beforeRun := ex.inventoryDigests["llamacpp"], st.proc, st.runID
 			var calls, mutations, notifications int
 			ex.emit = func(string, any) { notifications++ }
 			ex.modelMutationParent = func(context.Context, string) error {
@@ -1714,11 +1575,11 @@ func TestModelControlsActionRequiresExactCustomKeyBeforeEffects(t *testing.T) {
 				calls++
 				return nil, errors.New("missing exact key reached engine HTTP")
 			})
-			result, err := ex.Action(context.Background(), "ollama", tc.action, json.RawMessage(`{"TARGET":"valid","name":"valid"}`))
+			result, err := ex.Action(context.Background(), "llamacpp", tc.action, json.RawMessage(`{"`+strings.ToUpper(modelControlsKey(tc.action))+`":"valid","name":"valid"}`))
 			want := nodepolicy.ValidateModelIdentifierJSON(nil)
 			if err == nil || err.Error() != want.Error() || result != nil || calls != 0 || mutations != 0 || notifications != 0 ||
 				ex.progress.next != 0 || len(ex.progress.subs) != 0 || len(ex.Errors()) != 0 ||
-				!reflect.DeepEqual(before, ex.inventoryDigests["ollama"]) || st.proc != beforeProc || st.runID != beforeRun {
+				!reflect.DeepEqual(before, ex.inventoryDigests["llamacpp"]) || st.proc != beforeProc || st.runID != beforeRun {
 				t.Fatalf("case variant satisfied exact binding: result=%s error=%v calls=%d mutations=%d notifications=%d", result, err, calls, mutations, notifications)
 			}
 		})
@@ -1726,10 +1587,10 @@ func TestModelControlsActionRequiresExactCustomKeyBeforeEffects(t *testing.T) {
 }
 
 func TestModelControlsPullRequiresExactBoundKeyBeforeEffects(t *testing.T) {
-	for _, boundary := range []string{"manager", "direct pull", "destination HTTP", "default destination HTTP", "uppercase custom destination HTTP", "name destination HTTP", "name invalid common destination HTTP"} {
+	for _, boundary := range []string{"manager", "direct pull", "destination HTTP"} {
 		t.Run(boundary, func(t *testing.T) {
-			ex := modelControlsExecutor(t)
-			before := ex.inventoryDigests["ollama"]
+			ex := llamaModelControlsExecutor(t)
+			before := ex.inventoryDigests["llamacpp"]
 			var calls, mutations, notifications int
 			ex.emit = func(string, any) { notifications++ }
 			ex.modelMutationParent = func(context.Context, string) error { mutations++; return errors.New("unexpected mutation") }
@@ -1737,29 +1598,15 @@ func TestModelControlsPullRequiresExactBoundKeyBeforeEffects(t *testing.T) {
 				calls++
 				return nil, errors.New("missing exact key reached engine HTTP")
 			})
-			params := json.RawMessage(`{"TARGET":"valid","name":"valid"}`)
+			params := json.RawMessage(`{"MODEL":"valid","name":"valid"}`)
 			earlyPlainRefusal := ""
-			if boundary == "default destination HTTP" {
-				ex.engines["ollama"].manifest.Operations[engines.OperationPull] = OperationBinding{Action: pullModelAction}
-				params = json.RawMessage(`{"MODEL":"valid","name":"valid"}`)
-			} else if boundary == "uppercase custom destination HTTP" {
-				ex.engines["ollama"].manifest.Operations[engines.OperationPull] = OperationBinding{Action: pullModelAction, ModelParam: "TARGET"}
-				params = json.RawMessage(`{"target":"valid","name":"valid"}`)
-			} else if boundary == "name destination HTTP" {
-				ex.engines["ollama"].manifest.Operations[engines.OperationPull] = OperationBinding{Action: pullModelAction, ModelParam: "name"}
-				params = json.RawMessage(`{"NAME":"valid","model":"valid"}`)
-			} else if boundary == "name invalid common destination HTTP" {
-				ex.engines["ollama"].manifest.Operations[engines.OperationPull] = OperationBinding{Action: pullModelAction, ModelParam: "name"}
-				params = modelControlsJSON(t, map[string]string{"name": strings.Repeat("v", 512), "MODEL": "private\nmodel"})
-				earlyPlainRefusal = "invalid JSON body\n"
-			}
 			want := nodepolicy.ValidateModelIdentifierJSON(nil)
 			switch boundary {
 			case "manager":
 				var output bytes.Buffer
 				manager := &Manager{exec: ex, codec: NewCodec(&output)}
 				id := json.RawMessage("1")
-				manager.runAction(context.Background(), &Message{ID: &id, Params: modelControlsJSON(t, actionParam{Engine: "ollama", Action: pullModelAction, Params: params})})
+				manager.runAction(context.Background(), &Message{ID: &id, Params: modelControlsJSON(t, actionParam{Engine: "llamacpp", Action: pullModelAction, Params: params})})
 				var response Message
 				if err := json.NewDecoder(&output).Decode(&response); err != nil {
 					t.Fatalf("decode manager exact-key refusal: %v", err)
@@ -1768,14 +1615,14 @@ func TestModelControlsPullRequiresExactBoundKeyBeforeEffects(t *testing.T) {
 					t.Fatalf("manager accepted missing exact key: %+v", response)
 				}
 			case "direct pull":
-				result, err := ex.PullModelStream(context.Background(), "ollama", "", params)
+				result, err := ex.PullModelStream(context.Background(), "llamacpp", "", params)
 				if err == nil || err.Error() != want.Error() || result != nil {
 					t.Fatalf("direct pull accepted missing exact key: result=%s error=%v", result, err)
 				}
-			case "destination HTTP", "default destination HTTP", "uppercase custom destination HTTP", "name destination HTTP", "name invalid common destination HTTP":
+			case "destination HTTP":
 				server := &controlServer{exec: ex}
 				recorder := httptest.NewRecorder()
-				wire := modelControlsJSON(t, pullRequest{Engine: "ollama", Params: params})
+				wire := modelControlsJSON(t, pullRequest{Engine: "llamacpp", Params: params})
 				server.handlePull(recorder, httptest.NewRequest(http.MethodPost, controlPullPath, bytes.NewReader(wire)))
 				if earlyPlainRefusal != "" {
 					body := recorder.Body.String()
@@ -1793,7 +1640,7 @@ func TestModelControlsPullRequiresExactBoundKeyBeforeEffects(t *testing.T) {
 				}
 			}
 			if calls != 0 || mutations != 0 || notifications != 0 || ex.progress.next != 0 || len(ex.progress.subs) != 0 ||
-				len(ex.Errors()) != 0 || !reflect.DeepEqual(before, ex.inventoryDigests["ollama"]) {
+				len(ex.Errors()) != 0 || !reflect.DeepEqual(before, ex.inventoryDigests["llamacpp"]) {
 				t.Fatalf("missing exact key crossed effects: calls=%d mutations=%d notifications=%d admissions=%d", calls, mutations, notifications, ex.progress.next)
 			}
 		})
@@ -1809,12 +1656,13 @@ func TestModelControlsActionPreservesOpaqueCustomCaseVariant(t *testing.T) {
 		{"delete query", "erase", "query"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ex := modelControlsExecutor(t)
+			ex := llamaModelControlsExecutor(t)
 			if tc.form == "query" {
-				ex.engines["ollama"].manifest.Actions[tc.action].HTTP.ParamsIn = actionHTTPParamsQuery
+				ex.engines["llamacpp"].manifest.Actions[tc.action].HTTP.ParamsIn = actionHTTPParamsQuery
 			}
 			model, opaque := strings.Repeat("v", 512), "opaque\ntext\u0085"
-			params := modelControlsJSON(t, map[string]string{"target": model, "TARGET": opaque})
+			key := modelControlsKey(tc.action)
+			params := modelControlsJSON(t, map[string]string{key: model, "TARGET": opaque})
 			var calls, mutations int
 			ex.modelMutationParent = func(context.Context, string) error { mutations++; return nil }
 			ex.client.Transport = memoryModelsTransport(func(r *http.Request) (*http.Response, error) {
@@ -1832,24 +1680,30 @@ func TestModelControlsActionPreservesOpaqueCustomCaseVariant(t *testing.T) {
 						return nil, errors.New("exact or opaque body key changed")
 					}
 				}
-				if tc.action == pullModelAction {
-					return mutationJSON(http.StatusOK, `{"accepted":true,"status":"success"}`)
-				}
 				return mutationJSON(http.StatusOK, `{"accepted":true}`)
 			})
-			result, err := ex.Action(context.Background(), "ollama", tc.action, params)
+			if tc.action == pullModelAction {
+				ex.client.Transport = llamaPullTransport("download_finished", func(_ *http.Request, body []byte) (*http.Response, error) {
+					calls++
+					if !bytes.Equal(body, params) {
+						return nil, errors.New("exact or opaque body key changed")
+					}
+					return mutationJSON(http.StatusOK, `{"accepted":true,"success":true}`)
+				})
+			}
+			result, err := ex.Action(context.Background(), "llamacpp", tc.action, params)
 			if err != nil {
 				t.Fatalf("valid exact model with opaque variant: %v", err)
 			}
 			var response struct {
 				Accepted bool
-				Status   string
+				Success  bool
 			}
 			if err := json.Unmarshal(result, &response); err != nil {
 				t.Fatalf("decode action result: %v", err)
 			}
-			if tc.action == pullModelAction && response.Status != "success" {
-				t.Fatalf("pull omitted native success terminal: %+v", response)
+			if tc.action == pullModelAction && !response.Success {
+				t.Fatalf("pull omitted the engine's start response: %+v", response)
 			}
 			wantMutations := 0
 			if tc.action == "erase" || tc.action == pullModelAction {
@@ -1863,14 +1717,10 @@ func TestModelControlsActionPreservesOpaqueCustomCaseVariant(t *testing.T) {
 }
 
 func TestModelControlsPullPreservesOpaqueCustomCaseVariant(t *testing.T) {
-	for _, boundary := range []string{"manager", "direct pull", "destination HTTP", "uppercase custom destination HTTP"} {
+	for _, boundary := range []string{"manager", "direct pull", "destination HTTP"} {
 		t.Run(boundary, func(t *testing.T) {
-			ex := modelControlsExecutor(t)
-			params := modelControlsJSON(t, map[string]string{"target": strings.Repeat("v", 512), "TARGET": "opaque\ntext\u0085"})
-			if boundary == "uppercase custom destination HTTP" {
-				ex.engines["ollama"].manifest.Operations[engines.OperationPull] = OperationBinding{Action: pullModelAction, ModelParam: "TARGET"}
-				params = modelControlsJSON(t, map[string]string{"TARGET": strings.Repeat("v", 512), "target": "opaque\ntext\u0085"})
-			}
+			ex := llamaModelControlsExecutor(t)
+			params := modelControlsJSON(t, map[string]string{"model": strings.Repeat("v", 512), "TARGET": "opaque\ntext\u0085"})
 			var calls, mutations, progress int
 			ex.modelMutationParent = func(context.Context, string) error { mutations++; return nil }
 			ex.emit = func(method string, _ any) {
@@ -1878,16 +1728,12 @@ func TestModelControlsPullPreservesOpaqueCustomCaseVariant(t *testing.T) {
 					progress++
 				}
 			}
-			ex.client.Transport = memoryModelsTransport(func(r *http.Request) (*http.Response, error) {
+			ex.client.Transport = llamaPullTransport("download_finished", func(_ *http.Request, body []byte) (*http.Response, error) {
 				calls++
-				body, err := io.ReadAll(r.Body)
-				if err != nil {
-					return nil, err
-				}
 				if !bytes.Equal(body, params) {
 					return nil, errors.New("pull changed exact or opaque custom field")
 				}
-				return mutationJSON(http.StatusOK, `{"status":"success"}`)
+				return mutationJSON(http.StatusOK, `{"success":true}`)
 			})
 			var result json.RawMessage
 			wantAdmissions := 0
@@ -1896,7 +1742,7 @@ func TestModelControlsPullPreservesOpaqueCustomCaseVariant(t *testing.T) {
 				var output bytes.Buffer
 				manager := &Manager{exec: ex, codec: NewCodec(&output)}
 				id := json.RawMessage("1")
-				manager.runAction(context.Background(), &Message{ID: &id, Params: modelControlsJSON(t, actionParam{Engine: "ollama", Action: pullModelAction, Params: params})})
+				manager.runAction(context.Background(), &Message{ID: &id, Params: modelControlsJSON(t, actionParam{Engine: "llamacpp", Action: pullModelAction, Params: params})})
 				var response Message
 				if err := json.NewDecoder(&output).Decode(&response); err != nil {
 					t.Fatalf("decode manager pull result: %v", err)
@@ -1907,15 +1753,15 @@ func TestModelControlsPullPreservesOpaqueCustomCaseVariant(t *testing.T) {
 				result = response.Result
 			case "direct pull":
 				var err error
-				result, err = ex.PullModelStream(context.Background(), "ollama", "", params)
+				result, err = ex.PullModelStream(context.Background(), "llamacpp", "", params)
 				if err != nil {
 					t.Fatalf("direct pull scanned opaque custom variant: %v", err)
 				}
-			case "destination HTTP", "uppercase custom destination HTTP":
+			case "destination HTTP":
 				wantAdmissions = 1
 				server := &controlServer{exec: ex}
 				recorder := httptest.NewRecorder()
-				wire := modelControlsJSON(t, pullRequest{Engine: "ollama", Params: params})
+				wire := modelControlsJSON(t, pullRequest{Engine: "llamacpp", Params: params})
 				server.handlePull(recorder, httptest.NewRequest(http.MethodPost, controlPullPath, bytes.NewReader(wire)))
 				decoder := json.NewDecoder(recorder.Body)
 				var terminal streamFrame
@@ -1933,11 +1779,11 @@ func TestModelControlsPullPreservesOpaqueCustomCaseVariant(t *testing.T) {
 				}
 				result = terminal.Result
 			}
-			var response struct{ Status string }
+			var response struct{ Success bool }
 			if err := json.Unmarshal(result, &response); err != nil {
 				t.Fatalf("decode pull success: %v", err)
 			}
-			if response.Status != "success" || calls != 1 || mutations != 1 || progress == 0 || ex.progress.next != wantAdmissions || len(ex.progress.subs) != 0 || len(ex.Errors()) != 0 {
+			if !response.Success || calls != 1 || mutations != 1 || progress == 0 || ex.progress.next != wantAdmissions || len(ex.progress.subs) != 0 || len(ex.Errors()) != 0 {
 				t.Fatalf("opaque variant altered valid pull: result=%+v calls=%d mutations=%d progress=%d admissions=%d", response, calls, mutations, progress, ex.progress.next)
 			}
 		})
@@ -1985,11 +1831,10 @@ func TestModelControlsConventionalHTTPActionsPreserveCallerParams(t *testing.T) 
 		{"model-free load with informational schema", "load_model", "null"},
 		{"name-only delete body", "delete_model", `{"name":"tiny","prompt":"opaque\ntext"}`},
 		{"name-only delete query", "delete_model", `{"name":"tiny"}`},
-		{"name-only pull action", pullModelAction, `{"name":"tiny"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ex := modelControlsExecutor(t)
-			manifest := ex.engines["ollama"].manifest
+			ex := llamaModelControlsExecutor(t)
+			manifest := ex.engines["llamacpp"].manifest
 			manifest.Operations = nil
 			manifest.Actions["load_model"] = Action{HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/load"}}
 			manifest.Actions["delete_model"] = Action{HTTP: &ActionHTTP{Method: http.MethodDelete, Path: "/delete"}}
@@ -2005,10 +1850,8 @@ func TestModelControlsConventionalHTTPActionsPreserveCallerParams(t *testing.T) 
 			op := engines.OperationLoad
 			if tc.action == "delete_model" {
 				op = engines.OperationDelete
-			} else if tc.action == pullModelAction {
-				op = engines.OperationPull
 			}
-			action, raw, err := ex.modelOperationCall("ollama", op, "typed-model")
+			action, raw, err := ex.modelOperationCall("llamacpp", op, "typed-model")
 			if err != nil {
 				t.Fatalf("resolve conventional typed call: %v", err)
 			}
@@ -2044,24 +1887,17 @@ func TestModelControlsConventionalHTTPActionsPreserveCallerParams(t *testing.T) 
 						return nil, errors.New("generic action body changed")
 					}
 				}
-				if tc.action == pullModelAction {
-					return mutationJSON(http.StatusOK, `{"accepted":true,"status":"success"}`)
-				}
 				return mutationJSON(http.StatusOK, `{"accepted":true}`)
 			})
-			result, err := ex.Action(context.Background(), "ollama", tc.action, json.RawMessage(tc.params))
+			result, err := ex.Action(context.Background(), "llamacpp", tc.action, json.RawMessage(tc.params))
 			if err != nil {
 				t.Fatalf("conventional action: %v", err)
 			}
 			var response struct {
 				Accepted bool
-				Status   string
 			}
 			if err := json.Unmarshal(result, &response); err != nil {
 				t.Fatalf("decode generic action result: %v", err)
-			}
-			if tc.action == pullModelAction && response.Status != "success" {
-				t.Fatalf("pull omitted native success terminal: %+v", response)
 			}
 			wantMutations := 1
 			if tc.action == "load_model" {
@@ -2074,20 +1910,15 @@ func TestModelControlsConventionalHTTPActionsPreserveCallerParams(t *testing.T) 
 	}
 }
 
-func TestModelControlsConventionalNamePullStreamsAtEntryBoundaries(t *testing.T) {
+func TestModelControlsPullStreamsAtEntryBoundaries(t *testing.T) {
 	for _, boundary := range []string{"manager", "direct pull", "destination HTTP"} {
 		t.Run(boundary, func(t *testing.T) {
-			ex := modelControlsExecutor(t)
-			manifest := ex.engines["ollama"].manifest
-			manifest.Operations = nil
+			ex := llamaModelControlsExecutor(t)
+			manifest := ex.engines["llamacpp"].manifest
 			model := strings.Repeat("v", 512)
-			params := modelControlsJSON(t, map[string]string{"name": model, "TARGET": "opaque\ntext"})
+			params := modelControlsJSON(t, map[string]string{"model": model, "TARGET": "opaque\ntext"})
 			if got, err := manifest.pullProgressModel(params); err != nil || got != model {
-				t.Fatalf("name-only progress model=%q error=%v", got, err)
-			}
-			both := modelControlsJSON(t, map[string]string{"name": model, "model": "secondary"})
-			if got, err := manifest.pullProgressModel(both); err != nil || got != model {
-				t.Fatalf("name-before-model progress changed: model=%q error=%v", got, err)
+				t.Fatalf("progress model=%q error=%v", got, err)
 			}
 			var calls, mutations int
 			ex.modelMutationParent = func(context.Context, string) error { mutations++; return nil }
@@ -2112,16 +1943,14 @@ func TestModelControlsConventionalNamePullStreamsAtEntryBoundaries(t *testing.T)
 					progress = append(progress, event)
 				}
 			}
-			ex.client.Transport = memoryModelsTransport(func(r *http.Request) (*http.Response, error) {
+			ex.client.Transport = llamaPullEventsTransport(func(model string) []string {
+				return []string{llamaPullProgressEvent(model, 40, 100), llamaPullEvent(model, "download_finished")}
+			}, func(_ *http.Request, body []byte) (*http.Response, error) {
 				calls++
-				body, err := io.ReadAll(r.Body)
-				if err != nil {
-					return nil, err
-				}
 				if !bytes.Equal(body, params) {
-					return nil, errors.New("name-only pull body changed")
+					return nil, errors.New("pull body changed")
 				}
-				return mutationJSON(http.StatusOK, "{\"status\":\"pulling\",\"total\":100,\"completed\":40}\n{\"status\":\"success\"}\n")
+				return mutationJSON(http.StatusOK, `{"success":true}`)
 			})
 			var result json.RawMessage
 			wantAdmissions := 0
@@ -2130,26 +1959,26 @@ func TestModelControlsConventionalNamePullStreamsAtEntryBoundaries(t *testing.T)
 				var output bytes.Buffer
 				manager := &Manager{exec: ex, codec: NewCodec(&output)}
 				id := json.RawMessage("1")
-				manager.runAction(context.Background(), &Message{ID: &id, Params: modelControlsJSON(t, actionParam{Engine: "ollama", Action: pullModelAction, Params: params})})
+				manager.runAction(context.Background(), &Message{ID: &id, Params: modelControlsJSON(t, actionParam{Engine: "llamacpp", Action: pullModelAction, Params: params})})
 				var response Message
 				if err := json.NewDecoder(&output).Decode(&response); err != nil {
-					t.Fatalf("decode name-only manager result: %v", err)
+					t.Fatalf("decode model-only manager result: %v", err)
 				}
 				if response.Error != nil {
-					t.Fatalf("manager refused name-only pull: %+v", response.Error)
+					t.Fatalf("manager refused model-only pull: %+v", response.Error)
 				}
 				result = response.Result
 			case "direct pull":
 				var err error
-				result, err = ex.PullModelStream(context.Background(), "ollama", "", params)
+				result, err = ex.PullModelStream(context.Background(), "llamacpp", "", params)
 				if err != nil {
-					t.Fatalf("direct name-only pull: %v", err)
+					t.Fatalf("direct model-only pull: %v", err)
 				}
 			case "destination HTTP":
 				wantAdmissions = 1
 				server := &controlServer{exec: ex}
 				recorder := httptest.NewRecorder()
-				wire := modelControlsJSON(t, pullRequest{OpID: "name-only", Engine: "ollama", Params: params})
+				wire := modelControlsJSON(t, pullRequest{OpID: "model-only", Engine: "llamacpp", Params: params})
 				server.handlePull(recorder, httptest.NewRequest(http.MethodPost, controlPullPath, bytes.NewReader(wire)))
 				decoder := json.NewDecoder(recorder.Body)
 				var terminal streamFrame
@@ -2159,18 +1988,18 @@ func TestModelControlsConventionalNamePullStreamsAtEntryBoundaries(t *testing.T)
 					if err := decoder.Decode(&frame); err == io.EOF {
 						break
 					} else if err != nil {
-						t.Fatalf("decode name-only stream: %v", err)
+						t.Fatalf("decode model-only stream: %v", err)
 					}
-					if frame.OpID != "name-only" || frame.ID == "" || frame.Engine != "ollama" || frame.Op != "pull" || frame.Model != model || frame.DownloadState == nil {
-						t.Fatalf("name-only stream lost target identity: %+v", frame)
+					if frame.OpID != "model-only" || frame.ID == "" || frame.Engine != "llamacpp" || frame.Op != "pull" || frame.Model != model || frame.DownloadState == nil {
+						t.Fatalf("model-only stream lost target identity: %+v", frame)
 					}
 					if frame.Type == "progress" {
 						streamed = append(streamed, ProgressEvent{Engine: frame.Engine, Op: frame.Op, Stage: frame.Stage, Percent: frame.Percent, Message: frame.Message, ID: frame.ID, Model: frame.Model, DownloadState: frame.DownloadState})
 					}
 					terminal = frame
 				}
-				if recorder.Code != http.StatusOK || !recorder.Flushed || terminal.Type != "result" || terminal.OpID != "name-only" || !reflect.DeepEqual(streamed, progress) {
-					t.Fatalf("name-only stream: HTTP %d terminal=%+v streamed=%+v", recorder.Code, terminal, streamed)
+				if recorder.Code != http.StatusOK || !recorder.Flushed || terminal.Type != "result" || terminal.OpID != "model-only" || !reflect.DeepEqual(streamed, progress) {
+					t.Fatalf("model-only stream: HTTP %d terminal=%+v streamed=%+v", recorder.Code, terminal, streamed)
 				}
 				// The stream's explicit queued frame replaces the queued local
 				// event emitted before its exact-ID subscription was installed.
@@ -2179,9 +2008,9 @@ func TestModelControlsConventionalNamePullStreamsAtEntryBoundaries(t *testing.T)
 				}
 				result = terminal.Result
 			}
-			var response struct{ Status string }
+			var response struct{ Success bool }
 			if err := json.Unmarshal(result, &response); err != nil {
-				t.Fatalf("decode name-only pull result: %v", err)
+				t.Fatalf("decode model-only pull result: %v", err)
 			}
 			wantProgress := []struct {
 				stage, phase string
@@ -2190,7 +2019,7 @@ func TestModelControlsConventionalNamePullStreamsAtEntryBoundaries(t *testing.T)
 			}{
 				{"queued", modeldownload.PhaseQueued, 0, true},
 				{"pulling", modeldownload.PhaseInProgress, 0, true},
-				{"pulling", modeldownload.PhaseInProgress, 40, true},
+				{"downloading", modeldownload.PhaseInProgress, 40, true},
 				{"success", modeldownload.PhaseComplete, 100, false},
 			}
 			if len(progress) != len(wantProgress) {
@@ -2203,7 +2032,7 @@ func TestModelControlsConventionalNamePullStreamsAtEntryBoundaries(t *testing.T)
 				if event.Stage != want.stage || event.Percent != want.percent {
 					t.Fatalf("pull progress[%d]=%+v, want stage=%s percent=%d", i, event, want.stage, want.percent)
 				}
-				wantEntry := modeldownload.Entry{ID: event.ID, Engine: "ollama", Model: model, Phase: want.phase, BlocksReadiness: want.blocks}
+				wantEntry := modeldownload.Entry{ID: event.ID, Engine: "llamacpp", Model: model, Phase: want.phase, BlocksReadiness: want.blocks}
 				if want.percent == 40 {
 					percent := 40
 					wantEntry.Percent = &percent
@@ -2217,18 +2046,17 @@ func TestModelControlsConventionalNamePullStreamsAtEntryBoundaries(t *testing.T)
 				}
 				previousRevision = revision
 			}
-			if response.Status != "success" || calls != 1 || mutations != 1 ||
+			if !response.Success || calls != 1 || mutations != 1 ||
 				ex.progress.next != wantAdmissions || len(ex.progress.subs) != 0 || len(ex.Errors()) != 0 {
-				t.Fatalf("name-only pull result=%+v progress=%+v calls=%d mutations=%d", response, progress, calls, mutations)
+				t.Fatalf("model-only pull result=%+v progress=%+v calls=%d mutations=%d", response, progress, calls, mutations)
 			}
 		})
 	}
 }
 
-func TestModelControlsConventionalNamePullStoppedEngineReportsTerminalError(t *testing.T) {
-	ex := modelControlsExecutor(t)
-	ex.engines["ollama"].manifest.Operations = nil
-	ex.engines["ollama"].running = false
+func TestModelControlsPullStoppedEngineReportsTerminalError(t *testing.T) {
+	ex := llamaModelControlsExecutor(t)
+	ex.engines["llamacpp"].running = false
 	acceptModelMutations(ex)
 	var progress []ProgressEvent
 	ex.emit = func(method string, value any) {
@@ -2254,12 +2082,12 @@ func TestModelControlsConventionalNamePullStoppedEngineReportsTerminalError(t *t
 	var output bytes.Buffer
 	manager := &Manager{exec: ex, codec: NewCodec(&output)}
 	id := json.RawMessage("1")
-	manager.runAction(context.Background(), &Message{ID: &id, Params: json.RawMessage(`{"engine":"ollama","action":"pull_model","params":{"name":"tiny"}}`)})
+	manager.runAction(context.Background(), &Message{ID: &id, Params: json.RawMessage(`{"engine":"llamacpp","action":"pull_model","params":{"model":"tiny"}}`)})
 	var response Message
 	if err := json.NewDecoder(&output).Decode(&response); err != nil {
 		t.Fatalf("decode stopped-engine response: %v", err)
 	}
-	want := formatEnginePullError("Ollama", errors.New(`engine "ollama" is not running`))
+	want := formatEnginePullError("llama.cpp fixture", errors.New(`engine "llamacpp" is not running`))
 	if len(progress) != 2 {
 		t.Fatalf("stopped pull progress=%+v, want queued and failed", progress)
 	}
@@ -2267,18 +2095,18 @@ func TestModelControlsConventionalNamePullStoppedEngineReportsTerminalError(t *t
 	queued := modelControlsPullEntry(t, progress[0], ex.switchIncarnation, downloadID, "tiny")
 	failed := modelControlsPullEntry(t, progress[1], ex.switchIncarnation, downloadID, "tiny")
 	if progress[0].Stage != "queued" || progress[0].Percent != 0 ||
-		!reflect.DeepEqual(queued, modeldownload.Entry{ID: downloadID, Engine: "ollama", Model: "tiny", Phase: modeldownload.PhaseQueued, BlocksReadiness: true}) {
+		!reflect.DeepEqual(queued, modeldownload.Entry{ID: downloadID, Engine: "llamacpp", Model: "tiny", Phase: modeldownload.PhaseQueued, BlocksReadiness: true}) {
 		t.Fatalf("stopped pull did not queue exact model: %+v", progress[0])
 	}
 	if progress[1].Stage != "error" || progress[1].Percent != -1 ||
-		!reflect.DeepEqual(failed, modeldownload.Entry{ID: downloadID, Engine: "ollama", Model: "tiny", Phase: modeldownload.PhaseFailed, Reason: modeldownload.ReasonDownloadFailed}) ||
+		!reflect.DeepEqual(failed, modeldownload.Entry{ID: downloadID, Engine: "llamacpp", Model: "tiny", Phase: modeldownload.PhaseFailed, Reason: modeldownload.ReasonDownloadFailed}) ||
 		progress[0].DownloadState.Equal(*progress[1].DownloadState) || !progress[1].DownloadState.Equal(ex.downloads.snapshot()) {
 		t.Fatalf("stopped pull did not publish fixed terminal state: %+v", progress[1])
 	}
 	reports := ex.Errors()
 	if response.Error == nil || response.Error.Code != -32000 || response.Error.Message != want ||
 		len(reports) != 1 || reports[0].Message != want || reports[0].ModelName != "tiny" || reports[0].Operation != "pull" || reports[0].Action != "retry" {
-		t.Fatalf("stopped name-only pull response=%+v progress=%v reports=%+v", response, progress, reports)
+		t.Fatalf("stopped model-only pull response=%+v progress=%v reports=%+v", response, progress, reports)
 	}
 }
 
@@ -2298,13 +2126,13 @@ func TestModelControlsConventionalActionsRejectSuppliedCommonIdentifiers(t *test
 				t.Run(boundary, func(t *testing.T) {
 					for _, key := range []string{"name", "MODEL"} {
 						t.Run(key, func(t *testing.T) {
-							ex := modelControlsExecutor(t)
-							manifest := ex.engines["ollama"].manifest
+							ex := llamaModelControlsExecutor(t)
+							manifest := ex.engines["llamacpp"].manifest
 							manifest.Operations = nil
 							manifest.Actions["load_model"] = Action{HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/load"}}
 							manifest.Actions["delete_model"] = Action{HTTP: &ActionHTTP{Method: http.MethodDelete, Path: "/delete"}}
 							ex.emit = func(string, any) { t.Error("invalid common model emitted a notification") }
-							before := ex.inventoryDigests["ollama"]
+							before := ex.inventoryDigests["llamacpp"]
 							params := json.RawMessage(`{"model":"valid","` + key + `":` + tc.raw + `}`)
 							want := nodepolicy.ValidateModelIdentifierJSON(json.RawMessage(tc.raw))
 							switch boundary {
@@ -2312,7 +2140,7 @@ func TestModelControlsConventionalActionsRejectSuppliedCommonIdentifiers(t *test
 								var result json.RawMessage
 								var err error
 								if boundary == "direct pull" {
-									result, err = ex.PullModelStream(context.Background(), "ollama", "valid", params)
+									result, err = ex.PullModelStream(context.Background(), "llamacpp", "valid", params)
 								} else {
 									action := pullModelAction
 									if boundary == "load action" {
@@ -2320,7 +2148,7 @@ func TestModelControlsConventionalActionsRejectSuppliedCommonIdentifiers(t *test
 									} else if boundary == "delete action" {
 										action = "delete_model"
 									}
-									result, err = ex.Action(context.Background(), "ollama", action, params)
+									result, err = ex.Action(context.Background(), "llamacpp", action, params)
 								}
 								if err == nil || err.Error() != want.Error() || result != nil {
 									t.Fatalf("supplied common model refusal: result=%s error=%v want=%v", result, err, want)
@@ -2329,7 +2157,7 @@ func TestModelControlsConventionalActionsRejectSuppliedCommonIdentifiers(t *test
 								var output bytes.Buffer
 								manager := &Manager{exec: ex, codec: NewCodec(&output)}
 								id := json.RawMessage("1")
-								manager.runAction(context.Background(), &Message{ID: &id, Params: modelControlsJSON(t, actionParam{Engine: "ollama", Action: pullModelAction, Params: params})})
+								manager.runAction(context.Background(), &Message{ID: &id, Params: modelControlsJSON(t, actionParam{Engine: "llamacpp", Action: pullModelAction, Params: params})})
 								var response Message
 								if err := json.NewDecoder(&output).Decode(&response); err != nil {
 									t.Fatalf("decode common-field refusal: %v", err)
@@ -2340,13 +2168,13 @@ func TestModelControlsConventionalActionsRejectSuppliedCommonIdentifiers(t *test
 							case "destination pull":
 								server := &controlServer{exec: ex}
 								recorder := httptest.NewRecorder()
-								wire := modelControlsJSON(t, pullRequest{Engine: "ollama", Params: params})
+								wire := modelControlsJSON(t, pullRequest{Engine: "llamacpp", Params: params})
 								server.handlePull(recorder, httptest.NewRequest(http.MethodPost, controlPullPath, bytes.NewReader(wire)))
 								if recorder.Code != http.StatusBadRequest || recorder.Flushed || recorder.Body.String() != "invalid JSON body\n" {
 									t.Fatalf("destination common-field refusal: HTTP %d body=%q", recorder.Code, recorder.Body.String())
 								}
 							}
-							if len(ex.Errors()) != 0 || ex.progress.next != 0 || len(ex.progress.subs) != 0 || !reflect.DeepEqual(before, ex.inventoryDigests["ollama"]) {
+							if len(ex.Errors()) != 0 || ex.progress.next != 0 || len(ex.progress.subs) != 0 || !reflect.DeepEqual(before, ex.inventoryDigests["llamacpp"]) {
 								t.Fatal("invalid supplied common field crossed progress/report/mutation boundary")
 							}
 						})
@@ -2367,20 +2195,19 @@ func TestModelControlsConventionalConsumersRequireExactModelBeforeEffects(t *tes
 		{"command name placeholder", "delete_model", Action{Cmd: []string{"unreachable-compatibility-child", "{name}"}}},
 		{"remove path model placeholder", "delete_model", Action{RemovePath: &ActionRemovePath{Root: "unused", Path: "unused/{model}"}}},
 		{"unbound remove path model placeholder", "opaque", Action{RemovePath: &ActionRemovePath{Root: "unused", Path: "unused/{model}"}}},
-		{"model resolver", pullModelAction, Action{Cmd: []string{"unreachable-compatibility-child"}, ModelResolution: modelResolutionLMSGet}},
 		{"progress protocol", pullModelAction, Action{HTTP: &ActionHTTP{Method: http.MethodPost, Path: "/models"}, ProgressProtocol: pullProgressProtocolLlamaCPPModelsSSE}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ex := modelControlsExecutor(t)
-			manifest := ex.engines["ollama"].manifest
+			ex := llamaModelControlsExecutor(t)
+			manifest := ex.engines["llamacpp"].manifest
 			manifest.Operations = nil
 			manifest.Actions[tc.action] = tc.definition
 			ex.emit = func(string, any) { t.Error("missing consumer key emitted a notification") }
-			before := ex.inventoryDigests["ollama"]
-			result, err := ex.Action(context.Background(), "ollama", tc.action, json.RawMessage(`{"MODEL":"valid","NAME":"valid"}`))
+			before := ex.inventoryDigests["llamacpp"]
+			result, err := ex.Action(context.Background(), "llamacpp", tc.action, json.RawMessage(`{"MODEL":"valid","NAME":"valid"}`))
 			want := nodepolicy.ValidateModelIdentifierJSON(nil)
 			if err == nil || err.Error() != want.Error() || result != nil || len(ex.Errors()) != 0 || ex.progress.next != 0 ||
-				!reflect.DeepEqual(before, ex.inventoryDigests["ollama"]) {
+				!reflect.DeepEqual(before, ex.inventoryDigests["llamacpp"]) {
 				t.Fatalf("missing consumer key reached effects: result=%s error=%v", result, err)
 			}
 		})
@@ -2388,14 +2215,14 @@ func TestModelControlsConventionalConsumersRequireExactModelBeforeEffects(t *tes
 }
 
 func TestModelControlsConventionalLoadRetainsServingDeclarationGuard(t *testing.T) {
-	ex := modelControlsExecutor(t)
-	st := ex.engines["ollama"]
+	ex := llamaModelControlsExecutor(t)
+	st := ex.engines["llamacpp"]
 	st.manifest.Operations = nil
 	st.manifest.Actions["load_model"] = Action{HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/load"}}
 	st.plat.Runtime.Serving = modelControlsServing("valid")
 	ex.emit = func(string, any) { t.Error("missing serving model emitted a notification") }
 	for _, params := range []string{"", `{"MODEL":"valid","name":"valid"}`} {
-		result, err := ex.Action(context.Background(), "ollama", "load_model", json.RawMessage(params))
+		result, err := ex.Action(context.Background(), "llamacpp", "load_model", json.RawMessage(params))
 		var fieldError *ServingFieldError
 		if !errors.As(err, &fieldError) || fieldError.Field != "model" || fieldError.ModelID != "" || result != nil || len(ex.Errors()) != 0 {
 			t.Fatalf("conventional serving guard: result=%s error=%v", result, err)
@@ -2407,7 +2234,7 @@ func TestModelControlsTypedMissingFieldsKeepStructuralErrors(t *testing.T) {
 	for _, tc := range []struct{ name, params, want string }{
 		{"root null", `null`, "engine and model are required"},
 		{"empty object", `{}`, "engine and model are required"},
-		{"absent model", `{"engine":"ollama"}`, "engine and model are required"},
+		{"absent model", `{"engine":"llamacpp"}`, "engine and model are required"},
 		{"absent engine", `{"model":"valid"}`, "engine and model are required"},
 		{"supplied null model", `{"model":null}`, "invalid params: model is required"},
 		{"supplied empty model", `{"model":""}`, "invalid params: model is required"},
@@ -2434,9 +2261,9 @@ func TestModelControlsCopyMissingFieldsKeepOrderBeforePeerLookup(t *testing.T) {
 	for _, tc := range []struct{ name, params, want string }{
 		{"root null", `null`, "node is required"},
 		{"empty object", `{}`, "node is required"},
-		{"node before model", `{"engine":"ollama"}`, "node is required"},
+		{"node before model", `{"engine":"llamacpp"}`, "node is required"},
 		{"engine before model", `{"node":"private-peer"}`, "engine is required"},
-		{"model before lookup", `{"node":"private-peer","engine":"ollama"}`, "model is required"},
+		{"model before lookup", `{"node":"private-peer","engine":"llamacpp"}`, "model is required"},
 		{"supplied null model", `{"model":null}`, "model is required"},
 		{"supplied empty model", `{"model":""}`, "model is required"},
 		{"supplied invalid UTF8", "{\"model\":\"private\xffmodel\"}", "model must be valid UTF-8"},

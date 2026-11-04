@@ -482,7 +482,7 @@ func (e *Executor) reclaimOrphanForPID(ctx context.Context, st *engineState, eng
 	st.mu.Lock()
 	binPath, installDir, rt, owned := st.binPath, st.installDir, st.plat.Runtime, st.proc != nil
 	st.mu.Unlock()
-	if owned || port <= 0 || rt.modeOrDefault() != "process" || !isManagedInstallPath(binPath, installDir) {
+	if owned || port <= 0 || !isManagedInstallPath(binPath, installDir) {
 		return false, nil
 	}
 	// A child may still be initializing when its manager dies. Listener-only

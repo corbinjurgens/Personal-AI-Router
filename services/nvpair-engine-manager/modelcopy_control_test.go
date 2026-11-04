@@ -27,7 +27,7 @@ import (
 )
 
 func TestModelCopyControlStrictIngress(t *testing.T) {
-	valid := `{"opId":"0123456789abcdef0123456789abcdef","sourceNodeId":"source-host","destinationNodeId":"destination-host","engine":"ollama","model":"tiny"}`
+	valid := `{"opId":"0123456789abcdef0123456789abcdef","sourceNodeId":"source-host","destinationNodeId":"destination-host","engine":"llamacpp","model":"tiny"}`
 	if _, err := decodeCopyRequest([]byte(valid), false); err != nil {
 		t.Fatalf("valid request: %v", err)
 	}
@@ -52,7 +52,7 @@ func TestModelCopyControlStrictIngress(t *testing.T) {
 	test("oversize", valid+strings.Repeat(" ", maxCopyControlBody))
 	for _, field := range []string{"caller", "destinationNodeId", "url", "path", "port"} {
 		t.Run("inbound rejects "+field, func(t *testing.T) {
-			body := `{"opId":"0123456789abcdef0123456789abcdef","sourceNodeId":"source-host","engine":"ollama","model":"tiny","` + field + `":"x"}`
+			body := `{"opId":"0123456789abcdef0123456789abcdef","sourceNodeId":"source-host","engine":"llamacpp","model":"tiny","` + field + `":"x"}`
 			if _, err := decodeCopyRequest([]byte(body), true); err == nil {
 				t.Fatal("accepted forwarding/authority field")
 			}
@@ -144,7 +144,7 @@ func TestModelCopyControlRejectsBeforeLookup(t *testing.T) {
 	output := &syncBuffer{}
 	m := &Manager{codec: NewCodec(output)} // No peer directory or executor may be consulted.
 	id := json.RawMessage(`1`)
-	m.runCopy(context.Background(), &Message{JSONRPC: "2.0", ID: &id, Params: json.RawMessage(`{"opId":"invalid","sourceNodeId":"source","destinationNodeId":"destination","engine":"ollama","model":"tiny"}`)})
+	m.runCopy(context.Background(), &Message{JSONRPC: "2.0", ID: &id, Params: json.RawMessage(`{"opId":"invalid","sourceNodeId":"source","destinationNodeId":"destination","engine":"llamacpp","model":"tiny"}`)})
 	frames := output.frames()
 	if len(frames) != 1 || frames[0].Error == nil || frames[0].Error.Code != -32602 || len(m.activeCopies()) != 0 {
 		t.Fatalf("invalid request response=%+v", frames)
@@ -218,14 +218,8 @@ func newCopyControlSourceFixture(t *testing.T, wrap func(http.Handler) http.Hand
 	sourceDir, controllerDir := f.authority.peer("source-certificate").dir, f.authority.peer("controller-certificate").dir
 	grantRemoteManagement(t, sourceDir, "1", map[string]bool{"destination-certificate": false})
 	grantRemoteManagement(t, controllerDir, "1", map[string]bool{"destination-certificate": false})
-	f.source = copyTestExecutor(t, "ollama", t.TempDir(), true)
-	_, sourceStore, err := f.source.modelStoreFor("ollama")
-	if err != nil {
-		t.Fatal(err)
-	}
-	writeOllamaModel(t, sourceStore.root, "tiny", 100_000, 2)
-	copyTestNativeModels(t, f.source, "ollama", "tiny")
-	copyTestSourceListing(t, f.source, "ollama", "tiny")
+	source := namedCustomCopyFixture(t, "tiny", 100_000, 2)
+	f.source = source.source
 	f.source.nodeProjection.set(nodeProjection{})
 	sourceMesh := clustertrust.Open(sourceDir)
 	sourceControl := &controlServer{exec: f.source, mesh: sourceMesh}
@@ -242,8 +236,8 @@ func newCopyControlSourceFixture(t *testing.T, wrap func(http.Handler) http.Hand
 		}
 		sourceHandler.ServeHTTP(w, r)
 	}))
-	destinationExecutor := copyTestExecutor(t, "ollama", t.TempDir(), true)
-	_, destinationStore, err := destinationExecutor.modelStoreFor("ollama")
+	destinationExecutor := copyTestExecutor(t, "llamacpp", t.TempDir(), true)
+	_, destinationStore, err := destinationExecutor.modelStoreFor("llamacpp")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,19 +246,19 @@ func newCopyControlSourceFixture(t *testing.T, wrap func(http.Handler) http.Hand
 	copyControlDirectory(f.destination, copyControlNode(t, "destination-host", "destination-certificate", nil), copyControlNode(t, "source-host", "source-certificate", f.sourceServer))
 	f.destinationServer = rmTLSServer(t, f.authority.mesh, (&controlServer{exec: destinationExecutor, mesh: f.authority.mesh, copyFromPeer: f.destination.copyFromPeer}).mux())
 	f.controllerStore = filepath.Join(t.TempDir(), "controller-store-must-never-exist")
-	f.controller = copyControlManager(t, copyTestExecutor(t, "ollama", f.controllerStore, true), controllerDir)
+	f.controller = copyControlManager(t, copyTestExecutor(t, "llamacpp", f.controllerStore, true), controllerDir)
 	copyControlDirectory(f.controller, copyControlNode(t, "controller-host", "controller-certificate", nil), copyControlNode(t, "destination-host", "destination-certificate", f.destinationServer))
 	return f
 }
 
 func controlCopyRequest() copyRequest {
-	return copyRequest{OpID: "0123456789abcdef0123456789abcdef", SourceNodeID: "source-host", DestinationNodeID: "destination-host", Engine: "ollama", Model: "tiny"}
+	return copyRequest{OpID: "0123456789abcdef0123456789abcdef", SourceNodeID: "source-host", DestinationNodeID: "destination-host", Engine: "llamacpp", Model: "tiny"}
 }
 
 func TestModelCopyControlDestinationOwnsBytes(t *testing.T) {
 	f := newCopyControlFixture(t)
 	f.controller.exec = nil // Controller artifact/executor access would fail this operation.
-	if _, err := f.destination.exec.desired.setLocked("ollama", true); err != nil {
+	if _, err := f.destination.exec.desired.setLocked("llamacpp", true); err != nil {
 		t.Fatal(err)
 	}
 	var progress []copyProgress
@@ -296,15 +290,15 @@ func TestModelCopyControlDestinationOwnsBytes(t *testing.T) {
 	if len(f.controller.activeCopies()) != 0 || len(f.destination.activeCopies()) != 0 {
 		t.Fatal("completed operations leaked")
 	}
-	st, err := f.destination.exec.Status("ollama")
+	st, err := f.destination.exec.Status("llamacpp")
 	if err != nil || st.Running || st.Locked == nil || !*st.Locked {
 		t.Fatalf("copy activated engine: %+v, %v", st, err)
 	}
-	enabled, known, err := f.destination.exec.desired.get("ollama")
+	enabled, known, err := f.destination.exec.desired.get("llamacpp")
 	if err != nil || !known || enabled {
 		t.Fatalf("copy changed saved Off: enabled=%v known=%v err=%v", enabled, known, err)
 	}
-	list, err := f.source.modelSourceFiles(context.Background(), "ollama", "tiny")
+	list, err := f.source.modelSourceFiles(context.Background(), "llamacpp", "tiny")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +306,7 @@ func TestModelCopyControlDestinationOwnsBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, file := range list.Files {
-		data, err := os.ReadFile(filepath.Join(f.destinationStore, filepath.FromSlash(file.Path)))
+		data, err := os.ReadFile(filepath.Join(copyAliasDir(f.destinationStore, "tiny"), list.ExportID, filepath.FromSlash(file.Path)))
 		if err != nil || int64(len(data)) != file.Size || sha256Hex(data) != file.SHA256 {
 			t.Fatalf("destination file %s differs: %v", file.Path, err)
 		}
@@ -444,7 +438,7 @@ func TestModelCopyControlLegacyUsesCanonicalExecutor(t *testing.T) {
 	output := &syncBuffer{}
 	f.destination.codec = NewCodec(output)
 	id := json.RawMessage(`1`)
-	f.destination.runRemoteCopy(remoteFixtureContext(t), &Message{JSONRPC: "2.0", ID: &id, Method: "engine:remote-copy-model", Params: json.RawMessage(`{"node":"source-host","engine":"ollama","model":"tiny"}`)})
+	f.destination.runRemoteCopy(remoteFixtureContext(t), &Message{JSONRPC: "2.0", ID: &id, Method: "engine:remote-copy-model", Params: json.RawMessage(`{"node":"source-host","engine":"llamacpp","model":"tiny"}`)})
 	var result struct {
 		OpID   string          `json:"opId"`
 		Result copyModelResult `json:"result"`
@@ -480,7 +474,7 @@ func TestModelCopyControlLegacyUsesCanonicalExecutor(t *testing.T) {
 func TestModelCopyControlCancellationClosesSourceAndRetainsPartial(t *testing.T) {
 	started, closed := make(chan struct{}), make(chan struct{})
 	weights := testBytes(100_000, 2)
-	weightPath := "blobs/sha256-" + sha256Hex(weights)
+	weightPath := "model/model.gguf"
 	f := newCopyControlSourceFixture(t, func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path != controlModelFilePath || r.URL.Query().Get("path") != weightPath {
@@ -517,7 +511,14 @@ func TestModelCopyControlCancellationClosesSourceAndRetainsPartial(t *testing.T)
 	case <-time.After(2 * time.Second):
 		t.Fatal("source did not begin streaming")
 	}
-	part := filepath.Join(f.destinationStore, filepath.FromSlash(weightPath)+".part")
+	list, err := f.source.modelSourceFiles(context.Background(), "llamacpp", "tiny")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hashModelFiles(context.Background(), &list, func(string, int) {}); err != nil {
+		t.Fatal(err)
+	}
+	part := filepath.Join(copyAliasDir(f.destinationStore, "tiny"), list.ExportID, filepath.FromSlash(weightPath)+".part")
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		info, err := os.Stat(part)
@@ -565,11 +566,7 @@ func TestModelCopyControlCancellationClosesSourceAndRetainsPartial(t *testing.T)
 	if err != nil || info.Size() <= 0 {
 		t.Fatalf("cancel discarded resumable partial: %v", err)
 	}
-	rel, err := ollamaManifestRel("tiny")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(f.destinationStore, filepath.FromSlash(rel))); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(filepath.Join(copyAliasDir(f.destinationStore, "tiny"), "copy.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("cancelled copy published model: %v", err)
 	}
 }
@@ -649,8 +646,7 @@ func TestModelCopyControlRemoteVerifiedRetryHasNoSourceContact(t *testing.T) {
 	}
 	dst.nodeProjection.set(nodeProjection{})
 	f.destination = copyControlManager(t, dst, f.authority.dir)
-	// This fixture's controller has no llama.cpp installation, but the engine
-	// descriptor still owns the content naming contract for its reservation.
+	// The engine descriptor owns the content naming contract for reservation.
 	f.controller.copyRegistry.engines["llamacpp"] = &Manifest{Engine: "llamacpp"}
 	copyControlDirectory(f.destination, copyControlNode(t, "destination-host", "destination-certificate", nil))
 	server := rmTLSServer(t, f.authority.mesh, (&controlServer{exec: dst, mesh: f.authority.mesh, copyFromPeer: f.destination.copyFromPeer}).mux())
@@ -801,7 +797,7 @@ func TestModelCopyControlFailedStreamCancelsWork(t *testing.T) {
 				close(cancelled)
 				return copyModelResult{}, ctx.Err()
 			}}
-			body := `{"opId":"0123456789abcdef0123456789abcdef","sourceNodeId":"source-host","engine":"ollama","model":"tiny"}`
+			body := `{"opId":"0123456789abcdef0123456789abcdef","sourceNodeId":"source-host","engine":"llamacpp","model":"tiny"}`
 			req := httptest.NewRequest(http.MethodPost, controlCopyPath, strings.NewReader(body))
 			done := make(chan struct{})
 			go func() { s.handleCopy(&copyFailWriter{flushErr: flush}, req, "controller"); close(done) }()
@@ -830,7 +826,7 @@ func TestModelCopyControlDispatchedMutationIsNotReplayed(t *testing.T) {
 				t.Errorf("copy dispatch=%s %s close=%v", r.Method, r.URL.Path, r.Close)
 			}
 			w.Header().Set("Content-Type", "application/x-ndjson")
-			cp := copyProgress{remoteProgress: remoteProgress{OpID: controlCopyRequest().OpID, Node: "source-host", Engine: "ollama", Op: "copy", Stage: "checking"}, SourceNodeID: "source-host", DestinationNodeID: "host-peer", Model: "tiny"}
+			cp := copyProgress{remoteProgress: remoteProgress{OpID: controlCopyRequest().OpID, Node: "source-host", Engine: "llamacpp", Op: "copy", Stage: "checking"}, SourceNodeID: "source-host", DestinationNodeID: "host-peer", Model: "tiny"}
 			remoteFixtureEncode(t, w, copyProgressFrame(cp))
 			if err := http.NewResponseController(w).Flush(); err != nil {
 				t.Errorf("flush dispatched progress: %v", err)
@@ -898,7 +894,7 @@ func TestModelCopyControlPostPublicationLostResponseIsUnknown(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, file := range list.Files {
-		data, err := os.ReadFile(filepath.Join(f.destinationStore, filepath.FromSlash(file.Path)))
+		data, err := os.ReadFile(filepath.Join(copyAliasDir(f.destinationStore, "tiny"), list.ExportID, filepath.FromSlash(file.Path)))
 		if err != nil || int64(len(data)) != file.Size || sha256Hex(data) != file.SHA256 {
 			t.Fatalf("published destination file %s differs: %v", file.Path, err)
 		}
@@ -1007,7 +1003,7 @@ func TestModelCopyControlCapabilitiesBodyIsBounded(t *testing.T) {
 			observed := make(chan time.Time, 1)
 			client := &remoteClient{base: server.URL, controlHTTP: &http.Client{Transport: &copyCapabilityDeadlineTransport{base: server.Client().Transport, deadline: observed}}}
 			finished := make(chan error, 1)
-			go func() { _, err := client.copyCapabilities(ctx, "ollama"); finished <- err }()
+			go func() { _, err := client.copyCapabilities(ctx, "llamacpp"); finished <- err }()
 			select {
 			case <-headers:
 			case <-time.After(time.Second):
@@ -1082,14 +1078,14 @@ func TestModelCopyControlReverseStreamsExactTuple(t *testing.T) {
 
 func TestModelCopyControlConcurrentDestinationsRemainIndependent(t *testing.T) {
 	f := rmNewFixture(t, "controller-cert", "first-cert", "second-cert")
-	controller := copyControlManager(t, copyTestExecutor(t, "ollama", t.TempDir(), true), f.dir)
+	controller := copyControlManager(t, copyTestExecutor(t, "llamacpp", t.TempDir(), true), f.dir)
 	release := make(chan struct{})
 	t.Cleanup(func() { controller.stopCopies() })
 	makeDestination := func(host, principal string) noderec.DirectoryNode {
 		dir := f.peer(principal).dir
 		grantRemoteManagement(t, dir, "1", map[string]bool{"controller-cert": true})
 		mesh := clustertrust.Open(dir)
-		ex := copyTestExecutor(t, "ollama", t.TempDir(), true)
+		ex := copyTestExecutor(t, "llamacpp", t.TempDir(), true)
 		ex.nodeProjection.set(nodeProjection{})
 		s := &controlServer{exec: ex, mesh: mesh, copyFromPeer: func(ctx context.Context, p copyRequest, authorize func() error, emit func(copyProgress)) (copyModelResult, error) {
 			if err := authorize(); err != nil {
@@ -1188,9 +1184,9 @@ func TestModelCopyControlCapabilitiesReadiness(t *testing.T) {
 		}
 	})
 	t.Run("not installed is distinct from unavailable", func(t *testing.T) {
-		ex := copyTestExecutor(t, "ollama", t.TempDir(), false)
+		ex := copyTestExecutor(t, "llamacpp", t.TempDir(), false)
 		ex.nodeProjection.set(nodeProjection{})
-		capability := ex.copyCapabilities("ollama")
+		capability := ex.copyCapabilities("llamacpp")
 		if !capability.Available || capability.Installed || capability.Writable || capability.Reason == "" {
 			t.Fatalf("capability=%+v", capability)
 		}
@@ -1203,13 +1199,13 @@ func TestModelCopyControlCapabilitiesReadiness(t *testing.T) {
 		}
 	})
 	t.Run("unknown projection and recovery fail closed", func(t *testing.T) {
-		ex := copyTestExecutor(t, "ollama", t.TempDir(), true)
-		if ex.copyCapabilities("ollama").Writable {
+		ex := copyTestExecutor(t, "llamacpp", t.TempDir(), true)
+		if ex.copyCapabilities("llamacpp").Writable {
 			t.Fatal("unknown policy became writable")
 		}
 		ex.nodeProjection.set(nodeProjection{})
 		ex.switchRecoveryPending.Store(true)
-		if ex.copyCapabilities("ollama").Writable {
+		if ex.copyCapabilities("llamacpp").Writable {
 			t.Fatal("pending recovery became writable")
 		}
 	})
@@ -1217,7 +1213,7 @@ func TestModelCopyControlCapabilitiesReadiness(t *testing.T) {
 		server := httptest.NewServer(http.NotFoundHandler())
 		defer server.Close()
 		client := &remoteClient{base: server.URL, controlHTTP: server.Client()}
-		if _, err := client.copyCapabilities(context.Background(), "ollama"); err == nil {
+		if _, err := client.copyCapabilities(context.Background(), "llamacpp"); err == nil {
 			t.Fatal("old peer became copy capable")
 		}
 	})
@@ -1233,7 +1229,7 @@ func TestModelCopyControlReservationBoundAndExactCancel(t *testing.T) {
 	var releases []func()
 	var contexts []context.Context
 	for i := range 8 {
-		p := copyRequest{OpID: fmt.Sprintf("%032x", i), SourceNodeID: "s", DestinationNodeID: "d", Engine: "ollama", Model: "tiny"}
+		p := copyRequest{OpID: fmt.Sprintf("%032x", i), SourceNodeID: "s", DestinationNodeID: "d", Engine: "llamacpp", Model: "tiny"}
 		ctx, release, err := m.reserveCopy(context.Background(), p)
 		if err != nil {
 			t.Fatal(err)

@@ -745,13 +745,12 @@ func (f *strataContractFixture) strataContractStartManager(t *testing.T) {
 				Runtime struct {
 					Port          int `json:"port"`
 					Ready, Health json.RawMessage
-					AuthStatuses  []int `json:"auth_statuses"`
 				} `json:"runtime"`
 			} `json:"platforms"`
 		}
 		f.Manager.strataContractOK(t, "engine:describe", map[string]string{"engine": engine.Name}, &manifest)
 		platform, ok := manifest.Platforms[runtime.GOOS+"/"+runtime.GOARCH]
-		if !ok || !reflect.DeepEqual(platform.Detect, []string{filepath.Join(f.Root, "absent-"+engine.Name)}) || platform.Runtime.Port != 0 || (len(platform.Runtime.Ready) != 0 && string(platform.Runtime.Ready) != "null") || (len(platform.Runtime.Health) != 0 && string(platform.Runtime.Health) != "null") || len(platform.Runtime.AuthStatuses) != 0 {
+		if !ok || !reflect.DeepEqual(platform.Detect, []string{filepath.Join(f.Root, "absent-"+engine.Name)}) || platform.Runtime.Port != 0 || (len(platform.Runtime.Ready) != 0 && string(platform.Runtime.Ready) != "null") || (len(platform.Runtime.Health) != 0 && string(platform.Runtime.Health) != "null") {
 			t.Fatalf("built-in %s host override did not disable detection and probes", engine.Name)
 		}
 	}

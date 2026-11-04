@@ -52,8 +52,8 @@ func TestBundledModelStoresOutliveTheAppDataRoot(t *testing.T) {
 }
 
 // TestBundledUninstallsKeepTheModelStore checks the other removal path: an
-// engine uninstall may remove a directory that contains the model store (LM
-// Studio keeps both under ~/.lmstudio), but never the store itself.
+// engine uninstall may remove a directory that contains the model store (an
+// engine may keep both under one home directory), but never the store itself.
 func TestBundledUninstallsKeepTheModelStore(t *testing.T) {
 	for name, manifest := range bundledManifestSet(t) {
 		for key, platform := range manifest.Platforms {
@@ -78,7 +78,7 @@ func TestBundledUninstallsKeepTheModelStore(t *testing.T) {
 // argument, or "" when there is none.
 //
 // Scanned as a substring rather than by executable name. A manifest's deletion
-// almost never arrives as argv[0]: the LM Studio uninstall this guard exists for
+// almost never arrives as argv[0]: the vendor uninstall this guard exists for
 // was a whole shell script in one `sh -c` argument, whose base name was the tail
 // of the script, and the Windows form buried Remove-Item inside a PowerShell
 // -Command string the same way.
@@ -102,17 +102,17 @@ func destructiveToken(arg string) string {
 // not provide.
 func TestDestructiveTokenCatchesTheOriginalUninstalls(t *testing.T) {
 	originals := map[string]string{
-		"posix": `pkill -x lms 2>/dev/null; pkill -x llmster 2>/dev/null; sleep 2; rm -rf "$HOME/.lmstudio"; sleep 1; [ -d "$HOME/.lmstudio" ] && exit 1; exit 0`,
-		"windows": `$root = Join-Path $env:USERPROFILE '.lmstudio'; Start-Sleep -Seconds 3; ` +
+		"posix": `pkill -x vendor-cli 2>/dev/null; pkill -x vendor-daemon 2>/dev/null; sleep 2; rm -rf "$HOME/.vendor"; sleep 1; [ -d "$HOME/.vendor" ] && exit 1; exit 0`,
+		"windows": `$root = Join-Path $env:USERPROFILE '.vendor'; Start-Sleep -Seconds 3; ` +
 			`Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue`,
 	}
 	for name, argument := range originals {
 		if destructiveToken(argument) == "" {
-			t.Errorf("%s: the original LM Studio uninstall was not recognised as deleting files", name)
+			t.Errorf("%s: the original vendor uninstall was not recognised as deleting files", name)
 		}
 	}
 	for _, harmless := range []string{
-		"pkill -x lms 2>/dev/null; pkill -x llmster 2>/dev/null; sleep 2; exit 0",
+		"pkill -x vendor-cli 2>/dev/null; pkill -x vendor-daemon 2>/dev/null; sleep 2; exit 0",
 		"server",
 		"--strip-components=1",
 	} {
@@ -152,9 +152,9 @@ func TestValidateRejectsRemovalsThatReachTheModelStore(t *testing.T) {
 
 func TestRemoveTreePreservingKeepsNestedStore(t *testing.T) {
 	root := t.TempDir()
-	engineRoot := filepath.Join(root, ".lmstudio")
+	engineRoot := filepath.Join(root, ".llamacpp")
 	models := filepath.Join(engineRoot, "models", "publisher", "repo")
-	binary := filepath.Join(engineRoot, "bin", "lms")
+	binary := filepath.Join(engineRoot, "bin", "llama-server")
 	internal := filepath.Join(engineRoot, ".internal", "state.json")
 	for _, dir := range []string{models, filepath.Dir(binary), filepath.Dir(internal)} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -183,14 +183,14 @@ func TestRemoveTreePreservingKeepsNestedStore(t *testing.T) {
 }
 
 // TestRemoveTreePreservingKeepsASymlinkedStore is the guard for a model library
-// moved and linked back. With ~/.lmstudio/models a symlink to a sibling
+// moved and linked back. With ~/.llamacpp/models a symlink to a sibling
 // directory, a removal that matched the store by path kept the link and deleted
 // the sibling, which is where the models were.
 func TestRemoveTreePreservingKeepsASymlinkedStore(t *testing.T) {
-	engineRoot := filepath.Join(t.TempDir(), ".lmstudio")
+	engineRoot := filepath.Join(t.TempDir(), ".llamacpp")
 	weights := filepath.Join(engineRoot, "weights")
 	model := filepath.Join(weights, "model.gguf")
-	binary := filepath.Join(engineRoot, "bin", "lms")
+	binary := filepath.Join(engineRoot, "bin", "llama-server")
 	for _, file := range []string{model, binary} {
 		if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
 			t.Fatal(err)
@@ -278,16 +278,16 @@ func TestRemoveTreePreservingKeepsAStoreSpelledInAnotherCase(t *testing.T) {
 
 func TestRemoveTreePreservingRemovesUnrelatedTree(t *testing.T) {
 	root := t.TempDir()
-	installDir := filepath.Join(root, "engine-bin", "ollama")
+	installDir := filepath.Join(root, "engine-bin", "llamacpp")
 	if err := os.MkdirAll(installDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(installDir, "ollama"), []byte("x"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(installDir, "llamacpp"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	// Ollama's models live outside the install dir, so this is a plain removal.
-	if err := removeTreePreserving(installDir, filepath.Join(root, ".ollama")); err != nil {
+	// The model store live outside the install dir, so this is a plain removal.
+	if err := removeTreePreserving(installDir, filepath.Join(root, ".llamacpp")); err != nil {
 		t.Fatalf("removeTreePreserving: %v", err)
 	}
 	if _, err := os.Stat(installDir); !os.IsNotExist(err) {

@@ -10,8 +10,7 @@ package main
 // needs: whether it may reposition the engine's process while it is running.
 //
 // Ownership governs relocation authority, not facade setup. Engines normally
-// keep their configured port while the broker places their facade. Ollama and
-// LM Studio additionally need engine-specific compatibility-port takeover.
+// keep their configured port while the broker places their facade.
 
 import (
 	"context"
@@ -20,9 +19,11 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"os"
 	"strings"
 	"sync/atomic"
 
+	"nvpair-shared/appdir"
 	"nvpair-shared/engines"
 	"nvpair-shared/errors"
 	"nvpair-shared/noderec"
@@ -34,14 +35,12 @@ type engineOwnership int
 const (
 	// adoptedEngine — the engine may have been started outside PAIR, so the
 	// broker has no takeover authority over it. It is repositioned only while
-	// stopped, and even then the move is deferred until the proxy has proved
-	// it holds the facade port. Ollama.
+	// stopped.
 	adoptedEngine engineOwnership = iota
 
 	// managedEngine — engine-manager can stop and reposition a process it
 	// owns, or an identified command-mode runtime with an official stop
-	// command. It still refuses unknown or unowned processes. LM Studio and
-	// llama.cpp; only LM Studio needs automatic compatibility-port takeover.
+	// command. It still refuses unknown or unowned processes.
 	managedEngine
 )
 
@@ -50,13 +49,11 @@ const (
 type engineProxyProfile struct {
 	engines.Engine
 
-	// Ownership determines whether a running engine may be relocated when an
-	// engine-specific compatibility-port takeover requires it.
+	// Ownership determines whether port planning may relocate a running engine.
 	Ownership engineOwnership
 
 	// HealthProbePath is the path whose 200 means "this engine is answering".
-	// Ollama's liveness convention is a plain GET of the root; an
-	// OpenAI-compatible engine answers on its model list.
+	// An OpenAI-compatible engine answers on its model list.
 	HealthProbePath string
 }
 
@@ -76,7 +73,7 @@ func (p engineProxyProfile) mayMoveRunningEngine() bool {
 // distinguish that from a stranger — so it moves the backend first and
 // re-checks the facade afterwards, when a still-busy port genuinely means
 // someone else. Applying the adopted rule to a managed engine would block the
-// most common install, where LM Studio is already running on its facade port.
+// case where a managed engine is already running on its facade port.
 func (p engineProxyProfile) blocksOnOccupiedFacade() bool {
 	return p.Ownership == adoptedEngine
 }
@@ -101,12 +98,8 @@ type engineProxyRuntime struct {
 	// stream. Guarded by Broker.proxyMu.
 	subscribed bool
 
-	// managedFacade reports that the broker is holding this engine's facade
-	// port for its proxy.
-	managedFacade atomic.Bool
 	// explicitSettings keeps automatic bind recovery from overriding a saved
-	// user choice. The reader must inspect this without taking engineConfigMu,
-	// which a settings operation may hold while waiting for the same reader.
+	// user choice during facade bring-up and bind retry.
 	explicitSettings atomic.Bool
 
 	// backendPort is engine-manager's configured port for the engine itself,
@@ -121,17 +114,6 @@ type engineProxyRuntime struct {
 	// the proxy restore its own persisted port.
 	startupPort atomic.Int32
 }
-
-// Deliberately not here yet: the ownership gate channel and its sync.Once, the
-// respawn generations, and the reconcile mutex.
-//
-// The gate channel's nil-ness is load-bearing — a nil channel means "no gate
-// configured", which is how a test that constructs a bare &Broker{} gets
-// ungated relays. Moving it behind a lazily-built runtime would quietly make
-// every such broker gated instead. The generations are worse: Ollama's lives
-// under ollamaHostAliasMu because it is bumped together with the alias
-// snapshot, while LM Studio's is a plain atomic, and collapsing that
-// difference is what deadlocks the JSON-RPC read pump.
 
 // engineProxy resolves an engine's runtime state.
 //
@@ -153,23 +135,11 @@ func (b *Broker) engineProxy(p engineProxyProfile) *engineProxyRuntime {
 	return b.dynamicEngineRuntime(p.Name)
 }
 
-// ollamaState and lmstudioState are shorthands for code that is inherently
-// about those engines' special ownership behavior. Profile-generic code should
-// take an engineProxyProfile and call engineProxy instead.
-func (b *Broker) ollamaState() *engineProxyRuntime   { return b.engineProxy(ollamaProxyProfile) }
-func (b *Broker) lmstudioState() *engineProxyRuntime { return b.engineProxy(lmstudioProxyProfile) }
-
 // engineProxyProfiles is the broker's engine set, in preparation order.
-// Ollama is first because its preparation reserves any inherited OLLAMA_HOST
-// alias that later engines must route around.
 var engineProxyProfiles = buildEngineProxyProfiles()
 
 func buildEngineProxyProfiles() []engineProxyProfile {
 	brokerOnly := map[string]engineProxyProfile{
-		"ollama": {Ownership: adoptedEngine, HealthProbePath: "/"},
-		// LM Studio's command-mode runtime has an official stop command;
-		// llama.cpp's managed process is stopped directly by engine-manager.
-		"lmstudio": {Ownership: managedEngine, HealthProbePath: "/v1/models"},
 		"llamacpp": {Ownership: managedEngine, HealthProbePath: "/health"},
 	}
 	out := make([]engineProxyProfile, 0, len(engines.All()))
@@ -182,13 +152,12 @@ func buildEngineProxyProfiles() []engineProxyProfile {
 }
 
 // enableFacadeRequest is the broker's facade/enable payload. It mirrors the
-// child's parameter struct; the port and alias addresses travel here rather
+// child's parameter struct; the port travels here rather
 // than on argv because the broker plans a different port for each engine.
 type enableFacadeRequest struct {
-	Engine              string   `json:"engine"`
-	Port                int      `json:"port,omitempty"`
-	AliasAddresses      []string `json:"aliasAddresses,omitempty"`
-	IgnorePersistedPort bool     `json:"ignorePersistedPort,omitempty"`
+	Engine              string `json:"engine"`
+	Port                int    `json:"port,omitempty"`
+	IgnorePersistedPort bool   `json:"ignorePersistedPort,omitempty"`
 	// Descriptor accompanies a descriptor engine only; see enginecatalog.go.
 	Descriptor *engines.Descriptor `json:"descriptor,omitempty"`
 }
@@ -277,7 +246,7 @@ func (b *Broker) enableProxyFacadeWithFallback(
 	if err == nil || !stderrors.Is(err, errFacadeBindFailed) {
 		return err
 	}
-	if profile, ok := engineProxyProfileFor(spec.Engine); ok && b.engineProxy(profile).explicitSettings.Load() {
+	if profile, ok := b.frontedEngineProfile(spec.Engine); ok && b.engineProxy(profile).explicitSettings.Load() {
 		return err
 	}
 	// Teardown began between the attempt and the retry: stop here rather than
@@ -318,9 +287,6 @@ func (b *Broker) defaultEngineFallbackPortWithCheck(
 	profile engineProxyProfile, failed int, available func(int) bool,
 ) int {
 	excluded := []int{failed, profile.EnginePortBase}
-	if alias := b.currentOllamaHostAlias().Port; alias > 0 {
-		excluded = append(excluded, alias)
-	}
 	for port := range b.siblingEngineProxyPorts(profile) {
 		excluded = append(excluded, port)
 	}
@@ -340,7 +306,7 @@ func (b *Broker) defaultEngineFallbackPortWithCheck(
 // on a status, or a cleared error on the wrong tab.
 //
 // Callers must strip before every dispatch, including the errors relay: a
-// prefixed "ollama:errors:report" does not match methodErrorsReport, so an
+// prefixed "llamacpp:errors:report" does not match methodErrorsReport, so an
 // unstripped error would fall through to the client stream as an unknown event.
 func facadeMethodFor(profile engineProxyProfile, method string) (string, bool) {
 	engine, bare := engines.SplitAddressedMethod(method)
@@ -356,7 +322,7 @@ func facadeMethodFor(profile engineProxyProfile, method string) (string, bool) {
 }
 
 // engineProxyProfileForMethod resolves a relayed client method such as
-// "ollama-proxy:nodes/list" to the engine whose proxy should receive it.
+// "llamacpp-proxy:nodes/list" to the engine whose proxy should receive it.
 func engineProxyProfileForMethod(method string) (engineProxyProfile, bool) {
 	for _, p := range engineProxyProfiles {
 		if strings.HasPrefix(method, p.ComponentName()+":") {
@@ -380,10 +346,6 @@ func engineProxyProfileFor(name string) (engineProxyProfile, bool) {
 // unified binary has to be resolvable, and the engine has to be one the
 // operator asked for via --proxy-engines.
 //
-// A disabled engine still runs the not-resolved branch at its call site, which
-// is what settles its ownership gate. Skipping the branch entirely would leave
-// the gate closed and strand every engine request behind it.
-//
 // A fronted descriptor engine is enabled whenever the binary resolves:
 // --proxy-engines names built-in engines only, and loadDynamicEngines has
 // already applied the fronting rule.
@@ -403,29 +365,14 @@ func (b *Broker) proxyEnabled(p engineProxyProfile) bool {
 }
 
 // prepareEnabledFacades prepares port ownership for the engines the broker is
-// actually going to front, in table order — Ollama first, because its alias
-// reservation constrains later engines. The default path records the engine
-// port without a gate or automatic relocation.
-//
-// The enablement check belongs here and not downstream, because preparation is
-// not read-only: LM Studio's engine move runs inside it, so
-// preparing an engine whose proxy is never started relocates that engine off
-// its own stock port and leaves nothing serving it. Ollama cannot show the
-// symptom, since its move is deferred until its proxy proves it holds the
-// facade — which is exactly why this cannot be left to the callee.
+// actually going to front, in table order. Preparation records each engine's
+// configured port without probing or relocating a process.
 func (b *Broker) prepareEnabledFacades() {
-	for _, profile := range engineProxyProfiles {
+	for _, profile := range b.frontedEngineProfiles() {
 		if !b.proxyEnabled(profile) {
 			continue
 		}
-		switch profile.Name {
-		case ollamaProxyProfile.Name:
-			b.prepareManagedOllamaFacade()
-		case lmstudioProxyProfile.Name:
-			b.prepareManagedLMStudioFacade()
-		default:
-			b.prepareDefaultEngineFacade(profile)
-		}
+		b.prepareDefaultEngineFacade(profile)
 	}
 }
 
@@ -461,8 +408,7 @@ func (p engineProxyProfile) addressed(method string) string {
 	return engines.AddressMethod(p.Name, method)
 }
 
-// ownershipBlockedID matches the per-engine constants; see
-// TestBrokerConstantsMatchTheEngineTable.
+// ownershipBlockedID is the stable per-engine proxy availability warning ID.
 func (p engineProxyProfile) ownershipBlockedID() string {
 	return p.ComponentName() + ":port-ownership-blocked"
 }
@@ -645,7 +591,7 @@ func (b *Broker) handleEngineProxyBrokerRequest(profile engineProxyProfile, meth
 //
 // The client's component prefix comes off and the facade address goes on. Both
 // name the engine, but they are not the same string and not interchangeable:
-// "ollama-proxy:" is how a client addresses the component, "ollama:" is how a
+// "llamacpp-proxy:" is how a client addresses the component, "llamacpp:" is how a
 // message addresses a facade inside the process.
 //
 // <engine>-proxy:shutdown is refused: the broker owns the proxy lifecycle, so a
@@ -709,7 +655,7 @@ func mustEngineProxyProfile(name string) engineProxyProfile {
 // the likeliest occupant is its own engine, which the relocation branch is
 // about to move. The second check is therefore reached only by managed
 // engines — for an adopted one the first check has already returned.
-func planManagedEnginePorts(p engineProxyProfile, enabled bool, st ollamaPortStatus, available func(int) bool) managedPortPlan {
+func planManagedEnginePorts(p engineProxyProfile, enabled bool, st enginePortStatus, available func(int) bool) managedPortPlan {
 	if !enabled {
 		return managedPortPlan{}
 	}
@@ -747,4 +693,70 @@ func planManagedEnginePorts(p engineProxyProfile, enabled bool, st ollamaPortSta
 		return managedPortPlan{Blocked: "no free backend port is available"}
 	}
 	return managedPortPlan{Enabled: true, BackendPort: backend}
+}
+
+// configuredEngineProxyPort reads a proxy's persisted port, or its facade default.
+func configuredEngineProxyPort(p engineProxyProfile) int {
+	if port := savedEngineProxyPort(p); port > 0 {
+		return port
+	}
+	return p.FacadePort
+}
+
+func savedEngineProxyPort(p engineProxyProfile) int {
+	path, err := appdir.Path(p.PortFile)
+	if err != nil {
+		return 0
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	var stored struct {
+		Port int `json:"port"`
+	}
+	if json.Unmarshal(data, &stored) != nil || stored.Port < 1 || stored.Port > 65535 {
+		return 0
+	}
+	return stored.Port
+}
+
+// siblingEngineProxyPorts is every port an engine other than self is going to
+// want, with the reason to show a user who collided with one: the facade it
+// claims, the backend base a managed engine gets relocated onto, and its
+// persisted, planned and live ports if it has them.
+//
+// A proxy's bind-failure fallback must leave sibling engine ports available
+// for the next desired-state restore.
+//
+// Ports are reserved even for an engine deselected via --proxy-engines. The
+// engine's persisted configuration outlives this process, so handing its port
+// away is not made safe by the proxy being off right now; the reason text says
+// so rather than the set quietly shrinking.
+func (b *Broker) siblingEngineProxyPorts(self engineProxyProfile) map[int]string {
+	reserved := map[int]string{}
+	for _, p := range b.frontedEngineProfiles() {
+		if p.Name == self.Name {
+			continue
+		}
+		suffix := ""
+		if !b.proxyEnabled(p) {
+			suffix = " (its proxy is not enabled, but the port stays reserved)"
+		}
+		reserved[p.FacadePort] = fmt.Sprintf("the %s compatibility proxy uses port %d%s", p.DisplayName, p.FacadePort, suffix)
+		// Managed ownership is prepared after this check and moves a colliding
+		// backend here, so nothing else may be sitting on it.
+		reserved[p.EnginePortBase] = fmt.Sprintf("the managed %s backend uses port %d%s", p.DisplayName, p.EnginePortBase, suffix)
+		// Prefer the most concrete description when port sources coincide.
+		if persisted := configuredEngineProxyPort(p); persisted > 0 {
+			reserved[persisted] = fmt.Sprintf("the %s proxy is configured on port %d%s", p.DisplayName, persisted, suffix)
+		}
+		if planned := int(b.engineProxy(p).startupPort.Load()); planned > 0 {
+			reserved[planned] = fmt.Sprintf("the %s proxy is planned on port %d%s", p.DisplayName, planned, suffix)
+		}
+		if live := b.engineProxyListenPort(p); live > 0 {
+			reserved[live] = fmt.Sprintf("the %s proxy is listening on port %d%s", p.DisplayName, live, suffix)
+		}
+	}
+	return reserved
 }

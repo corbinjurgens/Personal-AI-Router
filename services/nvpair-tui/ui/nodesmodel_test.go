@@ -205,16 +205,13 @@ func TestMergeManualProbeBeatsDiscoverySilence(t *testing.T) {
 // TestMergeUsesEveryFactTheManualWorkerReports is the regression guard for the
 // merged table reading the manual-node worker's reply too narrowly.
 //
-// It decoded only Ollama and node-info liveness and an address, so a host
-// running only LM Studio read Offline, a hostname typed by hand could not be
-// joined to the same machine discovered by IP, and the node-info port and TLS
-// setting the probe found were dropped.
+// Node-info liveness, identity, port and TLS settings all survive the merge.
 func TestMergeUsesEveryFactTheManualWorkerReports(t *testing.T) {
 	rows := mergeNodes(nodeFeeds{
-		manual: []manualNode{{ID: "m1", Name: "lms-only", Address: "10.0.0.7", LMStudioUp: true}},
+		manual: []manualNode{{ID: "m1", Name: "node-info", Address: "10.0.0.7", NodeInfoUp: true}},
 	})
-	if got := findRow(t, rows, "lms-only").presence; got != presenceOnline {
-		t.Errorf("a host answering only on LM Studio reads %v, want Online", got)
+	if got := findRow(t, rows, "node-info").presence; got != presenceOnline {
+		t.Errorf("a host answering node-info reads %v, want Online", got)
 	}
 
 	// Typed as a hostname, discovered by IP: only the UUID ties them together.

@@ -51,16 +51,6 @@ func TestLinkedModelRecognitionBoundary(t *testing.T) {
 		engine, model string
 		files         map[string]int64
 	}
-	ollama := func(t *testing.T) fixture {
-		t.Helper()
-		root := t.TempDir()
-		fx := writeOllamaModel(t, filepath.Join(root, "models"), "demo", 128, 1)
-		files := map[string]int64{fx.manifestRel: int64(len(fx.manifest))}
-		for path, data := range fx.blobs {
-			files[path] = int64(len(data))
-		}
-		return fixture{copyTestExecutor(t, "ollama", root, true), "ollama", "demo", files}
-	}
 	llama := func(t *testing.T) fixture {
 		t.Helper()
 		root := t.TempDir()
@@ -127,12 +117,8 @@ func TestLinkedModelRecognitionBoundary(t *testing.T) {
 					source.inventory.modelsDir != observation.modelsDir || source.inventory.epoch != observation.epoch || len(source.artifacts) != len(list.Files) {
 					t.Fatalf("source lost its exact native observation, run, configuration or artifact set: %+v", source)
 				}
-				wantCalls := 1
-				if f.engine == "ollama" {
-					wantCalls = 2
-				}
-				if *calls != wantCalls {
-					t.Errorf("fresh selected-engine recognition calls=%d, want %d (Ollama includes final-publication recheck)", *calls, wantCalls)
+				if *calls != 1 {
+					t.Errorf("fresh selected-engine recognition calls=%d, want 1", *calls)
 				}
 				if c.readAt == 0 || c.opens != c.closes || (f.engine == "llamacpp" && c.readDir == 0) {
 					t.Fatalf("native control did not exercise closed instrumented readers: %+v", c)
@@ -225,36 +211,7 @@ func TestLinkedModelRecognitionBoundary(t *testing.T) {
 			})
 		})
 	}
-	testNative("ollama", ollama)
 	testNative("llama HF fallback", llama)
-
-	t.Run("LM Studio native row needs no running HTTP inventory", func(t *testing.T) {
-		root := t.TempDir()
-		const model, path = "owner/demo/demo-Q4_K_M", "owner/demo/demo-Q4_K_M.gguf"
-		writeTestFile(t, filepath.Join(root, filepath.FromSlash(path)), testBytes(128, 3))
-		ex := copyTestExecutor(t, "lmstudio", root, true)
-		ex.client.Transport = memoryModelsTransport(func(*http.Request) (*http.Response, error) {
-			t.Error("LM Studio source attempted an additional HTTP inventory gate")
-			return nil, errors.New("unexpected HTTP inventory")
-		})
-		original, calls := lmsListModels, 0
-		lmsListModels = func(_ context.Context, owner *Executor, _ string) ([]lmsListEntry, error) {
-			if owner != ex {
-				t.Fatal("LM Studio listing used another executor")
-			}
-			calls++
-			return []lmsListEntry{{ModelKey: model, Path: path}}, nil
-		}
-		t.Cleanup(func() { lmsListModels = original })
-		list, err := ex.modelSourceFiles(context.Background(), "lmstudio", model)
-		if err != nil {
-			t.Fatalf("native LM Studio row: %v", err)
-		}
-		assertFiles(t, fixture{ex, "lmstudio", model, map[string]int64{path: 128}}, list)
-		if calls != 2 {
-			t.Fatalf("native row queries=%d, want 2 including final-publication row-drift check", calls)
-		}
-	})
 
 	testCustom := func(name string, configure func(*testing.T, *Executor, string, string)) {
 		t.Run(name, func(t *testing.T) {

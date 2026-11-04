@@ -178,7 +178,7 @@ describe('copy wire boundary', () => {
     })
     const invalidResults: [string, JsonValue][] = [
         ['wrong operation', { opId: 'c'.repeat(32), result }],
-        ['wrong engine', { opId: request.opId, result: { ...result, engine: 'ollama' } }],
+        ['wrong engine', { opId: request.opId, result: { ...result, engine: 'llamacpp-custom' } }],
         ['wrong model', { opId: request.opId, result: { ...result, model: 'other' } }],
         ['invalid durability', { opId: request.opId, result: { ...result, durability: 'yes' } }],
         ['no result', { opId: request.opId }]
@@ -206,7 +206,7 @@ describe('copy wire boundary', () => {
             parseModelCopyCapabilities({ ...capability, version: 2 }, 'llamacpp')
         ).toThrow()
         expect(() =>
-            parseModelCopyCapabilities({ ...capability, engine: 'ollama' }, 'llamacpp')
+            parseModelCopyCapabilities({ ...capability, engine: 'llamacpp-custom' }, 'llamacpp')
         ).toThrow()
     })
     it('validates snapshot tuples and refuses mismatched nested progress', () => {
@@ -567,18 +567,18 @@ describe('copy state', () => {
     it('keeps ordinary pull keys and progress independent from copy outcomes', () => {
         const key = engineProgressKey({
             nodeId: 'Joes',
-            engineType: 'ollama',
+            engineType: 'llama-cpp',
             operation: 'pull',
             model: 'qwen:4b'
         })
-        state.beginRemoteModelPull('Joes', 'ollama', 'qwen:4b')
+        state.beginRemoteModelPull('Joes', 'llama-cpp', 'qwen:4b')
         state.beginModelCopy(request)
         state.finishModelCopy(request, 'unknown')
-        expect(key).toBe('Joes:ollama:pull:qwen:4b')
+        expect(key).toBe('Joes:llama-cpp:pull:qwen:4b')
         expect(
             state.getEngineInitialState().activeProgress.some(p => engineProgressKey(p) === key)
         ).toBe(true)
-        state.finishRemoteModelPull('Joes', 'ollama', 'qwen:4b')
+        state.finishRemoteModelPull('Joes', 'llama-cpp', 'qwen:4b')
     })
 })
 

@@ -234,7 +234,7 @@ func TestModelDownloadDuplicateIdentityAndKey(t *testing.T) {
 	test := func(name string, mutate func(*Entry), wantValid bool) {
 		t.Run(name, func(t *testing.T) {
 			s := modelDownloadSnapshot()
-			s.Entries[0].Engine, s.Entries[0].Model = "ollama", "demo"
+			s.Entries[0].Engine, s.Entries[0].Model = "llamacpp-custom", "demo"
 			second := s.Entries[0]
 			mutate(&second)
 			s.Entries = append(s.Entries, second)
@@ -405,7 +405,7 @@ func TestModelDownloadEqualObservesEveryField(t *testing.T) {
 	test("recovery", func(s *Snapshot) { s.RecoveryRequired = true })
 	test("entries", func(s *Snapshot) { s.Entries = []Entry{} })
 	test("ID", func(s *Snapshot) { s.Entries[0].ID = strings.Repeat("2", 32) })
-	test("engine", func(s *Snapshot) { s.Entries[0].Engine = "ollama" })
+	test("engine", func(s *Snapshot) { s.Entries[0].Engine = "llamacpp" })
 	test("model", func(s *Snapshot) { s.Entries[0].Model = "other" })
 	test("phase", func(s *Snapshot) { s.Entries[0].Phase = PhaseUnknown })
 	test("readiness", func(s *Snapshot) { s.Entries[0].BlocksReadiness = false })

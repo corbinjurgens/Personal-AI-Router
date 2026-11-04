@@ -111,14 +111,12 @@ func TestModelsRefreshConvergesWithoutMDNSChange(t *testing.T) {
 	stub.set(map[string]any{
 		"models": []string{"llama3:8b", "qwen:0.5b", "org/router-model-GGUF:Q4_K_M"},
 		"modelsByEngine": map[string][]string{
-			"ollama":   {"llama3:8b"},
-			"lmstudio": {"qwen:0.5b"},
-			"llamacpp": {"org/router-model-GGUF:Q4_K_M"},
+			"llamacpp":        {"llama3:8b", "org/router-model-GGUF:Q4_K_M"},
+			"llamacpp-custom": {"qwen:0.5b"},
 		},
 		"loadedByEngine": map[string][]string{
-			"ollama":   {"llama3:8b"},
-			"lmstudio": {},
-			"llamacpp": {"org/router-model-GGUF:Q4_K_M"},
+			"llamacpp":        {"llama3:8b", "org/router-model-GGUF:Q4_K_M"},
+			"llamacpp-custom": {},
 		},
 	})
 	pollForNode(t, stdin, msgs, instance, 45*time.Second, func(n availableNode) bool {
@@ -132,17 +130,15 @@ func TestModelsRefreshConvergesWithoutMDNSChange(t *testing.T) {
 	stub.set(map[string]any{
 		"models": []string{},
 		"modelsByEngine": map[string][]string{
-			"ollama":   {},
-			"lmstudio": {},
-			"llamacpp": {},
+			"llamacpp":        {},
+			"llamacpp-custom": {},
 		},
 		"loadedByEngine": map[string][]string{
-			"ollama":   {},
-			"lmstudio": {},
-			"llamacpp": {},
+			"llamacpp":        {},
+			"llamacpp-custom": {},
 		},
 	})
-	emptyByEngine := map[string][]string{"ollama": {}, "lmstudio": {}, "llamacpp": {}}
+	emptyByEngine := map[string][]string{"llamacpp": {}, "llamacpp-custom": {}}
 	pollForNode(t, stdin, msgs, instance, 45*time.Second, func(n availableNode) bool {
 		return len(n.Models) == 0 && byEngineEqual(n.ModelsByEngine, emptyByEngine) &&
 			byEngineEqual(n.LoadedByEngine, emptyByEngine)

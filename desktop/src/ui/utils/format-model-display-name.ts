@@ -9,16 +9,15 @@ const HUB_REGISTRY_ARROW = ' \u2192 '
  * send the return value to the server; always use the raw model id for
  * wire operations.
  *
- * When engineType is unknown or omitted, applies generic HF/hub
- * heuristics only. Does not truncate; callers handle layout constraints
- * themselves.
+ * Applies generic HF/hub heuristics only. Does not truncate; callers
+ * handle layout constraints themselves.
  */
 /** Upper bound on the length of any untrusted name fed to a formatter. Model /
  *  workload names arrive over the wire from cluster peers and engine model
  *  lists; capping length keeps every formatter linear-time on hostile input. */
 const MAX_FORMAT_INPUT_CHARS = 256
 
-export function formatModelDisplayName(name: string, engineType?: string | null): string {
+export function formatModelDisplayName(name: string): string {
     if (!name) {
         return name
     }
@@ -38,45 +37,10 @@ export function formatModelDisplayName(name: string, engineType?: string | null)
         formatted = formatHuggingFaceModelName(formatted)
     }
 
-    switch (engineType) {
-        case 'lm-studio':
-            return isHfModel ? formatted : formatLmStudioModelName(formatted)
-
-        case 'ollama':
-            return formatOllamaModelName(formatted)
-
-        default:
-            if (formatted.includes('/')) {
-                return formatHuggingFaceModelName(formatted)
-            }
-            return formatted
+    if (formatted.includes('/')) {
+        return formatHuggingFaceModelName(formatted)
     }
-}
-
-/**
- * Format an LM Studio / llama.cpp GGUF model path into a readable name.
- * "lmstudio-community/Meta-Llama-3.1-8B-Instruct-GGUF/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
- * -> "Meta Llama 3.1 8B Instruct (Q4_K_M)"
- */
-function formatLmStudioModelName(modelPath: string): string {
-    const segments = modelPath.split('/')
-    let filename = segments[segments.length - 1]
-
-    filename = filename.replace(/\.gguf$/i, '')
-
-    // `_` is already a `\w` character, so the old `(?:_\w+)*` tail was redundant
-    // and ambiguous — it made this pattern backtrack exponentially on names like
-    // `m-Q1` + `_a`.repeat(n) + `!`. `\w*` alone matches the same quant suffixes
-    // in linear time.
-    const quantMatch = filename.match(/[-_](Q\d\w*)$/i)
-    const quantization = quantMatch ? quantMatch[1] : ''
-    if (quantMatch) {
-        filename = filename.slice(0, quantMatch.index)
-    }
-
-    const name = filename.replace(/[-_]/g, ' ').replace(/\s+/g, ' ').trim()
-
-    return quantization ? `${name} (${quantization})` : name
+    return formatted
 }
 
 /**
@@ -125,8 +89,4 @@ function formatHubRegistryDisplayLabel(label: string): string {
         .trim()
     if (author && humanRepo) return `${humanRepo} (${author})`
     return humanRepo || author || repoPart
-}
-
-function formatOllamaModelName(name: string): string {
-    return name.replace(/:latest$/i, '')
 }

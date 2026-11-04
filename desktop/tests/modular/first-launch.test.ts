@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, expect, it } from 'vitest'
+import { customEngine } from './engine-fixtures'
 import type { NodeItem } from '@/shared/types/nodes'
 import type { EngineProcessStatus, EngineStatusData, EngineType } from '@/shared/types/engines'
 import { buildOverviewNodes } from '@/ui/utils/overview-nodes'
@@ -39,12 +40,12 @@ describe('first launch', () => {
     it('waits for every local welcome-engine status before onboarding', () => {
         const local = new Map<EngineType, unknown>()
         const statuses = new Map<string, ReadonlyMap<EngineType, unknown>>([['self', local]])
-        const candidates: EngineType[] = ['ollama', 'lm-studio']
+        const candidates: EngineType[] = ['llama-cpp', customEngine]
 
         expect(hasWelcomeEngineStatuses(statuses, 'self', candidates)).toBe(false)
-        local.set('ollama', {})
+        local.set('llama-cpp', {})
         expect(hasWelcomeEngineStatuses(statuses, 'self', candidates)).toBe(false)
-        local.set('lm-studio', {})
+        local.set(customEngine, {})
         expect(hasWelcomeEngineStatuses(statuses, 'self', candidates)).toBe(true)
     })
 
@@ -53,14 +54,14 @@ describe('first launch', () => {
         const statuses = new Map<string, ReadonlyMap<EngineType, EngineStatusData>>([
             ['self', local]
         ])
-        const candidates: EngineType[] = ['ollama', 'lm-studio']
+        const candidates: EngineType[] = ['llama-cpp', customEngine]
 
         expect(areWelcomeEnginesInstalled(statuses, 'self', candidates)).toBe(false)
-        local.set('ollama', engineStatus('ollama', 'running'))
+        local.set('llama-cpp', engineStatus('llama-cpp', 'running'))
         expect(areWelcomeEnginesInstalled(statuses, 'self', candidates)).toBe(false)
-        local.set('lm-studio', engineStatus('lm-studio', 'stopped'))
+        local.set(customEngine, engineStatus(customEngine, 'stopped'))
         expect(areWelcomeEnginesInstalled(statuses, 'self', candidates)).toBe(true)
-        local.set('lm-studio', engineStatus('lm-studio', 'not-installed'))
+        local.set(customEngine, engineStatus(customEngine, 'not-installed'))
         expect(areWelcomeEnginesInstalled(statuses, 'self', candidates)).toBe(false)
     })
 
@@ -84,13 +85,13 @@ describe('first launch', () => {
     })
 
     it('keeps onboarding open until every selected engine is installed', () => {
-        const started = new Set<EngineType>(['ollama', 'lm-studio'])
+        const started = new Set<EngineType>(['llama-cpp', customEngine])
 
         expect(
             getWelcomeInstallOutcome(
                 [
-                    { engineType: 'ollama', status: 'stopped' },
-                    { engineType: 'lm-studio', status: 'installing' }
+                    { engineType: 'llama-cpp', status: 'stopped' },
+                    { engineType: customEngine, status: 'installing' }
                 ],
                 started
             )
@@ -98,8 +99,8 @@ describe('first launch', () => {
         expect(
             getWelcomeInstallOutcome(
                 [
-                    { engineType: 'ollama', status: 'running' },
-                    { engineType: 'lm-studio', status: 'stopped' }
+                    { engineType: 'llama-cpp', status: 'running' },
+                    { engineType: customEngine, status: 'stopped' }
                 ],
                 started
             )
@@ -109,26 +110,26 @@ describe('first launch', () => {
     it('allows retry when an installation returns to not-installed', () => {
         expect(
             getWelcomeInstallOutcome(
-                [{ engineType: 'lm-studio', status: 'not-installed' }],
-                new Set<EngineType>(['lm-studio'])
+                [{ engineType: customEngine, status: 'not-installed' }],
+                new Set<EngineType>([customEngine])
             )
         ).toBe('failed')
         expect(
             getWelcomeInstallOutcome(
-                [{ engineType: 'lm-studio', status: 'not-installed' }],
+                [{ engineType: customEngine, status: 'not-installed' }],
                 new Set<EngineType>()
             )
         ).toBe('pending')
     })
 
     it('keeps a partial failure locked until the other engine finishes', () => {
-        const started = new Set<EngineType>(['ollama', 'lm-studio'])
-        const failed = new Set<EngineType>(['lm-studio'])
+        const started = new Set<EngineType>(['llama-cpp', customEngine])
+        const failed = new Set<EngineType>([customEngine])
         expect(
             getWelcomeInstallOutcome(
                 [
-                    { engineType: 'ollama', status: 'installing' },
-                    { engineType: 'lm-studio', status: 'not-installed' }
+                    { engineType: 'llama-cpp', status: 'installing' },
+                    { engineType: customEngine, status: 'not-installed' }
                 ],
                 started,
                 failed
@@ -137,8 +138,8 @@ describe('first launch', () => {
         expect(
             getWelcomeInstallOutcome(
                 [
-                    { engineType: 'ollama', status: 'stopped' },
-                    { engineType: 'lm-studio', status: 'not-installed' }
+                    { engineType: 'llama-cpp', status: 'stopped' },
+                    { engineType: customEngine, status: 'not-installed' }
                 ],
                 started,
                 failed

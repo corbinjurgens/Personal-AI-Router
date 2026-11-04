@@ -21,17 +21,17 @@ func TestFailStaleForeignWorkloadsRetiresSilentRemoteWork(t *testing.T) {
 	b := &Broker{workloads: workloadstore.New(), nodeID: "self"}
 
 	// Remote-origin, executing on the origin: the sweep's business.
-	if !b.workloads.Apply(storeIncoming("7", "peer-uuid", "ollama", "r1", "running", "peer-uuid")) {
+	if !b.workloads.Apply(storeIncoming("7", "peer-uuid", "llamacpp", "r1", "running", "peer-uuid")) {
 		t.Fatal("remote running apply should be accepted")
 	}
 	// Local-origin: our own proxies are the authority and never re-assert here.
-	if !b.workloads.Apply(storeIncoming("8", "self", "ollama", "r1", "running", "self")) {
+	if !b.workloads.Apply(storeIncoming("8", "self", "llamacpp", "r1", "running", "self")) {
 		t.Fatal("local running apply should be accepted")
 	}
 	// Remote-origin but executing HERE. Still the sweep's business: lifecycle
 	// events come from the origin's proxy, not from our engine, so nothing else
 	// will ever clear this record.
-	if !b.workloads.Apply(storeIncoming("9", "peer-uuid", "ollama", "r1", "running", "self")) {
+	if !b.workloads.Apply(storeIncoming("9", "peer-uuid", "llamacpp", "r1", "running", "self")) {
 		t.Fatal("remote-origin local-executor apply should be accepted")
 	}
 
@@ -66,14 +66,14 @@ func TestFailStaleForeignWorkloadsRetiresSilentRemoteWork(t *testing.T) {
 func TestFailStaleForeignWorkloadsYieldsToTheOrigin(t *testing.T) {
 	b := &Broker{workloads: workloadstore.New(), nodeID: "self"}
 	// Executing on the origin, so the sweep is entitled to judge it.
-	b.workloads.Apply(storeIncoming("9", "peer-uuid", "ollama", "r1", "running", "peer-uuid"))
+	b.workloads.Apply(storeIncoming("9", "peer-uuid", "llamacpp", "r1", "running", "peer-uuid"))
 
 	b.failStaleForeignWorkloads(-time.Second)
 	if r, _ := b.workloads.Get("peer-uuid", "9"); r.State != "failed" {
 		t.Fatalf("state = %q, want failed", r.State)
 	}
 
-	if !b.workloads.Apply(storeIncoming("9", "peer-uuid", "ollama", "r1", "running", "peer-uuid")) {
+	if !b.workloads.Apply(storeIncoming("9", "peer-uuid", "llamacpp", "r1", "running", "peer-uuid")) {
 		t.Fatal("the origin's authoritative running must override the inferred failure")
 	}
 	r, _ := b.workloads.Get("peer-uuid", "9")
@@ -82,7 +82,7 @@ func TestFailStaleForeignWorkloadsYieldsToTheOrigin(t *testing.T) {
 	}
 
 	// And the origin's real terminal still lands afterwards.
-	if !b.workloads.Apply(storeIncoming("9", "peer-uuid", "ollama", "r1", "completed", "peer-uuid")) {
+	if !b.workloads.Apply(storeIncoming("9", "peer-uuid", "llamacpp", "r1", "completed", "peer-uuid")) {
 		t.Fatal("the origin's terminal must apply")
 	}
 	if r, _ := b.workloads.Get("peer-uuid", "9"); r.State != "completed" || r.Inferred {

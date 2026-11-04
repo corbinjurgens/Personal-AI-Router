@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -312,14 +313,17 @@ type controllerCopyFixture struct {
 	blocked                       int
 	op                            int
 	egress                        atomic.Int32
+	expectedEngines               []string
 }
 
-func newControllerCopyFixture(t *testing.T) *controllerCopyFixture {
+func newControllerCopyFixture(t *testing.T, descriptorEngines ...string) *controllerCopyFixture {
 	t.Helper()
 	if runtime.GOOS == "windows" && (!filepath.IsAbs(os.Getenv("NVPAIR_TEST_BIN_DIR")) || !strings.Contains(os.Getenv("GOFLAGS"), "nvpair-test-exec")) {
 		t.Fatal("controller copy requires the registered fixed-path Windows test wrapper")
 	}
 	f := &controllerCopyFixture{files: map[string]*controllerCopyObserver{}, stores: map[string]string{}, aliases: map[string]string{}}
+	f.expectedEngines = append(engines.Names(), descriptorEngines...)
+	slices.Sort(f.expectedEngines)
 	// The caller owns one serialized native lane. TestMain's existing registered
 	// products are reused; no new listener image or executable role is created.
 	self, err := os.Executable()
@@ -461,6 +465,11 @@ func newControllerCopyFixture(t *testing.T) *controllerCopyFixture {
 		}
 		task1WriteJSON(t, filepath.Join(n.base, "cluster", "members.json"), members)
 		writeDisabledBuiltinEngineOverrides(t, n.base, jointAppDir(n.base))
+		for _, name := range descriptorEngines {
+			absent := filepath.Join(n.base, "absent-"+name)
+			rt := map[string]any{"bin": absent, "port": 0}
+			jointWriteJSON(t, filepath.Join(jointAppDir(n.base), "engines", name+".json"), privateFixtureManifest(t, name, filepath.Join(n.base, "absent-models", name), absent, rt))
+		}
 		// Known Off and locked also establish that COPY does not activate an engine.
 		if err := os.MkdirAll(filepath.Join(jointAppDir(n.base), "engine-bin"), 0o700); err != nil {
 			t.Fatal(err)
@@ -590,7 +599,7 @@ func (f *controllerCopyFixture) writeManifestWithRouter(t *testing.T, n *task1No
 	if err := os.WriteFile(marker, []byte("fixture installation marker; not executable"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	rt := map[string]any{"bin": marker, "cli": filepath.Join(n.base, "never-start-cli"), "port": 0, "args": args, "env": map[string]string{"LLAMA_CACHE": f.stores[n.uuid]}, "ready": nil, "health": nil, "auth_statuses": []int{}}
+	rt := map[string]any{"bin": marker, "port": 0, "args": args, "env": map[string]string{"LLAMA_CACHE": f.stores[n.uuid]}, "ready": nil, "health": nil}
 	rt["editable_launch"] = map[string]any{"fixed_args": []string{}}
 	if port != 0 {
 		if err := validateFixturePort(port); err != nil {
@@ -803,8 +812,13 @@ func (f *controllerCopyFixture) assertController(t *testing.T) {
 			} `json:"engines"`
 		}
 		task2Decode(t, manager.call(t, "engine:get-installed", nil).Result, &installed)
-		if len(installed.Engines) != len(engines.All()) {
-			t.Fatal("incomplete isolated engine inventory")
+		var names []string
+		for _, engine := range installed.Engines {
+			names = append(names, engine.Engine)
+		}
+		slices.Sort(names)
+		if !slices.Equal(names, f.expectedEngines) {
+			t.Fatalf("isolated engine inventory=%v, want %v", names, f.expectedEngines)
 		}
 		for _, engine := range installed.Engines {
 			if engine.Running {

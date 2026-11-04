@@ -251,8 +251,8 @@ func mergeNodes(in nodeFeeds) []nodeRow {
 		}
 		// A probe is direct evidence and outranks discovery silence: a node on
 		// a network that filters multicast is reachable but never announced.
-		// Any service answering counts — a host running only LM Studio is as
-		// reachable as one running Ollama.
+		// Any service answering counts — a host running only one engine is as
+		// reachable as one running several.
 		if m.answered() {
 			row.presence = presenceOnline
 		} else if row.presence == presenceUnknown {

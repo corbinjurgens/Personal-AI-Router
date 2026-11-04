@@ -260,13 +260,6 @@ func (e *Executor) reconcilePresenceStateWithProcessProof(ctx context.Context, e
 		return presenceResult{Occupied: true}, false
 	}
 
-	// A command-mode engine needs its control CLI. A compatible HTTP endpoint
-	// alone (for example another OpenAI server on LM Studio's port) is not an
-	// installation and must not suppress the installer.
-	if !pathInstalled && len(st.plat.DetectRequired) == 0 && st.plat.Runtime.modeOrDefault() != "process" {
-		return presenceResult{}, false
-	}
-
 	if port == 0 || ready == nil || proc != nil || (running && !adopted) {
 		st.mu.Lock()
 		// No new native observation occurred here. Restore only an unchanged
@@ -299,9 +292,8 @@ func (e *Executor) reconcilePresenceStateWithProcessProof(ctx context.Context, e
 		st.mu.Lock()
 		// Refusing TCP proves only that the listener closed. An external
 		// process may still hold models; retain unknown ownership until its
-		// observed PID has positively exited. Command engines additionally
-		// have a separate native residency owner, which status cannot prove.
-		if st.plat.Runtime.modeOrDefault() == "command" || st.reclaimPID <= 0 || !exited(st.reclaimPID) {
+		// observed PID has positively exited.
+		if st.reclaimPID <= 0 || !exited(st.reclaimPID) {
 			changed := st.healthy
 			st.healthy = false
 			st.mu.Unlock()
@@ -379,10 +371,8 @@ func (e *Executor) reconcilePresenceStateWithProcessProof(ctx context.Context, e
 	// listener is never stopped on refusal. Passive status checks and cleanup
 	// reconciliation keep adopting so reporting and stop stay truthful.
 	var externalPID int
-	if st.plat.Runtime.modeOrDefault() == "process" {
-		if pid, _, known := owner(port); known {
-			externalPID = pid
-		}
+	if pid, _, known := owner(port); known {
+		externalPID = pid
 	}
 	e.nodeProjection.mu.Lock()
 	st.mu.Lock()

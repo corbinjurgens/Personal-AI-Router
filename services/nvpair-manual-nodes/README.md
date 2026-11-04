@@ -11,22 +11,7 @@ captured before serialization; broker alias reprojection preserves that stamp.
 The existing probe remains the only collector. Missing facts do not change
 legacy hardware display or engine inventory behavior.
 
-Ollama names and LM Studio IDs must be nonempty valid UTF-8, at most 512 UTF-8
-bytes, with no C0 (U+0000–U+001F), DEL (U+007F), or C1 (U+0080–U+009F)
-characters. The shared validator checks raw model tokens before JSON string
-decoding can replace malformed UTF-8. Invalid identifiers, including missing or
-empty names, are skipped individually; valid siblings retain their order. A
-successful list containing only invalid identifiers yields no valid models and
-does not change the engine's reachability. Malformed documents yield unavailable
-model inventory. Names are never trimmed, truncated or synthesized to pass
-validation; ordinary Unicode, spaces, tags and slashes retain their meaning.
-
-New node-policy writes are strict. Only the broker's disk-policy loader removes
-old invalid model entries and dependent references in memory, preserving valid
-siblings and explicit empty served permission without rewriting the file or
-advancing its revision. This load-only sanitation does not relax new writes.
-
-A Go service for managing manually configured nodes on networks where mDNS discovery is unavailable. Accepts node addresses via JSON-RPC, probes each for Ollama, LM Studio, and node-info, and emits status events. The node list is persisted, so it survives a restart of this worker, the broker, or the machine.
+A Go service for managing manually configured nodes on networks where mDNS discovery is unavailable. Accepts node addresses via JSON-RPC, probes each for node-info, and emits status events. The node list is persisted, so it survives a restart of this worker, the broker, or the machine.
 
 ## Communication
 
@@ -37,8 +22,6 @@ Uses bidirectional newline-delimited JSON-RPC 2.0. By default, communication is 
 | Flag | Default | Description |
 |---|---|---|
 | `--ipc <path>` | _(stdio)_ | IPC endpoint: Unix socket or Windows named pipe |
-| `--ollama-port <n>` | `11434` | Ollama health/model probe target on each manual address; `0` disables this leg |
-| `--lmstudio-port <n>` | `1234` | LM Studio model probe target on each manual address; `0` disables this leg |
 | `--node-info-port <n>` | `14318` | Plain node-info probe target; `0` disables this leg. An entry's explicit `tls_port` still selects its HTTPS target |
 | `--client-cert <path>` | _(none)_ | PEM client certificate to present when probing TLS-enabled manual nodes (requires `--client-key`) |
 | `--client-key <path>` | _(none)_ | PEM client private key matching `--client-cert` |
@@ -69,12 +52,6 @@ Emitted when a manually added node has been probed and its initial status determ
   "params":{
     "id":"manual:10.0.1.50",
     "address":"10.0.1.50",
-    "ollama_up":true,
-    "ollama_port":11434,
-    "ollama_models":["llama3.2:latest","gemma3:4b"],
-    "lmstudio_up":true,
-    "lmstudio_port":1234,
-    "lmstudio_models":["qwen2.5-7b-instruct"],
     "node_info_up":true,
     "node_info_port":14318,
     "gpus":[{"name":"NVIDIA GeForce RTX 3080","utilization_percent":37}],
@@ -85,11 +62,11 @@ Emitted when a manually added node has been probed and its initial status determ
 }
 ```
 
-Each node is probed for both inference engines: Ollama on its default `:11434` (`GET /` + `/api/tags`) and LM Studio on its default `:1234` (`GET /v1/models`, which doubles as the liveness check and the model list). `lmstudio_up` / `lmstudio_port` / `lmstudio_models` mirror the `ollama_*` fields and let a supervising broker bridge the node into that engine's `nvpair-proxy` instance the same way it bridges Ollama into its own. A node can run either engine, both, or neither.
+Each node is probed for node-info hardware inventory, telemetry and host identity. Manual entries do not supply engine health or model inventory.
 
 ### `node/updated`
 
-Emitted when a periodic probe detects a change (service going up/down, models,
+Emitted when a periodic probe detects a change (node-info going up/down,
 GPU values, telemetry validity, or sample age changed). `telemetryValid` and
 `msSince` preserve node-info's distinction between an idle 0% sample and missing
 telemetry so the broker can feed manual nodes into the same scheduler cache.
@@ -187,7 +164,7 @@ every `node/add` and every `node/remove` that removed something:
   resolved is ever saved.
 - At startup, after `ready`, every saved entry is re-added as if by `node/add`:
   it is probed and announced with `node/discovered`, so a supervising broker
-  merges it back into discovery and bridges it into the proxies with no client
+  merges it back into discovery with no client
   involvement.
 - A file that cannot be read is renamed to `manual-nodes.json.invalid` and the
   worker starts with an empty list, rather than overwriting it on the next add.
@@ -195,21 +172,17 @@ every `node/add` and every `node/remove` that removed something:
 
 ## Probing
 
-Each manual node is probed every 10 seconds, with a 3-second timeout per leg, for:
+Each manual node is probed every 10 seconds, with a 3-second timeout, for
+hardware inventory and identity via `GET /v1/node-info` on port 14318, or
+`tls_port` over HTTPS. Status changes trigger `node/updated` events, including
+CPU, memory and GPU utilization changes.
 
-- **Ollama** on port 11434: health check (`GET /`) and model list (`GET /api/tags`)
-- **LM Studio** on port 1234: `GET /v1/models`, which doubles as the liveness check and the model list
-- **Node Info** on port 14318, or `tls_port` over HTTPS: hardware inventory and identity (`GET /v1/node-info`)
-
-A node can have any combination of these, or none if the target is unreachable. Status changes trigger `node/updated` events. Because change detection compares CPU, memory, and GPU values, a node running node-info emits a `node/updated` on most probe cycles as utilization moves.
-
-Startup probe-port flags override these defaults for every entry, including
-restored entries and periodic probes. They accept 0 to 65535; zero disables the
-leg without a request or a default-port fallback. Status and `node/add` replies
-report the configured ports so the broker bridges the same inference targets
-into its proxies. An entry's `tls_port` still overrides the plain node-info
-setting and retains the existing TLS or pinned cluster client. These flags do
-not change saved entries, RPC shapes or trust checks.
+The startup `--node-info-port` flag overrides the plain target for every entry,
+including restored entries and periodic probes. It accepts 0 to 65535; zero
+disables the plain probe without a request or a default-port fallback. Status
+and `node/add` replies report the configured node-info port. An entry's
+`tls_port` overrides the plain setting and retains the existing TLS or pinned
+cluster client. Saved addresses and trust checks are unchanged.
 
 Addresses may be hostnames, such as Tailscale MagicDNS names. Every probe client disables keep-alives, so every probe opens a new connection and resolves the name again (Go's resolver keeps no cache of its own; any caching is the operating system's), and a machine that changed address is followed on the next probe.
 

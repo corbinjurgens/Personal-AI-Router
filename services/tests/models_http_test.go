@@ -34,14 +34,12 @@ func TestModelsHTTPEnrichment(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"models": []string{"llama3:8b", "qwen:0.5b", "org/router-model-GGUF:Q4_K_M"},
 			"modelsByEngine": map[string][]string{
-				"ollama":   {"llama3:8b"},
-				"lmstudio": {"qwen:0.5b"},
-				"llamacpp": {"org/router-model-GGUF:Q4_K_M"},
+				"llamacpp":        {"llama3:8b", "org/router-model-GGUF:Q4_K_M"},
+				"llamacpp-custom": {"qwen:0.5b"},
 			},
 			"loadedByEngine": map[string][]string{
-				"ollama":   {"llama3:8b"},
-				"lmstudio": {},
-				"llamacpp": {"org/router-model-GGUF:Q4_K_M"},
+				"llamacpp":        {"llama3:8b", "org/router-model-GGUF:Q4_K_M"},
+				"llamacpp-custom": {},
 			},
 		})
 	}))
@@ -123,21 +121,19 @@ func modelsMatch(models []string) bool {
 
 func modelsByEngineMatch(byEngine map[string][]string) bool {
 	want := map[string][]string{
-		"ollama":   {"llama3:8b"},
-		"lmstudio": {"qwen:0.5b"},
-		"llamacpp": {"org/router-model-GGUF:Q4_K_M"},
+		"llamacpp":        {"llama3:8b", "org/router-model-GGUF:Q4_K_M"},
+		"llamacpp-custom": {"qwen:0.5b"},
 	}
 	return byEngineEqual(byEngine, want)
 }
 
-// loadedByEngineMatch asserts the loaded set the stub served (Ollama and
-// llama.cpp each have one resident model; LM Studio is running but empty)
+// loadedByEngineMatch asserts the loaded set the stub served (llama.cpp has
+// resident models; the custom descriptor engine is running but empty)
 // survives the daemon->broker projection onto the client-facing node.
 func loadedByEngineMatch(loaded map[string][]string) bool {
 	want := map[string][]string{
-		"ollama":   {"llama3:8b"},
-		"lmstudio": {},
-		"llamacpp": {"org/router-model-GGUF:Q4_K_M"},
+		"llamacpp":        {"llama3:8b", "org/router-model-GGUF:Q4_K_M"},
+		"llamacpp-custom": {},
 	}
 	return byEngineEqual(loaded, want)
 }

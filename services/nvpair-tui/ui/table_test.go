@@ -177,17 +177,17 @@ func TestViewsAcceptRowsBeforeResize(t *testing.T) {
 		v.rebuild()
 	})
 	t.Run("jobs", func(t *testing.T) {
-		newJobsView(nil).upsert(workload{ID: "w", Model: "m", Engine: "ollama", State: "running"})
+		newJobsView(nil).upsert(workload{ID: "w", Model: "m", Engine: "llamacpp", State: "running"})
 	})
 	t.Run("node detail engines and models", func(t *testing.T) {
 		d := newNodeDetail(nil, nodeRow{
 			key:            "u",
 			name:           "n",
 			self:           true,
-			modelsByEngine: map[string][]string{"ollama": {"llama3.2"}},
-			loadedByEngine: map[string][]string{"ollama": {"llama3.2"}},
+			modelsByEngine: map[string][]string{"llamacpp": {"llama3.2"}},
+			loadedByEngine: map[string][]string{"llamacpp": {"llama3.2"}},
 		})
-		d.engines = []engineStatus{{Engine: "ollama", Installed: true}}
+		d.engines = []engineStatus{{Engine: "llamacpp", Installed: true}}
 		d.refreshEngines()
 		d.refreshModels()
 	})
@@ -241,7 +241,7 @@ func TestRowsMatchTheirColumns(t *testing.T) {
 	})
 	t.Run("jobs", func(t *testing.T) {
 		v := newJobsView(nil)
-		v.upsert(workload{ID: "w", Model: "m", Engine: "ollama", State: "running"})
+		v.upsert(workload{ID: "w", Model: "m", Engine: "llamacpp", State: "running"})
 		assertRowWidths(t, v.table)
 	})
 	t.Run("errors", func(t *testing.T) {
@@ -260,10 +260,10 @@ func TestRowsMatchTheirColumns(t *testing.T) {
 				key:            "u",
 				name:           "n",
 				self:           !remote,
-				modelsByEngine: map[string][]string{"ollama": {"llama3.2"}},
-				loadedByEngine: map[string][]string{"ollama": {"llama3.2"}},
+				modelsByEngine: map[string][]string{"llamacpp": {"llama3.2"}},
+				loadedByEngine: map[string][]string{"llamacpp": {"llama3.2"}},
 			})
-			d.engines = []engineStatus{{Engine: "ollama", Installed: true}}
+			d.engines = []engineStatus{{Engine: "llamacpp", Installed: true}}
 			d.refreshEngines()
 			d.refreshModels()
 			assertRowWidths(t, d.engineTable)

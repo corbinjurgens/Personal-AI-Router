@@ -49,7 +49,7 @@ func TestPublicEgressLeaseProcessDisabled(t *testing.T) {
 	f.copyExecutable(self, f.scannerPath)
 	f.env = append(f.env, "NVPAIR_TEST_SUBSCRIPTION_SCANNER="+f.scannerPath,
 		"NVPAIR_TEST_SUBSCRIPTION_PORT="+strconv.Itoa(freePort(t)),
-		"USERPROFILE="+f.configDir, "OLLAMA_HOST=")
+		"USERPROFILE="+f.configDir)
 	policy := egressProcessPolicy(t, "17", upstream.publicPort)
 	jointWriteJSON(t, f.policyPath(), policy)
 	f.start()
@@ -672,7 +672,7 @@ func startEgressProcessProxy(t *testing.T, base string) *egressProcessProxy {
 	p := &egressProcessProxy{cmd: exec.Command(proxyBin, "--cluster-dir", cluster, "--log-level", "error"), done: make(chan struct{}), nextID: 3000,
 		inventory: &serviceProcessInventory{paths: []string{path}, known: make(map[int32]serviceProcessIdentity)}}
 	p.cmd.Dir = base
-	p.cmd.Env = append(os.Environ(), "HOME="+base, "XDG_CONFIG_HOME="+base, "APPDATA="+base, "LOCALAPPDATA="+base, "USERPROFILE="+base, "OLLAMA_HOST=")
+	p.cmd.Env = append(os.Environ(), "HOME="+base, "XDG_CONFIG_HOME="+base, "APPDATA="+base, "LOCALAPPDATA="+base, "USERPROFILE="+base)
 	p.cmd.Stderr = &p.output
 	p.cmd.WaitDelay = 2 * time.Second
 	input, err := p.cmd.StdinPipe()

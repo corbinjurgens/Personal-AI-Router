@@ -9,13 +9,11 @@ import "fmt"
 // probes. Zero disables that leg; an entry's explicit TLS hint still takes
 // precedence over the plain node-info target.
 type probePorts struct {
-	ollama   int
-	lmstudio int
 	nodeInfo int
 }
 
 func defaultProbePorts() probePorts {
-	return probePorts{ollama: 11434, lmstudio: lmStudioPort, nodeInfo: 14318}
+	return probePorts{nodeInfo: 14318}
 }
 
 func (p probePorts) validate() error {
@@ -23,8 +21,6 @@ func (p probePorts) validate() error {
 		name string
 		port int
 	}{
-		{"ollama-port", p.ollama},
-		{"lmstudio-port", p.lmstudio},
 		{"node-info-port", p.nodeInfo},
 	} {
 		if target.port < 0 || target.port > 65535 {

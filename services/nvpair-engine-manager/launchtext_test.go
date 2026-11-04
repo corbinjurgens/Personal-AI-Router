@@ -28,23 +28,23 @@ func TestParseLaunchText(t *testing.T) {
 	}
 	test("empty arguments", "", nil)
 	test("blank arguments", " \t\r\n", nil)
-	test("env and Windows executable", `OLLAMA_HOST=127.0.0.1:11435 "C:\Program Files\Ollama\ollama.exe" serve`, []string{"OLLAMA_HOST=127.0.0.1:11435", `C:\Program Files\Ollama\ollama.exe`, "serve"})
-	test("Windows backslashes", `C:\tools\lms.exe --path 'C:\new\tools\'`, []string{`C:\tools\lms.exe`, "--path", `C:\new\tools\`})
-	test("UNC", `'\\server\share\lms.exe' server start`, []string{`\\server\share\lms.exe`, "server", "start"})
-	test("quoted segments", `lms --name="two words" --empty=''`, []string{"lms", "--name=two words", "--empty="})
-	test("empty arguments", `lms "" ''`, []string{"lms", "", ""})
-	test("escaped quotes", `lms "a\"b\\c"`, []string{"lms", `a"b\c`})
-	test("multiline", "lms\r\nserver\tstart --name '日本語\n模型'", []string{"lms", "server", "start", "--name", "日本語\n模型"})
-	test("literal expansions", `lms $HOME %USERPROFILE% {port} '~' '$(touch nope)'`, []string{"lms", "$HOME", "%USERPROFILE%", "{port}", "~", "$(touch nope)"})
-	test("literal operators", "lms '|&;<>`'", []string{"lms", "|&;<>`"})
-	test("terminator", `lms -- --port=9000`, []string{"lms", "--", "--port=9000"})
+	test("env and Windows executable", `LLAMA_ARG_PORT=8081 "C:\Program Files\llama.cpp\llama-server.exe" --jinja`, []string{"LLAMA_ARG_PORT=8081", `C:\Program Files\llama.cpp\llama-server.exe`, "--jinja"})
+	test("Windows backslashes", `C:\tools\llama-server.exe --path 'C:\new\tools\'`, []string{`C:\tools\llama-server.exe`, "--path", `C:\new\tools\`})
+	test("UNC", `'\\server\share\llama-server.exe' server start`, []string{`\\server\share\llama-server.exe`, "server", "start"})
+	test("quoted segments", `llama-server --name="two words" --empty=''`, []string{"llama-server", "--name=two words", "--empty="})
+	test("empty arguments", `llama-server "" ''`, []string{"llama-server", "", ""})
+	test("escaped quotes", `llama-server "a\"b\\c"`, []string{"llama-server", `a"b\c`})
+	test("multiline", "llama-server\r\nserver\tstart --name '日本語\n模型'", []string{"llama-server", "server", "start", "--name", "日本語\n模型"})
+	test("literal expansions", `llama-server $HOME %USERPROFILE% {port} '~' '$(touch nope)'`, []string{"llama-server", "$HOME", "%USERPROFILE%", "{port}", "~", "$(touch nope)"})
+	test("literal operators", "llama-server '|&;<>`'", []string{"llama-server", "|&;<>`"})
+	test("terminator", `llama-server -- --port=9000`, []string{"llama-server", "--", "--port=9000"})
 }
 
 func TestParseLaunchTextRejectsInvalidInput(t *testing.T) {
 	for _, text := range []string{
-		`lms "unterminated`, `lms 'unterminated`, "lms \x00argument",
-		"lms \x7f", "lms \xff", `lms | other`, `lms > file`, `lms < file`,
-		`lms && other`, `lms ; other`, "lms `other`", `lms $(other)`,
+		`llama-server "unterminated`, `llama-server 'unterminated`, "llama-server \x00argument",
+		"llama-server \x7f", "llama-server \xff", `llama-server | other`, `llama-server > file`, `llama-server < file`,
+		`llama-server && other`, `llama-server ; other`, "llama-server `other`", `llama-server $(other)`,
 		strings.Repeat("x", maxLaunchTextBytes+1), strings.Repeat("x ", maxLaunchTokens+1),
 	} {
 		if _, err := parseLaunchText(text); err == nil {
@@ -61,8 +61,8 @@ func TestParseLaunchTextRejectsInvalidInput(t *testing.T) {
 
 func FuzzLaunchTextRoundTrip(f *testing.F) {
 	for _, seed := range []string{
-		`lms server start --port=1235`, `"C:\Program Files\Ollama\ollama.exe" serve`,
-		`lms '' "日本語" '$HOME' '{port}'`, `lms --name="two words"`,
+		`llama-server --port=8081`, `"C:\Program Files\llama.cpp\llama-server.exe" --jinja`,
+		`llama-server '' "日本語" '$HOME' '{port}'`, `llama-server --name="two words"`,
 	} {
 		f.Add(seed)
 	}

@@ -18,7 +18,7 @@ func storeTerminal(t *testing.T, id, origin string, completedAgo time.Duration) 
 	t.Helper()
 	completedAt := time.Now().Add(-completedAgo).UnixMilli()
 	raw, err := json.Marshal(map[string]any{
-		"id": id, "originatedFrom": origin, "engine": "ollama", "runId": "r1",
+		"id": id, "originatedFrom": origin, "engine": "llamacpp", "runId": "r1",
 		"state": "completed", "scheduledOn": origin,
 		"createdAt": completedAt - 1000, "completedAt": completedAt, "model": "m",
 	})

@@ -536,14 +536,14 @@ func armedResetView(t *testing.T, client *rpc.Client) *serviceView {
 // TestResetRemovesManagedEnginesBeforeWiping pins the order a reset works in:
 // the engines go first, through the backend, while the broker is still up, and
 // only then does the shell get the request to quit and delete the data
-// directory. Deleting the directory alone would miss an engine a vendor
-// installer put in the user's home, which is where LM Studio lands.
+// directory. Deleting the directory alone would miss an engine installed
+// outside the data directory.
 //
 // One call, not a loop: engine-manager owns which installs are PAIR's.
 func TestResetRemovesManagedEnginesBeforeWiping(t *testing.T) {
 	client, called := resetBroker(t, `{"engines":[
-		{"engine":"ollama","removed":true},
-		{"engine":"llamacpp","removed":false}
+		{"engine":"llamacpp","removed":true},
+		{"engine":"llamacpp-custom","removed":false}
 	]}`)
 	v := armedResetView(t, client)
 
@@ -577,8 +577,8 @@ func TestResetRemovesManagedEnginesBeforeWiping(t *testing.T) {
 // a failed removal left its files on disk with nothing allowed to remove them.
 func TestResetStopsWhenAnEngineCannotBeRemoved(t *testing.T) {
 	client, _ := resetBroker(t, `{"engines":[
-		{"engine":"ollama","removed":true},
-		{"engine":"lmstudio","removed":false,"error":"locked"}
+		{"engine":"llamacpp","removed":true},
+		{"engine":"llamacpp-custom","removed":false,"error":"locked"}
 	]}`)
 	v := armedResetView(t, client)
 
@@ -590,7 +590,7 @@ func TestResetStopsWhenAnEngineCannotBeRemoved(t *testing.T) {
 	if !ok {
 		t.Fatal("a failed engine removal still went on to wipe the data")
 	}
-	if halted.reason != "could not remove lmstudio" {
+	if halted.reason != "could not remove llamacpp-custom" {
 		t.Errorf("reason %q, want it to name the engine that could not be removed", halted.reason)
 	}
 
@@ -598,7 +598,7 @@ func TestResetStopsWhenAnEngineCannotBeRemoved(t *testing.T) {
 	if v.resetting || v.CapturingInput() {
 		t.Error("a stopped reset still holds the keyboard")
 	}
-	if v.status.kind != toastError || !strings.Contains(v.status.text, "could not remove lmstudio") {
+	if v.status.kind != toastError || !strings.Contains(v.status.text, "could not remove llamacpp-custom") {
 		t.Errorf("status %q does not report why the reset stopped", v.status.text)
 	}
 }

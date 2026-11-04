@@ -6,7 +6,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,36 +31,16 @@ import (
 // holds, but not what its upstream offers.
 //
 // It lives here rather than in a client so both the desktop app and the terminal
-// interface see the same catalogue. Each engine has exactly one curated source,
-// and they are deliberately different in kind:
-//
-//   - Ollama has no public library API, only a client-rendered web page. A live
-//     scrape was fragile and broke whenever the markup changed, so the list is a
-//     locked file, regenerated on demand by a developer who reviews the diff.
-//     It is compiled in, so serving it needs no network and cannot fail.
-//   - LM Studio's catalogue *is* a Hugging Face org (`lmstudio-community`), whose
-//     repo ids are exactly the strings `lms get` accepts. That has a real API, so
-//     it is fetched live and cached.
-//   - llama.cpp downloads any GGUF repo on Hugging Face as `repo:quantization`.
-//     The browse list is the GGUF repos of a few approved publishers, fetched
-//     live and cached; a query searches all of Hugging Face, each query cached
-//     on its own.
-
-// catalogSourceKind distinguishes how an engine's catalogue is obtained.
-type catalogSourceKind int
-
-const (
-	// catalogEmbedded is compiled into this binary.
-	catalogEmbedded catalogSourceKind = iota
-	// catalogFetched is retrieved over HTTP and cached.
-	catalogFetched
-)
+// interface see the same catalogue. llama.cpp downloads any GGUF repo on Hugging
+// Face as `repo:quantization`. The browse list is the GGUF repos of a few
+// approved publishers, fetched live and cached; a query searches all of Hugging
+// Face, each query cached on its own.
 
 // CatalogModel is one downloadable model, normalized across sources.
 //
 // Name is pull-ready: passing it straight to the engine's pull_model action
-// works. That is the field's whole purpose, so neither source is allowed to put
-// a display-only string here.
+// works. That is the field's whole purpose, so no source is allowed to put a
+// display-only string here.
 type CatalogModel struct {
 	ID     string `json:"id"`
 	Name   string `json:"name"`
@@ -89,8 +68,8 @@ type CatalogResult struct {
 	Models []CatalogModel `json:"models"`
 	// Source describes where the list came from, for support and diagnostics.
 	Source string `json:"source"`
-	// FetchedAt is when the served list was obtained. For an embedded list this
-	// is when it was scraped, which tells an operator how stale it is.
+	// FetchedAt is when the served list was obtained, which tells an operator
+	// how stale it is.
 	FetchedAt string `json:"fetchedAt,omitempty"`
 	// Platform and Arch are the GOOS and GOARCH this list was filtered for.
 	// Echoed back so a client can tell the operator which machine the list
@@ -122,23 +101,9 @@ type catalogParams struct {
 	Query    string `json:"query"`
 }
 
-//go:embed catalog/ollama-models.json
-var catalogFS embed.FS
-
-// ollamaCatalogPath is the embedded locked list.
-const ollamaCatalogPath = "catalog/ollama-models.json"
-
-// The LM Studio catalogue endpoint. Its repo ids are the pull-ready strings.
+// The Hugging Face listing endpoint and the cache and request limits around it.
 const (
-	hfModelsAPI    = "https://huggingface.co/api/models"
-	lmStudioAuthor = "lmstudio-community"
-	// lmStudioLimit is one page of the listing, deliberately not followed by
-	// more. The listing is sorted by downloads, so what falls off the end is the
-	// least-used tail, and every page past the first would be another request
-	// inside the same timeout on a cold cache. A model beyond it is still one
-	// download-by-name away; the catalogue is for browsing, not the boundary of
-	// what can be installed.
-	lmStudioLimit      = 500
+	hfModelsAPI        = "https://huggingface.co/api/models"
 	catalogCacheTTL    = 6 * time.Hour
 	catalogHTTPTimeout = 20 * time.Second
 	// catalogRetryAfterFailure keeps a failed fetch from turning every later
@@ -176,35 +141,9 @@ const (
 // llama.cpp browse list: llama.cpp's own org and two widely used quantizers.
 var llamaCPPPublishers = []string{"ggml-org", "bartowski", "unsloth"}
 
-// ollamaLibraryFile is the committed list's on-disk shape.
-type ollamaLibraryFile struct {
-	ScrapedAt string             `json:"scrapedAt"`
-	Source    string             `json:"source"`
-	Count     int                `json:"count"`
-	Models    []ollamaLibraryRow `json:"models"`
-}
-
-// ollamaLibraryRow is one committed entry, shaped like an Ollama tags response.
-type ollamaLibraryRow struct {
-	Name              string               `json:"name"`
-	Model             string               `json:"model"`
-	ModifiedAt        string               `json:"modified_at"`
-	Size              uint64               `json:"size"`
-	Digest            string               `json:"digest"`
-	Details           ollamaLibraryDetails `json:"details"`
-	invalidIdentifier bool
-}
-
-// ollamaLibraryDetails is the subset of an entry's details the catalogue uses.
-type ollamaLibraryDetails struct {
-	Family        string `json:"family"`
-	ParameterSize string `json:"parameter_size"`
-	Quantization  string `json:"quantization_level"`
-}
-
 // hfModelRow is the subset of a Hugging Face listing entry that matters here.
 // The last four fields are only present when the listing is asked for in full,
-// which only the llama.cpp catalogue does.
+// which the llama.cpp catalogue does.
 type hfModelRow struct {
 	ID           string   `json:"id"`
 	ModelID      string   `json:"modelId"`
@@ -220,22 +159,6 @@ type hfModelRow struct {
 	PipelineTag       string          `json:"pipeline_tag"`
 	Siblings          []hfSibling     `json:"siblings"`
 	invalidIdentifier bool
-}
-
-func (r *ollamaLibraryRow) UnmarshalJSON(data []byte) error {
-	type row ollamaLibraryRow
-	var decoded row
-	wire := struct {
-		*row
-		Name  json.RawMessage `json:"name"`
-		Model json.RawMessage `json:"model"`
-	}{row: &decoded}
-	if err := json.Unmarshal(data, &wire); err != nil {
-		return err
-	}
-	decoded.Name, decoded.Model, decoded.invalidIdentifier = decodeCatalogIdentifiers(wire.Name, wire.Model)
-	*r = ollamaLibraryRow(decoded)
-	return nil
 }
 
 func (r *hfModelRow) UnmarshalJSON(data []byte) error {
@@ -310,8 +233,7 @@ type hfSibling struct {
 	RFilename string `json:"rfilename"`
 }
 
-// catalogService answers engine:catalog. The embedded list is parsed once; each
-// fetched list is a listingCache.
+// catalogService answers engine:catalog. Each fetched list is a listingCache.
 type catalogService struct {
 	client *http.Client
 
@@ -320,12 +242,6 @@ type catalogService struct {
 	// not know, selects by the requested name.
 	familyOf func(engine string) (string, bool)
 
-	ollamaOnce sync.Once
-	ollama     []CatalogModel
-	ollamaMeta ollamaLibraryFile
-	ollamaErr  error
-
-	lmStudio *listingCache
 	llamaCPP *listingCache
 
 	// searchMu guards the llama.cpp searches, kept by lowercased query with
@@ -377,7 +293,6 @@ func newCatalogService() *catalogService {
 		llamaSearches: map[string]*listingCache{},
 	}
 	c.client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	c.lmStudio = &listingCache{label: "lm studio catalog", fetch: c.fetchLmStudio}
 	c.llamaCPP = &listingCache{label: "llama.cpp catalog", fetch: c.fetchLlamaCPP}
 	return c
 }
@@ -387,60 +302,32 @@ func newCatalogService() *catalogService {
 // that can search.
 func (c *catalogService) Catalog(ctx context.Context, engine, platform, arch, query string) (CatalogResult, error) {
 	platform, arch = catalogTarget(platform, arch)
-	switch c.adapterFor(engine) {
-	case engines.NameOllama:
-		models, meta, err := c.ollamaCatalog()
-		if err != nil {
-			return CatalogResult{}, err
-		}
-		return CatalogResult{
-			Models:   models,
-			Source:   meta.Source,
-			Platform: platform,
-			Arch:     arch,
-			// The committed Ollama list carries no machine-locked entries, so
-			// nothing is dropped and the caller's target does not change it.
-			FetchedAt: meta.ScrapedAt,
-		}, nil
-	case engines.NameLMStudio:
-		models, fetchedAt, err := c.lmStudio.get(ctx)
-		if err != nil {
-			return CatalogResult{}, err
-		}
-		return CatalogResult{
-			Models:    filterForTarget(models, platform, arch),
-			Source:    hfModelsAPI + "?author=" + lmStudioAuthor,
-			Platform:  platform,
-			Arch:      arch,
-			FetchedAt: fetchedAt.UTC().Format(time.RFC3339),
-		}, nil
-	case engines.NameLlamaCPP:
-		query, err := catalogQuery(query)
-		if err != nil {
-			return CatalogResult{}, err
-		}
-		models, fetchedAt, err := c.llamaCPPCatalog(ctx, query)
-		if err != nil {
-			return CatalogResult{}, err
-		}
-		source := hfModelsAPI + "?filter=gguf&author=" + strings.Join(llamaCPPPublishers, ",")
-		if query != "" {
-			source = hfModelsAPI + "?filter=gguf&search=" + url.QueryEscape(query)
-		}
-		return CatalogResult{
-			// GGUF has no machine-locked quantizations, so nothing is filtered
-			// for the target.
-			Models:     models,
-			Source:     source,
-			Platform:   platform,
-			Arch:       arch,
-			FetchedAt:  fetchedAt.UTC().Format(time.RFC3339),
-			Searchable: true,
-			Query:      query,
-		}, nil
-	default:
+	if c.adapterFor(engine) != engines.NameLlamaCPP {
 		return CatalogResult{}, fmt.Errorf("no model catalog for engine %q", engine)
 	}
+	query, err := catalogQuery(query)
+	if err != nil {
+		return CatalogResult{}, err
+	}
+	models, fetchedAt, err := c.llamaCPPCatalog(ctx, query)
+	if err != nil {
+		return CatalogResult{}, err
+	}
+	source := hfModelsAPI + "?filter=gguf&author=" + strings.Join(llamaCPPPublishers, ",")
+	if query != "" {
+		source = hfModelsAPI + "?filter=gguf&search=" + url.QueryEscape(query)
+	}
+	return CatalogResult{
+		// GGUF has no machine-locked quantizations, so nothing is filtered for
+		// the target.
+		Models:     models,
+		Source:     source,
+		Platform:   platform,
+		Arch:       arch,
+		FetchedAt:  fetchedAt.UTC().Format(time.RFC3339),
+		Searchable: true,
+		Query:      query,
+	}, nil
 }
 
 // catalogQuery trims a query and refuses one over maxCatalogQuery characters.
@@ -468,11 +355,10 @@ func catalogTarget(platform, arch string) (string, string) {
 
 // filterForTarget drops models that cannot install on the target.
 //
-// MLX is Apple's framework and only runs on Apple Silicon; `lms get` refuses it
-// anywhere else, an Intel Mac included, so the operating system alone does not
-// decide it. Filtering happens here, against the *target* rather than this
-// host, so a client driving a peer is not offered models that peer can never
-// install.
+// MLX is Apple's framework and only runs on Apple Silicon, an Intel Mac
+// excluded, so the operating system alone does not decide it. Filtering happens
+// here, against the *target* rather than this host, so a client driving a peer
+// is not offered models that peer can never install.
 func filterForTarget(models []CatalogModel, platform, arch string) []CatalogModel {
 	models = validCatalogModels(models)
 	if platform == "darwin" && arch == "arm64" {
@@ -507,82 +393,11 @@ func (c *catalogService) adapterFor(engine string) string {
 func normalizeCatalogEngine(engine string) string {
 	e := strings.ToLower(strings.TrimSpace(engine))
 	switch e {
-	case "lm-studio", "lm studio", "lmstudio":
-		return "lmstudio"
 	case "llama-cpp", "llama.cpp", "llamacpp":
 		return "llamacpp"
 	default:
 		return e
 	}
-}
-
-// ollamaCatalog parses the embedded list once and serves it thereafter.
-func (c *catalogService) ollamaCatalog() ([]CatalogModel, ollamaLibraryFile, error) {
-	c.ollamaOnce.Do(func() {
-		raw, err := catalogFS.ReadFile(ollamaCatalogPath)
-		if err != nil {
-			c.ollamaErr = fmt.Errorf("read embedded ollama catalog: %w", err)
-			return
-		}
-		var file ollamaLibraryFile
-		if err := json.Unmarshal(raw, &file); err != nil {
-			c.ollamaErr = fmt.Errorf("parse embedded ollama catalog: %w", err)
-			return
-		}
-		c.ollamaMeta = file
-		c.ollama = normalizeOllamaRows(file.Models)
-		slog.Info("ollama model catalog loaded",
-			"models", len(c.ollama), "scrapedAt", file.ScrapedAt)
-	})
-	return validCatalogModels(c.ollama), c.ollamaMeta, c.ollamaErr
-}
-
-// normalizeOllamaRows converts committed rows into the shared shape, dropping
-// malformed entries and de-duplicating by pull name.
-func normalizeOllamaRows(rows []ollamaLibraryRow) []CatalogModel {
-	seen := make(map[string]int, len(rows))
-	out := make([]CatalogModel, 0, len(rows))
-	for _, r := range rows {
-		name, ok := catalogIdentifier(r.Name, r.Model)
-		if r.invalidIdentifier || !ok {
-			continue
-		}
-		// The library page is the only URL an Ollama model has; the tag suffix
-		// is not part of the path.
-		base := name
-		if i := strings.Index(base, ":"); i > 0 {
-			base = base[:i]
-		}
-		model := CatalogModel{
-			ID:            name,
-			Name:          name,
-			Author:        "ollama",
-			URL:           "https://ollama.com/library/" + base,
-			Size:          r.Size,
-			UpdatedAt:     r.ModifiedAt,
-			Tags:          catalogTags(r.Details.Family, r.Details.Quantization),
-			Family:        r.Details.Family,
-			ParameterSize: r.Details.ParameterSize,
-		}
-		if idx, dup := seen[name]; dup {
-			out[idx] = model
-			continue
-		}
-		seen[name] = len(out)
-		out = append(out, model)
-	}
-	return out
-}
-
-// catalogTags builds a small tag set from the fields the committed list carries.
-func catalogTags(values ...string) []string {
-	tags := make([]string, 0, len(values))
-	for _, v := range values {
-		if v = strings.TrimSpace(v); v != "" {
-			tags = append(tags, v)
-		}
-	}
-	return tags
 }
 
 // get serves the cached list, refreshing it when stale. A refresh that fails
@@ -657,19 +472,6 @@ func (l *listingCache) get(ctx context.Context) ([]CatalogModel, time.Time, erro
 			"catalog", l.label, "models", len(served), "err", err)
 	}
 	return validCatalogModels(served), at, nil
-}
-
-func (c *catalogService) fetchLmStudio(ctx context.Context) ([]CatalogModel, error) {
-	q := url.Values{}
-	q.Set("author", lmStudioAuthor)
-	q.Set("sort", "downloads")
-	q.Set("direction", "-1")
-	q.Set("limit", fmt.Sprint(lmStudioLimit))
-	rows, err := c.fetchHF(ctx, q)
-	if err != nil {
-		return nil, err
-	}
-	return normalizeHFRows(rows), nil
 }
 
 // llamaCPPCatalog serves the browse list, or the results of a query.
@@ -812,62 +614,6 @@ func (c *catalogService) fetchHFBody(ctx context.Context, endpoint string) ([]by
 		return nil, fmt.Errorf("model catalog exceeds size limit")
 	}
 	return body, nil
-}
-
-// mlxPattern matches an MLX marker as a whole token in a repo id.
-var mlxPattern = regexp.MustCompile(`(?i)(?:^|[-_/])mlx(?:[-_/]|$)`)
-
-// normalizeHFRows converts listing entries into the shared shape.
-//
-// MLX quantizations are Apple's framework and only run on Apple Silicon; `lms
-// get` refuses them elsewhere with "no download options available". Listing them
-// off-Mac would offer models that can never install, so they are dropped there.
-func normalizeHFRows(rows []hfModelRow) []CatalogModel {
-	seen := make(map[string]int, len(rows))
-	out := make([]CatalogModel, 0, len(rows))
-	for _, r := range rows {
-		id, ok := catalogIdentifier(r.ID, r.ModelID)
-		if r.invalidIdentifier || !ok {
-			continue
-		}
-		author := lmStudioAuthor
-		if i := strings.Index(id, "/"); i > 0 {
-			author = id[:i]
-		}
-		updated := r.LastModified
-		if updated == "" {
-			updated = r.CreatedAt
-		}
-		model := CatalogModel{
-			ID:        id,
-			Name:      id,
-			Author:    author,
-			URL:       "https://huggingface.co/" + id,
-			Downloads: r.Downloads,
-			Likes:     r.Likes,
-			UpdatedAt: updated,
-			Tags:      r.Tags,
-			AppleOnly: isMLX(id, r.Tags),
-		}
-		if idx, dup := seen[id]; dup {
-			out[idx] = model
-			continue
-		}
-		seen[id] = len(out)
-		out = append(out, model)
-	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].Downloads > out[j].Downloads })
-	return out
-}
-
-// isMLX reports an Apple-only quantization, by tag or by repo-id token.
-func isMLX(id string, tags []string) bool {
-	for _, t := range tags {
-		if strings.EqualFold(strings.TrimSpace(t), "mlx") {
-			return true
-		}
-	}
-	return mlxPattern.MatchString(id)
 }
 
 // The shapes a llama.cpp download depends on.

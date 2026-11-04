@@ -19,7 +19,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -74,27 +73,15 @@ func runSwitchEngine() error {
 	}
 	return http.Serve(ln, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if r.URL.Path == "/api/generate" || r.URL.Path == "/v1/chat/completions" {
+		if r.URL.Path == "/v1/chat/completions" {
 			if err := notify("/inflight"); err != nil {
 				http.Error(w, err.Error(), http.StatusBadGateway)
 				return
 			}
-			if r.URL.Path == "/v1/chat/completions" {
-				fmt.Fprintln(w, `{"id":"fixture","object":"chat.completion","model":"switch-model","choices":[{"index":0,"message":{"role":"assistant","content":"finished"},"finish_reason":"stop"}]}`)
-			} else {
-				fmt.Fprintln(w, `{"model":"switch-model","done":true,"response":"finished"}`)
-			}
+			fmt.Fprintln(w, `{"id":"fixture","object":"chat.completion","model":"switch-model","choices":[{"index":0,"message":{"role":"assistant","content":"finished"},"finish_reason":"stop"}]}`)
 			return
 		}
 		switch r.URL.Path {
-		case "/api/tags":
-			if os.Getenv("NVPAIR_TEST_SWITCH_EMPTY_MODELS") == "1" {
-				fmt.Fprintln(w, `{"models":[]}`)
-			} else {
-				fmt.Fprintln(w, `{"models":[{"name":"switch-model"}]}`)
-			}
-		case "/api/ps":
-			fmt.Fprintln(w, `{"models":[]}`)
 		case "/v1/models", "/models":
 			if os.Getenv("NVPAIR_TEST_SWITCH_EMPTY_MODELS") == "1" {
 				fmt.Fprintln(w, `{"object":"list","data":[]}`)
@@ -108,6 +95,7 @@ func runSwitchEngine() error {
 }
 
 type switchProcessFixture struct {
+	proxyControl        *fixtureProxyControl
 	base                string
 	p                   *interopProcess
 	ports               fixtureServicePorts
@@ -147,7 +135,7 @@ func newSwitchProcessFixtureAt(t *testing.T, base string, ports fixtureServicePo
 	t.Helper()
 	f := prepareSwitchProcessFixture(t, base, ports, "")
 	f.start(t)
-	f.rpcOK(t, "engine:start", map[string]string{"engine": "ollama"})
+	f.rpcOK(t, "engine:start", map[string]string{"engine": "llamacpp-custom"})
 	// Initialize every settings baseline before a switch revision is captured.
 	// Otherwise the periodic refresh can add an unrelated engine's revision.
 	for _, engine := range engines.Names() {
@@ -194,7 +182,7 @@ func prepareSwitchProcessFixture(t *testing.T, base string, ports fixtureService
 			}
 			f.starts[name] = append(f.starts[name], int32(pid))
 			if name == "llamacpp" && f.checkSourceExit {
-				for _, source := range f.engineIdentities["ollama"] {
+				for _, source := range f.engineIdentities["llamacpp-custom"] {
 					stopped, err := f.lifetimes[source].stopped(r.Context())
 					if err != nil {
 						f.effectError = errors.Join(f.effectError, err)
@@ -287,27 +275,29 @@ func prepareSwitchProcessFixture(t *testing.T, base string, ports fixtureService
 		jointCopyExecutable(t, image, f.scanner)
 	}
 	f.scannerPort = freePort(t)
+	f.proxyControl = newFixtureProxyControl(t)
 	jointIsolateEngines(t, f.base, freePort(t))
 	for _, engine := range []struct {
 		name string
 		port int
-	}{{"ollama", f.sourcePort}, {"llamacpp", f.targetPort}} {
+	}{{"llamacpp-custom", f.sourcePort}, {"llamacpp", f.targetPort}} {
 		// Overrides deep-merge with bundled manifests. Clear llama.cpp's
 		// router-role predicate: this fixture serves only a generic HTTP probe.
 		probe := map[string]any{"http": "http://127.0.0.1:{port}/", "status": http.StatusOK, "timeout_s": 10, "interval_s": 60, "json_match": nil}
-		rt := map[string]any{"mode": "process", "bin": image, "port": engine.port, "bind": "127.0.0.1", "ready": probe, "health": probe,
+		rt := map[string]any{"bin": image, "port": engine.port, "bind": "127.0.0.1", "ready": probe, "health": probe,
 			"env":  map[string]string{"NVPAIR_TEST_SWITCH_ENGINE": image, "NVPAIR_TEST_SWITCH_NAME": engine.name, "NVPAIR_TEST_SWITCH_PORT": "{port}", "NVPAIR_TEST_SWITCH_CONTROL": f.control.URL},
 			"stop": map[string]any{"signal": "term", "grace_s": 1}}
-		jointWriteJSON(t, filepath.Join(jointAppDir(f.base), "engines", engine.name+".json"), map[string]any{
-			"engine": engine.name, "runtime": rt, "platforms": map[string]any{runtime.GOOS + "/" + runtime.GOARCH: map[string]any{"detect": []string{image}, "runtime": rt}},
-		})
+		jointWriteJSON(t, filepath.Join(jointAppDir(f.base), "engines", engine.name+".json"), privateFixtureManifest(t, engine.name, filepath.Join(f.base, "absent-models", engine.name), image, rt, engines.ProtocolOpenAIV1))
 	}
 	journal := make(map[string]any)
 	for _, facade := range []struct {
 		name   string
 		server int
 		port   int
-	}{{"ollama", f.sourcePort, f.facadePort}, {"llamacpp", f.targetPort, f.targetFacadePort}} {
+	}{{"llamacpp-custom", f.sourcePort, f.facadePort}, {"llamacpp", f.targetPort, f.targetFacadePort}} {
+		if facade.name == "llamacpp-custom" {
+			jointWriteJSON(t, filepath.Join(jointAppDir(f.base), privateFixtureEngine(t, facade.name).PortFile), map[string]int{"port": facade.port})
+		}
 		// Explicit settings bypass managed default-port ownership. Never bind
 		// beside or dial an installed PAIR's default engine facade.
 		journal[facade.name] = map[string]any{"explicit": true, "snapshot": map[string]any{
@@ -379,10 +369,11 @@ func switchProcessIdentityStopped(ctx context.Context, expected serviceProcessId
 
 func (f *switchProcessFixture) start(t *testing.T) {
 	t.Helper()
-	args := append([]string{"--scanner-path", f.scanner, "--engine-manager-path", engineMgrBin, "--proxy-path", proxyBin, "--proxy-engines", "ollama,llamacpp", "--cluster-dir", filepath.Join(f.base, "cluster")}, f.ports.args()...)
-	f.p = startInteropProcess(t, f.base, brokerBin, f.ports.engineManagerHTTP, []string{"OLLAMA_HOST=", "NVPAIR_TEST_SUBSCRIPTION_SCANNER=" + f.scanner, "NVPAIR_TEST_SUBSCRIPTION_PORT=" + strconv.Itoa(f.scannerPort)}, args...)
-	f.p.ports = append(f.p.ports, f.scannerPort, f.sourcePort, f.targetPort, f.facadePort)
-	for _, path := range []string{f.scanner, engineMgrBin, proxyBin} {
+	args := append([]string{"--scanner-path", f.scanner, "--engine-manager-path", engineMgrBin, "--proxy-path", f.proxyControl.image, "--proxy-engines", "llamacpp", "--cluster-dir", filepath.Join(f.base, "cluster")}, f.ports.args()...)
+	env := append(f.proxyControl.env(), "NVPAIR_TEST_SUBSCRIPTION_SCANNER="+f.scanner, "NVPAIR_TEST_SUBSCRIPTION_PORT="+strconv.Itoa(f.scannerPort))
+	f.p = startInteropProcess(t, f.base, brokerBin, f.ports.engineManagerHTTP, env, args...)
+	f.p.ports = append(f.p.ports, f.scannerPort, f.sourcePort, f.targetPort, f.facadePort, f.targetFacadePort, f.proxyControl.port)
+	for _, path := range []string{f.scanner, engineMgrBin, proxyBin, f.proxyControl.image} {
 		canonical, err := canonicalServicePath(path)
 		if err != nil {
 			t.Fatal(err)
@@ -390,16 +381,17 @@ func (f *switchProcessFixture) start(t *testing.T) {
 		f.p.paths = append(f.p.paths, canonical)
 	}
 	waitForMethod(t, f.p.msgs, "app:ready", 20*time.Second)
-	if port := waitProxyReady(t, f.p.in, f.p.msgs, 20*time.Second); port != f.facadePort {
-		t.Fatalf("source facade port = %d, want fixture port %d", port, f.facadePort)
-	}
-	waitEngineProxyReady(t, "llamacpp-proxy", f.p.in, f.p.msgs, 20*time.Second)
+	f.proxyControl.ready(t, "llamacpp-custom", f.facadePort)
+	f.proxyControl.ready(t, "llamacpp", f.targetFacadePort)
 }
 
 // Keep switch notifications while correlating RPC replies. The general callRPC
 // helper deliberately discards pushes, which would hide the sequence contract.
 func (f *switchProcessFixture) rpc(t *testing.T, method string, params any) jsonrpc.Message {
 	t.Helper()
+	if reply, handled := f.proxyControl.componentCall(t, method, params); handled {
+		return reply
+	}
 	id := newRPCID()
 	rawID := json.RawMessage(strconv.FormatInt(id, 10))
 	sendLine(t, f.p.in, jsonrpc.Message{JSONRPC: "2.0", ID: &rawID, Method: method, Params: mustMarshal(t, params)})
@@ -447,7 +439,7 @@ func (f *switchProcessFixture) status(t *testing.T, request settings.SwitchStatu
 
 func (f *switchProcessFixture) request(t *testing.T, id string) settings.SwitchRequest {
 	t.Helper()
-	return settings.SwitchRequest{RequestID: id, SourceEngine: "ollama", TargetEngine: "llamacpp", ExpectedRevision: f.status(t, settings.SwitchStatusRequest{}).ConfigurationRevision}
+	return settings.SwitchRequest{RequestID: id, SourceEngine: "llamacpp-custom", TargetEngine: "llamacpp", ExpectedRevision: f.status(t, settings.SwitchStatusRequest{}).ConfigurationRevision}
 }
 
 func (f *switchProcessFixture) terminal(t *testing.T, id string) settings.SwitchReceipt {
@@ -488,7 +480,7 @@ func (f *switchProcessFixture) resumedSource(t *testing.T) int32 {
 	var pid int32
 	task1Eventually(t, "resumed source and released switch snapshot", 30*time.Second, func() bool {
 		f.mu.Lock()
-		starts := append([]int32(nil), f.starts["ollama"]...)
+		starts := append([]int32(nil), f.starts["llamacpp-custom"]...)
 		f.mu.Unlock()
 		if len(starts) != 2 {
 			return false
@@ -527,7 +519,7 @@ func assertSwitchProcessStopped(t *testing.T, pid int32) {
 
 func TestEngineSwitchProcessCompletesAndRetries(t *testing.T) {
 	f := newSwitchProcessFixture(t)
-	sourcePID := f.pid(t, "ollama")
+	sourcePID := f.pid(t, "llamacpp-custom")
 	request := f.request(t, "switch-complete")
 	f.rpcOK(t, settings.SwitchMethod, request)
 	receipt := f.terminal(t, request.RequestID)
@@ -567,7 +559,7 @@ func TestEngineSwitchProcessCompletesAndRetries(t *testing.T) {
 	if err := json.Unmarshal(data, &stored); err != nil {
 		t.Fatal(err)
 	}
-	if source, known := stored.Engines["ollama"]; !known || source || !stored.Engines["llamacpp"] {
+	if source, known := stored.Engines["llamacpp-custom"]; !known || source || !stored.Engines["llamacpp"] {
 		t.Fatalf("persisted intents = %v", stored.Engines)
 	}
 }
@@ -580,7 +572,7 @@ func TestEngineSwitchProcessRejectsStaleRevision(t *testing.T) {
 	if response.Error == nil || response.Error.Code != settings.SwitchConfigurationConflictCode {
 		t.Fatalf("stale revision error = %+v", response.Error)
 	}
-	f.pid(t, "ollama")
+	f.pid(t, "llamacpp-custom")
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if len(f.starts["llamacpp"]) != 0 {
@@ -602,7 +594,7 @@ func TestEngineSwitchProcessRejectsRunningTargetBeforeDrain(t *testing.T) {
 			t.Fatal("notification advanced after terminal validation failure")
 		}
 	}
-	for _, engine := range []string{"ollama", "llamacpp"} {
+	for _, engine := range []string{"llamacpp-custom", "llamacpp"} {
 		pid := f.pid(t, engine)
 		stopped, err := serviceProcessStopped(context.Background(), pid)
 		if err != nil || stopped {
@@ -627,19 +619,22 @@ func TestEngineSwitchProcessRejectsRunningTargetBeforeDrain(t *testing.T) {
 // timing a sleep or assuming a workload notification means dispatch happened.
 func (f *switchProcessFixture) holdRequest(t *testing.T) <-chan error {
 	t.Helper()
-	f.rpcOK(t, "ollama-proxy:node/add-manual", map[string]any{"id": "switch-source", "host": "127.0.0.1", "port": f.sourcePort, "addresses": []string{"127.0.0.1"}, "models": []string{"switch-model"}})
-	f.rpcOK(t, "ollama-proxy:node/select", map[string]string{"id": "switch-source"})
+	f.rpcOK(t, "llamacpp-custom-proxy:node/add-manual", map[string]any{"id": "switch-source", "host": "127.0.0.1", "port": f.sourcePort, "addresses": []string{"127.0.0.1"}, "models": []string{"switch-model"}})
+	f.rpcOK(t, "llamacpp-custom-proxy:node/select", map[string]string{"id": "switch-source"})
 	done := make(chan error, 1)
 	go func() {
 		client := &http.Client{Timeout: 80 * time.Second}
-		response, err := client.Post(fmt.Sprintf("http://127.0.0.1:%d/api/generate", f.facadePort), "application/json", strings.NewReader(`{"model":"switch-model","stream":false,"prompt":"fixture"}`))
+		response, err := client.Post(fmt.Sprintf("http://127.0.0.1:%d/v1/chat/completions", f.facadePort), "application/json", strings.NewReader(`{"model":"switch-model","stream":false,"messages":[{"role":"user","content":"fixture"}]}`))
 		if err == nil {
 			var result struct {
-				Done bool `json:"done"`
+				Model   string `json:"model"`
+				Choices []struct {
+					FinishReason string `json:"finish_reason"`
+				} `json:"choices"`
 			}
 			err = json.NewDecoder(response.Body).Decode(&result)
-			if response.StatusCode != http.StatusOK || !result.Done {
-				err = fmt.Errorf("inference status=%d done=%t", response.StatusCode, result.Done)
+			if response.StatusCode != http.StatusOK || result.Model != "switch-model" || len(result.Choices) != 1 || result.Choices[0].FinishReason != "stop" {
+				err = fmt.Errorf("inference status=%d model=%q choices=%d", response.StatusCode, result.Model, len(result.Choices))
 			}
 			if closeErr := response.Body.Close(); err == nil {
 				err = closeErr
@@ -679,7 +674,7 @@ func (f *switchProcessFixture) waitDraining(t *testing.T, id string) {
 
 func TestEngineSwitchProcessDrainsInflightBeforeStop(t *testing.T) {
 	f := newSwitchProcessFixture(t)
-	sourcePID := f.pid(t, "ollama")
+	sourcePID := f.pid(t, "llamacpp-custom")
 	done := f.holdRequest(t)
 	request := f.request(t, "switch-inflight")
 	f.rpcOK(t, settings.SwitchMethod, request)
@@ -705,7 +700,7 @@ func TestEngineSwitchProcessDrainsInflightBeforeStop(t *testing.T) {
 
 func TestEngineSwitchProcessBrokerDeathInterruptsWithoutRestore(t *testing.T) {
 	f := newSwitchProcessFixture(t)
-	sourcePID := f.pid(t, "ollama")
+	sourcePID := f.pid(t, "llamacpp-custom")
 	f.mu.Lock()
 	f.holdTarget = true
 	f.mu.Unlock()
@@ -779,12 +774,12 @@ func TestEngineSwitchProcessBrokerDeathInterruptsWithoutRestore(t *testing.T) {
 	// this fresh broker rather than calling the notification as a public RPC.
 	task1Eventually(t, "post-restore startup advertisement", 10*time.Second, func() bool {
 		output := f.p.output.String()
-		return strings.Contains(output, "local backend updated engine=ollama") &&
+		return strings.Contains(output, "local backend updated engine=llamacpp-custom") &&
 			strings.Contains(output, "local backend updated engine=llamacpp")
 	})
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if len(f.starts["ollama"]) != 1 || len(f.starts["llamacpp"]) != 1 {
+	if len(f.starts["llamacpp-custom"]) != 1 || len(f.starts["llamacpp"]) != 1 {
 		t.Fatalf("recovery/restore started a reserved engine: %v", f.starts)
 	}
 	assertInteropListenerClosed(t, f.sourcePort)
@@ -909,7 +904,7 @@ func TestE4SwitchClientLostResponseReconnectReadback(t *testing.T) {
 	if again := read(&after); !reflect.DeepEqual(again.Receipt, terminal.Receipt) {
 		t.Fatalf("terminal receipt changed after another reconnect: %+v", again)
 	}
-	assertSwitchProcessStopped(t, f.pid(t, "ollama"))
+	assertSwitchProcessStopped(t, f.pid(t, "llamacpp-custom"))
 	assertInteropListenerClosed(t, f.sourcePort)
 	f.pid(t, "llamacpp") // exactly one start, with no mutation replay
 }
@@ -1000,7 +995,7 @@ func TestE4SwitchClientDenialRevocationVetoConflict(t *testing.T) {
 	assertRejected(stale, settings.SwitchConfigurationConflictCode, settings.SwitchErrorConfigurationConflict)
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if len(f.starts["ollama"]) != 2 || len(f.starts["llamacpp"]) != 0 {
+	if len(f.starts["llamacpp-custom"]) != 2 || len(f.starts["llamacpp"]) != 0 {
 		t.Fatalf("refusals changed engine execution: %v", f.starts)
 	}
 }
@@ -1068,7 +1063,7 @@ func (p *pinnedSwitchFixture) remoteStatus(t *testing.T, requestID string) setti
 
 func (p *pinnedSwitchFixture) request(t *testing.T, id string) settings.SwitchRequest {
 	t.Helper()
-	return settings.SwitchRequest{NodeID: p.mesh.b.uuid, RequestID: id, SourceEngine: "ollama", TargetEngine: "llamacpp", ExpectedRevision: p.remoteStatus(t, "").ConfigurationRevision}
+	return settings.SwitchRequest{NodeID: p.mesh.b.uuid, RequestID: id, SourceEngine: "llamacpp-custom", TargetEngine: "llamacpp", ExpectedRevision: p.remoteStatus(t, "").ConfigurationRevision}
 }
 
 func testEngineSwitchPinned(t *testing.T, reverse bool) {
@@ -1083,7 +1078,7 @@ func testEngineSwitchPinned(t *testing.T, reverse bool) {
 	})
 	var initial settings.SwitchStatus
 	task2Decode(t, origin.call(t, settings.RemoteSwitchStatusMethod, settings.SwitchStatusRequest{NodeID: mesh.b.uuid}).Result, &initial)
-	request := settings.SwitchRequest{NodeID: mesh.b.uuid, RequestID: "switch-pinned", SourceEngine: "ollama", TargetEngine: "llamacpp", ExpectedRevision: initial.ConfigurationRevision}
+	request := settings.SwitchRequest{NodeID: mesh.b.uuid, RequestID: "switch-pinned", SourceEngine: "llamacpp-custom", TargetEngine: "llamacpp", ExpectedRevision: initial.ConfigurationRevision}
 	f.mu.Lock()
 	f.holdTarget = true
 	f.mu.Unlock()
@@ -1157,7 +1152,7 @@ func testEngineSwitchPinned(t *testing.T, reverse bool) {
 		}
 		return sequence > 0
 	})
-	assertSwitchProcessStopped(t, f.pid(t, "ollama"))
+	assertSwitchProcessStopped(t, f.pid(t, "llamacpp-custom"))
 	f.pid(t, "llamacpp")
 }
 

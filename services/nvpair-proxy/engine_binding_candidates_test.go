@@ -18,9 +18,9 @@ func bindingOffer(engine, model string) *nodepolicy.EngineBindingOffers {
 }
 
 func TestEngineBindingSubscribedOfferIsNotInventory(t *testing.T) {
-	profile := ollamaCase(t).profile
+	profile := llamacppCase(t).profile
 	n := noderec.DirectoryNode{HostUUID: "cold", IP: "127.0.0.2", Services: map[noderec.ServiceKey]noderec.ServiceStatus{
-		profile.DiscoveryService: {Port: 45678}}, Policy: &nodepolicy.Advertisement{Revision: "1", EngineBindingOffers: bindingOffer("ollama", "fixture")}}
+		profile.DiscoveryService: {Port: 45678}}, Policy: &nodepolicy.Advertisement{Revision: "1", EngineBindingOffers: bindingOffer("llamacpp", "fixture")}}
 	node, ok := subscribedToNode(profile, n)
 	if !ok || len(node.Models) != 0 || node.EngineBindingOffers == nil || node.Port != 45678 {
 		t.Fatalf("stopped listener projection=%+v present=%v", node, ok)
@@ -39,15 +39,15 @@ func TestEngineBindingSubscribedOfferIsNotInventory(t *testing.T) {
 }
 
 func TestEngineBindingCandidatesReadyBeatsSchedulerCold(t *testing.T) {
-	pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "fixture"}}})
-	fx := newTierFixture(t, ollamaCase(t), pol, map[string][]string{"ready": {"fixture"}, "cold": {}}, nil)
+	pol := tierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "fixture"}}})
+	fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"ready": {"fixture"}, "cold": {}}, nil)
 	f := fx.p.soleFacade()
 	n, ok := discoveredNode(f, "cold")
 	if !ok {
 		t.Fatal("missing cold fixture")
 	}
 	n.PolicyRevision = "1"
-	n.EngineBindingOffers = bindingOffer("ollama", "fixture")
+	n.EngineBindingOffers = bindingOffer("llamacpp", "fixture")
 	f.discovery.AddManual(n)
 	applySnapshot(fx.p, schedulerwire.Priority{Nodes: []string{"cold", "ready"}, Ranks: []schedulerwire.NodeRank{{ID: "cold"}, {ID: "ready", Pending: 100}}})
 	test := func(name string, tier, prepared bool) {
@@ -97,20 +97,20 @@ func TestEngineBindingCandidatesReadyBeatsSchedulerCold(t *testing.T) {
 func TestEngineBindingCandidatesPreserveLoadedPreferenceAndTierFallback(t *testing.T) {
 	test := func(name, preferLoaded, want string) {
 		t.Run(name, func(t *testing.T) {
-			pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{
-				"weak":   {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "small"}},
-				"medium": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "large"}},
+			pol := tierPolicy(map[string][]nodepolicy.TierEntry{
+				"weak":   {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "small"}},
+				"medium": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "large"}},
 			})
 			pol.TierPolicy.PreferLoaded = preferLoaded
 			pol.TierPolicy.AllowStronger = true
-			fx := newTierFixture(t, ollamaCase(t), pol, map[string][]string{"cold": {}, "ready": {"large"}}, map[string][]string{"ready": {"large"}})
+			fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"cold": {}, "ready": {"large"}}, map[string][]string{"ready": {"large"}})
 			f := fx.p.soleFacade()
 			n, ok := discoveredNode(f, "cold")
 			if !ok {
 				t.Fatal("missing cold fixture")
 			}
 			n.PolicyRevision = "1"
-			n.EngineBindingOffers = bindingOffer("ollama", "small")
+			n.EngineBindingOffers = bindingOffer("llamacpp", "small")
 			f.discovery.AddManual(n)
 			cands, held := f.reserveRound(f.resolveTierCandidates("weak", requestNeeds{}, false), true)
 			defer fx.p.releaseReservation(held)
@@ -124,10 +124,10 @@ func TestEngineBindingCandidatesPreserveLoadedPreferenceAndTierFallback(t *testi
 }
 
 func TestEngineBindingCandidatesAbsentOffersPreserveEntryOrder(t *testing.T) {
-	pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{
-		"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "first"}, {Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "second"}},
+	pol := tierPolicy(map[string][]nodepolicy.TierEntry{
+		"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "first"}, {Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "second"}},
 	})
-	fx := newTierFixture(t, ollamaCase(t), pol, map[string][]string{"a": {"first"}, "b": {"second"}}, nil)
+	fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"a": {"first"}, "b": {"second"}}, nil)
 	f := fx.p.soleFacade()
 	f.SetSelected("b")
 	cands := f.resolveTierCandidates("weak", requestNeeds{}, false)
@@ -139,7 +139,7 @@ func TestEngineBindingCandidatesAbsentOffersPreserveEntryOrder(t *testing.T) {
 func TestEngineBindingCandidatesRejectConflictingInventory(t *testing.T) {
 	p := prProxy(t)
 	f := p.soleFacade()
-	n := Node{EngineBindingOffers: bindingOffer("lmstudio", "fixture"), Models: []string{"fixture"}}
+	n := Node{EngineBindingOffers: bindingOffer("llamacpp-custom", "fixture"), Models: []string{"fixture"}}
 	if f.bindingConsistent(n.EngineBindingOffers, "fixture") {
 		t.Fatal("old-engine inventory overrode bound engine")
 	}
@@ -185,15 +185,15 @@ func TestEngineBindingCandidatesSelfOffUsesCurrentOffer(t *testing.T) {
 }
 
 func TestEngineBindingCandidatesStrictExcludesOffersWithStaleIdentity(t *testing.T) {
-	pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "q:1b"}}})
-	fx := newTierFixture(t, ollamaCase(t), pol, map[string][]string{"cold": {}}, nil)
-	fx.advertise(t, "cold", map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("q:1b")}, strictCapabilityFor("ollama", "q:1b"))
+	pol := tierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "q:1b"}}})
+	fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"cold": {}}, nil)
+	fx.advertise(t, "cold", map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("q:1b")}, strictCapabilityFor("llamacpp", "q:1b"))
 	f := fx.p.soleFacade()
 	n, ok := discoveredNode(f, "cold")
 	if !ok {
 		t.Fatal("missing cold fixture")
 	}
-	n.EngineBindingOffers = bindingOffer("ollama", "q:1b")
+	n.EngineBindingOffers = bindingOffer("llamacpp", "q:1b")
 	f.discovery.AddManual(n)
 	if got := f.resolveTierCandidates("weak", requestNeeds{}, false); len(got) != 1 || !got[0].preparation {
 		t.Fatalf("concrete-tier offer missing: %+v", got)

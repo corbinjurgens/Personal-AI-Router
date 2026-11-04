@@ -297,7 +297,7 @@ func TestProxyRestartsOnceForAChangedReferenceSet(t *testing.T) {
 			if got := fakeProxyReserved(t, pp); len(got) != 0 {
 				t.Fatalf("a proxy with no configured reference received %q", got)
 			}
-			spawns := b.currentOllamaProxyGeneration()
+			spawns := sb.proxyStarts(t)
 
 			step := func(what, ceiling string, restart bool, refs []nodepolicy.CredentialRef, want []string) {
 				sb.setAccounts(t, ceiling, refs...)
@@ -306,8 +306,8 @@ func TestProxyRestartsOnceForAChangedReferenceSet(t *testing.T) {
 					requireProxyExited(t, pp, what)
 					spawns++
 				}
-				if got := b.currentOllamaProxyGeneration(); got != spawns {
-					t.Fatalf("%s: spawn generation = %d, want %d", what, got, spawns)
+				if got := sb.proxyStarts(t); got != spawns {
+					t.Fatalf("%s: proxy starts = %d, want %d", what, got, spawns)
 				}
 				next := b.proxyProcessHandle()
 				requireProxyRunning(t, next, what)
@@ -334,7 +334,7 @@ func TestProxyRestartsOnceForAChangedReferenceSet(t *testing.T) {
 			step("replacing the reference", "5", true, []nodepolicy.CredentialRef{unconfiguredRef}, []string{unconfiguredRef})
 			step("removing every reference", "5", true, nil, []string{})
 
-			if len(facades) > 0 && b.engineProxyHandle(ollamaProxyProfile) != pp {
+			if len(facades) > 0 && b.engineProxyHandle(mustEngineProxyProfile("llamacpp")) != pp {
 				t.Error("the restarted proxy does not serve the facade")
 			}
 			secretenvtest.AssertNoValue(t, "client stream", bufferText(sb.out))
@@ -343,7 +343,7 @@ func TestProxyRestartsOnceForAChangedReferenceSet(t *testing.T) {
 	}
 
 	test("listener only", true)
-	test("serving a facade", false, ollamaProxyProfile.Name)
+	test("serving a facade", false, mustEngineProxyProfile("llamacpp").Name)
 }
 
 func bufferText(s *syncBuffer) string {

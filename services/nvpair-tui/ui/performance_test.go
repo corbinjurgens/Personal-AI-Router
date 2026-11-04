@@ -555,7 +555,7 @@ func TestPerformanceBrokerRestartRequiresNewSnapshot(t *testing.T) {
 		}
 		result := json.RawMessage(`{"subscribed":true}`)
 		if method == "engine:models" {
-			snapshot := tuiDownloadSnapshot()
+			snapshot := tuiLlamaCPPDownloadSnapshot()
 			snapshot.Entries = []modeldownload.Entry{}
 			result = tuiDownloadJSON(t, tuiDownloadInventory(snapshot))
 		}
@@ -569,7 +569,7 @@ func TestPerformanceBrokerRestartRequiresNewSnapshot(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("canonical model hydration did not return")
 	}
-	if !d.modelReady("ollama", "exact/model") || d.performance != nil {
+	if !d.modelReady("llamacpp", "exact/model") || d.performance != nil {
 		t.Fatal("model hydration did not restore readiness independently of performance")
 	}
 	d.update(performanceReplyFromRPC(t, broker, batch[1]))

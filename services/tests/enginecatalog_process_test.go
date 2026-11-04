@@ -41,7 +41,6 @@ func TestDescriptorEngineIsFrontedFromAUserManifest(t *testing.T) {
 		"protocols":        []string{"openai-v1"},
 		"model_naming":     "exact",
 		"runtime": map[string]any{
-			"mode":   "process",
 			"bin":    fake,
 			"env":    map[string]string{"FAKE_ADDR": "127.0.0.1:{port}"},
 			"bind":   "127.0.0.1",

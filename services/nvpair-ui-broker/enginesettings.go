@@ -18,7 +18,6 @@ import (
 
 	"nvpair-shared/appdir"
 	"nvpair-shared/clustertrust"
-	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/modelconfig"
 	"nvpair-shared/noderec"
@@ -207,8 +206,8 @@ func (b *Broker) settingsProxy(engine string) *proxyProcess {
 	return b.engineProxyHandle(profile)
 }
 
-func isEngineDiscoveryService(service noderec.ServiceKey) bool {
-	for _, profile := range engineProxyProfiles {
+func (b *Broker) isEngineDiscoveryService(service noderec.ServiceKey) bool {
+	for _, profile := range b.frontedEngineProfiles() {
 		if profile.DiscoveryService == service {
 			return true
 		}
@@ -249,7 +248,7 @@ func (b *Broker) settingsSnapshotLocked(ctx context.Context, engine string) (set
 // Build initialization, migration and drift readback on a private record.
 // Apply must finish worker IO before it can atomically authorize and save.
 func (b *Broker) prepareSettingsSnapshotLocked(ctx context.Context, engine string) (*engineSettingsRecord, bool, error) {
-	if _, ok := engineProxyProfileFor(engine); !ok {
+	if _, ok := b.frontedEngineProfile(engine); !ok {
 		return nil, false, fmt.Errorf("this engine does not support settings")
 	}
 	if err := b.loadEngineSettingsLocked(); err != nil {
@@ -312,7 +311,7 @@ func (b *Broker) prepareSettingsSnapshotLocked(ctx context.Context, engine strin
 
 func (b *Broker) publishSettingsLocked() {
 	all := make([]settings.Snapshot, 0, len(b.engineSettings))
-	for _, profile := range engineProxyProfiles {
+	for _, profile := range b.frontedEngineProfiles() {
 		if record := b.engineSettings[profile.Name]; record != nil {
 			record.Snapshot.Sequence++
 			all = append(all, record.Snapshot.Clone())
@@ -366,22 +365,19 @@ func (b *Broker) validateSettingsPortsLocked(ctx context.Context, engine string,
 	for _, service := range b.servicePorts().entries() {
 		reserved[service.port] = true
 	}
-	if alias := b.currentOllamaHostAlias().Port; alias > 0 {
-		reserved[alias] = true
-	}
 	if listener := b.routingListenerPort(); listener > 0 {
 		reserved[listener] = true
 	}
 	// Include every registered PAIR listener, including services added later.
 	if b.regCache != nil {
 		for _, service := range b.regCache.Snapshot() {
-			if service.Port > 0 && !isEngineDiscoveryService(service.Service) {
+			if service.Port > 0 && !b.isEngineDiscoveryService(service.Service) {
 				reserved[service.Port] = true
 			}
 		}
 	}
 	if reserved[config.ServerPort] || reserved[config.ProxyPort] {
-		return fmt.Errorf("a selected port is reserved by a PAIR service or proxy alias")
+		return fmt.Errorf("a selected port is reserved by a PAIR service or routing listener")
 	}
 	var installed struct {
 		Engines []struct {
@@ -397,7 +393,7 @@ func (b *Broker) validateSettingsPortsLocked(ctx context.Context, engine string,
 			return fmt.Errorf("a selected port is reserved by another configured engine")
 		}
 	}
-	for _, profile := range engineProxyProfiles {
+	for _, profile := range b.frontedEngineProfiles() {
 		if profile.Name == engine {
 			continue
 		}
@@ -406,6 +402,9 @@ func (b *Broker) validateSettingsPortsLocked(ctx context.Context, engine string,
 			if port == config.ServerPort || port == config.ProxyPort {
 				return fmt.Errorf("a selected port is reserved by another configured proxy")
 			}
+		}
+		if port := savedEngineProxyPort(profile); port == config.ServerPort || port == config.ProxyPort {
+			return fmt.Errorf("a selected port is reserved by another configured proxy")
 		}
 		if proxy := b.settingsProxy(profile.Name); proxy != nil {
 			_, port := proxy.Status(profile.Name)
@@ -471,10 +470,13 @@ func (b *Broker) previewSettingsSnapshotLocked(ctx context.Context, p settings.R
 // restart. settingsApplyMu, which the caller also holds, is what keeps a
 // second apply out of this window.
 func (b *Broker) runSettingsOperationLocked(ctx context.Context, engine string, record *engineSettingsRecord) error {
+	profile, ok := b.frontedEngineProfile(engine)
+	if !ok {
+		return fmt.Errorf("this engine does not support settings")
+	}
 	if err := b.migrateSettingsArgumentsLocked(ctx, engine, record); err != nil {
 		return err
 	}
-	profile, _ := engineProxyProfileFor(engine)
 	service := profile.DiscoveryService
 	if b.regCache != nil {
 		b.unregisterService(service)
@@ -907,24 +909,25 @@ func (b *Broker) handleSettingsRelay(source *engineManagerSource, raw json.RawMe
 }
 
 func (b *Broker) rebindSettingsProxy(engine string, port int) error {
+	profile, ok := b.frontedEngineProfile(engine)
+	if !ok {
+		return fmt.Errorf("this engine does not support settings")
+	}
 	p := b.settingsProxy(engine)
 	if p == nil {
 		return fmt.Errorf("proxy unavailable")
 	}
 	// Disable automatic facade takeover before the ready event can race the
 	// explicit rebind. The accepted journal restores these choices after restart.
-	profile, _ := engineProxyProfileFor(engine)
 	state := b.engineProxy(profile)
 	state.explicitSettings.Store(true)
-	state.managedFacade.Store(false)
-	_, rpcErr, err := p.Call(context.Background(), engine+":set-port", settingsJSON(map[string]int{"port": port}))
+	_, rpcErr, err := p.Call(context.Background(), profile.addressed("set-port"), settingsJSON(map[string]int{"port": port}))
 	if err != nil {
 		return err
 	}
 	if rpcErr != nil {
 		return fmt.Errorf("%s", rpcErr.Message)
 	}
-	state.managedFacade.Store(false)
 	state.startupPort.Store(int32(port))
 	return nil
 }
@@ -937,7 +940,7 @@ func (b *Broker) refreshEngineSettings(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if !b.managedPortOwnershipReady() {
+			if !b.facadeStartupReady() {
 				continue
 			}
 			func() {
@@ -946,7 +949,8 @@ func (b *Broker) refreshEngineSettings(ctx context.Context) {
 				readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 				defer cancel()
 				changed := false
-				for _, engine := range engines.Names() {
+				for _, profile := range b.frontedEngineProfiles() {
+					engine := profile.Name
 					var before settings.Snapshot
 					if r := b.engineSettings[engine]; r != nil {
 						before = r.Snapshot.Clone()

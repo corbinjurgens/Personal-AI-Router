@@ -5,16 +5,11 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
-	"strings"
-	"sync/atomic"
 	"testing"
-	"time"
 
 	"nvpair-shared/engines"
 	"nvpair-shared/noderec"
@@ -23,117 +18,10 @@ import (
 
 func TestLocalEnginePortRequiresCurrentManagerStatus(t *testing.T) {
 	b := &Broker{} // no engine-manager worker
-	for _, engine := range []string{"ollama", "lmstudio", "custom"} {
+	for _, engine := range []string{engines.NameLlamaCPP, "custom"} {
 		if got, ok := b.localEnginePort(engine); ok || got != 0 {
 			t.Fatalf("no engine-manager: %s port = (%d, %v), want (0, false)", engine, got, ok)
 		}
-	}
-}
-
-type advertiserTestTransport func(*http.Request) (*http.Response, error)
-
-func (f advertiserTestTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
-
-func TestAdvertisersRequireCurrentManagerBeforeHealthAttempt(t *testing.T) {
-	for _, engine := range []string{"ollama", "lmstudio", "custom"} {
-		t.Run(engine, func(t *testing.T) {
-			for _, scenario := range []string{"missing manager", "closed manager", "RPC error", "stopped", "malformed", "running"} {
-				t.Run(scenario, func(t *testing.T) {
-					profile := ollamaProxyProfile
-					if engine == "lmstudio" {
-						profile = lmstudioProxyProfile
-					} else if engine == "custom" {
-						profile = testDefaultEngineProxyProfile()
-						profile.DiscoveryService = "e-fixedtest"
-					}
-					b := brokerWithEngineProxyProfile(profile)
-					b.regCache = relay.NewRegistrationCache()
-					// A previously confirmed port cannot substitute for current status.
-					b.engineProxy(profile).backendPort.Store(25002)
-					updates := attachAdvertiserProxy(t, b, profile, 25001)
-					if scenario != "missing manager" {
-						worker, codec := newTestRPCWorkerPipe(t)
-						b.setEngineMgr(worker)
-						if scenario == "closed manager" {
-							worker.peer.Close()
-						} else {
-							go func() {
-								msg, err := codec.Read()
-								if err != nil {
-									t.Errorf("read status: %v", err)
-									return
-								}
-								var params struct {
-									Engine string `json:"engine"`
-								}
-								if err := json.Unmarshal(msg.Params, &params); err != nil || msg.Method != "engine:status" || params.Engine != profile.Name {
-									t.Errorf("status request = %+v, params=%+v, error=%v", msg, params, err)
-								}
-								switch scenario {
-								case "RPC error":
-									err = codec.RespondError(msg.ID, -32000, "unavailable")
-								case "malformed":
-									err = codec.Respond(msg.ID, "not a status")
-								default:
-									err = codec.Respond(msg.ID, map[string]any{"running": scenario == "running", "port": 25002})
-								}
-								if err != nil {
-									t.Errorf("respond status: %v", err)
-									return
-								}
-								if scenario == "running" {
-									msg, err := codec.Read()
-									if err != nil {
-										t.Errorf("read local credential: %v", err)
-										return
-									}
-									if msg.Method != engines.LocalCredentialMethod {
-										t.Errorf("unexpected request %s", msg.Method)
-									}
-									if err := codec.Respond(msg.ID, engines.LocalCredential{Port: 25002}); err != nil {
-										t.Errorf("respond local credential: %v", err)
-									}
-								}
-							}()
-						}
-					}
-					var attempts atomic.Int32
-					client := &http.Client{Transport: advertiserTestTransport(func(r *http.Request) (*http.Response, error) {
-						attempts.Add(1)
-						if r.URL.Port() != "25002" {
-							return nil, fmt.Errorf("unexpected health target %s", r.URL)
-						}
-						return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("{}"))}, nil
-					})}
-					switch engine {
-					case "ollama":
-						b.reconcileAdvertise(client)
-					case "lmstudio":
-						b.reconcileAdvertiseLMStudio(client)
-					default:
-						b.reconcileAdvertiseDynamicEngine(profile, client)
-					}
-					wantAttempts := int32(0)
-					if scenario == "running" {
-						wantAttempts = 1
-					}
-					if got := attempts.Load(); got != wantAttempts {
-						t.Fatalf("health attempts = %d, want %d", got, wantAttempts)
-					}
-					select {
-					case update := <-updates:
-						if update.Healthy != (scenario == "running") {
-							t.Fatalf("local backend = %+v", update)
-						}
-					case <-time.After(2 * time.Second):
-						t.Fatal("proxy did not receive health result")
-					}
-					if got := b.regCache.Snapshot(); len(got) != int(wantAttempts) {
-						t.Fatalf("registrations = %+v, want %d", got, wantAttempts)
-					}
-				})
-			}
-		})
 	}
 }
 
@@ -159,59 +47,6 @@ func TestRunningEnginePort(t *testing.T) {
 	}
 }
 
-func TestLMStudioMissingManagerClearsProxyDestination(t *testing.T) {
-	proxyClient, proxyServer := net.Pipe()
-	defer proxyClient.Close()
-	defer proxyServer.Close()
-	proxy := &proxyProcess{
-		peer:        NewPeer(NewCodec(proxyClient)),
-		facadeState: readyFacade(lmstudioProxyProfile.Name, defaultLMStudioPort),
-	}
-	go proxy.peer.Serve(nil, nil)
-
-	localBackend := make(chan proxyLocalBackend, 1)
-	go func() {
-		codec := NewCodec(proxyServer)
-		msg, err := codec.Read()
-		if err != nil {
-			return
-		}
-		var got proxyLocalBackend
-		if json.Unmarshal(msg.Params, &got) == nil {
-			localBackend <- got
-		}
-		_ = codec.Respond(msg.ID, map[string]bool{"ok": true})
-	}()
-
-	b := &Broker{regCache: relay.NewRegistrationCache()}
-	b.setLMStudioProxy(proxy)
-
-	// A nil client proves missing manager status refuses health HTTP.
-	b.reconcileAdvertiseLMStudio(nil)
-	if got := b.regCache.Snapshot(); len(got) != 0 {
-		t.Fatalf("LM Studio proxy was advertised as an engine: %+v", got)
-	}
-	select {
-	case got := <-localBackend:
-		if got.Port != 0 || got.Healthy {
-			t.Fatalf("proxy listener was retained as the local backend: %+v", got)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("LM Studio proxy did not receive a cleared local backend")
-	}
-}
-
-func TestLMStudioMissingManagerPreservesKnownBackendCache(t *testing.T) {
-	b := &Broker{regCache: relay.NewRegistrationCache()}
-	b.lmstudioState().backendPort.Store(managedLMStudioBackendStart)
-
-	b.reconcileAdvertiseLMStudio(nil)
-
-	if got := int(b.lmstudioState().backendPort.Load()); got != managedLMStudioBackendStart {
-		t.Fatalf("backend cache = %d, want %d", got, managedLMStudioBackendStart)
-	}
-}
-
 func TestEngineAdvertiserTracksEngineHealth(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -231,7 +66,7 @@ func TestEngineAdvertiserTracksEngineHealth(t *testing.T) {
 	}
 
 	profile := testDefaultEngineProxyProfile()
-	profile.DiscoveryService = noderec.ServiceLMStudio
+	profile.DiscoveryService = noderec.ServiceLlamaCPP
 	b := brokerWithEngineProxyProfile(profile)
 	b.regCache = relay.NewRegistrationCache()
 	b.engineProxy(profile).backendPort.Store(int32(backendPort))
@@ -259,7 +94,7 @@ func TestEngineAdvertiserTracksEngineHealth(t *testing.T) {
 
 func TestEngineAdvertiserRejectsSelfForwardLoop(t *testing.T) {
 	profile := testDefaultEngineProxyProfile()
-	profile.DiscoveryService = noderec.ServiceLMStudio
+	profile.DiscoveryService = noderec.ServiceLlamaCPP
 	b := brokerWithEngineProxyProfile(profile)
 	b.regCache = relay.NewRegistrationCache()
 	b.regCache.Register(noderec.RegisterParams{Service: profile.DiscoveryService, Port: 44000})
@@ -314,43 +149,11 @@ func attachAdvertiserProxy(
 	return updates
 }
 
-// TestProxyListenPortNoProxy: with no proxy supervised, proxyListenPort is 0,
+// With no proxy supervised, engineProxyListenPort is 0,
 // so the self-forward collision check (port == proxy port) never falsely trips.
 func TestProxyListenPortNoProxy(t *testing.T) {
 	b := &Broker{} // no proxy worker
-	if got := b.proxyListenPort(); got != 0 {
-		t.Errorf("no proxy: proxyListenPort = %d, want 0", got)
-	}
-}
-
-func TestOllamaFacadeIsPendingBackend(t *testing.T) {
-	b := &Broker{}
-	b.ollamaState().managedFacade.Store(true)
-	b.ollamaState().backendPort.Store(managedOllamaFacadePort)
-	if !b.ollamaFacadeIsPendingBackend() {
-		t.Fatal("managed facade must block liveness probes while the backend still points at 11434")
-	}
-	b.ollamaState().backendPort.Store(11435)
-	if b.ollamaFacadeIsPendingBackend() {
-		t.Fatal("liveness probes should resume after the backend moves off 11434")
-	}
-	b.managedOllamaBackend.Store(11436)
-	if !b.ollamaFacadeIsPendingBackend() {
-		t.Fatal("a pending 11435 to 11436 move must keep liveness probes gated")
-	}
-	b.managedOllamaBackend.Store(0)
-	b.ollamaMoveInFlight.Store(true)
-	if !b.ollamaFacadeIsPendingBackend() {
-		t.Fatal("an in-flight backend move must keep liveness probes gated")
-	}
-	b.ollamaMoveInFlight.Store(false)
-
-	b.ollamaState().managedFacade.Store(false)
-	b.ollamaState().backendPort.Store(managedOllamaFacadePort)
-	b.setProxy(&proxyProcess{
-		facadeState: readyFacade(ollamaProxyProfile.Name, managedOllamaFacadePort),
-	})
-	if !b.ollamaFacadeIsPendingBackend() {
-		t.Fatal("recovery must keep probes blocked until the proxy vacates 11434")
+	if got := b.engineProxyListenPort(mustEngineProxyProfile("llamacpp")); got != 0 {
+		t.Errorf("no proxy: engineProxyListenPort = %d, want 0", got)
 	}
 }

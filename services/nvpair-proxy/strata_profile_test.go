@@ -158,9 +158,6 @@ func TestStrataIsFrontedFromItsDescriptor(t *testing.T) {
 	if profile.DiscoveryService != "e-strata" || profile.PortFile != "strata-proxy-port.json" {
 		t.Fatalf("service key %q port file %q, want e-strata and strata-proxy-port.json", profile.DiscoveryService, profile.PortFile)
 	}
-	if profile.SupportsHostAlias {
-		t.Fatal("a dynamic engine has no inherited host variable for an alias")
-	}
 }
 
 func TestStrataEnableIsRefusedWithoutAFrontableDescriptor(t *testing.T) {
@@ -307,7 +304,7 @@ func TestStrataRouteClassification(t *testing.T) {
 }
 
 // Strata model ids are exact: the proxy must not treat "m" and "m:latest" as one
-// model, as it does for Ollama.
+// model, as it does for engine.
 func TestStrataModelIDsAreExact(t *testing.T) {
 	profile := strataProfile(t)
 	for _, id := range []string{"qwen3-30b-a3b", "org/qwen3:Q4_K_M", "qwen3-30b-a3b:latest"} {

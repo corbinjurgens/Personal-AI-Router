@@ -94,11 +94,19 @@ func TestResidentNativeAllocationRevalidation(t *testing.T) {
 
 func residentHarness(t *testing.T, models ...string) (*admHarness, nodepolicy.PrepareResidentParams) {
 	t.Helper()
+	return residentHarnessFor(t, "llamacpp", models...)
+}
+
+// residentHarnessFor is residentHarness for a chosen engine, for the cases that
+// depend on one engine's model naming.
+func residentHarnessFor(t *testing.T, engine string, models ...string) (*admHarness, nodepolicy.PrepareResidentParams) {
+	t.Helper()
 	h := newAdmHarness(t)
+	h.setHealthy(engine, true)
 	h.a.strict.storageErr = nil
 	keys := make([]admKey, 0, len(models))
 	for _, model := range models {
-		keys = append(keys, admKey{engine: "ollama", model: model})
+		keys = append(keys, admKey{engine: engine, model: model})
 	}
 	installQualified(t, h.a, keys...)
 	p := h.a.currentPolicy()
@@ -111,17 +119,17 @@ func residentHarness(t *testing.T, models ...string) (*admHarness, nodepolicy.Pr
 	for i := range p.Profiles {
 		p.Profiles[i].MemoryBytes = 40
 	}
-	p.ResidentModels = nodepolicy.ResidentModels{{Engine: "ollama", Model: models[0]}}
+	p.ResidentModels = nodepolicy.ResidentModels{{Engine: engine, Model: models[0]}}
 	h.a.setPolicy(p)
-	h.a.setIntent(map[string]bool{"ollama": true})
-	h.a.setResidency(map[string][]string{"ollama": {}})
-	return h, nodepolicy.PrepareResidentParams{PolicyRevision: "1", ProxyRunID: "proxy", ManagerIncarnation: "manager", Engine: "ollama", Model: models[0], Identity: strictRequest().Identity, OperationID: "resident:1", TimeoutMs: 10_000}
+	h.a.setIntent(map[string]bool{engine: true})
+	h.a.setResidency(map[string][]string{engine: {}})
+	return h, nodepolicy.PrepareResidentParams{PolicyRevision: "1", ProxyRunID: "proxy", ManagerIncarnation: "manager", Engine: engine, Model: models[0], Identity: strictRequest().Identity, OperationID: "resident:1", TimeoutMs: 10_000}
 }
 
 func TestResidentContextBoundPrepare(t *testing.T) {
 	test := func(name string, context, bound int, collision bool, wantGrant bool) {
 		t.Run(name, func(t *testing.T) {
-			h, in := residentHarness(t, "m:latest")
+			h, in := residentHarness(t, "m")
 			p := h.a.currentPolicy()
 			p.Profiles[0].ContextTokens = context
 			if collision {
@@ -170,9 +178,9 @@ func TestResidentContextBoundPrepare(t *testing.T) {
 }
 
 func TestResidentContextBoundPerModel(t *testing.T) {
-	h, in := residentHarness(t, "m:latest", "n:latest")
+	h, in := residentHarness(t, "m", "n")
 	p := h.a.currentPolicy()
-	p.ResidentModels = append(p.ResidentModels, nodepolicy.Role{Engine: "ollama", Model: "n:latest"})
+	p.ResidentModels = append(p.ResidentModels, nodepolicy.Role{Engine: "llamacpp", Model: "n"})
 	p.Profiles[1].ContextTokens = 2048
 	h.a.mu.Lock()
 	ref := *p.Profiles[1].Qualification
@@ -183,7 +191,7 @@ func TestResidentContextBoundPerModel(t *testing.T) {
 	h.a.setPolicy(p)
 	first := prepareResidentOK(t, h.a, in)
 	dispatchResidentOK(t, h.a, in, first)
-	in.Model, in.OperationID = "n:latest", "resident:2"
+	in.Model, in.OperationID = "n", "resident:2"
 	second := prepareResidentOK(t, h.a, in)
 	dispatchResidentOK(t, h.a, in, second)
 	if h.a.resident.ops[in.OperationID].context != 2048 || h.a.currentActive() != 2 {
@@ -194,7 +202,7 @@ func TestResidentContextBoundPerModel(t *testing.T) {
 func TestResidentContextBoundRevalidation(t *testing.T) {
 	test := func(name string, mutate func(*admissionController, admKey)) {
 		t.Run(name, func(t *testing.T) {
-			h, in := residentHarness(t, "m:latest")
+			h, in := residentHarness(t, "m")
 			prepared := prepareResidentOK(t, h.a, in)
 			h.a.mu.Lock()
 			// Deliberately replace evidence without a refresh signal: final grant
@@ -296,9 +304,9 @@ func fillReleasedResidentHistory(t *testing.T, a *admissionController, in nodepo
 }
 
 func TestResidentCapacityInstalledIsNotLoaded(t *testing.T) {
-	h, in := residentHarness(t, "m:latest")
+	h, in := residentHarness(t, "m")
 	prepareResidentOK(t, h.a, in)
-	if h.a.isLoaded("ollama", "m:latest") {
+	if h.a.isLoaded("llamacpp", "m") {
 		t.Fatal("prepare fabricated loaded inventory")
 	}
 	if active := h.a.currentActive(); active != 1 {
@@ -310,7 +318,7 @@ func TestResidentCapacityInstalledIsNotLoaded(t *testing.T) {
 }
 
 func TestResidentCapacityLastSlotAcrossCallers(t *testing.T) {
-	h, in := residentHarness(t, "m:latest")
+	h, in := residentHarness(t, "m")
 	start := make(chan struct{})
 	type answer struct {
 		result nodepolicy.PrepareResidentResult
@@ -349,16 +357,16 @@ func TestResidentCapacityLastSlotAcrossCallers(t *testing.T) {
 	if granted != 1 || h.a.currentActive() != 1 {
 		t.Fatalf("granted=%d active=%d, want one", granted, h.a.currentActive())
 	}
-	mustReject(t, h.admit("ollama", "m:latest", 0), nodepolicy.RejectBusy)
+	mustReject(t, h.admit("llamacpp", "m", 0), nodepolicy.RejectBusy)
 	req := strictRequest()
 	req.QueueBudgetMs = 0
-	if ticket, err := h.a.admitStrictNow(context.Background(), "ollama", "m:latest", req); ticket != nil || err == nil {
+	if ticket, err := h.a.admitStrictNow(context.Background(), "llamacpp", "m", req); ticket != nil || err == nil {
 		t.Fatalf("strict bypassed held capacity: ticket=%v error=%v", ticket, err)
 	}
 }
 
 func TestResidentCapacityLastSlotCompetesWithConcrete(t *testing.T) {
-	h, in := residentHarness(t, "m:latest", "n:latest")
+	h, in := residentHarness(t, "m", "n")
 	p := h.a.currentPolicy()
 	p.Admission.MaxResidentModels = 1
 	h.a.setPolicy(p)
@@ -374,7 +382,7 @@ func TestResidentCapacityLastSlotCompetesWithConcrete(t *testing.T) {
 		result, err := h.a.prepareResident("proxy", in)
 		resident <- residentAnswer{result, err}
 	}()
-	go func() { <-start; concrete <- h.admit("ollama", "n:latest", 0) }()
+	go func() { <-start; concrete <- h.admit("llamacpp", "n", 0) }()
 	close(start)
 	residentResult, concreteResult := <-resident, <-concrete
 	if residentResult.err != nil {
@@ -396,12 +404,12 @@ func TestResidentCapacityLastSlotCompetesWithConcrete(t *testing.T) {
 }
 
 func TestResidentCapacityCountsStrictQuarantine(t *testing.T) {
-	h, in := residentHarness(t, "m:latest", "n:latest")
+	h, in := residentHarness(t, "m", "n")
 	p := h.a.currentPolicy()
 	p.Admission.MaxResidentModels = 1
 	h.a.setPolicy(p)
 	// Recovered strict markers enter these shared counts before any requests.
-	k := admKey{"ollama", "n:latest"}
+	k := admKey{"llamacpp", "n"}
 	h.a.mu.Lock()
 	h.a.strict.markers[1] = capacityMarker{ID: 1, Engine: k.engine, Model: k.model}
 	h.a.inflight[k], h.a.active, h.a.activeByEngine[k.engine] = 1, 1, 1
@@ -415,9 +423,9 @@ func TestResidentCapacityCountsStrictQuarantine(t *testing.T) {
 func TestResidentCapacityAggregateRefusal(t *testing.T) {
 	test := func(name string, mutate func(*admissionController, *nodepolicy.Policy), reason nodepolicy.ModelConfigurationReason) {
 		t.Run(name, func(t *testing.T) {
-			h, in := residentHarness(t, "m:latest", "n:latest")
+			h, in := residentHarness(t, "m", "n")
 			p := h.a.currentPolicy()
-			p.ResidentModels = append(p.ResidentModels, nodepolicy.Role{Engine: "ollama", Model: "n:latest"})
+			p.ResidentModels = append(p.ResidentModels, nodepolicy.Role{Engine: "llamacpp", Model: "n"})
 			mutate(h.a, &p)
 			h.a.setPolicy(p)
 			result, err := h.a.prepareResident("proxy", in)
@@ -441,21 +449,18 @@ func TestResidentCapacityAggregateRefusal(t *testing.T) {
 	}, nodepolicy.ModelReasonUnqualified)
 	test("unknown existing memory", func(a *admissionController, p *nodepolicy.Policy) {
 		p.Admission.MaxResidentModels = 3
-		a.setResidency(map[string][]string{"ollama": {"other:latest"}})
+		a.setResidency(map[string][]string{"llamacpp": {"other"}})
 	}, nodepolicy.ModelReasonNoFit)
 	test("pending unload", func(a *admissionController, _ *nodepolicy.Policy) {
-		a.unloadSentAt[admKey{"ollama", "m:latest"}] = a.strict.now()
+		a.unloadSentAt[admKey{"llamacpp", "m"}] = a.strict.now()
 	}, nodepolicy.ModelReasonSwitchBusy)
 	test("installed digest missing", func(a *admissionController, _ *nodepolicy.Policy) {
-		a.setModelIdentity(map[string]nodepolicy.EngineIdentity{"ollama": testIdentity("n:latest")})
+		a.setModelIdentity(map[string]nodepolicy.EngineIdentity{"llamacpp": testIdentity("n")})
 	}, nodepolicy.ModelReasonNotInstalled)
-	test("installed aliases even with equal digest", func(a *admissionController, _ *nodepolicy.Policy) {
-		a.setModelIdentity(map[string]nodepolicy.EngineIdentity{"ollama": testIdentity("m", "m:latest", "n:latest")})
-	}, nodepolicy.ModelReasonUnqualified)
 }
 
 func TestResidentCapacityDuplicatePayloadAndDeadline(t *testing.T) {
-	h, in := residentHarness(t, "m:latest")
+	h, in := residentHarness(t, "m")
 	clock := useStrictClock(h.a)
 	first := prepareResidentOK(t, h.a, in)
 	deadline := h.a.resident.ops[in.OperationID].deadline
@@ -480,7 +485,7 @@ func TestResidentCapacityDuplicatePayloadAndDeadline(t *testing.T) {
 }
 
 func TestResidentCapacityIncomingDeadlineWins(t *testing.T) {
-	h, in := residentHarness(t, "m:latest")
+	h, in := residentHarness(t, "m")
 	clock := useStrictClock(h.a)
 	in.TimeoutMs = 250
 	prepareResidentOK(t, h.a, in)
@@ -490,24 +495,24 @@ func TestResidentCapacityIncomingDeadlineWins(t *testing.T) {
 }
 
 func TestResidentCapacityMemorySumCannotOverflow(t *testing.T) {
-	h, in := residentHarness(t, "m:latest", "n:latest")
+	h, in := residentHarness(t, "m", "n")
 	p := h.a.currentPolicy()
 	p.Admission.MemoryBudgetBytes = 1<<63 - 1
 	p.Profiles[0].MemoryBytes, p.Profiles[1].MemoryBytes = 1<<62, 1<<62
-	p.ResidentModels = append(p.ResidentModels, nodepolicy.Role{Engine: "ollama", Model: "n:latest"})
+	p.ResidentModels = append(p.ResidentModels, nodepolicy.Role{Engine: "llamacpp", Model: "n"})
 	h.a.setPolicy(p)
 	result, err := h.a.prepareResident("proxy", in)
 	if err != nil || result.ReservationID != "" || len(result.Refusals) != 1 || result.Refusals[0].Reason != nodepolicy.ModelReasonNoFit {
 		t.Fatalf("overflowed desired memory fit: %+v error=%v", result, err)
 	}
-	h.a.setResidency(map[string][]string{"ollama": {"m:latest"}})
-	mustReject(t, h.admit("ollama", "n:latest", 0), nodepolicy.RejectNoFit)
+	h.a.setResidency(map[string][]string{"llamacpp": {"m"}})
+	mustReject(t, h.admit("llamacpp", "n", 0), nodepolicy.RejectNoFit)
 }
 
 func TestServedResidentPrepareBindingRefusals(t *testing.T) {
-	for _, field := range []string{"proxy", "revision", "manager", "identity", "normalization"} {
+	for _, field := range []string{"proxy", "revision", "manager", "identity"} {
 		t.Run(field, func(t *testing.T) {
-			h, in := residentHarness(t, "m:latest")
+			h, in := residentHarness(t, "m")
 			switch field {
 			case "proxy":
 				in.ProxyRunID = "old-proxy"
@@ -517,8 +522,6 @@ func TestServedResidentPrepareBindingRefusals(t *testing.T) {
 				in.ManagerIncarnation = ""
 			case "identity":
 				in.Identity.EngineRunID = "old-engine"
-			case "normalization":
-				in.Model = "m"
 			}
 			result, err := h.a.prepareResident("proxy", in)
 			if field == "proxy" {
@@ -537,7 +540,7 @@ func TestServedResidentPrepareBindingRefusals(t *testing.T) {
 func TestServedResidentFinalGrantRevocation(t *testing.T) {
 	test := func(name string, revoke func(*admissionController)) {
 		t.Run(name, func(t *testing.T) {
-			h, in := residentHarness(t, "m:latest")
+			h, in := residentHarness(t, "m")
 			prepared := prepareResidentOK(t, h.a, in)
 			revoke(h.a)
 			result, err := h.a.dispatchResident("proxy", residentDispatch(in, prepared))
@@ -553,11 +556,11 @@ func TestServedResidentFinalGrantRevocation(t *testing.T) {
 	})
 	test("revision replaced", func(a *admissionController) { p := a.currentPolicy(); p.Revision = "2"; a.setPolicy(p) })
 	test("local pause", func(a *admissionController) { a.setAvailability(nodepolicy.Paused, false) })
-	test("saved Off", func(a *admissionController) { a.setIntent(map[string]bool{"ollama": false}) })
-	test("drain", func(a *admissionController) { a.setDrain("ollama", true) })
+	test("saved Off", func(a *admissionController) { a.setIntent(map[string]bool{"llamacpp": false}) })
+	test("drain", func(a *admissionController) { a.setDrain("llamacpp", true) })
 	test("identity withdrawal", func(a *admissionController) { a.setModelIdentity(map[string]nodepolicy.EngineIdentity{}) })
 	test("switch invalidation", func(a *admissionController) {
-		a.invalidateEngine(nodepolicy.InvalidateEngineParams{Engine: "ollama", OperationID: "switch", Reason: nodepolicy.InvalidationReasonEngineSwitch})
+		a.invalidateEngine(nodepolicy.InvalidateEngineParams{Engine: "llamacpp", OperationID: "switch", Reason: nodepolicy.InvalidationReasonEngineSwitch})
 	})
 	test("accepted launch digest changed", func(a *admissionController) {
 		a.mu.Lock()
@@ -565,16 +568,16 @@ func TestServedResidentFinalGrantRevocation(t *testing.T) {
 			q.LaunchDigests = append(q.LaunchDigests, strings.Repeat("d", 64))
 		}
 		a.mu.Unlock()
-		id := testIdentity("m:latest")
+		id := testIdentity("m")
 		id.LaunchDigest = strings.Repeat("d", 64)
-		a.setModelIdentity(map[string]nodepolicy.EngineIdentity{"ollama": id})
+		a.setModelIdentity(map[string]nodepolicy.EngineIdentity{"llamacpp": id})
 	})
 }
 
 func TestServedResidentDispatchBindings(t *testing.T) {
 	for _, field := range []string{"proxy", "reservation", "manager", "operation", "revision", "engine", "model", "identity"} {
 		t.Run(field, func(t *testing.T) {
-			h, in := residentHarness(t, "m:latest")
+			h, in := residentHarness(t, "m")
 			prepared := prepareResidentOK(t, h.a, in)
 			request := residentDispatch(in, prepared)
 			switch field {
@@ -589,9 +592,9 @@ func TestServedResidentDispatchBindings(t *testing.T) {
 			case "revision":
 				request.PolicyRevision = "0"
 			case "engine":
-				request.Engine = "lmstudio"
+				request.Engine = "llamacpp-custom"
 			case "model":
-				request.Model = "n:latest"
+				request.Model = "n"
 			case "identity":
 				request.Identity.EngineRunID = "old-engine"
 			}
@@ -607,7 +610,7 @@ func TestServedResidentDispatchBindings(t *testing.T) {
 func TestResidentCapacityDispatchedUnknownRetained(t *testing.T) {
 	for _, outcome := range []nodepolicy.ResidentOutcome{nodepolicy.ResidentUnknown, nodepolicy.ResidentTimeout, nodepolicy.ResidentCancelled, nodepolicy.ResidentFailed, nodepolicy.ResidentNotDispatched} {
 		t.Run(string(outcome), func(t *testing.T) {
-			h, in := residentHarness(t, "m:latest")
+			h, in := residentHarness(t, "m")
 			clock := useStrictClock(h.a)
 			prepared := prepareResidentOK(t, h.a, in)
 			dispatchResidentOK(t, h.a, in, prepared)
@@ -618,8 +621,8 @@ func TestResidentCapacityDispatchedUnknownRetained(t *testing.T) {
 			if again := finishResidentOK(t, h.a, finish); again != first {
 				t.Fatal("duplicate finish changed result")
 			}
-			h.a.setResidency(map[string][]string{"ollama": {}})
-			if h.a.currentActive() != 1 || h.a.inflight[admKey{"ollama", "m:latest"}] != 1 {
+			h.a.setResidency(map[string][]string{"llamacpp": {}})
+			if h.a.currentActive() != 1 || h.a.inflight[admKey{"llamacpp", "m"}] != 1 {
 				t.Fatal("timeout, cancellation, revocation or unversioned inventory cleared dispatched uncertainty")
 			}
 		})
@@ -627,7 +630,7 @@ func TestResidentCapacityDispatchedUnknownRetained(t *testing.T) {
 }
 
 func TestResidentFailedLoadRefusals(t *testing.T) {
-	h, in := residentHarness(t, "m:latest")
+	h, in := residentHarness(t, "m")
 	prepared := prepareResidentOK(t, h.a, in)
 	dispatchResidentOK(t, h.a, in, prepared)
 	// A definite load failure without fresh inventory still holds capacity.
@@ -663,7 +666,7 @@ func TestResidentFailedLoadRefusals(t *testing.T) {
 }
 
 func TestResidentCapacityUndispatchedFinishReleasesOnce(t *testing.T) {
-	h, in := residentHarness(t, "m:latest")
+	h, in := residentHarness(t, "m")
 	prepared := prepareResidentOK(t, h.a, in)
 	finish := residentFinish(in, prepared, nodepolicy.ResidentNotDispatched)
 	finishResidentOK(t, h.a, finish)
@@ -684,7 +687,7 @@ func TestResidentCapacityUndispatchedFinishReleasesOnce(t *testing.T) {
 func TestResidentCapacityFinishObservations(t *testing.T) {
 	for _, loaded := range []bool{true, false} {
 		t.Run(fmt.Sprintf("loaded=%t", loaded), func(t *testing.T) {
-			h, in := residentHarness(t, "m:latest")
+			h, in := residentHarness(t, "m")
 			prepared := prepareResidentOK(t, h.a, in)
 			dispatchResidentOK(t, h.a, in, prepared)
 			finish := residentFinish(in, prepared, nodepolicy.ResidentFailed)
@@ -694,12 +697,12 @@ func TestResidentCapacityFinishObservations(t *testing.T) {
 			finish.Observation = residentObservationFor(in, 1, loaded)
 			finishResidentOK(t, h.a, finish)
 			finishResidentOK(t, h.a, finish)
-			if h.a.currentActive() != 0 || h.a.isLoaded("ollama", in.Model) != loaded {
-				t.Fatalf("observation did not convert capacity: active=%d loaded=%t", h.a.currentActive(), h.a.isLoaded("ollama", in.Model))
+			if h.a.currentActive() != 0 || h.a.isLoaded("llamacpp", in.Model) != loaded {
+				t.Fatalf("observation did not convert capacity: active=%d loaded=%t", h.a.currentActive(), h.a.isLoaded("llamacpp", in.Model))
 			}
-			h.a.setResidency(map[string][]string{"ollama": {}})
+			h.a.setResidency(map[string][]string{"llamacpp": {}})
 			h.a.mu.Lock()
-			resident := h.a.residentLocked()[admKey{"ollama", in.Model}]
+			resident := h.a.residentLocked()[admKey{"llamacpp", in.Model}]
 			h.a.mu.Unlock()
 			if resident {
 				t.Fatal("completed load did not rejoin ordinary residency accounting")
@@ -711,7 +714,7 @@ func TestResidentCapacityFinishObservations(t *testing.T) {
 func TestResidentCapacityStaleFinishCannotReleaseReplacement(t *testing.T) {
 	for _, field := range []string{"proxy", "operation", "reservation", "manager", "model", "engine", "identity", "generation"} {
 		t.Run(field, func(t *testing.T) {
-			h, in := residentHarness(t, "m:latest")
+			h, in := residentHarness(t, "m")
 			prepared := prepareResidentOK(t, h.a, in)
 			dispatchResidentOK(t, h.a, in, prepared)
 			finish := residentFinish(in, prepared, nodepolicy.ResidentLoaded)
@@ -726,9 +729,9 @@ func TestResidentCapacityStaleFinishCannotReleaseReplacement(t *testing.T) {
 			case "manager":
 				finish.Observation.ManagerIncarnation = "old-manager"
 			case "model":
-				finish.Observation.Model = "n:latest"
+				finish.Observation.Model = "n"
 			case "engine":
-				finish.Observation.Engine = "lmstudio"
+				finish.Observation.Engine = "llamacpp-custom"
 			case "identity":
 				finish.Observation.Identity.EngineRunID = "old-engine"
 			case "generation":
@@ -744,7 +747,7 @@ func TestResidentCapacityStaleFinishCannotReleaseReplacement(t *testing.T) {
 func TestResidentCapacityRetainsPreparedMemory(t *testing.T) {
 	for _, change := range []string{"profile removed", "bound reduced", "qualification withdrawn"} {
 		t.Run(change, func(t *testing.T) {
-			h, in := residentHarness(t, "m:latest", "n:latest")
+			h, in := residentHarness(t, "m", "n")
 			p := h.a.currentPolicy()
 			p.Profiles[0].MemoryBytes = 80
 			h.a.setPolicy(p)
@@ -752,7 +755,7 @@ func TestResidentCapacityRetainsPreparedMemory(t *testing.T) {
 			dispatchResidentOK(t, h.a, in, prepared)
 			p = h.a.currentPolicy()
 			p.Revision = "2"
-			p.ResidentModels = nodepolicy.ResidentModels{{Engine: "ollama", Model: "n:latest"}}
+			p.ResidentModels = nodepolicy.ResidentModels{{Engine: "llamacpp", Model: "n"}}
 			switch change {
 			case "profile removed":
 				p.Profiles = p.Profiles[1:]
@@ -762,25 +765,25 @@ func TestResidentCapacityRetainsPreparedMemory(t *testing.T) {
 				p.Profiles[0].Qualification = nil
 			}
 			h.a.setPolicy(p)
-			h.a.setResidency(map[string][]string{"ollama": {}})
-			in.OperationID, in.PolicyRevision, in.Model = "resident:2", "2", "n:latest"
+			h.a.setResidency(map[string][]string{"llamacpp": {}})
+			in.OperationID, in.PolicyRevision, in.Model = "resident:2", "2", "n"
 			result, err := h.a.prepareResident("proxy", in)
 			if err != nil || len(result.Refusals) != 1 || result.Refusals[0].Reason != nodepolicy.ModelReasonNoFit || h.a.currentActive() != 1 {
 				t.Fatalf("prepared bound lost: result=%+v error=%v active=%d", result, err, h.a.currentActive())
 			}
-			mustReject(t, h.admit("ollama", "n:latest", 0), nodepolicy.RejectNoFit)
+			mustReject(t, h.admit("llamacpp", "n", 0), nodepolicy.RejectNoFit)
 		})
 	}
 }
 
 func TestServedResidentHardProtectionAndConcreteUnknownMemory(t *testing.T) {
-	h, _ := residentHarness(t, "m:latest", "n:latest")
+	h, _ := residentHarness(t, "m", "n")
 	p := h.a.currentPolicy()
 	p.Admission.MaxResidentModels = 1
 	p.Admission.SwitchModels = true
 	h.a.setPolicy(p)
-	h.a.setResidency(map[string][]string{"ollama": {"m:latest"}})
-	mustReject(t, h.admit("ollama", "n:latest", 0), nodepolicy.RejectNoFit)
+	h.a.setResidency(map[string][]string{"llamacpp": {"m"}})
+	mustReject(t, h.admit("llamacpp", "n", 0), nodepolicy.RejectNoFit)
 	if len(h.notes(nodepolicy.NotifyAdmissionUnload)) != 0 {
 		t.Fatal("ordinary demand evicted protected resident")
 	}
@@ -788,11 +791,11 @@ func TestServedResidentHardProtectionAndConcreteUnknownMemory(t *testing.T) {
 	p.Admission.MaxResidentModels = 2
 	p.Profiles[1].MemoryBytes = 0
 	h.a.setPolicy(p)
-	mustReject(t, h.admit("ollama", "n:latest", 0), nodepolicy.RejectNoFit)
+	mustReject(t, h.admit("llamacpp", "n", 0), nodepolicy.RejectNoFit)
 	// Removing the preference restores existing concrete unknown-memory behavior.
 	p.ResidentModels = nil
 	h.a.setPolicy(p)
-	decision := h.admit("ollama", "n:latest", 0)
+	decision := h.admit("llamacpp", "n", 0)
 	if decision.ticket == nil {
 		t.Fatalf("legacy concrete behavior changed: %+v", decision)
 	}
@@ -800,27 +803,27 @@ func TestServedResidentHardProtectionAndConcreteUnknownMemory(t *testing.T) {
 }
 
 func TestServedResidentConcreteSwitchTimeoutDoesNotBypassProtection(t *testing.T) {
-	h, _ := residentHarness(t, "m:latest", "n:latest", "idle:latest")
+	h, _ := residentHarness(t, "m", "n", "idle")
 	p := h.a.currentPolicy()
 	p.Admission.MaxResidentModels = 2
 	p.Admission.SwitchModels = true
 	p.Admission.SwitchTimeoutSeconds = 0
 	h.a.setPolicy(p)
-	h.a.setResidency(map[string][]string{"ollama": {"m:latest", "idle:latest"}})
+	h.a.setResidency(map[string][]string{"llamacpp": {"m", "idle"}})
 	h.a.mu.Lock()
-	plan, evict := h.a.fitLocked(admKey{"ollama", "n:latest"}, p)
+	plan, evict := h.a.fitLocked(admKey{"llamacpp", "n"}, p)
 	h.a.mu.Unlock()
-	if plan != fitEvict || !reflect.DeepEqual(evict, []admKey{{"ollama", "idle:latest"}}) {
+	if plan != fitEvict || !reflect.DeepEqual(evict, []admKey{{"llamacpp", "idle"}}) {
 		t.Fatalf("fit=%v evict=%+v, want only unprotected idle model", plan, evict)
 	}
-	mustReject(t, h.admit("ollama", "n:latest", 0), nodepolicy.RejectNoFit)
+	mustReject(t, h.admit("llamacpp", "n", 0), nodepolicy.RejectNoFit)
 	if h.a.currentActive() != 0 {
 		t.Fatal("switch timeout granted over protected capacity")
 	}
 	// On an engine with no protected residents the existing timeout applies.
 	p.ResidentModels = nil
 	h.a.setPolicy(p)
-	decision := h.admit("ollama", "n:latest", 0)
+	decision := h.admit("llamacpp", "n", 0)
 	if decision.ticket == nil {
 		t.Fatalf("legacy switch-timeout behavior changed: %+v", decision)
 	}
@@ -828,22 +831,22 @@ func TestServedResidentConcreteSwitchTimeoutDoesNotBypassProtection(t *testing.T
 }
 
 func TestServedResidentUnknownMemorySameModelFailsBeforeWarmShortcut(t *testing.T) {
-	h, _ := residentHarness(t, "m:latest")
+	h, _ := residentHarness(t, "m")
 	p := h.a.currentPolicy()
 	p.Profiles[0].MemoryBytes = 0
 	h.a.setPolicy(p)
-	h.a.setResidency(map[string][]string{"ollama": {"m:latest"}})
-	mustReject(t, h.admit("ollama", "m:latest", 0), nodepolicy.RejectNoFit)
+	h.a.setResidency(map[string][]string{"llamacpp": {"m"}})
+	mustReject(t, h.admit("llamacpp", "m", 0), nodepolicy.RejectNoFit)
 }
 
 func TestResidentCapacityFinalDispatchRechecksActualCapacity(t *testing.T) {
-	h, in := residentHarness(t, "m:latest", "n:latest")
+	h, in := residentHarness(t, "m", "n")
 	p := h.a.currentPolicy()
 	p.Admission.MaxResidentModels = 1
 	h.a.setPolicy(p)
 	prepared := prepareResidentOK(t, h.a, in)
 	// This report is evidence of additional use, never permission to overbook.
-	h.a.setResidency(map[string][]string{"ollama": {"n:latest"}})
+	h.a.setResidency(map[string][]string{"llamacpp": {"n"}})
 	result, err := h.a.dispatchResident("proxy", residentDispatch(in, prepared))
 	if err != nil || result.Dispatched || result.Reason != nodepolicy.DispatchResidentReason(nodepolicy.ModelReasonNoFit) || h.a.currentActive() != 0 {
 		t.Fatalf("actual capacity changed after prepare: result=%+v error=%v active=%d", result, err, h.a.currentActive())
@@ -851,10 +854,10 @@ func TestResidentCapacityFinalDispatchRechecksActualCapacity(t *testing.T) {
 }
 
 func TestServedResidentRevokeRestoreDoesNotReviveGrant(t *testing.T) {
-	h, in := residentHarness(t, "m:latest")
+	h, in := residentHarness(t, "m")
 	prepared := prepareResidentOK(t, h.a, in)
-	h.a.setDrain("ollama", true)
-	h.a.setDrain("ollama", false)
+	h.a.setDrain("llamacpp", true)
+	h.a.setDrain("llamacpp", false)
 	result, err := h.a.dispatchResident("proxy", residentDispatch(in, prepared))
 	if err != nil || result.Dispatched || h.a.currentActive() != 0 {
 		t.Fatalf("revived grant=%+v error=%v", result, err)
@@ -862,7 +865,7 @@ func TestServedResidentRevokeRestoreDoesNotReviveGrant(t *testing.T) {
 }
 
 func TestServedResidentDuplicateDispatchDoesNotGrantAgain(t *testing.T) {
-	h, in := residentHarness(t, "m:latest")
+	h, in := residentHarness(t, "m")
 	prepared := prepareResidentOK(t, h.a, in)
 	dispatchResidentOK(t, h.a, in, prepared)
 	result, err := h.a.dispatchResident("proxy", residentDispatch(in, prepared))
@@ -874,7 +877,7 @@ func TestServedResidentDuplicateDispatchDoesNotGrantAgain(t *testing.T) {
 func TestServedResidentDispatchAndRevocationLinearize(t *testing.T) {
 	for _, order := range []string{"revocation first", "dispatch first"} {
 		t.Run(order, func(t *testing.T) {
-			h, in := residentHarness(t, "m:latest")
+			h, in := residentHarness(t, "m")
 			prepared := prepareResidentOK(t, h.a, in)
 			firstDone := make(chan struct{})
 			type dispatchAnswer struct {
@@ -914,10 +917,10 @@ func TestServedResidentDispatchAndRevocationLinearize(t *testing.T) {
 }
 
 func TestResidentCapacityProxyReplacementRejectsOldCompletion(t *testing.T) {
-	old, in := residentHarness(t, "m:latest")
+	old, in := residentHarness(t, "m")
 	oldPrepared := prepareResidentOK(t, old.a, in)
 	dispatchResidentOK(t, old.a, in, oldPrepared)
-	next, nextIn := residentHarness(t, "m:latest")
+	next, nextIn := residentHarness(t, "m")
 	nextIn.ProxyRunID = "new-proxy"
 	prepared, err := next.a.prepareResident("new-proxy", nextIn)
 	if err != nil || prepared.ReservationID == "" {
@@ -930,7 +933,7 @@ func TestResidentCapacityProxyReplacementRejectsOldCompletion(t *testing.T) {
 }
 
 func TestResidentCapacityOldGenerationCannotReleaseNextHold(t *testing.T) {
-	h, in := residentHarness(t, "m:latest")
+	h, in := residentHarness(t, "m")
 	prepared := prepareResidentOK(t, h.a, in)
 	dispatchResidentOK(t, h.a, in, prepared)
 	finish := residentFinish(in, prepared, nodepolicy.ResidentFailed)
@@ -952,7 +955,7 @@ func TestResidentCapacityOldGenerationCannotReleaseNextHold(t *testing.T) {
 }
 
 func TestResidentCapacityFinishedLoadConvergesAfterPreferenceRemoval(t *testing.T) {
-	h, in := residentHarness(t, "m:latest", "n:latest")
+	h, in := residentHarness(t, "m", "n")
 	p := h.a.currentPolicy()
 	p.Admission.MaxResidentModels = 1
 	h.a.setPolicy(p)
@@ -963,11 +966,11 @@ func TestResidentCapacityFinishedLoadConvergesAfterPreferenceRemoval(t *testing.
 	finishResidentOK(t, h.a, finish)
 	p = h.a.currentPolicy()
 	p.Revision = "2"
-	p.ResidentModels = nodepolicy.ResidentModels{{Engine: "ollama", Model: "n:latest"}}
+	p.ResidentModels = nodepolicy.ResidentModels{{Engine: "llamacpp", Model: "n"}}
 	h.a.setPolicy(p)
 	// SR5 performs the normal unload; its ordinary loaded watcher reports empty.
-	h.a.setResidency(map[string][]string{"ollama": {}})
-	in.OperationID, in.PolicyRevision, in.Model = "resident:2", "2", "n:latest"
+	h.a.setResidency(map[string][]string{"llamacpp": {}})
+	in.OperationID, in.PolicyRevision, in.Model = "resident:2", "2", "n"
 	prepareResidentOK(t, h.a, in)
 	if h.a.currentActive() != 1 {
 		t.Fatal("settled load retained a phantom capacity hold")
@@ -975,13 +978,13 @@ func TestResidentCapacityFinishedLoadConvergesAfterPreferenceRemoval(t *testing.
 }
 
 func TestResidentCapacityUnrelatedObservationGenerationDoesNotStrandFinish(t *testing.T) {
-	h, first := residentHarness(t, "m:latest", "n:latest")
+	h, first := residentHarness(t, "m", "n")
 	p := h.a.currentPolicy()
-	p.ResidentModels = append(p.ResidentModels, nodepolicy.Role{Engine: "ollama", Model: "n:latest"})
+	p.ResidentModels = append(p.ResidentModels, nodepolicy.Role{Engine: "llamacpp", Model: "n"})
 	h.a.setPolicy(p)
 	firstPrepared := prepareResidentOK(t, h.a, first)
 	second := first
-	second.OperationID, second.Model = "resident:2", "n:latest"
+	second.OperationID, second.Model = "resident:2", "n"
 	secondPrepared := prepareResidentOK(t, h.a, second)
 	dispatchResidentOK(t, h.a, first, firstPrepared)
 	dispatchResidentOK(t, h.a, second, secondPrepared)
@@ -991,13 +994,13 @@ func TestResidentCapacityUnrelatedObservationGenerationDoesNotStrandFinish(t *te
 	firstFinish := residentFinish(first, firstPrepared, nodepolicy.ResidentLoaded)
 	firstFinish.Observation = residentObservationFor(first, 1, true)
 	finishResidentOK(t, h.a, firstFinish)
-	if h.a.currentActive() != 0 || !h.a.isLoaded("ollama", first.Model) || !h.a.isLoaded("ollama", second.Model) {
+	if h.a.currentActive() != 0 || !h.a.isLoaded("llamacpp", first.Model) || !h.a.isLoaded("llamacpp", second.Model) {
 		t.Fatal("unrelated model generation stranded a matching authoritative completion")
 	}
 }
 
 func TestResidentCapacityDuplicateFinishRace(t *testing.T) {
-	h, in := residentHarness(t, "m:latest")
+	h, in := residentHarness(t, "m")
 	prepared := prepareResidentOK(t, h.a, in)
 	finish := residentFinish(in, prepared, nodepolicy.ResidentNotDispatched)
 	var wg sync.WaitGroup
@@ -1020,7 +1023,7 @@ func TestResidentCapacityDuplicateFinishRace(t *testing.T) {
 }
 
 func TestResidentCapacityBoundNeverEvictsUnresolvedDispatch(t *testing.T) {
-	h, in := residentHarness(t, "m:latest")
+	h, in := residentHarness(t, "m")
 	p := h.a.currentPolicy()
 	p.Admission.MaxResidentModels, p.Admission.MemoryBudgetBytes = 0, 0
 	h.a.setPolicy(p)
@@ -1031,7 +1034,7 @@ func TestResidentCapacityBoundNeverEvictsUnresolvedDispatch(t *testing.T) {
 		sequence := uint64(len(h.a.resident.ops) + 1)
 		request := in
 		request.OperationID = fmt.Sprintf("resident:%d", sequence)
-		request.Model = fmt.Sprintf("held-%d:latest", sequence)
+		request.Model = fmt.Sprintf("held-%d", sequence)
 		key := admKey{request.Engine, request.Model}
 		h.a.resident.ops[request.OperationID] = &residentHold{request: request, sequence: sequence, key: key, counted: true, dispatched: true, revoked: true, memory: 40}
 		h.a.inflight[key]++
@@ -1057,7 +1060,7 @@ func TestResidentCapacityBoundNeverEvictsUnresolvedDispatch(t *testing.T) {
 }
 
 func TestServedResidentRPCs(t *testing.T) {
-	h, in := residentHarness(t, "m:latest")
+	h, in := residentHarness(t, "m")
 	p, writer := policyProxy(t)
 	p.admission = h.a
 	in.ProxyRunID = p.runID
@@ -1098,7 +1101,7 @@ func TestServedResidentRPCs(t *testing.T) {
 func TestResidentCapacityRecoveryPreservesImmutableFinish(t *testing.T) {
 	for _, loaded := range []bool{false, true} {
 		t.Run(fmt.Sprintf("loaded=%t", loaded), func(t *testing.T) {
-			h, in := residentHarness(t, "m:latest")
+			h, in := residentHarness(t, "m")
 			prepared := prepareResidentOK(t, h.a, in)
 			dispatchResidentOK(t, h.a, in, prepared)
 			finish := residentFinish(in, prepared, nodepolicy.ResidentUnknown)
@@ -1106,7 +1109,7 @@ func TestResidentCapacityRecoveryPreservesImmutableFinish(t *testing.T) {
 			if original.RecoveryID == "" {
 				t.Fatal("unknown dispatch has no recovery binding")
 			}
-			h.a.setResidency(map[string][]string{"ollama": {}})
+			h.a.setResidency(map[string][]string{"llamacpp": {}})
 			if h.a.currentActive() != 1 {
 				t.Fatal("legacy empty recovered uncertainty")
 			}
@@ -1137,7 +1140,7 @@ func TestResidentCapacityRecoveryPreservesImmutableFinish(t *testing.T) {
 func TestResidentCapacityRecoveryBindingRefusals(t *testing.T) {
 	for _, field := range []string{"proxy", "reservation", "operation", "recovery", "manager", "engine", "model", "identity", "sequence", "incomplete", "current identity"} {
 		t.Run(field, func(t *testing.T) {
-			h, in := residentHarness(t, "m:latest")
+			h, in := residentHarness(t, "m")
 			prepared := prepareResidentOK(t, h.a, in)
 			dispatchResidentOK(t, h.a, in, prepared)
 			finish := finishResidentOK(t, h.a, residentFinish(in, prepared, nodepolicy.ResidentTimeout))
@@ -1154,9 +1157,9 @@ func TestResidentCapacityRecoveryBindingRefusals(t *testing.T) {
 			case "manager":
 				recovery.Observation.ManagerIncarnation = "old-manager"
 			case "engine":
-				recovery.Observation.Engine = "lmstudio"
+				recovery.Observation.Engine = "llamacpp-custom"
 			case "model":
-				recovery.Observation.Model = "other:latest"
+				recovery.Observation.Model = "other"
 			case "identity":
 				recovery.Observation.Identity.EngineRunID = "old-engine"
 			case "sequence":
@@ -1174,7 +1177,7 @@ func TestResidentCapacityRecoveryBindingRefusals(t *testing.T) {
 }
 
 func TestResidentCapacityRecoveryRequiresTerminalFinish(t *testing.T) {
-	h, in := residentHarness(t, "m:latest")
+	h, in := residentHarness(t, "m")
 	prepared := prepareResidentOK(t, h.a, in)
 	dispatchResidentOK(t, h.a, in, prepared)
 	fake := nodepolicy.FinishResidentResult{ReservationID: prepared.ReservationID, Outcome: nodepolicy.ResidentUnknown, RecoveryID: "recovery-1"}
@@ -1184,7 +1187,7 @@ func TestResidentCapacityRecoveryRequiresTerminalFinish(t *testing.T) {
 }
 
 func TestResidentCapacityLateRecoveryCannotReleaseReplacement(t *testing.T) {
-	h, in := residentHarness(t, "m:latest")
+	h, in := residentHarness(t, "m")
 	prepared := prepareResidentOK(t, h.a, in)
 	dispatchResidentOK(t, h.a, in, prepared)
 	finish := finishResidentOK(t, h.a, residentFinish(in, prepared, nodepolicy.ResidentCancelled))
@@ -1203,7 +1206,7 @@ func TestResidentCapacityLateRecoveryCannotReleaseReplacement(t *testing.T) {
 }
 
 func TestResidentCapacitySuccessfulLoadsRetireWithoutReplay(t *testing.T) {
-	h, in := residentHarness(t, "m:latest")
+	h, in := residentHarness(t, "m")
 	clock := useStrictClock(h.a)
 	first := in
 	var firstPrepared nodepolicy.PrepareResidentResult
@@ -1240,20 +1243,20 @@ func TestResidentCapacitySuccessfulLoadsRetireWithoutReplay(t *testing.T) {
 }
 
 func TestResidentCapacityUncertainHoldSurvivesCompletedChurn(t *testing.T) {
-	h, first := residentHarness(t, "m:latest", "n:latest")
+	h, first := residentHarness(t, "m", "n")
 	p := h.a.currentPolicy()
-	p.ResidentModels = append(p.ResidentModels, nodepolicy.Role{Engine: "ollama", Model: "n:latest"})
+	p.ResidentModels = append(p.ResidentModels, nodepolicy.Role{Engine: "llamacpp", Model: "n"})
 	h.a.setPolicy(p)
 	prepared := prepareResidentOK(t, h.a, first)
 	dispatchResidentOK(t, h.a, first, prepared)
 	finish := finishResidentOK(t, h.a, residentFinish(first, prepared, nodepolicy.ResidentUnknown))
 	for sequence := uint64(2); sequence <= maxResidentOperations+3; sequence++ {
 		in := first
-		in.OperationID, in.Model = residentOperation(t, sequence), "n:latest"
+		in.OperationID, in.Model = residentOperation(t, sequence), "n"
 		next := prepareResidentOK(t, h.a, in)
 		finishResidentOK(t, h.a, residentFinish(in, next, nodepolicy.ResidentNotDispatched))
 	}
-	if h.a.currentActive() != 1 || h.a.resident.ops[first.OperationID] == nil || !h.a.resident.ops[first.OperationID].counted || h.a.memoryLocked(admKey{"ollama", first.Model}) != 40 {
+	if h.a.currentActive() != 1 || h.a.resident.ops[first.OperationID] == nil || !h.a.resident.ops[first.OperationID].counted || h.a.memoryLocked(admKey{"llamacpp", first.Model}) != 40 {
 		t.Fatal("retirement evicted unresolved capacity or its prepared bound")
 	}
 	observeResidentOK(t, h.a, residentRecovery(first, finish, 1, false))
@@ -1263,7 +1266,7 @@ func TestResidentCapacityUncertainHoldSurvivesCompletedChurn(t *testing.T) {
 }
 
 func TestResidentCapacitySourceGenerationMetadataIsBounded(t *testing.T) {
-	h, in := residentHarness(t, "m:latest")
+	h, in := residentHarness(t, "m")
 	for sequence := uint64(1); sequence <= 64; sequence++ {
 		in.OperationID, in.ManagerIncarnation = residentOperation(t, sequence), fmt.Sprintf("source-%d", sequence)
 		prepared := prepareResidentOK(t, h.a, in)
@@ -1278,7 +1281,7 @@ func TestResidentCapacitySourceGenerationMetadataIsBounded(t *testing.T) {
 }
 
 func TestResidentCapacityCurrentSourceFloorSurvivesLastRecordRetirement(t *testing.T) {
-	h, in := residentHarness(t, "m:latest")
+	h, in := residentHarness(t, "m")
 	prepared := prepareResidentOK(t, h.a, in)
 	dispatchResidentOK(t, h.a, in, prepared)
 	finish := residentFinish(in, prepared, nodepolicy.ResidentFailed)
@@ -1306,23 +1309,23 @@ func TestResidentCapacityCurrentSourceFloorSurvivesLastRecordRetirement(t *testi
 }
 
 func TestResidentCapacitySourceChurnKeepsCountedSourceFloor(t *testing.T) {
-	h, in := residentHarness(t, "m:latest", "n:latest")
+	h, in := residentHarness(t, "m", "n")
 	p := h.a.currentPolicy()
-	p.ResidentModels = append(p.ResidentModels, nodepolicy.Role{Engine: "ollama", Model: "n:latest"})
+	p.ResidentModels = append(p.ResidentModels, nodepolicy.Role{Engine: "llamacpp", Model: "n"})
 	h.a.setPolicy(p)
-	in.Model = "n:latest"
+	in.Model = "n"
 	prepared := prepareResidentOK(t, h.a, in)
 	dispatchResidentOK(t, h.a, in, prepared)
 	finish := residentFinish(in, prepared, nodepolicy.ResidentFailed)
 	finish.Observation = residentObservationFor(in, 7, false)
 	finishResidentOK(t, h.a, finish)
-	in.OperationID, in.Model = "resident:2", "m:latest"
+	in.OperationID, in.Model = "resident:2", "m"
 	prepared = prepareResidentOK(t, h.a, in)
 	dispatchResidentOK(t, h.a, in, prepared)
 	finishResidentOK(t, h.a, residentFinish(in, prepared, nodepolicy.ResidentUnknown))
 	for sequence := uint64(3); sequence <= 66; sequence++ {
 		next := in
-		next.OperationID, next.Model, next.ManagerIncarnation = residentOperation(t, sequence), "n:latest", fmt.Sprintf("bookkeeping-source-%d", sequence)
+		next.OperationID, next.Model, next.ManagerIncarnation = residentOperation(t, sequence), "n", fmt.Sprintf("bookkeeping-source-%d", sequence)
 		prepared := prepareResidentOK(t, h.a, next)
 		dispatchResidentOK(t, h.a, next, prepared)
 		finish := residentFinish(next, prepared, nodepolicy.ResidentFailed)
@@ -1337,7 +1340,7 @@ func TestResidentCapacitySourceChurnKeepsCountedSourceFloor(t *testing.T) {
 func TestResidentCapacityDuplicateAndRetirementLinearize(t *testing.T) {
 	for _, order := range []string{"duplicate first", "retirement first"} {
 		t.Run(order, func(t *testing.T) {
-			h, in := residentHarness(t, "m:latest")
+			h, in := residentHarness(t, "m")
 			prepared := prepareResidentOK(t, h.a, in)
 			finishResidentOK(t, h.a, residentFinish(in, prepared, nodepolicy.ResidentNotDispatched))
 			fillReleasedResidentHistory(t, h.a, in)
@@ -1386,9 +1389,9 @@ func TestResidentCapacityDuplicateAndRetirementLinearize(t *testing.T) {
 func TestResidentCapacityRecoveryAndRetirementLinearize(t *testing.T) {
 	for _, order := range []string{"recovery first", "retirement first"} {
 		t.Run(order, func(t *testing.T) {
-			h, in := residentHarness(t, "m:latest", "n:latest")
+			h, in := residentHarness(t, "m", "n")
 			p := h.a.currentPolicy()
-			p.ResidentModels = append(p.ResidentModels, nodepolicy.Role{Engine: "ollama", Model: "n:latest"})
+			p.ResidentModels = append(p.ResidentModels, nodepolicy.Role{Engine: "llamacpp", Model: "n"})
 			h.a.setPolicy(p)
 			prepared := prepareResidentOK(t, h.a, in)
 			recoveryNotGranted := nodepolicy.FinishResidentResult{ReservationID: prepared.ReservationID, Outcome: nodepolicy.ResidentUnknown, RecoveryID: "recovery-1"}
@@ -1400,7 +1403,7 @@ func TestResidentCapacityRecoveryAndRetirementLinearize(t *testing.T) {
 			fillReleasedResidentHistory(t, h.a, in)
 			recovery := residentRecovery(in, unknown, 1, false)
 			next := in
-			next.OperationID, next.Model = residentOperation(t, maxResidentOperations+1), "n:latest"
+			next.OperationID, next.Model = residentOperation(t, maxResidentOperations+1), "n"
 			firstDone := make(chan struct{})
 			errors := make(chan error, 2)
 			if order == "recovery first" {
@@ -1433,7 +1436,7 @@ func TestResidentCapacityRecoveryAndRetirementLinearize(t *testing.T) {
 }
 
 func TestResidentCapacitySequenceConsumption(t *testing.T) {
-	h, in := residentHarness(t, "m:latest")
+	h, in := residentHarness(t, "m")
 	for _, operation := range []string{"arbitrary-op", "resident:0", "resident:2"} {
 		request := in
 		request.OperationID = operation
@@ -1461,7 +1464,7 @@ func TestResidentCapacitySequenceConsumption(t *testing.T) {
 }
 
 func TestResidentCapacitySequenceOverflowFailsClosed(t *testing.T) {
-	h, in := residentHarness(t, "m:latest")
+	h, in := residentHarness(t, "m")
 	h.a.resident.highestSequence = ^uint64(0) - 1
 	in.OperationID = residentOperation(t, ^uint64(0))
 	prepared := prepareResidentOK(t, h.a, in)
@@ -1473,7 +1476,7 @@ func TestResidentCapacitySequenceOverflowFailsClosed(t *testing.T) {
 }
 
 func TestServedResidentRecoveryRPC(t *testing.T) {
-	h, in := residentHarness(t, "m:latest")
+	h, in := residentHarness(t, "m")
 	p, writer := policyProxy(t)
 	p.admission, in.ProxyRunID = h.a, p.runID
 	response := rpc(t, p, writer, nodepolicy.MethodPrepareResident, in)

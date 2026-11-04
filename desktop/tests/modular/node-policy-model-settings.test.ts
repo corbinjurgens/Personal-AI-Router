@@ -15,8 +15,8 @@ import {
 import ModelSettingsEditor from '@/ui/components/RoutingSettings/ModelSettingsEditor'
 
 const identity = { engine: 'llamacpp', model: 'native/model' }
-const other = { engine: 'lmstudio', model: identity.model }
-function policy(extra: Record<string, JsonValue> = {}): string {
+const other = { engine: 'llamacpp', model: 'other/model' }
+function policy(extra: Record<string, JsonValue> = {}, alternate = other): string {
     return JSON.stringify({
         version: 2,
         revision: '9007199254740993',
@@ -29,7 +29,7 @@ function policy(extra: Record<string, JsonValue> = {}): string {
                 qualification: { id: 'q', revision: '1' },
                 ...extra
             },
-            other
+            alternate
         ]
     })
 }
@@ -66,7 +66,7 @@ describe('model settings policy helpers', () => {
         'preserves opaque number tokens when changing $kind',
         edit => {
             const text =
-                '{"version":2,"opaque":9007199254740993,"profiles":[{"engine":"llamacpp","model":"native/model","requestOptions":{"temperature":1,"nested":{"precise":1.0000000000000000001,"huge":1e400},"array":[9007199254740995]}},{"engine":"lmstudio","model":"other","requestOptions":{"seed":9007199254740997}}],"engineBindings":[]}'
+                '{"version":2,"opaque":9007199254740993,"profiles":[{"engine":"llamacpp","model":"native/model","requestOptions":{"temperature":1,"nested":{"precise":1.0000000000000000001,"huge":1e400},"array":[9007199254740995]}},{"engine":"llamacpp","model":"other","requestOptions":{"seed":9007199254740997}}],"engineBindings":[]}'
             const result = applied(text, edit)
             // Inspect original JSON tokens, not numbers rounded by JSON.parse.
             for (const token of [
@@ -263,15 +263,15 @@ describe('model settings policy helpers', () => {
         )
     })
 
-    it('preserves unsupported engines and LM Studio min_p through supported edits', () => {
-        const ollama = {
-            engine: 'ollama',
+    it('preserves unsupported engines and unknown options through supported edits', () => {
+        const unsupported = {
+            engine: 'strata',
             model: 'native',
             requestOptions: { options: { temperature: 2 } }
         }
-        const lm = { ...other, requestOptions: { min_p: 0.2, uncommon: [1, 2] } }
-        const text = JSON.stringify({ profiles: [ollama, lm] })
-        const result = applyModelSettings(text, other, {
+        const supported = { ...identity, requestOptions: { min_p: 0.2, uncommon: [1, 2] } }
+        const text = JSON.stringify({ profiles: [unsupported, supported] })
+        const result = applyModelSettings(text, identity, {
             kind: 'option',
             key: 'temperature',
             value: '0.7'
@@ -279,16 +279,19 @@ describe('model settings policy helpers', () => {
         if (!result.ok) throw new Error(result.error.message)
         expect(JSON.parse(result.value)).toEqual({
             profiles: [
-                ollama,
-                { ...lm, requestOptions: { ...lm.requestOptions, temperature: 0.7 } }
+                unsupported,
+                {
+                    ...supported,
+                    requestOptions: { ...supported.requestOptions, temperature: 0.7 }
+                }
             ]
         })
         expect(
-            applyModelSettings(text, other, { kind: 'option', key: 'min_p', value: '0.4' }).ok
-        ).toBe(false)
-        expect(
-            applyModelSettings(text, ollama, { kind: 'option', key: 'temperature', value: '0.4' })
-                .ok
+            applyModelSettings(text, unsupported, {
+                kind: 'option',
+                key: 'temperature',
+                value: '0.4'
+            }).ok
         ).toBe(false)
     })
 })
@@ -315,7 +318,7 @@ describe('typed profile lifecycle', () => {
 
     it('appends without rewriting existing profiles, numeric tokens or unrelated references', () => {
         const text = String.raw` {"opaque":9007199254740993,"profiles":[{"name":"first","engine":"llamacpp","model":"native/model","requestOptions":{"precise":1.00000000000000001,"huge":1e400,"nested":[null,{},[]]}}],"residentModels":null,"servedModels":[],"roles":{"nine":{"engine":"llamacpp","model":"native/model"}},"engineBindings":null} `
-        const escaped = { engine: 'lmstudio', model: 'owner/"model\\file/模型' }
+        const escaped = { engine: 'llamacpp', model: 'owner/"model\\file/模型' }
         const raw = JSON.stringify({ name: 'new/model', ...escaped })
         const edited = success(createModelSettingsProfile(text, escaped, 'new/model'))
         expect(edited).toBe(text.replace('}}],"residentModels"', `}},${raw}],"residentModels"`))
@@ -327,9 +330,9 @@ describe('typed profile lifecycle', () => {
         { label: 'last', profiles: [second, first], selected: identity, remaining: [second] },
         {
             label: 'middle',
-            profiles: [second, first, { name: 'third', engine: 'ollama', model: 'm' }],
+            profiles: [second, first, { name: 'third', engine: 'llamacpp-custom', model: 'm' }],
             selected: identity,
-            remaining: [second, { name: 'third', engine: 'ollama', model: 'm' }]
+            remaining: [second, { name: 'third', engine: 'llamacpp-custom', model: 'm' }]
         },
         { label: 'only', profiles: [first], selected: identity, remaining: [] }
     ])('removes only the $label profile', ({ profiles, selected, remaining }) => {
@@ -355,7 +358,7 @@ describe('typed profile lifecycle', () => {
     it('removes one raw span while retaining opaque numbers and null/empty values', () => {
         const rawFirst = JSON.stringify(first)
         const rawSecond =
-            '{"name":"second","engine":"lmstudio","model":"native/model","requestOptions":{"nested":{"n":9007199254740993,"x":1e400}},"opaque":null}'
+            '{"name":"second","engine":"llamacpp","model":"other/model","requestOptions":{"nested":{"n":9007199254740993,"x":1e400}},"opaque":null}'
         const text = ` {"profiles":[ ${rawFirst}, \n${rawSecond} ],"servedModels":null,"residentModels":[],"opaque":[] } `
         expect(success(removeModelSettingsProfile(text, identity))).toBe(
             text.replace(`${rawFirst}, \n`, '')
@@ -412,7 +415,7 @@ describe('typed profile lifecycle', () => {
         '{"profiles":{}}',
         '{"profiles":[null]}',
         '{"profiles":[],"profi\\u006ces":[]}',
-        '{"profiles":[{"name":"a","engine":"ollama","engine":"llamacpp","model":"m"}]}',
+        '{"profiles":[{"name":"a","engine":"llamacpp-custom","engine":"llamacpp","model":"m"}]}',
         '{"profiles":[{"name":"a","name":"b","engine":"llamacpp","model":"m"}]}',
         '{"profiles":[{"name":"a","engine":"llamacpp","model":"m","requestOptions":{"temperature":1,"temperature":2}}]}',
         JSON.stringify({ profiles: [identity] }),
@@ -537,9 +540,9 @@ describe('model settings form controls', () => {
         await act(async () => option.click())
     }
 
-    it('edits the bound engine/model profile and hides min_p for LM Studio', async () => {
-        await render(policy(), policy(), false, false, other)
-        expect(container.querySelector('input[aria-label="Min P"]')).toBeNull()
+    it('edits the bound engine/model profile', async () => {
+        const initial = policy({}, other)
+        await render(initial, initial, false, false, other)
         await type('Temperature', '0.4')
         const text = changed.mock.lastCall?.[0]
         if (!text) throw new Error('Missing selected-profile edit')
@@ -671,7 +674,7 @@ describe('model settings form controls', () => {
     })
 
     it('renders unsupported engines as an empty state without modifying JSON', async () => {
-        await render(JSON.stringify({ profiles: [{ engine: 'ollama', model: 'm' }] }))
+        await render(JSON.stringify({ profiles: [{ engine: 'llamacpp-custom', model: 'm' }] }))
         expect(container.textContent).toContain('No supported profiles')
         expect(container.querySelector('input')).toBeNull()
         expect(changed).not.toHaveBeenCalled()

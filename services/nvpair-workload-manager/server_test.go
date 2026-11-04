@@ -64,7 +64,7 @@ func TestServer_InterNodeDedupRecordedOnlyAfterSuccessfulEmit(t *testing.T) {
 	}
 
 	lifecycleFrame := []byte(`{"jsonrpc":"2.0","method":"workload:started","params":` +
-		`{"workloadInfo":{"id":"7","model":"llama3","engine":"ollama",` +
+		`{"workloadInfo":{"id":"7","model":"llama3","engine":"llamacpp",` +
 		`"runId":"r1","state":"running","originatedFrom":"uuid-peer"}}}`)
 	removeFrame := []byte(`{"jsonrpc":"2.0","method":"workloads:remove",` +
 		`"params":{"workloadId":"7","originatedFrom":"uuid-peer"}}`)
@@ -145,7 +145,7 @@ func TestServer_ConcurrentDuplicatesEmitOnce(t *testing.T) {
 		})
 	}
 
-	lifecycle := []byte(`{"workloadInfo":{"id":"7","model":"llama3","engine":"ollama","runId":"r1","state":"running","originatedFrom":"uuid-peer"}}`)
+	lifecycle := []byte(`{"workloadInfo":{"id":"7","model":"llama3","engine":"llamacpp","runId":"r1","state":"running","originatedFrom":"uuid-peer"}}`)
 	remove := []byte(`{"workloadId":"7","originatedFrom":"uuid-peer"}`)
 	test("lifecycle upsert", lifecycle, (*Server).handleLifecycle)
 	test("workload removal", remove, (*Server).handleRemove)

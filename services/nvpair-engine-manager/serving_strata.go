@@ -542,7 +542,7 @@ func deriveStrataServing(command launchCommand, rt Runtime) (*llamaServingLaunch
 }
 
 func deriveStrataServingExpected(ctx context.Context, command launchCommand, rt Runtime, access servingFileAccess, expected *llamaServingEvidence) (*llamaServingLaunch, error) {
-	if rt.modeOrDefault() != "process" || rt.Serving == nil || len(servingDeclarationErrors(rt.Serving)) != 0 || len(rt.Serving.Models) != 1 {
+	if rt.Serving == nil || len(servingDeclarationErrors(rt.Serving)) != 0 || len(rt.Serving.Models) != 1 {
 		return nil, servingError("Prepared Strata requires one declared model and an owned process launch.")
 	}
 	if _, err := strataRuntimePaths(rt.Serving); err != nil {

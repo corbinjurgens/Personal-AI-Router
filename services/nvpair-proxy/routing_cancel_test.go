@@ -274,7 +274,7 @@ func TestRoutingCancelAvailableUnderSaturation(t *testing.T) {
 	body := &identityBody{}
 	f := newFacade(p, anyProfile(t), NewDiscovery(), 0)
 	rec := httptest.NewRecorder()
-	f.handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/chat", body))
+	f.handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body))
 	if rec.Code != http.StatusServiceUnavailable || body.reads != 0 || len(w.lines()) != 0 || p.requestSequence != 1 {
 		t.Fatalf("overflow status=%d body reads=%d frames=%d sequence=%d", rec.Code, body.reads, len(w.lines()), p.requestSequence)
 	}
@@ -546,11 +546,11 @@ func TestRoutingCancelWorkloadAndRequestShareQualifiedTransition(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer p.unregisterRoutingRequest(request)
-			key := workloadKey{engine: "ollama", id: "7"}
+			key := workloadKey{engine: "llamacpp", id: "7"}
 			if err := p.registerWorkload(request, key); err != nil {
 				t.Fatal(err)
 			}
-			wrong := workloadKey{engine: "ollama", id: "8"}
+			wrong := workloadKey{engine: "llamacpp", id: "8"}
 			if owner.cancelQualified(false, &wrong) || calls != 0 {
 				t.Fatal("unqualified workload changed owner")
 			}
@@ -598,7 +598,7 @@ func TestRoutingCancelSnapshotErrorRelease(t *testing.T) {
 func TestRoutingCancelConcurrentSurfacesHaveOneTransition(t *testing.T) {
 	var callbacks atomic.Int64
 	r := newRoutingRequest(func(string) { callbacks.Add(1) })
-	key := workloadKey{engine: "ollama", id: "7"}
+	key := workloadKey{engine: "llamacpp", id: "7"}
 	r.workload = &key
 	start := make(chan struct{})
 	var wg sync.WaitGroup

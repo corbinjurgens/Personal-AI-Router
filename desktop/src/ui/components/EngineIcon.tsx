@@ -6,8 +6,6 @@ import { type EngineType } from '@/shared/types/engines'
 import { engineAdapterType, engineLabel } from '@/shared/utils/engines'
 import { GenericEngine } from '@/ui/components/icons'
 import { useEngineDescriptor } from '@/ui/stores/engine-status.store'
-import ollamaIcon from '@/ui/assets/engine-icons/ollama.png?inline'
-import lmStudioIcon from '@/ui/assets/engine-icons/lm-studio.png?inline'
 import llamaCppIcon from '@/ui/assets/engine-icons/llama-cpp.svg?inline'
 
 /**
@@ -30,24 +28,6 @@ export default function EngineIcon({ type, size = 32 }: { type: EngineType; size
         backgroundColor: '#fff',
         borderRadius: '25%',
         overflow: 'hidden'
-    }
-
-    if (family === 'ollama') {
-        return (
-            <div style={containerStyle}>
-                <img src={ollamaIcon} alt="Ollama" style={imgStyle} />
-            </div>
-        )
-    }
-
-    if (family === 'lm-studio') {
-        imgStyle.objectFit = 'cover'
-
-        return (
-            <div style={containerStyle}>
-                <img src={lmStudioIcon} alt="LM Studio" style={imgStyle} />
-            </div>
-        )
     }
 
     if (family === 'llama-cpp') {

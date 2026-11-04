@@ -265,8 +265,8 @@ type managedUninstall struct {
 // are PAIR's and what removing one safely involves. Selecting them here instead
 // would mean this client deciding ownership, and offering every detected engine
 // so the backend could decline the rest would raise a service error per decline
-// — and those sync to cluster peers, so resetting a machine with the operator's
-// own LM Studio would plant an error on its neighbours.
+// — and those sync to cluster peers, so resetting a machine with an engine the
+// operator installed themselves would plant an error on its neighbours.
 //
 // Downloaded models survive, and an engine PAIR did not install is skipped
 // rather than failed.
@@ -834,7 +834,7 @@ func (v *serviceView) refreshWorkers() {
 //
 // The identifiers are supervisor process names, and they collided with how the
 // same components are named elsewhere: the proxy process serves the endpoints
-// the Jobs tab calls "Ollama" and "LM Studio", so an operator reading
+// the Jobs tab names by engine, so an operator reading
 // "nvpair-proxy DOWN" here had no way to connect it to the endpoint they had
 // just seen reported down there. The crash lookup still keys on the process
 // name; only the display changes.

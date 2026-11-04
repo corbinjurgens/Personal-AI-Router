@@ -120,7 +120,6 @@ type engineState struct {
 // layer runs the long ones (install, start) in goroutines so the read
 // loop stays responsive.
 type Executor struct {
-	credentials         credentialStore
 	modelInspection     modelInspectionState
 	modelEstimates      modelEstimateState
 	modelBuffers        modelBufferOwner
@@ -154,7 +153,6 @@ type Executor struct {
 	reporter            *Reporter
 	emit                func(method string, params any)
 	client              *http.Client
-	processes           processLister
 	// budgetClients holds one engine client per operation response budget a
 	// manifest declares (OperationBinding.ResponseTimeoutS), created on first
 	// use and reused so its connections are too. Guarded by budgetMu.
@@ -166,6 +164,9 @@ type Executor struct {
 	progress  *progressHub
 	downloads *modelDownloads
 	baseDir   string // user-scoped install base
+	// modelSources are the folders whose models engines offer in place
+	// (modelsources.go). main sets the built-in defaults; nil offers none.
+	modelSources []modelSource
 	// desired persists explicit per-engine ON/OFF intent and allocated endpoints.
 	// Shutdown clears endpoint evidence without rewriting saved intent.
 	desired *desiredStateStore
@@ -241,13 +242,11 @@ type Executor struct {
 
 func NewExecutor(reg *Registry, reporter *Reporter, emit func(string, any), baseDir string) *Executor {
 	e := &Executor{
-		credentials:         credentialStore{factory: newCredentialBackend},
 		switchIncarnation:   newOpID(),
 		reg:                 reg,
 		reporter:            reporter,
 		emit:                emit,
 		client:              newEngineHTTPClient(engineResponseHeaderTimeout),
-		processes:           listProcessNames,
 		progress:            newProgressHub(),
 		baseDir:             baseDir,
 		desired:             newDesiredStateStore(baseDir),
@@ -297,7 +296,7 @@ func (e *Executor) SetReservedPort(port int) error {
 
 func (e *Executor) reservedPortError(port int) error {
 	if port > 0 && int(e.reservedPort.Load()) == port {
-		return fmt.Errorf("port %d is reserved by the inherited OLLAMA_HOST proxy alias", port)
+		return fmt.Errorf("port %d is reserved by the parent proxy", port)
 	}
 	return nil
 }
@@ -323,8 +322,8 @@ func (e *Executor) clientFor(budget time.Duration) *http.Client {
 
 // newEngineHTTPClient builds a client used for downloads, loopback actions,
 // and probes. The ordinary shared client keeps a 30s response-header bound;
-// an action a model operation binds with a longer budget (Ollama's cold load,
-// 10m) gets a client of its own (clientFor). Neither sets a total
+// an action a model operation binds with a longer budget (a cold load, 10m)
+// gets a client of its own (clientFor). Neither sets a total
 // http.Client.Timeout: a multi-GB engine download can legitimately run
 // for many minutes and every call site already bounds total time with a
 // context deadline or inactivity watchdog (install download 30m, streaming

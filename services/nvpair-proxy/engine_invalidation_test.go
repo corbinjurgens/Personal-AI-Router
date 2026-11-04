@@ -27,9 +27,9 @@ func TestInvalidateEngineFencesHeldTicketsAndPreservesQuarantine(t *testing.T) {
 	}
 	quarantined.Finish(strictUncertain)
 	// A second model permits a held ticket alongside uncertain capacity.
-	installQualified(t, h.a, admKey{engine: "ollama", model: "m"}, admKey{engine: "ollama", model: "n"})
-	h.a.setResidency(map[string][]string{"ollama": {"m", "n"}})
-	held, err := h.a.admitStrictNow(context.Background(), "ollama", "n", strictRequest())
+	installQualified(t, h.a, admKey{engine: "llamacpp", model: "m"}, admKey{engine: "llamacpp", model: "n"})
+	h.a.setResidency(map[string][]string{"llamacpp": {"m", "n"}})
+	held, err := h.a.admitStrictNow(context.Background(), "llamacpp", "n", strictRequest())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +38,7 @@ func TestInvalidateEngineFencesHeldTicketsAndPreservesQuarantine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := p.applyInvalidateEngine(json.RawMessage(`{"engine":"ollama","operationId":"switch-1","reason":"engine-switch"}`))
+	result, err := p.applyInvalidateEngine(json.RawMessage(`{"engine":"llamacpp","operationId":"switch-1","reason":"engine-switch"}`))
 	if err != nil || !result.OK || result.RunID != p.runID {
 		t.Fatalf("result=%+v error=%v", result, err)
 	}
@@ -65,16 +65,16 @@ func TestInvalidateEngineFencesHeldTicketsAndPreservesQuarantine(t *testing.T) {
 
 func TestInvalidateEnginePreservesOtherEngineEligibility(t *testing.T) {
 	h := newStrictHarness(t)
-	installQualified(t, h.a, admKey{engine: "ollama", model: "m"}, admKey{engine: "lmstudio", model: "m"})
-	h.a.setResidency(map[string][]string{"ollama": {"m"}, "lmstudio": {"m"}})
-	held, err := h.a.admitStrictNow(context.Background(), "lmstudio", "m", strictRequest())
+	installQualified(t, h.a, admKey{engine: "llamacpp", model: "m"}, admKey{engine: "llamacpp-custom", model: "m"})
+	h.a.setResidency(map[string][]string{"llamacpp": {"m"}, "llamacpp-custom": {"m"}})
+	held, err := h.a.admitStrictNow(context.Background(), "llamacpp-custom", "m", strictRequest())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer held.Finish(strictQualifiedComplete)
-	key := admKey{engine: "lmstudio", model: "m"}
+	key := admKey{engine: "llamacpp-custom", model: "m"}
 	generation := h.a.strict.generation[key]
-	h.a.invalidateEngine(engineInvalidation("ollama", "switch-1"))
+	h.a.invalidateEngine(engineInvalidation("llamacpp", "switch-1"))
 	if h.a.strict.generation[key] != generation {
 		t.Fatal("other engine generation changed")
 	}
@@ -82,23 +82,23 @@ func TestInvalidateEnginePreservesOtherEngineEligibility(t *testing.T) {
 		t.Fatalf("other engine's held ticket rejected: %v", err)
 	}
 	held.Finish(strictQualifiedComplete)
-	next, err := h.a.admitStrictNow(context.Background(), "lmstudio", "m", strictRequest())
+	next, err := h.a.admitStrictNow(context.Background(), "llamacpp-custom", "m", strictRequest())
 	if err != nil {
 		t.Fatalf("other engine lost eligibility: %v", err)
 	}
 	next.Finish(strictNotDispatched)
 	// The same switch operation can invalidate the target independently.
-	h.a.invalidateEngine(engineInvalidation("lmstudio", "switch-1"))
-	if _, err := h.a.admitStrictNow(context.Background(), "lmstudio", "m", strictRequest()); !errors.Is(err, errStrictUnavailable) {
+	h.a.invalidateEngine(engineInvalidation("llamacpp-custom", "switch-1"))
+	if _, err := h.a.admitStrictNow(context.Background(), "llamacpp-custom", "m", strictRequest()); !errors.Is(err, errStrictUnavailable) {
 		t.Fatalf("target engine not invalidated: %v", err)
 	}
 }
 
 func TestInvalidateEngineRepeatDoesNotFenceFreshCapability(t *testing.T) {
 	h := newStrictHarness(t)
-	key := admKey{engine: "ollama", model: "m:latest"}
+	key := admKey{engine: "llamacpp", model: "m"}
 	generation := h.a.strict.generation[key]
-	in := engineInvalidation("ollama", "switch-1")
+	in := engineInvalidation("llamacpp", "switch-1")
 	h.a.invalidateEngine(in)
 	if h.a.strict.generation[key] != generation+1 {
 		t.Fatal("invalidation did not advance generation")
@@ -114,7 +114,7 @@ func TestInvalidateEngineRepeatDoesNotFenceFreshCapability(t *testing.T) {
 	if err := held.BeforeStrictDispatch(); err != nil {
 		t.Fatalf("repeat invalidated newly installed capability: %v", err)
 	}
-	h.a.invalidateEngine(engineInvalidation("ollama", "switch-2"))
+	h.a.invalidateEngine(engineInvalidation("llamacpp", "switch-2"))
 	if h.a.strict.generation[key] != generation+1 {
 		t.Fatal("fresh operation did not invalidate")
 	}
@@ -124,13 +124,13 @@ func TestIdentityWithdrawalAndSwitchInvalidationShareCapacityFence(t *testing.T)
 	h := newStrictHarness(t)
 	held := mustStrictTicket(t, h.a)
 	defer held.Finish(strictNotDispatched)
-	key := admKey{engine: "ollama", model: "m:latest"}
+	key := admKey{engine: "llamacpp", model: "m"}
 	generation := h.a.strict.generation[key]
 	h.a.setModelIdentity(nil)
 	if h.a.strict.generation[key] != generation+1 {
 		t.Fatal("identity withdrawal did not fence the old installation")
 	}
-	h.a.invalidateEngine(engineInvalidation("ollama", "switch-1"))
+	h.a.invalidateEngine(engineInvalidation("llamacpp", "switch-1"))
 	if h.a.strict.generation[key] != generation+1 {
 		t.Fatal("switch invalidation counted the withdrawn installation again")
 	}
@@ -138,7 +138,7 @@ func TestIdentityWithdrawalAndSwitchInvalidationShareCapacityFence(t *testing.T)
 	if got := h.a.StrictReadiness(); got.Capability != nil {
 		t.Fatalf("policy refresh restored withdrawn identity: %+v", got)
 	}
-	h.a.setModelIdentity(map[string]nodepolicy.EngineIdentity{"ollama": testIdentity("m")})
+	h.a.setModelIdentity(map[string]nodepolicy.EngineIdentity{"llamacpp": testIdentity("m")})
 	if err := held.BeforeStrictDispatch(); !errors.Is(err, errStrictUnavailable) {
 		t.Fatalf("old ticket survived identity re-observation: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestInvalidateEngineWakesQueuedWaiters(t *testing.T) {
 	if err != nil || snapshot.Active != 1 || snapshot.Queued != 1 {
 		t.Fatalf("queued snapshot=%+v error=%v", snapshot, err)
 	}
-	h.a.invalidateEngine(engineInvalidation("ollama", "switch-1"))
+	h.a.invalidateEngine(engineInvalidation("llamacpp", "switch-1"))
 	if result := awaitStrict(t, waiting); result.ticket != nil || !errors.Is(result.err, errStrictUnavailable) {
 		t.Fatalf("queued result=%+v", result)
 	}
@@ -177,7 +177,7 @@ func TestInvalidateEngineLeavesDispatchedWorkRunning(t *testing.T) {
 	h := newStrictHarness(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ticket, err := h.a.admitStrictNow(ctx, "ollama", "m", strictRequest())
+	ticket, err := h.a.admitStrictNow(ctx, "llamacpp", "m", strictRequest())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +185,7 @@ func TestInvalidateEngineLeavesDispatchedWorkRunning(t *testing.T) {
 	if err := ticket.BeforeStrictDispatch(); err != nil {
 		t.Fatal(err)
 	}
-	h.a.invalidateEngine(engineInvalidation("ollama", "switch-1"))
+	h.a.invalidateEngine(engineInvalidation("llamacpp", "switch-1"))
 	if ctx.Err() != nil || h.a.currentActive() != 1 || len(h.a.strict.markers) != 1 {
 		t.Fatal("invalidation cancelled or released dispatched work")
 	}
@@ -223,25 +223,25 @@ func TestAdmissionSnapshotRPCReflectsCurrentInflight(t *testing.T) {
 	}
 	held := mustStrictTicket(t, h.a)
 	defer held.Finish(strictNotDispatched)
-	rpcOK(t, p, w, nodepolicy.MethodSetEngineDrain, nodepolicy.SetEngineDrainParams{Engine: "ollama", Drain: true})
+	rpcOK(t, p, w, nodepolicy.MethodSetEngineDrain, nodepolicy.SetEngineDrainParams{Engine: "llamacpp", Drain: true})
 	drained := snapshot()
-	if drained.Active != 1 || drained.ActiveByEngine["ollama"] != 1 || len(before.ActiveByEngine) != 0 {
+	if drained.Active != 1 || drained.ActiveByEngine["llamacpp"] != 1 || len(before.ActiveByEngine) != 0 {
 		t.Fatalf("snapshot after drain=%+v, initial=%+v", drained, before)
 	}
 	held.Finish(strictNotDispatched)
-	if after := snapshot(); after.Active != 0 || after.ActiveByEngine["ollama"] != 0 {
+	if after := snapshot(); after.Active != 0 || after.ActiveByEngine["llamacpp"] != 0 {
 		t.Fatalf("released snapshot=%+v", after)
 	}
-	if drained.ActiveByEngine["ollama"] != 1 {
+	if drained.ActiveByEngine["llamacpp"] != 1 {
 		t.Fatal("snapshot map aliases live counts")
 	}
-	rpcOK(t, p, w, nodepolicy.MethodSetEngineDrain, nodepolicy.SetEngineDrainParams{Engine: "ollama", Drain: false})
+	rpcOK(t, p, w, nodepolicy.MethodSetEngineDrain, nodepolicy.SetEngineDrainParams{Engine: "llamacpp", Drain: false})
 	ticket := mustStrictTicket(t, h.a)
 	if err := ticket.BeforeStrictDispatch(); err != nil {
 		t.Fatal(err)
 	}
 	ticket.Finish(strictUncertain)
-	if got := snapshot(); got.Active != 1 || got.ActiveByEngine["ollama"] != 1 {
+	if got := snapshot(); got.Active != 1 || got.ActiveByEngine["llamacpp"] != 1 {
 		t.Fatalf("quarantined snapshot=%+v", got)
 	}
 }
@@ -255,14 +255,14 @@ func TestAdmissionSnapshotCopiesMaps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	activity := first.LastActivityMs["ollama"]
-	first.ActiveByEngine["ollama"] = 99
-	first.LastActivityMs["ollama"] = 0
+	activity := first.LastActivityMs["llamacpp"]
+	first.ActiveByEngine["llamacpp"] = 99
+	first.LastActivityMs["llamacpp"] = 0
 	next, err := p.applyAdmissionSnapshot(json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if next.ActiveByEngine["ollama"] != 1 || activity == 0 || next.LastActivityMs["ollama"] != activity {
+	if next.ActiveByEngine["llamacpp"] != 1 || activity == 0 || next.LastActivityMs["llamacpp"] != activity {
 		t.Fatalf("snapshot maps alias controller state: %+v", next)
 	}
 }
@@ -274,23 +274,23 @@ func TestInvalidateEngineRPCValidationAndAcknowledgement(t *testing.T) {
 	for name, params := range map[string]json.RawMessage{
 		"missing params":    nil,
 		"null":              json.RawMessage(`null`),
-		"invalid engine":    json.RawMessage(`{"engine":"../ollama","operationId":"switch-1","reason":"engine-switch"}`),
-		"invalid operation": json.RawMessage(`{"engine":"ollama","operationId":"-switch","reason":"engine-switch"}`),
-		"unknown reason":    json.RawMessage(`{"engine":"ollama","operationId":"switch-1","reason":"restart"}`),
-		"extra field":       json.RawMessage(`{"engine":"ollama","operationId":"switch-1","reason":"engine-switch","force":true}`),
+		"invalid engine":    json.RawMessage(`{"engine":"../llamacpp","operationId":"switch-1","reason":"engine-switch"}`),
+		"invalid operation": json.RawMessage(`{"engine":"llamacpp","operationId":"-switch","reason":"engine-switch"}`),
+		"unknown reason":    json.RawMessage(`{"engine":"llamacpp","operationId":"switch-1","reason":"restart"}`),
+		"extra field":       json.RawMessage(`{"engine":"llamacpp","operationId":"switch-1","reason":"engine-switch","force":true}`),
 	} {
 		t.Run(name, func(t *testing.T) {
-			generation := h.a.strict.generation[admKey{engine: "ollama", model: "m:latest"}]
+			generation := h.a.strict.generation[admKey{engine: "llamacpp", model: "m"}]
 			f := rpc(t, p, w, nodepolicy.MethodInvalidateEngine, params)
 			if f.Error == nil || f.Error.Code != -32602 {
 				t.Fatalf("invalid request response=%+v", f)
 			}
-			if len(h.a.strict.models) != 1 || h.a.strict.generation[admKey{engine: "ollama", model: "m:latest"}] != generation {
+			if len(h.a.strict.models) != 1 || h.a.strict.generation[admKey{engine: "llamacpp", model: "m"}] != generation {
 				t.Fatal("invalid request changed eligibility")
 			}
 		})
 	}
-	f := rpc(t, p, w, nodepolicy.MethodInvalidateEngine, engineInvalidation("ollama", "switch-1"))
+	f := rpc(t, p, w, nodepolicy.MethodInvalidateEngine, engineInvalidation("llamacpp", "switch-1"))
 	if f.Error != nil {
 		t.Fatalf("invalidation error=%+v", f.Error)
 	}
@@ -301,7 +301,7 @@ func TestInvalidateEngineRPCValidationAndAcknowledgement(t *testing.T) {
 	if !result.OK || result.RunID == "" || result.RunID != p.runID {
 		t.Fatalf("acknowledgement=%+v", result)
 	}
-	for _, params := range []json.RawMessage{nil, json.RawMessage(`null`), json.RawMessage(`{"engine":"ollama"}`)} {
+	for _, params := range []json.RawMessage{nil, json.RawMessage(`null`), json.RawMessage(`{"engine":"llamacpp"}`)} {
 		h.a.mu.Lock()
 		before := h.a.snapshotLocked().state
 		h.a.mu.Unlock()

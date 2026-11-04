@@ -18,16 +18,16 @@ export interface ModelItem {
     quantization: string
     family: string
     digest: string
-    /** VRAM consumed by the model when loaded (bytes), from Ollama /api/ps */
+    /** VRAM consumed by the model when loaded (bytes) */
     sizeVram: number | null
-    /** Timestamp when Ollama will auto-unload this model, from Ollama /api/ps */
+    /** Timestamp when the engine will auto-unload this model */
     expiresAt: string | null
-    /** User-configured keep_alive duration sent when loading the model */
+    /** User-configured keep-alive duration sent when loading the model */
     expiry: ModelExpiry
     /**
      * Original key used to pull/download this model (e.g. HuggingFace `author/repo/file.gguf`).
      * Stored alongside the model so sync can reproduce the pull on other nodes.
-     * Absent for models whose `name` is already a valid pull key (e.g. Ollama tags).
+     * Absent for models whose `name` is already a valid pull key (e.g. a bare model name).
      */
     pullKey?: string
     /**
@@ -68,11 +68,11 @@ export interface BackendInstallProgress {
  * node drops out of `ClusterState`.
  *
  * `installType`:
- * - `managed` — PAIR owns the binary (e.g. `{userData}/ollama`), so the UI
+ * - `managed` — PAIR owns the binary (e.g. `{userData}/llamacpp`), so the UI
  *   shows a one-click "Update" button that dispatches the `update` engine
  *   command on the engine's owning node.
  * - `external` — the binary lives outside `{userData}` (user installed
- *   Ollama themselves, llama.cpp via brew, etc.). The UI shows an info
+ *   llama.cpp themselves, via brew, etc.). The UI shows an info
  *   banner with release notes and an optional CTA to install a PAIR-managed
  *   copy; PAIR never modifies external installs in place.
  */
@@ -87,7 +87,7 @@ export interface BackendInfo {
     type: EngineType
     displayName: string
     source: EngineSource
-    /** Whether the inference process (e.g. ollama serve) is running */
+    /** Whether the inference process (e.g. llama-server) is running */
     processStatus: EngineProcessStatus
     /** Server port the inference process listens on (null if process is stopped) */
     port: number | null

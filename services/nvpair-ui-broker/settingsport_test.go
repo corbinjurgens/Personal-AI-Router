@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"net"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -62,19 +61,6 @@ func TestBrokerProxySetPortRejectsInvalidPorts(t *testing.T) {
 	}
 }
 
-func TestBrokerProxySetPortRejectsInheritedAlias(t *testing.T) {
-	for _, profile := range engineProxyProfiles {
-		t.Run(profile.Name, func(t *testing.T) {
-			b := &Broker{}
-			b.setOllamaHostAlias(ollamaHostAlias{Port: 11433})
-			response := callBrokerPortRequest(t, b, profile.ComponentName()+":set-port", json.RawMessage(`{"port":11433}`))
-			if response.Error == nil || response.Error.Code != -32000 || !strings.Contains(response.Error.Message, "OLLAMA_HOST proxy alias") {
-				t.Fatalf("response = %+v, want alias-port rejection", response)
-			}
-		})
-	}
-}
-
 func TestBrokerLlamaCPPProxySetPortRejectsConflicts(t *testing.T) {
 	test := func(name string, port func(*testing.T, *settingsHarness, settings.Snapshot) int) {
 		t.Run(name, func(t *testing.T) {
@@ -110,7 +96,7 @@ func TestBrokerLlamaCPPProxySetPortRejectsConflicts(t *testing.T) {
 		return 25001
 	})
 	test("another proxy listener", func(t *testing.T, h *settingsHarness, before settings.Snapshot) int {
-		_, port := h.b.getProxy().Status("ollama")
+		_, port := h.b.engineProxyHandle(mustEngineProxyProfile("llamacpp")).Status("llamacpp-custom")
 		return port
 	})
 	test("occupied listener", func(t *testing.T, h *settingsHarness, before settings.Snapshot) int {
@@ -130,12 +116,12 @@ func TestBrokerLlamaCPPProxySetPortPersistsOnlyRequestedFacade(t *testing.T) {
 		t.Fatalf("read initial settings: %v", err)
 	}
 	otherPorts := make(map[string]int)
-	for _, engine := range []string{"ollama", "lmstudio"} {
-		_, otherPorts[engine] = h.b.getProxy().Status(engine)
+	for _, engine := range []string{"llamacpp-custom"} {
+		_, otherPorts[engine] = h.b.engineProxyHandle(mustEngineProxyProfile("llamacpp")).Status(engine)
 	}
 	target := h.reservePort(t)
 	// The namespace determines the engine, even if parameters name another.
-	response := callBrokerPortRequest(t, h.b, "llamacpp-proxy:set-port", settingsJSON(map[string]any{"engine": "ollama", "port": target}))
+	response := callBrokerPortRequest(t, h.b, "llamacpp-proxy:set-port", settingsJSON(map[string]any{"engine": "llamacpp-custom", "port": target}))
 	if response.Error != nil {
 		t.Fatalf("set proxy port: %+v", response.Error)
 	}
@@ -148,12 +134,12 @@ func TestBrokerLlamaCPPProxySetPortPersistsOnlyRequestedFacade(t *testing.T) {
 	if result.Port != target || h.proxyRebinds.Load() != 1 {
 		t.Fatalf("port=%d rebinds=%d, want port=%d and one rebind", result.Port, h.proxyRebinds.Load(), target)
 	}
-	ready, actual := h.b.getProxy().Status("llamacpp")
+	ready, actual := h.b.engineProxyHandle(mustEngineProxyProfile("llamacpp")).Status("llamacpp")
 	if !ready || actual != target {
 		t.Fatalf("llama.cpp facade ready=%v port=%d, want %d", ready, actual, target)
 	}
 	for engine, want := range otherPorts {
-		_, actual := h.b.getProxy().Status(engine)
+		_, actual := h.b.engineProxyHandle(mustEngineProxyProfile("llamacpp")).Status(engine)
 		if actual != want {
 			t.Fatalf("%s facade moved from %d to %d", engine, want, actual)
 		}

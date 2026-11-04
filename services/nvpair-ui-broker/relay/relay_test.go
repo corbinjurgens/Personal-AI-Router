@@ -19,10 +19,10 @@ func TestRegistrationCache(t *testing.T) {
 		t.Error("identical re-register should not change")
 	}
 	// A new TXT (update-txt) is a change.
-	if !c.Register(noderec.RegisterParams{Service: noderec.ServiceOllama, Port: 11434, TXT: []string{"models=a"}}) {
+	if !c.Register(noderec.RegisterParams{Service: noderec.ServiceLlamaCPP, Port: 8080, TXT: []string{"models=a"}}) {
 		t.Fatal("new service should change")
 	}
-	if !c.Register(noderec.RegisterParams{Service: noderec.ServiceOllama, Port: 11434, TXT: []string{"models=a;b"}}) {
+	if !c.Register(noderec.RegisterParams{Service: noderec.ServiceLlamaCPP, Port: 8080, TXT: []string{"models=a;b"}}) {
 		t.Error("changed TXT should change")
 	}
 	if c.Register(noderec.RegisterParams{Service: noderec.ServiceErrors, Port: 0}) {
@@ -33,8 +33,8 @@ func TestRegistrationCache(t *testing.T) {
 	if len(snap) != 2 {
 		t.Fatalf("snapshot len = %d, want 2", len(snap))
 	}
-	// Sorted by service key: ni before ol.
-	if snap[0].Service != noderec.ServiceNodeInfo || snap[1].Service != noderec.ServiceOllama {
+	// Sorted by service key: lc before ni.
+	if snap[0].Service != noderec.ServiceLlamaCPP || snap[1].Service != noderec.ServiceNodeInfo {
 		t.Errorf("snapshot not sorted by service: %+v", snap)
 	}
 
@@ -75,8 +75,8 @@ func ids(nodes []noderec.DirectoryNode) []string {
 	return out
 }
 
-func olNode(id string) noderec.DirectoryNode {
-	return noderec.DirectoryNode{HostUUID: id, Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceOllama: {Port: 11434}}}
+func llamaNode(id string) noderec.DirectoryNode {
+	return noderec.DirectoryNode{HostUUID: id, Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceLlamaCPP: {Port: 8080}}}
 }
 func erNode(id string) noderec.DirectoryNode {
 	return noderec.DirectoryNode{HostUUID: id, Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceErrors: {Port: 14319}}}
@@ -84,14 +84,14 @@ func erNode(id string) noderec.DirectoryNode {
 
 func TestDirectorySubscribeInitialSnapshot(t *testing.T) {
 	d := NewDirectory()
-	d.Apply(noderec.NotifyNodeDiscovered, olNode("a"))
+	d.Apply(noderec.NotifyNodeDiscovered, llamaNode("a"))
 	d.Apply(noderec.NotifyNodeDiscovered, erNode("b"))
 
-	// A subscriber filtered to ol gets only the existing ol node as its first
+	// A subscriber filtered to llama.cpp gets only the existing llama.cpp node as its first
 	// delivery.
 	rec := &recordingSub{}
 	sub := &Subscriber{
-		Filter: noderec.SubscribeParams{Services: []noderec.ServiceKey{noderec.ServiceOllama}},
+		Filter: noderec.SubscribeParams{Services: []noderec.ServiceKey{noderec.ServiceLlamaCPP}},
 		Send:   rec.send,
 	}
 	d.Subscribe(sub)
@@ -110,7 +110,7 @@ func TestDeliverCapturesAtSendTime(t *testing.T) {
 	rec := &recordingSub{}
 	sub := &Subscriber{Filter: noderec.SubscribeParams{}, Send: rec.send}
 	d.Subscribe(sub)
-	d.Apply(noderec.NotifyNodeDiscovered, olNode("a"))
+	d.Apply(noderec.NotifyNodeDiscovered, llamaNode("a"))
 	d.Deliver(sub)
 	if got := ids(rec.last()); !reflect.DeepEqual(got, []string{"a"}) {
 		t.Fatalf("delivery after a post-subscribe change = %v, want [a]", got)
@@ -119,17 +119,17 @@ func TestDeliverCapturesAtSendTime(t *testing.T) {
 
 func TestDirectoryFanoutRespectsFilter(t *testing.T) {
 	d := NewDirectory()
-	olSub := &recordingSub{}
+	llamaSub := &recordingSub{}
 	allSub := &recordingSub{}
-	d.Subscribe(&Subscriber{Filter: noderec.SubscribeParams{Services: []noderec.ServiceKey{noderec.ServiceOllama}}, Send: olSub.send})
+	d.Subscribe(&Subscriber{Filter: noderec.SubscribeParams{Services: []noderec.ServiceKey{noderec.ServiceLlamaCPP}}, Send: llamaSub.send})
 	d.Subscribe(&Subscriber{Filter: noderec.SubscribeParams{}, Send: allSub.send}) // all
 
-	d.Apply(noderec.NotifyNodeDiscovered, olNode("a"))
+	d.Apply(noderec.NotifyNodeDiscovered, llamaNode("a"))
 	d.Apply(noderec.NotifyNodeDiscovered, erNode("b"))
 
 	// Every change re-pushes each subscriber its full filtered snapshot, so the
 	// latest snapshot is the authoritative filtered set.
-	if got := ids(olSub.last()); !reflect.DeepEqual(got, []string{"a"}) {
+	if got := ids(llamaSub.last()); !reflect.DeepEqual(got, []string{"a"}) {
 		t.Errorf("ol subscriber last snapshot = %v, want [a]", got)
 	}
 	if got := ids(allSub.last()); !reflect.DeepEqual(got, []string{"a", "b"}) {
@@ -142,8 +142,8 @@ func TestDirectoryRemoveAndUnsubscribe(t *testing.T) {
 	sub := &recordingSub{}
 	id := d.Subscribe(&Subscriber{Filter: noderec.SubscribeParams{}, Send: sub.send})
 
-	d.Apply(noderec.NotifyNodeDiscovered, olNode("a"))
-	d.Apply(noderec.NotifyNodeRemoved, olNode("a"))
+	d.Apply(noderec.NotifyNodeDiscovered, llamaNode("a"))
+	d.Apply(noderec.NotifyNodeRemoved, llamaNode("a"))
 	if len(d.Snapshot("")) != 0 {
 		t.Error("node should be gone after removed")
 	}
@@ -155,7 +155,7 @@ func TestDirectoryRemoveAndUnsubscribe(t *testing.T) {
 	// After unsubscribe, no more pushes.
 	before := len(sub.snaps)
 	d.Unsubscribe(id)
-	d.Apply(noderec.NotifyNodeDiscovered, olNode("c"))
+	d.Apply(noderec.NotifyNodeDiscovered, llamaNode("c"))
 	if len(sub.snaps) != before {
 		t.Errorf("unsubscribed sub still received %d pushes", len(sub.snaps)-before)
 	}
@@ -164,14 +164,14 @@ func TestDirectoryRemoveAndUnsubscribe(t *testing.T) {
 func TestDirectorySnapshotFilterAndSort(t *testing.T) {
 	d := NewDirectory()
 	d.Apply(noderec.NotifyNodeDiscovered, erNode("z"))
-	d.Apply(noderec.NotifyNodeDiscovered, olNode("a"))
-	d.Apply(noderec.NotifyNodeDiscovered, olNode("m"))
+	d.Apply(noderec.NotifyNodeDiscovered, llamaNode("a"))
+	d.Apply(noderec.NotifyNodeDiscovered, llamaNode("m"))
 
 	all := d.Snapshot("")
 	if len(all) != 3 || all[0].HostUUID != "a" || all[2].HostUUID != "z" {
 		t.Fatalf("snapshot(all) not sorted: %+v", all)
 	}
-	ol := d.Snapshot(noderec.ServiceOllama)
+	ol := d.Snapshot(noderec.ServiceLlamaCPP)
 	if len(ol) != 2 {
 		t.Fatalf("snapshot(ol) = %d, want 2", len(ol))
 	}

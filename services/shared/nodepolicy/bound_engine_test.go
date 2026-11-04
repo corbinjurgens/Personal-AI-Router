@@ -11,7 +11,7 @@ import (
 )
 
 func TestBoundEngineRequestStrictContract(t *testing.T) {
-	valid := `{"requestId":"wait-1","proxyRunId":"run-1","policyRevision":"3","engine":"ollama","model":"a/b:tag","budgetMs":90000}`
+	valid := `{"requestId":"wait-1","proxyRunId":"run-1","policyRevision":"3","engine":"llamacpp","model":"a/b:tag","budgetMs":90000}`
 	var got PrepareBoundEngineRequest
 	if err := json.Unmarshal([]byte(valid), &got); err != nil {
 		t.Fatal(err)
@@ -75,7 +75,7 @@ func TestBoundEngineReplyStrictContract(t *testing.T) {
 }
 
 func TestBoundEngineActivationAndCancellation(t *testing.T) {
-	p := ActivateBoundEngineRequest{OperationID: "operation", Engine: "ollama", Model: "model", PolicyRevision: "1", ManagerIncarnation: "manager", Deadline: time.Now().UTC().Add(time.Minute), PeerID: "peer", PeerIncarnation: "admission"}
+	p := ActivateBoundEngineRequest{OperationID: "operation", Engine: "llamacpp", Model: "model", PolicyRevision: "1", ManagerIncarnation: "manager", Deadline: time.Now().UTC().Add(time.Minute), PeerID: "peer", PeerIncarnation: "admission"}
 	raw, err := json.Marshal(p)
 	if err != nil {
 		t.Fatal(err)
@@ -91,7 +91,7 @@ func TestBoundEngineActivationAndCancellation(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"requestId":"operation","proxyRunId":"run"}`), &cancel); err != nil {
 		t.Fatal(err)
 	}
-	if err := json.Unmarshal([]byte(`{"requestId":"operation","proxyRunId":"run","engine":"ollama"}`), &cancel); err == nil {
+	if err := json.Unmarshal([]byte(`{"requestId":"operation","proxyRunId":"run","engine":"llamacpp"}`), &cancel); err == nil {
 		t.Fatal("cancellation accepted an engine command")
 	}
 }

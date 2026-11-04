@@ -41,13 +41,13 @@ func newBoundHarness(t *testing.T, sourceRunning, targetRunning bool) *boundHarn
 	r.current = nodepolicy.Default()
 	r.current.Revision = "1"
 	r.current.Availability = nodepolicy.Available
-	r.current.EngineBindings = nodepolicy.EngineBindings{{Engine: "lmstudio", Model: "model"}, {Engine: "llamacpp", Model: "other-model"}}
+	r.current.EngineBindings = nodepolicy.EngineBindings{{Engine: "llamacpp-custom", Model: "model"}, {Engine: "llamacpp", Model: "other-model"}}
 	r.live = nodepolicy.Available
 	r.activeRevision = "1"
 	r.incarnation = h.pp
 	r.runID = "proxy-run"
 	r.mu.Unlock()
-	h.request = nodepolicy.PrepareBoundEngineRequest{RequestID: "wait-1", ProxyRunID: "proxy-run", PolicyRevision: "1", Engine: "lmstudio", Model: "model", BudgetMs: 2000}
+	h.request = nodepolicy.PrepareBoundEngineRequest{RequestID: "wait-1", ProxyRunID: "proxy-run", PolicyRevision: "1", Engine: "llamacpp-custom", Model: "model", BudgetMs: 2000}
 	base := h.engine.answer
 	h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
 		switch method {
@@ -65,20 +65,20 @@ func newBoundHarness(t *testing.T, sourceRunning, targetRunning bool) *boundHarn
 			h.mu.Unlock()
 			return map[string]any{"engines": []map[string]any{
 				{"engine": "llamacpp", "installed": true, "running": source, "healthy": source, "locked": false},
-				{"engine": "lmstudio", "installed": true, "running": target, "healthy": target, "locked": false},
+				{"engine": "llamacpp-custom", "installed": true, "running": target, "healthy": target, "locked": false},
 			}}, ""
 		case "engine:models":
 			models := []string{}
 			if h.modelAvailable.Load() {
 				models = []string{"model"}
 			}
-			return map[string]any{"modelsByEngine": map[string][]string{"lmstudio": models}}, ""
+			return map[string]any{"modelsByEngine": map[string][]string{"llamacpp-custom": models}}, ""
 		case nodepolicy.MethodActivateBoundEngine:
 			var in nodepolicy.ActivateBoundEngineRequest
 			if err := json.Unmarshal(raw, &in); err != nil {
 				return nil, err.Error()
 			}
-			if in.Engine != "lmstudio" || in.PolicyRevision != "1" || in.ManagerIncarnation != "manager-run" {
+			if in.Engine != "llamacpp-custom" || in.PolicyRevision != "1" || in.ManagerIncarnation != "manager-run" {
 				return nil, "activation envelope mismatch"
 			}
 			h.activations.Add(1)
@@ -433,7 +433,7 @@ func TestBoundEngineRefusesLockedAndAuthUnknown(t *testing.T) {
 			base := h.engine.answer
 			h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
 				if locked && method == "engine:get-installed" {
-					return map[string]any{"engines": []map[string]any{{"engine": "lmstudio", "installed": true, "running": true, "healthy": true, "locked": true}}}, ""
+					return map[string]any{"engines": []map[string]any{{"engine": "llamacpp-custom", "installed": true, "running": true, "healthy": true, "locked": true}}}, ""
 				}
 				if authFailure && method == "engine:models" {
 					return nil, "native authentication secret must not escape"
@@ -496,13 +496,13 @@ func TestBoundEngineBrokerStopPreemptsColdReadiness(t *testing.T) {
 			if err := json.Unmarshal(raw, &in); err != nil {
 				return nil, err.Error()
 			}
-			if in.OperationID != activationID || in.Engine != "lmstudio" {
+			if in.OperationID != activationID || in.Engine != "llamacpp-custom" {
 				return nil, "cold Off was not scoped"
 			}
 			h.engine.releaseHeld()
 			return map[string]bool{"applied": true}, ""
 		case "engine:status":
-			return map[string]any{"engine": "lmstudio", "running": false, "installed": true, "healthy": false}, ""
+			return map[string]any{"engine": "llamacpp-custom", "running": false, "installed": true, "healthy": false}, ""
 		}
 		return base(method, raw)
 	})
@@ -514,7 +514,7 @@ func TestBoundEngineBrokerStopPreemptsColdReadiness(t *testing.T) {
 		t.Fatal("cold readiness wait not reached")
 	}
 	id := json.RawMessage(`"cold-Off"`)
-	h.b.handleMessage(&Message{Method: "engine:stop", ID: &id, Params: settingsJSON(map[string]string{"engine": "lmstudio"})})
+	h.b.handleMessage(&Message{Method: "engine:stop", ID: &id, Params: settingsJSON(map[string]string{"engine": "llamacpp-custom"})})
 	select {
 	case result := <-preparation:
 		if result.Success {
@@ -582,7 +582,7 @@ func TestBoundEngineUnknownColdAcceptanceRetainsOriginalID(t *testing.T) {
 			return nil, holdReply
 		}
 		if method == "engine:status" {
-			return map[string]any{"engine": "lmstudio", "running": false, "installed": true, "healthy": false}, ""
+			return map[string]any{"engine": "llamacpp-custom", "running": false, "installed": true, "healthy": false}, ""
 		}
 		return base(method, raw)
 	})
@@ -614,7 +614,7 @@ func TestBoundEngineUnknownColdAcceptanceRetainsOriginalID(t *testing.T) {
 		t.Fatalf("unknown outcome resubmitted: %+v activations=%d", result, h.activations.Load())
 	}
 	idRaw := json.RawMessage(`"resolve-Off"`)
-	h.b.handleMessage(&Message{Method: "engine:stop", ID: &idRaw, Params: settingsJSON(map[string]string{"engine": "lmstudio"})})
+	h.b.handleMessage(&Message{Method: "engine:stop", ID: &idRaw, Params: settingsJSON(map[string]string{"engine": "llamacpp-custom"})})
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		for _, frame := range h.output.frames() {
@@ -684,7 +684,7 @@ func TestBoundEngineSameEngineCoalescesWithPerModelReadback(t *testing.T) {
 	h.active.Store(1)
 	r := h.b.nodePolicyRuntime()
 	r.mu.Lock()
-	r.current.EngineBindings = append(r.current.EngineBindings, nodepolicy.Role{Engine: "lmstudio", Model: "missing-model"})
+	r.current.EngineBindings = append(r.current.EngineBindings, nodepolicy.Role{Engine: "llamacpp-custom", Model: "missing-model"})
 	r.mu.Unlock()
 	first := make(chan nodepolicy.BoundEnginePrepared, 1)
 	go func() { first <- h.b.prepareBoundEngine(context.Background(), h.pp, h.request) }()
@@ -780,7 +780,7 @@ func TestBoundEngineFailedColdOffRetainsPolicyReservation(t *testing.T) {
 		t.Fatal("cold activation not submitted")
 	}
 	id := json.RawMessage(`"failed-Off"`)
-	h.b.handleMessage(&Message{Method: "engine:stop", ID: &id, Params: settingsJSON(map[string]string{"engine": "lmstudio"})})
+	h.b.handleMessage(&Message{Method: "engine:stop", ID: &id, Params: settingsJSON(map[string]string{"engine": "llamacpp-custom"})})
 	select {
 	case result := <-done:
 		if result.Success {

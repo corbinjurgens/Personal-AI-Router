@@ -341,7 +341,7 @@ func TestRoutingListener_ListFollowsTheActivatedPolicy(t *testing.T) {
 	pol := nodepolicy.Default()
 	pol.Revision = "2"
 	pol.Routing.Listener = listener
-	pol.Tiers["strong"] = []nodepolicy.TierEntry{{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "big:70b"}}
+	pol.Tiers["strong"] = []nodepolicy.TierEntry{{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "big:70b"}}
 	activate(t, p, w, pol)
 
 	if boundPort(p) != port {
@@ -379,7 +379,7 @@ func TestRoutingListener_BindsLoopbackOnly(t *testing.T) {
 
 func TestRoutingListener_InferenceUnqualifiedOrUnsupportedHasNoDispatchEffects(t *testing.T) {
 	const selfID = "self-uuid"
-	tc := ollamaCase(t)
+	tc := llamacppCase(t)
 	models := append([]string{"mid:7b"}, allAliases...)
 	newFixture := func(t *testing.T) (*Proxy, *recordingWriter, *recordingEngine) {
 		t.Helper()
@@ -414,7 +414,7 @@ func TestRoutingListener_InferenceUnqualifiedOrUnsupportedHasNoDispatchEffects(t
 	t.Run("control: the same request through the facade reaches the engine", func(t *testing.T) {
 		p, _, local := newFixture(t)
 		rec := httptest.NewRecorder()
-		p.soleFacade().handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(`{"model":"mid:7b"}`)))
+		p.soleFacade().handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"mid:7b"}`)))
 		if rec.Code != http.StatusOK || local.hits() != 1 {
 			t.Fatalf("control: status %d with %d engine hits, want 200 and 1", rec.Code, local.hits())
 		}
@@ -426,7 +426,6 @@ func TestRoutingListener_InferenceUnqualifiedOrUnsupportedHasNoDispatchEffects(t
 		port := boundPort(p)
 		for _, path := range []string{
 			"/v1/chat/completions", "/v1/completions", "/v1/embeddings", "/v1/messages",
-			"/api/generate", "/api/chat", "/api/embeddings", "/api/embed",
 		} {
 			got := call(t, port, http.MethodPost, path, nil)
 			if got.status != http.StatusNotFound {
@@ -515,13 +514,12 @@ func TestRoutingListener_RejectsMethodsAndPaths(t *testing.T) {
 	test("model detail path", http.MethodGet, "/v1/models/weak", http.StatusNotFound, "not_found")
 	test("trailing slash on the list", http.MethodGet, "/v1/models/", http.StatusNotFound, "not_found")
 	test("trailing slash on an inference route", http.MethodPost, "/v1/chat/completions/", http.StatusNotFound, "not_found")
-	test("engine native model list", http.MethodGet, "/api/tags", http.StatusNotFound, "not_found")
 	test("llama.cpp model list", http.MethodGet, "/models", http.StatusNotFound, "not_found")
-	test("engine passthrough", http.MethodPost, "/api/show", http.StatusNotFound, "not_found")
+	test("engine passthrough", http.MethodPost, "/props", http.StatusNotFound, "not_found")
 	test("root", http.MethodGet, "/", http.StatusNotFound, "not_found")
 
 	t.Run("query string on an inference route", func(t *testing.T) {
-		for _, target := range []string{"/v1/chat/completions?x=1", "/v1/chat/completions?", "/api/chat?model=weak-api"} {
+		for _, target := range []string{"/v1/chat/completions?x=1", "/v1/chat/completions?", "/v1/chat/completions?model=weak-api"} {
 			got := call(t, port, http.MethodPost, target, nil)
 			if got.status != http.StatusBadRequest || got.code(t) != "query_not_allowed" {
 				t.Errorf("POST %s = %d %s, want 400 query_not_allowed", target, got.status, got.body)
@@ -541,7 +539,7 @@ func TestRoutingListener_RebindsAndDisablesOnlyItsOwnListener(t *testing.T) {
 	w := &recordingWriter{}
 	p := newBoundProxy(NewCodec(w))
 	p.serveCtx = t.Context()
-	facadePort := enableOnFreePort(t, p, "ollama")
+	facadePort := enableOnFreePort(t, p, "llamacpp")
 	t.Cleanup(func() { p.shutdown(context.Background()) })
 
 	foreign, err := net.Listen("tcp", "127.0.0.1:0")
@@ -651,7 +649,7 @@ func TestRoutingListener_ReportsACollisionAndNeverPicksAnotherPort(t *testing.T)
 	}
 }
 
-// facadeProxy is a process with an Ollama and an LM Studio facade enabled on
+// facadeProxy is a process with a llama.cpp and a descriptor-engine facade enabled on
 // ephemeral ports, keyed by engine.
 func facadeProxy(t *testing.T) (*Proxy, *recordingWriter, map[string]int) {
 	t.Helper()
@@ -660,8 +658,8 @@ func facadeProxy(t *testing.T) (*Proxy, *recordingWriter, map[string]int) {
 	p := newBoundProxy(NewCodec(w))
 	p.serveCtx = t.Context()
 	ports := map[string]int{
-		"ollama":   enableOnFreePort(t, p, "ollama"),
-		"lmstudio": enableOnFreePort(t, p, "lmstudio"),
+		"llamacpp":        enableOnFreePort(t, p, "llamacpp"),
+		"llamacpp-custom": enableDescriptorOnFreePort(t, p, customDescriptor()),
 	}
 	t.Cleanup(func() { p.shutdown(context.Background()) })
 	return p, w, ports
@@ -670,8 +668,8 @@ func facadeProxy(t *testing.T) (*Proxy, *recordingWriter, map[string]int) {
 // facadeRoutes is one inference route each facade answers itself, whatever the
 // routing listener does.
 var facadeRoutes = map[string]string{
-	"ollama":   "/api/chat",
-	"lmstudio": "/v1/chat/completions",
+	"llamacpp":        "/v1/chat/completions",
+	"llamacpp-custom": "/v1/chat/completions",
 }
 
 // askFacade posts a request for a model no node serves to one facade.
@@ -843,7 +841,7 @@ func holdAddress(t *testing.T, address, dial, marker string) (int, func() answer
 			if _, err := ln.(*net.TCPListener).SyscallConn(); err != nil {
 				t.Fatalf("foreign holder's listener was closed: %v", err)
 			}
-			got, err := routingExchange(conn, reader, dial, port, http.MethodPost, "/api/chat")
+			got, err := routingExchange(conn, reader, dial, port, http.MethodPost, "/v1/chat/completions")
 			if err != nil {
 				t.Fatalf("ask the holder: %v", err)
 			}
@@ -852,7 +850,7 @@ func holdAddress(t *testing.T, address, dial, marker string) (int, func() answer
 		// Wildcard listeners may be shadowed by an unrelated specific-address
 		// listener. Establish identity before the action, then retain this exact
 		// connection so later address reuse cannot redirect the assertion.
-		if got, err := routingExchange(conn, reader, dial, port, http.MethodPost, "/api/chat"); err != nil || got.status != http.StatusOK || string(got.body) != marker {
+		if got, err := routingExchange(conn, reader, dial, port, http.MethodPost, "/v1/chat/completions"); err != nil || got.status != http.StatusOK || string(got.body) != marker {
 			_ = conn.Close()
 			srv.Close()
 			continue
@@ -910,7 +908,7 @@ func TestRoutingListener_ReportsAFacadePortAsACollision(t *testing.T) {
 	p, w, ports := facadeProxy(t)
 	before := askFacades(t, ports)
 
-	activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{Enabled: true, Port: ports["ollama"]}))
+	activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{Enabled: true, Port: ports["llamacpp"]}))
 
 	if got := p.admission.currentPolicy().Revision; got != "1" {
 		t.Errorf("active revision = %q, want 1 despite the collision", got)
@@ -938,7 +936,7 @@ func TestRoutingListener_RefusesAFacadeOnItsPort(t *testing.T) {
 			t.Fatalf("listener did not bind %d", port)
 		}
 
-		_, err := p.enableFacade(enableFacadeParams{Engine: "ollama", Port: port, IgnorePersistedPort: true})
+		_, err := p.enableFacade(enableFacadeParams{Engine: "llamacpp", Port: port, IgnorePersistedPort: true})
 		if !stderrors.Is(err, errFacadeBindFailed) {
 			t.Fatalf("enabling a facade on the listener's port = %v, want errFacadeBindFailed", err)
 		}
@@ -954,7 +952,7 @@ func TestRoutingListener_RefusesAFacadeOnItsPort(t *testing.T) {
 		}
 		before := askFacades(t, ports)
 
-		if err := p.facadeFor("lmstudio").setPort(port); err == nil {
+		if err := p.facadeFor("llamacpp-custom").setPort(port); err == nil {
 			t.Fatal("moving a facade onto the listener's port succeeded")
 		}
 		if got := call(t, port, http.MethodGet, "/v1/models", nil); got.status != http.StatusOK {
@@ -1527,10 +1525,10 @@ func waitInferenceDrained(t *testing.T, p *Proxy) {
 func TestModelControlsSelectionListenerShortAlias512ByteConcrete(t *testing.T) {
 	test := func(name, model string) {
 		t.Run(name, func(t *testing.T) {
-			pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: model}}})
+			pol := tierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: model}}})
 			pol.TierPolicy.AllowStronger = false
-			fx := newTierFixture(t, ollamaCase(t), pol, map[string][]string{"peer": {model}}, nil)
-			fx.advertise(t, "peer", map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole(model)}, strictCapabilityFor("ollama", model))
+			fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"peer": {model}}, nil)
+			fx.advertise(t, "peer", map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole(model)}, strictCapabilityFor("llamacpp", model))
 			pinRecordingPairPeer(t, fx.p.soleFacade(), "peer", fx.eng["peer"])
 			port := inferenceListener(t, fx)
 			resp := inferencePost(t, port, `{"model":"weak"}`)
@@ -1884,7 +1882,7 @@ func inferencePeerHandler(t *testing.T, fx *tierFixture, id string, handler http
 	n := nodeFor(t, id, server.URL)
 	n.Models = []string{"q:1b"}
 	fx.p.soleFacade().discovery.AddManual(n)
-	fx.advertise(t, id, map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("q:1b")}, strictCapabilityFor("ollama", "q:1b"))
+	fx.advertise(t, id, map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("q:1b")}, strictCapabilityFor("llamacpp", "q:1b"))
 }
 
 func TestRoutingListener_InferencePartialResponseNeverFallsBack(t *testing.T) {

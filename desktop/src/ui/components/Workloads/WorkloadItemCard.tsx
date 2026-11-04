@@ -208,10 +208,7 @@ function WorkloadItemCard({ workload }: { workload: Workload }) {
                 <Flex align="center" gap="2" className="min-w-0">
                     <EngineIcon type={workload.engine} size={16} />
                     <Text kind="body/bold/sm" className="min-w-0 truncate">
-                        {workloadModelLabel(
-                            workload,
-                            formatModelDisplayName(workload.model, workload.engine)
-                        )}
+                        {workloadModelLabel(workload, formatModelDisplayName(workload.model))}
                     </Text>
                 </Flex>
 

@@ -351,11 +351,6 @@ func submitDemoRequest(ctx context.Context, exe string, req demoRequest, gen int
 		"--max-tokens", strconv.Itoa(stage.maxTokens),
 		"--temperature", strconv.FormatFloat(stage.temperature, 'f', -1, 64),
 	}
-	// Ollama's separate reasoning channel would inflate latency and token counts
-	// without changing what the demo shows, so it is switched off where it exists.
-	if req.target.backend == "ollama" {
-		args = append(args, "--ollama-think", "false")
-	}
 
 	return func() tea.Msg {
 		cmd := exec.CommandContext(ctx, exe, args...)

@@ -82,7 +82,7 @@ func TestServiceRestartReconnect(t *testing.T) {
 	t.Cleanup(func() { close(release) })
 
 	f := newProxyServiceFixture(t)
-	f.env = append(f.env, "USERPROFILE="+f.configDir, "OLLAMA_HOST=")
+	f.env = append(f.env, "USERPROFILE="+f.configDir)
 	managerPath := f.copyBinary(engineMgrBin)
 	f.inventory.paths = append(f.inventory.paths, managerPath)
 	writeRestartProofManifest(t, f, engine, portOfURL(t, upstream.URL))
@@ -414,7 +414,7 @@ func writeRestartProofManifest(t *testing.T, f *serviceFixture, engine string, p
 	manifest := map[string]any{
 		"engine": engine, "display_name": "Private restart proof", "manifest_version": 1,
 		"runtime": map[string]any{
-			"mode": "process", "bin": filepath.Join(f.dir, "never-started"), "bind": "127.0.0.1", "port": port,
+			"bin": filepath.Join(f.dir, "never-started"), "bind": "127.0.0.1", "port": port,
 			"ready":  map[string]any{"http": "http://127.0.0.1:{port}/ready", "status": http.StatusOK, "timeout_s": 1},
 			"health": map[string]any{"http": "http://127.0.0.1:{port}/ready", "status": http.StatusOK, "interval_s": 5},
 		},
@@ -456,7 +456,7 @@ func isolateRestartProofBundledEngines(t *testing.T, f *serviceFixture) map[stri
 		ports[engine.Name] = port
 		privatePath := filepath.Join(f.dir, engine.Name+"-never-started")
 		runtimeOverride := map[string]any{
-			"port": port, "bin": privatePath, "cli": privatePath,
+			"port": port, "bin": privatePath,
 			"ready":  map[string]any{"http": unavailable.URL + "/unavailable", "status": http.StatusOK, "timeout_s": 1},
 			"health": map[string]any{"http": unavailable.URL + "/unavailable", "status": http.StatusOK, "interval_s": 5},
 		}
@@ -594,7 +594,7 @@ func TestServiceRestartReconnectDesktop(t *testing.T) {
 	f.env = privateEnv
 	f.env = append(f.env, "NVPAIR_TEST_SUBSCRIPTION_SCANNER="+f.scannerPath,
 		"NVPAIR_TEST_SUBSCRIPTION_PORT="+strconv.Itoa(temporaryClusterPort(t)),
-		"USERPROFILE="+f.configDir, "OLLAMA_HOST=")
+		"USERPROFILE="+f.configDir)
 	managerPath := f.copyBinary(engineMgrBin)
 	clusterPath := f.copyBinary(clusterMgrBin)
 	f.inventory.paths = append(f.inventory.paths, managerPath, clusterPath)

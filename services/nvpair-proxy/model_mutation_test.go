@@ -17,7 +17,7 @@ func newModelMutationProxy(t *testing.T) *Proxy {
 	h := newStrictHarness(t)
 	p := &Proxy{admission: h.a}
 	params, err := json.Marshal(nodepolicy.SetModelIdentityParams{
-		Engines: map[string]nodepolicy.EngineIdentity{"ollama": testIdentity("m")},
+		Engines: map[string]nodepolicy.EngineIdentity{"llamacpp": testIdentity("m")},
 	})
 	if err != nil {
 		t.Fatalf("encode installed identity: %v", err)
@@ -32,11 +32,11 @@ func TestModelMutationWithdrawalRejectsCachedEnvelopeBeforeDispatch(t *testing.T
 	p := newModelMutationProxy(t)
 	cached := strictRequest()
 	body := []byte(strictBody("m"))
-	validated, err := p.admission.qualifyStrict("ollama", "m", routeChatCompletions, body, cached.Identity)
+	validated, err := p.admission.qualifyStrict("llamacpp", "m", routeChatCompletions, body, cached.Identity)
 	if err != nil {
 		t.Fatalf("qualify cached envelope: %v", err)
 	}
-	ticket, err := p.admission.AdmitStrict(context.Background(), "ollama", "m", cached, validated.generation)
+	ticket, err := p.admission.AdmitStrict(context.Background(), "llamacpp", "m", cached, validated.generation)
 	if err != nil {
 		t.Fatalf("admit before withdrawal: %v", err)
 	}
@@ -44,10 +44,10 @@ func TestModelMutationWithdrawalRejectsCachedEnvelopeBeforeDispatch(t *testing.T
 	if err := p.applySetModelIdentity(json.RawMessage(`{"engines":{}}`)); err != nil {
 		t.Fatalf("accept withdrawal: %v", err)
 	}
-	if _, err := p.admission.qualifyStrict("ollama", "m", routeChatCompletions, body, cached.Identity); !errors.Is(err, errStrictUnavailable) {
+	if _, err := p.admission.qualifyStrict("llamacpp", "m", routeChatCompletions, body, cached.Identity); !errors.Is(err, errStrictUnavailable) {
 		t.Fatalf("revalidate cached envelope: got %v, want unavailable", err)
 	}
-	if next, err := p.admission.AdmitStrict(context.Background(), "ollama", "m", cached, validated.generation); next != nil || !errors.Is(err, errStrictUnavailable) {
+	if next, err := p.admission.AdmitStrict(context.Background(), "llamacpp", "m", cached, validated.generation); next != nil || !errors.Is(err, errStrictUnavailable) {
 		t.Fatalf("admit cached validation: ticket=%v error=%v, want unavailable", next, err)
 	}
 	if err := ticket.BeforeStrictDispatch(); !errors.Is(err, errStrictUnavailable) {
@@ -62,7 +62,7 @@ func TestModelMutationWithdrawalPreservesDispatchedRequest(t *testing.T) {
 	p := newModelMutationProxy(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ticket, err := p.admission.admitStrictNow(ctx, "ollama", "m", strictRequest())
+	ticket, err := p.admission.admitStrictNow(ctx, "llamacpp", "m", strictRequest())
 	if err != nil {
 		t.Fatalf("admit before withdrawal: %v", err)
 	}

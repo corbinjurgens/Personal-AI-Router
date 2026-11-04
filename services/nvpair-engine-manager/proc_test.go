@@ -91,11 +91,11 @@ func TestTerminatePIDExitWaitHonoursCancellation(t *testing.T) {
 }
 
 func TestIsOurEngineImage(t *testing.T) {
-	bin := filepath.Join(t.TempDir(), "ollama.exe")
+	bin := filepath.Join(t.TempDir(), "llama-server.exe")
 	if err := os.WriteFile(bin, []byte("image fixture"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	upper := filepath.Join(filepath.Dir(bin), "OLLAMA.EXE")
+	upper := filepath.Join(filepath.Dir(bin), "LLAMA-SERVER.EXE")
 	caseAlias := runtime.GOOS != "linux"
 	if runtime.GOOS == "darwin" {
 		_, err := os.Stat(upper)
@@ -292,8 +292,8 @@ func TestIsOurEngineImageCanonicalAlias(t *testing.T) {
 
 func TestIsManagedInstallPath(t *testing.T) {
 	base := t.TempDir()
-	inside := filepath.Join(base, "ollama", "bin", "ollama"+exeExt())
-	outside := filepath.Join(t.TempDir(), "ollama"+exeExt())
+	inside := filepath.Join(base, "llamacpp", "bin", "llamacpp"+exeExt())
+	outside := filepath.Join(t.TempDir(), "llamacpp"+exeExt())
 	if err := os.MkdirAll(filepath.Dir(inside), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -302,13 +302,13 @@ func TestIsManagedInstallPath(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if !isManagedInstallPath(inside, filepath.Join(base, "ollama")) {
+	if !isManagedInstallPath(inside, filepath.Join(base, "llamacpp")) {
 		t.Fatalf("managed child path %q was rejected", inside)
 	}
-	if isManagedInstallPath(outside, filepath.Join(base, "ollama")) {
+	if isManagedInstallPath(outside, filepath.Join(base, "llamacpp")) {
 		t.Fatalf("external path %q was accepted", outside)
 	}
-	if isManagedInstallPath("", filepath.Join(base, "ollama")) {
+	if isManagedInstallPath("", filepath.Join(base, "llamacpp")) {
 		t.Fatal("empty binary path must not be managed")
 	}
 }
@@ -459,7 +459,7 @@ func TestProcImageUnavailableOwnerRefused(t *testing.T) {
 				t.Fatal(err)
 			}
 			spawnFakeListener(t, bin, port)
-			m := testEngineManifest(bin)
+			m := llamaTestEngineManifest(bin)
 			key := runtime.GOOS + "/" + runtime.GOARCH
 			p := m.Platforms[key]
 			p.Runtime.Port = port

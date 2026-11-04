@@ -530,7 +530,7 @@ func ValidReverseSessionID(id string) bool {
 
 func reverseServiceAllowed(service noderec.ServiceKey) bool {
 	switch service {
-	case noderec.ServiceNodeInfo, noderec.ServiceOllama, noderec.ServiceLMStudio,
+	case noderec.ServiceNodeInfo,
 		noderec.ServiceLlamaCPP, noderec.ServiceErrors, noderec.ServiceWorkload,
 		noderec.ServiceCluster, noderec.ServiceEngineManager, noderec.ServiceEngineControl:
 		return true

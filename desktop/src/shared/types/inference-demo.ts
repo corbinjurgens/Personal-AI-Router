@@ -57,8 +57,6 @@ export const DEMO_ENGINE_PROBES: readonly {
     /** Engine key used by the broker's proxy port registry. */
     proxyEngine: BuiltinEngineType
 }[] = [
-    { backend: 'ollama', proxyEngine: 'ollama' },
-    { backend: 'lmstudio', proxyEngine: 'lm-studio' },
     { backend: 'llamacpp', proxyEngine: 'llama-cpp' }
 ]
 

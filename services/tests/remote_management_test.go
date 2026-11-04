@@ -14,7 +14,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strconv"
 	"sync"
 	"testing"
@@ -246,7 +245,7 @@ func TestRemoteManagementDirectMutationBoundary(t *testing.T) {
 	} {
 		t.Run(path, func(t *testing.T) {
 			managementHTTP(t, f.denied, f.joint.ports[1], http.MethodPost, path,
-				map[string]any{"engine": "ollama", "model": "fixture-model", "caller": "policy-joint-origin", "nodeId": "policy-joint-origin", "local": true}, http.StatusConflict)
+				map[string]any{"engine": "llamacpp", "model": "fixture-model", "caller": "policy-joint-origin", "nodeId": "policy-joint-origin", "local": true}, http.StatusConflict)
 			f.joint.assertUnchanged(t, beforePolicy)
 			if !bytes.Equal(readLiveDurableFile(t, permissionPath), beforePermission) {
 				t.Fatal("remote request changed local grants")
@@ -279,12 +278,12 @@ func TestRemoteManagementDeniedReadsAndLocalWriterBoundary(t *testing.T) {
 	data := managementHTTP(t, f.denied, port, http.MethodPost, "/v1/node-policy/get", map[string]any{}, http.StatusOK)
 	assertJointPeer(t, data, f.joint.want)
 	managementHTTP(t, f.denied, port, http.MethodGet, "/v1/engines", nil, http.StatusOK)
-	data = managementHTTP(t, f.denied, port, http.MethodPost, "/v1/engine-settings/get", settings.Request{Engine: "ollama"}, http.StatusOK)
+	data = managementHTTP(t, f.denied, port, http.MethodPost, "/v1/engine-settings/get", settings.Request{Engine: "llamacpp"}, http.StatusOK)
 	var snapshot settings.Snapshot
 	if err := json.Unmarshal(data, &snapshot); err != nil {
 		t.Fatalf("decode readable settings: %v", err)
 	}
-	managementHTTP(t, f.denied, port, http.MethodPost, "/v1/engine-settings/preview", settings.Request{Engine: "ollama", ExpectedRevision: snapshot.Revision, Settings: snapshot.Settings}, http.StatusOK)
+	managementHTTP(t, f.denied, port, http.MethodPost, "/v1/engine-settings/preview", settings.Request{Engine: "llamacpp", ExpectedRevision: snapshot.Revision, Settings: snapshot.Settings}, http.StatusOK)
 	managementHTTP(t, f.denied, port, http.MethodPost, settings.SwitchStatusPath, settings.SwitchStatusRequest{}, http.StatusOK)
 	f.permission(t, f.denied, false)
 	before := readLiveDurableFile(t, filepath.Join(f.joint.cluster, clustertrust.RemoteManagementFile))
@@ -419,7 +418,8 @@ func managementPolicyWriterAt(t *testing.T, base string) *policyJointFixture {
 // registered empty scanner replacing discovery of installed peers.
 func managementSwitchWriterAt(t *testing.T, base string) *switchProcessFixture {
 	t.Helper()
-	f := &switchProcessFixture{base: base, ports: reserveFixtureServicePorts(t), sourcePort: temporaryClusterPort(t), targetPort: temporaryClusterPort(t), facadePort: temporaryClusterPort(t), release: make(chan struct{}), starts: make(map[string][]int32)}
+	f := &switchProcessFixture{base: base, ports: reserveFixtureServicePorts(t), sourcePort: temporaryClusterPort(t), targetPort: temporaryClusterPort(t), facadePort: temporaryClusterPort(t), targetFacadePort: temporaryClusterPort(t), release: make(chan struct{}), starts: make(map[string][]int32)}
+	f.proxyControl = newFixtureProxyControl(t)
 	f.control = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		pid, err := strconv.ParseInt(r.URL.Query().Get("pid"), 10, 32)
 		if err != nil || r.URL.Path != "/started" {
@@ -440,14 +440,15 @@ func managementSwitchWriterAt(t *testing.T, base string) *switchProcessFixture {
 	for _, engine := range []struct {
 		name           string
 		server, facade int
-	}{{"ollama", f.sourcePort, f.facadePort}, {"llamacpp", f.targetPort, temporaryClusterPort(t)}} {
+	}{{"llamacpp-custom", f.sourcePort, f.facadePort}, {"llamacpp", f.targetPort, f.targetFacadePort}} {
+		if engine.name == "llamacpp-custom" {
+			jointWriteJSON(t, filepath.Join(jointAppDir(base), privateFixtureEngine(t, engine.name).PortFile), map[string]int{"port": engine.facade})
+		}
 		probe := map[string]any{"http": "http://127.0.0.1:{port}/", "status": http.StatusOK, "timeout_s": 10, "interval_s": 60, "json_match": nil}
-		rt := map[string]any{"mode": "process", "bin": self, "port": engine.server, "bind": "127.0.0.1", "ready": probe, "health": probe,
+		rt := map[string]any{"bin": self, "port": engine.server, "bind": "127.0.0.1", "ready": probe, "health": probe,
 			"env":  map[string]string{"NVPAIR_TEST_SWITCH_ENGINE": self, "NVPAIR_TEST_SWITCH_NAME": engine.name, "NVPAIR_TEST_SWITCH_PORT": "{port}", "NVPAIR_TEST_SWITCH_CONTROL": f.control.URL},
 			"stop": map[string]any{"signal": "term", "grace_s": 1}}
-		jointWriteJSON(t, filepath.Join(jointAppDir(base), "engines", engine.name+".json"), map[string]any{
-			"engine": engine.name, "runtime": rt, "platforms": map[string]any{runtime.GOOS + "/" + runtime.GOARCH: map[string]any{"detect": []string{self}, "runtime": rt}},
-		})
+		jointWriteJSON(t, filepath.Join(jointAppDir(base), "engines", engine.name+".json"), privateFixtureManifest(t, engine.name, filepath.Join(base, "absent-models", engine.name), self, rt, engines.ProtocolOpenAIV1))
 		journal[engine.name] = map[string]any{"explicit": true, "snapshot": map[string]any{
 			"engine": engine.name, "revision": 1, "appliedRevision": 1, "phase": "idle", "format": "pair-arguments-v1",
 			"settings": settings.Config{ServerPort: engine.server, ProxyPort: engine.facade},
@@ -464,23 +465,22 @@ func managementSwitchWriterAt(t *testing.T, base string) *switchProcessFixture {
 	jointCopyExecutable(t, engineMgrBin, enginePath)
 	jointCopyExecutable(t, self, scannerPath)
 	scannerPort := temporaryClusterPort(t)
-	args := append([]string{"--scanner-path", scannerPath, "--engine-manager-path", enginePath, "--proxy-path", proxyBin, "--proxy-engines", "ollama,llamacpp", "--cluster-dir", filepath.Join(base, "cluster")}, f.ports.args()...)
-	f.p = startInteropProcess(t, base, brokerBin, f.ports.engineManagerHTTP, []string{"OLLAMA_HOST=", "NVPAIR_TEST_SUBSCRIPTION_SCANNER=" + scannerPath, "NVPAIR_TEST_SUBSCRIPTION_PORT=" + strconv.Itoa(scannerPort)}, args...)
-	for _, path := range []string{enginePath, scannerPath, proxyBin} {
+	args := append([]string{"--scanner-path", scannerPath, "--engine-manager-path", enginePath, "--proxy-path", f.proxyControl.image, "--proxy-engines", "llamacpp", "--cluster-dir", filepath.Join(base, "cluster")}, f.ports.args()...)
+	env := append(f.proxyControl.env(), "NVPAIR_TEST_SUBSCRIPTION_SCANNER="+scannerPath, "NVPAIR_TEST_SUBSCRIPTION_PORT="+strconv.Itoa(scannerPort))
+	f.p = startInteropProcess(t, base, brokerBin, f.ports.engineManagerHTTP, env, args...)
+	for _, path := range []string{enginePath, scannerPath, proxyBin, f.proxyControl.image} {
 		canonical, err := canonicalServicePath(path)
 		if err != nil {
 			t.Fatal(err)
 		}
 		f.p.paths = append(f.p.paths, canonical)
 	}
-	f.p.ports = append(f.p.ports, f.ports.engineControl, scannerPort, f.sourcePort, f.targetPort)
+	f.p.ports = append(f.p.ports, f.ports.engineControl, scannerPort, f.sourcePort, f.targetPort, f.facadePort, f.targetFacadePort, f.proxyControl.port)
 	waitForMethod(t, f.p.msgs, "app:ready", 20*time.Second)
-	if port := waitProxyReady(t, f.p.in, f.p.msgs, 20*time.Second); port != f.facadePort {
-		t.Fatal("synthetic source proxy did not use its explicit fixture port")
-	}
-	waitEngineProxyReady(t, "llamacpp-proxy", f.p.in, f.p.msgs, 20*time.Second)
-	f.rpcOK(t, "engine:start", map[string]string{"engine": "ollama"})
-	f.pid(t, "ollama")
+	f.proxyControl.ready(t, "llamacpp-custom", f.facadePort)
+	f.proxyControl.ready(t, "llamacpp", f.targetFacadePort)
+	f.rpcOK(t, "engine:start", map[string]string{"engine": "llamacpp-custom"})
+	f.pid(t, "llamacpp-custom")
 	// Initialize every settings baseline before a switch revision is captured.
 	// Otherwise the periodic refresh can add an unrelated engine's revision.
 	for _, engine := range engines.Names() {
@@ -528,7 +528,7 @@ func TestRemoteManagementReverseMutationBoundary(t *testing.T) {
 	}
 	allowedClient, deniedClient := reverseClient(allowed), reverseClient(denied)
 	jointIsolateEngines(t, denied.base, blockedPort)
-	deniedOrigin := startInteropProcess(t, denied.base, engineMgrBin, 0, []string{"OLLAMA_HOST="}, "--cluster-dir", filepath.Join(denied.base, "cluster"), "--loaded-poll-interval", "0")
+	deniedOrigin := startInteropProcess(t, denied.base, engineMgrBin, 0, nil, "--cluster-dir", filepath.Join(denied.base, "cluster"), "--loaded-poll-interval", "0")
 	waitForMethod(t, deniedOrigin.msgs, "engine:ready", 10*time.Second)
 	completeEngineManagerRecovery(t, func(method string, params any) jsonrpc.Message {
 		return callRPC(t, deniedOrigin.in, deniedOrigin.msgs, method, params, 10*time.Second)
@@ -658,8 +658,8 @@ func TestRemoteManagementReverseMutationBoundary(t *testing.T) {
 	})
 	t.Run("settings forged identity", func(t *testing.T) {
 		var snapshot settings.Snapshot
-		task2Decode(t, managementHTTP(t, allowedClient, blockedPort, http.MethodPost, "/v1/engine-settings/get", settings.Request{Engine: "ollama"}, http.StatusOK), &snapshot)
-		request := settings.Request{Engine: "ollama", ExpectedRevision: snapshot.Revision, RequestID: "reverse-settings-control", Settings: snapshot.Settings}
+		task2Decode(t, managementHTTP(t, allowedClient, blockedPort, http.MethodPost, "/v1/engine-settings/get", settings.Request{Engine: "llamacpp"}, http.StatusOK), &snapshot)
+		request := settings.Request{Engine: "llamacpp", ExpectedRevision: snapshot.Revision, RequestID: "reverse-settings-control", Settings: snapshot.Settings}
 		assertForgedDenied(t, "/v1/engine-settings/apply", request)
 		var receipt struct {
 			Phase    string `json:"phase"`
@@ -675,7 +675,7 @@ func TestRemoteManagementReverseMutationBoundary(t *testing.T) {
 				Revision uint64 `json:"revision"`
 			} `json:"receipts"`
 		}](t, filepath.Join(target.base, "engine-settings-operations.json"))
-		persisted := stored["ollama"].Receipts[request.RequestID]
+		persisted := stored["llamacpp"].Receipts[request.RequestID]
 		if persisted.Phase != "succeeded" || persisted.Revision != snapshot.Revision {
 			t.Fatal("allowed settings receipt was not saved by the real writer")
 		}
@@ -704,7 +704,7 @@ func TestRemoteManagementReverseMutationBoundary(t *testing.T) {
 		if !reflect.DeepEqual(journal.Receipts[request.RequestID], *terminal.Receipt) {
 			t.Fatal("allowed reverse switch did not persist its terminal receipt")
 		}
-		assertSwitchProcessStopped(t, f.pid(t, "ollama"))
+		assertSwitchProcessStopped(t, f.pid(t, "llamacpp-custom"))
 		f.pid(t, "llamacpp")
 		assertAllowedRoute(t, settings.SwitchApplyPath)
 	})
@@ -731,7 +731,7 @@ func TestRemoteManagementReverseRevocationBoundary(t *testing.T) {
 	if capability.Allowed || capability.State != "denied" {
 		t.Fatal("reverse permission lost inner mTLS caller")
 	}
-	request := map[string]string{"node": f.b.uuid, "engine": "ollama", "model": "task2-model"}
+	request := map[string]string{"node": f.b.uuid, "engine": "llamacpp", "model": "task2-model"}
 	response = task2Response(t, a, a.send(t, "engine:remote-unload-model", request, true))
 	if response.Error == nil || response.Error.Code != -32012 {
 		t.Fatal("reverse mutation did not preserve -32012")
@@ -929,10 +929,10 @@ func TestRemoteManagementDeniedPeerCanReadModelExports(t *testing.T) {
 	managementSet(t, a.cm, b.uuid, false)
 	test := func(name, model string, source, destination *task1Node) {
 		t.Run(name, func(t *testing.T) {
-			scenario := phase04SeedModel(t, f.stores[source.uuid], f.stores[destination.uuid], model, 37)
+			scenario := phase04SeedModel(t, f, source, destination, model, 37)
 			// Copy is a local destination action. The denied peer only reads
 			// the source's real ec file list and file export handlers.
-			response := f.control.engines[destination.uuid].call(t, "engine:remote-copy-model", map[string]string{"node": source.uuid, "engine": "ollama", "model": model + ":latest"})
+			response := f.control.engines[destination.uuid].call(t, "engine:remote-copy-model", map[string]string{"node": source.uuid, "engine": "llamacpp", "model": scenario.model})
 			var result struct {
 				Result struct {
 					Files       int   `json:"files"`
@@ -945,7 +945,7 @@ func TestRemoteManagementDeniedPeerCanReadModelExports(t *testing.T) {
 			}
 			for path, want := range scenario.data {
 				for _, root := range []string{f.stores[source.uuid], f.stores[destination.uuid]} {
-					got, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(path)))
+					got, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(scenario.snapshot), filepath.FromSlash(path)))
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -963,7 +963,7 @@ func TestRemoteManagementDeniedPeerCanReadModelExports(t *testing.T) {
 func TestRemoteManagementGrantPreservesLocalPause(t *testing.T) {
 	f := newManagementFixture(t)
 	f.permission(t, f.joint.client, true)
-	response, err := f.joint.client.Post("https://127.0.0.1:"+strconv.Itoa(f.joint.ports[1])+"/v1/engines/start", "application/json", bytes.NewReader(mustMarshal(t, map[string]string{"engine": "ollama"})))
+	response, err := f.joint.client.Post("https://127.0.0.1:"+strconv.Itoa(f.joint.ports[1])+"/v1/engines/start", "application/json", bytes.NewReader(mustMarshal(t, map[string]string{"engine": "llamacpp"})))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1135,7 +1135,7 @@ func TestRemoteManagementPersistsAcrossSeparateProcessRestarts(t *testing.T) {
 		t.Helper()
 		client.CloseIdleConnections()
 		allowedClient.CloseIdleConnections()
-		managementHTTP(t, client, f.ports.engineControl, http.MethodPost, "/v1/engines/stop", map[string]any{"engine": "ollama"}, http.StatusConflict)
+		managementHTTP(t, client, f.ports.engineControl, http.MethodPost, "/v1/engines/stop", map[string]any{"engine": "llamacpp"}, http.StatusConflict)
 		managementHTTP(t, client, f.ports.engineControl, http.MethodGet, "/v1/engines", nil, http.StatusOK)
 		for _, caller := range []struct {
 			client  *http.Client

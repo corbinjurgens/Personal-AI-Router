@@ -381,8 +381,7 @@ func TestIsHostnameRejectsNonHosts(t *testing.T) {
 	for _, s := range []string{
 		"qwen3.6:27b",                          // model tag
 		"engine:status",                        // JSON-RPC method
-		"ollama",                               // engine name
-		"lmstudio",                             // engine name
+		"llamacpp",                             // engine name
 		"127.0.0.1",                            // address
 		"11111111-2222-4333-8444-555555555555", // uuid
 		"C:\\Users\\bob",                       // path
@@ -821,7 +820,7 @@ func TestModelNamesOnlyReplacedWhenRequested(t *testing.T) {
 	}
 	// Engine names are keys in modelsByEngine, not model names.
 	for _, e := range on.entities {
-		if e.Kind == KindModel && (e.Value == "ollama" || e.Value == "lmstudio") {
+		if e.Kind == KindModel && (e.Value == "llamacpp") {
 			t.Errorf("engine name %q was treated as a model", e.Value)
 		}
 	}

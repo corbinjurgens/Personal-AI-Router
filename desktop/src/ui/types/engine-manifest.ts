@@ -9,7 +9,7 @@
 import type { SupportedPlatform } from '@/shared/types/platform'
 
 export interface EngineHubConfig {
-    /** Display label shown in the hub source selector (e.g. 'Ollama'). */
+    /** Display label shown in the hub source selector (e.g. 'llama.cpp'). */
     label: string
     /** Public catalog URL that returns a JSON model list. */
     url: string
@@ -43,13 +43,7 @@ export interface EngineCaps {
     /** When true, a paired node's model can be copied to this PC for this engine. */
     hasModelCopy: boolean
     /**
-     * When true, the engine restarts as part of deleting a model, so Delete asks
-     * for confirmation first. The engine manager owns the restart; this flag only
-     * tells the UI that deleting has that side effect.
-     */
-    restartsOnModelDelete?: boolean
-    /**
-     * If the engine has its own public model catalog (e.g. ollama.com), provide the
+     * If the engine has its own public model catalog (e.g. huggingface.co), provide the
      * hub config here. Presence doubles as the truthy flag for the hub source selector.
      */
     engineHub?: EngineHubConfig

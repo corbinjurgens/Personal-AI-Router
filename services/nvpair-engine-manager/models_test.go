@@ -32,15 +32,14 @@ func (f memoryModelsTransport) RoundTrip(request *http.Request) (*http.Response,
 
 // This fixture owns no process or listener. Every engine request must be one
 // of the two existing inventory GETs; mutating endpoints fail immediately.
-func memoryModelsFixture(t *testing.T) (*memoryEvidenceHarness, *string) {
+func memoryModelsFixture(t *testing.T) *memoryEvidenceHarness {
 	t.Helper()
 	h := newMemoryEvidenceHarness(t)
-	manifest := h.ex.engines["ollama"].manifest
+	manifest := h.ex.engines[h.engine].manifest
 	manifest.Actions = map[string]Action{
-		"list_models":   {HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/api/tags"}, Result: &ActionResult{Array: "models", Field: "name", Digest: "digest"}},
-		"loaded_models": {HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/api/ps"}, Result: &ActionResult{Array: "models", Field: "name"}},
+		"list_models":   {HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/test/models"}, Result: &ActionResult{Array: "data", Field: "id", Digest: "digest"}},
+		"loaded_models": {HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/test/loaded"}, Result: &ActionResult{Array: "data", Field: "id"}},
 	}
-	loaded := memoryPS(memoryTestModel, memoryTestDigest, 9000, 8192)
 	h.ex.client = &http.Client{Transport: memoryModelsTransport(func(request *http.Request) (*http.Response, error) {
 		if request.Method != http.MethodGet {
 			t.Errorf("forbidden engine method %s", request.Method)
@@ -48,10 +47,10 @@ func memoryModelsFixture(t *testing.T) (*memoryEvidenceHarness, *string) {
 		}
 		body := ""
 		switch request.URL.Path {
-		case "/api/tags":
-			body = fmt.Sprintf(`{"models":[{"name":%q,"digest":%q}]}`, memoryTestModel, h.digest)
-		case "/api/ps":
-			body = loaded
+		case "/test/models":
+			body = fmt.Sprintf(`{"data":[{"id":%q,"digest":%q}]}`, memoryTestModel, h.digest)
+		case "/test/loaded":
+			body = fmt.Sprintf(`{"data":[{"id":%q}]}`, memoryTestModel)
 		default:
 			t.Errorf("forbidden engine endpoint %s", request.URL.Path)
 			return nil, fmt.Errorf("forbidden engine endpoint")
@@ -62,14 +61,14 @@ func memoryModelsFixture(t *testing.T) (*memoryEvidenceHarness, *string) {
 		t.Error("forbidden model-content mutation")
 		return fmt.Errorf("forbidden model-content mutation")
 	}
-	return h, &loaded
+	return h
 }
 
 func modelsMemoryEntry(t *testing.T, result ModelsResult) performancewire.MemoryEvidenceEntry {
 	t.Helper()
 	if !reflect.DeepEqual(result.Models, []string{memoryTestModel}) ||
-		!reflect.DeepEqual(result.ByEngine["ollama"], []string{memoryTestModel}) ||
-		!reflect.DeepEqual(result.LoadedByEngine["ollama"], []string{memoryTestModel}) {
+		!reflect.DeepEqual(result.ByEngine[memoryTestEngine], []string{memoryTestModel}) ||
+		!reflect.DeepEqual(result.LoadedByEngine[memoryTestEngine], []string{memoryTestModel}) {
 		t.Fatalf("memory processing changed model names: %+v", result)
 	}
 	if result.MemoryEvidence == nil {
@@ -81,22 +80,23 @@ func modelsMemoryEntry(t *testing.T, result ModelsResult) performancewire.Memory
 	return memoryEntry(t, result.MemoryEvidence.Entries)
 }
 
-// This fixture has no process, listener or installed engine. Its transport
-// accepts inventory reads only and its profile is private to the test.
 func modelDownloadInventoryExecutor(t *testing.T) *Executor {
 	t.Helper()
-	manifest := &Manifest{Engine: "ollama", DisplayName: "Fixture", ModelNaming: engines.ModelNamingImpliedLatestTag,
+	manifest := &Manifest{Engine: engines.NameLlamaCPP, DisplayName: "llama.cpp fixture", ModelNaming: engines.ModelNamingExact,
 		Actions: map[string]Action{
-			"list_models": {HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/api/tags"},
-				Result: &ActionResult{Array: "models", Field: "name", Digest: "digest"}},
-			"loaded_models": {HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/api/ps"},
-				Result: &ActionResult{Array: "models", Field: "name"}},
+			"list_models": {HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/models"},
+				Result: &ActionResult{Array: "data", Field: "id", Digest: "digest"}},
+			"loaded_models": {HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/v1/models"},
+				Result: &ActionResult{Array: "data", Field: "id"}},
 		}}
 	reg := NewRegistry()
 	reg.engines[manifest.Engine] = manifest
 	ex := NewExecutor(reg, NewReporter(nil), nil, t.TempDir())
 	ex.engines[manifest.Engine] = &engineState{manifest: manifest, plat: &Platform{}, running: true,
 		runID: "fixture-run", launchDigest: memoryTestLaunch, proc: &managedProc{}, contentMu: make(chan struct{}, 1)}
+	ex.inventoryDigests = map[string]observedDigests{
+		manifest.Engine: {runID: "fixture-run", models: map[string]string{memoryTestModel: memoryTestDigest}, epoch: 9},
+	}
 	ex.client = &http.Client{Transport: memoryModelsTransport(func(request *http.Request) (*http.Response, error) {
 		if request.Method != http.MethodGet {
 			t.Errorf("unexpected engine effect: %s %s", request.Method, request.URL.Path)
@@ -104,10 +104,10 @@ func modelDownloadInventoryExecutor(t *testing.T) *Executor {
 		}
 		var body string
 		switch request.URL.Path {
-		case "/api/tags":
-			body = fmt.Sprintf(`{"models":[{"name":"demo:latest","digest":%q},{"name":"ready:latest","digest":%q}]}`, memoryTestDigest, memoryTestDigest)
-		case "/api/ps":
-			body = `{"models":[{"name":"demo:latest"}]}`
+		case "/models":
+			body = fmt.Sprintf(`{"data":[{"id":"demo","digest":%q},{"id":"ready","digest":%q}]}`, memoryTestDigest, memoryTestDigest)
+		case "/v1/models":
+			body = `{"data":[{"id":"demo"}]}`
 		default:
 			t.Errorf("unexpected engine endpoint: %s", request.URL.Path)
 			return nil, fmt.Errorf("fixture refuses unexpected endpoint")
@@ -135,10 +135,11 @@ func TestLinkedModelInventory(t *testing.T) {
 	test := func(name, body, model string, want inventoryMembership) {
 		t.Run(name, func(t *testing.T) {
 			ex := modelDownloadInventoryExecutor(t)
+			engine, path := "llamacpp", "/models"
 			calls := 0
 			ex.client.Transport = memoryModelsTransport(func(request *http.Request) (*http.Response, error) {
 				calls++
-				if request.Method != http.MethodGet || request.URL.Path != "/api/tags" {
+				if request.Method != http.MethodGet || request.URL.Path != path {
 					t.Fatalf("unexpected request: %s %s", request.Method, request.URL.Path)
 				}
 				if body == "failure" {
@@ -146,28 +147,33 @@ func TestLinkedModelInventory(t *testing.T) {
 				}
 				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
 			})
-			result := ex.readEngineInventory(context.Background(), "ollama")
+			result := ex.readEngineInventory(context.Background(), engine)
 			if got := result.membership(model); got != want {
 				t.Fatalf("membership = %v, want %v", got, want)
 			}
-			if calls != 1 || result.engine != "ollama" || result.runID != "fixture-run" {
+			if calls != 1 || result.engine != engine || result.runID != "fixture-run" {
 				t.Fatalf("unexpected request or binding: calls=%d result=%+v", calls, result)
 			}
 		})
 	}
-	test("descriptor naming", `{"models":[{"name":"demo:latest"}]}`, "demo", inventoryPresent)
-	test("empty", `{"models":[]}`, "demo", inventoryAbsent)
-	test("duplicate aliases", `{"models":[{"name":"demo"},{"name":"demo:latest"}]}`, "demo", inventoryAmbiguous)
+	test("empty", `{"data":[]}`, "demo", inventoryAbsent)
 	test("failed", "failure", "demo", inventoryFailed)
-	test("invalid response", `{"models":null}`, "demo", inventoryFailed)
+	test("invalid response", `{"data":null}`, "demo", inventoryFailed)
 
 	t.Run("exact naming and unrelated engine", func(t *testing.T) {
 		ex := modelDownloadInventoryExecutor(t)
-		ex.engines["ollama"].manifest.ModelNaming = ""
-		other := &Manifest{Engine: "other", Actions: map[string]Action{"list_models": {HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/other"}, Result: &ActionResult{Array: "models", Field: "name"}}}}
-		ex.reg.engines["other"] = other
-		ex.engines["other"] = &engineState{manifest: other, running: true}
-		got := ex.readEngineInventory(context.Background(), "ollama")
+		ex.client.Transport = memoryModelsTransport(func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"data":[{"id":"demo:latest"}]}`))}, nil
+		})
+		descriptor, ok := engines.DynamicEngine("llamacpp-custom", "llama.cpp custom")
+		if !ok {
+			t.Fatal("invalid descriptor engine")
+		}
+		other := &Manifest{Engine: descriptor.Name, DisplayName: descriptor.DisplayName, Family: engines.NameLlamaCPP, ModelNaming: engines.ModelNamingExact,
+			Actions: map[string]Action{"list_models": {HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/other/models"}, Result: &ActionResult{Array: "data", Field: "id"}}}}
+		ex.reg.engines[other.Engine] = other
+		ex.engines[other.Engine] = &engineState{manifest: other, running: true}
+		got := ex.readEngineInventory(context.Background(), "llamacpp")
 		if got.membership("demo") != inventoryAbsent || got.membership("demo:latest") != inventoryPresent {
 			t.Fatalf("exact naming: %+v", got)
 		}
@@ -175,12 +181,12 @@ func TestLinkedModelInventory(t *testing.T) {
 
 	t.Run("native and download readiness", func(t *testing.T) {
 		ex := modelDownloadInventoryExecutor(t)
-		ex.engines["ollama"].manifest.Actions["pull_model"] = Action{ProgressProtocol: pullProgressProtocolLlamaCPPModelsSSE}
+		ex.engines["llamacpp"].manifest.Actions["pull_model"] = Action{ProgressProtocol: pullProgressProtocolLlamaCPPModelsSSE}
 		ex.client.Transport = memoryModelsTransport(func(*http.Request) (*http.Response, error) {
-			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"models":[{"name":"demo:latest","status":{"value":"downloading"}},{"name":"ready:latest","status":{"value":"loaded"}}]}`))}, nil
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"data":[{"id":"demo","status":{"value":"downloading"}},{"id":"ready","status":{"value":"loaded"}}]}`))}, nil
 		})
-		reserveModelDownload(t, ex.downloads, "ollama", "ready", engines.ModelNamingImpliedLatestTag)
-		got := ex.readEngineInventory(context.Background(), "ollama")
+		reserveModelDownload(t, ex.downloads, "llamacpp", "ready", engines.ModelNamingExact)
+		got := ex.readEngineInventory(context.Background(), "llamacpp")
 		if got.membership("demo") != inventoryUnready || got.membership("ready") != inventoryUnready {
 			t.Fatalf("readiness: %+v", got)
 		}
@@ -195,97 +201,46 @@ func TestLinkedModelInventory(t *testing.T) {
 				response, err := original.RoundTrip(req)
 				switch change {
 				case "run":
-					ex.engines["ollama"].mu.Lock()
-					ex.engines["ollama"].runID = "new-run"
-					ex.engines["ollama"].mu.Unlock()
+					ex.engines["llamacpp"].mu.Lock()
+					ex.engines["llamacpp"].runID = "new-run"
+					ex.engines["llamacpp"].mu.Unlock()
 				case "configuration":
-					ex.engines["ollama"].mu.Lock()
-					ex.engines["ollama"].modelsDir = "changed"
-					ex.engines["ollama"].mu.Unlock()
+					ex.engines["llamacpp"].mu.Lock()
+					ex.engines["llamacpp"].modelsDir = "changed"
+					ex.engines["llamacpp"].mu.Unlock()
 				case "epoch":
 					ex.inventoryMu.Lock()
-					observation := ex.inventoryDigests["ollama"]
+					observation := ex.inventoryDigests["llamacpp"]
 					observation.epoch++
-					ex.inventoryDigests["ollama"] = observation
+					ex.inventoryDigests["llamacpp"] = observation
 					ex.inventoryMu.Unlock()
 				}
 				return response, err
 			})
-			if got := ex.readEngineInventory(context.Background(), "ollama"); got.membership("demo") != inventoryFailed {
+			if got := ex.readEngineInventory(context.Background(), "llamacpp"); got.membership("demo") != inventoryFailed {
 				t.Fatalf("accepted changed evidence: %+v", got)
 			}
 		})
 	}
 	t.Run("caller holds operation lock", func(t *testing.T) {
 		ex := modelDownloadInventoryExecutor(t)
-		st := ex.engines["ollama"]
+		st := ex.engines["llamacpp"]
 		st.opMu.Lock()
 		defer st.opMu.Unlock()
-		if got := ex.readEngineInventory(context.Background(), "ollama"); got.membership("demo") != inventoryPresent {
+		if got := ex.readEngineInventory(context.Background(), "llamacpp"); got.membership("demo") != inventoryPresent {
 			t.Fatalf("recognition failed: %+v", got)
 		}
 	})
 }
 
-func TestModelDownloadInventoryMasksEquivalentKeys(t *testing.T) {
-	test := func(name, requestModel, listedModel, terminalPhase, reason string) {
-		t.Run(name, func(t *testing.T) {
-			ex := modelDownloadInventoryExecutor(t)
-			original := ex.client.Transport
-			ex.client.Transport = memoryModelsTransport(func(request *http.Request) (*http.Response, error) {
-				response, err := original.RoundTrip(request)
-				if err == nil && request.URL.Path == "/api/tags" {
-					if err := response.Body.Close(); err != nil {
-						return nil, err
-					}
-					body := fmt.Sprintf(`{"models":[{"name":%q,"digest":%q},{"name":"ready:latest","digest":%q}]}`, listedModel, memoryTestDigest, memoryTestDigest)
-					response.Body = io.NopCloser(strings.NewReader(body))
-				}
-				return response, err
-			})
-			attempt := reserveModelDownload(t, ex.downloads, "ollama", requestModel, engines.ModelNamingImpliedLatestTag)
-			assertMasked := func(wantPhase string) {
-				t.Helper()
-				result := ex.ModelsResult(context.Background())
-				want := []string{"ready:latest"}
-				if !reflect.DeepEqual(result.Models, want) || !reflect.DeepEqual(result.ByEngine["ollama"], want) ||
-					!reflect.DeepEqual(ex.cachedInventory()["ollama"], want) {
-					t.Fatalf("unsafe alias escaped ready inventory/cache: %+v", result)
-				}
-				if !reflect.DeepEqual(result.LoadedByEngine["ollama"], []string{"demo:latest"}) {
-					t.Fatalf("mask changed actual loaded observation: %+v", result.LoadedByEngine)
-				}
-				if result.DownloadState == nil || len(result.DownloadState.Entries) != 1 {
-					t.Fatalf("missing target lifecycle: %+v", result.DownloadState)
-				}
-				entry := result.DownloadState.Entries[0]
-				if entry.ID != attempt.entry.ID || entry.Model != requestModel || entry.Phase != wantPhase || !entry.BlocksReadiness {
-					t.Fatalf("lifecycle lost exact request identity or fence: %+v", entry)
-				}
-			}
-			assertMasked(modeldownload.PhaseQueued)
-			if _, err := ex.downloads.changeMarker(attempt, false); err != nil {
-				t.Fatalf("persist unsafe marker: %v", err)
-			}
-			if err := ex.downloads.finish(attempt, terminalPhase, reason, ""); err != nil {
-				t.Fatalf("finish unsafe attempt: %v", err)
-			}
-			assertMasked(terminalPhase)
-		})
-	}
-	test("untagged request blocks tagged inventory", "demo", "demo:latest", modeldownload.PhaseFailed, modeldownload.ReasonDownloadFailed)
-	test("tagged request blocks untagged inventory", "demo:latest", "demo", modeldownload.PhaseFailed, modeldownload.ReasonDownloadFailed)
-	test("unknown attempt retains unsafe content", "demo", "demo:latest", modeldownload.PhaseUnknown, modeldownload.ReasonInterrupted)
-}
-
 func TestModelDownloadPreEffectFailurePreservesReadyContent(t *testing.T) {
 	ex := modelDownloadInventoryExecutor(t)
-	attempt := reserveModelDownload(t, ex.downloads, "ollama", "demo", engines.ModelNamingImpliedLatestTag)
+	attempt := reserveModelDownload(t, ex.downloads, "llamacpp", "demo", engines.ModelNamingExact)
 	if err := ex.downloads.finish(attempt, modeldownload.PhaseFailed, modeldownload.ReasonInterrupted, ""); err != nil {
 		t.Fatalf("finish pre-effect cancellation: %v", err)
 	}
 	result := ex.ModelsResult(context.Background())
-	if !reflect.DeepEqual(result.Models, []string{"demo:latest", "ready:latest"}) || result.DownloadState == nil {
+	if !reflect.DeepEqual(result.Models, []string{"demo", "ready"}) || result.DownloadState == nil {
 		t.Fatalf("pre-effect failure invalidated existing content: %+v", result)
 	}
 	entry := result.DownloadState.Entries[0]
@@ -296,13 +251,13 @@ func TestModelDownloadPreEffectFailurePreservesReadyContent(t *testing.T) {
 
 func TestModelDownloadCompleteDoesNotReplaceInventoryObservation(t *testing.T) {
 	ex := modelDownloadInventoryExecutor(t)
-	attempt := reserveModelDownload(t, ex.downloads, "ollama", "demo", engines.ModelNamingImpliedLatestTag)
+	attempt := reserveModelDownload(t, ex.downloads, "llamacpp", "demo", engines.ModelNamingExact)
 	if err := ex.downloads.finish(attempt, modeldownload.PhaseComplete, "", ""); err != nil {
 		t.Fatalf("finish successful attempt: %v", err)
 	}
 	original := ex.client.Transport
 	ex.client.Transport = memoryModelsTransport(func(request *http.Request) (*http.Response, error) {
-		if request.URL.Path == "/api/tags" {
+		if request.URL.Path == "/models" {
 			return &http.Response{StatusCode: http.StatusServiceUnavailable, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}, nil
 		}
 		return original.RoundTrip(request)
@@ -312,11 +267,11 @@ func TestModelDownloadCompleteDoesNotReplaceInventoryObservation(t *testing.T) {
 		result.DownloadState.Entries[0].Phase != modeldownload.PhaseComplete {
 		t.Fatalf("completion manufactured ready content after failed query: %+v", result)
 	}
-	if !reflect.DeepEqual(result.LoadedByEngine["ollama"], []string{"demo:latest"}) {
+	if !reflect.DeepEqual(result.LoadedByEngine["llamacpp"], []string{"demo"}) {
 		t.Fatalf("failed inventory query changed observed residency: %+v", result.LoadedByEngine)
 	}
 	ex.client.Transport = original
-	if result := ex.ModelsResult(context.Background()); !reflect.DeepEqual(result.Models, []string{"demo:latest", "ready:latest"}) {
+	if result := ex.ModelsResult(context.Background()); !reflect.DeepEqual(result.Models, []string{"demo", "ready"}) {
 		t.Fatalf("fresh successful inventory did not restore ready content: %+v", result)
 	}
 }
@@ -325,14 +280,14 @@ func TestModelDownloadInventoryReadFences(t *testing.T) {
 	test := func(name string, change func(*testing.T, *Executor, *modelDownloadAttempt), wantReady bool) {
 		t.Run(name, func(t *testing.T) {
 			ex := modelDownloadInventoryExecutor(t)
-			attempt := reserveModelDownload(t, ex.downloads, "ollama", "demo", engines.ModelNamingImpliedLatestTag)
+			attempt := reserveModelDownload(t, ex.downloads, "llamacpp", "demo", engines.ModelNamingExact)
 			started, release := make(chan struct{}), make(chan struct{})
 			var once sync.Once
 			releaseRead := func() { once.Do(func() { close(release) }) }
 			defer releaseRead()
 			original := ex.client.Transport
 			ex.client.Transport = memoryModelsTransport(func(request *http.Request) (*http.Response, error) {
-				if request.URL.Path == "/api/tags" {
+				if request.URL.Path == "/models" {
 					close(started)
 					select {
 					case <-release:
@@ -354,7 +309,7 @@ func TestModelDownloadInventoryReadFences(t *testing.T) {
 			select {
 			case result := <-done:
 				if wantReady {
-					if !reflect.DeepEqual(result.Models, []string{"ready:latest"}) {
+					if !reflect.DeepEqual(result.Models, []string{"ready"}) {
 						t.Fatalf("percent update invalidated unrelated ready inventory: %+v", result)
 					}
 				} else if len(result.Models) != 0 || len(result.ByEngine) != 0 || len(ex.cachedInventory()) != 0 {
@@ -366,13 +321,13 @@ func TestModelDownloadInventoryReadFences(t *testing.T) {
 		})
 	}
 	test("retired mutation epoch", func(t *testing.T, ex *Executor, attempt *modelDownloadAttempt) {
-		if err := ex.beginModelMutation(context.Background(), "ollama"); err != nil {
+		if err := ex.beginModelMutation(context.Background(), "llamacpp"); err != nil {
 			t.Fatalf("begin synthetic mutation: %v", err)
 		}
-		ex.endModelMutation("ollama", nil)
+		ex.endModelMutation("llamacpp", nil)
 	}, false)
 	test("retired engine run", func(t *testing.T, ex *Executor, attempt *modelDownloadAttempt) {
-		state := ex.engines["ollama"]
+		state := ex.engines["llamacpp"]
 		state.mu.Lock()
 		state.runID = "replacement-run"
 		state.mu.Unlock()
@@ -388,9 +343,9 @@ func TestModelDownloadInventoryReadFences(t *testing.T) {
 func TestModelDownloadInventoryRemasksAtPublication(t *testing.T) {
 	ex := modelDownloadInventoryExecutor(t)
 	result := ex.modelsSweep(context.Background(), true)
-	attempt := reserveModelDownload(t, ex.downloads, "ollama", "demo", engines.ModelNamingImpliedLatestTag)
+	attempt := reserveModelDownload(t, ex.downloads, "llamacpp", "demo", engines.ModelNamingExact)
 	result = ex.currentModelsResult(result)
-	if !reflect.DeepEqual(result.Models, []string{"ready:latest"}) || result.DownloadState == nil ||
+	if !reflect.DeepEqual(result.Models, []string{"ready"}) || result.DownloadState == nil ||
 		len(result.DownloadState.Entries) != 1 || result.DownloadState.Entries[0].ID != attempt.entry.ID {
 		t.Fatalf("publication retained a pre-reservation mask/snapshot: %+v", result)
 	}
@@ -399,15 +354,15 @@ func TestModelDownloadInventoryRemasksAtPublication(t *testing.T) {
 func TestModelDownloadInventoryRejectsRetiredPublication(t *testing.T) {
 	ex := modelDownloadInventoryExecutor(t)
 	result := ex.modelsSweep(context.Background(), true)
-	if err := ex.beginModelMutation(context.Background(), "ollama"); err != nil {
+	if err := ex.beginModelMutation(context.Background(), "llamacpp"); err != nil {
 		t.Fatalf("begin synthetic mutation: %v", err)
 	}
-	ex.endModelMutation("ollama", nil)
+	ex.endModelMutation("llamacpp", nil)
 	result = ex.currentModelsResult(result)
 	if len(result.Models) != 0 || len(result.ByEngine) != 0 {
 		t.Fatalf("publication restored names from a retired mutation epoch: %+v", result)
 	}
-	if !reflect.DeepEqual(result.LoadedByEngine["ollama"], []string{"demo:latest"}) {
+	if !reflect.DeepEqual(result.LoadedByEngine["llamacpp"], []string{"demo"}) {
 		t.Fatalf("epoch fencing changed actual loaded observation: %+v", result.LoadedByEngine)
 	}
 }
@@ -421,11 +376,11 @@ func TestModelDownloadOlderSweepUsesCurrentInventory(t *testing.T) {
 	var reads atomic.Int32
 	original := ex.client.Transport
 	ex.client.Transport = memoryModelsTransport(func(request *http.Request) (*http.Response, error) {
-		if request.URL.Path != "/api/tags" {
+		if request.URL.Path != "/models" {
 			return original.RoundTrip(request)
 		}
 		if reads.Add(1) != 1 {
-			body := fmt.Sprintf(`{"models":[{"name":"ready:latest","digest":%q}]}`, memoryTestDigest)
+			body := fmt.Sprintf(`{"data":[{"id":"ready","digest":%q}]}`, memoryTestDigest)
 			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
 		}
 		response, err := original.RoundTrip(request)
@@ -451,7 +406,7 @@ func TestModelDownloadOlderSweepUsesCurrentInventory(t *testing.T) {
 		t.Fatal("old inventory query did not reach barrier")
 	}
 	newer := ex.ModelsResult(context.Background())
-	if !reflect.DeepEqual(newer.Models, []string{"ready:latest"}) {
+	if !reflect.DeepEqual(newer.Models, []string{"ready"}) {
 		t.Fatalf("new inventory baseline = %+v", newer)
 	}
 	releaseRead()
@@ -468,7 +423,7 @@ func TestModelDownloadOlderSweepUsesCurrentInventory(t *testing.T) {
 
 func TestModelDownloadLlamaStableInventory(t *testing.T) {
 	ex := modelDownloadInventoryExecutor(t)
-	manifest := ex.reg.engines["ollama"]
+	manifest := ex.reg.engines["llamacpp"]
 	manifest.Actions["pull_model"] = Action{ProgressProtocol: pullProgressProtocolLlamaCPPModelsSSE}
 	manifest.Actions["list_models"] = Action{HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/models"}, Result: &ActionResult{Array: "data", Field: "id", Digest: "digest"}}
 	manifest.Actions["loaded_models"] = Action{HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/models"}, Result: &ActionResult{Array: "data", Field: "id", Match: &ResultMatch{Field: "status.value", In: []string{"loaded"}}}}
@@ -492,8 +447,8 @@ func TestModelDownloadLlamaStableInventory(t *testing.T) {
 	})
 	result := ex.ModelsResult(context.Background())
 	if !reflect.DeepEqual(result.Models, []string{"cold", "loading", "resident", "sleeping"}) ||
-		!reflect.DeepEqual(result.ByEngine["ollama"], result.Models) ||
-		!reflect.DeepEqual(result.LoadedByEngine["ollama"], []string{"resident"}) {
+		!reflect.DeepEqual(result.ByEngine["llamacpp"], result.Models) ||
+		!reflect.DeepEqual(result.LoadedByEngine["llamacpp"], []string{"resident"}) {
 		t.Fatalf("router transient/unknown rows became ready: %+v", result)
 	}
 	// Adapter selection follows the named protocol, never the family label.
@@ -506,254 +461,55 @@ func TestModelDownloadLlamaStableInventory(t *testing.T) {
 }
 
 func TestModelDownloadMalformedSnapshotCannotCertifyInventory(t *testing.T) {
-	payload := []byte(`{"models":["partial"],"modelsByEngine":{"ollama":["partial"]},"loadedByEngine":{"ollama":["partial"]},"downloadState":{"version":1,"entries":[]}}`)
+	payload := []byte(`{"models":["partial"],"modelsByEngine":{"llamacpp":["partial"]},"loadedByEngine":{"llamacpp":["partial"]},"downloadState":{"version":1,"entries":[]}}`)
 	var result ModelsResult
 	if err := json.Unmarshal(payload, &result); err != nil {
 		t.Fatalf("decode additive malformed lifecycle: %v", err)
 	}
 	if len(result.Models) != 0 || len(result.ByEngine) != 0 || result.DownloadState != nil ||
-		!reflect.DeepEqual(result.LoadedByEngine["ollama"], []string{"partial"}) {
+		!reflect.DeepEqual(result.LoadedByEngine["llamacpp"], []string{"partial"}) {
 		t.Fatalf("malformed snapshot promoted content or changed residency: %+v", result)
 	}
 }
 
-func TestModelsMemoryEvidencePublicUnknownZeroAndQualified(t *testing.T) {
-	test := func(name, raw string, artifact bool, wantAllocated *int64, wantQualified bool) {
+func TestModelsMemoryEvidenceLoadedModelIsUnsupported(t *testing.T) {
+	test := func(name string, documented bool) {
 		t.Run(name, func(t *testing.T) {
-			h, loaded := memoryModelsFixture(t)
-			*loaded = raw
-			if artifact {
+			h := memoryModelsFixture(t)
+			if documented {
 				h.writeArtifact(t, h.artifact("2"))
 			}
-			entry := modelsMemoryEntry(t, h.ex.ModelsResult(context.Background()))
-			if !sameMemoryInt64(entry.Observed.AllocatedBytes, wantAllocated) {
-				t.Fatalf("allocation = %v, want %v", entry.Observed.AllocatedBytes, wantAllocated)
-			}
-			if (memoryUpper(entry) != nil) != wantQualified {
-				t.Fatalf("upper = %v, qualified wanted %v; uncertainty=%v", memoryUpper(entry), wantQualified, entry.Uncertainty)
-			}
+			requireUnsupportedUnknown(t, modelsMemoryEntry(t, h.ex.ModelsResult(context.Background())))
 		})
 	}
-	test("absent authority remains advisory", memoryPS(memoryTestModel, memoryTestDigest, 9000, 8192), false, memoryValue[int64](9000), false)
-	test("actual measured zero", memoryPS(memoryTestModel, memoryTestDigest, 0, 8192), true, memoryValue[int64](0), true)
-	test("missing allocation stays unknown", memoryPSWithoutSize(memoryTestModel, memoryTestDigest), true, nil, false)
-	test("synthetic qualified upper", memoryPS(memoryTestModel, memoryTestDigest, 9000, 8192), true, memoryValue[int64](9000), true)
+	test("loaded model without a document", false)
+	test("loaded model with a document", true)
 }
 
-func TestModelsMemoryEvidenceInvalidInputPreservesNames(t *testing.T) {
-	test := func(name string, setup func(*testing.T, *memoryEvidenceHarness, *string)) {
+func TestModelsMemoryEvidenceInvalidDocumentPreservesNames(t *testing.T) {
+	test := func(name string, data []byte) {
 		t.Run(name, func(t *testing.T) {
-			h, loaded := memoryModelsFixture(t)
-			setup(t, h, loaded)
-			entry := modelsMemoryEntry(t, h.ex.ModelsResult(context.Background()))
-			if memoryUpper(entry) != nil {
-				t.Fatal("invalid memory input qualified")
-			}
+			h := memoryModelsFixture(t)
+			h.writeArtifactBytes(t, data)
+			requireUnsupportedUnknown(t, modelsMemoryEntry(t, h.ex.ModelsResult(context.Background())))
 		})
 	}
-	test("malformed artifact", func(t *testing.T, h *memoryEvidenceHarness, loaded *string) {
-		h.writeArtifactBytes(t, []byte(`{"version":`))
-	})
-	test("oversize artifact", func(t *testing.T, h *memoryEvidenceHarness, loaded *string) {
-		h.writeArtifactBytes(t, []byte(strings.Repeat("x", maxMemoryQualificationBytes+1)))
-	})
-	test("ambiguous allocation", func(t *testing.T, h *memoryEvidenceHarness, loaded *string) {
-		h.writeArtifact(t, h.artifact("2"))
-		*loaded = strings.Replace(*loaded, `"size_vram":9000`, `"size_vram":9000,"size_vram":9001`, 1)
-	})
-	test("oversize loaded response", func(t *testing.T, h *memoryEvidenceHarness, loaded *string) {
-		h.writeArtifact(t, h.artifact("2"))
-		*loaded = strings.TrimSuffix(*loaded, "}") + `,"extra":"` + strings.Repeat("x", performancewire.MaxMemoryEvidenceBytes) + `"}`
-	})
-}
-
-func TestModelsMemoryEvidenceReviewAmbiguousSharedDigest(t *testing.T) {
-	h, loaded := memoryModelsFixture(t)
-	h.writeArtifact(t, h.artifact("2"))
-	target := strings.TrimSuffix(strings.TrimPrefix(memoryPS(memoryTestModel, memoryTestDigest, 9000, 8192), `{"models":[`), `]}`)
-	*loaded = fmt.Sprintf(`{"models":[{"name":"other:latest","model":"other:latest","digest":%q,"size_vram":1,"size_vram":2,"context_length":8192},%s]}`, memoryTestDigest, target)
-	result := h.ex.ModelsResult(context.Background())
-	if result.MemoryEvidence == nil {
-		t.Fatal("memory evidence missing")
-	}
-	for _, entry := range result.MemoryEvidence.Entries {
-		if entry.Model == memoryTestModel {
-			if memoryUpper(entry) != nil {
-				t.Fatalf("target sharing digest with ambiguous sibling qualified with upper %d", *memoryUpper(entry))
-			}
-			return
-		}
-	}
-	t.Fatal("target evidence missing")
-}
-
-func TestModelsMemoryEvidenceAmbiguousResponsePreservesInventory(t *testing.T) {
-	const otherDigest = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
-	target := strings.TrimSuffix(strings.TrimPrefix(memoryPS(memoryTestModel, memoryTestDigest, 9000, 8192), `{"models":[`), `]}`)
-	other := func(name, digest string) string {
-		return fmt.Sprintf(`{"name":%q,"model":%q,"digest":%q,"size_vram":1,"context_length":8192}`, name, name, digest)
-	}
-	test := func(name, siblings string, wantLoaded []string, wantQualified bool) {
-		t.Run(name, func(t *testing.T) {
-			h, loaded := memoryModelsFixture(t)
-			h.writeArtifact(t, h.artifact("2"))
-			*loaded = `{"models":[` + siblings + "," + target + "]}"
-			var reads atomic.Int32
-			original := h.ex.client.Transport
-			h.ex.client.Transport = memoryModelsTransport(func(request *http.Request) (*http.Response, error) {
-				reads.Add(1)
-				return original.RoundTrip(request)
-			})
-			result := h.ex.ModelsResult(context.Background())
-			if !reflect.DeepEqual(result.Models, []string{memoryTestModel}) ||
-				!reflect.DeepEqual(result.ByEngine, map[string][]string{"ollama": {memoryTestModel}}) ||
-				!reflect.DeepEqual(result.LoadedByEngine, map[string][]string{"ollama": wantLoaded}) {
-				t.Fatalf("memory ambiguity changed installed/loaded inventory: %+v", result)
-			}
-			if reads.Load() != 2 {
-				t.Fatalf("engine requests = %d, want only the existing inventory GETs", reads.Load())
-			}
-			if result.MemoryEvidence == nil {
-				t.Fatal("memory evidence missing")
-			}
-			if err := result.MemoryEvidence.Validate(); err != nil {
-				t.Fatalf("invalid public memory evidence: %v", err)
-			}
-			found := false
-			for _, entry := range result.MemoryEvidence.Entries {
-				if !wantQualified && (memoryUpper(entry) != nil || entry.Observed.AllocatedBytes != nil) {
-					t.Fatalf("ambiguous response published allocation or upper for %q: %+v", entry.Model, entry)
-				}
-				if entry.Model == memoryTestModel {
-					found = true
-					if (memoryUpper(entry) != nil) != wantQualified {
-						t.Fatalf("target upper = %v, want qualified %v; uncertainty=%v", memoryUpper(entry), wantQualified, entry.Uncertainty)
-					}
-					if wantQualified && (entry.Observed.AllocatedBytes == nil || *entry.Observed.AllocatedBytes != 9000) {
-						t.Fatal("clean unique-digest positive lost its allocation")
-					}
-				}
-			}
-			if !found {
-				t.Fatal("target evidence missing")
-			}
-		})
-	}
-	wantLoaded := []string{"other:latest", memoryTestModel}
-	test("duplicate allocation with shared digest",
-		fmt.Sprintf(`{"name":"other:latest","model":"other:latest","digest":%q,"size_vram":1,"size_vram":2,"context_length":8192}`, memoryTestDigest), wantLoaded, false)
-	test("duplicate context with shared digest",
-		fmt.Sprintf(`{"name":"other:latest","model":"other:latest","digest":%q,"size_vram":1,"context_length":4096,"context_length":8192}`, memoryTestDigest), wantLoaded, false)
-	test("duplicate identity with shared digest",
-		fmt.Sprintf(`{"name":"other:latest","name":"other:latest","model":"other:latest","digest":%q,"size_vram":1,"context_length":8192}`, memoryTestDigest), wantLoaded, false)
-	test("repeated name hides shared digest",
-		other("other:latest", memoryTestDigest)+","+other("other:latest", otherDigest), []string{"other:latest", "other:latest", memoryTestModel}, false)
-	test("repeated normalized name hides shared digest",
-		other("other", memoryTestDigest)+","+other("other:latest", otherDigest), []string{"other", "other:latest", memoryTestModel}, false)
-	test("duplicate distinct digest fields hide target ownership",
-		fmt.Sprintf(`{"name":"other:latest","model":"other:latest","digest":%q,"digest":%q,"size_vram":1,"context_length":8192}`, otherDigest, memoryTestDigest), wantLoaded, false)
-	test("clean same-digest aliases", other("other:latest", memoryTestDigest), wantLoaded, false)
-	test("clean unique-digest positive", other("other:latest", otherDigest), wantLoaded, true)
-}
-
-func TestModelsMemoryEvidenceNewQueriesRefreshOnlyAllocationAge(t *testing.T) {
-	h, _ := memoryModelsFixture(t)
-	h.writeArtifact(t, h.artifact("2"))
-	first := modelsMemoryEntry(t, h.ex.ModelsResult(context.Background()))
-	h.clock = h.clock.Add(20 * time.Second)
-	second := modelsMemoryEntry(t, h.ex.ModelsResult(context.Background()))
-	if memoryUpper(second) == nil || second.Freshness.SampleAgeMs == nil || *second.Freshness.SampleAgeMs != 0 {
-		t.Fatalf("new successful query did not refresh allocation: %+v", second)
-	}
-	if first.Freshness.Generation == nil || second.Freshness.Generation == nil || *second.Freshness.Generation <= *first.Freshness.Generation {
-		t.Fatal("real query did not advance observation generation")
-	}
-	if first.Freshness.QualificationAgeMs == nil || second.Freshness.QualificationAgeMs == nil || *second.Freshness.QualificationAgeMs-*first.Freshness.QualificationAgeMs != 20_000 {
-		t.Fatal("new query rejuvenated qualification age")
-	}
-}
-
-func TestModelsMemoryEvidencePreIOAnchorIncludesReadDelay(t *testing.T) {
-	test := func(name string, delay time.Duration, wantQualified bool, wantAge int64) {
-		t.Run(name, func(t *testing.T) {
-			h, _ := memoryModelsFixture(t)
-			h.writeArtifact(t, h.artifact("2"))
-			original := h.ex.client.Transport
-			h.ex.client.Transport = memoryModelsTransport(func(request *http.Request) (*http.Response, error) {
-				response, err := original.RoundTrip(request)
-				if request.URL.Path == "/api/ps" {
-					// Buffer the existing source response first, then advance
-					// time before the sweep can process or verify it.
-					h.clock = h.clock.Add(delay)
-				}
-				return response, err
-			})
-			entry := modelsMemoryEntry(t, h.ex.ModelsResult(context.Background()))
-			if (memoryUpper(entry) != nil) != wantQualified {
-				t.Fatalf("upper = %v, want qualified %v; uncertainty=%v", memoryUpper(entry), wantQualified, entry.Uncertainty)
-			}
-			if entry.Freshness.SampleAgeMs == nil || *entry.Freshness.SampleAgeMs != wantAge {
-				t.Fatalf("sample age = %v, want %d ms", entry.Freshness.SampleAgeMs, wantAge)
-			}
-			if entry.Observed.AllocatedBytes == nil || *entry.Observed.AllocatedBytes != 9000 {
-				t.Fatal("delayed source response lost its allocation")
-			}
-		})
-	}
-	test("fresh buffered response includes elapsed query time", 4*time.Second, true, 4000)
-	test("buffered response exceeds fixed validity", 16*time.Second, false, 16000)
-}
-
-func TestModelsMemoryEvidenceWithdrawalCannotRevive(t *testing.T) {
-	h, loaded := memoryModelsFixture(t)
-	original := h.writeArtifact(t, h.artifact("2"))
-	if memoryUpper(modelsMemoryEntry(t, h.ex.ModelsResult(context.Background()))) == nil {
-		t.Fatal("positive control failed")
-	}
-	*loaded = memoryPS(memoryTestModel, memoryTestDigest, 11_000, 8192)
-	if memoryUpper(modelsMemoryEntry(t, h.ex.ModelsResult(context.Background()))) != nil {
-		t.Fatal("exceedance retained upper")
-	}
-	*loaded = memoryPS(memoryTestModel, memoryTestDigest, 9000, 8192)
-	assertWithdrawn := func() {
-		t.Helper()
-		if memoryUpper(modelsMemoryEntry(t, h.ex.ModelsResult(context.Background()))) != nil {
-			t.Fatal("contradicted authority revived")
-		}
-	}
-	assertWithdrawn()
-	h.removeArtifact(t)
-	assertWithdrawn()
-	h.writeArtifactBytes(t, original)
-	assertWithdrawn()
-	*loaded = `{"models":[]}`
-	h.ex.ModelsResult(context.Background())
-	*loaded = memoryPS(memoryTestModel, memoryTestDigest, 9000, 8192)
-	assertWithdrawn()
-	h.writeArtifact(t, h.artifact("1"))
-	assertWithdrawn()
-	conflict := h.artifact("2")
-	(*conflict.Records)[0].Qualification.UpperBytes = memoryValue[int64](20_000)
-	h.writeArtifact(t, conflict)
-	assertWithdrawn()
-	h.writeArtifact(t, h.artifact("3"))
-	if memoryUpper(modelsMemoryEntry(t, h.ex.ModelsResult(context.Background()))) == nil {
-		t.Fatal("higher reviewed document did not recover")
-	}
+	test("malformed document", []byte(`{"version":`))
+	test("oversize document", []byte(strings.Repeat("x", maxMemoryQualificationBytes+1)))
 }
 
 func TestModelsResultDecodeDiscardsInvalidMemoryEvidence(t *testing.T) {
 	test := func(name, evidence string) {
 		t.Run(name, func(t *testing.T) {
-			payload := `{"models":["m"],"modelsByEngine":{"ollama":["m"]},"loadedByEngine":{"ollama":["m"]},"policy":{"revision":"21","roles":{}},"memoryEvidence":` + evidence + `}`
+			payload := `{"models":["m"],"modelsByEngine":{"llamacpp":["m"]},"loadedByEngine":{"llamacpp":["m"]},"policy":{"revision":"21","roles":{}},"memoryEvidence":` + evidence + `}`
 			result := ModelsResult{MemoryEvidence: &performancewire.MemoryEvidence{Version: 2}}
 			if err := json.Unmarshal([]byte(payload), &result); err != nil {
 				t.Fatalf("decode inventory with invalid optional evidence: %v", err)
 			}
 			want := ModelsResult{
 				Models:         []string{"m"},
-				ByEngine:       map[string][]string{"ollama": {"m"}},
-				LoadedByEngine: map[string][]string{"ollama": {"m"}},
+				ByEngine:       map[string][]string{"llamacpp": {"m"}},
+				LoadedByEngine: map[string][]string{"llamacpp": {"m"}},
 				Policy:         &nodepolicy.Advertisement{Revision: "21", Roles: map[string]nodepolicy.AdvertisedRole{}},
 			}
 			if !reflect.DeepEqual(result, want) {
@@ -802,13 +558,13 @@ func TestModelsResultDecodeRejectsMalformedInventory(t *testing.T) {
 	test("invalid JSON", `{"models":["m"],"memoryEvidence":`)
 	test("wrong result type", `[]`)
 	test("wrong models type", `{"models":{},"memoryEvidence":{"version":2}}`)
-	test("wrong attribution type", `{"models":["m"],"modelsByEngine":{"ollama":1}}`)
-	test("wrong residency type", `{"models":["m"],"loadedByEngine":{"ollama":1}}`)
+	test("wrong attribution type", `{"models":["m"],"modelsByEngine":{"llamacpp":1}}`)
+	test("wrong residency type", `{"models":["m"],"loadedByEngine":{"llamacpp":1}}`)
 	test("wrong policy type", `{"models":["m"],"policy":[]}`)
 }
 
 func TestModelsMemoryEvidenceRPCCodec(t *testing.T) {
-	h, _ := memoryModelsFixture(t)
+	h := memoryModelsFixture(t)
 	h.writeArtifact(t, h.artifact("2"))
 	var output bytes.Buffer
 	manager := &Manager{exec: h.ex, codec: NewCodec(&output)}
@@ -822,13 +578,14 @@ func TestModelsMemoryEvidenceRPCCodec(t *testing.T) {
 	if err := json.Unmarshal(message.Result, &result); err != nil {
 		t.Fatalf("decode RPC models result: %v", err)
 	}
-	if memoryUpper(modelsMemoryEntry(t, result)) == nil || !message.IsResponse() {
-		t.Fatal("actual engine:models response lost qualified evidence")
+	if !message.IsResponse() {
+		t.Fatalf("engine:models reply is not a response: %s", output.String())
 	}
+	requireUnsupportedUnknown(t, modelsMemoryEntry(t, result))
 }
 
-func TestModelsMemoryEvidenceWatchPublishesBaselineChangesAndWithdrawal(t *testing.T) {
-	h, loaded := memoryModelsFixture(t)
+func TestModelsMemoryEvidenceWatchPublishesUnsupportedBaseline(t *testing.T) {
+	h := memoryModelsFixture(t)
 	h.writeArtifact(t, h.artifact("2"))
 	h.ex.loadedPollInterval = time.Hour
 	ctx, cancel := context.WithCancel(context.Background())
@@ -875,7 +632,7 @@ func TestModelsMemoryEvidenceWatchPublishesBaselineChangesAndWithdrawal(t *testi
 		h.ex.pokeLoaded()
 		select {
 		case result := <-results:
-			if result.Engine != "ollama" {
+			if result.Engine != memoryTestEngine {
 				t.Fatalf("trigger engine = %q", result.Engine)
 			}
 			return modelsMemoryEntry(t, result.Models)
@@ -884,29 +641,18 @@ func TestModelsMemoryEvidenceWatchPublishesBaselineChangesAndWithdrawal(t *testi
 			return performancewire.MemoryEvidenceEntry{}
 		}
 	}
-	if memoryUpper(next()) == nil {
-		t.Fatal("first memory baseline was not published")
-	}
-	*loaded = memoryPS(memoryTestModel, memoryTestDigest, 9500, 8192)
-	changed := next()
-	if changed.Observed.AllocatedBytes == nil || *changed.Observed.AllocatedBytes != 9500 {
-		t.Fatal("unchanged-name allocation update was not published")
-	}
-	h.removeArtifact(t)
-	if memoryUpper(next()) != nil {
-		t.Fatal("unchanged-name withdrawal was not published")
-	}
+	requireUnsupportedUnknown(t, next())
 }
 
 func TestModelsMemoryEvidenceSourceChangesAcrossRead(t *testing.T) {
 	test := func(name string, change func(*memoryEvidenceHarness), wantReady []string) {
 		t.Run(name, func(t *testing.T) {
-			h, _ := memoryModelsFixture(t)
+			h := memoryModelsFixture(t)
 			h.writeArtifact(t, h.artifact("2"))
 			original := h.ex.client.Transport
 			h.ex.client.Transport = memoryModelsTransport(func(request *http.Request) (*http.Response, error) {
 				response, err := original.RoundTrip(request)
-				if request.URL.Path == "/api/ps" {
+				if request.URL.Path == "/test/loaded" {
 					change(h)
 				}
 				return response, err
@@ -916,10 +662,10 @@ func TestModelsMemoryEvidenceSourceChangesAcrossRead(t *testing.T) {
 				if len(result.Models) != 0 || len(result.ByEngine) != 0 {
 					t.Fatalf("retired inventory published ready names: %+v", result)
 				}
-			} else if !reflect.DeepEqual(result.Models, wantReady) || !reflect.DeepEqual(result.ByEngine["ollama"], wantReady) {
+			} else if !reflect.DeepEqual(result.Models, wantReady) || !reflect.DeepEqual(result.ByEngine[memoryTestEngine], wantReady) {
 				t.Fatalf("memory source change altered current ready inventory: %+v", result)
 			}
-			if !reflect.DeepEqual(result.LoadedByEngine["ollama"], []string{memoryTestModel}) {
+			if !reflect.DeepEqual(result.LoadedByEngine[memoryTestEngine], []string{memoryTestModel}) {
 				t.Fatalf("source fencing changed observed residency: %+v", result.LoadedByEngine)
 			}
 			if result.MemoryEvidence == nil {
@@ -940,23 +686,23 @@ func TestModelsMemoryEvidenceSourceChangesAcrossRead(t *testing.T) {
 	test("host disappears", func(h *memoryEvidenceHarness) { h.host = "" }, []string{memoryTestModel})
 	test("manager incarnation changes", func(h *memoryEvidenceHarness) { h.ex.switchIncarnation = "manager-replacement" }, []string{memoryTestModel})
 	test("engine run changes", func(h *memoryEvidenceHarness) {
-		state := h.ex.engines["ollama"]
+		state := h.ex.engines[memoryTestEngine]
 		state.mu.Lock()
 		state.runID = "run-replacement"
 		state.mu.Unlock()
 	}, []string{})
 	test("owned identity disappears", func(h *memoryEvidenceHarness) {
-		state := h.ex.engines["ollama"]
+		state := h.ex.engines[memoryTestEngine]
 		state.mu.Lock()
 		state.proc = nil
 		state.mu.Unlock()
 	}, []string{memoryTestModel})
 	test("content epoch changes", func(h *memoryEvidenceHarness) {
 		h.ex.inventoryMu.Lock()
-		observed := h.ex.inventoryDigests["ollama"]
+		observed := h.ex.inventoryDigests[memoryTestEngine]
 		observed.epoch++
 		observed.models = map[string]string{memoryTestModel: strings.Repeat("d", 64)}
-		h.ex.inventoryDigests["ollama"] = observed
+		h.ex.inventoryDigests[memoryTestEngine] = observed
 		h.ex.inventoryMu.Unlock()
 	}, []string{})
 	test("applied settings change", func(h *memoryEvidenceHarness) {
@@ -967,133 +713,6 @@ func TestModelsMemoryEvidenceSourceChangesAcrossRead(t *testing.T) {
 	}, []string{memoryTestModel})
 }
 
-func TestModelsMemoryEvidenceOlderCompletionCannotPublishUpper(t *testing.T) {
-	h, _ := memoryModelsFixture(t)
-	h.writeArtifact(t, h.artifact("2"))
-	started, release := make(chan struct{}), make(chan struct{})
-	var reads atomic.Int32
-	original := h.ex.client.Transport
-	h.ex.client.Transport = memoryModelsTransport(func(request *http.Request) (*http.Response, error) {
-		response, err := original.RoundTrip(request)
-		if request.URL.Path == "/api/ps" && reads.Add(1) == 1 {
-			close(started)
-			select {
-			case <-release:
-			case <-request.Context().Done():
-				return nil, request.Context().Err()
-			}
-		}
-		return response, err
-	})
-	done := make(chan ModelsResult, 1)
-	go func() { done <- h.ex.ModelsResult(context.Background()) }()
-	var releaseOnce sync.Once
-	releaseRead := func() { releaseOnce.Do(func() { close(release) }) }
-	defer releaseRead()
-	select {
-	case <-started:
-	case <-time.After(5 * time.Second):
-		t.Fatal("old sweep did not reach read barrier")
-	}
-	if memoryUpper(modelsMemoryEntry(t, h.ex.ModelsResult(context.Background()))) == nil {
-		t.Fatal("newer sweep positive control failed")
-	}
-	// Release once, while ensuring failure cleanup also releases the waiter.
-	releaseRead()
-	select {
-	case result := <-done:
-		if memoryUpper(modelsMemoryEntry(t, result)) != nil {
-			t.Fatal("older completion published an upper")
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("old sweep did not complete")
-	}
-}
-
-func TestModelsMemoryEvidenceTwoEngineContradictionWithdrawsWholeDocument(t *testing.T) {
-	h, _ := memoryModelsFixture(t)
-	const other = "ollama-variant"
-	manifest := &Manifest{Engine: other, DisplayName: "Variant", Family: "ollama", ModelNaming: h.ex.engines["ollama"].manifest.ModelNaming,
-		Actions: map[string]Action{
-			"list_models":   {HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/other/tags"}, Result: &ActionResult{Array: "models", Field: "name", Digest: "digest"}},
-			"loaded_models": {HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/other/ps"}, Result: &ActionResult{Array: "models", Field: "name"}},
-		}}
-	h.ex.reg.engines[other] = manifest
-	h.ex.engines[other] = &engineState{manifest: manifest, plat: &Platform{}, running: true, runID: "other-run", launchDigest: memoryTestLaunch, proc: &managedProc{}}
-	h.ex.inventoryDigests[other] = observedDigests{runID: "other-run", models: map[string]string{memoryTestModel: memoryTestDigest}, epoch: 9}
-	otherSettings := h.settings
-	otherSettings.Engine = other
-	h.ex.settingsHub.Publish([]settings.Snapshot{h.settings, otherSettings})
-	document := h.artifact("2")
-	record := h.record()
-	record.Source.Engine = memoryValue(other)
-	record.Source.EngineRunID = memoryValue("other-run")
-	*document.Records = append(*document.Records, record)
-	h.writeArtifact(t, document)
-	allocated := int64(11_000)
-	original := h.ex.client.Transport
-	h.ex.client.Transport = memoryModelsTransport(func(request *http.Request) (*http.Response, error) {
-		if request.URL.Path == "/other/tags" || request.URL.Path == "/other/ps" {
-			if request.Method != http.MethodGet {
-				return nil, fmt.Errorf("forbidden method")
-			}
-			body := memoryPS(memoryTestModel, memoryTestDigest, allocated, 8192)
-			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
-		}
-		return original.RoundTrip(request)
-	})
-	assertAll := func(wantQualified bool) {
-		t.Helper()
-		result := h.ex.ModelsResult(context.Background())
-		if result.MemoryEvidence == nil || len(result.MemoryEvidence.Entries) != 2 {
-			t.Fatalf("evidence = %+v", result.MemoryEvidence)
-		}
-		for _, entry := range result.MemoryEvidence.Entries {
-			if (memoryUpper(entry) != nil) != wantQualified {
-				t.Fatalf("%s upper = %v, want qualified %v", entry.Engine, memoryUpper(entry), wantQualified)
-			}
-		}
-	}
-	assertAll(false)
-	allocated = 9000
-	assertAll(false)
-	document.Revision = memoryValue("3")
-	h.writeArtifact(t, document)
-	assertAll(true)
-}
-
-func TestModelsMemoryEvidenceActualFamilyAndNaming(t *testing.T) {
-	test := func(name, family string, wantQualified bool) {
-		t.Run(name, func(t *testing.T) {
-			h, _ := memoryModelsFixture(t)
-			manifest := h.ex.engines["ollama"].manifest
-			manifest.Family = family
-			manifest.Engine = "dynamic-variant"
-			h.ex.reg.engines[manifest.Engine] = manifest
-			delete(h.ex.reg.engines, "ollama")
-			h.ex.engines[manifest.Engine] = h.ex.engines["ollama"]
-			delete(h.ex.engines, "ollama")
-			h.ex.inventoryDigests[manifest.Engine] = h.ex.inventoryDigests["ollama"]
-			delete(h.ex.inventoryDigests, "ollama")
-			h.settings.Engine = manifest.Engine
-			h.ex.settingsHub.Publish([]settings.Snapshot{h.settings})
-			document := h.artifact("2")
-			(*document.Records)[0].Source.Engine = memoryValue(manifest.Engine)
-			h.writeArtifact(t, document)
-			result := h.ex.ModelsResult(context.Background())
-			if result.MemoryEvidence == nil {
-				t.Fatal("public evidence missing")
-			}
-			entry := memoryEntry(t, result.MemoryEvidence.Entries)
-			if (memoryUpper(entry) != nil) != wantQualified {
-				t.Fatalf("family %q upper = %v, qualified wanted %v", family, memoryUpper(entry), wantQualified)
-			}
-		})
-	}
-	test("owned Ollama variant", "ollama", true)
-	test("unsupported actual family despite Ollama artifact", "unsupported", false)
-}
-
 func TestExtractStrings(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1102,19 +721,19 @@ func TestExtractStrings(t *testing.T) {
 		want []string
 	}{
 		{
-			name: "ollama tags shape",
+			name: "models array with a name field",
 			raw:  `{"models":[{"name":"llama3:8b","model":"llama3:8b"},{"name":"qwen:0.5b"}]}`,
 			spec: &ActionResult{Array: "models", Field: "name"},
 			want: []string{"llama3:8b", "qwen:0.5b"},
 		},
 		{
-			name: "lmstudio v1/models shape",
+			name: "data array with an id field",
 			raw:  `{"object":"list","data":[{"id":"phi-3"},{"id":"gemma-2b"}]}`,
 			spec: &ActionResult{Array: "data", Field: "id"},
 			want: []string{"phi-3", "gemma-2b"},
 		},
 		{
-			name: "lmstudio native models shape",
+			name: "models array with a key field",
 			raw:  `{"models":[{"key":"phi-3","loaded_instances":[]},{"key":"gemma-2b","loaded_instances":[]}]}`,
 			spec: &ActionResult{Array: "models", Field: "key"},
 			want: []string{"phi-3", "gemma-2b"},
@@ -1162,7 +781,7 @@ func TestExtractStrings(t *testing.T) {
 			want: nil,
 		},
 		{
-			name: "lmstudio v1 nonempty loaded_instances keeps only loaded rows",
+			name: "nonempty loaded_instances keeps only loaded rows",
 			raw:  `{"models":[{"key":"a","loaded_instances":[{"id":"a"}]},{"key":"b","loaded_instances":[]},{"key":"c","loaded_instances":[{"id":"c"}]}]}`,
 			spec: &ActionResult{Array: "models", Field: "key", Match: &ResultMatch{Field: "loaded_instances", Nonempty: true}},
 			want: []string{"a", "c"},
@@ -1522,7 +1141,7 @@ func TestSameReadRequestMatchesShippedManifests(t *testing.T) {
 	if err := reg.LoadFS(bundledManifests, "manifests"); err != nil {
 		t.Fatalf("load bundled manifests: %v", err)
 	}
-	want := map[string]bool{"lmstudio": true, "llamacpp": true, "ollama": false}
+	want := map[string]bool{"llamacpp": true}
 	for name, shared := range want {
 		mf, ok := reg.Get(name)
 		if !ok {
@@ -1547,7 +1166,7 @@ func TestSameReadRequestRejectsDifferingOrSideEffectingActions(t *testing.T) {
 		{"different path", get("/m"), get("/n"), false},
 		{"different method", get("/m"), Action{HTTP: &ActionHTTP{Method: "POST", Path: "/m"}}, false},
 		{"restart after", get("/m"), restart, false},
-		{"cmd action", Action{Cmd: []string{"{cli}", "ls"}}, Action{Cmd: []string{"{cli}", "ls"}}, false},
+		{"cmd action", Action{Cmd: []string{"{bin}", "ls"}}, Action{Cmd: []string{"{bin}", "ls"}}, false},
 	}
 	for _, tc := range cases {
 		if got := sameReadRequest(tc.a, tc.b); got != tc.want {
@@ -1642,7 +1261,7 @@ func TestModelsResultCarriesAndWithdrawsTheStrictCapability(t *testing.T) {
 		Revision: "21",
 		Roles:    map[string]nodepolicy.AdvertisedRole{},
 		StrictAdmission: &nodepolicy.StrictAdmissionCapability{Version: nodepolicy.StrictAdmissionVersion, Models: []nodepolicy.StrictAdmissionModel{{
-			Engine: "ollama", Model: "m:latest", MaxConcurrent: 2,
+			Engine: "llamacpp", Model: "m", MaxConcurrent: 2,
 			Identity: nodepolicy.StrictModelIdentity{EngineRunID: "engine-run-1", SettingsFingerprint: strings.Repeat("a", 64), ModelDigest: strings.Repeat("b", 64)},
 		}}},
 	}

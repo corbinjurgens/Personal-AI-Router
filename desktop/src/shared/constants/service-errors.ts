@@ -24,7 +24,7 @@ export const BUILD_APPLY_MAINTENANCE_BUSY_CODE = -32015
 
 /**
  * The explanation for a paired node's action refused with LOCAL_VETO_CODE.
- * `action` names what was refused, for example `start ollama on node-a`.
+ * `action` names what was refused, for example `start llamacpp on node-a`.
  */
 export function localVetoMessage(action: string): string {
     return `Could not ${action}: the target refused the operation. Check its node and engine state, then try again.`
@@ -32,7 +32,7 @@ export function localVetoMessage(action: string): string {
 
 /**
  * The explanation for a paired node's action refused with ENGINE_LOCKED_CODE.
- * `action` names what was refused, for example `start ollama on node-a`.
+ * `action` names what was refused, for example `start llamacpp on node-a`.
  */
 export function engineLockedMessage(action: string): string {
     return `Could not ${action}: the engine is locked on that node. Unlock it on that node, then try again.`

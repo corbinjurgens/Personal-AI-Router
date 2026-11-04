@@ -307,24 +307,24 @@ func TestDeniedManagementKeepsStatusReadableAndDoesNotRetry(t *testing.T) {
 	client, broker := nodeInfoRPCFixture(t)
 	d := newNodeDetail(client, nodeRow{key: "peer", name: "Peer", membership: membershipMember, presence: presenceOnline})
 	d.SetSize(180, 40)
-	d.engines = []engineStatus{{Engine: "ollama", Installed: true, Running: true, Healthy: true}}
+	d.engines = []engineStatus{{Engine: "llamacpp", Installed: true, Running: true, Healthy: true}}
 	d.refreshEngines()
-	snapshot := tuiDownloadSnapshot()
+	snapshot := tuiLlamaCPPDownloadSnapshot()
 	snapshot.Entries = []modeldownload.Entry{}
-	if !d.applyModels(modelsResult{ModelsByEngine: map[string][]string{"ollama": {"model"}}, DownloadState: snapshot, current: true}, true) {
+	if !d.applyModels(modelsResult{ModelsByEngine: map[string][]string{"llamacpp": {"model"}}, DownloadState: snapshot, current: true}, true) {
 		t.Fatal("ready canonical inventory rejected")
 	}
-	request, denied := terminalControlsReply(t, broker, d.modelCmd("ollama", modelActions["load"], "model"), &rpc.Message{Error: &rpc.RPCError{Code: -32012, Message: permissionDeniedText}})
+	request, denied := terminalControlsReply(t, broker, d.modelCmd("llamacpp", modelActions["load"], "model"), &rpc.Message{Error: &rpc.RPCError{Code: -32012, Message: permissionDeniedText}})
 	if request.Method != "engine:remote-load-model" {
 		t.Fatalf("method = %s", request.Method)
 	}
 	if cmd, _ := d.update(denied); cmd != nil {
 		t.Fatal("denied command scheduled retry")
 	}
-	if !strings.Contains(d.View(), permissionDeniedText) || !strings.Contains(d.View(), "ollama") {
+	if !strings.Contains(d.View(), permissionDeniedText) || !strings.Contains(d.View(), "llamacpp") {
 		t.Fatalf("denial hid status: %s", d.View())
 	}
-	request, status := terminalControlsReply(t, broker, d.enginesCmd(), &rpc.Message{Result: []byte(`{"engines":[{"engine":"ollama","installed":true,"running":true,"healthy":true}]}`)})
+	request, status := terminalControlsReply(t, broker, d.enginesCmd(), &rpc.Message{Result: []byte(`{"engines":[{"engine":"llamacpp","installed":true,"running":true,"healthy":true}]}`)})
 	if request.Method != "engine:remote-get-installed" {
 		t.Fatalf("status method = %s", request.Method)
 	}
@@ -356,11 +356,11 @@ func TestPermissionDenialReachesAvailabilityAndSettings(t *testing.T) {
 	}
 	client, broker := nodeInfoRPCFixture(t)
 	d := newNodeDetail(client, nodeRow{key: "peer", membership: membershipMember})
-	reload, _ := d.update(engineSettingsAppliedMsg{engine: "ollama", err: denial})
+	reload, _ := d.update(engineSettingsAppliedMsg{engine: "llamacpp", err: denial})
 	if !strings.Contains(d.status.render(), permissionDeniedText) {
 		t.Fatalf("settings denial = %s", d.status.render())
 	}
-	request, _ := terminalControlsReply(t, broker, reload, &rpc.Message{Result: []byte(`{"engine":"ollama"}`)})
+	request, _ := terminalControlsReply(t, broker, reload, &rpc.Message{Result: []byte(`{"engine":"llamacpp"}`)})
 	if request.Method != "engine:get-settings" {
 		t.Fatalf("denied settings retried mutation: %s", request.Method)
 	}
@@ -370,12 +370,12 @@ func TestGrantedManagementStillReportsLocalVeto(t *testing.T) {
 	client, broker := nodeInfoRPCFixture(t)
 	d := newNodeDetail(client, nodeRow{key: "peer", name: "Peer", membership: membershipMember, presence: presenceOnline})
 	d.remotePermission, d.remotePermissionFresh = remotePermission{Version: 1, Allowed: true, State: "allowed"}, true
-	snapshot := tuiDownloadSnapshot()
+	snapshot := tuiLlamaCPPDownloadSnapshot()
 	snapshot.Entries = []modeldownload.Entry{}
-	if !d.applyModels(modelsResult{ModelsByEngine: map[string][]string{"ollama": {"model"}}, DownloadState: snapshot, current: true}, true) {
+	if !d.applyModels(modelsResult{ModelsByEngine: map[string][]string{"llamacpp": {"model"}}, DownloadState: snapshot, current: true}, true) {
 		t.Fatal("ready canonical inventory rejected")
 	}
-	_, result := terminalControlsReply(t, broker, d.modelCmd("ollama", modelActions["load"], "model"), &rpc.Message{Error: &rpc.RPCError{Code: -32011, Message: "engine is Off locally"}})
+	_, result := terminalControlsReply(t, broker, d.modelCmd("llamacpp", modelActions["load"], "model"), &rpc.Message{Error: &rpc.RPCError{Code: -32011, Message: "engine is Off locally"}})
 	if cmd, _ := d.update(result); cmd != nil {
 		t.Fatal("local veto scheduled a retry")
 	}

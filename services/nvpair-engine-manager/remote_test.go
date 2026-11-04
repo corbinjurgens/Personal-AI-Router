@@ -17,7 +17,7 @@ func TestRunRemoteRequiresNode(t *testing.T) {
 	m := NewManager(NewCodec(&out), &Executor{progress: newProgressHub()}, nil, "")
 	id := json.RawMessage("1")
 	m.runRemote(context.Background(), &Message{JSONRPC: "2.0", ID: &id,
-		Method: "engine:remote-install", Params: json.RawMessage(`{"engine":"ollama"}`)})
+		Method: "engine:remote-install", Params: json.RawMessage(`{"engine":"llamacpp"}`)})
 	mustContain(t, out.String(), "node is required")
 }
 
@@ -26,7 +26,7 @@ func TestRunRemoteUnknownPeer(t *testing.T) {
 	m := NewManager(NewCodec(&out), &Executor{progress: newProgressHub()}, nil, "")
 	id := json.RawMessage("1")
 	m.runRemote(context.Background(), &Message{JSONRPC: "2.0", ID: &id,
-		Method: "engine:remote-install", Params: json.RawMessage(`{"node":"ghost","engine":"ollama"}`)})
+		Method: "engine:remote-install", Params: json.RawMessage(`{"node":"ghost","engine":"llamacpp"}`)})
 	mustContain(t, out.String(), "not a discovered ec peer")
 }
 
@@ -43,6 +43,6 @@ func TestRunRemoteNotClustered(t *testing.T) {
 	}})
 	id := json.RawMessage("1")
 	m.runRemote(context.Background(), &Message{JSONRPC: "2.0", ID: &id,
-		Method: "engine:remote-install", Params: json.RawMessage(`{"node":"uuid-b","engine":"ollama"}`)})
+		Method: "engine:remote-install", Params: json.RawMessage(`{"node":"uuid-b","engine":"llamacpp"}`)})
 	mustContain(t, out.String(), "not clustered")
 }

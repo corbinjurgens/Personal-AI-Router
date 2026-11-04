@@ -119,8 +119,8 @@ func healthyPolicy() policyFixture {
 		revision: "1792285135482000000", activeRevision: "1792285135482000000", activation: "active",
 		availability: "available", generation: 7,
 		models: []nodepolicy.ModelConfigurationEntry{
-			{Engine: engines.NameOllama, Model: sentinelModel, DesiredResident: true, ObservedLoaded: &loaded, State: nodepolicy.ModelStateSatisfied},
-			{Engine: engines.NameOllama, Model: sentinelModel + "-second", DesiredResident: true, State: nodepolicy.ModelStateBlocked, Reason: nodepolicy.ModelReasonNoFit},
+			{Engine: engines.NameLlamaCPP, Model: sentinelModel, DesiredResident: true, ObservedLoaded: &loaded, State: nodepolicy.ModelStateSatisfied},
+			{Engine: engines.NameLlamaCPP, Model: sentinelModel + "-second", DesiredResident: true, State: nodepolicy.ModelStateBlocked, Reason: nodepolicy.ModelReasonNoFit},
 		},
 	}
 }
@@ -155,9 +155,8 @@ func newHealthyDiagnoseService(t *testing.T) *fakeDiagnoseService {
 		methodStatus: fixed(serviceStatusResult(t, 0)),
 		"policy:get": fixed(policyGetResult(t, healthyPolicy())),
 	}}
-	ports := []int{11434, 1234, 8080}
-	for i, e := range engines.All() {
-		f.answers[e.ComponentName()+":get-status"] = fixed(facadeResult(t, true, ports[i%len(ports)]))
+	for _, e := range engines.All() {
+		f.answers[e.ComponentName()+":get-status"] = fixed(facadeResult(t, true, 8080))
 	}
 	return f
 }
@@ -169,6 +168,17 @@ func facadeMethod(t *testing.T, name string) string {
 		t.Fatalf("no built-in engine %q", name)
 	}
 	return e.ComponentName() + ":get-status"
+}
+
+func diagnoseFacadeIndex(t *testing.T, name string) int {
+	t.Helper()
+	for i, e := range engines.All() {
+		if e.Name == name {
+			return i
+		}
+	}
+	t.Fatalf("no built-in engine %q", name)
+	return 0
 }
 
 func wantDiagnoseSequence() []diagnoseCall {
@@ -244,9 +254,8 @@ func facades(status diagnoseStatus) []diagnoseFacade {
 
 func boundFacades() []diagnoseFacade {
 	out := facades(diagnoseKnown)
-	ports := []int{11434, 1234, 8080}
 	for i := range out {
-		out[i].Ready, out[i].Port = boolPtr(true), ports[i%len(ports)]
+		out[i].Ready, out[i].Port = boolPtr(true), 8080
 	}
 	return out
 }
@@ -289,7 +298,7 @@ func TestDiagnoseCompleteCapture(t *testing.T) {
 	for _, want := range []string{
 		"Service: known",
 		"pid 4242, broker pid 4243, broker restarts 0",
-		"Ollama: known, bound on port 11434",
+		"llama.cpp: known, bound on port 8080",
 		"states: satisfied 1, blocked 1",
 		"reasons: no-fit 1",
 		"Capture: complete.",
@@ -318,8 +327,8 @@ func TestDiagnoseKnownOperatingStates(t *testing.T) {
 	test("paused node with unbound facades", func(f *fakeDiagnoseService, p *policyFixture) {
 		p.availability = "paused"
 		p.models = []nodepolicy.ModelConfigurationEntry{
-			{Engine: engines.NameOllama, Model: sentinelModel, DesiredResident: true, State: nodepolicy.ModelStateBlocked, Reason: nodepolicy.ModelReasonPausedLocal},
-			{Engine: engines.NameLlamaCPP, Model: sentinelModel, DesiredResident: true, ObservedLoaded: &unknown, State: nodepolicy.ModelStateUnknown, Reason: nodepolicy.ModelReasonObservationUnknown},
+			{Engine: engines.NameLlamaCPP, Model: sentinelModel, DesiredResident: true, State: nodepolicy.ModelStateBlocked, Reason: nodepolicy.ModelReasonPausedLocal},
+			{Engine: engines.NameLlamaCPP, Model: sentinelModel + "-second", DesiredResident: true, ObservedLoaded: &unknown, State: nodepolicy.ModelStateUnknown, Reason: nodepolicy.ModelReasonObservationUnknown},
 		}
 		for _, e := range engines.All() {
 			f.answers[e.ComponentName()+":get-status"] = fixed(facadeResult(t, false, 0))
@@ -355,9 +364,9 @@ func TestDiagnoseKnownOperatingStates(t *testing.T) {
 		r.ResidentConfiguration.ReasonCounts = map[nodepolicy.ModelConfigurationReason]int{}
 	})
 	test("relocated facade port", func(f *fakeDiagnoseService, _ *policyFixture) {
-		f.answers[facadeMethod(t, engines.NameOllama)] = fixed(facadeResult(t, true, 11500))
+		f.answers[facadeMethod(t, engines.NameLlamaCPP)] = fixed(facadeResult(t, true, 8100))
 	}, func(r *diagnoseReport) {
-		r.BuiltinFacades[0].Port = 11500
+		r.BuiltinFacades[diagnoseFacadeIndex(t, engines.NameLlamaCPP)].Port = 8100
 	})
 }
 
@@ -454,29 +463,29 @@ func TestDiagnoseRejectsMalformedValues(t *testing.T) {
 	test("resident configuration missing", "policy:get", `{`+policy+`}`,
 		func(r *diagnoseReport) { knownPolicy(r); invalidResident(r) })
 	test("resident unsupported state", "policy:get",
-		`{`+policy+`,"modelConfiguration":{"policyRevision":"5","observationGeneration":1,"models":[{"engine":"ollama","model":"`+sentinelModel+`","desiredResident":true,"state":"warming"}]}}`,
+		`{`+policy+`,"modelConfiguration":{"policyRevision":"5","observationGeneration":1,"models":[{"engine":"llamacpp","model":"`+sentinelModel+`","desiredResident":true,"state":"warming"}]}}`,
 		func(r *diagnoseReport) { knownPolicy(r); invalidResident(r) })
 	test("resident unsupported reason", "policy:get",
-		`{`+policy+`,"modelConfiguration":{"policyRevision":"5","observationGeneration":1,"models":[{"engine":"ollama","model":"`+sentinelModel+`","desiredResident":true,"state":"blocked","reason":"`+sentinelError+`"}]}}`,
+		`{`+policy+`,"modelConfiguration":{"policyRevision":"5","observationGeneration":1,"models":[{"engine":"llamacpp","model":"`+sentinelModel+`","desiredResident":true,"state":"blocked","reason":"`+sentinelError+`"}]}}`,
 		func(r *diagnoseReport) { knownPolicy(r); invalidResident(r) })
 
-	invalidOllama := func(r *diagnoseReport) {
-		r.BuiltinFacades[0] = diagnoseFacade{Engine: engines.NameOllama, Status: diagnoseInvalid}
+	invalidLlamaCPP := func(r *diagnoseReport) {
+		r.BuiltinFacades[diagnoseFacadeIndex(t, engines.NameLlamaCPP)] = diagnoseFacade{Engine: engines.NameLlamaCPP, Status: diagnoseInvalid}
 	}
-	ollama := facadeMethod(t, engines.NameOllama)
-	test("facade missing ready", ollama, `{"port":11434}`, invalidOllama)
-	test("facade missing port", ollama, `{"ready":false}`, invalidOllama)
-	test("facade port out of range", ollama, `{"ready":true,"port":70000}`, invalidOllama)
-	test("ready facade without a port", ollama, `{"ready":true,"port":0}`, invalidOllama)
-	test("unbound facade with a port", ollama, `{"ready":false,"port":11434}`, invalidOllama)
-	test("facade ready of the wrong type", ollama, `{"ready":"yes","port":11434}`, invalidOllama)
+	llamacpp := facadeMethod(t, engines.NameLlamaCPP)
+	test("facade missing ready", llamacpp, `{"port":8080}`, invalidLlamaCPP)
+	test("facade missing port", llamacpp, `{"ready":false}`, invalidLlamaCPP)
+	test("facade port out of range", llamacpp, `{"ready":true,"port":70000}`, invalidLlamaCPP)
+	test("ready facade without a port", llamacpp, `{"ready":true,"port":0}`, invalidLlamaCPP)
+	test("unbound facade with a port", llamacpp, `{"ready":false,"port":8080}`, invalidLlamaCPP)
+	test("facade ready of the wrong type", llamacpp, `{"ready":"yes","port":8080}`, invalidLlamaCPP)
 }
 
 func TestDiagnoseDiscardsUnknownFields(t *testing.T) {
 	f := newHealthyDiagnoseService(t)
 	f.answers[methodStatus] = fixed(json.RawMessage(`{"pid":4242,"brokerPid":4243,"clients":1,"brokerRestarts":0,` +
 		`"version":"0.2.0","serviceBuildId":"` + testBuildID + `","futureField":"` + sentinelUnknown + `"}`))
-	f.answers[facadeMethod(t, engines.NameOllama)] = fixed(json.RawMessage(`{"ready":true,"port":11434,"address":"` + sentinelHost + `"}`))
+	f.answers[facadeMethod(t, engines.NameLlamaCPP)] = fixed(json.RawMessage(`{"ready":true,"port":8080,"address":"` + sentinelHost + `"}`))
 	got := runDiagnoseCapture(t, context.Background(), f.call)
 	assertReport(t, got, healthyReport(), diagnoseExitComplete)
 }
@@ -496,11 +505,11 @@ func TestDiagnoseKeepsUnsafeMetadataUnknown(t *testing.T) {
 
 func TestDiagnoseReportsReadErrorsWithoutTheirText(t *testing.T) {
 	f := newHealthyDiagnoseService(t)
-	delete(f.answers, facadeMethod(t, engines.NameLMStudio))
+	delete(f.answers, facadeMethod(t, engines.NameLlamaCPP))
 	got := runDiagnoseCapture(t, context.Background(), f.call)
 	want := healthyReport()
 	want.Complete = false
-	want.BuiltinFacades[1] = diagnoseFacade{Engine: engines.NameLMStudio, Status: diagnoseUnavailable}
+	want.BuiltinFacades[diagnoseFacadeIndex(t, engines.NameLlamaCPP)] = diagnoseFacade{Engine: engines.NameLlamaCPP, Status: diagnoseUnavailable}
 	assertReport(t, got, want, diagnoseExitIncomplete)
 }
 
@@ -587,7 +596,7 @@ func TestDiagnoseFinalPolicyReadFailureDropsValues(t *testing.T) {
 func TestDiagnoseStopsAtTheSharedDeadline(t *testing.T) {
 	f := newHealthyDiagnoseService(t)
 	var cancelled error
-	f.answers[facadeMethod(t, engines.NameLMStudio)] = func(ctx context.Context, _ int) (json.RawMessage, error) {
+	f.answers[facadeMethod(t, engines.NameLlamaCPP)] = func(ctx context.Context, _ int) (json.RawMessage, error) {
 		<-ctx.Done()
 		cancelled = ctx.Err()
 		return nil, fmt.Errorf("%s: %w", sentinelError, ctx.Err())
@@ -602,11 +611,11 @@ func TestDiagnoseStopsAtTheSharedDeadline(t *testing.T) {
 	want.Complete = false
 	want.Policy = diagnosePolicy{Status: diagnoseUnavailable}
 	want.ResidentConfiguration = diagnoseResidentConfig{Status: diagnoseUnavailable}
-	for i := 1; i < len(want.BuiltinFacades); i++ {
+	for i := diagnoseFacadeIndex(t, engines.NameLlamaCPP); i < len(want.BuiltinFacades); i++ {
 		want.BuiltinFacades[i] = diagnoseFacade{Engine: want.BuiltinFacades[i].Engine, Status: diagnoseUnavailable}
 	}
 	assertReport(t, got, want, diagnoseExitIncomplete)
-	assertCalls(t, f.calls, wantDiagnoseSequence()[:4])
+	assertCalls(t, f.calls, wantDiagnoseSequence()[:3+diagnoseFacadeIndex(t, engines.NameLlamaCPP)])
 }
 
 func TestDiagnoseUsageErrorsDoNotDial(t *testing.T) {
@@ -890,7 +899,7 @@ func TestDiagnoseEndpointFailures(t *testing.T) {
 	test("error answer for a facade", facadeMethod(t, engines.NameLlamaCPP),
 		diagnoseReply{frames: []string{`{"jsonrpc":"2.0","id":%s,"error":{"code":-32000,"message":"` + sentinelError + `"}}`}},
 		func(r *diagnoseReport) {
-			r.BuiltinFacades[2] = diagnoseFacade{Engine: engines.NameLlamaCPP, Status: diagnoseUnavailable}
+			r.BuiltinFacades[diagnoseFacadeIndex(t, engines.NameLlamaCPP)] = diagnoseFacade{Engine: engines.NameLlamaCPP, Status: diagnoseUnavailable}
 		})
 }
 
@@ -919,7 +928,7 @@ func TestControlCommandsKeepSkippingMalformedReplies(t *testing.T) {
 
 func TestDiagnoseContextEndClosesTheSlowConnection(t *testing.T) {
 	healthy := healthyReplies(t)
-	slow := facadeMethod(t, engines.NameOllama)
+	slow := facadeMethod(t, engines.NameLlamaCPP)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	fixture := newDiagnoseFixture(t, func(m string) diagnoseReply {
@@ -943,12 +952,17 @@ func TestDiagnoseContextEndClosesTheSlowConnection(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 		t.Fatalf("decode JSON report: %v", err)
 	}
-	for _, f := range report.BuiltinFacades {
-		if f.Status != diagnoseUnavailable {
-			t.Fatalf("facade %s status = %s, want unavailable after the deadline", f.Engine, f.Status)
+	for i, f := range report.BuiltinFacades {
+		want := diagnoseKnown
+		if i >= diagnoseFacadeIndex(t, engines.NameLlamaCPP) {
+			want = diagnoseUnavailable
+		}
+		if f.Status != want {
+			t.Fatalf("facade %s status = %s, want %s", f.Engine, f.Status, want)
 		}
 	}
-	assertCalls(t, fixture.recorded(), wantDiagnoseSequence()[:3])
+	connections := 3 + diagnoseFacadeIndex(t, engines.NameLlamaCPP)
+	assertCalls(t, fixture.recorded(), wantDiagnoseSequence()[:connections])
 	// Both answered connections and the unanswered one were closed by the client.
-	waitClosedByClient(t, fixture, 3)
+	waitClosedByClient(t, fixture, connections)
 }

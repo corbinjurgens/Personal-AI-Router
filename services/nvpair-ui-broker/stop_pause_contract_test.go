@@ -214,7 +214,7 @@ func TestStopPauseContractConfiguredDrainPreservesPolicy(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			rb := newRoutedBroker(t)
 			before := rb.b.localPolicy().Policy
-			rb.b.observeIntent(map[string]bool{"ollama": true, "llamacpp": false})
+			rb.b.observeIntent(map[string]bool{"llamacpp": true, "llamacpp-custom": false})
 			rb.b.observeAdmission(nodepolicy.AdmissionState{Active: 1})
 			type outcome struct {
 				result any
@@ -264,7 +264,7 @@ func TestStopPauseContractConfiguredDrainPreservesPolicy(t *testing.T) {
 			if !reflect.DeepEqual(disk, after) {
 				t.Fatal("saved policy differs from authoritative snapshot")
 			}
-			requirePolicyIntent(t, rb.b, map[string]bool{"ollama": true, "llamacpp": false})
+			requirePolicyIntent(t, rb.b, map[string]bool{"llamacpp": true, "llamacpp-custom": false})
 			resumed, err := rb.b.dispatchPolicy(context.Background(), methodSetAvailability, policyParams{State: "available"})
 			if err != nil {
 				t.Fatal(err)

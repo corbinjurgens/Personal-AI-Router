@@ -41,9 +41,7 @@ var openAICompatibleInference = map[string]bool{
 
 // embeddingsRoutes are the inference routes that need an embeddings model.
 var embeddingsRoutes = map[string]bool{
-	"/v1/embeddings":  true,
-	"/api/embed":      true,
-	"/api/embeddings": true,
+	"/v1/embeddings": true,
 }
 
 // requestNeeds is what a request requires of the model that answers it.
@@ -61,8 +59,8 @@ func (n requestNeeds) names() []string {
 	return out
 }
 
-// parseRequestNeeds reads a buffered request, in either the OpenAI or the
-// Ollama shape, for the capabilities and context it needs. A body that is not
+// parseRequestNeeds reads a buffered request for the capabilities and context
+// it needs. A body that is not
 // JSON needs nothing beyond its size.
 func parseRequestNeeds(body []byte, path string) requestNeeds {
 	needs, _ := parseRequestNeedsOwned(nil, body, path)
@@ -635,16 +633,15 @@ func aliasRejection(model string, inference bool) (reason string, rejected bool)
 }
 
 // modelDetailPrefixes are the path prefixes whose remainder names one model, as
-// in LM Studio's /v1/models/<id> and /api/v0/models/<id>.
-var modelDetailPrefixes = []string{"/v1/models/", "/api/v0/models/"}
+// in /v1/models/<id>.
+var modelDetailPrefixes = []string{"/v1/models/"}
 
 // requestAliasRejection is the refusal decision for one request. It applies
 // aliasRejection to the body's "model" as the router reads it, and refuses a
 // -api or -local alias in any other place an engine could read a model name
 // from, because an engine may read a different one than the router does:
 //   - every top-level JSON key equal under strings.EqualFold to "model" or
-//     "name", counting repeated keys (Ollama's /api/pull, /api/show,
-//     /api/delete and /api/create read "name");
+//     "name", counting repeated keys;
 //   - every "model" query parameter (llama.cpp's GET /props?model=...);
 //   - the remainder of a model-detail path (modelDetailPrefixes).
 //

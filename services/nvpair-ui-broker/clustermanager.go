@@ -25,7 +25,7 @@ import (
 const clusterManagerCallTimeout = 30 * time.Second
 
 // clusterManagerProcess is the broker's handle on its child
-// nvpair-cluster-manager. Like ollama-proxy it is a full bidirectional JSON-RPC
+// nvpair-cluster-manager. Like the proxy it is a full bidirectional JSON-RPC
 // peer: it answers id-bearing cluster:* / nodes:* requests and pushes
 // cluster:invite-received / cluster:invite-declined / cluster:identity-changed /
 // nodes:changed (and any other cluster:* notifications) through to the client.

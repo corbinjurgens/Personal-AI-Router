@@ -72,8 +72,8 @@ func TestRoutingIdentityProcess(t *testing.T) {
 	t.Run("late peer old-run frames have no effect and peer cancel reaches owner", func(t *testing.T) {
 		cluster := newInterNodeCluster(t)
 		ports := reserveFixtureServicePorts(t)
-		engine := newRoutingIdentityEngine(t, "departed-run-model", "application/x-ndjson",
-			`{"message":{"role":"assistant","content":"ready"},"done":false}`+"\n")
+		engine := newRoutingIdentityEngine(t, "departed-run-model", "text/event-stream",
+			`data: {"id":"fixture","model":"departed-run-model","choices":[{"index":0,"delta":{"role":"assistant","content":"ready"},"finish_reason":null}]}`+"\n\n")
 		f := routingIdentityBroker(t, cluster.nodeDir, ports, engine.port)
 		pid := mustPid(t, waitForStderr(t, f.proxyLines, proxyPidRe, 10*time.Second))
 		firstRequest := f.startRequest(t)
@@ -94,7 +94,7 @@ func TestRoutingIdentityProcess(t *testing.T) {
 		if replacementPID == pid {
 			t.Fatal("supervisor did not replace the proxy process")
 		}
-		f.port = waitProxyReady(t, f.stdin, f.control, 15*time.Second)
+		f.port = waitEngineProxyReady(t, "llamacpp-proxy", f.stdin, f.control, 15*time.Second)
 		f.selectEngine(t)
 		secondRequest := f.startRequest(t)
 		current := waitDepartedRunFrame(t, f.events, "workloads:upsert", 15*time.Second, func(p departedRunParams) bool {
@@ -279,7 +279,7 @@ func newRoutingIdentityEngine(t *testing.T, model, contentType, chunk string) *r
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		if r.Method != http.MethodPost || (r.URL.Path != "/api/chat" && r.URL.Path != "/v1/chat/completions") || body.Model != model {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/chat/completions" || body.Model != model {
 			t.Errorf("unexpected identity engine route: method=%s path=%s model=%q", r.Method, r.URL.Path, body.Model)
 			w.WriteHeader(http.StatusBadRequest)
 			return
@@ -377,7 +377,7 @@ func routingIdentityBroker(t *testing.T, clusterDir string, ports fixtureService
 	var cancel context.CancelFunc
 	f.ctx, cancel = context.WithCancel(context.Background())
 	configDir := routingIdentityAppDir(t)
-	writePrivateBrokerEngineSettings(t, configDir, clusterDir, map[string]int{"ollama": freePort(t)})
+	writePrivateBrokerEngineSettings(t, configDir, clusterDir, map[string]int{"llamacpp": freePort(t)})
 	self, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -385,10 +385,10 @@ func routingIdentityBroker(t *testing.T, clusterDir string, ports fixtureService
 	scanner := filepath.Join(testbin.Dir(t, "tests", "subscription-scanner", "subscription-scanner"), testbin.Exe("subscription-scanner"))
 	jointCopyExecutable(t, self, scanner)
 	stdin, messages, stderr, cleanup := startBrokerWithPorts(t, configDir, clusterDir,
-		[]string{"OLLAMA_HOST=", "NVPAIR_TEST_SUBSCRIPTION_SCANNER=" + scanner,
+		[]string{"NVPAIR_TEST_SUBSCRIPTION_SCANNER=" + scanner,
 			"NVPAIR_TEST_SUBSCRIPTION_PORT=" + strconv.Itoa(freePort(t))}, ports,
 		"--scanner-path", scanner, "--engine-manager-path", engineMgrBin,
-		"--proxy-path", proxyBin, "--proxy-engines", "ollama", "--workload-manager-path", workloadMgrBin)
+		"--proxy-path", proxyBin, "--proxy-engines", "llamacpp", "--workload-manager-path", workloadMgrBin)
 	f.stdin = stdin
 	control, events, lines := make(chan jsonrpc.Message, 64), make(chan jsonrpc.Message, 64), make(chan string, 8)
 	f.control, f.events, f.proxyLines = control, events, lines
@@ -451,7 +451,7 @@ func routingIdentityBroker(t *testing.T, clusterDir string, ports fixtureService
 	if !subscription.Subscribed {
 		t.Fatal("identity broker did not acknowledge workload subscription")
 	}
-	f.port = waitProxyReady(t, f.stdin, f.control, 15*time.Second)
+	f.port = waitEngineProxyReady(t, "llamacpp-proxy", f.stdin, f.control, 15*time.Second)
 	f.selectEngine(t)
 	return f
 }

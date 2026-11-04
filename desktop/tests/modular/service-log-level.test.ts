@@ -18,7 +18,7 @@ describe('serviceLogLevel', () => {
         const cases: [string, string][] = [
             ['10:57:00.123 [nvpair-node-scanner] DEBUG browse tick ifaces=3', 'verbose'],
             ['10:57:00.123 [nvpair-node-scanner] INFO advertised addresses re-ranked', 'info'],
-            ['10:57:00.123 [ollama-proxy] WARN upstream refused connection', 'warn'],
+            ['10:57:00.123 [llamacpp-proxy] WARN upstream refused connection', 'warn'],
             ['10:57:00.123 [nvpair-ui-broker] ERROR worker exited code=2', 'error']
         ]
         for (const [line, want] of cases) {

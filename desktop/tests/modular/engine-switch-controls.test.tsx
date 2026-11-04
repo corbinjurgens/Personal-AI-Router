@@ -4,8 +4,8 @@
 
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { customEngine } from './engine-fixtures'
 import type { PreloadServiceTransport } from '@/shared/types/service-bridge'
 import type { SwitchReceipt, SwitchRequest } from '@/shared/types/engine-switch'
 import type { NodePolicyDocument } from '@/shared/types/node-policy'
@@ -36,14 +36,14 @@ it('labels automatic activity while retaining request and phase evidence', async
     expect(container.textContent).toContain('observed')
 })
 const engines = [
-    { value: 'ollama', children: 'Ollama' },
-    { value: 'llamacpp', children: 'llama.cpp' }
+    { value: 'llamacpp', children: 'llama.cpp' },
+    { value: 'llamacpp-custom', children: 'llama.cpp custom' }
 ]
 const request: SwitchRequest = {
     nodeId: 'node-a',
     requestId: 'observed',
-    sourceEngine: 'ollama',
-    targetEngine: 'llamacpp',
+    sourceEngine: 'llamacpp',
+    targetEngine: 'llamacpp-custom',
     expectedRevision: revision
 }
 function receipt(changes: Partial<SwitchReceipt> = {}): SwitchReceipt {
@@ -164,8 +164,8 @@ describe('engine switch controls in node settings', () => {
             expect(fieldLabel?.textContent).toBe(label)
             expect(box.getAttribute('aria-labelledby')).toBe(fieldLabel?.id)
         }
-        await select(0, 'ollama')
-        await select(1, 'llamacpp')
+        await select(0, 'llamacpp')
+        await select(1, 'llamacpp-custom')
         expect(submit().disabled).toBe(false)
         invoke.mockResolvedValueOnce({ success: true, data: { configurationRevision: 'fresh' } })
         await act(async () => submit().click())
@@ -176,8 +176,8 @@ describe('engine switch controls in node settings', () => {
                 {
                     nodeId: 'node-a',
                     requestId: expect.any(String),
-                    sourceEngine: 'ollama',
-                    targetEngine: 'llamacpp',
+                    sourceEngine: 'llamacpp',
+                    targetEngine: 'llamacpp-custom',
                     expectedRevision: 'fresh'
                 }
             ]
@@ -189,8 +189,8 @@ describe('engine switch controls in node settings', () => {
     it('empty and equal selections disable submit and send no writes', async () => {
         await mount()
         await act(async () => submit().click())
-        await select(0, 'ollama')
-        await select(1, 'ollama')
+        await select(0, 'llamacpp')
+        await select(1, 'llamacpp')
         expect(submit().disabled).toBe(true)
         expect(container.textContent).toContain('must be different')
         await act(async () => submit().click())
@@ -200,8 +200,8 @@ describe('engine switch controls in node settings', () => {
     })
     it('lost response shows unknown outcome and retains the original request without resend', async () => {
         await mount()
-        await select(0, 'ollama')
-        await select(1, 'llamacpp')
+        await select(0, 'llamacpp')
+        await select(1, 'llamacpp-custom')
         invoke.mockResolvedValueOnce({ success: true, data: { configurationRevision: revision } })
         invoke.mockResolvedValueOnce({ success: false, error: 'lost response' })
         await act(async () => submit().click())
@@ -225,8 +225,8 @@ describe('engine switch controls in node settings', () => {
             revision: '1'
         })
         await mount()
-        await select(0, 'ollama')
-        await select(1, 'llamacpp')
+        await select(0, 'llamacpp')
+        await select(1, 'llamacpp-custom')
         expect(submit().disabled).toBe(true)
         expect(container.textContent).toContain('has not granted remote management')
 
@@ -240,8 +240,8 @@ describe('engine switch controls in node settings', () => {
 
         expect(submit().disabled).toBe(false)
         expect(container.textContent).not.toContain('has not granted remote management')
-        expect(container.querySelector('[aria-label="From"]')?.textContent).toBe('Ollama')
-        expect(container.querySelector('[aria-label="To"]')?.textContent).toBe('llama.cpp')
+        expect(container.querySelector('[aria-label="From"]')?.textContent).toBe('llama.cpp')
+        expect(container.querySelector('[aria-label="To"]')?.textContent).toBe('llama.cpp custom')
         expect(useConnectionStore.getState().connected).toBe(true)
         expect(invoke.mock.calls.filter(([channel]) => channel === 'engines:switch')).toHaveLength(
             0
@@ -251,8 +251,8 @@ describe('engine switch controls in node settings', () => {
     it('permission revoked after selection retains draft and disables mutation', async () => {
         useConnectionStore.setState({ selfId: 'self' })
         await mount()
-        await select(0, 'ollama')
-        await select(1, 'llamacpp')
+        await select(0, 'llamacpp')
+        await select(1, 'llamacpp-custom')
         expect(submit().disabled).toBe(false)
         await act(async () =>
             useNodeConfigurationStore.setState({
@@ -270,7 +270,7 @@ describe('engine switch controls in node settings', () => {
         )
         expect(submit().disabled).toBe(true)
         expect(container.textContent).toContain('Remote management blocked')
-        expect(container.querySelector('[aria-label="From"]')?.textContent).toBe('Ollama')
+        expect(container.querySelector('[aria-label="From"]')?.textContent).toBe('llama.cpp')
         await act(async () => submit().click())
         expect(invoke.mock.calls.filter(([channel]) => channel === 'engines:switch')).toHaveLength(
             0
@@ -279,8 +279,8 @@ describe('engine switch controls in node settings', () => {
     it('pre-acceptance denial shows the actual refusal and permits a deliberate retry after permission readback', async () => {
         useConnectionStore.setState({ selfId: 'self' })
         await mount()
-        await select(0, 'ollama')
-        await select(1, 'llamacpp')
+        await select(0, 'llamacpp')
+        await select(1, 'llamacpp-custom')
         permission.mockResolvedValueOnce({
             version: 1,
             allowed: true,
@@ -312,12 +312,12 @@ describe('engine switch controls in node settings', () => {
             'refused before acceptance: remote management not permitted'
         )
         expect(container.textContent).not.toContain('outcome unknown')
-        expect(container.querySelector('[aria-label="From"]')?.textContent).toBe('Ollama')
-        expect(container.querySelector('[aria-label="To"]')?.textContent).toBe('llama.cpp')
+        expect(container.querySelector('[aria-label="From"]')?.textContent).toBe('llama.cpp')
+        expect(container.querySelector('[aria-label="To"]')?.textContent).toBe('llama.cpp custom')
         expect(submit().disabled).toBe(true)
         expect(permission).toHaveBeenCalledTimes(4)
-        expect(useEngineSwitchStore.getState().reserved('node-a', 'ollama')).toBe(false)
         expect(useEngineSwitchStore.getState().reserved('node-a', 'llamacpp')).toBe(false)
+        expect(useEngineSwitchStore.getState().reserved('node-a', 'llamacpp-custom')).toBe(false)
         permission.mockResolvedValue({ version: 1, allowed: true, state: 'allowed', revision: '3' })
         await act(async () =>
             useNodeConfigurationStore.getState().readManagement('node-a', 'node-a')
@@ -342,16 +342,16 @@ describe('engine switch controls in node settings', () => {
     })
     it('source and target identity survives engine list reorder', async () => {
         await mount()
-        await select(0, 'ollama')
-        await select(1, 'llamacpp')
+        await select(0, 'llamacpp')
+        await select(1, 'llamacpp-custom')
         await mount('node-a', [...engines].reverse())
-        expect(container.querySelector('[aria-label="From"]')?.textContent).toBe('Ollama')
-        expect(container.querySelector('[aria-label="To"]')?.textContent).toBe('llama.cpp')
+        expect(container.querySelector('[aria-label="From"]')?.textContent).toBe('llama.cpp')
+        expect(container.querySelector('[aria-label="To"]')?.textContent).toBe('llama.cpp custom')
         invoke.mockResolvedValueOnce({ success: true, data: { configurationRevision: revision } })
         await act(async () => submit().click())
         expect(invoke).toHaveBeenLastCalledWith(
             'engines:switch',
-            expect.objectContaining({ sourceEngine: 'ollama', targetEngine: 'llamacpp' })
+            expect.objectContaining({ sourceEngine: 'llamacpp', targetEngine: 'llamacpp-custom' })
         )
     })
     it.each([
@@ -447,8 +447,8 @@ describe('engine switch controls in node settings', () => {
             expect(container.textContent).toContain('Recovery required')
             expect(container.textContent).toContain('Observed activity: observed')
             expect(container.textContent).toContain('Phase: failed-validation; sequence 3')
-            expect(container.textContent).toContain('Source ollama:')
-            expect(container.textContent).toContain('Target llamacpp:')
+            expect(container.textContent).toContain('Source llamacpp:')
+            expect(container.textContent).toContain('Target llamacpp-custom:')
             expect(container.textContent).not.toContain('completed')
             expect(submit().disabled).toBe(true)
         }
@@ -459,23 +459,23 @@ describe('engine switch controls in node settings', () => {
                 [
                     'node-a',
                     new Map([
-                        ['llama-cpp', { ...emptyEngineStatus('node-a', 'llama-cpp'), locked: true }]
+                        [customEngine, { ...emptyEngineStatus('node-a', customEngine), locked: true }]
                     ])
                 ]
             ])
         })
         await mount()
         const lists = container.querySelectorAll('[role="listbox"]')
-        expect(lists[0]?.querySelector('button[value="llamacpp"]')).not.toBeNull()
-        expect(lists[1]?.querySelector('button[value="llamacpp"]')).toBeNull()
-        await select(0, 'llamacpp')
-        await select(1, 'ollama')
+        expect(lists[0]?.querySelector('button[value="llamacpp-custom"]')).not.toBeNull()
+        expect(lists[1]?.querySelector('button[value="llamacpp-custom"]')).toBeNull()
+        await select(0, 'llamacpp-custom')
+        await select(1, 'llamacpp')
         expect(submit().disabled).toBe(false)
     })
     it('blocks an already selected target when authoritative lock readback arrives', async () => {
         await mount()
-        await select(0, 'ollama')
-        await select(1, 'llamacpp')
+        await select(0, 'llamacpp')
+        await select(1, 'llamacpp-custom')
         await act(async () =>
             useEngineStatusStore.setState({
                 statusByNode: new Map([
@@ -483,8 +483,8 @@ describe('engine switch controls in node settings', () => {
                         'node-a',
                         new Map([
                             [
-                                'llama-cpp',
-                                { ...emptyEngineStatus('node-a', 'llama-cpp'), locked: true }
+                                customEngine,
+                                { ...emptyEngineStatus('node-a', customEngine), locked: true }
                             ]
                         ])
                     ]
@@ -509,9 +509,9 @@ describe('engine switch controls in node settings', () => {
         )
         expect(container.textContent).toContain('Phase: draining; sequence 3')
         expect(container.textContent).toContain(
-            'Source ollama: Saved intent: Unknown; Runtime: Unknown'
+            'Source llamacpp: Saved intent: Unknown; Runtime: Unknown'
         )
-        expect(container.textContent).toContain('Target llamacpp:')
+        expect(container.textContent).toContain('Target llamacpp-custom:')
         expect(container.textContent).toContain('Health: Unknown')
         expect(container.textContent).toContain('Termination not verified')
         expect(container.textContent).not.toMatch(/completed|\d+%|ETA/)
@@ -545,15 +545,15 @@ describe('engine switch controls in node settings', () => {
             })
         )
         expect(container.textContent).toContain(
-            'Source ollama: Saved intent: On; Runtime: Not running; Health: Unhealthy; Observed: 2026-10-20T00:00:00Z; Termination verified'
+            'Source llamacpp: Saved intent: On; Runtime: Not running; Health: Unhealthy; Observed: 2026-10-20T00:00:00Z; Termination verified'
         )
         expect(container.textContent).toContain(
-            'Target llamacpp: Saved intent: Off; Runtime: Running; Health: Healthy; Observed: Unavailable; Termination not verified'
+            'Target llamacpp-custom: Saved intent: Off; Runtime: Running; Health: Healthy; Observed: Unavailable; Termination not verified'
         )
     })
     it('node change resets selections and ignores old delayed read callback', async () => {
         await mount()
-        await select(0, 'ollama')
+        await select(0, 'llamacpp')
         let resolveOld: (
             result: Awaited<ReturnType<PreloadServiceTransport['invoke']>>
         ) => void = () => {}
@@ -583,8 +583,8 @@ describe('engine switch controls in node settings', () => {
     })
     it('disconnect disables controls and sends no mutation', async () => {
         await mount()
-        await select(0, 'ollama')
-        await select(1, 'llamacpp')
+        await select(0, 'llamacpp')
+        await select(1, 'llamacpp-custom')
         await act(async () => useConnectionStore.setState({ connected: false }))
         expect(submit().disabled).toBe(true)
         expect(container.textContent).toContain('Device disconnected')
@@ -603,8 +603,8 @@ describe('engine switch controls in node settings', () => {
                     nodeId="node-a"
                     statusKnown
                     backend={{
-                        type: 'ollama',
-                        displayName: 'Ollama',
+                        type: 'llama-cpp',
+                        displayName: 'llama.cpp',
                         source: 'detected',
                         processStatus: 'running',
                         port: 12000,
@@ -614,30 +614,30 @@ describe('engine switch controls in node settings', () => {
                 />
             )
         )
-        const off = container.querySelector('[aria-label="Stop Ollama"]')
+        const off = container.querySelector('[aria-label="Stop llama.cpp"]')
         if (!(off instanceof HTMLInputElement)) throw new Error('Local Stop control missing')
         expect(off.disabled).toBe(false)
         await act(async () => off.click())
         expect(invoke).toHaveBeenLastCalledWith('engine:command', {
             command: 'toggle',
-            engineType: 'ollama',
+            engineType: 'llama-cpp',
             nodeId: 'node-a'
         })
     })
-    it('renders the form in the existing node settings with a narrow stacking layout', () => {
+    it('renders the form in the existing node settings with a narrow stacking layout', async () => {
         useEngineStatusStore.setState({
             statusByNode: new Map([
                 [
                     'node-a',
                     new Map([
                         [
-                            'ollama',
-                            { ...emptyEngineStatus('node-a', 'ollama'), processStatus: 'running' }
+                            'llama-cpp',
+                            { ...emptyEngineStatus('node-a', 'llama-cpp'), processStatus: 'running' }
                         ],
                         [
-                            'llama-cpp',
+                            customEngine,
                             {
-                                ...emptyEngineStatus('node-a', 'llama-cpp'),
+                                ...emptyEngineStatus('node-a', customEngine),
                                 processStatus: 'stopped'
                             }
                         ]
@@ -645,12 +645,14 @@ describe('engine switch controls in node settings', () => {
                 ]
             ])
         })
-        const markup = renderToStaticMarkup(<NodeEngineSettings nodeId="node-a" />)
+        useConnectionStore.setState({ connected: false })
+        await act(async () => root.render(<NodeEngineSettings nodeId="node-a" />))
+        const markup = container.innerHTML
         expect(markup).toContain('Switch engine')
         expect(markup).toContain('grid-cols-1 gap-3 sm:grid-cols-2')
         expect(markup).toContain('aria-label="From"')
         expect(markup).toContain('aria-label="To"')
         expect(markup).toContain('Device disconnected. Reconnect before switching.')
-        expect(markup).toContain('value="llamacpp"')
+        expect(markup).toContain('value="llamacpp-custom"')
     })
 })

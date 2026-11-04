@@ -84,9 +84,9 @@ func TestRecoveringManagerReadyReceivesStateProjections(t *testing.T) {
 	r.mu.Lock()
 	r.localPauseRequested = true
 	r.mu.Unlock()
-	want := settings.Snapshot{Engine: "ollama", Revision: 7}
+	want := settings.Snapshot{Engine: "llamacpp", Revision: 7}
 	b.engineSettingsLoaded = true
-	b.engineSettings = map[string]*engineSettingsRecord{"ollama": {Snapshot: want}}
+	b.engineSettings = map[string]*engineSettingsRecord{"llamacpp": {Snapshot: want}}
 	b.forwardEngineNotificationFrom(b.activateEngineManagerSource(), "engine:ready", nil)
 	waitProjections(t, engine, 1)
 	engine.mu.Lock()
@@ -175,8 +175,8 @@ func TestNodeProjectionPublishedOnPersistAvailabilityAndReady(t *testing.T) {
 	_, err := ab.b.dispatchPolicy(context.Background(), methodPolicySet, policyParams{
 		Policy: mustJSON(map[string]any{
 			"version":  nodepolicy.SchemaVersion,
-			"roles":    map[string]any{"weak": map[string]any{"engine": "ollama", "model": "qwen3:4b"}},
-			"profiles": []any{map[string]any{"name": "qwen-small", "engine": "ollama", "model": "qwen3:4b", "contextTokens": 8192, "capabilities": []string{"tools"}}},
+			"roles":    map[string]any{"weak": map[string]any{"engine": "llamacpp", "model": "qwen3:4b"}},
+			"profiles": []any{map[string]any{"name": "qwen-small", "engine": "llamacpp", "model": "qwen3:4b", "contextTokens": 8192, "capabilities": []string{"tools"}}},
 		}),
 		ExpectedPersistedRevision: mustJSON(ab.b.localPolicy().Policy.Revision),
 	})
@@ -187,7 +187,7 @@ func TestNodeProjectionPublishedOnPersistAvailabilityAndReady(t *testing.T) {
 	want := nodepolicy.Advertisement{
 		Revision: ab.b.localPolicy().Policy.Revision,
 		Roles: map[string]nodepolicy.AdvertisedRole{
-			nodepolicy.TierWeak: {Engine: "ollama", Model: "qwen3:4b", ContextTokens: 8192, Capabilities: []nodepolicy.Capability{nodepolicy.CapTools}},
+			nodepolicy.TierWeak: {Engine: "llamacpp", Model: "qwen3:4b", ContextTokens: 8192, Capabilities: []nodepolicy.Capability{nodepolicy.CapTools}},
 		},
 	}
 	if !reflect.DeepEqual(got[0], want) {

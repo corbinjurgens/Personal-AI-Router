@@ -34,8 +34,8 @@ fails validation is ignored as a whole and logged; nothing is qualified from it.
   "qualifications": [{
     "id": "synthetic-example",
     "revision": "1",
-    "engine": "ollama",
-    "model": "example:8b",
+    "engine": "llamacpp",
+    "model": "owner/example-GGUF:Q4_K_M",
     "modelDigests": ["1111111111111111111111111111111111111111111111111111111111111111"],
     "launchDigests": ["2222222222222222222222222222222222222222222222222222222222222222"],
     "requestOptions": {"temperature": 0},
@@ -66,7 +66,7 @@ fails validation is ignored as a whole and logged; nothing is qualified from it.
 | `version` | Document schema integer `2`; older evidence is not migrated automatically. |
 | `id`, `revision` | Identity of this qualification. A profile names exactly one id and revision. |
 | `engine`, `model` | The engine and model; the model is compared after the engine's naming normalization. |
-| `modelDigests` | Content identities of the model the bounds hold for. Ollama uses its `/api/tags` digest; NE uses the aggregate artifact manifest digest described below. |
+| `modelDigests` | Content identities of the model the bounds hold for. An engine whose inventory declares a digest supplies it; NE uses the aggregate artifact manifest digest described below. |
 | `launchDigests` | Launches the bounds hold for (Identity, below). |
 | `requestOptions` | The profile defaults the bounds were measured with. The profile's `requestOptions` must be equal. |
 | `requestOptionsMode` | The request precedence the evidence covers: `defaults` when omitted, or `enforced`. The profile's effective mode must match. |
@@ -121,7 +121,7 @@ real template. Replay is refused and has no accepted input accounting today.
 A model opts in through its profile in the node policy:
 
 ```json
-{"name": "example", "engine": "ollama", "model": "example:8b",
+{"name": "example", "engine": "llamacpp", "model": "owner/example-GGUF:Q4_K_M",
  "contextTokens": 8192, "maxOutputTokens": 2048, "maxConcurrent": 1,
  "qualification": {"id": "synthetic-example", "revision": "1"},
  "requestOptions": {"temperature": 0}}
@@ -160,8 +160,8 @@ The separate `localOnly` flag is already a target-owned policy-edit lock. It
 does not supply qualification, force a request value or install capacity.
 See the [broker contract](../services/nvpair-ui-broker/README.md#model-inference-settings-and-target-owned-locks)
 for administrative rules and the shared-draft desktop editor. Typed numeric
-fields target llama.cpp and LM Studio, with typed `min_p` only for llama.cpp.
-Advanced policy JSON preserves uncommon and Ollama-native settings but does
+fields target llama.cpp, including typed `min_p`.
+Advanced policy JSON preserves uncommon and engine-native settings but does
 not establish engine-specific sampler acceptance. An engine-rejected enforced
 value can make every request fail until corrected. Model-card values are
 per-model starting points, not product defaults or qualification evidence.
@@ -196,7 +196,7 @@ profile concurrency must not exceed its slots, and the profile's `memoryBytes`
 must be at least the explicitly declared `vramBytes`. Equality is accepted.
 Host RAM remains a separate declared domain; it is not added to VRAM for this
 comparison. A nil `serving` map retains the existing non-NE qualification and
-digest rules, including Ollama's inventory digests.
+digest rules, including inventory digests.
 
 The installed entry carries the identity `{engineRunId, settingsFingerprint,
 modelDigest}` that a strict request must name. When any input changes, the entry
@@ -330,8 +330,8 @@ which is how a qualifying operator records it. The inherited environment of the
 service is not part of it.
 
 For engines without an NE serving declaration, model content digests come from the engine's own inventory when its manifest's
-`list_models` result declares a `digest` field (Ollama does). Other engines report
-none, so their models are not installed. Engines that declare one are listed on
+`list_models` result declares a `digest` field. Other engines, including
+llama.cpp, report none, so their models are not installed. Engines that declare one are listed on
 every watcher tick, and each digest is reported only with the run it was listed
 under. An approved NE owned launch instead derives content from its declared
 artifact manifest, as described below; inventory cannot replace that identity.

@@ -98,7 +98,7 @@ func TestToDirectoryNode(t *testing.T) {
 		ID:        "hostA",
 		Host:      "hostA.local.",
 		Addresses: []string{"10.221.0.9", "192.168.1.10"},
-		TXT:       []string{"v=1", "uuid=host-uuid", "cluster-uuid=clu", "ip=192.168.1.10", "ni=14318", "ol=11434"},
+		TXT:       []string{"v=1", "uuid=host-uuid", "cluster-uuid=clu", "ip=192.168.1.10", "ni=14318", "lc=8080"},
 	}
 	n, ok := toDirectoryNode(raw, true)
 	if !ok {
@@ -116,11 +116,11 @@ func TestToDirectoryNode(t *testing.T) {
 	if !n.Trusted {
 		t.Error("Trusted should reflect the caller-supplied flag")
 	}
-	if !n.HasService(noderec.ServiceNodeInfo) || !n.HasService(noderec.ServiceOllama) {
+	if !n.HasService(noderec.ServiceNodeInfo) || !n.HasService(noderec.ServiceLlamaCPP) {
 		t.Errorf("services wrong: %+v", n.Services)
 	}
-	if n.Services[noderec.ServiceOllama].Port != 11434 {
-		t.Errorf("ol port = %d", n.Services[noderec.ServiceOllama].Port)
+	if n.Services[noderec.ServiceLlamaCPP].Port != 8080 {
+		t.Errorf("ol port = %d", n.Services[noderec.ServiceLlamaCPP].Port)
 	}
 }
 
@@ -135,7 +135,7 @@ func TestToDirectoryNodeIgnoresSRVPort(t *testing.T) {
 		Host:      "hostC.local.",
 		Port:      65000, // bogus SRV port — must be ignored
 		Addresses: []string{"192.168.1.30"},
-		TXT:       []string{"v=1", "uuid=host-c", "ip=192.168.1.30", "ni=14318", "ol=11434"},
+		TXT:       []string{"v=1", "uuid=host-c", "ip=192.168.1.30", "ni=14318", "lc=8080"},
 	}
 	n, ok := toDirectoryNode(raw, false)
 	if !ok {
@@ -144,8 +144,8 @@ func TestToDirectoryNodeIgnoresSRVPort(t *testing.T) {
 	if got := n.Services[noderec.ServiceNodeInfo].Port; got != 14318 {
 		t.Errorf("ni port = %d, want 14318 from TXT (SRV port 65000 must be ignored)", got)
 	}
-	if got := n.Services[noderec.ServiceOllama].Port; got != 11434 {
-		t.Errorf("ol port = %d, want 11434 from TXT", got)
+	if got := n.Services[noderec.ServiceLlamaCPP].Port; got != 8080 {
+		t.Errorf("ol port = %d, want 8080 from TXT", got)
 	}
 	for svc, st := range n.Services {
 		if st.Port == 65000 {
@@ -241,7 +241,7 @@ func TestToDirectoryNodeUnionsUnpublishedAddresses(t *testing.T) {
 
 func TestDirectoryUpsertRemoveSnapshot(t *testing.T) {
 	d := newDirectory()
-	a := noderec.DirectoryNode{HostUUID: "a", Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceOllama: {Port: 11434}}}
+	a := noderec.DirectoryNode{HostUUID: "a", Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceLlamaCPP: {Port: 8080}}}
 	b := noderec.DirectoryNode{HostUUID: "b", Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceErrors: {Port: 14319}}}
 
 	if !d.upsert(a) {
@@ -256,7 +256,7 @@ func TestDirectoryUpsertRemoveSnapshot(t *testing.T) {
 		t.Fatalf("snapshot(all) = %+v, want [a b] sorted", all)
 	}
 	// Service filter.
-	if ol := d.snapshot(noderec.ServiceOllama); len(ol) != 1 || ol[0].HostUUID != "a" {
+	if ol := d.snapshot(noderec.ServiceLlamaCPP); len(ol) != 1 || ol[0].HostUUID != "a" {
 		t.Fatalf("snapshot(ol) = %+v, want [a]", ol)
 	}
 	if !d.remove("a") {

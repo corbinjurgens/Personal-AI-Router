@@ -56,20 +56,6 @@ func TestBuiltInProfilesAreUnchanged(t *testing.T) {
 	openAI := []route{post("/v1/chat/completions"), post("/v1/completions"), post("/v1/embeddings")}
 	want := []engineProfile{
 		{
-			Engine: engines.Engine{Name: "ollama", DisplayName: "Ollama", DiscoveryService: "ol", FacadePort: 11434, EnginePortBase: 11435, PortFile: "proxy-port.json"},
-			Routes: slices.Concat([]route{
-				post("/api/generate"), post("/api/chat"), post("/api/embeddings"), post("/api/embed"),
-				{Path: "/api/tags", Role: roleModelListNativeGET},
-				{Path: "/v1/models", Role: roleModelListOpenAIGET},
-			}, openAI, []route{post("/v1/messages")}),
-			StandalonePort: 11435, ModelNaming: impliedLatestTag, SupportsHostAlias: true,
-		},
-		{
-			Engine:         engines.Engine{Name: "lmstudio", DisplayName: "LM Studio", DiscoveryService: "lm", FacadePort: 1234, EnginePortBase: 1235, PortFile: "lmstudio-proxy-port.json"},
-			Routes:         slices.Concat([]route{{Path: "/v1/models", Role: roleModelListOpenAIGET}}, openAI, []route{post("/v1/messages")}),
-			StandalonePort: 1234, ModelNaming: exactID, ReservedPersistedPort: 1235,
-		},
-		{
 			Engine: engines.Engine{Name: "llamacpp", DisplayName: "llama.cpp", DiscoveryService: "lc", FacadePort: 8080, EnginePortBase: 8081, PortFile: "llamacpp-proxy-port.json"},
 			Routes: slices.Concat([]route{
 				{Path: "/models", Role: roleModelListOpenAIGET},
@@ -91,25 +77,14 @@ func TestBuiltInProfilesAreUnchanged(t *testing.T) {
 	}
 }
 
-func TestProtocolRoutesCoverFacadeProtocols(t *testing.T) {
-	for _, protocol := range engines.FacadeProtocols() {
-		if len(protocolRoutes[protocol]) == 0 {
-			t.Errorf("facade protocol %q has no routes", protocol)
-		}
-	}
-	if len(protocolRoutes) != len(engines.FacadeProtocols()) {
-		t.Errorf("protocolRoutes has %d entries, engines.FacadeProtocols %d", len(protocolRoutes), len(engines.FacadeProtocols()))
-	}
-}
-
 func TestDynamicProfileFromDescriptor(t *testing.T) {
 	t.Run("llama.cpp fork", func(t *testing.T) {
 		p := customProfile(t)
 		if p.Name != "llamacpp-custom" || p.DiscoveryService != "e-llamacpp-custom" || p.PortFile != "llamacpp-custom-proxy-port.json" || !p.dynamic() {
 			t.Fatalf("identity = %+v", p.Engine)
 		}
-		if p.StandalonePort != 0 || p.ReservedPersistedPort != 0 || p.SupportsHostAlias || p.FacadePort != 0 {
-			t.Fatalf("dynamic profile borrowed fixed ports or alias support: %+v", p)
+		if p.StandalonePort != 0 || p.ReservedPersistedPort != 0 || p.FacadePort != 0 {
+			t.Fatalf("dynamic profile borrowed fixed ports: %+v", p)
 		}
 		// The router list wins /v1/models even though openai-v1 is declared first.
 		if r, ok := p.routeFor(http.MethodGet, "/v1/models"); !ok || r.upstreamPath() != "/models" {
@@ -139,23 +114,7 @@ func TestDynamicProfileFromDescriptor(t *testing.T) {
 			t.Fatalf("routes = %+v, want %+v", p.Routes, want)
 		}
 	})
-	t.Run("ollama api fork", func(t *testing.T) {
-		d := customDescriptor()
-		d.Engine, d.Family, d.Protocols, d.ModelNaming = "ollama-fork", engines.NameOllama, []string{engines.ProtocolOllamaAPI, engines.ProtocolOpenAIV1}, engines.ModelNamingImpliedLatestTag
-		p, err := dynamicProfile(d)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if role, ok := p.roleFor(http.MethodGet, "/api/tags"); !ok || role != roleModelListNativeGET {
-			t.Fatal("native model list missing")
-		}
-		if role, ok := p.roleFor(http.MethodGet, "/v1/models"); !ok || role != roleModelListOpenAIGET {
-			t.Fatal("OpenAI model list missing")
-		}
-		if got := p.normalizeModel("llama3"); got != "llama3:latest" {
-			t.Fatalf("implied-tag naming gave %q", got)
-		}
-	})
+
 }
 
 // Every way of asking for a facade the proxy cannot honour is refused before a
@@ -189,7 +148,6 @@ func TestEnableFacadeFailsClosed(t *testing.T) {
 		{"unknown descriptor version", enableFacadeParams{Engine: "llamacpp-custom", Port: 1, Descriptor: &newer}, "version"},
 		{"overlong id", enableFacadeParams{Engine: long.Engine, Port: 1, Descriptor: &long}, "at most"},
 		{"no port", enableFacadeParams{Engine: "llamacpp-custom", Descriptor: &custom}, "explicit facade port"},
-		{"alias on a dynamic engine", enableFacadeParams{Engine: "llamacpp-custom", Port: 1, Descriptor: &custom, AliasAddresses: []string{"127.0.0.2"}}, "alias"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := p.enableFacade(tc.params); err == nil || !strings.Contains(err.Error(), tc.want) {
@@ -313,5 +271,21 @@ func TestDynamicFacadeRoutesToPinnedPeer(t *testing.T) {
 				t.Fatal("direct path was not tried first")
 			}
 		})
+	}
+}
+
+func TestProtocolRoutesMatchSupportedProtocols(t *testing.T) {
+	want := []string{engines.ProtocolOpenAIV1, engines.ProtocolOpenAIChat, engines.ProtocolAnthropicMessages, engines.ProtocolLlamaCPPRouter}
+	got := make([]string, 0, len(protocolRoutes))
+	for protocol, routes := range protocolRoutes {
+		if len(routes) == 0 {
+			t.Errorf("protocol %q has no routes", protocol)
+		}
+		got = append(got, protocol)
+	}
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Fatalf("protocol routes = %v, want %v", got, want)
 	}
 }

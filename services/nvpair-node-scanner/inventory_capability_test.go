@@ -15,18 +15,18 @@ import (
 	"nvpair-shared/noderec"
 )
 
-// strictModelJSON is one valid version-1 capability entry for model on ollama.
+// strictModelJSON is one valid version-1 capability entry for model on llamacpp.
 func strictModelJSON(model string) string {
-	return `{"engine":"ollama","model":"` + model + `","maxConcurrent":1,"identity":{"engineRunId":"engine-run-1","settingsFingerprint":"` +
+	return `{"engine":"llamacpp","model":"` + model + `","maxConcurrent":1,"identity":{"engineRunId":"engine-run-1","settingsFingerprint":"` +
 		strings.Repeat("a", 64) + `","modelDigest":"` + strings.Repeat("b", 64) + `"}}`
 }
 
-// validStrictJSON is a valid version-1 capability for model on ollama.
+// validStrictJSON is a valid version-1 capability for model on llamacpp.
 func validStrictJSON(model string) string {
 	return `{"version":1,"models":[` + strictModelJSON(model) + `]}`
 }
 
-const capabilityRoles = `{"medium":{"engine":"ollama","model":"model","contextTokens":16384}}`
+const capabilityRoles = `{"medium":{"engine":"llamacpp","model":"model","contextTokens":16384}}`
 
 // policyWith is a policy advertisement with the fixture's roles and extra
 // top-level members.
@@ -38,13 +38,13 @@ func policyWith(extra string) json.RawMessage {
 	return json.RawMessage(doc + "}")
 }
 
-var capabilityTestRoles = map[string]nodepolicy.AdvertisedRole{nodepolicy.TierMedium: {Engine: "ollama", Model: "model", ContextTokens: 16384}}
+var capabilityTestRoles = map[string]nodepolicy.AdvertisedRole{nodepolicy.TierMedium: {Engine: "llamacpp", Model: "model", ContextTokens: 16384}}
 
 func TestServedResidentInventoryCacheRoundTrip(t *testing.T) {
 	for _, tc := range []struct{ name, extra string }{
 		{"absent permission", ""},
 		{"deny all", `"servedModels":[]`},
-		{"restricted permission", `"servedModels":[{"engine":"ollama","model":"model"}]`},
+		{"restricted permission", `"servedModels":[{"engine":"llamacpp","model":"model"}]`},
 		{"malformed capability retains deny all", `"servedModels":[],"strictAdmission":{"version":1,"models":[]}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -85,7 +85,7 @@ func TestServedResidentInvalidAdvertisementKeepsLastGood(t *testing.T) {
 		{"null permission", `"servedModels":null`},
 		{"case variant permission", `"ServedModels":[]`},
 		{"duplicate permission", `"servedModels":[],"servedModels":[]`},
-		{"malformed reference", `"servedModels":[{"engine":"ollama"}]`},
+		{"malformed reference", `"servedModels":[{"engine":"llamacpp"}]`},
 		{"aliased capability with deny all", `"servedModels":[],"StrictAdmission":{"version":2}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -183,7 +183,7 @@ func TestDecodeInventoryPolicy(t *testing.T) {
 // advertisement nor its capability: the hint alone is dropped, and the role
 // is then not hybrid eligible.
 func TestDecodeInventoryPolicyKeepsRolesWithMalformedQualification(t *testing.T) {
-	raw := json.RawMessage(`{"revision":"31","roles":{"medium":{"engine":"ollama","model":"model","contextTokens":16384,` +
+	raw := json.RawMessage(`{"revision":"31","roles":{"medium":{"engine":"llamacpp","model":"model","contextTokens":16384,` +
 		`"maxOutputTokens":"lots","qualification":["q","1"]}},"strictAdmission":` + validStrictJSON("m:latest") + `}`)
 	adv, rejected, err := decodeInventoryPolicy(raw)
 	if err != nil || rejected != "" || adv == nil {

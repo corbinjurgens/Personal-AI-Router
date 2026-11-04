@@ -21,6 +21,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"nvpair-shared/engines"
 )
 
 type engineCase struct {
@@ -47,47 +49,58 @@ type engineCase struct {
 	emptyModelList string
 
 	// advertisedModel is how a node's discovery inventory spells the model a
-	// client reaches with requestedModel. For Ollama the two differ, because
-	// an untagged request means the :latest tag.
+	// client reaches with requestedModel. It matches
+	// requestedModel exactly.
 	advertisedModel string
 
 	// requestedModel is what a client asks for.
 	requestedModel string
+
+	// descriptor is the facade/enable descriptor of an engine that is not built
+	// in; nil for a built-in engine.
+	descriptor *engines.Descriptor
 }
 
-func ollamaCase(t *testing.T) engineCase {
+func llamacppCase(t *testing.T) engineCase {
 	t.Helper()
-	p, ok := profileFor("ollama")
+	p, ok := profileFor(engines.NameLlamaCPP)
 	if !ok {
-		t.Fatal("ollama profile missing")
-	}
-	return engineCase{
-		profile:          p,
-		inferencePath:    "/api/chat",
-		nonInferencePath: "/api/version",
-		modelListPath:    "/api/tags",
-		emptyModelList:   `{"models":[]}`,
-		advertisedModel:  "qwen3:latest",
-		requestedModel:   "qwen3",
-	}
-}
-
-func lmstudioCase(t *testing.T) engineCase {
-	t.Helper()
-	p, ok := profileFor("lmstudio")
-	if !ok {
-		t.Fatal("lmstudio profile missing")
+		t.Fatal("llamacpp profile missing")
 	}
 	return engineCase{
 		profile:       p,
 		inferencePath: "/v1/chat/completions",
-		// LM Studio's own REST surface, unlisted in Routes and so forwarded
-		// verbatim.
-		nonInferencePath: "/api/v0/models",
+		// llama.cpp's own server-properties endpoint, unlisted in Routes and so
+		// forwarded verbatim.
+		nonInferencePath: "/props",
+		modelListPath:    "/v1/models",
+		emptyModelList:   `{"object":"list","data":[]}`,
+		advertisedModel:  "qwen3",
+		requestedModel:   "qwen3",
+	}
+}
+
+// customCase is a descriptor engine (a llama.cpp fork registered by manifest)
+// that declares the OpenAI v1 and Anthropic messages protocols, so unlike
+// llamacpp its model list is served from the upstream's own /v1/models and it
+// fronts /v1/messages.
+func customCase(t *testing.T) engineCase {
+	t.Helper()
+	d := customDescriptor()
+	d.Protocols = []string{engines.ProtocolOpenAIV1, engines.ProtocolAnthropicMessages}
+	p, err := dynamicProfile(d)
+	if err != nil {
+		t.Fatalf("custom engine profile: %v", err)
+	}
+	return engineCase{
+		profile:          p,
+		inferencePath:    "/v1/chat/completions",
+		nonInferencePath: "/props",
 		modelListPath:    "/v1/models",
 		emptyModelList:   `{"object":"list","data":[]}`,
 		advertisedModel:  "qwen3-8b",
 		requestedModel:   "qwen3-8b",
+		descriptor:       &d,
 	}
 }
 
@@ -108,7 +121,7 @@ func (tc engineCase) inferenceRequest() *http.Request {
 // under this is asserting behavior both proxies must share.
 func engineCases(t *testing.T) []engineCase {
 	t.Helper()
-	return []engineCase{ollamaCase(t), lmstudioCase(t)}
+	return []engineCase{llamacppCase(t), customCase(t)}
 }
 
 // forEachEngine runs body as a subtest per engine.
@@ -127,7 +140,7 @@ func forEachEngine(t *testing.T, body func(t *testing.T, tc engineCase)) {
 // for coverage gaps.
 func anyProfile(t *testing.T) engineProfile {
 	t.Helper()
-	return ollamaCase(t).profile
+	return llamacppCase(t).profile
 }
 
 // anyCase is anyProfile for a body that still needs an engine's fixtures as a
@@ -139,7 +152,7 @@ func anyProfile(t *testing.T) engineProfile {
 // pass here would add real-socket seconds and no coverage.
 func anyCase(t *testing.T) engineCase {
 	t.Helper()
-	return ollamaCase(t)
+	return llamacppCase(t)
 }
 
 // otherEngine returns an engine that is not tc's, for negative fixtures that
@@ -153,13 +166,4 @@ func otherEngine(t *testing.T, tc engineCase) engineProfile {
 	}
 	t.Fatal("no sibling engine to contrast against")
 	return engineProfile{}
-}
-
-// ollamaOnlyProfile is for bodies that are genuinely Ollama-scoped — the
-// OLLAMA_HOST alias, and the native /api/tags dialect LM Studio does not
-// serve. Using it rather than engineCases documents that the scoping is
-// deliberate.
-func ollamaOnlyProfile(t *testing.T) engineProfile {
-	t.Helper()
-	return ollamaCase(t).profile
 }

@@ -96,27 +96,6 @@ function booleanValue(value: JsonValue | undefined): boolean {
     return typeof value === 'boolean' ? value : false
 }
 
-function credentialState(
-    value: JsonValue | undefined
-): WsInvokeResponse<'engine:credential-state'> {
-    const result = objectValue(value)
-    if (
-        !result ||
-        typeof result.supported !== 'boolean' ||
-        typeof result.configured !== 'boolean'
-    ) {
-        throw new Error('Credential store unavailable')
-    }
-    return { supported: result.supported, configured: result.configured }
-}
-
-function requireLocalCredentialTarget(nodeId: string): void {
-    const selfId = getModularBridgeState().getSelfId()
-    if (!selfId || nodeId !== selfId) {
-        throw new Error('Credentials can only be changed on this device.')
-    }
-}
-
 /** Relay a `cluster:*` / `nodes:*` request to nvpair-cluster-manager via the broker. */
 function callCluster(
     method: string,
@@ -317,8 +296,8 @@ function routeEngineManagerCommand(payload: WsInvokeRequest<'engine:command'>): 
         case 'loadModel':
             // "Load" warms a model into the engine's memory/VRAM through
             // engine-manager's typed operation, which applies the engine's own
-            // `load` binding (Ollama's is `run_model` with streaming off and a
-            // 10-minute budget). The reply can take that long, so it is observed
+            // `load` binding, whose budget its descriptor declares. The reply
+            // can take that long, so it is observed
             // rather than timed: a rejection clears the row's pending entry.
             // All require the engine running, matching the disabled rule in
             // ModelRow.tsx. See docs/services-parity.md#models.
@@ -1071,40 +1050,6 @@ const EMPTY_SERVICE_BRIDGE_HANDLERS: BridgeHandlerMap = {
     'engine:command': payload => handleEngineCommand(payload),
     'engine:search-hub': payload =>
         payload ? getEngineHubModels(payload.engineType, payload.query) : { models: [] },
-    'engine:credential-state': async payload => {
-        if (!payload) throw new Error('Missing credential request')
-        requireLocalCredentialTarget(payload.nodeId)
-        try {
-            return credentialState(
-                await getModularSupervisor().callProcess('broker', 'engine:credential-state', {
-                    engine: engineManagerName(payload.engineType)
-                })
-            )
-        } catch {
-            throw new Error('Credential store unavailable')
-        }
-    },
-    'engine:set-credential': async payload => {
-        if (!payload) throw new Error('Missing credential request')
-        requireLocalCredentialTarget(payload.nodeId)
-        try {
-            return credentialState(
-                await getModularSupervisor().callProcess(
-                    'broker',
-                    'engine:set-credential',
-                    {
-                        engine: engineManagerName(payload.engineType),
-                        credential: payload.credential
-                    },
-                    // A client timeout cannot cancel the native store write.
-                    // Keep the mutation barrier until its actual reply arrives.
-                    null
-                )
-            )
-        } catch {
-            throw new Error('Could not update credential')
-        }
-    },
 
     'errors:get-initial': () => handleErrorsGetInitial(),
     'errors:clear': payload => (payload ? handleErrorsClear(payload) : null),

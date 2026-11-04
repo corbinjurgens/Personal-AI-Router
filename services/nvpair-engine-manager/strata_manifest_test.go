@@ -108,7 +108,7 @@ func TestStrataManifestDescriptor(t *testing.T) {
 	}
 	rt := platform.Runtime
 	wantArgs := []string{"/REPLACE_WITH_ABSOLUTE_PATH/server.py", "--engine", "strata", "--config", "/REPLACE_WITH_ABSOLUTE_PATH/config.json", "--host", "127.0.0.1", "--port", "{port}", "--lazy"}
-	if rt.Mode != "process" || rt.Bin != "/REPLACE_WITH_ABSOLUTE_PATH/python" || rt.Bind != "127.0.0.1" || rt.Port != 18082 || !reflect.DeepEqual(rt.Args, wantArgs) {
+	if rt.Bin != "/REPLACE_WITH_ABSOLUTE_PATH/python" || rt.Bind != "127.0.0.1" || rt.Port != 18082 || !reflect.DeepEqual(rt.Args, wantArgs) {
 		t.Fatalf("runtime = %+v", rt)
 	}
 }
@@ -163,7 +163,7 @@ func TestStrataReadinessIdentity(t *testing.T) {
 		want bool
 	}{
 		{"Strata", `{"service":"strata"}`, true},
-		{"foreign service", `{"service":"ollama"}`, false},
+		{"foreign service", `{"service":"llamacpp"}`, false},
 		{"missing identity", `{"status":"ok"}`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

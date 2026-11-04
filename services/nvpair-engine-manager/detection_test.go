@@ -178,14 +178,13 @@ func TestConfiguredDetectionEnvironmentReferences(t *testing.T) {
 }
 
 func TestConfiguredDetectionReadinessCannotCompleteInstallation(t *testing.T) {
-	test := func(name, mode string) {
+	test := func(name string) {
 		t.Run(name, func(t *testing.T) {
 			ex, st := configuredDetectionExecutor(t)
 			removeDetectionFile(t, filepath.Join(st.installDir, "config.json"))
 			var status atomic.Int32
 			status.Store(http.StatusOK)
 			st.port = detectionServer(t, &status)
-			st.plat.Runtime.Mode = mode
 			marker := filepath.Join(t.TempDir(), "installer-ran")
 			st.plat.Install = &Install{Script: []string{fakeEngineBin, "touch", marker}}
 			got, err := ex.Status("fake")
@@ -210,8 +209,7 @@ func TestConfiguredDetectionReadinessCannotCompleteInstallation(t *testing.T) {
 			}
 		})
 	}
-	test("process listener", "process")
-	test("command listener", "command")
+	test("process listener")
 }
 
 func TestConfiguredDetectionAdoptedFileDisappearance(t *testing.T) {
@@ -441,29 +439,7 @@ func TestConfiguredDetectionUninstallRefusesExternalExecutable(t *testing.T) {
 }
 
 func TestBundledDetectionAlternatives(t *testing.T) {
-	windowsOllama := []string{`{install_dir}\ollama.exe`, `%LOCALAPPDATA%\Programs\Ollama\ollama.exe`}
-	darwinOllama := []string{
-		"/Applications/Ollama.app/Contents/Resources/ollama",
-		"~/Applications/Ollama.app/Contents/Resources/ollama",
-		"{install_dir}/Ollama.app/Contents/Resources/ollama",
-	}
 	wantTemplates := map[string]map[string][]string{
-		"ollama": {
-			"windows/amd64": windowsOllama,
-			"windows/arm64": windowsOllama,
-			"darwin/amd64":  darwinOllama,
-			"darwin/arm64":  darwinOllama,
-			"linux/amd64":   {"{install_dir}/bin/ollama"},
-			"linux/arm64":   {"{install_dir}/bin/ollama"},
-		},
-		"lmstudio": {
-			"windows/amd64": {`%USERPROFILE%\.lmstudio\bin\lms.exe`},
-			"windows/arm64": {`%USERPROFILE%\.lmstudio\bin\lms.exe`},
-			"darwin/amd64":  {"~/.lmstudio/bin/lms"},
-			"darwin/arm64":  {"~/.lmstudio/bin/lms"},
-			"linux/amd64":   {"~/.lmstudio/bin/lms"},
-			"linux/arm64":   {"~/.lmstudio/bin/lms"},
-		},
 		"llamacpp": {
 			"windows/amd64": {`{install_dir}\llama-server.exe`},
 			"windows/arm64": {`{install_dir}\llama-server.exe`},
@@ -580,11 +556,6 @@ func TestBundledDetectionAdoptionCompatibility(t *testing.T) {
 			t.Run(engine+"/"+platform, func(t *testing.T) {
 				p := m.Platforms[platform]
 				p.Detect = []string{filepath.Join(t.TempDir(), "absent-executable")}
-				if p.Runtime.modeOrDefault() == "command" {
-					// The existing command-mode contract requires its CLI even
-					// when the API is already live. It is never executed here.
-					writeDetectionFile(t, p.Detect[0])
-				}
 				p.Runtime.Health = nil
 				copy := *m
 				copy.Platforms = map[string]Platform{runtime.GOOS + "/" + runtime.GOARCH: p}

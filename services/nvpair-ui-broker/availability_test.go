@@ -77,6 +77,21 @@ func paProjectionBarrier(t *testing.T, b *Broker) {
 	}
 }
 
+// observePauseFixtureEngine makes llamacpp the engine the pause fixtures observe
+// as enabled and holding a resident model, and forgets whatever engine
+// pausingBroker seeded.
+func observePauseFixtureEngine(b *Broker) {
+	r := b.nodePolicyRuntime()
+	r.mu.Lock()
+	clear(r.running)
+	clear(r.runningObserved)
+	clear(r.runningSince)
+	clear(r.residencyAt)
+	r.mu.Unlock()
+	b.observeIntent(map[string]bool{"llamacpp": true})
+	b.observeLoaded(map[string][]string{"llamacpp": {"m1"}})
+}
+
 func TestPauseProjectionCarriesProvenanceAndRevision(t *testing.T) {
 	fixture := func(t *testing.T) (*activatedBroker, *fakeWorker) {
 		t.Helper()
@@ -84,7 +99,7 @@ func TestPauseProjectionCarriesProvenanceAndRevision(t *testing.T) {
 		_, err := ab.b.dispatchPolicy(context.Background(), methodPolicySet, policyParams{
 			Policy: mustJSON(map[string]any{
 				"version": nodepolicy.SchemaVersion,
-				"roles":   map[string]any{"weak": map[string]any{"engine": "ollama", "model": "fixture-model"}},
+				"roles":   map[string]any{"weak": map[string]any{"engine": "llamacpp", "model": "fixture-model"}},
 			}),
 			ExpectedPersistedRevision: mustJSON(ab.b.localPolicy().Policy.Revision),
 		})
@@ -178,14 +193,14 @@ func pauseLifecycleCalls(calls []policyCall) []policyCall {
 func TestPauseUsesReplacementEngineManagerObservations(t *testing.T) {
 	b, _ := newPolicyBroker(t)
 	old := b.activateEngineManagerSource()
-	b.observeEngineRunningFrom(old, "ollama", true)
-	b.observeLoadedFrom(old, map[string][]string{"ollama": {"old-model"}})
-	b.observeIntentFrom(old, map[string]bool{"ollama": true})
+	b.observeEngineRunningFrom(old, "llamacpp", true)
+	b.observeLoadedFrom(old, map[string][]string{"llamacpp": {"old-model"}})
+	b.observeIntentFrom(old, map[string]bool{"llamacpp": true})
 	current := b.activateEngineManagerSource()
 	engine := attachFakeEngine(t, b)
-	b.observeEngineRunningFrom(current, "llamacpp", true)
-	b.observeLoadedFrom(current, map[string][]string{"llamacpp": {"new-model"}})
-	b.observeIntentFrom(current, map[string]bool{"llamacpp": true})
+	b.observeEngineRunningFrom(current, "llamacpp-custom", true)
+	b.observeLoadedFrom(current, map[string][]string{"llamacpp-custom": {"new-model"}})
+	b.observeIntentFrom(current, map[string]bool{"llamacpp-custom": true})
 	b.retireEngineManagerSource(old)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -206,7 +221,7 @@ func TestPauseUsesReplacementEngineManagerObservations(t *testing.T) {
 		}
 		slept = append(slept, p.Engine)
 	}
-	if !reflect.DeepEqual(slept, []string{"llamacpp"}) {
+	if !reflect.DeepEqual(slept, []string{"llamacpp-custom"}) {
 		t.Fatalf("pause slept engines %v, want replacement engine only", slept)
 	}
 }
@@ -249,16 +264,17 @@ func TestPauseAlwaysStopsAndUnloadsDespiteLegacyOptions(t *testing.T) {
 	test := func(name string, origin nodepolicy.PauseOrigin) {
 		t.Run(name, func(t *testing.T) {
 			b, _, _, engine := pausingBroker(t, nodepolicy.PauseConfig{OnActive: nodepolicy.FinishActive, StopEngines: false, UnloadModels: false})
+			observePauseFixtureEngine(b)
 			// The second engine and its resident model have not reached broker
 			// notifications. The manager owns both cleanup and its readback.
-			running := map[string]bool{"ollama": true, "llamacpp": true}
-			loaded := map[string][]string{"ollama": {"m1"}, "llamacpp": {"fresh-model"}}
+			running := map[string]bool{"llamacpp": true, "llamacpp-custom": true}
+			loaded := map[string][]string{"llamacpp": {"m1"}, "llamacpp-custom": {"fresh-model"}}
 			engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
 				switch method {
 				case "engine:get-installed":
 					return map[string]any{"engines": []any{
-						map[string]any{"engine": "ollama", "running": running["ollama"], "terminationVerified": !running["ollama"]},
 						map[string]any{"engine": "llamacpp", "running": running["llamacpp"], "terminationVerified": !running["llamacpp"]},
+						map[string]any{"engine": "llamacpp-custom", "running": running["llamacpp-custom"], "terminationVerified": !running["llamacpp-custom"]},
 					}}, ""
 				case "engine:models":
 					return map[string]any{"loadedByEngine": loaded}, ""
@@ -293,11 +309,11 @@ func TestPauseAlwaysStopsAndUnloadsDespiteLegacyOptions(t *testing.T) {
 					unloaded[p.Engine] = append(unloaded[p.Engine], p.Model)
 				}
 			}
-			if len(unloaded) != 0 || !reflect.DeepEqual(slept, map[string]bool{"ollama": true, "llamacpp": true}) {
+			if len(unloaded) != 0 || !reflect.DeepEqual(slept, map[string]bool{"llamacpp": true, "llamacpp-custom": true}) {
 				t.Fatalf("broker unloads=%v sleeps=%v, want manager-owned cleanup of cached and freshly discovered engines", unloaded, slept)
 			}
-			requirePauseManagerCleanup(t, b, "ollama", "llamacpp")
-			requirePolicyIntent(t, b, map[string]bool{"ollama": true})
+			requirePauseManagerCleanup(t, b, "llamacpp", "llamacpp-custom")
+			requirePolicyIntent(t, b, map[string]bool{"llamacpp": true})
 			for _, call := range engine.snapshot() {
 				if call.method == "engine:stop" {
 					t.Fatal("pause rewrote engine intent with an ordinary stop")
@@ -311,13 +327,14 @@ func TestPauseAlwaysStopsAndUnloadsDespiteLegacyOptions(t *testing.T) {
 
 func TestPauseStopFailureRetainsFenceAndCanRetryLocally(t *testing.T) {
 	b, _, proxy, engine := pausingBroker(t, nodepolicy.PauseConfig{OnActive: nodepolicy.FinishActive})
-	fail, running := true, map[string]bool{"ollama": true, "llamacpp": true}
+	observePauseFixtureEngine(b)
+	fail, running := true, map[string]bool{"llamacpp": true, "llamacpp-custom": true}
 	engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
 		switch method {
 		case "engine:get-installed":
 			return map[string]any{"engines": []any{
-				map[string]any{"engine": "ollama", "running": running["ollama"]},
 				map[string]any{"engine": "llamacpp", "running": running["llamacpp"]},
+				map[string]any{"engine": "llamacpp-custom", "running": running["llamacpp-custom"]},
 			}}, ""
 		case "engine:models":
 			return map[string]any{"loadedByEngine": map[string][]string{}}, ""
@@ -330,7 +347,7 @@ func TestPauseStopFailureRetainsFenceAndCanRetryLocally(t *testing.T) {
 			if err := json.Unmarshal(raw, &p); err != nil {
 				return nil, err.Error()
 			}
-			if p.Engine == "llamacpp" && fail {
+			if p.Engine == "llamacpp-custom" && fail {
 				return nil, "external process cannot be stopped"
 			}
 			running[p.Engine] = false
@@ -346,7 +363,7 @@ func TestPauseStopFailureRetainsFenceAndCanRetryLocally(t *testing.T) {
 	r.mu.Lock()
 	blocked, proxyErr := r.managementBlockedLocked(), r.availabilityErr
 	r.mu.Unlock()
-	if !blocked || proxyErr != "" || b.localPolicy().Policy.Availability != nodepolicy.Paused || running["ollama"] {
+	if !blocked || proxyErr != "" || b.localPolicy().Policy.Availability != nodepolicy.Paused || running["llamacpp"] {
 		t.Fatalf("failed pause lost fence or stopped trying: blocked=%v proxyErr=%q running=%v", blocked, proxyErr, running)
 	}
 	pushes := availabilityPushes(proxy.snapshot())
@@ -363,13 +380,14 @@ func TestPauseStopFailureRetainsFenceAndCanRetryLocally(t *testing.T) {
 	if state, err := b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally); err != nil || state != nodepolicy.Paused {
 		t.Fatalf("local retry = %s, %v", state, err)
 	}
-	if running["ollama"] || running["llamacpp"] {
+	if running["llamacpp"] || running["llamacpp-custom"] {
 		t.Fatalf("retry left engines running: %v", running)
 	}
 }
 
 func TestRepeatedCompletedPauseKeepsRevisionAndRechecksShutdown(t *testing.T) {
 	b, _, _, engine := pausingBroker(t, nodepolicy.PauseConfig{OnActive: nodepolicy.FinishActive})
+	observePauseFixtureEngine(b)
 	if state, err := b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally); err != nil || state != nodepolicy.Paused {
 		t.Fatalf("initial pause = %s, %v", state, err)
 	}
@@ -388,6 +406,7 @@ func TestRepeatedCompletedPauseKeepsRevisionAndRechecksShutdown(t *testing.T) {
 
 func TestPauseReadbackCannotCrossManagerReplacement(t *testing.T) {
 	b, _, _, engine := pausingBroker(t, nodepolicy.PauseConfig{OnActive: nodepolicy.FinishActive})
+	observePauseFixtureEngine(b)
 	t.Cleanup(engine.releaseHeld)
 	base := engine.answer
 	first := true
@@ -472,13 +491,14 @@ func TestPauseReplaySkipsRestoreForEveryOrigin(t *testing.T) {
 // in the final inventory from the same worker.
 func TestPauseIgnoresSleepRefusalWithTerminationEvidence(t *testing.T) {
 	b, _, _, engine := pausingBroker(t, nodepolicy.PauseConfig{OnActive: nodepolicy.FinishActive})
+	observePauseFixtureEngine(b)
 	engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
 		switch method {
 		case "engine:descriptors":
 			return json.RawMessage(`{"engines":[{"version":1,"engine":"custom","available":false}]}`), ""
 		case "engine:get-installed":
 			return map[string]any{"engines": []any{
-				map[string]any{"engine": "ollama", "running": false},
+				map[string]any{"engine": "llamacpp", "running": false},
 				map[string]any{"engine": "custom", "running": false, "terminationVerified": true},
 			}}, ""
 		case "engine:models":
@@ -543,8 +563,8 @@ func requireUnverifiedPauseFence(t *testing.T, b *Broker, proxy *fakeWorker, out
 }
 
 func TestPauseFailedSleepRequiresTerminationProof(t *testing.T) {
-	const stopped = `{"engines":[{"engine":"ollama","running":false}]}`
-	const unsupported = `{"engines":[{"version":1,"engine":"ollama","available":false}]}`
+	const stopped = `{"engines":[{"engine":"llamacpp","running":false}]}`
+	const unsupported = `{"engines":[{"version":1,"engine":"llamacpp","available":false}]}`
 	for _, tc := range []struct {
 		name           string
 		inventory      string
@@ -552,23 +572,24 @@ func TestPauseFailedSleepRequiresTerminationProof(t *testing.T) {
 		descriptors    string
 		wantDetail     string
 	}{
-		{name: "unsupported engine without physical proof", inventory: stopped, descriptors: unsupported, wantDetail: "ollama: stop unverified"},
-		{name: "negative physical proof", inventory: `{"engines":[{"engine":"ollama","running":false,"terminationVerified":false}]}`, descriptors: unsupported, wantDetail: "ollama: stop unverified"},
-		{name: "null physical proof", inventory: `{"engines":[{"engine":"ollama","running":false,"terminationVerified":null}]}`, descriptors: unsupported, wantDetail: "ollama: stop unverified"},
-		{name: "malformed physical proof", inventory: `{"engines":[{"engine":"ollama","running":false,"terminationVerified":"true"}]}`, descriptors: unsupported, wantDetail: "engine shutdown readback unavailable"},
-		{name: "positive proof cannot override running", inventory: `{"engines":[{"engine":"ollama","running":true,"terminationVerified":true}]}`, wantDetail: "ollama: still running"},
-		{name: "failed reclaim with surviving PID", inventory: stopped, descriptors: `{"engines":[{"version":1,"engine":"ollama","available":true}]}`, wantDetail: "ollama: stop unverified"},
+		{name: "unsupported engine without physical proof", inventory: stopped, descriptors: unsupported, wantDetail: "llamacpp: stop unverified"},
+		{name: "negative physical proof", inventory: `{"engines":[{"engine":"llamacpp","running":false,"terminationVerified":false}]}`, descriptors: unsupported, wantDetail: "llamacpp: stop unverified"},
+		{name: "null physical proof", inventory: `{"engines":[{"engine":"llamacpp","running":false,"terminationVerified":null}]}`, descriptors: unsupported, wantDetail: "llamacpp: stop unverified"},
+		{name: "malformed physical proof", inventory: `{"engines":[{"engine":"llamacpp","running":false,"terminationVerified":"true"}]}`, descriptors: unsupported, wantDetail: "engine shutdown readback unavailable"},
+		{name: "positive proof cannot override running", inventory: `{"engines":[{"engine":"llamacpp","running":true,"terminationVerified":true}]}`, wantDetail: "llamacpp: still running"},
+		{name: "failed reclaim with surviving PID", inventory: stopped, descriptors: `{"engines":[{"version":1,"engine":"llamacpp","available":true}]}`, wantDetail: "llamacpp: stop unverified"},
 		{name: "final inventory unavailable", inventoryError: "inventory unavailable", descriptors: unsupported, wantDetail: "engine shutdown readback unavailable"},
 		{name: "final inventory missing engines", inventory: `{}`, descriptors: unsupported, wantDetail: "engine shutdown readback unavailable"},
 		{name: "final inventory truncated entry", inventory: `{"engines":[{}]}`, descriptors: unsupported, wantDetail: "engine shutdown readback unavailable"},
-		{name: "final inventory missing running", inventory: `{"engines":[{"engine":"ollama"}]}`, descriptors: unsupported, wantDetail: "engine shutdown readback unavailable"},
-		{name: "final inventory null running", inventory: `{"engines":[{"engine":"ollama","running":null}]}`, descriptors: unsupported, wantDetail: "engine shutdown readback unavailable"},
-		{name: "final inventory omits failed engine", inventory: `{"engines":[]}`, descriptors: unsupported, wantDetail: "ollama: stop unverified"},
-		{name: "final inventory duplicate engine", inventory: `{"engines":[{"engine":"ollama","running":true},{"engine":"ollama","running":false}]}`, descriptors: unsupported, wantDetail: "engine shutdown readback unavailable"},
-		{name: "unsupported descriptor cannot override running", inventory: `{"engines":[{"engine":"ollama","running":true}]}`, descriptors: unsupported, wantDetail: "ollama: still running"},
+		{name: "final inventory missing running", inventory: `{"engines":[{"engine":"llamacpp"}]}`, descriptors: unsupported, wantDetail: "engine shutdown readback unavailable"},
+		{name: "final inventory null running", inventory: `{"engines":[{"engine":"llamacpp","running":null}]}`, descriptors: unsupported, wantDetail: "engine shutdown readback unavailable"},
+		{name: "final inventory omits failed engine", inventory: `{"engines":[]}`, descriptors: unsupported, wantDetail: "llamacpp: stop unverified"},
+		{name: "final inventory duplicate engine", inventory: `{"engines":[{"engine":"llamacpp","running":true},{"engine":"llamacpp","running":false}]}`, descriptors: unsupported, wantDetail: "engine shutdown readback unavailable"},
+		{name: "unsupported descriptor cannot override running", inventory: `{"engines":[{"engine":"llamacpp","running":true}]}`, descriptors: unsupported, wantDetail: "llamacpp: still running"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b, out, proxy, engine := pausingBroker(t, nodepolicy.PauseConfig{OnActive: nodepolicy.FinishActive})
+			observePauseFixtureEngine(b)
 			reads := 0
 			engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
 				switch method {
@@ -583,7 +604,7 @@ func TestPauseFailedSleepRequiresTerminationProof(t *testing.T) {
 				case "engine:models":
 					return map[string]any{"loadedByEngine": map[string][]string{}}, ""
 				case engineSleepMethod:
-					return nil, `cannot stop engine "ollama": orphan termination could not be verified`
+					return nil, `cannot stop engine "llamacpp": orphan termination could not be verified`
 				}
 				return map[string]bool{"ok": true}, ""
 			})

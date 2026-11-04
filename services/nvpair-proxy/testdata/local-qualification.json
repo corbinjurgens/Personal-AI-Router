@@ -5,8 +5,8 @@
       {
         "id": "synthetic-fixture",
         "revision": "1",
-        "engine": "ollama",
-        "model": "fixture-model:latest",
+        "engine": "llamacpp",
+        "model": "fixture-model",
         "modelDigests": ["1111111111111111111111111111111111111111111111111111111111111111"],
         "launchDigests": ["2222222222222222222222222222222222222222222222222222222222222222"],
         "requestOptions": {"seed": 7, "frequency_penalty": 0},
@@ -142,7 +142,7 @@
     },
     {
       "name": "unsupported route",
-      "route": "/api/chat",
+      "route": "/unsupported",
       "body": {"model": "fixture-model", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 8},
       "reject": "is not qualified"
     }

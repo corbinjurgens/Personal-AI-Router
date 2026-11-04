@@ -161,9 +161,6 @@ func TestBufferPreparationOnlyEffectiveStreamingRoutesPrepareFrames(t *testing.T
 			{"omitted OpenAI stream", "/v1/chat/completions", `{"model":"m"}`, false},
 			{"null OpenAI stream", "/v1/completions", `{"model":"m","stream":null}`, false},
 			{"declared SSE route", "/v1/completions", `{"model":"m","stream":true}`, true},
-			{"default NDJSON route", "/api/generate", `{"model":"m"}`, true},
-			{"null NDJSON stream", "/api/chat", `{"model":"m","stream":null}`, true},
-			{"disabled NDJSON route", "/api/chat", `{"model":"m","stream":false}`, false},
 		} {
 			t.Run(fmt.Sprintf("%v/%s", mode, route.name), func(t *testing.T) {
 				root := bufferTestBudget(t, 192<<20, 0)
@@ -198,7 +195,6 @@ func TestBufferPreparationResponseGrantsFollowEffectiveStream(t *testing.T) {
 		{name: "auto SSE fresh grants", path: routeChatCompletions, raw: `{"model":"m"}`, media: "text/event-stream"},
 		{name: "auto SSE unprotected after decrease", path: routeChatCompletions, raw: `{"model":"m"}`, media: "text/event-stream", decreased: true},
 		{name: "declared SSE protected after decrease", path: routeChatCompletions, raw: `{"model":"m","stream":true}`, media: "text/event-stream", decreased: true, protected: true},
-		{name: "default NDJSON protected after decrease", path: "/api/generate", raw: `{"model":"m"}`, media: "application/x-ndjson", decreased: true, protected: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root := bufferTestBudget(t, 192<<20, 0)
@@ -250,29 +246,12 @@ func TestBufferPreparationResponseGrantsFollowEffectiveStream(t *testing.T) {
 	}
 }
 
-func TestBufferPreparationNativeNDJSONIgnoresChoices(t *testing.T) {
-	for _, path := range []string{"/api/chat", "/api/generate"} {
-		for _, literal := range []string{"100000000", "184467440737095516160000", `"irrelevant"`} {
-			t.Run(path+"/n="+literal, func(t *testing.T) {
-				body := []byte(`{"model":"m","n":` + literal + `}`)
-				request, err := parseOriginStreamRequest(path, body)
-				if err != nil {
-					t.Fatalf("native n rejected: %v", err)
-				}
-				if request.choices != 1 || !request.declared || request.protocol != streamProtocolNDJSON {
-					t.Fatalf("native request=%+v", request)
-				}
-			})
-		}
-	}
-}
-
 func TestBufferPreparationEffectiveProfileStreamErrors(t *testing.T) {
 	for _, entry := range []string{"origin", "ingress"} {
 		t.Run(entry, func(t *testing.T) {
-			profile, ok := profileFor("ollama")
+			profile, ok := profileFor("llamacpp")
 			if !ok {
-				t.Fatal("missing ollama profile")
+				t.Fatal("missing llamacpp profile")
 			}
 			root := bufferTestBudget(t, 192<<20, 0)
 			p := testProxy(profile, NewDiscovery(), profile.FacadePort)

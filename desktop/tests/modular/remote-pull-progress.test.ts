@@ -56,13 +56,13 @@ describe('pull error handling', () => {
         expect(isPullInfrastructureError('broker is not running')).toBe(true)
         expect(
             isPullInfrastructureError(
-                'LM Studio experienced an error while downloading a model: timeout'
+                'llama.cpp experienced an error while downloading a model: timeout'
             )
         ).toBe(false)
     })
 
     it('skips duplicate backend pull failure copy', () => {
-        const backend = 'LM Studio experienced an error while downloading a model: Download failed'
+        const backend = 'llama.cpp experienced an error while downloading a model: Download failed'
         expect(isBackendPullFailureMessage(backend)).toBe(true)
         expect(resolvePullCatchError(backend)).toBeNull()
     })
@@ -73,7 +73,7 @@ describe('pull error handling', () => {
         expect(resolvePullCatchError(notRunning)).toBeNull()
 
         const timedOut =
-            'LM Studio experienced an error while downloading a model: connection timed out'
+            'llama.cpp experienced an error while downloading a model: connection timed out'
         expect(resolvePullCatchError(timedOut)).toBeNull()
     })
 
@@ -102,7 +102,7 @@ describe('remote pull progress', () => {
 
         state.applyRemoteEngineProgress({
             node: 'remote-indeterminate',
-            engine: 'lmstudio',
+            engine: 'llamacpp',
             op: 'pull',
             stage: 'pulling',
             opId: 'request-1',
@@ -116,7 +116,7 @@ describe('remote pull progress', () => {
                 entries: [
                     {
                         id: '1'.repeat(32),
-                        engine: 'lmstudio',
+                        engine: 'llamacpp',
                         model: 'demo-model',
                         phase: 'in_progress',
                         blocksReadiness: true
@@ -141,7 +141,7 @@ describe('remote pull progress', () => {
 
         state.applyRemoteEngineProgress({
             node: 'remote-percent',
-            engine: 'ollama',
+            engine: 'llamacpp',
             op: 'pull',
             stage: 'pulling',
             percent: 42,
@@ -156,7 +156,7 @@ describe('remote pull progress', () => {
                 entries: [
                     {
                         id: '2'.repeat(32),
-                        engine: 'ollama',
+                        engine: 'llamacpp',
                         model: 'llama3.1:8b',
                         phase: 'in_progress',
                         blocksReadiness: true,
@@ -177,7 +177,7 @@ describe('remote pull progress', () => {
         })
         state.applyRemoteEngineProgress({
             node: 'remote-wrong-id',
-            engine: 'ollama',
+            engine: 'llamacpp',
             op: 'pull',
             opId: 'request-3',
             id: '3'.repeat(32),
@@ -191,7 +191,7 @@ describe('remote pull progress', () => {
                 entries: [
                     {
                         id: '4'.repeat(32),
-                        engine: 'ollama',
+                        engine: 'llamacpp',
                         model: 'demo',
                         phase: 'complete',
                         blocksReadiness: false
@@ -212,7 +212,7 @@ describe('remote pull progress', () => {
         state.applyRemoteEngineProgress({
             opId: 'op-1',
             node: 'source-node',
-            engine: 'ollama',
+            engine: 'llamacpp',
             op: 'copy',
             stage: 'downloading',
             percent: 10,

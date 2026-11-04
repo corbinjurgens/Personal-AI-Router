@@ -371,8 +371,8 @@ func TestPAPausedAdvertisementConvergesWithoutMDNSChange(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(observed.status)
 		var response any = map[string]any{
-			"models": []string{"pa-model"}, "modelsByEngine": map[string][]string{"ollama": {"pa-model"}},
-			"loadedByEngine": map[string][]string{"ollama": {"pa-model"}}, "policy": snapshot,
+			"models": []string{"pa-model"}, "modelsByEngine": map[string][]string{"llamacpp": {"pa-model"}},
+			"loadedByEngine": map[string][]string{"llamacpp": {"pa-model"}}, "policy": snapshot,
 		}
 		if observed.status != http.StatusOK {
 			response = map[string]string{"error": "fixture refresh failure"}
@@ -505,7 +505,7 @@ func TestPAPausedAdvertisementConvergesWithoutMDNSChange(t *testing.T) {
 		for {
 			node := readPeer(deadline)
 			if node.Policy != nil && node.Policy.Revision == revision && node.Policy.PausedBy == paused {
-				if !reflect.DeepEqual(node.Models, []string{"pa-model"}) || !reflect.DeepEqual(node.ModelsByEngine, map[string][]string{"ollama": {"pa-model"}}) || !reflect.DeepEqual(node.LoadedByEngine, map[string][]string{"ollama": {"pa-model"}}) {
+				if !reflect.DeepEqual(node.Models, []string{"pa-model"}) || !reflect.DeepEqual(node.ModelsByEngine, map[string][]string{"llamacpp": {"pa-model"}}) || !reflect.DeepEqual(node.LoadedByEngine, map[string][]string{"llamacpp": {"pa-model"}}) {
 					t.Fatal("PA policy transition changed model inventory")
 				}
 				return node
@@ -567,7 +567,7 @@ func TestPAPausedAdvertisementConvergesWithoutMDNSChange(t *testing.T) {
 		t.Fatal("PA timed out awaiting next periodic resume request")
 	}
 	retained := readPeer(wholeDeadline)
-	if retained.Policy == nil || retained.Policy.Revision != "6" || retained.Policy.PausedBy != nodepolicy.PausedLocally || !reflect.DeepEqual(retained.Models, []string{"pa-model"}) || !reflect.DeepEqual(retained.ModelsByEngine, map[string][]string{"ollama": {"pa-model"}}) || !reflect.DeepEqual(retained.LoadedByEngine, map[string][]string{"ollama": {"pa-model"}}) {
+	if retained.Policy == nil || retained.Policy.Revision != "6" || retained.Policy.PausedBy != nodepolicy.PausedLocally || !reflect.DeepEqual(retained.Models, []string{"pa-model"}) || !reflect.DeepEqual(retained.ModelsByEngine, map[string][]string{"llamacpp": {"pa-model"}}) || !reflect.DeepEqual(retained.LoadedByEngine, map[string][]string{"llamacpp": {"pa-model"}}) {
 		t.Fatal("PA acknowledged failed refresh did not retain last-good pause6")
 	}
 	t.Logf("pa6-propagation acknowledged500 request=%d private_reverse_connect=%d retained=pause6", failed.id, failed.reverseConnect)

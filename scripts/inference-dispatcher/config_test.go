@@ -9,39 +9,34 @@ import (
 	"testing"
 )
 
-// TestConfiguredEngineIDsAreAccepted checks a backend need not be one of the
-// built-in three: any engine-manager engine ID is driven through the protocol
-// profile and port the caller takes from its descriptor and facade.
+// TestConfiguredEngineIDsAreAccepted checks a backend need not be llamacpp:
+// any engine-manager engine ID is driven on the port the caller takes from its
+// facade.
 func TestConfiguredEngineIDsAreAccepted(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		args     []string
-		protocol string
-		port     int
+		name string
+		args []string
+		port int
 	}{
 		{
-			name:     "fork on openai-v1",
-			args:     []string{"--backend", "llamacpp-custom", "--protocol", "openai-v1", "--port", "8090"},
-			protocol: protocolOpenAIV1,
-			port:     8090,
+			name: "fork on its own port",
+			args: []string{"--backend", "llamacpp-custom", "--port", "8090"},
+			port: 8090,
 		},
 		{
-			name:     "variant on ollama-api with thinking off",
-			args:     []string{"--backend", "Ollama-Nightly", "--protocol", "ollama-api", "--port", "11500", "--ollama-think", "false"},
-			protocol: protocolOllamaAPI,
-			port:     11500,
+			name: "mixed-case descriptor engine",
+			args: []string{"--backend", "Strata", "--port", "9000"},
+			port: 9000,
 		},
 		{
-			name:     "built-in keeps its own protocol and default port",
-			args:     []string{"--backend", "llamacpp"},
-			protocol: protocolOpenAIV1,
-			port:     defaultLlamaCPPPort,
+			name: "default backend and port",
+			args: nil,
+			port: defaultLlamaCPPPort,
 		},
 		{
-			name:     "built-in may name its own protocol",
-			args:     []string{"--backend", "ollama", "--protocol", "ollama-api"},
-			protocol: protocolOllamaAPI,
-			port:     defaultOllamaPort,
+			name: "llamacpp may override its port",
+			args: []string{"--backend", "llamacpp", "--port", "8181"},
+			port: 8181,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -50,9 +45,6 @@ func TestConfiguredEngineIDsAreAccepted(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parse config: %v", err)
 			}
-			if got := effectiveProtocol(cfg); got != tc.protocol {
-				t.Errorf("protocol = %q, want %q", got, tc.protocol)
-			}
 			if got := effectivePort(cfg); got != tc.port {
 				t.Errorf("port = %d, want %d", got, tc.port)
 			}
@@ -60,22 +52,17 @@ func TestConfiguredEngineIDsAreAccepted(t *testing.T) {
 	}
 }
 
-// TestConfiguredEngineNeedsItsProtocolAndPort checks nothing is guessed for an
-// engine the dispatcher does not know: without a protocol it would fall back to
-// Ollama's API, and without a port to Ollama's, which is how an unknown name
-// used to be treated by every path that was not the validation.
-func TestConfiguredEngineNeedsItsProtocolAndPort(t *testing.T) {
+// TestConfiguredEngineNeedsItsPort checks nothing is guessed for an engine the
+// dispatcher does not know: without a port it would fall back to llama.cpp's,
+// which belongs to a different engine.
+func TestConfiguredEngineNeedsItsPort(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		args []string
 		want string
 	}{
-		{"no protocol", []string{"--backend", "strata", "--port", "9000"}, `--protocol is required for engine "strata"`},
-		{"no port", []string{"--backend", "strata", "--protocol", "openai-v1"}, `--port is required for engine "strata"`},
-		{"unknown protocol", []string{"--backend", "strata", "--protocol", "anthropic-messages", "--port", "9000"}, "--protocol must be ollama-api or openai-v1"},
-		{"invalid id", []string{"--backend", "../strata", "--protocol", "openai-v1", "--port", "9000"}, "--backend must be"},
-		{"built-in with another protocol", []string{"--backend", "lmstudio", "--protocol", "ollama-api"}, "--protocol for lmstudio must be openai-v1"},
-		{"thinking on openai-v1", []string{"--backend", "strata", "--protocol", "openai-v1", "--port", "9000", "--ollama-think", "false"}, "--ollama-think is only valid with the ollama-api protocol"},
+		{"no port", []string{"--backend", "strata"}, `--port is required for engine "strata"`},
+		{"invalid id", []string{"--backend", "../strata", "--port", "9000"}, "--backend must be"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var stderr bytes.Buffer

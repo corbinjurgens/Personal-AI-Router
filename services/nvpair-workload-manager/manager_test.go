@@ -136,14 +136,14 @@ func TestManager_SnapshotCannotResurrectRemovedWorkload(t *testing.T) {
 		peers:       newPeerSet(),
 	}
 	workload := &Workload{
-		ID: "7", Model: "m", Engine: "ollama", RunID: "r1",
+		ID: "7", Model: "m", Engine: "llamacpp", RunID: "r1",
 		State: StateRunning, OriginatedFrom: "node-a", CreatedAt: 1,
 	}
 	lifecycle, err := json.Marshal(lifecycleParams{WorkloadInfo: workload})
 	if err != nil {
 		t.Fatalf("marshal lifecycle: %v", err)
 	}
-	m.trackActive(workloadKey{origin: "node-a", engine: "ollama", runID: "r1", id: "7"}, MethodStarted, lifecycle, StateRunning)
+	m.trackActive(workloadKey{origin: "node-a", engine: "llamacpp", runID: "r1", id: "7"}, MethodStarted, lifecycle, StateRunning)
 
 	paused := make(chan struct{})
 	release := make(chan struct{})

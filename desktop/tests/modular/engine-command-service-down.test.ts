@@ -37,7 +37,7 @@ describe('engine command while the modular service is stopped', () => {
 
         await handleServiceBridgeInvoke('engine:command', {
             command: 'toggle',
-            engineType: 'ollama',
+            engineType: 'llama-cpp',
             nodeId: 'local-node'
         })
 
@@ -45,7 +45,7 @@ describe('engine command while the modular service is stopped', () => {
             'toggle is not available until the modular backend is running.',
             'warning',
             'engine-cmd:toggle',
-            { nodeId: 'local-node', engineType: 'ollama', modelName: undefined }
+            { nodeId: 'local-node', engineType: 'llama-cpp', modelName: undefined }
         )
     })
 
@@ -55,7 +55,7 @@ describe('engine command while the modular service is stopped', () => {
 
         await handleServiceBridgeInvoke('engine:command', {
             command: 'pullModel',
-            engineType: 'ollama',
+            engineType: 'llama-cpp',
             nodeId: 'local-node',
             model: 'llama3.1:8b'
         })
@@ -64,7 +64,7 @@ describe('engine command while the modular service is stopped', () => {
             'pullModel is not available until the modular backend is running.',
             'warning',
             'engine-cmd:pullModel',
-            { nodeId: 'local-node', engineType: 'ollama', modelName: 'llama3.1:8b' }
+            { nodeId: 'local-node', engineType: 'llama-cpp', modelName: 'llama3.1:8b' }
         )
     })
 
@@ -74,7 +74,7 @@ describe('engine command while the modular service is stopped', () => {
 
         await handleServiceBridgeInvoke('engine:command', {
             command: 'toggle',
-            engineType: 'ollama',
+            engineType: 'llama-cpp',
             nodeId: 'remote-node'
         })
 
@@ -82,7 +82,7 @@ describe('engine command while the modular service is stopped', () => {
             'toggle is not available until the modular backend is running.',
             'warning',
             'engine-cmd:toggle',
-            { nodeId: 'remote-node', engineType: 'ollama', modelName: undefined }
+            { nodeId: 'remote-node', engineType: 'llama-cpp', modelName: undefined }
         )
     })
 })

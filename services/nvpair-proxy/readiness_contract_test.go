@@ -200,67 +200,6 @@ func TestNEReadinessAcceptsExplicitCPUOnlyMemoryAndProfileConcurrency(t *testing
 	f.qualify(t)
 }
 
-func TestNEReadinessResolvesNormalizedEnvelopeAndContent(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		change func(*readinessEnvelopeFixture)
-		want   bool
-	}{
-		{"equal normalized aliases", func(f *readinessEnvelopeFixture) {
-			e := f.id.Serving["m"].Clone()
-			e.ModelID = "m:latest"
-			f.id.Serving["m:latest"] = e
-			f.id.ModelDigests["m:latest"] = f.id.ModelDigests["m"]
-		}, true},
-		{"envelope and content under normalized alias", func(f *readinessEnvelopeFixture) {
-			e := f.id.Serving["m"].Clone()
-			delete(f.id.Serving, "m")
-			e.ModelID = "m:latest"
-			f.id.Serving["m:latest"] = e
-			f.id.ModelDigests["m:latest"] = f.id.ModelDigests["m"]
-		}, true},
-		{"empty present map", func(f *readinessEnvelopeFixture) { f.id.Serving = map[string]engines.ServingEnvelope{} }, false},
-		{"missing model envelope", func(f *readinessEnvelopeFixture) {
-			e := f.id.Serving["m"]
-			delete(f.id.Serving, "m")
-			e.ModelID = "other"
-			f.id.Serving["other"] = e
-		}, false},
-		{"normalized envelope disagreement", func(f *readinessEnvelopeFixture) {
-			e := f.id.Serving["m"].Clone()
-			e.ModelID, e.Retention = "m:latest", "60"
-			f.id.Serving["m:latest"] = e
-		}, false},
-		{"normalized content disagreement", func(f *readinessEnvelopeFixture) { f.id.ModelDigests["m:latest"] = strings.Repeat("e", 64) }, false},
-		{"envelope content mismatch", func(f *readinessEnvelopeFixture) {
-			e := f.id.Serving["m"]
-			e.ContentDigest = strings.Repeat("e", 64)
-			f.id.Serving["m"] = e
-		}, false},
-		{"envelope model key mismatch", func(f *readinessEnvelopeFixture) {
-			e := f.id.Serving["m"]
-			e.ModelID = "other"
-			f.id.Serving["m"] = e
-		}, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			f := newReadinessEnvelopeFixture(t, "ollama")
-			tc.change(&f)
-			f.install(t)
-			r := f.a.StrictReadiness()
-			if got := r.Capability != nil; got != tc.want {
-				t.Fatalf("strict capability present = %v, want %v: %+v", got, tc.want, r)
-			}
-			if tc.want {
-				if len(r.Capability.Models) != 1 || r.Capability.Models[0].Model != "m:latest" {
-					t.Fatalf("normalized capability = %+v, want exactly m:latest", r.Capability)
-				}
-				f.qualify(t)
-			}
-		})
-	}
-}
-
 func TestNEReadinessEnvelopeReplacementFencesValidationAndTicket(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -360,22 +299,6 @@ func TestNEReadinessWithdrawalReconnectFencesOldValidationAndTicket(t *testing.T
 	}
 }
 
-func TestNEReadinessLegacyOllamaRetainsDigestSemantics(t *testing.T) {
-	f := newReadinessEnvelopeFixture(t, "ollama")
-	f.id.Serving = nil
-	f.policy.Profiles[0].MemoryBytes = 0
-	f.install(t)
-	f.qualify(t)
-	next := f.id
-	next.ModelDigests = map[string]string{"m": strings.Repeat("e", 64)}
-	f.a.setModelIdentity(map[string]nodepolicy.EngineIdentity{f.engine: next})
-	if got := f.a.StrictReadiness(); got.Capability != nil {
-		t.Fatalf("unqualified replacement Ollama digest advertised: %+v", got)
-	}
-	f.a.setModelIdentity(map[string]nodepolicy.EngineIdentity{f.engine: f.id})
-	f.qualify(t)
-}
-
 func TestRequestOptionsReadinessModeInvalidation(t *testing.T) {
 	f := newReadinessEnvelopeFixture(t, "llamacpp")
 	f.policy.Profiles[0].RequestOptions = json.RawMessage(`{"temperature":0.1}`)
@@ -441,7 +364,7 @@ func TestRequestOptionsReadinessModeInvalidation(t *testing.T) {
 }
 
 func TestRequestOptionsInstalledQualificationMode(t *testing.T) {
-	q := testQualification("mode", "ollama", "m")
+	q := testQualification("mode", "llamacpp", "m")
 	before := installedQualification{q: q, profile: nodepolicy.Profile{RequestOptions: json.RawMessage(`{"temperature":0.1}`)}}
 	after := before
 	after.profile.RequestOptionsMode = nodepolicy.RequestOptionsDefaults

@@ -45,26 +45,22 @@ func TestModelDownloadTargetLifecycleAndCancelledQueue(t *testing.T) {
 	started, finish := make(chan struct{}), make(chan struct{})
 	var release sync.Once
 	var effects atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/api/pull" {
-			http.NotFound(w, r)
-			return
-		}
+	server := newLlamaPullServer(t, llamaPullBehavior{Start: func(w http.ResponseWriter, _ *http.Request) {
 		effects.Add(1)
 		close(started)
 		<-finish
-		_, _ = fmt.Fprintln(w, `{"status":"success"}`)
-	}))
-	defer func() { release.Do(func() { close(finish) }); server.Close() }()
-	ex := newHTTPPullTestExecutor(t, server, Action{HTTP: &ActionHTTP{Method: http.MethodPost, Path: "/api/pull"}})
-	first, err := ex.reserveModelPull(context.Background(), "fake", "first", json.RawMessage(`{"name":"first"}`))
+		_, _ = fmt.Fprint(w, `{"success":true}`)
+	}})
+	defer release.Do(func() { close(finish) })
+	ex := newHTTPPullTestExecutor(t, server.Server, llamaPullAction())
+	first, err := ex.reserveModelPull(context.Background(), "fake", "first", json.RawMessage(`{"model":"first"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	firstDone := make(chan error, 1)
 	go func() { _, err := first.run(context.Background()); firstDone <- err }()
 	<-started
-	second, err := ex.reserveModelPull(context.Background(), "fake", "second", json.RawMessage(`{"name":"second"}`))
+	second, err := ex.reserveModelPull(context.Background(), "fake", "second", json.RawMessage(`{"model":"second"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +76,7 @@ func TestModelDownloadTargetLifecycleAndCancelledQueue(t *testing.T) {
 			t.Fatalf("second inherited progress: %+v", entry)
 		}
 	}
-	if _, err := ex.reserveModelPull(context.Background(), "fake", "first", json.RawMessage(`{"name":"first"}`)); !errors.Is(err, errDownloadBusy) {
+	if _, err := ex.reserveModelPull(context.Background(), "fake", "first", json.RawMessage(`{"model":"first"}`)); !errors.Is(err, errDownloadBusy) {
 		t.Fatalf("duplicate = %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -114,21 +110,23 @@ func TestModelDownloadTargetLifecycleAndCancelledQueue(t *testing.T) {
 	}
 }
 
-func TestModelDownloadNDJSONRequiresNativeTerminal(t *testing.T) {
-	test := func(name, body, phase, reason string, blocked bool) {
+func TestModelDownloadSSERequiresNativeTerminal(t *testing.T) {
+	const model = "demo"
+	test := func(name string, behavior llamaPullBehavior, phase, reason string, blocked bool) {
 		t.Run(name, func(t *testing.T) {
 			var effects atomic.Int32
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodPost || r.URL.Path != "/api/pull" {
-					http.NotFound(w, r)
+			start := behavior.Start
+			behavior.Start = func(w http.ResponseWriter, r *http.Request) {
+				effects.Add(1)
+				if start != nil {
+					start(w, r)
 					return
 				}
-				effects.Add(1)
-				_, _ = fmt.Fprintln(w, body)
-			}))
-			defer server.Close()
-			ex := newHTTPPullTestExecutor(t, server, Action{HTTP: &ActionHTTP{Method: http.MethodPost, Path: "/api/pull"}})
-			_, err := ex.PullModelStream(context.Background(), "fake", "demo", json.RawMessage(`{"name":"demo"}`))
+				_, _ = fmt.Fprint(w, `{"success":true}`)
+			}
+			server := newLlamaPullServer(t, behavior)
+			ex := newHTTPPullTestExecutor(t, server.Server, llamaPullAction())
+			_, err := ex.PullModelStream(context.Background(), "fake", model, json.RawMessage(`{"model":"demo"}`))
 			if (err == nil) != (phase == "complete") {
 				t.Fatalf("error = %v", err)
 			}
@@ -155,25 +153,26 @@ func TestModelDownloadNDJSONRequiresNativeTerminal(t *testing.T) {
 			}
 		})
 	}
-	test("explicit success", `{"status":"success"}`, "complete", "", false)
-	test("percent one hundred is not completion", `{"status":"pulling","total":100,"completed":100}`, "unknown", "interrupted", true)
-	test("explicit native error", `{"error":"private vendor output"}`, "failed", "download_failed", true)
-	test("opaque response", "accepted", "unknown", "unsupported", true)
+	test("explicit finished", llamaPullBehavior{}, "complete", "", false)
+	test("percent one hundred is not completion", llamaPullBehavior{Events: func(string) []string {
+		return []string{llamaPullProgressEvent(model, 100, 100), llamaPullEndStream}
+	}}, "failed", "interrupted", true)
+	test("explicit native failure", llamaPullBehavior{Events: func(string) []string {
+		return []string{llamaPullEvent(model, "download_failed")}
+	}}, "failed", "download_failed", true)
+	test("acknowledgement without a success flag", llamaPullBehavior{Start: func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `accepted`)
+	}}, "unknown", "acceptance_unknown", true)
 }
 
 func TestModelDownloadPersistenceFailureHasZeroNativeEffects(t *testing.T) {
 	var effects atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/api/pull" {
-			http.NotFound(w, r)
-			return
-		}
+	server := newLlamaPullServer(t, llamaPullBehavior{Start: func(http.ResponseWriter, *http.Request) {
 		effects.Add(1)
-	}))
-	defer server.Close()
-	ex := newHTTPPullTestExecutor(t, server, Action{HTTP: &ActionHTTP{Method: http.MethodPost, Path: "/api/pull"}})
+	}})
+	ex := newHTTPPullTestExecutor(t, server.Server, llamaPullAction())
 	ex.downloads.store.replace.Replace = func(string, string) error { return errors.New("injected") }
-	if _, err := ex.PullModelStream(context.Background(), "fake", "demo", json.RawMessage(`{"name":"demo"}`)); err == nil {
+	if _, err := ex.PullModelStream(context.Background(), "fake", "demo", json.RawMessage(`{"model":"demo"}`)); err == nil {
 		t.Fatal("save failure accepted")
 	}
 	if effects.Load() != 0 {
@@ -346,7 +345,7 @@ func TestModelDownloadDeleteResolutionReservesRevisionBeforePersistence(t *testi
 	})
 	t.Run("progress preserves deletion and active terminal capacity", func(t *testing.T) {
 		d, a := prepare(t)
-		other := reserveModelDownload(t, d, "ollama", "other", engines.ModelNamingImpliedLatestTag)
+		other := reserveModelDownload(t, d, "llamacpp-custom", "other", engines.ModelNamingExact)
 		if err := d.update(other, "in_progress", nil); err != nil {
 			t.Fatal(err)
 		}
@@ -373,23 +372,16 @@ func TestModelDownloadDeleteResolutionReservesRevisionBeforePersistence(t *testi
 }
 
 func TestModelDownloadTerminalSnapshotSurvivesSameKeyRetry(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/api/pull" {
-			http.NotFound(w, r)
-			return
-		}
-		_, _ = fmt.Fprintln(w, `{"status":"success"}`)
-	}))
-	defer server.Close()
-	ex := newHTTPPullTestExecutor(t, server, Action{HTTP: &ActionHTTP{Method: http.MethodPost, Path: "/api/pull"}})
-	first, err := ex.reserveModelPull(context.Background(), "fake", "demo", json.RawMessage(`{"name":"demo"}`))
+	server := newLlamaPullServer(t, llamaPullBehavior{})
+	ex := newHTTPPullTestExecutor(t, server.Server, llamaPullAction())
+	first, err := ex.reserveModelPull(context.Background(), "fake", "demo", json.RawMessage(`{"model":"demo"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := first.run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	next, err := ex.reserveModelPull(context.Background(), "fake", "demo", json.RawMessage(`{"name":"demo"}`))
+	next, err := ex.reserveModelPull(context.Background(), "fake", "demo", json.RawMessage(`{"model":"demo"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -406,27 +398,26 @@ func TestModelDownloadTerminalSnapshotSurvivesSameKeyRetry(t *testing.T) {
 
 func TestModelDownloadBlockedLoadAndExportDispatch(t *testing.T) {
 	root := t.TempDir()
-	writeOllamaModel(t, root, "demo", 64, 1)
-	ex := copyTestExecutor(t, "ollama", root, true)
-	st, err := ex.state("ollama")
+	ex := copyTestExecutor(t, "tagged", root, true)
+	st, err := ex.state("tagged")
 	if err != nil {
 		t.Fatal(err)
 	}
-	st.manifest.ModelNaming = engines.ModelNamingImpliedLatestTag
+	st.manifest.ModelNaming = engines.ModelNamingExact
 	st.manifest.Actions = map[string]Action{"load_model": {HTTP: &ActionHTTP{Method: http.MethodPost, Path: "/load"}}}
 	var effects atomic.Int32
 	ex.client = &http.Client{Transport: &mutationTransport{respond: func(*http.Request) (*http.Response, error) { effects.Add(1); return mutationJSON(http.StatusOK, `{}`) }}}
-	a := reserveModelDownload(t, ex.downloads, "ollama", "demo:latest", engines.ModelNamingImpliedLatestTag)
+	a := reserveModelDownload(t, ex.downloads, "tagged", "demo", engines.ModelNamingExact)
 	if _, err := ex.downloads.changeMarker(a, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := ex.downloads.finish(a, "failed", "download_failed", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ex.Action(context.Background(), "ollama", "load_model", json.RawMessage(`{"model":"demo"}`)); err == nil {
+	if _, err := ex.Action(context.Background(), "tagged", "load_model", json.RawMessage(`{"model":"demo"}`)); err == nil {
 		t.Fatal("raw load dispatched unsafe alias")
 	}
-	if _, err := ex.ModelLoad(context.Background(), "ollama", "demo"); err == nil {
+	if _, err := ex.ModelLoad(context.Background(), "tagged", "demo"); err == nil {
 		t.Fatal("typed load dispatched unsafe alias")
 	}
 	st.opMu.Lock()
@@ -439,7 +430,7 @@ func TestModelDownloadBlockedLoadAndExportDispatch(t *testing.T) {
 	st.opMu.Unlock()
 	s := &controlServer{exec: ex}
 	for _, route := range []string{controlModelFilesPath, controlModelFilePath} {
-		r := httptest.NewRequest(http.MethodGet, route+"?engine=ollama&model=demo&path=blobs/unused", nil)
+		r := httptest.NewRequest(http.MethodGet, route+"?engine=tagged&model=demo&path=blobs/unused", nil)
 		w := httptest.NewRecorder()
 		if route == controlModelFilesPath {
 			s.handleModelFiles(w, r)
@@ -457,7 +448,11 @@ func TestModelDownloadBlockedLoadAndExportDispatch(t *testing.T) {
 
 func testModelDownloads(t *testing.T) *modelDownloads {
 	t.Helper()
-	return newModelDownloads(newOpID(), t.TempDir(), map[string]string{"ollama": engines.ModelNamingImpliedLatestTag, "llamacpp": engines.ModelNamingExact})
+	other, ok := engines.DynamicEngine("llamacpp-custom", "llama.cpp custom")
+	if !ok {
+		t.Fatal("invalid descriptor engine")
+	}
+	return newModelDownloads(newOpID(), t.TempDir(), map[string]string{"tagged": engines.ModelNamingExact, "llamacpp": engines.ModelNamingExact, other.Name: engines.ModelNamingExact})
 }
 
 func reserveModelDownload(t *testing.T, d *modelDownloads, engine, model, naming string) *modelDownloadAttempt {
@@ -467,34 +462,6 @@ func reserveModelDownload(t *testing.T, d *modelDownloads, engine, model, naming
 		t.Fatal(err)
 	}
 	return a
-}
-
-func TestModelDownloadNamingEquivalence(t *testing.T) {
-	d := testModelDownloads(t)
-	a := reserveModelDownload(t, d, "ollama", "demo", engines.ModelNamingImpliedLatestTag)
-	if a.entry.Model != "demo" || a.key.model != "demo:latest" {
-		t.Fatalf("raw spelling/key = %q/%q", a.entry.Model, a.key.model)
-	}
-	if _, err := d.reserve("ollama", "demo:latest", engines.ModelNamingImpliedLatestTag); !errors.Is(err, errDownloadBusy) {
-		t.Fatalf("duplicate = %v", err)
-	}
-	if !d.blocked(downloadContentKey{"ollama", "demo:latest"}) {
-		t.Fatal("equivalent key was not fenced")
-	}
-	if _, err := d.changeMarker(a, false); err != nil {
-		t.Fatal(err)
-	}
-	if err := d.finish(a, "failed", "download_failed", ""); err != nil {
-		t.Fatal(err)
-	}
-	b := reserveModelDownload(t, d, "ollama", "demo:latest", engines.ModelNamingImpliedLatestTag)
-	if err := d.finish(b, "failed", "interrupted", ""); err != nil {
-		t.Fatal(err)
-	}
-	s := d.snapshot()
-	if len(s.Entries) != 1 || s.Entries[0].ID != b.entry.ID || !s.Entries[0].BlocksReadiness {
-		t.Fatalf("retry lost earlier unsafe marker: %+v", s)
-	}
 }
 
 func TestModelDownloadFixedCapacity(t *testing.T) {
@@ -542,7 +509,7 @@ func TestModelDownloadGateOrderings(t *testing.T) {
 	if _, err := d.acquireWrite("llamacpp"); !errors.Is(err, errDownloadBusy) {
 		t.Fatalf("writer behind reader = %v", err)
 	}
-	other, err := d.acquireWrite("ollama")
+	other, err := d.acquireWrite("llamacpp-custom")
 	if err != nil {
 		t.Fatal(err)
 	}

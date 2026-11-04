@@ -87,7 +87,7 @@ func TestModelDownloadJournalLandedAdditionRefusesEffect(t *testing.T) {
 
 func TestModelDownloadJournalRecovery(t *testing.T) {
 	d := testModelDownloads(t)
-	a := reserveModelDownload(t, d, "ollama", "demo", engines.ModelNamingImpliedLatestTag)
+	a := reserveModelDownload(t, d, "llamacpp", "demo", engines.ModelNamingExact)
 	if _, err := d.changeMarker(a, false); err != nil {
 		t.Fatal(err)
 	}
@@ -98,14 +98,14 @@ func TestModelDownloadJournalRecovery(t *testing.T) {
 	if runtime.GOOS != "windows" && info.Mode().Perm() != 0600 {
 		t.Fatalf("mode = %o", info.Mode().Perm())
 	}
-	recovered := newModelDownloads(newOpID(), filepath.Dir(d.store.path), map[string]string{"ollama": engines.ModelNamingImpliedLatestTag})
+	recovered := newModelDownloads(newOpID(), filepath.Dir(d.store.path), map[string]string{"llamacpp": engines.ModelNamingExact})
 	s := recovered.snapshot()
 	if s.SourceID == d.source || len(s.Entries) != 1 || s.Entries[0].Phase != "unknown" || !s.Entries[0].BlocksReadiness {
 		t.Fatalf("recovery = %+v", s)
 	}
-	changed := newModelDownloads(newOpID(), filepath.Dir(d.store.path), map[string]string{"ollama": engines.ModelNamingExact})
+	changed := newModelDownloads(newOpID(), filepath.Dir(d.store.path), nil)
 	if !changed.snapshot().RecoveryRequired {
-		t.Fatal("changed naming reinterpreted marker")
+		t.Fatal("unknown naming reinterpreted marker")
 	}
 }
 
@@ -156,9 +156,16 @@ func TestModelDownloadJournalEncodedByteBound(t *testing.T) {
 }
 
 func TestModelDownloadJournalSerializesCrossEnginePublication(t *testing.T) {
-	d := testModelDownloads(t)
+	other, ok := engines.DynamicEngine("llamacpp-custom", "llama.cpp custom")
+	if !ok {
+		t.Fatal("invalid descriptor engine")
+	}
+	d := newModelDownloads(newOpID(), t.TempDir(), map[string]string{
+		engines.NameLlamaCPP: engines.ModelNamingExact,
+		other.Name:           engines.ModelNamingExact,
+	})
 	a := reserveModelDownload(t, d, "llamacpp", "one", engines.ModelNamingExact)
-	b := reserveModelDownload(t, d, "ollama", "two", engines.ModelNamingImpliedLatestTag)
+	b := reserveModelDownload(t, d, other.Name, "two", engines.ModelNamingExact)
 	entered, release := make(chan struct{}), make(chan struct{})
 	var firstSync sync.Once
 	d.store.replace.SyncDir = func(string) error { firstSync.Do(func() { close(entered); <-release }); return nil }

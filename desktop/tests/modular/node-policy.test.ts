@@ -156,11 +156,11 @@ describe('served/resident policy contract', () => {
     const residentPolicy = (contextTokens: number, maxOutputTokens: number): string =>
         JSON.stringify({
             revision: '31',
-            servedModels: [{ engine: 'ollama', model: 'm' }],
-            residentModels: [{ engine: 'ollama', model: 'm' }],
+            servedModels: [{ engine: 'llamacpp', model: 'm' }],
+            residentModels: [{ engine: 'llamacpp', model: 'm' }],
             profiles: [
                 {
-                    engine: 'ollama',
+                    engine: 'llamacpp',
                     model: 'm',
                     contextTokens,
                     maxOutputTokens,
@@ -171,7 +171,7 @@ describe('served/resident policy contract', () => {
             ]
         })
 
-    const RESIDENT = [{ engine: 'ollama', model: 'm' }]
+    const RESIDENT = [{ engine: 'llamacpp', model: 'm' }]
 
     it('keeps a non-empty residentModels list through the bridge round trip', () => {
         const draft = parsePolicyText(residentPolicy(4096, 512))
@@ -206,7 +206,7 @@ describe('served/resident policy contract', () => {
             parsePolicyText(
                 JSON.stringify({
                     servedModels: [],
-                    residentModels: [{ engine: 'ollama', model: 'm' }]
+                    residentModels: [{ engine: 'llamacpp', model: 'm' }]
                 })
             )
         ).toThrow('subset')
@@ -214,7 +214,7 @@ describe('served/resident policy contract', () => {
 
     it('documents the raw duplicate-key boundary', () => {
         expect(
-            parsePolicyText('{"servedModels":[{"engine":"ollama","model":"m"}],"servedModels":[]}')
+            parsePolicyText('{"servedModels":[{"engine":"llamacpp","model":"m"}],"servedModels":[]}')
         ).toEqual({ servedModels: [] })
         expect(() => parsePolicyText('{"servedModels":[],"ServedModels":[]}')).toThrow()
     })
@@ -226,7 +226,7 @@ describe('served/resident policy contract', () => {
 })
 
 describe('engine binding policy transport', () => {
-    const bindings = [{ engine: 'ollama', model: 'Native/Model' }]
+    const bindings = [{ engine: 'llamacpp', model: 'Native/Model' }]
 
     it.each([undefined, [], bindings])('preserves bindings %j through get, set and push', value => {
         const policy = {
@@ -260,23 +260,23 @@ describe('engine binding policy transport', () => {
         ['null', null],
         ['non-list', {}],
         ['invalid engine', [{ engine: '../bad', model: 'm' }]],
-        ['empty model', [{ engine: 'ollama', model: '' }]],
-        ['alias', [{ engine: 'ollama', model: 'weak-local' }]],
-        ['control', [{ engine: 'ollama', model: 'm\u0080' }]],
-        ['encoded reference bound', [{ engine: 'ollama', model: 'm'.repeat(230) }]],
-        ['escaped reference bound', [{ engine: 'ollama', model: '<'.repeat(40) }]],
-        ['extra member', [{ engine: 'ollama', model: 'm', extra: true }]],
-        ['case variant member', [{ engine: 'ollama', Model: 'm' }]],
+        ['empty model', [{ engine: 'llamacpp', model: '' }]],
+        ['alias', [{ engine: 'llamacpp', model: 'weak-local' }]],
+        ['control', [{ engine: 'llamacpp', model: 'm\u0080' }]],
+        ['encoded reference bound', [{ engine: 'llamacpp', model: 'm'.repeat(230) }]],
+        ['escaped reference bound', [{ engine: 'llamacpp', model: '<'.repeat(40) }]],
+        ['extra member', [{ engine: 'llamacpp', model: 'm', extra: true }]],
+        ['case variant member', [{ engine: 'llamacpp', Model: 'm' }]],
         [
             'duplicate native name',
             [
-                { engine: 'ollama', model: 'm' },
-                { engine: 'llamacpp', model: 'm' }
+                { engine: 'llamacpp', model: 'm' },
+                { engine: 'llamacpp-custom', model: 'm' }
             ]
         ],
         [
             'entry bound',
-            Array.from({ length: 257 }, (_, i) => ({ engine: 'ollama', model: `m${i}` }))
+            Array.from({ length: 257 }, (_, i) => ({ engine: 'llamacpp', model: `m${i}` }))
         ]
     ]
     it.each(invalid)('rejects %s across get, set, push and drafts', (_name, engineBindings) => {
@@ -297,12 +297,12 @@ describe('engine binding policy transport', () => {
     it('keeps case-sensitive names and leaves descriptor checks to the target', () => {
         const policy = {
             engineBindings: [
-                { engine: 'ollama', model: 'M' },
-                { engine: 'llamacpp', model: 'm' }
+                { engine: 'llamacpp', model: 'M' },
+                { engine: 'llamacpp-custom', model: 'm' }
             ],
             servedModels: [
-                { engine: 'ollama', model: 'M:latest' },
-                { engine: 'llamacpp', model: 'm' }
+                { engine: 'llamacpp', model: 'M:variant' },
+                { engine: 'llamacpp-custom', model: 'm' }
             ]
         }
         expect(parsePolicyText(JSON.stringify(policy))).toEqual(policy)
@@ -317,7 +317,7 @@ describe('engine binding policy transport', () => {
                     policy: {
                         revision: '31',
                         roles: {},
-                        engineBindings: [{ engine: 'ollama', model: `${target}-model` }],
+                        engineBindings: [{ engine: 'llamacpp', model: `${target}-model` }],
                         routing: { accounts: [] }
                     },
                     availability: 'available'
@@ -355,7 +355,7 @@ describe('engine binding policy transport', () => {
             expect(parsePolicyText(request.policy)).toEqual({
                 revision: '31',
                 roles: { weak: bindings[0] },
-                engineBindings: [{ engine: 'ollama', model: `${request.nodeId}-model` }],
+                engineBindings: [{ engine: 'llamacpp', model: `${request.nodeId}-model` }],
                 routing: { accounts: [] }
             })
         }
@@ -500,14 +500,14 @@ describe('strict-admission shared Go/TypeScript parity corpus', () => {
     })
 
     it.each([
-        'ollama',
-        'lmstudio',
         'llamacpp',
+        'llamacpp-main',
         'llamacpp-custom',
+        'llamacpp-dev',
         'strata',
         'errors',
         'e-x',
-        'lm-studio',
+        'llamacpp-custom-main',
         'llama-cpp',
         'A_1.-',
         '-engine',
@@ -736,7 +736,7 @@ describe('deployment endpoint schema Go/TypeScript parity corpus', () => {
 })
 
 describe('parseWorkloadsInitial', () => {
-    const base = { id: '7', engine: 'ollama', state: 'running', model: 'qwen3:4b', createdAt: 1 }
+    const base = { id: '7', engine: 'llamacpp', state: 'running', model: 'qwen3:4b', createdAt: 1 }
 
     it('keeps runId and requestedModel when present', () => {
         const [workload] = parseWorkloadsInitial({
@@ -758,7 +758,7 @@ describe('parseWorkloadsInitial', () => {
 describe('workloadCancelRequest', () => {
     const job = {
         id: '7',
-        engine: 'ollama' as const,
+        engine: 'llama-cpp' as const,
         state: 'running' as const,
         originatedFrom: 'node-a',
         runId: 'run-1'
@@ -768,7 +768,7 @@ describe('workloadCancelRequest', () => {
         expect(workloadCancelRequest(job, true)).toEqual({
             originatedFrom: 'node-a',
             workloadId: '7',
-            engine: 'ollama',
+            engine: 'llama-cpp',
             runId: 'run-1',
             regenerate: true
         })
@@ -791,14 +791,14 @@ describe('workloadCancelParams', () => {
         const params = workloadCancelParams({
             originatedFrom: 'node-a',
             workloadId: '7',
-            engine: 'lm-studio',
+            engine: 'llama-cpp',
             runId: 'run-1',
             regenerate: false
         })
         expect(params).toEqual({
             originatedFrom: 'node-a',
             workloadId: '7',
-            engine: 'lmstudio',
+            engine: 'llamacpp',
             runId: 'run-1',
             regenerate: false
         })
@@ -808,7 +808,7 @@ describe('workloadCancelParams', () => {
         const request: WorkloadCancelRequest = {
             originatedFrom: 'node-a',
             workloadId: '7',
-            engine: 'ollama',
+            engine: 'llama-cpp',
             runId: 'run-1',
             regenerate: false
         }
@@ -1064,7 +1064,7 @@ describe('policy revision and activation fields', () => {
 
 describe('model configuration policy evidence', () => {
     const loaded: JsonObject = {
-        engine: 'ollama',
+        engine: 'llamacpp',
         model: 'model-a',
         desiredResident: true,
         observedLoaded: true,
@@ -1076,14 +1076,14 @@ describe('model configuration policy evidence', () => {
         models: [
             loaded,
             {
-                engine: 'llamacpp',
+                engine: 'llamacpp-custom',
                 model: 'model-b',
                 desiredResident: false,
                 observedLoaded: true,
                 state: 'pending'
             },
             {
-                engine: 'ollama',
+                engine: 'llamacpp',
                 model: 'model-c',
                 desiredResident: true,
                 observedLoaded: false,
@@ -1091,7 +1091,7 @@ describe('model configuration policy evidence', () => {
                 reason: 'not-installed'
             },
             {
-                engine: 'ollama',
+                engine: 'llamacpp',
                 model: 'model-d',
                 desiredResident: true,
                 state: 'unknown',
@@ -1132,7 +1132,7 @@ describe('model configuration policy evidence', () => {
                 observationGeneration: 18,
                 models: [
                     {
-                        engine: 'ollama',
+                        engine: 'llamacpp',
                         model: 'failed-unloaded',
                         desiredResident: true,
                         observedLoaded: false,
@@ -1140,7 +1140,7 @@ describe('model configuration policy evidence', () => {
                         reason: 'load-failed'
                     },
                     {
-                        engine: 'llamacpp',
+                        engine: 'llamacpp-custom',
                         model: 'failed-unknown',
                         desiredResident: true,
                         state: 'unknown',
@@ -1171,7 +1171,7 @@ describe('model configuration policy evidence', () => {
                 observationGeneration: 19,
                 models: [
                     {
-                        engine: 'ollama',
+                        engine: 'llamacpp',
                         model: 'held',
                         desiredResident: true,
                         observedLoaded: false,
@@ -1334,7 +1334,7 @@ describe('model configuration policy evidence', () => {
         ],
         [
             'missing desired flag',
-            { ...configuration, models: [{ engine: 'ollama', model: 'm', state: 'unknown' }] }
+            { ...configuration, models: [{ engine: 'llamacpp', model: 'm', state: 'unknown' }] }
         ],
         [
             'non-boolean loaded',
@@ -1346,7 +1346,7 @@ describe('model configuration policy evidence', () => {
             {
                 ...configuration,
                 models: [
-                    { engine: 'ollama', model: 'm', desiredResident: true, state: 'satisfied' }
+                    { engine: 'llamacpp', model: 'm', desiredResident: true, state: 'satisfied' }
                 ]
             }
         ],

@@ -14,7 +14,7 @@ import (
 	"nvpair-shared/testbin"
 )
 
-func TestLMStudioDeleteModelRemovePath(t *testing.T) {
+func TestDeleteModelRemovePath(t *testing.T) {
 	root := t.TempDir()
 	modelRel := "publisher/demo-model"
 	modelDir := filepath.Join(root, modelRel)
@@ -53,12 +53,12 @@ func TestLMStudioDeleteModelRemovePath(t *testing.T) {
 	}
 }
 
-// deleteModelRestartManifest mirrors LM Studio's bundled delete_model: a guarded
-// filesystem removal that declares restart_after. bin lets a caller point the
+// deleteModelRestartManifest declares a delete_model that is a guarded
+// filesystem removal with restart_after. bin lets a caller point the
 // engine at a private copy of the fake binary it is free to break.
 func deleteModelRestartManifest(t *testing.T, root, bin string) *Manifest {
 	t.Helper()
-	m := testEngineManifest(bin)
+	m := llamaTestEngineManifest(bin)
 	m.Actions["delete_model"] = Action{
 		RemovePath: &ActionRemovePath{
 			Root: root,
@@ -92,10 +92,10 @@ func engineRun(t *testing.T, ex *Executor, engine string) (generation int64, run
 	return st.gen, st.running
 }
 
-// TestDeleteModelRestartAfterBouncesRunningEngine pins why LM Studio's
-// delete_model declares restart_after: the files are gone, but its server keeps
-// answering /v1/models from an index built at startup, and it offers no rescan.
-// The engine must come back up, not merely stop.
+// TestDeleteModelRestartAfterBouncesRunningEngine pins why a delete_model can
+// declare restart_after: the files are gone, but an engine whose server keeps
+// answering from an index built at startup offers no rescan. The engine must
+// come back up, not merely stop.
 func TestDeleteModelRestartAfterBouncesRunningEngine(t *testing.T) {
 	root := t.TempDir()
 	modelRel := "publisher/demo-model"
@@ -147,11 +147,11 @@ func TestDeleteModelRestartAfterLeavesStoppedEngineDown(t *testing.T) {
 	}
 }
 
-// TestDeleteModelWithoutRestartAfterDoesNotBounce is the Ollama side of the
-// contract. Ollama reflects a deletion immediately, so its manifest omits
-// restart_after and its delete must leave the engine's process completely alone
-// — no bounce, no interrupted inference. The restart is opt-in per action, never
-// a property of deleting.
+// TestDeleteModelWithoutRestartAfterDoesNotBounce is the other side of the
+// contract. An engine that reflects a deletion immediately omits restart_after
+// and its delete must leave the engine's process completely alone — no bounce,
+// no interrupted inference. The restart is opt-in per action, never a property
+// of deleting.
 func TestDeleteModelWithoutRestartAfterDoesNotBounce(t *testing.T) {
 	root := t.TempDir()
 	modelRel := "publisher/demo-model"
@@ -230,38 +230,6 @@ func TestDeleteModelRestartFailureFailsTheAction(t *testing.T) {
 	}
 	if _, running := engineRun(t, ex, "fake"); running {
 		t.Fatal("engine reports running after a failed restart")
-	}
-}
-
-// TestBundledManifestsRestartOnlyLMStudio guards the blast radius of
-// restart_after. Restarting interrupts whatever the engine is serving, so it is
-// justified only for an engine that cannot see a deletion any other way. If a
-// new manifest ever needs it, that is a deliberate decision — and it also has to
-// be mirrored in the desktop's EngineCapabilities so the UI still confirms
-// first (see desktop/tests/modular/delete-model-restart.test.ts).
-func TestBundledManifestsRestartOnlyLMStudio(t *testing.T) {
-	reg := NewRegistry()
-	if err := reg.LoadFS(bundledManifests, "manifests"); err != nil {
-		t.Fatalf("LoadFS bundled: %v", err)
-	}
-	for engine, m := range reg.engines {
-		for name, act := range m.Actions {
-			if !act.RestartAfter {
-				continue
-			}
-			if engine != "lmstudio" {
-				t.Errorf("engine %q action %q declares restart_after; only lmstudio needs one", engine, name)
-			}
-			if name != "delete_model" {
-				t.Errorf("lmstudio action %q declares restart_after; only delete_model needs one", name)
-			}
-		}
-	}
-	if !reg.engines["lmstudio"].Actions["delete_model"].RestartAfter {
-		t.Fatal("lmstudio delete_model lost restart_after; a deleted model would keep being served")
-	}
-	if reg.engines["ollama"].Actions["delete_model"].RestartAfter {
-		t.Fatal("ollama delete_model declares restart_after; Ollama reflects deletions without a bounce")
 	}
 }
 

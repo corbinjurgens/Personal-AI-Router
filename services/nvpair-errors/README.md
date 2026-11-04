@@ -101,8 +101,7 @@ Starter ids:
 
 | id | emitter | meaning |
 |---|---|---|
-| `ollama-proxy:upstream-unreachable:<node-id>` | ollama-proxy | an upstream node dropped out of discovery |
-| `lmstudio-proxy:upstream-unreachable:<node-id>` | lmstudio-proxy | an upstream node dropped out of discovery |
+| `llamacpp-proxy:upstream-unreachable:<node-id>` | llamacpp-proxy | an upstream node dropped out of discovery |
 | `node-scanner:node-info-unreachable:<host-uuid>` | nvpair-node-scanner | a paired peer's node-info stopped answering, or its reverse-session claims lapsed or never arrived after scanner start; cleared when it answers or renews, stops being paired, or is evicted |
 | `manual-nodes:probe-failed:<node-id>` | nvpair-manual-nodes | a manual node has failed N consecutive probes |
 | `engine-manager:install-failed:<engine>` | nvpair-engine-manager | installing the engine failed |
@@ -119,7 +118,7 @@ Returns the current full list, sorted by id.
 ```json
 // → {"jsonrpc":"2.0","id":1,"method":"errors:get-initial"}
 // ← {"jsonrpc":"2.0","id":1,"result":[
-//      {"id":"engine-manager:start-failed:ollama","message":"...","timestamp":1700000000000,"nodeId":"node-a"}
+//      {"id":"engine-manager:start-failed:llamacpp","message":"...","timestamp":1700000000000,"nodeId":"node-a"}
 //   ]}
 ```
 
@@ -132,7 +131,7 @@ notification form is fire-and-forget.
 ```json
 // notification form (most producers use this):
 {"jsonrpc":"2.0","method":"errors:report","params":{
-  "id":"ollama-proxy:upstream-unreachable:peer-b",
+  "id":"llamacpp-proxy:upstream-unreachable:peer-b",
   "message":"peer-b unreachable for 5 ticks",
   "timestamp":1700000123456,
   "nodeId":"node-a"
@@ -148,7 +147,7 @@ nvpair-errors today; see [Origin tracking and loop prevention via `nodeId`](#ori
 ```json
 // notification form:
 {"jsonrpc":"2.0","method":"errors:clear","params":{
-  "id":"ollama-proxy:upstream-unreachable:peer-b",
+  "id":"llamacpp-proxy:upstream-unreachable:peer-b",
   "clearedBy":"node-a"
 }}
 ```
@@ -183,7 +182,7 @@ on every dropped frame otherwise.
 
 ```json
 {"jsonrpc":"2.0","method":"errors:update","params":[
-  {"id":"engine-manager:start-failed:ollama","message":"...","timestamp":...,"nodeId":"node-a"},
+  {"id":"engine-manager:start-failed:llamacpp","message":"...","timestamp":...,"nodeId":"node-a"},
   {"id":"supervisor:subprocess-crashed:nvpair-node-info","message":"...","timestamp":...,"nodeId":"node-a"}
 ]}
 ```
@@ -307,7 +306,7 @@ refreshes the message).
 ### Keying
 
 The store keys by composite `(nodeId, id)` because ids are only unique
-within a node (two nodes both emit `engine-manager:start-failed:ollama`). The
+within a node (two nodes both emit `engine-manager:start-failed:llamacpp`). The
 on-wire shapes are unchanged — `errors:update` / `errors:get-initial`
 still carry a flat `[]ServiceError`, sorted by `id` then `nodeId`.
 

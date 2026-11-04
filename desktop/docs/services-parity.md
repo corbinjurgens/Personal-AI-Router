@@ -89,8 +89,6 @@ see [model engine bindings](../../docs/model-engine-bindings.mdx).
 | Discovery                  | Complete                        | Broker discovery snapshots drive available nodes and node state                                                                                 |
 | Node telemetry             | Integrated                      | Paired remotes use the broker-backed fresh getter; self and unpaired discovery retain direct `/v1/node-info`; remote OS remains backend-limited |
 | Manual nodes               | Complete with local persistence | Broker owns probing, proxy registration, and persistence; Electron's old entries are migrated once                                              |
-| Ollama routing             | Complete                        | Broker relay and backend scheduler drive proxy routing                                                                                          |
-| LM Studio routing          | Complete                        | Parallel broker relay and scheduler path                                                                                                        |
 | llama.cpp backend          | Integrated                      | Desktop and TUI expose install, lifecycle, catalog pull, inventory, load/unload, endpoints, routing, and demo traffic                            |
 | Local engine lifecycle     | Complete                        | Install, start, stop, uninstall, update, and port configuration                                                                                 |
 | Engine switching           | Integrated; native acceptance pending | Explicit source/target, revision and request correlation; typed denial/veto/conflict and recovery readback in desktop and TUI |
@@ -104,7 +102,7 @@ see [model engine bindings](../../docs/model-engine-bindings.mdx).
 | Cluster pairing            | Complete                        | PIN pairing, identity, membership, leave, and removal                                                                                           |
 | Cluster transport security | Backend-owned                   | Node-to-node transport security, including the proxies' cluster-mTLS inference ingress, is entirely backend; Personal AI Router implements none |
 | Settings                   | Partial                         | Cluster identity plus per-engine ports and engine arguments, local and remote; inert backend settings are not surfaced                            |
-| Model catalog search       | Backend-owned                   | `engine:catalog` serves the locked Ollama list and the cached LM Studio and llama.cpp catalogs, and searches Hugging Face for llama.cpp         |
+| Model catalog search       | Backend-owned                   | `engine:catalog` serves the cached llama.cpp catalog and searches Hugging Face for it         |
 
 ## Routing history availability and limits
 
@@ -279,14 +277,12 @@ All engine facades are broker-owned and cluster-aware. They live in one
 `nvpair-proxy` process, each enabled after spawn on its own port, and each
 serves its engine's dialect:
 
-- the Ollama facade serves the Ollama-compatible surface;
-- the LM Studio facade serves the LM Studio/OpenAI-compatible surface;
 - the llama.cpp facade serves OpenAI-compatible routes and remaps
   `GET /v1/models` to the router's `GET /models`.
 
-Sharing a process is what lets them share the burst reservations the scheduler
-depends on: facades bursting at once compete for the same node's GPU, so a
-dispatch through any one has to be visible to the others.
+Sharing a process is what lets facades share the burst reservations the
+scheduler depends on: facades bursting at once compete for the same node's GPU,
+so a dispatch through any one has to be visible to the others.
 
 Routing precedence is manual selection, scheduler priority, then deterministic
 proxy ordering. Personal AI Router leaves proxies in automatic mode.
@@ -450,16 +446,13 @@ The independent source/destination picker is not part of this bridge contract.
 Personal AI Router uses:
 
 - `engine:models`, selecting the requested engine's `modelsByEngine` inventory;
-- `pull_model`, whose body the bridge still spells by engine family (Ollama's
-  `name`, every other engine's `model`);
+- `pull_model`, whose body is `{ model }`;
 - the typed `engine:load-model`, `engine:unload-model` and
   `engine:delete-model` operations, which engine-manager maps onto each
-  manifest's `operations` bindings: Ollama `run_model`, `unload_model`
-  (`keep_alive: 0`) and `delete_model`; LM Studio `load_model`, `unload_model`
-  and `delete_model` (`remove_path`); llama.cpp `load_model`, `unload_model`
+  manifest's `operations` bindings: llama.cpp `load_model`, `unload_model`
   and `delete_model` (`DELETE /models` with URL-encoded query params).
 
-All three engines expose Load, Eject, and Delete in the model manager. Any
+llama.cpp exposes Load, Eject, and Delete in the model manager. Any
 other engine engine-manager registers, such as a locally configured fork, is
 listed once installed, with its descriptor's label and only the operations its
 `engine:descriptors` entry declares. An engine without a descriptor here (a
@@ -467,52 +460,33 @@ paired node's variant) shows status and start/stop only.
 User-configurable keep-alive / expiry controls remain unsupported; managed
 llama.cpp uses its fixed five-minute idle sleep.
 
-LM Studio's `delete_model` declares `restart_after`, so the engine manager
-restarts a running LM Studio once the files are removed — its `/v1/models` is
-served from an index built at startup and it exposes no rescan operation, so
-clients would otherwise keep being offered a deleted model. Because that makes
-Delete interrupt inference, `EngineCapabilities['lm-studio'].restartsOnModelDelete`
-tells `ModelManager.tsx` to confirm the deletion first (`ConfirmModal`). The
-restart is entirely backend-owned: PAIR sends the same `deleteModel` command as
-for any other engine and never issues `engine:restart` itself, so the bundled
-`nvpair` terminal UI and a remote peer's deletion get the same behavior.
+The bundled llama.cpp manifest declares no `restart_after`: llama.cpp reflects a
+deletion in-process, so there is no engine bounce and no restart confirmation.
+llama.cpp may stop the selected model while removing its cache entry, but the
+router and its other models stay up. `tests/modular/delete-model-restart.test.ts`
+reads the shipped manifest and asserts it omits `restart_after`. The desktop
+carries no capability flag for a restart-backed delete.
 
-**The full engine restart is LM Studio only.** Ollama and llama.cpp reflect a
-deletion in-process, so their manifests omit `restart_after` and their capability
-entries omit `restartsOnModelDelete`: no engine bounce and no restart
-confirmation. llama.cpp may stop the selected model while removing its cache
-entry, but the router and its other models stay up. Those manifest and
-capability facts have to stay in step across Go and TypeScript, which nothing in
-either type system enforces — so
-`tests/modular/delete-model-restart.test.ts` reads the shipped manifests and
-asserts the pair agrees, and `TestBundledManifestsRestartOnlyLMStudio` guards the
-same thing from the Go side.
-
-Several model-action timeouts have to be ordered correctly. For a
-restart-backed delete, the reply is withheld until the engine is ready again
-(LM Studio's `ready.timeout_s` alone is 60s), so
-`MODULAR_MODEL_ACTION_TIMEOUT_MS` anchors the delete-specific observers. Ollama
-Load uses a separate 10/11-minute response-header budget:
+Several model-action timeouts have to be ordered correctly.
+`MODULAR_MODEL_ACTION_TIMEOUT_MS` anchors the model-action observers, and a load
+whose descriptor declares a longer response budget gets a separate allowance:
 
 | Budget                                                        | Value | Why                                                                                                                                                                                                                           |
 | ------------------------------------------------------------- | ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `MODULAR_MODEL_ACTION_TIMEOUT_MS` (`modular-runtime.ts`)      | 120s  | The RPC must outlast a full stop + readiness-probed start.                                                                                                                                                                    |
-| `RESTART_DELETE_TIMEOUT_MS` (`pending-actions.store.ts`)      | 180s  | The optimistic-spinner safety net must outlast the RPC, or it expires mid-flight and drops the spinner while the delete is still running.                                                                                     |
 | `engineResponseHeaderTimeout` (`executor.go`)                 | 30s   | Downloads and ordinary local HTTP actions retain a prompt response-header bound; probe contexts stay shorter.                                                                                                                 |
-| `pullProgressTimeout` (`executor.go`)                         | 30min | Streaming Ollama and llama.cpp pulls may run indefinitely while layer/file completed bytes advance; 30 minutes without advancing bytes cancels the stalled pull.                                                              |
-| `ollamaLoadResponseHeaderTimeout` (`executor.go`)             | 10min | Only Ollama's local `run_model` action gets the cold-load allowance.                                                                                                                                                          |
-| `OLLAMA_LOAD_PENDING_TIMEOUT_MS` (`pending-actions.store.ts`) | 12min | Ollama's Load control stays locked beyond the remote path's 11-minute header budget, while backend success or failure still clears it immediately.                                                                            |
-| `PENDING_TIMEOUT_MS`                                          | 60s   | Unchanged for every other command, including an Ollama delete.                                                                                                                                                                |
-| `remoteReadyResponseHeaderTimeout` (`remoteclient.go`)        | 11min | Remote start/delete responses can wait on engine readiness, and a cold Ollama model load can withhold headers for minutes, so those calls use the readiness-sized client. Other model actions retain the ordinary 30s budget. |
+| `pullProgressTimeout` (`executor.go`)                         | 30min | Streaming llama.cpp pulls may run indefinitely while file completed bytes advance; 30 minutes without advancing bytes cancels the stalled pull.                                                              |
+| `PENDING_TIMEOUT_MS`                                          | 60s   | Unchanged for every other command, including a delete.                                                                                                                                                                |
+| `remoteReadyResponseHeaderTimeout` (`remoteclient.go`)        | 11min | Remote start/delete responses can wait on engine readiness, and a cold model load can withhold headers for minutes, so those calls use the readiness-sized client. Other model actions retain the ordinary 30s budget. |
 
 The net is a backstop, not the mechanism: a delete now ends the spinner on real
 backend truth either way. On success the refreshed canonical inventory drops the model;
 on failure the reported error carries `nodeId` + `engineType` + `modelName`, which
 is what lets the store attribute it and clear that row.
 
-Local Ollama Load also observes its eventual JSON-RPC rejection and reports the
+Local Load also observes its eventual JSON-RPC rejection and reports the
 same model context; the resulting attributed `errors:update` clears `Loading…`
-without waiting for the 12-minute net.
+without waiting for the net.
 
 A failed restart is reported as `Deleted <model>, but <engine> failed to
 restart: …`, never as a failed delete — the files really are gone, and telling
@@ -593,7 +567,7 @@ union, the per-engine breakdown (`modelsByEngine`), the per-engine set of
 models loaded in memory (`loadedByEngine`), and `downloadState`. The engine-manager
 watches inventory/readiness and loaded state and pushes `engine:models-changed`
 (`{ engine, models }`, the full `engine:models` shape) on explicit load/unload,
-LM Studio JIT auto-load, and TTL/idle eviction. Discovery carries
+JIT auto-load, and TTL/idle eviction. Discovery carries
 `loadedByEngine` onto each node's `AvailableNode` so remote cards reflect
 residency too.
 
@@ -627,8 +601,8 @@ never treats a listed name as completion. Failed partial models stay in the
 catalog for an explicit download retry; no automatic retry or engine start occurs.
 
 The model catalogue is owned by the backend: `engine:catalog` on
-`nvpair-engine-manager` serves the curated Ollama, LM Studio, and llama.cpp
-lists, and searches Hugging Face for llama.cpp, and both the desktop app and
+`nvpair-engine-manager` serves the llama.cpp
+list, and searches Hugging Face for llama.cpp, and both the desktop app and
 the terminal interface browse it. Electron only relays the call and maps rows
 for the renderer.
 

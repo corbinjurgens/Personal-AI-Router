@@ -80,7 +80,7 @@ func TestBuildApplyProcess(t *testing.T) {
 		}
 	}
 	f.env = ownerEvidencePrivateEnv(f.env)
-	f.additionalBrokerArgs = []string{"--scanner-mdns=false", "--manual-ollama-port=0", "--manual-lmstudio-port=0", "--manual-node-info-port=0", "--engine-manager-control-host=127.0.0.1"}
+	f.additionalBrokerArgs = []string{"--scanner-mdns=false", "--manual-node-info-port=0", "--engine-manager-control-host=127.0.0.1"}
 	requireOwnerFirewallRules(t, firewall, append(f.inventory.ownedPaths(), self))
 	t.Cleanup(func() {
 		if err := f.cleanupChecked(); err != nil {

@@ -138,7 +138,7 @@ func TestSwitchDrainPushSlotAndDeadlineAreBounded(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 35*time.Millisecond)
 			defer cancel()
 			started := time.Now()
-			err := h.b.drainEngineForSwitch(ctx, settings.SwitchPrepareRequest{OperationID: "bounded-drain", SourceEngine: "llamacpp", TargetEngine: "lmstudio"})
+			err := h.b.drainEngineForSwitch(ctx, settings.SwitchPrepareRequest{OperationID: "bounded-drain", SourceEngine: "llamacpp", TargetEngine: "llamacpp-custom"})
 			if err == nil || time.Since(started) > time.Second {
 				t.Fatalf("drain bound: error %v, elapsed %v", err, time.Since(started))
 			}
@@ -152,7 +152,7 @@ func TestSwitchDrainPushSlotAndDeadlineAreBounded(t *testing.T) {
 func TestSwitchReplayInvalidatesBeforeFacadeAndFailsClosed(t *testing.T) {
 	h := newSwitchHarness(t)
 	r := switchStoreReceipt("replay-invalidations")
-	r.Request.TargetEngine = "lmstudio"
+	r.Request.TargetEngine = "llamacpp-custom"
 	r.PayloadHash = settings.SwitchPayloadHash(r.Caller, r.NodeID, r.Request)
 	switchStoreAccept(t, h.b.engineSwitch.store, r)
 	for _, phase := range []string{settings.SwitchValidating, settings.SwitchDraining} {
@@ -188,7 +188,7 @@ func TestSwitchReplayInvalidatesBeforeFacadeAndFailsClosed(t *testing.T) {
 			invalidations = append(invalidations, p)
 		}
 	}
-	if len(invalidations) != 2 || invalidations[0].Engine != "llamacpp" || invalidations[1].Engine != "lmstudio" || invalidations[0].OperationID != r.RequestID {
+	if len(invalidations) != 2 || invalidations[0].Engine != "llamacpp" || invalidations[1].Engine != "llamacpp-custom" || invalidations[0].OperationID != r.RequestID {
 		t.Fatalf("replay = %+v", invalidations)
 	}
 	base := h.proxy.answer
@@ -219,7 +219,7 @@ func TestSwitchDrainWrongRunBetweenInvalidationAcknowledgements(t *testing.T) {
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if err := h.b.drainEngineForSwitch(ctx, settings.SwitchPrepareRequest{OperationID: "restart", SourceEngine: "llamacpp", TargetEngine: "lmstudio"}); err == nil {
+	if err := h.b.drainEngineForSwitch(ctx, settings.SwitchPrepareRequest{OperationID: "restart", SourceEngine: "llamacpp", TargetEngine: "llamacpp-custom"}); err == nil {
 		t.Fatal("accepted evidence from two proxy runs")
 	}
 }
@@ -234,7 +234,7 @@ type nodeDrainHarness struct {
 
 func newNodeDrainHarness(t *testing.T) *nodeDrainHarness {
 	t.Helper()
-	isolateOllamaHostTestConfig(t)
+	isolateBrokerTestConfig(t)
 	b, _ := newPolicyBroker(t)
 	// Use the existing catalog owner, including descriptor engines outside the
 	// built-in table. Port planning is synthetic and never opens a listener.

@@ -94,7 +94,7 @@ func TestEngineManagerControlHostInvalidConstructionDoesNotCreateIdentity(t *tes
 		{name: "malformed host with explicit identity directory", host: "256.0.0.1", explicitCluster: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			isolateOllamaHostTestConfig(t)
+			isolateBrokerTestConfig(t)
 			defaultRoot, err := appdir.Dir()
 			if err != nil {
 				t.Fatalf("resolve private app directory: %v", err)
@@ -132,7 +132,7 @@ func TestEngineManagerControlHostInvalidConstructionDoesNotCreateIdentity(t *tes
 }
 
 func TestEngineManagerControlHostCLIRejectsBeforeWorkerResolution(t *testing.T) {
-	isolateOllamaHostTestConfig(t)
+	isolateBrokerTestConfig(t)
 	binary := buildEngineManagerPortTestBinary(t, "ports-cli", "nvpair-ui-broker", ".", ".")
 	for _, host := range []string{"", "localhost", "127.0.0.1:14323", "[::1]", "256.0.0.1"} {
 		t.Run("rejects "+host, func(t *testing.T) {
@@ -160,8 +160,8 @@ func TestEngineManagerPortsCLIRejectsInvalidBeforeWorkerResolution(t *testing.T)
 		{name: "node-info collides with HTTP", httpPort: "25122", controlPort: "25123", extra: []string{"--node-info-port", "25122"}, want: "--node-info-port and --engine-manager-http-port must differ (both are 25122)"},
 		{name: "control collides with default cluster port", httpPort: "25122", controlPort: "14321", want: "--cluster-manager-port and --engine-manager-control-port must differ (both are 14321)"},
 		{name: "errors below range", httpPort: "25122", controlPort: "25123", extra: []string{"--errors-port", "0"}, want: "--errors-port must be between 1 and 65535 (got 0)"},
-		{name: "workload on a compatibility facade", httpPort: "25122", controlPort: "25123", extra: []string{"--workload-manager-port", "11434"}, want: "--workload-manager-port 11434 is reserved"},
-		{name: "HTTP on a managed backend base", httpPort: "1235", controlPort: "25123", want: "--engine-manager-http-port 1235 is reserved"},
+		{name: "workload on a compatibility facade", httpPort: "25122", controlPort: "25123", extra: []string{"--workload-manager-port", "8080"}, want: "--workload-manager-port 8080 is reserved"},
+		{name: "HTTP on a managed backend base", httpPort: "8081", controlPort: "25123", want: "--engine-manager-http-port 8081 is reserved"},
 		{name: "zero HTTP", httpPort: "0", controlPort: "25123", want: "--engine-manager-http-port must be between 1 and 65535 (got 0)"},
 		{name: "zero control", httpPort: "25122", controlPort: "0", want: "--engine-manager-control-port must be between 1 and 65535 (got 0)"},
 		{name: "negative HTTP", httpPort: "-1", controlPort: "25123", want: "--engine-manager-http-port must be between 1 and 65535 (got -1)"},
@@ -218,7 +218,7 @@ func TestEngineManagerPortsInvalidProgrammaticConfigurationDoesNotSpawn(t *testi
 }
 
 func TestEngineManagerPortsSpawnAndScannerReplay(t *testing.T) {
-	isolateOllamaHostTestConfig(t)
+	isolateBrokerTestConfig(t)
 	engineBinary := buildPrivateEngineManagerPortFixture(t)
 	scannerBinary := buildServicePortFixture(t)
 	ports := make([]int, 2)
@@ -389,8 +389,8 @@ func TestEngineManagerPortsSettingsReserveConfiguredListeners(t *testing.T) {
 		{name: "cluster remains reserved", serverPort: 14321, proxyPort: 25200},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := b.validateSettingsPortsLocked(context.Background(), "ollama", settings.Config{ServerPort: tc.serverPort, ProxyPort: tc.proxyPort}, settings.Snapshot{})
-			if err == nil || err.Error() != "a selected port is reserved by a PAIR service or proxy alias" {
+			err := b.validateSettingsPortsLocked(context.Background(), "llamacpp", settings.Config{ServerPort: tc.serverPort, ProxyPort: tc.proxyPort}, settings.Snapshot{})
+			if err == nil || err.Error() != "a selected port is reserved by a PAIR service or routing listener" {
 				t.Fatalf("settings validation error = %v, want PAIR reservation", err)
 			}
 		})
@@ -412,8 +412,8 @@ func TestEngineManagerPortsSettingsReserveTheRoutingListenerPort(t *testing.T) {
 		{name: "proxy port", serverPort: 25301, proxyPort: 25300},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := b.validateSettingsPortsLocked(context.Background(), "ollama", settings.Config{ServerPort: tc.serverPort, ProxyPort: tc.proxyPort}, settings.Snapshot{})
-			if err == nil || err.Error() != "a selected port is reserved by a PAIR service or proxy alias" {
+			err := b.validateSettingsPortsLocked(context.Background(), "llamacpp", settings.Config{ServerPort: tc.serverPort, ProxyPort: tc.proxyPort}, settings.Snapshot{})
+			if err == nil || err.Error() != "a selected port is reserved by a PAIR service or routing listener" {
 				t.Fatalf("settings validation error = %v, want the routing listener port reserved", err)
 			}
 		})
@@ -438,7 +438,7 @@ func TestEngineManagerPortsSettingsReleaseUnusedDefaults(t *testing.T) {
 		}
 	}()
 	current := settings.Snapshot{Running: true, EffectiveServerPort: 14322, EffectiveProxyPort: 14323}
-	if err := b.validateSettingsPortsLocked(context.Background(), "ollama", settings.Config{ServerPort: 14322, ProxyPort: 14323}, current); err != nil {
+	if err := b.validateSettingsPortsLocked(context.Background(), "llamacpp", settings.Config{ServerPort: 14322, ProxyPort: 14323}, current); err != nil {
 		t.Fatalf("unused default listener ports remain reserved: %v", err)
 	}
 }

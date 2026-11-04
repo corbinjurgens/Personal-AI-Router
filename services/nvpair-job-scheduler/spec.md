@@ -55,7 +55,7 @@ capacity, model locality, latency, and affinity can grow later behind the same
 - **Simultaneous local burst**: before each auto-routed inference forward, the
   proxy atomically increments a local reservation for its chosen node. Concurrent
   requests therefore see one another even before workload feedback completes.
-- **Cross-engine contention**: an Ollama workload and an LM Studio workload both
+- **Cross-engine contention**: a llama.cpp workload and a descriptor engine's workload both
   consume the destination node's execution resources, so either one changes both
   engine outputs.
 - **Periodic reconciliation**: the runtime-adjustable timer recomputes the same
@@ -189,7 +189,7 @@ notification per engine when its rank snapshot changes; `errors:report` /
 `errors:clear`. No inference traffic and no requests addressed to other workers.
 
 ```json
-{"jsonrpc":"2.0","method":"schedule:priority","params":{"engine":"ollama","nodes":["MY-PC","LAB-DESK-B","GPU-RIG"],"ranks":[{"id":"MY-PC","pending":0,"gpuPressure":0,"rank":0},{"id":"LAB-DESK-B","pending":1,"gpuPressure":1,"rank":1},{"id":"GPU-RIG","pending":3,"gpuPressure":3,"rank":2}]}}
+{"jsonrpc":"2.0","method":"schedule:priority","params":{"engine":"llamacpp","nodes":["MY-PC","LAB-DESK-B","GPU-RIG"],"ranks":[{"id":"MY-PC","pending":0,"gpuPressure":0,"rank":0},{"id":"LAB-DESK-B","pending":1,"gpuPressure":1,"rank":1},{"id":"GPU-RIG","pending":3,"gpuPressure":3,"rank":2}]}}
 ```
 
 ## 7. API / Interface Contract
@@ -205,7 +205,7 @@ Requests (Broker → scheduler):
 
 | Method | Params | Result |
 |--------|--------|--------|
-| `scheduler:get-status` | — | `{ interval_ms, engines: { ollama: EngineSchedule, lmstudio: EngineSchedule } }` |
+| `scheduler:get-status` | — | `{ interval_ms, engines: { <engine id>: EngineSchedule } }` |
 | `scheduler:get-interval` | — | `{ interval_ms }` |
 | `scheduler:set-interval` | `{ interval_ms }` | `{ interval_ms }` — live; clamped to the floor (§7.5); effective next tick |
 | `scheduler:tick` | — | `{ ticked: true }` — force an immediate recompute + re-emit (tests/debug) |
@@ -215,7 +215,7 @@ Requests (Broker → scheduler):
 `EngineSchedule`:
 ```json
 {
-  engine: string          // "ollama" | "lmstudio"
+  engine: string          // an engine ID, such as "llamacpp"
   emitted: [NodeRank]      // last order emitted (empty if none yet)
   lastEmittedAt: number    // epoch ms; 0 if never
 }
@@ -289,8 +289,8 @@ Let `D` = current discovered-node `hostUuid`s:
 
 `scheduledOn` (not `originatedFrom`) is the key: we care where work runs, not where
 it came from. Engine remains part of workload identity and selects the downstream
-proxy output, but it does not partition the load metric: Ollama, LM Studio, and
-llama.cpp normally contend for the same node-level GPU, VRAM, CPU, and memory.
+proxy output, but it does not partition the load metric: engines on one node
+normally contend for the same node-level GPU, VRAM, CPU, and memory.
 Until resource affinity is observable, total node queue depth is the conservative
 signal.
 
@@ -424,7 +424,7 @@ distinct proxy process via `node/set-priority`; each facade applies the subset i
 can route to.
 
 As load and smoothed pressure change, only a new pressure band, pending count, or
-order triggers another snapshot. If the Ollama proxy is not supervised, the Broker
+order triggers another snapshot. If the engine proxy is not supervised, the Broker
 drops the push and re-delivers once it is back — the scheduler is unaware.
 
 ## 15. Process model, CLI, and build wiring

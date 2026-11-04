@@ -109,16 +109,11 @@ func decodeObject(data []byte, target any) error {
 }
 
 func (c *backendClient) listModels(ctx context.Context) ([]RegisteredModel, error) {
-	var models []RegisteredModel
-	var err error
-	switch {
-	case c.cfg.Backend == "lmstudio":
-		models, err = c.listLMStudioModels(ctx)
-	case c.usesOpenAIProtocol():
-		models, err = c.listOpenAIModels(ctx)
-	default:
-		models, err = c.listOllamaModels(ctx)
+	data, err := c.request(ctx, http.MethodGet, "/v1/models", nil)
+	if err != nil {
+		return nil, fmt.Errorf("query %s models: %w", c.cfg.Backend, err)
 	}
+	models, err := parseOpenAIModels(data)
 	if err != nil {
 		return nil, err
 	}
@@ -128,139 +123,6 @@ func (c *backendClient) listModels(ctx context.Context) ([]RegisteredModel, erro
 	sort.SliceStable(models, func(i, j int) bool {
 		return strings.ToLower(models[i].Name) < strings.ToLower(models[j].Name)
 	})
-	return models, nil
-}
-
-// listOpenAIModels reads an OpenAI-compatible /v1/models: llama.cpp's, and any
-// configured engine driven through the openai-v1 profile.
-func (c *backendClient) listOpenAIModels(ctx context.Context) ([]RegisteredModel, error) {
-	data, err := c.request(ctx, http.MethodGet, "/v1/models", nil)
-	if err != nil {
-		return nil, fmt.Errorf("query %s models: %w", c.cfg.Backend, err)
-	}
-	return parseOpenAIModels(data)
-}
-
-func (c *backendClient) listOllamaModels(ctx context.Context) ([]RegisteredModel, error) {
-	data, err := c.request(ctx, http.MethodGet, "/api/tags", nil)
-	if err != nil {
-		return nil, fmt.Errorf("query %s models: %w", c.cfg.Backend, err)
-	}
-	var response struct {
-		Models []struct {
-			Name         string   `json:"name"`
-			Model        string   `json:"model"`
-			Capabilities []string `json:"capabilities"`
-		} `json:"models"`
-	}
-	if err := decodeObject(data, &response); err != nil {
-		return nil, err
-	}
-	models := make([]RegisteredModel, 0, len(response.Models))
-	for _, model := range response.Models {
-		name := strings.TrimSpace(model.Name)
-		if name == "" {
-			name = strings.TrimSpace(model.Model)
-		}
-		if name == "" {
-			continue
-		}
-		models = append(models, RegisteredModel{
-			Name:         name,
-			Capabilities: normalizedStrings(model.Capabilities),
-		})
-	}
-	return models, nil
-}
-
-// listLMStudioModels asks the OpenAI-compatible `/v1/models` first. When the
-// endpoint belongs to a Personal AI Router proxy, that route fans out across the
-// cluster and answers with the combined inventory, while the native
-// `/api/v1/models` is forwarded to a single node — so preferring the native list
-// would silently hide every model that lives on another machine.
-//
-// The OpenAI list carries no type or capability fields, which the generation
-// filter needs, so the native list is still consulted and merged in by name.
-// Whatever it reports describes the same model wherever it is loaded.
-func (c *backendClient) listLMStudioModels(ctx context.Context) ([]RegisteredModel, error) {
-	openAIData, openAIErr := c.request(ctx, http.MethodGet, "/v1/models", nil)
-	var models []RegisteredModel
-	if openAIErr == nil {
-		parsed, err := parseOpenAIModels(openAIData)
-		if err != nil {
-			openAIErr = err
-		} else if len(parsed) == 0 {
-			openAIErr = errors.New("no models returned")
-		} else {
-			models = parsed
-		}
-	}
-
-	nativeData, nativeErr := c.request(ctx, http.MethodGet, "/api/v1/models", nil)
-	var native []RegisteredModel
-	if nativeErr == nil {
-		native, nativeErr = parseLMStudioNativeModels(nativeData)
-	}
-
-	if models == nil {
-		if nativeErr != nil || len(native) == 0 {
-			return nil, fmt.Errorf(
-				"LM Studio model query failed through /v1/models (%v) and /api/v1/models (%v)",
-				openAIErr, nativeErr,
-			)
-		}
-		return native, nil
-	}
-	return mergeLMStudioMetadata(models, native), nil
-}
-
-// mergeLMStudioMetadata copies the type and capability fields the native
-// endpoint reports onto the cluster-wide list, matched by name. Names the native
-// endpoint does not know about keep their empty metadata, which
-// supportsGeneration treats as eligible.
-func mergeLMStudioMetadata(models, native []RegisteredModel) []RegisteredModel {
-	if len(native) == 0 {
-		return models
-	}
-	byName := make(map[string]RegisteredModel, len(native))
-	for _, model := range native {
-		byName[model.Name] = model
-	}
-	for i, model := range models {
-		detail, ok := byName[model.Name]
-		if !ok {
-			continue
-		}
-		models[i].Type = detail.Type
-		models[i].Capabilities = detail.Capabilities
-	}
-	return models
-}
-
-func parseLMStudioNativeModels(data []byte) ([]RegisteredModel, error) {
-	var response struct {
-		Models []map[string]any `json:"models"`
-	}
-	if err := decodeObject(data, &response); err != nil {
-		return nil, err
-	}
-	models := make([]RegisteredModel, 0, len(response.Models))
-	for _, raw := range response.Models {
-		name := firstString(raw, "key", "id", "model", "display_name")
-		if name == "" {
-			continue
-		}
-		model := RegisteredModel{Name: name, Type: strings.ToLower(firstString(raw, "type"))}
-		if capabilities, ok := raw["capabilities"].(map[string]any); ok {
-			for key, value := range capabilities {
-				if truthy(value) {
-					model.Capabilities = append(model.Capabilities, strings.ToLower(key))
-				}
-			}
-			sort.Strings(model.Capabilities)
-		}
-		models = append(models, model)
-	}
 	return models, nil
 }
 
@@ -285,41 +147,6 @@ func parseOpenAIModels(data []byte) ([]RegisteredModel, error) {
 		}
 	}
 	return models, nil
-}
-
-func firstString(values map[string]any, keys ...string) string {
-	for _, key := range keys {
-		if value, ok := values[key].(string); ok && strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
-		}
-	}
-	return ""
-}
-
-func truthy(value any) bool {
-	switch v := value.(type) {
-	case bool:
-		return v
-	case float64:
-		return v != 0
-	case string:
-		parsed, err := strconv.ParseBool(v)
-		return err == nil && parsed
-	default:
-		return false
-	}
-}
-
-func normalizedStrings(values []string) []string {
-	out := make([]string, 0, len(values))
-	for _, value := range values {
-		value = strings.ToLower(strings.TrimSpace(value))
-		if value != "" {
-			out = append(out, value)
-		}
-	}
-	sort.Strings(out)
-	return out
 }
 
 func supportsGeneration(model RegisteredModel) bool {
@@ -353,66 +180,23 @@ func (c *backendClient) resolveModel(ctx context.Context) (string, []RegisteredM
 	return "", models, errors.New("no available model advertises text-generation support")
 }
 
-func (c *backendClient) inferencePath() string {
-	if c.usesOpenAIProtocol() {
-		return "/v1/chat/completions"
-	}
-	return "/api/generate"
-}
-
-func (c *backendClient) usesOpenAIProtocol() bool {
-	return effectiveProtocol(c.cfg) == protocolOpenAIV1
-}
-
 func (c *backendClient) infer(ctx context.Context, model, prompt string) (string, error) {
-	var payload map[string]any
-	if c.usesOpenAIProtocol() {
-		payload = map[string]any{
-			"model":    model,
-			"messages": []map[string]string{{"role": "user", "content": prompt}},
-			"stream":   false,
-		}
-		if c.cfg.MaxTokens > 0 {
-			payload["max_tokens"] = c.cfg.MaxTokens
-		}
-		if c.cfg.Temperature != nil {
-			payload["temperature"] = *c.cfg.Temperature
-		}
-	} else {
-		payload = map[string]any{"model": model, "prompt": prompt, "stream": false}
-		options := map[string]any{}
-		if c.cfg.MaxTokens > 0 {
-			options["num_predict"] = c.cfg.MaxTokens
-		}
-		if c.cfg.Temperature != nil {
-			options["temperature"] = *c.cfg.Temperature
-		}
-		if len(options) > 0 {
-			payload["options"] = options
-		}
-		switch c.cfg.OllamaThink {
-		case "true":
-			payload["think"] = true
-		case "false":
-			payload["think"] = false
-		case "low", "medium", "high":
-			payload["think"] = c.cfg.OllamaThink
-		}
+	payload := map[string]any{
+		"model":    model,
+		"messages": []map[string]string{{"role": "user", "content": prompt}},
+		"stream":   false,
 	}
-	data, err := c.request(ctx, http.MethodPost, c.inferencePath(), payload)
+	if c.cfg.MaxTokens > 0 {
+		payload["max_tokens"] = c.cfg.MaxTokens
+	}
+	if c.cfg.Temperature != nil {
+		payload["temperature"] = *c.cfg.Temperature
+	}
+	data, err := c.request(ctx, http.MethodPost, "/v1/chat/completions", payload)
 	if err != nil {
 		return "", err
 	}
-	if c.usesOpenAIProtocol() {
-		return parseOpenAIResponse(data)
-	}
-	var response struct {
-		Response string `json:"response"`
-	}
-	if err := decodeObject(data, &response); err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(response.Response), nil
+	return parseOpenAIResponse(data)
 }
 
 func parseOpenAIResponse(data []byte) (string, error) {

@@ -63,7 +63,7 @@ func TestBrokerManualBuildProjection(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var status manualNodeStatus
-			if err := json.Unmarshal([]byte(`{"id":"manual-a","hostUuid":"host-a","address":"127.0.0.1","gpus":[{"name":"GPU"}],"ollama_models":["model-a"]`+tc.field+`}`), &status); err != nil {
+			if err := json.Unmarshal([]byte(`{"id":"manual-a","hostUuid":"host-a","address":"127.0.0.1","gpus":[{"name":"GPU"}]`+tc.field+`}`), &status); err != nil {
 				t.Fatalf("decode manual status: %v", err)
 			}
 			enriched := manualToEnriched(status)
@@ -73,8 +73,8 @@ func TestBrokerManualBuildProjection(t *testing.T) {
 			store := newDiscoveryStore()
 			store.Upsert(enriched, sourceManual)
 			got := store.Snapshot()
-			if len(got) != 1 || got[0].ServiceBuildID != tc.want || got[0].HostUUID != "host-a" || got[0].IPAddress != "127.0.0.1" || !reflect.DeepEqual(got[0].Models, []string{"model-a"}) {
-				t.Fatalf("manual snapshot = %+v, want build %q and identity/models", got, tc.want)
+			if len(got) != 1 || got[0].ServiceBuildID != tc.want || got[0].HostUUID != "host-a" || got[0].IPAddress != "127.0.0.1" || got[0].Models != nil || got[0].ModelsByEngine != nil {
+				t.Fatalf("manual snapshot = %+v, want build %q and identity without model inventory", got, tc.want)
 			}
 		})
 	}

@@ -11,7 +11,7 @@
     "preOutputBudgetMs": 30000,
     "request": {"originNodeId": "node-1", "proxyRunId": "proxy-1", "requestId": "1"}
   },
-  "model": {"engine": "ollama", "model": "m:latest", "maxConcurrent": 1},
+  "model": {"engine": "llamacpp", "model": "m", "maxConcurrent": 1},
   "cases": [
     {"name": "valid zero waits", "kind": "request", "path": [], "valid": true},
     {"name": "valid maximum budget", "kind": "request", "path": ["preOutputBudgetMs"], "value": 600000, "valid": true},
@@ -80,7 +80,7 @@
     {"name": "unknown model field", "kind": "model", "path": ["extra"], "value": true, "valid": false},
     {"name": "case variant request field", "kind": "request", "path": ["QueueBudgetMs"], "value": 1, "valid": false},
     {"name": "case variant identity field", "kind": "identity", "path": ["EngineRunId"], "value": "e", "valid": false},
-    {"name": "case variant model field", "kind": "model", "path": ["Engine"], "value": "ollama", "valid": false},
+    {"name": "case variant model field", "kind": "model", "path": ["Engine"], "value": "llamacpp", "valid": false},
     {"name": "missing model identity", "kind": "model", "path": ["identity"], "remove": true, "valid": false},
     {"name": "null model identity", "kind": "model", "path": ["identity"], "value": null, "valid": false},
     {"name": "null engine", "kind": "model", "path": ["engine"], "value": null, "valid": false},

@@ -28,8 +28,8 @@ import (
 )
 
 func tuiDownloadInventory(snapshot *modeldownload.Snapshot) modelsResult {
-	return modelsResult{ModelsByEngine: map[string][]string{"ollama": {"exact/model"}},
-		LoadedByEngine: map[string][]string{"ollama": {}}, DownloadState: snapshot, current: true}
+	return modelsResult{ModelsByEngine: map[string][]string{"llamacpp": {"exact/model"}},
+		LoadedByEngine: map[string][]string{"llamacpp": {}}, DownloadState: snapshot, current: true}
 }
 
 func tuiDownloadProgress(t *testing.T, method, node string, snapshot *modeldownload.Snapshot, entry modeldownload.Entry) NotificationMsg {
@@ -41,7 +41,7 @@ func tuiDownloadProgress(t *testing.T, method, node string, snapshot *modeldownl
 
 func TestModelDownloadRowsUniteLifecycleInventoryAndResidency(t *testing.T) {
 	d := localDetail()
-	snapshot := tuiDownloadSnapshot()
+	snapshot := tuiLlamaCPPDownloadSnapshot()
 	percent := 21
 	snapshot.Entries[0].Percent = &percent
 	queued := snapshot.Entries[0]
@@ -52,7 +52,7 @@ func TestModelDownloadRowsUniteLifecycleInventoryAndResidency(t *testing.T) {
 	unknown.ID, unknown.Model, unknown.Phase = strings.Repeat("e", 32), "unknown/model", modeldownload.PhaseUnknown
 	snapshot.Entries = append(snapshot.Entries, queued, failed, unknown)
 	inventory := tuiDownloadInventory(snapshot)
-	inventory.LoadedByEngine["ollama"] = []string{"exact/model", "resident-only"}
+	inventory.LoadedByEngine["llamacpp"] = []string{"exact/model", "resident-only"}
 	d.applyModels(inventory, true)
 	rows := map[string]detailModelRow{}
 	labels := map[string]string{}
@@ -80,7 +80,7 @@ func TestModelDownloadDispatcherRequiresCurrentCanonicalReadyContent(t *testing.
 	test := func(name string, mutate func(*modelsResult), ready bool) {
 		t.Run(name, func(t *testing.T) {
 			d := localDetail()
-			snapshot := tuiDownloadSnapshot()
+			snapshot := tuiLlamaCPPDownloadSnapshot()
 			snapshot.Entries[0].Phase, snapshot.Entries[0].BlocksReadiness = modeldownload.PhaseComplete, false
 			inventory := tuiDownloadInventory(snapshot)
 			mutate(&inventory)
@@ -88,11 +88,11 @@ func TestModelDownloadDispatcherRequiresCurrentCanonicalReadyContent(t *testing.
 			for _, op := range []string{"load", "copy"} {
 				act := modelActions["load"]
 				act.op = op
-				if got := d.modelCmd("ollama", act, "exact/model") != nil; got != ready {
+				if got := d.modelCmd("llamacpp", act, "exact/model") != nil; got != ready {
 					t.Fatalf("%s dispatcher returned command = %v, want %v", op, got, ready)
 				}
 			}
-			if d.modelCmd("ollama", modelActions["unload"], "exact/model") == nil {
+			if d.modelCmd("llamacpp", modelActions["unload"], "exact/model") == nil {
 				t.Fatal("readiness changed eject authority")
 			}
 		})
@@ -106,28 +106,28 @@ func TestModelDownloadDispatcherRequiresCurrentCanonicalReadyContent(t *testing.
 		r.DownloadState.Entries[0].Phase, r.DownloadState.Entries[0].BlocksReadiness = modeldownload.PhaseInProgress, true
 	}, false)
 	test("loaded unsafe", func(r *modelsResult) {
-		r.LoadedByEngine["ollama"] = []string{"exact/model"}
+		r.LoadedByEngine["llamacpp"] = []string{"exact/model"}
 		r.DownloadState.Entries[0].Phase, r.DownloadState.Entries[0].BlocksReadiness = modeldownload.PhaseFailed, true
 	}, false)
 	test("pre-effect failure keeps ready content", func(r *modelsResult) { r.DownloadState.Entries[0].Phase = modeldownload.PhaseFailed }, true)
 }
 
 func TestModelDownloadActivePullSuppressesDeleteKeyConfirmationAndDispatch(t *testing.T) {
-	test := func(name, phase, requested, reported string) {
+	test := func(name, phase, requested string) {
 		t.Run(name, func(t *testing.T) {
 			f := newReconnectUIFixture(t)
 			f.serve(t, nil)
 			d := newNodeDetail(f.client, nodeRow{key: "self", self: true, presence: presenceOnline})
 			d.SetSize(120, 30)
 			d.pane = detailModels
-			d.descriptors = engineDescriptors{"ollama": {
-				Version: engines.DescriptorVersion, Engine: "ollama", Family: "ollama", Label: "Ollama",
-				ModelNaming: engines.ModelNamingImpliedLatestTag,
+			d.descriptors = engineDescriptors{"llamacpp-custom": {
+				Version: engines.DescriptorVersion, Engine: "llamacpp-custom", Family: engines.NameLlamaCPP, Label: "llama.cpp custom",
+				ModelNaming: engines.ModelNamingExact,
 				Operations:  map[string]engines.OperationCapability{engines.OperationDelete: {}, engines.OperationUnload: {}},
 			}}
 			snapshot := tuiDownloadSnapshot()
 			snapshot.Entries = []modeldownload.Entry{}
-			if !d.applyModels(modelsResult{ModelsByEngine: map[string][]string{"ollama": {requested}}, DownloadState: snapshot, current: true}, true) {
+			if !d.applyModels(modelsResult{ModelsByEngine: map[string][]string{"llamacpp-custom": {requested}}, DownloadState: snapshot, current: true}, true) {
 				t.Fatal("initial canonical inventory rejected")
 			}
 			press := func(k string) {
@@ -141,7 +141,7 @@ func TestModelDownloadActivePullSuppressesDeleteKeyConfirmationAndDispatch(t *te
 				t.Fatal("initial Delete did not wait for confirmation")
 			}
 			active := tuiDownloadSnapshot()
-			active.Revision, active.Entries[0].Model, active.Entries[0].Phase = "8", reported, phase
+			active.Revision, active.Entries[0].Model, active.Entries[0].Phase = "8", requested, phase
 			d.update(tuiDownloadProgress(t, "engine:pull-progress", "", active, active.Entries[0]))
 			// Confirm a Delete armed before the pull started. Any mistakenly
 			// returned command runs against the pipe fixture and is counted.
@@ -153,7 +153,7 @@ func TestModelDownloadActivePullSuppressesDeleteKeyConfirmationAndDispatch(t *te
 			if d.pending != nil || f.count("engine:delete-model") != 0 || !strings.Contains(d.status.text, "Download in progress") {
 				t.Fatal("Delete key armed or dispatched during an active pull")
 			}
-			if cmd := d.modelCmd("ollama", modelActions["delete"], requested); cmd != nil {
+			if cmd := d.modelCmd("llamacpp-custom", modelActions["delete"], requested); cmd != nil {
 				d.update(cmd())
 			}
 			if f.count("engine:delete-model") != 0 {
@@ -172,22 +172,21 @@ func TestModelDownloadActivePullSuppressesDeleteKeyConfirmationAndDispatch(t *te
 			}
 		})
 	}
-	test("queued exact model", modeldownload.PhaseQueued, "exact/model", "exact/model")
-	test("in progress implied latest", modeldownload.PhaseInProgress, "demo", "demo:latest")
-	test("queued explicit latest", modeldownload.PhaseQueued, "demo:latest", "demo")
+	test("queued exact model", modeldownload.PhaseQueued, "exact/model")
+	test("in progress exact model", modeldownload.PhaseInProgress, "exact/model")
 }
 
 func TestModelDownloadDeleteOutsideMatchingActivePullKeepsAuthority(t *testing.T) {
 	test := func(name string, mutate func(*modelsResult)) {
 		t.Run(name, func(t *testing.T) {
 			d := localDetail()
-			snapshot := tuiDownloadSnapshot()
+			snapshot := tuiLlamaCPPDownloadSnapshot()
 			inventory := tuiDownloadInventory(snapshot)
 			mutate(&inventory)
 			if !d.applyModels(inventory, true) {
 				t.Fatal("canonical inventory rejected")
 			}
-			if d.modelCmd("ollama", modelActions["delete"], "exact/model") == nil {
+			if d.modelCmd("llamacpp", modelActions["delete"], "exact/model") == nil {
 				t.Fatal("non-active download state changed Delete authority")
 			}
 		})
@@ -195,14 +194,14 @@ func TestModelDownloadDeleteOutsideMatchingActivePullKeepsAuthority(t *testing.T
 	test("failed unresolved content", func(r *modelsResult) { r.DownloadState.Entries[0].Phase = modeldownload.PhaseFailed })
 	test("unknown unresolved content", func(r *modelsResult) { r.DownloadState.Entries[0].Phase = modeldownload.PhaseUnknown })
 	test("different model is active", func(r *modelsResult) { r.DownloadState.Entries[0].Model = "other/model" })
-	test("different engine is active", func(r *modelsResult) { r.DownloadState.Entries[0].Engine = "llamacpp" })
+	test("different engine is active", func(r *modelsResult) { r.DownloadState.Entries[0].Engine = tuiCustomEngine(t).Name })
 	test("unsupported lifecycle", func(r *modelsResult) { r.DownloadState = nil })
 	test("last known active snapshot is stale", func(r *modelsResult) { r.current = false })
 }
 
 func TestModelDownloadProgressHydratesWithoutInitiatorAndFencesReorderedIdentity(t *testing.T) {
 	d := localDetail()
-	snapshot := tuiDownloadSnapshot()
+	snapshot := tuiLlamaCPPDownloadSnapshot()
 	cmd, _ := d.update(tuiDownloadProgress(t, "engine:pull-progress", "", snapshot, snapshot.Entries[0]))
 	if cmd == nil || d.models.DownloadState != nil || d.modelsGeneration == 0 {
 		t.Fatal("unseeded notification selected a source instead of requesting hydration")
@@ -237,7 +236,7 @@ func TestModelDownloadProgressHydratesWithoutInitiatorAndFencesReorderedIdentity
 
 func TestModelDownloadSourceReplacementRequiresCurrentCanonicalObservation(t *testing.T) {
 	d := localDetail()
-	original := tuiDownloadSnapshot()
+	original := tuiLlamaCPPDownloadSnapshot()
 	d.applyModels(tuiDownloadInventory(original), true)
 	replacement := original.Clone()
 	replacement.SourceID, replacement.Revision = strings.Repeat("f", 32), "0"
@@ -256,27 +255,27 @@ func TestModelDownloadSourceReplacementRequiresCurrentCanonicalObservation(t *te
 
 func TestModelDownloadDiscoveryStalenessAndSameRevisionRecovery(t *testing.T) {
 	d := remoteDetail()
-	snapshot := tuiDownloadSnapshot()
+	snapshot := tuiLlamaCPPDownloadSnapshot()
 	snapshot.Entries = []modeldownload.Entry{}
 	current := true
 	peer := availableNode{HostUUID: "peer", DownloadState: snapshot, DownloadStateCurrent: &current,
-		ModelsByEngine: map[string][]string{"ollama": {"exact/model"}}}
+		ModelsByEngine: map[string][]string{"llamacpp": {"exact/model"}}}
 	d.update(discoveryPush(peer))
-	if !d.modelReady("ollama", "exact/model") {
+	if !d.modelReady("llamacpp", "exact/model") {
 		t.Fatal("current peer inventory did not become ready")
 	}
 	current = false
 	d.update(discoveryPush(peer))
-	if d.modelCmd("ollama", modelActions["load"], "exact/model") != nil {
+	if d.modelCmd("llamacpp", modelActions["load"], "exact/model") != nil {
 		t.Fatal("stale peer dispatched Load")
 	}
 	current = true
 	d.update(discoveryPush(peer))
-	if !d.modelReady("ollama", "exact/model") {
+	if !d.modelReady("llamacpp", "exact/model") {
 		t.Fatal("same-revision current read did not restore readiness")
 	}
 	d.update(DisconnectedMsg{})
-	if d.modelReady("ollama", "exact/model") {
+	if d.modelReady("llamacpp", "exact/model") {
 		t.Fatal("disconnect retained readiness")
 	}
 	if len(d.modelRows) == 0 || d.modelTable.Rows()[0][3] != "Download status unknown" {
@@ -306,12 +305,12 @@ func TestModelDownloadHydrationSubscribesBeforeCanonicalFetch(t *testing.T) {
 					}
 					result := tuiDownloadJSON(t, map[string]bool{"subscribed": true})
 					if method == fetch {
-						snapshot := tuiDownloadSnapshot()
+						snapshot := tuiLlamaCPPDownloadSnapshot()
 						snapshot.Entries = []modeldownload.Entry{}
 						result = tuiDownloadJSON(t, tuiDownloadInventory(snapshot))
 						if remote {
 							current := true
-							result = tuiDownloadJSON(t, map[string][]availableNode{"nodes": {{HostUUID: "target", ModelsByEngine: map[string][]string{"ollama": {"exact/model"}}, DownloadState: snapshot, DownloadStateCurrent: &current}}})
+							result = tuiDownloadJSON(t, map[string][]availableNode{"nodes": {{HostUUID: "target", ModelsByEngine: map[string][]string{"llamacpp": {"exact/model"}}, DownloadState: snapshot, DownloadStateCurrent: &current}}})
 						}
 					}
 					if err := broker.Write(&rpc.Message{JSONRPC: "2.0", ID: request.ID, Result: result}); err != nil {
@@ -324,7 +323,7 @@ func TestModelDownloadHydrationSubscribesBeforeCanonicalFetch(t *testing.T) {
 				case <-time.After(time.Second):
 					t.Fatal("hydration did not finish")
 				}
-				if !d.modelReady("ollama", "exact/model") {
+				if !d.modelReady("llamacpp", "exact/model") {
 					t.Fatal("canonical hydration did not establish readiness")
 				}
 			}
@@ -336,30 +335,30 @@ func TestModelDownloadHydrationSubscribesBeforeCanonicalFetch(t *testing.T) {
 
 func TestModelDownloadModelsChangedUsesCanonicalNestedInventory(t *testing.T) {
 	d := localDetail()
-	snapshot := tuiDownloadSnapshot()
+	snapshot := tuiLlamaCPPDownloadSnapshot()
 	d.applyModels(tuiDownloadInventory(snapshot), true)
 	complete := snapshot.Clone()
 	complete.Revision, complete.Entries[0].Phase, complete.Entries[0].BlocksReadiness = "8", modeldownload.PhaseComplete, false
 	d.update(tuiDownloadProgress(t, "engine:pull-progress", "", &complete, complete.Entries[0]))
-	if d.modelCmd("ollama", modelActions["load"], "exact/model") != nil {
+	if d.modelCmd("llamacpp", modelActions["load"], "exact/model") != nil {
 		t.Fatal("completion without inventory dispatched Load")
 	}
-	params := tuiDownloadJSON(t, map[string]any{"engine": "ollama", "models": tuiDownloadInventory(&complete)})
+	params := tuiDownloadJSON(t, map[string]any{"engine": "llamacpp", "models": tuiDownloadInventory(&complete)})
 	cmd, _ := d.update(NotificationMsg{Msg: &rpc.Message{Method: "engine:models-changed", Params: params}})
-	if cmd != nil || !d.modelReady("ollama", "exact/model") || d.modelRows[0].loaded {
+	if cmd != nil || !d.modelReady("llamacpp", "exact/model") || d.modelRows[0].loaded {
 		t.Fatal("nested full inventory was not used independently of residency")
 	}
 	// A malformed extension must revoke readiness while retaining the last
 	// authenticated observation until canonical hydration succeeds.
-	bad := `{"models":{"modelsByEngine":{"ollama":["exact/model"]},"loadedByEngine":{"ollama":["exact/model"]},"downloadState":{"version":2}}}`
+	bad := `{"models":{"modelsByEngine":{"llamacpp":["exact/model"]},"loadedByEngine":{"llamacpp":["exact/model"]},"downloadState":{"version":2}}}`
 	d.update(NotificationMsg{Msg: &rpc.Message{Method: "engine:models-changed", Params: []byte(bad)}})
-	if d.modelReady("ollama", "exact/model") || d.modelRows[0].loaded || d.modelTable.Rows()[0][3] != "Download status unknown" {
+	if d.modelReady("llamacpp", "exact/model") || d.modelRows[0].loaded || d.modelTable.Rows()[0][3] != "Download status unknown" {
 		t.Fatal("malformed support promoted content or replaced the authenticated observation")
 	}
 	canonical := tuiDownloadInventory(&complete)
-	canonical.LoadedByEngine["ollama"] = []string{"exact/model"}
+	canonical.LoadedByEngine["llamacpp"] = []string{"exact/model"}
 	d.update(detailModelsMsg{models: canonical, generation: d.modelsGeneration})
-	if !d.modelRows[0].loaded || !d.modelReady("ollama", "exact/model") {
+	if !d.modelRows[0].loaded || !d.modelReady("llamacpp", "exact/model") {
 		t.Fatal("canonical read did not restore residency and readiness independently")
 	}
 }
@@ -375,7 +374,7 @@ func tuiSourceNotification(t *testing.T, method string, snapshot *modeldownload.
 
 func TestModelDownloadModelsChangedCannotSelectInitialSource(t *testing.T) {
 	d := localDetail()
-	snapshot := tuiDownloadSnapshot()
+	snapshot := tuiLlamaCPPDownloadSnapshot()
 	oldGeneration := d.modelsGeneration
 	cmd, _ := d.update(tuiSourceNotification(t, "engine:models-changed", snapshot))
 	if cmd == nil || d.models.DownloadState != nil || d.modelsGeneration != oldGeneration+1 {
@@ -395,14 +394,14 @@ func TestModelDownloadUnseenRetiredNotificationCannotReplaceCanonicalSource(t *t
 	for _, method := range []string{"engine:pull-progress", "engine:models-changed"} {
 		t.Run(method, func(t *testing.T) {
 			d := localDetail()
-			current := tuiDownloadSnapshot()
+			current := tuiLlamaCPPDownloadSnapshot()
 			current.Entries[0].Phase, current.Entries[0].BlocksReadiness = modeldownload.PhaseComplete, false
-			if !d.applyModels(tuiDownloadInventory(current), true) || !d.modelReady("ollama", "exact/model") {
+			if !d.applyModels(tuiDownloadInventory(current), true) || !d.modelReady("llamacpp", "exact/model") {
 				t.Fatal("current canonical baseline was not ready")
 			}
 			// This source belonged to a worker retired before this client attached.
 			// It is deliberately absent from the client's retired-source set.
-			unseen := tuiDownloadSnapshot()
+			unseen := tuiLlamaCPPDownloadSnapshot()
 			unseen.SourceID, unseen.Revision = strings.Repeat("f", 32), "999"
 			oldGeneration := d.modelsGeneration
 			cmd, _ := d.update(tuiSourceNotification(t, method, unseen))
@@ -417,7 +416,7 @@ func TestModelDownloadUnseenRetiredNotificationCannotReplaceCanonicalSource(t *t
 				t.Fatal("in-flight pre-notification read selected a different worker")
 			}
 			d.update(detailModelsMsg{models: tuiDownloadInventory(current), generation: d.modelsGeneration})
-			if !d.modelReady("ollama", "exact/model") || !d.models.DownloadState.Equal(*current) {
+			if !d.modelReady("llamacpp", "exact/model") || !d.models.DownloadState.Equal(*current) {
 				t.Fatal("real current RPC source was rejected after an unseen retired notification")
 			}
 		})
@@ -428,11 +427,11 @@ func TestModelDownloadWorkerReplacementRequiresNewCanonicalRead(t *testing.T) {
 	for _, method := range []string{"engine:pull-progress", "engine:models-changed"} {
 		t.Run(method, func(t *testing.T) {
 			d := localDetail()
-			original := tuiDownloadSnapshot()
+			original := tuiLlamaCPPDownloadSnapshot()
 			if !d.applyModels(tuiDownloadInventory(original), true) {
 				t.Fatal("original canonical baseline rejected")
 			}
-			replacement := tuiDownloadSnapshot()
+			replacement := tuiLlamaCPPDownloadSnapshot()
 			replacement.SourceID, replacement.Revision = strings.Repeat("e", 32), "0"
 			replacement.Entries[0].Phase, replacement.Entries[0].BlocksReadiness = modeldownload.PhaseComplete, false
 			cmd, _ := d.update(tuiSourceNotification(t, method, replacement))
@@ -446,7 +445,7 @@ func TestModelDownloadWorkerReplacementRequiresNewCanonicalRead(t *testing.T) {
 				t.Fatal("old-source notification restored currentness before hydration")
 			}
 			d.update(detailModelsMsg{models: tuiDownloadInventory(replacement), generation: d.modelsGeneration})
-			if !d.models.DownloadState.Equal(*replacement) || !d.retiredDownloadSources[original.SourceID] || !d.modelReady("ollama", "exact/model") {
+			if !d.models.DownloadState.Equal(*replacement) || !d.retiredDownloadSources[original.SourceID] || !d.modelReady("llamacpp", "exact/model") {
 				t.Fatal("new current canonical read did not select the replacement worker")
 			}
 			if d.applyModels(tuiDownloadInventory(original), true) || !d.models.DownloadState.Equal(*replacement) {
@@ -459,7 +458,7 @@ func TestModelDownloadWorkerReplacementRequiresNewCanonicalRead(t *testing.T) {
 func TestModelDownloadReadyLoadDispatchesExactTypedRequest(t *testing.T) {
 	client, broker := nodeInfoRPCFixture(t)
 	d := newNodeDetail(client, nodeRow{key: "self", self: true, presence: presenceOnline})
-	snapshot := tuiDownloadSnapshot()
+	snapshot := tuiLlamaCPPDownloadSnapshot()
 	snapshot.Entries = []modeldownload.Entry{}
 	d.applyModels(tuiDownloadInventory(snapshot), true)
 	request, _ := terminalControlsReply(t, broker, d.modelOp("load"), &rpc.Message{Result: []byte(`{}`)})
@@ -470,7 +469,7 @@ func TestModelDownloadReadyLoadDispatchesExactTypedRequest(t *testing.T) {
 	if err := json.Unmarshal(request.Params, &params); err != nil {
 		t.Fatalf("decode Load params: %v", err)
 	}
-	if request.Method != "engine:load-model" || params.Engine != "ollama" || params.Model != "exact/model" {
+	if request.Method != "engine:load-model" || params.Engine != "llamacpp" || params.Model != "exact/model" {
 		t.Fatalf("Load request = %s %+v", request.Method, params)
 	}
 }
@@ -557,7 +556,7 @@ func TestReplacementInterruptsEngineOperationStatus(t *testing.T) {
 	v.detail = d
 	m := New(f.client, nil, []View{v})
 	t.Cleanup(d.closePerformance)
-	d.engines = []engineStatus{{Engine: "ollama", DisplayName: "Ollama", Installed: true}}
+	d.engines = []engineStatus{{Engine: "llamacpp", DisplayName: "llama.cpp", Installed: true}}
 	d.refreshEngines()
 	generation := f.client.Generation()
 	done := holdReplacementCommand(t, f, d.lifecycle(d.selectedEngine(), "start"), "engine:start")
@@ -575,7 +574,7 @@ func TestReplacementInterruptsEngineOperationStatus(t *testing.T) {
 	// of its acknowledgement must not be treated as a server-side rollback.
 	request, fresh := terminalControlsReply(t, f.broker,
 		sessionCommand(f.client, f.client.Generation(), d.enginesCmd()),
-		&rpc.Message{Result: []byte(`{"engines":[{"engine":"ollama","display_name":"Ollama","installed":true,"running":true,"healthy":true,"port":11434}]}`)})
+		&rpc.Message{Result: []byte(`{"engines":[{"engine":"llamacpp","display_name":"llama.cpp","installed":true,"running":true,"healthy":true,"port":8081}]}`)})
 	if request.Method != "engine:get-installed" {
 		t.Fatalf("fresh baseline method = %q", request.Method)
 	}
@@ -616,7 +615,7 @@ func TestReplacementRetiresDetailConfirmation(t *testing.T) {
 	v.detail = d
 	m := New(f.client, nil, []View{v})
 	t.Cleanup(d.closePerformance)
-	d.uninstallEngine(&engineStatus{Engine: "ollama", DisplayName: "Ollama", Installed: true})
+	d.uninstallEngine(&engineStatus{Engine: "llamacpp", DisplayName: "llama.cpp", Installed: true})
 	if d.pending == nil || !d.status.sticky || !strings.Contains(d.status.render(), "press y to confirm") {
 		t.Fatal("uninstall confirmation was not visible before disconnect")
 	}
@@ -670,7 +669,7 @@ func TestSessionCatalogRefreshPreservesSearchDraft(t *testing.T) {
 	v := newNodesView(f.client)
 	d := newNodeDetail(f.client, nodeRow{key: "self", self: true})
 	v.detail = d
-	d.catalog = newCatalogBrowser(f.client, "ollama", "Ollama", "this host", false)
+	d.catalog = newCatalogBrowser(f.client, "llamacpp", "llama.cpp", "this host", false)
 	old := d.catalog
 	old.all = []catalogModel{{ID: "removed", Name: "removed"}}
 	old.browse = old.all
@@ -700,7 +699,7 @@ func TestSessionCatalogRefreshPreservesSearchDraft(t *testing.T) {
 	if len(d.catalog.all) != 1 || d.catalog.all[0].ID != "fresh" || f.count("engine:catalog") != 1 {
 		t.Fatal("catalog did not load one fresh replacement baseline")
 	}
-	d.update(catalogLoadedMsg{engine: "ollama", gen: 7, models: []catalogModel{{ID: "obsolete"}}})
+	d.update(catalogLoadedMsg{engine: "llamacpp", gen: 7, models: []catalogModel{{ID: "obsolete"}}})
 	if len(d.catalog.all) != 1 || d.catalog.all[0].ID != "fresh" {
 		t.Fatal("old catalog reply replaced fresh rows")
 	}
@@ -739,17 +738,17 @@ func TestSessionDetailWaitsForFreshTargetBeforeTelemetry(t *testing.T) {
 
 func TestSessionDetailKeepsOnlyUnknownEngineIdentityUntilReady(t *testing.T) {
 	d := localDetail()
-	d.engines = []engineStatus{{Engine: "ollama", DisplayName: "Ollama", Installed: true, Running: true, Healthy: true, Port: 12345}}
-	d.intent = engineintent.Snapshot{EnabledByEngine: map[string]bool{"ollama": false}, OffByEngine: map[string]engineintent.Origin{}}
+	d.engines = []engineStatus{{Engine: "llamacpp", DisplayName: "llama.cpp", Installed: true, Running: true, Healthy: true, Port: 12345}}
+	d.intent = engineintent.Snapshot{EnabledByEngine: map[string]bool{"llamacpp": false}, OffByEngine: map[string]engineintent.Origin{}}
 	d.refreshEngines()
 	d.mode = detailInputLaunchArgs
 	d.input.SetValue("unsent arguments")
 	d.update(DisconnectedMsg{})
-	if len(d.engines) != 1 || d.engines[0] != (engineStatus{Engine: "ollama", DisplayName: "Ollama"}) || d.intent.EnabledByEngine != nil || d.intent.OffByEngine != nil {
+	if len(d.engines) != 1 || d.engines[0] != (engineStatus{Engine: "llamacpp", DisplayName: "llama.cpp"}) || d.intent.EnabledByEngine != nil || d.intent.OffByEngine != nil {
 		t.Fatal("disconnect retained runtime or intent facts beyond engine identity")
 	}
 	rows := d.engineTable.Rows()
-	if len(rows) != 1 || rows[0][0] != "Ollama" {
+	if len(rows) != 1 || rows[0][0] != "llama.cpp" {
 		t.Fatalf("disconnected engine identity rows = %v", rows)
 	}
 	for _, cell := range rows[0][1:] {
@@ -777,7 +776,7 @@ func localDetail() *nodeDetail {
 
 func TestSettingsServingSurvivesUnrelatedEditAndFailedApply(t *testing.T) {
 	d := localDetail()
-	snapshot := ollamaSettings()
+	snapshot := llamaCPPSettings()
 	ram, vram := int64(4096), int64(0)
 	snapshot.Settings.Serving = &engines.ServingConfig{Version: 1, Models: []engines.ServingModel{{ModelID: "exact/model", MaxOutputTokens: 128, Memory: engines.ServingMemory{HostRAMBytes: &ram, VRAMBytes: &vram}, Artifacts: []engines.ServingArtifact{{Role: "model", SHA256: strings.Repeat("a", 64), Provenance: engines.ServingProvenance{Kind: "supplied-sha256"}}}}}}
 	request, ok := d.settingsRequest(snapshot, detailInputProxyPort, "12500")
@@ -800,7 +799,7 @@ func TestSettingsServingSurvivesUnrelatedEditAndFailedApply(t *testing.T) {
 	snapshot.Phase = settingsPhaseFailed
 	snapshot.RequestID = apply.RequestID
 	snapshot.Error = "synthetic apply failure"
-	d.settingsAwaited = &awaitedSettings{engine: "ollama", requestID: apply.RequestID}
+	d.settingsAwaited = &awaitedSettings{engine: "llamacpp", requestID: apply.RequestID}
 	d.reportSettingsOutcome(snapshot)
 	retry, ok := d.settingsRequest(snapshot, detailInputLaunchArgs, "--unrelated")
 	if !ok || !retry.Settings.Serving.Equal(wire.Settings.Serving) {
@@ -837,7 +836,7 @@ func TestRemoteDetailFollowsDiscoveryModels(t *testing.T) {
 		HostUUID:       "peer",
 		Name:           "peer-host",
 		Models:         []string{"old-model", "new-model"},
-		ModelsByEngine: map[string][]string{"ollama": {"old-model", "new-model"}},
+		ModelsByEngine: map[string][]string{"llamacpp": {"old-model", "new-model"}},
 	}))
 
 	if len(d.models.Models) != 2 {
@@ -871,13 +870,14 @@ func TestRemoteDetailIgnoresOtherNodesDiscovery(t *testing.T) {
 // is left out of loadedByEngine, and reading that as an empty list marked every
 // one of its models as not in memory.
 func TestUnreportedLoadStateIsUnknown(t *testing.T) {
+	custom := tuiCustomEngine(t)
 	d := localDetail()
 	d.models = modelsResult{
 		ModelsByEngine: map[string][]string{
-			"ollama":   {"idle", "resident"},
-			"llamacpp": {"unreported"},
+			"llamacpp":  {"idle", "resident"},
+			custom.Name: {"unreported"},
 		},
-		LoadedByEngine: map[string][]string{"ollama": {"resident"}},
+		LoadedByEngine: map[string][]string{"llamacpp": {"resident"}},
 	}
 	d.refreshModels()
 
@@ -937,7 +937,7 @@ func TestRemoteDetailPollsEngines(t *testing.T) {
 // with a stray header in the middle: there must be a blank line between them.
 func TestDetailSectionsAreSeparated(t *testing.T) {
 	d := localDetail()
-	d.engines = []engineStatus{{Engine: "ollama", Installed: true, Running: true, Port: 11434}}
+	d.engines = []engineStatus{{Engine: "llamacpp", Installed: true, Running: true, Port: 8081}}
 	d.refreshEngines()
 
 	lines := strings.Split(d.View(), "\n")
@@ -963,8 +963,12 @@ func TestLocalDetailShowsBothPorts(t *testing.T) {
 	if d.proxy == nil {
 		t.Fatal("no proxy tracker on the local node")
 	}
-	d.proxy.apply(proxyStatusMsg{idx: 0, ready: true, port: 11435})
-	d.engines = []engineStatus{{Engine: "ollama", Installed: true, Running: true, Port: 11434}}
+	idx := d.proxy.indexForEngine("llamacpp")
+	if idx < 0 {
+		t.Fatal("local detail has no llama.cpp proxy tracker")
+	}
+	d.proxy.apply(proxyStatusMsg{idx: idx, ready: true, port: 8080})
+	d.engines = []engineStatus{{Engine: "llamacpp", Installed: true, Running: true, Port: 8081}}
 	d.refreshEngines()
 
 	cols := detailEngineColumns(100, false)
@@ -978,11 +982,11 @@ func TestLocalDetailShowsBothPorts(t *testing.T) {
 	}
 
 	row := d.engineTable.Rows()[0]
-	if row[4] != "11434" {
-		t.Errorf("engine port cell = %q, want 11434", row[4])
+	if row[4] != "8081" {
+		t.Errorf("engine port cell = %q, want 8081", row[4])
 	}
-	if row[5] != "11435" {
-		t.Errorf("proxy port cell = %q, want 11435", row[5])
+	if row[5] != "8080" {
+		t.Errorf("proxy port cell = %q, want 8080", row[5])
 	}
 }
 
@@ -999,7 +1003,7 @@ func TestRemoteDetailHidesProxyPort(t *testing.T) {
 		}
 	}
 
-	d.engines = []engineStatus{{Engine: "ollama", Port: 11434}}
+	d.engines = []engineStatus{{Engine: "llamacpp", Port: 8081}}
 	d.refreshEngines()
 	if got := len(d.engineTable.Rows()[0]); got != 5 {
 		t.Errorf("remote row has %d cells, want 5", got)
@@ -1008,10 +1012,10 @@ func TestRemoteDetailHidesProxyPort(t *testing.T) {
 
 func TestDetailProxyPortUnknownAfterFailedStatusRead(t *testing.T) {
 	d := localDetail()
-	d.engines = []engineStatus{{Engine: "ollama", Installed: true, Running: true, Port: 11434}}
-	idx := d.proxy.indexForEngine("ollama")
+	d.engines = []engineStatus{{Engine: "llamacpp", Installed: true, Running: true, Port: 8081}}
+	idx := d.proxy.indexForEngine("llamacpp")
 	if idx < 0 {
-		t.Fatal("local detail has no Ollama proxy tracker")
+		t.Fatal("local detail has no llama.cpp proxy tracker")
 	}
 	cell := func() string {
 		t.Helper()
@@ -1026,34 +1030,34 @@ func TestDetailProxyPortUnknownAfterFailedStatusRead(t *testing.T) {
 		if got := cell(); !strings.Contains(got, "down") {
 			t.Errorf("%s: proxy cell = %q, want confirmed down", stage, got)
 		}
-		if port, usable := d.proxy.portForEngine("ollama"); usable || port != 11435 {
-			t.Errorf("%s: endpoint port=%d usable=%v, want 11435/false", stage, port, usable)
+		if port, usable := d.proxy.portForEngine("llamacpp"); usable || port != 8080 {
+			t.Errorf("%s: endpoint port=%d usable=%v, want 8080/false", stage, port, usable)
 		}
 	}
 	assertUsable := func(stage string) {
 		t.Helper()
-		if got := cell(); got != "11435" {
-			t.Errorf("%s: proxy cell = %q, want usable port 11435", stage, got)
+		if got := cell(); got != "8080" {
+			t.Errorf("%s: proxy cell = %q, want usable port 8080", stage, got)
 		}
-		if port, usable := d.proxy.portForEngine("ollama"); !usable || port != 11435 {
-			t.Errorf("%s: endpoint port=%d usable=%v, want 11435/true", stage, port, usable)
+		if port, usable := d.proxy.portForEngine("llamacpp"); !usable || port != 8080 {
+			t.Errorf("%s: endpoint port=%d usable=%v, want 8080/true", stage, port, usable)
 		}
 	}
-	d.update(proxyStatusMsg{idx: idx, ready: true, port: 11435})
+	d.update(proxyStatusMsg{idx: idx, ready: true, port: 8080})
 	assertUsable("successful status read")
 	d.update(proxyStatusMsg{idx: idx, err: errors.New("status read unavailable")})
 	if got := cell(); strings.Contains(got, "down") || (!strings.Contains(got, "unknown") && !strings.Contains(got, "?")) {
 		t.Errorf("failed status read: proxy cell = %q, want unknown", got)
 	}
-	if port, usable := d.proxy.portForEngine("ollama"); usable || port != 11435 {
-		t.Errorf("failed status read: endpoint port=%d usable=%v, want retained 11435/false", port, usable)
+	if port, usable := d.proxy.portForEngine("llamacpp"); usable || port != 8080 {
+		t.Errorf("failed status read: endpoint port=%d usable=%v, want retained 8080/false", port, usable)
 	}
 	d.update(proxyStatusMsg{idx: idx, ready: false, port: 0})
 	assertDown("successful ready:false read")
 	d.update(proxyStatusMsg{idx: idx, err: errors.New("status read unavailable")})
-	d.update(NotificationMsg{Msg: &rpc.Message{Method: "ollama-proxy:error", Params: []byte(`{}`)}})
+	d.update(NotificationMsg{Msg: &rpc.Message{Method: "llamacpp-proxy:error", Params: []byte(`{}`)}})
 	assertDown("explicit error push")
-	d.update(NotificationMsg{Msg: &rpc.Message{Method: "ollama-proxy:ready", Params: []byte(`{"port":11435}`)}})
+	d.update(NotificationMsg{Msg: &rpc.Message{Method: "llamacpp-proxy:ready", Params: []byte(`{"port":8080}`)}})
 	assertUsable("ready push")
 }
 
@@ -1062,13 +1066,17 @@ func TestDetailProxyPortUnknownAfterFailedStatusRead(t *testing.T) {
 func TestProxyPortCellStates(t *testing.T) {
 	d := localDetail()
 
-	d.proxy.apply(proxyStatusMsg{idx: 0, ready: true, port: 11435})
-	if got := d.proxyPortCell("ollama"); got != "11435" {
+	idx := d.proxy.indexForEngine("llamacpp")
+	if idx < 0 {
+		t.Fatal("local detail has no llama.cpp proxy tracker")
+	}
+	d.proxy.apply(proxyStatusMsg{idx: idx, ready: true, port: 8080})
+	if got := d.proxyPortCell("llamacpp"); got != "8080" {
 		t.Errorf("live endpoint = %q", got)
 	}
 
-	d.proxy.engines[0].ready = false
-	if got := d.proxyPortCell("ollama"); !strings.Contains(got, "down") {
+	d.proxy.engines[idx].ready = false
+	if got := d.proxyPortCell("llamacpp"); !strings.Contains(got, "down") {
 		t.Errorf("endpoint with the proxy down = %q, want it marked down", got)
 	}
 
@@ -1081,14 +1089,11 @@ func TestProxyPortCellStates(t *testing.T) {
 // column depends on.
 func TestProxyIndexForEngine(t *testing.T) {
 	p := newProxyTracker()
-	if got := p.indexForEngine("ollama"); got != 0 {
-		t.Errorf("ollama -> %d, want 0", got)
-	}
-	if got := p.indexForEngine("lmstudio"); got != 1 {
-		t.Errorf("lmstudio -> %d, want 1", got)
+	if got := p.indexForEngine("llamacpp"); got != 0 {
+		t.Errorf("llamacpp -> %d, want 0", got)
 	}
 	// Case and padding must not decide whether a port renders.
-	if got := p.indexForEngine("  OLLAMA "); got != 0 {
+	if got := p.indexForEngine("  LLAMACPP "); got != 0 {
 		t.Errorf("normalisation failed: %d", got)
 	}
 	if got := p.indexForEngine("vllm"); got != -1 {
@@ -1105,16 +1110,16 @@ func seedSettings(d *nodeDetail, snap enginesettings.Snapshot) {
 	d.settings[snap.Engine] = snap
 }
 
-// ollamaSettings is an editable snapshot for the engine the detail tests use.
-func ollamaSettings() enginesettings.Snapshot {
+// llamaCPPSettings is an editable snapshot for the engine the detail tests use.
+func llamaCPPSettings() enginesettings.Snapshot {
 	return enginesettings.Snapshot{
-		Engine:   "ollama",
+		Engine:   "llamacpp",
 		Revision: 7,
 		Editable: true,
 		Settings: enginesettings.Config{
-			ServerPort: 11434,
-			ProxyPort:  11435,
-			LaunchText: "OLLAMA_KEEP_ALIVE=5m",
+			ServerPort: 8081,
+			ProxyPort:  8080,
+			LaunchText: "--ctx-size 4096",
 		},
 	}
 }
@@ -1127,7 +1132,7 @@ func ollamaSettings() enginesettings.Snapshot {
 // other is that every write carries the revision it was based on.
 func TestSettingsKeysAskTheBackendBeforeOpening(t *testing.T) {
 	d := localDetail()
-	d.engines = []engineStatus{{Engine: "ollama", Installed: true, Port: 11434}}
+	d.engines = []engineStatus{{Engine: "llamacpp", Installed: true, Port: 8081}}
 	d.refreshEngines()
 
 	cmd := d.handleEngineKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
@@ -1146,9 +1151,9 @@ func TestSettingsKeysAskTheBackendBeforeOpening(t *testing.T) {
 // typed value cannot be applied to the wrong one.
 func TestSettingsEditorsAreDistinct(t *testing.T) {
 	d := localDetail()
-	d.engines = []engineStatus{{Engine: "ollama", Installed: true, Port: 11434}}
+	d.engines = []engineStatus{{Engine: "llamacpp", Installed: true, Port: 8081}}
 	d.refreshEngines()
-	seedSettings(d, ollamaSettings())
+	seedSettings(d, llamaCPPSettings())
 
 	cases := []struct {
 		key   string
@@ -1156,9 +1161,9 @@ func TestSettingsEditorsAreDistinct(t *testing.T) {
 		value string
 		label string
 	}{
-		{"e", detailInputEnginePort, "11434", "engine"},
-		{"p", detailInputProxyPort, "11435", "proxy"},
-		{"a", detailInputLaunchArgs, "OLLAMA_KEEP_ALIVE=5m", "arguments"},
+		{"e", detailInputEnginePort, "8081", "engine"},
+		{"p", detailInputProxyPort, "8080", "proxy"},
+		{"a", detailInputLaunchArgs, "--ctx-size 4096", "arguments"},
 	}
 	for _, tc := range cases {
 		d.mode = detailInputNone
@@ -1184,10 +1189,10 @@ func TestSettingsEditorsAreDistinct(t *testing.T) {
 // unreachable settings worker — rather than to a rule here that would drift.
 func TestSettingsRefusalComesFromTheBackend(t *testing.T) {
 	d := remoteDetail()
-	d.engines = []engineStatus{{Engine: "ollama", Port: 11434}}
+	d.engines = []engineStatus{{Engine: "llamacpp", Port: 8081}}
 	d.refreshEngines()
 
-	snap := ollamaSettings()
+	snap := llamaCPPSettings()
 	snap.Editable = false
 	snap.Adopted = true
 	snap.Reason = "this engine was started outside PAIR"
@@ -1212,9 +1217,9 @@ func TestSettingsRefusalComesFromTheBackend(t *testing.T) {
 // Send the wrong one and the backend quietly rewrites what the operator typed.
 func TestSettingsWriteCarriesTheRevisionAndResolution(t *testing.T) {
 	d := localDetail()
-	d.engines = []engineStatus{{Engine: "ollama", Installed: true, Port: 11434}}
+	d.engines = []engineStatus{{Engine: "llamacpp", Installed: true, Port: 8081}}
 	d.refreshEngines()
-	snap := ollamaSettings()
+	snap := llamaCPPSettings()
 	seedSettings(d, snap)
 
 	cases := []struct {
@@ -1227,13 +1232,13 @@ func TestSettingsWriteCarriesTheRevisionAndResolution(t *testing.T) {
 		{
 			name:       "the port field wins over the command",
 			mode:       detailInputEnginePort,
-			value:      "11500",
+			value:      "8181",
 			resolution: resolutionServer,
 		},
 		{
 			name:       "the command wins over the port field",
 			mode:       detailInputLaunchArgs,
-			value:      "OLLAMA_HOST=127.0.0.1:11500",
+			value:      "--port 8181",
 			resolution: resolutionLaunch,
 		},
 	}
@@ -1261,8 +1266,8 @@ func TestSettingsWriteCarriesTheRevisionAndResolution(t *testing.T) {
 // and, worse, would disagree invisibly.
 func TestLaunchTextIsSentAsTyped(t *testing.T) {
 	d := localDetail()
-	snap := ollamaSettings()
-	const typed = `  OLLAMA_ORIGINS="https://example.com"  `
+	snap := llamaCPPSettings()
+	const typed = `  --alias "example model"  `
 
 	req, ok := d.settingsRequest(snap, detailInputLaunchArgs, typed)
 	if !ok {
@@ -1281,15 +1286,15 @@ func TestLaunchTextIsSentAsTyped(t *testing.T) {
 // with the preview's approval standing behind it.
 func TestSettingsApplyUsesTheNormalizedDraft(t *testing.T) {
 	d := localDetail()
-	d.engines = []engineStatus{{Engine: "ollama", Installed: true}}
+	d.engines = []engineStatus{{Engine: "llamacpp", Installed: true}}
 	d.refreshEngines()
 
-	typed := enginesettings.Config{ServerPort: 11434, ProxyPort: 11435, LaunchText: "--flag   x"}
-	normalized := enginesettings.Config{ServerPort: 11434, ProxyPort: 11435, LaunchText: "--flag x"}
+	typed := enginesettings.Config{ServerPort: 8081, ProxyPort: 8080, LaunchText: "--flag   x"}
+	normalized := enginesettings.Config{ServerPort: 8081, ProxyPort: 8080, LaunchText: "--flag x"}
 
 	verdict, sent, problem := judgeSettingsPreview(enginePreviewMsg{
 		request: enginesettings.Request{
-			Engine:           "ollama",
+			Engine:           "llamacpp",
 			ExpectedRevision: 7,
 			Settings:         typed,
 			Resolution:       resolutionLaunch,
@@ -1333,23 +1338,23 @@ func TestLocalSettingsPushIsNotDiscarded(t *testing.T) {
 	const uuid = "33983c39-c0a6-41d2-9488-455b5e61e25f"
 	d := newNodeDetail(nil, nodeRow{key: uuid, name: "this-host", self: true, presence: presenceOnline})
 	d.SetSize(100, 30)
-	seedSettings(d, ollamaSettings()) // revision 7
+	seedSettings(d, llamaCPPSettings()) // revision 7
 
-	moved := ollamaSettings()
+	moved := llamaCPPSettings()
 	moved.NodeID = uuid
 	moved.Revision = 8
 	d.handleNotification(settingsPush(moved).Msg)
 
-	if got := d.settings["ollama"].Revision; got != 8 {
+	if got := d.settings["llamacpp"].Revision; got != 8 {
 		t.Fatalf("cached revision is %d after a push for this machine, want 8", got)
 	}
 
 	// And a push for a different machine is still ignored.
-	other := ollamaSettings()
+	other := llamaCPPSettings()
 	other.NodeID = "some-other-node"
 	other.Revision = 99
 	d.handleNotification(settingsPush(other).Msg)
-	if got := d.settings["ollama"].Revision; got != 8 {
+	if got := d.settings["llamacpp"].Revision; got != 8 {
 		t.Errorf("a peer's snapshot overwrote this machine's: revision %d", got)
 	}
 }
@@ -1362,17 +1367,17 @@ func TestLocalSettingsPushIsNotDiscarded(t *testing.T) {
 // the only way out is to leave the screen.
 func TestFailedSaveReloadsTheSnapshot(t *testing.T) {
 	d := localDetail()
-	d.engines = []engineStatus{{Engine: "ollama", Installed: true}}
+	d.engines = []engineStatus{{Engine: "llamacpp", Installed: true}}
 	d.refreshEngines()
-	seedSettings(d, ollamaSettings())
-	d.settingsAwaited = &awaitedSettings{engine: "ollama", requestID: "req-1"}
+	seedSettings(d, llamaCPPSettings())
+	d.settingsAwaited = &awaitedSettings{engine: "llamacpp", requestID: "req-1"}
 
 	cmd, _ := d.update(engineSettingsAppliedMsg{
-		engine: "ollama",
+		engine: "llamacpp",
 		err:    errors.New("settings changed on this device; reload before applying"),
 	})
 
-	if _, still := d.settings["ollama"]; still {
+	if _, still := d.settings["llamacpp"]; still {
 		t.Error("the rejected snapshot is still cached, so the next attempt repeats the failure")
 	}
 	if cmd == nil {
@@ -1394,14 +1399,14 @@ func TestFailedSaveReloadsTheSnapshot(t *testing.T) {
 func TestSettingsCommitCarriesARequestIdentifier(t *testing.T) {
 	previewOf := func(port int) enginePreviewMsg {
 		return enginePreviewMsg{
-			request: enginesettings.Request{Engine: "ollama", ExpectedRevision: 7},
+			request: enginesettings.Request{Engine: "llamacpp", ExpectedRevision: 7},
 			preview: enginesettings.Preview{
-				Settings: enginesettings.Config{ServerPort: port, ProxyPort: 11434},
+				Settings: enginesettings.Config{ServerPort: port, ProxyPort: 8080},
 			},
 		}
 	}
 
-	_, first, _ := judgeSettingsPreview(previewOf(11500))
+	_, first, _ := judgeSettingsPreview(previewOf(8181))
 	if first.RequestID == "" {
 		t.Fatal("the commit carries no request identifier; the backend will refuse it")
 	}
@@ -1423,7 +1428,7 @@ func TestSettingsCommitCarriesARequestIdentifier(t *testing.T) {
 
 	// A different change must not reuse it: the backend refuses an identifier
 	// replayed with settings that do not match its receipt.
-	_, second, _ := judgeSettingsPreview(previewOf(11501))
+	_, second, _ := judgeSettingsPreview(previewOf(8182))
 	if second.RequestID == first.RequestID {
 		t.Error("two different changes share one identifier; the second would be refused")
 	}
@@ -1433,12 +1438,12 @@ func TestSettingsCommitCarriesARequestIdentifier(t *testing.T) {
 // first, and that the confirmation applies the same request it armed.
 func TestSettingsRestartIsConfirmed(t *testing.T) {
 	d := localDetail()
-	d.engines = []engineStatus{{Engine: "ollama", Installed: true}}
+	d.engines = []engineStatus{{Engine: "llamacpp", Installed: true}}
 	d.refreshEngines()
 
-	normalized := enginesettings.Config{ServerPort: 11500, ProxyPort: 11435}
+	normalized := enginesettings.Config{ServerPort: 8181, ProxyPort: 8080}
 	restarting := enginePreviewMsg{
-		request: enginesettings.Request{Engine: "ollama", ExpectedRevision: 7},
+		request: enginesettings.Request{Engine: "llamacpp", ExpectedRevision: 7},
 		preview: enginesettings.Preview{Settings: normalized, Restart: true},
 	}
 
@@ -1495,18 +1500,18 @@ func TestSettingsPreviewFailuresAreExplained(t *testing.T) {
 		},
 		{
 			name:    "the two ports disagree",
-			preview: enginesettings.Preview{Conflict: &enginesettings.Conflict{ServerPort: 11434, LaunchPort: 11500}},
-			want:    "11500",
+			preview: enginesettings.Preview{Conflict: &enginesettings.Conflict{ServerPort: 8081, LaunchPort: 8181}},
+			want:    "8181",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			d := localDetail()
-			d.engines = []engineStatus{{Engine: "ollama", Installed: true}}
+			d.engines = []engineStatus{{Engine: "llamacpp", Installed: true}}
 			d.refreshEngines()
 
 			cmd := d.applySettingsPreview(enginePreviewMsg{
-				request: enginesettings.Request{Engine: "ollama"},
+				request: enginesettings.Request{Engine: "llamacpp"},
 				preview: tc.preview,
 				err:     tc.err,
 			})
@@ -1553,7 +1558,7 @@ func TestNoBindingRequiresShift(t *testing.T) {
 		"service":        newServiceView(nil).Help(),
 		"logs":           newLogsView(nil).Help(),
 		"errors overlay": newErrorsView(nil).Help(),
-		"catalog":        newCatalogBrowser(nil, "ollama", "Ollama", "this-host", false).Help(),
+		"catalog":        newCatalogBrowser(nil, "llamacpp", "llama.cpp", "this-host", false).Help(),
 		"detail engines": localDetail().Help(),
 	}
 
@@ -1594,15 +1599,15 @@ func TestSettingsOutcomeReportsTheBoundPort(t *testing.T) {
 			// observed in passing, so a difference here is real.
 			name: "the endpoint could not take the port",
 			snapshot: enginesettings.Snapshot{
-				Engine:              "lmstudio",
+				Engine:              "llamacpp",
 				Phase:               settingsPhaseSucceeded,
-				Settings:            enginesettings.Config{ProxyPort: 1235, ServerPort: 1236},
-				EffectiveProxyPort:  1234,
-				EffectiveServerPort: 1236,
+				Settings:            enginesettings.Config{ProxyPort: 8180, ServerPort: 8081},
+				EffectiveProxyPort:  8080,
+				EffectiveServerPort: 8081,
 			},
 			wantKind: toastError,
 			// Both numbers: which port it is on, and which one it could not have.
-			wantHas:   []string{"1234", "1235"},
+			wantHas:   []string{"8080", "8180"},
 			wantNotIn: []string{"saved"},
 		},
 		{
@@ -1610,10 +1615,10 @@ func TestSettingsOutcomeReportsTheBoundPort(t *testing.T) {
 			// assembled from the ports.
 			name: "the backend refused the change",
 			snapshot: enginesettings.Snapshot{
-				Engine:   "ollama",
+				Engine:   "llamacpp",
 				Phase:    settingsPhaseFailed,
-				Error:    "port 11500 is reserved by another service",
-				Settings: enginesettings.Config{ProxyPort: 11434, ServerPort: 11500},
+				Error:    "port 8181 is reserved by another service",
+				Settings: enginesettings.Config{ProxyPort: 8080, ServerPort: 8181},
 			},
 			wantKind:  toastError,
 			wantHas:   []string{"reserved by another service"},
@@ -1622,29 +1627,29 @@ func TestSettingsOutcomeReportsTheBoundPort(t *testing.T) {
 		{
 			// The engine's effective port is observed when the apply replies,
 			// and an engine that restarts onto the new port finishes after
-			// that -- LM Studio's server re-launches detached. Reading failure
-			// into the lag reported a move that had happened as one that had
-			// not, naming a port nothing was listening on.
+			// that observation. Reading failure into the lag reported a move
+			// that had happened as one that had not, naming a port nothing
+			// was listening on.
 			name: "the engine port reading lags a successful move",
 			snapshot: enginesettings.Snapshot{
-				Engine:              "ollama",
+				Engine:              "llamacpp",
 				Phase:               settingsPhaseSucceeded,
-				Settings:            enginesettings.Config{ProxyPort: 11434, ServerPort: 11500},
-				EffectiveProxyPort:  11434,
-				EffectiveServerPort: 11435,
+				Settings:            enginesettings.Config{ProxyPort: 8080, ServerPort: 8181},
+				EffectiveProxyPort:  8080,
+				EffectiveServerPort: 8081,
 			},
 			wantKind:  toastOK,
 			wantHas:   []string{"saved"},
-			wantNotIn: []string{"11435"},
+			wantNotIn: []string{"8081"},
 		},
 		{
 			name: "honoured",
 			snapshot: enginesettings.Snapshot{
-				Engine:              "ollama",
+				Engine:              "llamacpp",
 				Phase:               settingsPhaseSucceeded,
-				Settings:            enginesettings.Config{ProxyPort: 11434, ServerPort: 11500},
-				EffectiveProxyPort:  11434,
-				EffectiveServerPort: 11500,
+				Settings:            enginesettings.Config{ProxyPort: 8080, ServerPort: 8181},
+				EffectiveProxyPort:  8080,
+				EffectiveServerPort: 8181,
 			},
 			wantKind: toastOK,
 			wantHas:  []string{"saved"},
@@ -1652,9 +1657,9 @@ func TestSettingsOutcomeReportsTheBoundPort(t *testing.T) {
 		{
 			name: "nothing bound yet",
 			snapshot: enginesettings.Snapshot{
-				Engine:   "ollama",
+				Engine:   "llamacpp",
 				Phase:    settingsPhaseSucceeded,
-				Settings: enginesettings.Config{ProxyPort: 11434, ServerPort: 11500},
+				Settings: enginesettings.Config{ProxyPort: 8080, ServerPort: 8181},
 			},
 			// A stopped engine has no port in force. Saying it "stayed on :0"
 			// would be worse than not saying where it landed.
@@ -1698,10 +1703,10 @@ func TestSettingsOutcomeReportsTheBoundPort(t *testing.T) {
 func TestSettingsOutcomeIsSilentForSomeoneElsesChange(t *testing.T) {
 	d := localDetail()
 	snap := enginesettings.Snapshot{
-		Engine:             "ollama",
+		Engine:             "llamacpp",
 		RequestID:          "ours",
 		Phase:              settingsPhaseSucceeded,
-		Settings:           enginesettings.Config{ProxyPort: 11434},
+		Settings:           enginesettings.Config{ProxyPort: 8080},
 		EffectiveProxyPort: 11999,
 	}
 
@@ -1713,7 +1718,7 @@ func TestSettingsOutcomeIsSilentForSomeoneElsesChange(t *testing.T) {
 	// The same engine, changed by someone else while this screen waits: the
 	// desktop app, say. Matching on the engine alone consumed the await and
 	// reported their result as ours.
-	d.settingsAwaited = &awaitedSettings{engine: "ollama", requestID: "ours"}
+	d.settingsAwaited = &awaitedSettings{engine: "llamacpp", requestID: "ours"}
 	theirs := snap
 	theirs.RequestID = "theirs"
 	d.reportSettingsOutcome(theirs)
@@ -1747,15 +1752,15 @@ func TestSettingsOutcomeIsSilentForSomeoneElsesChange(t *testing.T) {
 // it spent the await, so the real verdict was never reported.
 func TestAcceptedIsNotApplied(t *testing.T) {
 	d := localDetail()
-	d.settingsAwaited = &awaitedSettings{engine: "ollama", requestID: "req-1"}
+	d.settingsAwaited = &awaitedSettings{engine: "llamacpp", requestID: "req-1"}
 
 	applying := enginesettings.Snapshot{
-		Engine:    "ollama",
+		Engine:    "llamacpp",
 		RequestID: "req-1",
 		Phase:     settingsPhaseApplying,
-		Settings:  enginesettings.Config{ProxyPort: 11500, ServerPort: 11435},
+		Settings:  enginesettings.Config{ProxyPort: 8180, ServerPort: 8081},
 		// Still where it was: the change has been accepted, not carried out.
-		EffectiveProxyPort: 11434,
+		EffectiveProxyPort: 8080,
 	}
 	d.reportSettingsOutcome(applying)
 	if got := d.status.render(); got != "" {
@@ -1777,7 +1782,7 @@ func TestAcceptedIsNotApplied(t *testing.T) {
 	// The terminal snapshot for the same request is the one that speaks.
 	done := applying
 	done.Phase = settingsPhaseSucceeded
-	done.EffectiveProxyPort = 11500
+	done.EffectiveProxyPort = 8180
 	d.reportSettingsOutcome(done)
 	if got := d.status.render(); !strings.Contains(got, "saved") {
 		t.Errorf("the terminal snapshot reported %q, want a save", got)
@@ -1785,7 +1790,7 @@ func TestAcceptedIsNotApplied(t *testing.T) {
 
 	// And a genuine failure after "applying" is reported, not lost.
 	d = localDetail()
-	d.settingsAwaited = &awaitedSettings{engine: "ollama", requestID: "req-2"}
+	d.settingsAwaited = &awaitedSettings{engine: "llamacpp", requestID: "req-2"}
 	applying.RequestID = "req-2"
 	d.reportSettingsOutcome(applying)
 	failed := applying
@@ -1806,19 +1811,19 @@ func TestAcceptedIsNotApplied(t *testing.T) {
 // the cached snapshot, so the real verdict that followed went unreported.
 func TestSlowApplyIsStillApplying(t *testing.T) {
 	d := localDetail()
-	d.engines = []engineStatus{{Engine: "ollama", Installed: true}}
+	d.engines = []engineStatus{{Engine: "llamacpp", Installed: true}}
 	d.refreshEngines()
-	seedSettings(d, ollamaSettings())
-	d.settingsAwaited = &awaitedSettings{engine: "ollama", requestID: "req-1"}
+	seedSettings(d, llamaCPPSettings())
+	d.settingsAwaited = &awaitedSettings{engine: "llamacpp", requestID: "req-1"}
 
-	cmd, _ := d.update(engineSettingsAppliedMsg{engine: "ollama", err: context.DeadlineExceeded})
+	cmd, _ := d.update(engineSettingsAppliedMsg{engine: "llamacpp", err: context.DeadlineExceeded})
 	if cmd != nil {
 		t.Error("a deadline triggered a re-read, as though the write had been rejected")
 	}
 	if d.settingsAwaited == nil {
 		t.Fatal("a deadline cleared the await, so the verdict that follows will be ignored")
 	}
-	if _, kept := d.settings["ollama"]; !kept {
+	if _, kept := d.settings["llamacpp"]; !kept {
 		t.Error("a deadline discarded the snapshot the in-flight write was based on")
 	}
 	if got := d.status.render(); strings.Contains(got, "fail") || !strings.Contains(got, "applying") {
@@ -1826,7 +1831,7 @@ func TestSlowApplyIsStillApplying(t *testing.T) {
 	}
 
 	d.reportSettingsOutcome(enginesettings.Snapshot{
-		Engine: "ollama", RequestID: "req-1", Phase: settingsPhaseSucceeded,
+		Engine: "llamacpp", RequestID: "req-1", Phase: settingsPhaseSucceeded,
 	})
 	if got := d.status.render(); !strings.Contains(got, "saved") {
 		t.Errorf("the verdict after a deadline reported %q", got)
@@ -1836,11 +1841,11 @@ func TestSlowApplyIsStillApplying(t *testing.T) {
 // TestSettingsApplyBudgetIsTheBackends checks the apply call is given the time
 // the backend works to, not the one sized for control calls.
 func TestSettingsApplyBudgetIsTheBackends(t *testing.T) {
-	if got := settingsApplyBudget(enginesettings.Request{Engine: "ollama"}); got != enginesettings.CallBudget {
+	if got := settingsApplyBudget(enginesettings.Request{Engine: "llamacpp"}); got != enginesettings.CallBudget {
 		t.Errorf("a local apply is allowed %v, want the shared call budget %v",
 			got, enginesettings.CallBudget)
 	}
-	if got := settingsApplyBudget(enginesettings.Request{NodeID: "peer", Engine: "ollama"}); got != enginesettings.RelayBudget {
+	if got := settingsApplyBudget(enginesettings.Request{NodeID: "peer", Engine: "llamacpp"}); got != enginesettings.RelayBudget {
 		t.Errorf("a relayed apply is allowed %v, want the shared relay budget %v",
 			got, enginesettings.RelayBudget)
 	}
@@ -1858,13 +1863,13 @@ func TestSettingsApplyBudgetIsTheBackends(t *testing.T) {
 // about to open.
 func TestSettingsPromptsHoldTheKeyboard(t *testing.T) {
 	d := localDetail()
-	d.settingsConfirm = &enginesettings.Request{Engine: "ollama"}
+	d.settingsConfirm = &enginesettings.Request{Engine: "llamacpp"}
 	if !d.CapturingInput() {
 		t.Error("an armed restart confirmation does not hold the keyboard")
 	}
 
 	d = localDetail()
-	d.settingsWanted = &pendingSettingsEdit{engine: "ollama", mode: detailInputEnginePort}
+	d.settingsWanted = &pendingSettingsEdit{engine: "llamacpp", mode: detailInputEnginePort}
 	if !d.CapturingInput() {
 		t.Error("a settings read in flight does not hold the keyboard")
 	}
@@ -1875,34 +1880,35 @@ func TestSettingsPromptsHoldTheKeyboard(t *testing.T) {
 //
 // A field can open after a settings read, and the cursor is free to move while
 // the read is in flight. Building the request from the selection wrote the
-// value typed into Ollama's field into LM Studio's settings.
+// value typed into llama.cpp's field into the custom engine's settings.
 func TestSettingsWriteFollowsTheFieldNotTheCursor(t *testing.T) {
+	custom := tuiCustomEngine(t)
 	d := localDetail()
 	d.engines = []engineStatus{
-		{Engine: "ollama", DisplayName: "Ollama", Installed: true, Port: 11435},
-		{Engine: "lmstudio", DisplayName: "LM Studio", Installed: true, Port: 1235},
+		{Engine: "llamacpp", DisplayName: "llama.cpp", Installed: true, Port: 8080},
+		{Engine: custom.Name, DisplayName: custom.DisplayName, Installed: true, Port: 8081},
 	}
 	d.refreshEngines()
-	seedSettings(d, ollamaSettings())
-	lms := ollamaSettings()
-	lms.Engine = "lmstudio"
-	lms.Revision = 3
-	seedSettings(d, lms)
+	seedSettings(d, llamaCPPSettings())
+	customSettings := llamaCPPSettings()
+	customSettings.Engine = "llamacpp-custom"
+	customSettings.Revision = 3
+	seedSettings(d, customSettings)
 
-	// Open Ollama's engine port field, then move the cursor to LM Studio.
-	d.openSettingsField(d.settings["ollama"], detailInputEnginePort)
+	// Open llama.cpp's engine port field, then move the cursor to llama.cpp custom.
+	d.openSettingsField(d.settings["llamacpp"], detailInputEnginePort)
 	d.engineTable.SetCursor(1)
-	if sel := d.selectedEngine(); sel == nil || sel.Engine != "lmstudio" {
-		t.Fatalf("setup: cursor is not on LM Studio (%+v)", sel)
+	if sel := d.selectedEngine(); sel == nil || sel.Engine != "llamacpp-custom" {
+		t.Fatalf("setup: cursor is not on llama.cpp custom (%+v)", sel)
 	}
 
 	if d.submitSettings(detailInputEnginePort, "11600", "11600") == nil {
 		t.Fatal("the submit issued no preview")
 	}
 	// The submit names the engine it built the request for. Resolved from the
-	// cursor, this read "checking LM Studio settings".
+	// cursor, this read "checking llama.cpp custom settings".
 	got := d.status.render()
-	if !strings.Contains(got, "Ollama") || strings.Contains(got, "LM Studio") {
+	if !strings.Contains(got, "llama.cpp") || strings.Contains(got, "llama.cpp custom") {
 		t.Errorf("status %q: the write was aimed at the cursor, not the field", got)
 	}
 	if d.settingsEngine != "" {
@@ -1922,7 +1928,7 @@ func TestLateSettingsReplyDoesNotOpenAnotherNodesEditor(t *testing.T) {
 	open := func(key string) *nodeDetail {
 		d := newNodeDetail(nil, nodeRow{key: key, name: key, presence: presenceOnline})
 		d.SetSize(100, 30)
-		d.engines = []engineStatus{{Engine: "ollama", Installed: true}}
+		d.engines = []engineStatus{{Engine: "llamacpp", Installed: true}}
 		d.refreshEngines()
 		v.detail = d
 		if d.editSetting(&d.engines[0], detailInputEnginePort) == nil {
@@ -1938,17 +1944,17 @@ func TestLateSettingsReplyDoesNotOpenAnotherNodesEditor(t *testing.T) {
 	}
 	second := open("node-b")
 
-	stale := ollamaSettings()
+	stale := llamaCPPSettings()
 	stale.NodeID = "node-a"
-	stale.Settings.ServerPort = 11500
+	stale.Settings.ServerPort = 8181
 	v.Update(detailReply{node: "node-a", msg: engineSettingsMsg{snapshot: stale}})
 	v.Update(detailReply{node: "node-a", msg: engineSettingsMsg{err: errors.New("node-a went away")}})
-	v.Update(detailReply{node: "node-a", msg: enginePreviewMsg{request: enginesettings.Request{NodeID: "node-a", Engine: "ollama"}}})
+	v.Update(detailReply{node: "node-a", msg: enginePreviewMsg{request: enginesettings.Request{NodeID: "node-a", Engine: "llamacpp"}}})
 
 	if second.mode != detailInputNone {
 		t.Errorf("node A's reply opened node B's editor with port %q", second.input.Value())
 	}
-	if _, cached := second.settings["ollama"]; cached {
+	if _, cached := second.settings["llamacpp"]; cached {
 		t.Error("node A's settings reply was cached on node B")
 	}
 	if second.settingsWanted == nil {
@@ -1957,10 +1963,10 @@ func TestLateSettingsReplyDoesNotOpenAnotherNodesEditor(t *testing.T) {
 
 	// And node B's own reply still does what it is for; without this the
 	// assertions above would pass if every reply were dropped.
-	own := ollamaSettings()
+	own := llamaCPPSettings()
 	own.NodeID = "node-b"
 	v.Update(detailReply{node: "node-b", msg: engineSettingsMsg{snapshot: own}})
-	if second.mode != detailInputEnginePort || second.input.Value() != "11434" {
+	if second.mode != detailInputEnginePort || second.input.Value() != "8081" {
 		t.Errorf("node B's own reply did not open its field (mode %v, value %q)",
 			second.mode, second.input.Value())
 	}
@@ -1974,17 +1980,17 @@ func TestLateSettingsReplyDoesNotOpenAnotherNodesEditor(t *testing.T) {
 func TestLateOperationReplyStaysWithItsNode(t *testing.T) {
 	b := newNodeDetail(nil, nodeRow{key: "node-b", name: "B", presence: presenceOnline})
 	b.SetSize(100, 30)
-	b.engines = []engineStatus{{Engine: "ollama", DisplayName: "Ollama", Installed: true}}
+	b.engines = []engineStatus{{Engine: "llamacpp", DisplayName: "llama.cpp", Installed: true}}
 	b.refreshEngines()
 
-	failed := classifyOpResult("start", "ollama", "start", errors.New("engine did not come up"))
+	failed := classifyOpResult("start", "llamacpp", "start", errors.New("engine did not come up"))
 	b.update(detailReply{node: "node-a", msg: failed})
 	if got := b.status.render(); strings.Contains(got, "failed") {
 		t.Errorf("node A's outcome was reported on node B: %q", got)
 	}
 
 	b.update(detailReply{node: "node-b", msg: failed})
-	if got := b.status.render(); !strings.Contains(got, "start (Ollama) failed") {
+	if got := b.status.render(); !strings.Contains(got, "start (llama.cpp) failed") {
 		t.Errorf("node B's own outcome was not reported: %q", got)
 	}
 }
@@ -1994,7 +2000,7 @@ func TestLateOperationReplyStaysWithItsNode(t *testing.T) {
 // the time it lands.
 func TestDetailRepliesCarryTheirNode(t *testing.T) {
 	a := newNodeDetail(nil, nodeRow{key: "node-a", name: "A", presence: presenceOnline})
-	reply := engineOpMsg{what: "start", engine: "ollama"}
+	reply := engineOpMsg{what: "start", engine: "llamacpp"}
 	got := a.own(func() tea.Msg { return reply })()
 	tagged, ok := got.(detailReply)
 	if !ok || tagged.node != "node-a" || tagged.msg != reply {
@@ -2012,13 +2018,14 @@ func TestDetailRepliesCarryTheirNode(t *testing.T) {
 // second save replacing the first before its verdict came back. The screen
 // follows one outstanding write, so the first outcome was never reported.
 func TestSecondSettingsChangeWaitsForTheFirst(t *testing.T) {
+	custom := tuiCustomEngine(t)
 	d := localDetail()
 	d.engines = []engineStatus{
-		{Engine: "ollama", DisplayName: "Ollama", Installed: true},
-		{Engine: "lmstudio", DisplayName: "LM Studio", Installed: true},
+		{Engine: "llamacpp", DisplayName: "llama.cpp", Installed: true},
+		{Engine: custom.Name, DisplayName: custom.DisplayName, Installed: true},
 	}
 	d.refreshEngines()
-	d.settingsAwaited = &awaitedSettings{engine: "ollama", requestID: "first"}
+	d.settingsAwaited = &awaitedSettings{engine: "llamacpp", requestID: "first"}
 
 	if cmd := d.editSetting(&d.engines[1], detailInputEnginePort); cmd != nil {
 		t.Error("a second settings change started while the first was still applying")
@@ -2026,7 +2033,7 @@ func TestSecondSettingsChangeWaitsForTheFirst(t *testing.T) {
 	if d.mode != detailInputNone || d.settingsWanted != nil {
 		t.Error("a second settings field was opened while the first change was applying")
 	}
-	if got := d.status.render(); !strings.Contains(got, "wait for the Ollama settings change") {
+	if got := d.status.render(); !strings.Contains(got, "wait for the llama.cpp settings change") {
 		t.Errorf("the refusal did not say what to wait for: %q", got)
 	}
 }
@@ -2042,7 +2049,7 @@ func progressPush(method string, fields map[string]any) NotificationMsg {
 // there it read as the peer installing something.
 func TestInstallProgressStaysOnThisMachine(t *testing.T) {
 	frame := progressPush("engine:install-progress",
-		map[string]any{"engine": "ollama", "stage": "downloading", "percent": 40})
+		map[string]any{"engine": "llamacpp", "stage": "downloading", "percent": 40})
 
 	peer := remoteDetail()
 	peer.update(frame)
@@ -2063,7 +2070,7 @@ func TestInstallProgressStaysOnThisMachine(t *testing.T) {
 // "(0%)" and "(-1%)".
 func TestProgressWithoutAPercentShowsNone(t *testing.T) {
 	peer := remoteDetail()
-	snapshot := tuiDownloadSnapshot()
+	snapshot := tuiLlamaCPPDownloadSnapshot()
 	peer.applyModels(tuiDownloadInventory(snapshot), true)
 	peer.update(tuiDownloadProgress(t, "engine:remote-progress", "peer", snapshot, snapshot.Entries[0]))
 	if got := peer.status.render(); !strings.Contains(got, "Downloading") || strings.Contains(got, "%") {
@@ -2085,7 +2092,7 @@ func TestProgressWithoutAPercentShowsNone(t *testing.T) {
 	}
 
 	local.update(progressPush("engine:install-progress",
-		map[string]any{"engine": "ollama", "stage": "failed", "percent": -1, "error": "disk full"}))
+		map[string]any{"engine": "llamacpp", "stage": "failed", "percent": -1, "error": "disk full"}))
 	got := local.status.render()
 	if strings.Contains(got, "%") || !strings.Contains(got, "install") || !strings.Contains(got, "failed: disk full") {
 		t.Errorf("a failed install rendered as %q", got)
@@ -2097,9 +2104,9 @@ func TestProgressWithoutAPercentShowsNone(t *testing.T) {
 // armed against a model the operator could not see.
 func TestHiddenListsRefuseTheirKeys(t *testing.T) {
 	d := localDetail()
-	d.engines = []engineStatus{{Engine: "ollama", DisplayName: "Ollama", Installed: true, Running: true}}
+	d.engines = []engineStatus{{Engine: "llamacpp", DisplayName: "llama.cpp", Installed: true, Running: true}}
 	models := []string{"model-a", "model-b", "model-c"}
-	d.models = modelsResult{Models: models, ModelsByEngine: map[string][]string{"ollama": models}}
+	d.models = modelsResult{Models: models, ModelsByEngine: map[string][]string{"llamacpp": models}}
 	d.refreshEngines()
 	d.refreshModels()
 
@@ -2160,7 +2167,7 @@ func TestOpenDetailFollowsPresenceAndMembership(t *testing.T) {
 	v.restoreSelection()
 	v.openDetail()
 	d := v.detail
-	d.engines = []engineStatus{{Engine: "ollama", Installed: true, Running: true}}
+	d.engines = []engineStatus{{Engine: "llamacpp", Installed: true, Running: true}}
 	d.refreshEngines()
 	if d.node.membership != membershipMember || d.node.presence != presenceOnline {
 		t.Fatalf("setup: detail opened as %v/%v", d.node.presence, d.node.membership)
@@ -2187,7 +2194,7 @@ func TestOpenDetailFollowsPresenceAndMembership(t *testing.T) {
 }
 
 // TestEngineNameDoesNotDependOnTheEngineFetch is the regression guard for the
-// same engine reading "Ollama" on one machine and "ollama" on another.
+// same engine reading "llama.cpp" on one machine and "llamacpp" on another.
 //
 // A remote node's models come from discovery while its engine list comes from a
 // separate call, so the models table routinely has rows while the engine list is
@@ -2195,14 +2202,16 @@ func TestOpenDetailFollowsPresenceAndMembership(t *testing.T) {
 // genuinely lists nothing. Resolving the name only against that list meant the
 // spelling depended on whether an unrelated fetch had landed.
 func TestEngineNameDoesNotDependOnTheEngineFetch(t *testing.T) {
+	custom := tuiCustomEngine(t)
 	withList := localDetail()
 	withList.engines = []engineStatus{
-		{Engine: "ollama", DisplayName: "Ollama"},
-		{Engine: "lmstudio", DisplayName: "LM Studio"},
+		{Engine: "llamacpp", DisplayName: "llama.cpp"},
+		{Engine: custom.Name, DisplayName: custom.DisplayName},
 	}
 	empty := localDetail() // no engine list at all
+	empty.descriptors = engineDescriptors{custom.Name: {Engine: custom.Name, Label: custom.DisplayName}}
 
-	for _, engine := range []string{"ollama", "lmstudio"} {
+	for _, engine := range []string{"llamacpp", "llamacpp-custom"} {
 		want := withList.engineLabel(engine)
 		if got := empty.engineLabel(engine); got != want {
 			t.Errorf("engine %q reads %q with no engine list but %q with one",
@@ -2290,18 +2299,18 @@ func TestUnpairedNodeIsNotCalledSilent(t *testing.T) {
 // Discovery carries which engine serves each model and needs no pairing to do
 // it, so an unpaired node's model list arrives with its ENGINE column filled
 // in. "Its engines are not visible from here", printed directly above a list
-// naming Ollama, claimed less than the screen displayed. What pairing actually
+// naming llama.cpp, claimed less than the screen displayed. What pairing actually
 // buys is their state and their controls.
 func TestUnpairedHintAgreesWithTheModelList(t *testing.T) {
 	d := remoteDetail()
 	d.node.membership = membershipNone
 	d.models = modelsResult{ModelsByEngine: map[string][]string{
-		"ollama": {"gemma3:4b", "gemma4:12b"},
+		"llamacpp": {"gemma3:4b", "gemma4:12b"},
 	}}
 	d.refreshModels()
 
 	hint := d.emptyEnginesHint()
-	if !strings.Contains(hint, "Ollama") {
+	if !strings.Contains(hint, "llama.cpp") {
 		t.Errorf("hint %q does not name the engine the model list attributes rows to", hint)
 	}
 	if !strings.Contains(hint, "manage") {
@@ -2377,12 +2386,12 @@ func globalBindings() []key.Binding {
 func TestDetailResizesWhenHardwareArrives(t *testing.T) {
 	const budget = 20
 	d := localDetail()
-	d.engines = []engineStatus{{Engine: "ollama", Installed: true, Running: true}}
+	d.engines = []engineStatus{{Engine: "llamacpp", Installed: true, Running: true}}
 	models := make([]string, 30)
 	for i := range models {
 		models[i] = "model-" + string(rune('a'+i%26))
 	}
-	d.models = modelsResult{Models: models, ModelsByEngine: map[string][]string{"ollama": models}}
+	d.models = modelsResult{Models: models, ModelsByEngine: map[string][]string{"llamacpp": models}}
 	d.SetSize(100, budget)
 	d.refreshEngines()
 	d.refreshModels()
@@ -2422,7 +2431,7 @@ func TestDetailResizesWhenHardwareArrives(t *testing.T) {
 // rather than keeping the size it was opened at.
 func TestDetailResizesCatalogBrowser(t *testing.T) {
 	d := localDetail()
-	d.engines = []engineStatus{{Engine: "ollama", Installed: true, Running: true}}
+	d.engines = []engineStatus{{Engine: "llamacpp", Installed: true, Running: true}}
 	d.refreshEngines()
 	d.openCatalog()
 	if d.catalog == nil {
@@ -2446,7 +2455,7 @@ func TestDetailResizesCatalogBrowser(t *testing.T) {
 func TestModelSelectionSurvivesARebuild(t *testing.T) {
 	d := localDetail()
 	d.models = modelsResult{
-		ModelsByEngine: map[string][]string{"ollama": {"bravo", "charlie", "delta"}},
+		ModelsByEngine: map[string][]string{"llamacpp": {"bravo", "charlie", "delta"}},
 	}
 	d.refreshModels()
 	d.modelTable.SetCursor(1)
@@ -2456,7 +2465,7 @@ func TestModelSelectionSurvivesARebuild(t *testing.T) {
 
 	// A background pull lands "alpha", which sorts first.
 	d.models = modelsResult{
-		ModelsByEngine: map[string][]string{"ollama": {"alpha", "bravo", "charlie", "delta"}},
+		ModelsByEngine: map[string][]string{"llamacpp": {"alpha", "bravo", "charlie", "delta"}},
 	}
 	d.refreshModels()
 
@@ -2479,7 +2488,7 @@ func TestModelSelectionSurvivesARebuild(t *testing.T) {
 func TestActionsWorkAfterAnEmptyRefresh(t *testing.T) {
 	d := localDetail() // constructed with no inventory, as at startup
 
-	d.models = modelsResult{ModelsByEngine: map[string][]string{"ollama": {"a", "b"}}}
+	d.models = modelsResult{ModelsByEngine: map[string][]string{"llamacpp": {"a", "b"}}}
 	d.refreshModels()
 	if d.selectedModel() == nil {
 		t.Errorf("no model selected after the inventory arrived (cursor %d); "+
@@ -2487,7 +2496,7 @@ func TestActionsWorkAfterAnEmptyRefresh(t *testing.T) {
 	}
 
 	// Same for the engines pane, which gates install/start/stop.
-	d.engines = []engineStatus{{Engine: "ollama", Installed: true}}
+	d.engines = []engineStatus{{Engine: "llamacpp", Installed: true}}
 	d.refreshEngines()
 	if d.selectedEngine() == nil {
 		t.Errorf("no engine selected after engines arrived (cursor %d)",
@@ -2500,7 +2509,7 @@ func TestActionsWorkAfterAnEmptyRefresh(t *testing.T) {
 // prompt for whatever the operator pressed on returning.
 func TestArmedActionOwnsTheKeyboard(t *testing.T) {
 	d := localDetail()
-	d.models = modelsResult{ModelsByEngine: map[string][]string{"ollama": {"victim"}}}
+	d.models = modelsResult{ModelsByEngine: map[string][]string{"llamacpp": {"victim"}}}
 	d.refreshModels()
 	d.pane = detailModels
 
@@ -2527,7 +2536,7 @@ func TestArmedActionOwnsTheKeyboard(t *testing.T) {
 func TestArmedActionRunsOnConfirmAndNotOtherwise(t *testing.T) {
 	build := func() *nodeDetail {
 		d := localDetail()
-		d.models = modelsResult{ModelsByEngine: map[string][]string{"ollama": {"victim"}}}
+		d.models = modelsResult{ModelsByEngine: map[string][]string{"llamacpp": {"victim"}}}
 		d.refreshModels()
 		d.pane = detailModels
 		d.deleteSelectedModel()
@@ -2561,7 +2570,7 @@ func TestArmedActionRunsOnConfirmAndNotOtherwise(t *testing.T) {
 // answering that the operation is unavailable is worse than refusing outright.
 func TestUninstallRefusedOnAPeerBeforeArming(t *testing.T) {
 	d := remoteDetail()
-	d.engines = []engineStatus{{Engine: "ollama", Installed: true}}
+	d.engines = []engineStatus{{Engine: "llamacpp", Installed: true}}
 	d.refreshEngines()
 	d.pane = detailEngines
 
@@ -2583,7 +2592,7 @@ func (d *nodeDetail) handleKeyForTest(t *testing.T, k string) tea.Cmd {
 }
 
 func TestParsePort(t *testing.T) {
-	valid := map[string]int{"1": 1, "11434": 11434, "65535": 65535}
+	valid := map[string]int{"1": 1, "8081": 8081, "65535": 65535}
 	for in, want := range valid {
 		if got, ok := parsePort(in); !ok || got != want {
 			t.Errorf("parsePort(%q) = %d, %v", in, got, ok)
@@ -2614,15 +2623,15 @@ func TestServiceTabNoLongerOffersPorts(t *testing.T) {
 func TestUndeclaredModelOperationIsRefusedBeforeArming(t *testing.T) {
 	d := localDetail()
 	d.descriptors = engineDescriptors{
-		"strata": {
-			Version: engines.DescriptorVersion, Engine: "strata", Family: "strata", Label: "Strata",
+		"llamacpp-custom": {
+			Version: engines.DescriptorVersion, Engine: "llamacpp-custom", Family: engines.NameLlamaCPP, Label: "llama.cpp custom",
 			ModelNaming: engines.ModelNamingExact,
 			Operations:  map[string]engines.OperationCapability{engines.OperationLoad: {}},
 		},
 	}
-	snapshot := tuiDownloadSnapshot()
+	snapshot := tuiLlamaCPPDownloadSnapshot()
 	snapshot.Entries = []modeldownload.Entry{}
-	if !d.applyModels(modelsResult{ModelsByEngine: map[string][]string{"strata": {"victim"}}, DownloadState: snapshot, current: true}, true) {
+	if !d.applyModels(modelsResult{ModelsByEngine: map[string][]string{"llamacpp-custom": {"victim"}}, DownloadState: snapshot, current: true}, true) {
 		t.Fatal("ready canonical inventory rejected")
 	}
 	d.pane = detailModels
@@ -2630,13 +2639,13 @@ func TestUndeclaredModelOperationIsRefusedBeforeArming(t *testing.T) {
 	if cmd := d.deleteSelectedModel(); cmd != nil || d.pending != nil {
 		t.Fatal("an undeclared delete was armed")
 	}
-	if !contains(d.status.render(), "Strata does not support delete") {
+	if !contains(d.status.render(), "llama.cpp custom does not support delete") {
 		t.Errorf("refusal not explained: %q", d.status.render())
 	}
 	if cmd := d.modelOp("load"); cmd == nil {
 		t.Error("a declared load was refused")
 	}
-	if got := d.engineLabel("strata"); got != "Strata" {
+	if got := d.engineLabel("llamacpp-custom"); got != "llama.cpp custom" {
 		t.Errorf("engine label = %q, want the descriptor's", got)
 	}
 }

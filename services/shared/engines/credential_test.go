@@ -4,7 +4,6 @@
 package engines
 
 import (
-	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -32,73 +31,4 @@ func TestValidCredential(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestCredentialJSONRoundTrip(t *testing.T) {
-	t.Run("set params", func(t *testing.T) {
-		want := SetCredentialParams{Engine: "lmstudio", Credential: "token"}
-		data, err := json.Marshal(want)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var fields map[string]string
-		if err := json.Unmarshal(data, &fields); err != nil {
-			t.Fatal(err)
-		}
-		if len(fields) != 2 || fields["engine"] != want.Engine || fields["credential"] != want.Credential {
-			t.Fatal("unexpected set params fields")
-		}
-		var got SetCredentialParams
-		if err := json.Unmarshal(data, &got); err != nil {
-			t.Fatal(err)
-		}
-		if got != want {
-			t.Fatal("set params did not round trip")
-		}
-	})
-	t.Run("state params", func(t *testing.T) {
-		want := CredentialParams{Engine: "lmstudio"}
-		data, err := json.Marshal(want)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var fields map[string]string
-		if err := json.Unmarshal(data, &fields); err != nil {
-			t.Fatal(err)
-		}
-		if len(fields) != 1 || fields["engine"] != want.Engine {
-			t.Fatal("unexpected state params fields")
-		}
-		var got CredentialParams
-		if err := json.Unmarshal(data, &got); err != nil {
-			t.Fatal(err)
-		}
-		if got != want {
-			t.Fatal("state params did not round trip")
-		}
-	})
-	t.Run("state", func(t *testing.T) {
-		want := CredentialState{Supported: true, Configured: false}
-		data, err := json.Marshal(want)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var fields map[string]bool
-		if err := json.Unmarshal(data, &fields); err != nil {
-			t.Fatal(err)
-		}
-		if len(fields) != 2 || !fields["supported"] || fields["configured"] {
-			t.Fatal("unexpected state fields")
-		}
-		if _, ok := fields["configured"]; !ok {
-			t.Fatal("configured field missing")
-		}
-		var got CredentialState
-		if err := json.Unmarshal(data, &got); err != nil {
-			t.Fatal(err)
-		}
-		if got != want {
-			t.Fatal("state did not round trip")
-		}
-	})
 }

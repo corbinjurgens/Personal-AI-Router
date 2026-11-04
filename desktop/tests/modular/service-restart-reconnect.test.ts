@@ -42,11 +42,11 @@ function deferred() {
 }
 
 function baseline(model: string, includeRemoved = false): JsonValue {
-    const workloads = [{ id: 'kept', engine: 'ollama', model, state: 'completed', createdAt: 1 }]
+    const workloads = [{ id: 'kept', engine: 'llamacpp', model, state: 'completed', createdAt: 1 }]
     if (includeRemoved) {
         workloads.push({
             id: 'removed',
-            engine: 'ollama',
+            engine: 'llamacpp',
             model: 'removed-model',
             state: 'completed',
             createdAt: 2
@@ -63,8 +63,8 @@ function modelBaseline(
 ): JsonValue {
     return {
         models: names,
-        modelsByEngine: { ollama: names },
-        loadedByEngine: { ollama: [] },
+        modelsByEngine: { llamacpp: names },
+        loadedByEngine: { llamacpp: [] },
         downloadState: {
             version: 1,
             sourceId: source,
@@ -225,7 +225,7 @@ describe('broker session hydration', () => {
             }
             return defaultResponse(method)
         }
-        supervisor.refreshDiscoveryEngineModels('ollama')
+        supervisor.refreshDiscoveryEngineModels('llama-cpp')
         await flush()
         expect(methods.filter(method => method === 'engine:models')).toHaveLength(2)
         client.emit('disconnected')
@@ -250,7 +250,7 @@ describe('broker session hydration', () => {
             }
             return defaultResponse(method)
         }
-        supervisor.refreshDiscoveryEngineModels('ollama')
+        supervisor.refreshDiscoveryEngineModels('llama-cpp')
         await flush()
         expect(methods.filter(method => method === 'engine:models')).toHaveLength(2)
         client.emit('disconnected')
@@ -281,13 +281,13 @@ describe('broker session hydration', () => {
         client.emit('notification', {
             source: 'broker',
             method: 'engine:models-changed',
-            params: { engine: 'ollama', models: modelBaseline(['obsolete'], 'e'.repeat(32)) }
+            params: { engine: 'llamacpp', models: modelBaseline(['obsolete'], 'e'.repeat(32)) }
         })
         client.emit('notification', {
             source: 'broker',
             method: 'engine:pull-progress',
             params: {
-                engine: 'ollama',
+                engine: 'llamacpp',
                 op: 'pull',
                 id: '1'.repeat(32),
                 model: 'obsolete',
@@ -300,7 +300,7 @@ describe('broker session hydration', () => {
                     entries: [
                         {
                             id: '1'.repeat(32),
-                            engine: 'ollama',
+                            engine: 'llamacpp',
                             model: 'obsolete',
                             phase: 'complete',
                             blocksReadiness: false
@@ -313,7 +313,7 @@ describe('broker session hydration', () => {
         const local = () =>
             state
                 .getEngineInitialState()
-                .models.find(models => models.nodeId === 'self' && models.engineType === 'ollama')
+                .models.find(models => models.nodeId === 'self' && models.engineType === 'llama-cpp')
         expect(local()?.downloadState?.sourceId).toBe(currentSource)
         expect(local()?.models).toMatchObject([{ name: 'ready', downloaded: false }])
         expect(methods.filter(method => method === 'engine:models')).toHaveLength(2)
@@ -337,7 +337,7 @@ describe('broker session hydration', () => {
             }
             return Promise.resolve(modelBaseline(['fresh'], 'f'.repeat(32)))
         }
-        supervisor.refreshDiscoveryEngineModels('ollama')
+        supervisor.refreshDiscoveryEngineModels('llama-cpp')
         await flush()
         client.emit('notification', { source: 'broker', method: 'engine:ready' })
         await flush()
@@ -347,7 +347,7 @@ describe('broker session hydration', () => {
         expect(applied).not.toHaveBeenCalled()
         const models = state
             .getEngineInitialState()
-            .models.find(models => models.nodeId === 'self' && models.engineType === 'ollama')
+            .models.find(models => models.nodeId === 'self' && models.engineType === 'llama-cpp')
         expect(models?.downloadState?.sourceId).toBe('f'.repeat(32))
         expect(models?.models).toMatchObject([{ name: 'fresh', downloaded: true }])
     })

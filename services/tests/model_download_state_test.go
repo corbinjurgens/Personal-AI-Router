@@ -455,7 +455,6 @@ func newDownloadProcessFixture(t *testing.T, reverse bool) *downloadProcessFixtu
 			t.Setenv(key, "")
 		}
 	}
-	t.Setenv("OLLAMA_HOST", "")
 	f := &downloadProcessFixture{router: newDownloadProcessRouter(t), controlCalls: make(map[task1RequestKey]int), pullIDs: make(map[string]int)}
 	f.router.onStartTimeout = f.logStartTimeout
 	f.service = newServiceFixture(t)
@@ -483,7 +482,7 @@ func newDownloadProcessFixture(t *testing.T, reverse bool) *downloadProcessFixtu
 	inert := newFixtureHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) }))
 	t.Cleanup(inert.Close)
 	jointIsolateEngines(t, s.configDir, portOfURL(t, inert.URL))
-	writePrivateBrokerEngineSettings(t, s.configDir, s.clusterDir, map[string]int{"llamacpp": temporaryClusterPort(t), "ollama": temporaryClusterPort(t)})
+	writePrivateBrokerEngineSettings(t, s.configDir, s.clusterDir, map[string]int{"llamacpp": temporaryClusterPort(t), "llamacpp-custom": temporaryClusterPort(t)})
 	policy := nodepolicy.Default()
 	policy.Revision = "12"
 	jointWriteJSON(t, s.policyPath(), policy)
@@ -677,7 +676,7 @@ func (f *downloadProcessFixture) writeManifest(t *testing.T, base string, port i
 	}
 	manifest := map[string]any{
 		"engine": downloadProcessEngine, "display_name": "Synthetic catalog router", "manifest_version": 1, "family": "llamacpp", "model_naming": "exact",
-		"runtime":   map[string]any{"mode": "process", "bin": filepath.Join(base, "never-start"), "port": port, "bind": "127.0.0.1", "ready": probe, "health": nil},
+		"runtime":   map[string]any{"bin": filepath.Join(base, "never-start"), "port": port, "bind": "127.0.0.1", "ready": probe, "health": nil},
 		"platforms": map[string]any{runtime.GOOS + "/" + runtime.GOARCH: map[string]any{"detect": []string{}}},
 		"actions": map[string]any{
 			"list_models":   map[string]any{"http": map[string]string{"method": http.MethodGet, "path": "/models"}, "result": map[string]string{"array": "data", "field": "id"}},

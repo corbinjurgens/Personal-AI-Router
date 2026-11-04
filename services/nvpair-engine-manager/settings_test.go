@@ -41,9 +41,9 @@ func workingSetSettingsExecutor(t *testing.T) *Executor {
 }
 
 func TestWorkingSetLimitRefusedApplyHasNoEffects(t *testing.T) {
-	test := func(name string, command bool, family string, limit int) {
+	test := func(name, family string, limit int) {
 		t.Run(name, func(t *testing.T) {
-			e := settingsExecutor(t, command)
+			e := settingsExecutor(t, false)
 			st := settingsState(t, e)
 			st.manifest.Family = family
 			path := filepath.Join(e.overrideDir, "fake.json")
@@ -51,7 +51,7 @@ func TestWorkingSetLimitRefusedApplyHasNoEffects(t *testing.T) {
 			if err := os.WriteFile(path, before, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			st.running, st.adopted = true, true
+			st.running = true
 			request := settingsRequest(t, e)
 			request.Settings.WorkingSetLimitMiB = &limit
 			preview := previewSettings(t, e, request)
@@ -70,17 +70,16 @@ func TestWorkingSetLimitRefusedApplyHasNoEffects(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !bytes.Equal(before, after) || !st.running || !st.adopted || st.plat.Runtime.WorkingSetLimitMiB != nil {
+			if !bytes.Equal(before, after) || !st.running || st.plat.Runtime.WorkingSetLimitMiB != nil {
 				t.Fatal("refused apply changed disk or engine state")
 			}
-			st.running, st.adopted = false, false
+			st.running = false
 		})
 	}
-	test("below minimum", false, "llamacpp", 255)
-	test("above maximum", false, "llamacpp", 1048577)
-	test("zero is not absence", false, "llamacpp", 0)
-	test("other engine family", false, "ollama", 256)
-	test("command mode", true, "llamacpp", 256)
+	test("below minimum", "llamacpp", 255)
+	test("above maximum", "llamacpp", 1048577)
+	test("zero is not absence", "llamacpp", 0)
+	test("other engine family", "other-family", 256)
 }
 
 func TestWorkingSetLimitApplyPersistsAndRestartsOwnedProcess(t *testing.T) {
@@ -250,9 +249,12 @@ func graftPlatform(t *testing.T, e *Executor, platform Platform) {
 	state.modelsDir = expandPath(platform.ModelsDir)
 }
 
-func settingsExecutor(t *testing.T, command bool) *Executor {
+// settingsExecutor builds a process-mode llama.cpp-family fake. Its managed
+// controls bind to environment variables, or to command-line flags when flags
+// is set.
+func settingsExecutor(t *testing.T, flags bool) *Executor {
 	t.Helper()
-	m := testEngineManifest(fakeEngineBin)
+	m := llamaTestEngineManifest(fakeEngineBin)
 	key := runtime.GOOS + "/" + runtime.GOARCH
 	p := m.Platforms[key]
 	port, err := freePort()
@@ -261,12 +263,10 @@ func settingsExecutor(t *testing.T, command bool) *Executor {
 	}
 	p.Runtime.Port = port
 	p.Runtime.Args = []string{"serve"}
-	p.Runtime.EditableLaunch = &EditableLaunch{FixedArgs: []string{"serve"}, Controls: []LaunchControl{{Value: "{server.host}:{server.port}", Env: []string{"OLLAMA_HOST"}}, {Value: "{cors.origins}", Env: []string{"OLLAMA_ORIGINS"}}}}
-	if command {
-		p.Runtime.Mode = "command"
-		p.Runtime.CLI = fakeEngineBin
-		p.Runtime.Start = [][]string{{"{cli}", "server", "start", "--port", "{port}", "--bind", "{host}"}}
-		p.Runtime.EditableLaunch = &EditableLaunch{FixedArgs: []string{"server", "start"}, Controls: []LaunchControl{{Value: "{server.port}", Flags: []string{"--port", "-p"}}, {Value: "{server.host}", Flags: []string{"--bind"}, Env: []string{"LMS_SERVER_HOST"}}, {Value: "{cors.enabled}", Implicit: implicitLaunchValue("true"), Flags: []string{"--cors"}}}}
+	p.Runtime.EditableLaunch = &EditableLaunch{FixedArgs: []string{"serve"}, Controls: []LaunchControl{{Value: "{server.host}:{server.port}", Env: []string{"FAKE_ADDR"}}, {Value: "{cors.origins}", Env: []string{"BROWSER_ORIGINS"}}}}
+	if flags {
+		p.Runtime.Args = []string{"server", "start", "--port", "{port}", "--bind", "{host}"}
+		p.Runtime.EditableLaunch = &EditableLaunch{FixedArgs: []string{"server", "start"}, Controls: []LaunchControl{{Value: "{server.port}", Flags: []string{"--port", "-p"}}, {Value: "{server.host}", Flags: []string{"--bind"}, Env: []string{"SERVER_HOST"}}, {Value: "{cors.enabled}", Implicit: implicitLaunchValue("true"), Flags: []string{"--cors"}}}}
 	}
 	m.Platforms[key] = p
 	e := newTestExecutor(t, m)
@@ -296,7 +296,7 @@ func TestServingOverridesRejectInvalidDeclarations(t *testing.T) {
 	test := func(name, field string, mutate func(*engines.ServingConfig)) {
 		t.Run(name, func(t *testing.T) {
 			reg := NewRegistry()
-			base, err := json.Marshal(testEngineManifest(fakeEngineBin))
+			base, err := json.Marshal(llamaTestEngineManifest(fakeEngineBin))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -435,8 +435,6 @@ func TestSettingsServingPreviewApplyAndUnrelatedEdit(t *testing.T) {
 func TestSettingsServingDuplicateRejectedBeforeEffects(t *testing.T) {
 	e := settingsExecutor(t, true)
 	st := settingsState(t, e)
-	stopMarker := filepath.Join(t.TempDir(), "stop-marker")
-	st.plat.Runtime.Stop = &StopSpec{Cmd: []string{fakeEngineBin, "touch", stopMarker}}
 	var probes atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/" {
@@ -463,8 +461,8 @@ func TestSettingsServingDuplicateRejectedBeforeEffects(t *testing.T) {
 	if _, err := e.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: p.Settings}, func() error { t.Error("invalid serving rebound proxy"); return nil }); err == nil {
 		t.Error("invalid serving applied")
 	}
-	if _, err := os.Stat(stopMarker); !os.IsNotExist(err) {
-		t.Fatal("invalid declaration invoked stop")
+	if !st.running || !st.adopted {
+		t.Fatal("invalid declaration stopped the engine")
 	}
 	if probes.Load() != 0 {
 		t.Fatal("invalid declaration probed engine")
@@ -490,15 +488,13 @@ func TestSettingsServingChangeRequiresRestart(t *testing.T) {
 	}
 }
 
-// eachEngineMode runs test against both Runtime.Mode lifecycles: "process",
-// where this service spawns the engine and its managed controls bind to
-// environment variables, and "command", where a control CLI brings the engine
-// up and the same controls bind to flags. The launch settings path must behave
-// identically either way, so every mode-independent test here runs twice.
+// eachEngineMode runs test against both control bindings: environment
+// variables and command-line flags. The launch settings path must behave
+// identically either way, so every binding-independent test here runs twice.
 func eachEngineMode(t *testing.T, test func(*testing.T, *Executor)) {
 	t.Helper()
-	t.Run("process mode", func(t *testing.T) { test(t, settingsExecutor(t, false)) })
-	t.Run("command mode", func(t *testing.T) { test(t, settingsExecutor(t, true)) })
+	t.Run("environment controls", func(t *testing.T) { test(t, settingsExecutor(t, false)) })
+	t.Run("flag controls", func(t *testing.T) { test(t, settingsExecutor(t, true)) })
 }
 
 func previewSettings(t *testing.T, e *Executor, request settings.Request) settings.Preview {
@@ -599,7 +595,7 @@ func TestSettingsPreviewChecksOnlyDeclaredControls(t *testing.T) {
 			}
 		} else {
 			p := settingsRequest(t, e)
-			p.Settings.LaunchText = "OLLAMA_HOST=0.0.0.0:12345"
+			p.Settings.LaunchText = "FAKE_ADDR=0.0.0.0:12345"
 			if result := previewSettings(t, e, p); result.Errors["launchText"] == "" {
 				t.Fatal("accepted invalid managed host")
 			}
@@ -903,7 +899,7 @@ func TestSettingsCORSOriginsValidationAndNormalization(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			e := settingsExecutor(t, false)
 			request := settingsRequest(t, e)
-			request.Settings.LaunchText = `OLLAMA_ORIGINS="` + origins + `" ` + request.Settings.LaunchText
+			request.Settings.LaunchText = `BROWSER_ORIGINS="` + origins + `" ` + request.Settings.LaunchText
 			result := previewSettings(t, e, request)
 			if wantError != "" {
 				if !strings.Contains(result.Errors["launchText"], wantError) {
@@ -917,7 +913,7 @@ func TestSettingsCORSOriginsValidationAndNormalization(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if value, ok := env["OLLAMA_ORIGINS"]; !ok || value != origins {
+				if value, ok := env["BROWSER_ORIGINS"]; !ok || value != origins {
 					t.Fatalf("origins = %q (present %v), want %q", value, ok, origins)
 				}
 			}
@@ -976,8 +972,8 @@ func TestSettingsCORSIsOptionalAndIndependentOfEngine(t *testing.T) {
 func TestSettingsPassesUnknownEnvironmentNamesAndValues(t *testing.T) {
 	eachEngineMode(t, func(t *testing.T, e *Executor) {
 		request := settingsRequest(t, e)
-		want := []string{"FUTURE_ENGINE_SETTING=unknown-value", "OLLAMA_CONTEXT_LENGTH=not-a-number",
-			"OLLAMA_HOSTNAME=example.test", "PATH=/custom", "LD_LIBRARY_PATH=/custom/lib"}
+		want := []string{"FUTURE_ENGINE_SETTING=unknown-value", "LLAMA_CONTEXT_LENGTH=not-a-number",
+			"LLAMA_HOSTNAME=example.test", "PATH=/custom", "LD_LIBRARY_PATH=/custom/lib"}
 		text, err := formatLaunchText(want)
 		if err != nil {
 			t.Fatal(err)
@@ -997,9 +993,9 @@ func TestSettingsPassesUnknownEnvironmentNamesAndValues(t *testing.T) {
 func manifestSettingsRequest(t *testing.T, platform string) (*Executor, settings.Request, []string) {
 	t.Helper()
 	reg := loadWithOverrides(t, t.TempDir())
-	manifest, ok := reg.Get("ollama")
+	manifest, ok := reg.Get(engines.NameLlamaCPP)
 	if !ok {
-		t.Fatal("Ollama manifest missing")
+		t.Fatal("llama.cpp manifest missing")
 	}
 	config, ok := manifest.Platforms[platform]
 	if !ok {
@@ -1060,7 +1056,7 @@ func TestSettingsSafeEditPreservesManifestEnvironment(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			request.Settings.LaunchText = "OLLAMA_NUM_PARALLEL=3 " + request.Settings.LaunchText
+			request.Settings.LaunchText = "LLAMA_NUM_PARALLEL=3 " + request.Settings.LaunchText
 			preview := previewSettings(t, e, request)
 			if len(preview.Errors) != 0 {
 				t.Fatalf("safe edit rejected: %+v", preview)
@@ -1078,7 +1074,7 @@ func TestSettingsSafeEditPreservesManifestEnvironment(t *testing.T) {
 			state := settingsState(t, e)
 			state.installDir = "/updated-install"
 			launch, err := launchForState(state, request.Settings.ServerPort)
-			if err != nil || launch.Env["LD_LIBRARY_PATH"] != "/updated-install/lib/ollama" {
+			if err != nil || launch.Env["LD_LIBRARY_PATH"] != "/updated-install" {
 				t.Fatalf("default environment stopped following the manifest: %v, %v", launch.Env, err)
 			}
 		})
@@ -1169,65 +1165,12 @@ func TestSettingsSwapsLiveServerAndProxyPorts(t *testing.T) {
 	}
 }
 
-func TestSettingsCommandLaunchPreservesLiteralsAndCleansFailedStart(t *testing.T) {
-	e := settingsExecutor(t, true)
-	st := settingsState(t, e)
-	capture := filepath.Join(t.TempDir(), "argv.json")
-	stopped := filepath.Join(t.TempDir(), "stopped")
-	rt := &st.plat.Runtime
-	rt.Start = [][]string{{fakeEngineBin, "captureargs", capture, "--port", "{port}", "--bind", "{host}"}}
-	rt.EditableLaunch.FixedArgs = []string{"captureargs", capture}
-	rt.Ready = nil
-	rt.Health = nil
-	rt.Stop = &StopSpec{Cmd: []string{fakeEngineBin, "touch", stopped}}
-	p := settingsRequest(t, e)
-	p.Settings.LaunchText += ` "{port}" "$HOME" "two words" ""`
-	if _, err := e.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: p.Settings}, func() error { return nil }); err != nil {
-		t.Fatal(err)
-	}
-	if err := e.Start(context.Background(), "fake"); err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(capture)
-	var args []string
-	if err != nil || json.Unmarshal(data, &args) != nil || len(args) < 4 || !reflect.DeepEqual(args[len(args)-4:], []string{"{port}", "$HOME", "two words", ""}) {
-		t.Fatalf("command mode expanded literal options: %s %v", data, err)
-	}
-	if err := e.Stop("fake"); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Remove(stopped); err != nil {
-		t.Fatal(err)
-	}
-	p = settingsRequest(t, e)
-	p.Settings.LaunchText += " --fail-launch private-value"
-	if _, err := e.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: p.Settings}, func() error { return nil }); err != nil {
-		t.Fatal(err)
-	}
-	err = e.Start(context.Background(), "fake")
-	if err == nil || !strings.Contains(err.Error(), "invalid launch") || strings.Contains(err.Error(), "private-value") {
-		t.Fatalf("failed command output was not classified safely: %v", err)
-	}
-	if _, err := os.Stat(stopped); err != nil {
-		t.Fatal("failed first command did not run official cleanup")
-	}
-}
-
 func TestSettingsEnvironmentReachesEngineAndCanBeEditedAndRemoved(t *testing.T) {
-	for _, command := range []bool{false, true} {
-		t.Run(fmt.Sprint(command), func(t *testing.T) {
-			e := settingsExecutor(t, command)
-			st := settingsState(t, e)
-			if command {
-				capture := filepath.Join(t.TempDir(), "args.json")
-				rt := &st.plat.Runtime
-				rt.Start = [][]string{{fakeEngineBin, "captureargs", capture, "--port", "{port}", "--bind", "{host}"}}
-				rt.EditableLaunch.FixedArgs = []string{"captureargs", capture}
-				rt.Ready, rt.Health = nil, nil
-				rt.Stop = &StopSpec{Cmd: []string{fakeEngineBin, "touch", filepath.Join(t.TempDir(), "stopped")}}
-			}
+	for _, flags := range []bool{false, true} {
+		t.Run(fmt.Sprint(flags), func(t *testing.T) {
+			e := settingsExecutor(t, flags)
 			captureEnv := filepath.Join(t.TempDir(), "env.json")
-			prefix, err := formatLaunchText([]string{"PAIR_TEST_ENV_FILE=" + captureEnv, "OLLAMA_ORIGINS=http://localhost", `PAIR_TEST_LITERAL=$HOME {port} C:\new\tools`, "PAIR_TEST_EMPTY="})
+			prefix, err := formatLaunchText([]string{"PAIR_TEST_ENV_FILE=" + captureEnv, `PAIR_TEST_LITERAL=$HOME {port} C:\new\tools`, "PAIR_TEST_EMPTY="})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1257,18 +1200,18 @@ func TestSettingsEnvironmentReachesEngineAndCanBeEditedAndRemoved(t *testing.T) 
 				}
 				return env
 			}
-			if env := readEnv(); env["OLLAMA_ORIGINS"] != "http://localhost" || env["PAIR_TEST_LITERAL"] != `$HOME {port} C:\new\tools` || env["PAIR_TEST_EMPTY"] != "" {
+			if env := readEnv(); env["PAIR_TEST_LITERAL"] != `$HOME {port} C:\new\tools` || env["PAIR_TEST_EMPTY"] != "" {
 				t.Fatalf("environment not passed literally: %#v", env)
 			}
 			p = settingsRequest(t, e)
-			p.Settings.LaunchText = strings.Replace(p.Settings.LaunchText, `OLLAMA_ORIGINS="http://localhost"`, `OLLAMA_ORIGINS="http://example.test"`, 1)
-			if !configure().Running || readEnv()["OLLAMA_ORIGINS"] != "http://example.test" {
+			p.Settings.LaunchText = strings.Replace(p.Settings.LaunchText, `PAIR_TEST_EMPTY=""`, `PAIR_TEST_EMPTY="http://example.test"`, 1)
+			if !configure().Running || readEnv()["PAIR_TEST_EMPTY"] != "http://example.test" {
 				t.Fatal("environment-only edit did not restart with new value")
 			}
 			p = settingsRequest(t, e)
-			p.Settings.LaunchText = strings.Replace(p.Settings.LaunchText, `OLLAMA_ORIGINS="http://example.test" `, "", 1)
+			p.Settings.LaunchText = strings.Replace(p.Settings.LaunchText, `PAIR_TEST_EMPTY="http://example.test" `, "", 1)
 			configure()
-			if readEnv()["OLLAMA_ORIGINS"] != "" {
+			if readEnv()["PAIR_TEST_EMPTY"] != "" {
 				t.Fatal("removed environment variable survived")
 			}
 			override := readSettingsOverride(t, e)
@@ -1279,7 +1222,7 @@ func TestSettingsEnvironmentReachesEngineAndCanBeEditedAndRemoved(t *testing.T) 
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, exists := env["OLLAMA_ORIGINS"]; exists {
+			if _, exists := env["PAIR_TEST_EMPTY"]; exists {
 				t.Fatal("removed environment variable remains in override")
 			}
 			if env["PAIR_TEST_ENV_FILE"] != captureEnv || env["PAIR_TEST_LITERAL"] != `$HOME {port} C:\new\tools` {
@@ -1298,48 +1241,6 @@ func TestSettingsEnvironmentValidation(t *testing.T) {
 		if err != nil || len(result.Errors) == 0 {
 			t.Fatalf("invalid assignment accepted: %+v %v", result, err)
 		}
-	}
-}
-
-// A stop that fails has to leave the saved configuration alone. Persisting
-// first would put the new launch on disk while the live process kept the old
-// one, and the next start would adopt settings the user was told had failed.
-func TestSettingsFailedStopLeavesSavedConfigurationIntact(t *testing.T) {
-	e := settingsExecutor(t, true)
-	st := settingsState(t, e)
-	capture := filepath.Join(t.TempDir(), "argv.json")
-	rt := &st.plat.Runtime
-	rt.Start = [][]string{{fakeEngineBin, "captureargs", capture, "--port", "{port}", "--bind", "{host}"}}
-	rt.EditableLaunch.FixedArgs = []string{"captureargs", capture}
-	rt.Ready, rt.Health = nil, nil
-	rt.Stop = &StopSpec{Cmd: []string{fakeEngineBin, "failmark", filepath.Join(t.TempDir(), "stop-attempts")}}
-	if err := e.Start(context.Background(), "fake"); err != nil {
-		t.Fatal(err)
-	}
-	override := filepath.Join(e.overrideDir, "fake.json")
-	before, err := os.ReadFile(override)
-	if err != nil && !os.IsNotExist(err) {
-		t.Fatal(err)
-	}
-	request := settingsRequest(t, e)
-	request.Settings.LaunchText += " --parallel 7"
-	result, err := e.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: request.Settings}, func() error {
-		t.Error("rebound an engine that could not be stopped")
-		return nil
-	})
-	if err == nil {
-		t.Fatalf("failed stop reported success: %+v", result)
-	}
-	after, readErr := os.ReadFile(override)
-	if readErr != nil && !os.IsNotExist(readErr) {
-		t.Fatal(readErr)
-	}
-	if !bytes.Equal(before, after) {
-		t.Fatalf("stop failure still rewrote saved configuration: %q -> %q", before, after)
-	}
-	live := e.launchStateLocked("fake", st)
-	if strings.Contains(live.LaunchText, "--parallel 7") {
-		t.Fatalf("in-memory launch adopted the rejected change: %q", live.LaunchText)
 	}
 }
 

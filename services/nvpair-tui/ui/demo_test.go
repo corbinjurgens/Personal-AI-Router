@@ -26,8 +26,8 @@ func targets(n int) []demoTarget {
 	out := make([]demoTarget, 0, n)
 	for i := 0; i < n; i++ {
 		out = append(out, demoTarget{
-			backend: "ollama",
-			port:    11434,
+			backend: "llamacpp",
+			port:    8080,
 			model:   string(rune('a'+i%26)) + "-model",
 		})
 	}
@@ -287,8 +287,9 @@ func TestStartRefusesWhenNoProxyIsListening(t *testing.T) {
 func TestStartRefusesASecondConcurrentRun(t *testing.T) {
 	d := armedRunner(t, 2)
 	tracker := newProxyTracker()
-	tracker.engines[0].ready = true
-	tracker.engines[0].port = 11434
+	idx := tracker.indexForEngine("llamacpp")
+	tracker.engines[idx].ready = true
+	tracker.engines[idx].port = 8080
 
 	if _, err := d.start(tracker); err == nil {
 		t.Error("a second demo started while one was running")
@@ -341,7 +342,7 @@ func TestGeneratesMirrorsTheDispatcher(t *testing.T) {
 		{"nothing declared", dispatcherModel{}, true},
 		{"type wins over capabilities", dispatcherModel{
 			Type: "embeddings", Capabilities: []string{"chat"}}, false},
-		// Verbatim from a live LM Studio: a real chat model whose advertised
+		// Verbatim from a live engine: a real chat model whose advertised
 		// capabilities name neither chat nor completion. Checking capabilities
 		// ahead of the type would exclude the only usable model on the host, so
 		// the ordering above is load-bearing rather than arbitrary.
@@ -382,15 +383,15 @@ func TestProbeAsksTheDispatcherCorrectlyAndKeepsOnlyGenerativeModels(t *testing.
 	// only as a demo that always says no model is available — the failure mode
 	// least likely to be read as a bug in this code.
 	exe, argsFile := fakeDispatcher(t, `[
-		{"name":"llama3.2:latest","type":"llm"},
+		{"name":"llama3.2","type":"llm"},
 		{"name":"nomic-embed-text","type":"embeddings"},
 		{"name":"mystery-model"},
 		{"name":"","type":"llm"}
 	]`)
 
-	got := probeModels(context.Background(), exe, "ollama", 11434)
+	got := probeModels(context.Background(), exe, "llamacpp", 8080)
 
-	want := []string{"llama3.2:latest", "mystery-model"}
+	want := []string{"llama3.2", "mystery-model"}
 	if len(got) != len(want) {
 		t.Fatalf("got %d targets %+v, want %d", len(got), got, len(want))
 	}
@@ -398,8 +399,8 @@ func TestProbeAsksTheDispatcherCorrectlyAndKeepsOnlyGenerativeModels(t *testing.
 		if got[i].model != model {
 			t.Errorf("target %d is %q, want %q", i, got[i].model, model)
 		}
-		if got[i].backend != "ollama" || got[i].port != 11434 {
-			t.Errorf("target %d addressed %s:%d, want ollama:11434",
+		if got[i].backend != "llamacpp" || got[i].port != 8080 {
+			t.Errorf("target %d addressed %s:%d, want llamacpp:8080",
 				i, got[i].backend, got[i].port)
 		}
 	}
@@ -409,7 +410,7 @@ func TestProbeAsksTheDispatcherCorrectlyAndKeepsOnlyGenerativeModels(t *testing.
 		t.Fatal(err)
 	}
 	args := strings.Fields(string(raw))
-	for _, want := range []string{"--backend", "ollama", "--port", "11434", "--list-models"} {
+	for _, want := range []string{"--backend", "llamacpp", "--port", "8080", "--list-models"} {
 		if !slices.Contains(args, want) {
 			t.Errorf("dispatcher was not passed %q; got %v", want, args)
 		}
@@ -418,14 +419,14 @@ func TestProbeAsksTheDispatcherCorrectlyAndKeepsOnlyGenerativeModels(t *testing.
 
 func TestProbeTreatsAnUnreachableEngineAsNoTargets(t *testing.T) {
 	// An engine that is down is not a demo failure — it just is not a target.
-	if got := probeModels(context.Background(), "/nonexistent/dispatcher", "ollama", 1); got != nil {
+	if got := probeModels(context.Background(), "/nonexistent/dispatcher", "llamacpp", 1); got != nil {
 		t.Errorf("got %d targets from a missing dispatcher, want none", len(got))
 	}
 }
 
 func TestProbeIgnoresOutputThatIsNotAModelList(t *testing.T) {
 	exe, _ := fakeDispatcher(t, "Model query failed: connection refused")
-	if got := probeModels(context.Background(), exe, "ollama", 11434); got != nil {
+	if got := probeModels(context.Background(), exe, "llamacpp", 8080); got != nil {
 		t.Errorf("got %d targets from non-JSON output, want none", len(got))
 	}
 }
@@ -436,7 +437,7 @@ func TestProbeIgnoresOutputThatIsNotAModelList(t *testing.T) {
 func TestDemoChildrenReceiveNoProviderSecrets(t *testing.T) {
 	t.Run("model probe", func(t *testing.T) {
 		report := secretenvtest.Prepare(t)
-		if got := probeModels(context.Background(), os.Args[0], "ollama", 1); got != nil {
+		if got := probeModels(context.Background(), os.Args[0], "llamacpp", 1); got != nil {
 			t.Errorf("got %d targets from a sentinel child, want none", len(got))
 		}
 		secretenvtest.AssertRemoved(t, secretenvtest.Wait(t, report))
@@ -444,14 +445,14 @@ func TestDemoChildrenReceiveNoProviderSecrets(t *testing.T) {
 	t.Run("model probe that fails", func(t *testing.T) {
 		report := secretenvtest.Prepare(t)
 		t.Setenv(secretenvtest.ExitEnv, "1")
-		if got := probeModels(context.Background(), os.Args[0], "ollama", 1); got != nil {
+		if got := probeModels(context.Background(), os.Args[0], "llamacpp", 1); got != nil {
 			t.Errorf("got %d targets from a failing child, want none", len(got))
 		}
 		secretenvtest.AssertRemoved(t, secretenvtest.Wait(t, report))
 	})
 	t.Run("request", func(t *testing.T) {
 		report := secretenvtest.Prepare(t)
-		req := demoRequest{target: demoTarget{backend: "ollama", port: 1, model: "m"}}
+		req := demoRequest{target: demoTarget{backend: "llamacpp", port: 1, model: "m"}}
 		if msg := submitDemoRequest(context.Background(), os.Args[0], req, 7)(); msg != (demoSpawnedMsg{gen: 7}) {
 			t.Fatalf("submit returned %#v, want a spawned message", msg)
 		}

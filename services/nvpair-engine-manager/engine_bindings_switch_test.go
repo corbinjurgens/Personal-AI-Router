@@ -331,24 +331,6 @@ func TestEngineBindingsSwitchOwnedStopBudget(t *testing.T) {
 	test("forced signal still requires reaping evidence", 0)
 }
 
-func TestEngineBindingsSwitchCommandStopBudget(t *testing.T) {
-	ex, _ := switchFixture(t)
-	st, err := ex.state("source")
-	if err != nil {
-		t.Fatal(err)
-	}
-	rt := Runtime{Stop: &StopSpec{Cmd: []string{fakeEngineBin, "noserve"}, GraceS: 60}}
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-	started := time.Now()
-	if err := ex.runCommandStopContext(ctx, st, "source", rt, 0); err == nil {
-		t.Fatal("hung stop CLI succeeded")
-	}
-	if ctx.Err() == nil || time.Since(started) > time.Second {
-		t.Fatal("command stop reset its preparation budget")
-	}
-}
-
 func TestEngineBindingsSwitchReconcileStopBudget(t *testing.T) {
 	ex, p := automaticSwitchFixture(t)
 	p = prepareSwitch(t, ex, p)
@@ -419,10 +401,5 @@ func TestEngineBindingsSwitchFailedTargetCleanupBudget(t *testing.T) {
 	}
 	test("owned process retains cleanup evidence", func(rt *Runtime) {
 		rt.Args = []string{"noserve"}
-	})
-	test("stop CLI does not get another budget", func(rt *Runtime) {
-		rt.Mode = "command"
-		rt.Start = [][]string{{fakeEngineBin, "noserve"}}
-		rt.Stop = &StopSpec{Cmd: []string{fakeEngineBin, "noserve"}, GraceS: 60}
 	})
 }

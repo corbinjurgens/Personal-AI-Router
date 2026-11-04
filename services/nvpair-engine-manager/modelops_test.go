@@ -40,14 +40,6 @@ func TestBundledModelOperationsKeepTheirWire(t *testing.T) {
 	cases := []struct {
 		engine, op, action, params string
 	}{
-		{"ollama", "load", "run_model", `{"model":"m:1","stream":false}`},
-		{"ollama", "unload", "unload_model", `{"keep_alive":0,"model":"m:1"}`},
-		{"ollama", "delete", "delete_model", `{"name":"m:1"}`},
-		{"ollama", "pull", "pull_model", `{"name":"m:1"}`},
-		{"lmstudio", "load", "load_model", `{"model":"m:1"}`},
-		{"lmstudio", "unload", "unload_model", `{"model":"m:1"}`},
-		{"lmstudio", "delete", "delete_model", `{"model":"m:1"}`},
-		{"lmstudio", "pull", "pull_model", `{"model":"m:1"}`},
 		{"llamacpp", "load", "load_model", `{"model":"m:1"}`},
 		{"llamacpp", "unload", "unload_model", `{"model":"m:1"}`},
 		{"llamacpp", "delete", "delete_model", `{"model":"m:1"}`},
@@ -66,30 +58,20 @@ func TestBundledModelOperationsKeepTheirWire(t *testing.T) {
 	}
 }
 
-// Only Ollama's load waits longer than the ordinary budget, as before, and the
-// budget it binds is the former 10-minute load allowance.
+// The bundled engine uses the ordinary response budget for load.
 func TestBundledLoadBudgets(t *testing.T) {
 	ex := bundledTestExecutor(t)
-	want := map[string]time.Duration{"ollama": 10 * time.Minute, "lmstudio": 0, "llamacpp": 0}
+	want := map[string]time.Duration{"llamacpp": 0}
 	for engine, budget := range want {
 		if got := ex.loadResponseBudget(engine); got != budget {
 			t.Errorf("%s load budget = %s, want %s", engine, got, budget)
-		}
-	}
-	ollama, _ := ex.reg.Get("ollama")
-	if got := ollama.actionResponseBudget("run_model"); got != 10*time.Minute {
-		t.Errorf("ollama run_model budget = %s, want 10m, so engine:action keeps it too", got)
-	}
-	for _, action := range []string{"unload_model", "delete_model", "pull_model", "list_models"} {
-		if got := ollama.actionResponseBudget(action); got != 0 {
-			t.Errorf("ollama %s budget = %s, want the ordinary budget", action, got)
 		}
 	}
 }
 
 func TestModelOperationErrors(t *testing.T) {
 	ex := bundledTestExecutor(t)
-	if _, _, err := ex.modelOperationCall("ollama", "load", ""); err == nil || !strings.Contains(err.Error(), "model is required") {
+	if _, _, err := ex.modelOperationCall("llamacpp", "load", ""); err == nil || !strings.Contains(err.Error(), "model is required") {
 		t.Errorf("empty model error = %v", err)
 	}
 	if _, _, err := ex.modelOperationCall("nope", "load", "m"); err == nil || !strings.Contains(err.Error(), "unknown engine") {
@@ -226,19 +208,18 @@ func TestTypedModelOperationsAreDispatched(t *testing.T) {
 // A remote pull that names only a model gets its params from the pull binding.
 func TestPullWithoutParamsUsesThePullBinding(t *testing.T) {
 	bodies := make(chan string, 1)
-	srv := httptest.NewServer(fixtureRequestHandler(http.MethodPost, "/api/pull", func(w http.ResponseWriter, r *http.Request) {
+	srv := newLlamaPullServer(t, llamaPullBehavior{Start: func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		bodies <- string(body)
-		_, _ = w.Write([]byte(`{"status":"success"}` + "\n"))
-	}))
-	defer srv.Close()
-	ex := newHTTPPullTestExecutor(t, srv, Action{HTTP: &ActionHTTP{Method: "POST", Path: "/api/pull"}})
+		_, _ = w.Write([]byte(`{"success":true}`))
+	}})
+	ex := newHTTPPullTestExecutor(t, srv.Server, llamaPullAction())
 	m, _ := ex.reg.Get("fake")
-	m.Operations = map[string]OperationBinding{"pull": {Action: pullModelAction, ModelParam: "name"}}
+	m.Operations = map[string]OperationBinding{"pull": {Action: pullModelAction}}
 	if _, err := ex.PullModelStream(context.Background(), "fake", "tiny", nil); err != nil {
 		t.Fatal(err)
 	}
-	if got := <-bodies; got != `{"name":"tiny"}` {
-		t.Fatalf("pull body = %s, want the bound name param", got)
+	if got := <-bodies; got != `{"model":"tiny"}` {
+		t.Fatalf("pull body = %s, want the bound model param", got)
 	}
 }

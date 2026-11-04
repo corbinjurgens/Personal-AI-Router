@@ -58,6 +58,18 @@ func (w *recordingWriter) lines() [][]byte {
 // authoritative is what made these tests flake on "address already in use".
 func enableOnFreePort(t *testing.T, p *Proxy, engine string) int {
 	t.Helper()
+	return enableFacadeOnFreePort(t, p, engine, nil)
+}
+
+// enableDescriptorOnFreePort is enableOnFreePort for a descriptor engine, whose
+// facade is built from the descriptor the request carries.
+func enableDescriptorOnFreePort(t *testing.T, p *Proxy, d engines.Descriptor) int {
+	t.Helper()
+	return enableFacadeOnFreePort(t, p, d.Engine, &d)
+}
+
+func enableFacadeOnFreePort(t *testing.T, p *Proxy, engine string, descriptor *engines.Descriptor) int {
+	t.Helper()
 	var lastErr error
 	for attempt := 0; attempt < 8; attempt++ {
 		port := freeTCPPort(t)
@@ -65,6 +77,7 @@ func enableOnFreePort(t *testing.T, p *Proxy, engine string) int {
 			Engine:              engine,
 			Port:                port,
 			IgnorePersistedPort: true,
+			Descriptor:          descriptor,
 		})
 		if err == nil {
 			return port
@@ -78,7 +91,21 @@ func enableOnFreePort(t *testing.T, p *Proxy, engine string) int {
 	return 0
 }
 
-// twoFacadeProxy enables a facade for every engine on one host, each on its own
+// twoFacadeNames are the engines these tests host together: built-in llama.cpp
+// and the descriptor engine from customDescriptor. A descriptor engine is the
+// second facade because it is the only second engine every build has.
+func twoFacadeNames() []string {
+	return []string{engines.NameLlamaCPP, customDescriptor().Engine}
+}
+
+// enableTwoFacades enables both engines on ephemeral ports.
+func enableTwoFacades(t *testing.T, p *Proxy) {
+	t.Helper()
+	enableOnFreePort(t, p, engines.NameLlamaCPP)
+	enableDescriptorOnFreePort(t, p, customDescriptor())
+}
+
+// twoFacadeProxy enables a facade for both engines on one host, each on its own
 // ephemeral port so the test does not depend on a real engine's port being free.
 func twoFacadeProxy(t *testing.T) *Proxy {
 	t.Helper()
@@ -86,13 +113,11 @@ func twoFacadeProxy(t *testing.T) *Proxy {
 
 	p := newBoundProxy(NewCodec(rwNop{}))
 	p.serveCtx = t.Context()
-	for _, e := range engines.All() {
-		enableOnFreePort(t, p, e.Name)
-	}
+	enableTwoFacades(t, p)
 	t.Cleanup(func() { p.shutdown(t.Context()) })
 
-	if got := len(p.enabledFacades()); got != len(engines.All()) {
-		t.Fatalf("enabled %d facades, want %d", got, len(engines.All()))
+	if got, want := len(p.enabledFacades()), len(twoFacadeNames()); got != want {
+		t.Fatalf("enabled %d facades, want %d", got, want)
 	}
 	return p
 }
@@ -104,18 +129,18 @@ func TestTwoFacadesKeepSeparatePortsAndProfiles(t *testing.T) {
 	p := twoFacadeProxy(t)
 
 	ports := map[int]string{}
-	for _, e := range engines.All() {
-		f := p.facadeFor(e.Name)
+	for _, name := range twoFacadeNames() {
+		f := p.facadeFor(name)
 		if f == nil {
-			t.Fatalf("no facade enabled for %s", e.Name)
+			t.Fatalf("no facade enabled for %s", name)
 		}
-		if f.profile.Name != e.Name {
-			t.Errorf("facade for %s carries profile %q", e.Name, f.profile.Name)
+		if f.profile.Name != name {
+			t.Errorf("facade for %s carries profile %q", name, f.profile.Name)
 		}
 		if owner, clash := ports[f.port]; clash {
-			t.Errorf("facades for %s and %s both bound port %d", e.Name, owner, f.port)
+			t.Errorf("facades for %s and %s both bound port %d", name, owner, f.port)
 		}
-		ports[f.port] = e.Name
+		ports[f.port] = name
 	}
 }
 
@@ -125,24 +150,24 @@ func TestTwoFacadesKeepSeparatePortsAndProfiles(t *testing.T) {
 func TestReEnablingOneFacadeLeavesBothIntact(t *testing.T) {
 	p := twoFacadeProxy(t)
 
-	first := engines.All()[0]
-	before := p.facadeFor(first.Name)
+	first := engines.NameLlamaCPP
+	before := p.facadeFor(first)
 
 	result, err := p.enableFacade(enableFacadeParams{
-		Engine: first.Name,
+		Engine: first,
 		Port:   before.port,
 	})
 	if err != nil {
-		t.Fatalf("re-enable %s: %v", first.Name, err)
+		t.Fatalf("re-enable %s: %v", first, err)
 	}
 	if result.Port != before.port {
 		t.Errorf("re-enable reported port %d, want the bound %d", result.Port, before.port)
 	}
-	if p.facadeFor(first.Name) != before {
+	if p.facadeFor(first) != before {
 		t.Error("re-enable replaced the running facade")
 	}
-	if got := len(p.enabledFacades()); got != len(engines.All()) {
-		t.Errorf("after re-enable there are %d facades, want %d", got, len(engines.All()))
+	if got, want := len(p.enabledFacades()), len(twoFacadeNames()); got != want {
+		t.Errorf("after re-enable there are %d facades, want %d", got, want)
 	}
 }
 
@@ -152,17 +177,13 @@ func TestReEnablingOneFacadeLeavesBothIntact(t *testing.T) {
 func TestOneFacadeFailingToBindLeavesTheOthersServing(t *testing.T) {
 	redirectConfigDir(t)
 
-	all := engines.All()
-	if len(all) < 2 {
-		t.Skip("needs at least two engines")
-	}
-	surviving, failing := all[0], all[1]
+	surviving, failing := engines.NameLlamaCPP, customDescriptor()
 
 	p := newBoundProxy(NewCodec(rwNop{}))
 	p.serveCtx = t.Context()
 	t.Cleanup(func() { p.shutdown(t.Context()) })
 
-	enableOnFreePort(t, p, surviving.Name)
+	enableOnFreePort(t, p, surviving)
 
 	// Hold a port so the second facade cannot have it.
 	squatter, err := net.Listen("tcp", ":0")
@@ -173,20 +194,20 @@ func TestOneFacadeFailingToBindLeavesTheOthersServing(t *testing.T) {
 	taken := squatter.Addr().(*net.TCPAddr).Port
 
 	_, err = p.enableFacade(enableFacadeParams{
-		Engine: failing.Name, Port: taken, IgnorePersistedPort: true,
+		Engine: failing.Engine, Port: taken, IgnorePersistedPort: true, Descriptor: &failing,
 	})
 	if err == nil {
-		t.Fatalf("enabling %s on the occupied port %d succeeded", failing.Name, taken)
+		t.Fatalf("enabling %s on the occupied port %d succeeded", failing.Engine, taken)
 	}
 	if !stderrors.Is(err, errFacadeBindFailed) {
 		t.Errorf("bind failure was not tagged retryable: %v", err)
 	}
 
-	if p.facadeFor(failing.Name) != nil {
-		t.Errorf("%s facade was published despite failing to bind", failing.Name)
+	if p.facadeFor(failing.Engine) != nil {
+		t.Errorf("%s facade was published despite failing to bind", failing.Engine)
 	}
-	if p.facadeFor(surviving.Name) == nil {
-		t.Errorf("%s facade was taken down by %s's bind failure", surviving.Name, failing.Name)
+	if p.facadeFor(surviving) == nil {
+		t.Errorf("%s facade was taken down by %s's bind failure", surviving, failing.Engine)
 	}
 	if got := len(p.enabledFacades()); got != 1 {
 		t.Errorf("enabled facades = %d, want just the surviving one", got)
@@ -198,28 +219,25 @@ func TestOneFacadeFailingToBindLeavesTheOthersServing(t *testing.T) {
 func TestAddressedRequestReachesOnlyItsOwnFacade(t *testing.T) {
 	p := twoFacadeProxy(t)
 
-	all := engines.All()
-	first, second := all[0], all[1]
-
 	// Give each facade a distinct manual node, then confirm nodes/list on one
 	// engine never reports the other's.
-	for i, e := range []engines.Engine{first, second} {
+	for i, name := range twoFacadeNames() {
 		node := Node{
-			ID:        e.Name + "-node",
+			ID:        name + "-node",
 			Port:      9000 + i,
 			Addresses: []string{"127.0.0.1"},
 		}
-		p.facadeFor(e.Name).discovery.AddManual(node)
+		p.facadeFor(name).discovery.AddManual(node)
 	}
 
-	for _, e := range []engines.Engine{first, second} {
-		f := p.facadeFor(e.Name)
+	for _, name := range twoFacadeNames() {
+		f := p.facadeFor(name)
 		nodes := f.discovery.Nodes()
 		if len(nodes) != 1 {
-			t.Fatalf("%s facade sees %d nodes, want 1: %+v", e.Name, len(nodes), nodes)
+			t.Fatalf("%s facade sees %d nodes, want 1: %+v", name, len(nodes), nodes)
 		}
-		if want := e.Name + "-node"; nodes[0].ID != want {
-			t.Errorf("%s facade sees node %q, want %q", e.Name, nodes[0].ID, want)
+		if want := name + "-node"; nodes[0].ID != want {
+			t.Errorf("%s facade sees node %q, want %q", name, nodes[0].ID, want)
 		}
 	}
 
@@ -240,8 +258,7 @@ func TestAddressedRequestReachesOnlyItsOwnFacade(t *testing.T) {
 func TestFacadesShareSchedulerStateAndReservations(t *testing.T) {
 	p := twoFacadeProxy(t)
 
-	all := engines.All()
-	first, second := all[0], all[1]
+	first, second := twoFacadeNames()[0], twoFacadeNames()[1]
 
 	p.SetPrioritySnapshot(schedulerwire.Priority{
 		Generation: 1,
@@ -250,8 +267,8 @@ func TestFacadesShareSchedulerStateAndReservations(t *testing.T) {
 	})
 
 	// One dispatch through each facade. The second must see the first's claim.
-	_, firstRes := p.reserveCandidate(p.facadeFor(first.Name), reservationCandidates("x", "y"))
-	_, secondRes := p.reserveCandidate(p.facadeFor(second.Name), reservationCandidates("x", "y"))
+	_, firstRes := p.reserveCandidate(p.facadeFor(first), reservationCandidates("x", "y"))
+	_, secondRes := p.reserveCandidate(p.facadeFor(second), reservationCandidates("x", "y"))
 
 	if !firstRes.held || !secondRes.held {
 		t.Fatal("a facade failed to take a reservation from the shared snapshot")
@@ -265,7 +282,7 @@ func TestFacadesShareSchedulerStateAndReservations(t *testing.T) {
 	p.releaseReservation(firstRes)
 	if got := reservationCount(p, secondRes.nodeID); got != 1 {
 		t.Errorf("%s's reservation on %q = %d after the other facade released, want 1",
-			second.Name, secondRes.nodeID, got)
+			second, secondRes.nodeID, got)
 	}
 }
 
@@ -280,11 +297,10 @@ func TestFacadesShareSchedulerStateAndReservations(t *testing.T) {
 func TestPanicHandlingOneEngineLeavesTheOtherServing(t *testing.T) {
 	p := twoFacadeProxy(t)
 
-	all := engines.All()
-	victim, bystander := all[0], all[1]
+	victim, bystander := twoFacadeNames()[0], twoFacadeNames()[1]
 
 	// Take the victim facade's discovery out from under its handler.
-	p.facadeFor(victim.Name).discovery = nil
+	p.facadeFor(victim).discovery = nil
 
 	params, err := json.Marshal(map[string]string{"id": "some-node"})
 	if err != nil {
@@ -292,7 +308,7 @@ func TestPanicHandlingOneEngineLeavesTheOtherServing(t *testing.T) {
 	}
 	id := json.RawMessage(`7`)
 	msg := &Message{
-		Method: engines.AddressMethod(victim.Name, "node/select"),
+		Method: engines.AddressMethod(victim, "node/select"),
 		Params: params,
 		ID:     &id,
 	}
@@ -302,17 +318,17 @@ func TestPanicHandlingOneEngineLeavesTheOtherServing(t *testing.T) {
 	p.handleMessage(msg)
 
 	// The bystander facade is untouched and still answers.
-	if f := p.facadeFor(bystander.Name); f == nil {
-		t.Fatalf("%s facade disappeared after %s panicked", bystander.Name, victim.Name)
+	if f := p.facadeFor(bystander); f == nil {
+		t.Fatalf("%s facade disappeared after %s panicked", bystander, victim)
 	}
 	bystanderMsg := &Message{
-		Method: engines.AddressMethod(bystander.Name, "nodes/list"),
+		Method: engines.AddressMethod(bystander, "nodes/list"),
 		ID:     &id,
 	}
 	p.handleMessage(bystanderMsg)
 
-	if got := len(p.enabledFacades()); got != len(all) {
-		t.Errorf("enabled facades = %d after a panic, want %d", got, len(all))
+	if got, want := len(p.enabledFacades()), len(twoFacadeNames()); got != want {
+		t.Errorf("enabled facades = %d after a panic, want %d", got, want)
 	}
 }
 
@@ -326,17 +342,13 @@ func TestPanicHandlingOneEngineLeavesTheOtherServing(t *testing.T) {
 func TestPanicDuringEnableWithdrawsOnlyThatFacade(t *testing.T) {
 	redirectConfigDir(t)
 
-	all := engines.All()
-	if len(all) < 2 {
-		t.Skip("needs at least two engines")
-	}
-	surviving, panicking := all[0], all[1]
+	surviving, panicking := engines.NameLlamaCPP, customDescriptor()
 
 	p := newBoundProxy(NewCodec(rwNop{}))
 	p.serveCtx = t.Context()
 	t.Cleanup(func() { p.shutdown(t.Context()) })
 
-	enableOnFreePort(t, p, surviving.Name)
+	enableOnFreePort(t, p, surviving)
 
 	// Panic inside bring-up, after the facade is published and its listener is
 	// bound: nil the host codec so the ready notification dereferences it.
@@ -351,15 +363,15 @@ func TestPanicDuringEnableWithdrawsOnlyThatFacade(t *testing.T) {
 			p.codec = codec
 		}()
 		_, _ = p.enableFacade(enableFacadeParams{
-			Engine: panicking.Name, Port: port, IgnorePersistedPort: true,
+			Engine: panicking.Engine, Port: port, IgnorePersistedPort: true, Descriptor: &panicking,
 		})
 	}()
 
-	if f := p.facadeFor(panicking.Name); f != nil {
-		t.Errorf("%s facade survived a panic during its bring-up", panicking.Name)
+	if f := p.facadeFor(panicking.Engine); f != nil {
+		t.Errorf("%s facade survived a panic during its bring-up", panicking.Engine)
 	}
-	if p.facadeFor(surviving.Name) == nil {
-		t.Errorf("%s facade was taken down by %s's panic", surviving.Name, panicking.Name)
+	if p.facadeFor(surviving) == nil {
+		t.Errorf("%s facade was taken down by %s's panic", surviving, panicking.Engine)
 	}
 
 	// The port is bindable again, which is the part the deferred rollback is
@@ -372,68 +384,15 @@ func TestPanicDuringEnableWithdrawsOnlyThatFacade(t *testing.T) {
 	// meantime that is an unrelated race, and skipping says so instead of
 	// blaming the rollback.
 	if _, err := p.enableFacade(enableFacadeParams{
-		Engine: panicking.Name, Port: port, IgnorePersistedPort: true,
+		Engine: panicking.Engine, Port: port, IgnorePersistedPort: true, Descriptor: &panicking,
 	}); err != nil {
 		if stderrors.Is(err, errFacadeBindFailed) {
 			t.Skipf("port %d was taken by something else between the rollback and the re-enable: %v", port, err)
 		}
 		t.Fatalf("re-enable after the rollback failed for a non-bind reason: %v", err)
 	}
-	if p.facadeFor(panicking.Name) == nil {
-		t.Errorf("%s did not come back up on the released port %d", panicking.Name, port)
-	}
-}
-
-// Alias validation runs on the surface the broker actually uses. The addresses
-// arrive in facade/enable now rather than on argv, and the alias listener is a
-// plaintext one, so a weakened check here would put a LAN plaintext listener in
-// front of the router.
-func TestEnableFacadeRejectsUnsafeAliasAddresses(t *testing.T) {
-	redirectConfigDir(t)
-
-	var aliasEngine, plainEngine engines.Engine
-	for _, e := range engines.All() {
-		p, ok := profileFor(e.Name)
-		if !ok {
-			t.Fatalf("no profile for %s", e.Name)
-		}
-		if p.SupportsHostAlias {
-			aliasEngine = e
-		} else {
-			plainEngine = e
-		}
-	}
-	if aliasEngine.Name == "" || plainEngine.Name == "" {
-		t.Skip("needs one alias-capable and one alias-incapable engine")
-	}
-
-	for _, tc := range []struct {
-		name   string
-		engine string
-		alias  string
-	}{
-		{"a LAN address", aliasEngine.Name, "192.168.1.20:11433"},
-		{"the wildcard address", aliasEngine.Name, "0.0.0.0:11433"},
-		{"an engine with no inherited host variable", plainEngine.Name, "127.0.0.1:11433"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			p := newBoundProxy(NewCodec(rwNop{}))
-			p.serveCtx = t.Context()
-			t.Cleanup(func() { p.shutdown(t.Context()) })
-
-			if _, err := p.enableFacade(enableFacadeParams{
-				Engine:              tc.engine,
-				Port:                freeTCPPort(t),
-				AliasAddresses:      []string{tc.alias},
-				IgnorePersistedPort: true,
-			}); err == nil {
-				t.Fatalf("enable accepted alias %q for %s", tc.alias, tc.engine)
-			}
-			// Rejected outright, not enabled-then-partially-configured.
-			if f := p.facadeFor(tc.engine); f != nil {
-				t.Errorf("a rejected alias still left a %s facade enabled", tc.engine)
-			}
-		})
+	if p.facadeFor(panicking.Engine) == nil {
+		t.Errorf("%s did not come back up on the released port %d", panicking.Engine, port)
 	}
 }
 
@@ -448,9 +407,7 @@ func TestBothFacadesAddressTheirNotifications(t *testing.T) {
 	p.serveCtx = t.Context()
 	t.Cleanup(func() { p.shutdown(t.Context()) })
 
-	for _, e := range engines.All() {
-		enableOnFreePort(t, p, e.Name)
-	}
+	enableTwoFacades(t, p)
 
 	readyFor := map[string]bool{}
 	for _, line := range recorded.lines() {
@@ -471,9 +428,9 @@ func TestBothFacadesAddressTheirNotifications(t *testing.T) {
 		readyFor[engine] = true
 	}
 
-	for _, e := range engines.All() {
-		if !readyFor[e.Name] {
-			t.Errorf("no addressed ready notification for %s; saw %v", e.Name, readyFor)
+	for _, name := range twoFacadeNames() {
+		if !readyFor[name] {
+			t.Errorf("no addressed ready notification for %s; saw %v", name, readyFor)
 		}
 	}
 }

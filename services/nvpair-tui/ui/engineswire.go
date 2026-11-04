@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sync"
 
 	"nvpair-shared/engines"
 	"nvpair-shared/modeldownload"
@@ -16,79 +15,6 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 )
-
-// Credential operations have no peer equivalent. Reject the target before a
-// request (including a queued command) can reach the RPC client.
-func setCredentialRequest(node, engine, credential string) (string, map[string]any, error) {
-	if node != "" {
-		return "", nil, errors.New("credentials can only be edited on this machine")
-	}
-	return engines.SetCredentialMethod, map[string]any{"engine": engine, "credential": credential}, nil
-}
-
-func credentialStateRequest(node, engine string) (string, map[string]any, error) {
-	if node != "" {
-		return "", nil, errors.New("credential state is only available on this machine")
-	}
-	return engines.CredentialStateMethod, map[string]any{"engine": engine}, nil
-}
-
-// credentialRequest owns a single cancellable call. A queued command captures
-// this holder, never the editable key. Once started, only CallGeneration's
-// in-flight parameters retain it; cancellation ends that call's wait. Dropping
-// references is not secure memory erasure.
-type credentialRequest struct {
-	mu     sync.Mutex
-	params map[string]any
-	ctx    context.Context
-	cancel context.CancelFunc
-}
-
-type credentialMsg struct {
-	request *credentialRequest
-	state   engines.CredentialState
-	failed  bool
-}
-
-func (r *credentialRequest) drop() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.params = nil
-	if r.cancel != nil {
-		r.cancel()
-		r.cancel = nil
-	}
-}
-
-func (r *credentialRequest) cmd(client *rpc.Client, method string) tea.Cmd {
-	generation := clientGeneration(client)
-	return func() tea.Msg {
-		defer r.drop()
-		out := credentialMsg{request: r, failed: true}
-		r.mu.Lock()
-		params := r.params
-		r.params = nil
-		r.mu.Unlock()
-		if r.ctx.Err() != nil || params == nil || client == nil {
-			return out
-		}
-		msg, err := client.CallGeneration(r.ctx, generation, method, params)
-		params = nil
-		if err != nil || r.ctx.Err() != nil || msg == nil || !client.IsCurrent(generation) {
-			return out
-		}
-		// Missing or malformed state is unavailable, never an absent key.
-		var state struct {
-			Supported  *bool `json:"supported"`
-			Configured *bool `json:"configured"`
-		}
-		if json.Unmarshal(msg.Result, &state) == nil && state.Supported != nil && state.Configured != nil {
-			out.state = engines.CredentialState{Supported: *state.Supported, Configured: *state.Configured}
-			out.failed = false
-		}
-		return out
-	}
-}
 
 // engineStatus mirrors nvpair-engine-manager's EngineStatus snapshot, the
 // element of engine:get-installed and the engine:state-changed payload.
@@ -210,7 +136,7 @@ var modelActions = map[string]modelAction{
 	"unload": {op: engines.OperationUnload, local: "engine:unload-model", remote: "engine:remote-unload-model", what: "eject"},
 	"delete": {op: engines.OperationDelete, local: "engine:delete-model", remote: "engine:remote-delete-model", what: "delete"},
 	// A local pull has no typed method yet: it is engine:action pull_model,
-	// spelled by pullParams.
+	// spelled by localModelRequest.
 	"pull": {op: engines.OperationPull, remote: "engine:remote-pull-model", what: "download"},
 }
 
@@ -273,11 +199,8 @@ func (ds engineDescriptors) unsupported(engine string, act modelAction) error {
 }
 
 // downloadExamples show what a download name looks like for each engine family.
-// The families spell them very differently: an Ollama tag, a Hugging Face repo,
-// and a repo with its quantization after a colon.
+// llama.cpp names a repository with its quantization after a colon.
 var downloadExamples = map[string]string{
-	engines.NameOllama:   "llama3.2",
-	engines.NameLMStudio: "lmstudio-community/Qwen3-8B-GGUF",
 	engines.NameLlamaCPP: "ggml-org/gemma-3-1b-it-GGUF:Q4_K_M",
 }
 
@@ -290,27 +213,12 @@ func downloadPrompt(family, label string) string {
 	return "model name for " + label
 }
 
-// pullParams spells a local pull_model for an engine family.
-//
-// Ollama's pull takes "name" and LM Studio's takes "model", so both are sent
-// there. Every other family gets "model" alone, engine-manager's conventional
-// parameter: llama.cpp's pull would pass a second key to the engine as a
-// parameter it does not take.
-func pullParams(family, model string) map[string]any {
-	switch family {
-	case engines.NameOllama, engines.NameLMStudio:
-		return map[string]any{"name": model, "model": model}
-	default:
-		return map[string]any{"model": model}
-	}
-}
-
 // localModelRequest is the method and params of a model operation on this
 // machine.
-func localModelRequest(engine, family string, act modelAction, model string) (string, map[string]any) {
+func localModelRequest(engine string, act modelAction, model string) (string, map[string]any) {
 	if act.local == "" {
 		return "engine:action", map[string]any{
-			"engine": engine, "action": "pull_model", "params": pullParams(family, model),
+			"engine": engine, "action": "pull_model", "params": map[string]any{"model": model},
 		}
 	}
 	return act.local, map[string]any{"engine": engine, "model": model}
@@ -357,14 +265,14 @@ func engineCmd(client *rpc.Client, node, engine, method, op, what string) tea.Cm
 // this replaced, which left the operator with no acknowledgement that the
 // download had started at all, and nothing to distinguish it from a keystroke
 // that missed.
-func modelCmd(client *rpc.Client, node, engine, family string, act modelAction, model string) tea.Cmd {
+func modelCmd(client *rpc.Client, node, engine string, act modelAction, model string) tea.Cmd {
 	what := act.what + " " + model
 	// The methods take the operation in the method name, so the engine's own
 	// action vocabulary stays with the engine-manager that runs it.
 	method := act.remote
 	params := map[string]any{"node": node, "engine": engine, "model": model}
 	if node == "" {
-		method, params = localModelRequest(engine, family, act, model)
+		method, params = localModelRequest(engine, act, model)
 	}
 	return call(client, method, params, func(_ *rpc.Message, err error) tea.Msg {
 		return classifyOpResult(what, engine, act.op, err)
@@ -379,13 +287,12 @@ func modelCmd(client *rpc.Client, node, engine, family string, act modelAction, 
 // feed. Reporting a failure is actively misleading: the operator sees "load
 // failed" at the same moment the model finishes loading.
 //
-// Ollama's load is `run_model` with streaming off, which does not answer until
-// the model is resident and has produced a response, so a large model on cold
-// storage exceeds the reply deadline routinely. Install downloads an engine.
+// A load does not answer until the model is resident, so a large model on cold
+// storage can exceed the reply deadline. Install downloads an engine.
 //
 // Start and restart belong here too. The engine manager answers only once the
-// engine passes its readiness probe, and the manifests allow that probe six
-// hundred seconds for Ollama and sixty for LM Studio — the desktop app gives
+// engine passes its readiness probe, and the manifests allow that probe
+// several minutes — the desktop app gives
 // the same calls a fourteen-minute envelope for exactly this reason. Held to
 // the thirty-five-second reply deadline, a cold start behind a slow probe
 // reported failure while the engine went on to come up.

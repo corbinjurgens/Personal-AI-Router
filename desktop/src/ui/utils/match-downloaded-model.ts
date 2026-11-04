@@ -9,40 +9,17 @@ import type { ModelEntry } from '@/ui/types/model-hub'
  * Returns true when a hub search result represents a model that is already
  * downloaded locally (per the installed `ModelItem[]` for this engine).
  *
- * Matching is engine-specific because the hub's id format and the engine's
- * stored model id format don't line up the same way:
+ * Matching is engine-specific because an engine's hub id format and stored
+ * model id format may not line up:
  *
- * - Ollama lib hub:  `ModelItem.name` is `<base>:<tag>`; the hub id is the
- *                    bare `<base>`. Match on exact `<base>` or `<base>:`
- *                    prefix so every quantization collapses to "downloaded".
- * - LM Studio:       the download is keyed by `pullKey = <owner>/<repo>` (or
- *                    `<owner>/<repo>/<file>`); the hub id is `<owner>/<repo>`.
  * - llama.cpp:       router inventory and catalog use the same complete
  *                    `<owner>/<repo>:<quant>` id, so only exact ids match.
  */
 type DownloadedMatcher = (hubEntry: ModelEntry, downloaded: ModelItem) => boolean
 
-const matchOllama: DownloadedMatcher = (hubEntry, d) => {
-    const hubId = hubEntry.id
-    if (d.name === hubId) return true
-    return d.name.startsWith(`${hubId}:`)
-}
-
-const matchHfPullKeyOrName: DownloadedMatcher = (hubEntry, d) => {
-    const hubId = hubEntry.id
-    const pullKey = d.pullKey ?? ''
-    if (pullKey === hubId) return true
-    if (pullKey.startsWith(`${hubId}/`)) return true
-    if (d.name === hubId) return true
-    if (d.name.startsWith(`${hubId}/`)) return true
-    return false
-}
-
 const matchExactName: DownloadedMatcher = (hubEntry, downloaded) => downloaded.name === hubEntry.id
 
 const MATCHERS: Record<BuiltinEngineType, DownloadedMatcher> = {
-    ollama: matchOllama,
-    'lm-studio': matchHfPullKeyOrName,
     'llama-cpp': matchExactName
 }
 

@@ -19,14 +19,14 @@ function serviceError(partial: Partial<ServiceError> & { id: string }): ServiceE
 describe('errorDismissalKey', () => {
     it('is stable when the same snapshot is re-delivered', () => {
         const errors = [
-            serviceError({ id: 'engine-manager:install-failed:ollama', nodeId: 'node-a' })
+            serviceError({ id: 'engine-manager:install-failed:llamacpp', nodeId: 'node-a' })
         ]
         expect(errorDismissalKey(errors)).toBe(errorDismissalKey([...errors]))
     })
 
     it('changes when the same id is reported again with a fresh timestamp', () => {
         const first = serviceError({
-            id: 'engine-manager:install-failed:ollama',
+            id: 'engine-manager:install-failed:llamacpp',
             nodeId: 'node-a',
             timestamp: 1000
         })
@@ -35,7 +35,7 @@ describe('errorDismissalKey', () => {
     })
 
     it('distinguishes the same producer id on two different nodes', () => {
-        const id = 'engine-manager:install-failed:ollama'
+        const id = 'engine-manager:install-failed:llamacpp'
         const onA = serviceError({ id, nodeId: 'node-a' })
         const onB = serviceError({ id, nodeId: 'node-b' })
         expect(errorDismissalKey([onA])).not.toBe(errorDismissalKey([onB]))
@@ -44,7 +44,7 @@ describe('errorDismissalKey', () => {
 
     it('does not depend on snapshot ordering', () => {
         const a = serviceError({ id: 'manual-nodes:probe-failed:peer-1', nodeId: 'node-a' })
-        const b = serviceError({ id: 'ollama-local:not-running', nodeId: 'node-b' })
+        const b = serviceError({ id: 'llamacpp-local:not-running', nodeId: 'node-b' })
         expect(errorDismissalKey([a, b])).toBe(errorDismissalKey([b, a]))
     })
 

@@ -128,7 +128,7 @@ type RequestStartedEvent struct {
 // rejection path (no forward happened) and upstream-error path
 // (ModifyResponse is never called on connection/dial failures). This
 // is the "is the node snappy?" signal — distinct from Duration,
-// which for streaming Ollama responses is dominated by token
+// which for streaming engine responses is dominated by token
 // generation time and so doesn't really reflect latency at all.
 type RequestEvent struct {
 	ID       string `json:"id"`
@@ -514,7 +514,7 @@ func (p *Proxy) Run(ctx context.Context) error {
 	// inference requests still in flight rather than letting them run to
 	// completion: cancelling the proxy's root context propagates to every
 	// in-flight request context — and thus the upstream reverse-proxy
-	// connection — so the target Ollama sees the client disconnect and stops
+	// connection — so the target engine sees the client disconnect and stops
 	// generating instead of burning the GPU on a result nobody will read.
 	cancel()
 
@@ -639,7 +639,7 @@ func (f *facade) resolveRouteCandidates(model string, inference bool) []candidat
 
 	priority := p.PriorityList()
 
-	selfPort, aliasBoundAddresses := f.selfAddresses()
+	selfPort := f.selfPort()
 
 	// Re-derive membership and pins before resolving so a cluster joined or left,
 	// and a peer paired or removed, since the last request is reflected without a
@@ -672,7 +672,7 @@ func (f *facade) resolveRouteCandidates(model string, inference bool) []candidat
 	out := make([]candidate, 0, len(nodes))
 	// Dedup by resolved backend host: the same physical node can appear under two
 	// IDs (e.g. a manually-added entry and its relay-discovered record), and
-	// routing to the same Ollama twice is wasteful.
+	// routing to the same engine twice is wasteful.
 	seenHost := make(map[string]bool, len(nodes))
 	// placed tracks node IDs already considered so the priority-ordered and
 	// fallback passes don't reconsider one (scheduler ordering).
@@ -689,7 +689,7 @@ func (f *facade) resolveRouteCandidates(model string, inference bool) []candidat
 		self := false
 		preparation := model != "" && !nodeAdvertisesModel(f.profile, n, model)
 		switch {
-		case isSelfTarget(u, selfPort) || isAnyAliasSelfTarget(u, aliasBoundAddresses):
+		case isSelfTarget(u, selfPort):
 			pol := p.admission.currentPolicy()
 			if model != "" && !f.localBindingConsistent(pol, model) {
 				return
@@ -733,7 +733,7 @@ func (f *facade) resolveRouteCandidates(model string, inference bool) []candidat
 			return
 		}
 		// Defensive: the local backend must never resolve back to this proxy.
-		if isSelfTarget(u, selfPort) || isAnyAliasSelfTarget(u, aliasBoundAddresses) {
+		if isSelfTarget(u, selfPort) {
 			slog.Debug("resolveCandidates: skipping self-target node",
 				"node_id", n.ID, "target", u.Host)
 			return
@@ -1092,61 +1092,12 @@ func isSelfTarget(u *url.URL, selfPort int) bool {
 	return isLoopbackHost(host)
 }
 
-// isAliasSelfTarget reports whether u points to the alias listener that this
-// process actually owns. The configured alias is not enough: a failed bind
-// leaves another process owning that endpoint, and two distinct 127/8
-// addresses may legitimately use the same port.
-func isAliasSelfTarget(u *url.URL, boundAddress string) bool {
-	if boundAddress == "" {
-		return false
-	}
-	targetHost, targetPort, err := net.SplitHostPort(u.Host)
-	if err != nil {
-		return false
-	}
-	boundHost, boundPort, err := net.SplitHostPort(boundAddress)
-	if err != nil || targetPort != boundPort {
-		return false
-	}
-	return equalLoopbackHosts(targetHost, boundHost)
-}
-
-func isAnyAliasSelfTarget(u *url.URL, boundAddresses []string) bool {
-	for _, address := range boundAddresses {
-		if isAliasSelfTarget(u, address) {
-			return true
-		}
-	}
-	return false
-}
-
 func isLoopbackHost(host string) bool {
 	if strings.EqualFold(strings.TrimSuffix(host, "."), "localhost") {
 		return true
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
-}
-
-func equalLoopbackHosts(a, b string) bool {
-	aLocalhost, bLocalhost := isLocalhostName(a), isLocalhostName(b)
-	if aLocalhost || bLocalhost {
-		if aLocalhost && bLocalhost {
-			return true
-		}
-		other := a
-		if aLocalhost {
-			other = b
-		}
-		ip := net.ParseIP(other)
-		return ip != nil && (ip.Equal(net.IPv4(127, 0, 0, 1)) || ip.Equal(net.IPv6loopback))
-	}
-	aIP, bIP := net.ParseIP(a), net.ParseIP(b)
-	return aIP != nil && bIP != nil && aIP.IsLoopback() && bIP.IsLoopback() && aIP.Equal(bIP)
-}
-
-func isLocalhostName(host string) bool {
-	return strings.EqualFold(strings.TrimSuffix(host, "."), "localhost")
 }
 
 // nodeURL returns the single best forward URL for a node (the first candidate
@@ -1168,8 +1119,8 @@ func nodeURL(n Node) *url.URL {
 // else it advertised. Re-sorting here by address class is what previously put a
 // two-host direct-connect link ahead of a peer's real LAN address.
 //
-// Any local-interface address is rewritten to loopback (Ollama binds loopback
-// only) and floated to the front because it's unambiguously reachable.
+// Any local-interface address is rewritten to loopback and floated to the
+// front so engines bound only to loopback remain reachable.
 func nodeCandidates(n Node) []string {
 	port := strconv.Itoa(n.Port)
 	sorted := netpick.Candidates(n.TXT, n.Addresses)
@@ -1212,7 +1163,7 @@ var (
 	localAddrsMu sync.RWMutex
 	// localAddrs is the set of IPs currently bound to this host's interfaces.
 	// It's used to decide whether a discovered node is actually us, so we can
-	// dial loopback instead of our own external IP (Ollama binds loopback
+	// dial loopback instead of our own external IP (engine binds loopback
 	// only). The initial value is a one-shot enumeration; startLocalAddrWatch
 	// then keeps it in sync with live interface changes, so a late VPN/dock
 	// interface or a sleep/wake IP reassignment can't strand us dialing a
@@ -1351,11 +1302,9 @@ func (p *Proxy) setPriorityLocked(priority schedulerwire.Priority) int {
 	return len(cleaned)
 }
 
-// subscribedToNode projects a relay DirectoryNode onto the proxy's routable Node
-// for the ol service, returning false when the node doesn't advertise ol or has
-// no dialable address. The engine port comes from the ol service key (the real
-// Ollama port the broker's engine poller registered, not the proxy's listen
-// port).
+// subscribedToNode projects a relay DirectoryNode onto the facade's routable
+// Node, returning false when its engine service or dialable address is absent.
+// The target port comes from that engine's advertised service.
 func subscribedToNode(p engineProfile, n noderec.DirectoryNode) (Node, bool) {
 	svc, ok := n.Services[p.DiscoveryService]
 	if !ok || n.IP == "" {
@@ -1379,10 +1328,7 @@ func subscribedToNode(p engineProfile, n noderec.DirectoryNode) (Node, bool) {
 		TXT:         n.AddressTXT(),
 		IP:          n.IP,
 		ClusterUUID: n.ClusterUUID,
-		// Filter on this node's Ollama models only, not the cross-engine union, so
-		// a model that a dual-engine node serves solely via LM Studio isn't
-		// accepted as an Ollama owner here (falls back to the union for a peer
-		// that sends no attribution — see DirectoryNode.EngineModels).
+		// Use this facade's attributed inventory rather than another engine's models.
 		Models: append([]string(nil), n.EngineModels(p.Name)...),
 		Loaded: append([]string(nil), n.LoadedByEngine[p.Name]...),
 	}
@@ -1539,7 +1485,7 @@ func (p *Proxy) handleMessage(msg *Message) {
 	case "facade/enable":
 		var params enableFacadeParams
 		if err := json.Unmarshal(msg.Params, &params); err != nil {
-			p.codec.RespondError(msg.ID, -32602, "invalid params: expected {\"engine\",\"port\",\"aliasAddresses\",\"ignorePersistedPort\",\"descriptor\"}")
+			p.codec.RespondError(msg.ID, -32602, "invalid params: expected {\"engine\",\"port\",\"ignorePersistedPort\",\"descriptor\"}")
 			return
 		}
 		result, err := p.enableFacade(params)

@@ -24,7 +24,7 @@ import {
 } from '@/ui/stores/node-configuration.store'
 import { useNodesStore } from '@/ui/stores/nodes.store'
 
-const WEAK = { engine: 'ollama', model: 'qwen3:4b' }
+const WEAK = { engine: 'llamacpp', model: 'qwen3:4b' }
 const ROLES: NodeRoles = { weak: WEAK }
 
 function policyText(revision: string, extra: Record<string, JsonValue> = {}): string {
@@ -189,7 +189,7 @@ describe('bulk fan-out', () => {
         expect(sent.get('b')?.expectedPersistedRevision).toBe('9')
         expect(JSON.parse(sent.get('b')?.policy ?? '{}')).toEqual({
             ...JSON.parse(policyText('9', { admission: { maxResidentModels: 1 } })),
-            roles: { weak: { engine: 'ollama', model: 'qwen3:4b' } }
+            roles: { weak: { engine: 'llamacpp', model: 'qwen3:4b' } }
         })
     })
 
@@ -418,7 +418,7 @@ describe('per-node outcomes', () => {
 
         get.mockResolvedValue(policyDocument('6'))
         set.mockRejectedValue(new Error('-32011: vetoed'))
-        await store().apply('a', 'a', { strong: { engine: 'ollama', model: 'x' } })
+        await store().apply('a', 'a', { strong: { engine: 'llamacpp', model: 'x' } })
         expect(entry('a').requestId).not.toBe(id)
     })
 })

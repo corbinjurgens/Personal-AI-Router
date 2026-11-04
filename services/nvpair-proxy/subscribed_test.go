@@ -81,11 +81,11 @@ func TestCapacityDropClearsSelectedNode(t *testing.T) {
 }
 
 func TestUnknownTierDeclarationPreventsRouterFallback(t *testing.T) {
-	pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{
-		"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "m"}},
+	pol := tierPolicy(map[string][]nodepolicy.TierEntry{
+		"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "m"}},
 	})
-	fx := newTierFixture(t, ollamaCase(t), pol, map[string][]string{"peer": {"m"}}, nil)
-	fx.declare(t, "peer", map[string]nodepolicy.AdvertisedRole{"future": ollamaRole("m")})
+	fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"peer": {"m"}}, nil)
+	fx.declare(t, "peer", map[string]nodepolicy.AdvertisedRole{"future": llamacppRole("m")})
 	if got := resolvedTier(fx.p.soleFacade(), "weak", requestNeeds{}, false); len(got) != 0 {
 		t.Fatalf("unknown tier declaration enabled router fallback: %+v", got)
 	}
@@ -135,7 +135,7 @@ func TestDiscoveryInventoryModelLimit(t *testing.T) {
 	served := make(nodepolicy.ServedModels, len(models))
 	for i := range models {
 		models[i] = fmt.Sprintf("model-%04d", i)
-		served[i] = nodepolicy.Role{Engine: "ollama", Model: models[i]}
+		served[i] = nodepolicy.Role{Engine: "llamacpp", Model: models[i]}
 	}
 	for _, source := range []string{"subscribed", "manual"} {
 		t.Run(source, func(t *testing.T) {
@@ -285,7 +285,7 @@ func TestSubscribedDiff(t *testing.T) {
 // key, or an IP, is rejected.
 //
 // The two negative fixtures matter for different reasons and the old suites
-// carried one each — Ollama rejected a non-engine service, LM Studio rejected
+// carried one each — one rejected a non-engine service, the other rejected
 // the other engine. Both run for both engines here, because the second is what
 // regresses if the projection ever loses its service-key filter.
 func TestSubscribedToNode(t *testing.T) {
@@ -443,10 +443,10 @@ func TestSubscribedCarriesPolicyWithoutChurn(t *testing.T) {
 	})
 }
 
-// strictTestCapability is a valid capability for model on ollama.
+// strictTestCapability is a valid capability for model on llamacpp.
 func strictTestCapability(model string) *nodepolicy.StrictAdmissionCapability {
 	return &nodepolicy.StrictAdmissionCapability{Version: nodepolicy.StrictAdmissionVersion, Models: []nodepolicy.StrictAdmissionModel{
-		{Engine: "ollama", Model: model, MaxConcurrent: 2, Identity: strictRequest().Identity},
+		{Engine: "llamacpp", Model: model, MaxConcurrent: 2, Identity: strictRequest().Identity},
 	}}
 }
 
@@ -482,7 +482,7 @@ func TestSubscribedCarriesStrictCapabilityWithoutChurn(t *testing.T) {
 			t.Fatalf("node without a capability projected %+v (ok %v)", without.StrictAdmission, ok)
 		}
 		for name, capability := range map[string]*nodepolicy.StrictAdmissionCapability{
-			"valid":       strictTestCapability("m:latest"),
+			"valid":       strictTestCapability("m"),
 			"unsupported": unsupportedStrictCapability(t),
 		} {
 			n.Policy = &nodepolicy.Advertisement{Revision: "40", StrictAdmission: capability}
@@ -507,7 +507,7 @@ func TestSubscribedCarriesStrictCapabilityWithoutChurn(t *testing.T) {
 // model makes a peer eligible, while every one of these peers stays a
 // concrete-routing candidate for the same model.
 func TestStrictModelExcludesPeersWithoutAValidCapability(t *testing.T) {
-	profile := ollamaOnlyProfile(t)
+	profile := anyProfile(t)
 	model := profile.normalizeModel("m")
 	cases := []struct {
 		name     string
@@ -517,7 +517,7 @@ func TestStrictModelExcludesPeersWithoutAValidCapability(t *testing.T) {
 		{"older peer without a policy", nil, false},
 		{"policy without a capability", &nodepolicy.Advertisement{Revision: "3"}, false},
 		{"unsupported version", &nodepolicy.Advertisement{Revision: "3", StrictAdmission: unsupportedStrictCapability(t)}, false},
-		{"valid without that model", &nodepolicy.Advertisement{Revision: "3", StrictAdmission: strictTestCapability("other:latest")}, false},
+		{"valid without that model", &nodepolicy.Advertisement{Revision: "3", StrictAdmission: strictTestCapability("other")}, false},
 		{"valid for that model", &nodepolicy.Advertisement{Revision: "3", StrictAdmission: strictTestCapability(model)}, true},
 	}
 	port := freeTCPPort(t)
@@ -540,14 +540,14 @@ func TestStrictModelExcludesPeersWithoutAValidCapability(t *testing.T) {
 		}
 		nodes = append(nodes, n)
 		t.Run(tc.name, func(t *testing.T) {
-			entry, eligible := n.strictModel("ollama", model)
+			entry, eligible := n.strictModel("llamacpp", model)
 			if eligible != tc.eligible {
 				t.Fatalf("eligible = %v, want %v", eligible, tc.eligible)
 			}
 			if eligible && (entry.Model != model || entry.MaxConcurrent != 2) {
 				t.Fatalf("entry = %+v, want %s with maxConcurrent 2", entry, model)
 			}
-			if _, other := n.strictModel("lmstudio", model); other {
+			if _, other := n.strictModel("llamacpp-custom", model); other {
 				t.Fatal("an entry for another engine made the node eligible")
 			}
 		})

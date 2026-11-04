@@ -21,9 +21,9 @@ function copied(text: string, fields: string[], mode = false): string {
 }
 
 describe('selective model settings copy', () => {
-    it('defaults to configured numeric leaves common to both engines', () => {
+    it('defaults to configured numeric leaves', () => {
         expect(
-            defaultModelCopyFields(sourceText, source, { engine: 'lmstudio', model: 'other' })
+            defaultModelCopyFields(sourceText, source, { engine: 'llamacpp', model: 'other' })
         ).toEqual({
             ok: true,
             value: ['temperature', 'top_k']

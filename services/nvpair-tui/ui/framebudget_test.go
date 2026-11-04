@@ -120,7 +120,7 @@ func TestErrorsViewNeverOverflowsItsBudget(t *testing.T) {
 				Message:    "install failed",
 				Timestamp:  time.Now().UnixMilli(),
 				Severity:   "error",
-				EngineType: "ollama",
+				EngineType: "llamacpp",
 				Operation:  "install",
 				ModelName:  "llama3.2",
 				Action:     "retry",
@@ -148,20 +148,21 @@ func TestErrorsViewNeverOverflowsItsBudget(t *testing.T) {
 // TestNodeDetailNeverOverflowsItsBudget covers the screen with two tables
 // sharing one budget plus a hardware block whose height depends on the node.
 func TestNodeDetailNeverOverflowsItsBudget(t *testing.T) {
+	custom := tuiCustomEngine(t)
 	const w, h = 80, 24
 	budget := contentBudget(t, w, h)
 
 	build := func() *nodeDetail {
 		d := newNodeDetail(nil, nodeRow{key: "self", name: "this-host", self: true})
 		d.engines = []engineStatus{
-			{Engine: "ollama", Installed: true, Running: true, Port: 11434},
-			{Engine: "lmstudio", Installed: true, Running: false, Port: 1234},
+			{Engine: "llamacpp", Installed: true, Running: true, Port: 8081},
+			{Engine: custom.Name, Installed: true, Running: false, Port: 8181},
 		}
 		models := make([]string, 40)
 		for i := range models {
 			models[i] = "model-" + string(rune('a'+i%26))
 		}
-		d.models = modelsResult{Models: models, ModelsByEngine: map[string][]string{"ollama": models}}
+		d.models = modelsResult{Models: models, ModelsByEngine: map[string][]string{"llamacpp": models}}
 		d.SetSize(w, budget)
 		d.refreshEngines()
 		d.refreshModels()
@@ -317,6 +318,7 @@ func TestServiceConfirmationSurvivesEveryHeight(t *testing.T) {
 // the models list, and the status line off the frame — leaving a hardware
 // readout and no sign anything was missing.
 func TestDetailSurvivesAManyGpuHost(t *testing.T) {
+	custom := tuiCustomEngine(t)
 	for _, gpuCount := range []int{1, 2, 4, 8, 16} {
 		gpus := make([]noderec.GPUInfo, gpuCount)
 		for i := range gpus {
@@ -329,8 +331,8 @@ func TestDetailSurvivesAManyGpuHost(t *testing.T) {
 			}
 			d := newNodeDetail(nil, nodeRow{key: "self", name: "host", self: true})
 			d.engines = []engineStatus{
-				{Engine: "ollama", Installed: true, Running: true},
-				{Engine: "lmstudio", Installed: true},
+				{Engine: "llamacpp", Installed: true, Running: true},
+				{Engine: custom.Name, Installed: true},
 			}
 			d.telemetryOK = true
 			d.telemetry = nodeTelemetry{
@@ -340,7 +342,7 @@ func TestDetailSurvivesAManyGpuHost(t *testing.T) {
 			}
 			d.SetSize(80, budget)
 			d.refreshEngines()
-			d.status.error("start lmstudio failed: port in use")
+			d.status.error("start llamacpp-custom failed: port in use")
 
 			out := d.View()
 			if got := renderedRows(out); got > budget {
@@ -349,7 +351,7 @@ func TestDetailSurvivesAManyGpuHost(t *testing.T) {
 			}
 			// The status line is what the operator just caused; it must not be
 			// the thing a long device list displaces.
-			if !contains(fitLines(out, budget), "start lmstudio failed") {
+			if !contains(fitLines(out, budget), "start llamacpp-custom failed") {
 				t.Errorf("%d GPUs at 80x%d: the status line was displaced:\n%s",
 					gpuCount, h, out)
 			}
@@ -395,7 +397,7 @@ func TestArmedActionsOwnTheKeyboardEverywhere(t *testing.T) {
 	}
 
 	detail := localDetail()
-	detail.models = modelsResult{ModelsByEngine: map[string][]string{"ollama": {"victim"}}}
+	detail.models = modelsResult{ModelsByEngine: map[string][]string{"llamacpp": {"victim"}}}
 	detail.refreshModels()
 	detail.pane = detailModels
 	detail.deleteSelectedModel()
@@ -448,7 +450,7 @@ func TestDetailStaysInBudgetWithAStaleEngineList(t *testing.T) {
 				continue
 			}
 			d := newNodeDetail(nil, nodeRow{key: "peer", name: "peer-01"})
-			d.engines = []engineStatus{{Engine: "ollama", Installed: true, Running: true}}
+			d.engines = []engineStatus{{Engine: "llamacpp", Installed: true, Running: true}}
 			d.enginesStale = stale
 			d.telemetryOK = true
 			d.telemetry = nodeTelemetry{
@@ -535,7 +537,7 @@ func populatedViews(t *testing.T) []View {
 	for i := range 20 {
 		jobs.upsert(workload{
 			ID: "j" + string(rune('a'+i)), OriginatedFrom: "node",
-			Model: "llama3.2", Engine: "ollama", State: "running",
+			Model: "llama3.2", Engine: "llamacpp", State: "running",
 		})
 	}
 
@@ -545,7 +547,7 @@ func populatedViews(t *testing.T) []View {
 		entries[i] = svcerrors.ServiceError{
 			ID: "e" + string(rune('a'+i)), Message: "install failed",
 			Timestamp: time.Now().UnixMilli(), Severity: "error",
-			EngineType: "ollama", Operation: "install", ModelName: "llama3.2",
+			EngineType: "llamacpp", Operation: "install", ModelName: "llama3.2",
 		}
 	}
 	errs.setErrors(entries)
@@ -574,7 +576,7 @@ func noteStatus(v View) {
 		t.demo.status = demoPreparing
 		t.demo.gen = 1
 		t.demo.armed(demoTargetsMsg{gen: 1, targets: []demoTarget{
-			{backend: "ollama", port: 11434, model: "llama3.2"},
+			{backend: "llamacpp", port: 8080, model: "llama3.2"},
 		}})
 	case *serviceView:
 		t.status.error("something failed")
@@ -593,7 +595,7 @@ func TestCatalogBrowserStaysInBudget(t *testing.T) {
 			continue
 		}
 
-		b := newCatalogBrowser(nil, "ollama", "Ollama", "this-host", false)
+		b := newCatalogBrowser(nil, "llamacpp", "llama.cpp", "this-host", false)
 		models := make([]catalogModel, 30)
 		for i := range models {
 			models[i] = catalogModel{Name: "model-" + string(rune('a'+i)), Size: 1 << 30}
@@ -617,6 +619,7 @@ func TestCatalogBrowserStaysInBudget(t *testing.T) {
 // TestNodeDetailStaysInBudgetWhenShort covers the drill-down at sizes below the
 // 80x24 the per-view test uses, where its two tables and hardware block compete.
 func TestNodeDetailStaysInBudgetWhenShort(t *testing.T) {
+	custom := tuiCustomEngine(t)
 	for _, size := range [][2]int{{80, 24}, {80, 16}, {80, 13}, {60, 12}, {40, 12}} {
 		w, h := size[0], size[1]
 		budget := contentBudget(t, w, h)
@@ -626,14 +629,14 @@ func TestNodeDetailStaysInBudgetWhenShort(t *testing.T) {
 
 		d := newNodeDetail(nil, nodeRow{key: "self", name: "this-host", self: true})
 		d.engines = []engineStatus{
-			{Engine: "ollama", Installed: true, Running: true, Port: 11434},
-			{Engine: "lmstudio", Installed: true, Running: false, Port: 1234},
+			{Engine: "llamacpp", Installed: true, Running: true, Port: 8081},
+			{Engine: custom.Name, Installed: true, Running: false, Port: 8181},
 		}
 		models := make([]string, 20)
 		for i := range models {
 			models[i] = "model-" + string(rune('a'+i))
 		}
-		d.models = modelsResult{Models: models, ModelsByEngine: map[string][]string{"ollama": models}}
+		d.models = modelsResult{Models: models, ModelsByEngine: map[string][]string{"llamacpp": models}}
 		d.SetSize(w, budget)
 		d.refreshEngines()
 		d.refreshModels()

@@ -20,8 +20,9 @@ import (
 func TestLinkedModelPeerBoundary(t *testing.T) {
 	t.Run("native file request without a listing is refused", func(t *testing.T) {
 		root := t.TempDir()
-		ex := copyTestExecutor(t, "ollama", root, true)
-		st, err := ex.state("ollama")
+		ex := copyTestExecutor(t, "llamacpp", root, true)
+		fixture := writeLlamaNativeModel(t, root, 128, 3)
+		st, err := ex.state("llamacpp")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -32,25 +33,24 @@ func TestLinkedModelPeerBoundary(t *testing.T) {
 			if r.Method != http.MethodGet || r.URL.Path != "/api/tags" {
 				return nil, fmt.Errorf("unexpected native request")
 			}
-			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"models":[{"name":"tiny"}]}`))}, nil
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"models":[{"name":"` + fixture.model + `"}]}`))}, nil
 		})}
-		raw, err := ex.Action(context.Background(), "ollama", "list_models", nil)
+		raw, err := ex.Action(context.Background(), "llamacpp", "list_models", nil)
 		if err != nil {
 			t.Fatalf("fake native recognition: %v", err)
 		}
 		models, ok := extractReadyStringsResult(raw, spec, st.manifest)
-		if !ok || len(models) != 1 || models[0] != "tiny" {
+		if !ok || len(models) != 1 || models[0] != fixture.model {
 			t.Fatalf("fake native membership = %v, valid=%v", models, ok)
 		}
-		fixture := writeOllamaModel(t, filepath.Join(root, "models"), "tiny", 128, 3)
-		query := url.Values{"engine": {"ollama"}, "model": {"tiny"}, "path": {fixture.manifestRel}}
+		query := url.Values{"engine": {"llamacpp"}, "model": {fixture.model}, "path": {fixture.rel}}
 		response := httptest.NewRecorder()
 		(&controlServer{exec: ex}).handleModelFile(response, httptest.NewRequest(http.MethodGet, controlModelFilePath+"?"+query.Encode(), nil))
 		if response.Code != http.StatusConflict {
 			t.Fatalf("unissued native file status = %d, want %d", response.Code, http.StatusConflict)
 		}
-		if bytes.Equal(response.Body.Bytes(), fixture.manifest) {
-			t.Fatal("unissued native file response contains manifest bytes")
+		if bytes.Equal(response.Body.Bytes(), fixture.data) {
+			t.Fatal("unissued native file response contains model bytes")
 		}
 	})
 }
@@ -83,31 +83,6 @@ func TestLinkedModelReadBinding(t *testing.T) {
 		}
 		if opens != 2 {
 			t.Fatalf("opened %d times, want the substituted second open", opens)
-		}
-	})
-}
-
-func TestLinkedModelResolution(t *testing.T) {
-	t.Run("recognized Ollama blob outside the store is bound", func(t *testing.T) {
-		root := t.TempDir()
-		store := filepath.Join(root, "models")
-		fixture := writeOllamaModel(t, store, "tiny", 128, 3)
-		for rel, data := range fixture.blobs {
-			target := filepath.Join(t.TempDir(), "blob")
-			writeTestFile(t, target, data)
-			path := filepath.Join(store, filepath.FromSlash(rel))
-			if err := os.Remove(path); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Symlink(target, path); err != nil {
-				t.Skipf("symlink unavailable: %v", err)
-			}
-		}
-		ex := copyTestExecutor(t, "ollama", root, true)
-		copyTestNativeModels(t, ex, "ollama", "tiny")
-		list, err := ex.modelSourceFiles(context.Background(), "ollama", "tiny")
-		if err != nil || len(list.Files) != len(fixture.blobs)+1 {
-			t.Fatalf("recognized outside blobs: files=%v err=%v", list.Files, err)
 		}
 	})
 }

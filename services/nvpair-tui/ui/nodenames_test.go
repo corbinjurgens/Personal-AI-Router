@@ -126,7 +126,7 @@ func TestJobsRendersNodeNames(t *testing.T) {
 	v.upsert(workload{
 		ID:             "w1",
 		Model:          "llama3.2",
-		Engine:         "ollama",
+		Engine:         "llamacpp",
 		State:          "running",
 		OriginatedFrom: "origin-uuid",
 		ScheduledOn:    "target-uuid",

@@ -131,7 +131,7 @@ func peerEntry(hostUUID, clusterUUID string) noderec.DirectoryNode {
 		Name:        hostUUID,
 		IP:          "192.0.2.10",
 		ClusterUUID: clusterUUID,
-		Services:    map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceOllama: {Port: 11434}},
+		Services:    map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceLlamaCPP: {Port: 8080}},
 	}
 }
 

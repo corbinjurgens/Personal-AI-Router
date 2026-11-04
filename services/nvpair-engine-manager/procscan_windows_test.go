@@ -8,7 +8,7 @@ package main
 import (
 	"context"
 	"os"
-	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -16,19 +16,20 @@ import (
 // the child releases its listening port.
 func procImage(pid int) string { return imagePathForPID(pid) }
 
-func TestListProcessNamesIncludesSelf(t *testing.T) {
+func TestListProcessRecordsIncludesSelf(t *testing.T) {
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatalf("resolve test executable: %v", err)
 	}
-	names, err := listProcessNames(context.Background())
+	records, err := listProcessRecords(context.Background())
 	if err != nil {
-		t.Fatalf("listProcessNames: %v", err)
+		t.Fatalf("listProcessRecords: %v", err)
 	}
-	if len(names) == 0 {
-		t.Fatal("listProcessNames returned no names")
+	want := normalizeProcessName(executable)
+	for _, record := range records {
+		if record.PID == os.Getpid() && strings.EqualFold(normalizeProcessName(record.Image), want) {
+			return
+		}
 	}
-	if !anyProcessMatches(names, []string{filepath.Base(executable)}) {
-		t.Fatalf("process list does not contain test executable %q", filepath.Base(executable))
-	}
+	t.Fatalf("process list does not contain test executable %q", want)
 }

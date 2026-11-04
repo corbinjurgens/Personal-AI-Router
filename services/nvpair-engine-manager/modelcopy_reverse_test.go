@@ -22,33 +22,37 @@ import (
 )
 
 type reverseCopyFixture struct {
-	peer    *remoteReverseFixture
-	dst     *Executor
-	model   ollamaFixture
-	root    string
-	weights string
-	listing modelFileList
+	peer     *remoteReverseFixture
+	dst      *Executor
+	model    string
+	files    map[string][]byte
+	repoDir  string // destination hub-cache repository
+	snapshot string // destination snapshot directory
+	root     string // destination store root
+	weights  string // the model GGUF, which the destination publishes last
+	listing  modelFileList
 }
 
 func newReverseCopyFixture(t *testing.T, wrap func(http.Handler) http.Handler) *reverseCopyFixture {
 	t.Helper()
+	const repo, commit = "owner/tiny-GGUF", "0123456789abcdef0123456789abcdef01234567"
 	srcDir, dstDir := t.TempDir(), t.TempDir()
-	src := copyTestExecutor(t, "ollama", srcDir, true)
 	f := &reverseCopyFixture{
-		dst:   copyTestExecutor(t, "ollama", dstDir, true),
-		model: writeOllamaModel(t, filepath.Join(srcDir, "models"), "tiny", 500_000, 5),
-		root:  filepath.Join(dstDir, "models"),
+		model:   repo + ":Q4_K_M",
+		weights: "tiny-Q4_K_M.gguf",
+		files: map[string][]byte{
+			"tiny-Q4_K_M.gguf":      testBytes(500_000, 5),
+			"mmproj-tiny-Q8_0.gguf": testBytes(5_000, 6),
+		},
+		repoDir: llamaRepoDir(dstDir, repo),
+		root:    dstDir,
 	}
-	copyTestNativeModels(t, src, "ollama", "tiny")
-	f.listing = copyTestSourceListing(t, src, "ollama", "tiny")
-	for path, data := range f.model.blobs {
-		if len(data) == 500_000 {
-			f.weights = path
-		}
-	}
-	if f.weights == "" {
-		t.Fatal("missing weights fixture")
-	}
+	f.snapshot = filepath.Join(f.repoDir, "snapshots", commit)
+	writeLlamaCache(t, srcDir, repo, commit, f.files)
+	src := copyTestExecutor(t, "llamacpp", srcDir, true)
+	f.dst = copyTestExecutor(t, "llamacpp", dstDir, true)
+	copyTestNativeModels(t, src, "llamacpp", f.model)
+	f.listing = copyTestSourceListing(t, src, "llamacpp", f.model)
 	f.peer = newRemoteReverseFixture(t, func(mesh *clustertrust.Mesh) http.Handler {
 		s := &controlServer{exec: src, mesh: mesh}
 		mux := http.NewServeMux()
@@ -63,23 +67,30 @@ func newReverseCopyFixture(t *testing.T, wrap func(http.Handler) http.Handler) *
 	return f
 }
 
+// notPublished fails the test when the destination cache already lists the
+// model: its GGUF or its refs/main is visible.
+func (f *reverseCopyFixture) notPublished(t *testing.T, context string) {
+	t.Helper()
+	for _, path := range []string{filepath.Join(f.snapshot, f.weights), filepath.Join(f.repoDir, "refs", "main")} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s visible %s: %v", path, context, err)
+		}
+	}
+}
+
 func (f *reverseCopyFixture) assertPublished(t *testing.T) {
 	t.Helper()
-	for path, want := range f.model.blobs {
-		got, err := os.ReadFile(filepath.Join(f.root, filepath.FromSlash(path)))
+	for path, want := range f.files {
+		got, err := os.ReadFile(filepath.Join(f.snapshot, filepath.FromSlash(path)))
 		if err != nil {
 			t.Fatal(err)
 		}
 		if !bytes.Equal(got, want) || sha256Hex(got) != sha256Hex(want) {
-			t.Fatalf("published blob %s differs from source", path)
+			t.Fatalf("published file %s differs from source", path)
 		}
 	}
-	got, err := os.ReadFile(filepath.Join(f.root, filepath.FromSlash(f.model.manifestRel)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(got, f.model.manifest) {
-		t.Fatal("published manifest differs from source")
+	if _, err := os.Stat(filepath.Join(f.repoDir, "refs", "main")); err != nil {
+		t.Fatalf("published cache has no ref: %v", err)
 	}
 	assertNoPartFiles(t, f.root)
 }
@@ -100,42 +111,43 @@ func TestModelCopyReversePreservesPublicationOrder(t *testing.T) {
 						if !r.Close {
 							t.Error("file request retained a replayable connection")
 						}
-						if path == f.model.manifestRel {
-							for rel, want := range f.model.blobs {
-								got, err := os.ReadFile(filepath.Join(f.root, filepath.FromSlash(rel)))
+						if path == f.weights {
+							for rel, want := range f.files {
+								if rel == f.weights {
+									continue
+								}
+								got, err := os.ReadFile(filepath.Join(f.snapshot, filepath.FromSlash(rel)))
 								if err != nil || !bytes.Equal(got, want) {
-									t.Errorf("manifest requested before verified blob %s: %v", rel, err)
+									t.Errorf("model requested before verified file %s: %v", rel, err)
 								}
 							}
 						}
-						if _, err := os.Stat(filepath.Join(f.root, filepath.FromSlash(f.model.manifestRel))); !errors.Is(err, os.ErrNotExist) {
-							t.Errorf("manifest visible during download: %v", err)
-						}
+						f.notPublished(t, "during download")
 					}
 					next.ServeHTTP(w, r)
 				})
 			})
 			f.peer.directHealthy.Store(direct)
 			ctx := remoteFixtureContext(t)
-			result, err := f.dst.CopyModelFrom(ctx, f.peer.client(t, ctx), "ollama", "tiny", nil)
+			result, err := f.dst.CopyModelFrom(ctx, f.peer.client(t, ctx), "llamacpp", f.model, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if result.Files != 3 || result.FilesSkipped != 0 || result.BytesCopied != result.BytesTotal {
+			if result.Files != 2 || result.FilesSkipped != 0 || result.BytesCopied != result.BytesTotal {
 				t.Fatalf("copy result = %+v", result)
 			}
 			f.assertPublished(t)
 			mu.Lock()
 			defer mu.Unlock()
-			if len(fetched) != 3 || fetched[2] != f.model.manifestRel {
-				t.Fatalf("file request order = %q, want two blobs then manifest", fetched)
+			if len(fetched) != 2 || fetched[1] != f.weights {
+				t.Fatalf("file request order = %q, want the projector then the model", fetched)
 			}
 			if direct {
-				if f.peer.directCalls.Load() != 4 || f.peer.reverseCalls.Load() != 0 {
-					t.Fatalf("direct/reverse = %d/%d, want 4/0", f.peer.directCalls.Load(), f.peer.reverseCalls.Load())
+				if f.peer.directCalls.Load() != 3 || f.peer.reverseCalls.Load() != 0 {
+					t.Fatalf("direct/reverse = %d/%d, want 3/0", f.peer.directCalls.Load(), f.peer.reverseCalls.Load())
 				}
-			} else if f.peer.reverseCalls.Load() != 4 {
-				t.Fatalf("reverse calls = %d, want listing and three file requests", f.peer.reverseCalls.Load())
+			} else if f.peer.reverseCalls.Load() != 3 {
+				t.Fatalf("reverse calls = %d, want listing and two file requests", f.peer.reverseCalls.Load())
 			}
 		})
 	}
@@ -148,27 +160,25 @@ func TestModelCopyReverseResumesDroppedBodyWithNewRange(t *testing.T) {
 	var mu sync.Mutex
 	var ranges []string
 	f = newReverseCopyFixture(t, func(next http.Handler) http.Handler {
-		cut := interruptAfter("sha256-"+sha256Hex(testBytes(500_000, 5)), 200_000)(next)
+		cut := interruptAfter("tiny-Q4_K_M.gguf", 200_000)(next)
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == controlModelFilePath && r.URL.Query().Get("path") == f.weights {
 				mu.Lock()
 				ranges = append(ranges, r.Header.Get("Range"))
 				mu.Unlock()
 				if r.Header.Get("Range") != "" {
-					part, err := os.ReadFile(filepath.Join(f.root, filepath.FromSlash(f.weights)) + ".part")
-					if err != nil || !bytes.Equal(part, f.model.blobs[f.weights][:200_000]) {
+					part, err := os.ReadFile(filepath.Join(f.snapshot, filepath.FromSlash(f.weights)) + ".part")
+					if err != nil || !bytes.Equal(part, f.files[f.weights][:200_000]) {
 						t.Errorf("resumed partial = %d bytes, error = %v", len(part), err)
 					}
-					if _, err := os.Stat(filepath.Join(f.root, filepath.FromSlash(f.model.manifestRel))); !errors.Is(err, os.ErrNotExist) {
-						t.Errorf("manifest visible before resumed file verification: %v", err)
-					}
+					f.notPublished(t, "before resumed file verification")
 				}
 			}
 			cut.ServeHTTP(w, r)
 		})
 	})
 	ctx := remoteFixtureContext(t)
-	if _, err := f.dst.CopyModelFrom(ctx, f.peer.client(t, ctx), "ollama", "tiny", nil); err != nil {
+	if _, err := f.dst.CopyModelFrom(ctx, f.peer.client(t, ctx), "llamacpp", f.model, nil); err != nil {
 		t.Fatal(err)
 	}
 	f.assertPublished(t)
@@ -177,8 +187,8 @@ func TestModelCopyReverseResumesDroppedBodyWithNewRange(t *testing.T) {
 	if len(ranges) != 2 || ranges[0] != "" || ranges[1] != "bytes=200000-" {
 		t.Fatalf("Range requests = %q, want fresh request then bytes=200000-", ranges)
 	}
-	if f.peer.reverseCalls.Load() != 5 {
-		t.Fatalf("reverse requests = %d, want listing, three files and one owner retry", f.peer.reverseCalls.Load())
+	if f.peer.reverseCalls.Load() != 4 {
+		t.Fatalf("reverse requests = %d, want listing, two files and one owner retry", f.peer.reverseCalls.Load())
 	}
 }
 
@@ -195,7 +205,7 @@ func TestModelCopyReverseCancellationKeepsPartialWithoutVisibility(t *testing.T)
 			}
 			calls.Add(1)
 			w.Header().Set("Content-Length", "500000")
-			if _, err := w.Write(f.model.blobs[f.weights][:65536]); err != nil {
+			if _, err := w.Write(f.files[f.weights][:65536]); err != nil {
 				t.Error(err)
 				return
 			}
@@ -211,11 +221,11 @@ func TestModelCopyReverseCancellationKeepsPartialWithoutVisibility(t *testing.T)
 	ctx, cancel := context.WithCancel(remoteFixtureContext(t))
 	defer cancel()
 	client := f.peer.client(t, ctx)
-	dest := filepath.Join(f.root, filepath.FromSlash(f.weights))
-	file := plannedFile{modelFile: modelFile{Path: f.weights, Size: 500_000, SHA256: sha256Hex(f.model.blobs[f.weights])}, dest: dest, root: f.root, exportID: f.listing.ExportID}
+	dest := filepath.Join(f.snapshot, filepath.FromSlash(f.weights))
+	file := plannedFile{modelFile: modelFile{Path: f.weights, Size: 500_000, SHA256: sha256Hex(f.files[f.weights])}, dest: dest, root: f.root, exportID: f.listing.ExportID}
 	// Cancel only once bytes reached the copy owner's .part, independently of
 	// HTTP buffering and the throttled user-facing progress notifications.
-	_, _, err := downloadPlannedFile(ctx, client, "ollama", "tiny", file, func(n int64) {
+	_, _, err := downloadPlannedFile(ctx, client, "llamacpp", f.model, file, func(n int64) {
 		if n >= 65536 {
 			cancel()
 		}
@@ -234,14 +244,10 @@ func TestModelCopyReverseCancellationKeepsPartialWithoutVisibility(t *testing.T)
 		t.Fatal("cancellation did not reach source handler")
 	}
 	part, err := os.ReadFile(dest + ".part")
-	if err != nil || !bytes.Equal(part, f.model.blobs[f.weights][:65536]) {
+	if err != nil || !bytes.Equal(part, f.files[f.weights][:65536]) {
 		t.Fatalf("retained partial = %d bytes, error = %v", len(part), err)
 	}
-	for _, path := range []string{dest, filepath.Join(f.root, filepath.FromSlash(f.model.manifestRel))} {
-		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("unverified file visible at %s: %v", path, err)
-		}
-	}
+	f.notPublished(t, "after cancellation")
 	if calls.Load() != 1 || f.peer.reverseCalls.Load() != 1 {
 		t.Fatalf("file/reverse calls = %d/%d, want 1/1 without replay", calls.Load(), f.peer.reverseCalls.Load())
 	}
@@ -262,9 +268,9 @@ func TestModelCopyReverseStalePartialRetriesFreshAfterHashMismatch(t *testing.T)
 		})
 	})
 	const offset = 32768
-	writeTestFile(t, filepath.Join(f.root, filepath.FromSlash(f.weights))+".part", bytes.Repeat([]byte{0}, offset))
+	writeTestFile(t, filepath.Join(f.snapshot, filepath.FromSlash(f.weights))+".part", bytes.Repeat([]byte{0}, offset))
 	ctx := remoteFixtureContext(t)
-	if _, err := f.dst.CopyModelFrom(ctx, f.peer.client(t, ctx), "ollama", "tiny", nil); err != nil {
+	if _, err := f.dst.CopyModelFrom(ctx, f.peer.client(t, ctx), "llamacpp", f.model, nil); err != nil {
 		t.Fatal(err)
 	}
 	f.assertPublished(t)
@@ -275,12 +281,12 @@ func TestModelCopyReverseStalePartialRetriesFreshAfterHashMismatch(t *testing.T)
 	}
 }
 
-func TestModelCopyReverseFailureBeforeManifestKeepsOnlyVerifiedData(t *testing.T) {
+func TestModelCopyReverseFailureBeforeFinalFileKeepsOnlyVerifiedData(t *testing.T) {
 	var f *reverseCopyFixture
 	var refused atomic.Int32
 	f = newReverseCopyFixture(t, func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == controlModelFilePath && r.URL.Query().Get("path") == f.model.manifestRel {
+			if r.URL.Path == controlModelFilePath && r.URL.Query().Get("path") == f.weights {
 				refused.Add(1)
 				http.Error(w, "fixture refused final visibility", http.StatusForbidden)
 				return
@@ -289,40 +295,44 @@ func TestModelCopyReverseFailureBeforeManifestKeepsOnlyVerifiedData(t *testing.T
 		})
 	})
 	ctx := remoteFixtureContext(t)
-	if _, err := f.dst.CopyModelFrom(ctx, f.peer.client(t, ctx), "ollama", "tiny", nil); err == nil {
-		t.Fatal("manifest refusal reported success")
+	if _, err := f.dst.CopyModelFrom(ctx, f.peer.client(t, ctx), "llamacpp", f.model, nil); err == nil {
+		t.Fatal("model refusal reported success")
 	}
 	if refused.Load() != 1 {
 		t.Fatalf("visibility requests = %d, want one permanent refusal", refused.Load())
 	}
-	for path, want := range f.model.blobs {
-		got, err := os.ReadFile(filepath.Join(f.root, filepath.FromSlash(path)))
+	for path, want := range f.files {
+		if path == f.weights {
+			continue
+		}
+		got, err := os.ReadFile(filepath.Join(f.snapshot, filepath.FromSlash(path)))
 		if err != nil || !bytes.Equal(got, want) {
 			t.Fatalf("verified data %s missing or changed: %v", path, err)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(f.root, filepath.FromSlash(f.model.manifestRel))); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("failed copy published manifest: %v", err)
-	}
+	f.notPublished(t, "after a failed copy")
 }
 
 func TestModelCopyReverseInvalidPinNeverReachesFileHandlers(t *testing.T) {
 	test := func(name string, invalidate func(*testing.T, *remoteReverseFixture)) {
 		t.Run(name, func(t *testing.T) {
 			var calls atomic.Int32
-			f := newReverseCopyFixture(t, func(next http.Handler) http.Handler {
-				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			source := namedCustomCopyFixture(t, "tiny", 500_000, 5)
+			list := sourceFromExecutor(t, source.source, "llamacpp", "tiny").list
+			f := newRemoteReverseFixture(t, func(mesh *clustertrust.Mesh) http.Handler {
+				control := &controlServer{exec: source.source, mesh: mesh}
+				return control.requirePin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					calls.Add(1)
-					next.ServeHTTP(w, r)
-				})
+					control.mux().ServeHTTP(w, r)
+				}))
 			})
 			ctx := remoteFixtureContext(t)
-			client := f.peer.client(t, ctx)
-			invalidate(t, f.peer)
-			if _, err := client.modelFiles(ctx, "ollama", "tiny", nil); err == nil {
+			client := f.client(t, ctx)
+			invalidate(t, f)
+			if _, err := client.modelFiles(ctx, "llamacpp", "tiny", nil); err == nil {
 				t.Fatal("invalid pin allowed file listing")
 			}
-			body, _, err := client.modelFile(ctx, "ollama", "tiny", f.weights, f.listing.ExportID, 0)
+			body, _, err := client.modelFile(ctx, "llamacpp", "tiny", "model/model.gguf", list.ExportID, 0)
 			if body != nil {
 				if closeErr := body.Close(); closeErr != nil {
 					t.Error(closeErr)
@@ -370,11 +380,11 @@ func TestModelCopyReverseDispatchedDirectGETDoesNotReplay(t *testing.T) {
 		})
 	}
 	test("file listing", func(ctx context.Context, client *remoteClient) error {
-		_, err := client.modelFiles(ctx, "ollama", "tiny", nil)
+		_, err := client.modelFiles(ctx, "llamacpp", "tiny", nil)
 		return err
 	})
 	test("file download", func(ctx context.Context, client *remoteClient) error {
-		body, _, err := client.modelFile(ctx, "ollama", "tiny", "blobs/fixture", "", 0)
+		body, _, err := client.modelFile(ctx, "llamacpp", "tiny", "model/fixture.gguf", "", 0)
 		if body != nil {
 			err = errors.Join(err, body.Close())
 		}
@@ -401,7 +411,7 @@ func TestModelCopyReverseListingProgressAndFileBytesStreamBeforeCompletion(t *te
 				case <-r.Context().Done():
 					return
 				}
-				list, err := json.Marshal(modelFileList{Engine: "lmstudio", Model: "fixture", Files: []modelFile{{Path: "fixture.gguf", Size: int64(len(data)), SHA256: sha256Hex(data)}}})
+				list, err := json.Marshal(modelFileList{Engine: "llamacpp", Model: "fixture", Files: []modelFile{{Path: "fixture.gguf", Size: int64(len(data)), SHA256: sha256Hex(data)}}})
 				if err != nil {
 					t.Error(err)
 					return
@@ -438,7 +448,7 @@ func TestModelCopyReverseListingProgressAndFileBytesStreamBeforeCompletion(t *te
 	progress := make(chan streamFrame, 1)
 	listingDone := make(chan error, 1)
 	go func() {
-		list, err := client.modelFiles(ctx, "lmstudio", "fixture", func(frame streamFrame) { progress <- frame })
+		list, err := client.modelFiles(ctx, "llamacpp", "fixture", func(frame streamFrame) { progress <- frame })
 		if err == nil && (len(list.Files) != 1 || list.Files[0].SHA256 != sha256Hex(data)) {
 			err = errors.New("listing differs from source")
 		}
@@ -470,7 +480,7 @@ func TestModelCopyReverseListingProgressAndFileBytesStreamBeforeCompletion(t *te
 	case <-ctx.Done():
 		t.Fatal("listing did not complete after release")
 	}
-	body, offset, err := client.modelFile(ctx, "lmstudio", "fixture", "fixture.gguf", "", 0)
+	body, offset, err := client.modelFile(ctx, "llamacpp", "fixture", "fixture.gguf", "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}

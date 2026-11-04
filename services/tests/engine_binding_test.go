@@ -28,6 +28,7 @@ import (
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
+	"nvpair-shared/testbin"
 )
 
 // These cases exercise production service, broker, proxy and manager processes.
@@ -59,23 +60,39 @@ func newEngineBindingServiceFixture(t *testing.T, s *remoteServiceFixture, confi
 	var journal map[string]json.RawMessage
 	task2Decode(t, readPolicyBytes(t, filepath.Join(s.configDir, "engine-settings-operations.json")), &journal)
 	jointWriteJSON(t, filepath.Join(filepath.Dir(s.clusterDir), "engine-settings-operations.json"), journal)
-	facades := map[string]int{"ollama": e.facadePort, "llamacpp": e.targetFacadePort}
+	facades := map[string]int{"llamacpp-custom": e.facadePort, "llamacpp": e.targetFacadePort}
 	for _, name := range engines.Names() {
 		if _, exists := facades[name]; !exists {
 			facades[name] = freePort(t)
 		}
 	}
 	writePrivateBrokerEngineSettings(t, s.configDir, s.clusterDir, facades)
-	s.proxyPath = s.copyBinary(proxyBin)
-	s.inventory.paths = append(s.inventory.paths, s.proxyPath)
+	// A paired standalone fixture may run concurrently in this test. Reuse the
+	// registered manager observation image for this proxy personality, and keep
+	// its real proxy in the service bundle so their cleanup inventories differ.
+	image, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.proxyControl.image = filepath.Join(testbin.Dir(t, "tests", "performance-observations", "observation-manager"), testbin.Exe("observation-manager"))
+	jointCopyExecutable(t, image, e.proxyControl.image)
+	e.proxyControl.real = s.copyBinary(proxyBin)
+	s.proxyPath = e.proxyControl.image
+	for _, path := range []string{s.proxyPath, e.proxyControl.real} {
+		canonical, err := canonicalServicePath(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.inventory.paths = append(s.inventory.paths, canonical)
+	}
 	s.facadePort = e.targetFacadePort
 	s.env = append(s.env, "NVPAIR_TEST_SUBSCRIPTION_SCANNER="+s.scannerPath,
 		"NVPAIR_TEST_SUBSCRIPTION_PORT="+strconv.Itoa(e.scannerPort))
+	s.env = append(s.env, e.proxyControl.env()...)
 	f := &engineBindingFixture{service: s, engine: e, args: s.args(), nodeID: clustertrust.Open(s.clusterDir).NodeUUID()}
 	if f.args[len(f.args)-2] != "--proxy-engines" || f.args[len(f.args)-1] != "llamacpp" {
 		t.Fatal("service fixture no longer supplies the expected proxy argument")
 	}
-	f.args[len(f.args)-1] = "ollama,llamacpp"
 	f.start(t)
 	t.Cleanup(func() {
 		e.unblock()
@@ -96,7 +113,7 @@ func newEngineBindingServiceFixture(t *testing.T, s *remoteServiceFixture, confi
 		for _, identity := range identities {
 			e.assertProcessStopped(t, identity)
 		}
-		for _, port := range []int{e.sourcePort, e.targetPort, e.facadePort, e.targetFacadePort, e.scannerPort} {
+		for _, port := range []int{e.sourcePort, e.targetPort, e.facadePort, e.targetFacadePort, e.scannerPort, e.proxyControl.port} {
 			assertInteropListenerClosed(t, port)
 		}
 	})
@@ -140,6 +157,8 @@ func (f *engineBindingFixture) start(t *testing.T) {
 	f.started = time.Now()
 	f.service.service = f.service.startChild(f.args...)
 	f.client = f.service.readyClient()
+	f.engine.proxyControl.ready(t, "llamacpp-custom", f.engine.facadePort)
+	f.engine.proxyControl.ready(t, "llamacpp", f.engine.targetFacadePort)
 	for _, name := range engines.Names() {
 		f.call(t, "engine:get-settings", map[string]string{"engine": name})
 	}
@@ -147,6 +166,12 @@ func (f *engineBindingFixture) start(t *testing.T) {
 
 func (f *engineBindingFixture) call(t *testing.T, method string, params any) json.RawMessage {
 	t.Helper()
+	if reply, handled := f.engine.proxyControl.componentCall(t, method, params); handled {
+		if reply.Error != nil {
+			t.Fatalf("fixture proxy %s: %+v", method, reply.Error)
+		}
+		return reply.Result
+	}
 	return f.client.mustCall(t, strconv.FormatInt(newRPCID(), 10), method, mustMarshal(t, params)).Result
 }
 
@@ -184,11 +209,11 @@ func (f *engineBindingFixture) publish(t *testing.T, requireOffer bool) noderec.
 	node := noderec.DirectoryNode{
 		HostUUID: f.nodeID, ClusterUUID: f.nodeID, Name: "binding-target-" + inventory.Policy.Revision, IP: "127.0.0.1", Trusted: true,
 		Services: map[noderec.ServiceKey]noderec.ServiceStatus{
-			noderec.ServiceOllama: {Port: f.engine.facadePort}, noderec.ServiceLlamaCPP: {Port: f.engine.targetFacadePort},
+			privateFixtureEngine(t, "llamacpp-custom").DiscoveryService: {Port: f.engine.facadePort}, noderec.ServiceLlamaCPP: {Port: f.engine.targetFacadePort},
 		}, Models: inventory.Models, ModelsByEngine: inventory.ByEngine, LoadedByEngine: inventory.Loaded, Policy: inventory.Policy,
 	}
 	f.publishDirectory(t, node)
-	for _, engine := range []string{"ollama", "llamacpp"} {
+	for _, engine := range []string{"llamacpp-custom", "llamacpp"} {
 		if len(inventory.ByEngine[engine]) != 0 {
 			f.waitHealthy(t, engine)
 		}
@@ -199,8 +224,8 @@ func (f *engineBindingFixture) publish(t *testing.T, requireOffer bool) noderec.
 func (f *engineBindingFixture) waitHealthy(t *testing.T, engine string) {
 	t.Helper()
 	port, path := f.engine.targetFacadePort, "/v1/models"
-	if engine == "ollama" {
-		port, path = f.engine.facadePort, "/api/tags"
+	if engine == "llamacpp-custom" {
+		port, path = f.engine.facadePort, "/v1/models"
 	}
 	if f.service.peer == nil {
 		t.Fatal("health barrier requires a pinned peer client")
@@ -238,11 +263,8 @@ func (f *engineBindingFixture) publishDirectory(t *testing.T, node noderec.Direc
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("scanner publication HTTP %d", response.StatusCode)
 	}
-	for _, engine := range []string{"ollama", "llamacpp"} {
-		identity, ok := engines.ByName(engine)
-		if !ok {
-			t.Fatalf("unknown fixture engine %s", engine)
-		}
+	for _, engine := range []string{"llamacpp-custom", "llamacpp"} {
+		identity := privateFixtureEngine(t, engine)
 		task1Eventually(t, "proxy observed target inventory for "+engine, 10*time.Second, func() bool {
 			var result struct {
 				Nodes []struct {
@@ -252,7 +274,7 @@ func (f *engineBindingFixture) publishDirectory(t *testing.T, node noderec.Direc
 					Models []string `json:"models"`
 				} `json:"nodes"`
 			}
-			task2Decode(t, f.call(t, engine+"-proxy:nodes/list", nil), &result)
+			task2Decode(t, f.call(t, identity.ComponentName()+":nodes/list", nil), &result)
 			for _, got := range result.Nodes {
 				if got.ID == node.HostUUID && got.Host == node.Name && got.Port == node.Services[identity.DiscoveryService].Port && slices.Equal(got.Models, node.ModelsByEngine[engine]) {
 					return true
@@ -271,7 +293,6 @@ type engineBindingResponse struct {
 		Code    string `json:"code"`
 		Reason  string `json:"reason"`
 		Error   string `json:"error"`
-		Done    bool   `json:"done"`
 		Choices []struct {
 			Index   int `json:"index"`
 			Message struct {
@@ -398,7 +419,7 @@ func (f *engineBindingFixture) assertEffects(t *testing.T, sourceStarts, targetS
 	if e.checkSourceExit && e.sourceAliveAtTarget {
 		t.Fatal("target started before actual source process exit")
 	}
-	if len(e.starts["ollama"]) != sourceStarts || len(e.starts["llamacpp"]) != targetStarts || e.inferences["ollama"] != sourceInference || e.inferences["llamacpp"] != targetInference {
+	if len(e.starts["llamacpp-custom"]) != sourceStarts || len(e.starts["llamacpp"]) != targetStarts || e.inferences["llamacpp-custom"] != sourceInference || e.inferences["llamacpp"] != targetInference {
 		t.Fatalf("engine effects starts=%v inference=%v, want starts=%d/%d inference=%d/%d", e.starts, e.inferences, sourceStarts, targetStarts, sourceInference, targetInference)
 	}
 }
@@ -446,7 +467,7 @@ func testEngineBindingPolicy(t *testing.T) {
 	view := decodeResult[managementSnapshot](t, *f.client.mustCall(t, strconv.FormatInt(newRPCID(), 10), "cluster:get-remote-management", mustMarshal(t, map[string]any{})))
 	f.call(t, "cluster:set-remote-management", map[string]any{"peerUuid": "management-service-allowed", "allowed": true, "expectedRevision": view.Revision})
 	peer := want.PeerProjection()
-	peer.EngineBindings = nodepolicy.EngineBindings{{Engine: "ollama", Model: "other-model"}}
+	peer.EngineBindings = nodepolicy.EngineBindings{{Engine: "llamacpp-custom", Model: "other-model"}}
 	data := managementHTTP(t, f.service.allowed, f.service.ports.engineControl, http.MethodPost, "/v1/node-policy/set", map[string]any{"policy": peer, "expectedPersistedRevision": want.Revision}, http.StatusOK)
 	var accepted struct {
 		Policy nodepolicy.PeerPolicy `json:"policy"`
@@ -484,8 +505,8 @@ func testEngineBindingPolicy(t *testing.T) {
 func testEngineBindingDrain(t *testing.T) {
 	f := newEngineBindingFixture(t, func(e *switchProcessFixture) { e.checkSourceExit = true; e.holdTarget = true })
 	e := f.engine
-	f.call(t, "engine:start", map[string]string{"engine": "ollama"})
-	sourcePID := e.pid(t, "ollama")
+	f.call(t, "engine:start", map[string]string{"engine": "llamacpp-custom"})
+	sourcePID := e.pid(t, "llamacpp-custom")
 	f.publish(t, false)
 	client := &http.Client{Timeout: 100 * time.Second}
 	defer client.CloseIdleConnections()
@@ -503,7 +524,7 @@ func testEngineBindingDrain(t *testing.T) {
 		active = f.status(t, "")
 		return active.Receipt != nil && active.Receipt.Phase == settings.SwitchDraining
 	})
-	if !active.Receipt.Automatic || active.ActiveRequestID != active.Receipt.RequestID || active.Receipt.Request.SourceEngine != "ollama" || active.Receipt.Request.TargetEngine != "llamacpp" || active.Receipt.Caller != settings.SwitchOriginLocal {
+	if !active.Receipt.Automatic || active.ActiveRequestID != active.Receipt.RequestID || active.Receipt.Request.SourceEngine != "llamacpp-custom" || active.Receipt.Request.TargetEngine != "llamacpp" || active.Receipt.Caller != settings.SwitchOriginLocal {
 		t.Fatalf("automatic drain identity=%+v", active)
 	}
 	if active.Receipt.AcceptedAt.Before(f.started.Add(time.Minute)) {
@@ -525,7 +546,7 @@ func testEngineBindingDrain(t *testing.T) {
 	default:
 	}
 	e.unblockSource()
-	assertEngineBindingSuccess(t, engineBindingAwait(t, old), "ollama", "management-service-target")
+	assertEngineBindingSuccess(t, engineBindingAwait(t, old), "llamacpp-custom", "management-service-target")
 	select {
 	case <-e.targetStarting:
 	case <-time.After(20 * time.Second):
@@ -562,7 +583,7 @@ func testEngineBindingDrain(t *testing.T) {
 	f.assertEffects(t, 1, 1, 1, 1)
 	// Replacement dwell consumes the caller's allowance and must not start a
 	// second process merely because another concrete model is now requested.
-	f.bind(t, nodepolicy.EngineBindings{{Engine: "ollama", Model: "switch-model"}})
+	f.bind(t, nodepolicy.EngineBindings{{Engine: "llamacpp-custom", Model: "switch-model"}})
 	f.publish(t, true)
 	assertEngineBindingRefusal(t, engineBindingAwait(t, f.request(t, client, e.facadePort, false, 1000)), "engine-switch-cooldown")
 	f.assertEffects(t, 1, 1, 1, 1)
@@ -571,7 +592,7 @@ func testEngineBindingDrain(t *testing.T) {
 func testEngineBindingWrongEngine(t *testing.T) {
 	f := newEngineBindingFixture(t, nil)
 	f.engine.unblock()
-	for _, name := range []string{"ollama", "llamacpp"} {
+	for _, name := range []string{"llamacpp-custom", "llamacpp"} {
 		f.call(t, "engine:start", map[string]string{"engine": name})
 	}
 	f.targetBinding(t)
@@ -611,7 +632,7 @@ func testEngineBindingReadyPeer(t *testing.T) {
 	peer := newSwitchProcessFixtureAt(t, base, reserveFixtureServicePorts(t))
 	peer.unblock()
 	peer.rpcOK(t, "engine:start", map[string]string{"engine": "llamacpp"})
-	f.call(t, "engine:start", map[string]string{"engine": "ollama"})
+	f.call(t, "engine:start", map[string]string{"engine": "llamacpp-custom"})
 	f.targetBinding(t)
 	f.publish(t, true)
 	var inventory struct {
@@ -644,7 +665,7 @@ func testEngineBindingReadyPeer(t *testing.T) {
 		return response.StatusCode == http.StatusOK
 	})
 	f.publishDirectory(t, noderec.DirectoryNode{HostUUID: peerID, ClusterUUID: peerID, Name: peerID, IP: "127.0.0.1", Trusted: true,
-		Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceOllama: {Port: peer.facadePort}, noderec.ServiceLlamaCPP: {Port: peer.targetFacadePort}},
+		Services: map[noderec.ServiceKey]noderec.ServiceStatus{privateFixtureEngine(t, "llamacpp-custom").DiscoveryService: {Port: peer.facadePort}, noderec.ServiceLlamaCPP: {Port: peer.targetFacadePort}},
 		Models:   inventory.Models, ModelsByEngine: inventory.ByEngine, LoadedByEngine: inventory.Loaded, Policy: inventory.Policy,
 	})
 	f.call(t, "llamacpp-proxy:node/set-priority", map[string]any{"generation": 1, "nodes": []string{f.nodeID, peerID}})
@@ -709,7 +730,7 @@ func testEngineBindingReadyPeer(t *testing.T) {
 	f.assertEffects(t, 1, 0, 0, 0)
 	peer.mu.Lock()
 	defer peer.mu.Unlock()
-	if peer.inferences["llamacpp"] != 1 || peer.inferences["ollama"] != 0 || len(peer.starts["llamacpp"]) != 1 {
+	if peer.inferences["llamacpp"] != 1 || peer.inferences["llamacpp-custom"] != 0 || len(peer.starts["llamacpp"]) != 1 {
 		t.Fatalf("ready peer effects starts=%v inference=%v", peer.starts, peer.inferences)
 	}
 }
@@ -754,14 +775,14 @@ func testEngineBindingVeto(t *testing.T) {
 
 func testEngineBindingProtectedResident(t *testing.T) {
 	f := newEngineBindingFixture(t, nil)
-	f.call(t, "engine:start", map[string]string{"engine": "ollama"})
+	f.call(t, "engine:start", map[string]string{"engine": "llamacpp-custom"})
 	profile := fixtureResidentProfile()
 	// Desired resident protection is sufficient for the stop guard. This
 	// declaration supplies no live qualification and claims no loaded model.
-	profile.Engine, profile.Model, profile.Name = "ollama", "switch-model", "binding-protected-source"
+	profile.Engine, profile.Model, profile.Name = "llamacpp-custom", "switch-model", "binding-protected-source"
 	want := fetchServicePolicy(t, f.client).Policy
 	want.Profiles = []nodepolicy.Profile{profile}
-	want.ResidentModels = nodepolicy.ResidentModels{{Engine: "ollama", Model: "switch-model"}}
+	want.ResidentModels = nodepolicy.ResidentModels{{Engine: "llamacpp-custom", Model: "switch-model"}}
 	want.EngineBindings = nodepolicy.EngineBindings{{Engine: "llamacpp", Model: "switch-model"}}
 	setServicePolicy(t, f.client, want)
 	f.publish(t, true)
@@ -769,7 +790,7 @@ func testEngineBindingProtectedResident(t *testing.T) {
 	defer client.CloseIdleConnections()
 	assertEngineBindingRefusal(t, engineBindingAwait(t, f.request(t, client, f.engine.targetFacadePort, false, 5000)), "no-fit")
 	f.assertEffects(t, 1, 0, 0, 0)
-	stopped, err := serviceProcessStopped(context.Background(), f.engine.pid(t, "ollama"))
+	stopped, err := serviceProcessStopped(context.Background(), f.engine.pid(t, "llamacpp-custom"))
 	if err != nil || stopped {
 		t.Fatalf("protected source stopped: stopped=%t err=%v", stopped, err)
 	}
@@ -819,7 +840,7 @@ func testEngineBindingStartFailure(t *testing.T) {
 
 func testEngineBindingCompeting(t *testing.T) {
 	f := newEngineBindingFixture(t, func(e *switchProcessFixture) { e.holdTarget = true })
-	f.bind(t, nodepolicy.EngineBindings{{Engine: "llamacpp", Model: "switch-model"}, {Engine: "ollama", Model: "other-model"}})
+	f.bind(t, nodepolicy.EngineBindings{{Engine: "llamacpp", Model: "switch-model"}, {Engine: "llamacpp-custom", Model: "other-model"}})
 	f.publish(t, true)
 	client := &http.Client{Timeout: 40 * time.Second}
 	defer client.CloseIdleConnections()
@@ -865,8 +886,8 @@ func testEngineBindingCompeting(t *testing.T) {
 func testEngineBindingRing(t *testing.T) {
 	f := newEngineBindingFixture(t, func(e *switchProcessFixture) { e.failTarget = true; e.checkSourceExit = true })
 	f.engine.unblockSource()
-	f.call(t, "engine:start", map[string]string{"engine": "ollama"})
-	manual := settings.SwitchRequest{RequestID: "binding-manual-retained", SourceEngine: "ollama", TargetEngine: "llamacpp", ExpectedRevision: "e3v1:" + strings.Repeat("0", 64)}
+	f.call(t, "engine:start", map[string]string{"engine": "llamacpp-custom"})
+	manual := settings.SwitchRequest{RequestID: "binding-manual-retained", SourceEngine: "llamacpp-custom", TargetEngine: "llamacpp", ExpectedRevision: "e3v1:" + strings.Repeat("0", 64)}
 	manualPayload := mustMarshal(t, manual)
 	busyReplies := 0
 	m, err := func() (*jsonrpc.Message, error) {
@@ -920,7 +941,7 @@ func testEngineBindingRing(t *testing.T) {
 	var first settings.SwitchReceipt
 	for i := 0; i < settings.MaxAutomaticSwitchReceipts+2; i++ {
 		if i > 0 {
-			f.call(t, "engine:start", map[string]string{"engine": "ollama"})
+			f.call(t, "engine:start", map[string]string{"engine": "llamacpp-custom"})
 			f.publish(t, true)
 		}
 		response := engineBindingAwait(t, f.request(t, client, f.engine.targetFacadePort, false, nodepolicy.MaxBoundEngineBudgetMs))
@@ -977,7 +998,7 @@ func testEngineBindingRing(t *testing.T) {
 
 func testEngineBindingRestart(t *testing.T) {
 	f := newEngineBindingFixture(t, func(e *switchProcessFixture) { e.holdTarget = true; e.checkSourceExit = true })
-	f.call(t, "engine:start", map[string]string{"engine": "ollama"})
+	f.call(t, "engine:start", map[string]string{"engine": "llamacpp-custom"})
 	f.targetBinding(t)
 	f.publish(t, true)
 	client := &http.Client{Timeout: 100 * time.Second}
@@ -1010,7 +1031,7 @@ func testEngineBindingRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertSwitchProcessStopped(t, broker.PID)
-	assertSwitchProcessStopped(t, f.engine.pid(t, "ollama"))
+	assertSwitchProcessStopped(t, f.engine.pid(t, "llamacpp-custom"))
 	assertSwitchProcessStopped(t, f.engine.pid(t, "llamacpp"))
 	f.engine.unblock()
 	select {
@@ -1037,7 +1058,7 @@ func testEngineBindingRestart(t *testing.T) {
 		Engines map[string]bool `json:"engines"`
 	}
 	task2Decode(t, readLiveDurableFile(t, filepath.Join(jointAppDir(f.service.configDir), "engine-bin", "engine-state.json")), &intent)
-	for _, engine := range []string{"ollama", "llamacpp"} {
+	for _, engine := range []string{"llamacpp-custom", "llamacpp"} {
 		if on, known := intent.Engines[engine]; !known || on {
 			t.Fatalf("post-recovery %s intent known=%t on=%t", engine, known, on)
 		}

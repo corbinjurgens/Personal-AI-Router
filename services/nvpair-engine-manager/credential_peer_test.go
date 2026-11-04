@@ -5,37 +5,35 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync/atomic"
 	"testing"
 
 	"nvpair-shared/clustertrust"
-	"nvpair-shared/engines"
 )
 
-func credentialPeerExecutor(t *testing.T) (*Executor, *credentialFake) {
+// credentialPeerExecutor returns an executor whose running engine holds the
+// serving credential, so a route that leaked it would be visible.
+func credentialPeerExecutor(t *testing.T) *Executor {
 	t.Helper()
 	ex := newTestExecutor(t, testEngineManifest(fakeEngineBin))
 	st, err := ex.state("fake")
 	if err != nil {
 		t.Fatal(err)
 	}
-	st.plat.Runtime.UserCredential = true
 	st.plat.Runtime.Ready = nil
-	fake := &credentialFake{value: credentialTestKey}
-	ex.credentials = credentialStore{backend: fake}
-	return ex, fake
+	ownServingCredential(st, 45678)
+	st.mu.Lock()
+	st.running = true
+	st.mu.Unlock()
+	return ex
 }
 
-func credentialPeerRequests(t *testing.T, client *http.Client, base string, ex *Executor, fake *credentialFake, relay *syncBuffer) {
+func credentialPeerRequests(t *testing.T, client *http.Client, base string, ex *Executor, relay *syncBuffer) {
 	t.Helper()
 	audit := &syncBuffer{}
 	old := slog.Default()
@@ -59,8 +57,8 @@ func credentialPeerRequests(t *testing.T, client *http.Client, base string, ex *
 		if resp.StatusCode != want {
 			t.Fatalf("peer route %s %s status=%d, want %d", method, path, resp.StatusCode, want)
 		}
-		if bytes.Contains(data, []byte(credentialTestKey)) || bytes.Contains(data, []byte("configured")) || bytes.Contains(data, []byte("supported")) {
-			t.Fatal("peer reply exposed credential or state")
+		if bytes.Contains(data, []byte(credentialTestKey)) {
+			t.Fatal("peer reply exposed credential")
 		}
 		return data
 	}
@@ -74,13 +72,7 @@ func credentialPeerRequests(t *testing.T, client *http.Client, base string, ex *
 		t.Fatal("inventory positive control failed")
 	}
 	for _, tc := range []struct{ name, method, path, body string }{
-		{"set", http.MethodPost, "/v1/engines/set-credential", `{"engine":"fake","credential":"test-key-123"}`},
-		{"clear", http.MethodPost, "/v1/engines/set-credential", `{"engine":"fake","credential":""}`},
-		{"state", http.MethodGet, "/v1/engines/credential-state", ""},
 		{"retrieval", http.MethodGet, "/v1/engines/local-credential", ""},
-		{"RPC set", http.MethodPost, "/", `{"jsonrpc":"2.0","id":1,"method":"engine:set-credential","params":{"engine":"fake","credential":"test-key-123"}}`},
-		{"RPC clear", http.MethodPost, "/", `{"jsonrpc":"2.0","id":1,"method":"engine:set-credential","params":{"engine":"fake","credential":""}}`},
-		{"RPC state", http.MethodPost, "/", `{"jsonrpc":"2.0","id":1,"method":"engine:credential-state","params":{"engine":"fake"}}`},
 		{"RPC retrieval", http.MethodPost, "/", `{"jsonrpc":"2.0","id":1,"method":"internal:local-engine-credential","params":{"engine":"fake"}}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) { request(t, tc.method, tc.path, tc.body, http.StatusNotFound) })
@@ -94,9 +86,6 @@ func credentialPeerRequests(t *testing.T, client *http.Client, base string, ex *
 	}
 	if len(relay.frames()) != 0 {
 		t.Fatal("peer attempts invoked parent relay")
-	}
-	if fake.gets != 0 || fake.writes != 0 {
-		t.Fatal("peer attempts invoked credential store")
 	}
 }
 
@@ -112,7 +101,7 @@ func TestCredentialPeerDirectRoutesAbsent(t *testing.T) {
 			if f.mesh.RemoteManagement("caller").Allowed != allowed {
 				t.Fatal("permission fixture mismatch")
 			}
-			ex, fake := credentialPeerExecutor(t)
+			ex := credentialPeerExecutor(t)
 			relay := &syncBuffer{}
 			NewManager(NewCodec(relay), ex, f.mesh, f.dir)
 			s := &controlServer{exec: ex, mesh: f.mesh}
@@ -122,7 +111,7 @@ func TestCredentialPeerDirectRoutesAbsent(t *testing.T) {
 			defer server.Close()
 			client := f.client("caller")
 			defer client.CloseIdleConnections()
-			credentialPeerRequests(t, client, server.URL, ex, fake, relay)
+			credentialPeerRequests(t, client, server.URL, ex, relay)
 		})
 	}
 }
@@ -134,7 +123,7 @@ func TestCredentialPeerReverseRoutesAbsent(t *testing.T) {
 			name = "management denied"
 		}
 		t.Run(name, func(t *testing.T) {
-			ex, fake := credentialPeerExecutor(t)
+			ex := credentialPeerExecutor(t)
 			relay := &syncBuffer{}
 			f := newRemoteReverseFixture(t, func(mesh *clustertrust.Mesh) http.Handler {
 				NewManager(NewCodec(relay), ex, mesh, t.TempDir())
@@ -145,7 +134,7 @@ func TestCredentialPeerReverseRoutesAbsent(t *testing.T) {
 				t.Fatal("permission fixture mismatch")
 			}
 			client := f.client(t, remoteFixtureContext(t))
-			credentialPeerRequests(t, client.controlHTTP, client.base, ex, fake, relay)
+			credentialPeerRequests(t, client.controlHTTP, client.base, ex, relay)
 			if f.reverseCalls.Load() == 0 {
 				t.Fatal("fixture did not use reverse inner mTLS")
 			}
@@ -153,42 +142,11 @@ func TestCredentialPeerReverseRoutesAbsent(t *testing.T) {
 	}
 }
 
-func TestCredentialPeerRegistryAndInventedRemoteMethods(t *testing.T) {
+func TestCredentialPeerRegistryHasNoCredentialRoute(t *testing.T) {
 	server := &controlServer{}
 	for _, route := range server.routes() {
 		if strings.Contains(route.path, "credential") || strings.Contains(route.family, "credential") || route.path == "/" || strings.Contains(strings.ToLower(route.path), "rpc") {
 			t.Fatal("credential or generic RPC route registered")
 		}
-	}
-	ex, fake := credentialPeerExecutor(t)
-	out := &syncBuffer{}
-	manager := NewManager(NewCodec(out), ex, nil, t.TempDir())
-	var dials atomic.Int32
-	manager.controlHTTP = clustertrust.NewPeerServiceClient(nil, clustertrust.PeerServiceClientOptions{
-		DialContext: func(context.Context, string, string) (net.Conn, error) {
-			dials.Add(1)
-			return nil, errors.New("unexpected peer dial")
-		},
-	})
-	// No remote family dispatch is registered, so resolution itself must never
-	// happen. A remote peer is not needed for the supplementary stdio check.
-	for i, method := range []string{"engine:remote-set-credential", "engine:remote-credential-state", "engine:remote-local-credential"} {
-		id := json.RawMessage([]byte{byte('1' + i)})
-		manager.handleMessage(t.Context(), &Message{ID: &id, Method: method, Params: json.RawMessage(`{"engine":"fake","node":"peer","credential":"test-key-123"}`)})
-	}
-	frames := out.frames()
-	if len(frames) != 3 {
-		t.Fatal("missing method-not-found replies")
-	}
-	for _, response := range frames {
-		if response.Error == nil || response.Error.Code != -32601 {
-			t.Fatal("invented remote method accepted")
-		}
-	}
-	if dials.Load() != 0 || fake.gets != 0 || fake.writes != 0 || strings.Contains(credentialOutput(out), credentialTestKey) {
-		t.Fatal("invented remote method had effects")
-	}
-	if engines.SetCredentialMethod == engines.LocalCredentialMethod {
-		t.Fatal("public and broker-only methods overlap")
 	}
 }

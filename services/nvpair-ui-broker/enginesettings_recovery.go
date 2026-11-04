@@ -5,11 +5,8 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"reflect"
 	"time"
 
@@ -87,75 +84,15 @@ func (b *Broker) prepareExplicitEngineSettings(engine string) bool {
 	if !ok {
 		return false
 	}
-	profile, _ := engineProxyProfileFor(engine)
+	profile, ok := b.frontedEngineProfile(engine)
+	if !ok {
+		return false
+	}
 	state := b.engineProxy(profile)
 	state.explicitSettings.Store(true)
-	state.managedFacade.Store(false)
 	state.backendPort.Store(int32(config.ServerPort))
 	state.startupPort.Store(int32(config.ProxyPort))
-	if engine == "ollama" {
-		b.managedOllamaBackend.Store(0)
-		b.syncCurrentEngineOllamaHostAliasReservation()
-	}
 	return true
-}
-
-// Legacy proxy stores did not distinguish user choices from automatic moves.
-// Preserve a valid non-colliding saved choice as explicit on first upgrade.
-// LM Studio's old 1235 default is excluded, matching its existing migration.
-func (b *Broker) migrateLegacyEngineSettings() {
-	b.engineConfigMu.Lock()
-	defer b.engineConfigMu.Unlock()
-	if b.loadEngineSettingsLocked() != nil || b.getEngineMgr() == nil {
-		return
-	}
-	journal, err := b.engineSettingsPath()
-	if err != nil {
-		return
-	}
-	for _, engine := range []string{"ollama", "lmstudio"} {
-		name := "proxy-port.json"
-		if engine == "lmstudio" {
-			name = "lmstudio-proxy-port.json"
-		}
-		if b.engineSettings[engine] != nil {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(filepath.Dir(journal), name))
-		if err != nil {
-			continue
-		}
-		var saved struct {
-			Port int `json:"port"`
-		}
-		if json.Unmarshal(data, &saved) != nil || saved.Port < 1 || saved.Port > 65535 || (engine == "lmstudio" && saved.Port == 1235) {
-			continue
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_ = b.settingsWorkerCall(ctx, "engine:status", map[string]string{"engine": engine}, nil)
-		var launch settings.LaunchState
-		err = b.settingsWorkerCall(ctx, "engine:get-launch", map[string]string{"engine": engine}, &launch)
-		if err != nil || !launch.Editable || launch.ServerPort == saved.Port {
-			cancel()
-			continue
-		}
-		config := settings.ConfigFromLaunch(launch, saved.Port)
-		current := settings.Snapshot{Running: launch.Running, EffectiveServerPort: launch.EffectivePort}
-		if proxy := b.settingsProxy(engine); proxy != nil {
-			_, current.EffectiveProxyPort = proxy.Status(engine)
-		}
-		err = b.validateSettingsPortsLocked(ctx, engine, config, current)
-		cancel()
-		if err != nil {
-			continue
-		}
-		b.engineSettings[engine] = &engineSettingsRecord{Explicit: true, Receipts: map[string]settingsReceipt{}, Snapshot: settings.Snapshot{NodeID: b.nodeID, Engine: engine, Revision: 1, AppliedRevision: 1, Epoch: b.engineSettingsEpoch, Phase: "idle", Settings: config.Clone()}}
-		if err := b.saveEngineSettingsLocked(); err != nil {
-			delete(b.engineSettings, engine)
-			b.engineSettingsError = err
-			return
-		}
-	}
 }
 
 func (b *Broker) replayLoadedEngineSettings() {

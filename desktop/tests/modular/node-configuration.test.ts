@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // @vitest-environment jsdom
 
+import { customEngine, customEngineDescriptor } from './engine-fixtures'
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -26,6 +27,7 @@ import NodeDeclaredRoles from '@/ui/components/NodeList/NodeDeclaredRoles'
 import RoleEditor from '@/ui/components/RoutingSettings/RoleEditor'
 import { useDiscoveredNodesStore } from '@/ui/stores/discovered-nodes.store'
 import { useEngineModelsStore } from '@/ui/stores/engine-models.store'
+import { useEngineStatusStore } from '@/ui/stores/engine-status.store'
 import {
     inventoryChoices,
     NODE_PAUSED_MESSAGE,
@@ -58,8 +60,8 @@ function model(name: string, downloaded = true): ModelItem {
 }
 
 const inventory: EngineModels[] = [
-    { nodeId: PEER, engineType: 'ollama', models: [model('qwen3:4b'), model('gone', false)] },
-    { nodeId: PEER, engineType: 'llama-cpp', models: [model('gemma-3-27b')] }
+    { nodeId: PEER, engineType: 'llama-cpp', models: [model('qwen3:4b'), model('gone', false)] },
+    { nodeId: PEER, engineType: customEngine, models: [model('gemma-3-27b')] }
 ]
 
 /** A peer projection: device fields, local tier entries and roles. */
@@ -72,8 +74,8 @@ function policyText(revision: string, extra: Record<string, JsonValue> = {}): st
             admission: { maxResidentModels: 1 },
             tiers: {
                 weak: [
-                    { kind: 'local', engine: 'ollama', model: 'missing' },
-                    { kind: 'local', engine: 'ollama', model: 'qwen3:4b' }
+                    { kind: 'local', engine: 'llamacpp', model: 'missing' },
+                    { kind: 'local', engine: 'llamacpp', model: 'qwen3:4b' }
                 ],
                 strong: [{ kind: 'api', deployment: 'cloud' }]
             },
@@ -126,7 +128,7 @@ describe('role substitution', () => {
     ])('keeps a remote role draft without sending during $name', async ({ policy }) => {
         const store = useNodeConfigurationStore.getState()
         store.adopt(PEER, snapshot('5', policy))
-        store.setRole(PEER, 'weak', { engine: 'ollama', model: 'qwen3:4b' })
+        store.setRole(PEER, 'weak', { engine: 'llamacpp', model: 'qwen3:4b' })
 
         await store.save(PEER, PEER)
         await store.save(PEER, PEER)
@@ -135,14 +137,14 @@ describe('role substitution', () => {
         expect(entry()).toMatchObject({
             phase: 'vetoed',
             message: NODE_PAUSED_MESSAGE,
-            draft: { weak: { engine: 'ollama', model: 'qwen3:4b' } }
+            draft: { weak: { engine: 'llamacpp', model: 'qwen3:4b' } }
         })
     })
 
     it('uses live draining readback even while the saved document is available', async () => {
         const store = useNodeConfigurationStore.getState()
         store.adopt(PEER, { ...policyDocument('5'), availability: 'draining' })
-        store.setRole(PEER, 'weak', { engine: 'ollama', model: 'qwen3:4b' })
+        store.setRole(PEER, 'weak', { engine: 'llamacpp', model: 'qwen3:4b' })
         await store.save(PEER, PEER)
         expect(set).not.toHaveBeenCalled()
         expect(entry().phase).toBe('vetoed')
@@ -157,7 +159,7 @@ describe('role substitution', () => {
                 observationGeneration: 1,
                 models: [
                     {
-                        engine: 'ollama',
+                        engine: 'llamacpp',
                         model: 'qwen3:4b',
                         desiredResident: true,
                         state: 'blocked',
@@ -167,7 +169,7 @@ describe('role substitution', () => {
             }
         }
         store.adopt(PEER, locked)
-        store.setRole(PEER, 'weak', { engine: 'ollama', model: 'qwen3:4b' })
+        store.setRole(PEER, 'weak', { engine: 'llamacpp', model: 'qwen3:4b' })
         set.mockResolvedValue(snapshot('6'))
         await store.save(PEER, PEER)
         expect(set).toHaveBeenCalledTimes(1)
@@ -177,11 +179,11 @@ describe('role substitution', () => {
     it('permits local role configuration while paused', async () => {
         const store = useNodeConfigurationStore.getState()
         store.adopt(SELF, snapshot('5', { availability: 'paused', pausedBy: 'peer' }))
-        store.setRole(SELF, 'weak', { engine: 'ollama', model: 'qwen3:4b' })
+        store.setRole(SELF, 'weak', { engine: 'llamacpp', model: 'qwen3:4b' })
         set.mockResolvedValue(
             snapshot('6', {
                 availability: 'paused',
-                roles: { weak: { engine: 'ollama', model: 'qwen3:4b' } }
+                roles: { weak: { engine: 'llamacpp', model: 'qwen3:4b' } }
             })
         )
         await store.save(SELF, undefined)
@@ -199,11 +201,11 @@ describe('role substitution', () => {
         }
         const canonicalPause = { ...legacyPause, stopEngines: true, unloadModels: true }
         store.adopt(PEER, snapshot('5', { pause: legacyPause }))
-        store.setRole(PEER, 'weak', { engine: 'ollama', model: 'qwen3:4b' })
+        store.setRole(PEER, 'weak', { engine: 'llamacpp', model: 'qwen3:4b' })
         set.mockResolvedValue(
             snapshot('6', {
                 pause: canonicalPause,
-                roles: { weak: { engine: 'ollama', model: 'qwen3:4b' } }
+                roles: { weak: { engine: 'llamacpp', model: 'qwen3:4b' } }
             })
         )
         await store.save(PEER, PEER)
@@ -215,7 +217,7 @@ describe('role substitution', () => {
     it('keeps a refused draft after resume until preview and an explicit revision-checked save', async () => {
         const store = useNodeConfigurationStore.getState()
         store.adopt(PEER, snapshot('5'))
-        store.setRole(PEER, 'weak', { engine: 'ollama', model: 'qwen3:4b' })
+        store.setRole(PEER, 'weak', { engine: 'llamacpp', model: 'qwen3:4b' })
         set.mockRejectedValueOnce(new ServiceCallError('pause accepted', LOCAL_VETO_CODE))
         await store.save(PEER, PEER)
         store.adopt(PEER, snapshot('6'))
@@ -227,7 +229,7 @@ describe('role substitution', () => {
         expect(set).toHaveBeenCalledTimes(1)
         expect(entry().phase).toBe('draft')
         set.mockResolvedValue(
-            snapshot('7', { roles: { weak: { engine: 'ollama', model: 'qwen3:4b' } } })
+            snapshot('7', { roles: { weak: { engine: 'llamacpp', model: 'qwen3:4b' } } })
         )
         await store.save(PEER, PEER)
         expect(set).toHaveBeenCalledTimes(2)
@@ -239,11 +241,11 @@ describe('role substitution', () => {
         async edit => {
             const store = useNodeConfigurationStore.getState()
             store.adopt(PEER, snapshot('5'))
-            store.setRole(PEER, 'weak', { engine: 'ollama', model: 'qwen3:4b' })
+            store.setRole(PEER, 'weak', { engine: 'llamacpp', model: 'qwen3:4b' })
             set.mockRejectedValueOnce(new ServiceCallError('pause accepted', LOCAL_VETO_CODE))
             await store.save(PEER, PEER)
 
-            const changed = { engine: 'ollama', model: 'changed-model' }
+            const changed = { engine: 'llamacpp', model: 'changed-model' }
             if (edit === 'setRole') store.setRole(PEER, 'weak', changed)
             else store.setDraft(PEER, { weak: changed })
             expect(entry().phase).toBe('vetoed')
@@ -265,7 +267,7 @@ describe('role substitution', () => {
     it('retains live draining after an identical policy push omits availability', async () => {
         const store = useNodeConfigurationStore.getState()
         store.adopt(PEER, { ...policyDocument('5'), availability: 'draining' })
-        store.setRole(PEER, 'weak', { engine: 'ollama', model: 'qwen3:4b' })
+        store.setRole(PEER, 'weak', { engine: 'llamacpp', model: 'qwen3:4b' })
         store.adopt(PEER, snapshot('5'))
 
         expect(entry().baseline?.availability).toBe('draining')
@@ -277,7 +279,7 @@ describe('role substitution', () => {
     it('allows a newer saved available revision to clear old draining readback', async () => {
         const store = useNodeConfigurationStore.getState()
         store.adopt(PEER, { ...policyDocument('5'), availability: 'draining' })
-        store.setRole(PEER, 'weak', { engine: 'ollama', model: 'qwen3:4b' })
+        store.setRole(PEER, 'weak', { engine: 'llamacpp', model: 'qwen3:4b' })
         store.adopt(PEER, snapshot('6'))
         expect(entry().baseline?.availability).toBeUndefined()
         expect(set).not.toHaveBeenCalled()
@@ -290,26 +292,26 @@ describe('role substitution', () => {
 
     it('replaces only roles and keeps every other field of the target document', () => {
         const text = withRoles(
-            policyText('5', { roles: { weak: { engine: 'ollama', model: 'a' } } }),
+            policyText('5', { roles: { weak: { engine: 'llamacpp', model: 'a' } } }),
             {
-                strong: { engine: 'llamacpp', model: 'gemma-3-27b' }
+                strong: { engine: 'llamacpp-custom', model: 'gemma-3-27b' }
             }
         )
         const sent = JSON.parse(text)
         const original = JSON.parse(policyText('5'))
         expect(sent).toEqual({
             ...original,
-            roles: { strong: { engine: 'llamacpp', model: 'gemma-3-27b' } }
+            roles: { strong: { engine: 'llamacpp-custom', model: 'gemma-3-27b' } }
         })
     })
 
     it('sends the substituted document with the target revision to a peer', async () => {
         set.mockResolvedValue(
-            snapshot('6', { roles: { medium: { engine: 'ollama', model: 'qwen3:4b' } } })
+            snapshot('6', { roles: { medium: { engine: 'llamacpp', model: 'qwen3:4b' } } })
         )
         const store = useNodeConfigurationStore.getState()
         store.adopt(PEER, snapshot('5'))
-        store.setRole(PEER, 'medium', { engine: 'ollama', model: 'qwen3:4b' })
+        store.setRole(PEER, 'medium', { engine: 'llamacpp', model: 'qwen3:4b' })
 
         const saved = await store.save(PEER, PEER)
 
@@ -319,7 +321,7 @@ describe('role substitution', () => {
         expect(request.expectedPersistedRevision).toBe('5')
         expect(JSON.parse(request.policy)).toEqual({
             ...JSON.parse(policyText('5')),
-            roles: { medium: { engine: 'ollama', model: 'qwen3:4b' } }
+            roles: { medium: { engine: 'llamacpp', model: 'qwen3:4b' } }
         })
         expect(saved?.revision).toBe('6')
         expect(entry().phase).toBe('applied')
@@ -330,7 +332,7 @@ describe('role substitution', () => {
         set.mockResolvedValue(snapshot('2'))
         const store = useNodeConfigurationStore.getState()
         store.adopt(SELF, snapshot('1'))
-        store.setRole(SELF, 'weak', { engine: 'ollama', model: 'qwen3:4b' })
+        store.setRole(SELF, 'weak', { engine: 'llamacpp', model: 'qwen3:4b' })
         await store.save(SELF, undefined)
         expect(set.mock.calls[0][0].nodeId).toBeUndefined()
         expect(set.mock.calls[0][0].expectedPersistedRevision).toBe('1')
@@ -349,15 +351,15 @@ describe('unset tiers', () => {
             PEER,
             snapshot('3', {
                 roles: {
-                    weak: { engine: 'ollama', model: 'qwen3:4b' },
-                    strong: { engine: 'llamacpp', model: 'gemma-3-27b' }
+                    weak: { engine: 'llamacpp', model: 'qwen3:4b' },
+                    strong: { engine: 'llamacpp-custom', model: 'gemma-3-27b' }
                 }
             })
         )
         store.setRole(PEER, 'weak', undefined)
         await store.save(PEER, PEER)
         expect(JSON.parse(set.mock.calls[0][0].policy).roles).toEqual({
-            strong: { engine: 'llamacpp', model: 'gemma-3-27b' }
+            strong: { engine: 'llamacpp-custom', model: 'gemma-3-27b' }
         })
     })
 
@@ -366,13 +368,13 @@ describe('unset tiers', () => {
             policyRoles(
                 JSON.stringify({
                     roles: {
-                        weak: { engine: 'ollama' },
-                        tiny: { engine: 'ollama', model: 'x' },
-                        medium: { engine: 'ollama', model: 'y' }
+                        weak: { engine: 'llamacpp' },
+                        tiny: { engine: 'llamacpp', model: 'x' },
+                        medium: { engine: 'llamacpp', model: 'y' }
                     }
                 })
             )
-        ).toEqual({ medium: { engine: 'ollama', model: 'y' } })
+        ).toEqual({ medium: { engine: 'llamacpp', model: 'y' } })
     })
 })
 
@@ -383,11 +385,11 @@ describe('conflicts', () => {
     ])('reads the target back and shows the diff without retrying: %s', async message => {
         set.mockRejectedValue(new Error(message))
         get.mockResolvedValue(
-            policyDocument('6', { roles: { weak: { engine: 'llamacpp', model: 'gemma-3-27b' } } })
+            policyDocument('6', { roles: { weak: { engine: 'llamacpp-custom', model: 'gemma-3-27b' } } })
         )
         const store = useNodeConfigurationStore.getState()
         store.adopt(PEER, snapshot('5'))
-        store.setRole(PEER, 'weak', { engine: 'ollama', model: 'qwen3:4b' })
+        store.setRole(PEER, 'weak', { engine: 'llamacpp', model: 'qwen3:4b' })
 
         expect(await store.save(PEER, PEER)).toBeNull()
 
@@ -400,8 +402,8 @@ describe('conflicts', () => {
         expect(roleDifferences(draft, latest?.roles ?? {})).toEqual([
             {
                 tier: 'weak',
-                mine: { engine: 'ollama', model: 'qwen3:4b' },
-                theirs: { engine: 'llamacpp', model: 'gemma-3-27b' }
+                mine: { engine: 'llamacpp', model: 'qwen3:4b' },
+                theirs: { engine: 'llamacpp-custom', model: 'gemma-3-27b' }
             }
         ])
         // A save while the conflict stands sends nothing.
@@ -415,7 +417,7 @@ describe('conflicts', () => {
         get.mockResolvedValue(policyDocument('6'))
         const store = useNodeConfigurationStore.getState()
         store.adopt(PEER, snapshot('5'))
-        store.setRole(PEER, 'weak', { engine: 'ollama', model: 'qwen3:4b' })
+        store.setRole(PEER, 'weak', { engine: 'llamacpp', model: 'qwen3:4b' })
         await store.save(PEER, PEER)
         store.keepDraftOnLatest(PEER)
         expect(entry().phase).toBe('draft')
@@ -427,15 +429,15 @@ describe('conflicts', () => {
     it('marks a draft stale when a newer document changes the roles', () => {
         const store = useNodeConfigurationStore.getState()
         store.adopt(PEER, snapshot('5'))
-        store.setRole(PEER, 'weak', { engine: 'ollama', model: 'qwen3:4b' })
-        store.adopt(PEER, snapshot('6', { roles: { weak: { engine: 'ollama', model: 'z' } } }))
+        store.setRole(PEER, 'weak', { engine: 'llamacpp', model: 'qwen3:4b' })
+        store.adopt(PEER, snapshot('6', { roles: { weak: { engine: 'llamacpp', model: 'z' } } }))
         expect(entry().phase).toBe('conflict')
     })
 
     it('rebases a draft when a newer document leaves the roles alone', () => {
         const store = useNodeConfigurationStore.getState()
         store.adopt(PEER, snapshot('5'))
-        store.setRole(PEER, 'weak', { engine: 'ollama', model: 'qwen3:4b' })
+        store.setRole(PEER, 'weak', { engine: 'llamacpp', model: 'qwen3:4b' })
         store.adopt(PEER, snapshot('6', { availability: 'paused' }))
         expect(entry().phase).toBe('draft')
         expect(entry().baseline?.revision).toBe('6')
@@ -446,7 +448,7 @@ describe('conflicts', () => {
         set.mockRejectedValue(new Error('-32011: this node was paused on the node itself'))
         const store = useNodeConfigurationStore.getState()
         store.adopt(PEER, snapshot('5'))
-        store.setRole(PEER, 'weak', { engine: 'ollama', model: 'qwen3:4b' })
+        store.setRole(PEER, 'weak', { engine: 'llamacpp', model: 'qwen3:4b' })
         await store.save(PEER, PEER)
         expect(entry().phase).toBe('vetoed')
         expect(get).not.toHaveBeenCalled()
@@ -457,7 +459,7 @@ describe('conflicts', () => {
         get.mockRejectedValue(new Error('connection lost'))
         const store = useNodeConfigurationStore.getState()
         store.adopt(PEER, snapshot('5'))
-        store.setRole(PEER, 'weak', { engine: 'ollama', model: 'qwen3:4b' })
+        store.setRole(PEER, 'weak', { engine: 'llamacpp', model: 'qwen3:4b' })
         await store.save(PEER, PEER)
         expect(entry().phase).toBe('unknown')
         expect(set).toHaveBeenCalledTimes(1)
@@ -482,7 +484,7 @@ describe('conflicts', () => {
         set.mockRejectedValue(new ServiceCallError('paused on the node itself', LOCAL_VETO_CODE))
         const store = useNodeConfigurationStore.getState()
         store.adopt(PEER, snapshot('5'))
-        store.setRole(PEER, 'weak', { engine: 'ollama', model: 'qwen3:4b' })
+        store.setRole(PEER, 'weak', { engine: 'llamacpp', model: 'qwen3:4b' })
         await store.save(PEER, PEER)
         expect(entry().phase).toBe('vetoed')
         expect(get).not.toHaveBeenCalled()
@@ -493,7 +495,7 @@ describe('conflicts', () => {
         get.mockResolvedValue(policyDocument('5'))
         const store = useNodeConfigurationStore.getState()
         store.adopt(PEER, snapshot('5'))
-        store.setRole(PEER, 'weak', { engine: 'ollama', model: 'qwen3:4b' })
+        store.setRole(PEER, 'weak', { engine: 'llamacpp', model: 'qwen3:4b' })
         await store.save(PEER, PEER)
         expect(entry().phase).toBe('rejected')
         expect(get).toHaveBeenCalledTimes(1)
@@ -514,7 +516,7 @@ describe('conflicts', () => {
         )
         const store = useNodeConfigurationStore.getState()
         store.adopt(PEER, snapshot('5'))
-        store.setRole(PEER, 'weak', { engine: 'ollama', model: 'qwen3:4b' })
+        store.setRole(PEER, 'weak', { engine: 'llamacpp', model: 'qwen3:4b' })
         await store.save(PEER, PEER)
         expect(entry().phase).toBe('unreachable')
         expect(entry().draft.weak?.model).toBe('qwen3:4b')
@@ -527,11 +529,11 @@ describe('conflicts', () => {
         )
         const store = useNodeConfigurationStore.getState()
         store.adopt(PEER, snapshot('5'))
-        store.setRole(PEER, 'weak', { engine: 'ollama', model: 'qwen3:4b' })
+        store.setRole(PEER, 'weak', { engine: 'llamacpp', model: 'qwen3:4b' })
         await store.save(PEER, PEER)
         expect(entry().phase).toBe('rejected')
         expect(entry().message).toContain('Remote management permission')
-        expect(entry().draft.weak).toEqual({ engine: 'ollama', model: 'qwen3:4b' })
+        expect(entry().draft.weak).toEqual({ engine: 'llamacpp', model: 'qwen3:4b' })
         expect(entry().baseline?.revision).toBe('5')
         expect(get).not.toHaveBeenCalled()
         expect(set).toHaveBeenCalledTimes(1)
@@ -543,7 +545,7 @@ describe('conflicts', () => {
         )
         const profiles = [
             {
-                engine: 'llamacpp',
+                engine: 'llamacpp-custom',
                 model: 'm',
                 localOnly: true,
                 requestOptionsMode: 'enforced',
@@ -552,10 +554,10 @@ describe('conflicts', () => {
         ]
         const store = useNodeConfigurationStore.getState()
         store.adopt(PEER, snapshot('5', { profiles }))
-        store.setRole(PEER, 'weak', { engine: 'ollama', model: 'qwen3:4b' })
+        store.setRole(PEER, 'weak', { engine: 'llamacpp', model: 'qwen3:4b' })
         await store.save(PEER, PEER)
         expect(entry().phase).toBe('rejected')
-        expect(entry().draft.weak).toEqual({ engine: 'ollama', model: 'qwen3:4b' })
+        expect(entry().draft.weak).toEqual({ engine: 'llamacpp', model: 'qwen3:4b' })
         expect(entry().baseline?.policy).toBe(policyText('5', { profiles }))
         expect(entry().baseline?.revision).toBe('5')
         expect(get).not.toHaveBeenCalled()
@@ -567,8 +569,8 @@ describe('inventory choices', () => {
     it('offers only installed models of that node, in engine-manager spelling', () => {
         expect(inventoryChoices(inventory).map(({ engine, model }) => ({ engine, model }))).toEqual(
             [
-                { engine: 'llamacpp', model: 'gemma-3-27b' },
-                { engine: 'ollama', model: 'qwen3:4b' }
+                { engine: 'llamacpp-custom', model: 'gemma-3-27b' },
+                { engine: 'llamacpp', model: 'qwen3:4b' }
             ]
         )
     })
@@ -576,18 +578,18 @@ describe('inventory choices', () => {
     it('suggests the first installed local tier entry per tier and leaves the rest unset', () => {
         const choices = inventoryChoices(inventory)
         expect(suggestRoles(choices, [policyText('1')])).toEqual({
-            weak: { engine: 'ollama', model: 'qwen3:4b' }
+            weak: { engine: 'llamacpp', model: 'qwen3:4b' }
         })
     })
 
     it('falls back to the later document for a tier the first leaves unmatched', () => {
         const choices = inventoryChoices(inventory)
         const own = JSON.stringify({
-            tiers: { strong: [{ kind: 'local', engine: 'llamacpp', model: 'gemma-3-27b' }] }
+            tiers: { strong: [{ kind: 'local', engine: 'llamacpp-custom', model: 'gemma-3-27b' }] }
         })
         expect(suggestRoles(choices, [policyText('1'), own])).toEqual({
-            weak: { engine: 'ollama', model: 'qwen3:4b' },
-            strong: { engine: 'llamacpp', model: 'gemma-3-27b' }
+            weak: { engine: 'llamacpp', model: 'qwen3:4b' },
+            strong: { engine: 'llamacpp-custom', model: 'gemma-3-27b' }
         })
     })
 })
@@ -605,7 +607,7 @@ describe('declared roles on the node card', () => {
             policy: {
                 revision: '9',
                 roles: {
-                    strong: { engine: 'llamacpp', model: 'gemma-3-27b', contextTokens: 8192 }
+                    strong: { engine: 'llamacpp-custom', model: 'gemma-3-27b', contextTokens: 8192 }
                 },
                 pausedBy: 'local'
             }
@@ -616,14 +618,14 @@ describe('declared roles on the node card', () => {
             params: { nodes: [brokerNode] }
         })
         state.handleNotification({
-            source: 'ollama-proxy',
+            source: 'llamacpp-proxy',
             method: 'node/discovered',
-            params: { id: 'uuid-roles-1', host: 'roles-host-1', port: 11434, ip: '192.0.2.41' }
+            params: { id: 'uuid-roles-1', host: 'roles-host-1', port: 8080, ip: '192.0.2.41' }
         })
         const available = () => state.getAvailableNodes().find(node => node.id === 'uuid-roles-1')
         expect(available()?.policy).toEqual({
             revision: '9',
-            roles: { strong: { engine: 'llamacpp', model: 'gemma-3-27b' } },
+            roles: { strong: { engine: 'llamacpp-custom', model: 'gemma-3-27b' } },
             pausedBy: 'local'
         })
 
@@ -645,12 +647,16 @@ describe('declared roles on the node card', () => {
             container = document.createElement('div')
             document.body.append(container)
             root = createRoot(container)
+            useEngineStatusStore.setState({
+                descriptors: new Map([[customEngine, customEngineDescriptor]])
+            })
         })
         afterEach(async () => {
             await act(async () => root.unmount())
             container.remove()
             useDiscoveredNodesStore.setState({ nodes: [] })
             useEngineModelsStore.setState({ models: new Map() })
+            useEngineStatusStore.setState({ descriptors: new Map() })
             vi.unstubAllGlobals()
         })
 
@@ -672,12 +678,12 @@ describe('declared roles on the node card', () => {
 
         it('lists each declared tier', async () => {
             discovered({
-                weak: { engine: 'ollama', model: 'qwen3:4b' },
-                strong: { engine: 'llamacpp', model: 'gemma-3-27b' }
+                weak: { engine: 'llamacpp', model: 'qwen3:4b' },
+                strong: { engine: 'llamacpp-custom', model: 'gemma-3-27b' }
             })
             await act(async () => root.render(createElement(NodeDeclaredRoles, { nodeId: PEER })))
-            expect(container.textContent).toContain('weak: qwen3:4b (Ollama)')
-            expect(container.textContent).toContain('strong: gemma-3-27b (llama.cpp)')
+            expect(container.textContent).toContain('weak: qwen3:4b (llama.cpp)')
+            expect(container.textContent).toContain('strong: gemma-3-27b (llama.cpp custom)')
             expect(container.textContent).not.toContain('medium')
         })
 

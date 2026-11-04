@@ -717,7 +717,7 @@ func TestModelSettingsRecoveryAcceptanceDoesNotOverwriteThirdJournal(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	third := []byte(`{"ollama":{"snapshot":{"phase":"idle"},"receipts":{}}}`)
+	third := []byte(`{"llamacpp-custom":{"snapshot":{"phase":"idle"},"receipts":{}}}`)
 	replacements := 0
 	h.b.engineSettingsReplacer = durablefile.Replacer{
 		Replace: func(tmp, target string) error { replacements++; return os.Rename(tmp, target) },
@@ -829,7 +829,7 @@ func TestModelSettingsRecoveryCompletedHistoryDoesNotBlockOrdinaryJournalError(t
 	receipt := record.Receipts[record.Snapshot.RequestID]
 	receipt.Phase = "succeeded"
 	record.Receipts[record.Snapshot.RequestID] = receipt
-	data, err := json.Marshal(map[string]*engineSettingsRecord{"llamacpp": record, "ollama": nil})
+	data, err := json.Marshal(map[string]*engineSettingsRecord{"llamacpp": record, "llamacpp-custom": nil})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -164,7 +164,6 @@ func (f *facade) performanceCurrentIdentity(model, api string) (performancewire.
 		q.SchemaID = performanceExtractLlamaSchema
 	case "strata":
 		q.SchemaID = performanceExtractStrataSchema
-	case "ollama":
 	default:
 		return performancewire.ProfileKey{}, q, tuple, false
 	}
@@ -232,11 +231,6 @@ const (
 // must not change the parser storage admitted for this engine-facing API.
 func (f *facade) performancePreparationMode(api string) performancePreparationMode {
 	switch f.performanceFamily() {
-	case "ollama":
-		switch api {
-		case "/api/chat", "/api/generate", "/v1/chat/completions", "/v1/completions":
-			return performancePrepareLocalNumeric
-		}
 	case "llamacpp", "strata":
 		if api == "/v1/chat/completions" {
 			return performancePrepareLocalNumeric
@@ -319,7 +313,7 @@ func preparePerformanceBuffers(ctx context.Context, body []byte, request originS
 	}
 	// OpenAI's omitted/null stream flag defaults to nonstreaming. An unusual
 	// SSE response is still detected later, but must acquire fresh frame grants.
-	if request.disabled || !request.declared || (request.protocol != streamProtocolSSE && request.protocol != streamProtocolNDJSON) {
+	if request.disabled || !request.declared || request.protocol != streamProtocolSSE {
 		return context.WithValue(ctx, performancePreparationKey{}, performancePreparation{bytes: n, mode: mode}), release, nil
 	}
 	// Response working storage is distinct from the request parser and the
@@ -638,9 +632,6 @@ func performanceOptionsWrite(body []byte, family string, h hash.Hash) bool {
 			continue
 		}
 		allowed := slices.Contains(chatRequestKeys, key) || key == "n"
-		if family == "ollama" {
-			allowed = allowed || key == "options" || key == "keep_alive" || key == "format" || key == "raw" || key == "think"
-		}
 		if !allowed {
 			return false
 		}
@@ -995,32 +986,5 @@ func (n *performanceNumbers) snapshot() performanceExtractMetadata {
 // Mark present-but-unusable evidence as unknown even if an earlier object had
 // usable counters. Absence still permits independently split usage/timings.
 func extractPerformanceObserved(payload []byte, q performanceExtractQualification) performanceExtractMetadata {
-	v := extractPerformanceMetadata(payload, q)
-	f := performanceExtractObject(payload)
-	var fields performanceExtractFields
-	if q.EngineFamily == "ollama" && (q.APIPath == "/api/chat" || q.APIPath == "/api/generate") {
-		fields = f
-		for _, check := range []struct {
-			key   string
-			value *int64
-			bit   uint16
-		}{
-			{"eval_count", v.OutputTokens, 1 << 2}, {"eval_duration", v.DecodeNs, 1 << 4}, {"load_duration", v.LoadNs, 1 << 5}, {"prompt_eval_duration", v.PrefillNs, 1 << 3},
-		} {
-			if _, present := fields.field(check.key); present && check.value == nil {
-				v.invalid |= check.bit
-			}
-		}
-		return v
-	}
-	if q.EngineFamily == "ollama" {
-		usage := performanceExtractObject(f.value("usage"))
-		if _, present := f.field("usage"); present && usage == nil {
-			v.invalid |= 1<<2 | 1<<1
-		}
-		if _, present := usage.field("completion_tokens"); present && v.OutputTokens == nil {
-			v.invalid |= 1 << 2
-		}
-	}
-	return v
+	return extractPerformanceMetadata(payload, q)
 }

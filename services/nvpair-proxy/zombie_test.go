@@ -7,7 +7,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -341,11 +340,11 @@ func TestHandleHTTP_RealSocketWriteDeadline(t *testing.T) {
 	// unwinds when the proxy tears the connection down (write error or context
 	// cancel).
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		flusher, _ := w.(http.Flusher)
-		chunk := append([]byte(`{"response":"`), bytes.Repeat([]byte("x"), 64*1024)...)
-		chunk = append(chunk, []byte("\",\"done\":false}\n")...)
+		chunk := append([]byte(`data: {"choices":[{"index":0,"delta":{"content":"`), bytes.Repeat([]byte("x"), 64*1024)...)
+		chunk = append(chunk, []byte("\"}}]}\n\n")...)
 		for {
 			if _, err := w.Write(chunk); err != nil {
 				return
@@ -440,15 +439,15 @@ func TestHandleHTTP_RealSocketFlushDeadline(t *testing.T) {
 	// Flush. ReverseProxy flushes after each write for a chunked response, so
 	// the block lands in Flush, never in Write.
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		flusher, ok := w.(http.Flusher)
 		if !ok {
 			t.Errorf("upstream ResponseWriter is not a Flusher")
 			return
 		}
-		chunk := append([]byte(`{"response":"`), bytes.Repeat([]byte("x"), 1500)...)
-		chunk = append(chunk, []byte("\",\"done\":false}\n")...)
+		chunk := append([]byte(`data: {"choices":[{"index":0,"delta":{"content":"`), bytes.Repeat([]byte("x"), 1500)...)
+		chunk = append(chunk, []byte("\"}}]}\n\n")...)
 		for {
 			if _, err := w.Write(chunk); err != nil {
 				return
@@ -542,133 +541,5 @@ func TestHandleHTTP_RealSocketFlushDeadline(t *testing.T) {
 	}
 	if !rec.has(`"state":"cancelled"`) {
 		t.Fatal("a stalled client must terminate as cancelled, not failed")
-	}
-}
-
-// A healthy client must receive a framed error and one failed workload when
-// the upstream dies mid-body, even though HTTP 200 has already committed.
-// A real http.Server also guards against ReverseProxy's ErrAbortHandler path:
-// managed framing must turn the read failure into a clean HTTP EOF instead.
-func TestHandleHTTP_UpstreamDiesMidStream_EmitsTerminal(t *testing.T) {
-	// A raw listener rather than httptest, so the abrupt close is exact: a
-	// chunked response that stops without its terminating zero-length chunk,
-	// which is what the proxy sees when an engine is killed mid-generation.
-	// Accepting in a loop keeps the address probe in targetURL from consuming
-	// the one connection the request needs.
-	upLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen upstream: %v", err)
-	}
-	defer upLn.Close()
-	go func() {
-		for {
-			conn, err := upLn.Accept()
-			if err != nil {
-				return
-			}
-			go func(c net.Conn) {
-				br := bufio.NewReader(c)
-				for {
-					line, err := br.ReadString('\n')
-					if err != nil {
-						c.Close()
-						return
-					}
-					if line == "\r\n" {
-						break
-					}
-				}
-				defer c.Close()
-				chunk := "{\"response\":\"partial tokens\",\"done\":false}\n"
-				if _, err := io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nTransfer-Encoding: chunked\r\n\r\n"); err != nil {
-					t.Errorf("write upstream headers: %v", err)
-					return
-				}
-				if _, err := fmt.Fprintf(c, "%x\r\n%s\r\n", len(chunk), chunk); err != nil {
-					t.Errorf("write complete upstream event: %v", err)
-					return
-				}
-				if _, err := io.WriteString(c, "100\r\n{\"response\":\"torn"); err != nil {
-					t.Errorf("write torn upstream event: %v", err)
-				}
-			}(conn)
-		}
-	}()
-
-	tc := anyCase(t)
-	rec := &recordingWriter{}
-	disc := NewDiscovery()
-	disc.AddManual(nodeForModel(t, "node-a", "http://"+upLn.Addr().String(), tc.advertisedModel))
-	p := newTestProxy(tc.profile, NewCodec(rec), disc, tc.profile.FacadePort)
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen proxy: %v", err)
-	}
-	handlerDone := make(chan struct{})
-	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer close(handlerDone)
-		p.soleFacade().handleHTTP(w, r)
-	})}
-	go func() { _ = srv.Serve(ln) }()
-	defer srv.Close()
-
-	conn, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatalf("dial proxy: %v", err)
-	}
-	defer conn.Close()
-	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
-		t.Fatalf("bound client I/O: %v", err)
-	}
-
-	body := tc.inferenceBody()
-	reqText := fmt.Sprintf("POST %s HTTP/1.1\r\n", tc.inferencePath) +
-		"Host: localhost\r\n" +
-		"Content-Type: application/json\r\n" +
-		fmt.Sprintf("Content-Length: %d\r\n", len(body)) +
-		"\r\n" + body
-	if _, err := conn.Write([]byte(reqText)); err != nil {
-		t.Fatalf("write request: %v", err)
-	}
-
-	response, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodPost})
-	if err != nil {
-		t.Fatalf("read proxy response: %v", err)
-	}
-	defer response.Body.Close()
-	clientBody, err := io.ReadAll(response.Body)
-	if err != nil {
-		t.Fatalf("read managed response through clean HTTP EOF: %v", err)
-	}
-	if response.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, want committed 200", response.StatusCode)
-	}
-	lines := strings.Split(strings.TrimSpace(string(clientBody)), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("response has %d NDJSON events, want complete event and error", len(lines))
-	}
-	if event := decodeJSONBody(t, lines[0]); event["response"] != "partial tokens" || event["done"] != false {
-		t.Fatalf("first complete event = %v", event)
-	}
-	if event := decodeJSONBody(t, lines[1]); event["error"] == nil {
-		t.Fatal("interrupted stream has no framed error")
-	}
-	select {
-	case <-handlerDone:
-	case <-time.After(5 * time.Second):
-		t.Fatal("origin handler did not finish after upstream interruption")
-	}
-	failed := notificationsOf(t, rec, workloadErroredMethod)
-	if len(failed) != 1 || len(notificationsOf(t, rec, workloadCompletedMethod)) != 0 {
-		t.Fatalf("terminal events: failed = %d, completed = %d; want exactly one failed", len(failed), len(notificationsOf(t, rec, workloadCompletedMethod)))
-	}
-	var terminal workloadParams
-	if err := json.Unmarshal(failed[0], &terminal); err != nil {
-		t.Fatalf("decode terminal workload: %v", err)
-	}
-	wl := terminal.WorkloadInfo
-	if wl.State != "failed" || wl.ScheduledOn != "node-a" || wl.Error == nil || !strings.Contains(*wl.Error, "stream interrupted after output began on node-a:") {
-		t.Fatalf("terminal = %+v, want failed on node-a with interruption reason", wl)
 	}
 }

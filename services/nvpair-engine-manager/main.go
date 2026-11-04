@@ -212,6 +212,7 @@ func main() {
 	// engine:set-port persists the chosen port as a manifest override in the
 	// same per-user engines/ dir that buildRegistry overlays.
 	exec.overrideDir = manifestDir
+	exec.modelSources = defaultModelSources()
 	// Loaded-model watcher cadence. Integer seconds keeps parity with the other
 	// flags, so the smallest positive interval is 1s; <=0 disables the watcher.
 	if *loadedPollSec <= 0 {

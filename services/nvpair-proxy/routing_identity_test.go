@@ -67,7 +67,7 @@ func TestRoutingIdentityMissingBindingHasZeroEffects(t *testing.T) {
 			p := NewProxy(NewCodec(w))
 			f := newFacade(p, anyProfile(t), NewDiscovery(), 0)
 			body := &identityBody{}
-			r := httptest.NewRequest(http.MethodPost, "/api/chat", body)
+			r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body)
 			ctx, cancel := context.WithTimeout(r.Context(), 100*time.Millisecond)
 			defer cancel()
 			r = r.WithContext(ctx)
@@ -152,7 +152,7 @@ func TestRoutingIdentityProcessCounterAndExhaustion(t *testing.T) {
 	for range 2 {
 		body := &identityBody{}
 		rec := httptest.NewRecorder()
-		r := httptest.NewRequest(http.MethodPost, "/api/chat", body)
+		r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body)
 		ctx, cancel := context.WithTimeout(r.Context(), 100*time.Millisecond)
 		f.handleHTTP(rec, r.WithContext(ctx))
 		cancel()

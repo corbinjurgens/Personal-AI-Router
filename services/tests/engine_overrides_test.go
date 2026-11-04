@@ -12,16 +12,19 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
+	"nvpair-shared/jsonrpc"
+	"nvpair-shared/testbin"
 )
 
 // writeDisabledBuiltinEngineOverrides fills missing built-in manifests without
-// replacing intentional private fake engines. Explicit empty auth statuses
-// replace inherited values, which require the readiness probe disabled here.
+// replacing intentional private fake engines.
 func writeDisabledBuiltinEngineOverrides(t *testing.T, root, appDir string) {
 	t.Helper()
 	dir := filepath.Join(appDir, "engines")
@@ -39,14 +42,9 @@ func writeDisabledBuiltinEngineOverrides(t *testing.T, root, appDir string) {
 		override := map[string]any{"engine": engine.Name, "platforms": map[string]any{runtime.GOOS + "/" + runtime.GOARCH: map[string]any{
 			"detect": []string{absent}, "models_dir": filepath.Join(root, "absent-models", engine.Name),
 			"runtime": map[string]any{
-				"port": 0, "bin": absent, "cli": absent, "ready": nil, "health": nil, "auth_statuses": []int{},
+				"port": 0, "bin": absent, "ready": nil, "health": nil,
 			},
 		}}}
-		if engine.Name == "lmstudio" {
-			// Its dormant delete action also requires readiness when restart_after
-			// is true. Disable that flag to keep the null-probe override valid.
-			override["actions"] = map[string]any{"delete_model": map[string]bool{"restart_after": false}}
-		}
 		data, err := json.Marshal(override)
 		if err != nil {
 			t.Fatal(err)
@@ -63,7 +61,7 @@ func privateEngineEnv(t *testing.T, root string) []string {
 	t.Helper()
 	writeDisabledBuiltinEngineOverrides(t, root, jointAppDir(root))
 	return append(os.Environ(), "HOME="+root, "XDG_CONFIG_HOME="+root,
-		"APPDATA="+root, "LOCALAPPDATA="+root, "USERPROFILE="+root, "OLLAMA_HOST=")
+		"APPDATA="+root, "LOCALAPPDATA="+root, "USERPROFILE="+root)
 }
 
 // writePrivateBrokerEngineSettings isolates the broker's health route as well
@@ -87,10 +85,7 @@ func writePrivateBrokerEngineSettings(t *testing.T, configDir, clusterDir string
 		if _, exists := journal[name]; exists {
 			continue
 		}
-		engine, ok := engines.ByName(name)
-		if !ok {
-			t.Fatalf("unknown fixture engine %q", name)
-		}
+		engine := privateFixtureEngine(t, name)
 		portPath := filepath.Join(jointAppDir(configDir), engine.PortFile)
 		portData, portErr := os.ReadFile(portPath)
 		if portErr == nil {
@@ -133,10 +128,125 @@ func writePrivateBrokerEngineSettings(t *testing.T, configDir, clusterDir string
 	}
 }
 
+func privateFixtureEngine(t *testing.T, name string) engines.Engine {
+	t.Helper()
+	if engine, ok := engines.ByName(name); ok {
+		return engine
+	}
+	if name == "llamacpp-custom" {
+		engine, ok := engines.DynamicEngine(name, "llama.cpp custom")
+		if ok {
+			return engine
+		}
+	}
+	t.Fatalf("unknown fixture engine %q", name)
+	return engines.Engine{}
+}
+
+func privateFixtureManifest(t *testing.T, name, models, image string, rt map[string]any, protocols ...string) map[string]any {
+	t.Helper()
+	rt["bin"] = image
+	manifest := map[string]any{
+		"engine": name, "models_dir": models, "runtime": rt,
+		"platforms": map[string]any{runtime.GOOS + "/" + runtime.GOARCH: map[string]any{
+			"detect": []string{image}, "models_dir": models, "runtime": rt,
+		}},
+	}
+	engine := privateFixtureEngine(t, name)
+	if engines.IsDynamicServiceKey(engine.DiscoveryService) {
+		manifest["display_name"] = engine.DisplayName
+		manifest["manifest_version"] = 1
+		manifest["family"] = "llamacpp"
+		// Inert inventory descriptors must not cause the broker to create a
+		// facade. Serving fixtures explicitly declare the routes they own.
+		manifest["protocols"] = append([]string{}, protocols...)
+		manifest["model_naming"] = "exact"
+		manifest["actions"] = map[string]any{"list_models": map[string]any{
+			"http":   map[string]any{"method": "GET", "path": "/v1/models"},
+			"result": map[string]any{"array": "data", "field": "id"},
+		}}
+	}
+	return manifest
+}
+
+func privateFixtureEngineNames() []string {
+	return append(engines.Names(), "llamacpp-custom")
+}
+
+// Reuse the transparent registered proxy relay for fixture setup. Descriptor
+// facades expose inference, but have no broker component-control namespace.
+type fixtureProxyControl struct {
+	image  string
+	real   string
+	port   int
+	client *http.Client
+}
+
+func newFixtureProxyControl(t *testing.T) *fixtureProxyControl {
+	t.Helper()
+	image, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(testbin.Dir(t, "tests", "performance-observations", "observation-proxy"), testbin.Exe("observation-proxy"))
+	jointCopyExecutable(t, image, path)
+	p := &fixtureProxyControl{image: path, real: proxyBin, port: freePort(t), client: &http.Client{Timeout: 20 * time.Second, Transport: &http.Transport{Proxy: nil}}}
+	t.Cleanup(p.client.CloseIdleConnections)
+	return p
+}
+
+func (p *fixtureProxyControl) env() []string {
+	return []string{"NVPAIR_OBSERVATION_PROXY_FIXTURE=" + p.image, "NVPAIR_OBSERVATION_REAL_PROXY=" + p.real, "NVPAIR_OBSERVATION_PROXY_CONTROL=" + strconv.Itoa(p.port)}
+}
+
+func (p *fixtureProxyControl) call(t *testing.T, engine, method string, params any) jsonrpc.Message {
+	t.Helper()
+	var reply jsonrpc.Message
+	observationWorkerHTTP(t, p.client, fmt.Sprintf("http://127.0.0.1:%d", p.port), "/control", jsonrpc.Message{
+		JSONRPC: "2.0", Method: engines.AddressMethod(engine, method), Params: mustMarshal(t, params),
+	}, &reply)
+	return reply
+}
+
+func (p *fixtureProxyControl) componentCall(t *testing.T, method string, params any) (jsonrpc.Message, bool) {
+	t.Helper()
+	for _, engine := range privateFixtureEngineNames() {
+		if bare, ok := strings.CutPrefix(method, engine+"-proxy:"); ok {
+			return p.call(t, engine, bare, params), true
+		}
+	}
+	return jsonrpc.Message{}, false
+}
+
+func (p *fixtureProxyControl) ready(t *testing.T, engine string, wantPort int) {
+	t.Helper()
+	task1Eventually(t, "owned "+engine+" facade", 20*time.Second, func() bool {
+		var frames []jsonrpc.Message
+		observationWorkerHTTP(t, p.client, fmt.Sprintf("http://127.0.0.1:%d", p.port), "/frames", nil, &frames)
+		for _, frame := range frames {
+			addressed, method := engines.SplitAddressedMethod(frame.Method)
+			if addressed != engine || method != "ready" {
+				continue
+			}
+			var status struct {
+				Port int `json:"port"`
+			}
+			if err := json.Unmarshal(frame.Params, &status); err != nil {
+				t.Fatal(err)
+			}
+			if status.Port != wantPort {
+				t.Fatalf("%s facade port=%d, want owned port=%d", engine, status.Port, wantPort)
+			}
+			return true
+		}
+		return false
+	})
+}
+
 func TestPrivateBrokerEngineSettings(t *testing.T) {
 	t.Run("selected facades use an owned unavailable backend", func(t *testing.T) {
 		configDir, clusterDir := t.TempDir(), filepath.Join(t.TempDir(), "cluster")
-		facades := map[string]int{"ollama": freePort(t), "llamacpp": freePort(t)}
+		facades := map[string]int{"llamacpp-custom": freePort(t), "llamacpp": freePort(t)}
 		writePrivateBrokerEngineSettings(t, configDir, clusterDir, facades)
 		data, err := os.ReadFile(filepath.Join(filepath.Dir(clusterDir), "engine-settings-operations.json"))
 		if err != nil {
@@ -163,10 +273,7 @@ func TestPrivateBrokerEngineSettings(t *testing.T) {
 			if err := validateFixturePort(snapshot.Settings.ServerPort); err != nil {
 				t.Fatal(err)
 			}
-			engine, ok := engines.ByName(name)
-			if !ok {
-				t.Fatalf("unknown fixture engine %q", name)
-			}
+			engine := privateFixtureEngine(t, name)
 			data, err := os.ReadFile(filepath.Join(jointAppDir(configDir), engine.PortFile))
 			if err != nil {
 				t.Fatal(err)
@@ -240,7 +347,7 @@ func TestPrivateBrokerEngineSettings(t *testing.T) {
 		if err := os.WriteFile(portPath, portData, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		facades := map[string]int{"llamacpp": freePort(t), "ollama": freePort(t)}
+		facades := map[string]int{"llamacpp": freePort(t), "llamacpp-custom": freePort(t)}
 		writePrivateBrokerEngineSettings(t, configDir, clusterDir, facades)
 		before, err := os.ReadFile(path)
 		if err != nil {
@@ -250,7 +357,7 @@ func TestPrivateBrokerEngineSettings(t *testing.T) {
 		if err := json.Unmarshal(before, &journal); err != nil {
 			t.Fatal(err)
 		}
-		if !bytes.Equal(journal["llamacpp"], intentional) || len(journal["ollama"]) == 0 {
+		if !bytes.Equal(journal["llamacpp"], intentional) || len(journal["llamacpp-custom"]) == 0 {
 			t.Fatalf("private journal changed or missing new engine: %s", before)
 		}
 		actual, err := os.ReadFile(portPath)
@@ -272,8 +379,8 @@ func TestDisabledBuiltinOverridesPreservePrivateEngine(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	private := []byte(`{"engine":"ollama","runtime":{"port":12345,"ready":{"http":"http://127.0.0.1:{port}/api/version"}}}`)
-	path := filepath.Join(dir, "ollama.json")
+	private := []byte(`{"engine":"llamacpp","runtime":{"port":12345,"ready":{"http":"http://127.0.0.1:{port}/health"}}}`)
+	path := filepath.Join(dir, "llamacpp.json")
 	if err := os.WriteFile(path, private, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -283,7 +390,7 @@ func TestDisabledBuiltinOverridesPreservePrivateEngine(t *testing.T) {
 		t.Fatalf("private engine changed: %q, %v", actual, err)
 	}
 	for _, engine := range engines.All() {
-		if engine.Name == "ollama" {
+		if engine.Name == engines.NameLlamaCPP {
 			continue
 		}
 		data, err := os.ReadFile(filepath.Join(dir, engine.Name+".json"))

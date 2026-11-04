@@ -16,8 +16,6 @@ type Key string
 
 const (
 	NodeInfo Key = "ni"
-	Ollama   Key = "ol"
-	LMStudio Key = "lm"
 	LlamaCPP Key = "lc"
 	Errors   Key = "er"
 	Workload Key = "wl"

@@ -754,7 +754,7 @@ func i7BuffersBroker(t *testing.T, capacity, wait int, setup ...func(*serviceFix
 	f.copyExecutable(self, f.scannerPath)
 	scannerPort := freePort(t)
 	f.env = append(f.env, "NVPAIR_TEST_SUBSCRIPTION_SCANNER="+f.scannerPath,
-		"NVPAIR_TEST_SUBSCRIPTION_PORT="+strconv.Itoa(scannerPort), "USERPROFILE="+f.configDir, "OLLAMA_HOST=")
+		"NVPAIR_TEST_SUBSCRIPTION_PORT="+strconv.Itoa(scannerPort), "USERPROFILE="+f.configDir)
 	for _, prepare := range setup {
 		prepare(f)
 	}

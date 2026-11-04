@@ -12,7 +12,7 @@ import (
 )
 
 func lifecycleFrame(id, state, method, origin string) json.RawMessage {
-	wl := &Workload{ID: id, Model: "m", Engine: "ollama", State: WorkloadState(state), OriginatedFrom: origin, CreatedAt: 1}
+	wl := &Workload{ID: id, Model: "m", Engine: "llamacpp", State: WorkloadState(state), OriginatedFrom: origin, CreatedAt: 1}
 	p, _ := json.Marshal(lifecycleParams{WorkloadInfo: wl})
 	return json.RawMessage(p)
 }
@@ -31,7 +31,7 @@ func TestResyncBypassesReceiverDedup(t *testing.T) {
 	post := serveEventsOverMTLS(t, srv, self, peer)
 	emitCount := func() int { mu.Lock(); defer mu.Unlock(); return emits }
 
-	wl := &Workload{ID: "1", Model: "m", Engine: "ollama", RunID: "r1", State: StateRunning, OriginatedFrom: "a", CreatedAt: 1}
+	wl := &Workload{ID: "1", Model: "m", Engine: "llamacpp", RunID: "r1", State: StateRunning, OriginatedFrom: "a", CreatedAt: 1}
 	wiRaw, _ := json.Marshal(wl)
 
 	// Normal frame: emitted once.
@@ -105,9 +105,9 @@ func TestActiveSnapshotTracking(t *testing.T) {
 func TestActiveSnapshotDistinguishesEngineAndRun(t *testing.T) {
 	m := &Manager{activeLocal: make(map[workloadKey]workloadEvent)}
 
-	m.trackActive(workloadKey{origin: "a", engine: "ollama", runID: "r1", id: "1"}, MethodStarted, lifecycleFrame("1", "running", MethodStarted, "a"), StateRunning)
-	m.trackActive(workloadKey{origin: "a", engine: "lmstudio", runID: "r2", id: "1"}, MethodStarted, lifecycleFrame("1", "running", MethodStarted, "a"), StateRunning)
-	m.trackActive(workloadKey{origin: "a", engine: "ollama", runID: "r3", id: "1"}, MethodStarted, lifecycleFrame("1", "running", MethodStarted, "a"), StateRunning)
+	m.trackActive(workloadKey{origin: "a", engine: "llamacpp", runID: "r1", id: "1"}, MethodStarted, lifecycleFrame("1", "running", MethodStarted, "a"), StateRunning)
+	m.trackActive(workloadKey{origin: "a", engine: "llamacpp-custom", runID: "r2", id: "1"}, MethodStarted, lifecycleFrame("1", "running", MethodStarted, "a"), StateRunning)
+	m.trackActive(workloadKey{origin: "a", engine: "llamacpp", runID: "r3", id: "1"}, MethodStarted, lifecycleFrame("1", "running", MethodStarted, "a"), StateRunning)
 	if got := len(m.activeSnapshot()); got != 3 {
 		t.Fatalf("count = %d, want 3 (engine + runId keep same-id workloads distinct)", got)
 	}
@@ -124,7 +124,7 @@ func TestActiveSnapshotDistinguishesEngineAndRun(t *testing.T) {
 // must not resurrect a finished job, nor strip its expiry so it never ages out.
 func TestTrackActiveMonotonicTerminal(t *testing.T) {
 	m := &Manager{activeLocal: make(map[workloadKey]workloadEvent)}
-	k := workloadKey{origin: "a", engine: "ollama", runID: "r1", id: "1"}
+	k := workloadKey{origin: "a", engine: "llamacpp", runID: "r1", id: "1"}
 
 	m.trackActive(k, MethodCompleted, lifecycleFrame("1", "completed", MethodCompleted, "a"), StateCompleted)
 	m.trackActive(k, MethodStarted, lifecycleFrame("1", "running", MethodStarted, "a"), StateRunning)

@@ -19,12 +19,12 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
+	"nvpair-shared/engines"
 	"nvpair-shared/testbin"
 )
 
@@ -42,7 +42,7 @@ func testEngineManifest(bin string) *Manifest {
 				Detect: []string{bin},
 				Runtime: Runtime{
 					Bin:    bin,
-					Env:    map[string]string{"OLLAMA_HOST": "127.0.0.1:{port}"},
+					Env:    map[string]string{"FAKE_ADDR": "127.0.0.1:{port}"},
 					Port:   0, // auto-assign a free loopback port
 					Ready:  &Probe{HTTP: "http://127.0.0.1:{port}/", Status: 200, TimeoutS: 10},
 					Health: &Probe{HTTP: "http://127.0.0.1:{port}/", Status: 200, IntervalS: 1},
@@ -56,12 +56,24 @@ func testEngineManifest(bin string) *Manifest {
 	}
 }
 
+// Native model-store and pull-stream tests still use testEngineManifest.
+// Generic callers use the fake executable's OpenAI-compatible inventory.
+func llamaTestEngineManifest(bin string) *Manifest {
+	m := testEngineManifest(bin)
+	m.ModelNaming = engines.ModelNamingExact
+	key := runtime.GOOS + "/" + runtime.GOARCH
+	p := m.Platforms[key]
+	p.Runtime.Env = map[string]string{"FAKE_ADDR": "127.0.0.1:{port}"}
+	m.Platforms[key] = p
+	m.Actions["list_models"] = Action{HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/v1/models"}}
+	return m
+}
+
 func newTestExecutor(t *testing.T, m *Manifest) *Executor {
 	t.Helper()
 	reg := NewRegistry()
 	reg.engines[m.Engine] = m
 	ex := NewExecutor(reg, NewReporter(nil), func(string, any) {}, t.TempDir())
-	ex.credentials = credentialStore{backend: &credentialFake{}}
 	acceptModelMutations(ex)
 	return ex
 }
@@ -76,7 +88,7 @@ func responseHeaderTimeout(t *testing.T, client *http.Client) time.Duration {
 }
 
 func TestEngineHTTPClientsBoundResponseHeaders(t *testing.T) {
-	ex := newTestExecutor(t, testEngineManifest(fakeEngineBin))
+	ex := newTestExecutor(t, llamaTestEngineManifest(fakeEngineBin))
 	if got := responseHeaderTimeout(t, ex.client); got != engineResponseHeaderTimeout {
 		t.Fatalf("ordinary response-header timeout = %s, want %s", got, engineResponseHeaderTimeout)
 	}
@@ -96,7 +108,7 @@ func TestEngineHTTPClientsBoundResponseHeaders(t *testing.T) {
 // so it applies to engine:action calls too, and to no other action or engine.
 func TestBoundOperationBudgetAppliesOnlyToItsAction(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !((r.Method == http.MethodPost && r.URL.Path == "/api/generate") || (r.Method == http.MethodDelete && r.URL.Path == "/api/delete")) {
+		if !((r.Method == http.MethodPost && r.URL.Path == "/models/load") || (r.Method == http.MethodDelete && r.URL.Path == "/models")) {
 			http.NotFound(w, r)
 			return
 		}
@@ -108,14 +120,14 @@ func TestBoundOperationBudgetAppliesOnlyToItsAction(t *testing.T) {
 	u, _ := url.Parse(srv.URL)
 	port, _ := strconv.Atoi(u.Port())
 
-	m := testEngineManifest(fakeEngineBin)
-	m.Engine = "ollama"
+	m := llamaTestEngineManifest(fakeEngineBin)
+	m.Engine = engines.NameLlamaCPP
 	platform := m.Platforms[runtime.GOOS+"/"+runtime.GOARCH]
 	platform.Runtime.Port = port
 	m.Platforms[runtime.GOOS+"/"+runtime.GOARCH] = platform
 	m.Actions = map[string]Action{
-		"run_model":    {HTTP: &ActionHTTP{Method: "POST", Path: "/api/generate"}},
-		"delete_model": {HTTP: &ActionHTTP{Method: "DELETE", Path: "/api/delete"}},
+		"run_model":    {HTTP: &ActionHTTP{Method: "POST", Path: "/models/load"}},
+		"delete_model": {HTTP: &ActionHTTP{Method: "DELETE", Path: "/models"}},
 	}
 	m.Operations = map[string]OperationBinding{
 		"load": {Action: "run_model", ResponseTimeoutS: 1},
@@ -125,35 +137,35 @@ func TestBoundOperationBudgetAppliesOnlyToItsAction(t *testing.T) {
 	}
 	ex := newTestExecutor(t, m)
 	ex.client = newEngineHTTPClient(20 * time.Millisecond)
-	st, err := ex.state("ollama")
+	st, err := ex.state(engines.NameLlamaCPP)
 	if err != nil {
 		t.Fatal(err)
 	}
 	st.running = true
 
-	if _, err := ex.Action(context.Background(), "ollama", "run_model", json.RawMessage(`{"model":"tiny"}`)); err != nil {
-		t.Fatalf("Ollama load was cut off by the ordinary response-header budget: %v", err)
+	if _, err := ex.Action(context.Background(), engines.NameLlamaCPP, "run_model", json.RawMessage(`{"model":"tiny"}`)); err != nil {
+		t.Fatalf("llama.cpp load was cut off by the ordinary response-header budget: %v", err)
 	}
-	if _, err := ex.Action(context.Background(), "ollama", "delete_model", json.RawMessage(`{"name":"tiny"}`)); err == nil || !strings.Contains(err.Error(), "timeout awaiting response headers") {
+	if _, err := ex.Action(context.Background(), engines.NameLlamaCPP, "delete_model", json.RawMessage(`{"name":"tiny"}`)); err == nil || !strings.Contains(err.Error(), "timeout awaiting response headers") {
 		t.Fatalf("ordinary action error = %v, want bounded response-header timeout", err)
 	}
 
-	other := testEngineManifest(fakeEngineBin)
-	other.Engine = "other"
+	other := llamaTestEngineManifest(fakeEngineBin)
+	other.Engine = portFixtureCustomEngine(t).Name
 	otherPlatform := other.Platforms[runtime.GOOS+"/"+runtime.GOARCH]
 	otherPlatform.Runtime.Port = port
 	other.Platforms[runtime.GOOS+"/"+runtime.GOARCH] = otherPlatform
 	other.Actions = map[string]Action{
-		"run_model": {HTTP: &ActionHTTP{Method: "POST", Path: "/api/generate"}},
+		"run_model": {HTTP: &ActionHTTP{Method: "POST", Path: "/models/load"}},
 	}
 	otherEx := newTestExecutor(t, other)
 	otherEx.client = newEngineHTTPClient(20 * time.Millisecond)
-	otherState, err := otherEx.state("other")
+	otherState, err := otherEx.state(other.Engine)
 	if err != nil {
 		t.Fatal(err)
 	}
 	otherState.running = true
-	if _, err := otherEx.Action(context.Background(), "other", "run_model", json.RawMessage(`{"model":"tiny"}`)); err == nil || !strings.Contains(err.Error(), "timeout awaiting response headers") {
+	if _, err := otherEx.Action(context.Background(), other.Engine, "run_model", json.RawMessage(`{"model":"tiny"}`)); err == nil || !strings.Contains(err.Error(), "timeout awaiting response headers") {
 		t.Fatalf("unbound run_model error = %v, want ordinary response-header timeout", err)
 	}
 }
@@ -193,7 +205,7 @@ func TestHTTPActionSendsStringParamsInQuery(t *testing.T) {
 		t.Fatalf("parse test server port: %v", err)
 	}
 
-	m := testEngineManifest(fakeEngineBin)
+	m := llamaTestEngineManifest(fakeEngineBin)
 	m.Engine = "llamacpp"
 	platform := m.Platforms[runtime.GOOS+"/"+runtime.GOARCH]
 	platform.Runtime.Port = port
@@ -267,7 +279,7 @@ func TestHTTPActionRejectsNonStringQueryParams(t *testing.T) {
 }
 
 func TestEngineLifecycle(t *testing.T) {
-	ex := newTestExecutor(t, testEngineManifest(fakeEngineBin))
+	ex := newTestExecutor(t, llamaTestEngineManifest(fakeEngineBin))
 	ctx := context.Background()
 	t.Cleanup(func() { _ = ex.Stop("fake") })
 
@@ -312,7 +324,7 @@ func TestCrashThenExternalServiceIsAdoptedWithoutRespawn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := testEngineManifest(fakeEngineBin)
+	m := llamaTestEngineManifest(fakeEngineBin)
 	key := runtime.GOOS + "/" + runtime.GOARCH
 	p := m.Platforms[key]
 	p.Runtime.Port = port
@@ -361,21 +373,21 @@ func TestCrashThenExternalServiceIsAdoptedWithoutRespawn(t *testing.T) {
 }
 
 func TestActionRequiresRunning(t *testing.T) {
-	ex := newTestExecutor(t, testEngineManifest(fakeEngineBin))
+	ex := newTestExecutor(t, llamaTestEngineManifest(fakeEngineBin))
 	if _, err := ex.Action(context.Background(), "fake", "list_models", nil); err == nil {
 		t.Fatal("expected error: action on a non-running engine")
 	}
 }
 
 func TestStartUnknownEngine(t *testing.T) {
-	ex := newTestExecutor(t, testEngineManifest(fakeEngineBin))
+	ex := newTestExecutor(t, llamaTestEngineManifest(fakeEngineBin))
 	if err := ex.Start(context.Background(), "nope"); err == nil {
 		t.Fatal("expected error for unknown engine")
 	}
 }
 
 func TestStartPortOverride(t *testing.T) {
-	ex := newTestExecutor(t, testEngineManifest(fakeEngineBin)) // manifest Port is 0
+	ex := newTestExecutor(t, llamaTestEngineManifest(fakeEngineBin)) // manifest Port is 0
 	t.Cleanup(func() { _ = ex.Stop("fake") })
 	want := privateTestPorts(t, 1)[0]
 	if err := ex.StartWith(context.Background(), "fake", startOpts{Port: want}); err != nil {
@@ -498,7 +510,7 @@ func TestGetInstalledAdoptsExternallyRunningEngineWithoutDetectPath(t *testing.T
 
 func TestInstallAdoptsExternalServiceWithoutDownloading(t *testing.T) {
 	engineSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/version" {
+		if r.URL.Path != "/props" {
 			http.NotFound(w, r)
 			return
 		}
@@ -526,7 +538,7 @@ func TestInstallAdoptsExternalServiceWithoutDownloading(t *testing.T) {
 				Runtime: Runtime{
 					Bin:   filepath.Join(t.TempDir(), "managed"+exeExt()),
 					Port:  enginePort,
-					Ready: &Probe{HTTP: "http://127.0.0.1:{port}/api/version", Status: http.StatusOK},
+					Ready: &Probe{HTTP: "http://127.0.0.1:{port}/props", Status: http.StatusOK},
 				},
 			},
 		},
@@ -583,7 +595,7 @@ func TestInstallDoesNotOverwriteUnknownListener(t *testing.T) {
 			Detect:  []string{filepath.Join(t.TempDir(), "missing"+exeExt())},
 			Install: &Install{Fetch: &Fetch{URL: downloadSrv.URL}},
 			Runtime: Runtime{Port: port, Ready: &Probe{
-				HTTP: "http://127.0.0.1:{port}/api/version", Status: http.StatusOK,
+				HTTP: "http://127.0.0.1:{port}/props", Status: http.StatusOK,
 			}},
 		}},
 	}
@@ -601,46 +613,9 @@ func TestInstallDoesNotOverwriteUnknownListener(t *testing.T) {
 	}
 }
 
-func TestCommandModeMissingCLIInstallsDespiteLiveAPI(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/models" {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"object":"list","data":[]}`))
-	}))
-	defer srv.Close()
-	port := portOf(t, srv.URL)
-	cli := filepath.Join(t.TempDir(), "lms"+exeExt())
-
-	key := runtime.GOOS + "/" + runtime.GOARCH
-	m := &Manifest{
-		Engine: "missing-cli", DisplayName: "Missing CLI", ManifestVersion: 1,
-		Platforms: map[string]Platform{key: {
-			Detect:  []string{cli},
-			Install: &Install{Run: []string{fakeEngineBin, "touch", cli}},
-			Runtime: Runtime{
-				Mode: "command", CLI: cli, Port: port,
-				Ready: &Probe{HTTP: "http://127.0.0.1:{port}/v1/models", Status: http.StatusOK},
-			},
-		}},
-	}
-	ex := newTestExecutor(t, m)
-	if st, err := ex.Status(m.Engine); err != nil || st.Installed || st.Running {
-		t.Fatalf("live API without CLI status = %+v, err=%v; want not installed", st, err)
-	}
-	if err := ex.Install(context.Background(), m.Engine); err != nil {
-		t.Fatalf("install missing command-mode CLI: %v", err)
-	}
-	if !fileExists(cli) {
-		t.Fatal("live API incorrectly suppressed command-mode installer")
-	}
-}
-
 func TestStatusDoesNotAdoptFacadeOnDifferentConfiguredPort(t *testing.T) {
 	facade := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/version" {
+		if r.URL.Path == "/props" {
 			_, _ = w.Write([]byte(`{"version":"facade"}`))
 			return
 		}
@@ -662,7 +637,7 @@ func TestStatusDoesNotAdoptFacadeOnDifferentConfiguredPort(t *testing.T) {
 			Detect: []string{filepath.Join(t.TempDir(), "missing"+exeExt())},
 			Runtime: Runtime{
 				Port:  backendPort,
-				Ready: &Probe{HTTP: "http://127.0.0.1:{port}/api/version", Status: http.StatusOK},
+				Ready: &Probe{HTTP: "http://127.0.0.1:{port}/props", Status: http.StatusOK},
 			},
 		}},
 	}
@@ -729,10 +704,10 @@ func TestAdoptedExternalLivenessIsTruthful(t *testing.T) {
 	}
 }
 
-func TestProxyFacadeCannotIdentifyAsOllama(t *testing.T) {
+func TestProxyFacadeCannotIdentifyAsLlamaCPP(t *testing.T) {
 	var probes atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || (r.URL.Path != "/" && r.URL.Path != "/api/version" && r.URL.Path != "/api/tags") {
+		if r.Method != http.MethodGet || (r.URL.Path != "/" && r.URL.Path != "/props" && r.URL.Path != "/v1/models") {
 			http.NotFound(w, r)
 			return
 		}
@@ -747,30 +722,31 @@ func TestProxyFacadeCannotIdentifyAsOllama(t *testing.T) {
 	u, _ := url.Parse(srv.URL)
 	port, _ := strconv.Atoi(u.Port())
 
-	m := testEngineManifest(fakeEngineBin)
-	m.Engine = "ollama"
+	m := llamaTestEngineManifest(fakeEngineBin)
+	m.Engine = engines.NameLlamaCPP
+	m.Actions["list_models"] = Action{HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/v1/models"}}
 	key := runtime.GOOS + "/" + runtime.GOARCH
 	p := m.Platforms[key]
 	p.Detect = []string{filepath.Join(t.TempDir(), "missing"+exeExt())}
 	p.Runtime.Port = port
-	p.Runtime.Ready = &Probe{HTTP: "http://127.0.0.1:{port}/api/version", Status: http.StatusOK}
+	p.Runtime.Ready = &Probe{HTTP: "http://127.0.0.1:{port}/props", Status: http.StatusOK}
 	m.Platforms[key] = p
 	ex := newTestExecutor(t, m)
 
-	if st, err := ex.Status("ollama"); err != nil || st.Installed || st.Running || st.Healthy {
+	if st, err := ex.Status(engines.NameLlamaCPP); err != nil || st.Installed || st.Running || st.Healthy {
 		t.Fatalf("proxy facade was adopted: status=%+v err=%v", st, err)
 	}
-	if err := ex.Install(context.Background(), "ollama"); err == nil || !strings.Contains(err.Error(), "occupied") {
+	if err := ex.Install(context.Background(), engines.NameLlamaCPP); err == nil || !strings.Contains(err.Error(), "occupied") {
 		t.Fatalf("install over proxy facade error = %v", err)
 	}
-	if err := ex.Start(context.Background(), "ollama"); err == nil || !strings.Contains(err.Error(), "occupied") {
+	if err := ex.Start(context.Background(), engines.NameLlamaCPP); err == nil || !strings.Contains(err.Error(), "occupied") {
 		t.Fatalf("start over proxy facade error = %v", err)
 	}
-	state, _ := ex.state("ollama")
+	state, _ := ex.state(engines.NameLlamaCPP)
 	state.mu.Lock()
 	state.running = true // stale pre-transition state must not route an action through the facade
 	state.mu.Unlock()
-	if _, err := ex.Action(context.Background(), "ollama", "list_models", nil); err == nil || !strings.Contains(err.Error(), "HTTP 409") {
+	if _, err := ex.Action(context.Background(), engines.NameLlamaCPP, "list_models", nil); err == nil || !strings.Contains(err.Error(), "HTTP 409") {
 		t.Fatalf("action through proxy facade error = %v", err)
 	}
 	if probes.Load() == 0 {
@@ -779,15 +755,15 @@ func TestProxyFacadeCannotIdentifyAsOllama(t *testing.T) {
 }
 
 func TestPreviouslyAdoptedForeignReplacementFailsClosed(t *testing.T) {
-	var isOllama atomic.Bool
-	isOllama.Store(true)
+	var isLlamaCPP atomic.Bool
+	isLlamaCPP.Store(true)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/version" && isOllama.Load() {
+		if r.URL.Path == "/props" && isLlamaCPP.Load() {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
 		if r.URL.Path == "/" {
-			w.WriteHeader(http.StatusOK) // reachable listener, but no Ollama identity
+			w.WriteHeader(http.StatusOK) // reachable listener, but no llama.cpp identity
 			return
 		}
 		http.NotFound(w, r)
@@ -796,28 +772,29 @@ func TestPreviouslyAdoptedForeignReplacementFailsClosed(t *testing.T) {
 	u, _ := url.Parse(srv.URL)
 	port, _ := strconv.Atoi(u.Port())
 
-	m := testEngineManifest(fakeEngineBin)
-	m.Engine = "ollama"
-	m.DisplayName = "Ollama"
+	m := llamaTestEngineManifest(fakeEngineBin)
+	m.Engine = engines.NameLlamaCPP
+	m.Actions["list_models"] = Action{HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/v1/models"}}
+	m.DisplayName = "llama.cpp"
 	key := runtime.GOOS + "/" + runtime.GOARCH
 	p := m.Platforms[key]
 	p.Detect = []string{filepath.Join(t.TempDir(), "missing"+exeExt())}
 	p.Runtime.Port = port
-	p.Runtime.Ready = &Probe{HTTP: "http://127.0.0.1:{port}/api/version", Status: http.StatusOK}
+	p.Runtime.Ready = &Probe{HTTP: "http://127.0.0.1:{port}/props", Status: http.StatusOK}
 	m.Platforms[key] = p
 	ex := newTestExecutor(t, m)
 
-	if st, err := ex.Status("ollama"); err != nil || !st.Running || !st.Healthy {
+	if st, err := ex.Status(engines.NameLlamaCPP); err != nil || !st.Running || !st.Healthy {
 		t.Fatalf("initial adoption = %+v, err=%v", st, err)
 	}
-	isOllama.Store(false)
-	if st, err := ex.Status("ollama"); err != nil || !st.Running || st.Healthy {
+	isLlamaCPP.Store(false)
+	if st, err := ex.Status(engines.NameLlamaCPP); err != nil || !st.Running || st.Healthy {
 		t.Fatalf("foreign replacement status = %+v, err=%v", st, err)
 	}
-	if err := ex.Start(context.Background(), "ollama"); err == nil || !strings.Contains(err.Error(), "occupied") {
+	if err := ex.Start(context.Background(), engines.NameLlamaCPP); err == nil || !strings.Contains(err.Error(), "occupied") {
 		t.Fatalf("Start accepted foreign replacement: %v", err)
 	}
-	if err := ex.Install(context.Background(), "ollama"); err == nil || !strings.Contains(err.Error(), "occupied") {
+	if err := ex.Install(context.Background(), engines.NameLlamaCPP); err == nil || !strings.Contains(err.Error(), "occupied") {
 		t.Fatalf("Install accepted foreign replacement: %v", err)
 	}
 }
@@ -836,7 +813,7 @@ func TestUninstallTerminatesRunningInstance(t *testing.T) {
 	}
 	spawnFakeListener(t, bin, port)
 
-	m := testEngineManifest(bin)
+	m := llamaTestEngineManifest(bin)
 	key := runtime.GOOS + "/" + runtime.GOARCH
 	p := m.Platforms[key]
 	p.Detect = []string{bin}
@@ -870,7 +847,7 @@ func TestUninstallDoesNotKillExternalSameNameProcess(t *testing.T) {
 	}
 	spawnFakeListener(t, externalBin, port)
 
-	m := testEngineManifest(managedBin)
+	m := llamaTestEngineManifest(managedBin)
 	key := runtime.GOOS + "/" + runtime.GOARCH
 	p := m.Platforms[key]
 	p.Detect = []string{managedBin}
@@ -895,7 +872,7 @@ func TestUninstallDoesNotKillExternalSameNameProcess(t *testing.T) {
 func TestUninstallRefusesExternalProcessEngine(t *testing.T) {
 	externalBin := filepath.Join(testbin.Dir(t, "nvpair-engine-manager", "uninstall-external", "external"), testbin.Exe("external"))
 	copyFile(t, fakeEngineBin, externalBin)
-	m := testEngineManifest(externalBin)
+	m := llamaTestEngineManifest(externalBin)
 	key := runtime.GOOS + "/" + runtime.GOARCH
 	p := m.Platforms[key]
 	p.Detect = []string{externalBin}
@@ -931,7 +908,7 @@ func TestUninstallRefusesManagedSymlinkToExternalImage(t *testing.T) {
 		t.Fatal(err)
 	}
 	spawnFakeListener(t, externalBin, port)
-	m := testEngineManifest(managedBin)
+	m := llamaTestEngineManifest(managedBin)
 	key := runtime.GOOS + "/" + runtime.GOARCH
 	p := m.Platforms[key]
 	p.Runtime.Port = port
@@ -956,12 +933,12 @@ func TestUninstallRefusesUnidentifiedLiveListener(t *testing.T) {
 	u, _ := url.Parse(srv.URL)
 	port, _ := strconv.Atoi(u.Port())
 
-	m := testEngineManifest(managedBin)
+	m := llamaTestEngineManifest(managedBin)
 	key := runtime.GOOS + "/" + runtime.GOARCH
 	p := m.Platforms[key]
 	p.Detect = []string{managedBin}
 	p.Runtime.Port = port
-	p.Runtime.Ready = &Probe{HTTP: "http://127.0.0.1:{port}/api/version", Status: http.StatusOK}
+	p.Runtime.Ready = &Probe{HTTP: "http://127.0.0.1:{port}/props", Status: http.StatusOK}
 	p.Uninstall = &Uninstall{Run: rmCmd(managedBin)}
 	m.Platforms[key] = p
 
@@ -1006,7 +983,7 @@ func TestDownloadVerify(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ex := newTestExecutor(t, testEngineManifest(fakeEngineBin))
+	ex := newTestExecutor(t, llamaTestEngineManifest(fakeEngineBin))
 	ctx := context.Background()
 
 	p, err := ex.download(ctx, "fake", &Fetch{URL: srv.URL + "/installer.ps1", SHA256: good})
@@ -1036,7 +1013,7 @@ func TestDownloadVerify(t *testing.T) {
 }
 
 func TestInstallRefusesAdmin(t *testing.T) {
-	m := testEngineManifest(fakeEngineBin)
+	m := llamaTestEngineManifest(fakeEngineBin)
 	key := runtime.GOOS + "/" + runtime.GOARCH
 	p := m.Platforms[key]
 	p.Detect = nil // ensure not-detected so install reaches the mode check
@@ -1057,7 +1034,7 @@ func TestEngineUninstall(t *testing.T) {
 	binCopy := filepath.Join(dir, testbin.Exe("fake"))
 	copyFile(t, fakeEngineBin, binCopy)
 
-	m := testEngineManifest(binCopy)
+	m := llamaTestEngineManifest(binCopy)
 	key := runtime.GOOS + "/" + runtime.GOARCH
 	p := m.Platforms[key]
 	p.Detect = []string{binCopy}
@@ -1077,103 +1054,17 @@ func TestEngineUninstall(t *testing.T) {
 }
 
 func TestUninstallNoOpWhenAbsent(t *testing.T) {
-	m := testEngineManifest(filepath.Join(t.TempDir(), "absent"+exeExt()))
+	m := llamaTestEngineManifest(filepath.Join(t.TempDir(), "absent"+exeExt()))
 	ex := newTestExecutor(t, m)
 	if err := ex.Uninstall(context.Background(), "fake"); err != nil {
 		t.Fatalf("uninstall of an absent engine should be a no-op, got %v", err)
 	}
 }
 
-// TestCommandModeLifecycle exercises the "command" runtime mode: start
-// commands run, readiness is determined by a probe (here a stand-in
-// HTTP server for the daemon's API), and the stop command runs. Marker
-// files prove the commands executed.
-func TestCommandModeLifecycle(t *testing.T) {
-	dir := t.TempDir()
-	startMarker := filepath.Join(dir, "started")
-	stopMarker := filepath.Join(dir, "stopped")
-
-	// The stand-in daemon only "serves" once the start command has run
-	// (created startMarker), so the adoption probe doesn't short-circuit
-	// the start sequence.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if fileExists(startMarker) && !fileExists(stopMarker) {
-			w.WriteHeader(http.StatusOK)
-		} else {
-			w.WriteHeader(http.StatusServiceUnavailable)
-		}
-	}))
-	// Model a real command-mode daemon: once the stop command has run (created
-	// stopMarker) the daemon exits and its port stops accepting connections.
-	// waitUnavailable confirms a stop by an actual TCP refusal, not a 503 from a
-	// still-listening socket, so the stand-in must genuinely close its listener.
-	var closeOnce sync.Once
-	closeServer := func() { closeOnce.Do(srv.Close) }
-	defer closeServer()
-	stopWatch := make(chan struct{})
-	defer close(stopWatch)
-	go func() {
-		for {
-			select {
-			case <-stopWatch:
-				return
-			case <-time.After(50 * time.Millisecond):
-				if fileExists(stopMarker) {
-					closeServer()
-					return
-				}
-			}
-		}
-	}()
-	u, _ := url.Parse(srv.URL)
-	port, _ := strconv.Atoi(u.Port())
-
-	key := runtime.GOOS + "/" + runtime.GOARCH
-	m := &Manifest{
-		Engine: "daemon", DisplayName: "Daemon Engine", ManifestVersion: 1,
-		Platforms: map[string]Platform{
-			key: {
-				Detect: []string{fakeEngineBin},
-				Runtime: Runtime{
-					Mode:   "command",
-					Port:   port,
-					Start:  [][]string{{fakeEngineBin, "touch", startMarker}},
-					Stop:   &StopSpec{Cmd: []string{fakeEngineBin, "touch", stopMarker}},
-					Ready:  &Probe{HTTP: "http://127.0.0.1:{port}/", Status: 200, TimeoutS: 10},
-					Health: &Probe{HTTP: "http://127.0.0.1:{port}/", Status: 200, IntervalS: 1},
-				},
-			},
-		},
-	}
-	ex := newTestExecutor(t, m)
-
-	if err := ex.Start(context.Background(), "daemon"); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	if !fileExists(startMarker) {
-		t.Fatal("expected the start command to have run")
-	}
-	st, _ := ex.Status("daemon")
-	if !st.Running || !st.Healthy {
-		t.Fatalf("expected running+healthy, got %+v", st)
-	}
-
-	if err := ex.Stop("daemon"); err != nil {
-		t.Fatalf("stop: %v", err)
-	}
-	if !fileExists(stopMarker) {
-		t.Fatal("expected the stop command to have run")
-	}
-	st, _ = ex.Status("daemon")
-	if st.Running {
-		t.Fatalf("expected stopped, got %+v", st)
-	}
-}
-
 // TestCmdAction exercises a CLI action with a param placeholder; it must
 // run without the engine being "running" and return the command stdout.
 func TestCmdAction(t *testing.T) {
-	m := testEngineManifest(fakeEngineBin)
+	m := llamaTestEngineManifest(fakeEngineBin)
 	m.Actions["echo"] = Action{Cmd: []string{fakeEngineBin, "echo", "{model}"}}
 	ex := newTestExecutor(t, m)
 

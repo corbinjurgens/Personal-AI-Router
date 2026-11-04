@@ -356,7 +356,7 @@ describe('target-owned desktop download projection', () => {
             parseModelsResult({
                 models: ['safe'],
                 modelsByEngine: {
-                    ollama: ['safe'],
+                    'llamacpp-custom': ['safe'],
                     llamacpp: []
                 },
                 downloadState: localSnapshot('1')
@@ -372,7 +372,7 @@ describe('target-owned desktop download projection', () => {
         expect(
             state
                 .getEngineInitialState()
-                .models.find(models => models.nodeId === nodeId && models.engineType === 'ollama')
+                .models.find(models => models.nodeId === nodeId && models.engineType === 'llamacpp-custom')
                 ?.models[0]?.downloaded
         ).toBe(true)
     })

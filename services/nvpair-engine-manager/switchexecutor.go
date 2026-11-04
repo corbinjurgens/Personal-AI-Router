@@ -1146,7 +1146,7 @@ func (e *Executor) automaticSwitchSource(p settings.SwitchPrepareRequest) error 
 		}
 		st.mu.Lock()
 		running, adopted, uncertain := st.running, st.adopted, st.reclaimFailed || st.reclaimPID != 0 || (st.running && st.stopping)
-		controlled := (st.proc != nil && st.proc.cmd != nil && st.proc.cmd.Process != nil) || (st.plat.Runtime.modeOrDefault() == "command" && st.runID != "")
+		controlled := st.proc != nil && st.proc.cmd != nil && st.proc.cmd.Process != nil
 		st.mu.Unlock()
 		if name == p.SourceEngine {
 			if !running || adopted || uncertain || !controlled {
@@ -1173,8 +1173,8 @@ func (e *Executor) cleanupAutomaticSwitchSource(ctx context.Context, st *engineS
 	if adopted {
 		return errors.New("automatic source recovery refuses an adopted server")
 	}
-	if proc != nil || rt.modeOrDefault() == "command" {
-		if runID != ports.SourceRunID || (proc != nil && (proc.cmd == nil || proc.cmd.Process == nil || proc.cmd.Process.Pid != ports.SourcePID)) {
+	if proc != nil {
+		if runID != ports.SourceRunID || proc.cmd == nil || proc.cmd.Process == nil || proc.cmd.Process.Pid != ports.SourcePID {
 			return errors.New("automatic source recovery control identity changed")
 		}
 		return e.doStopOwnedContext(ctx, st, cp.SourceEngine, &stopOwnership{process: proc, runID: runID})

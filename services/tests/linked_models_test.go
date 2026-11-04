@@ -50,7 +50,7 @@ func TestLinkedModelsProcess(t *testing.T) {
 		{"custom reverse", "linked-custom-reverse", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newControllerCopyFixture(t)
+			f := newControllerCopyFixture(t, "llamacpp-custom")
 			linkedTargets := t.TempDir()
 			f.directoryToManagers(t, tc.reverse)
 			linkedWatchSentinel(t, f, []byte("unlisted sentinel"))
@@ -155,7 +155,7 @@ func TestLinkedModelsProcess(t *testing.T) {
 			}
 			for _, changed := range []url.Values{
 				{"engine": {"llamacpp"}, "model": {tc.alias}, "path": {model.manifest.Files[0].Path}, "exportId": {"wrong"}},
-				{"engine": {"ollama"}, "model": {tc.alias}, "path": {model.manifest.Files[0].Path}, "exportId": {model.manifest.ExportID}},
+				{"engine": {"llamacpp-custom"}, "model": {tc.alias}, "path": {model.manifest.Files[0].Path}, "exportId": {model.manifest.ExportID}},
 				{"engine": {"llamacpp"}, "model": {"not-listed"}, "path": {model.manifest.Files[0].Path}, "exportId": {model.manifest.ExportID}},
 			} {
 				for _, method := range []string{http.MethodGet, http.MethodHead} {
@@ -176,7 +176,7 @@ func TestLinkedModelsProcess(t *testing.T) {
 				}
 			}
 			wrongEngine := f.request(tc.alias, "")
-			wrongEngine.Engine = "ollama"
+			wrongEngine.Engine = "llamacpp-custom"
 			for _, bad := range []controllerCopyRequest{f.request(tc.alias, "wrong"), f.request("not-listed", ""), wrongEngine, f.request(filepath.Dir(outsideSibling), "")} {
 				id := f.broker.send(t, "engine:copy-model", bad, true)
 				refused := controllerCopyResponse(t, f.broker, id)
@@ -410,186 +410,6 @@ func TestLinkedModelsProcess(t *testing.T) {
 		linkedExactDestination(t, f.stores[f.target.uuid], map[string][]byte{"models--fixture--linked-GGUF/refs/main": []byte(revision), "models--fixture--linked-GGUF/snapshots/" + revision + "/model-Q4_K_M.gguf": data})
 		if got := readLiveDurableFile(t, filepath.Join(outside, "unlisted.gguf")); string(got) != "outside sentinel" {
 			t.Fatal("outside sentinel changed")
-		}
-		f.idle(t)
-	})
-	t.Run("recognized Ollama linked blobs direct", func(t *testing.T) {
-		f := newControllerCopyFixture(t)
-		linkedWatchSentinel(t, f, []byte("private sentinel"))
-		fake := newFixtureHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodGet {
-				http.NotFound(w, r)
-				return
-			}
-			switch r.URL.Path {
-			case "/ready":
-				io.WriteString(w, `{"ready":true}`)
-			case "/api/tags":
-				io.WriteString(w, `{"models":[{"name":"linked-ollama"}]}`)
-			case "/api/ps":
-				io.WriteString(w, `{"models":[]}`)
-			default:
-				http.NotFound(w, r)
-			}
-		}))
-		t.Cleanup(fake.Close)
-		for _, n := range []*task1Node{f.source, f.target} {
-			marker := filepath.Join(n.base, "synthetic-engine-installed")
-			rt := map[string]any{"bin": marker, "port": 0, "ready": nil, "health": nil, "auth_statuses": []int{}, "env": map[string]string{"OLLAMA_MODELS": f.stores[n.uuid]}}
-			if n == f.source {
-				rt["port"] = portOfURL(t, fake.URL)
-				rt["ready"] = map[string]any{"http": "http://127.0.0.1:{port}/ready", "status": http.StatusOK, "timeout_s": 1}
-			}
-			task1WriteJSON(t, filepath.Join(jointAppDir(n.base), "engines", "ollama.json"), map[string]any{"engine": "ollama", "models_dir": f.stores[n.uuid], "runtime": rt, "platforms": map[string]any{runtime.GOOS + "/" + runtime.GOARCH: map[string]any{"detect": []string{marker}, "models_dir": f.stores[n.uuid], "runtime": rt}}})
-		}
-		linkedRestartManagers(t, f, nil)
-		var state struct {
-			Running bool `json:"running"`
-		}
-		task2Decode(t, f.sourceEM.call(t, "engine:status", map[string]string{"engine": "ollama"}).Result, &state)
-		if !state.Running {
-			t.Fatal("private fake Ollama was not recognized")
-		}
-		data := []byte("synthetic linked Ollama blob")
-		digest := phase04SHA(data)
-		outside := t.TempDir()
-		target := filepath.Join(outside, "blob")
-		modelSettingsWrite(t, target, data)
-		modelSettingsWrite(t, filepath.Join(outside, "sentinel"), []byte("private sentinel"))
-		path := filepath.Join(f.stores[f.source.uuid], "blobs", "sha256-"+digest)
-		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Symlink(target, path); err != nil {
-			t.Skipf("symlink unavailable: %v", err)
-		}
-		manifest := map[string]any{"schemaVersion": 2, "config": map[string]any{"digest": "sha256:" + digest, "size": len(data)}, "layers": []any{}}
-		manifestPath := filepath.Join("manifests", "registry.ollama.ai", "library", "linked-ollama", "latest")
-		modelSettingsWrite(t, filepath.Join(f.stores[f.source.uuid], manifestPath), mustMarshal(t, manifest))
-		manifestBytes := readLiveDurableFile(t, filepath.Join(f.stores[f.source.uuid], manifestPath))
-		files := map[string][]byte{"blobs/sha256-" + digest: data, filepath.ToSlash(manifestPath): manifestBytes}
-		listed := linkedNativeRead(t, f, false, "ollama", "linked-ollama", files)
-		selector := filepath.Join(f.stores[f.source.uuid], manifestPath)
-		if err := os.Remove(selector); err != nil {
-			t.Fatal(err)
-		}
-		modelSettingsWrite(t, selector, manifestBytes)
-		linkedOldNativeRefused(t, f, false, listed, data)
-		linkedNativeCopyRetarget(t, f, "ollama", "linked-ollama", func() error {
-			if err := os.Remove(selector); err != nil {
-				return err
-			}
-			return os.WriteFile(selector, manifestBytes, 0o600)
-		})
-		linkedNativeRead(t, f, false, "ollama", "linked-ollama", files)
-		request := f.request("linked-ollama", "")
-		request.Engine = "ollama"
-		id := f.broker.send(t, "engine:copy-model", request, true)
-		response := task2Response(t, f.broker, id)
-		if response.Error != nil {
-			t.Fatalf("Ollama copy: %+v", response.Error)
-		}
-		linkedNativeResult(t, response)
-		got := readLiveDurableFile(t, filepath.Join(f.stores[f.target.uuid], "blobs", "sha256-"+digest))
-		if !bytes.Equal(got, data) || phase04SHA(got) != digest {
-			t.Fatal("Ollama destination differs")
-		}
-		if _, err := os.Stat(filepath.Join(f.stores[f.target.uuid], manifestPath)); err != nil {
-			t.Fatal(err)
-		}
-		linkedExactDestination(t, f.stores[f.target.uuid], files)
-		if got := readLiveDurableFile(t, filepath.Join(outside, "sentinel")); string(got) != "private sentinel" {
-			t.Fatal("Ollama sentinel changed")
-		}
-		f.idle(t)
-	})
-	t.Run("recognized LM Studio linked tree reverse", func(t *testing.T) {
-		f := newControllerCopyFixture(t)
-		linkedWatchSentinel(t, f, []byte("private sentinel"))
-		fake := newFixtureHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodGet {
-				http.NotFound(w, r)
-				return
-			}
-			switch r.URL.Path {
-			case "/ready":
-				io.WriteString(w, `{"ready":true}`)
-			case "/api/v1/models":
-				io.WriteString(w, `{"models":[{"key":"linked-mlx","loaded_instances":[]}]}`)
-			default:
-				http.NotFound(w, r)
-			}
-		}))
-		t.Cleanup(fake.Close)
-		image, err := os.Executable()
-		if err != nil {
-			t.Fatal(err)
-		}
-		rows := filepath.Join(f.source.base, "lms-rows.json")
-		task1WriteJSON(t, rows, []map[string]string{{"modelKey": "linked-mlx", "path": "owner/linked-mlx"}})
-		for _, n := range []*task1Node{f.source, f.target} {
-			marker := filepath.Join(n.base, "synthetic-engine-installed")
-			cli := filepath.Join(n.base, "never-start-cli")
-			if n == f.source {
-				cli = image
-			}
-			rt := map[string]any{"bin": marker, "cli": cli, "port": 0, "ready": nil, "health": nil, "auth_statuses": []int{}}
-			if n == f.source {
-				rt["port"] = portOfURL(t, fake.URL)
-				rt["ready"] = map[string]any{"http": "http://127.0.0.1:{port}/ready", "status": http.StatusOK, "timeout_s": 1}
-			}
-			task1WriteJSON(t, filepath.Join(jointAppDir(n.base), "engines", "lmstudio.json"), map[string]any{"engine": "lmstudio", "actions": map[string]any{"delete_model": map[string]bool{"restart_after": false}}, "models_dir": f.stores[n.uuid], "runtime": rt, "platforms": map[string]any{runtime.GOOS + "/" + runtime.GOARCH: map[string]any{"detect": []string{marker}, "models_dir": f.stores[n.uuid], "runtime": rt}}})
-		}
-		linkedRestartManagers(t, f, []string{"NVPAIR_TEST_MODEL_LMS_IMAGE=" + image, "NVPAIR_TEST_MODEL_LMS_ROWS=" + rows})
-		f.directoryToManagers(t, true)
-		outside := t.TempDir()
-		modelSettingsWrite(t, filepath.Join(outside, "weights.safetensors"), []byte("linked mlx weights"))
-		modelSettingsWrite(t, filepath.Join(outside, "config.json"), []byte("{}"))
-		modelSettingsWrite(t, filepath.Join(outside, "nested", "empty.json"), nil)
-		modelSettingsWrite(t, filepath.Join(filepath.Dir(outside), "unlisted-mlx"), []byte("private sentinel"))
-		link := filepath.Join(f.stores[f.source.uuid], "owner", "linked-mlx")
-		if err := os.MkdirAll(filepath.Dir(link), 0700); err != nil {
-			t.Fatal(err)
-		}
-		linkedDirectory(t, outside, link)
-		files := map[string][]byte{"owner/linked-mlx/weights.safetensors": []byte("linked mlx weights"), "owner/linked-mlx/config.json": []byte("{}"), "owner/linked-mlx/nested/empty.json": {}}
-		listed := linkedNativeRead(t, f, true, "lmstudio", "linked-mlx", files)
-		replacement := t.TempDir()
-		for rel, data := range map[string][]byte{"weights.safetensors": []byte("linked mlx weights"), "config.json": []byte("{}"), "nested/empty.json": {}} {
-			modelSettingsWrite(t, filepath.Join(replacement, rel), data)
-		}
-		if err := os.Remove(link); err != nil {
-			t.Fatal(err)
-		}
-		linkedDirectory(t, replacement, link)
-		linkedOldNativeRefused(t, f, true, listed, []byte("linked mlx weights"))
-		linkedNativeCopyRetarget(t, f, "lmstudio", "linked-mlx", func() error {
-			if err := os.Remove(link); err != nil {
-				return err
-			}
-			if runtime.GOOS == "windows" {
-				return exec.Command("cmd.exe", "/d", "/c", "mklink", "/J", link, outside).Run()
-			}
-			return os.Symlink(outside, link)
-		})
-		linkedNativeRead(t, f, true, "lmstudio", "linked-mlx", files)
-		request := f.request("linked-mlx", "")
-		request.Engine = "lmstudio"
-		id := f.broker.send(t, "engine:copy-model", request, true)
-		response := task2Response(t, f.broker, id)
-		if response.Error != nil {
-			t.Fatalf("LM Studio copy: %+v", response.Error)
-		}
-		linkedNativeResult(t, response)
-		for rel, want := range map[string][]byte{"weights.safetensors": []byte("linked mlx weights"), "config.json": []byte("{}"), "nested/empty.json": {}} {
-			got := readLiveDurableFile(t, filepath.Join(f.stores[f.target.uuid], "owner", "linked-mlx", rel))
-			if !bytes.Equal(got, want) || phase04SHA(got) != phase04SHA(want) {
-				t.Fatalf("LM Studio destination mismatch: %s", rel)
-			}
-		}
-		linkedExactDestination(t, f.stores[f.target.uuid], files)
-		if got := readLiveDurableFile(t, filepath.Join(filepath.Dir(outside), "unlisted-mlx")); string(got) != "private sentinel" {
-			t.Fatal("LM Studio sentinel changed")
 		}
 		f.idle(t)
 	})

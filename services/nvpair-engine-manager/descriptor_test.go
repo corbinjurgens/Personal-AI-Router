@@ -39,18 +39,6 @@ func TestBundledDescriptors(t *testing.T) {
 			ModelNaming: engines.ModelNamingExact, ModelStore: "llamacpp", Catalog: "llamacpp",
 			Operations: map[string]engines.OperationCapability{"load": {}, "unload": {}, "pull": {}, "delete": {}},
 		},
-		{
-			Engine: "lmstudio", Family: "lmstudio", Label: "LM Studio",
-			Protocols:   []string{engines.ProtocolOpenAIV1, engines.ProtocolAnthropicMessages},
-			ModelNaming: engines.ModelNamingExact, ModelStore: "lmstudio", Catalog: "lmstudio",
-			Operations: map[string]engines.OperationCapability{"load": {}, "unload": {}, "pull": {}, "delete": {}},
-		},
-		{
-			Engine: "ollama", Family: "ollama", Label: "Ollama",
-			Protocols:   []string{engines.ProtocolOllamaAPI, engines.ProtocolOpenAIV1, engines.ProtocolAnthropicMessages},
-			ModelNaming: engines.ModelNamingImpliedLatestTag, ModelStore: "ollama", Catalog: "ollama",
-			Operations: map[string]engines.OperationCapability{"load": {ResponseTimeoutS: 600}, "unload": {}, "pull": {}, "delete": {}},
-		},
 	}
 	got := reg.Descriptors()
 	if len(got) != len(all) {
@@ -295,7 +283,7 @@ func TestDescriptorsExcludeSecretsAndPaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, leaked := range []string{"SECRET", "/opt/", "/home/", "~", "{port}", "{model}", "{host}", "http:", "https:", "example.invalid", ".exe", "install_dir", "models_dir", "LLAMA_CACHE", "OLLAMA_", "llama-server", "/bin/", "serve"} {
+	for _, leaked := range []string{"SECRET", "/opt/", "/home/", "~", "{port}", "{model}", "{host}", "http:", "https:", "example.invalid", ".exe", "install_dir", "models_dir", "LLAMA_CACHE", "llama-server", "/bin/", "serve"} {
 		if bytes.Contains(published, []byte(leaked)) {
 			t.Errorf("published descriptors contain %q: %s", leaked, published)
 		}
@@ -331,7 +319,7 @@ func TestDescriptorsExcludeSecretsAndPaths(t *testing.T) {
 // engine:descriptors answers with every registered engine's descriptor.
 func TestDescriptorsRPC(t *testing.T) {
 	var out bytes.Buffer
-	m := NewManager(NewCodec(&out), bundledTestExecutor(t), nil, "")
+	m := NewManager(NewCodec(&out), newLlamaPortFixtureExecutor(t, t.TempDir()), nil, "")
 	id := json.RawMessage("3")
 	m.handleMessage(context.Background(), &Message{JSONRPC: "2.0", ID: &id, Method: descriptorsMethod})
 	var resp struct {
@@ -346,7 +334,7 @@ func TestDescriptorsRPC(t *testing.T) {
 	for _, d := range resp.Result.Engines {
 		names = append(names, d.Engine)
 	}
-	if strings.Join(names, ",") != "llamacpp,lmstudio,ollama" {
+	if strings.Join(names, ",") != "llamacpp,llamacpp-custom" {
 		t.Fatalf("descriptors for %v", names)
 	}
 }
@@ -354,7 +342,7 @@ func TestDescriptorsRPC(t *testing.T) {
 // A family the manifest does not name is the engine's own ID, which selects
 // no shared adapter unless the ID is itself an adapter family.
 func TestFamilyDefaultsToEngineID(t *testing.T) {
-	m := testEngineManifest(fakeEngineBin)
+	m := llamaTestEngineManifest(fakeEngineBin)
 	m.Engine = "strata"
 	d := m.descriptor(runtime.GOOS, runtime.GOARCH)
 	if d.Family != "strata" || d.ModelStore != "" || d.Catalog != "" || d.ModelNaming != engines.ModelNamingExact {
@@ -386,7 +374,7 @@ func TestManifestFieldValidation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			m := testEngineManifest(fakeEngineBin)
+			m := llamaTestEngineManifest(fakeEngineBin)
 			tc.mutate(m)
 			if err := m.Validate(); err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("Validate error = %v, want %q", err, tc.want)

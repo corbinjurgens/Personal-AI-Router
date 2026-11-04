@@ -68,7 +68,7 @@ func compileTypedLlamaExpected(st *engineState, command launchCommand, rt Runtim
 }
 
 func compileTypedLlamaExpectedContext(ctx context.Context, st *engineState, command launchCommand, rt Runtime, approved bool, access servingFileAccess, expected *typedLlamaInputEvidence, advisory ...*map[string]modelEstimateInput) (*llamaServingLaunch, error) {
-	if st.manifest.FamilyOrDefault() != "llamacpp" || rt.modeOrDefault() != "process" {
+	if st.manifest.FamilyOrDefault() != "llamacpp" {
 		return nil, modelLoadError("", "engine", "Typed loads require an owned llama.cpp process.")
 	}
 	owner := rt.modelLoadOwner

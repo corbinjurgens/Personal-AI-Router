@@ -23,29 +23,10 @@ import (
 	"nvpair-shared/modeldownload"
 )
 
-func TestPullProgressFromLine(t *testing.T) {
-	ev := pullProgressFromLine("ollama", []byte(`{"status":"pulling manifest","total":200,"completed":50}`))
-	if ev.Op != "pull" || ev.Engine != "ollama" {
-		t.Fatalf("unexpected event meta: %+v", ev)
-	}
-	if ev.Percent != 25 {
-		t.Fatalf("expected 25%%, got %d", ev.Percent)
-	}
-	if ev.Stage != "pulling manifest" {
-		t.Fatalf("expected stage from status, got %q", ev.Stage)
-	}
-
-	// No total -> 0% (avoids divide-by-zero), still carries the status.
-	ev = pullProgressFromLine("ollama", []byte(`{"status":"verifying"}`))
-	if ev.Percent != 0 || ev.Stage != "verifying" {
-		t.Fatalf("unexpected zero-total event: %+v", ev)
-	}
-}
-
 func TestHandlePullRejectsMissingTarget(t *testing.T) {
 	s := &controlServer{exec: &Executor{progress: newProgressHub()}}
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", controlPullPath, strings.NewReader(`{"opId":"x","engine":"ollama"}`))
+	req := httptest.NewRequest("POST", controlPullPath, strings.NewReader(`{"opId":"x","engine":"fake"}`))
 	s.handlePull(rec, req)
 	if rec.Code != 400 {
 		t.Fatalf("expected 400 when neither model nor params set, got %d", rec.Code)
@@ -56,7 +37,7 @@ func TestModelFromParams(t *testing.T) {
 	cases := []struct {
 		params, want string
 	}{
-		{`{"name":"llama3.2"}`, "llama3.2"},      // Ollama body key
+		{`{"name":"llama3.2"}`, "llama3.2"},      // name body key
 		{`{"model":"owner/repo"}`, "owner/repo"}, // generic placeholder
 		{`{"name":"a","model":"b"}`, "a"},        // name wins
 		{`{}`, ""},                               // neither present
@@ -110,6 +91,212 @@ func newHTTPPullTestExecutor(t *testing.T, server *httptest.Server, action Actio
 	state.running = true
 	state.port = port
 	return executor
+}
+
+// llamaPullAction is the pull_model action a test engine declares: the pinned
+// llama.cpp router protocol, the only HTTP pull the manager supports.
+func llamaPullAction() Action {
+	return Action{
+		HTTP:             &ActionHTTP{Method: http.MethodPost, Path: "/models"},
+		ProgressProtocol: pullProgressProtocolLlamaCPPModelsSSE,
+	}
+}
+
+// llamaPullEndStream, returned in place of an event payload, ends the SSE
+// response instead of publishing anything.
+const llamaPullEndStream = ""
+
+func llamaPullEvent(model, event string) string {
+	return fmt.Sprintf(`{"model":%q,"event":%q,"data":{}}`, model, event)
+}
+
+func llamaPullProgressEvent(model string, done, total int64) string {
+	return fmt.Sprintf(`{"model":%q,"event":"download_progress","data":{"progress":{"model.gguf":{"done":%d,"total":%d}}}}`, model, done, total)
+}
+
+// llamaPullBehavior scripts a loopback llama.cpp router for pull tests.
+type llamaPullBehavior struct {
+	// Start answers POST /models once the SSE subscription is open. Nil accepts
+	// the download with {"success":true}.
+	Start func(w http.ResponseWriter, r *http.Request)
+	// Events lists the SSE payloads published after the download was accepted.
+	// Nil publishes download_finished for the requested model.
+	Events func(model string) []string
+	// Repeat, when set, publishes the Events again at this interval until the
+	// client disconnects.
+	Repeat time.Duration
+}
+
+// llamaPullServer serves the router's pull surface: GET /models/sse, POST
+// /models and an empty GET /models inventory.
+type llamaPullServer struct {
+	*httptest.Server
+	behavior llamaPullBehavior
+	done     chan struct{}
+	mu       sync.Mutex
+	subs     map[chan string]struct{}
+}
+
+func newLlamaPullServer(t *testing.T, behavior llamaPullBehavior) *llamaPullServer {
+	t.Helper()
+	s := &llamaPullServer{behavior: behavior, done: make(chan struct{}), subs: make(map[chan string]struct{})}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/models/sse", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.NotFound(w, r)
+			return
+		}
+		sub := make(chan string, 64)
+		s.mu.Lock()
+		s.subs[sub] = struct{}{}
+		s.mu.Unlock()
+		defer func() {
+			s.mu.Lock()
+			delete(s.subs, sub)
+			s.mu.Unlock()
+		}()
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, ": ready\n\n")
+		w.(http.Flusher).Flush()
+		for {
+			select {
+			case payload := <-sub:
+				if payload == llamaPullEndStream {
+					return
+				}
+				_, _ = fmt.Fprintf(w, "data: %s\n\n", payload)
+				w.(http.Flusher).Flush()
+			case <-r.Context().Done():
+				return
+			}
+		}
+	})
+	mux.HandleFunc("/models", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			data, err := io.ReadAll(r.Body)
+			if err != nil {
+				http.Error(w, "unreadable body", http.StatusBadRequest)
+				return
+			}
+			// Start sees the request body the engine received.
+			r.Body = io.NopCloser(bytes.NewReader(data))
+			var body struct {
+				Model string `json:"model"`
+			}
+			if err := json.Unmarshal(data, &body); err != nil || body.Model == "" {
+				http.Error(w, "invalid model", http.StatusBadRequest)
+				return
+			}
+			if s.behavior.Start != nil {
+				s.behavior.Start(w, r)
+			} else {
+				_, _ = fmt.Fprint(w, `{"success":true}`)
+			}
+			events := []string{llamaPullEvent(body.Model, "download_finished")}
+			if s.behavior.Events != nil {
+				events = s.behavior.Events(body.Model)
+			}
+			s.publish(events)
+			if s.behavior.Repeat > 0 {
+				go func() {
+					ticker := time.NewTicker(s.behavior.Repeat)
+					defer ticker.Stop()
+					for {
+						select {
+						case <-s.done:
+							return
+						case <-ticker.C:
+							s.publish(events)
+						}
+					}
+				}()
+			}
+		case http.MethodGet:
+			_, _ = fmt.Fprint(w, `{"data":[]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	s.Server = httptest.NewServer(mux)
+	t.Cleanup(func() {
+		close(s.done)
+		s.Close()
+	})
+	return s
+}
+
+// llamaPullTransport is the router's pull surface without a listener: GET
+// /models/sse is an open stream, post answers POST /models with the engine's
+// start response, and the download then ends with the terminal event
+// ("download_finished" or "download_failed") for the model the request named.
+// llamaPullEventsTransport scripts the whole event sequence instead.
+// A GET /models inventory reports nothing downloading.
+func llamaPullTransport(terminal string, post func(r *http.Request, body []byte) (*http.Response, error)) memoryModelsTransport {
+	return llamaPullEventsTransport(func(model string) []string { return []string{llamaPullEvent(model, terminal)} }, post)
+}
+
+// llamaPullEventsTransport is llamaPullTransport with the accepted download's
+// whole event sequence scripted by events.
+func llamaPullEventsTransport(events func(model string) []string, post func(r *http.Request, body []byte) (*http.Response, error)) memoryModelsTransport {
+	var mu sync.Mutex
+	var streams []*io.PipeWriter
+	return func(r *http.Request) (*http.Response, error) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/models/sse":
+			reader, writer := io.Pipe()
+			mu.Lock()
+			streams = append(streams, writer)
+			mu.Unlock()
+			go func() {
+				<-r.Context().Done()
+				_ = writer.Close()
+			}()
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: reader}, nil
+		case r.Method == http.MethodPost && r.URL.Path == "/models":
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				return nil, err
+			}
+			response, err := post(r, body)
+			if err != nil {
+				return nil, err
+			}
+			var requested struct {
+				Model string `json:"model"`
+			}
+			_ = json.Unmarshal(body, &requested)
+			mu.Lock()
+			open := append([]*io.PipeWriter(nil), streams...)
+			mu.Unlock()
+			for _, stream := range open {
+				go func() {
+					for _, event := range events(requested.Model) {
+						if _, err := fmt.Fprintf(stream, "data: %s\n\n", event); err != nil {
+							return
+						}
+					}
+				}()
+			}
+			return response, nil
+		case r.Method == http.MethodGet && r.URL.Path == "/models":
+			return mutationJSON(http.StatusOK, `{"data":[]}`)
+		}
+		return nil, fmt.Errorf("unexpected pull request %s %s", r.Method, r.URL.Path)
+	}
+}
+
+func (s *llamaPullServer) publish(events []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for sub := range s.subs {
+		for _, payload := range events {
+			select {
+			case sub <- payload:
+			default:
+			}
+		}
+	}
 }
 
 func TestPullModelLlamaCPPSSESubscribesBeforeStarting(t *testing.T) {
@@ -219,64 +406,6 @@ func TestPullModelLlamaCPPSSESubscribesBeforeStarting(t *testing.T) {
 	}
 }
 
-func TestPullModelOllamaAdvancingProgressRefreshesTimeout(t *testing.T) {
-	const (
-		idleTimeout     = 400 * time.Millisecond
-		progressDelay   = 90 * time.Millisecond
-		progressUpdates = 6
-	)
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/pull", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/api/pull" {
-			http.NotFound(w, r)
-			return
-		}
-		flusher, ok := w.(http.Flusher)
-		if !ok {
-			t.Error("test response does not support flushing")
-			return
-		}
-		for completed := 1; completed <= progressUpdates; completed++ {
-			if _, err := fmt.Fprintf(
-				w,
-				"{\"status\":\"pulling\",\"digest\":\"sha256:model\",\"total\":%d,\"completed\":%d}\n",
-				progressUpdates,
-				completed,
-			); err != nil {
-				return
-			}
-			flusher.Flush()
-			time.Sleep(progressDelay)
-		}
-		_, _ = fmt.Fprintln(w, `{"status":"success"}`)
-		flusher.Flush()
-	})
-	server := httptest.NewServer(mux)
-	defer server.Close()
-
-	ex := newHTTPPullTestExecutor(t, server, Action{
-		HTTP: &ActionHTTP{Method: http.MethodPost, Path: "/api/pull"},
-	})
-	ex.pullProgressTimeout = idleTimeout
-
-	started := time.Now()
-	result, err := ex.PullModelStream(
-		context.Background(),
-		"fake",
-		"demo:1b",
-		json.RawMessage(`{"name":"demo:1b"}`),
-	)
-	if err != nil {
-		t.Fatalf("pull model: %v", err)
-	}
-	if elapsed := time.Since(started); elapsed <= idleTimeout {
-		t.Fatalf("pull completed in %s, want longer than one %s idle interval", elapsed, idleTimeout)
-	}
-	if !strings.Contains(string(result), `"status":"success"`) {
-		t.Fatalf("pull result = %s, want terminal success", result)
-	}
-}
-
 func TestPullModelLlamaCPPAdvancingProgressRefreshesTimeout(t *testing.T) {
 	const (
 		model           = "owner/repo:Q4_K_M"
@@ -356,47 +485,21 @@ func TestPullModelLlamaCPPAdvancingProgressRefreshesTimeout(t *testing.T) {
 }
 
 func TestPullModelDuplicateProgressDoesNotRefreshTimeout(t *testing.T) {
-	const idleTimeout = 150 * time.Millisecond
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/pull", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/api/pull" {
-			http.NotFound(w, r)
-			return
-		}
-		flusher, ok := w.(http.Flusher)
-		if !ok {
-			t.Error("test response does not support flushing")
-			return
-		}
-		ticker := time.NewTicker(25 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			_, err := fmt.Fprintln(w, `{"status":"pulling","digest":"sha256:model","total":100,"completed":1}`)
-			if err != nil {
-				return
-			}
-			flusher.Flush()
-			select {
-			case <-r.Context().Done():
-				return
-			case <-ticker.C:
-			}
-		}
+	const (
+		model       = "owner/repo:Q4_K_M"
+		idleTimeout = 150 * time.Millisecond
+	)
+	server := newLlamaPullServer(t, llamaPullBehavior{
+		Events: func(string) []string {
+			// The same byte count again and again: nothing advances.
+			return []string{llamaPullProgressEvent(model, 1, 100)}
+		},
+		Repeat: 25 * time.Millisecond,
 	})
-	server := httptest.NewServer(mux)
-	defer server.Close()
-
-	ex := newHTTPPullTestExecutor(t, server, Action{
-		HTTP: &ActionHTTP{Method: http.MethodPost, Path: "/api/pull"},
-	})
+	ex := newHTTPPullTestExecutor(t, server.Server, llamaPullAction())
 	ex.pullProgressTimeout = idleTimeout
 
-	_, err := ex.PullModelStream(
-		context.Background(),
-		"fake",
-		"demo:1b",
-		json.RawMessage(`{"name":"demo:1b"}`),
-	)
+	_, err := ex.PullModelStream(context.Background(), "fake", model, json.RawMessage(`{"model":"`+model+`"}`))
 	if err == nil {
 		t.Fatal("pull model succeeded despite duplicate-only progress")
 	}
@@ -428,7 +531,7 @@ func TestPullProgressWatchdogPreservesParentCancellation(t *testing.T) {
 // surface via engine:remote-progress.
 func TestActionPullModelStreamsProgress(t *testing.T) {
 	m := testEngineManifest(fakeEngineBin)
-	m.Actions["pull_model"] = Action{HTTP: &ActionHTTP{Method: "POST", Path: "/api/pull"}}
+	m.Actions["pull_model"] = llamaPullAction()
 
 	var mu sync.Mutex
 	var pulls []map[string]any
@@ -455,7 +558,7 @@ func TestActionPullModelStreamsProgress(t *testing.T) {
 	acceptModelMutations(ex)
 	id := json.RawMessage("7")
 	mgr.runAction(ctx, &Message{JSONRPC: "2.0", ID: &id, Method: "engine:action",
-		Params: json.RawMessage(`{"engine":"fake","action":"pull_model","params":{"name":"demo:1b"}}`)})
+		Params: json.RawMessage(`{"engine":"fake","action":"pull_model","params":{"model":"demo:1b"}}`)})
 
 	if !strings.Contains(out.String(), "success") {
 		t.Fatalf("expected the pull's terminal result in the response, got %s", out.String())
@@ -480,9 +583,9 @@ func TestActionPullModelStreamsProgress(t *testing.T) {
 	}
 }
 
-// TestActionPullModelCmdMarkerAndResult covers the CLI (LM Studio `lms get`)
-// pull path through the same engine:action routing: a Cmd-based pull_model can't
-// expose structured line progress, so it emits a single "pulling" marker and
+// TestActionPullModelCmdMarkerAndResult covers the CLI pull path through the
+// same engine:action routing: a Cmd-based pull_model can't expose structured
+// line progress, so it emits a single "pulling" marker and
 // returns the command's terminal result — the counterpart to the HTTP streaming
 // path in TestActionPullModelStreamsProgress.
 func TestActionPullModelCmdMarkerAndResult(t *testing.T) {
@@ -549,34 +652,30 @@ func TestActionPullModelCmdMarkerAndResult(t *testing.T) {
 func TestModelDownloadNativeCompletionBelongsToDispatchRun(t *testing.T) {
 	test := func(name string, retire func(*engineState), phase string, blocked bool) {
 		t.Run(name, func(t *testing.T) {
-			ex := modelControlsExecutor(t)
+			ex := llamaModelControlsExecutor(t)
 			acceptModelMutations(ex)
-			st := ex.engines["ollama"]
-			params := json.RawMessage(`{"target":"demo","TARGET":"opaque\nvariant"}`)
+			st := ex.engines["llamacpp"]
+			params := json.RawMessage(`{"model":"demo","TARGET":"opaque\nvariant"}`)
 			started, release, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
 			var once sync.Once
 			var effects atomic.Int32
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			ex.client.Transport = memoryModelsTransport(func(r *http.Request) (*http.Response, error) {
+			ex.client.Transport = llamaPullTransport("download_finished", func(r *http.Request, body []byte) (*http.Response, error) {
 				effects.Add(1)
-				body, err := io.ReadAll(r.Body)
-				if err != nil {
-					return nil, err
-				}
-				if r.Method != http.MethodPost || r.URL.Path != "/pull" || !bytes.Equal(body, params) {
+				if !bytes.Equal(body, params) {
 					return nil, errors.New("pull changed its native dispatch or caller params")
 				}
 				close(started)
 				select {
 				case <-release:
-					return mutationJSON(http.StatusOK, `{"status":"success"}`)
+					return mutationJSON(http.StatusOK, `{"success":true}`)
 				case <-r.Context().Done():
 					return nil, r.Context().Err()
 				}
 			})
 			var pullErr error
 			go func() {
-				_, pullErr = ex.PullModelStream(ctx, "ollama", "demo", params)
+				_, pullErr = ex.PullModelStream(ctx, "llamacpp", "demo", params)
 				close(finished)
 			}()
 			t.Cleanup(func() {
@@ -617,7 +716,7 @@ func TestModelDownloadNativeCompletionBelongsToDispatchRun(t *testing.T) {
 				t.Fatalf("terminal snapshot=%+v", snapshot)
 			}
 			entry := snapshot.Entries[0]
-			if entry.ID != before.Entries[0].ID || entry.Engine != "ollama" || entry.Model != "demo" || entry.Phase != phase || entry.BlocksReadiness != blocked {
+			if entry.ID != before.Entries[0].ID || entry.Engine != "llamacpp" || entry.Model != "demo" || entry.Phase != phase || entry.BlocksReadiness != blocked {
 				t.Fatalf("terminal lost dispatch identity or readiness: %+v", entry)
 			}
 			if blocked && entry.Reason != modeldownload.ReasonInterrupted {
@@ -627,7 +726,7 @@ func TestModelDownloadNativeCompletionBelongsToDispatchRun(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read retained journal: %v", err)
 			}
-			marker, retained := markers[downloadContentKey{"ollama", "demo"}]
+			marker, retained := markers[downloadContentKey{"llamacpp", "demo"}]
 			if retained != blocked || retained && marker.ID != entry.ID {
 				t.Fatalf("unsafe journal=%+v, blocked=%t", markers, blocked)
 			}
@@ -671,7 +770,7 @@ func TestActionPullModelMissingActionEmitsTerminalError(t *testing.T) {
 	mgr := NewManager(NewCodec(&out), ex, nil, "")
 	id := json.RawMessage("9")
 	mgr.runAction(context.Background(), &Message{JSONRPC: "2.0", ID: &id, Method: "engine:action",
-		Params: json.RawMessage(`{"engine":"fake","action":"pull_model","params":{"name":"demo:1b"}}`)})
+		Params: json.RawMessage(`{"engine":"fake","action":"pull_model","params":{"model":"demo:1b"}}`)})
 	var response struct {
 		Error struct {
 			Code    int    `json:"code"`
@@ -703,7 +802,7 @@ func TestActionPullModelMissingActionEmitsTerminalError(t *testing.T) {
 // converges off "pulling" instead of appearing stuck.
 func TestActionPullModelFailureEmitsTerminalError(t *testing.T) {
 	m := testEngineManifest(fakeEngineBin)
-	m.Actions["pull_model"] = Action{HTTP: &ActionHTTP{Method: "POST", Path: "/api/pull"}}
+	m.Actions["pull_model"] = llamaPullAction()
 
 	var mu sync.Mutex
 	var pulls []map[string]any
@@ -727,7 +826,7 @@ func TestActionPullModelFailureEmitsTerminalError(t *testing.T) {
 	acceptModelMutations(ex)
 	id := json.RawMessage("9")
 	mgr.runAction(context.Background(), &Message{JSONRPC: "2.0", ID: &id, Method: "engine:action",
-		Params: json.RawMessage(`{"engine":"fake","action":"pull_model","params":{"name":"demo:1b"}}`)})
+		Params: json.RawMessage(`{"engine":"fake","action":"pull_model","params":{"model":"demo:1b"}}`)})
 
 	if !strings.Contains(out.String(), "Fake Engine experienced an error while downloading a model") {
 		t.Fatalf("expected a formatted JSON-RPC error for the failed pull, got %s", out.String())

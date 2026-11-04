@@ -506,16 +506,16 @@ func startPrivateReverse(t *testing.T, m *Manager) {
 func TestReverseServicesSnapshotsAreAtomic(t *testing.T) {
 	m := newReverseTestManager(t)
 	setReverseServices(t, m, 0)
-	setReverseServices(t, m, 1, noderec.RegisterParams{Service: noderec.ServiceOllama, Port: 19001})
+	setReverseServices(t, m, 1, noderec.RegisterParams{Service: noderec.ServiceLlamaCPP, Port: 19001})
 	cases := []struct {
 		name   string
 		params string
 	}{
-		{"conflicting generation", `{"generation":1,"services":[{"service":"ol","port":19002}]}`},
-		{"bad port after valid entry", `{"generation":2,"services":[{"service":"ol","port":19002},{"service":"ni","port":0}]}`},
+		{"conflicting generation", `{"generation":1,"services":[{"service":"lc","port":19002}]}`},
+		{"bad port after valid entry", `{"generation":2,"services":[{"service":"lc","port":19002},{"service":"ni","port":0}]}`},
 		{"unknown service", `{"generation":2,"services":[{"service":"gateway","port":19002}]}`},
-		{"duplicate service", `{"generation":2,"services":[{"service":"ol","port":19002},{"service":"ol","port":19003}]}`},
-		{"protocol override", `{"generation":2,"services":[{"service":"ol","port":19002,"protocol":"plain"}]}`},
+		{"duplicate service", `{"generation":2,"services":[{"service":"lc","port":19002},{"service":"lc","port":19003}]}`},
+		{"protocol override", `{"generation":2,"services":[{"service":"lc","port":19002,"protocol":"plain"}]}`},
 		{"missing generation", `{"services":[]}`},
 		{"missing services", `{"generation":2}`},
 		{"trailing object", `{"generation":2,"services":[]} {}`},
@@ -525,17 +525,17 @@ func TestReverseServicesSnapshotsAreAtomic(t *testing.T) {
 			if err := m.applyLocalServices(json.RawMessage(test.params)); err == nil {
 				t.Fatal("invalid snapshot accepted")
 			}
-			if m.reverse.generation != 1 || m.reverse.services[noderec.ServiceOllama].Port != 19001 {
+			if m.reverse.generation != 1 || m.reverse.services[noderec.ServiceLlamaCPP].Port != 19001 {
 				t.Fatal("rejected snapshot mutated registrations")
 			}
 		})
 	}
-	setReverseServices(t, m, 0, noderec.RegisterParams{Service: noderec.ServiceOllama, Port: 19999})
-	if m.reverse.services[noderec.ServiceOllama].Port != 19001 {
+	setReverseServices(t, m, 0, noderec.RegisterParams{Service: noderec.ServiceLlamaCPP, Port: 19999})
+	if m.reverse.services[noderec.ServiceLlamaCPP].Port != 19001 {
 		t.Fatal("old generation replaced live port")
 	}
-	setReverseServices(t, m, 2, noderec.RegisterParams{Service: noderec.ServiceOllama, Port: 19002})
-	if m.reverse.services[noderec.ServiceOllama].Port != 19002 {
+	setReverseServices(t, m, 2, noderec.RegisterParams{Service: noderec.ServiceLlamaCPP, Port: 19002})
+	if m.reverse.services[noderec.ServiceLlamaCPP].Port != 19002 {
 		t.Fatal("new generation did not rebind port")
 	}
 }
@@ -597,7 +597,7 @@ func TestReverseDynamicEngineServiceRegistrationAndWithdrawal(t *testing.T) {
 		t.Fatal("withdrawn dynamic engine still resolved")
 	}
 
-	for _, key := range []string{"e-ollama", "e-", "e-a/b", "e-" + strings.Repeat("a", 41)} {
+	for _, key := range []string{"e-llamacpp", "e-", "e-a/b", "e-" + strings.Repeat("a", 41)} {
 		params := `{"generation":4,"services":[{"service":"` + key + `","port":18180}]}`
 		if err := a.applyLocalServices(json.RawMessage(params)); err == nil {
 			t.Errorf("malformed dynamic key %q registered", key)
@@ -670,7 +670,7 @@ func TestReverseBlockedDirectionConcurrentPrivateStreaming(t *testing.T) {
 	}
 	go service.Serve(tls.NewListener(ln, b.buildServerTLSConfig()))
 	t.Cleanup(func() { service.Close() })
-	setReverseServices(t, b, 0, noderec.RegisterParams{Service: noderec.ServiceOllama, Port: ln.Addr().(*net.TCPAddr).Port})
+	setReverseServices(t, b, 0, noderec.RegisterParams{Service: noderec.ServiceLlamaCPP, Port: ln.Addr().(*net.TCPAddr).Port})
 	var wg sync.WaitGroup
 	for range 3 {
 		wg.Add(1)
@@ -678,7 +678,7 @@ func TestReverseBlockedDirectionConcurrentPrivateStreaming(t *testing.T) {
 			defer wg.Done()
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			conn, err := clustertrust.DialReverse(ctx, filepath.Dir(a.clusterDir), b.identity.NodeUUID, noderec.ServiceOllama)
+			conn, err := clustertrust.DialReverse(ctx, filepath.Dir(a.clusterDir), b.identity.NodeUUID, noderec.ServiceLlamaCPP)
 			if err != nil {
 				t.Errorf("private dial: %v", err)
 				return
@@ -740,7 +740,7 @@ func TestReversePeerServiceClientPrivateHTTPSFallback(t *testing.T) {
 	service.StartTLS()
 	defer service.Close()
 	port := service.Listener.Addr().(*net.TCPAddr).Port
-	setReverseServices(t, b, 1, noderec.RegisterParams{Service: noderec.ServiceOllama, Port: port})
+	setReverseServices(t, b, 1, noderec.RegisterParams{Service: noderec.ServiceLlamaCPP, Port: port})
 	address := net.JoinHostPort("original.example", strconv.Itoa(port))
 	var attempts atomic.Int32
 	adapter := clustertrust.NewPeerServiceClient(clustertrust.Open(a.clusterDir), clustertrust.PeerServiceClientOptions{
@@ -748,7 +748,7 @@ func TestReversePeerServiceClientPrivateHTTPSFallback(t *testing.T) {
 		BaseConfigDir:     filepath.Dir(a.clusterDir), DirectTimeout: 60 * time.Millisecond,
 		ResolveRoute: func(uuid string, service noderec.ServiceKey) (clustertrust.PeerServiceRoute, bool) {
 			peer, ok := a.reversePeer(uuid)
-			return clustertrust.PeerServiceRoute{Incarnation: peer.Incarnation, Address: address, Protocol: clustertrust.ReverseTLS, Generation: 1}, ok && service == noderec.ServiceOllama
+			return clustertrust.PeerServiceRoute{Incarnation: peer.Incarnation, Address: address, Protocol: clustertrust.ReverseTLS, Generation: 1}, ok && service == noderec.ServiceLlamaCPP
 		},
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			attempts.Add(1)
@@ -756,7 +756,7 @@ func TestReversePeerServiceClientPrivateHTTPSFallback(t *testing.T) {
 			return nil, ctx.Err()
 		},
 	})
-	client := adapter.Client(b.identity.NodeUUID, noderec.ServiceOllama)
+	client := adapter.Client(b.identity.NodeUUID, noderec.ServiceLlamaCPP)
 	for range 2 {
 		response, err := client.Get("https://" + address + "/original?a=1")
 		if err != nil {
@@ -798,13 +798,13 @@ func TestReversePeerServiceClientCancellationAfterResponse(t *testing.T) {
 	service.StartTLS()
 	defer service.Close()
 	port := service.Listener.Addr().(*net.TCPAddr).Port
-	setReverseServices(t, b, 1, noderec.RegisterParams{Service: noderec.ServiceOllama, Port: port})
+	setReverseServices(t, b, 1, noderec.RegisterParams{Service: noderec.ServiceLlamaCPP, Port: port})
 	address := net.JoinHostPort("original.example", strconv.Itoa(port))
 	adapter := clustertrust.NewPeerServiceClient(clustertrust.Open(a.clusterDir), clustertrust.PeerServiceClientOptions{
 		PeerClientOptions: clustertrust.PeerClientOptions{ResolvePin: a.trust.DER}, BaseConfigDir: filepath.Dir(a.clusterDir),
 		ResolveRoute: func(uuid string, service noderec.ServiceKey) (clustertrust.PeerServiceRoute, bool) {
 			peer, ok := a.reversePeer(uuid)
-			return clustertrust.PeerServiceRoute{Incarnation: peer.Incarnation, Address: address, Protocol: clustertrust.ReverseTLS, Generation: 1}, ok && service == noderec.ServiceOllama
+			return clustertrust.PeerServiceRoute{Incarnation: peer.Incarnation, Address: address, Protocol: clustertrust.ReverseTLS, Generation: 1}, ok && service == noderec.ServiceLlamaCPP
 		},
 		DialContext: func(context.Context, string, string) (net.Conn, error) { return nil, errors.New("direct blocked") },
 	})
@@ -814,7 +814,7 @@ func TestReversePeerServiceClientCancellationAfterResponse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	response, err := adapter.Client(b.identity.NodeUUID, noderec.ServiceOllama).Do(req)
+	response, err := adapter.Client(b.identity.NodeUUID, noderec.ServiceLlamaCPP).Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -857,7 +857,7 @@ func TestReverseProtocolGateBeforeLoopback(t *testing.T) {
 			conn.Close()
 		}
 	}()
-	keys := []noderec.ServiceKey{"cl", "ol", "lm", "lc", "em", "ec", "er", "wl"}
+	keys := []noderec.ServiceKey{"cl", "lc", "em", "ec", "er", "wl"}
 	services := make([]noderec.RegisterParams, 0, len(keys))
 	for _, key := range keys {
 		services = append(services, noderec.RegisterParams{Service: key, Port: ln.Addr().(*net.TCPAddr).Port})

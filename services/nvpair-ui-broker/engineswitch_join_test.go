@@ -31,7 +31,7 @@ func TestSwitchWaitsForIdentityWithdrawalBeforeLifecycle(t *testing.T) {
 				return nil, err.Error()
 			}
 			mu.Lock()
-			for _, engine := range []string{"llamacpp", "lmstudio"} {
+			for _, engine := range []string{"llamacpp", "llamacpp-custom"} {
 				_, present := p.Engines[engine]
 				withdrawn[engine] = !present
 			}
@@ -47,7 +47,7 @@ func TestSwitchWaitsForIdentityWithdrawalBeforeLifecycle(t *testing.T) {
 			}
 			if p.Step == settings.SwitchStepSourceStop || p.Step == settings.SwitchStepTargetStart {
 				mu.Lock()
-				ready := withdrawn["llamacpp"] && withdrawn["lmstudio"]
+				ready := withdrawn["llamacpp"] && withdrawn["llamacpp-custom"]
 				mu.Unlock()
 				if !ready {
 					return nil, "lifecycle preceded identity withdrawal acknowledgement"
@@ -59,10 +59,10 @@ func TestSwitchWaitsForIdentityWithdrawalBeforeLifecycle(t *testing.T) {
 	p := h.request(t, "identity-order")
 	runtime := h.b.nodePolicyRuntime()
 	runtime.mu.Lock()
-	runtime.settingsIdentity = map[string]string{"llamacpp": modelDigestB, "lmstudio": modelDigestB}
+	runtime.settingsIdentity = map[string]string{"llamacpp": modelDigestB, "llamacpp-custom": modelDigestB}
 	runtime.engineIdentity = map[string]engineManagerIdentity{
-		"llamacpp": {EngineRunID: "source-run", LaunchDigest: launchDigestC, ModelDigests: map[string]string{"m": modelDigestB}},
-		"lmstudio": {EngineRunID: "target-run", LaunchDigest: launchDigestC, ModelDigests: map[string]string{"m": modelDigestB}},
+		"llamacpp":        {EngineRunID: "source-run", LaunchDigest: launchDigestC, ModelDigests: map[string]string{"m": modelDigestB}},
+		"llamacpp-custom": {EngineRunID: "target-run", LaunchDigest: launchDigestC, ModelDigests: map[string]string{"m": modelDigestB}},
 	}
 	runtime.mu.Unlock()
 	if _, err := h.b.acceptEngineSwitch(context.Background(), p, "peer"); err != nil {
@@ -99,7 +99,7 @@ func TestSwitchIdentityWithdrawalFailurePreventsMutationAndCleanup(t *testing.T)
 }
 
 func TestSwitchSettingsPublicationKeepsReservedIdentitiesWithdrawn(t *testing.T) {
-	h := newSwitchHarness(t)
+	h := newSwitchHarnessFor(t, "llamacpp-custom")
 	p := h.request(t, "identity-refresh")
 	h.active.Store(1)
 	if _, err := h.b.acceptEngineSwitch(context.Background(), p, ""); err != nil {
@@ -108,8 +108,8 @@ func TestSwitchSettingsPublicationKeepsReservedIdentitiesWithdrawn(t *testing.T)
 	// Keep the coordinator in drain while a periodic settings publication runs.
 	h.b.engineConfigMu.Lock()
 	h.b.engineSettings = map[string]*engineSettingsRecord{
-		"llamacpp": {Snapshot: appliedSnapshot("llamacpp", 1)},
-		"lmstudio": {Snapshot: appliedSnapshot("lmstudio", 1)},
+		"llamacpp":        {Snapshot: appliedSnapshot("llamacpp", 1)},
+		"llamacpp-custom": {Snapshot: appliedSnapshot("llamacpp-custom", 1)},
 	}
 	h.b.publishSettingsLocked()
 	r := h.b.nodePolicyRuntime()
@@ -141,7 +141,6 @@ func TestSwitchRoutabilityUsesDescriptorProtocolsAndFacadeReadiness(t *testing.T
 	}{
 		{"OpenAI chat", []string{engines.ProtocolOpenAIChat}, true, true},
 		{"OpenAI v1", []string{engines.ProtocolOpenAIV1}, true, true},
-		{"Ollama", []string{engines.ProtocolOllamaAPI}, true, true},
 		{"list only", []string{engines.ProtocolLlamaCPPRouter}, true, false},
 		{"messages only", []string{engines.ProtocolAnthropicMessages}, true, false},
 		{"unsupported", []string{"grpc"}, true, false},
@@ -183,16 +182,12 @@ func TestSwitchCompletesWithDynamicSourceOrTarget(t *testing.T) {
 			h.pp.readyMu.Unlock()
 			h.mu.Lock()
 			if engine == "source" {
-				h.config.Engines[0].Engine = "llamacpp-custom"
-			} else {
-				h.config.Engines[1].Engine = "llamacpp-custom"
+				h.config.Engines[0].Engine, h.config.Engines[1].Engine = "llamacpp-custom", "llamacpp"
 			}
 			h.mu.Unlock()
 			p := h.request(t, "dynamic-"+engine)
 			if engine == "source" {
-				p.SourceEngine = "llamacpp-custom"
-			} else {
-				p.TargetEngine = "llamacpp-custom"
+				p.SourceEngine, p.TargetEngine = "llamacpp-custom", "llamacpp"
 			}
 			if _, err := h.b.acceptEngineSwitch(context.Background(), p, ""); err != nil {
 				t.Fatal(err)
@@ -279,7 +274,7 @@ func TestSwitchLocalOffWithdrawalRefusalPreventsStop(t *testing.T) {
 	}
 	refuse.Store(true)
 	id := json.RawMessage(`90`)
-	h.b.relayToEngineNow(&Message{ID: &id, Method: "engine:stop", Params: settingsJSON(map[string]string{"engine": "lmstudio"})})
+	h.b.relayToEngineNow(&Message{ID: &id, Method: "engine:stop", Params: settingsJSON(map[string]string{"engine": "llamacpp-custom"})})
 	if len(h.engine.methods("engine:stop")) != 0 {
 		t.Fatal("local Off touched the engine despite refused withdrawal")
 	}

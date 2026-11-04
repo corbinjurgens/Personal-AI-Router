@@ -88,7 +88,7 @@ func TestModelCopySelectedExport(t *testing.T) {
 		if err := hashModelFiles(context.Background(), &list, func(string, int) {}); err != nil {
 			t.Fatal(err)
 		}
-		assertNoLlamaSpawn(t, f)
+		assertNoSpawn(t, f)
 	})
 	t.Run("typed exports after restart without native build reads", func(t *testing.T) {
 		f := newModelLoadFixture(t)
@@ -218,11 +218,16 @@ type customCopyFixture struct {
 
 func newCustomCopyFixture(t *testing.T) customCopyFixture {
 	t.Helper()
+	return namedCustomCopyFixture(t, reportedCopyAlias, 300_000, 4)
+}
+
+func namedCustomCopyFixture(t *testing.T, model string, size int, seed byte) customCopyFixture {
+	t.Helper()
 	store, external := t.TempDir(), t.TempDir()
 	artifact := filepath.Join(external, "huggingface", "hub", "model.gguf")
-	writeTestFile(t, artifact, testBytes(300_000, 4))
+	writeTestFile(t, artifact, testBytes(size, seed))
 	preset := filepath.Join(external, "models.ini")
-	writeTestFile(t, preset, []byte("["+reportedCopyAlias+"]\nmodel = huggingface/hub/model.gguf\n"))
+	writeTestFile(t, preset, []byte("["+model+"]\nmodel = huggingface/hub/model.gguf\n"))
 	ex := copyTestExecutor(t, "llamacpp", store, true)
 	st, err := ex.state("llamacpp")
 	if err != nil {

@@ -30,30 +30,6 @@ Stopping the service is an explicit action (`Q`, or `--stop-service`).
 This file is the component reference. For task-oriented usage instructions, see
 [Using the PAIR terminal interface](../../docs/terminal-interface.mdx).
 
-## Local engine API keys
-
-In the local node's Engines pane, supported engines show their service-confirmed
-`Key saved` or `No key saved` state. Press `c` for a masked API key field,
-`enter` to Save, `ctrl+d` to Clear, or `esc` to cancel. `delete` also Clears from
-the Engines pane. Empty Save is refused; only an explicit Clear sends an empty
-credential. Remote nodes offer no credential controls or credential RPC route.
-
-`ctrl+r` retries the state read without resending a key. Before a confirmed answer,
-the label is `Credential state unknown`; a failed read shows
-`Credential store unavailable`, never `No key saved`. Failed Save/Clear keeps
-the last confirmed label and reports failure. If the store becomes available,
-retry with `ctrl+r`; re-enter a key to retry Save. Cancelling a call discards its reply, but does not
-undo a write the service already accepted; read state again to reconcile it.
-
-Editable keys live only in the transient masked input and a single in-flight
-request. Submission resets the input; success, failure, Escape/cancel, node or
-engine changes, leaving detail (including a tab change), service interruption,
-and application exit drop UI/request references and cancel pending calls.
-Late replies cannot reopen a field or update a newly selected engine. No key
-is kept in history, shared application state, logs, or a retry callback. Dropping
-references and masking do not provide secure memory erasure. Durable storage
-and credential availability belong to the local engine manager.
-
 ## Routing history consumer
 
 `connectService` constructs `ui.NewRoutingHistoryClient` with one bounded wire
@@ -222,7 +198,7 @@ finish or reconcile.
 
 `p` opens a catalog browser over the engine's downloadable models, served by the
 backend's `engine:catalog`. Sorting (`o`) is local. So is filtering (`/`) for a
-source that cannot search, such as Ollama's list of thousands of entries. For
+source that cannot search. For
 one whose reply says it is `searchable` — llama.cpp's, a slice of Hugging Face —
 `/` sends the query upstream instead, and `c` returns to the browse list.
 

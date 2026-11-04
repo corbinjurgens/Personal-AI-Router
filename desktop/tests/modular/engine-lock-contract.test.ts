@@ -64,7 +64,7 @@ describe('engine lock command dispatch', () => {
         const { send, report } = spySupervisor()
         await handleServiceBridgeInvoke('engine:command', {
             command: 'setLock',
-            engineType: 'lm-studio',
+            engineType: 'llama-cpp',
             nodeId: SELF,
             locked
         })
@@ -73,7 +73,7 @@ describe('engine lock command dispatch', () => {
         expect([name, method, params, observeResponse]).toEqual([
             'broker',
             'engine:set-lock',
-            { engine: 'lmstudio', locked },
+            { engine: 'llamacpp', locked },
             true
         ])
         expect(report).not.toHaveBeenCalled()
@@ -84,17 +84,17 @@ describe('engine lock command dispatch', () => {
         const { send, report } = spySupervisor()
         await handleServiceBridgeInvoke('engine:command', {
             command: 'setLock',
-            engineType: 'ollama',
+            engineType: 'llama-cpp',
             nodeId: SELF,
             locked: true
         })
         const onFailure = send.mock.calls[0][3]
         onFailure?.('-32000: Engine locking is not available yet.', true)
         expect(report).toHaveBeenCalledWith(
-            'Failed to lock ollama: -32000: Engine locking is not available yet.',
+            'Failed to lock llamacpp: -32000: Engine locking is not available yet.',
             'error',
-            `engine-cmd:setLock:${SELF}:ollama`,
-            { nodeId: SELF, engineType: 'ollama' }
+            `engine-cmd:setLock:${SELF}:llamacpp`,
+            { nodeId: SELF, engineType: 'llama-cpp' }
         )
     })
 
@@ -103,7 +103,7 @@ describe('engine lock command dispatch', () => {
         const { send, report } = spySupervisor()
         await handleServiceBridgeInvoke('engine:command', {
             command: 'setLock',
-            engineType: 'ollama',
+            engineType: 'llama-cpp',
             nodeId: PEER,
             locked: true
         })
@@ -111,8 +111,8 @@ describe('engine lock command dispatch', () => {
         expect(report).toHaveBeenCalledWith(
             'Engine locks can only be changed on the device running the engine.',
             'warning',
-            `engine-cmd:setLock:${PEER}:ollama`,
-            { nodeId: PEER, engineType: 'ollama' }
+            `engine-cmd:setLock:${PEER}:llamacpp`,
+            { nodeId: PEER, engineType: 'llama-cpp' }
         )
     })
 
@@ -121,7 +121,7 @@ describe('engine lock command dispatch', () => {
         const { send, report } = spySupervisor()
         await handleServiceBridgeInvoke('engine:command', {
             command: 'setLock',
-            engineType: 'ollama',
+            engineType: 'llama-cpp',
             nodeId: SELF
         })
         expect(send).not.toHaveBeenCalled()
@@ -135,14 +135,10 @@ describe('engine lock status round trips', () => {
     beforeAll(() => {
         state.setSelfId(SELF)
         state.handleNotification({
-            source: 'lmstudio-proxy',
-            method: 'node/discovered',
+            source: 'broker',
+            method: 'discovery:nodes-changed',
             params: {
-                id: PEER,
-                host: PEER,
-                port: 1234,
-                addresses: ['192.0.2.191'],
-                ip: '192.0.2.191'
+                nodes: [{ hostUuid: PEER, name: PEER, port: 14318, ipAddress: '192.0.2.191' }]
             }
         })
     })
@@ -163,7 +159,7 @@ describe('engine lock status round trips', () => {
             installed: true,
             running: false,
             healthy: false,
-            port: 1235,
+            port: 8081,
             ...(locked === undefined ? {} : { locked })
         }
     }

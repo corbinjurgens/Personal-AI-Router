@@ -218,10 +218,6 @@ func snapshotLlamaState(st *engineState) *engineState {
 	rt.ModelLoads = modelconfig.CloneLoads(rt.ModelLoads)
 	rt.Args = slices.Clone(rt.Args)
 	rt.Env = maps.Clone(rt.Env)
-	rt.Start = slices.Clone(rt.Start)
-	for i := range rt.Start {
-		rt.Start[i] = slices.Clone(rt.Start[i])
-	}
 	if rt.LaunchArgs != nil {
 		value := slices.Clone(*rt.LaunchArgs)
 		rt.LaunchArgs = &value

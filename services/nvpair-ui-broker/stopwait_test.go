@@ -300,7 +300,7 @@ func TestTeardownBudgetCapsAggregateWait(t *testing.T) {
 // the budget is untouched, and is clipped rather than starved once it is spent.
 // TestGraceForIgnoresBudgetOutsideTeardown is the regression guard for a
 // process-global clock armed by the wrong join. supervisor.Restart stops a worker
-// at ordinary runtime — LM Studio port reconciliation does it on every rebind — and
+// at ordinary runtime — facade port reconciliation does it on every rebind — and
 // arming the budget there left it permanently spent, so the real shutdown gave
 // every worker the floor and signalled engine-manager almost immediately.
 func TestGraceForIgnoresBudgetOutsideTeardown(t *testing.T) {
@@ -308,13 +308,13 @@ func TestGraceForIgnoresBudgetOutsideTeardown(t *testing.T) {
 
 	// A restart-shaped stop, long before any shutdown. It must not be clipped, and
 	// it must not arm anything.
-	if got := graceFor("lmstudio-proxy"); got != workerStopGrace {
+	if got := graceFor("llamacpp-custom-proxy"); got != workerStopGrace {
 		t.Fatalf("restart-path grace = %v, want its full %v", got, workerStopGrace)
 	}
 	stdin := &closeRecorder{}
 	done := make(chan struct{})
 	close(done)
-	waitForStdinClose("lmstudio-proxy", nil, stdin, done)
+	waitForStdinClose("llamacpp-custom-proxy", nil, stdin, done)
 
 	// The later real teardown must still start with a full budget.
 	beginTeardown()

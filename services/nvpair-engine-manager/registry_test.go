@@ -8,10 +8,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
-	"time"
+
+	"nvpair-shared/engines"
 )
 
 // validManifest is a minimal well-formed manifest used as the base for
@@ -19,30 +19,29 @@ import (
 // fault at a time.
 func validManifest() Manifest {
 	return Manifest{
-		Engine:          "ollama",
-		DisplayName:     "Ollama",
+		Engine:          engines.NameLlamaCPP,
+		DisplayName:     "llama.cpp",
 		ManifestVersion: 1,
 		Platforms: map[string]Platform{
 			"linux/amd64": {
-				Detect: []string{"$HOME/.local/bin/ollama"},
+				Detect: []string{"$HOME/.local/bin/llama-server"},
 				Install: &Install{
-					Fetch: &Fetch{URL: "https://example/ollama.tgz", SHA256: "abc123"},
+					Fetch: &Fetch{URL: "https://example/llamacpp.tgz", SHA256: "abc123"},
 					Run:   []string{"tar", "xzf", "{download}", "-C", "{install_dir}"},
 					Mode:  "user",
 				},
 				Runtime: Runtime{
-					Bin:    "{install_dir}/ollama",
-					Args:   []string{"serve"},
-					Env:    map[string]string{"OLLAMA_HOST": "127.0.0.1:{port}"},
-					Port:   11434,
-					Ready:  &Probe{HTTP: "http://127.0.0.1:{port}/", Status: 200, TimeoutS: 20},
+					Bin:    "{install_dir}/llama-server",
+					Args:   []string{"--host", "{host}", "--port", "{port}"},
+					Port:   8081,
+					Ready:  &Probe{HTTP: "http://127.0.0.1:{port}/props", Status: 200, TimeoutS: 20},
 					Stop:   &StopSpec{Signal: "term", GraceS: 5},
-					Health: &Probe{HTTP: "http://127.0.0.1:{port}/", Status: 200, IntervalS: 5},
+					Health: &Probe{HTTP: "http://127.0.0.1:{port}/health", Status: 200, IntervalS: 5},
 				},
 			},
 		},
 		Actions: map[string]Action{
-			"list_models": {Description: "list", HTTP: &ActionHTTP{Method: "GET", Path: "/api/tags"}},
+			"list_models": {Description: "list", HTTP: &ActionHTTP{Method: "GET", Path: "/models"}},
 		},
 	}
 }
@@ -101,170 +100,13 @@ func TestMemoryPlanManifest(t *testing.T) {
 	}
 }
 
-func TestManifestUserCredential(t *testing.T) {
-	reg := NewRegistry()
-	if err := reg.LoadFS(bundledManifests, "manifests"); err != nil {
-		t.Fatal(err)
-	}
-	for _, tc := range []struct {
-		engine string
-		want   bool
-	}{{"lmstudio", true}, {"ollama", false}, {"llamacpp", false}} {
-		t.Run(tc.engine, func(t *testing.T) {
-			m, ok := reg.Get(tc.engine)
-			if !ok {
-				t.Fatal("manifest not loaded")
-			}
-			p, ok := m.HostPlatform()
-			if !ok {
-				t.Fatal("host platform missing")
-			}
-			if p.Runtime.UserCredential != tc.want {
-				t.Errorf("runtime.user_credential = %t, want %t", p.Runtime.UserCredential, tc.want)
-			}
-		})
-	}
-}
-
-func TestManifestAuthStatuses(t *testing.T) {
-	t.Run("bundled manifests", func(t *testing.T) {
-		reg := NewRegistry()
-		if err := reg.LoadFS(bundledManifests, "manifests"); err != nil {
-			t.Fatal(err)
-		}
-		for _, engine := range []string{"lmstudio", "ollama", "llamacpp"} {
-			t.Run(engine, func(t *testing.T) {
-				m, ok := reg.Get(engine)
-				if !ok {
-					t.Fatalf("%s manifest not loaded", engine)
-				}
-				p, ok := m.HostPlatform()
-				if !ok {
-					t.Fatalf("%s host platform missing", engine)
-				}
-				var want []int
-				if engine == "lmstudio" {
-					want = []int{http.StatusUnauthorized, http.StatusForbidden}
-				}
-				if !slices.Equal(p.Runtime.AuthStatuses, want) {
-					t.Errorf("runtime.auth_statuses = %v, want %v", p.Runtime.AuthStatuses, want)
-				}
-			})
-		}
-	})
-
-	accept := func(name string, statuses []int) {
-		t.Run(name, func(t *testing.T) {
-			m := validManifest()
-			p := m.Platforms["linux/amd64"]
-			p.Runtime.AuthStatuses = statuses
-			m.Platforms["linux/amd64"] = p
-			if err := m.Validate(); err != nil {
-				t.Fatalf("valid auth statuses rejected: %v", err)
-			}
-		})
-	}
-	accept("accepts unauthorized", []int{http.StatusUnauthorized})
-	accept("accepts forbidden", []int{http.StatusForbidden})
-	accept("accepts both statuses", []int{http.StatusUnauthorized, http.StatusForbidden})
-
-	reject := func(name string, ready *Probe, statuses []int) {
-		t.Run(name, func(t *testing.T) {
-			m := validManifest()
-			p := m.Platforms["linux/amd64"]
-			p.Runtime.Ready = ready
-			p.Runtime.AuthStatuses = statuses
-			m.Platforms["linux/amd64"] = p
-			err := m.Validate()
-			if err == nil {
-				t.Fatal("invalid auth statuses accepted")
-			}
-			if !strings.Contains(err.Error(), `platform "linux/amd64": runtime.auth_statuses`) {
-				t.Fatalf("error = %q, want platform and runtime.auth_statuses", err)
-			}
-		})
-	}
-	reject("rejects missing ready probe", nil, []int{http.StatusUnauthorized})
-	reject("rejects TCP ready probe", &Probe{TCP: "127.0.0.1:{port}"}, []int{http.StatusUnauthorized})
-	reject("rejects whitespace HTTP ready probe", &Probe{HTTP: " \t", TCP: "127.0.0.1:{port}"}, []int{http.StatusUnauthorized})
-	reject("rejects other status", &Probe{HTTP: "http://127.0.0.1:{port}/"}, []int{http.StatusServiceUnavailable})
-	reject("rejects duplicate unauthorized", &Probe{HTTP: "http://127.0.0.1:{port}/"}, []int{http.StatusUnauthorized, http.StatusUnauthorized})
-	reject("rejects duplicate forbidden", &Probe{HTTP: "http://127.0.0.1:{port}/"}, []int{http.StatusForbidden, http.StatusForbidden})
-}
-
-func TestManifestAppProcesses(t *testing.T) {
-	t.Run("bundled manifests", func(t *testing.T) {
-		reg := NewRegistry()
-		if err := reg.LoadFS(bundledManifests, "manifests"); err != nil {
-			t.Fatal(err)
-		}
-		for _, engine := range []string{"lmstudio", "ollama", "llamacpp"} {
-			t.Run(engine, func(t *testing.T) {
-				m, ok := reg.Get(engine)
-				if !ok {
-					t.Fatalf("%s manifest not loaded", engine)
-				}
-				p, ok := m.HostPlatform()
-				if !ok {
-					t.Fatalf("%s host platform missing", engine)
-				}
-				var want []string
-				if engine == "lmstudio" {
-					want = []string{"LM Studio", "lm-studio", "llmster"}
-				}
-				if !slices.Equal(p.Runtime.AppProcesses, want) {
-					t.Errorf("runtime.app_processes = %v, want %v", p.Runtime.AppProcesses, want)
-				}
-			})
-		}
-	})
-
-	t.Run("accepts process image base names", func(t *testing.T) {
-		m := validManifest()
-		p := m.Platforms["linux/amd64"]
-		p.Runtime.AppProcesses = []string{"LM Studio", "lm-studio", "llmster", "Other App.exe"}
-		m.Platforms["linux/amd64"] = p
-		if err := m.Validate(); err != nil {
-			t.Fatalf("valid process image base names rejected: %v", err)
-		}
-	})
-
-	reject := func(name string, names []string) {
-		t.Run(name, func(t *testing.T) {
-			m := validManifest()
-			p := m.Platforms["linux/amd64"]
-			p.Runtime.AppProcesses = names
-			m.Platforms["linux/amd64"] = p
-			err := m.Validate()
-			if err == nil {
-				t.Fatal("invalid app process names accepted")
-			}
-			if !strings.Contains(err.Error(), `platform "linux/amd64": runtime.app_processes`) {
-				t.Fatalf("error = %q, want platform and runtime.app_processes", err)
-			}
-		})
-	}
-	reject("rejects empty name", []string{""})
-	reject("rejects whitespace name", []string{" \t\r\n"})
-	reject("rejects slash", []string{"Applications/LM Studio"})
-	reject("rejects backslash", []string{`Programs\LM Studio.exe`})
-	reject("rejects duplicate name", []string{"llmster", "llmster"})
-	reject("rejects case-insensitive duplicate", []string{"LM Studio", "lm studio"})
-}
-
-func TestValidateAcceptsCommandModeAndCmdAction(t *testing.T) {
+func TestValidateAcceptsCmdAction(t *testing.T) {
 	m := validManifest()
-	p := m.Platforms["linux/amd64"]
-	p.Runtime.Mode = "command"
-	p.Runtime.Bin = "" // not required in command mode
-	p.Runtime.Start = [][]string{{"lms", "daemon", "up"}, {"lms", "server", "start", "--port", "{port}"}}
-	p.Runtime.Stop = &StopSpec{Cmd: []string{"lms", "server", "stop"}}
-	m.Platforms["linux/amd64"] = p
 	// A CLI action with a param placeholder ({model}) must validate —
 	// action templates are resolved from params at call time, not here.
-	m.Actions["pull"] = Action{Cmd: []string{"lms", "get", "{model}", "--yes"}}
+	m.Actions["pull"] = Action{Cmd: []string{"llama-server-control", "download", "{model}", "--yes"}}
 	if err := m.Validate(); err != nil {
-		t.Fatalf("command-mode/cmd-action manifest rejected: %v", err)
+		t.Fatalf("cmd-action manifest rejected: %v", err)
 	}
 }
 
@@ -556,6 +398,9 @@ func TestValidateRejects(t *testing.T) {
 				ProgressProtocol: "unknown",
 			}
 		}, "unsupported progress_protocol"},
+		{"HTTP pull without progress protocol", func(m *Manifest) {
+			m.Actions[pullModelAction] = Action{HTTP: &ActionHTTP{Method: "POST", Path: "/models"}}
+		}, "requires a progress_protocol"},
 		{"progress protocol on other action", func(m *Manifest) {
 			m.Actions["list_models"] = Action{
 				HTTP:             &ActionHTTP{Method: "GET", Path: "/models"},
@@ -600,12 +445,12 @@ func TestPlatformFor(t *testing.T) {
 }
 
 func TestResolvePlaceholders(t *testing.T) {
-	vars := map[string]string{"port": "11434", "install_dir": "/opt/x", "bin": "/opt/x/ollama"}
+	vars := map[string]string{"port": "8081", "install_dir": "/opt/x", "bin": "/opt/x/llama-server"}
 	got, err := resolvePlaceholders("http://127.0.0.1:{port}/", vars)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	if got != "http://127.0.0.1:11434/" {
+	if got != "http://127.0.0.1:8081/" {
 		t.Fatalf("got %q", got)
 	}
 	if _, err := resolvePlaceholders("{download}", vars); err == nil {
@@ -632,30 +477,30 @@ func TestLoadRegistryOverride(t *testing.T) {
 	userDir := t.TempDir()
 
 	base := validManifest()
-	base.DisplayName = "Ollama (bundled)"
-	writeManifest(t, bundled, "ollama.json", base)
+	base.DisplayName = "llama.cpp (bundled)"
+	writeManifest(t, bundled, "llamacpp.json", base)
 
 	// A second bundled engine.
 	other := validManifest()
-	other.Engine = "vllm"
-	other.DisplayName = "vLLM"
-	writeManifest(t, bundled, "vllm.json", other)
+	other.Engine = portFixtureCustomEngine(t).Name
+	other.DisplayName = "llama.cpp custom"
+	writeManifest(t, bundled, "llamacpp-custom.json", other)
 
-	// User override of ollama wins over bundled.
+	// User override of llamacpp wins over bundled.
 	override := validManifest()
-	override.DisplayName = "Ollama (user)"
-	writeManifest(t, userDir, "ollama.json", override)
+	override.DisplayName = "llama.cpp (user)"
+	writeManifest(t, userDir, "llamacpp.json", override)
 
 	reg, err := LoadRegistry(bundled, userDir)
 	if err != nil {
 		t.Fatalf("LoadRegistry: %v", err)
 	}
 	names := reg.Names()
-	if len(names) != 2 || names[0] != "ollama" || names[1] != "vllm" {
+	if len(names) != 2 || names[0] != "llamacpp" || names[1] != "llamacpp-custom" {
 		t.Fatalf("unexpected names: %v", names)
 	}
-	m, ok := reg.Get("ollama")
-	if !ok || m.DisplayName != "Ollama (user)" {
+	m, ok := reg.Get("llamacpp")
+	if !ok || m.DisplayName != "llama.cpp (user)" {
 		t.Fatalf("user override did not win: %+v", m)
 	}
 }
@@ -665,27 +510,27 @@ func TestLoadOverrideDirRejectsEmptyInstallRun(t *testing.T) {
 	if err := reg.LoadFS(bundledManifests, "manifests"); err != nil {
 		t.Fatalf("load bundled manifests: %v", err)
 	}
-	base, ok := reg.Get("ollama")
+	base, ok := reg.Get("llamacpp")
 	if !ok {
-		t.Fatal("bundled ollama manifest missing")
+		t.Fatal("bundled llamacpp manifest missing")
 	}
 	if len(base.Platforms["linux/amd64"].Install.Run) == 0 {
-		t.Fatal("bundled ollama install.run is empty")
+		t.Fatal("bundled llamacpp install.run is empty")
 	}
 	dir := t.TempDir()
 	const override = `{
-  "engine": "ollama",
+  "engine": "llamacpp",
   "display_name": "Invalid override",
   "platforms": {"linux/amd64": {"install": {"run": []}}}
 }`
-	if err := os.WriteFile(filepath.Join(dir, "ollama.json"), []byte(override), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "llamacpp.json"), []byte(override), 0o644); err != nil {
 		t.Fatalf("write override: %v", err)
 	}
 	if err := reg.LoadOverrideDir(dir); err != nil {
 		t.Fatalf("load override directory: %v", err)
 	}
-	if got, ok := reg.Get("ollama"); ok || got != nil || reg.invalid["ollama"] == nil {
-		t.Fatalf("invalid override must make ollama unavailable: manifest=%+v error=%v", got, reg.invalid["ollama"])
+	if got, ok := reg.Get("llamacpp"); ok || got != nil || reg.invalid["llamacpp"] == nil {
+		t.Fatalf("invalid override must make llamacpp unavailable: manifest=%+v error=%v", got, reg.invalid["llamacpp"])
 	}
 }
 
@@ -792,72 +637,25 @@ func TestApplyPlatformDefaults(t *testing.T) {
 	}
 }
 
-// TestBundledManifestsMerge guards the actual shipped manifests: they must
-// load, validate, and produce the right effective platforms after the
-// shared-base merge.
+// Bundled platforms inherit the shared runtime while supplying their binary.
 func TestBundledManifestsMerge(t *testing.T) {
-	reg, err := LoadRegistry("manifests")
-	if err != nil {
-		t.Fatalf("load bundled manifests: %v", err)
-	}
-
-	ol, ok := reg.Get("ollama")
-	if !ok {
-		t.Fatal("ollama not loaded")
-	}
-	if p, ok := ol.PlatformFor("linux", "amd64"); ok {
-		// linux env must deep-merge shared OLLAMA_HOST with per-platform LD_LIBRARY_PATH
-		if p.Runtime.Env["OLLAMA_HOST"] == "" || p.Runtime.Env["LD_LIBRARY_PATH"] == "" {
-			t.Errorf("ollama linux env merge missing a key: %v", p.Runtime.Env)
-		}
-		if p.Runtime.Port != 11434 || p.Runtime.Bin == "" {
-			t.Errorf("ollama linux runtime: port=%d bin=%q", p.Runtime.Port, p.Runtime.Bin)
-		}
-	} else {
-		t.Error("ollama linux/amd64 missing")
-	}
-
-	lm, ok := reg.Get("lmstudio")
-	if !ok {
-		t.Fatal("lmstudio not loaded")
-	}
-	if p, ok := lm.PlatformFor("darwin", "arm64"); ok {
-		// per-platform cli override + inherited shared runtime (port/start)
-		if p.Runtime.CLI != "~/.lmstudio/bin/lms" {
-			t.Errorf("lmstudio darwin cli: %q", p.Runtime.CLI)
-		}
-		if p.Runtime.Port != 1235 || len(p.Runtime.Start) == 0 {
-			t.Errorf("lmstudio darwin inherited runtime missing: port=%d start=%v", p.Runtime.Port, p.Runtime.Start)
-		}
-	} else {
-		t.Error("lmstudio darwin/arm64 missing")
-	}
-}
-
-// TestBundledOllamaReadinessBudget pins the finite startup allowance used by
-// every supported platform. Ollama does not serve /api/version until GPU
-// discovery completes, which can exceed the previous 30-second allowance.
-func TestBundledOllamaReadinessBudget(t *testing.T) {
 	reg := NewRegistry()
 	if err := reg.LoadFS(bundledManifests, "manifests"); err != nil {
 		t.Fatal(err)
 	}
-	m, ok := reg.Get("ollama")
+	m, ok := reg.Get("llamacpp")
 	if !ok {
-		t.Fatal("ollama manifest not loaded")
+		t.Fatal("llamacpp manifest not loaded")
 	}
-	for key, p := range m.Platforms {
-		if p.Runtime.Ready == nil {
-			t.Errorf("%s: readiness probe missing", key)
-			continue
-		}
-		if got, want := p.Runtime.Ready.TimeoutS, 600; got != want {
-			t.Errorf("%s: readiness timeout = %ds, want %ds", key, got, want)
-		}
-		if readiness := time.Duration(p.Runtime.Ready.TimeoutS) * time.Second; remoteReadyResponseHeaderTimeout <= readiness {
-			t.Errorf("%s: remote readiness response-header timeout %s must exceed readiness timeout %s",
-				key, remoteReadyResponseHeaderTimeout, readiness)
-		}
+	for key, platform := range m.Platforms {
+		t.Run(key, func(t *testing.T) {
+			if platform.Runtime.Port != 8081 || platform.Runtime.Bin == "" || platform.Runtime.Env["LLAMA_CACHE"] != "{models_dir}" {
+				t.Fatalf("platform did not inherit shared runtime: %+v", platform.Runtime)
+			}
+			if strings.HasPrefix(key, "linux/") && platform.Runtime.Env["LD_LIBRARY_PATH"] != "{install_dir}" {
+				t.Fatalf("Linux environment did not merge with shared environment: %v", platform.Runtime.Env)
+			}
+		})
 	}
 }
 
@@ -869,64 +667,6 @@ func writeManifest(t *testing.T, dir, name string, m Manifest) {
 	}
 	if err := os.WriteFile(filepath.Join(dir, name), data, 0o644); err != nil {
 		t.Fatal(err)
-	}
-}
-
-// TestOllamaManifestBindsLoopback pins the secure-inference policy: the bundled
-// Ollama manifest binds 127.0.0.1 so the engine is never directly LAN-reachable
-// — cluster peers reach it only through the promoted proxy's pin-gated mTLS
-// ingress. OLLAMA_HOST stays templated on {host} (which now resolves to
-// loopback).
-func TestOllamaManifestBindsLoopback(t *testing.T) {
-	reg := NewRegistry()
-	if err := reg.LoadFS(bundledManifests, "manifests"); err != nil {
-		t.Fatal(err)
-	}
-	m, ok := reg.Get("ollama")
-	if !ok {
-		t.Fatal("ollama manifest not loaded")
-	}
-	for key, p := range m.Platforms {
-		if p.Runtime.Bind != "127.0.0.1" {
-			t.Errorf("%s: runtime.bind = %q, want 127.0.0.1", key, p.Runtime.Bind)
-		}
-		if !strings.Contains(p.Runtime.Env["OLLAMA_HOST"], "{host}") {
-			t.Errorf("%s: OLLAMA_HOST %q should use {host}", key, p.Runtime.Env["OLLAMA_HOST"])
-		}
-	}
-}
-
-// TestLMStudioManifestBindsLoopback pins LM Studio to the same loopback-only
-// policy as Ollama: runtime.bind is 127.0.0.1 and the start command still
-// passes `--bind {host}` (which resolves to loopback), so the engine is reached
-// only through the promoted proxy's mTLS ingress, never directly on the LAN.
-func TestLMStudioManifestBindsLoopback(t *testing.T) {
-	reg := NewRegistry()
-	if err := reg.LoadFS(bundledManifests, "manifests"); err != nil {
-		t.Fatal(err)
-	}
-	m, ok := reg.Get("lmstudio")
-	if !ok {
-		t.Fatal("lmstudio manifest not loaded")
-	}
-	for key, p := range m.Platforms {
-		if p.Runtime.Bind != "127.0.0.1" {
-			t.Errorf("%s: runtime.bind = %q, want 127.0.0.1", key, p.Runtime.Bind)
-		}
-		var hasBindFlag, hasHostToken bool
-		for _, cmd := range p.Runtime.Start {
-			for i, arg := range cmd {
-				if arg == "--bind" {
-					hasBindFlag = true
-					if i+1 < len(cmd) && cmd[i+1] == "{host}" {
-						hasHostToken = true
-					}
-				}
-			}
-		}
-		if !hasBindFlag || !hasHostToken {
-			t.Errorf("%s: start %v should pass --bind {host}", key, p.Runtime.Start)
-		}
 	}
 }
 
@@ -978,68 +718,5 @@ func TestLlamaCPPManifestDeclaresNativeCacheDelete(t *testing.T) {
 	}
 	if action.RestartAfter {
 		t.Error("llamacpp delete_model must not restart the router")
-	}
-}
-
-func TestLMStudioManifestUsesNativeSystemInventory(t *testing.T) {
-	reg := NewRegistry()
-	if err := reg.LoadFS(bundledManifests, "manifests"); err != nil {
-		t.Fatal(err)
-	}
-	m, ok := reg.Get("lmstudio")
-	if !ok {
-		t.Fatal("lmstudio manifest not loaded")
-	}
-	action, ok := m.Actions["list_models"]
-	if !ok || action.HTTP == nil || action.Result == nil {
-		t.Fatalf("lmstudio list_models action is incomplete: %+v", action)
-	}
-	if action.HTTP.Method != "GET" || action.HTTP.Path != "/api/v1/models" {
-		t.Errorf("lmstudio list_models HTTP = %s %s, want GET /api/v1/models", action.HTTP.Method, action.HTTP.Path)
-	}
-	if action.Result.Array != "models" || action.Result.Field != "key" {
-		t.Errorf("lmstudio list_models result = %+v, want models[].key", action.Result)
-	}
-}
-
-// TestLMStudioInstallBootstrapSafety verifies that bootstrap fetch failures are
-// visible and Windows executes a downloaded .ps1
-// file rather than pipe remote content through Invoke-Expression.
-func TestLMStudioInstallBootstrapSafety(t *testing.T) {
-	reg := NewRegistry()
-	if err := reg.LoadFS(bundledManifests, "manifests"); err != nil {
-		t.Fatal(err)
-	}
-	m, ok := reg.Get("lmstudio")
-	if !ok {
-		t.Fatal("lmstudio manifest not loaded")
-	}
-	for key, p := range m.Platforms {
-		if p.Install == nil {
-			continue
-		}
-		if strings.HasPrefix(key, "windows/") {
-			if len(p.Install.Script) != 0 {
-				t.Errorf("%s: install must not evaluate a remote script inline; got %v", key, p.Install.Script)
-			}
-			if p.Install.Fetch == nil || p.Install.Fetch.URL != "https://lmstudio.ai/install.ps1" {
-				t.Errorf("%s: install must download the official script through engine-manager; got %+v", key, p.Install.Fetch)
-			}
-			wantRun := []string{"powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "RemoteSigned", "-File", "{download}"}
-			if !slices.Equal(p.Install.Run, wantRun) {
-				t.Errorf("%s: install run = %v, want %v", key, p.Install.Run, wantRun)
-			}
-			continue
-		}
-		if len(p.Install.Script) != 0 {
-			t.Errorf("%s: install must not interpolate paths into shell text; got %v", key, p.Install.Script)
-		}
-		if p.Install.Fetch == nil || p.Install.Fetch.URL != "https://lmstudio.ai/install.sh" {
-			t.Errorf("%s: install must download the official script through engine-manager; got %+v", key, p.Install.Fetch)
-		}
-		wantRun := []string{"bash", "{download}"}
-		if !slices.Equal(p.Install.Run, wantRun) {
-			t.Errorf("%s: install run = %v, want %v", key, p.Install.Run, wantRun)
-		}
 	}
 }

@@ -28,16 +28,16 @@ func TestPeerPolicySetRoundTripsRoles(t *testing.T) {
 		t.Fatalf("relayed get roles = %#v, want an empty object", doc["roles"])
 	}
 	doc["roles"] = map[string]any{
-		"weak":   map[string]any{"engine": "ollama", "model": "qwen3:8b"},
-		"strong": map[string]any{"engine": "lmstudio", "model": "big"},
+		"weak":   map[string]any{"engine": "llamacpp", "model": "qwen3:8b"},
+		"strong": map[string]any{"engine": "llamacpp-custom", "model": "big"},
 	}
 	if _, errText := rb.relaySet(t, doc); errText != "" {
 		t.Fatalf("relayed set with roles: %s", errText)
 	}
 
 	want := map[string]nodepolicy.Role{
-		nodepolicy.TierWeak:   {Engine: "ollama", Model: "qwen3:8b"},
-		nodepolicy.TierStrong: {Engine: "lmstudio", Model: "big"},
+		nodepolicy.TierWeak:   {Engine: "llamacpp", Model: "qwen3:8b"},
+		nodepolicy.TierStrong: {Engine: "llamacpp-custom", Model: "big"},
 	}
 	if got := rb.b.localPolicy().Policy.Roles; !reflect.DeepEqual(got, want) {
 		t.Errorf("stored roles = %+v, want %+v", got, want)
@@ -89,8 +89,8 @@ func TestPeerPolicySetRejectsInvalidRolesWithoutEffect(t *testing.T) {
 		})
 	}
 
-	test("unknown tier", map[string]any{"huge": map[string]any{"engine": "ollama", "model": "m"}}, "unknown tier")
-	test("reserved alias model", map[string]any{"weak": map[string]any{"engine": "ollama", "model": "weak-api"}}, "reserved alias")
+	test("unknown tier", map[string]any{"huge": map[string]any{"engine": "llamacpp", "model": "m"}}, "unknown tier")
+	test("reserved alias model", map[string]any{"weak": map[string]any{"engine": "llamacpp", "model": "weak-api"}}, "reserved alias")
 	test("unknown engine", map[string]any{"weak": map[string]any{"engine": "no/pe", "model": "m"}}, "unknown engine")
 }
 
@@ -123,7 +123,7 @@ func TestPeerPolicySetWhilePausedHasNoEffect(t *testing.T) {
 		delete(doc, "pausedBy")
 	})
 	test("roles edit alongside", func(doc map[string]any) {
-		doc["roles"] = map[string]any{"medium": map[string]any{"engine": "ollama", "model": "qwen3:8b"}}
+		doc["roles"] = map[string]any{"medium": map[string]any{"engine": "llamacpp", "model": "qwen3:8b"}}
 		doc["pausedBy"] = "peer"
 	})
 }
@@ -132,10 +132,10 @@ func TestLocalRolesEditWhilePausedPreservesPause(t *testing.T) {
 	rb := newBrokerOnFile(t, pausedLocallyDocument)
 	before := rb.b.localPolicy().Policy.Revision
 	rb.localSet(t, func(doc map[string]any) {
-		doc["roles"] = map[string]any{"medium": map[string]any{"engine": "ollama", "model": "qwen3:8b"}}
+		doc["roles"] = map[string]any{"medium": map[string]any{"engine": "llamacpp", "model": "qwen3:8b"}}
 	})
 	got := rb.b.localPolicy().Policy
-	want := map[string]nodepolicy.Role{nodepolicy.TierMedium: {Engine: "ollama", Model: "qwen3:8b"}}
+	want := map[string]nodepolicy.Role{nodepolicy.TierMedium: {Engine: "llamacpp", Model: "qwen3:8b"}}
 	if !reflect.DeepEqual(got.Roles, want) || got.Revision == before || got.Availability != nodepolicy.Paused || got.PausedBy != nodepolicy.PausedLocally {
 		t.Fatalf("local roles edit = %+v, want new revision and roles with the local pause preserved", got)
 	}

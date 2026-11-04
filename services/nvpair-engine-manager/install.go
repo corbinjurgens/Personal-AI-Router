@@ -73,7 +73,7 @@ func (e *Executor) Install(ctx context.Context, engine string) (err error) {
 		e.emitInstallProgress(engine, "already-installed", 100)
 		return nil
 	}
-	if presence.Occupied && (st.plat.Runtime.modeOrDefault() == "process" || len(st.plat.DetectRequired) > 0) {
+	if presence.Occupied {
 		reason := fmt.Sprintf("a service that did not identify as %s", st.manifest.DisplayName)
 		if presence.Identified {
 			reason = "a running service with incomplete mandatory detection files"
@@ -214,17 +214,8 @@ func (e *Executor) Uninstall(ctx context.Context, engine string) (err error) {
 	st.mu.Lock()
 	binPath := st.binPath // resolved by the Detect at the top of Uninstall
 	st.mu.Unlock()
-	if st.plat.Runtime.modeOrDefault() == "process" && !isManagedInstallPath(binPath, st.installDir) {
+	if !isManagedInstallPath(binPath, st.installDir) {
 		err := fmt.Errorf("cannot uninstall engine %q: its executable is outside NVPAIR's managed install directory (%s)", engine, binPath)
-		e.reporter.report(serviceError{ID: uninstallFailedID(engine), Message: err.Error(), Severity: "error", Action: "none", EngineType: engine, Operation: "uninstall"})
-		return err
-	}
-	// A command-mode engine's vendor script picks its own destination, so the
-	// managed-path test above can never vouch for one. Without the install
-	// marker this could be the copy the user installed themselves, holding the
-	// model library they built up in it — decline rather than guess.
-	if st.plat.Runtime.modeOrDefault() == "command" && !installedByPAIR(st.installDir) {
-		err := fmt.Errorf("cannot uninstall engine %q: NVIDIA PAIR has no record of installing it, so it may be your own installation; remove it with %s's own uninstaller", engine, st.manifest.DisplayName)
 		e.reporter.report(serviceError{ID: uninstallFailedID(engine), Message: err.Error(), Severity: "error", Action: "none", EngineType: engine, Operation: "uninstall"})
 		return err
 	}
@@ -328,8 +319,7 @@ func (e *Executor) Uninstall(ctx context.Context, engine string) (err error) {
 var maxDownloadBytes int64 = 8 << 30 // 8 GiB
 
 // uninstallRetries / uninstallBackoff bound retrying a failed uninstall
-// command. A command-mode engine's daemon (e.g. LM Studio's backend) can
-// outlive its `stop` and briefly hold files open, so a straight rm hits
+// command. A stopped engine can briefly hold files open, so a straight rm hits
 // "directory not empty"; a short retry lets the tree settle. Vars so tests
 // can shrink the backoff.
 var (

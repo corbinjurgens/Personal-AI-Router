@@ -260,7 +260,7 @@ func TestEngineNotificationResetClearsOnlyEngineOwners(t *testing.T) {
 	s.broker = run
 	s.readyFrame = []byte("actual-ready")
 	s.baselines["engine:ready"] = []byte("old-engine-ready")
-	s.baselines["ollama-proxy:ready"] = []byte("proxy-ready")
+	s.baselines["llamacpp-proxy:ready"] = []byte("proxy-ready")
 	s.subscribed["engine:subscribe"], s.subscribed["discovery:subscribe"] = true, true
 	s.resubscribe = []string{"engine:subscribe", "discovery:subscribe"}
 	completed := make(chan *jsonrpc.Message, 1)
@@ -292,7 +292,7 @@ func TestEngineNotificationResetClearsOnlyEngineOwners(t *testing.T) {
 	if s.subscribed["engine:subscribe"] || s.baselines["engine:ready"] != nil || s.pending[1] != nil || s.pending[3] != nil || len(s.clients) != 0 {
 		t.Fatal("late subscription acknowledgement restored invalid engine ownership")
 	}
-	if s.pending[2] != other || !s.subscribed["discovery:subscribe"] || string(s.baselines["ollama-proxy:ready"]) != "proxy-ready" || string(s.readyFrame) != "actual-ready" || !reflect.DeepEqual(s.resubscribe, []string{"discovery:subscribe"}) {
+	if s.pending[2] != other || !s.subscribed["discovery:subscribe"] || string(s.baselines["llamacpp-proxy:ready"]) != "proxy-ready" || string(s.readyFrame) != "actual-ready" || !reflect.DeepEqual(s.resubscribe, []string{"discovery:subscribe"}) {
 		t.Fatal("reset changed unrelated pending, baseline, ready or subscription ownership")
 	}
 }

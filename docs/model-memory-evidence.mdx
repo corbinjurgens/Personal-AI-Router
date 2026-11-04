@@ -23,6 +23,13 @@ fingerprint/profile join, follows later. It does not change ranking, admission
 or scheduling. It adds no RPC method, channel, mDNS record, public node-info
 field or poller.
 
+No engine has a supported loaded-memory extractor today. engine-manager can
+therefore read no allocation from any engine, and every entry it publishes is
+`unknown` and marked `unsupported`. The wire format and the operator
+qualification document below stay defined and validated so that an extractor
+can be added without changing them. A loaded-memory extractor for llama.cpp is
+planned work (ME2) and does not exist yet.
+
 ## Where it appears
 
 | Surface | Carries |
@@ -31,7 +38,9 @@ field or poller.
 | `engine:models-changed` notification | The same `ModelsResult` shape, including optional memory evidence |
 | `/v1/models` | The same `ModelsResult` shape on the LAN HTTP surface |
 
-The member may contain an empty entries array when no loaded evidence is available.
+The member may contain an empty entries array when no engine reports a loaded
+model and no qualification document applies. Otherwise it holds one entry for
+each loaded model and for each model a current qualification document names.
 Its absence means "no evidence", never "zero bytes". Evidence is redacted: it carries engine
 and model names, digests, envelope values, ages, counts and reviewed provenance,
 and never prompts, messages, response bodies, file paths, tokens or key
@@ -60,13 +69,14 @@ structurally required, and every member that is not known is an explicit JSON
 | `source` | `hostUuid`, `managerIncarnation`, `engineRunId`, `launchDigest`, `modelDigest` | The exact host, manager process, engine run, launch and model content the entry belongs to. |
 | `appliedSettings` | `epoch`, `revision` | The fully applied settings snapshot. It is not the broker's settings fingerprint. |
 | `envelope` | `domain`, `effectiveContextTokens`, `concurrentExecutions`, `offloadMode` | The serving envelope the entry covers. |
-| `observed` | `allocatedBytes`, `extractorRevision` | The current allocation reading and the extractor that produced it. |
+| `observed` | `allocatedBytes`, `extractorRevision` | The current allocation reading and the extractor that produced it. Both are `null` today because no extractor is supported. |
 | `qualification` | `upperBytes`, `id`, `revision`, `artifactDigest`, `procedureDigest` | The reviewed upper bound and the document identity it came from. `upperBytes` is set only for `qualified`. |
 | `provenance` | `procedureId`, `procedureRevision`, `hardwareFingerprint`, `hardwareDescription`, `runtimeRevision`, `driverRevision`, `scope` | Operator-attested measurement provenance. |
 | `freshness` | `sampleAgeMs`, `qualificationAgeMs`, `observationGeneration`, `readingValidForMs` | Monotonic ages, the source observation generation and the fixed reading window. |
 
-A measured zero is the number `0`, and it means the engine reported zero bytes.
-A `null` allocation means the value is unknown. Consumers must never read a
+A measured zero is the number `0`, and it would mean an extractor read zero bytes
+from the engine. A `null` allocation means the value is unknown, which is every
+allocation today. Consumers must never read a
 missing value as zero or as an upper bound. The observed allocation is not a
 qualified upper: it is one reading, and the upper is a separate positive review
 result. Memory domains are not summed; a dedicated device, host physical memory
@@ -79,6 +89,10 @@ and unified physical memory are distinct budgets.
 | `unknown` | The evidence is incomplete. Partial metadata may still be present, but there is no qualified upper bound. |
 | `advisory` | There are observations, but no current qualified upper bound. |
 | `qualified` | A current document bound this exact source, applied settings and envelope, and a fresh reading lies within the reviewed upper bound. |
+
+Without a supported extractor there are no observations, so engine-manager
+emits only `unknown`. `advisory` and `qualified` remain valid wire states that
+consumers must accept; no producer path reaches them until an extractor exists.
 
 A `qualified` entry carries every binding, a positive `upperBytes`, the
 qualification and procedure digests, the full provenance, empty uncertainty and
@@ -143,10 +157,10 @@ it, or any synthetic fixture, qualifies nothing.
       "source": {
         "hostUuid": "example-host",
         "managerIncarnation": "example-manager-incarnation",
-        "engine": "ollama",
+        "engine": "llamacpp",
         "engineRunId": "example-engine-run",
         "launchDigest": "0000000000000000000000000000000000000000000000000000000000000000",
-        "model": "example:8b",
+        "model": "example-8b.gguf",
         "modelDigest": "0000000000000000000000000000000000000000000000000000000000000000"
       },
       "config": {
@@ -158,7 +172,7 @@ it, or any synthetic fixture, qualifies nothing.
         "effectiveContextTokens": 8192,
         "concurrentExecutions": 1,
         "offloadMode": "gpu",
-        "extractorRevision": "ollama-ps-v1"
+        "extractorRevision": "example-extractor-0"
       },
       "qualification": {
         "id": "example-memory-upper",
@@ -185,8 +199,12 @@ it, or any synthetic fixture, qualifies nothing.
 }
 ```
 
-Creating a real document is owner-gated: it requires an approved measurement of
-the exact machine, executable and model, as described below.
+The `extractorRevision` member names the extractor that produced the measured
+reading. It is validated as bounded text and recorded with the document, but no
+extractor revision is supported, so it never makes an entry observed or
+qualified. Creating a real document is owner-gated: it requires an extractor and
+an approved measurement of the exact machine, executable and model, as described
+below.
 
 ## Revision and history authority
 
@@ -197,9 +215,10 @@ document-wide for the lifetime of the manager process.
   existing qualification age and any withdrawal, and does not refresh either.
 - A different document with the same revision is rejected.
 - An older revision is rejected.
-- A bound exceedance or clock uncertainty is latched document-wide. Deleting
-  the file, letting it reappear, or evicting the entry does not clear the latch,
-  because the producer retains the rejected authority for its lifetime.
+- Clock uncertainty is latched document-wide, as is a bound exceedance once an
+  extractor can observe one. Deleting the file or letting it reappear does not
+  clear the latch, because the producer retains the rejected authority for its
+  lifetime.
 - Only a new, valid, reviewed document with a higher revision recovers a
   latched qualification.
 
@@ -220,7 +239,9 @@ A record applies only while every bound input still matches:
 | `modelDigest` | The model content changes, including a same-name replacement. |
 | applied settings `epoch` and `revision` | An apply or recovery produces a new fully applied revision. |
 
-Any mismatch leaves the entry unqualified and reports the matching uncertainty.
+Any mismatch reports the matching uncertainty. A document is accepted only
+while every record matches the current source, so a document written for another
+run, host or model content is not accepted at all.
 Lowering context, changing concurrency or offload mode, or restarting the engine
 also leaves the measured envelope, so the old upper no longer applies.
 
@@ -233,39 +254,38 @@ in particular, RTX evidence is never inherited on the PC3 GTX 1060 target.
 
 ## Observation and freshness
 
-There is one supported extractor revision, `ollama-ps-v1`, for actual
-Ollama-family runs owned by PAIR. It reads the official loaded-model shape
-described at <https://docs.ollama.com/api/ps>, using `size_vram` as the
-current allocation and `context_length` as the served context. Units, schema
-details and the exact runtime version must be verified during owner
-qualification; the name is not a runtime version acceptance claim.
+There is no supported extractor revision. engine-manager does not read an
+engine's loaded-model response for memory, so no entry carries
+`allocatedBytes`, an `extractorRevision` or a `qualified` state. Each entry
+carries the `unsupported` and missing-reading reasons, plus any identity,
+document or clock reasons that apply. The inventory of installed and loaded
+model names is unaffected: a memory failure never removes a name.
 
-`size_vram` and the current allocation are advisory on their own. They are never
-a worst-case upper bound and never host-memory accounting, because the engine's
-other allocations, fragmentation and the host are not observed. No estimate from
-model file size or bytes per token is used.
+A future extractor must report a current allocation that is advisory on its own.
+An allocation is never a worst-case upper bound and never host-memory
+accounting, because the engine's other allocations, fragmentation and the host
+are not observed, and no estimate from model file size or bytes per token is
+used. An entry can be qualified only from a fresh, same-source read with no
+duplicate or ambiguous row, field or alias, and with context and envelope equal
+to the document.
 
-An entry can be qualified only from a fresh, same-source read of the loaded-model
-response, with no duplicate or ambiguous row, field or alias, and with context
-and envelope equal to the document. A malformed row, a repeated model name or
-two models sharing one digest makes the affected observation ambiguous and
-unusable for qualification.
+Ages follow these rules today:
 
-A reading is valid for a fixed 15000 ms. The source observation generation
-identifies an actual observation: replaying a cached or duplicate response never
-resets the age. Allocation age uses a conservative monotonic anchor taken before
-the whole model sweep captures source identity or starts I/O. Source capture,
-engine requests, waiting for other engine results, buffered-response delay and
-qualification verification therefore all count toward the reading's age. A
-genuinely new source read uses its new sweep's anchor, while the qualification
-age continues from the document. A reversed or unknown clock leaves the age
-unknown and prevents qualification. The receiver advances both ages from
-monotonic elapsed time. Queueing delay after publication in the local stdio path
-is not measured, so no end-to-end freshness bound is claimed.
+- The qualification age continues from the document's `measuredAt` and advances
+  from monotonic elapsed time. Re-reading identical bytes never rejuvenates it.
+- A reading would be valid for a fixed 15000 ms. Sample age uses a conservative
+  monotonic anchor taken before the whole model sweep captures source identity
+  or starts I/O, so source capture, engine requests, waiting for other engine
+  results and verification all count toward it.
+- A reversed or unknown clock leaves both ages unknown and latches clock
+  uncertainty.
+- Queueing delay after publication in the local stdio path is not measured, so
+  no end-to-end freshness bound is claimed.
 
 ## Owner-gated measurement runbook
 
-A real upper bound requires an explicitly approved run. The runbook must
+A real upper bound requires a supported extractor and an explicitly approved
+run. Until an extractor exists the runbook cannot be executed. It must
 require:
 
 - owner approval naming the exact machine, executable, model and current run;

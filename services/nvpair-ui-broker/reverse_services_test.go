@@ -78,14 +78,14 @@ func TestLocalServicesIncludesEmptyBaselineAndRemoval(t *testing.T) {
 	if got := awaitLocalServices(t, seen, 0); len(got.Services) != 0 {
 		t.Fatalf("initial services = %+v, want empty", got.Services)
 	}
-	b.registerService(noderec.RegisterParams{Service: noderec.ServiceOllama, Port: 44001})
+	b.registerService(noderec.RegisterParams{Service: noderec.ServiceLlamaCPP, Port: 44001})
 	if got := awaitLocalServices(t, seen, 1); !reflect.DeepEqual(got.Services,
-		[]noderec.RegisterParams{{Service: noderec.ServiceOllama, Port: 44001}}) {
-		t.Fatalf("registered snapshot = %+v, want ol on 44001", got)
+		[]noderec.RegisterParams{{Service: noderec.ServiceLlamaCPP, Port: 44001}}) {
+		t.Fatalf("registered snapshot = %+v, want lc on 44001", got)
 	}
-	b.registerService(noderec.RegisterParams{Service: noderec.ServiceOllama, Port: 44001})
-	b.unregisterService(noderec.ServiceLMStudio)
-	b.unregisterService(noderec.ServiceOllama)
+	b.registerService(noderec.RegisterParams{Service: noderec.ServiceLlamaCPP, Port: 44001})
+	b.unregisterService(noderec.ServiceKey("e-llamacpp-custom"))
+	b.unregisterService(noderec.ServiceLlamaCPP)
 	if got := awaitLocalServices(t, seen, 2); len(got.Services) != 0 {
 		t.Fatalf("removed services = %+v, want empty", got.Services)
 	}
@@ -96,7 +96,7 @@ func TestLocalServicesConcurrentChangesConvergeInGenerationOrder(t *testing.T) {
 	seen := observeLocalServices(t, b)
 	awaitLocalServices(t, seen, 0)
 	var writers sync.WaitGroup
-	for _, service := range []noderec.ServiceKey{noderec.ServiceOllama, noderec.ServiceLMStudio, noderec.ServiceLlamaCPP} {
+	for _, service := range []noderec.ServiceKey{noderec.ServiceLlamaCPP, noderec.ServiceKey("e-llamacpp-custom"), noderec.ServiceNodeInfo} {
 		writers.Add(1)
 		go func(service noderec.ServiceKey) {
 			defer writers.Done()
@@ -167,9 +167,9 @@ func TestLocalServicesReplacementBypassesPendingOldChildWrite(t *testing.T) {
 	old := blockedLocalServicesChild(t, b)
 	updated := make(chan struct{})
 	go func() {
-		b.registerService(noderec.RegisterParams{Service: noderec.ServiceOllama, Port: 44001})
-		b.registerService(noderec.RegisterParams{Service: noderec.ServiceLMStudio, Port: 44002})
-		b.unregisterService(noderec.ServiceOllama)
+		b.registerService(noderec.RegisterParams{Service: noderec.ServiceLlamaCPP, Port: 44001})
+		b.registerService(noderec.RegisterParams{Service: noderec.ServiceKey("e-llamacpp-custom"), Port: 44002})
+		b.unregisterService(noderec.ServiceLlamaCPP)
 		close(updated)
 	}()
 	select {
@@ -179,17 +179,17 @@ func TestLocalServicesReplacementBypassesPendingOldChildWrite(t *testing.T) {
 	}
 	seen := observeLocalServices(t, b)
 	if got := awaitLocalServices(t, seen, 3); !reflect.DeepEqual(got.Services,
-		[]noderec.RegisterParams{{Service: noderec.ServiceLMStudio, Port: 44002}}) {
-		t.Fatalf("replacement baseline = %+v, want only lm on 44002", got)
+		[]noderec.RegisterParams{{Service: noderec.ServiceKey("e-llamacpp-custom"), Port: 44002}}) {
+		t.Fatalf("replacement baseline = %+v, want only custom on 44002", got)
 	}
 	select {
 	case <-old.exited:
 	case <-time.After(time.Second):
 		t.Fatal("replacement did not release old child's pending write")
 	}
-	b.registerService(noderec.RegisterParams{Service: noderec.ServiceLMStudio, Port: 44003})
+	b.registerService(noderec.RegisterParams{Service: noderec.ServiceKey("e-llamacpp-custom"), Port: 44003})
 	if got := awaitLocalServices(t, seen, 4); got.Services[0].Port != 44003 {
-		t.Fatalf("current child update = %+v, want lm on 44003", got)
+		t.Fatalf("current child update = %+v, want custom on 44003", got)
 	}
 }
 
@@ -254,7 +254,7 @@ func TestLocalServicesClientRequestCannotReachChild(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		b.handleMessage(&Message{JSONRPC: "2.0", ID: &id, Method: "cluster:set-local-services",
-			Params: json.RawMessage(`{"generation":999,"services":[{"service":"ol","port":1}]}`)})
+			Params: json.RawMessage(`{"generation":999,"services":[{"service":"lc","port":1}]}`)})
 		close(done)
 	}()
 	if err := server.SetReadDeadline(time.Now().Add(time.Second)); err != nil {

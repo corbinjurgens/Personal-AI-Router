@@ -36,9 +36,6 @@ func TestMain(m *testing.M) {
 	if len(os.Args) == 3 && os.Args[1] == "model-devices-test-child" {
 		os.Exit(runModelDevicesTestChild(os.Args[2]))
 	}
-	// Tests must never initialize a native credential store, even when a bundled
-	// manifest opts in. Each executor lazily receives a fresh private fake.
-	newCredentialBackend = func() credentialBackend { return &credentialFake{} }
 	if len(os.Args) > 1 && os.Args[1] == "credential-cli-helper" {
 		found := false
 		for _, value := range append(os.Environ(), os.Args...) {
@@ -59,9 +56,9 @@ func TestMain(m *testing.M) {
 	if len(os.Args) == 3 && os.Args[1] == "command-test-helper" {
 		os.Exit(runCommandTestHelper(os.Args[2]))
 	}
-	// fake-engine gives FAKE_ADDR precedence over OLLAMA_HOST. Ambient values
-	// must not redirect a fixture child to an installed engine's address.
-	for _, key := range []string{"FAKE_ADDR", "OLLAMA_HOST", "NVPAIR_EM_LIVE_TEST"} {
+	// fake-engine binds FAKE_ADDR. Ambient values must not redirect a fixture
+	// child to an installed engine's address.
+	for _, key := range []string{"FAKE_ADDR", "NVPAIR_EM_LIVE_TEST"} {
 		if err := os.Unsetenv(key); err != nil {
 			panic(err)
 		}
@@ -106,11 +103,12 @@ func managerFixtureOverlay(dir string) (string, error) {
 	if err := os.Mkdir(bundle, 0o700); err != nil {
 		return "", err
 	}
-	ports, err := privateFixturePorts(3)
+	engineNames := []string{"llamacpp"}
+	ports, err := privateFixturePorts(len(engineNames))
 	if err != nil {
 		return "", err
 	}
-	for i, engine := range []string{"ollama", "lmstudio", "llamacpp"} {
+	for i, engine := range engineNames {
 		data, err := json.Marshal(portFixtureManifest(engine, ports[i]))
 		if err != nil {
 			return "", err
@@ -153,36 +151,7 @@ func managerFixtureOverlay(dir string) (string, error) {
 	if err := os.WriteFile(modified, []byte(strings.Replace(string(data), site, replacement, 1)), 0o600); err != nil {
 		return "", err
 	}
-	// The production child is not a test binary, so TestMain's in-memory
-	// factory replacement must also be compiled into its fixture overlay.
-	credentialSource, err := filepath.Abs("credentialstore.go")
-	if err != nil {
-		return "", err
-	}
-	credentialData, err := os.ReadFile(credentialSource)
-	if err != nil {
-		return "", err
-	}
-	const factory = "var newCredentialBackend = func() credentialBackend { return secretstore.New() }"
-	if strings.Count(string(credentialData), factory) != 1 {
-		return "", fmt.Errorf("credential fixture factory site changed")
-	}
-	credentialData = []byte(strings.Replace(string(credentialData), factory, `var newCredentialBackend = func() credentialBackend { return &fixtureCredentialBackend{values: make(map[string][]byte)} }
-type fixtureCredentialBackend struct { values map[string][]byte }
-func (f *fixtureCredentialBackend) Set(_ context.Context, purpose, id string, value []byte) error {
- f.values[purpose+"/"+id] = append([]byte(nil), value...); return nil
-}
-func (f *fixtureCredentialBackend) Get(_ context.Context, purpose, id string) ([]byte, error) {
- value, ok := f.values[purpose+"/"+id]; if !ok { return nil, secretstore.ErrNotFound }; return append([]byte(nil), value...), nil
-}
-func (f *fixtureCredentialBackend) Delete(_ context.Context, purpose, id string) error {
- delete(f.values, purpose+"/"+id); return nil
-}`, 1))
-	credentialModified := filepath.Join(dir, "credentialstore.go")
-	if err := os.WriteFile(credentialModified, credentialData, 0o600); err != nil {
-		return "", err
-	}
-	overlay, err := json.Marshal(map[string]map[string]string{"Replace": {source: modified, credentialSource: credentialModified}})
+	overlay, err := json.Marshal(map[string]map[string]string{"Replace": {source: modified}})
 	if err != nil {
 		return "", err
 	}

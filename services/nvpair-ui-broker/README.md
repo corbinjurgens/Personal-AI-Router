@@ -143,8 +143,7 @@ native references. Absence and `[]` disable the binding configuration; new
 local and peer readbacks always emit `engineBindings: []` when empty. The policy
 schema remains version 2. Each native name has one binding, with at most 256
 entries and the existing identifier and encoded-reference bounds. The target
-uses current descriptor naming to reject overlapping matching sets, including
-implied-latest aliases, and requires each binding to be served when served
+uses current descriptor naming to reject overlapping matching sets and requires each binding to be served when served
 permission is explicit. Names remain case-sensitive. Saving changes no engine
 intent and starts no engine; request-triggered preparation is a separate feature.
 
@@ -237,7 +236,7 @@ resolution. Omitting them retains the production 30-second resident retry and
 5-second local engine advertisement cadence. Programmatic `workerPaths` and bare
 broker fixtures use zero to retain those same defaults. Values are copied per
 broker at construction and are not changed while it runs. The advertisement
-override covers Ollama, LM Studio, the other built-in engines and descriptor
+override covers built-in engines and descriptor
 engines. These fixture overrides leave the 30-second idle ticker, 60-second
 resident observation window, operation budgets, cancellation and capacity holds
 unchanged. They add no environment-variable configuration.
@@ -331,6 +330,12 @@ journal as durable evidence. Fence transport uses the existing manager relay,
 
 The [engine settings protocol](ENGINE_SETTINGS.md) documents local/paired
 launch and port editing, revision checks, serialized application and recovery.
+Built-in and fronted descriptor engines share the broker's settings owner,
+journal and snapshot publication. Settings validation and automatic facade
+fallback reserve descriptor siblings' saved and live proxy ports.
+Broker startup restores explicit journal ports for both engine kinds. A saved
+explicit facade port takes precedence over the proxy's port file, and a bind
+failure leaves that choice unchanged instead of selecting a fallback.
 Its [engine switching contract](ENGINE_SETTINGS.md#engine-switching) covers
 `engine:switch`, status/progress, acknowledged source drain, durable receipts
 and interrupted-operation reconciliation. The broker owns transaction order;
@@ -402,13 +407,10 @@ process and canonical backend entry point: it supervises the worker subprocesses
 on the UI's behalf, speaking JSON-RPC over stdio.
 
 `nvpair-service` accepts same-user clients through `ipc.ListenPrivate` (a 0600
-Unix socket or a named pipe restricted to the process user's SID), multiplexes
-their requests to broker stdio, and the broker's local dispatcher relays
-`engine:set-credential` and `engine:credential-state` through the generic engine
-relay to engine-manager's stdio dispatcher. Set accepts an empty credential to
-Clear; both methods return only `supported` and `configured`, or a sanitized
-store error. Relay diagnostics contain operational metadata, never request or
-response bodies. Engine-manager owns the credential cache and native store.
+Unix socket or a named pipe restricted to the process user's SID), and
+multiplexes their requests to broker stdio. The broker holds and relays no
+user-entered engine API key. Relay diagnostics contain operational metadata,
+never request or response bodies.
 
 Peer HTTP requests instead enter engine-manager's pinned mTLS control server,
 including its reverse transport, through the explicit `controlServer.routes`
@@ -421,7 +423,7 @@ health and proxy configuration, and use its key only when the returned port
 exactly matches the effective engine port. This boundary trusts same-user
 processes; it does not depend on a UI remote-node check or a method's name.
 
-Keyed LM Studio health checks use loopback and refuse redirects. A failed health or
+Keyed engine health checks use loopback and refuse redirects. A failed health or
 unavailable manager withdraws ordinary engine readiness and clears the proxy's
 obsolete key. An independently eligible managed facade can remain advertised
 while its local engine is not ready.
@@ -434,7 +436,7 @@ namespace:
 | --- | --- | --- |
 | `nvpair-node-scanner` | Discovery daemon: advertises this host's one `_nvpair-node._tcp` record and browses the LAN | `discovery:*` |
 | `nvpair-node-info` | Local GPU / CPU / memory inventory over HTTP at `/v1/node-info` | — (HTTP only) |
-| `nvpair-proxy` | One process hosting an inference proxy and router facade per enabled engine | `ollama-proxy:*`, `lmstudio-proxy:*`, `llamacpp-proxy:*` |
+| `nvpair-proxy` | One process hosting an inference proxy and router facade per enabled engine | `<engine>-proxy:*` |
 | `nvpair-engine-manager` | Local engine and model control plane; also serves `GET /v1/models` to peers | `engine:*` |
 | `nvpair-cluster-manager` | Node identity, trusted-node store, PIN pairing | `cluster:*`, `nodes:*` |
 | `nvpair-workload-manager` | Cluster workload relay between this node and peers | `workloads:*` |
@@ -450,9 +452,9 @@ lifecycle, and relay rules.
 
 These responsibilities live in the broker itself rather than in a worker:
 
-- **Engine advertising.** The broker polls local Ollama, LM Studio, and
-  llama.cpp every 5 s and registers each running engine's promoted facade port
-  (`ol` / `lm` / `lc`) with the discovery daemon, so they are carried in this
+- **Engine advertising.** The broker polls enabled local engines every 5 s
+  and registers each healthy engine's promoted facade port
+  with the discovery daemon, so they are carried in this
   host's single `_nvpair-node` record. The
   model list is not part of that record — it is served over HTTP by
   `nvpair-engine-manager` on the `em` service and fetched by a peer's daemon
@@ -519,9 +521,8 @@ terminal for it, exactly as when another facade is serving.
   refuses (`-32602`, message starting `routing.listener.port`) an enabled
   listener whose port a configured facade uses: its compatibility port or the
   one persisted in its place, the port planned for its next spawn, the port it
-  bound, or the inherited Ollama alias. `<engine>-proxy:set-port` and
-  `engine:set-port` refuse (`-32000`) the port of an enabled listener, like the
-  alias port. The node policy, the scheduler ranking and `log/set-level`
+  bound. `<engine>-proxy:set-port` and
+  `engine:set-port` refuse (`-32000`) the port of an enabled listener. The node policy, the scheduler ranking and `log/set-level`
   reach the proxy through the process, so they also reach one that serves no
   facade.
 
@@ -568,7 +569,7 @@ Bidirectional newline-delimited JSON-RPC 2.0 — same conventions as every other
 | `--scanner-mdns-service <name>` | `_nvpair-node._tcp` | DNS-SD service forwarded to the scanner browser and responder on startup and restart |
 | `--node-info-path <path>` | `./nvpair-node-info[.exe]` in the CWD | Explicit path to the `nvpair-node-info` binary the broker should spawn. When omitted and no default sibling exists, the broker runs without the local inventory server (non-fatal); when set to an invalid path, the broker exits with an error |
 | `--proxy-path <path>` | `./nvpair-proxy[.exe]` in the CWD | Explicit path to the `nvpair-proxy` binary. One process fronts every engine: the broker spawns it once and then sends a `facade/enable` per entry in `--proxy-engines`. Same optional semantics as `--node-info-path`: an absent default sibling means no local proxies (non-fatal); an invalid explicit path exits with an error |
-| `--proxy-engines <csv>` | `ollama,lmstudio,llamacpp` | Which engines to front with a proxy. An unrecognized name exits with an error rather than being skipped, so a typo cannot look like it worked. An engine left out is not started **and not prepared** — the broker will not relocate an engine whose facade nothing is going to claim |
+| `--proxy-engines <csv>` | All table engines | Which engines to front with a proxy. An unrecognized name exits with an error rather than being skipped, so a typo cannot look like it worked. An engine left out has no facade started or prepared |
 | `--workload-manager-path <path>` | `./nvpair-workload-manager[.exe]` in the CWD | Explicit path to the `nvpair-workload-manager` binary the broker spawns for the cluster workload relay. Same optional semantics as `--node-info-path`: an absent default sibling means no workload relay (non-fatal); an invalid explicit path exits with an error |
 | `--errors-path <path>` | `./nvpair-errors[.exe]` in the CWD | Explicit path to the `nvpair-errors` binary the broker spawns (with `--peer-sync`) for the service-error pipeline. Same optional semantics as `--node-info-path`: an absent default sibling means the error pipeline is disabled — producers' errors are dropped (non-fatal); an invalid explicit path exits with an error |
 | `--engine-manager-path <path>` | `./nvpair-engine-manager[.exe]` in the CWD | Explicit path to the `nvpair-engine-manager` binary the broker spawns for engine management. Same optional semantics as `--node-info-path` |
@@ -580,8 +581,6 @@ Bidirectional newline-delimited JSON-RPC 2.0 — same conventions as every other
 | `--workload-manager-port <port>` | `14320` | Workload relay listener (`wl`) passed to `nvpair-workload-manager` as `--port` and registered with discovery |
 | `--cluster-manager-port <port>` | `14321` | Cluster pairing listener (`cl`) passed to `nvpair-cluster-manager` as `--port` and registered with discovery |
 | `--manual-nodes-path <path>` | `./nvpair-manual-nodes[.exe]` in the CWD | Explicit path to the `nvpair-manual-nodes` binary the broker spawns for user-added nodes. Same optional semantics as `--node-info-path` |
-| `--manual-ollama-port <n>` | `11434` | Forwarded as manual-nodes `--ollama-port`; zero disables this probe |
-| `--manual-lmstudio-port <n>` | `1234` | Forwarded as manual-nodes `--lmstudio-port`; zero disables this probe |
 | `--manual-node-info-port <n>` | `14318` | Forwarded as manual-nodes `--node-info-port`; zero disables plain probing, preserving explicit entry TLS targets |
 | `--settings-path <path>` | `./nvpair-node-settings[.exe]` in the CWD | Explicit path to the `nvpair-node-settings` binary the broker spawns for the typed settings store. Same optional semantics as `--node-info-path` |
 | `--cluster-manager-path <path>` | `./nvpair-cluster-manager[.exe]` in the CWD | Explicit path to the `nvpair-cluster-manager` binary the broker spawns for cluster pairing / membership. Same optional semantics as `--node-info-path` |
@@ -598,7 +597,7 @@ engine base port from the engine table (reserved even for an engine left out of
 `--proxy-engines`). Each worker receives, registers and replays exactly its
 planned port, including across supervised restarts and scanner respawns; a port
 at its default is left to the worker's identical flag default. The planned ports
-stay reserved against engine settings and the inherited `OLLAMA_HOST` alias,
+stay reserved against engine settings,
 and a default port that the plan moved elsewhere is released. These flags
 separate listeners only: another instance on one host still needs its own app
 data, cluster identity, IPC endpoint and engine facades.
@@ -677,28 +676,28 @@ On startup — **before** emitting `app:ready` — the broker spawns the scanner
 
 **`nvpair-node-info`** is spawned next. It's a server, not an event source: it stands up the local `/v1/node-info` HTTP endpoint (GPU/CPU/memory inventory). It does not advertise itself — the broker registers its `ni` port with the scanner daemon, which carries it in the node record, and a peer's daemon fetches `/v1/node-info` over plain HTTP to enrich the node. The broker doesn't read anything back from node-info's stdout (drained and discarded). Spawning it is **optional**: if the binary can't be resolved (and no `--node-info-path` override was given) the broker logs a warning and continues serving discovery without it.
 
-**Engine advertising.** The broker runs an internal 5 s poll loop against local
-Ollama (`GET /`), LM Studio (`GET /v1/models`), and llama.cpp (`GET /health`)
-at their configured backend ports and reconciles this node's engine registration
+**Engine advertising.** The broker runs an internal 5 s poll loop against each
+enabled local engine, using its profile's health path at the configured backend
+port, and reconciles this node's engine registration
 with the scanner daemon:
 
-- engine **up** and facade **ready** → register `ol` / `lm` / `lc` at the
+- engine **up** and facade **ready** → register its discovery service at the
   promoted facade port, never the private backend port;
 - engine **down** → unregister it.
 
-Ollama, LM Studio and descriptor-engine advertisers require a successful current
+Descriptor-engine advertisers require a successful current
 `engine:status` reporting a running engine and a valid port before attempting
 health HTTP. A missing manager, failed status RPC, malformed status or
 `running:false` withdraws advertisement and marks the local destination
 unhealthy without guessing an installed engine's stock port. The manager's
-own status checks still use its configured engine endpoints. llama.cpp uses
-its configured runtime profile at its existing advertiser owner.
+own status checks still use its configured engine endpoints. Table engines use
+their configured runtime profiles at the shared advertiser owner.
 
 The daemon folds those registrations into this host's single `_nvpair-node` record, so a peer discovers the engine through the shared channel. The model list is not part of that registration — it's served over HTTP by `nvpair-engine-manager` (the `em` service, `GET /v1/models`) and enriched onto each node by the peer's daemon. There is no separate advertiser subprocess and no manual-advertise RPC.
 
-**Descriptor engines.** After engine-manager starts and before facades are prepared, the broker reads `engine:descriptors` once and fronts every descriptor engine (any engine ID that is not built in, such as a `llamacpp-custom` fork manifest or a Strata user manifest) that is available on this host and that `engines.ProxyCanFront` accepts, at most `engines.MaxDynamicEngines` of them in ID order (`enginecatalog.go`). Each gets a facade in the one proxy process, enabled with its descriptor so the proxy can build its routes; a facade port planned from `engines.DynamicFacadePortBase` clear of every built-in engine port and every other descriptor engine's persisted or planned port (the proxy then persists where it landed); and the default advertisement loop, which reads its backend port from engine-manager's `engine:status` and probes its OpenAI or Ollama model list. While it is up the broker registers its `e-<id>` service: cluster-manager publishes it on the authenticated peer-services path and admits it on the reverse transport, and the scanner adds it to this node's own directory entry but keeps it out of the mDNS TXT record. When it stops, the registration is withdrawn from both. `--proxy-engines` names built-in engines only. The set is fixed for the broker's lifetime; a new manifest takes effect at the next start. Unknown, malformed, unavailable or unfrontable descriptors are not fronted, and descriptor engines have no engine settings or `<id>-proxy:` client relay yet.
+**Descriptor engines.** After engine-manager starts and before facades are prepared, the broker reads `engine:descriptors` once and fronts every descriptor engine (any engine ID that is not built in, such as a `llamacpp-custom` fork manifest or a Strata user manifest) that is available on this host and that `engines.ProxyCanFront` accepts, at most `engines.MaxDynamicEngines` of them in ID order (`enginecatalog.go`). Each gets a facade in the one proxy process, enabled with its descriptor so the proxy can build its routes; a facade port planned from `engines.DynamicFacadePortBase` clear of every built-in engine port and every other descriptor engine's persisted or planned port (the proxy then persists where it landed); and the default advertisement loop, which reads its backend port from engine-manager's `engine:status` and probes its OpenAI or native model list. While it is up the broker registers its `e-<id>` service: cluster-manager publishes it on the authenticated peer-services path and admits it on the reverse transport, and the scanner adds it to this node's own directory entry but keeps it out of the mDNS TXT record. When it stops, the registration is withdrawn from both. `--proxy-engines` names built-in engines only. The set is fixed for the broker's lifetime; a new manifest takes effect at the next start. Unknown, malformed, unavailable or unfrontable descriptors are not fronted. Fronted descriptor engines use the ordinary engine settings API; they have no `<id>-proxy:` client relay yet.
 
-**`nvpair-proxy`** is one process that fronts every enabled engine. It starts with no engine and no listener; the broker then sends it a `facade/enable` per engine, carrying that engine's port and any alias addresses. A flag could not express this, because the broker plans a different port for each engine. Each facade forwards inference to a node it discovers on the network and speaks its own engine's dialect.
+**`nvpair-proxy`** is one process that fronts every enabled engine. It starts with no engine and no listener; the broker then sends it a `facade/enable` per engine, carrying that engine's port. A flag could not express this, because the broker plans a different port for each engine. Each facade forwards inference to a node it discovers on the network and speaks its own engine's dialect.
 
 One process for all of them is deliberate. Between scheduler snapshots a facade
 takes short-lived reservations for work it has dispatched, and those live in
@@ -711,7 +710,11 @@ Within the process the boundaries are finer — a facade that loses its bind
 race, cannot be moved to a free port, or panics while handling a request is
 withdrawn or answered with an error on its own, leaving the others serving.
 
-Ollama's standalone default is `:11435`; with managed port ownership enabled (the default), the broker starts settings and engine-manager first, claims `:11434` with that facade, and only then moves a stopped default-port Ollama backend to a free port. Custom backend ports are preserved. When the inherited `OLLAMA_HOST` names a distinct local plaintext port, the broker also gives the facade that normalized loopback-only alias so clients already using the variable enter the same routing path; `localhost` reserves both canonical loopback families atomically, while remote and HTTPS targets are ignored. The alias port is reserved against every configured engine, local or remote engine start override, every facade's control plane, and the managed Ollama and LM Studio backend port plans, so a backend that has to move can never land on the alias. A running Ollama or unknown owner on either requested port is never stopped or moved: the primary uses a safe fallback when needed, and an occupied alias remains with its owner while the broker reports a warning.
+Every table engine uses the same facade preparation, bind retry, advertising,
+and notification path. Preparation preserves the engine's configured port.
+Enabled-engine restoration starts after the initial facade attempts complete,
+including a failed attempt. Proxy notifications retain the emitting process
+as their source so a replaced process cannot update the current facade state.
 
 llama.cpp is a managed engine: engine-manager owns its lifecycle and starts it
 on its configured loopback port, `:8081` by default. The broker places its
@@ -733,7 +736,7 @@ forwarded to that engine's facade and the response relayed straight back, and
 every facade notification is re-emitted to subscribed clients under the same
 component namespace.
 
-Client namespaces are unchanged by the process collapse, but the wire inside is not. Because one process holds every facade, a message on that link carries the engine it concerns: the client's `ollama-proxy:` prefix comes off and a bare `ollama:` facade address goes on. The two are not interchangeable — `ollama-proxy:` is how a client addresses the component, `ollama:` is how a message addresses a facade inside the process — so the relay is a translation between them rather than a strip. Process-scoped methods (`log/set-level`, the scheduler's `node/set-priority`) carry no address, as do the proxy's own `errors:report` / `errors:clear` for the routing listener (`nvpair-proxy:routing-listener-blocked`), which the broker routes into the error pipeline once per process and, like the OLLAMA_HOST alias warning, caches until cleared and replays to a restarted `nvpair-errors`. `facade/enable` names its engine in the payload because it runs before that facade exists.
+Client namespaces are unchanged by the process collapse, but the wire inside is not. Because one process holds every facade, a message on that link carries the engine it concerns: the client's `llamacpp-proxy:` prefix comes off and a bare `llamacpp:` facade address goes on. The two are not interchangeable — `llamacpp-proxy:` is how a client addresses the component, `llamacpp:` is how a message addresses a facade inside the process — so the relay is a translation between them rather than a strip. Process-scoped methods (`log/set-level`, the scheduler's `node/set-priority`) carry no address, as do the proxy's own `errors:report` / `errors:clear` for the routing listener (`nvpair-proxy:routing-listener-blocked`), which the broker routes into the error pipeline once per process and caches until cleared and replays to a restarted `nvpair-errors`. `facade/enable` names its engine in the payload because it runs before that facade exists.
 
 Two classes of proxy notification are **not** re-emitted under any
 `<engine>-proxy:` namespace, because neither is a proxy control-plane event:
@@ -751,7 +754,7 @@ Two classes of proxy notification are **not** re-emitted under any
 telemetry, and discovery snapshot. It smooths fresh utilization into pressure
 0–3, uses neutral pressure 1 for invalid/missing/older-than-10-second samples,
 and orders by `pending + gpuPressure`, then pressure, then stable UUID. Load is
-node-wide across Ollama, LM Studio, and llama.cpp because they normally contend
+node-wide across engines because they normally contend
 for the same resources. Each engine-specific `schedule:priority` carries
 `{engine,nodes,ranks}` and refreshes when order, pending counts, or pressure
 changes. The broker caches, generation-orders, and replays the full
@@ -762,7 +765,7 @@ three live feeds.
 
 `schedule:priority` and `node/set-priority` are internal worker contracts: the broker does not expose either notification to its connected client.
 
-**`nvpair-cluster-manager`** owns the node's stable cryptographic identity (a self-generated UUID + Ed25519 self-signed certificate), the trusted-node store, and the EAP-NOOB PIN-based pairing flow that bootstraps mTLS trust between machines. Like ollama-proxy it's a full bidirectional JSON-RPC peer, and like the rest it's supervised **optionally and non-fatally**: a missing default sibling (and no `--cluster-manager-path`) just means the broker runs without cluster pairing. The broker is a **generic relay** for it in both directions: any `cluster:*` or `nodes:*` request a client sends is forwarded verbatim and the response (result or JSON-RPC error) is relayed straight back, and every notification the manager pushes is forwarded to the client unchanged. Unlike the proxy stream these events are not opt-in — they're low-volume, important pairing/membership pushes (`cluster:invite-received`, `cluster:identity-changed`, `nodes:changed`, ...), so they always flow. `errors:report` / `errors:clear` are the one exception: like the proxy's, they target `nvpair-errors` (which the broker doesn't supervise) and are dropped. Because pairing calls drive multi-round-trip inter-node network exchanges, the relay's per-call timeout is more generous (30 s) than the proxy's local control-plane timeout.
+**`nvpair-cluster-manager`** owns the node's stable cryptographic identity (a self-generated UUID + Ed25519 self-signed certificate), the trusted-node store, and the EAP-NOOB PIN-based pairing flow that bootstraps mTLS trust between machines. Like llamacpp-proxy it's a full bidirectional JSON-RPC peer, and like the rest it's supervised **optionally and non-fatally**: a missing default sibling (and no `--cluster-manager-path`) just means the broker runs without cluster pairing. The broker is a **generic relay** for it in both directions: any `cluster:*` or `nodes:*` request a client sends is forwarded verbatim and the response (result or JSON-RPC error) is relayed straight back, and every notification the manager pushes is forwarded to the client unchanged. Unlike the proxy stream these events are not opt-in — they're low-volume, important pairing/membership pushes (`cluster:invite-received`, `cluster:identity-changed`, `nodes:changed`, ...), so they always flow. `errors:report` / `errors:clear` are the one exception: like the proxy's, they target `nvpair-errors` (which the broker doesn't supervise) and are dropped. Because pairing calls drive multi-round-trip inter-node network exchanges, the relay's per-call timeout is more generous (30 s) than the proxy's local control-plane timeout.
 
 Shared lifecycle for all workers:
 
@@ -1210,9 +1213,8 @@ In Routing & resources, the desktop's Model inference settings editor uses
 `Only this device can edit`. It shares the policy JSON draft and Save/CAS flow
 with the binding editor and `Advanced policy JSON`; there is no separate save.
 The editor shows `Editing settings on <node>` and exact numeric inputs for
-OpenAI-compatible llama.cpp and LM Studio profiles. Typed `min_p` is limited to
-llama.cpp because LM Studio support was not established. Ollama-native and
-uncommon settings, including LM Studio `min_p`, stay in Advanced policy JSON.
+OpenAI-compatible engine profiles. Typed `min_p` is limited to llama.cpp.
+Uncommon settings stay in Advanced policy JSON.
 Clearing the final option removes the options object and resets the mode to
 defaults without changing the local-only flag. Untouched properties and opaque
 number tokens are preserved by source-span edits.
@@ -1285,7 +1287,7 @@ when the profile is not local-only.
 
 #### `app:ready`
 
-Emitted once on startup, after the scanner (and, when available, node-info and ollama-proxy) have been spawned and the transport is connected. Seeing `app:ready` means the broker is accepting requests **and** discovery events are flowing into its store (even if no nodes are known yet — mDNS browsing takes a moment). It does not imply node-info came up — that worker is optional and a failure to spawn it is logged but does not block `app:ready`. Nor does it imply the proxy is serving yet: the proxy reports its bound port asynchronously, so `ollama-proxy:get-status` may briefly show `ready:false` right after `app:ready`.
+Emitted once on startup, after the scanner (and, when available, node-info and llamacpp-proxy) have been spawned and the transport is connected. Seeing `app:ready` means the broker is accepting requests **and** discovery events are flowing into its store (even if no nodes are known yet — mDNS browsing takes a moment). It does not imply node-info came up — that worker is optional and a failure to spawn it is logged but does not block `app:ready`. Nor does it imply the proxy is serving yet: the proxy reports its bound port asynchronously, so `llamacpp-proxy:get-status` may briefly show `ready:false` right after `app:ready`.
 
 ```json
 {"jsonrpc":"2.0","method":"app:ready","params":{"version":"0.5.0"}}
@@ -1319,25 +1321,25 @@ A few semantics worth knowing:
 - **Empty array is a valid payload.** If every previously-known node ages out, you'll get a `discovery:nodes-changed` with `"params": []`.
 - **Best-effort delivery.** The broker tries the notification once per mutation; transient write errors are logged but not retried.
 
-#### `ollama-proxy:<event>`
+#### `llamacpp-proxy:<event>`
 
-**Opt-in.** Only delivered to a peer that has called `ollama-proxy:subscribe`; silent otherwise. Once subscribed, every notification `ollama-proxy` emits is re-emitted to the client as `ollama-proxy:<method>` — the proxy's native method name with the `ollama-proxy:` prefix, and `params` passed through verbatim (the proxy's own snake_case schema). The proxy's current notifications are:
+**Opt-in.** Only delivered to a peer that has called `llamacpp-proxy:subscribe`; silent otherwise. Once subscribed, every notification `llamacpp-proxy` emits is re-emitted to the client as `llamacpp-proxy:<method>` — the proxy's native method name with the `llamacpp-proxy:` prefix, and `params` passed through verbatim (the proxy's own snake_case schema). The proxy's current notifications are:
 
 | Forwarded as | Proxy emits | Meaning |
 |---|---|---|
-| `ollama-proxy:ready` | `ready` | The proxy bound its HTTP port (`{version, port}`). Also replayed as the baseline on a fresh subscribe. |
-| `ollama-proxy:node/discovered` | `node/discovered` | A manual node was added to the proxy (relay-sourced routing targets don't emit these). |
-| `ollama-proxy:node/updated` | `node/updated` | A manual node's fields changed. |
-| `ollama-proxy:node/removed` | `node/removed` | A manual node was removed. |
-| `ollama-proxy:node/selection-changed` | `node/selection-changed` | The active upstream changed (`{id}`; empty `id` = auto-select). |
-| `ollama-proxy:proxy/request-started` | `proxy/request-started` | An HTTP request began being forwarded. |
-| `ollama-proxy:proxy/request` | `proxy/request` | An HTTP request completed (status, durations). |
+| `llamacpp-proxy:ready` | `ready` | The proxy bound its HTTP port (`{version, port}`). Also replayed as the baseline on a fresh subscribe. |
+| `llamacpp-proxy:node/discovered` | `node/discovered` | A manual node was added to the proxy (relay-sourced routing targets don't emit these). |
+| `llamacpp-proxy:node/updated` | `node/updated` | A manual node's fields changed. |
+| `llamacpp-proxy:node/removed` | `node/removed` | A manual node was removed. |
+| `llamacpp-proxy:node/selection-changed` | `node/selection-changed` | The active upstream changed (`{id}`; empty `id` = auto-select). |
+| `llamacpp-proxy:proxy/request-started` | `proxy/request-started` | An HTTP request began being forwarded. |
+| `llamacpp-proxy:proxy/request` | `proxy/request` | An HTTP request completed (status, durations). |
 
 ```json
-{"jsonrpc":"2.0","method":"ollama-proxy:node/discovered","params":{"id":"MY-GPU-BOX","host":"my-gpu-box.local.","port":11434,"addresses":["192.168.1.10"],"txt":["models=llama3"]}}
+{"jsonrpc":"2.0","method":"llamacpp-proxy:node/discovered","params":{"id":"MY-GPU-BOX","host":"my-gpu-box.local.","port":8080,"addresses":["192.168.1.10"],"txt":["models=llama3"]}}
 ```
 
-Two classes of proxy notification are **not** re-emitted under the `ollama-proxy:` namespace: `errors:report` / `errors:clear` are routed into the `nvpair-errors` pipeline and surface on the `errors:update` stream (see [`errors:update`](#errorsupdate)); the proxy's `workload:*` events go to the workload-manager and surface on the separate `workloads:*` stream below.
+Two classes of proxy notification are **not** re-emitted under the `llamacpp-proxy:` namespace: `errors:report` / `errors:clear` are routed into the `nvpair-errors` pipeline and surface on the `errors:update` stream (see [`errors:update`](#errorsupdate)); the proxy's `workload:*` events go to the workload-manager and surface on the separate `workloads:*` stream below.
 
 #### `workloads:upsert` / `workloads:remove`
 
@@ -1381,7 +1383,7 @@ Two classes of proxy notification are **not** re-emitted under the `ollama-proxy
 `workloads:upsert` carries `params.workloadInfo` (a full `Workload`); `workloads:remove` carries `params.workloadId` and the origin `params.originatedFrom`. See [`nvpair-workload-manager`](../nvpair-workload-manager/README.md) for the `Workload` shape.
 
 ```json
-{"jsonrpc":"2.0","method":"workloads:upsert","params":{"workloadInfo":{"id":"42","model":"llama-3-70b","engine":"ollama","state":"running","originatedFrom":"MY-PC","scheduledOn":"GPU-RIG","createdAt":1716998400000,"startedAt":1716998400000,"completedAt":null,"error":null,"requesterId":null}}}
+{"jsonrpc":"2.0","method":"workloads:upsert","params":{"workloadInfo":{"id":"42","model":"llama-3-70b","engine":"llamacpp","state":"running","originatedFrom":"MY-PC","scheduledOn":"GPU-RIG","createdAt":1716998400000,"startedAt":1716998400000,"completedAt":null,"error":null,"requesterId":null}}}
 ```
 
 A few semantics worth knowing:
@@ -1633,7 +1635,7 @@ Field-by-field:
 | `trusted` | bool | whether this node is a paired cluster peer (the daemon holds a pin for its `cluster-uuid`); false for non-cluster/unknown nodes. |
 | `clustered` | bool | whether this node belongs to some cluster (it advertises a `cluster-uuid`), independent of whether we're paired with it (`trusted`). A client uses it to suppress a cluster invite that an already-clustered peer would reject. Omitted (false) for standalone/unknown nodes. |
 | `models` | string[] | the node's available model names, enriched by the daemon from the node's engine-manager `em` endpoint (`GET /v1/models`). Omitted when the node advertises no engine-manager or no engine is running. |
-| `modelsByEngine` | object | models attributed to their serving engine (e.g. `ollama` / `lmstudio`), alongside the flat `models` union. Absent or null means unknown attribution and retains the existing legacy flat fallback. Any present map is authoritative: outer `{}` suppresses flat fallback even when `models` contains valid names; an engine key with `[]` is an observed empty inventory; populated keys retain their models and valid sibling engines. A missing engine key in a present map supplies no models for that engine. Nil attribution is omitted; a nonnil empty map stays present. |
+| `modelsByEngine` | object | models attributed to their serving engine (e.g. `llamacpp` / `llamacpp-custom`), alongside the flat `models` union. Absent or null means unknown attribution and retains the existing legacy flat fallback. Any present map is authoritative: outer `{}` suppresses flat fallback even when `models` contains valid names; an engine key with `[]` is an observed empty inventory; populated keys retain their models and valid sibling engines. A missing engine key in a present map supplies no models for that engine. Nil attribution is omitted; a nonnil empty map stays present. |
 | `loadedByEngine` | object | the models currently **loaded in memory** for each engine (normally a subset of `modelsByEngine`), keyed by engine name. Enriched from the peer's `loadedByEngine`. An engine key with an empty list means "running, nothing loaded"; a missing key means loaded state wasn't reported. Omitted when no engine reports loaded state. |
 | `policy` | object | the node's own policy advertisement, enriched from the same `GET /v1/models` fetch: `revision` (its persisted policy revision), `roles` (tier name to `{engine, model, contextTokens?, capabilities?}`) and `pausedBy?` (`local` or `peer`). Omitted when the node publishes none (an older peer, or before its broker's first push), which means the node declares nothing. |
 
@@ -1701,45 +1703,45 @@ Response:
 {"jsonrpc":"2.0","id":3,"result":{"version":"0.5.0"}}
 ```
 
-#### `ollama-proxy:get-status`
+#### `llamacpp-proxy:get-status`
 
-Reports whether the supervised `ollama-proxy` is up and, if so, the HTTP port it bound. `ready` is `false` and `port` is `0` until the proxy emits its `ready` notification — and stays that way if no proxy is being supervised or the proxy has crashed — so the call is always safe and never errors. Answered locally from the broker's captured state (no round-trip to the proxy).
+Reports whether the supervised `llamacpp-proxy` is up and, if so, the HTTP port it bound. `ready` is `false` and `port` is `0` until the proxy emits its `ready` notification — and stays that way if no proxy is being supervised or the proxy has crashed — so the call is always safe and never errors. Answered locally from the broker's captured state (no round-trip to the proxy).
 
 ```json
-{"jsonrpc":"2.0","id":8,"method":"ollama-proxy:get-status"}
+{"jsonrpc":"2.0","id":8,"method":"llamacpp-proxy:get-status"}
 ```
 
 Response (once the proxy is serving):
 
 ```json
-{"jsonrpc":"2.0","id":8,"result":{"ready":true,"port":11435}}
+{"jsonrpc":"2.0","id":8,"result":{"ready":true,"port":8080}}
 ```
 
-`port` is the proxy's HTTP reverse-proxy listener — point an Ollama client at `http://localhost:<port>` to route inference traffic through it. The proxy comes up asynchronously, so a client typically polls this shortly after `app:ready` until `ready` is `true`.
+`port` is the proxy's HTTP reverse-proxy listener — point an OpenAI-compatible client at `http://localhost:<port>` to route inference traffic through it. The proxy comes up asynchronously, so a client typically polls this shortly after `app:ready` until `ready` is `true`.
 
-#### `ollama-proxy:<method>` (generic relay)
+#### `llamacpp-proxy:<method>` (generic relay)
 
-Any request whose method starts with `ollama-proxy:` — except the reserved broker-local methods (`ollama-proxy:get-status`, `ollama-proxy:set-port`, and the subscription methods below) — is **forwarded to `ollama-proxy`** with the `ollama-proxy:` prefix stripped, and the proxy's result or error is relayed straight back to the caller unchanged. The `ollama-proxy:` prefix is the only translation: everything after it is the proxy's own native method name, and `params` pass through verbatim. This means the proxy's whole control plane is reachable through the broker without the broker enumerating individual methods. Current proxy methods include `nodes/list`, `node/select`, `node/selected`, `node/add-manual`, and `node/remove-manual` (see the `ollama-proxy` README for their params/results).
+Any request whose method starts with `llamacpp-proxy:` — except the reserved broker-local methods (`llamacpp-proxy:get-status`, `llamacpp-proxy:set-port`, and the subscription methods below) — is **forwarded to `nvpair-proxy`** with the `llamacpp-proxy:` prefix translated to the `llamacpp:` facade address, and the proxy's result or error is relayed straight back to the caller unchanged. The facade address is the only translation: everything after it is the proxy's own native method name, and `params` pass through verbatim. This means the proxy's whole control plane is reachable through the broker without the broker enumerating individual methods. Current proxy methods include `nodes/list`, `node/select`, `node/selected`, `node/add-manual`, and `node/remove-manual` (see the `nvpair-proxy` README for their params/results).
 
-For example, to list the Ollama nodes the proxy currently knows and pin traffic to one:
+For example, to list the engine nodes the proxy currently knows and pin traffic to one:
 
 ```json
-{"jsonrpc":"2.0","id":10,"method":"ollama-proxy:nodes/list"}
-{"jsonrpc":"2.0","id":11,"method":"ollama-proxy:node/select","params":{"id":"MY-GPU-BOX"}}
+{"jsonrpc":"2.0","id":10,"method":"llamacpp-proxy:nodes/list"}
+{"jsonrpc":"2.0","id":11,"method":"llamacpp-proxy:node/select","params":{"id":"MY-GPU-BOX"}}
 ```
 
-The responses are exactly what the proxy returns (its payloads use the proxy's own snake_case `Node` schema — `id` / `host` / `port` / `addresses` / `txt` — not the camelCase `discovery:*` shape; the `ollama-proxy:` namespace is a deliberate exception kept thin to avoid coupling).
+The responses are exactly what the proxy returns (its payloads use the proxy's own snake_case `Node` schema — `id` / `host` / `port` / `addresses` / `txt` — not the camelCase `discovery:*` shape; the `llamacpp-proxy:` namespace is a deliberate exception kept thin to avoid coupling).
 
 Two relay-specific error cases:
 
-- If no proxy is being supervised (or it has exited), the broker replies with error `-32000` `"ollama-proxy not available"`.
-- `ollama-proxy:shutdown` is **refused** with error `-32601` — the broker owns the proxy's lifecycle, so a client can't terminate it independently. Shut the broker down instead (which tears the proxy down with it).
+- If no proxy is being supervised (or it has exited), the broker replies with error `-32000` `"llamacpp-proxy not available"`.
+- `llamacpp-proxy:shutdown` is **refused** with error `-32601` — the broker owns the proxy's lifecycle, so a client can't terminate it independently. Shut the broker down instead (which tears the proxy down with it).
 
-#### `ollama-proxy:set-port` / `lmstudio-proxy:set-port` / `llamacpp-proxy:set-port`
+#### `<engine>-proxy:set-port`
 
 Port preflight checks occupancy without dialing the occupant. On non-Windows
 hosts it probes IPv4/IPv6 wildcards and the loopback addresses used by managed
-launches and aliases (`127.0.0.1` and `::1`), immediately closing each temporary
+launches (`127.0.0.1` and `::1`), immediately closing each temporary
 listener. An unsupported IPv6 family is skipped; occupied addresses and other
 probe failures refuse the port. Windows retains its exclusive wildcard bind
 probe, which also rejects concrete-address holders and aborts before native
@@ -1748,27 +1750,27 @@ not reserve a port across the settings operation.
 
 **Intercepted, not relayed verbatim.** For every engine profile, a port-only caller — `nvpair-tui` is the one in tree — gets to move a single port without rendering the whole launch settings form, but the change still runs through the same authoritative settings operation the desktop editor uses, so a port set from the terminal cannot diverge from one set from the UI. The namespace selects the engine. The broker reads that engine's current settings, substitutes the requested proxy port, and applies the result while preserving the server port and launch arguments. Accepted settings are saved in the settings journal.
 
-A malformed request, missing port, or port outside `1`–`65535` is refused with error `-32602 "port must be between 1 and 65535"`. A **requested port that is already in use or reserved** by a PAIR service, another configured engine/proxy, or the engine's own server port is refused with error `-32000 "resolve settings errors and port conflicts before applying"`. The broker does not pick a different port on the caller's behalf. Retry with a free port. A request that collides with an inherited `OLLAMA_HOST` alias is refused with its own message naming that alias. The response echoes the requested port (`{"port": <requested>}`) once it is bound.
+A malformed request, missing port, or port outside `1`–`65535` is refused with error `-32602 "port must be between 1 and 65535"`. A **requested port that is already in use or reserved** by a PAIR service, another configured engine/proxy, or the engine's own server port is refused with error `-32000 "resolve settings errors and port conflicts before applying"`. The broker does not pick a different port on the caller's behalf. Retry with a free port. The response echoes the requested port (`{"port": <requested>}`) once it is bound.
 
 ```json
-{"jsonrpc":"2.0","id":9,"method":"ollama-proxy:set-port","params":{"port":11500}}
+{"jsonrpc":"2.0","id":9,"method":"llamacpp-proxy:set-port","params":{"port":11500}}
 {"jsonrpc":"2.0","id":10,"method":"llamacpp-proxy:set-port","params":{"port":8082}}
 ```
 
-Automatic conflict resolution still exists, but only for a port the user did not just choose: when the Ollama proxy announces a (re)bound port on startup and a running engine has since taken it, the broker steers the proxy to a free port and surfaces a sticky `warning` into the errors pipeline (id `ollama-proxy:port-bumped`, `action:"none"`) explaining the move. That path **never changes an engine's port** — only the proxy is moved. Port setters also return `-32000` if the settings operation cannot run, including when the engine manager or proxy is unavailable.
+Automatic bind recovery retries a failed facade enable on a free fallback only
+when the port was not explicitly chosen. It preserves the engine's port.
+Port setters also return `-32000` if the settings operation cannot run,
+including when the engine manager or proxy is unavailable.
 
-#### `lmstudio-proxy:get-status` / `lmstudio-proxy:subscribe` / `lmstudio-proxy:unsubscribe` / `lmstudio-proxy:<method>` (generic relay)
+The same broker-local status, subscription, port-setting methods and addressed
+relay apply to every table engine's `<engine>-proxy:*` namespace.
 
-The LM Studio counterpart of the `ollama-proxy:*` surface runs the supervised `lmstudio-proxy` on compatibility port `:1234` and tracks the managed LM Studio backend on `:1235`. With managed port ownership enabled (the default), the broker identifies and moves an existing LM Studio server through engine-manager before allowing the proxy to claim `1234`; unknown owners are left untouched and force a warned proxy fallback. Disabling managed ownership preserves explicit custom backend and proxy ports. `lmstudio-proxy:get-status` reports the actual bound port; `lmstudio-proxy:subscribe` / `lmstudio-proxy:unsubscribe` opt into / out of its `lmstudio-proxy:<event>` stream; `lmstudio-proxy:set-port` uses the settings operation described above; and other `lmstudio-proxy:<method>` requests are relayed with the prefix translated (`nodes/list`, `node/select`, `node/add-manual`, `node/remove-manual`, ...). `lmstudio-proxy:shutdown` is refused because the broker owns lifecycle ordering. Workload and error events feed the shared streams exactly as Ollama's do.
+#### `llamacpp-proxy:subscribe`
 
-The same broker-local status, subscription, and port-setting methods apply to `llamacpp-proxy:*`. llama.cpp port changes use the same validation, journal, and application path; remaining methods use the generic facade relay, with `llamacpp-proxy:shutdown` refused.
-
-#### `ollama-proxy:subscribe`
-
-Opts the peer into the `ollama-proxy:<event>` stream (off by default). On a fresh subscription the broker immediately replays the proxy's last `ready` payload as a baseline `ollama-proxy:ready` (if the proxy has come up), so a subscriber learns the port without a separate `ollama-proxy:get-status`.
+Opts the peer into the `llamacpp-proxy:<event>` stream (off by default). On a fresh subscription the broker immediately replays the proxy's last `ready` payload as a baseline `llamacpp-proxy:ready` (if the proxy has come up), so a subscriber learns the port without a separate `llamacpp-proxy:get-status`.
 
 ```json
-{"jsonrpc":"2.0","id":12,"method":"ollama-proxy:subscribe"}
+{"jsonrpc":"2.0","id":12,"method":"llamacpp-proxy:subscribe"}
 ```
 
 Response:
@@ -1779,12 +1781,12 @@ Response:
 
 Idempotent: re-subscribing returns `{"subscribed":true}` and does not re-send a baseline. This is a reserved broker-local method — it is not forwarded to the proxy.
 
-#### `ollama-proxy:unsubscribe`
+#### `llamacpp-proxy:unsubscribe`
 
-Stops the `ollama-proxy:<event>` stream for this peer. Reserved broker-local; not forwarded. Idempotent.
+Stops the `llamacpp-proxy:<event>` stream for this peer. Reserved broker-local; not forwarded. Idempotent.
 
 ```json
-{"jsonrpc":"2.0","id":13,"method":"ollama-proxy:unsubscribe"}
+{"jsonrpc":"2.0","id":13,"method":"llamacpp-proxy:unsubscribe"}
 ```
 
 Response:
@@ -1886,7 +1888,11 @@ Any `settings/*` request is forwarded to `nvpair-node-settings` and its response
 
 Relayed to `nvpair-manual-nodes`. `node/add` (`{ address, name?, tls_port?, mtls? }`) registers a user-added node and probes it; `node/remove` (`{ id }`) drops it; `nodes/list` returns the tracked manual nodes. Manually added nodes also surface in the shared `discovery:get-nodes` / `discovery:nodes-changed` snapshot — the broker merges `nvpair-manual-nodes`' `node/discovered|updated|removed` into the same store the scanner feeds. `nvpair-manual-nodes` persists its list to `manual-nodes.json` in the per-user data dir and replays it when it starts, so manual nodes survive a restart of the worker, the broker, or the machine without any client re-adding them: on a worker crash-and-restart the broker first evicts the orphaned entries, then merges each replayed entry back in as its `node/discovered` arrives. Error `-32000 "manual-nodes not available"` when no manual-nodes worker is supervised.
 
-**Manual → proxy bridge.** When the broker supervises both `nvpair-manual-nodes` and a proxy, it also bridges a manual node whose engine is reachable into that proxy via `node/add-manual` (host/port from the node's per-engine status), so inference can route to it through `ollama-proxy:node/select` / `lmstudio-proxy:node/select` just like a relay-discovered node. This is per-engine: a node whose `ollama_*` status is up is bridged into `ollama-proxy` (host/port from `ollama_port`), and one whose `lmstudio_*` status is up into `lmstudio-proxy` (from `lmstudio_port`) — a node running both is bridged into both. Manual nodes are by definition the ones that never appear via the daemon's `_nvpair-node` discovery, so this explicit add is what makes them routable. The bridge tracks reachability: an engine that goes down (or a node that is removed, or whose prober crashes) is pulled back out with `node/remove-manual`. A proxy that isn't supervised → that leg is a no-op; manual nodes still appear in the discovery snapshot as before.
+Manual-node status projects into the discovery snapshot and scheduler telemetry.
+The worker probes node-info only, so these snapshots carry hardware and identity
+without manual engine health or model inventory.
+The broker does not add or remove inference proxy targets from those status
+notifications.
 
 #### `cluster:<method>` / `nodes:<method>` (generic relay)
 
@@ -1904,7 +1910,7 @@ registration/shutdown. Cluster-manager owns the listener protocol classification
 the broker supplies no user-selected TLS policy and does not infer it from
 discovery transport labels. This metadata has no desktop consumer.
 
-The cluster-manager also pushes notifications (`cluster:invite-received`, `cluster:invite-canceled`, `cluster:identity-changed`, `cluster:join-requests-changed`, `nodes:changed`, ...); the broker forwards them to the caller verbatim. Unlike `ollama-proxy:<event>` / `workloads:*` these are **not opt-in** — there is no `cluster:subscribe`; the events always flow.
+The cluster-manager also pushes notifications (`cluster:invite-received`, `cluster:invite-canceled`, `cluster:identity-changed`, `cluster:join-requests-changed`, `nodes:changed`, ...); the broker forwards them to the caller verbatim. Unlike `llamacpp-proxy:<event>` / `workloads:*` these are **not opt-in** — there is no `cluster:subscribe`; the events always flow.
 
 Ask-to-join uses the same generic production relay, without broker-owned
 admission logic. `cluster:get-join-requests {}` returns the complete
@@ -2118,8 +2124,8 @@ receive neither performance changes nor private manager frames.
 ## What this version intentionally does NOT do (yet)
 
 - **Engine-advertise control surface.** Engine registration is auto-driven only:
-  the broker tracks local Ollama, LM Studio, and llama.cpp and registers `ol`,
-  `lm`, or `lc` with the daemon while each is up. There's no manual-advertise
+  the broker tracks enabled local engines and registers each engine's service
+  with the daemon while it is healthy. There's no manual-advertise
   RPC (custom service, port, name, or TXT), and no way to advertise anything
   other than the detected engines.
 - **node-info control surface.** node-info is spawned and torn down with the broker, and the broker pushes it only two things over stdin: the log level, and this node's cluster principal (`nodeinfo:set-cluster-identity`, sent on spawn and on every membership or pin-set change, because node-info holds no cluster dir and so cannot read membership itself). The broker registers its plain port with the daemon and passes no TLS material; its only port flag is the `--port` override from `--node-info-port`. `discovery:get-node-info` queries admitted peers through the scanner; it does not reconfigure the node-info worker.

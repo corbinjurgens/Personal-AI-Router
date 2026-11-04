@@ -246,19 +246,9 @@ func (b *bodyWithPeek) Read(p []byte) (int, error) {
 // response body, and returns that byte spliced back onto the front of the
 // stream.
 //
-// It exists because response headers are not a reliable signal that an engine
-// has started work, and the difference is engine-specific. LM Studio answers a
-// streaming request with 200 and headers ~12ms after accepting it and then
-// holds the connection open, silent, for the entire time the request waits
-// behind other work — measured at 128s behind a single-slot generation. Ollama
-// withholds headers until generation begins. Committing on headers therefore
-// meant that on LM Studio the proxy bound itself to a node that had merely
-// accepted the request: the header timeout could never fire, failover was
-// impossible, and a node dying during the wait took the job with it.
-//
-// The first content byte is the signal both engines agree on, and it is a real
-// one — no SSE keepalive or empty role delta arrives during the wait, so the
-// byte means generation actually started.
+// Response headers alone do not establish generation: an engine may send
+// headers while the request is still queued. Waiting for content retains
+// pre-commit failover and its first-body timeout.
 //
 // A read that ends in EOF with no bytes is an empty body, which is a complete
 // (if unusual) response and commits. A genuine read error before any content
@@ -477,8 +467,6 @@ func parseOriginStreamRequest(path string, body []byte) (originStreamRequest, er
 	switch path {
 	case "/v1/chat/completions", "/v1/completions":
 		s.protocol = streamProtocolSSE
-	case "/api/chat", "/api/generate":
-		s.protocol, s.declared = streamProtocolNDJSON, true
 	default:
 		return s, nil
 	}
@@ -527,9 +515,6 @@ func parseOriginStreamRequest(path string, body []byte) (originStreamRequest, er
 func (s originStreamRequest) manages(contentType string) (bool, bool) {
 	media, _, _ := mime.ParseMediaType(contentType)
 	validMedia := media == "text/event-stream"
-	if s.protocol == streamProtocolNDJSON {
-		validMedia = media == "application/x-ndjson" || media == "application/json"
-	}
 	return s.protocol != streamProtocolUnknown && !s.disabled &&
 		(s.declared || (s.protocol == streamProtocolSSE && validMedia)), validMedia
 }

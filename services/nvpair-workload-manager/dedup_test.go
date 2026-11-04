@@ -241,21 +241,21 @@ func TestDedupDistinguishesNodes(t *testing.T) {
 // runId). The dedup must treat those as distinct workloads, not collapse them.
 func TestDedupDistinguishesEngineAndRun(t *testing.T) {
 	d := newDedupIndex(8)
-	ollama := &Workload{ID: "1", OriginatedFrom: "host", Engine: "ollama", RunID: "r1", State: StateRunning}
-	lmstudio := &Workload{ID: "1", OriginatedFrom: "host", Engine: "lmstudio", RunID: "r2", State: StateRunning}
-	restarted := &Workload{ID: "1", OriginatedFrom: "host", Engine: "ollama", RunID: "r3", State: StateRunning}
+	llamacpp := &Workload{ID: "1", OriginatedFrom: "host", Engine: "llamacpp", RunID: "r1", State: StateRunning}
+	descriptor := &Workload{ID: "1", OriginatedFrom: "host", Engine: "llamacpp-custom", RunID: "r2", State: StateRunning}
+	restarted := &Workload{ID: "1", OriginatedFrom: "host", Engine: "llamacpp", RunID: "r3", State: StateRunning}
 
-	if emitDedupKey(t, d, keyLifecycle(ollama)) {
-		t.Fatal("ollama host/1 should be new")
+	if emitDedupKey(t, d, keyLifecycle(llamacpp)) {
+		t.Fatal("llamacpp host/1 should be new")
 	}
-	if emitDedupKey(t, d, keyLifecycle(lmstudio)) {
-		t.Fatal("lmstudio host/1 shares the id but a different engine; must not dedup")
+	if emitDedupKey(t, d, keyLifecycle(descriptor)) {
+		t.Fatal("llamacpp-custom host/1 shares the id but a different engine; must not dedup")
 	}
 	if emitDedupKey(t, d, keyLifecycle(restarted)) {
 		t.Fatal("a reused id from a new run must not dedup against the old run")
 	}
-	if !emitDedupKey(t, d, keyLifecycle(ollama)) {
-		t.Fatal("repeat of ollama host/1 should dedup")
+	if !emitDedupKey(t, d, keyLifecycle(llamacpp)) {
+		t.Fatal("repeat of llamacpp host/1 should dedup")
 	}
 }
 
@@ -269,8 +269,8 @@ func TestDedupDistinguishesEngineAndRun(t *testing.T) {
 func TestDedupDistinguishesPlacement(t *testing.T) {
 	d := newDedupIndex(8)
 
-	first := &Workload{ID: "1", OriginatedFrom: "host", Engine: "ollama", RunID: "r1", State: StateRunning, ScheduledOn: "node-A"}
-	repointed := &Workload{ID: "1", OriginatedFrom: "host", Engine: "ollama", RunID: "r1", State: StateRunning, ScheduledOn: "node-B"}
+	first := &Workload{ID: "1", OriginatedFrom: "host", Engine: "llamacpp", RunID: "r1", State: StateRunning, ScheduledOn: "node-A"}
+	repointed := &Workload{ID: "1", OriginatedFrom: "host", Engine: "llamacpp", RunID: "r1", State: StateRunning, ScheduledOn: "node-B"}
 
 	if emitDedupKey(t, d, keyLifecycle(first)) {
 		t.Fatal("first placement on node-A should be new")
@@ -300,7 +300,7 @@ func TestDedupDistinguishesRepeatedPlacements(t *testing.T) {
 
 	base := func(seq int64, node string) *Workload {
 		return &Workload{
-			ID: "1", OriginatedFrom: "host", Engine: "ollama", RunID: "r1",
+			ID: "1", OriginatedFrom: "host", Engine: "llamacpp", RunID: "r1",
 			State: StateQueued, ScheduledOn: node, Seq: seq,
 		}
 	}

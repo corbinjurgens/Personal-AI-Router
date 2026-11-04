@@ -66,7 +66,7 @@ const stagedRoutingDocument = `{
   "revision": "12",
   "tiers": {
     "weak": [
-      {"kind": "local", "engine": "ollama", "model": "qwen3:8b"},
+      {"kind": "local", "engine": "llamacpp", "model": "qwen3-8b"},
       {"kind": "api", "deployment": "free-small"}
     ],
     "strong": [{"kind": "api", "deployment": "free-small"}]
@@ -152,7 +152,7 @@ func TestParseAcceptsDisabledProviderConfiguration(t *testing.T) {
 		t.Errorf("daily ceiling = %q, want 9007199254740993 unchanged", got)
 	}
 	want := []TierEntry{
-		{Kind: EntryLocal, Engine: "ollama", Model: "qwen3:8b"},
+		{Kind: EntryLocal, Engine: "llamacpp", Model: "qwen3-8b"},
 		{Kind: EntryAPI, Deployment: "free-small"},
 	}
 	if !reflect.DeepEqual(p.Tiers["weak"], want) {
@@ -167,7 +167,7 @@ func TestParseAcceptsDisabledProviderConfiguration(t *testing.T) {
 }
 
 func TestParseV2RejectsUnknownTierEntryKind(t *testing.T) {
-	doc := `{"version":2,"tiers":{"weak":[{"kind":"remote","engine":"ollama","model":"m"}]}}`
+	doc := `{"version":2,"tiers":{"weak":[{"kind":"remote","engine":"llamacpp","model":"m"}]}}`
 	if _, err := Parse([]byte(doc)); err == nil || !strings.Contains(err.Error(), "kind") {
 		t.Fatalf("Parse(unknown tier-entry kind) err = %v, want a kind error", err)
 	}
@@ -195,7 +195,7 @@ func TestDefaultAndMigratedTierFamiliesAreEmpty(t *testing.T) {
 		checkEmptyFamilies(t, Default())
 	})
 	t.Run("migrated v1", func(t *testing.T) {
-		p, err := Parse([]byte(`{"version":1,"tiers":{"weak":[{"engine":"ollama","model":"m"}]}}`))
+		p, err := Parse([]byte(`{"version":1,"tiers":{"weak":[{"engine":"llamacpp","model":"m"}]}}`))
 		if err != nil {
 			t.Fatalf("Parse(v1): %v", err)
 		}
@@ -230,7 +230,7 @@ func TestValidateRoutingRejects(t *testing.T) {
 		p.Routing.Accounts[1].Credential = p.Routing.Accounts[0].Credential
 	}, "already used")
 	test("duplicate local tier entry", func(p *Policy) {
-		p.Tiers["weak"] = append(p.Tiers["weak"], TierEntry{Kind: EntryLocal, Engine: "ollama", Model: "qwen3:8b"})
+		p.Tiers["weak"] = append(p.Tiers["weak"], TierEntry{Kind: EntryLocal, Engine: "llamacpp", Model: "qwen3-8b"})
 	}, "duplicate entry")
 	test("duplicate api tier entry", func(p *Policy) {
 		p.Tiers["strong"] = append(p.Tiers["strong"], TierEntry{Kind: EntryAPI, Deployment: "free-small"})
@@ -254,13 +254,13 @@ func TestValidateRoutingRejects(t *testing.T) {
 		p.Tiers["strong"] = []TierEntry{{Kind: EntryAPI, Deployment: "ghost"}}
 	}, `deployment "ghost" is not defined`)
 	test("api entry with local fields", func(p *Policy) {
-		p.Tiers["strong"] = []TierEntry{{Kind: EntryAPI, Deployment: "free-small", Engine: "ollama"}}
+		p.Tiers["strong"] = []TierEntry{{Kind: EntryAPI, Deployment: "free-small", Engine: "llamacpp"}}
 	}, "names only a deployment")
 	test("local entry with a deployment", func(p *Policy) {
-		p.Tiers["strong"] = []TierEntry{{Kind: EntryLocal, Engine: "ollama", Model: "m", Deployment: "free-small"}}
+		p.Tiers["strong"] = []TierEntry{{Kind: EntryLocal, Engine: "llamacpp", Model: "m", Deployment: "free-small"}}
 	}, "cannot name a deployment")
 	test("entry without a kind", func(p *Policy) {
-		p.Tiers["strong"] = []TierEntry{{Engine: "ollama", Model: "m"}}
+		p.Tiers["strong"] = []TierEntry{{Engine: "llamacpp", Model: "m"}}
 	}, "kind must be")
 	test("routing settings for an unknown tier", func(p *Policy) {
 		p.Routing.Tiers["huge"] = TierRouting{BareMode: BareHybrid}
@@ -275,10 +275,10 @@ func TestValidateRoutingRejects(t *testing.T) {
 	// Alias collisions.
 	for _, alias := range []string{"weak", "medium", "strong", "weak-api", "medium-api", "strong-api", "weak-local", "medium-local", "strong-local"} {
 		test("profile model "+alias, func(p *Policy) {
-			p.Profiles = []Profile{{Name: "p", Engine: "ollama", Model: alias}}
+			p.Profiles = []Profile{{Name: "p", Engine: "llamacpp", Model: alias}}
 		}, "reserved alias")
 		test("local tier model "+alias, func(p *Policy) {
-			p.Tiers["strong"] = []TierEntry{{Kind: EntryLocal, Engine: "ollama", Model: alias}}
+			p.Tiers["strong"] = []TierEntry{{Kind: EntryLocal, Engine: "llamacpp", Model: alias}}
 		}, "reserved alias")
 		test("deployment model "+alias, func(p *Policy) {
 			p.Routing.Deployments[0].Model = alias

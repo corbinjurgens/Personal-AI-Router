@@ -16,11 +16,11 @@ import (
 func TestSetPortPreservesOtherOverrides(t *testing.T) {
 	dir := t.TempDir()
 	ports := privateTestPorts(t, 3)
-	path := filepath.Join(dir, "ollama.json")
+	path := filepath.Join(dir, "llamacpp.json")
 	host := runtime.GOOS + "/" + runtime.GOARCH
 	original := map[string]any{
-		"engine":         "ollama",
-		"display_name":   "Custom Ollama",
+		"engine":         "llamacpp",
+		"display_name":   "Custom llama.cpp",
 		"custom_counter": json.Number("9007199254740993"),
 		"runtime": map[string]any{
 			"port": ports[0],
@@ -36,26 +36,26 @@ func TestSetPortPreservesOtherOverrides(t *testing.T) {
 	if err := writeJSONAtomic(path, original); err != nil {
 		t.Fatal(err)
 	}
-	ex := newPortFixtureExecutor(t, dir)
-	defaultPort, ok := ex.reg.bundledDefaultPort("ollama")
+	ex := newLlamaPortFixtureExecutor(t, dir)
+	defaultPort, ok := ex.reg.bundledDefaultPort("llamacpp")
 	if !ok {
 		t.Fatal("missing fixture bundled default")
 	}
 	for _, port := range []int{ports[2], defaultPort} {
-		if _, err := ex.SetPort(context.Background(), "ollama", port); err != nil {
+		if _, err := ex.SetPort(context.Background(), "llamacpp", port); err != nil {
 			t.Fatal(err)
 		}
 		reg := reloadPortFixture(t, ex.reg, dir)
-		manifest, _ := reg.Get("ollama")
+		manifest, _ := reg.Get("llamacpp")
 		platform, _ := manifest.HostPlatform()
 		if platform.Runtime.Port != port {
 			t.Fatalf("restart restored %d instead of %d", platform.Runtime.Port, port)
 		}
-		if manifest.DisplayName != "Custom Ollama" ||
+		if manifest.DisplayName != "Custom llama.cpp" ||
 			!reflect.DeepEqual(platform.Runtime.Args, []string{"serve", "--custom-option"}) ||
 			platform.Runtime.Env["CUSTOM_SETTING"] != "kept" ||
 			platform.Runtime.Env["HOST_SETTING"] != "kept" ||
-			platform.Runtime.Env["OLLAMA_HOST"] != "{host}:{port}" {
+			platform.Runtime.Env["FAKE_ADDR"] != "{host}:{port}" {
 			t.Fatalf("port change lost unrelated overrides or inherited defaults: %+v", platform.Runtime)
 		}
 	}
@@ -118,26 +118,26 @@ func TestPersistPortOverridesBundledPlatformPort(t *testing.T) {
 func TestPersistPortRefusesMalformedOverrideWithoutClobbering(t *testing.T) {
 	for _, data := range []string{
 		`{`, `null`, `[]`, `{}`, `{"runtime":{}}`, `{"engine":"another-engine"}`,
-		`{"engine":"ollama","runtime":null}`,
-		`{"engine":"ollama","platforms":[]}`,
+		`{"engine":"llamacpp","runtime":null}`,
+		`{"engine":"llamacpp","platforms":[]}`,
 	} {
 		t.Run(data, func(t *testing.T) {
 			dir := t.TempDir()
-			path := filepath.Join(dir, "ollama.json")
-			ex := newPortFixtureExecutor(t, dir)
-			defaultPort := hostPort(t, ex.reg, "ollama")
+			path := filepath.Join(dir, "llamacpp.json")
+			ex := newLlamaPortFixtureExecutor(t, dir)
+			defaultPort := hostPort(t, ex.reg, "llamacpp")
 			port := privateTestPorts(t, 1, defaultPort)[0]
 			if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := ex.SetPort(context.Background(), "ollama", port); err == nil {
+			if _, err := ex.SetPort(context.Background(), "llamacpp", port); err == nil {
 				t.Fatal("malformed override was overwritten")
 			}
 			got, err := os.ReadFile(path)
 			if err != nil || string(got) != data {
 				t.Fatalf("invalid override changed: %q, %v", got, err)
 			}
-			if got, err := ex.Status("ollama"); err != nil || got.Port != defaultPort {
+			if got, err := ex.Status("llamacpp"); err != nil || got.Port != defaultPort {
 				t.Fatalf("failed persistence changed runtime port: %+v, err=%v", got, err)
 			}
 		})
@@ -188,10 +188,10 @@ func bundledHostPlatform(t *testing.T, engine string) Platform {
 // user can write.
 func TestUninstallerTakesOnlyLocationsFromAnOverride(t *testing.T) {
 	host := runtime.GOOS + "/" + runtime.GOARCH
-	want := bundledHostPlatform(t, "ollama")
+	want := bundledHostPlatform(t, "llamacpp")
 	dir := t.TempDir()
 	override := map[string]any{
-		"engine":  "ollama",
+		"engine":  "llamacpp",
 		"runtime": map[string]any{"port": 21001},
 		"platforms": map[string]any{
 			host: map[string]any{
@@ -201,15 +201,15 @@ func TestUninstallerTakesOnlyLocationsFromAnOverride(t *testing.T) {
 			},
 		},
 	}
-	if err := writeJSONAtomic(filepath.Join(dir, "ollama.json"), override); err != nil {
+	if err := writeJSONAtomic(filepath.Join(dir, "llamacpp.json"), override); err != nil {
 		t.Fatal(err)
 	}
 
 	reg := buildBundledRegistry()
 	reg.applyLocationOverrides(dir)
-	got, ok := reg.Get("ollama")
+	got, ok := reg.Get("llamacpp")
 	if !ok {
-		t.Fatal("ollama vanished from the registry")
+		t.Fatal("llamacpp vanished from the registry")
 	}
 	platform := got.Platforms[host]
 
@@ -230,22 +230,38 @@ func TestUninstallerTakesOnlyLocationsFromAnOverride(t *testing.T) {
 // to remove around.
 func TestUninstallerIgnoresAnOverrideStoreHoldingWhatItRemoves(t *testing.T) {
 	host := runtime.GOOS + "/" + runtime.GOARCH
-	want := bundledHostPlatform(t, "lmstudio")
+	reg := buildBundledRegistry()
+	manifest, ok := reg.Get("llamacpp")
+	if !ok {
+		t.Fatal("llamacpp manifest missing")
+	}
+	want := bundledHostPlatform(t, "llamacpp")
+	if want.Uninstall == nil {
+		t.Fatal("llamacpp uninstall plan missing")
+	}
+	store := t.TempDir()
+	// Use an explicit disposable target to exercise static containment validation.
+	uninstall := *want.Uninstall
+	uninstall.Remove = []string{filepath.Join(store, "engine")}
+	want.Uninstall = &uninstall
+	manifest.Platforms[host] = want
+	if err := manifest.Validate(); err != nil {
+		t.Fatalf("invalid uninstall fixture: %v", err)
+	}
 	dir := t.TempDir()
 	override := map[string]any{
-		"engine":     "lmstudio",
-		"models_dir": "~",
+		"engine":     "llamacpp",
+		"models_dir": store,
 		"runtime":    map[string]any{"port": 21003},
 	}
-	if err := writeJSONAtomic(filepath.Join(dir, "lmstudio.json"), override); err != nil {
+	if err := writeJSONAtomic(filepath.Join(dir, "llamacpp.json"), override); err != nil {
 		t.Fatal(err)
 	}
 
-	reg := buildBundledRegistry()
 	reg.applyLocationOverrides(dir)
-	got, ok := reg.Get("lmstudio")
+	got, ok := reg.Get("llamacpp")
 	if !ok {
-		t.Fatal("lmstudio vanished from the registry")
+		t.Fatal("llamacpp vanished from the registry")
 	}
 	platform := got.Platforms[host]
 

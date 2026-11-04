@@ -1234,7 +1234,7 @@ func TestPerformanceObservationOldCapabilityDoesNotAffectInference(t *testing.T)
 				return
 			}
 			info := params.WorkloadInfo
-			if info.ID != readinessID || info.OriginatedFrom != a.uuid || info.Engine != "ollama" || info.Model != "task1-model" || info.RunID != "task1-run" || info.State != "running" || info.Seq != 1 || info.CreatedAt != 1000 {
+			if info.ID != readinessID || info.OriginatedFrom != a.uuid || info.Engine != "llamacpp" || info.Model != "task1-model" || info.RunID != "task1-run" || info.State != "running" || info.Seq != 1 || info.CreatedAt != 1000 {
 				t.Errorf("old telemetry readiness workload=%+v", info)
 				w.WriteHeader(http.StatusBadRequest)
 				return

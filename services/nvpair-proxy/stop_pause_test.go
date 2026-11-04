@@ -70,7 +70,7 @@ func TestStopPauseRouting(t *testing.T) {
 	committed := func(name, entry, path, media, first string, protocol streamProtocol, requesterCancel bool) {
 		t.Run(name, func(t *testing.T) {
 			w := &recordingWriter{}
-			p := performanceProxyWithCodec(t, "ollama", NewCodec(w))
+			p := performanceProxyWithCodec(t, "llamacpp", NewCodec(w))
 			e := newStopPauseEngine(t, path, media, first)
 			f := p.soleFacade()
 			setBackend(t, f, e.URL, true)
@@ -96,9 +96,9 @@ func TestStopPauseRouting(t *testing.T) {
 			rec := &strictFirstByteWriter{ResponseRecorder: httptest.NewRecorder(), first: make(chan struct{})}
 			done := make(chan struct{})
 			if entry == "hybrid" {
-				installQualified(t, p.admission, admKey{engine: "ollama", model: "m:latest"})
+				installQualified(t, p.admission, admKey{engine: "llamacpp", model: "m"})
 				pol := p.admission.currentPolicy()
-				pol.Roles = map[string]nodepolicy.Role{"weak": {Engine: "ollama", Model: "m:latest"}}
+				pol.Roles = map[string]nodepolicy.Role{"weak": {Engine: "llamacpp", Model: "m"}}
 				p.admission.setPolicy(pol)
 			}
 			go func() {
@@ -167,10 +167,10 @@ func TestStopPauseRouting(t *testing.T) {
 				if slots := readCapacity(t, p.admission.strict.path).Slots; len(slots) != 1 {
 					t.Fatalf("uncertain strict markers=%v", slots)
 				}
-				if err := p.admission.reconcileStrictCapacity("ollama", "m", strictQualifiedComplete); err == nil {
+				if err := p.admission.reconcileStrictCapacity("llamacpp", "m", strictQualifiedComplete); err == nil {
 					t.Fatal("synthetic completion accepted as idle proof")
 				}
-				if err := p.admission.reconcileStrictCapacity("ollama", "m", strictAuthoritativeIdle); err != nil {
+				if err := p.admission.reconcileStrictCapacity("llamacpp", "m", strictAuthoritativeIdle); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -181,9 +181,7 @@ func TestStopPauseRouting(t *testing.T) {
 		})
 	}
 	committed("local concrete committed SSE", "local", routeChatCompletions, "text/event-stream", continuitySSEEvent, streamProtocolSSE, false)
-	committed("local concrete committed NDJSON", "local", "/api/chat", "application/x-ndjson", continuityNDJSONEvent, streamProtocolNDJSON, false)
 	committed("terminal peer ordinary committed SSE", "peer", routeChatCompletions, "text/event-stream", continuitySSEEvent, streamProtocolSSE, false)
-	committed("terminal peer ordinary committed NDJSON", "peer", "/api/chat", "application/x-ndjson", continuityNDJSONEvent, streamProtocolNDJSON, false)
 	committed("local strict committed SSE", "strict local", routeChatCompletions, "text/event-stream", continuitySSEEvent, streamProtocolSSE, false)
 	committed("terminal peer strict committed SSE", "strict peer", routeChatCompletions, "text/event-stream", continuitySSEEvent, streamProtocolSSE, false)
 	committed("local hybrid committed SSE", "hybrid", routeChatCompletions, "text/event-stream", continuitySSEEvent, streamProtocolSSE, false)
@@ -193,23 +191,23 @@ func TestStopPauseRouting(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			e := newStopPauseEngine(t, routeChatCompletions, "", "")
 			w := &recordingWriter{}
-			p := performanceProxyWithCodec(t, "ollama", NewCodec(w))
+			p := performanceProxyWithCodec(t, "llamacpp", NewCodec(w))
 			f := p.soleFacade()
 			setBackend(t, f, e.URL, true)
 			other := newRecordingEngine(t, http.StatusOK)
 			if hybrid {
 				configureStrict(t, p.admission, filepath.Join(t.TempDir(), "capacity.json"))
-				installQualified(t, p.admission, admKey{engine: "ollama", model: "m:latest"})
+				installQualified(t, p.admission, admKey{engine: "llamacpp", model: "m"})
 				pol := p.admission.currentPolicy()
-				pol.Roles = map[string]nodepolicy.Role{"weak": {Engine: "ollama", Model: "m:latest"}}
+				pol.Roles = map[string]nodepolicy.Role{"weak": {Engine: "llamacpp", Model: "m"}}
 				p.admission.setPolicy(pol)
 			}
 			if alternate {
 				n := nodeForModel(t, "alternate", other.URL, "m")
 				if hybrid {
-					n.Roles = map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("m:latest")}
+					n.Roles = map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("m")}
 					n.PolicyRevision = "1"
-					n.StrictAdmission = strictCapabilityFor("ollama", "m:latest")
+					n.StrictAdmission = strictCapabilityFor("llamacpp", "m")
 				}
 				f.discovery.AddManual(n)
 				if hybrid {
@@ -261,7 +259,7 @@ func TestStopPauseRouting(t *testing.T) {
 				if p.admission.currentActive() != 1 {
 					t.Fatal("precommit cancelled strict dispatch lost uncertainty hold")
 				}
-				if err := p.admission.reconcileStrictCapacity("ollama", "m", strictAuthoritativeIdle); err != nil {
+				if err := p.admission.reconcileStrictCapacity("llamacpp", "m", strictAuthoritativeIdle); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -293,7 +291,7 @@ func stopPausePeerHeaders(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			engineCancelled := make(chan struct{})
 			var engineHits atomic.Int32
-			peer := newProxyReverseFixture(t, "ollama", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			peer := newProxyReverseFixture(t, "llamacpp", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				engineHits.Add(1)
 				if _, err := io.Copy(io.Discard, r.Body); err != nil {
 					t.Errorf("read engine request: %v", err)
@@ -436,7 +434,6 @@ func stopPausePeerHeaders(t *testing.T) {
 		})
 	}
 	test("SSE", routeChatCompletions, "text/event-stream", continuitySSEEvent+"data: [DONE]\n\n")
-	test("NDJSON", "/api/chat", "application/x-ndjson", continuityNDJSONEvent+"{\"done\":true}\n")
 }
 
 func stopPauseHybrid(t *testing.T, f *facade, w http.ResponseWriter, r *http.Request, body string, attempts int) {
@@ -468,7 +465,7 @@ func stopPausePreparation(t *testing.T) {
 	entered, release := make(chan struct{}), make(chan struct{})
 	done := make(chan admissionDecision, 1)
 	go func() {
-		done <- h.a.admit(t.Context(), admissionRequest{engine: "ollama", model: "m", waitCap: -1,
+		done <- h.a.admit(t.Context(), admissionRequest{engine: "llamacpp", model: "m", waitCap: -1,
 			prepare: func(context.Context, nodepolicy.Profile, bool, uint64) error { close(entered); <-release; return nil },
 		})
 	}()
@@ -544,7 +541,7 @@ func stopPauseRemote(t *testing.T) {
 
 func stopPausePeerFailure(t *testing.T) {
 	e := newStopPauseEngine(t, routeChatCompletions, "text/event-stream", continuitySSEEvent)
-	peer := newProxyReverseFixture(t, "ollama", e.Config.Handler)
+	peer := newProxyReverseFixture(t, "llamacpp", e.Config.Handler)
 	peer.directHealthy.Store(true)
 	w := &recordingWriter{}
 	peer.p.codec = NewCodec(w)
@@ -581,7 +578,7 @@ func stopPauseRaw(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			e := newStopPauseEngine(t, routeChatCompletions, media, first)
 			w := &recordingWriter{}
-			p := performanceProxyWithCodec(t, "ollama", NewCodec(w))
+			p := performanceProxyWithCodec(t, "llamacpp", NewCodec(w))
 			setBackend(t, p.soleFacade(), e.URL, true)
 			rec := &strictFirstByteWriter{ResponseRecorder: httptest.NewRecorder(), first: make(chan struct{})}
 			done := make(chan struct{})
@@ -613,7 +610,7 @@ func stopPauseRaw(t *testing.T) {
 func stopPauseWaitingIngress(t *testing.T) {
 	test := func(name string, peer, waking bool) {
 		t.Run(name, func(t *testing.T) {
-			p := performanceProxy(t, "ollama")
+			p := performanceProxy(t, "llamacpp")
 			e := newRecordingEngine(t, http.StatusOK)
 			setBackend(t, p.soleFacade(), e.URL, !waking)
 			entered := make(chan struct{})
@@ -634,9 +631,9 @@ func stopPauseWaitingIngress(t *testing.T) {
 			pol.Admission.MaxConcurrentPerModel = 1
 			p.admission.setPolicy(pol)
 			if waking {
-				p.admission.setIntent(map[string]bool{"ollama": true})
+				p.admission.setIntent(map[string]bool{"llamacpp": true})
 			} else {
-				blocker := mustAdmit(t, p.admission.admit(t.Context(), admissionRequest{engine: "ollama", model: "m", waitCap: -1}))
+				blocker := mustAdmit(t, p.admission.admit(t.Context(), admissionRequest{engine: "llamacpp", model: "m", waitCap: -1}))
 				defer blocker.release()
 				p.admission.mu.Lock()
 				p.admission.stateSentAt = time.Time{}
@@ -689,7 +686,7 @@ func stopPauseStrictCleanup(t *testing.T) {
 	account := <-upstream.account
 	p.admission.setAvailability(nodepolicy.Paused, true)
 	waitChan(t, upstream.closeStarted, "strict body Close")
-	if err := p.admission.reconcileStrictCapacity("ollama", "m", strictAuthoritativeIdle); err != nil {
+	if err := p.admission.reconcileStrictCapacity("llamacpp", "m", strictAuthoritativeIdle); err != nil {
 		t.Fatal(err)
 	}
 	if p.admission.currentActive() != 1 {
@@ -723,7 +720,7 @@ func stopPauseStrictCleanup(t *testing.T) {
 	if p.admission.currentActive() != 1 {
 		t.Fatal("reader cleanup alone released uncertain execution capacity")
 	}
-	if err := p.admission.reconcileStrictCapacity("ollama", "m", strictAuthoritativeIdle); err != nil {
+	if err := p.admission.reconcileStrictCapacity("llamacpp", "m", strictAuthoritativeIdle); err != nil {
 		t.Fatal(err)
 	}
 	if p.admission.currentActive() != 0 {
@@ -759,7 +756,7 @@ func stopPauseCommitBeforeSetup(t *testing.T) {
 	r := row.owner
 	ctx, cancel := r.attemptContext(t.Context())
 	defer cancel()
-	a, err := r.newDispatchAttempt(ctx, cancel, "self", destinationDescriptor("m", "self", "ollama", false))
+	a, err := r.newDispatchAttempt(ctx, cancel, "self", destinationDescriptor("m", "self", "llamacpp", false))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -166,7 +166,7 @@ func (w *historyRequiredReplyTransport) Close() error {
 func TestRoutingHistoryMainAssemblyInterruptsRequiredReplyOnCancellation(t *testing.T) {
 	test := func(name string, cancelRoot bool) {
 		t.Run(name, func(t *testing.T) {
-			isolateOllamaHostTestConfig(t)
+			isolateBrokerTestConfig(t)
 			scanner := buildServicePortFixture(t)
 			client, server := net.Pipe()
 			transport := &historyRequiredReplyTransport{
@@ -627,11 +627,11 @@ func historyManifest(t *testing.T, generation string, records ...nodepolicy.Rout
 
 func historySend(t *testing.T, b *Broker, p *proxyProcess, generation string, records ...nodepolicy.RoutingHistoryRecord) {
 	t.Helper()
-	b.forwardProxyNotificationFrom(p, 0, 0, nodepolicy.NotifyRoutingHistoryWindow, historyMarshal(t, historyManifest(t, generation, records...)))
+	b.forwardProxyNotificationFrom(p, nodepolicy.NotifyRoutingHistoryWindow, historyMarshal(t, historyManifest(t, generation, records...)))
 	for _, record := range records {
-		b.forwardProxyNotificationFrom(p, 0, 0, nodepolicy.NotifyRoutingRequest, historyMarshal(t, record))
+		b.forwardProxyNotificationFrom(p, nodepolicy.NotifyRoutingRequest, historyMarshal(t, record))
 	}
-	b.forwardProxyNotificationFrom(p, 0, 0, nodepolicy.NotifyRoutingHistoryWindowEnd, historyMarshal(t, nodepolicy.RoutingHistoryWindowEnd{Schema: 1, Generation: generation}))
+	b.forwardProxyNotificationFrom(p, nodepolicy.NotifyRoutingHistoryWindowEnd, historyMarshal(t, nodepolicy.RoutingHistoryWindowEnd{Schema: 1, Generation: generation}))
 }
 
 func historyRows(t *testing.T, b *Broker) []nodepolicy.RoutingHistoryRecord {
@@ -675,12 +675,12 @@ func TestRoutingHistoryStageAcceptance(t *testing.T) {
 	}
 	test("incomplete end preserves accepted", func(t *testing.T, b *Broker, p *proxyProcess, row nodepolicy.RoutingHistoryRecord) {
 		row.Seq = 2
-		b.forwardProxyNotificationFrom(p, 0, 0, nodepolicy.NotifyRoutingHistoryWindow, historyMarshal(t, historyManifest(t, "2", row)))
-		b.forwardProxyNotificationFrom(p, 0, 0, nodepolicy.NotifyRoutingHistoryWindowEnd, historyMarshal(t, nodepolicy.RoutingHistoryWindowEnd{Schema: 1, Generation: "2"}))
+		b.forwardProxyNotificationFrom(p, nodepolicy.NotifyRoutingHistoryWindow, historyMarshal(t, historyManifest(t, "2", row)))
+		b.forwardProxyNotificationFrom(p, nodepolicy.NotifyRoutingHistoryWindowEnd, historyMarshal(t, nodepolicy.RoutingHistoryWindowEnd{Schema: 1, Generation: "2"}))
 	})
 	test("record without begin has no effects", func(t *testing.T, b *Broker, p *proxyProcess, row nodepolicy.RoutingHistoryRecord) {
 		row.Seq = 2
-		b.forwardProxyNotificationFrom(p, 0, 0, nodepolicy.NotifyRoutingRequest, historyMarshal(t, row))
+		b.forwardProxyNotificationFrom(p, nodepolicy.NotifyRoutingRequest, historyMarshal(t, row))
 	})
 	test("equal generation conflict discards stage", func(t *testing.T, b *Broker, p *proxyProcess, row nodepolicy.RoutingHistoryRecord) {
 		row.Seq = 2
@@ -708,7 +708,7 @@ func TestRoutingHistoryStageAcceptance(t *testing.T) {
 	})
 	test("later begin supersedes incomplete window", func(t *testing.T, b *Broker, p *proxyProcess, row nodepolicy.RoutingHistoryRecord) {
 		other := historyRecord("10", 11, 1)
-		b.forwardProxyNotificationFrom(p, 0, 0, nodepolicy.NotifyRoutingHistoryWindow, historyMarshal(t, historyManifest(t, "2", other)))
+		b.forwardProxyNotificationFrom(p, nodepolicy.NotifyRoutingHistoryWindow, historyMarshal(t, historyManifest(t, "2", other)))
 		historySend(t, b, p, "3", row)
 	})
 }
@@ -784,13 +784,13 @@ func TestRoutingHistoryPrivateRefusal(t *testing.T) {
 	b, p, out := historyFixture(t)
 	row := historyRecord("9", 10, 1)
 	raw := historyMarshal(t, row)
-	for _, method := range []string{nodepolicy.NotifyRoutingHistoryWindow, nodepolicy.NotifyRoutingRequest, nodepolicy.NotifyRoutingHistoryWindowEnd, nodepolicy.NotifyRoutingHistoryAccepted, nodepolicy.NotifyRoutingChanged, engines.AddressMethod("ollama", nodepolicy.NotifyRoutingRequest)} {
+	for _, method := range []string{nodepolicy.NotifyRoutingHistoryWindow, nodepolicy.NotifyRoutingRequest, nodepolicy.NotifyRoutingHistoryWindowEnd, nodepolicy.NotifyRoutingHistoryAccepted, nodepolicy.NotifyRoutingChanged, engines.AddressMethod("llamacpp", nodepolicy.NotifyRoutingRequest)} {
 		b.handleMessage(routingBrokerRequest("1", method, string(raw)))
 		b.handleMessage(&Message{JSONRPC: "2.0", Method: method, Params: raw})
 		b.forwardClusterManagerNotification(method, raw)
 		b.forwardEngineNotificationFrom(nil, method, raw)
-		b.forwardProxyProcessNotification(0, 0, method, raw)
-		b.forwardProxyNotificationFrom(p, 0, 0, method, raw)
+		b.forwardProxyProcessNotification(method, raw)
+		b.forwardProxyNotificationFrom(p, method, raw)
 	}
 	historyRequireRows(t, b)
 	frames := out.frames()
@@ -1162,7 +1162,7 @@ func TestRoutingHistoryRawFailureOrdinaryCallSurvives(t *testing.T) {
 	if err := p.attachRoutingHistoryPeer(b, client, func() { _ = client.Close() }); err != nil {
 		t.Fatal(err)
 	}
-	p.onNotify = func(method string, params json.RawMessage) { b.forwardProxyNotificationFrom(p, 0, 0, method, params) }
+	p.onNotify = func(method string, params json.RawMessage) { b.forwardProxyNotificationFrom(p, method, params) }
 	failures := make(chan jsonrpc.HistoryFailure, 4)
 	if err := p.peer.SetHistoryReadHandlers(nil, func(f jsonrpc.HistoryFailure) { b.routingHistoryFailure(p, f); failures <- f }); err != nil {
 		t.Fatal(err)
@@ -1566,22 +1566,22 @@ func TestRoutingHistoryLocalOwnedAliasesUseOrdinaryRefusal(t *testing.T) {
 	}{
 		{
 			name:   "object ID",
-			frame:  `{"jsonrpc":"2.0","id":{},"method":"ollama:routing/request","params":{}}`,
+			frame:  `{"jsonrpc":"2.0","id":{},"method":"llamacpp:routing/request","params":{}}`,
 			wantID: `{}`,
 		},
 		{
 			name:   "aliased duplicate ID keeps ordinary last-wins behavior",
-			frame:  `{"jsonrpc":"2.0","id":"first","ID":"second","method":"ollama:routing/request","params":{}}`,
+			frame:  `{"jsonrpc":"2.0","id":"first","ID":"second","method":"llamacpp:routing/request","params":{}}`,
 			wantID: `"second"`,
 		},
 		{
 			name:   "literal HTML-sensitive ordinary ID",
-			frame:  `{"jsonrpc":"2.0","id":"` + strings.Repeat("<", 86) + `","method":"ollama:routing/request","params":{"synthetic-private-key":"local-alias-payload-sentinel"}}`,
+			frame:  `{"jsonrpc":"2.0","id":"` + strings.Repeat("<", 86) + `","method":"llamacpp:routing/request","params":{"synthetic-private-key":"local-alias-payload-sentinel"}}`,
 			wantID: `"` + strings.Repeat(`\u003c`, 86) + `"`,
 		},
 		{
 			name:   "ordinary ID above history ID and error-frame bounds remains ordinary",
-			frame:  `{"jsonrpc":"2.0","id":"` + strings.Repeat("<", 1024) + `","method":"ollama:routing/request","params":{"synthetic-private-key":"local-alias-payload-sentinel"}}`,
+			frame:  `{"jsonrpc":"2.0","id":"` + strings.Repeat("<", 1024) + `","method":"llamacpp:routing/request","params":{"synthetic-private-key":"local-alias-payload-sentinel"}}`,
 			wantID: `"` + strings.Repeat(`\u003c`, 1024) + `"`,
 		},
 	}
@@ -1633,7 +1633,7 @@ func TestRoutingHistoryLocalOwnedAliasesUseOrdinaryRefusal(t *testing.T) {
 				logs.mu.Lock()
 				captured := logs.buf.String()
 				logs.mu.Unlock()
-				for _, sentinel := range []string{"ollama:routing/request", "first", "second", "synthetic-private-key", "local-alias-payload-sentinel", strings.Repeat("<", 86)} {
+				for _, sentinel := range []string{"llamacpp:routing/request", "first", "second", "synthetic-private-key", "local-alias-payload-sentinel", strings.Repeat("<", 86)} {
 					if strings.Contains(captured, sentinel) {
 						t.Fatalf("ordinary private rejection logged input sentinel %s", sentinel)
 					}
@@ -1651,7 +1651,7 @@ func TestRoutingHistoryLocalOwnedAliasesUseOrdinaryRefusal(t *testing.T) {
 func TestRoutingHistoryOwnedAddressedRequestHasZeroHistoryEffects(t *testing.T) {
 	b, p, _ := historyFixture(t)
 	out := &syncBuffer{}
-	frame := `{"jsonrpc":"2.0","id":"first","ID":"second","method":"ollama:routing/request","params":{}}` + "\n" +
+	frame := `{"jsonrpc":"2.0","id":"first","ID":"second","method":"llamacpp:routing/request","params":{}}` + "\n" +
 		`{"jsonrpc":"2.0","method":"ordinary-barrier","params":{}}` + "\n"
 	if err := p.attachRoutingHistoryPeer(b, readWriter{strings.NewReader(frame), out}, func() {}); err != nil {
 		t.Fatal(err)
@@ -1803,9 +1803,9 @@ func TestRoutingHistoryPrivacyGuard(t *testing.T) {
 	raw := historyMarshal(t, row)
 	unknown := `"synthetic-secret-key":{"prompt":"prompt-sentinel","response":"response-sentinel","credential":"credential-sentinel","endpoint":"endpoint-sentinel","PIN":"pin-sentinel","key":"key-sentinel"},`
 	withUnknown := append([]byte("{"+unknown), raw[1:]...)
-	b.forwardProxyNotificationFrom(p, 0, 0, nodepolicy.NotifyRoutingHistoryWindow, historyMarshal(t, historyManifest(t, "1", row)))
-	b.forwardProxyNotificationFrom(p, 0, 0, nodepolicy.NotifyRoutingRequest, withUnknown)
-	b.forwardProxyNotificationFrom(p, 0, 0, nodepolicy.NotifyRoutingHistoryWindowEnd, historyMarshal(t, nodepolicy.RoutingHistoryWindowEnd{Schema: 1, Generation: "1"}))
+	b.forwardProxyNotificationFrom(p, nodepolicy.NotifyRoutingHistoryWindow, historyMarshal(t, historyManifest(t, "1", row)))
+	b.forwardProxyNotificationFrom(p, nodepolicy.NotifyRoutingRequest, withUnknown)
+	b.forwardProxyNotificationFrom(p, nodepolicy.NotifyRoutingHistoryWindowEnd, historyMarshal(t, nodepolicy.RoutingHistoryWindowEnd{Schema: 1, Generation: "1"}))
 	historyRequireRows(t, b, row)
 	b.routingHistoryFailure(p, jsonrpc.HistoryFailure{Disposition: "quarantine", Category: "history-invalid", Count: 1, ScheduleRefetch: true})
 	packed := b.routingHistory.accepted.cell(0)[:b.routingHistory.accepted.length[0]]
@@ -1847,7 +1847,7 @@ func TestRoutingHistoryRawPrivateDispositions(t *testing.T) {
 					ordinary++
 					return
 				}
-				b.forwardProxyNotificationFrom(p, 0, 0, method, params)
+				b.forwardProxyNotificationFrom(p, method, params)
 			}
 			if err := p.peer.SetHistoryReadHandlers(nil, func(f jsonrpc.HistoryFailure) {
 				failures++
