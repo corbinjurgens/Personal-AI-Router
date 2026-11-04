@@ -65,11 +65,24 @@ func (b *Broker) authorizeRemoteManagement(caller, family, operation string, bou
 	return b.authorizeRemoteManagementLocked(r, caller, family, operation, boundRequest...)
 }
 
-// authorizeRemoteManagementLocked is shared by the r.mu-held policy and
-// availability entry points and the settings/switch wrapper. Permission wins
+// authorizeRemoteManagementLocked is shared by the r.mu-held policy entry
+// points and the settings/switch wrapper. Permission wins
 // over pause, preserving revocation's code. Never acquire engineConfigMu here:
 // settings and switch admission already own it before taking r.mu.
 func (b *Broker) authorizeRemoteManagementLocked(r *policyRuntime, caller, family, operation string, boundRequest ...bool) error {
+	if err := b.authorizeRemoteManagementGrantLocked(r, caller, family, operation, boundRequest...); err != nil {
+		return err
+	}
+	if caller != "" && r.managementBlockedLocked() {
+		return &localVetoError{}
+	}
+	return nil
+}
+
+// authorizeRemoteManagementGrantLocked checks only the fresh peer grant.
+// Availability uses it before its own mode-aware veto; other management uses
+// authorizeRemoteManagementLocked to retain the strict either-origin fence.
+func (b *Broker) authorizeRemoteManagementGrantLocked(r *policyRuntime, caller, family, operation string, boundRequest ...bool) error {
 	if caller == "" {
 		return nil
 	}
@@ -83,9 +96,6 @@ func (b *Broker) authorizeRemoteManagementLocked(r *policyRuntime, caller, famil
 			logBoundManagementRefusal("broker.remote_management", caller, permission.State, r.runID, permission.Diagnostic)
 		}
 		return &remoteManagementDeniedError{}
-	}
-	if r.managementBlockedLocked() {
-		return &localVetoError{}
 	}
 	return nil
 }

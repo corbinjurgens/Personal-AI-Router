@@ -11,6 +11,29 @@ import (
 	"testing"
 )
 
+func TestStoredPauseModeRepair(t *testing.T) {
+	for _, tc := range []struct {
+		name, raw string
+		want      PauseMode
+	}{
+		{name: "old local pause", raw: `{"revision":"17","availability":"paused","pausedBy":"local"}`, want: PauseImmediate},
+		{name: "old peer pause", raw: `{"revision":"17","availability":"paused","pausedBy":"peer"}`, want: PauseImmediate},
+		{name: "configured pause", raw: `{"revision":"17","availability":"paused","pauseMode":"configured"}`, want: PauseConfigured},
+		{name: "halt", raw: `{"revision":"17","availability":"paused","pauseMode":"immediate"}`, want: PauseImmediate},
+		{name: "available", raw: `{"revision":"17","availability":"available"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, _, err := ParseStored([]byte(tc.raw))
+			if err != nil {
+				t.Fatalf("ParseStored: %v", err)
+			}
+			if p.PauseMode != tc.want || p.Revision != "17" {
+				t.Fatalf("stored policy mode/revision = %q/%q, want %q/17", p.PauseMode, p.Revision, tc.want)
+			}
+		})
+	}
+}
+
 func TestModelControlStoredPolicyPreservesValidSiblings(t *testing.T) {
 	for _, version := range []string{"1", "2"} {
 		t.Run("version "+version, func(t *testing.T) {

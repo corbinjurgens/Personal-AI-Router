@@ -1124,7 +1124,7 @@ func requireBrokerPauseRefusal(t *testing.T, err error) {
 	}
 }
 
-func TestPausedBrokerRejectsEveryPeerRelayMutation(t *testing.T) {
+func TestPausedBrokerRejectsManagementAndUnknownModeAvailability(t *testing.T) {
 	test := func(name string, origin nodepolicy.PauseOrigin) {
 		t.Run(name, func(t *testing.T) {
 			t.Run("policy set", func(t *testing.T) {
@@ -1223,15 +1223,11 @@ func TestPendingPeerPauseBlocksQueuedMutation(t *testing.T) {
 	unlockApply()
 	requireBrokerPauseRefusal(t, rmResult(t, queued))
 	rmSettingsUnchanged(t, h, before, p.RequestID, journal)
-	for _, state := range []nodepolicy.Availability{nodepolicy.Available, nodepolicy.Paused} {
-		_, err := h.b.setAvailabilityAs(context.Background(), state, nodepolicy.PausedByPeer, "peer")
-		requireBrokerPauseRefusal(t, err)
-	}
 	r.mu.Lock()
 	unchanged := r.transitionGen == gen && r.current.Revision == revision && r.pendingPauseRequested
 	r.mu.Unlock()
 	if !unchanged {
-		t.Fatal("refused peer writes disturbed the pending pause")
+		t.Fatal("refused peer settings disturbed the pending pause")
 	}
 	unlockTransition()
 	if err := rmResult(t, pause); err != nil {

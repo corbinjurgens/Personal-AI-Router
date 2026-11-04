@@ -11,6 +11,40 @@ import (
 	"testing"
 )
 
+func TestPeerProjectionProtectsPauseMode(t *testing.T) {
+	stored := Default()
+	stored.Availability, stored.PausedBy, stored.PauseMode = Paused, PausedLocally, PauseImmediate
+	peer := stored.PeerProjection()
+	if peer.PauseMode != PauseImmediate {
+		t.Fatalf("peer pauseMode = %q, want immediate", peer.PauseMode)
+	}
+	for _, key := range []string{"pauseMode", "PauseMode"} {
+		t.Run(key, func(t *testing.T) {
+			raw, err := json.Marshal(peer)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &fields); err != nil {
+				t.Fatal(err)
+			}
+			delete(fields, "pauseMode")
+			fields[key] = json.RawMessage(`"unknown"`)
+			raw, err = json.Marshal(fields)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := MergePeerSet(stored, raw)
+			if err != nil {
+				t.Fatalf("MergePeerSet: %v", err)
+			}
+			if got.Availability != Paused || got.PausedBy != PausedLocally || got.PauseMode != PauseImmediate {
+				t.Fatalf("peer write replaced saved pause: %+v", got)
+			}
+		})
+	}
+}
+
 func inferenceLockPolicy() Policy {
 	p := Default()
 	p.Profiles = []Profile{

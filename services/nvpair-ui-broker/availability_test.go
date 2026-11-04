@@ -18,6 +18,279 @@ import (
 	"nvpair-shared/nodepolicy"
 )
 
+func TestSavedPauseModeRoundTripsThroughBroker(t *testing.T) {
+	for _, mode := range []nodepolicy.PauseMode{nodepolicy.PauseImmediate, nodepolicy.PauseConfigured} {
+		t.Run(string(mode), func(t *testing.T) {
+			rb := newRoutedBroker(t)
+			state, err := rb.b.setAvailabilityRequestAs(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally, "", mustJSON(mode))
+			if err != nil || state != nodepolicy.Paused {
+				t.Fatalf("pause = %q, %v", state, err)
+			}
+			got := rb.b.localPolicy()
+			if got.Availability != nodepolicy.Paused || got.PausedBy != nodepolicy.PausedLocally || got.PauseMode != mode {
+				t.Fatalf("live pause = %+v, want paused/local/%s", got, mode)
+			}
+			fresh := freshBroker(t, rb.path).localPolicy()
+			if fresh.RecoveryRequired || fresh.Policy.Availability != nodepolicy.Paused || fresh.Policy.PausedBy != nodepolicy.PausedLocally || fresh.Policy.PauseMode != mode {
+				t.Fatalf("reloaded pause = %+v, want paused/local/%s", fresh, mode)
+			}
+			peer := rb.b.peerPolicy()
+			if peer.PauseMode != mode || peer.Policy.PauseMode != mode {
+				t.Fatalf("peer readback = %+v, want %s", peer, mode)
+			}
+			paProjectionBarrier(t, rb.b)
+			found := false
+			for _, adv := range nodeProjections(t, rb.engine) {
+				if adv.Revision == got.Policy.Revision && adv.PausedBy == nodepolicy.PausedLocally && adv.PauseMode == mode {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("no advertisement for saved local/%s revision %s", mode, got.Policy.Revision)
+			}
+			if _, err := rb.b.setAvailability(context.Background(), nodepolicy.Available, nodepolicy.PausedLocally); err != nil {
+				t.Fatalf("resume: %v", err)
+			}
+			resumed := rb.b.localPolicy()
+			if resumed.Policy.PauseMode != "" || resumed.PauseMode != "" || resumed.Policy.PausedBy != "" {
+				t.Fatalf("resume retained pause metadata: %+v", resumed)
+			}
+		})
+	}
+}
+
+func TestLocalHaltEscalatesPeerConfiguredPauseWithoutResume(t *testing.T) {
+	rb := newRoutedBroker(t)
+	if _, err := rb.b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedByPeer); err != nil {
+		t.Fatalf("peer configured pause: %v", err)
+	}
+	before := len(rb.out.frames())
+	if _, err := rb.b.setAvailabilityRequestAs(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally, "", json.RawMessage(`"immediate"`)); err != nil {
+		t.Fatalf("local Halt: %v", err)
+	}
+	got := rb.b.localPolicy().Policy
+	if got.Availability != nodepolicy.Paused || got.PausedBy != nodepolicy.PausedLocally || got.PauseMode != nodepolicy.PauseImmediate {
+		t.Fatalf("Halt policy = %+v, want paused/local/immediate", got)
+	}
+	for _, frame := range rb.out.frames()[before:] {
+		if frame.Method != notifyAvailabilityChanged && frame.Method != notifyPolicyChanged {
+			continue
+		}
+		var event struct {
+			Availability nodepolicy.Availability `json:"availability"`
+			Policy       nodepolicy.Policy       `json:"policy"`
+		}
+		if err := json.Unmarshal(frame.Params, &event); err != nil {
+			t.Fatalf("decode pause event: %v", err)
+		}
+		if event.Availability == nodepolicy.Available || event.Policy.Availability == nodepolicy.Available {
+			t.Fatalf("Halt escalation published available: %+v", event)
+		}
+	}
+}
+
+func TestPeerAvailabilityResumesConfiguredPause(t *testing.T) {
+	for _, origin := range []nodepolicy.PauseOrigin{nodepolicy.PausedLocally, nodepolicy.PausedByPeer} {
+		t.Run(string(origin), func(t *testing.T) {
+			rb := newRoutedBroker(t)
+			if origin == nodepolicy.PausedLocally {
+				if _, err := rb.b.dispatchPolicy(context.Background(), methodSetAvailability, policyParams{State: "paused"}); err != nil {
+					t.Fatal(err)
+				}
+			} else if reply := rb.relayReply(t, "set-availability", policyParams{State: "paused"}); reply.Error != "" {
+				t.Fatalf("peer Pause: %+v", reply)
+			}
+			paused := rb.b.localPolicy().Policy
+			if paused.PauseMode != nodepolicy.PauseConfigured || paused.PausedBy != origin {
+				t.Fatalf("saved Pause = %+v", paused)
+			}
+			reply := rb.relayReply(t, "set-availability", policyParams{State: "available"})
+			if reply.Error != "" || reply.ErrorCode != 0 {
+				t.Fatalf("peer Resume: %+v", reply)
+			}
+			var result availabilitySetResult
+			if err := json.Unmarshal(reply.Result, &result); err != nil {
+				t.Fatal(err)
+			}
+			got := rb.b.localPolicy()
+			if result.Availability != nodepolicy.Available || result.PausedBy != "" || result.PauseMode != "" ||
+				got.Availability != nodepolicy.Available || got.Policy.Availability != nodepolicy.Available ||
+				got.Policy.PauseMode != "" || got.Policy.PausedBy != "" || got.Policy.Revision == paused.Revision {
+				t.Fatalf("Resume result=%+v policy=%+v", result, got)
+			}
+		})
+	}
+}
+
+func TestPeerAvailabilityCannotResumeHaltAcrossRestart(t *testing.T) {
+	for _, restart := range []bool{false, true} {
+		name := "same broker"
+		if restart {
+			name = "reloaded policy"
+		}
+		t.Run(name, func(t *testing.T) {
+			rb := newRoutedBroker(t)
+			if _, err := rb.b.dispatchPolicy(context.Background(), methodSetAvailability, policyParams{State: "paused", PauseMode: json.RawMessage(`"immediate"`)}); err != nil {
+				t.Fatal(err)
+			}
+			if restart {
+				data, err := os.ReadFile(rb.path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				rb = newBrokerOnFile(t, string(data))
+			}
+			before := rb.baseline(t)
+			reply := rb.relayReply(t, "set-availability", policyParams{State: "available"})
+			if reply.ErrorCode != codeLocalVeto || reply.Error != (&localVetoError{}).Error() {
+				t.Fatalf("peer Resume of Halt = %+v", reply)
+			}
+			before.requireUnchanged(t)
+			if got := rb.b.localPolicy().Policy; got.PauseMode != nodepolicy.PauseImmediate || got.PausedBy != nodepolicy.PausedLocally {
+				t.Fatalf("Halt changed: %+v", got)
+			}
+		})
+	}
+}
+
+func TestPeerAvailabilityRepeatedHaltPauseHasNoEffects(t *testing.T) {
+	rb := newRoutedBroker(t)
+	if _, err := rb.b.dispatchPolicy(context.Background(), methodSetAvailability, policyParams{State: "paused", PauseMode: json.RawMessage(`"immediate"`)}); err != nil {
+		t.Fatal(err)
+	}
+	waitPushesSettled(t, rb.b)
+	paProjectionBarrier(t, rb.b)
+	before := rb.baseline(t)
+	projections, proxy := nodeProjections(t, rb.engine), rb.proxy.snapshot()
+	lifecycle := pauseLifecycleCalls(rb.engine.snapshot())
+	notices := func() []Message {
+		var out []Message
+		for _, frame := range rb.out.frames() {
+			if frame.Method == notifyAvailabilityChanged || frame.Method == notifyPolicyChanged {
+				out = append(out, frame)
+			}
+		}
+		return out
+	}
+	announcements := notices()
+	r := rb.b.nodePolicyRuntime()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r.mu.Lock()
+	gen := r.transitionGen
+	r.transitionCancel = cancel
+	r.mu.Unlock()
+	reply := rb.relayReply(t, "set-availability", policyParams{State: "paused", PauseMode: json.RawMessage(`"configured"`)})
+	if reply.Error != "" || reply.ErrorCode != 0 {
+		t.Fatalf("repeated peer Pause: %+v", reply)
+	}
+	var result availabilitySetResult
+	if err := json.Unmarshal(reply.Result, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Availability != nodepolicy.Paused || result.PausedBy != nodepolicy.PausedLocally || result.PauseMode != nodepolicy.PauseImmediate {
+		t.Fatalf("no-op result = %+v, want paused/local/immediate", result)
+	}
+	before.requireUnchanged(t)
+	paProjectionBarrier(t, rb.b)
+	r.mu.Lock()
+	unchanged := r.transitionGen == gen && !r.pendingPauseRequested && !r.localPauseRequested && r.live == nodepolicy.Paused
+	r.mu.Unlock()
+	if !unchanged || ctx.Err() != nil || !reflect.DeepEqual(projections, nodeProjections(t, rb.engine)) ||
+		!reflect.DeepEqual(proxy, rb.proxy.snapshot()) || !reflect.DeepEqual(lifecycle, pauseLifecycleCalls(rb.engine.snapshot())) ||
+		!reflect.DeepEqual(announcements, notices()) {
+		t.Fatal("repeated peer Pause changed Halt transition, cancellation, workers or notifications")
+	}
+	grantRemoteManagement(t, rb.b.clusterDir, "cluster-1", "self-node", "pinned-peer", false)
+	if denied := rb.relayReply(t, "set-availability", policyParams{State: "paused"}); denied.ErrorCode != -32012 {
+		t.Fatalf("revoked peer bypassed grant via no-op: %+v", denied)
+	}
+}
+
+func TestPeerAvailabilityLegacyPauseRequiresLocalResume(t *testing.T) {
+	for _, tc := range []struct{ name, document string }{
+		{"legacy peer origin", `{"version":2,"revision":"12","availability":"paused","pausedBy":"peer"}`},
+		{"legacy unknown origin", `{"version":2,"revision":"12","availability":"paused"}`},
+		{"recovery unknown origin", `invalid policy`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rb := newBrokerOnFile(t, tc.document)
+			if got := rb.b.localPolicy().Policy; got.PauseMode != nodepolicy.PauseImmediate {
+				t.Fatalf("conservative saved mode=%s, want immediate", got.PauseMode)
+			}
+			for _, state := range []string{"paused", "available"} {
+				before := rb.baseline(t)
+				if reply := rb.relayReply(t, "set-availability", policyParams{State: state}); reply.ErrorCode != codeLocalVeto {
+					t.Fatalf("peer %s crossed legacy/recovery pause: %+v", state, reply)
+				}
+				before.requireUnchanged(t)
+			}
+			if _, err := rb.b.dispatchPolicy(context.Background(), methodSetAvailability, policyParams{State: "available"}); err != nil {
+				t.Fatal(err)
+			}
+			if reply := rb.relayReply(t, "set-availability", policyParams{State: "paused"}); reply.ErrorCode != 0 || reply.Error != "" {
+				t.Fatalf("peer Pause after local Resume: %+v", reply)
+			}
+		})
+	}
+}
+
+func TestPeerAvailabilityDuringBuildApplyIsRefused(t *testing.T) {
+	rb := newRoutedBroker(t)
+	if _, err := rb.b.dispatchPolicy(context.Background(), methodSetAvailability, policyParams{State: "paused", PauseMode: json.RawMessage(`"immediate"`)}); err != nil {
+		t.Fatal(err)
+	}
+	r := rb.b.nodePolicyRuntime()
+	r.mu.Lock()
+	r.buildApplyOperation = "active-build"
+	r.mu.Unlock()
+	for _, state := range []string{"paused", "available"} {
+		t.Run(state, func(t *testing.T) {
+			before := rb.baseline(t)
+			if reply := rb.relayReply(t, "set-availability", policyParams{State: state}); reply.ErrorCode != codeLocalVeto {
+				t.Fatalf("peer request during build apply = %+v", reply)
+			}
+			before.requireUnchanged(t)
+		})
+	}
+}
+
+func TestPeerAvailabilitySupersedesPendingConfiguredPause(t *testing.T) {
+	rb := newRoutedBroker(t)
+	r := rb.b.nodePolicyRuntime()
+	r.mu.Lock()
+	accepted := r.acceptAvailabilityLocked(nodepolicy.Paused, nodepolicy.PausedLocally, nodepolicy.PauseConfigured)
+	blocked := r.managementBlockedLocked()
+	r.mu.Unlock()
+	defer accepted.cancel()
+	if !blocked {
+		t.Fatal("pending configured Pause lost the strict management fence")
+	}
+	reply := rb.relayReply(t, "set-availability", policyParams{State: "available"})
+	if reply.Error != "" || reply.ErrorCode != 0 {
+		t.Fatalf("peer Resume of pending configured Pause = %+v", reply)
+	}
+	r.mu.Lock()
+	cleared := !r.pendingPauseRequested && r.pendingPauseMode == "" && !r.localPauseRequested && !r.managementBlockedLocked()
+	r.mu.Unlock()
+	if !cleared || accepted.ctx.Err() == nil || rb.b.localPolicy().Availability != nodepolicy.Available {
+		t.Fatal("peer Resume did not supersede pending configured Pause and clear its fence")
+	}
+}
+
+func TestConfiguredPauseStillRefusesPeerEngineSettings(t *testing.T) {
+	h, p := rmSettings(t)
+	h.pause(nodepolicy.PausedLocally)
+	r := h.b.nodePolicyRuntime()
+	r.mu.Lock()
+	r.current.PauseMode = nodepolicy.PauseConfigured
+	r.mu.Unlock()
+	before, journal := h.snapshot(), rmSettingsJournal(t, h)
+	_, err := h.b.dispatchEngineSettings(context.Background(), "apply", p, "peer")
+	requireBrokerPauseRefusal(t, err)
+	rmSettingsUnchanged(t, h, before, p.RequestID, journal)
+}
+
 func TestBuildApplyMaintenanceRefusesResumeWithoutSupersedingPause(t *testing.T) {
 	f := newBuildApplyTestFixture(t)
 	op := requireBuildApplyPrepared(t, f.b.prepareBuildApply(f.request(t)))
@@ -161,7 +434,9 @@ func TestPauseProjectionCarriesProvenanceAndRevision(t *testing.T) {
 
 	t.Run("peer resume veto emits no projection", func(t *testing.T) {
 		ab, engine := fixture(t)
-		transition(t, ab, engine, nodepolicy.Paused, nodepolicy.PausedLocally)
+		if _, err := ab.b.setAvailabilityRequestAs(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally, "", json.RawMessage(`"immediate"`)); err != nil {
+			t.Fatal(err)
+		}
 		paProjectionBarrier(t, ab.b)
 		before := nodeProjections(t, engine)
 		saved := ab.b.localPolicy().Policy
@@ -370,11 +645,8 @@ func TestPauseStopFailureRetainsFenceAndCanRetryLocally(t *testing.T) {
 	if last := pushes[len(pushes)-1]; last.State != nodepolicy.Draining {
 		t.Fatalf("failure advertised %+v", last)
 	}
-	for _, next := range []nodepolicy.Availability{nodepolicy.Available, nodepolicy.Paused} {
-		_, err := b.setAvailability(context.Background(), next, nodepolicy.PausedByPeer)
-		if policyErrorCode(err) != codeLocalVeto {
-			t.Fatalf("peer retry/resume = %v", err)
-		}
+	if state, err := b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedByPeer); state != nodepolicy.Draining || policyErrorCode(err) != -32000 {
+		t.Fatalf("peer configured retry = %s, %v, want incomplete shutdown", state, err)
 	}
 	fail = false
 	if state, err := b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally); err != nil || state != nodepolicy.Paused {

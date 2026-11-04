@@ -71,7 +71,8 @@ type Advertisement struct {
 	Revision     string                    `json:"revision"`
 	Roles        map[string]AdvertisedRole `json:"roles"`
 	// PausedBy lets a remote UI show "paused on that node" before it tries.
-	PausedBy PauseOrigin `json:"pausedBy,omitempty"`
+	PausedBy  PauseOrigin `json:"pausedBy,omitempty"`
+	PauseMode PauseMode   `json:"pauseMode,omitempty"`
 	// StrictAdmission is absent until destination enforcement and identity
 	// reconciliation are ready. Policy.Advertisement never sets it.
 	StrictAdmission     *StrictAdmissionCapability `json:"strictAdmission,omitempty"`
@@ -439,5 +440,5 @@ func (p Policy) Advertisement() Advertisement {
 		}
 		roles[tier] = adv
 	}
-	return Advertisement{Revision: p.Revision, Roles: roles, PausedBy: p.PausedBy, ServedModels: slices.Clone(p.ServedModels)}
+	return Advertisement{Revision: p.Revision, Roles: roles, PausedBy: p.PausedBy, PauseMode: p.PauseMode, ServedModels: slices.Clone(p.ServedModels)}
 }

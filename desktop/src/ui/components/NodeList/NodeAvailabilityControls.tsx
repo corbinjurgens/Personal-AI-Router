@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Badge, Button, Flex, Stack, Text } from '@nvidia/foundations-react-core'
 import type { NodeAvailabilityRequest } from '@/shared/types/node-policy'
 import {
+    canResumeAvailability,
     useNodeConfigurationStore,
     watchNodeAvailability,
     watchNodeManagement
@@ -35,7 +36,8 @@ export function AvailabilityControls({
     const value = entry?.value
     const known = enabled && entry?.current && !entry.stale && value !== undefined
     const busy = entry?.pending !== undefined
-    const resume = local && value !== 'available' && value !== undefined
+    const resume = canResumeAvailability(entry, local)
+    const halted = !local && entry?.pauseMode === 'immediate' && entry.pausedBy === 'local'
     const canResume = known && (!busy || (entry.pending === 'paused' && value === 'draining'))
     const canStop =
         known &&
@@ -114,7 +116,7 @@ export function AvailabilityControls({
                         aria-busy={entry?.pendingPauseMode === 'immediate'}
                         onClick={() => onRequest({ state: 'paused', pauseMode: 'immediate' })}
                     >
-                        Stop local models now
+                        Halt
                     </Button>
                 )}
                 <Button
@@ -133,7 +135,10 @@ export function AvailabilityControls({
                 className="text-subtle-color break-words min-w-0"
             >
                 {value && value !== 'available' && `${origin}. `}
+                {halted && value !== 'available' && 'Halted on that node. '}
                 {!local &&
+                    !resume &&
+                    !halted &&
                     (value === 'draining' || value === 'paused') &&
                     'Resume on that device. '}
                 {entry?.stale && 'Readback timed out. Refresh availability manually. '}

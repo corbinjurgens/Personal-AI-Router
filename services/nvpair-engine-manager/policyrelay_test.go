@@ -23,8 +23,93 @@ import (
 
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/clustertrusttest"
+	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 )
+
+func TestPolicyRelayAvailabilityDelegatesPauseAuthorityAfterOuterChecks(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		projection *nodeProjection
+		denied     bool
+		unpinned   bool
+		recovery   bool
+		brokerVeto bool
+		status     int
+		calls      int
+		code       string
+	}{
+		{name: "configured pause reaches broker", projection: &nodeProjection{ManagementBlocked: true, Policy: nodepolicy.Advertisement{PauseMode: nodepolicy.PauseConfigured}}, status: http.StatusOK, calls: 1},
+		{name: "Halt refusal comes from broker", projection: &nodeProjection{ManagementBlocked: true, PausedLocally: true, Policy: nodepolicy.Advertisement{PauseMode: nodepolicy.PauseImmediate}}, brokerVeto: true, status: http.StatusConflict, calls: 1, code: "local_veto"},
+		{name: "unknown projection", status: http.StatusServiceUnavailable},
+		{name: "grant before pause delegation", projection: &nodeProjection{ManagementBlocked: true}, denied: true, status: http.StatusConflict, code: "remote_management_denied"},
+		{name: "pin before pause delegation", projection: &nodeProjection{ManagementBlocked: true}, unpinned: true, status: http.StatusForbidden},
+		{name: "recovery before pause delegation", projection: &nodeProjection{ManagementBlocked: true}, recovery: true, status: http.StatusServiceUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := rmNewFixture(t, "uuid-self", "uuid-a")
+			f.writePermissions("1", map[string]bool{"uuid-a": !tc.denied})
+			ex := &Executor{progress: newProgressHub()}
+			if tc.projection != nil {
+				ex.nodeProjection.set(*tc.projection)
+			}
+			ex.switchRecoveryPending.Store(tc.recovery)
+			var mu sync.Mutex
+			calls := 0
+			ex.policyParent = func(_ context.Context, method string, params json.RawMessage, caller string) (json.RawMessage, error) {
+				mu.Lock()
+				calls++
+				mu.Unlock()
+				var body policyBody
+				if err := json.Unmarshal(params, &body); err != nil {
+					return nil, err
+				}
+				if caller != "uuid-a" || method != "set-availability" || body.State != "available" || body.NodeID != "" {
+					return nil, fmt.Errorf("incorrect relay: caller=%q method=%q body=%+v", caller, method, body)
+				}
+				if tc.brokerVeto {
+					return nil, &codedError{code: codeLocalVeto, message: nodePausedVeto}
+				}
+				return json.RawMessage(`{"availability":"available"}`), nil
+			}
+			server := rmTLSServer(t, f.mesh, (&controlServer{exec: ex, mesh: f.mesh}).mux())
+			client := f.client("uuid-a")
+			if tc.unpinned {
+				strangerDir := t.TempDir()
+				clustertrusttest.WriteKeypair(t, strangerDir, "uuid-stranger")
+				identity, err := clustertrust.LoadIdentity(strangerDir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				client = &http.Client{Transport: &http.Transport{
+					TLSClientConfig: clustertrust.ClientTLSConfig(identity.Cert, f.serverDER()),
+				}}
+			}
+			t.Cleanup(client.CloseIdleConnections)
+			status, _, data := rmRequest(t, client, server.URL, http.MethodPost, controlAvailabilitySetPath, `{"nodeId":"forged-local","state":"available"}`)
+			mu.Lock()
+			gotCalls := calls
+			mu.Unlock()
+			if status != tc.status || gotCalls != tc.calls {
+				t.Fatalf("availability status=%d calls=%d body=%s; want %d/%d", status, gotCalls, data, tc.status, tc.calls)
+			}
+			if tc.code != "" {
+				if code, _ := rmCodedBody(t, data); code != tc.code {
+					t.Fatalf("refusal code=%q, want %q", code, tc.code)
+				}
+			}
+			if status == http.StatusOK {
+				var result struct{ Availability string }
+				if err := json.Unmarshal(data, &result); err != nil {
+					t.Fatal(err)
+				}
+				if result.Availability != "available" {
+					t.Fatalf("broker reply=%+v", result)
+				}
+			}
+		})
+	}
+}
 
 // syncBuffer is a goroutine-safe writer for a Manager's codec output.
 type syncBuffer struct {

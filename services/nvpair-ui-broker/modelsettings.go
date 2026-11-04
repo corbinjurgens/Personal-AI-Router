@@ -119,7 +119,7 @@ func modelPolicyFingerprint(policy nodepolicy.Policy) string {
 	if json.Unmarshal(settingsJSON(policy), &fields) != nil {
 		return ""
 	}
-	dropFields(fields, "revision", "availability", "pausedBy")
+	dropFields(fields, "revision", "availability", "pausedBy", "pauseMode")
 	return modelSettingsHash(fields)
 }
 

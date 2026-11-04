@@ -25,8 +25,8 @@ func TestStopPauseContractRefusalsHaveNoEffects(t *testing.T) {
 		{name: "revoked permission precedes immediate", state: "paused", mode: `"immediate"`, peer: true, denied: true, code: -32012, message: remoteManagementDeniedMessage},
 		{name: "revoked permission precedes fence", state: "paused", mode: `"immediate"`, peer: true, denied: true, fenced: true, code: -32012, message: remoteManagementDeniedMessage},
 		{name: "fence precedes immediate", state: "paused", mode: `"immediate"`, peer: true, fenced: true, code: -32011, message: (&localVetoError{}).Error()},
-		{name: "initiator cannot repeat configured pause", state: "paused", mode: `"configured"`, peer: true, fenced: true, code: -32011},
-		{name: "initiator cannot resume", state: "available", peer: true, fenced: true, code: -32011},
+		{name: "draining unknown-mode pause cannot repeat", state: "paused", mode: `"configured"`, peer: true, fenced: true, code: -32011},
+		{name: "draining unknown-mode pause cannot resume", state: "available", peer: true, fenced: true, code: -32011},
 		{name: "permission precedes null mode", state: "paused", mode: `null`, peer: true, denied: true, code: -32012},
 		{name: "null mode", state: "paused", mode: `null`, code: -32602},
 		{name: "unknown mode", state: "paused", mode: `"fast"`, code: -32602},
@@ -254,6 +254,7 @@ func TestStopPauseContractConfiguredDrainPreservesPolicy(t *testing.T) {
 			after := rb.b.localPolicy().Policy
 			expected := before
 			expected.Revision, expected.Availability, expected.PausedBy = after.Revision, nodepolicy.Paused, nodepolicy.PausedLocally
+			expected.PauseMode = nodepolicy.PauseConfigured
 			if !reflect.DeepEqual(after, expected) {
 				t.Fatal("configured pause changed saved options or declarations")
 			}

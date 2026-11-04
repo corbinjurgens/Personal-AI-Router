@@ -40,6 +40,33 @@ func TestAvailabilityLabels(t *testing.T) {
 	}
 }
 
+func TestAvailabilityPauseModeObservations(t *testing.T) {
+	for _, mode := range []string{"configured", "immediate"} {
+		t.Run(mode, func(t *testing.T) {
+			a := availabilityState{selfID: "me"}
+			a.update(policyGetMsg{availability: availPaused, pausedBy: "local", pauseMode: mode})
+			if a.pauseMode != mode || a.pausedBy != "local" {
+				t.Fatalf("readback lost pause metadata: %+v", a)
+			}
+			a.update(setAvailabilityMsg{target: availAvailable, availability: availAvailable})
+			if a.pauseMode != "" || a.pausedBy != "" {
+				t.Fatalf("Resume retained pause metadata: %+v", a)
+			}
+			a.update(NotificationMsg{Msg: &rpc.Message{
+				Method: "node:availability-changed",
+				Params: []byte(`{"nodeId":"me","availability":"paused","pausedBy":"local","pauseMode":"` + mode + `"}`),
+			}})
+			if a.pauseMode != mode || a.pausedBy != "local" {
+				t.Fatalf("push lost pause metadata: %+v", a)
+			}
+			a.update(availNote("me", availAvailable))
+			if a.pauseMode != "" || a.pausedBy != "" {
+				t.Fatalf("available push retained pause metadata: %+v", a)
+			}
+		})
+	}
+}
+
 func TestAvailabilityNotificationsFilterByNode(t *testing.T) {
 	var a availabilityState
 	a.update(availNote("other", availPaused)) // identity unknown: accepted

@@ -528,6 +528,29 @@ func (s *syncBuffer) waitFrame(t *testing.T, what string, pred func(Message) boo
 	return Message{}
 }
 
+func TestRawPolicySetPreservesSavedPauseMode(t *testing.T) {
+	for _, key := range []string{"pauseMode", "PauseMode"} {
+		t.Run(key, func(t *testing.T) {
+			rb := newRoutedBroker(t)
+			if _, err := rb.b.setAvailabilityRequestAs(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally, "", json.RawMessage(`"immediate"`)); err != nil {
+				t.Fatalf("local Halt: %v", err)
+			}
+			stored := rb.b.localPolicy().Policy
+			draft := map[string]any{key: "configured", "idle": map[string]any{"unloadAfterMinutes": 13}}
+			_, err := rb.b.dispatchPolicy(context.Background(), methodPolicySet, policyParams{
+				Policy: mustJSON(draft), ExpectedPersistedRevision: mustJSON(stored.Revision),
+			})
+			if err != nil {
+				t.Fatalf("policy:set: %v", err)
+			}
+			got := freshBroker(t, rb.path).localPolicy().Policy
+			if got.PauseMode != nodepolicy.PauseImmediate || got.PausedBy != nodepolicy.PausedLocally || got.Availability != nodepolicy.Paused || got.Idle.UnloadAfterMinutes != 13 {
+				t.Fatalf("policy:set readback = %+v, want retained Halt and idle edit", got)
+			}
+		})
+	}
+}
+
 func newPolicyBroker(t *testing.T) (*Broker, *syncBuffer) {
 	t.Helper()
 	out := &syncBuffer{}
@@ -1979,7 +2002,7 @@ func TestRelayedSetAvailabilityShowsNoActivationFields(t *testing.T) {
 	if err := json.Unmarshal(result, &relayed); err != nil {
 		t.Fatalf("decode relayed set-availability %s: %v", result, err)
 	}
-	want := map[string]string{"availability": "paused", "pausedBy": "peer"}
+	want := map[string]string{"availability": "paused", "pausedBy": "peer", "pauseMode": "configured"}
 	if !reflect.DeepEqual(relayed, want) {
 		t.Fatalf("relayed set-availability = %v, want only %v", relayed, want)
 	}
@@ -2837,6 +2860,10 @@ func TestAvailabilityPublicationFailureLeavesOneWholeDocument(t *testing.T) {
 					want := before.Policy
 					want.Availability, want.Revision = to, attempted
 					want.PausedBy = pausedByFor(to, nodepolicy.PausedLocally)
+					want.PauseMode = ""
+					if to == nodepolicy.Paused {
+						want.PauseMode = nodepolicy.PauseConfigured
+					}
 					requireLandedAvailability(t, rb, want, callStart, frameStart)
 					var save *policySaveError
 					if !errors.As(err, &save) || save.revision != attempted {
@@ -3013,6 +3040,9 @@ func TestAvailabilityVersion1FirstSavePublicationFaultBoundaries(t *testing.T) {
 					want := nodepolicy.Default()
 					want.Availability, want.Revision = to, "5"
 					want.PausedBy = pausedByFor(to, nodepolicy.PausedLocally)
+					if to == nodepolicy.Paused {
+						want.PauseMode = nodepolicy.PauseConfigured
+					}
 					want.Idle.UnloadAfterMinutes = 4
 					requireLandedAvailability(t, rb, want, callStart, frameStart)
 					var stored nodepolicy.Policy
@@ -3052,7 +3082,7 @@ func TestAvailabilityRelayedLandedReplacementAdoptsPolicy(t *testing.T) {
 				rb.b.replayPolicyToProxy(context.Background(), rb.b.policyProxy())
 				waitBrokerLeaseAnnouncement(t, rb.b.nodePolicyRuntime())
 				if to == nodepolicy.Available {
-					// A peer-origin pause fences every peer, including its initiator.
+					// Configured Pause can be resumed by its managing peer.
 					if _, err := rb.b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedByPeer); err != nil {
 						t.Fatalf("prepare paused node: %v", err)
 					}
@@ -3061,26 +3091,12 @@ func TestAvailabilityRelayedLandedReplacementAdoptsPolicy(t *testing.T) {
 				want := rb.b.localPolicy().Policy
 				want.Availability, want.Revision = to, revision
 				want.PausedBy = pausedByFor(to, nodepolicy.PausedByPeer)
-				setReplacer(rb.b, boundary.rep)
-				var errText string
-				if to == nodepolicy.Available {
-					before, beforeBytes := rb.b.localPolicy(), rb.fileBytes(t)
-					reply := rb.relayReply(t, "set-availability", map[string]any{"state": to})
-					if reply.ErrorCode != codeLocalVeto || reply.Error != "This node is paused. Resume it on this node before managing it remotely." {
-						t.Fatalf("peer resume = %+v, want pause refusal before publication", reply)
-					}
-					if !reflect.DeepEqual(rb.b.localPolicy(), before) || !bytes.Equal(rb.fileBytes(t), beforeBytes) || len(rb.proxy.snapshot()) != callStart || len(rb.out.frames()) != frameStart {
-						t.Fatal("refused peer resume changed the policy, file, proxy or notifications")
-					}
-					// Only local Resume reaches the writer, so exercise the landed
-					// replacement warning through that authorized path.
-					_, err := rb.b.setAvailability(context.Background(), to, nodepolicy.PausedLocally)
-					if err != nil {
-						errText = err.Error()
-					}
-				} else {
-					_, errText = rb.relay(t, "set-availability", map[string]any{"state": to})
+				want.PauseMode = ""
+				if to == nodepolicy.Paused {
+					want.PauseMode = nodepolicy.PauseConfigured
 				}
+				setReplacer(rb.b, boundary.rep)
+				_, errText := rb.relay(t, "set-availability", map[string]any{"state": to})
 				setReplacer(rb.b, durablefile.Replacer{})
 				wantMessage := "the policy document with revision " + revision + " was saved and is being applied but may not survive a power loss: "
 				if !strings.HasPrefix(errText, wantMessage) || !strings.Contains(errText, errPublish.Error()) {
@@ -3120,6 +3136,10 @@ func TestAvailabilityLandedReplacementCompletesEngineActions(t *testing.T) {
 			want := rb.b.localPolicy().Policy
 			want.Availability, want.Revision = to, revision
 			want.PausedBy = pausedByFor(to, nodepolicy.PausedLocally)
+			want.PauseMode = ""
+			if to == nodepolicy.Paused {
+				want.PauseMode = nodepolicy.PauseConfigured
+			}
 			setReplacer(rb.b, durablefile.Replacer{SyncDir: func(string) error { return errPublish }})
 			got, err := rb.b.setAvailability(context.Background(), to, nodepolicy.PausedLocally)
 			setReplacer(rb.b, durablefile.Replacer{})
@@ -3193,6 +3213,9 @@ func TestAvailabilityDuringRecoveryPreservesFileUntilPolicyReplacementLands(t *t
 			want := nodepolicy.Default()
 			want.Availability = to
 			want.PausedBy = pausedByFor(to, nodepolicy.PausedLocally)
+			if to == nodepolicy.Paused {
+				want.PauseMode = nodepolicy.PauseConfigured
+			}
 			if current := rb.b.localPolicy(); !current.RecoveryRequired || !reflect.DeepEqual(current.Policy, want) {
 				t.Error("availability changed the recovery flag or the revision-zero recovery document")
 			}
@@ -3609,6 +3632,7 @@ func TestPolicyVersion1FirstSavePublicationFaultBoundaries(t *testing.T) {
 			}
 			want := nodepolicy.Default()
 			want.Availability = nodepolicy.Paused
+			want.PauseMode = nodepolicy.PauseImmediate
 			want.Idle.UnloadAfterMinutes = 7
 			want.Revision = "5"
 			setReplacer(rb.b, boundary.rep)
@@ -3661,6 +3685,7 @@ func TestPolicyRecoveryPublicationFaultBoundaries(t *testing.T) {
 			original := rb.fileBytes(t)
 			want := nodepolicy.Default()
 			want.Availability = nodepolicy.Paused
+			want.PauseMode = nodepolicy.PauseImmediate
 			want.Idle.UnloadAfterMinutes = 7
 			want.Revision = "5"
 			setReplacer(rb.b, boundary.rep)

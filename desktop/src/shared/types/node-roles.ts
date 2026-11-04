@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+import type { NodePauseMode } from '@/shared/types/node-policy'
+
 /** A routing tier a node can declare a role for (`nodepolicy.TierOrder`). */
 export type RoleTier = 'weak' | 'medium' | 'strong'
 
@@ -27,4 +29,5 @@ export interface NodePolicyAdvertisement {
     revision: string
     roles: NodeRoles
     pausedBy?: PauseOrigin
+    pauseMode?: NodePauseMode
 }

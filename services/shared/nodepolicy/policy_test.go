@@ -14,6 +14,29 @@ import (
 	"nvpair-shared/engines"
 )
 
+func TestSavedPauseModeValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		state   Availability
+		mode    PauseMode
+		invalid bool
+	}{
+		{name: "available without mode", state: Available},
+		{name: "configured pause", state: Paused, mode: PauseConfigured},
+		{name: "immediate pause", state: Paused, mode: PauseImmediate},
+		{name: "available with mode", state: Available, mode: PauseImmediate, invalid: true},
+		{name: "unknown mode", state: Paused, mode: "later", invalid: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := Default()
+			p.Availability, p.PauseMode = tc.state, tc.mode
+			if err := p.Validate(); (err != nil) != tc.invalid {
+				t.Fatalf("Validate() = %v, want invalid %t", err, tc.invalid)
+			}
+		})
+	}
+}
+
 func TestPauseModeRequestValidation(t *testing.T) {
 	for _, tc := range []struct {
 		name    string

@@ -64,6 +64,39 @@ describe('availabilityMenuItem', () => {
 })
 
 describe('NodeAvailabilityState', () => {
+    it('tracks mode-only changes and clears them on Resume and reset', () => {
+        const s = state()
+        const changed = vi.fn<() => void>()
+        s.onChange(changed)
+        s.applyResult({ availability: 'paused', pausedBy: 'local', pauseMode: 'configured' })
+        expect(s.pauseMode).toBe('configured')
+        changed.mockClear()
+        s.applyNotification({
+            nodeId: SELF,
+            availability: 'paused',
+            pausedBy: 'local',
+            pauseMode: 'immediate'
+        })
+        expect(s.pauseMode).toBe('immediate')
+        expect(changed).toHaveBeenCalledTimes(1)
+        s.applyResult({ availability: 'available' })
+        expect(s.pauseMode).toBeUndefined()
+        s.applyResult({ availability: 'paused', pauseMode: 'immediate' })
+        s.reset()
+        expect(s.pauseMode).toBeUndefined()
+    })
+
+    it('ignores observations with unknown pause mode', () => {
+        const s = state()
+        s.applyResult({ availability: 'paused', pauseMode: 'immediate' })
+        const observation = s.observation
+        s.applyResult({ availability: 'draining', pauseMode: 'later' })
+        s.applyNotification({ nodeId: SELF, availability: 'paused', pauseMode: 'later' })
+        expect(s.availability).toBe('paused')
+        expect(s.pauseMode).toBe('immediate')
+        expect(s.observation).toBe(observation)
+    })
+
     it('invalidates a read on equal self pushes and reset, while peer pushes leave its generation alone', () => {
         const s = state()
         s.applyResult({ availability: 'draining' })

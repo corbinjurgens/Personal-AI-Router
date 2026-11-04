@@ -190,7 +190,9 @@ func (s *controlServer) authorize(route controlRoute, h pinnedPeerHandler) pinne
 			http.Error(w, errNoProjection.Error(), http.StatusServiceUnavailable)
 			return
 		}
-		if blocked {
+		// Availability has its own authoritative Halt/configured-Pause gate
+		// at the broker. Keep pin, grant, hydration and recovery checks here.
+		if blocked && route.path != controlAvailabilitySetPath {
 			writeCodedError(w, codeLocalVeto, nodePausedVeto)
 			return
 		}

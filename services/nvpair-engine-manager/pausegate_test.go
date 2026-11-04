@@ -59,6 +59,9 @@ func TestPauseGateCoversEveryRegisteredMutationAndAllowsEveryRead(t *testing.T) 
 					want := http.StatusOK
 					if class == controlMutation {
 						want = scenario.status
+						if route.path == controlAvailabilitySetPath && scenario.projection != nil && scenario.allowed {
+							want = http.StatusOK
+						}
 					}
 					if rec.Code != want {
 						t.Fatalf("gate = %d %s, want %d", rec.Code, rec.Body.String(), want)
@@ -71,7 +74,7 @@ func TestPauseGateCoversEveryRegisteredMutationAndAllowsEveryRead(t *testing.T) 
 					if calls != wantCalls {
 						t.Fatalf("handler calls = %d, want %d", calls, wantCalls)
 					}
-					if class == controlMutation && scenario.code != "" {
+					if class == controlMutation && scenario.code != "" && want != http.StatusOK {
 						var body codedBody
 						if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 							t.Fatal(err)

@@ -11,6 +11,26 @@ import (
 	"testing"
 )
 
+func TestPauseModeAdvertisementRoundTrip(t *testing.T) {
+	for _, mode := range []PauseMode{PauseConfigured, PauseImmediate} {
+		t.Run(string(mode), func(t *testing.T) {
+			p := Default()
+			p.Availability, p.PausedBy, p.PauseMode = Paused, PausedLocally, mode
+			raw, err := json.Marshal(p.Advertisement())
+			if err != nil {
+				t.Fatalf("marshal advertisement: %v", err)
+			}
+			var got Advertisement
+			if err := json.Unmarshal(raw, &got); err != nil {
+				t.Fatalf("decode advertisement: %v", err)
+			}
+			if got.PausedBy != PausedLocally || got.PauseMode != mode {
+				t.Fatalf("advertisement = %+v, want local/%s", got, mode)
+			}
+		})
+	}
+}
+
 func TestServedResidentAdvertisementRoundTrip(t *testing.T) {
 	for _, name := range []string{"absent", "empty", "subset"} {
 		t.Run(name, func(t *testing.T) {
