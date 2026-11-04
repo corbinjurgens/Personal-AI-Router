@@ -428,8 +428,9 @@ func (e *Executor) StopFrom(engine string, origin intentOrigin) error {
 	return e.stopFrom(engine, origin, "")
 }
 
-// StopForSwitch applies a broker-admitted local Off only while its remote
-// switch reservation still exists. A stale request is a complete no-op.
+// StopForSwitch applies a broker-admitted local Off to its remote reservation,
+// or as ordinary Off after a rejected prepare if no newer engine work exists.
+// A superseded request is a complete no-op.
 func (e *Executor) StopForSwitch(engine, operationID string) error {
 	return e.stopFrom(engine, intentLocal, operationID)
 }

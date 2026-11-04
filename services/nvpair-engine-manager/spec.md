@@ -480,7 +480,22 @@ Off to its remote reservation. Stop admission checks the operation ID, origin,
 engine membership and unreleased phase atomically under the admission lock.
 If that scope has settled or changed, the entire request succeeds as a no-op,
 with no cancellation, physical stop or intent write against later work. An
-unscoped stop retains ordinary local Off semantics.
+exception is a prepare rejected before reservation: a matching scoped stop
+falls back to ordinary local Off only while its per-engine rejection admission
+remains eligible. Every later admitted mutation (including reasserted On) or
+prepare involving that engine invalidates eligibility under the admission lock.
+The bounded eligibility map is process-local, not reconstructed from the intent
+boolean or Off provenance; those cannot distinguish a later same-value On.
+A replacement manager ignores stale scopes without such admission evidence.
+An unscoped stop retains ordinary local Off semantics.
+Reconciliation carrying that eligible rejected operation's engine veto creates
+a durable reserved cleanup checkpoint before persisting Off or stopping. A
+remote prepare that already reserved keeps its provisional checkpoint on
+rejection until final reconciliation/release. For every unreleased remote
+checkpoint, reconciliation physically stops and verifies engines saved locally
+Off, including a running source in the reserved phase after failed drain. This
+does not advance a forward switch step. Cleanup failure retains the checkpoint;
+release refuses local Off without checkpoint termination evidence.
 The existing projection
 path cancels remote work on local pause. Local switching is allowed under these
 remote-only vetoes.

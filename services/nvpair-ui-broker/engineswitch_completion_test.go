@@ -301,6 +301,69 @@ func TestSwitchLatchedOffCleanupPrecedesLocalStopAdmission(t *testing.T) {
 	}
 }
 
+func TestSwitchDrainFailureReconcilesReservedSourceOffBeforeDelayedStop(t *testing.T) {
+	h := newSwitchHarness(t)
+	clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")
+	p := h.request(t, "reserved-source-off")
+	reached, resume := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	open := func() { once.Do(func() { close(resume) }) }
+	t.Cleanup(open)
+	proxyAnswer := h.proxy.answer
+	h.proxy.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+		if method == nodepolicy.MethodAdmissionSnapshot {
+			close(reached)
+			<-resume
+			return nil, "drain admission evidence rejected"
+		}
+		return proxyAnswer(method, raw)
+	})
+	engineAnswer := h.engine.answer
+	h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+		if method == settings.SwitchReconcileMethod {
+			var cleanup settings.SwitchReconcileRequest
+			if err := json.Unmarshal(raw, &cleanup); err != nil {
+				return nil, err.Error()
+			}
+			if cleanup.OperationID != p.RequestID || cleanup.LocalVeto == nil || cleanup.LocalVeto.Engine != "llamacpp" {
+				t.Errorf("reserved cleanup lost admitted Off: %+v", cleanup)
+			}
+			h.mu.Lock()
+			if h.cp == nil || h.cp.Phase != settings.SwitchCheckpointReserved || h.cp.Source.Running == nil || !*h.cp.Source.Running {
+				t.Errorf("cleanup must begin with running reserved source: %+v", h.cp)
+			} else {
+				// The manager's physical-stop contract is exercised separately
+				// by TestSwitchReservedSourceVetoStopsBeforeDelayedScopedStop.
+				h.cp.Source = switchTestState(false, false, settings.SwitchIntentOff)
+			}
+			h.mu.Unlock()
+		}
+		return engineAnswer(method, raw)
+	})
+	if _, err := h.b.acceptEngineSwitch(context.Background(), p, "peer"); err != nil {
+		t.Fatal(err)
+	}
+	requireGateOpens(t, reached, "drain before source-stop")
+	remote, reserved, operationID := h.b.admitLocalEngineOff("llamacpp")
+	if !remote || !reserved || operationID != p.RequestID {
+		t.Fatalf("source Off admission = %v, %v, %q", remote, reserved, operationID)
+	}
+	open()
+	r := h.receipt(t, p.RequestID)
+	if r.Phase != settings.SwitchFailedDrain || r.RecoveryRequired || !r.Source.TerminationVerified || r.Source.Intent != settings.SwitchIntentOff {
+		t.Fatalf("drain failure source Off terminal = %+v", r)
+	}
+	for _, step := range switchSteps(t, h.engine) {
+		if step != settings.SwitchStepRelease {
+			t.Fatalf("failed drain advanced forward step: %s", step)
+		}
+	}
+	w := h.b.getEngineMgr()
+	if _, rpcErr, err := w.CallNoTimeout(context.Background(), "engine:stop", settingsJSON(map[string]string{"engine": "llamacpp", "switchOperationId": operationID})); err != nil || rpcErr != nil {
+		t.Fatalf("held stop after terminal/release: %v, %+v", err, rpcErr)
+	}
+}
+
 func TestSwitchVetoDuringReconcileRepeatsCleanupBeforeTerminal(t *testing.T) {
 	h := newSwitchHarness(t)
 	clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")

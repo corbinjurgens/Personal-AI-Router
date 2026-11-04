@@ -570,10 +570,22 @@ The veto takes neither the switch lock nor the engine operation lock, including
 for a remote reservation retained for recovery. Local Off of a reserved engine
 during a local switch remains a busy refusal.
 The parent may scope `engine:stop` with internal `switchOperationId` for an Off
-admitted during a remote reservation. Under the same admission lock, a missing,
-released or different reservation makes the entire scoped stop a no-op. It
-neither vetoes a newer switch nor stops or rewrites a later explicit local On.
-Unscoped local stops retain ordinary lifecycle semantics.
+admitted during a remote reservation. Under the same admission lock, a settled
+or different reservation makes the scoped stop a no-op against newer work.
+If prepare rejected before reserving, the manager remembers Off eligibility
+per engine until any newer mutation or prepare involving it is admitted. Only
+that matching rejected operation may fall back to ordinary local Off. Boolean
+intent and Off provenance alone cannot detect a later reassertion of On;
+admission invalidation does, even when the saved value is unchanged. This
+eligibility is process-local; replacement managers conservatively ignore stale
+scoped requests. Unscoped local stops retain ordinary lifecycle semantics.
+Reconcile of a rejected prepare with a still-eligible latched engine Off first
+creates a durable cleanup reservation. A provisional remote prepare refusal
+also retains its reservation until final reconcile/release. Reconcile physically
+stops and verifies locally vetoed engines even at the reserved/pre-source-stop
+phase: this is the user's Off, independent of failed switch drain. Failed or
+unverified termination retains the reservation, and release refuses an
+unverified local Off. Source is never restarted.
 While a remote reservation remains unreleased, local Off of either engine or
 local pause also vetoes an already-committed target. Reconciliation records
 target Off and pending cleanup before stopping it; source is never restored.
