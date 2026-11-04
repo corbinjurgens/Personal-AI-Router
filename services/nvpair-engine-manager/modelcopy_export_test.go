@@ -495,8 +495,22 @@ func TestModelCopyCustomAliasSecurity(t *testing.T) {
 		})
 	}
 	refusePreset("missing shard", "["+reportedCopyAlias+"]\nmodel = absent-00001-of-00002.gguf\n")
-	refusePreset("projector is explicitly unsupported", "["+reportedCopyAlias+"]\nmodel = huggingface/hub/model.gguf\nmmproj = secret.gguf\n")
-	refusePreset("include is explicitly unsupported", "["+reportedCopyAlias+"]\nmodel = huggingface/hub/model.gguf\ninclude = secrets.ini\n")
+	for _, tc := range []struct{ name, option string }{
+		{"projector is excluded from artifact lookup", "mmproj = secret.gguf"},
+		{"include is excluded from artifact lookup", "include = secrets.ini"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newCustomCopyFixture(t)
+			writeTestFile(t, f.preset, []byte("["+reportedCopyAlias+"]\nmodel = huggingface/hub/model.gguf\n"+tc.option+"\n"))
+			list, err := f.source.modelSourceFiles(context.Background(), "llamacpp", reportedCopyAlias)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(list.Files) != 1 || list.Files[0].Role != "model" || list.Files[0].configured != f.artifact {
+				t.Fatalf("selected artifacts = %+v", list.Files)
+			}
+		})
+	}
 	refusePreset("source URL is explicitly unsupported", "["+reportedCopyAlias+"]\nmodel-url = https://example.invalid/model.gguf\n")
 	refusePreset("duplicate alias sections are ambiguous", "["+reportedCopyAlias+"]\nmodel = first.gguf\n["+reportedCopyAlias+"]\nmodel = second.gguf\n")
 	refusePreset("oversize split rejected before allocation", "["+reportedCopyAlias+"]\nmodel = missing-00001-of-99999.gguf\n")

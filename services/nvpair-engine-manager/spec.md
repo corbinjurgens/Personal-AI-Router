@@ -739,11 +739,12 @@ are rejected after absolute resolution, with a model field error and no path.
 Actual loaded training-context caps and props
 are separate runtime evidence, not inferred from cold configuration.
 
-The same parser is used by custom-alias copy export. Presets containing these
-supported expert-cache, lazy-loading or built-in MTP controls no longer fail
-export solely because of those controls. The selected artifacts still require
-their existing checked bindings; the controls grant no copy permission and add
-no separate draft artifact.
+Artifact lookup for custom-alias copy export and inspection reads only
+`models-preset`, `model`, `model-draft`, `ctx-size` and `parallel`. Other preset
+options are ignored, and structural refusals apply to the affected section
+(including defaults inherited from `[*]`). Serving compilation keeps the strict
+parser. Selected artifacts still require their existing checked bindings;
+native controls grant no copy permission and add no separate draft artifact.
 
 Preview performs no probe, spawn, load, persistence or snapshot creation. It
 reads bounded source/configuration data and model samples only, returning a

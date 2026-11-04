@@ -539,11 +539,14 @@ func (e *Executor) inspectModelArtifacts(ctx context.Context, p modelconfig.Insp
 	}
 	list, _, err := resolveLlamaArtifacts(ctx, snapshot.state, snapshot.command, snapshot.store, p.ModelID, access)
 	if err != nil {
+		var field *ServingFieldError
 		switch {
 		case errors.Is(err, errModelArtifactLimit):
 			return unavailable("unknown", "Artifact discovery exceeded its bounded scan or artifact limit.")
 		case errors.Is(err, errNoArtifactBinding):
 			return unavailable("ambiguous", "No unique safe exact artifact binding is available.")
+		case errors.As(err, &field):
+			return unavailable("missing", "Configured artifacts cannot be resolved: "+field.Reason)
 		default:
 			return unavailable("missing", "Configured artifacts are missing, unsupported, partial or changed.")
 		}

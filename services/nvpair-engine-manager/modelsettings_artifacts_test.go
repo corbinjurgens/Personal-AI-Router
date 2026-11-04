@@ -153,6 +153,15 @@ func inspectionNativeMembership(t *testing.T, f inspectionFixture) *int {
 	return copyTestNativeModels(t, f.ex, f.request.Engine, f.request.ModelID)
 }
 
+func TestInspectModelReportsResolverReason(t *testing.T) {
+	f := newInspectionFixture(t, 2<<20)
+	writeTestFile(t, f.preset, []byte("[exact-alias]\nn-cpu-moe = 21\n"))
+	result := inspectFixture(t, f)
+	if result.Status != "missing" || !strings.Contains(result.Reason, "Every model preset requires an existing local model path.") {
+		t.Fatalf("inspection = %+v", result)
+	}
+}
+
 func TestModelSettingsArtifactsExactAliasOffAndNoApproval(t *testing.T) {
 	f := newInspectionFixture(t, 2<<20)
 	// Inspection must not compile the other declaration or require its files,
