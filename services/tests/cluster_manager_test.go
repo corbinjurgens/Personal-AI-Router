@@ -5,6 +5,7 @@ package tests
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -19,12 +20,13 @@ import (
 
 // cmProc is a running nvpair-cluster-manager subprocess driven over stdio.
 type cmProc struct {
-	t      *testing.T
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	msgs   <-chan jsonrpc.Message
-	buf    []jsonrpc.Message
-	nextID int
+	t        *testing.T
+	cmd      *exec.Cmd
+	stdin    io.WriteCloser
+	msgs     <-chan jsonrpc.Message
+	buf      []jsonrpc.Message
+	nextID   int
+	stopOnce sync.Once
 }
 
 func startCM(t *testing.T, configDir string, port int) *cmProc {
@@ -69,14 +71,29 @@ func startCMBinaryEnv(t *testing.T, binary, configDir string, port int, extraEnv
 }
 
 func (p *cmProc) stop() {
-	_ = p.stdin.Close()
-	done := make(chan struct{})
-	go func() { _ = p.cmd.Wait(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
-		_ = p.cmd.Process.Kill()
-	}
+	p.t.Helper()
+	p.stopOnce.Do(func() {
+		_ = p.stdin.Close()
+		done := make(chan error, 1)
+		go func() { done <- p.cmd.Wait() }()
+		var waitErr error
+		killed := false
+		select {
+		case waitErr = <-done:
+		case <-time.After(3 * time.Second):
+			err := p.cmd.Process.Kill()
+			if err != nil && !errors.Is(err, os.ErrProcessDone) {
+				p.t.Errorf("kill cluster-manager: %v", err)
+			}
+			killed = err == nil
+			waitErr = <-done
+		}
+		if waitErr != nil {
+			if _, exited := waitErr.(*exec.ExitError); !killed || !exited {
+				p.t.Errorf("wait for cluster-manager: %v", waitErr)
+			}
+		}
+	})
 }
 
 func (p *cmProc) pump(want func(jsonrpc.Message) bool, timeout time.Duration) jsonrpc.Message {
