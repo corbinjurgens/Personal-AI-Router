@@ -16,11 +16,21 @@ durable veto path during remote reservations without waiting for the transaction
 lock. Forward steps are pinned to the preparing manager incarnation; replacement
 interrupts the operation and gates the new manager until reconciliation finishes.
 Off/pause admission and terminal completion share a gate, so an admitted veto
-cannot produce a successful receipt while a stop response is pending. Worker
-exit is fenced before supervisor notification, with already-closed worker
+cannot produce a successful receipt while a stop response is pending. Broker
+cleanup carries the operation-specific Off/pause veto to the manager before
+reconciling a committed target. A veto admitted during cleanup requires another
+reconcile or retained recovery ownership; checkpoint release refuses an
+uncleaned committed target with a durable veto. A delayed Off response cancels
+only its original operation. Worker exit is fenced before supervisor
+notification, with already-closed worker
 channels checked again at completion. Transient conservative recovery failures
 retry with bounded backoff on the same replacement; exhausted recovery remains
 hidden and reports a sticky error. Journal/storage uncertainty stays blocked.
+Each of the three recovery attempts has a 60-second cleanup budget, plus
+one-/two-second backoffs: RPC budgets can occupy the synchronous spawn path for
+about 183 seconds. Entry lock waits precede those budgets, so this is not an
+unconditional end-to-end bound. A simultaneous drain-release failure cannot
+downgrade a permanent storage failure.
 
 A Go service that exposes the NVIDIA Personal AI Router API to **UI processes**
 and other clients (CLIs, dashboards, mobile companions, scripts, tests, etc.).

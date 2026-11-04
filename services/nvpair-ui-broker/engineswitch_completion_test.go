@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"nvpair-shared/clustertrusttest"
@@ -225,12 +226,135 @@ func TestSwitchOffAdmissionRechecksAfterNegativeReservationLookup(t *testing.T) 
 func TestSwitchOffNegativeLookupAndOperationAdmissionAreOrdered(t *testing.T) {
 	h := newSwitchHarness(t)
 	p := h.request(t, "off-ordered")
-	remote, reserved := h.b.admitLocalEngineOff("lmstudio")
+	remote, reserved, _ := h.b.admitLocalEngineOff("lmstudio")
 	defer h.b.settingsApplyMu.Unlock()
 	if remote || reserved {
 		t.Fatalf("unexpected Off reservation: remote %v, reserved %v", remote, reserved)
 	}
 	if _, err := h.b.acceptEngineSwitch(context.Background(), p, ""); err == nil || switchErrorDetail(err, "").Kind != settings.SwitchErrorBusy {
 		t.Fatalf("switch passed Off's operation admission: %v", err)
+	}
+}
+
+func TestSwitchLatchedOffCleanupPrecedesLocalStopAdmission(t *testing.T) {
+	for _, engine := range []string{"llamacpp", "lmstudio"} {
+		t.Run(engine, func(t *testing.T) {
+			h := newSwitchHarness(t)
+			clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")
+			p := h.request(t, "latched-off")
+			reached, release := holdSwitchCompletion(t, h)
+			base := h.engine.answer
+			h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+				if method == settings.SwitchReconcileMethod {
+					var cleanup settings.SwitchReconcileRequest
+					if err := json.Unmarshal(raw, &cleanup); err != nil {
+						return nil, err.Error()
+					}
+					if cleanup.OperationID != p.RequestID || cleanup.LocalVeto == nil || cleanup.LocalVeto.Engine != engine || cleanup.LocalVeto.Pause {
+						t.Errorf("cleanup did not carry the admitted operation/Off: %+v", cleanup)
+					}
+				}
+				return base(method, raw)
+			})
+			if _, err := h.b.acceptEngineSwitch(context.Background(), p, "peer"); err != nil {
+				t.Fatal(err)
+			}
+			requireGateOpens(t, reached, "post-publication barrier")
+			// Pause the local handler at its actual admission boundary, before
+			// dispatching any engine:stop to the manager.
+			remote, reserved, operationID := h.b.admitLocalEngineOff(engine)
+			if !remote || !reserved || operationID != p.RequestID {
+				t.Fatalf("Off admission = %v, %v, %q", remote, reserved, operationID)
+			}
+			release()
+			r := h.receipt(t, p.RequestID)
+			if r.Phase != settings.SwitchFailedPublication || r.Error == nil || r.Error.Kind != settings.SwitchErrorRemoteVeto || r.RecoveryRequired || !r.Target.TerminationVerified || r.Target.Intent != settings.SwitchIntentOff || r.Source.Intent != settings.SwitchIntentOff {
+				t.Fatalf("latched-veto terminal = %+v", r)
+			}
+			if stops := h.engine.methods("engine:stop"); len(stops) != 0 {
+				t.Fatalf("cleanup depended on local stop delivery: %v", stops)
+			}
+			h.mu.Lock()
+			cp := *h.cp
+			h.mu.Unlock()
+			if cp.Phase != settings.SwitchCheckpointReleased || cp.Target.Intent != settings.SwitchIntentOff || !cp.Target.TerminationVerified {
+				t.Fatalf("manager released without verified target Off: %+v", cp)
+			}
+			// Deliver the held lifecycle request only after terminal cleanup and
+			// release. It is now an ordinary stop of the originally selected engine.
+			w := h.b.getEngineMgr()
+			if _, rpcErr, err := w.CallNoTimeout(context.Background(), "engine:stop", settingsJSON(map[string]string{"engine": engine})); err != nil || rpcErr != nil {
+				t.Fatalf("late ordinary stop: %v, %+v", err, rpcErr)
+			}
+			h.b.cancelRemoteEngineSwitchOperation(engine, operationID)
+		})
+	}
+}
+
+func TestSwitchVetoDuringReconcileRepeatsCleanupBeforeTerminal(t *testing.T) {
+	h := newSwitchHarness(t)
+	clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")
+	h.publicationFailure = true
+	p := h.request(t, "veto-during-cleanup")
+	read, resume := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	open := func() { once.Do(func() { close(resume) }) }
+	t.Cleanup(open)
+	base := h.engine.answer
+	var reconciles atomic.Int32
+	h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+		result, errText := base(method, raw)
+		if method == settings.SwitchReconcileMethod && reconciles.Add(1) == 1 {
+			close(read)
+			<-resume
+		}
+		return result, errText
+	})
+	if _, err := h.b.acceptEngineSwitch(context.Background(), p, "peer"); err != nil {
+		t.Fatal(err)
+	}
+	requireGateOpens(t, read, "reconcile read before veto")
+	if remote, reserved, _ := h.b.admitLocalEngineOff("llamacpp"); !remote || !reserved {
+		t.Fatalf("Off admission: remote %v, reserved %v", remote, reserved)
+	}
+	open()
+	r := h.receipt(t, p.RequestID)
+	if r.Phase != settings.SwitchFailedPublication || r.RecoveryRequired || r.Target.Intent != settings.SwitchIntentOff || !r.Target.TerminationVerified || reconciles.Load() != 2 {
+		t.Fatalf("late-latch terminal = %+v; reconcile calls = %d", r, reconciles.Load())
+	}
+}
+
+func TestSwitchLatchedPauseReconcileCleansCommittedTarget(t *testing.T) {
+	h := newSwitchHarness(t)
+	clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")
+	p := h.request(t, "latched-pause")
+	reached, release := holdSwitchCompletion(t, h)
+	if _, err := h.b.acceptEngineSwitch(context.Background(), p, "peer"); err != nil {
+		t.Fatal(err)
+	}
+	requireGateOpens(t, reached, "post-publication barrier")
+	// Pause's latch precedes projection delivery in the real availability path.
+	h.b.vetoRemoteEngineSwitch("", false)
+	release()
+	r := h.receipt(t, p.RequestID)
+	if r.Phase != settings.SwitchFailedPublication || r.RecoveryRequired || r.Target.Intent != settings.SwitchIntentOff || !r.Target.TerminationVerified {
+		t.Fatalf("latched pause terminal = %+v", r)
+	}
+}
+
+func TestSwitchLateOffResponseDoesNotCancelLaterOperation(t *testing.T) {
+	h := newSwitchHarness(t)
+	c := h.b.switchCoordinator()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c.activeID = "later-switch"
+	c.remoteCancel, c.remoteSource, c.remoteTarget = cancel, "llamacpp", "lmstudio"
+	h.b.cancelRemoteEngineSwitchOperation("lmstudio", "released-switch")
+	if ctx.Err() != nil || c.localVeto != nil {
+		t.Fatal("late Off response vetoed a later switch")
+	}
+	h.b.cancelRemoteEngineSwitchOperation("lmstudio", "later-switch")
+	if ctx.Err() == nil {
+		t.Fatal("matching Off response did not cancel its operation")
 	}
 }

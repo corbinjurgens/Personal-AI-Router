@@ -4,11 +4,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
 
+	"nvpair-shared/clustertrusttest"
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/nodepolicy"
 )
@@ -179,4 +182,140 @@ func TestSwitchRecoveryRetryDoesNotFollowReplacedManager(t *testing.T) {
 	if inspections.Load() != 1 || len(replacement.snapshot()) != 0 || h.b.getEngineMgr() != nil {
 		t.Fatalf("old inspections = %d, replacement calls = %v, published = %p", inspections.Load(), replacement.snapshot(), h.b.getEngineMgr())
 	}
+}
+
+func TestSwitchRecoveryStorageFailureSurvivesDrainReleaseFailure(t *testing.T) {
+	h := newSwitchHarness(t)
+	h.publicationFailure = true
+	p := h.request(t, "storage-and-drain")
+	baseEngine := h.engine.answer
+	h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+		if method == settings.SwitchReconcileMethod {
+			return settings.SwitchReconcileResult{Error: &settings.SwitchError{Code: settings.SwitchOperationErrorCode, Kind: settings.SwitchErrorStorage, Message: "checkpoint durability uncertain"}}, ""
+		}
+		return baseEngine(method, raw)
+	})
+	baseProxy := h.proxy.answer
+	var drainReleases atomic.Int32
+	h.proxy.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+		if method == nodepolicy.MethodSetEngineDrain {
+			var p nodepolicy.SetEngineDrainParams
+			if err := json.Unmarshal(raw, &p); err != nil {
+				return nil, err.Error()
+			}
+			if !p.Drain {
+				drainReleases.Add(1)
+				return nil, "proxy temporarily unavailable"
+			}
+		}
+		return baseProxy(method, raw)
+	})
+	if _, err := h.b.acceptEngineSwitch(context.Background(), p, ""); err != nil {
+		t.Fatal(err)
+	}
+	r := h.receipt(t, p.RequestID)
+	if !r.RecoveryRequired || !switchRecoveryPermanent(h.b.engineSwitch.err) || drainReleases.Load() != 1 {
+		t.Fatalf("lost storage fence: receipt %+v, error %v, drain failures %d", r, h.b.engineSwitch.err, drainReleases.Load())
+	}
+	// Even after the proxy/manager would answer successfully, the observed
+	// storage uncertainty must prevent any later recovery RPC or publication.
+	h.engine.setAnswer(baseEngine)
+	h.proxy.setAnswer(baseProxy)
+	before := len(h.engine.snapshot())
+	w := hideSwitchRecoveryManager(t, h.b)
+	if h.b.recoverReplacementEngineMgr(w) || len(h.engine.snapshot()) != before || h.b.getEngineMgr() != nil {
+		t.Fatal("later recovery retried past permanent storage uncertainty")
+	}
+}
+
+func TestSwitchRecoveryClassifiesEveryJoinedError(t *testing.T) {
+	storage := switchError(settings.SwitchErrorStorage, "checkpoint storage failure")
+	transient := switchError(settings.SwitchErrorDrain, "proxy drain failure")
+	for _, scenario := range []struct {
+		name string
+		err  error
+	}{
+		{"storage first", errors.Join(storage, transient)},
+		{"storage after another RPC error", errors.Join(transient, storage)},
+		{"wrapped nested storage", fmt.Errorf("cleanup: %w", errors.Join(transient, errors.Join(errors.New("transport"), storage)))},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			if !switchRecoveryPermanent(scenario.err) {
+				t.Fatalf("storage uncertainty classified retryable: %v", scenario.err)
+			}
+		})
+	}
+	if switchRecoveryPermanent(errors.Join(transient, errors.New("transport"))) {
+		t.Fatal("operational errors classified permanent")
+	}
+}
+
+func TestSwitchRecoveryRetainsVetoUntilManagerAdmission(t *testing.T) {
+	test := func(name string, forgetLatch bool) {
+		t.Run(name, func(t *testing.T) {
+			h := newSwitchHarness(t)
+			clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")
+			p := h.request(t, "retry-latched-veto")
+			reached, release := holdSwitchCompletion(t, h)
+			base := h.engine.answer
+			var reconciles atomic.Int32
+			h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+				if method == settings.SwitchReconcileMethod {
+					if reconciles.Add(1) == 1 {
+						return nil, "veto delivery temporarily unavailable"
+					}
+					var cleanup settings.SwitchReconcileRequest
+					if err := json.Unmarshal(raw, &cleanup); err != nil {
+						return nil, err.Error()
+					}
+					want := settings.SwitchLocalVeto{Engine: "llamacpp"}
+					if forgetLatch {
+						want = settings.SwitchLocalVeto{Pause: true}
+					}
+					if cleanup.OperationID != p.RequestID || cleanup.LocalVeto == nil || *cleanup.LocalVeto != want {
+						t.Errorf("recovery lost operation veto: %+v", cleanup)
+					}
+				}
+				return base(method, raw)
+			})
+			if _, err := h.b.acceptEngineSwitch(context.Background(), p, "peer"); err != nil {
+				t.Fatal(err)
+			}
+			requireGateOpens(t, reached, "post-publication barrier")
+			if remote, reserved, _ := h.b.admitLocalEngineOff("llamacpp"); !remote || !reserved {
+				t.Fatalf("Off admission: remote %v, reserved %v", remote, reserved)
+			}
+			release()
+			r := h.receipt(t, p.RequestID)
+			if !r.RecoveryRequired || r.Error == nil || r.Error.Kind != settings.SwitchErrorRemoteVeto {
+				t.Fatalf("unacknowledged veto receipt = %+v", r)
+			}
+			h.mu.Lock()
+			committed := h.cp.TargetCommitted && h.cp.Phase != settings.SwitchCheckpointReleased
+			h.mu.Unlock()
+			if !committed {
+				t.Fatal("failed delivery did not retain committed target reservation")
+			}
+			if forgetLatch {
+				// Model loss of the in-memory latch on broker restart. Recovery
+				// must still honor the durable veto failure receipt.
+				h.b.workersMu.Lock()
+				h.b.engineSwitch.localVeto = nil
+				h.b.engineSwitch.vetoID = ""
+				h.b.workersMu.Unlock()
+			}
+			w := hideSwitchRecoveryManager(t, h.b)
+			if !h.b.recoverReplacementEngineMgr(w) {
+				t.Fatal("veto recovery failed")
+			}
+			h.mu.Lock()
+			cp := *h.cp
+			h.mu.Unlock()
+			if reconciles.Load() != 2 || cp.Phase != settings.SwitchCheckpointReleased || cp.Target.Intent != settings.SwitchIntentOff || !cp.Target.TerminationVerified || cp.Source.Intent != settings.SwitchIntentOff {
+				t.Fatalf("recovered veto checkpoint = %+v; reconcile calls = %d", cp, reconciles.Load())
+			}
+		})
+	}
+	test("same broker retains exact veto", false)
+	test("durable receipt retains veto after latch loss", true)
 }

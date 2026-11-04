@@ -5,7 +5,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -17,10 +16,21 @@ import (
 const engineSwitchRecoveryBlockedID = "engine-switch:recovery-blocked"
 
 func switchRecoveryPermanent(err error) bool {
-	var journal *engineSwitchRecoveryError
-	var store *engineSwitchStoreError
-	var rpc *switchRPCError
-	return errors.As(err, &journal) || errors.As(err, &store) || (errors.As(err, &rpc) && rpc.detail.Kind == settings.SwitchErrorStorage)
+	switch e := err.(type) {
+	case *engineSwitchRecoveryError, *engineSwitchStoreError:
+		return true
+	case *switchRPCError:
+		return e.detail.Kind == settings.SwitchErrorStorage
+	case interface{ Unwrap() []error }:
+		for _, cause := range e.Unwrap() {
+			if switchRecoveryPermanent(cause) {
+				return true
+			}
+		}
+	case interface{ Unwrap() error }:
+		return switchRecoveryPermanent(e.Unwrap())
+	}
+	return false
 }
 
 // Recovery always precedes settings replay and enabled-intent restoration.
@@ -106,9 +116,23 @@ func (b *Broker) recoverEngineSwitchOn(w *rpcWorker) bool {
 	}
 	// Do not hold engineConfigMu across a potentially long stop/cleanup.
 	if cp != nil && cp.Phase != settings.SwitchCheckpointReleased {
+		b.workersMu.Lock()
+		var veto *settings.SwitchLocalVeto
+		if c.vetoID == cp.OperationID {
+			veto = c.localVeto
+		}
+		b.workersMu.Unlock()
+		// After a broker restart the failure receipt still records that this
+		// operation was vetoed. A cleanup-only pause veto preserves that outcome;
+		// it does not change node availability or infer a local Off provenance.
+		if veto == nil && cp.Origin == settings.SwitchOriginRemote {
+			if r, ok := c.store.Lookup(cp.OperationID); ok && r.Error != nil && r.Error.Kind == settings.SwitchErrorRemoteVeto {
+				veto = &settings.SwitchLocalVeto{Pause: true}
+			}
+		}
 		b.engineConfigMu.Unlock()
 		var result settings.SwitchReconcileResult
-		err := switchManagerCallOn(ctx, w, settings.SwitchReconcileMethod, settings.SwitchReconcileRequest{SwitchPrepareRequest: cp.SwitchPrepareRequest}, &result)
+		err := switchManagerCallOn(ctx, w, settings.SwitchReconcileMethod, settings.SwitchReconcileRequest{SwitchPrepareRequest: cp.SwitchPrepareRequest, LocalVeto: veto}, &result)
 		if err == nil && result.Error != nil && !switchCleanupSettled(result) {
 			err = &switchRPCError{*result.Error}
 		}

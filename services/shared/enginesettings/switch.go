@@ -201,6 +201,14 @@ type SwitchStepRequest struct {
 
 type SwitchReconcileRequest struct {
 	SwitchPrepareRequest
+	LocalVeto *SwitchLocalVeto `json:"localVeto,omitempty"`
+}
+
+// SwitchLocalVeto delivers a broker-latched local decision for this operation.
+// Pause applies to the node; otherwise Engine identifies the local Off.
+type SwitchLocalVeto struct {
+	Engine string `json:"engine"`
+	Pause  bool   `json:"pause"`
 }
 
 type SwitchCheckpoint struct {

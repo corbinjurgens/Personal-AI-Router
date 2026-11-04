@@ -110,6 +110,11 @@ func TestSwitchWireFields(t *testing.T) {
 	t.Run("reconcile", func(t *testing.T) {
 		checkSwitchWire(t, SwitchReconcileRequest{SwitchPrepareRequest: prepare}, prepareKeys)
 	})
+	t.Run("reconcile local veto", func(t *testing.T) {
+		veto := SwitchLocalVeto{Engine: "llamacpp"}
+		checkSwitchWire(t, SwitchReconcileRequest{SwitchPrepareRequest: prepare, LocalVeto: &veto}, prepareKeys+" localVeto")
+		checkSwitchWire(t, veto, "engine pause")
+	})
 	checkpoint := SwitchCheckpoint{SwitchPrepareRequest: prepare, Phase: SwitchCheckpointReserved, PreSource: state, PreTarget: state, Source: state, Target: state}
 	t.Run("checkpoint", func(t *testing.T) {
 		checkSwitchWire(t, checkpoint, prepareKeys+" phase preSource preTarget sourceProvenance targetProvenance source target targetCommitted error")
