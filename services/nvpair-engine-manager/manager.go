@@ -175,6 +175,7 @@ func (m *Manager) Run(ctx context.Context) error {
 	// on change (load/unload, JIT auto-load, TTL eviction). Bound to ctx: stops
 	// when the read loop exits below.
 	go m.exec.watchLoaded(ctx)
+	go m.exec.modelIdentities.run(ctx)
 	go m.watchPeerSettings(ctx)
 
 	err := m.readLoop(ctx)

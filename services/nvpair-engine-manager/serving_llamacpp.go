@@ -526,11 +526,23 @@ func llamaCanonicalModelID(id string) string {
 	return id[:colon+1] + string(upper)
 }
 
-func validateLlamaModelID(id string) error {
+// Artifact lookup preserves the exact ID instead of applying the serving
+// compiler's native canonicalization (which strips labels such as UD-).
+func validateLlamaArtifactModelID(id string) error {
 	if err := nodepolicy.ValidateModelIdentifier(id); err != nil {
 		return servingError(err.Error())
 	}
-	if id == "*" || id != strings.TrimSpace(id) || strings.ContainsAny(id, "[]#;\r\n\x00") || llamaCanonicalModelID(id) != id {
+	if id == "*" || id != strings.TrimSpace(id) || strings.ContainsAny(id, "[]#;\r\n\x00") {
+		return &ServingFieldError{Field: "serving.models.modelId", ModelID: id, Reason: "Use an exact canonical native preset model ID."}
+	}
+	return nil
+}
+
+func validateLlamaModelID(id string) error {
+	if err := validateLlamaArtifactModelID(id); err != nil {
+		return err
+	}
+	if llamaCanonicalModelID(id) != id {
 		return &ServingFieldError{Field: "serving.models.modelId", ModelID: id, Reason: "Use an exact canonical native preset model ID."}
 	}
 	return nil
@@ -661,6 +673,128 @@ func llamaLaunchOptions(command launchCommand, policy *EditableLaunch) (map[stri
 		env[key] = value
 		if err := validateLlamaValue(key, value); err != nil {
 			return nil, nil, err
+		}
+	}
+	return cli, env, nil
+}
+
+// llamaArtifactKeys are the only options artifact lookup reads.
+var llamaArtifactKeys = map[string]bool{"models-preset": true, "model": true, "model-draft": true, "ctx-size": true, "parallel": true}
+
+type llamaArtifactSection struct {
+	options map[string]string
+	err     error
+}
+
+// readLlamaArtifactPreset reads a hand-written preset only to locate artifacts.
+// Other keys are ignored; structural problems affect only their section.
+func readLlamaArtifactPreset(data []byte) (map[string]llamaArtifactSection, error) {
+	sections := map[string]llamaArtifactSection{}
+	section, haveSection := "", false
+	scanner := bufio.NewScanner(strings.NewReader(string(data)))
+	scanner.Buffer(make([]byte, 4096), servingSmallFileLimit)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			section, haveSection = line[1:len(line)-1], true
+			current, duplicate := sections[section]
+			if duplicate {
+				current.err = servingError("Duplicate preset section.")
+			} else {
+				current.options = map[string]string{}
+				if section != "*" && validateLlamaArtifactModelID(section) != nil {
+					current.err = servingError("Section name is not an exact model ID.")
+				}
+			}
+			sections[section] = current
+			continue
+		}
+		name, value, ok := strings.Cut(line, "=")
+		name, value = strings.TrimSpace(name), strings.TrimSpace(value)
+		if ok && name == "version" {
+			continue
+		}
+		if !haveSection {
+			if ok {
+				return nil, servingError("Preset requires explicit sections.")
+			}
+			continue
+		}
+		current := sections[section]
+		if !ok {
+			current.err = servingError("Preset requires key=value options.")
+		} else if key := llamaPresetOptionKey(name); llamaArtifactKeys[key] {
+			switch {
+			case strings.ContainsAny(value, ";#$%{}\x00"):
+				current.err = servingError("Preset option value is unsupported.")
+			default:
+				if key == "ctx-size" || key == "parallel" {
+					if err := validateLlamaValue(key, value); err != nil {
+						current.err = err
+					}
+				}
+			}
+			if _, exists := current.options[key]; exists {
+				current.err = servingError("Duplicate preset option.")
+			}
+			current.options[key] = value
+		}
+		sections[section] = current
+	}
+	if scanner.Err() != nil {
+		return nil, servingError("Cannot parse bounded native preset.")
+	}
+	return sections, nil
+}
+
+func llamaArtifactLaunchOptions(command launchCommand, policy *EditableLaunch) (cli, env map[string]string, err error) {
+	cli, env = map[string]string{}, map[string]string{}
+	accept := func(values map[string]string, key, value string) error {
+		if value == "" {
+			return servingError("Native artifact option is missing its value.")
+		}
+		if old, exists := values[key]; exists && old != value {
+			return servingError("Conflicting native artifact option values.")
+		}
+		values[key] = value
+		return nil
+	}
+	for i := 0; i < len(command.Args); i++ {
+		if policy != nil {
+			control, _, last, controlErr := policy.readControl(command.Args, i)
+			if controlErr == nil && control != nil {
+				i = last
+				continue
+			}
+		}
+		key, arity := llamaLaunchArgument(command.Args[i])
+		if llamaArtifactKeys[key] {
+			_, value, attached := strings.Cut(command.Args[i], "=")
+			if !attached && i+1 < len(command.Args) {
+				value = command.Args[i+1]
+			}
+			if err := accept(cli, key, value); err != nil {
+				return nil, nil, err
+			}
+		}
+		i += arity
+	}
+	effectiveEnv := map[string]string{}
+	for _, assignment := range os.Environ() {
+		key, value, _ := strings.Cut(assignment, "=")
+		effectiveEnv[environmentKey(key)] = value
+	}
+	for key, value := range command.Env {
+		effectiveEnv[environmentKey(key)] = value
+	}
+	for name, value := range effectiveEnv {
+		if key := llamaOptionKey(environmentKey(name)); llamaArtifactKeys[key] {
+			if err := accept(env, key, value); err != nil {
+				return nil, nil, err
+			}
 		}
 	}
 	return cli, env, nil

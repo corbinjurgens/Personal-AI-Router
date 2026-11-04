@@ -5,6 +5,31 @@ SPDX-License-Identifier: Apache-2.0
 
 # Microservice: Engine Manager (`nvpair-engine-manager`)
 
+## Model identity
+
+The executor's in-memory model identity owner reads the latest stored inventory
+for llama.cpp-family engines only. It resolves checked local artifacts under
+download read admission and the inspection budget. Snapshots perform no I/O and
+detach file slices. Busy reads retain the previous entry; resolution failures
+remove it. Explicit refresh, changed run/configuration and a ten-minute interval
+invalidate resolution. This phase does not publish identities in inventory or
+wire messages.
+
+Identity records base file names, roles and sizes; model-role files alone supply
+total bytes and the serving-content formula's content ID. SHA256 values come
+only from existing free blob-link names, never whole-file hashing or a persisted
+hash store. Repository and revision come from the HF cache ID/snapshot path,
+then configured cache path segments, then a Hugging Face GGUF repository URL.
+Quantization prefers the HF tag, then the model file name, then GGUF file type.
+Architecture, trained context, general name and size label use bounded GGUF
+facts. Configured context is PAIR's reading: typed per-slot context when present,
+otherwise context divided by parallel from env, wildcard, section and CLI in
+that precedence order. It is not a native runtime observation.
+
+These identities support display and grouping only. The `verified` strength
+means every model-role file supplied a free digest; it grants no strict
+admission, readiness, residency or hybrid eligibility authority.
+
 ## Windows engine working-set limit
 
 Engine settings accept optional integer `workingSetLimitMiB`, from 256 through
@@ -739,11 +764,12 @@ are rejected after absolute resolution, with a model field error and no path.
 Actual loaded training-context caps and props
 are separate runtime evidence, not inferred from cold configuration.
 
-The same parser is used by custom-alias copy export. Presets containing these
-supported expert-cache, lazy-loading or built-in MTP controls no longer fail
-export solely because of those controls. The selected artifacts still require
-their existing checked bindings; the controls grant no copy permission and add
-no separate draft artifact.
+Artifact lookup for custom-alias copy export and inspection reads only
+`models-preset`, `model`, `model-draft`, `ctx-size` and `parallel`. Other preset
+options are ignored, and structural refusals apply to the affected section
+(including defaults inherited from `[*]`). Serving compilation keeps the strict
+parser. Selected artifacts still require their existing checked bindings;
+native controls grant no copy permission and add no separate draft artifact.
 
 Preview performs no probe, spawn, load, persistence or snapshot creation. It
 reads bounded source/configuration data and model samples only, returning a

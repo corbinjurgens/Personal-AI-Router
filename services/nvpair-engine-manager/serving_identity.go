@@ -73,25 +73,30 @@ func validateServingModelsJSON(data json.RawMessage, path ...string) error {
 
 // The versioned manifest binds asserted full-file hashes, never local samples.
 // Artifact order is the compiler-validated native consumption order.
+type contentArtifact struct {
+	Role   string `json:"role"`
+	Size   int64  `json:"sizeBytes"`
+	SHA256 string `json:"sha256"`
+}
+
 func servingContentDigest(model engines.ServingModel) string {
-	type artifact struct {
-		Role   string `json:"role"`
-		Size   int64  `json:"sizeBytes"`
-		SHA256 string `json:"sha256"`
-	}
-	items := make([]artifact, 0, len(model.Artifacts))
+	items := make([]contentArtifact, 0, len(model.Artifacts))
 	for _, a := range model.Artifacts {
 		if a.Binding == nil || a.Binding.SizeBytes <= 0 || len(a.SHA256) != 64 {
 			return ""
 		}
-		items = append(items, artifact{a.Role, a.Binding.SizeBytes, strings.ToLower(a.SHA256)})
+		items = append(items, contentArtifact{a.Role, a.Binding.SizeBytes, strings.ToLower(a.SHA256)})
 	}
+	return contentDigestOf(items)
+}
+
+func contentDigestOf(items []contentArtifact) string {
 	if len(items) == 0 {
 		return ""
 	}
 	data, _ := json.Marshal(struct {
-		Version   string     `json:"version"`
-		Artifacts []artifact `json:"artifacts"`
+		Version   string            `json:"version"`
+		Artifacts []contentArtifact `json:"artifacts"`
 	}{"pair-serving-content-v1", items})
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])

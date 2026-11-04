@@ -645,7 +645,7 @@ func resolveLlamaArtifactsSelection(ctx context.Context, snapshot *engineState, 
 	if !artifactPathSafe(store.root) {
 		return modelFileList{}, false, errNoArtifactBinding
 	}
-	if err := validateLlamaModelID(model); err != nil {
+	if err := validateLlamaArtifactModelID(model); err != nil {
 		return modelFileList{}, false, errNoArtifactBinding
 	}
 	rt := snapshot.plat.Runtime
@@ -695,9 +695,9 @@ func resolveLlamaArtifactsSelection(ctx context.Context, snapshot *engineState, 
 	var candidates []modelFileList
 	presetSelected := false
 	if presetConfigured {
-		cli, env, parseErr := llamaLaunchOptions(command, rt.EditableLaunch)
+		cli, env, parseErr := llamaArtifactLaunchOptions(command, rt.EditableLaunch)
 		if parseErr != nil {
-			return modelFileList{}, false, fmt.Errorf("custom artifact configuration is unsupported: %w", parseErr)
+			return modelFileList{}, false, parseErr
 		}
 		source := env["models-preset"]
 		if v, ok := cli["models-preset"]; ok {
@@ -708,17 +708,23 @@ func resolveLlamaArtifactsSelection(ctx context.Context, snapshot *engineState, 
 		}
 		data, binding, readErr := evidence.selector(ctx, source, access)
 		if readErr != nil {
-			return modelFileList{}, false, fmt.Errorf("configured custom preset is missing or unstable")
+			return modelFileList{}, false, servingError("Configured custom preset is missing or unstable.")
 		}
-		sections, parseErr := parseLlamaServingPreset(data)
+		sections, parseErr := readLlamaArtifactPreset(data)
 		if parseErr != nil {
-			return modelFileList{}, false, fmt.Errorf("custom artifact configuration is unsupported: %w", parseErr)
+			return modelFileList{}, false, parseErr
 		}
 		preset, found := sections[model]
 		if found && model != "*" {
+			if preset.err != nil {
+				return modelFileList{}, false, preset.err
+			}
+			if sections["*"].err != nil {
+				return modelFileList{}, false, sections["*"].err
+			}
 			presetSelected = true
 			options := map[string]string{}
-			for _, values := range []map[string]string{env, sections["*"], preset, cli} {
+			for _, values := range []map[string]string{env, sections["*"].options, preset.options, cli} {
 				for key, value := range values {
 					options[key] = value
 				}
@@ -738,18 +744,18 @@ func resolveLlamaArtifactsSelection(ctx context.Context, snapshot *engineState, 
 					return modelFileList{}, false, err
 				}
 				if !artifactPathSafe(path) || !strings.HasSuffix(path, ".gguf") {
-					return modelFileList{}, false, fmt.Errorf("custom copies require local GGUF model and draft artifacts")
+					return modelFileList{}, false, servingError("Custom copies require local GGUF model and draft artifacts.")
 				}
 				current, info, bindErr := evidence.artifact(ctx, path, access)
 				if bindErr != nil {
-					return modelFileList{}, false, fmt.Errorf("configured model or draft shard is missing or unstable")
+					return modelFileList{}, false, servingError("Configured model or draft shard is missing or unstable.")
 				}
 				list.Files = append(list.Files, modelFile{Role: roles[i], Path: roles[i] + "/" + filepath.Base(path), Size: info.Size(), abs: current.ResolvedTarget, configured: current.SourcePath, sample: current.SampleSHA256, info: info})
 			}
 			old := evidence.source.selectors[len(evidence.source.selectors)-1].file
 			after, afterErr := access.bindingExpected(ctx, old.configured, old.target, old.info)
 			if afterErr != nil || *binding != *after {
-				return modelFileList{}, false, fmt.Errorf("configured preset changed during export resolution")
+				return modelFileList{}, false, servingError("Configured preset changed during export resolution.")
 			}
 			candidates = append(candidates, list)
 			candidates[len(candidates)-1].binding = exportBinding(list, struct {
@@ -761,7 +767,7 @@ func resolveLlamaArtifactsSelection(ctx context.Context, snapshot *engineState, 
 		} else if rt.Serving != nil {
 			for _, declared := range rt.Serving.Models {
 				if declared.ModelID == model {
-					return modelFileList{}, false, fmt.Errorf("declared model has no exact configured preset")
+					return modelFileList{}, false, servingError("Declared model has no exact configured preset.")
 				}
 			}
 		}
@@ -783,7 +789,7 @@ func resolveLlamaArtifactsSelection(ctx context.Context, snapshot *engineState, 
 			}
 			binding, info, err := evidence.artifact(ctx, path, access)
 			if err != nil {
-				return modelFileList{}, false, fmt.Errorf("committed copy artifact is missing or unstable")
+				return modelFileList{}, false, servingError("Committed copy artifact is missing or unstable.")
 			}
 			f.abs, f.configured, f.info, f.asserted, f.SHA256 = binding.ResolvedTarget, binding.SourcePath, info, f.SHA256, ""
 			f.sample = binding.SampleSHA256
