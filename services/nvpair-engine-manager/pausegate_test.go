@@ -19,7 +19,7 @@ import (
 	"nvpair-shared/nodepolicy"
 )
 
-func TestPauseGateDelegatesAvailabilityAndFencesOtherMutations(t *testing.T) {
+func TestPauseGateCoversEveryRegisteredMutationAndAllowsEveryRead(t *testing.T) {
 	for _, scenario := range []struct {
 		name       string
 		projection *nodeProjection

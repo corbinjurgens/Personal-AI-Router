@@ -1135,7 +1135,7 @@ proxy enforces it.
   with `-32011` and `This node is paused. Resume it on this node before managing it remotely.`
   Availability uses a separate rule under the same runtime lock: a verified,
   granted peer may Pause or Resume a configured pause of either origin.
-  Repeating Pause on a completed pause is a successful no-op, preserving its
+  Repeating Pause on a completed configured pause or local Halt is a successful no-op, preserving its
   mode, provenance and revision without cancellation, worker calls or notifications.
   In particular, repeated peer Pause cannot downgrade completed local Halt
   (`pauseMode: immediate`, `pausedBy: local`). Peer Resume of Halt is refused,

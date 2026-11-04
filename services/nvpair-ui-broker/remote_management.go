@@ -65,8 +65,8 @@ func (b *Broker) authorizeRemoteManagement(caller, family, operation string, bou
 	return b.authorizeRemoteManagementLocked(r, caller, family, operation, boundRequest...)
 }
 
-// authorizeRemoteManagementLocked is shared by the r.mu-held policy and
-// availability entry points and the settings/switch wrapper. Permission wins
+// authorizeRemoteManagementLocked is shared by the r.mu-held policy entry
+// points and the settings/switch wrapper. Permission wins
 // over pause, preserving revocation's code. Never acquire engineConfigMu here:
 // settings and switch admission already own it before taking r.mu.
 func (b *Broker) authorizeRemoteManagementLocked(r *policyRuntime, caller, family, operation string, boundRequest ...bool) error {

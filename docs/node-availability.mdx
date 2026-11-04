@@ -93,7 +93,7 @@ Resume clears it.
 - A paired device with management permission may Pause an available node.
 - A managing peer may Resume a known configured Pause, whether it was made
   locally or by a peer, including while that configured pause is draining.
-- Repeating peer Pause on a completed pause succeeds without changing its mode,
+- Repeating peer Pause on a completed configured pause or local Halt succeeds without changing its mode,
   origin or revision. Repeating Pause on a completed local Halt leaves the Halt
   intact and sends no new notifications or cancellation.
 - Peer Resume of local Halt is refused, including after restart. Both peer
@@ -101,7 +101,7 @@ Resume clears it.
   pauses repaired to `immediate`, including peer or unknown origins, remain
   local-only until local Resume. Only a known `configured` mode enables peer Resume.
 - Other peer management, including engine-settings Apply, remains refused
-  during any pause. Every peer request rechecks its management grant first.
+  during any pause. Every peer availability write rechecks its management grant first.
 - A local Pause over a peer pause makes the origin `local`.
 - Policy edits, whether local or relayed, never change `pausedBy`.
 

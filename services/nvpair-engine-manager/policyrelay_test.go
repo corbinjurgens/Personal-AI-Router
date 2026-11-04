@@ -73,11 +73,18 @@ func TestPolicyRelayAvailabilityDelegatesPauseAuthorityAfterOuterChecks(t *testi
 				return json.RawMessage(`{"availability":"available"}`), nil
 			}
 			server := rmTLSServer(t, f.mesh, (&controlServer{exec: ex, mesh: f.mesh}).mux())
-			uuid := "uuid-a"
+			client := f.client("uuid-a")
 			if tc.unpinned {
-				uuid = "uuid-self"
+				strangerDir := t.TempDir()
+				clustertrusttest.WriteKeypair(t, strangerDir, "uuid-stranger")
+				identity, err := clustertrust.LoadIdentity(strangerDir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				client = &http.Client{Transport: &http.Transport{
+					TLSClientConfig: clustertrust.ClientTLSConfig(identity.Cert, f.serverDER()),
+				}}
 			}
-			client := f.client(uuid)
 			t.Cleanup(client.CloseIdleConnections)
 			status, _, data := rmRequest(t, client, server.URL, http.MethodPost, controlAvailabilitySetPath, `{"nodeId":"forged-local","state":"available"}`)
 			mu.Lock()
