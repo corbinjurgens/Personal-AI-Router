@@ -1137,3 +1137,162 @@ func TestMemoryEvidenceReversedPreIOClockRemainsUnknown(t *testing.T) {
 		t.Fatalf("uncertainty = %v, want clock-uncertain", entry.Uncertainty)
 	}
 }
+
+func (h *memoryEvidenceHarness) addOllamaFamilyEngine(t *testing.T, engine, model, digest string) {
+	t.Helper()
+	manifest := &Manifest{
+		Engine: engine, DisplayName: engine,
+		Family: "ollama", ModelNaming: engines.ModelNamingImpliedLatestTag,
+	}
+	h.ex.reg.engines[engine] = manifest
+	h.ex.engines[engine] = &engineState{
+		manifest: manifest, plat: &Platform{}, running: true, runID: h.runID,
+		launchDigest: h.launch, proc: &managedProc{}, contentMu: make(chan struct{}, 1),
+	}
+	h.ex.inventoryDigests[engine] = observedDigests{
+		runID: h.runID, models: map[string]string{model: digest}, epoch: 9,
+	}
+	variant := h.settings
+	variant.Engine = engine
+	h.ex.settingsHub.Publish([]settings.Snapshot{h.settings, variant})
+}
+
+func (h *memoryEvidenceHarness) recordFor(engine, model, digest string, upper int64) memoryQualificationRecord {
+	record := h.record()
+	record.Source.Engine = memoryValue(engine)
+	record.Source.Model = memoryValue(model)
+	record.Source.ModelDigest = memoryValue(digest)
+	record.Qualification = memoryTestQualification(upper)
+	return record
+}
+
+func (h *memoryEvidenceHarness) artifactWithRecords(revision string, records []memoryQualificationRecord) memoryQualificationArtifact {
+	measured := h.clock.Add(-5 * time.Minute).UnixMilli()
+	return memoryQualificationArtifact{
+		Version: memoryValue(1), Revision: &revision, MeasuredAt: &measured, Records: &records,
+	}
+}
+
+func memoryEntryFor(t *testing.T, entries []performancewire.MemoryEvidenceEntry, model string) performancewire.MemoryEvidenceEntry {
+	t.Helper()
+	for _, entry := range entries {
+		if entry.Model == model {
+			return entry
+		}
+	}
+	t.Fatalf("entry for %q is missing from %d entries", model, len(entries))
+	return performancewire.MemoryEvidenceEntry{}
+}
+
+func TestMemoryEvidenceFinalizerWithdrawsEveryEngineInOneSweep(t *testing.T) {
+	const (
+		variant       = "ollama-variant"
+		variantModel  = "mixtral:8x7b"
+		variantDigest = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+	)
+	h := newMemoryEvidenceHarness(t)
+	h.addOllamaFamilyEngine(t, variant, variantModel, variantDigest)
+	h.writeArtifact(t, h.artifactWithRecords("2", []memoryQualificationRecord{
+		h.recordFor("ollama", memoryTestModel, memoryTestDigest, 10_000),
+		h.recordFor(variant, variantModel, variantDigest, 10_000),
+	}))
+
+	capture := h.ex.captureMemoryEvidence()
+	first := h.ex.memoryEvidenceEntries(capture, "ollama",
+		json.RawMessage(memoryPS(memoryTestModel, memoryTestDigest, 9000, 8192)))
+	if memoryUpper(memoryEntryFor(t, first, memoryTestModel)) == nil {
+		t.Fatal("setup: the first engine did not qualify")
+	}
+	second := h.ex.memoryEvidenceEntries(capture, variant,
+		json.RawMessage(memoryPS(variantModel, variantDigest, 11_000, 8192)))
+	if memoryUpper(memoryEntryFor(t, second, variantModel)) != nil {
+		t.Fatal("the exceeding engine kept a positive upper")
+	}
+
+	combined := h.ex.finalizeMemoryEvidence(capture, append(first, second...))
+	earlier := memoryEntryFor(t, combined, memoryTestModel)
+	if memoryUpper(earlier) != nil {
+		t.Fatalf("earlier qualified entry survived a later contradiction: %+v", earlier)
+	}
+	if !slicesContain(earlier.Uncertainty, performancewire.MemoryUncertaintyBoundExceeded) {
+		t.Fatalf("earlier uncertainty = %v, want bound-exceeded", earlier.Uncertainty)
+	}
+	if memoryUpper(memoryEntryFor(t, combined, variantModel)) != nil {
+		t.Fatal("the combined projection retained a positive upper")
+	}
+
+	// A higher reviewed revision is the only recovery control.
+	h.writeArtifact(t, h.artifactWithRecords("3", []memoryQualificationRecord{
+		h.recordFor("ollama", memoryTestModel, memoryTestDigest, 12_000),
+		h.recordFor(variant, variantModel, variantDigest, 12_000),
+	}))
+	recoveredCapture := h.ex.captureMemoryEvidence()
+	recovered := append(
+		h.ex.memoryEvidenceEntries(recoveredCapture, "ollama",
+			json.RawMessage(memoryPS(memoryTestModel, memoryTestDigest, 9000, 8192))),
+		h.ex.memoryEvidenceEntries(recoveredCapture, variant,
+			json.RawMessage(memoryPS(variantModel, variantDigest, 11_000, 8192)))...,
+	)
+	recovered = h.ex.finalizeMemoryEvidence(recoveredCapture, recovered)
+	for _, model := range []string{memoryTestModel, variantModel} {
+		entry := memoryEntryFor(t, recovered, model)
+		if memoryUpper(entry) == nil || *memoryUpper(entry) != 12_000 {
+			t.Fatalf("%s upperBytes = %v, want 12000 after a higher revision", model, memoryUpper(entry))
+		}
+	}
+}
+
+func TestMemoryEvidenceOllamaFamilyVariantQualifies(t *testing.T) {
+	const (
+		variant       = "ollama-variant"
+		variantModel  = "mixtral:8x7b"
+		variantDigest = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	)
+	h := newMemoryEvidenceHarness(t)
+	h.addOllamaFamilyEngine(t, variant, variantModel, variantDigest)
+	h.writeArtifact(t, h.artifactWithRecords("2", []memoryQualificationRecord{
+		h.recordFor(variant, variantModel, variantDigest, 10_000),
+	}))
+	capture := h.ex.captureMemoryEvidence()
+	entry := memoryEntryFor(t, h.ex.memoryEvidenceEntries(capture, variant,
+		json.RawMessage(memoryPS(variantModel, variantDigest, 9000, 8192))), variantModel)
+	if memoryUpper(entry) == nil {
+		t.Fatalf("owned Ollama-family variant did not qualify: %+v", entry.Uncertainty)
+	}
+}
+
+func TestMemoryEvidenceUnsupportedActualFamilyCannotClaimOllama(t *testing.T) {
+	h := newMemoryEvidenceHarness(t)
+	manifest, ok := h.ex.reg.Get("ollama")
+	if !ok {
+		t.Fatal("setup engine is missing")
+	}
+	manifest.Family = "lmstudio"
+	h.writeArtifact(t, h.artifact("2"))
+	entry := memoryEntry(t, h.entries(memoryPS(memoryTestModel, memoryTestDigest, 9000, 8192)))
+	if memoryUpper(entry) != nil {
+		t.Fatalf("unsupported actual family qualified from an Ollama artifact: %+v", entry)
+	}
+	if !slicesContain(entry.Uncertainty, performancewire.MemoryUncertaintyUnsupported) {
+		t.Fatalf("uncertainty = %v, want unsupported", entry.Uncertainty)
+	}
+}
+
+func TestMemoryEvidenceDuplicateKnownResponseFieldsCannotQualify(t *testing.T) {
+	cases := map[string]string{
+		"duplicate context": `{"models":[{"name":"` + memoryTestModel + `","model":"` + memoryTestModel + `","digest":"` + memoryTestDigest + `","size_vram":9000,"context_length":8192,"context_length":4096}]}`,
+		"duplicate name":    `{"models":[{"name":"` + memoryTestModel + `","name":"other","model":"` + memoryTestModel + `","digest":"` + memoryTestDigest + `","size_vram":9000,"context_length":8192}]}`,
+		"duplicate model":   `{"models":[{"name":"` + memoryTestModel + `","model":"` + memoryTestModel + `","model":"other","digest":"` + memoryTestDigest + `","size_vram":9000,"context_length":8192}]}`,
+		"duplicate digest":  `{"models":[{"name":"` + memoryTestModel + `","model":"` + memoryTestModel + `","digest":"` + memoryTestDigest + `","digest":"other","size_vram":9000,"context_length":8192}]}`,
+	}
+	for name, raw := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := newMemoryEvidenceHarness(t)
+			h.writeArtifact(t, h.artifact("2"))
+			entry := memoryEntry(t, h.entries(raw))
+			if memoryUpper(entry) != nil {
+				t.Fatalf("duplicate known field qualified: %+v", entry)
+			}
+		})
+	}
+}
