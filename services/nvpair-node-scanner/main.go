@@ -25,6 +25,7 @@ func main() {
 	clientKey := flag.String("client-key", "", "path to PEM client private key matching --client-cert")
 	caBundle := flag.String("ca-bundle", "", "path to PEM CA bundle to trust for verifying node-info server certificates (additive to the system trust store); enabling any of these TLS flags moves node-info enrichment onto HTTPS")
 	showVersion := flag.Bool("version", false, "print version and exit")
+	mdnsEnabled := flag.Bool("mdns", true, "browse and advertise nodes over mDNS")
 	resolveLevel := applog.RegisterFlag(nil, slog.LevelInfo)
 	flag.Parse()
 
@@ -84,7 +85,7 @@ func main() {
 	}()
 
 	codec := NewCodec(transport)
-	scanner := NewScanner(codec, mesh, *clusterDir, tlsHTTP)
+	scanner := NewScanner(codec, mesh, *clusterDir, tlsHTTP, *mdnsEnabled)
 
 	if err := scanner.Run(ctx); err != nil && ctx.Err() == nil {
 		log.Fatalf("scanner error: %v", err)

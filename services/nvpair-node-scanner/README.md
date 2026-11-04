@@ -72,12 +72,20 @@ Bidirectional newline-delimited JSON-RPC 2.0. Stdio by default; `--ipc <path>` s
 | Flag | Default | Description |
 |---|---|---|
 | `--ipc <path>` | _(stdio)_ | IPC endpoint: Unix socket or Windows named pipe |
+| `--mdns` | `true` | Browse and advertise nodes over mDNS; `--mdns=false` constructs neither the browser nor the responder |
 | `--cluster-dir <path>` | _(none)_ | Cluster config dir (`node.crt`/`node.key` + `trusted/`). Controls peer trust annotation, local membership advertisement, pinned direct/reverse peer transport for node information and model inventory, and the parent directory used to resolve this node's identity |
 | `--ca-bundle <path>` | _(none)_ | PEM CA bundle to trust for verifying node-info server certs (additive to the system trust store). Setting any TLS flag moves node-info enrichment onto HTTPS |
 | `--client-cert <path>` | _(none)_ | PEM client certificate to present when fetching `/v1/node-info` from TLS-enabled nodes (mTLS; requires `--client-key`) |
 | `--client-key <path>` | _(none)_ | PEM client private key matching `--client-cert` |
 | `--log-level <level>` | `info` | `error` / `warn` / `info` / `debug` |
 | `--version` | | Print version and exit |
+
+Use `--mdns=false` for isolated tests or air-gapped deployments that do not use
+multicast discovery. The scanner still publishes its local directory entry,
+accepts the broker's private authenticated peer-services notifications, and runs
+periodic enrichment and maintenance. Authenticated and explicitly configured peer
+HTTP remains active under its existing transport and admission rules. This flag
+provides neither general network isolation nor an authentication bypass.
 
 ## JSON-RPC surface
 

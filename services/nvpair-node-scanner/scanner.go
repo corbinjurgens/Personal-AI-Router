@@ -75,10 +75,10 @@ type Scanner struct {
 // same base cluster-manager persists to (empty selects the shared default).
 // tlsHTTP is nil unless the operator opted node-info enrichment onto HTTPS via
 // the --client-cert/--client-key/--ca-bundle flags.
-func NewScanner(codec *Codec, mesh *clustertrust.Mesh, clusterDir string, tlsHTTP *http.Client) *Scanner {
+func NewScanner(codec *Codec, mesh *clustertrust.Mesh, clusterDir string, tlsHTTP *http.Client, mdnsEnabled bool) *Scanner {
 	return &Scanner{
 		codec:  codec,
-		daemon: newDaemon(codec, mesh, clusterDir, tlsHTTP),
+		daemon: newDaemon(codec, mesh, clusterDir, tlsHTTP, mdnsEnabled),
 	}
 }
 
