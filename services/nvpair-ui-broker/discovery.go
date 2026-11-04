@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"nvpair-shared/applog"
+	"nvpair-shared/buildinfo"
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/netpick"
 	"nvpair-shared/nodepolicy"
@@ -36,7 +37,8 @@ type (
 )
 
 type EnrichedNode struct {
-	ID string `json:"id"`
+	ServiceBuildID buildinfo.ID `json:"serviceBuildId,omitempty"`
+	ID             string       `json:"id"`
 	// HostUUID is the node's stable per-host identity (the daemon's uuid= TXT).
 	// It's the discovery-store key, so a PC rename — which changes the hostname
 	// (ID) but not the UUID — updates the existing entry in place instead of
@@ -100,6 +102,7 @@ func directoryToEnriched(n noderec.DirectoryNode) EnrichedNode {
 		port = ni.Port
 	}
 	return EnrichedNode{
+		ServiceBuildID: n.ServiceBuildID,
 		ID:             n.Name,
 		HostUUID:       n.HostUUID,
 		Host:           n.Name,
@@ -317,6 +320,7 @@ func (sn storedNode) toAvailable() AvailableNode {
 		candidates = nil
 	}
 	return AvailableNode{
+		ServiceBuildID: n.ServiceBuildID,
 		ID:             n.ID,
 		Name:           n.ID,
 		HostUUID:       n.HostUUID,

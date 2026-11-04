@@ -34,6 +34,7 @@ import (
 	"strconv"
 	"strings"
 
+	"nvpair-shared/buildinfo"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec/servicekey"
 )
@@ -444,9 +445,10 @@ type ServiceStatus struct {
 // derived from Services + Clustered (never carried), and node-info enrichment
 // decorates entries that advertise a node-info service.
 type DirectoryNode struct {
-	HostUUID string `json:"hostUuid"`
-	Name     string `json:"name"` // mDNS instance name (hostname)
-	IP       string `json:"ip"`   // canonical dialable LAN address
+	ServiceBuildID buildinfo.ID `json:"serviceBuildId,omitempty"`
+	HostUUID       string       `json:"hostUuid"`
+	Name           string       `json:"name"` // mDNS instance name (hostname)
+	IP             string       `json:"ip"`   // canonical dialable LAN address
 	// IPs is every address this node published, in its own ranked order with IP
 	// first. A multi-homed node has no single address every peer can reach — a
 	// direct-connect link is reachable only from the machine on its far end — so

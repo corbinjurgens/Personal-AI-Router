@@ -21,11 +21,15 @@ import (
 	"time"
 
 	"nvpair-shared/applog"
+	"nvpair-shared/buildinfo"
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/nodeid"
 	"nvpair-shared/noderec"
 	"nvpair-shared/splitlisten"
 )
+
+// Captured from this process, independently of the service and broker versions.
+var serviceBuildID = buildinfo.Current()
 
 type GPUInfo struct {
 	Name               string `json:"name"`
@@ -72,11 +76,12 @@ type MemoryInfo struct {
 }
 
 type NodeInfoResponse struct {
-	GPUs           []GPUInfo   `json:"GPUs"`
-	CPU            *CPUInfo    `json:"cpu,omitempty"`
-	Memory         *MemoryInfo `json:"memory,omitempty"`
-	TelemetryValid bool        `json:"telemetryValid"`
-	MSSince        int64       `json:"msSince"`
+	ServiceBuildID buildinfo.ID `json:"serviceBuildId,omitempty"`
+	GPUs           []GPUInfo    `json:"GPUs"`
+	CPU            *CPUInfo     `json:"cpu,omitempty"`
+	Memory         *MemoryInfo  `json:"memory,omitempty"`
+	TelemetryValid bool         `json:"telemetryValid"`
+	MSSince        int64        `json:"msSince"`
 	// HostUUID is this node's stable per-host identity (the same value the
 	// node-scanner advertises as uuid= and the cluster uses as nodeUuid). It lets
 	// a consumer that reaches this node only over HTTP — notably a user-added
@@ -190,6 +195,7 @@ func buildResponseAt(gpus []GPUInfo, cpuStatic *CPUInfo, memTotal uint64, snap s
 
 	telemetryValid, msSince := telemetryStatus(snap.GPUSampledAt, now)
 	resp := NodeInfoResponse{
+		ServiceBuildID: serviceBuildID,
 		GPUs:           outGPUs,
 		TelemetryValid: telemetryValid,
 		MSSince:        msSince,

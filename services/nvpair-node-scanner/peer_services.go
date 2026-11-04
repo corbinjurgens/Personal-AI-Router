@@ -189,6 +189,7 @@ func (d *daemon) enrichPeerServices(claim noderec.PeerServicesClaim, node nodere
 		node = d.dir.nodes[node.HostUUID]
 		if infoFetched {
 			node.GPUs, node.CPU, node.Memory = info.GPUs, info.CPU, info.Memory
+			node.ServiceBuildID = info.ServiceBuildID
 		}
 		if modelsFetched {
 			inventory.applyTo(&node)

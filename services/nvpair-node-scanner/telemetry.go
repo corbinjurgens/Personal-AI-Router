@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -266,6 +267,17 @@ type telemetrySample struct {
 // a link this host cannot reach reported no telemetry at all, and the scheduler
 // then assigned it neutral pressure and scheduled it blind.
 func (d *daemon) refreshNodeTelemetryCandidates(ctx context.Context, hostUUID string, hosts []string, niPort int) bool {
+	var generation uint64
+	var buildTargetCurrent bool
+	if d.dir != nil {
+		self := d.reg != nil && hostUUID == d.reg.record().HostUUID && slices.Equal(hosts, []string{loopbackHost})
+		d.dir.mu.RLock()
+		node, exists := d.dir.nodes[hostUUID]
+		generation = d.dir.generations[hostUUID]
+		ni, advertised := node.Services[noderec.ServiceNodeInfo]
+		buildTargetCurrent = exists && advertised && ni.Port == niPort && (self || slices.Equal(hosts, node.CandidateIPs()))
+		d.dir.mu.RUnlock()
+	}
 	ask := func(host string) (telemetrySample, bool) {
 		startedAt := time.Now()
 		candidate, ok := d.fetchPeerNodeInfoWithin(ctx, hostUUID, "", host, niPort)
@@ -285,6 +297,34 @@ func (d *daemon) refreshNodeTelemetryCandidates(ctx context.Context, hostUUID st
 		return false
 	}
 	info, startedAt := sample.info, sample.startedAt
+	if buildTargetCurrent {
+		d.peerServicesMu.Lock()
+		// Claim replacement/retirement shares peerServicesMu with this apply.
+		// Recheck admission after the fetch, before any directory/cache/event write.
+		d.dir.mu.RLock()
+		claim, authenticated := d.dir.peerServices[hostUUID]
+		d.dir.mu.RUnlock()
+		authorityCurrent := true
+		if authenticated {
+			incarnation, admitted := d.mesh.PeerServiceIncarnation(hostUUID)
+			authorityCurrent = admitted && incarnation == claim.Incarnation && peerServicesFresh(claim, time.Now())
+		}
+		if authorityCurrent {
+			node, changed, current := d.dir.applyServiceBuild(hostUUID, generation, info.ServiceBuildID)
+			if current {
+				d.infoMu.Lock()
+				if cached, present := d.lastInfo[hostUUID]; present {
+					cached.ServiceBuildID = info.ServiceBuildID
+					d.lastInfo[hostUUID] = cached
+				}
+				d.infoMu.Unlock()
+				if changed {
+					d.emit(noderec.NotifyNodeUpdated, node)
+				}
+			}
+		}
+		d.peerServicesMu.Unlock()
+	}
 
 	age := int64(0)
 	if info.TelemetryValid {

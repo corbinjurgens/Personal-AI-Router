@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"nvpair-shared/applog"
+	"nvpair-shared/buildinfo"
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/errors"
 )
@@ -67,11 +68,12 @@ type MemoryInfo struct {
 }
 
 type NodeInfoResponse struct {
-	GPUs           []GPUInfo   `json:"GPUs"`
-	CPU            *CPUInfo    `json:"cpu,omitempty"`
-	Memory         *MemoryInfo `json:"memory,omitempty"`
-	TelemetryValid bool        `json:"telemetryValid"`
-	MSSince        int64       `json:"msSince"`
+	ServiceBuildID buildinfo.ID `json:"serviceBuildId,omitempty"`
+	GPUs           []GPUInfo    `json:"GPUs"`
+	CPU            *CPUInfo     `json:"cpu,omitempty"`
+	Memory         *MemoryInfo  `json:"memory,omitempty"`
+	TelemetryValid bool         `json:"telemetryValid"`
+	MSSince        int64        `json:"msSince"`
 	// HostUUID is the remote node's stable per-host identity, reported by
 	// node-info. We surface it so a manual node is tracked by the same permanent
 	// identity as the rest of the fleet — including deduping with the same
@@ -103,12 +105,13 @@ type ManualEntry struct {
 // 14318 otherwise) so existing UI that displays the port stays
 // correct.
 type ManualNodeStatus struct {
-	ID           string   `json:"id"`
-	Name         string   `json:"name,omitempty"`
-	Address      string   `json:"address"`
-	OllamaUp     bool     `json:"ollama_up"`
-	OllamaPort   int      `json:"ollama_port"`
-	OllamaModels []string `json:"ollama_models,omitempty"`
+	ServiceBuildID buildinfo.ID `json:"serviceBuildId,omitempty"`
+	ID             string       `json:"id"`
+	Name           string       `json:"name,omitempty"`
+	Address        string       `json:"address"`
+	OllamaUp       bool         `json:"ollama_up"`
+	OllamaPort     int          `json:"ollama_port"`
+	OllamaModels   []string     `json:"ollama_models,omitempty"`
 	// LM Studio is probed on its default OpenAI-API port the same way Ollama
 	// is on 11434, so a manually-added node running LM Studio can be bridged
 	// into lmstudio-proxy by a supervising broker.
@@ -291,6 +294,7 @@ func (m *Manager) probeNode(entry ManualEntry) {
 	nodeInfoUp, info := m.probeNodeInfo(probeClient, scheme, addr, nodeInfoPort)
 
 	newStatus := ManualNodeStatus{
+		ServiceBuildID: info.ServiceBuildID,
 		ID:             id,
 		Name:           entry.Name,
 		Address:        addr,
@@ -343,6 +347,7 @@ func (m *Manager) probeNode(entry ManualEntry) {
 		prev.LMStudioUp != newStatus.LMStudioUp ||
 		prev.NodeInfoUp != newStatus.NodeInfoUp ||
 		prev.HostUUID != newStatus.HostUUID ||
+		prev.ServiceBuildID != newStatus.ServiceBuildID ||
 		!sliceEqual(prev.OllamaModels, newStatus.OllamaModels) ||
 		!sliceEqual(prev.LMStudioModels, newStatus.LMStudioModels) ||
 		!gpusEqual(prev.GPUs, newStatus.GPUs) ||
