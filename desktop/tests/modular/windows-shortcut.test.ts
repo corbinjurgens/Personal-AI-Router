@@ -7,6 +7,7 @@ import path from 'path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { app, shell } from 'electron'
 import { currentPlatform } from '@/shared/utils/platform'
+import { setPaths } from '@/electron/path'
 import { ensureWindowsShortcut, handleShortcutEntry } from '@/electron/windows-shortcut'
 
 const native = vi.hoisted(() => ({ packaged: true }))
@@ -15,7 +16,10 @@ vi.mock('electron', () => ({
         get isPackaged() {
             return native.packaged
         },
-        getPath: vi.fn<typeof app.getPath>()
+        getPath: vi.fn<typeof app.getPath>(),
+        setPath: vi.fn<typeof app.setPath>(),
+        setAppLogsPath: vi.fn<typeof app.setAppLogsPath>(),
+        commandLine: { appendSwitch: vi.fn<typeof app.commandLine.appendSwitch>() }
     },
     shell: {
         readShortcutLink: vi.fn<typeof shell.readShortcutLink>(),
@@ -39,6 +43,7 @@ const expected: Electron.ShortcutDetails = {
     args: ''
 }
 let temp: string
+let overrides: Map<string, string>
 let existing: Electron.ShortcutDetails | null
 
 beforeEach(() => {
@@ -51,9 +56,15 @@ beforeEach(() => {
     existing = null
     native.packaged = true
     vi.mocked(currentPlatform).mockReturnValue('win32')
-    vi.mocked(app.getPath).mockImplementation(name =>
-        name === 'appData' ? 'C:\\User data' : name === 'temp' ? 'C:\\Temporary' : target
+    overrides = new Map()
+    vi.mocked(app.getPath).mockImplementation(
+        name =>
+            overrides.get(name) ??
+            (name === 'appData' ? 'C:\\User data' : name === 'temp' ? 'C:\\Temporary' : target)
     )
+    vi.mocked(app.setPath).mockImplementation((name, value) => {
+        overrides.set(name, value)
+    })
     vi.spyOn(fs, 'realpathSync').mockImplementation(value =>
         value === 'C:\\Temporary' ? 'C:\\Temporary' : target
     )
@@ -138,6 +149,17 @@ describe('Windows Start Menu shortcut', () => {
         expect(shell.writeShortcutLink).toHaveBeenCalledWith(link, 'create', expected)
         expect(shell.readShortcutLink).toHaveBeenCalledWith(link)
         expect(await handleShortcutEntry(['--pair-shortcut=status'])).toBe(0)
+    })
+
+    it('writes under the system app-data folder after startup redirects Electron appData', async () => {
+        // The redirected temp folder resolves to itself rather than to the fixture target.
+        vi.mocked(fs.realpathSync).mockImplementation(value => String(value))
+        await setPaths()
+        expect(app.getPath('appData')).not.toBe('C:\\User data')
+
+        ensureWindowsShortcut()
+
+        expect(shell.writeShortcutLink).toHaveBeenCalledWith(link, 'create', expected)
     })
 
     it('leaves a current link unchanged on repeat and after a same-path update', async () => {

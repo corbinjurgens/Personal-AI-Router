@@ -5,6 +5,7 @@ import fs from 'fs'
 import path from 'path'
 import { app, shell } from 'electron'
 import { APP_DISPLAY_NAME, APP_EXECUTABLE_NAME, APP_ID } from '@/shared/constants/app'
+import { getSystemAppData } from '@/electron/path'
 import { currentPlatform } from '@/shared/utils/platform'
 import { createStructuredLogger } from '@/shared/utils/log'
 import getErrorString from '@/shared/utils/get-error-string'
@@ -27,7 +28,7 @@ function isPairTarget(target: string): boolean {
 
 function shortcutPath(): string {
     return windowsPath.join(
-        app.getPath('appData'),
+        getSystemAppData(),
         'Microsoft',
         'Windows',
         'Start Menu',
