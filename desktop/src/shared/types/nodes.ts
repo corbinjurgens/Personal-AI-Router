@@ -18,4 +18,5 @@ export interface NodeItem {
     topology: SystemTopology
     os: PlatformDisplayName
     performance?: NodePerformance
+    serviceBuildId?: string
 }

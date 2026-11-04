@@ -8,6 +8,7 @@ import type { NodePolicyAdvertisement } from '@/shared/types/node-roles'
 import type { NodePerformance } from '@/shared/types/performance'
 import { MODULAR_NODE_INFO_SELF_HOST } from '@/shared/constants/modular-runtime'
 import { engineManagerName } from '@/shared/utils/engines'
+import { parseServiceBuildId } from '@/shared/utils/service-build'
 import { parsePolicyAdvertisement, samePolicyAdvertisement } from '@/shared/utils/node-roles'
 import { currentPlatform, platformDisplayName } from '@/shared/utils/platform'
 import type { JsonObject, JsonValue } from './json-rpc-client'
@@ -41,6 +42,7 @@ interface EnginePresence {
 
 interface ModularNode {
     performance?: NodePerformance
+    serviceBuildId?: string
     // Canonical cross-domain node key = the backend's stable per-host UUID
     // (`shared/nodeid`). The broker carries it on `AvailableNode.hostUuid`, the
     // proxies key `Node.ID` by it, and `/v1/node-info` reports it, so every
@@ -471,6 +473,7 @@ function toNodeItem(node: ModularNode, selfId: string | null): NodeItem {
     const port = primaryServicePort(node)
     return {
         id: node.id,
+        serviceBuildId: node.serviceBuildId,
         ...(node.performance ? { performance: node.performance } : {}),
         // Display label: the hostname, else the reachable address; never the raw
         // UUID key (falls back to it only if a node somehow has neither).
@@ -681,6 +684,7 @@ function parseBrokerNode(params: JsonValue | undefined): ModularNode | null {
         // Broker `AvailableNode.policy`: `omitempty` on the wire, absent until
         // the node's broker has published one.
         policy: parsePolicyAdvertisement(obj.policy),
+        serviceBuildId: parseServiceBuildId(obj.serviceBuildId),
         engines: emptyEngines(),
         lastSeen: normalizeLastSeen(numberValue(obj.lastSeen) || numberValue(obj.last_seen))
     }
@@ -715,6 +719,7 @@ function sameNode(left: ModularNode, right: ModularNode): boolean {
     return (
         JSON.stringify(left.performance) === JSON.stringify(right.performance) &&
         left.id === right.id &&
+        left.serviceBuildId === right.serviceBuildId &&
         sameStringList(left.sources, right.sources) &&
         left.name === right.name &&
         left.host === right.host &&
