@@ -491,6 +491,7 @@ func (d *nodeDetail) followNode(row nodeRow, found bool) {
 		d.hostUUID = hostUUID
 		d.telemetrySelf = row.self
 		d.node.name = row.name
+		d.node.serviceBuildID = row.serviceBuildID
 		d.node.address = row.address
 		d.node.addresses = row.addresses
 		d.node.presence = row.presence
@@ -621,11 +622,11 @@ func (d *nodeDetail) sizeEngineTable() {
 	d.engineTable.SetHeight(want)
 }
 
-// detailChromeRows is the fixed furniture on the detail screen: the identity
-// and availability lines, the two section headings, and the blank line between the sections. The
-// editor and status line come and go, so View measures those directly rather
-// than reserving for them here.
-const detailChromeRows = 5
+// detailChromeRows is the fixed furniture on the detail screen: the identity,
+// availability and reported-build lines, the two section headings, and the blank
+// line between the sections. The editor and status line come and go, so View
+// measures those directly rather than reserving for them here.
+const detailChromeRows = 6
 
 // hardwareHeight is the rows the hardware block occupies, so the model table can
 // be sized without rendering it first.
@@ -2077,6 +2078,14 @@ func (d *nodeDetail) View() string {
 		"   %s:%d   %s   %s   %s",
 		d.node.address, d.node.port, d.node.presence, d.node.membership, scope))
 	identity += "\n" + footerStyle.Render(d.policyLabel())
+	build := string(d.node.serviceBuildID)
+	if build == "" {
+		build = "--"
+	}
+	if d.node.serviceBuildID != "" && d.node.presence != presenceOnline {
+		build += " (cached; node is not reachable)"
+	}
+	identity += "\n" + footerStyle.Render("Reported service build: "+build)
 	if d.remote() {
 		identity += "\n" + footerStyle.Render(d.remotePermissionLine())
 	}
@@ -2115,9 +2124,13 @@ func (d *nodeDetail) View() string {
 	// measured as one.
 	const separator = " "
 	status := d.status.render()
-	hardware := d.hardwareBlock()
 	enginesHeading := d.paneHeading("Engines", detailEngines)
 	modelsHeading := d.paneHeading("Models", detailModels)
+	// Hardware must leave room even for the engine list's one-line fallback.
+	// Measure the current identity, editor and status before choosing its cap.
+	hardwareRoom := d.height - countLines(identity) - countLines(enginesHeading) -
+		1 - countLines(editor) - countLines(status)
+	hardware := d.hardwareBlockWithin(min(d.hardwareBudget(), hardwareRoom))
 
 	// The engine table's height comes from the engine count, not the budget, so
 	// on a very short screen it is the piece that will not shrink. Replaced by a
@@ -2186,6 +2199,10 @@ func (d *nodeDetail) View() string {
 
 // hardwareBlock renders the node's own GPU, CPU, and memory readings.
 func (d *nodeDetail) hardwareBlock() string {
+	return d.hardwareBlockWithin(d.hardwareBudget())
+}
+
+func (d *nodeDetail) hardwareBlockWithin(budget int) string {
 	if !d.telemetryOK {
 		if d.node.presence != presenceOnline {
 			return footerStyle.Render("  hardware: unavailable (node is not reachable)")
@@ -2202,7 +2219,7 @@ func (d *nodeDetail) hardwareBlock() string {
 	// below it — the engine table, the models list, the status line — was then
 	// pushed off the frame, so the screen showed a hardware readout and nothing
 	// else, with no sign anything was missing.
-	if max := d.hardwareBudget(); len(lines) > max {
+	if max := clampWidth(budget, 1); len(lines) > max {
 		hidden := len(lines) - (max - 1)
 		lines = append(lines[:max-1],
 			footerStyle.Render(fmt.Sprintf("  ...and %d more device(s)", hidden)))

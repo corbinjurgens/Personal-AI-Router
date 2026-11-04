@@ -499,7 +499,7 @@ func (m Model) headerView() string {
 	case m.disconnected:
 		status = statusErrStyle.Render("service disconnected")
 	case m.ready:
-		status = statusOKStyle.Render(fmt.Sprintf("service ready  v%s", m.brokerVersion))
+		status = statusOKStyle.Render(fmt.Sprintf("broker ready  v%s", m.brokerVersion))
 	default:
 		status = footerStyle.Render("starting service...")
 	}

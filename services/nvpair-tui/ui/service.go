@@ -857,11 +857,11 @@ func (v *serviceView) hiddenWorkers() int {
 }
 
 func (v *serviceView) View() string {
-	summary := statusOKStyle.Render(fmt.Sprintf("service v%s  up %s",
+	summary := statusOKStyle.Render(fmt.Sprintf("broker v%s  up %s",
 		v.brokerVersion, v.uptime.Round(time.Second)))
 	if v.pingErr != nil {
 		summary = statusErrStyle.Render(
-			"service not responding: " + v.pingErr.Error() +
+			"broker not responding: " + v.pingErr.Error() +
 				" - press 5 for Logs, or Q to stop the service and start nvpair again")
 	}
 
