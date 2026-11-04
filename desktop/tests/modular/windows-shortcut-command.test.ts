@@ -30,7 +30,11 @@ vi.mock('electron', () => ({
 vi.mock('@/shared/utils/platform', () => ({ currentPlatform: () => 'win32' }))
 vi.mock('@/shared/utils/log', () => ({ createStructuredLogger: () => ({ info: vi.fn(), warn: vi.fn() }), initFileLogger: vi.fn() }))
 vi.mock('@/electron/globals', () => ({ initPlatform: vi.fn() }))
-vi.mock('@/electron/path', () => ({ ElectronPathProvider: vi.fn(), setPaths: vi.fn() }))
+vi.mock('@/electron/path', () => ({
+    ElectronPathProvider: vi.fn(),
+    setPaths: vi.fn(),
+    getSystemAppData: () => 'C:\\User'
+}))
 vi.mock('@/electron/build-apply', () => ({ handleBuildApplyEntry: calls.buildApply }))
 vi.mock('@/electron/connector', () => ({ initializeConnector: calls.connector }))
 vi.mock('@/electron/service-bridge/modular-supervisor', () => ({ ModularSupervisor: calls.service }))
