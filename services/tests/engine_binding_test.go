@@ -869,7 +869,12 @@ func testEngineBindingRing(t *testing.T) {
 	manual := settings.SwitchRequest{RequestID: "binding-manual-retained", SourceEngine: "ollama", TargetEngine: "llamacpp", ExpectedRevision: "e3v1:" + strings.Repeat("0", 64)}
 	m, err := f.client.call(strconv.FormatInt(newRPCID(), 10), settings.SwitchMethod, mustMarshal(t, manual), serviceCallTimeout)
 	if err != nil || m.Error == nil || m.Error.Code != settings.SwitchConfigurationConflictCode {
-		t.Fatalf("manual receipt setup: transport=%v", err)
+		t.Fatalf("manual receipt setup: transport=%v outcome=%s", err, func() string {
+			if m != nil && m.Error != nil {
+				return fmt.Sprintf("code=%d message=%q", m.Error.Code, m.Error.Message)
+			}
+			return "result present"
+		}())
 	}
 	manualReceipt := f.status(t, manual.RequestID).Receipt
 	if manualReceipt == nil || manualReceipt.Automatic || !manualReceipt.Terminal || manualReceipt.Phase != settings.SwitchRejected {
