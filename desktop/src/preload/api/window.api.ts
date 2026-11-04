@@ -15,7 +15,7 @@ export interface IWindowActionApi {
     /** Subscribe to maximize/restore from OS (e.g. title-bar double-click). Returns unsubscribe. */
     onMaximizedChanged(callback: (maximized: boolean) => void): () => void
     openOverview(): Promise<void>
-    /** Open/focus Overview and expand the given node's inline engine settings (used by the tray). */
+    /** Open/focus Overview and show the given node's settings page (used by the tray). */
     focusNode(nodeId: string): Promise<void>
     /** Tell main the Overview renderer has subscribed and is ready for `overview:command`. */
     overviewReady(): Promise<void>
