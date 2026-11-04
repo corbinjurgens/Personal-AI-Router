@@ -19,7 +19,7 @@ import { useConnectionStore } from '@/ui/stores/connection.store'
 import { RemoteManagementChoice } from '@/ui/components/InvitePairingPanel'
 
 export default function ActiveNode({ node }: { node: ClusterNode }) {
-    const focusNodeEngineSettings = useOverviewUiStore(state => state.focusNodeEngineSettings)
+    const focusNodeSettings = useOverviewUiStore(state => state.focusNodeSettings)
     const connected = useConnectionStore(state => state.connected)
     const permissions = useClusterInvitationsStore(state => state.remoteManagement)
     const permissionError = useClusterInvitationsStore(state => state.remoteManagementError)
@@ -72,7 +72,7 @@ export default function ActiveNode({ node }: { node: ClusterNode }) {
         () => [
             {
                 children: 'Edit node',
-                onSelect: () => focusNodeEngineSettings(node.nodeUuid)
+                onSelect: () => focusNodeSettings(node.nodeUuid)
             },
             {
                 children: 'Remove from cluster',
@@ -82,7 +82,7 @@ export default function ActiveNode({ node }: { node: ClusterNode }) {
                 }
             }
         ],
-        [node.nodeUuid, focusNodeEngineSettings]
+        [node.nodeUuid, focusNodeSettings]
     )
 
     return (

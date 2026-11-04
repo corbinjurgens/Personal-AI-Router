@@ -238,6 +238,9 @@ function inspection() {
                     domainId: 'uma',
                     status: 'estimated',
                     bytes: '4096',
+                    lowBytes: '4096',
+                    highBytes: '4096',
+                    basis: 'derived',
                     reason: 'bounded tensor facts'
                 }
             ],
@@ -626,7 +629,15 @@ describe('model contract validation', () => {
                 estimate: {
                     status: 'partial',
                     components: [
-                        { name: 'weights', domainId: 'missing', status: 'estimated', bytes: '1' }
+                        {
+                            name: 'weights',
+                            domainId: 'missing',
+                            status: 'estimated',
+                            bytes: '1',
+                            lowBytes: '1',
+                            highBytes: '1',
+                            basis: 'derived'
+                        }
                     ]
                 }
             }

@@ -5,6 +5,16 @@ SPDX-License-Identifier: Apache-2.0
 
 # Personal AI Router Architecture
 
+Node configuration is available from one **Node settings** page in Settings.
+Choose a node with the page's node picker, or open the page for a specific node
+with the **Node settings** button on its Overview card. Cluster **Edit node**,
+the welcome flow and the tray's existing node-settings route open that same page
+for their selected node. The page groups Availability, Roles, Model settings
+(including engine bindings), Engines and Advanced policy JSON. Its Engines
+section contains the controls formerly shown in the card's expandable engine
+settings. Bulk configuration and routing history are cluster-wide sections in
+Cluster settings. These entry points do not change setting behavior.
+
 The model configuration contract keeps portable selected edits separate from
 target-owned artifacts, allocation resolution and runtime readback. The renderer
 uses `pairApi.engines.inspectModel`; Electron decodes the service reply without

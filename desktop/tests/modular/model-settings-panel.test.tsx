@@ -24,6 +24,7 @@ import { ModelManager } from '@/ui/components/ModelManager/ModelManager'
 import ModelSettingsPanel from '@/ui/components/ModelSettings/ModelSettingsPanel'
 import RoutingSettings from '@/ui/components/RoutingSettings/RoutingSettings'
 import { useConnectionStore } from '@/ui/stores/connection.store'
+import { useOverviewUiStore } from '@/ui/stores/overview-ui.store'
 import { useEngineModelsStore } from '@/ui/stores/engine-models.store'
 import { useEngineProgressStore } from '@/ui/stores/engine-progress.store'
 import { useNodeConfigurationStore } from '@/ui/stores/node-configuration.store'
@@ -31,6 +32,7 @@ import { useNodesStore } from '@/ui/stores/nodes.store'
 import { usePendingActionsStore } from '@/ui/stores/pending-actions.store'
 
 vi.mock('@/ui/components/RoutingSettings/RoleEditor', () => ({ default: () => null }))
+vi.mock('@/ui/components/NodeList/NodeEngineSettings', () => ({ default: () => null }))
 vi.mock('@/ui/components/RoutingSettings/BulkNodeConfiguration', () => ({ default: () => null }))
 vi.mock('@/ui/components/ModelManager/ModelCopyModal', () => ({ ModelCopyModal: () => null }))
 vi.mock('@/ui/components/ModelHub/ModelHubModal', () => ({ ModelHubModal: () => null }))
@@ -163,6 +165,7 @@ function manager() {
 }
 
 beforeEach(() => {
+    useOverviewUiStore.setState({ settingsNodeId: null })
     vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
     vi.stubGlobal('CSS', { supports: () => false, escape: (value: string) => value })
     Object.defineProperty(HTMLDialogElement.prototype, 'show', {

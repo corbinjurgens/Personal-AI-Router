@@ -5,6 +5,7 @@
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
 import { LOCAL_VETO_CODE } from '@/shared/constants/service-errors'
 import type { NodeAvailabilityChange, NodePolicyDocument } from '@/shared/types/node-policy'
 import type { NodeItem } from '@/shared/types/nodes'
@@ -13,6 +14,7 @@ import { createPairApi, type INodePolicyApi } from '@/ui/api/pair-api'
 import { ServiceCallError } from '@/ui/api/service-transport'
 import RoutingSettings from '@/ui/components/RoutingSettings/RoutingSettings'
 import { useConnectionStore } from '@/ui/stores/connection.store'
+import { useOverviewUiStore } from '@/ui/stores/overview-ui.store'
 import {
     initializeNodeAvailability,
     useNodeConfigurationStore
@@ -20,6 +22,7 @@ import {
 import { useNodesStore } from '@/ui/stores/nodes.store'
 
 vi.mock('@/ui/components/RoutingSettings/RoleEditor', () => ({ default: () => null }))
+vi.mock('@/ui/components/NodeList/NodeEngineSettings', () => ({ default: () => null }))
 vi.mock('@/ui/components/RoutingSettings/BulkNodeConfiguration', () => ({ default: () => null }))
 
 function documentFor(
@@ -63,6 +66,7 @@ async function mount(availability: NodePolicyDocument['availability'] = 'drainin
 }
 
 beforeEach(() => {
+    useOverviewUiStore.setState({ settingsNodeId: null })
     vi.useFakeTimers()
     vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
     vi.stubGlobal('CSS', { supports: () => true })
