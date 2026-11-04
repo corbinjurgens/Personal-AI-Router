@@ -20,6 +20,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"nvpair-shared/nodepolicy"
 	"nvpair-shared/performancewire"
 )
 
@@ -138,8 +139,8 @@ func (p *Proxy) sendPerformance(ctx context.Context) {
 }
 
 // performanceFingerprint is the only serving-profile hash in the proxy. The
-// joined identity is read under its owner's lock and reduced to this model's
-// digest. No filename, alias, response model or placeholder supplies identity.
+// joined identity is read under its owner's lock. Models without a content
+// digest use their normalized name only for measurement, never qualification.
 func (f *facade) performanceFingerprint(model, api string, body []byte) (performancewire.ProfileKey, performanceExtractQualification, bool) {
 	key, qualification, _, ok := f.performanceFingerprintOwned(model, api, body)
 	return key, qualification, ok
@@ -153,7 +154,7 @@ func (f *facade) performanceFamily() string {
 	return family
 }
 
-type performanceIdentityTuple struct{ run, settings, launch, model, api, schema, host, engine, normalizedModel string }
+type performanceIdentityTuple struct{ run, settings, launch, kind, model, api, schema, host, engine, normalizedModel string }
 
 func (f *facade) performanceCurrentIdentity(model, api string) (performancewire.ProfileKey, performanceExtractQualification, performanceIdentityTuple, bool) {
 	var tuple performanceIdentityTuple
@@ -168,18 +169,23 @@ func (f *facade) performanceCurrentIdentity(model, api string) (performancewire.
 		return performancewire.ProfileKey{}, q, tuple, false
 	}
 	a := f.host.admission
+	normalized := f.profile.normalizeModel(model)
 	a.mu.Lock()
 	id, exists := a.strict.identity[f.profile.Name]
-	digest, found := a.modelDigestLocked(id, admKey{engine: f.profile.Name, model: f.profile.normalizeModel(model)})
-	valid := exists && found && id.Validate() == nil
+	digest, found := a.modelDigestLocked(id, admKey{engine: f.profile.Name, model: normalized})
+	valid := exists && id.Validate() == nil
 	// Copy only immutable scalars; the projection's map never escapes its lock.
 	run, settings, launch := id.EngineRunID, id.SettingsFingerprint, id.LaunchDigest
 	a.mu.Unlock()
 	host, _ := f.host.selfIdentity(f.profile.Name)
-	if !valid || host == "" {
+	if !valid || host == "" || nodepolicy.ValidateModelIdentifier(normalized) != nil {
 		return performancewire.ProfileKey{}, q, tuple, false
 	}
-	tuple = performanceIdentityTuple{run, settings, launch, digest, api, family + ":" + q.SchemaID, host, f.profile.Name, f.profile.normalizeModel(model)}
+	kind, modelIdentity := "digest", digest
+	if !found {
+		kind, modelIdentity = "name", normalized
+	}
+	tuple = performanceIdentityTuple{run, settings, launch, kind, modelIdentity, api, family + ":" + q.SchemaID, host, f.profile.Name, normalized}
 	key := performancewire.ProfileKey{Host: host, Engine: tuple.engine, Model: tuple.normalizedModel}
 	return key, q, tuple, true
 }
@@ -195,6 +201,9 @@ func (f *facade) performanceFingerprintOwned(model, api string, body []byte) (pe
 			h.Write([]byte("{"))
 		} else {
 			h.Write([]byte(","))
+		}
+		if field.name == "Model" && tuple.kind == "name" {
+			h.Write([]byte(`"Kind":"name",`))
 		}
 		performanceHashString(h, []byte(field.name))
 		h.Write([]byte(":"))

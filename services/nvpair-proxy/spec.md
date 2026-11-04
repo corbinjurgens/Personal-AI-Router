@@ -67,8 +67,11 @@ execution sample.
 
 The profile key uses the measuring host, actual engine, normalized dispatched
 model and a hash from the existing joined `EngineIdentity` (engine run,
-settings fingerprint, launch digest and model-content digest), normalized
+settings fingerprint, launch digest and model-content digest when available), normalized
 effective request options, API and extractor schema. Request content is excluded.
+Models without a content digest use the normalized model name with an explicit
+identity kind for measurement only; this grants no strict or hybrid eligibility.
+Replacing a model file under the same name within one engine run is not detected.
 Unknown top-level overrides or missing required identity suppress observations;
 there is no placeholder digest. Finalization revalidates the identity/key and
 drops stale executions rather than relabeling them. Descriptor `Family` selects

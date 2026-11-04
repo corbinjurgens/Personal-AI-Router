@@ -52,6 +52,32 @@ func aliasFixture(t *testing.T, tc engineCase) *tierFixture {
 	return newTierFixture(t, tc, stagedHybridPolicy(t), map[string][]string{"a": models}, nil)
 }
 
+func TestHybridNameBasedPerformanceDoesNotGrantLocalEligibility(t *testing.T) {
+	fx := newReadinessEnvelopeFixture(t, "llamacpp")
+	fx.policy.Roles = map[string]nodepolicy.Role{"weak": {Engine: "llamacpp", Model: "m"}}
+	fx.install(t)
+	p := performanceProxy(t, "llamacpp")
+	p.admission = fx.a
+	f := p.soleFacade()
+	u := performanceUpstream(t, "data: "+performanceLlamaFinal+"\n\ndata: [DONE]\n\n")
+	setBackend(t, f, u.URL, true)
+	if got := f.hybridLocalCandidates("weak", requestNeeds{}, false); len(got) != 1 || !got[0].self || got[0].model != "m" {
+		t.Fatalf("digest-backed control lacks local hybrid candidate: %+v", got)
+	}
+	fx.id.ModelDigests = map[string]string{}
+	fx.id.Serving = nil
+	if err := fx.id.Validate(); err != nil {
+		t.Fatalf("digest-less engine identity: %v", err)
+	}
+	fx.a.setModelIdentity(map[string]nodepolicy.EngineIdentity{"llamacpp": fx.id})
+	if _, _, ok := f.performanceFingerprint("m", routeChatCompletions, []byte(`{"model":"m","stream":true}`)); !ok {
+		t.Fatal("digest-less identity did not allow performance measurement")
+	}
+	if got := f.hybridLocalCandidates("weak", requestNeeds{}, false); len(got) != 0 {
+		t.Fatalf("name-based measurement granted local hybrid eligibility: %+v", got)
+	}
+}
+
 type aliasRefusal struct {
 	Error  string `json:"error"`
 	Code   string `json:"code"`

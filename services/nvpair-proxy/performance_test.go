@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -187,13 +188,13 @@ func TestPerformanceStrictDestinations(t *testing.T) {
 }
 
 func TestPerformanceMissingIdentitySuppresses(t *testing.T) {
-	for _, missing := range []string{"engine", "model", "run", "settings", "launch", "host"} {
+	for _, missing := range []string{"engine", "model digest map", "run", "settings", "launch", "host"} {
 		t.Run(missing, func(t *testing.T) {
 			p := performanceProxy(t, "llamacpp")
 			id := performanceIdentity()
 			switch missing {
-			case "model":
-				id.ModelDigests = map[string]string{}
+			case "model digest map":
+				id.ModelDigests = nil
 			case "run":
 				id.EngineRunID = ""
 			case "settings":
@@ -226,6 +227,11 @@ func TestPerformanceFingerprint(t *testing.T) {
 	key, _, ok := f.performanceFingerprint("m", routeChatCompletions, base)
 	if !ok {
 		t.Fatal("valid projection refused")
+	}
+	// Pinned on unchanged dc56af66 before name-based measurement was added.
+	const digestFingerprint = "cd191dc9cda763d54e91953dde3a7b8264ac5172ac492d32d14e73b2132bda97"
+	if key.Fingerprint != digestFingerprint {
+		t.Fatalf("digest-backed fingerprint=%s, want %s", key.Fingerprint, digestFingerprint)
 	}
 	same, _, ok := f.performanceFingerprint("m", routeChatCompletions, []byte(`{"temperature":1e0,"stream":true,"messages":[{"role":"user","content":"different"}],"model":"alias"}`))
 	if !ok || same != key {
@@ -263,6 +269,39 @@ func TestPerformanceFingerprint(t *testing.T) {
 	}
 	if _, _, ok := f.performanceFingerprint("m", routeChatCompletions, []byte(`{"model":"m","mystery_override":true}`)); ok {
 		t.Fatal("unknown override qualified")
+	}
+}
+
+func TestPerformanceIdentityKindSeparatesSameModelValue(t *testing.T) {
+	p := performanceProxy(t, "llamacpp")
+	f := p.soleFacade()
+	// A valid model name can itself equal a digest. Only the kind separates
+	// these identities, including the in-flight tuple comparison.
+	model := strings.Repeat("c", 64)
+	body := []byte(`{"model":"` + model + `","stream":true}`)
+	id := performanceIdentity()
+	id.ModelDigests = map[string]string{model: model}
+	p.admission.setModelIdentity(map[string]nodepolicy.EngineIdentity{"llamacpp": id})
+	digestKey, _, ok := f.performanceFingerprint(model, routeChatCompletions, body)
+	if !ok {
+		t.Fatal("digest-backed fixture refused")
+	}
+	id.ModelDigests = map[string]string{}
+	p.admission.setModelIdentity(map[string]nodepolicy.EngineIdentity{"llamacpp": id})
+	nameKey, _, ok := f.performanceFingerprint(model, routeChatCompletions, body)
+	if !ok || nameKey.Fingerprint == digestKey.Fingerprint {
+		t.Fatal("identity kinds shared a fingerprint")
+	}
+	a := f.newPerformanceAttempt(context.Background(), model, routeChatCompletions, body, 0)
+	if a == nil {
+		t.Fatal("no name-based attempt")
+	}
+	a.start = time.Now()
+	id.ModelDigests = map[string]string{model: model}
+	p.admission.setModelIdentity(map[string]nodepolicy.EngineIdentity{"llamacpp": id})
+	a.finish(&statusCapture{}, true)
+	if len(performanceSamples(p)) != 0 || p.performance.drops[2] != 1 {
+		t.Fatal("changed identity kind did not drop the attempt")
 	}
 }
 
@@ -829,19 +868,70 @@ func TestPerformancePreparationImpossibleBeforeAllocation(t *testing.T) {
 }
 
 func TestPerformanceStaleIdentityDrops(t *testing.T) {
-	p := performanceProxy(t, "llamacpp")
-	a := p.soleFacade().newPerformanceAttempt(context.Background(), "m", routeChatCompletions, []byte(`{"model":"m","stream":true}`), 0)
-	if a == nil {
-		t.Fatal("no attempt")
+	for _, kind := range []string{"digest", "name"} {
+		t.Run(kind, func(t *testing.T) {
+			p := performanceProxy(t, "llamacpp")
+			id := performanceIdentity()
+			if kind == "name" {
+				id.ModelDigests = map[string]string{}
+			}
+			p.admission.setModelIdentity(map[string]nodepolicy.EngineIdentity{"llamacpp": id})
+			a := p.soleFacade().newPerformanceAttempt(context.Background(), "m", routeChatCompletions, []byte(`{"model":"m","stream":true}`), 0)
+			if a == nil {
+				t.Fatal("no attempt")
+			}
+			a.start = time.Now()
+			id.EngineRunID = "runtime-2"
+			p.admission.setModelIdentity(map[string]nodepolicy.EngineIdentity{"llamacpp": id})
+			a.finish(&statusCapture{}, true)
+			if len(performanceSamples(p)) != 0 || p.performance.drops[2] != 1 {
+				t.Fatal("stale identity relabeled")
+			}
+		})
 	}
-	a.start = time.Now()
-	id := performanceIdentity()
-	id.EngineRunID = "runtime-2"
-	p.admission.setModelIdentity(map[string]nodepolicy.EngineIdentity{"llamacpp": id})
-	a.finish(&statusCapture{}, true)
-	if len(performanceSamples(p)) != 0 || p.performance.drops[2] != 1 {
-		t.Fatal("stale identity relabeled")
+}
+
+func TestPerformanceNameIdentityDestinationFixtures(t *testing.T) {
+	test := func(name, fixture, body string) {
+		t.Run(name, func(t *testing.T) {
+			p := performanceProxy(t, "llamacpp")
+			f := p.soleFacade()
+			digestKey, _, ok := f.performanceFingerprint("m", routeChatCompletions, []byte(body))
+			if !ok {
+				t.Fatal("digest-backed fixture refused")
+			}
+			id := performanceIdentity()
+			id.ModelDigests = map[string]string{}
+			if err := id.Validate(); err != nil {
+				t.Fatalf("digest-less fixture identity: %v", err)
+			}
+			p.admission.setModelIdentity(map[string]nodepolicy.EngineIdentity{"llamacpp": id})
+			payload, err := os.ReadFile(filepath.Join("testdata", "performance", fixture))
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The extraction recordings omit the terminal SSE blank line.
+			u := performanceUpstream(t, string(payload)+"\n")
+			setBackend(t, f, u.URL, true)
+			w := httptest.NewRecorder()
+			f.handleHTTP(w, httptest.NewRequest(http.MethodPost, routeChatCompletions, strings.NewReader(body)))
+			s := performanceOne(t, p)
+			if w.Code != http.StatusOK || s.Key.Host != "destination" || s.Key.Engine != "llamacpp" || s.Key.Model != "m" || s.Key.Fingerprint == digestKey.Fingerprint {
+				t.Fatalf("name-based destination status/key=%d %+v, digest key=%+v", w.Code, s.Key, digestKey)
+			}
+			if s.Outcome != performancewire.OutcomeCompleted || s.ProtocolComplete == nil || !*s.ProtocolComplete || s.PromptTokens == nil || *s.PromptTokens != 10 || s.PrefillNs == nil || *s.PrefillNs != 125000 || s.EngineDecodeNs == nil || *s.EngineDecodeNs != 250500000 || s.EngineDecodeTokensPerSecond == nil || *s.EngineDecodeTokensPerSecond != 39.92015968063872 || s.DecodeNs != nil {
+				t.Fatalf("name-based measurements=%+v", s.Measurement)
+			}
+			p.admission.mu.Lock()
+			got := p.admission.strict.identity["llamacpp"]
+			p.admission.mu.Unlock()
+			if !reflect.DeepEqual(got, id) {
+				t.Fatalf("measurement changed engine identity: got %+v, want %+v", got, id)
+			}
+		})
 	}
+	test("usage object", "llamacpp-chat-stream-usage.txt", `{"model":"m","messages":[],"stream":true,"stream_options":{"include_usage":true}}`)
+	test("finish object without usage", "llamacpp-chat-stream-no-usage.txt", `{"model":"m","messages":[],"stream":true}`)
 }
 
 func TestPerformanceRetryAttemptsOnce(t *testing.T) {
