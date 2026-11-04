@@ -57,9 +57,13 @@ func TestSwitchLocalOffAfterPublicationFailsBeforeStopReply(t *testing.T) {
 			var stop struct {
 				Engine            string `json:"engine"`
 				SwitchOperationID string `json:"switchOperationId"`
+				VerifyStop        bool   `json:"verifyStop"`
 			}
 			if err := json.Unmarshal(raw, &stop); err != nil {
 				return nil, err.Error()
+			}
+			if stop.VerifyStop {
+				return base(method, raw)
 			}
 			if stop.Engine != "lmstudio" || stop.SwitchOperationID != p.RequestID {
 				t.Errorf("stop lost admitted switch identity: %+v", stop)
@@ -236,7 +240,10 @@ func TestSwitchOffAdmissionRechecksAfterNegativeReservationLookup(t *testing.T) 
 func TestSwitchOffNegativeLookupAndOperationAdmissionAreOrdered(t *testing.T) {
 	h := newSwitchHarness(t)
 	p := h.request(t, "off-ordered")
-	remote, reserved, _ := h.b.admitLocalEngineOff("lmstudio")
+	remote, reserved, _, err := h.b.admitLocalEngineOff("lmstudio")
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer h.b.settingsApplyMu.Unlock()
 	if remote || reserved {
 		t.Fatalf("unexpected Off reservation: remote %v, reserved %v", remote, reserved)
@@ -272,7 +279,10 @@ func TestSwitchLatchedOffCleanupPrecedesLocalStopAdmission(t *testing.T) {
 			requireGateOpens(t, reached, "post-publication barrier")
 			// Pause the local handler at its actual admission boundary, before
 			// dispatching any engine:stop to the manager.
-			remote, reserved, operationID := h.b.admitLocalEngineOff(engine)
+			remote, reserved, operationID, err := h.b.admitLocalEngineOff(engine)
+			if err != nil {
+				t.Fatal(err)
+			}
 			if !remote || !reserved || operationID != p.RequestID {
 				t.Fatalf("Off admission = %v, %v, %q", remote, reserved, operationID)
 			}
@@ -281,8 +291,8 @@ func TestSwitchLatchedOffCleanupPrecedesLocalStopAdmission(t *testing.T) {
 			if r.Phase != settings.SwitchFailedPublication || r.Error == nil || r.Error.Kind != settings.SwitchErrorRemoteVeto || r.RecoveryRequired || !r.Target.TerminationVerified || r.Target.Intent != settings.SwitchIntentOff || r.Source.Intent != settings.SwitchIntentOff {
 				t.Fatalf("latched-veto terminal = %+v", r)
 			}
-			if stops := h.engine.methods("engine:stop"); len(stops) != 0 {
-				t.Fatalf("cleanup depended on local stop delivery: %v", stops)
+			if stops := h.engine.methods("engine:stop"); len(stops) != 1 {
+				t.Fatalf("broker must discharge the Off before held delivery: %v", stops)
 			}
 			h.mu.Lock()
 			cp := *h.cp
@@ -344,7 +354,10 @@ func TestSwitchDrainFailureReconcilesReservedSourceOffBeforeDelayedStop(t *testi
 		t.Fatal(err)
 	}
 	requireGateOpens(t, reached, "drain before source-stop")
-	remote, reserved, operationID := h.b.admitLocalEngineOff("llamacpp")
+	remote, reserved, operationID, err := h.b.admitLocalEngineOff("llamacpp")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !remote || !reserved || operationID != p.RequestID {
 		t.Fatalf("source Off admission = %v, %v, %q", remote, reserved, operationID)
 	}
@@ -361,6 +374,71 @@ func TestSwitchDrainFailureReconcilesReservedSourceOffBeforeDelayedStop(t *testi
 	w := h.b.getEngineMgr()
 	if _, rpcErr, err := w.CallNoTimeout(context.Background(), "engine:stop", settingsJSON(map[string]string{"engine": "llamacpp", "switchOperationId": operationID})); err != nil || rpcErr != nil {
 		t.Fatalf("held stop after terminal/release: %v, %+v", err, rpcErr)
+	}
+}
+
+func TestSwitchPrepareRejectedByOlderPeerStartDischargesAdmittedOff(t *testing.T) {
+	h := newSwitchHarness(t)
+	clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")
+	p := h.request(t, "older-peer-start-off")
+	prepare, reject, stop, peerSettled := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var rejectOnce, peerOnce sync.Once
+	openPrepare := func() { rejectOnce.Do(func() { close(reject) }) }
+	settlePeer := func() { peerOnce.Do(func() { close(peerSettled) }) }
+	t.Cleanup(openPrepare)
+	t.Cleanup(settlePeer)
+	base := h.engine.answer
+	h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+		if method == settings.SwitchPrepareMethod {
+			var request settings.SwitchPrepareRequest
+			if err := json.Unmarshal(raw, &request); err != nil {
+				return nil, err.Error()
+			}
+			if request.OperationID != "" {
+				close(prepare)
+				<-reject
+				return settings.SwitchPrepareResult{Error: &settings.SwitchError{Code: settings.SwitchOperationErrorCode, Kind: settings.SwitchErrorBusy, Message: "older peer start still active"}}, ""
+			}
+		}
+		if method == settings.SwitchReconcileMethod {
+			return settings.SwitchReconcileResult{Observed: settings.SwitchObserved{Source: switchTestState(true, true, settings.SwitchIntentOn), Target: switchTestState(false, false, settings.SwitchIntentOff)}, Error: &settings.SwitchError{Code: settings.SwitchInvalidParamsCode, Kind: settings.SwitchErrorInvalidRequest, Message: "no checkpoint"}}, ""
+		}
+		if method == "engine:stop" {
+			var request struct {
+				OperationID string `json:"switchOperationId"`
+				VerifyStop  bool   `json:"verifyStop"`
+			}
+			if err := json.Unmarshal(raw, &request); err != nil {
+				return nil, err.Error()
+			}
+			if request.OperationID != "" || !request.VerifyStop {
+				return nil, "expected broker-owned ordinary discharge"
+			}
+			close(stop)
+			<-peerSettled
+		}
+		return base(method, raw)
+	})
+	if _, err := h.b.acceptEngineSwitch(context.Background(), p, "peer"); err != nil {
+		t.Fatal(err)
+	}
+	requireGateOpens(t, prepare, "prepare overlapping older peer start")
+	remote, reserved, id, err := h.b.admitLocalEngineOff("llamacpp")
+	if err != nil || !remote || !reserved || id != p.RequestID {
+		t.Fatalf("Off admission: %v %v %s %v", remote, reserved, id, err)
+	}
+	openPrepare()
+	requireGateOpens(t, stop, "ordinary discharge waiting for older start")
+	if disk := switchStoreDisk(t, h.b.engineSwitch.store); disk.Receipts[id].Terminal || disk.LocalObligations[id].Discharged {
+		t.Fatal("operation released before older start settled and Off was verified")
+	}
+	settlePeer()
+	r := h.receipt(t, id)
+	if r.Phase != settings.SwitchFailedValidation || r.RecoveryRequired || r.Source.Intent != settings.SwitchIntentOff || !r.Source.TerminationVerified {
+		t.Fatalf("rejected prepare discharge: %+v", r)
+	}
+	if disk := switchStoreDisk(t, h.b.engineSwitch.store); !disk.LocalObligations[id].Discharged {
+		t.Fatal("terminal preceded durable discharge")
 	}
 }
 
@@ -387,7 +465,7 @@ func TestSwitchVetoDuringReconcileRepeatsCleanupBeforeTerminal(t *testing.T) {
 		t.Fatal(err)
 	}
 	requireGateOpens(t, read, "reconcile read before veto")
-	if remote, reserved, _ := h.b.admitLocalEngineOff("llamacpp"); !remote || !reserved {
+	if remote, reserved, _, err := h.b.admitLocalEngineOff("llamacpp"); err != nil || !remote || !reserved {
 		t.Fatalf("Off admission: remote %v, reserved %v", remote, reserved)
 	}
 	open()
@@ -407,11 +485,42 @@ func TestSwitchLatchedPauseReconcileCleansCommittedTarget(t *testing.T) {
 	}
 	requireGateOpens(t, reached, "post-publication barrier")
 	// Pause's latch precedes projection delivery in the real availability path.
-	h.b.vetoRemoteEngineSwitch("", false)
+	if err := h.b.vetoRemoteEngineSwitch("", false); err != nil {
+		t.Fatal(err)
+	}
+	runtime := h.b.nodePolicyRuntime()
+	runtime.mu.Lock()
+	runtime.current.Availability, runtime.current.PausedBy = nodepolicy.Paused, nodepolicy.PausedLocally
+	runtime.mu.Unlock()
 	release()
 	r := h.receipt(t, p.RequestID)
 	if r.Phase != settings.SwitchFailedPublication || r.RecoveryRequired || r.Target.Intent != settings.SwitchIntentOff || !r.Target.TerminationVerified {
 		t.Fatalf("latched pause terminal = %+v", r)
+	}
+}
+
+func TestSwitchUnappliedPauseRetainsDurableObligation(t *testing.T) {
+	h := newSwitchHarness(t)
+	clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")
+	p := h.request(t, "unapplied-pause")
+	reached, release := holdSwitchCompletion(t, h)
+	if _, err := h.b.acceptEngineSwitch(context.Background(), p, "peer"); err != nil {
+		t.Fatal(err)
+	}
+	requireGateOpens(t, reached, "post-publication barrier")
+	if err := h.b.vetoRemoteEngineSwitch("", false); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	r := h.receipt(t, p.RequestID)
+	o := switchStoreDisk(t, h.b.engineSwitch.store).LocalObligations[p.RequestID]
+	if !r.RecoveryRequired || !o.Pause || o.Discharged {
+		t.Fatalf("unapplied pause: receipt=%+v obligation=%+v", r, o)
+	}
+	for _, step := range switchSteps(t, h.engine) {
+		if step == settings.SwitchStepRelease {
+			t.Fatal("released before pause applied")
+		}
 	}
 }
 

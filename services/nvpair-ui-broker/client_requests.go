@@ -356,7 +356,11 @@ func (b *Broker) relayToEngineNow(msg *Message) {
 			Engine string `json:"engine"`
 		}
 		if json.Unmarshal(msg.Params, &target) == nil && target.Engine != "" {
-			remote, reserved, operationID := b.admitLocalEngineOff(target.Engine)
+			remote, reserved, operationID, err := b.admitLocalEngineOff(target.Engine)
+			if err != nil {
+				_ = b.codec.RespondError(msg.ID, -32000, err.Error())
+				return
+			}
 			if reserved && !remote {
 				_ = b.codec.RespondError(msg.ID, -32000, "Engine switch reserves this engine (busy).")
 				return

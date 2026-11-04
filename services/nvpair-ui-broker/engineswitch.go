@@ -145,51 +145,164 @@ func (b *Broker) pendingSwitchLocked(engine string) error {
 }
 
 // Local Off alone may bypass the operation lock for a remote reservation,
-// including an unresolved recovery row. The manager remains the veto owner.
-func (b *Broker) switchLocalOffReservationLocked(engine string) (remote, reserved bool, operationID string) {
-	if b.loadEngineSwitchLocked() != nil {
-		return false, false, ""
+// including an unresolved recovery row. The broker durably owns its discharge.
+func (b *Broker) switchLocalOffReservationLocked(engine string) (remote, reserved bool, operationID string, err error) {
+	if err = b.loadEngineSwitchLocked(); err != nil {
+		return false, false, "", err
 	}
 	c := b.switchCoordinator()
 	if cp := c.recoveryCheckpoint; cp != nil && cp.Phase != settings.SwitchCheckpointReleased && (engine == cp.SourceEngine || engine == cp.TargetEngine) {
 		remote = cp.Origin == settings.SwitchOriginRemote
 		if remote {
+			if err = b.recordSwitchLocalObligationLocked(cp.OperationID, engine); err != nil {
+				return false, true, cp.OperationID, err
+			}
 			b.workersMu.Lock()
 			c.vetoID, c.localVeto = cp.OperationID, &settings.SwitchLocalVeto{Engine: engine}
 			b.workersMu.Unlock()
 		}
-		return remote, true, cp.OperationID
+		return remote, true, cp.OperationID, nil
 	}
 	for _, r := range c.store.journal.Receipts {
 		if (!r.Terminal || (r.RecoveryRequired && !c.resolved[r.RequestID])) && (engine == r.Request.SourceEngine || engine == r.Request.TargetEngine) {
 			remote = r.Caller != settings.SwitchOriginLocal
 			if remote {
+				if err = b.recordSwitchLocalObligationLocked(r.RequestID, engine); err != nil {
+					return false, true, r.RequestID, err
+				}
 				// Admission and completion share workersMu. Latch before the
 				// lifecycle RPC can wait for physical stop or its response.
 				b.workersMu.Lock()
 				c.vetoID, c.localVeto = r.RequestID, &settings.SwitchLocalVeto{Engine: engine}
 				b.workersMu.Unlock()
 			}
-			return remote, true, r.RequestID
+			return remote, true, r.RequestID, nil
 		}
 	}
-	return false, false, ""
+	return false, false, "", nil
+}
+
+func (b *Broker) recordSwitchLocalObligationLocked(id, engine string) error {
+	c := b.switchCoordinator()
+	r, ok := c.store.Lookup(id)
+	if !ok {
+		return switchError(settings.SwitchErrorStorage, "Cannot durably admit local veto without its switch journal record.")
+	}
+	o := c.store.journal.LocalObligations[id]
+	o.SourceOff = o.SourceOff || engine == r.Request.SourceEngine
+	o.TargetOff = o.TargetOff || engine == r.Request.TargetEngine
+	o.Pause = o.Pause || engine == ""
+	o.Discharged = false
+	if err := c.store.SaveLocalObligation(id, o); err != nil {
+		b.latchSwitchStorageLocked(err)
+		return err
+	}
+	return nil
+}
+
+// Caller owns settingsApplyMu and engineConfigMu. Drop only the admission lock
+// while stopping: a new Off can join this operation, but a later local On cannot
+// interleave. An older direct peer start settles before this ordinary stop wins.
+func (b *Broker) dischargeSwitchLocalObligationLocked(ctx context.Context, id string, observed *settings.SwitchObserved) error {
+	c := b.switchCoordinator()
+	if c.err != nil {
+		return c.err
+	}
+	for {
+		o, ok := c.store.journal.LocalObligations[id]
+		if !ok || o.Discharged {
+			return nil
+		}
+		r, ok := c.store.Lookup(id)
+		if !ok {
+			return switchError(settings.SwitchErrorStorage, "Local Off lost its operation record.")
+		}
+		b.workersMu.Lock()
+		w := b.engineMgr
+		b.workersMu.Unlock()
+		b.engineConfigMu.Unlock()
+		var stopErr error
+		for _, pair := range []struct {
+			engine string
+			off    bool
+			source bool
+		}{
+			{r.Request.SourceEngine, o.SourceOff, true}, {r.Request.TargetEngine, o.TargetOff, false},
+		} {
+			if !pair.off {
+				continue
+			}
+			var result settings.SwitchEngineState
+			stopErr = switchManagerCallOn(ctx, w, "engine:stop", struct {
+				Engine     string `json:"engine"`
+				VerifyStop bool   `json:"verifyStop"`
+			}{pair.engine, true}, &result)
+			if stopErr == nil && (result.Validate() != nil || result.Intent != settings.SwitchIntentOff || !result.TerminationVerified) {
+				stopErr = switchError(settings.SwitchErrorInterrupted, "Local Off stop could not be verified.")
+			}
+			if stopErr != nil {
+				break
+			}
+			if observed != nil {
+				if pair.source {
+					observed.Source = result
+				} else {
+					observed.Target = result
+				}
+			}
+		}
+		b.engineConfigMu.Lock()
+		if stopErr != nil {
+			return stopErr
+		}
+		b.workersMu.Lock()
+		current := w != nil && b.engineMgr == w
+		if current {
+			select {
+			case <-w.Done():
+				current = false
+			default:
+			}
+		}
+		b.workersMu.Unlock()
+		if !current {
+			return switchError(settings.SwitchErrorInterrupted, "Manager changed during local Off discharge.")
+		}
+		if o.Pause {
+			runtime := b.nodePolicyRuntime()
+			runtime.mu.Lock()
+			applied := pausedLocally(runtime.current) && !runtime.recoveryRequired && !runtime.localPauseRequested
+			runtime.mu.Unlock()
+			if !applied {
+				return switchError(settings.SwitchErrorBusy, "Local pause must be persisted and applied before switch release.")
+			}
+		}
+		if c.store.journal.LocalObligations[id] != o {
+			continue
+		}
+		o.Discharged = true
+		if err := c.store.SaveLocalObligation(id, o); err != nil {
+			b.latchSwitchStorageLocked(err)
+			return err
+		}
+		return nil
+	}
 }
 
 // Recheck reservations while waiting for ordinary settings work. Lookup and
 // TryLock share engineConfigMu with acceptance, so a negative lookup can never
 // lead to a blocking Lock behind a newly accepted switch.
-func (b *Broker) admitLocalEngineOff(engine string) (remote, reserved bool, operationID string) {
+func (b *Broker) admitLocalEngineOff(engine string) (remote, reserved bool, operationID string, err error) {
 	for {
 		b.engineConfigMu.Lock()
-		remote, reserved, operationID = b.switchLocalOffReservationLocked(engine)
-		if reserved {
+		remote, reserved, operationID, err = b.switchLocalOffReservationLocked(engine)
+		if reserved || err != nil {
 			b.engineConfigMu.Unlock()
-			return remote, reserved, operationID
+			return remote, reserved, operationID, err
 		}
 		if b.settingsApplyMu.TryLock() {
 			b.engineConfigMu.Unlock()
-			return false, false, "" // caller owns settingsApplyMu
+			return false, false, "", nil // caller owns settingsApplyMu
 		}
 		changed := b.switchCoordinator().changed
 		b.engineConfigMu.Unlock()
@@ -476,6 +589,11 @@ func (b *Broker) advanceEngineSwitch(id, phase string, observed *settings.Switch
 	if !ok {
 		return fmt.Errorf("switch receipt missing")
 	}
+	if settings.IsTerminal(phase) && !recovery {
+		if o, ok := c.store.journal.LocalObligations[id]; ok && !o.Discharged {
+			return switchError(settings.SwitchErrorRemoteVeto, "Local veto requires durable discharge.")
+		}
+	}
 	now := time.Now().UTC()
 	if now.Before(r.UpdatedAt) {
 		now = r.UpdatedAt
@@ -667,7 +785,7 @@ func (b *Broker) finishEngineSwitch(p settings.SwitchPrepareRequest, phase strin
 		err := b.switchManagerCall(ctx, settings.SwitchReconcileMethod, settings.SwitchReconcileRequest{SwitchPrepareRequest: p, LocalVeto: veto}, &result)
 		// Only an authoritative reply can prove that prepare left no reservation.
 		// A missing checkpoint in a transport/storage failure proves nothing.
-		noReservation := err == nil && result.Checkpoint == nil && phase == settings.SwitchFailedValidation && (result.Error == nil || result.Error.Kind == settings.SwitchErrorInvalidRequest)
+		noReservation := err == nil && (result.Checkpoint == nil || result.Checkpoint.Phase == settings.SwitchCheckpointReleased) && phase == settings.SwitchFailedValidation && (result.Error == nil || result.Error.Kind == settings.SwitchErrorInvalidRequest)
 		if err == nil && result.Error != nil && !switchCleanupSettled(result) {
 			err = &switchRPCError{*result.Error}
 		}
@@ -681,6 +799,14 @@ func (b *Broker) finishEngineSwitch(p settings.SwitchPrepareRequest, phase strin
 		if drainErr := b.releaseSwitchDrain(ctx, p.SourceEngine); drainErr != nil {
 			err = errors.Join(err, drainErr)
 		}
+		b.engineConfigMu.Lock()
+		cleanupObserved := result.Observed
+		if dischargeErr := b.dischargeSwitchLocalObligationLocked(ctx, p.OperationID, &cleanupObserved); dischargeErr != nil {
+			err = errors.Join(err, dischargeErr)
+		} else if cleanupObserved.Source.Intent != "" && cleanupObserved.Target.Intent != "" {
+			observed = &cleanupObserved
+		}
+		b.engineConfigMu.Unlock()
 		// Preserve storage uncertainty even if interruption or terminal persistence
 		// prevents the normal cleanup-error path below from running.
 		if err != nil {
@@ -850,12 +976,33 @@ func (b *Broker) cancelRemoteEngineSwitchOperation(engine, operationID string) {
 	}
 }
 
-func (b *Broker) vetoRemoteEngineSwitch(engine string, cancel bool) {
+func (b *Broker) vetoRemoteEngineSwitch(engine string, cancel bool) error {
 	// Serialize recovery-time pause admission with its final reconcile/release
 	// decision, just like local Off. Never wait for physical cleanup here.
 	b.engineConfigMu.Lock()
 	defer b.engineConfigMu.Unlock()
 	c := b.switchCoordinator()
+	if err := b.loadEngineSwitchLocked(); err != nil {
+		return err
+	}
+	// Persist before publishing a pause/Off latch. Repeated cancellation of the
+	// same latch must not reopen an already discharged obligation.
+	if cp := c.recoveryCheckpoint; cp != nil && cp.Phase != settings.SwitchCheckpointReleased && cp.Origin == settings.SwitchOriginRemote && (engine == "" || engine == cp.SourceEngine || engine == cp.TargetEngine) {
+		if _, ok := c.store.Lookup(cp.OperationID); !ok {
+			return switchError(settings.SwitchErrorStorage, "Cannot durably admit local veto without its switch journal record.")
+		}
+	}
+	for id, receipt := range c.store.journal.Receipts {
+		if receipt.Caller != settings.SwitchOriginLocal && (!receipt.Terminal || (receipt.RecoveryRequired && !c.resolved[id])) && (engine == "" || engine == receipt.Request.SourceEngine || engine == receipt.Request.TargetEngine) {
+			o := c.store.journal.LocalObligations[id]
+			already := (engine == "" && o.Pause) || (engine == receipt.Request.SourceEngine && o.SourceOff) || (engine == receipt.Request.TargetEngine && o.TargetOff)
+			if !already {
+				if err := b.recordSwitchLocalObligationLocked(id, engine); err != nil {
+					return err
+				}
+			}
+		}
+	}
 	b.workersMu.Lock()
 	c.waitMu.Lock()
 	if cp := c.recoveryCheckpoint; cp != nil && cp.Phase != settings.SwitchCheckpointReleased && cp.Origin == settings.SwitchOriginRemote && (engine == "" || engine == cp.SourceEngine || engine == cp.TargetEngine) {
@@ -869,6 +1016,7 @@ func (b *Broker) vetoRemoteEngineSwitch(engine string, cancel bool) {
 	}
 	c.waitMu.Unlock()
 	b.workersMu.Unlock()
+	return nil
 }
 
 func (b *Broker) dispatchEngineSwitch(ctx context.Context, method string, raw json.RawMessage, caller string) (any, error) {

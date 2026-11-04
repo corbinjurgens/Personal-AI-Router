@@ -32,6 +32,14 @@ is released or belongs to another operation, preserving later explicit On intent
 Off/pause during retained recovery latches against its checkpoint identity;
 recovery rechecks after reconciliation and drain release, repeats cleanup for a
 new veto, and orders checkpoint release with that admission gate.
+Admission first persists an internal operation-keyed local obligation in the
+switch journal; failure visibly refuses the local request. Before terminal release
+or recovery resolution, the broker holds the operation lock while discharging
+every obligated engine through a verified ordinary stop on the current manager.
+Pause must be persisted and applied too. Discharge is durably recorded; failure
+retains recovery ownership. Restart replays undischarged obligations even with no
+manager checkpoint, before restoration/readiness. An older direct peer start loses
+to the subsequently admitted local Off; later local On waits for this discharge.
 Worker exit is fenced before supervisor
 notification, with already-closed worker
 channels checked again at completion. Transient conservative recovery failures

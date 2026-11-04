@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/httpcon"
 )
 
@@ -429,8 +430,8 @@ func (e *Executor) StopFrom(engine string, origin intentOrigin) error {
 }
 
 // StopForSwitch applies a broker-admitted local Off to its remote reservation,
-// or as ordinary Off after a rejected prepare if no newer engine work exists.
-// A superseded request is a complete no-op.
+// after release or a rejected prepare it is a complete no-op. The broker owns
+// durable discharge before relinquishing the original operation lock.
 func (e *Executor) StopForSwitch(engine, operationID string) error {
 	return e.stopFrom(engine, intentLocal, operationID)
 }
@@ -461,6 +462,43 @@ func (e *Executor) stopFrom(engine string, origin intentOrigin, operationID stri
 	// rewrite intent — shutdown must not erase the user's saved choice.
 	setErr := e.setDesiredEnabled(engine, false, origin)
 	return errors.Join(stopErr, setErr)
+}
+
+func (e *Executor) verifyStopped(engine string) (settings.SwitchEngineState, error) {
+	st, err := e.state(engine)
+	if err != nil {
+		return settings.SwitchEngineState{}, err
+	}
+	st.opMu.Lock()
+	defer st.opMu.Unlock()
+	e.desired.mu.Lock()
+	state, err := e.desired.load()
+	e.desired.mu.Unlock()
+	if err != nil {
+		return settings.SwitchEngineState{}, err
+	}
+	observed := e.switchObserved(st, switchIntent(state, engine), e.switchTerminated(st))
+	if observed.Intent != settings.SwitchIntentOff || !observed.TerminationVerified {
+		return observed, errors.New("local Off termination is unverified")
+	}
+	e.desired.mu.Lock()
+	defer e.desired.mu.Unlock()
+	state, err = e.desired.load()
+	if err != nil {
+		return observed, err
+	}
+	if cp := state.PendingSwitch; cp != nil && cp.Phase != settings.SwitchCheckpointReleased {
+		if engine == cp.SourceEngine && cp.SourceLocalOff {
+			cp.Source = observed
+		}
+		if engine == cp.TargetEngine && cp.TargetLocalOff {
+			cp.Target = observed
+		}
+		if err := e.desired.save(state); err != nil {
+			return observed, err
+		}
+	}
+	return observed, nil
 }
 
 // doStop performs the stop. Callers must hold st.opMu.

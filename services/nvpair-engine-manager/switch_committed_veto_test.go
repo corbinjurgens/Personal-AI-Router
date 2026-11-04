@@ -9,6 +9,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -44,8 +47,117 @@ func TestSwitchReservedSourceVetoStopsBeforeDelayedScopedStop(t *testing.T) {
 	}
 }
 
+func TestSwitchRejectedPrepareOlderPeerStartLosesToBrokerOff(t *testing.T) {
+	ex, p := switchFixture(t)
+	if err := ex.desired.set("source", true, intentLocal); err != nil {
+		t.Fatal(err)
+	}
+	p.Origin = settings.SwitchOriginRemote
+	snapshot := ex.SwitchPrepare(context.Background(), settings.SwitchPrepareRequest{})
+	if snapshot.Error != nil {
+		t.Fatal(snapshot.Error)
+	}
+	p.ConfigurationFence = snapshot.ConfigurationFence
+	st, err := ex.state("source")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.opMu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			st.opMu.Unlock()
+		}
+	}()
+	peerDone := make(chan struct{})
+	response := httptest.NewRecorder()
+	go func() {
+		(&controlServer{exec: ex}).handleStart(response, httptest.NewRequest(http.MethodPost, "/v1/engines/start", strings.NewReader(`{"engine":"source"}`)))
+		close(peerDone)
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		ex.switchAdmission.Lock()
+		admitted := ex.switchMutations["source"] > 0
+		ex.switchAdmission.Unlock()
+		if admitted {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("older peer start was not admitted")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// The broker has admitted Off now, but holds its scoped delivery. Prepare
+	// rejects while the older authenticated peer path still owns a mutation.
+	rejected := ex.SwitchPrepare(context.Background(), p)
+	if rejected.Error == nil || rejected.Error.Kind != settings.SwitchErrorBusy || rejected.Checkpoint != nil {
+		t.Fatalf("busy prepare: %+v", rejected)
+	}
+	st.opMu.Unlock()
+	locked = false
+	select {
+	case <-peerDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("older peer start did not finish")
+	}
+	if response.Code != http.StatusOK {
+		t.Fatalf("older peer start: HTTP %d", response.Code)
+	}
+	if err := ex.Stop("source"); err != nil {
+		t.Fatalf("broker discharge: %v", err)
+	}
+	if observed, err := ex.verifyStopped("source"); err != nil || !observed.TerminationVerified || observed.Intent != settings.SwitchIntentOff {
+		t.Fatalf("discharge: %+v, %v", observed, err)
+	}
+	if err := ex.StopForSwitch("source", p.OperationID); err != nil {
+		t.Fatal(err)
+	}
+	if err := ex.RestoreEnabled(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if status, err := ex.Status("source"); err != nil || status.Running {
+		t.Fatalf("source restored after Off: %+v %v", status, err)
+	}
+}
+
+func TestSwitchHistoricalLocalOffAdoptedSourceIsObservationOnly(t *testing.T) {
+	ex, p := switchFixture(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+	t.Cleanup(server.Close)
+	st, err := ex.state("source")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopMarker := filepath.Join(t.TempDir(), "unexpected-stop")
+	st.port = server.Listener.Addr().(*net.TCPAddr).Port
+	st.plat.Runtime.Mode = "command"
+	st.plat.Runtime.Stop = &StopSpec{Cmd: []string{fakeEngineBin, "touch", stopMarker}}
+	if err := ex.desired.set("source", false, intentLocal); err != nil {
+		t.Fatal(err)
+	}
+	p.Origin = settings.SwitchOriginRemote
+	p = prepareSwitch(t, ex, p)
+	status, err := ex.Status("source")
+	if err != nil || !status.Running {
+		t.Fatalf("adopted source: %+v, %v", status, err)
+	}
+	// Failed drain sends no forward source-stop and admitted no new local veto.
+	cleaned := ex.SwitchReconcile(context.Background(), settings.SwitchReconcileRequest{SwitchPrepareRequest: p})
+	if cleaned.Error != nil || cleaned.Observed.Source.Running == nil || !*cleaned.Observed.Source.Running || cleaned.Observed.Source.Intent != settings.SwitchIntentOff {
+		t.Fatalf("historical Off cleanup: %+v", cleaned)
+	}
+	if _, err := os.Stat(stopMarker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stop CLI ran without operation veto: %v", err)
+	}
+	switchStep(t, ex, p, settings.SwitchStepRelease)
+	// Avoid the fixture's shutdown running the intentionally forbidden CLI.
+	server.Close()
+	ex.markStopped(st, "source")
+}
+
 func TestSwitchRejectedPrepareDelayedScopedStop(t *testing.T) {
-	for _, scenario := range []string{"ordinary Off", "later local On", "later reservation"} {
+	for _, scenario := range []string{"broker not yet discharged", "later local On", "later reservation"} {
 		t.Run(scenario, func(t *testing.T) {
 			ex, p := switchFixture(t)
 			snapshot := ex.SwitchPrepare(context.Background(), settings.SwitchPrepareRequest{})
@@ -77,7 +189,7 @@ func TestSwitchRejectedPrepareDelayedScopedStop(t *testing.T) {
 			if err := ex.StopForSwitch("source", p.OperationID); err != nil {
 				t.Fatalf("delayed scoped stop: %v", err)
 			}
-			wantRunning := scenario != "ordinary Off"
+			wantRunning := true
 			status, err := ex.Status("source")
 			if err != nil || status.Running != wantRunning {
 				t.Fatalf("source status = %+v, %v; want running %v", status, err, wantRunning)
@@ -85,12 +197,6 @@ func TestSwitchRejectedPrepareDelayedScopedStop(t *testing.T) {
 			on, known, err := ex.desired.get("source")
 			if err != nil || !known || on != wantRunning {
 				t.Fatalf("source intent = %v, %v, %v; want On %v", on, known, err, wantRunning)
-			}
-			if scenario == "ordinary Off" {
-				st, err := ex.state("source")
-				if err != nil || !ex.switchTerminated(st) {
-					t.Fatalf("source termination not verified: %v", err)
-				}
 			}
 			if scenario == "later reservation" {
 				switchStep(t, ex, b, settings.SwitchStepSourceStop)
@@ -101,7 +207,7 @@ func TestSwitchRejectedPrepareDelayedScopedStop(t *testing.T) {
 	}
 }
 
-func TestSwitchRejectedPrepareLatchedVetoOwnsCleanup(t *testing.T) {
+func TestSwitchRejectedPrepareRequiresBrokerDischarge(t *testing.T) {
 	ex, p := switchFixture(t)
 	snapshot := ex.SwitchPrepare(context.Background(), settings.SwitchPrepareRequest{})
 	if snapshot.Error != nil {
@@ -119,12 +225,44 @@ func TestSwitchRejectedPrepareLatchedVetoOwnsCleanup(t *testing.T) {
 	cleaned := ex.SwitchReconcile(context.Background(), settings.SwitchReconcileRequest{
 		SwitchPrepareRequest: p, LocalVeto: &settings.SwitchLocalVeto{Engine: "source"},
 	})
-	if cleaned.Error == nil || cleaned.Error.Kind != settings.SwitchErrorRemoteVeto || cleaned.Checkpoint == nil || !cleaned.Observed.Source.TerminationVerified {
+	if cleaned.Error == nil || cleaned.Error.Kind != settings.SwitchErrorInvalidRequest || cleaned.Checkpoint != nil {
 		t.Fatalf("rejected prepare Off cleanup = %+v", cleaned)
 	}
-	switchStep(t, ex, p, settings.SwitchStepRelease)
+	if err := ex.Stop("source"); err != nil {
+		t.Fatalf("broker ordinary discharge: %v", err)
+	}
+	if observed, err := ex.verifyStopped("source"); err != nil || !observed.TerminationVerified || observed.Intent != settings.SwitchIntentOff {
+		t.Fatalf("verified discharge = %+v, %v", observed, err)
+	}
 	if err := ex.StopForSwitch("source", p.OperationID); err != nil {
 		t.Fatalf("held stop after cleanup: %v", err)
+	}
+}
+
+func TestSwitchRecoveryReplacementWithoutCheckpointDischargesBeforeRestore(t *testing.T) {
+	ex, _ := switchFixture(t)
+	if err := ex.desired.set("source", true, intentLocal); err != nil {
+		t.Fatal(err)
+	}
+	// Rejection allocated no checkpoint; the broker's journal is the only owner.
+	replacement := NewExecutor(ex.reg, NewReporter(nil), nil, filepath.Dir(ex.desired.path))
+	t.Cleanup(replacement.StopAll)
+	replacement.nodeProjection.set(nodeProjection{})
+	snapshot := replacement.SwitchPrepare(context.Background(), settings.SwitchPrepareRequest{})
+	if snapshot.Error != nil || snapshot.Checkpoint != nil {
+		t.Fatalf("replacement inspection: %+v", snapshot)
+	}
+	if err := replacement.Stop("source"); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := replacement.verifyStopped("source"); err != nil || !result.TerminationVerified || result.Intent != settings.SwitchIntentOff {
+		t.Fatalf("replacement discharge: %+v %v", result, err)
+	}
+	if err := replacement.RestoreEnabled(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if status, err := replacement.Status("source"); err != nil || status.Running {
+		t.Fatalf("replacement restored source: %+v %v", status, err)
 	}
 }
 

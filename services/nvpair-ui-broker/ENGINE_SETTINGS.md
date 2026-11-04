@@ -203,6 +203,23 @@ repeating cleanup for any new veto within the cleanup budget. Its final
 metadata-only release and clearing recovery ownership share the local admission
 lock; long physical cleanup runs outside that lock. Failure retains recovery.
 
+The broker durably owns every admitted local Off/pause. Internal journal
+`localObligations[operationId]` records `sourceOff`, `targetOff`, `pause`, and
+`discharged`; public receipts are unchanged. Admission persists before latching
+or returning to the local handler, and a failed write visibly refuses the request.
+After reconcile, while still holding `settingsApplyMu`, cleanup sends ordinary
+unscoped `engine:stop` with internal `verifyStop: true` to the current worker for
+each obligated engine. Its `SwitchEngineState` reply must prove saved Off and
+termination. Pause must already be persisted and applied. Discharge is saved
+durably before terminal release or recovery resolution; failure keeps recovery.
+Broker restart and manager replacement replay undischarged obligations even
+when inspection returns no checkpoint, before restore/readiness. An older direct
+peer start loses to a subsequently admitted Off at this settlement boundary.
+Later explicit local On takes the same operation lock and runs after discharge;
+the delayed scoped handler remains a no-op against later work. Historical local
+Off alone never authorizes a physical reconcile stop after failed drain: manager
+cleanup and release guards use operation-specific checkpoint veto flags.
+
 Switch drain is strict and separate from the settings restart drain. Withdraw
 source discovery and its local inference endpoint, acknowledge source drain,
 then invalidate source and target through `node/invalidate-engine` with the

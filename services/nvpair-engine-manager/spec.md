@@ -479,23 +479,23 @@ For parent-only `engine:stop`, optional `switchOperationId` binds a broker-admit
 Off to its remote reservation. Stop admission checks the operation ID, origin,
 engine membership and unreleased phase atomically under the admission lock.
 If that scope has settled or changed, the entire request succeeds as a no-op,
-with no cancellation, physical stop or intent write against later work. An
-exception is a prepare rejected before reservation: a matching scoped stop
-falls back to ordinary local Off only while its per-engine rejection admission
-remains eligible. Every later admitted mutation (including reasserted On) or
-prepare involving that engine invalidates eligibility under the admission lock.
-The bounded eligibility map is process-local, not reconstructed from the intent
-boolean or Off provenance; those cannot distinguish a later same-value On.
-A replacement manager ignores stale scopes without such admission evidence.
-An unscoped stop retains ordinary local Off semantics.
-Reconciliation carrying that eligible rejected operation's engine veto creates
-a durable reserved cleanup checkpoint before persisting Off or stopping. A
-remote prepare that already reserved keeps its provisional checkpoint on
-rejection until final reconciliation/release. For every unreleased remote
-checkpoint, reconciliation physically stops and verifies engines saved locally
-Off, including a running source in the reserved phase after failed drain. This
-does not advance a forward switch step. Cleanup failure retains the checkpoint;
-release refuses local Off without checkpoint termination evidence.
+with no cancellation, physical stop or intent write against later work. Missing
+checkpoints (including rejected prepares) also make scoped delivery a no-op.
+There is no process-local rejection eligibility or fallback. The broker journals
+the admitted obligation and discharges it through an ordinary unscoped stop on
+the current manager while holding its operation lock, before release/resolution.
+Internal parent `verifyStop: true` requests a `SwitchEngineState` reply requiring
+saved Off and timestamped verified termination; ordinary stop replies remain status.
+This also works without a checkpoint after manager replacement and precedes
+restore/readiness. An older direct peer start loses to the later admitted Off;
+a later local On cannot interleave with broker discharge.
+A remote prepare that reserved keeps its provisional checkpoint on rejection
+until final reconciliation/release. Reconcile physically stops only engines with
+operation-specific `sourceLocalOff`/`targetLocalOff` checkpoint flags, set by scoped
+or ordinary stop admission and the reconcile veto envelope. Historical local Off
+on an adopted running source is observation-only after a failed drain without
+a new veto. Release requires termination evidence for those flags, rather than
+all saved Off provenance. Cleanup failure retains the checkpoint.
 The existing projection
 path cancels remote work on local pause. Local switching is allowed under these
 remote-only vetoes.

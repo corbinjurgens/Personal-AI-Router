@@ -57,6 +57,26 @@ func newSwitchHarness(t *testing.T) *switchHarness {
 			result.Observed = settings.SwitchObserved{Source: copy.Source, Target: copy.Target}
 		}
 		switch method {
+		case "engine:stop":
+			var p struct {
+				Engine     string `json:"engine"`
+				VerifyStop bool   `json:"verifyStop"`
+			}
+			if err := json.Unmarshal(raw, &p); err != nil {
+				return nil, err.Error()
+			}
+			if !p.VerifyStop {
+				return map[string]bool{"ok": true}, ""
+			}
+			state := switchTestState(false, false, settings.SwitchIntentOff)
+			if h.cp != nil {
+				if p.Engine == h.cp.SourceEngine {
+					h.cp.Source = state
+				} else if p.Engine == h.cp.TargetEngine {
+					h.cp.Target = state
+				}
+			}
+			return state, ""
 		case settings.SwitchPrepareMethod:
 			var p settings.SwitchPrepareRequest
 			if err := json.Unmarshal(raw, &p); err != nil {
@@ -817,6 +837,15 @@ func TestSwitchLocalOffReachesManagerWhileTargetReadinessIsHeld(t *testing.T) {
 			}
 		}
 		if method == "engine:stop" {
+			var p struct {
+				VerifyStop bool `json:"verifyStop"`
+			}
+			if err := json.Unmarshal(raw, &p); err != nil {
+				return nil, err.Error()
+			}
+			if p.VerifyStop {
+				return base(method, raw)
+			}
 			if err := os.WriteFile(vetoPath, settingsJSON(map[string]string{"lmstudio": "off"}), 0600); err != nil {
 				return nil, err.Error()
 			}
@@ -943,7 +972,17 @@ func TestSwitchLocalOffReachesManagerDuringRecoveryReservation(t *testing.T) {
 			for _, call := range h.engine.snapshot() {
 				found = found || call.method == "engine:stop"
 			}
-			if !found {
+			if scenario == "orphan checkpoint" {
+				var refused bool
+				for _, frame := range h.output.frames() {
+					if frame.ID != nil && string(*frame.ID) == "93" && frame.Error != nil {
+						refused = true
+					}
+				}
+				if found || !refused {
+					t.Fatal("orphan without a journal identity must visibly refuse durable Off admission")
+				}
+			} else if !found {
 				t.Fatal("local Off did not reach recovery manager")
 			}
 		})
