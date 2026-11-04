@@ -1457,10 +1457,13 @@ func (c *reverseTestPauseConn) pause(t *testing.T) {
 	}
 }
 
-func reverseTestPingPeer(t *testing.T, manager *ReverseManager) (*yamux.Session, *reverseTestPauseConn) {
+func reverseTestPingPeer(t *testing.T, manager *ReverseManager, wrapConn func(net.Conn) net.Conn) (*yamux.Session, *reverseTestPauseConn) {
 	t.Helper()
 	left, right := net.Pipe()
 	peer := &reverseTestPauseConn{Conn: left, blocked: make(chan struct{}, 1), closed: make(chan struct{})}
+	if wrapConn != nil {
+		right = wrapConn(right)
+	}
 	cfg := yamux.DefaultConfig()
 	cfg.LogOutput = io.Discard
 	cfg.EnableKeepAlive = false
@@ -1476,6 +1479,19 @@ func reverseTestPingPeer(t *testing.T, manager *ReverseManager) (*yamux.Session,
 	if _, err := raw.Ping(); err != nil {
 		t.Fatalf("ordinary initial ping: %v", err)
 	}
+	manager.mu.Lock()
+	session := manager.sessions["a"]
+	manager.mu.Unlock()
+	if session == nil {
+		t.Fatal("ping peer session was not registered")
+	}
+	select {
+	case <-session.ready:
+	case <-session.ctx.Done():
+		t.Fatal("ping peer control setup closed session")
+	case <-time.After(3 * time.Second):
+		t.Fatal("ping peer control setup timed out")
+	}
 	return raw, peer
 }
 
@@ -1483,6 +1499,21 @@ func reverseTestPingFrame(id uint32) [12]byte {
 	frame := [12]byte{0, 2, 0, 1}
 	binary.BigEndian.PutUint32(frame[8:12], id)
 	return frame
+}
+
+type reverseTestWriteDeadlineConn struct {
+	net.Conn
+	set chan time.Time
+}
+
+func (c *reverseTestWriteDeadlineConn) SetWriteDeadline(deadline time.Time) error {
+	if err := c.Conn.SetWriteDeadline(deadline); err != nil {
+		return err
+	}
+	if !deadline.IsZero() {
+		c.set <- time.Now()
+	}
+	return nil
 }
 
 func TestReversePingFloodHasBoundedWorkersAndPreservesOtherPeer(t *testing.T) {
@@ -1494,7 +1525,7 @@ func TestReversePingFloodHasBoundedWorkersAndPreservesOtherPeer(t *testing.T) {
 		}}, nil
 	}
 	b := reverseTestManager(t, ReverseOptions{LocalUUID: "b", SetupTimeout: 2 * time.Second, ResolveService: resolve})
-	_, peer := reverseTestPingPeer(t, b)
+	_, peer := reverseTestPingPeer(t, b, nil)
 	c := reverseTestManager(t, ReverseOptions{LocalUUID: "c"})
 	reverseTestConnect(t, c, b, "c", reverseTestID)
 	peer.pause(t)
@@ -1575,12 +1606,33 @@ func TestReversePingFloodHasBoundedWorkersAndPreservesOtherPeer(t *testing.T) {
 
 func TestReverseBlockedPingReplyClosesAtSocketWriteDeadline(t *testing.T) {
 	b := reverseTestManager(t, ReverseOptions{LocalUUID: "b", SetupTimeout: 150 * time.Millisecond})
-	_, peer := reverseTestPingPeer(t, b)
+	var socketWriteDeadline chan time.Time
+	_, peer := reverseTestPingPeer(t, b, func(conn net.Conn) net.Conn {
+		trace := &reverseTestWriteDeadlineConn{Conn: conn, set: make(chan time.Time, 16)}
+		socketWriteDeadline = trace.set
+		return trace
+	})
 	peer.pause(t)
-	started := time.Now()
+	if !b.Has(ReversePeer{"a", "v1"}) {
+		t.Fatal("reverse session closed while pausing peer read")
+	}
+drainDeadlines:
+	for {
+		select {
+		case <-socketWriteDeadline:
+		default:
+			break drainDeadlines
+		}
+	}
 	frame := reverseTestPingFrame(42)
 	if _, err := peer.Conn.Write(frame[:]); err != nil {
 		t.Fatalf("one ping query: %v", err)
+	}
+	var started time.Time
+	select {
+	case started = <-socketWriteDeadline:
+	case <-time.After(time.Second):
+		t.Fatal("blocked ping reply did not reach socket write deadline")
 	}
 	deadline := time.Now().Add(time.Second)
 	for b.Has(ReversePeer{"a", "v1"}) {
