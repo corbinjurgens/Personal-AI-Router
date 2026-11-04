@@ -18,6 +18,77 @@ import (
 	"nvpair-shared/nodepolicy"
 )
 
+func TestSavedPauseModeRoundTripsThroughBroker(t *testing.T) {
+	for _, mode := range []nodepolicy.PauseMode{nodepolicy.PauseImmediate, nodepolicy.PauseConfigured} {
+		t.Run(string(mode), func(t *testing.T) {
+			rb := newRoutedBroker(t)
+			state, err := rb.b.setAvailabilityRequestAs(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally, "", mustJSON(mode))
+			if err != nil || state != nodepolicy.Paused {
+				t.Fatalf("pause = %q, %v", state, err)
+			}
+			got := rb.b.localPolicy()
+			if got.Availability != nodepolicy.Paused || got.PausedBy != nodepolicy.PausedLocally || got.PauseMode != mode {
+				t.Fatalf("live pause = %+v, want paused/local/%s", got, mode)
+			}
+			fresh := freshBroker(t, rb.path).localPolicy()
+			if fresh.RecoveryRequired || fresh.Policy.Availability != nodepolicy.Paused || fresh.Policy.PausedBy != nodepolicy.PausedLocally || fresh.Policy.PauseMode != mode {
+				t.Fatalf("reloaded pause = %+v, want paused/local/%s", fresh, mode)
+			}
+			peer := rb.b.peerPolicy()
+			if peer.PauseMode != mode || peer.Policy.PauseMode != mode {
+				t.Fatalf("peer readback = %+v, want %s", peer, mode)
+			}
+			paProjectionBarrier(t, rb.b)
+			found := false
+			for _, adv := range nodeProjections(t, rb.engine) {
+				if adv.Revision == got.Policy.Revision && adv.PausedBy == nodepolicy.PausedLocally && adv.PauseMode == mode {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("no advertisement for saved local/%s revision %s", mode, got.Policy.Revision)
+			}
+			if _, err := rb.b.setAvailability(context.Background(), nodepolicy.Available, nodepolicy.PausedLocally); err != nil {
+				t.Fatalf("resume: %v", err)
+			}
+			resumed := rb.b.localPolicy()
+			if resumed.Policy.PauseMode != "" || resumed.PauseMode != "" || resumed.Policy.PausedBy != "" {
+				t.Fatalf("resume retained pause metadata: %+v", resumed)
+			}
+		})
+	}
+}
+
+func TestLocalHaltEscalatesPeerConfiguredPauseWithoutResume(t *testing.T) {
+	rb := newRoutedBroker(t)
+	if _, err := rb.b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedByPeer); err != nil {
+		t.Fatalf("peer configured pause: %v", err)
+	}
+	before := len(rb.out.frames())
+	if _, err := rb.b.setAvailabilityRequestAs(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally, "", json.RawMessage(`"immediate"`)); err != nil {
+		t.Fatalf("local Halt: %v", err)
+	}
+	got := rb.b.localPolicy().Policy
+	if got.Availability != nodepolicy.Paused || got.PausedBy != nodepolicy.PausedLocally || got.PauseMode != nodepolicy.PauseImmediate {
+		t.Fatalf("Halt policy = %+v, want paused/local/immediate", got)
+	}
+	for _, frame := range rb.out.frames()[before:] {
+		if frame.Method != notifyAvailabilityChanged && frame.Method != notifyPolicyChanged {
+			continue
+		}
+		var event struct {
+			Availability nodepolicy.Availability `json:"availability"`
+			Policy       nodepolicy.Policy       `json:"policy"`
+		}
+		if err := json.Unmarshal(frame.Params, &event); err != nil {
+			t.Fatalf("decode pause event: %v", err)
+		}
+		if event.Availability == nodepolicy.Available || event.Policy.Availability == nodepolicy.Available {
+			t.Fatalf("Halt escalation published available: %+v", event)
+		}
+	}
+}
+
 func TestBuildApplyMaintenanceRefusesResumeWithoutSupersedingPause(t *testing.T) {
 	f := newBuildApplyTestFixture(t)
 	op := requireBuildApplyPrepared(t, f.b.prepareBuildApply(f.request(t)))

@@ -584,6 +584,11 @@ func removedStoredModels(data []byte, counts map[string]int) (*storedModelRepair
 }
 
 func repairStoredModelReferences(p *Policy, repairs *storedModelRepairs) {
+	// Older saved pauses do not distinguish a configured pause from a Halt.
+	// Retain the conservative Halt meaning within this existing repair pass.
+	if p.Availability == Paused && p.PauseMode == "" {
+		p.PauseMode = PauseImmediate
+	}
 	counts := repairs.counts
 	// Repair only consequences of removed entries. Preexisting unrelated bad
 	// references must still fail ordinary validation and invoke recovery.

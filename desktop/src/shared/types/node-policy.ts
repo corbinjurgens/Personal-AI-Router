@@ -110,6 +110,8 @@ export interface RoutingDeployment {
 /** A node's live availability. `draining` is a pause in progress. */
 export type NodeAvailability = 'available' | 'draining' | 'paused'
 
+export type NodePauseMode = 'configured' | 'immediate'
+
 /** The state a caller can request; `draining` is only ever reached, never asked for. */
 export type RequestedAvailability = 'available' | 'paused'
 
@@ -201,6 +203,7 @@ export interface NodeAvailabilityChange extends NodeAvailabilityResult {
 export interface NodeAvailabilityResult {
     availability: NodeAvailability
     pausedBy?: 'local' | 'peer'
+    pauseMode?: NodePauseMode
 }
 
 /** A node's saved policy changed, as JSON text like {@link NodePolicySnapshot.policy}. */
@@ -210,8 +213,8 @@ export interface NodePolicyChange extends NodePolicySnapshot {
 
 export interface NodeAvailabilityRequest extends NodePolicyTarget {
     state: RequestedAvailability
-    /** Omission uses saved drain options. Immediate is local-only and currently unavailable. */
-    pauseMode?: 'configured' | 'immediate'
+    /** Omission uses saved drain options. Immediate is local-only. */
+    pauseMode?: NodePauseMode
 }
 
 /** Cancels one job; only the node the job originated on acts on it. */

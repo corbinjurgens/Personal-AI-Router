@@ -121,6 +121,20 @@ function entry(targetId = PEER) {
 }
 
 describe('role substitution', () => {
+    it('retains the saved pause mode in the policy baseline', () => {
+        const store = useNodeConfigurationStore.getState()
+        store.adopt(
+            PEER,
+            snapshot('5', { availability: 'paused', pausedBy: 'local', pauseMode: 'immediate' })
+        )
+        expect(entry().baseline?.pauseMode).toBe('immediate')
+        store.adopt(
+            PEER,
+            snapshot('6', { availability: 'paused', pausedBy: 'local', pauseMode: 'configured' })
+        )
+        expect(entry().baseline?.pauseMode).toBe('configured')
+    })
+
     it.each<{ name: string; policy: Record<string, JsonValue> }>([
         { name: 'local pause', policy: { availability: 'paused', pausedBy: 'local' } },
         { name: 'peer pause', policy: { availability: 'paused', pausedBy: 'peer' } },
@@ -609,7 +623,8 @@ describe('declared roles on the node card', () => {
                 roles: {
                     strong: { engine: 'llamacpp-custom', model: 'gemma-3-27b', contextTokens: 8192 }
                 },
-                pausedBy: 'local'
+                pausedBy: 'local',
+                pauseMode: 'immediate'
             }
         }
         state.handleNotification({
@@ -626,7 +641,8 @@ describe('declared roles on the node card', () => {
         expect(available()?.policy).toEqual({
             revision: '9',
             roles: { strong: { engine: 'llamacpp-custom', model: 'gemma-3-27b' } },
-            pausedBy: 'local'
+            pausedBy: 'local',
+            pauseMode: 'immediate'
         })
 
         const { policy: _dropped, ...withoutPolicy } = brokerNode

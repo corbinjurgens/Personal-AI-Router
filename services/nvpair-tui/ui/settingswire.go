@@ -35,7 +35,8 @@ func commandFailure(err error) string {
 type targetPolicy struct {
 	Availability string `json:"availability"`
 	Policy       struct {
-		PausedBy string `json:"pausedBy"`
+		PausedBy  string `json:"pausedBy"`
+		PauseMode string `json:"pauseMode"`
 	} `json:"policy"`
 }
 

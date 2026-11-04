@@ -51,6 +51,7 @@ import getErrorString from '@/shared/utils/get-error-string'
 import { replaceJsonFieldSource } from '@/shared/utils/json-source'
 import {
     pauseOriginValue,
+    pauseModeValue,
     parseNodeRoles,
     ROLE_TIERS,
     sameNodeRoles
@@ -262,6 +263,7 @@ interface RoleBaseline {
     roles: NodeRoles
     availability?: NodeAvailability
     pausedBy?: PauseOrigin
+    pauseMode?: NodeAvailabilityRequest['pauseMode']
 }
 
 type PolicyBaselineInput = Pick<NodePolicySnapshot, 'policy' | 'revision'> & {
@@ -295,7 +297,8 @@ function baselineOf(snapshot: PolicyBaselineInput): RoleBaseline {
         revision: snapshot.revision,
         roles: policyRoles(snapshot.policy),
         availability: snapshot.availability,
-        pausedBy: pauseOriginValue(policyObject(snapshot.policy).pausedBy)
+        pausedBy: pauseOriginValue(policyObject(snapshot.policy).pausedBy),
+        pauseMode: pauseModeValue(policyObject(snapshot.policy).pauseMode)
     }
 }
 
@@ -450,6 +453,7 @@ interface NodeConfigurationState {
 interface AvailabilityEntry {
     value?: NodeAvailability
     pausedBy?: PauseOrigin
+    pauseMode?: NodeAvailabilityRequest['pauseMode']
     revision?: string
     current: boolean
     reading: boolean
@@ -526,6 +530,7 @@ export function readNodePolicy(nodeId: string | undefined): Promise<NodePolicyDo
             putAvailability(watched[0], {
                 value: document.availability,
                 pausedBy: document.pausedBy,
+                pauseMode: document.pauseMode,
                 revision: document.revision,
                 current: true,
                 stale: false,
@@ -661,7 +666,11 @@ export function initializeNodeAvailability(): () => void {
                 for (const [id, target] of availabilityTargets) {
                     const next = state.nodes.find(node => node.id === id)?.policy
                     const before = previous.nodes.find(node => node.id === id)?.policy
-                    if (next?.revision === before?.revision && next?.pausedBy === before?.pausedBy)
+                    if (
+                        next?.revision === before?.revision &&
+                        next?.pausedBy === before?.pausedBy &&
+                        next?.pauseMode === before?.pauseMode
+                    )
                         continue
                     const entry = useNodeConfigurationStore.getState().availability.get(id)
                     if (next?.revision && entry?.revision && isOlder(next.revision, entry.revision))
@@ -697,6 +706,7 @@ export function initializeNodeAvailability(): () => void {
                 putAvailability(change.nodeId, {
                     value: change.availability,
                     pausedBy: change.pausedBy,
+                    pauseMode: change.pauseMode,
                     current: true,
                     stale: false
                 })
@@ -749,6 +759,7 @@ export function watchNodeAvailability(
             value: undefined,
             revision: undefined,
             pausedBy: undefined,
+            pauseMode: undefined,
             current: false,
             reading: false,
             stale: false,

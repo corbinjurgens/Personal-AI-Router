@@ -80,11 +80,13 @@ func (b *Broker) notifyAvailability() {
 	r.mu.Lock()
 	live, active := r.live, r.admission.Active
 	origin := r.current.PausedBy
+	mode := r.current.PauseMode
 	if live == nodepolicy.Available {
 		origin = ""
+		mode = ""
 	}
 	r.mu.Unlock()
-	b.notifyClients(notifyAvailabilityChanged, map[string]any{"nodeId": b.nodeID, "availability": live, "pausedBy": origin, "active": active})
+	b.notifyClients(notifyAvailabilityChanged, map[string]any{"nodeId": b.nodeID, "availability": live, "pausedBy": origin, "pauseMode": mode, "active": active})
 }
 
 // nodeProjection is the engine:node-projection payload: what engine-manager

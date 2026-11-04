@@ -33,6 +33,7 @@ import type {
     WorkloadCancelRequest
 } from '@/shared/types/node-policy'
 import { workloadCancelRequest } from '@/shared/utils/workloads'
+import { parsePolicyAdvertisement, samePolicyAdvertisement } from '@/shared/utils/node-roles'
 import type { IClusterApi, INodePolicyApi } from '@/ui/api/pair-api'
 import RoutingSettings from '@/ui/components/RoutingSettings/RoutingSettings'
 import { useNodeConfigurationStore, withRoles } from '@/ui/stores/node-configuration.store'
@@ -64,6 +65,58 @@ function loadStrictFixtures(): JsonObject {
     )
     return strictFixtureObject(value)
 }
+
+describe('saved pause mode', () => {
+    it.each(['configured', 'immediate'])('preserves %s in readback and live pushes', pauseMode => {
+        const state = { availability: 'paused', pausedBy: 'local', pauseMode }
+        expect(parseAvailabilityResult(state)).toEqual(state)
+        expect(parseAvailabilityChange({ nodeId: 'self', ...state })).toEqual({
+            nodeId: 'self',
+            ...state
+        })
+        const document = parsePolicyDocument(
+            policyEnvelope({ policy: { revision: '8', ...state }, ...state })
+        )
+        expect(document.pauseMode).toBe(pauseMode)
+        expect(parsePolicyText(document.policy).pauseMode).toBe(pauseMode)
+    })
+
+    it('rejects unknown modes in availability results and pushes', () => {
+        const state = { availability: 'paused', pausedBy: 'local', pauseMode: 'later' }
+        expect(() => parseAvailabilityResult(state)).toThrow('invalid pause mode')
+        expect(parseAvailabilityChange({ nodeId: 'self', ...state })).toBeNull()
+        expect(() =>
+            parsePolicyDocument(policyEnvelope({ policy: { revision: '8' }, ...state }))
+        ).toThrow('invalid pause mode')
+    })
+
+    it('clears pause mode while available', () => {
+        expect(
+            parseAvailabilityResult({ availability: 'available', pauseMode: 'immediate' })
+        ).toEqual({ availability: 'available' })
+    })
+
+    it('retains advertised modes and distinguishes a Halt from a configured pause', () => {
+        const configured = parsePolicyAdvertisement({
+            revision: '8',
+            roles: {},
+            pausedBy: 'local',
+            pauseMode: 'configured'
+        })
+        const halted = parsePolicyAdvertisement({
+            revision: '8',
+            roles: {},
+            pausedBy: 'local',
+            pauseMode: 'immediate'
+        })
+        expect(configured?.pauseMode).toBe('configured')
+        expect(halted?.pauseMode).toBe('immediate')
+        expect(samePolicyAdvertisement(configured, halted)).toBe(false)
+        expect(
+            parsePolicyAdvertisement({ revision: '8', roles: {}, pauseMode: 'later' })
+        ).toBeUndefined()
+    })
+})
 
 describe('served/resident policy contract', () => {
     it('preserves custom buffers and zero wait through the generic policy bridge', () => {
@@ -1916,8 +1969,18 @@ describe('routing settings editor', () => {
         it('shows the availability the broker pushes', async () => {
             get.mockResolvedValue(savedDocument('5'))
             await open()
-            await act(async () => emitAvailability({ nodeId: SELF, availability: 'paused' }))
+            await act(async () =>
+                emitAvailability({
+                    nodeId: SELF,
+                    availability: 'paused',
+                    pausedBy: 'local',
+                    pauseMode: 'immediate'
+                })
+            )
             expect(container.textContent).toContain('Paused')
+            expect(useNodeConfigurationStore.getState().availability.get(SELF)?.pauseMode).toBe(
+                'immediate'
+            )
         })
     })
 

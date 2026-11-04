@@ -48,7 +48,7 @@ const legacySchemaVersion = 1
 // other machines.
 type Availability string
 
-// PauseMode selects timing for one availability request, never saved policy.
+// PauseMode records whether a pause follows configured timing or halts immediately.
 type PauseMode string
 
 const (
@@ -153,6 +153,9 @@ type Policy struct {
 	// the field existed, counts as paused locally. Only node:set-availability
 	// writes it; policy:set keeps it.
 	PausedBy PauseOrigin `json:"pausedBy,omitempty"`
+	// PauseMode records the accepted pause timing. Only node:set-availability
+	// writes it; policy:set keeps it. Empty while available.
+	PauseMode PauseMode `json:"pauseMode,omitempty"`
 }
 
 // UnmarshalJSON retains omitted defaults and validates the new fields' raw
@@ -642,6 +645,12 @@ func (p Policy) Validate() error {
 		return fmt.Errorf("pausedBy must be empty while the node is available")
 	case p.PausedBy != "" && p.PausedBy != PausedLocally && p.PausedBy != PausedByPeer:
 		return fmt.Errorf("pausedBy must be %q or %q", PausedLocally, PausedByPeer)
+	}
+	switch {
+	case p.Availability == Available && p.PauseMode != "":
+		return fmt.Errorf("pauseMode must be empty while the node is available")
+	case p.PauseMode != "" && p.PauseMode != PauseConfigured && p.PauseMode != PauseImmediate:
+		return fmt.Errorf("pauseMode must be %q or %q", PauseConfigured, PauseImmediate)
 	}
 	switch p.Pause.OnActive {
 	case FinishActive, CancelActive:

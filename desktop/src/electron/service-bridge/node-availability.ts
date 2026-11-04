@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { NodeAvailability, NodeAvailabilityResult } from '@/shared/types/node-policy'
+import { pauseModeValue } from '@/shared/utils/node-roles'
 import type { JsonValue } from './json-rpc-client'
 
 /** What the tray's pause toggle shows and does for an availability. */
@@ -54,6 +55,7 @@ export function availabilityMenuItem(availability: NodeAvailability | null): Ava
 export class NodeAvailabilityState {
     private current: NodeAvailability | null = null
     private origin: NodeAvailabilityResult['pausedBy']
+    private mode: NodeAvailabilityResult['pauseMode']
     private version = 0
     private readonly listeners = new Set<() => void>()
 
@@ -65,6 +67,10 @@ export class NodeAvailabilityState {
 
     get pausedBy(): NodeAvailabilityResult['pausedBy'] {
         return this.origin
+    }
+
+    get pauseMode(): NodeAvailabilityResult['pauseMode'] {
+        return this.mode
     }
 
     /** Invalidates reads when a newer push/result, even an equal value, arrives. */
@@ -86,9 +92,11 @@ export class NodeAvailabilityState {
     applyResult(result: JsonValue | undefined): void {
         const body = objectValue(result)
         const next = availabilityValue(body?.availability)
+        if (body?.pauseMode !== undefined && body.pauseMode !== '' && !pauseModeValue(body.pauseMode))
+            return
         if (next) {
             this.version++
-            this.set(next, pauseOriginValue(body?.pausedBy))
+            this.set(next, pauseOriginValue(body?.pausedBy), pauseModeValue(body?.pauseMode))
         }
     }
 
@@ -99,9 +107,11 @@ export class NodeAvailabilityState {
         const selfId = this.getSelfId()
         if (selfId === null || body.nodeId !== selfId) return
         const next = availabilityValue(body.availability)
+        if (body.pauseMode !== undefined && body.pauseMode !== '' && !pauseModeValue(body.pauseMode))
+            return
         if (next) {
             this.version++
-            this.set(next, pauseOriginValue(body.pausedBy))
+            this.set(next, pauseOriginValue(body.pausedBy), pauseModeValue(body.pauseMode))
         }
     }
 
@@ -113,12 +123,15 @@ export class NodeAvailabilityState {
 
     private set(
         next: NodeAvailability | null,
-        pausedBy?: NodeAvailabilityResult['pausedBy']
+        pausedBy?: NodeAvailabilityResult['pausedBy'],
+        pauseMode?: NodeAvailabilityResult['pauseMode']
     ): void {
         const origin = next === 'available' || next === null ? undefined : pausedBy
-        if (next === this.current && origin === this.origin) return
+        const mode = next === 'available' || next === null ? undefined : pauseMode
+        if (next === this.current && origin === this.origin && mode === this.mode) return
         this.current = next
         this.origin = origin
+        this.mode = mode
         for (const listener of Array.from(this.listeners)) listener()
     }
 }

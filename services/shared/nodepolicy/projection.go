@@ -36,6 +36,7 @@ type PeerPolicy struct {
 	Tiers          map[string][]TierEntry `json:"tiers"`
 	TierPolicy     TierPolicy             `json:"tierPolicy"`
 	PausedBy       PauseOrigin            `json:"pausedBy,omitempty"`
+	PauseMode      PauseMode              `json:"pauseMode,omitempty"`
 }
 
 func (p *PeerPolicy) UnmarshalJSON(data []byte) error {
@@ -70,6 +71,7 @@ func (p Policy) PeerProjection() PeerPolicy {
 		Tiers:          localTiers(p.Tiers),
 		TierPolicy:     p.TierPolicy,
 		PausedBy:       p.PausedBy,
+		PauseMode:      p.PauseMode,
 	}
 }
 
@@ -286,7 +288,7 @@ func peerFields(raw []byte) (map[string]json.RawMessage, error) {
 // policy. The document must carry no routing section, and its tiers and
 // tierPolicy must equal the peer projection of stored: a peer may change device
 // fields only, roles included. The result is the document's device fields with
-// the stored tiers, tierPolicy, routing, revision, availability and pausedBy
+// the stored tiers, tierPolicy, routing, revision, availability and pause metadata
 // restored exactly, so the caller must pass the stored policy it is about to
 // replace. Errors never echo the document.
 func MergePeerSet(stored Policy, raw []byte) (Policy, error) {
@@ -298,14 +300,14 @@ func MergePeerSet(stored Policy, raw []byte) (Policy, error) {
 		return Policy{}, err
 	}
 	// Parse matches keys case-insensitively, so "Routing" would be decoded as
-	// the routing section; reject every spelling. Availability and pausedBy are
-	// restored from stored and validated as a pair, so every spelling of either
+	// the routing section; reject every spelling. Availability and pause metadata
+	// are restored from stored and validated together, so every spelling
 	// is dropped before the document is parsed on its own.
 	for key := range fields {
 		if strings.EqualFold(key, "routing") {
 			return Policy{}, errors.New("a paired node cannot change the routing configuration")
 		}
-		if strings.EqualFold(key, "availability") || strings.EqualFold(key, "pausedBy") {
+		if strings.EqualFold(key, "availability") || strings.EqualFold(key, "pausedBy") || strings.EqualFold(key, "pauseMode") {
 			delete(fields, key)
 		}
 	}
@@ -334,6 +336,7 @@ func MergePeerSet(stored Policy, raw []byte) (Policy, error) {
 	merged.Revision = stored.Revision
 	merged.Availability = stored.Availability
 	merged.PausedBy = stored.PausedBy
+	merged.PauseMode = stored.PauseMode
 	if err := merged.Validate(); err != nil {
 		return Policy{}, err
 	}

@@ -145,7 +145,7 @@ func (b *Broker) runAcceptedAvailability(ctx context.Context, r *policyRuntime, 
 				cancel()
 				return "", errAvailabilitySuperseded
 			}
-			policy, persisted, err := r.persistAvailabilityLocked(nodepolicy.Paused, origin)
+			policy, persisted, err := r.persistAvailabilityLocked(nodepolicy.Paused, origin, mode)
 			if err == nil || persisted {
 				r.current = policy
 			}
@@ -240,20 +240,22 @@ func (b *Broker) runAvailabilityTransition(ctx context.Context, gen uint64, stat
 
 // persistAvailabilityLocked returns the current policy with state as its
 // availability, saved under the next revision. A pause records origin as its
-// pausedBy provenance and a resume clears it. That revision is active once the
-// proxy has acknowledged the availability push and the policy push that follows
-// it. While policy recovery is
-// required nothing is saved, so the corrupt file and recoveryRequired stay as
+// pausedBy provenance and mode as pauseMode; a resume clears both. That revision
+// is active once the proxy acknowledges the availability push and the policy
+// push that follows it. While policy recovery is required nothing is saved,
+// so the corrupt file and recoveryRequired stay as
 // they are; the change then lives in memory only and persisted is false.
 // A landed replacement is persisted even when durability failed; the caller
 // adopts it and completes the transition before returning the save warning.
 // Caller holds r.mu.
-func (r *policyRuntime) persistAvailabilityLocked(state nodepolicy.Availability, origin nodepolicy.PauseOrigin) (policy nodepolicy.Policy, persisted bool, err error) {
+func (r *policyRuntime) persistAvailabilityLocked(state nodepolicy.Availability, origin nodepolicy.PauseOrigin, mode nodepolicy.PauseMode) (policy nodepolicy.Policy, persisted bool, err error) {
 	policy = r.current
 	policy.Availability = state
 	policy.PausedBy = ""
+	policy.PauseMode = ""
 	if state == nodepolicy.Paused {
 		policy.PausedBy = origin
+		policy.PauseMode = mode
 	}
 	if r.recoveryRequired {
 		return policy, false, nil
@@ -291,9 +293,9 @@ func (b *Broker) pauseNode(ctx context.Context, origin nodepolicy.PauseOrigin, m
 	// Recheck physical shutdown on a repeated pause without assigning another
 	// revision to an already completed transition. A failed proxy activation
 	// still takes the ordinary publication path so a retry can activate it.
-	if r.current.Availability != nodepolicy.Paused || r.current.PausedBy != origin ||
+	if r.current.Availability != nodepolicy.Paused || r.current.PausedBy != origin || r.current.PauseMode != mode ||
 		(mode != nodepolicy.PauseImmediate && (r.live != nodepolicy.Paused || r.availabilityErr != "" || r.recoveryRequired)) {
-		policy, persisted, err = r.persistAvailabilityLocked(nodepolicy.Paused, origin)
+		policy, persisted, err = r.persistAvailabilityLocked(nodepolicy.Paused, origin, mode)
 	}
 	if err != nil && !persisted {
 		r.mu.Unlock()
@@ -556,7 +558,7 @@ func (b *Broker) resumeNode(ctx context.Context, gen uint64, origin nodepolicy.P
 		r.mu.Unlock()
 		return nodepolicy.Available, nil
 	}
-	policy, persisted, err := r.persistAvailabilityLocked(nodepolicy.Available, origin)
+	policy, persisted, err := r.persistAvailabilityLocked(nodepolicy.Available, origin, "")
 	if err != nil && !persisted {
 		r.mu.Unlock()
 		return "", fmt.Errorf("the available state could not be saved: %w", err)

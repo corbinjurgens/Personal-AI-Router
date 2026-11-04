@@ -254,6 +254,7 @@ func TestStopPauseContractConfiguredDrainPreservesPolicy(t *testing.T) {
 			after := rb.b.localPolicy().Policy
 			expected := before
 			expected.Revision, expected.Availability, expected.PausedBy = after.Revision, nodepolicy.Paused, nodepolicy.PausedLocally
+			expected.PauseMode = nodepolicy.PauseConfigured
 			if !reflect.DeepEqual(after, expected) {
 				t.Fatal("configured pause changed saved options or declarations")
 			}

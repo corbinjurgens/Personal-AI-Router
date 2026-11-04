@@ -30,6 +30,7 @@ import type {
 import { engineManagerName, isValidRoutingEngineId } from '@/shared/utils/engines'
 import getErrorString from '@/shared/utils/get-error-string'
 import { prettyJsonSource } from '@/shared/utils/json-source'
+import { pauseModeValue } from '@/shared/utils/node-roles'
 import { availabilityValue, pauseOriginValue } from './node-availability'
 import type { JsonObject, JsonValue } from './json-rpc-client'
 
@@ -605,9 +606,15 @@ export function parseAvailabilityResult(result: JsonValue | undefined): NodeAvai
         throw new Error('The service returned invalid pause provenance')
     }
     const origin = availability !== 'available' ? pauseOriginValue(pausedBy) : undefined
+    const pauseMode = body?.pauseMode
+    const mode = pauseModeValue(pauseMode)
+    if (pauseMode !== undefined && pauseMode !== '' && !mode) {
+        throw new Error('The service returned invalid pause mode')
+    }
     return {
         availability,
-        ...(origin !== undefined ? { pausedBy: origin } : {})
+        ...(origin !== undefined ? { pausedBy: origin } : {}),
+        ...(availability !== 'available' && mode !== undefined ? { pauseMode: mode } : {})
     }
 }
 

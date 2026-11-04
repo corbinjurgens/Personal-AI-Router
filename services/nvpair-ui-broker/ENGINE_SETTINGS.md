@@ -142,7 +142,7 @@ A load-plus-policy acceptance reserves the complete policy document. Ordinary
 local and peer `policy:set` calls, including Advanced, role, copy and TUI
 writers, receive `-32010` naming the pending request. Availability transitions
 retain their independent owner. The private journal-driven policy commit
-compares content excluding only `revision`, `availability` and `pausedBy`,
+compares content excluding only `revision`, `availability`, `pausedBy` and `pauseMode`,
 preserving their current values. Before content applies the accepted patch;
 after content adopts the landed revision; any third content refuses replacement.
 A landed policy replacement with uncertain durability is adopted and remains

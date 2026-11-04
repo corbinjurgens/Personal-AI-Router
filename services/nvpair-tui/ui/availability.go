@@ -39,8 +39,9 @@ const pauseStopFailurePrefix = "Pause could not stop every engine: "
 // availabilityState is the shell's view of this node's pause switch.
 type availabilityState struct {
 	// value is the last availability the broker reported; empty until known.
-	value    string
-	pausedBy string
+	value     string
+	pausedBy  string
+	pauseMode string
 	// pending is the target of a node:set-availability call in flight, or empty.
 	pending string
 	// err is the last failure, shown in the header until the next attempt.
@@ -57,6 +58,7 @@ type availabilityState struct {
 type policyGetMsg struct {
 	availability string
 	pausedBy     string
+	pauseMode    string
 	err          error
 	// guarded readbacks carry the epoch they were issued at.
 	guarded bool
@@ -66,6 +68,8 @@ type policyGetMsg struct {
 type setAvailabilityMsg struct {
 	target       string
 	availability string
+	pausedBy     string
+	pauseMode    string
 	err          error
 }
 
@@ -78,7 +82,7 @@ func policyGetCmd(client *rpc.Client) tea.Cmd {
 		}
 		var r targetPolicy
 		decodeOrLog("policy:get", msg.Result, &r)
-		return policyGetMsg{availability: r.Availability, pausedBy: r.Policy.PausedBy}
+		return policyGetMsg{availability: r.Availability, pausedBy: r.Policy.PausedBy, pauseMode: r.Policy.PauseMode}
 	})
 }
 
@@ -104,9 +108,11 @@ func setAvailabilityCmd(client *rpc.Client, target string) tea.Cmd {
 			}
 			var r struct {
 				Availability string `json:"availability"`
+				PausedBy     string `json:"pausedBy"`
+				PauseMode    string `json:"pauseMode"`
 			}
 			decodeOrLog("node:set-availability", msg.Result, &r)
-			return setAvailabilityMsg{target: target, availability: r.Availability}
+			return setAvailabilityMsg{target: target, availability: r.Availability, pausedBy: r.PausedBy, pauseMode: r.PauseMode}
 		})
 }
 
@@ -160,6 +166,8 @@ func (a *availabilityState) notify(params json.RawMessage) {
 	var p struct {
 		NodeID       string `json:"nodeId"`
 		Availability string `json:"availability"`
+		PausedBy     string `json:"pausedBy"`
+		PauseMode    string `json:"pauseMode"`
 	}
 	if !decodeOrLog("node:availability-changed", params, &p) {
 		return
@@ -169,7 +177,10 @@ func (a *availabilityState) notify(params json.RawMessage) {
 		return
 	}
 	a.value = p.Availability
-	a.pausedBy = ""
+	a.pausedBy, a.pauseMode = p.PausedBy, p.PauseMode
+	if a.value == availAvailable {
+		a.pausedBy, a.pauseMode = "", ""
+	}
 	a.epoch++
 }
 
@@ -185,8 +196,9 @@ func (a *availabilityState) update(msg tea.Msg) {
 		if msg.err == nil && msg.availability != "" {
 			a.value = msg.availability
 			a.pausedBy = msg.pausedBy
+			a.pauseMode = msg.pauseMode
 		} else if msg.err != nil {
-			a.value, a.pausedBy = "", ""
+			a.value, a.pausedBy, a.pauseMode = "", "", ""
 		}
 	case setAvailabilityMsg:
 		a.pending = ""
@@ -196,10 +208,10 @@ func (a *availabilityState) update(msg tea.Msg) {
 			a.err = commandFailure(msg.err)
 		case msg.availability != "":
 			a.value = msg.availability
-			a.pausedBy = ""
+			a.pausedBy, a.pauseMode = msg.pausedBy, msg.pauseMode
 		default:
 			a.value = msg.target
-			a.pausedBy = ""
+			a.pausedBy, a.pauseMode = "", ""
 		}
 	case NotificationMsg:
 		if msg.Msg != nil && msg.Msg.Method == "node:availability-changed" {
@@ -212,6 +224,7 @@ func (a *availabilityState) update(msg tea.Msg) {
 			}
 			if decodeOrLog(msg.Msg.Method, msg.Msg.Params, &p) && p.NodeID != "" && (p.NodeID == a.selfID || p.NodeID == a.selfUUID) {
 				a.pausedBy = p.Policy.PausedBy
+				a.pauseMode = p.Policy.PauseMode
 			}
 		}
 	}

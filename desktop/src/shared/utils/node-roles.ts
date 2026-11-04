@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { JsonValue } from '@/shared/types/json'
+import type { NodePauseMode } from '@/shared/types/node-policy'
 import type {
     NodePolicyAdvertisement,
     NodeRole,
@@ -46,6 +47,11 @@ export function pauseOriginValue(value: JsonValue | undefined): PauseOrigin | un
     return value === 'local' || value === 'peer' ? value : undefined
 }
 
+/** The accepted timing of a saved pause, or undefined when absent or unknown. */
+export function pauseModeValue(value: JsonValue | undefined): NodePauseMode | undefined {
+    return value === 'configured' || value === 'immediate' ? value : undefined
+}
+
 /** Read a discovery node's `policy` advertisement; undefined when the node sent none. */
 export function parsePolicyAdvertisement(
     value: JsonValue | undefined
@@ -53,10 +59,13 @@ export function parsePolicyAdvertisement(
     const body = objectValue(value)
     if (!body) return undefined
     const pausedBy = pauseOriginValue(body.pausedBy)
+    const pauseMode = pauseModeValue(body.pauseMode)
+    if (body.pauseMode !== undefined && body.pauseMode !== '' && !pauseMode) return undefined
     return {
         revision: typeof body.revision === 'string' ? body.revision : '',
         roles: parseNodeRoles(body.roles),
-        ...(pausedBy ? { pausedBy } : {})
+        ...(pausedBy ? { pausedBy } : {}),
+        ...(pauseMode ? { pauseMode } : {})
     }
 }
 
@@ -78,6 +87,7 @@ export function samePolicyAdvertisement(
     return (
         left.revision === right.revision &&
         left.pausedBy === right.pausedBy &&
+        left.pauseMode === right.pauseMode &&
         sameNodeRoles(left.roles, right.roles)
     )
 }
