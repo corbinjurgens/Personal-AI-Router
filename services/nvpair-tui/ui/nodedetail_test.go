@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -40,16 +41,17 @@ func tuiDownloadProgress(t *testing.T, method, node string, snapshot *modeldownl
 }
 
 func TestNodeDetailShowsIdentityTags(t *testing.T) {
-	const inventory = `{
+	const inventoryTemplate = `{
 		"hostUuid":"peer","name":"Peer","ipAddress":"127.0.0.1","port":12345,
 		"modelsByEngine":{"llamacpp":["served"]},
 		"modelIdentities":{"llamacpp":{"served":{
 			"repository":"unsloth/LFM2.5-24B-A2B-GGUF","quantization":"UD-Q4_K_XL",
-			"quantizationSource":"hf-tag","strength":"declared"
+			"quantizationSource":"hf-tag","strength":"declared"%s
 		}}}
 	}`
-	test := func(name string, self bool) {
+	test := func(name string, self bool, contextField, wantTags string) {
 		t.Run(name, func(t *testing.T) {
+			inventory := fmt.Sprintf(inventoryTemplate, contextField)
 			var d *nodeDetail
 			if self {
 				var result modelsResult
@@ -72,12 +74,12 @@ func TestNodeDetailShowsIdentityTags(t *testing.T) {
 				d = newNodeDetail(nil, rows[0])
 			}
 			d.SetSize(240, 40)
-			const want = "served  [unsloth/LFM2.5-24B-A2B-GGUF · UD-Q4_K_XL]"
+			want := "served  [" + wantTags + "]"
 			rows := d.modelTable.Rows()
 			if len(rows) != 1 || rows[0][0] != want {
 				t.Fatalf("model rows = %v, want %q", rows, want)
 			}
-			if rendered := d.View(); !strings.Contains(rendered, "unsloth/LFM2.5-24B-A2B-GGUF · UD-Q4_K_XL") {
+			if rendered := d.View(); !strings.Contains(rendered, wantTags) {
 				t.Fatalf("rendered detail lost identity tags: %s", rendered)
 			}
 			if len(d.modelRows) != 1 || d.modelRows[0].model != "served" {
@@ -85,8 +87,12 @@ func TestNodeDetailShowsIdentityTags(t *testing.T) {
 			}
 		})
 	}
-	test("local inventory", true)
-	test("peer discovery through node merge", false)
+	const tags = "unsloth/LFM2.5-24B-A2B-GGUF · UD-Q4_K_XL"
+	const contextField = `,"configuredContextTokens":131072`
+	test("local inventory with context", true, contextField, tags+" · Context 131072")
+	test("local inventory without context", true, "", tags)
+	test("peer discovery with context", false, contextField, tags+" · Context 131072")
+	test("peer discovery without context", false, "", tags)
 }
 
 func TestNodeDetailIdentityTagsOmitAbsentParts(t *testing.T) {
@@ -105,6 +111,7 @@ func TestNodeDetailIdentityTagsOmitAbsentParts(t *testing.T) {
 	}
 	test("repository only", engines.ModelIdentity{Repository: "owner/repo", Strength: "declared"}, "served  [owner/repo]")
 	test("quantization only", engines.ModelIdentity{Quantization: "Q4_K_M", Strength: "declared"}, "served  [Q4_K_M]")
+	test("context only", engines.ModelIdentity{ConfiguredContextTokens: 131072, Strength: "declared"}, "served  [Context 131072]")
 	test("no display parts", engines.ModelIdentity{GeneralName: "Model", Strength: "declared"}, "served")
 	test("absent identity", engines.ModelIdentity{}, "served")
 }

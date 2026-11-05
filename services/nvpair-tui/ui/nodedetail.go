@@ -2373,6 +2373,9 @@ func (d *nodeDetail) refreshModels() {
 		if identity.Quantization != "" {
 			tags = append(tags, identity.Quantization)
 		}
+		if identity.ConfiguredContextTokens > 0 {
+			tags = append(tags, fmt.Sprintf("Context %d", identity.ConfiguredContextTokens))
+		}
 		if len(tags) > 0 {
 			label += "  [" + strings.Join(tags, " · ") + "]"
 		}
