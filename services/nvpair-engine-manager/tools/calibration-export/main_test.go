@@ -189,6 +189,51 @@ func TestExportRejectsUnjoinableStore(t *testing.T) {
 	})
 }
 
+func TestExportFoldedHistoryDoesNotBlockContentIdentifiedSamples(t *testing.T) {
+	_, paths, current := syntheticStore(t)
+	folded := current
+	folded.Observation = current.Observation.Clone()
+	folded.Observation.SampleID = strings.Repeat("5", 64)
+	folded.Observation.BuildID = ""
+	folded.Observation.ReportedBuild = "b12020-0ec4027a2"
+	folded.Observation.ConfigurationKey = ""
+	folded.Observation.CapturedOptions = nil
+	for name, samples := range map[string][]storedSample{
+		"history before current": {folded, current},
+		"history after current":  {current, folded},
+	} {
+		t.Run(name, func(t *testing.T) {
+			encoded, err := json.Marshal(samples)
+			if err != nil {
+				t.Fatal(err)
+			}
+			root := t.TempDir()
+			storePath := filepath.Join(root, "mixed-history.json")
+			if err := os.WriteFile(storePath, encoded, 0600); err != nil {
+				t.Fatal(err)
+			}
+			output := filepath.Join(root, "export")
+			if err := run(context.Background(), storePath, output, "synthetic", "synthetic", paths); err != nil {
+				t.Fatalf("folded history blocked current sample export: %v", err)
+			}
+			data, err := os.ReadFile(filepath.Join(output, "sample-000.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got estimateCalibrationFixture
+			if err := json.Unmarshal(data, &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.BuildID != current.Observation.BuildID || got.ConfigurationKey != current.Observation.ConfigurationKey || got.Provenance.Build != current.Observation.ReportedBuild {
+				t.Fatalf("exported the wrong provenance: %+v", got)
+			}
+			if _, err := os.Stat(filepath.Join(output, "sample-001.json")); !os.IsNotExist(err) {
+				t.Fatalf("historical sample must not receive a content identity: %v", err)
+			}
+		})
+	}
+}
+
 func TestExportOnlyRecognizedOutput(t *testing.T) {
 	_, paths, recognized := syntheticStore(t)
 	unrecognized := storedSample{ModelIdentity: strings.Repeat("2", 64), Observation: modelconfig.BufferObservation{Status: "partial", SampleID: strings.Repeat("3", 64), RecordedAt: "2026-10-30T00:00:00Z", BuildID: "sha256:" + strings.Repeat("4", 64), ReportedBuild: "new-fork", Reason: "unrecognized-build-output"}}

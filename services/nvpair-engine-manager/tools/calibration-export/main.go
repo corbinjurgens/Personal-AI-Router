@@ -229,13 +229,15 @@ func exportFixtures(ctx context.Context, store io.Reader, paths []namedArtifact,
 			return nil, errors.New("invalid stored sample")
 		}
 		seen[o.SampleID] = true
-		if o.BuildAssurance != "recognized-output" {
+		// Folded history has no content identity and cannot calibrate a build.
+		// Keep it readable in the store without blocking eligible new samples.
+		if o.BuildAssurance != "recognized-output" || o.BuildID == "" {
 			continue
 		}
 		if !digest.MatchString(o.ConfigurationKey) || !reflect.DeepEqual(o.Artifacts, summaries) {
 			return nil, errors.New("unjoinable configuration/artifact set")
 		}
-		if o.BuildID == "" || o.ReportedBuild == "" || o.CapturedOptions == nil {
+		if o.ReportedBuild == "" || o.CapturedOptions == nil {
 			return nil, errors.New("sample lacks native provenance/effective allocation")
 		}
 		opts := o.CapturedOptions
