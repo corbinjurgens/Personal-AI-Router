@@ -22,7 +22,7 @@ unrelated ambient variables are excluded. Touching or moving an unchanged build
 preserves its key, including installs described by `install.fetch`. Expected
 file evidence still rejects replacement during preparation and replay. Auto
 retains its environment-bound source separately in the reviewed input envelope.
-The device helper's pin and native-initialization gates remain independent.
+Native initialization remains subject to activation and Pause gates.
 
 The inherited SWA allocation default has its own known-source assurance for
 the managed b12020 artifact declaration. Recognizing another build's device

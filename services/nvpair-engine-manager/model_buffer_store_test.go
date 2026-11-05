@@ -151,8 +151,8 @@ func TestModelBufferStorePrefersCurrentBuildOverNewerHistory(t *testing.T) {
 	if got := s.newest(sample.ModelIdentity, sample.Observation.BuildID); got.SampleID != sample.Observation.SampleID || got.Reason == "earlier-build" {
 		t.Fatalf("newer other-build record displaced matching history: %+v", got)
 	}
-	if got := s.newest(sample.ModelIdentity, ""); got.SampleID != other.Observation.SampleID || got.Reason != "earlier-build" {
-		t.Fatalf("unknown current build matched history: %+v", got)
+	if got := s.newest(sample.ModelIdentity, ""); got.SampleID != other.Observation.SampleID || got.Reason != "source-unavailable" || got.Current {
+		t.Fatalf("unknown current build must retain history without asserting a different build: %+v", got)
 	}
 }
 
