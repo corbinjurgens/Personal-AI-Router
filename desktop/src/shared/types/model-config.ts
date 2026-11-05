@@ -255,6 +255,8 @@ export type MemoryProfile = {
     current: boolean
 }
 export type InspectModelResult = {
+    nativeBuild?: string
+    nativeBuildId?: string
     memoryProfiles?: MemoryProfile[]
     memoryProfilesUnavailable?: boolean
     engine: string
@@ -315,6 +317,8 @@ type LoadBufferReason =
     | 'no-matching-sample'
     | 'missing-boundary'
     | 'unsupported-build'
+    | 'unrecognized-build-output'
+    | 'earlier-build'
     | 'clock-reversal'
     | 'unmapped-device'
     | 'mixed-role'
@@ -337,8 +341,9 @@ type LoadBufferObservation = {
     sampleId?: string
     recordedAt?: string
     persistence?: 'pending' | 'saved' | 'uncertain' | 'failed' | 'history-unavailable'
-    upstreamPin?: '0ec4027a2a0183de87c007069adddc06e665f7de'
-    buildAssurance?: 'recognized-self-reported-pin'
+    buildId?: string
+    reportedBuild?: string
+    buildAssurance?: 'recognized-output'
     estimatorRevision?: string
     inputIdentity?: string
     sourceIdentity?: string

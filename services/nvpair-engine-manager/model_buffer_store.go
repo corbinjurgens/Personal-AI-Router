@@ -124,7 +124,39 @@ func (s *modelBufferStore) load() {
 	var recovered []modelBufferStoredSample
 	for _, raw := range encoded {
 		var sample modelBufferStoredSample
-		if modelconfig.DecodeStrict(raw, &sample) != nil || validateModelBufferSample(sample) != nil || seen[sample.Observation.SampleID] {
+		// Fold the former on-disk pin at this existing decode boundary only.
+		// It is a reported build claim, never a content identity.
+		var stored struct {
+			ModelIdentity string          `json:"modelIdentity"`
+			Observation   json.RawMessage `json:"observation"`
+		}
+		if modelconfig.DecodeStrict(raw, &stored) != nil {
+			s.writeDisabled = true
+			return
+		}
+		sample.ModelIdentity = stored.ModelIdentity
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(stored.Observation, &fields) != nil || fields == nil {
+			s.writeDisabled = true
+			return
+		}
+		if previous, ok := fields["upstreamPin"]; ok {
+			var pin, assurance string
+			if modelconfig.DecodeStrict(previous, &pin) != nil || pin != "0ec4027a2a0183de87c007069adddc06e665f7de" || fields["buildId"] != nil || fields["reportedBuild"] != nil || fields["buildAssurance"] != nil && (modelconfig.DecodeStrict(fields["buildAssurance"], &assurance) != nil || assurance != "recognized-self-reported-pin") {
+				s.writeDisabled = true
+				return
+			}
+			delete(fields, "upstreamPin")
+			fields["reportedBuild"] = json.RawMessage(`"b12020-0ec4027a2"`)
+			fields["buildAssurance"] = json.RawMessage(`"recognized-output"`)
+			folded, err := json.Marshal(fields)
+			if err != nil {
+				s.writeDisabled = true
+				return
+			}
+			stored.Observation = folded
+		}
+		if modelconfig.DecodeStrict(stored.Observation, &sample.Observation) != nil || validateModelBufferSample(sample) != nil || seen[sample.Observation.SampleID] {
 			s.writeDisabled = true
 			return
 		}
@@ -225,12 +257,23 @@ func (s *modelBufferStore) publish(sample modelBufferStoredSample) string {
 	return "saved"
 }
 
-func (s *modelBufferStore) newest(model string) modelconfig.BufferObservation {
+func modelBufferHistoryBuildReason(recorded, current string) string {
+	if recorded != "" && recorded == current {
+		return ""
+	}
+	if current == "" && recorded != "" {
+		return "source-unavailable"
+	}
+	return "earlier-build"
+}
+
+func (s *modelBufferStore) newest(model, buildID string) modelconfig.BufferObservation {
 	view := s.view.Load()
 	if view == nil || view.unavailable {
 		return modelconfig.BufferObservation{Status: "unknown", Reason: "history-unavailable", Persistence: "history-unavailable"}
 	}
 	now := s.now()
+	var earlier *modelconfig.BufferObservation
 	for i := len(view.samples) - 1; i >= 0; i-- {
 		sample := view.samples[i]
 		at, err := time.Parse(time.RFC3339Nano, sample.Observation.RecordedAt)
@@ -243,7 +286,19 @@ func (s *modelBufferStore) newest(model string) modelconfig.BufferObservation {
 			o.Status = "partial"
 			o.Reason = "clock-reversal"
 		}
-		return o
+		reason := modelBufferHistoryBuildReason(o.BuildID, buildID)
+		if reason == "" {
+			return o
+		}
+		if earlier == nil {
+			if o.Reason != "clock-reversal" {
+				o.Reason = reason
+			}
+			earlier = &o
+		}
+	}
+	if earlier != nil {
+		return *earlier
 	}
 	return modelconfig.BufferObservation{Status: "unknown", Reason: "no-matching-sample"}
 }

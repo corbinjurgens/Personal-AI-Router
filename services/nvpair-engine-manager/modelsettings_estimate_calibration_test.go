@@ -33,7 +33,8 @@ type estimateCalibrationFixture struct {
 	Role             string                        `json:"role"`
 	Class            string                        `json:"class,omitempty"`
 	Backend          string                        `json:"backend"`
-	NativePin        string                        `json:"nativePin"`
+	NativePin        string                        `json:"nativePin,omitempty"`
+	BuildID          string                        `json:"buildId,omitempty"`
 	ConfigurationKey string                        `json:"configurationKey"`
 	Facts            gguffacts.Facts               `json:"facts"`
 	Artifacts        []modelconfig.ArtifactSummary `json:"artifacts"`
@@ -74,11 +75,15 @@ type estimateCalibrationPeak struct {
 
 func (f estimateCalibrationFixture) input() modelEstimateInput {
 	unified := false
+	buildID := f.BuildID
+	if buildID == "" {
+		buildID = f.Provenance.Build
+	}
 	return modelEstimateInput{Facts: f.Facts, Bindings: f.Artifacts,
 		Allocation: &modelconfig.ResolvedLoad{PerSlotContext: f.Allocation.PerSlotContext,
 			TotalContext: f.Allocation.TotalContext, Slots: f.Allocation.Slots, KVUnified: &unified,
 			GPU: f.Allocation.GPU, Options: f.Allocation.Options},
-		BuildID: f.Provenance.Build, Support: modelEstimatorSupport, SWAFull: f.Allocation.SWAFull}
+		BuildID: buildID, Support: modelEstimatorSupport, SWAFull: f.Allocation.SWAFull}
 }
 
 var estimateCalibrationDigest = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -117,10 +122,19 @@ func (f estimateCalibrationFixture) validate() error {
 	if f.Version != 1 || !slices.Contains([]string{"synthetic", "fit", "check"}, f.Role) {
 		return fmt.Errorf("fixture version/role")
 	}
-	if !slices.Contains([]string{"cpu", "cuda", "metal", "vulkan", "hip"}, f.Backend) || f.NativePin != modelBufferPin {
+	if !slices.Contains([]string{"cpu", "cuda", "metal", "vulkan", "hip"}, f.Backend) {
 		return fmt.Errorf("fixture backend/native pin")
 	}
-	if !estimateCalibrationMachine.MatchString(f.Provenance.Machine) || !modelBufferBuildSupported(f.Provenance.Build) {
+	// Historical calibration pins describe retained evidence, not a runtime
+	// feature gate. New exports carry the content identity and reported build.
+	if f.BuildID == "" {
+		if f.NativePin != "0ec4027a2a0183de87c007069adddc06e665f7de" || f.Provenance.Build != "b12020-0ec4027a2" && f.Provenance.Build != "b12020-"+f.NativePin {
+			return fmt.Errorf("fixture historical native evidence")
+		}
+	} else if f.NativePin != "" || !strings.HasPrefix(f.BuildID, "sha256:") || !estimateCalibrationDigest.MatchString(strings.TrimPrefix(f.BuildID, "sha256:")) || f.Provenance.Build == "" || len(f.Provenance.Build) > 256 {
+		return fmt.Errorf("fixture native build identity")
+	}
+	if !estimateCalibrationMachine.MatchString(f.Provenance.Machine) {
 		return fmt.Errorf("fixture provenance machine/build")
 	}
 	if _, err := time.Parse("2006-01-02", f.Provenance.Date); err != nil {

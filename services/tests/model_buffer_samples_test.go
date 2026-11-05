@@ -63,7 +63,7 @@ func TestModelBufferSamplesProcess(t *testing.T) {
 		f.rpcOK(t, "engine:start", map[string]string{"engine": "llamacpp"})
 		f.control(t, "medium-model", "initial")
 		first := f.observed(t, "medium-model", "initial")
-		if first.BuildAssurance != "recognized-self-reported-pin" || first.UpstreamPin != "0ec4027a2a0183de87c007069adddc06e665f7de" || first.SourceIdentity == first.UpstreamPin {
+		if first.BuildAssurance != "recognized-output" || !strings.HasPrefix(first.BuildID, "sha256:") || first.ReportedBuild != "b12020-0ec4027a2" || first.SourceIdentity == first.BuildID {
 			t.Fatal("native source digest became clean-source attestation")
 		}
 		var stored *modelconfig.BufferObservation
@@ -220,6 +220,35 @@ func TestModelBufferSamplesProcessRestart(t *testing.T) {
 		t.Fatal("live load overwrote corrupt history")
 	}
 	f.rpcOK(t, "engine:stop", map[string]string{"engine": "llamacpp"})
+}
+
+func TestModelBufferSamplesProcessPerBuildOutput(t *testing.T) {
+	t.Run("another props build with recognized grammar", func(t *testing.T) {
+		f := newModelBufferProcessFixture(t)
+		f.rpcOK(t, "engine:start", map[string]string{"engine": "llamacpp"})
+		f.control(t, "medium-model", "other-build")
+		f.control(t, "medium-model", "initial")
+		value := f.observed(t, "medium-model", "initial")
+		if value.ReportedBuild != "b12100-abcdef0" || !strings.HasPrefix(value.BuildID, "sha256:") || value.BuildAssurance != "recognized-output" || len(value.Rows) == 0 {
+			t.Fatalf("another build was not captured: %+v", value)
+		}
+		f.rpcOK(t, "engine:stop", map[string]string{"engine": "llamacpp"})
+	})
+	t.Run("unrecognized output remains a saved partial sample", func(t *testing.T) {
+		f := newModelBufferProcessFixture(t)
+		f.rpcOK(t, "engine:start", map[string]string{"engine": "llamacpp"})
+		f.control(t, "medium-model", "other-build")
+		f.control(t, "medium-model", "unrecognized")
+		task1Eventually(t, "unrecognized output saved", 90*time.Second, func() bool {
+			value := f.inspect(t, "medium-model").LoadObservation
+			return value != nil && value.Status == "partial" && value.Reason == "unrecognized-build-output" && value.Current && value.SampleID != "" && value.Persistence == "saved" && len(value.Rows) == 0 && value.BuildAssurance == "" && value.ReportedBuild == "b12100-abcdef0"
+		})
+		stored := modelBufferHistory(t, f)
+		if len(stored) != 1 || stored[0].Reason != "unrecognized-build-output" || stored[0].Status != "partial" || len(stored[0].Rows) != 0 || !strings.HasPrefix(stored[0].BuildID, "sha256:") {
+			t.Fatalf("unrecognized history=%+v", stored)
+		}
+		f.rpcOK(t, "engine:stop", map[string]string{"engine": "llamacpp"})
+	})
 }
 
 func TestModelBufferSamplesProcessNoNativeFromInspection(t *testing.T) {

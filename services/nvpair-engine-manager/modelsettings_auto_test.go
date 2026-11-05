@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/gguffacts"
@@ -168,6 +169,57 @@ func autoTestResolveInput(ctx context.Context, model string, requested modelconf
 	allocation.Options = modelEffectiveLoadOptions(requested)
 	in.Allocation = &allocation
 	return resolveModelSettingsAutoInput(ctx, model, requested, in, op, state)
+}
+
+func TestReviewedAutoKeepsNativeBuildAndSourceSeparate(t *testing.T) {
+	now := time.Now()
+	in := autoTestInput()
+	in.BuildID = "sha256:" + strings.Repeat("b", 64)
+	wantSource := strings.Repeat("e", 64)
+	state := modelEstimateState{now: func() time.Time { return now }, run: func(ctx context.Context, candidate modelEstimateInput) modelconfig.Estimate {
+		if candidate.Allocation.NativeBuildID != in.BuildID || candidate.BuildID != wantSource {
+			t.Fatalf("candidate build=%q source=%q", candidate.Allocation.NativeBuildID, candidate.BuildID)
+		}
+		return autoTestEstimate(ctx, candidate)
+	}}
+	op := modelAutoOperation{
+		Memory:           &autoTestMemoryOwner{memory: autoTestMemory(now)},
+		ConversionSource: strings.Repeat("c", 64),
+		NativeSource: func(candidate *modelconfig.ResolvedLoad) (string, error) {
+			if candidate.NativeBuildID != in.BuildID {
+				t.Fatalf("source check received build %q", candidate.NativeBuildID)
+			}
+			return wantSource, nil
+		},
+	}
+	requested := autoTestRequest()
+	proposal, err := autoTestResolveInput(context.Background(), "exact", requested, in, op, &state)
+	if err != nil || proposal.Resolved == nil {
+		t.Fatalf("proposal=%+v err=%v", proposal, err)
+	}
+	resolved := proposal.Resolved
+	if resolved.NativeBuildID != in.BuildID || modelAutoNativeSource(resolved) != wantSource {
+		t.Fatalf("resolved build=%q source=%q", resolved.NativeBuildID, modelAutoNativeSource(resolved))
+	}
+	if len(resolved.ReviewedInputID) > 256 {
+		t.Fatal("review envelope exceeds existing storage bound")
+	}
+	resolved.SourceInputDigest, resolved.PresetDigest = strings.Repeat("a", 64), strings.Repeat("d", 64)
+	if err := modelAutoFrozen("exact", requested, resolved); err != nil {
+		t.Fatal("frozen review failed", err)
+	}
+	changed := resolved.Clone()
+	conversion, memory, ok := modelAutoReviewParts(changed.ReviewedInputID)
+	if !ok {
+		t.Fatal("review envelope is invalid")
+	}
+	other, err := modelAutoReviewHash("exact", requested, &changed, conversion, memory, strings.Repeat("f", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other == resolved.ReviewedInputID {
+		t.Fatal("native source does not bind the review")
+	}
 }
 
 func TestModelSettingsAutoContextRange(t *testing.T) {
@@ -502,6 +554,170 @@ func autoTestNativeSource(t *testing.T, f *modelLoadFixture) {
 	writeTestFile(t, filepath.Join(f.root, "libggml-base.dylib"), []byte("synthetic native library, never loaded"))
 }
 
+func TestReviewedAutoPerBuildDeviceCheck(t *testing.T) {
+	test := func(name string, mutate func(map[string]any), recognized bool) {
+		t.Run(name, func(t *testing.T) {
+			f := newModelLoadFixture(t)
+			f.st.plat.Runtime = convertModelLoadFixture(t, f)
+			autoTestNativeSource(t, &f)
+			writeTestFile(t, f.st.binPath, []byte("synthetic reviewed build "+t.Name()))
+			build, err := nativeBuildID(context.Background(), f.st)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				modelDeviceChecks.Lock()
+				delete(modelDeviceChecks.builds, build)
+				modelDeviceChecks.Unlock()
+			})
+			helperCalls := 0
+			runner := func(ctx context.Context, selected modelDeviceRuntime, env []string) (modelDeviceReply, error) {
+				helperCalls++
+				if selected.Build != build || !slices.Contains(env, "CUDA_VISIBLE_DEVICES="+autoTestDeviceBinding().DeviceID) {
+					t.Fatalf("helper selection = %+v, env = %v", selected, env)
+				}
+				ggml, driver := modelDeviceTestABI(t, "CUDA0")
+				physical := [16]byte{0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11}
+				driver["cuDeviceGetUuid_v2"] = func(out *[16]byte, _ int32) int32 { *out = physical; return 0 }
+				driver["cuDeviceGetUuid"] = func(out *[16]byte, _ int32) int32 { *out = physical; return 0 }
+				mutate(driver)
+				return modelDeviceTestEnumerate(t, selected, ggml, driver), ctx.Err()
+			}
+			ctx := context.WithValue(context.Background(), modelAutoOperationKey{}, modelAutoOperation{DeviceRunner: runner})
+			ctx = f.ex.modelMemoryContext(ctx, "fake", modelBufferTestTargetMemory(), true)
+			op, _ := ctx.Value(modelAutoOperationKey{}).(modelAutoOperation)
+			memory, err := op.Memory.ModelAutoMemory(ctx)
+			if err != nil || memory == nil || memory.Map == nil {
+				t.Fatalf("memory = %+v, %v", memory, err)
+			}
+			checked, ok := modelDeviceCheckedBuild(build)
+			if !ok || checked.Commit != "abcdef0-custom" {
+				t.Fatalf("missing per-build result: %+v, %v", checked, ok)
+			}
+			f.ex.modelEstimates.run = autoTestEstimate
+			request := settingsRequest(t, f.ex)
+			r := autoTestRequest()
+			layers := int32(1)
+			r.GPU = &modelconfig.GPU{Mode: "layers", Layers: &layers}
+			r.Context = &modelconfig.Context{Mode: "auto", Floor: 4096, Cap: 4096}
+			request.ModelChange = &modelconfig.ModelChange{ModelID: "weak-model", ExpectedPolicyRevision: "0", Load: &modelconfig.LoadPatch{Set: r}}
+			preview, previewErr := f.ex.PreviewLaunch(request, ctx)
+			if recognized {
+				if checked.Unknown != "" || helperCalls != 2 || memory.Map.Binding == nil || memory.Map.Unknown != "" || len(memory.Map.Devices) != 1 {
+					t.Fatalf("recognized mapping: calls=%d, map=%+v, check=%+v", helperCalls, memory.Map, checked)
+				}
+				if previewErr != nil || len(preview.Errors) != 0 || preview.Auto == nil || preview.Auto.Status != "fits" || preview.Auto.Resolved == nil || preview.Auto.Resolved.NativeBuildID != build || preview.Auto.Resolved.DeviceBinding == nil {
+					t.Fatalf("recognized Auto = %+v, %v", preview, previewErr)
+				}
+				return
+			}
+			if checked.Unknown != "device report not recognized for this build" || memory.Map.Unknown != checked.Unknown || memory.Map.Binding != nil || len(memory.Map.Devices) != 0 || helperCalls != 1 {
+				t.Fatalf("unrecognized mapping: calls=%d, map=%+v, check=%+v", helperCalls, memory.Map, checked)
+			}
+			if previewErr == nil && len(preview.Errors) == 0 || preview.Auto != nil && (preview.Auto.Status == "fits" || preview.Auto.Resolved != nil) {
+				t.Fatalf("unrecognized Auto = %+v, %v", preview, previewErr)
+			}
+			// A second review consumes the negative recognition cache, without
+			// retaining the previous operation's physical inventory or binding.
+			second := f.ex.modelMemoryContext(ctx, "fake", modelBufferTestTargetMemory(), true)
+			secondOp, _ := second.Value(modelAutoOperationKey{}).(modelAutoOperation)
+			secondMemory, err := secondOp.Memory.ModelAutoMemory(second)
+			if err != nil || secondMemory == nil || secondMemory.Map == nil || secondMemory.Map.Unknown != "device report not recognized for this build" || helperCalls != 1 {
+				t.Fatalf("negative cache: calls=%d, memory=%+v, %v", helperCalls, secondMemory, err)
+			}
+			executable, err := captureSource(f.st.binPath, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, libraries, err := nativeBuildSnapshotExpected(ctx, executable, servingFileAccess{}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			command := typedFixtureCommand(t, f, f.st.plat.Runtime)
+			if source, _, err := modelReviewedNativeSourceExpected(ctx, f.st, command, servingFileAccess{}, executable, libraries); err != nil || source == "" {
+				t.Fatalf("CPU Auto source depended on device recognition: %q, %v", source, err)
+			}
+			if command.Env == nil {
+				command.Env = map[string]string{}
+			}
+			command.Env["CUDA_VISIBLE_DEVICES"] = autoTestDeviceBinding().DeviceID
+			if _, _, err := modelReviewedNativeSourceExpected(ctx, f.st, command, servingFileAccess{}, executable, libraries); err == nil || !strings.Contains(err.Error(), "device report not recognized for this build") {
+				t.Fatalf("Auto source ignored failed recognition: %v", err)
+			}
+			if source, err := modelReviewedNativeSource(ctx, f.st, command); err != nil || source == "" {
+				t.Fatalf("file-only identity depended on native recognition: %q, %v", source, err)
+			}
+		})
+	}
+	test("agreeing report enables Auto on another revision", func(map[string]any) {}, true)
+	test("name mismatch disables Auto", func(driver map[string]any) {
+		driver["cuDeviceGetName"] = func(out *byte, size int32, _ int32) int32 {
+			copy(unsafe.Slice(out, int(size)), "Different GPU\x00")
+			return 0
+		}
+	}, false)
+	test("memory mismatch disables Auto", func(driver map[string]any) {
+		driver["cuDeviceTotalMem_v2"] = func(out *uintptr, _ int32) int32 { *out = 9 << 30; return 0 }
+	}, false)
+}
+
+func TestReviewedAutoSeveralGPUsNamesReasonWithoutHelper(t *testing.T) {
+	test := func(name string, firstHasUUID bool) {
+		t.Run(name, func(t *testing.T) {
+			f := newModelLoadFixture(t)
+			f.st.plat.Runtime = convertModelLoadFixture(t, f)
+			autoTestNativeSource(t, &f)
+			target := modelBufferTestTargetMemory()
+			second := target.Observation.Domains[1]
+			second.ID = "other-gpu"
+			second.DeviceIDs = []string{"GPU-22222222-2222-2222-2222-222222222222", "pci:0000:ac:00.0", "luid_0x00000000_0x00005678_phys_0"}
+			target.Observation.Domains = append(target.Observation.Domains, second)
+			if !firstHasUUID {
+				target.Observation.Domains[1].DeviceIDs = []string{"pci:0000:ab:00.0", modelDevicesFixtureLUID}
+			}
+			ctx := context.WithValue(context.Background(), modelAutoOperationKey{}, modelAutoOperation{DeviceRunner: func(context.Context, modelDeviceRuntime, []string) (modelDeviceReply, error) {
+				t.Fatal("several-GPU topology ran a device helper")
+				return modelDeviceReply{}, nil
+			}})
+			ctx = f.ex.modelMemoryContext(ctx, "fake", target, true)
+			op, _ := ctx.Value(modelAutoOperationKey{}).(modelAutoOperation)
+			memory, err := op.Memory.ModelAutoMemory(ctx)
+			if err != nil || memory == nil || memory.Map == nil || memory.Map.Unknown != "several GPUs: reviewed Auto supports one GPU; choose GPUs with extra options" || memory.Map.Binding != nil || len(memory.Map.Devices) != 0 {
+				t.Fatalf("several-GPU map = %+v, %v", memory, err)
+			}
+			r := autoTestRequest()
+			layers := int32(1)
+			r.GPU = &modelconfig.GPU{Mode: "layers", Layers: &layers}
+			r.Context = &modelconfig.Context{Mode: "auto", Floor: 4096, Cap: 4096}
+			state := modelEstimateState{run: autoTestEstimate}
+			proposal, err := autoTestResolveInput(ctx, "exact", r, autoTestInput(), op, &state)
+			if err == nil || proposal.Status != "unavailable" || proposal.Resolved != nil {
+				t.Fatalf("several-GPU Auto = %+v, %v", proposal, err)
+			}
+		})
+	}
+	test("both UUIDs present", true)
+	test("first UUID missing", false)
+}
+
+func TestReviewedAutoInspectionExplainsDeviceRefusal(t *testing.T) {
+	for _, reason := range []string{"device report not recognized for this build", "several GPUs: reviewed Auto supports one GPU; choose GPUs with extra options"} {
+		t.Run(reason, func(t *testing.T) {
+			f := newInspectionFixture(t, 4096)
+			memory := autoTestMemory(time.Now())
+			memory.Map = &modelDeviceMap{Unknown: reason}
+			f.ex.modelEstimates.run = func(context.Context, modelEstimateInput) modelconfig.Estimate {
+				return modelconfig.Estimate{Status: "unknown", Domains: []modelconfig.MemoryDomain{{ID: "offload-unmapped", Kind: "device"}}}
+			}
+			ctx := context.WithValue(context.Background(), modelAutoOperationKey{}, modelAutoOperation{Memory: &autoTestMemoryOwner{memory: memory}})
+			result, err := f.ex.InspectModel(ctx, f.request)
+			if err != nil || len(result.Estimate.Domains) != 1 || !slices.Contains(result.Estimate.Domains[0].Unknowns, reason) {
+				t.Fatalf("inspection lost device refusal: %+v, %v", result.Estimate, err)
+			}
+		})
+	}
+}
+
 func TestModelSettingsAutoCandidatesUseEffectiveBaseline(t *testing.T) {
 	now := time.Now()
 	r := autoTestRequest()
@@ -555,7 +771,7 @@ func TestModelSettingsAutoReplayBindsLibrariesAndEnvironment(t *testing.T) {
 	test("added relevant library", func(t *testing.T, f modelLoadFixture) {
 		writeTestFile(t, filepath.Join(f.root, "libggml-cuda.dylib"), []byte("new synthetic library"))
 	})
-	test("effective environment", func(t *testing.T, _ modelLoadFixture) { t.Setenv("PAIR_AUTO_SOURCE_FIXTURE", "changed") })
+	test("effective native environment", func(t *testing.T, _ modelLoadFixture) { t.Setenv("GGML_SOURCE_FIXTURE", "changed") })
 	test("external native library search", func(t *testing.T, _ modelLoadFixture) { t.Setenv("LD_LIBRARY_PATH", t.TempDir()) })
 }
 

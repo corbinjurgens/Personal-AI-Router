@@ -106,6 +106,22 @@ interface RemoteEngineFacts {
     port: number
     /** Physical-stop evidence; absent/invalid wire data never proves it. */
     terminationVerified: boolean
+    buildInfo?: string
+    buildId?: string
+}
+
+function reportedBuild(
+    buildInfo: JsonValue | undefined,
+    buildId: JsonValue | undefined
+): Pick<EngineStatusData, 'buildInfo' | 'buildId'> {
+    return {
+        ...(typeof buildInfo === 'string' && buildInfo.length > 0 && buildInfo.length <= 256
+            ? { buildInfo }
+            : {}),
+        ...(typeof buildId === 'string' && buildId.length > 0 && buildId.length <= 256
+            ? { buildId }
+            : {})
+    }
 }
 
 const appStartTime = new Date().toISOString()
@@ -239,6 +255,8 @@ class ModularBridgeState {
             running: boolean
             port: number
             terminationVerified: boolean
+            buildInfo?: string
+            buildId?: string
         }
     >()
     /**
@@ -838,7 +856,8 @@ class ModularBridgeState {
             installed: booleanValue(obj.installed),
             running: booleanValue(obj.running),
             port: numberValue(obj.port),
-            terminationVerified: obj.running === false && obj.terminationVerified === true
+            terminationVerified: obj.running === false && obj.terminationVerified === true,
+            ...reportedBuild(obj.buildInfo, obj.buildId)
         })
         // A fresh authoritative state is the resolution of whatever op was in
         // flight (start/stop done, install `done`+installed, uninstall removed).
@@ -1455,7 +1474,8 @@ class ModularBridgeState {
                 // it for the engine port.
                 enginePort: facts.installed && facts.port > 0 ? facts.port : null,
                 // The peer's promoted proxy port, when its engine is advertised.
-                proxyPort: presence?.up && presence.port > 0 ? presence.port : null
+                proxyPort: presence?.up && presence.port > 0 ? presence.port : null,
+                ...reportedBuild(facts.buildInfo, facts.buildId)
             }
         } else if (
             node &&
@@ -1513,7 +1533,8 @@ class ModularBridgeState {
                 healthy: booleanValue(engineObj.healthy),
                 port: numberValue(engineObj.port),
                 terminationVerified:
-                    engineObj.running === false && engineObj.terminationVerified === true
+                    engineObj.running === false && engineObj.terminationVerified === true,
+                ...reportedBuild(engineObj.buildInfo, engineObj.buildId)
             })
             seen.add(engineType)
         }
@@ -1542,7 +1563,8 @@ class ModularBridgeState {
             running: booleanValue(obj.running),
             healthy: booleanValue(obj.healthy),
             port: numberValue(obj.port),
-            terminationVerified: obj.running === false && obj.terminationVerified === true
+            terminationVerified: obj.running === false && obj.terminationVerified === true,
+            ...reportedBuild(obj.buildInfo, obj.buildId)
         })
         this.emitRemoteEngineStatus(nodeId, engineType)
     }
@@ -2016,7 +2038,8 @@ class ModularBridgeState {
                 nodeId,
                 processStatus: pending,
                 enginePort: facts && facts.running && facts.port > 0 ? facts.port : null,
-                proxyPort: isProxyEngine(engineType) ? this.getProxyPort(engineType) : null
+                proxyPort: isProxyEngine(engineType) ? this.getProxyPort(engineType) : null,
+                ...reportedBuild(facts?.buildInfo, facts?.buildId)
             }
         }
 
@@ -2039,7 +2062,8 @@ class ModularBridgeState {
                 // Each proxy-fronted engine has its own broker proxy
                 // (mapped in proxy-engines.ts); report that engine's bound
                 // proxy port. Loopback-only engines get null.
-                proxyPort: isProxyEngine(engineType) ? this.getProxyPort(engineType) : null
+                proxyPort: isProxyEngine(engineType) ? this.getProxyPort(engineType) : null,
+                ...reportedBuild(facts.buildInfo, facts.buildId)
             }
         }
 

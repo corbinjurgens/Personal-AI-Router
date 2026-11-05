@@ -21,6 +21,12 @@ import type { IEngineApi } from '@/ui/api/engine-api'
 import { EngineSettingsSection } from '@/ui/components/BackendRow/EngineSettingsSection'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import { redactSensitiveLogText } from '@/electron/redact-log'
+import { useEngineStatusStore } from '@/ui/stores/engine-status.store'
+import { getModularBridgeState } from '@/electron/service-bridge/modular-state'
+import type { EngineStatusData, EngineType } from '@/shared/types/engines'
+
+vi.mock('electron', () => ({ BrowserWindow: { getAllWindows: () => [] } }))
+vi.mock('@/electron/window', () => ({ createOverviewWindow: vi.fn() }))
 
 const target = { nodeId: 'remote', engine: 'llamacpp' } as const
 const modelLoads: NonNullable<EngineSettingsConfig['modelLoads']> = [
@@ -108,6 +114,148 @@ const key = engineSettingsKey(target)
 const store = useEngineSettingsStore
 const getSettings = vi.fn()
 const applySettings = vi.fn()
+
+describe('running native build status', () => {
+    const buildInfo = 'b12345-test-build'
+    const buildId = `sha256:${'a'.repeat(64)}`
+    const wire = {
+        engine: 'llamacpp',
+        installed: true,
+        running: true,
+        healthy: true,
+        port: 8081,
+        buildInfo,
+        buildId
+    }
+
+    it('preserves local notification builds and clears omissions on stop', () => {
+        const state = getModularBridgeState()
+        state.setSelfId('build-local')
+        state.applyEngineManagerStatus(wire)
+        const status = () =>
+            state.getEngineInitialState().statuses.find(
+                value => value.nodeId === 'build-local' && value.engineType === 'llama-cpp'
+            )
+        expect(status()).toMatchObject({ buildInfo, buildId, processStatus: 'running' })
+        state.beginLocalEngineOp('llama-cpp', 'stopping')
+        expect(status()).toMatchObject({ buildInfo, buildId, processStatus: 'stopping' })
+        state.applyEngineManagerStatus({ engine: 'llamacpp', installed: true, running: false })
+        expect(status()?.buildInfo).toBeUndefined()
+        expect(status()?.buildId).toBeUndefined()
+    })
+
+    it('preserves remote list and operation builds and clears a replacement without them', () => {
+        const state = getModularBridgeState()
+        state.setSelfId('build-local')
+        state.handleNotification({
+            source: 'broker',
+            method: 'discovery:nodes-changed',
+            params: {
+                nodes: [
+                    {
+                        hostUuid: 'build-peer',
+                        name: 'build-peer',
+                        ipAddress: '192.0.2.60',
+                        port: 14318,
+                        trusted: true,
+                        clustered: true
+                    }
+                ]
+            }
+        })
+        state.applyRemoteEngineFacts('build-peer', { engines: [wire] })
+        const status = () =>
+            state.getEngineInitialState().statuses.find(
+                value => value.nodeId === 'build-peer' && value.engineType === 'llama-cpp'
+            )
+        expect(status()).toMatchObject({ buildInfo, buildId })
+        state.applyRemoteEngineStatusResult('build-peer', 'llama-cpp', {
+            ...wire,
+            buildInfo: 'replacement-build',
+            buildId: `sha256:${'b'.repeat(64)}`
+        })
+        expect(status()).toMatchObject({
+            buildInfo: 'replacement-build',
+            buildId: `sha256:${'b'.repeat(64)}`
+        })
+        state.applyRemoteEngineStatusResult('build-peer', 'llama-cpp', {
+            engine: 'llamacpp',
+            installed: true,
+            running: false
+        })
+        expect(status()?.buildInfo).toBeUndefined()
+        expect(status()?.buildId).toBeUndefined()
+    })
+
+    it('shows the owning node build in settings and its identity in the tooltip', async () => {
+        const get = vi.fn<IEngineApi['getSettings']>().mockResolvedValue(baseline)
+        Object.defineProperty(window, 'pairApi', {
+            configurable: true,
+            value: {
+                engines: {
+                    getSettings: get,
+                    onSettingsChanged: () => () => {},
+                    onSettingsDisconnected: () => () => {}
+                }
+            }
+        })
+        vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+        vi.stubGlobal('CSS', { supports: () => false })
+        useConnectionStore.setState({ connected: true, selfId: 'remote' })
+        useEngineStatusStore.setState({
+            statusByNode: new Map([
+                [
+                    'remote',
+                    new Map<EngineType, EngineStatusData>([
+                        [
+                            'llama-cpp',
+                            {
+                                engineType: 'llama-cpp',
+                                nodeId: 'remote',
+                                processStatus: 'running',
+                                enginePort: 8081,
+                                proxyPort: 8080,
+                                buildInfo,
+                                buildId
+                            }
+                        ]
+                    ])
+                ]
+            ])
+        })
+        store.setState({ entries: {} })
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        const root = createRoot(container)
+        try {
+            await act(async () =>
+                root.render(
+                    createElement(EngineSettingsSection, {
+                        nodeId: 'remote',
+                        engineType: 'llama-cpp',
+                        disabled: false
+                    })
+                )
+            )
+            const label = Array.from(container.querySelectorAll('[tabindex="0"]')).find(
+                element => element.textContent === 'llama.cpp b12345-test-build'
+            )
+            if (!(label instanceof HTMLElement)) throw new Error('Build label missing')
+            const tooltipId = label.getAttribute('aria-describedby')
+            if (!tooltipId) throw new Error('Build tooltip association missing')
+            expect(document.getElementById(tooltipId)?.getAttribute('role')).toBe('tooltip')
+            expect(document.getElementById(tooltipId)?.textContent).toBe(buildId)
+            await act(async () => useEngineStatusStore.setState({ statusByNode: new Map() }))
+            expect(container.textContent).not.toContain('llama.cpp b12345-test-build')
+        } finally {
+            await act(async () => root.unmount())
+            container.remove()
+            useEngineStatusStore.setState({ statusByNode: new Map() })
+            vi.unstubAllGlobals()
+            vi.restoreAllMocks()
+        }
+    })
+})
 
 const serving: EngineServingConfig = {
     version: 1,

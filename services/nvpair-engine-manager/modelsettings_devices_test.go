@@ -17,6 +17,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 )
 
 const modelDevicesFixtureUUID = "GPU-12345678-1234-1234-1234-123456789abc"
@@ -58,9 +59,16 @@ func TestModelSettingsDevicesBoundLibraryRead(t *testing.T) {
 
 const modelDevicesFixtureLUID = "luid_0x00000000_0x00001234_phys_0"
 
-func modelDevicesFixtureOperation() modelDeviceOperation {
+func modelDevicesFixtureOperation(t *testing.T) modelDeviceOperation {
+	t.Helper()
+	build := "fixture:" + t.Name()
+	t.Cleanup(func() {
+		modelDeviceChecks.Lock()
+		delete(modelDeviceChecks.builds, build)
+		modelDeviceChecks.Unlock()
+	})
 	return modelDeviceOperation{
-		Runtime: modelDeviceRuntime{Build: modelDevicesBuild, Libraries: []modelDeviceLibrary{{Name: "ggml.dll", SHA256: strings.Repeat("a", 64)}}},
+		Runtime: modelDeviceRuntime{Build: build, Libraries: []modelDeviceLibrary{{Name: "ggml.dll", SHA256: strings.Repeat("a", 64)}}},
 		Topology: modelDeviceTopology{Host: "host-a", Run: "run-a", Observation: "observation-a", Pools: []modelDevicePool{
 			{ID: "ram", Kind: "host"},
 			{ID: "physical-a", Kind: "dedicated", UUID: modelDevicesFixtureUUID, PCI: "00000000:AB:00.0", LUID: modelDevicesFixtureLUID},
@@ -78,14 +86,14 @@ func modelDevicesFixtureRunner(ctx context.Context, _ modelDeviceRuntime, env []
 			selector = "CUDA0"
 		}
 	}
-	return modelDeviceReply{Devices: []modelNativeDevice{
+	return modelDeviceReply{Commit: "abcdef0-custom", Devices: []modelNativeDevice{
 		{Selector: "CPU", Kind: 0},
 		{Selector: selector, Kind: 1, PCI: "0000:ab:00.0", UUID: modelDevicesFixtureUUID, LUID: modelDevicesFixtureLUID},
 	}}, nil
 }
 
 func TestModelSettingsDevicesPhysicalSelection(t *testing.T) {
-	op := modelDevicesFixtureOperation()
+	op := modelDevicesFixtureOperation(t)
 	first := mapModelSettingsDevices(context.Background(), op, modelDevicesFixtureRunner)
 	if first.Unknown != "" || first.Binding == nil {
 		t.Fatalf("mapping = %+v", first)
@@ -120,13 +128,15 @@ func TestModelSettingsDevicesPhysicalSelection(t *testing.T) {
 }
 
 func TestModelSettingsDevicesObservationAndBindingIdentity(t *testing.T) {
-	base := mapModelSettingsDevices(context.Background(), modelDevicesFixtureOperation(), modelDevicesFixtureRunner)
+	baseOp := modelDevicesFixtureOperation(t)
+	base := mapModelSettingsDevices(context.Background(), baseOp, modelDevicesFixtureRunner)
 	if base.Binding == nil {
 		t.Fatalf("base = %+v", base)
 	}
 	test := func(name string, change func(*modelDeviceOperation), sameBinding bool) {
 		t.Run(name, func(t *testing.T) {
-			op := modelDevicesFixtureOperation()
+			op := modelDevicesFixtureOperation(t)
+			op.Runtime.Build = baseOp.Runtime.Build
 			change(&op)
 			got := mapModelSettingsDevices(context.Background(), op, modelDevicesFixtureRunner)
 			if got.Binding == nil {
@@ -147,47 +157,33 @@ func TestModelSettingsDevicesObservationAndBindingIdentity(t *testing.T) {
 	test("changed host", func(op *modelDeviceOperation) { op.Topology.Host = "host-b" }, false)
 }
 
-func TestModelSettingsDevicesReorderedIdenticalAdapters(t *testing.T) {
-	op := modelDevicesFixtureOperation()
+func TestModelSettingsDevicesSeveralGPUsDoNotInitialize(t *testing.T) {
+	op := modelDevicesFixtureOperation(t)
 	other := op.Topology.Pools[1]
 	other.ID = "physical-b"
 	other.PCI = "0000:ac:00.0"
 	other.UUID = "GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 	other.LUID = "luid_0x00000000_0x00005678_phys_0"
 	op.Topology.Pools = append(op.Topology.Pools, other)
-	runner := func(swapped bool) modelDeviceRunner {
-		return func(ctx context.Context, r modelDeviceRuntime, env []string) (modelDeviceReply, error) {
-			reply, err := modelDevicesFixtureRunner(ctx, r, env)
-			if reply.Devices[1].Selector == "CUDA0" {
-				return reply, err
-			}
-			second := modelNativeDevice{Selector: "CUDA8", Kind: 1, PCI: other.PCI, UUID: other.UUID, LUID: other.LUID}
-			if swapped {
-				reply.Devices[1].Selector = "CUDA8"
-				second.Selector = "CUDA7"
-				reply.Devices = []modelNativeDevice{second, reply.Devices[1], reply.Devices[0]}
-			} else {
-				reply.Devices = append(reply.Devices, second)
-			}
-			return reply, err
-		}
+	runner := func(context.Context, modelDeviceRuntime, []string) (modelDeviceReply, error) {
+		t.Fatal("several-GPU topology initialized native metadata")
+		return modelDeviceReply{}, nil
 	}
-	first := mapModelSettingsDevices(context.Background(), op, runner(false))
+	first := mapModelSettingsDevices(context.Background(), op, runner)
 	op.Topology.Pools[1], op.Topology.Pools[2] = op.Topology.Pools[2], op.Topology.Pools[1]
 	op.Selector = "CUDA8"
-	second := mapModelSettingsDevices(context.Background(), op, runner(true))
-	if first.Binding == nil || second.Binding == nil {
-		t.Fatalf("maps = %+v / %+v", first, second)
-	}
-	if first.Binding.Digest != second.Binding.Digest || second.Binding.UUID != modelDevicesFixtureUUID {
-		t.Fatalf("physical binding changed: %+v / %+v", first.Binding, second.Binding)
+	second := mapModelSettingsDevices(context.Background(), op, runner)
+	for _, got := range []modelDeviceMap{first, second} {
+		if got.Unknown != "several GPUs: reviewed Auto supports one GPU; choose GPUs with extra options" || got.Binding != nil || len(got.Devices) != 0 {
+			t.Fatalf("several-GPU mapping = %+v", got)
+		}
 	}
 }
 
 func TestModelSettingsDevicesUnknownInputs(t *testing.T) {
 	test := func(name string, change func(*modelDeviceOperation)) {
 		t.Run(name, func(t *testing.T) {
-			op := modelDevicesFixtureOperation()
+			op := modelDevicesFixtureOperation(t)
 			change(&op)
 			got := mapModelSettingsDevices(context.Background(), op, modelDevicesFixtureRunner)
 			if got.Unknown == "" || got.Binding != nil {
@@ -195,7 +191,7 @@ func TestModelSettingsDevicesUnknownInputs(t *testing.T) {
 			}
 		})
 	}
-	test("unsupported build", func(op *modelDeviceOperation) { op.Runtime.Build = "other" })
+	test("missing build identity", func(op *modelDeviceOperation) { op.Runtime.Build = "" })
 	test("Pause prohibits native initialization", func(op *modelDeviceOperation) { op.NativeInitAllowed = false })
 	test("split selector", func(op *modelDeviceOperation) { op.Selector = "CUDA7,CUDA8" })
 	test("missing UUID", func(op *modelDeviceOperation) { op.Topology.Pools[1].UUID = "" })
@@ -238,8 +234,8 @@ func TestModelSettingsDevicesUnknownNativeResults(t *testing.T) {
 				}
 				return reply, err
 			}
-			got := mapModelSettingsDevices(context.Background(), modelDevicesFixtureOperation(), run)
-			if got.Unknown == "" || got.Binding != nil {
+			got := mapModelSettingsDevices(context.Background(), modelDevicesFixtureOperation(t), run)
+			if got.Unknown == "" || got.Binding != nil || len(got.Devices) != 0 {
 				t.Fatalf("expected Unknown, got %+v", got)
 			}
 		})
@@ -254,7 +250,7 @@ func TestModelSettingsDevicesUnknownNativeResults(t *testing.T) {
 }
 
 func TestModelSettingsDevicesCPUSharedPool(t *testing.T) {
-	op := modelDevicesFixtureOperation()
+	op := modelDevicesFixtureOperation(t)
 	op.Selector = "CPU"
 	op.NativeInitAllowed = false
 	op.Topology.Pools = []modelDevicePool{{ID: "shared-uma", Kind: "shared"}}
@@ -270,7 +266,7 @@ func TestModelSettingsDevicesCPUSharedPool(t *testing.T) {
 func TestModelSettingsDevicesCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	got := mapModelSettingsDevices(ctx, modelDevicesFixtureOperation(), func(context.Context, modelDeviceRuntime, []string) (modelDeviceReply, error) {
+	got := mapModelSettingsDevices(ctx, modelDevicesFixtureOperation(t), func(context.Context, modelDeviceRuntime, []string) (modelDeviceReply, error) {
 		t.Fatal("canceled operation enumerated")
 		return modelDeviceReply{}, nil
 	})
@@ -328,8 +324,8 @@ func runModelDevicesTestChild(mode string) int {
 	}
 }
 
-func TestModelSettingsDevicesLoadedRevision(t *testing.T) {
-	for _, revision := range []string{modelDevicesCommit, modelDevicesCommit[:7], "unknown", "7fe450e-dirty", "0123456", "7fe450"} {
+func TestModelSettingsDevicesLoadedRevisionIsMetadata(t *testing.T) {
+	for _, revision := range []string{"0ec4027a2a0183de87c007069adddc06e665f7de", "0ec4027", "unknown", "7fe450e-dirty", "0123456", "7fe450"} {
 		t.Run(revision, func(t *testing.T) {
 			lookup := func(name string) (uintptr, error) {
 				if name != "ggml_commit" {
@@ -337,21 +333,21 @@ func TestModelSettingsDevicesLoadedRevision(t *testing.T) {
 				}
 				return 1, nil
 			}
+			raw := append([]byte(revision), 0)
 			register := func(fn any, _ uintptr) {
-				p, ok := fn.(*func() string)
+				p, ok := fn.(*func() unsafe.Pointer)
 				if !ok {
 					t.Fatalf("unexpected revision signature %T", fn)
 				}
-				*p = func() string { return revision }
+				*p = func() unsafe.Pointer { return unsafe.Pointer(&raw[0]) }
 			}
-			err := checkModelDeviceCommit(lookup, register)
-			want := revision == modelDevicesCommit || revision == modelDevicesCommit[:7]
-			if (err == nil) != want {
-				t.Fatalf("revision %q accepted=%v, want %v", revision, err == nil, want)
+			got, err := readModelDeviceCommit(lookup, register)
+			if err != nil || got != revision {
+				t.Fatalf("revision metadata = %q, %v; want %q", got, err, revision)
 			}
 		})
 	}
-	if err := checkModelDeviceCommit(func(string) (uintptr, error) { return 0, errors.New("missing") }, func(any, uintptr) { t.Fatal("missing export registered") }); err == nil {
+	if _, err := readModelDeviceCommit(func(string) (uintptr, error) { return 0, errors.New("missing") }, func(any, uintptr) { t.Fatal("missing export registered") }); err == nil {
 		t.Fatal("missing revision export accepted")
 	}
 }
@@ -446,5 +442,271 @@ func TestModelSettingsDevicesHelperContextCancellation(t *testing.T) {
 	}
 	if time.Since(start) > 2*time.Second {
 		t.Fatal("canceled helper was not reaped within bound")
+	}
+}
+
+// Symbols are Go functions only. No native library, driver or helper process is
+// opened by these fixtures, including the ABI and loader rejection cases.
+func modelDeviceTestSymbols(t *testing.T, functions map[string]any) (modelDeviceSymbols, modelDeviceRegister) {
+	t.Helper()
+	var exports []any
+	lookup := func(name string) (uintptr, error) {
+		fn, ok := functions[name]
+		if !ok {
+			return 0, errors.New("missing fake symbol")
+		}
+		exports = append(exports, fn)
+		return uintptr(len(exports)), nil
+	}
+	register := func(pointer any, address uintptr) {
+		if address == 0 || address > uintptr(len(exports)) {
+			t.Fatalf("invalid fake symbol address %d", address)
+		}
+		out, fn := reflect.ValueOf(pointer).Elem(), reflect.ValueOf(exports[address-1])
+		if out.Type() != fn.Type() {
+			t.Fatalf("fake symbol signature %v, want %v", fn.Type(), out.Type())
+		}
+		out.Set(fn)
+	}
+	return lookup, register
+}
+
+func modelDeviceTestABI(t *testing.T, selector string) (map[string]any, map[string]any) {
+	t.Helper()
+	selectorBytes := append([]byte(selector), 0)
+	name := []byte("Synthetic CUDA GPU\x00")
+	pci := []byte("0000:ab:00.0\x00")
+	commit := []byte("abcdef0-custom\x00")
+	uuid := [16]byte{0x12, 0x34, 0x56, 0x78, 0x12, 0x34, 0x12, 0x34, 0x12, 0x34, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc}
+	ggml := map[string]any{
+		"ggml_commit":            func() unsafe.Pointer { return unsafe.Pointer(&commit[0]) },
+		"ggml_backend_load":      func(string) uintptr { return 1 },
+		"ggml_backend_dev_count": func() uintptr { return 1 },
+		"ggml_backend_dev_get":   func(uintptr) uintptr { return 1 },
+		"ggml_backend_dev_get_props": func(_ uintptr, p *modelGGMLProps) {
+			*p = modelGGMLProps{Name: unsafe.Pointer(&selectorBytes[0]), Description: unsafe.Pointer(&name[0]), ID: unsafe.Pointer(&pci[0]), Total: 8 << 30, Kind: 1}
+		},
+	}
+	driver := map[string]any{
+		"cuInit":           func(uint32) int32 { return 0 },
+		"cuDeviceGetCount": func(n *int32) int32 { *n = 1; return 0 },
+		"cuDeviceGet":      func(device *int32, ordinal int32) int32 { *device = ordinal; return 0 },
+		"cuDeviceGetPCIBusId": func(out *byte, size int32, _ int32) int32 {
+			copy(unsafe.Slice(out, int(size)), pci)
+			return 0
+		},
+		"cuDeviceGetUuid_v2": func(out *[16]byte, _ int32) int32 { *out = uuid; return 0 },
+		"cuDeviceGetUuid":    func(out *[16]byte, _ int32) int32 { *out = uuid; return 0 },
+		"cuDeviceGetName": func(out *byte, size int32, _ int32) int32 {
+			copy(unsafe.Slice(out, int(size)), name)
+			return 0
+		},
+		"cuDeviceTotalMem_v2": func(out *uintptr, _ int32) int32 { *out = 8 << 30; return 0 },
+		"cuDeviceGetLuid": func(out *[8]byte, mask *uint32, _ int32) int32 {
+			*out, *mask = [8]byte{0x34, 0x12}, 1
+			return 0
+		},
+	}
+	return ggml, driver
+}
+
+func modelDeviceTestEnumerate(t *testing.T, selected modelDeviceRuntime, ggml, driver map[string]any) modelDeviceReply {
+	t.Helper()
+	return enumerateModelNativeDevicesWith(selected, func(modelDeviceRuntime) (modelDeviceSymbols, modelDeviceRegister, error) {
+		symbol, register := modelDeviceTestSymbols(t, ggml)
+		return symbol, register, nil
+	}, func() (modelDeviceSymbols, modelDeviceRegister, error) {
+		symbol, register := modelDeviceTestSymbols(t, driver)
+		return symbol, register, nil
+	})
+}
+
+func TestModelSettingsDevicesDriverCrossCheck(t *testing.T) {
+	test := func(name string, mutate func(map[string]any, map[string]any), recognized bool) {
+		t.Run(name, func(t *testing.T) {
+			op := modelDevicesFixtureOperation(t)
+			op.Runtime.Libraries = append(op.Runtime.Libraries, modelDeviceLibrary{Name: "ggml-cuda.dll"})
+			ggml, driver := modelDeviceTestABI(t, "CUDA7")
+			mutate(ggml, driver)
+			got := modelDeviceTestEnumerate(t, op.Runtime, ggml, driver)
+			if !recognized {
+				if got.Unknown != "device report not recognized for this build" || len(got.Devices) != 0 {
+					t.Fatalf("unrecognized report = %+v", got)
+				}
+				return
+			}
+			if got.Unknown != "" || got.Commit != "abcdef0-custom" || len(got.Devices) != 1 {
+				t.Fatalf("recognized report = %+v", got)
+			}
+			d := got.Devices[0]
+			if d.Selector != "CUDA7" || d.Name != "Synthetic CUDA GPU" || d.Total != 8589934592 || d.PCI != "0000:ab:00.0" || d.UUID != modelDevicesFixtureUUID || d.Unknown != "" {
+				t.Fatalf("recognized device = %+v", d)
+			}
+			if runtime.GOOS == "windows" && d.LUID != modelDevicesFixtureLUID {
+				t.Fatalf("driver LUID = %q", d.LUID)
+			}
+		})
+	}
+	test("agreement on another revision", func(map[string]any, map[string]any) {}, true)
+	test("memory tolerance includes one MiB", func(_ map[string]any, driver map[string]any) {
+		driver["cuDeviceTotalMem_v2"] = func(out *uintptr, _ int32) int32 { *out = (8 << 30) + (1 << 20); return 0 }
+	}, true)
+	test("memory lower tolerance includes one MiB", func(_ map[string]any, driver map[string]any) {
+		driver["cuDeviceTotalMem_v2"] = func(out *uintptr, _ int32) int32 { *out = (8 << 30) - (1 << 20); return 0 }
+	}, true)
+	test("undecodable ggml name", func(ggml map[string]any, _ map[string]any) {
+		original := ggml["ggml_backend_dev_get_props"].(func(uintptr, *modelGGMLProps))
+		invalid := []byte{0xff, 0}
+		ggml["ggml_backend_dev_get_props"] = func(device uintptr, p *modelGGMLProps) {
+			original(device, p)
+			p.Description = unsafe.Pointer(&invalid[0])
+		}
+	}, false)
+	test("zero ggml total", func(ggml map[string]any, _ map[string]any) {
+		original := ggml["ggml_backend_dev_get_props"].(func(uintptr, *modelGGMLProps))
+		ggml["ggml_backend_dev_get_props"] = func(device uintptr, p *modelGGMLProps) {
+			original(device, p)
+			p.Total = 0
+		}
+	}, false)
+	test("name mismatch", func(_ map[string]any, driver map[string]any) {
+		driver["cuDeviceGetName"] = func(out *byte, size int32, _ int32) int32 {
+			copy(unsafe.Slice(out, int(size)), "Another GPU\x00")
+			return 0
+		}
+	}, false)
+	test("memory exceeds upper tolerance", func(_ map[string]any, driver map[string]any) {
+		driver["cuDeviceTotalMem_v2"] = func(out *uintptr, _ int32) int32 { *out = (8 << 30) + (1 << 20) + 1; return 0 }
+	}, false)
+	test("memory exceeds lower tolerance", func(_ map[string]any, driver map[string]any) {
+		driver["cuDeviceTotalMem_v2"] = func(out *uintptr, _ int32) int32 { *out = (8 << 30) - (1 << 20) - 1; return 0 }
+	}, false)
+	test("undecodable driver name", func(_ map[string]any, driver map[string]any) {
+		driver["cuDeviceGetName"] = func(out *byte, _ int32, _ int32) int32 { *out = 0xff; return 0 }
+	}, false)
+	test("unterminated driver name", func(_ map[string]any, driver map[string]any) {
+		driver["cuDeviceGetName"] = func(out *byte, size int32, _ int32) int32 {
+			copy(unsafe.Slice(out, int(size)), strings.Repeat("x", int(size)))
+			return 0
+		}
+	}, false)
+	test("zero driver memory", func(_ map[string]any, driver map[string]any) {
+		driver["cuDeviceTotalMem_v2"] = func(out *uintptr, _ int32) int32 { *out = 0; return 0 }
+	}, false)
+	test("driver name call fails", func(_ map[string]any, driver map[string]any) {
+		driver["cuDeviceGetName"] = func(*byte, int32, int32) int32 { return 1 }
+	}, false)
+	test("driver memory call fails", func(_ map[string]any, driver map[string]any) {
+		driver["cuDeviceTotalMem_v2"] = func(*uintptr, int32) int32 { return 1 }
+	}, false)
+	test("missing driver name export", func(_ map[string]any, driver map[string]any) { delete(driver, "cuDeviceGetName") }, false)
+	test("missing driver memory export", func(_ map[string]any, driver map[string]any) { delete(driver, "cuDeviceTotalMem_v2") }, false)
+	test("missing commit export", func(ggml map[string]any, _ map[string]any) { delete(ggml, "ggml_commit") }, false)
+	test("missing property export", func(ggml map[string]any, _ map[string]any) { delete(ggml, "ggml_backend_dev_get_props") }, false)
+	test("missing loader export", func(ggml map[string]any, _ map[string]any) { delete(ggml, "ggml_backend_load") }, false)
+	test("loader refuses selected module", func(ggml map[string]any, _ map[string]any) {
+		ggml["ggml_backend_load"] = func(string) uintptr { return 0 }
+	}, false)
+}
+
+func TestModelSettingsDevicesLibraryOpenFailure(t *testing.T) {
+	got := enumerateModelNativeDevicesWith(modelDeviceRuntime{}, func(modelDeviceRuntime) (modelDeviceSymbols, modelDeviceRegister, error) {
+		return nil, nil, errors.New("fake loader failure")
+	}, func() (modelDeviceSymbols, modelDeviceRegister, error) {
+		t.Fatal("driver opened after library failure")
+		return nil, nil, errors.New("unexpected driver open")
+	})
+	if got.Unknown != "device report not recognized for this build" || len(got.Devices) != 0 {
+		t.Fatalf("loader failure = %+v", got)
+	}
+}
+
+func TestModelSettingsDevicesDriverOpenFailure(t *testing.T) {
+	ggml, _ := modelDeviceTestABI(t, "CUDA0")
+	got := enumerateModelNativeDevicesWith(modelDeviceRuntime{}, func(modelDeviceRuntime) (modelDeviceSymbols, modelDeviceRegister, error) {
+		symbol, register := modelDeviceTestSymbols(t, ggml)
+		return symbol, register, nil
+	}, func() (modelDeviceSymbols, modelDeviceRegister, error) {
+		return nil, nil, errors.New("fake driver open failure")
+	})
+	if got.Unknown != "device report not recognized for this build" || len(got.Devices) != 0 || got.Commit != "abcdef0-custom" {
+		t.Fatalf("driver open failure = %+v", got)
+	}
+}
+
+func TestModelSettingsDevicesSnapshotAcceptsFetchAndOverride(t *testing.T) {
+	test := func(name string, override bool) {
+		t.Run(name, func(t *testing.T) {
+			f := newInspectionFixture(t, 4096)
+			root := t.TempDir()
+			f.st.installDir = root
+			if override {
+				f.st.installDir = t.TempDir()
+				f.st.plat.Install = nil
+			} else {
+				f.st.plat.Install = &Install{Fetch: &Fetch{URL: "https://fixture.invalid/new-build.tgz"}, Run: []string{"never-run"}}
+			}
+			f.st.binPath = filepath.Join(root, "llama-server")
+			writeTestFile(t, f.st.binPath, []byte("synthetic server "+t.Name()))
+			writeTestFile(t, filepath.Join(root, "libggml.so"), []byte("synthetic metadata library"))
+			got, err := modelDeviceRuntimeSnapshot(context.Background(), f.st)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantID, err := nativeBuildID(context.Background(), f.st)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantRoot, err := resolveExistingPath(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Build == "" || got.Build != wantID || got.Root != wantRoot || len(got.Libraries) != 1 || got.Libraries[0].Name != "libggml.so" {
+				t.Fatalf("snapshot = %+v, want build %s in %s", got, wantID, wantRoot)
+			}
+		})
+	}
+	test("install fetch", false)
+	test("override outside managed directory", true)
+}
+
+func TestModelSettingsDevicesRecognitionCacheKeepsMapsOperationScoped(t *testing.T) {
+	op := modelDevicesFixtureOperation(t)
+	first := mapModelSettingsDevices(context.Background(), op, modelDevicesFixtureRunner)
+	checked, ok := modelDeviceCheckedBuild(op.Runtime.Build)
+	if !ok || checked.Unknown != "" || checked.Commit != "abcdef0-custom" || first.Binding == nil {
+		t.Fatalf("recognition = %+v, %v; map = %+v", checked, ok, first)
+	}
+	op.Topology.Host, op.Topology.Run, op.Topology.Observation = "other-host", "other-run", "other-observation"
+	calls := 0
+	second := mapModelSettingsDevices(context.Background(), op, func(ctx context.Context, r modelDeviceRuntime, env []string) (modelDeviceReply, error) {
+		calls++
+		return modelDevicesFixtureRunner(ctx, r, env)
+	})
+	if calls != 2 || second.Binding == nil || second.Binding.Host != "other-host" || second.Binding.Digest == first.Binding.Digest || second.ObservationID == first.ObservationID {
+		t.Fatalf("cached recognition reused a map: calls=%d, second=%+v", calls, second)
+	}
+	op.NativeInitAllowed = false
+	paused := mapModelSettingsDevices(context.Background(), op, func(context.Context, modelDeviceRuntime, []string) (modelDeviceReply, error) {
+		t.Fatal("cached recognition bypassed Pause")
+		return modelDeviceReply{}, nil
+	})
+	if paused.Unknown != "native initialization prohibited by target activation/Pause" || paused.Binding != nil || len(paused.Devices) != 0 {
+		t.Fatalf("paused cached build = %+v", paused)
+	}
+}
+
+func TestModelSettingsDevicesCanceledRecognitionIsNotCached(t *testing.T) {
+	op := modelDevicesFixtureOperation(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	got := mapModelSettingsDevices(ctx, op, func(context.Context, modelDeviceRuntime, []string) (modelDeviceReply, error) {
+		cancel()
+		return modelDeviceReply{Unknown: "fake incomplete check"}, nil
+	})
+	if got.Unknown == "" || got.Binding != nil || len(got.Devices) != 0 {
+		t.Fatalf("canceled check = %+v", got)
+	}
+	if checked, ok := modelDeviceCheckedBuild(op.Runtime.Build); ok {
+		t.Fatalf("canceled check cached: %+v", checked)
 	}
 }

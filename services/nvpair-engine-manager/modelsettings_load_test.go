@@ -1092,6 +1092,108 @@ func TestModelSettingsLoadConversionRechecksCompleteExternalSource(t *testing.T)
 	}
 }
 
+func nativeModelLoadConversionFixture(t *testing.T) modelLoadFixture {
+	t.Helper()
+	f := newModelLoadFixture(t)
+	autoTestNativeSource(t, &f)
+	f.rt = f.st.plat.Runtime
+	command, err := launchForState(f.st, f.rt.Port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.command = command
+	return f
+}
+
+// A replacement with identical bytes and metadata must still fail an existing
+// operation's object-evidence fence, even though a fresh build ID would agree.
+func replaceNativeConversionLibrary(t *testing.T, path string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(path, filepath.Join(filepath.Dir(path), "saved-original")); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, path, data)
+	if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestModelLoadConversionCapturesLibrariesBeforeArtifactReads(t *testing.T) {
+	f := nativeModelLoadConversionFixture(t)
+	library := filepath.Join(f.root, "libggml-base.dylib")
+	replace, replaced, replacementOpens := false, false, 0
+	access := servingFileAccess{open: func(path string) (servingArtifactFile, error) {
+		if replace && !replaced && path == filepath.Join(f.root, "weak.gguf") {
+			replaceNativeConversionLibrary(t, library)
+			replaced = true
+		}
+		if replaced && path == library {
+			replacementOpens++
+		}
+		return os.Open(path)
+	}}
+	positive, err := f.ex.previewTypedLlamaConversionExpected(context.Background(), f.st, f.command, f.rt, access, nil)
+	if err != nil || len(positive.Runtime.ModelLoads) == 0 || positive.inputs == nil {
+		t.Fatalf("positive native conversion=%+v error=%v", positive, err)
+	}
+	if _, ok := positive.inputs.libraries["libggml-base.dylib"]; !ok {
+		t.Fatal("conversion omitted native library evidence")
+	}
+	replace = true
+	if _, err := f.ex.previewTypedLlamaConversionExpected(context.Background(), f.st, f.command, f.rt, access, nil); err == nil {
+		t.Fatal("conversion recaptured a replacement library after reading artifacts")
+	}
+	if !replaced || replacementOpens != 0 {
+		t.Fatalf("replacement triggered=%v opens=%d", replaced, replacementOpens)
+	}
+}
+
+func TestModelLoadConversionApplyRetainsLibraryEvidence(t *testing.T) {
+	f := nativeModelLoadConversionFixture(t)
+	two := int32(2)
+	preview := previewModelLoadFixture(t, f, "weak-model", modelconfig.LoadPatch{Set: modelconfig.RequestedLoad{Slots: &two}})
+	if len(preview.Settings.ModelLoads) == 0 {
+		t.Fatal("preview has no accepted loads")
+	}
+	recheck, err := f.ex.validateTypedLlamaConversion(context.Background(), f.st, f.rt, preview.Settings)
+	if err != nil || recheck == nil {
+		t.Fatalf("conversion apply validation=%v", err)
+	}
+	if err := recheck(); err != nil {
+		t.Fatal("unchanged conversion replay failed", err)
+	}
+	replaceNativeConversionLibrary(t, filepath.Join(f.root, "libggml-base.dylib"))
+	if err := recheck(); err == nil {
+		t.Fatal("apply replay adopted a replacement native library")
+	}
+	assertNoSettingsOverride(t, f.ex)
+}
+
+func TestModelLoadConversionRejectsMissingExpectedLibraryEvidence(t *testing.T) {
+	f := nativeModelLoadConversionFixture(t)
+	conversion, err := f.ex.previewTypedLlamaConversion(context.Background(), f.st, f.command, f.rt)
+	if err != nil || conversion.inputs == nil || len(conversion.Runtime.ModelLoads) == 0 {
+		t.Fatalf("conversion=%+v error=%v", conversion, err)
+	}
+	conversion.inputs.libraries = nil
+	opens := 0
+	access := servingFileAccess{open: func(path string) (servingArtifactFile, error) { opens++; return os.Open(path) }}
+	if _, err := f.ex.previewTypedLlamaConversionExpected(context.Background(), f.st, f.command, f.rt, access, conversion.inputs); err == nil {
+		t.Fatal("incomplete expected evidence was rediscovered")
+	}
+	if opens != 0 {
+		t.Fatalf("incomplete expected evidence opened %d files", opens)
+	}
+}
+
 func TestModelSettingsLoadConversionRefusesPartialRouterBeforeEffects(t *testing.T) {
 	f := newModelLoadFixture(t)
 	two := int32(2)
@@ -1850,6 +1952,75 @@ func TestModelSettingsLoadContentFenceAndNativeBuildIdentity(t *testing.T) {
 	}
 	if first.Digest == second.Digest || first.ModelLoads[0].Resolved.NativeBuildID == second.ModelLoads[0].Resolved.NativeBuildID {
 		t.Fatal("native build binding omitted from typed identity")
+	}
+}
+
+func TestModelLoadManualNativeBuildID(t *testing.T) {
+	f := newModelLoadFixture(t)
+	rt := convertModelLoadFixture(t, f)
+	nativeBuildTestRuntime(t, f.st, t.TempDir())
+	rt.Bin = f.st.binPath
+	f.st.plat.Install = &Install{Fetch: &Fetch{URL: "https://fixture.invalid/native.tar.gz", SHA256: strings.Repeat("a", 64)}}
+	prepared, err := compileTypedLlamaInputs(context.Background(), f.st, typedFixtureCommand(t, f, rt), rt, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared == nil || len(prepared.ModelLoads) == 0 || len(prepared.ModelLoads) != len(rt.ModelLoads) {
+		t.Fatalf("manual compilation lost model loads: %+v", prepared)
+	}
+	want := requireNativeBuildID(t, f.st)
+	for _, load := range prepared.ModelLoads {
+		if load.Resolved == nil || load.Resolved.NativeBuildID != want {
+			t.Fatalf("manual load build = %+v, want %q", load.Resolved, want)
+		}
+	}
+}
+
+func TestModelLoadReviewedAutoNativeBuildID(t *testing.T) {
+	f, frozen, owner := autoTestFrozenLaunch(t)
+	want := requireNativeBuildID(t, f.st)
+	rt := f.st.plat.Runtime
+	rt.ModelLoads = modelconfig.CloneLoads(frozen.Settings.ModelLoads)
+	if len(rt.ModelLoads) == 0 {
+		t.Fatal("Auto fixture has no frozen model loads")
+	}
+	command, err := modelConstrainCommand(typedFixtureCommand(t, f, rt), rt.ModelLoads)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSource, err := modelReviewedNativeSource(context.Background(), f.st, command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wantSource == "" {
+		t.Fatal("Auto fixture has no native source identity")
+	}
+	hasAuto := false
+	for _, load := range rt.ModelLoads {
+		if load.Resolved == nil || load.Resolved.NativeBuildID != want {
+			t.Fatalf("Auto load build = %+v, want %q", load.Resolved, want)
+		}
+		if modelLoadHasAuto(load.Requested) {
+			hasAuto = true
+			source := modelAutoNativeSource(load.Resolved)
+			if source != wantSource {
+				t.Fatalf("Auto native source = %q, want %q", source, wantSource)
+			}
+		}
+	}
+	if !hasAuto {
+		t.Fatal("Auto fixture has no reviewed Auto load")
+	}
+	owner.calls = 0
+	prepared, err := compileTypedLlamaInputs(context.Background(), f.st, typedFixtureCommand(t, f, rt), rt, true)
+	if err != nil {
+		t.Fatal("frozen Auto replay failed", err)
+	}
+	if prepared == nil || !modelconfig.EqualLoads(prepared.ModelLoads, rt.ModelLoads) {
+		t.Fatalf("frozen replay lost the reviewed model loads: %+v", prepared)
+	}
+	if owner.calls != 0 {
+		t.Fatal("frozen replay consulted telemetry")
 	}
 }
 

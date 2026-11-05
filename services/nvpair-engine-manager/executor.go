@@ -39,6 +39,9 @@ type EngineStatus struct {
 	Running     bool   `json:"running"`
 	Healthy     bool   `json:"healthy"`
 	Port        int    `json:"port,omitempty"`
+	// BuildInfo is the running engine's claim; BuildID fingerprints its native files.
+	BuildInfo string `json:"buildInfo,omitempty"`
+	BuildID   string `json:"buildId,omitempty"`
 	// TerminationVerified is positive physical-stop evidence, never inferred
 	// from running:false or from the absence of a host-platform block.
 	TerminationVerified bool `json:"terminationVerified"`
@@ -88,6 +91,8 @@ type engineState struct {
 	// cleared whenever it is marked stopped. launchDigest identifies the
 	// launch of the owned process, set with proc (model_identity.go).
 	runID        string
+	buildInfo    string
+	buildID      string
 	launchDigest string
 	port         int
 	// portCleanupPending retains a failed endpoint-removal write after the

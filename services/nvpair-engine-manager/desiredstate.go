@@ -485,6 +485,7 @@ func (e *Executor) failOrphanReclaim(st *engineState, engine string, err error) 
 	st.reclaimFailed = true
 	st.running, st.healthy, st.adopted = false, false, false
 	st.runID = ""
+	st.buildInfo, st.buildID = "", ""
 	if st.healthStop != nil {
 		st.healthStop()
 		st.healthStop = nil

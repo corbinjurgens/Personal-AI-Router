@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -173,14 +174,18 @@ func (f *modelBufferTestFixture) allocations(port int, ready bool) {
 		f.line("stdout", fmt.Sprintf("[%5d] srv         server_run_i: model loaded", port))
 	}
 }
-func (f *modelBufferTestFixture) confirm(t *testing.T, model string, sweep uint64) modelconfig.BufferObservation {
+func (f *modelBufferTestFixture) confirm(t *testing.T, model string, sweep uint64, reportedBuild ...string) modelconfig.BufferObservation {
 	t.Helper()
 	raw, err := json.Marshal(map[string]any{"data": []any{map[string]any{"id": model, "status": map[string]string{"value": "loaded"}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	frozen := f.capture.frozen[model]
-	props := map[string]modelBufferProps{model: {Build: "b12020-0ec4027a2", RouterBuild: "b12020-0ec4027a2", Context: int64(frozen.context), Slots: int64(frozen.slots)}}
+	build := "b12020-0ec4027a2"
+	if len(reportedBuild) > 0 {
+		build = reportedBuild[0]
+	}
+	props := map[string]modelBufferProps{model: {Build: build, RouterBuild: build, Context: int64(frozen.context), Slots: int64(frozen.slots)}}
 	f.load.ex.observeModelBuffers(context.Background(), f.load.st, f.capture, sweep, []string{model}, true, raw, props)
 	f.load.ex.modelBuffers.mu.Lock()
 	done := f.load.ex.modelBuffers.done
@@ -193,6 +198,139 @@ func (f *modelBufferTestFixture) confirm(t *testing.T, model string, sweep uint6
 		}
 	}
 	return f.load.ex.projectModelBufferObservation(f.load.st, "fake", model, frozen.artifacts)
+}
+
+func TestModelBufferRecognizesAnotherBuild(t *testing.T) {
+	f := newModelBufferTestFixture(t)
+	f.initial("medium-model", 31001)
+	o := f.confirm(t, "medium-model", 1, "b12100-abcdef0")
+	buildID, err := nativeBuildID(context.Background(), f.load.st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !o.Current || o.Persistence != "saved" || len(o.Rows) != 3 || o.BuildID != buildID || o.ReportedBuild != "b12100-abcdef0" || o.BuildAssurance != "recognized-output" {
+		t.Fatalf("recognized grammar on another build: %+v", o)
+	}
+	if err := o.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestModelBufferRecordsUnrecognizedOutput(t *testing.T) {
+	f := newModelBufferTestFixture(t)
+	f.line("stderr", "srv         load: spawning server instance with name=medium-model on port 31001")
+	for _, message := range []string{"srv   load_model: loading model 'private'", "new_allocator: CPU allocated 1.00 MiB", "srv         server_run_i: model loaded"} {
+		f.line("stdout", "[31001] "+message)
+	}
+	o := f.confirm(t, "medium-model", 1, "b12100-abcdef0")
+	if o.Status != "partial" || o.Reason != "unrecognized-build-output" || !o.Current || o.Persistence != "saved" || o.SampleID == "" || len(o.Rows) != 0 || o.BuildAssurance != "" || o.ReportedBuild != "b12100-abcdef0" || o.BuildID == "" {
+		t.Fatalf("unrecognized output was not retained: %+v", o)
+	}
+	recovered := newModelBufferStore(filepath.Dir(f.load.ex.modelBuffers.store.path))
+	identity := modelBufferHash(struct{ Engine, Model string }{modelBufferHash("fake"), "medium-model"})
+	if got := recovered.newest(identity, o.BuildID); got.Current || got.SampleID != o.SampleID || got.Reason != "unrecognized-build-output" || len(got.Rows) != 0 {
+		t.Fatalf("unrecognized output recovery: %+v", got)
+	}
+}
+
+func TestModelBufferEarlierBuildInspection(t *testing.T) {
+	test := func(name string, change func(*modelBufferTestFixture)) {
+		t.Run(name, func(t *testing.T) {
+			f := newModelBufferTestFixture(t)
+			f.initial("medium-model", 31001)
+			first := f.confirm(t, "medium-model", 1)
+			store := f.load.ex.modelBuffers.store
+			old := store.samples[0]
+			old.Observation.BuildID = "sha256:" + strings.Repeat("1", 64)
+			old.Observation.SourceIdentity = strings.Repeat("2", 64)
+			if got := store.publish(old); got != "saved" {
+				t.Fatal(got)
+			}
+			change(f)
+			got := f.load.ex.projectModelBufferObservation(f.load.st, "fake", "medium-model", old.Observation.Artifacts)
+			if got.SampleID != first.SampleID || got.Reason != "earlier-build" || got.Current || len(got.Rows) != 3 || got.BuildID != old.Observation.BuildID {
+				t.Fatalf("earlier build history hidden: %+v", got)
+			}
+			if changed := f.load.ex.projectModelBufferObservation(f.load.st, "fake", "medium-model", nil); changed.Reason != "source-changed" || len(changed.Rows) != 0 {
+				t.Fatalf("earlier build bypassed artifact safeguard: %+v", changed)
+			}
+		})
+	}
+	test("running without capture", func(f *modelBufferTestFixture) {
+		f.capture.retire()
+		f.load.st.bufferCapture = nil
+	})
+	test("live child with contradictory props", func(f *modelBufferTestFixture) {
+		f.capture.children[31001].sample = modelconfig.BufferObservation{Status: "unknown", Reason: "unsupported-build"}
+	})
+	test("live child awaiting publication", func(f *modelBufferTestFixture) {
+		f.capture.children[31001].sample.Persistence = "pending"
+	})
+}
+
+func TestModelBufferHistoryDoesNotAssertUnavailableBuild(t *testing.T) {
+	f := newModelBufferTestFixture(t)
+	f.initial("medium-model", 31001)
+	first := f.confirm(t, "medium-model", 1)
+	f.capture.retire()
+	f.load.st.bufferCapture = nil
+	f.load.st.running = false
+	if err := os.Remove(f.load.st.binPath); err != nil {
+		t.Fatal(err)
+	}
+	got := f.load.ex.projectModelBufferObservation(f.load.st, "fake", "medium-model", first.Artifacts)
+	if got.SampleID != first.SampleID || len(got.Rows) != len(first.Rows) || got.Current || got.Reason != "source-unavailable" {
+		t.Fatalf("unavailable current build was asserted as different: %+v", got)
+	}
+}
+
+func TestModelBufferCurrentBuildHistoryPrecedesOtherBuildLiveSample(t *testing.T) {
+	f := newModelBufferTestFixture(t)
+	f.initial("medium-model", 31001)
+	first := f.confirm(t, "medium-model", 1)
+	child := f.capture.children[31001]
+	child.sample.BuildID = "sha256:" + strings.Repeat("1", 64)
+	child.sample.SampleID = strings.Repeat("2", 64)
+	got := f.load.ex.projectModelBufferObservation(f.load.st, "fake", "medium-model", first.Artifacts)
+	if got.SampleID != first.SampleID || got.BuildID != first.BuildID || got.Reason == "earlier-build" || got.Current {
+		t.Fatalf("other-build live sample displaced current-build history: %+v", got)
+	}
+}
+
+func TestModelBufferSeveralGPURowsHaveNoPoolIdentity(t *testing.T) {
+	memory := autoTestMemory(time.Now())
+	memory.Target = modelBufferTestTargetMemory()
+	allocation := estimateFixture("llama").Allocation
+	allocation.DeviceBinding = autoTestDeviceBinding()
+	single := &modelBufferFrozen{input: modelEstimateInput{Allocation: allocation}}
+	modelBufferFreezeTopology(single, memory, allocation.DeviceBinding.DeviceID)
+	if single.deviceBindingID == "" || single.devicePoolID == "" {
+		t.Fatal("single-pool control did not establish the physical binding")
+	}
+	second := memory.Target.Observation.Domains[1]
+	second.ID = "gpu-second"
+	second.DeviceIDs = []string{"GPU-22222222-2222-2222-2222-222222222222"}
+	memory.Target.Observation.Domains = append(memory.Target.Observation.Domains, second)
+	f := newModelBufferTestFixture(t)
+	frozen := f.capture.frozen["medium-model"]
+	frozen.input.Allocation = allocation
+	modelBufferFreezeTopology(frozen, memory, allocation.DeviceBinding.DeviceID)
+	if frozen.deviceBindingID != "" || frozen.devicePoolID != "" {
+		t.Fatal("two dedicated pools acquired a single-GPU proof")
+	}
+	f.line("stderr", "srv         load: spawning server instance with name=medium-model on port 31001")
+	for _, message := range []string{"srv   load_model: loading model 'private'", "load_tensors: CUDA0 model buffer size = 1.00 MiB", "load_tensors: CUDA1 model buffer size = 2.00 MiB", "sched_reserve: reserving ...", "sched_reserve: CUDA0 compute buffer size = 0.25 MiB", "sched_reserve: reserve took 1.00 ms, sched copies = 1", "srv         server_run_i: model loaded"} {
+		f.line("stdout", "[31001] "+message)
+	}
+	o := f.confirm(t, "medium-model", 1, "b12100-abcdef0")
+	if !o.Current || o.Persistence != "saved" || len(o.Rows) != 3 || o.Rows[0].Label != "CUDA0" || o.Rows[1].Label != "CUDA1" || o.BuildAssurance != "recognized-output" {
+		t.Fatalf("several-GPU output lost: %+v", o)
+	}
+	for _, row := range o.Rows {
+		if row.PoolIdentity != "" || row.DeviceBinding != "" {
+			t.Fatalf("ordinal acquired physical identity: %+v", row)
+		}
+	}
 }
 
 func TestModelBufferLoadCorrelation(t *testing.T) {
@@ -244,7 +382,7 @@ func TestModelBufferLoadCorrelation(t *testing.T) {
 		if err := o.Validate(); err != nil {
 			t.Fatal(err)
 		}
-		if o.SourceIdentity == o.UpstreamPin || o.BuildAssurance != "recognized-self-reported-pin" {
+		if o.SourceIdentity == o.BuildID || o.BuildID != f.capture.buildID || o.ReportedBuild != "b12020-0ec4027a2" || o.BuildAssurance != "recognized-output" {
 			t.Fatal("source digest was treated as source attestation")
 		}
 		data, err := os.ReadFile(f.load.ex.modelBuffers.store.path)
@@ -564,7 +702,15 @@ func TestModelBufferResponseBudget(t *testing.T) {
 	for i := 0; i < 256; i++ {
 		parser.consume(managedOutputFrame{Stream: "stdout", Sequence: uint64(i + 1), Line: "load_tensors: CPU model buffer size = 1.00 MiB"})
 	}
-	observation := modelconfig.BufferObservation{Status: "partial", SampleID: strings.Repeat("b", 64), InputIdentity: strings.Repeat("c", 64), SourceIdentity: strings.Repeat("d", 64), OptionsIdentity: strings.Repeat("e", 64), UpstreamPin: modelBufferPin, BuildAssurance: "recognized-self-reported-pin", EstimatorRevision: modelEstimatorRevision, Rows: parser.rows}
+	observation := modelconfig.BufferObservation{Status: "partial", SampleID: strings.Repeat("b", 64), InputIdentity: strings.Repeat("c", 64), SourceIdentity: strings.Repeat("d", 64), OptionsIdentity: strings.Repeat("e", 64), BuildID: "sha256:" + strings.Repeat("f", 64), ReportedBuild: "b12020-0ec4027a2", BuildAssurance: "recognized-output", EstimatorRevision: modelEstimatorRevision, Rows: parser.rows}
+	t.Run("earlier build label survives row reduction", func(t *testing.T) {
+		earlier := observation.Clone()
+		earlier.Reason = "earlier-build"
+		got := attachModelBufferObservation(base, earlier)
+		if got.LoadObservation == nil || got.LoadObservation.Reason != "earlier-build" || got.LoadObservation.Current || !slices.Contains(got.LoadObservation.Reasons, "response-budget") || len(got.LoadObservation.Rows) == 0 || len(got.LoadObservation.Rows) >= 256 {
+			t.Fatalf("response reduction erased earlier-build label: %+v", got.LoadObservation)
+		}
+	})
 	t.Run("history checkpoint obeys its independent encoded ceiling", func(t *testing.T) {
 		sample := modelBufferStoredSample{ModelIdentity: strings.Repeat("a", 64), Observation: observation.Clone()}
 		sample.Observation.RecordedAt = time.Now().UTC().Format(time.RFC3339Nano)

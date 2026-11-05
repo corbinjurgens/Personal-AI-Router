@@ -50,6 +50,36 @@ Start-to-assignment interval can leave a suspended process; no query code has
 run in that interval. Windows Job and ACL execution acceptance remains Task 6;
 cross-vet alone does not establish it.
 
+## Private native device metadata
+
+Device review accepts llama.cpp-family runtimes with metadata libraries from
+the selected executable's directory, including `install.fetch` installs and
+override executables outside the managed install directory. The executable and
+accepted runtime library bytes supply the content build ID. Manifest URLs,
+release pins, paths and modification times do not select supported builds.
+
+The private metadata helper reports `ggml_commit()` as a claim. It checks the
+ggml device description (the device name, distinct from its `CUDA0` selector)
+and total memory against the CUDA driver after joining by PCI. Names must agree
+exactly and totals must differ by at most 1 MiB. These values check the report
+layout; they provide no telemetry or placement authority. Missing exports,
+loader/call failures and undecodable or disagreeing values return a whole-report
+Unknown: `device report not recognized for this build`.
+
+Recognition is cached in memory by content build ID. Each review still obtains
+its own inventory, verifies the physical PCI/full UUID against target topology
+(plus LUID on Windows), and repeats enumeration under full UUID visibility to
+require one `CUDA0`. The cache contains no physical maps or replay bindings.
+Several dedicated pools prevent native initialization and report
+`several GPUs: reviewed Auto supports one GPU; choose GPUs with extra options`.
+Reviewed GPU Auto requires a recognized report and one dedicated GPU. Explicit
+CPU placement remains non-native; Metal, Vulkan and HIP remain Unknown.
+
+The activation/Pause fence, three-second parent budget, helper self-exit
+deadline, combined 64 KiB output ceiling and environment filtering still apply.
+Apply, restart and recovery use frozen file-checked bindings without device
+enumeration. The independent known-source SWA default assurance is unchanged.
+
 ## Typed model load contract and option matrix
 
 `runtime.modelLoads` is an ordered collection of exact `modelId` records with

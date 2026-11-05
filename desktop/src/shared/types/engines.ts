@@ -96,6 +96,9 @@ export interface EngineStatusData {
      * reported version data or engines that are not installed.
      */
     installedVersion?: string
+    /** Running native engine claim and content fingerprint, reported by its owner. */
+    buildInfo?: string
+    buildId?: string
 }
 
 export type ModelItemStatus = (typeof ModelItemStatuses)[number]

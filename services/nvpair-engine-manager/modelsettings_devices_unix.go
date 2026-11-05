@@ -44,9 +44,6 @@ func openModelDeviceLibraries(selected modelDeviceRuntime) (modelDeviceSymbols, 
 		}
 		return 0, errors.New("unsupported ggml export")
 	}
-	if err := loadModelDeviceCUDA(selected, lookup, purego.RegisterFunc); err != nil {
-		return nil, nil, err
-	}
 	// Native resources intentionally live until this private process exits.
 	return lookup, purego.RegisterFunc, nil
 }

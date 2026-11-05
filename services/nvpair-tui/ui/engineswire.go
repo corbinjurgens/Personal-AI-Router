@@ -25,6 +25,8 @@ type engineStatus struct {
 	Running     bool   `json:"running"`
 	Healthy     bool   `json:"healthy"`
 	Port        int    `json:"port"`
+	BuildInfo   string `json:"buildInfo,omitempty"`
+	BuildID     string `json:"buildId,omitempty"`
 	// Positive stop evidence; omission from an older target is unverified.
 	TerminationVerified bool `json:"terminationVerified"`
 }

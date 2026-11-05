@@ -31,7 +31,7 @@ type estimateCalibrationFixture struct {
 	Role             string                        `json:"role"`
 	Class            string                        `json:"class,omitempty"`
 	Backend          string                        `json:"backend"`
-	NativePin        string                        `json:"nativePin"`
+	BuildID          string                        `json:"buildId"`
 	ConfigurationKey string                        `json:"configurationKey"`
 	Facts            gguffacts.Facts               `json:"facts"`
 	Artifacts        []modelconfig.ArtifactSummary `json:"artifacts"`
@@ -229,10 +229,15 @@ func exportFixtures(ctx context.Context, store io.Reader, paths []namedArtifact,
 			return nil, errors.New("invalid stored sample")
 		}
 		seen[o.SampleID] = true
+		// Folded history has no content identity and cannot calibrate a build.
+		// Keep it readable in the store without blocking eligible new samples.
+		if o.BuildAssurance != "recognized-output" || o.BuildID == "" {
+			continue
+		}
 		if !digest.MatchString(o.ConfigurationKey) || !reflect.DeepEqual(o.Artifacts, summaries) {
 			return nil, errors.New("unjoinable configuration/artifact set")
 		}
-		if o.UpstreamPin == "" || o.BuildAssurance != "recognized-self-reported-pin" || o.CapturedOptions == nil {
+		if o.ReportedBuild == "" || o.CapturedOptions == nil {
 			return nil, errors.New("sample lacks native provenance/effective allocation")
 		}
 		opts := o.CapturedOptions
@@ -258,18 +263,21 @@ func exportFixtures(ctx context.Context, store io.Reader, paths []namedArtifact,
 		if err != nil {
 			return nil, errors.New("sample date unavailable")
 		}
-		f := estimateCalibrationFixture{Version: 1, Role: role, Backend: backend, NativePin: o.UpstreamPin, ConfigurationKey: o.ConfigurationKey, Facts: facts, Artifacts: summaries}
+		f := estimateCalibrationFixture{Version: 1, Role: role, Backend: backend, BuildID: o.BuildID, ConfigurationKey: o.ConfigurationKey, Facts: facts, Artifacts: summaries}
 		f.Allocation = estimateCalibrationAllocation{PerSlotContext: o.PerSlotContext, TotalContext: o.PerSlotContext * o.Slots, Slots: o.Slots, GPU: *opts.GPU, Options: opts.Clone()}
 		f.Sample.ConfigurationKey = o.ConfigurationKey
 		f.Sample.Artifacts = summaries
 		f.Provenance.Machine = machine
 		f.Provenance.Date = at.UTC().Format("2006-01-02")
-		f.Provenance.Build = "b12020-" + o.UpstreamPin
+		f.Provenance.Build = o.ReportedBuild
 		f.Observed, err = exportIntervals(o, backend)
 		if err != nil {
 			return nil, err
 		}
 		fixtures = append(fixtures, f)
+	}
+	if len(fixtures) == 0 {
+		return nil, errors.New("store has no recognized-output samples")
 	}
 	// Recheck the ORIGINAL evidence and sampled identity after all facts and
 	// projections, never replacing it with a recaptured object.

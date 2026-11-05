@@ -75,6 +75,7 @@ func (e *Executor) modelMemoryContext(ctx context.Context, engine string, target
 	}
 	topology := modelDeviceTopology{Host: target.HostID, Run: observation.RunID, Observation: target.ObservationID}
 	uuid := ""
+	dedicated := 0
 	for _, pool := range observation.Domains {
 		p := modelDevicePool{ID: pool.ID, Kind: pool.Kind}
 		if p.Kind == "system" {
@@ -111,7 +112,8 @@ func (e *Executor) modelMemoryContext(ctx context.Context, engine string, target
 			}
 		}
 		if p.Kind == "dedicated" {
-			if uuid != "" || p.UUID == "" || p.PCI == "" || p.Unsupported != "" {
+			dedicated++
+			if dedicated > 1 || p.UUID == "" || p.PCI == "" || p.Unsupported != "" {
 				native = false
 			}
 			uuid = p.UUID
@@ -120,7 +122,7 @@ func (e *Executor) modelMemoryContext(ctx context.Context, engine string, target
 	}
 	deviceOp := modelDeviceOperation{Topology: topology, Selector: "CPU"}
 	current := func() bool { return true }
-	if uuid != "" {
+	if dedicated != 0 {
 		deviceOp.Selector = "CUDA0"
 		st, err := e.state(engine)
 		if err == nil && native && e.activationVeto(engine) == nil {
@@ -133,7 +135,7 @@ func (e *Executor) modelMemoryContext(ctx context.Context, engine string, target
 					after, err := inspectionSnapshot(st, engine)
 					return err == nil && snapshot.equal(after) && e.activationVeto(engine) == nil
 				}
-				runtime, runtimeErr := modelDeviceRuntimeSnapshot(ctx, st, modelDevicesBuild)
+				runtime, runtimeErr := modelDeviceRuntimeSnapshot(ctx, st)
 				if runtimeErr == nil {
 					effective, envErr := modelNativeEnvironment(runtime.Root, snapshot.command.Env)
 					if envErr == nil {
@@ -160,8 +162,12 @@ func (e *Executor) modelMemoryContext(ctx context.Context, engine string, target
 		}
 	}
 	mapped := mapModelSettingsDevices(ctx, deviceOp, op.DeviceRunner)
+	if dedicated > 1 {
+		mapped.Devices, mapped.Binding, mapped.Unknown = nil, nil, modelDeviceSeveralGPUs
+	}
 	if !current() || ctx.Err() != nil {
 		mapped.Binding = nil
+		mapped.Devices = nil
 		mapped.Unknown = "target changed during native inspection"
 	}
 	owner.deviceMap = &mapped
@@ -399,6 +405,15 @@ func (e *Executor) InspectModel(ctx context.Context, p modelconfig.InspectReques
 		advisory.Memory, _ = op.Memory.ModelAutoMemory(ctx)
 	}
 	result.Estimate = e.modelEstimates.estimate(ctx, advisory)
+	// Keep the operation's precise refusal visible on unproved GPU domains.
+	// Host/CPU comparisons do not depend on device recognition.
+	if advisory.Memory != nil && advisory.Memory.Map != nil && advisory.Memory.Map.Unknown != "" {
+		for i := range result.Estimate.Domains {
+			if result.Estimate.Domains[i].Kind == "device" {
+				result.Estimate.Domains[i].Unknowns = append(result.Estimate.Domains[i].Unknowns, advisory.Memory.Map.Unknown)
+			}
+		}
+	}
 	e.modelMemoryProfiles.attach(&result)
 	if err := completeModelInspectionReply(&result); err != nil {
 		return modelconfig.InspectResult{}, err

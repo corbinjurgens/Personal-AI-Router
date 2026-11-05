@@ -5,6 +5,62 @@ SPDX-License-Identifier: Apache-2.0
 
 # Microservice: Engine Manager (`nvpair-engine-manager`)
 
+## Native build identity and configuration keys
+
+`nativeBuildID(ctx, st)` returns `sha256:<hex>` over JSON containing
+`version: "pair-native-build-v1"`, `platform: "GOOS/GOARCH"`, `executable`
+(the full-file SHA256) and `libraries` (objects with lower-case JSON keys `name`
+and `sha256`, sorted by name). The library set contains the executable
+directory's files accepted by `modelDeviceLibraryName`. No executable name,
+path, mtime or manifest pin enters this content identity. It applies to managed
+and override runtimes, including `install.fetch` installs. Full-file hashing
+retains cancellation, the existing file size bound, regular-file checks and
+library confinement. The process-local hash memo uses resolved path, size and
+mtime and rechecks object evidence before reuse; nothing is persisted.
+
+Every typed manual or Auto `ResolvedLoad.NativeBuildID` holds that fingerprint.
+Auto's reviewed input envelope separately binds its native source digest;
+frozen compilation and conversion compare the appropriate identity without
+consulting telemetry or repeating native enumeration. The native source digest
+contains only `{BuildID, Environment}`. Environment includes explicit launch
+values and effective `CUDA_*`, `GGML_*` and `LLAMA_*` controls, with the checked
+build root replaced by `{build_root}`. Unrelated ambient values are excluded.
+Finite configuration keys bind this source alongside artifacts and allocation
+options, so unchanged build bytes retain keys across touches and moves.
+Expected-source replay checks still reject executable or library replacement.
+This read-only calculation adds no persistent mutation or native initialization;
+device helper gates and pinned advisory defaults are separate checks.
+
+Conversion captures the executable and complete native library evidence before
+reading external model artifacts. Its expected-input whitelist includes those
+original objects and rejects a missing library snapshot; replay does not
+rediscover files to replace missing or changed evidence. Accepted conversion
+validation captures the same complete evidence at the start of its operation.
+
+The inherited SWA allocation default remains conditional on the known managed
+b12020 artifact declaration and checked native files. This assurance belongs to
+the load estimator, independently of device report recognition. A recognized
+device report from another build does not establish an inherited SWA default;
+it stays unknown until separate semantic evidence is available. This does not
+gate content identity or configuration-key availability.
+
+## Running native build readback
+
+After owned llama.cpp readiness, a bounded empty-model `/props?autoload=false`
+read supplies the optional `EngineStatus.buildInfo` claim, while file-only
+content hashing supplies `buildId`. Publication is fenced by the owned run and
+process; stop, exit, replacement and external adoption clear the values.
+Inspection exposes those saved observations as `nativeBuild` and `nativeBuildId`.
+An external listener is not assigned the detected installation's fingerprint.
+
+Buffer capture attempts every build. Recognized grammar yields `recognized-output`
+assurance; no recognized allocation output yields a partial `unrecognized-build-output`
+record with no rows. Records bind `buildId` separately from the `reportedBuild`
+claim. Valid other-build records never disable writes. Inspection prefers the
+newest matching-build record, otherwise retains earlier-build history with
+currentness withdrawn. The existing stored decode folds former known-pin records
+into `reportedBuild` with an empty build identity; no migration pass is added.
+
 ## Model identity
 
 The executor's in-memory model identity owner reads the latest stored inventory
@@ -95,9 +151,10 @@ member capped. A stalled or stopped watcher also reports `unverified`.
 `mapModelSettingsDevices(ctx, operation, runner)` consumes an operation snapshot,
 not public settings or an uploaded capacity claim. Inputs are bounded host/run/
 topology identity, physical pools, selected native selector, complete effective
-environment, selected b12020 library hashes, and an explicit native-init gate.
-The runtime snapshot resolver accepts the existing managed llama.cpp state and
-checks the pinned install declaration; it does not accept a public library path.
+environment, content-identified library hashes, and an explicit native-init gate.
+The runtime snapshot resolver accepts managed, fetch and override llama.cpp
+builds using the selected executable's directory; it does not require a manifest
+pin or managed path and does not accept a public library path.
 The adapter is review-only and has no startup, Apply or recovery caller.
 
 CPU maps to one host/shared pool without native initialization. GPU identity
@@ -109,18 +166,25 @@ selector, constrained child environment and a digest of physical/native/build/
 library/environment identity. No memory bytes, sample times or producer run
 enter that digest. A separate bounded observation digest binds host, run and
 the exact supplied topology observation. Pool ordering is canonicalized.
-Unknown results retain native inventory when available; they confer no replay
+Failed reports clear native inventory and binding; they confer no replay
 or capacity authority. Missing identities, duplicate aliases, ambiguous joins,
 unsupported exports/ABI, MIG/MPS, mixed UMA/discrete and split placements refuse
 a GPU binding. Unsupported Metal/Vulkan/HIP remain visible as Unknown.
 
 The existing executable recognizes `--private-model-devices` before flags,
 registry, transport or service startup. Its stdin is an internal selected-runtime
-snapshot capped at 64 KiB. It verifies the selected library set/hashes, checks
-the pinned source revision through `ggml_commit()` before CUDA registration or
-property calls, and refuses unknown, dirty or different revisions. It checks
+snapshot capped at 64 KiB. It verifies the selected library set/hashes and reports
+`ggml_commit()` as bounded metadata before CUDA registration or property calls.
+It checks
 64-bit `ggml_backend_dev_props` layout and required exports, and enumerates at
-most 64 devices. It discards native memory amounts. `ggml_backend_load` loads
+most 64 devices. The ggml description must match the CUDA driver name and total
+memory must agree within 1 MiB for the same PCI identity. Those values are
+recognition checks, not capacity authority. Missing exports, loader failures,
+undecodable values or disagreement return `device report not recognized for this build`
+with no partial report. Recognition alone is cached by content build ID; each
+operation still checks topology and UUID-constrained visibility. Several dedicated
+pools run no helper and report `several GPUs: reviewed Auto supports one GPU; choose GPUs with extra options`.
+`ggml_backend_load` loads
 only the selected CUDA module and checks the native engine ABI; no `load_all`
 or ambient engine search is used. Linux requires the effective library search
 path to be exactly the selected install directory. Windows uses DLL-load-dir

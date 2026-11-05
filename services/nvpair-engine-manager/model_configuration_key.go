@@ -55,6 +55,8 @@ func modelConfigurationOptionsID(options modelconfig.RequestedLoad, snapshot []b
 	}{options, modelLoadDigest(snapshot)})
 }
 
+// source binds the content-based native build ID and filtered launch/native
+// environment. Build paths and mtimes are evidence checks, not key inputs.
 func modelConfigurationKey(in modelEstimateInput, source, optionsID string) string {
 	a := in.Allocation
 	if a == nil || source == "" || optionsID == "" || a.PerSlotContext <= 0 || a.Slots <= 0 || len(in.Bindings) == 0 {

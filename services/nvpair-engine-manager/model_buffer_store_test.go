@@ -27,7 +27,7 @@ func modelBufferStoreFixture(t *testing.T) (*modelBufferStore, modelBufferStored
 	s := newModelBufferStore(dir)
 	now := time.Date(2026, 10, 28, 0, 0, 0, 0, time.UTC)
 	s.now = func() time.Time { return now }
-	sample := modelBufferStoredSample{ModelIdentity: strings.Repeat("a", 64), Observation: modelconfig.BufferObservation{Status: "partial", SampleID: strings.Repeat("b", 64), RecordedAt: now.Format(time.RFC3339Nano), Reason: "missing-boundary"}}
+	sample := modelBufferStoredSample{ModelIdentity: strings.Repeat("a", 64), Observation: modelconfig.BufferObservation{Status: "partial", SampleID: strings.Repeat("b", 64), RecordedAt: now.Format(time.RFC3339Nano), BuildID: "sha256:" + strings.Repeat("d", 64), Reason: "missing-boundary"}}
 	return s, sample
 }
 
@@ -47,7 +47,7 @@ func TestModelBufferStoreRetention(t *testing.T) {
 		if err != nil || len(encoded) > modelBufferHistoryBytes || len(encoded)*4 > 16<<20 || len(s.samples) >= 100 {
 			t.Fatal("encoded or retained budget did not evict old completed samples")
 		}
-		if got := s.newest(sample.ModelIdentity); got.SampleID != sample.Observation.SampleID {
+		if got := s.newest(sample.ModelIdentity, sample.Observation.BuildID); got.SampleID != sample.Observation.SampleID {
 			t.Fatal("retention evicted newest completed sample")
 		}
 	})
@@ -62,7 +62,7 @@ func TestModelBufferStoreRetention(t *testing.T) {
 		t.Fatalf("retained %d samples", len(s.samples))
 	}
 	s.now = func() time.Time { return time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC) }
-	if got := s.newest(sample.ModelIdentity); got.Status != "unknown" {
+	if got := s.newest(sample.ModelIdentity, sample.Observation.BuildID); got.Status != "unknown" {
 		t.Fatalf("expired sample: %+v", got)
 	}
 }
@@ -77,9 +77,105 @@ func TestModelBufferStoreConfigurationKeyRoundtrip(t *testing.T) {
 			}
 			reopened := newModelBufferStore(filepath.Dir(s.path))
 			reopened.now = s.now
-			got := reopened.newest(sample.ModelIdentity)
+			got := reopened.newest(sample.ModelIdentity, sample.Observation.BuildID)
 			if got.SampleID != sample.Observation.SampleID || got.ConfigurationKey != key {
 				t.Fatalf("reopened sample=%+v", got)
+			}
+		})
+	}
+}
+
+func TestModelBufferStoreOldAndOtherBuildStayWritable(t *testing.T) {
+	s, sample := modelBufferStoreFixture(t)
+	legacy := map[string]any{
+		"modelIdentity": sample.ModelIdentity,
+		"observation": map[string]any{
+			"status": "partial", "current": true, "sampleId": strings.Repeat("1", 64),
+			"recordedAt": sample.Observation.RecordedAt, "reason": "unmapped-device",
+			"upstreamPin": "0ec4027a2a0183de87c007069adddc06e665f7de", "buildAssurance": "recognized-self-reported-pin",
+		},
+	}
+	other := sample
+	other.Observation.SampleID = strings.Repeat("2", 64)
+	other.Observation.BuildID = "sha256:" + strings.Repeat("e", 64)
+	other.Observation.ReportedBuild = "b12100-abcdef0"
+	other.Observation.Current = true
+	data, err := json.Marshal([]any{legacy, other})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recovered := newModelBufferStore(filepath.Dir(s.path))
+	recovered.now = s.now
+	if recovered.writeDisabled || len(recovered.samples) != 2 {
+		t.Fatalf("old/other builds disabled store: disabled=%t samples=%d", recovered.writeDisabled, len(recovered.samples))
+	}
+	folded := recovered.samples[0].Observation
+	if folded.BuildID != "" || folded.ReportedBuild != "b12020-0ec4027a2" || folded.BuildAssurance != "recognized-output" || folded.Current {
+		t.Fatalf("old record fold: %+v", folded)
+	}
+	if got := recovered.newest(sample.ModelIdentity, sample.Observation.BuildID); got.SampleID != other.Observation.SampleID || got.Reason != "earlier-build" || got.Current {
+		t.Fatalf("earlier-build fallback: %+v", got)
+	}
+	if got := recovered.publish(sample); got != "saved" {
+		t.Fatalf("new build append=%s", got)
+	}
+	if len(recovered.samples) != 3 {
+		t.Fatalf("append lost prior builds: %d", len(recovered.samples))
+	}
+	got := recovered.newest(sample.ModelIdentity, sample.Observation.BuildID)
+	if got.SampleID != sample.Observation.SampleID || got.BuildID != sample.Observation.BuildID || got.Reason == "earlier-build" || got.Current {
+		t.Fatalf("current-build selection: %+v", got)
+	}
+	reopened := newModelBufferStore(filepath.Dir(s.path))
+	if reopened.writeDisabled || len(reopened.samples) != 3 || reopened.samples[0].Observation.ReportedBuild != "b12020-0ec4027a2" {
+		t.Fatalf("mixed-build publication did not recover: disabled=%t samples=%d", reopened.writeDisabled, len(reopened.samples))
+	}
+}
+
+func TestModelBufferStorePrefersCurrentBuildOverNewerHistory(t *testing.T) {
+	s, sample := modelBufferStoreFixture(t)
+	sample.Observation.RecordedAt = s.now().Add(-time.Minute).Format(time.RFC3339Nano)
+	if got := s.publish(sample); got != "saved" {
+		t.Fatal(got)
+	}
+	other := sample
+	other.Observation.SampleID = strings.Repeat("c", 64)
+	other.Observation.BuildID = "sha256:" + strings.Repeat("e", 64)
+	other.Observation.RecordedAt = s.now().Format(time.RFC3339Nano)
+	if got := s.publish(other); got != "saved" {
+		t.Fatal(got)
+	}
+	if got := s.newest(sample.ModelIdentity, sample.Observation.BuildID); got.SampleID != sample.Observation.SampleID || got.Reason == "earlier-build" {
+		t.Fatalf("newer other-build record displaced matching history: %+v", got)
+	}
+	if got := s.newest(sample.ModelIdentity, ""); got.SampleID != other.Observation.SampleID || got.Reason != "source-unavailable" || got.Current {
+		t.Fatalf("unknown current build must retain history without asserting a different build: %+v", got)
+	}
+}
+
+func TestModelBufferStoreOldFoldKeepsStrictValidation(t *testing.T) {
+	for name, observation := range map[string]string{
+		"unknown field":   `,"rawLog":"secret"`,
+		"duplicate field": `,"status":"partial"`,
+		"wrong case":      `,"ReportedBuild":"other"`,
+		"mixed formats":   `,"buildId":"sha256:` + strings.Repeat("d", 64) + `"`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, sample := modelBufferStoreFixture(t)
+			data := []byte(`[{"modelIdentity":"` + sample.ModelIdentity + `","observation":{"status":"partial","current":false,"sampleId":"` + sample.Observation.SampleID + `","recordedAt":"` + sample.Observation.RecordedAt + `","upstreamPin":"0ec4027a2a0183de87c007069adddc06e665f7de","buildAssurance":"recognized-self-reported-pin"` + observation + `}}]`)
+			if err := os.WriteFile(s.path, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			recovered := newModelBufferStore(filepath.Dir(s.path))
+			if !recovered.writeDisabled || recovered.publish(sample) != "history-unavailable" {
+				t.Fatal("old-record fold accepted malformed history")
+			}
+			preserved, err := os.ReadFile(s.path)
+			if err != nil || string(preserved) != string(data) {
+				t.Fatalf("malformed history changed: %v", err)
 			}
 		})
 	}
@@ -129,7 +225,7 @@ func TestModelBufferStoreRecovery(t *testing.T) {
 				t.Fatal(err)
 			}
 			recovered := newModelBufferStore(filepath.Dir(s.path))
-			if got := recovered.newest(sample.ModelIdentity); got.Reason != "history-unavailable" || recovered.publish(sample) != "history-unavailable" {
+			if got := recovered.newest(sample.ModelIdentity, sample.Observation.BuildID); got.Reason != "history-unavailable" || recovered.publish(sample) != "history-unavailable" {
 				t.Fatal("corruption was silently repaired")
 			}
 			preserved, err := os.ReadFile(s.path)
@@ -144,7 +240,7 @@ func TestModelBufferStoreRecovery(t *testing.T) {
 	}
 	recovered := newModelBufferStore(filepath.Dir(s.path))
 	recovered.now = s.now
-	if got := recovered.newest(sample.ModelIdentity); got.Current || got.SampleID != sample.Observation.SampleID {
+	if got := recovered.newest(sample.ModelIdentity, sample.Observation.BuildID); got.Current || got.SampleID != sample.Observation.SampleID {
 		t.Fatalf("recovered currentness: %+v", got)
 	}
 	bad := []byte(`[{"modelIdentity":"private","modelIdentity":"duplicate"}]`)
@@ -173,7 +269,7 @@ func TestModelBufferStorePublication(t *testing.T) {
 		if got := s.publish(sample); got != "failed" || len(s.samples) != 1 {
 			t.Fatalf("failed write adopted: %s, %d", got, len(s.samples))
 		}
-		if got := s.newest(sample.ModelIdentity); got.SampleID != oldID {
+		if got := s.newest(sample.ModelIdentity, sample.Observation.BuildID); got.SampleID != oldID {
 			t.Fatal("pre-replacement failure replaced the last complete read view")
 		}
 	})
@@ -186,7 +282,7 @@ func TestModelBufferStorePublication(t *testing.T) {
 		if got := s.publish(sample); got != "uncertain" || len(s.samples) != 1 {
 			t.Fatalf("retry duplicated: %s, %d", got, len(s.samples))
 		}
-		if got := s.newest(sample.ModelIdentity); got.Persistence != "uncertain" {
+		if got := s.newest(sample.ModelIdentity, sample.Observation.BuildID); got.Persistence != "uncertain" {
 			t.Fatalf("hidden uncertainty: %+v", got)
 		}
 	})
@@ -200,7 +296,7 @@ func TestModelBufferStoreConcurrentReaders(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 8; j++ {
-				_ = s.newest(sample.ModelIdentity)
+				_ = s.newest(sample.ModelIdentity, sample.Observation.BuildID)
 			}
 		}()
 	}
@@ -228,7 +324,7 @@ func TestModelBufferStoreConcurrentReaders(t *testing.T) {
 			t.Fatal("publisher did not reach injected boundary")
 		}
 		read := make(chan modelconfig.BufferObservation, 1)
-		go func() { read <- s.newest(sample.ModelIdentity) }()
+		go func() { read <- s.newest(sample.ModelIdentity, sample.Observation.BuildID) }()
 		select {
 		case got := <-read:
 			if got.SampleID != "" {

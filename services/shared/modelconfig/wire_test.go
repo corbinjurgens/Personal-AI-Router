@@ -405,6 +405,20 @@ func TestEstimateRejectsInvalidRanges(t *testing.T) {
 	}
 }
 
+func TestInspectNativeBuildReadback(t *testing.T) {
+	r := InspectResult{Engine: "llamacpp", ModelID: "m", Status: "unknown", Estimate: Estimate{Status: "unknown"}, NativeBuild: "b12345-example", NativeBuildID: "sha256:" + strings.Repeat("a", 64)}
+	got, err := DecodeInspectResult(mustJSON(t, r))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.NativeBuild != "b12345-example" || got.NativeBuildID != "sha256:"+strings.Repeat("a", 64) {
+		t.Fatalf("native build readback = %+v", got)
+	}
+	if _, err := DecodeInspectResult([]byte(`{"engine":"llamacpp","modelId":"m","status":"unknown","estimate":{"status":"unknown"},"nativeBuild":"example","nativeBuildId":"fingerprint","surprise":true}`)); err == nil {
+		t.Fatal("native build support weakened unknown-field rejection")
+	}
+}
+
 func TestInspectRejectsInvalidArtifactAndEstimateBytes(t *testing.T) {
 	test := func(name string, edit func(*InspectResult)) {
 		t.Run(name, func(t *testing.T) {
@@ -422,4 +436,6 @@ func TestInspectRejectsInvalidArtifactAndEstimateBytes(t *testing.T) {
 	test("estimate exponent", func(r *InspectResult) { r.Estimate.DeviceBytes = "1e3" })
 	test("false fits state", func(r *InspectResult) { r.Estimate.Status = "fits" })
 	test("missing resolved artifacts", func(r *InspectResult) { r.Artifacts = nil })
+	test("oversized build claim", func(r *InspectResult) { r.NativeBuild = strings.Repeat("x", 257) })
+	test("build identity controls", func(r *InspectResult) { r.NativeBuildID = "bad\nidentity" })
 }

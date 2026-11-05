@@ -98,7 +98,7 @@ func syntheticStore(t *testing.T) ([]byte, []namedArtifact, storedSample) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sample := storedSample{ModelIdentity: strings.Repeat("a", 64), Observation: modelconfig.BufferObservation{Status: "reported", SampleID: strings.Repeat("b", 64), RecordedAt: "2026-10-30T00:00:00Z", ConfigurationKey: strings.Repeat("c", 64), UpstreamPin: fixture.NativePin, BuildAssurance: "recognized-self-reported-pin", TopologyIdentity: strings.Repeat("d", 64), PerSlotContext: 1024, Slots: 1, CapturedOptions: &opts, Artifacts: summaries, Baseline: []modelconfig.BufferBaseline{{Component: "weights", Status: "estimated", Bytes: "65536"}}, Comparisons: []modelconfig.BufferComparison{{Component: "weights", Status: "compatible", EstimatedBytes: "65536", LowerBytes: lo, UpperBytes: hi, DeltaLowerBytes: fmt.Sprint(l - 65536), DeltaUpperBytes: fmt.Sprint(h - 65536)}}, Rows: []modelconfig.BufferReportRow{{Component: "model", Label: "CPU", Phase: "load", Sequence: "1", Role: "model", ReportedMiB: "0.06", Unit: "MiB", Precision: "0.01", SourceKind: "log-scraped", IntervalStatus: "bounded", LowerBytes: lo, UpperBytes: hi, PoolIdentity: strings.Repeat("e", 64), Coverage: "compatible"}}}}
+	sample := storedSample{ModelIdentity: strings.Repeat("a", 64), Observation: modelconfig.BufferObservation{Status: "reported", SampleID: strings.Repeat("b", 64), RecordedAt: "2026-10-30T00:00:00Z", ConfigurationKey: strings.Repeat("c", 64), BuildID: "sha256:" + strings.Repeat("f", 64), ReportedBuild: "b12100-abcdef0", BuildAssurance: "recognized-output", TopologyIdentity: strings.Repeat("d", 64), PerSlotContext: 1024, Slots: 1, CapturedOptions: &opts, Artifacts: summaries, Baseline: []modelconfig.BufferBaseline{{Component: "weights", Status: "estimated", Bytes: "65536"}}, Comparisons: []modelconfig.BufferComparison{{Component: "weights", Status: "compatible", EstimatedBytes: "65536", LowerBytes: lo, UpperBytes: hi, DeltaLowerBytes: fmt.Sprint(l - 65536), DeltaUpperBytes: fmt.Sprint(h - 65536)}}, Rows: []modelconfig.BufferReportRow{{Component: "model", Label: "CPU", Phase: "load", Sequence: "1", Role: "model", ReportedMiB: "0.06", Unit: "MiB", Precision: "0.01", SourceKind: "log-scraped", IntervalStatus: "bounded", LowerBytes: lo, UpperBytes: hi, PoolIdentity: strings.Repeat("e", 64), Coverage: "compatible"}}}}
 	if err := sample.Observation.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -119,6 +119,9 @@ func TestExportSyntheticStore(t *testing.T) {
 		t.Fatalf("fixtures=%d", len(fixtures))
 	}
 	f := fixtures[0]
+	if f.BuildID != "sha256:"+strings.Repeat("f", 64) || f.Provenance.Build != "b12100-abcdef0" {
+		t.Fatalf("export lost build identity or invented a pin: %+v", f)
+	}
 	if f.ConfigurationKey != sample.Observation.ConfigurationKey || !reflect.DeepEqual(f.Artifacts, sample.Observation.Artifacts) || f.Class != "" || f.Backend != "cpu" || f.Role != "synthetic" || len(f.Observed) != 1 || f.Observed[0].Correspondence != "supported" || f.Observed[0].Comparison.LowerBytes != sample.Observation.Comparisons[0].LowerBytes {
 		t.Fatalf("bad fixture: %+v", f)
 	}
@@ -177,11 +180,84 @@ func TestExportRejectsUnjoinableStore(t *testing.T) {
 	})
 	test("missing selectors", func(_ *storedSample, p *[]namedArtifact) { *p = nil })
 	test("no finite options", func(s *storedSample, _ *[]namedArtifact) { s.Observation.CapturedOptions = nil })
+	test("missing build identity", func(s *storedSample, _ *[]namedArtifact) { s.Observation.BuildID = "" })
+	test("missing reported build", func(s *storedSample, _ *[]namedArtifact) { s.Observation.ReportedBuild = "" })
 	test("source changed", func(_ *storedSample, p *[]namedArtifact) {
 		if err := os.WriteFile((*p)[0].Path, []byte("changed"), 0600); err != nil {
 			t.Fatal(err)
 		}
 	})
+}
+
+func TestExportFoldedHistoryDoesNotBlockContentIdentifiedSamples(t *testing.T) {
+	_, paths, current := syntheticStore(t)
+	folded := current
+	folded.Observation = current.Observation.Clone()
+	folded.Observation.SampleID = strings.Repeat("5", 64)
+	folded.Observation.BuildID = ""
+	folded.Observation.ReportedBuild = "b12020-0ec4027a2"
+	folded.Observation.ConfigurationKey = ""
+	folded.Observation.CapturedOptions = nil
+	for name, samples := range map[string][]storedSample{
+		"history before current": {folded, current},
+		"history after current":  {current, folded},
+	} {
+		t.Run(name, func(t *testing.T) {
+			encoded, err := json.Marshal(samples)
+			if err != nil {
+				t.Fatal(err)
+			}
+			root := t.TempDir()
+			storePath := filepath.Join(root, "mixed-history.json")
+			if err := os.WriteFile(storePath, encoded, 0600); err != nil {
+				t.Fatal(err)
+			}
+			output := filepath.Join(root, "export")
+			if err := run(context.Background(), storePath, output, "synthetic", "synthetic", paths); err != nil {
+				t.Fatalf("folded history blocked current sample export: %v", err)
+			}
+			data, err := os.ReadFile(filepath.Join(output, "sample-000.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got estimateCalibrationFixture
+			if err := json.Unmarshal(data, &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.BuildID != current.Observation.BuildID || got.ConfigurationKey != current.Observation.ConfigurationKey || got.Provenance.Build != current.Observation.ReportedBuild {
+				t.Fatalf("exported the wrong provenance: %+v", got)
+			}
+			if _, err := os.Stat(filepath.Join(output, "sample-001.json")); !os.IsNotExist(err) {
+				t.Fatalf("historical sample must not receive a content identity: %v", err)
+			}
+		})
+	}
+}
+
+func TestExportOnlyRecognizedOutput(t *testing.T) {
+	_, paths, recognized := syntheticStore(t)
+	unrecognized := storedSample{ModelIdentity: strings.Repeat("2", 64), Observation: modelconfig.BufferObservation{Status: "partial", SampleID: strings.Repeat("3", 64), RecordedAt: "2026-10-30T00:00:00Z", BuildID: "sha256:" + strings.Repeat("4", 64), ReportedBuild: "new-fork", Reason: "unrecognized-build-output"}}
+	for name, samples := range map[string][]storedSample{
+		"only unrecognized output":                 {unrecognized},
+		"mixed recognized and unrecognized output": {unrecognized, recognized},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store, err := json.Marshal(samples)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fixtures, err := exportFixtures(context.Background(), bytes.NewReader(store), paths, "synthetic", "synthetic", artifactbinding.Access{})
+			if len(samples) == 1 {
+				if err == nil || err.Error() != "store has no recognized-output samples" || len(fixtures) != 0 {
+					t.Fatalf("unrecognized output exported: fixtures=%+v err=%v", fixtures, err)
+				}
+				return
+			}
+			if err != nil || len(fixtures) != 1 || fixtures[0].BuildID != recognized.Observation.BuildID || fixtures[0].Provenance.Build != "b12100-abcdef0" {
+				t.Fatalf("mixed provenance export: fixtures=%+v err=%v", fixtures, err)
+			}
+		})
+	}
 }
 
 func TestExportRejectsCanceledRead(t *testing.T) {

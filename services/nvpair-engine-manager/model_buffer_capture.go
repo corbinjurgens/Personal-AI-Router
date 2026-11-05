@@ -127,30 +127,30 @@ type modelBufferChild struct {
 
 // Independent observational currentness; no ServingConfig is required.
 type modelBufferCapture struct {
-	mu                                   sync.Mutex
-	owner                                *modelBufferOwner
-	token, engineID, managerID, sourceID string
-	prepared                             *llamaServingLaunch
-	proc                                 *managedProc
-	run                                  string
-	retired                              bool
-	retiredFlag                          atomic.Bool
-	released                             atomic.Bool
-	jobs                                 atomic.Int64
-	childCharge                          int
-	sequence                             [2]uint64
-	lastHash                             [2]string
-	children                             map[int]*modelBufferChild
-	usedPorts                            [1024]uint64
-	frozen                               map[string]*modelBufferFrozen
-	charge                               int
-	lastSweep                            uint64
-	boundary                             uint64
-	confirmedAt                          time.Time
-	wallHigh                             int64
-	clockUncertain                       bool
-	budgetOmitted                        bool
-	unsupportedLogged                    bool // guarded by mu; one warning per capture
+	mu                                            sync.Mutex
+	owner                                         *modelBufferOwner
+	token, engineID, managerID, sourceID, buildID string
+	prepared                                      *llamaServingLaunch
+	proc                                          *managedProc
+	run                                           string
+	retired                                       bool
+	retiredFlag                                   atomic.Bool
+	released                                      atomic.Bool
+	jobs                                          atomic.Int64
+	childCharge                                   int
+	sequence                                      [2]uint64
+	lastHash                                      [2]string
+	children                                      map[int]*modelBufferChild
+	usedPorts                                     [1024]uint64
+	frozen                                        map[string]*modelBufferFrozen
+	charge                                        int
+	lastSweep                                     uint64
+	boundary                                      uint64
+	confirmedAt                                   time.Time
+	wallHigh                                      int64
+	clockUncertain                                bool
+	budgetOmitted                                 bool
+	unsupportedLogged                             bool // guarded by mu; one warning per capture
 }
 
 type modelBufferSourceDiagnostic struct {
@@ -250,14 +250,18 @@ func (e *Executor) newModelBufferCapture(st *engineState, engine string, prepare
 	command, constrainErr := modelConstrainCommand(command, prepared.ModelLoads)
 	var diagnostic modelBufferSourceDiagnostic
 	source, err := modelReviewedNativeSource(ctx, st, command, &diagnostic)
+	buildID, buildErr := nativeBuildID(ctx, st)
 	cancel()
 	if constrainErr != nil {
 		(modelBufferSourceDiagnostic{stage: "constrain-command", err: constrainErr}).warn()
 	} else if err != nil {
 		diagnostic.warn()
+	} else if buildErr != nil {
+		(modelBufferSourceDiagnostic{stage: "build-identity", err: buildErr}).warn()
 	}
-	if err == nil && constrainErr == nil {
+	if err == nil && constrainErr == nil && buildErr == nil {
 		c.sourceID = source
+		c.buildID = buildID
 	}
 	if len(prepared.ModelLoads) == 0 && c.sourceID == "" {
 		return nil
@@ -708,13 +712,11 @@ func (e *Executor) observeModelBuffers(ctx context.Context, st *engineState, c *
 		if !ok || !slices.Contains(loaded, child.model) || child.sleeping || child.poisoned || !child.loading || child.phase == "initial" && !child.ready {
 			continue
 		}
-		if !modelBufferBuildSupported(p.Build) || p.Build != p.RouterBuild || p.Context != int64(f.context) || p.Slots != int64(f.slots) {
+		if p.Build == "" || p.Build != p.RouterBuild || p.Context != int64(f.context) || p.Slots != int64(f.slots) {
 			if !c.unsupportedLogged {
 				c.unsupportedLogged = true
 				switch {
-				case !modelBufferBuildSupported(p.Build):
-					slog.Warn("model buffer capture unavailable", "stage", "build-support", "build", modelBufferDiagnosticBuild(p.Build))
-				case p.Build != p.RouterBuild:
+				case p.Build == "" || p.Build != p.RouterBuild:
 					slog.Warn("model buffer capture unavailable", "stage", "router-build", "build", modelBufferDiagnosticBuild(p.Build), "router_build", modelBufferDiagnosticBuild(p.RouterBuild))
 				case p.Context != int64(f.context):
 					slog.Warn("model buffer capture unavailable", "stage", "context", "context", p.Context, "frozen_context", f.context)
@@ -726,7 +728,7 @@ func (e *Executor) observeModelBuffers(ctx context.Context, st *engineState, c *
 			child.poisoned = true
 			continue
 		}
-		if child.parser.inReserve || !child.parser.reserveComplete || len(child.parser.rows) == 0 {
+		if len(child.parser.rows) > 0 && (child.parser.inReserve || !child.parser.reserveComplete) {
 			continue
 		}
 		if child.sample.SampleID != "" {
@@ -739,7 +741,12 @@ func (e *Executor) observeModelBuffers(ctx context.Context, st *engineState, c *
 			}
 			continue
 		}
-		o := modelconfig.BufferObservation{Status: "partial", Reason: "unknown-baseline", RecordedAt: child.startedAt.UTC().Format(time.RFC3339Nano), Current: true, Persistence: "pending", UpstreamPin: modelBufferPin, BuildAssurance: "recognized-self-reported-pin", EstimatorRevision: modelEstimatorRevision, InputIdentity: f.inputID, SourceIdentity: c.sourceID, OptionsIdentity: f.optionsID, LoadPhase: child.phase, PerSlotContext: f.context, Slots: f.slots, CapturedOptions: &f.options, Artifacts: slices.Clone(f.artifacts), Rows: slices.Clone(child.parser.rows)}
+		o := modelconfig.BufferObservation{Status: "partial", Reason: "unknown-baseline", RecordedAt: child.startedAt.UTC().Format(time.RFC3339Nano), Current: true, Persistence: "pending", BuildID: c.buildID, ReportedBuild: p.Build, EstimatorRevision: modelEstimatorRevision, InputIdentity: f.inputID, SourceIdentity: c.sourceID, OptionsIdentity: f.optionsID, LoadPhase: child.phase, PerSlotContext: f.context, Slots: f.slots, CapturedOptions: &f.options, Artifacts: slices.Clone(f.artifacts), Rows: slices.Clone(child.parser.rows)}
+		if len(o.Rows) == 0 {
+			o.Reason = "unrecognized-build-output"
+		} else {
+			o.BuildAssurance = "recognized-output"
+		}
 		o.SampleID = modelBufferHash(struct {
 			Manager, Token, Engine, Run, Model, Input, Phase string
 			Port                                             int
@@ -860,7 +867,9 @@ func (o *modelBufferOwner) work(e *Executor, done chan struct{}) {
 		}
 		job.sample.Observation.Baseline = baseline
 		job.sample.Observation.Comparisons = modelBufferComparisons(job.sample.Observation)
-		job.sample.Observation.Reason = "unmapped-device"
+		if job.sample.Observation.Reason != "unrecognized-build-output" {
+			job.sample.Observation.Reason = "unmapped-device"
+		}
 		modelBufferBoundSample(&job.sample)
 		status := "history-unavailable"
 		if o.store != nil {
@@ -1064,6 +1073,15 @@ func modelBufferFreezeTopology(f *modelBufferFrozen, memory *modelEstimateMemory
 	if f.input.Allocation == nil || f.input.Allocation.DeviceBinding == nil || actualUUID == "" || memory.Map == nil || memory.Map.Unknown != "" || memory.Map.Binding == nil || memory.Target.MapID != mapID {
 		return
 	}
+	dedicated := 0
+	for _, pool := range observed.Domains {
+		if pool.Kind == "dedicated" {
+			dedicated++
+		}
+	}
+	if dedicated != 1 {
+		return
+	}
 	a, b := f.input.Allocation.DeviceBinding, memory.Map.Binding
 	if a.Validate() != nil || a.DeviceID != actualUUID || a.HostID != memory.Target.HostID || a.HostID != b.Host || a.DomainID != b.Pool || a.DeviceID != b.UUID || a.Selector != b.Selector || a.Digest != b.Digest {
 		return
@@ -1187,27 +1205,31 @@ func (c *modelBufferCapture) captureBoundary() uint64 {
 
 func (e *Executor) projectModelBufferObservation(st *engineState, engine, model string, artifacts []modelconfig.ArtifactSummary) modelconfig.BufferObservation {
 	identity := modelBufferHash(struct{ Engine, Model string }{modelBufferHash(engine), model})
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	buildID, _ := nativeBuildID(ctx, st)
+	cancel()
 	o := modelconfig.BufferObservation{Status: "unknown", Reason: "no-matching-sample"}
 	if e.modelBuffers.store != nil {
-		o = e.modelBuffers.store.newest(identity)
+		o = e.modelBuffers.store.newest(identity, buildID)
 	}
+	historyFallback := o.SampleID != "" && modelBufferHistoryBuildReason(o.BuildID, buildID) != ""
 	st.mu.Lock()
 	c := st.bufferCapture
 	current := c != nil && c.currentLocked(st)
 	running := st.running
 	st.mu.Unlock()
-	if running && (c == nil || c.sourceID == "") {
+	if !historyFallback && running && (c == nil || c.sourceID == "") {
 		return modelconfig.BufferObservation{Status: "unknown", Reason: "unsupported-build"}
 	}
-	if current && o.SourceIdentity != "" && o.SourceIdentity != c.sourceID {
+	if !historyFallback && current && o.SourceIdentity != "" && o.SourceIdentity != c.sourceID {
 		o = modelconfig.BufferObservation{Status: "unknown", Reason: "source-changed"}
 	}
 	if c != nil {
 		c.mu.Lock()
-		if c.budgetOmitted && c.frozen[model] == nil {
+		if !historyFallback && c.budgetOmitted && c.frozen[model] == nil {
 			o = modelconfig.BufferObservation{Status: "unknown", Reason: "capture-budget"}
 		}
-		if f := c.frozen[model]; f != nil && f.captureBudget {
+		if f := c.frozen[model]; !historyFallback && f != nil && f.captureBudget {
 			o = modelconfig.BufferObservation{Status: "unknown", Reason: "capture-budget"}
 		}
 		if time.Now().UnixNano() < c.wallHigh {
@@ -1215,6 +1237,20 @@ func (e *Executor) projectModelBufferObservation(st *engineState, engine, model 
 		}
 		for _, child := range c.children {
 			if child.model == model && (child.sample.SampleID != "" || child.sample.Status == "unknown") {
+				if historyFallback && (child.sample.SampleID == "" || child.sample.Persistence == "pending") {
+					continue
+				}
+				childFallback := child.sample.SampleID != "" && modelBufferHistoryBuildReason(child.sample.BuildID, buildID) != ""
+				if childFallback && o.SampleID != "" {
+					if !historyFallback {
+						continue
+					}
+					childAt, childErr := time.Parse(time.RFC3339Nano, child.sample.RecordedAt)
+					historyAt, historyErr := time.Parse(time.RFC3339Nano, o.RecordedAt)
+					if childErr != nil || historyErr == nil && !childAt.After(historyAt) {
+						continue
+					}
+				}
 				o = child.sample.Clone()
 				if o.Persistence == "pending" {
 					o = modelconfig.BufferObservation{Status: "unknown", Reason: "unknown-baseline", Persistence: "pending"}
@@ -1226,6 +1262,10 @@ func (e *Executor) projectModelBufferObservation(st *engineState, engine, model 
 				budget := e.loadedPollInterval + modelsTimeout
 				if !current || c.retired || time.Now().Before(c.confirmedAt) || time.Since(c.confirmedAt) > budget {
 					o.Current = false
+				}
+				if reason := modelBufferHistoryBuildReason(o.BuildID, buildID); o.SampleID != "" && reason != "" {
+					o.Current = false
+					o.Reason = reason
 				}
 				if c.clockUncertain {
 					o.Current = false
@@ -1360,7 +1400,16 @@ func attachModelBufferObservation(result modelconfig.InspectResult, o modelconfi
 		}
 		o.Rows = o.Rows[:len(o.Rows)-1]
 		o.Status = "partial"
-		o.Reason = "response-budget"
+		if o.Reason == "earlier-build" {
+			if !slices.Contains(o.Reasons, "response-budget") {
+				if len(o.Reasons) == 16 {
+					o.Reasons = o.Reasons[:15]
+				}
+				o.Reasons = append(o.Reasons, "response-budget")
+			}
+		} else {
+			o.Reason = "response-budget"
+		}
 		// A reduced allocation list has no component-level comparison coverage.
 		for i := range o.Comparisons {
 			o.Comparisons[i] = modelconfig.BufferComparison{Component: o.Comparisons[i].Component, Status: "unknown"}

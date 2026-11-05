@@ -350,6 +350,7 @@ func (e *Executor) doStart(ctx context.Context, st *engineState, engine string, 
 	}
 	st.running = true
 	st.runID = newEngineRunID()
+	st.buildInfo, st.buildID = "", ""
 	st.bufferCapture.publishRun(st.runID)
 	st.healthy = true
 	st.adopted = false
@@ -365,6 +366,7 @@ func (e *Executor) doStart(ctx context.Context, st *engineState, engine string, 
 	if recovery != nil {
 		recovery.cancel()
 	}
+	e.observeNativeBuild(ctx, st)
 	e.reporter.clear(startFailedID(engine))
 	e.reporter.clear(exitedID(engine))
 	e.reporter.clear(unhealthyID(engine))
@@ -732,6 +734,7 @@ func (e *Executor) watch(st *engineState, engine string, proc *managedProc) {
 			st.proc = nil
 			st.running = false
 			st.runID = ""
+			st.buildInfo, st.buildID = "", ""
 			st.healthy = false
 			if st.healthStop != nil {
 				st.healthStop()
@@ -1015,6 +1018,7 @@ func (e *Executor) markStopped(st *engineState, engine string) {
 	}
 	st.running = false
 	st.runID = ""
+	st.buildInfo, st.buildID = "", ""
 	st.healthy = false
 	st.stopping = true
 	st.adopted = false

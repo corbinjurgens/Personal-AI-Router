@@ -559,6 +559,22 @@ func TestEngineStatusTerminationReadback(t *testing.T) {
 	}
 }
 
+func TestEngineStatusBuildReadback(t *testing.T) {
+	var status engineStatus
+	if err := json.Unmarshal([]byte(`{"engine":"llamacpp","running":true,"buildInfo":"b12345-test","buildId":"sha256:example"}`), &status); err != nil {
+		t.Fatal(err)
+	}
+	if status.BuildInfo != "b12345-test" || status.BuildID != "sha256:example" {
+		t.Fatalf("build readback = %+v", status)
+	}
+	d := localDetail()
+	d.engines = []engineStatus{status}
+	d.handleNotification(&rpc.Message{Method: "engine:state-changed", Params: json.RawMessage(`{"engine":"llamacpp","running":false}`)})
+	if len(d.engines) != 1 || d.engines[0].BuildInfo != "" || d.engines[0].BuildID != "" {
+		t.Fatalf("stopped status retained a stale build: %+v", d.engines)
+	}
+}
+
 func TestTerminalControlsTargetPolicy(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
