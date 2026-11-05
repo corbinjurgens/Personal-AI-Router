@@ -15,8 +15,6 @@ export const POLICY_CONFLICT_CODE = -32010
 export const LOCAL_VETO_CODE = -32011
 /** The target device has not granted this peer remote management permission. */
 export const REMOTE_MANAGEMENT_DENIED_CODE = -32012
-/** A start, load or switch into an engine locked on its own node. */
-export const ENGINE_LOCKED_CODE = -32013
 /** A peer tried to change inference settings reserved for the target device. */
 export const REMOTE_SETTING_LOCKED_CODE = -32014
 /** A build apply and a model-settings operation cannot hold maintenance together. */
@@ -28,12 +26,4 @@ export const BUILD_APPLY_MAINTENANCE_BUSY_CODE = -32015
  */
 export function localVetoMessage(action: string): string {
     return `Could not ${action}: the target refused the operation. Check its node and engine state, then try again.`
-}
-
-/**
- * The explanation for a paired node's action refused with ENGINE_LOCKED_CODE.
- * `action` names what was refused, for example `start llamacpp on node-a`.
- */
-export function engineLockedMessage(action: string): string {
-    return `Could not ${action}: the engine is locked on that node. Unlock it on that node, then try again.`
 }

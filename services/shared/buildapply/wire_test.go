@@ -410,7 +410,7 @@ func TestBuildApplyStatusEncodingBoundsCompleteOutput(t *testing.T) {
 	operation.Fences = Fences{
 		RuntimeGeneration: value, ServiceInstance: value, BrokerGeneration: value,
 		ManagerIncarnation: value, PolicyRevision: value, SettingsRevision: value,
-		IntentRevision: value, LocksRevision: value, AvailabilityRevision: value,
+		IntentRevision: value, AvailabilityRevision: value,
 	}
 	status := BuildApplyStatus{State: StatusPending, Operation: &operation}
 	result := Result[BuildApplyStatus]{Available: true, Value: &status}

@@ -26,11 +26,6 @@ type EngineOwnerIntent struct {
 	OffByEngine     map[string]string `json:"offByEngine"`
 }
 
-type EngineOwnerLocks struct {
-	Revision       string          `json:"revision"`
-	LockedByEngine map[string]bool `json:"lockedByEngine"`
-}
-
 type EngineOwnerUniverseEntry struct {
 	Engine              string                `json:"engine"`
 	Registered          bool                  `json:"registered"`
@@ -84,13 +79,12 @@ type EngineOwnerReason struct {
 }
 
 // Private parent evidence. Complete describes knowledge, never permission to
-// stop, reserve or apply. Explicit false intent/locks and unknown provenance
+// stop, reserve or apply. Explicit false intent and unknown provenance
 // survive transport. No field contains commands, native errors or credentials.
 type EngineOwnerEvidence struct {
 	ManagerIncarnation string                                  `json:"managerIncarnation"`
 	CaptureToken       string                                  `json:"captureToken"`
 	Intent             Observation[EngineOwnerIntent]          `json:"intent"`
-	Locks              Observation[EngineOwnerLocks]           `json:"locks"`
 	Universe           Observation[[]EngineOwnerUniverseEntry] `json:"universe"`
 	StopAuthority      Observation[[]EngineOwnerStopAuthority] `json:"stopAuthority"`
 	Reservations       Observation[EngineOwnerReservations]    `json:"reservations"`
@@ -160,7 +154,7 @@ func ownerReason(code string) bool {
 }
 
 func (e EngineOwnerEvidence) knowledgeComplete() bool {
-	if !e.Intent.Known || !e.Locks.Known || !e.Universe.Known || !e.StopAuthority.Known || !e.Reservations.Known {
+	if !e.Intent.Known || !e.Universe.Known || !e.StopAuthority.Known || !e.Reservations.Known {
 		return false
 	}
 	for _, entry := range *e.Universe.Value {
@@ -199,16 +193,6 @@ func (e EngineOwnerEvidence) validateSections() error {
 		}
 		for engine := range v.OffByEngine {
 			if enabled, exists := v.EnabledByEngine[engine]; !exists || enabled {
-				return false
-			}
-		}
-		return true
-	}) || !validObservation(e.Locks, func(v EngineOwnerLocks) bool {
-		if !ownerRevision(v.Revision) || v.LockedByEngine == nil {
-			return false
-		}
-		for engine := range v.LockedByEngine {
-			if !ownerEngineID(engine) {
 				return false
 			}
 		}
@@ -301,23 +285,6 @@ func (e EngineOwnerEvidence) validateSections() error {
 				}
 			}
 		}
-		if e.Locks.Known {
-			for engine := range e.Locks.Value.LockedByEngine {
-				if !names[engine] {
-					return invalid
-				}
-			}
-		}
-	}
-	if e.Intent.Known && e.Locks.Known {
-		for engine, locked := range e.Locks.Value.LockedByEngine {
-			if locked {
-				enabled, exists := e.Intent.Value.EnabledByEngine[engine]
-				if !exists || enabled || e.Intent.Value.OffByEngine[engine] != "local" {
-					return invalid
-				}
-			}
-		}
 	}
 	if !validObservation(e.Reservations, func(v EngineOwnerReservations) bool {
 		if !ownerRevision(v.Revision) || v.Operations == nil || !validObservation(v.BlocksApply, func(bool) bool { return true }) {
@@ -358,7 +325,7 @@ func (e EngineOwnerEvidence) validateSections() error {
 			return invalid
 		}
 		switch reason.Section {
-		case "intent", "locks", "universe", "stopAuthority", "reservations":
+		case "intent", "universe", "stopAuthority", "reservations":
 		default:
 			return invalid
 		}
@@ -366,7 +333,7 @@ func (e EngineOwnerEvidence) validateSections() error {
 			return invalid
 		}
 	}
-	for section, known := range map[string]bool{"intent": e.Intent.Known, "locks": e.Locks.Known, "universe": e.Universe.Known, "stopAuthority": e.StopAuthority.Known, "reservations": e.Reservations.Known} {
+	for section, known := range map[string]bool{"intent": e.Intent.Known, "universe": e.Universe.Known, "stopAuthority": e.StopAuthority.Known, "reservations": e.Reservations.Known} {
 		if known {
 			continue
 		}
@@ -441,7 +408,7 @@ func (e *EngineOwnerEvidence) UnmarshalJSON(data []byte) error {
 	if len(data) == 0 || len(data) > MaxStatusBytes {
 		return errors.New("invalid engine owner evidence size")
 	}
-	if err := decodeResponse(data, &value, "managerIncarnation", "captureToken", "intent", "locks", "universe", "stopAuthority", "reservations", "complete", "reasons"); err != nil {
+	if err := decodeResponse(data, &value, "managerIncarnation", "captureToken", "intent", "universe", "stopAuthority", "reservations", "complete", "reasons"); err != nil {
 		return err
 	}
 	result := EngineOwnerEvidence(value)
@@ -458,13 +425,6 @@ func (v *EngineOwnerIntent) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	return ownerBooleanMap(data, "enabledByEngine")
-}
-func (v *EngineOwnerLocks) UnmarshalJSON(data []byte) error {
-	type wire EngineOwnerLocks
-	if err := decodeResponse(data, (*wire)(v), "revision", "lockedByEngine"); err != nil {
-		return err
-	}
-	return ownerBooleanMap(data, "lockedByEngine")
 }
 
 func ownerBooleanMap(data []byte, field string) error {

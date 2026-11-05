@@ -27,10 +27,8 @@ import { safeHandle } from '@/electron/ipc/safe-handle'
 import { JsonRpcResponseError } from '@/electron/service-bridge/json-rpc-client'
 import { getModularSupervisor } from '@/electron/service-bridge/modular-supervisor'
 import {
-    ENGINE_LOCKED_CODE,
     LOCAL_VETO_CODE,
     REMOTE_SETTING_LOCKED_CODE,
-    engineLockedMessage,
     localVetoMessage
 } from '@/shared/constants/service-errors'
 import type { IpcResult } from '@/shared/types/ipc-channels'
@@ -201,8 +199,7 @@ describe('remote engine actions refused by the target', () => {
     })
 
     it.each([
-        [LOCAL_VETO_CODE, localVetoMessage],
-        [ENGINE_LOCKED_CODE, engineLockedMessage]
+        [LOCAL_VETO_CODE, localVetoMessage]
     ])('applies refusal %s to every remote mutation without a retry', async (code, explain) => {
         const { supervisor, report } = refuse(code)
         await supervisor.toggleEngineRemote('peer-node', 'llamacpp', 'llama-cpp', true)
@@ -221,16 +218,6 @@ describe('remote engine actions refused by the target', () => {
         expect(report.mock.calls[4][3]).not.toHaveProperty('action')
     })
 
-    it('names a lock refusal for start and load', async () => {
-        const detail = 'remote /v1/engines/start: HTTP 409: This engine is locked on this node.'
-        const { supervisor, report } = refuse(ENGINE_LOCKED_CODE, detail)
-        await supervisor.toggleEngineRemote('peer-node', 'llamacpp', 'llama-cpp', false)
-        await supervisor.modelActionRemote('peer-node', 'llamacpp', 'llama-cpp', 'm', 'loadModel')
-        expect(report.mock.calls.map(call => call[0])).toEqual([
-            refusal(engineLockedMessage('start llamacpp on peer-node'), ENGINE_LOCKED_CODE, detail),
-            refusal(engineLockedMessage('load m on peer-node'), ENGINE_LOCKED_CODE, detail)
-        ])
-    })
 
     it.each([
         [

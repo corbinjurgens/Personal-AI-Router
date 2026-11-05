@@ -2167,13 +2167,12 @@ func downloadTransferAttachRouter(t *testing.T, f *controllerCopyFixture, node *
 	policy := nodepolicy.Default()
 	manager.send(t, "engine:node-projection", map[string]any{"policy": policy.Advertisement(), "pausedLocally": false, "managementBlocked": false}, false)
 	var status struct {
-		Running bool  `json:"running"`
-		Port    int   `json:"port"`
-		Locked  *bool `json:"locked"`
+		Running bool `json:"running"`
+		Port    int  `json:"port"`
 	}
 	task2Decode(t, manager.call(t, "engine:status", map[string]string{"engine": "llamacpp"}).Result, &status)
-	if !status.Running || status.Port != portOfURL(t, router.server.URL) || status.Locked == nil || !*status.Locked {
-		t.Fatalf("private router adoption/lock=%+v", status)
+	if !status.Running || status.Port != portOfURL(t, router.server.URL) {
+		t.Fatalf("private router adoption=%+v", status)
 	}
 	if node == f.source {
 		f.sourceEM = manager
@@ -2362,11 +2361,10 @@ func downloadTransferController(t *testing.T, f *controllerCopyFixture) {
 	for _, node := range []*task1Node{f.controller, f.source, f.target} {
 		var intent struct {
 			Engines map[string]bool `json:"engines"`
-			Locked  map[string]bool `json:"locked"`
 		}
 		task2Decode(t, readLiveDurableFile(t, filepath.Join(jointAppDir(node.base), "engine-bin", "engine-state.json")), &intent)
-		if on, known := intent.Engines["llamacpp"]; !known || on || !intent.Locked["llamacpp"] {
-			t.Fatalf("joined COPY/download changed private Off/lock intent for %s", node.uuid)
+		if on, known := intent.Engines["llamacpp"]; !known || on {
+			t.Fatalf("joined COPY/download changed private Off intent for %s", node.uuid)
 		}
 	}
 }

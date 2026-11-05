@@ -25,7 +25,7 @@ conversion diffs and their digest. Direct previews and readback preserve typed
 records. ConfigureLaunch applies frozen reviewed settings through the existing
 owned stop, atomic persistence, proxy rebind and conditional restart sequence.
 Typed SetPort uses that same owner. Unchanged loads do not restart the process;
-Off, Pause and engine locks preserve non-activation, and adopted processes remain
+Off and Pause preserve non-activation, and adopted processes remain
 read-only. Accepted conversion validates the complete current external router
 and exact reviewed native resolution before removing conflicting sources.
 Inspection reads bounded artifact facts; estimates and Auto remain unavailable.

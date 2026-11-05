@@ -281,9 +281,6 @@ func (e *Executor) residentPrecheck(p nodepolicy.ReconcileResidentParams) string
 		if rpcCode(err) == codeLocalVeto {
 			return string(nodepolicy.ModelReasonPaused)
 		}
-		if rpcCode(err) == codeEngineLocked {
-			return string(nodepolicy.ModelReasonEngineLocked)
-		}
 		return "observation-unknown"
 	}
 	e.desired.mu.Lock()

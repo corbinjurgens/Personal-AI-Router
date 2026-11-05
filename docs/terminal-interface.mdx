@@ -326,17 +326,9 @@ class, not a particular peer, and stays separate from installed, running and
 healthy state. A stopped engine alone does not establish saved Off, and reading
 origin does not grant permission to start an engine.
 
-Plain Off, an engine lock and a node pause are different. Saved Off is ordinary
-intent and does not stop a granted peer from starting the engine. When the
-engine's node reports it locked, the row adds ` (locked on this node)`, for this
-machine and for paired targets. A target that reports no lock is shown without
-one and is never read as unlocked, and saved Off is never read as a lock. A
-locked engine refuses start, restart and model load before anything is sent,
-with `This engine is locked on this node. Unlock it on this node before starting
-or loading a model.` Stop, unload and reads stay available. The terminal has no
-lock key; locks are changed on the engine's own device. A paused target refuses
-remote changes until it is resumed on that node, while status, permission and
-receipt reads keep working.
+Saved Off is ordinary intent and does not stop a granted peer from starting the engine.
+A paused target refuses remote changes until resumed under its availability policy;
+status, permission and receipt reads remain available.
 
 A port is a request rather than a promise. If a running engine already holds
 the port you asked for, PAIR binds elsewhere and tells you which port it ended
@@ -347,8 +339,7 @@ up on — so a change you did not get is never reported as one you did.
 In node detail, press `w` (**switch engine**). Choose **From** and **To** with
 `tab` to change fields and up/down (or `j`/`k`) to select installed engines.
 Press `enter` to **Switch**. The engines must differ. `r` reads status and
-permission again; `esc` closes the panel. A locked target engine is refused before
-submission; a locked source adds no extra prohibition. Local pause and Stop/Off
+permission again; `esc` closes the panel. Local pause and Stop/Off
 remain available through their existing controls, including during a remote
 switch.
 
@@ -367,7 +358,7 @@ The saved-Off origin labels described above retain their meaning.
 
 Remote switching needs a current remote-management grant on the target device.
 Permission denial (`-32012`) requires a local permission change there; a local
-target veto (`-32011`, for example a pause), engine lock (`-32013`) and configuration conflict
+target veto (`-32011`, for example a pause) and configuration conflict
 (`-32010`) are different refusals. Keep the selections, read back current state and resolve the reported
 cause before a deliberate new submission. Unavailable permission or revision
 keeps switching read-only. Revocation blocks new acceptance; accepted work may

@@ -29,8 +29,8 @@ launch state.
 Remote set and clear use the strict settings relay union and authenticated
 mutation routes `POST /v1/engine-settings/set-stated-memory` and
 `POST /v1/engine-settings/clear-stated-memory`, through the existing direct or
-reverse transport. The destination broker rechecks remote-management permission,
-Pause and engine lock; only the destination store changes. Local recording is
+reverse transport. The destination broker rechecks remote-management permission and
+Pause; only the destination store changes. Local recording is
 allowed while paused. Public requests cannot provide target-memory authority;
 the private worker envelope supplies target evidence and disables native helper
 initialization for recording.
@@ -169,7 +169,7 @@ Changed overrides, bindings/build or selected policy implications require a
 fresh review. A successful configure acknowledgement alone cannot complete Apply.
 Exact persisted native settings do not discharge saved resume intent after a
 manager restart. Resume converges through the existing ConfigureLaunch owner,
-which retains current Pause, engine-lock and saved-Off vetoes. A stopped result
+which retains current Pause and saved-Off vetoes. A stopped result
 requires current veto evidence, rather than silently claiming running readiness.
 
 The operation keeps discovery, local backend eligibility, resident reconciliation
@@ -559,7 +559,7 @@ rechecks this before reservation and source effects. Automatic reservations
 prevent another engine from starting during replacement. Local Off may preempt
 automatic work of either origin through the existing durable operation-specific
 obligation. Delayed scoped Off cannot affect newer work. Manual local switches
-retain busy behavior; lock and pause guards remain authoritative. Desktop and
+retain busy behavior; pause guards remain authoritative. Desktop and
 TUI show `Automatic engine switch` with existing phases, request identities,
 observations and refusal codes.
 
@@ -567,8 +567,7 @@ Failures terminate as `failed-validation`, `failed-drain`, `failed-source-stop`,
 `failed-target-start`, `failed-publication` or `failed-interrupted`; pre-acceptance
 refusals may have a durable `rejected` receipt. Errors carry a stable kind and
 numeric code: invalid/reused ID `-32602`, configuration conflict `-32010`, local
-remote veto `-32011`, remote-management denial `-32012`, a target engine locked on
-its node `-32013` (kind `engine_locked`), and other operational/storage/full/busy errors `-32000`.
+remote veto `-32011`, remote-management denial `-32012`, and other operational/storage/full/busy errors `-32000`.
 Manager result envelopes are inspected even when JSON-RPC itself succeeds.
 
 Startup loads the switch journal, marks nonterminal operations

@@ -37,9 +37,6 @@ func TestPauseGateCoversEveryRegisteredMutationAndAllowsEveryRead(t *testing.T) 
 			f := rmNewFixture(t, "uuid-self", "uuid-a")
 			f.writePermissions("1", map[string]bool{"uuid-a": scenario.allowed})
 			ex := newTestExecutor(t, lockLoadManifest())
-			if err := ex.setEngineLocked("fake", true); err != nil {
-				t.Fatal(err)
-			}
 			if scenario.projection != nil {
 				ex.nodeProjection.set(*scenario.projection)
 			}
@@ -167,12 +164,6 @@ func TestPeerPauseProjectionCancelsActivation(t *testing.T) {
 		}
 		if _, err := ex.ModelLoad(context.Background(), "fake", "tiny"); rpcCode(err) != -32011 {
 			t.Fatalf("local load after peer pause = %v", err)
-		}
-		if err := ex.setEngineLocked("fake", true); err != nil {
-			t.Fatalf("local lock while paused: %v", err)
-		}
-		if err := ex.setEngineLocked("fake", false); err != nil {
-			t.Fatalf("local unlock while paused: %v", err)
 		}
 		if err := ex.Stop("fake"); err != nil {
 			t.Fatalf("local stop while paused: %v", err)

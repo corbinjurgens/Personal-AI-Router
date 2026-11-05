@@ -1219,7 +1219,7 @@ describe('model configuration policy evidence', () => {
         }
     )
 
-    it.each(['paused', 'engine-locked', 'paused-local', 'engine-off-local'])(
+    it.each(['paused', 'paused-local', 'engine-off-local'])(
         'reads the %s reason on get, set and push',
         reason => {
             const evidence: JsonObject = {

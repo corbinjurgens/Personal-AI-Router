@@ -265,7 +265,7 @@ func TestResidentRefusalWire(t *testing.T) {
 
 func TestResidentRefusalReasons(t *testing.T) {
 	for _, reason := range []ModelConfigurationReason{
-		ModelReasonEngineOff, ModelReasonNoFit, ModelReasonPaused, ModelReasonEngineLocked,
+		ModelReasonEngineOff, ModelReasonNoFit, ModelReasonPaused,
 		ModelReasonPausedLocal, ModelReasonEngineOffLocal, ModelReasonNotServed, ModelReasonNotInstalled,
 		ModelReasonUnqualified, ModelReasonUnsupportedLoad, ModelReasonSwitchBusy,
 		ModelReasonOperationTimeout, ModelReasonObservationUnknown, ModelReasonProjectionUnknown,
@@ -534,9 +534,9 @@ func TestModelConfigurationLoadFailedReasonWire(t *testing.T) {
 	test("unknown capacity", nil)
 }
 
-// TestModelConfigurationPauseAndLockReasons carries each pause and lock reason,
+// TestModelConfigurationPauseReasons carries each pause reason,
 // the new codes and the older producers' codes, inside the enclosing status.
-func TestModelConfigurationPauseAndLockReasons(t *testing.T) {
+func TestModelConfigurationPauseReasons(t *testing.T) {
 	test := func(name string, reason ModelConfigurationReason) {
 		t.Run(name, func(t *testing.T) {
 			entry := ModelConfigurationEntry{Engine: "llamacpp", Model: "m", DesiredResident: true, State: ModelStateBlocked, Reason: reason}
@@ -547,12 +547,11 @@ func TestModelConfigurationPauseAndLockReasons(t *testing.T) {
 		})
 	}
 	test("paused by either origin", ModelReasonPaused)
-	test("engine locked", ModelReasonEngineLocked)
 	test("older local pause", ModelReasonPausedLocal)
 	test("older local Off", ModelReasonEngineOffLocal)
 	t.Run("spellings", func(t *testing.T) {
-		if ModelReasonPaused != "paused" || ModelReasonEngineLocked != "engine-locked" {
-			t.Fatalf("reason spellings = %q, %q", ModelReasonPaused, ModelReasonEngineLocked)
+		if ModelReasonPaused != "paused" {
+			t.Fatalf("reason spelling = %q", ModelReasonPaused)
 		}
 	})
 }
@@ -587,7 +586,7 @@ func TestResidentWireBoundsAccepted(t *testing.T) {
 }
 
 func TestResidentWireEnums(t *testing.T) {
-	for _, reason := range []ModelConfigurationReason{ModelReasonEngineOff, ModelReasonNoFit, ModelReasonPaused, ModelReasonEngineLocked, ModelReasonPausedLocal, ModelReasonEngineOffLocal, ModelReasonNotServed, ModelReasonNotInstalled, ModelReasonUnqualified, ModelReasonUnsupportedLoad, ModelReasonSwitchBusy, ModelReasonOperationTimeout, ModelReasonObservationUnknown, ModelReasonProjectionUnknown} {
+	for _, reason := range []ModelConfigurationReason{ModelReasonEngineOff, ModelReasonNoFit, ModelReasonPaused, ModelReasonPausedLocal, ModelReasonEngineOffLocal, ModelReasonNotServed, ModelReasonNotInstalled, ModelReasonUnqualified, ModelReasonUnsupportedLoad, ModelReasonSwitchBusy, ModelReasonOperationTimeout, ModelReasonObservationUnknown, ModelReasonProjectionUnknown} {
 		t.Run(string(reason), func(t *testing.T) {
 			testResidentWire(t, ResidentRefusal{Engine: "llamacpp", Model: "m", Reason: reason}, "engine model reason")
 		})

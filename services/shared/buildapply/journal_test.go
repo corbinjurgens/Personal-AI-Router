@@ -94,12 +94,12 @@ func journalInputs(t *testing.T, j *Journal) (Receipt, Inventory) {
 	receipt := Receipt{
 		OperationID: id, RunnerToken: id, PreviewID: "preview_" + id, Target: filepath.Join(filepath.Dir(j.Path()), "target"),
 		CandidateSHA256: inventory.PackageSHA256, PreviousSHA256: digest,
-		Protected: ProtectedDigests{Policy: digest, EngineSettings: digest, Intent: digest, Locks: digest, IdentityMembership: digest},
-		Expected:  JournalExpectations{StopEngines: true, UnloadModels: true, RemainPaused: true, PreserveIntentLocks: true, OnActive: nodepolicy.FinishActive, DrainTimeoutSeconds: 120},
+		Protected: ProtectedDigests{Policy: digest, EngineSettings: digest, Intent: digest, IdentityMembership: digest},
+		Expected:  JournalExpectations{StopEngines: true, UnloadModels: true, RemainPaused: true, PreserveIntent: true, OnActive: nodepolicy.FinishActive, DrainTimeoutSeconds: 120},
 		Consent:   Consent{AllowEngineStop: true, AllowInterruption: true},
 		Fences: Fences{
 			RuntimeGeneration: Known("runtime"), ServiceInstance: Known("service"), BrokerGeneration: Known("broker"), ManagerIncarnation: Known("manager"),
-			PolicyRevision: Known("policy"), SettingsRevision: Known("settings"), IntentRevision: Known("intent"), LocksRevision: Known("locks"), AvailabilityRevision: Known("availability"),
+			PolicyRevision: Known("policy"), SettingsRevision: Known("settings"), IntentRevision: Known("intent"), AvailabilityRevision: Known("availability"),
 		},
 		Phase: PhasePrepare, Rename: RenameNone, Handoff: HandoffNone,
 	}
@@ -691,6 +691,57 @@ func TestJournalPublicProjectionKeepsDurablePreviewCorrelation(t *testing.T) {
 	}
 }
 
+func TestJournalRejectsRemovedEngineLockFields(t *testing.T) {
+	cases := []struct {
+		name, section, field string
+		value                json.RawMessage
+	}{
+		{"protected locks", "protected", "locks", json.RawMessage(`"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"`)},
+		{"lock revision", "fences", "locksRevision", json.RawMessage(`{"known":true,"value":"locks"}`)},
+		{"old journal preservation key", "expected", "preserveIntentLocks", json.RawMessage(`true`)},
+		{"old wire preservation key", "expected", "preserveIntentAndLocks", json.RawMessage(`true`)},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			j, lock := journalFixture(t)
+			beginJournal(t, j, lock)
+			state, err := j.Read()
+			if err != nil || state.Current == nil {
+				t.Fatalf("read current-format fixture: %+v, %v", state, err)
+			}
+			data, err := json.Marshal(state.Current)
+			if err != nil {
+				t.Fatalf("encode receipt: %v", err)
+			}
+			var receipt map[string]json.RawMessage
+			if err := json.Unmarshal(data, &receipt); err != nil {
+				t.Fatalf("decode receipt fields: %v", err)
+			}
+			var section map[string]json.RawMessage
+			if err := json.Unmarshal(receipt[test.section], &section); err != nil {
+				t.Fatalf("decode %s fields: %v", test.section, err)
+			}
+			// Keep preserveIntent present so rejection proves unknown-field
+			// validation, independently of its required-true semantic check.
+			section[test.field] = test.value
+			receipt[test.section], err = json.Marshal(section)
+			if err != nil {
+				t.Fatalf("encode old section: %v", err)
+			}
+			data, err = json.Marshal(map[string]any{"current": receipt, "lastTerminal": nil})
+			if err != nil {
+				t.Fatalf("encode old journal: %v", err)
+			}
+			if err := j.writeFile("operation.json", data); err != nil {
+				t.Fatalf("write old journal fixture: %v", err)
+			}
+			if _, err := j.Read(); !errors.Is(err, ErrInvalidJournal) {
+				t.Fatalf("old journal error = %v, want ErrInvalidJournal", err)
+			}
+		})
+	}
+}
+
 func TestJournalAdmissionRequiresConsentAndCompleteOwnerFacts(t *testing.T) {
 	test := func(name string, change func(*Receipt)) {
 		t.Run(name, func(t *testing.T) {
@@ -707,10 +758,11 @@ func TestJournalAdmissionRequiresConsentAndCompleteOwnerFacts(t *testing.T) {
 			}
 		})
 	}
+	test("saved intent preservation required", func(r *Receipt) { r.Expected.PreserveIntent = false })
+	test("unknown intent digest", func(r *Receipt) { r.Protected.Intent = "" })
 	test("no engine-stop consent", func(r *Receipt) { r.Consent.AllowEngineStop = false })
 	test("unknown manager lifetime", func(r *Receipt) { r.Fences.ManagerIncarnation = Observation[string]{} })
 	test("unknown intent revision", func(r *Receipt) { r.Fences.IntentRevision = Observation[string]{} })
-	test("unknown locks digest", func(r *Receipt) { r.Protected.Locks = "" })
 	test("invalid owner-fence UTF-8", func(r *Receipt) { r.Fences.IntentRevision = Known(string([]byte{0xff})) })
 	test("invalid total budget", func(r *Receipt) { r.Runtime.Deadline = r.Runtime.Deadline.Add(time.Second) })
 	test("partial recovery budget", func(r *Receipt) { r.RecoveryDeadline = time.Now().Add(time.Minute) })

@@ -122,7 +122,6 @@ function fences(): BuildApplyFences {
         policyRevision: known('4'),
         settingsRevision: known('5'),
         intentRevision: known('6'),
-        locksRevision: known('7'),
         availabilityRevision: known('8')
     }
 }
@@ -164,7 +163,6 @@ function preview(): BuildApplyPreview {
                     running: absent(),
                     loadedModels: known([]),
                     desiredState: known('off'),
-                    locked: known(true),
                     scopedStopAuthority: absent()
                 }
             ]),
@@ -182,7 +180,6 @@ function preview(): BuildApplyPreview {
                 policyDigest: known('policy-digest'),
                 engineSettingsDigest: known('settings-digest'),
                 intentDigest: known('intent-digest'),
-                locksDigest: known('locks-digest'),
                 stopEngines: known(true),
                 unloadModels: known(true)
             },
@@ -197,7 +194,7 @@ function preview(): BuildApplyPreview {
             restorePolicy: {
                 remainPaused: true,
                 requireLocalResume: true,
-                preserveIntentAndLocks: true,
+                preserveIntent: true,
                 preserveNewerPause: true,
                 automaticRollback: false
             },
@@ -354,6 +351,34 @@ describe('build apply payloads', () => {
         })
         expect(value.requestedService.dirty).toEqual({ known: false, value: null })
         expect(value.packageSha256).not.toEqual(value.requestedService.buildId)
+    })
+    it('rejects removed lock fences and the old intent preservation key', () => {
+        const value = preview()
+        const { preserveIntent, ...restorePolicy } = value.impact.restorePolicy
+        expect(preserveIntent).toBe(true)
+        expect(() =>
+            parseBuildApplyPreviewResult(
+                wire({
+                    available: true,
+                    value: {
+                        ...value,
+                        impact: {
+                            ...value.impact,
+                            restorePolicy: { ...restorePolicy, preserveIntentAndLocks: true }
+                        }
+                    },
+                    refusal: null
+                })
+            )
+        ).toThrow()
+        expect(() =>
+            parseBuildApplyOperation(
+                wire({
+                    ...operation(),
+                    fences: { ...operation().fences, locksRevision: known('old') }
+                })
+            )
+        ).toThrow()
     })
     it('preserves failure phase, confidence, pause and separate saved/enforced/physical-stop facts', () => {
         const value = operation()

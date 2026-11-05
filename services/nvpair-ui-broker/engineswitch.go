@@ -63,8 +63,6 @@ func switchError(kind, message string) error {
 		code = settings.SwitchConfigurationConflictCode
 	case settings.SwitchErrorRemoteVeto:
 		code = settings.SwitchRemoteVetoCode
-	case settings.SwitchErrorEngineLocked:
-		code = settings.SwitchEngineLockedCode
 	}
 	if len(message) > settings.MaxSwitchErrorMessageBytes {
 		message = message[:settings.MaxSwitchErrorMessageBytes]
@@ -577,8 +575,6 @@ func switchManagerCallOn(ctx context.Context, w *rpcWorker, method string, param
 			kind = settings.SwitchErrorConfigurationConflict
 		case settings.SwitchRemoteVetoCode:
 			kind = settings.SwitchErrorRemoteVeto
-		case settings.SwitchEngineLockedCode:
-			kind = settings.SwitchErrorEngineLocked
 		}
 		return &switchRPCError{settings.SwitchError{Code: rpcErr.Code, Kind: kind, Message: rpcErr.Message}}
 	}

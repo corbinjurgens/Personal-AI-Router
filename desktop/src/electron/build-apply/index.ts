@@ -93,7 +93,7 @@ function completePreview(preview: BuildApplyPreview): boolean {
         impact.interruptionPolicy.drainTimeoutSeconds.known &&
         impact.restorePolicy.remainPaused &&
         impact.restorePolicy.requireLocalResume &&
-        impact.restorePolicy.preserveIntentAndLocks &&
+        impact.restorePolicy.preserveIntent &&
         impact.restorePolicy.preserveNewerPause &&
         !impact.restorePolicy.automaticRollback &&
         impact.refusals.length === 0

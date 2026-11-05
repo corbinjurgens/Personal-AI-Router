@@ -158,18 +158,6 @@ func TestXARemoteConfigurationService(t *testing.T) {
 			nextID++
 			return decodeOBIntent(t, m.Result).OffByEngine["llamacpp"] == engineintent.Local
 		})
-		c.mustCall(t, "911", "engine:set-lock", mustMarshal(t, map[string]any{"engine": "llamacpp", "locked": true}))
-		status, _, body := managementHTTPResponse(t, rf.allowed, rf.ports.engineControl, http.MethodPost, "/v1/engines/start", map[string]any{"engine": "llamacpp"})
-		var refusal struct {
-			Code  string `json:"code"`
-			Error string `json:"error"`
-		}
-		if err := json.Unmarshal(body, &refusal); err != nil {
-			t.Fatalf("decode service engine-lock refusal: %v", err)
-		}
-		if status != http.StatusConflict || refusal.Code != "engine_locked" || refusal.Error != "This engine is locked on this node. Unlock it on this node before starting or loading a model." {
-			t.Fatalf("service engine-lock refusal = HTTP %d/%s/%q, want exact engine lock", status, refusal.Code, refusal.Error)
-		}
 	}) {
 		return
 	}
@@ -326,25 +314,6 @@ func TestXARemoteConfigurationVeto(t *testing.T) {
 	}) {
 		return
 	}
-
-	t.Run("local resume then explicit engine lock vetoes remote start", func(t *testing.T) {
-		local := callRPC(t, f.target.in, f.target.msgs, "node:set-availability", map[string]any{"state": "available"}, 15*time.Second)
-		if local.Error != nil {
-			t.Fatalf("local resume failed: code=%d", local.Error.Code)
-		}
-		c := subscribeOBIntent(t, f.target)
-		c.call(t, "engine:stop", map[string]string{"engine": "llamacpp"})
-		want := obIntent(false, map[string]engineintent.Origin{"llamacpp": engineintent.Local})
-		c.assertIntent(t, want)
-		f.inert.Close()
-		c.call(t, "engine:set-lock", map[string]any{"engine": "llamacpp", "locked": true})
-		task1Eventually(t, "remote start refused by explicit engine lock", 15*time.Second, func() bool {
-			m := callRPC(t, f.origin.in, f.origin.msgs, "engine:remote-start", map[string]any{"node": "policy-joint-target", "engine": "llamacpp"}, 30*time.Second)
-			return m.Error != nil && m.Error.Code == -32013 && m.Error.Message == "remote /v1/engines/start: HTTP 409: This engine is locked on this node. Unlock it on this node before starting or loading a model." && len(m.Result) == 0
-		})
-		assertOBIntent(t, decodeOBIntent(t, c.call(t, "engine:intent", nil)), want)
-		assertOBStoredIntent(t, filepath.Join(jointAppDir(f.base), "engine-bin", "engine-state.json"), "llamacpp", false, engineintent.Local)
-	})
 }
 
 func TestXARemoteConfigurationSwitch(t *testing.T) {

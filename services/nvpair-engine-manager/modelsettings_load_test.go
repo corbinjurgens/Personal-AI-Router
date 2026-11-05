@@ -996,7 +996,7 @@ func TestModelSettingsLoadConfigureVetoKeepsSavedConfigurationCold(t *testing.T)
 			}
 			after, err := f.ex.desired.snapshot([]string{"fake"})
 			if err != nil || !reflect.DeepEqual(before, after) {
-				t.Fatalf("configuration changed intent or lock: before=%+v after=%+v err=%v", before, after, err)
+				t.Fatalf("configuration changed intent: before=%+v after=%+v err=%v", before, after, err)
 			}
 			if _, err := os.Stat(f.capture); !os.IsNotExist(err) {
 				t.Fatal("configuration bypassed activation veto", err)
@@ -1005,11 +1005,6 @@ func TestModelSettingsLoadConfigureVetoKeepsSavedConfigurationCold(t *testing.T)
 	}
 	test("paused by either origin", func(t *testing.T, f modelLoadFixture) {
 		f.ex.nodeProjection.set(nodeProjection{ManagementBlocked: true})
-	})
-	test("local engine lock", func(t *testing.T, f modelLoadFixture) {
-		if _, err := f.ex.desired.setLocked("fake", true); err != nil {
-			t.Fatal(err)
-		}
 	})
 }
 

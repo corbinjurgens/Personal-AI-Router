@@ -176,9 +176,7 @@ func switchCode(err error) int {
 }
 
 func switchFailure(code int, kind string, err error) *settings.SwitchError {
-	if code == codeEngineLocked {
-		kind = settings.SwitchErrorEngineLocked
-	} else if code == codeLocalVeto {
+	if code == codeLocalVeto {
 		kind = settings.SwitchErrorRemoteVeto
 	} else if kind == settings.SwitchErrorRemoteVeto {
 		kind = settings.SwitchErrorValidation
@@ -510,9 +508,6 @@ func (e *Executor) saveSwitch(cp *settings.SwitchCheckpoint, engine string, on b
 		return err
 	}
 	if engine != "" {
-		if on && state.Locked[engine] {
-			return &localVetoError{code: codeEngineLocked, reason: engineLockedVeto(engine)}
-		}
 		origin := intentLocal
 		if cp.Origin == settings.SwitchOriginRemote {
 			origin = intentPeer
@@ -521,7 +516,7 @@ func (e *Executor) saveSwitch(cp *settings.SwitchCheckpoint, engine string, on b
 	}
 	// A veto may arrive while a step owns its private decoded checkpoint.
 	// Never overwrite that durable cancellation with the step's older copy.
-	if previous := state.PendingSwitch; previous != nil && previous.OperationID == cp.OperationID && previous.Error != nil && (previous.Error.Code == codeLocalVeto || previous.Error.Code == codeEngineLocked) {
+	if previous := state.PendingSwitch; previous != nil && previous.OperationID == cp.OperationID && previous.Error != nil && previous.Error.Code == codeLocalVeto {
 		cp.Error = previous.Error
 		if previous.SourceLocalOff && !cp.SourceLocalOff {
 			cp.SourceLocalOff, cp.Source = true, previous.Source
@@ -1113,7 +1108,7 @@ func (e *Executor) switchStartAllowed(ctx context.Context, cp *settings.SwitchCh
 	if pending == nil || pending.SwitchPrepareRequest != cp.SwitchPrepareRequest || pending.Phase != cp.Phase || pending.TargetCommitted != cp.TargetCommitted {
 		return errors.New("switch checkpoint changed before target readiness")
 	}
-	if pending.Error != nil && (pending.Error.Code == codeLocalVeto || pending.Error.Code == codeEngineLocked) {
+	if pending.Error != nil && pending.Error.Code == codeLocalVeto {
 		return &localVetoError{code: pending.Error.Code, reason: pending.Error.Message}
 	}
 	if recoverCommitted && switchIntent(current, cp.TargetEngine) != settings.SwitchIntentOn {

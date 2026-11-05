@@ -178,7 +178,7 @@ On Nodes, `g` opens this device's local permission list; up/down selects a peer,
 space/enter toggles permission, `r` reloads and `esc` returns. Saves use the
 reported revision and authoritative readback, including after errors; they are
 not automatically retried. `cluster_auto_sync` remains an inert stored
-preference and grants no authority. An engine lock and a node pause on the target
+preference and grants no authority. A node pause on the target
 still apply; revocation prevents new acceptance while already accepted work can
 finish or reconcile.
 
@@ -225,19 +225,9 @@ Off. These labels appear only on this machine's rows; there is no remote intent
 projection. Origin identifies a class relative to the engine-owning device,
 not a particular peer, and does not change lifecycle or permission decisions.
 
-Plain Off, an engine lock and a node pause are different facts. Saved Off is
-ordinary intent and does not stop a granted peer from starting the engine. A
-lock is reported by the engine-owning node as `locked` on its status; when it is
-true the row adds ` (locked on this node)`, on this machine and on a paired
-target. A target that reports no `locked` field, as an older one does, is shown
-without a lock claim and is never read as unlocked; saved Off is never read as a
-lock. A locked engine refuses start, restart, model load and being a switch
-target before anything is sent, with `This engine is locked on this node. Unlock
-it on this node before starting or loading a model.` Stop, unload, delete,
-download, settings and reads stay available, and a locked switch source adds no
-prohibition on switching to an unlocked engine. The target stays authoritative
-against a stale readback. The terminal has no lock or unlock key and exposes no
-remote setter; locks are changed on the engine's own device.
+Saved Off is ordinary intent and does not stop a granted peer from starting the engine.
+A paused target refuses remote changes until resumed under its availability policy;
+status, permission and receipt reads remain available.
 
 Lifecycle, model, settings and availability refusals retain the target's message
 and RPC code. `-32012` means remote management is blocked and must be changed
@@ -245,7 +235,7 @@ locally on the target. Its permission readback in remote detail is read-only;
 unknown, unavailable or unsupported is not a grant. Reads and permitted
 inference remain available. Downgraded pre-PG targets cannot enforce PG.
 `-32011` means a local veto, including a paused target, which must be resumed on
-that node first; `-32013` means the engine is locked on its node; `-32010`
+that node first; `-32010`
 means a revision conflict requiring reload and retry. An unavailable projection
 on the target is an ordinary retryable operational error, not a veto. Refusals do not retry or resume work automatically.
 Existing long-operation timeouts still report continuing work rather than
@@ -290,7 +280,7 @@ These guarantees require a coordinated fleet update; older peers remain unknown.
 Node detail offers `w` / **switch engine**. Use `tab` for **From**/**To**,
 up/down to select installed engines, `enter` to **Switch**, `r` for status and
 permission readback, and `esc` to close the panel. Blocked submission shows its
-reason, including a locked target engine. Existing local pause/Off controls remain
+reason. Existing local pause/Off controls remain
 reachable. The TUI invokes the
 existing E3 `engine:switch` and
 `engine:switch-status` methods through the broker, with a peer `nodeId` only for

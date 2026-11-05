@@ -258,7 +258,7 @@ func controlCopyRequest() copyRequest {
 func TestModelCopyControlDestinationOwnsBytes(t *testing.T) {
 	f := newCopyControlFixture(t)
 	f.controller.exec = nil // Controller artifact/executor access would fail this operation.
-	if _, err := f.destination.exec.desired.setLocked("llamacpp", true); err != nil {
+	if err := f.destination.exec.setDesiredEnabled("llamacpp", false, intentLocal); err != nil {
 		t.Fatal(err)
 	}
 	var progress []copyProgress
@@ -291,7 +291,7 @@ func TestModelCopyControlDestinationOwnsBytes(t *testing.T) {
 		t.Fatal("completed operations leaked")
 	}
 	st, err := f.destination.exec.Status("llamacpp")
-	if err != nil || st.Running || st.Locked == nil || !*st.Locked {
+	if err != nil || st.Running {
 		t.Fatalf("copy activated engine: %+v, %v", st, err)
 	}
 	enabled, known, err := f.destination.exec.desired.get("llamacpp")
@@ -1168,10 +1168,10 @@ func TestModelCopyControlConcurrentDestinationsRemainIndependent(t *testing.T) {
 }
 
 func TestModelCopyControlCapabilitiesReadiness(t *testing.T) {
-	t.Run("installed stopped locked engine is copy writable", func(t *testing.T) {
+	t.Run("installed stopped engine is copy writable", func(t *testing.T) {
 		ex := copyTestExecutor(t, "llamacpp", t.TempDir(), true)
 		ex.nodeProjection.set(nodeProjection{})
-		if _, err := ex.desired.setLocked("llamacpp", true); err != nil {
+		if err := ex.setDesiredEnabled("llamacpp", false, intentLocal); err != nil {
 			t.Fatal(err)
 		}
 		capability := ex.copyCapabilities("llamacpp")
@@ -1179,7 +1179,7 @@ func TestModelCopyControlCapabilitiesReadiness(t *testing.T) {
 			t.Fatalf("capability=%+v", capability)
 		}
 		st, err := ex.Status("llamacpp")
-		if err != nil || st.Running || st.Locked == nil || !*st.Locked {
+		if err != nil || st.Running {
 			t.Fatalf("copy capability activated engine: %+v, %v", st, err)
 		}
 	})

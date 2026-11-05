@@ -54,9 +54,6 @@ const (
 	// target's local remote-management permission refused. It is distinct from
 	// an unpinned 403 and from codeLocalVeto.
 	codeRemoteManagementDenied = -32012
-	// codeEngineLocked is a start, load or switch into an engine locked on the
-	// target node. It is distinct from codeLocalVeto.
-	codeEngineLocked = -32013
 	// codeRemoteSettingLocked is a peer edit of target-owned inference settings.
 	codeRemoteSettingLocked = -32014
 )
@@ -66,7 +63,6 @@ var wireCodes = map[int]string{
 	codePolicyConflict:         "policy_conflict",
 	codeLocalVeto:              "local_veto",
 	codeRemoteManagementDenied: remoteManagementWireCode,
-	codeEngineLocked:           "engine_locked",
 	codeRemoteSettingLocked:    "remote_setting_locked",
 }
 

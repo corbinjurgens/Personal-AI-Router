@@ -378,8 +378,7 @@ func ParseResidentOperationID(id string) (uint64, error) {
 
 // ModelConfigurationReason contains codes only; raw engine errors and identity
 // digests must not be copied into derived status or refusal explanations.
-// ModelReasonPaused is a node paused by either origin and ModelReasonEngineLocked
-// an engine locked on its node; ModelReasonPausedLocal and
+// ModelReasonPaused is a node paused by either origin; ModelReasonPausedLocal and
 // ModelReasonEngineOffLocal remain readable from older producers.
 type ModelConfigurationReason string
 
@@ -387,7 +386,6 @@ const (
 	ModelReasonEngineOff          ModelConfigurationReason = ModelConfigurationReason(RejectOff)
 	ModelReasonNoFit              ModelConfigurationReason = ModelConfigurationReason(RejectNoFit)
 	ModelReasonPaused             ModelConfigurationReason = ModelConfigurationReason(RejectPaused)
-	ModelReasonEngineLocked       ModelConfigurationReason = "engine-locked"
 	ModelReasonPausedLocal        ModelConfigurationReason = "paused-local"
 	ModelReasonEngineOffLocal     ModelConfigurationReason = "engine-off-local"
 	ModelReasonNotServed          ModelConfigurationReason = "not-served"
@@ -403,7 +401,7 @@ const (
 
 func (r ModelConfigurationReason) Validate() error {
 	switch r {
-	case ModelReasonEngineOff, ModelReasonNoFit, ModelReasonPaused, ModelReasonEngineLocked, ModelReasonPausedLocal, ModelReasonEngineOffLocal,
+	case ModelReasonEngineOff, ModelReasonNoFit, ModelReasonPaused, ModelReasonPausedLocal, ModelReasonEngineOffLocal,
 		ModelReasonNotServed, ModelReasonNotInstalled, ModelReasonUnqualified, ModelReasonUnsupportedLoad,
 		ModelReasonSwitchBusy, ModelReasonLoadFailed, ModelReasonOperationTimeout, ModelReasonObservationUnknown, ModelReasonProjectionUnknown:
 		return nil
@@ -421,7 +419,7 @@ type ResidentRefusal struct {
 // reasons so a completed load failure cannot become a prepare/dispatch refusal.
 func validateResidentRefusalReason(r ModelConfigurationReason) error {
 	switch r {
-	case ModelReasonEngineOff, ModelReasonNoFit, ModelReasonPaused, ModelReasonEngineLocked, ModelReasonPausedLocal, ModelReasonEngineOffLocal,
+	case ModelReasonEngineOff, ModelReasonNoFit, ModelReasonPaused, ModelReasonPausedLocal, ModelReasonEngineOffLocal,
 		ModelReasonNotServed, ModelReasonNotInstalled, ModelReasonUnqualified, ModelReasonUnsupportedLoad,
 		ModelReasonSwitchBusy, ModelReasonOperationTimeout, ModelReasonObservationUnknown, ModelReasonProjectionUnknown:
 		return nil

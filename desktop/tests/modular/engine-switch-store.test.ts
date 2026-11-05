@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { customEngine } from './engine-fixtures'
 import type { SwitchChanged, SwitchReceipt, SwitchRequest } from '@/shared/types/engine-switch'
 import type { PreloadServiceTransport } from '@/shared/types/service-bridge'
 import type { NodePolicyDocument } from '@/shared/types/node-policy'
@@ -17,7 +16,6 @@ import {
     watchNodeManagement
 } from '@/ui/stores/node-configuration.store'
 import { useEngineStatusStore } from '@/ui/stores/engine-status.store'
-import { emptyEngineStatus } from '@/shared/utils/engines'
 import { parseEngineSwitchStatus } from '@/electron/service-bridge/engine-switch'
 
 const revision = `e3v1:${'a'.repeat(64)}`
@@ -293,7 +291,6 @@ describe('node-scoped engine switch store', () => {
     })
 
     it.each([
-        { name: 'lock', code: -32013, message: 'engine is locked', label: 'Engine locked' },
         {
             name: 'authoritative pause',
             code: -32011,
@@ -383,32 +380,6 @@ describe('node-scoped engine switch store', () => {
         }
     )
 
-    it('does not submit a known locked target and allows leaving a locked source', async () => {
-        await idle()
-        useEngineStatusStore.setState({
-            statusByNode: new Map([
-                [
-                    'node-a',
-                    new Map([
-                        [customEngine, { ...emptyEngineStatus('node-a', customEngine), locked: true }]
-                    ])
-                ]
-            ])
-        })
-        await store.getState().submit('node-a', 'llamacpp', 'llamacpp-custom')
-        expect(invoke.mock.calls.filter(([channel]) => channel === 'engines:switch')).toHaveLength(
-            0
-        )
-        invoke.mockResolvedValueOnce({ success: true, data: { configurationRevision: revision } })
-        invoke.mockResolvedValueOnce({ success: false, error: 'revision changed', code: -32010 })
-        await store.getState().submit('node-a', 'llamacpp-custom', 'llamacpp')
-        expect(invoke.mock.calls.filter(([channel]) => channel === 'engines:switch')).toEqual([
-            [
-                'engines:switch',
-                expect.objectContaining({ sourceEngine: 'llamacpp-custom', targetEngine: 'llamacpp' })
-            ]
-        ])
-    })
 
     it.each([
         { outcome: 'observed', sequence: 1 },
@@ -1229,7 +1200,6 @@ describe('node-scoped engine switch store', () => {
     )
     it.each([
         [-32012, 'Remote management permission denied'],
-        [-32013, 'Engine locked'],
         [-32011, 'Target refused'],
         [-32010, 'Configuration conflict'],
         [-32602, 'Invalid switch request']

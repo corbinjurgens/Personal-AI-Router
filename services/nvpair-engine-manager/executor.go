@@ -39,10 +39,6 @@ type EngineStatus struct {
 	Running     bool   `json:"running"`
 	Healthy     bool   `json:"healthy"`
 	Port        int    `json:"port,omitempty"`
-	// Locked is the engine's durable lock on this node. Present true or false
-	// is authoritative; nil, omitted on the wire, means lock state is not
-	// available, as from an older target, and is never read as unlocked.
-	Locked *bool `json:"locked,omitempty"`
 	// TerminationVerified is positive physical-stop evidence, never inferred
 	// from running:false or from the absence of a host-platform block.
 	TerminationVerified bool `json:"terminationVerified"`
@@ -67,10 +63,6 @@ type engineState struct {
 	// st.mu is released around probes, and the background health loop
 	// never takes opMu.
 	opMu sync.Mutex
-	// lockMu orders complete lock/unlock commands before mutation admission.
-	// desired.mu is released before waiting for opMu; status reads desired
-	// before st.mu. Ordinary lifecycle commands never take lockMu.
-	lockMu sync.Mutex
 	// contentMu serializes content mutations (delete / pull / copy into the
 	// engine's model store) for this engine, separate from opMu: a model change
 	// must not be blocked by, nor block, an install/start/stop/restart, and

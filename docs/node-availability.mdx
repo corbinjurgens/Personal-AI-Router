@@ -3,26 +3,24 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 */}
 
-# Node availability: pause, resume and engine locks
+# Node availability: pause and resume
 
-A node can take itself out of service, and an engine on a node can be kept from
-starting, without unpairing anything. This page describes what **Pause**,
-**Resume** and the per-engine **lock** do, who may use them, and what a paired
+A node can take itself out of service without unpairing anything.
+This page describes what **Pause** and
+**Resume** do, who may use them, and what a paired
 device sees and gets refused while they are in force. It describes current
 behavior as the Go services implement it; where this page and a component
 README differ, the source wins. [Architecture](architecture.mdx) places these
 rules among the other trust boundaries.
 
-## Three different things
+## Saved intent and availability
 
 | | What it is | Who can set it | What it stops |
 | --- | --- | --- | --- |
 | Saved Off | An engine's ordinary On/Off switch. It records intent. | The local device, or a paired device that has been granted management | Nothing on its own. A granted peer can still start or load into the engine. |
-| Engine lock | A durable per-engine flag, shown as a padlock beside the switch | Only a client on the device that runs the engine | Every start, model load and engine switch into that engine, from anyone |
 | Pause | A node-wide state | A client on the node, or a paired device that has been granted management | Work on this node and peer management other than permitted availability changes |
 
-A lock is stronger than Off, and Pause is stronger than a lock for a paired
-device: when both apply, the pause refusal is the one it receives.
+Saved Off records intent; Pause fences activation and peer management.
 
 ## Pause and Resume
 
@@ -76,7 +74,7 @@ request wins, so a Resume never waits out a pause's drain.
 - Every read: status, settings and policy reads, model files, event streams and
   the node's inventory. Paired devices can still see the node and its models;
   Pause does not remove catalogue models or declared tier aliases.
-- Local configuration: settings, grants, lock and unlock, stop and unload, and
+- Local configuration: settings, grants, stop and unload, and
   manual nodes.
 - Management that this node sends to other nodes.
 
@@ -115,7 +113,7 @@ The terminal interface shows `Paused (local)` or `Paused (peer)`.
 
 Resume saves the node as available, tells the proxy, and then starts the engines
 that the pause stopped. Because their saved intent never changed, only engines
-that are saved On and not locked come back. If the node restarted while paused,
+that are saved On come back. If the node restarted while paused,
 saved-On restoration was skipped, and Resume performs it.
 
 A paused state is saved, so it survives a restart. The proxy learns it before it
@@ -153,52 +151,16 @@ any pending activation or crash relaunch. If the node has not yet been told
 whether it is paused (shortly after an engine manager starts), incoming
 management requests receive HTTP 503 until it is; retry shortly.
 
-## The per-engine local lock
-
-A lock keeps one engine from starting on its node. It exists so an operator can
-reserve an engine for another use and know no paired device can start it.
-
-- It can only be set or cleared by a client on the device that runs the engine.
-  The request names no node or caller, and no peer route reaches it. The desktop
-  shows a padlock beside the engine's switch; on a paired node's row it only
-  reports the state. The terminal interface has no lock key.
-- Locking saves the lock, saves the engine as Off with local origin, cancels
-  starts, model loads and crash relaunches in progress, then stops the engine and
-  verifies it has stopped. If the stop cannot be verified, the lock stays, the
-  engine stays Off, and the request fails with `-32000`; repeating the lock
-  retries the stop.
-- Unlocking removes only the lock. The engine stays Off and does not start.
-- Sleep and idle unload or stop never change a lock.
-- The lock is stored in the engine manager's `engine-state.json` under `locked`.
-  An older program that rewrites that file may discard locks, and downgrading to
-  one is unsupported.
-
-A start, model load or switch into a locked engine is refused with `-32013`
-(`engine_locked`) and the message:
-
-```text
-This engine is locked on this node. Unlock it on this node before starting or loading a model.
-```
-
-This applies to a local client as well as a paired one, and it covers explicit
-starts, restarts, restoration, wake, crash relaunch, settings recovery, switch
-recovery and a restart after an action. While the node is not paused, a locked
-engine still accepts stop, unload, delete and pull from a granted peer, an
-install that does not start it, and settings edits; a restart after those edits
-cannot activate it. A lock
-change is refused with `-32000` while the engine is reserved by an engine switch.
-
-### Which code means what
+## Which code means what
 
 | Code | Meaning | HTTP body `code` |
 | --- | --- | --- |
 | `-32010` | Revision conflict | `policy_conflict` |
 | `-32011` | Local veto: the node is paused, or the node's own Stop cancelled a peer operation | `local_veto` |
 | `-32012` | The target has not granted this device management | `remote_management_denied` |
-| `-32013` | The engine is locked on its node | `engine_locked` |
 
-When more than one applies, the permission check comes first, then the pause,
-then the lock. A local Stop that cancels an accepted peer operation also reports
+When more than one applies, the permission check comes first, then the pause.
+A local Stop that cancels an accepted peer operation also reports
 `-32011`, with this message:
 `<engine> was turned off on the node itself; start it there`. It does not refuse
 later operations.
@@ -208,12 +170,12 @@ later operations.
 A granted peer may start an engine, load a model into a running engine, or
 switch to an engine that is saved Off, whatever the Off origin: local, peer,
 legacy, or no recorded intent. Saved Off is ordinary intent, not a prohibition.
-Only a lock or a pause refuses.
+Pause still refuses activation.
 
 Four limits remain:
 
 - An explicit model load never starts a stopped engine. A load into an engine
-  that is not running fails with its real error, not a lock or pause refusal.
+  that is not running fails with its real error.
 - Restoration after a restart, wake, and automatic model residency still require
   the engine to be saved On. Residency reports `engine-off` for a saved-Off
   engine and does not start it.
@@ -269,10 +231,10 @@ destination:
 - [Architecture](architecture.mdx) for the remote-management grant and the
   trust boundaries.
 - [Managing engines](engine-lifecycle.mdx) for install, start and stop.
-- [Local qualification](local-qualification.mdx) for how pause and lock fence
-  automatic model residency, with the `paused` and `engine-locked` reasons.
+- [Local qualification](local-qualification.mdx) for how pause fences
+  automatic model residency, with the `paused` reason.
 - Component contracts: the broker's availability and pause-fence sections in
   [`nvpair-ui-broker`](../services/nvpair-ui-broker/README.md), the
-  remote-management and lock sections of the engine manager's
+  remote-management sections of the engine manager's
   [spec](../services/nvpair-engine-manager/spec.md), and the paused-node
   routing rule in the [proxy spec](../services/nvpair-proxy/spec.md).

@@ -547,7 +547,7 @@ func (e *Executor) copyCapabilities(engine string) copyCapabilities {
 	return c
 }
 
-// Copy changes content, not engine activation. Saved Off and engine locks are
+// Copy changes content, not engine activation. Saved Off is
 // irrelevant; the existing pause/recovery mutation gates still apply.
 func (e *Executor) copyAdmission() error {
 	if e.switchRecoveryPending.Load() {

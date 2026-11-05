@@ -17,7 +17,6 @@ func engineOwnerWireFixture(t *testing.T) EngineOwnerEvidence {
 	e := EngineOwnerEvidence{
 		ManagerIncarnation: "native-manager",
 		Intent:             Known(EngineOwnerIntent{Revision: revision, EnabledByEngine: map[string]bool{"fake": false}, OffByEngine: map[string]string{"fake": "local"}}),
-		Locks:              Known(EngineOwnerLocks{Revision: revision, LockedByEngine: map[string]bool{"fake": false}}),
 		Universe:           Known([]EngineOwnerUniverseEntry{{Engine: "fake", Registered: true, Supported: Known(true), Installed: Known(false), Running: Known(false), TerminationVerified: Known(true), ModelRoots: Known([]string{}), DataRoots: Known([]string{}), RootsComplete: true}}),
 		StopAuthority:      Known([]EngineOwnerStopAuthority{{Engine: "fake", Scoped: Known(true), Adopted: Known(false), ReclaimPending: Known(false), Reason: "no_live_process"}}),
 		Reservations:       Known(EngineOwnerReservations{Revision: revision, BlocksApply: Known(false), UnsafeCopiesComplete: true, Operations: []EngineOwnerOperation{}}),
@@ -46,7 +45,7 @@ func TestEngineOwnerEvidenceWireRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(data, &fields); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"managerIncarnation", "captureToken", "intent", "locks", "universe", "stopAuthority", "reservations", "complete", "reasons"}
+	want := []string{"managerIncarnation", "captureToken", "intent", "universe", "stopAuthority", "reservations", "complete", "reasons"}
 	if len(fields) != len(want) {
 		t.Fatalf("unexpected response fields: %v", fields)
 	}
@@ -69,7 +68,6 @@ func TestEngineOwnerEvidenceWireRejectsInvalidFacts(t *testing.T) {
 	}
 	test("empty incarnation", func(e *EngineOwnerEvidence) { e.ManagerIncarnation = "" })
 	test("missing intent revision", func(e *EngineOwnerEvidence) { e.Intent.Value.Revision = "" })
-	test("missing locks revision", func(e *EngineOwnerEvidence) { e.Locks.Value.Revision = "" })
 	test("missing reservation revision", func(e *EngineOwnerEvidence) { e.Reservations.Value.Revision = "" })
 	test("duplicate engines", func(e *EngineOwnerEvidence) {
 		entries := append(*e.Universe.Value, (*e.Universe.Value)[0])
@@ -84,11 +82,7 @@ func TestEngineOwnerEvidenceWireRejectsInvalidFacts(t *testing.T) {
 	test("known null roots", func(e *EngineOwnerEvidence) { (*e.Universe.Value)[0].ModelRoots = Known[[]string](nil) })
 	test("complete roots with unknown data", func(e *EngineOwnerEvidence) { (*e.Universe.Value)[0].DataRoots = Observation[[]string]{} })
 	test("missing explicit Off origin", func(e *EngineOwnerEvidence) { delete(e.Intent.Value.OffByEngine, "fake") })
-	test("orphan durable key", func(e *EngineOwnerEvidence) { e.Locks.Value.LockedByEngine["retained"] = false })
-	test("locked peer Off", func(e *EngineOwnerEvidence) {
-		e.Locks.Value.LockedByEngine["fake"] = true
-		e.Intent.Value.OffByEngine["fake"] = "peer"
-	})
+	test("orphan durable key", func(e *EngineOwnerEvidence) { e.Intent.Value.EnabledByEngine["retained"] = true })
 	test("unbounded reason text", func(e *EngineOwnerEvidence) { (*e.StopAuthority.Value)[0].Reason = "raw native command error" })
 	test("scoped process without lifetime", func(e *EngineOwnerEvidence) { (*e.StopAuthority.Value)[0].Reason = "owned_process_lifetime" })
 	test("known zero PID", func(e *EngineOwnerEvidence) {
@@ -143,7 +137,6 @@ func TestEngineOwnerEvidenceWireRejectsAmbiguousShape(t *testing.T) {
 	test("case variant field", strings.Replace(string(data), `"complete":true`, `"Complete":true`, 1))
 	test("case variant nested field", strings.Replace(string(data), `"rootsComplete":true`, `"RootsComplete":true`, 1))
 	test("null saved boolean", strings.Replace(string(data), `"enabledByEngine":{"fake":false}`, `"enabledByEngine":{"fake":null}`, 1))
-	test("null lock boolean", strings.Replace(string(data), `"lockedByEngine":{"fake":false}`, `"lockedByEngine":{"fake":null}`, 1))
 	test("false completeness", strings.Replace(string(data), `"complete":true`, `"complete":false`, 1))
 	test("changed capture content", strings.Replace(string(data), `"native-manager"`, `"replacement-manager"`, 1))
 	// Keep padding inside the object so encoding/json passes it to the decoder.
@@ -169,7 +162,6 @@ func TestEngineOwnerEvidenceCaptureBindsUnknownAndAuthority(t *testing.T) {
 		delete(e.Intent.Value.EnabledByEngine, "fake")
 		delete(e.Intent.Value.OffByEngine, "fake")
 	})
-	test("false lock key presence", func(e *EngineOwnerEvidence) { delete(e.Locks.Value.LockedByEngine, "fake") })
 	test("unknown roots", func(e *EngineOwnerEvidence) {
 		(*e.Universe.Value)[0].RootsComplete = false
 		(*e.Universe.Value)[0].ModelRoots = Observation[[]string]{}
@@ -187,7 +179,6 @@ func TestEngineOwnerEvidenceWireRejectsEncodingOverflow(t *testing.T) {
 	for i := 0; i < MaxStatusBytes/64; i++ {
 		id := fmt.Sprintf("retained-%06d", i)
 		e.Intent.Value.EnabledByEngine[id] = true
-		e.Locks.Value.LockedByEngine[id] = false
 		entries := append(*e.Universe.Value, EngineOwnerUniverseEntry{Engine: id})
 		e.Universe = Known(entries)
 		authority := append(*e.StopAuthority.Value, EngineOwnerStopAuthority{Engine: id, Reason: "unobserved"})
@@ -204,7 +195,6 @@ func TestEngineOwnerEvidenceWireRejectsEncodingOverflow(t *testing.T) {
 func TestEngineOwnerEvidenceKnownEmptyUniverse(t *testing.T) {
 	e := engineOwnerWireFixture(t)
 	e.Intent.Value.EnabledByEngine, e.Intent.Value.OffByEngine = map[string]bool{}, map[string]string{}
-	e.Locks.Value.LockedByEngine = map[string]bool{}
 	e.Universe, e.StopAuthority = Known([]EngineOwnerUniverseEntry{}), Known([]EngineOwnerStopAuthority{})
 	if err := e.Finalize(); err != nil {
 		t.Fatal(err)

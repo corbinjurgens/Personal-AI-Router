@@ -412,7 +412,6 @@ func buildApplyPreviewEvidence(t *testing.T) buildapply.EngineOwnerEvidence {
 	e := buildapply.EngineOwnerEvidence{
 		ManagerIncarnation: "manager",
 		Intent:             buildapply.Known(buildapply.EngineOwnerIntent{Revision: revision, EnabledByEngine: map[string]bool{}, OffByEngine: map[string]string{}}),
-		Locks:              buildapply.Known(buildapply.EngineOwnerLocks{Revision: revision, LockedByEngine: map[string]bool{}}),
 		Universe:           buildapply.Known([]buildapply.EngineOwnerUniverseEntry{}),
 		StopAuthority:      buildapply.Known([]buildapply.EngineOwnerStopAuthority{}),
 		Reservations:       buildapply.Known(buildapply.EngineOwnerReservations{Revision: revision, BlocksApply: buildapply.Known(false), UnsafeCopiesComplete: true, Operations: []buildapply.EngineOwnerOperation{}}),
@@ -575,7 +574,6 @@ func TestBuildApplyOwnerEvidencePrivateChangeRefusesPreview(t *testing.T) {
 		})
 	}
 	test("intent revision", func(e *buildapply.EngineOwnerEvidence) { e.Intent.Value.Revision = "sha256:" + strings.Repeat("b", 64) })
-	test("lock revision", func(e *buildapply.EngineOwnerEvidence) { e.Locks.Value.Revision = "sha256:" + strings.Repeat("b", 64) })
 	test("reservation revision", func(e *buildapply.EngineOwnerEvidence) {
 		e.Reservations.Value.Revision = "sha256:" + strings.Repeat("b", 64)
 	})

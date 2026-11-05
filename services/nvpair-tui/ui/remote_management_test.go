@@ -411,7 +411,7 @@ func TestPermissionControlsFitShortTerminal(t *testing.T) {
 			if renderedRows(text) > 9 {
 				t.Fatalf("choice uses %d rows: %s", renderedRows(text), text)
 			}
-			const explanation = "This choice applies to the device you are using. Reading status and using models this device serves remain available. Engine locks and node pause still apply."
+			const explanation = "This choice applies to the device you are using. Reading status and using models this device serves remain available. Node pause still applies."
 			if !strings.Contains(strings.Join(strings.Fields(text), " "), explanation) || !strings.Contains(text, "ready") {
 				t.Fatalf("consent text or status hidden: %s", text)
 			}

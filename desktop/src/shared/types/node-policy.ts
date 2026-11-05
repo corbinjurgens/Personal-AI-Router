@@ -138,8 +138,6 @@ export interface ModelConfigurationEntry extends NodeModelReference {
         | 'no-fit'
         /** Paused by either origin. */
         | 'paused'
-        /** Locked on its own node. */
-        | 'engine-locked'
         /** Older producers' reasons, still readable. */
         | 'paused-local'
         | 'engine-off-local'

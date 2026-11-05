@@ -152,7 +152,7 @@ Only the authoritative `completed` receipt reports completion. Intermediate
 acceptance, source Off and target readiness are not success. Saved intent,
 runtime observations and verified termination remain separate, including the
 existing local/peer saved-Off origin labels. Permission denial (`-32012`), local
-veto (`-32011`), engine lock (`-32013`, kind `engine_locked`) and configuration
+veto (`-32011`) and configuration
 conflict (`-32010`) are distinct. Remote
 permission must be current; local pause/Off remains available during switching.
 
@@ -409,16 +409,9 @@ authoritative.
 
 Remote cluster support includes status, install, start, stop, model pull, and
 remote model load, unload (eject), and delete via the `ec` surface. Uninstall
-and update remain local-only. A refusal of any of these with `-32011` or
-`-32013` is reported with the neutral veto or the lock explanation plus the
+and update remain local-only. A refusal of any of these with `-32011`
+is reported with the neutral veto plus the
 target's own message, and offers no retry.
-
-`EngineStatusData.locked` is optional; absent means unavailable, never
-unlocked. `engine:set-lock` is local-only, reached through the `setLock` engine
-command for this device's node. The engine row shows the lock beside the On/Off
-switch: a button on this device, a read-only state on a peer. A known locked
-engine cannot be started from its row, and the lock command is covered by the
-centralized pending state until the engine's status reports a different lock.
 
 Server port, proxy port, and engine arguments are one authoritative record owned
 by the node running the engine, read and written through the broker's

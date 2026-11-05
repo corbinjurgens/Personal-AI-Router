@@ -115,7 +115,7 @@ export default function BuildApplyPreview({
         impact.interruptionPolicy.drainTimeoutSeconds.known &&
         impact.restorePolicy.remainPaused &&
         impact.restorePolicy.requireLocalResume &&
-        impact.restorePolicy.preserveIntentAndLocks &&
+        impact.restorePolicy.preserveIntent &&
         impact.restorePolicy.preserveNewerPause &&
         !impact.restorePolicy.automaticRollback &&
         impact.refusals.length === 0
@@ -205,8 +205,7 @@ export default function BuildApplyPreview({
                                       {engine.engine}: active {observationLabel(engine.active)},
                                       running {observationLabel(engine.running)}, loaded models{' '}
                                       {observationLabel(engine.loadedModels)}, saved intent{' '}
-                                      {observationLabel(engine.desiredState)}, locked{' '}
-                                      {observationLabel(engine.locked)}, scoped stop authority{' '}
+                                      {observationLabel(engine.desiredState)}, scoped stop authority{' '}
                                       {observationLabel(engine.scopedStopAuthority)}
                                   </div>
                               ))
@@ -240,7 +239,7 @@ export default function BuildApplyPreview({
                         Expected stopEngines:{' '}
                         {observationLabel(impact.expectedSettings.stopEngines)}; unloadModels:{' '}
                         {observationLabel(impact.expectedSettings.unloadModels)}. All other policy,
-                        settings, intent and locks must be preserved. Build applied; node remains
+                        settings and intent must be preserved. Build applied; node remains
                         paused. Ordinary local Resume is required. A pre-existing or newer Pause is
                         preserved. No automatic rollback.
                     </div>

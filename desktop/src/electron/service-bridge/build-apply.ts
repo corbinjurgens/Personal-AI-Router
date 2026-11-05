@@ -91,7 +91,6 @@ function fences(value: JsonValue | undefined): BuildApplyFences {
         'policyRevision',
         'settingsRevision',
         'intentRevision',
-        'locksRevision',
         'availabilityRevision'
     ])
     return {
@@ -102,7 +101,6 @@ function fences(value: JsonValue | undefined): BuildApplyFences {
         policyRevision: observed(row.policyRevision, text),
         settingsRevision: observed(row.settingsRevision, text),
         intentRevision: observed(row.intentRevision, text),
-        locksRevision: observed(row.locksRevision, text),
         availabilityRevision: observed(row.availabilityRevision, text)
     }
 }
@@ -122,7 +120,6 @@ function engine(value: JsonValue): BuildApplyEngineFact {
         running: observed(row.running, flag),
         loadedModels: observed(row.loadedModels, value => list(value, text)),
         desiredState: observed(row.desiredState, text),
-        locked: observed(row.locked, flag),
         scopedStopAuthority: observed(row.scopedStopAuthority, flag)
     }
 }
@@ -181,7 +178,6 @@ function impact(value: JsonValue | undefined): BuildApplyImpact {
             policyDigest: observed(settings.policyDigest, text),
             engineSettingsDigest: observed(settings.engineSettingsDigest, text),
             intentDigest: observed(settings.intentDigest, text),
-            locksDigest: observed(settings.locksDigest, text),
             stopEngines: observed(settings.stopEngines, flag),
             unloadModels: observed(settings.unloadModels, flag)
         },
@@ -199,7 +195,7 @@ function impact(value: JsonValue | undefined): BuildApplyImpact {
         restorePolicy: {
             remainPaused: flag(restore.remainPaused),
             requireLocalResume: flag(restore.requireLocalResume),
-            preserveIntentAndLocks: flag(restore.preserveIntentAndLocks),
+            preserveIntent: flag(restore.preserveIntent),
             preserveNewerPause: flag(restore.preserveNewerPause),
             automaticRollback: flag(restore.automaticRollback)
         },

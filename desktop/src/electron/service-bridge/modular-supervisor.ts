@@ -17,12 +17,10 @@ import {
 import { createStructuredLogger } from '@/shared/utils/log'
 import getErrorString from '@/shared/utils/get-error-string'
 import {
-    ENGINE_LOCKED_CODE,
     INVALID_PARAMS_CODE,
     LOCAL_VETO_CODE,
     POLICY_CONFLICT_CODE,
     REMOTE_MANAGEMENT_DENIED_CODE,
-    engineLockedMessage,
     localVetoMessage
 } from '@/shared/constants/service-errors'
 import { currentPlatform } from '@/shared/utils/platform'
@@ -228,7 +226,7 @@ const MAX_REFUSAL_DETAIL_LENGTH = 1024
 
 /**
  * The explanation for a paired node's typed refusal of `action`, or undefined
- * for any other failure. A lock refusal names the lock. A local veto stays
+ * for any other failure. A local veto stays
  * neutral: -32011 alone cannot tell a pause from an older target's saved Off or
  * from a local stop that cancelled the operation. The target's own message
  * follows, bounded. Retrying from here cannot succeed until the target lifts it.
@@ -236,11 +234,7 @@ const MAX_REFUSAL_DETAIL_LENGTH = 1024
 function remoteRefusalMessage(err: unknown, action: string): string | undefined {
     if (!(err instanceof JsonRpcResponseError)) return undefined
     const explanation =
-        err.code === ENGINE_LOCKED_CODE
-            ? engineLockedMessage(action)
-            : err.code === LOCAL_VETO_CODE
-              ? localVetoMessage(action)
-              : undefined
+        err.code === LOCAL_VETO_CODE ? localVetoMessage(action) : undefined
     if (explanation === undefined) return undefined
     return `${explanation} Target: ${err.message.slice(0, MAX_REFUSAL_DETAIL_LENGTH)}`
 }
@@ -522,7 +516,6 @@ class ModularSupervisor {
         this.brokerSessionGeneration++
         getModularBridgeState().reconcileModelCopies([])
         getModularBridgeState().applyEngineIntent(null)
-        getModularBridgeState().invalidateEngineLocks()
         getModularBridgeState().invalidateModelObservations()
         this.shuttingDown = false
         this.performance.reset()
@@ -620,7 +613,6 @@ class ModularSupervisor {
         this.brokerSessionGeneration++
         getModularBridgeState().reconcileModelCopies([])
         getModularBridgeState().applyEngineIntent(null)
-        getModularBridgeState().invalidateEngineLocks()
         getModularBridgeState().invalidateModelObservations()
         await this.performance.stop()
         stopNodeInfoPoller()
@@ -969,7 +961,6 @@ class ModularSupervisor {
         this.brokerSessionGeneration++
         getModularBridgeState().reconcileModelCopies([])
         getModularBridgeState().applyEngineIntent(null)
-        getModularBridgeState().invalidateEngineLocks()
         getModularBridgeState().invalidateModelObservations()
         this.performance.reset()
         this.brokerReady = false
@@ -1025,7 +1016,6 @@ class ModularSupervisor {
                 this.brokerSessionGeneration++
                 getModularBridgeState().reconcileModelCopies([])
                 getModularBridgeState().applyEngineIntent(null)
-                getModularBridgeState().invalidateEngineLocks()
                 getModularBridgeState().invalidateModelObservations()
                 this.performance.reset()
                 this.brokerReady = false
@@ -2066,7 +2056,6 @@ class ModularSupervisor {
             getModularBridgeState().reconcileModelCopies([])
             this.modelWorkerGeneration++
             getModularBridgeState().applyEngineIntent(null)
-            getModularBridgeState().invalidateEngineLocks()
             getModularBridgeState().invalidateModelObservations()
             void this.hydrateEngineIntent()
             void this.hydrateModels()
@@ -2371,7 +2360,6 @@ class ModularSupervisor {
                     POLICY_CONFLICT_CODE,
                     LOCAL_VETO_CODE,
                     REMOTE_MANAGEMENT_DENIED_CODE,
-                    ENGINE_LOCKED_CODE,
                     -32601
                 ].includes(err.code)
             state.finishModelCopy(

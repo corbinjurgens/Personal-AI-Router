@@ -98,39 +98,18 @@ func TestOBOffOrigin(t *testing.T) {
 		c.assertIntent(t, want)
 	})
 
-	t.Run("peer Off preserves local origin and explicit lock", func(t *testing.T) {
+	t.Run("peer Off preserves local origin", func(t *testing.T) {
 		f := newPolicyJointFixture(t, jointAvailable)
 		c := subscribeOBIntent(t, f.target)
 		c.call(t, "engine:stop", map[string]string{"engine": "llamacpp"})
 		want := obIntent(false, map[string]engineintent.Origin{"llamacpp": engineintent.Local})
 		c.assertIntent(t, want)
-		// A live HTTP 503 sink proves neither health nor physical shutdown.
-		// Close the owned probe listener so locking verifies a stopped engine.
-		f.inert.Close()
-		c.call(t, "engine:set-lock", map[string]any{"engine": "llamacpp", "locked": true})
 		f.http(t, "/v1/engines/stop", map[string]any{"engine": "llamacpp"}, http.StatusOK)
 		c.assertIntent(t, want)
 		assertOBStoredIntent(t, filepath.Join(jointAppDir(f.base), "engine-bin", "engine-state.json"), "llamacpp", false, engineintent.Local)
-		body := f.http(t, "/v1/engines/start", map[string]any{"engine": "llamacpp"}, http.StatusConflict)
-		var refusal struct {
-			Code  string `json:"code"`
-			Error string `json:"error"`
-		}
-		if err := json.Unmarshal(body, &refusal); err != nil {
-			t.Fatalf("decode peer start refusal: %v", err)
-		}
-		const locked = "This engine is locked on this node. Unlock it on this node before starting or loading a model."
-		if refusal.Code != "engine_locked" || refusal.Error != locked {
-			t.Fatalf("peer start refusal = %+v, want exact engine lock", refusal)
-		}
-		response := callRPC(t, f.origin.in, f.origin.msgs, "engine:remote-start", map[string]any{"node": "policy-joint-target", "engine": "llamacpp"}, 30*time.Second)
-		if response.Error == nil || response.Error.Code != -32013 || response.Error.Message != "remote /v1/engines/start: HTTP 409: "+locked || len(response.Result) != 0 {
-			t.Fatalf("peer start RPC refusal = %+v, want exact engine lock", response.Error)
-		}
-		assertOBIntent(t, decodeOBIntent(t, c.call(t, "engine:intent", nil)), want)
 	})
 
-	t.Run("unlocked saved local Off permits peer start", func(t *testing.T) {
+	t.Run("saved local Off permits peer start", func(t *testing.T) {
 		f, _, newClient := newSwitchClientFixture(t)
 		c := subscribeOBIntent(t, f.p)
 		pid := f.pid(t, "llamacpp-custom")

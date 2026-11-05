@@ -13,8 +13,8 @@ Set supplies canonical decimal byte strings for exactly `configurationPools`:
 target inspection with current-first `memoryProfiles` (at most 8) and optional
 `memoryProfilesUnavailable`. A stale key returns `-32010`: reinspect before
 retrying. These advisory records do not change estimates or routing budgets.
-Remote recording requires the target's management grant and unlocked engine and
-is refused while paused; local recording remains allowed while paused.
+Remote recording requires the target's management grant and is refused while
+paused; local recording remains allowed while paused.
 
 `window.windowApi.buildApply` exposes `choosePreview`, `start`, `status` and
 `onChanged`. Electron owns the native picker and GUI facts; the service owns
@@ -139,8 +139,8 @@ revision, retains unsaved edits across pushes, and clears them on target
 changes. Existing CAS conflicts, unsupported-target errors, management denial,
 pause vetoes and uncertain-save readback remain explicit; no automatic retry
 or second save path is added. The target can refuse changes to a binding
-reserved by automatic preparation as busy. Locks and pause retain their
-target-local unlock/Resume requirements. Existing engine switch controls show
+reserved by automatic preparation as busy. Pause retains its
+Resume requirements. Existing engine switch controls show
 automatic receipt phases and errors; the binding editor owns no progress UI.
 
 ### Model copy
@@ -355,13 +355,7 @@ the desktop; the destination's Go service fetches the source artifacts.
   engine-status store subscribes before fetching and clears intent on teardown.
   Intent and origin are independent of runtime lifecycle status.
 - `getInitialState()` returns engine statuses, models, active progress, and available
-  updates. `EngineStatusData.locked` is the engine's durable lock on its owning
-  node: `true` or `false` is authoritative, and an absent field means the lock
-  state is unavailable, as from an older target. Absent is never unlocked; it
-  stays absent through facts, single operation results, pending overlays,
-  refresh and invalidation. A disconnect or a broker or engine-manager restart
-  makes every reported lock unknown again until a new report arrives. Current
-  engine-managers do not report it yet.
+  updates.
 - Model snapshots carry `EngineModels.downloadState` (the target's full versioned
   download snapshot) and `downloadStateCurrent`. Each `ModelItem` can carry its
   exact `downloadState` entry and the same currentness. Rows are the union of
@@ -393,17 +387,6 @@ the desktop; the destination's Go service fetches the source artifacts.
   catalog retry; no retry, cleanup, or engine start happens automatically.
   Pending pulls yield only to a new matching target download identity, never to
   inventory presence, unrelated progress, or a previous download's terminal event.
-- The `engine:command` shape `{ command: 'setLock', engineType, nodeId, locked }`
-  maps to the local `engine:set-lock`. The bridge sends it only when `nodeId` is
-  this device's own node, and refuses any other target before sending with
-  `Engine locks can only be changed on the device running the engine.` The
-  renderer sends it with `engines.setLock(engineType, nodeId, locked)`, covered
-  by the centralized pending state until the engine's status reports a
-  different `locked` (or an error for that engine arrives), even when the
-  process status did not change. The engine row shows the lock beside the
-  On/Off switch: a button on this device, a read-only state on a peer, and
-  `Lock status unavailable` when the field is absent. A known locked engine
-  cannot be started from its row.
 - `toggle`, `install`, `uninstall`, and `update` manage engine lifecycle.
 - `pullModel`, `loadModel`, `unloadModel`, `deleteModel`, and
   `setModelExpiry` manage models.
@@ -452,8 +435,7 @@ Other clients' receipts are observed activity. Local pause/Off remains available
 The controls show node/request identity, sequence, phase, typed error and
 `recoveryRequired`, with saved intent, timestamped observations and termination
 evidence separately. Accepted, source-off and target-ready are not completed.
-Remote permission denial (`-32012`), local veto (`-32011`), engine lock
-(`-32013`, receipt kind `engine_locked`) and configuration conflict (`-32010`)
+Remote permission denial (`-32012`), local veto (`-32011`) and configuration conflict (`-32010`)
 remain distinct; denial refreshes permission and retains the draft. Permission
 changes belong on the target device.
 
@@ -612,12 +594,12 @@ transport resolves to the envelope, because an Error crossing the context
 bridge keeps only its message; the renderer's transport
 (`src/ui/api/service-transport.ts`) rejects a failure with a `ServiceCallError`
 whose `code` callers classify by, for example `-32010` for a policy conflict,
-`-32011` for the local veto and `-32013` for an engine locked on its node.
+`-32011` for the local veto.
 `-32011` alone does not establish a pause: an older target's saved Off and a
 local stop that cancelled the operation use it too, so `localVetoMessage` stays
 neutral. Electron main reports a remote start, stop, install, pull, load, unload
-or delete refused with `-32011` or `-32013` as `localVetoMessage` or
-`engineLockedMessage` followed by the target's own message, bounded, without a
+or delete refused with `-32011` as `localVetoMessage`
+followed by the target's own message, bounded, without a
 retry action.
 
 ## Subscription lifecycle

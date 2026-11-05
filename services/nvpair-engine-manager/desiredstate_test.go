@@ -6,6 +6,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -704,5 +705,57 @@ func TestDeclinedAdoptedStopStillPersistsOffIntent(t *testing.T) {
 	}
 	if st, err := fresh.Status("fake"); err != nil || st.Running {
 		t.Fatalf("declined-OFF engine was restarted: status=%+v err=%v", st, err)
+	}
+}
+
+func TestDesiredStateLoadsOldDocumentAndSaveDropsObsoleteField(t *testing.T) {
+	store := newDesiredStateStore(t.TempDir())
+	document := []byte(`{"engines":{"on":true,"local-off":false,"peer-off":false},"offBy":{"local-off":"local","peer-off":"peer"},"allocatedPorts":{"on":23456},"locked":{"on":true,"local-off":true,"removed":false}}`)
+	if err := os.WriteFile(store.path, document, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.snapshot([]string{"on", "local-off", "peer-off"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := engineintent.Snapshot{
+		EnabledByEngine: map[string]bool{"on": true, "local-off": false, "peer-off": false},
+		OffByEngine:     map[string]engineintent.Origin{"local-off": "local", "peer-off": "peer"},
+	}
+	if !reflect.DeepEqual(snapshot, want) {
+		t.Fatalf("old document intent = %+v, want %+v", snapshot, want)
+	}
+	unchanged, err := os.ReadFile(store.path)
+	if err != nil || !bytes.Equal(unchanged, document) {
+		t.Fatalf("load rewrote old document: %s, %v", unchanged, err)
+	}
+	if _, err := store.ownerEvidence(); err == nil || !strings.Contains(err.Error(), `unrecognized desired engine evidence field "locked"`) {
+		t.Fatalf("private evidence did not refuse obsolete field: %v", err)
+	}
+	// Use the existing intent save path; no migration or compatibility reader.
+	if err := store.set("on", true, intentLocal); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(store.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := fields["locked"]; present {
+		t.Fatal("intent save retained obsolete field")
+	}
+	after, err := store.snapshot([]string{"on", "local-off", "peer-off"})
+	if err != nil || !reflect.DeepEqual(after, want) {
+		t.Fatalf("save changed remaining intent: %+v, %v", after, err)
+	}
+	state, err := store.load()
+	if err != nil || state.AllocatedPorts["on"] != 23456 {
+		t.Fatalf("save changed allocated endpoint: %+v, %v", state, err)
+	}
+	if _, err := store.ownerEvidence(); err != nil {
+		t.Fatalf("saved document did not restore strict evidence: %v", err)
 	}
 }

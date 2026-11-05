@@ -390,9 +390,6 @@ func (m *Manager) handleMessage(ctx context.Context, msg *Message) {
 	case "engine:set-port":
 		go m.runSetPort(ctx, msg)
 
-	case setLockMethod:
-		m.runSetLock(msg)
-
 	case "internal:set-reserved-port":
 		var p struct {
 			Port int `json:"port"`

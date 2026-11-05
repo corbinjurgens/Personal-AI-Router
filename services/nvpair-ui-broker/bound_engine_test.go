@@ -64,8 +64,8 @@ func newBoundHarness(t *testing.T, sourceRunning, targetRunning bool) *boundHarn
 			}
 			h.mu.Unlock()
 			return map[string]any{"engines": []map[string]any{
-				{"engine": "llamacpp", "installed": true, "running": source, "healthy": source, "locked": false},
-				{"engine": "llamacpp-custom", "installed": true, "running": target, "healthy": target, "locked": false},
+				{"engine": "llamacpp", "installed": true, "running": source, "healthy": source},
+				{"engine": "llamacpp-custom", "installed": true, "running": target, "healthy": target},
 			}}, ""
 		case "engine:models":
 			models := []string{}
@@ -426,15 +426,12 @@ func TestBoundEnginePeerAuthorityChangesBeforeAcceptance(t *testing.T) {
 	})
 }
 
-func TestBoundEngineRefusesLockedAndAuthUnknown(t *testing.T) {
-	test := func(name string, locked, authFailure bool, wantReason string) {
+func TestBoundEngineRefusesAuthUnknown(t *testing.T) {
+	test := func(name string, authFailure bool, wantReason string) {
 		t.Run(name, func(t *testing.T) {
 			h := newBoundHarness(t, false, true)
 			base := h.engine.answer
 			h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
-				if locked && method == "engine:get-installed" {
-					return map[string]any{"engines": []map[string]any{{"engine": "llamacpp-custom", "installed": true, "running": true, "healthy": true, "locked": true}}}, ""
-				}
 				if authFailure && method == "engine:models" {
 					return nil, "native authentication secret must not escape"
 				}
@@ -450,8 +447,8 @@ func TestBoundEngineRefusesLockedAndAuthUnknown(t *testing.T) {
 			requireNoBoundEffects(t, h)
 		})
 	}
-	test("locked target", true, false, "engine-locked")
-	test("model authentication unavailable", false, true, "model-unavailable")
+
+	test("model authentication unavailable", true, "model-unavailable")
 }
 
 func TestBoundEngineWorkerMethodsAreNotPublic(t *testing.T) {

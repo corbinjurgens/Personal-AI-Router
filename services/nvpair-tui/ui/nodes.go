@@ -2183,7 +2183,7 @@ func (v *nodesView) View() string {
 		}
 		return ansi.Wrap(joinLines(v.joinPrompt(), "Approve request\n"+v.joinApprovalID,
 			"Remote management of this admitting device (tab to choose)", mark,
-			"Status and inference remain available. Engine locks and pause still apply.",
+			"Status and inference remain available. Pause still applies.",
 			"enter to approve; esc to cancel"), max(1, v.width), "")
 	}
 

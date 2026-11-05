@@ -121,7 +121,7 @@ func TestBuildApplyProcess(t *testing.T) {
 	assertSaved := func(t *testing.T) {
 		t.Helper()
 		if !reflect.DeepEqual(savedBefore, captureSaved(t)) {
-			t.Fatal("refusal changed private saved policy, settings, intent or locks")
+			t.Fatal("refusal changed private saved policy, settings or intent")
 		}
 	}
 	status := func(id string) buildapply.Result[buildapply.BuildApplyStatus] {

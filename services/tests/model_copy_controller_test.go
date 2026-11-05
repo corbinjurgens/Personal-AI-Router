@@ -470,11 +470,11 @@ func newControllerCopyFixture(t *testing.T, descriptorEngines ...string) *contro
 			rt := map[string]any{"bin": absent, "port": 0}
 			jointWriteJSON(t, filepath.Join(jointAppDir(n.base), "engines", name+".json"), privateFixtureManifest(t, name, filepath.Join(n.base, "absent-models", name), absent, rt))
 		}
-		// Known Off and locked also establish that COPY does not activate an engine.
+		// Known Off also establishes that COPY does not activate an engine.
 		if err := os.MkdirAll(filepath.Join(jointAppDir(n.base), "engine-bin"), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		task1WriteJSON(t, filepath.Join(jointAppDir(n.base), "engine-bin", "engine-state.json"), map[string]any{"engines": map[string]bool{"llamacpp": false}, "locked": map[string]bool{"llamacpp": true}})
+		task1WriteJSON(t, filepath.Join(jointAppDir(n.base), "engine-bin", "engine-state.json"), map[string]any{"engines": map[string]bool{"llamacpp": false}})
 		facades := map[string]int{}
 		for _, engine := range engines.All() {
 			facades[engine.Name] = allocatePrivateCopyPort(t)
@@ -808,7 +808,6 @@ func (f *controllerCopyFixture) assertController(t *testing.T) {
 			Engines []struct {
 				Engine  string `json:"engine"`
 				Running bool   `json:"running"`
-				Locked  *bool  `json:"locked"`
 			} `json:"engines"`
 		}
 		task2Decode(t, manager.call(t, "engine:get-installed", nil).Result, &installed)
@@ -823,9 +822,6 @@ func (f *controllerCopyFixture) assertController(t *testing.T) {
 		for _, engine := range installed.Engines {
 			if engine.Running {
 				t.Fatalf("COPY activated %s", engine.Engine)
-			}
-			if engine.Engine == "llamacpp" && (engine.Locked == nil || !*engine.Locked) {
-				t.Fatal("COPY lost the durable local engine lock")
 			}
 		}
 	}

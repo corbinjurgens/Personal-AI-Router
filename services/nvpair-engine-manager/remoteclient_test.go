@@ -49,7 +49,6 @@ func TestRemoteSettingLockedExactWireClassification(t *testing.T) {
 		{"policy_conflict", -32010},
 		{"local_veto", -32011},
 		{"remote_management_denied", -32012},
-		{"engine_locked", -32013},
 	} {
 		test(c.wire, http.StatusConflict, string(mustRemoteSettingJSON(t, codedBody{Code: c.wire, Error: "inference settings are locked on the target device"})), c.code)
 	}

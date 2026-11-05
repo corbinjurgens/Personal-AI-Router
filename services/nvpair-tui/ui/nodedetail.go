@@ -1930,10 +1930,6 @@ func (d *nodeDetail) lifecycle(engine *engineStatus, op string) tea.Cmd {
 		d.status.error("%s is only available on the machine running the engine", spec.what)
 		return nil
 	}
-	if (op == "start" || op == "restart") && engine.locked() {
-		d.status.error("%s", engineLockedMessage)
-		return nil
-	}
 	d.status.busy("%s %s...", spec.what, engine.label())
 	return d.own(engineCmd(d.client, d.nodeArg(), engine.Engine, spec.method, op, spec.what))
 }
@@ -1972,23 +1968,9 @@ func (d *nodeDetail) downloadFromCatalog(engine, model string) tea.Cmd {
 // declare, and says whether it did. An engine with no descriptor here keeps
 // the operations already offered; its own engine-manager decides them.
 func (d *nodeDetail) refuseModelOp(engine string, act modelAction) bool {
-	if act.op == engines.OperationLoad && d.engineLocked(engine) {
-		d.status.error("%s", engineLockedMessage)
-		return true
-	}
 	if err := d.descriptors.unsupported(engine, act); err != nil {
 		d.status.error("%s", err)
 		return true
-	}
-	return false
-}
-
-// engineLocked reports whether the node reported this engine as locked.
-func (d *nodeDetail) engineLocked(engine string) bool {
-	for _, e := range d.engines {
-		if e.Engine == engine {
-			return e.locked()
-		}
 	}
 	return false
 }
@@ -2257,11 +2239,6 @@ func (d *nodeDetail) refreshEngines() {
 			port = strconv.Itoa(e.Port)
 		}
 		row := table.Row{e.label(), yesNo(e.Installed), yesNo(e.Running), yesNo(e.Healthy), port}
-		// The lock goes first: the engine column is narrow, and a clipped cell
-		// must still tell a locked engine from one that is only saved Off.
-		if e.locked() {
-			row[0] += " (locked on this node)"
-		}
 		// Saved Off reports intent without deriving it from runtime state.
 		if enabled, present := d.intent.EnabledByEngine[e.Engine]; !d.remote() && present && !enabled {
 			switch d.intent.OffByEngine[e.Engine] {

@@ -118,7 +118,6 @@ type Fences struct {
 	PolicyRevision       Observation[string] `json:"policyRevision"`
 	SettingsRevision     Observation[string] `json:"settingsRevision"`
 	IntentRevision       Observation[string] `json:"intentRevision"`
-	LocksRevision        Observation[string] `json:"locksRevision"`
 	AvailabilityRevision Observation[string] `json:"availabilityRevision"`
 }
 type EngineFact struct {
@@ -127,7 +126,6 @@ type EngineFact struct {
 	Running             Observation[bool]     `json:"running"`
 	LoadedModels        Observation[[]string] `json:"loadedModels"`
 	DesiredState        Observation[string]   `json:"desiredState"`
-	Locked              Observation[bool]     `json:"locked"`
 	ScopedStopAuthority Observation[bool]     `json:"scopedStopAuthority"`
 }
 type ModelOperation struct {
@@ -147,7 +145,6 @@ type ExpectedSettings struct {
 	PolicyDigest         Observation[string] `json:"policyDigest"`
 	EngineSettingsDigest Observation[string] `json:"engineSettingsDigest"`
 	IntentDigest         Observation[string] `json:"intentDigest"`
-	LocksDigest          Observation[string] `json:"locksDigest"`
 	StopEngines          Observation[bool]   `json:"stopEngines"`
 	UnloadModels         Observation[bool]   `json:"unloadModels"`
 }
@@ -160,11 +157,11 @@ type InterruptionPolicy struct {
 	IncludesWorkBeforeFence bool                             `json:"includesWorkBeforeFence"`
 }
 type RestorePolicy struct {
-	RemainPaused           bool `json:"remainPaused"`
-	RequireLocalResume     bool `json:"requireLocalResume"`
-	PreserveIntentAndLocks bool `json:"preserveIntentAndLocks"`
-	PreserveNewerPause     bool `json:"preserveNewerPause"`
-	AutomaticRollback      bool `json:"automaticRollback"`
+	RemainPaused       bool `json:"remainPaused"`
+	RequireLocalResume bool `json:"requireLocalResume"`
+	PreserveIntent     bool `json:"preserveIntent"`
+	PreserveNewerPause bool `json:"preserveNewerPause"`
+	AutomaticRollback  bool `json:"automaticRollback"`
 }
 type Refusal struct {
 	Code   string `json:"code"`
@@ -362,7 +359,7 @@ func (o BuildApplyOperation) validate() error {
 	for _, value := range []Observation[string]{
 		o.Fences.RuntimeGeneration, o.Fences.ServiceInstance, o.Fences.BrokerGeneration,
 		o.Fences.ManagerIncarnation, o.Fences.PolicyRevision, o.Fences.SettingsRevision,
-		o.Fences.IntentRevision, o.Fences.LocksRevision, o.Fences.AvailabilityRevision,
+		o.Fences.IntentRevision, o.Fences.AvailabilityRevision,
 	} {
 		if !validObservation(value, func(value string) bool { return responseText(value, MaxPathBytes) }) {
 			return errors.New("invalid build apply fence")
@@ -419,7 +416,7 @@ func (f *Fences) UnmarshalJSON(data []byte) error {
 	var value wire
 	if err := decodeResponse(data, &value,
 		"runtimeGeneration", "serviceInstance", "brokerGeneration", "managerIncarnation",
-		"policyRevision", "settingsRevision", "intentRevision", "locksRevision", "availabilityRevision"); err != nil {
+		"policyRevision", "settingsRevision", "intentRevision", "availabilityRevision"); err != nil {
 		return err
 	}
 	*f = Fences(value)
@@ -719,7 +716,7 @@ func knownFences(f Fences) bool {
 	for _, value := range []Observation[string]{
 		f.RuntimeGeneration,
 		f.ServiceInstance, f.BrokerGeneration, f.ManagerIncarnation, f.PolicyRevision,
-		f.SettingsRevision, f.IntentRevision, f.LocksRevision, f.AvailabilityRevision,
+		f.SettingsRevision, f.IntentRevision, f.AvailabilityRevision,
 	} {
 		if !value.Known || value.Value == nil || len(*value.Value) == 0 || len(*value.Value) > 128 ||
 			strings.ContainsAny(*value.Value, "\x00\r\n") {

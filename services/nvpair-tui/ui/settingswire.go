@@ -19,8 +19,6 @@ func commandFailure(err error) string {
 	var refusal *rpc.RPCError
 	if errors.As(err, &refusal) {
 		switch refusal.Code {
-		case -32013:
-			return fmt.Sprintf("engine locked (%d): %s", refusal.Code, refusal.Message)
 		case -32012:
 			return fmt.Sprintf("remote management denied (%d): %s", refusal.Code, refusal.Message)
 		case -32011:

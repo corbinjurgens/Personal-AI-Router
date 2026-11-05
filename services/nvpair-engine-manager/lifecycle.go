@@ -110,7 +110,7 @@ func (e *Executor) Start(ctx context.Context, engine string) error {
 
 // StartWith is Start with per-call overrides. The overrides are not
 // persisted — a service restart reverts to the manifest. A paired node's start
-// rechecks target pause and lock after taking the lifecycle lock. Saved Off
+// rechecks target pause after taking the lifecycle lock. Saved Off
 // alone does not prohibit a fresh explicit start.
 func (e *Executor) StartWith(ctx context.Context, engine string, opts startOpts) error {
 	var done func()

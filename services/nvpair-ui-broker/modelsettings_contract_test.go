@@ -88,7 +88,7 @@ func TestModelSettingsStatedMemoryLocalPausedEnvelope(t *testing.T) {
 	}
 }
 
-func TestModelSettingsStatedMemoryRemoteEngineLock(t *testing.T) {
+func TestModelSettingsStatedMemoryRemoteWorkerRefusal(t *testing.T) {
 	for _, method := range []string{"set-stated-memory", "clear-stated-memory"} {
 		t.Run(method, func(t *testing.T) {
 			b := &Broker{nodeID: "target", clusterDir: filepath.Join(t.TempDir(), "cluster")}
@@ -120,10 +120,10 @@ func TestModelSettingsStatedMemoryRemoteEngineLock(t *testing.T) {
 					return
 				}
 				if !envelope.RemoteMemoryRecord || envelope.NativeInitAllowed {
-					done <- fmt.Errorf("remote lock owner bypassed")
+					done <- fmt.Errorf("remote memory authorization envelope bypassed")
 					return
 				}
-				done <- codec.RespondError(msg.ID, -32013, "Engine is locked on the target device.")
+				done <- codec.RespondError(msg.ID, -32012, "Remote management is disabled on the target device.")
 			}()
 			set := modelconfig.SetStatedMemoryRequest{Engine: "llamacpp", ModelID: "model", ConfigurationKey: strings.Repeat("a", 64), HostBytes: "1"}
 			clear := modelconfig.ClearStatedMemoryRequest{Engine: set.Engine, ModelID: set.ModelID, ConfigurationKey: set.ConfigurationKey}
@@ -133,8 +133,8 @@ func TestModelSettingsStatedMemoryRemoteEngineLock(t *testing.T) {
 			} else {
 				relay.ClearStatedMemory = &clear
 			}
-			if _, err := b.recordModelMemory(context.Background(), relay, "peer"); engineSettingsErrorCode(err) != -32013 {
-				t.Fatalf("locked: %v", err)
+			if _, err := b.recordModelMemory(context.Background(), relay, "peer"); engineSettingsErrorCode(err) != -32012 {
+				t.Fatalf("management refusal: %v", err)
 			}
 			if err := <-done; err != nil {
 				t.Fatal(err)

@@ -5,29 +5,24 @@ import { create } from 'zustand'
 import type { SwitchReceipt, SwitchRequest, SwitchStatus } from '@/shared/types/engine-switch'
 import type { NodePolicyDocument } from '@/shared/types/node-policy'
 import {
-    ENGINE_LOCKED_CODE,
     INVALID_PARAMS_CODE,
     LOCAL_VETO_CODE,
     POLICY_CONFLICT_CODE,
     REMOTE_MANAGEMENT_DENIED_CODE
 } from '@/shared/constants/service-errors'
-import { engineTypeFromManagerName } from '@/shared/utils/engines'
 import getErrorString from '@/shared/utils/get-error-string'
 import { serviceErrorCode } from '@/ui/api/service-transport'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import { useNodesStore } from '@/ui/stores/nodes.store'
 import { useNodeConfigurationStore } from '@/ui/stores/node-configuration.store'
 import { usePendingActionsStore } from '@/ui/stores/pending-actions.store'
-import { useEngineStatusStore } from '@/ui/stores/engine-status.store'
 
 /** Refusal codes alone cannot distinguish pause from older Off or scoped stop vetoes. */
 export function engineRefusalLabel(
     code: number | undefined,
     message: string,
-    policy?: NodePolicyDocument,
-    kind?: string
+    policy?: NodePolicyDocument
 ): string {
-    if (code === ENGINE_LOCKED_CODE || kind === 'engine_locked') return 'Engine locked'
     if (code === REMOTE_MANAGEMENT_DENIED_CODE) return 'Remote management permission denied'
     if (code === POLICY_CONFLICT_CODE) return 'Configuration conflict'
     if (code === INVALID_PARAMS_CODE) return 'Invalid switch request'
@@ -37,11 +32,6 @@ export function engineRefusalLabel(
         message === 'This node is paused. Resume it on this node before managing it remotely.'
         ? 'Node paused'
         : 'Target refused'
-}
-
-function targetLocked(nodeId: string, engine: string): boolean {
-    const type = engineTypeFromManagerName(engine)
-    return !!type && useEngineStatusStore.getState().getStatus(nodeId, type).locked === true
 }
 
 interface SwitchEntry {
@@ -351,7 +341,6 @@ export const useEngineSwitchStore = create<SwitchStore>((_set, get) => ({
             !source ||
             !target ||
             source === target ||
-            targetLocked(nodeId, target) ||
             !connected(nodeId) ||
             unresolved(get().entries[nodeId])
         )
@@ -374,7 +363,6 @@ export const useEngineSwitchStore = create<SwitchStore>((_set, get) => ({
             if (!(await get().refresh(nodeId)) || !current(nodeId, watch, generation)) return
             const entry = get().entries[nodeId]
             if (!entry?.revision || unresolved(entry)) return
-            if (targetLocked(nodeId, target)) return
             if (
                 !local &&
                 useNodeConfigurationStore.getState().management.get(nodeId)?.state !== 'allowed'
@@ -413,7 +401,6 @@ export const useEngineSwitchStore = create<SwitchStore>((_set, get) => ({
                 if (
                     code === REMOTE_MANAGEMENT_DENIED_CODE ||
                     code === LOCAL_VETO_CODE ||
-                    code === ENGINE_LOCKED_CODE ||
                     code === POLICY_CONFLICT_CODE ||
                     code === INVALID_PARAMS_CODE
                 ) {

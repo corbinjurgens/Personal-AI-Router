@@ -75,7 +75,7 @@ Conversion validates the complete current external router and reviewed finite
 identity, refuses unsupported members without dropping models, and rechecks its
 source before stopping and restarting. A generated output pathname is never
 desired configuration. Unchanged typed settings do not restart the process;
-Off, Pause, engine locks and adopted ownership retain their existing behavior.
+Off, Pause and adopted ownership retain their existing behavior.
 
 The projection in `modelsettings_load.go` reads flags, aliases, environment,
 negative switches and native rejection status directly from
@@ -105,7 +105,7 @@ field context/slot products, ubatch versus batch, positive repeat penalty and th
 idle-time sentinel (-1 or positive, excluding zero).
 Manual load changes use whole-router restart with the broker's 60-second drain
 bound disclosed in preview. Generation locks retain their generation-only
-scope; engine locks still veto activation. Copy defaults to tuning only at its
+scope. Copy defaults to tuning only at its
 owner. Auto remains unavailable, and configuration makes no qualified-readiness
 claim.
 

@@ -50,7 +50,6 @@ export type SwitchErrorKind =
     | 'configuration_conflict'
     | 'fenced'
     | 'remote_veto'
-    | 'engine_locked'
     | 'unknown_receipt'
     | 'busy'
     | 'full'

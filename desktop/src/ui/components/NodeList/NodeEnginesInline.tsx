@@ -10,74 +10,8 @@ import { useNodesStore } from '@/ui/stores/nodes.store'
 import { usePendingActionsStore } from '@/ui/stores/pending-actions.store'
 import { engineTypesForNode, getEnginesForNode } from '@/ui/utils/get-engines-for-node'
 import { Button, Flex, Switch, Text } from '@nvidia/foundations-react-core'
-import { Download, Lock, LockOpen } from '@/ui/components/icons'
+import { Download } from '@/ui/components/icons'
 import { useCallback, useMemo } from 'react'
-
-const LOCK_COPY = {
-    locked: 'Locked',
-    unavailable: 'Lock status unavailable',
-    peerLocked: 'Unlock this engine on the device running it.'
-}
-
-/**
- * The lock beside an engine's On/Off switch. Only the device running the engine
- * can change its lock, so a peer row reports the state and offers no command.
- * An absent readback is unknown, never unlocked.
- */
-function EngineLockControl({
-    name,
-    locked,
-    local,
-    disabled,
-    onChange
-}: {
-    name: string
-    locked: boolean | undefined
-    local: boolean
-    disabled: boolean
-    onChange: (locked: boolean) => void
-}) {
-    if (!local) {
-        if (locked === undefined) {
-            return (
-                <Text kind="body/regular/sm" className="text-subtle-color">
-                    {LOCK_COPY.unavailable}
-                </Text>
-            )
-        }
-        if (!locked) return null
-        return (
-            <Flex align="center" gap="1" wrap="wrap" title={LOCK_COPY.peerLocked}>
-                <Lock style={{ fontSize: 14 }} />
-                <Text kind="body/regular/sm">{LOCK_COPY.locked}</Text>
-                <Text kind="body/regular/sm" className="text-subtle-color">
-                    {LOCK_COPY.peerLocked}
-                </Text>
-            </Flex>
-        )
-    }
-    const label = `${locked ? 'Unlock' : 'Lock'} ${name}`
-    return (
-        <Flex align="center" gap="1" wrap="wrap">
-            <Button
-                kind="tertiary"
-                size="tiny"
-                className="shrink-0 px-1"
-                disabled={disabled || locked === undefined}
-                aria-label={label}
-                title={label}
-                onClick={() => onChange(!locked)}
-            >
-                {locked ? <Lock style={{ fontSize: 14 }} /> : <LockOpen style={{ fontSize: 14 }} />}
-            </Button>
-            {locked !== false && (
-                <Text kind="body/regular/sm" className="text-subtle-color">
-                    {locked ? LOCK_COPY.locked : LOCK_COPY.unavailable}
-                </Text>
-            )}
-        </Flex>
-    )
-}
 
 export default function NodeEnginesInline({ nodeId }: { nodeId: string }) {
     const statusByNode = useEngineStatusStore(s => s.statusByNode)
@@ -124,7 +58,6 @@ export default function NodeEnginesInline({ nodeId }: { nodeId: string }) {
                     type,
                     name: engineLabel(type, descriptor),
                     status: backend.processStatus,
-                    locked: backend.locked,
                     installable: engineCapabilities(type, descriptor).hasInstall.length > 0
                 }
             ]
@@ -134,13 +67,6 @@ export default function NodeEnginesInline({ nodeId }: { nodeId: string }) {
     const handleToggle = useCallback(
         (engineType: EngineType) => {
             window.pairApi.engines.toggle(engineType, nodeId)
-        },
-        [nodeId]
-    )
-
-    const handleLock = useCallback(
-        (engineType: EngineType, locked: boolean) => {
-            window.pairApi.engines.setLock(engineType, nodeId, locked)
         },
         [nodeId]
     )
@@ -164,12 +90,7 @@ export default function NodeEnginesInline({ nodeId }: { nodeId: string }) {
                     b.status === 'uninstalling' ||
                     b.status === 'starting' ||
                     b.status === 'stopping'
-                // A known lock keeps a stopped engine Off. A running locked engine
-                // (a lock whose stop failed) can still be stopped.
-                const startBlocked = b.locked === true && b.status !== 'running'
-                const switchLabel = startBlocked
-                    ? `${b.name} is locked`
-                    : `${b.status === 'running' ? 'Stop' : 'Start'} ${b.name}`
+                const switchLabel = `${b.status === 'running' ? 'Stop' : 'Start'} ${b.name}`
 
                 if (b.status === 'not-installed' && !pending) {
                     // An engine PAIR cannot install offers no control here.
@@ -221,7 +142,7 @@ export default function NodeEnginesInline({ nodeId }: { nodeId: string }) {
                                         size="small"
                                         checked={b.status === 'running'}
                                         onCheckedChange={() => handleToggle(b.type)}
-                                        disabled={(isRemote && isDisconnected) || startBlocked}
+                                        disabled={isRemote && isDisconnected}
                                         title={
                                             isRemote && isDisconnected
                                                 ? 'Node is disconnected'
@@ -239,25 +160,13 @@ export default function NodeEnginesInline({ nodeId }: { nodeId: string }) {
                                 kind="body/regular/sm"
                                 className="cursor-pointer"
                                 onClick={() =>
-                                    !isTransitioning && !startBlocked
+                                    !isTransitioning
                                         ? handleToggle(b.type)
                                         : undefined
                                 }
                             >
                                 {b.name}
                             </Text>
-                            <EngineLockControl
-                                name={b.name}
-                                locked={b.locked}
-                                local={!isRemote}
-                                disabled={
-                                    pending ||
-                                    b.status === 'installing' ||
-                                    b.status === 'uninstalling' ||
-                                    (isRemote && isDisconnected)
-                                }
-                                onChange={locked => handleLock(b.type, locked)}
-                            />
                         </Flex>
                     </Flex>
                 )

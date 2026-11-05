@@ -17,8 +17,6 @@ import {
     ExternalLink,
     Filter,
     Globe,
-    Lock as LucideLock,
-    LockOpen as LucideLockOpen,
     Minus,
     Search as LucideSearch,
     Settings,
@@ -57,8 +55,6 @@ export const Download = appIcon(LucideDownload)
 export const GenericEngine = appIcon(Cpu)
 export const ExpandMore = appIcon(ChevronDown)
 export const FilterList = appIcon(Filter)
-export const Lock = appIcon(LucideLock)
-export const LockOpen = appIcon(LucideLockOpen)
 export const KeyboardArrowRight = appIcon(ChevronRight)
 export const Minimize = appIcon(Minus)
 export const MoreHoriz = appIcon(Ellipsis)
