@@ -116,7 +116,7 @@ func validateModelExtraOptions(model string, extras map[string]string) error {
 				reason = "PAIR owns " + key + "."
 			case d.Supported && !strings.HasPrefix(d.Field, "native."):
 				reason = "Use the typed field for " + key + "."
-			case option.Native.unsupported:
+			case option.Native.unsupported && !option.Native.unpricedExtra:
 				reason = key + " changes allocation and is not accepted."
 			}
 			if reason != "" {
@@ -1422,6 +1422,10 @@ func patchModelLoad(loads []modelconfig.ModelLoad, model string, patch modelconf
 		return nil, err
 	}
 	if err := requested.Validate(); err != nil {
+		field, reason, ok := strings.Cut(err.Error(), ":")
+		if ok {
+			return nil, modelLoadError(model, field, strings.TrimSpace(reason))
+		}
 		return nil, err
 	}
 	if err := validateModelLoadGPUSelection(model, requested); err != nil {
@@ -2045,6 +2049,9 @@ func llamaModelSettingsOptions() ([]modelSettingsOption, error) {
 		if native.unsupported {
 			d.Reason = "Native finite adapter rejects this control; typed override unavailable."
 		}
+		if native.unpricedExtra {
+			d.Reason = "Accepted only as an unpriced extra option; no typed override."
+		}
 		preset := "none: typed override refused"
 		switch native.key {
 		case "ctx-size":
@@ -2147,7 +2154,7 @@ func llamaModelSettingsOptions() ([]modelSettingsOption, error) {
 }
 
 // Compare against actual native entries, including every alias/env/negative flag
-// and rejection bit. Tests also pass a projection with a removed actual row.
+// and rejection/extra-option metadata. Tests also pass a projection with a removed actual row.
 func validateModelSettingsOptionCoverage(native []llamaServingOption, options []modelSettingsOption) error {
 	byKey := make(map[string]llamaServingOption, len(options))
 	for _, option := range options {
@@ -2158,7 +2165,7 @@ func validateModelSettingsOptionCoverage(native []llamaServingOption, options []
 	}
 	for _, want := range native {
 		got, ok := byKey[want.key]
-		if !ok || !slices.Equal(got.flags, want.flags) || !slices.Equal(got.negativeFlags, want.negativeFlags) || got.env != want.env || got.negEnv != want.negEnv || got.bool != want.bool || got.unsupported != want.unsupported {
+		if !ok || !slices.Equal(got.flags, want.flags) || !slices.Equal(got.negativeFlags, want.negativeFlags) || got.env != want.env || got.negEnv != want.negEnv || got.bool != want.bool || got.unsupported != want.unsupported || got.unpricedExtra != want.unpricedExtra {
 			return fmt.Errorf("model options: missing or mismatched native option %s", want.key)
 		}
 	}

@@ -132,7 +132,7 @@ func (s *modelEstimateState) estimate(ctx context.Context, in modelEstimateInput
 		if len(requested.ExtraOptions) > 0 {
 			reason := "Options not priced: " + strings.Join(sortedKeys(requested.ExtraOptions), ", ") + "."
 			for key := range requested.ExtraOptions {
-				if !slices.ContainsFunc(llamaServingOptions, func(option llamaServingOption) bool { return option.key == key }) {
+				if !slices.ContainsFunc(llamaServingOptions, func(option llamaServingOption) bool { return option.key == key && !option.unpricedExtra }) {
 					return modelEstimateUnknown(reason)
 				}
 			}

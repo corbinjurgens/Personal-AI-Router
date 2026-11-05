@@ -100,9 +100,36 @@ func (o OptionDescriptor) Validate() error {
 var fitTargetPattern = regexp.MustCompile(`^[0-9]{1,7}(,[0-9]{1,7}){0,15}$`)
 var extraOptionKeyPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
 
-// Validate checks intent constraints only. Build, artifact and
-// architecture-dependent checks belong to the target's preview owner.
+// Validate checks complete intent, including relationships between leaves.
+// Build, artifact and architecture checks belong to the target's preview owner.
 func (r RequestedLoad) Validate() error {
+	if err := r.validateFields(); err != nil {
+		return err
+	}
+	fit := r.Fit != nil && *r.Fit == "on"
+	if fit && r.GPU != nil && r.GPU.Mode == "auto" {
+		return fmt.Errorf("fit: Native fit and reviewed Auto placement are exclusive.")
+	}
+	if r.FitTarget != nil && !fit {
+		return fmt.Errorf("fitTarget: requires fit on")
+	}
+	if r.FitCtx != nil && !fit {
+		return fmt.Errorf("fitCtx: requires fit on")
+	}
+	if r.BatchSize != nil && r.UBatchSize != nil && *r.UBatchSize > *r.BatchSize {
+		return fmt.Errorf("ubatchSize: exceeds batchSize")
+	}
+	if r.Context != nil && r.Context.Mode == "fixed" && r.Slots != nil {
+		if _, _, err := TotalContext(r.Context.Tokens, *r.Slots); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateFields checks selected leaves without assuming omitted siblings are
+// absent. Complete-load relationships are checked by Validate after merging.
+func (r RequestedLoad) validateFields() error {
 	if len(r.ExtraOptions) > 32 {
 		return fmt.Errorf("extraOptions: at most 32 entries")
 	}
@@ -118,15 +145,11 @@ func (r RequestedLoad) Validate() error {
 	if r.Fit != nil && *r.Fit != "off" && *r.Fit != "on" {
 		return fmt.Errorf("fit: invalid value")
 	}
-	fit := r.Fit != nil && *r.Fit == "on"
-	if fit && r.GPU != nil && r.GPU.Mode == "auto" {
-		return fmt.Errorf("fit: Native fit and reviewed Auto placement are exclusive.")
+	if r.FitTarget != nil && !fitTargetPattern.MatchString(*r.FitTarget) {
+		return fmt.Errorf("fitTarget: requires comma-separated MiB margins")
 	}
-	if r.FitTarget != nil && (!fit || !fitTargetPattern.MatchString(*r.FitTarget)) {
-		return fmt.Errorf("fitTarget: requires fit on and comma-separated MiB margins")
-	}
-	if r.FitCtx != nil && (!fit || *r.FitCtx < 0 || *r.FitCtx > 16777216) {
-		return fmt.Errorf("fitCtx: requires fit on and a value in 0..16777216")
+	if r.FitCtx != nil && (*r.FitCtx < 0 || *r.FitCtx > 16777216) {
+		return fmt.Errorf("fitCtx: requires a value in 0..16777216")
 	}
 	if r.Context != nil {
 		c := r.Context
@@ -179,9 +202,6 @@ func (r RequestedLoad) Validate() error {
 			return fmt.Errorf("%s: must be positive", name)
 		}
 	}
-	if r.BatchSize != nil && r.UBatchSize != nil && *r.UBatchSize > *r.BatchSize {
-		return fmt.Errorf("ubatchSize: exceeds batchSize")
-	}
 	if r.SleepIdleSeconds != nil && *r.SleepIdleSeconds != -1 && *r.SleepIdleSeconds <= 0 {
 		return fmt.Errorf("sleepIdleSeconds: must be -1 or positive")
 	}
@@ -194,11 +214,8 @@ func (r RequestedLoad) Validate() error {
 		return fmt.Errorf("flashAttention: invalid value")
 	}
 	if r.Context != nil && r.Context.Mode == "fixed" {
-		slots := int32(1) // arithmetic check only, not a saved/native default
-		if r.Slots != nil {
-			slots = *r.Slots
-		}
-		if _, _, err := TotalContext(r.Context.Tokens, slots); err != nil {
+		// A single context must fit even before its saved slot count is known.
+		if _, _, err := TotalContext(r.Context.Tokens, 1); err != nil {
 			return err
 		}
 	}

@@ -440,8 +440,14 @@ The full Runtime selects typed compilation at the existing prepared-serving
 owner, including Serving=nil. Exact Task 5 artifact resolution, bounded GGUF
 facts and repeated binding checks run under engine content-read admission.
 The compiler emits sorted complete model sections, checked finite padded context
-(per request times native slots), non-unified KV, fitting off and disabled
-startup loading. Reset removes requested leaves; inherited finite adapter
+(per request times native slots), non-unified KV and disabled startup loading.
+Fitting defaults to off, including the global preset defaults. A typed load may
+set `fit = on` with optional model-local `fit-target` margins and `fit-ctx`
+minimum context. Native-fit loads are unpriced: applied inspection has a
+diagnostic execution key, no finite configuration key or pools, an unknown
+estimate and no buffer capture or stated memory record. External operator
+presets retain the finite parser; conversion validates native fit through the
+typed fields first. Reset removes requested leaves; inherited finite adapter
 defaults are regenerated, never retained in a hidden old source. Explicit CPU
 does not require estimate facts; finite layers/native-default resolution needs
 bounded layer facts. Only f16 KV precision is currently mapped; unmapped

@@ -121,6 +121,52 @@ func TestRequestedLoadNativeFitCloneAndPatch(t *testing.T) {
 	}
 }
 
+func TestLoadPatchDefersCompleteLoadRelationships(t *testing.T) {
+	test := func(name string, set RequestedLoad) {
+		t.Run(name, func(t *testing.T) {
+			if err := (LoadPatch{Set: set}).Validate(); err != nil {
+				t.Fatalf("valid patch leaves refused before merge: %v", err)
+			}
+			if err := set.Validate(); err == nil {
+				t.Fatal("incomplete or conflicting complete load accepted")
+			}
+		})
+	}
+	test("native fit target only", RequestedLoad{FitTarget: testPointer("1024")})
+	test("native fit context only", RequestedLoad{FitCtx: testPointer(int32(8192))})
+	test("native fit off with target", RequestedLoad{Fit: testPointer("off"), FitTarget: testPointer("512")})
+	test("native fit off with context", RequestedLoad{Fit: testPointer("off"), FitCtx: testPointer(int32(4096))})
+	test("native fit and GPU Auto", RequestedLoad{Fit: testPointer("on"), GPU: &GPU{Mode: "auto"}})
+	test("batch and microbatch", RequestedLoad{BatchSize: testPointer(int32(32)), UBatchSize: testPointer(int32(64))})
+	test("context and slots overflow", RequestedLoad{Context: &Context{Mode: "fixed", Tokens: 1 << 30}, Slots: testPointer(int32(2))})
+}
+
+func TestLoadPatchRejectsInvalidLeavesBeforeMerge(t *testing.T) {
+	test := func(name string, set RequestedLoad) {
+		t.Run(name, func(t *testing.T) {
+			if err := (LoadPatch{Set: set}).Validate(); err == nil {
+				t.Fatal("invalid patch leaf accepted")
+			}
+		})
+	}
+	test("native fit mode", RequestedLoad{Fit: testPointer("auto")})
+	test("native fit empty target", RequestedLoad{FitTarget: testPointer("")})
+	test("native fit target syntax", RequestedLoad{FitTarget: testPointer("512,")})
+	test("native fit oversized target", RequestedLoad{FitTarget: testPointer("10000000")})
+	test("native fit too many margins", RequestedLoad{FitTarget: testPointer(strings.Repeat("1,", 16) + "1")})
+	test("native fit negative context", RequestedLoad{FitCtx: testPointer(int32(-1))})
+	test("native fit oversized context", RequestedLoad{FitCtx: testPointer(int32(16777217))})
+	test("fixed context shape", RequestedLoad{Context: &Context{Mode: "fixed", Tokens: 4096, Floor: 1}})
+	test("context intrinsic overflow", RequestedLoad{Context: &Context{Mode: "fixed", Tokens: math.MaxInt32}})
+	test("Auto context range", RequestedLoad{Context: &Context{Mode: "auto", Floor: 8192, Cap: 4096}})
+	test("GPU shape", RequestedLoad{GPU: &GPU{Mode: "cpu", Layers: testPointer(int32(1))}})
+	test("CPU experts shape", RequestedLoad{CPUExperts: &CPUExperts{Mode: "layers"}})
+	test("zero slots", RequestedLoad{Slots: testPointer(int32(0))})
+	test("zero batch", RequestedLoad{BatchSize: testPointer(int32(0))})
+	test("zero microbatch", RequestedLoad{UBatchSize: testPointer(int32(0))})
+	test("extra option shape", RequestedLoad{ExtraOptions: map[string]string{"Bad": "value"}})
+}
+
 func TestResolvedUnifiedKVPreservesLargerSharedPool(t *testing.T) {
 	load := testResolvedLoad()
 	load.Requested = RequestedLoad{}

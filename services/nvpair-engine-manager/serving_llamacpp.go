@@ -309,6 +309,7 @@ type llamaServingOption struct {
 	negEnv        string
 	bool          bool
 	unsupported   bool
+	unpricedExtra bool // Accepted through typed extras, with unknown allocation cost.
 }
 
 // Envelope boundary derived from llama.cpp 0ec4027a2 common/arg.cpp. Every
@@ -421,7 +422,7 @@ var llamaServingOptions = []llamaServingOption{
 	{key: "spec-draft-device", flags: []string{"--spec-draft-device", "-devd", "--device-draft"}, unsupported: true},
 	{key: "spec-draft-ngl", flags: []string{"--spec-draft-ngl", "-ngld", "--gpu-layers-draft", "--n-gpu-layers-draft"}, env: "LLAMA_ARG_N_GPU_LAYERS_DRAFT", unsupported: true},
 	{key: "spec-draft-backend-sampling", flags: []string{"--spec-draft-backend-sampling", "--no-spec-draft-backend-sampling"}, env: "LLAMA_ARG_SPEC_DRAFT_BACKEND_SAMPLING", negEnv: "LLAMA_ARG_NO_SPEC_DRAFT_BACKEND_SAMPLING", bool: true, unsupported: true},
-	{key: "spec-draft-n-max", flags: []string{"--spec-draft-n-max"}, env: "LLAMA_ARG_SPEC_DRAFT_N_MAX", unsupported: true},
+	{key: "spec-draft-n-max", flags: []string{"--spec-draft-n-max"}, env: "LLAMA_ARG_SPEC_DRAFT_N_MAX", unsupported: true, unpricedExtra: true},
 	{key: "spec-type", flags: []string{"--spec-type"}, env: "LLAMA_ARG_SPEC_TYPE"},
 	{key: "spec-default", flags: []string{"--spec-default"}, bool: true, unsupported: true},
 	{key: "mtp", flags: []string{"--mtp"}, bool: true, unsupported: true},
