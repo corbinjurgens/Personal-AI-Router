@@ -2267,7 +2267,11 @@ func newTask9EstimateFixture(t *testing.T, topology string) task9EstimateFixture
 		}
 		draftRuntime = f.st.plat.Runtime
 	})
-	f.ex.modelMemoryProfiles = newModelMemoryProfiles(t.TempDir())
+	profilesDir := t.TempDir()
+	if err := os.Chmod(profilesDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f.ex.modelMemoryProfiles = newModelMemoryProfiles(profilesDir)
 	target := modelBufferTestTargetMemory()
 	mapped := autoTestMemory(time.Now()).Map
 	binding := autoTestDeviceBinding()
@@ -2561,7 +2565,11 @@ func (f task9EstimateFixture) seed(t *testing.T, observations ...modelconfig.Buf
 func TestModelSettingsEstimateTask9CapturedWeightsReachInspection(t *testing.T) {
 	f := newTask9EstimateFixture(t, "host")
 	base := f.inspect(t)
-	f.f.ex.modelBuffers.store = newModelBufferStore(t.TempDir())
+	bufferDir := t.TempDir()
+	if err := os.Chmod(bufferDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f.f.ex.modelBuffers.store = newModelBufferStore(bufferDir)
 	rt := f.f.st.plat.Runtime
 	command, err := launchForState(f.f.st, rt.Port)
 	if err != nil {
