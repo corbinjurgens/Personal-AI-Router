@@ -142,7 +142,7 @@ func (s *modelBufferStore) load() {
 		}
 		if previous, ok := fields["upstreamPin"]; ok {
 			var pin, assurance string
-			if modelconfig.DecodeStrict(previous, &pin) != nil || pin != "0ec4027a2a0183de87c007069adddc06e665f7de" || fields["buildId"] != nil || fields["reportedBuild"] != nil || fields["buildAssurance"] != nil && (modelconfig.DecodeStrict(fields["buildAssurance"], &assurance) != nil || assurance != "recognized-self-reported-pin") {
+			if modelconfig.DecodeStrict(previous, &pin) != nil || pin != "0ec4027a2a0183de87c007069adddc06e665f7de" || fields["buildId"] != nil || fields["reportedBuild"] != nil || modelconfig.DecodeStrict(fields["buildAssurance"], &assurance) != nil || assurance != "recognized-self-reported-pin" {
 				s.writeDisabled = true
 				return
 			}

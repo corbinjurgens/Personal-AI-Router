@@ -181,6 +181,34 @@ func TestModelBufferStoreOldFoldKeepsStrictValidation(t *testing.T) {
 	}
 }
 
+func TestModelBufferStoreOldFoldRequiresAssurance(t *testing.T) {
+	s, sample := modelBufferStoreFixture(t)
+	data := []byte(`[{"modelIdentity":"` + sample.ModelIdentity + `","observation":{"status":"partial","current":false,"sampleId":"` + sample.Observation.SampleID + `","recordedAt":"` + sample.Observation.RecordedAt + `","upstreamPin":"0ec4027a2a0183de87c007069adddc06e665f7de"}}]`)
+	if err := os.WriteFile(s.path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recovered := newModelBufferStore(filepath.Dir(s.path))
+	if !recovered.writeDisabled {
+		t.Fatal("missing old assurance left history writable")
+	}
+	if len(recovered.samples) != 0 {
+		t.Fatalf("missing old assurance recovered folded samples: %d", len(recovered.samples))
+	}
+	if got := recovered.newest(sample.ModelIdentity, sample.Observation.BuildID); got.SampleID != "" || got.Reason != "history-unavailable" {
+		t.Fatalf("missing old assurance exposed history: %+v", got)
+	}
+	if got := recovered.publish(sample); got != "history-unavailable" {
+		t.Fatalf("missing old assurance publication=%s", got)
+	}
+	preserved, err := os.ReadFile(s.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(preserved) != string(data) {
+		t.Fatal("missing old assurance history was overwritten")
+	}
+}
+
 func TestModelBufferStorePrivacy(t *testing.T) {
 	s, sample := modelBufferStoreFixture(t)
 	sample.ModelIdentity = "/private/model.gguf"
