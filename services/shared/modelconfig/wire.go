@@ -611,7 +611,7 @@ func (c ModelChange) Validate() error {
 	return CheckPayloadSize(c)
 }
 func (p LoadPatch) Validate() error {
-	if err := p.Set.Validate(); err != nil {
+	if err := p.Set.validateFields(); err != nil {
 		return err
 	}
 	fields := p.Set.selectedFields()

@@ -39,7 +39,9 @@ import type {
     Estimate,
     InspectModelRequest,
     InspectModelResult,
-    MemoryPlan
+    MemoryPlan,
+    RequestedLoad,
+    ResolvedLoad
 } from '@/shared/types/model-config'
 import type { JsonValue } from '@/electron/service-bridge/json-rpc-client'
 import { JsonRpcResponseError } from '@/electron/service-bridge/json-rpc-client'
@@ -467,6 +469,76 @@ describe('unified settings bridge', () => {
             })
         ).toThrow('Invalid model response field.')
     })
+
+    it.each(['accepted', 'native-applying', 'native-persisted'])(
+        'decodes complete native-fit settings while an operation is applying at %s',
+        coupledStage => {
+            const requested: RequestedLoad = { fit: 'on', fitTarget: '1024', fitCtx: 8192 }
+            const allocation: ResolvedLoad = {
+                perSlotContext: 8192,
+                totalContext: 8192,
+                slots: 1,
+                gpu: { mode: 'cpu' },
+                options: requested,
+                artifacts: [
+                    {
+                        role: 'model',
+                        path: 'model.gguf',
+                        resolvedTarget: 'model.gguf',
+                        size: '64',
+                        mtimeNs: '1',
+                        sampleSha256: 'a'.repeat(64)
+                    }
+                ],
+                nativeBuildId: 'fixture-build',
+                sourceInputDigest: 'b'.repeat(64),
+                presetDigest: 'c'.repeat(64)
+            }
+            const settings = {
+                ...baseline.settings,
+                modelLoads: [{ modelId: 'exact/model', requested, resolved: allocation }]
+            }
+            const snapshot = parseEngineSettings({
+                ...baseline,
+                phase: 'applying',
+                coupledStage,
+                requestId: 'fit-edit',
+                appliedRevision: 3,
+                editable: false,
+                settings,
+                effectiveSettings: {
+                    ...baseline.settings,
+                    modelLoads: [
+                        {
+                            modelId: 'exact/model',
+                            requested: { fit: 'on', fitTarget: '512', fitCtx: 4096 }
+                        }
+                    ]
+                }
+            })
+            expect(snapshot.phase).toBe('applying')
+            expect(snapshot.coupledStage).toBe(coupledStage)
+            expect(snapshot.requestId).toBe('fit-edit')
+            expect(snapshot.settings.modelLoads?.[0]?.requested).toEqual(requested)
+            expect(snapshot.settings.modelLoads?.[0]?.resolved?.options).toEqual(requested)
+            expect(snapshot.effectiveSettings?.modelLoads?.[0]?.requested).toEqual({
+                fit: 'on',
+                fitTarget: '512',
+                fitCtx: 4096
+            })
+            expect(() =>
+                parseEngineSettings({
+                    ...baseline,
+                    phase: 'applying',
+                    coupledStage,
+                    settings: {
+                        ...baseline.settings,
+                        modelLoads: [{ modelId: 'exact/model', requested: { fitTarget: '1024' } }]
+                    }
+                })
+            ).toThrow('Invalid native fit target.')
+        }
+    )
 
     it('parses an unpriced execution identity and native option hints', () => {
         const fixture: JsonObject = {
@@ -1268,6 +1340,75 @@ describe('unified settings bridge', () => {
         expect(sent.modelChange).toEqual(request.modelChange)
         expect(mocks.supervisor.callProxy).not.toHaveBeenCalled()
         expect(mocks.supervisor.sendProcess).not.toHaveBeenCalled()
+    })
+
+    it.each<{ name: string; set: RequestedLoad }>([
+        { name: 'target only', set: { fitTarget: '1024' } },
+        { name: 'context only', set: { fitCtx: 8192 } }
+    ])('relays a sparse native-fit $name through preview and apply', async ({ set }) => {
+        const saved: RequestedLoad = { fit: 'on', fitTarget: '512', fitCtx: 4096 }
+        const change = {
+            modelId: 'exact/model',
+            expectedPolicyRevision: '7',
+            load: { set, clear: [] }
+        }
+        const request: EngineSettingsRequest = {
+            nodeId: 'local-node',
+            engine: 'llamacpp',
+            expectedRevision: 4,
+            settings: {
+                ...baseline.settings,
+                modelLoads: [{ modelId: 'exact/model', requested: saved }]
+            },
+            modelChange: change
+        }
+        const merged = { ...saved, ...set }
+        mocks.supervisor.callProcess.mockResolvedValueOnce({
+            settings: {
+                ...baseline.settings,
+                modelLoads: [{ modelId: 'exact/model', requested: merged }]
+            },
+            revision: 4,
+            restart: true,
+            rebind: false,
+            policyRevision: '7',
+            previewDigest: 'd'.repeat(64)
+        })
+        const preview = await handleServiceBridgeInvoke('engines:preview-settings', request)
+        expect(preview.settings.modelLoads?.[0]?.requested).toEqual(merged)
+        const sentPreview = mocks.supervisor.callProcess.mock.calls[0]?.[2]
+        expect(sentPreview).toEqual(request)
+        if (!sentPreview || typeof sentPreview !== 'object' || Array.isArray(sentPreview))
+            throw new Error('Missing preview payload')
+        expect(sentPreview.modelChange).not.toBe(request.modelChange)
+
+        const applying: EngineSettingsRequest = {
+            ...request,
+            requestId: 'native-fit-edit',
+            modelChange: { ...change, previewDigest: 'd'.repeat(64) }
+        }
+        mocks.supervisor.callProcess.mockResolvedValueOnce({ revision: 5, phase: 'applying' })
+        const receipt = await handleServiceBridgeInvoke('engines:apply-settings', applying)
+        expect(receipt).toEqual({ revision: 5, phase: 'applying' })
+        expect(mocks.supervisor.callProcess).toHaveBeenNthCalledWith(
+            1,
+            'broker',
+            'engine:preview-settings',
+            request
+        )
+        expect(mocks.supervisor.callProcess).toHaveBeenNthCalledWith(
+            2,
+            'broker',
+            'engine:apply-settings',
+            applying,
+            MODULAR_ENGINE_LIFECYCLE_CALL_TIMEOUT_MS
+        )
+        expect(applying.modelChange?.load).toEqual({ set, clear: [] })
+        expect(request.settings.modelLoads?.[0]?.requested).toEqual({
+            fit: 'on',
+            fitTarget: '512',
+            fitCtx: 4096
+        })
     })
 
     it('keeps a manager-accepted blank provenance reference readable', () => {

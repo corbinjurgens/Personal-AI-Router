@@ -14,6 +14,47 @@ import (
 
 func testPointer[T any](value T) *T { return &value }
 
+func TestDecodeModelChangeNativeFitSparsePatch(t *testing.T) {
+	test := func(name, selection string, want LoadPatch) {
+		t.Run(name, func(t *testing.T) {
+			change, err := DecodeModelChange([]byte(`{"modelId":"model","expectedPolicyRevision":"0","load":` + selection + `}`))
+			if err != nil {
+				t.Fatalf("decode sparse patch: %v", err)
+			}
+			if change.Load == nil || !reflect.DeepEqual(*change.Load, want) {
+				t.Fatalf("patch = %+v, want %+v", change.Load, want)
+			}
+			again, err := DecodeModelChange(mustJSON(t, change))
+			if err != nil || !reflect.DeepEqual(again, change) {
+				t.Fatalf("sparse patch round trip = %+v, %v", again, err)
+			}
+		})
+	}
+	test("target only", `{"set":{"fitTarget":"1024"}}`, LoadPatch{Set: RequestedLoad{FitTarget: testPointer("1024")}})
+	test("context only", `{"set":{"fitCtx":8192}}`, LoadPatch{Set: RequestedLoad{FitCtx: testPointer(int32(8192))}})
+	test("off and explicit dependent clears", `{"set":{"fit":"off"},"clear":["fitTarget","fitCtx"]}`, LoadPatch{Set: RequestedLoad{Fit: testPointer("off")}, Clear: []string{"fitCtx", "fitTarget"}})
+	test("clear fit and dependents", `{"set":{},"clear":["fitTarget","fit","fitCtx"]}`, LoadPatch{Clear: []string{"fit", "fitCtx", "fitTarget"}})
+}
+
+func TestDecodeModelChangeNativeFitRejectsMalformedLeaves(t *testing.T) {
+	for name, selection := range map[string]string{
+		"null target":        `{"fitTarget":null}`,
+		"target type":        `{"fitTarget":512}`,
+		"target syntax":      `{"fitTarget":"512,"}`,
+		"target bound":       `{"fitTarget":"10000000"}`,
+		"fractional context": `{"fitCtx":1.5}`,
+		"negative context":   `{"fitCtx":-1}`,
+		"context bound":      `{"fitCtx":16777217}`,
+		"context overflow":   `{"fitCtx":2147483648}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := DecodeModelChange([]byte(`{"modelId":"model","expectedPolicyRevision":"0","load":{"set":` + selection + `}}`)); err == nil {
+				t.Fatal("accepted malformed sparse native-fit leaf")
+			}
+		})
+	}
+}
+
 func TestInspectGPUSelectionTransport(t *testing.T) {
 	r := InspectResult{Engine: "llamacpp", ModelID: "model", Status: "unknown", Estimate: Estimate{Status: "unknown"}, ConfigurationKeyReason: "gpu-selection", ExecutionKey: strings.Repeat("a", 64)}
 	got, err := DecodeInspectResult(mustJSON(t, r))

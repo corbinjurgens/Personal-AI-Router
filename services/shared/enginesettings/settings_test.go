@@ -200,6 +200,33 @@ func TestModelChangeRequiresBaselineAndReview(t *testing.T) {
 	}
 }
 
+func TestModelChangeNativeFitSparseRequest(t *testing.T) {
+	on, margin, ctx := "on", "512", int32(4096)
+	baseline := Config{ServerPort: 8080, ProxyPort: 8081, ModelLoads: []modelconfig.ModelLoad{{ModelID: "model", Requested: modelconfig.RequestedLoad{Fit: &on, FitTarget: &margin, FitCtx: &ctx}}}}
+	target, nextCtx := "1024", int32(8192)
+	test := func(name string, set modelconfig.RequestedLoad) {
+		t.Run(name, func(t *testing.T) {
+			r := Request{Engine: "llamacpp", Settings: baseline.Clone(), ModelChange: &modelconfig.ModelChange{ModelID: "model", ExpectedPolicyRevision: "0", Load: &modelconfig.LoadPatch{Set: set}}}
+			decoded, err := DecodeRequest(settingsJSON(t, r))
+			if err != nil {
+				t.Fatalf("decode sparse request: %v", err)
+			}
+			if err := decoded.ValidateModelChange(baseline, false); err != nil {
+				t.Fatalf("validate sparse request against baseline: %v", err)
+			}
+			if !reflect.DeepEqual(decoded.ModelChange.Load.Set, set) || !decoded.Settings.Equal(baseline) {
+				t.Fatalf("sparse Set or complete baseline changed: %+v", decoded)
+			}
+			decoded.Settings.ModelLoads[0].Requested.Fit = nil
+			if err := decoded.Validate(); err == nil {
+				t.Fatal("accepted incomplete full baseline")
+			}
+		})
+	}
+	test("target only", modelconfig.RequestedLoad{FitTarget: &target})
+	test("context only", modelconfig.RequestedLoad{FitCtx: &nextCtx})
+}
+
 func TestConfigOmitsAbsentModelLoads(t *testing.T) {
 	data, err := json.Marshal(Config{ServerPort: 8080, ProxyPort: 8081, LaunchText: "--opaque"})
 	if err != nil {

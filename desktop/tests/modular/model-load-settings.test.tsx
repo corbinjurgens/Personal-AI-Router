@@ -259,6 +259,36 @@ function savedLoad(requested: RequestedLoad) {
 }
 
 describe('load editor and target impact', () => {
+    it.each([
+        { label: 'Fit target', value: '1024', set: { fitTarget: '1024' } },
+        { label: 'Fit context', value: '8192', set: { fitCtx: 8192 } }
+    ])(
+        'independently edits saved native $label as a sparse patch',
+        async ({ label, value, set }) => {
+            const saved: RequestedLoad = { fit: 'on', fitTarget: '512', fitCtx: 4096 }
+            savedLoad(saved)
+            await render()
+            await input(label, value)
+            expect(loadDraft()).toEqual({ set, clear: [] })
+            expect(button('Preview model changes').disabled).toBe(false)
+            expect(saved).toEqual({ fit: 'on', fitTarget: '512', fitCtx: 4096 })
+            await click('Preview model changes')
+            expect(review).toHaveBeenCalledWith({
+                ...target,
+                expectedRevision: 3,
+                settings: {
+                    ...snapshot.settings,
+                    modelLoads: [{ modelId: 'model', requested: saved }]
+                },
+                modelChange: {
+                    modelId: 'model',
+                    expectedPolicyRevision: '7',
+                    load: { set, clear: [] }
+                }
+            })
+            expect(loadDraft()).toEqual({ set, clear: [] })
+        }
+    )
     it('edits native fit, margin and minimum context in the current load draft', async () => {
         await render()
         await select('Native fit', 'on')
