@@ -940,7 +940,7 @@ func observeModelSettingsLaunch(record *engineSettingsRecord, launch settings.La
 	record.Snapshot.EffectiveServerPort = launch.EffectivePort
 }
 
-// ConfigureLaunch owns activation and its Pause/lock/saved-Off guards. If its
+// ConfigureLaunch owns activation and its Pause/saved-Off guards. If its
 // resume converges to stopped, require fresh explicit veto evidence from that
 // same manager before treating the stopped result as a successful saved apply.
 func modelSettingsResumeVeto(ctx context.Context, worker *rpcWorker, engine string) (bool, error) {
@@ -954,21 +954,7 @@ func modelSettingsResumeVeto(ctx context.Context, worker *rpcWorker, engine stri
 	if enabled, known := intent.EnabledByEngine[engine]; known && !enabled && intent.OffByEngine[engine] != "" {
 		return true, nil
 	}
-	var installed struct {
-		Engines []struct {
-			Engine string `json:"engine"`
-			Locked *bool  `json:"locked"`
-		} `json:"engines"`
-	}
-	if err := modelSettingsCall(ctx, worker, "engine:get-installed", nil, &installed); err != nil {
-		return false, err
-	}
-	for _, entry := range installed.Engines {
-		if entry.Engine == engine && entry.Locked != nil {
-			return *entry.Locked, nil
-		}
-	}
-	return false, fmt.Errorf("engine activation veto readback is unavailable")
+	return false, nil
 }
 
 func (b *Broker) runModelSettingsOperationLocked(ctx context.Context, engine string, record *engineSettingsRecord) error {
@@ -1285,7 +1271,7 @@ func (b *Broker) recordModelMemory(ctx context.Context, relay settings.Relay, ca
 		return modelconfig.InspectResult{}, err
 	}
 	worker := b.getEngineMgr()
-	// The worker rechecks its durable engine lock and current Pause projection
+	// The worker rechecks its current Pause projection
 	// for this private remote marker, without status detection or native helpers.
 	envelope := settings.WorkerRequest[any]{Request: request, Memory: b.modelTargetMemory(), NativeInitAllowed: false, RemoteMemoryRecord: caller != ""}
 	var raw json.RawMessage

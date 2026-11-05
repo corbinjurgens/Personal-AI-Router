@@ -640,7 +640,6 @@ func TestPolicyRoutesAnswerTypedCodesAsConflictBodies(t *testing.T) {
 		{"revision conflict", controlPolicySetPath, `{"policy":{},"expectedPersistedRevision":"11"}`, "policy conflict: the persisted revision is 12", "policy_conflict", codePolicyConflict},
 		{"local veto", controlAvailabilitySetPath, `{"state":"available"}`, "this node was paused on the node itself; resume it there", "local_veto", codeLocalVeto},
 		{"management denied", controlPolicySetPath, `{"policy":{},"expectedPersistedRevision":"12"}`, "remote management denied", "remote_management_denied", codeRemoteManagementDenied},
-		{"engine locked", controlPolicySetPath, `{"policy":{},"expectedPersistedRevision":"12"}`, "engine locked", "engine_locked", codeEngineLocked},
 		{"inference settings locked", controlPolicySetPath, `{"policy":{},"expectedPersistedRevision":"12"}`, `inference settings are locked on the target device for engine "llamacpp" model "stored-model"`, "remote_setting_locked", -32014},
 	}
 	for _, c := range cases {
@@ -692,7 +691,6 @@ func TestRemotePolicyPreservesHTTPErrorClassification(t *testing.T) {
 		{"typed revision conflict", "engine:remote-policy-set", `{"nodeId":"host-peer","policy":{},"expectedPersistedRevision":"11"}`, "policy conflict: the persisted revision is 12", codePolicyConflict, codePolicyConflict},
 		{"local veto of a resume", "engine:remote-availability-set", `{"nodeId":"host-peer","state":"available"}`, "this node was paused on the node itself; resume it there", codeLocalVeto, codeLocalVeto},
 		{"management denied", "engine:remote-policy-set", `{"nodeId":"host-peer","policy":{},"expectedPersistedRevision":"12"}`, "remote management denied", codeRemoteManagementDenied, -32012},
-		{"engine locked", "engine:remote-policy-set", `{"nodeId":"host-peer","policy":{},"expectedPersistedRevision":"12"}`, "engine locked", codeEngineLocked, -32013},
 		{"inference settings locked", "engine:remote-policy-set", `{"nodeId":"host-peer","policy":{},"expectedPersistedRevision":"12"}`, `inference settings are locked on the target device for engine "llamacpp" model "stored-model"`, -32014, -32014},
 		{"lock diagnostic without typed code", "engine:remote-policy-set", `{"nodeId":"host-peer","policy":{},"expectedPersistedRevision":"12"}`, "inference settings are locked on the target device", -32000, -32000},
 	}

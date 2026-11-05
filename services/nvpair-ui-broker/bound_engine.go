@@ -88,8 +88,6 @@ func boundEngineResult(err error) nodepolicy.BoundEnginePrepared {
 		r.Reason, r.Code = "paused", detail.Code
 	case -32012:
 		r.Reason, r.Code = "management-denied", detail.Code
-	case -32013:
-		r.Reason, r.Code = "engine-locked", detail.Code
 	}
 	if detail.Kind == settings.SwitchErrorBusy {
 		r.Reason = "engine-switch-busy"
@@ -329,7 +327,6 @@ type boundEngineStatus struct {
 	Installed *bool  `json:"installed"`
 	Running   *bool  `json:"running"`
 	Healthy   *bool  `json:"healthy"`
-	Locked    *bool  `json:"locked"`
 }
 
 func (b *Broker) boundStatus(ctx context.Context, op *boundEngineOperation) ([]boundEngineStatus, error) {
@@ -345,7 +342,7 @@ func (b *Broker) boundStatus(ctx context.Context, op *boundEngineOperation) ([]b
 	}
 	seen := map[string]bool{}
 	for _, st := range result.Engines {
-		if seen[st.Engine] || st.Installed == nil || st.Running == nil || st.Healthy == nil || st.Locked == nil {
+		if seen[st.Engine] || st.Installed == nil || st.Running == nil || st.Healthy == nil {
 			return nil, boundRefusal("unavailable", -32000)
 		}
 		seen[st.Engine] = true
@@ -446,8 +443,6 @@ func (b *Broker) runBoundEngine(ctx context.Context, op *boundEngineOperation) {
 		}
 		if target == nil || !*target.Installed {
 			err = boundRefusal("model-unavailable", -32000)
-		} else if *target.Locked {
-			err = boundRefusal("engine-locked", -32013)
 		}
 		if err == nil {
 			err = b.switchTargetRoutable(op.request.Engine)
@@ -805,7 +800,7 @@ func (b *Broker) finishBoundEngine(ctx context.Context, op *boundEngineOperation
 	}
 	ready := false
 	for _, st := range statuses {
-		if st.Engine == op.request.Engine && *st.Installed && *st.Running && *st.Healthy && !*st.Locked {
+		if st.Engine == op.request.Engine && *st.Installed && *st.Running && *st.Healthy {
 			ready = true
 		}
 	}

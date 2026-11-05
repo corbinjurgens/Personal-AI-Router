@@ -22,8 +22,6 @@ const mocks = vi.hoisted(() => ({
         setLocalDiscoveryModelRefresher:
             vi.fn<ReturnType<typeof getModularBridgeState>['setLocalDiscoveryModelRefresher']>(),
         applyEngineIntent: vi.fn<ReturnType<typeof getModularBridgeState>['applyEngineIntent']>(),
-        invalidateEngineLocks:
-            vi.fn<ReturnType<typeof getModularBridgeState>['invalidateEngineLocks']>(),
         invalidateModelObservations:
             vi.fn<ReturnType<typeof getModularBridgeState>['invalidateModelObservations']>(),
         beginEngineIntentRead: vi.fn<

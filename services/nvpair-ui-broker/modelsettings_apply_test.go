@@ -34,7 +34,6 @@ type modelSettingsHarness struct {
 	build            string
 	configureCount   int
 	configureFailure string
-	locked           bool
 	savedOff         bool
 }
 
@@ -118,7 +117,7 @@ func (h *modelSettingsHarness) answer(method string, raw json.RawMessage) (any, 
 		}
 		h.launch.ServerPort, h.launch.LaunchText = p.Settings.ServerPort, p.Settings.LaunchText
 		h.launch.ModelLoads, h.launch.Serving = modelconfig.CloneLoads(p.Settings.ModelLoads), p.Settings.Serving.Clone()
-		h.launch.Running = p.Resume && !h.locked && !h.savedOff
+		h.launch.Running = p.Resume && !h.savedOff
 		if h.configureFailure == "lost response" {
 			return nil, "injected lost configure response"
 		}
@@ -126,7 +125,7 @@ func (h *modelSettingsHarness) answer(method string, raw json.RawMessage) (any, 
 	case settings.SwitchPrepareMethod:
 		return emptySwitchManagerSnapshot(), ""
 	case "engine:get-installed":
-		return map[string]any{"engines": []map[string]any{{"engine": "llamacpp", "running": h.launch.Running, "terminationVerified": !h.launch.Running, "locked": h.locked}}}, ""
+		return map[string]any{"engines": []map[string]any{{"engine": "llamacpp", "running": h.launch.Running, "terminationVerified": !h.launch.Running}}}, ""
 	case engineIntentMethod:
 		intent := engineintent.Snapshot{EnabledByEngine: map[string]bool{"llamacpp": !h.savedOff}, OffByEngine: map[string]engineintent.Origin{}}
 		if h.savedOff {

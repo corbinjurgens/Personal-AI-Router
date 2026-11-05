@@ -497,7 +497,6 @@ func TestTerminalControlsTypedRefusals(t *testing.T) {
 	}{
 		{"veto", -32011, "local veto (-32011): paused on target"},
 		{"conflict", -32010, "revision conflict (-32010): paused on target - reload and retry"},
-		{"locked", -32013, "engine locked (-32013): paused on target"},
 	} {
 		for _, family := range []string{"lifecycle", "model", "settings read", "settings preview", "settings apply", "availability"} {
 			t.Run(refusal.name+"/"+family, func(t *testing.T) {
@@ -539,8 +538,6 @@ func TestTerminalControlsTypedRefusals(t *testing.T) {
 	}
 }
 
-// TestEngineStatusLockReadback keeps a reported lock exact and an unreported one
-// unknown, through decoding and the local state push that replaces a row.
 func TestEngineStatusTerminationReadback(t *testing.T) {
 	for _, tc := range []struct {
 		name, raw string
@@ -560,38 +557,6 @@ func TestEngineStatusTerminationReadback(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestEngineStatusLockReadback(t *testing.T) {
-	decode := func(t *testing.T, raw string) engineStatus {
-		t.Helper()
-		var e engineStatus
-		if err := json.Unmarshal([]byte(raw), &e); err != nil {
-			t.Fatalf("decode %s: %v", raw, err)
-		}
-		return e
-	}
-	test := func(name, raw string, want *bool) {
-		t.Run(name, func(t *testing.T) {
-			got := decode(t, raw).Locked
-			if (got == nil) != (want == nil) || (got != nil && *got != *want) {
-				t.Fatalf("locked = %v, want %v", got, want)
-			}
-		})
-	}
-	locked, unlocked := true, false
-	test("locked", `{"engine":"llamacpp","installed":true,"locked":true}`, &locked)
-	test("unlocked", `{"engine":"llamacpp","installed":true,"locked":false}`, &unlocked)
-	test("absent stays unknown", `{"engine":"llamacpp","installed":true}`, nil)
-
-	t.Run("push without lock clears a stale lock", func(t *testing.T) {
-		d := localDetail()
-		d.engines = []engineStatus{{Engine: "llamacpp", Installed: true, Locked: &locked}}
-		d.handleNotification(&rpc.Message{Method: "engine:state-changed", Params: json.RawMessage(`{"engine":"llamacpp","installed":true}`)})
-		if len(d.engines) != 1 || d.engines[0].Locked != nil {
-			t.Fatalf("engines after push = %+v, want lock unknown", d.engines)
-		}
-	})
 }
 
 func TestTerminalControlsTargetPolicy(t *testing.T) {
@@ -1154,95 +1119,39 @@ func TestTerminalControlsReopenedNodeRejectsOldVisit(t *testing.T) {
 	}
 }
 
-func TestTerminalControlsEngineLock(t *testing.T) {
-	custom := tuiCustomEngine(t)
-	locked, unlocked := true, false
-	lockedEngines := func() []engineStatus {
-		return []engineStatus{{Engine: "llamacpp", Installed: true, Locked: &locked}, {Engine: custom.Name, Installed: true, Locked: &unlocked}}
-	}
-
-	t.Run("lock shown on self and peer", func(t *testing.T) {
-		for _, self := range []bool{true, false} {
-			d := newNodeDetail(nil, nodeRow{self: self})
-			d.engines = lockedEngines()
-			d.refreshEngines()
-			rows := d.engineTable.Rows()
-			if rows[0][0] != "llamacpp (locked on this node)" {
-				t.Fatalf("self=%v locked label = %q", self, rows[0][0])
-			}
-		}
-	})
-	t.Run("absent lock remains unknown", func(t *testing.T) {
-		d := newNodeDetail(nil, nodeRow{self: true})
-		d.engines = lockedEngines()
-		for _, lock := range []*bool{&unlocked, nil} {
-			d.engines[1].Locked = lock
-			d.refreshEngines()
-			rows := d.engineTable.Rows()
-			if strings.Contains(rows[1][0], "lock") {
-				t.Fatalf("row label = %q, want no lock claim", rows[1][0])
-			}
-		}
-	})
-	t.Run("saved Off is not lock", func(t *testing.T) {
+func TestTerminalControlsSavedIntentAndPause(t *testing.T) {
+	t.Run("saved Off preserves local intent", func(t *testing.T) {
 		d := localDetail()
-		d.engines = []engineStatus{{Engine: "llamacpp"}, {Engine: "llamacpp-custom", Locked: &locked}}
+		d.engines = []engineStatus{{Engine: "llamacpp"}, {Engine: "llamacpp-custom"}}
 		d.intent = engineintent.Snapshot{
 			EnabledByEngine: map[string]bool{"llamacpp": false, "llamacpp-custom": false},
 			OffByEngine:     map[string]engineintent.Origin{"llamacpp": engineintent.Local, "llamacpp-custom": engineintent.Local},
 		}
 		d.refreshEngines()
 		rows := d.engineTable.Rows()
-		if rows[0][0] != "llamacpp (saved Off, local)" || rows[1][0] != "llamacpp-custom (locked on this node) (saved Off, local)" {
+		if rows[0][0] != "llamacpp (saved Off, local)" || rows[1][0] != "llamacpp-custom (saved Off, local)" {
 			t.Fatalf("labels = %q, %q", rows[0][0], rows[1][0])
-		}
-		if d.engineLocked("llamacpp") {
-			t.Fatal("saved Off was read as a lock")
 		}
 		// A saved Off engine is still startable; the target decides.
 		if cmd := d.lifecycle(&d.engines[0], "start"); cmd == nil {
 			t.Fatalf("saved Off start was refused: %s", d.status.render())
 		}
 	})
-	t.Run("locked activation is disabled", func(t *testing.T) {
+	t.Run("stop and unload remain available", func(t *testing.T) {
 		d := localDetail()
-		d.engines = lockedEngines()
-		d.refreshEngines()
-		for _, op := range []string{"start", "restart"} {
-			if cmd := d.lifecycle(&d.engines[0], op); cmd != nil {
-				t.Fatalf("locked %s sent a command", op)
-			}
-			if d.status.kind != toastError || !strings.Contains(d.status.text, engineLockedMessage) {
-				t.Fatalf("%s status = %+v", op, d.status)
-			}
-			d.status.info("")
-		}
-		if !d.refuseModelOp("llamacpp", modelActions["load"]) || !strings.Contains(d.status.text, engineLockedMessage) {
-			t.Fatalf("locked load was not refused: %+v", d.status)
-		}
-		if d.refuseModelOp("llamacpp-custom", modelActions["load"]) {
-			t.Fatal("unlocked engine load was refused")
-		}
-		d.engines[1].Locked = nil
-		if d.refuseModelOp("llamacpp-custom", modelActions["load"]) {
-			t.Fatal("unreported lock refused a load; the target decides")
-		}
-	})
-	t.Run("locked stop and unload remain available", func(t *testing.T) {
-		d := localDetail()
-		d.engines = lockedEngines()
+		d.engines = []engineStatus{{Engine: "llamacpp", Installed: true}}
 		if cmd := d.lifecycle(&d.engines[0], "stop"); cmd == nil {
-			t.Fatalf("locked stop was refused: %s", d.status.render())
+			t.Fatalf("stop was refused: %s", d.status.render())
 		}
 		for _, op := range []string{"unload", "delete", "pull"} {
 			if d.refuseModelOp("llamacpp", modelActions[op]) {
-				t.Fatalf("locked %s was refused: %s", op, d.status.render())
+				t.Fatalf("%s was refused: %s", op, d.status.render())
 			}
 		}
 	})
-	t.Run("distinct locked paused conflict and denied refusals", func(t *testing.T) {
+	t.Run("distinct paused conflict and denied refusals", func(t *testing.T) {
 		seen := map[string]int{}
-		for _, code := range []int{-32013, -32011, -32010, -32012, -32000} {
+		for _, code := range []int{-32011, -32010, -32012, -32000} {
 			text := commandFailure(&rpc.RPCError{Code: code, Message: "target text"})
 			if !strings.Contains(text, "target text") {
 				t.Fatalf("code %d dropped the target text: %q", code, text)
@@ -1252,7 +1161,7 @@ func TestTerminalControlsEngineLock(t *testing.T) {
 			}
 			seen[text] = code
 		}
-		if got := commandFailure(&rpc.RPCError{Code: -32000, Message: "projection unavailable"}); strings.Contains(got, "veto") || strings.Contains(got, "locked") {
+		if got := commandFailure(&rpc.RPCError{Code: -32000, Message: "projection unavailable"}); strings.Contains(got, "veto") {
 			t.Fatalf("unknown projection read as a refusal: %q", got)
 		}
 	})
@@ -1279,34 +1188,23 @@ func TestTerminalControlsEngineLock(t *testing.T) {
 	})
 }
 
-// A locked engine that is also saved Off must still read as locked when the
-// narrow engine column clips its label at 80 columns.
-func TestLockedEngineRowSurvivesNarrowColumn(t *testing.T) {
-	custom := tuiCustomEngine(t)
-	locked := true
+func TestSavedOffEngineRowSurvivesNarrowColumn(t *testing.T) {
 	d := localDetail()
 	d.SetSize(80, 30)
-	d.engines = []engineStatus{{Engine: "llamacpp", Installed: true}, {Engine: custom.Name, Installed: true, Locked: &locked}}
+	d.engines = []engineStatus{{Engine: "llamacpp", Installed: true}}
 	d.intent = engineintent.Snapshot{
-		EnabledByEngine: map[string]bool{"llamacpp": false, "llamacpp-custom": false},
-		OffByEngine:     map[string]engineintent.Origin{"llamacpp": engineintent.Local, "llamacpp-custom": engineintent.Local},
+		EnabledByEngine: map[string]bool{"llamacpp": false},
+		OffByEngine:     map[string]engineintent.Origin{"llamacpp": engineintent.Local},
 	}
 	d.refreshEngines()
 	d.engineTable.SetHeight(8)
-	rendered := d.engineTable.View()
-	var lockedRow, plainRow string
-	for _, line := range strings.Split(rendered, "\n") {
-		switch {
-		case strings.Contains(line, "llamacpp ("):
-			plainRow = line
-		case strings.Contains(line, "llamacpp-custom"):
-			lockedRow = line
+	var row string
+	for _, line := range strings.Split(d.engineTable.View(), "\n") {
+		if strings.Contains(line, "llamacpp (") {
+			row = line
 		}
 	}
-	if !strings.Contains(lockedRow, "(locked") {
-		t.Fatalf("locked row lost its lock at 80 columns: %q", lockedRow)
-	}
-	if strings.Contains(plainRow, "locked") || !strings.Contains(plainRow, "(saved Off") {
-		t.Fatalf("saved Off row = %q, want provenance without a lock", plainRow)
+	if !strings.Contains(row, "(saved Off") {
+		t.Fatalf("saved Off row lost its intent at 80 columns: %q", row)
 	}
 }

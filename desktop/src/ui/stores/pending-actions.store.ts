@@ -52,7 +52,6 @@ const SWEEP_INTERVAL_MS = 1_000
 /** Commands that flip an engine's lifecycle -- only one at a time per engine. */
 const LIFECYCLE_COMMANDS: ReadonlySet<EngineCommandType> = new Set<EngineCommandType>([
     'toggle',
-    'setLock',
     'install',
     'uninstall',
     'update'
@@ -98,12 +97,6 @@ interface PendingAction {
      * this, i.e. the backend acknowledged the transition.
      */
     baselineStatus?: EngineProcessStatus
-    /**
-     * `setLock` only: the lock readback captured when the command fired. A lock
-     * changes no process status on an engine that is already stopped, so this
-     * entry clears on the first status whose lock readback differs from this one.
-     */
-    baselineLocked?: boolean
     expiresAt: number
 }
 
@@ -121,16 +114,9 @@ function timeoutFor(command: EngineCommandType, engineType: EngineType): number 
     return PENDING_TIMEOUT_MS
 }
 
-/**
- * Whether a pushed status is the backend acknowledging a lifecycle entry. A lock
- * is acknowledged by its own readback, so a lock-only push clears it even though
- * the process status did not move, and a stop that did move it does not clear it
- * before the lock is reported.
- */
+/** Whether a pushed process status acknowledges a lifecycle transition. */
 function statusSupersedes(entry: PendingAction, status: EngineStatusData): boolean {
-    return entry.action === 'setLock'
-        ? status.locked !== entry.baselineLocked
-        : status.processStatus !== entry.baselineStatus
+    return status.processStatus !== entry.baselineStatus
 }
 
 function lifecycleKey(nodeId: string, engineType: EngineType): string {
@@ -243,7 +229,6 @@ export const usePendingActionsStore = create<PendingActionsState>((set, get) => 
                 engineType,
                 action: command,
                 baselineStatus: baseline.processStatus,
-                ...(command === 'setLock' ? { baselineLocked: baseline.locked } : {}),
                 expiresAt
             })
             set({ pending: next })

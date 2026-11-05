@@ -756,11 +756,6 @@ func TestResidentRefusesWithoutSideEffects(t *testing.T) {
 		f.ex.nodeProjection.set(nodeProjection{PausedLocally: true, ManagementBlocked: true})
 	})
 	test("paused by peer", "paused", func(f *residentFixture) { f.ex.nodeProjection.set(nodeProjection{ManagementBlocked: true}) })
-	test("engine locked", "engine-locked", func(f *residentFixture) {
-		if _, err := f.ex.desired.setLocked("fake", true); err != nil {
-			t.Fatal(err)
-		}
-	})
 	test("missing installed model", "not-installed", func(f *residentFixture) { f.ex.inventory["fake"] = []string{} })
 	test("unknown installed inventory", "not-installed", func(f *residentFixture) { delete(f.ex.inventory, "fake") })
 	test("implicit binding", "unsupported-load", func(f *residentFixture) { delete(f.ex.reg.engines["fake"].Operations, engines.OperationLoad) })

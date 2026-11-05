@@ -171,7 +171,6 @@ The shared wire contract is `buildapply.EngineOwnerEvidence`, with exactly:
 | `managerIncarnation` | Nonempty existing Executor `switchIncarnation`, even with no instantiated engines. |
 | `captureToken` | Canonical digest of incarnation and every detached section, knowledge state, reason and derived completeness. |
 | `intent` | Observation of `{revision,enabledByEngine,offByEngine}`, preserving all explicit saved keys and effective Off provenance. |
-| `locks` | Observation of `{revision,lockedByEngine}`, preserving the complete saved map, including explicit false keys. |
 | `universe` | Observation of the sorted complete engine union. Each entry has `engine`, `registered`, `supported`, `installed`, `running`, `engineRunId`, `terminationVerified`, `modelRoots`, `dataRoots`, `rootsComplete`. |
 | `stopAuthority` | Observation of the same sorted engine keys, each with `engine`, `scoped`, `adopted`, `reclaimPending`, `processLifetime`, `reason`. |
 | `reservations` | Observation of `{revision,blocksApply,unsafeCopiesComplete,operations}` from the joint copy/download/content owner. |
@@ -416,8 +415,8 @@ acceptance, drain and coupled policy application stay at their existing owner.
 Load previews describe whole-router scope, affected configured models, the
 60-second drain bound, possible interruption and whether the engine stays Off.
 Unobserved loaded models remain explicit unknowns for broker reconciliation.
-Unchanged typed settings do not restart an owned process. Saving Off, paused or
-locked settings never activates it; adopted processes remain read-only.
+Unchanged typed settings do not restart an owned process. Saving Off or paused
+settings never activates it; adopted processes remain read-only.
 No typed settings create qualification. The broker's existing build-maintenance
 settings-entry exclusion also covers this mutation; it is not a client bypass
 of the independent owner-evidence requirements for production build apply.
@@ -1062,7 +1061,7 @@ Checks before effects, after E3 admission and the lifecycle lock, and after
 the dispatch relay refuse these conditions with `outcome:"not-dispatched"`:
 
 - `projection-unknown`: no broker projection since startup.
-- `paused`, `engine-locked`: either-origin pause or durable engine lock.
+- `paused`: either-origin pause.
   `beginRemote` registers accepted work for cancellation by a later veto.
 - `switch-busy`: an unreleased E3 checkpoint reserves this engine.
 - `engine-off`: no saved On intent or running engine, regardless of Off origin.
@@ -1102,7 +1101,7 @@ it dispatched under its admission mutex. The broker must return its result as an
 
 A refusal is `result:{"dispatched":false,"reason":"reservation-revoked"}`.
 Reasons are `reservation-revoked`, `reservation-unknown`, or a shared resident
-refusal reason: `engine-off`, `no-fit`, `paused`, `engine-locked`,
+refusal reason: `engine-off`, `no-fit`, `paused`,
 `paused-local`, `engine-off-local` (older inbound reasons), `not-served`, `not-installed`, `unqualified`,
 `unsupported-load`, `switch-busy`, `operation-timeout`, `observation-unknown`,
 `projection-unknown`. The prepare and dispatch validators reject `load-failed`:
@@ -1327,20 +1326,12 @@ extensibility story for an open-source product.
   terminationVerified: boolean
   healthy: boolean
   port: number
-  locked?: boolean
 }
 ```
 
 `terminationVerified` is positive physical-stop evidence. `running:false` alone
 does not prove termination, including when orphan reclamation failed. A completed
 physical Pause requires verified shutdown rather than an inferred stopped state.
-
-`locked` is the engine's durable lock on its own node. Present `true` or `false`
-is authoritative; absent means lock state is unavailable, as from an older
-target, and is never evidence of unlocked. Every registered engine's status,
-get-installed shell and state push reads the desired-state store before taking
-the runtime state mutex. A store read error leaves `locked` unavailable and
-fails activation closed.
 
 `LogLine` object (entry in `engine:logs`):
 ```json
@@ -1396,7 +1387,6 @@ Requests (caller → service):
 | `engine:start` | `{ engine }` | `EngineStatus` (after readiness) |
 | `engine:stop` | `{ engine }` | `EngineStatus` |
 | `engine:restart` | `{ engine }` | `EngineStatus` |
-| `engine:set-lock` | `{ engine, locked }` | `null` acknowledgement after persistence and verified stop for Lock, or removal of only the lock for Unlock. Local only: decoded strictly, with exact, unique member names, so `engine` must be registered, `locked` must be a JSON boolean and any other member, `node`, `nodeId`, `caller` and `origin` included, is `-32602`. No `ec` route or peer relay reaches it. See Lock storage and execution below |
 | `engine:action` | `{ engine, action, params }` | the engine's raw response |
 | `engine:logs` | `{ engine }` | `{ lines: [LogLine] }` |
 | `engine:errors` | — | `{ errors: [ServiceError] }` |
@@ -1502,11 +1492,9 @@ from the current authenticated worker notification.
 
 HTTP 409 `{"error": "bounded explanation", "code":"remote_management_denied"}`
 maps to RPC `-32012`, independently of `-32010/policy_conflict`,
-`-32011/local_veto`, `-32013/engine_locked` and unpinned 403. Each typed code
+`-32011/local_veto` and unpinned 403. Each typed code
 keeps its number through the 409 body, stream error frames and broker relays,
-with the target's message and no JSON-RPC error `data`. `-32013` is the refusal
-of a start, load or switch into an engine locked on its own node; a switch
-receipt carries it as kind `engine_locked`, which is valid only with `-32013`. Missing, invalid, unsupported, changing or
+with the target's message and no JSON-RPC error `data`. Missing, invalid, unsupported, changing or
 incomplete authority denies without a cached allow. A grant does not override
 local veto, private/CORS policy, served/resident protection or target admission.
 Permitted inference is unchanged. Direct operations accept at the fresh `ec`
@@ -1537,11 +1525,11 @@ The broker's `policy:reply {id, result, error?, errorCode?}` carries a JSON-RPC
 `errorCode` on every failure. Invalid parameters, including missing or malformed
 `expectedPersistedRevision`, invalid policy and invalid availability, use
 `-32602`; revision conflicts use `-32010`; a resume the local veto refuses uses
-`-32011`; remote-management denial uses `-32012`; an engine lock uses `-32013`;
+`-32011`; remote-management denial uses `-32012`;
 target-owned profile inference settings use `-32014`; save failures and other operational errors use `-32000`. Inbound
 policy routes return HTTP 400 for `-32602`, HTTP 409 with the JSON body
-`{"error": <diagnostic>, "code": "policy_conflict" | "local_veto" | "remote_management_denied" | "engine_locked" | "remote_setting_locked"}`
-for `-32010`, `-32011`, `-32012`, `-32013` and `-32014`, and a plain-text HTTP 409 for other broker or relay errors. At the
+`{"error": <diagnostic>, "code": "policy_conflict" | "local_veto" | "remote_management_denied" | "remote_setting_locked"}`
+for `-32010`, `-32011`, `-32012` and `-32014`, and a plain-text HTTP 409 for other broker or relay errors. At the
 origin, HTTP 400 becomes JSON-RPC `-32602`, a typed 409 becomes its code, and
 other HTTP failures become `-32000`; diagnostics are preserved without inferring
 a code from their text. A stale policy draft conflicts before
@@ -1558,10 +1546,10 @@ policy options, adding error data or classifying by text. Permission and
 expected revision are checked before the target lock under the existing
 writer lock. Rejection leaves the entire policy and its publication unchanged.
 
-**Off, lock and pause.** Saved Off is ordinary intent, never a prohibition on a
+**Off and pause.** Saved Off is ordinary intent, never a prohibition on a
 new granted peer start/load/switch. This includes local, peer and legacy Off and
 missing intent. Explicit model load never starts a stopped engine, and its real
-runtime failure must not become a lock/pause refusal. Saved-On restoration,
+runtime failure must not become a pause refusal. Saved-On restoration,
 wake and residency retain their existing intent requirements. A local stop or
 uninstall records `offBy:local`; an ec stop records `peer` unless already Off,
 preserving its earlier provenance. On clears the origin. Legacy Off without
@@ -1573,7 +1561,7 @@ After a successful fresh grant check, `controlServer.authorize` uses the common
 route registry classification: every incoming mutation returns HTTP 503 until
 projection is known, then HTTP 409 with `code:local_veto` while
 `managementBlocked` is true. The exact message is `This node is paused. Resume it on this node before managing it remotely.` Grant denial retains `-32012`
-precedence, and pause precedes lock for a granted peer. Install, start, stop,
+precedence. Install, start, stop,
 load, unload, delete, pull, settings apply, switch apply and policy set are fenced.
 Availability set alone delegates the pause decision to the broker, after pin,
 fresh grant, projection hydration and recovery checks. The broker allows peers
@@ -1586,51 +1574,20 @@ files. No second production route registry is introduced.
 
 Either-origin pause projection cancels accepted starts, loads, crash relaunch
 and pending activation. Local start/load/switch also refuse known pause; local
-reads, configuration, lock/unlock, stop and unload remain available. Accepted
+reads, configuration, stop and unload remain available. Accepted
 file-only transfers can continue, but new destination copy admission still
 refuses known Pause, and peer mutations remain fenced. Sleep preserves saved
 intent and protects external ownership from automatic unload or unscoped stop.
 Unverified ownership or termination prevents a completed physical Pause; the
 broker retains its draining fence until proof or local retry. Settings
-apply/recovery can change metadata but cannot restart while paused or locked.
+apply/recovery can change metadata but cannot restart while paused.
 Accepted content installation/download may finish, without starting an engine.
-When available, a locked engine still admits granted stop/unload/delete/pull,
-install-without-start and settings edits; restart-after cannot activate it.
-Lock refusal is `-32013/engine_locked` with the exact message `This engine is locked on this node. Unlock it on this node before starting or loading a model.`
 The HTTP body, stream terminal error, JSON-RPC relay and switch receipt retain
-the numeric code and bounded target message. Switch kind `engine_locked` is
-valid only with `-32013`; pause and operation-scoped Stop retain `-32011`.
+the numeric code and bounded target message. Pause and operation-scoped Stop retain `-32011`.
 
-**Lock storage and execution.** `engine-state.json` extends the existing document
-with optional `locked: {engine:true}`; it has no schema version bump or separate
-store. Missing maps mean unlocked. Reject null maps, null/non-boolean entries
-and locked+On contradictions rather than repairing unreadable state. Preserve
-unknown engine keys and checkpoints. An older binary rewriting this private
-file may discard locks; downgrade to an old writer is unsupported.
-
-Each complete command holds the engine's `lockMu` before mutation admission
-through acknowledgement. Ordinary lifecycle commands do not take it. Unreleased
-switch involvement refuses lock/unlock before any write with `-32000` and the
-existing `engine "<engine>" is reserved by an engine switch (busy)` message.
-Lock atomically replaces lock=true, saved Off and local Off provenance, emits
-intent/state, then cancels starts, serving loads and crash relaunch before
-waiting on `opMu`. Never hold `desired.mu` while waiting on `opMu`. The existing
-process owner stops/unloads and verifies termination before success. Pre-replace
-failure leaves disk/runtime unchanged. Post-replace stop failure retains durable
-locked+Off, publishes actual runtime facts and returns operational `-32000`;
-idempotent Lock retries unresolved stop. Use the existing atomic writer warning
-semantics; a directory-sync warning is not proof of power-loss durability.
-Unlock removes only the lock and emits state, leaving Off and provenance without
-starting. Lock-only changes emit state too.
-
-Common start/load guards read the durable store under `desired.mu`; loads check
-before admission and after lifecycle waiting, and starts check before accepting
-readiness. No late success, intent setter or switch commit may save On over a
-lock. These guards cover explicit activation, restart, restore, wake, crash
-relaunch, settings recovery, switch recovery and action restart-after. Neither
-sleep nor idle unload/stop changes lock. Source ownership validation remains
-unchanged when switching away from a locked engine; target lock and either-origin
-pause are checked before source stop for local and remote switches.
+Common start/load guards preserve desired intent and either-origin pause.
+Source ownership validation remains authoritative; pause is checked before
+source stop for local and remote switches.
 
 The `engine:remote-*` methods are the client half: engine-manager resolves the target `node` in an `ec` peer directory (fed by its own `discovery:subscribe{services:[ec]}` to the broker relay), dials the peer's `ec` surface with the same pinned identity, relays each streamed progress frame up as `engine:remote-progress` (keyed by a minted `opId`), and settles the request on the terminal frame. Remote install/pull run for the operation's full duration (no broker-imposed timeout); remote stop and model unload/delete are fast request/response, a remote model load whose binding declares a long response budget uses the readiness-sized response budget, and remote start waits for the engine's bounded readiness result. They error if this node isn't clustered or the target isn't a pinned peer.
 
@@ -1925,7 +1882,7 @@ The operator opens the UI; the Broker calls `engine:get-installed`, which return
 
 The operator starts it: `engine:start {engine:"llamacpp"}` resolves the manifest runtime (the manifest's listen-address variable = `{host}:{port}`, `{host}` from `runtime.bind` defaulting to `0.0.0.0`; per-call `port`/`bind` override either), spawns the process, and waits for the readiness probe before reporting `running:true, healthy:true` in the response and an `engine:state-changed` notification. A periodic health probe keeps the state current; an unexpected exit emits `engine:state-changed` + `errors:report`. If something is already serving the port, `start` **adopts** it instead of spawning a duplicate.
 
-The operator stops it: `engine:stop {engine:"llamacpp"}` signals a process the service owns. For an **adopted** engine (no owned process), it resolves the PID bound to the port and terminates it only when that process is running the binary we manage — reclaiming an orphan a prior run left on our own managed port; a genuinely foreign listener (a different image on a different port) is declined with an error naming its PID and image. A user-initiated `stop` records the OFF intent regardless (even when the RPC returns an error), so the health loop and restore-on-restart don't flip the engine back on — clients must not treat a stop error as proof the OFF choice was discarded. The cluster `ec` stop endpoint shares this semantics and may return HTTP 500 while OFF is persisted. Local and peer Off retain their provenance; either permits a later granted peer activation when unlocked and available.
+The operator stops it: `engine:stop {engine:"llamacpp"}` signals a process the service owns. For an **adopted** engine (no owned process), it resolves the PID bound to the port and terminates it only when that process is running the binary we manage — reclaiming an orphan a prior run left on our own managed port; a genuinely foreign listener (a different image on a different port) is declined with an error naming its PID and image. A user-initiated `stop` records the OFF intent regardless (even when the RPC returns an error), so the health loop and restore-on-restart don't flip the engine back on — clients must not treat a stop error as proof the OFF choice was discarded. The cluster `ec` stop endpoint shares this semantics and may return HTTP 500 while OFF is persisted. Local and peer Off retain their provenance; either permits a later granted peer activation when available.
 
 The operator pulls a model with `engine:action {engine:"llamacpp", action:"pull_model", params:{model:"owner/repo:Q4_K_M"}}`, which issues the manifest-declared `POST 127.0.0.1:{port}/models` through the streaming pull owner. Local `engine:pull-progress` and remote `engine:remote-progress` frames carry the target model, download ID and lifecycle snapshot. Unchanged lifecycle/percentage updates are coalesced. Streaming pulls use a 30-minute inactivity watchdog refreshed only when a layer/file completed-byte count advances; duplicate progress and heartbeats do not keep a stalled pull alive. An HTTP `pull_model` action must declare a `progress_protocol` (only `llamacpp-models-sse` exists), and the manifest is refused at load without one; the adapter requires the matching `download_finished` event before emitting `stage:"success"`, so a closed stream or 100 percent alone is unknown. Failed or unknown pulls emit `stage:"error", percent:-1` with the fixed reason in their lifecycle snapshot, in addition to the JSON-RPC error. A CLI-driven pull has indeterminate progress and retains the fixed 30-minute action timeout. Its successful command exit must not contain an explicit error result. On `shutdown` (or stdin EOF) the service stops every running engine first, so none are orphaned.
 
@@ -2030,7 +1987,7 @@ the last identity until a subsequent prepare replaces them; the broker's journal
 owns older receipt retention. Unreadable checkpoint metadata fails mutation and
 restore admission closed.
 
-Local and remote prepare/start recheck lock (`-32013`) and either-origin pause
+Local and remote prepare/start recheck either-origin pause
 (`-32011`); target refusal precedes source stop. Explicit local Off
 cancels remote target work and durably records local provenance before waiting
 on the operation lock for cleanup; that vetoing stop returns its actual result.
@@ -2061,7 +2018,7 @@ a new veto. Release requires termination evidence for those flags, rather than
 all saved Off provenance. Cleanup failure retains the checkpoint.
 The existing projection
 path cancels activation on either-origin pause. Local switching also requires
-an unlocked target and an available node.
+an available node.
 Before a remote reservation is released, new local Off of either engine also
 cancels an already-committed target. Either-origin pause fences committed targets
 of local and remote reservations. Reconcile durably changes the target to

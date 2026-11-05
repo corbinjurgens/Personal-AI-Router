@@ -155,11 +155,11 @@ func (p BoundEnginePrepared) Validate() error {
 		return nil
 	}
 	switch p.Reason {
-	case "engine-switch-timeout", "engine-switch-busy", "engine-switch-cooldown", "engine-locked", "management-denied", "model-unavailable", "paused", "draining", "no-fit", "stale-revision", "unavailable":
+	case "engine-switch-timeout", "engine-switch-busy", "engine-switch-cooldown", "management-denied", "model-unavailable", "paused", "draining", "no-fit", "stale-revision", "unavailable":
 	default:
 		return errors.New("invalid preparation reason")
 	}
-	if p.Code != -32000 && p.Code != -32010 && p.Code != -32011 && p.Code != -32012 && p.Code != -32013 && p.Code != -32602 {
+	if p.Code != -32000 && p.Code != -32010 && p.Code != -32011 && p.Code != -32012 && p.Code != -32602 {
 		return errors.New("invalid preparation RPC code")
 	}
 	if p.Message == "" || len(p.Message) > MaxBoundEngineMessageBytes || !utf8.ValidString(p.Message) {

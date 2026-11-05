@@ -203,8 +203,8 @@ export default function ModelEngineBindingsEditor({
             </Flex>
             <Text kind="body/regular/sm" className="text-subtle-color">
                 The node can refuse edits to a binding reserved by an automatic switch as busy.
-                Existing engine switch controls show activation phases and errors. Locks and pause
-                still apply; unlock or Resume on the target node.
+                Existing engine switch controls show activation phases and errors. Pause still
+                applies; Resume on the target node.
             </Text>
         </Stack>
     )

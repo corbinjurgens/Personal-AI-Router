@@ -41,7 +41,7 @@ func TestEngineBindingOffersDescriptorDefaultConfiguration(t *testing.T) {
 	base := h.engine.answer
 	h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
 		if method == "engine:get-installed" {
-			return map[string]any{"engines": []map[string]any{{"engine": "custom", "installed": true, "running": false, "healthy": false, "locked": false}}}, ""
+			return map[string]any{"engines": []map[string]any{{"engine": "custom", "installed": true, "running": false, "healthy": false}}}, ""
 		}
 		return base(method, raw)
 	})
@@ -196,15 +196,6 @@ func TestEngineBindingOffersWithdrawUnknownOrVetoedEvidence(t *testing.T) {
 		h.pp.readyMu.Lock()
 		delete(h.pp.facadeState, "llamacpp-custom")
 		h.pp.readyMu.Unlock()
-	})
-	test("locked", func(h *boundHarness) {
-		base := h.engine.answer
-		h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
-			if method == "engine:get-installed" {
-				return map[string]any{"engines": []map[string]any{{"engine": "llamacpp-custom", "installed": true, "running": false, "healthy": false, "locked": true}}}, ""
-			}
-			return base(method, raw)
-		})
 	})
 }
 

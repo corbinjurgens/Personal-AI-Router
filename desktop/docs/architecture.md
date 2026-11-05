@@ -388,7 +388,7 @@ malformed, unsupported, stale or recovery-required lifecycle data cannot make a
 name ready. A lifecycle completion waits for a current canonical inventory read;
 settling the initiating RPC cannot clear a newer target operation. The target's
 content gate refuses unsafe Load/export effects, including raw action and
-automatic residency paths. Existing authorization, engine intent, pause, lock
+automatic residency paths. Existing authorization, engine intent, pause
 and strict identity boundaries continue to apply.
 
 ### Engine settings

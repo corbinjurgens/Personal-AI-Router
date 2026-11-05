@@ -162,31 +162,6 @@ describe('role substitution', () => {
         expect(entry().phase).toBe('vetoed')
     })
 
-    it('does not treat locked-engine model evidence as a node-wide pause', async () => {
-        const store = useNodeConfigurationStore.getState()
-        const locked: NodePolicySnapshot = {
-            ...snapshot('5'),
-            modelConfiguration: {
-                policyRevision: '5',
-                observationGeneration: 1,
-                models: [
-                    {
-                        engine: 'llamacpp',
-                        model: 'qwen3:4b',
-                        desiredResident: true,
-                        state: 'blocked',
-                        reason: 'engine-locked'
-                    }
-                ]
-            }
-        }
-        store.adopt(PEER, locked)
-        store.setRole(PEER, 'weak', { engine: 'llamacpp', model: 'qwen3:4b' })
-        set.mockResolvedValue(snapshot('6'))
-        await store.save(PEER, PEER)
-        expect(set).toHaveBeenCalledTimes(1)
-        expect(entry().phase).toBe('applied')
-    })
 
     it('permits local role configuration while paused', async () => {
         const store = useNodeConfigurationStore.getState()

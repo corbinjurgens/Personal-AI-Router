@@ -43,7 +43,6 @@ type ProtectedDigests struct {
 	Policy             string `json:"policy"`
 	EngineSettings     string `json:"engineSettings"`
 	Intent             string `json:"intent"`
-	Locks              string `json:"locks"`
 	IdentityMembership string `json:"identityMembership"`
 }
 
@@ -52,7 +51,7 @@ type JournalExpectations struct {
 	StopEngines         bool                `json:"stopEngines"`
 	UnloadModels        bool                `json:"unloadModels"`
 	RemainPaused        bool                `json:"remainPaused"`
-	PreserveIntentLocks bool                `json:"preserveIntentLocks"`
+	PreserveIntent      bool                `json:"preserveIntent"`
 	OnActive            nodepolicy.OnActive `json:"onActive"`
 	DrainTimeoutSeconds int                 `json:"drainTimeoutSeconds"`
 }
@@ -994,7 +993,7 @@ func (j *Journal) validateReceipt(r Receipt) error {
 	if r.ReadbackPause != nil && (r.Pause == nil || r.ReadbackPause.Origin != r.Pause.Origin || r.ReadbackPause.Owned != r.Pause.Owned || r.ReadbackPause.PolicySHA256 != r.Pause.PolicySHA256 || !token(r.ReadbackPause.Revision, false)) {
 		return errors.New("readback cannot replace the accepted Pause semantics/provenance")
 	}
-	for _, digest := range []string{r.CandidateSHA256, r.PreviousSHA256, r.InventorySHA256, r.Protected.Policy, r.Protected.EngineSettings, r.Protected.Intent, r.Protected.Locks, r.Protected.IdentityMembership} {
+	for _, digest := range []string{r.CandidateSHA256, r.PreviousSHA256, r.InventorySHA256, r.Protected.Policy, r.Protected.EngineSettings, r.Protected.Intent, r.Protected.IdentityMembership} {
 		if !lowerHex(digest, 64) {
 			return errors.New("missing/invalid protected digest")
 		}
@@ -1005,13 +1004,13 @@ func (j *Journal) validateReceipt(r Receipt) error {
 	if containsPath(r.Runtime.CandidatePath, j.root.Path) || containsPath(j.root.Path, r.Runtime.CandidatePath) {
 		return errors.New("operation root overlaps candidate")
 	}
-	if !knownFences(r.Fences) || !r.Consent.AllowEngineStop || !r.Consent.AllowInterruption || !r.Expected.StopEngines || !r.Expected.UnloadModels || !r.Expected.RemainPaused || !r.Expected.PreserveIntentLocks ||
+	if !knownFences(r.Fences) || !r.Consent.AllowEngineStop || !r.Consent.AllowInterruption || !r.Expected.StopEngines || !r.Expected.UnloadModels || !r.Expected.RemainPaused || !r.Expected.PreserveIntent ||
 		(r.Expected.OnActive != nodepolicy.FinishActive && r.Expected.OnActive != nodepolicy.CancelActive) || r.Expected.DrainTimeoutSeconds < 0 || r.Expected.DrainTimeoutSeconds > 1800 {
 		return errors.New("incomplete or unapproved receipt expectations/fences")
 	}
 	for _, fence := range []Observation[string]{
 		r.Fences.RuntimeGeneration, r.Fences.ServiceInstance, r.Fences.BrokerGeneration, r.Fences.ManagerIncarnation,
-		r.Fences.PolicyRevision, r.Fences.SettingsRevision, r.Fences.IntentRevision, r.Fences.LocksRevision, r.Fences.AvailabilityRevision,
+		r.Fences.PolicyRevision, r.Fences.SettingsRevision, r.Fences.IntentRevision, r.Fences.AvailabilityRevision,
 	} {
 		if !utf8.ValidString(*fence.Value) {
 			return errors.New("invalid UTF-8 in an owner fence")

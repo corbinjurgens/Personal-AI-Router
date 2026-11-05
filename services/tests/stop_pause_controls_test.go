@@ -484,8 +484,7 @@ func TestStopPauseControlsProcess(t *testing.T) {
 	t.Run("queued pinned peer demand is refused without later execution", func(t *testing.T) { testStopPauseQueue(t, true) })
 	t.Run("configured finish preserves execution until explicit completion", func(t *testing.T) { testStopPauseDrain(t, false) })
 	t.Run("immediate escalation bypasses the held configured drain", func(t *testing.T) { testStopPauseDrain(t, true) })
-	t.Run("paused restart preserves saved Off and resumes only saved On", func(t *testing.T) { testStopPauseRestart(t, false) })
-	t.Run("paused restart preserves lock and resident declarations", func(t *testing.T) { testStopPauseRestart(t, true) })
+	t.Run("paused restart preserves saved Off and resumes only saved On", func(t *testing.T) { testStopPauseRestart(t) })
 	t.Run("precommit local pause falls back at the origin", testStopPauseFallback)
 	t.Run("committed local stream fails and only a new client request retries", func(t *testing.T) { testStopPauseCommitted(t, false) })
 	t.Run("committed peer stream fails at origin without replay", func(t *testing.T) { testStopPauseCommitted(t, true) })
@@ -631,8 +630,6 @@ func testStopPauseFence(t *testing.T, mode string, peerOrigin bool) {
 	policy := fetchServicePolicy(t, f.client).Policy
 	policy.Admission.MaxConcurrentPerModel = 3
 	setServicePolicy(t, f.client, policy)
-	f.call(t, "engine:set-lock", map[string]any{"engine": "llamacpp-custom", "locked": true})
-	f.call(t, "engine:set-lock", map[string]any{"engine": "llamacpp-custom", "locked": false})
 	f.call(t, "engine:stop", map[string]string{"engine": "llamacpp-custom"})
 	// Explicit unload can fail because its HTTP server was physically stopped;
 	// that transport failure must not be an availability veto or cause a wake.
@@ -1022,11 +1019,10 @@ func testStopPauseDrain(t *testing.T, escalate bool) {
 	f.native.assertCounts(t, 1, 0, 0)
 }
 
-func testStopPauseRestart(t *testing.T, locked bool) {
+func testStopPauseRestart(t *testing.T) {
 	f := newStopPauseFixture(t)
 	f.startModel(t)
 	f.call(t, "engine:stop", map[string]string{"engine": "llamacpp-custom"})
-	f.call(t, "engine:set-lock", map[string]any{"engine": "llamacpp-custom", "locked": locked})
 	policy := fetchServicePolicy(t, f.client).Policy
 	profile := fixtureResidentProfile()
 	// Resident configuration requires a qualification reference. This is only
@@ -1043,11 +1039,10 @@ func testStopPauseRestart(t *testing.T, locked bool) {
 	intentPath := filepath.Join(jointAppDir(f.service.configDir), "engine-bin", "engine-state.json")
 	var before struct {
 		Engines map[string]bool `json:"engines"`
-		Locked  map[string]bool `json:"locked"`
 	}
 	task2Decode(t, readLiveDurableFile(t, intentPath), &before)
-	if !before.Engines["llamacpp"] || before.Engines["llamacpp-custom"] || before.Locked["llamacpp-custom"] != locked {
-		t.Fatalf("Pause changed On/Off/lock: %+v", before)
+	if !before.Engines["llamacpp"] || before.Engines["llamacpp-custom"] {
+		t.Fatalf("Pause changed On/Off: %+v", before)
 	}
 	if err := f.service.cleanupChecked(); err != nil {
 		t.Fatalf("stop paused service: %v", err)
@@ -1062,11 +1057,10 @@ func testStopPauseRestart(t *testing.T, locked bool) {
 	}
 	var after struct {
 		Engines map[string]bool `json:"engines"`
-		Locked  map[string]bool `json:"locked"`
 	}
 	task2Decode(t, readLiveDurableFile(t, intentPath), &after)
 	if !reflect.DeepEqual(before, after) {
-		t.Fatalf("paused restart changed intent/locks: before=%+v after=%+v", before, after)
+		t.Fatalf("paused restart changed intent: before=%+v after=%+v", before, after)
 	}
 	f.assertEffects(t, 0, 1, 0, 0)
 	f.native.assertCounts(t, 0, 0, 0)
@@ -1077,12 +1071,11 @@ func testStopPauseRestart(t *testing.T, locked bool) {
 		return len(f.engine.starts["llamacpp"]) == 2
 	})
 	var status struct {
-		Running bool  `json:"running"`
-		Locked  *bool `json:"locked"`
+		Running bool `json:"running"`
 	}
 	task2Decode(t, f.call(t, "engine:status", map[string]string{"engine": "llamacpp-custom"}), &status)
-	if status.Running || status.Locked == nil || *status.Locked != locked {
-		t.Fatalf("Resume activated saved-Off/locked engine: %+v", status)
+	if status.Running {
+		t.Fatalf("Resume activated saved-Off engine: %+v", status)
 	}
 	f.assertEffects(t, 0, 2, 0, 0)
 	f.native.assertCounts(t, 0, 0, 0)

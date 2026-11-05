@@ -361,7 +361,6 @@ describe('engine switch controls in node settings', () => {
             label: 'Remote management permission denied',
             message: 'refused'
         },
-        { name: 'locked engine', code: -32013, label: 'Engine locked', message: 'engine locked' },
         {
             name: 'fresh pause',
             code: -32011,
@@ -435,7 +434,7 @@ describe('engine switch controls in node settings', () => {
                                 recoveryRequired: true,
                                 error: {
                                     code,
-                                    kind: code === -32013 ? 'engine_locked' : 'validation',
+                                    kind: 'validation',
                                     message
                                 }
                             })
@@ -453,53 +452,6 @@ describe('engine switch controls in node settings', () => {
             expect(submit().disabled).toBe(true)
         }
     )
-    it('excludes locked activation targets while leaving them selectable as sources', async () => {
-        useEngineStatusStore.setState({
-            statusByNode: new Map([
-                [
-                    'node-a',
-                    new Map([
-                        [customEngine, { ...emptyEngineStatus('node-a', customEngine), locked: true }]
-                    ])
-                ]
-            ])
-        })
-        await mount()
-        const lists = container.querySelectorAll('[role="listbox"]')
-        expect(lists[0]?.querySelector('button[value="llamacpp-custom"]')).not.toBeNull()
-        expect(lists[1]?.querySelector('button[value="llamacpp-custom"]')).toBeNull()
-        await select(0, 'llamacpp-custom')
-        await select(1, 'llamacpp')
-        expect(submit().disabled).toBe(false)
-    })
-    it('blocks an already selected target when authoritative lock readback arrives', async () => {
-        await mount()
-        await select(0, 'llamacpp')
-        await select(1, 'llamacpp-custom')
-        await act(async () =>
-            useEngineStatusStore.setState({
-                statusByNode: new Map([
-                    [
-                        'node-a',
-                        new Map([
-                            [
-                                customEngine,
-                                { ...emptyEngineStatus('node-a', customEngine), locked: true }
-                            ]
-                        ])
-                    ]
-                ])
-            })
-        )
-        expect(submit().disabled).toBe(true)
-        expect(container.textContent).toContain(
-            'Engine locked. Unlock it on the device running it before switching.'
-        )
-        await act(async () => submit().click())
-        expect(invoke.mock.calls.filter(([channel]) => channel === 'engines:switch')).toHaveLength(
-            0
-        )
-    })
     it('drain shows reported identity and evidence without percentage or optimistic completion', async () => {
         await mount()
         await act(async () =>

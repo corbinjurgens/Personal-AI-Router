@@ -939,8 +939,8 @@ Engine-manager's `ec` route registry gates all mutations with the shared
 permission predicate; broker policy, availability, settings and switch owners
 recheck immediately before acceptance. Denial is HTTP 409
 `remote_management_denied`, preserved as RPC `-32012`; unpinned callers remain
-403, target veto is `-32011`, engine lock is `-32013` and revision conflict is
-`-32010`. Reads, status and permitted inference remain available. Grants cannot bypass pause, engine locks,
+403, target veto is `-32011` and revision conflict is
+`-32010`. Reads, status and permitted inference remain available. Grants cannot bypass pause,
 private policy, CORS, served-model or resident protections. Revocation blocks
 new acceptance, including queued broker writes, while already accepted work
 can finish or reconcile and remains visible in progress and receipt reads.
@@ -1002,10 +1002,10 @@ retains stored pause and live draining, reports actual availability, and returns
 `-32000` with `Pause could not stop every engine: ` plus bounded detail. A local
 Pause can retry; peer retries remain fenced. A paused node skips saved-On
 restoration on startup and manager replacement. Local Resume wakes only
-unlocked saved-On engines and reconciles resident declarations through existing
+saved-On engines and reconciles resident declarations through existing
 guards; cancelled requests are not replayed. The broker's
 model-configuration reasons are `paused` for either-origin pause and `engine-off`
-for ordinary saved Off; saved Off is not inferred to be an engine lock.
+for ordinary saved Off.
 
 Conservative switch cleanup may release a reconciled manager reservation while
 retaining a durable pause obligation and recovery receipt behind the pause

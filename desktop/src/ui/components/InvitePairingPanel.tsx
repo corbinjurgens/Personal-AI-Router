@@ -24,7 +24,7 @@ export function RemoteManagementChoice({
     return (
         <FormField
             slotLabel="Remote management of this device"
-            slotHelp="This choice applies to the device you are using. Reading status and using models this device serves remain available. Engine locks and node pause still apply."
+            slotHelp="This choice applies to the device you are using. Reading status and using models this device serves remain available. Node pause still applies."
         >
             <RadioGroup
                 name={name}

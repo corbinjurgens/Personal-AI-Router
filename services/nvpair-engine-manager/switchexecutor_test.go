@@ -92,12 +92,6 @@ func TestSwitchPrepareValidations(t *testing.T) {
 			}
 			st.plat.Runtime.Ready = nil
 		}, settings.SwitchErrorValidation},
-		{"remote locked target", func(ex *Executor, p *settings.SwitchPrepareRequest) {
-			p.Origin = settings.SwitchOriginRemote
-			if _, err := ex.desired.setLocked("target", true); err != nil {
-				t.Fatal(err)
-			}
-		}, settings.SwitchErrorEngineLocked},
 		{"remote local pause", func(ex *Executor, p *settings.SwitchPrepareRequest) {
 			p.Origin = settings.SwitchOriginRemote
 			ex.nodeProjection.set(nodeProjection{PausedLocally: true, ManagementBlocked: true})

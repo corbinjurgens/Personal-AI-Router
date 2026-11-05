@@ -112,8 +112,8 @@ export default function BuildApplyResult({
             )}
             {success && (
                 <div>
-                    Ordinary explicit Resume on this device is required. Saved intent and locks
-                    remain preserved.
+                    Ordinary explicit Resume on this device is required. Saved intent remains
+                    preserved.
                 </div>
             )}
             {recovery && command && (

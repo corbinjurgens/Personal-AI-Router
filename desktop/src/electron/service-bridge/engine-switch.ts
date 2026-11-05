@@ -90,7 +90,6 @@ function errorKind(value: JsonValue | undefined): SwitchErrorKind {
         case 'configuration_conflict':
         case 'fenced':
         case 'remote_veto':
-        case 'engine_locked':
         case 'unknown_receipt':
         case 'busy':
         case 'full':
@@ -120,9 +119,7 @@ function switchError(value: JsonValue | undefined): SwitchError | null {
               ? -32010
               : kind === 'remote_veto'
                 ? -32011
-                : kind === 'engine_locked'
-                  ? -32013
-                  : -32000
+                : -32000
     // Broker switchErrorDetail preserves PG denial as validation/-32012.
     const code = kind === 'validation' && row.code === -32012 ? -32012 : defaultCode
     const message = text(row.message)

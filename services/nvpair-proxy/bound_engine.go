@@ -124,7 +124,7 @@ func boundEngineRefusal(reason string) nodepolicy.BoundEnginePrepared {
 
 func isBoundEngineRefusal(reason string) bool {
 	switch reason {
-	case "engine-switch-timeout", "engine-switch-busy", "engine-switch-cooldown", "engine-locked", "management-denied", "model-unavailable":
+	case "engine-switch-timeout", "engine-switch-busy", "engine-switch-cooldown", "management-denied", "model-unavailable":
 		return true
 	}
 	return false

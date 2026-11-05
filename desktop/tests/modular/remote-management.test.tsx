@@ -79,7 +79,6 @@ const mocks = vi.hoisted(() => ({
         getSelfId: vi.fn<BridgeState['getSelfId']>(() => 'self'),
         setLocalDiscoveryModelRefresher: vi.fn<BridgeState['setLocalDiscoveryModelRefresher']>(),
         applyEngineIntent: vi.fn<BridgeState['applyEngineIntent']>(),
-        invalidateEngineLocks: vi.fn<BridgeState['invalidateEngineLocks']>(),
         invalidateModelObservations: vi.fn<BridgeState['invalidateModelObservations']>(),
         beginEngineIntentRead: vi.fn<BridgeState['beginEngineIntentRead']>(() => 0),
         getEngineIntent: vi.fn<BridgeState['getEngineIntent']>(() => null),
@@ -907,7 +906,7 @@ describe('permission controls', () => {
                 true
             )
             expect(document.body.textContent).toContain(
-                'This choice applies to the device you are using. Reading status and using models this device serves remain available. Engine locks and node pause still apply.'
+                'This choice applies to the device you are using. Reading status and using models this device serves remain available. Node pause still applies.'
             )
             if (allowed) await allow()
             if (path === 'manual')
@@ -1161,12 +1160,6 @@ describe('permission controls', () => {
 
     it.each([
         {
-            name: 'engine lock',
-            code: -32013,
-            detail: 'engine locked on target',
-            label: 'Engine locked'
-        },
-        {
             name: 'fresh pause',
             code: -32011,
             detail: 'refused',
@@ -1230,13 +1223,13 @@ describe('permission controls', () => {
         }
     )
 
-    it('allows metadata-only settings apply to a locked engine', async () => {
+    it('allows metadata-only settings apply', async () => {
         useEngineStatusStore.setState({
             statusByNode: new Map([
                 [
                     'peer-1',
                     new Map([
-                        ['llama-cpp', { ...emptyEngineStatus('peer-1', 'llama-cpp'), locked: true }]
+                        ['llama-cpp', emptyEngineStatus('peer-1', 'llama-cpp')]
                     ])
                 ]
             ])

@@ -12,8 +12,8 @@ package main
 // lives in memory, is replaced whole on every push and is unknown until the
 // first one, which the broker sends whenever engine-manager reports ready.
 //
-// Pause fences every peer mutation. Durable engine locks additionally fence
-// local and peer activation; ordinary saved Off is only lifecycle intent.
+// Pause fences every peer mutation and activation; ordinary saved Off is
+// only lifecycle intent.
 
 import (
 	"context"
@@ -126,7 +126,7 @@ func (e *Executor) activationDispatchContext(ctx context.Context, engine string)
 	return context.WithValue(ctx, activationDispatchKey{}, activationDispatch{e, engine})
 }
 
-// beginActivationEffect rechecks after saved-lock I/O, at the runner's effect
+// beginActivationEffect rechecks pause at the runner's effect
 // boundary. CLI callers hold the projection gate only through cmd.Start.
 // HTTP callers hand off inside client.Do at transport entry, before network or
 // response I/O; publication cancels the registered context independently of
@@ -163,10 +163,6 @@ func (e *localVetoError) Error() string { return e.reason }
 
 const nodePausedVeto = "This node is paused. Resume it on this node before managing it remotely."
 
-func engineLockedVeto(_ string) string {
-	return "This engine is locked on this node. Unlock it on this node before starting or loading a model."
-}
-
 func engineOffVeto(engine string) string {
 	return fmt.Sprintf("%s was turned off on the node itself; start it there", engine)
 }
@@ -177,7 +173,7 @@ func engineOffVeto(engine string) string {
 var errNoProjection = errors.New("this node's policy is not known yet; try again shortly")
 
 // remoteVeto is why a paired node may not start engine or load a model into it
-// now, or nil when it may. Either-origin pause and durable lock refuse with a
+// now, or nil when it may. Either-origin pause refuses with a
 // typed veto; an unknown projection refuses with errNoProjection.
 func (e *Executor) remoteVeto(engine string) error {
 	blocked, known := e.nodeProjection.managementBlocked()
@@ -186,13 +182,6 @@ func (e *Executor) remoteVeto(engine string) error {
 	}
 	if blocked {
 		return &localVetoError{code: codeLocalVeto, reason: nodePausedVeto}
-	}
-	locked, err := e.desired.locked(engine)
-	if err != nil {
-		return err
-	}
-	if locked {
-		return &localVetoError{code: codeEngineLocked, reason: engineLockedVeto(engine)}
 	}
 	return nil
 }
@@ -213,13 +202,6 @@ func activationAdoption(ctx context.Context) bool {
 func (e *Executor) activationVeto(engine string) error {
 	if blocked, known := e.nodeProjection.managementBlocked(); known && blocked {
 		return &localVetoError{code: codeLocalVeto, reason: nodePausedVeto}
-	}
-	locked, err := e.desired.locked(engine)
-	if err != nil {
-		return err
-	}
-	if locked {
-		return &localVetoError{code: codeEngineLocked, reason: engineLockedVeto(engine)}
 	}
 	return nil
 }

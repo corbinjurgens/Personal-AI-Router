@@ -55,7 +55,7 @@ func (b *Broker) bindingOffersLocked() *nodepolicy.EngineBindingOffers {
 			continue
 		}
 		for _, st := range statuses {
-			if st.Engine == ref.Engine && *st.Installed && !*st.Locked {
+			if st.Engine == ref.Engine && *st.Installed {
 				models = append(models, ref)
 			}
 		}

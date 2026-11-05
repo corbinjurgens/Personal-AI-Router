@@ -9,7 +9,7 @@ Stated memory recording follows the existing settings relay to its destination:
 `engine:set-stated-memory` and `engine:clear-stated-memory` (and manager
 `engine:remote-set-stated-memory` / `engine:remote-clear-stated-memory`) use
 authenticated mutation routes under `/v1/engine-settings/`. The destination
-broker owns remote grant, Pause and engine-lock checks. Target-only profiles
+broker owns remote grant and Pause checks. Target-only profiles
 persist privately in `model-memory-profiles.json`; inspection exposes bounded
 current-first `memoryProfiles` and `memoryProfilesUnavailable` on store failure.
 The bridge decodes exact decimal bytes, configuration identity, kind, timestamp
@@ -297,9 +297,8 @@ The typed engine API also exposes `switchEngine`, `switchStatus` and
 intent and recovery; the bridge validates the complete receipt and republishes
 `engine:switch-changed` as `engines:switch-changed` with node, request and sequence.
 Status accepts `afterSequence` for a bounded wait. Numeric refusal codes survive
-the IPC envelope, including configuration conflict (-32010), local veto
-(-32011) and engine lock (-32013). The receipt parser accepts kind
-`engine_locked` only with `-32013`.
+the IPC envelope, including configuration conflict (-32010) and local veto
+(-32011).
 
 The fence accepts `{nodeId?, requestId}` through `engines:switch-fence`.
 Its strict result is either confirmed `fenced: true` without a receipt or
@@ -313,12 +312,9 @@ After confirmed fencing, clients need a fresh revision before a new deliberate
 ID. The TUI does this for its own absent unacknowledged ID; desktop exposes the
 typed API without changing its controls or read-only engine status.
 
-Engine status carries an optional `locked` from engine-manager's `EngineStatus`
-through local and remote facts; an absent value stays absent. The local-only
-`engine:set-lock` is reached from `engine:command {command:'setLock'}` only for
-this device's own node. The node projection the broker sends engine-manager
+The node projection the broker sends engine-manager
 carries `managementBlocked`; the desktop does not read it. Model configuration
-reasons include `paused` and `engine-locked`, and the older `paused-local` and
+reasons include `paused`, and the older `paused-local` and
 `engine-off-local` remain readable. An older desktop rejects a snapshot carrying
 a new reason rather than showing generic text, so deploy the broker and its
 clients together for complete policy presentation.
@@ -366,7 +362,7 @@ inference arrives, then calls `engine:prepare-shutdown`, which stops local
 engine processes without clearing their persisted desired state, then waits for
 each worker to exit without force-killing it, so engines are not orphaned. The
 broker restores eligible enabled engines on the next startup, unless node Pause
-suppresses restoration; engine locks still block activation. Target-local Resume
+suppresses restoration. Target-local Resume
 delegates wake and resident reconciliation through the existing owners.
 
 ## Discovery and models

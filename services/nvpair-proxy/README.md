@@ -532,7 +532,7 @@ after preparation and revalidation; old streams retain their drain protection.
 
 Known preparation refusal is HTTP 503 with the existing JSON admission error
 and `X-PAIR-Admission`: `engine-switch-timeout`, `engine-switch-busy`,
-`engine-switch-cooldown`, `engine-locked`, `management-denied`,
+`engine-switch-cooldown`, `management-denied`,
 `model-unavailable`, or existing paused/draining/no-fit reasons. Transient
 reasons carry `Retry-After`; an optional `X-PAIR-Switch-Request-Id` names only
 known acceptance. Unknown acceptance is never resubmitted as a new operation.

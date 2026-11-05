@@ -74,7 +74,6 @@ function preview(): BuildApplyPreview {
         policyRevision: known('policy'),
         settingsRevision: known('settings'),
         intentRevision: known('intent'),
-        locksRevision: known('locks'),
         availabilityRevision: known('availability')
     }
     return {
@@ -110,7 +109,6 @@ function preview(): BuildApplyPreview {
                 policyDigest: known('d'.repeat(64)),
                 engineSettingsDigest: known('d'.repeat(64)),
                 intentDigest: known('d'.repeat(64)),
-                locksDigest: known('d'.repeat(64)),
                 stopEngines: known(true),
                 unloadModels: known(true)
             },
@@ -125,7 +123,7 @@ function preview(): BuildApplyPreview {
             restorePolicy: {
                 remainPaused: true,
                 requireLocalResume: true,
-                preserveIntentAndLocks: true,
+                preserveIntent: true,
                 preserveNewerPause: true,
                 automaticRollback: false
             },

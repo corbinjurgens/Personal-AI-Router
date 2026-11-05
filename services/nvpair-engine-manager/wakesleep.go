@@ -215,7 +215,7 @@ func (e *Executor) sleepUnsupported(engine string, platformErr error) (err error
 }
 
 func (e *Executor) unsupportedStatus(engine string, m *Manifest) EngineStatus {
-	status := EngineStatus{Engine: engine, DisplayName: m.DisplayName, Locked: e.lockedStatus(engine)}
+	status := EngineStatus{Engine: engine, DisplayName: m.DisplayName}
 	st, err := e.unsupportedStopState(engine)
 	if err != nil {
 		return status

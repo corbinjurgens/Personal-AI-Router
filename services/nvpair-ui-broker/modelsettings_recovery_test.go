@@ -517,7 +517,7 @@ func TestModelSettingsRecoveryExactNativeConvergesSavedResume(t *testing.T) {
 }
 
 func TestModelSettingsRecoverySavedResumeHonorsCurrentVeto(t *testing.T) {
-	test := func(name string, locked, off, paused bool, wantCalls int) {
+	test := func(name string, off, paused bool, wantCalls int) {
 		t.Run(name, func(t *testing.T) {
 			h := newModelSettingsHarness(t)
 			record := h.seedAccepted(t, true)
@@ -529,7 +529,7 @@ func TestModelSettingsRecoverySavedResumeHonorsCurrentVeto(t *testing.T) {
 			}
 			h.b.engineConfigMu.Unlock()
 			h.mu.Lock()
-			h.locked, h.savedOff = locked, off
+			h.savedOff = off
 			h.mu.Unlock()
 			if paused {
 				r := h.b.nodePolicyRuntime()
@@ -547,9 +547,8 @@ func TestModelSettingsRecoverySavedResumeHonorsCurrentVeto(t *testing.T) {
 			}
 		})
 	}
-	test("Pause", false, false, true, 0)
-	test("engine lock", true, false, false, 1)
-	test("saved local Off", false, true, false, 1)
+	test("Pause", false, true, 0)
+	test("saved local Off", true, false, 1)
 }
 
 func TestModelSettingsRecoveryEveryProgressedStageReplays(t *testing.T) {

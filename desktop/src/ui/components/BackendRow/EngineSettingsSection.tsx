@@ -34,7 +34,6 @@ import getErrorString from '@/shared/utils/get-error-string'
 import { engineManagerName } from '@/shared/utils/engines'
 import { engineRefusalLabel, useEngineSwitchStore } from '@/ui/stores/engine-switch.store'
 import {
-    ENGINE_LOCKED_CODE,
     LOCAL_VETO_CODE,
     POLICY_CONFLICT_CODE,
     REMOTE_MANAGEMENT_DENIED_CODE
@@ -283,7 +282,6 @@ export function EngineSettingsSection({
                 code === REMOTE_MANAGEMENT_DENIED_CODE
                     ? 'This device refused remote management permission. Your settings draft is kept. Change the permission on that device before trying again.'
                     : code === LOCAL_VETO_CODE ||
-                        code === ENGINE_LOCKED_CODE ||
                         code === POLICY_CONFLICT_CODE
                       ? `${engineRefusalLabel(code, message, refusalPolicy)}: ${message}`
                       : message

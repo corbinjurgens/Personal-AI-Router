@@ -111,7 +111,7 @@ func (e *Executor) StatusAtPort(engine string, probePort int) (EngineStatus, err
 	st, err := e.state(engine)
 	if err != nil {
 		if e.reg.invalid[engine] != nil {
-			return EngineStatus{Engine: engine, DisplayName: engine, Locked: e.lockedStatus(engine)}, nil
+			return EngineStatus{Engine: engine, DisplayName: engine}, nil
 		}
 		// Known engine with no host-platform block: return a shell status
 		// (matching get-installed) rather than erroring, so status is
@@ -131,7 +131,7 @@ func (e *Executor) GetInstalled() []EngineStatus {
 		st, err := e.state(name)
 		if err != nil {
 			if e.reg.invalid[name] != nil {
-				out = append(out, EngineStatus{Engine: name, DisplayName: name, Locked: e.lockedStatus(name)})
+				out = append(out, EngineStatus{Engine: name, DisplayName: name})
 				continue
 			}
 			// Known engine with no block for this host: surface a shell
@@ -184,7 +184,6 @@ func (e *Executor) Errors() []serviceError {
 }
 
 func (e *Executor) snapshot(engine string, st *engineState) EngineStatus {
-	locked := e.lockedStatus(engine)
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	return EngineStatus{
@@ -194,16 +193,7 @@ func (e *Executor) snapshot(engine string, st *engineState) EngineStatus {
 		Running:     st.running,
 		Healthy:     st.healthy,
 		Port:        st.port,
-		Locked:      locked,
 	}
-}
-
-func (e *Executor) lockedStatus(engine string) *bool {
-	locked, err := e.desired.locked(engine)
-	if err != nil {
-		return nil
-	}
-	return &locked
 }
 
 // reconcilePresence reconciles filesystem detection with a fixed-port engine

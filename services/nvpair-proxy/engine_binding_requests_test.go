@@ -275,7 +275,6 @@ func TestEngineBindingRequestsRefusalReasons(t *testing.T) {
 	test("engine-switch-timeout", true)
 	test("engine-switch-busy", true)
 	test("engine-switch-cooldown", true)
-	test("engine-locked", false)
 	test("management-denied", false)
 	test("model-unavailable", false)
 	test("paused", true)

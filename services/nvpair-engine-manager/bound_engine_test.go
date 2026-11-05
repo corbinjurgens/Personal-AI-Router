@@ -81,11 +81,6 @@ func TestBoundEngineActivationRefusals(t *testing.T) {
 			requireBoundNoStart(t, m)
 		})
 	}
-	test("locked", func(t *testing.T, m *Manager, _ *nodepolicy.ActivateBoundEngineRequest) {
-		if _, err := m.exec.desired.setLocked("target", true); err != nil {
-			t.Fatal(err)
-		}
-	})
 	test("paused", func(_ *testing.T, m *Manager, _ *nodepolicy.ActivateBoundEngineRequest) {
 		m.exec.nodeProjection.set(nodeProjection{Policy: nodepolicy.Advertisement{Revision: "1"}, ManagementBlocked: true})
 	})

@@ -608,7 +608,7 @@ func ownerEvidenceFixture(t *testing.T) (*Executor, *engineState, desiredOwnerEv
 		client:  &http.Client{Transport: ownerEvidenceRejectHTTP{}}, emit: func(string, any) { panic("evidence notified") },
 		inventory: map[string][]string{"fake": {"must-not-be-read"}},
 	}
-	return e, st, desiredOwnerEvidence{State: desiredStateFile{Engines: map[string]bool{}, OffBy: map[string]intentOrigin{}, Locked: map[string]bool{}}}
+	return e, st, desiredOwnerEvidence{State: desiredStateFile{Engines: map[string]bool{}, OffBy: map[string]intentOrigin{}}}
 }
 
 type ownerEvidenceRejectHTTP struct{}
@@ -718,7 +718,7 @@ func TestOwnerEvidenceRPC(t *testing.T) {
 		if err := json.Unmarshal(reply.Result, &fields); err != nil {
 			t.Fatal(err)
 		}
-		want := []string{"managerIncarnation", "captureToken", "intent", "locks", "universe", "stopAuthority", "reservations", "complete", "reasons"}
+		want := []string{"managerIncarnation", "captureToken", "intent", "universe", "stopAuthority", "reservations", "complete", "reasons"}
 		if len(fields) != len(want) {
 			t.Fatalf("response fields: %v", fields)
 		}
@@ -735,12 +735,12 @@ func TestOwnerEvidenceRPC(t *testing.T) {
 
 	t.Run("saved key presence and effective local Off survive", func(t *testing.T) {
 		m, out := ownerEvidenceRPCFixture(t)
-		document := []byte(`{"engines":{"retained":false},"locked":{"retained":false}}`)
+		document := []byte(`{"engines":{"retained":false}}`)
 		if err := os.WriteFile(m.exec.desired.path, document, 0o600); err != nil {
 			t.Fatal(err)
 		}
 		got := decodeOwnerEvidenceRPC(t, callOwnerEvidenceRPC(t, m, out, `{}`))
-		if !got.Intent.Known || !reflect.DeepEqual(got.Intent.Value.EnabledByEngine, map[string]bool{"retained": false}) || !reflect.DeepEqual(got.Intent.Value.OffByEngine, map[string]string{"retained": "local"}) || !reflect.DeepEqual(got.Locks.Value.LockedByEngine, map[string]bool{"retained": false}) {
+		if !got.Intent.Known || !reflect.DeepEqual(got.Intent.Value.EnabledByEngine, map[string]bool{"retained": false}) || !reflect.DeepEqual(got.Intent.Value.OffByEngine, map[string]string{"retained": "local"}) {
 			t.Fatalf("saved key semantics changed: %+v", got)
 		}
 		entries := *got.Universe.Value
@@ -805,7 +805,7 @@ func TestOwnerEvidenceRPC(t *testing.T) {
 		m.copyMu.Lock()
 		defer m.copyMu.Unlock()
 		got := decodeOwnerEvidenceRPC(t, callOwnerEvidenceRPC(t, m, out, `{}`))
-		if got.Universe.Known || got.StopAuthority.Known || got.Reservations.Known || got.Complete || !got.Intent.Known || !got.Locks.Known {
+		if got.Universe.Known || got.StopAuthority.Known || got.Reservations.Known || got.Complete || !got.Intent.Known {
 			t.Fatalf("contended capture fabricated facts: %+v", got)
 		}
 	})
@@ -916,13 +916,12 @@ func TestOwnerEvidenceUniverse(t *testing.T) {
 		e.stopOnly["removed-host"] = &engineState{plat: &Platform{}}
 		saved.State.Engines["saved-off"] = false
 		saved.State.OffBy["origin-only"] = intentPeer
-		saved.State.Locked["saved-unlocked"] = false
 		saved.State.ProcessStops = map[string]processStopEvidence{"unsupported": {PID: 12}, "unregistered-cleanup": {PID: 13}}
 		saved.State.AllocatedPorts = map[string]int{"port-zero": 0}
 		saved.State.PendingSwitch = &settings.SwitchCheckpoint{SwitchPrepareRequest: settings.SwitchPrepareRequest{SourceEngine: "checkpoint-source", TargetEngine: "checkpoint-target"}, Phase: settings.SwitchCheckpointReleased}
 		e.downloads = &modelDownloads{active: map[downloadContentKey]*modelDownloadAttempt{{engine: "download"}: {}}, unsafe: map[downloadContentKey]modelDownloadMarker{{engine: "unsafe"}: {}}, writers: map[string]bool{"writer": true}, readers: map[string]int{"reader": 1}}
 		got := e.captureOwnerUniverse(func() (desiredOwnerEvidence, error) { return saved, nil }, func() ([]string, bool) { return []string{"copy"}, true })
-		want := []string{"checkpoint-source", "checkpoint-target", "cold", "copy", "download", "fake", "origin-only", "port-zero", "reader", "removed-host", "saved-off", "saved-unlocked", "unregistered-cleanup", "unsafe", "unsupported", "writer"}
+		want := []string{"checkpoint-source", "checkpoint-target", "cold", "copy", "download", "fake", "origin-only", "port-zero", "reader", "removed-host", "saved-off", "unregistered-cleanup", "unsafe", "unsupported", "writer"}
 		var names []string
 		for _, entry := range got.Entries {
 			names = append(names, entry.Name)
@@ -1304,11 +1303,10 @@ func TestOwnerEvidenceDesiredState(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read owner evidence: %v", err)
 		}
-		if got.State.Engines == nil || got.State.OffBy == nil || got.State.Locked == nil {
+		if got.State.Engines == nil || got.State.OffBy == nil {
 			t.Fatalf("complete saved state lacks maps: %+v", got.State)
 		}
-		if len(got.IntentRevision) != len("sha256:")+64 || !strings.HasPrefix(got.IntentRevision, "sha256:") ||
-			len(got.LockRevision) != len("sha256:")+64 || !strings.HasPrefix(got.LockRevision, "sha256:") {
+		if len(got.IntentRevision) != len("sha256:")+64 || !strings.HasPrefix(got.IntentRevision, "sha256:") {
 			t.Fatalf("missing semantic revisions: %+v", got)
 		}
 		return got
@@ -1404,11 +1402,10 @@ func TestOwnerEvidenceDesiredState(t *testing.T) {
 			}
 		})
 	})
-	t.Run("retains unregistered intent locks and cleanup keys", func(t *testing.T) {
+	t.Run("retains unregistered intent and cleanup keys", func(t *testing.T) {
 		stop := processStopEvidence{Bin: filepath.Join(t.TempDir(), "inert-image"), Port: 23456, Address: "127.0.0.1:23456", PID: 123}
 		state := desiredStateFile{
-			Engines: map[string]bool{"removed-on": true, "removed-locked": false}, OffBy: map[string]intentOrigin{"removed-locked": intentLocal},
-			Locked:       map[string]bool{"removed-locked": true, "removed-unlocked": false},
+			Engines: map[string]bool{"removed-on": true, "removed-off": false}, OffBy: map[string]intentOrigin{"removed-off": intentLocal},
 			ProcessStops: map[string]processStopEvidence{"removed-stop": stop}, AllocatedPorts: map[string]int{"removed-port": 23457},
 		}
 		store := newStore(t, encode(t, state))
@@ -1417,16 +1414,13 @@ func TestOwnerEvidenceDesiredState(t *testing.T) {
 			if !reflect.DeepEqual(got.State, state) {
 				t.Fatalf("retained document = %+v, want %+v", got.State, state)
 			}
-			if _, present := got.State.Engines["removed-unlocked"]; present {
-				t.Fatal("false lock key fabricated intent")
-			}
 		})
 	})
 	t.Run("missing file is complete empty and stays missing", func(t *testing.T) {
 		store := newStore(t, "")
 		unchanged(t, store, func() {
 			got := read(t, store)
-			if len(got.State.Engines) != 0 || len(got.State.OffBy) != 0 || len(got.State.Locked) != 0 ||
+			if len(got.State.Engines) != 0 || len(got.State.OffBy) != 0 ||
 				len(got.State.ProcessStops) != 0 || len(got.State.AllocatedPorts) != 0 || got.State.PendingSwitch != nil || got.State.PendingSwitchPorts != nil {
 				t.Fatalf("missing saved document became nonempty: %+v", got.State)
 			}
@@ -1466,12 +1460,14 @@ func TestOwnerEvidenceDesiredState(t *testing.T) {
 	reject("null origin map is unknown", `{"engines":{"fake":false},"offBy":null}`)
 	reject("origin without intent is unknown", `{"engines":{},"offBy":{"removed":"peer"}}`)
 	reject("origin for On is unknown", `{"engines":{"fake":true},"offBy":{"fake":"local"}}`)
-	reject("null locks are unknown", `{"engines":{},"locked":null}`)
-	reject("null lock is unknown", `{"engines":{},"locked":{"fake":null}}`)
-	reject("non-boolean lock is unknown", `{"engines":{},"locked":{"fake":1}}`)
-	reject("locked On is unknown", `{"engines":{"fake":true},"locked":{"fake":true}}`)
-	reject("lock without saved intent is unknown", `{"engines":{},"locked":{"fake":true}}`)
-	reject("locked peer Off is inconsistent", `{"engines":{"fake":false},"offBy":{"fake":"peer"},"locked":{"fake":true}}`)
+	reject("obsolete empty field is unknown", `{"engines":{},"locked":{}}`)
+	reject("obsolete field with local Off is unknown", `{"engines":{"fake":false},"offBy":{"fake":"local"},"locked":{"fake":false}}`)
+	reject("obsolete null field is unknown", `{"engines":{},"locked":null}`)
+	reject("obsolete field with null value is unknown", `{"engines":{},"locked":{"fake":null}}`)
+	reject("obsolete field with nonboolean value is unknown", `{"engines":{},"locked":{"fake":1}}`)
+	reject("obsolete field with On is unknown", `{"engines":{"fake":true},"locked":{"fake":true}}`)
+	reject("obsolete field without intent is unknown", `{"engines":{},"locked":{"fake":true}}`)
+	reject("obsolete field with peer Off is unknown", `{"engines":{"fake":false},"offBy":{"fake":"peer"},"locked":{"fake":true}}`)
 	reject("invalid allocated port is unknown", `{"allocatedPorts":{"removed":65536}}`)
 	reject("null allocated port is unknown", `{"allocatedPorts":{"removed":null}}`)
 	reject("null cleanup map is unknown", `{"processStops":null}`)
@@ -1480,69 +1476,32 @@ func TestOwnerEvidenceDesiredState(t *testing.T) {
 	reject("invalid checkpoint is unknown", `{"pendingSwitch":{"phase":"reserved"}}`)
 	reject("unrecognized saved field is unknown", `{"Engines":{"fake":false}}`)
 
-	compareRevisions := func(name, first, second string, sameIntent, sameLocks bool) {
+	compareRevisions := func(name, first, second string, sameIntent bool) {
 		t.Run(name, func(t *testing.T) {
 			a := read(t, newStore(t, first))
 			b := read(t, newStore(t, second))
-			if (a.IntentRevision == b.IntentRevision) != sameIntent || (a.LockRevision == b.LockRevision) != sameLocks {
-				t.Fatalf("revision equality intent=%v locks=%v, want intent=%v locks=%v; first=%+v second=%+v",
-					a.IntentRevision == b.IntentRevision, a.LockRevision == b.LockRevision, sameIntent, sameLocks, a, b)
+			if (a.IntentRevision == b.IntentRevision) != sameIntent {
+				t.Fatalf("revision equality intent=%v, want %v; first=%+v second=%+v",
+					a.IntentRevision == b.IntentRevision, sameIntent, a, b)
 			}
 		})
 	}
 	compareRevisions("canonical map order and whitespace across owner instances",
-		`{"engines":{"a":false,"b":true},"offBy":{"a":"peer"},"locked":{"a":false,"b":false}}`,
-		`{ "locked": {"b":false,"a":false}, "offBy":{"a":"peer"}, "engines":{"b":true,"a":false} }`, true, true)
+		`{"engines":{"a":false,"b":true},"offBy":{"a":"peer"}}`,
+		`{ "offBy":{"a":"peer"}, "engines":{"b":true,"a":false} }`, true)
 	compareRevisions("legacy and explicit local Off have equal semantics", `{"engines":{"a":false}}`,
-		`{"engines":{"a":false},"offBy":{"a":"local"}}`, true, true)
-	compareRevisions("missing and explicit empty document have equal semantics", "", `{"engines":{},"offBy":{},"locked":{}}`, true, true)
-	compareRevisions("unset and explicit Off have distinct intent revisions", `{}`, `{"engines":{"a":false}}`, false, true)
-	compareRevisions("On and Off have distinct intent revisions", `{"engines":{"a":true}}`, `{"engines":{"a":false}}`, false, true)
+		`{"engines":{"a":false},"offBy":{"a":"local"}}`, true)
+	compareRevisions("missing and explicit empty document have equal semantics", "", `{"engines":{},"offBy":{}}`, true)
+	compareRevisions("unset and explicit Off have distinct intent revisions", `{}`, `{"engines":{"a":false}}`, false)
+	compareRevisions("On and Off have distinct intent revisions", `{"engines":{"a":true}}`, `{"engines":{"a":false}}`, false)
 	compareRevisions("local and peer Off have distinct intent revisions", `{"engines":{"a":false},"offBy":{"a":"local"}}`,
-		`{"engines":{"a":false},"offBy":{"a":"peer"}}`, false, true)
-	compareRevisions("false lock key is retained in lock revision", `{}`, `{"locked":{"removed":false}}`, true, false)
-	compareRevisions("true and false locks have distinct lock revisions", `{"engines":{"a":false},"locked":{"a":false}}`,
-		`{"engines":{"a":false},"locked":{"a":true}}`, true, false)
-	compareRevisions("execution evidence does not change intent or lock revisions", `{"engines":{"a":false}}`,
-		`{"engines":{"a":false},"allocatedPorts":{"removed":23456}}`, true, true)
-
-	lockTransition := func(name, document string) {
-		t.Run(name, func(t *testing.T) {
-			store := newStore(t, document)
-			before := read(t, store)
-			changed, err := store.setLocked("fake", true)
-			if err != nil || !changed {
-				t.Fatalf("save lock and local Off: changed=%v err=%v", changed, err)
-			}
-			locked := read(t, store)
-			enabled, present := locked.State.Engines["fake"]
-			if !present || enabled || locked.State.OffBy["fake"] != intentLocal || !locked.State.Locked["fake"] {
-				t.Fatalf("lock failed to capture local Off: %+v", locked.State)
-			}
-			if before.IntentRevision == locked.IntentRevision || before.LockRevision == locked.LockRevision {
-				t.Fatal("lock-induced intent and lock revisions did not change")
-			}
-			changed, err = store.setLocked("fake", false)
-			if err != nil || changed {
-				t.Fatalf("unlock: changed=%v err=%v", changed, err)
-			}
-			unlocked := read(t, store)
-			if !reflect.DeepEqual(unlocked.State.Engines, locked.State.Engines) || !reflect.DeepEqual(unlocked.State.OffBy, locked.State.OffBy) ||
-				unlocked.IntentRevision != locked.IntentRevision || unlocked.LockRevision != before.LockRevision {
-				t.Fatalf("unlock changed saved Off or failed to remove lock: locked=%+v unlocked=%+v", locked, unlocked)
-			}
-			if _, present := unlocked.State.Locked["fake"]; present {
-				t.Fatal("unlock retained lock key")
-			}
-		})
-	}
-	lockTransition("locking On records local Off and unlock preserves Off", `{"engines":{"fake":true}}`)
-	lockTransition("locking unset records local Off and unlock preserves Off", `{}`)
-	lockTransition("locking peer Off records local Off and unlock preserves Off", `{"engines":{"fake":false},"offBy":{"fake":"peer"}}`)
+		`{"engines":{"a":false},"offBy":{"a":"peer"}}`, false)
+	compareRevisions("execution evidence does not change intent revision", `{"engines":{"a":false}}`,
+		`{"engines":{"a":false},"allocatedPorts":{"removed":23456}}`, true)
 
 	checkpointState := func() desiredStateFile {
 		return desiredStateFile{
-			Engines: map[string]bool{"source": true, "target": false}, OffBy: map[string]intentOrigin{"target": intentPeer}, Locked: map[string]bool{"target": false},
+			Engines: map[string]bool{"source": true, "target": false}, OffBy: map[string]intentOrigin{"target": intentPeer},
 			PendingSwitch: &settings.SwitchCheckpoint{
 				SwitchPrepareRequest: settings.SwitchPrepareRequest{
 					OperationID: "owner-evidence", Caller: "fixture", Origin: settings.SwitchOriginLocal,
@@ -1649,14 +1608,14 @@ func TestOwnerEvidenceDesiredState(t *testing.T) {
 		store := newStore(t, encode(t, state))
 		unchanged(t, store, func() { unknown(t, store) })
 	})
-	t.Run("checkpoint does not change intent or lock semantic digests", func(t *testing.T) {
+	t.Run("checkpoint does not change intent semantic digest", func(t *testing.T) {
 		state := checkpointState()
 		before := read(t, newStore(t, encode(t, state)))
 		state.PendingSwitch = nil
 		state.PendingSwitchPorts = nil
 		after := read(t, newStore(t, encode(t, state)))
-		if before.IntentRevision != after.IntentRevision || before.LockRevision != after.LockRevision {
-			t.Fatal("checkpoint changed protected intent or lock semantics")
+		if before.IntentRevision != after.IntentRevision {
+			t.Fatal("checkpoint changed protected intent semantics")
 		}
 	})
 
@@ -1677,7 +1636,6 @@ func TestOwnerEvidenceDesiredState(t *testing.T) {
 			first, second := read(t, store), read(t, store)
 			first.State.Engines["source"] = false
 			first.State.OffBy["target"] = intentLocal
-			first.State.Locked["target"] = true
 			first.State.ProcessStops["removed"] = processStopEvidence{}
 			first.State.AllocatedPorts["removed"] = 1
 			first.State.PendingSwitch.Phase = settings.SwitchCheckpointReleased
@@ -1693,13 +1651,12 @@ func TestOwnerEvidenceDesiredState(t *testing.T) {
 		})
 	})
 
-	t.Run("setLocked and evidence capture one joint intent lock baseline", func(t *testing.T) {
+	t.Run("intent write and evidence capture one joint baseline", func(t *testing.T) {
 		store := newStore(t, `{"engines":{"fake":true}}`)
 		before := read(t, store)
 		saving := make(chan struct{})
 		releaseSave := make(chan struct{})
 		writerDone := make(chan struct{})
-		var writerChanged bool
 		var writerErr error
 		useEngineFileReplacer(t, durablefile.Replacer{CreateTemp: func(dir, base string, mode os.FileMode) (durablefile.File, error) {
 			close(saving)
@@ -1708,12 +1665,12 @@ func TestOwnerEvidenceDesiredState(t *testing.T) {
 		}})
 		go func() {
 			defer close(writerDone)
-			writerChanged, writerErr = store.setLocked("fake", true)
+			writerErr = store.set("fake", false, intentLocal)
 		}()
 		select {
-		case <-saving: // setLocked changed both fields and still owns desired.mu.
+		case <-saving: // The intent write still owns desired.mu.
 		case <-writerDone:
-			t.Fatalf("setLocked did not reach the save boundary: %v", writerErr)
+			t.Fatalf("intent write did not reach the save boundary: %v", writerErr)
 		}
 		readerStarted := make(chan struct{})
 		readerDone := make(chan struct{})
@@ -1750,7 +1707,7 @@ func TestOwnerEvidenceDesiredState(t *testing.T) {
 		}()
 		if store.mu.TryLock() {
 			store.mu.Unlock()
-			t.Fatal("setLocked released the owner boundary before saving")
+			t.Fatal("intent write released the owner boundary before saving")
 		}
 		select {
 		case <-readerDone:
@@ -1762,13 +1719,13 @@ func TestOwnerEvidenceDesiredState(t *testing.T) {
 		<-captureBoundary
 		close(releaseCapture)
 		<-readerDone
-		if writerErr != nil || !writerChanged || captureErr != nil {
-			t.Fatalf("joint capture: changed=%v write=%v read=%v", writerChanged, writerErr, captureErr)
+		if writerErr != nil || captureErr != nil {
+			t.Fatalf("joint capture: write=%v read=%v", writerErr, captureErr)
 		}
 		enabled, present := captured.State.Engines["fake"]
-		if !present || enabled || captured.State.OffBy["fake"] != intentLocal || !captured.State.Locked["fake"] ||
-			captured.IntentRevision == before.IntentRevision || captured.LockRevision == before.LockRevision {
-			t.Fatalf("capture combined different intent/lock baselines: before=%+v after=%+v", before, captured)
+		if !present || enabled || captured.State.OffBy["fake"] != intentLocal ||
+			captured.IntentRevision == before.IntentRevision {
+			t.Fatalf("capture combined different intent baselines: before=%+v after=%+v", before, captured)
 		}
 		if after := read(t, store); !reflect.DeepEqual(after, captured) {
 			t.Fatalf("joint capture revisions do not describe saved document: captured=%+v after=%+v", captured, after)

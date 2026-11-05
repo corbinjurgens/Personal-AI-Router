@@ -75,7 +75,7 @@ observed changes; they do not reserve the manager after the reply.
 
 Production `buildApplyOwners` is nil, so prepare refuses before Pause. It
 remains unavailable because no owner can pin manager
-intent, locks, content reservations and Pause acceptance atomically through
+intent, content reservations and Pause acceptance atomically through
 `WithLocked`. The service also requires independent identity/membership,
 worker-exit, durable-save, enforcement and physical-stop evidence before a
 real start. Finish retains the existing Pause and explicit target-local Resume
@@ -111,7 +111,7 @@ client and peer relay entry points. They carry no inference body or credential.
 
 The broker retains the submitting proxy and current manager through acceptance
 and reply. It resolves the current binding, served permission, availability,
-facade, installation and lock evidence. A healthy target needs inference
+facade and installation evidence. A healthy target needs inference
 permission only and must expose the requested canonical model. A running target
 missing that model refuses without restart. A cold target with no running
 source uses the parent-only `engine:activate-bound-engine` wrapper around
@@ -272,8 +272,7 @@ by older peers.
 
 A pause of either origin reports model-configuration reason `paused`, including
 the accepted interval before persistence. An ordinary saved Off reports
-`engine-off`; it does not imply an engine lock. Lock enforcement and the
-`engine-locked` refusal belong to engine-manager.
+`engine-off`.
 
 Unknown completion retains the proxy's capacity hold. Recovery requires a
 terminal response from the original manager followed by a fresh `engine:models`
@@ -789,7 +788,7 @@ cleanup of already accepted work retain their existing paths. Reads and
 permitted inference remain available without a grant.
 
 Permission denial is `-32012/remote_management_denied`, independently of pause
-veto `-32011` and revision conflict `-32010`. Pause, engine locks and private-policy,
+veto `-32011` and revision conflict `-32010`. Pause and private-policy,
 CORS, served/resident and admission checks remain authoritative even for allowed
 peers. Revocation prevents new acceptance; it does not stop or unpair the node
 or undo accepted work, whose target-owned completion/recovery and receipt reads
@@ -1110,7 +1109,7 @@ proxy enforces it.
   options remain unchanged.
 - **Resuming** persists and pushes `available`, then `engine:wake`s the engines
   the pause stopped. Their saved intent was never changed, so only engines saved
-  On and unlocked come back through engine-manager's activation guards; resident
+  On come back through engine-manager's activation guards; resident
   declarations are reconciled and cancelled requests are not replayed.
 - **Ordering.** Transitions run one at a time. A newer `node:set-availability`
   cancels the one in progress, which returns the error `superseded by a later
@@ -1270,11 +1269,11 @@ when the profile is not local-only.
   JSON-RPC code: invalid parameters (including a missing or malformed
   `expectedPersistedRevision`, invalid policy or invalid availability) use
   `-32602`; revision conflicts use `-32010`; a resume refused by the local veto
-  uses `-32011`; management denial uses `-32012`; engine lock uses `-32013`;
+  uses `-32011`; management denial uses `-32012`;
   target-owned inference settings use `-32014`; save failures and other
   operational failures use `-32000`.
   Engine-manager maps `-32602` to HTTP 400 and the typed codes to HTTP 409
-  with the body `{"error": <diagnostic>, "code": "policy_conflict" | "local_veto" | "remote_management_denied" | "engine_locked" | "remote_setting_locked"}`, and other
+  with the body `{"error": <diagnostic>, "code": "policy_conflict" | "local_veto" | "remote_management_denied" | "remote_setting_locked"}`, and other
   failures to a plain-text HTTP 409; the origin maps HTTP 400 back to `-32602`,
   a typed 409 back to its code, and other HTTP failures to `-32000`.
   Classification uses the code, never error text.

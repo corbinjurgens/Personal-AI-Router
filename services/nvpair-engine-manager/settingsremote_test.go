@@ -139,18 +139,6 @@ func TestSettingsRemoteStatedMemoryTargetStore(t *testing.T) {
 				t.Fatalf("paused remote clear: %v", err)
 			}
 			target.ex.nodeProjection.set(nodeProjection{ManagementBlocked: false})
-			if _, err := target.ex.desired.setLocked(q.Engine, true); err != nil {
-				t.Fatal(err)
-			}
-			if err := call("set-stated-memory", set); rpcCode(err) != codeEngineLocked {
-				t.Fatalf("locked remote set: %v", err)
-			}
-			if err := call("clear-stated-memory", q); rpcCode(err) != codeEngineLocked {
-				t.Fatalf("locked remote clear: %v", err)
-			}
-			if _, err := target.ex.desired.setLocked(q.Engine, false); err != nil {
-				t.Fatal(err)
-			}
 			grantRemoteManagement(t, f.peerDir, "2", map[string]bool{"uuid-self": false})
 			if err := call("set-stated-memory", set); rpcCode(err) != codeRemoteManagementDenied {
 				t.Fatalf("denied remote set: %v", err)

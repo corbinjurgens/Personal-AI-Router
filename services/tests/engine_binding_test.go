@@ -444,7 +444,7 @@ func TestEngineBindingProcess(t *testing.T) {
 	t.Run("ready bound engine excludes the wrong engine for ordinary demand", testEngineBindingWrongEngine)
 	t.Run("ready peer outranks a scheduler-preferred replacement", testEngineBindingReadyPeer)
 	t.Run("inference-only peer cannot activate but can use a ready engine", testEngineBindingPermission)
-	t.Run("cold target lock and pause prevent native effects", testEngineBindingVeto)
+	t.Run("cold target pause prevents native effects", testEngineBindingVeto)
 	t.Run("protected source resident prevents replacement", testEngineBindingProtectedResident)
 	t.Run("cold preparation refuses missing model without inference", testEngineBindingMissingModel)
 	t.Run("cold startup failure refuses without inference", testEngineBindingStartFailure)
@@ -769,7 +769,6 @@ func testEngineBindingVeto(t *testing.T) {
 			f.assertEffects(t, 0, 0, 0, 0)
 		})
 	}
-	test("local lock", "engine:set-lock", map[string]any{"engine": "llamacpp", "locked": true}, "engine-locked")
 	test("node pause", "node:set-availability", map[string]string{"state": "paused"}, "paused")
 }
 

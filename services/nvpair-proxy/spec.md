@@ -1788,7 +1788,7 @@ heartbeat or stream splice is emitted during preparation.
 A known preparation refusal returns HTTP 503 with the existing
 `{code:"admission",error,reason}` JSON shape and `X-PAIR-Admission` reason:
 `engine-switch-timeout`, `engine-switch-busy`, `engine-switch-cooldown`,
-`engine-locked`, `management-denied`, `model-unavailable`, or the existing
+`management-denied`, `model-unavailable`, or the existing
 `paused`, `draining`, `no-fit` reasons. Transient refusals carry `Retry-After`.
 `X-PAIR-Switch-Request-Id` is emitted only for a known accepted operation.
 Internal RPC codes remain on the correlated reply; engine/native error text
