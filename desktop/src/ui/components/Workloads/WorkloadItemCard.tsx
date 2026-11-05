@@ -9,7 +9,8 @@ import { workloadCancelRequest, workloadExecutionNodeId } from '@/shared/utils/w
 import { useErrorsStore } from '@/ui/stores/errors.store'
 import { useNodesStore } from '@/ui/stores/nodes.store'
 import { WORKLOAD_COLOR_MAP } from '@/ui/constants/colors'
-import { formatModelDisplayName } from '@/ui/utils/format-model-display-name'
+import { modelPrimaryLabel } from '@/ui/utils/model-identity-label'
+import { useEngineModelsStore } from '@/ui/stores/engine-models.store'
 import { getWorkloadColorBar } from '@/ui/utils/colors'
 import { workloadModelLabel, workloadNodeLabel } from '@/ui/utils/workload-labels'
 import EngineIcon from '@/ui/components/EngineIcon'
@@ -100,6 +101,13 @@ function WorkloadCancelActions({ workload }: { workload: Workload }) {
 }
 
 function WorkloadItemCard({ workload }: { workload: Workload }) {
+    const identity = useEngineModelsStore(state => {
+        const nodeId = workloadExecutionNodeId(workload)
+        if (!nodeId) return undefined
+        return state.models
+            .get(`${nodeId}:${workload.engine}`)
+            ?.models.find(model => model.name === workload.model)?.identity
+    })
     const routingRevision = useRoutingStore(state => state.revision)
     const routingConnected = useRoutingStore(state => state.connected)
     const routing = useMemo<ReturnType<typeof workloadRoutingSummary>>(() => {
@@ -208,7 +216,7 @@ function WorkloadItemCard({ workload }: { workload: Workload }) {
                 <Flex align="center" gap="2" className="min-w-0">
                     <EngineIcon type={workload.engine} size={16} />
                     <Text kind="body/bold/sm" className="min-w-0 truncate">
-                        {workloadModelLabel(workload, formatModelDisplayName(workload.model))}
+                        {workloadModelLabel(workload, modelPrimaryLabel(workload.model, identity))}
                     </Text>
                 </Flex>
 

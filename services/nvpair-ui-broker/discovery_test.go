@@ -12,11 +12,75 @@ import (
 	"testing"
 	"time"
 
+	"nvpair-shared/engines"
 	"nvpair-shared/errors"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 	"nvpair-ui-broker/relay"
 )
+
+func TestDiscoveryCarriesModelIdentities(t *testing.T) {
+	want := map[string]map[string]engines.ModelIdentity{"llamacpp": {"served-id": {
+		Repository: "owner/repository", Quantization: "Q4_K_M", Strength: "declared",
+		Files: []engines.ModelIdentityFile{{Role: "model", Name: "model.gguf", SizeBytes: 42}},
+	}}}
+	store := newDiscoveryStore()
+	directory := relay.NewDirectory()
+	scanner := &scannerProcess{store: store, relayDir: directory}
+	raw, err := json.Marshal(noderec.NodeEvent{Node: noderec.DirectoryNode{HostUUID: "peer", Name: "peer", IP: "127.0.0.1",
+		ModelsByEngine: map[string][]string{"llamacpp": {"served-id"}}, ModelIdentities: want}})
+	if err != nil {
+		t.Fatalf("encode scanner event: %v", err)
+	}
+	scanner.handleNotify(noderec.NotifyNodeUpdated, raw)
+	internal := directory.Snapshot("")
+	if len(internal) != 1 || !reflect.DeepEqual(internal[0].ModelIdentities, want) {
+		t.Fatalf("internal discovery relay lost identities: %+v", internal)
+	}
+	nodes := store.Snapshot()
+	if len(nodes) != 1 || !reflect.DeepEqual(nodes[0].ModelIdentities, want) {
+		t.Fatalf("client snapshot lost identities: %+v", nodes)
+	}
+	wire, err := json.Marshal(GetNodesResult{Nodes: nodes})
+	if err != nil {
+		t.Fatalf("encode client snapshot: %v", err)
+	}
+	var result GetNodesResult
+	if err := json.Unmarshal(wire, &result); err != nil {
+		t.Fatalf("decode client snapshot: %v", err)
+	}
+	if len(result.Nodes) != 1 || !reflect.DeepEqual(result.Nodes[0].ModelIdentities, want) {
+		t.Fatalf("client wire lost identities: %+v", result)
+	}
+}
+
+func TestDiscoveryIdentityCopiesAreIndependent(t *testing.T) {
+	node := noderec.DirectoryNode{HostUUID: "peer", Name: "peer", ModelIdentities: map[string]map[string]engines.ModelIdentity{"llamacpp": {"served-id": {
+		Strength: "declared", Files: []engines.ModelIdentityFile{{Role: "model", Name: "model.gguf", SizeBytes: 42}},
+	}}}}
+	enriched := directoryToEnriched(node)
+	node.ModelIdentities["llamacpp"]["served-id"].Files[0].Name = "scanner.gguf"
+	if enriched.ModelIdentities["llamacpp"]["served-id"].Files[0].Name != "model.gguf" {
+		t.Fatal("directory projection retained scanner-owned identity files")
+	}
+	store := newDiscoveryStore()
+	store.Upsert(enriched, sourceScanner)
+	enriched.ModelIdentities["llamacpp"]["served-id"].Files[0].Name = "enriched.gguf"
+	delete(enriched.ModelIdentities["llamacpp"], "served-id")
+	rows := store.Snapshot()
+	if len(rows) != 1 || rows[0].ModelIdentities["llamacpp"]["served-id"].Files[0].Name != "model.gguf" {
+		t.Fatal("store retained caller-owned identity maps or files")
+	}
+	rows[0].ModelIdentities["llamacpp"]["served-id"].Files[0].Name = "client.gguf"
+	delete(rows[0].ModelIdentities, "llamacpp")
+	last := store.Snapshot()
+	if len(last) != 1 || last[0].ModelIdentities["llamacpp"]["served-id"].Files[0].Name != "model.gguf" {
+		t.Fatal("client snapshot exposed store-owned identities")
+	}
+	if !store.Remove("peer", sourceScanner) || len(store.Snapshot()) != 0 {
+		t.Fatal("removed peer retained its identity projection")
+	}
+}
 
 func TestMemoryTelemetryRetiredSourceCannotRetireReplacementMemory(t *testing.T) {
 	b := &Broker{telemetry: newTelemetryCache()}

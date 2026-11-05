@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"nvpair-shared/buildinfo"
+	"nvpair-shared/engines"
 	"nvpair-shared/modeldownload"
 	"nvpair-shared/noderec"
 )
@@ -53,11 +54,12 @@ type availableNode struct {
 	// no extra call: Models is the flat de-duplicated union, ModelsByEngine
 	// attributes each to the engine serving it, and LoadedByEngine names those
 	// currently resident in memory.
-	Models               []string                `json:"models"`
-	ModelsByEngine       map[string][]string     `json:"modelsByEngine"`
-	LoadedByEngine       map[string][]string     `json:"loadedByEngine"`
-	DownloadState        *modeldownload.Snapshot `json:"downloadState,omitempty"`
-	DownloadStateCurrent *bool                   `json:"downloadStateCurrent,omitempty"`
+	Models               []string                                    `json:"models"`
+	ModelsByEngine       map[string][]string                         `json:"modelsByEngine"`
+	LoadedByEngine       map[string][]string                         `json:"loadedByEngine"`
+	ModelIdentities      map[string]map[string]engines.ModelIdentity `json:"modelIdentities,omitempty"`
+	DownloadState        *modeldownload.Snapshot                     `json:"downloadState,omitempty"`
+	DownloadStateCurrent *bool                                       `json:"downloadStateCurrent,omitempty"`
 }
 
 func (n *availableNode) UnmarshalJSON(data []byte) error {
@@ -66,6 +68,7 @@ func (n *availableNode) UnmarshalJSON(data []byte) error {
 		*plain
 		DownloadState        json.RawMessage `json:"downloadState"`
 		DownloadStateCurrent json.RawMessage `json:"downloadStateCurrent"`
+		ModelIdentities      json.RawMessage `json:"modelIdentities"`
 	}
 	next := availableNode{}
 	wire.plain = (*plain)(&next)
@@ -73,6 +76,7 @@ func (n *availableNode) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	next.DownloadState = parseDownloadState(wire.DownloadState)
+	next.ModelIdentities = parseModelIdentities(wire.ModelIdentities)
 	var current bool
 	if string(wire.DownloadStateCurrent) == "true" || string(wire.DownloadStateCurrent) == "false" {
 		if err := json.Unmarshal(wire.DownloadStateCurrent, &current); err == nil {
@@ -86,8 +90,9 @@ func (n *availableNode) UnmarshalJSON(data []byte) error {
 func (n availableNode) modelSnapshot() modelsResult {
 	return modelsResult{
 		Models: n.Models, ModelsByEngine: n.ModelsByEngine, LoadedByEngine: n.LoadedByEngine,
-		DownloadState: n.DownloadState,
-		current:       n.DownloadState != nil && n.DownloadStateCurrent != nil && *n.DownloadStateCurrent,
+		ModelIdentities: n.ModelIdentities,
+		DownloadState:   n.DownloadState,
+		current:         n.DownloadState != nil && n.DownloadStateCurrent != nil && *n.DownloadStateCurrent,
 	}
 }
 

@@ -131,6 +131,86 @@ func modelInventoryObservation(t *testing.T, ex *Executor, engine string) observ
 	return observedDigests{runID: state.runID, epoch: ex.inventoryDigests[engine].epoch}
 }
 
+func TestModelsResultCarriesIdentities(t *testing.T) {
+	test := func(name string, blockDemo bool, wantModels []string, wantIdentities map[string]engines.ModelIdentity) {
+		t.Run(name, func(t *testing.T) {
+			ex := modelDownloadInventoryExecutor(t)
+			ex.modelIdentities.values = map[string]map[string]engines.ModelIdentity{
+				"llamacpp": {
+					"demo":     {Repository: "owner/demo", Strength: "declared"},
+					"ready":    {GeneralName: "Ready model", Files: []engines.ModelIdentityFile{{Role: "model", Name: "ready.gguf", SizeBytes: 128}}, Strength: "declared"},
+					"unlisted": {GeneralName: "Unlisted model", Strength: "declared"},
+				},
+				"llamacpp-absent": {"ready": {GeneralName: "Absent engine", Strength: "declared"}},
+			}
+			if blockDemo {
+				reserveModelDownload(t, ex.downloads, "llamacpp", "demo", engines.ModelNamingExact)
+			}
+			result := ex.ModelsResult(context.Background())
+			if !reflect.DeepEqual(result.Models, wantModels) || !reflect.DeepEqual(result.ByEngine, map[string][]string{"llamacpp": wantModels}) {
+				t.Fatalf("identity attachment changed ready inventory: %+v", result)
+			}
+			if !reflect.DeepEqual(result.LoadedByEngine, map[string][]string{"llamacpp": {"demo"}}) {
+				t.Fatalf("identity attachment changed observed residency: %+v", result.LoadedByEngine)
+			}
+			data, err := json.Marshal(result)
+			if err != nil {
+				t.Fatalf("encode model result: %v", err)
+			}
+			var wire map[string]json.RawMessage
+			if err := json.Unmarshal(data, &wire); err != nil {
+				t.Fatalf("decode model result object: %v", err)
+			}
+			var identities map[string]map[string]engines.ModelIdentity
+			if err := json.Unmarshal(wire["modelIdentities"], &identities); err != nil {
+				t.Fatalf("decode modelIdentities field: %v", err)
+			}
+			want := map[string]map[string]engines.ModelIdentity{"llamacpp": wantIdentities}
+			if !reflect.DeepEqual(identities, want) {
+				t.Fatalf("wire identities = %+v, want %+v", identities, want)
+			}
+			var decoded ModelsResult
+			if err := json.Unmarshal(data, &decoded); err != nil {
+				t.Fatalf("decode model result: %v", err)
+			}
+			if !reflect.DeepEqual(decoded.Identities, want) {
+				t.Fatalf("model result decoder lost identities: %+v", decoded.Identities)
+			}
+			result.Identities["llamacpp"]["ready"].Files[0].Name = "changed.gguf"
+			delete(result.Identities["llamacpp"], "ready")
+			if got := ex.modelIdentities.snapshot()["llamacpp"]["ready"].Files[0].Name; got != "ready.gguf" {
+				t.Fatalf("result mutation reached identity owner: file = %q", got)
+			}
+		})
+	}
+	test("listed models only", false, []string{"demo", "ready"}, map[string]engines.ModelIdentity{
+		"demo":  {Repository: "owner/demo", Strength: "declared"},
+		"ready": {GeneralName: "Ready model", Files: []engines.ModelIdentityFile{{Role: "model", Name: "ready.gguf", SizeBytes: 128}}, Strength: "declared"},
+	})
+	test("readiness mask excludes queued model", true, []string{"ready"}, map[string]engines.ModelIdentity{
+		"ready": {GeneralName: "Ready model", Files: []engines.ModelIdentityFile{{Role: "model", Name: "ready.gguf", SizeBytes: 128}}, Strength: "declared"},
+	})
+}
+
+func TestModelsSweepRequestsIdentityRefreshForFullInventory(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		fullInventory bool
+		wantRefreshes int
+	}{
+		{name: "full inventory", fullInventory: true, wantRefreshes: 1},
+		{name: "loaded poll", fullInventory: false, wantRefreshes: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ex := modelDownloadInventoryExecutor(t)
+			ex.modelsSweep(context.Background(), test.fullInventory)
+			if got := len(ex.modelIdentities.poke); got != test.wantRefreshes {
+				t.Fatalf("identity refresh requests = %d, want %d", got, test.wantRefreshes)
+			}
+		})
+	}
+}
+
 func TestLinkedModelInventory(t *testing.T) {
 	test := func(name, body, model string, want inventoryMembership) {
 		t.Run(name, func(t *testing.T) {

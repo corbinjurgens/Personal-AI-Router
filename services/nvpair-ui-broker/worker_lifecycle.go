@@ -616,19 +616,7 @@ func (b *Broker) spawnJobScheduler() (supervisedHandle, error) {
 		return nil, err
 	}
 
-	// workloadEmitMu prevents an accepted workload transition from interleaving
-	// with its baseline. schedulerFeedMu also holds discovery fanout until the
-	// three ordered baselines are queued to the new child.
-	b.workloadEmitMu.Lock()
-	b.schedulerFeedMu.Lock()
-	b.setScheduler(w)
-	replayed := b.replayActiveWorkloadsToScheduler(w)
-	telemetryReplayed := b.replayTelemetryToScheduler(w)
-	if err := w.Notify("discovery:nodes-changed", b.store.Snapshot()); err != nil {
-		slog.Warn("push discovery baseline to scheduler failed", "err", err)
-	}
-	b.schedulerFeedMu.Unlock()
-	b.workloadEmitMu.Unlock()
+	replayed, telemetryReplayed := b.initializeScheduler(w)
 
 	if replayed > 0 {
 		slog.Info("replayed active workloads to scheduler", "count", replayed)
@@ -638,6 +626,24 @@ func (b *Broker) spawnJobScheduler() (supervisedHandle, error) {
 	}
 	slog.Info("scheduler started", "path", b.schedulerPath, "pid", w.cmd.Process.Pid)
 	return w, nil
+}
+
+func (b *Broker) initializeScheduler(w *rpcWorker) (int, int) {
+	// workloadEmitMu prevents an accepted workload transition from interleaving
+	// with its baseline. schedulerFeedMu also holds discovery fanout until the
+	// three ordered baselines are queued to the new child.
+	b.workloadEmitMu.Lock()
+	b.schedulerFeedMu.Lock()
+	b.setScheduler(w)
+	replayed := b.replayActiveWorkloadsToScheduler(w)
+	telemetryReplayed := b.replayTelemetryToScheduler(w)
+	if err := w.Notify("discovery:nodes-changed", discoveryNotificationNodes(b.store.Snapshot())); err != nil {
+		slog.Warn("push discovery baseline to scheduler failed", "err", err)
+	}
+	b.schedulerFeedMu.Unlock()
+	b.workloadEmitMu.Unlock()
+
+	return replayed, telemetryReplayed
 }
 
 func (b *Broker) spawnClusterManager() (supervisedHandle, error) {

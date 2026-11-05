@@ -54,6 +54,79 @@ func tuiDownloadJSON(t *testing.T, value any) json.RawMessage {
 	return data
 }
 
+func TestModelsResultDecodesIdentities(t *testing.T) {
+	const valid = `{"repository":"unsloth/LFM2.5-24B-A2B-GGUF","quantization":"UD-Q4_K_XL","quantizationSource":"hf-tag","configuredContextTokens":131072,"files":[{"role":"model","name":"model.gguf","sizeBytes":42}],"strength":"declared"}`
+	want := map[string]map[string]engines.ModelIdentity{
+		"llamacpp": {"served": {
+			Repository: "unsloth/LFM2.5-24B-A2B-GGUF", Quantization: "UD-Q4_K_XL", QuantizationSource: "hf-tag",
+			ConfiguredContextTokens: 131072, Strength: "declared",
+			Files: []engines.ModelIdentityFile{{Role: "model", Name: "model.gguf", SizeBytes: 42}},
+		}},
+	}
+	decoders := []struct {
+		name   string
+		decode func([]byte) (modelsResult, error)
+	}{
+		{"local inventory", func(data []byte) (modelsResult, error) {
+			var result modelsResult
+			err := json.Unmarshal(data, &result)
+			return result, err
+		}},
+		{"peer discovery", func(data []byte) (modelsResult, error) {
+			var node availableNode
+			err := json.Unmarshal(data, &node)
+			return node.modelSnapshot(), err
+		}},
+	}
+	for _, decoder := range decoders {
+		t.Run(decoder.name, func(t *testing.T) {
+			test := func(name, metadata string, keepValid bool) {
+				t.Run(name, func(t *testing.T) {
+					snapshot := tuiLlamaCPPDownloadSnapshot()
+					data := `{"models":["served"],"modelsByEngine":{"llamacpp":["served"]},"loadedByEngine":{"llamacpp":["served"]},"downloadState":` +
+						string(tuiDownloadJSON(t, snapshot)) + `,"downloadStateCurrent":true` + metadata + `}`
+					got, err := decoder.decode([]byte(data))
+					if err != nil {
+						t.Fatalf("decode inventory: %v", err)
+					}
+					var expected map[string]map[string]engines.ModelIdentity
+					if keepValid {
+						expected = want
+					}
+					if !reflect.DeepEqual(got.ModelIdentities, expected) {
+						t.Fatalf("identities = %+v, want %+v", got.ModelIdentities, expected)
+					}
+					if !reflect.DeepEqual(got.Models, []string{"served"}) ||
+						!reflect.DeepEqual(got.ModelsByEngine, map[string][]string{"llamacpp": {"served"}}) ||
+						!reflect.DeepEqual(got.LoadedByEngine, map[string][]string{"llamacpp": {"served"}}) {
+						t.Fatalf("identity metadata changed inventory/residency: %+v", got)
+					}
+					if !got.current || got.DownloadState == nil || !got.DownloadState.Equal(*snapshot) {
+						t.Fatalf("identity metadata changed download support: %+v", got)
+					}
+				})
+			}
+			test("valid identity", `,"modelIdentities":{"llamacpp":{"served":`+valid+`}}`, true)
+			test("invalid entries isolated", `,"modelIdentities":{"llamacpp":{
+				"served":`+valid+`,
+				"bad-type":"invalid",
+				"bad-field-type":{"repository":42,"strength":"declared"},
+				"bad-repository":{"repository":"/tmp/model","strength":"declared"},
+				"bad-digest":{"contentId":"`+strings.Repeat("a", 63)+`","strength":"verified"},
+				"bad-file":{"files":[{"role":"model","name":"dir/model.gguf","sizeBytes":1}],"strength":"declared"},
+				"negative-context":{"configuredContextTokens":-1,"strength":"declared"},
+				"missing-strength":{},
+				"null-entry":null
+			},"bad-engine":[]}`, true)
+			test("absent block", "", false)
+			test("null block", `,"modelIdentities":null`, false)
+			test("string block", `,"modelIdentities":"invalid"`, false)
+			test("array block", `,"modelIdentities":[]`, false)
+			test("malformed engine block", `,"modelIdentities":{"llamacpp":"invalid"}`, false)
+		})
+	}
+}
+
 func TestModelDownloadLocalDecodePreservesInventoryWithoutTrustingMalformedSupport(t *testing.T) {
 	valid := string(tuiDownloadJSON(t, tuiLlamaCPPDownloadSnapshot()))
 	test := func(name, extension string, supported bool) {

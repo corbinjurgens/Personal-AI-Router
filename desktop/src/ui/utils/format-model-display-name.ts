@@ -54,13 +54,17 @@ function formatHuggingFaceModelName(modelId: string): string {
     const segments = name.split('/')
     name = segments.length > 1 ? segments.slice(1).join('/') : segments[0]
 
+    const tagAt = name.indexOf(':')
+    const tag = tagAt >= 0 ? name.slice(tagAt + 1) : ''
+    if (tagAt >= 0) name = name.slice(0, tagAt)
+
     name = name
-        .replace(/-GGUF(:[^\s/]*)?$/i, '')
+        .replace(/-GGUF$/i, '')
         .replace(/[-_]/g, ' ')
         .replace(/\s+/g, ' ')
         .trim()
 
-    return name || modelId
+    return name ? `${name}${tag ? ` (${tag})` : ''}` : modelId
 }
 
 function formatHuggingFaceModelUrl(modelUrl: string): string {

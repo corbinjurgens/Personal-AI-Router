@@ -10,11 +10,13 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"nvpair-shared/engines"
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/modeldownload"
 	"nvpair-shared/nodepolicy"
@@ -87,6 +89,7 @@ func (d *daemon) enrichModelsCandidates(node *noderec.DirectoryNode, hosts []str
 	cached := modelInventory{
 		models:              d.lastModels[node.HostUUID],
 		byEngine:            d.lastModelsByEngine[node.HostUUID],
+		identities:          d.lastModelIdentities[node.HostUUID],
 		loadedByEngine:      d.lastLoadedByEngine[node.HostUUID],
 		policy:              d.lastPolicy[node.HostUUID],
 		downloadObservation: d.lastDownloads[node.HostUUID].stale(),
@@ -117,6 +120,9 @@ func (d *daemon) cacheInventoryLocked(hostUUID string, inventory modelInventory)
 	if d.lastLoadedByEngine == nil {
 		d.lastLoadedByEngine = make(map[string]map[string][]string)
 	}
+	if d.lastModelIdentities == nil {
+		d.lastModelIdentities = make(map[string]map[string]map[string]engines.ModelIdentity)
+	}
 	if d.lastPolicy == nil {
 		d.lastPolicy = make(map[string]*nodepolicy.Advertisement)
 	}
@@ -125,6 +131,7 @@ func (d *daemon) cacheInventoryLocked(hostUUID string, inventory modelInventory)
 	}
 	d.lastModels[hostUUID] = inventory.models
 	d.lastModelsByEngine[hostUUID] = inventory.byEngine
+	d.lastModelIdentities[hostUUID] = noderec.CloneModelIdentities(inventory.identities)
 	d.lastLoadedByEngine[hostUUID] = inventory.loadedByEngine
 	d.lastPolicy[hostUUID] = inventory.policy
 	observation := inventory.downloadObservation.clone()
@@ -188,11 +195,12 @@ func (d *daemon) fetchModelsForPeer(hostUUID, ip string, port int, clusterUUID s
 		return modelInventory{}, false
 	}
 	var body struct {
-		Models         []json.RawMessage            `json:"models"`
-		ModelsByEngine map[string][]json.RawMessage `json:"modelsByEngine"`
-		LoadedByEngine map[string][]json.RawMessage `json:"loadedByEngine"`
-		Policy         json.RawMessage              `json:"policy"`
-		DownloadState  json.RawMessage              `json:"downloadState"`
+		Models          []json.RawMessage            `json:"models"`
+		ModelsByEngine  map[string][]json.RawMessage `json:"modelsByEngine"`
+		ModelIdentities json.RawMessage              `json:"modelIdentities"`
+		LoadedByEngine  map[string][]json.RawMessage `json:"loadedByEngine"`
+		Policy          json.RawMessage              `json:"policy"`
+		DownloadState   json.RawMessage              `json:"downloadState"`
 	}
 	if err := json.Unmarshal(raw, &body); err != nil {
 		return modelInventory{}, false
@@ -252,8 +260,50 @@ func (d *daemon) fetchModelsForPeer(hostUUID, ip string, port int, clusterUUID s
 			}
 		}
 	}
-	return modelInventory{models: models, byEngine: byEngine, loadedByEngine: loadedByEngine, policy: policy,
+	identities := decodeInventoryIdentities(body.ModelIdentities, byEngine)
+	return modelInventory{models: models, byEngine: byEngine, identities: identities, loadedByEngine: loadedByEngine, policy: policy,
 		downloadObservation: observation, sourceBaseline: sourceBaseline}, true
+}
+
+// Identity metadata is optional: a malformed block, engine or model entry must
+// never discard the independently decoded routing inventory. The HTTP envelope
+// already bounds the whole block before decoding; Validate bounds each entry.
+func decodeInventoryIdentities(raw json.RawMessage, byEngine map[string][]string) map[string]map[string]engines.ModelIdentity {
+	if len(raw) == 0 || len(raw) > modelsResponseBytes {
+		return nil
+	}
+	var block map[string]json.RawMessage
+	if json.Unmarshal(raw, &block) != nil {
+		return nil
+	}
+	var identities map[string]map[string]engines.ModelIdentity
+	for engine, rawModels := range block {
+		models, listed := byEngine[engine]
+		if !listed {
+			continue
+		}
+		var entries map[string]json.RawMessage
+		if json.Unmarshal(rawModels, &entries) != nil {
+			continue
+		}
+		for model, entry := range entries {
+			if !slices.Contains(models, model) || bytes.Equal(bytes.TrimSpace(entry), []byte("null")) {
+				continue
+			}
+			var identity engines.ModelIdentity
+			if json.Unmarshal(entry, &identity) != nil || identity.Validate() != nil {
+				continue
+			}
+			if identities == nil {
+				identities = make(map[string]map[string]engines.ModelIdentity)
+			}
+			if identities[engine] == nil {
+				identities[engine] = make(map[string]engines.ModelIdentity)
+			}
+			identities[engine][model] = identity
+		}
+	}
+	return identities
 }
 
 // Keep model tokens raw until the shared validator has seen their original

@@ -21,6 +21,21 @@ an empty list; malformed documents and failed fetches retain last-good data.
 Policy advertisements reuse the shared raw model-entry filter, including its
 explicit empty served permission and opaque unsupported-capability behavior.
 
+The same inventory carries optional `modelIdentities`, keyed by engine and
+served model name. Each entry must pass `engines.ModelIdentity.Validate` and
+belong to that response's `modelsByEngine`. Invalid entries and malformed engine
+or identity blocks are dropped independently, preserving valid routing models.
+The existing HTTP inventory body limit also bounds identity metadata. Identities
+are display metadata and grant no routing or strict-admission authority.
+Last-good identities stay paired with their last-good inventory on failed or
+stale reads; a successful inventory removes identities for models no longer
+listed. Identity-only changes publish `discovery:node-updated`. Directory and
+cache copies detach the identity maps and their `files` slices.
+Individual events and aggregate directory responses omit identity metadata when
+its encoded JSON-RPC envelope would exceed the ordinary discovery frame limit.
+Routing inventory and the stored identity snapshot remain intact; no transport
+or HTTP limit is raised.
+
 New policy writes remain strict. Only the broker's stored-policy loader removes
 invalid old model entries and dependent references in memory, without changing
 the stored file, revision or surviving policy. No identifier is trimmed,

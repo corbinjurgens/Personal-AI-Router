@@ -15,6 +15,7 @@ import (
 	"nvpair-shared/applog"
 	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
+	"nvpair-shared/jsonrpc"
 	"nvpair-shared/nodepolicy"
 )
 
@@ -249,7 +250,13 @@ func (b *Broker) handleMessage(msg *Message) {
 		}
 
 	case "discovery:get-nodes":
-		if err := b.codec.Respond(msg.ID, GetNodesResult{Nodes: b.store.Snapshot()}); err != nil {
+		result := GetNodesResult{Nodes: b.store.Snapshot()}
+		if !jsonrpc.ResponseFitsFrame(msg.ID, result, jsonrpc.DefaultFrameBytes) {
+			for i := range result.Nodes {
+				result.Nodes[i].ModelIdentities = nil
+			}
+		}
+		if err := b.codec.Respond(msg.ID, result); err != nil {
 			log.Printf("failed to respond to discovery:get-nodes: %v", err)
 		}
 

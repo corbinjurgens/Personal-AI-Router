@@ -17,6 +17,7 @@ import {
     nodePaused,
     NODE_PAUSED_MESSAGE,
     roleDifferences,
+    roleIdentity,
     roleItems,
     roleKey,
     roleLabel,
@@ -105,7 +106,8 @@ export default function RoleEditor({ targetId, nodeId, onSaved }: RoleEditorProp
     }
 
     const differences = entry.latest ? roleDifferences(draft, entry.latest.roles) : []
-    const describe = (role: NodeRole | undefined) => (role ? roleLabel(role, descriptors) : 'unset')
+    const describe = (role: NodeRole | undefined) =>
+        role ? roleLabel(role, descriptors, roleIdentity(role, inventory)) : 'unset'
 
     return (
         <Stack gap="2">
@@ -145,7 +147,7 @@ export default function RoleEditor({ targetId, nodeId, onSaved }: RoleEditorProp
                         <Select
                             size="small"
                             aria-label={`${TIER_LABELS[tier]} role`}
-                            items={roleItems(choices, draft[tier], descriptors)}
+                            items={roleItems(choices, draft[tier], descriptors, inventory)}
                             value={draft[tier] ? roleKey(draft[tier]) : UNSET_ROLE}
                             onValueChange={(value: string) => pick(tier, value)}
                             disabled={sending || readOnly}

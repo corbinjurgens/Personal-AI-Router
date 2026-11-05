@@ -7,8 +7,66 @@ import (
 	"reflect"
 	"testing"
 
+	"nvpair-shared/engines"
 	"nvpair-shared/noderec"
 )
+
+func TestDirectoryIdentityOnlyChangePublishes(t *testing.T) {
+	d := newDirectory()
+	node := noderec.DirectoryNode{HostUUID: "target", IP: "127.0.0.1", Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceEngineManager: {Port: 14317}}}
+	d.upsert(node)
+	inv := modelInventory{models: []string{"served-id"}, byEngine: map[string][]string{"llamacpp": {"served-id"}},
+		identities: map[string]map[string]engines.ModelIdentity{"llamacpp": {"served-id": {
+			Repository: "owner/repository", Quantization: "Q4_K_M", Strength: "declared",
+			Files: []engines.ModelIdentityFile{{Role: "model", Name: "model.gguf", SizeBytes: 42}},
+		}}}}
+	if _, changed, valid := d.applyModels(node.HostUUID, node.IP, 14317, inv); !changed || !valid {
+		t.Fatalf("initial inventory changed/valid = %v/%v", changed, valid)
+	}
+	if _, changed, valid := d.applyModels(node.HostUUID, node.IP, 14317, inv); changed || !valid {
+		t.Fatalf("unchanged inventory changed/valid = %v/%v", changed, valid)
+	}
+	identity := inv.identities["llamacpp"]["served-id"]
+	identity.Quantization = "Q8_0"
+	inv.identities["llamacpp"]["served-id"] = identity
+	published, changed, valid := d.applyModels(node.HostUUID, node.IP, 14317, inv)
+	if !changed || !valid || published.ModelIdentities["llamacpp"]["served-id"].Quantization != "Q8_0" {
+		t.Fatalf("identity-only change not published: %+v, changed/valid %v/%v", published, changed, valid)
+	}
+	published.ModelIdentities["llamacpp"]["served-id"].Files[0].Name = "changed.gguf"
+	delete(published.ModelIdentities["llamacpp"], "served-id")
+	delete(published.ModelIdentities, "llamacpp")
+	stored, present := d.get(node.HostUUID)
+	if !present || stored.ModelIdentities["llamacpp"]["served-id"].Files[0].Name != "model.gguf" || stored.ModelIdentities["llamacpp"]["served-id"].Quantization != "Q8_0" {
+		t.Fatalf("publication exposed stored identity: %+v", stored.ModelIdentities)
+	}
+}
+
+func TestDirectoryIdentitySnapshotsAreIndependent(t *testing.T) {
+	d := newDirectory()
+	node := noderec.DirectoryNode{HostUUID: "target", ModelIdentities: map[string]map[string]engines.ModelIdentity{"llamacpp": {"served-id": {
+		Strength: "declared", Files: []engines.ModelIdentityFile{{Role: "model", Name: "model.gguf", SizeBytes: 42}},
+	}}}}
+	d.upsert(node)
+	node.ModelIdentities["llamacpp"]["served-id"].Files[0].Name = "caller.gguf"
+	got, present := d.get("target")
+	if !present || got.ModelIdentities["llamacpp"]["served-id"].Files[0].Name != "model.gguf" {
+		t.Fatal("upsert retained caller-owned identity files")
+	}
+	got.ModelIdentities["llamacpp"]["served-id"].Files[0].Name = "getter.gguf"
+	rows := d.snapshot("")
+	if len(rows) != 1 || rows[0].ModelIdentities["llamacpp"]["served-id"].Files[0].Name != "model.gguf" {
+		t.Fatal("get exposed directory identity files")
+	}
+	delete(rows[0].ModelIdentities["llamacpp"], "served-id")
+	last, _ := d.get("target")
+	if len(last.ModelIdentities["llamacpp"]) != 1 {
+		t.Fatal("snapshot exposed directory identity maps")
+	}
+	if !d.remove("target") || len(d.snapshot("")) != 0 {
+		t.Fatal("removed identity-bearing node survived in the directory")
+	}
+}
 
 func TestModelDownloadDirectoryLifecycleOnlyChanges(t *testing.T) {
 	d := newDirectory()

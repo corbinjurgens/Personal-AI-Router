@@ -9,7 +9,8 @@ import type {
     EngineProcessStatus,
     EngineProgress,
     EngineStatusData,
-    EngineType
+    EngineType,
+    ModelIdentity
 } from '@/shared/types/engines'
 import type { LogEntry, LogPage } from '@/shared/types/log'
 import type { NodeItem } from '@/shared/types/nodes'
@@ -62,6 +63,7 @@ import {
     booleanValue,
     optionalStringArrayValue,
     loadedNamesForEngine,
+    identitiesForEngine,
     sameStringList,
     nodeAddresses,
     primaryNodeAddress,
@@ -260,6 +262,7 @@ class ModularBridgeState {
     private engineDescriptors = new Map<EngineType, EngineDescriptor>()
     /** Last-good canonical inventory, independent of query currentness. */
     private localManagerModels = new Map<EngineType, string[]>()
+    private localModelIdentities = new Map<EngineType, Record<string, ModelIdentity>>()
     private localInventoryCurrent = new Set<EngineType>()
     private localLoadedByEngine: Record<string, string[]> = {}
     private localDownloads = new ModelDownloadObservation()
@@ -1391,7 +1394,8 @@ class ModularBridgeState {
             engineType,
             models,
             loaded,
-            node.modelsByEngine !== undefined && Object.hasOwn(node.modelsByEngine, engine)
+            node.modelsByEngine !== undefined && Object.hasOwn(node.modelsByEngine, engine),
+            identitiesForEngine(node.modelIdentities, engine)
         )
     }
 
@@ -1644,6 +1648,10 @@ class ModularBridgeState {
             const engine = engineManagerName(engineType)
             if (Object.hasOwn(inventories, engine)) {
                 this.localManagerModels.set(engineType, [...inventories[engine]])
+                this.localModelIdentities.set(
+                    engineType,
+                    identitiesForEngine(result.modelIdentities, engine) ?? {}
+                )
                 this.localInventoryCurrent.add(engineType)
             } else {
                 if (!this.localManagerModels.has(engineType))
@@ -1722,7 +1730,8 @@ class ModularBridgeState {
         engineType: EngineType,
         names: string[],
         loaded: Set<string>,
-        inventoryCurrent: boolean
+        inventoryCurrent: boolean,
+        identities?: Record<string, ModelIdentity>
     ): EngineModels {
         const observation = this.downloadsForNode(nodeId)
         return projectEngineModels(
@@ -1735,7 +1744,8 @@ class ModularBridgeState {
             inventoryCurrent &&
                 (nodeId === this.selfId ||
                     this.remoteInventoryCurrent.get(nodeId)?.has(engineManagerName(engineType)) ===
-                        true)
+                        true),
+            identities
         )
     }
 
@@ -1909,7 +1919,8 @@ class ModularBridgeState {
             engineType,
             cached ?? [],
             loaded,
-            this.localInventoryCurrent.has(engineType)
+            this.localInventoryCurrent.has(engineType),
+            this.localModelIdentities.get(engineType)
         )
     }
 
@@ -1982,7 +1993,8 @@ class ModularBridgeState {
             this.modelsForEngine(node, engine),
             loaded,
             node.modelsByEngine !== undefined &&
-                Object.hasOwn(node.modelsByEngine, engineManagerName(engine))
+                Object.hasOwn(node.modelsByEngine, engineManagerName(engine)),
+            identitiesForEngine(node.modelIdentities, engineManagerName(engine))
         )
     }
 
@@ -2403,13 +2415,22 @@ class ModularBridgeState {
                     const engineType = engineTypeFromManagerName(engine)
                     if (!engineType) continue
                     this.localManagerModels.set(engineType, [...names])
+                    this.localModelIdentities.set(
+                        engineType,
+                        identitiesForEngine(node.modelIdentities, engine) ?? {}
+                    )
                     if (node.downloadStateCurrent === true)
                         this.localInventoryCurrent.add(engineType)
                 }
                 this.localLoadedByEngine = node.loadedByEngine
             }
             if (!accepted && existing && node.id !== this.selfId) {
-                node = { ...node, models: existing.models, modelsByEngine: existing.modelsByEngine }
+                node = {
+                    ...node,
+                    models: existing.models,
+                    modelsByEngine: existing.modelsByEngine,
+                    modelIdentities: existing.modelIdentities
+                }
             }
             node = {
                 ...node,
@@ -2467,13 +2488,16 @@ class ModularBridgeState {
                         hadEngine ? (existing.modelsByEngine?.[managerEngine] ?? []) : [],
                         hasEngine ? (merged.modelsByEngine?.[managerEngine] ?? []) : []
                     )
+                const identityChanged =
+                    JSON.stringify(identitiesForEngine(existing.modelIdentities, managerEngine)) !==
+                    JSON.stringify(identitiesForEngine(merged.modelIdentities, managerEngine))
                 // Proxy presence is not a lifecycle fact: the broker can keep
                 // serving engine-manager while this optional routing proxy is
                 // unavailable. Use the local manager fact first, with proxy
                 // presence only as the existing external-engine fallback.
                 if (
                     this.engineActiveForModels(merged, engine) &&
-                    (unionChanged || attributionChanged)
+                    (unionChanged || attributionChanged || identityChanged)
                 ) {
                     this.onLocalDiscoveryModelsChanged?.(engine)
                 }
@@ -2653,6 +2677,7 @@ class ModularBridgeState {
             // loaded set) we already merged.
             models: existing.models,
             modelsByEngine: existing.modelsByEngine,
+            modelIdentities: existing.modelIdentities,
             loadedByEngine: existing.loadedByEngine,
             policy: existing.policy,
             downloadState: existing.downloadState,

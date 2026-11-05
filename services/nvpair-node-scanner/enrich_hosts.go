@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"sync"
 
+	"nvpair-shared/engines"
 	"nvpair-shared/modeldownload"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
@@ -19,6 +20,7 @@ import (
 type modelInventory struct {
 	models         []string
 	byEngine       map[string][]string
+	identities     map[string]map[string]engines.ModelIdentity
 	loadedByEngine map[string][]string
 	policy         *nodepolicy.Advertisement
 	downloadObservation
@@ -88,6 +90,7 @@ func (inv modelInventory) applyTo(node *noderec.DirectoryNode) {
 	}
 	node.Models = inv.models
 	node.ModelsByEngine = inv.byEngine
+	node.ModelIdentities = noderec.CloneModelIdentities(inv.identities)
 	node.LoadedByEngine = inv.loadedByEngine
 	node.Policy = inv.policy
 	observation := inv.downloadObservation.clone()

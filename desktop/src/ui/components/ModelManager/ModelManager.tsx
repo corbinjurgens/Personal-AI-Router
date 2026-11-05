@@ -6,7 +6,7 @@ import { Button, Flex, Stack, Text } from '@nvidia/foundations-react-core'
 import type { BackendInfo } from '@/ui/types/engine-info'
 import { engineCapabilities } from '@/ui/constants/engine-capabilities'
 import { useEngineDescriptor } from '@/ui/stores/engine-status.store'
-import { formatModelDisplayName } from '@/ui/utils/format-model-display-name'
+import { modelPrimaryLabel } from '@/ui/utils/model-identity-label'
 import { ModelExpiry, type ModelItem } from '@/shared/types/engines'
 import { emptyEngineModels, engineManagerName } from '@/shared/utils/engines'
 
@@ -84,7 +84,7 @@ export function ModelManager({ backend, nodeId }: { backend: BackendInfo; nodeId
     })
     void modelPendingFingerprint
 
-    const displayName = formatModelDisplayName
+    const displayName = (model: ModelItem) => modelPrimaryLabel(model.name, model.identity)
 
     // Canonical models already contain inventory, residency and lifecycle rows.
     // Progress may arrive first, so merge only exact model keys without making
@@ -127,9 +127,7 @@ export function ModelManager({ backend, nodeId }: { backend: BackendInfo; nodeId
                 size: 0,
                 status: 'idle',
                 parameterSize: '',
-                quantization: '',
                 family: '',
-                digest: '',
                 sizeVram: null,
                 expiresAt: null,
                 expiry: '10m',
@@ -145,7 +143,7 @@ export function ModelManager({ backend, nodeId }: { backend: BackendInfo; nodeId
             })
         }
         return Array.from(rows.values()).sort((a, b) =>
-            displayName(a.name).localeCompare(displayName(b.name))
+            displayName(a).localeCompare(displayName(b))
         )
     })()
 
@@ -275,7 +273,7 @@ export function ModelManager({ backend, nodeId }: { backend: BackendInfo; nodeId
             {transientModel && (
                 <TransientModelStatusRow
                     transientModel={transientModel}
-                    displayName={displayName}
+                    displayName={() => displayName(transientModel)}
                     pullProgress={transientPullProgress}
                 />
             )}
@@ -314,7 +312,7 @@ export function ModelManager({ backend, nodeId }: { backend: BackendInfo; nodeId
                                     .getModelPending(nodeId, backendType, model.name)}
                                 canCopy={caps.hasModelCopy}
                                 canConfigure={canConfigure}
-                                displayName={displayName}
+                                displayName={() => displayName(model)}
                                 onAction={handleAction}
                                 onExpiryChange={handleExpiryChange}
                             />

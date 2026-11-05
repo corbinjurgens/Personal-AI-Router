@@ -17,6 +17,7 @@ import (
 
 	"nvpair-shared/applog"
 	"nvpair-shared/buildinfo"
+	"nvpair-shared/engines"
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/modeldownload"
 	"nvpair-shared/netpick"
@@ -72,6 +73,8 @@ type EnrichedNode struct {
 	// the flat Models union; carried through to AvailableNode for per-engine
 	// consumers.
 	ModelsByEngine map[string][]string `json:"modelsByEngine,omitempty"`
+	// ModelIdentities is display metadata paired with the listed inventory.
+	ModelIdentities map[string]map[string]engines.ModelIdentity `json:"modelIdentities,omitempty"`
 	// LoadedByEngine names the models currently resident in memory per engine
 	// (normally a subset of ModelsByEngine), enriched by the daemon from the
 	// peer's engine-manager /v1/models loadedByEngine field. Carried through to
@@ -121,6 +124,7 @@ func directoryToEnriched(n noderec.DirectoryNode) EnrichedNode {
 		Clustered:            n.Clustered(),
 		Models:               n.Models,
 		ModelsByEngine:       n.ModelsByEngine,
+		ModelIdentities:      noderec.CloneModelIdentities(n.ModelIdentities),
 		LoadedByEngine:       n.LoadedByEngine,
 		DownloadState:        state,
 		DownloadStateCurrent: current,
@@ -242,6 +246,7 @@ func (s *discoveryStore) Upsert(n EnrichedNode, source nodeSource) {
 		return
 	}
 	cp := n
+	cp.ModelIdentities = noderec.CloneModelIdentities(n.ModelIdentities)
 	cp.DownloadState, cp.DownloadStateCurrent = cloneDownloadObservation(n.DownloadState, n.DownloadStateCurrent)
 	s.mu.Lock()
 	sn := s.nodes[key]
@@ -318,6 +323,18 @@ func (s *discoveryStore) Snapshot() []AvailableNode {
 	return out
 }
 
+// Discovery snapshots also reach ordinary worker/client codecs. Withdraw
+// optional identities from an oversized publication, keeping the stored facts
+// and all routing inventory intact.
+func discoveryNotificationNodes(nodes []AvailableNode) []AvailableNode {
+	if !jsonrpc.NotificationFitsFrame("discovery:nodes-changed", nodes, jsonrpc.DefaultFrameBytes) {
+		for i := range nodes {
+			nodes[i].ModelIdentities = nil
+		}
+	}
+	return nodes
+}
+
 // toAvailable projects a storedNode onto the wire format. Name currently mirrors
 // ID (the mDNS instance name is already human-readable for our use case); lastSeen
 // is emitted as Unix seconds to match the external schema's "number of seconds"
@@ -353,6 +370,7 @@ func (sn storedNode) toAvailable() AvailableNode {
 		Clustered:            n.Clustered,
 		Models:               n.Models,
 		ModelsByEngine:       n.ModelsByEngine,
+		ModelIdentities:      noderec.CloneModelIdentities(n.ModelIdentities),
 		LoadedByEngine:       n.LoadedByEngine,
 		DownloadState:        state,
 		DownloadStateCurrent: current,

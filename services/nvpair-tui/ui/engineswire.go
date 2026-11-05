@@ -52,10 +52,11 @@ func (e engineStatus) label() string {
 // currently resident in memory, which the engine-manager polls for and pushes —
 // so a client never has to poll to know what is loaded.
 type modelsResult struct {
-	Models         []string                `json:"models"`
-	ModelsByEngine map[string][]string     `json:"modelsByEngine"`
-	LoadedByEngine map[string][]string     `json:"loadedByEngine"`
-	DownloadState  *modeldownload.Snapshot `json:"downloadState,omitempty"`
+	Models          []string                                    `json:"models"`
+	ModelsByEngine  map[string][]string                         `json:"modelsByEngine"`
+	LoadedByEngine  map[string][]string                         `json:"loadedByEngine"`
+	ModelIdentities map[string]map[string]engines.ModelIdentity `json:"modelIdentities,omitempty"`
+	DownloadState   *modeldownload.Snapshot                     `json:"downloadState,omitempty"`
 	// current qualifies the canonical inventory, not operation completion.
 	current bool
 }
@@ -66,7 +67,8 @@ func (r *modelsResult) UnmarshalJSON(data []byte) error {
 	type plain modelsResult
 	var wire struct {
 		*plain
-		DownloadState json.RawMessage `json:"downloadState"`
+		DownloadState   json.RawMessage `json:"downloadState"`
+		ModelIdentities json.RawMessage `json:"modelIdentities"`
 	}
 	next := modelsResult{}
 	wire.plain = (*plain)(&next)
@@ -74,9 +76,40 @@ func (r *modelsResult) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	next.DownloadState = parseDownloadState(wire.DownloadState)
+	next.ModelIdentities = parseModelIdentities(wire.ModelIdentities)
 	next.current = next.DownloadState != nil
 	*r = next
 	return nil
+}
+
+// parseModelIdentities isolates optional display metadata failures from the
+// inventory and from valid entries belonging to other models or engines.
+func parseModelIdentities(data json.RawMessage) map[string]map[string]engines.ModelIdentity {
+	var wire map[string]json.RawMessage
+	if json.Unmarshal(data, &wire) != nil {
+		return nil
+	}
+	var identities map[string]map[string]engines.ModelIdentity
+	for engine, raw := range wire {
+		var models map[string]json.RawMessage
+		if json.Unmarshal(raw, &models) != nil {
+			continue
+		}
+		for model, raw := range models {
+			var identity engines.ModelIdentity
+			if json.Unmarshal(raw, &identity) != nil || identity.Validate() != nil {
+				continue
+			}
+			if identities == nil {
+				identities = make(map[string]map[string]engines.ModelIdentity)
+			}
+			if identities[engine] == nil {
+				identities[engine] = make(map[string]engines.ModelIdentity)
+			}
+			identities[engine][model] = identity
+		}
+	}
+	return identities
 }
 
 func parseDownloadState(data json.RawMessage) *modeldownload.Snapshot {

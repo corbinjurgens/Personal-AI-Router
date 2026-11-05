@@ -173,6 +173,28 @@ export interface EngineModels {
     downloadStateCurrent?: boolean
 }
 
+/** Display and grouping metadata from engines.ModelIdentity, never admission authority. */
+export interface ModelIdentity {
+    repository?: string
+    revision?: string
+    quantization?: string
+    quantizationSource?: 'hf-tag' | 'file-name' | 'gguf-file-type'
+    generalName?: string
+    sizeLabel?: string
+    architecture?: string
+    trainedContextTokens?: number
+    configuredContextTokens?: number
+    files?: {
+        role: 'model' | 'draft' | 'companion'
+        name: string
+        sizeBytes: number
+        sha256?: string
+    }[]
+    totalBytes?: number
+    contentId?: string
+    strength: 'declared' | 'verified'
+}
+
 export interface ModelItem {
     name: string
     size: number
@@ -181,9 +203,8 @@ export interface ModelItem {
     downloadStateCurrent?: boolean
     status: ModelItemStatus
     parameterSize: string
-    quantization: string
+    identity?: ModelIdentity
     family: string
-    digest: string
     /** VRAM consumed by the model when loaded (bytes). */
     sizeVram: number | null
     /** Timestamp when the engine will auto-unload this model. */

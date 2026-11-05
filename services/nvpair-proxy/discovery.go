@@ -279,6 +279,35 @@ func filterModelInventoryJSON(data []byte, modelFields ...string) ([]byte, error
 			if !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 				clean, err = nodepolicy.FilterAdvertisementModels(raw)
 			}
+		case "modelIdentities":
+			var byEngine map[string]json.RawMessage
+			if json.Unmarshal(raw, &byEngine) != nil {
+				clean = []byte("null")
+				break
+			}
+			for engine, rawModels := range byEngine {
+				if !isJSONObject(rawModels) {
+					delete(byEngine, engine)
+					continue
+				}
+				models := make(map[string]json.RawMessage)
+				visitObject(rawModels, func(key []byte, start, end int) {
+					if nodepolicy.ValidateModelIdentifierJSON(key) != nil {
+						return
+					}
+					var model string
+					if json.Unmarshal(key, &model) == nil {
+						models[model] = rawModels[start:end]
+					}
+				})
+				byEngine[engine], err = json.Marshal(models)
+				if err != nil {
+					break
+				}
+			}
+			if err == nil {
+				clean, err = json.Marshal(byEngine)
+			}
 		}
 		if err != nil {
 			filterErr = fmt.Errorf("invalid model inventory")
@@ -317,7 +346,7 @@ func filterDiscoveryModelsJSON(data []byte) ([]byte, error) {
 				continue
 			}
 			var err error
-			nodes[i], err = filterModelInventoryJSON(node, "models", "modelsByEngine", "loadedByEngine", "policy")
+			nodes[i], err = filterModelInventoryJSON(node, "models", "modelsByEngine", "loadedByEngine", "modelIdentities", "policy")
 			if err != nil {
 				filterErr = err
 				return

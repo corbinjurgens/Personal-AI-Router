@@ -11,12 +11,14 @@ import (
 	"sort"
 	"time"
 
+	"nvpair-shared/engines"
+	"nvpair-shared/jsonrpc"
 	"nvpair-shared/modeldownload"
 	"nvpair-shared/performancewire"
 )
 
-// modelsChangedMethod carries ready inventory, residency and download lifecycle
-// changes, including changes with no corresponding loaded-name change.
+// modelsChangedMethod carries ready inventory, model identity, residency and
+// download lifecycle changes, including changes with no loaded-name change.
 const modelsChangedMethod = "engine:models-changed"
 
 // defaultLoadedPollSeconds is the default cadence of the loaded-model watcher,
@@ -25,9 +27,8 @@ const modelsChangedMethod = "engine:models-changed"
 const defaultLoadedPollSeconds = 5
 
 // modelsChangedParams is the engine:models-changed payload: which engine's
-// loaded set changed (the trigger) plus the full current model result — the same
-// shape engine:models returns — so a push-driven consumer swaps its whole
-// snapshot instead of applying a delta.
+// inventory, metadata or residency changed plus the current model inventory
+// without policy, so a push-driven consumer swaps its whole snapshot.
 type modelsChangedParams struct {
 	Engine string       `json:"engine"`
 	Models ModelsResult `json:"models"`
@@ -51,8 +52,8 @@ var residencyNeutralActions = map[string]bool{
 // push-driven consumer never has to poll. It runs until ctx is cancelled and is
 // pokeable (see Executor.pokeLoaded) for sub-tick latency after an explicit
 // action. The first successful sweep publishes its loaded-name and memory
-// baseline; later memory changes use the same notification even if names are
-// unchanged.
+// baseline; later memory and model identity changes use the same notification
+// even if names are unchanged.
 func (e *Executor) watchLoaded(ctx context.Context) {
 	interval := e.loadedPollInterval
 	if interval <= 0 {
@@ -66,6 +67,7 @@ func (e *Executor) watchLoaded(ctx context.Context) {
 	var previousMemory *performancewire.MemoryEvidence
 	var previousInventory map[string][]string
 	var previousDownloads *modeldownload.Snapshot
+	var previousIdentities map[string]map[string]engines.ModelIdentity
 	var lastInventory time.Time
 	var identity *modelIdentityParams
 	for {
@@ -102,18 +104,53 @@ func (e *Executor) watchLoaded(ctx context.Context) {
 		// Identity publication can wait for a prior owner. Recheck inventory
 		// epochs and readiness after it, immediately before model publication.
 		res = e.currentModelsResult(res)
+		e.attachModelIdentities(&res)
+		// Compare the metadata consumers can actually receive. Every engine
+		// notification carries the full inventory, with its addressed engine.
+		for _, name := range e.reg.Names() {
+			if res.Identities == nil {
+				break
+			}
+			if !jsonrpc.NotificationFitsFrame(modelsChangedMethod, modelsChangedParams{Engine: name, Models: res}, jsonrpc.WorkerFrameBytes) {
+				res.Identities = nil
+			}
+		}
 		// The first successful loaded_models read is an observation too. A
 		// broker snapshot may have preceded engine start, so publish even an
 		// empty resident set when its engine key first appears.
 		changed = mergeMemoryChanges(changed, memoryChanged)
 		changed = mergeMemoryChanges(changed, changedInventoryEngines(previousInventory, res.ByEngine))
 		changed = mergeMemoryChanges(changed, changedDownloadEngines(previousDownloads, res.DownloadState, e.reg.Names()))
+		changed = mergeMemoryChanges(changed, changedModelIdentityEngines(previousIdentities, res.Identities))
 		previousInventory = res.ByEngine
 		previousDownloads = res.DownloadState
+		previousIdentities = res.Identities
 		for _, name := range changed {
 			e.notify(modelsChangedMethod, modelsChangedParams{Engine: name, Models: res})
 		}
 	}
+}
+
+func changedModelIdentityEngines(previous, current map[string]map[string]engines.ModelIdentity) []string {
+	names := make(map[string]bool, len(previous)+len(current))
+	for name := range previous {
+		names[name] = true
+	}
+	for name := range current {
+		names[name] = true
+	}
+	var changed []string
+	for name := range names {
+		// ModelIdentity contains only JSON scalars and file records, so these
+		// snapshots always marshal. JSON also gives map-order-independent equality.
+		before, _ := json.Marshal(previous[name])
+		after, _ := json.Marshal(current[name])
+		if !bytes.Equal(before, after) {
+			changed = append(changed, name)
+		}
+	}
+	sort.Strings(changed)
+	return changed
 }
 
 func changedInventoryEngines(previous, current map[string][]string) []string {

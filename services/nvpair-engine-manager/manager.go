@@ -20,6 +20,7 @@ import (
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
+	"nvpair-shared/jsonrpc"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 	"nvpair-shared/reach"
@@ -524,7 +525,11 @@ func (m *Manager) runSetPort(ctx context.Context, msg *Message) {
 // engine:action) because it makes one loopback HTTP call per running engine and
 // must not block the read loop.
 func (m *Manager) runModels(ctx context.Context, msg *Message) {
-	m.codec.Respond(msg.ID, m.exec.ModelsResult(ctx))
+	result := m.exec.ModelsResult(ctx)
+	if result.Identities != nil && !jsonrpc.ResponseFitsFrame(msg.ID, result, jsonrpc.WorkerFrameBytes) {
+		result.Identities = nil
+	}
+	m.codec.Respond(msg.ID, result)
 }
 
 // runCatalog answers engine:catalog. It is off the request goroutine because the

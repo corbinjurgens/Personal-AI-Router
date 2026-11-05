@@ -329,7 +329,7 @@ func (p *proxyProcess) handleSubscribe(engine string, params json.RawMessage) {
 	}
 	send := func(nodes []noderec.DirectoryNode) {
 		method := engines.AddressMethod(engine, noderec.NotifyNodes)
-		if err := p.peer.Notify(method, noderec.GetNodesResult{Nodes: nodes}); err != nil {
+		if err := p.peer.Notify(method, noderec.GetNodesResult{Nodes: relay.NotificationNodes(method, nodes)}); err != nil {
 			slog.Debug("failed to push node snapshot to proxy", "engine", engine, "err", err)
 		}
 	}

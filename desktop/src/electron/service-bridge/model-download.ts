@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { ModelDownloadEntry, ModelDownloadSnapshot } from '@/shared/types/model-download'
+import type { ModelIdentity } from '@/shared/types/engines'
 import type { JsonObject, JsonValue } from './json-rpc-client'
+import { parseModelIdentities } from './model-identity'
 
 function object(value: JsonValue | undefined): JsonObject | undefined {
     return value !== null && typeof value === 'object' && !Array.isArray(value) ? value : undefined
@@ -178,6 +180,7 @@ function stringMap(value: JsonValue | undefined): Record<string, string[]> | und
 /** Canonical inventory, including engines whose current query failed (missing key). */
 export interface ModelsResult {
     modelsByEngine?: Record<string, string[]>
+    modelIdentities?: Record<string, Record<string, ModelIdentity>>
     loadedByEngine?: Record<string, string[]>
     downloadState?: ModelDownloadSnapshot
     downloadStateCurrent?: boolean
@@ -191,6 +194,7 @@ export function parseModelsResult(value: JsonValue | undefined): ModelsResult {
     const downloadState = parseModelDownloadSnapshot(row.downloadState)
     return {
         modelsByEngine: stringMap(row.modelsByEngine),
+        modelIdentities: parseModelIdentities(row.modelIdentities),
         loadedByEngine: stringMap(row.loadedByEngine),
         downloadState,
         downloadStateCurrent: downloadState

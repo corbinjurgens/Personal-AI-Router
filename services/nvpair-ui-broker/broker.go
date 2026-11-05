@@ -114,6 +114,8 @@ type AvailableNode struct {
 	// Omitted only when attribution is nil; a nonnil empty map authoritatively
 	// reports no per-engine models and must remain present on the client wire.
 	ModelsByEngine map[string][]string `json:"modelsByEngine,omitzero"`
+	// ModelIdentities carries validated display metadata for listed models.
+	ModelIdentities map[string]map[string]engines.ModelIdentity `json:"modelIdentities,omitempty"`
 	// LoadedByEngine names the models currently resident in memory per engine
 	// (normally a subset of ModelsByEngine), enriched by the daemon from the
 	// peer's engine-manager /v1/models loadedByEngine field. Lets a per-engine
@@ -2107,7 +2109,7 @@ func (b *Broker) fanDiscoveryToScheduler() {
 	if sc == nil {
 		return
 	}
-	if err := sc.Notify("discovery:nodes-changed", b.store.Snapshot()); err != nil {
+	if err := sc.Notify("discovery:nodes-changed", discoveryNotificationNodes(b.store.Snapshot())); err != nil {
 		slog.Warn("fan discovery:nodes-changed to scheduler failed", "err", err)
 	}
 }
@@ -2122,7 +2124,7 @@ func (b *Broker) fanDiscoveryToScheduler() {
 // path via emitNodesChanged; the subscribe path because it has just set
 // the flag true and wants an immediate baseline regardless of races).
 func (b *Broker) pushNodesChanged() {
-	if err := b.codec.Notify("discovery:nodes-changed", b.store.Snapshot()); err != nil {
+	if err := b.codec.Notify("discovery:nodes-changed", discoveryNotificationNodes(b.store.Snapshot())); err != nil {
 		slog.Warn("emit discovery:nodes-changed failed", "err", err)
 	}
 }

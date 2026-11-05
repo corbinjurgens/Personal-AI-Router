@@ -11,10 +11,55 @@ import (
 	"testing"
 
 	"nvpair-shared/buildinfo"
+	"nvpair-shared/engines"
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/modeldownload"
 	"nvpair-shared/nodepolicy"
 )
+
+func TestDirectoryNodeModelIdentitiesRoundTrip(t *testing.T) {
+	want := map[string]map[string]engines.ModelIdentity{
+		"llamacpp": {"served-id": {
+			Repository: "unsloth/LFM2.5-24B-A2B-GGUF", Quantization: "UD-Q4_K_XL", QuantizationSource: "hf-tag",
+			ConfiguredContextTokens: 131072, Strength: "declared",
+			Files: []engines.ModelIdentityFile{{Role: "model", Name: "model.gguf", SizeBytes: 42}},
+		}},
+	}
+	raw, err := json.Marshal(DirectoryNode{HostUUID: "peer", ModelsByEngine: map[string][]string{"llamacpp": {"served-id"}}, ModelIdentities: want})
+	if err != nil {
+		t.Fatalf("encode directory node: %v", err)
+	}
+	var node DirectoryNode
+	if err := json.Unmarshal(raw, &node); err != nil {
+		t.Fatalf("decode directory node: %v", err)
+	}
+	if !reflect.DeepEqual(node.ModelIdentities, want) {
+		t.Fatalf("identity round trip = %+v, want %+v", node.ModelIdentities, want)
+	}
+	var wire map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatalf("decode wire keys: %v", err)
+	}
+	if _, present := wire["modelIdentities"]; !present {
+		t.Fatal("modelIdentities wire field missing")
+	}
+}
+
+func TestCloneModelIdentitiesDetachesFilesAndMaps(t *testing.T) {
+	original := map[string]map[string]engines.ModelIdentity{"llamacpp": {"model": {
+		Strength: "declared", Files: []engines.ModelIdentityFile{{Role: "model", Name: "original.gguf", SizeBytes: 42}},
+	}}}
+	cloned := CloneModelIdentities(original)
+	cloned["llamacpp"]["model"].Files[0].Name = "changed.gguf"
+	delete(cloned["llamacpp"], "model")
+	cloned["extra"] = map[string]engines.ModelIdentity{}
+	if len(original) != 1 || len(original["llamacpp"]) != 1 || original["llamacpp"]["model"].Files[0].Name != "original.gguf" {
+		t.Fatalf("clone mutated original: %+v", original)
+	}
+	if CloneModelIdentities(nil) != nil {
+		t.Fatal("nil identities became a nonnil map")
+	}
+}
 
 func TestMemoryDirectoryGenerationStrictDecode(t *testing.T) {
 	for _, raw := range []string{

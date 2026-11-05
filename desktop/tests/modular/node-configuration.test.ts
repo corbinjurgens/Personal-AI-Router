@@ -49,9 +49,7 @@ function model(name: string, downloaded = true): ModelItem {
         downloaded,
         status: 'idle',
         parameterSize: '',
-        quantization: '',
         family: '',
-        digest: '',
         sizeVram: null,
         expiresAt: null,
         expiry: '10m',
@@ -698,9 +696,126 @@ describe('declared roles on the node card', () => {
                 strong: { engine: 'llamacpp-custom', model: 'gemma-3-27b' }
             })
             await act(async () => root.render(createElement(NodeDeclaredRoles, { nodeId: PEER })))
-            expect(container.textContent).toContain('weak: qwen3:4b (llama.cpp)')
-            expect(container.textContent).toContain('strong: gemma-3-27b (llama.cpp custom)')
+            expect(container.textContent).toContain('weak: qwen3:4b · llama.cpp')
+            expect(container.textContent).toContain('strong: gemma-3-27b · llama.cpp custom')
             expect(container.textContent).not.toContain('medium')
+        })
+
+        it('labels roles from this node and engine, keeps tier order and updates identity pushes', async () => {
+            const served = 'preset-ctx131072'
+            const peerModel: ModelItem = {
+                ...model(served),
+                identity: {
+                    repository: 'unsloth/LFM2.5-24B-A2B-GGUF',
+                    quantization: 'UD-Q4_K_XL',
+                    quantizationSource: 'hf-tag',
+                    strength: 'declared'
+                }
+            }
+            useEngineModelsStore.setState({
+                models: new Map<string, EngineModels>([
+                    [
+                        `${SELF}:llama-cpp`,
+                        {
+                            nodeId: SELF,
+                            engineType: 'llama-cpp',
+                            models: [
+                                {
+                                    ...peerModel,
+                                    identity: { repository: 'wrong/node', strength: 'declared' }
+                                }
+                            ]
+                        }
+                    ],
+                    [
+                        `${PEER}:llama-cpp`,
+                        { nodeId: PEER, engineType: 'llama-cpp', models: [peerModel] }
+                    ],
+                    [
+                        `${PEER}:${customEngine}`,
+                        {
+                            nodeId: PEER,
+                            engineType: customEngine,
+                            models: [
+                                {
+                                    ...peerModel,
+                                    identity: { repository: 'wrong/engine', strength: 'declared' }
+                                }
+                            ]
+                        }
+                    ]
+                ])
+            })
+            discovered({
+                strong: { engine: 'llamacpp', model: served },
+                weak: { engine: 'llamacpp-custom', model: 'gemma-3-27b' }
+            })
+            await act(async () => root.render(createElement(NodeDeclaredRoles, { nodeId: PEER })))
+            const tags = () => Array.from(container.querySelectorAll('[title]'))
+            expect(tags().map(tag => [tag.textContent, tag.getAttribute('title')])).toEqual([
+                ['weak: gemma-3-27b · llama.cpp custom', 'gemma-3-27b (llamacpp-custom)'],
+                ['strong: LFM2.5 24B A2B (UD-Q4_K_XL) · llama.cpp', 'preset-ctx131072 (llamacpp)']
+            ])
+            await act(async () => {
+                const models = new Map(useEngineModelsStore.getState().models)
+                models.set(`${PEER}:llama-cpp`, {
+                    nodeId: PEER,
+                    engineType: 'llama-cpp',
+                    models: [
+                        {
+                            ...peerModel,
+                            identity: { repository: 'updated/model', strength: 'declared' }
+                        }
+                    ]
+                })
+                useEngineModelsStore.setState({ models })
+            })
+            expect(tags()[1].textContent).toBe('strong: updated/model · llama.cpp')
+        })
+
+        it('uses the edited node inventory for its role select label', async () => {
+            vi.stubGlobal('CSS', { supports: () => true })
+            const served = 'preset-ctx131072'
+            const configured: ModelItem = {
+                ...model(served),
+                identity: {
+                    repository: 'unsloth/LFM2.5-24B-A2B-GGUF',
+                    quantization: 'UD-Q4_K_XL',
+                    quantizationSource: 'hf-tag',
+                    strength: 'declared'
+                }
+            }
+            useEngineModelsStore.setState({
+                models: new Map<string, EngineModels>([
+                    [
+                        `${PEER}:llama-cpp`,
+                        { nodeId: PEER, engineType: 'llama-cpp', models: [configured] }
+                    ],
+                    [
+                        `${SELF}:llama-cpp`,
+                        {
+                            nodeId: SELF,
+                            engineType: 'llama-cpp',
+                            models: [
+                                {
+                                    ...configured,
+                                    identity: { repository: 'other/node', strength: 'declared' }
+                                }
+                            ]
+                        }
+                    ]
+                ])
+            })
+            useNodeConfigurationStore
+                .getState()
+                .adopt(PEER, snapshot('5', { roles: { strong: { engine: 'llamacpp', model: served } } }))
+            await act(async () =>
+                root.render(
+                    createElement(RoleEditor, { targetId: PEER, nodeId: PEER, onSaved: vi.fn() })
+                )
+            )
+            expect(container.textContent).toContain('LFM2.5 24B A2B (UD-Q4_K_XL) · llama.cpp')
+            expect(container.textContent).not.toContain('other/node')
         })
 
         it('shows nothing for a node that declares no role', async () => {
