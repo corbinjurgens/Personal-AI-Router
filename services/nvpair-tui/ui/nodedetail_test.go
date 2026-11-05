@@ -39,6 +39,112 @@ func tuiDownloadProgress(t *testing.T, method, node string, snapshot *modeldownl
 	})}}
 }
 
+func TestNodeDetailShowsIdentityTags(t *testing.T) {
+	const inventory = `{
+		"hostUuid":"peer","name":"Peer","ipAddress":"127.0.0.1","port":12345,
+		"modelsByEngine":{"llamacpp":["served"]},
+		"modelIdentities":{"llamacpp":{"served":{
+			"repository":"unsloth/LFM2.5-24B-A2B-GGUF","quantization":"UD-Q4_K_XL",
+			"quantizationSource":"hf-tag","strength":"declared"
+		}}}
+	}`
+	test := func(name string, self bool) {
+		t.Run(name, func(t *testing.T) {
+			var d *nodeDetail
+			if self {
+				var result modelsResult
+				if err := json.Unmarshal([]byte(inventory), &result); err != nil {
+					t.Fatalf("decode local inventory: %v", err)
+				}
+				d = localDetail()
+				if !d.applyModels(result, true) {
+					t.Fatal("local inventory rejected")
+				}
+			} else {
+				var node availableNode
+				if err := json.Unmarshal([]byte(inventory), &node); err != nil {
+					t.Fatalf("decode peer inventory: %v", err)
+				}
+				rows := mergeNodes(nodeFeeds{discovered: []availableNode{node}})
+				if len(rows) != 1 {
+					t.Fatalf("merged nodes = %d, want one", len(rows))
+				}
+				d = newNodeDetail(nil, rows[0])
+			}
+			d.SetSize(240, 40)
+			const want = "served  [unsloth/LFM2.5-24B-A2B-GGUF · UD-Q4_K_XL]"
+			rows := d.modelTable.Rows()
+			if len(rows) != 1 || rows[0][0] != want {
+				t.Fatalf("model rows = %v, want %q", rows, want)
+			}
+			if rendered := d.View(); !strings.Contains(rendered, "unsloth/LFM2.5-24B-A2B-GGUF · UD-Q4_K_XL") {
+				t.Fatalf("rendered detail lost identity tags: %s", rendered)
+			}
+			if len(d.modelRows) != 1 || d.modelRows[0].model != "served" {
+				t.Fatalf("display tags changed the operation model ID: %+v", d.modelRows)
+			}
+		})
+	}
+	test("local inventory", true)
+	test("peer discovery through node merge", false)
+}
+
+func TestNodeDetailIdentityTagsOmitAbsentParts(t *testing.T) {
+	test := func(name string, identity engines.ModelIdentity, want string) {
+		t.Run(name, func(t *testing.T) {
+			d := localDetail()
+			d.applyModels(modelsResult{
+				ModelsByEngine:  map[string][]string{"llamacpp": {"served"}},
+				ModelIdentities: map[string]map[string]engines.ModelIdentity{"llamacpp": {"served": identity}},
+			}, true)
+			rows := d.modelTable.Rows()
+			if len(rows) != 1 || rows[0][0] != want {
+				t.Fatalf("model rows = %v, want %q", rows, want)
+			}
+		})
+	}
+	test("repository only", engines.ModelIdentity{Repository: "owner/repo", Strength: "declared"}, "served  [owner/repo]")
+	test("quantization only", engines.ModelIdentity{Quantization: "Q4_K_M", Strength: "declared"}, "served  [Q4_K_M]")
+	test("no display parts", engines.ModelIdentity{GeneralName: "Model", Strength: "declared"}, "served")
+	test("absent identity", engines.ModelIdentity{}, "served")
+}
+
+func TestNodeDetailUpdatesPeerIdentityTags(t *testing.T) {
+	test := func(name string, update func(*testing.T, *nodeDetail, availableNode)) {
+		t.Run(name, func(t *testing.T) {
+			d := newNodeDetail(nil, nodeRow{key: "peer", presence: presenceOnline})
+			node := availableNode{
+				HostUUID: "peer", IPAddress: "127.0.0.1", Port: 12345,
+				ModelsByEngine: map[string][]string{"llamacpp": {"served"}},
+				ModelIdentities: map[string]map[string]engines.ModelIdentity{"llamacpp": {"served": {
+					Repository: "owner/repo", Quantization: "Q4_K_M", Strength: "declared",
+				}}},
+			}
+			update(t, d, node)
+			if rows := d.modelTable.Rows(); len(rows) != 1 || rows[0][0] != "served  [owner/repo · Q4_K_M]" {
+				t.Fatalf("updated rows = %v, want identity tags", rows)
+			}
+			node.ModelIdentities = nil
+			update(t, d, node)
+			if rows := d.modelTable.Rows(); len(rows) != 1 || rows[0][0] != "served" {
+				t.Fatalf("updated rows = %v, want removed identity tags", rows)
+			}
+		})
+	}
+	test("merged feed refresh", func(t *testing.T, d *nodeDetail, node availableNode) {
+		t.Helper()
+		rows := mergeNodes(nodeFeeds{discovered: []availableNode{node}})
+		if len(rows) != 1 {
+			t.Fatalf("merged nodes = %d, want one", len(rows))
+		}
+		d.followNode(rows[0], true)
+	})
+	test("discovery notification", func(t *testing.T, d *nodeDetail, node availableNode) {
+		t.Helper()
+		d.handleNotification(&rpc.Message{Method: "discovery:nodes-changed", Params: tuiDownloadJSON(t, []availableNode{node})})
+	})
+}
+
 func TestModelDownloadRowsUniteLifecycleInventoryAndResidency(t *testing.T) {
 	d := localDetail()
 	snapshot := tuiLlamaCPPDownloadSnapshot()

@@ -19,6 +19,7 @@ import (
 	"sort"
 	"sync"
 
+	"nvpair-shared/jsonrpc"
 	"nvpair-shared/noderec"
 )
 
@@ -153,11 +154,12 @@ func (d *Directory) filteredLocked(f noderec.SubscribeParams) []noderec.Director
 	out := make([]noderec.DirectoryNode, 0, len(d.nodes))
 	for _, n := range d.nodes {
 		if f.Matches(n) {
+			n.ModelIdentities = noderec.CloneModelIdentities(n.ModelIdentities)
 			out = append(out, n)
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].HostUUID < out[j].HostUUID })
-	return out
+	return NotificationNodes(noderec.NotifyNodes, out)
 }
 
 // Unsubscribe removes a subscriber.
@@ -180,6 +182,7 @@ func (d *Directory) Apply(method string, node noderec.DirectoryNode) {
 	if method == noderec.NotifyNodeRemoved {
 		delete(d.nodes, node.HostUUID)
 	} else {
+		node.ModelIdentities = noderec.CloneModelIdentities(node.ModelIdentities)
 		d.nodes[node.HostUUID] = node
 	}
 	subs := make([]*Subscriber, 0, len(d.subs))
@@ -204,9 +207,22 @@ func (d *Directory) Snapshot(filter noderec.ServiceKey) []noderec.DirectoryNode 
 		if filter != "" && !n.HasService(filter) {
 			continue
 		}
+		n.ModelIdentities = noderec.CloneModelIdentities(n.ModelIdentities)
 		out = append(out, n)
 	}
 	d.mu.Unlock()
 	sort.Slice(out, func(i, j int) bool { return out[i].HostUUID < out[j].HostUUID })
-	return out
+	return NotificationNodes(noderec.NotifyNodes, out)
+}
+
+// NotificationNodes bounds optional identities against the actual method,
+// including engine addressing. Callers pass detached publication snapshots.
+// Stored identities remain available for smaller filtered snapshots.
+func NotificationNodes(method string, nodes []noderec.DirectoryNode) []noderec.DirectoryNode {
+	if !jsonrpc.NotificationFitsFrame(method, noderec.GetNodesResult{Nodes: nodes}, jsonrpc.DefaultFrameBytes) {
+		for i := range nodes {
+			nodes[i].ModelIdentities = nil
+		}
+	}
+	return nodes
 }

@@ -1,7 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import type { EngineModels, EngineStatusData, EngineType, ModelItem } from '@/shared/types/engines'
+import type {
+    EngineModels,
+    EngineStatusData,
+    EngineType,
+    ModelIdentity,
+    ModelItem
+} from '@/shared/types/engines'
 import type { ModelDownloadSnapshot } from '@/shared/types/model-download'
 import type { NodeItemMetrics } from '@/shared/types/metrics'
 import type { NodeItem } from '@/shared/types/nodes'
@@ -14,6 +20,7 @@ import { parsePolicyAdvertisement, samePolicyAdvertisement } from '@/shared/util
 import { currentPlatform, platformDisplayName } from '@/shared/utils/platform'
 import type { JsonObject, JsonValue } from './json-rpc-client'
 import { parseModelDownloadSnapshot } from './model-download'
+import { parseModelIdentities } from './model-identity'
 import {
     PROXY_ENGINES,
     proxySourceForEngine,
@@ -114,6 +121,7 @@ interface ModularNode {
     // becomes undefined and retains the legacy flat fallback. Mirrors
     // noderec.DirectoryNode.EngineModels.
     modelsByEngine: Record<string, string[]> | undefined
+    modelIdentities?: Record<string, Record<string, ModelIdentity>>
     // Per-engine set of models currently loaded in memory, keyed by
     // engine-manager engine name ("llamacpp"), carried on
     // `AvailableNode.loadedByEngine`. Normally a subset of
@@ -257,6 +265,13 @@ function loadedNamesForEngine(node: ModularNode | undefined, engineType: EngineT
     return new Set(
         node && Object.hasOwn(node.loadedByEngine, engine) ? node.loadedByEngine[engine] : []
     )
+}
+
+function identitiesForEngine(
+    identities: Record<string, Record<string, ModelIdentity>> | undefined,
+    engine: string
+): Record<string, ModelIdentity> | undefined {
+    return identities && Object.hasOwn(identities, engine) ? identities[engine] : undefined
 }
 
 function sameStringList(left: string[], right: string[]): boolean {
@@ -463,9 +478,7 @@ function modelItem(name: string, loaded = false): ModelItem {
         downloaded: false,
         status: loaded ? 'loaded' : 'idle',
         parameterSize: '',
-        quantization: '',
         family: '',
-        digest: '',
         sizeVram: null,
         expiresAt: null,
         expiry: '10m',
@@ -481,7 +494,8 @@ function projectEngineModels(
     loaded: Set<string>,
     snapshot: ModelDownloadSnapshot | undefined,
     current: boolean | undefined,
-    inventoryCurrent: boolean
+    inventoryCurrent: boolean,
+    identities?: Record<string, ModelIdentity>
 ): EngineModels {
     const entries =
         snapshot?.entries.filter(entry => entry.engine === engineManagerName(engineType)) ?? []
@@ -496,6 +510,9 @@ function projectEngineModels(
             const downloadState = entries.find(entry => entry.model === name)
             return {
                 ...modelItem(name, loaded.has(name)),
+                ...(ready.has(name) && identities && Object.hasOwn(identities, name)
+                    ? { identity: identities[name] }
+                    : {}),
                 downloaded:
                     inventoryCurrent &&
                     current === true &&
@@ -723,6 +740,7 @@ function parseBrokerNode(params: JsonValue | undefined): ModularNode | null {
         // engine. Nil attribution is omitted; a nonnil empty map remains {}
         // and suppresses the legacy flat fallback in {@link modelsForEngine}.
         modelsByEngine: parseModelsByEngine(obj.modelsByEngine),
+        modelIdentities: parseModelIdentities(obj.modelIdentities),
         // Broker `AvailableNode.loadedByEngine`: the per-engine set of models
         // loaded in memory, enriched from the peer's engine-manager
         // `/v1/models`. `omitempty` on the wire — absent for a peer that reports
@@ -791,6 +809,7 @@ function sameNode(left: ModularNode, right: ModularNode): boolean {
         sameTelemetry(left, right.gpus, right.cpu, right.memory, right.inferenceHardwareIds) &&
         sameStringList(left.models, right.models) &&
         sameModelsByEngine(left.modelsByEngine, right.modelsByEngine) &&
+        sameModelIdentities(left.modelIdentities, right.modelIdentities) &&
         // A residency-only change (a model loaded/evicted with the installed set
         // unchanged) must still count as a node change so the loaded dot updates.
         sameModelsByEngine(left.loadedByEngine, right.loadedByEngine) &&
@@ -801,6 +820,28 @@ function sameNode(left: ModularNode, right: ModularNode): boolean {
         sameEngines(left.engines, right.engines) &&
         left.lastSeen === right.lastSeen
     )
+}
+
+function sameModelIdentities(
+    left: Record<string, Record<string, ModelIdentity>> | undefined,
+    right: Record<string, Record<string, ModelIdentity>> | undefined
+): boolean {
+    if (left === undefined || right === undefined) return left === right
+    const engines = Object.keys(left)
+    if (engines.length !== Object.keys(right).length) return false
+    for (const engine of engines) {
+        if (!Object.hasOwn(right, engine)) return false
+        const models = Object.keys(left[engine])
+        if (models.length !== Object.keys(right[engine]).length) return false
+        for (const model of models) {
+            if (
+                !Object.hasOwn(right[engine], model) ||
+                JSON.stringify(left[engine][model]) !== JSON.stringify(right[engine][model])
+            )
+                return false
+        }
+    }
+    return true
 }
 
 /**
@@ -833,6 +874,7 @@ export {
     booleanValue,
     optionalStringArrayValue,
     loadedNamesForEngine,
+    identitiesForEngine,
     sameStringList,
     nodeAddresses,
     primaryNodeAddress,

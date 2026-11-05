@@ -5,11 +5,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { RemoteManagementCapability } from '@/shared/types/cluster'
 import type { ClusterInitialSnapshot } from '@/shared/types/bootstrap'
 import type { ServiceTransport } from '@/shared/types/service-bridge'
+import type {
+    EngineDescriptor,
+    EngineModels,
+    EngineType,
+    ModelIdentity
+} from '@/shared/types/engines'
 import type { IClusterApi } from '@/ui/api/pair-api'
 import { getPairTransport } from '@/ui/api/bootstrap'
 import { createEngineApi } from '@/ui/api/engine-api'
 import { useClusterInvitationsStore } from '@/ui/stores/cluster-invitations.store'
 import {
+    inventoryChoices,
+    roleIdentity,
+    roleItems,
+    roleLabel,
     useNodeConfigurationStore,
     watchNodeManagement
 } from '@/ui/stores/node-configuration.store'
@@ -61,6 +71,70 @@ function capability(
 
 const cleanups: Array<() => void> = []
 const store = () => useNodeConfigurationStore.getState()
+
+describe('role identity labels', () => {
+    const descriptors = new Map<EngineType, EngineDescriptor>()
+    const role = { engine: 'llamacpp', model: 'preset-ctx131072' }
+    const identity: ModelIdentity = {
+        repository: 'unsloth/LFM2.5-24B-A2B-GGUF',
+        quantization: 'UD-Q4_K_XL',
+        quantizationSource: 'hf-tag',
+        strength: 'declared'
+    }
+
+    it('shows the identity label and engine separated by a middle dot', () => {
+        expect(roleLabel(role, descriptors, identity)).toBe(
+            'LFM2.5 24B A2B (UD-Q4_K_XL) · llama.cpp'
+        )
+    })
+
+    it('formats the model without an identity while retaining the declared engine', () => {
+        expect(
+            roleLabel({ engine: 'llamacpp', model: 'owner/model-GGUF:Q4_K_M' }, descriptors)
+        ).toBe('model (Q4_K_M) · llama.cpp')
+        expect(roleLabel({ engine: 'unregistered', model: 'lmstudio/model-GGUF' }, descriptors)).toBe(
+            'model · unregistered'
+        )
+    })
+
+    it('uses only the role engine and exact model when resolving inventory metadata', () => {
+        const inventory: EngineModels[] = [
+            {
+                nodeId: 'peer',
+                engineType: 'llama-cpp',
+                models: [
+                    {
+                        name: role.model,
+                        identity,
+                        size: 0,
+                        downloaded: true,
+                        status: 'idle',
+                        parameterSize: '',
+                        family: '',
+                        sizeVram: null,
+                        expiresAt: null,
+                        expiry: '10m',
+                        capabilities: []
+                    }
+                ]
+            }
+        ]
+        expect(roleIdentity(role, inventory)).toEqual(identity)
+        expect(roleIdentity({ ...role, engine: 'other' }, inventory)).toBeUndefined()
+        expect(roleIdentity({ ...role, model: 'different' }, inventory)).toBeUndefined()
+        const choices = inventoryChoices(inventory)
+        expect(roleItems(choices, role, descriptors, inventory)).toEqual([
+            { value: 'unset', children: 'Unset' },
+            {
+                value: '["llamacpp","preset-ctx131072"]',
+                children: 'LFM2.5 24B A2B (UD-Q4_K_XL) · llama.cpp'
+            }
+        ])
+        expect(roleItems(choices, role, descriptors, undefined)[1].children).toBe(
+            'preset-ctx131072 · llama.cpp'
+        )
+    })
+})
 
 function clusterSnapshot(certFingerprint = 'A'): ClusterInitialSnapshot {
     return {

@@ -6,7 +6,8 @@ import type {
     EngineSource,
     ModelItemStatus,
     ModelExpiry,
-    EngineProcessStatus
+    EngineProcessStatus,
+    ModelIdentity
 } from '@/shared/types/engines'
 
 export interface ModelItem {
@@ -15,9 +16,8 @@ export interface ModelItem {
     downloaded: boolean
     status: ModelItemStatus
     parameterSize: string
-    quantization: string
+    identity?: ModelIdentity
     family: string
-    digest: string
     /** VRAM consumed by the model when loaded (bytes) */
     sizeVram: number | null
     /** Timestamp when the engine will auto-unload this model */

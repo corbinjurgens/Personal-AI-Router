@@ -15,9 +15,178 @@ import (
 	"testing"
 	"time"
 
+	"nvpair-shared/engines"
 	"nvpair-shared/modeldownload"
 	"nvpair-shared/noderec"
 )
+
+func TestModelEnrichmentIdentities(t *testing.T) {
+	valid := `{"repository":"owner/repository","quantization":"Q4_K_M","strength":"declared","files":[{"role":"model","name":"model.gguf","sizeBytes":42}]}`
+	test := func(name, block string, want map[string]map[string]engines.ModelIdentity) {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(fixtureRequestHandler(http.MethodGet, "/v1/models", func(w http.ResponseWriter, r *http.Request) {
+				_, err := io.WriteString(w, `{"models":["good","bad","oversized","wrong-type"],"modelsByEngine":{"llamacpp":["good","bad","oversized","wrong-type"]},"modelIdentities":`+block+`}`)
+				if err != nil {
+					t.Errorf("write inventory: %v", err)
+				}
+			}))
+			t.Cleanup(srv.Close)
+			d := newRefreshTestDaemon()
+			inventory, ok := d.fetchModels("127.0.0.1", portFromURL(t, srv.URL), "")
+			if !ok || !reflect.DeepEqual(inventory.byEngine, map[string][]string{"llamacpp": {"good", "bad", "oversized", "wrong-type"}}) {
+				t.Fatalf("optional metadata discarded routing inventory: %+v, fetched %v", inventory, ok)
+			}
+			if !reflect.DeepEqual(inventory.identities, want) {
+				t.Fatalf("identities = %+v, want %+v", inventory.identities, want)
+			}
+		})
+	}
+	want := map[string]map[string]engines.ModelIdentity{"llamacpp": {"good": {
+		Repository: "owner/repository", Quantization: "Q4_K_M", Strength: "declared",
+		Files: []engines.ModelIdentityFile{{Role: "model", Name: "model.gguf", SizeBytes: 42}},
+	}}}
+	test("valid sibling survives invalid type digest and oversized text", `{"llamacpp":{"good":`+valid+`,"bad":{"contentId":"`+strings.Repeat("a", 63)+`","strength":"verified"},"oversized":{"generalName":"`+strings.Repeat("x", 257)+`","strength":"declared"},"wrong-type":"invalid","unlisted":`+valid+`},"unknown-engine":{"good":`+valid+`}}`, want)
+	test("malformed engine sibling is independent", `{"llamacpp":{"good":`+valid+`},"unknown-engine":[]}`, want)
+	test("malformed block", `"invalid"`, nil)
+	test("array block", `[]`, nil)
+	test("malformed engine map", `{"llamacpp":[]}`, nil)
+	test("null entry", `{"llamacpp":{"good":null}}`, nil)
+	test("oversized file list", `{"llamacpp":{"good":{"strength":"declared","files":[`+strings.TrimSuffix(strings.Repeat(`{"role":"model","name":"model.gguf","sizeBytes":42},`, 65), ",")+`]}}}`, nil)
+}
+
+func TestModelEnrichmentIdentityLastGoodPairing(t *testing.T) {
+	identity := engines.ModelIdentity{Repository: "owner/repository", Strength: "declared", Files: []engines.ModelIdentityFile{{Role: "model", Name: "model.gguf", SizeBytes: 42}}}
+	identities := map[string]map[string]engines.ModelIdentity{"llamacpp": {"ready": identity}}
+	body := map[string]any{"models": []string{"ready"}, "modelsByEngine": map[string][]string{"llamacpp": {"ready"}}, "modelIdentities": identities, "downloadState": scannerDownloadSnapshot("7")}
+	stub, port := startModelsStub(t, http.StatusOK, body)
+	d := newRefreshTestDaemon()
+	seedEMNode(d, "target", "127.0.0.1", port)
+	if !d.refreshNodeModels("target", "127.0.0.1", port, "") {
+		t.Fatal("initial identity inventory not applied")
+	}
+	assertPair := func(t *testing.T, node noderec.DirectoryNode) {
+		t.Helper()
+		if !reflect.DeepEqual(node.ModelsByEngine, map[string][]string{"llamacpp": {"ready"}}) || !reflect.DeepEqual(node.ModelIdentities, identities) {
+			t.Fatalf("last-good inventory and identities diverged: %+v", node)
+		}
+		if !reflect.DeepEqual(d.lastModelsByEngine["target"], map[string][]string{"llamacpp": {"ready"}}) || !reflect.DeepEqual(d.lastModelIdentities["target"], identities) {
+			t.Fatal("last-good cache lost inventory/identity pairing")
+		}
+	}
+	stub.set(http.StatusServiceUnavailable, nil)
+	d.refreshNodeModels("target", "127.0.0.1", port, "")
+	node, _ := d.dir.get("target")
+	assertPair(t, node)
+	browsed := noderec.DirectoryNode{HostUUID: "target", IP: "127.0.0.1", Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceEngineManager: {Port: port}}}
+	d.enrichModelsAt(&browsed, "127.0.0.1")
+	assertPair(t, browsed)
+	stub.set(http.StatusOK, map[string]any{"models": []string{"obsolete"}, "modelsByEngine": map[string][]string{"llamacpp": {"obsolete"}}, "modelIdentities": map[string]map[string]engines.ModelIdentity{"llamacpp": {"obsolete": identity}}, "downloadState": scannerDownloadSnapshot("6")})
+	if d.refreshNodeModels("target", "127.0.0.1", port, "") {
+		t.Fatal("lower revision published obsolete identities")
+	}
+	node, _ = d.dir.get("target")
+	assertPair(t, node)
+	d.enrichModelsAt(&browsed, "127.0.0.1")
+	assertPair(t, browsed)
+	stub.set(http.StatusOK, map[string]any{"models": []string{"replacement"}, "modelsByEngine": map[string][]string{"llamacpp": {"replacement"}}, "modelIdentities": identities, "downloadState": scannerDownloadSnapshot("8")})
+	if !d.refreshNodeModels("target", "127.0.0.1", port, "") {
+		t.Fatal("replacement inventory not applied")
+	}
+	node, _ = d.dir.get("target")
+	if !reflect.DeepEqual(node.ModelsByEngine, map[string][]string{"llamacpp": {"replacement"}}) || len(node.ModelIdentities) != 0 || len(d.lastModelIdentities["target"]) != 0 {
+		t.Fatal("identity survived for a removed model")
+	}
+}
+
+func TestModelEnrichmentIdentityChangeEmitsNotification(t *testing.T) {
+	stub, port := startModelsStub(t, http.StatusOK, map[string]any{"modelsByEngine": map[string][]string{"llamacpp": {"served-id"}}})
+	d := newRefreshTestDaemon()
+	seedEMNode(d, "target", "127.0.0.1", port)
+	if !d.refreshNodeModels("target", "127.0.0.1", port, "") {
+		t.Fatal("initial inventory not applied")
+	}
+	var wire bytes.Buffer
+	d.codec = NewCodec(&wire)
+	stub.set(http.StatusOK, map[string]any{"modelsByEngine": map[string][]string{"llamacpp": {"served-id"}},
+		"modelIdentities": map[string]map[string]engines.ModelIdentity{"llamacpp": {"served-id": {Repository: "owner/repository", Strength: "declared"}}}})
+	if !d.refreshNodeModels("target", "127.0.0.1", port, "") {
+		t.Fatal("identity-only change did not emit")
+	}
+	frame, err := d.codec.Read()
+	if err != nil {
+		t.Fatalf("read identity notification: %v", err)
+	}
+	var event noderec.NodeEvent
+	if err := json.Unmarshal(frame.Params, &event); err != nil {
+		t.Fatalf("decode identity notification: %v", err)
+	}
+	if frame.Method != noderec.NotifyNodeUpdated || event.Node.ModelIdentities["llamacpp"]["served-id"].Repository != "owner/repository" {
+		t.Fatalf("identity notification missing metadata: %+v", event)
+	}
+	if d.refreshNodeModels("target", "127.0.0.1", port, "") || wire.Len() != 0 {
+		t.Fatal("unchanged identity emitted another notification")
+	}
+}
+
+func TestModelEnrichmentIdentityCacheMigrationAndRemoval(t *testing.T) {
+	d := newRefreshTestDaemon()
+	inv := modelInventory{models: []string{"ready"}, byEngine: map[string][]string{"llamacpp": {"ready"}},
+		identities: map[string]map[string]engines.ModelIdentity{"llamacpp": {"ready": {Strength: "declared", Files: []engines.ModelIdentityFile{{Role: "model", Name: "model.gguf", SizeBytes: 42}}}}}}
+	if !d.cacheInventoryLocked("old", inv) {
+		t.Fatal("seed inventory rejected")
+	}
+	inv.identities["llamacpp"]["ready"].Files[0].Name = "caller.gguf"
+	if d.lastModelIdentities["old"]["llamacpp"]["ready"].Files[0].Name != "model.gguf" {
+		t.Fatal("cache retained caller-owned identity files")
+	}
+	d.dropSelf("old", "new")
+	if _, present := d.lastModelIdentities["old"]; present {
+		t.Fatal("old host identity cache survived migration")
+	}
+	if !reflect.DeepEqual(d.lastModelsByEngine["new"], map[string][]string{"llamacpp": {"ready"}}) || d.lastModelIdentities["new"]["llamacpp"]["ready"].Files[0].Name != "model.gguf" {
+		t.Fatal("host migration did not carry paired identities")
+	}
+	d.forget("new")
+	if _, present := d.lastModelIdentities["new"]; present {
+		t.Fatal("removed host retained cached identities")
+	}
+	if _, present := d.lastModelsByEngine["new"]; present {
+		t.Fatal("removed host retained cached routing inventory")
+	}
+}
+
+func TestModelEnrichmentRetiredFetchCannotCacheIdentities(t *testing.T) {
+	test := func(name string, replace bool) {
+		t.Run(name, func(t *testing.T) {
+			d := newRefreshTestDaemon()
+			seedEMNode(d, "target", "127.0.0.1", 14317)
+			d.modelsHTTP = &http.Client{Transport: peerServicesTestTransport(func(r *http.Request) (*http.Response, error) {
+				// Retire the route while its inventory fetch is in flight.
+				d.dir.remove("target")
+				d.forget("target")
+				if replace {
+					seedEMNode(d, "target", "127.0.0.2", 14318)
+				}
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"models":["obsolete"],"modelsByEngine":{"llamacpp":["obsolete"]},"modelIdentities":{"llamacpp":{"obsolete":{"repository":"owner/obsolete","strength":"declared"}}}}`))}, nil
+			})}
+			if d.refreshNodeModels("target", "127.0.0.1", 14317, "") {
+				t.Fatal("retired fetch published identities")
+			}
+			if _, present := d.lastModelIdentities["target"]; present {
+				t.Fatal("retired fetch repopulated identity cache")
+			}
+			if _, present := d.lastModelsByEngine["target"]; present {
+				t.Fatal("retired fetch repopulated routing inventory cache")
+			}
+			node, present := d.dir.get("target")
+			if present != replace || len(node.ModelIdentities) != 0 || len(node.ModelsByEngine) != 0 {
+				t.Fatalf("retired fetch changed directory: %+v, present %v", node, present)
+			}
+		})
+	}
+	test("removed host", false)
+	test("replacement route", true)
+}
 
 func scannerDownloadSnapshot(revision string) *modeldownload.Snapshot {
 	percent := 21

@@ -17,7 +17,12 @@
  * readback, and a node that is offline keeps an unsent draft.
  */
 import { create } from 'zustand'
-import type { EngineDescriptor, EngineModels, EngineType } from '@/shared/types/engines'
+import type {
+    EngineDescriptor,
+    EngineModels,
+    EngineType,
+    ModelIdentity
+} from '@/shared/types/engines'
 import type { JsonValue } from '@/shared/types/json'
 import type {
     NodeAvailability,
@@ -49,6 +54,7 @@ import { engineLabel, engineManagerName, engineTypeFromManagerName } from '@/sha
 import { serviceErrorCode } from '@/ui/api/service-transport'
 import getErrorString from '@/shared/utils/get-error-string'
 import { replaceJsonFieldSource } from '@/shared/utils/json-source'
+import { modelPrimaryLabel } from '@/ui/utils/model-identity-label'
 import {
     pauseOriginValue,
     pauseModeValue,
@@ -111,11 +117,19 @@ interface RoleChoice extends NodeRole {
 /** A role as the user reads it: the model and the engine that serves it. */
 export function roleLabel(
     role: NodeRole,
-    descriptors: ReadonlyMap<EngineType, EngineDescriptor>
+    descriptors: ReadonlyMap<EngineType, EngineDescriptor>,
+    identity?: ModelIdentity
 ): string {
     const engine = engineTypeFromManagerName(role.engine)
     const name = engine ? engineLabel(engine, descriptors.get(engine)) : role.engine
-    return `${role.model} (${name})`
+    return `${modelPrimaryLabel(role.model, identity)} · ${name}`
+}
+
+/** Read only the named role's engine inventory on the already selected node. */
+export function roleIdentity(role: NodeRole, inventory: EngineModels[]): ModelIdentity | undefined {
+    return inventory
+        .find(list => engineManagerName(list.engineType) === role.engine)
+        ?.models.find(model => model.name === role.model)?.identity
 }
 
 export function roleKey(role: NodeRole): string {
@@ -149,16 +163,19 @@ export const UNSET_ROLE = 'unset'
 export function roleItems(
     choices: RoleChoice[],
     current: NodeRole | undefined,
-    descriptors: ReadonlyMap<EngineType, EngineDescriptor>
+    descriptors: ReadonlyMap<EngineType, EngineDescriptor>,
+    inventory?: EngineModels[]
 ): { value: string; children: string }[] {
+    const label = (role: NodeRole) =>
+        roleLabel(role, descriptors, inventory ? roleIdentity(role, inventory) : undefined)
     const items = [
         { value: UNSET_ROLE, children: 'Unset' },
-        ...choices.map(choice => ({ value: choice.key, children: roleLabel(choice, descriptors) }))
+        ...choices.map(choice => ({ value: choice.key, children: label(choice) }))
     ]
     if (current && !choices.some(choice => choice.key === roleKey(current))) {
         items.push({
             value: roleKey(current),
-            children: `${roleLabel(current, descriptors)}, not installed`
+            children: `${label(current)}, not installed`
         })
     }
     return items

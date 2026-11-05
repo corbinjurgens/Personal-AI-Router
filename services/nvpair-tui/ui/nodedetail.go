@@ -286,11 +286,12 @@ func newNodeDetail(client *rpc.Client, node nodeRow) *nodeDetail {
 	// A remote node's models are already in the discovery snapshot the broker
 	// enriched, so the list is populated before any request completes.
 	d.models = modelsResult{
-		Models:         node.models,
-		ModelsByEngine: node.modelsByEngine,
-		LoadedByEngine: node.loadedByEngine,
-		DownloadState:  node.downloadState,
-		current:        !node.self && node.downloadState != nil && node.downloadStateCurrent != nil && *node.downloadStateCurrent,
+		Models:          node.models,
+		ModelsByEngine:  node.modelsByEngine,
+		LoadedByEngine:  node.loadedByEngine,
+		ModelIdentities: node.modelIdentities,
+		DownloadState:   node.downloadState,
+		current:         !node.self && node.downloadState != nil && node.downloadStateCurrent != nil && *node.downloadStateCurrent,
 	}
 	d.downloadsCurrent = d.models.current
 	d.refreshModels()
@@ -573,7 +574,8 @@ func (d *nodeDetail) followNode(row nodeRow, found bool) {
 		} else {
 			d.applyModels(modelsResult{Models: row.models, ModelsByEngine: row.modelsByEngine,
 				LoadedByEngine: row.loadedByEngine, DownloadState: row.downloadState,
-				current: row.downloadState != nil && row.downloadStateCurrent != nil && *row.downloadStateCurrent}, true)
+				ModelIdentities: row.modelIdentities,
+				current:         row.downloadState != nil && row.downloadStateCurrent != nil && *row.downloadStateCurrent}, true)
 		}
 	}
 	if d.hardwareHeight() != hardwareWas {
@@ -1318,6 +1320,7 @@ func (d *nodeDetail) handleNotification(msg *rpc.Message) tea.Cmd {
 			d.node.models = n.Models
 			d.node.modelsByEngine = n.ModelsByEngine
 			d.node.loadedByEngine = n.LoadedByEngine
+			d.node.modelIdentities = n.ModelIdentities
 			d.node.downloadState, d.node.downloadStateCurrent = n.DownloadState, n.DownloadStateCurrent
 			d.applyModels(n.modelSnapshot(), true)
 
@@ -2384,7 +2387,19 @@ func (d *nodeDetail) refreshModels() {
 		if r.download == nil && r.ready {
 			state = "Downloaded"
 		}
-		rows = append(rows, table.Row{r.model, engine, loaded, state})
+		label := r.model
+		identity := d.models.ModelIdentities[r.engine][r.model]
+		var tags []string
+		if identity.Repository != "" {
+			tags = append(tags, identity.Repository)
+		}
+		if identity.Quantization != "" {
+			tags = append(tags, identity.Quantization)
+		}
+		if len(tags) > 0 {
+			label += "  [" + strings.Join(tags, " · ") + "]"
+		}
+		rows = append(rows, table.Row{label, engine, loaded, state})
 	}
 	// Put the cursor back on whatever was highlighted. This list is sorted and
 	// rebuilt wholesale on every engine:models-changed and every discovery

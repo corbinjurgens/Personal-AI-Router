@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { memo, useMemo, useRef } from 'react'
-import { Button, Divider, Stack } from '@nvidia/foundations-react-core'
+import { Button, Divider, Stack, Text } from '@nvidia/foundations-react-core'
+import { ModelIdentityTags } from '@/ui/components/ModelIdentity/ModelIdentityTags'
 import { useDropdownClickable } from '@/ui/hooks/useDropdownClickable'
 import { ModelRowHeader } from './ModelRowHeader'
 import { ModelRowSecondaryRow } from './ModelRowSecondaryRow'
@@ -118,7 +119,7 @@ function ModelRowInner({
     const busyLabel = pendingAction ? pendingLabel(pendingAction) : null
 
     return (
-        <Stack gap="3" className="min-w-0">
+        <Stack gap="3" className="min-w-0" title={model.name}>
             <Stack gap="0" className="grow min-w-0 mt-1">
                 <ModelRowHeader
                     modelName={model.name}
@@ -129,6 +130,12 @@ function ModelRowInner({
                     actionDd={actionDd}
                     onAction={handleAction}
                 />
+                <ModelIdentityTags identity={model.identity} />
+                {formattedName !== model.name && (
+                    <Text kind="body/regular/sm" className="text-subtle-color break-all">
+                        {`Served as ${model.name}`}
+                    </Text>
+                )}
                 <ModelRowSecondaryRow
                     model={model}
                     busyLabel={busyLabel}

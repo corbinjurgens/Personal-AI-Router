@@ -166,7 +166,7 @@ func (d *directory) supersedeCandidates(n noderec.DirectoryNode, selfUUID string
 		if n.LastSeen-other.LastSeen < supersedeMinAge {
 			continue
 		}
-		candidates = append(candidates, other)
+		candidates = append(candidates, cloneDownloadNode(other))
 	}
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].HostUUID < candidates[j].HostUUID })
 	return candidates
@@ -199,7 +199,7 @@ func (d *directory) upsertEvicting(n noderec.DirectoryNode, proven []noderec.Dir
 		delete(d.nodes, old.HostUUID)
 		delete(d.browse, old.HostUUID)
 		d.generations[old.HostUUID]++
-		evicted = append(evicted, current)
+		evicted = append(evicted, cloneDownloadNode(current))
 	}
 	sort.Slice(evicted, func(i, j int) bool { return evicted[i].HostUUID < evicted[j].HostUUID })
 	d.browse[n.HostUUID] = n
@@ -273,7 +273,7 @@ func (d *directory) applyModels(hostUUID, ip string, emPort int, inventory model
 	}
 	em, has := n.Services[noderec.ServiceEngineManager]
 	if !has || n.IP != ip || em.Port != emPort {
-		return n, false, false
+		return cloneDownloadNode(n), false, false
 	}
 	if !inventory.accepts(nodeDownloadObservation(n)) {
 		return cloneDownloadNode(n), false, false
@@ -282,6 +282,7 @@ func (d *directory) applyModels(hostUUID, ip string, emPort int, inventory model
 	inventory.applyTo(&next)
 	if sameStringSet(n.Models, inventory.models) && (n.ModelsByEngine == nil) == (inventory.byEngine == nil) &&
 		sameByEngine(n.ModelsByEngine, inventory.byEngine) &&
+		reflect.DeepEqual(n.ModelIdentities, next.ModelIdentities) &&
 		sameByEngine(n.LoadedByEngine, inventory.loadedByEngine) && reflect.DeepEqual(n.Policy, inventory.policy) &&
 		nodeDownloadObservation(n).equal(nodeDownloadObservation(next)) {
 		return cloneDownloadNode(n), false, true
@@ -299,6 +300,7 @@ func (d *directory) retireDownloadReadsLocked(next noderec.DirectoryNode) {
 }
 
 func cloneDownloadNode(node noderec.DirectoryNode) noderec.DirectoryNode {
+	node.ModelIdentities = noderec.CloneModelIdentities(node.ModelIdentities)
 	observation := nodeDownloadObservation(node).clone()
 	node.DownloadState, node.DownloadStateCurrent = observation.snapshot, observation.current
 	return node
@@ -363,12 +365,12 @@ func (d *directory) applyClusterIdentity(hostUUID string, clusterUUID *string, t
 		trusted = trustFor(settled)
 	}
 	if n.ClusterUUID == settled && n.Trusted == trusted {
-		return n, false
+		return cloneDownloadNode(n), false
 	}
 	n.ClusterUUID = settled
 	n.Trusted = trusted
 	d.storeLocked(n)
-	return n, true
+	return cloneDownloadNode(n), true
 }
 
 // applyServiceBuild updates only the diagnostic from a successful node-info
@@ -379,14 +381,14 @@ func (d *directory) applyServiceBuild(hostUUID string, generation uint64, id bui
 	defer d.mu.Unlock()
 	n, present := d.nodes[hostUUID]
 	if !present || d.generations[hostUUID] != generation {
-		return n, false, false
+		return cloneDownloadNode(n), false, false
 	}
 	if n.ServiceBuildID == id {
-		return n, false, true
+		return cloneDownloadNode(n), false, true
 	}
 	n.ServiceBuildID = id
 	d.nodes[hostUUID] = n
-	return n, true, true
+	return cloneDownloadNode(n), true, true
 }
 
 // sameByEngine reports whether two per-engine model maps are semantically equal:

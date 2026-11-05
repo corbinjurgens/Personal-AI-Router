@@ -34,12 +34,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf8"
 
 	"nvpair-shared/buildinfo"
+	"nvpair-shared/engines"
 	"nvpair-shared/modeldownload"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec/servicekey"
@@ -478,6 +480,9 @@ type DirectoryNode struct {
 	// inventory was reported (nil); a nonnil empty map remains authoritative
 	// empty attribution and must not enable the flat-model fallback.
 	ModelsByEngine map[string][]string `json:"modelsByEngine,omitzero"`
+	// ModelIdentities contains validated display metadata for listed models,
+	// keyed by engine and served model name. It grants no routing authority.
+	ModelIdentities map[string]map[string]engines.ModelIdentity `json:"modelIdentities,omitempty"`
 	// LoadedByEngine names the models currently resident in memory on this node,
 	// per engine (normally a subset of ModelsByEngine). Enriched from
 	// engine-manager's em /v1/models loadedByEngine field so a remote node's
@@ -498,6 +503,28 @@ type DirectoryNode struct {
 	// before its broker's first push); absent means the node declares nothing.
 	Policy   *nodepolicy.Advertisement `json:"policy,omitempty"`
 	LastSeen int64                     `json:"lastSeen"` // Unix seconds
+}
+
+// CloneModelIdentities detaches the nested maps and each identity's file list
+// before a cached inventory is stored or published to another consumer.
+func CloneModelIdentities(identities map[string]map[string]engines.ModelIdentity) map[string]map[string]engines.ModelIdentity {
+	if identities == nil {
+		return nil
+	}
+	cloned := make(map[string]map[string]engines.ModelIdentity, len(identities))
+	for engine, models := range identities {
+		if models == nil {
+			cloned[engine] = nil
+			continue
+		}
+		entries := make(map[string]engines.ModelIdentity, len(models))
+		for model, identity := range models {
+			identity.Files = slices.Clone(identity.Files)
+			entries[model] = identity
+		}
+		cloned[engine] = entries
+	}
+	return cloned
 }
 
 // Clustered reports whether the node advertises a cluster identity.

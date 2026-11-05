@@ -113,7 +113,7 @@ async function mount(): Promise<void> {
 }
 
 async function openActions(model = MODEL): Promise<void> {
-    const name = [...container.querySelectorAll('[title]')].find(
+    const name = [...container.querySelectorAll('span[title]')].find(
         row => row.getAttribute('title') === model
     )
     const trigger = name?.parentElement?.parentElement?.querySelector(
@@ -235,7 +235,7 @@ describe('rendered target download readiness', () => {
     it('shows an unseeded target download once even when raw inventory names it, and suppresses menu clicks', async () => {
         report([entry({ percent: 21 })], [MODEL])
         await mount()
-        expect(container.querySelectorAll(`[title="${MODEL}"]`)).toHaveLength(1)
+        expect(container.querySelectorAll(`span[title="${MODEL}"]`)).toHaveLength(1)
         expect(container.textContent).toContain('Downloading')
         const progress = container.querySelector('[role="progressbar"]')
         expect(progress?.getAttribute('aria-label')).toBe(`Downloading ${MODEL}`)

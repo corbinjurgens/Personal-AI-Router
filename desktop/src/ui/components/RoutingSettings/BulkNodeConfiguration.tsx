@@ -64,7 +64,7 @@ const STATE_BADGES: Record<TargetState, { label: string; color: BadgeProps['colo
 type Descriptors = ReadonlyMap<EngineType, EngineDescriptor>
 
 function describeRole(role: NodeRole | undefined, descriptors: Descriptors): string {
-    return role ? roleLabel(role, descriptors) : 'unset'
+    return role ? roleLabel(role, descriptors, undefined) : 'unset'
 }
 
 function describeRoles(roles: NodeRoles, descriptors: Descriptors): string {
@@ -260,7 +260,7 @@ export default function BulkNodeConfiguration() {
                         key={tier}
                         size="small"
                         aria-label={`${row.node.name} ${tier} role`}
-                        items={roleItems(choices, entry.draft[tier], descriptors)}
+                        items={roleItems(choices, entry.draft[tier], descriptors, undefined)}
                         value={entry.draft[tier] ? roleKey(entry.draft[tier]) : UNSET_ROLE}
                         onValueChange={(value: string) => setOwn(row.node.id, tier, value)}
                         disabled={busy || running}
@@ -404,7 +404,8 @@ export default function BulkNodeConfiguration() {
                                             items={roleItems(
                                                 commonChoices,
                                                 bulk.common[tier],
-                                                descriptors
+                                                descriptors,
+                                                undefined
                                             )}
                                             value={
                                                 bulk.common[tier]

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"nvpair-shared/engines"
+	"nvpair-shared/jsonrpc"
 	"nvpair-shared/modeldownload"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/performancewire"
@@ -60,6 +61,9 @@ type ModelsResult struct {
 	Policy         *nodepolicy.Advertisement       `json:"policy,omitempty"`
 	MemoryEvidence *performancewire.MemoryEvidence `json:"memoryEvidence,omitempty"`
 	DownloadState  *modeldownload.Snapshot         `json:"downloadState,omitempty"`
+	// Identities is display metadata for models present in the ready inventory.
+	// It grants no strict admission, readiness or residency authority.
+	Identities map[string]map[string]engines.ModelIdentity `json:"modelIdentities,omitempty"`
 
 	// Local observation fences survive until the notification's publication.
 	observations map[string]observedDigests
@@ -128,9 +132,43 @@ func (e *Executor) Models(ctx context.Context) []string {
 // single engine, not the sum.
 func (e *Executor) ModelsResult(ctx context.Context) ModelsResult {
 	res := e.modelsSweep(ctx, true)
+	e.attachModelIdentities(&res)
 	res.Policy = e.nodeProjection.advertisement()
 	res.observations, res.sweep = nil, 0
+	if res.Identities != nil {
+		// The peer HTTP reader uses the existing worker-sized body limit.
+		// Optional metadata cannot displace otherwise valid routing names.
+		data, err := json.Marshal(res)
+		if err != nil || len(data)+1 > jsonrpc.WorkerFrameBytes {
+			res.Identities = nil
+		}
+	}
 	return res
+}
+
+// attachModelIdentities restricts the owner's detached snapshot to the masked
+// inventory. snapshot already copies each identity's Files slice.
+func (e *Executor) attachModelIdentities(res *ModelsResult) {
+	res.Identities = nil
+	if e.modelIdentities == nil {
+		return
+	}
+	snapshot := e.modelIdentities.snapshot()
+	for engine, models := range res.ByEngine {
+		for _, model := range models {
+			identity, ok := snapshot[engine][model]
+			if !ok {
+				continue
+			}
+			if res.Identities == nil {
+				res.Identities = make(map[string]map[string]engines.ModelIdentity)
+			}
+			if res.Identities[engine] == nil {
+				res.Identities[engine] = make(map[string]engines.ModelIdentity)
+			}
+			res.Identities[engine][model] = identity
+		}
+	}
 }
 
 // inventoryReconcileInterval is how often the loaded-model watcher refreshes
@@ -392,7 +430,11 @@ func (e *Executor) modelsSweep(ctx context.Context, fullInventory bool) ModelsRe
 			res.LoadedByEngine[engineNames[i]] = ld
 		}
 	}
-	return e.currentModelsResult(res)
+	res = e.currentModelsResult(res)
+	if fullInventory && e.modelIdentities != nil {
+		e.modelIdentities.refresh()
+	}
+	return res
 }
 
 // currentModelsResult fences the inventory and captures its readiness mask and

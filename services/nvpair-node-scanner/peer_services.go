@@ -97,7 +97,7 @@ func (d *directory) removeBrowse(hostUUID string) (noderec.DirectoryNode, bool) 
 	if existed {
 		d.generations[hostUUID]++
 	}
-	return node, existed
+	return cloneDownloadNode(node), existed
 }
 
 func (d *daemon) acceptPeerServices(claim noderec.PeerServicesClaim) bool {
@@ -294,6 +294,7 @@ func (d *daemon) reconcilePeerServices() {
 				// Browse may predate an unsafe pull. Keep the latest canonical
 				// inventory rather than restoring its superseded ready names.
 				browse.Models, browse.ModelsByEngine = old.Models, old.ModelsByEngine
+				browse.ModelIdentities = noderec.CloneModelIdentities(old.ModelIdentities)
 				browse.LoadedByEngine = old.LoadedByEngine
 			}
 			browse.DownloadState, browse.DownloadStateCurrent = observation.snapshot, observation.current

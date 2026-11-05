@@ -12,8 +12,27 @@ for llama.cpp-family engines only. It resolves checked local artifacts under
 download read admission and the inspection budget. Snapshots perform no I/O and
 detach file slices. Busy reads retain the previous entry; resolution failures
 remove it. Explicit refresh, changed run/configuration and a ten-minute interval
-invalidate resolution. This phase does not publish identities in inventory or
-wire messages.
+invalidate resolution. Each full inventory sweep requests a coalesced refresh
+without waiting for artifact I/O.
+
+`engine:models`, `GET /v1/models` and `engine:models-changed` carry optional
+`modelIdentities: { <engine>: { <model>: ModelIdentity } }`, using the shared
+`engines.ModelIdentity` JSON fields. Publication attaches a detached owner
+snapshot after readiness masking, restricted to exact engine/model keys still
+present in `modelsByEngine`. Unlisted, unavailable and readiness-blocked models
+have no attached identity, even when the identity owner retains metadata for
+them. Every attached file slice remains detached from the owner. The loaded
+watcher compares attached per-engine snapshots as JSON and emits the existing
+`engine:models-changed` notification for identity-only changes and withdrawals,
+so consumers update without polling. This does not change inventory, readiness
+or observed residency.
+
+HTTP inventory omits optional identities when the complete encoded body exceeds
+the existing peer inventory limit. JSON-RPC responses include their actual
+correlation ID in the frame budget, and model notifications include their full
+envelope. If identities exceed either publication budget they are omitted while
+routing names and the identity owner's stored snapshot remain intact. The loaded
+watcher compares the publishable snapshot, including metadata withdrawals.
 
 Identity records base file names, roles and sizes; model-role files alone supply
 total bytes and the serving-content formula's content ID. SHA256 values come
@@ -1237,7 +1256,7 @@ extensibility story for an open-source product.
   holds a few recent prompts, and a full 8,192-token state (about 896 MiB in
   f16) does not fit, so long contexts are not kept in the host cache.
 - Per-engine stdout/stderr log capture and structured operational error records, surfaced via the errors pipeline.
-- A normalized node-level model list (`engine:models`): union of every running engine's `list_models`, name-extracted via each action's declarative `result` spec, plus the per-engine set of models loaded in memory (`loadedByEngine`, from each engine's `loaded_models` action). A successful explicit empty inventory remains an engine key with `[]`; a missing/malformed/failed inventory omits that engine key instead of being mislabeled as authoritative empty. A watcher polls the loaded set and pushes `engine:models-changed` when it changes (explicit load/unload, JIT auto-load, TTL/idle eviction).
+- A normalized node-level model list (`engine:models`): union of every running engine's `list_models`, name-extracted via each action's declarative `result` spec, plus the per-engine set of models loaded in memory (`loadedByEngine`, from each engine's `loaded_models` action) and optional display metadata (`modelIdentities`, keyed by engine and ready model). A successful explicit empty inventory remains an engine key with `[]`; a missing/malformed/failed inventory omits that engine key instead of being mislabeled as authoritative empty. A watcher polls the loaded set and pushes `engine:models-changed` for inventory, residency, download lifecycle, memory evidence and attached identity changes.
 - Expose all of the above over the `engine:*` JSON-RPC surface to whatever orchestrates the service, plus an optional plain-HTTP LAN endpoint (`--http-port`, `GET /v1/models`) that serves the model list to a peer's discovery daemon (the list moved off the size-limited mDNS TXT onto HTTP), together with this node's policy advertisement (`policy`, §7.0) as the broker last pushed it.
 
 **Out of scope**
@@ -1436,7 +1455,7 @@ are excluded. Invalid saved Off origins or unreadable state fail the read and
 suppress intent publication. The private disk field remains `offBy`; origins
 are display data and do not change proxy admission or lifecycle behavior.
 
-Notifications (service → caller): `engine:intent-changed{enabledByEngine, offByEngine}` (after an explicit start/stop changes saved intent), `policy:request{id, method, caller, params}` / `policy:cancel{id}` (a paired node's node-policy call for the broker, which answers with the `policy:reply{id, result, error?, errorCode?}` notification), `ready{version}`, `engine:state-changed{EngineStatus}`, `engine:models-changed{engine, models}` (pushed when an engine's loaded-in-memory model set changes; `models` is the full `engine:models` shape incl. `loadedByEngine`), `engine:install-progress{engine, stage, percent?, error?}` (`error` on the terminal `failed` frame), `engine:pull-progress{engine, op, stage, percent?, message}` (live progress for a local model pull driven via `engine:action{action:"pull_model"}` — the local counterpart of `engine:remote-progress`), `engine:remote-progress{opId, node, engine, op, stage, percent?, message}` (live progress relayed from a remote install/pull; a model copy reports `op:"copy"` with `file?, bytesDone?, bytesTotal?`, §7.3), and `errors:report` / `errors:clear` (consumed by `nvpair-errors` via the Broker). `install` / `start` / `stop` / `restart` / `action` / `remote-*` each run in their own goroutine so the read loop never blocks; their responses arrive when the op completes.
+Notifications (service → caller): `engine:intent-changed{enabledByEngine, offByEngine}` (after an explicit start/stop changes saved intent), `policy:request{id, method, caller, params}` / `policy:cancel{id}` (a paired node's node-policy call for the broker, which answers with the `policy:reply{id, result, error?, errorCode?}` notification), `ready{version}`, `engine:state-changed{EngineStatus}`, `engine:models-changed{engine, models}` (pushed for ready inventory, residency, download lifecycle, memory evidence and attached identity changes; `models` carries the `engine:models` inventory shape including `loadedByEngine` and `modelIdentities`, without `policy`), `engine:install-progress{engine, stage, percent?, error?}` (`error` on the terminal `failed` frame), `engine:pull-progress{engine, op, stage, percent?, message}` (live progress for a local model pull driven via `engine:action{action:"pull_model"}` - the local counterpart of `engine:remote-progress`), `engine:remote-progress{opId, node, engine, op, stage, percent?, message}` (live progress relayed from a remote install/pull; a model copy reports `op:"copy"` with `file?, bytesDone?, bytesTotal?`, section 7.3), and `errors:report` / `errors:clear` (consumed by `nvpair-errors` via the Broker). `install` / `start` / `stop` / `restart` / `action` / `remote-*` each run in their own goroutine so the read loop never blocks; their responses arrive when the op completes.
 
 Notifications (caller → service): `engine:node-projection{policy, pausedLocally, managementBlocked}` carries this node's policy advertisement (`nvpair-shared/nodepolicy.Advertisement`: `revision`, `roles` per tier with the bounds of the matching profile, `pausedBy?`), local-pause provenance, and `managementBlocked`: whether a pause of either origin, accepted but not yet saved, draining or saved, fences peer management writes. The common mutation gate requires a known projection and enforces this bit after the current grant check. Local activation also refuses known blocked state; trusted local startup may proceed before the first projection. An older broker omits the bit, which reads as false; it is never derived from `pausedBy` or `pausedLocally`. The broker sends it after every persisted policy or availability change and again on every `engine:ready`, reading its current policy each time under one lock, so a later projection never carries older state. engine-manager keeps the last one in memory, replaced whole, never persisted; an undecodable one leaves the previous in place. `engine:models` and `GET /v1/models` return it as `policy`, omitted until the first push. `engine:models-changed` does not carry it.
 

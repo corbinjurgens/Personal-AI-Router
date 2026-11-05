@@ -131,3 +131,78 @@ func TestModelDownloadWatcherPublishesInventoryWithoutLoadedChanges(t *testing.T
 		t.Fatalf("inventory-only change lost independent loaded/lifecycle facts: %+v", changed)
 	}
 }
+
+func TestModelIdentityWatcherPublishesWithoutInventoryOrLoadedChanges(t *testing.T) {
+	ex := modelDownloadInventoryExecutor(t)
+	ex.modelIdentities.values = map[string]map[string]engines.ModelIdentity{
+		"llamacpp": {"demo": {Repository: "owner/demo", ConfiguredContextTokens: 4096, Strength: "declared"}},
+	}
+	updates := modelDownloadWatch(t, ex)
+	ex.pokeLoaded()
+	baseline := nextModelDownloadUpdate(t, updates)
+	want := map[string]map[string]engines.ModelIdentity{
+		"llamacpp": {"demo": {Repository: "owner/demo", ConfiguredContextTokens: 4096, Strength: "declared"}},
+	}
+	if !reflect.DeepEqual(baseline.Models.Identities, want) {
+		t.Fatalf("initial notification lost identity snapshot: %+v", baseline.Models.Identities)
+	}
+
+	ex.modelIdentities.mu.Lock()
+	ex.modelIdentities.values["llamacpp"]["demo"] = engines.ModelIdentity{
+		Repository: "owner/demo", ConfiguredContextTokens: 8192, Strength: "declared",
+	}
+	ex.modelIdentities.mu.Unlock()
+	ex.pokeLoaded()
+	changed := nextModelDownloadUpdate(t, updates)
+	want = map[string]map[string]engines.ModelIdentity{
+		"llamacpp": {"demo": {Repository: "owner/demo", ConfiguredContextTokens: 8192, Strength: "declared"}},
+	}
+	if !reflect.DeepEqual(changed.Models.Identities, want) {
+		t.Fatalf("identity-only change was not published: %+v", changed.Models.Identities)
+	}
+	assertInventoryUnchanged := func(update modelsChangedParams) {
+		t.Helper()
+		if !reflect.DeepEqual(update.Models.Models, []string{"demo", "ready"}) ||
+			!reflect.DeepEqual(update.Models.ByEngine, map[string][]string{"llamacpp": {"demo", "ready"}}) ||
+			!reflect.DeepEqual(update.Models.LoadedByEngine, map[string][]string{"llamacpp": {"demo"}}) ||
+			!update.Models.DownloadState.Equal(*baseline.Models.DownloadState) {
+			t.Fatalf("identity-only change altered inventory, residency or lifecycle: %+v", update)
+		}
+	}
+	assertInventoryUnchanged(changed)
+
+	ex.modelIdentities.mu.Lock()
+	ex.modelIdentities.values = nil
+	ex.modelIdentities.mu.Unlock()
+	ex.pokeLoaded()
+	withdrawn := nextModelDownloadUpdate(t, updates)
+	if len(withdrawn.Models.Identities) != 0 {
+		t.Fatalf("identity withdrawal was not published: %+v", withdrawn.Models.Identities)
+	}
+	assertInventoryUnchanged(withdrawn)
+}
+
+func TestChangedModelIdentityEngines(t *testing.T) {
+	test := func(name string, previous, current map[string]map[string]engines.ModelIdentity, want []string) {
+		t.Run(name, func(t *testing.T) {
+			if got := changedModelIdentityEngines(previous, current); !reflect.DeepEqual(got, want) {
+				t.Fatalf("changed identity engines = %v, want %v", got, want)
+			}
+		})
+	}
+	test("equal values and different map insertion order", map[string]map[string]engines.ModelIdentity{
+		"llamacpp": {"demo": {Strength: "declared"}, "ready": {GeneralName: "Ready", Strength: "declared"}},
+	}, map[string]map[string]engines.ModelIdentity{
+		"llamacpp": {"ready": {GeneralName: "Ready", Strength: "declared"}, "demo": {Strength: "declared"}},
+	}, nil)
+	test("addition and withdrawal sorted", map[string]map[string]engines.ModelIdentity{
+		"llamacpp-z": {"demo": {Strength: "declared"}},
+	}, map[string]map[string]engines.ModelIdentity{
+		"llamacpp-a": {"demo": {Strength: "declared"}},
+	}, []string{"llamacpp-a", "llamacpp-z"})
+	test("file-only change", map[string]map[string]engines.ModelIdentity{
+		"llamacpp": {"demo": {Files: []engines.ModelIdentityFile{{Role: "model", Name: "before.gguf", SizeBytes: 128}}, Strength: "declared"}},
+	}, map[string]map[string]engines.ModelIdentity{
+		"llamacpp": {"demo": {Files: []engines.ModelIdentityFile{{Role: "model", Name: "after.gguf", SizeBytes: 128}}, Strength: "declared"}},
+	}, []string{"llamacpp"})
+}

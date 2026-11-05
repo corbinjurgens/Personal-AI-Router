@@ -22,7 +22,9 @@ import (
 
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/discovery"
+	"nvpair-shared/engines"
 	sharederrors "nvpair-shared/errors"
+	"nvpair-shared/jsonrpc"
 	"nvpair-shared/mdns"
 	"nvpair-shared/netmon"
 	"nvpair-shared/netpick"
@@ -113,6 +115,8 @@ type daemon struct {
 	// miss reuses both rather than blanking the per-engine card. Keyed by
 	// hostUuid like the other enrichment caches.
 	lastModelsByEngine map[string]map[string][]string
+	// lastModelIdentities belongs to the same last-good inventory snapshot.
+	lastModelIdentities map[string]map[string]map[string]engines.ModelIdentity
 	// lastLoadedByEngine caches the per-engine loaded (in-memory) set from the
 	// same /v1/models fetch, so a transient miss reuses it rather than blanking
 	// a remote node's loaded state. Keyed by hostUuid.
@@ -267,27 +271,28 @@ func newDaemon(codec *Codec, mesh *clustertrust.Mesh, clusterDir string, tlsHTTP
 
 	instance, _ := os.Hostname()
 	d := &daemon{
-		codec:              codec,
-		timings:            timings,
-		mesh:               mesh,
-		reg:                reg,
-		instance:           instance,
-		baseDir:            baseDir,
-		clusterDir:         clusterDir,
-		dir:                newDirectory(),
-		http:               &http.Client{Timeout: nodeInfoFetchTimeout, Transport: nodeInfoTransport(nil)},
-		modelsHTTP:         &http.Client{Timeout: modelsFetchTimeout},
-		tlsHTTP:            tlsHTTP,
-		lastInfo:           make(map[string]NodeInfoResponse),
-		lastInfoAt:         make(map[string]time.Time),
-		lastModels:         make(map[string][]string),
-		lastModelsByEngine: make(map[string]map[string][]string),
-		lastLoadedByEngine: make(map[string]map[string][]string),
-		lastPolicy:         make(map[string]*nodepolicy.Advertisement),
-		nodeInfoDown:       make(map[string]bool),
-		nodeInfoReported:   make(map[string]bool),
-		startedAt:          time.Now(),
-		lastActivityAt:     make(map[string]time.Time),
+		codec:               codec,
+		timings:             timings,
+		mesh:                mesh,
+		reg:                 reg,
+		instance:            instance,
+		baseDir:             baseDir,
+		clusterDir:          clusterDir,
+		dir:                 newDirectory(),
+		http:                &http.Client{Timeout: nodeInfoFetchTimeout, Transport: nodeInfoTransport(nil)},
+		modelsHTTP:          &http.Client{Timeout: modelsFetchTimeout},
+		tlsHTTP:             tlsHTTP,
+		lastInfo:            make(map[string]NodeInfoResponse),
+		lastInfoAt:          make(map[string]time.Time),
+		lastModels:          make(map[string][]string),
+		lastModelsByEngine:  make(map[string]map[string][]string),
+		lastModelIdentities: make(map[string]map[string]map[string]engines.ModelIdentity),
+		lastLoadedByEngine:  make(map[string]map[string][]string),
+		lastPolicy:          make(map[string]*nodepolicy.Advertisement),
+		nodeInfoDown:        make(map[string]bool),
+		nodeInfoReported:    make(map[string]bool),
+		startedAt:           time.Now(),
+		lastActivityAt:      make(map[string]time.Time),
 	}
 	// Anti-flap: before evicting a node that's missed the mDNS threshold,
 	// confirm it still answers on node-info (or engine-manager as fallback).
@@ -470,6 +475,7 @@ func (d *daemon) supersedingUpsert(node noderec.DirectoryNode) {
 	if _, had := d.lastModels[node.HostUUID]; had {
 		inventory := modelInventory{
 			models: d.lastModels[node.HostUUID], byEngine: d.lastModelsByEngine[node.HostUUID],
+			identities:     d.lastModelIdentities[node.HostUUID],
 			loadedByEngine: d.lastLoadedByEngine[node.HostUUID], policy: d.lastPolicy[node.HostUUID],
 			downloadObservation: d.lastDownloads[node.HostUUID].clone(),
 		}
@@ -622,12 +628,15 @@ func (d *daemon) emit(method string, node noderec.DirectoryNode) {
 	if d.codec == nil {
 		return
 	}
-	event := noderec.NodeEvent{Node: node}
+	event := noderec.NodeEvent{Node: cloneDownloadNode(node)}
 	if d.dir != nil {
 		d.dir.mu.RLock()
 		defer d.dir.mu.RUnlock()
 		generation := strconv.FormatUint(d.dir.generations[node.HostUUID], 10)
 		event.MemoryGeneration = &generation
+	}
+	if event.Node.ModelIdentities != nil && !jsonrpc.NotificationFitsFrame(method, event, jsonrpc.DefaultFrameBytes) {
+		event.Node.ModelIdentities = nil
 	}
 	if err := d.codec.Notify(method, event); err != nil {
 		slog.Warn("failed to emit node event", "method", method, "err", err)
@@ -808,6 +817,9 @@ func (d *daemon) dropSelf(oldHostUUID, newHostUUID string) {
 	if byEngine, ok := d.lastModelsByEngine[oldHostUUID]; ok {
 		d.lastModelsByEngine[newHostUUID] = byEngine
 	}
+	if identities, ok := d.lastModelIdentities[oldHostUUID]; ok {
+		d.lastModelIdentities[newHostUUID] = noderec.CloneModelIdentities(identities)
+	}
 	if loaded, ok := d.lastLoadedByEngine[oldHostUUID]; ok {
 		d.lastLoadedByEngine[newHostUUID] = loaded
 	}
@@ -821,6 +833,7 @@ func (d *daemon) dropSelf(oldHostUUID, newHostUUID string) {
 	delete(d.lastInfoAt, oldHostUUID)
 	delete(d.lastModels, oldHostUUID)
 	delete(d.lastModelsByEngine, oldHostUUID)
+	delete(d.lastModelIdentities, oldHostUUID)
 	delete(d.lastLoadedByEngine, oldHostUUID)
 	delete(d.lastPolicy, oldHostUUID)
 	delete(d.lastDownloads, oldHostUUID)
@@ -1615,6 +1628,7 @@ func (d *daemon) invalidatePeerServicesRoute(hostUUID string) {
 	delete(d.lastInfoAt, hostUUID)
 	delete(d.lastModels, hostUUID)
 	delete(d.lastModelsByEngine, hostUUID)
+	delete(d.lastModelIdentities, hostUUID)
 	delete(d.lastLoadedByEngine, hostUUID)
 	delete(d.lastPolicy, hostUUID)
 	if observation, ok := d.lastDownloads[hostUUID]; ok {
@@ -1754,7 +1768,13 @@ func (d *daemon) handle(msg *Message) bool {
 		var p noderec.GetNodesParams
 		_ = json.Unmarshal(msg.Params, &p) // an unparseable/empty filter returns all
 		if msg.IsRequest() {
-			_ = d.codec.Respond(msg.ID, noderec.GetNodesResult{Nodes: d.dir.snapshot(p.Service)})
+			result := noderec.GetNodesResult{Nodes: d.dir.snapshot(p.Service)}
+			if !jsonrpc.ResponseFitsFrame(msg.ID, result, jsonrpc.DefaultFrameBytes) {
+				for i := range result.Nodes {
+					result.Nodes[i].ModelIdentities = nil
+				}
+			}
+			_ = d.codec.Respond(msg.ID, result)
 		}
 		return true
 

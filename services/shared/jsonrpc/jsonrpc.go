@@ -357,10 +357,13 @@ func (s *ReadControl) finishRetirementLocked() {
 	s.done = nil
 }
 
+// DefaultFrameBytes is the ordinary discovery/control frame limit.
+const DefaultFrameBytes = 1 << 20
+
 // NewCodec wraps rw with a Codec. Reads accept frames up to 1 MiB.
 func NewCodec(rw io.ReadWriter) *Codec {
 	scanner := bufio.NewScanner(rw)
-	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
+	scanner.Buffer(make([]byte, 0, DefaultFrameBytes), DefaultFrameBytes)
 	return &Codec{
 		scanner: scanner,
 		writer:  rw,
@@ -579,6 +582,33 @@ func notify(write func(*Message) error, method string, params any) error {
 		Method:  method,
 		Params:  raw,
 	})
+}
+
+// NotificationFitsFrame measures the same envelope Notify writes, including
+// its newline. Callers can withdraw optional metadata before publication.
+func NotificationFitsFrame(method string, params any, maxBytes int) bool {
+	fits := false
+	err := notify(func(msg *Message) error {
+		fits = messageFitsFrame(msg, maxBytes)
+		return nil
+	}, method, params)
+	return err == nil && fits
+}
+
+// ResponseFitsFrame measures the same envelope Respond writes, including the
+// actual correlation ID and newline, without performing any I/O.
+func ResponseFitsFrame(id *json.RawMessage, result any, maxBytes int) bool {
+	fits := false
+	err := respond(func(msg *Message) error {
+		fits = messageFitsFrame(msg, maxBytes)
+		return nil
+	}, id, result)
+	return err == nil && fits
+}
+
+func messageFitsFrame(msg *Message, maxBytes int) bool {
+	data, err := json.Marshal(msg)
+	return err == nil && len(data)+1 < maxBytes
 }
 
 // Respond sends a successful response carrying result for the given request id.
