@@ -20,6 +20,72 @@ import (
 	"nvpair-shared/engines"
 )
 
+func TestLlamaServingMixedUnpricedSiblingIdentity(t *testing.T) {
+	for _, unpriced := range []string{"native fit", "GPU selection"} {
+		for _, reverse := range []bool{false, true} {
+			name := unpriced + " first"
+			if reverse {
+				name = unpriced + " last"
+			}
+			t.Run(name, func(t *testing.T) {
+				f := newModelLoadFixture(t)
+				rt := convertModelLoadFixture(t, f)
+				ram, vram := int64(4096), int64(0)
+				rt.Serving = &engines.ServingConfig{Version: 1}
+				for i, id := range []string{"medium-model", "weak-model"} {
+					rt.Serving.Models = append(rt.Serving.Models, engines.ServingModel{ModelID: id, MaxOutputTokens: 128, Memory: engines.ServingMemory{HostRAMBytes: &ram, VRAMBytes: &vram}, Artifacts: []engines.ServingArtifact{{Role: "model", SHA256: strings.Repeat(string(rune('a'+i)), 64), Provenance: engines.ServingProvenance{Kind: "supplied-sha256"}}}})
+				}
+				if reverse {
+					rt.Serving.Models[0], rt.Serving.Models[1] = rt.Serving.Models[1], rt.Serving.Models[0]
+				}
+				command := typedFixtureCommand(t, f, rt)
+				baseline, err := compileTypedLlamaInputs(context.Background(), f.st, command, rt, false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var finiteDigest string
+				for _, envelope := range baseline.Envelopes {
+					if envelope.ModelID == "weak-model" {
+						finiteDigest = envelope.ContentDigest
+					}
+				}
+				if finiteDigest == "" {
+					t.Fatal("finite sibling baseline missing")
+				}
+				for i := range rt.ModelLoads {
+					if rt.ModelLoads[i].ModelID != "medium-model" {
+						continue
+					}
+					if unpriced == "native fit" {
+						on := "on"
+						rt.ModelLoads[i].Requested.Fit = &on
+					} else {
+						rt.ModelLoads[i].Requested.ExtraOptions = map[string]string{"device": "CUDA1"}
+					}
+				}
+				prepared, err := compileTypedLlamaInputs(context.Background(), f.st, command, rt, false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, envelopes := range [][]engines.ServingEnvelope{prepared.Envelopes, servingEnvelopes(prepared), llamaServingReadback(prepared).Configured} {
+					if len(envelopes) != 1 || envelopes[0].ModelID != "weak-model" || envelopes[0].ContentDigest != finiteDigest || envelopes[0].NativeSourceDigest != prepared.Digest {
+						t.Fatalf("finite sibling corrupted: %+v", envelopes)
+					}
+				}
+				rt.Serving, rt.ModelLoads, rt.servingLaunch = prepared.Config, prepared.ModelLoads, prepared
+				f.st.plat.Runtime = rt
+				identity := servingIdentityLocked(f.st)
+				if len(identity.Serving) != 1 || identity.ModelDigests["weak-model"] != finiteDigest || identity.ModelDigests["medium-model"] != "" {
+					t.Fatalf("identity=%+v", identity)
+				}
+				if _, err := parseLlamaServingPreset(prepared.Snapshot); unpriced == "native fit" && err == nil {
+					t.Fatal("operator launch accepted native fit")
+				}
+			})
+		}
+	}
+}
+
 func ownedServingFixture(t *testing.T) llamaServingFixture {
 	t.Helper()
 	f := newLlamaServingFixture(t)

@@ -35,6 +35,50 @@ type autoTestMemoryOwner struct {
 	calls  int
 }
 
+func TestGPUSelectionAutoResolverRefusesBeforeMemory(t *testing.T) {
+	memory := &autoTestMemoryOwner{}
+	requested := modelconfig.RequestedLoad{GPU: &modelconfig.GPU{Mode: "auto"}, ExtraOptions: map[string]string{"tensor-split": "1,1"}}
+	_, err := resolveModelSettingsAutoInput(context.Background(), "profile", requested, modelEstimateInput{}, modelAutoOperation{Memory: memory}, &modelEstimateState{})
+	if err == nil || !strings.Contains(err.Error(), "Reviewed Auto chooses the GPU; remove tensor-split or choose another GPU mode.") {
+		t.Fatalf("refusal=%v", err)
+	}
+	if memory.calls != 0 {
+		t.Fatalf("memory read before refusal: %d", memory.calls)
+	}
+}
+
+func TestGPUSelectionAutoPreviewRefusesBeforeMemory(t *testing.T) {
+	f := newModelLoadFixture(t)
+	memory := &autoTestMemoryOwner{}
+	request := settingsRequest(t, f.ex)
+	request.ModelChange = &modelconfig.ModelChange{
+		ModelID: "weak-model", ExpectedPolicyRevision: "0",
+		Load: &modelconfig.LoadPatch{Set: modelconfig.RequestedLoad{
+			GPU: &modelconfig.GPU{Mode: "auto"}, ExtraOptions: map[string]string{"tensor-split": "1,1"},
+		}},
+	}
+	ctx := context.WithValue(context.Background(), modelAutoOperationKey{}, modelAutoOperation{Memory: memory})
+	preview, err := f.ex.PreviewLaunch(request, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "Reviewed Auto chooses the GPU; remove tensor-split or choose another GPU mode."
+	found := false
+	for _, message := range preview.Errors {
+		found = found || strings.Contains(message, want)
+	}
+	if !found {
+		t.Fatalf("preview errors=%v, want %q", preview.Errors, want)
+	}
+	if memory.calls != 0 {
+		t.Fatalf("preview read memory before refusal: %d", memory.calls)
+	}
+	assertNoSettingsOverride(t, f.ex)
+	if f.st.running || f.st.proc != nil {
+		t.Fatal("refused preview activated an engine")
+	}
+}
+
 func (o *autoTestMemoryOwner) ModelAutoMemory(context.Context) (*modelEstimateMemory, error) {
 	o.calls++
 	return o.memory, nil

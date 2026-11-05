@@ -46,6 +46,7 @@
 - ⚠️ nvpair-engine-manager → engine:wake
 - ⚠️ nvpair-engine-manager → internal:local-engine-credential
 - ⚠️ nvpair-engine-manager → internal:set-reserved-port
+- ⚠️ nvpair-engine-manager → manager/router
 - ⚠️ nvpair-job-scheduler → scheduler:get-interval
 - ⚠️ nvpair-job-scheduler → scheduler:get-status
 - ⚠️ nvpair-job-scheduler → scheduler:set-interval
@@ -209,6 +210,7 @@
 | `error` | request (we call) | ✅ yes |
 | `internal:local-engine-credential` | request (we call) | ⚠️ not called |
 | `internal:set-reserved-port` | request (we call) | ⚠️ not called |
+| `manager/router` | request (we call) | ⚠️ not called |
 
 **Dynamic / unresolved notify sites (verify by hand — `npm run service-contracts` prints the line numbers):**
 - `method (var)  (codec.go, 2 sites)`

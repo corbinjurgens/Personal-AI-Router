@@ -7,36 +7,42 @@ package modelconfig
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"math"
 	"math/big"
 	"reflect"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // OptionDescriptor describes a service-owned option, without native flag names.
 type OptionDescriptor struct {
-	Field          string          `json:"field"`
-	Label          string          `json:"label"`
-	Kind           string          `json:"kind"`
-	Minimum        *json.Number    `json:"minimum,omitempty"`
-	Maximum        *json.Number    `json:"maximum,omitempty"`
-	Values         []string        `json:"values,omitempty"`
-	Default        json.RawMessage `json:"default,omitempty"`
-	DefaultSource  string          `json:"defaultSource,omitempty"`
-	Supported      bool            `json:"supported"`
-	Reason         string          `json:"reason,omitempty"`
-	Portable       bool            `json:"portable"`
-	Owner          string          `json:"owner,omitempty"`
-	Phase          string          `json:"phase,omitempty"`
-	IdentityEffect string          `json:"identityEffect,omitempty"`
-	EstimateEffect string          `json:"estimateEffect,omitempty"`
+	Field           string          `json:"field"`
+	Label           string          `json:"label"`
+	Kind            string          `json:"kind"`
+	Minimum         *json.Number    `json:"minimum,omitempty"`
+	Maximum         *json.Number    `json:"maximum,omitempty"`
+	Values          []string        `json:"values,omitempty"`
+	Default         json.RawMessage `json:"default,omitempty"`
+	DefaultSource   string          `json:"defaultSource,omitempty"`
+	Supported       bool            `json:"supported"`
+	Reason          string          `json:"reason,omitempty"`
+	Portable        bool            `json:"portable"`
+	Owner           string          `json:"owner,omitempty"`
+	Phase           string          `json:"phase,omitempty"`
+	IdentityEffect  string          `json:"identityEffect,omitempty"`
+	EstimateEffect  string          `json:"estimateEffect,omitempty"`
+	NonPortableKeys []string        `json:"nonPortableKeys,omitempty"`
 }
 
 func (o OptionDescriptor) Clone() OptionDescriptor {
 	o.Minimum, o.Maximum = clonePointer(o.Minimum), clonePointer(o.Maximum)
 	o.Values = slices.Clone(o.Values)
+	o.NonPortableKeys = slices.Clone(o.NonPortableKeys)
 	o.Default = slices.Clone(o.Default)
 	return o
 }
@@ -44,8 +50,18 @@ func (o OptionDescriptor) Clone() OptionDescriptor {
 // Validate checks descriptor transport shape, not native support. The manager
 // builds these from its existing option table and build/architecture facts.
 func (o OptionDescriptor) Validate() error {
-	if boundedText(o.Field, 128, true) != nil || boundedText(o.Label, 256, true) != nil || !slices.Contains([]string{"integer", "number", "boolean", "enum", "string"}, o.Kind) {
+	if boundedText(o.Field, 128, true) != nil || boundedText(o.Label, 256, true) != nil || !slices.Contains([]string{"integer", "number", "boolean", "enum", "string", "options"}, o.Kind) {
 		return fmt.Errorf("option: invalid descriptor identity or kind")
+	}
+	if len(o.NonPortableKeys) > 32 || o.NonPortableKeys != nil && o.Kind != "options" {
+		return fmt.Errorf("option.nonPortableKeys: only valid for options")
+	}
+	seen := map[string]bool{}
+	for _, key := range o.NonPortableKeys {
+		if !extraOptionKeyPattern.MatchString(key) || seen[key] {
+			return fmt.Errorf("option.nonPortableKeys: invalid or duplicate key")
+		}
+		seen[key] = true
 	}
 	if len(o.Values) > 64 || !o.Supported && o.Reason == "" {
 		return fmt.Errorf("option: bounded values and unsupported reason required")
@@ -81,9 +97,37 @@ func (o OptionDescriptor) Validate() error {
 	return CheckPayloadSize(o)
 }
 
-// ValidateRequested checks portable constraints only. Build, artifact and
+var fitTargetPattern = regexp.MustCompile(`^[0-9]{1,7}(,[0-9]{1,7}){0,15}$`)
+var extraOptionKeyPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
+
+// Validate checks intent constraints only. Build, artifact and
 // architecture-dependent checks belong to the target's preview owner.
 func (r RequestedLoad) Validate() error {
+	if len(r.ExtraOptions) > 32 {
+		return fmt.Errorf("extraOptions: at most 32 entries")
+	}
+	for _, key := range slices.Sorted(maps.Keys(r.ExtraOptions)) {
+		value := r.ExtraOptions[key]
+		if !extraOptionKeyPattern.MatchString(key) {
+			return fmt.Errorf("extraOptions: invalid key")
+		}
+		if len(value) > 1024 || !utf8.ValidString(value) || strings.ContainsAny(value, "#;$%{}`") || strings.ContainsFunc(value, unicode.IsControl) {
+			return fmt.Errorf("extraOptions: invalid value for %s", key)
+		}
+	}
+	if r.Fit != nil && *r.Fit != "off" && *r.Fit != "on" {
+		return fmt.Errorf("fit: invalid value")
+	}
+	fit := r.Fit != nil && *r.Fit == "on"
+	if fit && r.GPU != nil && r.GPU.Mode == "auto" {
+		return fmt.Errorf("fit: Native fit and reviewed Auto placement are exclusive.")
+	}
+	if r.FitTarget != nil && (!fit || !fitTargetPattern.MatchString(*r.FitTarget)) {
+		return fmt.Errorf("fitTarget: requires fit on and comma-separated MiB margins")
+	}
+	if r.FitCtx != nil && (!fit || *r.FitCtx < 0 || *r.FitCtx > 16777216) {
+		return fmt.Errorf("fitCtx: requires fit on and a value in 0..16777216")
+	}
 	if r.Context != nil {
 		c := r.Context
 		switch c.Mode {
@@ -165,7 +209,9 @@ func (r RequestedLoad) selectedFields() map[string]bool {
 	return map[string]bool{
 		"context": r.Context != nil, "slots": r.Slots != nil, "gpu": r.GPU != nil,
 		"cpuExperts": r.CPUExperts != nil,
-		"cacheTypeK": r.CacheTypeK != nil, "cacheTypeV": r.CacheTypeV != nil,
+		"fit":        r.Fit != nil, "fitTarget": r.FitTarget != nil, "fitCtx": r.FitCtx != nil,
+		"extraOptions": r.ExtraOptions != nil,
+		"cacheTypeK":   r.CacheTypeK != nil, "cacheTypeV": r.CacheTypeV != nil,
 		"flashAttention": r.FlashAttention != nil, "batchSize": r.BatchSize != nil,
 		"ubatchSize": r.UBatchSize != nil, "threads": r.Threads != nil,
 		"threadsBatch": r.ThreadsBatch != nil, "kvOffload": r.KVOffload != nil,
@@ -175,6 +221,10 @@ func (r RequestedLoad) selectedFields() map[string]bool {
 }
 
 func (r RequestedLoad) Clone() RequestedLoad {
+	r.ExtraOptions = maps.Clone(r.ExtraOptions)
+	r.Fit = clonePointer(r.Fit)
+	r.FitTarget = clonePointer(r.FitTarget)
+	r.FitCtx = clonePointer(r.FitCtx)
 	r.Context = clonePointer(r.Context)
 	r.Slots = clonePointer(r.Slots)
 	r.GPU = clonePointer(r.GPU)

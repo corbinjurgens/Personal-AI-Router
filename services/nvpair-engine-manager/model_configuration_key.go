@@ -11,6 +11,9 @@ import (
 // These identities scope advisory records only. Telemetry and resolver evidence
 // never become configuration identity or launch authority.
 func modelConfigurationPools(in modelEstimateInput) []string {
+	if in.Allocation != nil && modelLoadUnpriced(in.Allocation.Options) {
+		return nil
+	}
 	// Missing or expired topology cannot prove a non-UMA host. In particular,
 	// never mint a second host/device record scope when shared evidence expires.
 	if in.Memory == nil || in.Memory.Target == nil {
@@ -59,6 +62,9 @@ func modelConfigurationOptionsID(options modelconfig.RequestedLoad, snapshot []b
 // environment. Build paths and mtimes are evidence checks, not key inputs.
 func modelConfigurationKey(in modelEstimateInput, source, optionsID string) string {
 	a := in.Allocation
+	if a != nil && modelLoadUnpriced(a.Options) {
+		return ""
+	}
 	if a == nil || source == "" || optionsID == "" || a.PerSlotContext <= 0 || a.Slots <= 0 || len(in.Bindings) == 0 {
 		return ""
 	}
@@ -88,4 +94,20 @@ func modelConfigurationKey(in modelEstimateInput, source, optionsID string) stri
 		Source, Options, Placement string
 		Pools                      []string
 	}{artifacts, source, optionsID, placement, pools})
+}
+
+// Execution identity names an applied unpriced launch, never finite capacity.
+func modelExecutionKey(in modelEstimateInput, optionsID string) string {
+	if in.Allocation == nil || !modelLoadUnpriced(in.Allocation.Options) || in.Allocation.NativeBuildID == "" || optionsID == "" || len(in.Bindings) == 0 {
+		return ""
+	}
+	type artifact struct{ Role, Identity string }
+	artifacts := make([]artifact, 0, len(in.Bindings))
+	for _, binding := range in.Bindings {
+		artifacts = append(artifacts, artifact{binding.Role, binding.Identity})
+	}
+	return modelBufferHash(struct {
+		Artifacts      []artifact
+		Build, Options string
+	}{artifacts, in.Allocation.NativeBuildID, optionsID})
 }

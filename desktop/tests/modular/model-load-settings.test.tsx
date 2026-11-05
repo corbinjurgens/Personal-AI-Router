@@ -10,7 +10,7 @@ import type {
     EngineSettingsPreview,
     EngineSettingsTarget
 } from '@/shared/types/engine-settings'
-import type { InspectModelResult } from '@/shared/types/model-config'
+import type { InspectModelResult, RequestedLoad } from '@/shared/types/model-config'
 import type { ServiceTransport } from '@/shared/types/service-bridge'
 import { createPairApi } from '@/ui/api/pair-api'
 import type { IEngineApi } from '@/ui/api/engine-api'
@@ -96,6 +96,37 @@ const inspection: InspectModelResult = {
             supported: true
         },
         {
+            field: 'fit',
+            label: 'Native fit',
+            kind: 'enum',
+            values: ['off', 'on'],
+            portable: true,
+            supported: true
+        },
+        {
+            field: 'fitTarget',
+            label: 'Fit target',
+            kind: 'string',
+            portable: false,
+            supported: true
+        },
+        {
+            field: 'fitCtx',
+            label: 'Fit context',
+            kind: 'integer',
+            minimum: 0,
+            maximum: 16777216,
+            portable: true,
+            supported: true
+        },
+        {
+            field: 'extraOptions',
+            label: 'Extra options',
+            kind: 'options',
+            portable: true,
+            supported: true
+        },
+        {
             field: 'native.device',
             label: 'Native devices',
             kind: 'string',
@@ -129,6 +160,7 @@ const review = vi.fn<IEngineApi['previewSettings']>()
 const apply = vi.fn<IEngineApi['applySettings']>()
 beforeEach(() => {
     vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+    vi.stubGlobal('CSS', { supports: () => false })
     inspect.mockReset().mockResolvedValue(inspection)
     read.mockReset().mockResolvedValue(snapshot)
     review.mockReset().mockRejectedValue(new Error('modelChange: application is not ready'))
@@ -201,8 +233,227 @@ async function input(label: string, value: string) {
         field.dispatchEvent(new Event('input', { bubbles: true }))
     })
 }
+async function select(label: string, value: string) {
+    const fieldLabel = Array.from(container.querySelectorAll('label')).find(
+        item => item.textContent?.trim() === label
+    )
+    const field = fieldLabel && document.getElementById(fieldLabel.htmlFor)
+    if (!(field instanceof HTMLButtonElement)) throw new Error(`Missing select: ${label}`)
+    await act(async () => field.click())
+    const popup = document.getElementById(field.getAttribute('aria-controls') ?? '')
+    const option = Array.from(popup?.querySelectorAll<HTMLElement>('[role="option"]') ?? []).find(
+        item => item.textContent?.trim() === value
+    )
+    if (!option) throw new Error(`Missing option: ${value}`)
+    await act(async () => option.click())
+}
+function loadDraft() {
+    return useEngineSettingsStore.getState().modelDrafts[modelSettingsKey(target, 'model')]?.change
+        ?.load
+}
+function savedLoad(requested: RequestedLoad) {
+    read.mockResolvedValue({
+        ...snapshot,
+        settings: { ...snapshot.settings, modelLoads: [{ modelId: 'model', requested }] }
+    })
+}
 
 describe('load editor and target impact', () => {
+    it('edits native fit, margin and minimum context in the current load draft', async () => {
+        await render()
+        await select('Native fit', 'on')
+        await input('Fit target', '512')
+        await input('Fit context', '4096')
+        expect(loadDraft()).toEqual({
+            set: { fit: 'on', fitTarget: '512', fitCtx: 4096 },
+            clear: []
+        })
+        expect(container.textContent).toContain(
+            'Native fit: PAIR does not estimate memory for this configuration.'
+        )
+        await select('Native fit', 'off')
+        expect(container.textContent).not.toContain(
+            'Native fit: PAIR does not estimate memory for this configuration.'
+        )
+    })
+    it.each([
+        ['Fit target', '512,', 'Fit target: invalid value'],
+        ['Fit target', '12345678', 'Fit target: invalid value'],
+        ['Fit context', '-1', 'Fit context: invalid value'],
+        ['Fit context', '16777217', 'Fit context: invalid value'],
+        ['Fit context', '1.5', 'Fit context: invalid value']
+    ])('blocks invalid %s value %s', async (label, value, error) => {
+        await render()
+        await input(label, value)
+        expect(button('Preview model changes').disabled).toBe(true)
+        expect(container.textContent).toContain(error)
+    })
+    it('shows the service GPU-selection estimate note', async () => {
+        inspect.mockResolvedValue({ ...inspection, configurationKeyReason: 'gpu-selection' })
+        await render()
+        expect(container.textContent).toContain(
+            'GPU selection: PAIR does not estimate memory for this configuration.'
+        )
+    })
+    it('shows service-reported missing launch flags with their real flag spelling', async () => {
+        inspect.mockResolvedValue({
+            ...inspection,
+            unreportedLaunchOptions: ['cache-ram', 'sleep-idle-seconds']
+        })
+        await render()
+        expect(container.textContent).toContain(
+            'This llama.cpp build does not report: --cache-ram, --sleep-idle-seconds. The engine may fail to start.'
+        )
+    })
+    it('adds and removes extra rows through the existing draft and clears the last entry', async () => {
+        await render()
+        await click('Add extra option')
+        expect(button('Preview model changes').disabled).toBe(true)
+        await input('Extra option key 1', 'spec-type')
+        await input('Extra option value 1', 'draft-mtp')
+        expect(loadDraft()).toEqual({
+            set: { extraOptions: { 'spec-type': 'draft-mtp' } },
+            clear: []
+        })
+        expect(button('Preview model changes').disabled).toBe(false)
+        await click('Remove extra option 1')
+        expect(loadDraft()).toEqual({ set: {}, clear: ['extraOptions'] })
+    })
+    it('explicitly clears inherited empty options', async () => {
+        await render()
+        await click('Clear extra options')
+        expect(loadDraft()).toEqual({ set: {}, clear: ['extraOptions'] })
+    })
+    it.each(['Bad-Key', '--flag', '-flag', 'a'.repeat(65)])(
+        'blocks an invalid extra key %s while other fields remain editable',
+        async key => {
+            await render()
+            await click('Add extra option')
+            await input('Extra option key 1', key)
+            await input('Slots', '2')
+            expect(button('Preview model changes').disabled).toBe(true)
+            expect(container.textContent).toContain('enter a key of 1 to 64')
+            await input('Extra option key 1', 'fork-option')
+            expect(button('Preview model changes').disabled).toBe(false)
+        }
+    )
+    it.each([
+        ['UTF-8 bytes', 'é'.repeat(513), 'at most 1024 UTF-8 bytes'],
+        ['control character', 'value\u0085', 'control characters are not allowed'],
+        ['invalid UTF-8', '\uD800', 'enter valid UTF-8 text'],
+        ['hash', '#', 'cannot contain'],
+        ['semicolon', ';', 'cannot contain'],
+        ['dollar', '$', 'cannot contain'],
+        ['percent', '%', 'cannot contain'],
+        ['opening brace', '{', 'cannot contain'],
+        ['closing brace', '}', 'cannot contain'],
+        ['backtick', '`', 'cannot contain']
+    ])('blocks extra value with %s', async (_name, value, error) => {
+        await render()
+        await click('Add extra option')
+        await input('Extra option key 1', 'fork-option')
+        await input('Extra option value 1', value)
+        expect(button('Preview model changes').disabled).toBe(true)
+        expect(container.textContent).toContain(error)
+    })
+    it('accepts the UTF-8 byte boundary and rejects duplicate keys', async () => {
+        await render()
+        await click('Add extra option')
+        await input('Extra option key 1', 'fork-option')
+        await input('Extra option value 1', '😀'.repeat(256))
+        expect(button('Preview model changes').disabled).toBe(false)
+        await click('Add extra option')
+        await input('Extra option key 2', 'fork-option')
+        expect(button('Preview model changes').disabled).toBe(true)
+        expect(container.textContent).toContain('duplicate key fork-option')
+        await click('Remove extra option 2')
+        expect(button('Preview model changes').disabled).toBe(false)
+    })
+    it('limits the editor to 32 entries and permits removal at the limit', async () => {
+        savedLoad({
+            extraOptions: Object.fromEntries(
+                Array.from({ length: 32 }, (_, index) => [`fork-${index}`, 'ok'])
+            )
+        })
+        await render()
+        expect(container.querySelectorAll('input[list]').length).toBe(32)
+        expect(button('Add extra option').disabled).toBe(true)
+        await click('Remove extra option 32')
+        expect(button('Add extra option').disabled).toBe(false)
+        expect(Object.keys(loadDraft()?.set.extraOptions ?? {})).toHaveLength(31)
+    })
+    it('uses choice hints and exposes build-reported key suggestions', async () => {
+        inspect.mockResolvedValue({
+            ...inspection,
+            nativeOptions: [{ name: 'spec-type', kind: 'choice', choices: ['none', 'draft-mtp'] }]
+        })
+        await render()
+        await click('Add extra option')
+        await input('Extra option key 1', 'spec-type')
+        expect(container.querySelector('input[aria-label="Extra option value 1"]')).toBeNull()
+        expect(
+            Array.from(container.querySelectorAll('datalist option')).map(option =>
+                option.getAttribute('value')
+            )
+        ).toEqual(['spec-type'])
+        await select('Extra option value 1', 'draft-mtp')
+        expect(loadDraft()?.set.extraOptions).toEqual({ 'spec-type': 'draft-mtp' })
+    })
+    it('uses switch and numeric hints without imposing local native semantics', async () => {
+        inspect.mockResolvedValue({
+            ...inspection,
+            nativeOptions: [
+                { name: 'fork-switch', kind: 'switch' },
+                { name: 'fork-number', kind: 'number' }
+            ]
+        })
+        await render()
+        await click('Add extra option')
+        await input('Extra option key 1', 'fork-switch')
+        const toggle = container.querySelector<HTMLInputElement>(
+            'input[aria-label="Extra option value 1"]'
+        )
+        if (!toggle) throw new Error('Missing switch input')
+        expect(toggle.type).toBe('checkbox')
+        expect(toggle.checked).toBe(false)
+        expect(loadDraft()?.set.extraOptions).toEqual({ 'fork-switch': 'false' })
+        await act(async () => toggle.click())
+        expect(loadDraft()?.set.extraOptions).toEqual({ 'fork-switch': 'true' })
+        await click('Add extra option')
+        await input('Extra option key 2', 'fork-number')
+        expect(
+            container.querySelector<HTMLInputElement>('input[aria-label="Extra option value 2"]')
+                ?.type
+        ).toBe('number')
+        await input('Extra option value 2', '12')
+        expect(loadDraft()?.set.extraOptions).toEqual({
+            'fork-switch': 'true',
+            'fork-number': '12'
+        })
+    })
+    it('falls back to text for unknown hints and keeps per-key service errors visible', async () => {
+        inspect.mockResolvedValue({ ...inspection, nativeOptions: [] })
+        review.mockResolvedValue({
+            ...preview,
+            errors: {
+                'extraOptions.fork-option': 'This llama.cpp build does not report --fork-option.'
+            }
+        })
+        await render()
+        await click('Add extra option')
+        await input('Extra option key 1', 'fork-option')
+        expect(
+            container.querySelector<HTMLInputElement>('input[aria-label="Extra option value 1"]')
+                ?.type
+        ).toBe('text')
+        await input('Extra option value 1', 'raw')
+        expect(button('Preview model changes').disabled).toBe(false)
+        await click('Preview model changes')
+        expect(container.textContent).toContain(
+            'extraOptions.fork-option: This llama.cpp build does not report --fork-option.'
+        )
+        expect(button('Apply reviewed model changes').disabled).toBe(true)
+    })
     it('keeps an invalid context blocking review when another field is edited', async () => {
         await render()
         await input('Tokens per request', '1.5')

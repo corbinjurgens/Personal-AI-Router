@@ -320,6 +320,25 @@ type llamaServingOption struct {
 // n-cpu-moe, moe-cache-mib, repack, load-mode, lazy-mode and built-in MTP are
 // accepted and surfaced as placement;
 // memory bounds stay operator declarations.
+var llamaGPUSelectionKeys = []string{"device", "main-gpu", "split-mode", "tensor-split"}
+
+func modelLoadGPUSelection(requested modelconfig.RequestedLoad) []string {
+	var keys []string
+	for _, key := range llamaGPUSelectionKeys {
+		if _, exists := requested.ExtraOptions[key]; exists {
+			keys = append(keys, key)
+		}
+	}
+	return keys
+}
+
+func validateModelLoadGPUSelection(model string, requested modelconfig.RequestedLoad) error {
+	if keys := modelLoadGPUSelection(requested); len(keys) > 0 && requested.GPU != nil && requested.GPU.Mode == "auto" {
+		return modelLoadError(model, "extraOptions", "Reviewed Auto chooses the GPU; remove "+keys[0]+" or choose another GPU mode.")
+	}
+	return nil
+}
+
 var llamaServingOptions = []llamaServingOption{
 	{key: "models-preset", flags: []string{"--models-preset"}, env: "LLAMA_ARG_MODELS_PRESET"},
 	{key: "models-max", flags: []string{"--models-max"}, env: "LLAMA_ARG_MODELS_MAX"},
@@ -856,6 +875,10 @@ func llamaArtifactLaunchOptions(command launchCommand, policy *EditableLaunch) (
 }
 
 func parseLlamaServingPreset(data []byte) (map[string]map[string]string, error) {
+	return parseLlamaServingPresetAllowing(data, nil)
+}
+
+func parseLlamaServingPresetAllowing(data []byte, extra map[string]map[string]bool) (map[string]map[string]string, error) {
 	sections := map[string]map[string]string{}
 	section := ""
 	scanner := bufio.NewScanner(strings.NewReader(string(data)))
@@ -895,6 +918,16 @@ func parseLlamaServingPreset(data []byte) (map[string]map[string]string, error) 
 		}
 		name, value = strings.TrimSpace(name), strings.TrimSpace(value)
 		key := llamaPresetOptionKey(name)
+		if key == "" && extra[section][name] {
+			key = name
+		}
+		if extra[section][key] {
+			if _, duplicate := sections[section][key]; duplicate {
+				return nil, servingError("Duplicate preset aliases or options are unsupported.")
+			}
+			sections[section][key] = value
+			continue
+		}
 		if key == "" || key == "models-preset" || key == "models-max" {
 			field := "option"
 			if len(name) <= 64 && regexp.MustCompile(`^[a-zA-Z0-9_-]+$`).MatchString(name) {
@@ -1236,10 +1269,18 @@ func compileLlamaServingSectionsExpected(ctx context.Context, rt Runtime, requir
 				placement = append(placement, key+"="+v)
 			}
 		}
-		result.Envelopes = append(result.Envelopes, engines.ServingEnvelope{ModelID: model.ModelID,
-			PerSlotContextTokens: perSlot, TotalContextTokens: total, Slots: slots,
-			MaxOutputTokens: model.MaxOutputTokens, Memory: model.Memory,
-			Placement: placement, Retention: options["sleep-idle-seconds"], RouterCapacity: capacity})
+		unpriced := false
+		for _, load := range rt.ModelLoads {
+			if load.ModelID == model.ModelID && modelLoadUnpriced(load.Requested) {
+				unpriced = true
+			}
+		}
+		if !unpriced {
+			result.Envelopes = append(result.Envelopes, engines.ServingEnvelope{ModelID: model.ModelID,
+				PerSlotContextTokens: perSlot, TotalContextTokens: total, Slots: slots,
+				MaxOutputTokens: model.MaxOutputTokens, Memory: model.Memory,
+				Placement: placement, Retention: options["sleep-idle-seconds"], RouterCapacity: capacity})
+		}
 		snapshot.WriteString("\n[" + model.ModelID + "]\n")
 		for _, key := range sortedKeys(options) {
 			if err := validateLlamaPresetValue(key, options[key], model.ModelID); err != nil {
@@ -1276,8 +1317,10 @@ func compileLlamaServingSectionsExpected(ctx context.Context, rt Runtime, requir
 			return nil, servingError("Native source conflict; obtain a fresh preview before applying.")
 		}
 		result.Config.Models[i].ExpectedNativeSourceDigest = result.Digest
+	}
+	result.Envelopes = servingEnvelopes(result)
+	for i := range result.Envelopes {
 		result.Envelopes[i].NativeSourceDigest = result.Digest
-		result.Envelopes[i].ContentDigest = servingContentDigest(result.Config.Models[i])
 	}
 	return result, nil
 }

@@ -8,6 +8,10 @@ export type RequestedLoad = {
     slots?: number
     gpu?: { mode: 'native-default' | 'cpu' | 'layers' | 'auto'; layers?: number }
     cpuExperts?: { mode: 'none' | 'all' | 'layers'; layers?: number }
+    fit?: 'off' | 'on'
+    fitTarget?: string
+    fitCtx?: number
+    extraOptions?: Record<string, string>
     cacheTypeK?: 'f16' | 'bf16' | 'q8_0' | 'q4_0'
     cacheTypeV?: 'f16' | 'bf16' | 'q8_0' | 'q4_0'
     flashAttention?: 'inherit' | 'on' | 'off'
@@ -255,6 +259,13 @@ export type MemoryProfile = {
     current: boolean
 }
 export type InspectModelResult = {
+    nativeOptions?: Array<{
+        name: string
+        kind: 'switch' | 'choice' | 'number' | 'text'
+        choices?: string[]
+    }>
+    unreportedLaunchOptions?: string[]
+    executionKey?: string
     nativeBuild?: string
     nativeBuildId?: string
     memoryProfiles?: MemoryProfile[]
@@ -281,7 +292,8 @@ export type InspectModelResult = {
     options?: Array<{
         field: string
         label: string
-        kind: 'integer' | 'number' | 'boolean' | 'enum' | 'string'
+        kind: 'integer' | 'number' | 'boolean' | 'enum' | 'string' | 'options'
+        nonPortableKeys?: string[]
         minimum?: number
         maximum?: number
         values?: string[]
@@ -298,7 +310,12 @@ export type InspectModelResult = {
     estimate: Estimate
     loadObservation?: LoadBufferObservation
     configurationKey?: string
-    configurationKeyReason?: 'not-applied' | 'not-finite' | 'artifacts-unavailable'
+    configurationKeyReason?:
+        | 'not-applied'
+        | 'not-finite'
+        | 'artifacts-unavailable'
+        | 'native-fit'
+        | 'gpu-selection'
     configurationPools?: Array<'host' | 'device' | 'shared'>
 }
 

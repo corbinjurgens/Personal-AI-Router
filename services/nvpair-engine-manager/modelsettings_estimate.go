@@ -96,8 +96,17 @@ func estimateModelSettings(ctx context.Context, p modelconfig.InspectRequest, re
 	if err := requested.Validate(); err != nil {
 		return modelconfig.Estimate{}, modelSettingsParamsError(err)
 	}
+	if err := validateModelLoadGPUSelection(p.ModelID, requested); err != nil {
+		return modelconfig.Estimate{}, err
+	}
 	if err := ctx.Err(); err != nil {
 		return modelconfig.Estimate{}, err
+	}
+	if modelLoadNativeFit(requested) {
+		return modelEstimateUnknown("Native fit chooses placement when the model loads."), nil
+	}
+	if keys := modelLoadGPUSelection(requested); len(keys) > 0 {
+		return modelEstimateUnknown("GPU selection is not covered by the estimate: " + strings.Join(keys, ", ") + "."), nil
 	}
 	return modelEstimateUnknown("bounded artifact facts and effective native allocation unavailable"), nil
 }
@@ -112,6 +121,24 @@ func (s *modelEstimateState) remove(i int) {
 // Failures are advisory data, including panic, overflow and budget exhaustion.
 // The caller's operation/context is never cancelled by this boundary.
 func (s *modelEstimateState) estimate(ctx context.Context, in modelEstimateInput) (out modelconfig.Estimate) {
+	if in.Allocation != nil && modelLoadNativeFit(in.Allocation.Options) {
+		return modelEstimateUnknown("Native fit chooses placement when the model loads.")
+	}
+	if in.Allocation != nil {
+		requested := in.Allocation.Options
+		if keys := modelLoadGPUSelection(requested); len(keys) > 0 {
+			return modelEstimateUnknown("GPU selection is not covered by the estimate: " + strings.Join(keys, ", ") + ".")
+		}
+		if len(requested.ExtraOptions) > 0 {
+			reason := "Options not priced: " + strings.Join(sortedKeys(requested.ExtraOptions), ", ") + "."
+			for key := range requested.ExtraOptions {
+				if !slices.ContainsFunc(llamaServingOptions, func(option llamaServingOption) bool { return option.key == key }) {
+					return modelEstimateUnknown(reason)
+				}
+			}
+			defer func() { out.Unknowns = append(out.Unknowns, reason) }()
+		}
+	}
 	defer func() {
 		if r := recover(); r != nil {
 			reason := "estimator library panic"

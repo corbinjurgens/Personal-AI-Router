@@ -286,6 +286,9 @@ func resolveModelSettingsAutoInput(ctx context.Context, model string, requested 
 	if !modelLoadHasAuto(requested) || requested.Validate() != nil {
 		return fail("Select valid explicit Auto preferences.")
 	}
+	if err := validateModelLoadGPUSelection(model, requested); err != nil {
+		return out, err
+	}
 	if op.Memory == nil {
 		return out, modelSettingsParamsError(fmt.Errorf("target memory telemetry unavailable"))
 	}

@@ -107,6 +107,13 @@ source before stopping and restarting. A generated output pathname is never
 desired configuration. Unchanged typed settings do not restart the process;
 Off, Pause and adopted ownership retain their existing behavior.
 
+Native-fit typed loads are unpriced. `fit = on` may include model-local
+`fit-target` margins and `fit-ctx` minimum context; the global preset defaults
+remain off. Applied native-fit inspection has an execution key for diagnostics,
+no finite configuration key or pools, an unknown estimate and no buffer capture
+or stated memory record. External operator serving presets keep the finite
+parser; conversion validates native fit through the typed fields first.
+
 The projection in `modelsettings_load.go` reads flags, aliases, environment,
 negative switches and native rejection status directly from
 `llamaServingOptions` in `serving_llamacpp.go`. Metadata contains no parallel
@@ -121,7 +128,14 @@ Source references: bundled release b12020; adapter/native parser
 and [common/preset.cpp](https://github.com/ggml-org/llama.cpp/blob/0ec4027a2/common/preset.cpp).
 These identify source, not the installed build. Unsupported means no typed editor
 values, even when the native parser or existing Advanced launch accepts a value.
-No raw extras field bypasses this matrix.
+Typed loads accept a bounded `extraOptions` map of canonical preset keys and
+literal values. Typed keys must use their typed fields, manager/router and
+artifact keys remain PAIR-owned, and unsupported allocation controls are refused.
+Supported table keys retain their value validation; fork keys remain unpriced.
+GPU-selection extras make the load unpriced and cannot coexist with reviewed
+Auto placement. The `options` descriptor publishes their `nonPortableKeys` for
+copy and deploy. Native-fit and GPU-selection loads emit no finite serving
+envelope, including beside finite declared siblings.
 
 B descriptors describe the manual vocabulary. Target preview validates artifacts, native build,
 architecture and interactions. Defaults shown here are inherited source labels,
@@ -156,7 +170,7 @@ claim.
 | `backend-sampling` | `-bs`, `--backend-sampling`; env `LLAMA_ARG_BACKEND_SAMPLING` | Engine-side sampling | Model load | Native boolean; no typed override | Inherited native/model behavior, uninspected | D unsupported | No typed copy | None: typed override refused | Native semantics identity; unknown allocation/work cost |
 | `sleep-idle-seconds` | `--sleep-idle-seconds`; env `LLAMA_ARG_SLEEP_IDLE_SECONDS` | Unload after idle (seconds; -1 or positive) | Model load | -1 or positive int32; zero invalid | Finite adapter: 300 seconds | B advanced | Requested only | sleep-idle-seconds = explicit value | Retention identity; residency/keep-loaded protection wins |
 | `cache-ram` | `--cache-ram`, `-cram`; env `LLAMA_ARG_CACHE_RAM` | Host prompt cache (MiB) | Model load | 1..2147483647 MiB | Finite adapter: 512 MiB | B advanced | Requested only | cache-ram = explicit MiB | Native identity; host prompt cache, no admission bound |
-| `fit` | `--fit`, `-fit`; env `LLAMA_ARG_FIT` | Native automatic fitting | Manager/router | off only | Finite adapter enforced: off | B owner control; no editor | No | fit = off | Router identity/capacity/startup; no automatic retuning |
+| `fit` | `--fit`, `-fit`; env `LLAMA_ARG_FIT` | Native automatic fitting | Model load | off or on; exclusive with reviewed Auto GPU | Off when unset | B supported | Yes | fit = off/on | On is unpriced native placement; execution identity only |
 | `cache-prompt` | `--cache-prompt`, `--no-cache-prompt`; env `LLAMA_ARG_CACHE_PROMPT`, `LLAMA_ARG_NO_CACHE_PROMPT` | Prompt caching | Model load | Native boolean; no typed override | Inherited native/model behavior, uninspected | D unsupported | No typed copy | None: typed override refused | Native semantics identity; unknown allocation/work cost |
 | `cache-idle-slots` | `--cache-idle-slots`, `--no-cache-idle-slots`; env `LLAMA_ARG_CACHE_IDLE_SLOTS`, `LLAMA_ARG_NO_CACHE_IDLE_SLOTS` | Idle slot caching | Model load | Native boolean; no typed override | Inherited native/model behavior, uninspected | D unsupported | No typed copy | None: typed override refused | Native semantics identity; unknown allocation/work cost |
 | `batch-size` | `-b`, `--batch-size`; env `LLAMA_ARG_BATCH` | Logical prompt batch | Model load | Positive int32; ubatch <= batch | Inherited native default, unresolved | B advanced | Requested only | batch-size = explicit value | Native allocation identity; workspace |
@@ -239,8 +253,8 @@ claim.
 | `gpt-oss-120b-default` | `--gpt-oss-120b-default`; env None | GPT OSS 120B preset | Model load | Native boolean; no typed override | Inherited native/model behavior, uninspected | D unsupported | No typed copy | None: typed override refused | Native semantics identity; unknown allocation/work cost |
 | `vision-gemma-4b-default` | `--vision-gemma-4b-default`; env None | Gemma 4B vision preset | Model load | Native boolean; no typed override | Inherited native/model behavior, uninspected | D unsupported | No typed copy | None: typed override refused | Native semantics identity; unknown allocation/work cost |
 | `vision-gemma-12b-default` | `--vision-gemma-12b-default`; env None | Gemma 12B vision preset | Model load | Native boolean; no typed override | Inherited native/model behavior, uninspected | D unsupported | No typed copy | None: typed override refused | Native semantics identity; unknown allocation/work cost |
-| `fit-target` | `--fit-target`, `-fitt`; env `LLAMA_ARG_FIT_TARGET` | Native fit memory target | Manager/router | No model-local override | Existing native/router policy, uninspected | B owner control; no editor | No | None: model-local override refused | Router identity/capacity/startup; no automatic retuning |
-| `fit-ctx` | `--fit-ctx`, `-fitc`; env `LLAMA_ARG_FIT_CTX` | Native fit context target | Manager/router | No model-local override | Existing native/router policy, uninspected | B owner control; no editor | No | None: model-local override refused | Router identity/capacity/startup; no automatic retuning |
+| `fit-target` | `--fit-target`, `-fitt`; env `LLAMA_ARG_FIT_TARGET` | Native fit memory target | Model load | Comma-separated MiB margins; requires fit on | Native default | B supported | No | fit-target = explicit margins | Unpriced native placement |
+| `fit-ctx` | `--fit-ctx`, `-fitc`; env `LLAMA_ARG_FIT_CTX` | Native fit context target | Model load | 0..16777216; requires fit on | Native default | B supported | Yes | fit-ctx = minimum context | Realized context comes from native readback |
 | `cache-reuse` | `--cache-reuse`; env `LLAMA_ARG_CACHE_REUSE` | Prompt cache reuse | Model load | No typed values accepted | Inherited native/model behavior, uninspected | D unsupported | No typed copy | None: typed override refused | Native semantics identity; unknown allocation/work cost |
 | `ctx-checkpoints` | `--ctx-checkpoints`, `--swa-checkpoints`, `-ctxcp`; env `LLAMA_ARG_CTX_CHECKPOINTS` | Context checkpoints | Model load | No typed values accepted | Inherited native/model behavior, uninspected | D unsupported | No typed copy | None: typed override refused | Native semantics identity; unknown allocation/work cost |
 | `checkpoint-min-step` | `--checkpoint-min-step`, `-cms`; env `LLAMA_ARG_CHECKPOINT_MIN_SPACING_NT` | Minimum checkpoint spacing | Model load | No typed values accepted | Inherited native/model behavior, uninspected | D unsupported | No typed copy | None: typed override refused | Native semantics identity; unknown allocation/work cost |

@@ -355,7 +355,9 @@ func TestModelSettingsContractDescriptorsAreCompleteAndDetached(t *testing.T) {
 		if d.Label == "" || d.Owner == "" || d.Phase == "" || d.DefaultSource == "" || d.IdentityEffect == "" || d.EstimateEffect == "" || option.Preset == "" {
 			t.Fatalf("incomplete metadata for %s: %+v", option.Native.key, option)
 		}
-		if option.Native.unsupported && d.Supported {
+		// The raw finite parser still rejects fit controls; the validated
+		// typed path supports them as unpriced placement.
+		if option.Native.unsupported && d.Supported && d.Field != "fitTarget" && d.Field != "fitCtx" {
 			t.Fatalf("unsupported native option %s exposed as supported", option.Native.key)
 		}
 	}

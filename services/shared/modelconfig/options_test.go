@@ -20,6 +20,107 @@ func TestTotalContextPaddingAndOverflow(t *testing.T) {
 	}
 }
 
+func TestRequestedLoadExtraOptions(t *testing.T) {
+	test := func(name, key, value string, valid bool) {
+		t.Run(name, func(t *testing.T) {
+			r := RequestedLoad{ExtraOptions: map[string]string{key: value}}
+			if err := r.Validate(); (err == nil) != valid {
+				t.Fatalf("validation=%v, valid=%v", err, valid)
+			}
+		})
+	}
+	test("fork key", "expert-cache", "auto", true)
+	test("maximum value bytes", "x", strings.Repeat("a", 1024), true)
+	test("long value", "x", strings.Repeat("a", 1025), false)
+	test("unicode bytes", "x", strings.Repeat("界", 342), false)
+	test("invalid UTF8", "x", string([]byte{255}), false)
+	test("control", "x", "a\tb", false)
+	test("uppercase key", "Bad", "x", false)
+	test("long key", strings.Repeat("a", 65), "x", false)
+	for _, c := range "#;$%{}`" {
+		test("reserved "+string(c), "x", string(c), false)
+	}
+	r := RequestedLoad{ExtraOptions: map[string]string{"expert-cache": "auto"}}
+	clone := r.Clone()
+	clone.ExtraOptions["expert-cache"] = "off"
+	if r.ExtraOptions["expert-cache"] != "auto" || !r.selectedFields()["extraOptions"] {
+		t.Fatal("map clone or patch selection lost")
+	}
+	for i := 0; i < 33; i++ {
+		r.ExtraOptions[strings.Repeat("x", i+1)] = "true"
+	}
+	if err := r.Validate(); err == nil {
+		t.Fatal("entry bound ignored")
+	}
+}
+
+func TestExtraOptionsDescriptorNonPortableKeys(t *testing.T) {
+	d := OptionDescriptor{Field: "extraOptions", Label: "Extra options", Kind: "options", Supported: true, Portable: true, NonPortableKeys: []string{"device"}}
+	if err := d.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	clone := d.Clone()
+	clone.NonPortableKeys[0] = "changed"
+	if d.NonPortableKeys[0] != "device" {
+		t.Fatal("descriptor clone aliases keys")
+	}
+	for _, keys := range [][]string{{"device", "device"}, {"Bad"}} {
+		changed := d.Clone()
+		changed.NonPortableKeys = keys
+		if changed.Validate() == nil {
+			t.Fatalf("invalid keys accepted: %v", keys)
+		}
+	}
+	d.Kind = "string"
+	if d.Validate() == nil {
+		t.Fatal("keys allowed on non-options descriptor")
+	}
+}
+
+func TestRequestedLoadNativeFitValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		load  RequestedLoad
+		valid bool
+	}{
+		{"inherited", RequestedLoad{}, true},
+		{"off", RequestedLoad{Fit: testPointer("off")}, true},
+		{"margins and zero context", RequestedLoad{Fit: testPointer("on"), FitTarget: testPointer("1024,512"), FitCtx: testPointer(int32(0))}, true},
+		{"maximum context", RequestedLoad{Fit: testPointer("on"), FitCtx: testPointer(int32(16777216))}, true},
+		{"unknown mode", RequestedLoad{Fit: testPointer("auto")}, false},
+		{"reviewed Auto", RequestedLoad{Fit: testPointer("on"), GPU: &GPU{Mode: "auto"}}, false},
+		{"target without fit", RequestedLoad{FitTarget: testPointer("512")}, false},
+		{"context without fit", RequestedLoad{FitCtx: testPointer(int32(4096))}, false},
+		{"target with fit off", RequestedLoad{Fit: testPointer("off"), FitTarget: testPointer("512")}, false},
+		{"empty target", RequestedLoad{Fit: testPointer("on"), FitTarget: testPointer("")}, false},
+		{"oversized margin", RequestedLoad{Fit: testPointer("on"), FitTarget: testPointer("10000000")}, false},
+		{"too many margins", RequestedLoad{Fit: testPointer("on"), FitTarget: testPointer(strings.Repeat("1,", 16) + "1")}, false},
+		{"negative context", RequestedLoad{Fit: testPointer("on"), FitCtx: testPointer(int32(-1))}, false},
+		{"context above limit", RequestedLoad{Fit: testPointer("on"), FitCtx: testPointer(int32(16777217))}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.load.Validate(); (err == nil) != tc.valid {
+				t.Fatalf("validation error=%v, want valid=%v", err, tc.valid)
+			}
+		})
+	}
+}
+
+func TestRequestedLoadNativeFitCloneAndPatch(t *testing.T) {
+	original := RequestedLoad{Fit: testPointer("on"), FitTarget: testPointer("512"), FitCtx: testPointer(int32(4096))}
+	clone := original.Clone()
+	*clone.Fit, *clone.FitTarget, *clone.FitCtx = "off", "1024", 8192
+	if *original.Fit != "on" || *original.FitTarget != "512" || *original.FitCtx != 4096 {
+		t.Fatal("clone mutated original fit settings")
+	}
+	if err := (LoadPatch{Set: original}).Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := (LoadPatch{Clear: []string{"fit", "fitTarget", "fitCtx"}}).Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestResolvedUnifiedKVPreservesLargerSharedPool(t *testing.T) {
 	load := testResolvedLoad()
 	load.Requested = RequestedLoad{}

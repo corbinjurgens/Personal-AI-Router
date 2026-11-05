@@ -9,7 +9,7 @@ import {
     portableLoadPatch
 } from '@/shared/utils/node-policy-model-copy'
 import { parseModelSettings } from '@/shared/utils/node-policy-model-settings'
-import type { RequestedLoad } from '@/shared/types/model-config'
+import type { InspectModelResult, RequestedLoad } from '@/shared/types/model-config'
 
 const source = { engine: 'llamacpp', model: 'source' }
 const target = { engine: 'llamacpp', model: 'target' }
@@ -27,6 +27,82 @@ function copied(text: string, fields: string[], mode = false): string {
 }
 
 describe('selective model settings copy', () => {
+    const inspection: InspectModelResult = {
+        engine: 'llamacpp',
+        modelId: 'source',
+        status: 'resolved',
+        estimate: { status: 'unknown' },
+        options: [
+            { field: 'fit', label: 'Native fit', kind: 'enum', supported: true, portable: true },
+            {
+                field: 'fitTarget',
+                label: 'Fit target',
+                kind: 'string',
+                supported: true,
+                portable: false
+            },
+            {
+                field: 'fitCtx',
+                label: 'Fit context',
+                kind: 'integer',
+                supported: true,
+                portable: true
+            },
+            {
+                field: 'extraOptions',
+                label: 'Extra options',
+                kind: 'options',
+                supported: true,
+                portable: true,
+                nonPortableKeys: ['device', 'tensor-split', 'fork-local-device']
+            }
+        ]
+    }
+    it('copies portable native fit and options using descriptor keys without mutating source', () => {
+        const requested: RequestedLoad = {
+            fit: 'on',
+            fitTarget: '512',
+            fitCtx: 4096,
+            extraOptions: {
+                'spec-type': 'draft-mtp',
+                device: 'CUDA0',
+                'tensor-split': '1,2',
+                'fork-local-device': 'local'
+            }
+        }
+        const original = structuredClone(requested)
+        const fields = defaultPortableLoadFields(inspection, requested)
+        expect(fields).toEqual(['fit', 'fitCtx', 'extraOptions'])
+        const patch = portableLoadPatch(requested, [...fields, 'fitTarget'], inspection)
+        expect(patch).toEqual({
+            set: { fit: 'on', fitCtx: 4096, extraOptions: { 'spec-type': 'draft-mtp' } },
+            clear: []
+        })
+        expect(requested).toEqual(original)
+        if (!patch.set.extraOptions) throw new Error('Portable extras missing')
+        patch.set.extraOptions['spec-type'] = 'none'
+        expect(requested.extraOptions).toEqual(original.extraOptions)
+    })
+    it('explicitly clears empty or entirely nonportable copied extra maps', () => {
+        expect(portableLoadPatch({}, ['extraOptions'], inspection)).toEqual({
+            set: {},
+            clear: ['extraOptions']
+        })
+        expect(portableLoadPatch({ extraOptions: {} }, ['extraOptions'], inspection)).toEqual({
+            set: {},
+            clear: ['extraOptions']
+        })
+        expect(
+            portableLoadPatch({ extraOptions: { device: 'CUDA0' } }, ['extraOptions'], inspection)
+        ).toEqual({ set: {}, clear: ['extraOptions'] })
+    })
+    it('refuses extras when no source descriptor establishes portable keys', () => {
+        expect(() =>
+            portableLoadPatch({ extraOptions: { device: 'CUDA0', 'spec-type': 'none' } }, [
+                'extraOptions'
+            ])
+        ).toThrow('Extra options require a supported portable source descriptor.')
+    })
     it('selects portable CPU experts and detaches the copied setting', () => {
         const requested = { cpuExperts: { mode: 'layers', layers: 12 } } satisfies RequestedLoad
         expect(
