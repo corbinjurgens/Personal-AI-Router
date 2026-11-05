@@ -468,6 +468,14 @@ func (e *Executor) inspectModelArtifacts(ctx context.Context, p modelconfig.Insp
 		}
 	}
 	result := modelconfig.InspectResult{Engine: p.Engine, ModelID: p.ModelID, ConfigurationKeyReason: "artifacts-unavailable"}
+	e.mu.Lock()
+	st := e.engines[p.Engine]
+	e.mu.Unlock()
+	if st != nil {
+		st.mu.Lock()
+		result.NativeBuild, result.NativeBuildID = st.buildInfo, st.buildID
+		st.mu.Unlock()
+	}
 	unavailable := func(status, reason string) (modelconfig.InspectResult, error) {
 		if err := ctx.Err(); err != nil {
 			return modelconfig.InspectResult{}, err
@@ -509,7 +517,7 @@ func (e *Executor) inspectModelArtifacts(ctx context.Context, p modelconfig.Insp
 	downloads.mu.Lock()
 	source, revision := downloads.source, downloads.revision
 	downloads.mu.Unlock()
-	st, err := e.state(p.Engine)
+	st, err = e.state(p.Engine)
 	if err != nil {
 		return unavailable("unavailable", "Engine configuration is unavailable.")
 	}

@@ -157,6 +157,7 @@ func runModelBufferFixture() error {
 	}
 	var mu sync.Mutex
 	nextPort := 31001
+	routerBuild := "b12020-0ec4027a2"
 	// All pinned frames use one stream, so this fixture establishes real pump
 	// order. Native source: tools/server/server-models.cpp at the full pin.
 	line := func(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) }
@@ -188,7 +189,7 @@ func runModelBufferFixture() error {
 				return
 			}
 			switch r.URL.Query().Get("op") {
-			case "initial", "reload":
+			case "initial", "reload", "unrecognized":
 				if model.port != 0 {
 					http.Error(w, "existing child", http.StatusConflict)
 					return
@@ -196,7 +197,14 @@ func runModelBufferFixture() error {
 				model.port = nextPort
 				nextPort++
 				line("srv         load: spawning server instance with name=%s on port %d", name, model.port)
-				allocations(name, model, true)
+				if r.URL.Query().Get("op") == "unrecognized" {
+					line("[%5d] srv   load_model: loading model 'private-fixture-path'", model.port)
+					line("[%5d] new_allocator: CUDA0 allocated 1.00 MiB", model.port)
+					line("[%5d] srv         server_run_i: model loaded", model.port)
+					model.status = "loaded"
+				} else {
+					allocations(name, model, true)
+				}
 			case "sleep":
 				line("[%5d] srv handle_sleep: server is entering sleeping state", model.port)
 				model.status = "sleeping"
@@ -213,6 +221,11 @@ func runModelBufferFixture() error {
 				line("%s", strings.Repeat("x", 70<<10))
 			case "unsupported":
 				model.build = "b11147-0ec4027a2"
+			case "other-build":
+				routerBuild = "b12100-abcdef0"
+				for _, child := range models {
+					child.build = routerBuild
+				}
 			default:
 				http.Error(w, "unknown private operation", http.StatusBadRequest)
 				return
@@ -235,7 +248,9 @@ func runModelBufferFixture() error {
 		switch r.URL.Path {
 		case "/props":
 			if name == "" {
-				fmt.Fprintln(w, `{"role":"router","build_info":"b12020-0ec4027a2"}`)
+				if err := json.NewEncoder(w).Encode(map[string]string{"role": "router", "build_info": routerBuild}); err != nil {
+					return
+				}
 				return
 			}
 			if model == nil || model.status != "loaded" || r.URL.Query().Get("autoload") != "false" {

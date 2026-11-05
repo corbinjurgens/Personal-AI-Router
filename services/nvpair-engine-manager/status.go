@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unicode"
 )
 
 const presenceRefusalWindow = 500 * time.Millisecond
@@ -193,6 +194,40 @@ func (e *Executor) snapshot(engine string, st *engineState) EngineStatus {
 		Running:     st.running,
 		Healthy:     st.healthy,
 		Port:        st.port,
+		BuildInfo:   st.buildInfo,
+		BuildID:     st.buildID,
+	}
+}
+
+// observeNativeBuild runs only after owned readiness. Network and file reads
+// happen outside mu; a replaced/stopped process cannot publish into a later run.
+func (e *Executor) observeNativeBuild(ctx context.Context, st *engineState) {
+	st.mu.Lock()
+	runID, proc, port := st.runID, st.proc, st.port
+	owned := st.running && !st.adopted && !st.stopping && proc != nil && runID != "" && st.manifest.FamilyOrDefault() == "llamacpp"
+	st.mu.Unlock()
+	if !owned {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	_, props, propsErr := e.llamaServingPropsObserved(ctx, port, "")
+	buildID, buildErr := nativeBuildID(ctx, st)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.runID != runID || st.proc != proc || !st.running || st.adopted || st.stopping {
+		return
+	}
+	select {
+	case <-proc.done:
+		return
+	default:
+	}
+	if propsErr == nil && strings.IndexFunc(props.Build, unicode.IsControl) < 0 {
+		st.buildInfo = props.Build
+	}
+	if buildErr == nil {
+		st.buildID = buildID
 	}
 }
 
@@ -297,6 +332,7 @@ func (e *Executor) reconcilePresenceStateWithProcessProof(ctx context.Context, e
 		st.installed = pathInstalled
 		st.running = false
 		st.runID = ""
+		st.buildInfo, st.buildID = "", ""
 		st.healthy = false
 		st.adopted = false
 		st.proc = nil
@@ -385,6 +421,8 @@ func (e *Executor) reconcilePresenceStateWithProcessProof(ctx context.Context, e
 	if changed || st.runID == "" {
 		st.runID = newEngineRunID()
 	}
+	// An external listener is never attributed the detected installation's build.
+	st.buildInfo, st.buildID = "", ""
 	if !adopted || !running {
 		st.reclaimPID = externalPID
 	} else if st.reclaimPID != externalPID && !exited(st.reclaimPID) {

@@ -1088,6 +1088,8 @@ function bufferReason(value: JsonValue | undefined): NonNullable<LoadBufferObser
         'no-matching-sample',
         'missing-boundary',
         'unsupported-build',
+        'unrecognized-build-output',
+        'earlier-build',
         'clock-reversal',
         'unmapped-device',
         'mixed-role',
@@ -1227,7 +1229,8 @@ function loadObservation(value: JsonValue | undefined): LoadBufferObservation {
         'recordedAt',
         'current',
         'persistence',
-        'upstreamPin',
+        'buildId',
+        'reportedBuild',
         'buildAssurance',
         'estimatorRevision',
         'inputIdentity',
@@ -1263,14 +1266,12 @@ function loadObservation(value: JsonValue | undefined): LoadBufferObservation {
                       'failed',
                       'history-unavailable'
                   ]),
-        upstreamPin:
-            row.upstreamPin === undefined
-                ? undefined
-                : choice(row.upstreamPin, ['0ec4027a2a0183de87c007069adddc06e665f7de']),
+        buildId: optionalText(row.buildId, 256),
+        reportedBuild: optionalText(row.reportedBuild, 256),
         buildAssurance:
             row.buildAssurance === undefined
                 ? undefined
-                : choice(row.buildAssurance, ['recognized-self-reported-pin']),
+                : choice(row.buildAssurance, ['recognized-output']),
         estimatorRevision: optionalText(row.estimatorRevision, 256),
         inputIdentity: optionalDigest(row.inputIdentity),
         sourceIdentity: optionalDigest(row.sourceIdentity),
@@ -1358,6 +1359,8 @@ function loadObservation(value: JsonValue | undefined): LoadBufferObservation {
         reasons:
             row.reasons === undefined ? undefined : boundedArray(row.reasons, 16).map(bufferReason)
     }
+    if (result.buildId && !/^sha256:[0-9a-f]{64}$/.test(result.buildId))
+        throw new Error('Invalid native buffer build identity.')
     if (
         result.estimatorRevision !== undefined &&
         result.estimatorRevision !==
@@ -1412,6 +1415,8 @@ export function parseInspectModel(value: JsonValue | undefined): InspectModelRes
         'reason',
         'source',
         'assurance',
+        'nativeBuild',
+        'nativeBuildId',
         'artifacts',
         'facts',
         'options',
@@ -1470,6 +1475,8 @@ export function parseInspectModel(value: JsonValue | undefined): InspectModelRes
         reason: optionalText(row.reason),
         source: optionalText(row.source),
         assurance: optionalText(row.assurance),
+        nativeBuild: optionalText(row.nativeBuild, 256),
+        nativeBuildId: optionalText(row.nativeBuildId, 256),
         artifacts:
             row.artifacts === undefined
                 ? undefined

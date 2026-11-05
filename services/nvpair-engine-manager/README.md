@@ -5,10 +5,34 @@ SPDX-License-Identifier: Apache-2.0
 
 # nvpair-engine-manager
 
+## Native build identity
+
+`nativeBuildID` identifies llama.cpp builds as `sha256:<hex>` from the platform,
+the full executable hash and the sorted names and full hashes of accepted
+runtime libraries in the executable's directory. Managed and override builds
+use the same calculation. Paths, modification times and manifest pins do not
+enter the fingerprint. File hashes are memoized in memory with object checks;
+there is no persisted hash store.
+
+Manual and reviewed Auto loads store this content fingerprint in `nativeBuildId`.
+Finite configuration keys bind it through a native source digest that also
+includes explicit launch environment values and effective `CUDA_*`, `GGML_*`
+and `LLAMA_*` controls. Validated build-root paths are normalized in that digest;
+unrelated ambient variables are excluded. Touching or moving an unchanged build
+preserves its key, including installs described by `install.fetch`. Expected
+file evidence still rejects replacement during preparation and replay. Auto
+retains its environment-bound source separately in the reviewed input envelope.
+The device helper's pin and native-initialization gates remain independent.
+
+The inherited SWA allocation default has its own known-source assurance for
+the managed b12020 artifact declaration. Recognizing another build's device
+report does not establish its SWA default. Fetch installs and other builds can
+receive configuration keys while that advisory default remains unknown.
+
 ## Operation-scoped memory device map
 
 `mapModelSettingsDevices` is an internal, independently callable review adapter.
-It accepts a selected b12020 runtime/library snapshot, effective selection and
+It accepts an executable-directory content-identified library snapshot, effective selection and
 environment, explicit native-initialization permission, and supplied target
 host/run/topology identity. It owns no telemetry cache and makes no capacity or
 Fits decision. CPU placement uses only the supplied host/shared pool.
@@ -19,15 +43,22 @@ the private metadata helper again with UUID-only `CUDA_VISIBLE_DEVICES` and
 requires the same physical device at `CUDA0`. The returned binding retains that
 UUID, pool, constrained environment and stable digest. Observation identity
 includes producer run; stable binding identity excludes run and observation.
-Names, sizes and list position never prove a match. Unsupported exports,
+The ggml description must match the CUDA driver name, and total memory must
+agree within 1 MiB. These cross-checks do not replace physical identity.
+List position never proves a match. Unsupported exports,
 ambiguous aliases, MIG/MPS environments, shared/discrete mixtures, Metal,
 Vulkan, HIP and split-device selection remain Unknown.
 
 The existing executable's private `--private-model-devices` mode exits before
 registry/transport startup. It reads a bounded internal runtime snapshot from
-stdin, verifies selected library hashes and the pinned `ggml_commit()` revision,
-and uses ggml metadata plus CUDA driver
-identity APIs. It loads no model and starts no engine or network listener. The
+stdin, verifies selected library hashes and reports `ggml_commit()` as metadata.
+It checks the property layout against CUDA driver name and total memory for
+the same PCI identity before accepting the report. A failed check returns
+`device report not recognized for this build` without a partial inventory.
+Recognition results alone are cached in memory by content build ID; topology,
+visibility and bindings are checked anew for each operation. Several dedicated
+GPU pools run no helper and report `several GPUs: reviewed Auto supports one GPU; choose GPUs with extra options`.
+It loads no model and starts no engine or network listener. The
 parent enforces a three-second ceiling, combined stdout/stderr ceiling of
 64 KiB, device bound, credential-environment filtering, cancellation and reaping.
 Unix uses purego; Windows uses x/sys restricted DLL loading and purego calls.
@@ -333,8 +364,11 @@ declaration or qualification is required. Inspect reads a detached selected
 summary from retained history, adding no model-list/props request, load,
 inference or initialization beyond the surrounding operation's existing behavior.
 
-The b12020 adapter recognizes a pinned self-reported build tuple, not verified
-clean-source provenance. Two-decimal MiB reports and conservative byte intervals
+Capture attempts every build and recognizes allocation output by its grammar.
+An unrecognized output is retained as `partial` with `unrecognized-build-output`
+and no rows. Samples carry `buildId`, `reportedBuild` and, when output is
+recognized, `buildAssurance: recognized-output`, without claiming clean-source
+provenance. Two-decimal MiB reports and conservative byte intervals
 are allocation reports, not exact bytes, physical occupancy or a complete-process
 peak. Incomplete role/device/component coverage remains Unknown. The comparison
 uses the frozen captured-load baseline, never a newly edited draft, and cannot
@@ -343,7 +377,11 @@ update estimates, Auto, admission, qualification or margins.
 Derived samples use `model-buffer-samples.json`, separate from settings and
 operation journals. Corruption disables history writes; landed `ErrReplaced`
 publication is adopted with durability uncertainty. Recovered history never
-proves a current process. The optional Inspect summary is bounded to 4 KiB within
+proves a current process. Other-build records remain readable and never disable
+writes. Inspection prefers matching-build history, otherwise labels the newest
+retained sample `earlier build`. The existing decode folds old known-pin records
+into a reported build with no content identity; those never match the current build.
+The optional Inspect summary is bounded to 4 KiB within
 the existing complete reply limit; projection reduces rows, returns structured
 Unknown, or omits that field while preserving artifact facts. The desktop maps
 absence to Unknown/`observation-omitted`. See
@@ -543,7 +581,7 @@ Requests (caller → service):
 | `engine:get-installed` | — | `{ engines: [EngineStatus] }` |
 | `engine:describe` | `{ engine }` | the engine's manifest (local only: it contains commands and paths) |
 | `engine:descriptors` | — | `{ engines: [Descriptor] }` — every registered engine's sanitized, versioned descriptor (`nvpair-shared/engines`): `{ version, engine, family, label, platforms, available, protocols, modelNaming, modelStore?, catalog?, operations: { <load\|unload\|pull\|delete>: { responseTimeoutS? } } }`. It never carries binaries, commands, environment values, paths, URLs or credentials. See [MANIFEST.md](MANIFEST.md#descriptors) |
-| `engine:status` | `{ engine }` | `EngineStatus` |
+| `engine:status` | `{ engine }` | `EngineStatus`, including optional `buildInfo` (running engine claim) and `buildId` (content fingerprint), cleared on stop; inspection exposes the same observed values as `nativeBuild` and `nativeBuildId` |
 | `engine:install` | `{ engine, start?, port?, bind? }` | `EngineStatus` (after install; also starts it if `start:true`) |
 | `engine:uninstall` | `{ engine }` | `EngineStatus` (after removal) |
 | `engine:start` | `{ engine, port?, bind? }` | `EngineStatus` (after readiness) |

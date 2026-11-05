@@ -128,12 +128,17 @@ func modelReviewedNativeSource(ctx context.Context, st *engineState, command lau
 			diagnostic[0].stage, diagnostic[0].err = stage, err
 		}
 	}
-	runtime, err := modelDeviceRuntimeSnapshot(ctx, st, modelDevicesBuild)
+	executable, err := captureSource(command.Bin, false)
+	if err != nil {
+		fail("executable-binding", err)
+		return "", servingError("Reviewed Auto native library source unavailable.")
+	}
+	runtime, _, err := nativeBuildSnapshotExpected(ctx, executable, servingFileAccess{}, nil)
 	if err != nil {
 		fail("runtime-snapshot", err)
 		return "", servingError("Reviewed Auto native library source unavailable.")
 	}
-	return modelReviewedNativeRuntimeSource(ctx, runtime, command, fail)
+	return modelReviewedNativeRuntimeSourceExpected(ctx, runtime, command, fail, servingFileAccess{}, &executable)
 }
 
 func modelReviewedNativeRuntimeSource(ctx context.Context, runtime modelDeviceRuntime, command launchCommand, fail func(string, error)) (string, error) {
@@ -144,9 +149,19 @@ func modelReviewedNativeSourceExpected(ctx context.Context, st *engineState, com
 	if command.Bin != executable.configured || validateSource(executable) != nil {
 		return "", nil, servingError("Native executable changed.")
 	}
-	runtime, libraries, err := modelDeviceRuntimeSnapshotBound(ctx, st, modelDevicesBuild, access, expected)
+	runtime, libraries, err := nativeBuildSnapshotExpected(ctx, executable, access, expected)
 	if err != nil {
 		return "", nil, servingError("Reviewed Auto native library source unavailable.")
+	}
+	// A UUID-constrained reviewed GPU launch consumes build recognition. CPU
+	// Auto remains file-only. Missing process-local evidence after a restart
+	// does not invalidate an already frozen, file-checked allocation.
+	for key, value := range command.Env {
+		if environmentKey(key) == "CUDA_VISIBLE_DEVICES" && canonicalModelDeviceUUID(value) != "" {
+			if checked, ok := modelDeviceCheckedBuild(runtime.Build); ok && checked.Unknown != "" {
+				return "", nil, servingError(checked.Unknown)
+			}
+		}
 	}
 	source, err := modelReviewedNativeRuntimeSourceExpected(ctx, runtime, command, func(string, error) {}, access, &executable)
 	return source, libraries, err
@@ -168,15 +183,32 @@ func modelReviewedNativeRuntimeSourceExpected(ctx context.Context, runtime model
 			return "", servingError("Reviewed Auto build root contains an unsupported driver library.")
 		}
 	}
-	var executable *engines.ServingBinding
-	if expected == nil {
-		executable, err = access.binding(ctx, command.Bin)
-	} else if command.Bin == expected.configured {
-		executable, err = access.bindingExpected(ctx, expected.configured, expected.target, expected.info)
-	} else {
-		err = servingError("Native executable changed.")
+	// Keep the internal snapshot bound independently of what enters the digest.
+	if _, err := modelDeviceDigest(runtime); err != nil {
+		fail("source-digest", err)
+		return "", err
 	}
-	if err != nil {
+	if expected == nil {
+		executable, err := captureSource(command.Bin, false)
+		if err != nil {
+			fail("executable-binding", err)
+			return "", err
+		}
+		selected, _, err := nativeBuildSnapshotExpected(ctx, executable, access, nil)
+		if err != nil {
+			fail("runtime-snapshot", err)
+			return "", err
+		}
+		if selected.Root != runtime.Root {
+			err := servingError("Native executable directory changed.")
+			fail("runtime-snapshot", err)
+			return "", err
+		}
+		runtime = selected
+		expected = &executable
+	}
+	if expected == nil || command.Bin != expected.configured || validateSource(*expected) != nil {
+		err := servingError("Native executable changed.")
 		fail("executable-binding", err)
 		return "", err
 	}
@@ -190,13 +222,36 @@ func modelReviewedNativeRuntimeSourceExpected(ctx context.Context, runtime model
 		fail("device-environment", err)
 		return "", err
 	}
+	// Explicit launch values and native controls affect allocation. Unrelated
+	// ambient variables do not. Normalize a confined build path only after the
+	// native environment owner has validated loader search paths.
+	filtered := make([]string, 0, len(env))
+	for _, assignment := range env {
+		key, value, _ := strings.Cut(assignment, "=")
+		explicit := false
+		for name := range command.Env {
+			if environmentKey(name) == key {
+				explicit = true
+				break
+			}
+		}
+		if explicit || strings.HasPrefix(key, "CUDA_") || strings.HasPrefix(key, "GGML_") || strings.HasPrefix(key, "LLAMA_") {
+			value = strings.ReplaceAll(value, runtime.Root, "{build_root}")
+			configuredRoot := filepath.Dir(expected.configured)
+			value = strings.ReplaceAll(value, configuredRoot, "{build_root}")
+			filtered = append(filtered, key+"="+value)
+		}
+	}
+	slices.Sort(filtered)
 	source, err := modelDeviceDigest(struct {
-		Executable  *engines.ServingBinding
-		Runtime     modelDeviceRuntime
+		BuildID     string
 		Environment []string
-	}{executable, runtime, env})
+	}{runtime.Build, filtered})
 	if err != nil {
 		fail("source-digest", err)
+	}
+	if err == nil {
+		err = validateSource(*expected)
 	}
 	return source, err
 }

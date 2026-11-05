@@ -57,9 +57,12 @@ export default function ModelLoadBufferReport({
                             : ''}
                     </Text>
                     <Text kind="body/regular/sm">
-                        Upstream pin: {observation.upstreamPin ?? 'Unknown'} · Sample:{' '}
-                        {observation.sampleId ?? 'Unknown'}. Recognized self-reported build;
-                        clean-source provenance is unverified.
+                        Reported build: {observation.reportedBuild ?? 'Unknown'} · Build identity:{' '}
+                        {observation.buildId ?? 'Unknown'} · Sample:{' '}
+                        {observation.sampleId ?? 'Unknown'}.
+                        {observation.buildAssurance === 'recognized-output'
+                            ? ' Recognized allocation output; build information is self-reported; clean-source provenance is unverified.'
+                            : ' Allocation output recognition is unavailable.'}
                     </Text>
                     <Text kind="body/regular/sm">
                         Frozen baseline for captured load, independent of the edited draft and Auto

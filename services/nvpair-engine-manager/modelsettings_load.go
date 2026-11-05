@@ -169,6 +169,9 @@ func (e *typedLlamaInputEvidence) checkRecognition(ctx context.Context, owner *E
 }
 
 func (e *typedLlamaInputEvidence) checkedAccess(ctx context.Context, access servingFileAccess) (servingFileAccess, error) {
+	if e.libraries == nil {
+		return access, fmt.Errorf("missing native library evidence")
+	}
 	if err := validateSource(e.build); err != nil {
 		return access, err
 	}
@@ -294,9 +297,11 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 			return nil, modelLoadError("", "artifacts", "Prepared inputs changed before compilation.")
 		}
 	}
-	buildEvidence, err := captureSource(command.Bin, false)
+	var buildEvidence sourceEvidence
 	if expected != nil {
 		buildEvidence = expected.build
+	} else {
+		buildEvidence, err = captureSource(command.Bin, false)
 	}
 	if err != nil {
 		return nil, modelLoadError("", "nativeBuildId", "Native executable binding is unavailable.")
@@ -305,16 +310,16 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 	if err != nil {
 		return nil, modelLoadError("", "nativeBuildId", "Native executable binding is unavailable.")
 	}
-	buildBytes, err := json.Marshal(build)
-	if err != nil {
-		return nil, err
-	}
-	buildID := modelLoadDigest(buildBytes)
-	manualBuildID := buildID
 	var libraries map[string]sourceEvidence
 	if expected != nil {
 		libraries = expected.libraries
 	}
+	native, libraries, err := nativeBuildSnapshotExpected(ctx, buildEvidence, access, libraries)
+	if err != nil {
+		return nil, modelLoadError("", "nativeBuildId", "Native build content is unavailable or changed.")
+	}
+	buildID := native.Build
+	nativeSource := ""
 	reviewedSource := func(command launchCommand) (string, error) {
 		if command.Bin != buildEvidence.configured || validateSource(buildEvidence) != nil {
 			return "", modelLoadError("", "nativeBuildId", "Native executable changed during compilation.")
@@ -325,8 +330,7 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 		}
 		return source, err
 	}
-	// Accepted/reviewed Auto binds the complete native source and effective
-	// environment. Manual and external-conversion builds retain their semantics.
+	// Auto keeps the content build ID separate from its environment-bound source.
 	for _, load := range loads {
 		if !modelLoadHasAuto(load.Requested) {
 			continue
@@ -339,7 +343,7 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 		if err != nil {
 			return nil, err
 		}
-		buildID, err = reviewedSource(command)
+		nativeSource, err = reviewedSource(command)
 		if err != nil {
 			return nil, err
 		}
@@ -449,7 +453,7 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 		} else {
 			options, resolved, err = typedLlamaModelOptions(load.ModelID, modelEffectiveLoadOptions(load.Requested), layerCount)
 			if err == nil {
-				resolved.Artifacts, resolved.NativeBuildID = artifacts, manualBuildID
+				resolved.Artifacts, resolved.NativeBuildID = artifacts, buildID
 			}
 		}
 		if err != nil {
@@ -511,8 +515,8 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 		if sourceErr != nil {
 			return nil, sourceErr
 		}
-		buildID = current
-		if load.Resolved.NativeBuildID != current {
+		nativeSource = current
+		if modelAutoNativeSource(load.Resolved) != current {
 			if approved || rtLoadResolution(rt.ModelLoads, load.ModelID) != nil && operation.RecalculateModel != load.ModelID {
 				return nil, modelLoadError(load.ModelID, "nativeBuildId", "Reviewed native source changed; explicitly Recalculate.")
 			}
@@ -520,8 +524,7 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 			if !ok {
 				return nil, modelLoadError(load.ModelID, "auto", "Invalid reviewed input.")
 			}
-			load.Resolved.NativeBuildID = current
-			load.Resolved.ReviewedInputID, err = modelAutoReviewHash(load.ModelID, load.Requested, load.Resolved, conversion, memory)
+			load.Resolved.ReviewedInputID, err = modelAutoReviewHash(load.ModelID, load.Requested, load.Resolved, conversion, memory, current)
 			if err != nil {
 				return nil, err
 			}
@@ -627,15 +630,18 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 	if current, err := access.bindingExpected(ctx, buildEvidence.configured, buildEvidence.target, buildEvidence.info); err != nil || *current != *build {
 		return nil, modelLoadError("", "nativeBuildId", "Native executable changed during compilation.")
 	}
+	if current, _, err := nativeBuildSnapshotExpected(ctx, buildEvidence, access, libraries); err != nil || current.Build != buildID {
+		return nil, modelLoadError("", "nativeBuildId", "Native build changed during compilation.")
+	}
 	if _, err := modelConstrainCommand(command, loads); err != nil {
 		return nil, err
 	}
-	// b12020 common/common.h initializes swa_full to false. Only the existing
-	// file-verified pinned native source can supply that advisory default.
+	// The known b12020 common/common.h default is separate from device report
+	// recognition. Recognizing another build's devices does not prove swa_full.
 	if estimates != nil {
 		constrained, constrainErr := modelConstrainCommand(command, loads)
 		_, sourceErr := reviewedSource(constrained)
-		if constrainErr == nil && sourceErr == nil {
+		if constrainErr == nil && sourceErr == nil && len(libraries) != 0 && modelLoadHasKnownSWADefault(st, buildEvidence) {
 			for model, input := range estimates {
 				full := sections[model]["swa-full"] == "true"
 				input.SWAFull = &full
@@ -648,7 +654,7 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 			continue
 		}
 		current, err := reviewedSource(command)
-		if err != nil || current != buildID {
+		if err != nil || current != nativeSource {
 			return nil, modelLoadError("", "nativeBuildId", "Native source changed during compilation.")
 		}
 		break
@@ -673,6 +679,29 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 		}
 	}
 	return result, nil
+}
+
+// The inherited SWA default was derived from b12020 (0ec4027a) common/common.h.
+// Retain its existing managed artifact-declaration assurance independently of
+// the device helper's per-build report check. New builds need separate evidence
+// for this semantic default; a content fingerprint or device report is not it.
+func modelLoadHasKnownSWADefault(st *engineState, executable sourceEvidence) bool {
+	st.mu.Lock()
+	root := st.installDir
+	known := false
+	if st.plat != nil && st.plat.Install != nil {
+		for _, artifact := range st.plat.Install.Artifacts {
+			if artifact.Name == "server" && strings.Contains(artifact.URL, "/releases/download/b12020/") && len(artifact.SHA256) == 64 {
+				known = true
+			}
+		}
+	}
+	st.mu.Unlock()
+	if !known || !isManagedInstallPath(executable.configured, root) {
+		return false
+	}
+	resolved, err := resolveExistingPath(root)
+	return err == nil && resolved == filepath.Dir(executable.target)
 }
 
 // Auto-assigned endpoints are lifecycle outputs. Bind the managed zero-port
@@ -1270,6 +1299,10 @@ func (e *Executor) validateTypedLlamaConversion(ctx context.Context, st *engineS
 	if err != nil {
 		return nil, err
 	}
+	_, approvedInputs.libraries, err = nativeBuildSnapshotExpected(ctx, approvedInputs.build, servingFileAccess{}, nil)
+	if err != nil {
+		return nil, modelLoadError("", "nativeBuildId", "Native build content is unavailable or changed.")
+	}
 	for _, load := range desired.ModelLoads {
 		if load.Resolved == nil {
 			return nil, modelLoadError(load.ModelID, "conversion", "Accepted artifact bindings are missing.")
@@ -1304,7 +1337,7 @@ func (e *Executor) validateTypedLlamaConversion(ctx context.Context, st *engineS
 		if resolved == nil || modelAutoConversionSource(resolved) != conversion.SourceDigest {
 			return nil, modelLoadError(load.ModelID, "conversion", "External router source changed since preview; preview again before applying.")
 		}
-		if resolved == nil || !reflect.DeepEqual(resolved.Artifacts, load.Resolved.Artifacts) || !strings.HasPrefix(resolved.ResolverRevision, "auto/") && resolved.NativeBuildID != load.Resolved.NativeBuildID {
+		if resolved == nil || !reflect.DeepEqual(resolved.Artifacts, load.Resolved.Artifacts) || resolved.NativeBuildID != load.Resolved.NativeBuildID {
 			return nil, modelLoadError(load.ModelID, "conversion", "Accepted conversion must preserve the complete current router artifact set and native build.")
 		}
 	}
@@ -1328,7 +1361,7 @@ func (e *Executor) validateTypedLlamaConversion(ctx context.Context, st *engineS
 			return nil, modelLoadError(load.ModelID, "nativeBuildId", "Native executable changed during conversion.")
 		}
 		current, libraries, err := modelReviewedNativeSourceExpected(ctx, st, convertedCommand, servingFileAccess{}, conversion.inputs.build, conversion.inputs.libraries)
-		if err != nil || current != load.Resolved.NativeBuildID {
+		if err != nil || current != modelAutoNativeSource(load.Resolved) {
 			return nil, modelLoadError(load.ModelID, "conversion", "Reviewed native library/environment source changed.")
 		}
 		conversion.inputs.libraries = libraries
@@ -1397,16 +1430,26 @@ func (e *Executor) previewTypedLlamaConversionExpected(ctx context.Context, st *
 	}
 	inputs := &typedLlamaInputEvidence{models: map[string]modelFileList{}}
 	if expected != nil {
-		inputs.libraries = expected.libraries
-	}
-	inputs.build, err = captureSource(command.Bin, false)
-	if expected != nil {
 		inputs.build = expected.build
+		inputs.libraries = expected.libraries
+	} else {
+		inputs.build, err = captureSource(command.Bin, false)
+		if err == nil {
+			_, inputs.libraries, err = nativeBuildSnapshotExpected(ctx, inputs.build, access, nil)
+		}
 	}
 	if err != nil {
 		return refuse("", "nativeBuildId", "Native executable binding is unavailable.")
 	}
-	sourceFile, err := captureSource(source, false)
+	var sourceFile sourceEvidence
+	if expected != nil {
+		if len(expected.selectors) != 1 || expected.selectors[0].configured != source {
+			return refuse("", "models-preset", "Prepared external preset selection changed.")
+		}
+		sourceFile = expected.selectors[0]
+	} else {
+		sourceFile, err = captureSource(source, false)
+	}
 	if err != nil {
 		return refuse("", "models-preset", "External preset is unavailable.")
 	}

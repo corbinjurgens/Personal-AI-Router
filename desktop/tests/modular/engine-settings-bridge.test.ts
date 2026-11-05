@@ -349,6 +349,22 @@ function withoutField(value: JsonValue, field: string): JsonValue {
 }
 
 describe('unified settings bridge', () => {
+    it('preserves running native build metadata while rejecting unknown inspection keys', () => {
+        const fixture = {
+            ...memoryPlanInspectionFixture(),
+            nativeBuild: 'b12345-test-build',
+            nativeBuildId: `sha256:${'a'.repeat(64)}`
+        }
+        const result = parseInspectModel(fixture)
+        expect(result.nativeBuild).toBe('b12345-test-build')
+        expect(result.nativeBuildId).toBe(`sha256:${'a'.repeat(64)}`)
+        expect(() => parseInspectModel({ ...fixture, unexpectedBuildField: true })).toThrow(
+            'Invalid model response field.'
+        )
+        expect(() => parseInspectModel({ ...fixture, nativeBuild: 'x'.repeat(257) })).toThrow()
+        expect(() => parseInspectModel({ ...fixture, nativeBuildId: 42 })).toThrow()
+    })
+
     it('decodes bounded stated history with exact applied pools and unavailable-store reporting', () => {
         const key = 'a'.repeat(64)
         const profile = {
@@ -432,11 +448,23 @@ describe('unified settings bridge', () => {
             configurationKey: key,
             configurationPools: ['host', 'device'],
             estimate: { status: 'unknown' },
-            loadObservation: { status: 'unknown', current: false, configurationKey: key }
+            loadObservation: {
+                status: 'partial',
+                current: false,
+                configurationKey: key,
+                buildId: `sha256:${'b'.repeat(64)}`,
+                reportedBuild: 'b12100-abcdef0',
+                buildAssurance: 'recognized-output',
+                reason: 'earlier-build'
+            }
         })
         expect(result.configurationKey).toBe(key)
         expect(result.configurationPools).toEqual(['host', 'device'])
         expect(result.loadObservation?.configurationKey).toBe(key)
+        expect(result.loadObservation?.buildId).toBe(`sha256:${'b'.repeat(64)}`)
+        expect(result.loadObservation?.reportedBuild).toBe('b12100-abcdef0')
+        expect(result.loadObservation?.buildAssurance).toBe('recognized-output')
+        expect(result.loadObservation?.reason).toBe('earlier-build')
         expect(() =>
             parseInspectModel({
                 ...memoryPlanInspectionFixture(),

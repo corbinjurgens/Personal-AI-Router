@@ -29,6 +29,8 @@ import {
 } from '@/ui/stores/engine-settings.store'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import { usePendingActionsStore } from '@/ui/stores/pending-actions.store'
+import { useEngineStatusStore } from '@/ui/stores/engine-status.store'
+import { DismissibleTooltip } from '@/ui/components/DismissibleTooltip/DismissibleTooltip'
 import { ConfirmModal } from '@/ui/components/ConfirmModal'
 import getErrorString from '@/shared/utils/get-error-string'
 import { engineManagerName } from '@/shared/utils/engines'
@@ -75,6 +77,7 @@ export function EngineSettingsSection({
     disabled: boolean
 }) {
     const engine = engineManagerName(engineType)
+    const status = useEngineStatusStore(state => state.statusByNode.get(nodeId)?.get(engineType))
     const switchPending = usePendingActionsStore(state => state.isSwitchPending(nodeId, engine))
     const switchReserved =
         useEngineSwitchStore(state => state.reserved(nodeId, engine)) || switchPending
@@ -295,6 +298,13 @@ export function EngineSettingsSection({
                 <Text kind="body/semibold/sm">Settings</Text>
             </summary>
             <Stack gap="3" className="p-3">
+                {(status?.buildInfo || status?.buildId) && (
+                    <DismissibleTooltip slotContent={status.buildId || 'Build identity unavailable'}>
+                        <Text kind="body/regular/sm" tabIndex={0}>
+                            llama.cpp {status.buildInfo || '(build information unavailable)'}
+                        </Text>
+                    </DismissibleTooltip>
+                )}
                 {switchReserved && (
                     <Text kind="body/regular/sm" role="status">
                         This engine is reserved by a switch. Refresh switch readback to check its

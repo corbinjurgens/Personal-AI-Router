@@ -176,3 +176,47 @@ func TestModelBufferObservationBounds(t *testing.T) {
 		t.Fatal("unknown became current")
 	}
 }
+
+func TestModelBufferObservationBuildProvenance(t *testing.T) {
+	for _, build := range []string{"sha256:" + strings.Repeat("a", 64), "sha256:" + strings.Repeat("b", 64), ""} {
+		t.Run("build="+build, func(t *testing.T) {
+			o := BufferObservation{Status: "partial", Current: false, BuildID: build, ReportedBuild: "b12100-abcdef0", BuildAssurance: "recognized-output", Reason: "earlier-build"}
+			data, err := json.Marshal(o)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var decoded BufferObservation
+			if err := DecodeStrict(data, &decoded); err != nil {
+				t.Fatal(err)
+			}
+			if err := decoded.Validate(); err != nil {
+				t.Fatalf("build applicability became validity: %v", err)
+			}
+			if decoded.BuildID != build || decoded.ReportedBuild != "b12100-abcdef0" || decoded.Reason != "earlier-build" || decoded.BuildAssurance != "recognized-output" {
+				t.Fatalf("build provenance lost: %+v", decoded)
+			}
+		})
+	}
+	unknown := BufferObservation{Status: "partial", Reason: "unrecognized-build-output", ReportedBuild: "unknown-fork"}
+	if err := unknown.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for name, mutate := range map[string]func(*BufferObservation){
+		"invalid build identity":   func(o *BufferObservation) { o.BuildID = "b12100-abcdef0" },
+		"unsupported assurance":    func(o *BufferObservation) { o.BuildAssurance = "verified-clean-source" },
+		"oversized build ID":       func(o *BufferObservation) { o.BuildID = strings.Repeat("a", 257) },
+		"oversized reported build": func(o *BufferObservation) { o.ReportedBuild = strings.Repeat("b", 257) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			invalid := unknown.Clone()
+			mutate(&invalid)
+			if err := invalid.Validate(); err == nil {
+				t.Fatal("accepted invalid build provenance")
+			}
+		})
+	}
+	var decoded BufferObservation
+	if err := DecodeStrict([]byte(`{"status":"partial","current":false,"upstreamPin":"0ec4027a2a0183de87c007069adddc06e665f7de"}`), &decoded); err == nil {
+		t.Fatal("wire accepted the store-only historical pin")
+	}
+}

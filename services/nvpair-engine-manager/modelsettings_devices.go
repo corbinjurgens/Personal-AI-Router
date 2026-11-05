@@ -23,6 +23,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 	"unsafe"
 
 	"nvpair-shared/secretenv"
@@ -32,8 +33,8 @@ const modelDevicesHelperArg = "--private-model-devices"
 const modelDevicesLimit = 64
 const modelDevicesBytes = 64 << 10
 const modelDevicesBudget = 3 * time.Second
-const modelDevicesBuild = "b12020"
-const modelDevicesCommit = "0ec4027a2a0183de87c007069adddc06e665f7de"
+const modelDeviceReportUnknown = "device report not recognized for this build"
+const modelDeviceSeveralGPUs = "several GPUs: reviewed Auto supports one GPU; choose GPUs with extra options"
 
 // This is an internal supplied-operation snapshot, not a public request or a
 // second telemetry owner. Task 5 supplies topology from the target broker and
@@ -60,10 +61,13 @@ type modelDeviceOperation struct {
 }
 type modelNativeDevice struct {
 	Selector, PCI, UUID, LUID, Pool, Unknown string
+	Name                                     string
+	Total                                    uint64
 	Kind                                     int32
 }
 type modelDeviceReply struct {
 	Devices []modelNativeDevice
+	Commit  string
 	Unknown string
 }
 type modelDeviceBinding struct {
@@ -71,11 +75,33 @@ type modelDeviceBinding struct {
 	Environment                                   []string
 }
 type modelDeviceMap struct {
-	ObservationID, HostPool, Unknown string
-	Devices                          []modelNativeDevice
-	Binding                          *modelDeviceBinding
+	ObservationID, HostPool, Commit, Unknown string
+	Devices                                  []modelNativeDevice
+	Binding                                  *modelDeviceBinding
 }
 type modelDeviceRunner func(context.Context, modelDeviceRuntime, []string) (modelDeviceReply, error)
+
+type modelDeviceCheck struct{ Commit, Unknown string }
+
+// Cache build recognition only. Physical inventories, visibility verification,
+// topology joins and bindings belong to each operation and are never cached.
+var modelDeviceChecks = struct {
+	sync.Mutex
+	builds map[string]modelDeviceCheck
+}{builds: make(map[string]modelDeviceCheck)}
+
+func modelDeviceCheckedBuild(build string) (modelDeviceCheck, bool) {
+	modelDeviceChecks.Lock()
+	defer modelDeviceChecks.Unlock()
+	checked, ok := modelDeviceChecks.builds[build]
+	return checked, ok
+}
+
+func modelDeviceRememberCheck(build string, reply modelDeviceReply) {
+	modelDeviceChecks.Lock()
+	defer modelDeviceChecks.Unlock()
+	modelDeviceChecks.builds[build] = modelDeviceCheck{Commit: reply.Commit, Unknown: reply.Unknown}
+}
 
 var modelDevicePCI = regexp.MustCompile(`(?i)^([0-9a-f]{4}|[0-9a-f]{8}):([0-9a-f]{2}):([0-9a-f]{2})\.([0-7])$`)
 var modelDeviceUUID = regexp.MustCompile(`(?i)^GPU-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
@@ -112,7 +138,10 @@ func modelDeviceDigest(value any) (string, error) {
 // review-only. Apply, recovery and start must replay Binding and never call it.
 func mapModelSettingsDevices(ctx context.Context, op modelDeviceOperation, run modelDeviceRunner) modelDeviceMap {
 	out := modelDeviceMap{}
-	fail := func(reason string) modelDeviceMap { out.Unknown = reason; out.Binding = nil; return out }
+	fail := func(reason string) modelDeviceMap {
+		out.Unknown, out.Devices, out.Binding = reason, nil, nil
+		return out
+	}
 	if ctx.Err() != nil {
 		return fail("device operation canceled")
 	}
@@ -140,9 +169,13 @@ func mapModelSettingsDevices(ctx context.Context, op modelDeviceOperation, run m
 	}
 	ids, uuids, pcis, luids := map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}
 	hasShared, hasDedicated := false, false
+	dedicated := 0
 	for _, p := range t.Pools {
 		hasShared = hasShared || p.Kind == "shared"
 		hasDedicated = hasDedicated || p.Kind == "dedicated"
+		if p.Kind == "dedicated" {
+			dedicated++
+		}
 		if p.Kind == "host" || p.Kind == "shared" {
 			if out.HostPool != "" {
 				return fail("ambiguous host/shared pool")
@@ -155,6 +188,9 @@ func mapModelSettingsDevices(ctx context.Context, op modelDeviceOperation, run m
 			return fail("missing host/shared pool")
 		}
 		return out
+	}
+	if dedicated > 1 {
+		return fail(modelDeviceSeveralGPUs)
 	}
 	if hasShared && hasDedicated {
 		return fail("unsupported mixed UMA/discrete topology")
@@ -184,8 +220,12 @@ func mapModelSettingsDevices(ctx context.Context, op modelDeviceOperation, run m
 	if !op.NativeInitAllowed {
 		return fail("native initialization prohibited by target activation/Pause")
 	}
-	if op.Runtime.Build != modelDevicesBuild || len(op.Runtime.Libraries) == 0 {
+	if op.Runtime.Build == "" || len(op.Runtime.Libraries) == 0 {
 		return fail("unsupported native build/library identity")
+	}
+	if checked, ok := modelDeviceCheckedBuild(op.Runtime.Build); ok && checked.Unknown != "" {
+		out.Commit = checked.Commit
+		return fail(checked.Unknown)
 	}
 	op.Runtime.Libraries = append([]modelDeviceLibrary(nil), op.Runtime.Libraries...)
 	sort.Slice(op.Runtime.Libraries, func(i, j int) bool { return op.Runtime.Libraries[i].Name < op.Runtime.Libraries[j].Name })
@@ -205,10 +245,13 @@ func mapModelSettingsDevices(ctx context.Context, op modelDeviceOperation, run m
 	if err != nil || ctx.Err() != nil {
 		return fail("native metadata helper unavailable or canceled")
 	}
-	out.Devices = reply.Devices
+	out.Commit = reply.Commit
 	if reply.Unknown != "" || len(reply.Devices) > modelDevicesLimit {
-		return fail("unsupported native exports or device inventory")
+		reply.Unknown = modelDeviceReportUnknown
+		modelDeviceRememberCheck(op.Runtime.Build, reply)
+		return fail(modelDeviceReportUnknown)
 	}
+	modelDeviceRememberCheck(op.Runtime.Build, reply)
 	var selected *modelNativeDevice
 	seen := map[string]bool{}
 	nativePCI, nativeUUID := map[string]bool{}, map[string]bool{}
@@ -273,8 +316,13 @@ func mapModelSettingsDevices(ctx context.Context, op modelDeviceOperation, run m
 		return fail(err.Error())
 	}
 	verified, err := run(ctx, op.Runtime, env)
-	if err != nil || ctx.Err() != nil || verified.Unknown != "" || len(verified.Devices) > modelDevicesLimit {
+	if err != nil || ctx.Err() != nil {
 		return fail("UUID visibility verification unavailable")
+	}
+	if verified.Unknown != "" || len(verified.Devices) > modelDevicesLimit {
+		verified.Unknown = modelDeviceReportUnknown
+		modelDeviceRememberCheck(op.Runtime.Build, verified)
+		return fail(modelDeviceReportUnknown)
 	}
 	var gpu *modelNativeDevice
 	for i := range verified.Devices {
@@ -302,6 +350,7 @@ func mapModelSettingsDevices(ctx context.Context, op modelDeviceOperation, run m
 		return fail("binding identity exceeds bound")
 	}
 	out.Binding = b
+	out.Devices = reply.Devices
 	return out
 }
 
@@ -361,55 +410,38 @@ func modelDeviceEnvironment(input []string, uuid string) ([]string, error) {
 
 // The existing selected runtime/install owner supplies st, never public paths.
 // No engine is launched and no library is loaded in the manager process.
-func modelDeviceRuntimeSnapshot(ctx context.Context, st *engineState, build string) (modelDeviceRuntime, error) {
-	runtime, _, err := modelDeviceRuntimeSnapshotBound(ctx, st, build, servingFileAccess{}, nil)
+func modelDeviceRuntimeSnapshot(ctx context.Context, st *engineState) (modelDeviceRuntime, error) {
+	runtime, _, err := modelDeviceRuntimeSnapshotBound(ctx, st, servingFileAccess{}, nil)
 	return runtime, err
 }
 
 // Library identities are request-local and retained for Auto replay.
-func modelDeviceRuntimeSnapshotBound(ctx context.Context, st *engineState, build string, access servingFileAccess, expected map[string]sourceEvidence) (modelDeviceRuntime, map[string]sourceEvidence, error) {
-	if st == nil || build != modelDevicesBuild {
-		return modelDeviceRuntime{}, nil, errors.New("unsupported native build")
-	}
-	st.mu.Lock()
-	root, bin := st.installDir, st.binPath
-	if st.plat == nil || st.manifest == nil || st.manifest.FamilyOrDefault() != "llamacpp" {
-		st.mu.Unlock()
-		return modelDeviceRuntime{}, nil, errors.New("selected runtime is not llama.cpp")
-	}
-	if st.plat.Install == nil {
-		st.mu.Unlock()
-		return modelDeviceRuntime{}, nil, errors.New("missing pinned install")
-	}
-	rt := st.plat.Runtime
-	artifacts := append([]InstallArtifact(nil), st.plat.Install.Artifacts...)
-	vars := st.pathVars()
-	st.mu.Unlock()
-	pinned := false
-	for _, a := range artifacts {
-		if a.Name == "server" && strings.Contains(a.URL, "/releases/download/"+modelDevicesBuild+"/") && len(a.SHA256) == 64 {
-			pinned = true
-		}
-	}
-	if !pinned {
-		return modelDeviceRuntime{}, nil, errors.New("selected runtime is not pinned b12020")
-	}
-	if bin == "" {
-		var err error
-		bin, err = resolvePlaceholders(rt.Bin, vars)
-		if err != nil {
-			return modelDeviceRuntime{}, nil, err
-		}
-		bin = expandPath(bin)
-	}
-	if !isManagedInstallPath(bin, root) {
-		return modelDeviceRuntime{}, nil, errors.New("native runtime is not managed")
-	}
-	root, err := resolveExistingPath(root)
+func modelDeviceRuntimeSnapshotBound(ctx context.Context, st *engineState, access servingFileAccess, expected map[string]sourceEvidence) (modelDeviceRuntime, map[string]sourceEvidence, error) {
+	bin, err := nativeBuildExecutable(st)
 	if err != nil {
 		return modelDeviceRuntime{}, nil, err
 	}
-	r := modelDeviceRuntime{Build: build, Root: root}
+	executable, err := captureSource(bin, false)
+	if err != nil {
+		return modelDeviceRuntime{}, nil, err
+	}
+	r, files, err := nativeBuildSnapshotExpected(ctx, executable, access, expected)
+	if err == nil && len(r.Libraries) == 0 {
+		return r, nil, errors.New("selected runtime has no metadata libraries")
+	}
+	return r, files, err
+}
+
+// File-only callers and device review share the selected directory's library set.
+func modelDeviceLibrarySnapshotBound(ctx context.Context, r modelDeviceRuntime, access servingFileAccess, expected map[string]sourceEvidence) (modelDeviceRuntime, map[string]sourceEvidence, error) {
+	root := r.Root
+	if err := ctx.Err(); err != nil {
+		return r, nil, err
+	}
+	directory, err := captureSource(root, true)
+	if err != nil {
+		return r, nil, err
+	}
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return r, nil, err
@@ -443,11 +475,19 @@ func modelDeviceRuntimeSnapshotBound(ctx context.Context, st *engineState, build
 		files[name] = file
 		r.Libraries = append(r.Libraries, modelDeviceLibrary{Name: name, SHA256: digest})
 	}
-	if len(r.Libraries) == 0 {
-		return r, nil, errors.New("selected runtime has no metadata libraries")
-	}
 	if expected != nil && len(files) != len(expected) {
 		return r, nil, errors.New("native library set changed")
+	}
+	for _, file := range files {
+		if err := validateSource(file); err != nil {
+			return r, nil, err
+		}
+	}
+	if err := validateSource(directory); err != nil {
+		return r, nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return r, nil, err
 	}
 	return r, files, nil
 }
@@ -474,23 +514,7 @@ func modelDeviceHashFileExpected(ctx context.Context, root, name string, access 
 	if expected.configured != filepath.Join(root, name) || expected.target != p {
 		return "", errors.New("library identity changed")
 	}
-	f, err := access.checkedOpen(ctx, expected.configured, expected.target, expected.info)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	info, err := f.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Size() > 2<<30 {
-		return "", errors.New("invalid library file")
-	}
-	h := sha256.New()
-	if _, err := io.Copy(h, io.NewSectionReader(servingContextReaderAt{ctx: ctx, reader: f, expected: expected}, 0, info.Size())); err != nil {
-		return "", err
-	}
-	if validateSource(expected) != nil {
-		return "", errors.New("library identity changed")
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return nativeBuildHashFileExpected(ctx, access, expected)
 }
 
 func modelDeviceLibraryPath(root, name string) (string, error) {
@@ -615,7 +639,7 @@ func runModelDevicesHelper(input io.Reader, output io.Writer) int {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), modelDevicesBudget)
 	defer cancel()
-	if selected.Build != modelDevicesBuild || !filepath.IsAbs(selected.Root) || len(selected.Libraries) == 0 || len(selected.Libraries) > modelDevicesLimit {
+	if selected.Build == "" || !filepath.IsAbs(selected.Root) || len(selected.Libraries) == 0 || len(selected.Libraries) > modelDevicesLimit {
 		return 2
 	}
 	seen := map[string]bool{}
@@ -659,8 +683,8 @@ func armModelDeviceDeadline() {
 	time.AfterFunc(modelDevicesBudget, func() { os.Exit(124) })
 }
 
-// b12020 ggml-backend.h: ggml_backend_dev_props on 64-bit ABIs. Properties
-// include memory but it is deliberately discarded, never telemetry authority.
+// ggml_backend_dev_props on the supported 64-bit ABI. Name and total memory
+// are checked against the driver, never used as telemetry or placement authority.
 // https://github.com/ggml-org/llama.cpp/blob/0ec4027a2a0183de87c007069adddc06e665f7de/ggml/include/ggml-backend.h
 type modelGGMLProps struct {
 	Name, Description unsafe.Pointer
@@ -673,19 +697,38 @@ type modelGGMLProps struct {
 }
 type modelDeviceSymbols func(string) (uintptr, error)
 type modelDeviceRegister func(any, uintptr)
+type modelDeviceLibraryOpener func(modelDeviceRuntime) (modelDeviceSymbols, modelDeviceRegister, error)
+type modelDeviceDriverOpener func() (modelDeviceSymbols, modelDeviceRegister, error)
 
-func enumerateModelNativeDevices(selected modelDeviceRuntime) (reply modelDeviceReply) {
+func enumerateModelNativeDevices(selected modelDeviceRuntime) modelDeviceReply {
+	return enumerateModelNativeDevicesWith(selected, openModelDeviceLibraries, openModelCUDADriver)
+}
+
+func enumerateModelNativeDevicesWith(selected modelDeviceRuntime, openLibraries modelDeviceLibraryOpener, openDriver modelDeviceDriverOpener) (reply modelDeviceReply) {
 	defer func() {
 		if recover() != nil {
-			reply = modelDeviceReply{Unknown: "unsupported native ABI"}
+			reply.Unknown = modelDeviceReportUnknown
+		}
+		if reply.Unknown != "" {
+			reply.Devices = nil
+			reply.Unknown = modelDeviceReportUnknown
 		}
 	}()
 	if unsafe.Sizeof(uintptr(0)) != 8 || unsafe.Sizeof(modelGGMLProps{}) != 56 || unsafe.Offsetof(modelGGMLProps{}.ID) != 40 {
 		return modelDeviceReply{Unknown: "unsupported native ABI"}
 	}
-	symbol, register, err := openModelDeviceLibraries(selected)
+	symbol, register, err := openLibraries(selected)
 	if err != nil {
 		return modelDeviceReply{Unknown: "selected native libraries unavailable"}
+	}
+	reply.Commit, err = readModelDeviceCommit(symbol, register)
+	if err != nil {
+		reply.Unknown = modelDeviceReportUnknown
+		return reply
+	}
+	if err := loadModelDeviceCUDA(selected, symbol, register); err != nil {
+		reply.Unknown = modelDeviceReportUnknown
+		return reply
 	}
 	var count func() uintptr
 	var get func(uintptr) uintptr
@@ -696,7 +739,8 @@ func enumerateModelNativeDevices(selected modelDeviceRuntime) (reply modelDevice
 	}{{"ggml_backend_dev_count", &count}, {"ggml_backend_dev_get", &get}, {"ggml_backend_dev_get_props", &props}} {
 		p, e := symbol(f.name)
 		if e != nil || p == 0 {
-			return modelDeviceReply{Unknown: "unsupported ggml exports"}
+			reply.Unknown = modelDeviceReportUnknown
+			return reply
 		}
 		register(f.fn, p)
 	}
@@ -711,13 +755,29 @@ func enumerateModelNativeDevices(selected modelDeviceRuntime) (reply modelDevice
 			return modelDeviceReply{Unknown: "null native device"}
 		}
 		props(dev, &p)
-		d := modelNativeDevice{Selector: modelDeviceCString(p.Name), PCI: modelDeviceCString(p.ID), Kind: p.Kind}
+		d := modelNativeDevice{Selector: modelDeviceCString(p.Name), PCI: modelDeviceCString(p.ID), Name: modelDeviceCString(p.Description), Total: uint64(p.Total), Kind: p.Kind}
+		if d.Selector == "" {
+			reply.Unknown = modelDeviceReportUnknown
+			return reply
+		}
 		if p.Kind != 0 {
 			d.Unknown = "unsupported native identity"
 		}
 		reply.Devices = append(reply.Devices, d)
 	}
-	return joinModelCUDADevices(reply)
+	needsCUDA := false
+	for _, d := range reply.Devices {
+		needsCUDA = needsCUDA || strings.HasPrefix(d.Selector, "CUDA")
+	}
+	if !needsCUDA {
+		return reply
+	}
+	driver, registerDriver, err := openDriver()
+	if err != nil {
+		reply.Unknown = modelDeviceReportUnknown
+		return reply
+	}
+	return joinModelCUDADevices(reply, driver, registerDriver)
 }
 func modelDeviceCString(p unsafe.Pointer) string {
 	if p == nil {
@@ -727,22 +787,37 @@ func modelDeviceCString(p unsafe.Pointer) string {
 	for i := 0; i < 256; i++ {
 		c := *(*byte)(unsafe.Add(p, i))
 		if c == 0 {
-			return string(b)
+			return modelDeviceString(b)
 		}
 		b = append(b, c)
 	}
 	return ""
 }
 
+func modelDeviceString(b []byte) string {
+	if !utf8.Valid(b) {
+		return ""
+	}
+	for _, c := range b {
+		if c < 32 || c == 127 {
+			return ""
+		}
+	}
+	return string(b)
+}
+
+func modelDeviceTerminatedString(b []byte) string {
+	end := bytes.IndexByte(b, 0)
+	if end < 0 {
+		return ""
+	}
+	return modelDeviceString(b[:end])
+}
+
 // ggml_backend_load checks GGML_BACKEND_API_VERSION before registering the
 // selected dynamic engine. It is given one exact path, never a search path.
 // https://github.com/ggml-org/llama.cpp/blob/0ec4027a2a0183de87c007069adddc06e665f7de/ggml/src/ggml-backend-reg.cpp
 func loadModelDeviceCUDA(selected modelDeviceRuntime, symbol modelDeviceSymbols, register modelDeviceRegister) error {
-	// The dynamic backend API number alone does not pin the property layout.
-	// ggml_commit is a scalar API, checked before loading CUDA or reading props.
-	if err := checkModelDeviceCommit(symbol, register); err != nil {
-		return err
-	}
 	var cuda string
 	for _, lib := range selected.Libraries {
 		n := strings.ToLower(lib.Name)
@@ -768,37 +843,27 @@ func loadModelDeviceCUDA(selected modelDeviceRuntime, symbol modelDeviceSymbols,
 	return nil
 }
 
-func checkModelDeviceCommit(symbol modelDeviceSymbols, register modelDeviceRegister) error {
+func readModelDeviceCommit(symbol modelDeviceSymbols, register modelDeviceRegister) (string, error) {
 	p, err := symbol("ggml_commit")
 	if err != nil || p == 0 {
-		return errors.New("unsupported ggml revision export")
+		return "", errors.New("unsupported ggml revision export")
 	}
-	var commit func() string
+	var commit func() unsafe.Pointer
 	register(&commit, p)
-	got := commit()
-	// The pinned CMake build uses git rev-parse --short; accept only an
-	// unmodified hexadecimal prefix of this exact source revision.
-	if len(got) < 7 || len(got) > len(modelDevicesCommit) || !strings.HasPrefix(modelDevicesCommit, got) {
-		return errors.New("unsupported ggml revision")
+	got := modelDeviceCString(commit())
+	if got == "" {
+		return "", errors.New("undecodable ggml revision")
 	}
-	return nil
+	return got, nil
 }
 
-// Driver ordinals are used only to enumerate handles, never as the join. Both
-// UUID and PCI must agree with ggml and the supplied physical topology.
+// Driver ordinals only enumerate handles. PCI joins ggml to the driver; the
+// parent then checks the driver's physical UUID against supplied topology.
 // https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__DEVICE.html
 // https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__MEM.html
-func joinModelCUDADevices(reply modelDeviceReply) modelDeviceReply {
-	needs := false
-	for _, d := range reply.Devices {
-		needs = needs || strings.HasPrefix(d.Selector, "CUDA")
-	}
-	if !needs {
-		return reply
-	}
-	symbol, register, err := openModelCUDADriver()
-	if err != nil {
-		return modelDeviceReply{Devices: reply.Devices, Unknown: "CUDA driver unavailable"}
+func joinModelCUDADevices(reply modelDeviceReply, symbol modelDeviceSymbols, register modelDeviceRegister) modelDeviceReply {
+	fail := func() modelDeviceReply {
+		return modelDeviceReply{Commit: reply.Commit, Unknown: modelDeviceReportUnknown}
 	}
 	var init func(uint32) int32
 	var count func(*int32) int32
@@ -807,10 +872,12 @@ func joinModelCUDADevices(reply modelDeviceReply) modelDeviceReply {
 	var uuid func(*[16]byte, int32) int32
 	var physicalUUID func(*[16]byte, int32) int32
 	var luid func(*[8]byte, *uint32, int32) int32
+	var name func(*byte, int32, int32) int32
+	var total func(*uintptr, int32) int32
 	functions := []struct {
 		name string
 		fn   any
-	}{{"cuInit", &init}, {"cuDeviceGetCount", &count}, {"cuDeviceGet", &get}, {"cuDeviceGetPCIBusId", &pci}, {"cuDeviceGetUuid_v2", &uuid}, {"cuDeviceGetUuid", &physicalUUID}}
+	}{{"cuInit", &init}, {"cuDeviceGetCount", &count}, {"cuDeviceGet", &get}, {"cuDeviceGetPCIBusId", &pci}, {"cuDeviceGetUuid_v2", &uuid}, {"cuDeviceGetUuid", &physicalUUID}, {"cuDeviceGetName", &name}, {"cuDeviceTotalMem_v2", &total}}
 	if runtime.GOOS == "windows" {
 		functions = append(functions, struct {
 			name string
@@ -820,15 +887,13 @@ func joinModelCUDADevices(reply modelDeviceReply) modelDeviceReply {
 	for _, f := range functions {
 		p, e := symbol(f.name)
 		if e != nil || p == 0 {
-			reply.Unknown = "unsupported CUDA exports"
-			return reply
+			return fail()
 		}
 		register(f.fn, p)
 	}
 	var n int32
 	if init(0) != 0 || count(&n) != 0 || n < 0 || n > modelDevicesLimit {
-		reply.Unknown = "CUDA enumeration unavailable"
-		return reply
+		return fail()
 	}
 	identities := map[string]modelNativeDevice{}
 	for i := int32(0); i < n; i++ {
@@ -836,31 +901,29 @@ func joinModelCUDADevices(reply modelDeviceReply) modelDeviceReply {
 		var rawPCI [32]byte
 		var rawUUID [16]byte
 		var parentUUID [16]byte
-		if get(&dev, i) != 0 || pci(&rawPCI[0], 32, dev) != 0 || uuid(&rawUUID, dev) != 0 || physicalUUID(&parentUUID, dev) != 0 {
-			reply.Unknown = "CUDA identity unavailable"
-			return reply
+		var rawName [256]byte
+		var memory uintptr
+		if get(&dev, i) != 0 || pci(&rawPCI[0], 32, dev) != 0 || uuid(&rawUUID, dev) != 0 || physicalUUID(&parentUUID, dev) != 0 || name(&rawName[0], int32(len(rawName)), dev) != 0 || total(&memory, dev) != 0 {
+			return fail()
 		}
 		if rawUUID != parentUUID || rawUUID == [16]byte{} {
-			reply.Unknown = "unsupported MIG/physical UUID identity"
-			return reply
+			return fail()
 		}
-		key := canonicalModelDevicePCI(string(bytes.TrimRight(rawPCI[:], "\x00")))
-		if key == "" {
-			reply.Unknown = "CUDA PCI unavailable"
-			return reply
+		key := canonicalModelDevicePCI(modelDeviceTerminatedString(rawPCI[:]))
+		deviceName := modelDeviceTerminatedString(rawName[:])
+		if key == "" || deviceName == "" || memory == 0 {
+			return fail()
 		}
 		if _, ok := identities[key]; ok {
-			reply.Unknown = "ambiguous CUDA PCI/MIG alias"
-			return reply
+			return fail()
 		}
 		u := hex.EncodeToString(rawUUID[:])
-		identity := modelNativeDevice{PCI: key, UUID: "GPU-" + u[:8] + "-" + u[8:12] + "-" + u[12:16] + "-" + u[16:20] + "-" + u[20:]}
+		identity := modelNativeDevice{PCI: key, UUID: "GPU-" + u[:8] + "-" + u[8:12] + "-" + u[12:16] + "-" + u[16:20] + "-" + u[20:], Name: deviceName, Total: uint64(memory)}
 		if luid != nil {
 			var raw [8]byte
 			var mask uint32
 			if luid(&raw, &mask, dev) != 0 || mask == 0 || mask&(mask-1) != 0 {
-				reply.Unknown = "CUDA LUID unavailable"
-				return reply
+				return fail()
 			}
 			identity.LUID = fmt.Sprintf("luid_0x%08x_0x%08x_phys_0", binary.LittleEndian.Uint32(raw[4:]), binary.LittleEndian.Uint32(raw[:4]))
 		}
@@ -869,14 +932,16 @@ func joinModelCUDADevices(reply modelDeviceReply) modelDeviceReply {
 	seen := map[string]bool{}
 	for i := range reply.Devices {
 		d := &reply.Devices[i]
-		if !strings.HasPrefix(d.Selector, "CUDA") || d.Kind != 1 {
+		if !strings.HasPrefix(d.Selector, "CUDA") {
 			continue
+		}
+		if d.Kind != 1 {
+			return fail()
 		}
 		key := canonicalModelDevicePCI(d.PCI)
 		identity, ok := identities[key]
-		if !ok || seen[key] {
-			reply.Unknown = "ambiguous or unmatched ggml CUDA PCI"
-			return reply
+		if !ok || seen[key] || d.Name == "" || d.Name != identity.Name || d.Total == 0 || max(d.Total, identity.Total)-min(d.Total, identity.Total) > 1<<20 {
+			return fail()
 		}
 		seen[key] = true
 		d.PCI = identity.PCI

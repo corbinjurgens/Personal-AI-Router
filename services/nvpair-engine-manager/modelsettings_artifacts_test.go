@@ -146,6 +146,23 @@ func inspectFixture(t *testing.T, f inspectionFixture) modelconfig.InspectResult
 	return result
 }
 
+func TestInspectModelFetchInstalledNativeBuildConfigurationKey(t *testing.T) {
+	f := newFetchBuildKeyFixture(t)
+	if f.st.plat.Install.Fetch == nil || len(f.st.plat.Install.Artifacts) != 0 {
+		t.Fatal("fixture does not use the macOS fetch install shape")
+	}
+	result := inspectAppliedKeyFixture(t, f)
+	if result.Status != "resolved" || len(result.ConfigurationKey) != 64 || result.ConfigurationKeyReason != "" {
+		t.Fatalf("fetch-installed finite inspection = %+v", result)
+	}
+	want := requireNativeBuildID(t, f.st)
+	for _, load := range f.st.plat.Runtime.ModelLoads {
+		if load.Resolved == nil || load.Resolved.NativeBuildID != want {
+			t.Fatalf("inspection fixture load build = %+v, want %q", load.Resolved, want)
+		}
+	}
+}
+
 // Cache fixtures opt into exact native membership; configured preset, receipt
 // and typed sources continue to exercise their own authority with the engine off.
 func inspectionNativeMembership(t *testing.T, f inspectionFixture) *int {

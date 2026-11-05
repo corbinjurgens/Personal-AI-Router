@@ -30,8 +30,9 @@ function observation(): LoadBufferObservation {
         sampleId: 'a'.repeat(64),
         recordedAt: '2026-10-28T00:00:00Z',
         loadPhase: 'wakeup',
-        upstreamPin: '0ec4027a2a0183de87c007069adddc06e665f7de',
-        buildAssurance: 'recognized-self-reported-pin',
+        buildId: `sha256:${'f'.repeat(64)}`,
+        reportedBuild: 'b12100-abcdef0',
+        buildAssurance: 'recognized-output',
         estimatorRevision:
             'pair-gguf/2;gguf-parser-go/v0.27.0@9257743a3c1775b882ba1b58ec7f5a856c2cc385',
         capturedOptions: {
@@ -134,12 +135,23 @@ describe('native buffer load report with real KUI components', () => {
         expect(table?.textContent).toContain('reported minus estimated [-5243, 5243] bytes')
         expect(container.textContent).toContain('Durability uncertain (replacement landed)')
         expect(container.textContent).toContain('clean-source provenance is unverified')
+        expect(container.textContent).toContain('Reported build: b12100-abcdef0')
+        expect(container.textContent).toContain(`Build identity: sha256:${'f'.repeat(64)}`)
         expect(container.textContent).toContain('wakeup')
         expect(container.textContent).toContain(
             'Rounded allocation reports, not physical GPU usage'
         )
         expect(container.querySelector('button')).toBeNull()
         expect(container.textContent).not.toContain('Fits')
+    })
+    it('leaves output recognition unknown when the capture has no assurance', async () => {
+        const value = observation()
+        value.buildAssurance = undefined
+        value.reason = 'unrecognized-build-output'
+        value.rows = []
+        await act(async () => root.render(<ModelLoadBufferReport inspection={inspection(value)} />))
+        expect(container.textContent).toContain('Allocation output recognition is unavailable')
+        expect(container.textContent).not.toContain('Recognized allocation output')
     })
     it('keeps the captured baseline separate from a changed draft or Auto estimate', async () => {
         const preview: EngineSettingsPreview = {
@@ -247,6 +259,23 @@ describe('native buffer load report with real KUI components', () => {
         expect(container.textContent).toContain('Unknown (unsupported build)')
         expect(container.querySelector('table')).toBeNull()
         expect(container.textContent).not.toContain('1.00 MiB')
+    })
+    it('labels an earlier-build sample while retaining its rows as historical', async () => {
+        await act(async () =>
+            root.render(
+                <ModelLoadBufferReport
+                    inspection={inspection({
+                        ...observation(),
+                        current: false,
+                        reason: 'earlier-build'
+                    })}
+                />
+            )
+        )
+        expect(container.textContent).toContain('earlier build')
+        expect(container.textContent).toContain('Historical load comparison')
+        expect(container.textContent).not.toContain('Current load at inspection')
+        expect(container.querySelector('table')?.textContent).toContain('1.00 MiB')
     })
     it('keeps unmapped unknown intervals numeric without inventing exact bytes or totals', async () => {
         const value = observation()

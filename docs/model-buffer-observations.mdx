@@ -27,8 +27,8 @@ captured options and requested options. Editing a draft or receiving an Auto
 proposal does not replace that baseline. Unresolved native inheritance,
 including mmap/load mode and unsupported speculation details, stays explicit.
 
-The report identifies the sample, load time, initial or wakeup phase, upstream
-pin and persistence state. Current means the same owned load was confirmed at
+The report identifies the sample, load time, initial or wakeup phase, content
+build identity, reported build and persistence state. Current means the same owned load was confirmed at
 inspection, not a promise that it remains loaded afterward. A stale inspection
 cannot assert currentness. Changing target or model hides the prior report
 while that context awaits inspection. Recovered samples are historical even
@@ -47,33 +47,35 @@ replacement landed, but directory synchronization did not establish its
 durability. History recovered after restart remains historical and retains
 uncertainty. Unknown observations remain usable alongside manual configuration.
 An absent optional observation means **Unknown (observation omitted)**, not
-that no load occurred. An unsupported build shows Unknown, without plausible
-numbers from an earlier supported load.
+that no load occurred. Unrecognized output is retained as a partial record with
+`unrecognized-build-output` and no rows. Earlier-build history remains visible
+as historical data, never a current-build measurement.
 
 ## Supported source and assurance
 
-The adapter supports only llama.cpp **b12020**, full commit
-`0ec4027a2a0183de87c007069adddc06e665f7de`. It recognizes exactly the
-`b12020-0ec4027a2` tuple and its explicitly mapped full-hash spelling. It does not
-guess a version from an executable name or arbitrary hash prefix.
+The adapter attempts capture on every llama.cpp build and recognizes the finite
+output grammar below. Samples carry `buildId`, a content fingerprint of the
+executable and accepted runtime libraries, and `reportedBuild`, the `/props`
+claim. Paths, modification times and manifest pins do not enter the fingerprint.
 
 The native [build string template](https://github.com/ggml-org/llama.cpp/blob/0ec4027a2a0183de87c007069adddc06e665f7de/common/build-info.cpp.in)
 combines the build number and commit string. The
 [generator](https://github.com/ggml-org/llama.cpp/blob/0ec4027a2a0183de87c007069adddc06e665f7de/cmake/build-info.cmake)
 reads Git's commit count and short HEAD without checking modified source. The
-assurance is therefore `recognized-self-reported-pin`, never verified clean
-source. An undisclosed modified build can report the same tuple. Rejecting an
-explicit dirty suffix does not prove that hidden modifications are detectable.
+claim does not establish clean source. `buildAssurance: recognized-output`
+means the allocation grammar was recognized; it does not attest upstream
+provenance. An undisclosed modified build can report the same build string.
 
-The actual executable, metadata libraries and effective environment have a
-separate local source digest. That digest binds the manager-owned source; it
+The content build identity and filtered explicit/native launch environment have
+a separate local source digest. That digest binds the manager-owned source; it
 does not attest its upstream provenance. Artifact bindings sample local files
 and can miss same-stat modifications outside those samples. A future
 clean-source assertion would need a separately trusted build receipt tying
 exact executable/library digests to reviewed clean source. This feature
 neither creates nor requires that authority. It never launches `--version`.
 
-The source basis for this adapter is the following pinned implementation:
+The grammar's source basis is the following reviewed implementation; recognition
+on another build is checked from its output, without an exact build gate:
 
 | Primary source | Interpretation |
 | --- | --- |

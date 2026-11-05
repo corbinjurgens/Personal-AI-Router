@@ -224,6 +224,8 @@ type Estimate struct {
 	Unknowns        []string            `json:"unknowns,omitempty"`
 }
 type InspectResult struct {
+	NativeBuild               string             `json:"nativeBuild,omitempty"`
+	NativeBuildID             string             `json:"nativeBuildId,omitempty"`
 	MemoryProfiles            []MemoryProfile    `json:"memoryProfiles,omitempty"`
 	MemoryProfilesUnavailable bool               `json:"memoryProfilesUnavailable,omitempty"`
 	ConfigurationKey          string             `json:"configurationKey,omitempty"`
@@ -809,6 +811,9 @@ func DecodeInspectResult(data []byte) (InspectResult, error) {
 	return r, nil
 }
 func (r InspectResult) Validate() error {
+	if boundedText(r.NativeBuild, 256, false) != nil || boundedText(r.NativeBuildID, 256, false) != nil {
+		return fmt.Errorf("inspect: invalid native build metadata")
+	}
 	if len(r.MemoryProfiles) > 8 {
 		return fmt.Errorf("inspect.memoryProfiles: history limit exceeded")
 	}

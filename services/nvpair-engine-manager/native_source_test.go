@@ -91,8 +91,8 @@ func TestModelDeviceJunctionRuntimeSource(t *testing.T) {
 			writeTestFile(t, filepath.Join(install, "server.exe"), []byte("synthetic executable, never run"))
 			f.st.installDir = root
 			f.st.binPath = filepath.Join(root, "server.exe")
-			f.st.plat.Install = &Install{Artifacts: []InstallArtifact{{Name: "server", URL: "https://fixture.invalid/releases/download/" + modelDevicesBuild + "/native", SHA256: strings.Repeat("a", 64)}}}
-			snapshot, err := modelDeviceRuntimeSnapshot(context.Background(), f.st, modelDevicesBuild)
+			f.st.plat.Install = &Install{Fetch: &Fetch{URL: "https://fixture.invalid/native", SHA256: strings.Repeat("a", 64)}}
+			snapshot, err := modelDeviceRuntimeSnapshot(context.Background(), f.st)
 			if err != nil {
 				t.Fatal(err)
 			}

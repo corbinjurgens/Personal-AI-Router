@@ -14,9 +14,7 @@ import (
 	"nvpair-shared/modelconfig"
 )
 
-const modelBufferPin = "0ec4027a2a0183de87c007069adddc06e665f7de"
-
-// Exact emitter forms from the pinned source, never arbitrary substrings.
+// Recognized emitter forms, never arbitrary substrings or build claims.
 // Repeated identical reports are distinct allocation occurrences.
 var modelBufferEmitter = regexp.MustCompile(`^(load_tensors|llama_kv_cache|sched_reserve|llama_context|llama_memory_recurrent): +([A-Za-z0-9_]+) +(model|KV|compute|output|RS) buffer size = +([0-9]+\.[0-9]+) MiB$`)
 var modelBufferCandidate = regexp.MustCompile(`^(load_tensors|llama_kv_cache|sched_reserve|llama_context|llama_memory_recurrent): +[^ ]+ +(model|KV|rotation|compute|output|RS) buffer size`)
@@ -33,10 +31,6 @@ type modelBufferParser struct {
 	sequence        [2]uint64
 	lastHash        [2]string
 	reserveComplete bool
-}
-
-func modelBufferBuildSupported(build string) bool {
-	return build == "b12020-0ec4027a2" || build == "b12020-"+modelBufferPin
 }
 
 // JSONL is an envelope around a diagnostic message, not an exact-byte API.

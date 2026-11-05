@@ -41,13 +41,13 @@ func assertModelBufferDiagnostic(t *testing.T, logs *bytes.Buffer, stage string)
 }
 
 func TestModelBufferCaptureCreationDiagnostics(t *testing.T) {
-	test := func(name, stage, reason string, change func(*modelBufferTestFixture, **llamaServingLaunch, *launchCommand)) {
+	test := func(name, stage, reason string, change func(*testing.T, *modelBufferTestFixture, **llamaServingLaunch, *launchCommand)) {
 		t.Run(name, func(t *testing.T) {
 			f := newModelBufferTestFixture(t)
 			logs := modelBufferDiagnosticLogs(t)
 			prepared := f.capture.prepared
 			command := f.load.st.plat.Runtime.servingCommand
-			change(f, &prepared, &command)
+			change(t, f, &prepared, &command)
 			c := f.load.ex.newModelBufferCapture(f.load.st, "fake", prepared, nil, command)
 			if c != nil {
 				defer c.retire()
@@ -69,34 +69,49 @@ func TestModelBufferCaptureCreationDiagnostics(t *testing.T) {
 			}
 		})
 	}
-	test("unprepared", "capture-create", "unprepared", func(_ *modelBufferTestFixture, p **llamaServingLaunch, _ *launchCommand) { *p = nil })
-	test("no loads", "capture-create", "no-loads", func(_ *modelBufferTestFixture, p **llamaServingLaunch, _ *launchCommand) { *p = &llamaServingLaunch{} })
-	test("budget", "capture-create", "budget", func(f *modelBufferTestFixture, _ **llamaServingLaunch, _ *launchCommand) {
+	test("unprepared", "capture-create", "unprepared", func(_ *testing.T, _ *modelBufferTestFixture, p **llamaServingLaunch, _ *launchCommand) { *p = nil })
+	test("no loads", "capture-create", "no-loads", func(_ *testing.T, _ *modelBufferTestFixture, p **llamaServingLaunch, _ *launchCommand) {
+		*p = &llamaServingLaunch{}
+	})
+	test("budget", "capture-create", "budget", func(_ *testing.T, f *modelBufferTestFixture, _ **llamaServingLaunch, _ *launchCommand) {
 		f.load.ex.modelBuffers.bytes = modelBufferCaptureBytes
 	})
-	test("constrain command", "constrain-command", "Reviewed Auto GPU requires an exact physical binding.", func(_ *modelBufferTestFixture, p **llamaServingLaunch, _ *launchCommand) {
+	test("constrain command", "constrain-command", "Reviewed Auto GPU requires an exact physical binding.", func(_ *testing.T, _ *modelBufferTestFixture, p **llamaServingLaunch, _ *launchCommand) {
 		(*p).ModelLoads[0].Resolved.ResolverRevision = "auto/test"
 		(*p).ModelLoads[0].Resolved.GPU.Mode = "single"
 		(*p).ModelLoads[0].Resolved.GPU.Layers = nil
 		(*p).ModelLoads[0].Resolved.DeviceBinding = nil
 	})
-	test("runtime snapshot", "runtime-snapshot", "missing pinned install", func(f *modelBufferTestFixture, _ **llamaServingLaunch, _ *launchCommand) {
-		f.load.st.plat.Install = nil
+	test("runtime snapshot", "runtime-snapshot", "", func(t *testing.T, _ *modelBufferTestFixture, _ **llamaServingLaunch, c *launchCommand) {
+		if err := os.Mkdir(filepath.Join(filepath.Dir(c.Bin), "ggml-invalid.dll"), 0o700); err != nil {
+			t.Fatal(err)
+		}
 	})
 	missingExecutable := filepath.Join(t.TempDir(), "missing")
 	_, bindingErr := servingFileBinding(missingExecutable)
 	if bindingErr == nil {
 		t.Fatal("missing executable unexpectedly has a serving binding")
 	}
-	test("executable binding", "executable-binding", modelBufferDiagnosticError(bindingErr), func(_ *modelBufferTestFixture, _ **llamaServingLaunch, c *launchCommand) {
+	test("executable binding", "executable-binding", modelBufferDiagnosticError(bindingErr), func(_ *testing.T, _ *modelBufferTestFixture, _ **llamaServingLaunch, c *launchCommand) {
 		c.Bin = missingExecutable
 	})
-	test("native environment", "native-environment", "Reviewed Auto native library search escapes its selected build.", func(_ *modelBufferTestFixture, _ **llamaServingLaunch, c *launchCommand) {
+	test("native environment", "native-environment", "Reviewed Auto native library search escapes its selected build.", func(_ *testing.T, _ *modelBufferTestFixture, _ **llamaServingLaunch, c *launchCommand) {
 		c.Env = map[string]string{"LD_LIBRARY_PATH": "private-missing-directory"}
 	})
-	test("device environment", "device-environment", "unsupported native injection/MIG/MPS environment", func(_ *modelBufferTestFixture, _ **llamaServingLaunch, c *launchCommand) {
+	test("device environment", "device-environment", "unsupported native injection/MIG/MPS environment", func(_ *testing.T, _ *modelBufferTestFixture, _ **llamaServingLaunch, c *launchCommand) {
 		c.Env = map[string]string{"LD_PRELOAD": "private-value"}
 	})
+}
+
+func TestModelBufferCaptureWithoutInstallDeclaration(t *testing.T) {
+	f := newModelBufferTestFixture(t)
+	f.load.st.plat.Install = nil
+	command := f.load.st.plat.Runtime.servingCommand
+	capture := f.load.ex.newModelBufferCapture(f.load.st, "fake", f.capture.prepared, nil, command)
+	if capture == nil {
+		t.Fatal("content-identified runtime without install metadata lost buffer capture")
+	}
+	defer capture.retire()
 }
 
 func TestModelBufferNativeSourceDiagnosticStages(t *testing.T) {
@@ -141,7 +156,7 @@ func TestModelBufferComparisonDiagnosticsOncePerCapture(t *testing.T) {
 			}
 			record := assertModelBufferDiagnostic(t, logs, stage)
 			switch stage {
-			case "build-support", "router-build":
+			case "router-build":
 				if record["build"] != p.Build {
 					t.Fatalf("build = %v", record["build"])
 				}
@@ -162,7 +177,7 @@ func TestModelBufferComparisonDiagnosticsOncePerCapture(t *testing.T) {
 			}
 		})
 	}
-	test("unsupported build", "build-support", func(p *modelBufferProps) { p.Build = "other" })
+	test("missing build", "router-build", func(p *modelBufferProps) { p.Build = "" })
 	test("router build mismatch", "router-build", func(p *modelBufferProps) { p.RouterBuild = "other" })
 	test("context mismatch", "context", func(p *modelBufferProps) { p.Context++ })
 	test("slots mismatch", "slots", func(p *modelBufferProps) { p.Slots++ })

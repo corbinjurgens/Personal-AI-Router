@@ -13,8 +13,9 @@ function observation(): JsonObject {
         sampleId: 'a'.repeat(64),
         recordedAt: '2026-10-28T00:00:00.123456789Z',
         persistence: 'uncertain',
-        upstreamPin: '0ec4027a2a0183de87c007069adddc06e665f7de',
-        buildAssurance: 'recognized-self-reported-pin',
+        buildId: `sha256:${'f'.repeat(64)}`,
+        reportedBuild: 'b12100-abcdef0',
+        buildAssurance: 'recognized-output',
         estimatorRevision:
             'pair-gguf/2;gguf-parser-go/v0.27.0@9257743a3c1775b882ba1b58ec7f5a856c2cc385',
         inputIdentity: 'b'.repeat(64),
@@ -108,7 +109,7 @@ describe('load buffer Inspect contract', () => {
         expect(result.loadObservation?.baseline?.[0].component).toBe('runtime-overhead')
         expect(result.loadObservation?.comparisons?.[0].component).toBe('runtime-overhead')
     })
-    it('preserves rounded service intervals, frozen baseline and self-reported assurance', () => {
+    it('preserves rounded service intervals, frozen baseline and recognized-output assurance', () => {
         const source = observation()
         const parsed = parseInspectModel(inspection(source)).loadObservation
         expect(parsed).toMatchObject(source)
@@ -134,6 +135,28 @@ describe('load buffer Inspect contract', () => {
                     .loadObservation
             ).toMatchObject({ status: 'unknown', current: false, reason })
         }
+    })
+    it('preserves earlier-build history and unrecognized-output summaries', () => {
+        const earlier = observation()
+        earlier.current = false
+        earlier.reason = 'earlier-build'
+        const parsed = parseInspectModel(inspection(earlier)).loadObservation
+        expect(parsed?.reason).toBe('earlier-build')
+        expect(parsed?.buildId).toBe(`sha256:${'f'.repeat(64)}`)
+        expect(parsed?.reportedBuild).toBe('b12100-abcdef0')
+        expect(parsed?.current).toBe(false)
+        expect(parsed?.rows).toHaveLength(1)
+        expect(
+            parseInspectModel(
+                inspection({
+                    status: 'partial',
+                    current: false,
+                    reason: 'unrecognized-build-output',
+                    buildId: `sha256:${'a'.repeat(64)}`,
+                    reportedBuild: 'unknown-fork'
+                })
+            ).loadObservation
+        ).toMatchObject({ status: 'partial', reason: 'unrecognized-build-output' })
     })
     it('retains a numeric report above the interval budget without exact byte claims', () => {
         const value = observation(),
@@ -196,9 +219,33 @@ describe('load buffer Inspect contract', () => {
             }
         },
         {
-            name: 'abbreviated pin',
+            name: 'removed pin field',
             mutate: value => {
                 value.upstreamPin = '7fe450e'
+            }
+        },
+        {
+            name: 'reported string as build identity',
+            mutate: value => {
+                value.buildId = 'b12100-abcdef0'
+            }
+        },
+        {
+            name: 'oversized build identity',
+            mutate: value => {
+                value.buildId = 'a'.repeat(257)
+            }
+        },
+        {
+            name: 'oversized reported build',
+            mutate: value => {
+                value.reportedBuild = 'a'.repeat(257)
+            }
+        },
+        {
+            name: 'removed build assurance',
+            mutate: value => {
+                value.buildAssurance = 'recognized-self-reported-pin'
             }
         },
         {

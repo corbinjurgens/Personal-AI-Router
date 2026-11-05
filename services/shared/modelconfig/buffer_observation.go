@@ -23,7 +23,8 @@ type BufferObservation struct {
 	RecordedAt        string             `json:"recordedAt,omitempty"`
 	Current           bool               `json:"current"`
 	Persistence       string             `json:"persistence,omitempty"`
-	UpstreamPin       string             `json:"upstreamPin,omitempty"`
+	BuildID           string             `json:"buildId,omitempty"`
+	ReportedBuild     string             `json:"reportedBuild,omitempty"`
 	BuildAssurance    string             `json:"buildAssurance,omitempty"`
 	EstimatorRevision string             `json:"estimatorRevision,omitempty"`
 	InputIdentity     string             `json:"inputIdentity,omitempty"`
@@ -188,7 +189,7 @@ func (o BufferObservation) Validate() error {
 	if !slices.Contains([]string{"unknown", "partial", "reported"}, o.Status) || len(o.Rows) > 256 || len(o.Reasons) > 16 {
 		return fmt.Errorf("loadObservation: invalid state or collection budget")
 	}
-	for _, value := range []string{o.Reason, o.SampleID, o.RecordedAt, o.Persistence, o.UpstreamPin, o.BuildAssurance, o.EstimatorRevision, o.InputIdentity} {
+	for _, value := range []string{o.Reason, o.SampleID, o.RecordedAt, o.Persistence, o.BuildID, o.ReportedBuild, o.BuildAssurance, o.EstimatorRevision, o.InputIdentity} {
 		if boundedText(value, 256, false) != nil {
 			return fmt.Errorf("loadObservation: invalid bounded identifier")
 		}
@@ -274,17 +275,17 @@ func (o BufferObservation) Validate() error {
 			return fmt.Errorf("loadObservation: invalid timestamp")
 		}
 	}
-	if o.UpstreamPin != "" && o.UpstreamPin != "0ec4027a2a0183de87c007069adddc06e665f7de" {
-		return fmt.Errorf("loadObservation: unsupported pin")
+	if o.BuildID != "" && (!strings.HasPrefix(o.BuildID, "sha256:") || !digest(strings.TrimPrefix(o.BuildID, "sha256:"))) {
+		return fmt.Errorf("loadObservation: invalid native build identity")
 	}
-	if o.BuildAssurance != "" && o.BuildAssurance != "recognized-self-reported-pin" {
+	if o.BuildAssurance != "" && o.BuildAssurance != "recognized-output" {
 		return fmt.Errorf("loadObservation: unsupported provenance assurance")
 	}
 	if o.Current && (o.Status == "unknown" || o.SampleID == "") {
 		return fmt.Errorf("loadObservation: unknown current sample")
 	}
 	for _, reason := range append(slices.Clone(o.Reasons), o.Reason) {
-		if !slices.Contains([]string{"", "observation-omitted", "response-budget", "history-unavailable", "no-matching-sample", "missing-boundary", "unsupported-build", "clock-reversal", "unmapped-device", "mixed-role", "incomplete-reserve", "oversized-frame", "truncated-frame", "invalid-utf8", "read-failure", "capture-budget", "unknown-baseline", "source-changed", "source-unavailable", "unsupported-buffer"}, reason) {
+		if !slices.Contains([]string{"", "observation-omitted", "response-budget", "history-unavailable", "no-matching-sample", "missing-boundary", "unsupported-build", "unrecognized-build-output", "earlier-build", "clock-reversal", "unmapped-device", "mixed-role", "incomplete-reserve", "oversized-frame", "truncated-frame", "invalid-utf8", "read-failure", "capture-budget", "unknown-baseline", "source-changed", "source-unavailable", "unsupported-buffer"}, reason) {
 			return fmt.Errorf("loadObservation: invalid reason")
 		}
 	}

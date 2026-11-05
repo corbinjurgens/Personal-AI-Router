@@ -5,6 +5,8 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -320,6 +322,7 @@ func resolveModelSettingsAutoInput(ctx context.Context, model string, requested 
 	proofRead, proofKnown := false, false
 	evaluations, unknown := 0, false
 	var selected *modelconfig.ResolvedLoad
+	selectedSource := ""
 	evaluate := func(tokens int32, gpu modelconfig.GPU) (bool, bool, int, error) {
 		if err := ctx.Err(); err != nil {
 			return false, false, 0, err
@@ -359,14 +362,14 @@ func resolveModelSettingsAutoInput(ctx context.Context, model string, requested 
 			effective.Options.CacheRAM = &n
 		}
 		candidateInput := in
+		nativeSource := ""
 		if op.NativeSource != nil {
-			build, sourceErr := op.NativeSource(allocation)
+			source, sourceErr := op.NativeSource(allocation)
 			if sourceErr != nil {
 				return false, false, 0, sourceErr
 			}
-			allocation.NativeBuildID = build
-			effective.NativeBuildID = build
-			candidateInput.BuildID = build
+			candidateInput.BuildID = source
+			nativeSource = source
 		}
 		candidateInput.Allocation = &effective
 		evaluations++
@@ -392,6 +395,7 @@ func resolveModelSettingsAutoInput(ctx context.Context, model string, requested 
 		unknown = unknown || !known
 		if fits {
 			selected = allocation
+			selectedSource = nativeSource
 		}
 		return known, fits, direction, nil
 	}
@@ -472,7 +476,7 @@ func resolveModelSettingsAutoInput(ctx context.Context, model string, requested 
 		return fail(out.Status + ": no complete fitting candidate in the searched range")
 	}
 	selected.ResolverRevision = modelAutoRevision
-	selected.ReviewedInputID, err = modelAutoReviewedID(model, requested, selected, op.ConversionSource, memory, in.Allocation.Options)
+	selected.ReviewedInputID, err = modelAutoReviewedID(model, requested, selected, op.ConversionSource, selectedSource, memory, in.Allocation.Options)
 	if err != nil {
 		return fail(err.Error())
 	}
@@ -489,7 +493,7 @@ func resolveModelSettingsAutoInput(ctx context.Context, model string, requested 
 // Compact review envelope: conversion source, memory snapshot hash, and a hash
 // binding both to intent, finite options, sampled artifacts and native build.
 // Telemetry itself is not needed to compile an accepted resolution again.
-func modelAutoReviewedID(model string, requested modelconfig.RequestedLoad, resolved *modelconfig.ResolvedLoad, conversion string, memory *modelEstimateMemory, baseline ...modelconfig.RequestedLoad) (string, error) {
+func modelAutoReviewedID(model string, requested modelconfig.RequestedLoad, resolved *modelconfig.ResolvedLoad, conversion, nativeSource string, memory *modelEstimateMemory, baseline ...modelconfig.RequestedLoad) (string, error) {
 	data, err := json.Marshal(struct {
 		Memory   *modelEstimateMemory
 		Baseline []modelconfig.RequestedLoad
@@ -497,25 +501,49 @@ func modelAutoReviewedID(model string, requested modelconfig.RequestedLoad, reso
 	if err != nil {
 		return "", err
 	}
-	return modelAutoReviewHash(model, requested, resolved, conversion, modelLoadDigest(data))
+	return modelAutoReviewHash(model, requested, resolved, conversion, modelLoadDigest(data), nativeSource)
 }
 
-func modelAutoReviewHash(model string, requested modelconfig.RequestedLoad, resolved *modelconfig.ResolvedLoad, conversion, memory string) (string, error) {
+func modelAutoReviewHash(model string, requested modelconfig.RequestedLoad, resolved *modelconfig.ResolvedLoad, conversion, memory string, nativeSource ...string) (string, error) {
 	if conversion == "" {
 		conversion = "-"
 	}
 	finite := resolved.Clone()
 	finite.SourceInputDigest, finite.PresetDigest, finite.ReviewedInputID = "", "", ""
 	finite.ResolverRevision = modelAutoRevision
+	source := "-"
+	if len(nativeSource) != 0 && nativeSource[0] != "" {
+		decoded, err := hex.DecodeString(nativeSource[0])
+		if err != nil || len(decoded) != 32 {
+			return "", fmt.Errorf("invalid native source digest")
+		}
+		// Keep the review envelope within ResolvedLoad's existing text bound.
+		source = base64.RawURLEncoding.EncodeToString(decoded)
+	}
 	data, err := json.Marshal(struct {
-		Model, Conversion, Memory, Estimator string
-		Requested                            modelconfig.RequestedLoad
-		Finite                               modelconfig.ResolvedLoad
-	}{model, conversion, memory, modelEstimatorRevision, requested, finite})
+		Model, Conversion, Memory, Estimator, NativeSource string
+		Requested                                          modelconfig.RequestedLoad
+		Finite                                             modelconfig.ResolvedLoad
+	}{model, conversion, memory, modelEstimatorRevision, source, requested, finite})
 	if err != nil {
 		return "", err
 	}
-	return conversion + ":" + memory + ":" + modelLoadDigest(data), nil
+	return conversion + ":" + memory + ":" + source + ":" + modelLoadDigest(data), nil
+}
+
+func modelAutoNativeSource(resolved *modelconfig.ResolvedLoad) string {
+	if resolved == nil {
+		return ""
+	}
+	parts := strings.Split(resolved.ReviewedInputID, ":")
+	if len(parts) != 4 || parts[2] == "-" {
+		return ""
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil || len(decoded) != 32 {
+		return ""
+	}
+	return hex.EncodeToString(decoded)
 }
 
 func modelAutoReviewParts(id string) (string, string, bool) {
@@ -531,8 +559,14 @@ func modelAutoReviewParts(id string) (string, string, bool) {
 		}
 		return true
 	}
-	if len(parts) != 3 || parts[0] != "-" && !validDigest(parts[0]) || !validDigest(parts[1]) || !validDigest(parts[2]) {
+	if len(parts) != 4 || parts[0] != "-" && !validDigest(parts[0]) || !validDigest(parts[1]) || !validDigest(parts[3]) {
 		return "", "", false
+	}
+	if parts[2] != "-" {
+		decoded, err := base64.RawURLEncoding.Strict().DecodeString(parts[2])
+		if err != nil || len(decoded) != 32 {
+			return "", "", false
+		}
 	}
 	conversion := parts[0]
 	if conversion == "-" {
@@ -549,7 +583,7 @@ func modelAutoFrozen(model string, requested modelconfig.RequestedLoad, resolved
 	if !ok {
 		return modelLoadError(model, "auto", "Missing or invalid Auto reviewed input identity.")
 	}
-	id, err := modelAutoReviewHash(model, requested, resolved, conversion, memory)
+	id, err := modelAutoReviewHash(model, requested, resolved, conversion, memory, modelAutoNativeSource(resolved))
 	if err != nil || id != resolved.ReviewedInputID {
 		return modelLoadError(model, "auto", "Auto inputs changed since preview; explicitly Recalculate.")
 	}

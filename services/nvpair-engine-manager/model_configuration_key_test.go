@@ -10,9 +10,11 @@ import (
 	"fmt"
 	"nvpair-shared/modelconfig"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestModelConfigurationKeyUnapplied(t *testing.T) {
@@ -110,6 +112,79 @@ func TestModelConfigurationKeyStableInputs(t *testing.T) {
 }
 
 func keyTestPointer[T any](value T) *T { return &value }
+
+func newFetchBuildKeyFixture(t *testing.T) inspectionFixture {
+	t.Helper()
+	return newAppliedKeyFixture(t, func(f inspectionFixture) {
+		nativeBuildTestRuntime(t, f.st, t.TempDir())
+		f.st.plat.Install = &Install{Fetch: &Fetch{URL: "https://fixture.invalid/releases/download/custom/native.tar.gz", SHA256: strings.Repeat("a", 64)}}
+		if f.st.plat.Runtime.Env == nil {
+			f.st.plat.Runtime.Env = map[string]string{}
+		}
+		f.st.plat.Runtime.Env["LD_LIBRARY_PATH"] = f.st.installDir
+	})
+}
+
+func TestModelConfigurationKeyNativeBuildContent(t *testing.T) {
+	test := func(name string, change func(*testing.T, inspectionFixture), changes bool) {
+		t.Run(name, func(t *testing.T) {
+			f := newFetchBuildKeyFixture(t)
+			before := inspectAppliedKeyFixture(t, f)
+			if before.ConfigurationKey == "" {
+				t.Fatalf("fetch-installed finite load has no key: %+v", before)
+			}
+			change(t, f)
+			after := inspectAppliedKeyFixture(t, f)
+			if after.ConfigurationKey == "" {
+				t.Fatalf("finite load lost key: %+v", after)
+			}
+			if (after.ConfigurationKey != before.ConfigurationKey) != changes {
+				t.Fatalf("key changed=%v, want %v", after.ConfigurationKey != before.ConfigurationKey, changes)
+			}
+		})
+	}
+	test("executable touch", func(t *testing.T, f inspectionFixture) {
+		info, err := os.Stat(f.st.binPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		touch := info.ModTime().Add(2 * time.Hour)
+		if err := os.Chtimes(f.st.binPath, touch, touch); err != nil {
+			t.Fatal(err)
+		}
+	}, false)
+	test("moved build and loader path", func(t *testing.T, f inspectionFixture) {
+		root := filepath.Join(t.TempDir(), "moved-build")
+		if err := os.Rename(f.st.installDir, root); err != nil {
+			t.Fatal(err)
+		}
+		f.st.installDir = root
+		f.st.binPath = filepath.Join(root, filepath.Base(f.st.binPath))
+		f.st.plat.Runtime.Bin = f.st.binPath
+		f.st.plat.Runtime.Env["LD_LIBRARY_PATH"] = root
+		if f.st.plat.Runtime.LaunchEnv != nil {
+			environment, err := literalEnvironment(*f.st.plat.Runtime.LaunchEnv)
+			if err != nil {
+				t.Fatal(err)
+			}
+			environment["LD_LIBRARY_PATH"] = root
+			assignments := literalAssignments(environment)
+			f.st.plat.Runtime.LaunchEnv = &assignments
+		}
+	}, false)
+	test("library bytes", func(t *testing.T, f inspectionFixture) {
+		writeTestFile(t, filepath.Join(f.st.installDir, "libggml-base.dylib"), []byte("different native library bytes"))
+	}, true)
+	test("unrelated ambient environment", func(t *testing.T, _ inspectionFixture) {
+		t.Setenv("PAIR_NATIVE_BUILD_UNRELATED", "changed")
+	}, false)
+	test("native ambient environment", func(t *testing.T, _ inspectionFixture) {
+		t.Setenv("GGML_SOURCE_FIXTURE", "changed")
+	}, true)
+	test("explicit launch environment", func(t *testing.T, f inspectionFixture) {
+		f.st.plat.Runtime.Env["PAIR_EXPLICIT_BUILD_FIXTURE"] = "changed"
+	}, true)
+}
 
 func TestModelConfigurationKeyCPUExperts(t *testing.T) {
 	in := estimateFixture("qwen3moe")
@@ -260,6 +335,9 @@ func newAppliedKeyFixture(t *testing.T, configure ...func(inspectionFixture)) in
 	if err != nil {
 		t.Fatal(err)
 	}
+	if prepared == nil || len(prepared.ModelLoads) == 0 {
+		t.Fatalf("applied key fixture has no compiled model loads: %+v", prepared)
+	}
 	rt.ModelLoads = prepared.ModelLoads
 	f.st.plat.Runtime = rt
 	return f
@@ -377,9 +455,45 @@ func TestModelConfigurationKeySWARequiresPinnedSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if inputs[f.request.ModelID].SWAFull != nil {
+	input, ok := inputs[f.request.ModelID]
+	if !ok || input.Allocation == nil {
+		t.Fatal("compiled SWA advisory input is missing")
+	}
+	if input.SWAFull != nil {
 		t.Fatal("unproved source received pinned SWA default")
 	}
+}
+
+func TestModelConfigurationKeySWADefaultHasIndependentSourceAssurance(t *testing.T) {
+	test := func(name string, install *Install, known bool) {
+		t.Run(name, func(t *testing.T) {
+			f := newAppliedKeyFixture(t)
+			f.st.plat.Install = install
+			command, err := launchForState(f.st, f.st.plat.Runtime.Port)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var inputs map[string]modelEstimateInput
+			prepared, err := compileTypedLlamaInputs(context.Background(), f.st, command, f.st.plat.Runtime, false, &inputs)
+			if err != nil || prepared == nil || len(prepared.ModelLoads) == 0 {
+				t.Fatalf("compile=%+v error=%v", prepared, err)
+			}
+			input, ok := inputs[f.request.ModelID]
+			if !ok || input.Allocation == nil {
+				t.Fatal("compiled advisory input missing")
+			}
+			if known {
+				if input.SWAFull == nil || *input.SWAFull {
+					t.Fatal("known source did not supply the inherited false SWA default")
+				}
+			} else if input.SWAFull != nil {
+				t.Fatal("content identity broadened inherited SWA default assurance")
+			}
+		})
+	}
+	test("known managed artifact declaration", &Install{Artifacts: []InstallArtifact{{Name: "server", URL: "https://fixture.invalid/releases/download/b12020/native", SHA256: strings.Repeat("a", 64)}}}, true)
+	test("different build artifact declaration", &Install{Artifacts: []InstallArtifact{{Name: "server", URL: "https://fixture.invalid/releases/download/custom/native", SHA256: strings.Repeat("a", 64)}}}, false)
+	test("fetch declaration does not prove the inherited default", &Install{Fetch: &Fetch{URL: "https://fixture.invalid/releases/download/b12020/native", SHA256: strings.Repeat("a", 64)}}, false)
 }
 
 func TestModelConfigurationKeyMissingTopologyDoesNotChangePool(t *testing.T) {
