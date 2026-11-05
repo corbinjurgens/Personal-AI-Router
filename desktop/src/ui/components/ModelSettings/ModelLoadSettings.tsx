@@ -17,6 +17,7 @@ import {
     watchEngineSettings
 } from '@/ui/stores/engine-settings.store'
 import ModelSettingsPreview from './ModelSettingsPreview'
+import ModelExtraOptions from './ModelExtraOptions'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import type { ModelConfiguration } from '@/shared/types/node-policy'
 
@@ -27,6 +28,14 @@ function fieldPatch(
 ): RequestedLoad | null {
     const number = Number(value)
     switch (field) {
+        case 'fit':
+            return value === 'on' || value === 'off' ? { fit: value } : null
+        case 'fitTarget':
+            return /^[0-9]{1,7}(,[0-9]{1,7}){0,15}$/.test(value) ? { fitTarget: value } : null
+        case 'fitCtx':
+            return Number.isSafeInteger(number) && number >= 0 && number <= 16777216
+                ? { fitCtx: number }
+                : null
         case 'context':
             if (value === 'auto') return { context: { mode: 'auto', floor: 4096, cap: 8192 } }
             return Number.isSafeInteger(number)
@@ -98,7 +107,7 @@ export default function ModelLoadSettings({
             setValues({})
             setValidation({})
         }
-    }, [draft?.change])
+    }, [draft?.change, key])
     const { nodeId, engine } = target
     useEffect(() => {
         const stop = watchEngineSettings()
@@ -132,6 +141,7 @@ export default function ModelLoadSettings({
         ? undefined
         : (load?.set.context ?? requested.context)
     const effectiveGpu = load?.clear?.includes('gpu') ? undefined : (load?.set.gpu ?? requested.gpu)
+    const effectiveFit = load?.clear?.includes('fit') ? undefined : (load?.set.fit ?? requested.fit)
     const effectiveCpuExperts = load?.clear?.includes('cpuExperts')
         ? undefined
         : (load?.set.cpuExperts ?? requested.cpuExperts)
@@ -184,7 +194,44 @@ export default function ModelLoadSettings({
                 const current = load?.clear?.includes(field)
                     ? undefined
                     : (load?.set[field] ?? requested[field])
-                if (field === 'context' && typeof current === 'object' && current.mode === 'auto')
+                if (descriptor.kind === 'options')
+                    return (
+                        <ModelExtraOptions
+                            key={`${key}:${field}`}
+                            descriptor={descriptor}
+                            value={
+                                load?.clear?.includes('extraOptions')
+                                    ? undefined
+                                    : (load?.set.extraOptions ?? requested.extraOptions)
+                            }
+                            nativeOptions={inspection?.nativeOptions}
+                            disabled={
+                                blocked || !descriptor.supported || resolved?.kvUnified === true
+                            }
+                            reset={!draft?.change}
+                            onChange={(options, error) => {
+                                validateField('extraOptions', error)
+                                if (error) {
+                                    useEngineSettingsStore.getState().invalidateModel(key)
+                                    return
+                                }
+                                const set = { ...load?.set }
+                                delete set.extraOptions
+                                const clear: Array<keyof RequestedLoad> = (
+                                    load?.clear ?? []
+                                ).filter(item => item !== 'extraOptions')
+                                if (options) set.extraOptions = options
+                                else clear.push('extraOptions')
+                                edit({ load: { set, clear } })
+                            }}
+                        />
+                    )
+                if (
+                    field === 'context' &&
+                    typeof current === 'object' &&
+                    'mode' in current &&
+                    current.mode === 'auto'
+                )
                     return null
                 const display =
                     values[field] ??
@@ -197,7 +244,9 @@ export default function ModelLoadSettings({
                                   : 'tokens' in current
                                     ? String(current.tokens ?? '')
                                     : ''
-                              : current.mode
+                              : 'mode' in current
+                                ? current.mode
+                                : ''
                           : current === undefined
                             ? ''
                             : String(current))
@@ -432,6 +481,23 @@ export default function ModelLoadSettings({
                 not lock load settings.
             </Text>
             {controls(true)}
+            {effectiveFit === 'on' && (
+                <Text kind="body/regular/sm">
+                    Native fit: PAIR does not estimate memory for this configuration.
+                </Text>
+            )}
+            {inspection?.configurationKeyReason === 'gpu-selection' && (
+                <Text kind="body/regular/sm">
+                    GPU selection: PAIR does not estimate memory for this configuration.
+                </Text>
+            )}
+            {!!inspection?.unreportedLaunchOptions?.length && (
+                <Text role="alert" kind="body/regular/sm">
+                    This llama.cpp build does not report:{' '}
+                    {inspection.unreportedLaunchOptions.map(flag => `--${flag}`).join(', ')}. The
+                    engine may fail to start.
+                </Text>
+            )}
             <FormField
                 slotLabel="Context mode"
                 slotHelp="Auto uses a target/cap of 8192 tokens, a floor of 4096 and one slot unless explicitly changed."
@@ -641,6 +707,13 @@ export default function ModelLoadSettings({
                     </Text>
                 ))}
             {!generation.ok && <Text kind="body/regular/sm">{generation.error.message}</Text>}
+            {Object.entries((draft?.review?.preview ?? draft?.advisory)?.errors ?? {}).map(
+                ([field, error]) => (
+                    <Text key={field} role="alert" kind="body/regular/sm">
+                        {field}: {error}
+                    </Text>
+                )
+            )}
             {Object.keys(validation).length > 0 && (
                 <Text role="alert" kind="body/regular/sm">
                     {Object.values(validation).join('; ')}

@@ -33,6 +33,74 @@ func TestModelConfigurationKeyUnapplied(t *testing.T) {
 	}
 }
 
+func TestModelConfigurationKeyExtraOptionParticipation(t *testing.T) {
+	f := newAppliedKeyFixture(t)
+	before := inspectAppliedKeyFixture(t, f)
+	if before.ConfigurationKey == "" {
+		t.Fatal("finite control key unavailable")
+	}
+	rt := f.st.plat.Runtime
+	rt.ModelLoads[0].Requested.ExtraOptions = map[string]string{"expert-cache": "auto"}
+	command, err := launchForState(f.st, rt.Port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := compileTypedLlamaInputs(context.Background(), f.st, command, rt, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt.ModelLoads = prepared.ModelLoads
+	f.st.plat.Runtime = rt
+	after := inspectAppliedKeyFixture(t, f)
+	if after.ConfigurationKey == "" || after.ConfigurationKey == before.ConfigurationKey {
+		t.Fatal("extra option omitted from configuration identity")
+	}
+	if after.Estimate.Status != "unknown" {
+		t.Fatalf("fork key priced: %+v", after.Estimate)
+	}
+}
+
+func TestModelConfigurationKeyNativeFitExecutionScope(t *testing.T) {
+	on := "on"
+	in := modelEstimateInput{
+		Allocation: &modelconfig.ResolvedLoad{NativeBuildID: "sha256:" + strings.Repeat("a", 64), Options: modelconfig.RequestedLoad{Fit: &on}},
+		Bindings:   []modelconfig.ArtifactSummary{{Role: "model", Identity: "artifact-a"}},
+	}
+	key := modelExecutionKey(in, "options-a")
+	if len(key) != 64 || modelConfigurationKey(in, "source", "options-a") != "" {
+		t.Fatalf("native fit identity: execution=%s finite=%s", key, modelConfigurationKey(in, "source", "options-a"))
+	}
+	if modelExecutionKey(in, "options-b") == key {
+		t.Fatal("execution key ignored resolved options")
+	}
+	in.Allocation.NativeBuildID = "sha256:" + strings.Repeat("b", 64)
+	if modelExecutionKey(in, "options-a") == key {
+		t.Fatal("execution key ignored native build")
+	}
+	in.Allocation.NativeBuildID = "sha256:" + strings.Repeat("a", 64)
+	in.Bindings[0].Identity = "artifact-b"
+	if modelExecutionKey(in, "options-a") == key {
+		t.Fatal("execution key ignored artifact identity")
+	}
+	if modelExecutionKey(modelEstimateInput{}, "options-a") != "" {
+		t.Fatal("unapplied load received execution identity")
+	}
+	in.Allocation.Options.Fit = nil
+	if modelExecutionKey(in, "options-a") != "" {
+		t.Fatal("ordinary finite load received execution identity")
+	}
+}
+
+func TestModelConfigurationKeyNativeFitUnapplied(t *testing.T) {
+	f := newInspectionFixture(t, 4096)
+	on := "on"
+	f.st.plat.Runtime.ModelLoads = []modelconfig.ModelLoad{{ModelID: f.request.ModelID, Requested: modelconfig.RequestedLoad{Fit: &on}}}
+	result := inspectFixture(t, f)
+	if result.ExecutionKey != "" || result.ConfigurationKey != "" || result.ConfigurationKeyReason != "not-applied" {
+		t.Fatalf("unapplied fit identity=%+v", result)
+	}
+}
+
 func TestModelConfigurationKeyStableInputs(t *testing.T) {
 	base := estimateFixture("llama")
 	base.Memory = &modelEstimateMemory{Target: modelBufferTestTargetMemory()}

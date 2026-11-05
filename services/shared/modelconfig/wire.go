@@ -47,24 +47,28 @@ type CPUExperts struct {
 	Layers *int32 `json:"layers,omitempty"`
 }
 
-// RequestedLoad contains only portable intent. Nil means inherited, including
+// RequestedLoad contains model-load intent. Nil means inherited, including
 // explicit false versus absent booleans. No Auto defaults are selected here.
 type RequestedLoad struct {
-	Context          *Context    `json:"context,omitempty"`
-	Slots            *int32      `json:"slots,omitempty"`
-	GPU              *GPU        `json:"gpu,omitempty"`
-	CPUExperts       *CPUExperts `json:"cpuExperts,omitempty"`
-	CacheTypeK       *string     `json:"cacheTypeK,omitempty"`
-	CacheTypeV       *string     `json:"cacheTypeV,omitempty"`
-	FlashAttention   *string     `json:"flashAttention,omitempty"`
-	BatchSize        *int32      `json:"batchSize,omitempty"`
-	UBatchSize       *int32      `json:"ubatchSize,omitempty"`
-	Threads          *int32      `json:"threads,omitempty"`
-	ThreadsBatch     *int32      `json:"threadsBatch,omitempty"`
-	KVOffload        *bool       `json:"kvOffload,omitempty"`
-	OpOffload        *bool       `json:"opOffload,omitempty"`
-	SleepIdleSeconds *int32      `json:"sleepIdleSeconds,omitempty"`
-	CacheRAM         *int32      `json:"cacheRAM,omitempty"` // MiB, not bytes
+	Context          *Context          `json:"context,omitempty"`
+	Slots            *int32            `json:"slots,omitempty"`
+	GPU              *GPU              `json:"gpu,omitempty"`
+	CPUExperts       *CPUExperts       `json:"cpuExperts,omitempty"`
+	Fit              *string           `json:"fit,omitempty"`
+	FitTarget        *string           `json:"fitTarget,omitempty"`
+	FitCtx           *int32            `json:"fitCtx,omitempty"`
+	ExtraOptions     map[string]string `json:"extraOptions,omitempty"`
+	CacheTypeK       *string           `json:"cacheTypeK,omitempty"`
+	CacheTypeV       *string           `json:"cacheTypeV,omitempty"`
+	FlashAttention   *string           `json:"flashAttention,omitempty"`
+	BatchSize        *int32            `json:"batchSize,omitempty"`
+	UBatchSize       *int32            `json:"ubatchSize,omitempty"`
+	Threads          *int32            `json:"threads,omitempty"`
+	ThreadsBatch     *int32            `json:"threadsBatch,omitempty"`
+	KVOffload        *bool             `json:"kvOffload,omitempty"`
+	OpOffload        *bool             `json:"opOffload,omitempty"`
+	SleepIdleSeconds *int32            `json:"sleepIdleSeconds,omitempty"`
+	CacheRAM         *int32            `json:"cacheRAM,omitempty"` // MiB, not bytes
 }
 
 // ArtifactBinding is target-owned sampled local identity, not a verified full
@@ -223,7 +227,16 @@ type Estimate struct {
 	Assumptions     []string            `json:"assumptions,omitempty"`
 	Unknowns        []string            `json:"unknowns,omitempty"`
 }
+type NativeOption struct {
+	Name    string   `json:"name"`
+	Kind    string   `json:"kind"`
+	Choices []string `json:"choices,omitempty"`
+}
+
 type InspectResult struct {
+	NativeOptions             []NativeOption     `json:"nativeOptions"`
+	UnreportedLaunchOptions   []string           `json:"unreportedLaunchOptions,omitempty"`
+	ExecutionKey              string             `json:"executionKey,omitempty"`
 	NativeBuild               string             `json:"nativeBuild,omitempty"`
 	NativeBuildID             string             `json:"nativeBuildId,omitempty"`
 	MemoryProfiles            []MemoryProfile    `json:"memoryProfiles,omitempty"`
@@ -776,6 +789,11 @@ func (a AutoProposal) Clone() AutoProposal {
 	return a
 }
 func (r InspectResult) Clone() InspectResult {
+	r.NativeOptions = slices.Clone(r.NativeOptions)
+	for i := range r.NativeOptions {
+		r.NativeOptions[i].Choices = slices.Clone(r.NativeOptions[i].Choices)
+	}
+	r.UnreportedLaunchOptions = slices.Clone(r.UnreportedLaunchOptions)
 	r.MemoryProfiles = slices.Clone(r.MemoryProfiles)
 	r.ConfigurationPools = slices.Clone(r.ConfigurationPools)
 	if r.LoadObservation != nil {
@@ -811,6 +829,37 @@ func DecodeInspectResult(data []byte) (InspectResult, error) {
 	return r, nil
 }
 func (r InspectResult) Validate() error {
+	if len(r.NativeOptions) > 2048 || len(r.UnreportedLaunchOptions) > 2048 {
+		return fmt.Errorf("inspect: native option limit exceeded")
+	}
+	seenNative := map[string]bool{}
+	for _, option := range r.NativeOptions {
+		if !nativeOptionName(option.Name) || seenNative[option.Name] || !slices.Contains([]string{"switch", "choice", "number", "text"}, option.Kind) || len(option.Choices) > 64 || (option.Kind == "choice") != (len(option.Choices) > 0) {
+			return fmt.Errorf("inspect.nativeOptions: invalid option")
+		}
+		seenNative[option.Name] = true
+		seenChoices := map[string]bool{}
+		for _, value := range option.Choices {
+			if boundedText(value, 256, true) != nil || seenChoices[value] {
+				return fmt.Errorf("inspect.nativeOptions: invalid choices")
+			}
+			seenChoices[value] = true
+		}
+	}
+	seenUnreported := map[string]bool{}
+	for _, name := range r.UnreportedLaunchOptions {
+		if !nativeOptionName(name) || seenUnreported[name] || seenNative[name] || r.NativeOptions == nil {
+			return fmt.Errorf("inspect.unreportedLaunchOptions: invalid option")
+		}
+		seenUnreported[name] = true
+	}
+	unpriced := r.ConfigurationKeyReason == "native-fit" || r.ConfigurationKeyReason == "gpu-selection"
+	if r.ExecutionKey != "" && (!digest(r.ExecutionKey) || r.ConfigurationKey != "" || !unpriced || len(r.ConfigurationPools) != 0) {
+		return fmt.Errorf("inspect.executionKey: invalid identity or scope")
+	}
+	if unpriced && len(r.ConfigurationPools) != 0 {
+		return fmt.Errorf("inspect.configurationPools: placement is unpriced")
+	}
 	if boundedText(r.NativeBuild, 256, false) != nil || boundedText(r.NativeBuildID, 256, false) != nil {
 		return fmt.Errorf("inspect: invalid native build metadata")
 	}
@@ -835,7 +884,7 @@ func (r InspectResult) Validate() error {
 	if r.ConfigurationKey != "" && (!digest(r.ConfigurationKey) || r.ConfigurationKeyReason != "" || len(r.ConfigurationPools) == 0) {
 		return fmt.Errorf("inspect.configurationKey: invalid identity or scope")
 	}
-	if r.ConfigurationKeyReason != "" && !slices.Contains([]string{"not-applied", "not-finite", "artifacts-unavailable"}, r.ConfigurationKeyReason) {
+	if r.ConfigurationKeyReason != "" && !slices.Contains([]string{"not-applied", "not-finite", "artifacts-unavailable", "native-fit", "gpu-selection"}, r.ConfigurationKeyReason) {
 		return fmt.Errorf("inspect.configurationKeyReason: invalid value")
 	}
 	if len(r.ConfigurationPools) != 0 && !slices.Equal(r.ConfigurationPools, []string{"host"}) && !slices.Equal(r.ConfigurationPools, []string{"host", "device"}) && !slices.Equal(r.ConfigurationPools, []string{"shared"}) {
@@ -916,6 +965,18 @@ func (r InspectResult) Validate() error {
 		return fmt.Errorf("inspect: memory plan identity mismatch")
 	}
 	return CheckPayloadSize(r)
+}
+
+func nativeOptionName(name string) bool {
+	if len(name) == 0 || len(name) > 64 {
+		return false
+	}
+	for i, c := range name {
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && (c != '-' || i == 0) {
+			return false
+		}
+	}
+	return true
 }
 
 func (e Estimate) Validate() error {

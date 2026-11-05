@@ -277,6 +277,9 @@ func (e *Executor) newModelBufferCapture(st *engineState, engine string, prepare
 		memoryCharge = len(encoded) * 4
 	}
 	for _, load := range loads {
+		if modelLoadUnpriced(load.Requested) || load.Resolved != nil && modelLoadUnpriced(load.Resolved.Options) {
+			continue
+		}
 		if len(c.frozen) >= 64 {
 			c.budgetOmitted = true
 			break

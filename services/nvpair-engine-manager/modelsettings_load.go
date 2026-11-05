@@ -26,8 +26,116 @@ import (
 
 const externalConversionResolver = "external-conversion/llama"
 
+func modelLoadNativeFit(requested modelconfig.RequestedLoad) bool {
+	return requested.Fit != nil && *requested.Fit == "on"
+}
+
+func modelLoadUnpriced(requested modelconfig.RequestedLoad) bool {
+	return modelLoadNativeFit(requested) || len(modelLoadGPUSelection(requested)) > 0
+}
+
+func modelLoadUnpricedReason(requested modelconfig.RequestedLoad) string {
+	if modelLoadNativeFit(requested) {
+		return "native-fit"
+	}
+	return "gpu-selection"
+}
+
+func modelLoadAllowedPresetKeys(loads []modelconfig.ModelLoad) map[string]map[string]bool {
+	allowed := map[string]map[string]bool{}
+	for _, load := range loads {
+		allowed[load.ModelID] = map[string]bool{}
+		if modelLoadNativeFit(load.Requested) {
+			allowed[load.ModelID] = map[string]bool{"fit": true, "fit-target": true, "fit-ctx": true}
+		}
+		for key := range load.Requested.ExtraOptions {
+			allowed[load.ModelID][key] = true
+		}
+	}
+	return allowed
+}
+
+// This only selects conversion fields. The preset parser still checks section
+// identity and syntax, then convertTypedLlamaOptions validates merged values.
+func modelConversionAllowedKeys(data []byte) map[string]map[string]bool {
+	allowed := map[string]map[string]bool{}
+	section := ""
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			section = line[1 : len(line)-1]
+			allowed[section] = map[string]bool{}
+		} else if name, _, ok := strings.Cut(line, "="); ok && allowed[section] != nil {
+			name = strings.TrimSpace(name)
+			key := llamaPresetOptionKey(name)
+			if key == "" {
+				allowed[section][name] = true
+			} else if key == "fit" || key == "fit-target" || key == "fit-ctx" || key == "models-preset" || key == "models-max" || slices.ContainsFunc(llamaServingOptions, func(option llamaServingOption) bool { return option.key == key && option.unsupported }) {
+				allowed[section][key] = true
+			}
+		}
+	}
+	return allowed
+}
+
 func modelLoadError(model, field, reason string) error {
 	return &ServingFieldError{Field: "modelLoads." + field, ModelID: model, Reason: reason}
+}
+
+// Descriptor ownership and the integrated serving table remain the native
+// vocabulary. Raw options cannot replace typed or manager-owned controls.
+func validateModelExtraOptions(model string, extras map[string]string) error {
+	if len(extras) == 0 {
+		return nil
+	}
+	if err := (modelconfig.RequestedLoad{ExtraOptions: extras}).Validate(); err != nil {
+		return modelLoadError(model, "extraOptions", err.Error())
+	}
+	matrix, err := llamaModelSettingsOptions()
+	if err != nil {
+		return err
+	}
+	for _, key := range sortedKeys(extras) {
+		if key == "version" {
+			return modelLoadError(model, "extraOptions", "PAIR owns version.")
+		}
+		if canonical := llamaPresetOptionKey(key); canonical != "" && canonical != key {
+			return modelLoadError(model, "extraOptions", "Use the canonical key "+canonical+" for "+key+".")
+		}
+		if err := validateLlamaPresetValue(key, extras[key], model); err != nil {
+			return modelLoadError(model, "extraOptions", key+": "+err.Error())
+		}
+		for _, option := range matrix {
+			if option.Native.key != key {
+				continue
+			}
+			d := option.Descriptor
+			reason := ""
+			switch {
+			case d.Owner == "manager/router" || d.Owner == "artifacts":
+				reason = "PAIR owns " + key + "."
+			case d.Supported && !strings.HasPrefix(d.Field, "native."):
+				reason = "Use the typed field for " + key + "."
+			case option.Native.unsupported:
+				reason = key + " changes allocation and is not accepted."
+			}
+			if reason != "" {
+				return modelLoadError(model, "extraOptions", reason)
+			}
+			if err := validateLlamaValue(key, extras[key]); err != nil {
+				return modelLoadError(model, "extraOptions", key+": "+err.Error())
+			}
+		}
+		// The preset-key owner also recognizes typed request and thread
+		// controls outside the finite allocation table.
+		if llamaPresetOptionKey(key) != "" && !slices.ContainsFunc(llamaServingOptions, func(option llamaServingOption) bool { return option.key == key }) {
+			return modelLoadError(model, "extraOptions", "Use the typed field for "+key+".")
+		}
+		if key == "kv-unified" || key == "kv-unified-per-slot" {
+			return modelLoadError(model, "extraOptions", "PAIR owns "+key+".")
+		}
+	}
+	return nil
 }
 
 // The existing engine-wide read covers aliases sharing the same artifacts.
@@ -285,6 +393,19 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 	if err != nil || len(loads) == 0 {
 		return nil, modelLoadError("", "requested", "A valid complete typed model set is required.")
 	}
+	for _, load := range loads {
+		if err := validateModelLoadGPUSelection(load.ModelID, load.Requested); err != nil {
+			return nil, err
+		}
+		if len(modelLoadGPUSelection(load.Requested)) == 0 {
+			continue
+		}
+		for _, other := range loads {
+			if other.ModelID != load.ModelID && other.Requested.GPU != nil && other.Requested.GPU.Mode == "auto" && (other.Resolved == nil || other.Resolved.GPU.Mode == "layers" && other.Resolved.GPU.Layers != nil && *other.Resolved.GPU.Layers > 0) {
+				return nil, modelLoadError(load.ModelID, "extraOptions", load.ModelID+" selects GPUs and cannot share an engine with reviewed Auto profile "+other.ModelID+"; set that profile's GPU mode to layers.")
+			}
+		}
+	}
 	if expected != nil {
 		if expected.build.configured != command.Bin || validateSource(expected.build) != nil {
 			return nil, modelLoadError("", "nativeBuildId", "Prepared executable changed before compilation.")
@@ -319,6 +440,15 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 		return nil, modelLoadError("", "nativeBuildId", "Native build content is unavailable or changed.")
 	}
 	buildID := native.Build
+	nativeOptions := nativeHelpResults.lookup(buildID)
+	if known, explicit := ctx.Value(nativeHelpDiscoveryKey{}).(bool); explicit && !known {
+		nativeOptions = nil
+	}
+	for _, load := range loads {
+		if err := validateNativeExtraOptions(load.ModelID, load.Requested.ExtraOptions, nativeOptions); err != nil {
+			return nil, err
+		}
+	}
 	nativeSource := ""
 	reviewedSource := func(command launchCommand) (string, error) {
 		if command.Bin != buildEvidence.configured || validateSource(buildEvidence) != nil {
@@ -593,6 +723,8 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 				return nil, modelLoadError(result.Config.Models[i].ModelID, "serving", "Declaration requires a fresh typed preview.")
 			}
 			result.Config.Models[i].ExpectedNativeSourceDigest = result.Digest
+		}
+		for i := range result.Envelopes {
 			result.Envelopes[i].NativeSourceDigest = result.Digest
 		}
 	}
@@ -850,10 +982,16 @@ func typedLlamaModelOptions(model string, requested modelconfig.RequestedLoad, l
 		return nil, nil, modelLoadError(model, field, reason)
 	}
 	if err := requested.Validate(); err != nil {
-		if field, _, ok := strings.Cut(err.Error(), ":"); ok && strings.HasPrefix(field, "cpuExperts.") {
+		if field, _, ok := strings.Cut(err.Error(), ":"); ok && (strings.HasPrefix(field, "cpuExperts.") || field == "extraOptions") {
 			return fail(field, err.Error())
 		}
 		return fail("requested", err.Error())
+	}
+	if err := validateModelLoadGPUSelection(model, requested); err != nil {
+		return nil, nil, err
+	}
+	if err := validateModelExtraOptions(model, requested.ExtraOptions); err != nil {
+		return nil, nil, err
 	}
 	tokens, slots := int32(8192), int32(1)
 	if requested.Context != nil {
@@ -891,6 +1029,15 @@ func typedLlamaModelOptions(model string, requested modelconfig.RequestedLoad, l
 		}
 	}
 	options := map[string]string{"ctx-size": strconv.Itoa(int(total)), "parallel": strconv.Itoa(int(slots)), "kv-unified": "false", "fit": "off", "sleep-idle-seconds": "300", "cache-ram": "512", "load-on-startup": "false", "gpu-layers": "0"}
+	if modelLoadNativeFit(requested) {
+		options["fit"] = "on"
+		if requested.FitTarget != nil {
+			options["fit-target"] = *requested.FitTarget
+		}
+		if requested.FitCtx != nil {
+			options["fit-ctx"] = strconv.Itoa(int(*requested.FitCtx))
+		}
+	}
 	if gpu.Mode == "layers" {
 		options["gpu-layers"] = strconv.Itoa(int(*gpu.Layers))
 	}
@@ -949,6 +1096,7 @@ func typedLlamaModelOptions(model string, requested modelconfig.RequestedLoad, l
 			options[field.key] = strconv.FormatBool(*field.value)
 		}
 	}
+	maps.Copy(options, requested.ExtraOptions)
 	resolvedOptions := requested.Clone()
 	resolvedOptions.Context = &modelconfig.Context{Mode: "fixed", Tokens: per}
 	resolvedOptions.Slots = &slots
@@ -960,8 +1108,6 @@ func typedLlamaModelOptions(model string, requested modelconfig.RequestedLoad, l
 // Read-only worker preview. Acceptance and policy implications remain with
 // the settings operation owner.
 func (e *Executor) previewModelLoadChange(ctx context.Context, st *engineState, p settings.Request) (settings.Preview, error) {
-	ctx, cancel := context.WithTimeout(ctx, modelInspectionBudget)
-	defer cancel()
 	result := settings.Preview{Settings: p.Settings.Clone(), Args: []string{}, Env: []string{}, Errors: map[string]string{}}
 	fail := func(err error) (settings.Preview, error) {
 		if ctx.Err() != nil {
@@ -984,9 +1130,31 @@ func (e *Executor) previewModelLoadChange(ctx context.Context, st *engineState, 
 	if err := p.Validate(); err != nil {
 		return fail(err)
 	}
+	if p.ModelChange != nil && p.ModelChange.Load != nil {
+		if err := validateModelLoadGPUSelection(p.ModelChange.ModelID, p.ModelChange.Load.Set); err != nil {
+			return fail(err)
+		}
+		st.mu.Lock()
+		loads := modelconfig.CloneLoads(st.plat.Runtime.ModelLoads)
+		st.mu.Unlock()
+		if len(loads) != 0 {
+			// A selected patch can inherit the other half of an invalid
+			// placement combination. Merge through the existing owner before
+			// native help, not only before the later typed compilation.
+			if _, err := patchModelLoad(loads, p.ModelChange.ModelID, *p.ModelChange.Load); err != nil {
+				return fail(err)
+			}
+		}
+	}
 	if st.manifest.FamilyOrDefault() != "llamacpp" || p.ModelChange == nil || p.ModelChange.Load == nil || p.ModelChange.Policy != nil {
 		return fail(modelLoadError("", "request", "Only a local llama.cpp load-only preview is available."))
 	}
+	// This explicit operation may discover help; compiler/frozen callers only
+	// consume completed evidence for their selected build and never spawn it.
+	_, known := e.nativeOptions(ctx, st)
+	ctx = context.WithValue(ctx, nativeHelpDiscoveryKey{}, known)
+	ctx, cancel := context.WithTimeout(ctx, modelInspectionBudget)
+	defer cancel()
 	if !e.modelInspection.active.CompareAndSwap(false, true) {
 		return fail(modelLoadError("", "busy", "Another model metadata preview or inspection is active."))
 	}
@@ -1048,7 +1216,7 @@ func (e *Executor) previewModelLoadChange(ctx context.Context, st *engineState, 
 		if err != nil {
 			return fail(err)
 		}
-		before, err = parseLlamaServingPreset(prepared.Snapshot)
+		before, err = parseLlamaServingPresetAllowing(prepared.Snapshot, modelLoadAllowedPresetKeys(prepared.ModelLoads))
 		if err != nil {
 			return fail(err)
 		}
@@ -1122,7 +1290,7 @@ func (e *Executor) previewModelLoadChange(ctx context.Context, st *engineState, 
 	}
 	result.Env = literalAssignments(command.Env)
 	result.Serving = preparedServingReadback(snapshot.state, prepared)
-	after, err := parseLlamaServingPreset(prepared.Snapshot)
+	after, err := parseLlamaServingPresetAllowing(prepared.Snapshot, modelLoadAllowedPresetKeys(prepared.ModelLoads))
 	if err != nil {
 		return fail(err)
 	}
@@ -1254,6 +1422,9 @@ func patchModelLoad(loads []modelconfig.ModelLoad, model string, patch modelconf
 		return nil, err
 	}
 	if err := requested.Validate(); err != nil {
+		return nil, err
+	}
+	if err := validateModelLoadGPUSelection(model, requested); err != nil {
 		return nil, err
 	}
 	out[i].Requested = requested
@@ -1467,7 +1638,9 @@ func (e *Executor) previewTypedLlamaConversionExpected(ctx context.Context, st *
 		}
 		return sourceAccess.openFile(path)
 	}
-	sections, err := parseLlamaServingPreset(data)
+	// Conversion validates these fields through RequestedLoad before compiling.
+	// Operator launch continues to use the strict parser.
+	sections, err := parseLlamaServingPresetAllowing(data, modelConversionAllowedKeys(data))
 	if err != nil {
 		return refuse("", "conversion", err.Error())
 	}
@@ -1598,7 +1771,7 @@ func (e *Executor) previewTypedLlamaConversionExpected(ctx context.Context, st *
 	}
 	converted.ModelLoads, converted.Serving = prepared.ModelLoads, prepared.Config
 	result := typedLlamaConversion{Runtime: converted, SourceDigest: sourceDigest, Before: before, inputs: inputs}
-	generated, err := parseLlamaServingPreset(prepared.Snapshot)
+	generated, err := parseLlamaServingPresetAllowing(prepared.Snapshot, modelLoadAllowedPresetKeys(prepared.ModelLoads))
 	if err != nil {
 		return typedLlamaConversion{}, err
 	}
@@ -1724,16 +1897,36 @@ func convertTypedLlamaOptions(model string, options map[string]string) (modelcon
 				r.OpOffload = &b
 			}
 		case "fit":
-			if value != "off" {
+			b, err := llamaBool(value)
+			if err != nil {
 				return fail()
 			}
+			fit := "off"
+			if b == "true" {
+				fit = "on"
+			}
+			r.Fit = &fit
+		case "fit-target":
+			r.FitTarget = &value
+		case "fit-ctx":
+			n, err := integer()
+			if err != nil {
+				return fail()
+			}
+			r.FitCtx = n
 		case "load-on-startup", "kv-unified":
 			b, err := llamaBool(value)
 			if err != nil || b != "false" {
 				return fail()
 			}
 		default:
-			return fail()
+			if err := validateModelExtraOptions(model, map[string]string{key: value}); err != nil {
+				return modelconfig.RequestedLoad{}, err
+			}
+			if r.ExtraOptions == nil {
+				r.ExtraOptions = map[string]string{}
+			}
+			r.ExtraOptions[key] = value
 		}
 	}
 	slots := int32(1)
@@ -1900,14 +2093,22 @@ func llamaModelSettingsOptions() ([]modelSettingsOption, error) {
 		case "cache-ram":
 			d = modelSettingsInteger("cacheRAM", label, "1", "512", "finite adapter inherited baseline (MiB)", "host prompt cache; not admission memory")
 			preset = "cache-ram = explicit positive int32 MiB"
-		case "models-preset", "models-max", "models-autoload", "fit", "fit-target", "fit-ctx", "load-on-startup":
+		case "fit":
+			d = modelconfig.OptionDescriptor{Field: "fit", Label: label, Kind: "enum", Values: []string{"off", "on"}, Default: json.RawMessage(`"off"`), DefaultSource: "typed load baseline", Supported: true, Portable: true, Owner: "model-load", Phase: "B", IdentityEffect: "native placement", EstimateEffect: "unpriced when on"}
+			preset = "fit = off/on; native fit is unpriced"
+		case "fit-target":
+			d = modelconfig.OptionDescriptor{Field: "fitTarget", Label: label, Kind: "string", Supported: true, Portable: false, Owner: "model-load", Phase: "B", DefaultSource: "native default; unresolved", IdentityEffect: "native placement", EstimateEffect: "unpriced"}
+			preset = "fit-target = comma-separated MiB margins; requires fit on"
+		case "fit-ctx":
+			d = modelSettingsInteger("fitCtx", label, "0", "", "native fit minimum context; unresolved", "unpriced")
+			maximum := json.Number("16777216")
+			d.Maximum = &maximum
+			preset = "fit-ctx = minimum context; requires fit on"
+		case "models-preset", "models-max", "models-autoload", "load-on-startup":
 			d.Owner, d.Phase = "manager/router", "B"
 			d.Reason = "Manager-owned output/router control; no model-local override."
 			d.IdentityEffect, d.EstimateEffect = "router startup", "router capacity and startup effects"
-			if native.key == "fit" {
-				d.Kind, d.Default, d.DefaultSource = "enum", json.RawMessage(`"off"`), "finite adapter enforced output"
-				d.Values, preset = []string{"off"}, "fit = off; reviewed Auto resolves before compilation"
-			} else if native.key == "load-on-startup" {
+			if native.key == "load-on-startup" {
 				d.Kind, d.Default, d.DefaultSource = "boolean", json.RawMessage(`false`), "finite adapter enforced output"
 				preset = "load-on-startup = false"
 			} else if native.key == "models-preset" {
@@ -1928,7 +2129,9 @@ func llamaModelSettingsOptions() ([]modelSettingsOption, error) {
 		case "n-predict":
 			d.Owner, d.IdentityEffect, d.EstimateEffect = "request/native", "request semantics", "output work; not KV context"
 		}
-		if native.unsupported && d.Supported {
+		// Typed fit controls are validated before generated reparsing. The
+		// operator preset table still rejects them under its finite contract.
+		if native.unsupported && d.Supported && native.key != "fit-target" && native.key != "fit-ctx" {
 			d.Supported, d.Portable = false, false
 			d.Reason = "Native finite adapter rejects this control; typed override unavailable."
 		}
@@ -1969,6 +2172,7 @@ func validateModelSettingsOptionCoverage(native []llamaServingOption, options []
 // descriptors add no native spelling table and never materialize recommendations.
 func modelSettingsExtraOptions() []modelconfig.OptionDescriptor {
 	options := []modelconfig.OptionDescriptor{
+		{Field: "extraOptions", Label: "Extra options", Kind: "options", Supported: true, Portable: true, NonPortableKeys: slices.Clone(llamaGPUSelectionKeys), Owner: "model-load", IdentityEffect: "native options", EstimateEffect: "unpriced options"},
 		modelSettingsInteger("threads", "Generation threads", "1", "", "inherited native default; unresolved", "CPU work/workspace; no core-count tuning"),
 		modelSettingsInteger("threadsBatch", "Prompt-processing threads", "1", "", "inherited native threads default; unresolved", "CPU work/workspace"),
 		modelSettingsInteger("gpu.layers", "Finite GPU layers (target facts required)", "0", "", "inherited native placement; unresolved", "host/device weights; target layer count bounds this value"),

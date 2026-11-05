@@ -35,6 +35,10 @@ export const loadFields: Array<keyof RequestedLoad> = [
     'slots',
     'gpu',
     'cpuExperts',
+    'fit',
+    'fitTarget',
+    'fitCtx',
+    'extraOptions',
     'cacheTypeK',
     'cacheTypeV',
     'flashAttention',
@@ -51,11 +55,26 @@ export const loadFields: Array<keyof RequestedLoad> = [
 /** Copy requested leaves only. No resolved allocation or local artifact authority crosses nodes. */
 export function portableLoadPatch(
     requested: RequestedLoad,
-    fields: Array<keyof RequestedLoad>
+    fields: Array<keyof RequestedLoad>,
+    inspection?: InspectModelResult
 ): NonNullable<ModelChange['load']> {
     const set: RequestedLoad = {}
     const clear: Array<keyof RequestedLoad> = []
     for (const key of fields) {
+        if (key === 'fitTarget') continue
+        if (key === 'extraOptions') {
+            const descriptor = inspection?.options?.find(option => option.field === key)
+            if (descriptor?.kind !== 'options' || !descriptor.supported || !descriptor.portable)
+                throw new Error('Extra options require a supported portable source descriptor.')
+            const options = Object.fromEntries(
+                Object.entries(requested.extraOptions ?? {}).filter(
+                    ([name]) => !descriptor.nonPortableKeys?.includes(name)
+                )
+            )
+            if (Object.keys(options).length) set.extraOptions = options
+            else clear.push(key)
+            continue
+        }
         // Object.assign retains the closed RequestedLoad shape without a dynamic index assertion.
         if (requested[key] === undefined) clear.push(key)
         else Object.assign(set, { [key]: structuredClone(requested[key]) })

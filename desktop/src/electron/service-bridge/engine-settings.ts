@@ -179,12 +179,29 @@ function cpuExperts(value: JsonValue): NonNullable<RequestedLoad['cpuExperts']> 
         throw new Error('Invalid CPU expert placement.')
     return mode === 'layers' ? { mode, layers } : { mode }
 }
+function extraOptions(value: JsonValue): Record<string, string> {
+    const row = object(value)
+    if (Object.keys(row).length > 32) throw new Error('Too many extra options.')
+    const result: Record<string, string> = {}
+    for (const [key, value] of Object.entries(row)) {
+        if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(key)) throw new Error('Invalid extra option key.')
+        const entry = boundedText(value, 1024)
+        if (/[#;$%{}`]/.test(entry)) throw new Error('Invalid extra option value.')
+        result[key] = entry
+    }
+    return result
+}
+
 function requested(value: JsonValue | undefined): RequestedLoad {
     const row = shape(value, [
         'context',
         'slots',
         'gpu',
         'cpuExperts',
+        'fit',
+        'fitTarget',
+        'fitCtx',
+        'extraOptions',
         'cacheTypeK',
         'cacheTypeV',
         'flashAttention',
@@ -211,6 +228,10 @@ function requested(value: JsonValue | undefined): RequestedLoad {
         slots: optionalInteger(row.slots),
         gpu: row.gpu === undefined ? undefined : gpu(row.gpu),
         cpuExperts: row.cpuExperts === undefined ? undefined : cpuExperts(row.cpuExperts),
+        fit: row.fit === undefined ? undefined : choice(row.fit, ['off', 'on']),
+        fitTarget: optionalText(row.fitTarget, 127),
+        fitCtx: optionalInteger(row.fitCtx, 0),
+        extraOptions: row.extraOptions === undefined ? undefined : extraOptions(row.extraOptions),
         cacheTypeK:
             row.cacheTypeK === undefined
                 ? undefined
@@ -256,6 +277,15 @@ function requested(value: JsonValue | undefined): RequestedLoad {
             result.ubatchSize > result.batchSize)
     )
         throw new Error('Invalid model load bounds.')
+    if (result.fit === 'on' && result.gpu?.mode === 'auto')
+        throw new Error('Native fit and reviewed Auto placement are exclusive.')
+    if (
+        result.fitTarget !== undefined &&
+        (result.fit !== 'on' || !/^[0-9]{1,7}(,[0-9]{1,7}){0,15}$/.test(result.fitTarget))
+    )
+        throw new Error('Invalid native fit target.')
+    if (result.fitCtx !== undefined && (result.fit !== 'on' || result.fitCtx > 16777216))
+        throw new Error('Invalid native fit context.')
     return result
 }
 function resolved(value: JsonValue | undefined): ResolvedLoad {
@@ -1419,6 +1449,9 @@ export function parseInspectModel(value: JsonValue | undefined): InspectModelRes
         'nativeBuildId',
         'artifacts',
         'facts',
+        'nativeOptions',
+        'unreportedLaunchOptions',
+        'executionKey',
         'options',
         'estimate',
         'loadObservation',
@@ -1477,6 +1510,37 @@ export function parseInspectModel(value: JsonValue | undefined): InspectModelRes
         assurance: optionalText(row.assurance),
         nativeBuild: optionalText(row.nativeBuild, 256),
         nativeBuildId: optionalText(row.nativeBuildId, 256),
+        nativeOptions:
+            row.nativeOptions === undefined || row.nativeOptions === null
+                ? undefined
+                : boundedArray(row.nativeOptions, 2048).map(value => {
+                      const hint = shape(value, ['name', 'kind', 'choices'])
+                      const name = boundedText(hint.name, 64, true)
+                      const kind = choice(hint.kind, ['switch', 'choice', 'number', 'text'])
+                      const choices =
+                          hint.choices === undefined
+                              ? undefined
+                              : boundedArray(hint.choices, 64).map(value =>
+                                    boundedText(value, 256, true)
+                                )
+                      if (
+                          !/^[a-z0-9][a-z0-9-]{0,63}$/.test(name) ||
+                          (kind === 'choice') !== Boolean(choices?.length) ||
+                          new Set(choices).size !== (choices?.length ?? 0)
+                      )
+                          throw new Error('Invalid native option hint.')
+                      return { name, kind, choices }
+                  }),
+        unreportedLaunchOptions:
+            row.unreportedLaunchOptions === undefined
+                ? undefined
+                : boundedArray(row.unreportedLaunchOptions, 2048).map(value => {
+                      const name = boundedText(value, 64, true)
+                      if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(name))
+                          throw new Error('Invalid unreported launch option.')
+                      return name
+                  }),
+        executionKey: optionalDigest(row.executionKey),
         artifacts:
             row.artifacts === undefined
                 ? undefined
@@ -1502,7 +1566,9 @@ export function parseInspectModel(value: JsonValue | undefined): InspectModelRes
                 : choice(row.configurationKeyReason, [
                       'not-applied',
                       'not-finite',
-                      'artifacts-unavailable'
+                      'artifacts-unavailable',
+                      'native-fit',
+                      'gpu-selection'
                   ]),
         configurationPools:
             row.configurationPools === undefined
@@ -1512,6 +1578,29 @@ export function parseInspectModel(value: JsonValue | undefined): InspectModelRes
                   )
     }
     const pools = result.configurationPools?.join(',')
+    if (
+        new Set(result.nativeOptions?.map(item => item.name)).size !==
+            (result.nativeOptions?.length ?? 0) ||
+        new Set(result.unreportedLaunchOptions).size !==
+            (result.unreportedLaunchOptions?.length ?? 0) ||
+        result.unreportedLaunchOptions?.some(name =>
+            result.nativeOptions?.some(option => option.name === name)
+        ) ||
+        (result.unreportedLaunchOptions?.length && result.nativeOptions === undefined)
+    )
+        throw new Error('Invalid native option list.')
+    if (
+        result.executionKey &&
+        (result.configurationKey ||
+            !['native-fit', 'gpu-selection'].includes(result.configurationKeyReason ?? '') ||
+            result.configurationPools?.length)
+    )
+        throw new Error('Invalid execution identity scope.')
+    if (
+        ['native-fit', 'gpu-selection'].includes(result.configurationKeyReason ?? '') &&
+        result.configurationPools?.length
+    )
+        throw new Error('Placement is unpriced.')
     const seenProfiles = new Set<string>()
     for (const [index, profile] of (result.memoryProfiles ?? []).entries()) {
         if (
@@ -1600,12 +1689,14 @@ function option(value: JsonValue): NonNullable<InspectModelResult['options']>[nu
         'owner',
         'phase',
         'identityEffect',
-        'estimateEffect'
+        'estimateEffect',
+        'nonPortableKeys'
     ])
     const result = {
         field: boundedText(row.field, 128, true),
         label: boundedText(row.label, 256, true),
-        kind: choice(row.kind, ['integer', 'number', 'boolean', 'enum', 'string']),
+        kind: choice(row.kind, ['integer', 'number', 'boolean', 'enum', 'string', 'options']),
+        nonPortableKeys: strings(row.nonPortableKeys, 32),
         minimum: decimal(row.minimum),
         maximum: decimal(row.maximum),
         values: strings(row.values, 64),
@@ -1620,6 +1711,9 @@ function option(value: JsonValue): NonNullable<InspectModelResult['options']>[nu
         estimateEffect: optionalText(row.estimateEffect)
     }
     if (
+        (result.nonPortableKeys !== undefined && result.kind !== 'options') ||
+        result.nonPortableKeys?.some(key => !/^[a-z0-9][a-z0-9-]{0,63}$/.test(key)) ||
+        new Set(result.nonPortableKeys).size !== (result.nonPortableKeys?.length ?? 0) ||
         (result.minimum !== undefined &&
             result.maximum !== undefined &&
             result.minimum > result.maximum) ||

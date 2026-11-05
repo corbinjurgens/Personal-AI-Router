@@ -3,6 +3,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { getModularSupervisor } from '@/electron/service-bridge/modular-supervisor'
+import type { JsonObject } from '@/electron/service-bridge/json-rpc-client'
 
 const mocks = vi.hoisted(() => ({
     state: {
@@ -349,6 +350,204 @@ function withoutField(value: JsonValue, field: string): JsonValue {
 }
 
 describe('unified settings bridge', () => {
+    it('parses raw options, portability keys and GPU selection execution identity', () => {
+        const preview = parseEngineSettingsPreview({
+            settings: {
+                ...baseline.settings,
+                modelLoads: [
+                    {
+                        modelId: 'model',
+                        requested: { extraOptions: { device: 'CUDA1', 'expert-cache': 'auto' } }
+                    }
+                ]
+            },
+            revision: 4,
+            restart: false,
+            rebind: false
+        })
+        expect(preview.settings.modelLoads?.[0]?.requested.extraOptions).toEqual({
+            device: 'CUDA1',
+            'expert-cache': 'auto'
+        })
+        const fixture: JsonObject = {
+            engine: 'llamacpp',
+            modelId: 'model',
+            status: 'unknown',
+            estimate: { status: 'unknown' },
+            configurationKeyReason: 'gpu-selection',
+            executionKey: 'a'.repeat(64),
+            options: [
+                {
+                    field: 'extraOptions',
+                    label: 'Extra options',
+                    kind: 'options',
+                    supported: true,
+                    portable: true,
+                    nonPortableKeys: ['device', 'main-gpu', 'split-mode', 'tensor-split']
+                }
+            ]
+        }
+        const result = parseInspectModel(fixture)
+        expect(result.configurationKeyReason).toBe('gpu-selection')
+        expect(result.executionKey).toBe('a'.repeat(64))
+        expect(result.options?.[0]?.nonPortableKeys).toEqual([
+            'device',
+            'main-gpu',
+            'split-mode',
+            'tensor-split'
+        ])
+        expect(() => parseInspectModel({ ...fixture, configurationPools: ['host'] })).toThrow(
+            'Invalid execution identity scope.'
+        )
+        expect(() =>
+            parseInspectModel({
+                ...fixture,
+                options: [
+                    {
+                        field: 'x',
+                        label: 'X',
+                        kind: 'string',
+                        supported: true,
+                        portable: true,
+                        nonPortableKeys: ['device']
+                    }
+                ]
+            })
+        ).toThrow('Invalid model option descriptor.')
+    })
+
+    const invalidExtraOptions: Array<Record<string, string>> = [
+        { Bad: 'value' },
+        { x: 'bad;value' },
+        { x: 'a'.repeat(1025) }
+    ]
+    it.each(invalidExtraOptions)('rejects invalid extra options %j', extraOptions => {
+        expect(() =>
+            parseEngineSettingsPreview({
+                settings: {
+                    ...baseline.settings,
+                    modelLoads: [{ modelId: 'model', requested: { extraOptions } }]
+                },
+                revision: 4,
+                restart: false,
+                rebind: false
+            })
+        ).toThrow()
+    })
+
+    it('parses native fit preview fields and preserves strict requested keys', () => {
+        const settings = {
+            ...baseline.settings,
+            modelLoads: [
+                { modelId: 'exact/model', requested: { fit: 'on', fitTarget: '512', fitCtx: 4096 } }
+            ]
+        }
+        const preview = parseEngineSettingsPreview({
+            settings,
+            revision: 4,
+            restart: false,
+            rebind: false
+        })
+        expect(preview.settings.modelLoads?.[0]?.requested).toMatchObject({
+            fit: 'on',
+            fitTarget: '512',
+            fitCtx: 4096
+        })
+        expect(() =>
+            parseEngineSettingsPreview({
+                settings: {
+                    ...settings,
+                    modelLoads: [
+                        { modelId: 'exact/model', requested: { fit: 'on', unknownFit: 1 } }
+                    ]
+                },
+                revision: 4,
+                restart: false,
+                rebind: false
+            })
+        ).toThrow('Invalid model response field.')
+    })
+
+    it('parses an unpriced execution identity and native option hints', () => {
+        const fixture: JsonObject = {
+            engine: 'llamacpp',
+            modelId: 'model',
+            status: 'unknown',
+            estimate: { status: 'unknown' },
+            configurationKeyReason: 'native-fit',
+            executionKey: 'a'.repeat(64),
+            nativeOptions: [
+                { name: 'spec-type', kind: 'choice', choices: ['none', 'draft-mtp'] },
+                { name: 'cache-prompt', kind: 'switch' },
+                { name: 'moe-cache-mib', kind: 'number' }
+            ],
+            unreportedLaunchOptions: ['cache-ram']
+        }
+        const result = parseInspectModel(fixture)
+        expect(result.executionKey).toBe('a'.repeat(64))
+        expect(result.configurationKeyReason).toBe('native-fit')
+        expect(result.configurationKey).toBeUndefined()
+        expect(result.nativeOptions).toEqual(fixture.nativeOptions)
+        expect(result.unreportedLaunchOptions).toEqual(['cache-ram'])
+        expect(() =>
+            parseInspectModel({ ...fixture, unreportedLaunchOptions: ['spec-type'] })
+        ).toThrow('Invalid native option list.')
+        expect(() =>
+            parseInspectModel({ ...fixture, unreportedLaunchOptions: ['cache-ram', 'cache-ram'] })
+        ).toThrow('Invalid native option list.')
+        expect(() =>
+            parseInspectModel({ ...fixture, unreportedLaunchOptions: ['--cache-ram'] })
+        ).toThrow('Invalid unreported launch option.')
+        expect(() => parseInspectModel({ ...fixture, nativeOptions: null })).toThrow(
+            'Invalid native option list.'
+        )
+        expect(() => parseInspectModel({ ...fixture, unexpectedFitField: true })).toThrow(
+            'Invalid model response field.'
+        )
+        expect(() =>
+            parseInspectModel({
+                ...fixture,
+                configurationKey: 'b'.repeat(64),
+                configurationPools: ['host']
+            })
+        ).toThrow()
+        expect(() =>
+            parseInspectModel({ ...fixture, nativeOptions: [{ name: 'fit', kind: 'unknown' }] })
+        ).toThrow()
+        expect(() =>
+            parseInspectModel({
+                ...fixture,
+                nativeOptions: [{ name: 'fit', kind: 'switch', other: 1 }]
+            })
+        ).toThrow()
+        expect(
+            parseInspectModel({ ...fixture, nativeOptions: [], unreportedLaunchOptions: [] })
+                .nativeOptions
+        ).toEqual([])
+        expect(
+            parseInspectModel({ ...fixture, nativeOptions: null, unreportedLaunchOptions: [] })
+                .nativeOptions
+        ).toBeUndefined()
+    })
+
+    it.each<JsonValue>([
+        { fit: 'on', gpu: { mode: 'auto' } },
+        { fitCtx: 4096 },
+        { fit: 'on', fitCtx: 16777217 },
+        { fit: 'on', fitTarget: '512,' },
+        { fit: 'off', fitTarget: '512' }
+    ])('rejects invalid native fit selection %j', requested => {
+        expect(() =>
+            parseEngineSettings({
+                ...baseline,
+                settings: {
+                    ...baseline.settings,
+                    modelLoads: [{ modelId: 'model', requested }]
+                }
+            })
+        ).toThrow()
+    })
+
     it('preserves running native build metadata while rejecting unknown inspection keys', () => {
         const fixture = {
             ...memoryPlanInspectionFixture(),

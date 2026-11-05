@@ -285,7 +285,7 @@ func (e *Executor) recordStatedMemory(ctx context.Context, p modelconfig.ClearSt
 	if err != nil {
 		return modelconfig.InspectResult{}, err
 	}
-	result, err := e.InspectModel(ctx, modelconfig.InspectRequest{Engine: p.Engine, ModelID: p.ModelID})
+	result, err := e.inspectModel(ctx, modelconfig.InspectRequest{Engine: p.Engine, ModelID: p.ModelID}, false)
 	if err != nil {
 		return result, err
 	}
@@ -375,12 +375,13 @@ func (m *Manager) statedMemory(ctx context.Context, msg *Message) {
 
 // InspectModel is a target-local read. The broker supplies authenticated node
 // identity after this reply; a worker never echoes a caller's target as proof.
-// Artifact inspection reads bounded local metadata and samples without native,
-// network, lifecycle, qualification or settings effects.
+// Explicit inspection may discover bounded native help while Available. Artifact
+// reads, estimation and internal statement validation never initialize native work.
 func (e *Executor) InspectModel(ctx context.Context, p modelconfig.InspectRequest) (modelconfig.InspectResult, error) {
-	// Artifact inspection and advisory estimation share the operation budget.
-	ctx, cancel := context.WithTimeout(ctx, modelInspectionBudget)
-	defer cancel()
+	return e.inspectModel(ctx, p, true)
+}
+
+func (e *Executor) inspectModel(ctx context.Context, p modelconfig.InspectRequest, discover bool) (modelconfig.InspectResult, error) {
 	if err := p.Validate(); err != nil {
 		return modelconfig.InspectResult{}, modelSettingsParamsError(err)
 	}
@@ -390,6 +391,21 @@ func (e *Executor) InspectModel(ctx context.Context, p modelconfig.InspectReques
 	if err := ctx.Err(); err != nil {
 		return modelconfig.InspectResult{}, err
 	}
+	if discover && p.Engine == "llamacpp" && e.reg != nil && e.downloads != nil {
+		if st, err := e.state(p.Engine); err == nil {
+			_, known := e.nativeOptions(ctx, st)
+			ctx = context.WithValue(ctx, nativeHelpDiscoveryKey{}, known)
+			if known {
+				if build, err := nativeBuildID(ctx, st); err == nil {
+					ctx = context.WithValue(ctx, nativeHelpInspectionKey{}, build)
+				}
+			}
+		}
+	}
+	// Help has its own bounded read; a failed read must leave time for manual
+	// entry and metadata inspection rather than consume their entire budget.
+	ctx, cancel := context.WithTimeout(ctx, modelInspectionBudget)
+	defer cancel()
 	var advisory modelEstimateInput
 	result, err := e.inspectModelArtifacts(ctx, p, &advisory)
 	if err != nil {
@@ -415,6 +431,14 @@ func (e *Executor) InspectModel(ctx context.Context, p modelconfig.InspectReques
 		}
 	}
 	e.modelMemoryProfiles.attach(&result)
+	if build, _ := ctx.Value(nativeHelpInspectionKey{}).(string); build != "" {
+		st, stateErr := e.state(p.Engine)
+		current, buildErr := nativeBuildID(ctx, st)
+		blocked, known := e.nodeProjection.managementBlocked()
+		if stateErr != nil || buildErr != nil || current != build || !known || blocked {
+			result.NativeOptions, result.UnreportedLaunchOptions = nil, nil
+		}
+	}
 	if err := completeModelInspectionReply(&result); err != nil {
 		return modelconfig.InspectResult{}, err
 	}
@@ -424,6 +448,9 @@ func (e *Executor) InspectModel(ctx context.Context, p modelconfig.InspectReques
 func completeModelInspectionReply(result *modelconfig.InspectResult) error {
 	// The final public reply keeps its existing ceiling. An advisory result
 	// cannot turn a successful artifact inspection into a payload-size failure.
+	if err := modelconfig.CheckPayloadSize(*result); err != nil {
+		result.NativeOptions, result.UnreportedLaunchOptions = nil, nil
+	}
 	if err := modelconfig.CheckPayloadSize(*result); err != nil {
 		result.Estimate = modelEstimateUnknown("estimate omitted: complete inspection reply size limit")
 	}

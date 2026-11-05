@@ -14,6 +14,67 @@ import (
 
 func testPointer[T any](value T) *T { return &value }
 
+func TestInspectGPUSelectionTransport(t *testing.T) {
+	r := InspectResult{Engine: "llamacpp", ModelID: "model", Status: "unknown", Estimate: Estimate{Status: "unknown"}, ConfigurationKeyReason: "gpu-selection", ExecutionKey: strings.Repeat("a", 64)}
+	got, err := DecodeInspectResult(mustJSON(t, r))
+	if err != nil || !reflect.DeepEqual(got, r) {
+		t.Fatalf("transport=%+v err=%v", got, err)
+	}
+	r.ConfigurationPools = []string{"host"}
+	if r.Validate() == nil {
+		t.Fatal("GPU selection accepted a finite scope")
+	}
+}
+
+func TestInspectNativeFitAndNativeOptionsTransport(t *testing.T) {
+	result := InspectResult{Engine: "llamacpp", ModelID: "model", Status: "unknown", Estimate: Estimate{Status: "unknown"}, ConfigurationKeyReason: "native-fit", ExecutionKey: strings.Repeat("a", 64), NativeOptions: []NativeOption{{Name: "fit", Kind: "choice", Choices: []string{"on", "off"}}}, UnreportedLaunchOptions: []string{"cache-ram"}}
+	got, err := DecodeInspectResult(mustJSON(t, result))
+	if err != nil || !reflect.DeepEqual(got, result) {
+		t.Fatalf("transport=%+v err=%v", got, err)
+	}
+	clone := result.Clone()
+	clone.NativeOptions[0].Choices[0] = "changed"
+	clone.UnreportedLaunchOptions[0] = "changed"
+	if result.NativeOptions[0].Choices[0] != "on" || result.UnreportedLaunchOptions[0] != "cache-ram" {
+		t.Fatal("native option clone aliases source")
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*InspectResult)
+	}{
+		{"finite and execution keys", func(r *InspectResult) {
+			r.ConfigurationKey = strings.Repeat("b", 64)
+			r.ConfigurationPools = []string{"host"}
+		}},
+		{"execution without unpriced reason", func(r *InspectResult) { r.ConfigurationKeyReason = "not-applied" }},
+		{"invalid execution digest", func(r *InspectResult) { r.ExecutionKey = "bad" }},
+		{"unknown kind", func(r *InspectResult) { r.NativeOptions[0].Kind = "unknown" }},
+		{"invalid flag name", func(r *InspectResult) { r.NativeOptions[0].Name = "--fit" }},
+		{"duplicate hints", func(r *InspectResult) { r.NativeOptions = append(r.NativeOptions, r.NativeOptions[0]) }},
+		{"switch with choices", func(r *InspectResult) { r.NativeOptions[0].Kind = "switch" }},
+		{"warning without known help", func(r *InspectResult) { r.NativeOptions = nil }},
+		{"warning for reported option", func(r *InspectResult) { r.UnreportedLaunchOptions = []string{"fit"} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			invalid := result.Clone()
+			tc.mutate(&invalid)
+			if _, err := DecodeInspectResult(mustJSON(t, invalid)); err == nil {
+				t.Fatal("accepted invalid native inspection")
+			}
+		})
+	}
+}
+
+func TestInspectNativeOptionsUnknownAndKnownEmpty(t *testing.T) {
+	for _, options := range [][]NativeOption{nil, {}} {
+		result := InspectResult{Engine: "llamacpp", ModelID: "model", Status: "unknown", Estimate: Estimate{Status: "unknown"}, NativeOptions: options}
+		got, err := DecodeInspectResult(mustJSON(t, result))
+		if err != nil || (got.NativeOptions == nil) != (options == nil) {
+			t.Fatalf("known/unknown help changed: %+v, %v", got.NativeOptions, err)
+		}
+	}
+}
+
 func TestDecodeModelChangeCPUExpertsSelection(t *testing.T) {
 	for _, selection := range []string{
 		`"set":{"cpuExperts":{"mode":"none"}}`,

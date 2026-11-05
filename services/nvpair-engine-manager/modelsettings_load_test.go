@@ -146,6 +146,568 @@ func convertModelLoadFixture(t *testing.T, f modelLoadFixture) Runtime {
 	return conversion.Runtime
 }
 
+func TestTypedLlamaNativeFit(t *testing.T) {
+	f := newAppliedKeyFixture(t)
+	rt := f.st.plat.Runtime
+	on, margin, floor := "on", "512", int32(4096)
+	rt.ModelLoads[0].Requested.Fit = &on
+	rt.ModelLoads[0].Requested.FitTarget = &margin
+	rt.ModelLoads[0].Requested.FitCtx = &floor
+	command, err := launchForState(f.st, rt.Port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var inputs map[string]modelEstimateInput
+	prepared, err := compileTypedLlamaInputs(context.Background(), f.st, command, rt, false, &inputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sections, err := parseLlamaServingPresetAllowing(prepared.Snapshot, modelLoadAllowedPresetKeys(prepared.ModelLoads))
+	if err != nil {
+		t.Fatal(err)
+	}
+	section := sections[f.request.ModelID]
+	if section["fit"] != "on" || section["fit-target"] != "512" || section["fit-ctx"] != "4096" {
+		t.Fatalf("native fit options=%v", section)
+	}
+	rt.ModelLoads = prepared.ModelLoads
+	f.st.plat.Runtime = rt
+	result := inspectAppliedKeyFixture(t, f)
+	if result.ConfigurationKeyReason != "native-fit" || result.ConfigurationKey != "" || result.ExecutionKey == "" || len(result.ConfigurationPools) != 0 {
+		t.Fatalf("native fit identity=%+v", result)
+	}
+	if result.Estimate.Status != "unknown" || !slices.Contains(result.Estimate.Unknowns, "Native fit chooses placement when the model loads.") {
+		t.Fatalf("native fit estimate=%+v", result.Estimate)
+	}
+	if err := result.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	capture := f.ex.newModelBufferCapture(f.st, "llamacpp", prepared, inputs, command, keyTestMemoryContext())
+	if capture != nil {
+		defer capture.retire()
+		if capture.frozen[f.request.ModelID] != nil {
+			t.Fatal("native fit received finite buffer capture")
+		}
+	}
+	changedMargin := "1024"
+	rt.ModelLoads[0].Requested.FitTarget = &changedMargin
+	changedPrepared, err := compileTypedLlamaInputs(context.Background(), f.st, command, rt, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt.ModelLoads = changedPrepared.ModelLoads
+	f.st.plat.Runtime = rt
+	changed := inspectAppliedKeyFixture(t, f)
+	if changed.ExecutionKey == "" || changed.ExecutionKey == result.ExecutionKey {
+		t.Fatalf("changed margin did not change execution identity: before=%s after=%s", result.ExecutionKey, changed.ExecutionKey)
+	}
+}
+
+func TestNativeOptionsGPUSelectionInheritedPreviewRefusesBeforeHelp(t *testing.T) {
+	for _, inherited := range []string{"Auto", "selection"} {
+		t.Run(inherited, func(t *testing.T) {
+			f := newModelLoadFixture(t)
+			rt := convertModelLoadFixture(t, f)
+			load := &rt.ModelLoads[0]
+			load.Resolved = nil
+			selected := modelconfig.RequestedLoad{}
+			if inherited == "Auto" {
+				load.Requested.GPU = &modelconfig.GPU{Mode: "auto"}
+				selected.ExtraOptions = map[string]string{"tensor-split": "1,1"}
+			} else {
+				load.Requested.ExtraOptions = map[string]string{"tensor-split": "1,1"}
+				selected.GPU = &modelconfig.GPU{Mode: "auto"}
+			}
+			f.st.plat.Runtime = rt
+			marker, _ := nativeOptionsFixture(t, f.ex, f.st)
+			request := settingsRequest(t, f.ex)
+			request.ModelChange = &modelconfig.ModelChange{ModelID: load.ModelID, ExpectedPolicyRevision: "0", Load: &modelconfig.LoadPatch{Set: selected}}
+			memory := &autoTestMemoryOwner{}
+			ctx := context.WithValue(context.Background(), modelAutoOperationKey{}, modelAutoOperation{Memory: memory})
+			preview, err := f.ex.PreviewLaunch(request, ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, message := range preview.Errors {
+				found = found || strings.Contains(message, "Reviewed Auto chooses the GPU; remove tensor-split or choose another GPU mode.")
+			}
+			if !found || memory.calls != 0 {
+				t.Fatalf("preview errors=%v memory reads=%d", preview.Errors, memory.calls)
+			}
+			requireNativeHelpSpawns(t, marker, 0)
+		})
+	}
+}
+
+func TestNativeOptionsInspectPublishesLaunchWarnings(t *testing.T) {
+	var marker, library string
+	f := newAppliedKeyFixture(t, func(f inspectionFixture) {
+		marker, library = nativeOptionsFixture(t, f.ex, f.st)
+		f.st.plat.Runtime.EditableLaunch.FixedArgs = []string{"--cors-origins", "http://fixture.invalid"}
+		f.st.plat.Runtime.Args = append(f.st.plat.Runtime.Args, "--cors-origins", "http://fixture.invalid")
+	})
+	// Observed running metadata is deliberately unrelated to the selected file.
+	f.st.buildID = "running-build-is-not-the-selected-file"
+	result := inspectAppliedKeyFixture(t, f)
+	if len(result.NativeOptions) != 4 || result.NativeOptions[0].Name != "cache-prompt" || result.NativeOptions[3].Name != "spec-type" || !reflect.DeepEqual(result.NativeOptions[3].Choices, []string{"none", "draft-mtp", "ngram-mod"}) {
+		t.Fatalf("public native hints = %+v", result.NativeOptions)
+	}
+	for _, key := range []string{"cache-ram", "cors-origins", "ctx-size", "fit", "kv-unified", "load-on-startup", "model", "models-preset", "parallel", "sleep-idle-seconds"} {
+		if !slices.Contains(result.UnreportedLaunchOptions, key) {
+			t.Fatalf("public warning omitted %s: %v", key, result.UnreportedLaunchOptions)
+		}
+	}
+	if !slices.IsSorted(result.UnreportedLaunchOptions) {
+		t.Fatalf("warnings not sorted: %v", result.UnreportedLaunchOptions)
+	}
+	if result.ConfigurationKey == "" {
+		t.Fatalf("missing flags refused a finite typed launch: %+v", result)
+	}
+	if err := result.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	requireNativeHelpSpawns(t, marker, 1)
+	again := inspectAppliedKeyFixture(t, f)
+	if !reflect.DeepEqual(again.NativeOptions, result.NativeOptions) || !reflect.DeepEqual(again.UnreportedLaunchOptions, result.UnreportedLaunchOptions) {
+		t.Fatal("inspection did not reuse the selected build's published evidence")
+	}
+	requireNativeHelpSpawns(t, marker, 1)
+	data, err := os.ReadFile(library)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, library, data)
+	info, err := os.Stat(library)
+	if err != nil {
+		t.Fatal(err)
+	}
+	touch := info.ModTime().Add(time.Hour)
+	if err := os.Chtimes(library, touch, touch); err != nil {
+		t.Fatal(err)
+	}
+	touched := inspectAppliedKeyFixture(t, f)
+	if !reflect.DeepEqual(touched.NativeOptions, result.NativeOptions) {
+		t.Fatal("same-byte/touched inspection lost native hints")
+	}
+	requireNativeHelpSpawns(t, marker, 1)
+	writeTestFile(t, library, append(data, []byte("new selected library content")...))
+	changed := inspectAppliedKeyFixture(t, f)
+	if !reflect.DeepEqual(changed.NativeOptions, result.NativeOptions) || !slices.Contains(changed.UnreportedLaunchOptions, "cache-ram") {
+		t.Fatalf("changed-build inspection failed to refresh hints and warnings: %+v", changed)
+	}
+	requireNativeHelpSpawns(t, marker, 2)
+	f.ex.nodeProjection.set(nodeProjection{ManagementBlocked: true})
+	paused := inspectAppliedKeyFixture(t, f)
+	if paused.NativeOptions != nil || len(paused.UnreportedLaunchOptions) != 0 {
+		t.Fatalf("paused inspection published native hints: %+v", paused)
+	}
+	requireNativeHelpSpawns(t, marker, 2)
+}
+
+func nativeOptionsPreviewRequest(t *testing.T, f inspectionFixture, extra map[string]string) settings.Request {
+	t.Helper()
+	launch, err := f.ex.LaunchSettings("llamacpp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return settings.Request{Engine: "llamacpp", Settings: settings.ConfigFromLaunch(launch, 54301), ModelChange: &modelconfig.ModelChange{ModelID: f.request.ModelID, ExpectedPolicyRevision: "0", Load: &modelconfig.LoadPatch{Set: modelconfig.RequestedLoad{ExtraOptions: extra}}}}
+}
+
+func TestNativeOptionsPreviewDiscoversAndValidatesSelectedBuild(t *testing.T) {
+	var marker string
+	f := newAppliedKeyFixture(t, func(f inspectionFixture) {
+		marker, _ = nativeOptionsFixture(t, f.ex, f.st)
+	})
+	preview, err := f.ex.PreviewLaunch(nativeOptionsPreviewRequest(t, f, map[string]string{"spec-type": "draft-mtp"}))
+	if err != nil || len(preview.Errors) != 0 {
+		t.Fatalf("reported extra preview = %+v, err=%v", preview, err)
+	}
+	requireNativeHelpSpawns(t, marker, 1)
+	preview, err = f.ex.PreviewLaunch(nativeOptionsPreviewRequest(t, f, map[string]string{"expert-cache": "auto"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := preview.Errors["modelLoads.extraOptions"]; !strings.Contains(got, "This llama.cpp build does not report --expert-cache.") {
+		t.Fatalf("unsupported extra preview errors = %v", preview.Errors)
+	}
+	requireNativeHelpSpawns(t, marker, 1)
+	f.ex.nodeProjection.set(nodeProjection{ManagementBlocked: true})
+	preview, err = f.ex.PreviewLaunch(nativeOptionsPreviewRequest(t, f, map[string]string{"expert-cache": "auto"}))
+	if err != nil || len(preview.Errors) != 0 {
+		t.Fatalf("paused manual preview reused withheld hints: %+v, err=%v", preview, err)
+	}
+	requireNativeHelpSpawns(t, marker, 1)
+	if f.st.running || f.st.proc != nil {
+		t.Fatal("help preview activated an engine")
+	}
+}
+
+func TestNativeOptionsPaddedAliasesPreview(t *testing.T) {
+	var marker string
+	f := newAppliedKeyFixture(t, func(f inspectionFixture) {
+		marker, _ = nativeOptionsFixture(t, f.ex, f.st)
+		writeTestFile(t, os.Getenv("PAIR_NATIVE_HELP_FILE"), []byte(nativeHelpPaddedAliases))
+	})
+	for _, extra := range []map[string]string{
+		{"device": "CPU"},
+		{"split-mode": "layer"},
+		{"tensor-split": "1,1"},
+		{"main-gpu": "0"},
+	} {
+		preview, err := f.ex.PreviewLaunch(nativeOptionsPreviewRequest(t, f, extra))
+		if err != nil || len(preview.Errors) != 0 {
+			t.Fatalf("padded alias preview for %v = %+v, err=%v", extra, preview, err)
+		}
+	}
+	requireNativeHelpSpawns(t, marker, 1)
+}
+
+func TestNativeOptionsCompilerUsesOnlyCompletedSameBuildEvidence(t *testing.T) {
+	var marker, library string
+	f := newAppliedKeyFixture(t, func(f inspectionFixture) {
+		marker, library = nativeOptionsFixture(t, f.ex, f.st)
+	})
+	rt := f.st.plat.Runtime
+	rt.ModelLoads = modelconfig.CloneLoads(rt.ModelLoads)
+	rt.ModelLoads[0].Requested.ExtraOptions = map[string]string{"expert-cache": "auto"}
+	command, err := launchForState(f.st, rt.Port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compile := func() error {
+		t.Helper()
+		var inputs map[string]modelEstimateInput
+		_, err := compileTypedLlamaInputs(context.Background(), f.st, command, rt, false, &inputs)
+		if err == nil && inputs[f.request.ModelID].SWAFull != nil {
+			t.Fatal("help spelling established an inherited SWA allocation default")
+		}
+		return err
+	}
+	if err := compile(); err != nil {
+		t.Fatalf("unknown build refused manual entry: %v", err)
+	}
+	requireNativeHelpSpawns(t, marker, 0)
+	if _, known := f.ex.nativeOptions(context.Background(), f.st); !known {
+		t.Fatal("fixture help unavailable")
+	}
+	if err := compile(); err == nil || !strings.Contains(err.Error(), "This llama.cpp build does not report --expert-cache.") {
+		t.Fatalf("known build accepted an unreported extra: %v", err)
+	}
+	requireNativeHelpSpawns(t, marker, 1)
+	// A different selected build is unknown even if running metadata still
+	// names the build whose spelling was discovered previously.
+	f.st.buildID = requireNativeBuildID(t, f.st)
+	writeTestFile(t, library, []byte("a different selected build"))
+	if err := compile(); err != nil {
+		t.Fatalf("compiler reused another build's help: %v", err)
+	}
+	requireNativeHelpSpawns(t, marker, 1)
+}
+
+func TestNativeOptionsUnknownPreviewAllowsManualEntry(t *testing.T) {
+	test := func(name string, configure func(*Executor), fail bool, spawns int) {
+		t.Run(name, func(t *testing.T) {
+			var marker string
+			f := newAppliedKeyFixture(t, func(f inspectionFixture) {
+				marker, _ = nativeOptionsFixture(t, f.ex, f.st)
+			})
+			configure(f.ex)
+			if fail {
+				t.Setenv("PAIR_NATIVE_HELP_FAILURE", "1")
+			}
+			preview, err := f.ex.PreviewLaunch(nativeOptionsPreviewRequest(t, f, map[string]string{"expert-cache": "auto"}))
+			if err != nil || len(preview.Errors) != 0 {
+				t.Fatalf("unknown-help manual preview = %+v, err=%v", preview, err)
+			}
+			requireNativeHelpSpawns(t, marker, spawns)
+			result := inspectAppliedKeyFixture(t, f)
+			if result.NativeOptions != nil || len(result.UnreportedLaunchOptions) != 0 {
+				t.Fatalf("unknown-help inspection = %+v", result)
+			}
+			requireNativeHelpSpawns(t, marker, spawns)
+		})
+	}
+	test("paused", func(e *Executor) { e.nodeProjection.set(nodeProjection{ManagementBlocked: true}) }, false, 0)
+	test("unknown projection", func(e *Executor) { e.nodeProjection = nodeProjectionStore{} }, false, 0)
+	test("failed help", func(*Executor) {}, true, 1)
+}
+
+func TestTypedLlamaExtraOptions(t *testing.T) {
+	layers := int32(4)
+	request := modelconfig.RequestedLoad{GPU: &modelconfig.GPU{Mode: "cpu"}, ExtraOptions: map[string]string{"expert-cache": "auto", "spec-type": "draft-mtp", "moe-cache-mib": "2048"}}
+	options, _, err := typedLlamaModelOptions("model", request, &layers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := typedLlamaPreset(map[string]map[string]string{"model": options})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := parseLlamaServingPresetAllowing(data, modelLoadAllowedPresetKeys([]modelconfig.ModelLoad{{ModelID: "model", Requested: request}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range request.ExtraOptions {
+		if parsed["model"][key] != want {
+			t.Fatalf("%s=%q, want %q", key, parsed["model"][key], want)
+		}
+	}
+	if strings.Index(string(data), "expert-cache = auto") > strings.Index(string(data), "moe-cache-mib = 2048") {
+		t.Fatal("extras not sorted")
+	}
+	if _, err := parseLlamaServingPreset(data); err == nil {
+		t.Fatal("operator parser accepted unknown fork option")
+	}
+	for _, tc := range []struct{ key, value, reason string }{
+		{"ctx-size", "4096", "Use the typed field for ctx-size."},
+		{"alias", "x", "PAIR owns alias."},
+		{"mmproj-auto", "false", "mmproj-auto changes allocation and is not accepted."},
+		{"moe-cache-mib", "invalid", "moe-cache-mib"},
+		{"tensor-split", "1,1", "Reviewed Auto chooses the GPU; remove tensor-split or choose another GPU mode."},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			r := modelconfig.RequestedLoad{GPU: &modelconfig.GPU{Mode: "cpu"}, ExtraOptions: map[string]string{tc.key: tc.value}}
+			if tc.key == "tensor-split" {
+				r.GPU.Mode = "auto"
+			}
+			_, _, err := typedLlamaModelOptions("model", r, &layers)
+			if err == nil || !strings.Contains(err.Error(), tc.reason) {
+				t.Fatalf("refusal=%v, want %s", err, tc.reason)
+			}
+		})
+	}
+}
+
+func TestConvertTypedLlamaExtraOptions(t *testing.T) {
+	extras := map[string]string{"spec-type": "draft-mtp", "moe-cache-mib": "2048", "expert-cache": "auto", "device": "CUDA0,CUDA1", "split-mode": "layer"}
+	r, err := convertTypedLlamaOptions("model", extras)
+	if err != nil || !reflect.DeepEqual(r.ExtraOptions, extras) {
+		t.Fatalf("converted=%+v err=%v", r, err)
+	}
+	for _, key := range []string{"mmproj-auto", "alias"} {
+		if _, err := convertTypedLlamaOptions("model", map[string]string{key: "false"}); err == nil || !strings.Contains(err.Error(), key) {
+			t.Fatalf("%s refusal=%v", key, err)
+		}
+	}
+}
+
+func TestConvertTypedLlamaExtraOptionsPreset(t *testing.T) {
+	f := newModelLoadFixture(t)
+	data, err := os.ReadFile(f.source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append(data, []byte("expert-cache = auto\nspec-type = draft-mtp\nmoe-cache-mib = 2048\ndevice = CUDA0,CUDA1\nsplit-mode = layer\n")...)
+	writeTestFile(t, f.source, data)
+	rt := convertModelLoadFixture(t, f)
+	for _, load := range rt.ModelLoads {
+		if load.ModelID != "medium-model" {
+			continue
+		}
+		want := map[string]string{"expert-cache": "auto", "spec-type": "draft-mtp", "moe-cache-mib": "2048", "device": "CUDA0,CUDA1", "split-mode": "layer"}
+		if !reflect.DeepEqual(load.Requested.ExtraOptions, want) {
+			t.Fatalf("converted extras=%v", load.Requested.ExtraOptions)
+		}
+		return
+	}
+	t.Fatal("converted model missing")
+}
+
+func TestTypedLlamaGPUSelection(t *testing.T) {
+	f := newAppliedKeyFixture(t)
+	rt := f.st.plat.Runtime
+	layers := int32(1)
+	rt.ModelLoads[0].Requested.GPU = &modelconfig.GPU{Mode: "layers", Layers: &layers}
+	rt.ModelLoads[0].Requested.ExtraOptions = map[string]string{"device": "CUDA1"}
+	command, err := launchForState(f.st, rt.Port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var inputs map[string]modelEstimateInput
+	prepared, err := compileTypedLlamaInputs(context.Background(), f.st, command, rt, false, &inputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sections, err := parseLlamaServingPresetAllowing(prepared.Snapshot, modelLoadAllowedPresetKeys(prepared.ModelLoads))
+	if err != nil || sections[f.request.ModelID]["device"] != "CUDA1" {
+		t.Fatalf("sections=%v err=%v", sections, err)
+	}
+	rt.ModelLoads = prepared.ModelLoads
+	f.st.plat.Runtime = rt
+	result := inspectAppliedKeyFixture(t, f)
+	if result.ConfigurationKeyReason != "gpu-selection" || result.ConfigurationKey != "" || result.ExecutionKey == "" || len(result.ConfigurationPools) != 0 {
+		t.Fatalf("identity=%+v", result)
+	}
+	if result.Estimate.Status != "unknown" || !slices.Contains(result.Estimate.Unknowns, "GPU selection is not covered by the estimate: device.") {
+		t.Fatalf("estimate=%+v", result.Estimate)
+	}
+	if err := result.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	capture := f.ex.newModelBufferCapture(f.st, "llamacpp", prepared, inputs, command, keyTestMemoryContext())
+	if capture != nil {
+		defer capture.retire()
+		if capture.frozen[f.request.ModelID] != nil {
+			t.Fatal("GPU selection received finite capture")
+		}
+	}
+	descriptors, err := modelInspectionOptions(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index := slices.IndexFunc(descriptors, func(d modelconfig.OptionDescriptor) bool { return d.Field == "extraOptions" })
+	if index < 0 || descriptors[index].Kind != "options" || !reflect.DeepEqual(descriptors[index].NonPortableKeys, []string{"device", "main-gpu", "split-mode", "tensor-split"}) {
+		t.Fatal("GPU portability descriptor missing")
+	}
+}
+
+func TestExtraOptionUnknownNeverFits(t *testing.T) {
+	now := time.Now()
+	in := autoTestInput()
+	in.Memory = autoTestMemory(now)
+	state := modelEstimateState{now: func() time.Time { return now }, run: autoTestEstimate}
+	control := state.estimate(context.Background(), in)
+	if control.CapacityFit != "fits" || control.FreeFit != "fits" {
+		t.Fatalf("finite control does not fit: %+v", control)
+	}
+	in.Allocation.Options.ExtraOptions = map[string]string{"expert-cache": "auto"}
+	estimate := state.estimate(context.Background(), in)
+	if estimate.Status != "unknown" || estimate.CapacityFit != "unknown" || estimate.FreeFit != "unknown" || !slices.Contains(estimate.Unknowns, "Options not priced: expert-cache.") {
+		t.Fatalf("estimate=%+v", estimate)
+	}
+}
+
+func TestGPUSelectionSharedAutoPreviewNamesProfiles(t *testing.T) {
+	f := newModelLoadFixture(t)
+	rt := convertModelLoadFixture(t, f)
+	rt.ModelLoads[0].Requested.ExtraOptions = map[string]string{"main-gpu": "0"}
+	rt.ModelLoads[1].Requested.GPU = &modelconfig.GPU{Mode: "auto"}
+	other := rt.ModelLoads[1].Resolved
+	layers := int32(1)
+	other.GPU = modelconfig.GPU{Mode: "layers", Layers: &layers}
+	other.Options.GPU = &other.GPU
+	other.ResolverRevision, other.ReviewedInputID = "auto/test", "synthetic-reviewed-input"
+	other.DeviceBinding = autoTestDeviceBinding()
+	memory := &autoTestMemoryOwner{}
+	ctx := context.WithValue(context.Background(), modelAutoOperationKey{}, modelAutoOperation{Memory: memory})
+	_, err := compileTypedLlamaInputs(ctx, f.st, typedFixtureCommand(t, f, rt), rt, false)
+	want := rt.ModelLoads[0].ModelID + " selects GPUs and cannot share an engine with reviewed Auto profile " + rt.ModelLoads[1].ModelID + "; set that profile's GPU mode to layers."
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("refusal=%v, want %s", err, want)
+	}
+	if memory.calls != 0 {
+		t.Fatalf("memory read before refusal: %d", memory.calls)
+	}
+}
+
+func TestTypedLlamaNativeFitValidation(t *testing.T) {
+	on, floor := "on", int32(4096)
+	for _, tc := range []struct {
+		name string
+		load modelconfig.RequestedLoad
+	}{
+		{"reviewed Auto", modelconfig.RequestedLoad{Fit: &on, GPU: &modelconfig.GPU{Mode: "auto"}}},
+		{"fit context without fit", modelconfig.RequestedLoad{FitCtx: &floor}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, _, err := typedLlamaModelOptions("model", tc.load, nil); err == nil {
+				t.Fatal("accepted invalid native fit")
+			}
+		})
+	}
+}
+
+func TestTypedLlamaNativeFitDescriptors(t *testing.T) {
+	options, err := llamaModelSettingsOptions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		field    string
+		portable bool
+	}{{"fit", true}, {"fitTarget", false}, {"fitCtx", true}} {
+		t.Run(tc.field, func(t *testing.T) {
+			for _, option := range options {
+				if option.Descriptor.Field == tc.field {
+					if !option.Descriptor.Supported || option.Descriptor.Portable != tc.portable || option.Descriptor.Owner != "model-load" {
+						t.Fatalf("descriptor=%+v", option.Descriptor)
+					}
+					if err := option.Descriptor.Validate(); err != nil {
+						t.Fatal(err)
+					}
+					return
+				}
+			}
+			t.Fatal("fit descriptor absent")
+		})
+	}
+}
+
+func TestTypedLlamaNativeFitOffPreservesFiniteOptions(t *testing.T) {
+	off := "off"
+	for _, requested := range []modelconfig.RequestedLoad{{GPU: &modelconfig.GPU{Mode: "cpu"}}, {Fit: &off, GPU: &modelconfig.GPU{Mode: "cpu"}}} {
+		options, _, err := typedLlamaModelOptions("model", requested, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if options["fit"] != "off" || options["kv-unified"] != "false" || options["load-on-startup"] != "false" || options["ctx-size"] != "8192" || options["gpu-layers"] != "0" {
+			t.Fatalf("finite defaults changed: %v", options)
+		}
+		if _, ok := options["fit-target"]; ok {
+			t.Fatal("finite load acquired fit target")
+		}
+	}
+}
+
+func TestTypedLlamaNativeFitReparseScope(t *testing.T) {
+	data := []byte("[*]\nfit = off\n[model]\nfit = on\nfit-target = 512\n")
+	if _, err := parseLlamaServingPreset(data); err == nil {
+		t.Fatal("strict operator parser accepted native fit")
+	}
+	for _, tc := range []struct{ name, data string }{
+		{"wrong section", "[other]\nfit = on\n"},
+		{"unvalidated key", "[model]\nfit = on\nctx-checkpoints = 2\n"},
+		{"duplicate alias", "[model]\nfit = on\nfit = off\n"},
+		{"inline comment", "[model]\nfit = on # comment\n"},
+		{"substitution", "[model]\nfit-target = ${MARGIN}\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := parseLlamaServingPresetAllowing([]byte(tc.data), map[string]map[string]bool{"model": {"fit": true, "fit-target": true}}); err == nil {
+				t.Fatal("allowing parser lost strict syntax or scope")
+			}
+		})
+	}
+}
+
+func TestConvertTypedLlamaNativeFit(t *testing.T) {
+	f := newModelLoadFixture(t)
+	writeTestFile(t, f.source, []byte("[*]\nfit = off\nload-on-startup = false\n[weak-model]\nmodel = weak.gguf\nctx-size = 4096\nparallel = 1\ngpu-layers = 0\nfit = on\nfit-target = 1024\nfit-ctx = 2048\n[medium-model]\nmodel = medium.gguf\nctx-size = 16384\nparallel = 2\ngpu-layers = 0\n"))
+	rt := convertModelLoadFixture(t, f)
+	for _, load := range rt.ModelLoads {
+		if load.ModelID == "weak-model" {
+			if load.Requested.Fit == nil || *load.Requested.Fit != "on" || load.Requested.FitTarget == nil || *load.Requested.FitTarget != "1024" || load.Requested.FitCtx == nil || *load.Requested.FitCtx != 2048 {
+				t.Fatalf("conversion lost native fit: %+v", load.Requested)
+			}
+			return
+		}
+	}
+	t.Fatal("conversion omitted weak-model")
+}
+
+func TestConvertTypedLlamaNativeFitAliases(t *testing.T) {
+	for _, tc := range []struct{ value, want string }{
+		{"on", "on"}, {"true", "on"}, {"1", "on"}, {"off", "off"}, {"false", "off"}, {"0", "off"},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			got, err := convertTypedLlamaOptions("model", map[string]string{"fit": tc.value})
+			if err != nil || got.Fit == nil || *got.Fit != tc.want {
+				t.Fatalf("fit=%v, err=%v, want=%s", got.Fit, err, tc.want)
+			}
+		})
+	}
+}
+
 func typedFixtureCommand(t *testing.T, f modelLoadFixture, rt Runtime) launchCommand {
 	t.Helper()
 	vars := f.st.pathVars()

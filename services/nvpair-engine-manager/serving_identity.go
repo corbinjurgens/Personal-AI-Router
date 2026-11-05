@@ -123,14 +123,19 @@ func servingEnvelopes(prepared *llamaServingLaunch) []engines.ServingEnvelope {
 		return nil
 	}
 	result := make([]engines.ServingEnvelope, 0, len(prepared.Envelopes))
-	for i, envelope := range prepared.Envelopes {
-		if i >= len(prepared.Config.Models) {
-			return nil
-		}
+	models := map[string]engines.ServingModel{}
+	for _, model := range prepared.Config.Models {
+		models[model.ModelID] = model
+	}
+	for _, envelope := range prepared.Envelopes {
 		if nodepolicy.ValidateModelIdentifier(envelope.ModelID) != nil {
 			return nil
 		}
-		envelope.ContentDigest = servingContentDigest(prepared.Config.Models[i])
+		model, exists := models[envelope.ModelID]
+		if !exists {
+			return nil
+		}
+		envelope.ContentDigest = servingContentDigest(model)
 		result = append(result, envelope.Clone())
 	}
 	return result

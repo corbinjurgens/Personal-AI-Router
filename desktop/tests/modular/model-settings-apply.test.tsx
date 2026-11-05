@@ -154,6 +154,55 @@ beforeEach(() => {
 })
 
 describe('reviewed model operations', () => {
+    it('reviews and applies fit and raw options as one existing model operation', async () => {
+        const store = useEngineSettingsStore.getState()
+        const nativeChange: ModelChange = {
+            modelId: 'model',
+            expectedPolicyRevision: '7',
+            load: {
+                set: {
+                    fit: 'on',
+                    fitTarget: '512',
+                    fitCtx: 4096,
+                    extraOptions: { 'spec-type': 'draft-mtp' }
+                }
+            }
+        }
+        store.editModel(key, nativeChange)
+        await store.previewModel(target, nativeChange, 'authority')
+        expect(engine.previewSettings.mock.calls[0]?.[0].modelChange).toEqual(nativeChange)
+        await store.applyModel(key, 'authority')
+        expect(engine.applySettings).toHaveBeenCalledOnce()
+        expect(engine.applySettings.mock.calls[0]?.[0].modelChange).toEqual({
+            ...nativeChange,
+            previewDigest: 'reviewed'
+        })
+        expect(window.pairApi.nodePolicy.set).not.toHaveBeenCalled()
+    })
+    it('retains service option errors as advisory evidence without application authority', async () => {
+        engine.previewSettings.mockResolvedValue({
+            settings: snapshot().settings,
+            revision: 3,
+            policyRevision: '7',
+            previewDigest: 'refused',
+            errors: { 'extraOptions.port': 'PAIR owns port.' },
+            restart: false,
+            rebind: false
+        })
+        const invalidChange: ModelChange = {
+            ...change,
+            load: { set: { extraOptions: { port: '9999' } } }
+        }
+        const store = useEngineSettingsStore.getState()
+        store.editModel(key, invalidChange)
+        await store.previewModel(target, invalidChange, 'authority')
+        expect(useEngineSettingsStore.getState().modelDrafts[key].advisory?.errors).toEqual({
+            'extraOptions.port': 'PAIR owns port.'
+        })
+        expect(useEngineSettingsStore.getState().modelDrafts[key].review).toBeUndefined()
+        await store.applyModel(key, 'authority')
+        expect(engine.applySettings).not.toHaveBeenCalled()
+    })
     it('preserves an explicit destination review when a source advisory arrives', async () => {
         const response = deferred<EngineSettingsPreview>()
         const started = deferred<void>()

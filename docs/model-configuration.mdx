@@ -114,11 +114,41 @@ describes the manual native setting vocabulary, not complete-cost eligibility.
 
 Typed manual settings currently cover finite llama.cpp allocation and the
 service's supported batch, thread, KV/Flash Attention and idle/cache controls.
-RoPE/YaRN extension, explicit device/split selection, NUMA/RPC, tensor/MoE
-overrides, adapters, speculative/multimodal presets and remaining native
-allocation modes require later engine-specific support. Unsupported controls
+RoPE/YaRN extension, NUMA/RPC, tensor overrides, adapters, multimodal presets
+and remaining native allocation modes require later engine-specific support. Unsupported controls
 cannot be supplied as raw typed extras. Automatic qualification is outside this
 workflow.
+
+Typed llama.cpp loads also accept `fit: "on"` (unset or `"off"` keeps the
+finite behavior), `fitTarget` as comma-separated MiB margins such as `"1024,512"`,
+and `fitCtx` as a minimum context from 0 through 16777216. The target and minimum
+require fit on. Native fit and reviewed Auto GPU placement are exclusive.
+`fit` and `fitCtx` are portable; the hardware-specific `fitTarget` is not.
+
+Extra options accept canonical raw preset keys and literal values, with at most
+32 entries, keys up to 64 ASCII lowercase letters, digits or hyphens, and values
+up to 1024 UTF-8 bytes. Control characters and preset comment or substitution
+characters are refused. Use typed fields for typed controls; PAIR-owned artifact
+and router controls and unsupported allocation controls are refused by name.
+Supported table options retain native value checks. Unknown fork options remain
+unknown in estimates, even when priced components would fit, and all extras
+participate in configuration identity.
+
+The extras `device`, `split-mode`, `tensor-split` and `main-gpu` select GPUs and
+make placement unpriced. Inspection reports `gpu-selection`, no finite key or
+memory pools, and an applied execution key for diagnostics. These loads receive
+no buffer capture, stated memory or finite serving envelope. Reviewed Auto
+chooses the GPU, so it refuses GPU-selection extras and sharing an engine with a
+GPU-selection profile. Copy and deploy omit the descriptor's `nonPortableKeys`.
+
+Native fit chooses placement when the model loads. These loads remain routable
+and copyable, but have no finite configuration key, priced estimate verdict,
+buffer capture or stated memory record. Inspection reports reason `native-fit`
+and an execution key only for an applied load. The execution key binds resolved
+options, artifact identities and the native build, and never substitutes for a
+finite configuration key. Native `/props` `n_ctx` supplies the realized context;
+the requested context and `fitCtx` do not establish it. Operator-written serving
+presets retain the strict finite parser and cannot launch fit on directly.
 
 ## Review before applying load changes
 

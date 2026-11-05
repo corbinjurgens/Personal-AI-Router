@@ -528,6 +528,15 @@ func (e *Executor) inspectModelArtifacts(ctx context.Context, p modelconfig.Insp
 	if err != nil {
 		return unavailable("unavailable", "Exact local model source is unavailable.")
 	}
+	if selected, _ := ctx.Value(nativeHelpInspectionKey{}).(string); selected != "" {
+		if build, err := nativeBuildID(ctx, snapshot.state); err == nil && build == selected {
+			result.NativeOptions = nativeHelpResults.lookup(build)
+			result.UnreportedLaunchOptions, err = unreportedNativeLaunchOptions(result.NativeOptions, snapshot.command, nil, nil)
+			if err != nil {
+				return modelconfig.InspectResult{}, err
+			}
+		}
+	}
 	result.ConfigurationKeyReason = "not-applied"
 	for _, load := range snapshot.state.plat.Runtime.ModelLoads {
 		if load.ModelID == p.ModelID && load.Resolved != nil {
@@ -643,6 +652,13 @@ func (e *Executor) inspectModelArtifacts(ctx context.Context, p modelconfig.Insp
 	if err != nil {
 		return modelconfig.InspectResult{}, err
 	}
+	if !fits && result.NativeOptions != nil {
+		result.NativeOptions, result.UnreportedLaunchOptions = nil, nil
+		fits, err = inspectionReplyFits(result)
+		if err != nil {
+			return modelconfig.InspectResult{}, err
+		}
+	}
 	if !fits {
 		return unavailable("unknown", "The complete artifact facts exceed the bounded public inspection reply; no artifact subset was selected.")
 	}
@@ -661,6 +677,10 @@ func (e *Executor) inspectModelArtifacts(ctx context.Context, p modelconfig.Insp
 		var compiled map[string]modelEstimateInput
 		prepared, compileErr := compileTypedLlamaInputs(ctx, snapshot.state, snapshot.command, snapshot.state.plat.Runtime, false, &compiled)
 		if compileErr == nil && prepared != nil {
+			result.UnreportedLaunchOptions, err = unreportedNativeLaunchOptions(result.NativeOptions, snapshot.command, prepared.Snapshot, prepared.ModelLoads)
+			if err != nil {
+				return modelconfig.InspectResult{}, err
+			}
 			if finite, ok := compiled[p.ModelID]; ok && finite.Allocation != nil {
 				input = finite
 				if op, ok := ctx.Value(modelAutoOperationKey{}).(modelAutoOperation); ok && op.Memory != nil {
@@ -671,9 +691,15 @@ func (e *Executor) inspectModelArtifacts(ctx context.Context, p modelconfig.Insp
 				source, sourceErr := modelReviewedNativeSource(ctx, snapshot.state, command)
 				if commandErr == nil && sourceErr == nil {
 					optionsID := modelConfigurationOptionsID(modelConfigurationOptions(*input.Allocation), prepared.Snapshot)
-					result.ConfigurationKey = modelConfigurationKey(input, source, optionsID)
-					if result.ConfigurationKey != "" {
-						result.ConfigurationKeyReason = ""
+					if modelLoadUnpriced(input.Allocation.Options) {
+						result.ConfigurationKeyReason = modelLoadUnpricedReason(input.Allocation.Options)
+						result.ConfigurationPools = nil
+						result.ExecutionKey = modelExecutionKey(input, optionsID)
+					} else {
+						result.ConfigurationKey = modelConfigurationKey(input, source, optionsID)
+						if result.ConfigurationKey != "" {
+							result.ConfigurationKeyReason = ""
+						}
 					}
 				} else {
 					result.ConfigurationKeyReason = "artifacts-unavailable"
@@ -683,6 +709,7 @@ func (e *Executor) inspectModelArtifacts(ctx context.Context, p modelconfig.Insp
 		current, err := inspectionSnapshot(st, p.Engine)
 		if err != nil || !snapshot.equal(current) {
 			result.ConfigurationKey, result.ConfigurationKeyReason, result.ConfigurationPools = "", "not-finite", nil
+			result.ExecutionKey = ""
 			input = modelEstimateInput{}
 		}
 	}

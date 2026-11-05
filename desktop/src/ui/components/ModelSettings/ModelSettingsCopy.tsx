@@ -399,7 +399,13 @@ export default function ModelSettingsCopy({
                             modelId: target.identity.model,
                             expectedPolicyRevision: baseline.revision,
                             ...(loads.length
-                                ? { load: portableLoadPatch(sourceRequested, loads) }
+                                ? {
+                                      load: portableLoadPatch(
+                                          sourceRequested,
+                                          loads,
+                                          sourceInspection
+                                      )
+                                  }
                                 : {}),
                             policy: patch
                         },
