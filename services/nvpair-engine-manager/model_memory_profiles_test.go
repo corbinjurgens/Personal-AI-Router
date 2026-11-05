@@ -42,7 +42,7 @@ func TestModelMemoryProfilesFirstSaveWithoutEstimate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.MemoryProfiles) != 1 || !result.MemoryProfiles[0].Current || result.MemoryProfiles[0].HostBytes != "12345" || result.Estimate.Status != "unknown" {
+	if len(result.MemoryProfiles) != 1 || !result.MemoryProfiles[0].Current || result.MemoryProfiles[0].HostBytes != "12345" || result.Estimate.EstimateSource == nil || result.Estimate.EstimateSource.Kind != "user-stated" || result.Estimate.EstimateSource.Provider != "pair-user-statement" || len(result.Estimate.Domains) != 1 || result.Estimate.Domains[0].RequiredBytes != "12345" {
 		t.Fatalf("statement/estimate: %+v", result)
 	}
 	result.MemoryProfiles[0].HostBytes = "99"

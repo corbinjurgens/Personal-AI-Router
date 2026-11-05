@@ -239,6 +239,168 @@ func (s *modelEstimateState) estimate(ctx context.Context, in modelEstimateInput
 	return out
 }
 
+// Applied inspection overlays are outside the LRU and all preview/Auto paths.
+func modelEstimateObservedCPUWeights(base modelconfig.Estimate, in modelEstimateInput, key string, store *modelBufferStore) (out modelconfig.Estimate) {
+	out = base
+	if key == "" || in.BuildID == "" || in.Allocation == nil || in.Allocation.GPU.Mode != "cpu" || modelLoadUnpriced(in.Allocation.Options) || in.Memory == nil || in.Memory.Target == nil || base.MemoryPlan != nil || base.EstimateSource == nil || base.EstimateSource.Kind != "pair-estimate" {
+		return
+	}
+	observed := in.Memory.Target.At(noderec.MemoryBootClock)
+	if observed == nil {
+		return
+	}
+	pool := ""
+	for _, d := range observed.Domains {
+		if d.Kind == "system" || d.Kind == "shared" {
+			if pool != "" || d.ID == "" || modelBufferPoolRemaining(d) <= 0 {
+				return
+			}
+			pool = d.ID
+		}
+	}
+	if pool == "" {
+		return
+	}
+	hostPool := modelBufferHash(struct{ Host, Pool string }{in.Memory.Target.HostID, pool})
+	low, high, sampleID, ok := store.compatibleCPUWeights(key, in.BuildID, hostPool)
+	if !ok {
+		return
+	}
+	hostDomain := -1
+	for i, d := range base.Domains {
+		if d.ID == pool && (d.Kind == "host" || d.Kind == "shared") {
+			if hostDomain >= 0 {
+				return
+			}
+			hostDomain = i
+		}
+	}
+	weight := -1
+	for i, c := range base.Components {
+		if c.Name == "weights" {
+			if weight >= 0 || c.DomainID != pool || c.Status != "estimated" {
+				return
+			}
+			weight = i
+		}
+	}
+	if hostDomain < 0 || weight < 0 {
+		return
+	}
+	// Reuse the estimator's checked summation; advisory overflow keeps the base.
+	defer func() {
+		if recover() != nil {
+			out = base
+		}
+	}()
+	candidate := base.Clone()
+	c := &candidate.Components[weight]
+	c.Bytes = strconv.FormatUint(low+(high-low)/2, 10)
+	c.LowBytes, c.HighBytes = strconv.FormatUint(low, 10), strconv.FormatUint(high, 10)
+	c.Basis = "observed"
+	c.Reason = "rounded native CPU model buffer report; sample " + sampleID
+	amounts := modelconfig.Estimate{Components: candidate.Components, Domains: candidate.Domains[hostDomain : hostDomain+1]}
+	modelEstimateDomainAmounts(&amounts)
+	if candidate.Domains[hostDomain].Kind == "host" && candidate.HostBytes != "" {
+		candidate.HostBytes = candidate.Domains[hostDomain].RequiredBytes
+	}
+	candidate = modelconfig.CompareEstimate(candidate)
+	if candidate.Validate() == nil {
+		out = candidate
+	}
+	return
+}
+
+func modelEstimateStated(result *modelconfig.InspectResult, in modelEstimateInput, now time.Time) {
+	if result.Engine != "llamacpp" || result.ConfigurationKey == "" || result.ConfigurationKeyReason != "" || result.MemoryProfilesUnavailable || in.Allocation == nil || modelLoadUnpriced(in.Allocation.Options) {
+		return
+	}
+	var profile *modelconfig.MemoryProfile
+	for i := range result.MemoryProfiles {
+		p := &result.MemoryProfiles[i]
+		if p.Current && p.Kind == "stated" && p.ConfigurationKey == result.ConfigurationKey && p.ValidatePools(result.ConfigurationPools) == nil {
+			profile = p
+			break
+		}
+	}
+	if profile == nil {
+		return
+	}
+	candidate := result.Clone()
+	base := candidate.Estimate
+	out := modelconfig.Estimate{
+		Status: "estimated", Source: "pair-user-statement", BuildID: in.BuildID,
+		Timestamp: profile.RecordedAt,
+		EstimateSource: &modelconfig.EstimateSource{
+			Kind: "user-stated", Provider: "pair-user-statement",
+			Revision: profile.RecordedAt, Basis: "user statement for this configuration",
+		},
+		MemoryPlan: base.MemoryPlan,
+	}
+	if out.MemoryPlan != nil {
+		out.Status = "partial"
+	}
+	// Project fresh logical domains through the existing physical-pool owner.
+	// Placeholder zeros avoid warnings about temporarily absent selected slots.
+	for _, pool := range result.ConfigurationPools {
+		d := modelconfig.MemoryDomain{RequiredBytes: "0", RequiredLowBytes: "0", RequiredHighBytes: "0"}
+		switch pool {
+		case "host", "shared":
+			d.ID, d.Kind = "host", "host"
+		case "device":
+			d.ID, d.Kind = "offload-unmapped", "device"
+		}
+		out.Domains = append(out.Domains, d)
+	}
+	modelEstimateDomains(&out, in, now)
+	shared := slices.Equal(result.ConfigurationPools, []string{"shared"})
+	if len(out.Domains) != len(result.ConfigurationPools) {
+		return
+	}
+	for i := range out.Domains {
+		d := &out.Domains[i]
+		value := profile.HostBytes
+		if shared {
+			d.Kind = "shared"
+			value = profile.SharedBytes
+		} else if d.Kind == "device" {
+			value = profile.DeviceBytes
+		} else if d.Kind != "host" {
+			return
+		}
+		d.RequiredBytes, d.RequiredLowBytes, d.RequiredHighBytes = value, value, value
+	}
+	if !shared {
+		out.HostBytes, out.DeviceBytes = profile.HostBytes, profile.DeviceBytes
+	}
+	// Rows remain display evidence, independent of the selected statement total.
+	out.Components = base.Components
+	for i := range out.Components {
+		c := &out.Components[i]
+		if c.DomainID == "" {
+			continue
+		}
+		kind := ""
+		for _, d := range base.Domains {
+			if d.ID == c.DomainID {
+				kind = d.Kind
+				break
+			}
+		}
+		c.DomainID = ""
+		for _, d := range out.Domains {
+			if shared || d.Kind == kind {
+				c.DomainID = d.ID
+				break
+			}
+		}
+	}
+	candidate.Estimate = modelconfig.CompareEstimate(out)
+	if candidate.Validate() == nil {
+		*result = candidate
+	}
+}
+
 // Detach string backing storage too; a bounded substring must not retain a
 // larger input allocation. The wire clone already detaches every slice.
 func modelEstimateDetach(out modelconfig.Estimate) modelconfig.Estimate {

@@ -2241,3 +2241,642 @@ func TestModelSettingsEstimateInputIsReadOnly(t *testing.T) {
 		t.Fatal("estimator mutated facts, requested/resolved settings or memory input")
 	}
 }
+
+type task9EstimateFixture struct {
+	f            inspectionFixture
+	ctx          context.Context
+	memory       *modelEstimateMemory
+	draftRuntime Runtime
+}
+
+func newTask9EstimateFixture(t *testing.T, topology string) task9EstimateFixture {
+	t.Helper()
+	var draftRuntime Runtime
+	f := newAppliedKeyFixture(t, func(f inspectionFixture) {
+		writeKeyGGUF(t, f, "llama")
+		if topology != "host" {
+			data, err := os.ReadFile(f.preset)
+			if err != nil {
+				t.Fatal(err)
+			}
+			text := strings.Replace(string(data), "gpu-layers = 0", "gpu-layers = 2", 1)
+			if text == string(data) {
+				t.Fatal("GPU fixture preset did not change")
+			}
+			writeTestFile(t, f.preset, []byte(text))
+		}
+		draftRuntime = f.st.plat.Runtime
+	})
+	f.ex.modelMemoryProfiles = newModelMemoryProfiles(t.TempDir())
+	target := modelBufferTestTargetMemory()
+	mapped := autoTestMemory(time.Now()).Map
+	binding := autoTestDeviceBinding()
+	mapped.Devices = []modelNativeDevice{{Kind: 1, Selector: "CUDA0", UUID: binding.DeviceID, Pool: "gpu"}}
+	switch topology {
+	case "host":
+		target.Observation.Domains = target.Observation.Domains[:1]
+		mapped = nil
+	case "shared":
+		target.Observation.Domains = target.Observation.Domains[:1]
+		target.Observation.Domains[0].ID, target.Observation.Domains[0].Kind = "shared", "shared"
+		mapped.HostPool, mapped.Binding, mapped.Devices = "shared", nil, nil
+	case "mapped", "stale":
+		resolved := f.st.plat.Runtime.ModelLoads[0].Resolved
+		if resolved == nil || resolved.ResolverRevision == "" || resolved.ReviewedInputID == "" {
+			t.Fatal("conversion binding evidence unavailable")
+		}
+		resolved.DeviceBinding = binding
+		if topology == "stale" {
+			target.Observation.Domains[1].Total.AgeMS = noderec.MemoryFreshMS + 1
+			target.Observation.Domains[1].Free.AgeMS = noderec.MemoryFreshMS + 1
+		}
+	case "qa1":
+		mapped.Binding = nil
+	case "unmapped":
+		second := target.Observation.Domains[1]
+		second.ID, second.DeviceIDs = "gpu-second", []string{"GPU-22222222-2222-2222-2222-222222222222"}
+		target.Observation.Domains = append(target.Observation.Domains, second)
+		mapped = nil
+	default:
+		t.Fatalf("unknown topology %q", topology)
+	}
+	memory, err := (modelTargetMemoryOwner{target: target, deviceMap: mapped}).ModelAutoMemory(context.Background())
+	if err != nil || memory == nil {
+		t.Fatalf("memory fixture: %v", err)
+	}
+	// Keep the estimator cache input stable; only public pool projection ages it.
+	ctx := context.WithValue(context.Background(), modelAutoOperationKey{}, modelAutoOperation{Memory: modelAutoSnapshotMemory{memory: memory}})
+	now := time.Now()
+	f.ex.modelEstimates.now = func() time.Time { return now }
+	return task9EstimateFixture{f: f, ctx: ctx, memory: memory, draftRuntime: draftRuntime}
+}
+
+func (f task9EstimateFixture) inspect(t *testing.T) modelconfig.InspectResult {
+	t.Helper()
+	r, err := f.f.ex.InspectModel(f.ctx, f.f.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if r.ConfigurationKey == "" || r.ConfigurationKeyReason != "" {
+		t.Fatalf("finite fixture lost key: %+v", r)
+	}
+	return r
+}
+
+func (f task9EstimateFixture) set(t *testing.T, amounts map[string]string) modelconfig.InspectResult {
+	t.Helper()
+	r := f.inspect(t)
+	q := modelconfig.ClearStatedMemoryRequest{Engine: f.f.request.Engine, ModelID: f.f.request.ModelID, ConfigurationKey: r.ConfigurationKey}
+	set := modelconfig.SetStatedMemoryRequest{Engine: q.Engine, ModelID: q.ModelID, ConfigurationKey: q.ConfigurationKey, HostBytes: amounts["host"], DeviceBytes: amounts["device"], SharedBytes: amounts["shared"]}
+	out, err := f.f.ex.recordStatedMemory(f.ctx, q, &set)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func task9AssertStated(t *testing.T, r modelconfig.InspectResult, amounts map[string]string) {
+	t.Helper()
+	if err := r.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	var recorded string
+	for _, p := range r.MemoryProfiles {
+		if p.Current && p.Kind == "stated" && p.ConfigurationKey == r.ConfigurationKey {
+			if p.HostBytes != amounts["host"] || p.DeviceBytes != amounts["device"] || p.SharedBytes != amounts["shared"] {
+				t.Fatalf("current record=%+v", p)
+			}
+			recorded = p.RecordedAt
+		}
+	}
+	s := r.Estimate.EstimateSource
+	if recorded == "" || s == nil || s.Kind != "user-stated" || s.Provider != "pair-user-statement" || s.Revision != recorded || s.Basis != "user statement for this configuration" || len(s.UnpricedCosts) != 0 {
+		t.Fatalf("stated source=%+v record time=%q", s, recorded)
+	}
+	if len(r.Estimate.Domains) != len(amounts) {
+		t.Fatalf("stated domains=%+v", r.Estimate.Domains)
+	}
+	seen := map[string]bool{}
+	for _, d := range r.Estimate.Domains {
+		want, ok := amounts[d.Kind]
+		if !ok || seen[d.Kind] || d.RequiredBytes != want || d.RequiredLowBytes != want || d.RequiredHighBytes != want {
+			t.Fatalf("stated domain=%+v want=%v", d, amounts)
+		}
+		seen[d.Kind] = true
+		for _, warning := range d.Unknowns {
+			if strings.Contains(strings.ToLower(warning), "not priced") {
+				t.Fatalf("PAIR omission leaked into stated domain: %s", warning)
+			}
+		}
+	}
+	for _, warning := range r.Estimate.Unknowns {
+		if strings.Contains(strings.ToLower(warning), "not priced") || strings.HasPrefix(warning, "estimator busy") {
+			t.Fatalf("PAIR uncertainty leaked into statement: %s", warning)
+		}
+	}
+}
+
+func task9LogInspection(t *testing.T, name string, r modelconfig.InspectResult) {
+	t.Helper()
+	data, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("marshal decoder inspection: %v", err)
+	}
+	t.Logf("TASK9_DECODER_%s %s", name, data)
+}
+
+func TestModelSettingsEstimateTask9StatedVerdictAndMutationReplies(t *testing.T) {
+	f := newTask9EstimateFixture(t, "host")
+	base := f.inspect(t)
+	if base.Estimate.EstimateSource == nil || base.Estimate.EstimateSource.Kind != "pair-estimate" {
+		t.Fatal("base PAIR estimate unavailable")
+	}
+	for _, tc := range []struct{ name, bytes, fit string }{{"first", "1", "fits"}, {"replace", "17179869184", "exceeds"}, {"zero", "0", "fits"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			amounts := map[string]string{"host": tc.bytes}
+			reply := f.set(t, amounts)
+			task9AssertStated(t, reply, amounts)
+			fresh := f.inspect(t)
+			task9AssertStated(t, fresh, amounts)
+			for _, r := range []modelconfig.InspectResult{reply, fresh} {
+				if r.Estimate.CapacityFit != tc.fit || r.Estimate.FreeFit != tc.fit {
+					t.Fatalf("verdict=%+v want=%s", r.Estimate, tc.fit)
+				}
+				if !reflect.DeepEqual(r.Estimate.Components, base.Estimate.Components) {
+					t.Fatal("statement changed component display")
+				}
+			}
+			if reply.Estimate.EstimateSource.Revision != fresh.Estimate.EstimateSource.Revision {
+				t.Fatal("mutation reply selected a different statement")
+			}
+			if tc.name == "first" {
+				task9LogInspection(t, "stated", fresh)
+			}
+		})
+	}
+	q := modelconfig.ClearStatedMemoryRequest{Engine: f.f.request.Engine, ModelID: f.f.request.ModelID, ConfigurationKey: base.ConfigurationKey}
+	cleared, err := f.f.ex.recordStatedMemory(f.ctx, q, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range []modelconfig.InspectResult{cleared, f.inspect(t)} {
+		if len(r.MemoryProfiles) != 0 || r.Estimate.EstimateSource == nil || r.Estimate.EstimateSource.Kind != "pair-estimate" || !reflect.DeepEqual(r.Estimate.Components, base.Estimate.Components) {
+			t.Fatalf("clear did not restore PAIR result: %+v", r)
+		}
+	}
+}
+
+func TestModelSettingsEstimateTask9StatedBusy(t *testing.T) {
+	f := newTask9EstimateFixture(t, "host")
+	f.set(t, map[string]string{"host": "1"})
+	f.f.ex.modelEstimates.mu.Lock()
+	defer f.f.ex.modelEstimates.mu.Unlock()
+	r := f.inspect(t)
+	task9AssertStated(t, r, map[string]string{"host": "1"})
+	if len(r.Estimate.Components) != 0 || r.Estimate.CapacityFit != "fits" || r.Estimate.FreeFit != "fits" {
+		t.Fatalf("busy estimator suppressed stated verdict: %+v", r.Estimate)
+	}
+	task9LogInspection(t, "busy", r)
+}
+
+func TestModelSettingsEstimateTask9StatedPoolEvidence(t *testing.T) {
+	test := func(topology string, amounts map[string]string, fit string) {
+		t.Run(topology, func(t *testing.T) {
+			f := newTask9EstimateFixture(t, topology)
+			f.f.ex.modelEstimates.mu.Lock()
+			defer f.f.ex.modelEstimates.mu.Unlock()
+			before := f.inspect(t)
+			if len(before.Estimate.Domains) != 0 || before.Estimate.Status != "unknown" {
+				t.Fatalf("domainless control=%+v", before.Estimate)
+			}
+			r := f.set(t, amounts)
+			task9AssertStated(t, r, amounts)
+			if r.Estimate.CapacityFit != fit || r.Estimate.FreeFit != fit {
+				t.Fatalf("pool verdict=%+v want %s", r.Estimate, fit)
+			}
+			for _, d := range r.Estimate.Domains {
+				if d.Kind == "host" || fit == "fits" {
+					if d.CapacityBytes != "8589934592" || d.FreeBytes != "8589934592" || d.RemainingValidityMS <= 0 || d.CapacitySource != "synthetic" || d.CapacityTimestamp == "" {
+						t.Fatalf("lost fresh pool evidence: %+v", d)
+					}
+				}
+				if d.Kind == "device" {
+					if fit == "fits" && (d.ID != "gpu" || d.DeviceID != autoTestDeviceBinding().DeviceID) {
+						t.Fatalf("wrong physical mapping: %+v", d)
+					}
+					if fit == "unknown" && (d.CapacityFit != "unknown" || d.FreeFit != "unknown" || d.CapacityBytes != "" || d.FreeBytes != "") {
+						t.Fatalf("unproved pool acquired evidence: %+v", d)
+					}
+					if topology == "qa1" && !slices.Contains(d.Unknowns, "device mapping assumed: only one GPU present") {
+						t.Fatalf("QA1 warning missing: %+v", d)
+					}
+				}
+			}
+			if topology == "shared" && (r.Estimate.HostBytes != "" || r.Estimate.DeviceBytes != "" || r.Estimate.Domains[0].ID != "shared") {
+				t.Fatal("shared pool double counted")
+			}
+			if topology == "unmapped" && !slices.Contains(r.Estimate.Unknowns, "native map unavailable; device placement unproved") {
+				t.Fatal("mapping warning missing")
+			}
+			if topology == "mapped" || topology == "shared" || topology == "unmapped" {
+				fresh := f.inspect(t)
+				task9AssertStated(t, fresh, amounts)
+				task9LogInspection(t, topology, fresh)
+			}
+		})
+	}
+	test("host", map[string]string{"host": "1"}, "fits")
+	test("shared", map[string]string{"shared": "3"}, "fits")
+	test("mapped", map[string]string{"host": "1", "device": "2"}, "fits")
+	test("qa1", map[string]string{"host": "1", "device": "2"}, "fits")
+	test("unmapped", map[string]string{"host": "1", "device": "2"}, "unknown")
+	test("stale", map[string]string{"host": "1", "device": "2"}, "unknown")
+}
+
+func (f task9EstimateFixture) sample(t *testing.T, amounts ...string) modelconfig.BufferObservation {
+	t.Helper()
+	r := f.inspect(t)
+	var in modelEstimateInput
+	if _, err := f.f.ex.inspectModelArtifacts(f.ctx, f.f.request, &in); err != nil {
+		t.Fatal(err)
+	}
+	if in.Allocation == nil || in.Allocation.NativeBuildID == "" || in.BuildID != in.Allocation.NativeBuildID {
+		t.Fatal("compiled content build unavailable")
+	}
+	options := modelConfigurationOptions(*in.Allocation)
+	if options.GPU == nil || options.GPU.Mode != "cpu" && (options.GPU.Mode != "layers" || options.GPU.Layers == nil || *options.GPU.Layers != 0) {
+		t.Fatal("sample fixture is not CPU-only")
+	}
+	options.GPU = &modelconfig.GPU{Mode: "cpu"}
+	o := modelconfig.BufferObservation{Status: "reported", SampleID: strings.Repeat("a", 64), RecordedAt: "2026-11-05T00:00:01Z", BuildID: in.BuildID, BuildAssurance: "recognized-output", ReportedBuild: "b12020-0ec4027a2", ConfigurationKey: r.ConfigurationKey, TopologyIdentity: strings.Repeat("b", 64), CapturedOptions: &options, Artifacts: slices.Clone(in.Bindings), Baseline: modelBufferBaseline(r.Estimate.Components), EstimatorRevision: modelEstimatorRevision}
+	for i := range o.Artifacts {
+		o.Artifacts[i].Assurance = "sampled-local-binding"
+	}
+	host := modelBufferHash(struct{ Host, Pool string }{f.memory.Target.HostID, "host"})
+	for i, amount := range amounts {
+		lo, hi, err := modelconfig.BufferReportInterval(amount)
+		if err != nil {
+			t.Fatal(err)
+		}
+		o.Rows = append(o.Rows, modelconfig.BufferReportRow{Component: "model", Label: "CPU", Role: "model", Phase: "load", Sequence: strconv.Itoa(i + 1), Stream: "stdout", ReportedMiB: amount, Unit: "MiB", Precision: "0.01", SourceKind: "log-scraped", IntervalStatus: "bounded", LowerBytes: lo, UpperBytes: hi, PoolIdentity: host, Coverage: "compatible"})
+	}
+	lo, hi, err := modelconfig.BufferReportInterval("99.00")
+	if err != nil {
+		t.Fatal(err)
+	}
+	o.Rows = append(o.Rows, modelconfig.BufferReportRow{Component: "compute", Label: "CPU", Role: "model", Phase: "reserve", Sequence: strconv.Itoa(len(o.Rows) + 1), Stream: "stdout", ReportedMiB: "99.00", Unit: "MiB", Precision: "0.01", SourceKind: "log-scraped", IntervalStatus: "bounded", LowerBytes: lo, UpperBytes: hi, PoolIdentity: host, Coverage: "partial"})
+	o.Comparisons = modelBufferComparisons(o)
+	if err := o.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(o.Comparisons, func(c modelconfig.BufferComparison) bool { return c.Component == "weights" && c.Status == "compatible" }) {
+		t.Fatalf("sample has no compatible weights control: %+v", o)
+	}
+	return o
+}
+
+func (f task9EstimateFixture) seed(t *testing.T, observations ...modelconfig.BufferObservation) *modelBufferStore {
+	t.Helper()
+	s, _ := modelBufferStoreFixture(t)
+	s.now = func() time.Time { return time.Date(2026, 11, 5, 0, 1, 0, 0, time.UTC) }
+	samples := make([]modelBufferStoredSample, len(observations))
+	for i, o := range observations {
+		samples[i] = modelBufferStoredSample{ModelIdentity: modelBufferHash(struct{ Engine, Model string }{modelBufferHash(f.f.request.Engine), f.f.request.ModelID}), Observation: o.Clone()}
+		if err := validateModelBufferSample(samples[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Synthetic retained history uses the same immutable-view publication owner.
+	s.mu.Lock()
+	s.samples = samples
+	s.publishView()
+	s.mu.Unlock()
+	f.f.ex.modelBuffers.store = s
+	return s
+}
+
+func TestModelSettingsEstimateTask9CapturedWeightsReachInspection(t *testing.T) {
+	f := newTask9EstimateFixture(t, "host")
+	base := f.inspect(t)
+	f.f.ex.modelBuffers.store = newModelBufferStore(t.TempDir())
+	rt := f.f.st.plat.Runtime
+	command, err := launchForState(f.f.st, rt.Port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var inputs map[string]modelEstimateInput
+	prepared, err := compileTypedLlamaInputs(f.ctx, f.f.st, command, rt, true, &inputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := f.f.ex.newModelBufferCapture(f.f.st, f.f.request.Engine, prepared, inputs, command, f.ctx)
+	if c == nil {
+		t.Fatal("capture unavailable")
+	}
+	c.bind(&managedProc{done: make(chan struct{})})
+	f.f.st.mu.Lock()
+	f.f.st.bufferCapture, f.f.st.proc = c, c.proc
+	f.f.st.running, f.f.st.runID = true, "task9-captured-run"
+	f.f.st.plat.Runtime.servingLaunch, f.f.st.plat.Runtime.servingCommand = prepared, command
+	c.publishRun(f.f.st.runID)
+	f.f.st.mu.Unlock()
+	t.Cleanup(func() {
+		c.retire()
+		f.f.ex.modelBuffers.close()
+		f.f.st.mu.Lock()
+		f.f.st.proc, f.f.st.bufferCapture, f.f.st.running = nil, nil, false
+		f.f.st.mu.Unlock()
+	})
+	capture := modelBufferTestFixture{load: modelLoadFixture{ex: f.f.ex, st: f.f.st, root: f.f.root}, capture: c}
+	capture.initial(f.f.request.ModelID, 31001)
+	o := capture.confirm(t, f.f.request.ModelID, 1)
+	if o.Persistence != "saved" || o.Reason != "unmapped-device" || o.ConfigurationKey != base.ConfigurationKey || !slices.ContainsFunc(o.Comparisons, func(c modelconfig.BufferComparison) bool { return c.Component == "weights" && c.Status == "compatible" }) {
+		t.Fatalf("production capture control: %+v", o)
+	}
+	// Read actual durable bytes through the store's normal recovery boundary.
+	recovered := newModelBufferStore(filepath.Dir(f.f.ex.modelBuffers.store.path))
+	view := recovered.view.Load()
+	if view == nil || view.unavailable || len(view.samples) != 1 || view.samples[0].Observation.SampleID != o.SampleID || view.samples[0].Observation.Reason != "unmapped-device" {
+		t.Fatal("capture did not survive store recovery")
+	}
+	f.f.ex.modelBuffers.store = recovered
+	r := f.inspect(t)
+	w := estimateTestComponent(t, r.Estimate, "weights")
+	if w.Basis != "observed" || w.Bytes != "1048576" || w.LowBytes != "1043333" || w.HighBytes != "1053819" {
+		t.Fatalf("persisted capture did not reach applied estimate: %+v", w)
+	}
+}
+
+func TestModelSettingsEstimateTask9ObservedCPUWeights(t *testing.T) {
+	f := newTask9EstimateFixture(t, "host")
+	base := f.inspect(t)
+	f.seed(t, f.sample(t, "1.00", "2.00"))
+	r := f.inspect(t)
+	w := estimateTestComponent(t, r.Estimate, "weights")
+	if w.Status != "estimated" || w.Basis != "observed" || w.DomainID != "host" || w.Bytes != "3145728" || w.LowBytes != "3135242" || w.HighBytes != "3156214" {
+		t.Fatalf("summed CPU report=%+v", w)
+	}
+	if !reflect.DeepEqual(r.Estimate.EstimateSource, base.Estimate.EstimateSource) {
+		t.Fatal("weights replaced whole-estimate source")
+	}
+	for _, c := range base.Estimate.Components {
+		if c.Name != "weights" && !reflect.DeepEqual(estimateTestComponent(t, r.Estimate, c.Name), c) {
+			t.Fatalf("observed weights changed %s", c.Name)
+		}
+	}
+	for _, d := range r.Estimate.Domains {
+		var total, low, high uint64
+		for _, c := range base.Estimate.Components {
+			if c.DomainID != d.ID || c.Name == "weights" || c.Bytes == "" {
+				continue
+			}
+			for _, p := range []struct {
+				text string
+				sum  *uint64
+			}{{c.Bytes, &total}, {c.LowBytes, &low}, {c.HighBytes, &high}} {
+				n, err := strconv.ParseUint(p.text, 10, 64)
+				if err != nil {
+					t.Fatal(err)
+				}
+				*p.sum += n
+			}
+		}
+		if d.RequiredBytes != strconv.FormatUint(total+3145728, 10) || d.RequiredLowBytes != strconv.FormatUint(low+3135242, 10) || d.RequiredHighBytes != strconv.FormatUint(high+3156214, 10) {
+			t.Fatalf("weights not reflected in pool totals: %+v", d)
+		}
+	}
+	task9LogInspection(t, "observed", r)
+	task9AssertStated(t, f.set(t, map[string]string{"host": "1"}), map[string]string{"host": "1"})
+}
+
+func TestModelSettingsEstimateTask9NewestEligibleSample(t *testing.T) {
+	f := newTask9EstimateFixture(t, "host")
+	old := f.sample(t, "1.00")
+	newer := f.sample(t, "2.00")
+	newer.SampleID, newer.RecordedAt = strings.Repeat("c", 64), "2026-11-05T00:00:02Z"
+	ineligible := f.sample(t, "9.00")
+	ineligible.SampleID, ineligible.RecordedAt = strings.Repeat("d", 64), "2026-11-05T00:00:03Z"
+	ineligible.Comparisons = []modelconfig.BufferComparison{{Component: "weights", Status: "unknown"}}
+	f.seed(t, newer, old, ineligible)
+	w := estimateTestComponent(t, f.inspect(t).Estimate, "weights")
+	if w.Basis != "observed" || w.Bytes != "2097152" || w.LowBytes != "2091909" || w.HighBytes != "2102395" {
+		t.Fatalf("selected sample=%+v", w)
+	}
+}
+
+func task9AssertBaseEstimate(t *testing.T, got, want modelconfig.Estimate) {
+	t.Helper()
+	if !reflect.DeepEqual(got.Components, want.Components) || !reflect.DeepEqual(got.EstimateSource, want.EstimateSource) || got.HostBytes != want.HostBytes || got.DeviceBytes != want.DeviceBytes || got.CapacityFit != want.CapacityFit || got.FreeFit != want.FreeFit || len(got.Domains) != len(want.Domains) {
+		t.Fatalf("overlay changed base fields: got=%+v want=%+v", got, want)
+	}
+	for i, d := range got.Domains {
+		w := want.Domains[i]
+		if d.ID != w.ID || d.Kind != w.Kind || d.RequiredBytes != w.RequiredBytes || d.RequiredLowBytes != w.RequiredLowBytes || d.RequiredHighBytes != w.RequiredHighBytes {
+			t.Fatalf("overlay changed base domain: %+v want %+v", d, w)
+		}
+	}
+}
+
+func TestModelSettingsEstimateTask9IneligibleSamples(t *testing.T) {
+	test := func(name string, edit func(*modelconfig.BufferObservation)) {
+		t.Run(name, func(t *testing.T) {
+			f := newTask9EstimateFixture(t, "host")
+			base := f.inspect(t).Estimate
+			o := f.sample(t, "9.00")
+			edit(&o)
+			f.seed(t, o)
+			task9AssertBaseEstimate(t, f.inspect(t).Estimate, base)
+		})
+	}
+	test("unknown comparison", func(o *modelconfig.BufferObservation) {
+		o.Comparisons = []modelconfig.BufferComparison{{Component: "weights", Status: "unknown"}}
+	})
+	test("wrong configuration", func(o *modelconfig.BufferObservation) { o.ConfigurationKey = strings.Repeat("f", 64) })
+	test("missing configuration", func(o *modelconfig.BufferObservation) { o.ConfigurationKey = "" })
+	test("wrong content build", func(o *modelconfig.BufferObservation) { o.BuildID = "sha256:" + strings.Repeat("f", 64) })
+	test("missing content build", func(o *modelconfig.BufferObservation) { o.BuildID = "" })
+	test("changed source", func(o *modelconfig.BufferObservation) { o.Reason = "source-changed" })
+	test("unrecognized output", func(o *modelconfig.BufferObservation) { o.Reason = "unrecognized-build-output" })
+	test("history unavailable", func(o *modelconfig.BufferObservation) { o.Persistence = "history-unavailable" })
+	test("capture reasons", func(o *modelconfig.BufferObservation) { o.Reasons = []string{"source-changed"} })
+	test("wrong physical pool", func(o *modelconfig.BufferObservation) {
+		for i := range o.Rows {
+			o.Rows[i].PoolIdentity = strings.Repeat("e", 64)
+		}
+	})
+	test("expired history", func(o *modelconfig.BufferObservation) { o.RecordedAt = "2026-10-01T00:00:00Z" })
+	test("future history", func(o *modelconfig.BufferObservation) { o.RecordedAt = "2026-11-06T00:00:00Z" })
+}
+
+func TestModelSettingsEstimateTask9UnavailableHistory(t *testing.T) {
+	f := newTask9EstimateFixture(t, "host")
+	base := f.inspect(t).Estimate
+	s := f.seed(t, f.sample(t, "9.00"))
+	if w := estimateTestComponent(t, f.inspect(t).Estimate, "weights"); w.Basis != "observed" {
+		t.Fatal("available history control did not overlay")
+	}
+	s.mu.Lock()
+	s.writeDisabled = true
+	s.publishView()
+	s.mu.Unlock()
+	task9AssertBaseEstimate(t, f.inspect(t).Estimate, base)
+}
+
+func TestModelSettingsEstimateTask9LRUAndReplyIsolation(t *testing.T) {
+	f := newTask9EstimateFixture(t, "host")
+	base := f.inspect(t).Estimate
+	cache := func() []modelconfig.Estimate {
+		t.Helper()
+		s := &f.f.ex.modelEstimates
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		out := make([]modelconfig.Estimate, len(s.entries))
+		for i, entry := range s.entries {
+			out[i] = entry.value.Clone()
+		}
+		if len(out) == 0 {
+			t.Fatal("LRU control is empty")
+		}
+		return out
+	}
+	before := cache()
+	f.seed(t, f.sample(t, "1.00"))
+	first := f.inspect(t)
+	if w := estimateTestComponent(t, first.Estimate, "weights"); w.Basis != "observed" || w.Bytes != "1048576" {
+		t.Fatalf("first overlay=%+v", w)
+	}
+	f.seed(t, f.sample(t, "2.00"))
+	second := f.inspect(t)
+	if w := estimateTestComponent(t, second.Estimate, "weights"); w.Basis != "observed" || w.Bytes != "2097152" {
+		t.Fatalf("history update hidden by LRU=%+v", w)
+	}
+	stated := f.set(t, map[string]string{"host": "7"})
+	task9AssertStated(t, stated, map[string]string{"host": "7"})
+	stated.Estimate.Domains[0].RequiredBytes = "99"
+	stated.Estimate.EstimateSource.Provider = "changed"
+	stated.Estimate.Components[0].Bytes = "99"
+	stated.MemoryProfiles[0].HostBytes = "99"
+	fresh := f.inspect(t)
+	task9AssertStated(t, fresh, map[string]string{"host": "7"})
+	if !reflect.DeepEqual(fresh.Estimate.Components, second.Estimate.Components) {
+		t.Fatal("returned display rows alias later inspection")
+	}
+	if !reflect.DeepEqual(before, cache()) {
+		t.Fatal("overlay or returned reply mutated cached base")
+	}
+	q := modelconfig.ClearStatedMemoryRequest{Engine: f.f.request.Engine, ModelID: f.f.request.ModelID, ConfigurationKey: fresh.ConfigurationKey}
+	cleared, err := f.f.ex.recordStatedMemory(f.ctx, q, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared.Estimate.EstimateSource == nil || cleared.Estimate.EstimateSource.Kind != "pair-estimate" || !reflect.DeepEqual(cleared.Estimate.Components, second.Estimate.Components) {
+		t.Fatal("clear lost independent observed display")
+	}
+	f.seed(t)
+	task9AssertBaseEstimate(t, f.inspect(t).Estimate, base)
+}
+
+func TestModelSettingsEstimateTask9DraftHasNoOverlay(t *testing.T) {
+	f := newTask9EstimateFixture(t, "host")
+	f.seed(t, f.sample(t, "9.00"))
+	task9AssertStated(t, f.set(t, map[string]string{"host": "17179869184"}), map[string]string{"host": "17179869184"})
+	// The same exact model and stores remain visible through the original
+	// unapplied preset. Only the saved typed application is removed in this fixture.
+	runtime := f.f.st.plat.Runtime
+	f.f.st.plat.Runtime = f.draftRuntime
+	t.Cleanup(func() { f.f.st.plat.Runtime = runtime })
+	r, err := f.f.ex.InspectModel(f.ctx, f.f.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if r.ConfigurationKey != "" || r.ConfigurationKeyReason != "not-applied" {
+		t.Fatalf("draft still applied: %+v", r)
+	}
+	if r.Estimate.EstimateSource == nil || r.Estimate.EstimateSource.Kind != "pair-estimate" {
+		t.Fatalf("draft inherited stated source: %+v", r.Estimate)
+	}
+	w := estimateTestComponent(t, r.Estimate, "weights")
+	if w.Basis == "observed" || w.Bytes != "512" {
+		t.Fatalf("draft inherited retained weights: %+v", w)
+	}
+	if len(r.MemoryProfiles) == 0 || slices.ContainsFunc(r.MemoryProfiles, func(p modelconfig.MemoryProfile) bool { return p.Current }) {
+		t.Fatal("draft did not expose the saved figure as history only")
+	}
+}
+
+func TestModelSettingsEstimateTask9PreviewHasNoOverlay(t *testing.T) {
+	f := newTask9EstimateFixture(t, "host")
+	launch, err := f.f.ex.LaunchSettings(f.f.request.Engine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := settings.Request{Engine: f.f.request.Engine, Settings: settings.ConfigFromLaunch(launch, 54301), ModelChange: &modelconfig.ModelChange{ModelID: f.f.request.ModelID, ExpectedPolicyRevision: "0", Load: &modelconfig.LoadPatch{Set: modelconfig.RequestedLoad{Context: &modelconfig.Context{Mode: "fixed", Tokens: 2048}}}}}
+	preview := func() modelconfig.Estimate {
+		t.Helper()
+		p, err := f.f.ex.PreviewLaunch(request, f.ctx)
+		if err != nil || len(p.Errors) != 0 || p.Conflict != nil || p.Estimate == nil || p.PreviewDigest == "" {
+			t.Fatalf("public preview unavailable: %+v %v", p, err)
+		}
+		if err := p.Estimate.Validate(); err != nil {
+			t.Fatal(err)
+		}
+		if p.Estimate.EstimateSource == nil || p.Estimate.EstimateSource.Kind != "pair-estimate" || estimateTestComponent(t, *p.Estimate, "weights").Bytes != "512" {
+			t.Fatalf("preview control unavailable: %+v", p.Estimate)
+		}
+		return *p.Estimate
+	}
+	base := preview()
+	f.seed(t, f.sample(t, "9.00"))
+	if w := estimateTestComponent(t, f.inspect(t).Estimate, "weights"); w.Basis != "observed" {
+		t.Fatal("observed inspection control missing")
+	}
+	task9AssertBaseEstimate(t, preview(), base)
+	f.set(t, map[string]string{"host": "17179869184"})
+	task9AssertBaseEstimate(t, preview(), base)
+}
+
+func TestModelSettingsEstimateTask9AutoCandidateHasNoOverlay(t *testing.T) {
+	f := newTask9EstimateFixture(t, "host")
+	var in modelEstimateInput
+	if _, err := f.f.ex.inspectModelArtifacts(f.ctx, f.f.request, &in); err != nil {
+		t.Fatal(err)
+	}
+	if in.Allocation == nil {
+		t.Fatal("finite candidate input unavailable")
+	}
+	requested := modelConfigurationOptions(*in.Allocation)
+	requested.GPU = &modelconfig.GPU{Mode: "cpu"}
+	requested.Context = &modelconfig.Context{Mode: "auto", Floor: 4096, Cap: 4096}
+	candidate := func() modelconfig.Estimate {
+		t.Helper()
+		op, _ := f.ctx.Value(modelAutoOperationKey{}).(modelAutoOperation)
+		p, err := resolveModelSettingsAutoInput(f.ctx, f.f.request.ModelID, requested, in, op, &f.f.ex.modelEstimates)
+		// Production Auto remains gated by incomplete compute costs, but the
+		// real candidate must have reached the estimator with priced weights.
+		if err == nil || p.Status != "unavailable" || !strings.Contains(err.Error(), "no complete fitting candidate") {
+			t.Fatalf("candidate control: %+v %v", p, err)
+		}
+		if err := p.Estimate.Validate(); err != nil {
+			t.Fatal(err)
+		}
+		w := estimateTestComponent(t, p.Estimate, "weights")
+		if w.Bytes != "512" || w.Basis == "observed" || p.Estimate.EstimateSource == nil || p.Estimate.EstimateSource.Kind != "pair-estimate" {
+			t.Fatalf("candidate inherited overlay or did not evaluate: %+v", p.Estimate)
+		}
+		return p.Estimate
+	}
+	base := candidate()
+	f.seed(t, f.sample(t, "9.00"))
+	if w := estimateTestComponent(t, f.inspect(t).Estimate, "weights"); w.Basis != "observed" {
+		t.Fatal("observed inspection control missing")
+	}
+	task9AssertBaseEstimate(t, candidate(), base)
+	f.set(t, map[string]string{"host": "17179869184"})
+	task9AssertBaseEstimate(t, candidate(), base)
+}

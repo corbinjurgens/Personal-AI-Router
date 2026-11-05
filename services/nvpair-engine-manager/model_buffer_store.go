@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -265,6 +266,82 @@ func modelBufferHistoryBuildReason(recorded, current string) string {
 		return "source-unavailable"
 	}
 	return "earlier-build"
+}
+
+// Read only the immutable view. Diagnostic history's earlier-build fallback
+// cannot supply a replacement for the current applied configuration.
+func (s *modelBufferStore) compatibleCPUWeights(key, buildID, hostPool string) (low, high uint64, sampleID string, ok bool) {
+	if s == nil || key == "" || buildID == "" || hostPool == "" {
+		return
+	}
+	view := s.view.Load()
+	if view == nil || view.unavailable {
+		return
+	}
+	now := time.Now()
+	if s.now != nil {
+		now = s.now()
+	}
+	var bestAt time.Time
+	for _, sample := range view.samples {
+		o := sample.Observation
+		if o.ConfigurationKey != key || o.BuildID != buildID || validateModelBufferSample(sample) != nil {
+			continue
+		}
+		at, err := time.Parse(time.RFC3339Nano, o.RecordedAt)
+		if err != nil || now.Before(at) || now.Sub(at) > modelBufferHistoryAge {
+			continue
+		}
+		l, h, compatible := modelBufferCPUWeightInterval(o, hostPool)
+		if !compatible {
+			continue
+		}
+		if !ok || at.After(bestAt) || at.Equal(bestAt) && o.SampleID > sampleID {
+			low, high, sampleID, ok, bestAt = l, h, o.SampleID, true, at
+		}
+	}
+	return
+}
+
+// The caller validates the stored sample once. Reuse Task14's correspondence,
+// then check the CPU interval and current physical host independently.
+func modelBufferCPUWeightInterval(o modelconfig.BufferObservation, hostPool string) (uint64, uint64, bool) {
+	// Capture's device-diagnostic reason does not invalidate its independently
+	// compatible CPU weights; correspondence and physical host are checked below.
+	if hostPool == "" || o.Status == "unknown" || o.Reason != "" && o.Reason != "unmapped-device" || len(o.Reasons) != 0 || o.BuildAssurance != "recognized-output" || o.Persistence == "history-unavailable" {
+		return 0, 0, false
+	}
+	var stored modelconfig.BufferComparison
+	count := 0
+	for _, c := range o.Comparisons {
+		if c.Component == "weights" {
+			stored = c
+			count++
+		}
+	}
+	if count != 1 || stored.Status != "compatible" {
+		return 0, 0, false
+	}
+	if !slices.Contains(modelBufferComparisons(o), stored) {
+		return 0, 0, false
+	}
+	var low, high uint64
+	found := false
+	for _, row := range o.Rows {
+		if row.Component != "model" {
+			continue
+		}
+		if row.Label != "CPU" || row.Role != "model" || row.PoolIdentity != hostPool || row.DeviceBinding != "" || row.Phase != "load" || row.IntervalStatus != "bounded" {
+			return 0, 0, false
+		}
+		l, le := strconv.ParseUint(row.LowerBytes, 10, 64)
+		h, he := strconv.ParseUint(row.UpperBytes, 10, 64)
+		if le != nil || he != nil || l > h || l > ^uint64(0)-low || h > ^uint64(0)-high {
+			return 0, 0, false
+		}
+		low, high, found = low+l, high+h, true
+	}
+	return low, high, found && stored.LowerBytes == strconv.FormatUint(low, 10) && stored.UpperBytes == strconv.FormatUint(high, 10)
 }
 
 func (s *modelBufferStore) newest(model, buildID string) modelconfig.BufferObservation {

@@ -269,6 +269,7 @@ func modelSettingsParamsError(err error) error {
 }
 
 type modelMemoryRecordRemoteKey struct{}
+type modelStatedInspectionKey struct{}
 
 func (e *Executor) recordStatedMemory(ctx context.Context, p modelconfig.ClearStatedMemoryRequest, set *modelconfig.SetStatedMemoryRequest) (modelconfig.InspectResult, error) {
 	if err := p.Validate(); err != nil {
@@ -285,7 +286,9 @@ func (e *Executor) recordStatedMemory(ctx context.Context, p modelconfig.ClearSt
 	if err != nil {
 		return modelconfig.InspectResult{}, err
 	}
-	result, err := e.inspectModel(ctx, modelconfig.InspectRequest{Engine: p.Engine, ModelID: p.ModelID}, false)
+	var statedInput modelEstimateInput
+	inspectionCtx := context.WithValue(ctx, modelStatedInspectionKey{}, &statedInput)
+	result, err := e.inspectModel(inspectionCtx, modelconfig.InspectRequest{Engine: p.Engine, ModelID: p.ModelID}, false)
 	if err != nil {
 		return result, err
 	}
@@ -329,6 +332,7 @@ func (e *Executor) recordStatedMemory(ctx context.Context, p modelconfig.ClearSt
 	if err := e.modelMemoryProfiles.updateInspection(p.Engine, p.ModelID, p.ConfigurationKey, profile, &result); err != nil {
 		return result, err
 	}
+	modelEstimateStated(&result, statedInput, e.modelEstimates.clock())
 	return result, nil
 }
 
@@ -431,6 +435,14 @@ func (e *Executor) inspectModel(ctx context.Context, p modelconfig.InspectReques
 		}
 	}
 	e.modelMemoryProfiles.attach(&result)
+	result.Estimate = modelEstimateObservedCPUWeights(result.Estimate, advisory, result.ConfigurationKey, e.modelBuffers.store)
+	if input, ok := ctx.Value(modelStatedInspectionKey{}).(*modelEstimateInput); ok && input != nil {
+		// The statement writer needs the observed/PAIR base until its new record
+		// is attached, so Set and Clear cannot return the previous selection.
+		*input = advisory
+	} else {
+		modelEstimateStated(&result, advisory, e.modelEstimates.clock())
+	}
 	if build, _ := ctx.Value(nativeHelpInspectionKey{}).(string); build != "" {
 		st, stateErr := e.state(p.Engine)
 		current, buildErr := nativeBuildID(ctx, st)
