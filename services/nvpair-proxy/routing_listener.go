@@ -191,15 +191,26 @@ func probeIPv6Loopback(port string) error {
 }
 
 // listenWildcard binds an engine facade's all-address listener, refusing the
-// port this listener holds. The reverse of listenLoopbackExclusive: on macOS a
-// wildcard bind succeeds beside a loopback holder, so only this process's own
-// record of the port can refuse it. The lock makes the check and the bind one
-// step against a concurrent reconcile, which probes the wildcard under it.
+// routing listener's port and existing IPv4 or IPv6 loopback holders. A wildcard
+// bind can otherwise succeed beside a loopback holder and report readiness while
+// local clients reach the other program. Like listenLoopbackExclusive, probes
+// are released before binding to avoid colliding with our own probes; a foreign
+// bind after release remains possible. The lock serializes the reservation,
+// probes and bind against this process's routing-listener reconcile.
 func (l *routingListener) listenWildcard(port int) (net.Listener, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.srv != nil && l.port == port {
 		return nil, fmt.Errorf("port %d is held by the routing listener", port)
+	}
+	p := strconv.Itoa(port)
+	probe, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", p))
+	if err != nil {
+		return nil, fmt.Errorf("port %d is not free on the IPv4 loopback address: %w", port, err)
+	}
+	_ = probe.Close()
+	if err := probeIPv6Loopback(p); err != nil {
+		return nil, fmt.Errorf("port %d is not free on the IPv6 loopback address: %w", port, err)
 	}
 	return net.Listen("tcp", fmt.Sprintf(":%d", port))
 }
