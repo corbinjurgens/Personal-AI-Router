@@ -394,13 +394,24 @@ func candidateRoleProfile(profiles []nodepolicy.AdvertisedProfile, engine, model
 }
 
 // roleContextLength is the largest known bound of the role's visible profiles
-// on engines this process can route. Missing keys carry no facts; a reachable
-// unbounded profile omits the bound.
+// whose declaring node is a resolved candidate. Missing keys carry no facts;
+// a reachable unbounded profile omits the bound.
 func (p *Proxy) roleContextLength(d declaredRoles, t string) int {
 	length, unbounded := 0, false
-	add := func(roles map[string][]nodepolicy.AdvertisedProfile) {
+	add := func(roles map[string][]nodepolicy.AdvertisedProfile, nodeID string, self bool) {
 		for _, profile := range roles[t] {
-			if p.facadeFor(profile.Engine) == nil || nodepolicy.ValidateModelIdentifier(profile.Model) != nil {
+			f := p.facadeFor(profile.Engine)
+			if f == nil || nodepolicy.ValidateModelIdentifier(profile.Model) != nil {
+				continue
+			}
+			reachable := false
+			for _, c := range f.resolveCandidates(profile.Model) {
+				if (self && c.self) || (!self && !c.self && c.id == nodeID) {
+					reachable = true
+					break
+				}
+			}
+			if !reachable {
 				continue
 			}
 			if profile.ContextTokens == 0 {
@@ -409,9 +420,9 @@ func (p *Proxy) roleContextLength(d declaredRoles, t string) int {
 			length = max(length, profile.ContextTokens)
 		}
 	}
-	add(d.self)
-	for _, roles := range d.peers {
-		add(roles)
+	add(d.self, "", true)
+	for nodeID, roles := range d.peers {
+		add(roles, nodeID, false)
 	}
 	if unbounded {
 		return 0

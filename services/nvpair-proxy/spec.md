@@ -1915,8 +1915,12 @@ is resolved by the node it enters.
   policy and those declarations (`configuredAliases`, `hybridAliasRecords`) and
   carry no credential, account, deployment or endpoint. Each alias variant
   carries `context_length` equal to the largest `ContextTokens` of that role's
-  visible resolved profiles across self and peers whose engines have an
-  enabled facade in this process. The field is absent when no such profile
+  visible resolved profiles across self and peers whose declaring node is
+  returned by the engine facade's inference candidate resolver for that model.
+  Self facts require a self candidate; peer facts require a non-self candidate
+  with the declaring peer's exact ID. Another node serving the same model does
+  not qualify a profile. Supported binding/preparation offers qualify even
+  without inventory. The field is absent when no such profile
   facts are known or any such profile has zero (unbounded)
   context. Missing or withheld keys do not count as zero-context facts.
   Router tier entries do not supply this profile-derived field. An upstream
@@ -2306,8 +2310,8 @@ port. Inference uses the existing request/workload notification contract.
     own `roles`; peers' declarations are not seen), `[]` when none; a query string
     on it is ignored. The shared self-policy role resolver supplies
     `context_length` using only this node's profile facts, including local-only
-    profiles on enabled engines, with the same unknown/unbounded omission rule
-    as facade catalogs.
+    profiles whose model resolves to a self inference candidate, with the same
+    unknown/unbounded omission rule as facade catalogs.
   - A route is an inference route when any engine profile classifies the path as
     a `POST` inference route (`isInferenceRequest`), so the set is the facades'
     union. Another method on a known path is `405` with `Allow`; an unknown path
