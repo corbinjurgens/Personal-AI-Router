@@ -163,7 +163,7 @@ describe('profile-key load contracts', () => {
         ).toThrow()
     })
 
-    it.each(['', 'weak', 'medium-local', 'strong-api', 'bad\nkey', 'x'.repeat(513)])(
+    it.each(['', 'coder:api', 'coder:fast', 'coder:', 'bad\nkey', 'x'.repeat(513)])(
         'refuses invalid profile key %s',
         profileKey => {
             expect(() =>
@@ -178,18 +178,23 @@ describe('profile-key load contracts', () => {
         }
     )
 
-    it.each(['coder-api', 'coder-local', 'org/model-api', 'coder-api-local'])(
-        'accepts profile key outside the interim fixed-tier aliases %s',
-        profileKey => {
-            const load = { profileKey, modelId: 'model', requested: {} }
-            expect(
-                parseEngineSettingsPreview({
-                    ...preview,
-                    settings: { ...settings, modelLoads: [load] }
-                }).settings.modelLoads
-            ).toEqual([load])
-        }
-    )
+    it.each([
+        'weak',
+        'medium-local',
+        'strong-api',
+        'coder-api',
+        'coder-local',
+        'org/model-api',
+        'coder-api-local'
+    ])('accepts ordinary profile key %s', profileKey => {
+        const load = { profileKey, modelId: 'model', requested: {} }
+        expect(
+            parseEngineSettingsPreview({
+                ...preview,
+                settings: { ...settings, modelLoads: [load] }
+            }).settings.modelLoads
+        ).toEqual([load])
+    })
 
     it('preserves validated preview identities by profile key', () => {
         const identities = {
@@ -217,7 +222,7 @@ describe('profile-key load contracts', () => {
         expect(() =>
             parseEngineSettingsPreview({
                 ...preview,
-                identities: { 'medium-api': { strength: 'declared' } }
+                identities: { 'coder:fast': { strength: 'declared' } }
             })
         ).toThrow('Invalid profile key.')
     })

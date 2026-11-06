@@ -492,7 +492,8 @@ func TestServiceRoutingListenerWithoutFacades(t *testing.T) {
 	setListener := func(id string, listener nodepolicy.Listener) setResult {
 		t.Helper()
 		want := servicePolicy(t, c)
-		want.Tiers["strong"] = []nodepolicy.TierEntry{{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "big:70b"}}
+		// An empty declaration lists the role without an engine facade or profile.
+		want.Roles = []nodepolicy.Role{{Name: "strong", Profiles: []string{}}}
 		want.Routing.Listener = listener
 		if err := want.Validate(); err != nil {
 			t.Fatalf("invalid listener fixture: %v", err)
@@ -534,7 +535,7 @@ func TestServiceRoutingListenerWithoutFacades(t *testing.T) {
 	}
 	waitListed := func(port int) {
 		t.Helper()
-		want := []string{"strong", "strong-api", "strong-local"}
+		want := []string{"strong", "strong:api", "strong:local"}
 		deadline := time.Now().Add(serviceCallTimeout)
 		for {
 			ids, err := listed(port)

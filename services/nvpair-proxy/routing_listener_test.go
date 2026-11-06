@@ -32,8 +32,8 @@ import (
 	"nvpair-shared/nodepolicy"
 )
 
-// listenerPolicy is the staged hybrid policy (weak API-only, medium mixed,
-// strong empty) at revision, carrying the given listener settings.
+// listenerPolicy carries the fixture's declared weak and medium roles and the
+// given revision and listener settings. It does not declare strong.
 func listenerPolicy(t *testing.T, revision string, listener nodepolicy.Listener) nodepolicy.Policy {
 	t.Helper()
 	pol, err := nodepolicy.Parse([]byte(apiTierPolicy))
@@ -311,8 +311,8 @@ func TestRoutingListener_ListsAliasesWithNoEngineRunning(t *testing.T) {
 	if got.status != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body %s", got.status, got.body)
 	}
-	// weak is API-only and strong has no entry, so only weak and medium list.
-	want := []string{"weak", "weak-api", "weak-local", "medium", "medium-api", "medium-local"}
+	// Only weak and medium are declared; API entries do not create roles.
+	want := []string{"weak", "weak:api", "weak:local", "medium", "medium:api", "medium:local"}
 	if ids := listedIDs(t, got); !slices.Equal(ids, want) {
 		t.Errorf("listed %v, want %v", ids, want)
 	}
@@ -340,15 +340,15 @@ func TestRoutingListener_ListFollowsTheActivatedPolicy(t *testing.T) {
 
 	pol := nodepolicy.Default()
 	pol.Revision = "2"
+	declarePolicyRole(&pol, "strong", "llamacpp", "big:70b")
 	pol.Routing.Listener = listener
-	pol.Tiers["strong"] = []nodepolicy.TierEntry{{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "big:70b"}}
 	activate(t, p, w, pol)
 
 	if boundPort(p) != port {
 		t.Fatalf("an unchanged listener setting rebound %d to %d", port, boundPort(p))
 	}
 	got := call(t, port, http.MethodGet, "/v1/models", nil)
-	if ids, want := listedIDs(t, got), []string{"strong", "strong-api", "strong-local"}; !slices.Equal(ids, want) {
+	if ids, want := listedIDs(t, got), []string{"strong", "strong:api", "strong:local"}; !slices.Equal(ids, want) {
 		t.Errorf("listed %v, want %v", ids, want)
 	}
 }
@@ -444,47 +444,91 @@ func TestRoutingListener_InferenceUnqualifiedOrUnsupportedHasNoDispatchEffects(t
 
 	t.Run("every model name form", func(t *testing.T) {
 		p, w, local := newFixture(t)
-		startRouting(t, p, w, "1")
-		port := boundPort(p)
-		bodies := []string{
-			`{"model":"mid:7b"}`,
-			`{"model":"mid:7b","stream":true}`,
-			`{"model":""}`,
-			`{}`,
-			`not json`,
-			`{"name":"weak-api"}`,
+		pol := listenerPolicy(t, "1", nodepolicy.Listener{})
+		// Declare every role in this refusal matrix, including empty strong.
+		pol.Roles = []nodepolicy.Role{{Name: "weak"}, {Name: "medium"}, {Name: "strong"}}
+		port := startRoutingPolicy(t, p, w, pol)
+		type refusalCase struct {
+			body   string
+			status int
+			error  string
 		}
-		for _, alias := range allAliases {
-			for _, form := range []string{alias, strings.ToUpper(alias), " " + alias + " ", alias + ":latest"} {
-				encoded, err := json.Marshal(map[string]string{"model": form})
-				if err != nil {
-					t.Fatal(err)
+		cases := []refusalCase{
+			{`{"model":""}`, http.StatusBadRequest, "invalid model identifier"},
+			{`{}`, http.StatusBadRequest, "inference requires one exact supported tier alias"},
+			{`not json`, http.StatusBadRequest, "inference requires one exact supported tier alias"},
+			{`{"name":"weak:api"}`, http.StatusBadRequest, "inference requires one exact supported tier alias"},
+		}
+		for _, role := range []string{"weak", "medium", "strong"} {
+			for _, suffix := range []string{"", ":api", ":local"} {
+				alias := role + suffix
+				for _, specimen := range []struct {
+					model  string
+					status int
+					error  string
+				}{
+					{alias, http.StatusNotFound, "no eligible model for tier " + role},
+					{strings.ToUpper(alias), http.StatusNotFound, "no profile or role named " + strings.ToUpper(alias)},
+					{" " + alias + " ", http.StatusBadRequest, "inference requires one exact supported tier alias"},
+					{alias + ":latest", http.StatusNotFound, "no profile or role named " + alias + ":latest"},
+				} {
+					encoded, err := json.Marshal(map[string]string{"model": specimen.model})
+					if err != nil {
+						t.Fatal(err)
+					}
+					cases = append(cases, refusalCase{string(encoded), specimen.status, specimen.error})
 				}
-				bodies = append(bodies, string(encoded))
 			}
 		}
-		for _, body := range bodies {
+		for _, tc := range cases {
 			got := call(t, port, http.MethodPost, "/v1/chat/completions", func(r *http.Request) {
-				r.Body = io.NopCloser(strings.NewReader(body))
-				r.ContentLength = int64(len(body))
+				r.Body = io.NopCloser(strings.NewReader(tc.body))
+				r.ContentLength = int64(len(tc.body))
 			})
-			var request struct {
-				Model string `json:"model"`
+			var refusal struct {
+				Error string `json:"error"`
 			}
-			parseErr := json.Unmarshal([]byte(body), &request)
-			want := http.StatusBadRequest
-			if parseErr == nil && nodepolicy.IsReservedAlias(request.Model) {
-				want = http.StatusNotFound
+			if err := json.Unmarshal(got.body, &refusal); err != nil {
+				t.Fatalf("decode refusal for %q: %v", tc.body, err)
 			}
-			if got.status != want {
-				t.Errorf("body %q = %d %s, want %d", body, got.status, got.body, want)
+			if got.status != tc.status || refusal.Error != tc.error {
+				t.Errorf("body %q = %d %s, want %d error %q", tc.body, got.status, got.body, tc.status, tc.error)
 			}
 		}
 		if n := local.hits(); n != 0 {
 			t.Errorf("engine received %d request(s), want none", n)
 		}
 		settled(t, p)
+		if n := len(notificationsOf(t, w, workloadSubmittedMethod)); n != 0 {
+			t.Errorf("refused requests submitted %d workloads", n)
+		}
 		ownedAssertHandlerDrained(t, p, nil)
+	})
+
+	t.Run("ordinary concrete requests dispatch", func(t *testing.T) {
+		for _, body := range []string{`{"model":"mid:7b"}`, `{"model":"mid:7b","stream":true}`} {
+			t.Run(body, func(t *testing.T) {
+				p, w, local := newFixture(t)
+				port := startRouting(t, p, w, "1")
+				got := call(t, port, http.MethodPost, routeChatCompletions, func(r *http.Request) {
+					r.Body = io.NopCloser(strings.NewReader(body))
+					r.ContentLength = int64(len(body))
+				})
+				if got.status != http.StatusOK || local.hits() != 1 {
+					t.Fatalf("concrete status/hits = %d/%d, want 200/1; body %s", got.status, local.hits(), got.body)
+				}
+				var forwarded struct {
+					Model string `json:"model"`
+				}
+				if err := json.Unmarshal([]byte(local.lastBody()), &forwarded); err != nil {
+					t.Fatal(err)
+				}
+				if forwarded.Model != "mid:7b" || local.lastHeader().Get(nodepolicy.StrictAdmissionHeader) != "" {
+					t.Fatalf("concrete model/header = %q/%v", forwarded.Model, local.lastHeader())
+				}
+				waitInferenceDrained(t, p)
+			})
+		}
 	})
 }
 
@@ -519,7 +563,7 @@ func TestRoutingListener_RejectsMethodsAndPaths(t *testing.T) {
 	test("root", http.MethodGet, "/", http.StatusNotFound, "not_found")
 
 	t.Run("query string on an inference route", func(t *testing.T) {
-		for _, target := range []string{"/v1/chat/completions?x=1", "/v1/chat/completions?", "/v1/chat/completions?model=weak-api"} {
+		for _, target := range []string{"/v1/chat/completions?x=1", "/v1/chat/completions?", "/v1/chat/completions?model=weak:api"} {
 			got := call(t, port, http.MethodPost, target, nil)
 			if got.status != http.StatusBadRequest || got.code(t) != "query_not_allowed" {
 				t.Errorf("POST %s = %d %s, want 400 query_not_allowed", target, got.status, got.body)
@@ -1548,7 +1592,8 @@ func waitInferenceDrained(t *testing.T, p *Proxy) {
 func TestModelControlsSelectionListenerShortAlias512ByteConcrete(t *testing.T) {
 	test := func(name, model string) {
 		t.Run(name, func(t *testing.T) {
-			pol := tierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: model}}})
+			pol := nodepolicy.Default()
+			pol.Roles = []nodepolicy.Role{{Name: "weak"}}
 			pol.TierPolicy.AllowStronger = false
 			fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"peer": {model}}, nil)
 			fx.advertise(t, "peer", map[string]nodepolicy.AdvertisedProfile{"weak": qualifiedProfile(model)}, strictCapabilityFor("llamacpp", model))
@@ -1629,7 +1674,7 @@ func TestModelControlsIngressListenerKeyedRefusal(t *testing.T) {
 }
 
 func TestRoutingListener_InferenceModelMembers(t *testing.T) {
-	test := func(name, body string, wantStatus, wantHits int, wantCode string) {
+	test := func(name, body string, wantStatus, wantHits int, wantRefusal string) {
 		t.Run(name, func(t *testing.T) {
 			fx := hybridPeerFixture(t, map[string]int{"peer": http.StatusOK})
 			port := inferenceListener(t, fx)
@@ -1641,8 +1686,21 @@ func TestRoutingListener_InferenceModelMembers(t *testing.T) {
 			if resp.StatusCode != wantStatus || fx.eng["peer"].hits() != wantHits {
 				t.Fatalf("status/hits = %d/%d, want %d/%d; body %s", resp.StatusCode, fx.eng["peer"].hits(), wantStatus, wantHits, data)
 			}
-			if wantCode != "" && (answer{body: data}).code(t) != wantCode {
-				t.Fatalf("refusal = %s, want code %s", data, wantCode)
+			if wantRefusal != "" {
+				var refusal struct {
+					Code  string `json:"code"`
+					Error string `json:"error"`
+				}
+				if err := json.Unmarshal(data, &refusal); err != nil {
+					t.Fatal(err)
+				}
+				got := refusal.Code
+				if wantStatus == http.StatusNotFound {
+					got = refusal.Error
+				}
+				if got != wantRefusal {
+					t.Fatalf("refusal = %s, want %q", data, wantRefusal)
+				}
 			}
 			if wantHits != 0 {
 				var forwarded struct {
@@ -1657,7 +1715,7 @@ func TestRoutingListener_InferenceModelMembers(t *testing.T) {
 				if forwarded.Model != "q:1b" {
 					t.Fatalf("forwarded model = %q, want the selected concrete model", forwarded.Model)
 				}
-				if strings.Contains(body, `"payload"`) && forwarded.Payload.Model != "weak-api" {
+				if strings.Contains(body, `"payload"`) && forwarded.Payload.Model != "weak:api" {
 					t.Fatalf("nested payload changed: %+v", forwarded.Payload)
 				}
 				decodeStrictHeader(t, fx.eng["peer"].lastHeader())
@@ -1668,21 +1726,93 @@ func TestRoutingListener_InferenceModelMembers(t *testing.T) {
 		})
 	}
 	test("bare alias", hybridTestBody, http.StatusOK, 1, "")
-	test("local alias", `{"model":"weak-local"}`, http.StatusOK, 1, "")
-	test("API alias never falls through to local", `{"model":"weak-api"}`, http.StatusNotFound, 0, "")
-	test("nested model is payload", `{"model":"weak","payload":{"model":"weak-api"}}`, http.StatusOK, 1, "")
+	test("local alias", `{"model":"weak:local"}`, http.StatusOK, 1, "")
+	test("API alias never falls through to local", `{"model":"weak:api"}`, http.StatusNotFound, 0, "no eligible model for tier weak")
+	test("nested model is payload", `{"model":"weak","payload":{"model":"weak:api"}}`, http.StatusOK, 1, "")
 	test("nested model cannot select", `{"payload":{"model":"weak"}}`, http.StatusBadRequest, 0, "unsupported-alias")
 	test("escaped model key", `{"mo\u0064el":"weak"}`, http.StatusOK, 1, "")
 	test("escaped alias value", `{"model":"we\u0061k"}`, http.StatusOK, 1, "")
-	test("duplicate escaped key", `{"model":"weak","mo\u0064el":"weak-local"}`, http.StatusBadRequest, 0, "ambiguous-model")
-	test("duplicate unsupported first", `{"model":"weak-api","model":"weak"}`, http.StatusBadRequest, 0, "ambiguous-model")
+	test("duplicate escaped key", `{"model":"weak","mo\u0064el":"weak:local"}`, http.StatusBadRequest, 0, "ambiguous-model")
+	test("duplicate unsupported first", `{"model":"weak:api","model":"weak"}`, http.StatusBadRequest, 0, "ambiguous-model")
 	test("duplicate unsupported last", `{"model":"weak","model":"ordinary"}`, http.StatusBadRequest, 0, "ambiguous-model")
 	test("case folded model key", `{"Model":"weak"}`, http.StatusBadRequest, 0, "ambiguous-model")
-	test("ordinary concrete model", `{"model":"q:1b"}`, http.StatusBadRequest, 0, "unsupported-alias")
 	test("padded alias", `{"model":" weak "}`, http.StatusBadRequest, 0, "unsupported-alias")
-	test("tagged alias", `{"model":"weak:latest"}`, http.StatusBadRequest, 0, "unsupported-alias")
+	test("tagged alias", `{"model":"weak:latest"}`, http.StatusNotFound, 0, "no profile or role named weak:latest")
 	test("malformed JSON", `{"model":"weak",`, http.StatusBadRequest, 0, "unsupported-alias")
 	test("all identifiers checked", `{"model":"`+strings.Repeat("x", maxRequestIdentifierBytes+1)+`","model":"weak"}`, http.StatusBadRequest, 0, "request-body")
+}
+
+func TestRoutingListener_InferenceConcreteNames(t *testing.T) {
+	test := func(name, model string) {
+		t.Run(name, func(t *testing.T) {
+			fx := newTierFixture(t, llamacppCase(t), nodepolicy.Default(), map[string][]string{"peer": {model}}, nil)
+			pinRecordingPairPeer(t, fx.p.soleFacade(), "peer", fx.eng["peer"])
+			port := inferenceListener(t, fx)
+			body, err := json.Marshal(map[string]string{"model": model})
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp := inferencePost(t, port, string(body))
+			if _, err := io.ReadAll(resp.Body); err != nil {
+				t.Fatal(err)
+			}
+			if resp.StatusCode != http.StatusOK || fx.eng["peer"].hits() != 1 {
+				t.Fatalf("concrete status/hits = %d/%d, want 200/1", resp.StatusCode, fx.eng["peer"].hits())
+			}
+			var forwarded struct {
+				Model string `json:"model"`
+			}
+			if err := json.Unmarshal([]byte(fx.eng["peer"].lastBody()), &forwarded); err != nil {
+				t.Fatal(err)
+			}
+			if forwarded.Model != model || fx.eng["peer"].lastHeader().Get(nodepolicy.StrictAdmissionHeader) != "" {
+				t.Fatalf("concrete model/header = %q/%v", forwarded.Model, fx.eng["peer"].lastHeader())
+			}
+			waitInferenceDrained(t, fx.p)
+		})
+	}
+	test("ordinary concrete model", "q:1b")
+	test("hyphen API name", "coder-api")
+	test("hyphen local name", "coder-local")
+	test("undeclared former role", "strong")
+	test("undeclared API alias spelling", "strong:api")
+	test("undeclared local alias spelling", "strong:local")
+}
+
+func TestRoutingListener_InferenceDeclaredAliasWhitespaceRefused(t *testing.T) {
+	test := func(name, body string) {
+		t.Run(name, func(t *testing.T) {
+			fx := hybridPeerFixture(t, map[string]int{"peer": http.StatusOK})
+			f := fx.p.soleFacade()
+			n, ok := discoveredNode(f, "peer")
+			if !ok {
+				t.Fatal("missing fixture peer")
+			}
+			// Give erroneous concrete fallback an owner for every alias.
+			// The existing declaration must still require an exact selector.
+			n.Models = append(n.Models, "weak", "weak:api", "weak:local")
+			f.discovery.AddManual(n)
+			port := inferenceListener(t, fx)
+			resp := inferencePost(t, port, body)
+			data, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.StatusCode != http.StatusBadRequest || (answer{body: data}).code(t) != "unsupported-alias" {
+				t.Fatalf("padded declared alias = %d %s, want 400 unsupported-alias", resp.StatusCode, data)
+			}
+			if fx.eng["peer"].hits() != 0 || len(notificationsOf(t, fx.w, workloadSubmittedMethod)) != 0 {
+				t.Fatal("padded declared alias dispatched or submitted a workload")
+			}
+			waitInferenceDrained(t, fx.p)
+		})
+	}
+	test("leading space", `{"model":" weak"}`)
+	test("trailing space", `{"model":"weak "}`)
+	test("padded API alias", `{"model":" weak:api "}`)
+	test("padded local alias", `{"model":" weak:local "}`)
+	test("escaped padding", `{"model":"\u0020weak:local\u0020"}`)
+	test("Unicode padding", `{"model":"\u00a0weak\u2003"}`)
 }
 
 func TestRoutingListener_InferenceGatesPrecedeBodyAndOwner(t *testing.T) {

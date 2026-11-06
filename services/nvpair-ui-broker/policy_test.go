@@ -675,7 +675,7 @@ func TestModelControlPolicyLoadPreservesDiskAndAvailability(t *testing.T) {
 	if got.RecoveryRequired || got.Availability != nodepolicy.Available || got.Policy.Revision != "42" || got.Policy.Admission.MemoryBudgetBytes != 12345 {
 		t.Fatal("model repair invoked whole-node recovery or changed state")
 	}
-	wantRoles := []nodepolicy.Role{{Name: nodepolicy.TierWeak, Profiles: []string{"good-profile"}}, {Name: nodepolicy.TierStrong, Profiles: []string{}}}
+	wantRoles := []nodepolicy.Role{{Name: "weak", Profiles: []string{"good-profile"}}, {Name: "strong", Profiles: []string{}}}
 	if !reflect.DeepEqual(got.Policy.Roles, wantRoles) || len(got.Policy.Profiles) != 1 || got.Policy.Profiles[0].Model != "good" || got.Policy.ServedModels == nil || len(got.Policy.ServedModels) != 0 {
 		t.Fatal("model repair lost valid sibling or deny-all")
 	}
@@ -758,15 +758,16 @@ func TestModelControlPolicyLoadDiagnosticsNoEcho(t *testing.T) {
 
 func TestModelControlPolicyLoadLegacyKeepsDisk(t *testing.T) {
 	path := filepath.Join(t.TempDir(), nodepolicy.FileName)
-	raw := []byte(`{"version":1,"availability":"paused","roles":{"weak":{"engine":"llamacpp","model":"good"},"strong":{"engine":"llamacpp","model":"bad\nname"}},"tiers":{"weak":[{"engine":"llamacpp","model":"good"}]}}`)
+	raw := []byte(`{"version":1,"availability":"paused","roles":{"weak":{"engine":"llamacpp","model":"good"},"strong":{"engine":"llamacpp","model":"bad\nname"}},"tiers":{"weak":[{"engine":"llamacpp","model":"good"}]},"routing":{"tiers":{"weak":{"bareMode":"hybrid"},"medium":{"bareMode":"hybrid"},"strong":{"bareMode":"hybrid"}}}}`)
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	b, _ := newPolicyBroker(t)
 	b.loadNodePolicy(path)
 	got := b.localPolicy()
-	if got.RecoveryRequired || got.Availability != nodepolicy.Draining || got.Policy.Availability != nodepolicy.Paused || got.Policy.Version != 2 || got.Policy.Revision != "0" || len(got.Policy.Roles) != 0 || len(got.Policy.Tiers[nodepolicy.TierWeak]) != 1 {
-		t.Fatal("legacy repair lost state or invoked recovery")
+	wantTiers := map[string][]nodepolicy.TierEntry{"weak": {}}
+	if got.RecoveryRequired || got.Availability != nodepolicy.Draining || got.Policy.Availability != nodepolicy.Paused || got.Policy.Version != 2 || got.Policy.Revision != "0" || len(got.Policy.Roles) != 0 || !reflect.DeepEqual(got.Policy.Tiers, wantTiers) || len(got.Policy.Routing.Tiers) != 0 {
+		t.Fatalf("legacy repair lost state or invoked recovery: %+v", got)
 	}
 	onDisk, err := os.ReadFile(path)
 	if err != nil {
@@ -782,7 +783,7 @@ func TestModelControlPolicyLoadKeepsWritesStrictAndAtomic(t *testing.T) {
 	p := nodepolicy.Default()
 	p.Revision = "42"
 	p.Profiles = []nodepolicy.Profile{{Key: "good-profile", DisplayName: "Good", Engine: "llamacpp", Model: "good"}}
-	p.Roles = []nodepolicy.Role{{Name: nodepolicy.TierWeak, Profiles: []string{"good-profile"}}}
+	p.Roles = []nodepolicy.Role{{Name: "weak", Profiles: []string{"good-profile"}}}
 	writePolicyFile(t, path, p)
 	before, err := os.ReadFile(path)
 	if err != nil {
@@ -802,7 +803,7 @@ func TestModelControlPolicyLoadKeepsWritesStrictAndAtomic(t *testing.T) {
 			t.Fatal("invalid model leaked in write error")
 		}
 		got := b.localPolicy()
-		if got.Policy.Revision != "42" || !reflect.DeepEqual(got.Policy.Roles, []nodepolicy.Role{{Name: nodepolicy.TierWeak, Profiles: []string{"good-profile"}}}) || got.RecoveryRequired {
+		if got.Policy.Revision != "42" || !reflect.DeepEqual(got.Policy.Roles, []nodepolicy.Role{{Name: "weak", Profiles: []string{"good-profile"}}}) || got.RecoveryRequired {
 			t.Fatal("refused write changed live policy")
 		}
 		after, err := os.ReadFile(path)
@@ -1687,6 +1688,8 @@ func TestPolicyRelayFromPeerActsLocallyOnly(t *testing.T) {
 const routedPolicyDocument = `{
   "version": 2,
   "revision": "12",
+  "profiles": [{"key": "qwen-profile", "engine": "llamacpp", "model": "qwen3:8b"}],
+  "roles": [{"name": "weak", "profiles": ["qwen-profile"]}],
   "tiers": {
     "weak": [
       {"kind": "local", "engine": "llamacpp", "model": "qwen3:8b"},
@@ -1695,6 +1698,11 @@ const routedPolicyDocument = `{
     "strong": [{"kind": "api", "deployment": "free-small"}]
   },
   "routing": {
+    "tiers": {
+      "weak": {"bareMode": "hybrid"},
+      "medium": {"bareMode": "local"},
+      "strong": {"bareMode": "local"}
+    },
     "accounts": [
       {"id": "free-acct", "credential": "NVPAIR_PROVIDER_SECRET_FREE", "billing": "free",
        "perRequestCeiling": "0", "dailyCeiling": "0", "monthlyCeiling": "0"},
@@ -1879,6 +1887,7 @@ func remoteSettingLockedBroker(t *testing.T) *routedBroker {
 		{Key: "stored-profile", DisplayName: "Private", Engine: "llamacpp", Model: "stored-model", LocalOnly: true, RequestOptions: json.RawMessage(`{"temperature":0.1}`)},
 		{Key: "other-profile", DisplayName: "Other", Engine: "llamacpp-custom", Model: "other-model", RequestOptions: json.RawMessage(`{"temperature":0.2}`)},
 	}
+	p.Roles = []nodepolicy.Role{{Name: "weak", Profiles: []string{"stored-profile"}}}
 	if _, err := setCurrent(rb.b, rmJSON(t, p)); err != nil {
 		t.Fatalf("install locked target profile: %v", err)
 	}
@@ -1929,8 +1938,14 @@ func TestRemoteSettingLockedRefusesWholeWrite(t *testing.T) {
 		p.Profiles[0].RequestOptionsMode = nodepolicy.RequestOptionsMode("enforced")
 	}, stored)
 	test("unlock", func(p *nodepolicy.PeerPolicy) { p.Profiles[0].LocalOnly = false }, stored)
-	test("remove", func(p *nodepolicy.PeerPolicy) { p.Profiles = p.Profiles[1:] }, stored)
-	test("replace profile key", func(p *nodepolicy.PeerPolicy) { p.Profiles[0].Key = "submitted-profile" }, stored)
+	test("remove", func(p *nodepolicy.PeerPolicy) {
+		p.Profiles = p.Profiles[1:]
+		p.Roles[0].Profiles = []string{}
+	}, stored)
+	test("replace profile key", func(p *nodepolicy.PeerPolicy) {
+		p.Profiles[0].Key = "submitted-profile"
+		p.Roles[0].Profiles[0] = "submitted-profile"
+	}, stored)
 	test("replace identity", func(p *nodepolicy.PeerPolicy) { p.Profiles[0].Model = "submitted-model" }, stored)
 	test("replace engine", func(p *nodepolicy.PeerPolicy) { p.Profiles[0].Engine = "llamacpp-custom" }, stored)
 	test("lock existing", func(p *nodepolicy.PeerPolicy) { p.Profiles[1].LocalOnly = true }, `inference settings are locked on the target device for engine "llamacpp-custom" model "other-model"`)
@@ -1995,9 +2010,12 @@ func TestPeerPolicyGetReturnsTheProjection(t *testing.T) {
 	if err := json.Unmarshal(result, &got); err != nil {
 		t.Fatalf("decode relayed get: %v", err)
 	}
-	wantTiers := map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "qwen3:8b"}}}
-	if !reflect.DeepEqual(got.Policy.Tiers, wantTiers) {
-		t.Errorf("relayed tiers = %+v, want %+v", got.Policy.Tiers, wantTiers)
+	if len(got.Policy.Tiers) != 0 {
+		t.Errorf("relayed tiers = %+v, want no origin-only API entries", got.Policy.Tiers)
+	}
+	wantRoles := []nodepolicy.Role{{Name: "weak", Profiles: []string{"qwen-profile"}}}
+	if !reflect.DeepEqual(got.Policy.Roles, wantRoles) || len(got.Policy.Profiles) != 1 || got.Policy.Profiles[0].Key != "qwen-profile" {
+		t.Errorf("relayed declarations = %+v / %+v, want the declared profile membership", got.Policy.Roles, got.Policy.Profiles)
 	}
 	if got.Policy.Revision != "12" || got.Availability != "available" {
 		t.Errorf("relayed revision/availability = %q/%q, want 12/available", got.Policy.Revision, got.Availability)
@@ -2051,6 +2069,23 @@ func TestLocalPolicyGetKeepsTheFullDocument(t *testing.T) {
 	}
 	if len(got.Policy.Tiers["strong"]) != 1 || got.Policy.Tiers["strong"][0].Kind != nodepolicy.EntryAPI {
 		t.Errorf("local policy:get strong tier = %+v, want the API entry", got.Policy.Tiers["strong"])
+	}
+	wantTiers := map[string][]nodepolicy.TierEntry{
+		"weak":   {{Kind: nodepolicy.EntryAPI, Deployment: "free-small"}},
+		"strong": {{Kind: nodepolicy.EntryAPI, Deployment: "free-small"}},
+	}
+	if !reflect.DeepEqual(got.Policy.Tiers, wantTiers) {
+		t.Errorf("repaired tiers = %+v, want retained API siblings %+v", got.Policy.Tiers, wantTiers)
+	}
+	wantRouting := map[string]nodepolicy.TierRouting{
+		"weak":   {BareMode: nodepolicy.BareHybrid, AllowedFamilies: []string{}},
+		"strong": {BareMode: nodepolicy.BareLocal, AllowedFamilies: []string{}},
+	}
+	if !reflect.DeepEqual(got.Policy.Routing.Tiers, wantRouting) {
+		t.Errorf("repaired routing tiers = %+v, want retained API rules %+v", got.Policy.Routing.Tiers, wantRouting)
+	}
+	if !bytes.Equal(rb.fileBytes(t), []byte(routedPolicyDocument)) {
+		t.Fatal("stored repair rewrote the policy before a normal save")
 	}
 }
 
@@ -2261,21 +2296,21 @@ func TestPeerPolicySetFromAStaleSnapshotIsAConflict(t *testing.T) {
 		}
 	})
 
-	t.Run("local tier change rejects the stale tiers", func(t *testing.T) {
+	t.Run("local membership change rejects the stale roles", func(t *testing.T) {
 		rb := newRoutedBroker(t)
 		stale := rb.peerSnapshot(t)
 		rb.localSet(t, func(doc map[string]any) {
-			doc["tiers"].(map[string]any)["weak"] = []any{map[string]any{"kind": "local", "engine": "llamacpp", "model": "llama3:8b"}}
+			doc["roles"] = []any{map[string]any{"name": "weak", "profiles": []any{}}}
 		})
 		base := rb.baseline(t)
 		stale["idle"].(map[string]any)["unloadAfterMinutes"] = 9
 		if result, errText := rb.relaySet(t, stale); !strings.HasPrefix(errText, "policy conflict:") {
-			t.Fatalf("a stale snapshot restored the old tiers: %q %s", errText, result)
+			t.Fatalf("a stale snapshot restored the old membership: %q %s", errText, result)
 		}
 		base.requireUnchanged(t)
-		want := []nodepolicy.TierEntry{{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "llama3:8b"}}
-		if got := rb.b.localPolicy().Policy.Tiers["weak"]; !reflect.DeepEqual(got, want) {
-			t.Errorf("weak tier = %+v, want the local owner's %+v", got, want)
+		want := []nodepolicy.Role{{Name: "weak", Profiles: []string{}}}
+		if got := rb.b.localPolicy().Policy.Roles; !reflect.DeepEqual(got, want) {
+			t.Errorf("roles = %+v, want the local owner's %+v", got, want)
 		}
 	})
 
@@ -2383,12 +2418,7 @@ func TestStaleRemoteAllowedDraftIsConflictBeforeValidation(t *testing.T) {
 			// Client A has a dirty draft enabling execution. Phase 1 refuses
 			// that draft even at the current revision. Client B saves both
 			// permissions off before A submits the old draft.
-			for tier := range draft.Routing.Tiers {
-				settings := draft.Routing.Tiers[tier]
-				settings.RemoteAllowed = true
-				settings.PaidAllowed = true
-				draft.Routing.Tiers[tier] = settings
-			}
+			draft.Routing.Tiers["coder"] = nodepolicy.TierRouting{BareMode: nodepolicy.BareHybrid, RemoteAllowed: true, PaidAllowed: true}
 			if err := draft.Validate(); err == nil {
 				t.Fatal("dirty remote/paid draft must be invalid in Phase 1")
 			}

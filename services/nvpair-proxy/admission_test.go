@@ -1219,10 +1219,10 @@ func TestAdmission_MemoryBudget(t *testing.T) {
 		p.Admission.MemoryBudgetBytes = 10 * gb
 		p.Admission.SwitchTimeoutSeconds = 30
 		p.Profiles = []nodepolicy.Profile{
-			{Key: "a:1", DisplayName: "A", Engine: "llamacpp", Model: "a:1", MemoryBytes: 6 * gb},
-			{Key: "b:1", DisplayName: "B", Engine: "llamacpp", Model: "b:1", MemoryBytes: 6 * gb},
-			{Key: "c:1", DisplayName: "C", Engine: "llamacpp", Model: "c:1", MemoryBytes: 3 * gb},
-			{Key: "huge:1", DisplayName: "Huge", Engine: "llamacpp", Model: "huge:1", MemoryBytes: 11 * gb},
+			{Key: "a-1", DisplayName: "A", Engine: "llamacpp", Model: "a:1", MemoryBytes: 6 * gb},
+			{Key: "b-1", DisplayName: "B", Engine: "llamacpp", Model: "b:1", MemoryBytes: 6 * gb},
+			{Key: "c-1", DisplayName: "C", Engine: "llamacpp", Model: "c:1", MemoryBytes: 3 * gb},
+			{Key: "huge-1", DisplayName: "Huge", Engine: "llamacpp", Model: "huge:1", MemoryBytes: 11 * gb},
 		}
 	})
 	h.a.setResidency(map[string][]string{"llamacpp": {"a:1"}})

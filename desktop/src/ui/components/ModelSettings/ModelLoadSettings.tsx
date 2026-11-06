@@ -647,47 +647,51 @@ export default function ModelLoadSettings({
                     : 'explicit list, empty allows none'}
                 ). Changes require explicit target review. No qualifications are created.
             </Text>
-            {['weak', 'medium', 'strong'].map(tier => (
-                <Text key={tier} kind="body/regular/sm">
-                    {tier} role currently:{' '}
-                    {routing.profileKey &&
-                    routing.roles.some(
-                        role =>
-                            role.name === tier && role.profiles.includes(routing.profileKey ?? '')
-                    )
+            {routing.roles.map(role => (
+                <Text
+                    key={role.name}
+                    kind="body/regular/sm"
+                    title={role.name}
+                    className="break-all"
+                >
+                    {role.name} role currently:{' '}
+                    {routing.profileKey && role.profiles.includes(routing.profileKey)
                         ? 'Assigned'
                         : 'Unassigned'}
-                    . Assigning adds this profile to this tier.
+                    . Assigning adds this profile to this role.
                 </Text>
             ))}
-            {(
-                ['weak', 'medium', 'strong'] satisfies Array<
-                    keyof NonNullable<NonNullable<ModelChange['policy']>['roles']>
-                >
-            ).map(tier => (
-                <FormField key={tier} slotLabel={`${tier} role`}>
+            {routing.roles.map(role => (
+                <FormField key={role.name} slotLabel={`${role.name} role`} className="break-all">
                     <Select
-                        aria-label={`${tier} role`}
+                        aria-label={`${role.name} role`}
+                        title={role.name}
                         value={
-                            draft?.change?.policy?.roles?.[tier] === undefined
-                                ? ''
-                                : String(draft.change.policy.roles[tier])
+                            draft?.change?.policy?.roles &&
+                            Object.hasOwn(draft.change.policy.roles, role.name)
+                                ? String(draft.change.policy.roles[role.name])
+                                : ''
                         }
                         disabled={blocked}
                         items={[
                             { value: '', children: 'Unchanged' },
-                            { value: 'true', children: 'Assign, replacing target tier' },
-                            { value: 'false', children: 'Remove this model from tier' }
+                            { value: 'true', children: 'Add this profile to role' },
+                            { value: 'false', children: 'Remove this profile from role' }
                         ]}
                         onValueChange={value => {
                             const roles = { ...draft?.change?.policy?.roles }
-                            if (!value) delete roles[tier]
-                            else roles[tier] = value === 'true'
+                            if (!value) delete roles[role.name]
+                            else roles[role.name] = value === 'true'
                             edit({ policy: { ...draft?.change?.policy, roles } })
                         }}
                     />
                 </FormField>
             ))}
+            {!routing.roles.length && (
+                <Text kind="body/regular/sm">
+                    No roles on this node; create one in node settings.
+                </Text>
+            )}
             {(
                 ['served', 'resident', 'binding'] satisfies Array<
                     keyof NonNullable<ModelChange['policy']>

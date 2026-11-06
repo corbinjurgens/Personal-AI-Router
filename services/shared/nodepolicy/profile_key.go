@@ -5,6 +5,7 @@ package nodepolicy
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"unicode"
@@ -17,10 +18,16 @@ func ValidateProfileKey(key string) error {
 	if err := ValidateModelIdentifier(key); err != nil {
 		return err
 	}
-	if IsReservedAlias(key) {
-		return errors.New("profile key is a reserved routing alias")
+	if IsReservedProfileKey(key) {
+		return &reservedProfileKeyError{key: key}
 	}
 	return nil
+}
+
+type reservedProfileKeyError struct{ key string }
+
+func (e *reservedProfileKeyError) Error() string {
+	return fmt.Sprintf("profile key %s is reserved: the text before its colon is a valid role name", e.key)
 }
 
 // ProfileIcons implements phase 06's profile-fields decision with fixed KUI names.

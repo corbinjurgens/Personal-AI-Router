@@ -4,15 +4,14 @@
 // Package nodepolicy is the fork's node policy contract: whether this machine
 // accepts inference work (availability), how it admits work (resident models,
 // concurrency, memory), how idle engines are unloaded or stopped, the model
-// profiles it serves, the weak/medium/strong roles it declares for itself, and
-// the tiers it routes by.
+// profiles it serves, the ordered roles it declares for itself, and the API
+// entries it routes by.
 //
-// Schema version 2 adds hybrid routing. A tier entry is tagged: a local entry
-// names an engine and model on a cluster node, an API entry names a provider
-// deployment. Tier memberships stay in Tiers. The origin-only Routing section
-// holds the accounts, deployments, per-tier settings, limits and listener those
-// entries refer to; Revision identifies the document. Parse migrates a version 1
-// file by tagging its entries local and leaving remote and paid execution off.
+// Schema version 2 adds hybrid routing. A tier entry names a provider deployment;
+// declared roles are the only local candidate source. The origin-only Routing
+// section holds the accounts, deployments, per-tier settings, limits and listener
+// those entries refer to; Revision identifies the document. ParseStored removes
+// retired local entries in memory within the existing stored-shape repair.
 // Validation refuses to enable remote or paid execution until a dispatch path
 // exists, but accepts disabled provider configuration.
 //
@@ -105,15 +104,17 @@ const (
 // KnownCapabilities is every capability a profile or tier entry may declare.
 var KnownCapabilities = []Capability{CapTools, CapVision, CapStructured, CapEmbeddings}
 
-// Tier names. A tier request uses one of these as its "model" field.
-const (
-	TierWeak   = "weak"
-	TierMedium = "medium"
-	TierStrong = "strong"
-)
+// MaxRoleNameBytes bounds user-created role names under owner decision D1a.
+const MaxRoleNameBytes = 64
 
-// TierOrder lists the tiers from weakest to strongest.
-var TierOrder = []string{TierWeak, TierMedium, TierStrong}
+// RoleNames returns names in the node's user-set order, per owner decision D1a.
+func (p Policy) RoleNames() []string {
+	names := make([]string, 0, len(p.Roles))
+	for _, role := range p.Roles {
+		names = append(names, role.Name)
+	}
+	return names
+}
 
 // Policy is the whole node policy file.
 type Policy struct {
@@ -135,15 +136,11 @@ type Policy struct {
 	ResidentModels ResidentModels `json:"residentModels,omitempty"`
 	// EngineBindings assigns native model names to engines without starting them.
 	EngineBindings EngineBindings `json:"engineBindings"`
-	// Roles is this node's declaration of what it serves per tier. A node
-	// with at least one role is authoritative for itself: routers offer it
-	// only its declared role for each tier it names, and nothing for a tier
-	// absent from the list. Only a node that declares no role at all receives
-	// a router's own tier entries. Routers never read Tiers of another node.
+	// Roles is this node's ordered declaration of the profiles it serves per
+	// role. These declarations are the only local candidate source.
 	Roles []Role `json:"roles"`
-	// Tiers map each tier name to its candidates, most preferred first. Tiers
-	// are resolved by the node a request enters, across every node in the
-	// cluster that has a candidate model installed.
+	// Tiers maps role names to API deployments, most preferred first. These
+	// origin-only entries do not declare roles or supply local candidates.
 	Tiers      map[string][]TierEntry `json:"tiers"`
 	TierPolicy TierPolicy             `json:"tierPolicy"`
 	// Routing is the origin-only hybrid routing configuration.
@@ -585,15 +582,14 @@ func (q QualificationRef) Validate() error {
 type EntryKind string
 
 const (
-	// EntryLocal is an engine and model on a cluster node.
+	// EntryLocal identifies retired entries for refusal and stored-shape repair.
 	EntryLocal EntryKind = "local"
 	// EntryAPI is a provider deployment in Routing.Deployments.
 	EntryAPI EntryKind = "api"
 )
 
-// TierEntry is one candidate for a tier, either a local engine and model or a
-// provider deployment. Kind says which fields apply; validation refuses an
-// entry that sets the other kind's fields.
+// TierEntry is one API deployment candidate for a role. Validation refuses
+// retired local entries and API entries that set local fields.
 type TierEntry struct {
 	Kind EntryKind `json:"kind"`
 	// Engine, Model, ContextTokens and Capabilities describe a local entry.
@@ -604,9 +600,6 @@ type TierEntry struct {
 	// Deployment is the Routing.Deployments id of an API entry.
 	Deployment string `json:"deployment,omitempty"`
 }
-
-// IsLocal reports whether the entry names a local engine and model.
-func (e TierEntry) IsLocal() bool { return e.Kind == EntryLocal }
 
 // TierPolicy controls fallback between tiers.
 type TierPolicy struct {
@@ -716,8 +709,8 @@ func (p Policy) Validate() error {
 	models := map[string]bool{}
 	roles := map[string]bool{}
 	for i, role := range p.Roles {
-		if !slices.Contains(TierOrder, role.Name) {
-			return fmt.Errorf("roles[%d]: unknown tier %q (want one of %v)", i, role.Name, TierOrder)
+		if err := ValidateRoleName(role.Name); err != nil {
+			return fmt.Errorf("roles[%d]: %w", i, err)
 		}
 		if roles[role.Name] {
 			return fmt.Errorf("roles[%d]: duplicate name %q", i, role.Name)
@@ -746,7 +739,7 @@ func (p Policy) Validate() error {
 				return fmt.Errorf("profiles[%d].modelIdentity: %w", i, err)
 			}
 		}
-		if err := checkModelRef(pr.Engine, pr.Model, pr.ContextTokens, pr.Capabilities); err != nil {
+		if err := checkModelTarget(pr.Engine, pr.Model, pr.ContextTokens, pr.Capabilities); err != nil {
 			return fmt.Errorf("profiles[%d] %q: %w", i, pr.Key, err)
 		}
 		key := pr.Engine + "\x00" + pr.Model
@@ -815,8 +808,8 @@ func (p Policy) Validate() error {
 		return err
 	}
 	for tier, entries := range p.Tiers {
-		if !slices.Contains(TierOrder, tier) {
-			return fmt.Errorf("unknown tier %q (want one of %v)", tier, TierOrder)
+		if err := ValidateRoleName(tier); err != nil {
+			return fmt.Errorf("tiers: %w", err)
 		}
 		if err := p.Routing.validateTierRefs(tier, entries); err != nil {
 			return err
@@ -830,18 +823,15 @@ func (p Policy) Validate() error {
 	return nil
 }
 
-// checkModelRef accepts a built-in engine or a valid descriptor engine ID. A
+// checkModelTarget accepts a built-in engine or a valid descriptor engine ID. A
 // policy may name an engine that only a peer runs, so the ID is checked for
 // syntax here and resolved to candidates only where a facade fronts it.
-func checkModelRef(engine, model string, contextTokens int, caps []Capability) error {
+func checkModelTarget(engine, model string, contextTokens int, caps []Capability) error {
 	if !engines.ValidRoutingID(engine) {
 		return fmt.Errorf("unknown engine %q", engine)
 	}
 	if err := ValidateModelIdentifier(model); err != nil {
 		return err
-	}
-	if IsReservedAlias(model) {
-		return fmt.Errorf("model %q is a reserved alias", model)
 	}
 	if contextTokens < 0 {
 		return fmt.Errorf("contextTokens must not be negative")
@@ -850,6 +840,17 @@ func checkModelRef(engine, model string, contextTokens int, caps []Capability) e
 		if !slices.Contains(KnownCapabilities, c) {
 			return fmt.Errorf("unknown capability %q", c)
 		}
+	}
+	return nil
+}
+
+// checkModelRef validates a concrete served name, excluding hybrid aliases.
+func checkModelRef(engine, model string, contextTokens int, caps []Capability) error {
+	if err := checkModelTarget(engine, model, contextTokens, caps); err != nil {
+		return err
+	}
+	if IsReservedAlias(model) {
+		return fmt.Errorf("model %q is a reserved alias", model)
 	}
 	return nil
 }
@@ -875,9 +876,6 @@ func (pr Profile) validateOutputAndQualification() error {
 	}
 	return nil
 }
-
-// IsTier reports whether a request's model field names a tier.
-func IsTier(model string) bool { return slices.Contains(TierOrder, model) }
 
 // ValidateResidentContext compares a requested allocation with its finite,
 // model-specific context bound. Policy declarations alone do not supply evidence.
@@ -919,11 +917,10 @@ func validateRevision(rev string) error {
 }
 
 // Parse decodes and validates a policy file, filling fields the file omits
-// from Default so an older or hand-written file keeps working. A version 1 file
-// is migrated: every local setting is kept, its tier entries become local
-// entries, and routing and revision take their defaults, so remote and paid
-// execution stay off. Parsing the marshaled result of Parse gives the same
-// policy.
+// from Default. The existing version 1 decoder takes routing and revision from
+// defaults and tags its tier entries local; validation refuses those retired
+// entries. Only ParseStored removes them. Parsing the marshaled result of Parse
+// gives the same policy.
 func Parse(data []byte) (Policy, error) {
 	return parsePolicy(data, nil)
 }

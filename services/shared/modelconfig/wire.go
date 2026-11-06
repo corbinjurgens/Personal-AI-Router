@@ -127,7 +127,7 @@ type LoadPatch struct {
 }
 
 // Generation selects existing numeric leaves: a number sets, null clears, and
-// absence preserves. Roles selects weak/medium/strong membership of this exact
+// absence preserves. Roles selects user-declared role membership of this exact
 // profile key: true appends it once to an already declared role; false removes
 // only that key, retaining the declaration and other keys. Undeclared true is
 // refused with "Role <name> is not declared on this node; create it in node settings."
@@ -512,9 +512,6 @@ func ValidateUnsignedDecimal(s string) error {
 func validateModelID(id string) error {
 	return nodepolicy.ValidateModelIdentifier(id)
 }
-func isTier(s string) bool {
-	return s == "weak" || s == "medium" || s == "strong"
-}
 func boundedText(s string, limit int, required bool) error {
 	if required && s == "" || len(s) > limit || !utf8.ValidString(s) {
 		return fmt.Errorf("invalid or oversized text")
@@ -655,8 +652,8 @@ func (p PolicyPatch) Validate() error {
 		}
 	}
 	for tier := range p.Roles {
-		if !isTier(tier) {
-			return fmt.Errorf("roles: unknown tier")
+		if err := nodepolicy.ValidateRoleName(tier); err != nil {
+			return fmt.Errorf("roles: %w", err)
 		}
 	}
 	if p.RequestOptionsMode != nil && *p.RequestOptionsMode != "defaults" && *p.RequestOptionsMode != "enforced" {

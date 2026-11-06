@@ -188,8 +188,8 @@ type Workload struct {
 	CompletedAt    *int64  `json:"completedAt"`
 	Error          *string `json:"error"`
 	RequesterID    *string `json:"requesterId"`
-	// RequestedModel is the tier the client asked for ("weak", "medium",
-	// "strong") when it asked for one; Model is then the concrete model chosen
+	// RequestedModel is the user-created role the client asked for
+	// when it asked for one; Model is then the concrete model chosen
 	// for it. Optional and additive: absent for a request that named a model.
 	RequestedModel string `json:"requestedModel,omitempty"`
 	// Seq counts this workload's events, from 1, in emission order.
@@ -599,9 +599,6 @@ type candidate struct {
 	// position of its tier in the search order. Both order tier candidates.
 	warm     bool
 	tierRank int
-	// declared marks a tier candidate offered by its node's own role
-	// declaration rather than by this router's tier entries.
-	declared bool
 }
 
 // resolveCandidates resolves inference targets, including requests without a model.

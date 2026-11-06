@@ -4,12 +4,9 @@
 import type { ModelIdentity } from '@/shared/types/engines'
 import type { NodePauseMode, QualificationRef } from '@/shared/types/node-policy'
 
-/** A routing tier a node can declare a role for (`nodepolicy.TierOrder`). */
-export type RoleTier = 'weak' | 'medium' | 'strong'
-
-/** A declared tier and its profile keys, in saved preference order. */
+/** A user-named role and its profile keys, in saved preference order. */
 export interface NodeRole {
-    name: RoleTier
+    name: string
     profiles: string[]
 }
 

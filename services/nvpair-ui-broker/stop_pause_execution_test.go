@@ -431,7 +431,7 @@ func TestStopPauseExecutionRetryAndLocalResume(t *testing.T) {
 	ref := nodepolicy.ModelRef{Engine: "llamacpp", Model: "tiny"}
 	r.current.Profiles = []nodepolicy.Profile{{Key: "tiny-profile", DisplayName: "Tiny", Engine: "llamacpp", Model: "tiny", ContextTokens: 8192, MaxOutputTokens: 1024, MaxConcurrent: 1, MemoryBytes: 1024,
 		Qualification: &nodepolicy.QualificationRef{ID: "fixture-only", Revision: "1"}}}
-	r.current.Roles = []nodepolicy.Role{{Name: nodepolicy.TierWeak, Profiles: []string{"tiny-profile"}}}
+	r.current.Roles = []nodepolicy.Role{{Name: "weak", Profiles: []string{"tiny-profile"}}}
 	r.current.ResidentModels = nodepolicy.ResidentModels{ref}
 	r.current.EngineBindings = nodepolicy.EngineBindings{ref}
 	r.intent["llamacpp"] = true

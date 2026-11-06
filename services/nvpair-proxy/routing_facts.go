@@ -124,9 +124,10 @@ func factDisposition(state uint8, reason routingFactReason, status int) uint64 {
 // These descriptors own their bytes. Preparing them is restricted to the
 // originating goroutine, outside identity, permission, admission and request locks.
 type routingRequestedDescriptor struct {
-	model      [512]byte
-	length     uint16
-	tier, mode uint8
+	model         [512]byte
+	role          [nodepolicy.MaxRoleNameBytes]byte
+	length        uint16
+	roleLen, mode uint8
 }
 
 type routingDestinationDescriptor struct {
@@ -153,13 +154,8 @@ func requestedDescriptor(model, tier, path string) *routingRequestedDescriptor {
 	if nodepolicy.ValidateModelIdentifier(model) == nil {
 		d.length = uint16(copy(d.model[:], model))
 	}
-	switch tier {
-	case "weak":
-		d.tier = 1
-	case "medium":
-		d.tier = 2
-	case "strong":
-		d.tier = 3
+	if tier == "" || nodepolicy.ValidateRoleName(tier) == nil {
+		d.roleLen = uint8(copy(d.role[:], tier))
 	}
 	switch path {
 	case "/v1/chat/completions", "/v1/messages":

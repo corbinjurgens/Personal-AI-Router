@@ -1076,7 +1076,8 @@ describe('permission controls', () => {
         async ({ state, revision, message }) => {
             capability.mockResolvedValue({ version: 1, allowed: false, state, revision })
             useNodeConfigurationStore.getState().adopt('peer-1', policy)
-            useNodeConfigurationStore.getState().setRole('peer-1', 'weak', 'draft-profile')
+            useNodeConfigurationStore.getState().addRole('peer-1', 'coder')
+            useNodeConfigurationStore.getState().setRole('peer-1', 'coder', 'draft-profile')
             await act(async () =>
                 root.render(
                     <>
@@ -1096,7 +1097,7 @@ describe('permission controls', () => {
             expect(document.body.textContent).toContain(message)
             expect(button('Save roles').disabled).toBe(true)
             expect(useNodeConfigurationStore.getState().editors.get('peer-1')?.draft).toEqual([
-                { name: 'weak', profiles: ['draft-profile'] }
+                { name: 'coder', profiles: ['draft-profile'] }
             ])
             expect(button('Apply').disabled).toBe(true)
             expect(
@@ -1120,7 +1121,8 @@ describe('permission controls', () => {
             state: 'unavailable'
         })
         useNodeConfigurationStore.getState().adopt('invalid-target', policy)
-        useNodeConfigurationStore.getState().setRole('invalid-target', 'weak', 'draft-profile')
+        useNodeConfigurationStore.getState().addRole('invalid-target', 'coder')
+        useNodeConfigurationStore.getState().setRole('invalid-target', 'coder', 'draft-profile')
         await act(async () =>
             root.render(
                 <RoleEditor

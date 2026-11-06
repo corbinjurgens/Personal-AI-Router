@@ -201,7 +201,7 @@ afterEach(async () => {
     container.remove()
     vi.unstubAllGlobals()
 })
-async function render(disabled = false, draft = policy, authority = 'current') {
+async function render(disabled = false, draft = policy, authority = 'current', saved = policy) {
     await act(async () =>
         root.render(
             <ModelLoadSettings
@@ -209,7 +209,7 @@ async function render(disabled = false, draft = policy, authority = 'current') {
                 modelId={identity.model}
                 profileKey="model"
                 policy={draft}
-                savedPolicy={policy}
+                savedPolicy={saved}
                 policyRevision="7"
                 authority={authority}
                 disabled={disabled}
@@ -265,6 +265,98 @@ function savedLoad(requested: RequestedLoad) {
 }
 
 describe('load editor and target impact', () => {
+    it('keeps constructor unchanged until its own explicit membership patch', async () => {
+        const declared = JSON.stringify({
+            revision: '7',
+            profiles: [{ key: 'model', engine: 'llamacpp', model: 'model', localOnly: true }],
+            roles: [
+                { name: 'coder', profiles: [] },
+                { name: 'constructor', profiles: [] }
+            ]
+        })
+        await render(false, declared, 'current', declared)
+        const constructorSelection = () => {
+            const label = Array.from(container.querySelectorAll('label')).find(
+                item => item.textContent?.trim() === 'constructor role'
+            )
+            const control = label && document.getElementById(label.htmlFor)
+            if (!(control instanceof HTMLButtonElement))
+                throw new Error('Missing constructor role selector')
+            return control.textContent?.trim()
+        }
+        expect(constructorSelection()).toBe('Select item')
+        await select('coder role', 'Add this profile to role')
+        expect(constructorSelection()).toBe('Select item')
+        const memberships = () =>
+            useEngineSettingsStore.getState().modelDrafts[modelSettingsKey(target, 'model')]?.change
+                ?.policy?.roles
+        await select('constructor role', 'Remove this profile from role')
+        expect(constructorSelection()).toBe('Remove this profile from role')
+        expect(memberships()).toEqual({ coder: true, constructor: false })
+        await select('constructor role', 'Unchanged')
+        expect(constructorSelection()).toBe('Select item')
+        expect(memberships()).toEqual({ coder: true })
+        await select('constructor role', 'Add this profile to role')
+        expect(constructorSelection()).toBe('Add this profile to role')
+        expect(memberships()).toEqual({ coder: true, constructor: true })
+        await select('constructor role', 'Unchanged')
+        expect(constructorSelection()).toBe('Select item')
+    })
+
+    it('offers only declared roles in saved order and reviews coder without changing load identity', async () => {
+        const declared = JSON.stringify({
+            revision: '7',
+            profiles: [{ key: 'model', engine: 'llamacpp', model: 'model', localOnly: true }],
+            roles: [
+                { name: 'review', profiles: ['model'] },
+                { name: 'coder', profiles: [] }
+            ]
+        })
+        await render(false, declared, 'current', declared)
+        expect(
+            Array.from(container.querySelectorAll('label'))
+                .filter(
+                    label => document.getElementById(label.htmlFor) instanceof HTMLButtonElement
+                )
+                .map(item => item.textContent?.trim())
+                .filter(label => label?.endsWith(' role'))
+        ).toEqual(['review role', 'coder role'])
+        expect(container.textContent).toContain('review role currently: Assigned')
+        expect(container.textContent).toContain('coder role currently: Unassigned')
+        expect(container.querySelector('input[aria-label="Role name"]')).toBeNull()
+        expect(
+            Array.from(container.querySelectorAll('button')).some(item =>
+                /^(Add role|Create role|Rename|Remove role|Move up|Move down)$/.test(
+                    item.textContent ?? ''
+                )
+            )
+        ).toBe(false)
+        await select('coder role', 'Add this profile to role')
+        await click('Preview model changes')
+        expect(review.mock.lastCall?.[0].modelChange).toMatchObject({
+            modelId: 'model',
+            profileKey: 'model',
+            expectedPolicyRevision: '7',
+            policy: { roles: { coder: true } }
+        })
+        expect(review.mock.lastCall?.[0].modelChange?.policy?.roles).toEqual({ coder: true })
+        expect(window.pairApi.nodePolicy.set).not.toHaveBeenCalled()
+        expect(apply).not.toHaveBeenCalled()
+    })
+
+    it('offers no built-in role or creation action when the node declares none', async () => {
+        await render()
+        expect(container.textContent).toContain(
+            'No roles on this node; create one in node settings.'
+        )
+        expect(
+            Array.from(container.querySelectorAll('button[aria-label]'))
+                .map(item => item.getAttribute('aria-label'))
+                .filter(label => label?.endsWith(' role'))
+        ).toEqual([])
+        expect(container.querySelector('input[aria-label="Role name"]')).toBeNull()
+    })
+
     it('sends explicit removal without a load or policy patch', async () => {
         useEngineSettingsStore.getState().editModel(modelSettingsKey(target, 'model'), {
             modelId: 'model',

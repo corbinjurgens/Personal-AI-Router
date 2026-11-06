@@ -441,8 +441,14 @@ func TestStrataChatCompletionsRefuseAnUnadvertisedModel(t *testing.T) {
 	body := `{"model":"strata-other","messages":[]}`
 	p.soleFacade().handleHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)))
 
-	if w.Code != http.StatusBadGateway || !strings.Contains(w.Body.String(), "no available node advertises the requested model") {
-		t.Fatalf("client saw %d %q, want 502 naming the missing model", w.Code, w.Body.String())
+	var refusal struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &refusal); err != nil {
+		t.Fatalf("decode refusal: %v", err)
+	}
+	if w.Code != http.StatusNotFound || refusal.Error != "no profile or role named strata-other" {
+		t.Fatalf("client saw %d %q, want 404 naming the missing model", w.Code, w.Body.String())
 	}
 	if got := upstream.requests(); len(got) != 0 {
 		t.Fatalf("engine received %+v, want no request", got)

@@ -180,24 +180,9 @@ func (n Node) filteredModels() Node {
 	if n.Roles != nil {
 		roles := make([]nodepolicy.Role, 0, len(n.Roles))
 		for _, role := range n.Roles {
-			if nodepolicy.IsTier(role.Name) {
+			if nodepolicy.ValidateRoleName(role.Name) == nil {
 				role.Profiles = slices.Clone(role.Profiles)
 				roles = append(roles, role)
-			}
-		}
-		if len(roles) == 0 {
-			// A declaration of an unknown tier is still authoritative:
-			// dropping its presence would enable the router's legacy fallback.
-			// Retain one deterministic marker; only known tiers are consulted.
-			marker, found := nodepolicy.Role{}, false
-			for _, role := range n.Roles {
-				if !found || role.Name < marker.Name {
-					marker, found = role, true
-				}
-			}
-			if found {
-				marker.Profiles = slices.Clone(marker.Profiles)
-				roles = append(roles, marker)
 			}
 		}
 		n.Roles = roles

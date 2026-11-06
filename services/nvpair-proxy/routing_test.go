@@ -585,8 +585,11 @@ func TestUnifiedDispatchCandidatePreparationDeadline(t *testing.T) {
 			name = "retry consumes original deadline"
 		}
 		t.Run(name, func(t *testing.T) {
-			pol := tierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "small:1b"}}})
+			pol := tierPolicy(nil)
+			pol.Roles = []nodepolicy.Role{{Name: "weak"}}
 			fx := newTierFixtureForRequest(t, llamacppCase(t), pol, map[string][]string{"a": {"small:1b"}, "b": {"small:1b"}}, nil, http.MethodPost, "/v1/chat/completions")
+			fx.declare(t, "a", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("small:1b")})
+			fx.declare(t, "b", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("small:1b")})
 			capacity := int64(256<<10) + registryNextTestBytes(fx.p)
 			if later {
 				capacity += bufferFixtureRemotePreparationBytes(t, `{"model":"small:1b"}`)
@@ -622,6 +625,7 @@ func TestUnifiedDispatchCandidatePreparationDeadline(t *testing.T) {
 				defer first.Close()
 				firstURL = first.URL
 				fx.p.soleFacade().discovery.AddManual(nodeForModel(t, "a", first.URL, "small:1b"))
+				fx.declare(t, "a", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("small:1b")})
 			} else {
 				held <- bufferMustAcquire(t, fx.p.buffers, 128<<10)
 			}
@@ -1949,7 +1953,7 @@ const hybridTestBody = `{"model":"weak","messages":[{"role":"user","content":"hi
 // listed peer answers with its status.
 func hybridPeerFixture(t *testing.T, peers map[string]int) *tierFixture {
 	t.Helper()
-	pol := tierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "q:1b"}}})
+	pol := tierPolicy(nil)
 	pol.TierPolicy.AllowStronger = false
 	nodes := map[string][]string{}
 	for id := range peers {
@@ -2048,7 +2052,7 @@ func TestUnifiedDispatchHybridSpendsOneAttemptBudget(t *testing.T) {
 }
 
 func TestUnifiedDispatchHybridPreOutputDeadline(t *testing.T) {
-	pol := tierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "q:1b"}}})
+	pol := tierPolicy(nil)
 	pol.TierPolicy.AllowStronger = false
 	fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"slow": {"q:1b"}}, nil)
 	stalled := newStallingEngine(t, routeChatCompletions)

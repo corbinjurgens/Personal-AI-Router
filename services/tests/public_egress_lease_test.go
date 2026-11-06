@@ -130,7 +130,7 @@ func TestPublicEgressLeaseProcessDisabled(t *testing.T) {
 		for _, model := range listing.Data {
 			ids = append(ids, model.ID)
 		}
-		for _, want := range []string{egressProcessModel, "weak", "weak-api", "weak-local"} {
+		for _, want := range []string{egressProcessModel, "weak", "weak:api", "weak:local"} {
 			if !slices.Contains(ids, want) {
 				t.Fatalf("model listing omitted %q: %v", want, ids)
 			}
@@ -156,12 +156,12 @@ func TestPublicEgressLeaseProcessDisabled(t *testing.T) {
 			p.Routing.Deployments[0].Enabled = true
 		}, `routing.deployments[0] "g-public": a deployment cannot be enabled: remote execution is not available yet`)
 		reject("remote permission remains disabled", func(p *nodepolicy.Policy) {
-			rules := p.Routing.Tiers["weak"]
+			rules := nodepolicy.TierRouting{BareMode: nodepolicy.BareHybrid}
 			rules.RemoteAllowed = true
 			p.Routing.Tiers["weak"] = rules
 		}, "routing.tiers.weak: remote and paid execution cannot be enabled: remote execution is not available yet")
 		reject("paid permission remains disabled", func(p *nodepolicy.Policy) {
-			rules := p.Routing.Tiers["weak"]
+			rules := nodepolicy.TierRouting{BareMode: nodepolicy.BareHybrid}
 			rules.RemoteAllowed, rules.PaidAllowed = true, true
 			p.Routing.Tiers["weak"] = rules
 		}, "routing.tiers.weak: remote and paid execution cannot be enabled: remote execution is not available yet")
@@ -431,8 +431,14 @@ func egressProcessPolicy(t *testing.T, revision string, publicPort int) nodepoli
 	p.Revision = revision
 	p.Tiers["weak"] = []nodepolicy.TierEntry{
 		{Kind: nodepolicy.EntryAPI, Deployment: "g-public"},
-		{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: egressProcessModel},
 	}
+	// This declaration supplies no live qualification or public authority.
+	p.Profiles = []nodepolicy.Profile{{
+		Key: egressProcessModel, DisplayName: "Egress local control", Engine: "llamacpp", Model: egressProcessModel,
+		ContextTokens: 8192, MaxOutputTokens: 1024,
+		Qualification: &nodepolicy.QualificationRef{ID: "g-fixture-only", Revision: "1"},
+	}}
+	p.Roles = []nodepolicy.Role{{Name: "weak", Profiles: []string{egressProcessModel}}}
 	p.Routing.Accounts = []nodepolicy.Account{{ID: "g-account", Credential: egressProcessRef, Billing: nodepolicy.BillingPaid,
 		PerRequestCeiling: "1000", DailyCeiling: "10000", MonthlyCeiling: "100000"}}
 	p.Routing.Deployments = []nodepolicy.Deployment{{ID: "g-public", Account: "g-account", Model: "g-t4-public", Family: "g-family",
@@ -592,14 +598,14 @@ func egressProcessHTTP(t *testing.T, client *http.Client, method string, port in
 func egressProcessAssertDisabled(t *testing.T, client *http.Client, port int) {
 	t.Helper()
 	body := egressProcessHTTP(t, client, http.MethodPost, port, "/v1/chat/completions",
-		[]byte(`{"model":"weak-api","messages":[],"stream":false}`), http.StatusBadRequest)
+		[]byte(`{"model":"weak:api","messages":[],"stream":false}`), http.StatusBadRequest)
 	var refused struct {
 		Code   string `json:"code"`
 		Reason string `json:"reason"`
 		Model  string `json:"model"`
 	}
 	egressProcessDecode(t, body, &refused)
-	if refused.Code != "feature_unavailable" || refused.Reason != "alias_not_inference_ready" || refused.Model != "weak-api" {
+	if refused.Code != "feature_unavailable" || refused.Reason != "alias_not_inference_ready" || refused.Model != "weak:api" {
 		t.Fatalf("API inference refusal = %+v", refused)
 	}
 }

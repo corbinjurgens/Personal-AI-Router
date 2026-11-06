@@ -18,6 +18,7 @@ func TestValidateProfileKey(t *testing.T) {
 		})
 	}
 	accept("context profile", "lfm-64k")
+	accept("bare former alias", "weak")
 	accept("user slug", "joes-tiel35b-udq4kxl")
 	accept("existing canonical model", "unsloth/LFM2.5-24B-A2B-GGUF:UD-Q4_K_XL")
 	accept("UTF-8 model", "models/模型")
@@ -26,8 +27,8 @@ func TestValidateProfileKey(t *testing.T) {
 	accept("suffix with invalid role base", "org/model-api")
 	accept("maximum length", strings.Repeat("x", 512))
 	for name, key := range map[string]string{
-		"empty": "", "bare alias": "weak", "local alias": "medium-local",
-		"API alias": "strong-api", "oversized": strings.Repeat("x", 513),
+		"empty": "", "future variable": "coder:fast", "local alias": "medium:local",
+		"API alias": "strong:api", "oversized": strings.Repeat("x", 513),
 		"control": "model\nkey", "invalid UTF-8": string([]byte{0xff}),
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -35,6 +36,16 @@ func TestValidateProfileKey(t *testing.T) {
 				t.Fatalf("accepted profile key %q", key)
 			}
 		})
+	}
+}
+
+func TestReservedProfileKeyDiagnostic(t *testing.T) {
+	for _, key := range []string{"coder:api", "coder:fast", "coder:"} {
+		err := ValidateProfileKey(key)
+		want := "profile key " + key + " is reserved: the text before its colon is a valid role name"
+		if err == nil || err.Error() != want {
+			t.Fatalf("key %q error = %v, want %q", key, err, want)
+		}
 	}
 }
 

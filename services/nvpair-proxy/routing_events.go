@@ -115,7 +115,9 @@ const (
 	routingHistoryOwnerControlBytes = unsafe.Sizeof(proxyRoutingHistory{}) - routingHistoryCellBytes - 2*jsonrpc.HistoryRecordFrameBytes - jsonrpc.HistoryRecordBytes +
 		unsafe.Sizeof(sync.Mutex{}) + unsafe.Sizeof((*proxyRoutingHistory)(nil)) // Proxy's constructor fields.
 	routingHistoryNativeControlBytes = unsafe.Sizeof(routingSourceDirectory{}) + unsafe.Sizeof(routingProcessDescriptor{}) + unsafe.Sizeof(routingFactsClock)
-	routingHistoryDescriptorOverlap  = 32*800 + 528 + 288 // One current native read, no second pointer/copy bank.
+	// One current native read, no second pointer/copy bank. The 580B requested
+	// descriptor occupies the runtime's 640B size class with its inline role.
+	routingHistoryDescriptorOverlap = 32*800 + 640 + 288
 	// Empty struct channel elements have zero backing: wake, writeWake, Run's
 	// copier-join, run's writer-join, shared active-Write callback-join; plus the
 	// lazy parent Done and AfterFunc child's Done (normally shared closedchan).
@@ -577,7 +579,6 @@ func (h *proxyRoutingHistory) encodeWindow(w *routingHistoryJSON) {
 
 var routingHistoryStates = [...]string{"routing", "streaming", "completed", "failed", "cancelled"}
 var routingHistoryOutcomes = [...]string{"pending", "committed", "rejected", "failed", "redispatched", "interrupted", "cancelled"}
-var routingHistoryTiers = [...]string{"", "weak", "medium", "strong"}
 var routingHistoryModes = [...]string{"other", "chat", "completion", "embedding"}
 var routingHistoryAccounting = [...]string{"none", "pending", "recorded", "retained", "failed", "unknown"}
 var routingHistoryAccountStates = [...]string{"unknown", "ok", "cooldown", "frozen", "credential-failure", "exhausted", "probe", "conflict"}
@@ -677,7 +678,7 @@ func (h *proxyRoutingHistory) encodeRecord(w *routingHistoryJSON, cell *routingP
 	w.literal(`,"requested":{"model":`)
 	w.quote(f.requested.model[:f.requested.length])
 	w.literal(`,"tier":`)
-	routingHistoryEnum(w, routingHistoryTiers[:], uint64(f.requested.tier))
+	w.quote(f.requested.role[:f.requested.roleLen])
 	w.literal(`,"mode":`)
 	routingHistoryEnum(w, routingHistoryModes[:], uint64(f.requested.mode))
 	w.literal(`},"createdAt":`)

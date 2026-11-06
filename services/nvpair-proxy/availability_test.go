@@ -33,7 +33,7 @@ func TestSubscribedToNodeCarriesPausedBy(t *testing.T) {
 				t.Run(name, func(t *testing.T) {
 					capability := strictTestCapability("m")
 					if policy != nil {
-						policy.Roles = []nodepolicy.Role{{Name: nodepolicy.TierStrong, Profiles: []string{"m"}}}
+						policy.Roles = []nodepolicy.Role{{Name: "strong", Profiles: []string{"m"}}}
 						policy.Profiles = []nodepolicy.AdvertisedProfile{{Key: "m", DisplayName: "m", Engine: profile.Name, Model: "m", ContextTokens: 32768}}
 						policy.ServedModels = nodepolicy.ServedModels{{Engine: profile.Name, Model: "m"}}
 						policy.StrictAdmission = capability
@@ -70,7 +70,7 @@ func TestSubscribedToNodeCarriesPausedBy(t *testing.T) {
 						PausedBy:       pausedBy,
 					}
 					if policy != nil {
-						want.Roles = []nodepolicy.Role{{Name: nodepolicy.TierStrong, Profiles: []string{"m"}}}
+						want.Roles = []nodepolicy.Role{{Name: "strong", Profiles: []string{"m"}}}
 						want.Profiles = []nodepolicy.AdvertisedProfile{{Key: "m", DisplayName: "m", Engine: profile.Name, Model: "m", ContextTokens: 32768}}
 						want.ServedModels = nodepolicy.ServedModels{{Engine: profile.Name, Model: "m"}}
 						want.StrictAdmission = capability
@@ -377,7 +377,7 @@ func (fx *paFixture) peers(t *testing.T, ids ...string) []*paEndpoint {
 			Services:       map[noderec.ServiceKey]noderec.ServiceStatus{fx.f.profile.DiscoveryService: {Port: port}},
 			ModelsByEngine: map[string][]string{fx.f.profile.Name: {paModel}},
 			Policy: &nodepolicy.Advertisement{Revision: "1", ServedModels: pol.ServedModels,
-				Roles: []nodepolicy.Role{{Name: nodepolicy.TierStrong, Profiles: []string{paModel}}},
+				Roles: []nodepolicy.Role{{Name: "strong", Profiles: []string{paModel}}},
 				Profiles: []nodepolicy.AdvertisedProfile{{
 					Key: paModel, DisplayName: paModel, Engine: fx.f.profile.Name, Model: paModel, ContextTokens: 4096, MaxOutputTokens: 1024,
 					Qualification: &nodepolicy.QualificationRef{ID: "q", Revision: "1"},
@@ -493,7 +493,7 @@ func paCandidates(t *testing.T, f *facade, ids ...string) {
 		}
 	}
 	check("concrete", f.resolveCandidates(paModel))
-	check("tier", f.resolveTierCandidates(nodepolicy.TierStrong, requestNeeds{}, true))
+	check("tier", f.resolveTierCandidates("strong", requestNeeds{}, true))
 }
 
 func paPaused(t *testing.T, response paResponse) {
@@ -526,12 +526,12 @@ func TestPAPausedPinnedPeerEligibility(t *testing.T) {
 					}
 					paCandidates(t, fx.f, "a-paused", "z-available")
 					paServed(t, fx.infer(t, paModel, http.StatusOK), "a-paused")
-					paServed(t, fx.infer(t, nodepolicy.TierStrong, http.StatusOK), "a-paused")
+					paServed(t, fx.infer(t, "strong", http.StatusOK), "a-paused")
 					a.node.Policy.PausedBy, a.node.Policy.Revision = hint, "2"
 					fx.replace(t, a.node, b.node)
 					paCandidates(t, fx.f, "z-available")
 					paServed(t, fx.infer(t, paModel, http.StatusOK), "z-available")
-					paServed(t, fx.infer(t, nodepolicy.TierStrong, http.StatusOK), "z-available")
+					paServed(t, fx.infer(t, "strong", http.StatusOK), "z-available")
 					if a.ingress.Load() != 2 || a.inference.Load() != 2 || b.ingress.Load() != 2 || b.inference.Load() != 2 {
 						t.Fatalf("paused/eligible ingress and engine counts = %d/%d and %d/%d, want 2/2 each", a.ingress.Load(), a.inference.Load(), b.ingress.Load(), b.inference.Load())
 					}
@@ -744,13 +744,13 @@ func TestPAPausedPeerDynamicResume(t *testing.T) {
 				slices.Sort(ids)
 				return ids
 			}
-			wantCatalogue := []string{paModel, "strong", "strong-api", "strong-local"}
+			wantCatalogue := []string{paModel, "strong", "strong:api", "strong:local"}
 			if got := catalogue(t); !slices.Equal(got, wantCatalogue) {
 				t.Fatalf("initial catalogue = %v, want %v", got, wantCatalogue)
 			}
 			paCandidates(t, fx.f, "same-peer")
 			paServed(t, fx.infer(t, paModel, http.StatusOK), "same-peer")
-			paServed(t, fx.infer(t, nodepolicy.TierStrong, http.StatusOK), "same-peer")
+			paServed(t, fx.infer(t, "strong", http.StatusOK), "same-peer")
 			for _, step := range []struct {
 				name, revision string
 				hint           nodepolicy.PauseOrigin
@@ -769,11 +769,11 @@ func TestPAPausedPeerDynamicResume(t *testing.T) {
 					if step.hint != "" {
 						paCandidates(t, fx.f)
 						fx.infer(t, paModel, http.StatusBadGateway)
-						fx.infer(t, nodepolicy.TierStrong, http.StatusNotFound)
+						fx.infer(t, "strong", http.StatusNotFound)
 					} else {
 						paCandidates(t, fx.f, "same-peer")
 						paServed(t, fx.infer(t, paModel, http.StatusOK), "same-peer")
-						paServed(t, fx.infer(t, nodepolicy.TierStrong, http.StatusOK), "same-peer")
+						paServed(t, fx.infer(t, "strong", http.StatusOK), "same-peer")
 					}
 					if got := catalogue(t); !slices.Equal(got, wantCatalogue) {
 						t.Errorf("catalogue = %v, want %v", got, wantCatalogue)
@@ -915,7 +915,7 @@ func TestPAPauseRouteExceptions(t *testing.T) {
 				fx.f.SetSelected("a-paused")
 				paCandidates(t, fx.f, "z-available")
 				paServed(t, fx.infer(t, paModel, http.StatusOK), "z-available")
-				paServed(t, fx.infer(t, nodepolicy.TierStrong, http.StatusOK), "z-available")
+				paServed(t, fx.infer(t, "strong", http.StatusOK), "z-available")
 				if a.ingress.Load() != 1 || a.inference.Load() != 1 || b.ingress.Load() != 3 || b.inference.Load() != 3 {
 					t.Fatalf("duplicate ingress/engine counts = %d/%d and %d/%d", a.ingress.Load(), a.inference.Load(), b.ingress.Load(), b.inference.Load())
 				}
@@ -959,7 +959,7 @@ func TestPAAllPausedResponses(t *testing.T) {
 				})
 			}
 			test("concrete retains 502", paModel, http.StatusBadGateway, "no available node advertises the requested model", false)
-			test("tier retains 404", nodepolicy.TierStrong, http.StatusNotFound, "no eligible model for tier strong", true)
+			test("tier retains 404", "strong", http.StatusNotFound, "no eligible model for tier strong", true)
 		})
 	}
 }
@@ -967,7 +967,7 @@ func TestPAAllPausedResponses(t *testing.T) {
 func TestPAStaleHintDestinationRejection(t *testing.T) {
 	for _, profile := range append(buildProfiles(), strataProfile(t)) {
 		t.Run(profile.Name, func(t *testing.T) {
-			for _, model := range []string{paModel, nodepolicy.TierStrong} {
+			for _, model := range []string{paModel, "strong"} {
 				t.Run(model, func(t *testing.T) {
 					fx := paNewFixture(t, profile)
 					peers := fx.peers(t, "a-stale", "z-available")

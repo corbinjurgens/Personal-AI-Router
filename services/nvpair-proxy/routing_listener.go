@@ -363,12 +363,11 @@ func (h *routingHandler) preflight(w http.ResponseWriter, r *http.Request, route
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// listModels answers with the synthetic alias list from this node's policy.
-// Context bounds include only enabled engines; no peer overlay or upstream
-// request is involved.
+// listModels answers with roles from this node and visible peer declarations.
+// Context bounds use each profile's declaring node and enabled engine resolver.
 func (h *routingHandler) listModels(w http.ResponseWriter) {
 	pol := h.host.admission.currentPolicy()
-	data := h.host.hybridAliasRecords(pol, selfDeclaredRoles(pol), nil)
+	data := h.host.hybridAliasRecords(pol, h.host.declaredRoles(pol, nil))
 	if data == nil {
 		data = []json.RawMessage{}
 	}

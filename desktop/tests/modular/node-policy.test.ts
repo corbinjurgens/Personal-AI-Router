@@ -33,6 +33,7 @@ import type {
     WorkloadCancelRequest
 } from '@/shared/types/node-policy'
 import { workloadCancelRequest } from '@/shared/utils/workloads'
+import { isValidProfileKey } from '@/shared/utils/node-policy-model-settings'
 import { parsePolicyAdvertisement, samePolicyAdvertisement } from '@/shared/utils/node-roles'
 import { createPairApi, type IClusterApi, type INodePolicyApi } from '@/ui/api/pair-api'
 import type { IEngineApi } from '@/ui/api/engine-api'
@@ -287,6 +288,63 @@ describe('served/resident policy contract', () => {
     })
 })
 
+describe('role and concrete model namespaces', () => {
+    it.each(['coder:api', 'coder:fast', 'coder:'])('refuses reserved public profile key %s', key =>
+        expect(isValidProfileKey(key)).toBe(false)
+    )
+
+    it.each(['coder-api', 'coder-local', 'weak'])(
+        'accepts ordinary public profile key %s without a same-node role',
+        key => expect(isValidProfileKey(key)).toBe(true)
+    )
+
+    it('forwards arbitrary ordered declarations and API keys with the exact policy source', () => {
+        const source = `{
+  "revision":"9007199254740993",
+  "opaque":9007199254740993,
+  "profiles":[{"key":"ordinary","displayName":"Native","engine":"llamacpp","model":"coder:local"}],
+  "roles":[{"name":"deep","profiles":[]},{"name":"coder","profiles":["ordinary"]}],
+  "tiers":{"coder":[{"kind":"api","deployment":"provider"}],"r1.fast_v2":[{"kind":"api","deployment":"provider"}]},
+  "routing":{"tiers":{"coder":{"remoteAllowed":false}},"accounts":[]}
+}`
+        const params = policySetParams({
+            nodeId: 'peer',
+            policy: source,
+            expectedPersistedRevision: '9007199254740993'
+        })
+        expect(params).toEqual({
+            nodeId: 'peer',
+            policy: source,
+            expectedPersistedRevision: '9007199254740993'
+        })
+        expect(parsePolicyText(source).roles).toEqual([
+            { name: 'deep', profiles: [] },
+            { name: 'coder', profiles: ['ordinary'] }
+        ])
+        expect(parsePolicyText(source).profiles).toEqual([
+            { key: 'ordinary', displayName: 'Native', engine: 'llamacpp', model: 'coder:local' }
+        ])
+    })
+
+    it.each(['coder:api', 'coder:local'])(
+        'refuses recognized override %s as a concrete served reference',
+        model => {
+            const policy = JSON.stringify({ servedModels: [{ engine: 'llamacpp', model }] })
+            expect(() => policySetParams({ policy, expectedPersistedRevision: '31' })).toThrow(
+                'Invalid model reference'
+            )
+        }
+    )
+
+    it.each(['weak', 'coder-api', 'coder:fast'])(
+        'accepts concrete served name %s outside recognized overrides',
+        model => {
+            const policy = { servedModels: [{ engine: 'llamacpp', model }] }
+            expect(parsePolicyText(JSON.stringify(policy))).toEqual(policy)
+        }
+    )
+})
+
 describe('engine binding policy transport', () => {
     const bindings = [{ engine: 'llamacpp', model: 'Native/Model' }]
 
@@ -328,7 +386,7 @@ describe('engine binding policy transport', () => {
         ['non-list', {}],
         ['invalid engine', [{ engine: '../bad', model: 'm' }]],
         ['empty model', [{ engine: 'llamacpp', model: '' }]],
-        ['alias', [{ engine: 'llamacpp', model: 'weak-local' }]],
+        ['alias', [{ engine: 'llamacpp', model: 'coder:local' }]],
         ['control', [{ engine: 'llamacpp', model: 'm\u0080' }]],
         ['encoded reference bound', [{ engine: 'llamacpp', model: 'm'.repeat(230) }]],
         ['escaped reference bound', [{ engine: 'llamacpp', model: '<'.repeat(40) }]],
@@ -705,6 +763,14 @@ function corpusRouting(...deployments: JsonValue[]): JsonObject {
 }
 
 describe('deployment endpoint schema Go/TypeScript parity corpus', () => {
+    it.each(['provider-model:v2', 'coder:local', 'weak', 'coder-api'])(
+        'keeps provider identifier %s independent of the role namespace',
+        model => {
+            const deployment = strictFixtureObject(loadDeploymentCorpus().deployment)
+            deployment.model = model
+            expect(parseRoutingDeployments(corpusRouting(deployment))[0].model).toBe(model)
+        }
+    )
     const cases = loadDeploymentCorpus().cases
     if (!Array.isArray(cases)) throw new Error('Missing deployment corpus')
     for (const value of cases) {
@@ -1443,7 +1509,7 @@ describe('model configuration policy evidence', () => {
         ],
         ['satisfied with refusal', { ...configuration, models: [{ ...loaded, reason: 'no-fit' }] }],
         ['invalid reference', { ...configuration, models: [{ ...loaded, engine: '../engine' }] }],
-        ['reserved alias', { ...configuration, models: [{ ...loaded, model: 'weak' }] }],
+        ['reserved alias', { ...configuration, models: [{ ...loaded, model: 'coder:local' }] }],
         ['untrimmed model', { ...configuration, models: [{ ...loaded, model: ' m ' }] }],
         [
             'Unicode whitespace model',

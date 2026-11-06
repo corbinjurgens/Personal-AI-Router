@@ -188,10 +188,15 @@ func TestProxyReverseCrossEngineTierUsesPeerService(t *testing.T) {
 	if !ok {
 		t.Fatal("missing llamacpp profile")
 	}
+	custom := f.p.soleFacade()
+	setAdvertisedProfilesByRole(&f.node, map[string]nodepolicy.AdvertisedProfile{
+		"weak": {Key: "reverse-profile", Engine: "llamacpp-custom", Model: "fixture-model"},
+	})
+	custom.discovery.SetSubscribed([]Node{f.node})
 	lcpp := newFacade(f.p, profile, NewDiscovery(), 0)
 	f.p.facades["llamacpp"] = lcpp
 	policy := nodepolicy.Default()
-	policy.Tiers = map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp-custom", Model: "fixture-model"}}}
+	policy.Roles = []nodepolicy.Role{{Name: "weak"}}
 	if err := policy.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -1004,7 +1009,7 @@ func TestProxyReverseHybridPeerSlotWaitIsBounded(t *testing.T) {
 	fx.node.StrictAdmission = strictCapabilityFor("llamacpp", "fixture-model")
 	fx.p.soleFacade().discovery.SetSubscribed([]Node{fx.node})
 	policy := nodepolicy.Default()
-	policy.Tiers = map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "fixture-model"}}}
+	policy.Roles = []nodepolicy.Role{{Name: "weak"}}
 	if err := policy.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -1159,7 +1164,8 @@ func TestProxyReverseHybridPeerSlotRecomputesSentBudgets(t *testing.T) {
 			fx.node.PolicyRevision = "1"
 			fx.node.StrictAdmission = strictCapabilityFor("llamacpp", "fixture-model")
 			fx.p.soleFacade().discovery.SetSubscribed([]Node{fx.node})
-			policy := tierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "fixture-model"}}})
+			policy := nodepolicy.Default()
+			policy.Roles = []nodepolicy.Role{{Name: "weak"}}
 			fx.p.admission.setPolicy(policy)
 			headers := make(chan http.Header, 1)
 			// Capture the envelope at authenticated ingress before strict admission.

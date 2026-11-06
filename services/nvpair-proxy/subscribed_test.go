@@ -81,14 +81,15 @@ func TestCapacityDropClearsSelectedNode(t *testing.T) {
 	}
 }
 
-func TestUnknownTierDeclarationPreventsRouterFallback(t *testing.T) {
-	pol := tierPolicy(map[string][]nodepolicy.TierEntry{
-		"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "m"}},
-	})
-	fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"peer": {"m"}}, nil)
-	fx.declare(t, "peer", map[string]nodepolicy.AdvertisedProfile{"future": llamacppProfile("m")})
-	if got := resolvedTier(fx.p.soleFacade(), "weak", requestNeeds{}, false); len(got) != 0 {
-		t.Fatalf("unknown tier declaration enabled router fallback: %+v", got)
+func TestFilteredRolesKeepValidArbitraryDeclarations(t *testing.T) {
+	fx := newTierFixture(t, llamacppCase(t), nodepolicy.Default(), map[string][]string{"peer": {"m"}}, nil)
+	fx.declare(t, "peer", map[string]nodepolicy.AdvertisedProfile{"coder": llamacppProfile("m"), "Coder": llamacppProfile("m")})
+	nodes := fx.p.soleFacade().discovery.Nodes()
+	if len(nodes) != 1 || len(nodes[0].Roles) != 1 || nodes[0].Roles[0].Name != "coder" {
+		t.Fatalf("filtered roles = %+v, want only coder", nodes)
+	}
+	if got := resolvedTier(fx.p.soleFacade(), "coder", requestNeeds{}, false); len(got) != 1 || got[0].model != "m" {
+		t.Fatalf("valid arbitrary declaration did not resolve: %+v", got)
 	}
 }
 
@@ -417,7 +418,7 @@ func TestSubscribedCarriesPolicyWithoutChurn(t *testing.T) {
 			t.Fatalf("node without an advertisement projected roles %+v at revision %q", undeclared.Roles, undeclared.PolicyRevision)
 		}
 
-		roles := []nodepolicy.Role{{Name: nodepolicy.TierStrong, Profiles: []string{"big"}}}
+		roles := []nodepolicy.Role{{Name: "strong", Profiles: []string{"big"}}}
 		profiles := []nodepolicy.AdvertisedProfile{{Key: "big", DisplayName: "Large", Engine: tc.profile.Name, Model: "big", ContextTokens: 32768}}
 		n.Policy = &nodepolicy.Advertisement{Revision: "40", Roles: roles, Profiles: profiles}
 		declared, ok := subscribedToNode(tc.profile, n)

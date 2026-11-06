@@ -96,7 +96,7 @@ func TestModelSettingsRecoveryRemoveFinishesPolicyAfterNativePersisted(t *testin
 	h := newModelSettingsHarness(t)
 	h.createProfile(t, "model-8k", 8192)
 	policy := h.b.localPolicy().Policy
-	policy.Roles = []nodepolicy.Role{{Name: nodepolicy.TierWeak, Profiles: []string{"model-8k"}}}
+	policy.Roles = []nodepolicy.Role{{Name: "weak", Profiles: []string{"model-8k"}}}
 	policy.ServedModels = nodepolicy.ServedModels{{Engine: "llamacpp", Model: "model-8k"}}
 	policy.EngineBindings = nodepolicy.EngineBindings{{Engine: "llamacpp", Model: "model-8k"}}
 	if _, err := setCurrent(h.b, settingsJSON(policy)); err != nil {
@@ -121,7 +121,7 @@ func TestModelSettingsRecoveryRemoveFinishesPolicyAfterNativePersisted(t *testin
 	}
 	h.assertRemovalForwarding(t, start, want, 1, 0)
 	policy = h.b.localPolicy().Policy
-	if len(policy.Profiles) != 0 || !reflect.DeepEqual(policy.Roles, []nodepolicy.Role{{Name: nodepolicy.TierWeak, Profiles: []string{}}}) || policy.ServedModels == nil || len(policy.ServedModels) != 0 || len(policy.EngineBindings) != 0 || len(h.record(t).Snapshot.Settings.ModelLoads) != 0 || h.record(t).Model.Stage != "completed" || modelPolicyFingerprint(policy) != record.Model.After {
+	if len(policy.Profiles) != 0 || !reflect.DeepEqual(policy.Roles, []nodepolicy.Role{{Name: "weak", Profiles: []string{}}}) || policy.ServedModels == nil || len(policy.ServedModels) != 0 || len(policy.EngineBindings) != 0 || len(h.record(t).Snapshot.Settings.ModelLoads) != 0 || h.record(t).Model.Stage != "completed" || modelPolicyFingerprint(policy) != record.Model.After {
 		t.Fatalf("remove recovery left policy or native references: %+v", policy)
 	}
 	if !h.b.recoverEngineSettings() || h.b.localPolicy().Policy.Revision != policy.Revision || h.calls() != 1 {

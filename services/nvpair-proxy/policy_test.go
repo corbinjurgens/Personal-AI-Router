@@ -291,7 +291,7 @@ func TestPolicyMethods_SetPolicyValidatesAndKeepsPrevious(t *testing.T) {
 	bad.Version = 99
 	rpcErr(t, p, w, nodepolicy.MethodSetPolicy, bad)
 	bad = pol
-	bad.Tiers = map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "no/pe", Model: "m"}}}
+	declarePolicyRole(&bad, "weak", "no/pe", "m")
 	rpcErr(t, p, w, nodepolicy.MethodSetPolicy, bad)
 	if got := p.admission.currentPolicy().Admission.MaxResidentModels; got != 3 {
 		t.Fatalf("an invalid policy replaced the previous one: maxResidentModels = %d", got)
@@ -369,7 +369,7 @@ func TestPolicyMethods_AcceptDescriptorEngineIDs(t *testing.T) {
 		t.Fatal("descriptor engine intent not applied")
 	}
 	policy := nodepolicy.Default()
-	policy.Tiers = map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp-custom", Model: "m"}}}
+	declarePolicyRole(&policy, "weak", "llamacpp-custom", "m")
 	rpcOK(t, p, w, nodepolicy.MethodSetPolicy, policy)
 }
 

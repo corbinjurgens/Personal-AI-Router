@@ -38,8 +38,9 @@ func TestOwnedInferenceBuffersPlacement(t *testing.T) {
 	}
 	fixture := func(t *testing.T) *tierFixture {
 		t.Helper()
-		pol := tierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "small:1b"}}})
-		return newTierFixture(t, llamacppCase(t), pol, map[string][]string{"a": {"small:1b"}}, nil)
+		fx := newTierFixture(t, llamacppCase(t), nodepolicy.Default(), map[string][]string{"a": {"small:1b"}}, nil)
+		fx.declare(t, "a", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("small:1b")})
+		return fx
 	}
 	t.Run("impossible transformation has no claim or published placement", func(t *testing.T) {
 		fx := fixture(t)
@@ -91,8 +92,9 @@ func TestOwnedInferenceBuffersPlacement(t *testing.T) {
 		bufferAssertTotals(t, fx.p.buffers, 0, 0, 0)
 	})
 	t.Run("retry clears prior placement and claim before storage wait", func(t *testing.T) {
-		pol := tierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "small:1b"}}})
-		fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"a": {"small:1b"}, "b": {"small:1b"}}, nil)
+		fx := newTierFixture(t, llamacppCase(t), nodepolicy.Default(), map[string][]string{"a": {"small:1b"}, "b": {"small:1b"}}, nil)
+		fx.declare(t, "a", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("small:1b")})
+		fx.declare(t, "b", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("small:1b")})
 		preparationBytes := bufferFixtureRemotePreparationBytes(t, `{"model":"small:1b"}`)
 		capacity := (256 << 10) + preparationBytes + registryNextTestBytes(fx.p)
 		// The first attempt needs preparation room in addition to the blocker
@@ -121,7 +123,9 @@ func TestOwnedInferenceBuffersPlacement(t *testing.T) {
 		}))
 		defer first.Close()
 		f := fx.p.soleFacade()
-		f.discovery.AddManual(nodeForModel(t, "a", first.URL, "small:1b"))
+		firstNode := nodeForModel(t, "a", first.URL, "small:1b")
+		setAdvertisedProfilesByRole(&firstNode, map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("small:1b")})
+		f.discovery.AddManual(firstNode)
 		rec := httptest.NewRecorder()
 		done := make(chan struct{})
 		ctx, cancel := context.WithCancel(context.Background())
@@ -410,18 +414,18 @@ func legacyTierJSONModelNames(body []byte) []string {
 
 func TestTierAliasJSONMatchesLegacyCompletedMembers(t *testing.T) {
 	for _, tc := range []struct{ name, body string }{
-		{"NBSP before object", "\u00a0{\"name\":\"weak-api\"}"},
-		{"NBSP before key", "{\u00a0\"name\":\"weak-api\"}"},
-		{"NBSP before colon", "{\"name\"\u00a0:\"weak-api\"}"},
-		{"NBSP before value", "{\"name\":\u00a0\"weak-api\"}"},
-		{"JSON whitespace before object and key", " \t\r\n{ \t\r\n\"name\" \t\r\n: \t\r\n\"weak-api\"}"},
-		{"completed prefix survives malformed suffix", `{"model":"weak-api","later":`},
-		{"completed prefix before NBSP", "{\"name\":\"weak-api\",\u00a0\"later\":0}"},
+		{"NBSP before object", "\u00a0{\"name\":\"weak:api\"}"},
+		{"NBSP before key", "{\u00a0\"name\":\"weak:api\"}"},
+		{"NBSP before colon", "{\"name\"\u00a0:\"weak:api\"}"},
+		{"NBSP before value", "{\"name\":\u00a0\"weak:api\"}"},
+		{"JSON whitespace before object and key", " \t\r\n{ \t\r\n\"name\" \t\r\n: \t\r\n\"weak:api\"}"},
+		{"completed prefix survives malformed suffix", `{"model":"weak:api","later":`},
+		{"completed prefix before NBSP", "{\"name\":\"weak:api\",\u00a0\"later\":0}"},
 		{"escaped folded key and alias", `{"N\u0041ME":"\u0077eak-api"}`},
-		{"duplicate member", `{"model":"plain","model":"strong-local"}`},
-		{"wrong type ignored", `{"model":17,"name":"medium-api"}`},
-		{"null member ignored", `{"model":null,"name":"medium-local"}`},
-		{"uncompleted string ignored", `{"model":"weak-api`},
+		{"duplicate member", `{"model":"plain","model":"strong:local"}`},
+		{"wrong type ignored", `{"model":17,"name":"medium:api"}`},
+		{"null member ignored", `{"model":null,"name":"medium:local"}`},
+		{"uncompleted string ignored", `{"model":"weak:api`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			want := ""
@@ -460,8 +464,8 @@ func TestValidateRequestIdentifiersJSONBound(t *testing.T) {
 		{name: "multibyte 257", body: `{"name":` + quoted(strings.Repeat("あ", 85)+"aa") + `}`, reject: true},
 		{name: "escaped multibyte exact 256", body: `{"name":"` + strings.Repeat(`\u3042`, 85) + `a"}`},
 		{name: "escaped multibyte 257", body: `{"name":"` + strings.Repeat(`\u3042`, 85) + `aa"}`, reject: true},
-		{name: "padded alias exact 256", body: `{"model":` + quoted(strings.Repeat(" ", 248)+"weak-api") + `}`},
-		{name: "padded alias 257 before trimming", body: `{"model":` + quoted(strings.Repeat(" ", 249)+"weak-api") + `}`, reject: true},
+		{name: "padded alias exact 256", body: `{"model":` + quoted(strings.Repeat(" ", 248)+"weak:api") + `}`},
+		{name: "padded alias 257 before trimming", body: `{"model":` + quoted(strings.Repeat(" ", 249)+"weak:api") + `}`, reject: true},
 		{name: "folded name 257", body: `{"N\u0041ME":` + quoted(strings.Repeat("a", 257)) + `}`, reject: true},
 		{name: "earlier duplicate 257", body: `{"model":` + quoted(strings.Repeat("a", 257)) + `,"model":"m"}`, reject: true},
 		{name: "completed prefix 257", body: `{"name":` + quoted(strings.Repeat("a", 257)) + `,"later":`, reject: true},
@@ -500,16 +504,16 @@ func TestValidateRequestIdentifiersQueryAndPathBound(t *testing.T) {
 		{name: "escaped query 257", target: "/props", query: "mo%64el=" + strings.Repeat("%61", 257), reject: true},
 		{name: "multibyte query exact 256", target: "/props", query: "model=" + url.QueryEscape(strings.Repeat("あ", 85)+"a")},
 		{name: "multibyte query 257", target: "/props", query: "model=" + url.QueryEscape(strings.Repeat("あ", 85)+"aa"), reject: true},
-		{name: "padded query exact 256", target: "/props", query: "model=" + strings.Repeat("+", 248) + "weak-api"},
-		{name: "padded query 257 before trimming", target: "/props", query: "model=" + strings.Repeat("+", 249) + "weak-api", reject: true},
+		{name: "padded query exact 256", target: "/props", query: "model=" + strings.Repeat("+", 248) + "weak:api"},
+		{name: "padded query 257 before trimming", target: "/props", query: "model=" + strings.Repeat("+", 249) + "weak:api", reject: true},
 		{name: "earlier duplicate query 257", target: "/props", query: "model=" + strings.Repeat("a", 257) + "&model=m", reject: true},
 		{name: "invalid percent field ignored", target: "/props", query: "model=" + strings.Repeat("a", 257) + "%zz"},
 		{name: "semicolon field ignored", target: "/props", query: "model=" + strings.Repeat("a", 257) + ";ignored"},
 		{name: "query key case remains exact", target: "/props", query: "Model=" + strings.Repeat("a", 257)},
 		{name: "model path exact 256", target: "/v1/models/" + strings.Repeat("a", 256)},
 		{name: "model path 257", target: "/v1/models/" + strings.Repeat("a", 257), reject: true},
-		{name: "padded alias path exact 256", target: "/v1/models/" + strings.Repeat("%20", 248) + "weak-api"},
-		{name: "padded alias path 257 before trimming", target: "/v1/models/" + strings.Repeat("%20", 249) + "weak-api", reject: true},
+		{name: "padded alias path exact 256", target: "/v1/models/" + strings.Repeat("%20", 248) + "weak:api"},
+		{name: "padded alias path 257 before trimming", target: "/v1/models/" + strings.Repeat("%20", 249) + "weak:api", reject: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := httptest.NewRequest(http.MethodGet, tc.target, nil)
@@ -543,10 +547,125 @@ func TestTierSearchOrder(t *testing.T) {
 		{"strong", true, false, []string{"strong"}},
 	}
 	for _, c := range cases {
-		got := tierSearchOrder(c.tier, nodepolicy.TierPolicy{AllowStronger: c.stronger, AllowWeaker: c.weaker})
+		got := tierSearchOrder(c.tier, nodepolicy.TierPolicy{AllowStronger: c.stronger, AllowWeaker: c.weaker}, []string{"weak", "medium", "strong"})
 		if !slices.Equal(got, c.want) {
 			t.Errorf("%s stronger=%v weaker=%v: %v, want %v", c.tier, c.stronger, c.weaker, got, c.want)
 		}
+	}
+}
+
+func TestRoleSearchOrderUsesRequestingNodeOrder(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		role   string
+		order  []string
+		weaker bool
+		want   []string
+	}{
+		{"stronger", "coder", []string{"fast", "coder", "deep"}, false, []string{"coder", "deep"}},
+		{"both directions", "coder", []string{"fast", "coder", "deep"}, true, []string{"coder", "deep", "fast"}},
+		{"reordered", "coder", []string{"deep", "coder", "fast"}, true, []string{"coder", "fast", "deep"}},
+		{"peer only", "ops", []string{"fast", "coder", "deep"}, true, []string{"ops"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tierSearchOrder(tc.role, nodepolicy.TierPolicy{AllowStronger: true, AllowWeaker: tc.weaker}, tc.order)
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("order = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestArbitraryRoleRequestsAndUnknownNames(t *testing.T) {
+	pol := nodepolicy.Default()
+	pol.Roles = []nodepolicy.Role{{Name: "empty"}}
+	fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"peer": {"worker", "coder-api", "coder"}}, nil)
+	fx.declare(t, "peer", map[string]nodepolicy.AdvertisedProfile{"coder": llamacppProfile("worker")})
+	for _, tc := range []struct {
+		name   string
+		status int
+		err    string
+		model  string
+	}{
+		{"coder", http.StatusOK, "", "worker"},
+		{"coder-api", http.StatusOK, "", "coder-api"},
+		{"empty", http.StatusNotFound, "no eligible model for tier empty", ""},
+		{"medium", http.StatusNotFound, "no profile or role named medium", ""},
+		{"x:api", http.StatusNotFound, "no profile or role named x:api", ""},
+		{"coder:fast", http.StatusNotFound, "no profile or role named coder:fast", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := fx.eng["peer"].hits()
+			rec := fx.do(t, "/v1/chat/completions", `{"model":"`+tc.name+`"}`)
+			if rec.Code != tc.status {
+				t.Fatalf("status = %d, want %d: %s", rec.Code, tc.status, rec.Body)
+			}
+			if tc.err != "" {
+				var out struct {
+					Error string `json:"error"`
+				}
+				if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+					t.Fatal(err)
+				}
+				if out.Error != tc.err {
+					t.Fatalf("error = %q, want %q", out.Error, tc.err)
+				}
+				if fx.eng["peer"].hits() != before {
+					t.Fatal("refused request reached engine")
+				}
+			} else {
+				var out struct {
+					Model string `json:"model"`
+				}
+				if err := json.Unmarshal([]byte(fx.eng["peer"].lastBody()), &out); err != nil {
+					t.Fatal(err)
+				}
+				if out.Model != tc.model {
+					t.Fatalf("dispatched model = %q, want %q", out.Model, tc.model)
+				}
+			}
+		})
+	}
+}
+
+func TestRoleDeclarationTakesPrecedenceOverPeerConcreteName(t *testing.T) {
+	fx := newTierFixture(t, llamacppCase(t), nodepolicy.Default(), map[string][]string{
+		"declaring": {"worker"}, "concrete": {"coder"},
+	}, nil)
+	fx.declare(t, "declaring", map[string]nodepolicy.AdvertisedProfile{"coder": llamacppProfile("worker")})
+	rec := fx.do(t, "/v1/chat/completions", `{"model":"coder"}`)
+	if rec.Code != http.StatusOK || fx.eng["declaring"].hits() != 1 || fx.eng["concrete"].hits() != 0 {
+		t.Fatalf("role/profile clash: status %d declaring hits %d concrete hits %d", rec.Code, fx.eng["declaring"].hits(), fx.eng["concrete"].hits())
+	}
+	if rec.Header().Get(nodepolicy.TierHeader) != "coder" || rec.Header().Get(nodepolicy.ModelHeader) != "worker" {
+		t.Fatalf("role selection headers = %v", rec.Header())
+	}
+}
+
+func TestArbitraryRoleWideningFollowsOwnReordering(t *testing.T) {
+	pol := nodepolicy.Default()
+	pol.TierPolicy.AllowStronger = true
+	pol.Roles = []nodepolicy.Role{{Name: "fast"}, {Name: "coder"}, {Name: "deep"}}
+	fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"fast-node": {"fast-model"}, "deep-node": {"deep-model"}, "ops-node": {"ops-model"}}, nil)
+	fx.declare(t, "fast-node", map[string]nodepolicy.AdvertisedProfile{"fast": llamacppProfile("fast-model")})
+	fx.declare(t, "deep-node", map[string]nodepolicy.AdvertisedProfile{"deep": llamacppProfile("deep-model")})
+	fx.declare(t, "ops-node", map[string]nodepolicy.AdvertisedProfile{"ops": llamacppProfile("ops-model")})
+	f := fx.p.soleFacade()
+	if got, want := resolvedTier(f, "coder", requestNeeds{}, false), []tierCand{{"deep-node", "deep-model", 1}}; !slices.Equal(got, want) {
+		t.Fatalf("original widening = %+v, want %+v", got, want)
+	}
+	pol.Roles = []nodepolicy.Role{{Name: "deep"}, {Name: "coder"}, {Name: "fast"}}
+	fx.p.admission.setPolicy(pol)
+	if got, want := resolvedTier(f, "coder", requestNeeds{}, false), []tierCand{{"fast-node", "fast-model", 1}}; !slices.Equal(got, want) {
+		t.Fatalf("reordered widening = %+v, want %+v", got, want)
+	}
+	pol.TierPolicy.AllowWeaker = true
+	fx.p.admission.setPolicy(pol)
+	if got, want := resolvedTier(f, "coder", requestNeeds{}, false), []tierCand{{"fast-node", "fast-model", 1}, {"deep-node", "deep-model", 2}}; !slices.Equal(got, want) {
+		t.Fatalf("both directions = %+v, want %+v", got, want)
+	}
+	if got, want := resolvedTier(f, "ops", requestNeeds{}, false), []tierCand{{"ops-node", "ops-model", 0}}; !slices.Equal(got, want) {
+		t.Fatalf("peer-only widening = %+v, want %+v", got, want)
 	}
 }
 
@@ -777,15 +896,12 @@ func tierPolicy(tiers map[string][]nodepolicy.TierEntry) nodepolicy.Policy {
 
 func TestTier_CapabilityFilterAndBodyRewrite(t *testing.T) {
 	tc := llamacppCase(t)
-	pol := tierPolicy(map[string][]nodepolicy.TierEntry{
-		"weak": {
-			{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "small:1b"},
-			{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "small-tools:1b", Capabilities: []nodepolicy.Capability{nodepolicy.CapTools}},
-		},
-	})
+	pol := nodepolicy.Default()
 	fx := newTierFixture(t, tc, pol, map[string][]string{
 		"a": {"small:1b"}, "b": {"small-tools:1b"},
 	}, nil)
+	fx.declare(t, "a", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("small:1b")})
+	fx.declare(t, "b", map[string]nodepolicy.AdvertisedProfile{"weak": {Engine: "llamacpp", Model: "small-tools:1b", Capabilities: []nodepolicy.Capability{nodepolicy.CapTools}}})
 
 	body := `{"model":"weak","tools":[{"type":"function"}],"temperature":0.2}`
 	rec := fx.do(t, "/v1/chat/completions", body)
@@ -808,11 +924,11 @@ func TestTier_CapabilityFilterAndBodyRewrite(t *testing.T) {
 
 func TestTier_ContextFilterAndStrongerFallback(t *testing.T) {
 	tc := llamacppCase(t)
-	pol := tierPolicy(map[string][]nodepolicy.TierEntry{
-		"weak":   {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "small:1b", ContextTokens: 100}},
-		"medium": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "mid:7b", ContextTokens: 32000}},
-	})
+	pol := nodepolicy.Default()
+	pol.Roles = []nodepolicy.Role{{Name: "weak"}, {Name: "medium"}}
 	fx := newTierFixture(t, tc, pol, map[string][]string{"a": {"small:1b"}, "b": {"mid:7b"}}, nil)
+	fx.declare(t, "a", map[string]nodepolicy.AdvertisedProfile{"weak": {Engine: "llamacpp", Model: "small:1b", ContextTokens: 100}})
+	fx.declare(t, "b", map[string]nodepolicy.AdvertisedProfile{"medium": {Engine: "llamacpp", Model: "mid:7b", ContextTokens: 32000}})
 
 	// Small enough for weak.
 	if rec := fx.do(t, "/v1/chat/completions", `{"model":"weak"}`); rec.Code != http.StatusOK || fx.servedBy(t) != "a" {
@@ -848,9 +964,18 @@ func TestTier_ContextFilterAndStrongerFallback(t *testing.T) {
 
 func TestTier_NoEntriesIs404WithEmptyNeeds(t *testing.T) {
 	tc := llamacppCase(t)
-	fx := newTierFixture(t, tc, nodepolicy.Default(), map[string][]string{"a": {"small:1b"}}, nil)
+	pol := nodepolicy.Default()
+	pol.Roles = []nodepolicy.Role{{Name: "strong"}}
+	fx := newTierFixture(t, tc, pol, map[string][]string{"a": {"small:1b"}}, nil)
 	rec := fx.do(t, "/v1/chat/completions", `{"model":"strong"}`)
-	if rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), `"needs":[]`) {
+	var out struct {
+		Error string   `json:"error"`
+		Needs []string `json:"needs"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != http.StatusNotFound || out.Error != "no eligible model for tier strong" || out.Needs == nil || len(out.Needs) != 0 {
 		t.Fatalf("status %d body %s", rec.Code, rec.Body)
 	}
 	if fx.servedBy(t) != "" {
@@ -860,29 +985,33 @@ func TestTier_NoEntriesIs404WithEmptyNeeds(t *testing.T) {
 
 func TestTier_WarmPreference(t *testing.T) {
 	tc := llamacppCase(t)
-	tiers := map[string][]nodepolicy.TierEntry{
-		"weak":   {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "cold:1b"}, {Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "warm:1b"}},
-		"medium": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "mid:7b"}},
+	fixture := func(pol nodepolicy.Policy, loaded map[string][]string) *tierFixture {
+		t.Helper()
+		fx := newTierFixture(t, tc, pol, map[string][]string{"a": {"cold:1b"}, "b": {"warm:1b"}, "c": {"mid:7b"}}, loaded)
+		fx.declare(t, "a", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("cold:1b")})
+		fx.declare(t, "b", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("warm:1b")})
+		fx.declare(t, "c", map[string]nodepolicy.AdvertisedProfile{"medium": llamacppProfile("mid:7b")})
+		return fx
 	}
-	nodes := map[string][]string{"a": {"cold:1b"}, "b": {"warm:1b"}, "c": {"mid:7b"}}
+	pol := nodepolicy.Default()
+	pol.Roles = []nodepolicy.Role{{Name: "weak"}, {Name: "medium"}}
 
-	// Within the requested tier a loaded model leads, ahead of entry order.
-	fx := newTierFixture(t, tc, tierPolicy(tiers), nodes, map[string][]string{"b": {"warm:1b"}, "c": {"mid:7b"}})
+	// Within the requested role a loaded model leads, ahead of model order.
+	fx := fixture(pol, map[string][]string{"b": {"warm:1b"}, "c": {"mid:7b"}})
 	if rec := fx.do(t, "/v1/chat/completions", `{"model":"weak"}`); rec.Code != http.StatusOK || fx.servedBy(t) != "b" {
 		t.Fatalf("tier mode: served by %q, want warm b", fx.servedBy(t))
 	}
 
 	// "tier" keeps tier order first: a warm stronger model never beats a cold
 	// model of the requested tier.
-	fx = newTierFixture(t, tc, tierPolicy(tiers), nodes, map[string][]string{"c": {"mid:7b"}})
+	fx = fixture(pol, map[string][]string{"c": {"mid:7b"}})
 	if rec := fx.do(t, "/v1/chat/completions", `{"model":"weak"}`); rec.Code != http.StatusOK || fx.servedBy(t) != "a" {
 		t.Fatalf("tier mode, only medium warm: served by %q, want a", fx.servedBy(t))
 	}
 
 	// "any" prefers any loaded eligible model.
-	pol := tierPolicy(tiers)
 	pol.TierPolicy.PreferLoaded = "any"
-	fx = newTierFixture(t, tc, pol, nodes, map[string][]string{"c": {"mid:7b"}})
+	fx = fixture(pol, map[string][]string{"c": {"mid:7b"}})
 	rec := fx.do(t, "/v1/chat/completions", `{"model":"weak"}`)
 	if rec.Code != http.StatusOK || fx.servedBy(t) != "c" {
 		t.Fatalf("any mode: served by %q, want warm c", fx.servedBy(t))
@@ -892,8 +1021,9 @@ func TestTier_WarmPreference(t *testing.T) {
 // Workload events carry the concrete model and the tier asked for.
 func TestTier_WorkloadCarriesRequestedModel(t *testing.T) {
 	tc := llamacppCase(t)
-	pol := tierPolicy(map[string][]nodepolicy.TierEntry{"medium": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "mid:7b"}}})
+	pol := nodepolicy.Default()
 	fx := newTierFixture(t, tc, pol, map[string][]string{"a": {"mid:7b"}}, nil)
+	fx.declare(t, "a", map[string]nodepolicy.AdvertisedProfile{"medium": llamacppProfile("mid:7b")})
 	if rec := fx.do(t, "/v1/chat/completions", `{"model":"medium","prompt":"x"}`); rec.Code != http.StatusOK {
 		t.Fatalf("status %d", rec.Code)
 	}
@@ -973,7 +1103,7 @@ func TestTier_CrossEngineSelfRouting(t *testing.T) {
 	setBackend(t, lcpp, lcppEngine.URL, true)
 
 	pol := nodepolicy.Default()
-	pol.Tiers = map[string][]nodepolicy.TierEntry{"strong": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp-custom", Model: "qwen3-8b"}}}
+	declarePolicyRole(&pol, "strong", "llamacpp-custom", "qwen3-8b")
 	p.admission.setPolicy(pol)
 
 	rec := httptest.NewRecorder()
@@ -1003,9 +1133,11 @@ func TestTier_CrossEnginePeerUsesThatEnginesPort(t *testing.T) {
 	w := &recordingWriter{}
 	p, lcpp, custom := twoEngineProxy(t, w)
 	peerCustom := newRecordingEngine(t, http.StatusOK)
-	custom.discovery.AddManual(nodeForModel(t, "peer", peerCustom.URL, "qwen3-8b"))
+	peer := nodeForModel(t, "peer", peerCustom.URL, "qwen3-8b")
+	setAdvertisedProfilesByRole(&peer, map[string]nodepolicy.AdvertisedProfile{"weak": {Engine: "llamacpp-custom", Model: "qwen3-8b"}})
+	custom.discovery.AddManual(peer)
 	pol := nodepolicy.Default()
-	pol.Tiers = map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp-custom", Model: "qwen3-8b"}}}
+	pol.Roles = []nodepolicy.Role{{Name: "weak"}}
 	p.admission.setPolicy(pol)
 
 	cands := lcpp.resolveTierCandidates("weak", requestNeeds{}, true)
@@ -1027,10 +1159,7 @@ func TestModelList_OffersTiers(t *testing.T) {
 	disc.AddManual(nodeFor(t, "n1", e.URL))
 	p := testProxy(tc.profile, disc, tc.profile.FacadePort)
 	pol := nodepolicy.Default()
-	pol.Tiers = map[string][]nodepolicy.TierEntry{
-		"weak":   {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp-custom", Model: "qwen3-8b"}},
-		"strong": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp-custom", Model: "qwen3-8b"}},
-	}
+	pol.Roles = []nodepolicy.Role{{Name: "weak"}, {Name: "strong"}}
 	p.admission.setPolicy(pol)
 	rec := httptest.NewRecorder()
 	p.soleFacade().handleHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
@@ -1049,18 +1178,18 @@ func TestModelList_OffersTiers(t *testing.T) {
 	}
 	want := []string{
 		"qwen3-8b/",
-		"weak/pair", "weak-api/pair", "weak-local/pair",
-		"strong/pair", "strong-api/pair", "strong-local/pair",
+		"weak/pair", "weak:api/pair", "weak:local/pair",
+		"strong/pair", "strong:api/pair", "strong:local/pair",
 	}
 	if !slices.Equal(ids, want) {
 		t.Fatalf("model list = %v", ids)
 	}
 }
 
-// A version 1 policy file migrated to version 2 resolves exactly the candidates
-// it resolved before: its entries are local entries.
-func TestTier_MigratedV1PolicyResolvesTheSameCandidates(t *testing.T) {
-	pol, err := nodepolicy.Parse([]byte(`{
+// Stored local entries create neither declarations nor candidates. New peer
+// declarations restore routing with each peer's own capability facts.
+func TestTier_StoredLocalEntriesRequireNewDeclarations(t *testing.T) {
+	pol, _, err := nodepolicy.ParseStored([]byte(`{
 		"version": 1,
 		"tiers": {
 			"weak":   [{"engine":"llamacpp","model":"small:1b"}, {"engine":"llamacpp","model":"small-tools:1b","capabilities":["tools"]}],
@@ -1068,12 +1197,25 @@ func TestTier_MigratedV1PolicyResolvesTheSameCandidates(t *testing.T) {
 		}
 	}`))
 	if err != nil {
-		t.Fatalf("Parse(v1): %v", err)
+		t.Fatalf("ParseStored(v1): %v", err)
 	}
+	if len(pol.Roles) != 0 || len(pol.Tiers["weak"]) != 0 || len(pol.Tiers["medium"]) != 0 {
+		t.Fatalf("stored repair retained local routing: roles=%+v tiers=%+v", pol.Roles, pol.Tiers)
+	}
+	pol.Roles = []nodepolicy.Role{{Name: "weak"}, {Name: "medium"}}
 	fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{
 		"a": {"small:1b"}, "b": {"small-tools:1b"}, "c": {"mid:7b"}, "d": {"unrelated:1b"},
 	}, nil)
 	f := fx.p.soleFacade()
+	if got := resolvedTier(f, "weak", requestNeeds{}, false); len(got) != 0 {
+		t.Fatalf("stored local entries supplied candidates: %+v", got)
+	}
+	if rec := fx.do(t, "/v1/chat/completions", `{"model":"weak"}`); rec.Code != http.StatusNotFound || fx.servedBy(t) != "" {
+		t.Fatalf("undeclared models routed: status=%d served=%q", rec.Code, fx.servedBy(t))
+	}
+	fx.declare(t, "a", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("small:1b")})
+	fx.declare(t, "b", map[string]nodepolicy.AdvertisedProfile{"weak": {Engine: "llamacpp", Model: "small-tools:1b", Capabilities: []nodepolicy.Capability{nodepolicy.CapTools}}})
+	fx.declare(t, "c", map[string]nodepolicy.AdvertisedProfile{"medium": llamacppProfile("mid:7b")})
 
 	type resolved struct {
 		node, model string
@@ -1086,7 +1228,9 @@ func TestTier_MigratedV1PolicyResolvesTheSameCandidates(t *testing.T) {
 		}
 		return out
 	}
-	want := []resolved{{"a", "small:1b", 0}, {"b", "small-tools:1b", 0}, {"c", "mid:7b", 1}}
+	// Equal membership positions use engine/model order, independently of the
+	// discarded router entry order.
+	want := []resolved{{"b", "small-tools:1b", 0}, {"a", "small:1b", 0}, {"c", "mid:7b", 1}}
 	if got := resolve(requestNeeds{}); !slices.Equal(got, want) {
 		t.Errorf("candidates = %+v, want %+v", got, want)
 	}
@@ -1098,25 +1242,32 @@ func TestTier_MigratedV1PolicyResolvesTheSameCandidates(t *testing.T) {
 	}
 }
 
-// A v1 tier may list one engine and model twice with different declared
-// bounds; each entry made a candidate eligible on its own, and still does.
-func TestTier_MigratedV1NearDuplicateEntriesBothResolve(t *testing.T) {
-	pol, err := nodepolicy.Parse([]byte(`{"version":1,"tiers":{"weak":[
+// Old near-duplicate bounds are discarded together. Only a newly declared
+// profile may supply context and capabilities for the node.
+func TestTier_StoredNearDuplicateLocalEntriesAreDropped(t *testing.T) {
+	pol, _, err := nodepolicy.ParseStored([]byte(`{"version":1,"tiers":{"weak":[
 		{"engine":"llamacpp","model":"small:1b","contextTokens":100},
 		{"engine":"llamacpp","model":"small:1b","contextTokens":32000,"capabilities":["tools"]}]}}`))
 	if err != nil {
-		t.Fatalf("Parse(v1): %v", err)
+		t.Fatalf("ParseStored(v1): %v", err)
+	}
+	if len(pol.Tiers["weak"]) != 0 || len(pol.Roles) != 0 {
+		t.Fatalf("stored local bounds survived: tiers=%+v roles=%+v", pol.Tiers, pol.Roles)
 	}
 	pol.TierPolicy.AllowStronger = false
 	fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"a": {"small:1b"}}, nil)
 	f := fx.p.soleFacade()
 	count := func(needs requestNeeds) int { return len(f.resolveTierCandidates("weak", needs, false)) }
+	if got := count(requestNeeds{}); got != 0 {
+		t.Fatalf("stored local entries supplied %d candidates", got)
+	}
+	fx.declare(t, "a", map[string]nodepolicy.AdvertisedProfile{"weak": {Engine: "llamacpp", Model: "small:1b", ContextTokens: 32000, Capabilities: []nodepolicy.Capability{nodepolicy.CapTools}}})
 
 	if got := count(requestNeeds{caps: []nodepolicy.Capability{nodepolicy.CapTools}}); got != 1 {
-		t.Errorf("tools request candidates = %d, want 1 through the second entry", got)
+		t.Errorf("tools request candidates = %d, want the declared profile", got)
 	}
 	if got := count(requestNeeds{contextTokens: 1000}); got != 1 {
-		t.Errorf("1000-token request candidates = %d, want 1 through the second entry", got)
+		t.Errorf("1000-token request candidates = %d, want the declared profile", got)
 	}
 	if got := count(requestNeeds{contextTokens: 50}); got != 1 {
 		t.Errorf("50-token request candidates = %d, want 1 (deduplicated by node and model)", got)
@@ -1128,11 +1279,13 @@ func TestTier_MigratedV1NearDuplicateEntriesBothResolve(t *testing.T) {
 
 const apiTierPolicy = `{
   "version": 2,
+  "roles": [{"name":"weak","profiles":[]},{"name":"medium","profiles":[]}],
   "tiers": {
     "weak":   [{"kind":"api","deployment":"cloud-small"}],
-    "medium": [{"kind":"api","deployment":"cloud-small"}, {"kind":"local","engine":"llamacpp","model":"mid:7b"}]
+    "medium": [{"kind":"api","deployment":"cloud-small"}]
   },
   "routing": {
+    "tiers": {"weak":{"bareMode":"hybrid"},"medium":{"bareMode":"hybrid"}},
     "accounts": [{"id":"acct","credential":"NVPAIR_PROVIDER_SECRET_ACCT","billing":"free",
       "perRequestCeiling":"0","dailyCeiling":"0","monthlyCeiling":"0"}],
     "deployments": [{"id":"cloud-small","account":"acct","model":"small-1","family":"alpha",
@@ -1149,6 +1302,7 @@ func TestTier_APIEntriesAreSkipped(t *testing.T) {
 	fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{
 		"a": {"mid:7b"}, "b": {"cloud-small", "small-1"},
 	}, nil)
+	fx.declare(t, "a", map[string]nodepolicy.AdvertisedProfile{"medium": llamacppProfile("mid:7b")})
 	f := fx.p.soleFacade()
 	resolve := func(tier string) []string {
 		var out []string
@@ -1165,7 +1319,7 @@ func TestTier_APIEntriesAreSkipped(t *testing.T) {
 		t.Errorf("API-only tier: status %d served by %q, want 404 and no engine request", rec.Code, fx.servedBy(t))
 	}
 	if got, want := resolve("medium"), []string{"a/mid:7b"}; !slices.Equal(got, want) {
-		t.Errorf("mixed tier candidates = %v, want only the local entry %v", got, want)
+		t.Errorf("role with API entries candidates = %v, want only the declared profile %v", got, want)
 	}
 
 	// The kind decides, not the other fields: an API entry that also carries a
@@ -1181,6 +1335,42 @@ func TestTier_APIEntriesAreSkipped(t *testing.T) {
 	}
 }
 
+func TestTier_RejectedLocalEntriesNeverSupplyCandidates(t *testing.T) {
+	fx := newTierFixture(t, llamacppCase(t), nodepolicy.Default(), map[string][]string{
+		"declaring": {"chosen", "retired"}, "undeclared": {"chosen", "retired"},
+	}, nil)
+	fx.declare(t, "declaring", map[string]nodepolicy.AdvertisedProfile{"coder": llamacppProfile("chosen")})
+	pol := nodepolicy.Default()
+	pol.Roles = []nodepolicy.Role{{Name: "coder"}, {Name: "empty"}}
+	// Rejected input is deliberately installed past validation to prove the
+	// resolver cannot revive the retired mechanism for any declaring node.
+	pol.Tiers = map[string][]nodepolicy.TierEntry{
+		"coder": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "retired"}},
+		"empty": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "retired"}},
+	}
+	if err := pol.Validate(); err == nil || !strings.Contains(err.Error(), "Local tier entries are retired; declare roles instead.") {
+		t.Fatalf("local-entry validation = %v, want retirement refusal", err)
+	}
+	fx.p.admission.setPolicy(pol)
+	f := fx.p.soleFacade()
+	if got, want := resolvedTier(f, "coder", requestNeeds{}, false), []tierCand{{"declaring", "chosen", 0}}; !slices.Equal(got, want) {
+		t.Fatalf("rejected local entry supplied candidates: %+v, want %+v", got, want)
+	}
+	if got := resolvedTier(f, "empty", requestNeeds{}, false); len(got) != 0 {
+		t.Fatalf("rejected local entry filled an empty role: %+v", got)
+	}
+	rec := fx.do(t, "/v1/chat/completions", `{"model":"empty"}`)
+	var out struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != http.StatusNotFound || out.Error != "no eligible model for tier empty" || fx.servedBy(t) != "" {
+		t.Fatalf("empty role: status=%d error=%q served=%q", rec.Code, out.Error, fx.servedBy(t))
+	}
+}
+
 func TestModelList_OffersEveryTierWithEntriesAndBothVariants(t *testing.T) {
 	pol, err := nodepolicy.Parse([]byte(apiTierPolicy))
 	if err != nil {
@@ -1188,7 +1378,7 @@ func TestModelList_OffersEveryTierWithEntriesAndBothVariants(t *testing.T) {
 	}
 	fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"a": {"mid:7b"}}, nil)
 	var ids []string
-	for _, raw := range fx.p.soleFacade().tierModelEntries(map[string]modelListItem{}) {
+	for _, raw := range fx.p.soleFacade().tierModelEntries() {
 		var item struct {
 			ID string `json:"id"`
 		}
@@ -1197,7 +1387,7 @@ func TestModelList_OffersEveryTierWithEntriesAndBothVariants(t *testing.T) {
 		}
 		ids = append(ids, item.ID)
 	}
-	want := []string{"weak", "weak-api", "weak-local", "medium", "medium-api", "medium-local"}
+	want := []string{"weak", "weak:api", "weak:local", "medium", "medium:api", "medium:local"}
 	if !slices.Equal(ids, want) {
 		t.Fatalf("tier model entries = %v, want %v (weak has only an API entry; strong has none)", ids, want)
 	}
@@ -1227,52 +1417,45 @@ func llamacppProfile(model string) nodepolicy.AdvertisedProfile {
 type tierCand struct {
 	node, model string
 	rank        int
-	declared    bool
 }
 
 func resolvedTier(f *facade, tier string, needs requestNeeds, crossEngine bool) []tierCand {
 	var out []tierCand
 	for _, c := range f.resolveTierCandidates(tier, needs, crossEngine) {
-		out = append(out, tierCand{c.id, c.model, c.tierRank, c.declared})
+		out = append(out, tierCand{c.id, c.model, c.tierRank})
 	}
 	return out
 }
 
-// A node that declares roles is authoritative for itself: its declared role
-// replaces the router's entries on that node, a tier it omits offers nothing
-// even when the router's entry names a model it has, and an undeclared node
-// still receives the router's entries.
+// Only each node's declaration can supply its role candidates. An undeclared
+// node offers nothing even when its inventory matches another node's profile.
 func TestTierRoles_DeclaringNodeIsAuthoritative(t *testing.T) {
-	pol := tierPolicy(map[string][]nodepolicy.TierEntry{
-		"weak":   {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "router-weak:1b"}},
-		"medium": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "router-mid:7b"}},
-	})
+	pol := nodepolicy.Default()
+	pol.Roles = []nodepolicy.Role{{Name: "weak"}, {Name: "medium"}}
 	pol.TierPolicy.AllowStronger = false
 	fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{
 		"a": {"router-weak:1b", "router-mid:7b", "own-weak:1b"},
-		"b": {"router-weak:1b", "router-mid:7b"},
+		"b": {"router-weak:1b", "router-mid:7b", "own-weak:1b"},
 	}, nil)
 	f := fx.p.soleFacade()
 
-	t.Run("no declaration keeps router entries", func(t *testing.T) {
-		want := []tierCand{{"a", "router-weak:1b", 0, false}, {"b", "router-weak:1b", 0, false}}
-		if got := resolvedTier(f, "weak", requestNeeds{}, false); !slices.Equal(got, want) {
-			t.Fatalf("candidates = %+v, want %+v", got, want)
+	t.Run("no declaration supplies no candidates", func(t *testing.T) {
+		if got := resolvedTier(f, "weak", requestNeeds{}, false); len(got) != 0 {
+			t.Fatalf("undeclared nodes supplied candidates: %+v", got)
 		}
 	})
 
 	fx.declare(t, "a", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("own-weak:1b")})
 
-	t.Run("declared role replaces router entries on that node", func(t *testing.T) {
-		want := []tierCand{{"a", "own-weak:1b", 0, true}, {"b", "router-weak:1b", 0, false}}
+	t.Run("only declaring node supplies its profile", func(t *testing.T) {
+		want := []tierCand{{"a", "own-weak:1b", 0}}
 		if got := resolvedTier(f, "weak", requestNeeds{}, false); !slices.Equal(got, want) {
 			t.Fatalf("candidates = %+v, want %+v", got, want)
 		}
 	})
 	t.Run("omitted tier offers nothing", func(t *testing.T) {
-		want := []tierCand{{"b", "router-mid:7b", 0, false}}
-		if got := resolvedTier(f, "medium", requestNeeds{}, false); !slices.Equal(got, want) {
-			t.Fatalf("candidates = %+v, want %+v (a declares no medium role)", got, want)
+		if got := resolvedTier(f, "medium", requestNeeds{}, false); len(got) != 0 {
+			t.Fatalf("omitted role supplied candidates: %+v", got)
 		}
 	})
 	t.Run("request is sent the declared model", func(t *testing.T) {
@@ -1294,7 +1477,7 @@ func TestTierRoles_PeersDeclareDifferentModelsForOneTier(t *testing.T) {
 	}, nil)
 	fx.declare(t, "a", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("beta:1b")})
 	fx.declare(t, "b", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("alpha:1b")})
-	want := []tierCand{{"b", "alpha:1b", 0, true}, {"a", "beta:1b", 0, true}}
+	want := []tierCand{{"b", "alpha:1b", 0}, {"a", "beta:1b", 0}}
 	if got := resolvedTier(fx.p.soleFacade(), "weak", requestNeeds{}, false); !slices.Equal(got, want) {
 		t.Fatalf("candidates = %+v, want %+v", got, want)
 	}
@@ -1311,9 +1494,7 @@ func TestTierRoles_PeersDeclareDifferentModelsForOneTier(t *testing.T) {
 // not have is no candidate, and the node does not fall back to the router's
 // entries for that tier either.
 func TestTierRoles_DeclaredModelMissingFromInventory(t *testing.T) {
-	pol := tierPolicy(map[string][]nodepolicy.TierEntry{
-		"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "have:1b"}},
-	})
+	pol := nodepolicy.Default()
 	pol.TierPolicy.AllowStronger = false
 	fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"a": {"have:1b"}}, nil)
 	fx.declare(t, "a", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("missing:1b")})
@@ -1325,8 +1506,7 @@ func TestTierRoles_DeclaredModelMissingFromInventory(t *testing.T) {
 	}
 }
 
-// A declared role carries its node's advertised bounds, filtered like an
-// entry's.
+// A declared role carries only its node's advertised bounds.
 func TestTierRoles_AdvertisedBoundsFilter(t *testing.T) {
 	fx := newTierFixture(t, llamacppCase(t), tierPolicy(nil), map[string][]string{
 		"a": {"small:1b"}, "b": {"tools:1b"},
@@ -1334,18 +1514,18 @@ func TestTierRoles_AdvertisedBoundsFilter(t *testing.T) {
 	fx.declare(t, "a", map[string]nodepolicy.AdvertisedProfile{"weak": {Engine: "llamacpp", Model: "small:1b", ContextTokens: 100}})
 	fx.declare(t, "b", map[string]nodepolicy.AdvertisedProfile{"weak": {Engine: "llamacpp", Model: "tools:1b", Capabilities: []nodepolicy.Capability{nodepolicy.CapTools}}})
 	f := fx.p.soleFacade()
-	if got, want := resolvedTier(f, "weak", requestNeeds{caps: []nodepolicy.Capability{nodepolicy.CapTools}}, false), []tierCand{{"b", "tools:1b", 0, true}}; !slices.Equal(got, want) {
+	if got, want := resolvedTier(f, "weak", requestNeeds{caps: []nodepolicy.Capability{nodepolicy.CapTools}}, false), []tierCand{{"b", "tools:1b", 0}}; !slices.Equal(got, want) {
 		t.Errorf("tools candidates = %+v, want %+v", got, want)
 	}
-	if got, want := resolvedTier(f, "weak", requestNeeds{contextTokens: 1000}, false), []tierCand{{"b", "tools:1b", 0, true}}; !slices.Equal(got, want) {
+	if got, want := resolvedTier(f, "weak", requestNeeds{contextTokens: 1000}, false), []tierCand{{"b", "tools:1b", 0}}; !slices.Equal(got, want) {
 		t.Errorf("long-context candidates = %+v, want %+v", got, want)
 	}
 }
 
-// allowStronger and allowWeaker are the router's, applied to declared roles
-// as to entries.
+// allowStronger and allowWeaker follow the requesting node's declaration order.
 func TestTierRoles_StrongerAndWeakerFallback(t *testing.T) {
 	pol := tierPolicy(nil)
+	pol.Roles = []nodepolicy.Role{{Name: "weak"}, {Name: "medium"}, {Name: "strong"}}
 	fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"a": {"big:70b"}, "b": {"small:1b"}}, nil)
 	fx.declare(t, "a", map[string]nodepolicy.AdvertisedProfile{"strong": llamacppProfile("big:70b")})
 	fx.declare(t, "b", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("small:1b")})
@@ -1356,32 +1536,33 @@ func TestTierRoles_StrongerAndWeakerFallback(t *testing.T) {
 	}
 
 	set(false, false)
-	if got, want := resolvedTier(f, "weak", requestNeeds{}, false), []tierCand{{"b", "small:1b", 0, true}}; !slices.Equal(got, want) {
+	if got, want := resolvedTier(f, "weak", requestNeeds{}, false), []tierCand{{"b", "small:1b", 0}}; !slices.Equal(got, want) {
 		t.Errorf("weak, no fallback = %+v, want %+v", got, want)
 	}
 	if got := resolvedTier(f, "medium", requestNeeds{}, false); len(got) != 0 {
 		t.Errorf("medium, no fallback = %+v, want none", got)
 	}
 	set(true, false)
-	if got, want := resolvedTier(f, "medium", requestNeeds{}, false), []tierCand{{"a", "big:70b", 1, true}}; !slices.Equal(got, want) {
+	if got, want := resolvedTier(f, "medium", requestNeeds{}, false), []tierCand{{"a", "big:70b", 1}}; !slices.Equal(got, want) {
 		t.Errorf("medium, allowStronger = %+v, want %+v", got, want)
 	}
 	set(false, true)
-	if got, want := resolvedTier(f, "medium", requestNeeds{}, false), []tierCand{{"b", "small:1b", 1, true}}; !slices.Equal(got, want) {
+	if got, want := resolvedTier(f, "medium", requestNeeds{}, false), []tierCand{{"b", "small:1b", 1}}; !slices.Equal(got, want) {
 		t.Errorf("medium, allowWeaker = %+v, want %+v", got, want)
 	}
 }
 
-// Warmth orders declared candidates exactly as it orders entries, and of equal
-// rank and warmth a declared candidate leads a router entry.
+// Warmth and requested-role rank order candidates before profile membership
+// and model ordering within the same class.
 func TestTierRoles_WarmOrdering(t *testing.T) {
 	nodes := map[string][]string{"a": {"entry:1b"}, "d": {"declared:1b"}, "m": {"mid:7b"}}
-	tiers := map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "entry:1b"}}}
 	order := func(t *testing.T, preferLoaded string, loaded map[string][]string) []string {
 		t.Helper()
-		pol := tierPolicy(tiers)
+		pol := nodepolicy.Default()
+		pol.Roles = []nodepolicy.Role{{Name: "weak"}, {Name: "medium"}}
 		pol.TierPolicy.PreferLoaded = preferLoaded
 		fx := newTierFixture(t, llamacppCase(t), pol, nodes, loaded)
+		fx.declare(t, "a", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("entry:1b")})
 		fx.declare(t, "d", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("declared:1b")})
 		fx.declare(t, "m", map[string]nodepolicy.AdvertisedProfile{"medium": llamacppProfile("mid:7b")})
 		var out []string
@@ -1392,7 +1573,7 @@ func TestTierRoles_WarmOrdering(t *testing.T) {
 	}
 
 	if got, want := order(t, "tier", nil), []string{"d", "a", "m"}; !slices.Equal(got, want) {
-		t.Errorf("all cold = %v, want %v (declared before entry, then the stronger tier)", got, want)
+		t.Errorf("all cold = %v, want %v (model order within the role, then the stronger role)", got, want)
 	}
 	if got, want := order(t, "tier", map[string][]string{"a": {"entry:1b"}}), []string{"a", "d", "m"}; !slices.Equal(got, want) {
 		t.Errorf("entry warm = %v, want %v", got, want)
@@ -1409,7 +1590,9 @@ func TestTierRoles_WarmOrdering(t *testing.T) {
 // class, so the least-loaded declared node of the requested tier leads and an
 // idle node of a fallback tier is never promoted.
 func TestTierRoles_LoadBalancingKeepsLeadingClass(t *testing.T) {
-	fx := newTierFixture(t, llamacppCase(t), tierPolicy(nil), map[string][]string{
+	pol := tierPolicy(nil)
+	pol.Roles = []nodepolicy.Role{{Name: "weak"}, {Name: "medium"}}
+	fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{
 		"a": {"x:1b"}, "b": {"y:1b"}, "c": {"z:7b"},
 	}, nil)
 	fx.declare(t, "a", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("x:1b")})
@@ -1432,7 +1615,7 @@ func TestTierRoles_LoadBalancingKeepsLeadingClass(t *testing.T) {
 }
 
 // The router's own node follows the same rule through its policy's roles: a
-// self declaration replaces the router's entries for this node and crosses
+// self declaration supplies its profiles for this node and crosses
 // engines on an OpenAI-compatible route.
 func TestTierRoles_SelfDeclarationCrossEngine(t *testing.T) {
 	w := &recordingWriter{}
@@ -1445,12 +1628,10 @@ func TestTierRoles_SelfDeclarationCrossEngine(t *testing.T) {
 	setBackend(t, lcpp, lcppEngine.URL, true)
 
 	pol := nodepolicy.Default()
-	pol.Tiers = map[string][]nodepolicy.TierEntry{"strong": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "llama3"}}}
 	p.admission.setPolicy(pol)
 
-	// Undeclared: the router entry serves this node.
-	if got, want := resolvedTier(lcpp, "strong", requestNeeds{}, true), []tierCand{{"self", "llama3", 0, false}}; !slices.Equal(got, want) {
-		t.Fatalf("undeclared self = %+v, want %+v", got, want)
+	if got := resolvedTier(lcpp, "strong", requestNeeds{}, true); len(got) != 0 {
+		t.Fatalf("undeclared self supplied candidates: %+v", got)
 	}
 
 	declarePolicyRole(&pol, "strong", "llamacpp-custom", "qwen3-8b")
@@ -1460,7 +1641,7 @@ func TestTierRoles_SelfDeclarationCrossEngine(t *testing.T) {
 	p.admission.setPolicy(pol)
 
 	cands := lcpp.resolveTierCandidates("strong", requestNeeds{}, true)
-	if len(cands) != 1 || cands[0].engine != "llamacpp-custom" || cands[0].fac != custom || !cands[0].declared || cands[0].model != "qwen3-8b" {
+	if len(cands) != 1 || cands[0].engine != "llamacpp-custom" || cands[0].fac != custom || !cands[0].self || cands[0].model != "qwen3-8b" {
 		t.Fatalf("declared self candidates = %+v, want only the llamacpp-custom role", cands)
 	}
 	rec := httptest.NewRecorder()
@@ -1482,14 +1663,14 @@ func TestTierRoles_PeerCrossEngineRole(t *testing.T) {
 	p.admission.setPolicy(nodepolicy.Default())
 
 	cands := lcpp.resolveTierCandidates("weak", requestNeeds{}, true)
-	if len(cands) != 1 || cands[0].fac != custom || cands[0].engine != "llamacpp-custom" || !cands[0].declared ||
+	if len(cands) != 1 || cands[0].fac != custom || cands[0].engine != "llamacpp-custom" || cands[0].id != "peer" || cands[0].model != "qwen3-8b" ||
 		cands[0].url.Host != strings.TrimPrefix(peerCustom.URL, "http://") {
 		t.Fatalf("cross-engine candidates = %+v", cands)
 	}
 	if got := lcpp.resolveTierCandidates("weak", requestNeeds{}, false); len(got) != 0 {
 		t.Fatalf("native candidates = %+v, want none", got)
 	}
-	if got := custom.resolveTierCandidates("weak", requestNeeds{}, false); len(got) != 1 || !got[0].declared {
+	if got := custom.resolveTierCandidates("weak", requestNeeds{}, false); len(got) != 1 || got[0].id != "peer" || got[0].model != "qwen3-8b" {
 		t.Fatalf("own-engine candidates = %+v, want the declared role", got)
 	}
 }
@@ -1523,10 +1704,10 @@ func strictCapabilityFor(engine string, models ...string) *nodepolicy.StrictAdmi
 }
 
 // Hybrid role eligibility admits only a declared role with finite
-// qualification on a node that advertises a valid strict entry for it; legacy
-// tier resolution of the same request is unchanged.
+// qualification on a node that advertises a valid strict entry for it. Bare
+// role routing requires declarations but not strict qualification.
 func TestHybridLocalCandidatesRequireQualifiedDeclaredRoles(t *testing.T) {
-	pol := tierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "q:1b"}}})
+	pol := nodepolicy.Default()
 	pol.TierPolicy.AllowStronger = false
 	nodes := map[string][]string{}
 	for _, id := range []string{"eligible", "unqualified", "no-capability", "unsupported", "other-model", "undeclared", "malformed"} {
@@ -1551,8 +1732,9 @@ func TestHybridLocalCandidatesRequireQualifiedDeclaredRoles(t *testing.T) {
 	if len(got) != 1 || got[0].id != "eligible" || got[0].strict.Identity != strictRequest().Identity || !got[0].role.HybridQualified() {
 		t.Fatalf("hybrid candidates = %+v, want only the qualified, capable declared role", got)
 	}
-	if legacy := resolvedTier(f, "weak", requestNeeds{}, true); len(legacy) != len(nodes) {
-		t.Fatalf("legacy tier candidates = %+v, want every node unchanged", legacy)
+	want := []tierCand{{"eligible", "q:1b", 0}, {"malformed", "q:1b", 0}, {"no-capability", "q:1b", 0}, {"other-model", "q:1b", 0}, {"unqualified", "q:1b", 0}, {"unsupported", "q:1b", 0}}
+	if got := resolvedTier(f, "weak", requestNeeds{}, true); !slices.Equal(got, want) {
+		t.Fatalf("bare role candidates = %+v, want declared nodes %+v", got, want)
 	}
 }
 
@@ -1580,10 +1762,10 @@ func TestHybridLocalCandidatesSelfUsesItsOwnCapability(t *testing.T) {
 	}
 }
 
-// Hybrid selection is the legacy tier order filtered to eligible candidates,
+// Hybrid selection is the role order filtered to eligible candidates,
 // never a reordering of its own.
 func TestHybridLocalCandidatesKeepTierOrder(t *testing.T) {
-	pol := tierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "q:1b"}}})
+	pol := nodepolicy.Default()
 	pol.TierPolicy.AllowStronger = false
 	fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"a": {"q:1b"}, "b": {"q:1b"}, "c": {"q:1b"}}, nil)
 	fx.advertise(t, "a", map[string]nodepolicy.AdvertisedProfile{"weak": qualifiedProfile("q:1b")}, strictCapabilityFor("llamacpp", "q:1b"))
@@ -1591,17 +1773,15 @@ func TestHybridLocalCandidatesKeepTierOrder(t *testing.T) {
 	fx.advertise(t, "c", map[string]nodepolicy.AdvertisedProfile{"weak": qualifiedProfile("q:1b")}, strictCapabilityFor("llamacpp", "q:1b"))
 	f := fx.p.soleFacade()
 
-	var want []string
-	for _, c := range f.resolveTierCandidates("weak", requestNeeds{}, true) {
-		if c.id != "b" {
-			want = append(want, c.id)
-		}
+	if got, want := resolvedTier(f, "weak", requestNeeds{}, true), []tierCand{{"a", "q:1b", 0}, {"b", "q:1b", 0}, {"c", "q:1b", 0}}; !slices.Equal(got, want) {
+		t.Fatalf("bare role order = %+v, want %+v", got, want)
 	}
+	want := []string{"a", "c"}
 	var got []string
 	for _, c := range f.hybridLocalCandidates("weak", requestNeeds{}, true) {
 		got = append(got, c.id)
 	}
-	if len(want) != 2 || !slices.Equal(got, want) {
+	if !slices.Equal(got, want) {
 		t.Fatalf("hybrid order = %v, want the tier order without the unqualified node: %v", got, want)
 	}
 }

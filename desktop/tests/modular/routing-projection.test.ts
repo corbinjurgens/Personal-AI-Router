@@ -111,6 +111,110 @@ const requiredPaths = [
 ]
 
 describe('routing history schema parity', () => {
+    it.each(['', 'weak', 'coder', 'r1.fast_v2', `r${'a'.repeat(62)}9`])(
+        'preserves requested role %j through projection, storage and packed IPC',
+        tier => {
+            const record: RoutingHistoryRecord = JSON.parse(JSON.stringify(corpus.cases[0].record))
+            record.requested.tier = tier
+            const raw = new TextEncoder().encode(JSON.stringify(record))
+            const projected = new RoutingJsonProjector().record(raw)
+            consumeRoutingHistoryRecord(projected, value => {
+                expect(value).toEqual(record)
+                return undefined
+            })
+            const main = new RoutingHistoryBank(),
+                renderer = new RoutingHistoryBank()
+            expect(main.apply(raw)).toBe(true)
+            expect(
+                main.consume(0, value => {
+                    expect(value).toEqual(record)
+                    return undefined
+                })
+            ).toBe(true)
+            expect(renderer.applyPacked(main.at(0).slice())).toBe(true)
+            expect(
+                renderer.consume(0, value => {
+                    expect(value).toEqual(record)
+                    return undefined
+                })
+            ).toBe(true)
+        }
+    )
+
+    it.each<JsonValue>([
+        'a'.repeat(65),
+        'Coder',
+        '-coder',
+        '.coder',
+        '_coder',
+        'co:der',
+        'codér',
+        '\uFEFFcoder',
+        'coder\r',
+        'coder\n',
+        null,
+        1,
+        true,
+        {},
+        []
+    ])('rejects invalid requested role %j at projection and storage entry points', tier => {
+        const raw = altered(0, ['requested', 'tier'], tier)
+        expect(() => new RoutingJsonProjector().record(raw)).toThrow()
+        expect(() => consumeRoutingHistoryRecord(raw, () => undefined)).toThrow()
+        const bank = new RoutingHistoryBank()
+        expect(() => bank.apply(raw)).toThrow()
+        expect(bank.size).toBe(0)
+    })
+
+    it.each([
+        'a'.repeat(65),
+        'Coder',
+        '-oder',
+        '.oder',
+        '_oder',
+        'co:er',
+        'codér',
+        '\uFEFFcoder',
+        'code\r',
+        'code\n'
+    ])('rejects invalid requested role %j in packed IPC', tier => {
+        const record: RoutingHistoryRecord = JSON.parse(JSON.stringify(corpus.cases[0].record))
+        record.requested.tier = 'coder'
+        const raw = new TextEncoder().encode(JSON.stringify(record))
+        const main = new RoutingHistoryBank(),
+            renderer = new RoutingHistoryBank()
+        expect(main.apply(raw)).toBe(true)
+        const packed = main.at(0).slice()
+        expect(renderer.applyPacked(packed)).toBe(true)
+        const offset = Buffer.from(packed).indexOf('coder')
+        expect(offset).toBeGreaterThanOrEqual(2)
+        const replacement = new TextEncoder().encode(tier)
+        // Keep the packet framing coherent, including the non-ASCII case.
+        const invalid = new Uint8Array(packed.length - 5 + replacement.length)
+        invalid.set(packed.subarray(0, offset))
+        invalid[offset - 1] = replacement.length
+        invalid.set(replacement, offset)
+        invalid.set(packed.subarray(offset + 5), offset + replacement.length)
+        expect(() => renderer.applyPacked(invalid)).toThrow()
+        expect(renderer.size).toBe(1)
+        expect(
+            renderer.consume(0, value => {
+                expect(value).toEqual(record)
+                return undefined
+            })
+        ).toBe(true)
+        record.seq += 1
+        record.requested.tier = 'recovered'
+        expect(main.apply(new TextEncoder().encode(JSON.stringify(record)))).toBe(true)
+        expect(renderer.applyPacked(main.at(0).slice())).toBe(true)
+        expect(
+            renderer.consume(0, value => {
+                expect(value).toEqual(record)
+                return undefined
+            })
+        ).toBe(true)
+    })
+
     it('projects a model-less local record without losing its real node and engine', () => {
         const record = modelLessLocalRecord()
         const raw = new TextEncoder().encode(JSON.stringify(record))
@@ -311,7 +415,7 @@ describe('routing history schema parity', () => {
                 attached: false
             },
             seq: maximum,
-            requested: { model: '"'.repeat(512), tier: 'strong', mode: 'completion' },
+            requested: { model: '"'.repeat(512), tier: 'r'.repeat(64), mode: 'completion' },
             createdAt: maximum - 1,
             endedAt: maximum,
             state: 'completed',
@@ -334,7 +438,7 @@ describe('routing history schema parity', () => {
             projector = new RoutingJsonProjector()
         const projected = projector.record(new TextEncoder().encode(wire))
         consumeRoutingHistoryRecord(projected, row => {
-            expect(row.attempts).toHaveLength(32)
+            expect(row).toEqual(value)
             return undefined
         })
         expect(() =>
@@ -347,19 +451,31 @@ describe('routing history schema parity', () => {
         const bank = new RoutingHistoryBank()
         for (let i = 0; i < 256; i++) {
             value.request.requestId = (9223372036854775552n + BigInt(i)).toString()
-            bank.apply(new TextEncoder().encode(JSON.stringify(value)))
+            expect(bank.apply(new TextEncoder().encode(JSON.stringify(value)))).toBe(true)
         }
         expect(bank.size).toBe(256)
-        expect(bank.at(0).byteLength).toBeLessThanOrEqual(30768)
+        // Source-derived fixture size; the schema ceiling also covers other valid shapes.
+        expect(bank.at(0).byteLength).toBe(30766)
+        expect(bank.at(0).byteLength).toBeLessThanOrEqual(30833)
+        expect(bank.at(0).byteLength).toBeLessThanOrEqual(32752)
         const packed = bank.at(0).slice()
         expect(packed.byteLength).toBe(packed.buffer.byteLength)
         expect(packed.byteLength + 4096).toBeLessThanOrEqual(135168)
         expect(bank.capacity).toEqual({ windowBytes: 16777216, controlBytes: 2176 })
-        bank.consume(0, row => {
-            expect(row.request.requestId).toBe(money)
-            expect(row.attempts[31].account?.chargedNanoUsd).toBe(money)
-            return undefined
-        })
+        expect(
+            bank.consume(0, row => {
+                expect(row).toEqual(value)
+                return undefined
+            })
+        ).toBe(true)
+        const renderer = new RoutingHistoryBank()
+        expect(renderer.applyPacked(packed)).toBe(true)
+        expect(
+            renderer.consume(0, row => {
+                expect(row).toEqual(value)
+                return undefined
+            })
+        ).toBe(true)
     })
     it.each(corpus.cases)('preserves the canonical $name fixture', ({ record }) => {
         consumeRoutingHistoryRecord(new TextEncoder().encode(JSON.stringify(record)), output => {

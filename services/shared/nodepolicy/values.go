@@ -97,33 +97,44 @@ const (
 	AliasLocal AliasMode = "local"
 )
 
-const (
-	aliasAPISuffix   = "-api"
-	aliasLocalSuffix = "-local"
-)
+var roleNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 
-// ParseAlias splits a hybrid alias into its tier and mode. The reserved names
-// are each tier in TierOrder, bare or with the -api or -local suffix. Matching
-// is exact: no case folding, no trimming and no implied tags. ok is
-// false, with empty tier and mode, for any other name.
-func ParseAlias(name string) (tier string, mode AliasMode, ok bool) {
-	tier, mode = name, AliasBare
-	switch {
-	case strings.HasSuffix(name, aliasAPISuffix):
-		tier, mode = strings.TrimSuffix(name, aliasAPISuffix), AliasAPI
-	case strings.HasSuffix(name, aliasLocalSuffix):
-		tier, mode = strings.TrimSuffix(name, aliasLocalSuffix), AliasLocal
+// ValidateRoleName implements the plain-name grammar of owner decision D1a.
+func ValidateRoleName(name string) error {
+	if len(name) > MaxRoleNameBytes || !roleNamePattern.MatchString(name) {
+		return errors.New("role name must match ^[a-z0-9][a-z0-9._-]{0,63}$")
 	}
-	if !IsTier(tier) {
+	return nil
+}
+
+// ParseAlias accepts a plain role name or its :api or :local override.
+func ParseAlias(name string) (tier string, mode AliasMode, ok bool) {
+	tier, variable, hasColon := strings.Cut(name, ":")
+	mode = AliasBare
+	if hasColon {
+		switch variable {
+		case "api":
+			mode = AliasAPI
+		case "local":
+			mode = AliasLocal
+		default:
+			return "", "", false
+		}
+	}
+	if ValidateRoleName(tier) != nil {
 		return "", "", false
 	}
 	return tier, mode, true
 }
 
-// IsReservedAlias reports whether name is one of the nine reserved hybrid
-// aliases. Policy validation and the proxy's alias handling are meant to share
-// it, so they cannot disagree about what is reserved.
+// IsReservedAlias reports whether name is a role's hybrid override.
 func IsReservedAlias(name string) bool {
-	_, _, ok := ParseAlias(name)
-	return ok
+	_, mode, ok := ParseAlias(name)
+	return ok && mode != AliasBare
+}
+
+// IsReservedProfileKey reserves every variable after a valid plain role name.
+func IsReservedProfileKey(name string) bool {
+	base, _, hasColon := strings.Cut(name, ":")
+	return hasColon && ValidateRoleName(base) == nil
 }

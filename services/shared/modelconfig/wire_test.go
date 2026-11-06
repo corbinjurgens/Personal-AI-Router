@@ -94,20 +94,20 @@ func TestCanonicalLoadsKeysByProfile(t *testing.T) {
 		}
 	})
 	t.Run("invalid explicit key", func(t *testing.T) {
-		if _, err := CanonicalLoads([]ModelLoad{{ProfileKey: "weak", ModelID: "model"}}); err == nil {
+		if _, err := CanonicalLoads([]ModelLoad{{ProfileKey: "coder:fast", ModelID: "model"}}); err == nil {
 			t.Fatal("accepted a reserved profile key on a valid model")
 		}
 	})
 	t.Run("identity repair refuses reserved key", func(t *testing.T) {
-		_, err := CanonicalLoads([]ModelLoad{{ModelID: "medium-local"}})
-		if err == nil || !strings.Contains(err.Error(), "profileKey: profile key is a reserved routing alias") {
+		_, err := CanonicalLoads([]ModelLoad{{ModelID: "qwen3:8b"}})
+		if err == nil || !strings.Contains(err.Error(), "profileKey: profile key qwen3:8b is reserved: the text before its colon is a valid role name") {
 			t.Fatalf("reserved repaired key error = %v", err)
 		}
 	})
 }
 
 func TestLoadArtifactIDIsNotAKey(t *testing.T) {
-	load := ModelLoad{ProfileKey: "lfm-8k", ModelID: "medium-local"}
+	load := ModelLoad{ProfileKey: "lfm-8k", ModelID: "medium:local"}
 	if err := load.Validate(); err != nil {
 		t.Fatalf("valid profile with reserved-alias artifact ID: %v", err)
 	}
@@ -118,9 +118,9 @@ func TestLoadArtifactIDIsNotAKey(t *testing.T) {
 }
 
 func TestCoderProfileKeysRemainValid(t *testing.T) {
-	for _, key := range []string{"coder-api", "coder-local"} {
+	for _, key := range []string{"weak", "coder-api", "coder-local"} {
 		t.Run(key, func(t *testing.T) {
-			load := ModelLoad{ProfileKey: key, ModelID: "medium-local"}
+			load := ModelLoad{ProfileKey: key, ModelID: "medium:local"}
 			if err := load.Validate(); err != nil {
 				t.Fatalf("valid coder profile key: %v", err)
 			}
@@ -148,7 +148,7 @@ func TestModelChangeProfileValidation(t *testing.T) {
 	accept("clear icon only", `"policy":{"icon":""}`)
 	accept("remove only", `"profileKey":"model-8k","remove":true`)
 	for name, selection := range map[string]string{
-		"reserved key":       `"profileKey":"weak","remove":true`,
+		"reserved key":       `"profileKey":"coder:fast","remove":true`,
 		"invalid key":        `"profileKey":"bad\nkey","remove":true`,
 		"empty display":      `"policy":{"displayName":""}`,
 		"oversized display":  `"policy":{"displayName":"` + strings.Repeat("x", 129) + `"}`,
@@ -199,7 +199,7 @@ func TestInspectRequestProfileKey(t *testing.T) {
 	if err != nil || r.ProfileKey != "model-8k" || r.ModelID != "model" {
 		t.Fatalf("profile inspection = %+v, %v", r, err)
 	}
-	if _, err := DecodeInspectRequest([]byte(`{"engine":"llamacpp","modelId":"model","profileKey":"weak"}`)); err == nil {
+	if _, err := DecodeInspectRequest([]byte(`{"engine":"llamacpp","modelId":"model","profileKey":"coder:fast"}`)); err == nil {
 		t.Fatal("inspection accepted a reserved profile key")
 	}
 }
@@ -414,7 +414,7 @@ func TestPolicyRevisionIsCanonicalSignedInt64Text(t *testing.T) {
 }
 
 func TestModelIdentifiersMatchNodePolicy(t *testing.T) {
-	for _, id := range []string{"", "model", "Model", " model ", "a:b/c", "日本語", strings.Repeat("x", 512), strings.Repeat("x", 513), "bad\nmodel", "bad\u0085model", string([]byte{0xff}), "weak", "medium-api", "medium-local", "strong-local", "coder-api", "coder-local", "Weak", "weak-local-api", "weak-api-local", "weak:latest"} {
+	for _, id := range []string{"", "model", "Model", " model ", "a:b/c", "日本語", strings.Repeat("x", 512), strings.Repeat("x", 513), "bad\nmodel", "bad\u0085model", string([]byte{0xff}), "weak", "medium:api", "medium:local", "strong:local", "coder-api", "coder-local", "Weak", "weak:local-api", "weak:api-local", "weak:latest"} {
 		t.Run(id, func(t *testing.T) {
 			wantValid := nodepolicy.ValidateModelIdentifier(id) == nil
 			_, err := DecodeInspectRequest(mustJSON(t, InspectRequest{Engine: "llamacpp", ModelID: id}))

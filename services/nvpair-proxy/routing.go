@@ -680,8 +680,10 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 	var needs requestNeeds
 	crossEngine := false
 	if policy.hybrid {
-		tier, _, _ = nodepolicy.ParseAlias(model)
-	} else if nodepolicy.IsTier(model) {
+		if base, _, ok := nodepolicy.ParseAlias(model); ok && f.roleRequested(base) {
+			tier = base
+		}
+	} else if f.roleRequested(model) {
 		tier = model
 	}
 	if tier != "" {
@@ -902,22 +904,31 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if len(candidates) == 0 && !publicPending {
-		ctl.observeIngress(routingIngressResult{factFailed, factNoOwner, http.StatusBadGateway})
+		status := http.StatusBadGateway
 		rejectionBody := `{"error":"no active node selected or available"}`
 		rejectionError := "no active node"
 		if model != "" {
 			rejectionBody = `{"error":"no available node advertises the requested model"}`
 			rejectionError = "no node advertises requested model"
+			if tier == "" && !f.concreteModelAdvertised(model) {
+				status = http.StatusNotFound
+				rejectionError = "no profile or role named " + model
+			}
 		}
+		ctl.observeIngress(routingIngressResult{factFailed, factNoOwner, status})
 		slog.Warn("proxy request rejected",
 			"id", reqID, "method", r.Method, "path", r.URL.Path,
 			"remote", r.RemoteAddr, "reason", rejectionError)
-		http.Error(w, rejectionBody, http.StatusBadGateway)
+		if status == http.StatusNotFound {
+			writeProxyError(w, status, []string{"no profile or role named ", model}, nil, false)
+		} else {
+			http.Error(w, rejectionBody, status)
+		}
 		_ = f.notify("proxy/request", RequestEvent{
 			ID:       reqID,
 			Method:   r.Method,
 			Path:     r.URL.Path,
-			Status:   http.StatusBadGateway,
+			Status:   status,
 			Duration: time.Since(start).Milliseconds(),
 			Error:    rejectionError,
 		})

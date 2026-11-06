@@ -16,8 +16,8 @@ import (
 )
 
 // PeerPolicy is what a paired node sees of this node's policy: the device
-// fields (roles included), the local tier entries, the tier fallback rules and
-// who paused the node. The origin-only routing section and every API tier entry
+// fields (roles included), the tier fallback rules and who paused the node.
+// The origin-only routing section and every API tier entry
 // stay out, so a peer can neither read accounts, credential references or
 // deployments nor reconfigure what spends money. Revision is the revision of
 // the protected source document.
@@ -52,9 +52,8 @@ func (p *PeerPolicy) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// PeerProjection returns the part of p a paired node may see. Tiers keep their
-// local entries only, and a tier left with none is omitted so the projection
-// does not reveal that it holds API entries.
+// PeerProjection returns the part of p a paired node may see. Tiers is empty
+// because API entries are origin-only and local entries are retired.
 func (p Policy) PeerProjection() PeerPolicy {
 	return PeerPolicy{
 		Version:        p.Version,
@@ -68,7 +67,7 @@ func (p Policy) PeerProjection() PeerPolicy {
 		ResidentModels: slices.Clone(p.ResidentModels),
 		EngineBindings: slices.Clone(p.EngineBindings),
 		Roles:          copyRoles(p.Roles),
-		Tiers:          localTiers(p.Tiers),
+		Tiers:          map[string][]TierEntry{},
 		TierPolicy:     p.TierPolicy,
 		PausedBy:       p.PausedBy,
 		PauseMode:      p.PauseMode,
@@ -217,36 +216,6 @@ func exactOptionNumber(number json.Number) string {
 	return sign + trimmed + "e" + power.String()
 }
 
-// localTiers copies the local entries of every tier, dropping empty tiers.
-func localTiers(tiers map[string][]TierEntry) map[string][]TierEntry {
-	out := make(map[string][]TierEntry, len(tiers))
-	for tier, entries := range tiers {
-		var local []TierEntry
-		for _, e := range entries {
-			if e.IsLocal() {
-				e.Capabilities = nilIfEmpty(e.Capabilities)
-				local = append(local, e)
-			}
-		}
-		if len(local) > 0 {
-			out[tier] = local
-		}
-	}
-	return out
-}
-
-// nonEmptyTiers copies tiers, dropping empty ones, so an explicit empty tier
-// and an absent one compare equal.
-func nonEmptyTiers(tiers map[string][]TierEntry) map[string][]TierEntry {
-	out := make(map[string][]TierEntry, len(tiers))
-	for tier, entries := range tiers {
-		if len(entries) > 0 {
-			out[tier] = entries
-		}
-	}
-	return out
-}
-
 // peerFields returns the top-level fields of a peer document. It refuses two
 // keys that are equal under case folding, which Parse would treat as one field
 // whose value depends on key order, and a document that is not one JSON object.
@@ -318,8 +287,10 @@ func MergePeerSet(stored Policy, raw []byte) (Policy, error) {
 	if err != nil {
 		return Policy{}, err
 	}
-	if !reflect.DeepEqual(nonEmptyTiers(incoming.Tiers), localTiers(stored.Tiers)) {
-		return Policy{}, errors.New("a paired node cannot change the tiers")
+	for _, entries := range incoming.Tiers {
+		if len(entries) > 0 {
+			return Policy{}, errors.New("a paired node cannot change the tiers")
+		}
 	}
 	if incoming.TierPolicy != stored.TierPolicy {
 		return Policy{}, errors.New("a paired node cannot change the tier policy")

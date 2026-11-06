@@ -21,6 +21,15 @@ func ParseStored(data []byte) (Policy, map[string]int, error) {
 	if err := checkModelListKeys(data); err != nil {
 		return Policy{}, nil, errors.New("stored policy is invalid")
 	}
+	// Reserved public keys are fatal even when model sanitation would remove
+	// their profiles. Check both explicit keys and disk-only model-key repair.
+	if err := checkStoredReservedProfileKeys(data); err != nil {
+		var reserved *reservedProfileKeyError
+		if errors.As(err, &reserved) {
+			return Policy{}, nil, err
+		}
+		return Policy{}, nil, errors.New("stored policy is invalid")
+	}
 	data, droppedRoles, err := repairStoredRoles(data)
 	if err != nil {
 		return Policy{}, nil, errors.New("stored policy is invalid")
@@ -50,6 +59,39 @@ func ParseStored(data []byte) (Policy, map[string]int, error) {
 		}
 	}
 	return Policy{}, nil, errors.New("stored policy is invalid")
+}
+
+func checkStoredReservedProfileKeys(data []byte) error {
+	container, err := readPolicyModelContainer(data)
+	if err != nil {
+		return err
+	}
+	raw := container.fields[modelField(container.fields, "profiles")]
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil
+	}
+	var entries []json.RawMessage
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		fields, err := modelObject(entry)
+		if err != nil {
+			return err
+		}
+		key := fields[modelField(fields, "key")]
+		if key == nil {
+			key = fields[modelField(fields, "model")]
+		}
+		var name string
+		if err := json.Unmarshal(key, &name); err != nil {
+			return err
+		}
+		if IsReservedProfileKey(name) {
+			return ValidateProfileKey(name)
+		}
+	}
+	return nil
 }
 
 // repairStoredRoles discards object-shaped declarations before any list-shape
@@ -114,7 +156,10 @@ func checkStoredModelShapes(data []byte) error {
 			if err != nil {
 				return err
 			}
-			for _, rawTier := range tiers {
+			for name, rawTier := range tiers {
+				if err := ValidateRoleName(name); err != nil {
+					return err
+				}
 				if _, err := modelObject(rawTier); err != nil {
 					return err
 				}
@@ -136,14 +181,16 @@ func checkStoredModelShapes(data []byte) error {
 	}
 	check := func(name string, entry json.RawMessage) error {
 		ok, err := filterModelEntry(entry, true)
-		if err != nil || ok {
+		if err != nil || ok && name != "tiers" {
 			return err
 		}
 		obj, err := modelObject(entry)
 		if err != nil {
 			return err
 		}
-		obj[modelField(obj, "model")] = json.RawMessage(`"stored-model-check"`)
+		if !ok {
+			obj[modelField(obj, "model")] = json.RawMessage(`"stored-model-check"`)
+		}
 		if name == "profiles" {
 			repairStoredProfileFields(obj)
 		}
@@ -174,7 +221,18 @@ func checkStoredModelShapes(data []byte) error {
 			if e.Kind == "" && version == legacySchemaVersion {
 				e.Kind = EntryLocal
 			}
-			return routing.validateTierRefs(TierWeak, []TierEntry{e})
+			// Retired stored entries are discarded, but must not conceal the
+			// unrelated malformed fields this shape preflight already refused.
+			if e.Kind == EntryLocal {
+				if err := checkModelRef(e.Engine, e.Model, e.ContextTokens, e.Capabilities); err != nil {
+					return err
+				}
+				if e.Deployment != "" {
+					return errors.New("a local entry cannot name a deployment")
+				}
+				return nil
+			}
+			return routing.validateTierRefs("stored-model-check", []TierEntry{e})
 		case "servedModels", "residentModels":
 			_, err := decodeModelList(name, append(append([]byte{'['}, raw...), ']'))
 			return err
@@ -210,8 +268,8 @@ func checkStoredModelShapes(data []byte) error {
 				return err
 			}
 			for tier, entry := range members {
-				if !IsTier(tier) {
-					return errors.New("invalid tier")
+				if err := ValidateRoleName(tier); err != nil {
+					return err
 				}
 				var entries []json.RawMessage
 				if err := json.Unmarshal(entry, &entries); err != nil {
@@ -554,6 +612,12 @@ func filterPolicyModels(data []byte, remove bool) ([]byte, map[string]int, error
 	}
 	fields := container.fields
 	counts := map[string]int{}
+	version := SchemaVersion
+	if raw := fields[modelField(fields, "version")]; len(raw) > 0 {
+		if err := json.Unmarshal(raw, &version); err != nil {
+			return nil, nil, err
+		}
+	}
 	// Bindings are activation authority. Never sanitize them away, even on
 	// disk load where unrelated invalid model entries can be repaired.
 	if raw, ok := fields["engineBindings"]; ok {
@@ -609,7 +673,12 @@ func filterPolicyModels(data []byte, remove bool) ([]byte, map[string]int, error
 				if raw, ok := obj[modelField(obj, "kind")]; ok && json.Unmarshal(raw, &kind) != nil {
 					return nil, nil, errors.New("invalid tier kind")
 				}
-				if kind == "" || kind == string(EntryLocal) {
+				if kind == string(EntryLocal) || kind == "" && version == legacySchemaVersion {
+					if remove {
+						counts[name]++
+						continue
+					}
+				} else if kind == "" {
 					ok, err := filterModelEntry(e, remove)
 					if err != nil {
 						return nil, nil, err
@@ -777,48 +846,55 @@ func repairStoredModelReferences(p *Policy, repairs *storedModelRepairs) {
 		}
 		p.ResidentModels = kept
 	}
-	if counts["deployments"] == 0 {
-		return
-	}
-	deployments, families := map[string]bool{}, map[string]bool{}
-	for _, d := range p.Routing.Deployments {
-		deployments[d.ID], families[d.Family] = true, true
-	}
-	for tier, entries := range p.Tiers {
-		kept := make([]TierEntry, 0, len(entries))
-		for _, entry := range entries {
-			if entry.Kind == EntryAPI && repairs.deployments[entry.Deployment] && !deployments[entry.Deployment] {
-				counts["deploymentReferences"]++
-				continue
-			}
-			kept = append(kept, entry)
+	if counts["deployments"] > 0 {
+		deployments, families := map[string]bool{}, map[string]bool{}
+		for _, d := range p.Routing.Deployments {
+			deployments[d.ID], families[d.Family] = true, true
 		}
-		p.Tiers[tier] = kept
-	}
-	for tier, settings := range p.Routing.Tiers {
-		kept := make([]string, 0, len(settings.AllowedFamilies))
-		for _, family := range settings.AllowedFamilies {
-			if repairs.families[family] && !families[family] {
-				counts["familyReferences"]++
-				continue
-			}
-			kept = append(kept, family)
-		}
-		if len(settings.AllowedFamilies) > 0 && len(kept) == 0 {
-			settings.RemoteAllowed, settings.PaidAllowed = false, false
-			// Empty means unrestricted, so also remove dormant API candidates.
-			entries := p.Tiers[tier]
-			keptEntries := make([]TierEntry, 0, len(entries))
+		for tier, entries := range p.Tiers {
+			kept := make([]TierEntry, 0, len(entries))
 			for _, entry := range entries {
-				if entry.Kind == EntryAPI {
+				if entry.Kind == EntryAPI && repairs.deployments[entry.Deployment] && !deployments[entry.Deployment] {
 					counts["deploymentReferences"]++
 					continue
 				}
-				keptEntries = append(keptEntries, entry)
+				kept = append(kept, entry)
 			}
-			p.Tiers[tier] = keptEntries
+			p.Tiers[tier] = kept
 		}
-		settings.AllowedFamilies = kept
-		p.Routing.Tiers[tier] = settings
+		for tier, settings := range p.Routing.Tiers {
+			kept := make([]string, 0, len(settings.AllowedFamilies))
+			for _, family := range settings.AllowedFamilies {
+				if repairs.families[family] && !families[family] {
+					counts["familyReferences"]++
+					continue
+				}
+				kept = append(kept, family)
+			}
+			if len(settings.AllowedFamilies) > 0 && len(kept) == 0 {
+				settings.RemoteAllowed, settings.PaidAllowed = false, false
+				// Empty means unrestricted, so also remove dormant API candidates.
+				entries := p.Tiers[tier]
+				keptEntries := make([]TierEntry, 0, len(entries))
+				for _, entry := range entries {
+					if entry.Kind == EntryAPI {
+						counts["deploymentReferences"]++
+						continue
+					}
+					keptEntries = append(keptEntries, entry)
+				}
+				p.Tiers[tier] = keptEntries
+			}
+			settings.AllowedFamilies = kept
+			p.Routing.Tiers[tier] = settings
+		}
+	}
+	// Keep routing rules only for names with a retained API candidate, after
+	// deployment and exhausted-family repair have removed their dependents.
+	for tier := range p.Routing.Tiers {
+		if !slices.ContainsFunc(p.Tiers[tier], func(entry TierEntry) bool { return entry.Kind == EntryAPI }) {
+			delete(p.Routing.Tiers, tier)
+			counts["routingTiers"]++
+		}
 	}
 }

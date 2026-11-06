@@ -8,12 +8,32 @@ import type {
     NodePolicyAdvertisement,
     AdvertisedProfile,
     NodeRoles,
-    PauseOrigin,
-    RoleTier
+    PauseOrigin
 } from '@/shared/types/node-roles'
 
-/** The tiers from weakest to strongest (`nodepolicy.TierOrder`). */
-export const ROLE_TIERS: readonly RoleTier[] = ['weak', 'medium', 'strong']
+/** Mirror nodepolicy.ValidateRoleName: owner decision D1a has no built-in roles. */
+export function roleNameError(name: string): string | undefined {
+    // Compare the complete match because JavaScript's $ also matches before a final newline.
+    if (name.length > 64 || /^[a-z0-9][a-z0-9._-]{0,63}$/.exec(name)?.[0] !== name)
+        return 'Role name must match ^[a-z0-9][a-z0-9._-]{0,63}$'
+    return undefined
+}
+
+/** Only recognized colon overrides reserve concrete served names. */
+export function isReservedAlias(name: string): boolean {
+    const colon = name.indexOf(':')
+    return (
+        colon !== -1 &&
+        roleNameError(name.slice(0, colon)) === undefined &&
+        ['api', 'local'].includes(name.slice(colon + 1))
+    )
+}
+
+/** Every variable after a valid plain role name is reserved for public keys. */
+export function isReservedProfileKey(name: string): boolean {
+    const colon = name.indexOf(':')
+    return colon !== -1 && roleNameError(name.slice(0, colon)) === undefined
+}
 
 function objectValue(value: JsonValue | undefined): { [key: string]: JsonValue } | null {
     if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
@@ -34,12 +54,9 @@ function validIdentifier(value: JsonValue | undefined): value is string {
     )
 }
 
-/** Exact interim `nodepolicy.ValidateProfileKey` grammar, including fixed-tier aliases. */
+/** Mirror nodepolicy.ValidateProfileKey, including its broad colon reservation. */
 function validProfileKey(value: JsonValue | undefined): value is string {
-    return (
-        validIdentifier(value) &&
-        !ROLE_TIERS.some(tier => [tier, `${tier}-api`, `${tier}-local`].includes(value))
-    )
+    return validIdentifier(value) && !isReservedProfileKey(value)
 }
 
 /**
@@ -50,8 +67,14 @@ export function parseNodeRoles(value: JsonValue | undefined): NodeRoles {
     if (!Array.isArray(value)) return roles
     for (const item of value) {
         const role = objectValue(item)
-        const name = ROLE_TIERS.find(tier => tier === role?.name)
-        if (!role || !name || !Array.isArray(role.profiles)) continue
+        const name = role?.name
+        if (
+            !role ||
+            typeof name !== 'string' ||
+            roleNameError(name) !== undefined ||
+            !Array.isArray(role.profiles)
+        )
+            continue
         roles.push({ name, profiles: role.profiles.filter(validProfileKey) })
     }
     return roles
@@ -129,11 +152,10 @@ export function copyNodeRoles(roles: NodeRoles): NodeRoles {
 }
 
 /** Keep the existing single-profile control while preserving declaration order. */
-export function withRoleProfile(roles: NodeRoles, name: RoleTier, key?: string): NodeRoles {
+export function withRoleProfile(roles: NodeRoles, name: string, key?: string): NodeRoles {
     const next = copyNodeRoles(roles)
     const role = next.find(role => role.name === name)
     if (role) role.profiles = key === undefined ? [] : [key]
-    else if (key !== undefined) next.push({ name, profiles: [key] })
     return next
 }
 

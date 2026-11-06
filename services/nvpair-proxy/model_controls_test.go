@@ -279,17 +279,14 @@ func TestModelControlsSelectionSelfCache(t *testing.T) {
 }
 
 func TestModelControlsSelectionShortAliasConcreteBound(t *testing.T) {
-	test := func(name, model string, role, selectable bool, tc engineCase) {
+	test := func(name, model string, selectable bool, tc engineCase) {
 		t.Run(name, func(t *testing.T) {
-			pol := tierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: tc.profile.Name, Model: "seed:tag"}}})
+			pol := tierPolicy(nil)
+			pol.Roles = []nodepolicy.Role{{Name: "weak"}}
 			fx := newTierFixture(t, tc, pol, map[string][]string{"peer": {model}}, nil)
 			// Selection still guards metadata supplied through an in-memory
 			// snapshot; strict policy writes are tested separately below.
-			pol.Tiers["weak"][0].Model = model
-			fx.p.admission.setPolicy(pol)
-			if role {
-				fx.declare(t, "peer", map[string]nodepolicy.AdvertisedProfile{"weak": {Engine: tc.profile.Name, Model: model}})
-			}
+			fx.declare(t, "peer", map[string]nodepolicy.AdvertisedProfile{"weak": {Engine: tc.profile.Name, Model: model}})
 			got := fx.p.soleFacade().resolveTierCandidates("weak", requestNeeds{}, true)
 			if selectable {
 				if len(got) != 1 || got[0].model != model {
@@ -314,13 +311,11 @@ func TestModelControlsSelectionShortAliasConcreteBound(t *testing.T) {
 		})
 	}
 	lcpp := llamacppCase(t)
-	test("local 512 bytes", strings.Repeat("a", 508)+":tag", false, true, lcpp)
-	test("role 512 bytes", strings.Repeat("a", 508)+":tag", true, true, lcpp)
-	test("local multibyte 512 bytes", strings.Repeat("界", 169)+"a:tag", false, true, lcpp)
-	test("local 513 bytes", strings.Repeat("a", 509)+":tag", false, false, lcpp)
-	test("role 513 bytes", strings.Repeat("a", 509)+":tag", true, false, lcpp)
-	test("role multibyte 513 bytes", strings.Repeat("界", 169)+"aa:tag", true, false, lcpp)
-	test("role control before trim", "seed:tag\n", true, false, lcpp)
+	test("role 512 bytes", strings.Repeat("a", 508)+":tag", true, lcpp)
+	test("role multibyte 512 bytes", strings.Repeat("界", 169)+"a:tag", true, lcpp)
+	test("role 513 bytes", strings.Repeat("a", 509)+":tag", false, lcpp)
+	test("role multibyte 513 bytes", strings.Repeat("界", 169)+"aa:tag", false, lcpp)
+	test("role control before trim", "seed:tag\n", false, lcpp)
 }
 
 func TestModelControlsSelectionPolicyBounds(t *testing.T) {
@@ -334,9 +329,10 @@ func TestModelControlsSelectionPolicyBounds(t *testing.T) {
 			if err := pol.Validate(); (err == nil) != valid {
 				t.Fatalf("deployment validity = %v", err)
 			}
-			pol = tierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: model}}})
+			pol = nodepolicy.Default()
+			pol.Profiles = []nodepolicy.Profile{{Key: "fixture", DisplayName: "Fixture", Engine: "llamacpp", Model: model}}
 			if err := pol.Validate(); (err == nil) != valid {
-				t.Fatalf("local tier validity = %v", err)
+				t.Fatalf("profile target validity = %v", err)
 			}
 			pol = nodepolicy.Default()
 			declarePolicyRole(&pol, "weak", "llamacpp", model)

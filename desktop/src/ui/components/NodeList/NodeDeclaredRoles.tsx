@@ -49,8 +49,8 @@ function savedLoadSummary(load?: ModelLoad): string {
 
 /**
  * The roles a node declares, from its policy advertisement in the discovery
- * snapshot. A node that declares none shows nothing: routers use their own
- * tier entries for it.
+ * snapshot, preserving declaration and member order. A node that declares none
+ * shows nothing.
  */
 export default function NodeDeclaredRoles({ nodeId }: { nodeId: string }) {
     const policy = useDiscoveredNodesStore(
@@ -136,7 +136,15 @@ export default function NodeDeclaredRoles({ nodeId }: { nodeId: string }) {
             {declared.map(({ tier, key, profile, identity }) => {
                 if (!key)
                     return (
-                        <Tag key={tier} color="gray" density="compact" readOnly>
+                        <Tag
+                            key={tier}
+                            color="gray"
+                            density="compact"
+                            readOnly
+                            title={`${tier}: Unassigned`}
+                            aria-label={`${tier}: Unassigned`}
+                            className="break-all"
+                        >
                             {tier}: Unassigned
                         </Tag>
                     )
@@ -155,7 +163,8 @@ export default function NodeDeclaredRoles({ nodeId }: { nodeId: string }) {
                         key={`${tier}:${key}`}
                         type="button"
                         aria-label={label}
-                        title={showSummaries ? `${name} (${key})` : key}
+                        title={label}
+                        className="min-w-0 max-w-full whitespace-normal break-all"
                         onClick={() => focusNodeSettings(nodeId, key)}
                     >
                         <Text kind="body/regular/sm">{tier}</Text>

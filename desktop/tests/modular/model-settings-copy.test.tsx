@@ -610,8 +610,8 @@ describe('selected portable profile payload', () => {
         get.mockResolvedValue(
             policy({
                 roles: [
-                    { name: 'strong', profiles: [] },
-                    { name: 'weak', profiles: [] }
+                    { name: 'review', profiles: [] },
+                    { name: 'coder', profiles: [] }
                 ]
             })
         )
@@ -623,20 +623,77 @@ describe('selected portable profile payload', () => {
             )
             .map(item => item.textContent)
         expect(labels.filter(label => label?.includes(' on peer'))).toEqual([
-            'strong on peer',
-            'weak on peer'
+            'review on peer',
+            'coder on peer'
         ])
         expect(group().textContent).not.toContain('medium on peer')
-        await check('weak on peer')
+        expect(group().querySelector('input[aria-label="Role name"]')).toBeNull()
+        expect(
+            Array.from(group().querySelectorAll('button')).some(item =>
+                /^(Add role|Create role|Rename|Remove role|Move up|Move down)$/.test(
+                    item.textContent ?? ''
+                )
+            )
+        ).toBe(false)
+        await check('coder on peer')
         await click('Review again', group())
         const last = preview.mock.calls.at(-1)?.[0].modelChange
-        expect(last?.policy?.roles).toEqual({ weak: true })
+        expect(last?.policy?.roles).toEqual({ coder: true })
     })
     it('shows no-role guidance and sends no role patch', async () => {
         await render()
         await reviewTarget()
         expect(group().textContent).toContain('No roles on peer; create one in node settings.')
         expect(change().policy).not.toHaveProperty('roles')
+    })
+    it('keeps different peer role lists and selected memberships independent', async () => {
+        inventories.push(inventory('other'))
+        useNodesStore.setState({
+            nodes: new Map([
+                ['peer', node('peer')],
+                ['other', node('other')]
+            ])
+        })
+        get.mockImplementation(async id =>
+            policy({
+                roles:
+                    id === 'peer'
+                        ? [
+                              { name: 'review', profiles: [] },
+                              { name: 'coder', profiles: [] }
+                          ]
+                        : [
+                              { name: 'writer', profiles: [] },
+                              { name: 'research', profiles: [] }
+                          ]
+            })
+        )
+        await render()
+        await reviewTarget('peer')
+        await reviewTarget('other')
+        const roleLabels = (id: string) =>
+            Array.from(group(id).querySelectorAll('label'))
+                .filter(
+                    label =>
+                        label.control instanceof HTMLInputElement &&
+                        label.control.type === 'checkbox'
+                )
+                .map(label => label.textContent)
+                .filter(label => label?.includes(` on ${id}`))
+        expect(roleLabels('peer')).toEqual(['review on peer', 'coder on peer'])
+        expect(roleLabels('other')).toEqual(['writer on other', 'research on other'])
+        await check('coder on peer')
+        await check('writer on other')
+        await click('Review again', group('peer'))
+        await click('Review again', group('other'))
+        const latest = (id: string) =>
+            preview.mock.calls.findLast(([request]) => request.nodeId === id)?.[0].modelChange
+        expect(latest('peer')?.policy?.roles).toEqual({ coder: true })
+        expect(latest('other')?.policy?.roles).toEqual({ writer: true })
+        expect(latest('peer')?.profileKey).toBe('coder-local')
+        expect(latest('other')?.profileKey).toBe('coder-local')
+        expect(set).not.toHaveBeenCalled()
+        expect(apply).not.toHaveBeenCalled()
     })
     it('does not reset an explicit tuning deselection after source inspection refresh', async () => {
         await render()
@@ -793,7 +850,7 @@ describe('selected portable profile payload', () => {
     it('rejects reserved profile keys before any copy or review', async () => {
         await render()
         await check('Deploy to peer')
-        await input('Profile key peer', 'medium-local')
+        await input('Profile key peer', 'coder:fast')
         expect(button('Review deploy to peer', group()).disabled).toBe(true)
         expect(group().textContent).toContain('Enter a valid profile key')
         expect(preview).not.toHaveBeenCalled()

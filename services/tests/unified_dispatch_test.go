@@ -416,7 +416,6 @@ func i7HybridFixturePeers(t *testing.T, peerIDs []string, edits ...func(*nodepol
 	})
 	listener := freePort(t)
 	i7HybridPolicy(t, f, func(p *nodepolicy.Policy) {
-		p.Tiers["weak"] = []nodepolicy.TierEntry{{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: egressProcessModel}}
 		p.Routing.Listener = nodepolicy.Listener{Enabled: true, Port: listener}
 		for _, edit := range edits {
 			edit(p)
@@ -537,7 +536,7 @@ func i7HybridSlot(t *testing.T, u *i7BuffersFake, id string) *i7BuffersSlot {
 }
 
 func i7HybridBody() []byte {
-	return []byte(`{"model":"weak-local","messages":[],"stream":true,"max_tokens":16}`)
+	return []byte(`{"model":"weak:local","messages":[],"stream":true,"max_tokens":16}`)
 }
 
 func i7HybridAccepted(t *testing.T, slot *i7BuffersSlot, request *i7BuffersRequest) {
@@ -721,7 +720,7 @@ func i7HybridDisabledPublic(t *testing.T) {
 		p.Tiers["weak"] = staged.Tiers["weak"]
 		p.Routing.Accounts, p.Routing.Deployments = staged.Routing.Accounts, staged.Routing.Deployments
 	})
-	egressProcessHTTP(t, egressProcessHTTPClient(t), http.MethodPost, listener, "/v1/chat/completions", []byte(`{"model":"weak-api","messages":[],"stream":false}`), http.StatusNotFound)
+	egressProcessHTTP(t, egressProcessHTTPClient(t), http.MethodPost, listener, "/v1/chat/completions", []byte(`{"model":"weak:api","messages":[],"stream":false}`), http.StatusNotFound)
 	i7HybridActiveCount(t, f, 0)
 	public.assertNoPublic(t)
 	// Positive local completion after the refusal shows that an API-only miss

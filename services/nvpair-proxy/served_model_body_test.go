@@ -17,10 +17,9 @@ import (
 func reviewR2TierFixture(t *testing.T, failover bool) (*Proxy, *recordingEngine, *recordingEngine) {
 	t.Helper()
 	tc := llamacppCase(t)
-	pol := tierPolicy(map[string][]nodepolicy.TierEntry{
-		"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "m"}},
-	})
+	pol := nodepolicy.Default()
 	pol.ServedModels = nodepolicy.ServedModels{{Engine: "llamacpp", Model: "m"}}
+	declarePolicyRole(&pol, "weak", "llamacpp", "m")
 	if err := pol.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -28,7 +27,9 @@ func reviewR2TierFixture(t *testing.T, failover bool) (*Proxy, *recordingEngine,
 	local := newRecordingEngine(t, http.StatusOK)
 	d := NewDiscovery()
 	if failover {
-		d.AddManual(nodeForModel(t, "busy", busy.URL, "m"))
+		n := nodeForModel(t, "busy", busy.URL, "m")
+		setAdvertisedProfilesByRole(&n, map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("m")})
+		d.AddManual(n)
 	}
 	d.AddManual(selfNode("self", tc.profile.FacadePort, "m", "weak"))
 	p := testProxy(tc.profile, d, tc.profile.FacadePort)

@@ -13,7 +13,7 @@
     {"name":"resident duplicate entry", "input":{"residentModels":[{"engine":"llamacpp","model":"m"},{"engine":"llamacpp","model":"m"}]}, "valid":false},
     {"name":"invalid engine", "input":{"servedModels":[{"engine":"bad/id","model":"m"}]}, "valid":false},
     {"name":"missing model", "input":{"servedModels":[{"engine":"llamacpp"}]}, "valid":false},
-    {"name":"reserved model", "input":{"servedModels":[{"engine":"llamacpp","model":"weak"}]}, "valid":false},
+    {"name":"reserved model", "input":{"servedModels":[{"engine":"llamacpp","model":"weak:local"}]}, "valid":false},
     {"name":"empty model", "input":{"residentModels":[{"engine":"llamacpp","model":""}]}, "valid":false},
     {"name":"wrong list type", "input":{"servedModels":{}}, "valid":false},
     {"name":"case variant field", "input":{"ServedModels":[]}, "valid":false},

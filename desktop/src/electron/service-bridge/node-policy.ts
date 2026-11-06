@@ -30,7 +30,7 @@ import type {
 import { engineManagerName, isValidRoutingEngineId } from '@/shared/utils/engines'
 import getErrorString from '@/shared/utils/get-error-string'
 import { prettyJsonSource } from '@/shared/utils/json-source'
-import { pauseModeValue } from '@/shared/utils/node-roles'
+import { isReservedAlias, pauseModeValue } from '@/shared/utils/node-roles'
 import { availabilityValue, pauseOriginValue } from './node-availability'
 import type { JsonObject, JsonValue } from './json-rpc-client'
 
@@ -151,7 +151,7 @@ export function parseAdvertisementEngineBindingOffers(
                 !isValidRoutingEngineId(engine) ||
                 typeof model !== 'string' ||
                 !validModelIdentifier(model) ||
-                /^(weak|medium|strong)(-api|-local)?$/.test(model) ||
+                isReservedAlias(model) ||
                 new TextEncoder().encode(
                     JSON.stringify({ engine, model })
                         .replace(
@@ -200,7 +200,7 @@ export function parseStrictAdmissionCapability(
             !isValidRoutingEngineId(engine) ||
             name === null ||
             !validModelIdentifier(name) ||
-            /^(weak|medium|strong)(-api|-local)?$/.exec(name)?.[0] === name
+            isReservedAlias(name)
         ) {
             throw new Error('Invalid strict-admission engine/model')
         }
@@ -351,7 +351,7 @@ function routingDeployment(value: JsonValue | undefined, accounts: Set<string>):
     if (!accounts.has(account)) throw new Error('Deployment names an undefined account')
     // Match encoding/json's replacement of unpaired UTF-16 surrogates.
     const model = typeof body.model === 'string' ? body.model.toWellFormed() : ''
-    if (model === '' || /^(weak|medium|strong)(-api|-local)?$/.exec(model)?.[0] === model) {
+    if (!validModelIdentifier(model)) {
         throw new Error('Invalid deployment model')
     }
     const capabilities = body.capabilities === undefined ? [] : body.capabilities
@@ -491,7 +491,7 @@ function modelConfigurationEntry(value: JsonValue): ModelConfigurationEntry {
         model === '' ||
         /^\p{White_Space}|\p{White_Space}$/u.test(model) ||
         new TextEncoder().encode(model).length > 1024 ||
-        /^(weak|medium|strong)(-api|-local)?$/.exec(model)?.[0] === model ||
+        isReservedAlias(model) ||
         typeof desiredResident !== 'boolean' ||
         (observedLoaded !== undefined && typeof observedLoaded !== 'boolean') ||
         (state !== 'satisfied' &&
@@ -688,7 +688,7 @@ function modelReferences(
                             .replace(/\u2028/g, '\\u2028')
                             .replace(/\u2029/g, '\\u2029')
                     ).length > 256)) ||
-            /^(weak|medium|strong)(-api|-local)?$/.exec(model)?.[0] === model
+            isReservedAlias(model)
         ) {
             throw new Error('Invalid model reference')
         }

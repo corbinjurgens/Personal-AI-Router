@@ -163,16 +163,40 @@ afterEach(async () => {
 
 describe('opaque policy JSON through renderer, preload, bridge and socket client', () => {
     it('preserves opaque values through a role edit and the real bridge', async () => {
-        const keyedPolicy = POLICY.slice(0, -1) + ',"profiles":[{"key":"native-profile","displayName":"Native","engine":"llamacpp","model":"native"}]}'
-        const edited = withRoles(keyedPolicy, [{ name: 'weak', profiles: ['native-profile'] }])
+        const keyedPolicy =
+            POLICY.slice(0, -1) +
+            ',"profiles":[{"key":"native-profile","displayName":"Native","engine":"llamacpp","model":"native"}]}'
+        const edited = withRoles(keyedPolicy, [{ name: 'coder', profiles: ['native-profile'] }])
         const expected =
-            keyedPolicy.slice(0, -1) + ',"roles":[{"name":"weak","profiles":["native-profile"]}]}'
+            keyedPolicy.slice(0, -1) + ',"roles":[{"name":"coder","profiles":["native-profile"]}]}'
         expect(edited).toBe(expected)
         await api.nodePolicy.set({ policy: edited, expectedPersistedRevision: REVISION })
         expect(service.writes).toEqual([
             `{"jsonrpc":"2.0","id":1,"method":"policy:set","params":{"expectedPersistedRevision":"${REVISION}","policy":${expected}}}\n`
         ])
     })
+    it('forwards API configuration unchanged and preserves the unavailable-build save refusal', async () => {
+        const policy =
+            POLICY.slice(0, -1) +
+            ',"roles":[{"name":"coder","profiles":[]}],"tiers":{"coder":[{"kind":"api","deployment":"provider"}]},"routing":{"tiers":{"coder":{"remoteAllowed":true,"paidAllowed":true}}}}'
+        service.error = {
+            code: -32602,
+            message:
+                'remote and paid execution cannot be enabled: remote execution is not available yet'
+        }
+        await expect(
+            api.nodePolicy.set({ policy, expectedPersistedRevision: REVISION })
+        ).rejects.toMatchObject({
+            code: -32602,
+            message:
+                '-32602: remote and paid execution cannot be enabled: remote execution is not available yet'
+        })
+        expect(service.writes).toEqual([
+            `{"jsonrpc":"2.0","id":1,"method":"policy:set","params":{"expectedPersistedRevision":"${REVISION}","policy":${policy}}}\n`
+        ])
+        expect(service.policy).toBe(POLICY)
+    })
+
     it('preserves opaque values through a binding UI edit and the real bridge', async () => {
         const source =
             POLICY.slice(0, -1) + ',"engineBindings":[{"engine":"llamacpp","model":"native"}]}'

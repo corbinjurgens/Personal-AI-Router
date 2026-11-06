@@ -376,6 +376,67 @@ func routingHistoryJSON(t *testing.T, value any) []byte {
 	return raw
 }
 
+func TestRoutingHistoryRequestedRoleGrammar(t *testing.T) {
+	fixture := loadRoutingHistoryFixtures(t)[0].Record
+	base, _, err := DecodeRoutingHistoryRecord(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accept := func(name, role string) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			row := base
+			row.Requested.Tier = role
+			if err := row.Validate(); err != nil {
+				t.Fatalf("validate role %q: %v", role, err)
+			}
+			got, diag, err := DecodeRoutingHistoryRecord(routingHistoryJSON(t, row))
+			if err != nil || diag != (RoutingHistoryDiagnostic{}) {
+				t.Fatalf("decode role %q: diagnostic=%+v error=%v", role, diag, err)
+			}
+			if got.Requested.Tier != role {
+				t.Fatalf("role = %q, want %q", got.Requested.Tier, role)
+			}
+		})
+	}
+	accept("empty role", "")
+	accept("ordinary role weak", "weak")
+	accept("ordinary role medium", "medium")
+	accept("ordinary role strong", "strong")
+	accept("ordinary role coder", "coder")
+	accept("role punctuation and digits", "r1.fast_v2")
+	accept("maximum ASCII role", strings.Repeat("a", 64))
+	accept("unlisted role", "synthetic_private_sentinel")
+
+	reject := func(name, role string) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			row := base
+			row.Requested.Tier = role
+			if err := row.Validate(); err == nil {
+				t.Fatalf("validated invalid role %q", role)
+			}
+			got, diag, err := DecodeRoutingHistoryRecord(routingHistoryJSON(t, row))
+			var safe RoutingHistoryDiagnostic
+			if !errors.As(err, &safe) || safe.Category != "invalid-value" || safe.Count != 1 ||
+				diag != (RoutingHistoryDiagnostic{}) || !reflect.DeepEqual(got, RoutingHistoryRecord{}) {
+				t.Fatalf("invalid role %q: record=%+v diagnostic=%+v error=%v", role, got, diag, err)
+			}
+		})
+	}
+	reject("overlong role", strings.Repeat("a", 65))
+	reject("uppercase role", "Coder")
+	reject("leading dot", ".coder")
+	reject("leading underscore", "_coder")
+	reject("leading hyphen", "-coder")
+	reject("colon override", "coder:api")
+	reject("nonASCII role", "codér")
+	reject("newline", "coder\n")
+	reject("carriage return", "coder\r")
+	reject("Unicode line separator", "coder\u2028")
+	reject("Unicode paragraph separator", "coder\u2029")
+}
+
 func TestRoutingHistoryContract(t *testing.T) {
 	fixtures := loadRoutingHistoryFixtures(t)
 	const sentinel = "SYNTHETIC_PRIVATE_SENTINEL"
@@ -535,9 +596,6 @@ func TestRoutingHistoryContract(t *testing.T) {
 		for _, value := range []string{"chat", "completion", "embedding", "other"} {
 			good("mode "+value, 1, "requested.mode", value)
 		}
-		for _, value := range []string{"", "weak", "medium", "strong"} {
-			good("tier "+value, 1, "requested.tier", value)
-		}
 		for _, value := range []string{"ok", "cooldown", "frozen", "credential-failure", "exhausted", "probe", "conflict", "unknown"} {
 			good("account state "+value, 1, "attempts.0.account.state", value)
 		}
@@ -566,7 +624,7 @@ func TestRoutingHistoryContract(t *testing.T) {
 			})
 		}
 	})
-	for _, path := range []string{"state", "reason", "requested.mode", "requested.tier", "spend.accounting", "attempts.0.outcome", "attempts.0.reason", "attempts.0.account.state", "attempts.0.account.accounting", "attempts.0.destination.kind"} {
+	for _, path := range []string{"state", "reason", "requested.mode", "spend.accounting", "attempts.0.outcome", "attempts.0.reason", "attempts.0.account.state", "attempts.0.account.accounting", "attempts.0.destination.kind"} {
 		bad("reject unknown enum "+path, 1, path, sentinel)
 	}
 	bad("unsupported schema", 1, "schema", 2)

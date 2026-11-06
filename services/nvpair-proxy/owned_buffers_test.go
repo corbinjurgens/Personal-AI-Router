@@ -499,8 +499,8 @@ func TestOwnedInferenceBuffersBodyEdits(t *testing.T) {
 		bufferAssertTotals(t, budget, 0, 0, 0)
 		recorder = httptest.NewRecorder()
 		w = &inferenceErrorWriter{ResponseWriter: recorder, ctx: r.Context()}
-		writeAliasRejection(w, " \tweak-api\n", "<&\xff")
-		want = `{"error":"hybrid routing alias is not available on this request","code":"feature_unavailable","reason":"\u003c\u0026\ufffd","model":"weak-api"}`
+		writeAliasRejection(w, " \tweak:api\n", "<&\xff")
+		want = `{"error":"hybrid routing alias is not available on this request","code":"feature_unavailable","reason":"\u003c\u0026\ufffd","model":"weak:api"}`
 		if recorder.Code != http.StatusBadRequest || recorder.Body.String() != want {
 			t.Fatalf("alias status=%d body=%q, want %q", recorder.Code, recorder.Body.String(), want)
 		}
@@ -509,7 +509,7 @@ func TestOwnedInferenceBuffersBodyEdits(t *testing.T) {
 		defer hold.close()
 		recorder = httptest.NewRecorder()
 		w = &inferenceErrorWriter{ResponseWriter: recorder, ctx: r.Context()}
-		writeAliasRejection(w, "weak-api", aliasReasonNotInferenceReady)
+		writeAliasRejection(w, "weak:api", aliasReasonNotInferenceReady)
 		var response struct{ Code string }
 		if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 			t.Fatal(err)
@@ -755,21 +755,28 @@ func TestRequestOptionsOwnedBuffers(t *testing.T) {
 
 func TestOwnedInferenceBuffersAliasBorrowedScan(t *testing.T) {
 	for _, tc := range []struct{ name, target, body, want string }{
-		{"folded escaped key and value", "/v1/chat/completions", `{"Na\u004de":"  weak\u002dapi\u2003"}`, "weak-api"},
-		{"completed prefix before malformed suffix", "/v1/chat/completions", `{"name":"weak-api","broken":`, "weak-api"},
-		{"completed string before invalid separator", "/v1/chat/completions", `{"name":"weak-api"invalid`, "weak-api"},
-		{"malformed value before later alias", "/v1/chat/completions", `{"ignored":[,],"name":"weak-api"}`, ""},
-		{"unfinished alias string", "/v1/chat/completions", `{"name":"weak-api`, ""},
+		{"arbitrary escaped role", "/v1/chat/completions", `{"name":"coder\u003aapi"}`, "coder:api"},
+		{"arbitrary query role", "/props?model=coder%3Alocal", `{}`, "coder:local"},
+		{"arbitrary escaped path", "/v1/models/coder%3Aapi", `{}`, "coder:api"},
+		{"maximum role", "/props", `{"name":"` + strings.Repeat("a", 64) + `:local"}`, strings.Repeat("a", 64) + ":local"},
+		{"overlong role", "/props", `{"name":"` + strings.Repeat("a", 65) + `:local"}`, ""},
+		{"unknown variable", "/props", `{"name":"coder:fast"}`, ""},
+		{"native artifact", "/props", `{"name":"unsloth/LFM2.5-24B-A2B-GGUF:UD-Q4_K_XL"}`, ""},
+		{"folded escaped key and value", "/v1/chat/completions", `{"Na\u004de":"  weak\u003aapi\u2003"}`, "weak:api"},
+		{"completed prefix before malformed suffix", "/v1/chat/completions", `{"name":"weak:api","broken":`, "weak:api"},
+		{"completed string before invalid separator", "/v1/chat/completions", `{"name":"weak:api"invalid`, "weak:api"},
+		{"malformed value before later alias", "/v1/chat/completions", `{"ignored":[,],"name":"weak:api"}`, ""},
+		{"unfinished alias string", "/v1/chat/completions", `{"name":"weak:api`, ""},
 		{"null and bare aliases remain eligible", "/v1/chat/completions", `{"model":null,"name":"weak"}`, ""},
-		{"query percent and Unicode whitespace", "/props?other=%xx&%6dodel=%E2%80%83weak%2dapi+", `{}`, "weak-api"},
-		{"malformed query alias skipped", "/props?model=weak-api%xx&model=medium-local", `{}`, "medium-local"},
-		{"semicolon query field skipped", "/props?model=weak-api;ignored&model=strong-api", `{}`, "strong-api"},
-		{"query model key remains case sensitive", "/props?MODEL=weak-api", `{}`, ""},
-		{"model detail path", "/v1/models/weak-local", `{}`, "weak-local"},
+		{"query percent and Unicode whitespace", "/props?other=%xx&%6dodel=%E2%80%83weak%3Aapi+", `{}`, "weak:api"},
+		{"malformed query alias skipped", "/props?model=weak:api%xx&model=medium:local", `{}`, "medium:local"},
+		{"semicolon query field skipped", "/props?model=weak:api;ignored&model=strong:api", `{}`, "strong:api"},
+		{"query model key remains case sensitive", "/props?MODEL=weak:api", `{}`, ""},
+		{"model detail path", "/v1/models/weak:local", `{}`, "weak:local"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := httptest.NewRequest(http.MethodPost, tc.target, nil)
-			alias, reason, rejected := requestAliasRejection(r, []byte(tc.body), "", true)
+			alias, reason, rejected := requestAliasRejection(r, []byte(tc.body), "", true, func(string) bool { return false })
 			if alias != tc.want || rejected != (tc.want != "") || rejected && reason != aliasReasonNotInferenceReady {
 				t.Fatalf("alias=%q reason=%q rejected=%v, want %q", alias, reason, rejected, tc.want)
 			}
@@ -782,10 +789,9 @@ func TestOwnedInferenceBuffersAliasBorrowedScan(t *testing.T) {
 				alias := jsonModelAlias(body)
 				assertCanonical := func() {
 					t.Helper()
-					// Canonical literal identity excludes both a heap copy and a
-					// view retaining any request storage through the result.
-					if alias != want || unsafe.StringData(alias) != unsafe.StringData(want) {
-						t.Fatalf("borrowed alias=%q storage=%p, want canonical %q storage=%p", alias, unsafe.StringData(alias), want, unsafe.StringData(want))
+					// Clearing request storage must not change the detached name.
+					if alias != want {
+						t.Fatalf("detached alias=%q, want %q", alias, want)
 					}
 				}
 				assertCanonical()
@@ -794,18 +800,18 @@ func TestOwnedInferenceBuffersAliasBorrowedScan(t *testing.T) {
 				assertCanonical()
 			})
 		}
-		test("plain weak api", "weak-api", "weak-api")
-		test("escaped weak api", `weak\u002dapi`, "weak-api")
-		test("plain weak local", "weak-local", "weak-local")
-		test("escaped weak local", `weak\u002dlocal`, "weak-local")
-		test("plain medium api", "medium-api", "medium-api")
-		test("escaped medium api", `medium\u002dapi`, "medium-api")
-		test("plain medium local", "medium-local", "medium-local")
-		test("escaped medium local", `medium\u002dlocal`, "medium-local")
-		test("plain strong api", "strong-api", "strong-api")
-		test("escaped strong api", `strong\u002dapi`, "strong-api")
-		test("plain strong local", "strong-local", "strong-local")
-		test("escaped strong local", `strong\u002dlocal`, "strong-local")
+		test("plain weak api", "weak:api", "weak:api")
+		test("escaped weak api", `weak\u003aapi`, "weak:api")
+		test("plain weak local", "weak:local", "weak:local")
+		test("escaped weak local", `weak\u003alocal`, "weak:local")
+		test("plain medium api", "medium:api", "medium:api")
+		test("escaped medium api", `medium\u003aapi`, "medium:api")
+		test("plain medium local", "medium:local", "medium:local")
+		test("escaped medium local", `medium\u003alocal`, "medium:local")
+		test("plain strong api", "strong:api", "strong:api")
+		test("escaped strong api", `strong\u003aapi`, "strong:api")
+		test("plain strong local", "strong:local", "strong:local")
+		test("escaped strong local", `strong\u003alocal`, "strong:local")
 	})
 }
 
@@ -968,7 +974,7 @@ func TestOwnedInferenceBuffersFinishedModelStorage(t *testing.T) {
 		fx.p.admission.mu.Lock()
 		timestamps := len(fx.p.admission.finishedAt)
 		fx.p.admission.mu.Unlock()
-		if rec.Code != http.StatusBadGateway || timestamps != 0 || fx.eng["a"].hits() != 0 {
+		if rec.Code != http.StatusNotFound || timestamps != 0 || fx.eng["a"].hits() != 0 {
 			t.Fatalf("unknown resolution: status=%d timestamps=%d hits=%d", rec.Code, timestamps, fx.eng["a"].hits())
 		}
 		ownedAssertHandlerDrained(t, fx.p, nil)
@@ -1100,8 +1106,11 @@ func bufferFixtureRemotePreparationBytes(t *testing.T, body string) int64 {
 func TestOwnedInferenceBuffersHandlerPreparationCancellation(t *testing.T) {
 	run := func(name string, later, disconnect bool) {
 		t.Run(name, func(t *testing.T) {
-			pol := tierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "small:1b"}}})
+			pol := tierPolicy(nil)
+			pol.Roles = []nodepolicy.Role{{Name: "weak"}}
 			fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"a": {"small:1b"}, "b": {"small:1b"}}, nil)
+			fx.declare(t, "a", map[string]nodepolicy.AdvertisedProfile{"weak": {Engine: "llamacpp", Model: "small:1b"}})
+			fx.declare(t, "b", map[string]nodepolicy.AdvertisedProfile{"weak": {Engine: "llamacpp", Model: "small:1b"}})
 			capacity := int64(256<<10) + registryNextTestBytes(fx.p)
 			if later {
 				capacity += bufferFixtureRemotePreparationBytes(t, `{"model":"small:1b"}`)
@@ -1129,6 +1138,7 @@ func TestOwnedInferenceBuffersHandlerPreparationCancellation(t *testing.T) {
 				}))
 				defer first.Close()
 				fx.p.soleFacade().discovery.AddManual(nodeForModel(t, "a", first.URL, "small:1b"))
+				fx.declare(t, "a", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("small:1b")})
 			} else {
 				hold = bufferMustAcquire(t, fx.p.buffers, 128<<10)
 			}

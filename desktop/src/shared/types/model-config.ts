@@ -88,7 +88,7 @@ export type ModelChange = {
             >
         >
         requestOptionsMode?: 'defaults' | 'enforced'
-        roles?: Partial<Record<'weak' | 'medium' | 'strong', boolean>>
+        roles?: Record<string, boolean>
         served?: boolean
         resident?: boolean
         binding?: boolean

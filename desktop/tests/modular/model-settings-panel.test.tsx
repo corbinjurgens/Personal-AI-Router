@@ -357,7 +357,7 @@ describe('composed model settings', () => {
     it('blocks a reserved profile key while accepting coder-local', async () => {
         await render(rowPanel())
         await act(async () => button('New profile', panel()).click())
-        await type('Profile key', 'medium-local')
+        await type('Profile key', 'coder:fast')
         expect(button('Create profile', panel()).disabled).toBe(true)
         await type('Profile key', 'coder-local')
         expect(button('Create profile', panel()).disabled).toBe(false)

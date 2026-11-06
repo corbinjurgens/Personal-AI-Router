@@ -208,6 +208,23 @@ Your applications connect to PAIR on the local machine, not directly to an
 inference engine or the node that serves the request. PAIR calls that local
 address an endpoint.
 
+The per-engine endpoints copied below accept a bare declared role in the
+request's `model` field, for example `coder`. Declare the role in a node's
+Roles settings first; there are no default roles. These engine endpoints
+refuse declared colon overrides such as `coder:local` and `coder:api` with 400.
+
+Colon selection uses the separately configured `routing.listener` loopback
+endpoint. Send the literal `coder:local` or `coder:api` name there. Only the
+exact `:local` and `:api` suffixes select overrides. Local selection requires
+qualified profiles and strict-admission capability on each candidate node.
+The API alias is listed but returns 404 in this build because public dispatch
+is disabled.
+
+A friendly label belongs in your client's own configuration, for example an
+OpenCode model `name` or a Claude Code `modelPicker` row `label`. That label
+does not replace the literal role or colon name sent to PAIR. See
+[Hybrid routing](hybrid-routing.mdx) for role order and API limits.
+
 Select **Endpoints** in the top toolbar to open the **API endpoints** window. It
 lists one copyable `http://127.0.0.1:<port>` URL per engine. Copy the one for the
 engine you prepared. If it says **No engines are running**, return to step 4 and

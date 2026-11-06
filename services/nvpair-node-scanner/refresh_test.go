@@ -753,10 +753,15 @@ func TestRefreshLoadedRetainedOnFailure(t *testing.T) {
 // without one makes the node undeclared.
 func TestRefreshPolicyAdvertisement(t *testing.T) {
 	d := newRefreshTestDaemon()
+	roles := []nodepolicy.Role{
+		{Name: "r1.fast_v2", Profiles: []string{"a"}},
+		{Name: "coder", Profiles: []string{}},
+		{Name: "coder-local", Profiles: []string{"a"}},
+	}
 	inventory := func(revision string) map[string]any {
 		return map[string]any{
 			"models": []string{"a"},
-			"policy": map[string]any{"revision": revision, "roles": []nodepolicy.Role{{Name: "weak", Profiles: []string{"a"}}}, "profiles": []nodepolicy.AdvertisedProfile{{Key: "a", DisplayName: "A", Engine: "llamacpp", Model: "a"}}},
+			"policy": map[string]any{"revision": revision, "roles": roles, "profiles": []nodepolicy.AdvertisedProfile{{Key: "a", DisplayName: "A", Engine: "llamacpp", Model: "a"}}},
 		}
 	}
 	stub, port := startModelsStub(t, http.StatusOK, inventory("1"))
@@ -764,7 +769,7 @@ func TestRefreshPolicyAdvertisement(t *testing.T) {
 	if !d.refreshNodeModels("peer-P", "127.0.0.1", port, "") {
 		t.Fatal("initial populate should report a change")
 	}
-	want := &nodepolicy.Advertisement{Revision: "1", Roles: []nodepolicy.Role{{Name: nodepolicy.TierWeak, Profiles: []string{"a"}}}, Profiles: []nodepolicy.AdvertisedProfile{{Key: "a", DisplayName: "A", Engine: "llamacpp", Model: "a"}}}
+	want := &nodepolicy.Advertisement{Revision: "1", Roles: roles, Profiles: []nodepolicy.AdvertisedProfile{{Key: "a", DisplayName: "A", Engine: "llamacpp", Model: "a"}}}
 	if got, _ := d.dir.get("peer-P"); !reflect.DeepEqual(got.Policy, want) {
 		t.Fatalf("Policy = %+v, want %+v", got.Policy, want)
 	}
