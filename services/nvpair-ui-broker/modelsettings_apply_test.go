@@ -868,6 +868,57 @@ func TestModelSettingsApplyConversionPublishesSiblingAndPreservesPolicy(t *testi
 	}
 }
 
+func TestModelSettingsApplyConversionBoundsGeneratedDisplayName(t *testing.T) {
+	test := func(name string, size int) {
+		t.Run(name, func(t *testing.T) {
+			h := newModelSettingsHarness(t)
+			before := modelSettingsPresetPolicy(t, h)
+			key := strings.Repeat("x", size)
+			preset := modelSettingsPresetAnswer(h)
+			h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+				result, failure := preset(method, raw)
+				if method != "engine:preview-launch" || failure != "" {
+					return result, failure
+				}
+				preview, ok := result.(settings.Preview)
+				if !ok {
+					return nil, "fixture expected conversion preview"
+				}
+				for i := range preview.Settings.ModelLoads {
+					if preview.Settings.ModelLoads[i].ProfileKey == "sibling" {
+						preview.Settings.ModelLoads[i].ProfileKey = key
+					}
+				}
+				preview.Identities[key] = preview.Identities["sibling"]
+				delete(preview.Identities, "sibling")
+				return preview, ""
+			})
+			request := h.request(t, false)
+			request.ModelChange.ProfileKey = "edited"
+			request = h.review(t, request, "")
+			receipt, err := h.b.applyEngineSettings(context.Background(), request, "")
+			if err != nil || receipt.Phase != "succeeded" || h.calls() != 1 {
+				t.Fatalf("conversion of %d-byte key = %+v, %v; configure calls=%d", size, receipt, err, h.calls())
+			}
+			policy := h.b.localPolicy().Policy
+			profile, exists := policy.ProfileByKey(key)
+			want := key
+			if size > 128 {
+				want = "model-" + modelSettingsHash(nodepolicy.ModelRef{Engine: "llamacpp", Model: key})[:16]
+			}
+			if !exists || profile.Model != key || profile.DisplayName != want || profile.ContextTokens != 12288 || profile.ModelIdentity == nil || profile.ModelIdentity.GeneralName != "Converted sibling" {
+				t.Fatalf("converted profile = %+v, want key bytes=%d and display=%q", profile, size, want)
+			}
+			if !reflect.DeepEqual(policy.Roles, before.Roles) || len(h.record(t).Snapshot.Settings.ModelLoads) != 2 {
+				t.Fatal("long-key conversion changed roles or lost native loads")
+			}
+		})
+	}
+	test("section name at display limit", 128)
+	test("section name over display limit", 129)
+	test("section name at key limit", 512)
+}
+
 func TestModelSettingsApplyConversionOnlyPatchesSelectedRoleMembership(t *testing.T) {
 	h := newModelSettingsHarness(t)
 	before := modelSettingsPresetPolicy(t, h)
@@ -1428,6 +1479,115 @@ func TestModelSettingsFreshConversionCorruptScopeRefusesRepair(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestModelSettingsFreshConversionTruncatedSiblingPublicationRefusesRepair(t *testing.T) {
+	h, fresh, _ := reviewModelSettingsConversionRepair(t)
+	policyBefore := h.b.localPolicy().Policy
+	h.mu.Lock()
+	nativeBefore := settings.ConfigFromLaunch(h.launch, 18081)
+	h.mu.Unlock()
+	h.b.engineConfigMu.Lock()
+	op := h.b.engineSettings["llamacpp"].Model
+	op.ConversionProfiles = []string{"edited"}
+	delete(op.Review.Identities, "sibling")
+	err := h.b.saveEngineSettingsLocked()
+	h.b.engineConfigMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.restartJournal(t)
+	_, err = h.b.getEngineSettings(context.Background(), settings.Request{Engine: "llamacpp"}, "")
+	if err == nil {
+		fresh.ModelChange.PreviewDigest = ""
+		var preview settings.Preview
+		preview, err = h.b.previewEngineSettings(context.Background(), fresh, "")
+		if err == nil {
+			fresh.ModelChange.PreviewDigest = preview.PreviewDigest
+			var receipt settingsReceipt
+			receipt, err = h.b.applyEngineSettings(context.Background(), fresh, "")
+			if err == nil {
+				t.Fatalf("dual-truncated scope permitted repair: phase=%s, configure calls=%d, profiles=%+v", receipt.Phase, h.calls(), h.b.localPolicy().Policy.Profiles)
+			}
+		}
+	}
+	if err == nil || h.calls() != 1 || !reflect.DeepEqual(h.b.localPolicy().Policy, policyBefore) {
+		t.Fatalf("corrupt conversion refusal=%v, configure calls=%d", err, h.calls())
+	}
+	h.mu.Lock()
+	nativeAfter := settings.ConfigFromLaunch(h.launch, 18081)
+	h.mu.Unlock()
+	if !nativeAfter.Equal(nativeBefore) {
+		t.Fatal("truncated scope changed native settings")
+	}
+}
+
+func TestModelSettingsStoredConversionAutoScopeRequiresSiblingWithoutIdentity(t *testing.T) {
+	h, _, _ := reviewModelSettingsConversionRepair(t)
+	record := h.record(t)
+	for i := range record.Model.Review.Settings.ModelLoads {
+		load := &record.Model.Review.Settings.ModelLoads[i]
+		if load.ProfileKey == "sibling" {
+			load.Resolved.ResolverRevision = "auto/finite-llama/1"
+			load.Resolved.ReviewedInputID = strings.Repeat("c", 64) + ":" + strings.Repeat("a", 64) + ":-:" + strings.Repeat("b", 64)
+		}
+	}
+	record.Snapshot.Settings = record.Model.Review.Settings.Clone()
+	record.Model.ConversionProfiles = []string{"edited"}
+	delete(record.Model.Review.Identities, "sibling")
+	if err := validateStoredModelSettings(record); err == nil || !strings.Contains(err.Error(), "scope is incomplete") {
+		t.Fatalf("converted Auto sibling without scope or identity was not refused for completeness: %v", err)
+	}
+}
+
+func TestModelSettingsFreshConversionAddsProfileWithoutExpandingConvertedScope(t *testing.T) {
+	test := func(name string, auto bool) {
+		t.Run(name, func(t *testing.T) {
+			h, fresh, _ := reviewModelSettingsConversionRepair(t)
+			h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+				result, failure := h.answer(method, raw)
+				if method != "engine:preview-launch" || failure != "" {
+					return result, failure
+				}
+				preview, ok := result.(settings.Preview)
+				if !ok {
+					return nil, "fixture expected typed preview"
+				}
+				if auto {
+					for i := range preview.Settings.ModelLoads {
+						load := &preview.Settings.ModelLoads[i]
+						if load.ProfileKey == "added" {
+							load.Resolved.ResolverRevision = "auto/finite-llama/1"
+							load.Resolved.ReviewedInputID = "-:" + strings.Repeat("a", 64) + ":-:" + strings.Repeat("b", 64)
+						}
+					}
+				}
+				preview.Identities = map[string]engines.ModelIdentity{"added": preview.Identities["added"]}
+				return preview, ""
+			})
+			fresh.ModelChange.ProfileKey = "added"
+			fresh.ModelChange.PreviewDigest = ""
+			fresh = h.review(t, fresh, "")
+			receipt, err := h.b.applyEngineSettings(context.Background(), fresh, "")
+			if err != nil || receipt.Phase != "succeeded" || h.calls() != 2 {
+				t.Fatalf("added profile repair=%+v, %v; configure calls=%d", receipt, err, h.calls())
+			}
+			record := h.record(t)
+			if !reflect.DeepEqual(record.Model.ConversionProfiles, []string{"edited", "sibling"}) || len(record.Model.Review.Settings.ModelLoads) != 3 {
+				t.Fatal("added profile changed converted scope or native load membership")
+			}
+			if err := validateStoredModelSettings(record); err != nil {
+				t.Fatalf("legal added profile made its accepted journal unreadable: %v", err)
+			}
+			for _, key := range []string{"edited", "sibling", "added"} {
+				if _, exists := h.b.localPolicy().Policy.ProfileByKey(key); !exists {
+					t.Fatalf("repair omitted profile %q", key)
+				}
+			}
+		})
+	}
+	test("manual profile added during repair", false)
+	test("Auto profile without an external conversion source", true)
 }
 
 func TestModelSettingsFreshConversionSiblingDriftRefusesBeforeEffects(t *testing.T) {

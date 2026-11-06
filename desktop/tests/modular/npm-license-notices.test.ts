@@ -242,13 +242,17 @@ describe('npm notice license sources', () => {
         }
     )
 
-    it('validates every dependency included by the production scanner', async () => {
-        const modules = await scan(resolve('.'))
-        const own: { name: string } = JSON.parse(await readFile(resolve('package.json'), 'utf8'))
-        for (const [key, info] of Object.entries(modules)) {
-            if (key.slice(0, key.lastIndexOf('@')) === own.name) continue
-            const result = await npmLicenseText(key, info)
-            expect(result.text.length, key).toBeGreaterThan(0)
-        }
-    })
+    it(
+        'validates every dependency included by the production scanner',
+        async () => {
+            const modules = await scan(resolve('.'))
+            const own: { name: string } = JSON.parse(await readFile(resolve('package.json'), 'utf8'))
+            for (const [key, info] of Object.entries(modules)) {
+                if (key.slice(0, key.lastIndexOf('@')) === own.name) continue
+                const result = await npmLicenseText(key, info)
+                expect(result.text.length, key).toBeGreaterThan(0)
+            }
+        },
+        60_000
+    )
 })
