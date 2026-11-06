@@ -4,7 +4,10 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -403,6 +406,95 @@ func TestHybridAliasRecordsNameOnlyTheAlias(t *testing.T) {
 			t.Fatal("seen upstream alias was synthesized again")
 		}
 	}
+}
+
+func TestRoleCatalogResolvesEachEngineModelOnce(t *testing.T) {
+	fx := newTierFixture(t, llamacppCase(t), nodepolicy.Default(), map[string][]string{
+		"small-peer":  {"shared", "other"},
+		"medium-peer": {"shared"},
+		"large-peer":  {"shared"},
+	}, nil)
+	f := fx.p.soleFacade()
+	for _, entry := range []struct {
+		id      string
+		context int
+	}{
+		{"small-peer", 8192},
+		{"medium-peer", 16384},
+		{"large-peer", 32768},
+	} {
+		n, ok := discoveredNode(f, entry.id)
+		if !ok {
+			t.Fatalf("missing fixture node %s", entry.id)
+		}
+		n.Profiles = []nodepolicy.AdvertisedProfile{{Key: "shared", Engine: "llamacpp", Model: "shared", ContextTokens: entry.context}}
+		keys := []string{"shared"}
+		if entry.id == "small-peer" {
+			n.Profiles = append(n.Profiles, nodepolicy.AdvertisedProfile{Key: "other", Engine: "llamacpp", Model: "other", ContextTokens: 4096})
+			keys = append(keys, "other")
+		}
+		n.Roles = []nodepolicy.Role{{Name: "weak", Profiles: keys}, {Name: "medium", Profiles: keys}, {Name: "strong", Profiles: keys}}
+		f.discovery.AddManual(n)
+	}
+
+	// Count the resolver's existing completion diagnostic, without adding a
+	// production hook. This test must remain serial while replacing the logger.
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	assertCatalog := func(name string, wantContext int) {
+		t.Helper()
+		logs.Reset()
+		records := f.tierModelEntries(nil)
+		resolutions := 0
+		decoder := json.NewDecoder(&logs)
+		for {
+			var record struct {
+				Message string `json:"msg"`
+			}
+			err := decoder.Decode(&record)
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Fatalf("%s: decode resolver log: %v", name, err)
+			}
+			if record.Message == "resolveCandidates resolved" {
+				resolutions++
+			}
+		}
+		// Two distinct pairs: llamacpp/shared and llamacpp/other, regardless
+		// of the declaring nodes, role references, or synthesized aliases.
+		if resolutions != 2 {
+			t.Errorf("%s: candidate resolutions = %d, want 2", name, resolutions)
+		}
+		var ids []string
+		for _, raw := range records {
+			var record struct {
+				ID            string `json:"id"`
+				ContextLength int    `json:"context_length"`
+			}
+			if err := json.Unmarshal(raw, &record); err != nil {
+				t.Fatalf("%s: decode catalog: %v", name, err)
+			}
+			ids = append(ids, record.ID)
+			if record.ContextLength != wantContext {
+				t.Errorf("%s: %s context = %d, want %d", name, record.ID, record.ContextLength, wantContext)
+			}
+		}
+		if want := aliasesOf("weak", "medium", "strong"); !slices.Equal(ids, want) {
+			t.Errorf("%s: aliases = %v, want %v", name, ids, want)
+		}
+	}
+	assertCatalog("shared models across nodes and roles", 32768)
+	n, ok := discoveredNode(f, "large-peer")
+	if !ok {
+		t.Fatal("missing fixture large-peer")
+	}
+	n.ServedModels = nodepolicy.ServedModels{}
+	f.discovery.AddManual(n)
+	assertCatalog("new catalog refreshes declaring-node eligibility", 16384)
 }
 
 func TestRoleCatalogVisibleContext(t *testing.T) {

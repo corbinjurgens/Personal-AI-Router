@@ -1920,7 +1920,12 @@ is resolved by the node it enters.
   Self facts require a self candidate; peer facts require a non-self candidate
   with the declaring peer's exact ID. Another node serving the same model does
   not qualify a profile. Supported binding/preparation offers qualify even
-  without inventory. The field is absent when no such profile
+  without inventory. Each catalog resolves each engine/model pair once and
+  computes each tier bound once, including zero bounds, sharing these results
+  across alias variants only for that catalog. Resolver checks can refresh mesh
+  state and start background target-address confirmation. These observation
+  effects are accepted; no policy, engine or preparation action is introduced.
+  The field is absent when no such profile
   facts are known or any such profile has zero (unbounded)
   context. Missing or withheld keys do not count as zero-context facts.
   Router tier entries do not supply this profile-derived field. An upstream
