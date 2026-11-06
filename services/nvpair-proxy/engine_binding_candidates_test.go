@@ -39,8 +39,10 @@ func TestEngineBindingSubscribedOfferIsNotInventory(t *testing.T) {
 }
 
 func TestEngineBindingCandidatesReadyBeatsSchedulerCold(t *testing.T) {
-	pol := tierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "fixture"}}})
+	pol := tierPolicy(nil)
 	fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"ready": {"fixture"}, "cold": {}}, nil)
+	fx.declare(t, "ready", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("fixture")})
+	fx.declare(t, "cold", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("fixture")})
 	f := fx.p.soleFacade()
 	n, ok := discoveredNode(f, "cold")
 	if !ok {
@@ -97,13 +99,13 @@ func TestEngineBindingCandidatesReadyBeatsSchedulerCold(t *testing.T) {
 func TestEngineBindingCandidatesPreserveLoadedPreferenceAndTierFallback(t *testing.T) {
 	test := func(name, preferLoaded, want string) {
 		t.Run(name, func(t *testing.T) {
-			pol := tierPolicy(map[string][]nodepolicy.TierEntry{
-				"weak":   {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "small"}},
-				"medium": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "large"}},
-			})
+			pol := tierPolicy(nil)
 			pol.TierPolicy.PreferLoaded = preferLoaded
+			pol.Roles = []nodepolicy.Role{{Name: "weak"}, {Name: "medium"}}
 			pol.TierPolicy.AllowStronger = true
 			fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"cold": {}, "ready": {"large"}}, map[string][]string{"ready": {"large"}})
+			fx.declare(t, "cold", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("small")})
+			fx.declare(t, "ready", map[string]nodepolicy.AdvertisedProfile{"medium": llamacppProfile("large")})
 			f := fx.p.soleFacade()
 			n, ok := discoveredNode(f, "cold")
 			if !ok {
@@ -123,16 +125,16 @@ func TestEngineBindingCandidatesPreserveLoadedPreferenceAndTierFallback(t *testi
 	test("any loaded model stays ahead of tier rank", "any", "ready")
 }
 
-func TestEngineBindingCandidatesAbsentOffersPreserveEntryOrder(t *testing.T) {
-	pol := tierPolicy(map[string][]nodepolicy.TierEntry{
-		"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "first"}, {Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "second"}},
-	})
+func TestEngineBindingCandidatesAbsentOffersPreserveDeclarationOrder(t *testing.T) {
+	pol := tierPolicy(nil)
 	fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"a": {"first"}, "b": {"second"}}, nil)
+	fx.declare(t, "a", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("first")})
+	fx.declare(t, "b", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("second")})
 	f := fx.p.soleFacade()
 	f.SetSelected("b")
 	cands := f.resolveTierCandidates("weak", requestNeeds{}, false)
 	if len(cands) != 2 || cands[0].id != "a" || cands[1].id != "b" {
-		t.Fatalf("absent bindings changed legacy entry order: %+v", cands)
+		t.Fatalf("absent bindings changed declaration order: %+v", cands)
 	}
 }
 
@@ -185,9 +187,11 @@ func TestEngineBindingCandidatesSelfOffUsesCurrentOffer(t *testing.T) {
 }
 
 func TestEngineBindingCandidatesStrictExcludesOffersWithStaleIdentity(t *testing.T) {
-	pol := tierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "q:1b"}}})
+	pol := tierPolicy(nil)
 	fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"cold": {}}, nil)
-	fx.advertise(t, "cold", map[string]nodepolicy.AdvertisedProfile{"weak": qualifiedProfile("q:1b")}, strictCapabilityFor("llamacpp", "q:1b"))
+	profile := qualifiedProfile("q:1b")
+	profile.Key = "q-1b"
+	fx.advertise(t, "cold", map[string]nodepolicy.AdvertisedProfile{"weak": profile}, strictCapabilityFor("llamacpp", "q:1b"))
 	f := fx.p.soleFacade()
 	n, ok := discoveredNode(f, "cold")
 	if !ok {

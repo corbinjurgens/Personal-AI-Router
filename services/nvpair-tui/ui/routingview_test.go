@@ -47,6 +47,32 @@ func assertRoutingBounds(t *testing.T, rendered string, width, height int) {
 }
 
 func TestRoutingView(t *testing.T) {
+	t.Run("arbitrary requested roles survive expanded view refresh", func(t *testing.T) {
+		for _, role := range []string{"", "weak", "coder", "r1.fast_v2", strings.Repeat("r", 64)} {
+			t.Run("role="+role, func(t *testing.T) {
+				row := routingWireCorpus(t)[0]
+				row.Requested.Tier = role
+				v := routingFixtureView(t, row)
+				v.Update(tea.KeyMsg{Type: tea.KeyEnter})
+				v.refreshRows(false)
+				if !v.expanded || v.selected != row.Request {
+					t.Fatal("requested role disrupted expanded selection")
+				}
+				if err := v.wire.withRecord(1, v.table.Cursor(), func(got nodepolicy.RoutingHistoryRecord) {
+					if got.Requested.Tier != role {
+						t.Fatalf("view record role = %q, want %q", got.Requested.Tier, role)
+					}
+					if got := v.detailText(got); got != v.detailText(row) {
+						t.Fatal("expanded detail changed after fixed-cell read")
+					}
+				}); err != nil {
+					t.Fatal(err)
+				}
+				assertRoutingBounds(t, v.View(), 120, 30)
+			})
+		}
+	})
+
 	t.Run("navigation follows Jobs within digit cap", func(t *testing.T) {
 		views := defaultViews(nil)
 		want := []string{"Nodes", "Jobs", "Routing", "Service", "Errors", "Logs"}

@@ -352,7 +352,7 @@ func TestTypedLoadArtifactIDIsNotASection(t *testing.T) {
 			}
 		})
 	}
-	test("reserved alias is an artifact selector", "medium-local")
+	test("reserved alias is an artifact selector", "coder:local")
 	test("artifact tag is kept exact", "org/model:UD-Q4_K_XL")
 }
 
@@ -389,11 +389,11 @@ func TestModelLoadPatchKeepsProfileModel(t *testing.T) {
 	if refused != nil || !errors.As(err, &typed) || typed.Reason != "A profile keeps its model; create a new profile." || !reflect.DeepEqual(loads, before) {
 		t.Fatalf("retarget result = %+v, error = %v", refused, err)
 	}
-	created, err := patchModelLoad(loads, "lfm-64k", "medium-local", modelconfig.LoadPatch{Set: modelconfig.RequestedLoad{Context: &modelconfig.Context{Mode: "fixed", Tokens: 65536}}})
+	created, err := patchModelLoad(loads, "lfm-64k", "coder:local", modelconfig.LoadPatch{Set: modelconfig.RequestedLoad{Context: &modelconfig.Context{Mode: "fixed", Tokens: 65536}}})
 	if err != nil {
 		t.Fatalf("create missing load: %v", err)
 	}
-	if len(created) != 3 || created[1].ProfileKey != "lfm-64k" || created[1].ModelID != "medium-local" || created[1].Requested.Context.Tokens != 65536 || created[1].Resolved != nil {
+	if len(created) != 3 || created[1].ProfileKey != "lfm-64k" || created[1].ModelID != "coder:local" || created[1].Requested.Context.Tokens != 65536 || created[1].Resolved != nil {
 		t.Fatalf("created profile target = %+v", created)
 	}
 }

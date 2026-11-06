@@ -32,10 +32,13 @@ artifacts with different launch and request settings.
 Choose **New profile**, enter its key, display name and icon, then review and
 apply the change. The suggested key is a lowercase model slug; edit it as needed.
 New profiles inherit the target engine's load defaults until you select overrides.
-Keys must be unique on the node and satisfy the model-identifier rules. The
-fixed routing tiers and their reserved aliases, such as `medium-local`, cannot
-be profile keys. `coder-api` and `coder-local` are valid keys. Select an existing
-profile by its display name, key and context to edit its own settings.
+Keys must be unique on the node: nonempty valid UTF-8, at most 512 bytes, without
+control characters. A key cannot equal a declared role, and every colon name
+whose prefix is a valid role name is reserved, including `coder:api`,
+`coder:local` and unrecognized suffixes such as `coder:fast`. This reservation
+does not apply to native model identifiers, provider model identifiers or
+artifact identifiers. `coder-api` and `coder-local` are valid keys. Select an
+existing profile by its display name, key and context to edit its own settings.
 
 Profile context is derived from the resolved launch settings' per-slot context,
 not independently entered as a policy bound. Total native context and slots
@@ -50,6 +53,36 @@ creates a role. Node cards show model repository and quantization tags by
 default, with Unknown for unavailable identity. **Show profile summaries** adds
 the icon, display name and differentiating settings for the session. Clicking
 an entry opens settings at that profile.
+
+### Roles
+
+Create, rename, remove and reorder roles only in the **Roles** section of node
+settings. Names match `[a-z0-9][a-z0-9._-]{0,63}` (at most 64 bytes). Nodes start
+with no roles. Roles have no built-in names or defaults and belong to each node rather than
+a cluster-wide store. An empty role can be saved before assigning profiles.
+Order them weakest first: Allow stronger tries roles further down the requesting
+node's list; Allow weaker tries roles further up. Deploy and model settings
+select existing target roles and never create them.
+
+When editing this PC, renaming also moves its API configuration in the same save,
+and removing deletes it. API configuration means a nonempty `tiers[name]` list
+or the presence of `routing.tiers[name]`; an empty `tiers` list alone is absent.
+If both old and new names hold configuration, even in different maps, rename is
+refused atomically, names both sides and asks for another name. Nothing is
+overwritten or combined. If only one name holds configuration, it ends under
+the new name, retaining destination-only settings when the old name has none.
+Every old-name key is removed, including empty ones.
+
+Remote role edits leave that node's private API entries unseen and unchanged.
+Every remote rename and removal confirmation says that API entries on the named
+node can't be seen from here and stay as they are. No private configuration
+rename or removal is sent or inferred. API entries under an undeclared old name
+remain stored and unused. Role edits do not coordinate a cluster-wide change.
+
+Any role may have API entries and colon overrides, but public API dispatch is
+disabled in this build. Its `:api` alias is listed and refused; enabled
+deployments and remote or paid permissions cannot be saved. See
+[Hybrid routing](hybrid-routing.mdx) for selection and availability limits.
 
 ### Hand-written preset conversion
 

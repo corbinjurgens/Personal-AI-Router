@@ -106,11 +106,11 @@ func TestPolicyRelayJoint(t *testing.T) {
 		code   int
 		text   string
 	}{
-		{"changed local tier", func(t *testing.T, p map[string]any) {
+		{"introduced API tier", func(t *testing.T, p map[string]any) {
 			peer := jointExpectedPeer(f.want)
-			peer.Tiers["weak"][0].Model = "different-local"
+			peer.Tiers["weak"] = []nodepolicy.TierEntry{{Kind: nodepolicy.EntryAPI, Deployment: "free-small"}}
 			p["policy"] = peer
-		}, http.StatusBadRequest, -32602, "a paired node cannot change the tiers"},
+		}, http.StatusBadRequest, -32602, `tiers.weak[0]: deployment "free-small" is not defined`},
 		{"changed tier fallback", func(t *testing.T, p map[string]any) {
 			peer := jointExpectedPeer(f.want)
 			peer.TierPolicy.AllowWeaker = !peer.TierPolicy.AllowWeaker
@@ -400,8 +400,10 @@ func newPolicyJointFixture(t *testing.T, options ...policyJointFixtureOption) *p
 	var err error
 	f.want, err = nodepolicy.Parse([]byte(`{
 		"version":2,"revision":"12","availability":"paused","pauseMode":"immediate",
+		"profiles":[{"key":"joint-local","engine":"llamacpp","model":"joint-local","contextTokens":8192,"capabilities":["tools"]}],
+		"roles":[{"name":"weak","profiles":["joint-local"]}],
 		"tiers":{
-			"weak":[{"kind":"api","deployment":"free-small"},{"kind":"local","engine":"llamacpp","model":"joint-local","contextTokens":8192,"capabilities":["tools"]},{"kind":"api","deployment":"paid-big"}],
+			"weak":[{"kind":"api","deployment":"free-small"},{"kind":"api","deployment":"paid-big"}],
 			"strong":[{"kind":"api","deployment":"paid-big"}]
 		},
 		"routing":{
@@ -563,9 +565,9 @@ func (f *policyJointFixture) cloudDraft(t *testing.T, params map[string]any, clo
 func jointExpectedPeer(p nodepolicy.Policy) nodepolicy.PeerPolicy {
 	return nodepolicy.PeerPolicy{
 		Version: 2, Revision: p.Revision, Availability: p.Availability, PausedBy: p.PausedBy, PauseMode: p.PauseMode,
-		Pause: p.Pause, Admission: p.Admission, Idle: p.Idle, Profiles: p.Profiles, Roles: []nodepolicy.Role{}, TierPolicy: p.TierPolicy,
+		Pause: p.Pause, Admission: p.Admission, Idle: p.Idle, Profiles: p.Profiles, Roles: []nodepolicy.Role{{Name: "weak", Profiles: []string{"joint-local"}}}, TierPolicy: p.TierPolicy,
 		ServedModels: p.ServedModels, ResidentModels: p.ResidentModels,
-		Tiers: map[string][]nodepolicy.TierEntry{"weak": {{Kind: "local", Engine: "llamacpp", Model: "joint-local", ContextTokens: 8192, Capabilities: []nodepolicy.Capability{"tools"}}}},
+		Tiers: map[string][]nodepolicy.TierEntry{},
 	}
 }
 

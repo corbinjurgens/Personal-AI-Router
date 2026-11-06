@@ -8,9 +8,10 @@
  *
  * `policy:set` replaces the whole document and fills omitted fields with
  * defaults, so a role edit never sends a document of its own: it takes the
- * target's own projection as last read, substitutes `roles` only, and sends it
- * back checked against that target's revision. A refused or uncertain save is
- * read back and shown; nothing is retried automatically.
+ * target's own projection as last read, substitutes `roles` and any associated
+ * API entry edits, and sends it back checked against that target's revision.
+ * A refused or uncertain save is read back and shown; nothing is retried
+ * automatically.
  *
  */
 import { create } from 'zustand'
@@ -28,7 +29,7 @@ import type {
     NodePolicyDocument,
     NodePolicySnapshot
 } from '@/shared/types/node-policy'
-import type { AdvertisedProfile, NodeRoles, PauseOrigin, RoleTier } from '@/shared/types/node-roles'
+import type { AdvertisedProfile, NodeRoles, PauseOrigin } from '@/shared/types/node-roles'
 import {
     INVALID_PARAMS_CODE,
     LOCAL_VETO_CODE,
@@ -45,7 +46,11 @@ import { useDiscoveredNodesStore } from '@/ui/stores/discovered-nodes.store'
 import { engineLabel, engineManagerName, engineTypeFromManagerName } from '@/shared/utils/engines'
 import { serviceErrorCode } from '@/ui/api/service-transport'
 import getErrorString from '@/shared/utils/get-error-string'
-import { replaceJsonFieldSource } from '@/shared/utils/json-source'
+import {
+    compactJsonSource,
+    jsonFieldSource,
+    replaceJsonFieldSource
+} from '@/shared/utils/json-source'
 import { modelPrimaryLabel } from '@/ui/utils/model-identity-label'
 import {
     pauseOriginValue,
@@ -54,7 +59,7 @@ import {
     parseRoleProfiles,
     copyNodeRoles,
     withRoleProfile,
-    ROLE_TIERS,
+    roleNameError,
     sameNodeRoles
 } from '@/shared/utils/node-roles'
 
@@ -180,55 +185,41 @@ export function chosenRole(choices: AdvertisedProfile[], value: string): string 
 }
 
 /**
- * A suggestion for each tier: the first local tier entry, in the given
- * documents' order, whose engine and model the node has installed. A tier with
- * no installed entry keeps its existing declaration. Suggestions preserve the
- * target's declaration order and empty roles. They are never applied by themselves.
+ * Only the target's declarations establish role membership. Neither another
+ * node's policy nor retired local tier entries provide guesses for empty roles.
+ * Retain the existing call shape while preserving all target facts and order.
  */
-export function suggestRoles(choices: AdvertisedProfile[], policies: string[]): NodeRoles {
-    const roles: NodeRoles = []
-    for (const tier of ROLE_TIERS) {
-        for (const policy of policies) {
-            if (roles.some(role => role.name === tier)) break
-            const tiers = policyObject(policy).tiers
-            if (tiers === null || typeof tiers !== 'object' || Array.isArray(tiers)) continue
-            const entries = tiers[tier]
-            if (!Array.isArray(entries)) continue
-            for (const entry of entries) {
-                if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) continue
-                if (entry.kind !== 'local') continue
-                if (typeof entry.engine !== 'string' || typeof entry.model !== 'string') continue
-                const profile = choices.find(
-                    profile => profile.engine === entry.engine && profile.model === entry.model
-                )
-                if (profile) {
-                    roles.push({ name: tier, profiles: [profile.key] })
-                    break
-                }
-            }
-        }
-    }
-    let suggested = parseNodeRoles(policyObject(policies[0] ?? '{}').roles)
-    for (const role of roles) {
-        suggested = withRoleProfile(suggested, role.name, role.profiles[0])
-    }
-    return suggested
+export function suggestRoles(_choices: AdvertisedProfile[], policies: string[]): NodeRoles {
+    return policyRoles(policies[0] ?? '{}')
 }
 
-/** A tier whose membership differs between two documents, excluding declaration order. */
+/** A role whose membership, declaration or position differs between documents. */
 interface RoleDifference {
-    tier: RoleTier
+    tier: string
     mine?: string[]
     theirs?: string[]
+    mineIndex?: number
+    theirsIndex?: number
 }
 
 export function roleDifferences(mine: NodeRoles, theirs: NodeRoles): RoleDifference[] {
-    return ROLE_TIERS.flatMap(tier => {
+    const names = new Set([...mine, ...theirs].map(role => role.name))
+    return Array.from(names).flatMap(tier => {
         const left = mine.find(role => role.name === tier)
         const right = theirs.find(role => role.name === tier)
-        return JSON.stringify(left) === JSON.stringify(right)
+        const mineIndex = mine.findIndex(role => role.name === tier)
+        const theirsIndex = theirs.findIndex(role => role.name === tier)
+        const moved = left !== undefined && right !== undefined && mineIndex !== theirsIndex
+        return JSON.stringify(left) === JSON.stringify(right) && !moved
             ? []
-            : [{ tier, mine: left?.profiles, theirs: right?.profiles }]
+            : [
+                  {
+                      tier,
+                      mine: left?.profiles,
+                      theirs: right?.profiles,
+                      ...(moved ? { mineIndex, theirsIndex } : {})
+                  }
+              ]
     })
 }
 
@@ -296,11 +287,134 @@ interface RoleEditorEntry {
      */
     baseline?: RoleBaseline
     draft: NodeRoles
+    /** Ordered, session-only API key edits, replayed in the same policy save. */
+    roleEdits?: RoleApiEdit[]
+    /** Editor scope only; peers cannot inspect or edit private API entries. */
+    remote?: boolean
     phase: RoleEditPhase
     /** The document read back after a conflict, for the diff. */
     latest?: RoleBaseline
     /** The service's message for the last refused or uncertain save. */
     message?: string
+}
+
+interface RoleApiEdit {
+    name: string
+    /** Absent for removal. */
+    newName?: string
+}
+
+function roleApiEntries(policy: string, path: string[]): Map<string, string> {
+    const source = jsonFieldSource(policy, path)
+    const entries = new Map<string, string>()
+    if (source === undefined) return entries
+    for (const name of Object.keys(policyObject(source))) {
+        const value = jsonFieldSource(source, [name])
+        if (value === undefined) throw new Error(`Could not read API entry for ${name}.`)
+        entries.set(name, value)
+    }
+    return entries
+}
+
+function roleApiConfigurationPresent(
+    tiers: ReadonlyMap<string, string>,
+    routingTiers: ReadonlyMap<string, string>,
+    name: string
+): boolean {
+    const deployments: JsonValue = JSON.parse(tiers.get(name) ?? '[]')
+    return (Array.isArray(deployments) && deployments.length > 0) || routingTiers.has(name)
+}
+
+/** Validate both maps before moving either, including cross-map collisions. */
+function editRoleApiEntries(
+    tiers: Map<string, string>,
+    routingTiers: Map<string, string>,
+    edit: RoleApiEdit
+): void {
+    const configured = roleApiConfigurationPresent(tiers, routingTiers, edit.name)
+    if (
+        edit.newName !== undefined &&
+        configured &&
+        roleApiConfigurationPresent(tiers, routingTiers, edit.newName)
+    )
+        throw new Error(
+            `API configuration exists for both ${edit.name} and ${edit.newName}. Choose another name.`
+        )
+    for (const entries of [tiers, routingTiers]) {
+        const source = entries.get(edit.name)
+        if (edit.newName !== undefined && configured) {
+            entries.delete(edit.newName)
+            if (source !== undefined) entries.set(edit.newName, source)
+        }
+        entries.delete(edit.name)
+    }
+}
+
+/** Preserve every entry's value tokens, including numbers outside JS precision. */
+function roleApiEntriesSource(entries: ReadonlyMap<string, string>): string {
+    return `{${Array.from(entries, ([name, value]) => `${JSON.stringify(name)}:${value}`).join(',')}}`
+}
+
+function withRoleEdits(policy: string, roles: NodeRoles, edits: RoleApiEdit[] = []): string {
+    let next = withRoles(policy, roles)
+    if (edits.length === 0) return next
+    const tiers = jsonFieldSource(policy, ['tiers'])
+    const tierEntries = roleApiEntries(policy, ['tiers'])
+    const routing = jsonFieldSource(policy, ['routing'])
+    const routingTiers = jsonFieldSource(policy, ['routing', 'tiers'])
+    const routingEntries = roleApiEntries(policy, ['routing', 'tiers'])
+    const originalTiers = roleApiEntriesSource(tierEntries)
+    const originalRoutingTiers = roleApiEntriesSource(routingEntries)
+    for (const edit of edits) editRoleApiEntries(tierEntries, routingEntries, edit)
+    const editedTiers = roleApiEntriesSource(tierEntries)
+    const editedRoutingTiers = roleApiEntriesSource(routingEntries)
+    if (tiers !== undefined && editedTiers !== originalTiers)
+        next = replaceJsonFieldSource(next, 'tiers', editedTiers)
+    if (
+        routing !== undefined &&
+        routingTiers !== undefined &&
+        editedRoutingTiers !== originalRoutingTiers
+    )
+        next = replaceJsonFieldSource(
+            next,
+            'routing',
+            replaceJsonFieldSource(routing, 'tiers', editedRoutingTiers)
+        )
+    return next
+}
+
+function editorRoleEdits(entry: RoleEditorEntry): RoleApiEdit[] | undefined {
+    return entry.remote ? undefined : entry.roleEdits
+}
+
+function sameRoleApiEntries(left: string, right: string, names: ReadonlySet<string>): boolean {
+    for (const path of [['tiers'], ['routing', 'tiers']]) {
+        const before = roleApiEntries(left, path)
+        const after = roleApiEntries(right, path)
+        for (const name of names) {
+            const a = before.get(name)
+            const b = after.get(name)
+            if (a === undefined || b === undefined) {
+                if (a !== b) return false
+            } else if (compactJsonSource(a) !== compactJsonSource(b)) return false
+        }
+    }
+    return true
+}
+
+function editedRoleApiNames(edits: RoleApiEdit[] = []): Set<string> {
+    return new Set(
+        edits.flatMap(edit =>
+            edit.newName === undefined ? [edit.name] : [edit.name, edit.newName]
+        )
+    )
+}
+
+function roleEditorDirty(entry: RoleEditorEntry): boolean {
+    return (
+        !sameNodeRoles(entry.draft, entry.baseline?.roles ?? []) ||
+        (editorRoleEdits(entry)?.length ?? 0) > 0
+    )
 }
 
 function baselineOf(snapshot: PolicyBaselineInput): RoleBaseline {
@@ -351,10 +465,21 @@ interface NodeConfigurationState {
      * change; otherwise the draft is stale and shown against it.
      */
     adopt(targetId: string, snapshot: PolicyBaselineInput): void
-    setRole(targetId: string, tier: RoleTier, key: string | undefined): void
-    addRoleProfile(targetId: string, tier: RoleTier, key: string): void
-    removeRoleProfile(targetId: string, tier: RoleTier, key: string): void
-    moveRoleProfile(targetId: string, tier: RoleTier, index: number, direction: -1 | 1): void
+    addRole(targetId: string, name: string): void
+    roleRenameError(
+        targetId: string,
+        name: string,
+        newName: string,
+        nodeId?: string
+    ): string | undefined
+    renameRole(targetId: string, name: string, newName: string, nodeId?: string): void
+    removeRole(targetId: string, name: string, nodeId?: string): void
+    moveRole(targetId: string, name: string, direction: number): void
+    roleApiEntryPresent(targetId: string, name: string): boolean
+    setRole(targetId: string, tier: string, key: string | undefined): void
+    addRoleProfile(targetId: string, tier: string, key: string): void
+    removeRoleProfile(targetId: string, tier: string, key: string): void
+    moveRoleProfile(targetId: string, tier: string, index: number, direction: -1 | 1): void
     /** Replace the draft, for an offered suggestion the user accepted. */
     setDraft(targetId: string, roles: NodeRoles): void
     /** After a conflict: keep the draft and base it on the document read back. */
@@ -912,6 +1037,56 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
         set({ editors })
     }
 
+    function editRoles(
+        targetId: string,
+        change: (entry: RoleEditorEntry) => RoleEditorEntry
+    ): void {
+        update(targetId, entry => {
+            if (!entry.baseline || ['reading', 'sending', 'unknown'].includes(entry.phase))
+                return entry
+            const next = change(entry)
+            if (next === entry) return entry
+            return {
+                ...next,
+                phase:
+                    entry.phase === 'conflict' || entry.phase === 'vetoed' ? entry.phase : 'draft'
+            }
+        })
+    }
+
+    function roleNameIssue(entry: RoleEditorEntry, name: string): string | undefined {
+        return (
+            roleNameError(name) ??
+            (entry.draft.some(role => role.name === name)
+                ? `Role ${name} already exists.`
+                : policyRoleProfiles(entry.baseline?.policy ?? '{}').some(
+                        profile => profile.key === name
+                    )
+                  ? `Role ${name} matches a profile key on this node.`
+                  : undefined)
+        )
+    }
+
+    function roleRenameIssue(
+        entry: RoleEditorEntry,
+        name: string,
+        newName: string,
+        nodeId?: string
+    ): string | undefined {
+        if (name === newName || !entry.draft.some(role => role.name === name)) return undefined
+        const message = roleNameIssue(entry, newName)
+        if (message || nodeId !== undefined) return message
+        try {
+            withRoleEdits(entry.baseline?.policy ?? '{}', entry.draft, [
+                ...(editorRoleEdits(entry) ?? []),
+                { name, newName }
+            ])
+            return undefined
+        } catch (error) {
+            return getErrorString(error)
+        }
+    }
+
     return {
         availability: new Map(),
         readAvailability: async (targetId, manual = false) => {
@@ -1394,6 +1569,7 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
                 editors.set(targetId, {
                     baseline: next,
                     draft: copyNodeRoles(next.roles),
+                    remote: entry?.remote ?? managementTargets.get(targetId)?.nodeId !== undefined,
                     phase: 'draft'
                 })
                 set({ editors })
@@ -1417,18 +1593,45 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
             ) {
                 return
             }
-            const edited = !sameNodeRoles(entry.draft, entry.baseline.roles)
+            if (
+                entry.phase === 'unknown' &&
+                sameNodeRoles(next.roles, entry.draft) &&
+                sameRoleApiEntries(
+                    next.policy,
+                    withRoleEdits(entry.baseline.policy, entry.draft, editorRoleEdits(entry)),
+                    editedRoleApiNames(editorRoleEdits(entry))
+                )
+            ) {
+                editors.set(targetId, {
+                    baseline: next,
+                    draft: copyNodeRoles(next.roles),
+                    remote: entry.remote,
+                    phase: 'applied',
+                    message: 'Saved policy confirmed by readback.'
+                })
+                set({ editors })
+                return
+            }
+            const edited = roleEditorDirty(entry)
             if (!edited) {
                 editors.set(targetId, {
                     baseline: next,
                     draft: copyNodeRoles(next.roles),
+                    remote: entry.remote,
                     // "Saved" names the revision this editor saved, not a later one.
                     phase:
                         entry.phase === 'applied' && next.revision === entry.baseline.revision
                             ? 'applied'
                             : 'draft'
                 })
-            } else if (sameNodeRoles(next.roles, entry.baseline.roles)) {
+            } else if (
+                sameNodeRoles(next.roles, entry.baseline.roles) &&
+                sameRoleApiEntries(
+                    entry.baseline.policy,
+                    next.policy,
+                    editedRoleApiNames(editorRoleEdits(entry))
+                )
+            ) {
                 // Only other fields moved: the substitution keeps them, so the
                 // draft simply rebases.
                 editors.set(targetId, { ...entry, baseline: next })
@@ -1441,6 +1644,79 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
                 })
             }
             set({ editors })
+        },
+
+        addRole: (targetId, name) =>
+            editRoles(targetId, entry => {
+                const message = roleNameIssue(entry, name)
+                if (message) return { ...entry, message }
+                return {
+                    ...entry,
+                    draft: [...entry.draft, { name, profiles: [] }],
+                    message: undefined
+                }
+            }),
+
+        roleRenameError: (targetId, name, newName, nodeId) => {
+            const entry = get().editors.get(targetId)
+            return entry ? roleRenameIssue(entry, name, newName, nodeId) : undefined
+        },
+
+        renameRole: (targetId, name, newName, nodeId) =>
+            editRoles(targetId, entry => {
+                if (name === newName || !entry.draft.some(role => role.name === name)) return entry
+                const message = roleRenameIssue(entry, name, newName, nodeId)
+                if (message) return { ...entry, message }
+                return {
+                    ...entry,
+                    draft: entry.draft.map(role =>
+                        role.name === name ? { ...role, name: newName } : role
+                    ),
+                    remote: nodeId !== undefined,
+                    roleEdits:
+                        nodeId === undefined
+                            ? [...(editorRoleEdits(entry) ?? []), { name, newName }]
+                            : undefined,
+                    message: undefined
+                }
+            }),
+
+        removeRole: (targetId, name, nodeId) =>
+            editRoles(targetId, entry =>
+                entry.draft.some(role => role.name === name)
+                    ? {
+                          ...entry,
+                          draft: entry.draft.filter(role => role.name !== name),
+                          remote: nodeId !== undefined,
+                          roleEdits:
+                              nodeId === undefined
+                                  ? [...(editorRoleEdits(entry) ?? []), { name }]
+                                  : undefined,
+                          message: undefined
+                      }
+                    : entry
+            ),
+
+        moveRole: (targetId, name, direction) =>
+            editRoles(targetId, entry => {
+                if (direction !== -1 && direction !== 1) return entry
+                const index = entry.draft.findIndex(role => role.name === name)
+                const destination = index + direction
+                if (index < 0 || destination < 0 || destination >= entry.draft.length) return entry
+                const draft = copyNodeRoles(entry.draft)
+                ;[draft[index], draft[destination]] = [draft[destination], draft[index]]
+                return { ...entry, draft, message: undefined }
+            }),
+
+        roleApiEntryPresent: (targetId, name) => {
+            const entry = get().editors.get(targetId)
+            if (!entry?.baseline || entry.remote) return false
+            const policy = withRoleEdits(entry.baseline.policy, entry.draft, editorRoleEdits(entry))
+            return roleApiConfigurationPresent(
+                roleApiEntries(policy, ['tiers']),
+                roleApiEntries(policy, ['routing', 'tiers']),
+                name
+            )
         },
 
         addRoleProfile: (targetId, tier, key) => {
@@ -1479,47 +1755,83 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
         },
 
         setRole: (targetId, tier, role) =>
-            update(targetId, entry => {
+            editRoles(targetId, entry => {
                 const draft = withRoleProfile(entry.draft, tier, role)
                 return {
                     ...entry,
-                    draft,
-                    phase:
-                        entry.phase === 'conflict' || entry.phase === 'vetoed'
-                            ? entry.phase
-                            : 'draft'
+                    draft
                 }
             }),
 
         setDraft: (targetId, roles) =>
-            update(targetId, entry => ({
+            editRoles(targetId, entry => ({
                 ...entry,
                 draft: copyNodeRoles(roles),
-                phase:
-                    entry.phase === 'conflict' || entry.phase === 'vetoed' ? entry.phase : 'draft'
+                roleEdits: entry.remote
+                    ? undefined
+                    : [
+                          ...(entry.roleEdits ?? []),
+                          ...entry.draft
+                              .filter(role => !roles.some(next => next.name === role.name))
+                              .map(role => ({ name: role.name }))
+                      ]
             })),
 
         keepDraftOnLatest: targetId =>
-            update(targetId, entry =>
-                entry.latest
-                    ? { baseline: entry.latest, draft: entry.draft, phase: 'draft' }
-                    : entry
-            ),
+            update(targetId, entry => {
+                if (!entry.latest || entry.phase === 'sending') return entry
+                try {
+                    const desired = withRoleEdits(
+                        entry.baseline?.policy ?? '{}',
+                        entry.draft,
+                        editorRoleEdits(entry)
+                    )
+                    const alreadyApplied = sameRoleApiEntries(
+                        desired,
+                        entry.latest.policy,
+                        editedRoleApiNames(editorRoleEdits(entry))
+                    )
+                    const roleEdits = alreadyApplied ? undefined : editorRoleEdits(entry)
+                    withRoleEdits(entry.latest.policy, entry.draft, roleEdits)
+                    return {
+                        baseline: entry.latest,
+                        draft: entry.draft,
+                        roleEdits,
+                        remote: entry.remote,
+                        phase: 'draft'
+                    }
+                } catch (error) {
+                    return { ...entry, message: getErrorString(error) }
+                }
+            }),
 
         discard: targetId =>
             update(targetId, entry => {
+                if (entry.phase === 'sending' || entry.phase === 'reading') return entry
                 const baseline = entry.latest ?? entry.baseline
                 return baseline
-                    ? { baseline, draft: copyNodeRoles(baseline.roles), phase: 'draft' }
+                    ? {
+                          baseline,
+                          draft: copyNodeRoles(baseline.roles),
+                          remote: entry.remote,
+                          phase: 'draft'
+                      }
                     : entry
             }),
 
         save: async (targetId, nodeId) => {
             const entry = get().editors.get(targetId)
             const base = entry?.baseline
-            if (!entry || !base || entry.phase === 'sending' || entry.phase === 'conflict') {
+            if (
+                !entry ||
+                !base ||
+                ['reading', 'sending', 'conflict', 'unknown'].includes(entry.phase)
+            ) {
                 return null
             }
+            const remote = nodeId !== undefined
+            const roleEdits = remote ? undefined : editorRoleEdits(entry)
+            update(targetId, current => ({ ...current, remote, roleEdits }))
             if (nodeId !== undefined && nodePaused(base.policy, base.availability)) {
                 update(targetId, current => ({
                     ...current,
@@ -1553,17 +1865,29 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
                 }
                 return null
             }
+            let policy: string
+            try {
+                policy = withRoleEdits(base.policy, entry.draft, roleEdits)
+            } catch (error) {
+                update(targetId, current => ({
+                    ...current,
+                    phase: 'rejected',
+                    message: getErrorString(error)
+                }))
+                return null
+            }
             update(targetId, current => ({ ...current, phase: 'sending', message: undefined }))
             try {
                 const result = await window.pairApi.nodePolicy.set({
                     nodeId,
-                    policy: withRoles(base.policy, entry.draft),
+                    policy,
                     expectedPersistedRevision: base.revision
                 })
                 const saved = baselineOf(result)
                 update(targetId, () => ({
                     baseline: saved,
                     draft: copyNodeRoles(saved.roles),
+                    remote,
                     phase: 'applied'
                 }))
                 return result
@@ -1593,6 +1917,20 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
                 const latest = await window.pairApi.nodePolicy.get(nodeId).catch(() => null)
                 if (latest === null) {
                     update(targetId, current => ({ ...current, phase: 'unknown', message }))
+                } else if (
+                    refusal !== 'conflict' &&
+                    sameNodeRoles(policyRoles(latest.policy), entry.draft) &&
+                    sameRoleApiEntries(latest.policy, policy, editedRoleApiNames(roleEdits))
+                ) {
+                    const saved = baselineOf(latest)
+                    update(targetId, () => ({
+                        baseline: saved,
+                        draft: copyNodeRoles(saved.roles),
+                        remote,
+                        phase: 'applied',
+                        message: 'Saved policy confirmed by readback.'
+                    }))
+                    return latest
                 } else if (refusal === 'conflict' || latest.revision !== base.revision) {
                     update(targetId, current => ({
                         ...current,
@@ -1608,17 +1946,52 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
         },
 
         read: async (targetId, nodeId) => {
+            const remote = nodeId !== undefined
             const prior = get().editors.get(targetId)
-            if (prior?.baseline || prior?.phase === 'reading') return
-            put(targetId, { draft: [], phase: 'reading' })
+            if (prior?.phase === 'reading' || prior?.phase === 'sending') return
+            update(targetId, entry => ({
+                ...entry,
+                remote,
+                roleEdits: remote ? undefined : entry.roleEdits
+            }))
+            if (prior?.baseline && prior.phase !== 'unknown') return
+            if (prior?.baseline) {
+                try {
+                    const latest = await window.pairApi.nodePolicy.get(nodeId)
+                    get().adopt(targetId, latest)
+                    update(targetId, current =>
+                        current.phase === 'unknown'
+                            ? {
+                                  ...current,
+                                  phase: 'rejected',
+                                  message: 'Readback did not confirm the save. Your draft is kept.'
+                              }
+                            : current
+                    )
+                } catch (error) {
+                    update(targetId, current => ({ ...current, message: getErrorString(error) }))
+                }
+                return
+            }
+            put(targetId, { draft: [], remote, phase: 'reading' })
             try {
                 const latest = await window.pairApi.nodePolicy.get(nodeId)
                 // Another reader may have taken a baseline meanwhile; it stands.
                 if (get().editors.get(targetId)?.baseline) return
                 const next = baselineOf(latest)
-                put(targetId, { baseline: next, draft: copyNodeRoles(next.roles), phase: 'draft' })
+                put(targetId, {
+                    baseline: next,
+                    draft: copyNodeRoles(next.roles),
+                    remote,
+                    phase: 'draft'
+                })
             } catch (err) {
-                put(targetId, { draft: [], phase: 'unreachable', message: getErrorString(err) })
+                put(targetId, {
+                    draft: [],
+                    remote,
+                    phase: 'unreachable',
+                    message: getErrorString(err)
+                })
             }
         }
     }

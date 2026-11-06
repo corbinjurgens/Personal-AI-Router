@@ -66,20 +66,20 @@ func TestModelPolicyRoleMembershipLists(t *testing.T) {
 				{Key: "other-profile", DisplayName: "Other", Engine: "llamacpp", Model: "other-model"},
 			}
 			stored.Roles = []nodepolicy.Role{
-				{Name: nodepolicy.TierStrong, Profiles: []string{"other-profile"}},
-				{Name: nodepolicy.TierWeak, Profiles: members},
-				{Name: nodepolicy.TierMedium, Profiles: []string{}},
+				{Name: "strong", Profiles: []string{"other-profile"}},
+				{Name: "coder", Profiles: members},
+				{Name: "medium", Profiles: []string{}},
 			}
 			before := settingsJSON(stored)
-			change := modelconfig.ModelChange{ProfileKey: "selected-profile", ModelID: "fixture/model", Policy: &modelconfig.PolicyPatch{Roles: map[string]bool{nodepolicy.TierWeak: selected}}}
+			change := modelconfig.ModelChange{ProfileKey: "selected-profile", ModelID: "fixture/model", Policy: &modelconfig.PolicyPatch{Roles: map[string]bool{"coder": selected}}}
 			merged, err := h.b.mergeModelPolicy(stored, "llamacpp", change, "", settings.Preview{}, false)
 			if err != nil {
 				t.Fatalf("merge role membership: %v", err)
 			}
 			wantRoles := []nodepolicy.Role{
-				{Name: nodepolicy.TierStrong, Profiles: []string{"other-profile"}},
-				{Name: nodepolicy.TierWeak, Profiles: want},
-				{Name: nodepolicy.TierMedium, Profiles: []string{}},
+				{Name: "strong", Profiles: []string{"other-profile"}},
+				{Name: "coder", Profiles: want},
+				{Name: "medium", Profiles: []string{}},
 			}
 			if !reflect.DeepEqual(merged.Roles, wantRoles) {
 				t.Fatalf("roles = %+v, want %+v", merged.Roles, wantRoles)
@@ -103,13 +103,13 @@ func TestModelPolicyRoleMembershipLists(t *testing.T) {
 func TestModelPolicyRoleRemovalDoesNotDeclareRole(t *testing.T) {
 	h := newModelSettingsHarness(t)
 	stored := nodepolicy.Default()
-	stored.Roles = []nodepolicy.Role{{Name: nodepolicy.TierMedium, Profiles: []string{}}}
-	change := modelconfig.ModelChange{ModelID: "fixture/model", Policy: &modelconfig.PolicyPatch{Roles: map[string]bool{nodepolicy.TierWeak: false}}}
+	stored.Roles = []nodepolicy.Role{{Name: "medium", Profiles: []string{}}}
+	change := modelconfig.ModelChange{ModelID: "fixture/model", Policy: &modelconfig.PolicyPatch{Roles: map[string]bool{"coder": false}}}
 	merged, err := h.b.mergeModelPolicy(stored, "llamacpp", change, "", settings.Preview{}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []nodepolicy.Role{{Name: nodepolicy.TierMedium, Profiles: []string{}}}
+	want := []nodepolicy.Role{{Name: "medium", Profiles: []string{}}}
 	if !reflect.DeepEqual(merged.Roles, want) || len(merged.Profiles) != 1 || merged.Profiles[0].Key != "fixture/model" {
 		t.Fatalf("membership edit changed declarations or omitted the profile: %+v", merged)
 	}
@@ -118,16 +118,16 @@ func TestModelPolicyRoleRemovalDoesNotDeclareRole(t *testing.T) {
 func TestModelPolicyRoleAppendCreatesSelectedProfile(t *testing.T) {
 	h := newModelSettingsHarness(t)
 	stored := nodepolicy.Default()
-	stored.Roles = []nodepolicy.Role{{Name: nodepolicy.TierWeak, Profiles: []string{}}}
-	change := modelconfig.ModelChange{ModelID: "fixture/model", Policy: &modelconfig.PolicyPatch{Roles: map[string]bool{nodepolicy.TierWeak: true}}}
+	stored.Roles = []nodepolicy.Role{{Name: "coder", Profiles: []string{}}}
+	change := modelconfig.ModelChange{ModelID: "fixture/model", Policy: &modelconfig.PolicyPatch{Roles: map[string]bool{"coder": true}}}
 	merged, err := h.b.mergeModelPolicy(stored, "llamacpp", change, "", settings.Preview{}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(merged.Profiles) != 1 || merged.Profiles[0].Key != "fixture/model" || !reflect.DeepEqual(merged.Roles, []nodepolicy.Role{{Name: nodepolicy.TierWeak, Profiles: []string{"fixture/model"}}}) {
+	if len(merged.Profiles) != 1 || merged.Profiles[0].Key != "fixture/model" || !reflect.DeepEqual(merged.Roles, []nodepolicy.Role{{Name: "coder", Profiles: []string{"fixture/model"}}}) {
 		t.Fatalf("profile creation or membership = %+v", merged)
 	}
-	if len(stored.Profiles) != 0 || !reflect.DeepEqual(stored.Roles, []nodepolicy.Role{{Name: nodepolicy.TierWeak, Profiles: []string{}}}) {
+	if len(stored.Profiles) != 0 || !reflect.DeepEqual(stored.Roles, []nodepolicy.Role{{Name: "coder", Profiles: []string{}}}) {
 		t.Fatal("membership patch created a profile or changed the stored declaration")
 	}
 }
@@ -139,19 +139,19 @@ func TestModelSettingsRoleMembershipPersistsWithNativeLoad(t *testing.T) {
 		{Key: "selected-profile", DisplayName: "Selected", Engine: "llamacpp", Model: "selected-profile", ContextTokens: 4096},
 		{Key: "other-profile", DisplayName: "Other", Engine: "llamacpp", Model: "other-model"},
 	}
-	policy.Roles = []nodepolicy.Role{{Name: nodepolicy.TierStrong, Profiles: []string{"selected-profile"}}, {Name: nodepolicy.TierWeak, Profiles: []string{"other-profile"}}, {Name: nodepolicy.TierMedium, Profiles: []string{}}}
+	policy.Roles = []nodepolicy.Role{{Name: "strong", Profiles: []string{"selected-profile"}}, {Name: "coder", Profiles: []string{"other-profile"}}, {Name: "medium", Profiles: []string{}}}
 	if _, err := setCurrent(h.b, settingsJSON(policy)); err != nil {
 		t.Fatalf("seed membership policy: %v", err)
 	}
 	p := h.request(t, true)
 	p.ModelChange.ProfileKey = "selected-profile"
-	p.ModelChange.Policy.Roles = map[string]bool{nodepolicy.TierWeak: true, nodepolicy.TierStrong: false}
+	p.ModelChange.Policy.Roles = map[string]bool{"coder": true, "strong": false}
 	p = h.review(t, p, "")
 	receipt, err := h.b.applyEngineSettings(context.Background(), p, "")
 	if err != nil || receipt.Phase != "succeeded" {
 		t.Fatalf("apply membership and native load: %+v, %v", receipt, err)
 	}
-	wantRoles := []nodepolicy.Role{{Name: nodepolicy.TierStrong, Profiles: []string{}}, {Name: nodepolicy.TierWeak, Profiles: []string{"other-profile", "selected-profile"}}, {Name: nodepolicy.TierMedium, Profiles: []string{}}}
+	wantRoles := []nodepolicy.Role{{Name: "strong", Profiles: []string{}}, {Name: "coder", Profiles: []string{"other-profile", "selected-profile"}}, {Name: "medium", Profiles: []string{}}}
 	data, err := os.ReadFile(h.path)
 	if err != nil {
 		t.Fatal(err)
@@ -181,15 +181,15 @@ func TestModelPolicyRoleMergeDetachesUnselectedMembership(t *testing.T) {
 	h := newModelSettingsHarness(t)
 	stored := nodepolicy.Default()
 	stored.Profiles = []nodepolicy.Profile{{Key: "selected-profile", DisplayName: "Selected", Engine: "llamacpp", Model: "fixture/model"}}
-	stored.Roles = []nodepolicy.Role{{Name: nodepolicy.TierStrong, Profiles: []string{"selected-profile"}}, {Name: nodepolicy.TierWeak, Profiles: []string{}}}
-	change := modelconfig.ModelChange{ProfileKey: "selected-profile", ModelID: "fixture/model", Policy: &modelconfig.PolicyPatch{Roles: map[string]bool{nodepolicy.TierWeak: true}}}
+	stored.Roles = []nodepolicy.Role{{Name: "strong", Profiles: []string{"selected-profile"}}, {Name: "coder", Profiles: []string{}}}
+	change := modelconfig.ModelChange{ProfileKey: "selected-profile", ModelID: "fixture/model", Policy: &modelconfig.PolicyPatch{Roles: map[string]bool{"coder": true}}}
 	merged, err := h.b.mergeModelPolicy(stored, "llamacpp", change, "", settings.Preview{}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	merged.Roles[0].Profiles[0] = "changed-key"
 	merged.Roles[1].Profiles[0] = "changed-key"
-	want := []nodepolicy.Role{{Name: nodepolicy.TierStrong, Profiles: []string{"selected-profile"}}, {Name: nodepolicy.TierWeak, Profiles: []string{}}}
+	want := []nodepolicy.Role{{Name: "strong", Profiles: []string{"selected-profile"}}, {Name: "coder", Profiles: []string{}}}
 	if !reflect.DeepEqual(stored.Roles, want) {
 		t.Fatalf("merged roles alias stored membership: %+v", stored.Roles)
 	}
@@ -199,12 +199,12 @@ func TestModelSettingsUndeclaredRoleRefusesBeforeWrites(t *testing.T) {
 	h := newModelSettingsHarness(t)
 	policy := h.b.localPolicy().Policy
 	policy.Profiles = []nodepolicy.Profile{{Key: "selected-profile", DisplayName: "Selected", Engine: "llamacpp", Model: "fixture/model"}}
-	policy.Roles = []nodepolicy.Role{{Name: nodepolicy.TierMedium, Profiles: []string{}}}
+	policy.Roles = []nodepolicy.Role{{Name: "medium", Profiles: []string{}}}
 	if _, err := setCurrent(h.b, settingsJSON(policy)); err != nil {
 		t.Fatalf("seed declared role: %v", err)
 	}
 	p := h.request(t, true)
-	p.ModelChange.Policy.Roles = map[string]bool{nodepolicy.TierWeak: true}
+	p.ModelChange.Policy.Roles = map[string]bool{"coder": true}
 	beforePolicy, beforeSettings := h.b.localPolicy().Policy, h.record(t)
 	settingsPath, err := h.b.engineSettingsPath()
 	if err != nil {
@@ -227,7 +227,7 @@ func TestModelSettingsUndeclaredRoleRefusesBeforeWrites(t *testing.T) {
 	setReplacer(h.b, replacer)
 	proxyCalls := len(h.proxy.snapshot())
 	_, err = h.b.previewEngineSettings(context.Background(), p, "")
-	const want = "Role weak is not declared on this node; create it in node settings."
+	const want = "Role coder is not declared on this node; create it in node settings."
 	if err == nil || err.Error() != want || engineSettingsErrorCode(err) != -32602 {
 		t.Fatalf("undeclared role refusal = %v, want invalid params %q", err, want)
 	}

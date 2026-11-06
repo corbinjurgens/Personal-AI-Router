@@ -512,9 +512,6 @@ func ValidateUnsignedDecimal(s string) error {
 func validateModelID(id string) error {
 	return nodepolicy.ValidateModelIdentifier(id)
 }
-func isTier(s string) bool {
-	return s == "weak" || s == "medium" || s == "strong"
-}
 func boundedText(s string, limit int, required bool) error {
 	if required && s == "" || len(s) > limit || !utf8.ValidString(s) {
 		return fmt.Errorf("invalid or oversized text")
@@ -655,8 +652,8 @@ func (p PolicyPatch) Validate() error {
 		}
 	}
 	for tier := range p.Roles {
-		if !isTier(tier) {
-			return fmt.Errorf("roles: unknown tier")
+		if err := nodepolicy.ValidateRoleName(tier); err != nil {
+			return fmt.Errorf("roles: %w", err)
 		}
 	}
 	if p.RequestOptionsMode != nil && *p.RequestOptionsMode != "defaults" && *p.RequestOptionsMode != "enforced" {

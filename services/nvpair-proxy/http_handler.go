@@ -729,9 +729,9 @@ func (f *facade) serveInference(w http.ResponseWriter, r *http.Request, start ti
 		writeIngressError(w, bufferRequestStatus(err), "request-identifier", err.Error())
 		return
 	}
-	tier, _, _ := nodepolicy.ParseAlias(model)
-	if nodepolicy.IsTier(model) {
-		tier = model
+	tier := ""
+	if base, _, ok := nodepolicy.ParseAlias(model); ok && f.roleRequested(base) {
+		tier = base
 	}
 	ctl.observeRequested(requestedDescriptor(model, tier, r.URL.Path))
 	// An inference body naming "model" twice is ambiguous: admission and
@@ -785,22 +785,41 @@ func (f *facade) serveInference(w http.ResponseWriter, r *http.Request, start ti
 		if rejectAmbiguous() {
 			return
 		}
-		// A listener accepts only an exact reserved alias in one top-level
-		// model member. Nested models are payload, never routing selectors.
+		// One exact model member selects either a declared role or the
+		// concrete path. Alias grammar alone never declares a role.
 		tier, mode, ok := nodepolicy.ParseAlias(model)
-		if !ok || !bodyModelMatches(bodyBytes, model) {
+		if base, _, alias := nodepolicy.ParseAlias(strings.TrimSpace(model)); alias && f.roleRequested(base) && strings.TrimSpace(model) != model {
 			ctl.observeIngress(routingIngressResult{factFailed, factRequestInvalid, http.StatusBadRequest})
 			writeIngressError(w, http.StatusBadRequest, "unsupported-alias", "inference requires one exact supported tier alias")
 			return
 		}
-		rules := policy.routingTiers[tier]
-		policy.apiOnly = policy.apiOnly || mode == nodepolicy.AliasAPI || (mode == nodepolicy.AliasBare && rules.BareMode == nodepolicy.BareAPI)
-		policy.publicAllowed = mode != nodepolicy.AliasLocal && !(mode == nodepolicy.AliasBare && rules.BareMode == nodepolicy.BareLocal) &&
-			rules.RemoteAllowed && nodepolicy.PublicDispatchAvailable()
+		if model == "" || !bodyModelMatches(bodyBytes, model) {
+			ctl.observeIngress(routingIngressResult{factFailed, factRequestInvalid, http.StatusBadRequest})
+			writeIngressError(w, http.StatusBadRequest, "unsupported-alias", "inference requires one exact supported tier alias")
+			return
+		}
+		if alias, reason, rejected := requestAlternateAliasRejection(r, bodyBytes, model); rejected {
+			ctl.observeIngress(routingIngressResult{factFailed, factRequestInvalid, http.StatusBadRequest})
+			writeAliasRejection(w, alias, reason)
+			return
+		}
+		if ok && f.roleRequested(tier) {
+			rules := policy.routingTiers[tier]
+			policy.apiOnly = policy.apiOnly || mode == nodepolicy.AliasAPI || (mode == nodepolicy.AliasBare && rules.BareMode == nodepolicy.BareAPI)
+			policy.publicAllowed = mode != nodepolicy.AliasLocal && !(mode == nodepolicy.AliasBare && rules.BareMode == nodepolicy.BareLocal) &&
+				rules.RemoteAllowed && nodepolicy.PublicDispatchAvailable()
+		} else {
+			// An unregistered adapter must not acquire a newly enabled
+			// overlay after body preparation. It retains its refusal-only path.
+			if !policy.apiOnly {
+				policy.hybrid = false
+			}
+			policy.publicAllowed = false
+		}
 	} else {
 		// A reserved hybrid alias the legacy tier path does not serve is refused
 		// here, before candidates, admission, reservation, workload or upstream.
-		if alias, reason, rejected := requestAliasRejection(r, bodyBytes, model, true); rejected {
+		if alias, reason, rejected := requestAliasRejection(r, bodyBytes, model, true, f.roleRequested); rejected {
 			ctl.observeIngress(routingIngressResult{factFailed, factRequestInvalid, http.StatusBadRequest})
 			slog.Warn("proxy request rejected",
 				"id", reqID, "method", r.Method, "path", r.URL.Path,
@@ -923,7 +942,7 @@ func (f *facade) serveProxyPassthrough(w http.ResponseWriter, r *http.Request, s
 		writeIngressError(w, http.StatusBadRequest, "strict-admission", message)
 		return
 	}
-	if alias, reason, rejected := requestAliasRejection(r, body, model, false); rejected {
+	if alias, reason, rejected := requestAliasRejection(r, body, model, false, f.roleRequested); rejected {
 		writeAliasRejection(w, alias, reason)
 		_ = f.notify("proxy/request", RequestEvent{ID: reqID, Method: r.Method, Path: r.URL.Path,
 			Status: http.StatusBadRequest, Duration: time.Since(start).Milliseconds(), Error: reason})

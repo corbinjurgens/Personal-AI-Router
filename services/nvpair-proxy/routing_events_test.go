@@ -66,6 +66,38 @@ func historyTestScan(t *testing.T, h *proxyRoutingHistory) {
 	}
 }
 
+func TestRoutingHistoryRequestedRoleProjection(t *testing.T) {
+	for _, role := range []string{"", "weak", "coder", "r1.fast_v2", "a" + strings.Repeat("x", 62) + "z"} {
+		name := role
+		if name == "" {
+			name = "empty role"
+		}
+		t.Run(name, func(t *testing.T) {
+			p := newBoundProxy(NewCodec(&recordingWriter{}))
+			r := nativeRegistered(t, p, time.UnixMilli(1000))
+			r.owner.observeRequested(requestedDescriptor("model", role, routeChatCompletions))
+			h := p.newRoutingHistory()
+			historyTestScan(t, h)
+			got := historyTestRecord(t, h, 1)
+			if got.Requested != (nodepolicy.RoutingHistoryRequested{Model: "model", Tier: role, Mode: "chat"}) {
+				t.Fatalf("public decode lost full requested role: %+v", got.Requested)
+			}
+			before := got.Seq
+			r.owner.observeRequested(requestedDescriptor("model", role, routeChatCompletions))
+			historyTestScan(t, h)
+			if historyTestRecord(t, h, 1).Seq != before {
+				t.Fatal("equivalent role changed public sequence")
+			}
+			r.owner.observeRequested(requestedDescriptor("model", "different", routeChatCompletions))
+			historyTestScan(t, h)
+			after := historyTestRecord(t, h, 1)
+			if after.Seq != before+1 || after.Requested.Tier != "different" {
+				t.Fatal("changed role did not reach public projection")
+			}
+		})
+	}
+}
+
 func TestRoutingHistoryProjection(t *testing.T) {
 	t.Run("delivered success retains failed accounting and exact money", func(t *testing.T) {
 		p := newBoundProxy(NewCodec(&recordingWriter{}))
@@ -232,7 +264,7 @@ func TestRoutingHistoryCapacity(t *testing.T) {
 	checkPacked(reflect.TypeOf(routingProjectionCell{}))
 	// Include fixed enum tables and their static text, not just their headers.
 	static := uintptr(0)
-	for _, values := range [][]string{routingHistoryStates[:], routingHistoryOutcomes[:], routingHistoryTiers[:], routingHistoryModes[:], routingHistoryAccounting[:], routingHistoryAccountStates[:], routingFactReasons[:]} {
+	for _, values := range [][]string{routingHistoryStates[:], routingHistoryOutcomes[:], routingHistoryModes[:], routingHistoryAccounting[:], routingHistoryAccountStates[:], routingFactReasons[:]} {
 		static += uintptr(len(values)) * unsafe.Sizeof("")
 		for _, s := range values {
 			static += uintptr(len(s))
@@ -289,7 +321,7 @@ func TestRoutingHistoryCapacityControlCensus(t *testing.T) {
 		t.Fatal("census includes a referent the actual owner does not have")
 	}
 	actualOverlap := 32*unsafe.Sizeof(routingDestinationDescriptor{}) + unsafe.Sizeof(routingRequestedDescriptor{}) + unsafe.Sizeof(routingWorkloadDescriptor{})
-	if actualOverlap > routingHistoryDescriptorOverlap || unsafe.Sizeof(routingSourceScan{}.sources) != 256*8 {
+	if actualOverlap > routingHistoryDescriptorOverlap || routingHistoryDescriptorOverlap != 32*800+640+288 || unsafe.Sizeof(routingSourceScan{}.sources) != 256*8 {
 		t.Fatal("native descriptor overlap or sole scan-pointer bank exceeded its row")
 	}
 	// Actual standard context layout, not sizeof(interface). Registration and
@@ -441,7 +473,8 @@ func TestRoutingHistoryCapacityMaximumStrings(t *testing.T) {
 			f.disposition = factDisposition(uint8(factCompleted), factDeploymentQuarantined, 599)
 			f.flags = factEndKnown | factMoneyApplicable | factCeilingKnown | factHeldKnown | factChargeKnown | uint64(factAccountingRetained)<<16
 			f.ceiling, f.granted, f.held, f.charged = math.MaxInt64, math.MaxInt64, math.MaxInt64, math.MaxInt64
-			f.requested.length, f.requested.tier, f.requested.mode = uint16(copy(f.requested.model[:], model)), 3, 2
+			role := "a" + strings.Repeat("x", 62) + "z"
+			f.requested.length, f.requested.roleLen, f.requested.mode = uint16(copy(f.requested.model[:], model)), uint8(copy(f.requested.role[:], role)), 2
 			h.current.count, h.current.cells[0].sequence = 1, factMaxRevision
 			d := destinationDescriptor(model, first, second, true)
 			if d == nil || len(model) != 512 {
@@ -453,7 +486,7 @@ func TestRoutingHistoryCapacityMaximumStrings(t *testing.T) {
 			destination := nodepolicy.RoutingHistoryDestination{Kind: "api", Model: str(model), DeploymentID: str(first), AccountID: str(second)}
 			want := nodepolicy.RoutingHistoryRecord{
 				Schema: 1, Request: nodepolicy.RoutingRequestKey{OriginNodeID: origin, ProxyRunID: run, RequestID: "9223372036854775807"}, Seq: 9007199254740991,
-				Requested: nodepolicy.RoutingHistoryRequested{Model: model, Tier: "strong", Mode: "completion"}, CreatedAt: 9007199254740000, EndedAt: number(9007199254740002),
+				Requested: nodepolicy.RoutingHistoryRequested{Model: model, Tier: role, Mode: "completion"}, CreatedAt: 9007199254740000, EndedAt: number(9007199254740002),
 				State: "completed", Reason: "deployment-quarantined", Status: number(599), Served: &destination,
 				Spend: nodepolicy.RoutingHistorySpend{Currency: "USD", CeilingNanoUSD: &money, GrantedNanoUSD: &money, HeldNanoUSD: &money, ChargedNanoUSD: &money, Accounting: "retained"}, DroppedAttempts: 9007199254739968,
 			}

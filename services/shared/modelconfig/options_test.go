@@ -279,18 +279,21 @@ func TestPolicyPatchGenerationUsesExistingRanges(t *testing.T) {
 	test("not a numeric value", "temperature", `"0.5"`, false)
 }
 
-func TestPolicyPatchRolesMatchClosedNodePolicyTiers(t *testing.T) {
+func TestPolicyPatchRolesMatchRoleGrammar(t *testing.T) {
 	for name, roles := range map[string]string{
 		"valid explicit assignment and removal": `{"weak":true,"medium":false,"strong":true}`,
-		"unknown tier":                          `{"fast":true}`,
+		"valid arbitrary role":                  `{"coder":true}`,
 		"case folded tier":                      `{"Weak":true}`,
 		"unrelated model assignment":            `{"weak":"other/model"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := DecodeModelChange([]byte(`{"modelId":"m","expectedPolicyRevision":"0","policy":{"roles":` + roles + `}}`))
-			valid := name == "valid explicit assignment and removal"
+			change, err := DecodeModelChange([]byte(`{"modelId":"m","expectedPolicyRevision":"0","policy":{"roles":` + roles + `}}`))
+			valid := name == "valid explicit assignment and removal" || name == "valid arbitrary role"
 			if (err == nil) != valid {
 				t.Fatalf("decode err=%v, want valid=%v", err, valid)
+			}
+			if name == "valid arbitrary role" && (change.Policy == nil || len(change.Policy.Roles) != 1 || !change.Policy.Roles["coder"]) {
+				t.Fatalf("arbitrary role membership lost: %+v", change.Policy)
 			}
 		})
 	}

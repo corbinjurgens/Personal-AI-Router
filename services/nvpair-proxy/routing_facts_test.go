@@ -26,7 +26,15 @@ import (
 )
 
 const nativeStrictProducerBytes = unsafe.Sizeof(routingFactAttempt{}) + unsafe.Sizeof(routingStrictFactBody{}) + 128
-const nativeGraphBytes = unsafe.Sizeof(routingNativeFacts{}) + 32*800 + 528 + 288 + 1616 + 800 + 512 + nativeStrictProducerBytes
+
+// The spec bounds representation capacity, excluding allocator/GC overhead.
+// Both retained leaves and simultaneous replacement drafts use actual layouts.
+// Winning-descriptor and startup process drafts retain their conservative bounds.
+const nativeRetainedDescriptorBytes = 32*unsafe.Sizeof(routingDestinationDescriptor{}) + unsafe.Sizeof(routingRequestedDescriptor{}) + unsafe.Sizeof(routingWorkloadDescriptor{})
+const nativeReplacementDraftBytes = unsafe.Sizeof(routingDestinationDescriptor{}) + unsafe.Sizeof(routingRequestedDescriptor{}) + unsafe.Sizeof(routingWorkloadDescriptor{})
+const nativeWinningDescriptorAllowance = 800
+const nativeProcessDraftAllowance = 512
+const nativeGraphBytes = unsafe.Sizeof(routingNativeFacts{}) + nativeRetainedDescriptorBytes + nativeReplacementDraftBytes + nativeWinningDescriptorAllowance + nativeProcessDraftAllowance + nativeStrictProducerBytes
 
 // These bounds also fail during cross-compilation, so supported 64-bit target
 // layouts can be checked without executing a foreign test binary.
@@ -34,7 +42,8 @@ var (
 	_ [3328 - unsafe.Sizeof(routingNativeFacts{})]byte
 	_ [96 - unsafe.Sizeof(routingNativeAttempt{})]byte
 	_ [776 - unsafe.Sizeof(routingDestinationDescriptor{})]byte
-	_ [516 - unsafe.Sizeof(routingRequestedDescriptor{})]byte
+	_ [580 - unsafe.Sizeof(routingRequestedDescriptor{})]byte
+	_ [unsafe.Sizeof(routingRequestedDescriptor{}) - 580]byte
 	_ [288 - unsafe.Sizeof(routingWorkloadDescriptor{})]byte
 	_ [512 - unsafe.Sizeof(routingProcessDescriptor{})]byte
 	_ [6144 - unsafe.Sizeof(routingSourceDirectory{})]byte
@@ -97,6 +106,12 @@ func TestRoutingNativeFactsLayouts(t *testing.T) {
 	if strconv.IntSize != 64 {
 		t.Skip("C4 specifies supported 64-bit targets")
 	}
+	requested := routingRequestedDescriptor{}
+	if unsafe.Sizeof(requested) != 580 || unsafe.Alignof(requested) != 2 ||
+		unsafe.Offsetof(requested.role) != 512 || unsafe.Offsetof(requested.length) != 576 ||
+		unsafe.Offsetof(requested.roleLen) != 578 || unsafe.Offsetof(requested.mode) != 579 {
+		t.Fatal("requested descriptor inline layout changed")
+	}
 	for _, tc := range []struct {
 		name       string
 		got, limit uintptr
@@ -104,7 +119,7 @@ func TestRoutingNativeFactsLayouts(t *testing.T) {
 		{"request payload", unsafe.Sizeof(routingNativeFacts{}), 3328},
 		{"attempt cell", unsafe.Sizeof(routingNativeAttempt{}), 96},
 		{"destination", unsafe.Sizeof(routingDestinationDescriptor{}), 776},
-		{"requested", unsafe.Sizeof(routingRequestedDescriptor{}), 516},
+		{"requested", unsafe.Sizeof(routingRequestedDescriptor{}), 580},
 		{"workload", unsafe.Sizeof(routingWorkloadDescriptor{}), 288},
 		{"process", unsafe.Sizeof(routingProcessDescriptor{}), 512},
 		{"directory including sole scan bank", unsafe.Sizeof(routingSourceDirectory{}), 6144},
@@ -135,11 +150,12 @@ func TestRoutingNativeFactsLayouts(t *testing.T) {
 	if nativeGraphBytes > 32768 {
 		t.Fatalf("native graph plus all drafts/winning overlap=%d", nativeGraphBytes)
 	}
+	t.Logf("native graph representation=%d, retained descriptors=%d, replacement drafts=%d, limit=32768", nativeGraphBytes, nativeRetainedDescriptorBytes, nativeReplacementDraftBytes)
 	// Fixed proxy control C separately funds the ledger observation counter,
 	// both nested registry sidecar pointer fields (one remains nil), and the
 	// single monotonic reference. No inference grant funds these 48 bytes.
 	fixedControl := unsafe.Sizeof(uint64(0)) + 2*unsafe.Sizeof((*routingSourceDirectory)(nil)) + unsafe.Sizeof(routingFactsClock)
-	if fixedControl != 48 || 6144+2048+512+26416+fixedControl > 131072 {
+	if fixedControl != 48 || routingHistoryDescriptorOverlap != 32*800+640+288 || 6144+2048+512+routingHistoryDescriptorOverlap+fixedControl > 131072 {
 		t.Fatalf("fixed C control accounting=%d", fixedControl)
 	}
 	// The native historical graph may point only to immutable inline leaves.
@@ -150,6 +166,63 @@ func TestRoutingNativeFactsLayouts(t *testing.T) {
 				t.Fatalf("descriptor %s retains %s", kind.Name(), kind.Field(i).Name)
 			}
 		}
+	}
+}
+
+func TestRoutingRequestedRoleOwnedNativeBytes(t *testing.T) {
+	for _, role := range []string{"", "weak", "coder", "r1.fast_v2", "a" + strings.Repeat("x", 62) + "z"} {
+		name := role
+		if name == "" {
+			name = "empty role"
+		}
+		t.Run(name, func(t *testing.T) {
+			p := newBoundProxy(NewCodec(&recordingWriter{}))
+			r := nativeRegistered(t, p, time.UnixMilli(1000))
+			d := requestedDescriptor("model", role, routeChatCompletions)
+			var wantRole [64]byte
+			copy(wantRole[:], role)
+			if d.role != wantRole || int(d.roleLen) != len(role) || string(d.model[:d.length]) != "model" || d.mode != 1 {
+				t.Fatalf("constructor lost requested bytes: %+v", d)
+			}
+			r.owner.observeRequested(d)
+			before := nativeCopy(t, r.owner)
+			if before.requested != *d {
+				t.Fatal("native copy differs from constructor")
+			}
+			r.owner.observeRequested(requestedDescriptor("model", role, routeChatCompletions))
+			if nativeCopy(t, r.owner).revision != before.revision {
+				t.Fatal("equivalent role advanced revision")
+			}
+			changedRole := "different"
+			r.owner.observeRequested(requestedDescriptor("model", changedRole, routeChatCompletions))
+			after := nativeCopy(t, r.owner)
+			if after.revision != before.revision+1 || string(after.requested.role[:after.requested.roleLen]) != changedRole {
+				t.Fatal("changed role did not advance revision once")
+			}
+			if before.requested.role != wantRole || int(before.requested.roleLen) != len(role) {
+				t.Fatal("later observation mutated owned copy")
+			}
+		})
+	}
+}
+
+func TestRoutingRequestedInvalidRoleHygiene(t *testing.T) {
+	for _, role := range []string{"Upper", ".first", "bad:api", "_first", "bad role", "bad\nrole", "界", "a" + strings.Repeat("x", 63) + "z"} {
+		t.Run(strconv.Quote(role), func(t *testing.T) {
+			for _, tc := range []struct {
+				path string
+				mode uint8
+			}{{routeChatCompletions, 1}, {"/v1/messages", 1}, {"/v1/completions", 2}, {"/v1/embeddings", 3}, {"/unknown", 0}} {
+				d := requestedDescriptor("model", role, tc.path)
+				if d.role != ([64]byte{}) || d.roleLen != 0 || string(d.model[:d.length]) != "model" || d.mode != tc.mode {
+					t.Fatalf("invalid role copied or changed model/mode for %s: %+v", tc.path, d)
+				}
+			}
+		})
+	}
+	d := requestedDescriptor("bad\nmodel", "coder", routeChatCompletions)
+	if d.model != ([512]byte{}) || d.length != 0 || string(d.role[:d.roleLen]) != "coder" || d.mode != 1 {
+		t.Fatal("invalid model changed role or mode behavior")
 	}
 }
 

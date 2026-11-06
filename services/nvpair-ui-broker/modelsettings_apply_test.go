@@ -739,9 +739,9 @@ func modelSettingsPresetPolicy(t *testing.T, h *modelSettingsHarness) nodepolicy
 		{Key: "untouched", DisplayName: "Unrelated profile", Engine: "llamacpp", Model: "untouched", ContextTokens: 2048},
 	}
 	policy.Roles = []nodepolicy.Role{
-		{Name: nodepolicy.TierStrong, Profiles: []string{"untouched", "edited"}},
-		{Name: nodepolicy.TierMedium, Profiles: []string{}},
-		{Name: nodepolicy.TierWeak, Profiles: []string{"edited", "untouched"}},
+		{Name: "strong", Profiles: []string{"untouched", "edited"}},
+		{Name: "medium", Profiles: []string{}},
+		{Name: "weak", Profiles: []string{"edited", "untouched"}},
 	}
 	canonical, err := nodepolicy.Parse(settingsJSON(policy))
 	if err != nil {
@@ -925,15 +925,15 @@ func TestModelSettingsApplyConversionOnlyPatchesSelectedRoleMembership(t *testin
 	h.engine.setAnswer(modelSettingsPresetAnswer(h))
 	p := h.request(t, false)
 	p.ModelChange.ProfileKey = "edited"
-	p.ModelChange.Policy = &modelconfig.PolicyPatch{Roles: map[string]bool{nodepolicy.TierMedium: true, nodepolicy.TierWeak: false}}
+	p.ModelChange.Policy = &modelconfig.PolicyPatch{Roles: map[string]bool{"medium": true, "weak": false}}
 	p = h.review(t, p, "")
 	if receipt, err := h.b.applyEngineSettings(context.Background(), p, ""); err != nil || receipt.Phase != "succeeded" {
 		t.Fatalf("membership conversion = %+v, %v", receipt, err)
 	}
 	before.Roles = []nodepolicy.Role{
-		{Name: nodepolicy.TierStrong, Profiles: []string{"untouched", "edited"}},
-		{Name: nodepolicy.TierMedium, Profiles: []string{"edited"}},
-		{Name: nodepolicy.TierWeak, Profiles: []string{"untouched"}},
+		{Name: "strong", Profiles: []string{"untouched", "edited"}},
+		{Name: "medium", Profiles: []string{"edited"}},
+		{Name: "weak", Profiles: []string{"untouched"}},
 	}
 	assertModelSettingsConvertedPolicy(t, h, before)
 }
@@ -1997,7 +1997,7 @@ func TestModelSettingsApplyRemoveCleansPolicyReferencesAndLastLoad(t *testing.T)
 	profile.MaxOutputTokens, profile.MaxConcurrent, profile.MemoryBytes = 512, 1, 1024
 	profile.Qualification = &nodepolicy.QualificationRef{ID: "fixture-qualified", Revision: "1"}
 	policy.Profiles = append(policy.Profiles, nodepolicy.Profile{Key: "other", DisplayName: "Other", Engine: "llamacpp", Model: "other"})
-	policy.Roles = []nodepolicy.Role{{Name: nodepolicy.TierWeak, Profiles: []string{"model-8k"}}, {Name: nodepolicy.TierStrong, Profiles: []string{"other", "model-8k"}}}
+	policy.Roles = []nodepolicy.Role{{Name: "weak", Profiles: []string{"model-8k"}}, {Name: "strong", Profiles: []string{"other", "model-8k"}}}
 	policy.ServedModels = nodepolicy.ServedModels{{Engine: "llamacpp", Model: "model-8k"}, {Engine: "llamacpp", Model: "other"}}
 	policy.ResidentModels = nodepolicy.ResidentModels{{Engine: "llamacpp", Model: "model-8k"}}
 	policy.EngineBindings = nodepolicy.EngineBindings{{Engine: "llamacpp", Model: "model-8k"}, {Engine: "llamacpp", Model: "other"}}
@@ -2010,7 +2010,7 @@ func TestModelSettingsApplyRemoveCleansPolicyReferencesAndLastLoad(t *testing.T)
 		t.Fatalf("remove: %+v, %v", receipt, err)
 	}
 	policy = h.b.localPolicy().Policy
-	wantRoles := []nodepolicy.Role{{Name: nodepolicy.TierWeak, Profiles: []string{}}, {Name: nodepolicy.TierStrong, Profiles: []string{"other"}}}
+	wantRoles := []nodepolicy.Role{{Name: "weak", Profiles: []string{}}, {Name: "strong", Profiles: []string{"other"}}}
 	if len(policy.Profiles) != 1 || policy.Profiles[0].Key != "other" || !reflect.DeepEqual(policy.Roles, wantRoles) || !reflect.DeepEqual(policy.ServedModels, nodepolicy.ServedModels{{Engine: "llamacpp", Model: "other"}}) || len(policy.ResidentModels) != 0 || !reflect.DeepEqual(policy.EngineBindings, nodepolicy.EngineBindings{{Engine: "llamacpp", Model: "other"}}) {
 		t.Fatalf("removed profile references remain: %+v", policy)
 	}

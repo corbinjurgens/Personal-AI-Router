@@ -1077,7 +1077,7 @@ proxy enforces it.
   permitted attempt it relays the 503, even if other candidates remain.
   Strict hybrid admission instead uses its `strict-admission` error without
   those ordinary pause headers. Pause does not remove catalogue models or
-  declared tier aliases. See the
+  declared role aliases. See the
   [proxy admission contract](../nvpair-proxy/spec.md#5-request-path).
   The advertisement is snapshot evidence of saved policy. Healthy scanner
   refreshes have a nominal 15-second cadence plus preceding work, batching and
@@ -1359,10 +1359,55 @@ when the profile is not local-only.
   A successful
   remote change is also announced to this node's clients under the target's
   `nodeId`.
+- **Roles and API configuration.** Roles are user-created ordered
+  `{name, profiles}` declarations on each node, including empty declarations.
+  There are no built-in or default roles. Names match
+  `^[a-z0-9][a-z0-9._-]{0,63}$` (at most 64 bytes) and cannot equal a profile
+  key on that node. The Roles section in node settings creates, renames,
+  removes and reorders them. Local candidates come only from declared-role
+  profiles. Widening uses the requesting node's own weakest-to-strongest list:
+  the requested role first, then allowed stronger roles, then allowed weaker
+  roles nearest first. A role absent from that list does not widen.
+
+  `tiers` holds only API deployment entries; both its keys and `routing.tiers`
+  keys accept any valid role name. Local tier entries are retired. Existing
+  stored repair drops them without creating roles and drops routing rules
+  without a retained API entry. No per-role routing defaults are created.
+  API configuration alone declares no role. A request is a role request only
+  when this node or a visible peer declares it, including an empty declaration.
+  Each listed role also lists `<role>:api` and `<role>:local`, whether or not
+  it has API entries. Ordinary hyphens have no override meaning.
+
+  A public API route requires a configured deployment entry in `tiers` and a
+  matching `routing.tiers` rule with `remoteAllowed`, alongside the existing
+  permission checks. These prerequisites do not activate dispatch. Public
+  dispatch is disabled in this build: `:api` overrides are listed and refused,
+  and enabled deployments and remote or paid permissions cannot be saved.
+  Profile keys whose text before the first colon is a valid role name are
+  reserved for every suffix, including an empty one. This reservation does not
+  apply to native model names, provider identifiers or artifact selectors;
+  their existing identifier contracts remain in force.
+
+  When RoleEditor edits this PC (`nodeId` undefined), rename and removal also
+  update its private API configuration in the same revision-checked save.
+  A name holds configuration if `tiers[name]` is nonempty or a
+  `routing.tiers[name]` key exists; an empty `tiers` array alone is absent.
+  Rename refuses atomically if both old and new names hold configuration,
+  even in different maps, names both in the error and asks for another name.
+  Otherwise the sole configuration ends under the new name: source settings
+  move, or destination-only settings stay. Every old-name key is deleted,
+  including empty keys. Removal deletes both old-name keys. Confirmations
+  identify source configuration that moves or is deleted. Live validation and
+  the save transform apply the same rule through earlier unsaved renames.
+
+  Remote role rename or removal leaves unseen private API configuration
+  unchanged, sends no API edit intent and infers none from role-list changes.
+  Every remote confirmation says `API entries on <node> can't be seen from here and stay as they are.`
+  This does not change the peer projection or merge contract below.
 - **Peer projection.** A paired node sees and changes a projection of the policy,
   never the owner's document. A relayed `policy:get` and the result of a relayed
-  `policy:set` carry `nodepolicy.PeerPolicy`: the device fields, the local tier
-  entries (a tier left with none is omitted), `tierPolicy` and the `revision` of
+  `policy:set` carry `nodepolicy.PeerPolicy`: the device fields (including ordered
+  roles), an empty `tiers` map, `tierPolicy` and the `revision` of
   the protected source document. The whole `routing` section (accounts,
   credential references, deployments, limits, listener) and every API tier entry
   are left out. A relayed `policy:set` must carry the projection's `tiers` and
@@ -1741,7 +1786,7 @@ Field-by-field:
 | `modelsByEngine` | object | models attributed to their serving engine (e.g. `llamacpp` / `llamacpp-custom`), alongside the flat `models` union. Absent or null means unknown attribution and retains the existing legacy flat fallback. Any present map is authoritative: outer `{}` suppresses flat fallback even when `models` contains valid names; an engine key with `[]` is an observed empty inventory; populated keys retain their models and valid sibling engines. A missing engine key in a present map supplies no models for that engine. Nil attribution is omitted; a nonnil empty map stays present. |
 | `loadedByEngine` | object | the models currently **loaded in memory** for each engine (normally a subset of `modelsByEngine`), keyed by engine name. Enriched from the peer's `loadedByEngine`. An engine key with an empty list means "running, nothing loaded"; a missing key means loaded state wasn't reported. Omitted when no engine reports loaded state. |
 | `modelIdentities` | object | validated display metadata keyed by engine and served model name, paired with `modelsByEngine` by the scanner. Entries can include repository, quantization and its source, configured context, and model file metadata. Omitted when no valid identities are available or when optional metadata would exceed a discovery publication's frame budget. Routing inventory and stored identity facts are preserved. Identity changes reach the same discovery snapshots; identity maps and file slices are detached at relay storage and publication boundaries and in the client projection. These values grant no routing or strict-admission authority. |
-| `policy` | object | the node's own policy advertisement, enriched from the same `GET /v1/models` fetch: `revision` (its persisted policy revision), `roles` (tier name to `{engine, model, contextTokens?, capabilities?}`) `pausedBy?` (`local` or `peer`) and `pauseMode?` (`configured` or `immediate`). Omitted when the node publishes none (an older peer, or before its broker's first push), which means the node declares nothing. |
+| `policy` | object | the node's own policy advertisement, enriched from the same `GET /v1/models` fetch: `revision` (its persisted policy revision), ordered `roles` (`{name, profiles}` declarations, with profile keys in membership order), shared `profiles` facts, `pausedBy?` (`local` or `peer`) and `pauseMode?` (`configured` or `immediate`). Empty roles remain declared. Omitted when the node publishes none (an older peer, or before its broker's first push), which means the node declares nothing. |
 
 A node that the scanner reports as removed is deleted from the snapshot; `lastSeen` is not preserved for removed nodes. The response is wrapped in `{nodes: [...]}` (rather than a bare array) so we can grow summary fields later without breaking clients. An empty list is a normal early-startup state, not an error.
 

@@ -610,13 +610,13 @@ func TestPauseOptionsNormalizeForOldDocumentsAndPeerSets(t *testing.T) {
 	reject("rejects a negative drain timeout", `{"onActive":"finish","drainTimeoutSeconds":-1,"unloadModels":true,"stopEngines":true}`)
 }
 
-// A descriptor engine ID is a policy identity like a built-in name: profiles,
-// tiers and roles may name it whether or not this node runs it.
+// A descriptor engine ID is a policy identity like a built-in name: profiles
+// and roles may name it whether or not this node runs it.
 func TestValidateAcceptsDescriptorEngineIDs(t *testing.T) {
 	p := Default()
 	p.Profiles = []Profile{{Key: "custom", DisplayName: "custom", Engine: "llamacpp-custom", Model: "org/model:Q4_K_M"}}
-	p.Tiers = map[string][]TierEntry{"weak": {{Kind: EntryLocal, Engine: "strata", Model: "qwen-next"}}}
-	p.Roles = []Role{{Name: TierStrong, Profiles: []string{"custom"}}}
+	p.Profiles = append(p.Profiles, Profile{Key: "strata", DisplayName: "Strata", Engine: "strata", Model: "qwen-next"})
+	p.Roles = []Role{{Name: "strong", Profiles: []string{"custom", "strata"}}}
 	if err := p.Validate(); err != nil {
 		t.Fatalf("descriptor engine ids rejected: %v", err)
 	}
@@ -638,13 +638,14 @@ func TestValidateRejects(t *testing.T) {
 			p.Profiles = []Profile{{Key: "a", DisplayName: "a", Engine: "llamacpp", Model: "m"}, {Key: "b", DisplayName: "b", Engine: "llamacpp", Model: "m"}}
 		},
 		"unknown tier": func(p *Policy) {
-			p.Tiers = map[string][]TierEntry{"huge": {{Kind: EntryLocal, Engine: "llamacpp", Model: "m"}}}
+			*p = stagedPolicy(t)
+			p.Tiers["Coder"] = []TierEntry{{Kind: EntryAPI, Deployment: "free-small"}}
 		},
 		"tier as model": func(p *Policy) {
-			p.Tiers = map[string][]TierEntry{"weak": {{Kind: EntryLocal, Engine: "llamacpp", Model: "strong"}}}
+			p.ServedModels = ServedModels{{Engine: "llamacpp", Model: "strong:local"}}
 		},
 		"unknown capability": func(p *Policy) {
-			p.Tiers = map[string][]TierEntry{"weak": {{Kind: EntryLocal, Engine: "llamacpp", Model: "m", Capabilities: []Capability{"telepathy"}}}}
+			p.Profiles = []Profile{{Key: "m", DisplayName: "Model", Engine: "llamacpp", Model: "m", Capabilities: []Capability{"telepathy"}}}
 		},
 		"options not object": func(p *Policy) {
 			p.Profiles = []Profile{{Key: "a", DisplayName: "a", Engine: "llamacpp", Model: "m", RequestOptions: json.RawMessage(`[1]`)}}
@@ -664,7 +665,7 @@ func TestValidateRejects(t *testing.T) {
 	}
 }
 
-func TestProfileForAndIsTier(t *testing.T) {
+func TestProfileFor(t *testing.T) {
 	p := Default()
 	p.Profiles = []Profile{{Key: "q", DisplayName: "q", Engine: "llamacpp", Model: "qwen3-8b", MaxConcurrent: 2}}
 	if pr, ok := p.ProfileFor("llamacpp", "qwen3-8b"); !ok || pr.MaxConcurrent != 2 {
@@ -673,8 +674,53 @@ func TestProfileForAndIsTier(t *testing.T) {
 	if _, ok := p.ProfileFor("llamacpp-custom", "qwen3-8b"); ok {
 		t.Fatal("ProfileFor matched the wrong engine")
 	}
-	if !IsTier("medium") || IsTier("qwen3-8b") {
-		t.Fatal("IsTier misclassified")
+}
+
+func TestRoleNamesPreserveDeclarationOrder(t *testing.T) {
+	p := Default()
+	if len(p.RoleNames()) != 0 {
+		t.Fatal("default supplied roles")
+	}
+	p.Roles = []Role{{Name: "deep"}, {Name: "coder"}, {Name: "fast"}}
+	if got := p.RoleNames(); !reflect.DeepEqual(got, []string{"deep", "coder", "fast"}) {
+		t.Fatalf("role order = %v", got)
+	}
+}
+
+func TestNativeAndServedModelNamespaces(t *testing.T) {
+	p := Default()
+	p.Profiles = []Profile{{Key: "lfm-8k", DisplayName: "LFM", Engine: "llamacpp", Model: "coder:local"}}
+	if err := p.Validate(); err != nil {
+		t.Fatalf("native target: %v", err)
+	}
+	p.ServedModels = []ModelRef{{Engine: "llamacpp", Model: "coder:local"}}
+	if err := p.Validate(); err == nil || !strings.Contains(err.Error(), "reserved alias") {
+		t.Fatalf("served target: %v", err)
+	}
+}
+
+func TestBareFormerRoleIsValidProfileKey(t *testing.T) {
+	p := Default()
+	p.Profiles = []Profile{{Key: "weak", DisplayName: "Weak", Engine: "llamacpp", Model: "native"}}
+	if err := p.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	p.Roles = []Role{{Name: "weak", Profiles: []string{}}}
+	if err := p.Validate(); err == nil {
+		t.Fatal("accepted same-node role and profile collision")
+	}
+}
+
+func TestArbitraryAPIRoleKeys(t *testing.T) {
+	for _, name := range []string{"coder", "Coder"} {
+		t.Run(name, func(t *testing.T) {
+			p := stagedPolicy(t)
+			p.Tiers[name] = []TierEntry{{Kind: EntryAPI, Deployment: "free-small"}}
+			p.Routing.Tiers["coder"] = TierRouting{BareMode: BareHybrid}
+			if err := p.Validate(); (err == nil) != (name == "coder") {
+				t.Fatalf("API role key: %v", err)
+			}
+		})
 	}
 }
 
@@ -694,10 +740,7 @@ const v1Document = `{
   "profiles": [{"key": "qwen", "displayName": "qwen", "engine": "llamacpp", "model": "qwen3-8b",
     "contextTokens": 16384, "capabilities": ["tools"], "memoryBytes": 5000000000, "maxConcurrent": 2,
     "requestOptions": {  "options": { "num_ctx": 16384 }  }}],
-  "tiers": {
-    "weak": [{"engine": "llamacpp", "model": "qwen3-8b", "contextTokens": 8192, "capabilities": ["tools", "structured"]}],
-    "strong": [{"engine": "llamacpp-custom", "model": "big"}, {"engine": "llamacpp", "model": "qwen3-8b"}]
-  },
+  "roles": [{"name":"weak","profiles":["qwen"]}],
   "tierPolicy": {"allowStronger": false, "allowWeaker": true, "preferLoaded": "any"}
 }`
 
@@ -721,14 +764,8 @@ func TestParseMigratesV1KeepingLocalSettings(t *testing.T) {
 			Capabilities: []Capability{CapTools}, MemoryBytes: 5000000000, MaxConcurrent: 2,
 			RequestOptions: json.RawMessage(`{"options":{"num_ctx":16384}}`),
 		}},
-		Roles: []Role{},
-		Tiers: map[string][]TierEntry{
-			"weak": {{Kind: EntryLocal, Engine: "llamacpp", Model: "qwen3-8b", ContextTokens: 8192, Capabilities: []Capability{CapTools, CapStructured}}},
-			"strong": {
-				{Kind: EntryLocal, Engine: "llamacpp-custom", Model: "big"},
-				{Kind: EntryLocal, Engine: "llamacpp", Model: "qwen3-8b"},
-			},
-		},
+		Roles:      []Role{{Name: "weak", Profiles: []string{"qwen"}}},
+		Tiers:      map[string][]TierEntry{},
 		TierPolicy: TierPolicy{AllowStronger: false, AllowWeaker: true, PreferLoaded: "any"},
 		Routing:    got.Routing,
 	}
@@ -758,11 +795,8 @@ func TestParseMigrationLeavesRemoteAndPaidOff(t *testing.T) {
 	if p.Routing.Listener.Enabled {
 		t.Error("listener enabled by migration")
 	}
-	for _, tier := range []string{"weak", "medium", "strong"} {
-		tr := p.Routing.Tiers[tier]
-		if tr.RemoteAllowed || tr.PaidAllowed || tr.BareMode != BareHybrid {
-			t.Errorf("tier %s = %+v, want hybrid with remote and paid off", tier, tr)
-		}
+	if len(p.Routing.Tiers) != 0 {
+		t.Fatalf("migration supplied role rules: %+v", p.Routing.Tiers)
 	}
 }
 
@@ -772,7 +806,7 @@ func TestParseIsIdempotent(t *testing.T) {
 		"minimal v1":         `{"version":1}`,
 		"full v1":            v1Document,
 		"v1 with null tier":  `{"version":1,"tiers":{"weak":null,"medium":[]}}`,
-		"v2 empty lists":     `{"version":2,"profiles":null,"tiers":{"weak":[{"kind":"local","engine":"llamacpp","model":"m","capabilities":[]}]}}`,
+		"v2 empty lists":     `{"version":2,"profiles":[{"key":"m","displayName":"Model","engine":"llamacpp","model":"m","capabilities":[]}],"roles":[{"name":"weak","profiles":["m"]}]}`,
 		"v2 spaced options":  `{"version":2,"profiles":[{"key":"a", "displayName":"a", "engine":"llamacpp","model":"m","capabilities":[],"requestOptions": { "keep_alive" : "10m" }}]}`,
 		"v2 with revision":   `{"version":2,"revision":"9007199254740993"}`,
 		"v2 with api config": stagedRoutingDocument,
@@ -810,73 +844,35 @@ func TestParseIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestParseMigrationKeepsFilesVersion1Accepted(t *testing.T) {
-	t.Run("exact duplicate tier entry collapses to the first", func(t *testing.T) {
-		doc := `{"version":1,"availability":"paused",
-			"profiles":[{"key":"keep", "displayName":"keep", "engine":"llamacpp","model":"m"}],
-			"tiers":{"weak":[
-				{"engine":"llamacpp","model":"m","contextTokens":100},
-				{"engine":"llamacpp-custom","model":"m"},
-				{"engine":"llamacpp","model":"m","contextTokens":100}]}}`
-		p, err := Parse([]byte(doc))
-		if err != nil {
-			t.Fatalf("Parse: %v", err)
-		}
-		want := []TierEntry{
-			{Kind: EntryLocal, Engine: "llamacpp", Model: "m", ContextTokens: 100},
-			{Kind: EntryLocal, Engine: "llamacpp-custom", Model: "m"},
-		}
-		if !reflect.DeepEqual(p.Tiers["weak"], want) {
-			t.Errorf("weak entries = %+v, want %+v", p.Tiers["weak"], want)
-		}
-		if p.Availability != Paused || len(p.Profiles) != 1 || p.Profiles[0].DisplayName != "keep" {
-			t.Errorf("availability/profiles = %q/%+v, want paused with the profile kept", p.Availability, p.Profiles)
-		}
-	})
-	t.Run("exact duplicate with reordered capabilities collapses", func(t *testing.T) {
-		doc := `{"version":1,"tiers":{"weak":[
-			{"engine":"llamacpp","model":"m","capabilities":["tools","structured"]},
-			{"engine":"llamacpp","model":"m","capabilities":["structured","tools"]}]}}`
-		p, err := Parse([]byte(doc))
-		if err != nil {
-			t.Fatalf("Parse: %v", err)
-		}
-		if len(p.Tiers["weak"]) != 1 {
-			t.Errorf("weak entries = %+v, want one", p.Tiers["weak"])
-		}
-	})
-	t.Run("entries differing in bounds stay separate", func(t *testing.T) {
-		doc := `{"version":1,"tiers":{"weak":[
-			{"engine":"llamacpp","model":"small-1b","contextTokens":100},
-			{"engine":"llamacpp","model":"small-1b","contextTokens":32000,"capabilities":["tools"]}]}}`
-		p, err := Parse([]byte(doc))
-		if err != nil {
-			t.Fatalf("Parse: %v", err)
-		}
-		want := []TierEntry{
-			{Kind: EntryLocal, Engine: "llamacpp", Model: "small-1b", ContextTokens: 100},
-			{Kind: EntryLocal, Engine: "llamacpp", Model: "small-1b", ContextTokens: 32000, Capabilities: []Capability{CapTools}},
-		}
-		if !reflect.DeepEqual(p.Tiers["weak"], want) {
-			t.Errorf("weak entries = %+v, want %+v", p.Tiers["weak"], want)
-		}
-	})
-	t.Run("profile named like an alias", func(t *testing.T) {
-		p, err := Parse([]byte(`{"version":1,"profiles":[{"key":"m", "displayName":"weak", "engine":"llamacpp","model":"m"}]}`))
-		if err != nil {
-			t.Fatalf("Parse: %v", err)
-		}
-		if len(p.Profiles) != 1 || p.Profiles[0].DisplayName != "weak" {
-			t.Errorf("profiles = %+v, want the profile named weak", p.Profiles)
-		}
-	})
+func TestParseStoredRetiresLegacyLocalEntries(t *testing.T) {
+	for _, entries := range []string{
+		`{"engine":"llamacpp","model":"m","contextTokens":100},{"engine":"llamacpp-custom","model":"m"},{"engine":"llamacpp","model":"m","contextTokens":100}`,
+		`{"engine":"llamacpp","model":"m","capabilities":["tools","structured"]},{"engine":"llamacpp","model":"m","capabilities":["structured","tools"]}`,
+		`{"engine":"llamacpp","model":"m","contextTokens":100},{"engine":"llamacpp","model":"m","contextTokens":32000}`,
+	} {
+		t.Run(entries, func(t *testing.T) {
+			raw := []byte(`{"version":1,"availability":"paused","profiles":[{"key":"keep","displayName":"weak","engine":"llamacpp","model":"m"}],"tiers":{"weak":[` + entries + `]}}`)
+			p, _, err := ParseStored(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := []Profile{{Key: "keep", DisplayName: "weak", Engine: "llamacpp", Model: "m"}}
+			if len(p.Tiers["weak"]) != 0 || len(p.Roles) != 0 || !reflect.DeepEqual(p.Profiles, want) || p.Availability != Paused {
+				t.Fatalf("retirement changed retained profile or invented declarations: %+v", p)
+			}
+		})
+	}
 }
 
 func TestParseRejectsDuplicateTierEntryInV2(t *testing.T) {
-	doc := `{"version":2,"tiers":{"weak":[
-		{"kind":"local","engine":"llamacpp","model":"m"},{"kind":"local","engine":"llamacpp","model":"m"}]}}`
-	if _, err := Parse([]byte(doc)); err == nil || !strings.Contains(err.Error(), "duplicate entry") {
-		t.Fatalf("Parse(v2 duplicate) err = %v, want duplicate entry", err)
+	p := stagedPolicy(t)
+	p.Tiers["coder"] = []TierEntry{{Kind: EntryAPI, Deployment: "free-small"}, {Kind: EntryAPI, Deployment: "free-small"}}
+	raw, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Parse(raw); err == nil || !strings.Contains(err.Error(), "duplicate entry") {
+		t.Fatalf("duplicate API entry error = %v", err)
 	}
 }
 
@@ -906,8 +902,8 @@ func TestDefaultHybridValues(t *testing.T) {
 	if p.Routing.Listener.Enabled {
 		t.Error("listener enabled by default")
 	}
-	if len(p.Routing.Tiers) != 3 {
-		t.Errorf("tier settings = %v, want weak, medium and strong", p.Routing.Tiers)
+	if len(p.Routing.Tiers) != 0 {
+		t.Errorf("tier settings = %v, want no role rules", p.Routing.Tiers)
 	}
 	for tier, tr := range p.Routing.Tiers {
 		if tr.RemoteAllowed || tr.PaidAllowed {
@@ -957,33 +953,33 @@ func TestValidateRevision(t *testing.T) {
 	test("9223372036854775808", false)
 }
 
-func TestParseV2DuplicateEntryKey(t *testing.T) {
-	parse := func(entries string) error {
-		_, err := Parse([]byte(`{"version":2,"tiers":{"weak":[` + entries + `]}}`))
-		return err
-	}
-	local := func(extra string) string {
-		return `{"kind":"local","engine":"llamacpp","model":"m"` + extra + `}`
-	}
-	t.Run("near duplicates differing in context validate", func(t *testing.T) {
-		if err := parse(local(`,"contextTokens":100`) + "," + local(`,"contextTokens":32000`)); err != nil {
-			t.Fatalf("Parse: %v", err)
+func TestParseV2APIEntryIdentity(t *testing.T) {
+	t.Run("different deployments remain ordered", func(t *testing.T) {
+		p := stagedPolicy(t)
+		want := []TierEntry{{Kind: EntryAPI, Deployment: "paid-big"}, {Kind: EntryAPI, Deployment: "free-small"}}
+		p.Tiers["coder"] = want
+		raw, err := json.Marshal(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := Parse(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got.Tiers["coder"], want) {
+			t.Fatalf("API entry order = %+v, want %+v", got.Tiers["coder"], want)
 		}
 	})
-	t.Run("near duplicates differing in capabilities validate", func(t *testing.T) {
-		if err := parse(local("") + "," + local(`,"capabilities":["tools"]`)); err != nil {
-			t.Fatalf("Parse: %v", err)
-		}
-	})
-	t.Run("exact duplicates are rejected", func(t *testing.T) {
-		if err := parse(local(`,"contextTokens":100`) + "," + local(`,"contextTokens":100`)); err == nil || !strings.Contains(err.Error(), "duplicate entry") {
-			t.Fatalf("Parse err = %v, want duplicate entry", err)
-		}
-	})
-	t.Run("capability order does not distinguish entries", func(t *testing.T) {
-		err := parse(local(`,"capabilities":["tools","structured"]`) + "," + local(`,"capabilities":["structured","tools"]`))
-		if err == nil || !strings.Contains(err.Error(), "duplicate entry") {
-			t.Fatalf("Parse err = %v, want duplicate entry", err)
+	t.Run("local bounds cannot disguise API entries", func(t *testing.T) {
+		for _, entry := range []TierEntry{
+			{Kind: EntryAPI, Deployment: "free-small", ContextTokens: 100},
+			{Kind: EntryAPI, Deployment: "free-small", Capabilities: []Capability{CapTools}},
+		} {
+			p := stagedPolicy(t)
+			p.Tiers["coder"] = []TierEntry{entry}
+			if err := p.Validate(); err == nil || !strings.Contains(err.Error(), "names only a deployment") {
+				t.Fatalf("API local fields error = %v", err)
+			}
 		}
 	})
 }
@@ -995,13 +991,16 @@ func TestValidateRoleLists(t *testing.T) {
 		invalid bool
 	}{
 		{"no roles", []Role{}, false},
-		{"valid empty medium", []Role{{Name: TierMedium, Profiles: []string{}}}, false},
-		{"ordered shared keys", []Role{{Name: TierStrong, Profiles: []string{"second", "first"}}, {Name: TierWeak, Profiles: []string{"first"}}}, false},
-		{"unknown key", []Role{{Name: TierWeak, Profiles: []string{"missing"}}}, true},
-		{"duplicate key", []Role{{Name: TierWeak, Profiles: []string{"first", "first"}}}, true},
-		{"duplicate name", []Role{{Name: TierMedium}, {Name: TierMedium}}, true},
-		{"unknown tier", []Role{{Name: "huge"}}, true},
-		{"suffixed alias", []Role{{Name: "weak-local"}}, true},
+		{"valid empty medium", []Role{{Name: "medium", Profiles: []string{}}}, false},
+		{"ordered shared keys", []Role{{Name: "strong", Profiles: []string{"second", "first"}}, {Name: "weak", Profiles: []string{"first"}}}, false},
+		{"unknown key", []Role{{Name: "weak", Profiles: []string{"missing"}}}, true},
+		{"duplicate key", []Role{{Name: "weak", Profiles: []string{"first", "first"}}}, true},
+		{"duplicate name", []Role{{Name: "medium"}, {Name: "medium"}}, true},
+		{"arbitrary empty role", []Role{{Name: "coder", Profiles: []string{}}}, false},
+		{"duplicate arbitrary role", []Role{{Name: "coder"}, {Name: "coder"}}, true},
+		{"uppercase role", []Role{{Name: "Coder"}}, true},
+		{"profile key collision", []Role{{Name: "first"}}, true},
+		{"suffixed alias", []Role{{Name: "weak:local"}}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := Default()
@@ -1015,13 +1014,11 @@ func TestValidateRoleLists(t *testing.T) {
 	for _, tc := range []struct{ name, engine, model, diagnostic string }{
 		{"unknown engine", "no:pe", "m", "unknown engine"},
 		{"missing model", "llamacpp", "", "model is required"},
-		{"tier name as model", "llamacpp", "strong", "reserved alias"},
-		{"suffixed alias as model", "llamacpp", "medium-api", "reserved alias"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := Default()
 			p.Profiles = []Profile{{Key: "selected", DisplayName: "Selected", Engine: tc.engine, Model: tc.model}}
-			p.Roles = []Role{{Name: TierWeak, Profiles: []string{"selected"}}}
+			p.Roles = []Role{{Name: "weak", Profiles: []string{"selected"}}}
 			if err := p.Validate(); err == nil || !strings.Contains(err.Error(), tc.diagnostic) {
 				t.Fatalf("Validate() = %v, want %q", err, tc.diagnostic)
 			}
@@ -1060,7 +1057,7 @@ func TestValidatePausedBy(t *testing.T) {
 }
 
 func TestParseOlderFileWithoutRolesOrPausedBy(t *testing.T) {
-	p, err := Parse([]byte(`{"version":2,"availability":"paused","tiers":{"weak":[{"kind":"local","engine":"llamacpp","model":"m"}]}}`))
+	p, _, err := ParseStored([]byte(`{"version":2,"availability":"paused","tiers":{"weak":[{"kind":"local","engine":"llamacpp","model":"m"}]}}`))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -1092,7 +1089,7 @@ func TestParseKeepsRolesAndPausedBy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	want := []Role{{Name: TierWeak, Profiles: []string{}}, {Name: TierStrong, Profiles: []string{}}}
+	want := []Role{{Name: "weak", Profiles: []string{}}, {Name: "strong", Profiles: []string{}}}
 	if !reflect.DeepEqual(p.Roles, want) {
 		t.Errorf("roles = %+v, want %+v", p.Roles, want)
 	}

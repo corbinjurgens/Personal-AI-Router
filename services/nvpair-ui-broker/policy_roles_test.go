@@ -24,26 +24,27 @@ func TestPeerPolicySetRoundTripsRoles(t *testing.T) {
 	beforeTiers := mustJSON(rb.b.localPolicy().Policy.Tiers)
 
 	doc := rb.peerSnapshot(t)
-	if roles, ok := doc["roles"].([]any); !ok || len(roles) != 0 {
-		t.Fatalf("relayed get roles = %#v, want an empty list", doc["roles"])
+	wantInitialRoles := []nodepolicy.Role{{Name: "weak", Profiles: []string{"qwen-profile"}}}
+	if got := mustJSON(doc["roles"]); !bytes.Equal(got, mustJSON(wantInitialRoles)) {
+		t.Fatalf("relayed get roles = %s, want %+v", got, wantInitialRoles)
 	}
 	doc["profiles"] = []nodepolicy.Profile{
 		{Key: "small-profile", DisplayName: "Small", Engine: "llamacpp", Model: "qwen3:8b"},
 		{Key: "large-profile", DisplayName: "Large", Engine: "llamacpp-custom", Model: "big"},
 	}
 	doc["roles"] = []nodepolicy.Role{
-		{Name: nodepolicy.TierStrong, Profiles: []string{"large-profile", "small-profile"}},
-		{Name: nodepolicy.TierWeak, Profiles: []string{"small-profile"}},
-		{Name: nodepolicy.TierMedium, Profiles: []string{}},
+		{Name: "strong", Profiles: []string{"large-profile", "small-profile"}},
+		{Name: "weak", Profiles: []string{"small-profile"}},
+		{Name: "medium", Profiles: []string{}},
 	}
 	if _, errText := rb.relaySet(t, doc); errText != "" {
 		t.Fatalf("relayed set with roles: %s", errText)
 	}
 
 	want := []nodepolicy.Role{
-		{Name: nodepolicy.TierStrong, Profiles: []string{"large-profile", "small-profile"}},
-		{Name: nodepolicy.TierWeak, Profiles: []string{"small-profile"}},
-		{Name: nodepolicy.TierMedium, Profiles: []string{}},
+		{Name: "strong", Profiles: []string{"large-profile", "small-profile"}},
+		{Name: "weak", Profiles: []string{"small-profile"}},
+		{Name: "medium", Profiles: []string{}},
 	}
 	if got := rb.b.localPolicy().Policy.Roles; !reflect.DeepEqual(got, want) {
 		t.Errorf("stored roles = %+v, want %+v", got, want)
@@ -79,6 +80,52 @@ func TestPeerPolicySetRoundTripsRoles(t *testing.T) {
 	}
 }
 
+func TestPeerRoleRenameAndRemovalPreservePrivateAPIConfiguration(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		roles []nodepolicy.Role
+	}{
+		{"rename", []nodepolicy.Role{{Name: "coder", Profiles: []string{"qwen-profile"}}}},
+		{"remove", []nodepolicy.Role{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rb := newRoutedBroker(t)
+			before := rb.b.localPolicy().Policy
+			beforeTiers := mustJSON(before.Tiers)
+			beforeRouting := mustJSON(before.Routing)
+			doc := rb.peerSnapshot(t)
+			doc["roles"] = tc.roles
+			if _, errText := rb.relaySet(t, doc); errText != "" {
+				t.Fatalf("remote role %s refused: %s", tc.name, errText)
+			}
+			after := rb.b.localPolicy().Policy
+			if !reflect.DeepEqual(after.Roles, tc.roles) {
+				t.Fatalf("saved roles = %+v, want %+v", after.Roles, tc.roles)
+			}
+			if !bytes.Equal(mustJSON(after.Tiers), beforeTiers) || !bytes.Equal(mustJSON(after.Routing), beforeRouting) {
+				t.Fatal("remote role edit changed private API configuration")
+			}
+			sections := rb.fileSections(t)
+			for key, want := range map[string][]byte{"tiers": beforeTiers, "routing": beforeRouting} {
+				var stored bytes.Buffer
+				if err := json.Compact(&stored, sections[key]); err != nil {
+					t.Fatalf("compact saved %s: %v", key, err)
+				}
+				if !bytes.Equal(stored.Bytes(), want) {
+					t.Fatalf("remote role edit changed persisted %s", key)
+				}
+			}
+			projected := rb.peerSnapshot(t)
+			if _, exposed := projected["routing"]; exposed {
+				t.Fatal("remote read exposed private routing configuration")
+			}
+			if tiers, ok := projected["tiers"].(map[string]any); !ok || len(tiers) != 0 {
+				t.Fatal("remote read exposed private API entries")
+			}
+		})
+	}
+}
+
 func TestPeerPolicySetRejectsInvalidRolesWithoutEffect(t *testing.T) {
 	test := func(name string, edit func(map[string]any), wantErr string) {
 		t.Helper()
@@ -86,7 +133,7 @@ func TestPeerPolicySetRejectsInvalidRolesWithoutEffect(t *testing.T) {
 			rb := newRoutedBroker(t)
 			doc := rb.peerSnapshot(t)
 			doc["profiles"] = []nodepolicy.Profile{{Key: "fixture-profile", DisplayName: "Fixture", Engine: "llamacpp", Model: "m"}}
-			doc["roles"] = []nodepolicy.Role{{Name: nodepolicy.TierWeak, Profiles: []string{"fixture-profile"}}}
+			doc["roles"] = []nodepolicy.Role{{Name: "weak", Profiles: []string{"fixture-profile"}}}
 			edit(doc)
 			base := rb.baseline(t)
 			reply := rb.relayReply(t, "set", map[string]any{"policy": doc, "expectedPersistedRevision": doc["revision"]})
@@ -97,18 +144,38 @@ func TestPeerPolicySetRejectsInvalidRolesWithoutEffect(t *testing.T) {
 		})
 	}
 
-	test("unknown tier", func(doc map[string]any) {
-		doc["roles"] = []nodepolicy.Role{{Name: "huge", Profiles: []string{"fixture-profile"}}}
-	}, "unknown tier")
+	test("invalid role name", func(doc map[string]any) {
+		doc["roles"] = []nodepolicy.Role{{Name: "Coder", Profiles: []string{"fixture-profile"}}}
+	}, "role name")
 	test("unknown profile", func(doc map[string]any) {
-		doc["roles"] = []nodepolicy.Role{{Name: nodepolicy.TierWeak, Profiles: []string{"missing-profile"}}}
+		doc["roles"] = []nodepolicy.Role{{Name: "weak", Profiles: []string{"missing-profile"}}}
 	}, "unknown profile key")
-	test("reserved alias model", func(doc map[string]any) {
-		doc["profiles"].([]nodepolicy.Profile)[0].Model = "weak-api"
-	}, "reserved alias")
+	test("profile key clashes with declared role", func(doc map[string]any) {
+		doc["profiles"].([]nodepolicy.Profile)[0].Key = "weak"
+		doc["roles"] = []nodepolicy.Role{{Name: "weak", Profiles: []string{"weak"}}}
+	}, "key equals a declared role name")
+	test("reserved profile key", func(doc map[string]any) {
+		doc["profiles"].([]nodepolicy.Profile)[0].Key = "coder:fast"
+		doc["roles"] = []nodepolicy.Role{{Name: "weak", Profiles: []string{"coder:fast"}}}
+	}, "reserved")
 	test("unknown engine", func(doc map[string]any) {
 		doc["profiles"].([]nodepolicy.Profile)[0].Engine = "no/pe"
 	}, "unknown engine")
+}
+
+func TestPeerPolicySetAcceptsNativeAliasAndHyphenatedPublicNames(t *testing.T) {
+	rb := newRoutedBroker(t)
+	doc := rb.peerSnapshot(t)
+	doc["profiles"] = []nodepolicy.Profile{{Key: "coder-api", DisplayName: "Coder", Engine: "llamacpp", Model: "coder:local"}}
+	wantRoles := []nodepolicy.Role{{Name: "coder-local", Profiles: []string{"coder-api"}}, {Name: "coder", Profiles: []string{}}}
+	doc["roles"] = wantRoles
+	if _, errText := rb.relaySet(t, doc); errText != "" {
+		t.Fatalf("relayed set with native alias and hyphenated names: %s", errText)
+	}
+	got := rb.b.localPolicy().Policy
+	if len(got.Profiles) != 1 || got.Profiles[0].Key != "coder-api" || got.Profiles[0].Model != "coder:local" || !reflect.DeepEqual(got.Roles, wantRoles) {
+		t.Fatalf("saved profile or role identity changed: profiles=%+v roles=%+v", got.Profiles, got.Roles)
+	}
 }
 
 // A peer reads who paused the node, but every policy write is fenced while paused.
@@ -140,7 +207,7 @@ func TestPeerPolicySetWhilePausedHasNoEffect(t *testing.T) {
 		delete(doc, "pausedBy")
 	})
 	test("roles edit alongside", func(doc map[string]any) {
-		doc["roles"] = []nodepolicy.Role{{Name: nodepolicy.TierMedium, Profiles: []string{}}}
+		doc["roles"] = []nodepolicy.Role{{Name: "medium", Profiles: []string{}}}
 		doc["pausedBy"] = "peer"
 	})
 }
@@ -150,10 +217,10 @@ func TestLocalRolesEditWhilePausedPreservesPause(t *testing.T) {
 	before := rb.b.localPolicy().Policy.Revision
 	rb.localSet(t, func(doc map[string]any) {
 		doc["profiles"] = []nodepolicy.Profile{{Key: "small-profile", DisplayName: "Small", Engine: "llamacpp", Model: "qwen3:8b"}}
-		doc["roles"] = []nodepolicy.Role{{Name: nodepolicy.TierMedium, Profiles: []string{"small-profile"}}}
+		doc["roles"] = []nodepolicy.Role{{Name: "medium", Profiles: []string{"small-profile"}}}
 	})
 	got := rb.b.localPolicy().Policy
-	want := []nodepolicy.Role{{Name: nodepolicy.TierMedium, Profiles: []string{"small-profile"}}}
+	want := []nodepolicy.Role{{Name: "medium", Profiles: []string{"small-profile"}}}
 	if !reflect.DeepEqual(got.Roles, want) || got.Revision == before || got.Availability != nodepolicy.Paused || got.PausedBy != nodepolicy.PausedLocally {
 		t.Fatalf("local roles edit = %+v, want new revision and roles with the local pause preserved", got)
 	}

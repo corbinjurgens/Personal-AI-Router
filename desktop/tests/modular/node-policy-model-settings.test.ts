@@ -15,6 +15,7 @@ import {
 } from '@/shared/utils/node-policy-model-settings'
 import ModelSettingsEditor from '@/ui/components/RoutingSettings/ModelSettingsEditor'
 import type { ModelSettingsIdentity } from '@/shared/types/model-config'
+import { deployModelPolicyPatch } from '@/shared/utils/node-policy-model-copy'
 
 const identity = { engine: 'llamacpp', model: 'native/model', profileKey: 'native/model' }
 const other = { engine: 'llamacpp', model: 'other/model', profileKey: 'other/model' }
@@ -52,6 +53,37 @@ function selected(text: string) {
 }
 
 describe('model settings policy helpers', () => {
+    it('builds an explicit coder membership patch only for a declared target role', () => {
+        const target = JSON.stringify({
+            profiles: [],
+            roles: [{ name: 'coder', profiles: [] }]
+        })
+        const result = deployModelPolicyPatch(
+            policy(),
+            identity,
+            target,
+            other,
+            { fields: [], mode: false },
+            false,
+            {},
+            ['coder']
+        )
+        if (!result.ok) throw new Error(result.error.message)
+        expect(result.value.roles).toEqual({ coder: true })
+        expect(
+            deployModelPolicyPatch(
+                policy(),
+                identity,
+                JSON.stringify({ profiles: [], roles: [] }),
+                other,
+                { fields: [], mode: false },
+                false,
+                {},
+                ['coder']
+            ).ok
+        ).toBe(false)
+    })
+
     it('keeps new keys distinct across engines and refuses an invalid policy', () => {
         const text = JSON.stringify({
             profiles: [
@@ -66,13 +98,16 @@ describe('model settings policy helpers', () => {
         expect(newProfileKeyStatus(text, 'occupied')).toBe('duplicate')
         expect(newProfileKeyStatus(text, 'coder-local')).toBe('available')
         expect(newProfileKeyStatus('{', 'fresh')).toBe('invalid')
-        expect(newProfileKeyStatus(text, 'medium-local')).toBe('invalid')
+        expect(newProfileKeyStatus(text, 'coder:fast')).toBe('invalid')
     })
 
     it.each([
         'coder-api',
         'coder-local',
-        'role:api',
+        'weak',
+        'medium-local',
+        'strong-api',
+        'owner/model:api',
         ' Has space ',
         'é'.repeat(256),
         'x'.repeat(512),
@@ -82,16 +117,17 @@ describe('model settings policy helpers', () => {
     })
     it.each([
         '',
-        'medium-local',
-        'weak',
-        'strong-api',
+        'coder:api',
+        'coder:local',
+        'coder:fast',
+        'coder:',
         '\ud800',
         'é'.repeat(257),
         'x'.repeat(513),
         'bad\nkey',
         'bad\u0085key',
         'bad\u007fkey'
-    ])('refuses malformed and fixed-tier reserved key %j', key => {
+    ])('refuses malformed and plain colon reserved key %j', key => {
         expect(isValidProfileKey(key)).toBe(false)
     })
     it('suggests only a lowercase ASCII slug capped at 64 bytes', () => {

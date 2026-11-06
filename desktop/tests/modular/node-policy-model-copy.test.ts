@@ -177,7 +177,7 @@ describe('deploy policy construction', () => {
 
     it('refuses malformed target role declarations and saved tuning locks', () => {
         expect(
-            deploy('{"profiles":[],"roles":[{"name":"custom","profiles":[]}]}', [], {}, ['custom'])
+            deploy('{"profiles":[],"roles":[{"name":"Custom","profiles":[]}]}', [], {}, ['Custom'])
         ).toMatchObject({ ok: false, error: { code: 'roles' } })
         expect(deploy(targetPolicy('{}'), ['temperature'], {}, [], true)).toMatchObject({
             ok: false,

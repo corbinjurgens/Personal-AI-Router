@@ -28,7 +28,7 @@ func withStoppedPolicyEngines(t *testing.T, f *serviceFixture) {
 	jointIsolateEngines(t, f.configDir, temporaryClusterPort(t))
 }
 
-func TestModelControlsServiceStoredPolicy(t *testing.T) {
+func TestModelControlsServicePolicyStored(t *testing.T) {
 	f := newServiceFixture(t)
 	f.withInertEngineManager()
 	policy := nodepolicy.Default()
@@ -40,11 +40,14 @@ func TestModelControlsServiceStoredPolicy(t *testing.T) {
 		{Key: "last", DisplayName: "last", Engine: "llamacpp", Model: "last"},
 	}
 	policy.Roles = []nodepolicy.Role{{Name: "weak", Profiles: []string{"first"}}}
-	policy.Tiers["weak"] = []nodepolicy.TierEntry{{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "first"}}
 	policy.ServedModels = nodepolicy.ServedModels{{Engine: "llamacpp", Model: "first"}}
 	if err := policy.Validate(); err != nil {
 		t.Fatalf("validate stored positive control: %v", err)
 	}
+	// Retired local entries are stored-repair specimens, never valid policy
+	// declarations. Their orphan routing rules must disappear with them.
+	policy.Tiers["weak"] = []nodepolicy.TierEntry{{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "first"}}
+	policy.Routing.Tiers["weak"] = nodepolicy.TierRouting{BareMode: "local"}
 	raw := mustMarshal(t, policy)
 	if bytes.Count(raw, []byte(`"j304-invalid-placeholder"`)) != 1 {
 		t.Fatal("stored fixture does not contain exactly its intended raw model token")
@@ -61,6 +64,8 @@ func TestModelControlsServiceStoredPolicy(t *testing.T) {
 	c := f.readyClient()
 	want := policy
 	want.Profiles = []nodepolicy.Profile{policy.Profiles[0], policy.Profiles[2]}
+	want.Tiers = map[string][]nodepolicy.TierEntry{"weak": {}}
+	want.Routing.Tiers = map[string]nodepolicy.TierRouting{}
 	assertPolicySnapshot(t, fetchServicePolicy(t, c), want, nodepolicy.Available)
 	if !bytes.Equal(readPolicyBytes(t, path), raw) {
 		t.Fatal("load-only sanitation rewrote stored bytes")
@@ -241,6 +246,30 @@ func TestModelControlsServicePolicyWrites(t *testing.T) {
 }
 
 func TestServicePolicy(t *testing.T) {
+	t.Run("retired local tier write preserves declared roles and stored bytes", func(t *testing.T) {
+		f := newServiceFixture(t)
+		f.withInertEngineManager()
+		f.start()
+		c := f.readyClient()
+		want := servicePolicy(t, c)
+		want.Profiles = []nodepolicy.Profile{{Key: "policy-local", DisplayName: "Policy local", Engine: "llamacpp", Model: "policy-local"}}
+		want.Roles = []nodepolicy.Role{{Name: "coder", Profiles: []string{"policy-local"}}}
+		want = setServicePolicy(t, c, want)
+		before := fetchServicePolicy(t, c)
+		stored := assertStoredPolicy(t, f.policyPath(), want)
+		invalid := before.Policy
+		invalid.Tiers = map[string][]nodepolicy.TierEntry{
+			"coder": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "policy-local"}},
+		}
+		m := c.mustPolicyCallBased(t, "207", invalid, want.Revision)
+		if m.Error == nil || m.Error.Code != -32602 || m.Error.Message != "Local tier entries are retired; declare roles instead." || len(m.Result) != 0 {
+			t.Fatalf("retired local tier response: error=%+v result_bytes=%d", m.Error, len(m.Result))
+		}
+		if !reflect.DeepEqual(fetchServicePolicy(t, c), before) || !bytes.Equal(readPolicyBytes(t, f.policyPath()), stored) {
+			t.Fatal("retired local tier write changed policy, roles, revision or persisted bytes")
+		}
+	})
+
 	t.Run("valid update notifies and survives service restart", func(t *testing.T) {
 		f := newServiceFixture(t)
 		f.start()

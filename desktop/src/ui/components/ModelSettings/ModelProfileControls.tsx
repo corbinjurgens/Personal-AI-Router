@@ -116,7 +116,7 @@ export default function ModelProfileControls({
             {newProfile ? (
                 <FormField
                     slotLabel="Profile key"
-                    slotHelp="Use a unique model identifier. Routing aliases such as medium-local are reserved."
+                    slotHelp="Use a unique profile key. Names with a valid role name before a colon are reserved."
                     status={!keyValid || duplicate ? 'error' : undefined}
                     slotError={
                         duplicate

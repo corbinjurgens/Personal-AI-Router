@@ -79,7 +79,11 @@ func TestNodeProjectionServedWithTheModelInventory(t *testing.T) {
 
 	first := nodepolicy.Advertisement{
 		Revision: "12",
-		Roles:    []nodepolicy.Role{{Name: nodepolicy.TierStrong, Profiles: []string{"qwen3-32b"}}},
+		Roles: []nodepolicy.Role{
+			{Name: "r1.fast_v2", Profiles: []string{"qwen3-32b"}},
+			{Name: "coder", Profiles: []string{}},
+			{Name: "coder-local", Profiles: []string{"qwen3-32b"}},
+		},
 		Profiles: []nodepolicy.AdvertisedProfile{{Key: "qwen3-32b", DisplayName: "Qwen3 32B", Engine: engines.NameLlamaCPP, Model: "qwen3-32b", ContextTokens: 32768, Capabilities: []nodepolicy.Capability{nodepolicy.CapTools}}},
 	}
 	t.Run("served after a push", func(t *testing.T) {

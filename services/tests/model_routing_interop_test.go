@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -89,9 +90,6 @@ func TestModelControlsRoutingAcrossProcesses(t *testing.T) {
 	f.start()
 	c := f.readyClient()
 	policy := servicePolicy(t, c)
-	policy.Tiers["weak"] = []nodepolicy.TierEntry{{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: concrete}}
-	policy.Tiers["medium"] = []nodepolicy.TierEntry{{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: multibyte512}}
-	policy = setServicePolicy(t, c, policy)
 	nextID := 30400
 	call := func(t *testing.T, method string, params any) jsonrpc.Message {
 		t.Helper()
@@ -152,6 +150,20 @@ func TestModelControlsRoutingAcrossProcesses(t *testing.T) {
 	}
 	manual(models)
 	awaitModels(want)
+	// This fixture has peer declarations only, so aliases follow sorted role
+	// names rather than the order of memberships in the peer advertisement.
+	declaredAliases := func() []string {
+		var names []string
+		for _, role := range event.Node.Policy.Roles {
+			names = append(names, role.Name)
+		}
+		slices.Sort(names)
+		var aliases []string
+		for _, name := range names {
+			aliases = append(aliases, name, name+":api", name+":local")
+		}
+		return aliases
+	}
 	t.Run("client catalog retains valid siblings and aliases", func(t *testing.T) {
 		before := catalogReads.Load()
 		raw := egressProcessHTTP(t, client, http.MethodGet, f.facadePort, "/v1/models", nil, http.StatusOK)
@@ -170,7 +182,7 @@ func TestModelControlsRoutingAcrossProcesses(t *testing.T) {
 		for _, entry := range reply.Data {
 			ids = append(ids, entry.ID)
 		}
-		expected := append(append([]string{}, want...), "weak", "weak-api", "weak-local", "medium", "medium-api", "medium-local", "strong", "strong-api", "strong-local")
+		expected := append(append([]string{}, want...), declaredAliases()...)
 		if !reflect.DeepEqual(ids, expected) {
 			t.Fatal("client catalog lost valid ordering/aliases or retained invalid identifiers")
 		}
@@ -210,7 +222,7 @@ func TestModelControlsRoutingAcrossProcesses(t *testing.T) {
 		if hits.Load() != before {
 			t.Fatal("all-invalid inventory allowed tier inference upstream")
 		}
-		egressProcessHTTP(t, client, http.MethodPost, f.facadePort, "/v1/chat/completions", []byte(`{"model":"first","messages":[],"stream":false}`), http.StatusBadGateway)
+		egressProcessHTTP(t, client, http.MethodPost, f.facadePort, "/v1/chat/completions", []byte(`{"model":"first","messages":[],"stream":false}`), http.StatusNotFound)
 		if hits.Load() != before || hits.Load() != 2 {
 			t.Fatal("all-invalid inventory allowed concrete inference upstream")
 		}
@@ -235,9 +247,9 @@ func TestModelControlsRoutingAcrossProcesses(t *testing.T) {
 		for _, entry := range reply.Data {
 			ids = append(ids, entry.ID)
 		}
-		// The updated peer advertises only weak; medium remains configured in
-		// local tiers. Strong was withdrawn with the previous advertisement.
-		want := []string{"weak", "weak-api", "weak-local", "medium", "medium-api", "medium-local"}
+		// Only the updated peer's currently declared roles supply aliases.
+		// Retired router-local entries cannot retain withdrawn role names.
+		want := declaredAliases()
 		if !reflect.DeepEqual(ids, want) {
 			t.Fatalf("all-invalid catalog IDs=%q, want configured aliases=%q", ids, want)
 		}
@@ -267,7 +279,7 @@ func TestModelControlsRoutingAcrossProcesses(t *testing.T) {
 			}
 			return false
 		})
-		egressProcessHTTP(t, client, http.MethodPost, f.facadePort, "/v1/chat/completions", []byte(`{"model":"good","messages":[],"stream":false}`), http.StatusBadGateway)
+		egressProcessHTTP(t, client, http.MethodPost, f.facadePort, "/v1/chat/completions", []byte(`{"model":"good","messages":[],"stream":false}`), http.StatusNotFound)
 		if hits.Load() != 2 {
 			t.Fatal("present-empty attribution allowed flat-only model selection")
 		}
@@ -421,9 +433,9 @@ func TestStrictModelRoutingAcrossProcesses(t *testing.T) {
 			}
 			body, _ = io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
-			if resp.StatusCode != http.StatusBadGateway ||
-				!strings.Contains(string(body), "no available node advertises the requested model") {
-				t.Fatalf("ownerless response = %d %s, want actionable local 502", resp.StatusCode, body)
+			if resp.StatusCode != http.StatusNotFound ||
+				!strings.Contains(string(body), "no profile or role named no-advertised-owner") {
+				t.Fatalf("ownerless response = %d %s, want actionable local 404", resp.StatusCode, body)
 			}
 			if after = snapshot(); after != before {
 				t.Fatalf("ownerless request reached an upstream: hits %v -> %v", before, after)

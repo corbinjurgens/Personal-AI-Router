@@ -85,6 +85,86 @@ func TestRoutingHistoryWireCorpusPackedRoundTrip(t *testing.T) {
 	}
 }
 
+func TestRoutingHistoryWireRequestedRoleRoundTrip(t *testing.T) {
+	for _, tc := range []struct{ name, role string }{
+		{"unspecified", ""}, {"former role", "weak"}, {"custom role", "coder"},
+		{"mixed separators", "r1.fast_v2"}, {"maximum ASCII role", strings.Repeat("r", 64)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			row := routingWireCorpus(t)[0]
+			row.Requested.Tier = tc.role
+			raw, err := json.Marshal(row)
+			if err != nil {
+				t.Fatal(err)
+			}
+			schema, ok := nodepolicy.RoutingHistoryTransportSchema(nodepolicy.NotifyRoutingChanged, false)
+			if !ok {
+				t.Fatal("missing shared routing schema")
+			}
+			projected, _, err := jsonrpc.ProjectHistory(raw, make([]byte, 0, schema.Bytes), make([]uint32, 0, schema.Bytes/4), schema)
+			if err != nil {
+				t.Fatal(err)
+			}
+			materialized, err := routingHistoryMaterialize(projected)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if materialized.Requested.Tier != tc.role {
+				t.Fatalf("materialized role = %q, want %q", materialized.Requested.Tier, tc.role)
+			}
+			var cell routingHistoryCell
+			if err := cell.store(materialized); err != nil {
+				t.Fatal(err)
+			}
+			stored, err := cell.record()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stored.Requested.Tier != tc.role || !reflect.DeepEqual(stored, row) {
+				t.Fatalf("fixed cell changed role or record: role = %q, want %q", stored.Requested.Tier, tc.role)
+			}
+			w := newRoutingHistoryWire()
+			w.reset(1)
+			if err := w.consume(1, false, projected); err != nil {
+				t.Fatal(err)
+			}
+			if err := w.withRecord(1, 0, func(got nodepolicy.RoutingHistoryRecord) {
+				if got.Requested.Tier != tc.role || !reflect.DeepEqual(got, row) {
+					t.Fatalf("consumer changed role or record: role = %q, want %q", got.Requested.Tier, tc.role)
+				}
+			}); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestRoutingHistoryWireSharedSchemaRejectsInvalidRequestedRoles(t *testing.T) {
+	for _, tc := range []struct{ name, role string }{
+		{"overlong", strings.Repeat("r", 65)}, {"uppercase", "Coder"},
+		{"colon override", "coder:api"}, {"leading punctuation", ".coder"},
+		{"punctuation", "coder!"}, {"non ASCII", "cödér"},
+		{"newline", "coder\n"}, {"carriage return", "coder\r"},
+		{"Unicode line separator", "coder\u2028"}, {"Unicode paragraph separator", "coder\u2029"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			row := routingWireCorpus(t)[0]
+			row.Requested.Tier = tc.role
+			raw, err := json.Marshal(row)
+			if err != nil {
+				t.Fatal(err)
+			}
+			schema, ok := nodepolicy.RoutingHistoryTransportSchema(nodepolicy.NotifyRoutingChanged, false)
+			if !ok {
+				t.Fatal("missing shared routing schema")
+			}
+			if _, _, err := jsonrpc.ProjectHistory(raw, make([]byte, 0, schema.Bytes), make([]uint32, 0, schema.Bytes/4), schema); err == nil {
+				t.Fatalf("shared transport schema accepted role %q", tc.role)
+			}
+		})
+	}
+}
+
 func TestRoutingHistoryWireMergeAndTerminal(t *testing.T) {
 	w := newRoutingHistoryWire()
 	w.reset(1)
@@ -288,6 +368,7 @@ func TestRoutingHistoryWireMaximumPackedMetadata(t *testing.T) {
 	row.Request.OriginNodeID = strings.Repeat("o", 128)
 	row.Request.ProxyRunID = strings.Repeat("r", 128)
 	row.Requested.Model = strings.Repeat("\\", 512)
+	row.Requested.Tier = strings.Repeat("r", 64)
 	row.Attempts = make([]nodepolicy.RoutingHistoryAttempt, nodepolicy.RoutingHistoryAttempts)
 	model, account, deployment := strings.Repeat(`"`, 512), strings.Repeat("a", 128), strings.Repeat("d", 128)
 	maximum, err := nodepolicy.ParseNanoUSD("9223372036854775807")

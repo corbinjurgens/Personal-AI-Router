@@ -23,9 +23,8 @@ import (
 func TestBufferDecreasePreOutputRetryNewAdmission(t *testing.T) {
 	run := func(name string, insufficient bool) {
 		t.Run(name, func(t *testing.T) {
-			policy := tierPolicy(map[string][]nodepolicy.TierEntry{
-				"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "small:1b"}},
-			})
+			policy := tierPolicy(nil)
+			policy.Roles = []nodepolicy.Role{{Name: "weak"}}
 			fx := newTierFixture(t, llamacppCase(t), policy, map[string][]string{
 				"a": {"small:1b"}, "b": {"large:7b"},
 			}, nil)
@@ -87,6 +86,7 @@ func TestBufferDecreasePreOutputRetryNewAdmission(t *testing.T) {
 			defer first.Close()
 			defer release()
 			fx.p.soleFacade().discovery.AddManual(nodeForModel(t, "a", first.URL, "small:1b"))
+			fx.declare(t, "a", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("small:1b")})
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			recorder, done := httptest.NewRecorder(), make(chan struct{})
@@ -139,12 +139,11 @@ func TestBufferDecreasePreOutputRetryNewAdmission(t *testing.T) {
 			fx.p.admission.mu.Lock()
 			generation := fx.p.admission.policyGeneration
 			fx.p.admission.mu.Unlock()
-			// Replacing the tier also proves rebuilding obeys current permission:
-			// only b's model is eligible after this real activation transition.
+			// Rebuilding sees the current declarations after activation:
+			// a withdraws its membership and only b offers the role.
 			policy = fx.p.admission.currentPolicy()
-			policy.Tiers = map[string][]nodepolicy.TierEntry{
-				"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "large:7b"}},
-			}
+			fx.declare(t, "a", nil)
+			fx.declare(t, "b", map[string]nodepolicy.AdvertisedProfile{"weak": {Engine: "llamacpp", Model: "large:7b"}})
 			token, err := fx.p.beginPublicActivation(policy)
 			if err != nil {
 				t.Fatalf("activate replacement policy: %v", err)

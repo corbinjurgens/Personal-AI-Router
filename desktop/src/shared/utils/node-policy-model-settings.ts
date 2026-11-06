@@ -5,7 +5,7 @@ import type { JsonValue } from '@/shared/types/json'
 import type { NodeModelReference } from '@/shared/types/node-policy'
 import type { ModelSettingsIdentity } from '@/shared/types/model-config'
 import { isValidRoutingEngineId } from '@/shared/utils/engines'
-import { ROLE_TIERS } from '@/shared/utils/node-roles'
+import { isReservedProfileKey } from '@/shared/utils/node-roles'
 
 type JsonMap = { [key: string]: JsonValue }
 type SettingsError = { code: 'parse' | 'profile' | 'option' | 'mode' | 'flag'; message: string }
@@ -20,12 +20,9 @@ interface ModelSettingsProfile extends NodeModelReference {
     localOnly: boolean
 }
 
-/** Mirror nodepolicy.ValidateProfileKey, including its fixed-tier alias namespace. */
+/** Mirror nodepolicy.ValidateProfileKey, including its broad colon reservation. */
 export function isValidProfileKey(key: string): boolean {
-    return (
-        validText(key, 512) &&
-        !ROLE_TIERS.some(tier => [tier, `${tier}-api`, `${tier}-local`].includes(key))
-    )
+    return validText(key, 512) && !isReservedProfileKey(key)
 }
 
 /** Only the suggested slug has an ASCII length limit; saved keys retain UTF-8. */
@@ -285,8 +282,7 @@ function profileIdentityValid(identity: NodeModelReference): boolean {
         !Array.from(identity.model).some(char => {
             const code = char.charCodeAt(0)
             return code < 0x20 || (code >= 0x7f && code <= 0x9f)
-        }) &&
-        !ROLE_TIERS.some(tier => [tier, `${tier}-api`, `${tier}-local`].includes(identity.model))
+        })
     )
 }
 

@@ -9,6 +9,66 @@ import (
 	"testing"
 )
 
+func TestRoleNameGrammar(t *testing.T) {
+	for _, name := range []string{"weak", "coder", "coder-api", "r1.fast_v2", strings.Repeat("a", 64)} {
+		t.Run("accept "+name, func(t *testing.T) {
+			if err := ValidateRoleName(name); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	for _, name := range []string{"", "Coder", "-x", "co:der", strings.Repeat("a", 65)} {
+		t.Run("reject "+name, func(t *testing.T) {
+			if err := ValidateRoleName(name); err == nil {
+				t.Fatalf("accepted %q", name)
+			}
+		})
+	}
+	if MaxRoleNameBytes != 64 {
+		t.Fatalf("role byte limit = %d", MaxRoleNameBytes)
+	}
+}
+
+func TestRoleAliasNamespaces(t *testing.T) {
+	for _, tc := range []struct {
+		name, base string
+		mode       AliasMode
+	}{
+		{"coder", "coder", AliasBare}, {"coder-api", "coder-api", AliasBare},
+		{"coder-local", "coder-local", AliasBare}, {"weak-", "weak-", AliasBare},
+		{"coder:api", "coder", AliasAPI}, {"coder:local", "coder", AliasLocal},
+		{strings.Repeat("a", 64) + ":local", strings.Repeat("a", 64), AliasLocal},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base, mode, ok := ParseAlias(tc.name)
+			if !ok || base != tc.base || mode != tc.mode {
+				t.Fatalf("alias = %q %q %v", base, mode, ok)
+			}
+			if got := IsReservedAlias(tc.name); got != (tc.mode != AliasBare) {
+				t.Fatalf("reserved alias = %v", got)
+			}
+		})
+	}
+	for _, name := range []string{"", "Coder", "coder:fast", "coder:", "coder:API", " coder", strings.Repeat("a", 65) + ":local"} {
+		t.Run("invalid alias "+name, func(t *testing.T) {
+			base, mode, ok := ParseAlias(name)
+			if ok || base != "" || mode != "" || IsReservedAlias(name) {
+				t.Fatalf("invalid alias = %q %q %v", base, mode, ok)
+			}
+		})
+	}
+	for _, name := range []string{"coder:api", "coder:fast", "coder:", "coder:local"} {
+		if !IsReservedProfileKey(name) {
+			t.Errorf("profile key %q not reserved", name)
+		}
+	}
+	for _, name := range []string{"weak", "coder", "coder-api", "coder-local", "Coder:api", "unsloth/LFM2.5-24B-A2B-GGUF:UD-Q4_K_XL"} {
+		if IsReservedProfileKey(name) {
+			t.Errorf("profile key %q reserved", name)
+		}
+	}
+}
+
 func TestParseNanoUSDAcceptsCanonicalForms(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -234,76 +294,5 @@ func TestParseCredentialRefErrorDoesNotEchoInput(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "sk-live") || strings.Contains(err.Error(), input) {
 		t.Fatalf("error %q echoes the rejected input", err.Error())
-	}
-}
-
-func TestParseAliasAcceptsNineReservedNames(t *testing.T) {
-	cases := []struct {
-		name     string
-		wantTier string
-		wantMode AliasMode
-	}{
-		{name: "weak", wantTier: "weak", wantMode: AliasBare},
-		{name: "weak-api", wantTier: "weak", wantMode: AliasAPI},
-		{name: "weak-local", wantTier: "weak", wantMode: AliasLocal},
-		{name: "medium", wantTier: "medium", wantMode: AliasBare},
-		{name: "medium-api", wantTier: "medium", wantMode: AliasAPI},
-		{name: "medium-local", wantTier: "medium", wantMode: AliasLocal},
-		{name: "strong", wantTier: "strong", wantMode: AliasBare},
-		{name: "strong-api", wantTier: "strong", wantMode: AliasAPI},
-		{name: "strong-local", wantTier: "strong", wantMode: AliasLocal},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			tier, mode, ok := ParseAlias(c.name)
-			if !ok {
-				t.Fatalf("ParseAlias(%q) ok = false, want reserved", c.name)
-			}
-			if tier != c.wantTier || mode != c.wantMode {
-				t.Fatalf("ParseAlias(%q) = (%q, %q), want (%q, %q)", c.name, tier, mode, c.wantTier, c.wantMode)
-			}
-			if !IsReservedAlias(c.name) {
-				t.Fatalf("IsReservedAlias(%q) = false, want true", c.name)
-			}
-		})
-	}
-}
-
-func TestParseAliasRejectsEverythingElse(t *testing.T) {
-	cases := []struct {
-		name  string
-		input string
-	}{
-		{name: "empty", input: ""},
-		{name: "uppercase tier", input: "Weak"},
-		{name: "uppercase suffix", input: "weak-API"},
-		{name: "uppercase local suffix", input: "weak-Local"},
-		{name: "tagged name", input: "medium:latest"},
-		{name: "leading space", input: " weak"},
-		{name: "trailing space", input: "weak "},
-		{name: "unknown suffix", input: "weak-cloud"},
-		{name: "bare suffix", input: "weak-bare"},
-		{name: "dangling hyphen", input: "weak-"},
-		{name: "suffix without tier", input: "-api"},
-		{name: "local suffix without tier", input: "-local"},
-		{name: "double suffix", input: "weak-api-local"},
-		{name: "reversed suffix", input: "weak-local-api"},
-		{name: "underscore separator", input: "weak_api"},
-		{name: "unknown tier", input: "huge"},
-		{name: "unknown tier with suffix", input: "huge-api"},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			tier, mode, ok := ParseAlias(c.input)
-			if ok {
-				t.Fatalf("ParseAlias(%q) = (%q, %q, true), want not reserved", c.input, tier, mode)
-			}
-			if tier != "" || mode != "" {
-				t.Fatalf("ParseAlias(%q) returned (%q, %q) with ok false, want empty", c.input, tier, mode)
-			}
-			if IsReservedAlias(c.input) {
-				t.Fatalf("IsReservedAlias(%q) = true, want false", c.input)
-			}
-		})
 	}
 }

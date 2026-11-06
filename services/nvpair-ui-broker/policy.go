@@ -300,7 +300,7 @@ func (b *Broker) loadNodePolicy(path string) {
 			slog.Warn("node policy invalid; kept a copy and policy recovery is required", "path", path, "copy", bad, "err", perr)
 		} else {
 			policy = parsed
-			for _, category := range []string{"profiles", "roles", "roleReferences", "tiers", "servedModels", "residentModels", "deployments", "residentReferences", "deploymentReferences", "familyReferences"} {
+			for _, category := range []string{"profiles", "roles", "roleReferences", "tiers", "routingTiers", "servedModels", "residentModels", "deployments", "residentReferences", "deploymentReferences", "familyReferences"} {
 				if count := removals[category]; count > 0 {
 					slog.Warn("invalid stored model entries removed", "category", category, "count", count)
 				}

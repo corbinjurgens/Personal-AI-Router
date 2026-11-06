@@ -115,7 +115,7 @@
     {"name": "missing account", "path": ["account"], "value": "ghost", "valid": false},
     {"name": "invalid id", "path": ["id"], "value": "chat small", "valid": false},
     {"name": "empty model", "path": ["model"], "value": "", "valid": false},
-    {"name": "reserved alias model", "path": ["model"], "value": "strong-api", "valid": false},
+    {"name": "provider colon model", "path": ["model"], "value": "strong:api", "valid": true},
     {"name": "invalid family", "path": ["family"], "value": "al pha", "valid": false},
     {"name": "unknown capability", "path": ["capabilities"], "value": ["telepathy"], "valid": false},
     {"name": "zero context", "path": ["contextTokens"], "value": 0, "valid": false},

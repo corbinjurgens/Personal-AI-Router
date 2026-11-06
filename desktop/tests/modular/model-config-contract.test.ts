@@ -528,34 +528,54 @@ describe('model contract validation', () => {
         ).toThrow()
     })
 
-    it('preserves artifact aliases separately from profile keys in snapshots', () => {
-        const wire = snapshot()
-        const load = { ...modelLoad(), profileKey: 'lfm-8k', modelId: 'medium-local' }
-        expect(
-            parseEngineSettings({
-                ...wire,
-                settings: { ...wire.settings, modelLoads: [load] }
-            }).settings.modelLoads
-        ).toEqual([load])
-    })
+    it.each(['medium-local', 'coder:api', 'coder:fast', 'coder:', 'owner/model:api'])(
+        'preserves artifact selector %s separately from profile keys in snapshots',
+        modelId => {
+            const wire = snapshot()
+            const load = { ...modelLoad(), profileKey: 'lfm-8k', modelId }
+            expect(
+                parseEngineSettings({
+                    ...wire,
+                    settings: { ...wire.settings, modelLoads: [load] }
+                }).settings.modelLoads
+            ).toEqual([load])
+        }
+    )
 
-    it('accepts artifact aliases in inspection results', () => {
-        expect(parseInspectModel({ ...inspection(), modelId: 'medium-local' }).modelId).toBe(
-            'medium-local'
-        )
-    })
+    it.each(['medium-local', 'coder:api', 'coder:fast', 'coder:', 'owner/model:api'])(
+        'accepts artifact selector %s in inspection results',
+        modelId => {
+            expect(parseInspectModel({ ...inspection(), modelId }).modelId).toBe(modelId)
+        }
+    )
 
     it('rejects duplicated profile keys and reserved profile aliases', () => {
         const wire = snapshot()
         for (const loads of [
             [modelLoad(), modelLoad()],
-            [{ profileKey: 'medium-local', modelId: 'model', requested: {} }]
+            [{ profileKey: 'coder:api', modelId: 'model', requested: {} }],
+            [{ profileKey: 'coder:fast', modelId: 'model', requested: {} }],
+            [{ profileKey: 'coder:', modelId: 'model', requested: {} }]
         ]) {
             expect(() =>
                 parseEngineSettings({ ...wire, settings: { ...wire.settings, modelLoads: loads } })
             ).toThrow()
         }
     })
+
+    it.each(['weak', 'coder-api', 'coder-local', 'owner/model:api'])(
+        'accepts ordinary profile key %s',
+        profileKey => {
+            const wire = snapshot()
+            const load = { ...modelLoad(), profileKey }
+            expect(
+                parseEngineSettings({
+                    ...wire,
+                    settings: { ...wire.settings, modelLoads: [load] }
+                }).settings.modelLoads
+            ).toEqual([load])
+        }
+    )
 
     const invalidInspections: Array<{ name: string; value: JsonValue }> = [
         { name: 'fake ready status', value: { ...inspection(), status: 'ready' } },

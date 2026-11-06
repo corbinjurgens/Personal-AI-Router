@@ -12,7 +12,7 @@ import (
 )
 
 func TestModelControlPolicyWritesSelectedModels(t *testing.T) {
-	for _, owner := range []string{"profiles", "roles", "tiers", "deployments"} {
+	for _, owner := range []string{"profiles", "roles", "deployments"} {
 		t.Run(owner, func(t *testing.T) {
 			test := func(name, model string, wantOK bool) {
 				t.Run(name, func(t *testing.T) {
@@ -22,9 +22,7 @@ func TestModelControlPolicyWritesSelectedModels(t *testing.T) {
 						p.Profiles = []Profile{{Key: "test", DisplayName: "test", Engine: "llamacpp", Model: model}}
 					case "roles":
 						p.Profiles = []Profile{{Key: "test", DisplayName: "Test", Engine: "llamacpp", Model: model}}
-						p.Roles = []Role{{Name: TierWeak, Profiles: []string{"test"}}}
-					case "tiers":
-						p.Tiers[TierWeak] = []TierEntry{{Kind: EntryLocal, Engine: "llamacpp", Model: model}}
+						p.Roles = []Role{{Name: "weak", Profiles: []string{"test"}}}
 					case "deployments":
 						p = stagedPolicy(t)
 						p.Routing.Deployments[0].Model = model
@@ -309,7 +307,7 @@ func TestModelControlPolicyWritesLegacyRevisionOrder(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if p.Revision != tc.want || len(p.Roles) != 1 || p.Roles[0].Name != TierWeak {
+			if p.Revision != tc.want || len(p.Roles) != 1 || p.Roles[0].Name != "weak" {
 				t.Fatal("legacy revision order or model sibling changed")
 			}
 		})

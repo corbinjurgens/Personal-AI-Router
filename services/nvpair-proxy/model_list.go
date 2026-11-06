@@ -238,6 +238,7 @@ func (f *facade) serveModelList(w http.ResponseWriter, r *http.Request, matchedR
 
 	success := false
 	models := make([]json.RawMessage, 0)
+	modelKeys := make([]string, 0)
 	seen := make(map[string]modelListItem)
 	for i, result := range results {
 		if !result.ok {
@@ -257,9 +258,28 @@ func (f *facade) serveModelList(w http.ResponseWriter, r *http.Request, matchedR
 			}
 			seen[item.key] = item
 			models = append(models, item.raw)
+			modelKeys = append(modelKeys, item.key)
 		}
 	}
-	aliasModels := f.tierModelEntries(seen)
+	aliasModels := f.tierModelEntries()
+	aliasIDs := make(map[string]bool, len(aliasModels))
+	for _, raw := range aliasModels {
+		var alias struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(raw, &alias); err != nil {
+			writeJSON(http.StatusInternalServerError, []byte(`{"error":"failed to encode model inventory"}`))
+			return http.StatusInternalServerError, err
+		}
+		aliasIDs[alias.ID] = true
+	}
+	concrete := models[:0]
+	for i, raw := range models {
+		if !aliasIDs[modelKeys[i]] {
+			concrete = append(concrete, raw)
+		}
+	}
+	models = concrete
 	models = append(models, aliasModels...)
 	// Configured aliases are served without any upstream. The Origin checks
 	// above still apply: they speak for the engines' own CORS policy.

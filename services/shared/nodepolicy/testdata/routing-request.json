@@ -73,7 +73,7 @@
         "schema": 1,
         "request": {"originNodeId": "synthetic-origin", "proxyRunId": "synthetic-run", "requestId": "4"},
         "workload": null, "seq": 2,
-        "requested": {"model": "synthetic-model", "tier": "medium", "mode": "chat"},
+        "requested": {"model": "synthetic-model", "tier": "coder", "mode": "chat"},
         "createdAt": 1700000030000, "endedAt": null,
         "state": "streaming", "reason": "", "status": 200, "served": null, "recoverable": true,
         "spend": {"currency": "USD", "ceilingNanoUsd": null, "grantedNanoUsd": null, "heldNanoUsd": null, "chargedNanoUsd": null, "accounting": "none"},

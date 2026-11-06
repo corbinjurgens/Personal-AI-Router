@@ -245,7 +245,7 @@ func TestPrepareResidentWire(t *testing.T) {
 		residentWireRejection{"empty model", "model", ""},
 		residentWireRejection{"untrimmed model", "model", " m"},
 		residentWireRejection{"long model", "model", strings.Repeat("m", 1025)},
-		residentWireRejection{"reserved alias", "model", TierOrder[0]},
+		residentWireRejection{"reserved alias", "model", "coder:local"},
 		residentWireRejection{"zero timeout", "timeoutMs", 0},
 		residentWireRejection{"negative timeout", "timeoutMs", -1},
 		residentWireRejection{"timeout over cap", "timeoutMs", 60_001},

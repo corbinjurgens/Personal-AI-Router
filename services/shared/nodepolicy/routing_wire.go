@@ -807,7 +807,7 @@ func validateHistoryRecord(r RoutingHistoryRecordHeader, attemptsPresent bool, c
 	if r.Schema != 1 || r.Request.Validate() != nil || !historyNumber(r.Seq) || r.Seq == 0 ||
 		!historyNumber(r.CreatedAt) || !historyNullableNumber(r.EndedAt) || (r.EndedAt != nil && *r.EndedAt < r.CreatedAt) ||
 		!historyStatus(r.Status) || !historyNumber(r.DroppedAttempts) || !historyModel(r.Requested.Model, true) ||
-		!historyEnum(r.Requested.Tier, "|weak|medium|strong") || !historyEnum(r.Requested.Mode, "chat|completion|embedding|other") ||
+		(r.Requested.Tier != "" && ValidateRoleName(r.Requested.Tier) != nil) || !historyEnum(r.Requested.Mode, "chat|completion|embedding|other") ||
 		!historyEnum(r.State, "routing|streaming|completed|failed|cancelled") || !historyEnum(r.Reason, historyReasons) ||
 		r.Spend.Currency != "USD" || !historyEnum(r.Spend.Accounting, historyAccounting) ||
 		!historyMoney(r.Spend.CeilingNanoUSD, r.Spend.GrantedNanoUSD, r.Spend.HeldNanoUSD, r.Spend.ChargedNanoUSD) || !attemptsPresent {

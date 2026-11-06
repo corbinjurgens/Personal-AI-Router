@@ -77,7 +77,8 @@ func newBindingRequestFixtureFor(t *testing.T, profile engineProfile) *bindingRe
 	pol := nodepolicy.Default()
 	pol.Revision = "1"
 	pol.EngineBindings = nodepolicy.EngineBindings{{Engine: profile.Name, Model: "fixture"}}
-	pol.Tiers = map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: profile.Name, Model: "fixture"}}}
+	pol.Profiles = []nodepolicy.Profile{{Key: "fixture", DisplayName: "Fixture", Engine: profile.Name, Model: "fixture"}}
+	pol.Roles = []nodepolicy.Role{{Name: "weak", Profiles: []string{"fixture"}}}
 	fx.p.admission.setPolicy(pol)
 	fx.p.admission.setIntent(map[string]bool{profile.Name: false})
 	fx.offer(t, fx.f, "fixture")
@@ -342,7 +343,8 @@ func TestEngineBindingRequestsRevalidateAfterInventoryWait(t *testing.T) {
 	test("tier context changed", func(fx *bindingRequestFixture) {
 		pol := fx.p.admission.currentPolicy()
 		pol.Revision = "2"
-		pol.Tiers = map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "other", ContextTokens: 1}}}
+		pol.Profiles[0].Model = "other"
+		pol.Profiles[0].ContextTokens = 1
 		fx.p.admission.setPolicy(pol)
 	})
 	test("backend withdrawn", func(fx *bindingRequestFixture) {
@@ -765,15 +767,21 @@ func TestEngineBindingRequestsTotalBudgetAcrossFailover(t *testing.T) {
 	lcpp := fx.p.soleFacade()
 	ready := nodeForModel(t, "a-ready", first.URL, "fixture")
 	ready.ClusterUUID = "uuid-peer"
+	setAdvertisedProfilesByRole(&ready, map[string]nodepolicy.AdvertisedProfile{
+		"weak": {Key: "ready-fixture", Engine: "llamacpp", Model: "fixture"},
+	})
 	lcpp.discovery.SetSubscribed([]Node{ready})
 	lm := newFacade(fx.p, customCase(t).profile, NewDiscovery(), customCase(t).profile.FacadePort)
 	fx.p.facades[lm.profile.Name] = lm
 	cold := nodeFor(t, "b-cold", second.URL)
 	cold.PolicyRevision, cold.ClusterUUID = "1", "uuid-peer"
 	cold.EngineBindingOffers = bindingOffer("llamacpp-custom", "fixture")
+	setAdvertisedProfilesByRole(&cold, map[string]nodepolicy.AdvertisedProfile{
+		"weak": {Key: "cold-fixture", Engine: "llamacpp-custom", Model: "fixture"},
+	})
 	lm.discovery.SetSubscribed([]Node{cold})
 	pol := nodepolicy.Default()
-	pol.Tiers = map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "fixture"}, {Kind: nodepolicy.EntryLocal, Engine: "llamacpp-custom", Model: "fixture"}}}
+	pol.Roles = []nodepolicy.Role{{Name: "weak"}}
 	fx.p.admission.setPolicy(pol)
 	req := bindingRequest("weak", routeChatCompletions)
 	req.Header.Set(nodepolicy.EnginePrepareBudgetHeader, "250")

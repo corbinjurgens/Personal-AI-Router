@@ -98,8 +98,8 @@ beforeEach(() => {
                 policy: {
                     revision: '1',
                     roles: [
-                        { name: 'weak', profiles: ['first', 'second'] },
-                        { name: 'strong', profiles: ['first'] }
+                        { name: 'review', profiles: ['first', 'second'] },
+                        { name: 'coder', profiles: ['first'] }
                     ],
                     profiles: [
                         {
@@ -142,13 +142,53 @@ async function renderRoles() {
 }
 
 describe('node card role members', () => {
+    it('keeps full distinct long role names on populated and empty declarations', async () => {
+        const populated = `${'a'.repeat(63)}b`
+        const empty = `${'a'.repeat(63)}c`
+        useDiscoveredNodesStore.setState(state => ({
+            nodes: state.nodes.map(node => ({
+                ...node,
+                policy: node.policy
+                    ? {
+                          ...node.policy,
+                          roles: [
+                              { name: populated, profiles: ['first', 'second'] },
+                              { name: empty, profiles: [] }
+                          ]
+                      }
+                    : undefined
+            }))
+        }))
+        await renderRoles()
+        expect(
+            Array.from(container.querySelectorAll('button'), item => ({
+                label: item.getAttribute('aria-label'),
+                title: item.title
+            }))
+        ).toEqual([
+            { label: `${populated}: first`, title: `${populated}: first` },
+            { label: `${populated}: second`, title: `${populated}: second` }
+        ])
+        const unassigned = container.querySelector(`[aria-label="${empty}: Unassigned"]`)
+        expect(unassigned?.getAttribute('title')).toBe(`${empty}: Unassigned`)
+        expect(container.textContent?.indexOf(populated)).toBeLessThan(
+            container.textContent?.indexOf(empty) ?? -1
+        )
+    })
+
     it('renders every ordered member with identity tags and no display names by default', async () => {
         await renderRoles()
         expect(
             Array.from(container.querySelectorAll('button'), button =>
                 button.getAttribute('aria-label')
             )
-        ).toEqual(['weak: first', 'weak: second', 'strong: first'])
+        ).toEqual(['review: first', 'review: second', 'coder: first'])
+        const members = container.querySelectorAll('button')
+        expect(members[0].textContent).toContain('owner/repository')
+        expect(members[0].textContent).toContain('Q4_K_M')
+        expect(members[1].textContent).toContain('UnknownUnknown')
+        expect(members[2].textContent).toContain('owner/repository')
+        expect(members[2].textContent).toContain('Q4_K_M')
         expect(container.textContent).toContain('owner/repository')
         expect(container.textContent).toContain('Q4_K_M')
         expect(container.textContent).not.toContain(longName)
@@ -160,15 +200,15 @@ describe('node card role members', () => {
     it('shows unknown repository and quantization without guessing from a served name', async () => {
         await renderRoles()
         const member = container.querySelectorAll('button')[1]
-        expect(member.textContent).toBe('weakUnknownUnknown')
+        expect(member.textContent).toBe('reviewUnknownUnknown')
     })
 
     it('toggles summaries while retaining identity and full 64-byte names', async () => {
         await renderRoles()
         await act(async () => useOverviewUiStore.getState().setShowProfileSummaries(true))
         const member = container.querySelector('button')
-        expect(member?.getAttribute('aria-label')).toBe(`weak: ${longName} (first)`)
-        expect(member?.title).toBe(`${longName} (first)`)
+        expect(member?.getAttribute('aria-label')).toBe(`review: ${longName} (first)`)
+        expect(member?.title).toBe(`review: ${longName} (first)`)
         expect(member?.textContent).toContain(longName)
         expect(member?.querySelector('svg')?.getAttribute('class')).toContain('lucide-code')
         expect(member?.querySelector('svg')?.getAttribute('aria-hidden')).toBe('true')
@@ -330,18 +370,19 @@ describe('node card role members', () => {
                     ? {
                           ...node.policy,
                           roles: [
-                              { name: 'weak', profiles: [] },
-                              { name: 'strong', profiles: ['missing'] }
+                              { name: 'review', profiles: [] },
+                              { name: 'coder', profiles: ['missing'] }
                           ]
                       }
                     : undefined
             }))
         }))
         await renderRoles()
-        expect(container.textContent).toContain('weak: Unassigned')
-        expect(container.querySelector('button')?.textContent).toContain('Unavailable profile')
-        expect(container.querySelector('button')?.getAttribute('aria-label')).toBe(
-            'strong: missing'
+        expect(container.textContent).toContain('review: Unassigned')
+        expect(container.textContent?.indexOf('review: Unassigned')).toBeLessThan(
+            container.textContent?.indexOf('coder') ?? -1
         )
+        expect(container.querySelector('button')?.textContent).toContain('Unavailable profile')
+        expect(container.querySelector('button')?.getAttribute('aria-label')).toBe('coder: missing')
     })
 })

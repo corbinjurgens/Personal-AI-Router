@@ -27,7 +27,7 @@ describe('engine binding offers', () => {
         { version: 1, models: [] },
         { version: 1, models, ready: true },
         { version: 1, models: [...models, ...models] },
-        { version: 1, models: [{ engine: 'fixture-engine', model: 'weak' }] },
+        { version: 1, models: [{ engine: 'fixture-engine', model: 'coder:api' }] },
         { version: 1, models: [{ engine: 'fixture-engine', model: '<'.repeat(100) }] }
     ]
     it.each(invalidOffers)('disables malformed optional offers (%j)', engineBindingOffers => {
@@ -39,5 +39,13 @@ describe('engine binding offers', () => {
         expect(
             parseAdvertisementEngineBindingOffers({ EngineBindingOffers: { version: 1, models } })
         ).toEqual({ state: 'invalid' })
+    })
+    it.each(['weak', 'coder-api', 'coder-local'])('accepts ordinary concrete name %s', model => {
+        const ordinaryModels = [{ engine: 'fixture-engine', model }]
+        expect(
+            parseAdvertisementEngineBindingOffers({
+                engineBindingOffers: { version: 1, models: ordinaryModels }
+            })
+        ).toEqual({ state: 'valid', version: 1, models: ordinaryModels })
     })
 })

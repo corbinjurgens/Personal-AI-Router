@@ -6,6 +6,9 @@ import type { EngineModels } from '@/shared/types/engines'
 import type { NodeRoles } from '@/shared/types/node-roles'
 import {
     parseNodeRoles,
+    roleNameError,
+    isReservedAlias,
+    isReservedProfileKey,
     parsePolicyAdvertisement,
     sameNodeRoles,
     samePolicyAdvertisement
@@ -20,6 +23,35 @@ import {
 } from '@/ui/stores/node-configuration.store'
 
 describe('ordered role declarations', () => {
+    it.each(['coder', 'weak', 'coder-api', 'coder-local', '0', 'a.b_c-9', 'a'.repeat(64)])(
+        'accepts plain role name %j',
+        name => expect(roleNameError(name)).toBeUndefined()
+    )
+
+    it.each(['', 'Coder', 'coder\n', 'coder:api', 'a'.repeat(65), 'é', '-coder', ' coder'])(
+        'rejects invalid role name %j',
+        name => {
+            expect(roleNameError(name)).toEqual(expect.any(String))
+            expect(parseNodeRoles([{ name, profiles: [] }])).toEqual([])
+        }
+    )
+
+    it.each([
+        ['weak', false, false],
+        ['coder-api', false, false],
+        ['coder-local', false, false],
+        ['coder:api', true, true],
+        ['coder:local', true, true],
+        ['coder:fast', false, true],
+        ['coder:', false, true],
+        ['owner/model:api', false, false],
+        ['Coder:api', false, false],
+        ['coder\n:api', false, false]
+    ])('classifies alias and profile reservation for %s', (name, alias, key) => {
+        expect(isReservedAlias(name)).toBe(alias)
+        expect(isReservedProfileKey(name)).toBe(key)
+    })
+
     it('keeps saved role order and profile preference order', () => {
         expect(
             parseNodeRoles([
@@ -51,14 +83,14 @@ describe('ordered role declarations', () => {
         expect(
             parseNodeRoles([
                 null,
-                { name: 'custom', profiles: ['custom-profile'] },
+                { name: 'Custom', profiles: ['custom-profile'] },
                 { name: 'medium', profiles: 'profile' },
                 { name: 'strong', profiles: ['accepted'] }
             ])
         ).toEqual([{ name: 'strong', profiles: ['accepted'] }])
     })
 
-    it('matches the interim aliases exactly without banning every suffixed key', () => {
+    it('reserves every plain colon key while keeping ordinary and namespaced keys', () => {
         expect(
             parseNodeRoles([
                 {
@@ -77,7 +109,9 @@ describe('ordered role declarations', () => {
                         'custom-local',
                         'Weak',
                         ' weak',
-                        'weak:tag',
+                        'coder:api',
+                        'coder:fast',
+                        'coder:',
                         'owner/model-GGUF:Q4_K_M'
                     ]
                 }
@@ -86,14 +120,39 @@ describe('ordered role declarations', () => {
             {
                 name: 'weak',
                 profiles: [
+                    'weak',
+                    'medium',
+                    'strong',
+                    'weak-api',
+                    'medium-api',
+                    'strong-api',
+                    'weak-local',
+                    'medium-local',
+                    'strong-local',
                     'custom-api',
                     'custom-local',
                     'Weak',
                     ' weak',
-                    'weak:tag',
                     'owner/model-GGUF:Q4_K_M'
                 ]
             }
+        ])
+    })
+
+    it('detaches ordered populated and empty arbitrary declarations from input', () => {
+        const wire = [
+            { name: 'coder-local', profiles: ['first', 'second'] },
+            { name: 'coder', profiles: [] },
+            { name: 'a'.repeat(64), profiles: ['last'] }
+        ]
+        const parsed = parseNodeRoles(wire)
+        wire[0].profiles.reverse()
+        wire[1].profiles.push('external')
+        wire.reverse()
+        expect(parsed).toEqual([
+            { name: 'coder-local', profiles: ['first', 'second'] },
+            { name: 'coder', profiles: [] },
+            { name: 'a'.repeat(64), profiles: ['last'] }
         ])
     })
 
@@ -217,16 +276,17 @@ describe('single-profile controls over keyed lists', () => {
         ])
     })
 
-    it('saves a newly picked role as a one-element key list', () => {
+    it('saves a picked profile in an explicitly created role', () => {
         const store = useNodeConfigurationStore.getState()
         store.adopt('role-key-save', { policy, revision: '19' })
-        store.setRole('role-key-save', 'medium', 'fast-8k')
+        store.addRole('role-key-save', 'coder')
+        store.setRole('role-key-save', 'coder', 'fast-8k')
         const draft = useNodeConfigurationStore.getState().editors.get('role-key-save')?.draft
         if (!draft) throw new Error('role draft missing after adoption')
         expect(JSON.parse(withRoles(policy, draft))).toEqual({
             revision: '19',
             profiles: [profile],
-            roles: [{ name: 'medium', profiles: ['fast-8k'] }]
+            roles: [{ name: 'coder', profiles: ['fast-8k'] }]
         })
     })
 
@@ -265,6 +325,20 @@ describe('single-profile controls over keyed lists', () => {
 })
 
 describe('keyed advertisements', () => {
+    it('keeps native targets exempt from public key reservation', () => {
+        const profiles = ['coder:api', 'coder:fast', 'coder:', 'owner/model:api'].map(
+            (model, index) => ({
+                key: `profile-${index}`,
+                displayName: 'Native target',
+                engine: 'llamacpp',
+                model
+            })
+        )
+        expect(parsePolicyAdvertisement({ revision: '7', roles: [], profiles })?.profiles).toEqual(
+            profiles
+        )
+    })
+
     it('drops malformed profiles and empties only their declared memberships', () => {
         expect(
             parsePolicyAdvertisement({

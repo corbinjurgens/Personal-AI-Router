@@ -11,6 +11,81 @@ import (
 	"testing"
 )
 
+func TestParseStoredRetiresLocalEntriesAndOrphanRoutingRules(t *testing.T) {
+	for _, name := range []string{"no API entries", "coder API sibling"} {
+		t.Run(name, func(t *testing.T) {
+			p := stagedPolicy(t)
+			p.Tiers = map[string][]TierEntry{"weak": {{Kind: EntryLocal, Engine: "llamacpp", Model: "native"}}}
+			p.Routing.Tiers = map[string]TierRouting{
+				"weak": {BareMode: BareLocal, AllowedFamilies: []string{}}, "medium": {BareMode: BareHybrid, AllowedFamilies: []string{}}, "strong": {BareMode: BareLocal, AllowedFamilies: []string{}},
+			}
+			if name == "coder API sibling" {
+				p.Tiers["coder"] = []TierEntry{{Kind: EntryAPI, Deployment: "paid-big"}, {Kind: EntryAPI, Deployment: "free-small"}}
+				p.Routing.Tiers["coder"] = TierRouting{BareMode: BareAPI, AllowedFamilies: []string{"beta", "alpha"}}
+				p.Tiers["weak"] = append(p.Tiers["weak"], TierEntry{Kind: EntryAPI, Deployment: "free-small"})
+			}
+			raw, err := json.Marshal(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := bytes.Clone(raw)
+			got, _, err := ParseStored(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := p
+			want.Tiers = map[string][]TierEntry{"weak": {}}
+			want.Routing.Tiers = map[string]TierRouting{}
+			if name == "coder API sibling" {
+				want.Tiers["coder"] = p.Tiers["coder"]
+				want.Tiers["weak"] = []TierEntry{{Kind: EntryAPI, Deployment: "free-small"}}
+				want.Routing.Tiers["coder"] = p.Routing.Tiers["coder"]
+				want.Routing.Tiers["weak"] = p.Routing.Tiers["weak"]
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("repaired policy = %+v, want %+v", got, want)
+			}
+			if !bytes.Equal(raw, before) {
+				t.Fatal("repair mutated stored input")
+			}
+			encoded, err := json.Marshal(got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			again, _, err := ParseStored(encoded)
+			if err != nil || !reflect.DeepEqual(again, got) {
+				t.Fatalf("repair is not stable: %+v, %v", again, err)
+			}
+		})
+	}
+}
+
+func TestStoredReservedRepairedProfileKey(t *testing.T) {
+	_, _, err := ParseStored([]byte(`{"profiles":[{"engine":"llamacpp","model":"qwen3:8b"}]}`))
+	const want = "profile key qwen3:8b is reserved: the text before its colon is a valid role name"
+	if err == nil || err.Error() != want {
+		t.Fatalf("stored repaired key error = %v, want %q", err, want)
+	}
+}
+
+func TestStoredReservedExplicitProfileKeySurvivesInvalidModelSanitation(t *testing.T) {
+	_, _, err := ParseStored([]byte(`{"profiles":[{"key":"coder:fast","displayName":"Bad","engine":"llamacpp","model":"bad\nmodel"}]}`))
+	const want = "profile key coder:fast is reserved: the text before its colon is a valid role name"
+	if err == nil || err.Error() != want {
+		t.Fatalf("stored explicit key error = %v, want %q", err, want)
+	}
+}
+
+func TestStoredObjectRolesDropWithoutReservingBareKey(t *testing.T) {
+	p, _, err := ParseStored([]byte(`{"roles":{"medium":{"engine":"llamacpp","model":"medium"}},"profiles":[{"engine":"llamacpp","model":"medium"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Roles) != 0 || len(p.Profiles) != 1 || p.Profiles[0].Key != "medium" {
+		t.Fatalf("stored policy = %+v", p)
+	}
+}
+
 func TestParseStoredProfileIdentityUsesKeys(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -24,23 +99,23 @@ func TestParseStoredProfileIdentityUsesKeys(t *testing.T) {
 			name:      "final keys without old names",
 			profiles:  `[{"key":"small","displayName":"Small","engine":"llamacpp","model":"small"},{"key":"large","displayName":"Large","engine":"llamacpp","model":"large"}]`,
 			want:      []Profile{{Key: "small", DisplayName: "Small", Engine: "llamacpp", Model: "small"}, {Key: "large", DisplayName: "Large", Engine: "llamacpp", Model: "large"}},
-			roles:     []Role{{Name: TierWeak, Profiles: []string{"large", "small"}}},
-			wantRoles: []Role{{Name: TierWeak, Profiles: []string{"large", "small"}}},
+			roles:     []Role{{Name: "weak", Profiles: []string{"large", "small"}}},
+			wantRoles: []Role{{Name: "weak", Profiles: []string{"large", "small"}}},
 		},
 		{
 			name:      "repeated labels and malformed sibling",
 			profiles:  `[{"key":"small","displayName":"Shared","engine":"llamacpp","model":"small"},{"key":"bad","displayName":"Shared","engine":"llamacpp","model":"bad\nmodel"},{"key":"large","displayName":"Shared","engine":"llamacpp","model":"large"}]`,
 			want:      []Profile{{Key: "small", DisplayName: "Shared", Engine: "llamacpp", Model: "small"}, {Key: "large", DisplayName: "Shared", Engine: "llamacpp", Model: "large"}},
-			roles:     []Role{{Name: TierWeak, Profiles: []string{"large", "bad", "small"}}, {Name: TierStrong, Profiles: []string{"bad"}}},
-			wantRoles: []Role{{Name: TierWeak, Profiles: []string{"large", "small"}}, {Name: TierStrong, Profiles: []string{}}},
+			roles:     []Role{{Name: "weak", Profiles: []string{"large", "bad", "small"}}, {Name: "strong", Profiles: []string{"bad"}}},
+			wantRoles: []Role{{Name: "weak", Profiles: []string{"large", "small"}}, {Name: "strong", Profiles: []string{}}},
 			dropped:   1,
 		},
 		{
 			name:      "legacy identity uses existing model rule",
 			profiles:  `[{"name":"Shared","engine":"llamacpp","model":"small"},{"name":"Shared","engine":"llamacpp","model":"large"}]`,
 			want:      []Profile{{Key: "small", DisplayName: "Shared", Engine: "llamacpp", Model: "small"}, {Key: "large", DisplayName: "Shared", Engine: "llamacpp", Model: "large"}},
-			roles:     []Role{{Name: TierWeak, Profiles: []string{"large", "small"}}},
-			wantRoles: []Role{{Name: TierWeak, Profiles: []string{"large", "small"}}},
+			roles:     []Role{{Name: "weak", Profiles: []string{"large", "small"}}},
+			wantRoles: []Role{{Name: "weak", Profiles: []string{"large", "small"}}},
 		},
 	}
 	for _, tc := range tests {
@@ -122,7 +197,7 @@ func TestParseStoredDropsOldRoles(t *testing.T) {
 	t.Run("list roles preserved", func(t *testing.T) {
 		p := Default()
 		p.Profiles = []Profile{{Key: "exact", DisplayName: "Exact", Engine: "llamacpp", Model: "m"}}
-		p.Roles = []Role{{Name: TierStrong, Profiles: []string{"exact"}}, {Name: TierMedium, Profiles: []string{}}}
+		p.Roles = []Role{{Name: "strong", Profiles: []string{"exact"}}, {Name: "medium", Profiles: []string{}}}
 		raw, err := json.Marshal(p)
 		if err != nil {
 			t.Fatal(err)
@@ -148,8 +223,9 @@ func TestParseStoredDropsOldRoles(t *testing.T) {
 		if len(fields.Profiles) != 1 || fields.Profiles[0].Key != "medium" || fields.Profiles[0].Model != "medium" {
 			t.Fatalf("repair renamed legacy identity: %+v", fields.Profiles)
 		}
-		if _, _, err := ParseStored(raw); err == nil {
-			t.Fatal("interim reserved bare name accepted")
+		p, _, err := ParseStored(raw)
+		if err != nil || len(p.Roles) != 0 || len(p.Profiles) != 1 || p.Profiles[0].Key != "medium" {
+			t.Fatalf("bare stored profile: %+v, %v", p, err)
 		}
 	})
 }
@@ -293,6 +369,13 @@ func TestModelControlStoredPolicyPreservesValidSiblings(t *testing.T) {
 			}
 			raw := []byte(`{"version":` + version + `,"revision":"42","availability":"available","admission":{"memoryBudgetBytes":12345},"profiles":[{"name":"good","engine":"llamacpp","model":"good"},{"key":"bad-key","displayName":"Bad","name":"bad","engine":"llamacpp","model":"RAW"}],"roles":[{"name":"weak","profiles":["good"]},{"name":"strong","profiles":["bad-key"]}],"tiers":{"weak":[{` + kind + `"engine":"llamacpp","model":"good"},{` + kind + `"engine":"llamacpp","model":"bad\u0085name"}]},"servedModels":[{"engine":"llamacpp","model":"bad\nname"}],"residentModels":[{"engine":"llamacpp","model":"bad\nname"}]}`)
 			raw = bytes.ReplaceAll(raw, []byte("RAW"), []byte{0xff})
+			routing, err := json.Marshal(stagedPolicy(t).Routing)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if version == "2" {
+				raw = bytes.Replace(raw, []byte(`"tiers":{"weak":[`), []byte(`"routing":`+string(routing)+`,"tiers":{"weak":[{"kind":"api","deployment":"free-small"},`), 1)
+			}
 			original := bytes.Clone(raw)
 			p, counts, err := ParseStored(raw)
 			if err != nil {
@@ -305,13 +388,23 @@ func TestModelControlStoredPolicyPreservesValidSiblings(t *testing.T) {
 			if p.Version != 2 || p.Revision != wantRevision || p.Availability != Available || p.Admission.MemoryBudgetBytes != 12345 {
 				t.Fatal("unrelated policy state changed")
 			}
-			if len(p.Profiles) != 1 || p.Profiles[0].Model != "good" || len(p.Roles) != 2 || !reflect.DeepEqual(p.Roles[0].Profiles, []string{"good"}) || len(p.Roles[1].Profiles) != 0 || len(p.Tiers[TierWeak]) != 1 || p.Tiers[TierWeak][0].Model != "good" {
+			if len(p.Profiles) != 1 || p.Profiles[0].Key != "good" || p.Profiles[0].Model != "good" || len(p.Roles) != 2 || !reflect.DeepEqual(p.Roles[0].Profiles, []string{"good"}) || len(p.Roles[1].Profiles) != 0 {
 				t.Fatal("valid model siblings lost")
+			}
+			if version == "2" {
+				if !reflect.DeepEqual(p.Tiers["weak"], []TierEntry{{Kind: EntryAPI, Deployment: "free-small"}}) {
+					t.Fatal("valid sibling API entry lost")
+				}
+			} else if len(p.Tiers["weak"]) != 0 {
+				t.Fatal("legacy local entries retained")
 			}
 			if p.ServedModels == nil || len(p.ServedModels) != 0 || len(p.ResidentModels) != 0 {
 				t.Fatal("empty permission or residency changed")
 			}
-			for _, category := range []string{"profiles", "tiers", "servedModels", "residentModels"} {
+			if counts["tiers"] != 2 {
+				t.Fatalf("retired local count=%d, want 2", counts["tiers"])
+			}
+			for _, category := range []string{"profiles", "servedModels", "residentModels"} {
 				if counts[category] != 1 {
 					t.Fatalf("%s count=%d, want 1", category, counts[category])
 				}
@@ -330,7 +423,7 @@ func TestModelControlStoredPolicyRepairsDeploymentFamilies(t *testing.T) {
 			p := stagedPolicy(t)
 			p.Routing.Deployments[0].Model = "bad\nname"
 			if name == "exhausted allowlist" {
-				p.Tiers[TierWeak] = append(p.Tiers[TierWeak], TierEntry{Kind: EntryAPI, Deployment: "paid-big"})
+				p.Tiers["weak"] = append(p.Tiers["weak"], TierEntry{Kind: EntryAPI, Deployment: "paid-big"})
 			}
 			raw, err := json.Marshal(p)
 			if err != nil {
@@ -346,12 +439,11 @@ func TestModelControlStoredPolicyRepairsDeploymentFamilies(t *testing.T) {
 			if len(got.Routing.Deployments) != 1 || got.Routing.Deployments[0].ID != "paid-big" {
 				t.Fatal("deployment sibling lost")
 			}
-			if len(got.Tiers[TierWeak]) != 1 || got.Tiers[TierWeak][0].Kind != EntryLocal || len(got.Tiers[TierStrong]) != 0 {
+			if len(got.Tiers["weak"]) != 0 || len(got.Tiers["medium"]) != 0 || len(got.Tiers["strong"]) != 0 {
 				t.Fatal("dependent or dormant API candidates retained")
 			}
-			settings := got.Routing.Tiers[TierWeak]
-			if settings.RemoteAllowed || settings.PaidAllowed || len(settings.AllowedFamilies) != 0 {
-				t.Fatal("exhausted allowlist broadened")
+			if len(got.Routing.Tiers) != 0 {
+				t.Fatal("routing rules without API entries retained")
 			}
 			if counts["deployments"] != 1 || counts["familyReferences"] != 1 || counts["deploymentReferences"] < 2 {
 				t.Fatal("missing fixed removal counts")
@@ -369,13 +461,23 @@ func TestModelControlStoredPolicyConservativeRecovery(t *testing.T) {
 		`{"servedModels":[{"engine":"llamacpp","model":"bad\nname","extra":true}]}`,
 		`{"profiles":[{"name":"good","engine":"llamacpp","model":"good"},{"name":"bad","displayName":"bad\nname","engine":"llamacpp","model":"bad\nname"}]}`,
 		`{"profiles":[{"name":"test","engine":"llamacpp","model":"bad\nname","memoryBytes":-1}]}`,
-		`{"roles":[{"name":"unknown","profiles":[]}]}`,
+		`{"roles":[{"name":"Unknown","profiles":[]}]}`,
 		`{"profiles":[{"name":"test","engine":"llamacpp","model":"bad\nname"}],"residentModels":[{"engine":"llamacpp","model":"unrelated"}]}`,
+		`{"version":2,"tiers":{"coder":[{"engine":"llamacpp","model":"good"}]}}`,
+		`{"version":2,"tiers":{"coder":[{"kind":"local","engine":"llamacpp","model":"good"},{"kind":"local","engine":"llamacpp","model":"good"}]}}`,
+		`{"tiers":{"coder":[{"kind":"local","engine":"llamacpp","model":"good","contextTokens":-1}]}}`,
+		`{"routing":{"tiers":{"Coder":{"bareMode":"local"}}}}`,
+		`{"profiles":[{"engine":"llamacpp","model":"coder:fast\ninvalid"}]}`,
 	} {
-		if _, _, err := ParseStored([]byte(raw)); err == nil {
+		data := []byte(raw)
+		before := bytes.Clone(data)
+		if _, _, err := ParseStored(data); err == nil {
 			t.Fatal("unrelated malformed policy repaired")
 		} else if err.Error() != "stored policy is invalid" {
 			t.Fatalf("unsafe recovery diagnostic: %q", err.Error())
+		}
+		if !bytes.Equal(data, before) {
+			t.Fatal("refused load changed input bytes")
 		}
 	}
 }
@@ -424,9 +526,9 @@ func TestModelControlStoredPolicyRejectsPermissionsBeforeFamilyRepair(t *testing
 		t.Run(tc.name, func(t *testing.T) {
 			p := stagedPolicy(t)
 			p.Routing.Deployments[0].Model = "bad\nmodel"
-			tr := p.Routing.Tiers[TierWeak]
+			tr := p.Routing.Tiers["weak"]
 			tr.RemoteAllowed, tr.PaidAllowed = tc.remote, tc.paid
-			p.Routing.Tiers[TierWeak] = tr
+			p.Routing.Tiers["weak"] = tr
 			raw, err := json.Marshal(p)
 			if err != nil {
 				t.Fatal(err)

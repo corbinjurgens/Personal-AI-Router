@@ -43,8 +43,8 @@ const (
 	BillingPaid BillingClass = "paid"
 )
 
-// BareMode is where a bare tier alias ("weak") routes. The suffixed aliases
-// ("weak-api", "weak-local") override it per request.
+// BareMode is where a bare user-created role routes. The colon overrides
+// <role>:api and <role>:local select a mode per request.
 type BareMode string
 
 const (
@@ -57,15 +57,15 @@ const (
 )
 
 // Routing is the origin-only hybrid routing configuration. It never leaves the
-// machine that owns the policy: peers neither see nor change it. Tier
-// memberships stay in Policy.Tiers; this section holds the objects they refer
-// to and the rules that apply to them.
+// machine that owns the policy: peers neither see nor change it. API entries
+// stay in Policy.Tiers; this section holds the objects they refer to and their
+// routing rules. Local candidates come only from declared-role profiles.
 type Routing struct {
 	// Accounts are the provider billing and quota buckets.
 	Accounts []Account `json:"accounts"`
-	// Deployments are the provider models a tier's API entries refer to.
+	// Deployments are the provider models a role's API entries refer to.
 	Deployments []Deployment `json:"deployments"`
-	// Tiers holds the settings of every tier, keyed by tier name.
+	// Tiers holds optional routing rules keyed by valid role name, with no defaults.
 	Tiers    map[string]TierRouting `json:"tiers"`
 	Limits   Limits                 `json:"limits"`
 	Listener Listener               `json:"listener"`
@@ -314,17 +314,12 @@ func (t Transport) validate() error {
 	return nil
 }
 
-// defaultRouting is the routing section of Default(): no accounts, every tier
-// local-preferred with remote and paid execution off, and the finite limits.
+// defaultRouting has no accounts or role entries, and finite limits.
 func defaultRouting() Routing {
-	tiers := make(map[string]TierRouting, len(TierOrder))
-	for _, t := range TierOrder {
-		tiers[t] = TierRouting{BareMode: BareHybrid, AllowedFamilies: []string{}}
-	}
 	return Routing{
 		Accounts:    []Account{},
 		Deployments: []Deployment{},
-		Tiers:       tiers,
+		Tiers:       map[string]TierRouting{},
 		Limits: Limits{
 			QueueSeconds:           0,
 			ColdStartSeconds:       0,
@@ -425,15 +420,9 @@ func (r Routing) validate() error {
 		families[d.Family] = true
 	}
 
-	for t := range r.Tiers {
-		if !IsTier(t) {
-			return fmt.Errorf("routing.tiers: unknown tier %q (want one of %v)", t, TierOrder)
-		}
-	}
-	for _, t := range TierOrder {
-		tr, ok := r.Tiers[t]
-		if !ok {
-			return fmt.Errorf("routing.tiers.%s is required", t)
+	for t, tr := range r.Tiers {
+		if err := ValidateRoleName(t); err != nil {
+			return fmt.Errorf("routing.tiers: %w", err)
 		}
 		if err := tr.validate(families); err != nil {
 			return fmt.Errorf("routing.tiers.%s: %w", t, err)
@@ -457,9 +446,6 @@ func validateDeployment(d Deployment, accounts map[string]bool) error {
 	}
 	if err := ValidateModelIdentifier(d.Model); err != nil {
 		return err
-	}
-	if IsReservedAlias(d.Model) {
-		return fmt.Errorf("model %q is a reserved alias", d.Model)
 	}
 	if !routingID.MatchString(d.Family) {
 		return fmt.Errorf("invalid family %q", d.Family)
@@ -635,12 +621,7 @@ func (r Routing) validateTierRefs(tier string, entries []TierEntry) error {
 	for i, e := range entries {
 		switch e.Kind {
 		case EntryLocal:
-			if err := checkModelRef(e.Engine, e.Model, e.ContextTokens, e.Capabilities); err != nil {
-				return fmt.Errorf("tiers.%s[%d]: %w", tier, i, err)
-			}
-			if e.Deployment != "" {
-				return fmt.Errorf("tiers.%s[%d]: a local entry cannot name a deployment", tier, i)
-			}
+			return errors.New("Local tier entries are retired; declare roles instead.")
 		case EntryAPI:
 			if e.Engine != "" || e.Model != "" || e.ContextTokens != 0 || len(e.Capabilities) > 0 {
 				return fmt.Errorf("tiers.%s[%d]: an api entry names only a deployment", tier, i)
@@ -649,7 +630,7 @@ func (r Routing) validateTierRefs(tier string, entries []TierEntry) error {
 				return fmt.Errorf("tiers.%s[%d]: deployment %q is not defined", tier, i, e.Deployment)
 			}
 		default:
-			return fmt.Errorf("tiers.%s[%d]: kind must be %q or %q", tier, i, EntryLocal, EntryAPI)
+			return fmt.Errorf("tiers.%s[%d]: kind must be %q", tier, i, EntryAPI)
 		}
 		key := entryKey(e)
 		if seen[key] {

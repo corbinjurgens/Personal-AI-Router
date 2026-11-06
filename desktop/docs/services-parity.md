@@ -104,6 +104,33 @@ see [model engine bindings](../../docs/model-engine-bindings.mdx).
 | Settings                   | Partial                         | Cluster identity plus per-engine ports and engine arguments, local and remote; inert backend settings are not surfaced                            |
 | Model catalog search       | Backend-owned                   | `engine:catalog` serves the cached llama.cpp catalog and searches Hugging Face for it         |
 
+## Role editing and API availability
+
+The node settings RoleEditor is the sole role lifecycle editor: create, rename,
+remove and reorder user-created names, including empty roles. Roles have no
+built-ins or defaults and no cluster-wide store. Memberships reference ordered
+node-local profile keys; deployment pickers select existing target roles only.
+Local tier entries are retired. Widening uses the requesting node's role order.
+
+Local rename/removal couples API settings through the same revision-checked
+policy save. A nonempty `tiers[name]` or any `routing.tiers[name]` is configured;
+an empty `tiers` list alone is absent. Rename refuses atomically when both names
+are configured, including cross-map collisions. Otherwise configuration ends
+under the new name, preserving destination-only configuration and deleting all
+old-name keys, even empty ones. Local removal deletes the role's API settings.
+Remote edits leave private API maps unseen and unchanged, send no configuration
+intent and infer none from role changes. Every remote rename/removal confirmation
+says API entries on the named node can't be seen from here and stay as they are.
+
+Any declared role has exact `:api` and `:local` aliases in the catalogue, even
+without an API entry. API selection requires a configured deployment and
+`routing.tiers` remote permission, but public dispatch remains disabled in this
+build: the API alias is listed and refused, and enabled deployments and remote
+or paid permissions cannot be saved. Role edits do not activate dispatch or
+coordinate configuration across the cluster. See
+[Hybrid routing](../../docs/hybrid-routing.mdx) and
+[model configuration](../../docs/model-configuration.mdx).
+
 ## Routing history availability and limits
 
 Production connects proxy facts, broker accepted windows, the service relay and

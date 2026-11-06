@@ -628,7 +628,11 @@ func TestDirectoryNodePolicy(t *testing.T) {
 	t.Run("advertisement round-trips", func(t *testing.T) {
 		orig := DirectoryNode{HostUUID: "host-1", Policy: &nodepolicy.Advertisement{
 			Revision: "42",
-			Roles:    []nodepolicy.Role{{Name: nodepolicy.TierStrong, Profiles: []string{"qwen3-32b"}}},
+			Roles: []nodepolicy.Role{
+				{Name: "r1.fast_v2", Profiles: []string{"qwen3-32b"}},
+				{Name: "coder", Profiles: []string{}},
+				{Name: "coder-local", Profiles: []string{"qwen3-32b"}},
+			},
 			Profiles: []nodepolicy.AdvertisedProfile{{Key: "qwen3-32b", DisplayName: "Qwen", Engine: "llamacpp", Model: "qwen3-32b", ContextTokens: 32768, Capabilities: []nodepolicy.Capability{nodepolicy.CapTools}}},
 			PausedBy: nodepolicy.PausedLocally,
 		}}

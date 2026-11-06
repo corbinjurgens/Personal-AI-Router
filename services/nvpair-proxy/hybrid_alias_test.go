@@ -18,28 +18,24 @@ import (
 	"nvpair-shared/nodepolicy"
 )
 
-// The nine reserved hybrid alias names, spelled independently of the code
+// Fixture role names and their overrides, spelled independently of the code
 // under test.
 var (
 	bareAliases   = []string{"weak", "medium", "strong"}
-	suffixAliases = []string{"weak-api", "weak-local", "medium-api", "medium-local", "strong-api", "strong-local"}
+	suffixAliases = []string{"weak:api", "weak:local", "medium:api", "medium:local", "strong:api", "strong:local"}
 	allAliases    = append(slices.Clone(bareAliases), suffixAliases...)
 )
 
-// stagedHybridPolicy has weak as API-only, medium as API then local, and strong
-// as local only, with the disabled provider objects the API entries refer to.
+// stagedHybridPolicy declares empty roles and stages API entries for weak and
+// medium, with the disabled provider objects those entries refer to. Declaring
+// nodes supply any local profiles separately.
 func stagedHybridPolicy(t *testing.T) nodepolicy.Policy {
 	t.Helper()
 	pol, err := nodepolicy.Parse([]byte(apiTierPolicy))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	// These fixtures exercise supported OpenAI routes.
-	pol.Tiers["medium"] = []nodepolicy.TierEntry{
-		{Kind: nodepolicy.EntryAPI, Deployment: "cloud-small"},
-		{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "mid:7b"},
-	}
-	pol.Tiers["strong"] = []nodepolicy.TierEntry{{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "big:70b"}}
+	pol.Roles = []nodepolicy.Role{{Name: "weak"}, {Name: "medium"}, {Name: "strong"}}
 	return pol
 }
 
@@ -128,9 +124,8 @@ func assertRefusedWithoutSideEffects(t *testing.T, tc engineCase, fx *tierFixtur
 	}
 }
 
-// A -api or -local alias is refused on every route, including the routes that
-// serve a bare tier, and a bare tier is refused where no legacy tier path
-// exists.
+// The engine facade refuses :api and :local overrides on every route. A bare
+// declared role is accepted only on a classified inference route.
 func TestAliasRequestsAreRefusedBeforeAnySideEffect(t *testing.T) {
 	test := func(t *testing.T, tc engineCase, path, model, wantReason string) {
 		t.Helper()
@@ -175,7 +170,7 @@ func TestAliasRequestsAreRefusedBeforeAnySideEffect(t *testing.T) {
 
 	t.Run("padded name is still an alias", func(t *testing.T) {
 		tc := llamacppCase(t)
-		test(t, tc, "/v1/chat/completions", " weak-api ", aliasReasonNotInferenceReady)
+		test(t, tc, "/v1/chat/completions", " weak:api ", aliasReasonNotInferenceReady)
 		test(t, tc, "/v1/chat/completions", " weak", aliasReasonUnsupportedUse)
 		test(t, tc, "/v1/chat/completions", "weak ", aliasReasonUnsupportedUse)
 	})
@@ -184,7 +179,7 @@ func TestAliasRequestsAreRefusedBeforeAnySideEffect(t *testing.T) {
 // Names that merely resemble an alias are ordinary models and are forwarded.
 func TestAliasLookalikesAreOrdinaryModels(t *testing.T) {
 	tc := llamacppCase(t)
-	models := []string{"Weak", "weak-api-x", "weaker", "weak:latest", "weak-api:latest"}
+	models := []string{"Weak", "coder-api-x", "weaker", "weak:latest", "coder-api:latest", "coder-api", "qwen3-coder-local"}
 	fx := newTierFixture(t, tc, stagedHybridPolicy(t), map[string][]string{"a": models}, nil)
 	for _, model := range models {
 		if rec := fx.do(t, "/v1/chat/completions", `{"model":"`+model+`"}`); rec.Code != http.StatusOK {
@@ -196,13 +191,11 @@ func TestAliasLookalikesAreOrdinaryModels(t *testing.T) {
 	}
 }
 
-// A bare tier on a classified inference route keeps the legacy local-only path
-// byte for byte, whether or not disabled hybrid settings are staged.
+// A bare role on a classified inference route uses the same declarations
+// whether or not disabled hybrid settings are staged.
 func TestBareTierIsUnchangedByStagedHybridSettings(t *testing.T) {
-	legacy := tierPolicy(map[string][]nodepolicy.TierEntry{
-		"medium": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "mid:7b"}},
-		"strong": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "big:70b"}},
-	})
+	local := nodepolicy.Default()
+	local.Roles = []nodepolicy.Role{{Name: "weak"}, {Name: "medium"}, {Name: "strong"}}
 	staged := stagedHybridPolicy(t)
 	if staged.Routing.Listener.Enabled {
 		t.Fatal("fixture error: the staged listener must be disabled")
@@ -218,6 +211,9 @@ func TestBareTierIsUnchangedByStagedHybridSettings(t *testing.T) {
 	run := func(t *testing.T, pol nodepolicy.Policy, path, model string) outcome {
 		t.Helper()
 		fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"a": {"mid:7b", "big:70b"}}, nil)
+		fx.declare(t, "a", map[string]nodepolicy.AdvertisedProfile{
+			"medium": llamacppProfile("mid:7b"), "strong": llamacppProfile("big:70b"),
+		})
 		rec := fx.do(t, path, `{"model":"`+model+`","prompt":"x"}`)
 		var methods []string
 		for _, f := range frames(t, fx.w) {
@@ -232,7 +228,7 @@ func TestBareTierIsUnchangedByStagedHybridSettings(t *testing.T) {
 
 	test := func(name, path, model string, wantStatus int, wantUpstreamModel string) {
 		t.Run(name, func(t *testing.T) {
-			want := run(t, legacy, path, model)
+			want := run(t, local, path, model)
 			got := run(t, staged, path, model)
 			if got.status != wantStatus {
 				t.Fatalf("staged status = %d, want %d", got.status, wantStatus)
@@ -250,15 +246,14 @@ func TestBareTierIsUnchangedByStagedHybridSettings(t *testing.T) {
 			}
 			if got.status != want.status || got.served != want.served || got.body != want.body ||
 				got.tier != want.tier || !slices.Equal(got.events, want.events) {
-				t.Errorf("staged settings changed the bare tier path:\n legacy %+v\n staged %+v", want, got)
+				t.Errorf("staged settings changed the bare role path:\n local %+v\n staged %+v", want, got)
 			}
 		})
 	}
 	test("openai chat route", "/v1/chat/completions", "strong", http.StatusOK, "big:70b")
 	test("medium skips the API entry", "/v1/chat/completions", "medium", http.StatusOK, "mid:7b")
-	// weak has only an API entry, so the request falls through to the
-	// stronger local entry exactly as it does when weak has no entry at all.
-	test("api-only tier falls through to a stronger local entry", "/v1/chat/completions", "weak", http.StatusOK, "mid:7b")
+	// Weak has no local membership; requester order permits widening to medium.
+	test("empty role widens to a stronger declared profile", "/v1/chat/completions", "weak", http.StatusOK, "mid:7b")
 }
 
 func modelIDs(t *testing.T, rec *httptest.ResponseRecorder) []string {
@@ -287,12 +282,14 @@ func modelIDs(t *testing.T, rec *httptest.ResponseRecorder) []string {
 func aliasesOf(tiers ...string) []string {
 	var out []string
 	for _, t := range tiers {
-		out = append(out, t, t+"-api", t+"-local")
+		out = append(out, t, t+":api", t+":local")
 	}
 	return out
 }
 
 func TestConfiguredAliases(t *testing.T) {
+	// Local entries are rejected policy specimens here: even bypassing
+	// validation, they must never declare a request role or a catalog alias.
 	local := nodepolicy.TierEntry{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "m"}
 	api := nodepolicy.TierEntry{Kind: nodepolicy.EntryAPI, Deployment: "d"}
 	test := func(name string, tiers map[string][]nodepolicy.TierEntry, want []string) {
@@ -306,28 +303,106 @@ func TestConfiguredAliases(t *testing.T) {
 	}
 	test("no tiers", nil, nil)
 	test("empty tier", map[string][]nodepolicy.TierEntry{"weak": {}}, nil)
-	test("local only", map[string][]nodepolicy.TierEntry{"weak": {local}}, aliasesOf("weak"))
-	test("api only", map[string][]nodepolicy.TierEntry{"strong": {api}}, aliasesOf("strong"))
-	test("weakest first", map[string][]nodepolicy.TierEntry{"strong": {local}, "weak": {api}, "medium": {local, api}},
-		aliasesOf("weak", "medium", "strong"))
+	test("local entry is not declaration", map[string][]nodepolicy.TierEntry{"weak": {local}}, nil)
+	test("api entry is not declaration", map[string][]nodepolicy.TierEntry{"strong": {api}}, nil)
+	test("entries do not declare roles", map[string][]nodepolicy.TierEntry{"strong": {local}, "weak": {api}, "medium": {local, api}}, nil)
 
 	// A declared tier is listed without any entry: by this node's own roles,
 	// or by a peer's.
 	t.Run("declared tiers", func(t *testing.T) {
 		pol := nodepolicy.Default()
-		pol.Tiers = map[string][]nodepolicy.TierEntry{"weak": {local}}
+		pol.Tiers = map[string][]nodepolicy.TierEntry{"weak": {api}}
 		declarePolicyRole(&pol, "strong", "llamacpp", "m")
-		if got, want := configuredAliases(pol, nil), aliasesOf("weak", "strong"); !slices.Equal(got, want) {
+		if got, want := configuredAliases(pol, nil), aliasesOf("strong"); !slices.Equal(got, want) {
 			t.Errorf("self roles: configuredAliases = %v, want %v", got, want)
 		}
-		if got, want := configuredAliases(pol, map[string]bool{"medium": true}), aliasesOf("weak", "medium", "strong"); !slices.Equal(got, want) {
+		if got, want := configuredAliases(pol, map[string]bool{"medium": true}), aliasesOf("strong", "medium"); !slices.Equal(got, want) {
 			t.Errorf("peer tiers: configuredAliases = %v, want %v", got, want)
 		}
 	})
 }
 
-// A facade's model list adds the tiers peers in its overlays declare; the
-// routing listener, which has no overlay, lists this node's own roles only.
+func TestRoleCatalogUsesOwnOrderThenSortedPeerNames(t *testing.T) {
+	pol := nodepolicy.Default()
+	pol.Roles = []nodepolicy.Role{{Name: "deep"}, {Name: "coder"}, {Name: "fast"}}
+	peers := map[string]bool{"ops": true, "batch": true, "coder": true, "hidden": false}
+	if got, want := configuredAliases(pol, peers), aliasesOf("deep", "coder", "fast", "batch", "ops"); !slices.Equal(got, want) {
+		t.Fatalf("catalog = %v, want %v", got, want)
+	}
+}
+
+func TestRoleCatalogReplacesConcreteCollision(t *testing.T) {
+	pol := nodepolicy.Default()
+	pol.Roles = []nodepolicy.Role{{Name: "qwen3-8b"}}
+	fx := listFixture(t, pol, true)
+	rec := fx.listModels(t, "/v1/models")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	var out struct {
+		Data []struct {
+			ID    string `json:"id"`
+			Owner string `json:"owned_by"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, item := range out.Data {
+		ids = append(ids, item.ID)
+		if item.ID == "qwen3-8b" && item.Owner != "pair" {
+			t.Fatalf("concrete collision retained: %+v", item)
+		}
+	}
+	if want := aliasesOf("qwen3-8b"); !slices.Equal(ids, want) {
+		t.Fatalf("catalog IDs = %v, want %v", ids, want)
+	}
+}
+
+func TestAPIEntryNeedsVisibleDeclaration(t *testing.T) {
+	pol := stagedHybridPolicy(t)
+	pol.Roles = nil
+	fx := newTierFixture(t, llamacppCase(t), pol, nil, nil)
+	for _, name := range []string{"medium", "medium:api"} {
+		rec := fx.do(t, "/v1/chat/completions", `{"model":"`+name+`"}`)
+		var out struct {
+			Error string `json:"error"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		if rec.Code != http.StatusNotFound || out.Error != "no profile or role named "+name {
+			t.Fatalf("%s: status %d body %s", name, rec.Code, rec.Body)
+		}
+	}
+	if got := configuredAliases(pol, nil); len(got) != 0 {
+		t.Fatalf("unused API entries listed: %v", got)
+	}
+	pol.Roles = []nodepolicy.Role{{Name: "medium"}}
+	fx.p.admission.setPolicy(pol)
+	if !fx.p.soleFacade().roleRequested("medium") {
+		t.Fatal("empty declaration did not activate role")
+	}
+	if got, want := configuredAliases(pol, nil), aliasesOf("medium"); !slices.Equal(got, want) {
+		t.Fatalf("aliases = %v, want %v", got, want)
+	}
+}
+
+func TestArbitraryRoleOverridesRemainAtAliasBoundary(t *testing.T) {
+	pol := nodepolicy.Default()
+	pol.Roles = []nodepolicy.Role{{Name: "coder"}}
+	for _, model := range []string{"coder:api", "coder:local"} {
+		t.Run(model, func(t *testing.T) {
+			fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"peer": {"coder:api", "coder:local"}}, nil)
+			rec := fx.do(t, "/v1/chat/completions", `{"model":"`+model+`"}`)
+			assertRefusedWithoutSideEffects(t, llamacppCase(t), fx, rec, model, aliasReasonNotInferenceReady)
+		})
+	}
+}
+
+// A facade's model list includes roles declared by visible peers. The explicit
+// self-only fact-set control below includes only this node's declarations.
 func TestModelListOffersDeclaredTiers(t *testing.T) {
 	pol := nodepolicy.Default()
 	declarePolicyRole(&pol, "strong", "llamacpp-custom", "qwen3-8b")
@@ -337,11 +412,11 @@ func TestModelListOffersDeclaredTiers(t *testing.T) {
 		setAdvertisedProfilesByRole(&n, map[string]nodepolicy.AdvertisedProfile{"medium": {Engine: "llamacpp-custom", Model: "not-installed"}})
 		f.discovery.AddManual(n)
 	}
-	if got, want := modelIDs(t, fx.listModels(t, "/v1/models")), append([]string{"qwen3-8b"}, aliasesOf("medium", "strong")...); !slices.Equal(got, want) {
+	if got, want := modelIDs(t, fx.listModels(t, "/v1/models")), append([]string{"qwen3-8b"}, aliasesOf("strong", "medium")...); !slices.Equal(got, want) {
 		t.Errorf("facade model list = %v, want %v", got, want)
 	}
 	var ids []string
-	for _, raw := range fx.p.hybridAliasRecords(pol, selfDeclaredRoles(pol), nil) {
+	for _, raw := range fx.p.hybridAliasRecords(pol, selfDeclaredRoles(pol)) {
 		var item struct {
 			ID string `json:"id"`
 		}
@@ -355,11 +430,11 @@ func TestModelListOffersDeclaredTiers(t *testing.T) {
 	}
 }
 
-// Declared roles are local candidates: a -api alias never reaches them, and
-// the suffixed aliases stay refused until hybrid dispatch exists.
+// The engine facade refuses overrides before reaching declared local roles;
+// override selection belongs to the routing listener.
 func TestSuffixedAliasesNeverReachDeclaredRoles(t *testing.T) {
 	tc := llamacppCase(t)
-	for _, alias := range []string{"weak-api", "weak-local"} {
+	for _, alias := range []string{"weak:api", "weak:local"} {
 		t.Run(alias, func(t *testing.T) {
 			fx := newTierFixture(t, tc, nodepolicy.Default(), map[string][]string{"a": {"small:1b"}}, nil)
 			fx.declare(t, "a", map[string]nodepolicy.AdvertisedProfile{"weak": {Engine: "llamacpp", Model: "small:1b"}})
@@ -373,7 +448,7 @@ func TestSuffixedAliasesNeverReachDeclaredRoles(t *testing.T) {
 func TestHybridAliasRecordsNameOnlyTheAlias(t *testing.T) {
 	pol := stagedHybridPolicy(t)
 	p, _ := zeroFacadeProxy(t)
-	records := p.hybridAliasRecords(pol, selfDeclaredRoles(pol), nil)
+	records := p.hybridAliasRecords(pol, selfDeclaredRoles(pol))
 	if len(records) != len(aliasesOf("weak", "medium", "strong")) {
 		t.Fatalf("got %d records, want one per alias", len(records))
 	}
@@ -389,21 +464,6 @@ func TestHybridAliasRecordsNameOnlyTheAlias(t *testing.T) {
 		slices.Sort(keys)
 		if want := []string{"created", "id", "object", "owned_by"}; !slices.Equal(keys, want) {
 			t.Errorf("record %s has fields %v, want %v", raw, keys, want)
-		}
-	}
-	skipped := p.hybridAliasRecords(pol, selfDeclaredRoles(pol), map[string]modelListItem{"weak-api": {}})
-	if len(skipped) != len(records)-1 {
-		t.Errorf("skipping a seen id left %d records, want %d", len(skipped), len(records)-1)
-	}
-	for _, raw := range skipped {
-		var item struct {
-			ID string `json:"id"`
-		}
-		if err := json.Unmarshal(raw, &item); err != nil {
-			t.Fatal(err)
-		}
-		if item.ID == "weak-api" {
-			t.Fatal("seen upstream alias was synthesized again")
 		}
 	}
 }
@@ -446,7 +506,7 @@ func TestRoleCatalogResolvesEachEngineModelOnce(t *testing.T) {
 	assertCatalog := func(name string, wantContext int) {
 		t.Helper()
 		logs.Reset()
-		records := f.tierModelEntries(nil)
+		records := f.tierModelEntries()
 		resolutions := 0
 		decoder := json.NewDecoder(&logs)
 		for {
@@ -483,7 +543,7 @@ func TestRoleCatalogResolvesEachEngineModelOnce(t *testing.T) {
 				t.Errorf("%s: %s context = %d, want %d", name, record.ID, record.ContextLength, wantContext)
 			}
 		}
-		if want := aliasesOf("weak", "medium", "strong"); !slices.Equal(ids, want) {
+		if want := aliasesOf("medium", "strong", "weak"); !slices.Equal(ids, want) {
 			t.Errorf("%s: aliases = %v, want %v", name, ids, want)
 		}
 	}
@@ -539,7 +599,7 @@ func TestRoleCatalogVisibleContext(t *testing.T) {
 					if err := json.Unmarshal(item["id"], &id); err != nil {
 						t.Fatal(err)
 					}
-					if !slices.Contains([]string{"weak", "weak-api", "weak-local", "medium", "medium-api", "medium-local", "strong", "strong-api", "strong-local"}, id) {
+					if !slices.Contains([]string{"weak", "weak:api", "weak:local", "medium", "medium:api", "medium:local", "strong", "strong:api", "strong:local"}, id) {
 						continue
 					}
 					if seen[id] {
@@ -566,7 +626,7 @@ func TestRoleCatalogVisibleContext(t *testing.T) {
 						}
 					}
 				}
-				for _, id := range []string{"weak", "weak-api", "weak-local", "medium", "medium-api", "medium-local", "strong", "strong-api", "strong-local"} {
+				for _, id := range []string{"weak", "weak:api", "weak:local", "medium", "medium:api", "medium:local", "strong", "strong:api", "strong:local"} {
 					if !seen[id] {
 						t.Fatalf("missing alias %s", id)
 					}
@@ -579,12 +639,12 @@ func TestRoleCatalogVisibleContext(t *testing.T) {
 			assert(t, rec, wantListener)
 		})
 	}
-	test("facade max and listener local-only self", 32768, 131072, []string{"private", "public"}, 131072, 32768)
+	test("facade and listener use visible maximum", 32768, 131072, []string{"private", "public"}, 131072, 131072)
 	test("zero self omits", 0, 131072, []string{"private", "public"}, 0, 0)
-	test("zero peer omits only facade", 32768, 0, []string{"private", "public"}, 0, 32768)
+	test("zero peer omits both catalogs", 32768, 0, []string{"private", "public"}, 0, 0)
 	test("empty omits", 32768, 131072, []string{}, 0, 0)
 	test("all missing omits", 32768, 131072, []string{"missing"}, 0, 0)
-	test("missing and withheld references are not zero facts", 32768, 131072, []string{"missing", "private", "public"}, 131072, 32768)
+	test("missing and withheld references are not zero facts", 32768, 131072, []string{"missing", "private", "public"}, 131072, 131072)
 }
 
 func TestRoleCatalogContextUsesCandidateNodeRoutability(t *testing.T) {
@@ -610,9 +670,9 @@ func TestRoleCatalogContextUsesCandidateNodeRoutability(t *testing.T) {
 				}
 				f.discovery.AddManual(n)
 			}
-			wantCandidates := []tierCand{{node: "small-peer", model: "small", declared: true}}
+			wantCandidates := []tierCand{{node: "small-peer", model: "small"}}
 			if wantLarge {
-				wantCandidates = append(wantCandidates, tierCand{node: "large-peer", model: "large", declared: true})
+				wantCandidates = append(wantCandidates, tierCand{node: "large-peer", model: "large"})
 			}
 			gotCandidates := resolvedTier(f, "weak", requestNeeds{}, false)
 			slices.SortFunc(gotCandidates, func(a, b tierCand) int { return strings.Compare(a.node, b.node) })
@@ -648,7 +708,7 @@ func TestRoleCatalogContextUsesCandidateNodeRoutability(t *testing.T) {
 					t.Errorf("catalog aliases = %v, want %v", ids, want)
 				}
 			}
-			assertCatalog(f.tierModelEntries(nil))
+			assertCatalog(f.tierModelEntries())
 		})
 	}
 	unserved := func(n *Node) { n.ServedModels = nodepolicy.ServedModels{} }
@@ -722,7 +782,7 @@ func TestRoleCatalogIgnoresDisabledEngineContext(t *testing.T) {
 				}
 				t.Fatal("missing weak alias")
 			}
-			assert(f.tierModelEntries(nil))
+			assert(f.tierModelEntries())
 			rec := httptest.NewRecorder()
 			h := routingHandler{host: fx.p}
 			h.listModels(rec)
@@ -805,6 +865,7 @@ func TestModelList_ListsATierWithZeroLocalEntries(t *testing.T) {
 	pol := stagedHybridPolicy(t)
 	delete(pol.Tiers, "medium")
 	delete(pol.Tiers, "strong")
+	pol.Roles = []nodepolicy.Role{{Name: "weak"}}
 	for _, up := range []bool{true, false} {
 		fx := listFixture(t, pol, up)
 		rec := fx.listModels(t, "/v1/models")
@@ -817,7 +878,7 @@ func TestModelList_ListsATierWithZeroLocalEntries(t *testing.T) {
 				t.Errorf("upstream up=%v: %q missing from %v", up, id, got)
 			}
 		}
-		if slices.Contains(got, "medium") || slices.Contains(got, "strong-api") {
+		if slices.Contains(got, "medium") || slices.Contains(got, "strong:api") {
 			t.Errorf("upstream up=%v: unconfigured tier listed in %v", up, got)
 		}
 	}
@@ -847,7 +908,7 @@ func (fx *tierFixture) request(t *testing.T, method, target, body string) *httpt
 	return rec
 }
 
-// A -api or -local alias is refused wherever an engine could read a model name
+// A :api or :local alias is refused wherever an engine could read a model name
 // from, not only in the "model" key the router routes on.
 func TestAliasInOtherModelPlacesIsRefused(t *testing.T) {
 	test := func(t *testing.T, tc engineCase, method, target, body, alias string) {
@@ -861,39 +922,39 @@ func TestAliasInOtherModelPlacesIsRefused(t *testing.T) {
 		tc := llamacppCase(t)
 		for _, path := range []string{"/props"} {
 			t.Run(path+" name", func(t *testing.T) {
-				test(t, tc, http.MethodPost, path, `{"name":"strong-local"}`, "strong-local")
+				test(t, tc, http.MethodPost, path, `{"name":"strong:local"}`, "strong:local")
 			})
 		}
 		t.Run("padded name", func(t *testing.T) {
-			test(t, tc, http.MethodPost, "/props", `{"name":" weak-api "}`, "weak-api")
+			test(t, tc, http.MethodPost, "/props", `{"name":" weak:api "}`, "weak:api")
 		})
 		t.Run("case-variant Model beside a plain model", func(t *testing.T) {
-			test(t, tc, http.MethodPost, "/v1/chat/completions", `{"model":"mid:7b","Model":"weak-api"}`, "weak-api")
+			test(t, tc, http.MethodPost, "/v1/chat/completions", `{"model":"mid:7b","Model":"weak:api"}`, "weak:api")
 		})
 		t.Run("case-variant MODEL ahead of a plain model", func(t *testing.T) {
-			test(t, tc, http.MethodPost, "/v1/chat/completions", `{"MODEL":"medium-local","model":"mid:7b"}`, "medium-local")
+			test(t, tc, http.MethodPost, "/v1/chat/completions", `{"MODEL":"medium:local","model":"mid:7b"}`, "medium:local")
 		})
 		t.Run("case-variant NAME", func(t *testing.T) {
-			test(t, tc, http.MethodPost, "/props", `{"NAME":"weak-local"}`, "weak-local")
+			test(t, tc, http.MethodPost, "/props", `{"NAME":"weak:local"}`, "weak:local")
 		})
 		t.Run("repeated model key", func(t *testing.T) {
-			test(t, tc, http.MethodPost, "/v1/chat/completions", `{"model":"weak-api","model":"mid:7b"}`, "weak-api")
+			test(t, tc, http.MethodPost, "/v1/chat/completions", `{"model":"weak:api","model":"mid:7b"}`, "weak:api")
 		})
 		t.Run("model query parameter", func(t *testing.T) {
-			test(t, tc, http.MethodGet, "/props?model=weak-api", ``, "weak-api")
+			test(t, tc, http.MethodGet, "/props?model=weak:api", ``, "weak:api")
 		})
 	})
 
 	t.Run("llamacpp-custom", func(t *testing.T) {
 		tc := customCase(t)
 		t.Run("v1 model path", func(t *testing.T) {
-			test(t, tc, http.MethodGet, "/v1/models/weak-api", ``, "weak-api")
+			test(t, tc, http.MethodGet, "/v1/models/weak:api", ``, "weak:api")
 		})
 		t.Run("strong model path", func(t *testing.T) {
-			test(t, tc, http.MethodGet, "/v1/models/strong-local", ``, "strong-local")
+			test(t, tc, http.MethodGet, "/v1/models/strong:local", ``, "strong:local")
 		})
 		t.Run("escaped model path", func(t *testing.T) {
-			test(t, tc, http.MethodGet, "/v1/models/medium%2Dapi", ``, "medium-api")
+			test(t, tc, http.MethodGet, "/v1/models/medium%3Aapi", ``, "medium:api")
 		})
 	})
 }
@@ -916,11 +977,12 @@ func TestBareTierAndLookalikesInOtherModelPlacesAreForwarded(t *testing.T) {
 	test("bare tier as name", llama, http.MethodPost, "/props", `{"name":"weak"}`)
 	test("bare tier as query model", llama, http.MethodGet, "/props?model=medium", ``)
 	test("bare tier as model path", custom, http.MethodGet, "/v1/models/strong", ``)
-	test("tagged alias as name", llama, http.MethodPost, "/props", `{"name":"weak-api:latest"}`)
+	test("encoded hyphen remains an ordinary model path", custom, http.MethodGet, "/v1/models/medium%2Dapi", ``)
+	test("tagged alias as name", llama, http.MethodPost, "/props", `{"name":"weak:api:latest"}`)
 	test("case variant alias as name", llama, http.MethodPost, "/props", `{"name":"Weak-API"}`)
-	test("organization-qualified model path", custom, http.MethodGet, "/v1/models/org/weak-api", ``)
-	test("alias in an unrelated key", llama, http.MethodPost, "/v1/chat/completions", `{"model":"mid:7b","prompt":"weak-api","title":"weak-local"}`)
-	test("alias as a nested model", llama, http.MethodPost, "/v1/chat/completions", `{"model":"mid:7b","options":{"model":"weak-api"}}`)
+	test("organization-qualified model path", custom, http.MethodGet, "/v1/models/org/weak:api", ``)
+	test("alias in an unrelated key", llama, http.MethodPost, "/v1/chat/completions", `{"model":"mid:7b","prompt":"weak:api","title":"weak:local"}`)
+	test("alias as a nested model", llama, http.MethodPost, "/v1/chat/completions", `{"model":"mid:7b","options":{"model":"weak:api"}}`)
 }
 
 // spyRecorder snapshots proxy state at the moment a status is written, which
@@ -1032,13 +1094,13 @@ func TestAliasRefusalPrecedesPreflightReservationAndAdmission(t *testing.T) {
 			}
 		})
 	}
-	refused("healthy self", true, func() *http.Request { return chat("weak-api") })
-	refused("stopped self that a request would wake", false, func() *http.Request { return chat("strong-local") })
+	refused("healthy self", true, func() *http.Request { return chat("weak:api") })
+	refused("stopped self that a request would wake", false, func() *http.Request { return chat("strong:local") })
 	refused("name key", true, func() *http.Request {
-		return httptest.NewRequest(http.MethodPost, "/props", strings.NewReader(`{"name":"medium-api"}`))
+		return httptest.NewRequest(http.MethodPost, "/props", strings.NewReader(`{"name":"medium:api"}`))
 	})
 	refused("preflight carrying an alias body", true, func() *http.Request {
-		r := httptest.NewRequest(http.MethodOptions, "/v1/chat/completions", strings.NewReader(`{"model":"weak-local"}`))
+		r := httptest.NewRequest(http.MethodOptions, "/v1/chat/completions", strings.NewReader(`{"model":"weak:local"}`))
 		r.Header.Set("Origin", "http://example.test")
 		r.Header.Set("Access-Control-Request-Method", "POST")
 		return r

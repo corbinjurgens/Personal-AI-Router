@@ -285,8 +285,14 @@ func TestHandleHTTP_RejectionHasNoCORS(t *testing.T) {
 		rec := httptest.NewRecorder()
 		p.soleFacade().handleHTTP(rec, tc.inferenceRequest())
 
-		if rec.Code != http.StatusBadGateway {
-			t.Fatalf("status = %d, want 502", rec.Code)
+		var refusal struct {
+			Error string `json:"error"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &refusal); err != nil {
+			t.Fatal(err)
+		}
+		if rec.Code != http.StatusNotFound || refusal.Error != "no profile or role named "+tc.advertisedModel {
+			t.Fatalf("response = %d %+v, want 404 unknown-name rejection for %q", rec.Code, refusal, tc.advertisedModel)
 		}
 		if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
 			t.Errorf("Access-Control-Allow-Origin = %q, want no CORS header on rejection", got)
@@ -729,6 +735,24 @@ func TestHandleHTTP_InferenceRouting(t *testing.T) {
 	test("Anthropic messages", "/v1/messages", custom)
 }
 
+func TestHandleHTTP_UndeclaredNamesRemainConcrete(t *testing.T) {
+	forEachEngine(t, func(t *testing.T, tc engineCase) {
+		for _, model := range []string{"coder", "coder-api", "qwen3-coder-local"} {
+			t.Run(model, func(t *testing.T) {
+				e := newRecordingEngine(t, http.StatusOK)
+				disc := NewDiscovery()
+				disc.AddManual(nodeForModel(t, "owner", e.URL, model))
+				p := testProxy(tc.profile, disc, tc.profile.FacadePort)
+				rec := httptest.NewRecorder()
+				p.soleFacade().handleHTTP(rec, httptest.NewRequest(http.MethodPost, tc.inferencePath, strings.NewReader(`{"model":"`+model+`"}`)))
+				if rec.Code != http.StatusOK || e.hits() != 1 || e.lastBody() != `{"model":"`+model+`"}` {
+					t.Fatalf("concrete request: status=%d hits=%d body=%s", rec.Code, e.hits(), e.lastBody())
+				}
+			})
+		}
+	})
+}
+
 func TestHandleHTTP_NoAdvertisedModelRejectsLocally(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, tc engineCase) {
 		hits := 0
@@ -753,14 +777,19 @@ func TestHandleHTTP_NoAdvertisedModelRejectsLocally(t *testing.T) {
 		rec := httptest.NewRecorder()
 		p.soleFacade().handleHTTP(rec, tc.inferenceRequest())
 
-		if rec.Code != http.StatusBadGateway ||
-			!strings.Contains(rec.Body.String(), "no available node advertises the requested model") {
-			t.Fatalf("response = %d %s, want actionable local 502", rec.Code, rec.Body.String())
+		var refusal struct {
+			Error string `json:"error"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &refusal); err != nil {
+			t.Fatalf("decode refusal: %v", err)
+		}
+		if rec.Code != http.StatusNotFound || refusal.Error != "no profile or role named "+tc.advertisedModel {
+			t.Fatalf("response = %d %s, want named-model local 404", rec.Code, rec.Body.String())
 		}
 		if hits != 0 {
 			t.Fatalf("ineligible upstreams received %d requests, want 0", hits)
 		}
-		if !events.has("no node advertises requested model") {
+		if !events.has("no profile or role named " + tc.advertisedModel) {
 			t.Fatalf("missing rejected request event: %s", events.b)
 		}
 	})

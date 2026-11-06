@@ -64,12 +64,14 @@ func TestRoutingBufferInvalidExplicitValues(t *testing.T) {
 const stagedRoutingDocument = `{
   "version": 2,
   "revision": "12",
+  "profiles": [{"key":"qwen","displayName":"Qwen","engine":"llamacpp","model":"qwen3-8b"}],
+  "roles": [{"name":"weak","profiles":["qwen"]}],
   "tiers": {
     "weak": [
-      {"kind": "local", "engine": "llamacpp", "model": "qwen3-8b"},
       {"kind": "api", "deployment": "free-small"}
     ],
-    "strong": [{"kind": "api", "deployment": "free-small"}]
+    "strong": [{"kind": "api", "deployment": "free-small"}],
+    "medium": [{"kind": "api", "deployment": "free-small"}]
   },
   "routing": {
     "accounts": [
@@ -87,7 +89,8 @@ const stagedRoutingDocument = `{
        "contextTokens": 200000, "maxOutputTokens": 8192, "enabled": false}
     ],
     "tiers": {
-      "weak": {"bareMode": "local", "remoteAllowed": false, "paidAllowed": false, "allowedFamilies": ["alpha"]}
+      "weak": {"bareMode": "local", "remoteAllowed": false, "paidAllowed": false, "allowedFamilies": ["alpha"]},
+      "medium": {"bareMode": "hybrid", "remoteAllowed": false, "paidAllowed": false}
     },
     "limits": {"queueSeconds": 5, "coldStartSeconds": 10, "maxAttempts": 2, "preOutputBudgetSeconds": 20, "maxOutputTokens": 1024},
     "listener": {"enabled": true, "port": 4321, "allowedOrigins": ["http://localhost:3000", "https://app.example.com:8443"]}
@@ -152,7 +155,6 @@ func TestParseAcceptsDisabledProviderConfiguration(t *testing.T) {
 		t.Errorf("daily ceiling = %q, want 9007199254740993 unchanged", got)
 	}
 	want := []TierEntry{
-		{Kind: EntryLocal, Engine: "llamacpp", Model: "qwen3-8b"},
 		{Kind: EntryAPI, Deployment: "free-small"},
 	}
 	if !reflect.DeepEqual(p.Tiers["weak"], want) {
@@ -175,8 +177,8 @@ func TestParseV2RejectsUnknownTierEntryKind(t *testing.T) {
 
 // A suffixed alias names a fixed mode, so it cannot be configured as a tier.
 func TestRoutingRejectsSuffixedAliasAsTierKey(t *testing.T) {
-	doc := `{"version":2,"routing":{"tiers":{"weak-api":{"bareMode":"local"}}}}`
-	if _, err := Parse([]byte(doc)); err == nil || !strings.Contains(err.Error(), `unknown tier "weak-api"`) {
+	doc := `{"version":2,"routing":{"tiers":{"weak:api":{"bareMode":"local"}}}}`
+	if _, err := Parse([]byte(doc)); err == nil || !strings.Contains(err.Error(), "role name") {
 		t.Fatalf("Parse(suffixed tier key) err = %v, want unknown-tier rejection", err)
 	}
 }
@@ -184,8 +186,8 @@ func TestRoutingRejectsSuffixedAliasAsTierKey(t *testing.T) {
 func TestDefaultAndMigratedTierFamiliesAreEmpty(t *testing.T) {
 	checkEmptyFamilies := func(t *testing.T, p Policy) {
 		t.Helper()
-		for _, tier := range TierOrder {
-			if got := p.Routing.Tiers[tier].AllowedFamilies; len(got) != 0 {
+		for tier, rule := range p.Routing.Tiers {
+			if got := rule.AllowedFamilies; len(got) != 0 {
 				t.Errorf("tier %s allowed families = %v, want none", tier, got)
 			}
 		}
@@ -195,7 +197,7 @@ func TestDefaultAndMigratedTierFamiliesAreEmpty(t *testing.T) {
 		checkEmptyFamilies(t, Default())
 	})
 	t.Run("migrated v1", func(t *testing.T) {
-		p, err := Parse([]byte(`{"version":1,"tiers":{"weak":[{"engine":"llamacpp","model":"m"}]}}`))
+		p, _, err := ParseStored([]byte(`{"version":1,"tiers":{"weak":[{"engine":"llamacpp","model":"m"}]}}`))
 		if err != nil {
 			t.Fatalf("Parse(v1): %v", err)
 		}
@@ -229,9 +231,9 @@ func TestValidateRoutingRejects(t *testing.T) {
 	test("shared credential reference", func(p *Policy) {
 		p.Routing.Accounts[1].Credential = p.Routing.Accounts[0].Credential
 	}, "already used")
-	test("duplicate local tier entry", func(p *Policy) {
+	test("retired local tier entry", func(p *Policy) {
 		p.Tiers["weak"] = append(p.Tiers["weak"], TierEntry{Kind: EntryLocal, Engine: "llamacpp", Model: "qwen3-8b"})
-	}, "duplicate entry")
+	}, "Local tier entries are retired; declare roles instead.")
 	test("duplicate api tier entry", func(p *Policy) {
 		p.Tiers["strong"] = append(p.Tiers["strong"], TierEntry{Kind: EntryAPI, Deployment: "free-small"})
 	}, "duplicate entry")
@@ -258,31 +260,22 @@ func TestValidateRoutingRejects(t *testing.T) {
 	}, "names only a deployment")
 	test("local entry with a deployment", func(p *Policy) {
 		p.Tiers["strong"] = []TierEntry{{Kind: EntryLocal, Engine: "llamacpp", Model: "m", Deployment: "free-small"}}
-	}, "cannot name a deployment")
+	}, "Local tier entries are retired; declare roles instead.")
 	test("entry without a kind", func(p *Policy) {
 		p.Tiers["strong"] = []TierEntry{{Engine: "llamacpp", Model: "m"}}
 	}, "kind must be")
 	test("routing settings for an unknown tier", func(p *Policy) {
-		p.Routing.Tiers["huge"] = TierRouting{BareMode: BareHybrid}
-	}, `unknown tier "huge"`)
-	test("missing tier settings", func(p *Policy) {
-		delete(p.Routing.Tiers, "medium")
-	}, "routing.tiers.medium is required")
+		p.Routing.Tiers["Coder"] = TierRouting{BareMode: BareHybrid}
+	}, "role")
 	test("unknown bare mode", func(p *Policy) {
 		p.Routing.Tiers["weak"] = TierRouting{BareMode: "sideways"}
 	}, "bareMode")
 
 	// Alias collisions.
-	for _, alias := range []string{"weak", "medium", "strong", "weak-api", "medium-api", "strong-api", "weak-local", "medium-local", "strong-local"} {
-		test("profile model "+alias, func(p *Policy) {
-			p.Profiles = []Profile{{Key: "p", DisplayName: "p", Engine: "llamacpp", Model: alias}}
-		}, "reserved alias")
+	for _, alias := range []string{"weak:api", "medium:api", "strong:api", "weak:local", "medium:local", "strong:local"} {
 		test("local tier model "+alias, func(p *Policy) {
 			p.Tiers["strong"] = []TierEntry{{Kind: EntryLocal, Engine: "llamacpp", Model: alias}}
-		}, "reserved alias")
-		test("deployment model "+alias, func(p *Policy) {
-			p.Routing.Deployments[0].Model = alias
-		}, "reserved alias")
+		}, "Local tier entries are retired; declare roles instead.")
 	}
 
 	// Credentials.
@@ -513,6 +506,29 @@ func TestCheckEndpoint(t *testing.T) {
 	}
 }
 
+func TestProviderModelColonNamespace(t *testing.T) {
+	p := stagedPolicy(t)
+	p.Routing.Deployments[0].Model = "provider-model:v2"
+	if err := p.Validate(); err != nil {
+		t.Fatalf("provider identifier: %v", err)
+	}
+	p.Routing.Deployments[0].Model = "coder:local"
+	if err := p.Validate(); err != nil {
+		t.Fatalf("provider override-shaped identifier: %v", err)
+	}
+}
+
+func TestRoutingNeedsNoPerRoleRule(t *testing.T) {
+	p := Default()
+	p.Roles = []Role{{Name: "coder", Profiles: []string{}}}
+	if len(p.Routing.Tiers) != 0 {
+		t.Fatal("default routing supplied role rules")
+	}
+	if err := p.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestDeploymentEndpointTransportAndQualificationAreAccepted(t *testing.T) {
 	for _, endpoint := range []string{
 		"https://api.example.com/v1/chat/completions",
@@ -604,9 +620,23 @@ func TestParseErrorsDoNotEchoCredentialReferences(t *testing.T) {
 	}
 }
 
-func TestLocalEntryClassification(t *testing.T) {
-	if !(TierEntry{Kind: EntryLocal}).IsLocal() || (TierEntry{Kind: EntryAPI}).IsLocal() || (TierEntry{}).IsLocal() {
-		t.Fatal("IsLocal misclassified an entry kind")
+func TestAPIOnlyTierValidation(t *testing.T) {
+	p := stagedPolicy(t)
+	p.Tiers["coder"] = []TierEntry{{Kind: EntryAPI, Deployment: "paid-big"}}
+	if err := p.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	p.Tiers["coder"] = append(p.Tiers["coder"], TierEntry{Kind: EntryLocal, Engine: "llamacpp", Model: "native"})
+	const want = "Local tier entries are retired; declare roles instead."
+	if err := p.Validate(); err == nil || err.Error() != want {
+		t.Fatalf("local entry error = %v, want %q", err, want)
+	}
+	raw, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Parse(raw); err == nil || err.Error() != want {
+		t.Fatalf("local entry write error = %v, want %q", err, want)
 	}
 }
 

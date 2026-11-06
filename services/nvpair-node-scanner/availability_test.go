@@ -36,7 +36,7 @@ func pauseHintDocument(revision string, origin nodepolicy.PauseOrigin) pauseHint
 		LoadedByEngine: map[string][]string{"fixture-engine": {"fixture-model"}},
 		Policy: &nodepolicy.Advertisement{
 			Revision: revision, PausedBy: origin,
-			Roles:    []nodepolicy.Role{{Name: nodepolicy.TierWeak, Profiles: []string{"fixture"}}},
+			Roles:    []nodepolicy.Role{{Name: "weak", Profiles: []string{"fixture"}}},
 			Profiles: []nodepolicy.AdvertisedProfile{{Key: "fixture", DisplayName: "Fixture", Engine: "fixture-engine", Model: "fixture-model"}},
 		},
 	}

@@ -169,7 +169,7 @@ func TestLocalCredentialStaysOffOtherInferencePaths(t *testing.T) {
 	lcpp.discovery.AddManual(selfNode("self", lcpp.profile.FacadePort, "llama3"))
 	setBackend(t, lcpp, newRecordingEngine(t, http.StatusOK).URL, true)
 	pol := nodepolicy.Default()
-	pol.Tiers = map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp-custom", Model: "qwen3-8b"}}}
+	declarePolicyRole(&pol, "weak", "llamacpp-custom", "qwen3-8b")
 	p.admission.setPolicy(pol)
 
 	send := func(path string) http.Header {

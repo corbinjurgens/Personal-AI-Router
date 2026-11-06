@@ -39,7 +39,7 @@ func policyWith(extra string) json.RawMessage {
 	return json.RawMessage(doc + "}")
 }
 
-var capabilityTestRoles = []nodepolicy.Role{{Name: nodepolicy.TierMedium, Profiles: []string{"model"}}}
+var capabilityTestRoles = []nodepolicy.Role{{Name: "medium", Profiles: []string{"model"}}}
 var capabilityTestProfiles = []nodepolicy.AdvertisedProfile{{Key: "model", DisplayName: "Model", Engine: "llamacpp", Model: "model", ContextTokens: 16384}}
 
 func TestServedResidentInventoryCacheRoundTrip(t *testing.T) {

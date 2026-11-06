@@ -67,8 +67,12 @@ func TestDeriveProfileContextDetached(t *testing.T) {
 	p.Profiles[0].Capabilities = []nodepolicy.Capability{nodepolicy.CapTools}
 	p.Profiles[0].RequestOptions = json.RawMessage(`{"temperature":0.1}`)
 	p.Profiles[0].Qualification = &nodepolicy.QualificationRef{ID: "fixture", Revision: "1"}
-	p.Roles = []nodepolicy.Role{{Name: nodepolicy.TierWeak, Profiles: []string{"small-profile"}}}
-	p.Tiers[nodepolicy.TierWeak] = []nodepolicy.TierEntry{{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "small-profile", Capabilities: []nodepolicy.Capability{nodepolicy.CapTools}}}
+	p.Roles = []nodepolicy.Role{{Name: "weak", Profiles: []string{"small-profile"}}}
+	routed, _, err := nodepolicy.ParseStored([]byte(routedPolicyDocument))
+	if err != nil {
+		t.Fatalf("decode API fixture: %v", err)
+	}
+	p.Tiers, p.Routing = routed.Tiers, routed.Routing
 	before := rmJSON(t, p)
 	got, err := deriveProfileContext(p, profileContextLoads())
 	if err != nil {
@@ -79,7 +83,7 @@ func TestDeriveProfileContextDetached(t *testing.T) {
 	got.Profiles[0].Qualification.ID = "changed"
 	got.Profiles[0].ModelIdentity.Files[0].Name = "changed.gguf"
 	got.Roles[0].Profiles[0] = "changed"
-	got.Tiers[nodepolicy.TierWeak][0].Capabilities[0] = nodepolicy.CapEmbeddings
+	got.Tiers["weak"][0].Deployment = "changed"
 	got.Routing.Tiers["detached-only"] = nodepolicy.TierRouting{}
 	if !reflect.DeepEqual(rmJSON(t, p), before) {
 		t.Fatal("mutating derived policy changed its source")

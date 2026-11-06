@@ -66,7 +66,7 @@ func TestEngineBindingsRejectMalformedInput(t *testing.T) {
 	test("invalid engine", `{"engineBindings":[{"engine":"../bad","model":"a"}]}`)
 	test("empty model", `{"engineBindings":[{"engine":"llamacpp","model":""}]}`)
 	test("non-string model", `{"engineBindings":[{"engine":"llamacpp","model":42}]}`)
-	test("tier alias", `{"engineBindings":[{"engine":"llamacpp","model":"weak-local"}]}`)
+	test("tier alias", `{"engineBindings":[{"engine":"llamacpp","model":"weak:local"}]}`)
 	test("control token", `{"engineBindings":[{"engine":"llamacpp","model":"a\u0000"}]}`)
 	test("invalid UTF8", "{\"engineBindings\":[{\"engine\":\"llamacpp\",\"model\":\"\xff\"}]}")
 	test("duplicate model across engines", `{"engineBindings":[{"engine":"llamacpp-custom","model":"a"},{"engine":"llamacpp","model":"a"}]}`)

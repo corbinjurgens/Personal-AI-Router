@@ -135,10 +135,9 @@ func assertAmbiguousModelRejection(t *testing.T, rec *httptest.ResponseRecorder)
 // ambiguous body is refused before admission; the ordinary body still works.
 func TestServedModelsTierDuplicateModel(t *testing.T) {
 	tc := llamacppCase(t)
-	pol := tierPolicy(map[string][]nodepolicy.TierEntry{
-		"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "m"}},
-	})
+	pol := nodepolicy.Default()
 	pol.ServedModels = nodepolicy.ServedModels{{Engine: "llamacpp", Model: "m"}}
+	declarePolicyRole(&pol, "weak", "llamacpp", "m")
 	if err := pol.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -269,10 +268,8 @@ func TestServedModelsDormantSelf(t *testing.T) {
 }
 
 func TestServedModelsRolesRetainedButIneligible(t *testing.T) {
-	pol := tierPolicy(map[string][]nodepolicy.TierEntry{
-		"weak":   {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "router"}},
-		"medium": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "router"}},
-	})
+	pol := nodepolicy.Default()
+	pol.Roles = []nodepolicy.Role{{Name: "weak"}, {Name: "medium"}}
 	pol.TierPolicy.AllowStronger = false
 	fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"a": {"own", "router"}}, nil)
 	fx.declare(t, "a", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("own")})

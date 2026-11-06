@@ -78,7 +78,7 @@ Tracks inference workloads cluster-wide as they are queued, executed, and retire
   completedAt: number | null
   error: string | null
   requesterId: string | null
-  requestedModel?: string  // The tier ("weak" | "medium" | "strong") the request asked for, when `model` is the concrete model the proxy chose for it. Optional/additive (§7.3): absent when the client named a model. Passed through opaquely; not part of the dedup key.
+  requestedModel?: string  // The user-created role the request asked for, when `model` is the concrete model the proxy chose for it. Optional/additive (section 7.3): absent when the client named a concrete model. Passed through opaquely; not part of the dedup key.
 }
 ```
 

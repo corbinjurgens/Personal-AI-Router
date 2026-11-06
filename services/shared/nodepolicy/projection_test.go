@@ -291,6 +291,7 @@ func TestServedResidentPeerRoundTrip(t *testing.T) {
 			if name == "subset" {
 				desired := servedResidentPolicy()
 				p.ServedModels, p.ResidentModels, p.Profiles = desired.ServedModels, desired.ResidentModels, desired.Profiles
+				p.Roles = desired.Roles
 			}
 			projection := p.PeerProjection()
 			for range 3 {
@@ -364,7 +365,7 @@ func TestServedResidentRoleAuthority(t *testing.T) {
 	p.ServedModels = ServedModels{}
 	p.ResidentModels = nil
 	p.Profiles = append(p.Profiles, Profile{Key: "outside", DisplayName: "Outside", Engine: "llamacpp", Model: "outside"})
-	p.Roles = []Role{{Name: TierStrong, Profiles: []string{"outside"}}}
+	p.Roles = []Role{{Name: "strong", Profiles: []string{"outside"}}}
 	if err := p.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -380,7 +381,7 @@ func TestServedResidentRoleAuthority(t *testing.T) {
 		t.Fatal("roles rewritten outside served permission")
 	}
 	adv := p.Advertisement()
-	if len(adv.Roles) != 1 || adv.Roles[0].Name != TierStrong || !reflect.DeepEqual(adv.Roles[0].Profiles, []string{"outside"}) {
+	if len(adv.Roles) != 1 || adv.Roles[0].Name != "strong" || !reflect.DeepEqual(adv.Roles[0].Profiles, []string{"outside"}) {
 		t.Fatal("advertisement lost declaring role")
 	}
 	if len(adv.Roles) != 1 {
@@ -437,9 +438,9 @@ func TestPeerProjectionOmitsRoutingAndAPIEntries(t *testing.T) {
 	if err := json.Unmarshal(data, &got); err != nil {
 		t.Fatalf("decode projection: %v", err)
 	}
-	wantTiers := map[string][]TierEntry{"weak": {{Kind: EntryLocal, Engine: "llamacpp", Model: "qwen3-8b"}}}
+	wantTiers := map[string][]TierEntry{}
 	if !reflect.DeepEqual(got.Tiers, wantTiers) {
-		t.Errorf("projected tiers = %+v, want %+v (local entries only, no API-only tier)", got.Tiers, wantTiers)
+		t.Errorf("projected tiers = %+v, want no private API entries", got.Tiers)
 	}
 	if got.Revision != "12" {
 		t.Errorf("projected revision = %q, want the source document's %q", got.Revision, "12")
@@ -487,9 +488,9 @@ func TestMergePeerSetAcceptsUnchangedProjection(t *testing.T) {
 		doc["tiers"].(map[string]any)["medium"] = []any{}
 	}, func(*Policy) {})
 	test("declared roles", func(doc map[string]any) {
-		doc["roles"] = []Role{{Name: TierWeak, Profiles: []string{}}, {Name: TierStrong, Profiles: []string{}}}
+		doc["roles"] = []Role{{Name: "weak", Profiles: []string{}}, {Name: "strong", Profiles: []string{}}}
 	}, func(p *Policy) {
-		p.Roles = []Role{{Name: TierWeak, Profiles: []string{}}, {Name: TierStrong, Profiles: []string{}}}
+		p.Roles = []Role{{Name: "weak", Profiles: []string{}}, {Name: "strong", Profiles: []string{}}}
 	})
 	test("peer pausedBy is ignored", func(doc map[string]any) {
 		doc["pausedBy"] = "peer"
@@ -502,7 +503,7 @@ func TestMergePeerSetAcceptsUnchangedProjection(t *testing.T) {
 
 func TestPeerProjectionCarriesRolesAndPausedBy(t *testing.T) {
 	stored := stagedPolicy(t)
-	stored.Roles = []Role{{Name: TierMedium, Profiles: []string{}}}
+	stored.Roles = []Role{{Name: "medium", Profiles: []string{}}}
 	stored.Availability = Paused
 	stored.PausedBy = PausedLocally
 
@@ -522,7 +523,7 @@ func TestPeerProjectionCarriesRolesAndPausedBy(t *testing.T) {
 func TestRoleMembershipCopiesAreDetached(t *testing.T) {
 	p := Default()
 	p.Profiles = []Profile{{Key: "m", DisplayName: "Model", Engine: "llamacpp", Model: "m"}}
-	p.Roles = []Role{{Name: TierMedium, Profiles: []string{"m"}}}
+	p.Roles = []Role{{Name: "medium", Profiles: []string{"m"}}}
 	peer := p.PeerProjection()
 	peer.Roles[0].Profiles[0] = "peer-change"
 	if p.Roles[0].Profiles[0] != "m" {
@@ -613,19 +614,19 @@ func TestMergePeerSetRejectsProtectedChanges(t *testing.T) {
 		doc["tiers"].(map[string]any)["weak"] = entries
 	}
 
-	test("changed tier entry", func(doc map[string]any) { weak(doc, localEntry("llama3-8b")) }, "cannot change the tiers")
+	test("changed tier entry", func(doc map[string]any) { weak(doc, localEntry("llama3-8b")) }, "Local tier entries are retired; declare roles instead.")
 	test("added local tier entry", func(doc map[string]any) {
 		weak(doc, localEntry("qwen3-8b"), localEntry("llama3-8b"))
-	}, "cannot change the tiers")
-	test("removed local tier entry", func(doc map[string]any) { weak(doc) }, "cannot change the tiers")
+	}, "Local tier entries are retired; declare roles instead.")
+	test("local entry replacing private API entry", func(doc map[string]any) { weak(doc, localEntry("qwen3-8b")) }, "Local tier entries are retired; declare roles instead.")
 	test("added tier", func(doc map[string]any) {
 		doc["tiers"].(map[string]any)["medium"] = []any{localEntry("llama3-8b")}
-	}, "cannot change the tiers")
+	}, "Local tier entries are retired; declare roles instead.")
 	// The incoming document is validated without the stored routing, so a peer
 	// cannot tell whether a deployment id it names exists on this node.
 	test("added api tier entry", func(doc map[string]any) {
 		weak(doc, localEntry("qwen3-8b"), map[string]any{"kind": "api", "deployment": "free-small"})
-	}, "is not defined")
+	}, "Local tier entries are retired; declare roles instead.")
 	test("api entry replacing the local entry", func(doc map[string]any) {
 		weak(doc, map[string]any{"kind": "api", "deployment": "paid-big"})
 	}, "is not defined")
@@ -633,11 +634,11 @@ func TestMergePeerSetRejectsProtectedChanges(t *testing.T) {
 		entry := localEntry("qwen3-8b")
 		entry["capabilities"] = []any{"tools"}
 		weak(doc, entry)
-	}, "cannot change the tiers")
+	}, "Local tier entries are retired; declare roles instead.")
 	test("changed tiers under a capitalized key", func(doc map[string]any) {
 		delete(doc, "tiers")
 		doc["Tiers"] = map[string]any{"weak": []any{localEntry("llama3-8b")}}
-	}, "cannot change the tiers")
+	}, "Local tier entries are retired; declare roles instead.")
 	test("changed tier policy under an uppercase key", func(doc map[string]any) {
 		delete(doc, "tierPolicy")
 		doc["TIERPOLICY"] = map[string]any{"allowStronger": true, "allowWeaker": true, "preferLoaded": "tier"}
@@ -674,15 +675,15 @@ func TestMergePeerSetRejectsProtectedChanges(t *testing.T) {
 		doc["idle"].(map[string]any)["unloadAfterMinutes"] = -1
 	}, "idle.unloadAfterMinutes")
 	test("role for an unknown tier", func(doc map[string]any) {
-		doc["roles"] = []Role{{Name: "huge", Profiles: []string{}}}
-	}, `unknown tier "huge"`)
+		doc["roles"] = []Role{{Name: "Coder", Profiles: []string{}}}
+	}, "role")
 	test("role naming a reserved alias", func(doc map[string]any) {
-		doc["profiles"] = []any{map[string]any{"key": "m", "displayName": "Model", "engine": "llamacpp", "model": "strong-local"}}
-		doc["roles"] = []Role{{Name: TierWeak, Profiles: []string{"m"}}}
-	}, "reserved alias")
+		doc["profiles"] = []any{map[string]any{"key": "strong:local", "displayName": "Model", "engine": "llamacpp", "model": "m"}}
+		doc["roles"] = []Role{{Name: "weak", Profiles: []string{"strong:local"}}}
+	}, "reserved")
 	test("role for an unknown engine", func(doc map[string]any) {
 		doc["profiles"] = []any{map[string]any{"key": "m", "displayName": "Model", "engine": "no/pe", "model": "m"}}
-		doc["roles"] = []Role{{Name: TierWeak, Profiles: []string{"m"}}}
+		doc["roles"] = []Role{{Name: "weak", Profiles: []string{"m"}}}
 	}, `unknown engine "no/pe"`)
 }
 

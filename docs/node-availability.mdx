@@ -73,7 +73,7 @@ request wins, so a Resume never waits out a pause's drain.
 - Inference that enters the paused node and is served by other nodes.
 - Every read: status, settings and policy reads, model files, event streams and
   the node's inventory. Paired devices can still see the node and its models;
-  Pause does not remove catalogue models or declared tier aliases.
+  Pause does not remove catalogue models or declared role aliases.
 - Local configuration: settings, grants, stop and unload, and
   manual nodes.
 - Management that this node sends to other nodes.
@@ -205,8 +205,9 @@ A router uses the hint in two ways:
   candidate and no self candidate remains, a request naming a model receives
   `502` with this message:
   `no available node advertises the requested model`
-  and a request for the `strong` tier alias receives `404` with this message:
-  `no eligible model for tier strong`
+  and a request for a declared role such as `coder` receives `404` when no
+  eligible role candidate remains. Roles are user-created names, with no
+  built-in tiers; widening follows the requesting node's role order.
   A paused self candidate stays eligible and is refused by its own admission
   with `503` instead.
 - **Display.** The desktop shows the paused message for a paired node that is

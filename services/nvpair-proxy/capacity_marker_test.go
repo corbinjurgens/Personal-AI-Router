@@ -145,7 +145,7 @@ func TestStrictCorruptCapacityFailsClosed(t *testing.T) {
 		{"duplicate id", `{"version":1,"slots":[{"id":1,"engine":"llamacpp","model":"m"},{"id":1,"engine":"llamacpp","model":"n"}]}`},
 		{"zero id", `{"version":1,"slots":[{"id":0,"engine":"llamacpp","model":"m"}]}`},
 		{"invalid model", `{"version":1,"slots":[{"id":1,"engine":"llamacpp","model":" "}]}`},
-		{"reserved model", `{"version":1,"slots":[{"id":1,"engine":"llamacpp-custom","model":"weak"}]}`},
+		{"reserved model", `{"version":1,"slots":[{"id":1,"engine":"llamacpp-custom","model":"weak:local"}]}`},
 		{"invalid later slot", `{"version":1,"slots":[{"id":1,"engine":"llamacpp","model":"m"},{"id":2,"engine":"un/known","model":"n"}]}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

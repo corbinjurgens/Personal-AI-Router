@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { RoutingRequestKey } from '@/shared/types/node-policy'
+import { roleNameError } from '@/shared/utils/node-roles'
 import type { JsonValue } from './json'
 
 export interface RoutingCancelParams {
@@ -123,7 +124,7 @@ export interface RoutingHistoryRecord {
     seq: number
     requested: {
         model: string
-        tier: '' | 'weak' | 'medium' | 'strong'
+        tier: string
         mode: 'chat' | 'completion' | 'embedding' | 'other'
     }
     createdAt: number
@@ -203,7 +204,6 @@ export interface RoutingHistoryShape {
         | 'reason'
         | 'accounting'
         | 'accountState'
-        | 'tier'
         | 'mode'
         | 'currency'
 }
@@ -295,7 +295,7 @@ export const routingHistoryRecordShape: RoutingHistoryShape = {
                 kind: 'object',
                 fields: [
                     ['model', text],
-                    ['tier', { kind: 'string', limit: 6, enum: 'tier' }],
+                    ['tier', { kind: 'string', limit: 64 }],
                     ['mode', { kind: 'string', limit: 10, enum: 'mode' }]
                 ]
             }
@@ -400,7 +400,6 @@ const historyEnums: Record<NonNullable<RoutingHistoryShape['enum']>, readonly st
         'conflict',
         'unknown'
     ],
-    tier: ['', 'weak', 'medium', 'strong'],
     mode: ['chat', 'completion', 'embedding', 'other'],
     currency: ['USD']
 }
@@ -593,7 +592,8 @@ function validRecord(value: JsonValue | RoutingHistoryRecord): value is RoutingH
                 state !== 'completed' &&
                 state !== 'streaming')
     )
-    choice(q.tier, ['', 'weak', 'medium', 'strong'])
+    if (typeof q.tier !== 'string' || (q.tier !== '' && roleNameError(q.tier) !== undefined))
+        return invalid()
     choice(q.mode, ['chat', 'completion', 'embedding', 'other'])
     choice(v.reason, reasons)
     status(v.status)
@@ -675,8 +675,9 @@ function validRecord(value: JsonValue | RoutingHistoryRecord): value is RoutingH
 
 const cellBytes = 65536,
     headerBytes = 320
-// Valid schema-1 records require at most 30,768 packed bytes, including the
-// format tag. Private IPC loans contain one such record, never a packed window.
+// Valid schema-1 records require at most 30,833 packed bytes, including the
+// format tag and a length-prefixed role of up to 64 bytes. Private IPC loans
+// contain one such record, never a packed window.
 // Native serializer capacities/lifetimes remain a separate proof from this cap.
 // The private cap never lowers R/M.
 const packedRecordBytes = 32752
@@ -783,7 +784,7 @@ class RecordReader {
         if (size > (shape.limit ?? 512) || this.pos + size > this.raw.length) return invalid()
         let value: string
         try {
-            value = new TextDecoder('utf-8', { fatal: true }).decode(
+            value = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(
                 this.raw.subarray(this.pos, this.pos + size)
             )
         } catch {

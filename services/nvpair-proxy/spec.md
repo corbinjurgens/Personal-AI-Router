@@ -432,7 +432,7 @@ is a genuine limitation, not a safety margin (§5.6).
 - The process-wide reservation map that makes concurrent dispatch spread.
 - The persisted per-engine port a user chose through `set-port`.
 - The fork's node policy (§12): node-wide admission for work executed here,
-  weak/medium/strong tier resolution, routing metadata headers, and workload
+  user-created role resolution, routing metadata headers, and workload
   cancel and regenerate.
 
 **Out of scope**
@@ -566,9 +566,8 @@ each node to the result set, before host deduplication, not before ordering: an
 excluded node does not claim its resolved host, so another record for that host
 stays eligible. The rule covers a concrete model, a request without a `model`
 member (which has no model-owner filter) and a tier request, because
-`resolveTierCandidates` obtains candidates for applicable declared roles and
-eligible local tier entries through `resolveCandidates`; API entries are
-skipped. `hybridLocalCandidates` takes its candidates from
+`resolveTierCandidates` obtains candidates only for applicable declared roles
+through `resolveCandidates`. `hybridLocalCandidates` takes its candidates from
 `resolveTierCandidates` and so inherits the rule, including inference entering
 through the unified routing listener (§12.6).
 
@@ -1211,7 +1210,7 @@ treat an absent `scheduledOn` as "not placed" rather than assuming a node.
 **Model fields.** `model` is the concrete model the job asks for. For a tier
 request (§12.3) it is the model of the candidate being tried, updated on each
 dispatch and fixed at commit, and the optional, additive `requestedModel`
-carries the tier (`weak`, `medium`, `strong`). `requestedModel` is absent when
+carries the requested user-created role. `requestedModel` is absent when
 the client named a model. `engine` stays the facade the request entered on even
 when a tier candidate is served by another engine, because `engine` is part of
 the workload's store and dedup identity and changing it mid-life would fork the
@@ -1810,18 +1809,28 @@ the supported failure ending. Requester cancellation remains `cancelled`.
 
 ### 12.3 Tiers
 
-A request whose `model` is `weak`, `medium` or `strong` on an inference route
-is resolved by the node it enters.
+A request naming a visibly declared role on an inference route is resolved by
+the node it enters. Roles are user-created names ordered per node, with no
+built-in, default or protected names and no cluster role store.
 
-- **Entry kinds**: a policy (schema version 2) tier entry has a `kind`. A
-  `local` entry names an engine and model. An `api` entry names a deployment in
-  the policy's origin-only `routing` section. The reachable concrete/legacy
-  tier resolver considers `local` entries only and skips `api` entries without
-  error: an API-only tier has no dispatch candidate there. Alias lists still
-  include API-only tiers (below). The unified listener selects the common
-  driver's hybrid branch (§5.1, §12.6). Migrating a
-  version 1 file tags every entry `local`, so it resolves the candidates it
-  resolved before.
+- **API configuration**: any role may have `api` entries in `tiers`, naming
+  deployments in the origin-only `routing` section. Public selection requires
+  both a configured entry and a `routing.tiers` rule with `remoteAllowed`.
+  API entries alone do not declare a role. Local tier entries are retired and
+  rejected; only declared role profiles supply local candidates. Public dispatch
+  is disabled in this build (`PublicDispatchAvailable()` is false). Enabled
+  deployments and remote or paid permissions cannot be saved. API overrides
+  are listed and refused; naming or selecting them activates no dispatch and
+  bypasses no permission gate. The permission owner accepts only the configured
+  deployment and refuses before source lookup, provider calls or durable holds.
+  API entries and rules are private origin-node configuration. Remote role
+  editing cannot inspect or change these maps; remote rename/removal leaves
+  them unchanged. Local rename refuses atomically if both names hold API
+  configuration (nonempty `tiers[name]` or an existing `routing.tiers[name]`);
+  otherwise configuration ends under the new name and old-name keys are deleted.
+  An empty entries array alone is absent configuration. Remote confirmations
+  always explain that API entries on the target cannot be seen and stay as they
+  are. The unified listener uses the common hybrid branch (section 12.6).
 
 - **Needs**, read from the buffered body: `tools`
   (non-empty `tools` or `functions`), `vision` (an `image_url`, `image` or
@@ -1830,9 +1839,11 @@ is resolved by the node it enters.
   `embeddings` (`/v1/embeddings`), and a
   context estimate of body bytes / 4 plus `max_tokens`,
   `max_completion_tokens` or a positive `options.num_predict`.
-- **Search order**: the requested tier, then stronger tiers nearest first with
-  `allowStronger`, then weaker tiers nearest first with `allowWeaker`, all from
-  this router's `tierPolicy`.
+- **Search order**: the requesting node's ordered roles run weakest to strongest.
+  Search the requested role, then stronger roles nearest first with
+  `allowStronger`, then weaker roles nearest first with `allowWeaker`, using
+  this router's `tierPolicy`. A requested role absent from its own list never
+  widens, even when peers declare it.
 - **Declared roles**: a node's `roles` (for a peer, the `roles` of the `policy`
   object in its inventory document as carried by the discovery overlay; for
   this node, its own policy's `roles`, never its published document) are an
@@ -1841,18 +1852,15 @@ is resolved by the node it enters.
   resolution includes local-only profiles; peers see only shared facts.
   Missing or withheld keys contribute no candidate, but later reachable keys
   are still considered. Empty roles and roles with no reachable keys remain
-  declarations. A node that declares at least one role is authoritative for
+  declarations. Each node is authoritative for
   itself: for each tier in the search order it offers only the profiles it
   declared for that tier, and for a tier it omits it offers nothing. A node
-  that declares no role (no `policy`
-  object, or an empty `roles`) receives this router's tier entries as below.
-  There is no migration from entries to roles.
-- **Entries**: for each tier in the search order, first the declared roles,
-  then the tier's entries for the nodes that declare nothing. A role profile
-  or entry lacking a needed capability, or whose `contextTokens` is set
+  that declares no role supplies no local role candidates.
+- **Profiles**: for each role in the search order, resolve its declared profiles.
+  A profile lacking a needed capability, or whose `contextTokens` is set
   and below the estimate, is dropped. Every candidate uses its own node's
   matching profile bounds, never another member's or node's facts.
-- **Candidates**: each role and entry expands through its engine's facade in this
+- **Candidates**: each role profile expands through its engine's facade in this
   process with the ordinary owner filter and order (§5): node/select pin,
   scheduler priority, ID, self mapped to that engine's local backend, peers over
   cluster mTLS to the port that facade's discovery overlay carries — the peer's
@@ -1867,52 +1875,63 @@ is resolved by the node it enters.
   candidates, because the process has no routing view of it.
 - **Order**: `preferLoaded: "tier"` sorts by tier rank, then warm before cold;
   `"any"` by warm first, then tier rank. The existing preparation and selected
-  pin classes are unchanged. Inside equal comparator classes, declared
-  candidates precede entries and earlier membership positions on each node
-  lead. Distinct pairs at equal positions use engine/model order and retain
+  pin classes are unchanged. Inside equal comparator classes, earlier membership
+  positions on each node lead. Distinct pairs at equal positions use engine/model order and retain
   the ordinary per-pair owner order. Another node's earlier occurrence of a
-  pair cannot promote a later sibling on this node. Entry order remains the
-  tie breaker for entries. Reservations (§6) are taken only among the candidates
+  pair cannot promote a later sibling on this node. Qualification uses that
+  candidate node's selected engine/model facts. Reservations (§6) are taken only
+  among the candidates
   sharing the leading tier rank, warmth and preparation class.
 - **Body**: the top-level `model` is replaced by splicing its value's bytes;
   every other byte is forwarded as received.
 - **Nothing eligible** before any dispatch: `404` with
   `{"error":"no eligible model for tier <tier>","needs":[...]}`.
-- **Reserved aliases**: `weak`, `medium`, `strong` and each with a `-api` or
-  `-local` suffix are reserved exact model names. Matching is byte-for-byte
-  after trimming surrounding whitespace, so `<alias>:latest`, case variants and
-  qualified names such as `org/weak-api` are ordinary model names.
-  Model normalization preserves every exact identifier after trimming whitespace.
+- **Namespace**: role names match `^[a-z0-9][a-z0-9._-]{0,63}$`. Only exact
+  `<role>:api` and `<role>:local` are overrides. Hyphens are ordinary name
+  characters (`coder-api` is valid). Every public profile key whose prefix
+  before a colon is a valid role name is reserved, whatever follows the colon
+  and whether the role is declared. Native/provider model and artifact
+  identifiers are exempt from that profile-key rule. Otherwise valid keys up
+  to 512 UTF-8 bytes remain valid. Alias grammar alone does not classify a
+  request as a role: a visible self or peer declaration, even an empty one,
+  is required. Undeclared canonical names remain concrete. An unknown named
+  model returns `404` `no profile or role named <name>`, distinct from the
+  declared-role no-eligible failure above. Unknown suffixes such as `coder:fast`
+  remain concrete and return that ordinary `404` unless advertised exactly.
 - **Refusals**: a request is answered `400`
   `{"error":"...","code":"feature_unavailable","reason":"alias_not_inference_ready"|"unsupported_alias_use","model":"<alias>"}`
   before the CORS preflight, candidate resolution, admission, wake, reservation,
   workload events or any engine request, and only the `proxy/request` report is
   emitted, when it names:
-  - a `-api` or `-local` alias in the body `model` on any route
+  - a declared role's `:api` or `:local` override in the body `model` on the
+    concrete facade boundary
     (`alias_not_inference_ready`);
-  - a `-api` or `-local` alias as the string value of any top-level JSON key
+  - `:api` or `:local` override syntax, independently of declaration, as the
+    string value of any alternate top-level JSON key
     equal under `strings.EqualFold` to `model` or `name`, repeated keys
     included, so a case-variant key the engine may read instead of the one the
     router read is covered; as any `model` query parameter value (llama.cpp
     `GET /props?model=`); or as the whole remainder of a `/v1/models/` path
     (`alias_not_inference_ready`);
-  - a bare tier in the body `model` on a route that is not a classified
+  - a bare declared role in the body `model` on a route that is not a classified
     inference route (Responses, an unclassified native or passthrough path), or
     a bare tier in `model` with surrounding whitespace
     (`unsupported_alias_use`).
   Nested keys, other fields and other paths are not checked. A bare tier in
   `name`, a query parameter or a model path keeps today's behavior. A bare tier
   spelled exactly in `model` on a classified inference route (including native
-  and Messages routes) keeps the tier path above on facade entry; unified
-  listener inference uses §12.6. The cluster ingress (§7) is not
-  covered; refusing aliases there is Phase 4 work.
+  and Messages routes) takes the local role path above on facade entry; unified
+  listener inference uses §12.6. An undeclared canonical model remains concrete;
+  alternate selectors cannot smuggle override syntax past it. Cluster ingress
+  (§7) has its own listener boundary.
 - **Model lists**: an OpenAI-shape model list (`/v1/models`, llama.cpp's
   `/models`) gains `{"id":"<alias>","object":"model","created":0,"owned_by":"pair"}`
-  for the bare tier and its `-api` and `-local` variants, for each tier with at
-  least one entry of either kind (including a tier whose entries are all
-  `api`), each tier this node's own `roles` declare, and each tier a node in
-  any facade overlay of this process declares. The records are built from the
-  policy and those declarations (`configuredAliases`, `hybridAliasRecords`) and
+  for each declared role and its `:api` and `:local` variants. Self roles come
+  first in policy order, then peer-only names sorted by name; each role is
+  followed by its variants. Empty roles are included, API entries alone are
+  not. Peers come from every facade overlay in this process. Both facade and
+  unified-listener catalogs use these visible declarations. The records are
+  built from the policy and those declarations (`configuredAliases`, `hybridAliasRecords`) and
   carry no credential, account, deployment or endpoint. Each alias variant
   carries `context_length` equal to the largest `ContextTokens` of that role's
   visible resolved profiles across self and peers whose declaring node is
@@ -1929,22 +1948,21 @@ is resolved by the node it enters.
   facts are known or any such profile has zero (unbounded)
   context. Missing or withheld keys do not count as zero-context facts.
   Router tier entries do not supply this profile-derived field. An upstream
-  model already named like an alias is left alone. When no
+  model colliding with a role record is replaced by that role record. When no
   upstream yields a list and at least one alias is configured, the aliases are
   returned with `200` instead of `503`; without a configured tier the statuses
   are unchanged, and the browser `Origin` checks of §5.8 still apply.
-- **Readiness**: listed `-api` and `-local` aliases are not inference-ready
-  until Phase 4 of the hybrid routing plan; they are refused as above. Declared
-  roles are local destinations: when dispatch exists, `-api` excludes them and
-  `-local` and the bare tier include them.
+- **Selection**: on hybrid entry, `:api` excludes local destinations and
+  `:local` excludes public destinations; bare roles follow `bareMode`.
+  Local hybrid candidates still require their own finite qualification and
+  strict capability. Public dispatch remains disabled, so API-only requests
+  return `404` without local fallback, source lookups or provider calls.
 
 These profile-list and catalog rules describe the implementation contract, not
 installed or live-engine validation. Typed profile context is derived by the
 broker from the resolved per-slot launch context. Native fit can realize less
 than the requested context; agreement with the running engine remains pending
-N7, and client acceptance of `context_length` remains pending N8. The fixed
-`TierOrder`, widening order and suffix aliases remain until phase 08; phase 06
-is installed together with phases 07 and 08.
+N7, and client acceptance of `context_length` remains pending N8.
 
 ### 12.4 Routing metadata
 
@@ -2319,12 +2337,11 @@ port. Inference uses the existing request/workload notification contract.
     `Access-Control-Allow-Origin: <origin>` on every response; `Vary: Origin` is
     always set. Engine CORS is not consulted.
   - `GET /v1/models` answers `200` `{"object":"list","data":[...]}` from
-    `hybridAliasRecords` over the active policy (its entries and this node's
-    own `roles`; peers' declarations are not seen), `[]` when none; a query string
-    on it is ignored. The shared self-policy role resolver supplies
-    `context_length` using only this node's profile facts, including local-only
-    profiles whose model resolves to a self inference candidate, with the same
-    unknown/unbounded omission rule as facade catalogs.
+    `hybridAliasRecords` over self and visible peer declarations, in the same
+    order as facade catalogs, `[]` when none; a query string on it is ignored.
+    The shared role resolver supplies `context_length` from eligible declaring
+    nodes' facts, including self's local-only profiles, with the same
+    per-catalog pair/role reuse and unknown/unbounded omission rule as facade catalogs.
   - A route is an inference route when any engine profile classifies the path as
     a `POST` inference route (`isInferenceRequest`), so the set is the facades'
     union. Another method on a known path is `405` with `Allow`; an unknown path
@@ -2345,12 +2362,13 @@ port. Inference uses the existing request/workload notification contract.
   `validateRequestIdentifiers` checks every top-level model/name occurrence;
   `ambiguousModelMember` refuses duplicates (including escaped keys) and
   case-folded model spellings with `400` `ambiguous-model` before selection.
-  Exactly one top-level model naming an exact supported alias is required;
-  malformed JSON, concrete models, missing models and alias lookalikes return
-  `400` `unsupported-alias`. A single escaped spelling of the exact key or
-  alias is accepted. Nested model values are payload, not selectors.
-  Bare aliases follow the tier's `bareMode`; `-local` excludes public
-  destinations and `-api` excludes local destinations. Public remains disabled
+  Exactly one top-level model member is required; malformed JSON and missing
+  models return `400` `unsupported-alias`. A single escaped spelling of the exact
+  key or alias is accepted. Visible declarations distinguish roles from concrete
+  names; undeclared names take the concrete path and unknown names return the
+  distinct `404` described in section 12.3. Nested model values are payload,
+  not selectors. Bare aliases follow the tier's `bareMode`; `:local` excludes public
+  destinations and `:api` excludes local destinations. Public remains disabled
   by nodepolicy and the egress permission owner, so API-only requests return
   `404` without falling through to local candidates. Other aliases use the
   existing hybrid qualified-role selector, and only the selected concrete model

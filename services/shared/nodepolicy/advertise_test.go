@@ -21,12 +21,12 @@ func TestAdvertisementListsRoleProfiles(t *testing.T) {
 		{Key: "unused", DisplayName: "Unused", Engine: "llamacpp", Model: "unused"},
 		{Key: "private", DisplayName: "Private", Engine: "llamacpp", Model: "private", LocalOnly: true},
 	}
-	p.Roles = []Role{{Name: TierStrong, Profiles: []string{"z", "a"}}, {Name: TierMedium, Profiles: []string{}}, {Name: TierWeak, Profiles: []string{"z", "private"}}}
+	p.Roles = []Role{{Name: "strong", Profiles: []string{"z", "a"}}, {Name: "medium", Profiles: []string{}}, {Name: "weak", Profiles: []string{"z", "private"}}}
 	if err := p.Validate(); err != nil {
 		t.Fatal(err)
 	}
 	a := p.Advertisement()
-	wantRoles := []Role{{Name: TierStrong, Profiles: []string{"z", "a"}}, {Name: TierMedium, Profiles: []string{}}, {Name: TierWeak, Profiles: []string{"z", "private"}}}
+	wantRoles := []Role{{Name: "strong", Profiles: []string{"z", "a"}}, {Name: "medium", Profiles: []string{}}, {Name: "weak", Profiles: []string{"z", "private"}}}
 	if !reflect.DeepEqual(a.Roles, wantRoles) {
 		t.Fatalf("roles = %+v, want %+v", a.Roles, wantRoles)
 	}
@@ -70,7 +70,7 @@ func TestAdvertisementListsRoleProfiles(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := []Role{{Name: TierStrong, Profiles: []string{}}, {Name: TierWeak, Profiles: []string{"good"}}}
+		want := []Role{{Name: "strong", Profiles: []string{}}, {Name: "weak", Profiles: []string{"good"}}}
 		if !reflect.DeepEqual(got.Roles, want) || len(got.Profiles) != 1 || got.Profiles[0].Key != "good" {
 			t.Fatalf("filtered advertisement = %+v", got)
 		}
@@ -95,7 +95,7 @@ func TestAdvertisementFiltersInvalidProfileMetadata(t *testing.T) {
 			if err := json.Unmarshal(raw, &got); err != nil {
 				t.Fatal(err)
 			}
-			wantRoles := []Role{{Name: TierWeak, Profiles: []string{"good"}}, {Name: TierMedium, Profiles: []string{}}}
+			wantRoles := []Role{{Name: "weak", Profiles: []string{"good"}}, {Name: "medium", Profiles: []string{}}}
 			if len(got.Profiles) != 1 || got.Profiles[0].Key != "good" || !reflect.DeepEqual(got.Roles, wantRoles) {
 				t.Fatalf("malformed profile affected retained facts/declarations: %+v", got)
 			}
@@ -199,7 +199,7 @@ func TestAdvertisementTakesBoundsFromProfiles(t *testing.T) {
 		Capabilities: []Capability{CapTools, CapVision}, MemoryBytes: 5000000000, MaxConcurrent: 2,
 		RequestOptions: json.RawMessage(`{"keep_alive":"10m"}`),
 	}}
-	p.Roles = []Role{{Name: TierWeak, Profiles: []string{"qwen"}}, {Name: TierMedium, Profiles: []string{"qwen"}}, {Name: TierStrong, Profiles: []string{}}}
+	p.Roles = []Role{{Name: "weak", Profiles: []string{"qwen"}}, {Name: "medium", Profiles: []string{"qwen"}}, {Name: "strong", Profiles: []string{}}}
 	p.Availability = Paused
 	p.PausedBy = PausedByPeer
 	if err := p.Validate(); err != nil {
@@ -208,7 +208,7 @@ func TestAdvertisementTakesBoundsFromProfiles(t *testing.T) {
 
 	got := p.Advertisement()
 	bounded := AdvertisedProfile{Key: "qwen", DisplayName: "qwen", Engine: "llamacpp", Model: "qwen3-8b", ContextTokens: 16384, Capabilities: []Capability{CapTools, CapVision}}
-	want := Advertisement{Revision: "12", Roles: []Role{{Name: TierWeak, Profiles: []string{"qwen"}}, {Name: TierMedium, Profiles: []string{"qwen"}}, {Name: TierStrong, Profiles: []string{}}}, Profiles: []AdvertisedProfile{bounded}, PausedBy: PausedByPeer}
+	want := Advertisement{Revision: "12", Roles: []Role{{Name: "weak", Profiles: []string{"qwen"}}, {Name: "medium", Profiles: []string{"qwen"}}, {Name: "strong", Profiles: []string{}}}, Profiles: []AdvertisedProfile{bounded}, PausedBy: PausedByPeer}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Advertisement() = %+v\nwant %+v", got, want)
 	}
@@ -234,9 +234,9 @@ func TestAdvertisementTakesBoundsFromProfiles(t *testing.T) {
 
 func TestAdvertisementWithoutProfileHasNoBounds(t *testing.T) {
 	p := Default()
-	p.Roles = []Role{{Name: TierWeak, Profiles: []string{}}}
+	p.Roles = []Role{{Name: "weak", Profiles: []string{}}}
 	got := p.Advertisement()
-	want := Advertisement{Revision: "0", Roles: []Role{{Name: TierWeak, Profiles: []string{}}}, Profiles: []AdvertisedProfile{}}
+	want := Advertisement{Revision: "0", Roles: []Role{{Name: "weak", Profiles: []string{}}}, Profiles: []AdvertisedProfile{}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Advertisement()=%+v, want %+v", got, want)
 	}
@@ -353,7 +353,7 @@ func TestAdvertisementLegacyCaseFolding(t *testing.T) {
 	if err := json.Unmarshal([]byte(input), &got); err != nil {
 		t.Fatal(err)
 	}
-	want := Advertisement{Revision: "2", Roles: []Role{{Name: TierWeak, Profiles: []string{"m"}}}, Profiles: []AdvertisedProfile{{Key: "m", DisplayName: "Model", Engine: "llamacpp", Model: "m"}}, PausedBy: PausedByPeer}
+	want := Advertisement{Revision: "2", Roles: []Role{{Name: "weak", Profiles: []string{"m"}}}, Profiles: []AdvertisedProfile{{Key: "m", DisplayName: "Model", Engine: "llamacpp", Model: "m"}}, PausedBy: PausedByPeer}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("decoded = %+v, want %+v", got, want)
 	}
@@ -365,7 +365,7 @@ func TestAdvertisementCarriesProfileQualification(t *testing.T) {
 		Key: "q", DisplayName: "q", Engine: "llamacpp", Model: "q", ContextTokens: 8192, MaxOutputTokens: 2048,
 		Qualification: &QualificationRef{ID: "msi-qwen3-8b", Revision: "3"},
 	}}
-	p.Roles = []Role{{Name: TierWeak, Profiles: []string{"q"}}, {Name: TierStrong, Profiles: []string{}}}
+	p.Roles = []Role{{Name: "weak", Profiles: []string{"q"}}, {Name: "strong", Profiles: []string{}}}
 	if err := p.Validate(); err != nil {
 		t.Fatalf("fixture policy is invalid: %v", err)
 	}
@@ -380,7 +380,7 @@ func TestAdvertisementCarriesProfileQualification(t *testing.T) {
 	if !weak.HybridQualified() {
 		t.Errorf("the qualified role is not hybrid qualified")
 	}
-	if strong := got.Roles[1]; strong.Name != TierStrong || len(strong.Profiles) != 0 {
+	if strong := got.Roles[1]; strong.Name != "strong" || len(strong.Profiles) != 0 {
 		t.Fatalf("empty declaration lost: %+v", strong)
 	}
 

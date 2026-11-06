@@ -739,6 +739,9 @@ function DeployTarget({
                                 <Checkbox
                                     key={role.name}
                                     slotLabel={`${role.name} on ${target.name}`}
+                                    aria-label={`${role.name} on ${target.name}`}
+                                    title={role.name}
+                                    className="break-all"
                                     checked={roles.includes(role.name)}
                                     disabled={controlsLocked}
                                     onCheckedChange={value => {
