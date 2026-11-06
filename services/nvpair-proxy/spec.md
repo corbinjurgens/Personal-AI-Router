@@ -2275,8 +2275,16 @@ port. Inference uses the existing request/workload notification contract.
     facade as holders). Linux and Windows have not been run.
   - **Facades**: the reverse order is closed from the other side. A facade's
     `listen` and `setPort` bind through `listenWildcard`, which refuses the
-    port the listener holds under the listener's lock, so the broker retries
-    the facade on another port.
+    routing listener's port, then binds and releases `127.0.0.1:<port>` and
+    `[::1]:<port>` before the wildcard bind, under the routing listener's lock.
+    This also refuses foreign loopback holders that could otherwise shadow a
+    successful wildcard bind. The IPv6 probe uses the capability check above.
+    Releasing the probes avoids self-collision on platforms that refuse
+    overlapping binds; a foreign bind after release or after startup remains
+    possible. A same-port `setPort` persists the existing choice without a new
+    bind, and a changed-port refusal keeps the old listener serving. The broker
+    may retry a non-explicit startup port through its existing fallback, while
+    an explicit choice fails visibly and remains selected for settings recovery.
   - **When both meet**: whichever binds first keeps the port. If a facade
     already holds the port when the policy is activated, the facade keeps it and
     the listener is reported blocked (retried on any later reconcile). If the

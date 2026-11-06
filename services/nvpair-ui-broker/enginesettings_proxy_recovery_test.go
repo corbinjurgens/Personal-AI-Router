@@ -697,6 +697,15 @@ func TestSettingsOccupiedProxyPortRecoveryKeepsOtherOwnerAndEngineStopped(t *tes
 	runSettingsOccupiedProxyPortRecovery(t, ":0", 0)
 }
 
+func TestSettingsLoopbackOccupiedProxyPortRecoveryKeepsOtherOwnerAndEngineStopped(t *testing.T) {
+	t.Run("IPv4 loopback", func(t *testing.T) {
+		runSettingsOccupiedProxyPortRecovery(t, "127.0.0.1:0", 0)
+	})
+	t.Run("IPv6 loopback", func(t *testing.T) {
+		runSettingsOccupiedProxyPortRecovery(t, "[::1]:0", 0)
+	})
+}
+
 func runSettingsOccupiedProxyPortRecovery(t *testing.T, address string, targetPort int) {
 	t.Helper()
 	occupant, err := net.Listen("tcp", address)
@@ -704,14 +713,50 @@ func runSettingsOccupiedProxyPortRecovery(t *testing.T, address string, targetPo
 		if address == ":8080" {
 			t.Skipf("literal-port fixture cannot own 8080: %v", err)
 		}
+		if address == "[::1]:0" {
+			t.Skipf("IPv6 loopback is unavailable: %v", err)
+		}
 		t.Fatalf("occupy private proxy port: %v", err)
 	}
 	oldPort := occupant.Addr().(*net.TCPAddr).Port
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+	})}
+	served := make(chan error, 1)
+	go func() { served <- server.Serve(occupant) }()
 	t.Cleanup(func() {
-		if err := occupant.Close(); err != nil {
+		if err := server.Close(); err != nil {
 			t.Errorf("close competing listener: %v", err)
 		}
+		select {
+		case err := <-served:
+			if !errors.Is(err, http.ErrServerClosed) {
+				t.Errorf("competing HTTP server: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Error("competing HTTP server did not stop")
+		}
 	})
+	client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{DisableKeepAlives: true}}
+	t.Cleanup(client.CloseIdleConnections)
+	occupantHost := "127.0.0.1"
+	if ip := occupant.Addr().(*net.TCPAddr).IP; ip.IsLoopback() {
+		occupantHost = ip.String()
+	}
+	askOccupant := func() {
+		t.Helper()
+		response, err := client.Get("http://" + net.JoinHostPort(occupantHost, fmt.Sprint(oldPort)) + "/v1/models")
+		if err != nil {
+			t.Fatalf("competing owner was disturbed: %v", err)
+		}
+		if err := response.Body.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if response.StatusCode != http.StatusTeapot {
+			t.Fatalf("competing owner HTTP status=%d, want %d", response.StatusCode, http.StatusTeapot)
+		}
+	}
+	askOccupant()
 	if targetPort == 18080 && !tcpPortAvailable(targetPort) {
 		t.Skip("literal-port fixture requires free port 18080")
 	}
@@ -742,6 +787,14 @@ func runSettingsOccupiedProxyPortRecovery(t *testing.T, address string, targetPo
 	if h.b.proxyProcessHandle() != nil {
 		t.Fatal("explicit occupied port unexpectedly started a proxy")
 	}
+	snapshot, err := h.b.getEngineSettings(t.Context(), settings.Request{Engine: "llamacpp"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snapshot.Editable || snapshot.EffectiveProxyPort != 0 || snapshot.Running || h.engineStarts.Load() != 0 {
+		t.Fatalf("occupied endpoint settings=%+v starts=%d", snapshot, h.engineStarts.Load())
+	}
+	askOccupant()
 	p = h.request(t)
 	if p.Settings.ProxyPort != oldPort {
 		t.Fatalf("unavailable desired proxy port=%d, want %d", p.Settings.ProxyPort, oldPort)
@@ -766,8 +819,6 @@ func runSettingsOccupiedProxyPortRecovery(t *testing.T, address string, targetPo
 	if !reflect.DeepEqual(before, h.b.localPolicy().Policy) {
 		t.Fatal("occupied-port recovery changed saved policy/intent")
 	}
-	client := &http.Client{Timeout: 5 * time.Second}
-	t.Cleanup(client.CloseIdleConnections)
 	response, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/v1/models", targetPort))
 	if err != nil {
 		t.Fatalf("recovered proxy HTTP endpoint: %v", err)
@@ -780,30 +831,8 @@ func runSettingsOccupiedProxyPortRecovery(t *testing.T, address string, targetPo
 	if response.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("stopped-engine catalog status=%d, want %d", response.StatusCode, http.StatusServiceUnavailable)
 	}
-	// The original listener is still ours, and still accepts a connection.
-	accepted := make(chan error, 1)
-	go func() {
-		conn, err := occupant.Accept()
-		if err == nil {
-			err = conn.Close()
-		}
-		accepted <- err
-	}()
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", oldPort), time.Second)
-	if err != nil {
-		t.Fatalf("competing owner was disturbed: %v", err)
-	}
-	if err := conn.Close(); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case err := <-accepted:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("original competing listener no longer accepts")
-	}
+	// Fresh HTTP requests still reach the competing owner on its original port.
+	askOccupant()
 	portPath, err := appdir.Path(profile.PortFile)
 	if err != nil {
 		t.Fatal(err)

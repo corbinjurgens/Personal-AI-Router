@@ -962,6 +962,29 @@ func TestRoutingListener_RefusesAFacadeOnItsPort(t *testing.T) {
 	})
 }
 
+func TestFacadeSetPortRefusesLoopbackHolder(t *testing.T) {
+	for _, tc := range []struct {
+		name, address, dial string
+	}{
+		{"IPv4 loopback", "127.0.0.1:0", "127.0.0.1"},
+		{"IPv6 loopback", "[::1]:0", "::1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, _, ports := facadeProxy(t)
+			before := askFacades(t, ports)
+			marker := rand.Text()
+			taken, ask := holdAddress(t, tc.address, tc.dial, marker)
+			if err := p.facadeFor("llamacpp-custom").setPort(taken); err == nil {
+				t.Fatal("moving a facade onto a foreign loopback holder succeeded")
+			}
+			assertFacadesUnchanged(t, ports, before)
+			if got := ask(); got.status != http.StatusOK || string(got.body) != marker {
+				t.Fatalf("foreign holder answered %d %q, want its own %q", got.status, got.body, marker)
+			}
+		})
+	}
+}
+
 // The listener is local state: nothing the proxy sends upward names its port or
 // announces it for discovery. The only frames it adds are the error pipeline's
 // report and clear, and a clear never carries a port.
