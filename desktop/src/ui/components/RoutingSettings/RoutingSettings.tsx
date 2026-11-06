@@ -71,6 +71,7 @@ export default function RoutingSettings() {
 
     // null is this PC: the service omits `nodeId` for it.
     const pickedNodeId = useOverviewUiStore(state => state.settingsNodeId)
+    const selectedProfileKey = useOverviewUiStore(state => state.settingsProfileKey)
     const setPickedNodeId = useOverviewUiStore(state => state.selectSettingsNode)
     const nodeId = pickedNodeId === selfId ? null : pickedNodeId
     const selectedPeer = peers.find(peer => peer.id === nodeId)
@@ -471,6 +472,11 @@ export default function RoutingSettings() {
                             targetId={targetId}
                             nodeId={nodeId ?? undefined}
                             nodeName={nodeName}
+                            selectedProfileKey={selectedProfileKey ?? undefined}
+                            open={selectedProfileKey ? true : undefined}
+                            onOpenChange={open => {
+                                if (!open) useOverviewUiStore.setState({ settingsProfileKey: null })
+                            }}
                             routing={{
                                 text,
                                 onTextChange: setText,

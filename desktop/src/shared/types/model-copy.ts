@@ -80,6 +80,17 @@ export interface ModelCopyResponse {
     result: ModelCopyResult
 }
 
+export interface ModelCopyOutcome {
+    opId: string
+    sourceNodeId: string
+    destinationNodeId: string
+    engine: string
+    model: string
+    disposition: 'copied' | 'cancelled' | 'refused' | 'unknown'
+    result?: ModelCopyResult
+    reason?: string
+}
+
 export interface ModelCopyCapabilities {
     version: 1
     engine: string

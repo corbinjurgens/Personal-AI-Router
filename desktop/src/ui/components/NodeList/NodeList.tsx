@@ -3,7 +3,7 @@
 
 import 'overlayscrollbars/styles/overlayscrollbars.css'
 import { memo, useMemo } from 'react'
-import { Stack } from '@nvidia/foundations-react-core'
+import { Stack, Switch } from '@nvidia/foundations-react-core'
 import { OverlayScrollbarsComponent } from 'overlayscrollbars-react'
 import type { PartialOptions } from 'overlayscrollbars'
 import type { NodeItem } from '@/shared/types/nodes'
@@ -11,6 +11,7 @@ import { useOverviewNodes } from '@/ui/hooks/useOverviewNodes'
 import NodeCardDetails from './NodeCardDetails'
 import { CONNECTIONS_WIDTH } from '@/ui/constants/app'
 import OfflineNode from './OfflineNode'
+import { useOverviewUiStore } from '@/ui/stores/overview-ui.store'
 
 const SCROLLBAR_OPTIONS = {
     scrollbars: { autoHide: 'leave', autoHideDelay: 800 }
@@ -18,6 +19,8 @@ const SCROLLBAR_OPTIONS = {
 
 function NodeList() {
     const allNodes = useOverviewNodes()
+    const showProfileSummaries = useOverviewUiStore(state => state.showProfileSummaries)
+    const setShowProfileSummaries = useOverviewUiStore(state => state.setShowProfileSummaries)
 
     const { online, offline } = useMemo(() => {
         const on: NodeItem[] = []
@@ -38,6 +41,11 @@ function NodeList() {
 
     return (
         <Stack className="grow min-w-0 h-full max-w-300">
+            <Switch
+                slotLabel="Show profile summaries"
+                checked={showProfileSummaries}
+                onCheckedChange={setShowProfileSummaries}
+            />
             <OverlayScrollbarsComponent
                 className="node-list-scroll-container"
                 style={{

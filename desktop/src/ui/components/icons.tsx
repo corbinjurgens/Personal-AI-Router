@@ -5,18 +5,23 @@ import type { ForwardRefExoticComponent, RefAttributes } from 'react'
 import {
     ArrowDown,
     ArrowUp,
+    Box,
     ChartNoAxesColumn,
     Check as LucideCheck,
     ChevronDown,
     ChevronRight,
     CirclePlus,
     Copy,
+    Code as LucideCode,
     Cpu,
     Download as LucideDownload,
     Ellipsis,
     ExternalLink,
     Filter,
+    FileText,
     Globe,
+    Image as LucideImage,
+    MessageSquare,
     Minus,
     Search as LucideSearch,
     Settings,
@@ -62,6 +67,19 @@ export const OpenInNew = appIcon(ExternalLink)
 export const Public = appIcon(Globe)
 export const Search = appIcon(LucideSearch)
 export const SettingsOutlined = appIcon(Settings)
+
+const profileIcons = new Map([
+    ['chat-single', appIcon(MessageSquare)],
+    ['code', appIcon(LucideCode)],
+    ['cube', appIcon(Box)],
+    ['document', appIcon(FileText)],
+    ['image', appIcon(LucideImage)]
+])
+
+export function ProfileIcon({ name }: { name?: string }) {
+    const Icon = name ? profileIcons.get(name) : undefined
+    return Icon ? <Icon /> : null
+}
 
 /**
  * Classic Windows "restore down" glyph (a front square with the back square's

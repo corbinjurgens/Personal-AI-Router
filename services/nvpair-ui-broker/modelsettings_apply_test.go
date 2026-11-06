@@ -690,6 +690,790 @@ func TestModelSettingsApplyConversionProvenanceOrNativeDigestDriftRefuses(t *tes
 	}
 }
 
+// The pipe fake returns an accepted whole-preset conversion without opening a
+// preset, model or engine. Frozen validation keeps the exact supplied loads.
+func modelSettingsPresetAnswer(h *modelSettingsHarness) func(string, json.RawMessage) (any, string) {
+	converted := modelSettingsConversionAnswer(h, nil)
+	return func(method string, raw json.RawMessage) (any, string) {
+		result, failure := converted(method, raw)
+		if method != "engine:preview-launch" || failure != "" {
+			return result, failure
+		}
+		envelope, err := settings.DecodeWorkerRequest[settings.Request](raw)
+		if err != nil {
+			return nil, err.Error()
+		}
+		preview, ok := result.(settings.Preview)
+		if !ok {
+			return nil, "fixture expected typed conversion preview"
+		}
+		if envelope.Request.ModelChange != nil && !slices.ContainsFunc(preview.Settings.ModelLoads, func(load modelconfig.ModelLoad) bool { return load.ProfileKey == "sibling" }) {
+			sibling := modelconfig.CloneLoads(preview.Settings.ModelLoads)[0]
+			sibling.ProfileKey, sibling.ModelID = "sibling", "sibling-artifact"
+			slots, fit := int32(2), "on"
+			sibling.Requested = modelconfig.RequestedLoad{Context: &modelconfig.Context{Mode: "fixed", Tokens: 12288}, Slots: &slots, Fit: &fit, ExtraOptions: map[string]string{"seed": "7"}}
+			sibling.Resolved.PerSlotContext, sibling.Resolved.TotalContext, sibling.Resolved.Slots = 12288, 24576, 2
+			sibling.Resolved.Options = sibling.Requested.Clone()
+			preview.Settings.ModelLoads = append(preview.Settings.ModelLoads, sibling)
+		}
+		preview.Identities["sibling"] = engines.ModelIdentity{GeneralName: "Converted sibling", Architecture: "llama", ConfiguredContextTokens: 12288, Strength: "declared", Files: []engines.ModelIdentityFile{{Role: "model", Name: "sibling.gguf", SizeBytes: 256}}}
+		preview.Settings, err = preview.Settings.Canonical()
+		if err != nil {
+			return nil, err.Error()
+		}
+		return preview, ""
+	}
+}
+
+func modelSettingsPresetPolicy(t *testing.T, h *modelSettingsHarness) nodepolicy.Policy {
+	t.Helper()
+	h.mu.Lock()
+	h.launch.LaunchText = "--models-preset /fixture/external.ini"
+	h.mu.Unlock()
+	policy := h.b.localPolicy().Policy
+	policy.Profiles = []nodepolicy.Profile{
+		{Key: "edited", DisplayName: "My chosen name", Icon: "code", Engine: "llamacpp", Model: "edited", ContextTokens: 4096,
+			Capabilities: []nodepolicy.Capability{nodepolicy.CapTools}, MemoryBytes: 1024, MaxConcurrent: 2, MaxOutputTokens: 512,
+			RequestOptions: json.RawMessage(`{"temperature":0.25,"opaque":{"integer":9007199254740993}}`), RequestOptionsMode: nodepolicy.RequestOptionsEnforced, LocalOnly: true,
+			Qualification: &nodepolicy.QualificationRef{ID: "saved-qualification", Revision: "1"}},
+		{Key: "untouched", DisplayName: "Unrelated profile", Engine: "llamacpp", Model: "untouched", ContextTokens: 2048},
+	}
+	policy.Roles = []nodepolicy.Role{
+		{Name: nodepolicy.TierStrong, Profiles: []string{"untouched", "edited"}},
+		{Name: nodepolicy.TierMedium, Profiles: []string{}},
+		{Name: nodepolicy.TierWeak, Profiles: []string{"edited", "untouched"}},
+	}
+	canonical, err := nodepolicy.Parse(settingsJSON(policy))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := h.b.nodePolicyRuntime()
+	r.mu.Lock()
+	r.current = canonical
+	r.mu.Unlock()
+	return canonical
+}
+
+func assertModelSettingsConvertedPolicy(t *testing.T, h *modelSettingsHarness, before nodepolicy.Policy) {
+	t.Helper()
+	assertModelSettingsConvertedPolicyContext(t, h, before, 8192)
+}
+
+func assertModelSettingsConvertedPolicyContext(t *testing.T, h *modelSettingsHarness, before nodepolicy.Policy, context int) {
+	t.Helper()
+	want, err := nodepolicy.Parse(settingsJSON(before))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want.Profiles[0].ContextTokens = context
+	want.Profiles[0].ModelIdentity = &engines.ModelIdentity{GeneralName: "Fixture model", Architecture: "llama", ConfiguredContextTokens: int64(context), Strength: "declared", Files: []engines.ModelIdentityFile{{Role: "model", Name: "fixture.gguf", SizeBytes: 256}}}
+	sibling := slices.IndexFunc(want.Profiles, func(profile nodepolicy.Profile) bool { return profile.Key == "sibling" })
+	if sibling < 0 {
+		want.Profiles = append(want.Profiles, nodepolicy.Profile{Key: "sibling", DisplayName: "sibling", Engine: "llamacpp", Model: "sibling"})
+		sibling = len(want.Profiles) - 1
+	}
+	want.Profiles[sibling].ContextTokens = 12288
+	want.Profiles[sibling].ModelIdentity = &engines.ModelIdentity{GeneralName: "Converted sibling", Architecture: "llama", ConfiguredContextTokens: 12288, Strength: "declared", Files: []engines.ModelIdentityFile{{Role: "model", Name: "sibling.gguf", SizeBytes: 256}}}
+	want, err = nodepolicy.Parse(settingsJSON(want))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := h.b.localPolicy().Policy
+	want.Revision = got.Revision
+	if modelSettingsHash(got) != modelSettingsHash(want) {
+		t.Fatalf("complete converted policy\ngot: %s\nwant: %s", settingsJSON(got), settingsJSON(want))
+	}
+}
+
+func TestModelSettingsApplyTypedLoadForSameArtifactDescriptor(t *testing.T) {
+	h := newModelSettingsHarness(t)
+	before := h.b.localPolicy().Policy
+	before.Profiles = append(before.Profiles, nodepolicy.Profile{Key: "coder-local", DisplayName: "Saved descriptor", Icon: "code", Engine: "llamacpp", Model: "fixture/model", RequestOptions: json.RawMessage(`{"temperature":0.27,"opaque":9007199254740993}`)})
+	canonical, err := nodepolicy.Parse(settingsJSON(before))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := h.b.nodePolicyRuntime()
+	r.mu.Lock()
+	r.current = canonical
+	r.mu.Unlock()
+	p := h.request(t, false)
+	p.ModelChange.ProfileKey = "coder-local"
+	p = h.review(t, p, "")
+	if receipt, err := h.b.applyEngineSettings(context.Background(), p, ""); err != nil || receipt.Phase != "succeeded" || h.calls() != 1 {
+		t.Fatalf("same-artifact typed creation = %+v, %v", receipt, err)
+	}
+	profile, exists := h.b.localPolicy().Policy.ProfileByKey("coder-local")
+	if !exists || profile.Model != "coder-local" || profile.ContextTokens != 8192 || profile.DisplayName != "Saved descriptor" || profile.Icon != "code" || !nodepolicy.EqualRequestOptions(profile.RequestOptions, canonical.Profiles[len(canonical.Profiles)-1].RequestOptions) || !reflect.DeepEqual(h.b.localPolicy().Policy.Roles, canonical.Roles) {
+		t.Fatalf("same-artifact transition lost profile fields or role order: %+v", profile)
+	}
+	loads := h.record(t).Snapshot.Settings.ModelLoads
+	if len(loads) != 1 || loads[0].ProfileKey != "coder-local" || loads[0].ModelID != "fixture/model" {
+		t.Fatalf("same-artifact transition changed native artifact: %+v", loads)
+	}
+}
+
+func TestModelSettingsDescriptorTypedLoadRefusesRetarget(t *testing.T) {
+	for _, tc := range []struct {
+		name, engine, artifact string
+	}{
+		{"different artifact", "llamacpp", "other/model"},
+		{"different engine", "strata", "fixture/model"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newModelSettingsHarness(t)
+			before := h.b.localPolicy().Policy
+			before.Profiles = append(before.Profiles, nodepolicy.Profile{Key: "coder-local", DisplayName: "Saved descriptor", Engine: tc.engine, Model: "fixture/model"})
+			canonical, err := nodepolicy.Parse(settingsJSON(before))
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := h.b.nodePolicyRuntime()
+			r.mu.Lock()
+			r.current = canonical
+			r.mu.Unlock()
+			p := h.request(t, false)
+			p.ModelChange.ProfileKey, p.ModelChange.ModelID = "coder-local", tc.artifact
+			_, err = h.b.previewEngineSettings(context.Background(), p, "")
+			if err == nil || h.calls() != 0 || !reflect.DeepEqual(h.b.localPolicy().Policy, canonical) {
+				t.Fatalf("descriptor retarget reached effects: error=%v, configure calls=%d", err, h.calls())
+			}
+		})
+	}
+}
+
+func TestModelSettingsApplyConversionPublishesSiblingAndPreservesPolicy(t *testing.T) {
+	for _, caller := range []string{"", "peer"} {
+		name := "local"
+		if caller != "" {
+			name = "authenticated peer"
+		}
+		t.Run(name, func(t *testing.T) {
+			h := newModelSettingsHarness(t)
+			before := modelSettingsPresetPolicy(t, h)
+			h.engine.setAnswer(modelSettingsPresetAnswer(h))
+			if caller != "" {
+				clustertrusttest.Join(t, h.b.clusterDir, "cluster", h.b.nodeID, caller)
+				grantRemoteManagement(t, h.b.clusterDir, "cluster", h.b.nodeID, caller, true)
+			}
+			p := h.request(t, false)
+			p.ModelChange.ProfileKey = "edited"
+			p = h.review(t, p, caller)
+			receipt, err := h.b.applyEngineSettings(context.Background(), p, caller)
+			if err != nil || receipt.Phase != "succeeded" || h.calls() != 1 {
+				t.Fatalf("conversion apply = %+v, %v; configure calls = %d", receipt, err, h.calls())
+			}
+			assertModelSettingsConvertedPolicy(t, h, before)
+		})
+	}
+}
+
+func TestModelSettingsApplyConversionOnlyPatchesSelectedRoleMembership(t *testing.T) {
+	h := newModelSettingsHarness(t)
+	before := modelSettingsPresetPolicy(t, h)
+	h.engine.setAnswer(modelSettingsPresetAnswer(h))
+	p := h.request(t, false)
+	p.ModelChange.ProfileKey = "edited"
+	p.ModelChange.Policy = &modelconfig.PolicyPatch{Roles: map[string]bool{nodepolicy.TierMedium: true, nodepolicy.TierWeak: false}}
+	p = h.review(t, p, "")
+	if receipt, err := h.b.applyEngineSettings(context.Background(), p, ""); err != nil || receipt.Phase != "succeeded" {
+		t.Fatalf("membership conversion = %+v, %v", receipt, err)
+	}
+	before.Roles = []nodepolicy.Role{
+		{Name: nodepolicy.TierStrong, Profiles: []string{"untouched", "edited"}},
+		{Name: nodepolicy.TierMedium, Profiles: []string{"edited"}},
+		{Name: nodepolicy.TierWeak, Profiles: []string{"untouched"}},
+	}
+	assertModelSettingsConvertedPolicy(t, h, before)
+}
+
+func TestModelSettingsApplyConversionPreservesExistingSiblingFields(t *testing.T) {
+	h := newModelSettingsHarness(t)
+	before := modelSettingsPresetPolicy(t, h)
+	before.Profiles = append(before.Profiles, nodepolicy.Profile{Key: "sibling", DisplayName: "My sibling settings", Icon: "image", Engine: "llamacpp", Model: "sibling", ContextTokens: 2048,
+		RequestOptions: json.RawMessage(`{"top_k":31,"opaque":{"fraction":0.123456789012345678901}}`), RequestOptionsMode: nodepolicy.RequestOptionsEnforced, LocalOnly: true,
+		Capabilities: []nodepolicy.Capability{nodepolicy.CapVision}, MemoryBytes: 2048, MaxConcurrent: 3, MaxOutputTokens: 1024,
+		Qualification: &nodepolicy.QualificationRef{ID: "sibling-qualification", Revision: "2"}})
+	before.Roles[0].Profiles = []string{"sibling", "untouched", "edited"}
+	canonical, err := nodepolicy.Parse(settingsJSON(before))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := h.b.nodePolicyRuntime()
+	r.mu.Lock()
+	r.current = canonical
+	r.mu.Unlock()
+	h.engine.setAnswer(modelSettingsPresetAnswer(h))
+	p := h.request(t, false)
+	p.ModelChange.ProfileKey = "edited"
+	p = h.review(t, p, "")
+	if receipt, err := h.b.applyEngineSettings(context.Background(), p, ""); err != nil || receipt.Phase != "succeeded" {
+		t.Fatalf("existing sibling conversion = %+v, %v", receipt, err)
+	}
+	assertModelSettingsConvertedPolicy(t, h, canonical)
+}
+
+func TestModelSettingsApplyOrdinaryMultiLoadDoesNotCreateSiblingProfiles(t *testing.T) {
+	test := func(name string, typedBefore bool) {
+		t.Run(name, func(t *testing.T) {
+			h := newModelSettingsHarness(t)
+			before := modelSettingsPresetPolicy(t, h)
+			preset := modelSettingsPresetAnswer(h)
+			if typedBefore {
+				// Use the conversion fake only to construct the target's already
+				// typed baseline; it is not a newly accepted conversion.
+				p := settings.Request{Engine: "llamacpp", ExpectedRevision: 1, Settings: settings.ConfigFromLaunch(h.launch, 18081),
+					ModelChange: &modelconfig.ModelChange{ProfileKey: "edited", ModelID: "fixture/model", ExpectedPolicyRevision: before.Revision,
+						Load: &modelconfig.LoadPatch{Set: modelconfig.RequestedLoad{Context: &modelconfig.Context{Mode: "fixed", Tokens: 8192}}}}}
+				raw, err := json.Marshal(settings.WorkerRequest[settings.Request]{Request: p})
+				if err != nil {
+					t.Fatal(err)
+				}
+				result, failure := preset("engine:preview-launch", raw)
+				if failure != "" {
+					t.Fatal(failure)
+				}
+				converted, ok := result.(settings.Preview)
+				if !ok {
+					t.Fatal("fixture expected conversion preview")
+				}
+				h.setNative(converted.Settings)
+			}
+			h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+				result, failure := preset(method, raw)
+				if method == "engine:preview-launch" && failure == "" && !typedBefore {
+					preview, ok := result.(settings.Preview)
+					if !ok {
+						return nil, "fixture expected multi-load preview"
+					}
+					for i := range preview.Settings.ModelLoads {
+						preview.Settings.ModelLoads[i].Resolved.ResolverRevision = ""
+						preview.Settings.ModelLoads[i].Resolved.ReviewedInputID = ""
+					}
+					return preview, ""
+				}
+				return result, failure
+			})
+			p := h.request(t, false)
+			p.ModelChange.ProfileKey = "edited"
+			p = h.review(t, p, "")
+			if receipt, err := h.b.applyEngineSettings(context.Background(), p, ""); err != nil || receipt.Phase != "succeeded" {
+				t.Fatalf("ordinary multi-load apply = %+v, %v", receipt, err)
+			}
+			got := h.b.localPolicy().Policy
+			if len(got.Profiles) != 2 || got.Profiles[0].Key != "edited" || got.Profiles[1].Key != "untouched" || !reflect.DeepEqual(got.Roles, before.Roles) {
+				t.Fatalf("ordinary edit manufactured a profile or changed roles: %+v", got)
+			}
+		})
+	}
+	test("multiple loads without conversion provenance", false)
+	test("previous conversion provenance with a typed baseline", true)
+}
+
+func TestModelSettingsConversionScopeIncludesAutoSelectedLoad(t *testing.T) {
+	h := newModelSettingsHarness(t)
+	modelSettingsPresetPolicy(t, h)
+	p := h.request(t, false)
+	p.ModelChange.ProfileKey = "edited"
+	raw, err := json.Marshal(settings.WorkerRequest[settings.Request]{Request: p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, failure := modelSettingsPresetAnswer(h)("engine:preview-launch", raw)
+	if failure != "" {
+		t.Fatal(failure)
+	}
+	preview, ok := result.(settings.Preview)
+	if !ok {
+		t.Fatal("fixture expected conversion preview")
+	}
+	for i := range preview.Settings.ModelLoads {
+		load := &preview.Settings.ModelLoads[i]
+		if load.ProfileKey == "edited" {
+			load.Resolved.ResolverRevision = "auto/llama"
+			load.Resolved.ReviewedInputID += ":" + strings.Repeat("a", 64)
+		}
+	}
+	_, scope, err := modelConversionReview(nil, *p.ModelChange, preview, settings.Config{})
+	if err != nil || !reflect.DeepEqual(scope, []string{"edited", "sibling"}) {
+		t.Fatalf("Auto conversion publication scope = %v, %v", scope, err)
+	}
+	_, ordinary, err := modelConversionReview(nil, *p.ModelChange, preview, preview.Settings)
+	if err != nil || len(ordinary) != 0 {
+		t.Fatalf("ordinary typed Auto provenance granted conversion authority = %v, %v", ordinary, err)
+	}
+}
+
+func TestModelSettingsApplyConversionMissingSiblingIdentityRefusesBeforeEffects(t *testing.T) {
+	h := newModelSettingsHarness(t)
+	before := modelSettingsPresetPolicy(t, h)
+	preset := modelSettingsPresetAnswer(h)
+	h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+		result, failure := preset(method, raw)
+		if method == "engine:preview-launch" && failure == "" {
+			preview, ok := result.(settings.Preview)
+			if !ok {
+				return nil, "fixture expected conversion preview"
+			}
+			delete(preview.Identities, "sibling")
+			return preview, ""
+		}
+		return result, failure
+	})
+	p := h.request(t, false)
+	p.ModelChange.ProfileKey = "edited"
+	journal := h.record(t)
+	_, err := h.b.previewEngineSettings(context.Background(), p, "")
+	if err == nil || err.Error() != "native preview did not return converted profile \"sibling\"'s model identity" || h.calls() != 0 || !reflect.DeepEqual(h.record(t), journal) || !reflect.DeepEqual(h.b.localPolicy().Policy, before) {
+		t.Fatalf("missing sibling identity reached effects: %v", err)
+	}
+}
+
+func TestModelSettingsApplyConversionRefusesSiblingRetargetBeforeEffects(t *testing.T) {
+	h := newModelSettingsHarness(t)
+	before := modelSettingsPresetPolicy(t, h)
+	before.Profiles = append(before.Profiles, nodepolicy.Profile{Key: "sibling", DisplayName: "Descriptor profile", Engine: "llamacpp", Model: "different-served-id"})
+	canonical, err := nodepolicy.Parse(settingsJSON(before))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := h.b.nodePolicyRuntime()
+	r.mu.Lock()
+	r.current = canonical
+	r.mu.Unlock()
+	h.engine.setAnswer(modelSettingsPresetAnswer(h))
+	p := h.request(t, false)
+	p.ModelChange.ProfileKey = "edited"
+	journal := h.record(t)
+	_, err = h.b.previewEngineSettings(context.Background(), p, "")
+	if engineSettingsErrorCode(err) != -32602 || h.calls() != 0 || !reflect.DeepEqual(h.record(t), journal) || !reflect.DeepEqual(h.b.localPolicy().Policy, canonical) {
+		t.Fatalf("conversion retargeted an existing sibling or reached effects: %v", err)
+	}
+}
+
+func TestModelSettingsApplyConversionInvalidSourceRefusesBeforeEffects(t *testing.T) {
+	h := newModelSettingsHarness(t)
+	before := modelSettingsPresetPolicy(t, h)
+	preset := modelSettingsPresetAnswer(h)
+	h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+		result, failure := preset(method, raw)
+		if method == "engine:preview-launch" && failure == "" {
+			preview, ok := result.(settings.Preview)
+			if !ok {
+				return nil, "fixture expected conversion preview"
+			}
+			for i := range preview.Settings.ModelLoads {
+				if preview.Settings.ModelLoads[i].ProfileKey == "sibling" {
+					preview.Settings.ModelLoads[i].Resolved.ReviewedInputID = "invalid-source"
+				}
+			}
+			return preview, ""
+		}
+		return result, failure
+	})
+	p := h.request(t, false)
+	p.ModelChange.ProfileKey = "edited"
+	journal := h.record(t)
+	_, err := h.b.previewEngineSettings(context.Background(), p, "")
+	if err == nil || err.Error() != "converted profile \"sibling\" has no accepted external source" || h.calls() != 0 || !reflect.DeepEqual(h.record(t), journal) || !reflect.DeepEqual(h.b.localPolicy().Policy, before) {
+		t.Fatalf("invalid conversion source reached effects: %v", err)
+	}
+}
+
+func TestModelSettingsApplyConversionPolicyFailureRetainsFences(t *testing.T) {
+	h := newModelSettingsHarness(t)
+	before := modelSettingsPresetPolicy(t, h)
+	h.engine.setAnswer(modelSettingsPresetAnswer(h))
+	p := h.request(t, false)
+	p.ModelChange.ProfileKey = "edited"
+	p = h.review(t, p, "")
+	setReplacer(h.b, durablefile.Replacer{Replace: func(string, string) error { return errors.New("conversion policy replacement refused") }})
+	receipt, err := h.b.applyEngineSettings(context.Background(), p, "")
+	if err != nil || receipt.Phase != "failed" || h.calls() != 1 || !reflect.DeepEqual(h.b.localPolicy().Policy, before) {
+		t.Fatalf("native-first conversion failure = %+v, %v; configure calls = %d", receipt, err, h.calls())
+	}
+	record := h.record(t)
+	if record.Model.Stage != "native-persisted" || record.Snapshot.EffectiveSettings == nil || !record.Snapshot.EffectiveSettings.Equal(record.Snapshot.Settings) || len(record.Model.NativeBefore.ModelLoads) != 0 {
+		t.Fatal("conversion failure lost accepted source or exact native persistence")
+	}
+	snapshot, err := h.b.getEngineSettings(context.Background(), settings.Request{Engine: "llamacpp"}, "")
+	if err != nil || snapshot.Phase != "applying" || snapshot.Editable || snapshot.UnresolvedError == "" {
+		t.Fatalf("public conversion failure fence = %+v, %v", snapshot, err)
+	}
+	if _, err := h.b.setLocalPolicy(settingsJSON(before), settingsJSON(before.Revision)); policyErrorCode(err) != codePolicyConflict {
+		t.Fatalf("local writer bypassed conversion reservation: %v", err)
+	}
+	if _, err := h.b.setPeerPolicy(settingsJSON(before.PeerProjection()), settingsJSON(before.Revision)); policyErrorCode(err) != codePolicyConflict {
+		t.Fatalf("peer writer bypassed conversion reservation: %v", err)
+	}
+	h.b.engineConfigMu.Lock()
+	withdrawn := h.b.advertisementWithdrawnLocked("llamacpp")
+	h.b.engineConfigMu.Unlock()
+	if !withdrawn {
+		t.Fatal("unresolved conversion released its withdrawal")
+	}
+	setReplacer(h.b, durablefile.Replacer{})
+	h.restartJournal(t)
+	if h.b.recoverEngineSettings() || h.calls() != 1 || !reflect.DeepEqual(h.b.localPolicy().Policy, before) {
+		t.Fatal("failed conversion replayed without fresh local repair")
+	}
+}
+
+func TestModelSettingsRecoveryConversionReplaysAcceptedPolicyFromNativeBaseline(t *testing.T) {
+	h := newModelSettingsHarness(t)
+	before := modelSettingsPresetPolicy(t, h)
+	h.engine.setAnswer(modelSettingsPresetAnswer(h))
+	p := h.request(t, false)
+	p.ModelChange.ProfileKey = "edited"
+	p = h.review(t, p, "")
+	var crash *engineSettingsRecord
+	setReplacer(h.b, durablefile.Replacer{Replace: func(string, string) error {
+		// Capture the exact journal image after native persistence and before
+		// policy publication or the failure handler's reconciliation receipt.
+		crash = h.b.engineSettings["llamacpp"].clone()
+		return errors.New("crash boundary before policy replacement")
+	}})
+	if receipt, err := h.b.applyEngineSettings(context.Background(), p, ""); err != nil || receipt.Phase != "failed" {
+		t.Fatalf("capture conversion crash boundary = %+v, %v", receipt, err)
+	}
+	if crash == nil || crash.Model.Stage != "native-persisted" || crash.Receipts[p.RequestID].Phase != "applying" || len(crash.Model.NativeBefore.ModelLoads) != 0 {
+		t.Fatal("did not capture the replayable native-persisted conversion image")
+	}
+	setReplacer(h.b, durablefile.Replacer{})
+	h.b.engineConfigMu.Lock()
+	h.b.engineSettings["llamacpp"] = crash
+	err := h.b.saveEngineSettingsLocked()
+	h.b.engineConfigMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.restartJournal(t)
+	// Revalidation metadata is deliberately different. Only the durable
+	// accepted identities and NativeBefore may determine policy on replay.
+	h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+		result, failure := h.answer(method, raw)
+		if method == "engine:preview-launch" && failure == "" {
+			preview, ok := result.(settings.Preview)
+			if !ok {
+				return nil, "fixture expected frozen preview"
+			}
+			preview.Identities = nil
+			return preview, ""
+		}
+		return result, failure
+	})
+	if !h.b.recoverEngineSettings() || h.calls() != 1 {
+		t.Fatalf("accepted conversion replay did not settle without another configure; calls = %d", h.calls())
+	}
+	assertModelSettingsConvertedPolicy(t, h, before)
+	after := h.b.localPolicy().Policy
+	if modelPolicyFingerprint(after) != crash.Model.After || !h.b.recoverEngineSettings() || h.b.localPolicy().Policy.Revision != after.Revision || h.calls() != 1 {
+		t.Fatal("conversion replay changed accepted authority or repeated publication")
+	}
+}
+
+// Leave native conversion ahead of policy, then review a fresh selected edit
+// through the public owner. The fake follows the manager's selected-only identity
+// reply and changes whole-engine digests when the selected settings change.
+func reviewModelSettingsConversionRepair(t *testing.T) (*modelSettingsHarness, settings.Request, nodepolicy.Policy) {
+	t.Helper()
+	h := newModelSettingsHarness(t)
+	before := modelSettingsPresetPolicy(t, h)
+	h.engine.setAnswer(modelSettingsPresetAnswer(h))
+	original := h.request(t, false)
+	original.ModelChange.ProfileKey = "edited"
+	original = h.review(t, original, "")
+	setReplacer(h.b, durablefile.Replacer{Replace: func(string, string) error { return errors.New("conversion policy publication refused") }})
+	if receipt, err := h.b.applyEngineSettings(context.Background(), original, ""); err != nil || receipt.Phase != "failed" || h.calls() != 1 {
+		t.Fatalf("failed conversion = %+v, %v; configure calls = %d", receipt, err, h.calls())
+	}
+	setReplacer(h.b, durablefile.Replacer{})
+	h.restartJournal(t)
+	if h.b.recoverEngineSettings() || !reflect.DeepEqual(h.b.localPolicy().Policy, before) {
+		t.Fatal("failed conversion replayed before explicit local supersession")
+	}
+	h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+		result, failure := h.answer(method, raw)
+		if method != "engine:preview-launch" || failure != "" {
+			return result, failure
+		}
+		envelope, err := settings.DecodeWorkerRequest[settings.Request](raw)
+		if err != nil {
+			return nil, err.Error()
+		}
+		preview, ok := result.(settings.Preview)
+		if !ok {
+			return nil, "fixture expected fresh typed review"
+		}
+		for i := range preview.Settings.ModelLoads {
+			preview.Settings.ModelLoads[i].Resolved.SourceInputDigest = strings.Repeat("f", 64)
+			preview.Settings.ModelLoads[i].Resolved.PresetDigest = strings.Repeat("1", 64)
+		}
+		if envelope.Request.ModelChange != nil {
+			selected := modelChangeKey(*envelope.Request.ModelChange)
+			preview.Identities = map[string]engines.ModelIdentity{selected: preview.Identities[selected]}
+		} else {
+			// Frozen validation metadata must never replace accepted identities.
+			preview.Identities = nil
+		}
+		return preview, ""
+	})
+	fresh := h.request(t, false)
+	fresh.ModelChange.ProfileKey = "edited"
+	fresh.ModelChange.SupersedesRequestID = original.RequestID
+	fresh.ModelChange.Load.Set.Context.Tokens = 16384
+	name := "Fresh selected name"
+	fresh.ModelChange.Policy = &modelconfig.PolicyPatch{DisplayName: &name}
+	journal := h.record(t)
+	preview, err := h.b.previewEngineSettings(context.Background(), fresh, "")
+	if err != nil || len(preview.Errors) != 0 || preview.Conflict != nil || preview.PreviewDigest == "" {
+		t.Fatalf("fresh conversion review = %+v, %v", preview, err)
+	}
+	wantSibling := engines.ModelIdentity{GeneralName: "Converted sibling", Architecture: "llama", ConfiguredContextTokens: 12288, Strength: "declared", Files: []engines.ModelIdentityFile{{Role: "model", Name: "sibling.gguf", SizeBytes: 256}}}
+	if !reflect.DeepEqual(preview.Identities["sibling"], wantSibling) || preview.Identities["edited"].ConfiguredContextTokens != 16384 {
+		t.Fatalf("fresh review lost accepted sibling or fresh selected identity: %+v", preview.Identities)
+	}
+	var published struct {
+		Profiles []nodepolicy.Profile `json:"profiles"`
+	}
+	found := false
+	for _, diff := range preview.Diff {
+		if diff.Field == "policy" {
+			if err := json.Unmarshal(diff.After, &published); err != nil {
+				t.Fatal(err)
+			}
+			found = true
+		}
+	}
+	sibling := slices.IndexFunc(published.Profiles, func(profile nodepolicy.Profile) bool { return profile.Key == "sibling" })
+	if !found || sibling < 0 || published.Profiles[sibling].ContextTokens != 12288 || !reflect.DeepEqual(published.Profiles[sibling].ModelIdentity, &wantSibling) {
+		t.Fatalf("fresh policy review omitted accepted sibling facts: %+v", published)
+	}
+	if h.calls() != 1 || !reflect.DeepEqual(journal, h.record(t)) || !reflect.DeepEqual(h.b.localPolicy().Policy, before) {
+		t.Fatal("fresh review mutated native, journal or policy authority")
+	}
+	fresh.ModelChange.PreviewDigest = preview.PreviewDigest
+	before, err = nodepolicy.Parse(settingsJSON(before))
+	if err != nil {
+		t.Fatal(err)
+	}
+	before.Profiles[0].DisplayName = name
+	return h, fresh, before
+}
+
+func TestModelSettingsApplyFreshSupersessionPublishesUnfinishedConversion(t *testing.T) {
+	h, fresh, before := reviewModelSettingsConversionRepair(t)
+	receipt, err := h.b.applyEngineSettings(context.Background(), fresh, "")
+	if err != nil || receipt.Phase != "succeeded" || h.calls() != 2 {
+		t.Fatalf("fresh conversion repair = %+v, %v; configure calls = %d", receipt, err, h.calls())
+	}
+	assertModelSettingsConvertedPolicyContext(t, h, before, 16384)
+	record := h.record(t)
+	if record.Receipts[fresh.ModelChange.SupersedesRequestID].Phase != "superseded" || record.Model.Stage != "completed" || !reflect.DeepEqual(record.Model.ConversionProfiles, []string{"edited", "sibling"}) {
+		t.Fatalf("replacement lost conversion scope or receipt authority: %+v", record)
+	}
+	// A completed conversion's journal is retained, but must grant no authority
+	// to recreate a sibling intentionally omitted by an ordinary policy edit.
+	policy := h.b.localPolicy().Policy
+	policy.Profiles = slices.DeleteFunc(slices.Clone(policy.Profiles), func(profile nodepolicy.Profile) bool { return profile.Key == "sibling" })
+	if _, err := h.b.setLocalPolicy(settingsJSON(policy), settingsJSON(policy.Revision)); err != nil {
+		t.Fatal(err)
+	}
+	ordinary := h.request(t, false)
+	ordinary.ModelChange.ProfileKey = "edited"
+	ordinary.ModelChange.Load.Set.Context.Tokens = 16384
+	ordinary = h.review(t, ordinary, "")
+	if receipt, err := h.b.applyEngineSettings(context.Background(), ordinary, ""); err != nil || receipt.Phase != "succeeded" {
+		t.Fatalf("ordinary post-conversion edit = %+v, %v", receipt, err)
+	}
+	if _, exists := h.b.localPolicy().Policy.ProfileByKey("sibling"); exists || len(h.record(t).Model.ConversionProfiles) != 0 {
+		t.Fatal("ordinary edit inherited completed conversion publication authority")
+	}
+}
+
+func TestModelSettingsRecoveryFreshSupersessionRetainsConversionPublication(t *testing.T) {
+	h, fresh, before := reviewModelSettingsConversionRepair(t)
+	policyBeforeRepair := h.b.localPolicy().Policy
+	var crash *engineSettingsRecord
+	setReplacer(h.b, durablefile.Replacer{Replace: func(string, string) error {
+		crash = h.b.engineSettings["llamacpp"].clone()
+		return errors.New("replacement interrupted before policy publication")
+	}})
+	if receipt, err := h.b.applyEngineSettings(context.Background(), fresh, ""); err != nil || receipt.Phase != "failed" {
+		t.Fatalf("replacement crash boundary = %+v, %v", receipt, err)
+	}
+	if crash == nil || crash.Model.Stage != "native-persisted" || len(crash.Model.NativeBefore.ModelLoads) != 2 || !reflect.DeepEqual(crash.Model.ConversionProfiles, []string{"edited", "sibling"}) || crash.Receipts[fresh.RequestID].Phase != "applying" {
+		t.Fatal("replacement journal lost unfinished publication authority at the typed native boundary")
+	}
+	state, err := h.b.getEngineSettings(context.Background(), settings.Request{Engine: "llamacpp"}, "")
+	if err != nil || state.Phase != "applying" || state.Editable || state.UnresolvedError == "" || !reflect.DeepEqual(h.b.localPolicy().Policy, policyBeforeRepair) {
+		t.Fatalf("replacement publication failure lost native-first fences: %+v, %v", state, err)
+	}
+	setReplacer(h.b, durablefile.Replacer{})
+	h.b.engineConfigMu.Lock()
+	h.b.engineSettings["llamacpp"] = crash
+	err = h.b.saveEngineSettingsLocked()
+	h.b.engineConfigMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.restartJournal(t)
+	if !h.b.recoverEngineSettings() || h.calls() != 2 {
+		t.Fatalf("replacement recovery failed or repeated configure; calls = %d", h.calls())
+	}
+	assertModelSettingsConvertedPolicyContext(t, h, before, 16384)
+	settled := h.record(t)
+	if settled.Model.Stage != "completed" || settled.Receipts[fresh.RequestID].Phase != "succeeded" || settled.Receipts[fresh.ModelChange.SupersedesRequestID].Phase != "superseded" || modelPolicyFingerprint(h.b.localPolicy().Policy) != crash.Model.After {
+		t.Fatal("replacement restart lost accepted policy or receipt authority")
+	}
+}
+
+func TestModelSettingsFreshConversionRemovalPublishesRemainingSibling(t *testing.T) {
+	h, fresh, _ := reviewModelSettingsConversionRepair(t)
+	setReplacer(h.b, durablefile.Replacer{Replace: func(string, string) error { return errors.New("typed conversion publication refused") }})
+	if receipt, err := h.b.applyEngineSettings(context.Background(), fresh, ""); err != nil || receipt.Phase != "failed" || h.calls() != 2 {
+		t.Fatalf("typed conversion failure = %+v, %v", receipt, err)
+	}
+	setReplacer(h.b, durablefile.Replacer{})
+	h.restartJournal(t)
+	h.engine.setAnswer(h.answer)
+	remove := h.removeRequest(t, "edited")
+	remove.ModelChange.SupersedesRequestID = fresh.RequestID
+	remove = h.review(t, remove, "")
+	if receipt, err := h.b.applyEngineSettings(context.Background(), remove, ""); err != nil || receipt.Phase != "succeeded" || h.calls() != 3 {
+		t.Fatalf("conversion removal repair = %+v, %v; configure calls = %d", receipt, err, h.calls())
+	}
+	policy := h.b.localPolicy().Policy
+	if _, exists := policy.ProfileByKey("edited"); exists {
+		t.Fatal("conversion removal recreated the removed profile")
+	}
+	sibling, exists := policy.ProfileByKey("sibling")
+	if !exists || sibling.ContextTokens != 12288 || sibling.ModelIdentity == nil || sibling.ModelIdentity.GeneralName != "Converted sibling" || sibling.ModelIdentity.ConfiguredContextTokens != 12288 {
+		t.Fatalf("conversion removal lost accepted sibling facts: %+v", sibling)
+	}
+	wantRoles := []nodepolicy.Role{{Name: "strong", Profiles: []string{"untouched"}}, {Name: "medium", Profiles: []string{}}, {Name: "weak", Profiles: []string{"untouched"}}}
+	record := h.record(t)
+	if !reflect.DeepEqual(policy.Roles, wantRoles) || !reflect.DeepEqual(record.Model.ConversionProfiles, []string{"sibling"}) || len(record.Snapshot.Settings.ModelLoads) != 1 || record.Snapshot.Settings.ModelLoads[0].ProfileKey != "sibling" || record.Receipts[remove.ModelChange.SupersedesRequestID].Phase != "superseded" {
+		t.Fatal("conversion removal lost ordered role cleanup, remaining scope or superseded receipt")
+	}
+}
+
+func TestModelSettingsFreshConversionRepeatedSupersessionKeepsScope(t *testing.T) {
+	h, fresh, before := reviewModelSettingsConversionRepair(t)
+	setReplacer(h.b, durablefile.Replacer{Replace: func(string, string) error { return errors.New("second conversion publication refused") }})
+	if receipt, err := h.b.applyEngineSettings(context.Background(), fresh, ""); err != nil || receipt.Phase != "failed" || h.calls() != 2 {
+		t.Fatalf("second conversion failure = %+v, %v", receipt, err)
+	}
+	setReplacer(h.b, durablefile.Replacer{})
+	h.restartJournal(t)
+	next := h.request(t, false)
+	next.ModelChange.ProfileKey = "edited"
+	next.ModelChange.SupersedesRequestID = fresh.RequestID
+	next.ModelChange.Load.Set.Context.Tokens = 24576
+	name := "Second repair name"
+	next.ModelChange.Policy = &modelconfig.PolicyPatch{DisplayName: &name}
+	next = h.review(t, next, "")
+	if receipt, err := h.b.applyEngineSettings(context.Background(), next, ""); err != nil || receipt.Phase != "succeeded" || h.calls() != 3 {
+		t.Fatalf("repeated conversion repair = %+v, %v", receipt, err)
+	}
+	before.Profiles[0].DisplayName = name
+	assertModelSettingsConvertedPolicyContext(t, h, before, 24576)
+	record := h.record(t)
+	if !reflect.DeepEqual(record.Model.ConversionProfiles, []string{"edited", "sibling"}) || record.Receipts[fresh.RequestID].Phase != "superseded" || record.Receipts[fresh.ModelChange.SupersedesRequestID].Phase != "superseded" || record.Receipts[next.RequestID].Phase != "succeeded" {
+		t.Fatal("repeated conversion repair lost scope or receipt chain")
+	}
+}
+
+func TestModelSettingsFreshConversionCorruptScopeRefusesRepair(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*modelSettingsOperation)
+	}{
+		{"empty", func(op *modelSettingsOperation) { op.ConversionProfiles = nil }},
+		{"partial", func(op *modelSettingsOperation) { op.ConversionProfiles = []string{"edited"} }},
+		{"duplicate", func(op *modelSettingsOperation) { op.ConversionProfiles = []string{"edited", "edited"} }},
+		{"missing load", func(op *modelSettingsOperation) { op.ConversionProfiles = []string{"absent"} }},
+		{"missing identity", func(op *modelSettingsOperation) { delete(op.Review.Identities, "sibling") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, fresh, _ := reviewModelSettingsConversionRepair(t)
+			policyBefore := h.b.localPolicy().Policy
+			h.mu.Lock()
+			nativeBefore := settings.ConfigFromLaunch(h.launch, 18081)
+			h.mu.Unlock()
+			h.b.engineConfigMu.Lock()
+			tc.mutate(h.b.engineSettings["llamacpp"].Model)
+			err := h.b.saveEngineSettingsLocked()
+			h.b.engineConfigMu.Unlock()
+			if err != nil {
+				t.Fatal(err)
+			}
+			h.restartJournal(t)
+			_, err = h.b.getEngineSettings(context.Background(), settings.Request{Engine: "llamacpp"}, "")
+			if err == nil {
+				fresh.ModelChange.PreviewDigest = ""
+				_, err = h.b.previewEngineSettings(context.Background(), fresh, "")
+			}
+			if err == nil {
+				t.Fatal("corrupt conversion publication authority permitted fresh repair")
+			}
+			if h.calls() != 1 || !reflect.DeepEqual(h.b.localPolicy().Policy, policyBefore) {
+				t.Fatal("corrupt conversion scope changed native or policy authority")
+			}
+			h.mu.Lock()
+			nativeAfter := settings.ConfigFromLaunch(h.launch, 18081)
+			h.mu.Unlock()
+			if !nativeAfter.Equal(nativeBefore) {
+				t.Fatal("corrupt conversion scope changed native settings")
+			}
+		})
+	}
+}
+
+func TestModelSettingsFreshConversionSiblingDriftRefusesBeforeEffects(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*modelconfig.ModelLoad)
+	}{
+		{"accepted artifact", func(load *modelconfig.ModelLoad) { load.Resolved.Artifacts[0].SampleSHA256 = strings.Repeat("9", 64) }},
+		{"accepted allocation", func(load *modelconfig.ModelLoad) {
+			load.Requested.Context = &modelconfig.Context{Mode: "fixed", Tokens: 6144}
+			load.Resolved.PerSlotContext, load.Resolved.TotalContext = 6144, 12288
+			load.Resolved.Options = load.Requested.Clone()
+		}},
+		{"accepted native build", func(load *modelconfig.ModelLoad) { load.Resolved.NativeBuildID = "replacement-build" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, fresh, _ := reviewModelSettingsConversionRepair(t)
+			journal, policy := h.record(t), h.b.localPolicy().Policy
+			h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+				result, failure := h.answer(method, raw)
+				if method != "engine:preview-launch" || failure != "" {
+					return result, failure
+				}
+				preview, ok := result.(settings.Preview)
+				if !ok {
+					return nil, "fixture expected sibling drift preview"
+				}
+				for i := range preview.Settings.ModelLoads {
+					if preview.Settings.ModelLoads[i].ProfileKey == "sibling" {
+						tc.mutate(&preview.Settings.ModelLoads[i])
+					}
+				}
+				return preview, ""
+			})
+			fresh.ModelChange.PreviewDigest = ""
+			_, err := h.b.previewEngineSettings(context.Background(), fresh, "")
+			if err == nil || engineSettingsErrorCode(err) != codePolicyConflict || !strings.Contains(err.Error(), "unfinished conversion sibling changed") {
+				t.Fatalf("changed accepted sibling review = %v", err)
+			}
+			if h.calls() != 1 || !reflect.DeepEqual(journal, h.record(t)) || !reflect.DeepEqual(policy, h.b.localPolicy().Policy) {
+				t.Fatal("refused sibling drift changed native, journal or policy authority")
+			}
+		})
+	}
+}
+
 func TestModelSettingsApplyPreviewRemainsReadableDuringPause(t *testing.T) {
 	h := newModelSettingsHarness(t)
 	peer := "peer"

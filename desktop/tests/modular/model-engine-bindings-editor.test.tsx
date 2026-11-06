@@ -29,7 +29,6 @@ import { useNodesStore } from '@/ui/stores/nodes.store'
 
 vi.mock('@/ui/components/RoutingSettings/RoleEditor', () => ({ default: () => null }))
 vi.mock('@/ui/components/NodeList/NodeEngineSettings', () => ({ default: () => null }))
-vi.mock('@/ui/components/RoutingSettings/BulkNodeConfiguration', () => ({ default: () => null }))
 vi.mock('@/ui/components/RoutingSettings/RoutingHistory', () => ({ default: () => null }))
 
 const BASE = '9007199254740993'
@@ -95,7 +94,14 @@ function documentFor(
                 servedModels: null,
                 residentModels: [],
                 roles: [{ name: 'weak', profiles: ['role-model'] }],
-                profiles: [{ key: 'role-model', displayName: 'Role model', engine: 'llamacpp', model: 'role-model' }],
+                profiles: [
+                    {
+                        key: 'role-model',
+                        displayName: 'Role model',
+                        engine: 'llamacpp',
+                        model: 'role-model'
+                    }
+                ],
                 routing: { accounts: [{ id: 'private-account' }], tiers: { private: true } },
                 futureField: { enabled: false, values: ['retain', null, 0] },
                 ...extra
@@ -515,7 +521,9 @@ describe('model engine bindings in the shared policy form', () => {
     })
 
     it('shows an unknown save outcome after a lost reply and failed readback without retrying or discarding the draft', async () => {
-        await mount(documentFor(BASE, { engineBindings: [{ engine: 'llamacpp', model: 'before' }] }))
+        await mount(
+            documentFor(BASE, { engineBindings: [{ engine: 'llamacpp', model: 'before' }] })
+        )
         await type(modelInput(), 'unsure-native')
         const sent = policyEditor().value
         setPolicy.mockRejectedValueOnce(new Error('Save reply lost'))
@@ -531,7 +539,9 @@ describe('model engine bindings in the shared policy form', () => {
     })
 
     it('retains a dirty binding across a newer push and uses its original CAS base, then exposes conflict readback', async () => {
-        await mount(documentFor(BASE, { engineBindings: [{ engine: 'llamacpp', model: 'before' }] }))
+        await mount(
+            documentFor(BASE, { engineBindings: [{ engine: 'llamacpp', model: 'before' }] })
+        )
         await type(modelInput(), 'unsent-native')
         const sent = policyEditor().value
         const latest = documentFor(NEXT, {

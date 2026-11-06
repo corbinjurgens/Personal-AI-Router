@@ -68,7 +68,8 @@ it('shows requested Auto constraints beside the finite target proposal', () => {
 describe('mounted Auto editor', () => {
     const target: EngineSettingsTarget = { nodeId: 'self', engine: 'llamacpp' }
     const key = modelSettingsKey(target, 'model')
-    const policy = '{"profiles":[{"name":"test","engine":"llamacpp","model":"model"}]}'
+    const policy =
+        '{"profiles":[{"key":"model","displayName":"test","engine":"llamacpp","model":"model"}]}'
     const saved: EngineSettingsSnapshot = {
         ...target,
         revision: 1,
@@ -173,6 +174,7 @@ describe('mounted Auto editor', () => {
                 <ModelLoadSettings
                     target={target}
                     modelId={modelId}
+                    profileKey={modelId}
                     policy={policy}
                     savedPolicy={policy}
                     policyRevision="7"

@@ -24,7 +24,7 @@ import { useNodeConfigurationStore } from '@/ui/stores/node-configuration.store'
 const target = { nodeId: 'self', engine: 'llamacpp' } satisfies EngineSettingsTarget
 const identity = { engine: 'llamacpp', model: 'model' }
 const policy =
-    '{"revision":"7","profiles":[{"name":"test","engine":"llamacpp","model":"model","localOnly":true}]}'
+    '{"revision":"7","profiles":[{"key":"model","displayName":"test","engine":"llamacpp","model":"model","localOnly":true}]}'
 const snapshot: EngineSettingsSnapshot = {
     ...target,
     revision: 3,
@@ -207,6 +207,7 @@ async function render(disabled = false, draft = policy, authority = 'current') {
             <ModelLoadSettings
                 target={target}
                 modelId={identity.model}
+                profileKey="model"
                 policy={draft}
                 savedPolicy={policy}
                 policyRevision="7"
@@ -264,6 +265,72 @@ function savedLoad(requested: RequestedLoad) {
 }
 
 describe('load editor and target impact', () => {
+    it('sends explicit removal without a load or policy patch', async () => {
+        useEngineSettingsStore.getState().editModel(modelSettingsKey(target, 'model'), {
+            modelId: 'model',
+            profileKey: 'model',
+            expectedPolicyRevision: '7',
+            remove: true
+        })
+        await render()
+        await click('Preview model changes')
+        expect(review.mock.lastCall?.[0].modelChange).toEqual({
+            modelId: 'model',
+            profileKey: 'model',
+            expectedPolicyRevision: '7',
+            remove: true
+        })
+        expect(window.pairApi.nodePolicy.set).not.toHaveBeenCalled()
+    })
+
+    it('inspects and edits a sibling by key while keeping the shared artifact model id', async () => {
+        read.mockResolvedValue({
+            ...snapshot,
+            settings: {
+                ...snapshot.settings,
+                modelLoads: [
+                    { profileKey: 'small', modelId: 'model', requested: { slots: 1 } },
+                    { profileKey: 'large', modelId: 'model', requested: { slots: 5 } }
+                ]
+            }
+        })
+        const siblings =
+            '{"profiles":[{"key":"small","displayName":"Small","engine":"llamacpp","model":"small"},{"key":"large","displayName":"Large","engine":"llamacpp","model":"large"}]}'
+        await act(async () =>
+            root.render(
+                <ModelLoadSettings
+                    target={target}
+                    modelId="model"
+                    profileKey="large"
+                    policy={siblings}
+                    savedPolicy={siblings}
+                    policyRevision="7"
+                    authority="current"
+                    disabled={false}
+                />
+            )
+        )
+        expect(inspect).toHaveBeenCalledWith({
+            nodeId: 'self',
+            engine: 'llamacpp',
+            modelId: 'model',
+            profileKey: 'large'
+        })
+        expect(document.querySelector<HTMLInputElement>('input[aria-label="Slots"]')?.value).toBe(
+            '5'
+        )
+        await input('Slots', '6')
+        await click('Preview model changes')
+        expect(review.mock.lastCall?.[0].modelChange).toMatchObject({
+            profileKey: 'large',
+            modelId: 'model',
+            load: { set: { slots: 6 } }
+        })
+        expect(
+            useEngineSettingsStore.getState().modelDrafts[modelSettingsKey(target, 'small')]
+        ).toBeUndefined()
+    })
+
     it.each([
         { label: 'Fit target', value: '1024', set: { fitTarget: '1024' } },
         { label: 'Fit context', value: '8192', set: { fitCtx: 8192 } }
@@ -287,6 +354,7 @@ describe('load editor and target impact', () => {
                 },
                 modelChange: {
                     modelId: 'model',
+                    profileKey: 'model',
                     expectedPolicyRevision: '7',
                     load: { set, clear: [] }
                 }
@@ -515,7 +583,13 @@ describe('load editor and target impact', () => {
             serving: { status: 'configured' }
         }
         await act(async () =>
-            root.render(<ModelSettingsPreview inspection={inspection} snapshot={reported} />)
+            root.render(
+                <ModelSettingsPreview
+                    profileKey="model"
+                    inspection={inspection}
+                    snapshot={reported}
+                />
+            )
         )
         expect(container.textContent).toContain('Desired load preferences: {"slots":2}')
         expect(container.textContent).toContain('Applied load preferences: {"slots":1}')
@@ -523,6 +597,7 @@ describe('load editor and target impact', () => {
         await act(async () =>
             root.render(
                 <ModelSettingsPreview
+                    profileKey="model"
                     inspection={inspection}
                     snapshot={{
                         ...reported,
@@ -735,6 +810,7 @@ describe('load editor and target impact', () => {
         await act(async () =>
             root.render(
                 <ModelSettingsPreview
+                    profileKey="model"
                     inspection={{ ...inspection, artifacts }}
                     preview={{ ...preview, impact: { restartScope: 'whole-router' } }}
                     snapshot={snapshot}

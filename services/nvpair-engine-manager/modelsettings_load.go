@@ -1350,7 +1350,7 @@ func (e *Executor) previewModelLoadChange(ctx context.Context, st *engineState, 
 	}
 	result.Identities = map[string]engines.ModelIdentity{}
 	for _, load := range prepared.ModelLoads {
-		if load.ProfileKey != profileKey {
+		if conversionDigest == "" && load.ProfileKey != profileKey {
 			continue
 		}
 		list, exists := prepared.evidence.typed.models[load.ProfileKey]

@@ -258,7 +258,7 @@ it('clears pending engine row state when a mounted page focuses another node', a
     expect(container.textContent).not.toContain('Pending engine action')
 })
 
-it('shows bulk configuration and routing history only on Cluster', async () => {
+it('keeps routing history on Cluster and node settings on the selected node page', async () => {
     useOverviewUiStore.getState().focusNodeSettings('peer')
     await act(async () => root.render(<Settings />))
     expect(container.textContent).not.toContain('Configure several nodes')
@@ -269,7 +269,9 @@ it('shows bulk configuration and routing history only on Cluster', async () => {
     if (!cluster) throw new Error('Missing Cluster navigation')
     await act(async () => cluster.click())
     expect(useOverviewUiStore.getState().settingsSubTab).toBe('cluster')
-    expect(container.textContent).toContain('Configure several nodes')
+    expect(container.textContent).not.toContain('Configure several nodes')
     expect(container.textContent).toContain('Routing history')
     expect(container.textContent).not.toContain('Settings for Peer B')
+    expect(container.textContent).not.toContain('Engine target peer')
+    expect(container.textContent).not.toContain('Engine target local')
 })

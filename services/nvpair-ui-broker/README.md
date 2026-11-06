@@ -61,6 +61,34 @@ provides the policy context bound. Qualification and memory bounds are preserved
 Native fit can realize a smaller context than requested; installed native-fit
 context agreement remains unverified (N7).
 
+A descriptor-only profile can gain its first typed load for the same engine and
+artifact. Its served model becomes the profile key while its display metadata,
+request options and other saved fields remain. A different engine or artifact
+still refuses the change. Normal merged policy validation and reference checks
+remain in force.
+
+When the first typed edit converts an external llama.cpp preset, every converted
+load also gets a policy profile. Missing profiles use the original section key
+for `key`, `displayName` and the typed served `model`. Existing profiles retain
+their display name, icon, request options, qualification and other user fields;
+only accepted identities and resolved per-slot contexts are derived. Conversion
+preserves role declarations and membership order, including empty roles. An
+explicit membership patch still changes only the selected profile's membership.
+The broker initially captures conversion publication scope only when the native
+baseline has no typed loads and accepted loads carry external-conversion
+provenance, including a source-bound Auto selection. Multiple loads alone,
+or provenance retained by an already-typed engine, do not create sibling profiles.
+Recovery uses the journal's explicit conversion scope and accepted preview,
+including each converted identity, rather than metadata from revalidation.
+An unfinished conversion also retains its explicit profile publication scope
+through fresh local supersession. Unchanged siblings keep their accepted artifact
+identities and allocation facts, while the selected profile uses the fresh review.
+The replacement journal retains that scope for restart recovery, even when native
+readback already contains typed loads. Completed conversions grant no such scope
+to later ordinary edits. Fresh worker validation and native/policy revision fences
+still apply; supersession does not regenerate sibling metadata from telemetry.
+An incomplete or invalid stored conversion scope refuses repair and replay.
+
 Every accepted model change reserves policy through the existing settings
 journal. Native load changes and typed removals persist before policy publication.
 Removal deletes the selected profile and its role memberships, retaining empty
@@ -74,7 +102,10 @@ append a key once or remove only that key; selecting an undeclared role refuses
 before writes with `Role <name> is not declared on this node; create it in node settings.`
 Recovery uses the same accepted preview for derived metadata and the same
 before/after policy fingerprints, preserving native-first ordering and refusing
-third content. Policy-only edits perform no native configure or drain.
+third content. If policy publication fails after native persistence, settings
+remain applying, uneditable and unresolved, with ordinary policy writes fenced;
+there is no atomic rollback of the native conversion. Policy-only edits perform
+no native configure or drain.
 
 ## Local build maintenance contract
 

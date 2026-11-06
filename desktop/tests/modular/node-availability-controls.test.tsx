@@ -33,7 +33,6 @@ vi.mock('@/ui/components/NodeList/NodeEngineSettings', () => ({ default: () => n
 vi.mock('@/ui/components/NodeList/NodeDeclaredRoles', () => ({ default: () => null }))
 vi.mock('@/ui/components/NodeList/NodePerformance', () => ({ default: () => null }))
 vi.mock('@/ui/components/RoutingSettings/RoleEditor', () => ({ default: () => null }))
-vi.mock('@/ui/components/RoutingSettings/BulkNodeConfiguration', () => ({ default: () => null }))
 vi.mock('@/ui/components/RoutingSettings/ModelEngineBindingsEditor', () => ({
     default: () => null
 }))

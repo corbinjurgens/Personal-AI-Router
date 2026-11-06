@@ -499,7 +499,68 @@ func TestModelLoadPreviewUsesSelectedProfileIdentity(t *testing.T) {
 		})
 	}
 	test("existing profile has its own context", "lfm-8k", 8192, false)
+	test("existing sibling has its own context", "lfm-32k", 32768, false)
 	test("missing sibling uses artifact selector", "lfm-32k", 32768, true)
+}
+
+func TestModelLoadCreatesInheritedProfileWithoutBorrowingSibling(t *testing.T) {
+	f, rt := twoProfileModelLoadFixture(t)
+	f.st.plat.Runtime = rt
+	before := modelconfig.CloneLoads(rt.ModelLoads)
+	request := settingsRequest(t, f.ex)
+	request.ModelChange = &modelconfig.ModelChange{ProfileKey: "lfm-inherited", ModelID: "medium-model", ExpectedPolicyRevision: "0", Load: &modelconfig.LoadPatch{Clear: []string{"context"}}}
+	preview, err := f.ex.PreviewLaunch(request)
+	if err != nil || len(preview.Errors) != 0 {
+		t.Fatalf("inherited profile preview errors=%v, err=%v", preview.Errors, err)
+	}
+	index := slices.IndexFunc(preview.Settings.ModelLoads, func(load modelconfig.ModelLoad) bool { return load.ProfileKey == "lfm-inherited" })
+	if index < 0 {
+		t.Fatal("inherited profile was not compiled")
+	}
+	load := preview.Settings.ModelLoads[index]
+	if len(preview.Settings.ModelLoads) != 3 || load.ModelID != "medium-model" || load.Requested.Context != nil || load.Requested.Slots != nil || load.Resolved == nil || load.Resolved.PerSlotContext != 8192 || load.Resolved.Slots != 1 || preview.Identities["lfm-inherited"].ConfiguredContextTokens != 8192 {
+		t.Fatalf("new profile did not inherit canonical defaults: %+v", load)
+	}
+	if !modelconfig.EqualLoads(before, f.st.plat.Runtime.ModelLoads) {
+		t.Fatal("inherited preview persisted changes")
+	}
+}
+
+func TestModelLoadConversionPreviewIncludesEveryProfileIdentity(t *testing.T) {
+	f := newModelLoadFixture(t)
+	preview := previewModelLoadFixture(t, f, "weak-model", modelconfig.LoadPatch{Set: modelconfig.RequestedLoad{Context: &modelconfig.Context{Mode: "fixed", Tokens: 6144}}})
+	if !slices.Equal(sortedKeys(preview.Identities), []string{"medium-model", "weak-model"}) {
+		t.Fatalf("converted identities = %+v", preview.Identities)
+	}
+	if len(preview.Settings.ModelLoads) != 2 {
+		t.Fatalf("converted loads = %+v", preview.Settings.ModelLoads)
+	}
+	for _, want := range []struct {
+		key, file string
+		context   int64
+	}{
+		{"medium-model", "medium.gguf", 8192},
+		{"weak-model", "weak.gguf", 6144},
+	} {
+		t.Run(want.key, func(t *testing.T) {
+			identity := preview.Identities[want.key]
+			if identity.ConfiguredContextTokens != want.context || len(identity.Files) != 1 || identity.Files[0].Role != "model" || identity.Files[0].Name != want.file {
+				t.Fatalf("converted identity = %+v, want file %s and context %d", identity, want.file, want.context)
+			}
+			index := slices.IndexFunc(preview.Settings.ModelLoads, func(load modelconfig.ModelLoad) bool { return load.ProfileKey == want.key })
+			if index < 0 {
+				t.Fatal("converted profile missing")
+			}
+			load := preview.Settings.ModelLoads[index]
+			if load.ModelID != want.key || load.Resolved == nil || int64(load.Resolved.PerSlotContext) != want.context {
+				t.Fatalf("converted load = %+v", load)
+			}
+		})
+	}
+	if len(f.st.plat.Runtime.ModelLoads) != 0 {
+		t.Fatal("conversion preview persisted typed loads")
+	}
+	assertNoSettingsOverride(t, f.ex)
 }
 
 func TestTypedLlamaNativeFit(t *testing.T) {

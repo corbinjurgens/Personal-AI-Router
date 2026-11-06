@@ -9,6 +9,7 @@ import { createRoot } from 'react-dom/client'
 import {
     useEngineSettingsStore,
     engineSettingsKey,
+    modelSettingsKey,
     watchEngineSettings
 } from '@/ui/stores/engine-settings.store'
 import { usePendingActionsStore } from '@/ui/stores/pending-actions.store'
@@ -18,6 +19,8 @@ import type {
     EngineServingConfig
 } from '@/shared/types/engine-settings'
 import type { IEngineApi } from '@/ui/api/engine-api'
+import type { InspectModelResult, ModelChange } from '@/shared/types/model-config'
+import { useNodeConfigurationStore } from '@/ui/stores/node-configuration.store'
 import { EngineSettingsSection } from '@/ui/components/BackendRow/EngineSettingsSection'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import { redactSensitiveLogText } from '@/electron/redact-log'
@@ -115,6 +118,305 @@ const key = engineSettingsKey(target)
 const store = useEngineSettingsStore
 const getSettings = vi.fn()
 const applySettings = vi.fn()
+
+describe('profile-keyed settings drafts', () => {
+    const inspect = vi.fn<IEngineApi['inspectModel']>()
+    const preview = vi.fn<IEngineApi['previewSettings']>()
+    const get = vi.fn<IEngineApi['getSettings']>()
+    const apply = vi.fn<IEngineApi['applySettings']>()
+    const local = { nodeId: 'local-profile-test', engine: 'llamacpp' } as const
+    const inspection: InspectModelResult = {
+        engine: 'llamacpp',
+        modelId: 'artifact',
+        status: 'resolved',
+        estimate: { status: 'unknown' }
+    }
+    beforeEach(() => {
+        inspect.mockReset().mockResolvedValue(inspection)
+        preview.mockReset().mockResolvedValue({
+            settings: baseline.settings,
+            revision: 1,
+            policyRevision: '7',
+            errors: {},
+            restart: false,
+            rebind: false,
+            previewDigest: 'a'.repeat(64)
+        })
+        get.mockReset().mockResolvedValue({
+            ...baseline,
+            ...local,
+            policyRevision: '7',
+            settings: {
+                ...baseline.settings,
+                modelLoads: [
+                    {
+                        profileKey: 'small',
+                        modelId: 'artifact',
+                        requested: { context: { mode: 'auto', floor: 4096 } }
+                    }
+                ]
+            }
+        })
+        apply.mockReset().mockResolvedValue({ phase: 'applying', revision: 1 })
+        Object.defineProperty(window, 'pairApi', {
+            configurable: true,
+            value: {
+                engines: {
+                    inspectModel: inspect,
+                    previewSettings: preview,
+                    getSettings: get,
+                    applySettings: apply
+                },
+                nodePolicy: {
+                    get: vi.fn().mockResolvedValue({
+                        policy: '{}',
+                        revision: '7',
+                        availability: 'available'
+                    })
+                }
+            }
+        })
+        store.setState({ entries: {}, modelDrafts: {} })
+        useConnectionStore.setState({ connected: true, selfId: local.nodeId })
+        useNodeConfigurationStore.setState({ policyDrafts: new Map(), management: new Map() })
+    })
+    it('keeps optional inspection identities and draft caches separate', async () => {
+        await store.getState().inspectModel(local, 'artifact', 'small')
+        await store.getState().inspectModel(local, 'artifact', 'large')
+        await store.getState().inspectModel(local, 'artifact')
+        expect(inspect.mock.calls).toEqual([
+            [{ ...local, modelId: 'artifact', profileKey: 'small' }],
+            [{ ...local, modelId: 'artifact', profileKey: 'large' }],
+            [{ ...local, modelId: 'artifact' }]
+        ])
+        expect(Object.keys(store.getState().modelDrafts)).toEqual([
+            'local-profile-test:llamacpp:small',
+            'local-profile-test:llamacpp:large',
+            'local-profile-test:llamacpp:'
+        ])
+        store.getState().editModel(modelSettingsKey(local, 'large'), {
+            modelId: 'artifact',
+            profileKey: 'large',
+            expectedPolicyRevision: '7',
+            policy: { displayName: 'Large' }
+        })
+        expect(
+            store.getState().modelDrafts[modelSettingsKey(local, 'small')].change
+        ).toBeUndefined()
+        expect(store.getState().modelDrafts[modelSettingsKey(local)].change).toBeUndefined()
+    })
+    it.each([
+        { name: 'new profile', policy: '{}' },
+        {
+            name: 'untyped profile',
+            policy: JSON.stringify({
+                profiles: [
+                    {
+                        key: 'fresh-profile',
+                        displayName: 'Fresh',
+                        engine: 'llamacpp',
+                        model: 'artifact'
+                    }
+                ]
+            })
+        }
+    ])(
+        'inspects $name artifacts without an absent saved-key selector in review and apply',
+        async ({ policy }) => {
+            vi.mocked(window.pairApi.nodePolicy.get).mockResolvedValue({
+                policy,
+                revision: '7',
+                activation: null,
+                availability: 'available',
+                recoveryRequired: false
+            })
+            inspect.mockImplementation(async request => {
+                if (request.profileKey !== undefined) throw new Error('Profile key is not saved')
+                return inspection
+            })
+            const change: ModelChange = {
+                modelId: 'artifact',
+                profileKey: 'fresh-profile',
+                expectedPolicyRevision: '7',
+                load: { set: { slots: 2 } },
+                policy: { displayName: 'Fresh' }
+            }
+            await store.getState().reload(local)
+            await store.getState().previewModel(local, change, 'new-profile-review')
+            const draftKey = modelSettingsKey(local, 'fresh-profile')
+            expect(store.getState().modelDrafts[draftKey].review?.request.modelChange).toEqual({
+                ...change,
+                previewDigest: 'a'.repeat(64)
+            })
+            await store.getState().applyModel(draftKey, 'new-profile-review')
+            expect(inspect).toHaveBeenNthCalledWith(1, { ...local, modelId: 'artifact' })
+            expect(inspect).toHaveBeenNthCalledWith(2, { ...local, modelId: 'artifact' })
+            expect(apply).toHaveBeenCalledTimes(1)
+            expect(apply.mock.calls[0][0].modelChange).toMatchObject(change)
+            expect(store.getState().modelDrafts[modelSettingsKey(local)]).toBeUndefined()
+        }
+    )
+
+    it('does not inherit a sibling Auto load when reviewing another key', async () => {
+        const change: ModelChange = {
+            modelId: 'artifact',
+            profileKey: 'large',
+            expectedPolicyRevision: '7',
+            load: { set: { slots: 2 } }
+        }
+        await store.getState().reload(local)
+        await store.getState().previewModel(local, change, 'review-large')
+        expect(inspect).toHaveBeenCalledExactlyOnceWith({
+            ...local,
+            modelId: 'artifact'
+        })
+        expect(
+            store.getState().modelDrafts[modelSettingsKey(local, 'large')].review?.request
+                .modelChange
+        ).toEqual({ ...change, previewDigest: 'a'.repeat(64) })
+        expect(store.getState().modelDrafts[modelSettingsKey(local, 'small')]).toBeUndefined()
+    })
+    it('applies and reconciles only the selected profile after a lost reply', async () => {
+        get.mockResolvedValue({
+            ...baseline,
+            ...local,
+            policyRevision: '7',
+            settings: {
+                ...baseline.settings,
+                modelLoads: [
+                    {
+                        profileKey: 'small',
+                        modelId: 'artifact',
+                        requested: { context: { mode: 'auto', floor: 4096 } }
+                    },
+                    {
+                        profileKey: 'large',
+                        modelId: 'artifact',
+                        requested: { context: { mode: 'fixed', tokens: 8192 } }
+                    }
+                ]
+            }
+        })
+        await store.getState().reload(local)
+        const sibling: ModelChange = {
+            modelId: 'artifact',
+            profileKey: 'small',
+            expectedPolicyRevision: '7',
+            policy: { displayName: 'Small revised' }
+        }
+        store.getState().editModel(modelSettingsKey(local, 'small'), sibling)
+        const change: ModelChange = {
+            modelId: 'artifact',
+            profileKey: 'large',
+            expectedPolicyRevision: '7',
+            policy: { displayName: 'Large revised', icon: 'code' }
+        }
+        await store.getState().previewModel(local, change, 'review-large')
+        apply.mockImplementationOnce(async request => {
+            if (!request.requestId) throw new Error('Missing apply request ID')
+            get.mockResolvedValue({
+                ...baseline,
+                ...local,
+                sequence: 2,
+                policyRevision: '8',
+                phase: 'succeeded',
+                requestId: request.requestId
+            })
+            throw new Error('Lost reply')
+        })
+        await store.getState().applyModel(modelSettingsKey(local, 'large'), 'review-large')
+        expect(apply).toHaveBeenCalledTimes(1)
+        expect(apply.mock.calls[0]?.[0].modelChange).toEqual({
+            ...change,
+            previewDigest: 'a'.repeat(64)
+        })
+        expect(inspect.mock.calls).toEqual([
+            [{ ...local, modelId: 'artifact', profileKey: 'large' }],
+            [{ ...local, modelId: 'artifact', profileKey: 'large' }]
+        ])
+        expect(store.getState().modelDrafts[modelSettingsKey(local, 'large')]).toMatchObject({
+            change: undefined,
+            uncertain: false
+        })
+        expect(store.getState().modelDrafts[modelSettingsKey(local, 'small')].change).toEqual(
+            sibling
+        )
+    })
+    it('refuses apply when a fresh saved-load read changes the reviewed baseline', async () => {
+        const change: ModelChange = {
+            modelId: 'artifact',
+            profileKey: 'large',
+            expectedPolicyRevision: '7',
+            load: { set: { slots: 2 } }
+        }
+        await store.getState().reload(local)
+        await store.getState().previewModel(local, change, 'review-large')
+        const draftKey = modelSettingsKey(local, 'large')
+        expect(store.getState().modelDrafts[draftKey].review).toBeDefined()
+        get.mockResolvedValue({
+            ...baseline,
+            ...local,
+            sequence: 2,
+            revision: 2,
+            policyRevision: '7',
+            settings: {
+                ...baseline.settings,
+                modelLoads: [{ profileKey: 'large', modelId: 'artifact', requested: { slots: 4 } }]
+            }
+        })
+        await store.getState().applyModel(draftKey, 'review-large')
+        expect(inspect).toHaveBeenCalledExactlyOnceWith({ ...local, modelId: 'artifact' })
+        expect(apply).not.toHaveBeenCalled()
+        expect(store.getState().modelDrafts[draftKey]).toMatchObject({
+            change,
+            review: undefined,
+            message: 'Preview expired. Your draft is kept.'
+        })
+    })
+    it('keeps the keyed draft without dispatch when the apply refresh is unavailable', async () => {
+        const change: ModelChange = {
+            modelId: 'artifact',
+            profileKey: 'large',
+            expectedPolicyRevision: '7',
+            load: { set: { slots: 2 } }
+        }
+        await store.getState().reload(local)
+        await store.getState().previewModel(local, change, 'review-large')
+        const draftKey = modelSettingsKey(local, 'large')
+        expect(store.getState().modelDrafts[draftKey].review).toBeDefined()
+        get.mockRejectedValueOnce(new Error('Device offline'))
+        await store.getState().applyModel(draftKey, 'review-large')
+        expect(inspect).toHaveBeenCalledExactlyOnceWith({ ...local, modelId: 'artifact' })
+        expect(apply).not.toHaveBeenCalled()
+        expect(store.getState().modelDrafts[draftKey]).toMatchObject({
+            change,
+            review: undefined,
+            message: 'Preview expired. Your draft is kept.'
+        })
+        expect(store.getState().entries[engineSettingsKey(local)].unavailable).toContain(
+            'Device offline'
+        )
+    })
+    it('retains newer inspection results when an older same-key read arrives', async () => {
+        let finish: ((value: InspectModelResult) => void) | undefined
+        inspect.mockImplementationOnce(
+            () =>
+                new Promise(resolve => {
+                    finish = resolve
+                })
+        )
+        const old = store.getState().inspectModel(local, 'artifact', 'large')
+        inspect.mockResolvedValueOnce({ ...inspection, configurationKey: 'new-configuration' })
+        await store.getState().inspectModel(local, 'artifact', 'large')
+        if (!finish) throw new Error('Missing delayed inspection')
+        finish({ ...inspection, configurationKey: 'old-configuration' })
+        await old
+        expect(
+            store.getState().modelDrafts[modelSettingsKey(local, 'large')].inspection
+                ?.configurationKey
+        ).toBe('new-configuration')
+    })
+})
 
 describe('running native build status', () => {
     const buildInfo = 'b12345-test-build'

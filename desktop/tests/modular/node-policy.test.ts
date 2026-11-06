@@ -34,11 +34,15 @@ import type {
 } from '@/shared/types/node-policy'
 import { workloadCancelRequest } from '@/shared/utils/workloads'
 import { parsePolicyAdvertisement, samePolicyAdvertisement } from '@/shared/utils/node-roles'
-import type { IClusterApi, INodePolicyApi } from '@/ui/api/pair-api'
+import { createPairApi, type IClusterApi, type INodePolicyApi } from '@/ui/api/pair-api'
+import type { IEngineApi } from '@/ui/api/engine-api'
+import type { EngineSettingsSnapshot } from '@/shared/types/engine-settings'
+import type { ServiceTransport } from '@/shared/types/service-bridge'
 import RoutingSettings from '@/ui/components/RoutingSettings/RoutingSettings'
 import { useNodeConfigurationStore, withRoles } from '@/ui/stores/node-configuration.store'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import { useOverviewUiStore } from '@/ui/stores/overview-ui.store'
+import { useEngineSettingsStore } from '@/ui/stores/engine-settings.store'
 import { workloadModelLabel } from '@/ui/utils/workload-labels'
 import type { JsonObject, JsonValue } from '@/electron/service-bridge/json-rpc-client'
 
@@ -270,7 +274,9 @@ describe('served/resident policy contract', () => {
 
     it('documents the raw duplicate-key boundary', () => {
         expect(
-            parsePolicyText('{"servedModels":[{"engine":"llamacpp","model":"m"}],"servedModels":[]}')
+            parsePolicyText(
+                '{"servedModels":[{"engine":"llamacpp","model":"m"}],"servedModels":[]}'
+            )
         ).toEqual({ servedModels: [] })
         expect(() => parsePolicyText('{"servedModels":[],"ServedModels":[]}')).toThrow()
     })
@@ -307,7 +313,11 @@ describe('engine binding policy transport', () => {
         expect(parsePolicyChange(policyEnvelope({ nodeId: 'peer', policy }))?.policy).toBe(
             document.policy
         )
-        expect(parsePolicyText(withRoles(document.policy, [{ name: 'weak', profiles: ['selected-profile'] }]))).toEqual({
+        expect(
+            parsePolicyText(
+                withRoles(document.policy, [{ name: 'weak', profiles: ['selected-profile'] }])
+            )
+        ).toEqual({
             ...policy,
             roles: [{ name: 'weak', profiles: ['selected-profile'] }]
         })
@@ -365,7 +375,7 @@ describe('engine binding policy transport', () => {
         expect(parsePolicyText(JSON.stringify(policy))).toEqual(policy)
     })
 
-    it('preserves each bulk target binding and private fields in the actual writer', async () => {
+    it('preserves each target binding and private fields in the revision-checked role writer', async () => {
         const get = vi.fn<INodePolicyApi['get']>()
         const set = vi.fn<INodePolicyApi['set']>()
         get.mockImplementation(async target =>
@@ -373,8 +383,15 @@ describe('engine binding policy transport', () => {
                 policyEnvelope({
                     policy: {
                         revision: '31',
-                        roles: [],
-                        profiles: [{ key: 'selected-profile', displayName: 'Selected', engine: 'llamacpp', model: `${target}-model` }],
+                        roles: [{ name: 'weak', profiles: [] }],
+                        profiles: [
+                            {
+                                key: 'selected-profile',
+                                displayName: 'Selected',
+                                engine: 'llamacpp',
+                                model: `${target}-model`
+                            }
+                        ],
                         engineBindings: [{ engine: 'llamacpp', model: `${target}-model` }],
                         routing: { accounts: [] }
                     },
@@ -400,20 +417,27 @@ describe('engine binding policy transport', () => {
             }
         })
         useNodeConfigurationStore.setState({ editors: new Map(), management: new Map() })
-        await useNodeConfigurationStore.getState().applyAll(
-            [
-                { targetId: 'one', nodeId: 'one' },
-                { targetId: 'two', nodeId: 'two' }
-            ],
-            [{ name: 'weak', profiles: ['selected-profile'] }]
-        )
+        for (const targetId of ['one', 'two']) {
+            const store = useNodeConfigurationStore.getState()
+            await store.readManagement(targetId, targetId)
+            await store.read(targetId, targetId)
+            store.setDraft(targetId, [{ name: 'weak', profiles: ['selected-profile'] }])
+            await store.save(targetId, targetId)
+        }
         expect(set).toHaveBeenCalledTimes(2)
         for (const [request] of set.mock.calls) {
             expect(request.expectedPersistedRevision).toBe('31')
             expect(parsePolicyText(request.policy)).toEqual({
                 revision: '31',
                 roles: [{ name: 'weak', profiles: ['selected-profile'] }],
-                profiles: [{ key: 'selected-profile', displayName: 'Selected', engine: 'llamacpp', model: `${request.nodeId}-model` }],
+                profiles: [
+                    {
+                        key: 'selected-profile',
+                        displayName: 'Selected',
+                        engine: 'llamacpp',
+                        model: `${request.nodeId}-model`
+                    }
+                ],
                 engineBindings: [{ engine: 'llamacpp', model: `${request.nodeId}-model` }],
                 routing: { accounts: [] }
             })
@@ -1520,16 +1544,21 @@ describe('routing settings editor', () => {
     const get = vi.fn<INodePolicyApi['get']>()
     const set = vi.fn<INodePolicyApi['set']>()
     const setAvailability = vi.fn<INodePolicyApi['setAvailability']>()
+    const getSettings = vi.fn<IEngineApi['getSettings']>()
+    const toggleEngine = vi.fn<IEngineApi['toggle']>()
+    const loadModel = vi.fn<IEngineApi['loadModel']>()
+    const unloadModel = vi.fn<IEngineApi['unloadModel']>()
     let emitPolicy: (change: NodePolicyChange) => void
     let emitAvailability: (change: NodeAvailabilityChange) => void
     let container: HTMLDivElement
     let root: Root
 
     beforeEach(async () => {
-        useOverviewUiStore.setState({ settingsNodeId: null })
+        useOverviewUiStore.setState({ settingsNodeId: null, settingsProfileKey: null })
         vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
         // Each case starts a fresh app session; drafts intentionally survive component unmounts.
         useNodeConfigurationStore.setState({ policyDrafts: new Map(), availability: new Map() })
+        useEngineSettingsStore.setState({ entries: {}, modelDrafts: {} })
         Object.defineProperty(HTMLDialogElement.prototype, 'show', {
             configurable: true,
             value: function (this: HTMLDialogElement) {
@@ -1544,23 +1573,59 @@ describe('routing settings editor', () => {
         })
         // jsdom has no CSS.supports, which the auto-sizing text area asks.
         vi.stubGlobal('CSS', { supports: () => true })
+        const transport: ServiceTransport = {
+            connected: true,
+            invoke: vi
+                .fn<ServiceTransport['invoke']>()
+                .mockRejectedValue(new Error('Unexpected service call')),
+            subscribePush: () => () => {},
+            onConnect: () => () => {},
+            onDisconnect: () => () => {},
+            onAuthFailure: () => () => {},
+            destroy: () => {}
+        }
+        const settings: EngineSettingsSnapshot = {
+            nodeId: SELF,
+            engine: 'llamacpp',
+            revision: 1,
+            appliedRevision: 1,
+            sequence: 1,
+            epoch: 'routing-test',
+            settings: { serverPort: 8081, proxyPort: 8080, launchText: '', modelLoads: [] },
+            effectiveServerPort: 8081,
+            effectiveProxyPort: 8080,
+            running: false,
+            adopted: false,
+            editable: true,
+            reason: '',
+            format: 'pair-arguments-v1',
+            phase: 'idle',
+            error: '',
+            requestId: ''
+        }
+        getSettings.mockReset().mockResolvedValue(settings)
+        toggleEngine.mockReset()
+        loadModel.mockReset()
+        unloadModel.mockReset()
+        const api = createPairApi(transport)
+        api.engines.getSettings = getSettings
+        api.engines.toggle = toggleEngine
+        api.engines.loadModel = loadModel
+        api.engines.unloadModel = unloadModel
+        api.nodePolicy.get = get
+        api.nodePolicy.set = set
+        api.nodePolicy.setAvailability = setAvailability
+        api.nodePolicy.onPolicyChanged = callback => {
+            emitPolicy = callback
+            return () => undefined
+        }
+        api.nodePolicy.onAvailabilityChanged = callback => {
+            emitAvailability = callback
+            return () => undefined
+        }
         Object.defineProperty(window, 'pairApi', {
             configurable: true,
-            value: {
-                nodePolicy: {
-                    get,
-                    set,
-                    setAvailability,
-                    onPolicyChanged: (callback: (change: NodePolicyChange) => void) => {
-                        emitPolicy = callback
-                        return () => undefined
-                    },
-                    onAvailabilityChanged: (callback: (change: NodeAvailabilityChange) => void) => {
-                        emitAvailability = callback
-                        return () => undefined
-                    }
-                }
-            }
+            value: api
         })
         useConnectionStore.setState({ connected: true, selfId: SELF })
         container = document.createElement('div')
@@ -1613,7 +1678,13 @@ describe('routing settings editor', () => {
             await click('Configure model')
         }
         const profiles = [
-            { name: 'm', engine: 'llamacpp', model: 'm', requestOptions: { temperature: 1 } }
+            {
+                key: 'm',
+                displayName: 'Model M',
+                engine: 'llamacpp',
+                model: 'm',
+                requestOptions: { temperature: 1 }
+            }
         ]
         const initial = JSON.stringify({
             version: 2,
@@ -1653,7 +1724,13 @@ describe('routing settings editor', () => {
                 expectedPersistedRevision: '5'
             })
             expect(container.textContent).toContain('Saved, not yet enforced')
+            expect(getSettings).toHaveBeenCalled()
+            for (const [request] of getSettings.mock.calls)
+                expect(request).toEqual({ nodeId: SELF, engine: 'llamacpp' })
             expect(setAvailability).not.toHaveBeenCalled()
+            expect(toggleEngine).not.toHaveBeenCalled()
+            expect(loadModel).not.toHaveBeenCalled()
+            expect(unloadModel).not.toHaveBeenCalled()
         })
 
         it('blocks Save for invalid typed input without mutating the shared JSON draft', async () => {
@@ -1670,7 +1747,7 @@ describe('routing settings editor', () => {
             const empty = JSON.stringify({
                 version: 2,
                 revision: '5',
-                profiles: [{ name: 'm', engine: 'llamacpp', model: 'm' }]
+                profiles: [{ key: 'm', displayName: 'Model M', engine: 'llamacpp', model: 'm' }]
             })
             get.mockResolvedValue(savedDocument('5', { policy: empty }))
             set.mockResolvedValue(snapshot('6', 'pending'))
@@ -1723,6 +1800,9 @@ describe('routing settings editor', () => {
             expect(button('Save').disabled).toBe(true)
             expect(set).not.toHaveBeenCalled()
             expect(setAvailability).not.toHaveBeenCalled()
+            expect(toggleEngine).not.toHaveBeenCalled()
+            expect(loadModel).not.toHaveBeenCalled()
+            expect(unloadModel).not.toHaveBeenCalled()
         })
 
         it('keeps typed options disabled while a policy conflict awaits reload', async () => {

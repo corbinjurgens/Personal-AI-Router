@@ -1,10 +1,16 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import type { ModelConfiguration, NodeModelReference } from '@/shared/types/node-policy'
+import type { ModelConfiguration } from '@/shared/types/node-policy'
+import type { ModelIdentity } from '@/shared/types/engines'
 import type { JsonValue } from '@/shared/types/json'
 import { parseNodeRoles } from '@/shared/utils/node-roles'
-import type { InspectModelResult, ModelChange, RequestedLoad } from '@/shared/types/model-config'
+import type {
+    InspectModelResult,
+    ModelChange,
+    ModelSettingsIdentity,
+    RequestedLoad
+} from '@/shared/types/model-config'
 import {
     applyModelSettings,
     MODEL_OPTION_FIELDS,
@@ -14,6 +20,127 @@ import {
 type CopyError = { code: string; message: string }
 type Result<T> = { ok: true; value: T } | { ok: false; error: CopyError }
 type Profile = Extract<ReturnType<typeof parseModelSettings>, { ok: true }>['value'][number]
+
+/** Only recorded full hashes establish artifact correspondence. */
+export function profileDeployMatch(
+    source: ModelIdentity | undefined,
+    target: ModelIdentity | undefined
+): {
+    strength: 'verified' | 'companions-unverified' | 'possible' | 'different'
+    missingCompanions: string[]
+} {
+    if (!source || !target) return { strength: 'different', missingCompanions: [] }
+    if (
+        source.contentId &&
+        source.contentId === target.contentId &&
+        source.strength === 'verified' &&
+        target.strength === 'verified'
+    ) {
+        const missingCompanions = (source.files ?? [])
+            .filter(file => file.role !== 'model')
+            .filter(
+                file =>
+                    !file.sha256 ||
+                    !/^[0-9a-f]{64}$/.test(file.sha256) ||
+                    !target.files?.some(
+                        other => other.role === file.role && other.sha256 === file.sha256
+                    )
+            )
+            .map(file => file.name || file.role)
+        return {
+            strength: missingCompanions.length ? 'companions-unverified' : 'verified',
+            missingCompanions
+        }
+    }
+    const possible =
+        (!source.contentId || !target.contentId) &&
+        !!source.repository &&
+        source.repository === target.repository &&
+        !!source.quantization &&
+        source.quantization === target.quantization &&
+        source.totalBytes !== undefined &&
+        source.totalBytes === target.totalBytes
+    return { strength: possible ? 'possible' : 'different', missingCompanions: [] }
+}
+
+/** Build a closed patch only; the coupled ModelChange owner creates and persists profiles. */
+export function deployModelPolicyPatch(
+    sourceText: string,
+    source: ModelSettingsIdentity,
+    targetText: string,
+    target: ModelSettingsIdentity,
+    selection: { fields: string[]; mode: boolean },
+    savedTargetLocked: boolean,
+    metadata: { displayName?: string; icon?: string },
+    roles: string[]
+): Result<NonNullable<ModelChange['policy']>> {
+    const from = profile(sourceText, source)
+    if (!from.ok) return from
+    const parsed = parseModelSettings(targetText)
+    if (!parsed.ok) return parsed
+    const existing = parsed.value.find(item => item.key === target.profileKey)
+    if (existing && existing.engine !== target.engine)
+        return { ok: false, error: { code: 'profile', message: 'The target key is in use.' } }
+    const document: JsonValue = JSON.parse(targetText)
+    const declarations = jsonObject(document) ? document.roles : undefined
+    const declared = parseNodeRoles(declarations)
+    if (
+        (declarations !== undefined &&
+            (!Array.isArray(declarations) ||
+                declarations.length !== declared.length ||
+                declarations.some(
+                    (role, index) =>
+                        !jsonObject(role) ||
+                        !Array.isArray(role.profiles) ||
+                        role.profiles.length !== declared[index].profiles.length
+                ))) ||
+        new Set(declared.map(role => role.name)).size !== declared.length ||
+        new Set(roles).size !== roles.length ||
+        roles.some(name => !declared.some(role => role.name === name))
+    )
+        return { ok: false, error: { code: 'roles', message: 'Select declared target roles.' } }
+    const displayName = metadata.displayName ?? existing?.displayName ?? from.value.displayName
+    const icon = metadata.icon ?? existing?.icon ?? from.value.icon
+    // A separate minimal baseline avoids reserializing target-owned numeric tokens.
+    const synthetic = JSON.stringify({
+        profiles: [
+            {
+                key: target.profileKey,
+                engine: target.engine,
+                model: target.profileKey,
+                displayName,
+                icon
+            }
+        ]
+    })
+    const validMetadata = parseModelSettings(synthetic)
+    if (!validMetadata.ok) return validMetadata
+    const baseline = existing ? targetText : synthetic
+    const copied = copyModelSettings(
+        sourceText,
+        source,
+        baseline,
+        target,
+        selection,
+        savedTargetLocked
+    )
+    if (!copied.ok) return copied
+    const patch = modelPolicyPatch(baseline, copied.value, target)
+    if (!patch.ok) return patch
+    const memberships: NonNullable<NonNullable<ModelChange['policy']>['roles']> = {}
+    for (const role of declared) {
+        if (roles.includes(role.name)) memberships[role.name] = true
+    }
+    return {
+        ok: true,
+        value: {
+            ...patch.value,
+            ...(!existing || metadata.displayName !== undefined ? { displayName } : {}),
+            ...(!existing || metadata.icon !== undefined ? { icon } : {}),
+            ...(roles.length ? { roles: memberships } : {})
+        }
+    }
+}
 
 /** The common copy default is tuning only. Routing always requires an explicit selection. */
 export function portableLoadFields(inspection: InspectModelResult): Array<keyof RequestedLoad> {
@@ -87,7 +214,7 @@ export function portableLoadPatch(
 export function modelPolicyPatch(
     baseline: string,
     draft: string,
-    identity: NodeModelReference
+    identity: ModelSettingsIdentity
 ): Result<NonNullable<ModelChange['policy']>> {
     if (baseline === draft) return { ok: true, value: {} }
     const from = profile(baseline, identity)
@@ -138,6 +265,10 @@ export function modelPolicyPatch(
         ok: true,
         value: {
             ...(Object.keys(generation).length ? { generation } : {}),
+            ...(from.value.displayName !== to.value.displayName
+                ? { displayName: to.value.displayName }
+                : {}),
+            ...(from.value.icon !== to.value.icon ? { icon: to.value.icon } : {}),
             ...(from.value.mode !== to.value.mode ? { requestOptionsMode: to.value.mode } : {})
         }
     }
@@ -150,12 +281,17 @@ function jsonObject(value: JsonValue | undefined): value is { [key: string]: Jso
 }
 
 /** Compare untouched content losslessly, allowing object-key ordering and selected leaf additions. */
-function policyRemainder(text: string, identity: NodeModelReference, selected: string[]): string {
+function policyRemainder(
+    text: string,
+    identity: ModelSettingsIdentity,
+    selected: string[]
+): string {
     const document: JsonValue = JSON.parse(text)
     const profiles =
         jsonObject(document) && Array.isArray(document.profiles) ? document.profiles : []
     const profileIndex = profiles.findIndex(
-        item => jsonObject(item) && item.engine === identity.engine && item.model === identity.model
+        item =>
+            jsonObject(item) && item.engine === identity.engine && item.key === identity.profileKey
     )
     // Keep primitive tokens verbatim. A tagged syntax tree avoids numeric rounding
     // and cannot confuse an original object/string with a protected number.
@@ -183,7 +319,9 @@ function policyRemainder(text: string, identity: NodeModelReference, selected: s
                     !(selectedOptions && selected.includes(key)) &&
                     !(
                         selectedProfile &&
-                        (key === 'requestOptionsMode' ||
+                        (key === 'displayName' ||
+                            key === 'icon' ||
+                            key === 'requestOptionsMode' ||
                             (key === 'requestOptions' && JSON.stringify(child) === '["object",[]]'))
                     )
                 )
@@ -209,7 +347,7 @@ function policyRemainder(text: string, identity: NodeModelReference, selected: s
 
 export function modelRoutingState(
     text: string,
-    identity: NodeModelReference,
+    identity: ModelSettingsIdentity,
     evidence?: ModelConfiguration
 ) {
     let document: JsonValue
@@ -222,22 +360,26 @@ export function modelRoutingState(
         document !== null && typeof document === 'object' && !Array.isArray(document)
             ? document
             : {}
+    const parsed = profile(text, identity)
+    const servedModel = parsed.ok ? parsed.value.model : undefined
     const matches = (item: JsonValue) =>
         item !== null &&
         typeof item === 'object' &&
         !Array.isArray(item) &&
         item.engine === identity.engine &&
-        item.model === identity.model
+        servedModel !== undefined &&
+        item.model === servedModel
     const roles = parseNodeRoles(root.roles)
     const member = (key: string) => Array.isArray(root[key]) && root[key].some(matches)
-    const parsed = profile(text, identity)
     const profiles = Array.isArray(root.profiles) ? root.profiles : []
-    const selected = profiles.find(matches)
+    const selected = profiles.find(
+        item =>
+            jsonObject(item) && item.key === identity.profileKey && item.engine === identity.engine
+    )
     const profileKey =
         jsonObject(selected) && typeof selected.key === 'string' ? selected.key : undefined
     const qualified = profiles.some(item => {
-        if (!matches(item) || item === null || typeof item !== 'object' || Array.isArray(item))
-            return false
+        if (item !== selected || !parsed.ok || !jsonObject(item)) return false
         return (
             typeof item.contextTokens === 'number' &&
             item.contextTokens > 0 &&
@@ -257,7 +399,7 @@ export function modelRoutingState(
             evidence?.models.some(
                 model =>
                     model.engine === identity.engine &&
-                    model.model === identity.model &&
+                    model.model === servedModel &&
                     model.state === 'satisfied'
             ) === true &&
             evidence.policyRevision === root.revision
@@ -279,11 +421,11 @@ export function modelRoutingState(
     }
 }
 
-function profile(text: string, identity: NodeModelReference): Result<Profile> {
+function profile(text: string, identity: ModelSettingsIdentity): Result<Profile> {
     const parsed = parseModelSettings(text)
     if (!parsed.ok) return parsed
     const found = parsed.value.find(
-        item => item.engine === identity.engine && item.model === identity.model
+        item => item.engine === identity.engine && item.key === identity.profileKey
     )
     return found
         ? { ok: true, value: found }
@@ -293,7 +435,7 @@ function profile(text: string, identity: NodeModelReference): Result<Profile> {
           }
 }
 
-function supported(key: string, identity: NodeModelReference): boolean {
+function supported(key: string, identity: ModelSettingsIdentity): boolean {
     return (
         MODEL_OPTION_FIELDS.some(field => field.key === key) &&
         (key !== 'min_p' || identity.engine === 'llamacpp')
@@ -303,8 +445,8 @@ function supported(key: string, identity: NodeModelReference): boolean {
 /** Initial selection contains only numeric options supported by both engines. */
 export function defaultModelCopyFields(
     sourceText: string,
-    source: NodeModelReference,
-    target: NodeModelReference
+    source: ModelSettingsIdentity,
+    target: ModelSettingsIdentity
 ): Result<string[]> {
     const parsed = profile(sourceText, source)
     if (!parsed.ok) return parsed
@@ -325,9 +467,9 @@ export function defaultModelCopyFields(
 /** Apply selected generation leaves to a fresh target draft. Lock authority comes from saved target state. */
 export function copyModelSettings(
     sourceText: string,
-    source: NodeModelReference,
+    source: ModelSettingsIdentity,
     targetText: string,
-    target: NodeModelReference,
+    target: ModelSettingsIdentity,
     selection: { fields: string[]; mode: boolean },
     savedTargetLocked: boolean
 ): Result<string> {

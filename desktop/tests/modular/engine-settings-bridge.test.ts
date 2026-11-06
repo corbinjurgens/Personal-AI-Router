@@ -219,7 +219,7 @@ describe('profile-key load contracts', () => {
                 ...preview,
                 identities: { 'medium-api': { strength: 'declared' } }
             })
-        ).toThrow('Reserved profile key.')
+        ).toThrow('Invalid profile key.')
     })
 })
 
@@ -1419,7 +1419,8 @@ describe('unified settings bridge', () => {
         const request: InspectModelRequest = {
             engine: 'llamacpp',
             nodeId: 'remote',
-            modelId: 'exact/model'
+            modelId: 'exact/model',
+            profileKey: 'large-profile'
         }
         const result = await handleServiceBridgeInvoke('engines:inspect-model', request)
         expect(mocks.supervisor.callProcess).toHaveBeenCalledWith(
@@ -1485,10 +1486,16 @@ describe('unified settings bridge', () => {
                 ]
             },
             modelChange: {
+                profileKey: 'large-profile',
                 modelId: 'exact/model',
                 expectedPolicyRevision: '9007199254740993',
                 load: { set: { slots: 3 }, clear: ['threads'] },
-                policy: { generation: { temperature: 0.5, top_k: null }, roles: { weak: false } },
+                policy: {
+                    displayName: 'Large profile',
+                    icon: 'code',
+                    generation: { temperature: 0.5, top_k: null },
+                    roles: { weak: false }
+                },
                 previewDigest: 'd'.repeat(64),
                 supersedesRequestId: 'previous-request'
             }

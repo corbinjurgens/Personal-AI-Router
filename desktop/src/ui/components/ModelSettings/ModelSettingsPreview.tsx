@@ -36,24 +36,33 @@ export default function ModelSettingsPreview({
     inspection,
     preview,
     snapshot,
+    profileKey,
     reviewed = true,
     stale = false
 }: {
     inspection?: InspectModelResult
     preview?: EngineSettingsPreview
     snapshot?: EngineSettingsSnapshot
+    profileKey?: string
     reviewed?: boolean
     stale?: boolean
 }) {
     const impact = preview?.impact
     const estimate = preview ? (preview.auto?.estimate ?? preview.estimate) : inspection?.estimate
-    const desired = snapshot?.settings.modelLoads?.find(
-        load => load.modelId === inspection?.modelId
-    )
+    const desired = snapshot?.settings.modelLoads?.find(load => load.profileKey === profileKey)
     const applied = snapshot?.effectiveSettings?.modelLoads?.find(
-        load => load.modelId === inspection?.modelId
+        load => load.profileKey === profileKey
     )
-    const observed = snapshot?.serving?.observed?.find(load => load.modelId === inspection?.modelId)
+    const observed = snapshot?.serving?.observed?.find(load => load.modelId === profileKey)
+    const convertedLoads =
+        preview?.settings.modelLoads?.filter(
+            load =>
+                load.resolved?.resolverRevision === 'external-conversion/llama' ||
+                (load.resolved?.resolverRevision?.startsWith('auto/') &&
+                    /^[0-9a-f]{64}:/.test(load.resolved.reviewedInputId ?? ''))
+        ) ?? []
+    const conversion =
+        snapshot && !snapshot.settings.modelLoads?.length && convertedLoads.length > 0
     const matchingInspection =
         inspection &&
         (!snapshot ||
@@ -63,6 +72,12 @@ export default function ModelSettingsPreview({
             : undefined
     return (
         <Stack gap="2">
+            {conversion && (
+                <Text role="status" kind="body/regular/sm">
+                    Saving converts this engine&apos;s hand-written preset into{' '}
+                    {convertedLoads.length} profiles.
+                </Text>
+            )}
             <Text kind="body/semibold/sm">Target review</Text>
             <Text kind="body/regular/sm">
                 Artifact: {inspection?.status ?? 'Unknown'} · Source:{' '}

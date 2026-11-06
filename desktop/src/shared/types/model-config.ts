@@ -2,6 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { JsonValue } from '@/shared/types/json'
+import type { NodeModelReference } from '@/shared/types/node-policy'
+
+/** Profile selection is distinct from the native artifact model identifier. */
+export interface ModelSettingsIdentity extends NodeModelReference {
+    profileKey?: string
+}
 
 export type RequestedLoad = {
     context?: { mode: 'fixed' | 'auto'; tokens?: number; floor?: number; cap?: number }

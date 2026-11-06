@@ -31,13 +31,14 @@ import {
 const target: EngineSettingsTarget = { nodeId: 'self', engine: 'llamacpp' }
 const key = modelSettingsKey(target, 'model')
 const policy: NodePolicyDocument = {
-    policy: '{"revision":"7","profiles":[{"name":"test","engine":"llamacpp","model":"model"}],"opaque":9007199254740993}',
+    policy: '{"revision":"7","profiles":[{"key":"model","displayName":"test","engine":"llamacpp","model":"model"}],"opaque":9007199254740993}',
     revision: '7',
     activation: null,
     availability: 'available',
     recoveryRequired: false
 }
 const change: ModelChange = {
+    profileKey: 'model',
     modelId: 'model',
     expectedPolicyRevision: '7',
     load: { set: { slots: 2 } }
@@ -157,6 +158,7 @@ describe('reviewed model operations', () => {
     it('reviews and applies fit and raw options as one existing model operation', async () => {
         const store = useEngineSettingsStore.getState()
         const nativeChange: ModelChange = {
+            profileKey: 'model',
             modelId: 'model',
             expectedPolicyRevision: '7',
             load: {
@@ -392,7 +394,11 @@ describe('reviewed model operations', () => {
         const store = useEngineSettingsStore.getState()
         const first = store.previewModel(target, change, 'old authority')
         await started.promise
-        const next = store.previewModel(target, { ...change, modelId: 'other' }, 'new authority')
+        const next = store.previewModel(
+            target,
+            { ...change, modelId: 'other', profileKey: 'other' },
+            'new authority'
+        )
         const reads = engine.getSettings.mock.calls.length
         response.resolve({
             settings: snapshot().settings,
@@ -507,7 +513,7 @@ describe('reviewed model operations', () => {
         store.editModel(key, change)
         expect(useEngineSettingsStore.getState().modelDrafts[key].advisory).toBeUndefined()
     })
-    it('omits empty policy patches and sends only closed inspection keys before Apply', async () => {
+    it('omits empty policy patches and inspects an untyped profile without a saved-key selector before Apply', async () => {
         const store = useEngineSettingsStore.getState()
         await store.previewModel(
             target,
@@ -521,6 +527,34 @@ describe('reviewed model operations', () => {
             [{ ...target, modelId: 'model' }]
         ])
         expect(engine.applySettings.mock.calls[0]?.[0].modelChange?.policy).toBeUndefined()
+        expect(engine.applySettings.mock.calls[0]?.[0].modelChange?.profileKey).toBe('model')
+    })
+    it('inspects the selected saved key during review and fresh Apply validation', async () => {
+        const saved = snapshot({
+            sequence: 2,
+            settings: {
+                ...snapshot().settings,
+                modelLoads: [
+                    { profileKey: 'sibling', modelId: 'model', requested: { slots: 5 } },
+                    { profileKey: 'model', modelId: 'model', requested: { slots: 1 } }
+                ]
+            }
+        })
+        engine.getSettings.mockResolvedValue(saved)
+        const store = useEngineSettingsStore.getState()
+        store.receive(saved)
+        await store.previewModel(target, change, 'authority')
+        await store.applyModel(key, 'authority')
+        expect(engine.inspectModel.mock.calls).toEqual([
+            [{ ...target, modelId: 'model', profileKey: 'model' }],
+            [{ ...target, modelId: 'model', profileKey: 'model' }]
+        ])
+        expect(engine.applySettings).toHaveBeenCalledOnce()
+        expect(engine.applySettings.mock.calls[0]?.[0].modelChange).toMatchObject({
+            profileKey: 'model',
+            modelId: 'model',
+            load: { set: { slots: 2 } }
+        })
     })
     it.each([false, true])(
         'reconciles completed policy edits while preserving later edits=%s',
@@ -780,6 +814,7 @@ describe('reviewed model operations', () => {
         engine.inspectModel.mockResolvedValue(inspection({ nodeId: 'peer' }))
         useEngineSettingsStore.getState().receive(snapshot({ nodeId: 'peer' }))
         await useEngineSettingsStore.getState().previewModel(peer, change, 'same captured token')
+        const started = deferred<void>()
         let finish: ((value: NodePolicyDocument) => void) | undefined
         window.pairApi.nodePolicy.get = vi
             .fn<typeof window.pairApi.nodePolicy.get>()
@@ -787,11 +822,13 @@ describe('reviewed model operations', () => {
                 () =>
                     new Promise<NodePolicyDocument>(resolve => {
                         finish = resolve
+                        started.resolve()
                     })
             )
         const applying = useEngineSettingsStore
             .getState()
             .applyModel(peerKey, 'same captured token')
+        await started.promise
         useClusterInvitationsStore.setState({ remoteManagementContext: 2 })
         if (!finish) throw new Error('Apply did not reach its read')
         finish(policy)
@@ -881,7 +918,10 @@ describe('reviewed model operations', () => {
             .fn<typeof window.pairApi.nodePolicy.get>()
             .mockResolvedValue({
                 ...policy,
-                policy: policy.policy.replace('"name":"test"', '"localOnly":true,"name":"test"')
+                policy: policy.policy.replace(
+                    '"displayName":"test"',
+                    '"localOnly":true,"displayName":"test"'
+                )
             })
         useEngineSettingsStore.getState().receive(snapshot({ nodeId: 'peer' }))
         await useEngineSettingsStore.getState().previewModel(peer, change, 'authority')
@@ -898,13 +938,13 @@ describe('reviewed model operations', () => {
 })
 
 describe('selected policy and portable load patches', () => {
-    const identity = { engine: 'llamacpp', model: 'model' }
+    const identity = { engine: 'llamacpp', model: 'model', profileKey: 'model' }
     it.each(['llamacpp-custom', 'custom-engine'])(
         'selects the raw profile after a preceding %s profile',
         engine => {
             const baseline = policy.policy.replace(
                 '"profiles":[',
-                `"profiles":[{"name":"other","engine":"${engine}","model":"other","opaque":9007199254740993},`
+                `"profiles":[{"key":"other","displayName":"other","engine":"${engine}","model":"other","opaque":9007199254740993},`
             )
             const edited = applyModelSettings(baseline, identity, {
                 kind: 'option',
@@ -954,7 +994,10 @@ describe('selected policy and portable load patches', () => {
         expect(
             modelPolicyPatch(
                 policy.policy,
-                temperature.value.replace('"name":"test"', '"name":"foreign"'),
+                temperature.value.replace(
+                    '"displayName":"test"',
+                    '"unrelated":"foreign","displayName":"test"'
+                ),
                 identity
             ).ok
         ).toBe(false)
@@ -969,17 +1012,40 @@ describe('selected policy and portable load patches', () => {
     })
     it('distinguishes nil/empty served permissions and reads the actual engineBindings container', () => {
         expect(modelRoutingState(policy.policy, identity).served).toBe('unrestricted')
+        expect(modelRoutingState('{"servedModels":null}', identity).served).toBe('unrestricted')
         expect(modelRoutingState('{"servedModels":[]}', identity).served).toBe('excluded')
+        const selected = { engine: 'llamacpp', model: 'artifact.gguf', profileKey: 'profile-key' }
+        const routingPolicy = {
+            profiles: [
+                {
+                    key: 'profile-key',
+                    displayName: 'Profile',
+                    engine: 'llamacpp',
+                    model: 'served-model'
+                }
+            ],
+            engineBindings: [{ engine: 'llamacpp', model: 'served-model' }],
+            servedModels: [{ engine: 'llamacpp', model: 'served-model' }]
+        }
+        expect(modelRoutingState(JSON.stringify(routingPolicy), selected).binding).toBe(true)
+        expect(modelRoutingState(JSON.stringify(routingPolicy), selected).served).toBe('included')
         expect(
-            modelRoutingState(
-                '{"engineBindings":[{"engine":"llamacpp","model":"model"}]}',
-                identity
-            ).binding
-        ).toBe(true)
+            modelRoutingState(JSON.stringify({ ...routingPolicy, engineBindings: [] }), selected)
+                .binding
+        ).toBe(false)
+        const artifactReferences = {
+            ...routingPolicy,
+            engineBindings: [{ engine: 'llamacpp', model: 'artifact.gguf' }],
+            servedModels: [{ engine: 'llamacpp', model: 'artifact.gguf' }]
+        }
+        expect(modelRoutingState(JSON.stringify(artifactReferences), selected).binding).toBe(false)
+        expect(modelRoutingState(JSON.stringify(artifactReferences), selected).served).toBe(
+            'excluded'
+        )
     })
     it('keeps residency unavailable for a qualification object without current target evidence', () => {
         const text =
-            '{"revision":"7","profiles":[{"name":"q","engine":"llamacpp","model":"model","contextTokens":8192,"maxOutputTokens":1024,"maxConcurrent":1,"memoryBytes":1024,"qualification":{"id":"q","revision":"1"}}]}'
+            '{"revision":"7","profiles":[{"key":"model","displayName":"q","engine":"llamacpp","model":"model","contextTokens":8192,"maxOutputTokens":1024,"maxConcurrent":1,"memoryBytes":1024,"qualification":{"id":"q","revision":"1"}}]}'
         expect(modelRoutingState(text, identity).qualified).toBe(false)
         expect(
             modelRoutingState(text, identity, {

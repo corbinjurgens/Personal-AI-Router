@@ -3,7 +3,7 @@
 
 /**
  * Node configuration drafts for the app session. Routing and model setup share
- * one whole-policy draft per node; the role editor and bulk panel retain their
+ * one whole-policy draft per node; the role editor retains its
  * focused role drafts alongside it. None of these drafts are persisted here.
  *
  * `policy:set` replaces the whole document and fills omitted fields with
@@ -12,9 +12,6 @@
  * back checked against that target's revision. A refused or uncertain save is
  * read back and shown; nothing is retried automatically.
  *
- * Bulk configuration is a bounded fan-out of the same per-node operation. There
- * is no cluster-wide document: each target keeps its own baseline, result and
- * readback, and a node that is offline keeps an unsent draft.
  */
 import { create } from 'zustand'
 import type {
@@ -31,13 +28,7 @@ import type {
     NodePolicyDocument,
     NodePolicySnapshot
 } from '@/shared/types/node-policy'
-import type {
-    NodePolicyAdvertisement,
-    AdvertisedProfile,
-    NodeRoles,
-    PauseOrigin,
-    RoleTier
-} from '@/shared/types/node-roles'
+import type { AdvertisedProfile, NodeRoles, PauseOrigin, RoleTier } from '@/shared/types/node-roles'
 import {
     INVALID_PARAMS_CODE,
     LOCAL_VETO_CODE,
@@ -227,8 +218,8 @@ export function suggestRoles(choices: AdvertisedProfile[], policies: string[]): 
 /** A tier whose membership differs between two documents, excluding declaration order. */
 interface RoleDifference {
     tier: RoleTier
-    mine?: string
-    theirs?: string
+    mine?: string[]
+    theirs?: string[]
 }
 
 export function roleDifferences(mine: NodeRoles, theirs: NodeRoles): RoleDifference[] {
@@ -237,7 +228,7 @@ export function roleDifferences(mine: NodeRoles, theirs: NodeRoles): RoleDiffere
         const right = theirs.find(role => role.name === tier)
         return JSON.stringify(left) === JSON.stringify(right)
             ? []
-            : [{ tier, mine: left?.profiles[0], theirs: right?.profiles[0] }]
+            : [{ tier, mine: left?.profiles, theirs: right?.profiles }]
     })
 }
 
@@ -272,7 +263,7 @@ export function policyRefusal(message: string, code?: number): Refusal {
     return 'other'
 }
 
-/** Where one node's role edit stands (the bulk UX contract's per-node states). */
+/** Where one node's role edit stands. */
 type RoleEditPhase =
     | 'draft'
     | 'reading'
@@ -297,7 +288,7 @@ type PolicyBaselineInput = Pick<NodePolicySnapshot, 'policy' | 'revision'> & {
     availability?: NodeAvailability
 }
 
-export interface RoleEditorEntry {
+interface RoleEditorEntry {
     /**
      * The target's own document the draft substitutes into. Absent only while
      * the first read of the target is in flight or has failed; the draft then
@@ -310,12 +301,6 @@ export interface RoleEditorEntry {
     latest?: RoleBaseline
     /** The service's message for the last refused or uncertain save. */
     message?: string
-    /**
-     * Names one bulk attempt, from its read through its send and read back. A
-     * retry is a new attempt. `policy:set` takes no request id, so it stays on
-     * this side; the expected revision is what keeps a resend from landing twice.
-     */
-    requestId?: string
 }
 
 function baselineOf(snapshot: PolicyBaselineInput): RoleBaseline {
@@ -331,81 +316,6 @@ function baselineOf(snapshot: PolicyBaselineInput): RoleBaseline {
 
 function isOlder(revision: string, than: string): boolean {
     return BigInt(revision) < BigInt(than)
-}
-
-/** A target's state in the bulk panel: its edit phase, or `advertised` (see {@link targetState}). */
-export type TargetState = RoleEditPhase | 'advertised'
-
-/** The states a user can retry. */
-export const FAILED_STATES: ReadonlySet<TargetState> = new Set<TargetState>([
-    'conflict',
-    'rejected',
-    'vetoed',
-    'unreachable',
-    'unknown'
-])
-
-/**
- * A target's bulk state. An applied save becomes `advertised` once this node's
- * own discovery reports the target at that revision or a later one; until then
- * the target has persisted the roles but routers here may not use them yet. A
- * node never edited here is a draft.
- */
-export function targetState(
-    entry: RoleEditorEntry | undefined,
-    advertised: NodePolicyAdvertisement | undefined
-): TargetState {
-    if (!entry) return 'draft'
-    if (
-        entry.phase === 'applied' &&
-        entry.baseline &&
-        advertised &&
-        /^\d+$/.test(advertised.revision) &&
-        !isOlder(advertised.revision, entry.baseline.revision)
-    ) {
-        return 'advertised'
-    }
-    return entry.phase
-}
-
-/** One target of a bulk send. */
-export interface BulkTarget {
-    /** The broker's id for the node. */
-    targetId: string
-    /** The id `policy:*` takes; undefined for this PC. */
-    nodeId: string | undefined
-}
-
-/** The most per-node operations a bulk send keeps in flight. */
-export const BULK_CONCURRENCY = 4
-
-/** Run `operation` for every item, never more than `limit` at once. */
-async function runBounded<T>(
-    items: readonly T[],
-    limit: number,
-    operation: (item: T) => Promise<void>
-): Promise<void> {
-    let next = 0
-    const worker = async () => {
-        while (next < items.length) {
-            const item = items[next]
-            next += 1
-            await operation(item)
-        }
-    }
-    await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker))
-}
-
-/** Same roles on every selected node, or a draft of its own for each. */
-type BulkMode = 'common' | 'per-node'
-
-/** The bulk panel's choices, kept for the app session with the drafts. */
-interface BulkSelection {
-    /** Selected targets, by the broker's node id. */
-    selected: string[]
-    mode: BulkMode
-    /** The roles every selected node is given in `common` mode. */
-    common: NodeRoles
 }
 
 interface NodeConfigurationState {
@@ -442,6 +352,9 @@ interface NodeConfigurationState {
      */
     adopt(targetId: string, snapshot: PolicyBaselineInput): void
     setRole(targetId: string, tier: RoleTier, key: string | undefined): void
+    addRoleProfile(targetId: string, tier: RoleTier, key: string): void
+    removeRoleProfile(targetId: string, tier: RoleTier, key: string): void
+    moveRoleProfile(targetId: string, tier: RoleTier, index: number, direction: -1 | 1): void
     /** Replace the draft, for an offered suggestion the user accepted. */
     setDraft(targetId: string, roles: NodeRoles): void
     /** After a conflict: keep the draft and base it on the document read back. */
@@ -455,26 +368,6 @@ interface NodeConfigurationState {
     save(targetId: string, nodeId: string | undefined): Promise<NodePolicySnapshot | null>
     /** Take a first baseline for a target that has none, for its preview. */
     read(targetId: string, nodeId: string | undefined): Promise<void>
-    /**
-     * One bulk attempt on one target: read the target's own document, then send
-     * the draft over it. With `roles`, those roles are substituted into the
-     * document just read (the same roles on every node); without, the target's
-     * own draft is checked against its baseline, and a change to its roles
-     * stops at a conflict. A target already holding the roles is applied
-     * without a send. Never throws; the outcome is the entry's phase.
-     */
-    apply(targetId: string, nodeId: string | undefined, roles?: NodeRoles): Promise<void>
-    /**
-     * {@link apply} for each target, at most {@link BULK_CONCURRENCY} at once.
-     * `onSettled` is told as each target's attempt ends, for progress.
-     */
-    applyAll(
-        targets: readonly BulkTarget[],
-        roles?: NodeRoles,
-        onSettled?: (target: BulkTarget) => void
-    ): Promise<void>
-    bulk: BulkSelection
-    setBulk(change: Partial<BulkSelection>): void
 }
 
 interface AvailabilityEntry {
@@ -1550,6 +1443,41 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
             set({ editors })
         },
 
+        addRoleProfile: (targetId, tier, key) => {
+            const draft = copyNodeRoles(get().editors.get(targetId)?.draft ?? [])
+            const role = draft.find(role => role.name === tier)
+            if (!role || role.profiles.includes(key)) return
+            role.profiles.push(key)
+            get().setDraft(targetId, draft)
+        },
+
+        removeRoleProfile: (targetId, tier, key) => {
+            const draft = copyNodeRoles(get().editors.get(targetId)?.draft ?? [])
+            const role = draft.find(role => role.name === tier)
+            if (!role) return
+            role.profiles = role.profiles.filter(profile => profile !== key)
+            get().setDraft(targetId, draft)
+        },
+
+        moveRoleProfile: (targetId, tier, index, direction) => {
+            const draft = copyNodeRoles(get().editors.get(targetId)?.draft ?? [])
+            const role = draft.find(role => role.name === tier)
+            const destination = index + direction
+            if (
+                !role ||
+                index < 0 ||
+                index >= role.profiles.length ||
+                destination < 0 ||
+                destination >= role.profiles.length
+            )
+                return
+            ;[role.profiles[index], role.profiles[destination]] = [
+                role.profiles[destination],
+                role.profiles[index]
+            ]
+            get().setDraft(targetId, draft)
+        },
+
         setRole: (targetId, tier, role) =>
             update(targetId, entry => {
                 const draft = withRoleProfile(entry.draft, tier, role)
@@ -1633,11 +1561,10 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
                     expectedPersistedRevision: base.revision
                 })
                 const saved = baselineOf(result)
-                update(targetId, current => ({
+                update(targetId, () => ({
                     baseline: saved,
                     draft: copyNodeRoles(saved.roles),
-                    phase: 'applied',
-                    requestId: current.requestId
+                    phase: 'applied'
                 }))
                 return result
             } catch (err) {
@@ -1693,92 +1620,6 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
             } catch (err) {
                 put(targetId, { draft: [], phase: 'unreachable', message: getErrorString(err) })
             }
-        },
-
-        apply: async (targetId, nodeId, roles) => {
-            const prior = get().editors.get(targetId)
-            if (prior?.phase === 'reading' || prior?.phase === 'sending') return
-            // Without roles of its own to send, an unread target is only read.
-            if (roles === undefined && !prior?.baseline) return get().read(targetId, nodeId)
-            const requestId = crypto.randomUUID()
-            put(targetId, {
-                ...(prior ?? { draft: [] }),
-                phase: 'reading',
-                message: undefined,
-                requestId
-            })
-            if (nodeId !== undefined) {
-                await get().readManagement(targetId, nodeId)
-                const management = get().management.get(targetId)
-                if (management?.state !== 'allowed') {
-                    update(targetId, current => ({
-                        ...current,
-                        draft: copyNodeRoles(roles ?? current.draft),
-                        phase: 'rejected',
-                        message: management?.message ?? MANAGEMENT_MESSAGES.unavailable
-                    }))
-                    return
-                }
-            }
-            let latest: NodePolicySnapshot
-            try {
-                latest = await window.pairApi.nodePolicy.get(nodeId)
-            } catch (err) {
-                // Nothing was sent: the draft stays for an explicit retry.
-                update(targetId, current => ({
-                    ...current,
-                    phase: 'unreachable',
-                    message: getErrorString(err)
-                }))
-                return
-            }
-            const next = baselineOf(latest)
-            const draft = copyNodeRoles(roles ?? get().editors.get(targetId)?.draft ?? [])
-            if (sameNodeRoles(draft, next.roles)) {
-                // Also settles an unknown outcome whose save did land.
-                put(targetId, { baseline: next, draft, phase: 'applied', requestId })
-                return
-            }
-            if (roles !== undefined) {
-                put(targetId, { baseline: next, draft, phase: 'reading', requestId })
-            } else {
-                get().adopt(targetId, latest)
-                update(targetId, current => ({ ...current, requestId }))
-            }
-            const entry = get().editors.get(targetId)
-            if (!entry?.baseline || entry.phase === 'conflict') return
-            if (sameNodeRoles(entry.draft, entry.baseline.roles)) {
-                // The draft was never edited and simply followed the node.
-                update(targetId, current => ({ ...current, phase: 'draft' }))
-                return
-            }
-            if (nodeId !== undefined && nodePaused(next.policy, next.availability)) {
-                // Both pause origins and an incomplete drain fence every peer.
-                update(targetId, current => ({
-                    ...current,
-                    phase: 'vetoed',
-                    message: NODE_PAUSED_MESSAGE
-                }))
-                return
-            }
-            await get().save(targetId, nodeId)
-        },
-
-        applyAll: (targets, roles, onSettled) =>
-            runBounded(targets, BULK_CONCURRENCY, async target => {
-                await get().apply(target.targetId, target.nodeId, roles)
-                onSettled?.(target)
-            }),
-
-        bulk: { selected: [], mode: 'common', common: [] },
-
-        setBulk: change =>
-            set({
-                bulk: {
-                    ...get().bulk,
-                    ...change,
-                    ...(change.common ? { common: copyNodeRoles(change.common) } : {})
-                }
-            })
+        }
     }
 })
