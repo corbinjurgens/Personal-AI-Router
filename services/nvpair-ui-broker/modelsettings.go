@@ -112,8 +112,7 @@ func validateStoredModelSettings(record *engineSettingsRecord) error {
 	if requireScope {
 		for _, load := range op.Review.Settings.ModelLoads {
 			_, converted := modelConversionInput(load)
-			_, accepted := op.Review.Identities[load.ProfileKey]
-			if converted && accepted && !slices.Contains(op.ConversionProfiles, load.ProfileKey) {
+			if converted && !slices.Contains(op.ConversionProfiles, load.ProfileKey) {
 				return fmt.Errorf("accepted conversion publication scope is incomplete")
 			}
 		}
@@ -179,6 +178,13 @@ func modelSettingsHash(value any) string {
 	}
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:])
+}
+
+func modelProfileDisplayName(ref nodepolicy.ModelRef) string {
+	if nodepolicy.ValidateProfileDisplayName(ref.Model) == nil {
+		return ref.Model
+	}
+	return "model-" + modelSettingsHash(ref)[:16]
 }
 
 func modelPolicyFingerprint(policy nodepolicy.Policy) string {
@@ -367,10 +373,7 @@ func patchModelPolicy(stored nodepolicy.Policy, engine string, change modelconfi
 		}
 		i := slices.IndexFunc(policy.Profiles, func(p nodepolicy.Profile) bool { return p.Key == key })
 		if i < 0 {
-			displayName := key
-			if nodepolicy.ValidateProfileDisplayName(displayName) != nil {
-				displayName = "model-" + modelSettingsHash(ref)[:16]
-			}
+			displayName := modelProfileDisplayName(ref)
 			model := change.ModelID
 			if change.Load != nil || slices.ContainsFunc(loads, func(load modelconfig.ModelLoad) bool { return load.ProfileKey == key }) {
 				model = key
@@ -469,7 +472,8 @@ func modelConversionInput(load modelconfig.ModelLoad) (string, bool) {
 	}
 	if strings.HasPrefix(load.Resolved.ResolverRevision, "auto/") {
 		source, _, converted := strings.Cut(load.Resolved.ReviewedInputID, ":")
-		return source, converted
+		// Auto records use "-" when no external preset was converted.
+		return source, converted && source != "-"
 	}
 	return "", false
 }
@@ -557,7 +561,8 @@ func (b *Broker) mergeModelPolicyFromNative(stored nodepolicy.Policy, engine str
 				}
 				continue
 			}
-			policy.Profiles = append(policy.Profiles, nodepolicy.Profile{Key: key, DisplayName: key, Engine: engine, Model: key})
+			ref := nodepolicy.ModelRef{Engine: engine, Model: key}
+			policy.Profiles = append(policy.Profiles, nodepolicy.Profile{Key: key, DisplayName: modelProfileDisplayName(ref), Engine: engine, Model: key})
 		}
 	}
 	return b.mergeModelPolicy(policy, engine, change, caller, review, typedRemoval)
