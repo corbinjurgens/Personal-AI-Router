@@ -248,7 +248,8 @@ func (b *Broker) settingsSnapshotLocked(ctx context.Context, engine string) (set
 // Build initialization, migration and drift readback on a private record.
 // Apply must finish worker IO before it can atomically authorize and save.
 func (b *Broker) prepareSettingsSnapshotLocked(ctx context.Context, engine string) (*engineSettingsRecord, bool, error) {
-	if _, ok := b.frontedEngineProfile(engine); !ok {
+	profile, ok := b.frontedEngineProfile(engine)
+	if !ok {
 		return nil, false, fmt.Errorf("this engine does not support settings")
 	}
 	if err := b.loadEngineSettingsLocked(); err != nil {
@@ -266,9 +267,8 @@ func (b *Broker) prepareSettingsSnapshotLocked(ctx context.Context, engine strin
 		return nil, false, fmt.Errorf("engine settings readback is invalid: %w", err)
 	}
 	proxyPort := 0
-	ready := false
-	if proxy := b.settingsProxy(engine); proxy != nil {
-		ready, proxyPort = proxy.Status(engine)
+	if proxy := b.settingsProxy(engine); proxy != nil && proxy == b.proxyProcessHandle() {
+		_, proxyPort = proxy.Status(engine)
 	}
 	record := b.engineSettings[engine].clone()
 	save, err := b.prepareSettingsArgumentsLocked(ctx, engine, record)
@@ -276,7 +276,13 @@ func (b *Broker) prepareSettingsSnapshotLocked(ctx context.Context, engine strin
 		return nil, false, err
 	}
 	configuredProxy := proxyPort
-	if !ready && record != nil {
+	if configuredProxy == 0 {
+		configuredProxy = configuredEngineProxyPort(profile)
+		if planned := int(b.engineProxy(profile).startupPort.Load()); planned > 0 {
+			configuredProxy = planned
+		}
+	}
+	if record != nil && record.Explicit {
 		configuredProxy = record.Snapshot.Settings.ProxyPort
 	}
 	current.ProxyPort = configuredProxy
@@ -300,11 +306,8 @@ func (b *Broker) prepareSettingsSnapshotLocked(ctx context.Context, engine strin
 	snapshot.WorkingSetLimitStatus = launch.WorkingSetLimitStatus
 	snapshot.Adopted = launch.Adopted
 	snapshot.Format = launch.Format
-	snapshot.Editable = launch.Editable && ready
+	snapshot.Editable = launch.Editable
 	snapshot.Reason = launch.Reason
-	if !ready {
-		snapshot.Reason = "The proxy service is unavailable."
-	}
 	if snapshot.Phase == "applying" {
 		snapshot.Editable = false
 		snapshot.Reason = "Settings are being applied."
@@ -484,6 +487,9 @@ func (b *Broker) runSettingsOperationLocked(ctx context.Context, engine string, 
 	if err := b.migrateSettingsArgumentsLocked(ctx, engine, record); err != nil {
 		return err
 	}
+	// Acceptance owns the next spawn's port even if activation fails before
+	// Configure reaches its rebind callback. Replay restores the same plan.
+	b.setExplicitSettingsProxyPort(profile, record.Snapshot.Settings.ProxyPort)
 	service := profile.DiscoveryService
 	if b.regCache != nil {
 		b.unregisterService(service)
@@ -502,6 +508,7 @@ func (b *Broker) runSettingsOperationLocked(ctx context.Context, engine string, 
 	// A running engine whose launch changed is still restarted.
 	paused, _ := b.settingsPause()
 	configure := settings.Configure{Engine: engine, Settings: record.Snapshot.Settings.Clone(), OperationID: id, Resume: record.Resume && !paused}
+	recoverUnavailable := !record.Snapshot.Running
 
 	launch, err := func() (settings.LaunchState, error) {
 		b.engineConfigMu.Unlock()
@@ -509,8 +516,21 @@ func (b *Broker) runSettingsOperationLocked(ctx context.Context, engine string, 
 		var launch settings.LaunchState
 		// No strict request may be admitted under settings about to change.
 		err := b.withdrawSettingsIdentity(ctx, engine)
+		if err == nil && recoverUnavailable {
+			// Spawn/replay can read the journal. Finish recovery before Configure
+			// takes the manager operation lock and calls back into rebind.
+			err = b.recoverSettingsProxy(ctx, profile, configure.Settings.ProxyPort)
+		}
 		if err == nil {
 			err = b.settingsWorkerCall(ctx, "engine:configure-launch", configure, &launch)
+		}
+		if err == nil {
+			proxy := b.settingsProxy(engine)
+			if proxy == nil {
+				err = fmt.Errorf("proxy unavailable after settings activation")
+			} else if ready, port := proxy.Status(engine); !ready || port != configure.Settings.ProxyPort || b.proxyProcessHandle() != proxy {
+				err = fmt.Errorf("proxy did not activate the accepted port %d", configure.Settings.ProxyPort)
+			}
 		}
 		if err != nil {
 			// A failed RPC carries no result, so read the observed facts back
@@ -542,7 +562,8 @@ func (b *Broker) runSettingsOperationLocked(ctx context.Context, engine string, 
 		b.engineProxy(profile).backendPort.Store(int32(launch.EffectivePort))
 	}
 	proxyReady := false
-	if proxy := b.settingsProxy(engine); proxy != nil {
+	record.Snapshot.EffectiveProxyPort = 0
+	if proxy := b.settingsProxy(engine); proxy != nil && proxy == b.proxyProcessHandle() {
 		proxyReady, record.Snapshot.EffectiveProxyPort = proxy.Status(engine)
 	}
 	// An unsuccessful apply can leave the previous engine running. Restore
@@ -709,6 +730,10 @@ func (b *Broker) applyEngineSettings(ctx context.Context, p settings.Request, ca
 	// Recheck CORS after acquiring the target's apply lock. An HTTP ingress
 	// check alone can become stale while another accepted apply is running.
 	p.PreserveCORS = caller != ""
+	profile, ok := b.frontedEngineProfile(p.Engine)
+	if !ok {
+		return settingsReceipt{}, fmt.Errorf("this engine does not support settings")
+	}
 	record, _, err := b.prepareSettingsSnapshotLocked(ctx, p.Engine)
 	if err != nil {
 		return settingsReceipt{}, err
@@ -741,7 +766,8 @@ func (b *Broker) applyEngineSettings(ctx context.Context, p settings.Request, ca
 			b.engineSettings[p.Engine] = previous
 		}
 	}
-	if preview.Settings.Equal(record.Snapshot.Settings) && record.Snapshot.Phase != "failed" {
+	if preview.Settings.Equal(record.Snapshot.Settings) && record.Snapshot.Phase != "failed" && record.Snapshot.EffectiveProxyPort == preview.Settings.ProxyPort {
+		record.Explicit = true
 		record.Snapshot.RequestID = p.RequestID
 		record.Snapshot.Phase = "succeeded"
 		record.Receipts[p.RequestID] = settingsReceipt{Hash: hash, Revision: record.Snapshot.Revision, Phase: "succeeded"}
@@ -751,6 +777,7 @@ func (b *Broker) applyEngineSettings(ctx context.Context, p settings.Request, ca
 			return settingsReceipt{}, err
 		}
 		r.mu.Unlock()
+		b.setExplicitSettingsProxyPort(profile, preview.Settings.ProxyPort)
 		b.publishSettingsLocked()
 		return record.Receipts[p.RequestID], nil
 	}
@@ -769,6 +796,7 @@ func (b *Broker) applyEngineSettings(ctx context.Context, p settings.Request, ca
 		return settingsReceipt{}, fmt.Errorf("settings could not be saved; no runtime changes were made")
 	}
 	r.mu.Unlock()
+	b.setExplicitSettingsProxyPort(profile, preview.Settings.ProxyPort)
 	b.publishSettingsLocked()
 	// Once accepted, completion is target-owned. Losing the requesting UI or
 	// peer cannot abandon half a port swap. The operation has its own deadline.
@@ -921,21 +949,30 @@ func (b *Broker) rebindSettingsProxy(engine string, port int) error {
 		return fmt.Errorf("this engine does not support settings")
 	}
 	p := b.settingsProxy(engine)
-	if p == nil {
+	if p == nil || b.proxyProcessHandle() != p || b.proxySupClosing.Load() {
 		return fmt.Errorf("proxy unavailable")
 	}
-	// Disable automatic facade takeover before the ready event can race the
-	// explicit rebind. The accepted journal restores these choices after restart.
-	state := b.engineProxy(profile)
-	state.explicitSettings.Store(true)
-	_, rpcErr, err := p.Call(context.Background(), profile.addressed("set-port"), settingsJSON(map[string]int{"port": port}))
+	// Recovery belongs before Configure, never here: the manager holds its
+	// operation lock while this callback runs, and spawn/replay reads settings.
+	// Native model-settings Configure also shares this callback without the
+	// ordinary Apply's early startup-plan update.
+	b.setExplicitSettingsProxyPort(profile, port)
+	raw, rpcErr, err := p.Call(context.Background(), profile.addressed("set-port"), settingsJSON(map[string]int{"port": port}))
 	if err != nil {
 		return err
 	}
 	if rpcErr != nil {
 		return fmt.Errorf("%s", rpcErr.Message)
 	}
-	state.startupPort.Store(int32(port))
+	var result proxyReadyParams
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return fmt.Errorf("decode proxy port result: %w", err)
+	}
+	if result.Port != port || b.settingsProxy(engine) != p || b.proxyProcessHandle() != p || b.proxySupClosing.Load() {
+		return fmt.Errorf("proxy did not activate the accepted port %d on the current process", port)
+	}
+	p.recordFacadeReady(engine, result, raw)
+	p.listenerOnly.Store(false)
 	return nil
 }
 

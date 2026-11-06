@@ -33,9 +33,17 @@ type settingsHarness struct {
 	engine              string
 	applies             atomic.Int32
 	proxyRebinds        atomic.Int32
+	engineStarts        atomic.Int32
+	bindRace            atomic.Bool
+	facadeBindRace      atomic.Bool
+	facadeUnanswered    atomic.Bool
+	serializeLaunch     atomic.Bool
+	configureMu         sync.Mutex
+	launchReadWaiting   chan struct{}
 	fail                atomic.Bool
 	failBeforeStop      atomic.Bool
 	loseProxyOnStop     atomic.Bool
+	dropProxyOnStop     atomic.Bool
 	failResultSave      atomic.Bool
 	otherEnginePort     atomic.Int32
 	previewPreserveCORS atomic.Bool
@@ -153,7 +161,12 @@ func newSettingsHarnessForEngine(t *testing.T, engine string) *settingsHarness {
 
 func newServingSettingsHarness(t *testing.T, engine string, serving *engines.ServingConfig) *settingsHarness {
 	t.Helper()
-	h := &settingsHarness{engine: engine, b: &Broker{codec: NewCodec(&bytes.Buffer{}), nodeID: "target", clusterDir: filepath.Join(t.TempDir(), "cluster")}, settingsReplies: make(chan json.RawMessage, 8)}
+	return newSettingsHarnessWithLaunch(t, engine, serving, true)
+}
+
+func newSettingsHarnessWithLaunch(t *testing.T, engine string, serving *engines.ServingConfig, running bool) *settingsHarness {
+	t.Helper()
+	h := &settingsHarness{engine: engine, b: &Broker{codec: NewCodec(&bytes.Buffer{}), nodeID: "target", clusterDir: filepath.Join(t.TempDir(), "cluster")}, settingsReplies: make(chan json.RawMessage, 8), launchReadWaiting: make(chan struct{}, 1)}
 	h.b.setDynamicEngines([]engines.Descriptor{customEngineDescriptor()}, func(int) bool { return true })
 	ports := make([]int, 4)
 	for i := range ports {
@@ -176,6 +189,12 @@ func newServingSettingsHarness(t *testing.T, engine string, serving *engines.Ser
 		"llamacpp-custom": {ready: true, port: ports[2]},
 	}}
 	publishTestProxy(h.b, proxy)
+	h.b.engineProxy(mustEngineProxyProfile("llamacpp")).startupPort.Store(int32(ports[3]))
+	custom, ok := h.b.frontedEngineProfile("llamacpp-custom")
+	if !ok {
+		t.Fatal("fixture custom engine is not fronted")
+	}
+	h.b.engineProxy(custom).startupPort.Store(int32(ports[2]))
 	go func() {
 		for {
 			msg, err := proxyCodec.Read()
@@ -191,6 +210,29 @@ func newServingSettingsHarness(t *testing.T, engine string, serving *engines.Ser
 				h.proxyCalls = append(h.proxyCalls, policyCall{method: msg.Method, params: append(json.RawMessage(nil), msg.Params...)})
 				h.proxyCallsMu.Unlock()
 			}
+			if msg.Method == "facade/enable" {
+				var spec enableFacadeRequest
+				if err := json.Unmarshal(msg.Params, &spec); err != nil {
+					t.Errorf("decode facade request: %v", err)
+					return
+				}
+				if h.facadeBindRace.Load() {
+					_ = proxyCodec.RespondError(msg.ID, codeFacadeBindFailed, "fixture bind race")
+					continue
+				}
+				proxy.readyMu.Lock()
+				state := proxy.facadeState[spec.Engine]
+				if !state.ready {
+					state = proxyFacadeState{ready: true, port: spec.Port}
+					proxy.facadeState[spec.Engine] = state
+				}
+				proxy.readyMu.Unlock()
+				if h.facadeUnanswered.Load() {
+					continue
+				}
+				_ = proxyCodec.Respond(msg.ID, enableFacadeReply{Engine: spec.Engine, Port: state.port})
+				continue
+			}
 			if engine == "" || method != "set-port" {
 				_ = proxyCodec.Respond(msg.ID, map[string]bool{"ok": true})
 				continue
@@ -203,13 +245,20 @@ func newServingSettingsHarness(t *testing.T, engine string, serving *engines.Ser
 				return
 			}
 			h.proxyRebinds.Add(1)
+			if h.bindRace.Load() {
+				_ = proxyCodec.RespondError(msg.ID, -32000, "fixture bind race")
+				continue
+			}
 			proxy.readyMu.Lock()
 			proxy.facadeState[engine] = proxyFacadeState{ready: true, port: p.Port}
 			proxy.readyMu.Unlock()
 			_ = proxyCodec.Respond(msg.ID, map[string]int{"port": p.Port})
 		}
 	}()
-	launch := settings.LaunchState{Engine: engine, ServerPort: ports[0], EffectivePort: ports[0], LaunchText: "--fixture-option", Running: true, Editable: true, Format: "pair-arguments-v1", Serving: serving.Clone()}
+	launch := settings.LaunchState{Engine: engine, ServerPort: ports[0], EffectivePort: ports[0], LaunchText: "--fixture-option", Running: running, Editable: true, Format: "pair-arguments-v1", Serving: serving.Clone()}
+	if !running {
+		launch.EffectivePort = 0
+	}
 	go func() {
 		for {
 			msg, err := codec.Read()
@@ -235,10 +284,20 @@ func newServingSettingsHarness(t *testing.T, engine string, serving *engines.Ser
 					t.Error(err)
 					return
 				}
+				if request.Engine == engine && h.serializeLaunch.Load() {
+					select {
+					case h.launchReadWaiting <- struct{}{}:
+					default:
+					}
+					h.configureMu.Lock()
+				}
 				h.launchMu.Lock()
 				current := launch
 				current.WorkingSetLimitStatus = h.launchStatus
 				h.launchMu.Unlock()
+				if request.Engine == engine && h.serializeLaunch.Load() {
+					h.configureMu.Unlock()
+				}
 				current.Engine = request.Engine
 				if request.Engine != engine {
 					current.ServerPort = int(h.otherEnginePort.Load())
@@ -263,10 +322,15 @@ func newServingSettingsHarness(t *testing.T, engine string, serving *engines.Ser
 				// stop the fixture from answering an unrelated read, which is
 				// exactly what the broker's lock split makes possible.
 				go func(msg *Message) {
+					h.configureMu.Lock()
+					defer h.configureMu.Unlock()
 					h.applies.Add(1)
 					if h.entered != nil {
 						h.entered <- struct{}{}
 						<-h.release
+					}
+					if h.dropProxyOnStop.Load() {
+						h.b.clearProxyHandles()
 					}
 					if h.failBeforeStop.Load() {
 						if h.loseProxyOnStop.Load() {
@@ -303,6 +367,11 @@ func newServingSettingsHarness(t *testing.T, engine string, serving *engines.Ser
 					h.launchMu.Lock()
 					launch.EffectivePort = p.Settings.ServerPort
 					launch.Running = p.Resume
+					if p.Resume {
+						h.engineStarts.Add(1)
+					} else {
+						launch.EffectivePort = 0
+					}
 					current := launch
 					h.launchMu.Unlock()
 					if h.failResultSave.Load() {

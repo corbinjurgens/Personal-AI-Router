@@ -112,9 +112,17 @@ func (p *proxyProcess) Done() <-chan struct{} { return p.done }
 // Status reports whether one engine's facade has announced itself ready and, if
 // so, the HTTP port it bound (0 until its "ready" arrives).
 func (p *proxyProcess) Status(engine string) (bool, int) {
+	select {
+	case <-p.done:
+		return false, 0
+	default:
+	}
 	p.readyMu.Lock()
 	defer p.readyMu.Unlock()
 	state := p.facadeState[engine]
+	if !state.ready || state.port <= 0 {
+		return false, 0
+	}
 	return state.ready, state.port
 }
 
@@ -285,16 +293,7 @@ func (p *proxyProcess) handleNotify(method string, params json.RawMessage) {
 			slog.Warn("proxy emitted invalid ready payload", "engine", engine, "err", err)
 			return
 		}
-		p.readyMu.Lock()
-		if p.facadeState == nil {
-			p.facadeState = make(map[string]proxyFacadeState, len(engines.Names()))
-		}
-		p.facadeState[engine] = proxyFacadeState{
-			ready:  true,
-			port:   rp.Port,
-			params: append(json.RawMessage(nil), params...),
-		}
-		p.readyMu.Unlock()
+		p.recordFacadeReady(engine, rp, params)
 		slog.Info("proxy reported ready", "engine", engine, "version", rp.Version, "port", rp.Port)
 	}
 	// The proxy subscribes upward for its routing targets: wire it to
@@ -306,6 +305,21 @@ func (p *proxyProcess) handleNotify(method string, params json.RawMessage) {
 	}
 	if p.onNotify != nil {
 		p.onNotify(method, params)
+	}
+}
+
+// A ready event and an acknowledged addressed set-port both confirm the live
+// listener. In particular an idempotent set-port sends no new ready event.
+func (p *proxyProcess) recordFacadeReady(engine string, ready proxyReadyParams, params json.RawMessage) {
+	p.readyMu.Lock()
+	defer p.readyMu.Unlock()
+	if p.facadeState == nil {
+		p.facadeState = make(map[string]proxyFacadeState, len(engines.Names()))
+	}
+	p.facadeState[engine] = proxyFacadeState{
+		ready:  true,
+		port:   ready.Port,
+		params: append(json.RawMessage(nil), params...),
 	}
 }
 
@@ -477,7 +491,7 @@ func (b *Broker) startProxySupervision(facadesConfigured bool) {
 
 // startProxySupervisorLocked creates and starts the one proxy supervisor.
 // Caller holds proxySupMu.
-func (b *Broker) startProxySupervisorLocked() {
+func (b *Broker) startProxySupervisorLocked() error {
 	sup := newSupervisor(engines.ProxyComponent, defaultRestartPolicy(), b.spawnProxy)
 	b.configureProxySupervisorCallbacks(sup)
 	b.proxySupExhausted.Store(false)
@@ -496,7 +510,9 @@ func (b *Broker) startProxySupervisorLocked() {
 		slog.Warn("proxy failed to start; continuing without local engine proxies",
 			"path", b.proxyPath, "err", err)
 		b.setProxySupervisor(nil)
+		return err
 	}
+	return nil
 }
 
 // stopProxySupervisorLocked stops the proxy and withdraws its handles. Caller

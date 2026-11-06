@@ -750,6 +750,27 @@ selection excludes the default engine port and other engines' reserved ports.
 Explicit engine and proxy settings are preserved; a bind failure on an explicitly
 chosen proxy port is reported instead of selecting a fallback.
 
+An unavailable proxy does not prevent editing engine settings. Accepted explicit
+proxy ports remain the configured choices. Otherwise a healthy facade reports its
+live port; an unavailable facade uses the startup plan, saved component port or
+default. Effective ports are zero unless a current facade is
+ready. Apply saves its explicit port and next-spawn plan before activation. A
+stopped engine stays stopped, with its saved intent unchanged. For a missing
+facade the broker enables it in the existing process, preserving siblings; for
+a missing process it uses the existing supervisor even if routing is disabled.
+Recovery runs before the manager's Configure callback, which only rebinds and
+persists the addressed facade port. Normal running-engine stop/swap/resume
+ordering is retained, along with authorization, Pause/Halt and operation fences.
+
+Activation failure retains accepted desired settings and a failed receipt, with
+effective state read independently. Retrying with a fresh request ID attempts
+activation again even for unchanged settings; a duplicate request ID returns
+its original receipt. Supervision already recovering keeps its backoff and
+restart budget; a fresh explicit request can renew an exhausted supervisor.
+Shutdown and disabled or unresolved proxy configuration still refuse recovery.
+A lost bind race fails visibly without substituting a port or stopping its
+other owner. Changing only Server port cannot repair an occupied Proxy port.
+
 For automatic model-bearing inference, every facade combines scheduler pending counts and GPU pressure with the process-wide reservation map under one lock before forwarding, so concurrent requests distribute without an artificial delay or a round trip through the scheduler. A reservation is released when its request ends and moves with a failover, so a node stops counting as loaded as soon as it stops working. Manual pins, model-owner tiers, and the complete failover list keep their existing precedence. The broker otherwise treats the proxy as **optional and non-fatal**.
 
 Each facade announces its bound port **asynchronously**, via an engine-addressed `ready` notification emitted once its HTTP listener is up. The broker records readiness per engine and exposes it through that engine's `<engine>-proxy:get-status` request — per engine, because the facades bind different ports and a single port for the process would be whichever readied last. Because `ready` arrives after `app:ready` (and the proxy is optional), clients learn a port by **polling** `<engine>-proxy:get-status` rather than assuming it from `app:ready`.
@@ -1812,7 +1833,7 @@ A malformed request, missing port, or port outside `1`–`65535` is refused with
 Automatic bind recovery retries a failed facade enable on a free fallback only
 when the port was not explicitly chosen. It preserves the engine's port.
 Port setters also return `-32000` if the settings operation cannot run,
-including when the engine manager or proxy is unavailable.
+including when the engine manager is unavailable or proxy recovery fails.
 
 The same broker-local status, subscription, port-setting methods and addressed
 relay apply to every table engine's `<engine>-proxy:*` namespace.
