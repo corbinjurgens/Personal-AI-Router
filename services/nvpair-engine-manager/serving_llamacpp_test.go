@@ -1275,8 +1275,24 @@ func TestLlamaServingRecoveryIsDeterministic(t *testing.T) {
 	}
 	rt.Serving = &recovered
 	second, err := compileLlamaServing(command, rt, true)
-	if err != nil || !reflect.DeepEqual(first, second) {
-		t.Fatalf("recovery changed prepared snapshot/digest: %v", err)
+	if err != nil {
+		t.Fatalf("compile recovered serving plan: %v", err)
+	}
+	if err := recheckPreparedServing(st, command, rt, first); err != nil {
+		t.Fatalf("recovered runtime rejected the original prepared plan: %v", err)
+	}
+	if first.Digest != second.Digest {
+		t.Fatal("recovery changed the prepared digest")
+	}
+	if !bytes.Equal(first.Snapshot, second.Snapshot) {
+		t.Fatal("recovery changed the prepared snapshot")
+	}
+	// The pre-spawn recheck validates file identity, then excludes private
+	// FileInfo bookkeeping such as access times from launch-plan equality.
+	firstPlan, secondPlan := *first, *second
+	firstPlan.evidence, secondPlan.evidence = nil, nil
+	if !reflect.DeepEqual(firstPlan, secondPlan) {
+		t.Fatal("recovery changed the compiled serving plan")
 	}
 }
 
