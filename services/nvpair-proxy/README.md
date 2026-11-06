@@ -697,7 +697,10 @@ for the independent `localOnly` edit lock, desktop controls and precedence examp
   configured tiers the statuses are unchanged.
   All variants of a role alias carry `context_length`, the largest known
   context among that role's visible resolved profiles across self and peers
-  whose engines have an enabled facade in this process.
+  whose declaring node is returned by its engine facade's inference candidate
+  resolver for that model. Self facts require a self candidate; peer facts
+  require that exact peer, so another node's inventory cannot qualify them.
+  Supported binding/preparation offers count even without inventory.
   It is omitted when none is known or any such profile is unbounded
   (`contextTokens: 0`). Missing or withheld keys supply no facts; router tier
   entries do not supply this field. Upstream records with the same alias id
@@ -743,7 +746,8 @@ for the independent `localOnly` edit lock, desktop controls and precedence examp
     including a tier whose entries are all API and a tier this node's own roles
     declare; peers' declarations are not seen here. `context_length` uses the
     same self-policy role resolver and unknown/unbounded omission rule as
-    facade catalogs, including self's local-only profiles on enabled engines. No upstream request
+    facade catalogs, including self's local-only profiles when the inference
+    candidate resolver returns self for their model. No upstream request
     is made.
   - Every inference route any engine profile declares (`POST /v1/chat/completions`,
     `/v1/completions`, `/v1/embeddings`, `/v1/messages`): enters the common inference

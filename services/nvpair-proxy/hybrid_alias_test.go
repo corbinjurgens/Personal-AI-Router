@@ -418,8 +418,17 @@ func TestRoleCatalogVisibleContext(t *testing.T) {
 			f := fx.p.soleFacade()
 			for _, n := range f.discovery.Nodes() {
 				n.Roles = pol.Roles
+				n.Models = []string{"qwen3-8b"}
 				n.Profiles = []nodepolicy.AdvertisedProfile{{Key: "public", Engine: "llamacpp-custom", Model: "qwen3-8b", ContextTokens: peerContext}}
 				f.discovery.AddManual(n)
+			}
+			f.discovery.AddManual(selfNode("self", f.profile.FacadePort, "private-model"))
+			setBackend(t, f, newRecordingEngine(t, http.StatusOK).URL, true)
+			if candidates := f.resolveCandidates("private-model"); len(candidates) != 1 || !candidates[0].self {
+				t.Fatalf("private model routing control = %+v, want self", candidates)
+			}
+			if candidates := f.resolveCandidates("qwen3-8b"); len(candidates) != 1 || candidates[0].self || candidates[0].id != "n1" {
+				t.Fatalf("public model routing control = %+v, want n1 peer", candidates)
 			}
 			assert := func(t *testing.T, rec *httptest.ResponseRecorder, want int) {
 				t.Helper()
@@ -486,6 +495,93 @@ func TestRoleCatalogVisibleContext(t *testing.T) {
 	test("missing and withheld references are not zero facts", 32768, 131072, []string{"missing", "private", "public"}, 131072, 32768)
 }
 
+func TestRoleCatalogContextUsesCandidateNodeRoutability(t *testing.T) {
+	test := func(name string, largeContext int, configure func(*Node), wantLarge bool, wantContext int) {
+		t.Run(name, func(t *testing.T) {
+			fx := newTierFixture(t, llamacppCase(t), nodepolicy.Default(), map[string][]string{
+				"small-peer": {"small"}, "large-peer": {"large"},
+			}, nil)
+			f := fx.p.soleFacade()
+			for _, id := range []string{"small-peer", "large-peer"} {
+				n, ok := discoveredNode(f, id)
+				if !ok {
+					t.Fatalf("missing fixture node %s", id)
+				}
+				model, tokens := "small", 8192
+				if id == "large-peer" {
+					model, tokens = "large", largeContext
+				}
+				n.Profiles = []nodepolicy.AdvertisedProfile{{Key: model, Engine: "llamacpp", Model: model, ContextTokens: tokens}}
+				n.Roles = []nodepolicy.Role{{Name: "weak", Profiles: []string{model}}}
+				if id == "large-peer" {
+					configure(&n)
+				}
+				f.discovery.AddManual(n)
+			}
+			wantCandidates := []tierCand{{node: "small-peer", model: "small", declared: true}}
+			if wantLarge {
+				wantCandidates = append(wantCandidates, tierCand{node: "large-peer", model: "large", declared: true})
+			}
+			gotCandidates := resolvedTier(f, "weak", requestNeeds{}, false)
+			slices.SortFunc(gotCandidates, func(a, b tierCand) int { return strings.Compare(a.node, b.node) })
+			slices.SortFunc(wantCandidates, func(a, b tierCand) int { return strings.Compare(a.node, b.node) })
+			if !slices.Equal(gotCandidates, wantCandidates) {
+				t.Fatalf("routing control = %+v, want %+v", gotCandidates, wantCandidates)
+			}
+			assertCatalog := func(records []json.RawMessage) {
+				t.Helper()
+				var ids []string
+				for _, raw := range records {
+					var record struct {
+						ID            string `json:"id"`
+						ContextLength *int   `json:"context_length"`
+					}
+					if err := json.Unmarshal(raw, &record); err != nil {
+						t.Fatal(err)
+					}
+					ids = append(ids, record.ID)
+					if wantContext == 0 {
+						var fields map[string]json.RawMessage
+						if err := json.Unmarshal(raw, &fields); err != nil {
+							t.Fatal(err)
+						}
+						if _, exists := fields["context_length"]; exists {
+							t.Errorf("%s context_length must be omitted for a routable unbounded profile", record.ID)
+						}
+					} else if record.ContextLength == nil || *record.ContextLength != wantContext {
+						t.Errorf("%s context_length = %v, want %d", record.ID, record.ContextLength, wantContext)
+					}
+				}
+				if want := aliasesOf("weak"); !slices.Equal(ids, want) {
+					t.Errorf("catalog aliases = %v, want %v", ids, want)
+				}
+			}
+			assertCatalog(f.tierModelEntries(nil))
+		})
+	}
+	unserved := func(n *Node) { n.ServedModels = nodepolicy.ServedModels{} }
+	missingInventory := func(n *Node) { n.Models = []string{"small"} }
+	otherNodeOwnsModel := func(n *Node) {
+		n.Models = nil
+		n.Profiles[0].Model = "small"
+	}
+	routable := func(n *Node) {}
+	boundOffer := func(n *Node) {
+		n.Models = nil
+		n.PolicyRevision = "1"
+		n.EngineBindingOffers = bindingOffer("llamacpp", "large")
+	}
+	test("unserved larger profile cannot inflate context", 131072, unserved, false, 8192)
+	test("another node inventory cannot serve larger profile", 131072, missingInventory, false, 8192)
+	test("same model on another node cannot supply profile context", 131072, otherNodeOwnsModel, false, 8192)
+	test("unserved unbounded profile cannot hide context", 0, unserved, false, 8192)
+	test("missing inventory unbounded profile cannot hide context", 0, missingInventory, false, 8192)
+	test("routable larger profile raises context", 131072, routable, true, 131072)
+	test("routable unbounded profile omits context", 0, routable, true, 0)
+	test("binding offer without inventory raises context", 131072, boundOffer, true, 131072)
+	test("binding offer without inventory omits unbounded context", 0, boundOffer, true, 0)
+}
+
 func TestRoleCatalogIgnoresDisabledEngineContext(t *testing.T) {
 	test := func(name string, peer bool, context int) {
 		t.Run(name, func(t *testing.T) {
@@ -498,6 +594,11 @@ func TestRoleCatalogIgnoresDisabledEngineContext(t *testing.T) {
 			}
 			fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"peer": {"disabled-model"}}, nil)
 			f := fx.p.soleFacade()
+			f.discovery.AddManual(selfNode("self", f.profile.FacadePort, "local-model"))
+			setBackend(t, f, newRecordingEngine(t, http.StatusOK).URL, true)
+			if candidates := f.resolveCandidates("local-model"); len(candidates) != 1 || !candidates[0].self {
+				t.Fatalf("local model routing control = %+v, want self", candidates)
+			}
 			if f.tierFacade("strata", true) != nil {
 				t.Fatal("fixture unexpectedly has a route to the disabled engine")
 			}
