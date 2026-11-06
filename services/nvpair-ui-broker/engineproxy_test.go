@@ -369,6 +369,8 @@ const (
 	// fakeProxyAcceptsFacades makes the child enable a facade instead of
 	// refusing it.
 	fakeProxyAcceptsFacades = "accept-facades"
+	// fakeProxyExactPorts exercises settings recovery with real ready replies.
+	fakeProxyExactPorts = "exact-ports"
 	// fakeProxyHangs makes the child read its requests and never answer.
 	fakeProxyHangs = "hang"
 	// fakeProxyHoldsReplay holds the last replay acknowledgement until the
@@ -400,6 +402,7 @@ func runFakeProxy() {
 	in := bufio.NewScanner(os.Stdin)
 	in.Buffer(nil, 1<<20)
 	out := json.NewEncoder(os.Stdout)
+	facades := make(map[string]int)
 	for in.Scan() {
 		var req struct {
 			ID     json.RawMessage `json:"id"`
@@ -438,7 +441,21 @@ func runFakeProxy() {
 			}
 			reply["result"] = map[string]any{}
 		case "facade/enable":
-			if os.Getenv(fakeProxyEnv) == fakeProxyAcceptsFacades {
+			if os.Getenv(fakeProxyEnv) == fakeProxyExactPorts {
+				var spec enableFacadeRequest
+				if json.Unmarshal(req.Params, &spec) != nil {
+					os.Exit(2)
+				}
+				port := facades[spec.Engine]
+				if port == 0 {
+					port = spec.Port
+					facades[spec.Engine] = port
+					if out.Encode(map[string]any{"jsonrpc": "2.0", "method": engines.AddressMethod(spec.Engine, "ready"), "params": proxyReadyParams{Port: port}}) != nil {
+						return
+					}
+				}
+				reply["result"] = enableFacadeReply{Engine: spec.Engine, Port: port}
+			} else if os.Getenv(fakeProxyEnv) == fakeProxyAcceptsFacades {
 				var spec enableFacadeRequest
 				_ = json.Unmarshal(req.Params, &spec)
 				reply["result"] = enableFacadeReply{Engine: spec.Engine, Port: 40124}
@@ -448,7 +465,26 @@ func runFakeProxy() {
 		case fakeProxyEnvironmentMethod:
 			reply["result"] = fakeProxyEnvironment()
 		default:
-			reply["result"] = map[string]any{}
+			engine, method := engines.SplitAddressedMethod(req.Method)
+			if os.Getenv(fakeProxyEnv) == fakeProxyExactPorts && engine != "" && method == "set-port" {
+				var params struct {
+					Port int `json:"port"`
+				}
+				if json.Unmarshal(req.Params, &params) != nil {
+					os.Exit(2)
+				}
+				if facades[engine] == 0 {
+					reply["error"] = map[string]any{"code": -32000, "message": "facade unavailable"}
+				} else {
+					facades[engine] = params.Port
+					if out.Encode(map[string]any{"jsonrpc": "2.0", "method": engines.AddressMethod(engine, "ready"), "params": proxyReadyParams{Port: params.Port}}) != nil {
+						return
+					}
+					reply["result"] = proxyReadyParams{Port: params.Port}
+				}
+			} else {
+				reply["result"] = map[string]any{}
+			}
 		}
 		if out.Encode(reply) != nil {
 			return
