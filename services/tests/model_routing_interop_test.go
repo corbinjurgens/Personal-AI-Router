@@ -106,8 +106,14 @@ func TestModelControlsRoutingAcrossProcesses(t *testing.T) {
 		Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceLlamaCPP: {Port: portOfURL(t, upstream.URL)}},
 		Models:   models, ModelsByEngine: map[string][]string{"llamacpp": models, "llamacpp-custom": {}},
 		LoadedByEngine: map[string][]string{"llamacpp": models},
-		Policy: &nodepolicy.Advertisement{Revision: "304", Roles: map[string]nodepolicy.AdvertisedRole{
-			"weak": {Engine: "llamacpp", Model: concrete}, "medium": {Engine: "llamacpp", Model: multibyte512}, "strong": {Engine: "llamacpp", Model: overlong},
+		Policy: &nodepolicy.Advertisement{Revision: "304", Profiles: []nodepolicy.AdvertisedProfile{
+			{Key: "concrete", DisplayName: "Concrete", Engine: "llamacpp", Model: concrete},
+			{Key: "multibyte", DisplayName: "Multibyte", Engine: "llamacpp", Model: multibyte512},
+			{Key: "overlong", DisplayName: "Overlong", Engine: "llamacpp", Model: overlong},
+		}, Roles: []nodepolicy.Role{
+			{Name: "weak", Profiles: []string{"concrete"}},
+			{Name: "medium", Profiles: []string{"multibyte"}},
+			{Name: "strong", Profiles: []string{"overlong"}},
 		}},
 	}}
 	client := &http.Client{Timeout: serviceCallTimeout}
@@ -164,7 +170,7 @@ func TestModelControlsRoutingAcrossProcesses(t *testing.T) {
 		for _, entry := range reply.Data {
 			ids = append(ids, entry.ID)
 		}
-		expected := append(append([]string{}, want...), "weak", "weak-api", "weak-local", "medium", "medium-api", "medium-local")
+		expected := append(append([]string{}, want...), "weak", "weak-api", "weak-local", "medium", "medium-api", "medium-local", "strong", "strong-api", "strong-local")
 		if !reflect.DeepEqual(ids, expected) {
 			t.Fatal("client catalog lost valid ordering/aliases or retained invalid identifiers")
 		}
@@ -191,7 +197,7 @@ func TestModelControlsRoutingAcrossProcesses(t *testing.T) {
 		event.Node.Models = []string{overlong, multibyte513, "bad\x7f"}
 		event.Node.ModelsByEngine = map[string][]string{"llamacpp": event.Node.Models}
 		event.Node.LoadedByEngine = map[string][]string{"llamacpp": event.Node.Models}
-		event.Node.Policy = &nodepolicy.Advertisement{Revision: "305", Roles: map[string]nodepolicy.AdvertisedRole{"weak": {Engine: "llamacpp", Model: overlong}}}
+		event.Node.Policy = &nodepolicy.Advertisement{Revision: "305", Profiles: []nodepolicy.AdvertisedProfile{{Key: "overlong", DisplayName: "Overlong", Engine: "llamacpp", Model: overlong}}, Roles: []nodepolicy.Role{{Name: "weak", Profiles: []string{"overlong"}}}}
 		publish(noderec.NotifyNodeUpdated)
 		manual(event.Node.Models)
 		awaitModels(nil)
@@ -224,7 +230,7 @@ func TestModelControlsRoutingAcrossProcesses(t *testing.T) {
 		for _, entry := range reply.Data {
 			ids = append(ids, entry.ID)
 		}
-		if !reflect.DeepEqual(ids, []string{"weak", "weak-api", "weak-local", "medium", "medium-api", "medium-local"}) {
+		if !reflect.DeepEqual(ids, []string{"weak", "weak-api", "weak-local", "medium", "medium-api", "medium-local", "strong", "strong-api", "strong-local"}) {
 			t.Fatal("all-invalid catalog leaked an invalid ID or removed configured aliases")
 		}
 	})

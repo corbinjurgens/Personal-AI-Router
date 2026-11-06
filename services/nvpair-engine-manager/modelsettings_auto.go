@@ -507,6 +507,8 @@ func modelAutoReviewedID(model string, requested modelconfig.RequestedLoad, reso
 	return modelAutoReviewHash(model, requested, resolved, conversion, modelLoadDigest(data), nativeSource)
 }
 
+// model is the profile key throughout Auto resolution and frozen provenance.
+// Artifact identity is carried by the resolved artifact assertions.
 func modelAutoReviewHash(model string, requested modelconfig.RequestedLoad, resolved *modelconfig.ResolvedLoad, conversion, memory string, nativeSource ...string) (string, error) {
 	if conversion == "" {
 		conversion = "-"
@@ -524,9 +526,9 @@ func modelAutoReviewHash(model string, requested modelconfig.RequestedLoad, reso
 		source = base64.RawURLEncoding.EncodeToString(decoded)
 	}
 	data, err := json.Marshal(struct {
-		Model, Conversion, Memory, Estimator, NativeSource string
-		Requested                                          modelconfig.RequestedLoad
-		Finite                                             modelconfig.ResolvedLoad
+		ProfileKey, Conversion, Memory, Estimator, NativeSource string
+		Requested                                               modelconfig.RequestedLoad
+		Finite                                                  modelconfig.ResolvedLoad
 	}{model, conversion, memory, modelEstimatorRevision, source, requested, finite})
 	if err != nil {
 		return "", err
@@ -590,7 +592,9 @@ func modelAutoFrozen(model string, requested modelconfig.RequestedLoad, resolved
 	if err != nil || id != resolved.ReviewedInputID {
 		return modelLoadError(model, "auto", "Auto inputs changed since preview; explicitly Recalculate.")
 	}
-	if err := (modelconfig.ModelLoad{ModelID: model, Requested: requested, Resolved: resolved}).Validate(); err != nil {
+	// This synthetic record validates the finite allocation, not an artifact
+	// selector. The real artifact identity is checked by the compiler.
+	if _, err := modelconfig.CanonicalLoads([]modelconfig.ModelLoad{{ProfileKey: model, ModelID: "auto-review", Requested: requested, Resolved: resolved}}); err != nil {
 		return modelLoadError(model, "auto", err.Error())
 	}
 	return nil

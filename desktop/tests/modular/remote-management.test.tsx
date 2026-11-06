@@ -725,7 +725,7 @@ describe('permission controls', () => {
         requestId: ''
     }
     const policy: NodePolicyDocument = {
-        policy: '{"version":2,"revision":"5","availability":"available"}',
+        policy: '{"version":2,"revision":"5","availability":"available","profiles":[{"key":"draft-profile","displayName":"Draft","engine":"llamacpp","model":"draft-model"}]}',
         revision: '5',
         activation: null,
         availability: 'available',
@@ -1079,7 +1079,7 @@ describe('permission controls', () => {
             useNodeConfigurationStore.getState().adopt('peer-1', policy)
             useNodeConfigurationStore
                 .getState()
-                .setRole('peer-1', 'weak', { engine: 'llamacpp', model: 'draft-model' })
+                .setRole('peer-1', 'weak', 'draft-profile')
             await act(async () =>
                 root.render(
                     <>
@@ -1099,8 +1099,8 @@ describe('permission controls', () => {
             expect(document.body.textContent).toContain(message)
             expect(button('Save roles').disabled).toBe(true)
             expect(
-                useNodeConfigurationStore.getState().editors.get('peer-1')?.draft.weak?.model
-            ).toBe('draft-model')
+                useNodeConfigurationStore.getState().editors.get('peer-1')?.draft
+            ).toEqual([{ name: 'weak', profiles: ['draft-profile'] }])
             expect(button('Apply').disabled).toBe(true)
             expect(
                 document.querySelector<HTMLInputElement>('input[aria-label="Server port"]')
@@ -1125,7 +1125,7 @@ describe('permission controls', () => {
         useNodeConfigurationStore.getState().adopt('invalid-target', policy)
         useNodeConfigurationStore
             .getState()
-            .setRole('invalid-target', 'weak', { engine: 'llamacpp', model: 'draft-model' })
+            .setRole('invalid-target', 'weak', 'draft-profile')
         await act(async () =>
             root.render(
                 <RoleEditor

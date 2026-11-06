@@ -181,6 +181,10 @@ func (m *Manager) handleSettingsMessage(ctx context.Context, msg *Message) bool 
 					m.respondOrErr(msg, nil, err)
 					return
 				}
+				if err := m.exec.validateReviewedModelRemoval(ctx, p, envelope.ReviewedModelChange); err != nil {
+					m.respondOrErr(msg, nil, err)
+					return
+				}
 				result, err := m.exec.PreviewLaunch(p, ctx)
 				if err == nil && len(result.Errors) == 0 && result.Conflict == nil && p.ModelChange == nil && envelope.ValidateResources {
 					err = m.exec.validateUnacceptedAutoMemory(ctx, p, envelope.ResourceModel)

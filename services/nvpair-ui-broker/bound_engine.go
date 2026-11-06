@@ -901,8 +901,8 @@ func (b *Broker) boundPolicyChangeLocked(before, after nodepolicy.Policy) error 
 			reserved[cp.TargetEngine] = true
 		}
 	}
-	filter := func(refs []nodepolicy.Role, engine string) []nodepolicy.Role {
-		var out []nodepolicy.Role
+	filter := func(refs []nodepolicy.ModelRef, engine string) []nodepolicy.ModelRef {
+		var out []nodepolicy.ModelRef
 		for _, ref := range refs {
 			if ref.Engine == engine {
 				out = append(out, ref)

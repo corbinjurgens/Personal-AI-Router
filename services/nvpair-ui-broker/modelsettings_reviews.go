@@ -115,7 +115,7 @@ func modelReviewMemoryCurrent(before, after *modelconfig.TargetMemory, loads []m
 			pool := &observation.Domains[i]
 			required := pool.Kind == "system" || pool.Kind == "shared"
 			for _, load := range loads {
-				if load.ModelID != selected {
+				if load.ProfileKey != selected {
 					continue
 				}
 				if load.Resolved != nil && load.Resolved.DeviceBinding != nil && load.Resolved.DeviceBinding.DomainID == pool.ID {
@@ -155,9 +155,9 @@ func modelReviewRequest(p settings.Request) settings.Request {
 	return p
 }
 
-func (b *Broker) modelReviewRetainedLocked(p settings.Request, caller string, created time.Time) bool {
+func (b *Broker) modelReviewRetainedLocked(p settings.Request, caller string, created time.Time, source modelSettingsReviewSource) bool {
 	for _, record := range b.modelReviews {
-		if record.Target == b.nodeID && record.Caller == caller && record.Preview.PreviewDigest == p.ModelChange.PreviewDigest && record.Created.Equal(created) && reflect.DeepEqual(record.Request, modelReviewRequest(p)) {
+		if record.Target == b.nodeID && record.Caller == caller && record.Preview.PreviewDigest == p.ModelChange.PreviewDigest && record.Created.Equal(created) && record.Source.NativeDigest == source.NativeDigest && reflect.DeepEqual(record.Source.ReviewedModelChange, source.ReviewedModelChange) && reflect.DeepEqual(record.Request, modelReviewRequest(p)) {
 			return true
 		}
 	}
@@ -178,16 +178,22 @@ func (b *Broker) releaseAcceptedModelReviewLocked(p settings.Request, caller str
 // Caller holds engineConfigMu. This table retains unaccepted authority only;
 // receipt retries and recovery remain exclusively journal-owned.
 func (b *Broker) retainModelReviewLocked(p settings.Request, caller string, preview settings.Preview, source modelSettingsReviewSource) error {
+	reviewed, err := source.reviewedRemoval(*p.ModelChange, preview.PreviewDigest, source.native(*p.ModelChange))
+	if err != nil {
+		return err
+	}
+	source.ReviewedModelChange = reviewed
 	now := time.Now()
 	record := modelSettingsRetainedReview{Target: b.nodeID, Request: modelReviewRequest(p), Caller: caller, Preview: preview.Clone(), Source: source, Created: now}
 	encoded, err := json.Marshal(struct {
-		Request               settings.Request
-		Caller                string
-		Preview               settings.Preview
-		Launch                settings.LaunchState
-		Target, Policy, Epoch string
-		Created               time.Time
-	}{record.Request, caller, record.Preview, source.Launch, record.Target, source.Policy, source.Source.settingsEpoch, record.Created})
+		Request                             settings.Request
+		Caller                              string
+		Preview                             settings.Preview
+		Launch                              settings.LaunchState
+		Target, Policy, Epoch, NativeDigest string
+		ReviewedModelChange                 *modelconfig.ModelChange
+		Created                             time.Time
+	}{record.Request, caller, record.Preview, source.Launch, record.Target, source.Policy, source.Source.settingsEpoch, source.NativeDigest, source.ReviewedModelChange, record.Created})
 	if err != nil || len(encoded) > modelReviewBytes {
 		return modelSettingsConflict("review exceeds retention budget; reduce settings and Recalculate")
 	}
@@ -195,7 +201,7 @@ func (b *Broker) retainModelReviewLocked(p settings.Request, caller string, prev
 	kept := make([]modelSettingsRetainedReview, 0, min(len(b.modelReviews), modelReviewCount))
 	bytes := 0
 	for _, old := range b.modelReviews {
-		if now.Sub(old.Created) >= modelReviewTTL || old.Caller == caller && old.Request.Engine == p.Engine && old.Request.ModelChange.ModelID == p.ModelChange.ModelID {
+		if now.Sub(old.Created) >= modelReviewTTL || old.Caller == caller && old.Request.Engine == p.Engine && modelChangeKey(*old.Request.ModelChange) == modelChangeKey(*p.ModelChange) {
 			continue
 		}
 		kept = append(kept, old)
@@ -229,17 +235,23 @@ func (b *Broker) retainedModelReview(ctx context.Context, p settings.Request, ca
 	if found == nil {
 		return settings.Preview{}, modelSettingsReviewSource{}, modelSettingsConflict("review expired, superseded or changed; explicitly Recalculate")
 	}
+	reviewed, err := found.Source.reviewedRemoval(*p.ModelChange, found.Preview.PreviewDigest, found.Source.native(*p.ModelChange))
+	if err != nil {
+		return settings.Preview{}, modelSettingsReviewSource{}, err
+	}
+	found.Source.ReviewedModelChange = reviewed
 	if !b.modelWorkerCurrent(found.Source.Worker, found.Source.Source) {
 		return settings.Preview{}, modelSettingsReviewSource{}, modelSettingsConflict("review worker changed; explicitly Recalculate")
 	}
-	if p.ModelChange.Load != nil {
+	if found.Source.native(*p.ModelChange) {
 		request := p.Clone()
 		request.Settings, request.ModelChange = found.Preview.Settings.Clone(), nil
 		envelope := modelWorkerRequest(b, request, caller, false)
+		envelope.ReviewedModelChange = reviewed
 		for _, load := range request.Settings.ModelLoads {
-			if load.ModelID == p.ModelChange.ModelID && load.Resolved != nil && strings.HasPrefix(load.Resolved.ResolverRevision, "auto/") {
+			if !p.ModelChange.Remove && load.ProfileKey == modelChangeKey(*p.ModelChange) && load.Resolved != nil && strings.HasPrefix(load.Resolved.ResolverRevision, "auto/") {
 				envelope.ValidateResources = true
-				envelope.ResourceModel = load.ModelID
+				envelope.ResourceModel = load.ProfileKey
 			}
 		}
 		var validated settings.Preview

@@ -27,9 +27,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"regexp"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"nvpair-shared/engines"
 )
@@ -138,9 +138,9 @@ type Policy struct {
 	// Roles is this node's declaration of what it serves per tier. A node
 	// with at least one role is authoritative for itself: routers offer it
 	// only its declared role for each tier it names, and nothing for a tier
-	// absent from the map. Only a node that declares no role at all receives
+	// absent from the list. Only a node that declares no role at all receives
 	// a router's own tier entries. Routers never read Tiers of another node.
-	Roles map[string]Role `json:"roles"`
+	Roles []Role `json:"roles"`
 	// Tiers map each tier name to its candidates, most preferred first. Tiers
 	// are resolved by the node a request enters, across every node in the
 	// cluster that has a candidate model installed.
@@ -167,12 +167,14 @@ func (p *Policy) UnmarshalJSON(data []byte) error {
 	}
 	type wire Policy
 	next := wire(*p)
+	next.Roles = copyRoles(next.Roles)
 	if err := json.Unmarshal(data, &next); err != nil {
 		return err
 	}
 	next.ServedModels = slices.Clone(next.ServedModels)
 	next.ResidentModels = slices.Clone(next.ResidentModels)
 	next.EngineBindings = slices.Clone(next.EngineBindings)
+	next.Roles = copyRoles(next.Roles)
 	next.Pause.canonicalize()
 	*p = Policy(next)
 	return nil
@@ -188,16 +190,39 @@ const (
 	PausedByPeer PauseOrigin = "peer"
 )
 
-// Role is the engine and model this node serves one tier with. Bounds and
-// capabilities come from the node's Profile for the same (engine, model).
+// Role declares an ordered list of profile keys for one tier. Empty declarations
+// remain authoritative, even when no profile can serve the tier.
 type Role struct {
+	Name     string   `json:"name"`
+	Profiles []string `json:"profiles"`
+}
+
+func (r Role) MarshalJSON() ([]byte, error) {
+	type wire Role
+	if r.Profiles == nil {
+		r.Profiles = []string{}
+	}
+	return json.Marshal(wire(r))
+}
+
+func copyRoles(roles []Role) []Role {
+	out := make([]Role, len(roles))
+	for i, role := range roles {
+		out[i] = role
+		out[i].Profiles = append([]string{}, role.Profiles...)
+	}
+	return out
+}
+
+// ModelRef names one engine/model pair independently of role membership.
+type ModelRef struct {
 	Engine string `json:"engine"`
 	Model  string `json:"model"`
 }
 
 // ServedModels preserves absent versus explicitly empty permission. Clone it
 // with slices.Clone when transferring ownership to preserve non-nil empties.
-type ServedModels []Role
+type ServedModels []ModelRef
 
 func (s ServedModels) MarshalJSON() ([]byte, error) {
 	if s == nil {
@@ -206,7 +231,7 @@ func (s ServedModels) MarshalJSON() ([]byte, error) {
 	if err := validateModelList("servedModels", s); err != nil {
 		return nil, err
 	}
-	return json.Marshal([]Role(s))
+	return json.Marshal([]ModelRef(s))
 }
 
 func (s *ServedModels) UnmarshalJSON(data []byte) error {
@@ -218,7 +243,7 @@ func (s *ServedModels) UnmarshalJSON(data []byte) error {
 }
 
 // ResidentModels treats absence and an empty list as no resident preference.
-type ResidentModels []Role
+type ResidentModels []ModelRef
 
 func (r *ResidentModels) UnmarshalJSON(data []byte) error {
 	refs, err := decodeModelList("residentModels", data)
@@ -228,7 +253,7 @@ func (r *ResidentModels) UnmarshalJSON(data []byte) error {
 	return err
 }
 
-func decodeModelList(name string, data []byte) ([]Role, error) {
+func decodeModelList(name string, data []byte) ([]ModelRef, error) {
 	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
 		return nil, fmt.Errorf("%s must not be null", name)
 	}
@@ -236,7 +261,7 @@ func decodeModelList(name string, data []byte) ([]Role, error) {
 	if err := json.Unmarshal(data, &entries); err != nil {
 		return nil, err
 	}
-	refs := make([]Role, len(entries))
+	refs := make([]ModelRef, len(entries))
 	for i, entry := range entries {
 		fields, err := peerFields(entry)
 		if err != nil {
@@ -259,11 +284,11 @@ func decodeModelList(name string, data []byte) ([]Role, error) {
 // escaping. The bounded lists share the 256 KiB remote policy body.
 const maxModelReferenceBytes = 256
 
-func validateModelList(name string, refs []Role) error {
+func validateModelList(name string, refs []ModelRef) error {
 	if len(refs) > 256 {
 		return fmt.Errorf("%s must contain at most 256 entries", name)
 	}
-	seen := map[Role]bool{}
+	seen := map[ModelRef]bool{}
 	for i, ref := range refs {
 		if err := checkModelRef(ref.Engine, ref.Model, 0, nil); err != nil {
 			return fmt.Errorf("%s[%d]: %w", name, i, err)
@@ -407,10 +432,12 @@ func (m RequestOptionsMode) Effective() RequestOptionsMode {
 
 // Profile describes one model as served on this node.
 type Profile struct {
-	Name         string `json:"name"`
-	Engine       string `json:"engine"`
-	Model        string `json:"model"`
-	Quantization string `json:"quantization,omitempty"`
+	Key           string                 `json:"key"`
+	DisplayName   string                 `json:"displayName"`
+	Icon          string                 `json:"icon,omitempty"`
+	ModelIdentity *engines.ModelIdentity `json:"modelIdentity,omitempty"`
+	Engine        string                 `json:"engine"`
+	Model         string                 `json:"model"`
 	// ContextTokens is the context length this node serves the model with.
 	ContextTokens int          `json:"contextTokens,omitempty"`
 	Capabilities  []Capability `json:"capabilities,omitempty"`
@@ -450,7 +477,15 @@ func (p *Profile) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return err
 	}
+	if fields[modelField(fields, "displayName")] == nil {
+		next.DisplayName = next.Key
+	}
 	for key, value := range fields {
+		if strings.EqualFold(key, "key") || strings.EqualFold(key, "displayName") || strings.EqualFold(key, "icon") {
+			if !utf8.Valid(value) || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+				return errors.New("profile metadata has an invalid string field")
+			}
+		}
 		if (strings.EqualFold(key, "localOnly") || strings.EqualFold(key, "requestOptionsMode")) && bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
 			return errors.New("profile inference settings have an invalid field type")
 		}
@@ -466,6 +501,11 @@ func copyProfiles(profiles []Profile) []Profile {
 	for i := range out {
 		out[i].RequestOptions = bytes.Clone(out[i].RequestOptions)
 		out[i].Capabilities = slices.Clone(out[i].Capabilities)
+		if out[i].ModelIdentity != nil {
+			identity := *out[i].ModelIdentity
+			identity.Files = slices.Clone(identity.Files)
+			out[i].ModelIdentity = &identity
+		}
 		if out[i].Qualification != nil {
 			q := *out[i].Qualification
 			out[i].Qualification = &q
@@ -610,7 +650,7 @@ func Default() Policy {
 			WakeTimeoutSeconds:     90,
 		},
 		Profiles: []Profile{},
-		Roles:    map[string]Role{},
+		Roles:    []Role{},
 		Tiers:    map[string][]TierEntry{},
 		TierPolicy: TierPolicy{
 			AllowStronger: true,
@@ -620,8 +660,6 @@ func Default() Policy {
 		Routing: defaultRouting(),
 	}
 }
-
-var profileName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$`)
 
 // Validate reports the first problem with p, or nil. The broker validates
 // every write and refuses an invalid policy; the proxy validates what it is
@@ -674,29 +712,53 @@ func (p Policy) Validate() error {
 	if p.Admission.MemoryBudgetBytes < 0 {
 		return fmt.Errorf("admission.memoryBudgetBytes must not be negative")
 	}
-	seen := map[string]bool{}
+	keys := map[string]bool{}
 	models := map[string]bool{}
+	roles := map[string]bool{}
+	for i, role := range p.Roles {
+		if !slices.Contains(TierOrder, role.Name) {
+			return fmt.Errorf("roles[%d]: unknown tier %q (want one of %v)", i, role.Name, TierOrder)
+		}
+		if roles[role.Name] {
+			return fmt.Errorf("roles[%d]: duplicate name %q", i, role.Name)
+		}
+		roles[role.Name] = true
+	}
 	for i, pr := range p.Profiles {
-		if !profileName.MatchString(pr.Name) {
-			return fmt.Errorf("profiles[%d]: invalid name %q", i, pr.Name)
+		if err := ValidateProfileKey(pr.Key); err != nil {
+			return fmt.Errorf("profiles[%d].key: %w", i, err)
 		}
-		if seen[pr.Name] {
-			return fmt.Errorf("profiles[%d]: duplicate name %q", i, pr.Name)
+		if keys[pr.Key] {
+			return fmt.Errorf("profiles[%d]: duplicate key %q", i, pr.Key)
 		}
-		seen[pr.Name] = true
+		keys[pr.Key] = true
+		if roles[pr.Key] {
+			return fmt.Errorf("profiles[%d]: key equals a declared role name", i)
+		}
+		if err := ValidateProfileDisplayName(pr.DisplayName); err != nil {
+			return fmt.Errorf("profiles[%d].displayName: %w", i, err)
+		}
+		if err := ValidateProfileIcon(pr.Icon); err != nil {
+			return fmt.Errorf("profiles[%d].icon: %w", i, err)
+		}
+		if pr.ModelIdentity != nil {
+			if err := pr.ModelIdentity.Validate(); err != nil {
+				return fmt.Errorf("profiles[%d].modelIdentity: %w", i, err)
+			}
+		}
 		if err := checkModelRef(pr.Engine, pr.Model, pr.ContextTokens, pr.Capabilities); err != nil {
-			return fmt.Errorf("profiles[%d] %q: %w", i, pr.Name, err)
+			return fmt.Errorf("profiles[%d] %q: %w", i, pr.Key, err)
 		}
 		key := pr.Engine + "\x00" + pr.Model
 		if models[key] {
-			return fmt.Errorf("profiles[%d] %q: another profile already covers %s %q", i, pr.Name, pr.Engine, pr.Model)
+			return fmt.Errorf("profiles[%d] %q: another profile already covers %s %q", i, pr.Key, pr.Engine, pr.Model)
 		}
 		models[key] = true
 		if pr.MemoryBytes < 0 || pr.MaxConcurrent < 0 {
-			return fmt.Errorf("profiles[%d] %q: memoryBytes and maxConcurrent must not be negative", i, pr.Name)
+			return fmt.Errorf("profiles[%d] %q: memoryBytes and maxConcurrent must not be negative", i, pr.Key)
 		}
 		if err := pr.validateOutputAndQualification(); err != nil {
-			return fmt.Errorf("profiles[%d] %q: %w", i, pr.Name, err)
+			return fmt.Errorf("profiles[%d] %q: %w", i, pr.Key, err)
 		}
 		switch pr.RequestOptionsMode.Effective() {
 		case RequestOptionsDefaults:
@@ -710,21 +772,25 @@ func (p Policy) Validate() error {
 		if len(pr.RequestOptions) > 0 {
 			var obj map[string]json.RawMessage
 			if err := json.Unmarshal(pr.RequestOptions, &obj); err != nil {
-				return fmt.Errorf("profiles[%d] %q: requestOptions must be a JSON object", i, pr.Name)
+				return fmt.Errorf("profiles[%d] %q: requestOptions must be a JSON object", i, pr.Key)
 			}
 			for key := range obj {
 				if strings.EqualFold(key, "model") {
-					return fmt.Errorf("profiles[%d] %q: requestOptions may not set model", i, pr.Name)
+					return fmt.Errorf("profiles[%d] %q: requestOptions may not set model", i, pr.Key)
 				}
 			}
 		}
 	}
-	for tier, role := range p.Roles {
-		if !slices.Contains(TierOrder, tier) {
-			return fmt.Errorf("roles: unknown tier %q (want one of %v)", tier, TierOrder)
-		}
-		if err := checkModelRef(role.Engine, role.Model, 0, nil); err != nil {
-			return fmt.Errorf("roles[%s]: %w", tier, err)
+	for i, role := range p.Roles {
+		members := map[string]bool{}
+		for _, key := range role.Profiles {
+			if !keys[key] {
+				return fmt.Errorf("roles[%d]: unknown profile key %q", i, key)
+			}
+			if members[key] {
+				return fmt.Errorf("roles[%d]: duplicate profile key %q", i, key)
+			}
+			members[key] = true
 		}
 	}
 	if err := validateModelList("servedModels", p.ServedModels); err != nil {
@@ -827,6 +893,16 @@ func ValidateResidentContext(contextLength, qualifiedContextTokens int) error {
 func (p Policy) ProfileFor(engine, model string) (Profile, bool) {
 	for _, pr := range p.Profiles {
 		if pr.Engine == engine && pr.Model == model {
+			return pr, true
+		}
+	}
+	return Profile{}, false
+}
+
+// ProfileByKey returns the configuration with this exact immutable key.
+func (p Policy) ProfileByKey(key string) (Profile, bool) {
+	for _, pr := range p.Profiles {
+		if pr.Key == key {
 			return pr, true
 		}
 	}
@@ -954,9 +1030,7 @@ func (p *Policy) normalize() {
 			}
 		}
 	}
-	if p.Roles == nil {
-		p.Roles = map[string]Role{}
-	}
+	p.Roles = copyRoles(p.Roles)
 	if p.Tiers == nil {
 		p.Tiers = map[string][]TierEntry{}
 	}

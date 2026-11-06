@@ -64,6 +64,7 @@ function resolvedLoad(): ResolvedLoad {
 function modelLoad(): ModelLoad {
     const resolved = resolvedLoad()
     return {
+        profileKey: 'owner/model:Q4_K_M',
         modelId: 'owner/model:Q4_K_M',
         requested: {
             ...structuredClone(resolved.options),
@@ -128,7 +129,9 @@ it('keeps unbound manual GPU settings readable without accepting conversion as A
     const allocation = resolvedLoad()
     delete allocation.deviceBinding
     allocation.resolverRevision = 'external-conversion/llama'
-    wire.settings.modelLoads = [{ modelId: 'manual/model', requested: {}, resolved: allocation }]
+    wire.settings.modelLoads = [
+        { profileKey: 'manual/model', modelId: 'manual/model', requested: {}, resolved: allocation }
+    ]
     expect(
         parseEngineSettings(wire).settings.modelLoads?.[0].resolved?.deviceBinding
     ).toBeUndefined()
@@ -139,7 +142,14 @@ it('keeps unbound manual GPU settings readable without accepting conversion as A
 it('preserves a larger unified KV pool without changing ordinary slot arithmetic', () => {
     const wire = snapshot()
     const pool = resolvedLoad()
-    wire.settings.modelLoads = [{ modelId: 'owner/model:Q4_K_M', requested: {}, resolved: pool }]
+    wire.settings.modelLoads = [
+        {
+            profileKey: 'owner/model:Q4_K_M',
+            modelId: 'owner/model:Q4_K_M',
+            requested: {},
+            resolved: pool
+        }
+    ]
     pool.totalContext = 16384
     pool.kvUnified = true
     expect(parseEngineSettings(wire).settings.modelLoads?.[0].resolved?.totalContext).toBe(16384)
@@ -319,7 +329,11 @@ describe('model settings readback', () => {
 
     it('keeps unresolved saved intent without manufacturing a resolution', () => {
         const wire = snapshot()
-        const load = { modelId: 'owner/other:Q8_0', requested: { slots: 1 } }
+        const load = {
+            profileKey: 'owner/other:Q8_0',
+            modelId: 'owner/other:Q8_0',
+            requested: { slots: 1 }
+        }
         const result = parseEngineSettings({
             ...wire,
             settings: { ...wire.settings, modelLoads: [load] }
@@ -453,7 +467,10 @@ describe('model contract validation', () => {
         expect(() =>
             parseEngineSettings({
                 ...wire,
-                settings: { ...wire.settings, modelLoads: [{ modelId: 'model', requested: value }] }
+                settings: {
+                    ...wire.settings,
+                    modelLoads: [{ profileKey: 'model', modelId: 'model', requested: value }]
+                }
             })
         ).toThrow()
     })
@@ -511,11 +528,28 @@ describe('model contract validation', () => {
         ).toThrow()
     })
 
-    it('rejects duplicated loads and reserved model aliases', () => {
+    it('preserves artifact aliases separately from profile keys in snapshots', () => {
+        const wire = snapshot()
+        const load = { ...modelLoad(), profileKey: 'lfm-8k', modelId: 'medium-local' }
+        expect(
+            parseEngineSettings({
+                ...wire,
+                settings: { ...wire.settings, modelLoads: [load] }
+            }).settings.modelLoads
+        ).toEqual([load])
+    })
+
+    it('accepts artifact aliases in inspection results', () => {
+        expect(parseInspectModel({ ...inspection(), modelId: 'medium-local' }).modelId).toBe(
+            'medium-local'
+        )
+    })
+
+    it('rejects duplicated profile keys and reserved profile aliases', () => {
         const wire = snapshot()
         for (const loads of [
             [modelLoad(), modelLoad()],
-            [{ modelId: 'strong-api', requested: {} }]
+            [{ profileKey: 'medium-local', modelId: 'model', requested: {} }]
         ]) {
             expect(() =>
                 parseEngineSettings({ ...wire, settings: { ...wire.settings, modelLoads: loads } })

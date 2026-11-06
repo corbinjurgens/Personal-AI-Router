@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { LOCAL_VETO_CODE } from '@/shared/constants/service-errors'
 import type { NodeAvailabilityChange, NodePolicyDocument } from '@/shared/types/node-policy'
 import type { NodeItem } from '@/shared/types/nodes'
+import type { NodeRoles } from '@/shared/types/node-roles'
 import type { ServiceTransport } from '@/shared/types/service-bridge'
 import { createPairApi, type INodePolicyApi } from '@/ui/api/pair-api'
 import { ServiceCallError } from '@/ui/api/service-transport'
@@ -31,7 +32,9 @@ function documentFor(
     pausedBy = 'local'
 ): NodePolicyDocument {
     return {
-        policy: JSON.stringify({ version: 2, revision, availability, pausedBy }),
+        policy: JSON.stringify({ version: 2, revision, availability, pausedBy,
+            profiles: [{ key: 'unsent-role', displayName: 'Unsent', engine: 'llamacpp', model: 'unsent-model' }]
+        }),
         revision,
         activation: null,
         recoveryRequired: false,
@@ -296,7 +299,7 @@ describe('routing settings pause recovery', () => {
         )
         if (!option) throw new Error('Missing peer menu item')
         await act(async () => option.click())
-        const draft = { weak: { engine: 'llamacpp', model: 'unsent-role' } }
+        const draft: NodeRoles = [{ name: 'weak', profiles: ['unsent-role'] }]
         useNodeConfigurationStore.getState().setDraft('peer', draft)
         const baselinePolicy = useNodeConfigurationStore.getState().editors.get('peer')
             ?.baseline?.policy

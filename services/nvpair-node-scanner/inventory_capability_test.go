@@ -26,19 +26,21 @@ func validStrictJSON(model string) string {
 	return `{"version":1,"models":[` + strictModelJSON(model) + `]}`
 }
 
-const capabilityRoles = `{"medium":{"engine":"llamacpp","model":"model","contextTokens":16384}}`
+const capabilityRoles = `[{"name":"medium","profiles":["model"]}]`
+const capabilityProfiles = `[{"key":"model","displayName":"Model","engine":"llamacpp","model":"model","contextTokens":16384}]`
 
 // policyWith is a policy advertisement with the fixture's roles and extra
 // top-level members.
 func policyWith(extra string) json.RawMessage {
-	doc := `{"revision":"31","roles":` + capabilityRoles
+	doc := `{"revision":"31","roles":` + capabilityRoles + `,"profiles":` + capabilityProfiles
 	if extra != "" {
 		doc += "," + extra
 	}
 	return json.RawMessage(doc + "}")
 }
 
-var capabilityTestRoles = map[string]nodepolicy.AdvertisedRole{nodepolicy.TierMedium: {Engine: "llamacpp", Model: "model", ContextTokens: 16384}}
+var capabilityTestRoles = []nodepolicy.Role{{Name: nodepolicy.TierMedium, Profiles: []string{"model"}}}
+var capabilityTestProfiles = []nodepolicy.AdvertisedProfile{{Key: "model", DisplayName: "Model", Engine: "llamacpp", Model: "model", ContextTokens: 16384}}
 
 func TestServedResidentInventoryCacheRoundTrip(t *testing.T) {
 	for _, tc := range []struct{ name, extra string }{
@@ -138,8 +140,8 @@ func TestDecodeInventoryPolicy(t *testing.T) {
 		{"null capability dropped", policyWith(`"strictAdmission":null`), want{policy: true, state: nodepolicy.StrictCapabilityAbsent, keepsRoles: true, rejected: rejectedCapability}},
 		{"case-variant key rejects the advertisement", policyWith(`"StrictAdmission":` + validStrictJSON("m:latest")), want{err: true, rejected: rejectedAdvertisement}},
 		{"mixed keys reject the advertisement", policyWith(`"strictAdmission":` + validStrictJSON("m:latest") + `,"STRICTADMISSION":{"version":2}`), want{err: true, rejected: rejectedAdvertisement}},
-		{"invalid roles fail the document", json.RawMessage(`{"revision":"31","roles":[],"strictAdmission":{"version":1,"models":[]}}`), want{err: true}},
-		{"invalid revision fails the document", json.RawMessage(`{"revision":31,"roles":{}}`), want{err: true}},
+		{"invalid roles fail the document", json.RawMessage(`{"revision":"31","roles":{},"strictAdmission":{"version":1,"models":[]}}`), want{err: true}},
+		{"invalid revision fails the document", json.RawMessage(`{"revision":31,"roles":[]}`), want{err: true}},
 		{"not an object fails the document", json.RawMessage(`[]`), want{err: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -159,7 +161,7 @@ func TestDecodeInventoryPolicy(t *testing.T) {
 			if got := adv.StrictAdmission.State(); got != tc.want.state {
 				t.Fatalf("capability state = %s, want %s", got, tc.want.state)
 			}
-			if tc.want.keepsRoles && (adv.Revision != "31" || !reflect.DeepEqual(adv.Roles, capabilityTestRoles)) {
+			if tc.want.keepsRoles && (adv.Revision != "31" || !reflect.DeepEqual(adv.Roles, capabilityTestRoles) || !reflect.DeepEqual(adv.Profiles, capabilityTestProfiles)) {
 				t.Fatalf("advertisement = revision %q roles %+v, want the fixture's", adv.Revision, adv.Roles)
 			}
 			// Whatever the scanner keeps must survive the directory, broker and
@@ -179,18 +181,18 @@ func TestDecodeInventoryPolicy(t *testing.T) {
 	}
 }
 
-// A peer's malformed role qualification hint costs the node neither its
-// advertisement nor its capability: the hint alone is dropped, and the role
+// A peer's malformed profile qualification hint costs the node neither its
+// advertisement nor its capability: the hint alone is dropped, and the profile
 // is then not hybrid eligible.
 func TestDecodeInventoryPolicyKeepsRolesWithMalformedQualification(t *testing.T) {
-	raw := json.RawMessage(`{"revision":"31","roles":{"medium":{"engine":"llamacpp","model":"model","contextTokens":16384,` +
-		`"maxOutputTokens":"lots","qualification":["q","1"]}},"strictAdmission":` + validStrictJSON("m:latest") + `}`)
+	raw := json.RawMessage(`{"revision":"31","roles":` + capabilityRoles + `,"profiles":[{"key":"model","displayName":"Model","engine":"llamacpp","model":"model","contextTokens":16384,` +
+		`"maxOutputTokens":"lots","qualification":["q","1"]}],"strictAdmission":` + validStrictJSON("m:latest") + `}`)
 	adv, rejected, err := decodeInventoryPolicy(raw)
 	if err != nil || rejected != "" || adv == nil {
 		t.Fatalf("decode = %+v, %q, %v; want the advertisement kept", adv, rejected, err)
 	}
-	if !reflect.DeepEqual(adv.Roles, capabilityTestRoles) || adv.Roles[nodepolicy.TierMedium].HybridQualified() {
-		t.Fatalf("roles = %+v, want the fixture's without the malformed hints", adv.Roles)
+	if !reflect.DeepEqual(adv.Roles, capabilityTestRoles) || !reflect.DeepEqual(adv.Profiles, capabilityTestProfiles) || adv.Profiles[0].HybridQualified() {
+		t.Fatalf("roles = %+v profiles = %+v, want the fixture's without the malformed hints", adv.Roles, adv.Profiles)
 	}
 	if adv.StrictAdmission.State() != nodepolicy.StrictCapabilityValid {
 		t.Fatalf("capability state = %s, want valid", adv.StrictAdmission.State())
@@ -203,10 +205,10 @@ func TestDecodeInventoryPolicyKeepsRolesWithMalformedQualification(t *testing.T)
 // its document order and duplicate members.
 func TestDecodeInventoryPolicyKeepsTheSharedDecodingOfOtherFields(t *testing.T) {
 	for _, tc := range []struct{ name, without string }{
-		{"later case-folded duplicate wins", `{"revision":"1","Revision":"2","roles":{}`},
+		{"later case-folded duplicate wins", `{"revision":"1","Revision":"2","roles":[]`},
 		{"roles after a null spelling", `{"revision":"1","roles":null,"Roles":` + capabilityRoles},
 		{"null after the roles", `{"revision":"1","Roles":` + capabilityRoles + `,"roles":null`},
-		{"exact duplicate", `{"revision":"1","revision":"3","roles":{}`},
+		{"exact duplicate", `{"revision":"1","revision":"3","roles":[]`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var want nodepolicy.Advertisement
@@ -252,7 +254,7 @@ func TestInvalidCapabilityKeepsTheInventory(t *testing.T) {
 				t.Fatalf("models = %v, want [model]", node.Models)
 			}
 			switch {
-			case tc.wantRoles && (node.Policy == nil || !reflect.DeepEqual(node.Policy.Roles, capabilityTestRoles) || node.Policy.StrictAdmission != nil):
+			case tc.wantRoles && (node.Policy == nil || !reflect.DeepEqual(node.Policy.Roles, capabilityTestRoles) || !reflect.DeepEqual(node.Policy.Profiles, capabilityTestProfiles) || node.Policy.StrictAdmission != nil):
 				t.Fatalf("policy = %+v, want the roles without a capability", node.Policy)
 			case !tc.wantRoles && node.Policy != nil:
 				t.Fatalf("policy = %+v, want none", node.Policy)

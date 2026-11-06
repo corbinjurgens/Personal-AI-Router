@@ -204,10 +204,22 @@ func (m *modelIdentityInfo) resolve(parent context.Context, engine, model string
 // Read exactly the selector bytes already checked by artifact resolution.
 func modelIdentityConfiguredContext(snapshot modelInspectionSnapshot, model string, list modelFileList) int64 {
 	rt := snapshot.state.plat.Runtime
+	var configured int64
+	found := false
 	for _, load := range rt.ModelLoads {
-		if load.ModelID == model && load.Resolved != nil {
-			return int64(load.Resolved.PerSlotContext)
+		if load.ModelID == model {
+			if load.Resolved == nil {
+				return 0
+			}
+			context := int64(load.Resolved.PerSlotContext)
+			if found && configured != context {
+				return 0 // Artifact metadata cannot attribute one sibling's context.
+			}
+			configured, found = context, true
 		}
+	}
+	if found {
+		return configured
 	}
 	cli, env, err := llamaArtifactLaunchOptions(snapshot.command, rt.EditableLaunch)
 	if err != nil {

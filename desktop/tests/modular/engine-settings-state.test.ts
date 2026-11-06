@@ -31,6 +31,7 @@ vi.mock('@/electron/window', () => ({ createOverviewWindow: vi.fn() }))
 const target = { nodeId: 'remote', engine: 'llamacpp' } as const
 const modelLoads: NonNullable<EngineSettingsConfig['modelLoads']> = [
     {
+        profileKey: 'exact/model',
         modelId: 'exact/model',
         requested: {
             context: { mode: 'fixed', tokens: 4096 },
@@ -85,7 +86,7 @@ const modelLoads: NonNullable<EngineSettingsConfig['modelLoads']> = [
             presetDigest: 'c'.repeat(64)
         }
     },
-    { modelId: 'another/model', requested: { kvOffload: false } }
+    { profileKey: 'another/model', modelId: 'another/model', requested: { kvOffload: false } }
 ]
 const baseline: EngineSettingsSnapshot = {
     ...target,
@@ -133,9 +134,11 @@ describe('running native build status', () => {
         state.setSelfId('build-local')
         state.applyEngineManagerStatus(wire)
         const status = () =>
-            state.getEngineInitialState().statuses.find(
-                value => value.nodeId === 'build-local' && value.engineType === 'llama-cpp'
-            )
+            state
+                .getEngineInitialState()
+                .statuses.find(
+                    value => value.nodeId === 'build-local' && value.engineType === 'llama-cpp'
+                )
         expect(status()).toMatchObject({ buildInfo, buildId, processStatus: 'running' })
         state.beginLocalEngineOp('llama-cpp', 'stopping')
         expect(status()).toMatchObject({ buildInfo, buildId, processStatus: 'stopping' })
@@ -165,9 +168,11 @@ describe('running native build status', () => {
         })
         state.applyRemoteEngineFacts('build-peer', { engines: [wire] })
         const status = () =>
-            state.getEngineInitialState().statuses.find(
-                value => value.nodeId === 'build-peer' && value.engineType === 'llama-cpp'
-            )
+            state
+                .getEngineInitialState()
+                .statuses.find(
+                    value => value.nodeId === 'build-peer' && value.engineType === 'llama-cpp'
+                )
         expect(status()).toMatchObject({ buildInfo, buildId })
         state.applyRemoteEngineStatusResult('build-peer', 'llama-cpp', {
             ...wire,
@@ -631,7 +636,9 @@ describe('engine settings restart confirmation', () => {
             expect.objectContaining({ settings: { ...baseline.settings, proxyPort: 12500 } })
         )
         expect(apply).not.toHaveBeenCalled()
-        expect(usePendingActionsStore.getState().isSettingsPending('remote', 'llama-cpp')).toBe(false)
+        expect(usePendingActionsStore.getState().isSettingsPending('remote', 'llama-cpp')).toBe(
+            false
+        )
 
         await act(async () => buttonNamed(dialog, 'Restart').click())
 
@@ -645,7 +652,9 @@ describe('engine settings restart confirmation', () => {
             })
         )
         expect(dialog.open).toBe(false)
-        expect(usePendingActionsStore.getState().isSettingsPending('remote', 'llama-cpp')).toBe(true)
+        expect(usePendingActionsStore.getState().isSettingsPending('remote', 'llama-cpp')).toBe(
+            true
+        )
     })
 
     it('cancels a restart without applying and leaves the draft editable', async () => {
@@ -656,7 +665,9 @@ describe('engine settings restart confirmation', () => {
 
         expect(dialog.open).toBe(false)
         expect(apply).not.toHaveBeenCalled()
-        expect(usePendingActionsStore.getState().isSettingsPending('remote', 'llama-cpp')).toBe(false)
+        expect(usePendingActionsStore.getState().isSettingsPending('remote', 'llama-cpp')).toBe(
+            false
+        )
         const input = container.querySelector('input[aria-label="Proxy port"]')
         if (!(input instanceof HTMLInputElement)) throw new Error('Proxy port input missing')
         expect(input.value).toBe('12500')
@@ -815,7 +826,9 @@ describe('settings applies use the shared pending-actions cover', () => {
         expect(pending.isSettingsPending('remote', 'llama-cpp')).toBe(false)
 
         pending.beginSettings('remote', 'llama-cpp', 'current-request')
-        expect(usePendingActionsStore.getState().isSettingsPending('remote', 'llama-cpp')).toBe(true)
+        expect(usePendingActionsStore.getState().isSettingsPending('remote', 'llama-cpp')).toBe(
+            true
+        )
 
         // Another engine on the same device is untouched.
         expect(usePendingActionsStore.getState().isSettingsPending('remote', customEngine)).toBe(
@@ -823,11 +836,17 @@ describe('settings applies use the shared pending-actions cover', () => {
         )
 
         deliver({ ...baseline, phase: 'applying', requestId: 'older-request' })
-        expect(usePendingActionsStore.getState().isSettingsPending('remote', 'llama-cpp')).toBe(true)
+        expect(usePendingActionsStore.getState().isSettingsPending('remote', 'llama-cpp')).toBe(
+            true
+        )
         deliver({ ...baseline, phase: 'idle' })
-        expect(usePendingActionsStore.getState().isSettingsPending('remote', 'llama-cpp')).toBe(true)
+        expect(usePendingActionsStore.getState().isSettingsPending('remote', 'llama-cpp')).toBe(
+            true
+        )
         deliver({ ...baseline, phase: 'applying', requestId: 'current-request' })
-        expect(usePendingActionsStore.getState().isSettingsPending('remote', 'llama-cpp')).toBe(false)
+        expect(usePendingActionsStore.getState().isSettingsPending('remote', 'llama-cpp')).toBe(
+            false
+        )
     })
 
     it('releases the cover when validation refuses before sending', () => {

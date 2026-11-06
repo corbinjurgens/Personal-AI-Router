@@ -79,9 +79,8 @@ func TestNodeProjectionServedWithTheModelInventory(t *testing.T) {
 
 	first := nodepolicy.Advertisement{
 		Revision: "12",
-		Roles: map[string]nodepolicy.AdvertisedRole{
-			nodepolicy.TierStrong: {Engine: engines.NameLlamaCPP, Model: "qwen3-32b", ContextTokens: 32768, Capabilities: []nodepolicy.Capability{nodepolicy.CapTools}},
-		},
+		Roles:    []nodepolicy.Role{{Name: nodepolicy.TierStrong, Profiles: []string{"qwen3-32b"}}},
+		Profiles: []nodepolicy.AdvertisedProfile{{Key: "qwen3-32b", DisplayName: "Qwen3 32B", Engine: engines.NameLlamaCPP, Model: "qwen3-32b", ContextTokens: 32768, Capabilities: []nodepolicy.Capability{nodepolicy.CapTools}}},
 	}
 	t.Run("served after a push", func(t *testing.T) {
 		pushProjection(t, m, string(mustMarshal(t, map[string]any{"policy": first, "managementBlocked": false})))
@@ -99,7 +98,7 @@ func TestNodeProjectionServedWithTheModelInventory(t *testing.T) {
 	})
 
 	t.Run("a later push replaces it whole", func(t *testing.T) {
-		paused := nodepolicy.Advertisement{Revision: "13", Roles: map[string]nodepolicy.AdvertisedRole{}, PausedBy: nodepolicy.PausedLocally}
+		paused := nodepolicy.Advertisement{Revision: "13", Roles: []nodepolicy.Role{}, Profiles: []nodepolicy.AdvertisedProfile{}, PausedBy: nodepolicy.PausedLocally}
 		pushProjection(t, m, string(mustMarshal(t, map[string]any{"policy": paused, "pausedLocally": true, "managementBlocked": true})))
 		if fromHTTP, fromRPC, _, _ := servedPolicy(t, m, &out); !reflect.DeepEqual(fromHTTP, &paused) || !reflect.DeepEqual(fromRPC, &paused) {
 			t.Fatalf("served policy = /v1/models %+v, engine:models %+v; want %+v", fromHTTP, fromRPC, paused)

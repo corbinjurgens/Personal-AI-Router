@@ -35,7 +35,9 @@ const snapshot: EngineSettingsSnapshot = {
         serverPort: 1,
         proxyPort: 2,
         launchText: '',
-        modelLoads: [{ modelId: 'model', requested: { slots: 3, cacheTypeK: 'f16' } }]
+        modelLoads: [
+            { profileKey: 'model', modelId: 'model', requested: { slots: 3, cacheTypeK: 'f16' } }
+        ]
     },
     effectiveServerPort: 1,
     effectiveProxyPort: 2,
@@ -254,7 +256,10 @@ function loadDraft() {
 function savedLoad(requested: RequestedLoad) {
     read.mockResolvedValue({
         ...snapshot,
-        settings: { ...snapshot.settings, modelLoads: [{ modelId: 'model', requested }] }
+        settings: {
+            ...snapshot.settings,
+            modelLoads: [{ profileKey: 'model', modelId: 'model', requested }]
+        }
     })
 }
 
@@ -278,7 +283,7 @@ describe('load editor and target impact', () => {
                 expectedRevision: 3,
                 settings: {
                     ...snapshot.settings,
-                    modelLoads: [{ modelId: 'model', requested: saved }]
+                    modelLoads: [{ profileKey: 'model', modelId: 'model', requested: saved }]
                 },
                 modelChange: {
                     modelId: 'model',
@@ -501,11 +506,11 @@ describe('load editor and target impact', () => {
             ...snapshot,
             settings: {
                 ...snapshot.settings,
-                modelLoads: [{ modelId: 'model', requested: { slots: 2 } }]
+                modelLoads: [{ profileKey: 'model', modelId: 'model', requested: { slots: 2 } }]
             },
             effectiveSettings: {
                 ...snapshot.settings,
-                modelLoads: [{ modelId: 'model', requested: { slots: 1 } }]
+                modelLoads: [{ profileKey: 'model', modelId: 'model', requested: { slots: 1 } }]
             },
             serving: { status: 'configured' }
         }
@@ -568,7 +573,7 @@ describe('load editor and target impact', () => {
                 phase: 'succeeded',
                 settings: {
                     ...snapshot.settings,
-                    modelLoads: [{ modelId: 'model', requested: { slots: 2 } }]
+                    modelLoads: [{ profileKey: 'model', modelId: 'model', requested: { slots: 2 } }]
                 }
             })
             return { revision: 4, phase: 'succeeded' }
@@ -656,7 +661,13 @@ describe('load editor and target impact', () => {
                 phase: 'succeeded',
                 settings: {
                     ...snapshot.settings,
-                    modelLoads: [{ modelId: 'model', requested: { slots: 2, cacheTypeK: 'f16' } }]
+                    modelLoads: [
+                        {
+                            profileKey: 'model',
+                            modelId: 'model',
+                            requested: { slots: 2, cacheTypeK: 'f16' }
+                        }
+                    ]
                 }
             })
             return { revision: 4, phase: 'succeeded' }

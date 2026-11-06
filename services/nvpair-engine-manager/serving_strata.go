@@ -348,26 +348,48 @@ func resolvePreparedExport(ctx context.Context, st *engineState, command launchC
 	if err := validateTypedLlamaExport(rt, model); err != nil {
 		return modelFileList{}, err
 	}
-	declaration, err := llamaExportDeclaration(rt, model)
-	if err != nil {
-		return modelFileList{}, err
+	var declarations []*engines.ServingModel
+	typedSelected := false
+	for _, load := range rt.ModelLoads {
+		if load.ModelID != model {
+			continue
+		}
+		typedSelected = true
+		declaration, err := llamaExportDeclaration(rt, load.ProfileKey)
+		if err != nil || rt.Serving != nil && declaration == nil {
+			return modelFileList{}, errNoArtifactBinding
+		}
+		declarations = append(declarations, declaration)
+	}
+	if !typedSelected {
+		declaration, err := llamaExportDeclaration(rt, model)
+		if err != nil {
+			return modelFileList{}, err
+		}
+		declarations = append(declarations, declaration)
 	}
 	list, presetSelected, err := resolveLlamaArtifactsSelection(ctx, st, command, store, model, access, expected, func(paths, roles []string) error {
-		if rt.Serving != nil && declaration == nil {
-			return errNoArtifactBinding
+		for _, declaration := range declarations {
+			if rt.Serving != nil && declaration == nil {
+				return errNoArtifactBinding
+			}
+			if err := llamaExportSelection(declaration, paths, roles); err != nil {
+				return err
+			}
 		}
-		return llamaExportSelection(declaration, paths, roles)
+		return nil
 	})
 	if err != nil {
 		return modelFileList{}, err
 	}
-	typedSelected := rtLoadResolution(rt.ModelLoads, model) != nil
 	if presetSelected || typedSelected {
-		if rt.Serving != nil && declaration == nil {
-			return modelFileList{}, errNoArtifactBinding
-		}
-		if err := bindLlamaExportAssertions(declaration, &list); err != nil {
-			return modelFileList{}, err
+		for _, declaration := range declarations {
+			if rt.Serving != nil && declaration == nil {
+				return modelFileList{}, errNoArtifactBinding
+			}
+			if err := bindLlamaExportAssertions(declaration, &list); err != nil {
+				return modelFileList{}, err
+			}
 		}
 	}
 	return list, nil

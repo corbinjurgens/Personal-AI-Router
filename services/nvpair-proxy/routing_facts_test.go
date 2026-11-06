@@ -193,7 +193,7 @@ func TestRoutingNativeFactsEntry(t *testing.T) {
 func TestRequestOptionsNativeFactsInvalidHygiene(t *testing.T) {
 	p, _, engine := reviewR2TierFixture(t, false)
 	pol := p.admission.currentPolicy()
-	pol.Profiles = []nodepolicy.Profile{{Name: "m", Engine: "llamacpp", Model: "m", RequestOptions: json.RawMessage(`{"private_configured_key":1}`), RequestOptionsMode: nodepolicy.RequestOptionsEnforced}}
+	pol.Profiles = []nodepolicy.Profile{{Key: "m", DisplayName: "m", Engine: "llamacpp", Model: "m", RequestOptions: json.RawMessage(`{"private_configured_key":1}`), RequestOptionsMode: nodepolicy.RequestOptionsEnforced}}
 	p.admission.setPolicy(pol)
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, routeChatCompletions, strings.NewReader(`{"model":"m","private_configured_key":"private-value","PRIVATE_CONFIGURED_KEY":"other-private-value"}`))

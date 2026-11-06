@@ -15,7 +15,65 @@ import (
 	"testing"
 
 	"nvpair-shared/engines"
+	"nvpair-shared/modelconfig"
 )
+
+func TestPersistModelLoadsProfileKeyRoundtrip(t *testing.T) {
+	e := settingsExecutor(t, false)
+	port := settingsRequest(t, e).Settings.ServerPort
+	loads := []modelconfig.ModelLoad{
+		{ProfileKey: "lfm-8k", ModelID: "org/model:Q4", Requested: modelconfig.RequestedLoad{Context: &modelconfig.Context{Mode: "fixed", Tokens: 8192}}},
+		{ProfileKey: "lfm-32k", ModelID: "org/model:Q4", Requested: modelconfig.RequestedLoad{Context: &modelconfig.Context{Mode: "fixed", Tokens: 32768}}},
+	}
+	if err := e.persistRuntimeServing("fake", port, nil, nil, nil, &loads); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.persistPort("fake", port+1); err != nil {
+		t.Fatal(err)
+	}
+	got := readSettingsOverride(t, e).ModelLoads
+	if len(got) != 2 {
+		t.Fatalf("stored loads = %+v", got)
+	}
+	for i, want := range []struct {
+		key     string
+		context int32
+	}{{"lfm-32k", 32768}, {"lfm-8k", 8192}} {
+		load := got[i]
+		if load.ProfileKey != want.key || load.ModelID != "org/model:Q4" || load.Requested.Context == nil || load.Requested.Context.Mode != "fixed" || load.Requested.Context.Tokens != want.context {
+			t.Fatalf("stored load %d = %+v, want key %s context %d", i, load, want.key, want.context)
+		}
+	}
+	if loads[0].ProfileKey != "lfm-8k" || loads[1].ProfileKey != "lfm-32k" {
+		t.Fatal("persistence mutated caller loads")
+	}
+}
+
+func TestPortSavePersistsRepairedProfileKey(t *testing.T) {
+	e := settingsExecutor(t, false)
+	port := settingsRequest(t, e).Settings.ServerPort
+	path := filepath.Join(e.overrideDir, "fake.json")
+	if err := os.WriteFile(path, []byte(`{"engine":"fake","runtime":{"modelLoads":[{"modelId":"org/model:Q4","requested":{}}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.persistPort("fake", port+1); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored struct {
+		Runtime Runtime `json:"runtime"`
+	}
+	if err := json.Unmarshal(data, &stored); err != nil {
+		t.Fatal(err)
+	}
+	loads := stored.Runtime.ModelLoads
+	if len(loads) != 1 || loads[0].ProfileKey != "org/model:Q4" || loads[0].ModelID != "org/model:Q4" {
+		t.Fatalf("saved repaired loads = %+v", loads)
+	}
+}
 
 func TestSetPortPreservesServingOverrideAndExplicitRemoval(t *testing.T) {
 	e := settingsExecutor(t, false)

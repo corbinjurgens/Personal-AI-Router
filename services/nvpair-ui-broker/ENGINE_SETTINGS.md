@@ -54,8 +54,11 @@ the desktop maps absence to Unknown/`observation-omitted`. Observations never
 enter settings Preview, portable patches, review digests or accepted journals.
 See [native buffer observations](../../docs/model-buffer-observations.mdx).
 
-`settings.modelLoads` is an exact-model-ID ordered collection of `requested`
-portable preferences and optional target-owned finite `resolved` records.
+`settings.modelLoads` is a profile-keyed ordered collection. Each load carries
+`profileKey`, its exact artifact `modelId`, `requested` portable preferences and
+optional target-owned finite `resolved` records. Several profiles can use one
+artifact with different load settings; llama.cpp preset sections and served ids
+use the profile key. An existing profile keeps its engine and artifact selection.
 Bindings, native build/source/preset digests and reviewed Auto inputs are target
 authority, not copyable preferences. Ordinary port/launch constructors preserve
 the collection. The complete settings request, not just this collection, must
@@ -69,20 +72,38 @@ JSON, with marshal/decode refusal above `2^53-1`. New policy revisions, byte
 quantities and nanosecond file identities use decimal strings. A consumer must
 never round either representation.
 
-Preview/apply can carry `modelChange` with `modelId`, decimal
+Preview/apply can carry `modelChange` with `profileKey`, artifact `modelId`, decimal
 `expectedPolicyRevision`, selected `load` set/clear leaves, selected `policy`
 leaves, `previewDigest` and optional `supersedesRequestId`. The full settings
 payload must echo the target baseline beside that patch. Generation numbers
 retain decimal precision; locks, qualification and admission bounds are not
 selected-copy fields. The target merge preserves unrestricted
 `servedModels` versus an explicit empty list and validate enforced-empty options.
+Omitting `profileKey` selects the identity key equal to `modelId`. A Remove uses
+`remove: true` and no load or policy patch. It removes the selected typed native
+load when present, and the policy profile and role memberships. With a typed
+load, served, resident and binding references match the engine and profile key.
+Without a typed load, only the resident reference matching the engine and the
+profile's native model is removed; served and binding entries stay even when
+that native model equals the key. Empty role declarations remain. Removal
+without a typed load uses the policy-only operation and leaves native settings
+unchanged. Removing the final load leaves
+default engine mode, without an empty managed-router marker.
+
+The coupled policy stage creates or updates the keyed profile and derives
+`contextTokens` from that load's resolved per-slot context and `modelIdentity`
+from the accepted keyed preview identities. These fields are target-owned;
+they are not selected portable policy leaves. Raw policy writes preserve the
+stored identity and derive typed-profile context from the broker's authoritative
+load snapshot. Role membership edits address the node's declared roles and keep
+their ordered profile-key lists; undeclared roles are refused.
 
 Typed Preview performs worker reads without the configuration or policy mutex,
 then rechecks both CAS revisions and the worker source. Its digest binds the
 authenticated caller, selected patch, complete target baseline, policy content,
 native bindings/build, finite resolution, diff and impact. The bounded review
 owner retains that exact result, original request and caller for ten minutes.
-Explicit Recalculate supersedes the caller/model's previous recommendation;
+Explicit Recalculate supersedes the caller/engine/profile's previous recommendation;
 expired or lost unaccepted reviews require another explicit review. Apply checks
 receipt authentication/idempotency first, then validates retained full finite
 settings against current baseline, source and permissions. It does not repeat
@@ -114,7 +135,11 @@ calibration remain unverified.
 The existing `engine-settings-operations.json` journal contains the accepted
 model operation as a subrecord, including previous/desired native settings,
 frozen review, selected policy patch, before/after policy-content fingerprints,
-load-only implications, caller, original resume intent and execution stage.
+profile implications, caller, original resume intent and execution stage. Typed Remove
+also retains `reviewedModelChange` in this same subrecord: the original native
+worker's Remove-only selection, profile key, artifact id, expected policy
+revision and native preview digest. The public broker digest remains in the
+accepted request and review; it cannot substitute for native omission evidence.
 The stages are `accepted`, `drained`, `native-applying`, `native-persisted`,
 `policy-persisted`, `activation-pending`, `releasing` and `completed`.
 `acceptance-uncertain` and `completion-uncertain` retain withdrawal after
@@ -138,7 +163,8 @@ Recovery performs no native configure or policy publication from that bare stage
 A fresh local superseding preview is required; an identical request-ID retry
 reads the historical failed attempt rather than replaying it.
 
-A load-plus-policy acceptance reserves the complete policy document. Ordinary
+Every coupled model acceptance reserves the complete policy document, including
+load-only changes that publish derived profile metadata and Remove. Ordinary
 local and peer `policy:set` calls, including Advanced, role, copy and TUI
 writers, receive `-32010` naming the pending request. Availability transitions
 retain their independent owner. The private journal-driven policy commit
@@ -148,9 +174,8 @@ after content adopts the landed revision; any third content refuses replacement.
 A landed policy replacement with uncertain durability is adopted and remains
 unresolved. No blind retry or rollback overwrites a newer policy.
 
-Load-only operations validate the policy revision used by Preview, reserve no
-whole policy document, and recheck the selected model's profile, serving and
-residency implications before publication. Unrelated policy edits remain usable.
+Load-only operations validate the policy revision used by Preview and recheck
+the selected profile's serving and residency implications before publication.
 The existing inference lock protects generation options, mode and identity;
 it does not prevent load-only configuration. Selected edits retain opaque
 request-option numbers, target locks, unrelated model settings and existing
@@ -165,6 +190,23 @@ bound. Missing or failed acknowledgement prevents restart. The manager receives
 the frozen configuration once. Response loss is reconciled by exact current-source
 native readback, not interpreted as no effect. Frozen full-settings validation
 rechecks artifacts/build on replay without resolving portable Auto inputs again.
+For typed Remove, every frozen `engine:preview-launch` uses the existing private
+`WorkerRequest[Request].reviewedModelChange`; its `request.modelChange` is absent
+and `request.settings` is the already compiled accepted configuration. The direct
+`engine:configure-launch` payload remains `Configure`, with the same evidence in
+`reviewedModelChange`. The private retained source saves `NativeDigest` before
+public wrapping and includes it and the selection in retention-byte accounting
+and source checks. Public requests cannot supply this parent-only field.
+
+Initial Apply, journal recovery and same-key local supersession after native
+cleanup has landed forward the original native proof unchanged. They never
+reapply the portable Remove to the frozen settings or reconstruct proof from
+the wrapped public digest or current state. Missing, invalid or wrapped native
+proof refuses; the manager validates the original digest against the complete
+native source before accepting the selected omission. Evidence travels only as
+transient worker metadata and the existing accepted journal subrecord, never in
+settings `Config` or runtime overrides. This protocol description does not claim
+installed-engine or platform acceptance.
 Changed overrides, bindings/build or selected policy implications require a
 fresh review. A successful configure acknowledgement alone cannot complete Apply.
 Exact persisted native settings do not discharge saved resume intent after a
@@ -181,6 +223,10 @@ Failed or uncertain stages retain their fences. An unresolved model operation
 keeps snapshot phase `applying`, including after an attempt's receipt becomes
 `failed`; `unresolvedError` explains the reconciliation requirement. This retains
 the existing switch and cold-binding exclusions until the operation is settled.
+If policy persistence fails after a typed Remove persisted native settings,
+the removed load stays absent while the previous policy stays saved. The failed
+attempt remains fenced and requires a fresh local superseding review; it does
+not roll the native change back or release the old policy for ordinary writes.
 Startup reconstructs them before
 proxy replay/facade enablement, advertising and enabled-intent restoration.
 Progressed applying records without failed receipts replay automatically.

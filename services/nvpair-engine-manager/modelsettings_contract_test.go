@@ -22,6 +22,46 @@ import (
 	"nvpair-shared/noderec"
 )
 
+func TestModelSettingsContractRemovePreviewAdmission(t *testing.T) {
+	f, rt := twoProfileModelLoadFixture(t)
+	f.st.plat.Runtime = rt
+	before := snapshotLlamaState(f.st)
+	request := settingsRequest(t, f.ex)
+	request.ModelChange = &modelconfig.ModelChange{ProfileKey: "lfm-8k", ModelID: "medium-model", Remove: true, ExpectedPolicyRevision: "0"}
+	raw, err := json.Marshal(settings.WorkerRequest[settings.Request]{Request: request})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, client := net.Pipe()
+	t.Cleanup(func() { _ = server.Close(); _ = client.Close() })
+	if err := client.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	manager := &Manager{exec: f.ex, codec: NewCodec(server)}
+	id := json.RawMessage(`"remove-preview"`)
+	if !manager.handleSettingsMessage(context.Background(), &Message{JSONRPC: "2.0", ID: &id, Method: "engine:preview-launch", Params: raw}) {
+		t.Fatal("manager did not handle removal preview")
+	}
+	var reply Message
+	if err := json.NewDecoder(client).Decode(&reply); err != nil {
+		t.Fatal(err)
+	}
+	if reply.Error != nil {
+		t.Fatalf("manager refused read-only removal: %+v", reply.Error)
+	}
+	var preview settings.Preview
+	if err := modelconfig.DecodeStrict(reply.Result, &preview); err != nil {
+		t.Fatal(err)
+	}
+	if len(preview.Errors) != 0 || len(preview.PreviewDigest) != 64 || len(preview.Settings.ModelLoads) != 1 || preview.Settings.ModelLoads[0].ProfileKey != "lfm-32k" || preview.Settings.ModelLoads[0].ModelID != "medium-model" || preview.Settings.ModelLoads[0].Resolved == nil || preview.Settings.ModelLoads[0].Resolved.PerSlotContext != 32768 || preview.Estimate != nil || preview.Auto != nil {
+		t.Fatalf("manager removal preview = %+v", preview)
+	}
+	if !reflect.DeepEqual(before.plat.Runtime, f.st.plat.Runtime) || f.st.running || f.st.proc != nil {
+		t.Fatal("manager removal preview changed runtime or activated the engine")
+	}
+	assertNoSettingsOverride(t, f.ex)
+}
+
 func TestModelSettingsContractTargetMemoryFrozenCounterTimeline(t *testing.T) {
 	f, _, _ := autoTestFrozenLaunch(t)
 	candidatePrices := 0

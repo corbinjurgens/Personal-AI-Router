@@ -262,7 +262,7 @@ func TestBufferPreparationEffectiveProfileStreamErrors(t *testing.T) {
 				t.Fatalf("set local engine: %v", err)
 			}
 			policy := nodepolicy.Default()
-			policy.Profiles = []nodepolicy.Profile{{Name: "m", Engine: profile.Name, Model: "m", RequestOptions: json.RawMessage(`{"stream":"yes"}`)}}
+			policy.Profiles = []nodepolicy.Profile{{Key: "m", DisplayName: "m", Engine: profile.Name, Model: "m", RequestOptions: json.RawMessage(`{"stream":"yes"}`)}}
 			p.admission.setPolicy(policy)
 			recorder := httptest.NewRecorder()
 			request := httptest.NewRequest(http.MethodPost, routeChatCompletions, strings.NewReader(`{"model":"m"}`))

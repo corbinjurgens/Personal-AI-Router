@@ -649,12 +649,20 @@ for the independent `localOnly` edit lock, desktop controls and precedence examp
   output, embeddings, context) and ordered by tier and by whether the model is
   already loaded. A node that declares at least one role (a peer's `policy`
   advertisement, or this node's own `roles`) is authoritative for itself: for a
-  tier it declares it offers only its declared engine and model, with the
-  bounds it advertises, and for a tier it omits it offers nothing. The local
+  tier it declares it offers its ordered profile list, with each profile's own
+  bounds, and for a tier it omits it offers nothing. Roles are ordered
+  `{name, profiles}` records; their profile keys resolve against that node's
+  keyed facts. Self includes local-only profiles, while peer facts withhold
+  them. Missing keys are skipped without hiding later members; empty or fully
+  unreachable lists still declare a role. The local
   tier entries apply only to nodes that declare no role. A declared model the
   node does not have in its inventory is not a candidate. Declared candidates
   precede entry candidates of the same tier rank and warmth; `allowStronger`,
   `allowWeaker` and `preferLoaded` are this router's and apply to both.
+  Within equal rank, warmth, preparation and selected-pin classes, earlier
+  list positions lead. Each candidate uses its own node's membership position,
+  capabilities and context, even when another node lists the same pair earlier.
+  Hybrid qualification also uses the selected engine/model's own profile facts.
   OpenAI-compatible routes may
   be served by another engine; native routes stay on their own. The body's
   `model` is rewritten in place. Nothing eligible is a `404` naming the needs.
@@ -682,10 +690,22 @@ for the independent `localOnly` edit lock, desktop controls and precedence examp
   lists every tier that has at least one entry of either kind, that this node's
   roles declare, or that a node in one of this process's facade overlays
   declares, as the bare tier and both variants, including a tier whose entries
-  are all API deployments, as synthetic records that name nothing of the policy. They are merged with the
-  upstream models; when no upstream answers and tiers are configured the
+  are all API deployments, as synthetic records containing alias metadata and
+  optional context. They are merged with the upstream models; when no upstream
+  answers and tiers are configured the
   synthetic records are still returned instead of `503`, and without
   configured tiers the statuses are unchanged.
+  All variants of a role alias carry `context_length`, the largest known
+  context among that role's visible resolved profiles across self and peers
+  whose engines have an enabled facade in this process.
+  It is omitted when none is known or any such profile is unbounded
+  (`contextTokens: 0`). Missing or withheld keys supply no facts; router tier
+  entries do not supply this field. Upstream records with the same alias id
+  remain untouched. This is a catalog contract, not live validation: client
+  acceptance remains pending N8. Typed profile context comes from the broker's
+  resolved per-slot launch context; native-fit realized-context agreement
+  remains pending N7. The fixed role vocabulary, widening and suffix spelling
+  stay unchanged until phase 08, which installs together with phases 06 and 07.
   **Listed `-api` and `-local` aliases are not inference-ready until
   Phase 4.** A request is answered `400`
   `{"error":...,"code":"feature_unavailable","reason":"alias_not_inference_ready"|"unsupported_alias_use","model":"<alias>"}`
@@ -721,7 +741,10 @@ for the independent `localOnly` edit lock, desktop controls and precedence examp
   retries the bind. It serves only:
   - `GET /v1/models`: the synthetic alias records, built from the policy alone,
     including a tier whose entries are all API and a tier this node's own roles
-    declare; peers' declarations are not seen here. No upstream request is made.
+    declare; peers' declarations are not seen here. `context_length` uses the
+    same self-policy role resolver and unknown/unbounded omission rule as
+    facade catalogs, including self's local-only profiles on enabled engines. No upstream request
+    is made.
   - Every inference route any engine profile declares (`POST /v1/chat/completions`,
     `/v1/completions`, `/v1/embeddings`, `/v1/messages`): enters the common inference
     owner after the Host, Origin, path, method, query and preflight gates.

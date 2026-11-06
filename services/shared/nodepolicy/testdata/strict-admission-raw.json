@@ -1,12 +1,12 @@
 [
   {
     "name": "absent capability",
-    "document": "{\"revision\":\"0\",\"roles\":{}}",
+    "document": "{\"revision\":\"0\",\"roles\":[],\"profiles\":[]}",
     "state": "absent"
   },
   {
     "name": "canonical unsupported capability",
-    "document": "{\"revision\":\"0\",\"roles\":{},\"strictAdmission\":{\"version\":2,\"future\":true}}",
+    "document": "{\"revision\":\"0\",\"roles\":[],\"profiles\":[],\"strictAdmission\":{\"version\":2,\"future\":true}}",
     "state": "unsupported"
   },
   {

@@ -527,8 +527,8 @@ func TestStrictReadiness_ReportsTheInstalledCapability(t *testing.T) {
 		pol := policyAt(revision)
 		pol.Admission.MaxConcurrentPerModel = limit
 		pol.Profiles = []nodepolicy.Profile{
-			{Name: "o", Engine: "llamacpp", Model: "m", ContextTokens: 4096, MaxOutputTokens: 1024, Qualification: &refLlamaCPP},
-			{Name: "l", Engine: "llamacpp-custom", Model: "Exact Name", ContextTokens: 4096, MaxOutputTokens: 1024, Qualification: &refCustom},
+			{Key: "m", DisplayName: "Model", Engine: "llamacpp", Model: "m", ContextTokens: 4096, MaxOutputTokens: 1024, Qualification: &refLlamaCPP},
+			{Key: "Exact Name", DisplayName: "Exact", Engine: "llamacpp-custom", Model: "Exact Name", ContextTokens: 4096, MaxOutputTokens: 1024, Qualification: &refCustom},
 		}
 		return pol
 	}

@@ -614,8 +614,15 @@ export default function ModelLoadSettings({
             </Text>
             {['weak', 'medium', 'strong'].map(tier => (
                 <Text key={tier} kind="body/regular/sm">
-                    {tier} role currently: {JSON.stringify(routing.roles[tier]) ?? 'Unassigned'}.
-                    Assigning displaces this tier.
+                    {tier} role currently:{' '}
+                    {routing.profileKey &&
+                    routing.roles.some(
+                        role =>
+                            role.name === tier && role.profiles.includes(routing.profileKey ?? '')
+                    )
+                        ? 'Assigned'
+                        : 'Unassigned'}
+                    . Assigning adds this profile to this tier.
                 </Text>
             ))}
             {(

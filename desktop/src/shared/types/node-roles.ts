@@ -1,22 +1,34 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import type { NodePauseMode } from '@/shared/types/node-policy'
+import type { ModelIdentity } from '@/shared/types/engines'
+import type { NodePauseMode, QualificationRef } from '@/shared/types/node-policy'
 
 /** A routing tier a node can declare a role for (`nodepolicy.TierOrder`). */
 export type RoleTier = 'weak' | 'medium' | 'strong'
 
-/**
- * The engine and model a node serves one tier with (`nodepolicy.Role`). The
- * engine keeps engine-manager's spelling, as in the policy document.
- */
+/** A declared tier and its profile keys, in saved preference order. */
 export interface NodeRole {
-    engine: string
-    model: string
+    name: RoleTier
+    profiles: string[]
 }
 
-/** A node's declared roles; an absent tier is unset. */
-export type NodeRoles = Partial<Record<RoleTier, NodeRole>>
+/** A node's declarations in saved order, including explicitly empty roles. */
+export type NodeRoles = NodeRole[]
+
+/** Keyed profile metadata published by `nodepolicy.Advertisement`. */
+export interface AdvertisedProfile {
+    key: string
+    displayName: string
+    icon?: string
+    engine: string
+    model: string
+    modelIdentity?: ModelIdentity
+    contextTokens?: number
+    capabilities?: string[]
+    maxOutputTokens?: number
+    qualification?: QualificationRef
+}
 
 /** Who paused a node (`nodepolicy.PauseOrigin`). */
 export type PauseOrigin = 'local' | 'peer'
@@ -28,6 +40,7 @@ export type PauseOrigin = 'local' | 'peer'
 export interface NodePolicyAdvertisement {
     revision: string
     roles: NodeRoles
+    profiles: AdvertisedProfile[]
     pausedBy?: PauseOrigin
     pauseMode?: NodePauseMode
 }

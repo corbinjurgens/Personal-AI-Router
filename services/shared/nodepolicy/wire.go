@@ -453,12 +453,12 @@ func (r PrepareResidentResult) Validate() error {
 	} else if r.ReservationID != "" {
 		return errors.New("refusal must not reserve")
 	}
-	seen := map[Role]bool{}
+	seen := map[ModelRef]bool{}
 	for _, refusal := range r.Refusals {
 		if err := refusal.Validate(); err != nil {
 			return err
 		}
-		ref := Role{Engine: refusal.Engine, Model: refusal.Model}
+		ref := ModelRef{Engine: refusal.Engine, Model: refusal.Model}
 		if seen[ref] {
 			return errors.New("duplicate refusal reference")
 		}
@@ -739,12 +739,12 @@ func (c ModelConfiguration) Validate() error {
 	if c.Models == nil || len(c.Models) > MaxModelConfigurationEntries {
 		return errors.New("models must be a list of at most 256 entries")
 	}
-	seen := map[Role]bool{}
+	seen := map[ModelRef]bool{}
 	for _, e := range c.Models {
 		if err := e.Validate(); err != nil {
 			return err
 		}
-		ref := Role{Engine: e.Engine, Model: e.Model}
+		ref := ModelRef{Engine: e.Engine, Model: e.Model}
 		if seen[ref] {
 			return errors.New("duplicate model configuration reference")
 		}

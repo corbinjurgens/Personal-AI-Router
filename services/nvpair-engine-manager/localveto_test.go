@@ -35,7 +35,7 @@ func TestRemoteControlRecoveryGateWaitsForCurrentManagerAcknowledgement(t *testi
 	t.Cleanup(m.controlReadyHTTP.CloseIdle)
 	// This is the startup projection delivered even while broker recovery is
 	// blocked. It must not itself enable the independent direct peer surface.
-	m.applyNodeProjection(&Message{Params: json.RawMessage(`{"policy":{"revision":"1","roles":{}},"pausedLocally":false,"managementBlocked":false}`)})
+	m.applyNodeProjection(&Message{Params: json.RawMessage(`{"policy":{"revision":"1","roles":[]},"pausedLocally":false,"managementBlocked":false}`)})
 	server := httptest.NewUnstartedServer((&controlServer{exec: exec, mesh: mesh}).mux())
 	server.TLS = mesh.ServerTLSConfig()
 	server.StartTLS()
@@ -276,9 +276,9 @@ func TestLocalVetoCancelsAnAcceptedRemoteStart(t *testing.T) {
 	t.Run("local pause", func(t *testing.T) {
 		s, exec := vetoTestServer(t, slowStartManifest())
 		m := &Manager{exec: exec}
-		m.applyNodeProjection(&Message{Params: json.RawMessage(`{"policy":{"revision":"1","roles":{}},"pausedLocally":false,"managementBlocked":false}`)})
+		m.applyNodeProjection(&Message{Params: json.RawMessage(`{"policy":{"revision":"1","roles":[]},"pausedLocally":false,"managementBlocked":false}`)})
 		done := startRemotely(t, s)
-		m.applyNodeProjection(&Message{Params: json.RawMessage(`{"policy":{"revision":"2","roles":{},"pausedBy":"local"},"pausedLocally":true,"managementBlocked":true}`)})
+		m.applyNodeProjection(&Message{Params: json.RawMessage(`{"policy":{"revision":"2","roles":[],"pausedBy":"local"},"pausedLocally":true,"managementBlocked":true}`)})
 		requireLocalVeto(t, "remote start canceled by a local pause", awaitResponse(t, done))
 		if enabled, known, err := exec.desired.get("fake"); err != nil || (known && enabled) {
 			t.Fatalf("the canceled remote start saved On: %v %v %v", enabled, known, err)
@@ -303,7 +303,7 @@ func TestLocalVetoCancelsAnAcceptedRemoteStart(t *testing.T) {
 			t.Fatalf("begin remote work: %v", err)
 		}
 		defer done()
-		m.applyNodeProjection(&Message{Params: json.RawMessage(`{"policy":{"revision":"2","roles":{},"pausedBy":"peer"},"pausedLocally":false,"managementBlocked":true}`)})
+		m.applyNodeProjection(&Message{Params: json.RawMessage(`{"policy":{"revision":"2","roles":[],"pausedBy":"peer"},"pausedLocally":false,"managementBlocked":true}`)})
 		if rpcCode(context.Cause(ctx)) != codeLocalVeto {
 			t.Fatalf("peer pause cause = %v, want -32011", context.Cause(ctx))
 		}

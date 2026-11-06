@@ -22,13 +22,26 @@ import (
 
 func (h *modelSettingsHarness) seedAccepted(t *testing.T, coupled bool) *engineSettingsRecord {
 	t.Helper()
-	p := h.request(t, coupled)
+	return h.seedAcceptedRequest(t, h.request(t, coupled))
+}
+
+func (h *modelSettingsHarness) seedAcceptedRequest(t *testing.T, p settings.Request) *engineSettingsRecord {
+	t.Helper()
+	p = p.Clone()
 	preview, err := h.b.previewEngineSettings(context.Background(), p, "")
 	if err != nil || len(preview.Errors) != 0 {
 		t.Fatalf("seed preview=%+v, %v", preview, err)
 	}
+	p.ModelChange.PreviewDigest = preview.PreviewDigest
+	_, source, err := h.b.retainedModelReview(context.Background(), p, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source.native(*p.ModelChange) && source.NativeDigest == preview.PreviewDigest {
+		t.Fatal("seed confused the native review digest with its public wrapper")
+	}
 	policy := h.b.localPolicy().Policy
-	next, err := h.b.mergeModelPolicy(policy, p.Engine, *p.ModelChange, "")
+	next, err := h.b.mergeModelPolicy(policy, p.Engine, *p.ModelChange, "", preview, source.ReviewedModelChange != nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +52,11 @@ func (h *modelSettingsHarness) seedAccepted(t *testing.T, coupled bool) *engineS
 	record.Explicit = true
 	// This fixture begins after the first confirmed post-acceptance progress.
 	// A bare accepted stage is now deliberately ambiguous across a restart.
-	record.Model = &modelSettingsOperation{Change: p.ModelChange.Clone(), Review: preview.Clone(), NativeBefore: record.Previous.Clone(), Before: modelPolicyFingerprint(policy), After: modelPolicyFingerprint(next), Implications: modelPolicyImplications(policy, p.Engine, p.ModelChange.ModelID), Stage: "drained"}
+	var reviewed modelconfig.ModelChange
+	if source.ReviewedModelChange != nil {
+		reviewed = source.ReviewedModelChange.Clone()
+	}
+	record.Model = &modelSettingsOperation{Change: p.ModelChange.Clone(), Review: preview.Clone(), ReviewedModelChange: reviewed, NativeBefore: record.Previous.Clone(), Before: modelPolicyFingerprint(policy), After: modelPolicyFingerprint(next), Implications: modelPolicyImplications(policy, p.Engine, modelChangeKey(*p.ModelChange)), Stage: "drained"}
 	record.Snapshot.Settings = preview.Settings.Clone()
 	record.Snapshot.Revision++
 	record.Snapshot.RequestID, record.Snapshot.Phase, record.Snapshot.CoupledStage = p.RequestID, "applying", "drained"
@@ -50,6 +67,225 @@ func (h *modelSettingsHarness) seedAccepted(t *testing.T, coupled bool) *engineS
 	}
 	h.b.reconstructModelSettingsLocked()
 	return record.clone()
+}
+
+func TestModelSettingsRecoveryNewProfileUsesAcceptedIdentityAndContext(t *testing.T) {
+	h := newModelSettingsHarness(t)
+	p := h.request(t, false)
+	p.ModelChange.ProfileKey = "model-32k"
+	p.ModelChange.Load.Set.Context.Tokens = 32768
+	slots := int32(2)
+	p.ModelChange.Load.Set.Slots = &slots
+	record := h.seedAcceptedRequest(t, p)
+	h.setNative(record.Snapshot.Settings)
+	h.restartJournal(t)
+	if !h.b.recoverEngineSettings() || h.calls() != 0 {
+		t.Fatalf("native-persisted create did not finish policy exactly once; calls = %d", h.calls())
+	}
+	profile, ok := h.b.localPolicy().Policy.ProfileByKey("model-32k")
+	if !ok || profile.Model != "model-32k" || profile.ContextTokens != 32768 || profile.ModelIdentity == nil || profile.ModelIdentity.GeneralName != "Fixture model" || profile.ModelIdentity.ConfiguredContextTokens != 32768 {
+		t.Fatalf("recovered metadata = %+v", profile)
+	}
+	after := h.b.localPolicy().Policy
+	if modelPolicyFingerprint(after) != record.Model.After || !h.b.recoverEngineSettings() || h.b.localPolicy().Policy.Revision != after.Revision || h.calls() != 0 {
+		t.Fatal("recovery changed the accepted fingerprint or repeated policy/native effects")
+	}
+}
+
+func TestModelSettingsRecoveryRemoveFinishesPolicyAfterNativePersisted(t *testing.T) {
+	h := newModelSettingsHarness(t)
+	h.createProfile(t, "model-8k", 8192)
+	policy := h.b.localPolicy().Policy
+	policy.Roles = []nodepolicy.Role{{Name: nodepolicy.TierWeak, Profiles: []string{"model-8k"}}}
+	policy.ServedModels = nodepolicy.ServedModels{{Engine: "llamacpp", Model: "model-8k"}}
+	policy.EngineBindings = nodepolicy.EngineBindings{{Engine: "llamacpp", Model: "model-8k"}}
+	if _, err := setCurrent(h.b, settingsJSON(policy)); err != nil {
+		t.Fatal(err)
+	}
+	p := h.removeRequest(t, "model-8k")
+	record := h.seedAcceptedRequest(t, p)
+	want := h.removalEvidence(t, p)
+	h.setNative(record.Snapshot.Settings)
+	h.b.engineConfigMu.Lock()
+	live := h.b.engineSettings["llamacpp"]
+	live.Model.Stage, live.Snapshot.CoupledStage = "native-persisted", "native-persisted"
+	if err := h.b.saveEngineSettingsLocked(); err != nil {
+		h.b.engineConfigMu.Unlock()
+		t.Fatal(err)
+	}
+	h.b.engineConfigMu.Unlock()
+	h.restartJournal(t)
+	start := len(h.engine.snapshot())
+	if !h.b.recoverEngineSettings() || h.calls() != 1 {
+		t.Fatalf("remove recovery repeated native persistence; calls = %d", h.calls())
+	}
+	h.assertRemovalForwarding(t, start, want, 1, 0)
+	policy = h.b.localPolicy().Policy
+	if len(policy.Profiles) != 0 || !reflect.DeepEqual(policy.Roles, []nodepolicy.Role{{Name: nodepolicy.TierWeak, Profiles: []string{}}}) || policy.ServedModels == nil || len(policy.ServedModels) != 0 || len(policy.EngineBindings) != 0 || len(h.record(t).Snapshot.Settings.ModelLoads) != 0 || h.record(t).Model.Stage != "completed" || modelPolicyFingerprint(policy) != record.Model.After {
+		t.Fatalf("remove recovery left policy or native references: %+v", policy)
+	}
+	if !h.b.recoverEngineSettings() || h.b.localPolicy().Policy.Revision != policy.Revision || h.calls() != 1 {
+		t.Fatal("completed remove recovery repeated effects")
+	}
+}
+
+func TestModelSettingsRecoveryRemoveForwardsPersistedNativeReview(t *testing.T) {
+	h := newModelSettingsHarness(t)
+	h.createProfile(t, "model-8k", 8192)
+	p := h.removeRequest(t, "model-8k")
+	record := h.seedAcceptedRequest(t, p)
+	want := h.removalEvidence(t, p)
+	if !reflect.DeepEqual(record.Model.ReviewedModelChange, want.Change) || record.Model.Review.PreviewDigest == want.Change.PreviewDigest {
+		t.Fatalf("seed lost native/public digest separation: %+v", record.Model)
+	}
+	h.restartJournal(t)
+	start := len(h.engine.snapshot())
+	if !h.b.recoverEngineSettings() || h.calls() != 2 || len(h.b.localPolicy().Policy.Profiles) != 0 {
+		t.Fatal("accepted removal did not recover native then policy")
+	}
+	h.assertRemovalForwarding(t, start, want, 1, 1)
+	if proof := h.record(t).Model.ReviewedModelChange; !reflect.DeepEqual(proof, want.Change) {
+		t.Fatalf("recovery changed original removal evidence: %+v", proof)
+	}
+}
+
+func TestModelSettingsRecoveryRemoveRefusesInvalidNativeReview(t *testing.T) {
+	test := func(name string, corrupt func(*modelSettingsOperation), wantPreview bool) {
+		t.Run(name, func(t *testing.T) {
+			h := newModelSettingsHarness(t)
+			h.createProfile(t, "model-8k", 8192)
+			h.seedAcceptedRequest(t, h.removeRequest(t, "model-8k"))
+			beforePolicy := h.b.localPolicy().Policy
+			h.mu.Lock()
+			beforeNative := settings.ConfigFromLaunch(h.launch, 18081)
+			h.mu.Unlock()
+			h.b.engineConfigMu.Lock()
+			corrupt(h.b.engineSettings["llamacpp"].Model)
+			err := h.b.saveEngineSettingsLocked()
+			h.b.engineConfigMu.Unlock()
+			if err != nil {
+				t.Fatal(err)
+			}
+			h.restartJournal(t)
+			start := len(h.engine.snapshot())
+			if h.b.recoverEngineSettings() || h.calls() != 1 || !reflect.DeepEqual(h.b.localPolicy().Policy, beforePolicy) {
+				t.Fatal("invalid accepted removal proof reached native or policy effects")
+			}
+			h.mu.Lock()
+			afterNative := settings.ConfigFromLaunch(h.launch, 18081)
+			h.mu.Unlock()
+			if !afterNative.Equal(beforeNative) {
+				t.Fatal("invalid removal proof changed native settings")
+			}
+			previews := 0
+			for _, call := range h.engine.snapshot()[start:] {
+				if call.method == "engine:preview-launch" {
+					previews++
+				}
+				if call.method == "engine:configure-launch" {
+					t.Fatal("invalid native removal proof reached configure")
+				}
+			}
+			if wantPreview && previews != 1 || !wantPreview && previews != 0 {
+				t.Fatalf("frozen proof checks = %d, want worker validation = %v", previews, wantPreview)
+			}
+		})
+	}
+	test("missing proof", func(op *modelSettingsOperation) { op.ReviewedModelChange = modelconfig.ModelChange{} }, false)
+	test("missing digest", func(op *modelSettingsOperation) { op.ReviewedModelChange.PreviewDigest = "" }, false)
+	test("wrapped digest", func(op *modelSettingsOperation) { op.ReviewedModelChange.PreviewDigest = op.Review.PreviewDigest }, false)
+	test("wrong digest", func(op *modelSettingsOperation) { op.ReviewedModelChange.PreviewDigest = strings.Repeat("0", 64) }, true)
+}
+
+func TestModelSettingsRecoveryRemoveNativeFailureKeepsPolicy(t *testing.T) {
+	h := newModelSettingsHarness(t)
+	h.createProfile(t, "model-8k", 8192)
+	p := h.review(t, h.removeRequest(t, "model-8k"), "")
+	before := h.b.localPolicy().Policy
+	h.mu.Lock()
+	h.configureFailure = "no effect"
+	h.mu.Unlock()
+	receipt, err := h.b.applyEngineSettings(context.Background(), p, "")
+	record := h.record(t)
+	if err != nil || receipt.Phase != "failed" || !reflect.DeepEqual(h.b.localPolicy().Policy, before) || record.Snapshot.EffectiveSettings == nil || len(record.Snapshot.EffectiveSettings.ModelLoads) != 1 || h.calls() != 2 {
+		t.Fatalf("native failure cleaned policy: %+v, %v, policy = %+v", receipt, err, h.b.localPolicy().Policy)
+	}
+}
+
+func TestModelSettingsRecoveryRemovePolicyFailureRetainsNativeRemoval(t *testing.T) {
+	h := newModelSettingsHarness(t)
+	h.createProfile(t, "model-8k", 8192)
+	p := h.review(t, h.removeRequest(t, "model-8k"), "")
+	before := h.b.localPolicy().Policy
+	setReplacer(h.b, durablefile.Replacer{Replace: func(string, string) error { return errors.New("policy removal refused") }})
+	receipt, err := h.b.applyEngineSettings(context.Background(), p, "")
+	record := h.record(t)
+	if err != nil || receipt.Phase != "failed" || !reflect.DeepEqual(h.b.localPolicy().Policy, before) || record.Model.Stage != "native-persisted" || record.Snapshot.EffectiveSettings == nil || len(record.Snapshot.EffectiveSettings.ModelLoads) != 0 || h.calls() != 2 {
+		t.Fatalf("policy failure lost native-first removal: %+v, %v, record = %+v", receipt, err, record)
+	}
+	snapshot, err := h.b.getEngineSettings(context.Background(), settings.Request{Engine: "llamacpp"}, "")
+	if err != nil || snapshot.Phase != "applying" || snapshot.Editable || snapshot.UnresolvedError == "" || !modelSettingsNeedsReconciliation(record) {
+		t.Fatalf("failed removal lost its unresolved settings fence: %+v, %v", snapshot, err)
+	}
+	if _, err := h.b.setLocalPolicy(settingsJSON(before), settingsJSON(before.Revision)); policyErrorCode(err) != codePolicyConflict {
+		t.Fatalf("policy write bypassed unresolved native removal: %v", err)
+	}
+}
+
+func TestModelSettingsRecoveryRemoveUncertainAcceptanceMakesNoEffects(t *testing.T) {
+	h := newModelSettingsHarness(t)
+	h.createProfile(t, "model-8k", 8192)
+	p := h.review(t, h.removeRequest(t, "model-8k"), "")
+	before := h.b.localPolicy().Policy
+	h.b.engineSettingsReplacer = durablefile.Replacer{SyncDir: func(string) error { return errors.New("remove acceptance uncertain") }}
+	_, err := h.b.applyEngineSettings(context.Background(), p, "")
+	if !errors.Is(err, durablefile.ErrReplaced) || h.calls() != 1 || !reflect.DeepEqual(h.b.localPolicy().Policy, before) || h.record(t).Model.Stage != "acceptance-uncertain" {
+		t.Fatalf("uncertain acceptance made removal effects: %v, calls = %d", err, h.calls())
+	}
+	h.restartJournal(t)
+	if h.b.recoverEngineSettings() || h.calls() != 1 || !reflect.DeepEqual(h.b.localPolicy().Policy, before) {
+		t.Fatal("recovery executed an unconfirmed remove")
+	}
+}
+
+func TestModelSettingsRecoveryRemoveSupersessionFinishesLandedNativeCleanup(t *testing.T) {
+	h := newModelSettingsHarness(t)
+	h.createProfile(t, "model-8k", 8192)
+	first := h.review(t, h.removeRequest(t, "model-8k"), "")
+	want := h.removalEvidence(t, first)
+	setReplacer(h.b, durablefile.Replacer{Replace: func(string, string) error { return errors.New("policy cleanup refused") }})
+	if receipt, err := h.b.applyEngineSettings(context.Background(), first, ""); err != nil || receipt.Phase != "failed" || h.calls() != 2 {
+		t.Fatalf("seed failed removal = %+v, %v", receipt, err)
+	}
+	setReplacer(h.b, durablefile.Replacer{})
+	second := h.removeRequest(t, "model-8k")
+	second.ModelChange.SupersedesRequestID = first.RequestID
+	start := len(h.engine.snapshot())
+	second = h.review(t, second, "")
+	if receipt, err := h.b.applyEngineSettings(context.Background(), second, ""); err != nil || receipt.Phase != "succeeded" || h.calls() != 2 {
+		t.Fatalf("remove supersession repeated native removal = %+v, %v, calls = %d", receipt, err, h.calls())
+	}
+	h.assertRemovalForwarding(t, start, want, 3, 0)
+	record := h.record(t)
+	if len(h.b.localPolicy().Policy.Profiles) != 0 || record.Model.Stage != "completed" || record.Receipts[first.RequestID].Phase != "superseded" || len(record.Snapshot.Settings.ModelLoads) != 0 {
+		t.Fatalf("supersession lost cleanup or receipts: %+v", record)
+	}
+}
+
+func TestModelSettingsRecoveryRemoveLostNativeResponseUsesReadback(t *testing.T) {
+	h := newModelSettingsHarness(t)
+	h.createProfile(t, "model-8k", 8192)
+	p := h.review(t, h.removeRequest(t, "model-8k"), "")
+	want := h.removalEvidence(t, p)
+	start := len(h.engine.snapshot())
+	h.mu.Lock()
+	h.configureFailure = "lost response"
+	h.mu.Unlock()
+	receipt, err := h.b.applyEngineSettings(context.Background(), p, "")
+	if err != nil || receipt.Phase != "succeeded" || len(h.b.localPolicy().Policy.Profiles) != 0 || len(h.record(t).Snapshot.Settings.ModelLoads) != 0 || h.calls() != 2 {
+		t.Fatalf("lost remove response = %+v, %v, calls = %d", receipt, err, h.calls())
+	}
+	h.assertRemovalForwarding(t, start, want, 2, 1)
 }
 
 func (h *modelSettingsHarness) setNative(config settings.Config) {
@@ -147,7 +383,7 @@ func TestModelSettingsRecoveryAdoptsAlreadyLandedPolicy(t *testing.T) {
 	h.setNative(record.Snapshot.Settings)
 	r := h.b.nodePolicyRuntime()
 	r.mu.Lock()
-	next, err := h.b.mergeModelPolicy(r.current, "llamacpp", record.Model.Change, "")
+	next, err := h.b.mergeModelPolicy(r.current, "llamacpp", record.Model.Change, "", record.Model.Review, record.Model.ReviewedModelChange.Remove)
 	if err != nil {
 		r.mu.Unlock()
 		t.Fatal(err)
@@ -210,11 +446,11 @@ func TestModelSettingsRecoveryRevalidatesNativeBuildWithoutResolvingAgain(t *tes
 	}
 	for _, call := range h.engine.snapshot()[before:] {
 		if call.method == "engine:preview-launch" {
-			var p settings.Request
-			if err := json.Unmarshal(call.params, &p); err != nil {
+			envelope, err := settings.DecodeWorkerRequest[settings.Request](call.params)
+			if err != nil {
 				t.Fatal(err)
 			}
-			if p.ModelChange != nil {
+			if envelope.Request.ModelChange != nil {
 				t.Fatal("recovery re-resolved portable/Auto settings")
 			}
 		}
@@ -413,10 +649,14 @@ func TestModelSettingsRecoveryLoadOnlyChangedProfileStaysWithdrawn(t *testing.T)
 	go func() { _, err := h.b.applyEngineSettings(context.Background(), p, ""); done <- err }()
 	waitModelSettingsSignal(t, reached)
 	policy := h.b.localPolicy().Policy
-	policy.Profiles = []nodepolicy.Profile{{Name: "new-profile", Engine: "llamacpp", Model: "fixture/model", RequestOptions: json.RawMessage(`{"temperature":0.9}`)}}
-	if _, err := h.b.setLocalPolicy(settingsJSON(policy), settingsJSON(policy.Revision)); err != nil {
-		t.Fatal(err)
-	}
+	policy.Profiles = []nodepolicy.Profile{{Key: "fixture/profile", DisplayName: "Fixture", Engine: "llamacpp", Model: "fixture/model", RequestOptions: json.RawMessage(`{"temperature":0.9}`)}}
+	// Simulate third content outside the reserved public writer. A load-only
+	// operation now reserves policy too because it commits derived metadata.
+	r := h.b.nodePolicyRuntime()
+	r.mu.Lock()
+	r.current = policy
+	r.mu.Unlock()
+	writePolicyFile(t, h.path, policy)
 	h.engine.releaseHeld()
 	if err := <-done; err != nil {
 		t.Fatal(err)

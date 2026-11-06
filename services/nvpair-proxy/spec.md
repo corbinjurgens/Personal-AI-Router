@@ -229,7 +229,7 @@ revalidates every strict request. `hybridLocalCandidates(tier, needs,
 crossEngine)` is the role eligibility built on it: of `resolveTierCandidates`'
 candidates, in order, only those offered by their node's own declared role,
 whose advertised role carries finite qualification
-(`AdvertisedRole.HybridQualified`), and whose node has a strict entry for the
+(`AdvertisedProfile.HybridQualified`), and whose node has a strict entry for the
 role's normalized model (`Node.strictModel`; this node's own installed
 capability for itself). Router tier entries never make a node hybrid eligible.
 The hybrid branch of `routingSpend.dispatch` calls this filter. The HTTP facade
@@ -1835,17 +1835,23 @@ is resolved by the node it enters.
   this router's `tierPolicy`.
 - **Declared roles**: a node's `roles` (for a peer, the `roles` of the `policy`
   object in its inventory document as carried by the discovery overlay; for
-  this node, its own policy's `roles` with the bounds of its matching profile,
-  never its published document) name one engine and model per tier. A node
-  that declares at least one role is authoritative for itself: for each tier in
-  the search order it offers only the role it declared for that tier, and for a
-  tier it omits it offers nothing. A node that declares no role (no `policy`
+  this node, its own policy's `roles`, never its published document) are an
+  ordered list of `{name, profiles}` records. Each role's `profiles` is an
+  ordered list of keys resolved through that node's keyed profile facts. Self
+  resolution includes local-only profiles; peers see only shared facts.
+  Missing or withheld keys contribute no candidate, but later reachable keys
+  are still considered. Empty roles and roles with no reachable keys remain
+  declarations. A node that declares at least one role is authoritative for
+  itself: for each tier in the search order it offers only the profiles it
+  declared for that tier, and for a tier it omits it offers nothing. A node
+  that declares no role (no `policy`
   object, or an empty `roles`) receives this router's tier entries as below.
   There is no migration from entries to roles.
 - **Entries**: for each tier in the search order, first the declared roles,
-  then the tier's entries for the nodes that declare nothing. A role or entry
-  lacking a needed capability, or whose `contextTokens` is set and below the
-  estimate, is dropped; a role is judged by the bounds its node advertises.
+  then the tier's entries for the nodes that declare nothing. A role profile
+  or entry lacking a needed capability, or whose `contextTokens` is set
+  and below the estimate, is dropped. Every candidate uses its own node's
+  matching profile bounds, never another member's or node's facts.
 - **Candidates**: each role and entry expands through its engine's facade in this
   process with the ordinary owner filter and order (§5): node/select pin,
   scheduler priority, ID, self mapped to that engine's local backend, peers over
@@ -1860,9 +1866,13 @@ is resolved by the node it enters.
   engine. An engine without a facade enabled in this process contributes no
   candidates, because the process has no routing view of it.
 - **Order**: `preferLoaded: "tier"` sorts by tier rank, then warm before cold;
-  `"any"` by warm first, then tier rank. Declared roles (ordered by engine,
-  then model) before entries, entry order, and the per-role or per-entry owner
-  order break ties. Reservations (§6) are taken only among the candidates
+  `"any"` by warm first, then tier rank. The existing preparation and selected
+  pin classes are unchanged. Inside equal comparator classes, declared
+  candidates precede entries and earlier membership positions on each node
+  lead. Distinct pairs at equal positions use engine/model order and retain
+  the ordinary per-pair owner order. Another node's earlier occurrence of a
+  pair cannot promote a later sibling on this node. Entry order remains the
+  tie breaker for entries. Reservations (§6) are taken only among the candidates
   sharing the leading tier rank, warmth and preparation class.
 - **Body**: the top-level `model` is replaced by splicing its value's bytes;
   every other byte is forwarded as received.
@@ -1903,7 +1913,14 @@ is resolved by the node it enters.
   `api`), each tier this node's own `roles` declare, and each tier a node in
   any facade overlay of this process declares. The records are built from the
   policy and those declarations (`configuredAliases`, `hybridAliasRecords`) and
-  carry no credential, account, deployment or endpoint. An upstream model already named like an alias is left alone. When no
+  carry no credential, account, deployment or endpoint. Each alias variant
+  carries `context_length` equal to the largest `ContextTokens` of that role's
+  visible resolved profiles across self and peers whose engines have an
+  enabled facade in this process. The field is absent when no such profile
+  facts are known or any such profile has zero (unbounded)
+  context. Missing or withheld keys do not count as zero-context facts.
+  Router tier entries do not supply this profile-derived field. An upstream
+  model already named like an alias is left alone. When no
   upstream yields a list and at least one alias is configured, the aliases are
   returned with `200` instead of `503`; without a configured tier the statuses
   are unchanged, and the browser `Origin` checks of §5.8 still apply.
@@ -1911,6 +1928,14 @@ is resolved by the node it enters.
   until Phase 4 of the hybrid routing plan; they are refused as above. Declared
   roles are local destinations: when dispatch exists, `-api` excludes them and
   `-local` and the bare tier include them.
+
+These profile-list and catalog rules describe the implementation contract, not
+installed or live-engine validation. Typed profile context is derived by the
+broker from the resolved per-slot launch context. Native fit can realize less
+than the requested context; agreement with the running engine remains pending
+N7, and client acceptance of `context_length` remains pending N8. The fixed
+`TierOrder`, widening order and suffix aliases remain until phase 08; phase 06
+is installed together with phases 07 and 08.
 
 ### 12.4 Routing metadata
 
@@ -2279,7 +2304,10 @@ port. Inference uses the existing request/workload notification contract.
   - `GET /v1/models` answers `200` `{"object":"list","data":[...]}` from
     `hybridAliasRecords` over the active policy (its entries and this node's
     own `roles`; peers' declarations are not seen), `[]` when none; a query string
-    on it is ignored.
+    on it is ignored. The shared self-policy role resolver supplies
+    `context_length` using only this node's profile facts, including local-only
+    profiles on enabled engines, with the same unknown/unbounded omission rule
+    as facade catalogs.
   - A route is an inference route when any engine profile classifies the path as
     a `POST` inference route (`isInferenceRequest`), so the set is the facades'
     union. Another method on a known path is `405` with `Allow`; an unknown path

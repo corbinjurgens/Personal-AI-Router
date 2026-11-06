@@ -74,7 +74,7 @@ function advertisement(revision: string, pausedBy?: 'local' | 'peer'): Available
         lastSeen: 0,
         trusted: true,
         clustered: true,
-        policy: { revision, pausedBy, roles: {} }
+        policy: { revision, pausedBy, roles: [], profiles: [] }
     }
 }
 

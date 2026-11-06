@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"slices"
 	"strings"
@@ -20,11 +21,24 @@ func ParseStored(data []byte) (Policy, map[string]int, error) {
 	if err := checkModelListKeys(data); err != nil {
 		return Policy{}, nil, errors.New("stored policy is invalid")
 	}
+	data, droppedRoles, err := repairStoredRoles(data)
+	if err != nil {
+		return Policy{}, nil, errors.New("stored policy is invalid")
+	}
 	if err := checkStoredModelShapes(data); err != nil {
 		return Policy{}, nil, errors.New("stored policy is invalid")
 	}
 	clean, counts, err := filterPolicyModels(data, true)
 	if err == nil {
+		counts["roles"] += droppedRoles
+		clean, err = repairStoredProfileKeys(clean)
+		if err != nil {
+			var collision *profileKeyRepairError
+			if errors.As(err, &collision) {
+				return Policy{}, nil, err
+			}
+			return Policy{}, nil, errors.New("stored policy is invalid")
+		}
 		var p Policy
 		repairs, repairErr := removedStoredModels(data, counts)
 		if repairErr != nil {
@@ -36,6 +50,27 @@ func ParseStored(data []byte) (Policy, map[string]int, error) {
 		}
 	}
 	return Policy{}, nil, errors.New("stored policy is invalid")
+}
+
+// repairStoredRoles discards object-shaped declarations before any list-shape
+// validation. Roles never create profiles or acquire automatic memberships.
+func repairStoredRoles(data []byte) ([]byte, int, error) {
+	container, err := readPolicyModelContainer(data)
+	if err != nil {
+		return nil, 0, err
+	}
+	key := modelField(container.fields, "roles")
+	raw := bytes.TrimSpace(container.fields[key])
+	if len(raw) == 0 || raw[0] != '{' {
+		return data, 0, nil
+	}
+	var roles map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &roles); err != nil {
+		return nil, 0, err
+	}
+	container.fields[key] = json.RawMessage("[]")
+	clean, err := container.marshal()
+	return clean, len(roles), err
 }
 
 // A removed model must not conceal an unrelated type, engine, bound, or
@@ -109,6 +144,9 @@ func checkStoredModelShapes(data []byte) error {
 			return err
 		}
 		obj[modelField(obj, "model")] = json.RawMessage(`"stored-model-check"`)
+		if name == "profiles" {
+			repairStoredProfileFields(obj)
+		}
 		raw, err := json.Marshal(obj)
 		if err != nil {
 			return err
@@ -140,13 +178,8 @@ func checkStoredModelShapes(data []byte) error {
 		case "servedModels", "residentModels":
 			_, err := decodeModelList(name, append(append([]byte{'['}, raw...), ']'))
 			return err
-		default:
-			var r Role
-			if err := json.Unmarshal(raw, &r); err != nil {
-				return err
-			}
-			return checkModelRef(r.Engine, r.Model, 0, nil)
 		}
+		return nil
 	}
 	for _, name := range []string{"profiles", "servedModels", "residentModels", "deployments", "roles", "tiers"} {
 		container := fields
@@ -165,7 +198,13 @@ func checkStoredModelShapes(data []byte) error {
 		if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 			continue
 		}
-		if name == "roles" || name == "tiers" {
+		if name == "roles" {
+			if _, _, err := filterRoleMemberships(raw, nil); err != nil {
+				return err
+			}
+			continue
+		}
+		if name == "tiers" {
 			members, err := modelObject(raw)
 			if err != nil {
 				return err
@@ -173,12 +212,6 @@ func checkStoredModelShapes(data []byte) error {
 			for tier, entry := range members {
 				if !IsTier(tier) {
 					return errors.New("invalid tier")
-				}
-				if name == "roles" {
-					if err := check(name, entry); err != nil {
-						return err
-					}
-					continue
 				}
 				var entries []json.RawMessage
 				if err := json.Unmarshal(entry, &entries); err != nil {
@@ -229,6 +262,86 @@ func checkStoredModelShapes(data []byte) error {
 		}
 	}
 	return nil
+}
+
+type profileKeyRepairError struct {
+	pairs []string
+}
+
+func (e *profileKeyRepairError) Error() string {
+	return fmt.Sprintf("Profiles share a key after repair: %s. Rename one in this node's policy file before installing.", strings.Join(e.pairs, ", "))
+}
+
+// repairStoredProfileFields is part of disk-only shape repair. In particular,
+// raw policy writes never acquire a key from their model as a fallback.
+func repairStoredProfileFields(fields map[string]json.RawMessage) bool {
+	repairedKey := fields[modelField(fields, "key")] == nil
+	if repairedKey {
+		fields["key"] = fields[modelField(fields, "model")]
+	}
+	if fields[modelField(fields, "displayName")] == nil {
+		if name := fields[modelField(fields, "name")]; name != nil {
+			fields["displayName"] = name
+		}
+	}
+	delete(fields, modelField(fields, "name"))
+	delete(fields, modelField(fields, "quantization"))
+	return repairedKey
+}
+
+func repairStoredProfileKeys(data []byte) ([]byte, error) {
+	container, err := readPolicyModelContainer(data)
+	if err != nil {
+		return nil, err
+	}
+	field := modelField(container.fields, "profiles")
+	raw, exists := container.fields[field]
+	if !exists || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return data, nil
+	}
+	var entries []json.RawMessage
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		return nil, err
+	}
+	type identity struct {
+		key, pair string
+		repaired  bool
+	}
+	identities := make([]identity, 0, len(entries))
+	for i, entry := range entries {
+		fields, err := modelObject(entry)
+		if err != nil {
+			return nil, err
+		}
+		repaired := repairStoredProfileFields(fields)
+		entries[i], err = json.Marshal(fields)
+		if err != nil {
+			return nil, err
+		}
+		var pr Profile
+		if err := json.Unmarshal(entries[i], &pr); err != nil {
+			return nil, err
+		}
+		identities = append(identities, identity{pr.Key, pr.Engine + "/" + pr.Model, repaired})
+	}
+	for _, candidate := range identities {
+		var pairs []string
+		repaired := false
+		for _, other := range identities {
+			if candidate.key == other.key {
+				pairs = append(pairs, other.pair)
+				repaired = repaired || other.repaired
+			}
+		}
+		if len(pairs) > 1 && repaired {
+			return nil, &profileKeyRepairError{pairs: pairs}
+		}
+	}
+	container.fields[field], err = json.Marshal(entries)
+	if err != nil {
+		return nil, err
+	}
+	return container.marshal()
 }
 
 // modelObject retains raw values and refuses ambiguous effective keys before
@@ -389,6 +502,51 @@ func filterModelArray(raw json.RawMessage, remove bool, required ...string) (jso
 	return encoded, len(entries) - len(kept), err
 }
 
+func pruneProfileKeys(keys []string, dropped map[string]bool) ([]string, int) {
+	kept := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if !dropped[key] {
+			kept = append(kept, key)
+		}
+	}
+	return kept, len(keys) - len(kept)
+}
+
+// filterRoleMemberships removes only references to profiles actually dropped by
+// sanitation. Unrelated missing keys still reach ordinary policy validation.
+func filterRoleMemberships(raw json.RawMessage, dropped map[string]bool) (json.RawMessage, int, error) {
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return raw, 0, nil
+	}
+	var entries []json.RawMessage
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		return nil, 0, err
+	}
+	removed := 0
+	for i, entry := range entries {
+		fields, err := modelObject(entry)
+		if err != nil {
+			return nil, 0, err
+		}
+		var role Role
+		if err := json.Unmarshal(entry, &role); err != nil {
+			return nil, 0, err
+		}
+		kept, count := pruneProfileKeys(role.Profiles, dropped)
+		removed += count
+		fields[modelField(fields, "profiles")], err = json.Marshal(kept)
+		if err != nil {
+			return nil, 0, err
+		}
+		entries[i], err = json.Marshal(fields)
+		if err != nil {
+			return nil, 0, err
+		}
+	}
+	clean, err := json.Marshal(entries)
+	return clean, removed, err
+}
+
 func filterPolicyModels(data []byte, remove bool) ([]byte, map[string]int, error) {
 	container, err := readPolicyModelContainer(data)
 	if err != nil {
@@ -424,22 +582,19 @@ func filterPolicyModels(data []byte, remove bool) ([]byte, map[string]int, error
 		if !exists || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 			continue
 		}
+		if name == "roles" {
+			clean, _, err := filterRoleMemberships(raw, nil)
+			if err != nil {
+				return nil, nil, err
+			}
+			fields[key] = clean
+			continue
+		}
 		members, err := modelObject(raw)
 		if err != nil {
 			return nil, nil, err
 		}
 		for tier, entry := range members {
-			if name == "roles" {
-				ok, err := filterModelEntry(entry, remove)
-				if err != nil {
-					return nil, nil, err
-				}
-				if !ok {
-					delete(members, tier)
-					counts[name]++
-				}
-				continue
-			}
 			var entries []json.RawMessage
 			if json.Unmarshal(entry, &entries) != nil {
 				return nil, nil, errors.New("invalid tier list")
@@ -504,14 +659,15 @@ func filterPolicyModels(data []byte, remove bool) ([]byte, map[string]int, error
 
 type storedModelRepairs struct {
 	counts      map[string]int
-	profiles    map[Role]bool
-	served      map[Role]bool
+	profiles    map[ModelRef]bool
+	profileKeys map[string]bool
+	served      map[ModelRef]bool
 	deployments map[string]bool
 	families    map[string]bool
 }
 
 func removedStoredModels(data []byte, counts map[string]int) (*storedModelRepairs, error) {
-	r := &storedModelRepairs{counts: counts, profiles: map[Role]bool{}, served: map[Role]bool{}, deployments: map[string]bool{}, families: map[string]bool{}}
+	r := &storedModelRepairs{counts: counts, profiles: map[ModelRef]bool{}, profileKeys: map[string]bool{}, served: map[ModelRef]bool{}, deployments: map[string]bool{}, families: map[string]bool{}}
 	container, err := readPolicyModelContainer(data)
 	if err != nil {
 		return nil, err
@@ -539,13 +695,24 @@ func removedStoredModels(data []byte, counts map[string]int) (*storedModelRepair
 			return nil, err
 		}
 		seen := map[string]bool{}
-		models := map[Role]bool{}
+		models := map[ModelRef]bool{}
 		for _, entry := range entries {
-			var ref struct{ Engine, Model, Name, ID, Family string }
+			if name == "profiles" {
+				fields, err := modelObject(entry)
+				if err != nil {
+					return nil, err
+				}
+				repairStoredProfileFields(fields)
+				entry, err = json.Marshal(fields)
+				if err != nil {
+					return nil, err
+				}
+			}
+			var ref struct{ Engine, Model, Key, ID, Family string }
 			if err := json.Unmarshal(entry, &ref); err != nil {
 				return nil, err
 			}
-			key := ref.Name
+			key := ref.Key
 			if name == "deployments" {
 				key = ref.ID
 			}
@@ -557,7 +724,7 @@ func removedStoredModels(data []byte, counts map[string]int) (*storedModelRepair
 			}
 			seen[key] = true
 			if name == "profiles" {
-				model := Role{Engine: ref.Engine, Model: ref.Model}
+				model := ModelRef{Engine: ref.Engine, Model: ref.Model}
 				if models[model] {
 					return nil, errors.New("duplicate profile model")
 				}
@@ -572,9 +739,10 @@ func removedStoredModels(data []byte, counts map[string]int) (*storedModelRepair
 			}
 			switch name {
 			case "profiles":
-				r.profiles[Role{Engine: ref.Engine, Model: ref.Model}] = true
+				r.profiles[ModelRef{Engine: ref.Engine, Model: ref.Model}] = true
+				r.profileKeys[ref.Key] = true
 			case "servedModels":
-				r.served[Role{Engine: ref.Engine, Model: ref.Model}] = true
+				r.served[ModelRef{Engine: ref.Engine, Model: ref.Model}] = true
 			case "deployments":
 				r.deployments[ref.ID], r.families[ref.Family] = true, true
 			}
@@ -590,6 +758,11 @@ func repairStoredModelReferences(p *Policy, repairs *storedModelRepairs) {
 		p.PauseMode = PauseImmediate
 	}
 	counts := repairs.counts
+	for i := range p.Roles {
+		kept, count := pruneProfileKeys(p.Roles[i].Profiles, repairs.profileKeys)
+		counts["roleReferences"] += count
+		p.Roles[i].Profiles = kept
+	}
 	// Repair only consequences of removed entries. Preexisting unrelated bad
 	// references must still fail ordinary validation and invoke recovery.
 	if counts["profiles"] > 0 || counts["servedModels"] > 0 {

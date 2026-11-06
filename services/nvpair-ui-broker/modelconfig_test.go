@@ -33,7 +33,7 @@ func newModelConfigFixture(t *testing.T) *modelConfigFixture {
 	seedStrictIdentity(b, "llamacpp", "resident")
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
-	r.current.Profiles = []nodepolicy.Profile{{Name: "resident", Engine: "llamacpp", Model: "resident", ContextTokens: 8192, MaxOutputTokens: 1024, MaxConcurrent: 1, MemoryBytes: 1024,
+	r.current.Profiles = []nodepolicy.Profile{{Key: "resident", DisplayName: "Resident", Engine: "llamacpp", Model: "resident", ContextTokens: 8192, MaxOutputTokens: 1024, MaxConcurrent: 1, MemoryBytes: 1024,
 		Qualification: &nodepolicy.QualificationRef{ID: "fixture-only", Revision: "1"}}}
 	r.current.ServedModels = nodepolicy.ServedModels{{Engine: "llamacpp", Model: "resident"}}
 	r.current.ResidentModels = nodepolicy.ResidentModels{{Engine: "llamacpp", Model: "resident"}}
@@ -80,7 +80,7 @@ func newModelConfigFixture(t *testing.T) *modelConfigFixture {
 		return map[string]bool{"ok": true}, ""
 	})
 	e := b.captureModelConfig()
-	entry, _, _, _ := b.modelConfigEntry(e, nodepolicy.Role{Engine: "llamacpp", Model: "resident"})
+	entry, _, _, _ := b.modelConfigEntry(e, nodepolicy.ModelRef{Engine: "llamacpp", Model: "resident"})
 	if entry.State != nodepolicy.ModelStatePending {
 		t.Fatalf("resident fixture is not eligible: %+v", entry)
 	}
@@ -188,7 +188,7 @@ func runModelConfigEventTrace(t *testing.T, state string, events []string, f *mo
 	f.acks.mu.Lock()
 	f.acks.held = "0"
 	f.acks.mu.Unlock()
-	ref := nodepolicy.Role{Engine: "llamacpp", Model: "resident"}
+	ref := nodepolicy.ModelRef{Engine: "llamacpp", Model: "resident"}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	clock := time.Unix(5000, 0)
@@ -598,11 +598,11 @@ func awaitModelConfigMatrixCall(t *testing.T, worker *fakeWorker, method string)
 
 func cloneModelConfigMatrixState(from modelConfigRuntime) modelConfigRuntime {
 	copy := from
-	copy.pending = make(map[nodepolicy.Role]residentPendingObservation)
+	copy.pending = make(map[nodepolicy.ModelRef]residentPendingObservation)
 	for ref, pending := range from.pending {
 		copy.pending[ref] = pending
 	}
-	copy.unsettled = make(map[nodepolicy.Role]residentUnsettled)
+	copy.unsettled = make(map[nodepolicy.ModelRef]residentUnsettled)
 	for ref, hold := range from.unsettled {
 		op := *hold.op
 		if op.recovery != nil {
@@ -612,7 +612,7 @@ func cloneModelConfigMatrixState(from modelConfigRuntime) modelConfigRuntime {
 		hold.op = &op
 		copy.unsettled[ref] = hold
 	}
-	copy.confirmed = make(map[nodepolicy.Role]modelConfigEvidence)
+	copy.confirmed = make(map[nodepolicy.ModelRef]modelConfigEvidence)
 	for ref, evidence := range from.confirmed {
 		copy.confirmed[ref] = evidence
 	}
@@ -840,7 +840,7 @@ func TestModelConfigNonterminalReplacementTimeoutPreservesBarrier(t *testing.T) 
 			awaitModelConfigDone(t, done)
 			f.engine.releaseHeld()
 			r := f.b.nodePolicyRuntime()
-			ref := nodepolicy.Role{Engine: "llamacpp", Model: "resident"}
+			ref := nodepolicy.ModelRef{Engine: "llamacpp", Model: "resident"}
 			r.mu.Lock()
 			original, present := r.models.unsettled[ref]
 			identity := r.engineIdentity
@@ -936,7 +936,7 @@ func TestModelConfigTerminalLoadedObservationBound(t *testing.T) {
 		f.awaitGrant(t)
 		f.engine.releaseHeld()
 		awaitModelConfigDone(t, done)
-		ref := nodepolicy.Role{Engine: "llamacpp", Model: "resident"}
+		ref := nodepolicy.ModelRef{Engine: "llamacpp", Model: "resident"}
 		r.mu.Lock()
 		hold, held := r.models.unsettled[ref]
 		r.mu.Unlock()
@@ -1020,7 +1020,7 @@ func TestModelConfigTerminalFinishFailureHasBoundedExit(t *testing.T) {
 			awaitModelConfigDone(t, done)
 			before := f.b.captureModelConfig()
 			r := f.b.nodePolicyRuntime()
-			ref := nodepolicy.Role{Engine: "llamacpp", Model: "resident"}
+			ref := nodepolicy.ModelRef{Engine: "llamacpp", Model: "resident"}
 			r.mu.Lock()
 			hold, ok := r.models.unsettled[ref]
 			r.mu.Unlock()
@@ -1161,7 +1161,7 @@ func TestModelConfigPendingObservationAllowedExits(t *testing.T) {
 			f.engine.releaseHeld()
 			awaitModelConfigDone(t, done)
 			r := f.b.nodePolicyRuntime()
-			ref := nodepolicy.Role{Engine: "llamacpp", Model: "resident"}
+			ref := nodepolicy.ModelRef{Engine: "llamacpp", Model: "resident"}
 			r.mu.Lock()
 			_, pending := r.models.pending[ref]
 			r.mu.Unlock()
@@ -1624,15 +1624,15 @@ func TestModelConfigResidentSetNormalizedPerEngine(t *testing.T) {
 	}
 	e := f.b.captureModelConfig()
 	e.Policy = p
-	_, _, _, count := f.b.modelConfigEntry(e, nodepolicy.Role{Engine: "llamacpp-custom", Model: "m"})
+	_, _, _, count := f.b.modelConfigEntry(e, nodepolicy.ModelRef{Engine: "llamacpp-custom", Model: "m"})
 	if count != 2 {
 		t.Fatalf("normalized descriptor resident count=%d, want 2", count)
 	}
-	_, _, _, count = f.b.modelConfigEntry(e, nodepolicy.Role{Engine: "llamacpp", Model: "resident"})
+	_, _, _, count = f.b.modelConfigEntry(e, nodepolicy.ModelRef{Engine: "llamacpp", Model: "resident"})
 	if count != 1 {
 		t.Fatalf("llamacpp count=%d, want 1", count)
 	}
-	want := []nodepolicy.Role{{Engine: "llamacpp", Model: "resident"}, {Engine: "llamacpp-custom", Model: "m"}, {Engine: "llamacpp-custom", Model: "other"}}
+	want := []nodepolicy.ModelRef{{Engine: "llamacpp", Model: "resident"}, {Engine: "llamacpp-custom", Model: "m"}, {Engine: "llamacpp-custom", Model: "other"}}
 	if got := f.b.residentRefs(p); !reflect.DeepEqual(got, want) {
 		t.Fatalf("normalized deterministic resident set=%v, want %v", got, want)
 	}
@@ -1856,7 +1856,7 @@ func TestModelConfigDefiniteLoadFailureRetainedReason(t *testing.T) {
 			})
 			f.engine.releaseHeld()
 			awaitModelConfigDone(t, done)
-			ref := nodepolicy.Role{Engine: "llamacpp", Model: "resident"}
+			ref := nodepolicy.ModelRef{Engine: "llamacpp", Model: "resident"}
 			r.mu.Lock()
 			hold, held := r.models.unsettled[ref]
 			retryAt := r.models.retryAt
@@ -1946,7 +1946,7 @@ func TestModelConfigUncertainReadbackSurvivesInventoryWithdrawal(t *testing.T) {
 	f.engine.releaseHeld()
 	awaitModelConfigDone(t, done)
 	r := f.b.nodePolicyRuntime()
-	ref := nodepolicy.Role{Engine: "llamacpp", Model: "resident"}
+	ref := nodepolicy.ModelRef{Engine: "llamacpp", Model: "resident"}
 	r.mu.Lock()
 	hold, held := r.models.unsettled[ref]
 	r.mu.Unlock()
@@ -2013,7 +2013,7 @@ func TestModelConfigRetainedFailureReadbackTracksInventory(t *testing.T) {
 			f.engine.releaseHeld()
 			awaitModelConfigDone(t, done)
 			r := f.b.nodePolicyRuntime()
-			ref := nodepolicy.Role{Engine: "llamacpp", Model: "resident"}
+			ref := nodepolicy.ModelRef{Engine: "llamacpp", Model: "resident"}
 			r.mu.Lock()
 			hold, held := r.models.unsettled[ref]
 			if inventory == "unknown inventory" {
@@ -2079,7 +2079,7 @@ func TestModelConfigRetainedFailureKeepsCurrentVeto(t *testing.T) {
 			f.engine.releaseHeld()
 			awaitModelConfigDone(t, done)
 			r := f.b.nodePolicyRuntime()
-			ref := nodepolicy.Role{Engine: "llamacpp", Model: "resident"}
+			ref := nodepolicy.ModelRef{Engine: "llamacpp", Model: "resident"}
 			r.mu.Lock()
 			hold, held := r.models.unsettled[ref]
 			setVeto(r, true)
@@ -2903,7 +2903,7 @@ func TestModelConfigManagerReplacementDuringGrant(t *testing.T) {
 func TestModelConfigDispatchRejectsForeignAndDuplicateRequests(t *testing.T) {
 	f := newModelConfigFixture(t)
 	e := f.b.captureModelConfig()
-	_, _, id, _ := f.b.modelConfigEntry(e, nodepolicy.Role{Engine: "llamacpp", Model: "resident"})
+	_, _, id, _ := f.b.modelConfigEntry(e, nodepolicy.ModelRef{Engine: "llamacpp", Model: "resident"})
 	op := &modelConfigAttempt{ctx: context.Background(), evidence: e, reservation: "fixture-reservation", deadline: time.Now().Add(time.Second),
 		prepare: nodepolicy.PrepareResidentParams{PolicyRevision: e.Policy.Revision, ProxyRunID: e.Run,
 			ManagerIncarnation: "fixture-manager", OperationID: "resident-1", Engine: "llamacpp", Model: "resident", Identity: id}}
@@ -3193,10 +3193,11 @@ func TestModelConfigInflightStatusRetainsEveryDesiredReference(t *testing.T) {
 	r := f.b.nodePolicyRuntime()
 	r.mu.Lock()
 	second := r.current.Profiles[0]
-	second.Name, second.Model = "second", "second"
+	second.Key, second.DisplayName = "second", "Second"
+	second.Model = "second"
 	r.current.Profiles = append(r.current.Profiles, second)
-	r.current.ResidentModels = append(r.current.ResidentModels, nodepolicy.Role{Engine: "llamacpp", Model: "second"})
-	r.current.ServedModels = append(r.current.ServedModels, nodepolicy.Role{Engine: "llamacpp", Model: "second"})
+	r.current.ResidentModels = append(r.current.ResidentModels, nodepolicy.ModelRef{Engine: "llamacpp", Model: "second"})
+	r.current.ServedModels = append(r.current.ServedModels, nodepolicy.ModelRef{Engine: "llamacpp", Model: "second"})
 	r.mu.Unlock()
 	done := f.startLoadedAttempt(t)
 	f.awaitGrant(t)
@@ -3506,7 +3507,7 @@ func TestModelConfigAbsentEngineKeepsConfirmedProof(t *testing.T) {
 	}
 	r := f.b.nodePolicyRuntime()
 	r.mu.Lock()
-	_, confirmed := r.models.confirmed[nodepolicy.Role{Engine: "llamacpp", Model: "resident"}]
+	_, confirmed := r.models.confirmed[nodepolicy.ModelRef{Engine: "llamacpp", Model: "resident"}]
 	r.mu.Unlock()
 	if !confirmed {
 		t.Fatal("unknown inventory deleted the confirmed proof")
@@ -3520,7 +3521,7 @@ func TestModelConfigAbsentEngineKeepsConfirmedProof(t *testing.T) {
 }
 
 func TestModelConfigContradictingPendingObservationIsUnknown(t *testing.T) {
-	ref := nodepolicy.Role{Engine: "llamacpp", Model: "resident"}
+	ref := nodepolicy.ModelRef{Engine: "llamacpp", Model: "resident"}
 	test := func(name string, inventory []string) {
 		t.Run(name, func(t *testing.T) {
 			f := newModelConfigFixture(t)
@@ -3564,7 +3565,7 @@ func TestModelConfigContradictingPendingObservationIsUnknown(t *testing.T) {
 }
 
 func TestModelConfigPendingObservationIgnoresUnprovenInventory(t *testing.T) {
-	ref := nodepolicy.Role{Engine: "llamacpp", Model: "resident"}
+	ref := nodepolicy.ModelRef{Engine: "llamacpp", Model: "resident"}
 	t.Run("retired source", func(t *testing.T) {
 		f := newModelConfigFixture(t)
 		f.completedResidentLoad(t)
@@ -3601,7 +3602,7 @@ func TestModelConfigRetirementDropsRecordedLoadRequest(t *testing.T) {
 			f := newModelConfigFixture(t)
 			f.completedResidentLoad(t)
 			r := f.b.nodePolicyRuntime()
-			ref := nodepolicy.Role{Engine: "llamacpp", Model: "resident"}
+			ref := nodepolicy.ModelRef{Engine: "llamacpp", Model: "resident"}
 			r.mu.Lock()
 			_, recorded := r.models.loadedRequests[ref]
 			switch scenario {
@@ -3650,7 +3651,7 @@ func (f *modelConfigFixture) nonterminalHold(t *testing.T) residentUnsettled {
 	f.engine.setAnswer(modelConfigNotDispatched(nil))
 	r := f.b.nodePolicyRuntime()
 	r.mu.Lock()
-	hold, held := r.models.unsettled[nodepolicy.Role{Engine: "llamacpp", Model: "resident"}]
+	hold, held := r.models.unsettled[nodepolicy.ModelRef{Engine: "llamacpp", Model: "resident"}]
 	r.mu.Unlock()
 	if !held || hold.terminal {
 		t.Fatal("missing original nonterminal granted uncertainty")
@@ -3662,7 +3663,7 @@ func TestModelConfigNonterminalHoldConfirmsReplacementReadback(t *testing.T) {
 	f := newModelConfigFixture(t)
 	original := f.nonterminalHold(t)
 	r := f.b.nodePolicyRuntime()
-	ref := nodepolicy.Role{Engine: "llamacpp", Model: "resident"}
+	ref := nodepolicy.ModelRef{Engine: "llamacpp", Model: "resident"}
 	// The original allocation may still be loading: no readback replaces it.
 	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
 	f.b.reconcileModelConfig(context.Background())

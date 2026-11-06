@@ -13,7 +13,7 @@ import (
 // EngineBindings is target-owned configuration, not inventory or engine intent.
 // Absence and an empty list both disable automatic preparation. Readback always
 // emits a list so a caller can distinguish support from discarded input.
-type EngineBindings []Role
+type EngineBindings []ModelRef
 
 func (b EngineBindings) MarshalJSON() ([]byte, error) {
 	if err := b.validate(); err != nil {
@@ -22,7 +22,7 @@ func (b EngineBindings) MarshalJSON() ([]byte, error) {
 	if b == nil {
 		return []byte("[]"), nil
 	}
-	return json.Marshal([]Role(b))
+	return json.Marshal([]ModelRef(b))
 }
 
 func (b *EngineBindings) UnmarshalJSON(data []byte) error {

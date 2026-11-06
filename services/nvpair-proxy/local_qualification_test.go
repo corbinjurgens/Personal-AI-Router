@@ -69,7 +69,7 @@ func installQualified(t *testing.T, a *admissionController, keys ...admKey) {
 		id.ModelDigests[k.model] = strictRequest().Identity.ModelDigest
 		identities[k.engine] = id
 		p.Profiles = append(p.Profiles, nodepolicy.Profile{
-			Name: fmt.Sprintf("p%d", i), Engine: k.engine, Model: k.model, ContextTokens: 4096, MaxOutputTokens: 1024, Qualification: &ref,
+			Key: fmt.Sprintf("p%d", i), DisplayName: "Qualified profile", Engine: k.engine, Model: k.model, ContextTokens: 4096, MaxOutputTokens: 1024, Qualification: &ref,
 		})
 	}
 	a.mu.Lock()
@@ -126,7 +126,7 @@ func qualificationFixture(t *testing.T) (*localQualification, nodepolicy.Profile
 	if !ok {
 		t.Fatal("fixture artifact lacks synthetic-fixture revision 1")
 	}
-	profile := nodepolicy.Profile{Name: "fixture", Engine: q.Engine, Model: q.Model, ContextTokens: q.ContextTokens,
+	profile := nodepolicy.Profile{Key: "fixture", DisplayName: "fixture", Engine: q.Engine, Model: q.Model, ContextTokens: q.ContextTokens,
 		MaxOutputTokens: q.MaxOutputTokens, RequestOptions: q.RequestOptions, RequestOptionsMode: q.RequestOptionsMode, Qualification: &nodepolicy.QualificationRef{ID: q.ID, Revision: q.Revision}}
 	return q, profile, doc.Cases
 }
@@ -1181,18 +1181,18 @@ func TestStrictCapabilityDerivation(t *testing.T) {
 		{"two qualified profiles name the model", func(a *admissionController) {
 			p := a.currentPolicy()
 			dup := p.Profiles[0]
-			dup.Name, dup.Model = "dup", "m"
+			dup.Key, dup.Model = "dup", "m"
 			p.Profiles = append(p.Profiles, dup)
 			a.setPolicy(p)
 		}},
 		{"an unqualified profile names the model after it", func(a *admissionController) {
 			p := a.currentPolicy()
-			p.Profiles = append(p.Profiles, nodepolicy.Profile{Name: "dup", Engine: "llamacpp", Model: "m", MaxConcurrent: 3})
+			p.Profiles = append(p.Profiles, nodepolicy.Profile{Key: "dup", DisplayName: "dup", Engine: "llamacpp", Model: "m", MaxConcurrent: 3})
 			a.setPolicy(p)
 		}},
 		{"an unqualified profile names the model before it", func(a *admissionController) {
 			p := a.currentPolicy()
-			p.Profiles = append([]nodepolicy.Profile{{Name: "dup", Engine: "llamacpp", Model: "m", MaxConcurrent: 3}}, p.Profiles...)
+			p.Profiles = append([]nodepolicy.Profile{{Key: "dup", DisplayName: "dup", Engine: "llamacpp", Model: "m", MaxConcurrent: 3}}, p.Profiles...)
 			a.setPolicy(p)
 		}},
 		{"unbounded concurrency", func(a *admissionController) {

@@ -47,7 +47,7 @@ func (b *Broker) bindingOffersLocked() *nodepolicy.EngineBindingOffers {
 		r.activationLocked(b.policyProxy(), policy.Revision).Activation != activationActive {
 		return nil
 	}
-	var models []nodepolicy.Role
+	var models []nodepolicy.ModelRef
 	for _, ref := range policy.EngineBindings {
 		profile, fronted := b.frontedEngineProfile(ref.Engine)
 		if !fronted || b.engineProxyListenPort(profile) == 0 || r.drains[ref.Engine] ||

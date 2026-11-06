@@ -317,7 +317,7 @@ describe('typed profile lifecycle', () => {
     )
 
     it('appends without rewriting existing profiles, numeric tokens or unrelated references', () => {
-        const text = String.raw` {"opaque":9007199254740993,"profiles":[{"name":"first","engine":"llamacpp","model":"native/model","requestOptions":{"precise":1.00000000000000001,"huge":1e400,"nested":[null,{},[]]}}],"residentModels":null,"servedModels":[],"roles":{"nine":{"engine":"llamacpp","model":"native/model"}},"engineBindings":null} `
+        const text = String.raw` {"opaque":9007199254740993,"profiles":[{"name":"first","engine":"llamacpp","model":"native/model","requestOptions":{"precise":1.00000000000000001,"huge":1e400,"nested":[null,{},[]]}}],"residentModels":null,"servedModels":[],"roles":[{"name":"medium","profiles":["native/model"]}],"engineBindings":null} `
         const escaped = { engine: 'llamacpp', model: 'owner/"model\\file/模型' }
         const raw = JSON.stringify({ name: 'new/model', ...escaped })
         const edited = success(createModelSettingsProfile(text, escaped, 'new/model'))
@@ -336,21 +336,27 @@ describe('typed profile lifecycle', () => {
         },
         { label: 'only', profiles: [first], selected: identity, remaining: [] }
     ])('removes only the $label profile', ({ profiles, selected, remaining }) => {
+        const keyedProfiles = profiles.map(profile => ({
+            ...profile, key: profile.model, displayName: profile.name
+        }))
+        const keyedRemaining = remaining.map(profile => ({
+            ...profile, key: profile.model, displayName: profile.name
+        }))
         const text = JSON.stringify({
-            profiles,
+            profiles: keyedProfiles,
             residentModels: [],
             servedModels: [identity],
             engineBindings: [identity],
-            roles: { nine: identity },
+            roles: [{ name: 'medium', profiles: [identity.model] }],
             files: ['unchanged']
         })
         const edited = success(removeModelSettingsProfile(text, selected))
         expect(JSON.parse(edited)).toEqual({
-            profiles: remaining,
+            profiles: keyedRemaining,
             residentModels: [],
             servedModels: [identity],
             engineBindings: [identity],
-            roles: { nine: identity },
+            roles: [{ name: 'medium', profiles: [identity.model] }],
             files: ['unchanged']
         })
     })

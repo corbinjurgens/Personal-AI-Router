@@ -581,7 +581,7 @@ func TestModelsMemoryEvidenceInvalidDocumentPreservesNames(t *testing.T) {
 func TestModelsResultDecodeDiscardsInvalidMemoryEvidence(t *testing.T) {
 	test := func(name, evidence string) {
 		t.Run(name, func(t *testing.T) {
-			payload := `{"models":["m"],"modelsByEngine":{"llamacpp":["m"]},"loadedByEngine":{"llamacpp":["m"]},"policy":{"revision":"21","roles":{}},"memoryEvidence":` + evidence + `}`
+			payload := `{"models":["m"],"modelsByEngine":{"llamacpp":["m"]},"loadedByEngine":{"llamacpp":["m"]},"policy":{"revision":"21","roles":[]},"memoryEvidence":` + evidence + `}`
 			result := ModelsResult{MemoryEvidence: &performancewire.MemoryEvidence{Version: 2}}
 			if err := json.Unmarshal([]byte(payload), &result); err != nil {
 				t.Fatalf("decode inventory with invalid optional evidence: %v", err)
@@ -590,7 +590,7 @@ func TestModelsResultDecodeDiscardsInvalidMemoryEvidence(t *testing.T) {
 				Models:         []string{"m"},
 				ByEngine:       map[string][]string{"llamacpp": {"m"}},
 				LoadedByEngine: map[string][]string{"llamacpp": {"m"}},
-				Policy:         &nodepolicy.Advertisement{Revision: "21", Roles: map[string]nodepolicy.AdvertisedRole{}},
+				Policy:         &nodepolicy.Advertisement{Revision: "21", Roles: []nodepolicy.Role{}, Profiles: []nodepolicy.AdvertisedProfile{}},
 			}
 			if !reflect.DeepEqual(result, want) {
 				t.Fatalf("decoded result = %+v, want %+v", result, want)
@@ -1339,7 +1339,8 @@ func TestModelsResultCarriesAndWithdrawsTheStrictCapability(t *testing.T) {
 	m := NewManager(NewCodec(&out), ex, nil, "")
 	ready := nodepolicy.Advertisement{
 		Revision: "21",
-		Roles:    map[string]nodepolicy.AdvertisedRole{},
+		Roles:    []nodepolicy.Role{},
+		Profiles: []nodepolicy.AdvertisedProfile{},
 		StrictAdmission: &nodepolicy.StrictAdmissionCapability{Version: nodepolicy.StrictAdmissionVersion, Models: []nodepolicy.StrictAdmissionModel{{
 			Engine: "llamacpp", Model: "m", MaxConcurrent: 2,
 			Identity: nodepolicy.StrictModelIdentity{EngineRunID: "engine-run-1", SettingsFingerprint: strings.Repeat("a", 64), ModelDigest: strings.Repeat("b", 64)},

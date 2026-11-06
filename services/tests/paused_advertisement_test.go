@@ -338,7 +338,7 @@ func TestPAPausedAdvertisementConvergesWithoutMDNSChange(t *testing.T) {
 	}
 	reverseConnects := &atomic.Uint64{}
 	var mu sync.Mutex
-	policy := nodepolicy.Advertisement{Revision: "5", Roles: map[string]nodepolicy.AdvertisedRole{}}
+	policy := nodepolicy.Advertisement{Revision: "5", Profiles: []nodepolicy.AdvertisedProfile{}, Roles: []nodepolicy.Role{}}
 	status, requestID := http.StatusOK, uint64(0)
 	receipts := make(chan receipt, 32)
 	resumeEntered := make(chan receipt, 1)

@@ -24,26 +24,32 @@ func TestPeerPolicySetRoundTripsRoles(t *testing.T) {
 	beforeTiers := mustJSON(rb.b.localPolicy().Policy.Tiers)
 
 	doc := rb.peerSnapshot(t)
-	if roles, ok := doc["roles"].(map[string]any); !ok || len(roles) != 0 {
-		t.Fatalf("relayed get roles = %#v, want an empty object", doc["roles"])
+	if roles, ok := doc["roles"].([]any); !ok || len(roles) != 0 {
+		t.Fatalf("relayed get roles = %#v, want an empty list", doc["roles"])
 	}
-	doc["roles"] = map[string]any{
-		"weak":   map[string]any{"engine": "llamacpp", "model": "qwen3:8b"},
-		"strong": map[string]any{"engine": "llamacpp-custom", "model": "big"},
+	doc["profiles"] = []nodepolicy.Profile{
+		{Key: "small-profile", DisplayName: "Small", Engine: "llamacpp", Model: "qwen3:8b"},
+		{Key: "large-profile", DisplayName: "Large", Engine: "llamacpp-custom", Model: "big"},
+	}
+	doc["roles"] = []nodepolicy.Role{
+		{Name: nodepolicy.TierStrong, Profiles: []string{"large-profile", "small-profile"}},
+		{Name: nodepolicy.TierWeak, Profiles: []string{"small-profile"}},
+		{Name: nodepolicy.TierMedium, Profiles: []string{}},
 	}
 	if _, errText := rb.relaySet(t, doc); errText != "" {
 		t.Fatalf("relayed set with roles: %s", errText)
 	}
 
-	want := map[string]nodepolicy.Role{
-		nodepolicy.TierWeak:   {Engine: "llamacpp", Model: "qwen3:8b"},
-		nodepolicy.TierStrong: {Engine: "llamacpp-custom", Model: "big"},
+	want := []nodepolicy.Role{
+		{Name: nodepolicy.TierStrong, Profiles: []string{"large-profile", "small-profile"}},
+		{Name: nodepolicy.TierWeak, Profiles: []string{"small-profile"}},
+		{Name: nodepolicy.TierMedium, Profiles: []string{}},
 	}
 	if got := rb.b.localPolicy().Policy.Roles; !reflect.DeepEqual(got, want) {
 		t.Errorf("stored roles = %+v, want %+v", got, want)
 	}
 	sections := rb.fileSections(t)
-	var fileRoles map[string]nodepolicy.Role
+	var fileRoles []nodepolicy.Role
 	if err := json.Unmarshal(sections["roles"], &fileRoles); err != nil || !reflect.DeepEqual(fileRoles, want) {
 		t.Errorf("policy file roles = %s (%v), want %+v", sections["roles"], err, want)
 	}
@@ -74,12 +80,14 @@ func TestPeerPolicySetRoundTripsRoles(t *testing.T) {
 }
 
 func TestPeerPolicySetRejectsInvalidRolesWithoutEffect(t *testing.T) {
-	test := func(name string, roles map[string]any, wantErr string) {
+	test := func(name string, edit func(map[string]any), wantErr string) {
 		t.Helper()
 		t.Run(name, func(t *testing.T) {
 			rb := newRoutedBroker(t)
 			doc := rb.peerSnapshot(t)
-			doc["roles"] = roles
+			doc["profiles"] = []nodepolicy.Profile{{Key: "fixture-profile", DisplayName: "Fixture", Engine: "llamacpp", Model: "m"}}
+			doc["roles"] = []nodepolicy.Role{{Name: nodepolicy.TierWeak, Profiles: []string{"fixture-profile"}}}
+			edit(doc)
 			base := rb.baseline(t)
 			reply := rb.relayReply(t, "set", map[string]any{"policy": doc, "expectedPersistedRevision": doc["revision"]})
 			if reply.ErrorCode != -32602 || !strings.Contains(reply.Error, wantErr) {
@@ -89,9 +97,18 @@ func TestPeerPolicySetRejectsInvalidRolesWithoutEffect(t *testing.T) {
 		})
 	}
 
-	test("unknown tier", map[string]any{"huge": map[string]any{"engine": "llamacpp", "model": "m"}}, "unknown tier")
-	test("reserved alias model", map[string]any{"weak": map[string]any{"engine": "llamacpp", "model": "weak-api"}}, "reserved alias")
-	test("unknown engine", map[string]any{"weak": map[string]any{"engine": "no/pe", "model": "m"}}, "unknown engine")
+	test("unknown tier", func(doc map[string]any) {
+		doc["roles"] = []nodepolicy.Role{{Name: "huge", Profiles: []string{"fixture-profile"}}}
+	}, "unknown tier")
+	test("unknown profile", func(doc map[string]any) {
+		doc["roles"] = []nodepolicy.Role{{Name: nodepolicy.TierWeak, Profiles: []string{"missing-profile"}}}
+	}, "unknown profile key")
+	test("reserved alias model", func(doc map[string]any) {
+		doc["profiles"].([]nodepolicy.Profile)[0].Model = "weak-api"
+	}, "reserved alias")
+	test("unknown engine", func(doc map[string]any) {
+		doc["profiles"].([]nodepolicy.Profile)[0].Engine = "no/pe"
+	}, "unknown engine")
 }
 
 // A peer reads who paused the node, but every policy write is fenced while paused.
@@ -123,7 +140,7 @@ func TestPeerPolicySetWhilePausedHasNoEffect(t *testing.T) {
 		delete(doc, "pausedBy")
 	})
 	test("roles edit alongside", func(doc map[string]any) {
-		doc["roles"] = map[string]any{"medium": map[string]any{"engine": "llamacpp", "model": "qwen3:8b"}}
+		doc["roles"] = []nodepolicy.Role{{Name: nodepolicy.TierMedium, Profiles: []string{}}}
 		doc["pausedBy"] = "peer"
 	})
 }
@@ -132,14 +149,15 @@ func TestLocalRolesEditWhilePausedPreservesPause(t *testing.T) {
 	rb := newBrokerOnFile(t, pausedLocallyDocument)
 	before := rb.b.localPolicy().Policy.Revision
 	rb.localSet(t, func(doc map[string]any) {
-		doc["roles"] = map[string]any{"medium": map[string]any{"engine": "llamacpp", "model": "qwen3:8b"}}
+		doc["profiles"] = []nodepolicy.Profile{{Key: "small-profile", DisplayName: "Small", Engine: "llamacpp", Model: "qwen3:8b"}}
+		doc["roles"] = []nodepolicy.Role{{Name: nodepolicy.TierMedium, Profiles: []string{"small-profile"}}}
 	})
 	got := rb.b.localPolicy().Policy
-	want := map[string]nodepolicy.Role{nodepolicy.TierMedium: {Engine: "llamacpp", Model: "qwen3:8b"}}
+	want := []nodepolicy.Role{{Name: nodepolicy.TierMedium, Profiles: []string{"small-profile"}}}
 	if !reflect.DeepEqual(got.Roles, want) || got.Revision == before || got.Availability != nodepolicy.Paused || got.PausedBy != nodepolicy.PausedLocally {
 		t.Fatalf("local roles edit = %+v, want new revision and roles with the local pause preserved", got)
 	}
-	var saved map[string]nodepolicy.Role
+	var saved []nodepolicy.Role
 	if err := json.Unmarshal(rb.fileSections(t)["roles"], &saved); err != nil {
 		t.Fatalf("decode saved roles: %v", err)
 	}

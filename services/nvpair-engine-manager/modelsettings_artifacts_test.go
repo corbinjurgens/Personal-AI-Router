@@ -146,8 +146,149 @@ func inspectFixture(t *testing.T, f inspectionFixture) modelconfig.InspectResult
 	return result
 }
 
+func newSiblingInspectionFixture(t *testing.T) inspectionFixture {
+	t.Helper()
+	f := newAppliedKeyFixture(t)
+	rt := f.st.plat.Runtime
+	if len(rt.ModelLoads) != 1 {
+		t.Fatalf("expected one source load, got %+v", rt.ModelLoads)
+	}
+	base := rt.ModelLoads[0]
+	rt.ModelLoads = nil
+	for _, profile := range []struct {
+		key     string
+		context int32
+	}{{"lfm-8k", 8192}, {"lfm-32k", 32768}} {
+		load := modelconfig.CloneLoads([]modelconfig.ModelLoad{base})[0]
+		load.ProfileKey = profile.key
+		load.Requested.Context = &modelconfig.Context{Mode: "fixed", Tokens: profile.context}
+		load.Resolved.PerSlotContext, load.Resolved.TotalContext = profile.context, profile.context
+		load.Resolved.Options.Context = &modelconfig.Context{Mode: "fixed", Tokens: profile.context}
+		rt.ModelLoads = append(rt.ModelLoads, load)
+	}
+	fixture := modelLoadFixture{ex: f.ex, st: f.st, root: f.root}
+	prepared, err := compileTypedLlamaInputs(context.Background(), f.st, typedFixtureCommand(t, fixture, rt), rt, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt.ModelLoads = prepared.ModelLoads
+	f.st.plat.Runtime = rt
+	f.request.ProfileKey = ""
+	return f
+}
+
+func TestInspectModelSelectsSiblingProfile(t *testing.T) {
+	f := newSiblingInspectionFixture(t)
+	var contextSeen int32
+	f.ex.modelEstimates.run = func(_ context.Context, in modelEstimateInput) modelconfig.Estimate {
+		if in.Allocation == nil {
+			t.Fatal("selected profile lost its allocation")
+		}
+		contextSeen = in.Allocation.PerSlotContext
+		return modelEstimateUnknown("synthetic inspection")
+	}
+	f.request.ProfileKey = "lfm-8k"
+	first := inspectAppliedKeyFixture(t, f)
+	if first.Status != "resolved" || len(first.ConfigurationKey) != 64 || contextSeen != 8192 {
+		t.Fatalf("8k inspection: context=%d result=%+v", contextSeen, first)
+	}
+	contextSeen = 0
+	f.request.ProfileKey = "lfm-32k"
+	second := inspectAppliedKeyFixture(t, f)
+	if second.Status != "resolved" || len(second.ConfigurationKey) != 64 || contextSeen != 32768 || second.ConfigurationKey == first.ConfigurationKey {
+		t.Fatalf("32k inspection: context=%d firstKey=%s result=%+v", contextSeen, first.ConfigurationKey, second)
+	}
+	if !reflect.DeepEqual(first.Artifacts, second.Artifacts) || !reflect.DeepEqual(first.Facts, second.Facts) {
+		t.Fatal("profile allocation changed artifact facts")
+	}
+}
+
+func TestInspectModelWithoutKeyIsNewProfile(t *testing.T) {
+	f := newSiblingInspectionFixture(t)
+	f.ex.modelEstimates.run = func(_ context.Context, in modelEstimateInput) modelconfig.Estimate {
+		if in.Allocation != nil {
+			t.Fatal("new profile inherited a saved sibling allocation")
+		}
+		return modelEstimateUnknown("synthetic new profile")
+	}
+	result := inspectAppliedKeyFixture(t, f)
+	if result.Status != "resolved" || result.Facts == nil || result.Facts.Architecture != "llama" || len(result.Artifacts) != 1 || result.ConfigurationKey != "" || result.ExecutionKey != "" || result.ConfigurationKeyReason != "not-applied" || len(result.ConfigurationPools) != 0 || result.LoadObservation != nil {
+		t.Fatalf("new profile inspection=%+v", result)
+	}
+}
+
+func TestInspectModelRefusesWrongProfileArtifact(t *testing.T) {
+	f := newSiblingInspectionFixture(t)
+	f.request.ProfileKey, f.request.ModelID = "lfm-8k", "other-artifact"
+	f.ex.modelInspection.open = func(string) (servingArtifactFile, error) {
+		t.Fatal("wrong artifact was opened")
+		return nil, errors.New("wrong artifact")
+	}
+	_, err := f.ex.InspectModel(context.Background(), f.request)
+	if err == nil || !strings.Contains(err.Error(), "stored profile selects a different modelId") {
+		t.Fatalf("wrong artifact refusal=%v", err)
+	}
+}
+
+func TestInspectModelRefusesUnknownProfile(t *testing.T) {
+	f := newSiblingInspectionFixture(t)
+	f.request.ProfileKey = "missing-profile"
+	_, err := f.ex.InspectModel(context.Background(), f.request)
+	if err == nil || !strings.Contains(err.Error(), "stored profile not found") {
+		t.Fatalf("unknown profile refusal=%v", err)
+	}
+}
+
+func TestArtifactConfiguredContextRequiresSiblingAgreement(t *testing.T) {
+	f := newSiblingInspectionFixture(t)
+	snapshot, err := inspectionSnapshot(f.st, f.request.Engine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := modelIdentityConfiguredContext(snapshot, "exact-alias", modelFileList{}); got != 0 {
+		t.Fatalf("differing sibling context attributed to artifact: %d", got)
+	}
+	for i := range snapshot.state.plat.Runtime.ModelLoads {
+		snapshot.state.plat.Runtime.ModelLoads[i].Resolved.PerSlotContext = 8192
+	}
+	if got := modelIdentityConfiguredContext(snapshot, "exact-alias", modelFileList{}); got != 8192 {
+		t.Fatalf("agreed artifact context=%d, want 8192", got)
+	}
+}
+
+func TestStatedMemorySelectsSiblingConfiguration(t *testing.T) {
+	f := newSiblingInspectionFixture(t)
+	base := t.TempDir()
+	if err := os.Chmod(base, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f.ex.modelMemoryProfiles = newModelMemoryProfiles(base)
+	f.request.ProfileKey = "lfm-32k"
+	first := inspectAppliedKeyFixture(t, f)
+	f.request.ProfileKey = "lfm-8k"
+	second := inspectAppliedKeyFixture(t, f)
+	if len(first.ConfigurationKey) != 64 || len(second.ConfigurationKey) != 64 || first.ConfigurationKey == second.ConfigurationKey {
+		t.Fatalf("sibling configurations: first=%+v second=%+v", first, second)
+	}
+	request := modelconfig.ClearStatedMemoryRequest{Engine: f.request.Engine, ModelID: f.request.ModelID, ConfigurationKey: second.ConfigurationKey}
+	set := modelconfig.SetStatedMemoryRequest{Engine: request.Engine, ModelID: request.ModelID, ConfigurationKey: request.ConfigurationKey, HostBytes: "12345"}
+	result, err := f.ex.recordStatedMemory(keyTestMemoryContext(), request, &set)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ConfigurationKey != second.ConfigurationKey || result.Estimate.EstimateSource == nil || result.Estimate.EstimateSource.Kind != "user-stated" || len(result.Estimate.Domains) != 1 || result.Estimate.Domains[0].RequiredBytes != "12345" {
+		t.Fatalf("sibling statement reply=%+v", result)
+	}
+	f.request.ProfileKey = "lfm-32k"
+	untouched := inspectAppliedKeyFixture(t, f)
+	if untouched.Estimate.EstimateSource != nil && untouched.Estimate.EstimateSource.Kind == "user-stated" || len(untouched.MemoryProfiles) != 1 || untouched.MemoryProfiles[0].Current || untouched.MemoryProfiles[0].ConfigurationKey != second.ConfigurationKey {
+		t.Fatalf("statement leaked to sibling=%+v", untouched)
+	}
+}
+
 func TestInspectModelFetchInstalledNativeBuildConfigurationKey(t *testing.T) {
 	f := newFetchBuildKeyFixture(t)
+	f.request.ProfileKey = f.request.ModelID
 	if f.st.plat.Install.Fetch == nil || len(f.st.plat.Install.Artifacts) != 0 {
 		t.Fatal("fixture does not use the macOS fetch install shape")
 	}
@@ -1110,7 +1251,7 @@ func TestModelSettingsArtifactsStoredBindingsReenterResolver(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.st.plat.Runtime.ModelLoads = []modelconfig.ModelLoad{{ModelID: f.request.ModelID, Resolved: &modelconfig.ResolvedLoad{
+	f.st.plat.Runtime.ModelLoads = []modelconfig.ModelLoad{{ProfileKey: f.request.ModelID, ModelID: f.request.ModelID, Resolved: &modelconfig.ResolvedLoad{
 		PerSlotContext: 4096, TotalContext: 4096, Slots: 1, GPU: modelconfig.GPU{Mode: "cpu"}, NativeBuildID: "synthetic-build",
 		SourceInputDigest: strings.Repeat("a", 64), PresetDigest: strings.Repeat("b", 64),
 		Artifacts: []modelconfig.ArtifactBinding{{Role: "model", Path: binding.SourcePath, ResolvedTarget: binding.ResolvedTarget, Size: strconv.FormatInt(binding.SizeBytes, 10), MtimeNS: binding.MtimeNS, SampleSHA256: binding.SampleSHA256}},

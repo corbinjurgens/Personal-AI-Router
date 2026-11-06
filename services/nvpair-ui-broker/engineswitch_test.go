@@ -678,7 +678,13 @@ func newSwitchHarnessFor(t *testing.T, target string) *switchHarness {
 			}
 			return result, ""
 		case "engine:get-launch":
-			return settings.LaunchState{Engine: h.target, Running: true, EffectivePort: 12345}, ""
+			var request struct {
+				Engine string `json:"engine"`
+			}
+			if err := json.Unmarshal(raw, &request); err != nil {
+				return nil, err.Error()
+			}
+			return settings.LaunchState{Engine: request.Engine, Running: true, EffectivePort: 12345}, ""
 		case "engine:switch-recovery-ready":
 			var p struct {
 				ManagerIncarnation string `json:"managerIncarnation"`

@@ -100,7 +100,7 @@ func openCodeFixtures(t *testing.T) (qualificationRegistry, []openCodeCase) {
 }
 
 func openCodeProfile(q *localQualification) nodepolicy.Profile {
-	return nodepolicy.Profile{Name: "synthetic-opencode", Engine: q.Engine, Model: q.Model,
+	return nodepolicy.Profile{Key: "synthetic-opencode", DisplayName: "synthetic-opencode", Engine: q.Engine, Model: q.Model,
 		ContextTokens: 4096, MaxOutputTokens: 1024, MemoryBytes: 4096,
 		RequestOptions: q.RequestOptions, Qualification: &nodepolicy.QualificationRef{ID: q.ID, Revision: q.Revision}}
 }

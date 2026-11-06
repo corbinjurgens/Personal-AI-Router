@@ -93,7 +93,11 @@ function baseline(serviceBuildId?: JsonValue) {
         lastSeen: 100,
         models: ['model-a'],
         modelsByEngine: { llamacpp: ['model-a'] },
-        policy: { revision: '7', roles: { medium: { engine: 'llamacpp', model: 'model-a' } } },
+        policy: {
+            revision: '7',
+            roles: [{ name: 'medium', profiles: ['model-a'] }],
+            profiles: [{ key: 'model-a', displayName: 'Model A', engine: 'llamacpp', model: 'model-a' }]
+        },
         trusted: true,
         clustered: true,
         serviceBuildId
@@ -140,7 +144,8 @@ describe('node build projection', () => {
         expect(state.getAvailableNodes()[0]).toMatchObject({ trusted: true, clustered: true })
         expect(state.getAvailableNodes()[0].policy).toEqual({
             revision: '7',
-            roles: { medium: { engine: 'llamacpp', model: 'model-a' } }
+            roles: [{ name: 'medium', profiles: ['model-a'] }],
+            profiles: [{ key: 'model-a', displayName: 'Model A', engine: 'llamacpp', model: 'model-a' }]
         })
         const parsed = brokerNodesValue({ nodes: [{ ...baseline(), serviceBuildId: [] }] })[0]
         expect(parsed.models).toEqual(['model-a'])

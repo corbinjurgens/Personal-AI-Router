@@ -27,12 +27,13 @@ import type { JsonValue } from '@/shared/types/json'
 import type {
     NodeAvailability,
     NodeAvailabilityRequest,
+    NodeModelReference,
     NodePolicyDocument,
     NodePolicySnapshot
 } from '@/shared/types/node-policy'
 import type {
     NodePolicyAdvertisement,
-    NodeRole,
+    AdvertisedProfile,
     NodeRoles,
     PauseOrigin,
     RoleTier
@@ -59,6 +60,9 @@ import {
     pauseOriginValue,
     pauseModeValue,
     parseNodeRoles,
+    parseRoleProfiles,
+    copyNodeRoles,
+    withRoleProfile,
     ROLE_TIERS,
     sameNodeRoles
 } from '@/shared/utils/node-roles'
@@ -97,26 +101,20 @@ export const NODE_PAUSED_MESSAGE =
 
 /**
  * The target's own document with `roles` replaced by `roles` and every other
- * field kept as read. Unset tiers are omitted, which leaves them undeclared.
+ * field kept as read. Empty declarations keep their position.
  */
 export function withRoles(policy: string, roles: NodeRoles): string {
-    const declared: JsonMap = {}
-    for (const tier of ROLE_TIERS) {
-        const role = roles[tier]
-        if (role) declared[tier] = { engine: role.engine, model: role.model }
-    }
-    return replaceJsonFieldSource(policy, 'roles', JSON.stringify(declared))
+    return replaceJsonFieldSource(policy, 'roles', JSON.stringify(roles))
 }
 
-/** One installed model a role can name, in engine-manager spelling. */
-interface RoleChoice extends NodeRole {
-    /** Stable key for a select item. */
-    key: string
+/** Profiles, resolved from the policy rather than inferred from native model ids. */
+export function policyRoleProfiles(policy: string): AdvertisedProfile[] {
+    return parseRoleProfiles(policyObject(policy).profiles)
 }
 
 /** A role as the user reads it: the model and the engine that serves it. */
 export function roleLabel(
-    role: NodeRole,
+    role: NodeModelReference,
     descriptors: ReadonlyMap<EngineType, EngineDescriptor>,
     identity?: ModelIdentity
 ): string {
@@ -126,78 +124,81 @@ export function roleLabel(
 }
 
 /** Read only the named role's engine inventory on the already selected node. */
-export function roleIdentity(role: NodeRole, inventory: EngineModels[]): ModelIdentity | undefined {
+export function roleIdentity(
+    role: NodeModelReference,
+    inventory: EngineModels[]
+): ModelIdentity | undefined {
     return inventory
         .find(list => engineManagerName(list.engineType) === role.engine)
         ?.models.find(model => model.name === role.model)?.identity
 }
 
-export function roleKey(role: NodeRole): string {
-    return JSON.stringify([role.engine, role.model])
-}
-
-/** The roles a node can be given: the models its inventory reports as installed. */
-export function inventoryChoices(inventory: EngineModels[]): RoleChoice[] {
-    const choices = new Map<string, RoleChoice>()
-    for (const list of inventory) {
-        const engine = engineManagerName(list.engineType)
-        for (const model of list.models) {
-            if (!model.downloaded || model.name === '') continue
-            const role = { engine, model: model.name }
-            choices.set(roleKey(role), { ...role, key: roleKey(role) })
-        }
-    }
-    return Array.from(choices.values()).sort(
-        (left, right) =>
-            left.model.localeCompare(right.model) || left.engine.localeCompare(right.engine)
-    )
+/** Installed policy profiles are the choices; native ids never become policy keys. */
+export function inventoryChoices(
+    inventory: EngineModels[],
+    profiles: AdvertisedProfile[]
+): AdvertisedProfile[] {
+    return profiles
+        .filter(profile =>
+            inventory.some(
+                list =>
+                    engineManagerName(list.engineType) === profile.engine &&
+                    list.models.some(model => model.downloaded && model.name === profile.model)
+            )
+        )
+        .sort(
+            (left, right) =>
+                left.model.localeCompare(right.model) || left.engine.localeCompare(right.engine)
+        )
 }
 
 /** The select value for an unset tier. */
-export const UNSET_ROLE = 'unset'
+export const UNSET_ROLE = ''
 
 /**
  * Select items for one tier: unset, then each installed choice. A declared
  * model the node no longer reports stays visible as the current value.
  */
 export function roleItems(
-    choices: RoleChoice[],
-    current: NodeRole | undefined,
+    choices: AdvertisedProfile[],
+    current: string | undefined,
     descriptors: ReadonlyMap<EngineType, EngineDescriptor>,
-    inventory?: EngineModels[]
+    inventory?: EngineModels[],
+    profiles: AdvertisedProfile[] = choices
 ): { value: string; children: string }[] {
-    const label = (role: NodeRole) =>
+    const label = (role: AdvertisedProfile) =>
         roleLabel(role, descriptors, inventory ? roleIdentity(role, inventory) : undefined)
     const items = [
         { value: UNSET_ROLE, children: 'Unset' },
         ...choices.map(choice => ({ value: choice.key, children: label(choice) }))
     ]
-    if (current && !choices.some(choice => choice.key === roleKey(current))) {
+    if (current && !choices.some(choice => choice.key === current)) {
+        const profile = profiles.find(profile => profile.key === current)
         items.push({
-            value: roleKey(current),
-            children: `${label(current)}, not installed`
+            value: current,
+            children: `${profile ? label(profile) : current}, not installed`
         })
     }
     return items
 }
 
 /** The role a select value names, or undefined for unset or a value no longer offered. */
-export function chosenRole(choices: RoleChoice[], value: string): NodeRole | undefined {
+export function chosenRole(choices: AdvertisedProfile[], value: string): string | undefined {
     const choice = choices.find(candidate => candidate.key === value)
-    return choice ? { engine: choice.engine, model: choice.model } : undefined
+    return choice?.key
 }
 
 /**
  * A suggestion for each tier: the first local tier entry, in the given
  * documents' order, whose engine and model the node has installed. A tier with
- * no installed entry stays unset. It is only offered, never applied by itself.
+ * no installed entry keeps its existing declaration. Suggestions preserve the
+ * target's declaration order and empty roles. They are never applied by themselves.
  */
-export function suggestRoles(choices: RoleChoice[], policies: string[]): NodeRoles {
-    const installed = new Set(choices.map(choice => choice.key))
-    const roles: NodeRoles = {}
+export function suggestRoles(choices: AdvertisedProfile[], policies: string[]): NodeRoles {
+    const roles: NodeRoles = []
     for (const tier of ROLE_TIERS) {
         for (const policy of policies) {
-            if (roles[tier]) break
+            if (roles.some(role => role.name === tier)) break
             const tiers = policyObject(policy).tiers
             if (tiers === null || typeof tiers !== 'object' || Array.isArray(tiers)) continue
             const entries = tiers[tier]
@@ -206,29 +207,38 @@ export function suggestRoles(choices: RoleChoice[], policies: string[]): NodeRol
                 if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) continue
                 if (entry.kind !== 'local') continue
                 if (typeof entry.engine !== 'string' || typeof entry.model !== 'string') continue
-                const role = { engine: entry.engine, model: entry.model }
-                if (installed.has(roleKey(role))) {
-                    roles[tier] = role
+                const profile = choices.find(
+                    profile => profile.engine === entry.engine && profile.model === entry.model
+                )
+                if (profile) {
+                    roles.push({ name: tier, profiles: [profile.key] })
                     break
                 }
             }
         }
     }
-    return roles
+    let suggested = parseNodeRoles(policyObject(policies[0] ?? '{}').roles)
+    for (const role of roles) {
+        suggested = withRoleProfile(suggested, role.name, role.profiles[0])
+    }
+    return suggested
 }
 
-/** A tier whose role differs between two documents. */
+/** A tier whose membership differs between two documents, excluding declaration order. */
 interface RoleDifference {
     tier: RoleTier
-    mine?: NodeRole
-    theirs?: NodeRole
+    mine?: string
+    theirs?: string
 }
 
 export function roleDifferences(mine: NodeRoles, theirs: NodeRoles): RoleDifference[] {
-    return ROLE_TIERS.filter(
-        tier =>
-            mine[tier]?.engine !== theirs[tier]?.engine || mine[tier]?.model !== theirs[tier]?.model
-    ).map(tier => ({ tier, mine: mine[tier], theirs: theirs[tier] }))
+    return ROLE_TIERS.flatMap(tier => {
+        const left = mine.find(role => role.name === tier)
+        const right = theirs.find(role => role.name === tier)
+        return JSON.stringify(left) === JSON.stringify(right)
+            ? []
+            : [{ tier, mine: left?.profiles[0], theirs: right?.profiles[0] }]
+    })
 }
 
 /** How the service refused a save. */
@@ -431,7 +441,7 @@ interface NodeConfigurationState {
      * change; otherwise the draft is stale and shown against it.
      */
     adopt(targetId: string, snapshot: PolicyBaselineInput): void
-    setRole(targetId: string, tier: RoleTier, role: NodeRole | undefined): void
+    setRole(targetId: string, tier: RoleTier, key: string | undefined): void
     /** Replace the draft, for an offered suggestion the user accepted. */
     setDraft(targetId: string, roles: NodeRoles): void
     /** After a conflict: keep the draft and base it on the document read back. */
@@ -1488,7 +1498,11 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
             const next = baselineOf(snapshot)
             const editors = new Map(get().editors)
             if (!entry?.baseline) {
-                editors.set(targetId, { baseline: next, draft: next.roles, phase: 'draft' })
+                editors.set(targetId, {
+                    baseline: next,
+                    draft: copyNodeRoles(next.roles),
+                    phase: 'draft'
+                })
                 set({ editors })
                 return
             }
@@ -1514,7 +1528,7 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
             if (!edited) {
                 editors.set(targetId, {
                     baseline: next,
-                    draft: next.roles,
+                    draft: copyNodeRoles(next.roles),
                     // "Saved" names the revision this editor saved, not a later one.
                     phase:
                         entry.phase === 'applied' && next.revision === entry.baseline.revision
@@ -1538,9 +1552,7 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
 
         setRole: (targetId, tier, role) =>
             update(targetId, entry => {
-                const draft: NodeRoles = { ...entry.draft }
-                if (role) draft[tier] = role
-                else delete draft[tier]
+                const draft = withRoleProfile(entry.draft, tier, role)
                 return {
                     ...entry,
                     draft,
@@ -1554,7 +1566,7 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
         setDraft: (targetId, roles) =>
             update(targetId, entry => ({
                 ...entry,
-                draft: { ...roles },
+                draft: copyNodeRoles(roles),
                 phase:
                     entry.phase === 'conflict' || entry.phase === 'vetoed' ? entry.phase : 'draft'
             })),
@@ -1569,7 +1581,9 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
         discard: targetId =>
             update(targetId, entry => {
                 const baseline = entry.latest ?? entry.baseline
-                return baseline ? { baseline, draft: baseline.roles, phase: 'draft' } : entry
+                return baseline
+                    ? { baseline, draft: copyNodeRoles(baseline.roles), phase: 'draft' }
+                    : entry
             }),
 
         save: async (targetId, nodeId) => {
@@ -1621,7 +1635,7 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
                 const saved = baselineOf(result)
                 update(targetId, current => ({
                     baseline: saved,
-                    draft: saved.roles,
+                    draft: copyNodeRoles(saved.roles),
                     phase: 'applied',
                     requestId: current.requestId
                 }))
@@ -1669,15 +1683,15 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
         read: async (targetId, nodeId) => {
             const prior = get().editors.get(targetId)
             if (prior?.baseline || prior?.phase === 'reading') return
-            put(targetId, { draft: {}, phase: 'reading' })
+            put(targetId, { draft: [], phase: 'reading' })
             try {
                 const latest = await window.pairApi.nodePolicy.get(nodeId)
                 // Another reader may have taken a baseline meanwhile; it stands.
                 if (get().editors.get(targetId)?.baseline) return
                 const next = baselineOf(latest)
-                put(targetId, { baseline: next, draft: next.roles, phase: 'draft' })
+                put(targetId, { baseline: next, draft: copyNodeRoles(next.roles), phase: 'draft' })
             } catch (err) {
-                put(targetId, { draft: {}, phase: 'unreachable', message: getErrorString(err) })
+                put(targetId, { draft: [], phase: 'unreachable', message: getErrorString(err) })
             }
         },
 
@@ -1688,7 +1702,7 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
             if (roles === undefined && !prior?.baseline) return get().read(targetId, nodeId)
             const requestId = crypto.randomUUID()
             put(targetId, {
-                ...(prior ?? { draft: {} }),
+                ...(prior ?? { draft: [] }),
                 phase: 'reading',
                 message: undefined,
                 requestId
@@ -1699,7 +1713,7 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
                 if (management?.state !== 'allowed') {
                     update(targetId, current => ({
                         ...current,
-                        draft: roles ?? current.draft,
+                        draft: copyNodeRoles(roles ?? current.draft),
                         phase: 'rejected',
                         message: management?.message ?? MANAGEMENT_MESSAGES.unavailable
                     }))
@@ -1719,7 +1733,7 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
                 return
             }
             const next = baselineOf(latest)
-            const draft = roles ?? get().editors.get(targetId)?.draft ?? {}
+            const draft = copyNodeRoles(roles ?? get().editors.get(targetId)?.draft ?? [])
             if (sameNodeRoles(draft, next.roles)) {
                 // Also settles an unknown outcome whose save did land.
                 put(targetId, { baseline: next, draft, phase: 'applied', requestId })
@@ -1756,8 +1770,15 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
                 onSettled?.(target)
             }),
 
-        bulk: { selected: [], mode: 'common', common: {} },
+        bulk: { selected: [], mode: 'common', common: [] },
 
-        setBulk: change => set({ bulk: { ...get().bulk, ...change } })
+        setBulk: change =>
+            set({
+                bulk: {
+                    ...get().bulk,
+                    ...change,
+                    ...(change.common ? { common: copyNodeRoles(change.common) } : {})
+                }
+            })
     }
 })

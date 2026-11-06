@@ -35,11 +35,11 @@ func TestModelControlsServiceStoredPolicy(t *testing.T) {
 	policy.Revision = "304"
 	policy.Admission.MaxConcurrentPerModel = 7
 	policy.Profiles = []nodepolicy.Profile{
-		{Name: "first", Engine: "llamacpp", Model: "first"},
-		{Name: "invalid", Engine: "llamacpp", Model: "j304-invalid-placeholder"},
-		{Name: "last", Engine: "llamacpp", Model: "last"},
+		{Key: "first", DisplayName: "first", Engine: "llamacpp", Model: "first"},
+		{Key: "invalid", DisplayName: "invalid", Engine: "llamacpp", Model: "j304-invalid-placeholder"},
+		{Key: "last", DisplayName: "last", Engine: "llamacpp", Model: "last"},
 	}
-	policy.Roles["weak"] = nodepolicy.Role{Engine: "llamacpp", Model: "first"}
+	policy.Roles = []nodepolicy.Role{{Name: "weak", Profiles: []string{"first"}}}
 	policy.Tiers["weak"] = []nodepolicy.TierEntry{{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "first"}}
 	policy.ServedModels = nodepolicy.ServedModels{{Engine: "llamacpp", Model: "first"}}
 	if err := policy.Validate(); err != nil {
@@ -153,7 +153,7 @@ func TestModelControlsServicePolicyWrites(t *testing.T) {
 	c := f.readyClient()
 	observer := f.readyClient()
 	policy := servicePolicy(t, c)
-	policy.Profiles = []nodepolicy.Profile{{Name: "valid", Engine: "llamacpp", Model: strings.Repeat("a", 512)}}
+	policy.Profiles = []nodepolicy.Profile{{Key: "valid", DisplayName: "valid", Engine: "llamacpp", Model: strings.Repeat("a", 512)}}
 	policy = setServicePolicy(t, c, policy)
 	before := fetchServicePolicy(t, c)
 	stored := assertStoredPolicy(t, f.policyPath(), policy)
@@ -176,7 +176,7 @@ func TestModelControlsServicePolicyWrites(t *testing.T) {
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			draft := policy
-			draft.Profiles = append(append([]nodepolicy.Profile{}, policy.Profiles...), nodepolicy.Profile{Name: "rejected", Engine: "llamacpp", Model: "j304-invalid-placeholder"})
+			draft.Profiles = append(append([]nodepolicy.Profile{}, policy.Profiles...), nodepolicy.Profile{Key: "rejected", DisplayName: "rejected", Engine: "llamacpp", Model: "j304-invalid-placeholder"})
 			params := mustMarshal(t, map[string]any{"policy": draft, "expectedPersistedRevision": policy.Revision})
 			if bytes.Count(params, []byte(`"j304-invalid-placeholder"`)) != 1 {
 				t.Fatal("write fixture does not contain exactly its intended raw model token")
@@ -425,6 +425,7 @@ func TestServicePolicy(t *testing.T) {
 		want.Revision = paused.Policy.Revision
 		want.Availability = nodepolicy.Paused
 		want.PausedBy = nodepolicy.PausedLocally
+		want.PauseMode = nodepolicy.PauseConfigured
 		assertPolicyChanged(t, observer, nodeID, want)
 		assertAvailabilityChanged(t, observer, nodeID, nodepolicy.Paused)
 		assertPolicySnapshot(t, fetchServicePolicy(t, command), want, nodepolicy.Paused)
@@ -445,6 +446,7 @@ func TestServicePolicy(t *testing.T) {
 		want.Revision = resumed.Policy.Revision
 		want.Availability = nodepolicy.Available
 		want.PausedBy = ""
+		want.PauseMode = ""
 		assertPolicyChanged(t, observer, nodeID, want)
 		assertAvailabilityChanged(t, observer, nodeID, nodepolicy.Available)
 		assertPolicySnapshot(t, fetchServicePolicy(t, command), want, nodepolicy.Available)
@@ -490,9 +492,12 @@ func TestServicePolicyModelConfiguration(t *testing.T) {
 	f := newServiceFixture(t)
 	// No manager is intentional: configuration must retain unknown loaded
 	// inventory. Persisted Pause remains draining without manager stop proof.
+	// Saved empty typed settings still supply the raw policy write authority.
+	writePrivateBrokerEngineSettings(t, f.configDir, f.clusterDir, map[string]int{"llamacpp": freePort(t)})
 	initial := nodepolicy.Default()
 	initial.Availability = nodepolicy.Paused
 	initial.PausedBy = nodepolicy.PausedLocally
+	initial.PauseMode = nodepolicy.PauseImmediate
 	if err := initial.Validate(); err != nil {
 		t.Fatalf("invalid paused startup policy: %v", err)
 	}
@@ -566,7 +571,7 @@ func TestServicePolicyModelConfiguration(t *testing.T) {
 // loaded/effective-envelope evidence and must never produce satisfied status.
 func fixtureResidentProfile() nodepolicy.Profile {
 	return nodepolicy.Profile{
-		Name: "sr-status", Engine: "llamacpp", Model: "sr-status-fixture",
+		Key: "sr-status-fixture", DisplayName: "sr-status", Engine: "llamacpp", Model: "sr-status-fixture",
 		ContextTokens: 8192, MaxOutputTokens: 1024, MaxConcurrent: 1, MemoryBytes: 1,
 		Qualification: &nodepolicy.QualificationRef{ID: "fixture-only-sr-status", Revision: "1"},
 	}

@@ -275,7 +275,7 @@ func TestServedModelsRolesRetainedButIneligible(t *testing.T) {
 	})
 	pol.TierPolicy.AllowStronger = false
 	fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"a": {"own", "router"}}, nil)
-	fx.declare(t, "a", map[string]nodepolicy.AdvertisedRole{"weak": llamacppRole("own")})
+	fx.declare(t, "a", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("own")})
 	n, ok := discoveredNode(fx.p.soleFacade(), "a")
 	if !ok {
 		t.Fatal("missing peer")

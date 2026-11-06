@@ -19,9 +19,10 @@ func TestModelControlPolicyWritesSelectedModels(t *testing.T) {
 					p := Default()
 					switch owner {
 					case "profiles":
-						p.Profiles = []Profile{{Name: "test", Engine: "llamacpp", Model: model}}
+						p.Profiles = []Profile{{Key: "test", DisplayName: "test", Engine: "llamacpp", Model: model}}
 					case "roles":
-						p.Roles[TierWeak] = Role{Engine: "llamacpp", Model: model}
+						p.Profiles = []Profile{{Key: "test", DisplayName: "Test", Engine: "llamacpp", Model: model}}
+						p.Roles = []Role{{Name: TierWeak, Profiles: []string{"test"}}}
 					case "tiers":
 						p.Tiers[TierWeak] = []TierEntry{{Kind: EntryLocal, Engine: "llamacpp", Model: model}}
 					case "deployments":
@@ -97,8 +98,8 @@ func TestModelControlAdvertisementStrictModelSiblings(t *testing.T) {
 
 func TestModelControlPolicyWritesRawEncoding(t *testing.T) {
 	for _, raw := range []string{
-		`{"roles":{"weak":{"engine":"llamacpp","model":"RAW"}}}`,
-		`{"profiles":[{"name":"test","engine":"llamacpp","model":"RAW"}]}`,
+		`{"profiles":[{"key":"test","displayName":"Test","engine":"llamacpp","model":"RAW"}],"roles":[{"name":"weak","profiles":["test"]}]}`,
+		`{"profiles":[{"key":"test", "displayName":"test", "engine":"llamacpp","model":"RAW"}]}`,
 		`{"tiers":{"weak":[{"kind":"local","engine":"llamacpp","model":"RAW"}]}}`,
 		`{"servedModels":[{"engine":"llamacpp","model":"RAW"}]}`,
 		`{"residentModels":[{"engine":"llamacpp","model":"RAW"}]}`,
@@ -112,13 +113,13 @@ func TestModelControlPolicyWritesRawEncoding(t *testing.T) {
 }
 
 func TestModelControlAdvertisementFiltersBeforeStrictDecode(t *testing.T) {
-	raw := []byte(`{"revision":"7","servedModels":[{"engine":"llamacpp","model":"good"},{"engine":"llamacpp","model":"bad\nname"}],"roles":{"weak":{"engine":"llamacpp","model":"good"},"strong":{"engine":"llamacpp","model":"RAW"}}}`)
+	raw := []byte(`{"revision":"7","servedModels":[{"engine":"llamacpp","model":"good"},{"engine":"llamacpp","model":"bad\nname"}],"roles":[{"name":"weak","profiles":["good"]},{"name":"strong","profiles":["bad"]}],"profiles":[{"key":"good","displayName":"Profile","engine":"llamacpp","model":"good"},{"key":"bad","displayName":"Profile","engine":"llamacpp","model":"RAW"}]}`)
 	raw = bytes.ReplaceAll(raw, []byte("RAW"), []byte{0xff})
 	var a Advertisement
 	if err := json.Unmarshal(raw, &a); err != nil {
 		t.Fatal(err)
 	}
-	if len(a.ServedModels) != 1 || a.ServedModels[0].Model != "good" || len(a.Roles) != 1 || a.Roles[TierWeak].Model != "good" || a.Revision != "7" {
+	if len(a.ServedModels) != 1 || a.ServedModels[0].Model != "good" || len(a.Roles) != 2 || a.Roles[0].Profiles[0] != "good" || len(a.Roles[1].Profiles) != 0 || len(a.Profiles) != 1 || a.Profiles[0].Key != "good" || a.Revision != "7" {
 		t.Fatal("valid advertisement siblings lost")
 	}
 	if err := json.Unmarshal([]byte(`{"servedModels":[{"engine":"llamacpp","model":"bad\nname"}]}`), &a); err != nil {
@@ -245,11 +246,11 @@ func TestModelControlAdvertisementNumericVersions(t *testing.T) {
 
 func TestModelControlAdvertisementLegacyOuterFields(t *testing.T) {
 	var got Advertisement
-	raw := []byte(`{"revision":"1","Revision":"2","ROLES":{"weak":{"ENGINE":"llamacpp","MODEL":"good"}},"PAUSEDBY":"peer"}`)
+	raw := []byte(`{"revision":"1","Revision":"2","ROLES":[{"NAME":"weak","PROFILES":["good"]}],"PROFILES":[{"KEY":"good","DISPLAYNAME":"Good","ENGINE":"llamacpp","MODEL":"good"}],"PAUSEDBY":"peer"}`)
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Revision != "2" || got.Roles[TierWeak].Model != "good" || got.PausedBy != PausedByPeer {
+	if got.Revision != "2" || got.Profiles[0].Model != "good" || got.PausedBy != PausedByPeer {
 		t.Fatal("legacy case-fold or document-order semantics changed")
 	}
 	if err := json.Unmarshal([]byte(`{"strictAdmission":{"version":999},"StrictAdmission":{"version":1}}`), &got); err == nil || !strings.Contains(err.Error(), "must use the exact field name strictAdmission") {
@@ -269,7 +270,7 @@ func TestModelControlPolicyWritesIdentityWhitespace(t *testing.T) {
 }
 
 func TestModelControlPolicyWritesMissingModelCompatibility(t *testing.T) {
-	_, err := Parse([]byte(`{"roles":{"weak":{"engine":"llamacpp"}}}`))
+	_, err := Parse([]byte(`{"profiles":[{"key":"m","displayName":"M","engine":"llamacpp"}]}`))
 	if err == nil || !strings.Contains(err.Error(), "model is required") {
 		t.Fatal("missing-model error compatibility changed")
 	}
@@ -300,7 +301,7 @@ func TestModelControlPolicyWritesLegacyRevisionOrder(t *testing.T) {
 		{"same spelling", `"revision":"11","revision":"22"`, "22"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			raw := []byte(`{` + tc.revisions + `,"roles":{"weak":{"engine":"llamacpp","model":"good"}}}`)
+			raw := []byte(`{` + tc.revisions + `,"roles":[{"name":"weak","profiles":[]}]}`)
 			if err := CheckModelListKeys(raw); err != nil {
 				t.Fatal(err)
 			}
@@ -308,7 +309,7 @@ func TestModelControlPolicyWritesLegacyRevisionOrder(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if p.Revision != tc.want || p.Roles[TierWeak].Model != "good" {
+			if p.Revision != tc.want || len(p.Roles) != 1 || p.Roles[0].Name != TierWeak {
 				t.Fatal("legacy revision order or model sibling changed")
 			}
 		})
@@ -322,7 +323,7 @@ func TestModelControlPolicyWritesAmbiguousModelContainersRemainStrict(t *testing
 		`{"tiers":{},"Tiers":{}}`,
 		`{"routing":{},"Routing":{}}`,
 		`{"routing":{"deployments":[],"Deployments":[]}}`,
-		`{"roles":{"weak":{"engine":"llamacpp","model":"bad\nmodel","Model":"good"}}}`,
+		`{"profiles":[{"key":"bad","displayName":"Bad","engine":"llamacpp","model":"bad\nmodel","Model":"good"}]}`,
 	} {
 		if _, err := Parse([]byte(raw)); err == nil {
 			t.Fatal("strict write accepted ambiguous model container or field")

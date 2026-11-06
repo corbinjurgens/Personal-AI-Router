@@ -33,9 +33,8 @@ func TestSubscribedToNodeCarriesPausedBy(t *testing.T) {
 				t.Run(name, func(t *testing.T) {
 					capability := strictTestCapability("m")
 					if policy != nil {
-						policy.Roles = map[string]nodepolicy.AdvertisedRole{
-							nodepolicy.TierStrong: {Engine: profile.Name, Model: "m", ContextTokens: 32768},
-						}
+						policy.Roles = []nodepolicy.Role{{Name: nodepolicy.TierStrong, Profiles: []string{"m"}}}
+						policy.Profiles = []nodepolicy.AdvertisedProfile{{Key: "m", DisplayName: "m", Engine: profile.Name, Model: "m", ContextTokens: 32768}}
 						policy.ServedModels = nodepolicy.ServedModels{{Engine: profile.Name, Model: "m"}}
 						policy.StrictAdmission = capability
 					}
@@ -71,9 +70,8 @@ func TestSubscribedToNodeCarriesPausedBy(t *testing.T) {
 						PausedBy:       pausedBy,
 					}
 					if policy != nil {
-						want.Roles = map[string]nodepolicy.AdvertisedRole{
-							nodepolicy.TierStrong: {Engine: profile.Name, Model: "m", ContextTokens: 32768},
-						}
+						want.Roles = []nodepolicy.Role{{Name: nodepolicy.TierStrong, Profiles: []string{"m"}}}
+						want.Profiles = []nodepolicy.AdvertisedProfile{{Key: "m", DisplayName: "m", Engine: profile.Name, Model: "m", ContextTokens: 32768}}
 						want.ServedModels = nodepolicy.ServedModels{{Engine: profile.Name, Model: "m"}}
 						want.StrictAdmission = capability
 					}
@@ -379,8 +377,9 @@ func (fx *paFixture) peers(t *testing.T, ids ...string) []*paEndpoint {
 			Services:       map[noderec.ServiceKey]noderec.ServiceStatus{fx.f.profile.DiscoveryService: {Port: port}},
 			ModelsByEngine: map[string][]string{fx.f.profile.Name: {paModel}},
 			Policy: &nodepolicy.Advertisement{Revision: "1", ServedModels: pol.ServedModels,
-				Roles: map[string]nodepolicy.AdvertisedRole{nodepolicy.TierStrong: {
-					Engine: fx.f.profile.Name, Model: paModel, ContextTokens: 4096, MaxOutputTokens: 1024,
+				Roles: []nodepolicy.Role{{Name: nodepolicy.TierStrong, Profiles: []string{paModel}}},
+				Profiles: []nodepolicy.AdvertisedProfile{{
+					Key: paModel, DisplayName: paModel, Engine: fx.f.profile.Name, Model: paModel, ContextTokens: 4096, MaxOutputTokens: 1024,
 					Qualification: &nodepolicy.QualificationRef{ID: "q", Revision: "1"},
 				}}, StrictAdmission: strictCapabilityFor(fx.f.profile.Name, paModel)},
 		}

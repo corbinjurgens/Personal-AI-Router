@@ -263,7 +263,7 @@ func TestLinkedModelRecognitionBoundary(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		load := modelconfig.ModelLoad{ModelID: model, Resolved: &modelconfig.ResolvedLoad{
+		load := modelconfig.ModelLoad{ProfileKey: model, ModelID: model, Resolved: &modelconfig.ResolvedLoad{
 			PerSlotContext: 4096, TotalContext: 4096, Slots: 1, GPU: modelconfig.GPU{Mode: "cpu"},
 			NativeBuildID: "synthetic-build", SourceInputDigest: strings.Repeat("c", 64), PresetDigest: strings.Repeat("d", 64),
 			Artifacts: []modelconfig.ArtifactBinding{{Role: "model", Path: artifact, ResolvedTarget: binding.ResolvedTarget,

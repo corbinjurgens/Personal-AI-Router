@@ -6,7 +6,7 @@
     {"name":"absent", "input":{}, "valid":true, "servedPresent":false},
     {"name":"empty", "input":{"servedModels":[],"residentModels":[]}, "valid":true, "servedPresent":true,"served":[]},
     {"name":"restricted", "input":{"servedModels":[{"engine":"llamacpp","model":"m"}]}, "valid":true,"servedPresent":true,"served":[{"engine":"llamacpp","model":"m"}]},
-    {"name":"qualified subset", "input":{"servedModels":[{"engine":"llamacpp","model":"m"}],"residentModels":[{"engine":"llamacpp","model":"m"}],"profiles":[{"name":"m","engine":"llamacpp","model":"m","contextTokens":4096,"maxOutputTokens":512,"maxConcurrent":1,"memoryBytes":1024,"qualification":{"id":"q","revision":"1"}}]},"valid":true,"servedPresent":true,"served":[{"engine":"llamacpp","model":"m"}],"residents":[{"engine":"llamacpp","model":"m"}]},
+    {"name":"qualified subset", "input":{"servedModels":[{"engine":"llamacpp","model":"m"}],"residentModels":[{"engine":"llamacpp","model":"m"}],"profiles":[{"key":"m","displayName":"m","name":"m","engine":"llamacpp","model":"m","contextTokens":4096,"maxOutputTokens":512,"maxConcurrent":1,"memoryBytes":1024,"qualification":{"id":"q","revision":"1"}}]},"valid":true,"servedPresent":true,"served":[{"engine":"llamacpp","model":"m"}],"residents":[{"engine":"llamacpp","model":"m"}]},
     {"name":"served null", "input":{"servedModels":null}, "valid":false},
     {"name":"resident null", "input":{"residentModels":null}, "valid":false},
     {"name":"served duplicate entry", "input":{"servedModels":[{"engine":"llamacpp","model":"m"},{"engine":"llamacpp","model":"m"}]}, "valid":false},

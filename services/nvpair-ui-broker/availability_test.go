@@ -371,8 +371,9 @@ func TestPauseProjectionCarriesProvenanceAndRevision(t *testing.T) {
 		ab := newActivatedBroker(t)
 		_, err := ab.b.dispatchPolicy(context.Background(), methodPolicySet, policyParams{
 			Policy: mustJSON(map[string]any{
-				"version": nodepolicy.SchemaVersion,
-				"roles":   map[string]any{"weak": map[string]any{"engine": "llamacpp", "model": "fixture-model"}},
+				"version":  nodepolicy.SchemaVersion,
+				"roles":    []nodepolicy.Role{{Name: nodepolicy.TierWeak, Profiles: []string{"fixture-profile"}}},
+				"profiles": []nodepolicy.Profile{{Key: "fixture-profile", DisplayName: "Fixture", Engine: "llamacpp", Model: "fixture-model"}},
 			}),
 			ExpectedPersistedRevision: mustJSON(ab.b.localPolicy().Policy.Revision),
 		})

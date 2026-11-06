@@ -94,7 +94,8 @@ func TestXARemoteConfigurationService(t *testing.T) {
 	if !t.Run("local policy edit with roles and served set", func(t *testing.T) {
 		before := decodeServicePolicy(t, c.mustCall(t, "905", "policy:get", nil))
 		draft := before
-		draft.Roles = map[string]nodepolicy.Role{"weak": {Engine: "llamacpp", Model: "xa-model"}}
+		draft.Profiles = append(draft.Profiles, nodepolicy.Profile{Key: "xa-model", DisplayName: "xa-model", Engine: "llamacpp", Model: "xa-model"})
+		draft.Roles = []nodepolicy.Role{{Name: "weak", Profiles: []string{"xa-model"}}}
 		draft.ServedModels = nodepolicy.ServedModels{{Engine: "llamacpp", Model: "xa-model"}}
 		m := c.mustCall(t, "906", "policy:set", mustMarshal(t, map[string]any{"policy": draft, "expectedPersistedRevision": before.Revision}))
 		var accepted struct {
@@ -109,7 +110,7 @@ func TestXARemoteConfigurationService(t *testing.T) {
 		if err := accepted.Policy.Validate(); err != nil {
 			t.Fatalf("service policy:set returned an invalid policy: %v", err)
 		}
-		if accepted.Policy.Revision == "" || accepted.Policy.Revision == before.Revision || !reflect.DeepEqual(accepted.Policy.Roles, draft.Roles) || !reflect.DeepEqual(accepted.Policy.ServedModels, draft.ServedModels) || accepted.Activation != "pending" || accepted.ActiveRevision != "" || accepted.ActivationError != "" {
+		if accepted.Policy.Revision == "" || accepted.Policy.Revision == before.Revision || !reflect.DeepEqual(accepted.Policy.Profiles, draft.Profiles) || !reflect.DeepEqual(accepted.Policy.Roles, draft.Roles) || !reflect.DeepEqual(accepted.Policy.ServedModels, draft.ServedModels) || accepted.Activation != "pending" || accepted.ActiveRevision != "" || accepted.ActivationError != "" {
 			t.Fatal("service policy edit lacks a new revision, exact roles and served set, or pending activation")
 		}
 		snap = decodeServicePolicySnapshot(t, c.mustCall(t, "909", "policy:get", nil))
@@ -507,7 +508,8 @@ func TestXARemoteConfigurationRoles(t *testing.T) {
 
 	if !t.Run("allowed peer sets roles", func(t *testing.T) {
 		draft := xaPeerDraft(t, j.want)
-		draft.Roles = map[string]nodepolicy.Role{"weak": {Engine: "llamacpp", Model: "joint-local"}}
+		draft.Profiles = append(draft.Profiles, nodepolicy.Profile{Key: "joint-local", DisplayName: "joint-local", Engine: "llamacpp", Model: "joint-local"})
+		draft.Roles = []nodepolicy.Role{{Name: "weak", Profiles: []string{"joint-local"}}}
 		res := j.rpc(t, "engine:remote-policy-set", map[string]any{"policy": draft, "expectedPersistedRevision": j.want.Revision}).Result
 		var accepted struct {
 			Policy nodepolicy.PeerPolicy `json:"policy"`
@@ -515,9 +517,10 @@ func TestXARemoteConfigurationRoles(t *testing.T) {
 		if err := json.Unmarshal(res, &accepted); err != nil {
 			t.Fatalf("decode accepted roles edit: %v", err)
 		}
-		if !reflect.DeepEqual(accepted.Policy.Roles, draft.Roles) || accepted.Policy.Revision == "" || accepted.Policy.Revision == j.want.Revision {
+		if !reflect.DeepEqual(accepted.Policy.Profiles, draft.Profiles) || !reflect.DeepEqual(accepted.Policy.Roles, draft.Roles) || accepted.Policy.Revision == "" || accepted.Policy.Revision == j.want.Revision {
 			t.Fatal("accepted roles edit differs from the requested roles or lacks a new revision")
 		}
+		j.want.Profiles = draft.Profiles
 		j.want.Roles = draft.Roles
 		j.want.Revision = accepted.Policy.Revision
 		j.assertPolicy(t)
@@ -528,7 +531,9 @@ func TestXARemoteConfigurationRoles(t *testing.T) {
 	if !t.Run("target advertises roles", func(t *testing.T) {
 		task1Eventually(t, "roles projection", 10*time.Second, func() bool {
 			adv := xaEngineModelsPolicy(t, j.target)
-			return adv != nil && adv.Revision == j.want.Revision && adv.Roles["weak"].Engine == "llamacpp" && adv.Roles["weak"].Model == "joint-local"
+			return adv != nil && adv.Revision == j.want.Revision &&
+				reflect.DeepEqual(adv.Roles, []nodepolicy.Role{{Name: "weak", Profiles: []string{"joint-local"}}}) &&
+				reflect.DeepEqual(adv.Profiles, []nodepolicy.AdvertisedProfile{{Key: "joint-local", DisplayName: "joint-local", Engine: "llamacpp", Model: "joint-local"}})
 		})
 	}) {
 		return
@@ -537,7 +542,7 @@ func TestXARemoteConfigurationRoles(t *testing.T) {
 	if !t.Run("denied peer cannot change roles", func(t *testing.T) {
 		before := readPolicyBytes(t, j.path)
 		draft := xaPeerDraft(t, j.want)
-		draft.Roles = map[string]nodepolicy.Role{"strong": {Engine: "llamacpp", Model: "joint-local"}}
+		draft.Roles = []nodepolicy.Role{{Name: "strong", Profiles: []string{"joint-local"}}}
 		managementHTTP(t, f.denied, j.ports[1], http.MethodPost, "/v1/node-policy/set", map[string]any{"policy": draft, "expectedPersistedRevision": j.want.Revision}, http.StatusConflict)
 		j.assertUnchanged(t, before)
 	}) {
@@ -611,7 +616,7 @@ func TestXARemoteConfigurationServing(t *testing.T) {
 		if !t.Run("served subset with resident declaration", func(t *testing.T) {
 			draft := xaPeerDraft(t, j.want)
 			draft.Profiles = append(draft.Profiles, nodepolicy.Profile{
-				Name: "xa-resident", Engine: "llamacpp", Model: "joint-local",
+				Key: "xa-resident", DisplayName: "xa-resident", Engine: "llamacpp", Model: "joint-local",
 				ContextTokens: 8192, MaxOutputTokens: 1024, MaxConcurrent: 1, MemoryBytes: 1,
 				Qualification: &nodepolicy.QualificationRef{ID: "xa-qual", Revision: "1"},
 			})

@@ -39,7 +39,12 @@ import { useConnectionStore } from '@/ui/stores/connection.store'
 import { useNodesStore } from '@/ui/stores/nodes.store'
 import { useEngineProgressStore } from '@/ui/stores/engine-progress.store'
 import { useClusterInvitationsStore } from '@/ui/stores/cluster-invitations.store'
-import { nodePaused, useNodeConfigurationStore } from '@/ui/stores/node-configuration.store'
+import {
+    nodePaused,
+    policyRoleProfiles,
+    policyRoles,
+    useNodeConfigurationStore
+} from '@/ui/stores/node-configuration.store'
 
 interface Target {
     id: string
@@ -378,13 +383,16 @@ export default function ModelSettingsCopy({
                     const patch: NonNullable<ModelChange['policy']> = { ...selectedPolicy.value }
                     for (const field of routingFields) {
                         if (field === 'weak' || field === 'medium' || field === 'strong') {
-                            const role = sourceState.roles[field]
+                            const profile = policyRoleProfiles(policy).find(
+                                profile =>
+                                    profile.engine === identity.engine &&
+                                    profile.model === identity.model
+                            )
                             const matches =
-                                role !== null &&
-                                typeof role === 'object' &&
-                                !Array.isArray(role) &&
-                                role.engine === identity.engine &&
-                                role.model === identity.model
+                                profile !== undefined &&
+                                policyRoles(policy).some(
+                                    role => role.name === field && role.profiles.includes(profile.key)
+                                )
                             patch.roles = { ...patch.roles, [field]: matches }
                         } else
                             patch[field] =
@@ -693,7 +701,7 @@ export default function ModelSettingsCopy({
                     ).map(field => (
                         <Checkbox
                             key={field}
-                            slotLabel={`Explicitly copy ${field}${field === 'served' ? ' membership (unrestricted source means include only this model; target nil/empty semantics reviewed)' : field === 'resident' ? ' (requires target qualification/readiness)' : field === 'binding' ? ' membership' : ' role (can displace target tier)'}`}
+                            slotLabel={`Explicitly copy ${field}${field === 'served' ? ' membership (unrestricted source means include only this model; target nil/empty semantics reviewed)' : field === 'resident' ? ' (requires target qualification/readiness)' : field === 'binding' ? ' membership' : ' role membership'}`}
                             checked={routingFields.includes(field)}
                             disabled={busy || disabled}
                             onCheckedChange={value => {

@@ -388,7 +388,7 @@ func TestStreamContinuityEffectiveLocalDefaults(t *testing.T) {
 			fac.discovery.AddManual(selfNode("node-a", fac.port, "m"))
 			setBackend(t, fac, upstream.URL, true)
 			pol := nodepolicy.Default()
-			pol.Profiles = []nodepolicy.Profile{{Name: "m", Engine: "llamacpp-custom", Model: "m", RequestOptions: json.RawMessage(defaults)}}
+			pol.Profiles = []nodepolicy.Profile{{Key: "m", DisplayName: "m", Engine: "llamacpp-custom", Model: "m", RequestOptions: json.RawMessage(defaults)}}
 			fx.p.admission.setPolicy(pol)
 			resp, data, err := fx.request(t, path, request)
 			if err != nil || resp.StatusCode != http.StatusOK {

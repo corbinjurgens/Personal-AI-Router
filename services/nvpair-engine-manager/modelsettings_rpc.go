@@ -179,7 +179,7 @@ func (e *Executor) modelMemoryContext(ctx context.Context, engine string, target
 func (e *Executor) validateUnacceptedAutoMemory(ctx context.Context, p settings.Request, selected string) error {
 	hasAuto := false
 	for _, load := range p.Settings.ModelLoads {
-		hasAuto = hasAuto || load.ModelID == selected && modelLoadHasAuto(load.Requested)
+		hasAuto = hasAuto || load.ProfileKey == selected && modelLoadHasAuto(load.Requested)
 	}
 	if !hasAuto {
 		return modelLoadError(selected, "auto", "Resource validation requires the selected unaccepted Auto allocation.")
@@ -210,10 +210,10 @@ func (e *Executor) validateUnacceptedAutoMemory(ctx context.Context, p settings.
 		return modelLoadError("", "auto", "Frozen launch validation failed; explicitly Recalculate.")
 	}
 	for _, load := range p.Settings.ModelLoads {
-		if load.ModelID != selected || !modelLoadHasAuto(load.Requested) {
+		if load.ProfileKey != selected || !modelLoadHasAuto(load.Requested) {
 			continue
 		}
-		in, ok := inputs[load.ModelID]
+		in, ok := inputs[load.ProfileKey]
 		if ok {
 			in.Memory, err = op.Memory.ModelAutoMemory(ctx)
 			if err != nil {
@@ -221,7 +221,7 @@ func (e *Executor) validateUnacceptedAutoMemory(ctx context.Context, p settings.
 			}
 		}
 		if !ok || in.Memory == nil {
-			return modelLoadError(load.ModelID, "auto", "Fresh target evidence unavailable; explicitly Recalculate.")
+			return modelLoadError(load.ProfileKey, "auto", "Fresh target evidence unavailable; explicitly Recalculate.")
 		}
 		// The map digest remains opaque. Replaying its exact reviewed projection
 		// is permitted only after native/file/environment source equality above;
@@ -239,7 +239,7 @@ func (e *Executor) validateUnacceptedAutoMemory(ctx context.Context, p settings.
 				}
 			}
 			if !matched {
-				return modelLoadError(load.ModelID, "auto", "Reviewed physical device no longer matches target facts; explicitly Recalculate.")
+				return modelLoadError(load.ProfileKey, "auto", "Reviewed physical device no longer matches target facts; explicitly Recalculate.")
 			}
 			mapped := modelDeviceMap{ObservationID: in.Memory.Target.MapID, Binding: &modelDeviceBinding{Host: binding.HostID, Pool: binding.DomainID, UUID: binding.DeviceID, Selector: binding.Selector, Digest: binding.Digest}}
 			for _, pool := range observation.Domains {
@@ -258,7 +258,7 @@ func (e *Executor) validateUnacceptedAutoMemory(ctx context.Context, p settings.
 		estimate := e.modelEstimates.estimate(ctx, in)
 		known, fits, _ := modelAutoFit(estimate, in.Memory, e.modelEstimates.clock(), load.Resolved.GPU)
 		if !known || !fits {
-			return modelLoadError(load.ModelID, "auto", "Reviewed allocation no longer fits fresh complete target evidence; explicitly Recalculate.")
+			return modelLoadError(load.ProfileKey, "auto", "Reviewed allocation no longer fits fresh complete target evidence; explicitly Recalculate.")
 		}
 	}
 	return ctx.Err()
@@ -288,9 +288,20 @@ func (e *Executor) recordStatedMemory(ctx context.Context, p modelconfig.ClearSt
 	}
 	var statedInput modelEstimateInput
 	inspectionCtx := context.WithValue(ctx, modelStatedInspectionKey{}, &statedInput)
-	result, err := e.inspectModel(inspectionCtx, modelconfig.InspectRequest{Engine: p.Engine, ModelID: p.ModelID}, false)
-	if err != nil {
-		return result, err
+	var result modelconfig.InspectResult
+	// The statement addresses an exact finite configuration, without choosing a
+	// saved sibling by artifact name. Internal inspection never discovers help.
+	for _, load := range before.state.plat.Runtime.ModelLoads {
+		if load.ModelID != p.ModelID || load.Resolved == nil {
+			continue
+		}
+		result, err = e.inspectModel(inspectionCtx, modelconfig.InspectRequest{Engine: p.Engine, ModelID: p.ModelID, ProfileKey: load.ProfileKey}, false)
+		if err != nil {
+			return result, err
+		}
+		if result.ConfigurationKey == p.ConfigurationKey {
+			break
+		}
 	}
 	if result.ConfigurationKey == "" || result.ConfigurationKey != p.ConfigurationKey {
 		return result, &codedError{code: -32010, message: "Settings changed; reinspect and try again."}
@@ -540,6 +551,37 @@ func decodeModelSettingsLaunch(raw []byte) (settings.Request, error) {
 	return p, nil
 }
 
+// Parent-only frozen-preview admission. The desired settings are already
+// compiled; the reviewed selection is evidence and must never be applied again.
+func (e *Executor) validateReviewedModelRemoval(ctx context.Context, p settings.Request, change *modelconfig.ModelChange) error {
+	if change == nil {
+		return nil
+	}
+	if p.ModelChange != nil {
+		return modelSettingsParamsError(fmt.Errorf("reviewed removal requires frozen settings without modelChange"))
+	}
+	if err := p.Validate(); err != nil {
+		return modelSettingsParamsError(err)
+	}
+	st, err := e.state(p.Engine)
+	if err != nil {
+		return err
+	}
+	st.opMu.Lock()
+	defer st.opMu.Unlock()
+	st.mu.Lock()
+	rt := st.plat.Runtime
+	st.mu.Unlock()
+	recheck, err := e.validateTypedLlamaConversion(ctx, st, rt, p.Settings, change)
+	if err != nil {
+		return err
+	}
+	if recheck != nil {
+		return recheck()
+	}
+	return ctx.Err()
+}
+
 // The worker accepts frozen native settings from its parent. Coupled policy
 // acceptance belongs to the broker. Apply must never invoke an Auto resolver.
 func (e *Executor) validateModelSettingsLaunch(ctx context.Context, p settings.Request, applying bool) error {
@@ -560,7 +602,7 @@ func (e *Executor) validateModelSettingsLaunch(ctx context.Context, p settings.R
 				return modelSettingsParamsError(fmt.Errorf("target memory telemetry unavailable"))
 			}
 		}
-		if !applying && p.ModelChange.Load != nil && p.ModelChange.Policy == nil {
+		if !applying && (p.ModelChange.Load != nil || p.ModelChange.Remove) && p.ModelChange.Policy == nil {
 			return ctx.Err()
 		}
 		return modelSettingsParamsError(fmt.Errorf("modelChange: reviewed model settings application is not ready"))
@@ -571,7 +613,7 @@ func (e *Executor) validateModelSettingsLaunch(ctx context.Context, p settings.R
 				return modelSettingsParamsError(fmt.Errorf("settings.modelLoads: reviewed finite resolution required"))
 			}
 			if modelLoadHasAuto(load.Requested) {
-				if err := modelAutoFrozen(load.ModelID, load.Requested, load.Resolved); err != nil {
+				if err := modelAutoFrozen(load.ProfileKey, load.Requested, load.Resolved); err != nil {
 					return err
 				}
 			}

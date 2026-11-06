@@ -92,7 +92,8 @@ type scannerReverseFixture struct {
 // with its model inventory.
 var scannerFixturePolicy = &nodepolicy.Advertisement{
 	Revision: "31",
-	Roles:    map[string]nodepolicy.AdvertisedRole{nodepolicy.TierMedium: {Engine: "llamacpp", Model: "model", ContextTokens: 16384}},
+	Roles:    []nodepolicy.Role{{Name: nodepolicy.TierMedium, Profiles: []string{"model"}}},
+	Profiles: []nodepolicy.AdvertisedProfile{{Key: "model", DisplayName: "Model", Engine: "llamacpp", Model: "model", ContextTokens: 16384}},
 }
 
 const (

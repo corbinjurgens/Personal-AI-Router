@@ -54,15 +54,20 @@ export type ResolvedLoad = {
     }
 }
 export type ModelLoad = {
+    profileKey: string
     modelId: string
     requested: RequestedLoad
     resolved?: ResolvedLoad
 }
 export type ModelChange = {
+    profileKey?: string
+    remove?: boolean
     modelId: string
     expectedPolicyRevision: string
     load?: { set: RequestedLoad; clear?: Array<keyof RequestedLoad> }
     policy?: {
+        displayName?: string
+        icon?: string
         generation?: Partial<
             Record<
                 | 'temperature'
@@ -242,7 +247,12 @@ export type Estimate = {
     unknowns?: string[]
 }
 /** Engine uses the service routing ID, including descriptor-defined engines. */
-export type InspectModelRequest = { engine: string; nodeId?: string; modelId: string }
+export type InspectModelRequest = {
+    engine: string
+    nodeId?: string
+    modelId: string
+    profileKey?: string
+}
 export type ClearStatedMemoryRequest = InspectModelRequest & { configurationKey: string }
 export type SetStatedMemoryRequest = ClearStatedMemoryRequest & {
     hostBytes?: string

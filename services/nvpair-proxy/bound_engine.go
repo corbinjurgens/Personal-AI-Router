@@ -155,7 +155,7 @@ func writeBoundEngineRefusal(w http.ResponseWriter, result nodepolicy.BoundEngin
 }
 
 func (f *facade) boundModel(pol nodepolicy.Policy, model string) bool {
-	return slices.ContainsFunc(pol.EngineBindings, func(ref nodepolicy.Role) bool {
+	return slices.ContainsFunc(pol.EngineBindings, func(ref nodepolicy.ModelRef) bool {
 		return ref.Engine == f.profile.Name && f.profile.normalizeModel(ref.Model) == f.profile.normalizeModel(model)
 	})
 }

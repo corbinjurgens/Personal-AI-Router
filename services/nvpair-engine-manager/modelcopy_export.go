@@ -800,10 +800,15 @@ func resolveLlamaArtifactsSelection(ctx context.Context, snapshot *engineState, 
 			Binding string
 		}{receipt, receipt.binding})
 	}
+	var assertions *modelconfig.ResolvedLoad
 	for _, load := range rt.ModelLoads {
 		if load.ModelID != model || load.Resolved == nil {
 			continue
 		}
+		if assertions != nil && !reflect.DeepEqual(assertions.Artifacts, load.Resolved.Artifacts) {
+			return modelFileList{}, false, errNoArtifactBinding
+		}
+		assertions = load.Resolved
 		list, err := resolvedLoadArtifacts(ctx, store, model, load, access)
 		if err != nil {
 			return modelFileList{}, false, err

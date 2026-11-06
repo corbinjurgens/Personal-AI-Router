@@ -836,6 +836,12 @@ func validateRuntimeModelLoadsJSON(data []byte) error {
 		if err := modelconfig.DecodeStrict(raw, &loads); err != nil {
 			return fmt.Errorf("runtime.modelLoads: %w", err)
 		}
+		// Stored identities are repaired in this decode pass, before validation.
+		for i := range loads {
+			if loads[i].ProfileKey == "" {
+				loads[i].ProfileKey = loads[i].ModelID
+			}
+		}
 		if _, err := modelconfig.CanonicalLoads(loads); err != nil {
 			return fmt.Errorf("runtime.modelLoads: %w", err)
 		}

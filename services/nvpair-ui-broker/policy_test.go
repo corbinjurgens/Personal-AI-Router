@@ -24,6 +24,7 @@ import (
 	"nvpair-shared/clustertrusttest"
 	"nvpair-shared/durablefile"
 	"nvpair-shared/engines"
+	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/nodepolicy"
 )
 
@@ -426,6 +427,16 @@ func attachFakeEngine(t *testing.T, b *Broker) *fakeWorker {
 			return emptySwitchManagerSnapshot(), ""
 		}
 		switch method {
+		case "engine:get-launch":
+			var request struct {
+				Engine string `json:"engine"`
+			}
+			if err := json.Unmarshal(raw, &request); err != nil {
+				return nil, err.Error()
+			}
+			// This fixture has no typed native loads. An explicit saved launch
+			// reply establishes that absence for raw policy admission.
+			return settings.LaunchState{Engine: request.Engine, Format: "pair-arguments-v1"}, ""
 		case "engine:get-installed":
 			r := b.nodePolicyRuntime()
 			r.mu.Lock()
@@ -654,7 +665,7 @@ func TestNodePolicyLoadDefaultsCorruptAndPersist(t *testing.T) {
 
 func TestModelControlPolicyLoadPreservesDiskAndAvailability(t *testing.T) {
 	path := filepath.Join(t.TempDir(), nodepolicy.FileName)
-	raw := []byte(`{"version":2,"revision":"42","availability":"available","servedModels":[{"engine":"llamacpp","model":"bad\nname"}],"roles":{"weak":{"engine":"llamacpp","model":"good"},"strong":{"engine":"llamacpp","model":"bad\u0085name"}},"admission":{"memoryBudgetBytes":12345}}`)
+	raw := []byte(`{"version":2,"revision":"42","availability":"available","servedModels":[{"engine":"llamacpp","model":"bad\nname"}],"profiles":[{"key":"good-profile","displayName":"Good","name":"good","engine":"llamacpp","model":"good"},{"key":"bad-profile","displayName":"Bad","name":"bad","engine":"llamacpp","model":"bad\u0085name"}],"roles":[{"name":"weak","profiles":["good-profile"]},{"name":"strong","profiles":["bad-profile"]}],"admission":{"memoryBudgetBytes":12345}}`)
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -664,7 +675,8 @@ func TestModelControlPolicyLoadPreservesDiskAndAvailability(t *testing.T) {
 	if got.RecoveryRequired || got.Availability != nodepolicy.Available || got.Policy.Revision != "42" || got.Policy.Admission.MemoryBudgetBytes != 12345 {
 		t.Fatal("model repair invoked whole-node recovery or changed state")
 	}
-	if len(got.Policy.Roles) != 1 || got.Policy.Roles[nodepolicy.TierWeak].Model != "good" || got.Policy.ServedModels == nil || len(got.Policy.ServedModels) != 0 {
+	wantRoles := []nodepolicy.Role{{Name: nodepolicy.TierWeak, Profiles: []string{"good-profile"}}, {Name: nodepolicy.TierStrong, Profiles: []string{}}}
+	if !reflect.DeepEqual(got.Policy.Roles, wantRoles) || len(got.Policy.Profiles) != 1 || got.Policy.Profiles[0].Model != "good" || got.Policy.ServedModels == nil || len(got.Policy.ServedModels) != 0 {
 		t.Fatal("model repair lost valid sibling or deny-all")
 	}
 	onDisk, err := os.ReadFile(path)
@@ -705,7 +717,7 @@ func TestModelControlPolicyLoadDiagnosticsNoEcho(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&output, nil)))
 	t.Cleanup(func() { slog.SetDefault(previous) })
 	path := filepath.Join(t.TempDir(), nodepolicy.FileName)
-	raw := []byte(`{"roles":{"weak":{"engine":"llamacpp","model":"PRIVATE-MODEL\nunsafe"}}}`)
+	raw := []byte(`{"profiles":[{"key":"private-profile","displayName":"Private","name":"private","engine":"llamacpp","model":"PRIVATE-MODEL\nunsafe"}]}`)
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -725,7 +737,7 @@ func TestModelControlPolicyLoadDiagnosticsNoEcho(t *testing.T) {
 			t.Fatal(err)
 		}
 		if entry.Message == "invalid stored model entries removed" {
-			if entry.Category != "roles" || entry.Count != 1 {
+			if entry.Category != "profiles" || entry.Count != 1 {
 				t.Fatal("unexpected sanitation diagnostic")
 			}
 			found = true
@@ -753,7 +765,7 @@ func TestModelControlPolicyLoadLegacyKeepsDisk(t *testing.T) {
 	b, _ := newPolicyBroker(t)
 	b.loadNodePolicy(path)
 	got := b.localPolicy()
-	if got.RecoveryRequired || got.Availability != nodepolicy.Draining || got.Policy.Availability != nodepolicy.Paused || got.Policy.Version != 2 || got.Policy.Revision != "0" || len(got.Policy.Roles) != 1 || len(got.Policy.Tiers[nodepolicy.TierWeak]) != 1 {
+	if got.RecoveryRequired || got.Availability != nodepolicy.Draining || got.Policy.Availability != nodepolicy.Paused || got.Policy.Version != 2 || got.Policy.Revision != "0" || len(got.Policy.Roles) != 0 || len(got.Policy.Tiers[nodepolicy.TierWeak]) != 1 {
 		t.Fatal("legacy repair lost state or invoked recovery")
 	}
 	onDisk, err := os.ReadFile(path)
@@ -769,18 +781,20 @@ func TestModelControlPolicyLoadKeepsWritesStrictAndAtomic(t *testing.T) {
 	path := filepath.Join(t.TempDir(), nodepolicy.FileName)
 	p := nodepolicy.Default()
 	p.Revision = "42"
-	p.Roles[nodepolicy.TierWeak] = nodepolicy.Role{Engine: "llamacpp", Model: "good"}
+	p.Profiles = []nodepolicy.Profile{{Key: "good-profile", DisplayName: "Good", Engine: "llamacpp", Model: "good"}}
+	p.Roles = []nodepolicy.Role{{Name: nodepolicy.TierWeak, Profiles: []string{"good-profile"}}}
 	writePolicyFile(t, path, p)
 	before, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	b, _ := newPolicyBroker(t)
+	attachFakeEngine(t, b)
 	b.loadNodePolicy(path)
 	for _, raw := range []string{
-		`{"roles":{"weak":{"engine":"llamacpp","model":"PRIVATE-MODEL\nunsafe"}}}`,
-		`{"roles":{"weak":{"engine":"llamacpp","model":"PRIVATE-MODEL\nunsafe"}},"Roles":{}}`,
-		`{"roles":{"weak":{"engine":"llamacpp","model":"PRIVATE-MODEL\nunsafe","model":"good"}}}`,
+		`{"profiles":[{"key":"private-profile","displayName":"Private","name":"private","engine":"llamacpp","model":"PRIVATE-MODEL\nunsafe"}],"roles":[{"name":"weak","profiles":["private-profile"]}]}`,
+		`{"profiles":[{"key":"private-profile","displayName":"Private","name":"private","engine":"llamacpp","model":"PRIVATE-MODEL\nunsafe"}],"roles":[],"Roles":[]}`,
+		`{"profiles":[{"key":"private-profile","displayName":"Private","name":"private","engine":"llamacpp","model":"PRIVATE-MODEL\nunsafe","model":"good"}],"roles":[]}`,
 	} {
 		if _, err := setCurrent(b, json.RawMessage(raw)); err == nil {
 			t.Fatal("invalid write accepted")
@@ -788,7 +802,7 @@ func TestModelControlPolicyLoadKeepsWritesStrictAndAtomic(t *testing.T) {
 			t.Fatal("invalid model leaked in write error")
 		}
 		got := b.localPolicy()
-		if got.Policy.Revision != "42" || got.Policy.Roles[nodepolicy.TierWeak].Model != "good" || got.RecoveryRequired {
+		if got.Policy.Revision != "42" || !reflect.DeepEqual(got.Policy.Roles, []nodepolicy.Role{{Name: nodepolicy.TierWeak, Profiles: []string{"good-profile"}}}) || got.RecoveryRequired {
 			t.Fatal("refused write changed live policy")
 		}
 		after, err := os.ReadFile(path)
@@ -894,7 +908,7 @@ func TestPolicySetValidatesPushesAndNotifies(t *testing.T) {
 	pp, proxy, _ := attachAckingProxy(t, b)
 	b.replayPolicyToProxy(context.Background(), pp)
 
-	bad := map[string]any{"version": 1, "profiles": []any{map[string]any{"name": "x", "engine": "no/pe", "model": "m"}}}
+	bad := map[string]any{"version": 1, "profiles": []any{map[string]any{"key": "m", "displayName": "M", "name": "x", "engine": "no/pe", "model": "m"}}}
 	b.handleMessage(clientRequest(1, methodPolicySet, map[string]any{"policy": bad, "expectedPersistedRevision": "0"}))
 	resp := out.waitFrame(t, "invalid policy:set response", isResponse(1))
 	if resp.Error == nil || resp.Error.Code != -32602 {
@@ -1862,8 +1876,8 @@ func remoteSettingLockedBroker(t *testing.T) *routedBroker {
 	rb := newRoutedBroker(t)
 	p := rb.b.localPolicy().Policy
 	p.Profiles = []nodepolicy.Profile{
-		{Name: "private-display", Engine: "llamacpp", Model: "stored-model", LocalOnly: true, RequestOptions: json.RawMessage(`{"temperature":0.1}`)},
-		{Name: "unlocked", Engine: "llamacpp-custom", Model: "other-model", RequestOptions: json.RawMessage(`{"temperature":0.2}`)},
+		{Key: "stored-profile", DisplayName: "Private", Engine: "llamacpp", Model: "stored-model", LocalOnly: true, RequestOptions: json.RawMessage(`{"temperature":0.1}`)},
+		{Key: "other-profile", DisplayName: "Other", Engine: "llamacpp-custom", Model: "other-model", RequestOptions: json.RawMessage(`{"temperature":0.2}`)},
 	}
 	if _, err := setCurrent(rb.b, rmJSON(t, p)); err != nil {
 		t.Fatalf("install locked target profile: %v", err)
@@ -1916,11 +1930,12 @@ func TestRemoteSettingLockedRefusesWholeWrite(t *testing.T) {
 	}, stored)
 	test("unlock", func(p *nodepolicy.PeerPolicy) { p.Profiles[0].LocalOnly = false }, stored)
 	test("remove", func(p *nodepolicy.PeerPolicy) { p.Profiles = p.Profiles[1:] }, stored)
+	test("replace profile key", func(p *nodepolicy.PeerPolicy) { p.Profiles[0].Key = "submitted-profile" }, stored)
 	test("replace identity", func(p *nodepolicy.PeerPolicy) { p.Profiles[0].Model = "submitted-model" }, stored)
 	test("replace engine", func(p *nodepolicy.PeerPolicy) { p.Profiles[0].Engine = "llamacpp-custom" }, stored)
 	test("lock existing", func(p *nodepolicy.PeerPolicy) { p.Profiles[1].LocalOnly = true }, `inference settings are locked on the target device for engine "llamacpp-custom" model "other-model"`)
 	test("lock new profile", func(p *nodepolicy.PeerPolicy) {
-		p.Profiles = append(p.Profiles, nodepolicy.Profile{Name: "submitted-display", Engine: "llamacpp", Model: "submitted-model", LocalOnly: true, RequestOptions: json.RawMessage(`{"submitted-option":"secret-value"}`)})
+		p.Profiles = append(p.Profiles, nodepolicy.Profile{Key: "submitted-profile", DisplayName: "Submitted", Engine: "llamacpp", Model: "submitted-model", LocalOnly: true, RequestOptions: json.RawMessage(`{"submitted-option":"secret-value"}`)})
 	}, "inference settings can only be locked on the target device")
 }
 
@@ -1948,7 +1963,7 @@ func TestRemoteSettingLockedLocalTargetCanEdit(t *testing.T) {
 func TestRemoteSettingLockedAllowsUnprotectedEdits(t *testing.T) {
 	rb := remoteSettingLockedBroker(t)
 	p := rb.b.peerPolicy().Policy
-	p.Profiles[0].Name = "new-display"
+	p.Profiles[0].DisplayName = "New display"
 	p.Profiles[0].RequestOptionsMode = nodepolicy.RequestOptionsMode("defaults")
 	p.Profiles[0].RequestOptions = json.RawMessage(`{ "temperature": 0.10 }`)
 	p.Profiles[1].RequestOptions = json.RawMessage(`{"temperature":0.8}`)
@@ -1957,7 +1972,7 @@ func TestRemoteSettingLockedAllowsUnprotectedEdits(t *testing.T) {
 		t.Fatalf("unprotected edit: %v", err)
 	}
 	got := rb.b.localPolicy().Policy
-	if got.Revision == p.Revision || got.Profiles[0].Model != "other-model" || string(got.Profiles[0].RequestOptions) != `{"temperature":0.8}` || got.Profiles[1].Name != "new-display" || !got.Profiles[1].LocalOnly {
+	if got.Revision == p.Revision || got.Profiles[0].Model != "other-model" || string(got.Profiles[0].RequestOptions) != `{"temperature":0.8}` || got.Profiles[1].Key != "stored-profile" || got.Profiles[1].DisplayName != "New display" || !got.Profiles[1].LocalOnly {
 		t.Fatalf("unprotected edit was not applied: %+v", got.Profiles)
 	}
 }
@@ -4402,7 +4417,7 @@ func TestPolicySetPublicationFailureIsAServerError(t *testing.T) {
 
 			setReplacer(rb.b, durablefile.Replacer{})
 			rb.b.handleMessage(clientRequest(2, methodPolicySet, map[string]any{
-				"policy":                    map[string]any{"version": 1, "profiles": []any{map[string]any{"name": "x", "engine": "no/pe", "model": "m"}}},
+				"policy":                    map[string]any{"version": 1, "profiles": []any{map[string]any{"key": "m", "displayName": "M", "name": "x", "engine": "no/pe", "model": "m"}}},
 				"expectedPersistedRevision": rb.b.localPolicy().Policy.Revision,
 			}))
 			resp = rb.out.waitFrame(t, "invalid policy:set response", isResponse(2))

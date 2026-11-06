@@ -1092,12 +1092,12 @@ func TestAdmission_ProfileConcurrencyUsesNormalizedModel(t *testing.T) {
 	h := newAdmHarness(t)
 	h.policy(func(p *nodepolicy.Policy) {
 		p.Admission.MaxResidentModels = 0
-		p.Profiles = []nodepolicy.Profile{{Name: "q", Engine: "llamacpp", Model: "qwen3", MaxConcurrent: 1}}
+		p.Profiles = []nodepolicy.Profile{{Key: "qwen3", DisplayName: "Qwen", Engine: "llamacpp", Model: "qwen3", MaxConcurrent: 1}}
 	})
 	d := h.admit("llamacpp", "qwen3", -1)
 	tk := mustAdmit(t, d)
-	if !d.hasProfile || d.profile.Name != "q" {
-		t.Fatalf("profile = %+v (has=%v), want q", d.profile, d.hasProfile)
+	if !d.hasProfile || d.profile.Key != "qwen3" {
+		t.Fatalf("profile = %+v (has=%v), want key qwen3", d.profile, d.hasProfile)
 	}
 	mustReject(t, h.admit("llamacpp", "qwen3", 0), nodepolicy.RejectBusy)
 	tk.release()
@@ -1219,10 +1219,10 @@ func TestAdmission_MemoryBudget(t *testing.T) {
 		p.Admission.MemoryBudgetBytes = 10 * gb
 		p.Admission.SwitchTimeoutSeconds = 30
 		p.Profiles = []nodepolicy.Profile{
-			{Name: "a", Engine: "llamacpp", Model: "a:1", MemoryBytes: 6 * gb},
-			{Name: "b", Engine: "llamacpp", Model: "b:1", MemoryBytes: 6 * gb},
-			{Name: "c", Engine: "llamacpp", Model: "c:1", MemoryBytes: 3 * gb},
-			{Name: "huge", Engine: "llamacpp", Model: "huge:1", MemoryBytes: 11 * gb},
+			{Key: "a:1", DisplayName: "A", Engine: "llamacpp", Model: "a:1", MemoryBytes: 6 * gb},
+			{Key: "b:1", DisplayName: "B", Engine: "llamacpp", Model: "b:1", MemoryBytes: 6 * gb},
+			{Key: "c:1", DisplayName: "C", Engine: "llamacpp", Model: "c:1", MemoryBytes: 3 * gb},
+			{Key: "huge:1", DisplayName: "Huge", Engine: "llamacpp", Model: "huge:1", MemoryBytes: 11 * gb},
 		}
 	})
 	h.a.setResidency(map[string][]string{"llamacpp": {"a:1"}})

@@ -1028,7 +1028,7 @@ func testStopPauseRestart(t *testing.T) {
 	// Resident configuration requires a qualification reference. This is only
 	// a declaration: install no qualification registry entry, and never use it
 	// as admission, loaded-model or physical shutdown evidence.
-	profile.Engine, profile.Model, profile.Name = "llamacpp", "switch-model", "stop-pause-resident"
+	profile.Engine, profile.Model, profile.Key, profile.DisplayName = "llamacpp", "switch-model", "switch-model", "stop-pause-resident"
 	policy.Profiles = []nodepolicy.Profile{profile}
 	policy.ResidentModels = nodepolicy.ResidentModels{{Engine: "llamacpp", Model: "switch-model"}}
 	policy.ServedModels = nodepolicy.ServedModels{{Engine: "llamacpp", Model: "switch-model"}}

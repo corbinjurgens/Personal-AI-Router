@@ -206,6 +206,44 @@ func autoTestRequest() modelconfig.RequestedLoad {
 	return modelconfig.RequestedLoad{GPU: &modelconfig.GPU{Mode: "auto"}, KVOffload: &off, OpOffload: &off, CacheTypeK: &f16, CacheTypeV: &f16}
 }
 
+func TestModelSettingsAutoReviewBindsProfileKey(t *testing.T) {
+	now := time.Now()
+	requested := autoTestRequest()
+	requested.Context = &modelconfig.Context{Mode: "fixed", Tokens: 8192}
+	state := modelEstimateState{now: func() time.Time { return now }, run: autoTestEstimate}
+	op := modelAutoOperation{Memory: &autoTestMemoryOwner{memory: autoTestMemory(now)}}
+	resolve := func(key string) *modelconfig.ResolvedLoad {
+		t.Helper()
+		proposal, err := autoTestResolveInput(context.Background(), key, requested, autoTestInput(), op, &state)
+		if err != nil || proposal.Status != "fits" || proposal.Resolved == nil {
+			t.Fatalf("%s proposal=%+v error=%v", key, proposal, err)
+		}
+		proposal.Resolved.SourceInputDigest, proposal.Resolved.PresetDigest = strings.Repeat("a", 64), strings.Repeat("b", 64)
+		return proposal.Resolved
+	}
+	first, second := resolve("lfm-8k"), resolve("lfm-second")
+	if first.ReviewedInputID == second.ReviewedInputID {
+		t.Fatal("identical sibling allocations shared review provenance")
+	}
+	if err := modelAutoFrozen("lfm-8k", requested, first); err != nil {
+		t.Fatalf("first profile review refused: %v", err)
+	}
+	if err := modelAutoFrozen("lfm-second", requested, second); err != nil {
+		t.Fatalf("second profile review refused: %v", err)
+	}
+	if err := modelAutoFrozen("lfm-second", requested, first); err == nil {
+		t.Fatal("sibling accepted another profile's review")
+	}
+	changed := requested.Clone()
+	changed.Context.Tokens = 32768
+	if err := modelAutoFrozen("lfm-second", changed, second); err == nil {
+		t.Fatal("changed sibling retained its old review")
+	}
+	if err := modelAutoFrozen("lfm-8k", requested, first); err != nil {
+		t.Fatalf("sibling edit invalidated first profile review: %v", err)
+	}
+}
+
 // Supply the compiler-resolved baseline at the operation seam. The resolver
 // receives portable intent separately and must never rebuild this baseline.
 func autoTestResolveInput(ctx context.Context, model string, requested modelconfig.RequestedLoad, in modelEstimateInput, op modelAutoOperation, state *modelEstimateState) (modelconfig.AutoProposal, error) {

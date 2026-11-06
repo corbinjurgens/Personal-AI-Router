@@ -32,7 +32,7 @@ type PeerPolicy struct {
 	ServedModels   ServedModels           `json:"servedModels,omitzero"`
 	ResidentModels ResidentModels         `json:"residentModels,omitempty"`
 	EngineBindings EngineBindings         `json:"engineBindings"`
-	Roles          map[string]Role        `json:"roles"`
+	Roles          []Role                 `json:"roles"`
 	Tiers          map[string][]TierEntry `json:"tiers"`
 	TierPolicy     TierPolicy             `json:"tierPolicy"`
 	PausedBy       PauseOrigin            `json:"pausedBy,omitempty"`
@@ -67,7 +67,7 @@ func (p Policy) PeerProjection() PeerPolicy {
 		ServedModels:   slices.Clone(p.ServedModels),
 		ResidentModels: slices.Clone(p.ResidentModels),
 		EngineBindings: slices.Clone(p.EngineBindings),
-		Roles:          p.Roles,
+		Roles:          copyRoles(p.Roles),
 		Tiers:          localTiers(p.Tiers),
 		TierPolicy:     p.TierPolicy,
 		PausedBy:       p.PausedBy,
@@ -100,20 +100,19 @@ func boundedIdentity(value string, limit int) string {
 }
 
 func checkPeerInferenceSettings(stored, incoming []Profile) error {
-	type identity struct{ engine, model string }
-	next := make(map[identity]Profile, len(incoming))
-	previous := make(map[identity]Profile, len(stored))
+	next := make(map[string]Profile, len(incoming))
+	previous := make(map[string]Profile, len(stored))
 	for _, profile := range incoming {
-		next[identity{profile.Engine, profile.Model}] = profile
+		next[profile.Key] = profile
 	}
 	for _, profile := range stored {
-		key := identity{profile.Engine, profile.Model}
+		key := profile.Key
 		previous[key] = profile
 		if !profile.LocalOnly {
 			continue
 		}
 		candidate, exists := next[key]
-		if !exists || !candidate.LocalOnly || profile.RequestOptionsMode.Effective() != candidate.RequestOptionsMode.Effective() || !EqualRequestOptions(profile.RequestOptions, candidate.RequestOptions) {
+		if !exists || !candidate.LocalOnly || candidate.Engine != profile.Engine || candidate.Model != profile.Model || profile.RequestOptionsMode.Effective() != candidate.RequestOptionsMode.Effective() || !EqualRequestOptions(profile.RequestOptions, candidate.RequestOptions) {
 			return &RemoteSettingLockedError{engine: profile.Engine, model: profile.Model, stored: true}
 		}
 	}
@@ -121,7 +120,7 @@ func checkPeerInferenceSettings(stored, incoming []Profile) error {
 		if !profile.LocalOnly {
 			continue
 		}
-		old, exists := previous[identity{profile.Engine, profile.Model}]
+		old, exists := previous[profile.Key]
 		if !exists {
 			return &RemoteSettingLockedError{}
 		}
@@ -330,6 +329,7 @@ func MergePeerSet(stored Policy, raw []byte) (Policy, error) {
 	}
 	merged := incoming
 	merged.Profiles = copyProfiles(incoming.Profiles)
+	merged.Roles = copyRoles(incoming.Roles)
 	merged.Tiers = stored.Tiers
 	merged.TierPolicy = stored.TierPolicy
 	merged.Routing = stored.Routing

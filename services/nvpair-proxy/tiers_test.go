@@ -1205,12 +1205,12 @@ func TestModelList_OffersEveryTierWithEntriesAndBothVariants(t *testing.T) {
 
 // declare gives a fixture node an advertised role declaration, the way the
 // relay overlay carries a peer's policy advertisement.
-func (fx *tierFixture) declare(t *testing.T, id string, roles map[string]nodepolicy.AdvertisedRole) {
+func (fx *tierFixture) declare(t *testing.T, id string, roles map[string]nodepolicy.AdvertisedProfile) {
 	t.Helper()
 	f := fx.p.soleFacade()
 	for _, n := range f.discovery.Nodes() {
 		if n.ID == id {
-			n.Roles = roles
+			setAdvertisedProfilesByRole(&n, roles)
 			n.PolicyRevision = "1"
 			f.discovery.AddManual(n)
 			return
@@ -1219,8 +1219,8 @@ func (fx *tierFixture) declare(t *testing.T, id string, roles map[string]nodepol
 	t.Fatalf("no fixture node %q", id)
 }
 
-func llamacppRole(model string) nodepolicy.AdvertisedRole {
-	return nodepolicy.AdvertisedRole{Engine: "llamacpp", Model: model}
+func llamacppProfile(model string) nodepolicy.AdvertisedProfile {
+	return nodepolicy.AdvertisedProfile{Engine: "llamacpp", Model: model}
 }
 
 // tierCand is the part of a candidate that tier resolution decides.
@@ -1261,7 +1261,7 @@ func TestTierRoles_DeclaringNodeIsAuthoritative(t *testing.T) {
 		}
 	})
 
-	fx.declare(t, "a", map[string]nodepolicy.AdvertisedRole{"weak": llamacppRole("own-weak:1b")})
+	fx.declare(t, "a", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("own-weak:1b")})
 
 	t.Run("declared role replaces router entries on that node", func(t *testing.T) {
 		want := []tierCand{{"a", "own-weak:1b", 0, true}, {"b", "router-weak:1b", 0, false}}
@@ -1292,8 +1292,8 @@ func TestTierRoles_PeersDeclareDifferentModelsForOneTier(t *testing.T) {
 	fx := newTierFixture(t, llamacppCase(t), tierPolicy(nil), map[string][]string{
 		"a": {"alpha:1b", "beta:1b"}, "b": {"alpha:1b", "beta:1b"},
 	}, nil)
-	fx.declare(t, "a", map[string]nodepolicy.AdvertisedRole{"weak": llamacppRole("beta:1b")})
-	fx.declare(t, "b", map[string]nodepolicy.AdvertisedRole{"weak": llamacppRole("alpha:1b")})
+	fx.declare(t, "a", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("beta:1b")})
+	fx.declare(t, "b", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("alpha:1b")})
 	want := []tierCand{{"b", "alpha:1b", 0, true}, {"a", "beta:1b", 0, true}}
 	if got := resolvedTier(fx.p.soleFacade(), "weak", requestNeeds{}, false); !slices.Equal(got, want) {
 		t.Fatalf("candidates = %+v, want %+v", got, want)
@@ -1316,7 +1316,7 @@ func TestTierRoles_DeclaredModelMissingFromInventory(t *testing.T) {
 	})
 	pol.TierPolicy.AllowStronger = false
 	fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"a": {"have:1b"}}, nil)
-	fx.declare(t, "a", map[string]nodepolicy.AdvertisedRole{"weak": llamacppRole("missing:1b")})
+	fx.declare(t, "a", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("missing:1b")})
 	if got := resolvedTier(fx.p.soleFacade(), "weak", requestNeeds{}, false); len(got) != 0 {
 		t.Fatalf("candidates = %+v, want none", got)
 	}
@@ -1331,8 +1331,8 @@ func TestTierRoles_AdvertisedBoundsFilter(t *testing.T) {
 	fx := newTierFixture(t, llamacppCase(t), tierPolicy(nil), map[string][]string{
 		"a": {"small:1b"}, "b": {"tools:1b"},
 	}, nil)
-	fx.declare(t, "a", map[string]nodepolicy.AdvertisedRole{"weak": {Engine: "llamacpp", Model: "small:1b", ContextTokens: 100}})
-	fx.declare(t, "b", map[string]nodepolicy.AdvertisedRole{"weak": {Engine: "llamacpp", Model: "tools:1b", Capabilities: []nodepolicy.Capability{nodepolicy.CapTools}}})
+	fx.declare(t, "a", map[string]nodepolicy.AdvertisedProfile{"weak": {Engine: "llamacpp", Model: "small:1b", ContextTokens: 100}})
+	fx.declare(t, "b", map[string]nodepolicy.AdvertisedProfile{"weak": {Engine: "llamacpp", Model: "tools:1b", Capabilities: []nodepolicy.Capability{nodepolicy.CapTools}}})
 	f := fx.p.soleFacade()
 	if got, want := resolvedTier(f, "weak", requestNeeds{caps: []nodepolicy.Capability{nodepolicy.CapTools}}, false), []tierCand{{"b", "tools:1b", 0, true}}; !slices.Equal(got, want) {
 		t.Errorf("tools candidates = %+v, want %+v", got, want)
@@ -1347,8 +1347,8 @@ func TestTierRoles_AdvertisedBoundsFilter(t *testing.T) {
 func TestTierRoles_StrongerAndWeakerFallback(t *testing.T) {
 	pol := tierPolicy(nil)
 	fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"a": {"big:70b"}, "b": {"small:1b"}}, nil)
-	fx.declare(t, "a", map[string]nodepolicy.AdvertisedRole{"strong": llamacppRole("big:70b")})
-	fx.declare(t, "b", map[string]nodepolicy.AdvertisedRole{"weak": llamacppRole("small:1b")})
+	fx.declare(t, "a", map[string]nodepolicy.AdvertisedProfile{"strong": llamacppProfile("big:70b")})
+	fx.declare(t, "b", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("small:1b")})
 	f := fx.p.soleFacade()
 	set := func(stronger, weaker bool) {
 		pol.TierPolicy.AllowStronger, pol.TierPolicy.AllowWeaker = stronger, weaker
@@ -1382,8 +1382,8 @@ func TestTierRoles_WarmOrdering(t *testing.T) {
 		pol := tierPolicy(tiers)
 		pol.TierPolicy.PreferLoaded = preferLoaded
 		fx := newTierFixture(t, llamacppCase(t), pol, nodes, loaded)
-		fx.declare(t, "d", map[string]nodepolicy.AdvertisedRole{"weak": llamacppRole("declared:1b")})
-		fx.declare(t, "m", map[string]nodepolicy.AdvertisedRole{"medium": llamacppRole("mid:7b")})
+		fx.declare(t, "d", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("declared:1b")})
+		fx.declare(t, "m", map[string]nodepolicy.AdvertisedProfile{"medium": llamacppProfile("mid:7b")})
 		var out []string
 		for _, c := range resolvedTier(fx.p.soleFacade(), "weak", requestNeeds{}, false) {
 			out = append(out, c.node)
@@ -1412,9 +1412,9 @@ func TestTierRoles_LoadBalancingKeepsLeadingClass(t *testing.T) {
 	fx := newTierFixture(t, llamacppCase(t), tierPolicy(nil), map[string][]string{
 		"a": {"x:1b"}, "b": {"y:1b"}, "c": {"z:7b"},
 	}, nil)
-	fx.declare(t, "a", map[string]nodepolicy.AdvertisedRole{"weak": llamacppRole("x:1b")})
-	fx.declare(t, "b", map[string]nodepolicy.AdvertisedRole{"weak": llamacppRole("y:1b")})
-	fx.declare(t, "c", map[string]nodepolicy.AdvertisedRole{"medium": llamacppRole("z:7b")})
+	fx.declare(t, "a", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("x:1b")})
+	fx.declare(t, "b", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("y:1b")})
+	fx.declare(t, "c", map[string]nodepolicy.AdvertisedProfile{"medium": llamacppProfile("z:7b")})
 	applySnapshot(fx.p, schedulerwire.Priority{
 		Nodes: []string{"c", "a", "b"},
 		Ranks: []schedulerwire.NodeRank{{ID: "c", Pending: 0}, {ID: "a", Pending: 3, Rank: 1}, {ID: "b", Pending: 2, Rank: 2}},
@@ -1453,7 +1453,7 @@ func TestTierRoles_SelfDeclarationCrossEngine(t *testing.T) {
 		t.Fatalf("undeclared self = %+v, want %+v", got, want)
 	}
 
-	pol.Roles = map[string]nodepolicy.Role{"strong": {Engine: "llamacpp-custom", Model: "qwen3-8b"}}
+	declarePolicyRole(&pol, "strong", "llamacpp-custom", "qwen3-8b")
 	if err := pol.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -1477,7 +1477,7 @@ func TestTierRoles_PeerCrossEngineRole(t *testing.T) {
 	p, lcpp, custom := twoEngineProxy(t, w)
 	peerCustom := newRecordingEngine(t, http.StatusOK)
 	n := nodeForModel(t, "peer", peerCustom.URL, "qwen3-8b")
-	n.Roles = map[string]nodepolicy.AdvertisedRole{"weak": {Engine: "llamacpp-custom", Model: "qwen3-8b"}}
+	setAdvertisedProfilesByRole(&n, map[string]nodepolicy.AdvertisedProfile{"weak": {Engine: "llamacpp-custom", Model: "qwen3-8b"}})
 	custom.discovery.AddManual(n)
 	p.admission.setPolicy(nodepolicy.Default())
 
@@ -1494,15 +1494,15 @@ func TestTierRoles_PeerCrossEngineRole(t *testing.T) {
 	}
 }
 
-// qualifiedRole is a llama.cpp role advertising finite qualification.
-func qualifiedRole(model string) nodepolicy.AdvertisedRole {
-	return nodepolicy.AdvertisedRole{Engine: "llamacpp", Model: model, ContextTokens: 4096, MaxOutputTokens: 1024,
+// qualifiedProfile is a llama.cpp profile advertising finite qualification.
+func qualifiedProfile(model string) nodepolicy.AdvertisedProfile {
+	return nodepolicy.AdvertisedProfile{Engine: "llamacpp", Model: model, ContextTokens: 4096, MaxOutputTokens: 1024,
 		Qualification: &nodepolicy.QualificationRef{ID: "q", Revision: "1"}}
 }
 
 // advertise gives a fixture node a role declaration and a strict capability,
 // as its relayed policy advertisement would.
-func (fx *tierFixture) advertise(t *testing.T, id string, roles map[string]nodepolicy.AdvertisedRole, capability *nodepolicy.StrictAdmissionCapability) {
+func (fx *tierFixture) advertise(t *testing.T, id string, roles map[string]nodepolicy.AdvertisedProfile, capability *nodepolicy.StrictAdmissionCapability) {
 	t.Helper()
 	fx.declare(t, id, roles)
 	f := fx.p.soleFacade()
@@ -1538,14 +1538,14 @@ func TestHybridLocalCandidatesRequireQualifiedDeclaredRoles(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"version":2,"models":[{"engine":"llamacpp","model":"q:1b"}]}`), &unsupported); err != nil {
 		t.Fatal(err)
 	}
-	malformed := qualifiedRole("q:1b")
+	malformed := qualifiedProfile("q:1b")
 	malformed.MaxOutputTokens = 4096
-	fx.advertise(t, "eligible", map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("q:1b")}, strictCapabilityFor("llamacpp", "q:1b"))
-	fx.advertise(t, "unqualified", map[string]nodepolicy.AdvertisedRole{"weak": llamacppRole("q:1b")}, strictCapabilityFor("llamacpp", "q:1b"))
-	fx.advertise(t, "no-capability", map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("q:1b")}, nil)
-	fx.advertise(t, "unsupported", map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("q:1b")}, &unsupported)
-	fx.advertise(t, "other-model", map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("q:1b")}, strictCapabilityFor("llamacpp", "r:1b"))
-	fx.advertise(t, "malformed", map[string]nodepolicy.AdvertisedRole{"weak": malformed}, strictCapabilityFor("llamacpp", "q:1b"))
+	fx.advertise(t, "eligible", map[string]nodepolicy.AdvertisedProfile{"weak": qualifiedProfile("q:1b")}, strictCapabilityFor("llamacpp", "q:1b"))
+	fx.advertise(t, "unqualified", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("q:1b")}, strictCapabilityFor("llamacpp", "q:1b"))
+	fx.advertise(t, "no-capability", map[string]nodepolicy.AdvertisedProfile{"weak": qualifiedProfile("q:1b")}, nil)
+	fx.advertise(t, "unsupported", map[string]nodepolicy.AdvertisedProfile{"weak": qualifiedProfile("q:1b")}, &unsupported)
+	fx.advertise(t, "other-model", map[string]nodepolicy.AdvertisedProfile{"weak": qualifiedProfile("q:1b")}, strictCapabilityFor("llamacpp", "r:1b"))
+	fx.advertise(t, "malformed", map[string]nodepolicy.AdvertisedProfile{"weak": malformed}, strictCapabilityFor("llamacpp", "q:1b"))
 
 	got := f.hybridLocalCandidates("weak", requestNeeds{}, true)
 	if len(got) != 1 || got[0].id != "eligible" || got[0].strict.Identity != strictRequest().Identity || !got[0].role.HybridQualified() {
@@ -1566,7 +1566,7 @@ func TestHybridLocalCandidatesSelfUsesItsOwnCapability(t *testing.T) {
 	setBackend(t, lcpp, e.URL, true)
 	installQualified(t, p.admission, admKey{engine: "llamacpp", model: "llama3"})
 	pol := p.admission.currentPolicy()
-	pol.Roles = map[string]nodepolicy.Role{"weak": {Engine: "llamacpp", Model: "llama3"}}
+	declarePolicyRole(&pol, "weak", "llamacpp", "llama3")
 	pol.Admission.MaxConcurrentPerModel = 1
 	p.admission.setPolicy(pol)
 
@@ -1586,9 +1586,9 @@ func TestHybridLocalCandidatesKeepTierOrder(t *testing.T) {
 	pol := tierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "q:1b"}}})
 	pol.TierPolicy.AllowStronger = false
 	fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"a": {"q:1b"}, "b": {"q:1b"}, "c": {"q:1b"}}, nil)
-	fx.advertise(t, "a", map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("q:1b")}, strictCapabilityFor("llamacpp", "q:1b"))
-	fx.advertise(t, "b", map[string]nodepolicy.AdvertisedRole{"weak": llamacppRole("q:1b")}, strictCapabilityFor("llamacpp", "q:1b"))
-	fx.advertise(t, "c", map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("q:1b")}, strictCapabilityFor("llamacpp", "q:1b"))
+	fx.advertise(t, "a", map[string]nodepolicy.AdvertisedProfile{"weak": qualifiedProfile("q:1b")}, strictCapabilityFor("llamacpp", "q:1b"))
+	fx.advertise(t, "b", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("q:1b")}, strictCapabilityFor("llamacpp", "q:1b"))
+	fx.advertise(t, "c", map[string]nodepolicy.AdvertisedProfile{"weak": qualifiedProfile("q:1b")}, strictCapabilityFor("llamacpp", "q:1b"))
 	f := fx.p.soleFacade()
 
 	var want []string

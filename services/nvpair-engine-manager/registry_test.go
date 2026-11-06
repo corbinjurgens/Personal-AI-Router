@@ -14,6 +14,38 @@ import (
 	"nvpair-shared/engines"
 )
 
+func TestStoredModelLoadsGainProfileKey(t *testing.T) {
+	m := validManifest()
+	raw, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil {
+		t.Fatal(err)
+	}
+	object["runtime"] = json.RawMessage(`{"modelLoads":[{"modelId":"org/model:Q4","requested":{}}]}`)
+	raw, err = json.Marshal(object)
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged, err := applyPlatformDefaults(raw)
+	if err != nil {
+		t.Fatalf("decode stored loads: %v", err)
+	}
+	var loaded Manifest
+	if err := json.Unmarshal(merged, &loaded); err != nil {
+		t.Fatal(err)
+	}
+	if err := loaded.Validate(); err != nil {
+		t.Fatalf("validate stored loads: %v", err)
+	}
+	loads := loaded.Platforms["linux/amd64"].Runtime.ModelLoads
+	if len(loads) != 1 || loads[0].ProfileKey != "org/model:Q4" || loads[0].ModelID != "org/model:Q4" {
+		t.Fatalf("repaired loads = %+v", loads)
+	}
+}
+
 // validManifest is a minimal well-formed manifest used as the base for
 // validation tests; individual tests mutate a copy to introduce one
 // fault at a time.

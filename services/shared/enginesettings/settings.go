@@ -13,6 +13,7 @@ import (
 
 	"nvpair-shared/engines"
 	"nvpair-shared/modelconfig"
+	"nvpair-shared/nodepolicy"
 )
 
 type Config struct {
@@ -94,6 +95,9 @@ type WorkerRequest[T any] struct {
 	NativeInitAllowed  bool                      `json:"nativeInitAllowed"`
 	ValidateResources  bool                      `json:"validateResources,omitempty"`
 	ResourceModel      string                    `json:"resourceModel,omitempty"`
+	// The parent supplies the original native review digest with the accepted
+	// Remove selection. Request contains frozen desired settings, not a patch.
+	ReviewedModelChange *modelconfig.ModelChange `json:"reviewedModelChange,omitempty"`
 }
 
 func DecodeWorkerRequest[T any](data []byte) (WorkerRequest[T], error) {
@@ -101,8 +105,16 @@ func DecodeWorkerRequest[T any](data []byte) (WorkerRequest[T], error) {
 	if err := modelconfig.DecodeStrict(data, &p); err != nil {
 		return p, err
 	}
-	if len(p.ResourceModel) > 256 || p.ValidateResources != (p.ResourceModel != "") {
-		return p, fmt.Errorf("worker resource validation requires an exact selected model")
+	if p.ValidateResources != (p.ResourceModel != "") {
+		return p, fmt.Errorf("worker resource validation requires an exact selected profile")
+	}
+	if p.ResourceModel != "" {
+		if err := nodepolicy.ValidateProfileKey(p.ResourceModel); err != nil {
+			return p, fmt.Errorf("worker resource profile: %w", err)
+		}
+	}
+	if err := ValidateReviewedModelChange(p.ReviewedModelChange); err != nil {
+		return p, err
 	}
 	if p.Memory != nil {
 		if err := p.Memory.Validate(); err != nil {
@@ -250,20 +262,21 @@ type Conflict struct {
 }
 
 type Preview struct {
-	Serving           *engines.ServingReadback      `json:"serving,omitempty"`
-	Settings          Config                        `json:"settings"`
-	Revision          uint64                        `json:"revision"`
-	Conflict          *Conflict                     `json:"conflict,omitempty"`
-	Errors            map[string]string             `json:"errors,omitempty"`
-	Restart           bool                          `json:"restart"`
-	Rebind            bool                          `json:"rebind"`
-	PolicyRevision    string                        `json:"policyRevision,omitempty"`
-	PreviewDigest     string                        `json:"previewDigest,omitempty"`
-	Diff              []modelconfig.FieldDiff       `json:"diff,omitempty"`
-	RequiredArtifacts []modelconfig.ArtifactSummary `json:"requiredArtifacts,omitempty"`
-	Estimate          *modelconfig.Estimate         `json:"estimate,omitempty"`
-	Impact            *modelconfig.Impact           `json:"impact,omitempty"`
-	Auto              *modelconfig.AutoProposal     `json:"auto,omitempty"`
+	Identities        map[string]engines.ModelIdentity `json:"identities,omitempty"`
+	Serving           *engines.ServingReadback         `json:"serving,omitempty"`
+	Settings          Config                           `json:"settings"`
+	Revision          uint64                           `json:"revision"`
+	Conflict          *Conflict                        `json:"conflict,omitempty"`
+	Errors            map[string]string                `json:"errors,omitempty"`
+	Restart           bool                             `json:"restart"`
+	Rebind            bool                             `json:"rebind"`
+	PolicyRevision    string                           `json:"policyRevision,omitempty"`
+	PreviewDigest     string                           `json:"previewDigest,omitempty"`
+	Diff              []modelconfig.FieldDiff          `json:"diff,omitempty"`
+	RequiredArtifacts []modelconfig.ArtifactSummary    `json:"requiredArtifacts,omitempty"`
+	Estimate          *modelconfig.Estimate            `json:"estimate,omitempty"`
+	Impact            *modelconfig.Impact              `json:"impact,omitempty"`
+	Auto              *modelconfig.AutoProposal        `json:"auto,omitempty"`
 	// Named to match Runtime's persisted override keys: these carry the same
 	// user-supplied launch content, and a log sink redacts them by key. Plain
 	// "args"/"env" would collide with every worker-spawn diagnostic.
@@ -289,10 +302,28 @@ type LaunchState struct {
 }
 
 type Configure struct {
-	Engine      string `json:"engine"`
-	Settings    Config `json:"settings"`
-	OperationID string `json:"operationId"`
-	Resume      bool   `json:"resume,omitempty"`
+	Engine              string                   `json:"engine"`
+	Settings            Config                   `json:"settings"`
+	OperationID         string                   `json:"operationId"`
+	Resume              bool                     `json:"resume,omitempty"`
+	ReviewedModelChange *modelconfig.ModelChange `json:"reviewedModelChange,omitempty"`
+}
+
+// ValidateReviewedModelChange validates parent-only transient evidence. The
+// preview digest is the native worker digest, not the broker's public wrapper.
+// This grants no authority by itself: the manager rechecks the complete source
+// and selected omission against that review before accepting frozen settings.
+func ValidateReviewedModelChange(change *modelconfig.ModelChange) error {
+	if change == nil {
+		return nil
+	}
+	if err := change.Validate(); err != nil {
+		return fmt.Errorf("reviewedModelChange: %w", err)
+	}
+	if !change.Remove || change.PreviewDigest == "" {
+		return fmt.Errorf("reviewedModelChange: accepted removal and original native preview digest required")
+	}
+	return nil
 }
 
 // Relay is a correlated worker-to-parent request. It never blocks a reader.
@@ -505,6 +536,11 @@ func (r Relay) MarshalJSON() ([]byte, error) {
 }
 
 func (p Preview) Clone() Preview {
+	p.Identities = maps.Clone(p.Identities)
+	for key, identity := range p.Identities {
+		identity.Files = slices.Clone(identity.Files)
+		p.Identities[key] = identity
+	}
 	p.Serving = p.Serving.Clone()
 	p.Settings = p.Settings.Clone()
 	if p.Conflict != nil {

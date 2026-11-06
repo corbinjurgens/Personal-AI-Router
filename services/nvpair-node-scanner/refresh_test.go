@@ -54,9 +54,9 @@ func TestModelControlsScannerInventory(t *testing.T) {
 			wantServed := nodepolicy.ServedModels{{Engine: "llamacpp", Model: "first"}}
 			if tc.valid {
 				servedToken = `"last"`
-				wantServed = append(wantServed, nodepolicy.Role{Engine: "llamacpp", Model: "last"})
+				wantServed = append(wantServed, nodepolicy.ModelRef{Engine: "llamacpp", Model: "last"})
 			}
-			body := fmt.Sprintf(`{"models":%s,"modelsByEngine":{"llamacpp":%s,"llamacpp-custom":[]},"loadedByEngine":{"llamacpp":%s},"policy":{"revision":"7","servedModels":[{"engine":"llamacpp","model":"first"},{"engine":"llamacpp","model":%s}],"roles":{"weak":{"engine":"llamacpp","model":%s},"strong":{"engine":"llamacpp","model":"last"}},"strictAdmission":{"version":1,"models":[%s]}}}`, list, list, list, servedToken, tc.token, strict)
+			body := fmt.Sprintf(`{"models":%s,"modelsByEngine":{"llamacpp":%s,"llamacpp-custom":[]},"loadedByEngine":{"llamacpp":%s},"policy":{"revision":"7","servedModels":[{"engine":"llamacpp","model":"first"},{"engine":"llamacpp","model":%s}],"roles":[{"name":"weak","profiles":["candidate"]},{"name":"strong","profiles":["last"]}],"profiles":[{"key":"candidate","displayName":"Candidate","engine":"llamacpp","model":%s},{"key":"last","displayName":"Last","engine":"llamacpp","model":"last"}],"strictAdmission":{"version":1,"models":[%s]}}}`, list, list, list, servedToken, tc.token, strict)
 			d := newRefreshTestDaemon()
 			d.modelsHTTP.Transport = serviceBuildTransport(func(r *http.Request) (*http.Response, error) {
 				if r.URL.Host != "127.0.0.1:24001" || r.URL.Path != "/v1/models" {
@@ -83,15 +83,17 @@ func TestModelControlsScannerInventory(t *testing.T) {
 			if !reflect.DeepEqual(d.lastModels[node.HostUUID], want) || !reflect.DeepEqual(d.lastModelsByEngine[node.HostUUID], node.ModelsByEngine) || !reflect.DeepEqual(d.lastLoadedByEngine[node.HostUUID], node.LoadedByEngine) || !reflect.DeepEqual(d.lastPolicy[node.HostUUID], node.Policy) {
 				t.Fatal("cache differs from published sanitized inventory")
 			}
-			if node.Policy == nil || node.Policy.Revision != "7" || node.Policy.Roles["strong"].Model != "last" {
+			if node.Policy == nil || node.Policy.Revision != "7" {
 				t.Fatal("valid advertisement metadata was lost")
 			}
-			_, hasWeak := node.Policy.Roles["weak"]
-			if hasWeak != tc.valid || !reflect.DeepEqual(node.Policy.ServedModels, wantServed) {
-				t.Fatal("advertisement did not filter model entries individually")
+			wantRoles := []nodepolicy.Role{{Name: "weak", Profiles: []string{}}, {Name: "strong", Profiles: []string{"last"}}}
+			wantProfiles := []nodepolicy.AdvertisedProfile{{Key: "last", DisplayName: "Last", Engine: "llamacpp", Model: "last"}}
+			if tc.valid {
+				wantRoles[0].Profiles = []string{"candidate"}
+				wantProfiles = append([]nodepolicy.AdvertisedProfile{{Key: "candidate", DisplayName: "Candidate", Engine: "llamacpp", Model: want[1]}}, wantProfiles...)
 			}
-			if tc.valid && node.Policy.Roles["weak"].Model != want[1] {
-				t.Fatal("valid role model changed while using bounded served references")
+			if !reflect.DeepEqual(node.Policy.Roles, wantRoles) || !reflect.DeepEqual(node.Policy.Profiles, wantProfiles) || !reflect.DeepEqual(node.Policy.ServedModels, wantServed) {
+				t.Fatal("advertisement did not filter model entries individually")
 			}
 			capability := node.Policy.StrictAdmission
 			if capability.State() != nodepolicy.StrictCapabilityValid {
@@ -122,7 +124,7 @@ func TestModelControlsScannerServedReferenceBounds(t *testing.T) {
 			}
 			// Encode raw input without ServedModels.MarshalJSON's strict write
 			// guard, then exercise the actual receive-side container contract.
-			ref, err := json.Marshal([]nodepolicy.Role{{Engine: "llamacpp", Model: tc.model}})
+			ref, err := json.Marshal([]nodepolicy.ModelRef{{Engine: "llamacpp", Model: tc.model}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -754,7 +756,7 @@ func TestRefreshPolicyAdvertisement(t *testing.T) {
 	inventory := func(revision string) map[string]any {
 		return map[string]any{
 			"models": []string{"a"},
-			"policy": map[string]any{"revision": revision, "roles": map[string]any{"weak": map[string]any{"engine": "llamacpp", "model": "a"}}},
+			"policy": map[string]any{"revision": revision, "roles": []nodepolicy.Role{{Name: "weak", Profiles: []string{"a"}}}, "profiles": []nodepolicy.AdvertisedProfile{{Key: "a", DisplayName: "A", Engine: "llamacpp", Model: "a"}}},
 		}
 	}
 	stub, port := startModelsStub(t, http.StatusOK, inventory("1"))
@@ -762,7 +764,7 @@ func TestRefreshPolicyAdvertisement(t *testing.T) {
 	if !d.refreshNodeModels("peer-P", "127.0.0.1", port, "") {
 		t.Fatal("initial populate should report a change")
 	}
-	want := &nodepolicy.Advertisement{Revision: "1", Roles: map[string]nodepolicy.AdvertisedRole{nodepolicy.TierWeak: {Engine: "llamacpp", Model: "a"}}}
+	want := &nodepolicy.Advertisement{Revision: "1", Roles: []nodepolicy.Role{{Name: nodepolicy.TierWeak, Profiles: []string{"a"}}}, Profiles: []nodepolicy.AdvertisedProfile{{Key: "a", DisplayName: "A", Engine: "llamacpp", Model: "a"}}}
 	if got, _ := d.dir.get("peer-P"); !reflect.DeepEqual(got.Policy, want) {
 		t.Fatalf("Policy = %+v, want %+v", got.Policy, want)
 	}

@@ -2795,6 +2795,7 @@ func TestModelSettingsEstimateTask9DraftHasNoOverlay(t *testing.T) {
 	// unapplied preset. Only the saved typed application is removed in this fixture.
 	runtime := f.f.st.plat.Runtime
 	f.f.st.plat.Runtime = f.draftRuntime
+	f.f.request.ProfileKey = ""
 	t.Cleanup(func() { f.f.st.plat.Runtime = runtime })
 	r, err := f.f.ex.InspectModel(f.ctx, f.f.request)
 	if err != nil {
