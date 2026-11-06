@@ -508,8 +508,7 @@ func TestXARemoteConfigurationRoles(t *testing.T) {
 
 	if !t.Run("allowed peer sets roles", func(t *testing.T) {
 		draft := xaPeerDraft(t, j.want)
-		draft.Profiles = append(draft.Profiles, nodepolicy.Profile{Key: "joint-local", DisplayName: "joint-local", Engine: "llamacpp", Model: "joint-local"})
-		draft.Roles = []nodepolicy.Role{{Name: "weak", Profiles: []string{"joint-local"}}}
+		draft.Roles = append(draft.Roles, nodepolicy.Role{Name: "xa-role", Profiles: []string{"joint-local"}})
 		res := j.rpc(t, "engine:remote-policy-set", map[string]any{"policy": draft, "expectedPersistedRevision": j.want.Revision}).Result
 		var accepted struct {
 			Policy nodepolicy.PeerPolicy `json:"policy"`
@@ -532,8 +531,14 @@ func TestXARemoteConfigurationRoles(t *testing.T) {
 		task1Eventually(t, "roles projection", 10*time.Second, func() bool {
 			adv := xaEngineModelsPolicy(t, j.target)
 			return adv != nil && adv.Revision == j.want.Revision &&
-				reflect.DeepEqual(adv.Roles, []nodepolicy.Role{{Name: "weak", Profiles: []string{"joint-local"}}}) &&
-				reflect.DeepEqual(adv.Profiles, []nodepolicy.AdvertisedProfile{{Key: "joint-local", DisplayName: "joint-local", Engine: "llamacpp", Model: "joint-local"}})
+				reflect.DeepEqual(adv.Roles, []nodepolicy.Role{
+					{Name: "weak", Profiles: []string{"joint-local"}},
+					{Name: "xa-role", Profiles: []string{"joint-local"}},
+				}) &&
+				reflect.DeepEqual(adv.Profiles, []nodepolicy.AdvertisedProfile{{
+					Key: "joint-local", DisplayName: "joint-local", Engine: "llamacpp", Model: "joint-local",
+					ContextTokens: 8192, Capabilities: []nodepolicy.Capability{nodepolicy.CapTools},
+				}})
 		})
 	}) {
 		return
@@ -549,13 +554,15 @@ func TestXARemoteConfigurationRoles(t *testing.T) {
 		return
 	}
 
-	t.Run("peer cannot change tiers alongside roles", func(t *testing.T) {
+	t.Run("peer cannot inject API tiers alongside roles", func(t *testing.T) {
 		draft := xaPeerDraft(t, j.want)
-		draft.Tiers["weak"][0].Model = "different-local"
+		draft.Roles = append(draft.Roles, nodepolicy.Role{Name: "xa-refused", Profiles: []string{"joint-local"}})
+		draft.Tiers["weak"] = []nodepolicy.TierEntry{{Kind: nodepolicy.EntryAPI, Deployment: "free-small"}}
 		m := j.originCall(t, "engine:remote-policy-set", map[string]any{"policy": draft, "expectedPersistedRevision": j.want.Revision})
-		// Invalid parameters preserve the target's diagnostic, without adding
-		// a transport prefix (policyrelay.go postPolicy).
-		if m.Error == nil || m.Error.Code != -32602 || m.Error.Message != "a paired node cannot change the tiers" || len(m.Result) != 0 {
+		// The peer projection has no deployment definitions, so the target
+		// refuses the injected API entry before merging the role edit. The
+		// relay preserves that diagnostic without a transport prefix.
+		if m.Error == nil || m.Error.Code != -32602 || m.Error.Message != `tiers.weak[0]: deployment "free-small" is not defined` || len(m.Result) != 0 {
 			t.Fatalf("protected tier refusal mismatch: error=%+v result_bytes=%d", m.Error, len(m.Result))
 		}
 		j.assertPolicy(t)
@@ -615,11 +622,11 @@ func TestXARemoteConfigurationServing(t *testing.T) {
 
 		if !t.Run("served subset with resident declaration", func(t *testing.T) {
 			draft := xaPeerDraft(t, j.want)
-			draft.Profiles = append(draft.Profiles, nodepolicy.Profile{
-				Key: "xa-resident", DisplayName: "xa-resident", Engine: "llamacpp", Model: "joint-local",
+			draft.Profiles = []nodepolicy.Profile{{
+				Key: "joint-local", DisplayName: "joint-local", Engine: "llamacpp", Model: "joint-local",
 				ContextTokens: 8192, MaxOutputTokens: 1024, MaxConcurrent: 1, MemoryBytes: 1,
 				Qualification: &nodepolicy.QualificationRef{ID: "xa-qual", Revision: "1"},
-			})
+			}}
 			draft.ServedModels = nodepolicy.ServedModels{{Engine: "llamacpp", Model: "joint-local"}}
 			draft.ResidentModels = nodepolicy.ResidentModels{{Engine: "llamacpp", Model: "joint-local"}}
 			setDeclaration(t, draft)

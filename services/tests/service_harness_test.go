@@ -416,6 +416,56 @@ func (f *serviceFixture) dial() *serviceRPCClient {
 	}
 }
 
+// Capture before checked cleanup removes the private startup logs. Diagnostics
+// never retry readiness or replace the original failure.
+func (f *serviceFixture) logReadinessFailure(c *serviceRPCClient) {
+	f.t.Helper()
+	owned, err := f.inventory.scan()
+	f.t.Logf("fixture_readiness_failure endpoint=%q processes=%+v inventory_error=%v", f.endpoint, owned, err)
+	if f.service != nil {
+		f.t.Logf("fixture_startup_output pid=%d limit_bytes=%d output=%s", f.service.cmd.Process.Pid, 128*1024, f.service.output.String())
+	}
+	const maxLogBytes = 64 * 1024
+	for _, name := range []string{"service.log", "broker.log"} {
+		file, err := os.Open(filepath.Join(f.dir, "logs", name))
+		if err != nil {
+			f.t.Logf("fixture_startup_log name=%s open_error=%v", name, err)
+			continue
+		}
+		info, readErr := file.Stat()
+		var data []byte
+		var truncated bool
+		if readErr == nil {
+			if !info.Mode().IsRegular() {
+				readErr = errors.New("startup log is not a regular file")
+			} else if info.Size() > maxLogBytes {
+				truncated = true
+				_, readErr = file.Seek(info.Size()-maxLogBytes, io.SeekStart)
+			}
+		}
+		if readErr == nil {
+			data, readErr = io.ReadAll(io.LimitReader(file, maxLogBytes))
+		}
+		closeErr := file.Close()
+		f.t.Logf("fixture_startup_log name=%s tail_limit_bytes=%d truncated=%t read_error=%v close_error=%v output=%s", name, maxLogBytes, truncated, readErr, closeErr, data)
+	}
+	status, err := c.call("9999999", "service/status", nil, time.Second)
+	if err != nil {
+		f.t.Logf("fixture_startup_status error=%v", err)
+		return
+	}
+	if status.Error != nil {
+		f.t.Logf("fixture_startup_status rpc_error_code=%d", status.Error.Code)
+		return
+	}
+	var snapshot serviceStatusSnapshot
+	if err := json.Unmarshal(status.Result, &snapshot); err != nil {
+		f.t.Logf("fixture_startup_status decode_error=%v", err)
+		return
+	}
+	f.t.Logf("fixture_startup_status pid=%d broker_pid=%d clients=%d restarts=%d started_at=%s", snapshot.PID, snapshot.BrokerPID, snapshot.Clients, snapshot.BrokerRestarts, snapshot.StartedAt)
+}
+
 func (f *serviceFixture) readyClient() *serviceRPCClient {
 	f.t.Helper()
 	c := f.dial()
@@ -735,6 +785,9 @@ func (c *serviceRPCClient) notification(t *testing.T, method string) *jsonrpc.Me
 	t.Helper()
 	m, err := c.next(serviceCallTimeout, func(m *jsonrpc.Message) bool { return m.IsNotification() && m.Method == method })
 	if err != nil {
+		if method == "app:ready" && c.fixture != nil {
+			c.fixture.logReadinessFailure(c)
+		}
 		t.Fatalf("notification %s: %v", method, err)
 	}
 	return m
