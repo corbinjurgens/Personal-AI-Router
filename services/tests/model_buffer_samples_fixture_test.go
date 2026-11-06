@@ -672,7 +672,7 @@ func (f *modelBufferProcessFixture) control(t *testing.T, model, op string) {
 
 func (f *modelBufferProcessFixture) inspect(t *testing.T, model string) modelconfig.InspectResult {
 	t.Helper()
-	raw := f.rpcOK(t, "engine:inspect-model", modelconfig.InspectRequest{Engine: "llamacpp", ModelID: model})
+	raw := f.rpcOK(t, "engine:inspect-model", modelconfig.InspectRequest{Engine: "llamacpp", ModelID: model, ProfileKey: model})
 	value, err := modelconfig.DecodeInspectResult(raw)
 	if err != nil {
 		t.Fatal(err)

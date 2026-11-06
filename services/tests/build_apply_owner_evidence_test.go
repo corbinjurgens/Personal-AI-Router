@@ -369,7 +369,7 @@ func runOwnerEvidenceEngine() error {
 		}
 		return nil
 	}
-	if len(os.Args) == 2 && os.Args[1] == "pull" {
+	if len(os.Args) == 3 && os.Args[1] == "pull" && os.Args[2] == "active-download" {
 		if err := record("/pull"); err != nil {
 			return err
 		}
@@ -770,6 +770,14 @@ func newOwnerEvidenceProcessFixture(t *testing.T) *ownerEvidenceProcessFixture {
 		}
 		f.inventory.bundlePaths = append(f.inventory.bundlePaths, canonical)
 	}
+	bridge, err = serviceExecutablePath(bridge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.fake, err = serviceExecutablePath(f.fake)
+	if err != nil {
+		t.Fatal(err)
+	}
 	bridge = f.copyExecutable(self, bridge)
 	f.fake = f.copyExecutable(self, f.fake)
 	f.copyExecutable(self, f.brokerPath)
@@ -817,7 +825,7 @@ func (f *ownerEvidenceProcessFixture) installManifests(t *testing.T) {
 			"stop": map[string]any{"signal": "term", "grace_s": 1}}
 		jointWriteJSON(t, filepath.Join(manifestDir, engine+".json"), map[string]any{"engine": engine, "display_name": engine, "manifest_version": 1, "model_naming": "exact",
 			"operations": map[string]any{"pull": map[string]string{"action": "pull_model", "model_param": "name"}},
-			"actions":    map[string]any{"pull_model": map[string]any{"cmd": []string{f.fake, "pull"}}},
+			"actions":    map[string]any{"pull_model": map[string]any{"cmd": []string{f.fake, "pull", "{name}"}}},
 			"platforms": map[string]any{runtime.GOOS + "/" + runtime.GOARCH: map[string]any{
 				"detect": []string{f.fake}, "models_dir": filepath.Join(f.configDir, "models", engine), "runtime": rt}}})
 	}

@@ -1013,7 +1013,8 @@ func TestModelCopyControllerProcess(t *testing.T) {
 		}
 		id := f.broker.send(t, "engine:copy-model", f.request(m.manifest.Model, ""), true)
 		response := task2Response(t, f.broker, id)
-		if response.Error == nil || !strings.Contains(response.Error.Message, "unique exact model IDs") {
+		if response.Error == nil || !strings.Contains(response.Error.Message, "HTTP 500: model source unavailable") ||
+			strings.Contains(response.Error.Message, "unique exact model IDs") {
 			t.Fatalf("ambiguous alias refusal=%+v", response.Error)
 		}
 		f.assertNoReceipt(t, m)

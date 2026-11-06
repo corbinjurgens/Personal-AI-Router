@@ -67,7 +67,9 @@ type engineState struct {
 	// never takes opMu.
 	opMu sync.Mutex
 	// contentMu serializes content mutations (delete / pull / copy into the
-	// engine's model store) for this engine, separate from opMu: a model change
+	// engine's model store) and passive identity scans for this engine. Scans
+	// try without waiting; mutations wait with their context. Separate from opMu,
+	// a model change
 	// must not be blocked by, nor block, an install/start/stop/restart, and
 	// opMu is never held while contentMu is taken. See model_mutation.go.
 	contentMu chan struct{}

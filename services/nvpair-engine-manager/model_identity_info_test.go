@@ -8,9 +8,12 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -284,6 +287,112 @@ func TestModelIdentityInfoCancellationDuringRead(t *testing.T) {
 	f.ex.downloads.mu.Unlock()
 	if readers != 0 {
 		t.Fatalf("cancellation retained read admission: %d", readers)
+	}
+	if len(f.st.contentMu) != 0 {
+		t.Fatal("cancellation retained content semaphore")
+	}
+}
+
+func TestModelIdentityInfoYieldsToReservedMutation(t *testing.T) {
+	f := identityFixture(t)
+	m := f.ex.modelIdentities
+	resolvedIdentity(t, f)
+	old := m.entries["llamacpp"][f.request.ModelID]
+	f.ex.downloads.mu.Lock()
+	generation := f.ex.downloads.authorityGeneration
+	f.ex.downloads.mu.Unlock()
+	opens := 0
+	f.ex.modelInspection.open = func(path string) (servingArtifactFile, error) {
+		opens++
+		return os.Open(path)
+	}
+	// A mutation owns this semaphore before requesting its writer lease.
+	f.st.contentMu <- struct{}{}
+	entry, keep := m.resolve(context.Background(), "llamacpp", f.request.ModelID, old, true, true, time.Now())
+	<-f.st.contentMu
+	if opens != 0 || !keep || !reflect.DeepEqual(entry, old) {
+		t.Fatalf("reserved mutation did not preserve cached identity without reads: opens=%d keep=%t equal=%t", opens, keep, reflect.DeepEqual(entry, old))
+	}
+	f.ex.downloads.mu.Lock()
+	readers, current := f.ex.downloads.readers["llamacpp"], f.ex.downloads.authorityGeneration
+	f.ex.downloads.mu.Unlock()
+	if readers != 0 || current != generation || f.ex.modelInspection.active.Load() {
+		t.Fatalf("yield changed admission: readers=%d generation=%d want=%d inspection=%t", readers, current, generation, f.ex.modelInspection.active.Load())
+	}
+	if _, keep := m.resolve(context.Background(), "llamacpp", f.request.ModelID, old, true, true, time.Now()); !keep || opens == 0 {
+		t.Fatalf("released mutation did not permit resolution: keep=%t opens=%d", keep, opens)
+	}
+}
+
+func TestModelIdentityInfoSerializesReadWithMutation(t *testing.T) {
+	f := identityFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	opened, release, resolved := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	f.ex.modelInspection.open = func(path string) (servingArtifactFile, error) {
+		once.Do(func() { close(opened) })
+		select {
+		case <-release:
+			return os.Open(path)
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	go func() {
+		f.ex.modelIdentities.reconcile(ctx, true, time.Now())
+		close(resolved)
+	}()
+	select {
+	case <-opened:
+	case <-ctx.Done():
+		t.Fatal("identity resolver did not reach artifact barrier")
+	}
+	// This fixture has no manager goroutines or other readers: the lease at
+	// this barrier belongs to the background identity resolver alone.
+	f.ex.downloads.mu.Lock()
+	readers := f.ex.downloads.readers["llamacpp"]
+	writer := f.ex.downloads.writers["llamacpp"]
+	active, unsafe, recovery := len(f.ex.downloads.active), len(f.ex.downloads.unsafe), f.ex.downloads.recoveryRequired
+	f.ex.downloads.mu.Unlock()
+	if readers != 1 || writer || active != 0 || unsafe != 0 || recovery {
+		t.Errorf("identity barrier admission: readers=%d writer=%t active=%d unsafe=%d recovery=%t", readers, writer, active, unsafe, recovery)
+	}
+	select {
+	case f.st.contentMu <- struct{}{}:
+		<-f.st.contentMu
+		t.Error("identity reader did not serialize with content mutations")
+	default:
+	}
+	withdrawals := 0
+	f.ex.modelMutationParent = func(context.Context, string) error { withdrawals++; return nil }
+	mutated := make(chan error, 1)
+	go func() {
+		mutated <- f.ex.withModelMutation(ctx, "llamacpp", func() error {
+			f.ex.downloads.mu.Lock()
+			defer f.ex.downloads.mu.Unlock()
+			if f.ex.downloads.readers["llamacpp"] != 0 || !f.ex.downloads.writers["llamacpp"] {
+				return fmt.Errorf("mutation did not acquire exclusive content admission")
+			}
+			return nil
+		})
+	}()
+	close(release)
+	select {
+	case err := <-mutated:
+		if err != nil {
+			t.Fatalf("mutation behind passive identity read: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("mutation did not complete after identity read")
+	}
+	select {
+	case <-resolved:
+	case <-ctx.Done():
+		t.Fatal("identity resolution did not finish")
+	}
+	if withdrawals != 1 || len(f.st.contentMu) != 0 {
+		t.Fatalf("mutation completion: withdrawals=%d content reservations=%d", withdrawals, len(f.st.contentMu))
 	}
 }
 

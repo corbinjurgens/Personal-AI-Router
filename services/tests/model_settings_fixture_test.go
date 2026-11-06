@@ -307,6 +307,11 @@ func runModelSettingsEngine() error {
 	if err != nil || actual != expected {
 		return errors.New("synthetic router image differs from its fixed test image")
 	}
+	// Native option inspection exits without starting a serving lifetime.
+	if len(os.Args) == 2 && os.Args[1] == "--help" {
+		_, err := io.WriteString(os.Stdout, "--ctx-size N  Context size\n--spec-draft-n-max N  Maximum speculative draft tokens\n")
+		return err
+	}
 	port, err := strconv.Atoi(os.Getenv("NVPAIR_TEST_MODEL_PORT"))
 	if err != nil || validateFixturePort(port) != nil {
 		return errors.New("synthetic router requires its private fixture port")

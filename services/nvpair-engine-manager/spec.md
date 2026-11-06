@@ -65,8 +65,10 @@ into `reportedBuild` with an empty build identity; no migration pass is added.
 
 The executor's in-memory model identity owner reads the latest stored inventory
 for llama.cpp-family engines only. It resolves checked local artifacts under
-download read admission and the inspection budget. Snapshots perform no I/O and
-detach file slices. Busy reads retain the previous entry; resolution failures
+download read admission and the inspection budget. Background scans first try
+the engine's content semaphore without waiting, yielding to reserved mutations;
+a mutation waits behind an admitted scan with its existing context. Snapshots
+perform no I/O and detach file slices. Busy reads retain the previous entry; resolution failures
 remove it. Explicit refresh, changed run/configuration and a ten-minute interval
 invalidate resolution. Each full inventory sweep requests a coalesced refresh
 without waiting for artifact I/O.
