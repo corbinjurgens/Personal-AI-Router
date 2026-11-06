@@ -193,7 +193,8 @@ func TestModelControlsRoutingAcrossProcesses(t *testing.T) {
 			t.Fatal("over-ingress-cap concrete request reached upstream")
 		}
 	})
-	t.Run("successful all invalid inventory removes selection", func(t *testing.T) {
+	publishInvalidInventory := func(t *testing.T) {
+		t.Helper()
 		event.Node.Models = []string{overlong, multibyte513, "bad\x7f"}
 		event.Node.ModelsByEngine = map[string][]string{"llamacpp": event.Node.Models}
 		event.Node.LoadedByEngine = map[string][]string{"llamacpp": event.Node.Models}
@@ -201,6 +202,9 @@ func TestModelControlsRoutingAcrossProcesses(t *testing.T) {
 		publish(noderec.NotifyNodeUpdated)
 		manual(event.Node.Models)
 		awaitModels(nil)
+	}
+	t.Run("successful all invalid inventory removes selection", func(t *testing.T) {
+		publishInvalidInventory(t)
 		before := hits.Load()
 		egressProcessHTTP(t, client, http.MethodPost, f.facadePort, "/v1/chat/completions", []byte(`{"model":"weak","messages":[],"stream":false}`), http.StatusNotFound)
 		if hits.Load() != before {
@@ -212,6 +216,7 @@ func TestModelControlsRoutingAcrossProcesses(t *testing.T) {
 		}
 	})
 	t.Run("all invalid client catalog retains useful aliases", func(t *testing.T) {
+		publishInvalidInventory(t)
 		catalog.Store(`{"data":[{"id":"raw-` + string([]byte{0xff}) + `"},{"id":""},{"id":"bad\u007f"},{"id":"` + overlong + `"},{"id":"` + multibyte513 + `"}]}`)
 		before := catalogReads.Load()
 		raw := egressProcessHTTP(t, client, http.MethodGet, f.facadePort, "/v1/models", nil, http.StatusOK)
@@ -230,8 +235,11 @@ func TestModelControlsRoutingAcrossProcesses(t *testing.T) {
 		for _, entry := range reply.Data {
 			ids = append(ids, entry.ID)
 		}
-		if !reflect.DeepEqual(ids, []string{"weak", "weak-api", "weak-local", "medium", "medium-api", "medium-local", "strong", "strong-api", "strong-local"}) {
-			t.Fatal("all-invalid catalog leaked an invalid ID or removed configured aliases")
+		// The updated peer advertises only weak; medium remains configured in
+		// local tiers. Strong was withdrawn with the previous advertisement.
+		want := []string{"weak", "weak-api", "weak-local", "medium", "medium-api", "medium-local"}
+		if !reflect.DeepEqual(ids, want) {
+			t.Fatalf("all-invalid catalog IDs=%q, want configured aliases=%q", ids, want)
 		}
 	})
 	t.Run("outer empty attribution suppresses flat fallback on both wires", func(t *testing.T) {
