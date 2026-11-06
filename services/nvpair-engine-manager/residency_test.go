@@ -1156,7 +1156,7 @@ func TestResidentLifecycleWaitCancelled(t *testing.T) {
 func TestResidentVetoDuringFinalGrant(t *testing.T) {
 	f := newResidentFixture(t)
 	f.grant = func(req residentDispatchRequest) {
-		f.m.applyNodeProjection(&Message{Params: json.RawMessage(`{"policy":{"revision":"1","roles":{}},"pausedLocally":true,"managementBlocked":true}`)})
+		f.m.applyNodeProjection(&Message{Params: json.RawMessage(`{"policy":{"revision":"1","roles":[]},"pausedLocally":true,"managementBlocked":true}`)})
 		f.reply(t, req.ID, nodepolicy.DispatchResidentResult{Dispatched: true})
 	}
 	if result := f.run(t); result.Outcome != nodepolicy.ResidentNotDispatched {

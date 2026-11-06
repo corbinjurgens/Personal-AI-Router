@@ -32,10 +32,6 @@ type settingsWorkerError struct {
 func (e *settingsWorkerError) Error() string { return e.message }
 
 func engineSettingsErrorCode(err error) int {
-	var workerError *settingsWorkerError
-	if errors.As(err, &workerError) && workerError.code != 0 {
-		return workerError.code
-	}
 	return policyErrorCode(err)
 }
 
@@ -53,19 +49,21 @@ func validateModelSettingsEntry(p settings.Request) error {
 }
 
 // This is a subrecord of the settings journal, including for load-only work.
-// Only a selected policy patch reserves the whole policy. Failed and uncertain
-// operations keep their withdrawal until a fresh local supersession is accepted.
+// Every model change reserves the policy, including derived load metadata.
+// Failed and uncertain operations keep their withdrawal until a fresh local
+// supersession is accepted.
 type modelSettingsOperation struct {
-	Caller         string                  `json:"caller,omitempty"`
-	Change         modelconfig.ModelChange `json:"change"`
-	Review         settings.Preview        `json:"review"`
-	NativeBefore   settings.Config         `json:"nativeBefore"`
-	Before         string                  `json:"before"`
-	After          string                  `json:"after"`
-	Implications   string                  `json:"implications"`
-	Stage          string                  `json:"stage"`
-	Attempted      bool                    `json:"attempted"`
-	PolicyRevision string                  `json:"policyRevision,omitempty"`
+	Caller              string                  `json:"caller,omitempty"`
+	Change              modelconfig.ModelChange `json:"change"`
+	Review              settings.Preview        `json:"review"`
+	ReviewedModelChange modelconfig.ModelChange `json:"reviewedModelChange,omitzero"`
+	NativeBefore        settings.Config         `json:"nativeBefore"`
+	Before              string                  `json:"before"`
+	After               string                  `json:"after"`
+	Implications        string                  `json:"implications"`
+	Stage               string                  `json:"stage"`
+	Attempted           bool                    `json:"attempted"`
+	PolicyRevision      string                  `json:"policyRevision,omitempty"`
 }
 
 func validateStoredModelSettings(record *engineSettingsRecord) error {
@@ -88,6 +86,12 @@ func validateStoredModelSettings(record *engineSettingsRecord) error {
 	if !op.Review.Settings.Equal(record.Snapshot.Settings) || record.Snapshot.RequestID == "" {
 		return fmt.Errorf("model settings journal lost its accepted review")
 	}
+	if op.Change.Remove && (op.Change.PreviewDigest == "" || op.Change.PreviewDigest != op.Review.PreviewDigest) {
+		return fmt.Errorf("model settings journal lost its accepted public removal review")
+	}
+	if _, err := op.reviewedRemoval(); err != nil {
+		return err
+	}
 	for _, fingerprint := range []string{op.Before, op.After, op.Implications} {
 		if value, err := hex.DecodeString(fingerprint); err != nil || len(value) != sha256.Size {
 			return fmt.Errorf("invalid model settings policy fingerprint")
@@ -98,6 +102,43 @@ func validateStoredModelSettings(record *engineSettingsRecord) error {
 
 func modelSettingsConflict(message string) error {
 	return &settingsWorkerError{code: codePolicyConflict, message: message}
+}
+
+func (op modelSettingsOperation) reviewedRemoval() (*modelconfig.ModelChange, error) {
+	var reviewed *modelconfig.ModelChange
+	if op.ReviewedModelChange != (modelconfig.ModelChange{}) {
+		reviewed = &op.ReviewedModelChange
+	}
+	return reviewedModelRemoval(op.Change, reviewed, op.Review.PreviewDigest, op.native())
+}
+
+// Recovery consumes accepted native changes and proof, independent of the
+// currently available descriptor catalog. Descriptor-only removals leave the
+// native settings unchanged and carry no native omission proof.
+func (op modelSettingsOperation) native() bool {
+	return op.Change.Load != nil || op.Change.Remove && (!op.NativeBefore.Equal(op.Review.Settings) || op.ReviewedModelChange.Remove)
+}
+
+// The public digest binds the broker review. Native omission authority is the
+// original worker selection and digest, retained separately through recovery.
+func reviewedModelRemoval(change modelconfig.ModelChange, reviewed *modelconfig.ModelChange, publicDigest string, native bool) (*modelconfig.ModelChange, error) {
+	if !change.Remove || !native {
+		if reviewed != nil {
+			return nil, modelSettingsConflict("unexpected reviewed removal evidence")
+		}
+		return nil, nil
+	}
+	if reviewed == nil {
+		return nil, modelSettingsConflict("original native removal review is missing; explicitly Recalculate")
+	}
+	if err := settings.ValidateReviewedModelChange(reviewed); err != nil {
+		return nil, modelSettingsConflict(err.Error())
+	}
+	if modelChangeKey(*reviewed) != modelChangeKey(change) || reviewed.ModelID != change.ModelID || reviewed.SupersedesRequestID != "" || change.SupersedesRequestID == "" && reviewed.ExpectedPolicyRevision != change.ExpectedPolicyRevision || reviewed.PreviewDigest == publicDigest || reviewed.PreviewDigest == change.PreviewDigest {
+		return nil, modelSettingsConflict("original native removal review does not match the accepted selection")
+	}
+	copy := reviewed.Clone()
+	return &copy, nil
 }
 
 func modelSettingsHash(value any) string {
@@ -123,17 +164,16 @@ func modelPolicyFingerprint(policy nodepolicy.Policy) string {
 	return modelSettingsHash(fields)
 }
 
-// A load-only apply does not reserve unrelated policy. It does depend on the
-// complete profile (including qualification/bounds), residency and serving
-// implications of the selected model. Availability is checked separately.
+// Implications identify the served profile rather than its artifact selector.
+// Availability is checked separately.
 func modelPolicyImplications(policy nodepolicy.Policy, engine, model string) string {
 	var profiles []nodepolicy.Profile
 	for _, profile := range policy.Profiles {
-		if profile.Engine == engine && profile.Model == model {
+		if profile.Engine == engine && profile.Key == model {
 			profiles = append(profiles, profile)
 		}
 	}
-	ref := nodepolicy.Role{Engine: engine, Model: model}
+	ref := nodepolicy.ModelRef{Engine: engine, Model: model}
 	return modelSettingsHash(struct {
 		Profiles                       []nodepolicy.Profile
 		Resident, Served, Unrestricted bool
@@ -194,7 +234,7 @@ func (b *Broker) modelPolicyReservationLocked() error {
 		return nil
 	}
 	for _, record := range b.engineSettings {
-		if record.Model != nil && record.Model.Change.Policy != nil && record.Model.Stage != "completed" {
+		if record.Model != nil && record.Model.Stage != "completed" {
 			return &policyConflictError{expected: "pending model settings " + record.Snapshot.RequestID, current: record.Model.PolicyRevision}
 		}
 	}
@@ -213,7 +253,7 @@ func (b *Broker) reconstructModelSettingsLocked() {
 		}
 		if b.modelSettingsPendingLocked(engine) {
 			record.Snapshot.Phase = "applying"
-			if record.Model.Change.Load != nil {
+			if record.Model.native() {
 				r.drains[engine] = true
 				delete(r.settingsIdentity, engine)
 			}
@@ -224,94 +264,194 @@ func (b *Broker) reconstructModelSettingsLocked() {
 	}
 }
 
-// Merge only selected leaves. Raw request-option subtrees retain opaque JSON
-// numbers rather than making a float64 round trip. No bounds or qualification
-// are synthesized, and a peer uses exactly the existing inference-lock check.
-func (b *Broker) mergeModelPolicy(stored nodepolicy.Policy, engine string, change modelconfig.ModelChange, caller string) (nodepolicy.Policy, error) {
+func modelChangeKey(change modelconfig.ModelChange) string {
+	if change.ProfileKey != "" {
+		return change.ProfileKey
+	}
+	return change.ModelID
+}
+
+func modelChangeNative(change modelconfig.ModelChange, loads []modelconfig.ModelLoad) bool {
+	return change.Load != nil || change.Remove && slices.ContainsFunc(loads, func(load modelconfig.ModelLoad) bool {
+		return load.ProfileKey == modelChangeKey(change)
+	})
+}
+
+// Refuse undeclared membership and retargeting before native preview or writes.
+// Artifact identity is owned by the manager's typed load, not Profile.Model.
+func validateModelPolicyChange(policy nodepolicy.Policy, engine string, change modelconfig.ModelChange, loads []modelconfig.ModelLoad) error {
+	key := modelChangeKey(change)
+	if change.Policy != nil {
+		for name, selected := range change.Policy.Roles {
+			if selected && !slices.ContainsFunc(policy.Roles, func(role nodepolicy.Role) bool { return role.Name == name }) {
+				return &invalidParamsError{err: fmt.Errorf("Role %s is not declared on this node; create it in node settings.", name)}
+			}
+		}
+	}
+	typed := change.Load != nil
+	for _, load := range loads {
+		if load.ProfileKey == key {
+			typed = true
+			if load.ModelID != change.ModelID {
+				return &invalidParamsError{err: fmt.Errorf("A profile keeps its model; create a new profile.")}
+			}
+		}
+	}
+	if profile, ok := policy.ProfileByKey(key); ok {
+		model := change.ModelID
+		if typed {
+			model = key
+		}
+		if profile.Engine != engine || profile.Model != model {
+			return &invalidParamsError{err: fmt.Errorf("A profile keeps its model; create a new profile.")}
+		}
+	}
+	return nil
+}
+
+// Merge selected leaves without resolving metadata. The same patch constructs
+// the peer inference-lock preflight and the accepted policy candidate.
+func patchModelPolicy(stored nodepolicy.Policy, engine string, change modelconfig.ModelChange, loads []modelconfig.ModelLoad, typedRemoval bool) (nodepolicy.Policy, error) {
 	var policy nodepolicy.Policy
 	if err := json.Unmarshal(settingsJSON(stored), &policy); err != nil {
 		return policy, err
 	}
+	key := modelChangeKey(change)
+	ref := nodepolicy.ModelRef{Engine: engine, Model: key}
 	patch := change.Policy
-	if patch == nil {
-		return policy, nil
-	}
-	ref := nodepolicy.Role{Engine: engine, Model: change.ModelID}
-	if len(patch.Generation) > 0 || patch.RequestOptionsMode != nil {
-		i := slices.IndexFunc(policy.Profiles, func(p nodepolicy.Profile) bool { return p.Engine == engine && p.Model == change.ModelID })
+	if change.Remove {
+		profile, exists := policy.ProfileByKey(key)
+		policy.Profiles = slices.DeleteFunc(policy.Profiles, func(profile nodepolicy.Profile) bool { return profile.Key == key })
+		for i := range policy.Roles {
+			policy.Roles[i].Profiles = slices.DeleteFunc(policy.Roles[i].Profiles, func(member string) bool { return member == key })
+		}
+		if typedRemoval {
+			policy.ServedModels = slices.DeleteFunc(policy.ServedModels, func(member nodepolicy.ModelRef) bool { return member == ref })
+			policy.ResidentModels = slices.DeleteFunc(policy.ResidentModels, func(member nodepolicy.ModelRef) bool { return member == ref })
+			policy.EngineBindings = slices.DeleteFunc(policy.EngineBindings, func(member nodepolicy.ModelRef) bool { return member == ref })
+		} else if exists {
+			resident := nodepolicy.ModelRef{Engine: engine, Model: profile.Model}
+			policy.ResidentModels = slices.DeleteFunc(policy.ResidentModels, func(member nodepolicy.ModelRef) bool { return member == resident })
+		}
+	} else {
+		if err := validateModelPolicyChange(policy, engine, change, loads); err != nil {
+			return policy, err
+		}
+		i := slices.IndexFunc(policy.Profiles, func(p nodepolicy.Profile) bool { return p.Key == key })
 		if i < 0 {
-			name := "model-" + modelSettingsHash(ref)[:16]
-			for _, p := range policy.Profiles {
-				if p.Name == name {
-					return policy, &invalidParamsError{err: fmt.Errorf("generated profile name is already in use")}
-				}
+			displayName := key
+			if nodepolicy.ValidateProfileDisplayName(displayName) != nil {
+				displayName = "model-" + modelSettingsHash(ref)[:16]
 			}
-			policy.Profiles = append(policy.Profiles, nodepolicy.Profile{Name: name, Engine: engine, Model: change.ModelID})
+			model := change.ModelID
+			if change.Load != nil || slices.ContainsFunc(loads, func(load modelconfig.ModelLoad) bool { return load.ProfileKey == key }) {
+				model = key
+			}
+			policy.Profiles = append(policy.Profiles, nodepolicy.Profile{Key: key, DisplayName: displayName, Engine: engine, Model: model})
 			i = len(policy.Profiles) - 1
 		}
 		profile := &policy.Profiles[i]
-		options := map[string]json.RawMessage{}
-		if len(profile.RequestOptions) != 0 {
-			if err := json.Unmarshal(profile.RequestOptions, &options); err != nil {
-				return policy, &invalidParamsError{err: err}
+		if patch != nil {
+			if patch.DisplayName != nil {
+				profile.DisplayName = *patch.DisplayName
 			}
-			if options == nil {
-				options = map[string]json.RawMessage{}
+			if patch.Icon != nil {
+				profile.Icon = *patch.Icon
 			}
-		}
-		for key, value := range patch.Generation {
-			if value == nil {
-				delete(options, key)
+			options := map[string]json.RawMessage{}
+			if len(profile.RequestOptions) != 0 {
+				if err := json.Unmarshal(profile.RequestOptions, &options); err != nil {
+					return policy, &invalidParamsError{err: err}
+				}
+				if options == nil {
+					options = map[string]json.RawMessage{}
+				}
+			}
+			for key, value := range patch.Generation {
+				if value == nil {
+					delete(options, key)
+				} else {
+					options[key] = json.RawMessage(value.String())
+				}
+			}
+			if len(options) == 0 {
+				profile.RequestOptions = nil
 			} else {
-				options[key] = json.RawMessage(value.String())
+				profile.RequestOptions = settingsJSON(options)
+			}
+			if patch.RequestOptionsMode != nil {
+				profile.RequestOptionsMode = nodepolicy.RequestOptionsMode(*patch.RequestOptionsMode)
+			}
+			if len(patch.Roles) > 0 {
+				for i := range policy.Roles {
+					role := &policy.Roles[i]
+					selected, patched := patch.Roles[role.Name]
+					if !patched {
+						continue
+					}
+					if selected && !slices.Contains(role.Profiles, key) {
+						role.Profiles = append(role.Profiles, key)
+					} else if !selected {
+						role.Profiles = slices.DeleteFunc(role.Profiles, func(member string) bool { return member == key })
+					}
+				}
+			}
+			member := func(list []nodepolicy.ModelRef, selected bool) []nodepolicy.ModelRef {
+				out := slices.Clone(list)
+				if selected && !slices.Contains(out, ref) {
+					out = append(out, ref)
+				}
+				if !selected {
+					out = slices.DeleteFunc(out, func(r nodepolicy.ModelRef) bool { return r == ref })
+				}
+				if out == nil {
+					out = []nodepolicy.ModelRef{}
+				}
+				return out
+			}
+			if patch.Served != nil {
+				if policy.ServedModels == nil && !*patch.Served {
+					return policy, &invalidParamsError{err: fmt.Errorf("cannot exclude one model from unrestricted serving; select an explicit served list first")}
+				}
+				// Selecting an already-unrestricted model preserves unrestricted scope.
+				if policy.ServedModels != nil {
+					policy.ServedModels = member(policy.ServedModels, *patch.Served)
+				}
+			}
+			if patch.Resident != nil {
+				policy.ResidentModels = member(policy.ResidentModels, *patch.Resident)
+			}
+			if patch.Binding != nil {
+				policy.EngineBindings = member(policy.EngineBindings, *patch.Binding)
 			}
 		}
-		if len(options) == 0 {
-			profile.RequestOptions = nil
-		} else {
-			profile.RequestOptions = settingsJSON(options)
-		}
-		if patch.RequestOptionsMode != nil {
-			profile.RequestOptionsMode = nodepolicy.RequestOptionsMode(*patch.RequestOptionsMode)
-		}
 	}
-	if len(patch.Roles) > 0 && policy.Roles == nil {
-		policy.Roles = map[string]nodepolicy.Role{}
+	return policy, nil
+}
+
+// Review and replay use this accepted preview, never current telemetry
+// or a new native resolution, so the after-fingerprint is reproducible.
+// Opaque request-option numbers retain precision; qualification is preserved.
+func (b *Broker) mergeModelPolicy(stored nodepolicy.Policy, engine string, change modelconfig.ModelChange, caller string, review settings.Preview, typedRemoval bool) (nodepolicy.Policy, error) {
+	policy, err := patchModelPolicy(stored, engine, change, review.Settings.ModelLoads, typedRemoval)
+	if err != nil {
+		return policy, err
 	}
-	for role, selected := range patch.Roles {
-		if selected {
-			policy.Roles[role] = ref
-		} else if policy.Roles[role] == ref {
-			delete(policy.Roles, role)
-		}
+	policy, err = deriveProfileContext(policy, map[string][]modelconfig.ModelLoad{engine: review.Settings.ModelLoads})
+	if err != nil {
+		return policy, err
 	}
-	member := func(list []nodepolicy.Role, selected bool) []nodepolicy.Role {
-		out := slices.Clone(list)
-		if selected && !slices.Contains(out, ref) {
-			out = append(out, ref)
+	for i := range policy.Profiles {
+		profile := &policy.Profiles[i]
+		if profile.Engine != engine {
+			continue
 		}
-		if !selected {
-			out = slices.DeleteFunc(out, func(r nodepolicy.Role) bool { return r == ref })
+		if identity, ok := review.Identities[profile.Key]; ok {
+			identity.Files = slices.Clone(identity.Files)
+			profile.ModelIdentity = &identity
+		} else if !change.Remove && change.Load != nil && profile.Key == modelChangeKey(change) {
+			return policy, fmt.Errorf("native preview did not return the profile's model identity")
 		}
-		if out == nil {
-			out = []nodepolicy.Role{}
-		}
-		return out
-	}
-	if patch.Served != nil {
-		if policy.ServedModels == nil && !*patch.Served {
-			return policy, &invalidParamsError{err: fmt.Errorf("cannot exclude one model from unrestricted serving; select an explicit served list first")}
-		}
-		// Selecting an already-unrestricted model preserves unrestricted scope.
-		if policy.ServedModels != nil {
-			policy.ServedModels = member(policy.ServedModels, *patch.Served)
-		}
-	}
-	if patch.Resident != nil {
-		policy.ResidentModels = member(policy.ResidentModels, *patch.Resident)
-	}
-	if patch.Binding != nil {
-		policy.EngineBindings = member(policy.EngineBindings, *patch.Binding)
 	}
 	// Use the policy owner's normalization as well as validation so the
 	// recorded after-fingerprint survives its normal disk parse on restart.
@@ -377,12 +517,31 @@ func (b *Broker) modelWorkerCurrent(worker *rpcWorker, source *engineManagerSour
 // journal/policy/source again. Apply validates the retained finite settings;
 // it never repeats the portable patch or substitutes a new resolution.
 type modelSettingsReviewSource struct {
-	Launch     settings.LaunchState
-	Worker     *rpcWorker
-	Source     *engineManagerSource
-	Memory     *modelconfig.TargetMemory
-	Policy     string
-	ReviewedAt time.Time
+	Launch              settings.LaunchState
+	Worker              *rpcWorker
+	Source              *engineManagerSource
+	Memory              *modelconfig.TargetMemory
+	Policy              string
+	NativeDigest        string
+	ReviewedModelChange *modelconfig.ModelChange
+	ReviewedAt          time.Time
+}
+
+func (source modelSettingsReviewSource) native(change modelconfig.ModelChange) bool {
+	return modelChangeNative(change, source.Launch.ModelLoads) || source.NativeDigest != "" || source.ReviewedModelChange != nil
+}
+
+func (source modelSettingsReviewSource) reviewedRemoval(change modelconfig.ModelChange, publicDigest string, native bool) (*modelconfig.ModelChange, error) {
+	if native {
+		if value, err := hex.DecodeString(source.NativeDigest); err != nil || len(value) != sha256.Size || source.NativeDigest == publicDigest {
+			return nil, modelSettingsConflict("original native preview digest is missing or invalid; explicitly Recalculate")
+		}
+	}
+	reviewed, err := reviewedModelRemoval(change, source.ReviewedModelChange, publicDigest, native)
+	if err == nil && reviewed != nil && reviewed.PreviewDigest != source.NativeDigest {
+		return nil, modelSettingsConflict("retained native removal evidence changed; explicitly Recalculate")
+	}
+	return reviewed, err
 }
 
 func (b *Broker) previewModelSettings(ctx context.Context, input settings.Request, caller string) (settings.Preview, error) {
@@ -421,24 +580,57 @@ func (b *Broker) reviewModelSettings(ctx context.Context, input settings.Request
 	if err != nil {
 		return settings.Preview{}, err
 	}
-	nextPolicy, err := b.mergeModelPolicy(policy, p.Engine, *p.ModelChange, caller)
-	if err != nil {
+	targetLoads := base.Snapshot.Settings.ModelLoads
+	if base.Model != nil && base.Model.Change.Remove && p.ModelChange.Remove && p.ModelChange.SupersedesRequestID == base.Snapshot.RequestID {
+		// The accepted native removal may already have landed. Its original
+		// saved load still owns the selected artifact identity during cleanup.
+		targetLoads = base.Model.NativeBefore.ModelLoads
+	}
+	if err := validateModelPolicyChange(policy, p.Engine, *p.ModelChange, targetLoads); err != nil {
 		return settings.Preview{}, err
 	}
+	if caller != "" {
+		candidate, err := patchModelPolicy(policy, p.Engine, *p.ModelChange, base.Snapshot.Settings.ModelLoads, p.ModelChange.Remove && modelChangeNative(*p.ModelChange, targetLoads))
+		if err != nil {
+			return settings.Preview{}, err
+		}
+		if _, err := nodepolicy.MergePeerSet(policy, withoutRevision(settingsJSON(candidate.PeerProjection()))); err != nil {
+			return settings.Preview{}, err
+		}
+	}
 	preview := settings.Preview{Settings: base.Snapshot.Settings.Clone(), Revision: base.Snapshot.Revision, PolicyRevision: policy.Revision}
-	if p.ModelChange.Load != nil {
+	var nativeRemoval *modelconfig.ModelChange
+	nativeDigest := ""
+	if modelChangeNative(*p.ModelChange, targetLoads) {
 		request := p.Clone()
 		change := request.ModelChange
 		change.Policy, change.PreviewDigest = nil, ""
 		// During local supersession, the native store may differ from desired.
 		request.Settings = settings.ConfigFromLaunch(launch, p.Settings.ProxyPort)
+		// A failed removal may already have persisted native cleanup. Only an
+		// exact same-profile journal supersession may review that landed state
+		// without asking the manager to remove an absent load a second time.
+		removed := base.Model != nil && base.Model.Change.Remove && p.ModelChange.Remove &&
+			p.ModelChange.SupersedesRequestID == base.Snapshot.RequestID &&
+			modelChangeKey(base.Model.Change) == modelChangeKey(*p.ModelChange) &&
+			base.Model.Change.ModelID == p.ModelChange.ModelID &&
+			request.Settings.Equal(base.Snapshot.Settings) &&
+			!slices.ContainsFunc(request.Settings.ModelLoads, func(load modelconfig.ModelLoad) bool { return load.ProfileKey == modelChangeKey(*p.ModelChange) })
+		if removed {
+			request.ModelChange = nil
+			nativeRemoval, err = base.Model.reviewedRemoval()
+			if err != nil {
+				return settings.Preview{}, err
+			}
+		}
 		envelope := modelWorkerRequest(b, request, caller, true)
+		envelope.ReviewedModelChange = nativeRemoval
 		started, clockErr := noderec.MemoryBootClock()
 		if err := modelSettingsCall(ctx, worker, "engine:preview-launch", envelope, &preview); err != nil {
 			return preview, err
 		}
 		elapsed := modelWorkerElapsed(started, clockErr)
-		if envelope.Memory != nil && !modelReviewMemoryCurrent(envelope.Memory, b.modelTargetMemory(), preview.Settings.ModelLoads, p.ModelChange.ModelID) {
+		if envelope.Memory != nil && !modelReviewMemoryCurrent(envelope.Memory, b.modelTargetMemory(), preview.Settings.ModelLoads, modelChangeKey(*p.ModelChange)) {
 			if preview.Auto != nil && preview.Auto.Resolved != nil {
 				return settings.Preview{}, modelSettingsConflict("target evidence changed during preview; explicitly Recalculate")
 			}
@@ -451,8 +643,22 @@ func (b *Broker) reviewModelSettings(ctx context.Context, input settings.Request
 		if len(preview.Errors) > 0 || preview.Conflict != nil {
 			return preview, nil
 		}
+		if removed {
+			if !preview.Settings.Equal(request.Settings) {
+				return settings.Preview{}, modelSettingsConflict("removed profile native state changed; preview again")
+			}
+			// Frozen validation does not mint a new removal proof.
+			preview.PreviewDigest = nativeRemoval.PreviewDigest
+		}
 		if len(preview.PreviewDigest) != sha256.Size*2 {
 			return settings.Preview{}, fmt.Errorf("native preview did not bind its source identity")
+		}
+		nativeDigest = preview.PreviewDigest
+		if p.ModelChange.Remove && nativeRemoval == nil {
+			nativeRemoval = &modelconfig.ModelChange{ProfileKey: p.ModelChange.ProfileKey, ModelID: p.ModelChange.ModelID, ExpectedPolicyRevision: p.ModelChange.ExpectedPolicyRevision, Remove: true, PreviewDigest: nativeDigest}
+			if err := settings.ValidateReviewedModelChange(nativeRemoval); err != nil {
+				return settings.Preview{}, err
+			}
 		}
 		if _, err := preview.Settings.Canonical(); err != nil {
 			return settings.Preview{}, err
@@ -460,8 +666,16 @@ func (b *Broker) reviewModelSettings(ctx context.Context, input settings.Request
 		if preview.Settings.ServerPort != p.Settings.ServerPort || preview.Settings.ProxyPort != p.Settings.ProxyPort {
 			return settings.Preview{}, fmt.Errorf("model preview changed an unrelated port")
 		}
-		if len(preview.Settings.ModelLoads) == 0 {
+		if len(preview.Settings.ModelLoads) == 0 && !p.ModelChange.Remove {
 			return settings.Preview{}, fmt.Errorf("model preview did not resolve native load settings")
+		}
+		selected := slices.IndexFunc(preview.Settings.ModelLoads, func(load modelconfig.ModelLoad) bool { return load.ProfileKey == modelChangeKey(*p.ModelChange) })
+		if p.ModelChange.Remove {
+			if selected >= 0 {
+				return settings.Preview{}, fmt.Errorf("model preview retained the removed profile load")
+			}
+		} else if selected < 0 || preview.Settings.ModelLoads[selected].ModelID != p.ModelChange.ModelID {
+			return settings.Preview{}, fmt.Errorf("model preview did not resolve the selected profile load")
 		}
 		for _, load := range preview.Settings.ModelLoads {
 			if load.Resolved == nil {
@@ -469,17 +683,20 @@ func (b *Broker) reviewModelSettings(ctx context.Context, input settings.Request
 			}
 		}
 	}
-	nativeDigest := preview.PreviewDigest
+	nextPolicy, err := b.mergeModelPolicy(policy, p.Engine, *p.ModelChange, caller, preview, nativeRemoval != nil)
+	if err != nil {
+		return settings.Preview{}, err
+	}
 	preview.Revision, preview.PolicyRevision = base.Snapshot.Revision, policy.Revision
 	preview.Rebind = preview.Settings.ProxyPort != base.Snapshot.Settings.ProxyPort
 	preview.Restart = launch.Running && !preview.Settings.Equal(settings.ConfigFromLaunch(launch, p.Settings.ProxyPort))
 	// Supersession reviews the unresolved running intent as well as current
 	// observation: a replacement manager may have persisted settings but stopped.
-	if p.ModelChange.SupersedesRequestID != "" && p.ModelChange.Load != nil && base.Resume {
+	if p.ModelChange.SupersedesRequestID != "" && modelChangeNative(*p.ModelChange, targetLoads) && base.Resume {
 		preview.Restart = true
 	}
 	preview.Impact = b.modelSettingsImpact(p.Engine, launch, preview.Settings, preview.Restart)
-	if p.ModelChange.Policy != nil {
+	if modelPolicyFingerprint(policy) != modelPolicyFingerprint(nextPolicy) {
 		preview.Diff = append(preview.Diff, modelconfig.FieldDiff{Field: "policy", Before: settingsJSON(policy.PeerProjection()), After: settingsJSON(nextPolicy.PeerProjection())})
 	}
 	// Re-read source state after worker inspection, before taking owner locks.
@@ -523,7 +740,7 @@ func (b *Broker) reviewModelSettings(ctx context.Context, input settings.Request
 		}
 	}
 	if capture != nil {
-		*capture = modelSettingsReviewSource{Launch: launch, Worker: worker, Source: source, Policy: modelPolicyFingerprint(policy)}
+		*capture = modelSettingsReviewSource{Launch: launch, Worker: worker, Source: source, Policy: modelPolicyFingerprint(policy), NativeDigest: nativeDigest, ReviewedModelChange: nativeRemoval}
 	}
 	return preview, nil
 }
@@ -573,14 +790,17 @@ func (b *Broker) modelSettingsBaselineLocked(p settings.Request, caller string, 
 		if caller != "" || p.ModelChange.SupersedesRequestID != record.Snapshot.RequestID || p.RequestID == record.Snapshot.RequestID {
 			return fail(modelSettingsConflict("local fresh preview with supersedesRequestId required for " + record.Snapshot.RequestID))
 		}
-		if record.Model.Change.Load != nil && p.ModelChange.Load == nil {
+		if record.Model.native() && !modelChangeNative(*p.ModelChange, record.Model.NativeBefore.ModelLoads) {
 			return fail(modelSettingsConflict("native reconciliation requires a fresh load preview"))
+		}
+		if modelChangeKey(record.Model.Change) == modelChangeKey(*p.ModelChange) && record.Model.Change.ModelID != p.ModelChange.ModelID {
+			return fail(&invalidParamsError{err: fmt.Errorf("A profile keeps its model; create a new profile.")})
 		}
 	} else if p.ModelChange.SupersedesRequestID != "" {
 		return fail(modelSettingsConflict("superseded operation is no longer pending"))
 	}
 	for engine, pending := range b.engineSettings {
-		if engine != p.Engine && b.modelSettingsPendingLocked(engine) && pending.Model.Change.Policy != nil && p.ModelChange.Policy != nil {
+		if engine != p.Engine && b.modelSettingsPendingLocked(engine) {
 			return fail(modelSettingsConflict("policy is reserved by " + pending.Snapshot.RequestID))
 		}
 	}
@@ -608,10 +828,10 @@ func (b *Broker) modelSettingsBaselineLocked(p settings.Request, caller string, 
 func (b *Broker) modelSettingsImpact(engine string, launch settings.LaunchState, desired settings.Config, restart bool) *modelconfig.Impact {
 	models := map[string]bool{}
 	for _, load := range launch.ModelLoads {
-		models[load.ModelID] = true
+		models[load.ProfileKey] = true
 	}
 	for _, load := range desired.ModelLoads {
-		models[load.ModelID] = true
+		models[load.ProfileKey] = true
 	}
 	for _, config := range []settings.Config{settings.ConfigFromLaunch(launch, 0), desired} {
 		if config.Serving != nil {
@@ -719,7 +939,7 @@ func (b *Broker) applyModelSettings(ctx context.Context, input settings.Request,
 	if !b.modelWorkerCurrent(worker, source.Source) || ctx.Err() != nil {
 		return settingsReceipt{}, modelSettingsConflict("engine source changed before acceptance")
 	}
-	next, err := b.mergeModelPolicy(policy, p.Engine, *p.ModelChange, caller)
+	next, err := b.mergeModelPolicy(policy, p.Engine, *p.ModelChange, caller, preview, source.ReviewedModelChange != nil)
 	if err != nil {
 		return settingsReceipt{}, err
 	}
@@ -746,11 +966,11 @@ func (b *Broker) applyModelSettings(ctx context.Context, input settings.Request,
 		r.mu.Unlock()
 		return settingsReceipt{}, modelSettingsConflict("review expired before acceptance; explicitly Recalculate")
 	}
-	if !b.modelReviewRetainedLocked(p, caller, source.ReviewedAt) {
+	if !b.modelReviewRetainedLocked(p, caller, source.ReviewedAt, source) {
 		r.mu.Unlock()
 		return settingsReceipt{}, modelSettingsConflict("review superseded or evicted during validation; explicitly Recalculate")
 	}
-	if source.Memory != nil && !modelReviewMemoryCurrent(source.Memory, b.modelTargetMemory(), preview.Settings.ModelLoads, p.ModelChange.ModelID) {
+	if source.Memory != nil && !modelReviewMemoryCurrent(source.Memory, b.modelTargetMemory(), preview.Settings.ModelLoads, modelChangeKey(*p.ModelChange)) {
 		r.mu.Unlock()
 		return settingsReceipt{}, modelSettingsConflict("target memory source or age changed before acceptance; explicitly Recalculate")
 	}
@@ -765,7 +985,11 @@ func (b *Broker) applyModelSettings(ctx context.Context, input settings.Request,
 	record.Previous = record.Snapshot.Settings.Clone()
 	record.Resume = preview.Restart && !r.managementBlockedLocked()
 	record.Explicit = true
-	record.Model = &modelSettingsOperation{Caller: caller, Change: p.ModelChange.Clone(), Review: preview.Clone(), NativeBefore: settings.ConfigFromLaunch(launch, preview.Settings.ProxyPort), Before: modelPolicyFingerprint(policy), After: modelPolicyFingerprint(next), Implications: modelPolicyImplications(policy, p.Engine, p.ModelChange.ModelID), Stage: "accepted"}
+	var reviewed modelconfig.ModelChange
+	if source.ReviewedModelChange != nil {
+		reviewed = source.ReviewedModelChange.Clone()
+	}
+	record.Model = &modelSettingsOperation{Caller: caller, Change: p.ModelChange.Clone(), Review: preview.Clone(), ReviewedModelChange: reviewed, NativeBefore: settings.ConfigFromLaunch(launch, preview.Settings.ProxyPort), Before: modelPolicyFingerprint(policy), After: modelPolicyFingerprint(next), Implications: modelPolicyImplications(policy, p.Engine, modelChangeKey(*p.ModelChange)), Stage: "accepted"}
 	record.Snapshot.Settings = preview.Settings.Clone()
 	record.Snapshot.Revision++
 	if record.Snapshot.Revision > settings.MaxSafeCounter {
@@ -801,7 +1025,7 @@ func (b *Broker) applyModelSettings(ctx context.Context, input settings.Request,
 			} else if saveErr := b.saveEngineSettingsLocked(); saveErr != nil {
 				record.Snapshot.UnresolvedError += "; uncertainty record durability could not be confirmed"
 			}
-			if record.Model.Change.Load != nil {
+			if record.Model.native() {
 				r.drains[p.Engine] = true
 				delete(r.settingsIdentity, p.Engine)
 			}
@@ -814,7 +1038,7 @@ func (b *Broker) applyModelSettings(ctx context.Context, input settings.Request,
 		return settingsReceipt{}, fmt.Errorf("model settings acceptance could not be confirmed; no native or policy effects were made: %w", err)
 	}
 	b.releaseAcceptedModelReviewLocked(p, caller)
-	if record.Model.Change.Load != nil {
+	if record.Model.native() {
 		r.drains[p.Engine] = true
 		delete(r.settingsIdentity, p.Engine)
 	}
@@ -868,15 +1092,9 @@ func (b *Broker) checkModelPolicyLocked(record *engineSettingsRecord) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	op := record.Model
-	if op.Change.Policy == nil {
-		if modelPolicyImplications(r.current, record.Snapshot.Engine, op.Change.ModelID) != op.Implications {
-			return modelSettingsConflict("model profile or residency changed; local fresh preview required")
-		}
-	} else {
-		fingerprint := modelPolicyFingerprint(r.current)
-		if fingerprint != op.Before && fingerprint != op.After {
-			return modelSettingsConflict("policy content conflicts with the accepted operation; local fresh preview required")
-		}
+	fingerprint := modelPolicyFingerprint(r.current)
+	if fingerprint != op.Before && fingerprint != op.After {
+		return modelSettingsConflict("policy content conflicts with the accepted operation; local fresh preview required")
 	}
 	return nil
 }
@@ -888,14 +1106,6 @@ func (b *Broker) commitModelPolicyLocked(record *engineSettingsRecord) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	op := record.Model
-	if op.Change.Policy == nil {
-		if modelPolicyImplications(r.current, record.Snapshot.Engine, op.Change.ModelID) != op.Implications {
-			return modelSettingsConflict("model policy implications changed")
-		}
-		op.PolicyRevision = r.current.Revision
-		record.Snapshot.PolicyRevision = op.PolicyRevision
-		return nil
-	}
 	fingerprint := modelPolicyFingerprint(r.current)
 	if fingerprint == op.After {
 		op.PolicyRevision = r.current.Revision
@@ -905,7 +1115,7 @@ func (b *Broker) commitModelPolicyLocked(record *engineSettingsRecord) error {
 	if fingerprint != op.Before {
 		return modelSettingsConflict("a third policy state cannot be overwritten")
 	}
-	policy, err := b.mergeModelPolicy(r.current, record.Snapshot.Engine, op.Change, op.Caller)
+	policy, err := b.mergeModelPolicy(r.current, record.Snapshot.Engine, op.Change, op.Caller, op.Review, op.ReviewedModelChange.Remove)
 	if err != nil {
 		return err
 	}
@@ -959,6 +1169,10 @@ func modelSettingsResumeVeto(ctx context.Context, worker *rpcWorker, engine stri
 
 func (b *Broker) runModelSettingsOperationLocked(ctx context.Context, engine string, record *engineSettingsRecord) error {
 	fail := func(err error) error { return b.failModelSettingsLocked(record, err) }
+	reviewed, err := record.Model.reviewedRemoval()
+	if err != nil {
+		return fail(err)
+	}
 	if err := b.checkModelPolicyLocked(record); err != nil {
 		return fail(err)
 	}
@@ -973,7 +1187,7 @@ func (b *Broker) runModelSettingsOperationLocked(ctx context.Context, engine str
 	if worker == nil {
 		return fail(fmt.Errorf("engine manager unavailable; operation remains withdrawn"))
 	}
-	if op.Change.Load != nil {
+	if op.native() {
 		// A running restart has a disclosed 60-second wait after an acknowledged
 		// fence. A lost drain ACK never authorizes a native effect.
 		b.engineConfigMu.Unlock()
@@ -995,7 +1209,7 @@ func (b *Broker) runModelSettingsOperationLocked(ctx context.Context, engine str
 		if err == nil {
 			// Full frozen settings revalidation checks bindings/build without
 			// running the portable patch or selecting a fresh Auto result.
-			err = modelSettingsCall(ctx, worker, "engine:preview-launch", settings.WorkerRequest[settings.Request]{Request: settings.Request{Engine: engine, Settings: record.Snapshot.Settings.Clone()}}, &validated)
+			err = modelSettingsCall(ctx, worker, "engine:preview-launch", settings.WorkerRequest[settings.Request]{Request: settings.Request{Engine: engine, Settings: record.Snapshot.Settings.Clone()}, ReviewedModelChange: reviewed}, &validated)
 		}
 		if err == nil {
 			var rechecked settings.LaunchState
@@ -1043,10 +1257,11 @@ func (b *Broker) runModelSettingsOperationLocked(ctx context.Context, engine str
 			b.activeSettings[id] = activeSettingsOperation{Engine: engine, Port: record.Snapshot.Settings.ProxyPort}
 			b.settingsRelayMu.Unlock()
 			paused, _ := b.settingsPause()
-			configure := settings.Configure{Engine: engine, Settings: record.Snapshot.Settings.Clone(), OperationID: id, Resume: record.Resume && !paused}
+			configure := settings.Configure{Engine: engine, Settings: record.Snapshot.Settings.Clone(), OperationID: id, Resume: record.Resume && !paused, ReviewedModelChange: reviewed}
 			b.engineConfigMu.Unlock()
 			configureErr := modelSettingsCall(ctx, worker, "engine:configure-launch", configure, nil)
 			// A response is not persistence evidence, and loss is not no effect.
+			launch = settings.LaunchState{}
 			err = modelSettingsCall(ctx, worker, "engine:get-launch", map[string]string{"engine": engine}, &launch)
 			b.settingsRelayMu.Lock()
 			delete(b.activeSettings, id)
@@ -1094,7 +1309,7 @@ func (b *Broker) runModelSettingsOperationLocked(ctx context.Context, engine str
 	b.activatePolicyNow()
 	b.notifyPolicyChanged()
 	var final settings.LaunchState
-	err := modelSettingsCall(ctx, worker, "engine:get-launch", map[string]string{"engine": engine}, &final)
+	err = modelSettingsCall(ctx, worker, "engine:get-launch", map[string]string{"engine": engine}, &final)
 	b.engineConfigMu.Lock()
 	if err != nil {
 		record.Snapshot.EffectiveSettings = nil
@@ -1161,7 +1376,7 @@ func (b *Broker) runModelSettingsOperationLocked(ctx context.Context, engine str
 		*record = *prior
 		return fail(err)
 	}
-	if op.Change.Load != nil {
+	if op.native() {
 		b.engineConfigMu.Unlock()
 		_, err = b.pushSwitchDrain(ctx, engine, false)
 		b.engineConfigMu.Lock()
@@ -1177,7 +1392,7 @@ func (b *Broker) runModelSettingsOperationLocked(ctx context.Context, engine str
 	record.Snapshot.Phase = "succeeded"
 	if err := b.saveModelStageLocked(record, "completed"); err != nil {
 		record.Resume = resume
-		if op.Change.Load != nil {
+		if op.native() {
 			b.engineConfigMu.Unlock()
 			_, _ = b.pushSwitchDrain(ctx, engine, true)
 			b.engineConfigMu.Lock()
@@ -1185,7 +1400,7 @@ func (b *Broker) runModelSettingsOperationLocked(ctx context.Context, engine str
 		return fail(err)
 	}
 	r.mu.Lock()
-	if op.Change.Load != nil {
+	if op.native() {
 		delete(r.drains, engine)
 	}
 	r.mu.Unlock()

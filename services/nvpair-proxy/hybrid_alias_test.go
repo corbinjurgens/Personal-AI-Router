@@ -54,7 +54,7 @@ func aliasFixture(t *testing.T, tc engineCase) *tierFixture {
 
 func TestHybridNameBasedPerformanceDoesNotGrantLocalEligibility(t *testing.T) {
 	fx := newReadinessEnvelopeFixture(t, "llamacpp")
-	fx.policy.Roles = map[string]nodepolicy.Role{"weak": {Engine: "llamacpp", Model: "m"}}
+	declarePolicyRole(&fx.policy, "weak", "llamacpp", "m")
 	fx.install(t)
 	p := performanceProxy(t, "llamacpp")
 	p.admission = fx.a
@@ -313,7 +313,7 @@ func TestConfiguredAliases(t *testing.T) {
 	t.Run("declared tiers", func(t *testing.T) {
 		pol := nodepolicy.Default()
 		pol.Tiers = map[string][]nodepolicy.TierEntry{"weak": {local}}
-		pol.Roles = map[string]nodepolicy.Role{"strong": {Engine: "llamacpp", Model: "m"}}
+		declarePolicyRole(&pol, "strong", "llamacpp", "m")
 		if got, want := configuredAliases(pol, nil), aliasesOf("weak", "strong"); !slices.Equal(got, want) {
 			t.Errorf("self roles: configuredAliases = %v, want %v", got, want)
 		}
@@ -327,18 +327,18 @@ func TestConfiguredAliases(t *testing.T) {
 // routing listener, which has no overlay, lists this node's own roles only.
 func TestModelListOffersDeclaredTiers(t *testing.T) {
 	pol := nodepolicy.Default()
-	pol.Roles = map[string]nodepolicy.Role{"strong": {Engine: "llamacpp-custom", Model: "qwen3-8b"}}
+	declarePolicyRole(&pol, "strong", "llamacpp-custom", "qwen3-8b")
 	fx := listFixture(t, pol, true)
 	f := fx.p.soleFacade()
 	for _, n := range f.discovery.Nodes() {
-		n.Roles = map[string]nodepolicy.AdvertisedRole{"medium": {Engine: "llamacpp-custom", Model: "not-installed"}}
+		setAdvertisedProfilesByRole(&n, map[string]nodepolicy.AdvertisedProfile{"medium": {Engine: "llamacpp-custom", Model: "not-installed"}})
 		f.discovery.AddManual(n)
 	}
 	if got, want := modelIDs(t, fx.listModels(t, "/v1/models")), append([]string{"qwen3-8b"}, aliasesOf("medium", "strong")...); !slices.Equal(got, want) {
 		t.Errorf("facade model list = %v, want %v", got, want)
 	}
 	var ids []string
-	for _, raw := range hybridAliasRecords(fx.p.admission.currentPolicy(), nil, nil) {
+	for _, raw := range fx.p.hybridAliasRecords(pol, selfDeclaredRoles(pol), nil) {
 		var item struct {
 			ID string `json:"id"`
 		}
@@ -359,7 +359,7 @@ func TestSuffixedAliasesNeverReachDeclaredRoles(t *testing.T) {
 	for _, alias := range []string{"weak-api", "weak-local"} {
 		t.Run(alias, func(t *testing.T) {
 			fx := newTierFixture(t, tc, nodepolicy.Default(), map[string][]string{"a": {"small:1b"}}, nil)
-			fx.declare(t, "a", map[string]nodepolicy.AdvertisedRole{"weak": {Engine: "llamacpp", Model: "small:1b"}})
+			fx.declare(t, "a", map[string]nodepolicy.AdvertisedProfile{"weak": {Engine: "llamacpp", Model: "small:1b"}})
 			rec := fx.do(t, "/v1/chat/completions", `{"model":"`+alias+`"}`)
 			assertRefusedWithoutSideEffects(t, tc, fx, rec, alias, aliasReasonNotInferenceReady)
 		})
@@ -369,7 +369,8 @@ func TestSuffixedAliasesNeverReachDeclaredRoles(t *testing.T) {
 // The records are synthetic and carry nothing of the policy beyond the name.
 func TestHybridAliasRecordsNameOnlyTheAlias(t *testing.T) {
 	pol := stagedHybridPolicy(t)
-	records := hybridAliasRecords(pol, nil, nil)
+	p, _ := zeroFacadeProxy(t)
+	records := p.hybridAliasRecords(pol, selfDeclaredRoles(pol), nil)
 	if len(records) != len(aliasesOf("weak", "medium", "strong")) {
 		t.Fatalf("got %d records, want one per alias", len(records))
 	}
@@ -387,10 +388,167 @@ func TestHybridAliasRecordsNameOnlyTheAlias(t *testing.T) {
 			t.Errorf("record %s has fields %v, want %v", raw, keys, want)
 		}
 	}
-	skipped := hybridAliasRecords(pol, nil, map[string]modelListItem{"weak-api": {}})
+	skipped := p.hybridAliasRecords(pol, selfDeclaredRoles(pol), map[string]modelListItem{"weak-api": {}})
 	if len(skipped) != len(records)-1 {
 		t.Errorf("skipping a seen id left %d records, want %d", len(skipped), len(records)-1)
 	}
+	for _, raw := range skipped {
+		var item struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(raw, &item); err != nil {
+			t.Fatal(err)
+		}
+		if item.ID == "weak-api" {
+			t.Fatal("seen upstream alias was synthesized again")
+		}
+	}
+}
+
+func TestRoleCatalogVisibleContext(t *testing.T) {
+	test := func(name string, selfContext, peerContext int, keys []string, wantFacade, wantListener int) {
+		t.Run(name, func(t *testing.T) {
+			pol := nodepolicy.Default()
+			pol.Profiles = []nodepolicy.Profile{{Key: "private", DisplayName: "Private", Engine: "llamacpp-custom", Model: "private-model", LocalOnly: true, ContextTokens: selfContext}}
+			pol.Roles = []nodepolicy.Role{{Name: "weak", Profiles: keys}, {Name: "medium", Profiles: keys}, {Name: "strong", Profiles: keys}}
+			// Install raw role references after constructing the validated fixture:
+			// missing/withheld keys model the tolerant discovery snapshot seam.
+			fx := listFixture(t, nodepolicy.Default(), true)
+			fx.p.admission.setPolicy(pol)
+			f := fx.p.soleFacade()
+			for _, n := range f.discovery.Nodes() {
+				n.Roles = pol.Roles
+				n.Profiles = []nodepolicy.AdvertisedProfile{{Key: "public", Engine: "llamacpp-custom", Model: "qwen3-8b", ContextTokens: peerContext}}
+				f.discovery.AddManual(n)
+			}
+			assert := func(t *testing.T, rec *httptest.ResponseRecorder, want int) {
+				t.Helper()
+				if rec.Code != http.StatusOK {
+					t.Fatalf("catalog status = %d: %s", rec.Code, rec.Body)
+				}
+				var body struct {
+					Data []map[string]json.RawMessage `json:"data"`
+				}
+				if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+					t.Fatal(err)
+				}
+				seen := map[string]bool{}
+				for _, item := range body.Data {
+					var id string
+					if err := json.Unmarshal(item["id"], &id); err != nil {
+						t.Fatal(err)
+					}
+					if !slices.Contains([]string{"weak", "weak-api", "weak-local", "medium", "medium-api", "medium-local", "strong", "strong-api", "strong-local"}, id) {
+						continue
+					}
+					if seen[id] {
+						t.Fatalf("duplicate alias %q", id)
+					}
+					seen[id] = true
+					fields := []string{"created", "id", "object", "owned_by"}
+					if want != 0 {
+						fields = append(fields, "context_length")
+						var got int
+						if err := json.Unmarshal(item["context_length"], &got); err != nil {
+							t.Fatal(err)
+						}
+						if got != want {
+							t.Fatalf("%s context = %d, want %d", id, got, want)
+						}
+					}
+					if len(item) != len(fields) {
+						t.Fatalf("%s fields = %v, want %v", id, item, fields)
+					}
+					for _, key := range fields {
+						if _, ok := item[key]; !ok {
+							t.Fatalf("%s missing %s", id, key)
+						}
+					}
+				}
+				for _, id := range []string{"weak", "weak-api", "weak-local", "medium", "medium-api", "medium-local", "strong", "strong-api", "strong-local"} {
+					if !seen[id] {
+						t.Fatalf("missing alias %s", id)
+					}
+				}
+			}
+			assert(t, fx.listModels(t, "/v1/models"), wantFacade)
+			rec := httptest.NewRecorder()
+			h := routingHandler{host: fx.p}
+			h.listModels(rec)
+			assert(t, rec, wantListener)
+		})
+	}
+	test("facade max and listener local-only self", 32768, 131072, []string{"private", "public"}, 131072, 32768)
+	test("zero self omits", 0, 131072, []string{"private", "public"}, 0, 0)
+	test("zero peer omits only facade", 32768, 0, []string{"private", "public"}, 0, 32768)
+	test("empty omits", 32768, 131072, []string{}, 0, 0)
+	test("all missing omits", 32768, 131072, []string{"missing"}, 0, 0)
+	test("missing and withheld references are not zero facts", 32768, 131072, []string{"missing", "private", "public"}, 131072, 32768)
+}
+
+func TestRoleCatalogIgnoresDisabledEngineContext(t *testing.T) {
+	test := func(name string, peer bool, context int) {
+		t.Run(name, func(t *testing.T) {
+			pol := nodepolicy.Default()
+			pol.Profiles = []nodepolicy.Profile{{Key: "local", DisplayName: "Local", Engine: "llamacpp", Model: "local-model", ContextTokens: 8192}}
+			pol.Roles = []nodepolicy.Role{{Name: "weak", Profiles: []string{"local"}}}
+			if !peer {
+				pol.Profiles = append(pol.Profiles, nodepolicy.Profile{Key: "disabled", DisplayName: "Disabled", Engine: "strata", Model: "disabled-model", ContextTokens: context})
+				pol.Roles[0].Profiles = append(pol.Roles[0].Profiles, "disabled")
+			}
+			fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"peer": {"disabled-model"}}, nil)
+			f := fx.p.soleFacade()
+			if f.tierFacade("strata", true) != nil {
+				t.Fatal("fixture unexpectedly has a route to the disabled engine")
+			}
+			if peer {
+				n, ok := discoveredNode(f, "peer")
+				if !ok {
+					t.Fatal("missing fixture peer")
+				}
+				n.Roles = []nodepolicy.Role{{Name: "weak", Profiles: []string{"disabled"}}}
+				n.Profiles = []nodepolicy.AdvertisedProfile{{Key: "disabled", Engine: "strata", Model: "disabled-model", ContextTokens: context}}
+				f.discovery.AddManual(n)
+			}
+			assert := func(records []json.RawMessage) {
+				t.Helper()
+				for _, raw := range records {
+					var record struct {
+						ID            string `json:"id"`
+						ContextLength int    `json:"context_length"`
+					}
+					if err := json.Unmarshal(raw, &record); err != nil {
+						t.Fatal(err)
+					}
+					if record.ID == "weak" {
+						if record.ContextLength != 8192 {
+							t.Fatalf("disabled engine changed reachable context: got %d, want 8192", record.ContextLength)
+						}
+						return
+					}
+				}
+				t.Fatal("missing weak alias")
+			}
+			assert(f.tierModelEntries(nil))
+			rec := httptest.NewRecorder()
+			h := routingHandler{host: fx.p}
+			h.listModels(rec)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("listener catalog status = %d: %s", rec.Code, rec.Body)
+			}
+			var body struct {
+				Data []json.RawMessage `json:"data"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			assert(body.Data)
+		})
+	}
+	test("self bound cannot raise reachable maximum", false, 32768)
+	test("self unbounded cannot suppress reachable maximum", false, 0)
+	test("peer bound cannot raise reachable maximum", true, 32768)
+	test("peer unbounded cannot suppress reachable maximum", true, 0)
 }
 
 func (fx *tierFixture) listModels(t *testing.T, path string) *httptest.ResponseRecorder {

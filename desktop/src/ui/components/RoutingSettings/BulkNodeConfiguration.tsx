@@ -20,12 +20,12 @@ import { useShallow } from 'zustand/react/shallow'
 import type { EngineDescriptor, EngineType } from '@/shared/types/engines'
 import type {
     NodePolicyAdvertisement,
-    NodeRole,
+    AdvertisedProfile,
     NodeRoles,
     RoleTier
 } from '@/shared/types/node-roles'
 import type { NodeItem } from '@/shared/types/nodes'
-import { ROLE_TIERS, sameNodeRoles } from '@/shared/utils/node-roles'
+import { ROLE_TIERS, sameNodeRoles, withRoleProfile } from '@/shared/utils/node-roles'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import { useDiscoveredNodesStore } from '@/ui/stores/discovered-nodes.store'
 import { useEngineModelsStore } from '@/ui/stores/engine-models.store'
@@ -34,10 +34,10 @@ import {
     chosenRole,
     FAILED_STATES,
     inventoryChoices,
+    policyRoleProfiles,
     NODE_PAUSED_MESSAGE,
     roleDifferences,
     roleItems,
-    roleKey,
     roleLabel,
     targetState,
     UNSET_ROLE,
@@ -63,12 +63,24 @@ const STATE_BADGES: Record<TargetState, { label: string; color: BadgeProps['colo
 
 type Descriptors = ReadonlyMap<EngineType, EngineDescriptor>
 
-function describeRole(role: NodeRole | undefined, descriptors: Descriptors): string {
-    return role ? roleLabel(role, descriptors, undefined) : 'unset'
+function describeRole(
+    key: string | undefined,
+    descriptors: Descriptors,
+    profiles: AdvertisedProfile[] = []
+): string {
+    const profile = profiles.find(profile => profile.key === key)
+    return profile ? roleLabel(profile, descriptors, undefined) : (key ?? 'unset')
 }
 
-function describeRoles(roles: NodeRoles, descriptors: Descriptors): string {
-    return ROLE_TIERS.map(tier => `${tier}: ${describeRole(roles[tier], descriptors)}`).join('\n')
+function describeRoles(
+    roles: NodeRoles,
+    descriptors: Descriptors,
+    profiles: AdvertisedProfile[]
+): string {
+    return ROLE_TIERS.map(
+        tier =>
+            `${tier}: ${describeRole(roles.find(role => role.name === tier)?.profiles[0], descriptors, profiles)}`
+    ).join('\n')
 }
 
 /** One paired node as the panel shows it. */
@@ -106,10 +118,11 @@ function stateDetail(
             const diff = differences
                 .map(
                     difference =>
-                        `${difference.tier}: yours ${describeRole(difference.mine, descriptors)}, node ${describeRole(difference.theirs, descriptors)}`
+                        `${difference.tier}: yours ${describeRole(difference.mine, descriptors, policyRoleProfiles(entry.baseline?.policy ?? '{}'))}, node ${describeRole(difference.theirs, descriptors, policyRoleProfiles(latest.policy))}`
                 )
                 .join('\n')
-            return `The node's policy changed to revision ${latest.revision}, so nothing was sent.\n${diff || 'Its roles match this draft.'}${message}`
+            const unchanged = sameNodeRoles(entry.draft, latest.roles)
+            return `The node's policy changed to revision ${latest.revision}, so nothing was sent.\n${diff || (unchanged ? 'Its roles match this draft.' : 'The role declaration order differs from this draft.')}${message}`
         }
         case 'rejected':
             return `The node refused these roles; change the draft.${message}`
@@ -153,8 +166,24 @@ export default function BulkNodeConfiguration() {
         }
     }, [peers, selected, editors])
 
-    const choicesFor = (ids: ReadonlySet<string>) =>
-        inventoryChoices(Array.from(models.values()).filter(list => ids.has(list.nodeId)))
+    const profilesFor = (id: string) => {
+        const policy = editors.get(id)?.baseline?.policy
+        return policy
+            ? policyRoleProfiles(policy)
+            : (discovered.find(node => node.id === id)?.policy?.profiles ?? [])
+    }
+    const choicesFor = (ids: ReadonlySet<string>) => {
+        const choices = new Map<string, AdvertisedProfile>()
+        for (const id of ids) {
+            for (const choice of inventoryChoices(
+                Array.from(models.values()).filter(list => list.nodeId === id),
+                profilesFor(id)
+            )) {
+                choices.set(choice.key, choice)
+            }
+        }
+        return Array.from(choices.values())
+    }
     const commonChoices = choicesFor(selected)
 
     const rows: TargetRow[] = peers.map(node => {
@@ -210,13 +239,9 @@ export default function BulkNodeConfiguration() {
         })
 
     const setCommon = (tier: RoleTier, value: string) => {
-        const common: NodeRoles = { ...bulk.common }
-        if (value === UNSET_ROLE) delete common[tier]
-        else {
-            const role = chosenRole(commonChoices, value)
-            if (!role) return
-            common[tier] = role
-        }
+        const key = value === UNSET_ROLE ? undefined : chosenRole(commonChoices, value)
+        if (value !== UNSET_ROLE && key === undefined) return
+        const common = withRoleProfile(bulk.common, tier, key)
         store.setBulk({ common })
     }
 
@@ -231,9 +256,9 @@ export default function BulkNodeConfiguration() {
 
     const currentCell = (row: TargetRow): string => {
         const baseline = editors.get(row.node.id)?.baseline
-        if (baseline) return describeRoles(baseline.roles, descriptors)
+        if (baseline) return describeRoles(baseline.roles, descriptors, profilesFor(row.node.id))
         if (row.advertisement) {
-            return `${describeRoles(row.advertisement.roles, descriptors)}\n(as advertised)`
+            return `${describeRoles(row.advertisement.roles, descriptors, row.advertisement.profiles)}\n(as advertised)`
         }
         return row.offline ? 'Unknown while offline' : 'Not read yet'
     }
@@ -243,9 +268,9 @@ export default function BulkNodeConfiguration() {
         if (!perNode) {
             const installed = new Set(choicesFor(new Set([row.node.id])).map(choice => choice.key))
             return ROLE_TIERS.map(tier => {
-                const role = bulk.common[tier]
-                const missing = role && !installed.has(roleKey(role)) ? ', not installed here' : ''
-                return `${tier}: ${describeRole(role, descriptors)}${missing}`
+                const key = bulk.common.find(role => role.name === tier)?.profiles[0]
+                const missing = key && !installed.has(key) ? ', not installed here' : ''
+                return `${tier}: ${describeRole(key, descriptors, commonChoices)}${missing}`
             }).join('\n')
         }
         if (!entry?.baseline) {
@@ -259,9 +284,18 @@ export default function BulkNodeConfiguration() {
                     <Select
                         key={tier}
                         size="small"
+                        placeholder="Unset"
                         aria-label={`${row.node.name} ${tier} role`}
-                        items={roleItems(choices, entry.draft[tier], descriptors, undefined)}
-                        value={entry.draft[tier] ? roleKey(entry.draft[tier]) : UNSET_ROLE}
+                        items={roleItems(
+                            choices,
+                            entry.draft.find(role => role.name === tier)?.profiles[0],
+                            descriptors,
+                            undefined,
+                            profilesFor(row.node.id)
+                        )}
+                        value={
+                            entry.draft.find(role => role.name === tier)?.profiles[0] ?? UNSET_ROLE
+                        }
                         onValueChange={(value: string) => setOwn(row.node.id, tier, value)}
                         disabled={busy || running}
                     />
@@ -400,17 +434,18 @@ export default function BulkNodeConfiguration() {
                                     <div className="min-w-0 flex-1">
                                         <Select
                                             size="small"
+                                            placeholder="Unset"
                                             aria-label={`Common ${tier} role`}
                                             items={roleItems(
                                                 commonChoices,
-                                                bulk.common[tier],
+                                                bulk.common.find(role => role.name === tier)
+                                                    ?.profiles[0],
                                                 descriptors,
                                                 undefined
                                             )}
                                             value={
-                                                bulk.common[tier]
-                                                    ? roleKey(bulk.common[tier])
-                                                    : UNSET_ROLE
+                                                bulk.common.find(role => role.name === tier)
+                                                    ?.profiles[0] ?? UNSET_ROLE
                                             }
                                             onValueChange={(value: string) =>
                                                 setCommon(tier, value)

@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Badge, Button, Flex, Select, Stack, Text } from '@nvidia/foundations-react-core'
 import { useShallow } from 'zustand/react/shallow'
 import type { NodePolicySnapshot } from '@/shared/types/node-policy'
-import type { NodeRole, RoleTier } from '@/shared/types/node-roles'
+import type { RoleTier } from '@/shared/types/node-roles'
 import { ROLE_TIERS, sameNodeRoles } from '@/shared/utils/node-roles'
 import { InlineErrorBanner } from '@/ui/components/InlineErrorBanner'
 import { useEngineModelsStore } from '@/ui/stores/engine-models.store'
@@ -19,7 +19,7 @@ import {
     roleDifferences,
     roleIdentity,
     roleItems,
-    roleKey,
+    policyRoleProfiles,
     roleLabel,
     suggestRoles,
     UNSET_ROLE,
@@ -55,7 +55,11 @@ export default function RoleEditor({ targetId, nodeId, onSaved }: RoleEditorProp
             Array.from(state.models.values()).filter(models => models.nodeId === targetId)
         )
     )
-    const choices = useMemo(() => inventoryChoices(inventory), [inventory])
+    const profiles = useMemo(
+        () => policyRoleProfiles(entry?.baseline?.policy ?? '{}'),
+        [entry?.baseline?.policy]
+    )
+    const choices = useMemo(() => inventoryChoices(inventory, profiles), [inventory, profiles])
     const [suggesting, setSuggesting] = useState(false)
     const [noSuggestion, setNoSuggestion] = useState(false)
 
@@ -75,7 +79,7 @@ export default function RoleEditor({ targetId, nodeId, onSaved }: RoleEditorProp
             const own = nodeId ? await window.pairApi.nodePolicy.get().catch(() => null) : null
             const policies = own ? [baseline.policy, own.policy] : [baseline.policy]
             const roles = suggestRoles(choices, policies)
-            if (Object.keys(roles).length === 0) setNoSuggestion(true)
+            if (roles.length === 0) setNoSuggestion(true)
             else useNodeConfigurationStore.getState().setDraft(targetId, roles)
         } finally {
             setSuggesting(false)
@@ -106,8 +110,12 @@ export default function RoleEditor({ targetId, nodeId, onSaved }: RoleEditorProp
     }
 
     const differences = entry.latest ? roleDifferences(draft, entry.latest.roles) : []
-    const describe = (role: NodeRole | undefined) =>
-        role ? roleLabel(role, descriptors, roleIdentity(role, inventory)) : 'unset'
+    const describe = (key: string | undefined, policy: string) => {
+        const profile = policyRoleProfiles(policy).find(profile => profile.key === key)
+        return profile
+            ? roleLabel(profile, descriptors, roleIdentity(profile, inventory))
+            : (key ?? 'unset')
+    }
 
     return (
         <Stack gap="2">
@@ -146,9 +154,18 @@ export default function RoleEditor({ targetId, nodeId, onSaved }: RoleEditorProp
                     <div className="min-w-0 flex-1">
                         <Select
                             size="small"
+                            placeholder="Unset"
                             aria-label={`${TIER_LABELS[tier]} role`}
-                            items={roleItems(choices, draft[tier], descriptors, inventory)}
-                            value={draft[tier] ? roleKey(draft[tier]) : UNSET_ROLE}
+                            items={roleItems(
+                                choices,
+                                draft.find(role => role.name === tier)?.profiles[0],
+                                descriptors,
+                                inventory,
+                                profiles
+                            )}
+                            value={
+                                draft.find(role => role.name === tier)?.profiles[0] ?? UNSET_ROLE
+                            }
                             onValueChange={(value: string) => pick(tier, value)}
                             disabled={sending || readOnly}
                         />
@@ -171,11 +188,13 @@ export default function RoleEditor({ targetId, nodeId, onSaved }: RoleEditorProp
                     message={[
                         `The node's policy changed to revision ${entry.latest.revision} after these roles were loaded, so they were not sent.`,
                         differences.length === 0
-                            ? 'Its roles match this draft; only other settings changed.'
+                            ? sameNodeRoles(draft, entry.latest.roles)
+                                ? 'Its roles match this draft; only other settings changed.'
+                                : 'The role declaration order differs from this draft.'
                             : differences
                                   .map(
                                       difference =>
-                                          `${TIER_LABELS[difference.tier]}: yours ${describe(difference.mine)}, node ${describe(difference.theirs)}`
+                                          `${TIER_LABELS[difference.tier]}: yours ${describe(difference.mine, baseline.policy)}, node ${describe(difference.theirs, entry.latest?.policy ?? '{}')}`
                                   )
                                   .join('\n'),
                         entry.message ? `Service message: ${entry.message}` : ''

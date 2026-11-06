@@ -21,7 +21,7 @@ func customBindingLoad(t *testing.T, model, path string) modelconfig.ModelLoad {
 	if err != nil {
 		t.Fatal(err)
 	}
-	load := modelconfig.ModelLoad{ModelID: model, Resolved: &modelconfig.ResolvedLoad{
+	load := modelconfig.ModelLoad{ProfileKey: model, ModelID: model, Resolved: &modelconfig.ResolvedLoad{
 		PerSlotContext: 4096, TotalContext: 4096, Slots: 1, GPU: modelconfig.GPU{Mode: "cpu"}, NativeBuildID: "synthetic-build",
 		SourceInputDigest: strings.Repeat("a", 64), PresetDigest: strings.Repeat("b", 64),
 		Artifacts: []modelconfig.ArtifactBinding{{Role: "model", Path: binding.SourcePath, ResolvedTarget: binding.ResolvedTarget, Size: strconv.FormatInt(binding.SizeBytes, 10), MtimeNS: binding.MtimeNS, SampleSHA256: binding.SampleSHA256}},

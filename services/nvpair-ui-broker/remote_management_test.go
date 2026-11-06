@@ -231,7 +231,7 @@ func TestRemoteSettingLockedRecoveryAndValidationUnchanged(t *testing.T) {
 	t.Run("recovery before lock", func(t *testing.T) {
 		rb := newBrokerOnFile(t, "not json")
 		p := rb.b.peerPolicy().Policy
-		p.Profiles = []nodepolicy.Profile{{Name: "new", Engine: "llamacpp", Model: "submitted", LocalOnly: true}}
+		p.Profiles = []nodepolicy.Profile{{Key: "submitted", DisplayName: "Submitted", Engine: "llamacpp", Model: "submitted", LocalOnly: true}}
 		_, err := rb.b.setPeerPolicyAs(rmJSON(t, p), rmJSON(t, p.Revision), "pinned-peer")
 		if policyErrorCode(err) != -32011 {
 			t.Fatalf("paused recovery refusal = %v, want local veto", err)
@@ -254,7 +254,8 @@ func TestRemoteSettingLockedRecoveryAndValidationUnchanged(t *testing.T) {
 		rb := remoteSettingLockedBroker(t)
 		p := rb.b.peerPolicy().Policy
 		p.Profiles = append(p.Profiles, p.Profiles[0])
-		p.Profiles[2].Name = "duplicate"
+		p.Profiles[2].DisplayName = "Duplicate"
+		p.Profiles[2].Key = "duplicate-profile"
 		p.Profiles[0].LocalOnly = false
 		before := rb.baseline(t)
 		_, err := rb.b.setPeerPolicyAs(rmJSON(t, p), rmJSON(t, p.Revision), "pinned-peer")

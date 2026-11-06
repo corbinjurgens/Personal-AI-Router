@@ -70,7 +70,7 @@ func TestModelSettingsOffManualCoupledPreservesUnselectedState(t *testing.T) {
 	if state.Running || state.CoupledStage != "completed" || state.Revision != state.AppliedRevision || state.EffectiveSettings == nil || !state.EffectiveSettings.Equal(preview.Settings) || !state.Settings.Equal(preview.Settings) {
 		t.Fatalf("Off completion did not match reviewed persisted settings: phase=%s stage=%s running=%t", state.Phase, state.CoupledStage, state.Running)
 	}
-	assertModelSettingsPolicyPatch(t, policy, f.policy(t), "0.75")
+	assertModelSettingsPolicyPatch(t, policy, f.policy(t), preview, "0.75")
 	disk := f.disk(t)
 	if disk.Model.Stage != "completed" || !disk.Model.Attempted || disk.Receipts[request.RequestID].Phase != "succeeded" {
 		t.Fatal("completed native/policy receipt missing from durable journal")
@@ -162,9 +162,10 @@ func TestModelSettingsAutoUnavailablePreservesManualConfiguration(t *testing.T) 
 	after := f.settled(t, request.RequestID, "succeeded")
 	assertModelSettingsSavedReadback(t, after, preview.Settings)
 	assertModelSettingsFinite(t, after.Settings, f.root)
-	if after.Running || !reflect.DeepEqual(baseline.policy, f.policy(t)) {
-		t.Fatal("manual fallback started the engine or changed unselected policy")
+	if after.Running {
+		t.Fatal("manual fallback started the engine")
 	}
+	assertModelSettingsLoadPolicy(t, baseline.policy, f.policy(t), preview)
 }
 
 func TestModelSettingsEstimatorUnavailableManualResolutionRecoversExactly(t *testing.T) {
@@ -186,7 +187,7 @@ func TestModelSettingsEstimatorUnavailableManualResolutionRecoversExactly(t *tes
 		t.Fatal("manual preview without facts did not disclose unavailable estimate")
 	}
 	assertModelSettingsAdvisoryEstimate(t, *preview.Estimate)
-	index := slices.IndexFunc(preview.Settings.ModelLoads, func(load modelconfig.ModelLoad) bool { return load.ModelID == "medium-model" })
+	index := slices.IndexFunc(preview.Settings.ModelLoads, func(load modelconfig.ModelLoad) bool { return load.ProfileKey == "medium-model" })
 	if index < 0 || preview.Settings.ModelLoads[index].Resolved == nil {
 		t.Fatal("manual preview without estimator lost its finite allocation")
 	}
@@ -209,9 +210,10 @@ func TestModelSettingsEstimatorUnavailableManualResolutionRecoversExactly(t *tes
 	f.startModelSettings(t)
 	after := f.settled(t, request.RequestID, "succeeded")
 	assertModelSettingsSavedReadback(t, after, preview.Settings)
-	if after.Running || !reflect.DeepEqual(baseline.policy, f.policy(t)) {
-		t.Fatal("recovery retuned manual settings or changed unselected policy")
+	if after.Running {
+		t.Fatal("recovery started the Off engine")
 	}
+	assertModelSettingsLoadPolicy(t, baseline.policy, f.policy(t), preview)
 	var replay struct {
 		Revision uint64 `json:"revision"`
 		Phase    string `json:"phase"`
@@ -295,7 +297,7 @@ func TestModelSettingsRawPolicyConflictDuringManagerWait(t *testing.T) {
 	f.pinned(t)
 	f.startModelSettings(t)
 	before := f.policy(t)
-	request, _ := f.review(t, f.request(t, "writer-fence", &modelconfig.PolicyPatch{Generation: map[string]*json.Number{"temperature": modelSettingsNumber("0.6")}}))
+	request, preview := f.review(t, f.request(t, "writer-fence", &modelconfig.PolicyPatch{Generation: map[string]*json.Number{"temperature": modelSettingsNumber("0.6")}}))
 	gate := newModelSettingsGate()
 	f.configureGate = gate
 	applyID := f.begin(t, "engine:apply-settings", request)
@@ -327,10 +329,10 @@ func TestModelSettingsRawPolicyConflictDuringManagerWait(t *testing.T) {
 	gate.unblock()
 	f.finishApply(t, applyID)
 	f.settled(t, request.RequestID, "succeeded")
-	assertModelSettingsPolicyPatch(t, before, f.policy(t), "0.6")
+	assertModelSettingsPolicyPatch(t, before, f.policy(t), preview, "0.6")
 }
 
-func TestModelSettingsLoadOnlyAllowsUnrelatedPolicyDuringManagerWait(t *testing.T) {
+func TestModelSettingsLoadOnlyFencesUnrelatedPolicyDuringManagerWait(t *testing.T) {
 	f := newModelSettingsProcessFixture(t)
 	request, preview := f.review(t, f.request(t, "load-only-writer", nil))
 	gate := newModelSettingsGate()
@@ -338,15 +340,17 @@ func TestModelSettingsLoadOnlyAllowsUnrelatedPolicyDuringManagerWait(t *testing.
 	applyID := f.begin(t, "engine:apply-settings", request)
 	modelSettingsWait(t, gate)
 	policy := f.policy(t)
-	policy.Idle.UnloadAfterMinutes = 17
-	want := f.setPolicy(t, policy)
+	changed := policy
+	changed.Idle.UnloadAfterMinutes = 17
+	response := f.rpc(t, "policy:set", map[string]any{"policy": changed, "expectedPersistedRevision": policy.Revision})
+	if response.Error == nil || response.Error.Code != -32010 || !reflect.DeepEqual(policy, f.policy(t)) {
+		t.Fatal("load-only metadata publication did not reserve its policy baseline")
+	}
 	gate.unblock()
 	f.finishApply(t, applyID)
 	after := f.settled(t, request.RequestID, "succeeded")
 	assertModelSettingsSavedReadback(t, after, preview.Settings)
-	if !reflect.DeepEqual(want, f.policy(t)) {
-		t.Fatal("load-only publication overwrote unrelated raw policy change")
-	}
+	assertModelSettingsLoadPolicy(t, policy, f.policy(t), preview)
 }
 
 func TestModelSettingsPauseWhileApplyingDoesNotResume(t *testing.T) {
@@ -405,9 +409,10 @@ func TestModelSettingsRunningRestartConsumesWholeFinitePreset(t *testing.T) {
 	assertModelSettingsImpact(t, preview, true)
 	f.rpcOK(t, "engine:apply-settings", request)
 	after := f.settled(t, request.RequestID, "succeeded")
-	if !after.Running || !after.Settings.Equal(preview.Settings) || !reflect.DeepEqual(policy, f.policy(t)) {
-		t.Fatal("running apply did not persist selected settings and preserve policy")
+	if !after.Running || !after.Settings.Equal(preview.Settings) {
+		t.Fatal("running apply did not persist selected settings")
 	}
+	assertModelSettingsLoadPolicy(t, policy, f.policy(t), preview)
 	f.assertProcessStopped(t, initial)
 	replacement := f.engineIdentity(t, 2)
 	if replacement == initial {
@@ -596,7 +601,7 @@ func TestModelSettingsBareAcceptedRestartRequiresFreshLocalSupersession(t *testi
 	if !settled.Settings.Equal(preview.Settings) || !settled.Running {
 		t.Fatal("fresh local supersession lost reviewed settings or unresolved saved-On obligation")
 	}
-	assertModelSettingsPolicyPatch(t, before, f.policy(t), "0.35")
+	assertModelSettingsPolicyPatch(t, before, f.policy(t), preview, "0.35")
 }
 
 func TestModelSettingsMissingContentPreviewHasNoEffects(t *testing.T) {
@@ -604,6 +609,7 @@ func TestModelSettingsMissingContentPreviewHasNoEffects(t *testing.T) {
 	baseline := f.metadataBaseline(t)
 	request := f.request(t, "missing-copy-target", nil)
 	request.ModelChange.ModelID = "missing-copy-model"
+	request.ModelChange.ProfileKey = "missing-copy-model"
 	var preview settings.Preview
 	modelSettingsDecode(t, f.rpcOK(t, "engine:preview-settings", request), &preview)
 	if len(preview.Errors) == 0 || preview.PreviewDigest != "" {
@@ -632,7 +638,7 @@ func TestModelSettingsFailedReadbackRequiresLocalSupersession(t *testing.T) {
 	if !state.Settings.Equal(preview.Settings) {
 		t.Fatal("supersession did not apply its fresh target preview")
 	}
-	assertModelSettingsPolicyPatch(t, before, f.policy(t), "0.8")
+	assertModelSettingsPolicyPatch(t, before, f.policy(t), preview, "0.8")
 }
 
 func TestModelSettingsConfigureResponseFailureUsesRealReadback(t *testing.T) {
@@ -694,7 +700,7 @@ func TestModelSettingsProgressedReceiptRecoversAcrossBrokerAndManagerRestart(t *
 	after := f.settled(t, request.RequestID, "succeeded")
 	assertModelSettingsSavedReadback(t, after, preview.Settings)
 	assertModelSettingsFinite(t, after.Settings, f.root)
-	assertModelSettingsPolicyPatch(t, before, f.policy(t), "0.55")
+	assertModelSettingsPolicyPatch(t, before, f.policy(t), preview, "0.55")
 	var retry struct {
 		Revision uint64 `json:"revision"`
 		Phase    string `json:"phase"`
@@ -725,7 +731,7 @@ func TestModelSettingsPinnedFiniteApplyPreservesTargetState(t *testing.T) {
 	if remote.NodeID != "model-settings-target" || !remote.Settings.Equal(after.Settings) || !remote.Settings.Equal(preview.Settings) || remote.Running {
 		t.Fatal("pinned target readback differs from reviewed persisted configuration")
 	}
-	assertModelSettingsPolicyPatch(t, before, f.policy(t), "0.45")
+	assertModelSettingsPolicyPatch(t, before, f.policy(t), preview, "0.45")
 }
 
 func TestModelSettingsPinnedInferenceLockProtectsGenerationOnly(t *testing.T) {
@@ -762,9 +768,7 @@ func TestModelSettingsPinnedInferenceLockProtectsGenerationOnly(t *testing.T) {
 	if remote.NodeID != "model-settings-target" || remote.Revision != after.Revision {
 		t.Fatal("locked load-only readback did not identify the reviewed target revision")
 	}
-	if !reflect.DeepEqual(policy, f.policy(t)) {
-		t.Fatal("load-only copy changed saved target lock/generation or unrelated policy")
-	}
+	assertModelSettingsLoadPolicy(t, policy, f.policy(t), preview)
 }
 
 func TestModelSettingsDeniedGrantCannotUseReviewedApply(t *testing.T) {
@@ -813,7 +817,7 @@ func TestModelSettingsSelectedPreferenceCopyUsesTargetBindings(t *testing.T) {
 	baseline := target.settled(t, baselineRequest.RequestID, "succeeded")
 	before := target.policy(t)
 	request = target.request(t, "selected-target", &modelconfig.PolicyPatch{Generation: map[string]*json.Number{"temperature": modelSettingsNumber("0.7")}})
-	sourceIndex := slices.IndexFunc(saved.Settings.ModelLoads, func(m modelconfig.ModelLoad) bool { return m.ModelID == "medium-model" })
+	sourceIndex := slices.IndexFunc(saved.Settings.ModelLoads, func(m modelconfig.ModelLoad) bool { return m.ProfileKey == "medium-model" })
 	if sourceIndex < 0 {
 		t.Fatal("source preference was not persisted")
 	}
@@ -835,15 +839,15 @@ func TestModelSettingsSelectedPreferenceCopyUsesTargetBindings(t *testing.T) {
 	if !after.Settings.Equal(preview.Settings) {
 		t.Fatal("target copy readback does not match selected target preview")
 	}
-	assertModelSettingsPolicyPatch(t, before, target.policy(t), "0.7")
+	assertModelSettingsPolicyPatch(t, before, target.policy(t), preview, "0.7")
 	want := baseline.Settings.Clone()
 	for i := range want.ModelLoads {
 		load := &want.ModelLoads[i]
-		index := slices.IndexFunc(after.Settings.ModelLoads, func(m modelconfig.ModelLoad) bool { return m.ModelID == load.ModelID })
+		index := slices.IndexFunc(after.Settings.ModelLoads, func(m modelconfig.ModelLoad) bool { return m.ProfileKey == load.ProfileKey })
 		if index < 0 || load.Resolved == nil || after.Settings.ModelLoads[index].Resolved == nil {
 			t.Fatal("selected copy lost a target model")
 		}
-		if load.ModelID == "medium-model" {
+		if load.ProfileKey == "medium-model" {
 			load.Requested.Context, load.Requested.Slots = from.Requested.Context, from.Requested.Slots
 			load.Resolved.PerSlotContext, load.Resolved.TotalContext, load.Resolved.Slots = 8192, 16384, 2
 			load.Resolved.Options.Context, load.Resolved.Options.Slots = from.Requested.Context, from.Requested.Slots
@@ -874,13 +878,10 @@ func TestModelSettingsExplicitRoutingSelectionPreservesOtherPolicy(t *testing.T)
 	f.settled(t, request.RequestID, "succeeded")
 	after := f.policy(t)
 	want := before
-	want.Revision = after.Revision
-	want.Roles = map[string]nodepolicy.Role{"weak": {Engine: "llamacpp", Model: "medium-model"}}
+	want.Roles = []nodepolicy.Role{{Name: "weak", Profiles: []string{"weak-model", "medium-model"}}}
 	want.EngineBindings = nodepolicy.EngineBindings{{Engine: "llamacpp", Model: "medium-model"}}
 	want.ServedModels = nodepolicy.ServedModels{{Engine: "llamacpp", Model: "weak-model"}, {Engine: "llamacpp", Model: "medium-model"}}
-	if !reflect.DeepEqual(want, after) {
-		t.Fatal("explicit role/binding/served selection changed unselected policy or dropped existing served membership")
-	}
+	assertModelSettingsLoadPolicy(t, want, after, preview)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.configureCalls != 0 {
@@ -971,8 +972,9 @@ func modelSettingsCopyThenFreshReceiptInspection(t *testing.T, prepare func(*tes
 	before, policy := baseline.snapshot, baseline.policy
 	change := target.request(t, "configure-copied-content", nil)
 	change.ModelChange.ModelID = model.manifest.Model
+	change.ModelChange.ProfileKey = model.manifest.Model
 	change, preview := target.review(t, change)
-	index := slices.IndexFunc(preview.Settings.ModelLoads, func(load modelconfig.ModelLoad) bool { return load.ModelID == model.manifest.Model })
+	index := slices.IndexFunc(preview.Settings.ModelLoads, func(load modelconfig.ModelLoad) bool { return load.ProfileKey == model.manifest.Model })
 	if index < 0 || preview.Settings.ModelLoads[index].Resolved == nil {
 		t.Fatal("fresh target preview did not resolve copied receipt")
 	}
@@ -986,9 +988,11 @@ func modelSettingsCopyThenFreshReceiptInspection(t *testing.T, prepare func(*tes
 	target.noMetadataEffects(t, baseline)
 	target.rpcOK(t, "engine:apply-settings", change)
 	after := target.settled(t, change.RequestID, "succeeded")
-	if !after.Settings.Equal(preview.Settings) || after.Running || !reflect.DeepEqual(policy, target.policy(t)) {
-		t.Fatal("explicit copied-content Apply changed unselected target state")
+	if !after.Settings.Equal(preview.Settings) || after.Running {
+		t.Fatal("explicit copied-content Apply changed unselected target settings or runtime")
 	}
+	policy.Profiles = append(slices.Clone(policy.Profiles), nodepolicy.Profile{Key: model.manifest.Model, DisplayName: model.manifest.Model, Engine: "llamacpp", Model: model.manifest.Model})
+	assertModelSettingsLoadPolicy(t, policy, target.policy(t), preview)
 	if after.Settings.ServerPort != before.Settings.ServerPort || after.Settings.ProxyPort != before.Settings.ProxyPort || after.Settings.Serving != nil {
 		t.Fatal("copied-content Apply changed ports or created a serving declaration")
 	}
@@ -1022,14 +1026,14 @@ func assertModelSettingsFinite(t *testing.T, config settings.Config, root string
 		if r == nil || len(r.Artifacts) != 1 || r.NativeBuildID == "" || len(r.SourceInputDigest) != 64 || len(r.PresetDigest) != 64 || r.ResolverRevision != "external-conversion/llama" || len(r.ReviewedInputID) != 64 {
 			t.Fatal("finite preview lost frozen native/conversion provenance")
 		}
-		if load.ModelID == "medium-model" && (r.PerSlotContext != 8192 || r.TotalContext != 16384 || r.Slots != 2) {
+		if load.ProfileKey == "medium-model" && (r.PerSlotContext != 8192 || r.TotalContext != 16384 || r.Slots != 2) {
 			t.Fatal("finite selected context/slot allocation differs")
 		}
 		if r.GPU.Mode != "cpu" {
 			t.Fatal("manual CPU choice changed")
 		}
 		var want modelconfig.ArtifactBinding
-		switch load.ModelID {
+		switch load.ProfileKey {
 		case "medium-model":
 			want = modelSettingsExpectedBinding(t, root, "model", "medium.gguf", modelSettingsGGUF("blk.0.weight"))
 		case "weak-model":
@@ -1130,9 +1134,9 @@ func assertModelSettingsSavedReadback(t *testing.T, after settings.Snapshot, rev
 	}
 }
 
-func assertModelSettingsUnselectedLoad(t *testing.T, config settings.Config, model string, context, slots int32) {
+func assertModelSettingsUnselectedLoad(t *testing.T, config settings.Config, key string, context, slots int32) {
 	t.Helper()
-	index := slices.IndexFunc(config.ModelLoads, func(load modelconfig.ModelLoad) bool { return load.ModelID == model })
+	index := slices.IndexFunc(config.ModelLoads, func(load modelconfig.ModelLoad) bool { return load.ProfileKey == key })
 	if index < 0 || config.ModelLoads[index].Resolved == nil {
 		t.Fatal("unselected model disappeared")
 	}
@@ -1142,23 +1146,68 @@ func assertModelSettingsUnselectedLoad(t *testing.T, config settings.Config, mod
 	}
 }
 
-func assertModelSettingsPolicyPatch(t *testing.T, before, after nodepolicy.Policy, temperature string) {
+func assertModelSettingsPolicyPatch(t *testing.T, before, after nodepolicy.Policy, preview settings.Preview, temperature string) {
 	t.Helper()
 	want := before
-	want.Revision = after.Revision
 	want.Profiles = slices.Clone(before.Profiles)
 	var fields map[string]json.RawMessage
 	modelSettingsDecode(t, want.Profiles[0].RequestOptions, &fields)
 	fields["temperature"] = json.RawMessage(temperature)
 	want.Profiles[0].RequestOptions = mustMarshal(t, fields)
-	// Compare structured full policy, preserving opaque numbers lexically.
+	assertModelSettingsLoadPolicy(t, want, after, preview)
+}
+
+func assertModelSettingsLoadPolicy(t *testing.T, before, after nodepolicy.Policy, preview settings.Preview) {
+	t.Helper()
+	want := before
+	want.Revision = after.Revision
+	want.Profiles = slices.Clone(before.Profiles)
+	if len(want.Profiles) != len(after.Profiles) {
+		t.Fatal("coupled publication changed the unselected profile set")
+	}
+	for i := range want.Profiles {
+		profile := &want.Profiles[i]
+		if !nodepolicy.EqualRequestOptions(profile.RequestOptions, after.Profiles[i].RequestOptions) {
+			t.Fatalf("coupled publication changed profile %q request options", profile.Key)
+		}
+		// Object order may change when the selected policy patch is encoded.
+		// The shared comparison retains exact numeric values and array order.
+		profile.RequestOptions = after.Profiles[i].RequestOptions
+		if profile.Engine != "llamacpp" {
+			continue
+		}
+		for _, load := range preview.Settings.ModelLoads {
+			if load.ProfileKey == profile.Key {
+				if load.Resolved == nil || load.Resolved.PerSlotContext <= 0 {
+					t.Fatal("reviewed load lacks derived policy context")
+				}
+				profile.ContextTokens = int(load.Resolved.PerSlotContext)
+			}
+		}
+		if identity, ok := preview.Identities[profile.Key]; ok {
+			if err := identity.Validate(); err != nil {
+				t.Fatalf("reviewed profile identity: %v", err)
+			}
+			profile.ModelIdentity = &identity
+		}
+	}
+	// Preserve the complete policy, including opaque generation numbers, apart
+	// from the context and identity published from the accepted native review.
 	if !bytes.Equal(mustMarshal(t, want), mustMarshal(t, after)) {
-		t.Fatal("selected generation edit changed unselected target policy fields")
+		t.Fatal("coupled publication differs from reviewed metadata and selected policy edits")
 	}
 }
 
 func modelSettingsPreset(t *testing.T, data []byte) map[string]map[string]string {
 	t.Helper()
+	sections, err := parseModelSettingsPreset(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sections
+}
+
+func parseModelSettingsPreset(data []byte) (map[string]map[string]string, error) {
 	sections := map[string]map[string]string{}
 	current := ""
 	for _, line := range strings.Split(string(data), "\n") {
@@ -1173,11 +1222,11 @@ func modelSettingsPreset(t *testing.T, data []byte) map[string]map[string]string
 		}
 		key, value, ok := strings.Cut(line, "=")
 		if !ok || current == "" {
-			t.Fatal("invalid captured native preset")
+			return nil, fmt.Errorf("invalid captured native preset")
 		}
 		sections[current][strings.TrimSpace(key)] = strings.TrimSpace(value)
 	}
-	return sections
+	return sections, nil
 }
 
 func (f *modelSettingsProcessFixture) holdModelSettingsInference(t *testing.T) <-chan error {

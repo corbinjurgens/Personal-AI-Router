@@ -10,29 +10,35 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"unicode/utf8"
+
+	"nvpair-shared/engines"
 )
 
-// AdvertisedRole is a role as a router sees it: the reference plus the bounds
-// of the node's profile for it, resolved by the declaring node.
-type AdvertisedRole struct {
-	Engine        string       `json:"engine"`
-	Model         string       `json:"model"`
-	ContextTokens int          `json:"contextTokens,omitempty"`
-	Capabilities  []Capability `json:"capabilities,omitempty"`
+// AdvertisedProfile publishes shared profile facts once, independently of roles.
+type AdvertisedProfile struct {
+	Key           string                 `json:"key"`
+	DisplayName   string                 `json:"displayName"`
+	Icon          string                 `json:"icon,omitempty"`
+	Engine        string                 `json:"engine"`
+	Model         string                 `json:"model"`
+	ModelIdentity *engines.ModelIdentity `json:"modelIdentity,omitempty"`
+	ContextTokens int                    `json:"contextTokens,omitempty"`
+	Capabilities  []Capability           `json:"capabilities,omitempty"`
 	// MaxOutputTokens and Qualification come from the profile. A router may
-	// offer the role for a hybrid request only when both are present and
+	// offer the profile for a hybrid request only when both are present and
 	// finite; they are hints, and the destination revalidates every request
 	// against its own installed qualification.
 	MaxOutputTokens int               `json:"maxOutputTokens,omitempty"`
 	Qualification   *QualificationRef `json:"qualification,omitempty"`
 }
 
-// UnmarshalJSON keeps a role whose maxOutputTokens or qualification is
+// UnmarshalJSON keeps a profile whose maxOutputTokens or qualification is
 // malformed, dropping only that field: they are hints a router validates, and
 // a peer's bad hint must not cost the node its advertisement and inventory.
 // The other fields keep their R1 decoding, letter-case folding included.
-func (r *AdvertisedRole) UnmarshalJSON(data []byte) error {
-	type wire AdvertisedRole
+func (r *AdvertisedProfile) UnmarshalJSON(data []byte) error {
+	type wire AdvertisedProfile
 	var next wire
 	legacy := struct {
 		*wire
@@ -50,26 +56,27 @@ func (r *AdvertisedRole) UnmarshalJSON(data []byte) error {
 	if q := bytes.TrimSpace(legacy.Qualification); len(q) > 0 && !bytes.Equal(q, []byte("null")) && json.Unmarshal(q, &ref) == nil {
 		next.Qualification = &ref
 	}
-	*r = AdvertisedRole(next)
+	*r = AdvertisedProfile(next)
 	return nil
 }
 
-// HybridQualified reports whether the role carries finite qualification
+// HybridQualified reports whether the profile carries finite qualification
 // metadata: a valid reference, a served context and an output ceiling below
-// it. It never decodes strictly, so a malformed role from a peer is only
+// it. It never decodes strictly, so malformed qualification from a peer is only
 // ineligible for hybrid requests.
-func (r AdvertisedRole) HybridQualified() bool {
+func (r AdvertisedProfile) HybridQualified() bool {
 	return r.Qualification != nil && r.Qualification.Validate() == nil &&
 		r.ContextTokens > 0 && r.MaxOutputTokens > 0 && r.MaxOutputTokens < r.ContextTokens
 }
 
 // Advertisement is the part of a policy a node publishes to paired peers in
-// its inventory document. It carries no tier entries, no routing section, no
-// profiles beyond the bounds of the declared roles.
+// its inventory document. It carries shared profile facts and ordered roles,
+// with no request options, tier entries or routing section.
 type Advertisement struct {
-	ServedModels ServedModels              `json:"servedModels,omitzero"`
-	Revision     string                    `json:"revision"`
-	Roles        map[string]AdvertisedRole `json:"roles"`
+	ServedModels ServedModels        `json:"servedModels,omitzero"`
+	Revision     string              `json:"revision"`
+	Profiles     []AdvertisedProfile `json:"profiles"`
+	Roles        []Role              `json:"roles"`
 	// PausedBy lets a remote UI show "paused on that node" before it tries.
 	PausedBy  PauseOrigin `json:"pausedBy,omitempty"`
 	PauseMode PauseMode   `json:"pauseMode,omitempty"`
@@ -280,6 +287,10 @@ func (a *Advertisement) UnmarshalJSON(data []byte) error {
 		}
 		next.StrictAdmission = &capability
 	}
+	next.Roles = copyRoles(next.Roles)
+	if next.Profiles == nil {
+		next.Profiles = []AdvertisedProfile{}
+	}
 	*a = Advertisement(next)
 	return nil
 }
@@ -314,30 +325,35 @@ func FilterAdvertisementModels(data []byte) ([]byte, error) {
 	if err := checkModelListKeys(data); err != nil {
 		return nil, err
 	}
+	// Resolve the effective profile list before pruning any role, regardless of
+	// field order. Unrelated fields keep their existing last-wins decoding.
+	dropped := map[string]bool{}
+	for i := range container.members {
+		member := &container.members[i]
+		if strings.EqualFold(member.key, "profiles") {
+			clean, removed, err := filterAdvertisedProfiles(member.value)
+			if err != nil {
+				return nil, err
+			}
+			member.value, dropped = clean, removed
+		}
+	}
 	// Transform members in document order. Legacy revision/Revision and other
 	// unrelated fields retain encoding/json's last-wins and case-fold behavior.
-	d := json.NewDecoder(bytes.NewReader(data))
-	if _, err := d.Token(); err != nil {
-		return nil, err
-	}
 	var out bytes.Buffer
 	out.WriteByte('{')
 	first := true
-	for d.More() {
-		tok, err := d.Token()
-		if err != nil {
-			return nil, err
-		}
-		key, ok := tok.(string)
-		if !ok {
-			return nil, errors.New("invalid policy key")
-		}
-		var raw json.RawMessage
-		if err := d.Decode(&raw); err != nil {
-			return nil, err
-		}
+	for _, member := range container.members {
+		key, raw := member.key, member.value
 		if strings.EqualFold(key, "engineBindingOffers") && offerFields != 1 {
 			continue
+		}
+		if strings.EqualFold(key, "roles") {
+			var err error
+			raw, _, err = filterRoleMemberships(raw, dropped)
+			if err != nil {
+				return nil, err
+			}
 		}
 		clean, err := filterAdvertisementField(key, raw)
 		if err != nil {
@@ -358,11 +374,62 @@ func FilterAdvertisementModels(data []byte) ([]byte, error) {
 		out.WriteByte(':')
 		out.Write(clean)
 	}
-	if _, err := d.Token(); err != nil {
-		return nil, err
-	}
 	out.WriteByte('}')
 	return out.Bytes(), nil
+}
+
+func filterAdvertisedProfiles(raw json.RawMessage) (json.RawMessage, map[string]bool, error) {
+	dropped := map[string]bool{}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return json.RawMessage("[]"), dropped, nil
+	}
+	var entries []json.RawMessage
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		return nil, nil, err
+	}
+	kept := make([]json.RawMessage, 0, len(entries))
+	seen := map[string]bool{}
+	for _, entry := range entries {
+		if value := bytes.TrimSpace(entry); len(value) == 0 || value[0] != '{' {
+			continue
+		}
+		fields, err := modelObject(entry)
+		if err != nil {
+			return nil, nil, err
+		}
+		var key string
+		if rawKey := fields[modelField(fields, "key")]; rawKey != nil {
+			if err := json.Unmarshal(rawKey, &key); err != nil {
+				continue
+			}
+		}
+		if ValidateProfileKey(key) != nil || ValidateModelIdentifierJSON(fields[modelField(fields, "key")]) != nil {
+			dropped[key] = true
+			continue
+		}
+		if seen[key] {
+			return nil, nil, errors.New("duplicate advertised profile key")
+		}
+		seen[key] = true
+		var profile AdvertisedProfile
+		valid := json.Unmarshal(entry, &profile) == nil &&
+			ValidateModelIdentifierJSON(fields[modelField(fields, "model")]) == nil &&
+			ValidateProfileDisplayName(profile.DisplayName) == nil &&
+			ValidateProfileIcon(profile.Icon) == nil &&
+			utf8.Valid(fields[modelField(fields, "displayName")]) &&
+			utf8.Valid(fields[modelField(fields, "icon")]) &&
+			utf8.Valid(fields[modelField(fields, "modelIdentity")])
+		if valid && profile.ModelIdentity != nil {
+			valid = profile.ModelIdentity.Validate() == nil
+		}
+		if !valid {
+			dropped[key] = true
+			continue
+		}
+		kept = append(kept, entry)
+	}
+	clean, err := json.Marshal(kept)
+	return clean, dropped, err
 }
 
 func filterAdvertisementField(key string, raw json.RawMessage) (json.RawMessage, error) {
@@ -376,22 +443,6 @@ func filterAdvertisementField(key string, raw json.RawMessage) (json.RawMessage,
 	if key == "servedModels" {
 		clean, _, err := filterModelArray(raw, true, "engine", "model")
 		return clean, err
-	}
-	if strings.EqualFold(key, "roles") && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		roles, err := modelObject(raw)
-		if err != nil {
-			return nil, err
-		}
-		for tier, raw := range roles {
-			ok, err := filterModelEntry(raw, true)
-			if err != nil {
-				return nil, err
-			}
-			if !ok {
-				delete(roles, tier)
-			}
-		}
-		return json.Marshal(roles)
 	}
 	if key == "strictAdmission" && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 		version, err := strictAdmissionVersion(raw)
@@ -422,23 +473,21 @@ func filterAdvertisementField(key string, raw json.RawMessage) (json.RawMessage,
 	return raw, nil
 }
 
-// Advertisement returns what p publishes to paired peers. Each declared role
-// carries the context bound, capabilities, output ceiling and qualification of
-// the profile for the same (engine, model); a role with no profile carries none.
+// Advertisement returns shared profiles sorted by key and role declarations in
+// policy order. Withheld local-only profiles leave their role references intact.
 func (p Policy) Advertisement() Advertisement {
-	roles := make(map[string]AdvertisedRole, len(p.Roles))
-	for tier, role := range p.Roles {
-		adv := AdvertisedRole{Engine: role.Engine, Model: role.Model}
-		if pr, ok := p.ProfileFor(role.Engine, role.Model); ok {
-			adv.ContextTokens = pr.ContextTokens
-			adv.Capabilities = nilIfEmpty(slices.Clone(pr.Capabilities))
-			adv.MaxOutputTokens = pr.MaxOutputTokens
-			if pr.Qualification != nil {
-				q := *pr.Qualification
-				adv.Qualification = &q
-			}
+	profiles := make([]AdvertisedProfile, 0, len(p.Profiles))
+	for _, pr := range copyProfiles(p.Profiles) {
+		if pr.LocalOnly {
+			continue
 		}
-		roles[tier] = adv
+		profiles = append(profiles, AdvertisedProfile{
+			Key: pr.Key, DisplayName: pr.DisplayName, Icon: pr.Icon,
+			Engine: pr.Engine, Model: pr.Model, ModelIdentity: pr.ModelIdentity,
+			ContextTokens: pr.ContextTokens, Capabilities: nilIfEmpty(pr.Capabilities),
+			MaxOutputTokens: pr.MaxOutputTokens, Qualification: pr.Qualification,
+		})
 	}
-	return Advertisement{Revision: p.Revision, Roles: roles, PausedBy: p.PausedBy, PauseMode: p.PauseMode, ServedModels: slices.Clone(p.ServedModels)}
+	slices.SortFunc(profiles, func(a, b AdvertisedProfile) int { return strings.Compare(a.Key, b.Key) })
+	return Advertisement{Revision: p.Revision, Profiles: profiles, Roles: copyRoles(p.Roles), PausedBy: p.PausedBy, PauseMode: p.PauseMode, ServedModels: slices.Clone(p.ServedModels)}
 }

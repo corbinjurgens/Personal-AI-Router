@@ -22,6 +22,7 @@ import (
 	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/modelconfig"
+	"nvpair-shared/nodepolicy"
 )
 
 const externalConversionResolver = "external-conversion/llama"
@@ -44,12 +45,12 @@ func modelLoadUnpricedReason(requested modelconfig.RequestedLoad) string {
 func modelLoadAllowedPresetKeys(loads []modelconfig.ModelLoad) map[string]map[string]bool {
 	allowed := map[string]map[string]bool{}
 	for _, load := range loads {
-		allowed[load.ModelID] = map[string]bool{}
+		allowed[load.ProfileKey] = map[string]bool{}
 		if modelLoadNativeFit(load.Requested) {
-			allowed[load.ModelID] = map[string]bool{"fit": true, "fit-target": true, "fit-ctx": true}
+			allowed[load.ProfileKey] = map[string]bool{"fit": true, "fit-target": true, "fit-ctx": true}
 		}
 		for key := range load.Requested.ExtraOptions {
-			allowed[load.ModelID][key] = true
+			allowed[load.ProfileKey][key] = true
 		}
 	}
 	return allowed
@@ -385,24 +386,50 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 	requests := modelconfig.CloneLoads(rt.ModelLoads)
 	operation, _ := ctx.Value(modelAutoOperationKey{}).(modelAutoOperation)
 	for i := range requests {
-		if !modelLoadHasAuto(requests[i].Requested) || !approved && operation.RecalculateModel == requests[i].ModelID {
-			requests[i].Resolved = nil
-		}
+		requests[i].Resolved = nil
 	}
 	loads, err := modelconfig.CanonicalLoads(requests)
 	if err != nil || len(loads) == 0 {
 		return nil, modelLoadError("", "requested", "A valid complete typed model set is required.")
 	}
+	// CanonicalLoads alone repairs missing keys. Keep old artifact assertions
+	// separately from new preferences, whose allocation may intentionally differ.
+	assertedLoads := modelconfig.CloneLoads(rt.ModelLoads)
+	for i := range assertedLoads {
+		assertedLoads[i].Requested = modelconfig.RequestedLoad{}
+	}
+	assertedLoads, err = modelconfig.CanonicalLoads(assertedLoads)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateModelLoadArtifactAssertions(assertedLoads, rt.Serving); err != nil {
+		return nil, err
+	}
+	for i := range loads {
+		load := &loads[i]
+		if modelLoadHasAuto(load.Requested) && (approved || operation.RecalculateModel != load.ProfileKey) {
+			load.Resolved = rtLoadResolution(assertedLoads, load.ProfileKey)
+		}
+	}
 	for _, load := range loads {
-		if err := validateModelLoadGPUSelection(load.ModelID, load.Requested); err != nil {
+		if err := validateModelLoadGPUSelection(load.ProfileKey, load.Requested); err != nil {
 			return nil, err
 		}
 		if len(modelLoadGPUSelection(load.Requested)) == 0 {
 			continue
 		}
 		for _, other := range loads {
-			if other.ModelID != load.ModelID && other.Requested.GPU != nil && other.Requested.GPU.Mode == "auto" && (other.Resolved == nil || other.Resolved.GPU.Mode == "layers" && other.Resolved.GPU.Layers != nil && *other.Resolved.GPU.Layers > 0) {
-				return nil, modelLoadError(load.ModelID, "extraOptions", load.ModelID+" selects GPUs and cannot share an engine with reviewed Auto profile "+other.ModelID+"; set that profile's GPU mode to layers.")
+			if other.ProfileKey != load.ProfileKey && other.Requested.GPU != nil && other.Requested.GPU.Mode == "auto" && (other.Resolved == nil || other.Resolved.GPU.Mode == "layers" && other.Resolved.GPU.Layers != nil && *other.Resolved.GPU.Layers > 0) {
+				return nil, modelLoadError(load.ProfileKey, "extraOptions", load.ProfileKey+" selects GPUs and cannot share an engine with reviewed Auto profile "+other.ProfileKey+"; set that profile's GPU mode to layers.")
+			}
+		}
+	}
+	// Refuse changes to frozen Auto intent before any advisory memory read.
+	// GPU-selection refusals above keep their established precedence.
+	for _, load := range loads {
+		if modelLoadHasAuto(load.Requested) && load.Resolved != nil {
+			if err := modelAutoFrozen(load.ProfileKey, load.Requested, load.Resolved); err != nil {
+				return nil, err
 			}
 		}
 	}
@@ -445,7 +472,7 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 		nativeOptions = nil
 	}
 	for _, load := range loads {
-		if err := validateNativeExtraOptions(load.ModelID, load.Requested.ExtraOptions, nativeOptions); err != nil {
+		if err := validateNativeExtraOptions(load.ProfileKey, load.Requested.ExtraOptions, nativeOptions); err != nil {
 			return nil, err
 		}
 	}
@@ -491,7 +518,7 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 	for i := range resolutionRT.ModelLoads {
 		load := &resolutionRT.ModelLoads[i]
 		load.Requested = modelconfig.RequestedLoad{}
-		load.Resolved = rtLoadResolution(rt.ModelLoads, load.ModelID)
+		load.Resolved = rtLoadResolution(assertedLoads, load.ProfileKey)
 	}
 	plat := *st.plat
 	plat.Runtime = resolutionRT
@@ -505,12 +532,18 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 	lists := make([]modelFileList, len(loads))
 	for i := range loads {
 		load := &loads[i]
-		if err := validateLlamaModelID(load.ModelID); err != nil {
-			return nil, modelLoadError(load.ModelID, "modelId", "Use an exact canonical native model ID.")
+		if err := nodepolicy.ValidateProfileKey(load.ProfileKey); err != nil {
+			return nil, modelLoadError(load.ProfileKey, "profileKey", err.Error())
+		}
+		if err := validateLlamaModelID(load.ProfileKey); err != nil {
+			return nil, modelLoadError(load.ProfileKey, "profileKey", "Use an exact canonical native profile key.")
+		}
+		if err := validateLlamaArtifactModelID(load.ModelID); err != nil {
+			return nil, modelLoadError(load.ProfileKey, "modelId", "Use an exact native artifact model ID.")
 		}
 		list, _, err := resolveLlamaArtifacts(ctx, resolver, command, store, load.ModelID, access)
 		if err != nil {
-			return nil, modelLoadError(load.ModelID, "artifacts", "Exact artifacts are missing, ambiguous, changed or exceed the bounded resolver limits.")
+			return nil, modelLoadError(load.ProfileKey, "artifacts", "Exact artifacts are missing, ambiguous, changed or exceed the bounded resolver limits.")
 		}
 		facts, factsErr := decodeInspectionFacts(ctx, list, access)
 		var layerCount *int32
@@ -522,11 +555,11 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 		paths := map[string]string{}
 		for _, file := range list.Files {
 			if file.Role != "model" && file.Role != "draft" {
-				return nil, modelLoadError(load.ModelID, "artifacts", "Companion artifacts have no typed native mapping.")
+				return nil, modelLoadError(load.ProfileKey, "artifacts", "Companion artifacts have no typed native mapping.")
 			}
 			binding, err := access.bindingExpected(ctx, file.configured, file.abs, file.info)
 			if err != nil {
-				return nil, modelLoadError(load.ModelID, "artifacts", "Artifact changed during compilation.")
+				return nil, modelLoadError(load.ProfileKey, "artifacts", "Artifact changed during compilation.")
 			}
 			artifacts = append(artifacts, modelconfig.ArtifactBinding{Role: file.Role, Path: binding.SourcePath, ResolvedTarget: binding.ResolvedTarget, Size: strconv.FormatInt(binding.SizeBytes, 10), MtimeNS: binding.MtimeNS, SampleSHA256: binding.SampleSHA256})
 			key := "model"
@@ -541,10 +574,10 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 		var resolved *modelconfig.ResolvedLoad
 		if modelLoadHasAuto(load.Requested) {
 			if load.Resolved != nil {
-				options, resolved, err = modelAutoCompileFrozen(load.ModelID, load.Requested, load.Resolved, layerCount, artifacts, buildID)
+				options, resolved, err = modelAutoCompileFrozen(load.ProfileKey, load.Requested, load.Resolved, layerCount, artifacts, buildID)
 			} else {
 				if approved {
-					return nil, modelLoadError(load.ModelID, "auto", "Accepted Auto resolution missing; explicitly Recalculate.")
+					return nil, modelLoadError(load.ProfileKey, "auto", "Accepted Auto resolution missing; explicitly Recalculate.")
 				}
 				op, _ := ctx.Value(modelAutoOperationKey{}).(modelAutoOperation)
 				if op.Memory == nil {
@@ -558,7 +591,7 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 				operation.Memory = op.Memory
 				ctx = context.WithValue(ctx, modelAutoOperationKey{}, op)
 				op.NativeSource = func(candidate *modelconfig.ResolvedLoad) (string, error) {
-					finite := []modelconfig.ModelLoad{{ModelID: load.ModelID, Requested: load.Requested, Resolved: candidate}}
+					finite := []modelconfig.ModelLoad{{ProfileKey: load.ProfileKey, ModelID: load.ModelID, Requested: load.Requested, Resolved: candidate}}
 					constrained, err := modelConstrainCommand(command, finite)
 					if err != nil {
 						return "", err
@@ -571,17 +604,17 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 				if rt.modelLoadOwner != nil {
 					estimates = &rt.modelLoadOwner.modelEstimates
 				}
-				proposal, resolveErr := resolveModelSettingsAutoInput(ctx, load.ModelID, load.Requested, input, op, estimates)
+				proposal, resolveErr := resolveModelSettingsAutoInput(ctx, load.ProfileKey, load.Requested, input, op, estimates)
 				if op.Proposals != nil {
-					op.Proposals[load.ModelID] = proposal
+					op.Proposals[load.ProfileKey] = proposal
 				}
 				if resolveErr != nil {
 					return nil, resolveErr
 				}
-				options, resolved, err = modelAutoCompileCandidate(load.ModelID, proposal.Resolved, layerCount)
+				options, resolved, err = modelAutoCompileCandidate(load.ProfileKey, proposal.Resolved, layerCount)
 			}
 		} else {
-			options, resolved, err = typedLlamaModelOptions(load.ModelID, modelEffectiveLoadOptions(load.Requested), layerCount)
+			options, resolved, err = typedLlamaModelOptions(load.ProfileKey, modelEffectiveLoadOptions(load.Requested), layerCount)
 			if err == nil {
 				resolved.Artifacts, resolved.NativeBuildID = artifacts, buildID
 			}
@@ -593,7 +626,7 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 			options["device"] = resolved.DeviceBinding.Selector
 		}
 		maps.Copy(options, paths)
-		if previous := rtLoadResolution(rt.ModelLoads, load.ModelID); previous != nil && !modelLoadHasAuto(load.Requested) {
+		if previous := rtLoadResolution(assertedLoads, load.ProfileKey); previous != nil && !modelLoadHasAuto(load.Requested) {
 			resolved.ResolverRevision = previous.ResolverRevision
 			resolved.ReviewedInputID = previous.ReviewedInputID
 			if strings.HasPrefix(previous.ResolverRevision, "auto/") {
@@ -607,7 +640,7 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 				resolved.DeviceBinding = &binding
 			}
 		}
-		sections[load.ModelID], lists[i] = options, list
+		sections[load.ProfileKey], lists[i] = options, list
 		load.Resolved = resolved
 		if estimates != nil && factsErr == nil {
 			// Carry the same decoded facts and bindings, without a second read,
@@ -619,16 +652,16 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 				mib := int32(cacheRAM)
 				allocation.Options.CacheRAM = &mib
 			}
-			estimates[load.ModelID] = modelEstimateInput{Facts: facts, Bindings: modelEstimateBindings(resolved.Artifacts), Allocation: &allocation, BuildID: buildID, Support: modelEstimatorSupport}
+			estimates[load.ProfileKey] = modelEstimateInput{Facts: facts, Bindings: modelEstimateBindings(resolved.Artifacts), Allocation: &allocation, BuildID: buildID, Support: modelEstimatorSupport}
 			if operation.Memory != nil && !approved {
-				input := estimates[load.ModelID]
+				input := estimates[load.ProfileKey]
 				input.Memory, err = operation.Memory.ModelAutoMemory(ctx)
 				if err != nil {
 					return nil, err
 				}
 				operation.Memory = modelAutoSnapshotMemory{memory: input.Memory}
 				ctx = context.WithValue(ctx, modelAutoOperationKey{}, operation)
-				estimates[load.ModelID] = input
+				estimates[load.ProfileKey] = input
 			}
 		}
 	}
@@ -647,14 +680,14 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 		}
 		nativeSource = current
 		if modelAutoNativeSource(load.Resolved) != current {
-			if approved || rtLoadResolution(rt.ModelLoads, load.ModelID) != nil && operation.RecalculateModel != load.ModelID {
-				return nil, modelLoadError(load.ModelID, "nativeBuildId", "Reviewed native source changed; explicitly Recalculate.")
+			if approved || rtLoadResolution(assertedLoads, load.ProfileKey) != nil && operation.RecalculateModel != load.ProfileKey {
+				return nil, modelLoadError(load.ProfileKey, "nativeBuildId", "Reviewed native source changed; explicitly Recalculate.")
 			}
 			conversion, memory, ok := modelAutoReviewParts(load.Resolved.ReviewedInputID)
 			if !ok {
-				return nil, modelLoadError(load.ModelID, "auto", "Invalid reviewed input.")
+				return nil, modelLoadError(load.ProfileKey, "auto", "Invalid reviewed input.")
 			}
-			load.Resolved.ReviewedInputID, err = modelAutoReviewHash(load.ModelID, load.Requested, load.Resolved, conversion, memory, current)
+			load.Resolved.ReviewedInputID, err = modelAutoReviewHash(load.ProfileKey, load.Requested, load.Resolved, conversion, memory, current)
 			if err != nil {
 				return nil, err
 			}
@@ -731,8 +764,8 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 	for i := range loads {
 		loads[i].Resolved.SourceInputDigest = result.Digest
 		loads[i].Resolved.PresetDigest = presetDigest
-		if approved && !reflect.DeepEqual(loads[i].Resolved, rtLoadResolution(rt.ModelLoads, loads[i].ModelID)) {
-			return nil, modelLoadError(loads[i].ModelID, "resolved", "Typed inputs changed; obtain a fresh preview before starting.")
+		if approved && !reflect.DeepEqual(loads[i].Resolved, rtLoadResolution(assertedLoads, loads[i].ProfileKey)) {
+			return nil, modelLoadError(loads[i].ProfileKey, "resolved", "Typed inputs changed; obtain a fresh preview before starting.")
 		}
 	}
 	// Re-resolve through Task 5 after facts and samples. Do not trust the first
@@ -756,7 +789,7 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 		}
 		after, _, err := resolveLlamaArtifactsExpected(ctx, resolver, resolutionCommand, store, load.ModelID, finalAccess, lists[i])
 		if err != nil || after.binding != lists[i].binding || !sameTypedFiles(lists[i], after) {
-			return nil, modelLoadError(load.ModelID, "artifacts", "Artifact source changed during compilation.")
+			return nil, modelLoadError(load.ProfileKey, "artifacts", "Artifact source changed during compilation.")
 		}
 	}
 	if current, err := access.bindingExpected(ctx, buildEvidence.configured, buildEvidence.target, buildEvidence.info); err != nil || *current != *build {
@@ -802,7 +835,7 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 	}
 	inputs := &typedLlamaInputEvidence{build: buildEvidence, models: make(map[string]modelFileList, len(loads)), libraries: libraries}
 	for i, load := range loads {
-		inputs.models[load.ModelID] = lists[i]
+		inputs.models[load.ProfileKey] = lists[i]
 	}
 	result.evidence.typed = inputs
 	for _, output := range advisory {
@@ -880,10 +913,38 @@ func typedLlamaIdentityCommand(command launchCommand, rt Runtime) (launchCommand
 	return identity, nil
 }
 
-func rtLoadResolution(loads []modelconfig.ModelLoad, id string) *modelconfig.ResolvedLoad {
+func rtLoadResolution(loads []modelconfig.ModelLoad, profileKey string) *modelconfig.ResolvedLoad {
 	for _, load := range loads {
-		if load.ModelID == id {
+		if load.ProfileKey == profileKey {
 			return load.Resolved
+		}
+	}
+	return nil
+}
+
+// New profiles have no sampled assertions yet. Siblings of one exact artifact
+// selector must agree on bindings and declared content, independent of allocation.
+func validateModelLoadArtifactAssertions(loads []modelconfig.ModelLoad, serving *engines.ServingConfig) error {
+	assertions := map[string][]modelconfig.ArtifactBinding{}
+	declarations := map[string][]engines.ServingArtifact{}
+	if serving != nil {
+		for _, model := range serving.Models {
+			declarations[model.ModelID] = model.Artifacts
+		}
+	}
+	declaredAssertions := map[string][]engines.ServingArtifact{}
+	for _, load := range loads {
+		if load.Resolved != nil {
+			if previous, exists := assertions[load.ModelID]; exists && !reflect.DeepEqual(previous, load.Resolved.Artifacts) {
+				return modelLoadError(load.ProfileKey, "artifacts", "Profiles of one model disagree on artifacts.")
+			}
+			assertions[load.ModelID] = load.Resolved.Artifacts
+		}
+		if artifacts, declared := declarations[load.ProfileKey]; declared {
+			if previous, exists := declaredAssertions[load.ModelID]; exists && !reflect.DeepEqual(previous, artifacts) {
+				return modelLoadError(load.ProfileKey, "artifacts", "Profiles of one model disagree on artifacts.")
+			}
+			declaredAssertions[load.ModelID] = artifacts
 		}
 	}
 	return nil
@@ -896,7 +957,10 @@ func validateTypedLlamaExport(rt Runtime, model string) error {
 	for i := range rt.ModelLoads {
 		load := &rt.ModelLoads[i]
 		if load.ModelID == model {
-			if selected != nil || load.Resolved == nil || load.Validate() != nil {
+			if load.Resolved == nil || load.Validate() != nil {
+				return errNoArtifactBinding
+			}
+			if selected != nil && !reflect.DeepEqual(selected.Resolved.Artifacts, load.Resolved.Artifacts) {
 				return errNoArtifactBinding
 			}
 			selected = load
@@ -920,6 +984,27 @@ func sameTypedFiles(a, b modelFileList) bool {
 func modelLoadDigest(data []byte) string {
 	digest := sha256.Sum256(data)
 	return hex.EncodeToString(digest[:])
+}
+
+func modelLoadChangeProfileKey(change *modelconfig.ModelChange) string {
+	if change.ProfileKey != "" {
+		return change.ProfileKey
+	}
+	return change.ModelID
+}
+
+func modelLoadPreviewDigest(native, conversion string, change *modelconfig.ModelChange, baseline settings.Config) (string, error) {
+	identity, err := json.Marshal(struct {
+		Native, Conversion  string
+		ProfileKey, ModelID string
+		Remove              bool
+		Patch               *modelconfig.LoadPatch
+		Baseline            settings.Config
+	}{native, conversion, modelLoadChangeProfileKey(change), change.ModelID, change.Remove, change.Load, baseline})
+	if err != nil {
+		return "", err
+	}
+	return modelLoadDigest(identity), nil
 }
 
 func typedLlamaPreset(sections map[string]map[string]string) ([]byte, error) {
@@ -1109,6 +1194,10 @@ func typedLlamaModelOptions(model string, requested modelconfig.RequestedLoad, l
 // the settings operation owner.
 func (e *Executor) previewModelLoadChange(ctx context.Context, st *engineState, p settings.Request) (settings.Preview, error) {
 	result := settings.Preview{Settings: p.Settings.Clone(), Args: []string{}, Env: []string{}, Errors: map[string]string{}}
+	profileKey := ""
+	if p.ModelChange != nil {
+		profileKey = modelLoadChangeProfileKey(p.ModelChange)
+	}
 	fail := func(err error) (settings.Preview, error) {
 		if ctx.Err() != nil {
 			return settings.Preview{}, ctx.Err()
@@ -1121,7 +1210,7 @@ func (e *Executor) previewModelLoadChange(ctx context.Context, st *engineState, 
 		result.Errors[field] = err.Error()
 		if p.ModelChange != nil {
 			op, _ := ctx.Value(modelAutoOperationKey{}).(modelAutoOperation)
-			if proposal, ok := op.Proposals[p.ModelChange.ModelID]; ok {
+			if proposal, ok := op.Proposals[profileKey]; ok {
 				result.Auto = &proposal
 			}
 		}
@@ -1131,7 +1220,7 @@ func (e *Executor) previewModelLoadChange(ctx context.Context, st *engineState, 
 		return fail(err)
 	}
 	if p.ModelChange != nil && p.ModelChange.Load != nil {
-		if err := validateModelLoadGPUSelection(p.ModelChange.ModelID, p.ModelChange.Load.Set); err != nil {
+		if err := validateModelLoadGPUSelection(profileKey, p.ModelChange.Load.Set); err != nil {
 			return fail(err)
 		}
 		st.mu.Lock()
@@ -1141,12 +1230,12 @@ func (e *Executor) previewModelLoadChange(ctx context.Context, st *engineState, 
 			// A selected patch can inherit the other half of an invalid
 			// placement combination. Merge through the existing owner before
 			// native help, not only before the later typed compilation.
-			if _, err := patchModelLoad(loads, p.ModelChange.ModelID, *p.ModelChange.Load); err != nil {
+			if _, err := patchModelLoad(loads, profileKey, p.ModelChange.ModelID, *p.ModelChange.Load); err != nil {
 				return fail(err)
 			}
 		}
 	}
-	if st.manifest.FamilyOrDefault() != "llamacpp" || p.ModelChange == nil || p.ModelChange.Load == nil || p.ModelChange.Policy != nil {
+	if st.manifest.FamilyOrDefault() != "llamacpp" || p.ModelChange == nil || p.ModelChange.Load == nil && !p.ModelChange.Remove || p.ModelChange.Policy != nil {
 		return fail(modelLoadError("", "request", "Only a local llama.cpp load-only preview is available."))
 	}
 	// This explicit operation may discover help; compiler/frozen callers only
@@ -1196,7 +1285,7 @@ func (e *Executor) previewModelLoadChange(ctx context.Context, st *engineState, 
 		rt, before, conversionDigest = conversion.Runtime, conversion.Before, conversion.SourceDigest
 	} else if len(rt.ModelLoads) != 0 {
 		beforeRT := rt
-		if modelLoadHasAuto(p.ModelChange.Load.Set) {
+		if p.ModelChange.Load != nil && modelLoadHasAuto(p.ModelChange.Load.Set) {
 			// Render the selected model's old finite settings for the diff,
 			// without requiring its old native build to remain installed. This
 			// is not a launch or a new recommendation. Artifact bindings and
@@ -1204,8 +1293,8 @@ func (e *Executor) previewModelLoadChange(ctx context.Context, st *engineState, 
 			beforeRT.ModelLoads = modelconfig.CloneLoads(rt.ModelLoads)
 			for i := range beforeRT.ModelLoads {
 				load := &beforeRT.ModelLoads[i]
-				if load.ModelID == p.ModelChange.ModelID && modelLoadHasAuto(load.Requested) {
-					if err := modelAutoFrozen(load.ModelID, load.Requested, load.Resolved); err != nil {
+				if load.ProfileKey == profileKey && modelLoadHasAuto(load.Requested) {
+					if err := modelAutoFrozen(load.ProfileKey, load.Requested, load.Resolved); err != nil {
 						return fail(err)
 					}
 					load.Requested = load.Resolved.Options.Clone()
@@ -1223,18 +1312,25 @@ func (e *Executor) previewModelLoadChange(ctx context.Context, st *engineState, 
 	}
 	// Every explicit Auto patch is Recalculate, even with identical preferences.
 	// Preserve conversion provenance independently before clearing the old result.
-	conversionSource := modelAutoConversionSource(rtLoadResolution(rt.ModelLoads, p.ModelChange.ModelID))
+	conversionSource := modelAutoConversionSource(rtLoadResolution(rt.ModelLoads, profileKey))
 	if conversionDigest != "" {
 		conversionSource = conversionDigest
 	}
-	rt.ModelLoads, err = patchModelLoad(rt.ModelLoads, p.ModelChange.ModelID, *p.ModelChange.Load)
+	if p.ModelChange.Remove {
+		rt.ModelLoads, err = removeModelLoad(rt.ModelLoads, profileKey, p.ModelChange.ModelID)
+		if err == nil {
+			rt.Serving = removeModelLoadDeclaration(rt.Serving, profileKey)
+		}
+	} else {
+		rt.ModelLoads, err = patchModelLoad(rt.ModelLoads, profileKey, p.ModelChange.ModelID, *p.ModelChange.Load)
+	}
 	if err != nil {
 		return fail(err)
 	}
 	op, _ := ctx.Value(modelAutoOperationKey{}).(modelAutoOperation)
 	op.ConversionSource = conversionSource
-	if modelLoadHasAuto(p.ModelChange.Load.Set) {
-		op.RecalculateModel = p.ModelChange.ModelID
+	if p.ModelChange.Load != nil && modelLoadHasAuto(p.ModelChange.Load.Set) {
+		op.RecalculateModel = profileKey
 	}
 	op.Proposals = make(map[string]modelconfig.AutoProposal)
 	ctx = context.WithValue(ctx, modelAutoOperationKey{}, op)
@@ -1245,9 +1341,27 @@ func (e *Executor) previewModelLoadChange(ctx context.Context, st *engineState, 
 		return fail(err)
 	}
 	var advisory map[string]modelEstimateInput
-	prepared, err := compileTypedLlamaInputs(ctx, snapshot.state, command, rt, false, &advisory)
-	if err != nil {
-		return fail(err)
+	prepared := &llamaServingLaunch{}
+	if len(rt.ModelLoads) != 0 {
+		prepared, err = compileTypedLlamaInputs(ctx, snapshot.state, command, rt, false, &advisory)
+		if err != nil {
+			return fail(err)
+		}
+	}
+	result.Identities = map[string]engines.ModelIdentity{}
+	for _, load := range prepared.ModelLoads {
+		if load.ProfileKey != profileKey {
+			continue
+		}
+		list, exists := prepared.evidence.typed.models[load.ProfileKey]
+		if !exists || load.Resolved == nil {
+			return fail(modelLoadError(load.ProfileKey, "artifacts", "Compiled profile artifact evidence is missing."))
+		}
+		identity, ok := e.modelIdentityFromArtifacts(p.Engine, load.ModelID, list, int64(load.Resolved.PerSlotContext))
+		if !ok {
+			return fail(modelLoadError(load.ProfileKey, "artifacts", "Model identity is unavailable."))
+		}
+		result.Identities[load.ProfileKey] = identity
 	}
 	current, err := inspectionSnapshot(st, p.Engine)
 	if err != nil || !snapshot.equal(current) {
@@ -1279,23 +1393,37 @@ func (e *Executor) previewModelLoadChange(ctx context.Context, st *engineState, 
 	result.Restart = running && changed
 	models := map[string]bool{}
 	for model := range before {
-		models[model] = true
+		if model != "*" {
+			models[model] = true
+		}
 	}
 	for _, load := range prepared.ModelLoads {
-		models[load.ModelID] = true
+		models[load.ProfileKey] = true
 	}
 	result.Impact = e.modelLoadImpact(p.Engine, baseline, result.Settings, running, changed, models)
 	if rt.LaunchArgs != nil {
 		result.Args = slices.Clone(*rt.LaunchArgs)
 	}
 	result.Env = literalAssignments(command.Env)
-	result.Serving = preparedServingReadback(snapshot.state, prepared)
+	if len(prepared.ModelLoads) != 0 {
+		result.Serving = preparedServingReadback(snapshot.state, prepared)
+	}
 	after, err := parseLlamaServingPresetAllowing(prepared.Snapshot, modelLoadAllowedPresetKeys(prepared.ModelLoads))
 	if err != nil {
 		return fail(err)
 	}
-	for _, model := range sortedKeys(after) {
+	diffModels := map[string]bool{}
+	for model := range before {
+		diffModels[model] = true
+	}
+	for model := range after {
+		diffModels[model] = true
+	}
+	for _, model := range sortedKeys(diffModels) {
 		keys := maps.Clone(after[model])
+		if keys == nil {
+			keys = map[string]string{}
+		}
 		maps.Copy(keys, before[model])
 		for _, key := range sortedKeys(keys) {
 			var old, next any
@@ -1325,25 +1453,24 @@ func (e *Executor) previewModelLoadChange(ctx context.Context, st *engineState, 
 		return fail(err)
 	}
 	result.Diff = append(result.Diff, modelconfig.FieldDiff{Field: "launchText", Before: a, After: b})
-	identity, err := json.Marshal(struct {
-		Native, Conversion string
-		Patch              *modelconfig.LoadPatch
-	}{prepared.Digest, conversionDigest, p.ModelChange.Load})
+	result.PreviewDigest, err = modelLoadPreviewDigest(prepared.Digest, conversionDigest, p.ModelChange, baseline)
 	if err != nil {
 		return fail(err)
 	}
-	result.PreviewDigest = modelLoadDigest(identity)
 	if err := modelconfig.CheckPayloadSize(result); err != nil {
 		return fail(err)
 	}
 	// All authoritative work is already complete. Estimate failures, panic or
 	// expiration remain advisory, including a reply-size failure after attachment.
 	var estimate modelconfig.Estimate
-	if proposal, ok := op.Proposals[p.ModelChange.ModelID]; ok {
+	if p.ModelChange.Remove {
+		return result, nil
+	}
+	if proposal, ok := op.Proposals[profileKey]; ok {
 		estimate = proposal.Estimate
 		result.Auto = &proposal
 	} else {
-		estimate = e.modelEstimates.estimate(ctx, advisory[p.ModelChange.ModelID])
+		estimate = e.modelEstimates.estimate(ctx, advisory[profileKey])
 	}
 	result.Estimate = &estimate
 	if err := modelconfig.CheckPayloadSize(result); err != nil {
@@ -1358,7 +1485,7 @@ func (e *Executor) modelLoadImpact(engine string, before, after settings.Config,
 	}
 	for _, config := range []settings.Config{before, after} {
 		for _, load := range config.ModelLoads {
-			models[load.ModelID] = true
+			models[load.ProfileKey] = true
 		}
 		if config.Serving != nil {
 			for _, model := range config.Serving.Models {
@@ -1384,15 +1511,26 @@ func (e *Executor) modelLoadImpact(engine string, before, after settings.Config,
 
 // Preparation seam for Task 7. It changes selected requested leaves
 // only; previous target artifact assertions survive for exact re-resolution.
-func patchModelLoad(loads []modelconfig.ModelLoad, model string, patch modelconfig.LoadPatch) ([]modelconfig.ModelLoad, error) {
+func patchModelLoad(loads []modelconfig.ModelLoad, profileKey, modelID string, patch modelconfig.LoadPatch) ([]modelconfig.ModelLoad, error) {
 	if err := patch.Validate(); err != nil {
 		return nil, err
 	}
+	if err := nodepolicy.ValidateProfileKey(profileKey); err != nil {
+		return nil, modelLoadError(profileKey, "profileKey", err.Error())
+	}
+	if err := validateLlamaModelID(profileKey); err != nil {
+		return nil, err
+	}
+	if err := validateLlamaArtifactModelID(modelID); err != nil {
+		return nil, err
+	}
 	out := modelconfig.CloneLoads(loads)
-	i := slices.IndexFunc(out, func(load modelconfig.ModelLoad) bool { return load.ModelID == model })
+	i := slices.IndexFunc(out, func(load modelconfig.ModelLoad) bool { return load.ProfileKey == profileKey })
 	if i < 0 {
-		out = append(out, modelconfig.ModelLoad{ModelID: model})
+		out = append(out, modelconfig.ModelLoad{ProfileKey: profileKey, ModelID: modelID})
 		i = len(out) - 1
+	} else if out[i].ModelID != modelID {
+		return nil, modelLoadError(profileKey, "modelId", "A profile keeps its model; create a new profile.")
 	}
 	before, err := json.Marshal(out[i].Requested)
 	if err != nil {
@@ -1424,16 +1562,42 @@ func patchModelLoad(loads []modelconfig.ModelLoad, model string, patch modelconf
 	if err := requested.Validate(); err != nil {
 		field, reason, ok := strings.Cut(err.Error(), ":")
 		if ok {
-			return nil, modelLoadError(model, field, strings.TrimSpace(reason))
+			return nil, modelLoadError(profileKey, field, strings.TrimSpace(reason))
 		}
 		return nil, err
 	}
-	if err := validateModelLoadGPUSelection(model, requested); err != nil {
+	if err := validateModelLoadGPUSelection(profileKey, requested); err != nil {
 		return nil, err
 	}
 	out[i].Requested = requested
-	slices.SortFunc(out, func(a, b modelconfig.ModelLoad) int { return strings.Compare(a.ModelID, b.ModelID) })
+	slices.SortFunc(out, func(a, b modelconfig.ModelLoad) int { return strings.Compare(a.ProfileKey, b.ProfileKey) })
 	return out, nil
+}
+
+func removeModelLoad(loads []modelconfig.ModelLoad, profileKey, modelID string) ([]modelconfig.ModelLoad, error) {
+	out := modelconfig.CloneLoads(loads)
+	i := slices.IndexFunc(out, func(load modelconfig.ModelLoad) bool { return load.ProfileKey == profileKey })
+	if i < 0 {
+		return nil, modelLoadError(profileKey, "profileKey", "Profile load does not exist.")
+	}
+	if out[i].ModelID != modelID {
+		return nil, modelLoadError(profileKey, "modelId", "A profile keeps its model; create a new profile.")
+	}
+	out = slices.Delete(out, i, i+1)
+	slices.SortFunc(out, func(a, b modelconfig.ModelLoad) int { return strings.Compare(a.ProfileKey, b.ProfileKey) })
+	return out, nil
+}
+
+func removeModelLoadDeclaration(serving *engines.ServingConfig, profileKey string) *engines.ServingConfig {
+	if serving == nil {
+		return nil
+	}
+	serving = serving.Clone()
+	serving.Models = slices.DeleteFunc(serving.Models, func(model engines.ServingModel) bool { return model.ModelID == profileKey })
+	if len(serving.Models) == 0 {
+		return nil
+	}
+	return serving
 }
 
 // The complete source digest binds the current external baseline during
@@ -1446,12 +1610,16 @@ type typedLlamaConversion struct {
 	inputs       *typedLlamaInputEvidence
 }
 
-// Configure receives frozen settings, not the selected patch. Reconstruct the
-// complete current external router at this boundary, preserve its artifact set
-// and unrelated launch inputs, then let the normal compiler validate the exact
-// reviewed requested/resolved identity. Never use generated output as input.
-func (e *Executor) validateTypedLlamaConversion(ctx context.Context, st *engineState, rt Runtime, desired settings.Config) (func() error, error) {
-	if len(rt.ModelLoads) != 0 || len(desired.ModelLoads) == 0 || st.manifest.FamilyOrDefault() != "llamacpp" {
+// Configure receives frozen settings and optional parent-accepted removal
+// metadata, never a patch to apply again. Reconstruct the complete external
+// router and bind the exact selected omission to the original native review.
+func (e *Executor) validateTypedLlamaConversion(ctx context.Context, st *engineState, rt Runtime, desired settings.Config, removal *modelconfig.ModelChange) (func() error, error) {
+	if removal != nil {
+		if err := settings.ValidateReviewedModelChange(removal); err != nil {
+			return nil, err
+		}
+	}
+	if len(rt.ModelLoads) != 0 || st.manifest.FamilyOrDefault() != "llamacpp" {
 		return nil, nil
 	}
 	command, err := launchForState(st, rt.Port)
@@ -1463,6 +1631,32 @@ func (e *Executor) validateTypedLlamaConversion(ctx context.Context, st *engineS
 		return nil, err
 	}
 	if cli["models-preset"] == "" && env["models-preset"] == "" {
+		return nil, nil
+	}
+	if len(desired.ModelLoads) == 0 && removal == nil {
+		// An ordinary external-router edit keeps an external source. Dropping
+		// the complete router into default mode requires the same reviewed
+		// selection as removing a section into a nonempty typed configuration.
+		preview := e.previewLaunchLocked(st, settings.Request{Engine: st.manifest.Engine, Settings: desired})
+		if len(preview.Errors) != 0 || preview.Conflict != nil {
+			return nil, modelLoadError("", "conversion", "External router settings failed authoritative validation.")
+		}
+		next := rt
+		next.Port, next.Serving = desired.ServerPort, desired.Serving.Clone()
+		next.LaunchArgs, next.LaunchEnv = &preview.Args, &preview.Env
+		vars := st.pathVars()
+		vars["host"], vars["port"] = effectiveBind(next.Bind, ""), strconv.Itoa(next.Port)
+		proposed, err := resolveProcessLaunch(llamaServingBase(next), command.Bin, vars)
+		if err != nil {
+			return nil, err
+		}
+		cli, env, err := llamaLaunchOptions(proposed, next.EditableLaunch)
+		if err != nil {
+			return nil, err
+		}
+		if cli["models-preset"] == "" && env["models-preset"] == "" {
+			return nil, modelLoadError("", "conversion", "Removing an external router requires the reviewed profile selection.")
+		}
 		return nil, nil
 	}
 	// Use an immutable baseline: after persistence st contains the typed map.
@@ -1480,17 +1674,17 @@ func (e *Executor) validateTypedLlamaConversion(ctx context.Context, st *engineS
 	}
 	for _, load := range desired.ModelLoads {
 		if load.Resolved == nil {
-			return nil, modelLoadError(load.ModelID, "conversion", "Accepted artifact bindings are missing.")
+			return nil, modelLoadError(load.ProfileKey, "conversion", "Accepted artifact bindings are missing.")
 		}
 		list := modelFileList{source: &sourceSnapshot{}}
 		for _, artifact := range load.Resolved.Artifacts {
 			file, err := captureSource(artifact.Path, false)
 			if err != nil || file.target != artifact.ResolvedTarget || strconv.FormatInt(file.size, 10) != artifact.Size || strconv.FormatInt(file.mtime, 10) != artifact.MtimeNS {
-				return nil, modelLoadError(load.ModelID, "conversion", "Accepted artifacts changed since preview.")
+				return nil, modelLoadError(load.ProfileKey, "conversion", "Accepted artifacts changed since preview.")
 			}
 			list.source.artifacts = append(list.source.artifacts, modelFile{configured: file.configured, abs: file.target, info: file.info, Size: file.size})
 		}
-		approvedInputs.models[load.ModelID] = list
+		approvedInputs.models[load.ProfileKey] = list
 	}
 	source := cli["models-preset"]
 	if source == "" {
@@ -1503,17 +1697,88 @@ func (e *Executor) validateTypedLlamaConversion(ctx context.Context, st *engineS
 	// This first capture has no saved selector metadata. Subsequent reads keep
 	// this object; the complete serialized review digest still checks its bytes.
 	approvedInputs.selectors = []sourceEvidence{selector}
+	if removal != nil {
+		// The removed section has no desired resolution. Resolve only that
+		// selection from the checked original preset, then retain its opened
+		// objects through complete-router reconstruction and the final CAS.
+		access := servingFileAccess{}
+		original := access
+		access.open = func(path string) (servingArtifactFile, error) {
+			if path == selector.configured {
+				return original.checkedOpen(ctx, selector.configured, selector.target, selector.info)
+			}
+			return original.openFile(path)
+		}
+		store := typedLlamaStore(baseline, command)
+		access.scan = &modelArtifactScan{}
+		access.recognize = typedLlamaRecognition(e, store)
+		list, _, err := resolveLlamaArtifacts(ctx, baseline, command, store, removal.ModelID, access)
+		if err != nil {
+			return nil, modelLoadError(modelLoadChangeProfileKey(removal), "conversion", "Reviewed removed artifacts are unavailable or changed.")
+		}
+		approvedInputs.models[modelLoadChangeProfileKey(removal)] = list
+	}
 	conversion, err := e.previewTypedLlamaConversionExpected(ctx, baseline, command, rt, servingFileAccess{}, approvedInputs)
 	if err != nil {
 		return nil, err
 	}
+	removed := false
 	for _, load := range conversion.Runtime.ModelLoads {
-		resolved := rtLoadResolution(desired.ModelLoads, load.ModelID)
+		if removal != nil && load.ProfileKey == modelLoadChangeProfileKey(removal) {
+			if load.ModelID != removal.ModelID || slices.ContainsFunc(desired.ModelLoads, func(next modelconfig.ModelLoad) bool { return next.ProfileKey == load.ProfileKey }) {
+				return nil, modelLoadError(load.ProfileKey, "conversion", "Accepted conversion must remove exactly the reviewed profile and model.")
+			}
+			removed = true
+			continue
+		}
+		resolved := rtLoadResolution(desired.ModelLoads, load.ProfileKey)
 		if resolved == nil || modelAutoConversionSource(resolved) != conversion.SourceDigest {
-			return nil, modelLoadError(load.ModelID, "conversion", "External router source changed since preview; preview again before applying.")
+			return nil, modelLoadError(load.ProfileKey, "conversion", "External router source changed since preview; preview again before applying.")
 		}
 		if resolved == nil || !reflect.DeepEqual(resolved.Artifacts, load.Resolved.Artifacts) || resolved.NativeBuildID != load.Resolved.NativeBuildID {
-			return nil, modelLoadError(load.ModelID, "conversion", "Accepted conversion must preserve the complete current router artifact set and native build.")
+			return nil, modelLoadError(load.ProfileKey, "conversion", "Accepted conversion must preserve the complete current router artifact set and native build.")
+		}
+	}
+	if removal != nil {
+		if !removed || len(desired.ModelLoads) != len(conversion.Runtime.ModelLoads)-1 || desired.ServerPort != rt.Port || !reflect.DeepEqual(desired.WorkingSetLimitMiB, rt.WorkingSetLimitMiB) {
+			return nil, modelLoadError(modelLoadChangeProfileKey(removal), "conversion", "Accepted conversion must preserve every unselected router profile.")
+		}
+		beforeServing := removeModelLoadDeclaration(conversion.Runtime.Serving, modelLoadChangeProfileKey(removal))
+		afterServing := desired.Serving.Clone()
+		for _, serving := range []*engines.ServingConfig{beforeServing, afterServing} {
+			if serving != nil {
+				for i := range serving.Models {
+					// The normal frozen compiler checks this new digest after
+					// removal; every declaration input must otherwise survive.
+					serving.Models[i].ExpectedNativeSourceDigest = ""
+				}
+			}
+		}
+		if !beforeServing.Equal(afterServing) {
+			return nil, modelLoadError(modelLoadChangeProfileKey(removal), "conversion", "Accepted removal must preserve unselected serving declarations.")
+		}
+		native := ""
+		for _, load := range desired.ModelLoads {
+			i := slices.IndexFunc(conversion.Runtime.ModelLoads, func(original modelconfig.ModelLoad) bool { return original.ProfileKey == load.ProfileKey })
+			if i < 0 || load.ModelID != conversion.Runtime.ModelLoads[i].ModelID || !reflect.DeepEqual(load.Requested, conversion.Runtime.ModelLoads[i].Requested) {
+				return nil, modelLoadError(load.ProfileKey, "conversion", "Accepted removal must preserve unselected router settings.")
+			}
+			if native != "" && native != load.Resolved.SourceInputDigest {
+				return nil, modelLoadError(load.ProfileKey, "conversion", "Accepted removal requires one frozen native review.")
+			}
+			native = load.Resolved.SourceInputDigest
+		}
+		text, err := command.argumentText(llamaServingBase(rt))
+		if err != nil {
+			return nil, err
+		}
+		before := (settings.Config{WorkingSetLimitMiB: rt.WorkingSetLimitMiB, ServerPort: rt.Port, ProxyPort: desired.ProxyPort, LaunchText: text, Serving: rt.Serving, ModelLoads: rt.ModelLoads}).Clone()
+		digest, err := modelLoadPreviewDigest(native, conversion.SourceDigest, removal, before)
+		if err != nil {
+			return nil, err
+		}
+		if digest != removal.PreviewDigest {
+			return nil, modelLoadError(modelLoadChangeProfileKey(removal), "conversion", "External router source or reviewed removal changed since preview; preview again before applying.")
 		}
 	}
 	vars := baseline.pathVars()
@@ -1533,11 +1798,11 @@ func (e *Executor) validateTypedLlamaConversion(ctx context.Context, st *engineS
 			continue
 		}
 		if convertedCommand.Bin != conversion.inputs.build.configured || validateSource(conversion.inputs.build) != nil {
-			return nil, modelLoadError(load.ModelID, "nativeBuildId", "Native executable changed during conversion.")
+			return nil, modelLoadError(load.ProfileKey, "nativeBuildId", "Native executable changed during conversion.")
 		}
 		current, libraries, err := modelReviewedNativeSourceExpected(ctx, st, convertedCommand, servingFileAccess{}, conversion.inputs.build, conversion.inputs.libraries)
 		if err != nil || current != modelAutoNativeSource(load.Resolved) {
-			return nil, modelLoadError(load.ModelID, "conversion", "Reviewed native library/environment source changed.")
+			return nil, modelLoadError(load.ProfileKey, "conversion", "Reviewed native library/environment source changed.")
 		}
 		conversion.inputs.libraries = libraries
 	}
@@ -1686,7 +1951,7 @@ func (e *Executor) previewTypedLlamaConversionExpected(ctx context.Context, st *
 			}
 			resolved.Artifacts = append(resolved.Artifacts, modelconfig.ArtifactBinding{Role: f.Role, Path: b.SourcePath, ResolvedTarget: b.ResolvedTarget, Size: strconv.FormatInt(b.SizeBytes, 10), MtimeNS: b.MtimeNS, SampleSHA256: b.SampleSHA256})
 		}
-		converted.ModelLoads = append(converted.ModelLoads, modelconfig.ModelLoad{ModelID: model, Requested: requested, Resolved: resolved})
+		converted.ModelLoads = append(converted.ModelLoads, modelconfig.ModelLoad{ProfileKey: model, ModelID: model, Requested: requested, Resolved: resolved})
 	}
 	if len(converted.ModelLoads) == 0 {
 		return refuse("", "conversion", "No complete external router model set was found.")
@@ -1780,19 +2045,19 @@ func (e *Executor) previewTypedLlamaConversionExpected(ctx context.Context, st *
 		return typedLlamaConversion{}, err
 	}
 	for _, load := range converted.ModelLoads {
-		beforeOptions := before[load.ModelID]
+		beforeOptions := before[load.ProfileKey]
 		keys := maps.Clone(beforeOptions)
-		maps.Copy(keys, generated[load.ModelID])
+		maps.Copy(keys, generated[load.ProfileKey])
 		for _, key := range sortedKeys(keys) {
 			before, err := json.Marshal(beforeOptions[key])
 			if err != nil {
 				return typedLlamaConversion{}, err
 			}
-			after, err := json.Marshal(generated[load.ModelID][key])
+			after, err := json.Marshal(generated[load.ProfileKey][key])
 			if err != nil {
 				return typedLlamaConversion{}, err
 			}
-			result.Diff = append(result.Diff, modelconfig.FieldDiff{Field: "models." + load.ModelID + "." + key, Before: before, After: after})
+			result.Diff = append(result.Diff, modelconfig.FieldDiff{Field: "models." + load.ProfileKey + "." + key, Before: before, After: after})
 		}
 	}
 	beforeArgs, err := json.Marshal(command.Args)

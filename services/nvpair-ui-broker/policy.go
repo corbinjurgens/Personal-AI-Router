@@ -34,6 +34,8 @@ import (
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/durablefile"
 	"nvpair-shared/engineintent"
+	settings "nvpair-shared/enginesettings"
+	"nvpair-shared/modelconfig"
 	"nvpair-shared/nodepolicy"
 )
 
@@ -298,7 +300,7 @@ func (b *Broker) loadNodePolicy(path string) {
 			slog.Warn("node policy invalid; kept a copy and policy recovery is required", "path", path, "copy", bad, "err", perr)
 		} else {
 			policy = parsed
-			for _, category := range []string{"profiles", "roles", "tiers", "servedModels", "residentModels", "deployments", "residentReferences", "deploymentReferences", "familyReferences"} {
+			for _, category := range []string{"profiles", "roles", "roleReferences", "tiers", "servedModels", "residentModels", "deployments", "residentReferences", "deploymentReferences", "familyReferences"} {
 				if count := removals[category]; count > 0 {
 					slog.Warn("invalid stored model entries removed", "category", category, "count", count)
 				}
@@ -581,15 +583,28 @@ func (b *Broker) setLocalPolicy(raw, expected json.RawMessage) (nodepolicy.Polic
 	if err != nil {
 		return nodepolicy.Policy{}, err
 	}
-	return b.persistPolicy(func(stored nodepolicy.Policy) (nodepolicy.Policy, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), settings.CallBudget)
+	defer cancel()
+	var loads map[string][]modelconfig.ModelLoad
+	var sourceCurrent func() error
+	return b.persistPolicy(func(stored nodepolicy.Policy) error {
 		if err := checkExpectedRevision(stored, want); err != nil {
-			return nodepolicy.Policy{}, err
+			return err
 		}
 		if len(raw) == 0 {
-			return nodepolicy.Policy{}, fmt.Errorf("policy is required")
+			return fmt.Errorf("policy is required")
 		}
 		if err := nodepolicy.CheckModelListKeys(raw); err != nil {
-			return nodepolicy.Policy{}, fmt.Errorf("parse policy: %w", err)
+			return fmt.Errorf("parse policy: %w", err)
+		}
+		return nil
+	}, func(stored nodepolicy.Policy) error {
+		var err error
+		loads, sourceCurrent, err = b.prepareProfileLoadsLocked(ctx, raw, stored)
+		return err
+	}, func(stored nodepolicy.Policy) (nodepolicy.Policy, error) {
+		if err := sourceCurrent(); err != nil {
+			return nodepolicy.Policy{}, err
 		}
 		var fields map[string]json.RawMessage
 		if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
@@ -600,6 +615,10 @@ func (b *Broker) setLocalPolicy(raw, expected json.RawMessage) (nodepolicy.Polic
 		if err != nil {
 			return nodepolicy.Policy{}, err
 		}
+		stripped, err = normalizeRawPolicyProfiles(stripped, stored, loads)
+		if err != nil {
+			return nodepolicy.Policy{}, err
+		}
 		policy, err := nodepolicy.Parse(stripped)
 		if err != nil {
 			return nodepolicy.Policy{}, err
@@ -607,6 +626,9 @@ func (b *Broker) setLocalPolicy(raw, expected json.RawMessage) (nodepolicy.Polic
 		policy.Availability = stored.Availability
 		policy.PausedBy = stored.PausedBy
 		policy.PauseMode = stored.PauseMode
+		if err := protectProfileTargets(stored, policy, loads); err != nil {
+			return nodepolicy.Policy{}, err
+		}
 		if err := policy.Validate(); err != nil {
 			return nodepolicy.Policy{}, err
 		}
@@ -637,26 +659,46 @@ func (b *Broker) setPeerPolicyAs(raw, expected json.RawMessage, caller string) (
 		return nodepolicy.Policy{}, &invalidParamsError{err}
 	}
 	r := b.nodePolicyRuntime()
-	return b.persistPolicy(func(stored nodepolicy.Policy) (nodepolicy.Policy, error) {
-		// build runs under r.mu. Recovery is the owner's to complete.
+	ctx, cancel := context.WithTimeout(context.Background(), settings.CallBudget)
+	defer cancel()
+	var loads map[string][]modelconfig.ModelLoad
+	var sourceCurrent func() error
+	return b.persistPolicy(func(stored nodepolicy.Policy) error {
+		// Check before worker reads and again under r.mu before publication.
 		if err := b.authorizeRemoteManagementLocked(r, caller, "policy", ""); err != nil {
-			return nodepolicy.Policy{}, err
+			return err
 		}
 		if err := checkExpectedRevision(stored, want); err != nil {
-			return nodepolicy.Policy{}, err
+			return err
 		}
 		if r.recoveryRequired {
-			return nodepolicy.Policy{}, errors.New("this node's policy needs recovery; set it from this node")
+			return errors.New("this node's policy needs recovery; set it from this node")
 		}
 		if err := nodepolicy.CheckModelListKeys(raw); err != nil {
+			return &invalidParamsError{err}
+		}
+		return nil
+	}, func(stored nodepolicy.Policy) error {
+		var err error
+		loads, sourceCurrent, err = b.prepareProfileLoadsLocked(ctx, raw, stored)
+		return err
+	}, func(stored nodepolicy.Policy) (nodepolicy.Policy, error) {
+		if err := sourceCurrent(); err != nil {
+			return nodepolicy.Policy{}, err
+		}
+		normalized, err := normalizeRawPolicyProfiles(withoutRevision(raw), stored, loads)
+		if err != nil {
 			return nodepolicy.Policy{}, &invalidParamsError{err}
 		}
-		policy, err := nodepolicy.MergePeerSet(stored, withoutRevision(raw))
+		policy, err := nodepolicy.MergePeerSet(stored, normalized)
 		if err != nil {
 			var locked *nodepolicy.RemoteSettingLockedError
 			if errors.As(err, &locked) {
 				return nodepolicy.Policy{}, err
 			}
+			return nodepolicy.Policy{}, &invalidParamsError{err}
+		}
+		if err := protectProfileTargets(stored, policy, loads); err != nil {
 			return nodepolicy.Policy{}, &invalidParamsError{err}
 		}
 		return policy, nil
@@ -692,7 +734,9 @@ func withoutRevision(raw json.RawMessage) json.RawMessage {
 }
 
 // persistPolicy persists and applies the policy that build derives from the
-// stored one. build runs in the same critical section as the save, so a policy
+// stored one. check runs under policy.mu before and after private preparation;
+// prepare runs outside policy.mu while engineConfigMu keeps settings stable.
+// build runs in the same critical section as the save, so a policy
 // derived from the stored document can never be saved over a newer one. The
 // saved document carries the next revision. A build or pre-replacement error
 // pushes and announces nothing and leaves the previous document in memory.
@@ -701,7 +745,7 @@ func withoutRevision(raw json.RawMessage) json.RawMessage {
 // revision; a push that fails or does not finish in time leaves the revision
 // persisted and not active. A landed replacement whose durability failed is
 // adopted and applied the same way, then reported to the caller as a server error.
-func (b *Broker) persistPolicy(build func(stored nodepolicy.Policy) (nodepolicy.Policy, error)) (nodepolicy.Policy, error) {
+func (b *Broker) persistPolicy(check func(stored nodepolicy.Policy) error, prepare func(stored nodepolicy.Policy) error, build func(stored nodepolicy.Policy) (nodepolicy.Policy, error)) (nodepolicy.Policy, error) {
 	b.engineConfigMu.Lock()
 	if err := b.modelPolicyReservationLocked(); err != nil {
 		b.engineConfigMu.Unlock()
@@ -709,6 +753,25 @@ func (b *Broker) persistPolicy(build func(stored nodepolicy.Policy) (nodepolicy.
 	}
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
+	if err := check(r.current); err != nil {
+		r.mu.Unlock()
+		b.engineConfigMu.Unlock()
+		return nodepolicy.Policy{}, err
+	}
+	stored := r.current
+	r.mu.Unlock()
+	// Keep the settings CAS lock across private worker reads. Availability and
+	// permission owners can still proceed under policy.mu; check them again.
+	if err := prepare(stored); err != nil {
+		b.engineConfigMu.Unlock()
+		return nodepolicy.Policy{}, err
+	}
+	r.mu.Lock()
+	if err := check(r.current); err != nil {
+		r.mu.Unlock()
+		b.engineConfigMu.Unlock()
+		return nodepolicy.Policy{}, err
+	}
 	policy, err := build(r.current)
 	if err != nil {
 		r.mu.Unlock()
@@ -828,6 +891,7 @@ type invalidParamsError struct{ err error }
 func (e *invalidParamsError) Error() string { return e.err.Error() }
 
 func policyErrorCode(err error) int {
+	var worker *settingsWorkerError
 	var invalid *invalidParamsError
 	var conflict *policyConflictError
 	var veto *localVetoError
@@ -835,6 +899,8 @@ func policyErrorCode(err error) int {
 	var locked *nodepolicy.RemoteSettingLockedError
 	var maintenance *buildApplyBusyError
 	switch {
+	case errors.As(err, &worker) && worker.code != 0:
+		return worker.code
 	case errors.As(err, &maintenance):
 		return maintenance.Code()
 	case errors.As(err, &locked):
@@ -964,7 +1030,7 @@ func modelControlReadbackSupported(request, result json.RawMessage) error {
 		if !present {
 			continue
 		}
-		var refs, received []nodepolicy.Role
+		var refs, received []nodepolicy.ModelRef
 		if json.Unmarshal(raw, &refs) != nil {
 			return fmt.Errorf("unsupported policy readback")
 		}
@@ -1233,7 +1299,7 @@ func (b *Broker) observeLoadedFor(source *engineManagerSource, pp *proxyProcess,
 	r.models.loadedSource = r.engineManagerSource
 	r.models.loadedProxy = pp
 	if r.models.loadedRequests == nil {
-		r.models.loadedRequests = make(map[nodepolicy.Role]nodepolicy.ResidentLoadOptions)
+		r.models.loadedRequests = make(map[nodepolicy.ModelRef]nodepolicy.ResidentLoadOptions)
 	}
 	for ref := range r.models.loadedRequests {
 		if models, known := loadedByEngine[ref.Engine]; known && models != nil {

@@ -14,11 +14,11 @@ func TestEngineBindingOffersOptionalValidation(t *testing.T) {
 	test := func(name, extension string, supported bool) {
 		t.Run(name, func(t *testing.T) {
 			var adv Advertisement
-			if err := json.Unmarshal([]byte(`{"revision":"1","roles":{"weak":{"engine":"llamacpp","model":"actual"}},`+extension+`}`), &adv); err != nil {
+			if err := json.Unmarshal([]byte(`{"revision":"1","roles":[{"name":"weak","profiles":["actual"]}],"profiles":[{"key":"actual","displayName":"Profile","engine":"llamacpp","model":"actual"}],`+extension+`}`), &adv); err != nil {
 				t.Fatal(err)
 			}
-			if (adv.EngineBindingOffers != nil) != supported || adv.Roles["weak"].Model != "actual" {
-				t.Fatalf("offers=%+v canonical role=%+v", adv.EngineBindingOffers, adv.Roles["weak"])
+			if (adv.EngineBindingOffers != nil) != supported || adv.Profiles[0].Model != "actual" {
+				t.Fatalf("offers=%+v canonical role=%+v", adv.EngineBindingOffers, adv.Profiles[0])
 			}
 		})
 	}
@@ -37,7 +37,7 @@ func TestEngineBindingOffersOptionalValidation(t *testing.T) {
 }
 
 func TestEngineBindingOffersCloneAndRoundTrip(t *testing.T) {
-	offers := &EngineBindingOffers{Version: 1, Models: []Role{{Engine: "fixture-engine", Model: "org/model"}}}
+	offers := &EngineBindingOffers{Version: 1, Models: []ModelRef{{Engine: "fixture-engine", Model: "org/model"}}}
 	clone := offers.Clone()
 	clone.Models[0].Model = "changed"
 	if offers.Models[0].Model != "org/model" {

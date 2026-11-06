@@ -597,7 +597,8 @@ func TestDiscoveryStoreScannerProjectionWins(t *testing.T) {
 func TestDiscoveryRelayCarriesPolicyAdvertisement(t *testing.T) {
 	adv := &nodepolicy.Advertisement{
 		Revision: "7",
-		Roles:    map[string]nodepolicy.AdvertisedRole{nodepolicy.TierWeak: {Engine: "llamacpp", Model: "qwen3-4b"}},
+		Roles:    []nodepolicy.Role{{Name: nodepolicy.TierWeak, Profiles: []string{"qwen-profile"}}},
+		Profiles: []nodepolicy.AdvertisedProfile{{Key: "qwen-profile", DisplayName: "Qwen", Engine: "llamacpp", Model: "qwen3-4b"}},
 		PausedBy: nodepolicy.PausedByPeer,
 	}
 	s := newDiscoveryStore()

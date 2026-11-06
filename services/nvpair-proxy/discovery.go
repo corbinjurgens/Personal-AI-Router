@@ -93,14 +93,15 @@ type Node struct {
 	// removed. Internal routing metadata, not part of the proxy's outward node
 	// contract.
 	ClusterUUID string `json:"-"`
-	// Roles and PolicyRevision are the node's own policy advertisement
-	// (DirectoryNode.Policy): what it declares it serves per tier, and the
+	// Profiles, Roles and PolicyRevision are the node's own policy advertisement
+	// (DirectoryNode.Policy): keyed profile facts and tier memberships, and the
 	// revision of the policy that says so. Nil and empty when the node
 	// publishes none, which means it declares nothing. Internal routing
 	// metadata like Loaded, so a role edit does not announce node/updated.
-	Roles          map[string]nodepolicy.AdvertisedRole `json:"-"`
-	ServedModels   nodepolicy.ServedModels              `json:"-"`
-	PolicyRevision string                               `json:"-"`
+	Profiles       []nodepolicy.AdvertisedProfile `json:"-"`
+	Roles          []nodepolicy.Role              `json:"-"`
+	ServedModels   nodepolicy.ServedModels        `json:"-"`
+	PolicyRevision string                         `json:"-"`
 	// PausedBy is an advisory policy hint fetched over authenticated LAN
 	// transport, with the scanner's existing plaintext loopback exception.
 	PausedBy nodepolicy.PauseOrigin `json:"-"`
@@ -145,32 +146,58 @@ func filterModelNames(models []string) []string {
 	return clean
 }
 
+func cloneAdvertisedProfile(profile nodepolicy.AdvertisedProfile) nodepolicy.AdvertisedProfile {
+	profile.Capabilities = slices.Clone(profile.Capabilities)
+	if profile.ModelIdentity != nil {
+		identity := *profile.ModelIdentity
+		identity.Files = slices.Clone(identity.Files)
+		profile.ModelIdentity = &identity
+	}
+	if profile.Qualification != nil {
+		qualification := *profile.Qualification
+		profile.Qualification = &qualification
+	}
+	return profile
+}
+
 func (n Node) filteredModels() Node {
 	n.Models = filterModelNames(n.Models)
 	n.Loaded = filterModelNames(n.Loaded)
+	profiles := n.Profiles
+	if profiles != nil {
+		n.Profiles = make([]nodepolicy.AdvertisedProfile, 0, min(len(profiles), maxInventoryModels))
+	}
+	for _, profile := range profiles {
+		if nodepolicy.ValidateProfileKey(profile.Key) != nil || nodepolicy.ValidateModelIdentifier(profile.Model) != nil {
+			continue
+		}
+		if len(n.Profiles) == maxInventoryModels {
+			warnInventoryLimit()
+			break
+		}
+		n.Profiles = append(n.Profiles, cloneAdvertisedProfile(profile))
+	}
 	if n.Roles != nil {
-		roles := make(map[string]nodepolicy.AdvertisedRole)
-		for _, tier := range nodepolicy.TierOrder {
-			role, exists := n.Roles[tier]
-			if !exists {
-				continue
-			}
-			if nodepolicy.ValidateModelIdentifier(role.Model) == nil {
-				roles[tier] = role
+		roles := make([]nodepolicy.Role, 0, len(n.Roles))
+		for _, role := range n.Roles {
+			if nodepolicy.IsTier(role.Name) {
+				role.Profiles = slices.Clone(role.Profiles)
+				roles = append(roles, role)
 			}
 		}
 		if len(roles) == 0 {
-			// A valid declaration of an unknown tier is still authoritative:
+			// A declaration of an unknown tier is still authoritative:
 			// dropping its presence would enable the router's legacy fallback.
 			// Retain one deterministic marker; only known tiers are consulted.
-			marker, found := "", false
-			for tier, role := range n.Roles {
-				if nodepolicy.ValidateModelIdentifier(role.Model) == nil && (!found || tier < marker) {
-					marker, found = tier, true
+			marker, found := nodepolicy.Role{}, false
+			for _, role := range n.Roles {
+				if !found || role.Name < marker.Name {
+					marker, found = role, true
 				}
 			}
 			if found {
-				roles[marker] = n.Roles[marker]
+				marker.Profiles = slices.Clone(marker.Profiles)
+				roles = append(roles, marker)
 			}
 		}
 		n.Roles = roles
@@ -491,7 +518,7 @@ func (d *Discovery) SetSubscribed(nodes []Node) (discovered, updated, removed []
 
 // nodeEqual reports whether two routable Nodes carry the same routing/display
 // identity — the fields a consumer dials or renders. A change in any of them
-// warrants a node/updated. Loaded, ClusterUUID, Roles, PolicyRevision, PausedBy
+// warrants a node/updated. Loaded, ClusterUUID, Profiles, Roles, PolicyRevision, PausedBy
 // and StrictAdmission are internal routing metadata and deliberately not compared.
 func nodeEqual(a, b Node) bool {
 	return a.ID == b.ID && a.Host == b.Host && a.Port == b.Port && a.IP == b.IP &&

@@ -542,7 +542,7 @@ func newSRProcessFixtureWithRetry(t *testing.T, switchTarget bool, retention str
 		if model == srNeighbor {
 			context, output = 1024, 64
 		}
-		policy.Profiles = append(policy.Profiles, nodepolicy.Profile{Name: model, Engine: "llamacpp", Model: model, ContextTokens: context, MaxOutputTokens: output, MemoryBytes: neMemory, MaxConcurrent: 1, Qualification: &nodepolicy.QualificationRef{ID: "sr-" + model, Revision: "1"}})
+		policy.Profiles = append(policy.Profiles, nodepolicy.Profile{Key: model, DisplayName: model, Engine: "llamacpp", Model: model, ContextTokens: context, MaxOutputTokens: output, MemoryBytes: neMemory, MaxConcurrent: 1, Qualification: &nodepolicy.QualificationRef{ID: "sr-" + model, Revision: "1"}})
 	}
 	if err := policy.Validate(); err != nil {
 		t.Fatalf("validate initial SR policy: %v", err)
@@ -1356,7 +1356,7 @@ func (f *srProcessFixture) resident(t *testing.T, models ...string) {
 	f.edit(t, func(p *nodepolicy.Policy) {
 		p.ResidentModels = nil
 		for _, model := range models {
-			p.ResidentModels = append(p.ResidentModels, nodepolicy.Role{Engine: "llamacpp", Model: model})
+			p.ResidentModels = append(p.ResidentModels, nodepolicy.ModelRef{Engine: "llamacpp", Model: model})
 		}
 	})
 }
@@ -1595,12 +1595,12 @@ func TestServedResidentPolicyPairedRoutes(t *testing.T) {
 				default:
 				}
 			}
-			model := nodepolicy.Role{Engine: "llamacpp-custom", Model: "switch-model"}
-			neighbor := nodepolicy.Role{Engine: "llamacpp-custom", Model: srNeighbor}
+			model := nodepolicy.ModelRef{Engine: "llamacpp-custom", Model: "switch-model"}
+			neighbor := nodepolicy.ModelRef{Engine: "llamacpp-custom", Model: srNeighbor}
 			var profiles []nodepolicy.Profile
-			for _, ref := range []nodepolicy.Role{model, neighbor} {
+			for _, ref := range []nodepolicy.ModelRef{model, neighbor} {
 				profiles = append(profiles, nodepolicy.Profile{
-					Name: ref.Model, Engine: ref.Engine, Model: ref.Model,
+					Key: ref.Model, DisplayName: ref.Model, Engine: ref.Engine, Model: ref.Model,
 					ContextTokens: neContext, MaxOutputTokens: neOutput,
 					MemoryBytes: neMemory, MaxConcurrent: 1,
 					Qualification: &nodepolicy.QualificationRef{ID: "sr-paired-" + ref.Model, Revision: "1"},
@@ -1925,7 +1925,7 @@ func TestServedResidentProcessCrossEngineLastSlot(t *testing.T) {
 		p.Admission.MemoryBudgetBytes = 2 * neMemory
 		p.Admission.SwitchModels = true
 		p.Idle.StartOnDemand = true
-		p.Profiles = append(p.Profiles, nodepolicy.Profile{Name: "sr-custom", Engine: "llamacpp-custom", Model: srCustomModel, ContextTokens: neContext, MaxOutputTokens: neOutput, MemoryBytes: neMemory, MaxConcurrent: 1, Qualification: &nodepolicy.QualificationRef{ID: "sr-custom", Revision: "1"}})
+		p.Profiles = append(p.Profiles, nodepolicy.Profile{Key: srCustomModel, DisplayName: "sr-custom", Engine: "llamacpp-custom", Model: srCustomModel, ContextTokens: neContext, MaxOutputTokens: neOutput, MemoryBytes: neMemory, MaxConcurrent: 1, Qualification: &nodepolicy.QualificationRef{ID: "sr-custom", Revision: "1"}})
 	})
 	f.stop(t)
 	path := filepath.Join(f.app, "local-qualification.json")

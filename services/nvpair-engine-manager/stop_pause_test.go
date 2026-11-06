@@ -913,11 +913,11 @@ func TestNodeProjectionManagementBlocked(t *testing.T) {
 			}
 		})
 	}
-	test("available", `{"policy":{"revision":"1","roles":{}},"pausedLocally":false,"managementBlocked":false}`, false, false)
-	test("peer pause", `{"policy":{"revision":"1","roles":{},"pausedBy":"peer"},"pausedLocally":false,"managementBlocked":true}`, true, false)
-	test("local pause", `{"policy":{"revision":"1","roles":{}},"pausedLocally":true,"managementBlocked":true}`, true, true)
+	test("available", `{"policy":{"revision":"1","roles":[]},"pausedLocally":false,"managementBlocked":false}`, false, false)
+	test("peer pause", `{"policy":{"revision":"1","roles":[],"pausedBy":"peer"},"pausedLocally":false,"managementBlocked":true}`, true, false)
+	test("local pause", `{"policy":{"revision":"1","roles":[]},"pausedLocally":true,"managementBlocked":true}`, true, true)
 	// An older broker's projection is not upgraded from pausedBy.
-	test("older broker", `{"policy":{"revision":"1","roles":{},"pausedBy":"peer"},"pausedLocally":false}`, false, false)
+	test("older broker", `{"policy":{"revision":"1","roles":[],"pausedBy":"peer"},"pausedLocally":false}`, false, false)
 }
 
 func TestPauseVetoIdentitySurvivesEveryErrorBoundary(t *testing.T) {

@@ -276,7 +276,7 @@ func (e *Executor) PreviewLaunch(p settings.Request, contexts ...context.Context
 	}
 	ctx, cancel := strataPreparationContext(contexts)
 	defer cancel()
-	if p.ModelChange != nil && p.ModelChange.Load != nil {
+	if p.ModelChange != nil && (p.ModelChange.Load != nil || p.ModelChange.Remove) {
 		return e.previewModelLoadChange(ctx, st, p)
 	}
 	if err := e.prepareStrataRequest(ctx, st, p); err != nil {
@@ -526,7 +526,12 @@ func (e *Executor) previewLaunch(st *engineState, request settings.Request, prep
 // ConfigureLaunch owns the entire engine operation lock, including the narrow
 // parent rebind callback. The parent already holds the node configuration lock;
 // that callback must not acquire it again. Explicit ON/OFF intent is untouched.
+// ReviewedModelChange is transient evidence for frozen conversion, never
+// another edit to the desired settings.
 func (e *Executor) ConfigureLaunch(ctx context.Context, p settings.Configure, rebind func() error) (settings.LaunchState, error) {
+	if err := settings.ValidateReviewedModelChange(p.ReviewedModelChange); err != nil {
+		return settings.LaunchState{}, modelSettingsParamsError(err)
+	}
 	if err := e.validateModelSettingsLaunch(ctx, settings.Request{Engine: p.Engine, Settings: p.Settings}, true); err != nil {
 		return settings.LaunchState{}, err
 	}
@@ -561,7 +566,7 @@ func (e *Executor) configureLaunchLocked(ctx context.Context, st *engineState, p
 	currentRT := st.plat.Runtime
 	st.mu.Unlock()
 	var recheckContent func() error
-	if len(currentRT.ModelLoads) != 0 || len(p.Settings.ModelLoads) != 0 {
+	if len(currentRT.ModelLoads) != 0 || len(p.Settings.ModelLoads) != 0 || p.ReviewedModelChange != nil {
 		release, recheck, err := e.modelLoadContentRead(p.Engine)
 		if err != nil {
 			return settings.LaunchState{}, err
@@ -569,7 +574,7 @@ func (e *Executor) configureLaunchLocked(ctx context.Context, st *engineState, p
 		defer release()
 		recheckContent = recheck
 	}
-	recheckConversion, err := e.validateTypedLlamaConversion(ctx, st, currentRT, p.Settings)
+	recheckConversion, err := e.validateTypedLlamaConversion(ctx, st, currentRT, p.Settings, p.ReviewedModelChange)
 	if err != nil {
 		return settings.LaunchState{}, err
 	}

@@ -23,6 +23,7 @@ import (
 
 	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
+	"nvpair-shared/modelconfig"
 	"nvpair-shared/noderec"
 	"nvpair-ui-broker/relay"
 )
@@ -54,6 +55,62 @@ type settingsHarness struct {
 	// reservedPorts belong to the fake workers until test cleanup. Only these
 	// reservations may pass the injected check; foreign ports use real preflight.
 	reservedPorts sync.Map
+}
+
+func TestPrepareSettingsSnapshotRejectsUnidentifiedOrInvalidAuthority(t *testing.T) {
+	test := func(name string, launch settings.LaunchState, want string) {
+		t.Run(name, func(t *testing.T) {
+			rb := newRawSnapshotBroker(t)
+			rb.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+				if method == "engine:get-launch" {
+					return launch, ""
+				}
+				return nil, "unexpected snapshot request: " + method
+			})
+			rb.b.engineConfigMu.Lock()
+			_, _, err := rb.b.prepareSettingsSnapshotLocked(t.Context(), "llamacpp")
+			rb.b.engineConfigMu.Unlock()
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("snapshot authority = %v, want %q", err, want)
+			}
+			requireRawSnapshotPrivate(t, rb.b)
+		})
+	}
+	test("missing engine", settings.LaunchState{}, "readback did not identify")
+	test("other engine", rawSnapshotLaunch("llamacpp-custom"), "readback did not identify")
+	duplicate := rawSnapshotLaunch("llamacpp")
+	duplicate.ModelLoads = append(duplicate.ModelLoads, rawSnapshotLoad("small-profile", 16384))
+	test("duplicate profile load", duplicate, "profileKey: duplicate")
+	unresolved := rawSnapshotLaunch("llamacpp")
+	unresolved.ModelLoads[0].Resolved.PerSlotContext = 0
+	test("invalid finite context", unresolved, "resolved.context")
+}
+
+func TestPrepareSettingsSnapshotKeepsNativeLoadsPrivateAndDetached(t *testing.T) {
+	rb := newRawSnapshotBroker(t)
+	rb.b.engineConfigMu.Lock()
+	record, save, err := rb.b.prepareSettingsSnapshotLocked(t.Context(), "llamacpp")
+	rb.b.engineConfigMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !save || !modelconfig.EqualLoads(record.Snapshot.Settings.ModelLoads, []modelconfig.ModelLoad{rawSnapshotLoad("small-profile", 8192)}) {
+		t.Fatalf("private initial native snapshot = %+v, save=%v", record, save)
+	}
+	record.Snapshot.Settings.ModelLoads[0].Requested.Context.Tokens = 256
+	record.Snapshot.Settings.ModelLoads[0].Resolved.PerSlotContext = 256
+	record.Snapshot.Settings.ModelLoads[0].Resolved.Artifacts[0].Path = "changed.gguf"
+	requireRawSnapshotPrivate(t, rb.b)
+	rb.b.engineConfigMu.Lock()
+	next, _, err := rb.b.prepareSettingsSnapshotLocked(t.Context(), "llamacpp")
+	rb.b.engineConfigMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !modelconfig.EqualLoads(next.Snapshot.Settings.ModelLoads, []modelconfig.ModelLoad{rawSnapshotLoad("small-profile", 8192)}) {
+		t.Fatalf("private snapshot leaked into next preparation: %+v", next.Snapshot.Settings.ModelLoads)
+	}
+	requireRawSnapshotPrivate(t, rb.b)
 }
 
 func (h *settingsHarness) reservePort(t *testing.T) int {
@@ -171,10 +228,22 @@ func newServingSettingsHarness(t *testing.T, engine string, serving *engines.Ser
 			}
 			switch msg.Method {
 			case "engine:get-launch":
+				var request struct {
+					Engine string `json:"engine"`
+				}
+				if err := json.Unmarshal(msg.Params, &request); err != nil {
+					t.Error(err)
+					return
+				}
 				h.launchMu.Lock()
 				current := launch
 				current.WorkingSetLimitStatus = h.launchStatus
 				h.launchMu.Unlock()
+				current.Engine = request.Engine
+				if request.Engine != engine {
+					current.ServerPort = int(h.otherEnginePort.Load())
+					current.EffectivePort = current.ServerPort
+				}
 				_ = codec.Respond(msg.ID, current)
 			case "engine:configured-ports":
 				_ = codec.Respond(msg.ID, map[string]any{"engines": []any{map[string]any{"engine": "llamacpp-custom", "port": h.otherEnginePort.Load()}}})

@@ -24,11 +24,21 @@ import {
 } from '@/ui/stores/node-configuration.store'
 import { useNodesStore } from '@/ui/stores/nodes.store'
 
-const WEAK = { engine: 'llamacpp', model: 'qwen3:4b' }
-const ROLES: NodeRoles = { weak: WEAK }
+const WEAK = 'qwen3:4b'
+const ROLES: NodeRoles = [{ name: 'weak', profiles: [WEAK] }]
 
 function policyText(revision: string, extra: Record<string, JsonValue> = {}): string {
-    return JSON.stringify({ version: 2, revision, availability: 'available', ...extra }, null, 2)
+    return JSON.stringify(
+        {
+            version: 2,
+            revision,
+            availability: 'available',
+            profiles: [{ key: WEAK, displayName: 'Qwen', engine: 'llamacpp', model: 'qwen3:4b' }],
+            ...extra
+        },
+        null,
+        2
+    )
 }
 
 function snapshot(revision: string, extra: Record<string, JsonValue> = {}): NodePolicySnapshot {
@@ -69,7 +79,7 @@ beforeEach(() => {
     useNodeConfigurationStore.setState({
         editors: new Map(),
         management: new Map(),
-        bulk: { selected: [], mode: 'common', common: {} }
+        bulk: { selected: [], mode: 'common', common: [] }
     })
 })
 
@@ -124,13 +134,21 @@ describe('bulk fan-out', () => {
         }
         const canonicalPause = { ...legacyPause, stopEngines: true, unloadModels: true }
         get.mockResolvedValueOnce(policyDocument('5', { pause: legacyPause }))
-        const canonical = snapshot('6', { roles: { weak: WEAK }, pause: canonicalPause })
+        const canonical = snapshot('6', {
+            roles: [{ name: 'weak', profiles: [WEAK] }],
+            pause: canonicalPause
+        })
         set.mockResolvedValue(canonical)
         await store().apply('a', 'a', ROLES)
 
         expect(JSON.parse(set.mock.calls[0][0].policy).pause).toEqual(legacyPause)
         expect(JSON.parse(entry('a').baseline?.policy ?? '{}').pause).toEqual(canonicalPause)
-        get.mockResolvedValue(policyDocument('6', { roles: { weak: WEAK }, pause: canonicalPause }))
+        get.mockResolvedValue(
+            policyDocument('6', {
+                roles: [{ name: 'weak', profiles: [WEAK] }],
+                pause: canonicalPause
+            })
+        )
         await store().apply('a', 'a', ROLES)
         expect(set).toHaveBeenCalledTimes(1)
         expect(entry('a').phase).toBe('applied')
@@ -189,7 +207,7 @@ describe('bulk fan-out', () => {
         expect(sent.get('b')?.expectedPersistedRevision).toBe('9')
         expect(JSON.parse(sent.get('b')?.policy ?? '{}')).toEqual({
             ...JSON.parse(policyText('9', { admission: { maxResidentModels: 1 } })),
-            roles: { weak: { engine: 'llamacpp', model: 'qwen3:4b' } }
+            roles: [{ name: 'weak', profiles: ['qwen3:4b'] }]
         })
     })
 
@@ -211,7 +229,7 @@ describe('bulk fan-out', () => {
     })
 
     it('marks a node already holding the roles applied without sending', async () => {
-        get.mockResolvedValue(policyDocument('5', { roles: { weak: WEAK } }))
+        get.mockResolvedValue(policyDocument('5', { roles: [{ name: 'weak', profiles: [WEAK] }] }))
         await store().apply('a', 'a', ROLES)
         expect(set).not.toHaveBeenCalled()
         expect(entry('a').phase).toBe('applied')
@@ -295,7 +313,7 @@ describe('per-node outcomes', () => {
     it('shows a conflict from -32010 with the node read back, and resends nothing', async () => {
         get.mockResolvedValueOnce(policyDocument('5'))
         get.mockResolvedValueOnce(
-            policyDocument('6', { roles: { weak: { engine: 'llamacpp', model: 'g' } } })
+            policyDocument('6', { roles: [{ name: 'weak', profiles: ['g'] }] })
         )
         set.mockRejectedValue(new Error('-32010: the persisted revision is 6, not the expected 5'))
 
@@ -328,7 +346,7 @@ describe('per-node outcomes', () => {
 
     it('is unreachable, with the draft kept, when the node cannot be read first', async () => {
         store().adopt('a', snapshot('5'))
-        store().setRole('a', 'weak', ROLES.weak)
+        store().setRole('a', 'weak', WEAK)
         get.mockRejectedValue(new Error('-32000: node policy unavailable: device is offline'))
 
         await store().apply('a', 'a')
@@ -357,7 +375,9 @@ describe('per-node outcomes', () => {
         await store().apply('a', 'a', ROLES)
 
         // The lost save did land: the retry finds the roles and sends nothing.
-        get.mockResolvedValueOnce(policyDocument('6', { roles: { weak: WEAK } }))
+        get.mockResolvedValueOnce(
+            policyDocument('6', { roles: [{ name: 'weak', profiles: [WEAK] }] })
+        )
         await store().apply('a', 'a', ROLES)
 
         expect(entry('a').phase).toBe('applied')
@@ -367,10 +387,8 @@ describe('per-node outcomes', () => {
 
     it('keeps a per-node conflict until the user resolves it', async () => {
         store().adopt('a', snapshot('5'))
-        store().setRole('a', 'weak', ROLES.weak)
-        get.mockResolvedValue(
-            policyDocument('6', { roles: { weak: { engine: 'llamacpp', model: 'g' } } })
-        )
+        store().setRole('a', 'weak', WEAK)
+        get.mockResolvedValue(policyDocument('6', { roles: [{ name: 'weak', profiles: ['g'] }] }))
 
         await store().apply('a', 'a')
         expect(entry('a').phase).toBe('conflict')
@@ -418,7 +436,7 @@ describe('per-node outcomes', () => {
 
         get.mockResolvedValue(policyDocument('6'))
         set.mockRejectedValue(new Error('-32011: vetoed'))
-        await store().apply('a', 'a', { strong: { engine: 'llamacpp', model: 'x' } })
+        await store().apply('a', 'a', [{ name: 'strong', profiles: ['x'] }])
         expect(entry('a').requestId).not.toBe(id)
     })
 })
@@ -426,18 +444,21 @@ describe('per-node outcomes', () => {
 describe('advertised', () => {
     it('follows this node’s discovery of the target revision', () => {
         const applied: RoleEditorEntry = {
-            baseline: { policy: '', revision: '6', roles: {} },
-            draft: {},
+            baseline: { policy: '', revision: '6', roles: [] },
+            draft: [],
             phase: 'applied'
         }
         expect(targetState(applied, undefined)).toBe('applied')
-        expect(targetState(applied, { revision: '5', roles: {} })).toBe('applied')
-        expect(targetState(applied, { revision: '6', roles: {} })).toBe('advertised')
-        expect(targetState(applied, { revision: '12', roles: {} })).toBe('advertised')
-        expect(targetState({ ...applied, phase: 'unknown' }, { revision: '12', roles: {} })).toBe(
-            'unknown'
-        )
-        expect(targetState(undefined, { revision: '12', roles: {} })).toBe('draft')
+        expect(targetState(applied, { revision: '5', roles: [], profiles: [] })).toBe('applied')
+        expect(targetState(applied, { revision: '6', roles: [], profiles: [] })).toBe('advertised')
+        expect(targetState(applied, { revision: '12', roles: [], profiles: [] })).toBe('advertised')
+        expect(
+            targetState(
+                { ...applied, phase: 'unknown' },
+                { revision: '12', roles: [], profiles: [] }
+            )
+        ).toBe('unknown')
+        expect(targetState(undefined, { revision: '12', roles: [], profiles: [] })).toBe('draft')
     })
 })
 
@@ -499,6 +520,24 @@ describe('panel', () => {
         if (!found) throw new Error(`no button ${label}`)
         return found
     }
+
+    it('reports a declaration-order conflict without claiming matching roles', async () => {
+        const roles = [
+            { name: 'strong', profiles: [WEAK] },
+            { name: 'medium', profiles: [] }
+        ] satisfies NodeRoles
+        peers(node('a'))
+        store().adopt('a', snapshot('5', { roles }))
+        store().setDraft('a', [...roles].reverse())
+        get.mockResolvedValue(policyDocument('6', { roles }))
+        set.mockRejectedValue(new Error('-32000: policy conflict: stale'))
+        await store().save('a', 'a')
+        expect(entry('a').phase).toBe('conflict')
+        store().setBulk({ selected: ['a'] })
+        await render()
+        expect(container.textContent).toContain('role declaration order differs')
+        expect(container.textContent).not.toContain('Its roles match this draft')
+    })
 
     it('keeps an offline node’s draft unsent, including after it reconnects', async () => {
         get.mockResolvedValue(policyDocument('5'))
@@ -583,7 +622,7 @@ describe('panel', () => {
                         lastSeen: 1,
                         trusted: true,
                         clustered: true,
-                        policy: { revision, roles: ROLES }
+                        policy: { revision, roles: ROLES, profiles: [] }
                     }
                 ]
             })

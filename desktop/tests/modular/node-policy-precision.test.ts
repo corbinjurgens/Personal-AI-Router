@@ -163,9 +163,10 @@ afterEach(async () => {
 
 describe('opaque policy JSON through renderer, preload, bridge and socket client', () => {
     it('preserves opaque values through a role edit and the real bridge', async () => {
-        const edited = withRoles(POLICY, { weak: { engine: 'llamacpp', model: 'native' } })
+        const keyedPolicy = POLICY.slice(0, -1) + ',"profiles":[{"key":"native-profile","displayName":"Native","engine":"llamacpp","model":"native"}]}'
+        const edited = withRoles(keyedPolicy, [{ name: 'weak', profiles: ['native-profile'] }])
         const expected =
-            POLICY.slice(0, -1) + ',"roles":{"weak":{"engine":"llamacpp","model":"native"}}}'
+            keyedPolicy.slice(0, -1) + ',"roles":[{"name":"weak","profiles":["native-profile"]}]}'
         expect(edited).toBe(expected)
         await api.nodePolicy.set({ policy: edited, expectedPersistedRevision: REVISION })
         expect(service.writes).toEqual([

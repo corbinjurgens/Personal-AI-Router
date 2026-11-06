@@ -352,10 +352,12 @@ func (h *routingHandler) preflight(w http.ResponseWriter, r *http.Request, route
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// listModels answers with the synthetic alias list. It reads only the active
-// policy: no facade, upstream request or engine CORS is involved.
+// listModels answers with the synthetic alias list from this node's policy.
+// Context bounds include only enabled engines; no peer overlay or upstream
+// request is involved.
 func (h *routingHandler) listModels(w http.ResponseWriter) {
-	data := hybridAliasRecords(h.host.admission.currentPolicy(), nil, nil)
+	pol := h.host.admission.currentPolicy()
+	data := h.host.hybridAliasRecords(pol, selfDeclaredRoles(pol), nil)
 	if data == nil {
 		data = []json.RawMessage{}
 	}

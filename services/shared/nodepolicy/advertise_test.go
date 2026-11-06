@@ -9,7 +9,99 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"nvpair-shared/engines"
 )
+
+func TestAdvertisementListsRoleProfiles(t *testing.T) {
+	p := Default()
+	p.Profiles = []Profile{
+		{Key: "z", DisplayName: "Last", Engine: "llamacpp", Model: "z", ContextTokens: 4096, MaxOutputTokens: 1024, Capabilities: []Capability{CapTools}, Qualification: &QualificationRef{ID: "q", Revision: "1"}, ModelIdentity: &engines.ModelIdentity{Strength: "declared", Files: []engines.ModelIdentityFile{{Role: "model", Name: "z.gguf", SizeBytes: 42}}}},
+		{Key: "a", DisplayName: "First", Engine: "llamacpp", Model: "a"},
+		{Key: "unused", DisplayName: "Unused", Engine: "llamacpp", Model: "unused"},
+		{Key: "private", DisplayName: "Private", Engine: "llamacpp", Model: "private", LocalOnly: true},
+	}
+	p.Roles = []Role{{Name: TierStrong, Profiles: []string{"z", "a"}}, {Name: TierMedium, Profiles: []string{}}, {Name: TierWeak, Profiles: []string{"z", "private"}}}
+	if err := p.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	a := p.Advertisement()
+	wantRoles := []Role{{Name: TierStrong, Profiles: []string{"z", "a"}}, {Name: TierMedium, Profiles: []string{}}, {Name: TierWeak, Profiles: []string{"z", "private"}}}
+	if !reflect.DeepEqual(a.Roles, wantRoles) {
+		t.Fatalf("roles = %+v, want %+v", a.Roles, wantRoles)
+	}
+	var keys []string
+	for _, pr := range a.Profiles {
+		keys = append(keys, pr.Key)
+	}
+	if !reflect.DeepEqual(keys, []string{"a", "unused", "z"}) {
+		t.Fatalf("profile keys = %v", keys)
+	}
+	raw, err := json.Marshal(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields struct {
+		Roles []struct {
+			Name     string
+			Profiles json.RawMessage
+		}
+	}
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if string(fields.Roles[1].Profiles) != "[]" {
+		t.Fatalf("empty membership = %s", fields.Roles[1].Profiles)
+	}
+	a.Roles[0].Profiles[0] = "changed"
+	a.Profiles[2].Capabilities[0] = CapVision
+	a.Profiles[2].Qualification.Revision = "2"
+	a.Profiles[2].ModelIdentity.Files[0].Name = "changed.gguf"
+	if p.Roles[0].Profiles[0] != "z" || p.Profiles[0].Capabilities[0] != CapTools || p.Profiles[0].Qualification.Revision != "1" || p.Profiles[0].ModelIdentity.Files[0].Name != "z.gguf" {
+		t.Fatal("advertisement aliases policy nested state")
+	}
+	p.Roles = nil
+	if got := p.Advertisement(); len(got.Profiles) != 3 || len(got.Roles) != 0 {
+		t.Fatalf("profiles without roles = %+v", got)
+	}
+	t.Run("malformed profile prunes membership", func(t *testing.T) {
+		var got Advertisement
+		err := json.Unmarshal([]byte(`{"revision":"1","roles":[{"name":"strong","profiles":["bad"]},{"name":"weak","profiles":["good","bad"]}],"profiles":[{"key":"bad","displayName":"Profile","engine":"llamacpp","model":"bad\nmodel"},{"key":"good","displayName":"Profile","engine":"llamacpp","model":"good"}]}`), &got)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []Role{{Name: TierStrong, Profiles: []string{}}, {Name: TierWeak, Profiles: []string{"good"}}}
+		if !reflect.DeepEqual(got.Roles, want) || len(got.Profiles) != 1 || got.Profiles[0].Key != "good" {
+			t.Fatalf("filtered advertisement = %+v", got)
+		}
+	})
+}
+
+func TestAdvertisementFiltersInvalidProfileMetadata(t *testing.T) {
+	for name, metadata := range map[string]string{
+		"missing display name":      `"icon":"code"`,
+		"empty display name":        `"displayName":""`,
+		"control display name":      `"displayName":"bad\nname"`,
+		"oversized display name":    `"displayName":"` + strings.Repeat("x", 129) + `"`,
+		"invalid display UTF-8":     `"displayName":"` + string([]byte{0xff}) + `"`,
+		"invalid icon":              `"displayName":"Bad","icon":"unknown"`,
+		"invalid identity strength": `"displayName":"Bad","modelIdentity":{"strength":"verified"}`,
+		"invalid identity file":     `"displayName":"Bad","modelIdentity":{"strength":"declared","files":[{"role":"model","name":"../bad"}]}`,
+		"invalid identity UTF-8":    `"displayName":"Bad","modelIdentity":{"strength":"declared","generalName":"` + string([]byte{0xff}) + `"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			raw := []byte(`{"profiles":[{"key":"bad","engine":"llamacpp","model":"bad",` + metadata + `},{"key":"good","displayName":"Good","engine":"llamacpp","model":"good"}],"roles":[{"name":"weak","profiles":["bad","good"]},{"name":"medium","profiles":["bad"]}]}`)
+			var got Advertisement
+			if err := json.Unmarshal(raw, &got); err != nil {
+				t.Fatal(err)
+			}
+			wantRoles := []Role{{Name: TierWeak, Profiles: []string{"good"}}, {Name: TierMedium, Profiles: []string{}}}
+			if len(got.Profiles) != 1 || got.Profiles[0].Key != "good" || !reflect.DeepEqual(got.Roles, wantRoles) {
+				t.Fatalf("malformed profile affected retained facts/declarations: %+v", got)
+			}
+		})
+	}
+}
 
 func TestPauseModeAdvertisementRoundTrip(t *testing.T) {
 	for _, mode := range []PauseMode{PauseConfigured, PauseImmediate} {
@@ -55,7 +147,7 @@ func TestServedResidentAdvertisementRoundTrip(t *testing.T) {
 				if (fields["servedModels"] != nil) != (p.ServedModels != nil) {
 					t.Fatal("permission presence lost")
 				}
-				for _, private := range []string{"residentModels", "routing", "profiles", "tiers"} {
+				for _, private := range []string{"residentModels", "routing", "tiers"} {
 					if fields[private] != nil {
 						t.Fatalf("advertisement exposed %s", private)
 					}
@@ -103,15 +195,11 @@ func TestServedResidentAdvertisementRawKeys(t *testing.T) {
 func TestAdvertisementTakesBoundsFromProfiles(t *testing.T) {
 	p := stagedPolicy(t)
 	p.Profiles = []Profile{{
-		Name: "qwen", Engine: "llamacpp", Model: "qwen3-8b", ContextTokens: 16384,
+		Key: "qwen", DisplayName: "qwen", Engine: "llamacpp", Model: "qwen3-8b", ContextTokens: 16384,
 		Capabilities: []Capability{CapTools, CapVision}, MemoryBytes: 5000000000, MaxConcurrent: 2,
 		RequestOptions: json.RawMessage(`{"keep_alive":"10m"}`),
 	}}
-	p.Roles = map[string]Role{
-		TierWeak:   {Engine: "llamacpp", Model: "qwen3-8b"},
-		TierMedium: {Engine: "llamacpp", Model: "qwen3-8b"},
-		TierStrong: {Engine: "llamacpp-custom", Model: "qwen3-8b"},
-	}
+	p.Roles = []Role{{Name: TierWeak, Profiles: []string{"qwen"}}, {Name: TierMedium, Profiles: []string{"qwen"}}, {Name: TierStrong, Profiles: []string{}}}
 	p.Availability = Paused
 	p.PausedBy = PausedByPeer
 	if err := p.Validate(); err != nil {
@@ -119,22 +207,13 @@ func TestAdvertisementTakesBoundsFromProfiles(t *testing.T) {
 	}
 
 	got := p.Advertisement()
-	bounded := AdvertisedRole{Engine: "llamacpp", Model: "qwen3-8b", ContextTokens: 16384, Capabilities: []Capability{CapTools, CapVision}}
-	want := Advertisement{
-		Revision: "12",
-		Roles: map[string]AdvertisedRole{
-			TierWeak:   bounded,
-			TierMedium: bounded,
-			// The only profile covers the same model on another engine.
-			TierStrong: {Engine: "llamacpp-custom", Model: "qwen3-8b"},
-		},
-		PausedBy: PausedByPeer,
-	}
+	bounded := AdvertisedProfile{Key: "qwen", DisplayName: "qwen", Engine: "llamacpp", Model: "qwen3-8b", ContextTokens: 16384, Capabilities: []Capability{CapTools, CapVision}}
+	want := Advertisement{Revision: "12", Roles: []Role{{Name: TierWeak, Profiles: []string{"qwen"}}, {Name: TierMedium, Profiles: []string{"qwen"}}, {Name: TierStrong, Profiles: []string{}}}, Profiles: []AdvertisedProfile{bounded}, PausedBy: PausedByPeer}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Advertisement() = %+v\nwant %+v", got, want)
 	}
 
-	got.Roles[TierWeak].Capabilities[0] = CapEmbeddings
+	got.Profiles[0].Capabilities[0] = CapEmbeddings
 	if p.Profiles[0].Capabilities[0] != CapTools {
 		t.Errorf("editing the advertisement changed the policy's profile")
 	}
@@ -145,7 +224,7 @@ func TestAdvertisementTakesBoundsFromProfiles(t *testing.T) {
 	}
 	for _, leak := range []string{
 		"routing", "NVPAIR_PROVIDER_SECRET", "free-acct", "free-small", "deployment", "allowedOrigins",
-		"tiers", "profiles", "memoryBytes", "maxConcurrent", "keep_alive", "availability", "admission",
+		"tiers", "memoryBytes", "maxConcurrent", "keep_alive", "availability", "admission",
 	} {
 		if strings.Contains(string(data), leak) {
 			t.Errorf("advertisement contains %q: %s", leak, data)
@@ -155,19 +234,11 @@ func TestAdvertisementTakesBoundsFromProfiles(t *testing.T) {
 
 func TestAdvertisementWithoutProfileHasNoBounds(t *testing.T) {
 	p := Default()
-	p.Roles = map[string]Role{TierWeak: {Engine: "llamacpp", Model: "m"}}
-
+	p.Roles = []Role{{Name: TierWeak, Profiles: []string{}}}
 	got := p.Advertisement()
-	want := Advertisement{Revision: "0", Roles: map[string]AdvertisedRole{TierWeak: {Engine: "llamacpp", Model: "m"}}}
+	want := Advertisement{Revision: "0", Roles: []Role{{Name: TierWeak, Profiles: []string{}}}, Profiles: []AdvertisedProfile{}}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("Advertisement() = %+v, want %+v", got, want)
-	}
-	data, err := json.Marshal(got)
-	if err != nil {
-		t.Fatalf("marshal advertisement: %v", err)
-	}
-	if want := `{"revision":"0","roles":{"weak":{"engine":"llamacpp","model":"m"}}}`; string(data) != want {
-		t.Errorf("advertisement JSON = %s, want %s", data, want)
+		t.Fatalf("Advertisement()=%+v, want %+v", got, want)
 	}
 }
 
@@ -176,16 +247,20 @@ func TestAdvertisementWithoutRoles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal advertisement: %v", err)
 	}
-	if want := `{"revision":"0","roles":{}}`; string(data) != want {
-		t.Errorf("advertisement JSON = %s, want %s", data, want)
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if string(got["roles"]) != "[]" || string(got["profiles"]) != "[]" || string(got["revision"]) != `"0"` || len(got) != 3 {
+		t.Fatalf("empty advertisement = %s", data)
 	}
 }
 
 func TestAdvertisementStrictCapabilityCompatibility(t *testing.T) {
 	for _, original := range []string{
-		`{"revision":"0","roles":{}}`,
-		`{"revision":"12","roles":{"weak":{"engine":"llamacpp","model":"m","contextTokens":1024,"capabilities":["tools"]}},"pausedBy":"peer"}`,
-		`{"revision":"0","roles":{},"strictAdmission":{"version":2,"future":{"newField":true}}}`,
+		`{"revision":"0","roles":[],"profiles":[]}`,
+		`{"revision":"12","roles":[{"name":"weak","profiles":["m"]}],"profiles":[{"key":"m","displayName":"m","engine":"llamacpp","model":"m","contextTokens":1024,"capabilities":["tools"]}],"pausedBy":"peer"}`,
+		`{"revision":"0","roles":[],"profiles":[],"strictAdmission":{"version":2,"future":{"newField":true}}}`,
 	} {
 		t.Run(original, func(t *testing.T) {
 			var got Advertisement
@@ -203,7 +278,14 @@ func TestAdvertisementStrictCapabilityCompatibility(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if string(encoded) != original {
+			var encodedFields, originalFields map[string]json.RawMessage
+			if err := json.Unmarshal(encoded, &encodedFields); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal([]byte(original), &originalFields); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(encodedFields, originalFields) {
 				t.Fatalf("re-encoded = %s, want %s", encoded, original)
 			}
 		})
@@ -212,7 +294,7 @@ func TestAdvertisementStrictCapabilityCompatibility(t *testing.T) {
 
 func TestAdvertisementStrictCapabilityRejectsNull(t *testing.T) {
 	var got Advertisement
-	if err := json.Unmarshal([]byte(`{"revision":"0","roles":{},"strictAdmission":null}`), &got); err == nil {
+	if err := json.Unmarshal([]byte(`{"revision":"0","roles":[],"profiles":[],"strictAdmission":null}`), &got); err == nil {
 		t.Fatal("accepted explicit null capability")
 	}
 }
@@ -267,11 +349,11 @@ func TestAdvertisementStrictRawParityCorpus(t *testing.T) {
 
 func TestAdvertisementLegacyCaseFolding(t *testing.T) {
 	var got Advertisement
-	input := `{"revision":"1","Revision":"2","ROLES":{"weak":{"ENGINE":"llamacpp","MODEL":"m"}},"PAUSEDBY":"peer"}`
+	input := `{"revision":"1","Revision":"2","ROLES":[{"NAME":"weak","PROFILES":["m"]}],"PROFILES":[{"KEY":"m","DISPLAYNAME":"Model","ENGINE":"llamacpp","MODEL":"m"}],"PAUSEDBY":"peer"}`
 	if err := json.Unmarshal([]byte(input), &got); err != nil {
 		t.Fatal(err)
 	}
-	want := Advertisement{Revision: "2", Roles: map[string]AdvertisedRole{"weak": {Engine: "llamacpp", Model: "m"}}, PausedBy: PausedByPeer}
+	want := Advertisement{Revision: "2", Roles: []Role{{Name: TierWeak, Profiles: []string{"m"}}}, Profiles: []AdvertisedProfile{{Key: "m", DisplayName: "Model", Engine: "llamacpp", Model: "m"}}, PausedBy: PausedByPeer}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("decoded = %+v, want %+v", got, want)
 	}
@@ -280,17 +362,17 @@ func TestAdvertisementLegacyCaseFolding(t *testing.T) {
 func TestAdvertisementCarriesProfileQualification(t *testing.T) {
 	p := Default()
 	p.Profiles = []Profile{{
-		Name: "q", Engine: "llamacpp", Model: "q", ContextTokens: 8192, MaxOutputTokens: 2048,
+		Key: "q", DisplayName: "q", Engine: "llamacpp", Model: "q", ContextTokens: 8192, MaxOutputTokens: 2048,
 		Qualification: &QualificationRef{ID: "msi-qwen3-8b", Revision: "3"},
 	}}
-	p.Roles = map[string]Role{TierWeak: {Engine: "llamacpp", Model: "q"}, TierStrong: {Engine: "llamacpp", Model: "unprofiled"}}
+	p.Roles = []Role{{Name: TierWeak, Profiles: []string{"q"}}, {Name: TierStrong, Profiles: []string{}}}
 	if err := p.Validate(); err != nil {
 		t.Fatalf("fixture policy is invalid: %v", err)
 	}
 
 	got := p.Advertisement()
-	weak := got.Roles[TierWeak]
-	want := AdvertisedRole{Engine: "llamacpp", Model: "q", ContextTokens: 8192, MaxOutputTokens: 2048,
+	weak := got.Profiles[0]
+	want := AdvertisedProfile{Key: "q", DisplayName: "q", Engine: "llamacpp", Model: "q", ContextTokens: 8192, MaxOutputTokens: 2048,
 		Qualification: &QualificationRef{ID: "msi-qwen3-8b", Revision: "3"}}
 	if !reflect.DeepEqual(weak, want) {
 		t.Fatalf("weak role = %+v, want %+v", weak, want)
@@ -298,8 +380,8 @@ func TestAdvertisementCarriesProfileQualification(t *testing.T) {
 	if !weak.HybridQualified() {
 		t.Errorf("the qualified role is not hybrid qualified")
 	}
-	if strong := got.Roles[TierStrong]; strong.Qualification != nil || strong.MaxOutputTokens != 0 || strong.HybridQualified() {
-		t.Errorf("a role without a profile = %+v, want no qualification", strong)
+	if strong := got.Roles[1]; strong.Name != TierStrong || len(strong.Profiles) != 0 {
+		t.Fatalf("empty declaration lost: %+v", strong)
 	}
 
 	weak.Qualification.Revision = "4"
@@ -307,29 +389,29 @@ func TestAdvertisementCarriesProfileQualification(t *testing.T) {
 		t.Errorf("editing the advertisement changed the policy's profile")
 	}
 
-	data, err := json.Marshal(p.Advertisement().Roles[TierWeak])
+	data, err := json.Marshal(p.Advertisement().Profiles[0])
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := `{"engine":"llamacpp","model":"q","contextTokens":8192,"maxOutputTokens":2048,"qualification":{"id":"msi-qwen3-8b","revision":"3"}}`; string(data) != want {
+	if want := `{"key":"q","displayName":"q","engine":"llamacpp","model":"q","contextTokens":8192,"maxOutputTokens":2048,"qualification":{"id":"msi-qwen3-8b","revision":"3"}}`; string(data) != want {
 		t.Errorf("role JSON = %s, want %s", data, want)
 	}
 }
 
-func TestAdvertisedRoleHybridQualified(t *testing.T) {
+func TestAdvertisedProfileHybridQualified(t *testing.T) {
 	ref := &QualificationRef{ID: "q", Revision: "1"}
 	for _, tc := range []struct {
 		name string
-		role AdvertisedRole
+		role AdvertisedProfile
 		want bool
 	}{
-		{"finite and qualified", AdvertisedRole{ContextTokens: 4096, MaxOutputTokens: 1024, Qualification: ref}, true},
-		{"no qualification", AdvertisedRole{ContextTokens: 4096, MaxOutputTokens: 1024}, false},
-		{"no context", AdvertisedRole{MaxOutputTokens: 1024, Qualification: ref}, false},
-		{"no output ceiling", AdvertisedRole{ContextTokens: 4096, Qualification: ref}, false},
-		{"output filling the context", AdvertisedRole{ContextTokens: 1024, MaxOutputTokens: 1024, Qualification: ref}, false},
-		{"negative output", AdvertisedRole{ContextTokens: 4096, MaxOutputTokens: -1, Qualification: ref}, false},
-		{"malformed reference", AdvertisedRole{ContextTokens: 4096, MaxOutputTokens: 1024, Qualification: &QualificationRef{ID: "q", Revision: "x"}}, false},
+		{"finite and qualified", AdvertisedProfile{ContextTokens: 4096, MaxOutputTokens: 1024, Qualification: ref}, true},
+		{"no qualification", AdvertisedProfile{ContextTokens: 4096, MaxOutputTokens: 1024}, false},
+		{"no context", AdvertisedProfile{MaxOutputTokens: 1024, Qualification: ref}, false},
+		{"no output ceiling", AdvertisedProfile{ContextTokens: 4096, Qualification: ref}, false},
+		{"output filling the context", AdvertisedProfile{ContextTokens: 1024, MaxOutputTokens: 1024, Qualification: ref}, false},
+		{"negative output", AdvertisedProfile{ContextTokens: 4096, MaxOutputTokens: -1, Qualification: ref}, false},
+		{"malformed reference", AdvertisedProfile{ContextTokens: 4096, MaxOutputTokens: 1024, Qualification: &QualificationRef{ID: "q", Revision: "x"}}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tc.role.HybridQualified(); got != tc.want {
@@ -353,11 +435,11 @@ func TestAdvertisementDecodesMalformedQualificationLeniently(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var adv Advertisement
-			doc := `{"revision":"1","roles":{"weak":{"engine":"llamacpp","model":"m","contextTokens":4096,` + tc.role + `}}}`
+			doc := `{"revision":"1","roles":[{"name":"weak","profiles":["m"]}],"profiles":[{"key":"m","displayName":"Profile","engine":"llamacpp","model":"m","contextTokens":4096,` + tc.role + `}]}`
 			if err := json.Unmarshal([]byte(doc), &adv); err != nil {
 				t.Fatalf("decode: %v", err)
 			}
-			role := adv.Roles[TierWeak]
+			role := adv.Profiles[0]
 			if role.Engine != "llamacpp" || role.Model != "m" || role.ContextTokens != 4096 {
 				t.Fatalf("role = %+v, want its engine, model and context kept", role)
 			}
@@ -368,12 +450,12 @@ func TestAdvertisementDecodesMalformedQualificationLeniently(t *testing.T) {
 	}
 }
 
-func TestAdvertisedRoleKeepsLegacyCaseFolding(t *testing.T) {
-	var role AdvertisedRole
+func TestAdvertisedProfileKeepsLegacyCaseFolding(t *testing.T) {
+	var role AdvertisedProfile
 	if err := json.Unmarshal([]byte(`{"ENGINE":"llamacpp","Model":"m","CONTEXTTOKENS":4096,"maxoutputtokens":1024,"Qualification":{"ID":"q","REVISION":"1"}}`), &role); err != nil {
 		t.Fatal(err)
 	}
-	want := AdvertisedRole{Engine: "llamacpp", Model: "m", ContextTokens: 4096, MaxOutputTokens: 1024, Qualification: &QualificationRef{ID: "q", Revision: "1"}}
+	want := AdvertisedProfile{Engine: "llamacpp", Model: "m", ContextTokens: 4096, MaxOutputTokens: 1024, Qualification: &QualificationRef{ID: "q", Revision: "1"}}
 	if !reflect.DeepEqual(role, want) {
 		t.Fatalf("decoded = %+v, want %+v", role, want)
 	}

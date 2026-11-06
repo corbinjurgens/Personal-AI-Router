@@ -13,6 +13,31 @@ import (
 	"nvpair-shared/modelconfig"
 )
 
+func TestPreviewIdentitiesTransportAndClone(t *testing.T) {
+	p := Preview{Identities: map[string]engines.ModelIdentity{
+		"model-8k": {Strength: "declared", GeneralName: "Original", ConfiguredContextTokens: 8192, Files: []engines.ModelIdentityFile{{Role: "model", Name: "model.gguf", SizeBytes: 42}}},
+	}}
+	var got Preview
+	if err := modelconfig.DecodeStrict(settingsJSON(t, p), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.Identities, p.Identities) {
+		t.Fatalf("preview identities = %+v", got.Identities)
+	}
+	clone := p.Clone()
+	identity := clone.Identities["model-8k"]
+	identity.GeneralName = "Changed"
+	identity.Files[0].Name = "changed.gguf"
+	clone.Identities["model-8k"] = identity
+	delete(clone.Identities, "model-8k")
+	if len(p.Identities) != 1 || p.Identities["model-8k"].GeneralName != "Original" || p.Identities["model-8k"].Files[0].Name != "model.gguf" {
+		t.Fatal("preview clone aliases the identity map or its files")
+	}
+	if (Preview{}).Clone().Identities != nil || (Preview{Identities: map[string]engines.ModelIdentity{}}).Clone().Identities == nil {
+		t.Fatal("preview clone changed nil versus empty identities")
+	}
+}
+
 func TestWorkingSetLimitWireAndValueEquality(t *testing.T) {
 	t.Run("unverified status", func(t *testing.T) {
 		var got Snapshot
@@ -163,9 +188,84 @@ func TestWorkerRequestAuthorityIsPrivateAndStrict(t *testing.T) {
 	}
 }
 
+func TestWorkerRequestResourceProfileKey(t *testing.T) {
+	test := func(name, key string, validate, wantError bool) {
+		t.Run(name, func(t *testing.T) {
+			input := WorkerRequest[Request]{Request: Request{Engine: "llamacpp"}, ValidateResources: validate, ResourceModel: key}
+			got, err := DecodeWorkerRequest[Request](settingsJSON(t, input))
+			if (err != nil) != wantError {
+				t.Fatalf("resource profile %q: error=%v, wantError=%t", key, err, wantError)
+			}
+			if err == nil && (got.ResourceModel != key || got.ValidateResources != validate) {
+				t.Fatalf("resource selection changed: %+v", got)
+			}
+		})
+	}
+	test("maximum profile key", strings.Repeat("k", 512), true, false)
+	test("oversized profile key", strings.Repeat("k", 513), true, true)
+	test("control character", "key\n", true, true)
+	test("reserved routing alias", "weak", true, true)
+	test("colon remains allowed", "custom:profile", true, false)
+	test("missing selection", "", true, true)
+	test("selection without validation", "profile", false, true)
+	test("no resource validation", "", false, false)
+}
+
+func TestReviewedModelChangeIsParentOnly(t *testing.T) {
+	request := Request{Engine: "llamacpp", Settings: Config{ServerPort: 8080, ProxyPort: 8081}}
+	change := &modelconfig.ModelChange{ProfileKey: "profile", ModelID: "artifact", Remove: true, ExpectedPolicyRevision: "0", PreviewDigest: strings.Repeat("a", 64)}
+	worker := WorkerRequest[Request]{Request: request, ReviewedModelChange: change}
+	got, err := DecodeWorkerRequest[Request](settingsJSON(t, worker))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.ReviewedModelChange, change) || got.Request.ModelChange != nil || !got.Request.Settings.Equal(request.Settings) {
+		t.Fatalf("frozen worker request changed evidence or settings: %+v", got)
+	}
+	configure := Configure{Engine: "llamacpp", Settings: request.Settings, OperationID: "accepted", ReviewedModelChange: change}
+	var native Configure
+	if err := modelconfig.DecodeStrict(settingsJSON(t, configure), &native); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateReviewedModelChange(native.ReviewedModelChange); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(native, configure) {
+		t.Fatalf("native configure lost reviewed removal: %+v", native)
+	}
+	var public map[string]json.RawMessage
+	if err := json.Unmarshal(settingsJSON(t, request), &public); err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []json.RawMessage{settingsJSON(t, change), json.RawMessage(`null`)} {
+		public["reviewedModelChange"] = value
+		if _, err := DecodeRequest(settingsJSON(t, public)); err == nil {
+			t.Fatal("public portable Request accepted reviewed-removal authority")
+		}
+	}
+}
+
+func TestWorkerRequestRefusesUnreviewedRemovalEvidence(t *testing.T) {
+	test := func(name string, change modelconfig.ModelChange) {
+		t.Run(name, func(t *testing.T) {
+			worker := WorkerRequest[Request]{Request: Request{Engine: "llamacpp"}, ReviewedModelChange: &change}
+			if _, err := DecodeWorkerRequest[Request](settingsJSON(t, worker)); err == nil {
+				t.Fatal("worker accepted invalid reviewed-removal evidence")
+			}
+			if err := ValidateReviewedModelChange(&change); err == nil {
+				t.Fatal("native configure evidence validation accepted the same invalid selection")
+			}
+		})
+	}
+	test("missing native digest", modelconfig.ModelChange{ModelID: "artifact", Remove: true, ExpectedPolicyRevision: "0"})
+	test("malformed native digest", modelconfig.ModelChange{ModelID: "artifact", Remove: true, ExpectedPolicyRevision: "0", PreviewDigest: "not-a-digest"})
+	test("load is not removal evidence", modelconfig.ModelChange{ModelID: "artifact", ExpectedPolicyRevision: "0", PreviewDigest: strings.Repeat("a", 64), Load: &modelconfig.LoadPatch{Clear: []string{"threads"}}})
+	test("removal with a second edit", modelconfig.ModelChange{ModelID: "artifact", Remove: true, ExpectedPolicyRevision: "0", PreviewDigest: strings.Repeat("a", 64), Load: &modelconfig.LoadPatch{Clear: []string{"threads"}}})
+}
+
 func TestConfigPreservesModelLoads(t *testing.T) {
 	slots := int32(2)
-	launch := LaunchState{ModelLoads: []modelconfig.ModelLoad{{ModelID: "z", Requested: modelconfig.RequestedLoad{Slots: &slots}}, {ModelID: "a"}}}
+	launch := LaunchState{ModelLoads: []modelconfig.ModelLoad{{ProfileKey: "z", ModelID: "z", Requested: modelconfig.RequestedLoad{Slots: &slots}}, {ProfileKey: "a", ModelID: "a"}}}
 	c := ConfigFromLaunch(launch, 8081)
 	canonical, err := c.Canonical()
 	if err != nil {
@@ -202,7 +302,7 @@ func TestModelChangeRequiresBaselineAndReview(t *testing.T) {
 
 func TestModelChangeNativeFitSparseRequest(t *testing.T) {
 	on, margin, ctx := "on", "512", int32(4096)
-	baseline := Config{ServerPort: 8080, ProxyPort: 8081, ModelLoads: []modelconfig.ModelLoad{{ModelID: "model", Requested: modelconfig.RequestedLoad{Fit: &on, FitTarget: &margin, FitCtx: &ctx}}}}
+	baseline := Config{ServerPort: 8080, ProxyPort: 8081, ModelLoads: []modelconfig.ModelLoad{{ProfileKey: "model", ModelID: "model", Requested: modelconfig.RequestedLoad{Fit: &on, FitTarget: &margin, FitCtx: &ctx}}}}
 	target, nextCtx := "1024", int32(8192)
 	test := func(name string, set modelconfig.RequestedLoad) {
 		t.Run(name, func(t *testing.T) {
@@ -363,7 +463,7 @@ func TestConfigBudgetIncludesFieldsBesidesModelLoads(t *testing.T) {
 }
 
 func storedModelLoad() modelconfig.ModelLoad {
-	return modelconfig.ModelLoad{ModelID: "m", Resolved: &modelconfig.ResolvedLoad{
+	return modelconfig.ModelLoad{ProfileKey: "m", ModelID: "m", Resolved: &modelconfig.ResolvedLoad{
 		PerSlotContext: 8192, TotalContext: 8192, Slots: 1, GPU: modelconfig.GPU{Mode: "cpu"},
 		Artifacts:     []modelconfig.ArtifactBinding{{Role: "model", Path: "/models/m.gguf", ResolvedTarget: "/blobs/m", Size: "9007199254740993", MtimeNS: "1780000000000000001", SampleSHA256: strings.Repeat("a", 64)}},
 		NativeBuildID: "native-build", SourceInputDigest: strings.Repeat("b", 64), PresetDigest: strings.Repeat("c", 64),

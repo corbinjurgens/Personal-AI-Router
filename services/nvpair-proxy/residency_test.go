@@ -134,7 +134,7 @@ func TestResidentContextBoundPrepare(t *testing.T) {
 			p.Profiles[0].ContextTokens = context
 			if collision {
 				alias := p.Profiles[0]
-				alias.Name, alias.Model = "alias", "m"
+				alias.Key, alias.DisplayName, alias.Model = "alias-key", "Alias", "m"
 				p.Profiles = append(p.Profiles, alias)
 			}
 			h.a.mu.Lock()
@@ -180,7 +180,7 @@ func TestResidentContextBoundPrepare(t *testing.T) {
 func TestResidentContextBoundPerModel(t *testing.T) {
 	h, in := residentHarness(t, "m", "n")
 	p := h.a.currentPolicy()
-	p.ResidentModels = append(p.ResidentModels, nodepolicy.Role{Engine: "llamacpp", Model: "n"})
+	p.ResidentModels = append(p.ResidentModels, nodepolicy.ModelRef{Engine: "llamacpp", Model: "n"})
 	p.Profiles[1].ContextTokens = 2048
 	h.a.mu.Lock()
 	ref := *p.Profiles[1].Qualification
@@ -425,7 +425,7 @@ func TestResidentCapacityAggregateRefusal(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			h, in := residentHarness(t, "m", "n")
 			p := h.a.currentPolicy()
-			p.ResidentModels = append(p.ResidentModels, nodepolicy.Role{Engine: "llamacpp", Model: "n"})
+			p.ResidentModels = append(p.ResidentModels, nodepolicy.ModelRef{Engine: "llamacpp", Model: "n"})
 			mutate(h.a, &p)
 			h.a.setPolicy(p)
 			result, err := h.a.prepareResident("proxy", in)
@@ -444,7 +444,7 @@ func TestResidentCapacityAggregateRefusal(t *testing.T) {
 	test("desired alias collision", func(_ *admissionController, p *nodepolicy.Policy) { p.ResidentModels[1].Model = "m" }, nodepolicy.ModelReasonUnqualified)
 	test("profile alias collision", func(_ *admissionController, p *nodepolicy.Policy) {
 		alias := p.Profiles[0]
-		alias.Name, alias.Model = "alias", "m"
+		alias.Key, alias.DisplayName, alias.Model = "alias-key", "Alias", "m"
 		p.Profiles = append(p.Profiles, alias)
 	}, nodepolicy.ModelReasonUnqualified)
 	test("unknown existing memory", func(a *admissionController, p *nodepolicy.Policy) {
@@ -499,7 +499,7 @@ func TestResidentCapacityMemorySumCannotOverflow(t *testing.T) {
 	p := h.a.currentPolicy()
 	p.Admission.MemoryBudgetBytes = 1<<63 - 1
 	p.Profiles[0].MemoryBytes, p.Profiles[1].MemoryBytes = 1<<62, 1<<62
-	p.ResidentModels = append(p.ResidentModels, nodepolicy.Role{Engine: "llamacpp", Model: "n"})
+	p.ResidentModels = append(p.ResidentModels, nodepolicy.ModelRef{Engine: "llamacpp", Model: "n"})
 	h.a.setPolicy(p)
 	result, err := h.a.prepareResident("proxy", in)
 	if err != nil || result.ReservationID != "" || len(result.Refusals) != 1 || result.Refusals[0].Reason != nodepolicy.ModelReasonNoFit {
@@ -980,7 +980,7 @@ func TestResidentCapacityFinishedLoadConvergesAfterPreferenceRemoval(t *testing.
 func TestResidentCapacityUnrelatedObservationGenerationDoesNotStrandFinish(t *testing.T) {
 	h, first := residentHarness(t, "m", "n")
 	p := h.a.currentPolicy()
-	p.ResidentModels = append(p.ResidentModels, nodepolicy.Role{Engine: "llamacpp", Model: "n"})
+	p.ResidentModels = append(p.ResidentModels, nodepolicy.ModelRef{Engine: "llamacpp", Model: "n"})
 	h.a.setPolicy(p)
 	firstPrepared := prepareResidentOK(t, h.a, first)
 	second := first
@@ -1245,7 +1245,7 @@ func TestResidentCapacitySuccessfulLoadsRetireWithoutReplay(t *testing.T) {
 func TestResidentCapacityUncertainHoldSurvivesCompletedChurn(t *testing.T) {
 	h, first := residentHarness(t, "m", "n")
 	p := h.a.currentPolicy()
-	p.ResidentModels = append(p.ResidentModels, nodepolicy.Role{Engine: "llamacpp", Model: "n"})
+	p.ResidentModels = append(p.ResidentModels, nodepolicy.ModelRef{Engine: "llamacpp", Model: "n"})
 	h.a.setPolicy(p)
 	prepared := prepareResidentOK(t, h.a, first)
 	dispatchResidentOK(t, h.a, first, prepared)
@@ -1311,7 +1311,7 @@ func TestResidentCapacityCurrentSourceFloorSurvivesLastRecordRetirement(t *testi
 func TestResidentCapacitySourceChurnKeepsCountedSourceFloor(t *testing.T) {
 	h, in := residentHarness(t, "m", "n")
 	p := h.a.currentPolicy()
-	p.ResidentModels = append(p.ResidentModels, nodepolicy.Role{Engine: "llamacpp", Model: "n"})
+	p.ResidentModels = append(p.ResidentModels, nodepolicy.ModelRef{Engine: "llamacpp", Model: "n"})
 	h.a.setPolicy(p)
 	in.Model = "n"
 	prepared := prepareResidentOK(t, h.a, in)
@@ -1391,7 +1391,7 @@ func TestResidentCapacityRecoveryAndRetirementLinearize(t *testing.T) {
 		t.Run(order, func(t *testing.T) {
 			h, in := residentHarness(t, "m", "n")
 			p := h.a.currentPolicy()
-			p.ResidentModels = append(p.ResidentModels, nodepolicy.Role{Engine: "llamacpp", Model: "n"})
+			p.ResidentModels = append(p.ResidentModels, nodepolicy.ModelRef{Engine: "llamacpp", Model: "n"})
 			h.a.setPolicy(p)
 			prepared := prepareResidentOK(t, h.a, in)
 			recoveryNotGranted := nodepolicy.FinishResidentResult{ReservationID: prepared.ReservationID, Outcome: nodepolicy.ResidentUnknown, RecoveryID: "recovery-1"}

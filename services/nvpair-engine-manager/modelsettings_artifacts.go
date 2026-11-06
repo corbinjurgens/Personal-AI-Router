@@ -528,6 +528,22 @@ func (e *Executor) inspectModelArtifacts(ctx context.Context, p modelconfig.Insp
 	if err != nil {
 		return unavailable("unavailable", "Exact local model source is unavailable.")
 	}
+	var selected *modelconfig.ModelLoad
+	if p.ProfileKey != "" {
+		for i := range snapshot.state.plat.Runtime.ModelLoads {
+			load := &snapshot.state.plat.Runtime.ModelLoads[i]
+			if load.ProfileKey == p.ProfileKey {
+				if load.ModelID != p.ModelID {
+					return modelconfig.InspectResult{}, modelSettingsParamsError(fmt.Errorf("profileKey: stored profile selects a different modelId"))
+				}
+				selected = load
+				break
+			}
+		}
+		if selected == nil {
+			return modelconfig.InspectResult{}, modelSettingsParamsError(fmt.Errorf("profileKey: stored profile not found"))
+		}
+	}
 	if selected, _ := ctx.Value(nativeHelpInspectionKey{}).(string); selected != "" {
 		if build, err := nativeBuildID(ctx, snapshot.state); err == nil && build == selected {
 			result.NativeOptions = nativeHelpResults.lookup(build)
@@ -538,11 +554,8 @@ func (e *Executor) inspectModelArtifacts(ctx context.Context, p modelconfig.Insp
 		}
 	}
 	result.ConfigurationKeyReason = "not-applied"
-	for _, load := range snapshot.state.plat.Runtime.ModelLoads {
-		if load.ModelID == p.ModelID && load.Resolved != nil {
-			result.ConfigurationKeyReason = "artifacts-unavailable"
-			break
-		}
+	if selected != nil && selected.Resolved != nil {
+		result.ConfigurationKeyReason = "artifacts-unavailable"
 	}
 	access.recognize = func(ctx context.Context, model string) (engineInventory, error) {
 		observation, err := e.recognizeModelSource(ctx, p.Engine, model)
@@ -681,7 +694,7 @@ func (e *Executor) inspectModelArtifacts(ctx context.Context, p modelconfig.Insp
 			if err != nil {
 				return modelconfig.InspectResult{}, err
 			}
-			if finite, ok := compiled[p.ModelID]; ok && finite.Allocation != nil {
+			if finite, ok := compiled[p.ProfileKey]; ok && finite.Allocation != nil {
 				input = finite
 				if op, ok := ctx.Value(modelAutoOperationKey{}).(modelAutoOperation); ok && op.Memory != nil {
 					input.Memory, _ = op.Memory.ModelAutoMemory(ctx)
@@ -719,13 +732,10 @@ func (e *Executor) inspectModelArtifacts(ctx context.Context, p modelconfig.Insp
 		}
 	}
 	var observedArtifacts []modelconfig.ArtifactSummary
-	for _, load := range snapshot.state.plat.Runtime.ModelLoads {
-		if load.ModelID == p.ModelID && load.Resolved != nil {
-			observedArtifacts = modelEstimateBindings(load.Resolved.Artifacts)
-			for i := range observedArtifacts {
-				observedArtifacts[i].Assurance = "sampled-local-binding"
-			}
-			break
+	if selected != nil && selected.Resolved != nil {
+		observedArtifacts = modelEstimateBindings(selected.Resolved.Artifacts)
+		for i := range observedArtifacts {
+			observedArtifacts[i].Assurance = "sampled-local-binding"
 		}
 	}
 	if len(observedArtifacts) == 0 {
@@ -738,7 +748,9 @@ func (e *Executor) inspectModelArtifacts(ctx context.Context, p modelconfig.Insp
 			observedArtifacts[i].Assurance = "sampled-local-binding"
 		}
 	}
-	result = attachModelBufferObservation(result, e.projectModelBufferObservation(st, p.Engine, p.ModelID, observedArtifacts))
+	if selected != nil {
+		result = attachModelBufferObservation(result, e.projectModelBufferObservation(st, p.Engine, p.ProfileKey, observedArtifacts))
+	}
 	return result, nil
 }
 

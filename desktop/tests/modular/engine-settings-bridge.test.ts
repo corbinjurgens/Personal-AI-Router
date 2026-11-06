@@ -94,13 +94,142 @@ const baseline = {
     editable: true
 }
 
+describe('profile-key load contracts', () => {
+    const settings = { serverPort: 1234, proxyPort: 1235, launchText: '' }
+    const preview = { settings, revision: 1, restart: false, rebind: false }
+
+    it('preserves distinct profile keys for one model', () => {
+        const loads = [
+            { profileKey: 'model-8k', modelId: 'model', requested: {} },
+            { profileKey: 'model-32k', modelId: 'model', requested: {} }
+        ]
+        expect(
+            parseEngineSettingsPreview({
+                ...preview,
+                settings: { ...settings, modelLoads: loads }
+            }).settings.modelLoads
+        ).toEqual(loads)
+    })
+
+    it('refuses duplicate profile keys even for different models', () => {
+        expect(() =>
+            parseEngineSettingsPreview({
+                ...preview,
+                settings: {
+                    ...settings,
+                    modelLoads: [
+                        { profileKey: 'same', modelId: 'first', requested: {} },
+                        { profileKey: 'same', modelId: 'second', requested: {} }
+                    ]
+                }
+            })
+        ).toThrow('Duplicate model load profile key.')
+    })
+
+    it.each(['weak', 'medium-local', 'strong-api', 'coder-api', 'coder-local', 'role:api'])(
+        'accepts artifact identifier %s independently of its profile key',
+        modelId => {
+            const load = { profileKey: 'lfm-8k', modelId, requested: {} }
+            expect(
+                parseEngineSettingsPreview({
+                    ...preview,
+                    settings: { ...settings, modelLoads: [load] }
+                }).settings.modelLoads
+            ).toEqual([load])
+        }
+    )
+
+    it.each(['', 'bad\nmodel', 'bad\u007fmodel', '\ud800', 'é'.repeat(257)])(
+        'refuses malformed artifact identifier %s',
+        modelId => {
+            expect(() =>
+                parseEngineSettingsPreview({
+                    ...preview,
+                    settings: {
+                        ...settings,
+                        modelLoads: [{ profileKey: 'lfm-8k', modelId, requested: {} }]
+                    }
+                })
+            ).toThrow()
+        }
+    )
+
+    it('refuses a missing profile key', () => {
+        expect(() =>
+            parseEngineSettingsPreview({
+                ...preview,
+                settings: { ...settings, modelLoads: [{ modelId: 'model', requested: {} }] }
+            })
+        ).toThrow()
+    })
+
+    it.each(['', 'weak', 'medium-local', 'strong-api', 'bad\nkey', 'x'.repeat(513)])(
+        'refuses invalid profile key %s',
+        profileKey => {
+            expect(() =>
+                parseEngineSettingsPreview({
+                    ...preview,
+                    settings: {
+                        ...settings,
+                        modelLoads: [{ profileKey, modelId: 'model', requested: {} }]
+                    }
+                })
+            ).toThrow()
+        }
+    )
+
+    it.each(['coder-api', 'coder-local', 'org/model-api', 'coder-api-local'])(
+        'accepts profile key outside the interim fixed-tier aliases %s',
+        profileKey => {
+            const load = { profileKey, modelId: 'model', requested: {} }
+            expect(
+                parseEngineSettingsPreview({
+                    ...preview,
+                    settings: { ...settings, modelLoads: [load] }
+                }).settings.modelLoads
+            ).toEqual([load])
+        }
+    )
+
+    it('preserves validated preview identities by profile key', () => {
+        const identities = {
+            'model-8k': {
+                strength: 'declared',
+                configuredContextTokens: 8192,
+                files: [{ role: 'model', name: 'model.gguf', sizeBytes: 64 }]
+            }
+        }
+        expect(parseEngineSettingsPreview({ ...preview, identities }).identities).toEqual(
+            identities
+        )
+    })
+
+    it('refuses malformed preview identities', () => {
+        expect(() =>
+            parseEngineSettingsPreview({
+                ...preview,
+                identities: { profile: { strength: 'verified' } }
+            })
+        ).toThrow('Invalid preview model identity.')
+    })
+
+    it('validates preview identity profile keys', () => {
+        expect(() =>
+            parseEngineSettingsPreview({
+                ...preview,
+                identities: { 'medium-api': { strength: 'declared' } }
+            })
+        ).toThrow('Reserved profile key.')
+    })
+})
+
 describe('working-set settings decoding', () => {
     it('preserves inherited CPU expert placement', () => {
         const snapshot = parseEngineSettings({
             ...baseline,
             settings: {
                 ...baseline.settings,
-                modelLoads: [{ modelId: 'exact/model', requested: {} }]
+                modelLoads: [{ profileKey: 'exact/model', modelId: 'exact/model', requested: {} }]
             }
         })
         expect(snapshot.settings.modelLoads?.[0]?.requested.cpuExperts).toBeUndefined()
@@ -132,6 +261,7 @@ describe('working-set settings decoding', () => {
                 ...baseline.settings,
                 modelLoads: [
                     {
+                        profileKey: 'exact/model',
                         modelId: 'exact/model',
                         requested: { cpuExperts: { mode, layers } },
                         resolved: allocation
@@ -157,7 +287,9 @@ describe('working-set settings decoding', () => {
             ...baseline,
             settings: {
                 ...baseline.settings,
-                modelLoads: [{ modelId: 'exact/model', requested: { cpuExperts } }]
+                modelLoads: [
+                    { profileKey: 'exact/model', modelId: 'exact/model', requested: { cpuExperts } }
+                ]
             }
         })
         expect(snapshot.settings.modelLoads?.[0]?.requested.cpuExperts).toEqual(cpuExperts)
@@ -180,7 +312,13 @@ describe('working-set settings decoding', () => {
                 ...baseline,
                 settings: {
                     ...baseline.settings,
-                    modelLoads: [{ modelId: 'exact/model', requested: { cpuExperts } }]
+                    modelLoads: [
+                        {
+                            profileKey: 'exact/model',
+                            modelId: 'exact/model',
+                            requested: { cpuExperts }
+                        }
+                    ]
                 }
             })
         ).toThrow()
@@ -358,6 +496,7 @@ describe('unified settings bridge', () => {
                 ...baseline.settings,
                 modelLoads: [
                     {
+                        profileKey: 'model',
                         modelId: 'model',
                         requested: { extraOptions: { device: 'CUDA1', 'expert-cache': 'auto' } }
                     }
@@ -428,7 +567,9 @@ describe('unified settings bridge', () => {
             parseEngineSettingsPreview({
                 settings: {
                     ...baseline.settings,
-                    modelLoads: [{ modelId: 'model', requested: { extraOptions } }]
+                    modelLoads: [
+                        { profileKey: 'model', modelId: 'model', requested: { extraOptions } }
+                    ]
                 },
                 revision: 4,
                 restart: false,
@@ -441,7 +582,11 @@ describe('unified settings bridge', () => {
         const settings = {
             ...baseline.settings,
             modelLoads: [
-                { modelId: 'exact/model', requested: { fit: 'on', fitTarget: '512', fitCtx: 4096 } }
+                {
+                    profileKey: 'exact/model',
+                    modelId: 'exact/model',
+                    requested: { fit: 'on', fitTarget: '512', fitCtx: 4096 }
+                }
             ]
         }
         const preview = parseEngineSettingsPreview({
@@ -460,7 +605,11 @@ describe('unified settings bridge', () => {
                 settings: {
                     ...settings,
                     modelLoads: [
-                        { modelId: 'exact/model', requested: { fit: 'on', unknownFit: 1 } }
+                        {
+                            profileKey: 'exact/model',
+                            modelId: 'exact/model',
+                            requested: { fit: 'on', unknownFit: 1 }
+                        }
                     ]
                 },
                 revision: 4,
@@ -496,7 +645,14 @@ describe('unified settings bridge', () => {
             }
             const settings = {
                 ...baseline.settings,
-                modelLoads: [{ modelId: 'exact/model', requested, resolved: allocation }]
+                modelLoads: [
+                    {
+                        profileKey: 'exact/model',
+                        modelId: 'exact/model',
+                        requested,
+                        resolved: allocation
+                    }
+                ]
             }
             const snapshot = parseEngineSettings({
                 ...baseline,
@@ -510,6 +666,7 @@ describe('unified settings bridge', () => {
                     ...baseline.settings,
                     modelLoads: [
                         {
+                            profileKey: 'exact/model',
                             modelId: 'exact/model',
                             requested: { fit: 'on', fitTarget: '512', fitCtx: 4096 }
                         }
@@ -533,7 +690,13 @@ describe('unified settings bridge', () => {
                     coupledStage,
                     settings: {
                         ...baseline.settings,
-                        modelLoads: [{ modelId: 'exact/model', requested: { fitTarget: '1024' } }]
+                        modelLoads: [
+                            {
+                                profileKey: 'exact/model',
+                                modelId: 'exact/model',
+                                requested: { fitTarget: '1024' }
+                            }
+                        ]
                     }
                 })
             ).toThrow('Invalid native fit target.')
@@ -614,7 +777,7 @@ describe('unified settings bridge', () => {
                 ...baseline,
                 settings: {
                     ...baseline.settings,
-                    modelLoads: [{ modelId: 'model', requested }]
+                    modelLoads: [{ profileKey: 'model', modelId: 'model', requested }]
                 }
             })
         ).toThrow()
@@ -1313,7 +1476,13 @@ describe('unified settings bridge', () => {
             requestId: 'reviewed-request',
             settings: {
                 ...baseline.settings,
-                modelLoads: [{ modelId: 'exact/model', requested: { slots: 2, kvOffload: false } }]
+                modelLoads: [
+                    {
+                        profileKey: 'exact/model',
+                        modelId: 'exact/model',
+                        requested: { slots: 2, kvOffload: false }
+                    }
+                ]
             },
             modelChange: {
                 modelId: 'exact/model',
@@ -1358,7 +1527,9 @@ describe('unified settings bridge', () => {
             expectedRevision: 4,
             settings: {
                 ...baseline.settings,
-                modelLoads: [{ modelId: 'exact/model', requested: saved }]
+                modelLoads: [
+                    { profileKey: 'exact/model', modelId: 'exact/model', requested: saved }
+                ]
             },
             modelChange: change
         }
@@ -1366,7 +1537,9 @@ describe('unified settings bridge', () => {
         mocks.supervisor.callProcess.mockResolvedValueOnce({
             settings: {
                 ...baseline.settings,
-                modelLoads: [{ modelId: 'exact/model', requested: merged }]
+                modelLoads: [
+                    { profileKey: 'exact/model', modelId: 'exact/model', requested: merged }
+                ]
             },
             revision: 4,
             restart: true,

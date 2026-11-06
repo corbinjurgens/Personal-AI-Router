@@ -32,6 +32,48 @@ type modelBufferTestFixture struct {
 	sequences [2]uint64
 }
 
+func TestModelBufferCaptureSelectsSiblingProfileKeys(t *testing.T) {
+	f := newSiblingInspectionFixture(t)
+	if err := os.Chmod(f.ex.baseDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rt := f.st.plat.Runtime
+	command, err := launchForState(f.st, rt.Port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var inputs map[string]modelEstimateInput
+	prepared, err := compileTypedLlamaInputs(context.Background(), f.st, command, rt, false, &inputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capture := f.ex.newModelBufferCapture(f.st, "llamacpp", prepared, inputs, command, keyTestMemoryContext())
+	if capture == nil {
+		t.Fatal("sibling capture unavailable")
+	}
+	t.Cleanup(capture.retire)
+	first, second := capture.frozen["lfm-8k"], capture.frozen["lfm-32k"]
+	if len(capture.frozen) != 2 || capture.frozen["exact-alias"] != nil || first == nil || second == nil {
+		t.Fatalf("capture keys=%v", capture.frozen)
+	}
+	if first.context != 8192 || second.context != 32768 || first.input.Allocation == nil || first.input.Allocation.PerSlotContext != 8192 || second.input.Allocation == nil || second.input.Allocation.PerSlotContext != 32768 {
+		t.Fatalf("sibling capture allocations: first=%+v second=%+v", first, second)
+	}
+	if len(first.input.Facts.Shards) != 1 || len(second.input.Facts.Shards) != 1 {
+		t.Fatal("capture lost the profile-keyed compiler facts and used allocation-only fallback")
+	}
+	if len(first.configurationKey) != 64 || len(second.configurationKey) != 64 || first.configurationKey == second.configurationKey || !reflect.DeepEqual(first.artifacts, second.artifacts) {
+		t.Fatalf("sibling captured configurations: first=%+v second=%+v", first, second)
+	}
+	fixture := modelBufferTestFixture{capture: capture}
+	fixture.initial("lfm-8k", 31001)
+	fixture.initial("lfm-32k", 31002)
+	fixture.initial("exact-alias", 31003)
+	if len(capture.children) != 2 || capture.children[31001] == nil || capture.children[31001].model != "lfm-8k" || capture.children[31002] == nil || capture.children[31002].model != "lfm-32k" || capture.children[31003] != nil {
+		t.Fatalf("capture child selection=%+v", capture.children)
+	}
+}
+
 func TestModelBufferSplitBaselinePersists(t *testing.T) {
 	f := newModelBufferTestFixtureWithContext(t, keyTestMemoryContext())
 	f.load.ex.modelEstimates.run = func(context.Context, modelEstimateInput) modelconfig.Estimate {

@@ -64,9 +64,9 @@ func TestStrictPolicyWireCapabilityStates(t *testing.T) {
 		name, input string
 		state       nodepolicy.StrictCapabilityState
 	}{
-		{"old inventory", `{"revision":"0","roles":{}}`, nodepolicy.StrictCapabilityAbsent},
-		{"future inventory", `{"revision":"0","roles":{},"strictAdmission":{"version":2,"future":true}}`, nodepolicy.StrictCapabilityUnsupported},
-		{"valid inventory", `{"revision":"0","roles":{},"strictAdmission":{"version":1,"models":[{"engine":"llamacpp","model":"m","maxConcurrent":1,"identity":{"engineRunId":"e-1","settingsFingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","modelDigest":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}]}}`, nodepolicy.StrictCapabilityValid},
+		{"old inventory", `{"revision":"0","roles":[]}`, nodepolicy.StrictCapabilityAbsent},
+		{"future inventory", `{"revision":"0","roles":[],"strictAdmission":{"version":2,"future":true}}`, nodepolicy.StrictCapabilityUnsupported},
+		{"valid inventory", `{"revision":"0","roles":[],"strictAdmission":{"version":1,"models":[{"engine":"llamacpp","model":"m","maxConcurrent":1,"identity":{"engineRunId":"e-1","settingsFingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","modelDigest":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}]}}`, nodepolicy.StrictCapabilityValid},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := decodePolicyAdvertisement([]byte(tc.input))

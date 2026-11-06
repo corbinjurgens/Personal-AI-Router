@@ -11,6 +11,256 @@ import (
 	"testing"
 )
 
+func TestParseStoredProfileIdentityUsesKeys(t *testing.T) {
+	tests := []struct {
+		name      string
+		profiles  string
+		want      []Profile
+		roles     []Role
+		wantRoles []Role
+		dropped   int
+	}{
+		{
+			name:      "final keys without old names",
+			profiles:  `[{"key":"small","displayName":"Small","engine":"llamacpp","model":"small"},{"key":"large","displayName":"Large","engine":"llamacpp","model":"large"}]`,
+			want:      []Profile{{Key: "small", DisplayName: "Small", Engine: "llamacpp", Model: "small"}, {Key: "large", DisplayName: "Large", Engine: "llamacpp", Model: "large"}},
+			roles:     []Role{{Name: TierWeak, Profiles: []string{"large", "small"}}},
+			wantRoles: []Role{{Name: TierWeak, Profiles: []string{"large", "small"}}},
+		},
+		{
+			name:      "repeated labels and malformed sibling",
+			profiles:  `[{"key":"small","displayName":"Shared","engine":"llamacpp","model":"small"},{"key":"bad","displayName":"Shared","engine":"llamacpp","model":"bad\nmodel"},{"key":"large","displayName":"Shared","engine":"llamacpp","model":"large"}]`,
+			want:      []Profile{{Key: "small", DisplayName: "Shared", Engine: "llamacpp", Model: "small"}, {Key: "large", DisplayName: "Shared", Engine: "llamacpp", Model: "large"}},
+			roles:     []Role{{Name: TierWeak, Profiles: []string{"large", "bad", "small"}}, {Name: TierStrong, Profiles: []string{"bad"}}},
+			wantRoles: []Role{{Name: TierWeak, Profiles: []string{"large", "small"}}, {Name: TierStrong, Profiles: []string{}}},
+			dropped:   1,
+		},
+		{
+			name:      "legacy identity uses existing model rule",
+			profiles:  `[{"name":"Shared","engine":"llamacpp","model":"small"},{"name":"Shared","engine":"llamacpp","model":"large"}]`,
+			want:      []Profile{{Key: "small", DisplayName: "Shared", Engine: "llamacpp", Model: "small"}, {Key: "large", DisplayName: "Shared", Engine: "llamacpp", Model: "large"}},
+			roles:     []Role{{Name: TierWeak, Profiles: []string{"large", "small"}}},
+			wantRoles: []Role{{Name: TierWeak, Profiles: []string{"large", "small"}}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := json.Marshal(map[string]any{"profiles": json.RawMessage(tc.profiles), "roles": tc.roles})
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := bytes.Clone(raw)
+			got, counts, err := ParseStored(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got.Profiles, tc.want) || !reflect.DeepEqual(got.Roles, tc.wantRoles) || counts["profiles"] != tc.dropped {
+				t.Fatalf("profiles = %+v, roles = %+v, counts = %v", got.Profiles, got.Roles, counts)
+			}
+			if !bytes.Equal(raw, before) {
+				t.Fatal("stored repair mutated input")
+			}
+		})
+	}
+}
+
+func TestParseStoredDropsOldRoles(t *testing.T) {
+	t.Run("old role object and unkeyed profiles repair together", func(t *testing.T) {
+		p := stagedPolicy(t)
+		raw, err := json.Marshal(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &fields); err != nil {
+			t.Fatal(err)
+		}
+		fields["profiles"] = json.RawMessage(`[{"name":"small","engine":"llamacpp","model":"small-model"},{"name":"large","engine":"llamacpp","model":"large-model"}]`)
+		fields["roles"] = json.RawMessage(`{"weak":{"engine":"llamacpp","model":"small-model"},"medium":{"engine":"llamacpp","model":"large-model"}}`)
+		raw, err = json.Marshal(fields)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before := bytes.Clone(raw)
+		got, _, err := ParseStored(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []Profile{{Key: "small-model", DisplayName: "small", Engine: "llamacpp", Model: "small-model"}, {Key: "large-model", DisplayName: "large", Engine: "llamacpp", Model: "large-model"}}
+		if got.Roles == nil || len(got.Roles) != 0 || !reflect.DeepEqual(got.Profiles, want) || !reflect.DeepEqual(got.Tiers, p.Tiers) || !bytes.Equal(raw, before) {
+			t.Fatalf("joint role/profile repair changed identity or API entries: %+v", got)
+		}
+	})
+	t.Run("old declarations dropped without changing profiles or API tiers", func(t *testing.T) {
+		original := stagedPolicy(t)
+		original.Profiles = []Profile{{Key: "exact/model:Q4", DisplayName: "Exact", Engine: "llamacpp", Model: "exact/model:Q4"}}
+		raw, err := json.Marshal(original)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &fields); err != nil {
+			t.Fatal(err)
+		}
+		fields["roles"] = json.RawMessage(`{"medium":{"engine":"llamacpp","model":"exact/model:Q4"}}`)
+		raw, err = json.Marshal(fields)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before := bytes.Clone(raw)
+		got, _, err := ParseStored(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Roles == nil || len(got.Roles) != 0 || !reflect.DeepEqual(got.Profiles, original.Profiles) || !reflect.DeepEqual(got.Tiers, original.Tiers) || !reflect.DeepEqual(got.Routing, original.Routing) {
+			t.Fatalf("stored repair changed retained state: %+v", got)
+		}
+		if !bytes.Equal(raw, before) {
+			t.Fatal("repair mutated stored bytes")
+		}
+	})
+	t.Run("list roles preserved", func(t *testing.T) {
+		p := Default()
+		p.Profiles = []Profile{{Key: "exact", DisplayName: "Exact", Engine: "llamacpp", Model: "m"}}
+		p.Roles = []Role{{Name: TierStrong, Profiles: []string{"exact"}}, {Name: TierMedium, Profiles: []string{}}}
+		raw, err := json.Marshal(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, _, err := ParseStored(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got.Roles, p.Roles) {
+			t.Fatalf("roles = %+v, want %+v", got.Roles, p.Roles)
+		}
+	})
+	t.Run("reserved legacy model retains identity before validation", func(t *testing.T) {
+		raw := []byte(`{"profiles":[{"name":"legacy","engine":"llamacpp","model":"medium"}]}`)
+		repaired, err := repairStoredProfileKeys(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fields struct{ Profiles []Profile }
+		if err := json.Unmarshal(repaired, &fields); err != nil {
+			t.Fatal(err)
+		}
+		if len(fields.Profiles) != 1 || fields.Profiles[0].Key != "medium" || fields.Profiles[0].Model != "medium" {
+			t.Fatalf("repair renamed legacy identity: %+v", fields.Profiles)
+		}
+		if _, _, err := ParseStored(raw); err == nil {
+			t.Fatal("interim reserved bare name accepted")
+		}
+	})
+}
+
+func TestParseStoredGivesProfilesKeys(t *testing.T) {
+	raw := []byte(`{"revision":"17","profiles":[{"name":"old-display","engine":"llamacpp","model":"unsloth/LFM2.5-24B-A2B-GGUF:UD-Q4_K_XL"}],"servedModels":[{"engine":"llamacpp","model":"unsloth/LFM2.5-24B-A2B-GGUF:UD-Q4_K_XL"}]}`)
+	before := bytes.Clone(raw)
+	p, _, err := ParseStored(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Profiles) != 1 || p.Profiles[0].Key != "unsloth/LFM2.5-24B-A2B-GGUF:UD-Q4_K_XL" || p.Profiles[0].DisplayName != "old-display" || p.Revision != "17" || p.ServedModels[0].Model != p.Profiles[0].Key {
+		t.Fatalf("identity repair = %+v", p)
+	}
+	if !bytes.Equal(raw, before) {
+		t.Fatal("stored repair changed source bytes")
+	}
+	encoded, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, _, err := ParseStored(encoded)
+	if err != nil || !reflect.DeepEqual(again, p) {
+		t.Fatalf("repaired policy is not stable: %v", err)
+	}
+	if _, err := Parse(raw); err == nil {
+		t.Fatal("raw policy write acquired an implicit key")
+	}
+}
+
+func TestParseStoredRefusesAmbiguousKeys(t *testing.T) {
+	raw := []byte(`{"profiles":[{"name":"llama","engine":"llamacpp","model":"shared-model"},{"name":"strata","engine":"strata","model":"shared-model"}]}`)
+	before := bytes.Clone(raw)
+	p, counts, err := ParseStored(raw)
+	want := "Profiles share a key after repair: llamacpp/shared-model, strata/shared-model. Rename one in this node's policy file before installing."
+	if err == nil || err.Error() != want {
+		t.Fatalf("collision error = %v, want %q", err, want)
+	}
+	if !reflect.DeepEqual(p, Policy{}) || counts != nil || !bytes.Equal(raw, before) {
+		t.Fatal("ambiguous repair published a policy or changed source bytes")
+	}
+}
+
+func TestStoredProfileFieldRepairDropsObsoleteMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		name, profile, display string
+		repairedKey            bool
+	}{
+		{"unkeyed", `{"name":"Old label","quantization":"q4","engine":"llamacpp","model":"m"}`, "Old label", true},
+		{"already keyed", `{"key":"m","name":"Old label","quantization":"q4","engine":"llamacpp","model":"m"}`, "Old label", false},
+		{"explicit display", `{"key":"m","displayName":"Chosen label","name":"Old label","quantization":"q4","engine":"llamacpp","model":"m"}`, "Chosen label", false},
+		{"case insensitive fields", `{"Key":"m","Name":"Old label","Quantization":"q4","engine":"llamacpp","model":"m"}`, "Old label", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fields, err := modelObject([]byte(tc.profile))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := repairStoredProfileFields(fields); got != tc.repairedKey {
+				t.Fatalf("missing-key repair = %v, want %v", got, tc.repairedKey)
+			}
+			for key := range fields {
+				if strings.EqualFold(key, "name") || strings.EqualFold(key, "quantization") {
+					t.Fatalf("obsolete field retained: %s", key)
+				}
+			}
+			raw := []byte(`{"profiles":[` + tc.profile + `]}`)
+			before := bytes.Clone(raw)
+			p, _, err := ParseStored(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := []Profile{{Key: "m", DisplayName: tc.display, Engine: "llamacpp", Model: "m"}}
+			if !reflect.DeepEqual(p.Profiles, want) || !bytes.Equal(raw, before) {
+				t.Fatalf("repair changed identity or input: %+v", p.Profiles)
+			}
+			encoded, err := json.Marshal(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var saved struct{ Profiles []map[string]json.RawMessage }
+			if err := json.Unmarshal(encoded, &saved); err != nil {
+				t.Fatal(err)
+			}
+			if len(saved.Profiles) != 1 || saved.Profiles[0]["name"] != nil || saved.Profiles[0]["quantization"] != nil {
+				t.Fatalf("serialized obsolete metadata: %s", encoded)
+			}
+		})
+	}
+}
+
+func TestParseStoredPreservesExplicitProfileKeys(t *testing.T) {
+	raw := []byte(`{"profiles":[{"key":"small","displayName":"Small context","icon":"code","name":"small","engine":"llamacpp","model":"small"},{"key":"large","displayName":"Large context","name":"large","engine":"llamacpp","model":"large"}]}`)
+	p, _, err := ParseStored(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Profiles[0].Key != "small" || p.Profiles[0].DisplayName != "Small context" || p.Profiles[0].Icon != "code" || p.Profiles[1].Key != "large" {
+		t.Fatalf("explicit profile metadata changed: %+v", p.Profiles)
+	}
+}
+
+func TestParseStoredRefusesRepairCollisionWithExplicitKey(t *testing.T) {
+	raw := []byte(`{"profiles":[{"key":"shared-model","displayName":"First","name":"first","engine":"llamacpp","model":"other-model"},{"name":"second","engine":"strata","model":"shared-model"}]}`)
+	_, _, err := ParseStored(raw)
+	want := "Profiles share a key after repair: llamacpp/other-model, strata/shared-model. Rename one in this node's policy file before installing."
+	if err == nil || err.Error() != want {
+		t.Fatalf("mixed collision error = %v, want %q", err, want)
+	}
+}
+
 func TestStoredPauseModeRepair(t *testing.T) {
 	for _, tc := range []struct {
 		name, raw string
@@ -41,7 +291,7 @@ func TestModelControlStoredPolicyPreservesValidSiblings(t *testing.T) {
 			if version == "1" {
 				kind = ""
 			}
-			raw := []byte(`{"version":` + version + `,"revision":"42","availability":"available","admission":{"memoryBudgetBytes":12345},"profiles":[{"name":"good","engine":"llamacpp","model":"good"},{"name":"bad","engine":"llamacpp","model":"RAW"}],"roles":{"weak":{"engine":"llamacpp","model":"good"},"strong":{"engine":"llamacpp","model":"bad\nname"}},"tiers":{"weak":[{` + kind + `"engine":"llamacpp","model":"good"},{` + kind + `"engine":"llamacpp","model":"bad\u0085name"}]},"servedModels":[{"engine":"llamacpp","model":"bad\nname"}],"residentModels":[{"engine":"llamacpp","model":"bad\nname"}]}`)
+			raw := []byte(`{"version":` + version + `,"revision":"42","availability":"available","admission":{"memoryBudgetBytes":12345},"profiles":[{"name":"good","engine":"llamacpp","model":"good"},{"key":"bad-key","displayName":"Bad","name":"bad","engine":"llamacpp","model":"RAW"}],"roles":[{"name":"weak","profiles":["good"]},{"name":"strong","profiles":["bad-key"]}],"tiers":{"weak":[{` + kind + `"engine":"llamacpp","model":"good"},{` + kind + `"engine":"llamacpp","model":"bad\u0085name"}]},"servedModels":[{"engine":"llamacpp","model":"bad\nname"}],"residentModels":[{"engine":"llamacpp","model":"bad\nname"}]}`)
 			raw = bytes.ReplaceAll(raw, []byte("RAW"), []byte{0xff})
 			original := bytes.Clone(raw)
 			p, counts, err := ParseStored(raw)
@@ -55,13 +305,13 @@ func TestModelControlStoredPolicyPreservesValidSiblings(t *testing.T) {
 			if p.Version != 2 || p.Revision != wantRevision || p.Availability != Available || p.Admission.MemoryBudgetBytes != 12345 {
 				t.Fatal("unrelated policy state changed")
 			}
-			if len(p.Profiles) != 1 || p.Profiles[0].Model != "good" || len(p.Roles) != 1 || p.Roles[TierWeak].Model != "good" || len(p.Tiers[TierWeak]) != 1 || p.Tiers[TierWeak][0].Model != "good" {
+			if len(p.Profiles) != 1 || p.Profiles[0].Model != "good" || len(p.Roles) != 2 || !reflect.DeepEqual(p.Roles[0].Profiles, []string{"good"}) || len(p.Roles[1].Profiles) != 0 || len(p.Tiers[TierWeak]) != 1 || p.Tiers[TierWeak][0].Model != "good" {
 				t.Fatal("valid model siblings lost")
 			}
 			if p.ServedModels == nil || len(p.ServedModels) != 0 || len(p.ResidentModels) != 0 {
 				t.Fatal("empty permission or residency changed")
 			}
-			for _, category := range []string{"profiles", "roles", "tiers", "servedModels", "residentModels"} {
+			for _, category := range []string{"profiles", "tiers", "servedModels", "residentModels"} {
 				if counts[category] != 1 {
 					t.Fatalf("%s count=%d, want 1", category, counts[category])
 				}
@@ -112,14 +362,14 @@ func TestModelControlStoredPolicyRepairsDeploymentFamilies(t *testing.T) {
 
 func TestModelControlStoredPolicyConservativeRecovery(t *testing.T) {
 	for _, raw := range []string{
-		`{"availability":"bad-secret","roles":{"weak":{"engine":"llamacpp","model":"bad\nname"}}}`,
-		`{"roles":{"weak":{"engine":"llamacpp","model":"good","Model":"bad\nname"}}}`,
-		`{"roles":{"weak":{"engine":"llamacpp","model":"bad\nname"}},"Roles":{}}`,
+		`{"availability":"bad-secret","profiles":[{"key":"bad-key","name":"bad","displayName":"Bad","engine":"llamacpp","model":"bad\nname"}]}`,
+		`{"profiles":[{"key":"bad","name":"bad","engine":"llamacpp","model":"good","Model":"bad\nname"}]}`,
+		`{"roles":[{"name":"weak","profiles":[]}],"Roles":[]}`,
 		`{"servedModels":[{"engine":"llamacpp","model":null}]}`,
 		`{"servedModels":[{"engine":"llamacpp","model":"bad\nname","extra":true}]}`,
-		`{"profiles":[{"name":"same","engine":"llamacpp","model":"good"},{"name":"same","engine":"llamacpp","model":"bad\nname"}]}`,
+		`{"profiles":[{"name":"good","engine":"llamacpp","model":"good"},{"name":"bad","displayName":"bad\nname","engine":"llamacpp","model":"bad\nname"}]}`,
 		`{"profiles":[{"name":"test","engine":"llamacpp","model":"bad\nname","memoryBytes":-1}]}`,
-		`{"roles":{"unknown":{"engine":"llamacpp","model":"bad\nname"}}}`,
+		`{"roles":[{"name":"unknown","profiles":[]}]}`,
 		`{"profiles":[{"name":"test","engine":"llamacpp","model":"bad\nname"}],"residentModels":[{"engine":"llamacpp","model":"unrelated"}]}`,
 	} {
 		if _, _, err := ParseStored([]byte(raw)); err == nil {
@@ -140,24 +390,24 @@ func TestModelControlStoredPolicyLengthAndDecodedControls(t *testing.T) {
 		if model == string([]byte{0xff}) {
 			token = []byte{'"', 0xff, '"'}
 		}
-		raw := append([]byte(`{"roles":{"weak":{"engine":"llamacpp","model":`), token...)
-		raw = append(raw, []byte(`}}}`)...)
+		raw := append([]byte(`{"profiles":[{"key":"bad-key","name":"bad","displayName":"Bad","engine":"llamacpp","model":`), token...)
+		raw = append(raw, []byte(`}]}`)...)
 		p, counts, err := ParseStored(raw)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(p.Roles) != 0 || counts["roles"] != 1 || p.Availability != Available {
+		if len(p.Profiles) != 0 || counts["profiles"] != 1 || p.Availability != Available {
 			t.Fatal("invalid model did not receive entry-wise repair")
 		}
 	}
 }
 
 func TestModelControlStoredPolicyPreservesPausedState(t *testing.T) {
-	p, counts, err := ParseStored([]byte(`{"version":2,"revision":"88","availability":"paused","pausedBy":"peer","pause":{"onActive":"cancel","drainTimeoutSeconds":19},"roles":{"weak":{"engine":"llamacpp","model":"bad\nname"}}}`))
+	p, counts, err := ParseStored([]byte(`{"version":2,"revision":"88","availability":"paused","pausedBy":"peer","pause":{"onActive":"cancel","drainTimeoutSeconds":19},"profiles":[{"key":"bad-key","name":"bad","displayName":"Bad","engine":"llamacpp","model":"bad\nname"}]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.Revision != "88" || p.Availability != Paused || p.PausedBy != PausedByPeer || p.Pause.OnActive != CancelActive || p.Pause.DrainTimeoutSeconds != 19 || counts["roles"] != 1 {
+	if p.Revision != "88" || p.Availability != Paused || p.PausedBy != PausedByPeer || p.Pause.OnActive != CancelActive || p.Pause.DrainTimeoutSeconds != 19 || counts["profiles"] != 1 {
 		t.Fatal("model repair changed persisted pause state")
 	}
 }
@@ -199,7 +449,7 @@ func TestModelControlStoredPolicyPreservesLegacyMemberOrder(t *testing.T) {
 		{"same spelling", `"revision":"11","revision":"22"`, "22"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			raw := []byte(`{` + tc.revisions + `,"availability":"paused","Availability":"available","idle":{"unloadAfterMinutes":7},"IDLE":{"wakeTimeoutSeconds":23},"routing":{"limits":{"queueSeconds":5},"Limits":{"maxAttempts":3}},"roles":{"weak":{"engine":"llamacpp","model":"good"},"strong":{"engine":"llamacpp","model":"bad\nmodel"}}}`)
+			raw := []byte(`{` + tc.revisions + `,"availability":"paused","Availability":"available","idle":{"unloadAfterMinutes":7},"IDLE":{"wakeTimeoutSeconds":23},"routing":{"limits":{"queueSeconds":5},"Limits":{"maxAttempts":3}},"profiles":[{"name":"good","engine":"llamacpp","model":"good"},{"key":"bad-key","name":"bad","displayName":"Bad","engine":"llamacpp","model":"bad\nmodel"}],"roles":[{"name":"weak","profiles":["good"]},{"name":"strong","profiles":["bad-key"]}]}`)
 			before := bytes.Clone(raw)
 			p, counts, err := ParseStored(raw)
 			if err != nil {
@@ -214,7 +464,7 @@ func TestModelControlStoredPolicyPreservesLegacyMemberOrder(t *testing.T) {
 			if p.Routing.Limits.QueueSeconds != 5 || p.Routing.Limits.MaxAttempts != 3 {
 				t.Fatal("sanitation collapsed routing object merge")
 			}
-			if len(p.Roles) != 1 || p.Roles[TierWeak].Model != "good" || counts["roles"] != 1 {
+			if len(p.Roles) != 2 || !reflect.DeepEqual(p.Roles[0].Profiles, []string{"good"}) || len(p.Roles[1].Profiles) != 0 || counts["profiles"] != 1 {
 				t.Fatal("sanitation lost valid model sibling")
 			}
 			if !bytes.Equal(raw, before) {

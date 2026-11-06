@@ -150,7 +150,7 @@ func TestReviewR2ModelDefaults(t *testing.T) {
 					pol.Revision = "0"
 					pol.ServedModels = nodepolicy.ServedModels{{Engine: "llamacpp", Model: "m"}}
 					if !strict {
-						pol.Profiles = []nodepolicy.Profile{{Name: "m", Engine: "llamacpp", Model: "m"}}
+						pol.Profiles = []nodepolicy.Profile{{Key: "m", DisplayName: "Model", Engine: "llamacpp", Model: "m"}}
 					}
 					if err := pol.Validate(); err != nil {
 						t.Fatal(err)
@@ -269,7 +269,7 @@ func TestRequestOptionsProductionRoutes(t *testing.T) {
 					}
 					pol := p.admission.currentPolicy()
 					if !strict {
-						pol.Profiles = []nodepolicy.Profile{{Name: "m", Engine: "llamacpp", Model: "m"}}
+						pol.Profiles = []nodepolicy.Profile{{Key: "m", DisplayName: "Model", Engine: "llamacpp", Model: "m"}}
 					}
 					pol.Profiles[0].RequestOptions = json.RawMessage(`{"temperature":0.1,"top_k":4,"min_p":0.02,"repeat_penalty":1.1}`)
 					pol.Profiles[0].RequestOptionsMode = mode
@@ -376,12 +376,12 @@ func TestRequestOptionsAmbiguityHTTP(t *testing.T) {
 func TestRequestOptionsServingOwner(t *testing.T) {
 	destination, _, local := reviewR2TierFixture(t, false)
 	pol := destination.admission.currentPolicy()
-	pol.Profiles = []nodepolicy.Profile{{Name: "destination", Engine: "llamacpp", Model: "m", RequestOptions: json.RawMessage(`{"temperature":0.1}`), RequestOptionsMode: nodepolicy.RequestOptionsEnforced}}
+	pol.Profiles = []nodepolicy.Profile{{Key: "m", DisplayName: "Model", Engine: "llamacpp", Model: "m", RequestOptions: json.RawMessage(`{"temperature":0.1}`), RequestOptionsMode: nodepolicy.RequestOptionsEnforced}}
 	destination.admission.setPolicy(pol)
 	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { destination.soleFacade().serveIngress(w, r, "origin") }))
 	defer peer.Close()
 	originPolicy := nodepolicy.Default()
-	originPolicy.Profiles = []nodepolicy.Profile{{Name: "origin", Engine: "llamacpp", Model: "m", RequestOptions: json.RawMessage(`{"temperature":0.9,"seed":7}`), RequestOptionsMode: nodepolicy.RequestOptionsEnforced}}
+	originPolicy.Profiles = []nodepolicy.Profile{{Key: "m", DisplayName: "Model", Engine: "llamacpp", Model: "m", RequestOptions: json.RawMessage(`{"temperature":0.9,"seed":7}`), RequestOptionsMode: nodepolicy.RequestOptionsEnforced}}
 	fx := newTierFixture(t, llamacppCase(t), originPolicy, map[string][]string{"a": {"m"}}, nil)
 	fx.p.soleFacade().discovery.AddManual(nodeForModel(t, "a", peer.URL, "m"))
 	w := fx.do(t, routeChatCompletions, strings.TrimSuffix(strictBody("m"), "}")+`,"temperature":0.8}`)

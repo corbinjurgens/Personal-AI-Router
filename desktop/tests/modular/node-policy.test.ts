@@ -99,13 +99,13 @@ describe('saved pause mode', () => {
     it('retains advertised modes and distinguishes a Halt from a configured pause', () => {
         const configured = parsePolicyAdvertisement({
             revision: '8',
-            roles: {},
+            roles: [],
             pausedBy: 'local',
             pauseMode: 'configured'
         })
         const halted = parsePolicyAdvertisement({
             revision: '8',
-            roles: {},
+            roles: [],
             pausedBy: 'local',
             pauseMode: 'immediate'
         })
@@ -113,7 +113,7 @@ describe('saved pause mode', () => {
         expect(halted?.pauseMode).toBe('immediate')
         expect(samePolicyAdvertisement(configured, halted)).toBe(false)
         expect(
-            parsePolicyAdvertisement({ revision: '8', roles: {}, pauseMode: 'later' })
+            parsePolicyAdvertisement({ revision: '8', roles: [], pauseMode: 'later' })
         ).toBeUndefined()
     })
 })
@@ -287,6 +287,7 @@ describe('engine binding policy transport', () => {
     it.each([undefined, [], bindings])('preserves bindings %j through get, set and push', value => {
         const policy = {
             revision: '31',
+            profiles: [{ key: 'selected-profile', displayName: 'Selected', ...bindings[0] }],
             routing: { accounts: [] },
             ...(value === undefined ? {} : { engineBindings: value })
         }
@@ -306,9 +307,9 @@ describe('engine binding policy transport', () => {
         expect(parsePolicyChange(policyEnvelope({ nodeId: 'peer', policy }))?.policy).toBe(
             document.policy
         )
-        expect(parsePolicyText(withRoles(document.policy, { weak: bindings[0] }))).toEqual({
+        expect(parsePolicyText(withRoles(document.policy, [{ name: 'weak', profiles: ['selected-profile'] }]))).toEqual({
             ...policy,
-            roles: { weak: bindings[0] }
+            roles: [{ name: 'weak', profiles: ['selected-profile'] }]
         })
     })
 
@@ -372,7 +373,8 @@ describe('engine binding policy transport', () => {
                 policyEnvelope({
                     policy: {
                         revision: '31',
-                        roles: {},
+                        roles: [],
+                        profiles: [{ key: 'selected-profile', displayName: 'Selected', engine: 'llamacpp', model: `${target}-model` }],
                         engineBindings: [{ engine: 'llamacpp', model: `${target}-model` }],
                         routing: { accounts: [] }
                     },
@@ -403,14 +405,15 @@ describe('engine binding policy transport', () => {
                 { targetId: 'one', nodeId: 'one' },
                 { targetId: 'two', nodeId: 'two' }
             ],
-            { weak: bindings[0] }
+            [{ name: 'weak', profiles: ['selected-profile'] }]
         )
         expect(set).toHaveBeenCalledTimes(2)
         for (const [request] of set.mock.calls) {
             expect(request.expectedPersistedRevision).toBe('31')
             expect(parsePolicyText(request.policy)).toEqual({
                 revision: '31',
-                roles: { weak: bindings[0] },
+                roles: [{ name: 'weak', profiles: ['selected-profile'] }],
+                profiles: [{ key: 'selected-profile', displayName: 'Selected', engine: 'llamacpp', model: `${request.nodeId}-model` }],
                 engineBindings: [{ engine: 'llamacpp', model: `${request.nodeId}-model` }],
                 routing: { accounts: [] }
             })

@@ -393,7 +393,7 @@ func newNEServingFixture(t *testing.T) *neServingFixture {
 	policy.Admission.MaxConcurrentPerModel = 1
 	policy.Admission.MemoryBudgetBytes = neMemory
 	policy.Idle.StartOnDemand = false
-	policy.Profiles = []nodepolicy.Profile{{Name: "ne-process", Engine: "llamacpp", Model: neModel, ContextTokens: neContext, MaxOutputTokens: neOutput, MemoryBytes: neMemory, MaxConcurrent: 1, Qualification: &nodepolicy.QualificationRef{ID: "ne-synthetic", Revision: "1"}}}
+	policy.Profiles = []nodepolicy.Profile{{Key: neModel, DisplayName: "ne-process", Engine: "llamacpp", Model: neModel, ContextTokens: neContext, MaxOutputTokens: neOutput, MemoryBytes: neMemory, MaxConcurrent: 1, Qualification: &nodepolicy.QualificationRef{ID: "ne-synthetic", Revision: "1"}}}
 	if err := policy.Validate(); err != nil {
 		t.Fatalf("invalid finite synthetic policy: %v", err)
 	}

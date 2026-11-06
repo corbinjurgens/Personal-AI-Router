@@ -78,7 +78,7 @@ export type EngineServingReadback = {
     observed?: Array<{ modelId: string; perSlotContextTokens: number; slots: number }>
 }
 
-import type { EngineManagerName } from '@/shared/types/engines'
+import type { EngineManagerName, ModelIdentity } from '@/shared/types/engines'
 
 export interface EngineSettingsTarget {
     nodeId: string
@@ -120,6 +120,7 @@ export interface EngineSettingsSnapshot extends EngineSettingsTarget {
 }
 
 export interface EngineSettingsPreview {
+    identities?: Record<string, ModelIdentity>
     serving?: EngineServingReadback
     settings: EngineSettingsConfig
     revision: number

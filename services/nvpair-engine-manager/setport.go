@@ -250,6 +250,21 @@ func (e *Executor) persistRuntimeSettings(engine string, port int, args, environ
 	if loads != nil {
 		hostRuntime["modelLoads"] = loads
 	}
+	// A port-only save also records repaired stored identities. Keep the
+	// collection at its existing shared/host layer so inheritance is unchanged.
+	for _, storedRuntime := range []map[string]any{rt, hostRuntime} {
+		if raw, ok := storedRuntime["modelLoads"]; ok {
+			data, err := json.Marshal(raw)
+			if err != nil {
+				return fmt.Errorf("runtime.modelLoads: %w", err)
+			}
+			canonical, err := modelconfig.DecodeLoads(data)
+			if err != nil {
+				return fmt.Errorf("runtime.modelLoads: %w", err)
+			}
+			storedRuntime["modelLoads"] = canonical
+		}
+	}
 	setOverrideObject(platform, "runtime", hostRuntime)
 	setOverrideObject(platforms, host, platform)
 	setOverrideObject(m, "platforms", platforms)

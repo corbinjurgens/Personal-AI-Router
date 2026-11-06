@@ -20,6 +20,7 @@ import (
 	"nvpair-shared/clustertrusttest"
 	"nvpair-shared/durablefile"
 	"nvpair-shared/engineintent"
+	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/modelconfig"
 	"nvpair-shared/nodepolicy"
@@ -35,6 +36,33 @@ type modelSettingsHarness struct {
 	configureCount   int
 	configureFailure string
 	savedOff         bool
+	removalReviews   map[string]modelSettingsRemovalReview
+}
+
+type modelSettingsRemovalReview struct {
+	Change   modelconfig.ModelChange
+	Settings settings.Config
+}
+
+// Called under the harness mutex. The fake's original worker receipts are
+// independent of the broker's public digest and retained/journal metadata.
+func (h *modelSettingsHarness) validateRemoval(config settings.Config, reviewed *modelconfig.ModelChange) error {
+	if reviewed == nil {
+		for _, load := range h.launch.ModelLoads {
+			if !slices.ContainsFunc(config.ModelLoads, func(next modelconfig.ModelLoad) bool { return next.ProfileKey == load.ProfileKey }) {
+				return fmt.Errorf("frozen omission requires original native removal evidence")
+			}
+		}
+		return nil
+	}
+	if err := settings.ValidateReviewedModelChange(reviewed); err != nil {
+		return err
+	}
+	accepted, ok := h.removalReviews[reviewed.PreviewDigest]
+	if !ok || !reflect.DeepEqual(*reviewed, accepted.Change) || !config.Equal(accepted.Settings) {
+		return fmt.Errorf("original native removal review does not match frozen settings")
+	}
+	return nil
 }
 
 func newModelSettingsHarness(t *testing.T) *modelSettingsHarness {
@@ -76,39 +104,89 @@ func (h *modelSettingsHarness) answer(method string, raw json.RawMessage) (any, 
 		}
 		p := envelope.Request
 		config := p.Settings.Clone()
+		if p.ModelChange != nil && envelope.ReviewedModelChange != nil {
+			return nil, "reviewed removal must not reapply the portable patch"
+		}
 		if p.ModelChange != nil {
 			if p.ModelChange.Policy != nil {
 				return nil, "broker must merge the policy patch"
 			}
-			requested := p.ModelChange.Load.Set.Clone()
-			per, slots := int32(8192), int32(1)
-			if requested.Context != nil {
-				per = requested.Context.Tokens
+			key := p.ModelChange.ProfileKey
+			if key == "" {
+				key = p.ModelChange.ModelID
 			}
-			if requested.Slots != nil {
-				slots = *requested.Slots
+			i := slices.IndexFunc(config.ModelLoads, func(m modelconfig.ModelLoad) bool { return m.ProfileKey == key })
+			if i >= 0 && config.ModelLoads[i].ModelID != p.ModelChange.ModelID {
+				return nil, "A profile keeps its model; create a new profile."
 			}
-			resolved := &modelconfig.ResolvedLoad{PerSlotContext: per, TotalContext: per * slots, Slots: slots, GPU: modelconfig.GPU{Mode: "cpu"}, NativeBuildID: h.build,
-				SourceInputDigest: modelSettingsHash(requested), PresetDigest: strings.Repeat("a", 64),
-				Artifacts: []modelconfig.ArtifactBinding{{Role: "model", Path: "fixture.gguf", ResolvedTarget: "fixture.gguf", Size: "256", MtimeNS: "1", SampleSHA256: strings.Repeat("b", 64)}}}
-			load := modelconfig.ModelLoad{ModelID: p.ModelChange.ModelID, Requested: requested, Resolved: resolved}
-			i := slices.IndexFunc(config.ModelLoads, func(m modelconfig.ModelLoad) bool { return m.ModelID == load.ModelID })
-			if i < 0 {
-				config.ModelLoads = append(config.ModelLoads, load)
+			if p.ModelChange.Remove {
+				if i < 0 {
+					return nil, "profile load not found"
+				}
+				config.ModelLoads = slices.Delete(config.ModelLoads, i, i+1)
+				if config.Serving != nil {
+					config.Serving.Models = slices.DeleteFunc(config.Serving.Models, func(model engines.ServingModel) bool { return model.ModelID == key })
+					if len(config.ModelLoads) == 0 {
+						config.Serving = nil
+					}
+				}
 			} else {
-				config.ModelLoads[i] = load
+				requested := p.ModelChange.Load.Set.Clone()
+				per, slots := int32(8192), int32(1)
+				if requested.Context != nil {
+					per = requested.Context.Tokens
+				}
+				if requested.Slots != nil {
+					slots = *requested.Slots
+				}
+				resolved := &modelconfig.ResolvedLoad{PerSlotContext: per, TotalContext: per * slots, Slots: slots, GPU: modelconfig.GPU{Mode: "cpu"}, NativeBuildID: h.build,
+					SourceInputDigest: modelSettingsHash(requested), PresetDigest: strings.Repeat("a", 64),
+					Artifacts: []modelconfig.ArtifactBinding{{Role: "model", Path: "fixture.gguf", ResolvedTarget: "fixture.gguf", Size: "256", MtimeNS: "1", SampleSHA256: strings.Repeat("b", 64)}}}
+				load := modelconfig.ModelLoad{ProfileKey: key, ModelID: p.ModelChange.ModelID, Requested: requested, Resolved: resolved}
+				if i < 0 {
+					config.ModelLoads = append(config.ModelLoads, load)
+				} else {
+					config.ModelLoads[i] = load
+				}
 			}
 		} else {
+			if err := h.validateRemoval(config, envelope.ReviewedModelChange); err != nil {
+				return nil, err.Error()
+			}
 			// Frozen revalidation reports actual source/build drift, never a new
 			// portable resolution or Auto recommendation.
 			for i := range config.ModelLoads {
 				config.ModelLoads[i].Resolved.NativeBuildID = h.build
 			}
 		}
-		return settings.Preview{Settings: config, PreviewDigest: modelSettingsHash(config)}, ""
+		config, err = config.Canonical()
+		if err != nil {
+			return nil, err.Error()
+		}
+		identities := map[string]engines.ModelIdentity{}
+		for _, load := range config.ModelLoads {
+			identities[load.ProfileKey] = engines.ModelIdentity{GeneralName: "Fixture model", Architecture: "llama", ConfiguredContextTokens: int64(load.Resolved.PerSlotContext), Strength: "declared", Files: []engines.ModelIdentityFile{{Role: "model", Name: "fixture.gguf", SizeBytes: 256}}}
+		}
+		digest := modelSettingsHash(config)
+		if p.ModelChange != nil && p.ModelChange.Remove {
+			change := modelconfig.ModelChange{ProfileKey: p.ModelChange.ProfileKey, ModelID: p.ModelChange.ModelID, ExpectedPolicyRevision: p.ModelChange.ExpectedPolicyRevision, Remove: true}
+			digest = modelSettingsHash(struct {
+				Change        modelconfig.ModelChange
+				Before, After settings.Config
+			}{change, p.Settings, config})
+			change.PreviewDigest = digest
+			if h.removalReviews == nil {
+				h.removalReviews = map[string]modelSettingsRemovalReview{}
+			}
+			h.removalReviews[digest] = modelSettingsRemovalReview{Change: change, Settings: config.Clone()}
+		}
+		return settings.Preview{Settings: config, Identities: identities, PreviewDigest: digest}, ""
 	case "engine:configure-launch":
 		var p settings.Configure
 		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err.Error()
+		}
+		if err := h.validateRemoval(p.Settings, p.ReviewedModelChange); err != nil {
 			return nil, err.Error()
 		}
 		h.configureCount++
@@ -301,7 +379,7 @@ func TestModelSettingsApplyValidatesFiniteSettingsWithoutPortablePatch(t *testin
 
 func TestModelSettingsApplyManualDoesNotRevalidateAcceptedAutoMemory(t *testing.T) {
 	h := newModelSettingsHarness(t)
-	h.launch.ModelLoads = []modelconfig.ModelLoad{{ModelID: "saved-auto", Requested: modelconfig.RequestedLoad{Context: &modelconfig.Context{Mode: "auto", Floor: 4096, Cap: 8192}}, Resolved: &modelconfig.ResolvedLoad{PerSlotContext: 8192, TotalContext: 8192, Slots: 1, GPU: modelconfig.GPU{Mode: "cpu"}, NativeBuildID: h.build, SourceInputDigest: strings.Repeat("a", 64), PresetDigest: strings.Repeat("b", 64), ResolverRevision: "auto/finite-llama/1", ReviewedInputID: "accepted-synthetic-review", Artifacts: []modelconfig.ArtifactBinding{{Role: "model", Path: "saved.gguf", ResolvedTarget: "saved.gguf", Size: "256", MtimeNS: "1", SampleSHA256: strings.Repeat("c", 64)}}}}}
+	h.launch.ModelLoads = []modelconfig.ModelLoad{{ProfileKey: "saved-auto", ModelID: "saved-auto", Requested: modelconfig.RequestedLoad{Context: &modelconfig.Context{Mode: "auto", Floor: 4096, Cap: 8192}}, Resolved: &modelconfig.ResolvedLoad{PerSlotContext: 8192, TotalContext: 8192, Slots: 1, GPU: modelconfig.GPU{Mode: "cpu"}, NativeBuildID: h.build, SourceInputDigest: strings.Repeat("a", 64), PresetDigest: strings.Repeat("b", 64), ResolverRevision: "auto/finite-llama/1", ReviewedInputID: "accepted-synthetic-review", Artifacts: []modelconfig.ArtifactBinding{{Role: "model", Path: "saved.gguf", ResolvedTarget: "saved.gguf", Size: "256", MtimeNS: "1", SampleSHA256: strings.Repeat("c", 64)}}}}}
 	p := h.review(t, h.request(t, true), "")
 	before := len(h.engine.snapshot())
 	if _, err := h.b.applyEngineSettings(context.Background(), p, ""); err != nil {
@@ -387,7 +465,7 @@ func TestModelSettingsApplyCoupledOffPersistsBothComponents(t *testing.T) {
 		t.Fatalf("record = %+v", record)
 	}
 	policy := h.b.localPolicy().Policy
-	if len(policy.Profiles) != 1 || policy.Profiles[0].Qualification != nil || policy.Profiles[0].MemoryBytes != 0 {
+	if len(policy.Profiles) != 1 || policy.Profiles[0].Key != "fixture/model" || policy.Profiles[0].Model != "fixture/model" || policy.Profiles[0].DisplayName != "fixture/model" || policy.Profiles[0].ContextTokens != 8192 || policy.Profiles[0].Qualification != nil || policy.Profiles[0].MemoryBytes != 0 {
 		t.Fatalf("unexpected profile evidence: %+v", policy.Profiles)
 	}
 	var options map[string]json.Number
@@ -648,10 +726,10 @@ func TestModelSettingsApplyOrdinaryRawSettingsCannotReplacePendingOperation(t *t
 func TestModelSettingsApplyMergePreservesOpaqueNumbersAndUnselectedLeaves(t *testing.T) {
 	h := newModelSettingsHarness(t)
 	policy := h.b.localPolicy().Policy
-	policy.Profiles = []nodepolicy.Profile{{Name: "profile", Engine: "llamacpp", Model: "fixture/model", LocalOnly: true, RequestOptions: json.RawMessage(`{"temperature":0.1,"opaque":{"integer":9007199254740993,"fraction":0.123456789012345678901}}`)}}
+	policy.Profiles = []nodepolicy.Profile{{Key: "fixture/profile", DisplayName: "Fixture", Engine: "llamacpp", Model: "fixture/model", LocalOnly: true, RequestOptions: json.RawMessage(`{"temperature":0.1,"opaque":{"integer":9007199254740993,"fraction":0.123456789012345678901}}`)}}
 	number := json.Number("0.25")
-	change := modelconfig.ModelChange{ModelID: "fixture/model", Policy: &modelconfig.PolicyPatch{Generation: map[string]*json.Number{"temperature": &number}}}
-	merged, err := h.b.mergeModelPolicy(policy, "llamacpp", change, "")
+	change := modelconfig.ModelChange{ProfileKey: "fixture/profile", ModelID: "fixture/model", Policy: &modelconfig.PolicyPatch{Generation: map[string]*json.Number{"temperature": &number}}}
+	merged, err := h.b.mergeModelPolicy(policy, "llamacpp", change, "", settings.Preview{}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -730,7 +808,7 @@ func TestModelSettingsApplyCoupledRawPolicyWriterFence(t *testing.T) {
 	}
 }
 
-func TestModelSettingsApplyLoadOnlyAllowsUnrelatedPolicyWriter(t *testing.T) {
+func TestModelSettingsApplyLoadOnlyReservesDerivedPolicy(t *testing.T) {
 	h := newModelSettingsHarness(t)
 	p := h.review(t, h.request(t, false), "")
 	reached := make(chan struct{})
@@ -746,16 +824,432 @@ func TestModelSettingsApplyLoadOnlyAllowsUnrelatedPolicyWriter(t *testing.T) {
 	go func() { _, err := h.b.applyEngineSettings(context.Background(), p, ""); done <- err }()
 	waitModelSettingsSignal(t, reached)
 	policy := h.b.localPolicy().Policy
+	beforeIdle := policy.Idle.UnloadAfterMinutes
 	policy.Idle.UnloadAfterMinutes = 17
-	if _, err := h.b.setLocalPolicy(settingsJSON(policy), settingsJSON(policy.Revision)); err != nil {
-		t.Fatal(err)
+	if _, err := h.b.setLocalPolicy(settingsJSON(policy), settingsJSON(policy.Revision)); policyErrorCode(err) != codePolicyConflict {
+		t.Fatalf("load-only policy reservation = %v", err)
 	}
 	h.engine.releaseHeld()
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	if record := h.record(t); record.Snapshot.Phase != "succeeded" || h.b.localPolicy().Policy.Idle.UnloadAfterMinutes != 17 {
+	if record := h.record(t); record.Snapshot.Phase != "succeeded" || h.b.localPolicy().Policy.Idle.UnloadAfterMinutes != beforeIdle {
 		t.Fatalf("record=%+v", record.Snapshot)
+	}
+}
+
+func (h *modelSettingsHarness) createProfile(t *testing.T, key string, contextTokens int32) {
+	t.Helper()
+	p := h.request(t, false)
+	p.ModelChange.ProfileKey = key
+	p.ModelChange.Load.Set.Context.Tokens = contextTokens
+	p = h.review(t, p, "")
+	if receipt, err := h.b.applyEngineSettings(context.Background(), p, ""); err != nil || receipt.Phase != "succeeded" {
+		t.Fatalf("create profile %q: %+v, %v", key, receipt, err)
+	}
+}
+
+func (h *modelSettingsHarness) removeRequest(t *testing.T, key string) settings.Request {
+	t.Helper()
+	p := h.request(t, false)
+	p.ModelChange.ProfileKey, p.ModelChange.Remove, p.ModelChange.Load = key, true, nil
+	return p
+}
+
+func (h *modelSettingsHarness) removalEvidence(t *testing.T, p settings.Request) modelSettingsRemovalReview {
+	t.Helper()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, review := range h.removalReviews {
+		if review.Change.ProfileKey == p.ModelChange.ProfileKey && review.Change.ModelID == p.ModelChange.ModelID && review.Change.ExpectedPolicyRevision == p.ModelChange.ExpectedPolicyRevision {
+			if review.Change.PreviewDigest == p.ModelChange.PreviewDigest {
+				t.Fatal("native review digest equals the public broker digest")
+			}
+			return modelSettingsRemovalReview{Change: review.Change.Clone(), Settings: review.Settings.Clone()}
+		}
+	}
+	t.Fatal("no original native removal review")
+	return modelSettingsRemovalReview{}
+}
+
+func (h *modelSettingsHarness) assertRemovalForwarding(t *testing.T, start int, want modelSettingsRemovalReview, wantPreviews, wantConfigures int) {
+	t.Helper()
+	previews, configures := 0, 0
+	for _, call := range h.engine.snapshot()[start:] {
+		switch call.method {
+		case "engine:preview-launch":
+			envelope, err := settings.DecodeWorkerRequest[settings.Request](call.params)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if envelope.Request.ModelChange != nil || !envelope.Request.Settings.Equal(want.Settings) || envelope.ReviewedModelChange == nil || !reflect.DeepEqual(*envelope.ReviewedModelChange, want.Change) {
+				t.Fatalf("frozen preview lost original native removal proof: %+v", envelope)
+			}
+			previews++
+		case "engine:configure-launch":
+			var configure settings.Configure
+			if err := json.Unmarshal(call.params, &configure); err != nil {
+				t.Fatal(err)
+			}
+			if configure.Engine != "llamacpp" || !configure.Settings.Equal(want.Settings) || configure.ReviewedModelChange == nil || !reflect.DeepEqual(*configure.ReviewedModelChange, want.Change) {
+				t.Fatalf("direct configure lost original native removal proof: %+v", configure)
+			}
+			configures++
+		}
+	}
+	if previews != wantPreviews || configures != wantConfigures {
+		t.Fatalf("forwarded previews/configures = %d/%d, want %d/%d", previews, configures, wantPreviews, wantConfigures)
+	}
+}
+
+func TestModelSettingsApplyRemoveForwardsOriginalNativeReview(t *testing.T) {
+	h := newModelSettingsHarness(t)
+	h.createProfile(t, "model-8k", 8192)
+	h.createProfile(t, "model-32k", 32768)
+	p := h.review(t, h.removeRequest(t, "model-8k"), "")
+	want := h.removalEvidence(t, p)
+	start := len(h.engine.snapshot())
+	if receipt, err := h.b.applyEngineSettings(context.Background(), p, ""); err != nil || receipt.Phase != "succeeded" {
+		t.Fatalf("remove = %+v, %v", receipt, err)
+	}
+	h.assertRemovalForwarding(t, start, want, 2, 1)
+	record := h.record(t)
+	if !reflect.DeepEqual(record.Model.ReviewedModelChange, want.Change) || record.Model.Change.PreviewDigest != p.ModelChange.PreviewDigest || record.Model.Review.PreviewDigest != p.ModelChange.PreviewDigest {
+		t.Fatalf("journal confused native/public removal evidence: %+v", record.Model)
+	}
+	if len(record.Snapshot.Settings.ModelLoads) != 1 || record.Snapshot.Settings.ModelLoads[0].ProfileKey != "model-32k" || record.Snapshot.Settings.ModelLoads[0].Resolved.PerSlotContext != 32768 {
+		t.Fatalf("removal changed the surviving profile: %+v", record.Snapshot.Settings.ModelLoads)
+	}
+	beforeRetry := len(h.engine.snapshot())
+	if receipt, err := h.b.applyEngineSettings(context.Background(), p, ""); err != nil || receipt.Phase != "succeeded" || len(h.engine.snapshot()) != beforeRetry {
+		t.Fatalf("receipt retry repeated native work: %+v, %v", receipt, err)
+	}
+}
+
+func TestModelSettingsApplyRemoveRefusesInvalidNativeReview(t *testing.T) {
+	test := func(name string, corrupt func(*modelSettingsRetainedReview)) {
+		t.Run(name, func(t *testing.T) {
+			h := newModelSettingsHarness(t)
+			h.createProfile(t, "model-8k", 8192)
+			p := h.review(t, h.removeRequest(t, "model-8k"), "")
+			before := h.record(t)
+			policy := h.b.localPolicy().Policy
+			h.b.engineConfigMu.Lock()
+			corrupt(&h.b.modelReviews[0])
+			h.b.engineConfigMu.Unlock()
+			if _, err := h.b.applyEngineSettings(context.Background(), p, ""); err == nil || engineSettingsErrorCode(err) != codePolicyConflict {
+				t.Fatalf("invalid proof refusal = %v", err)
+			}
+			if !reflect.DeepEqual(h.record(t), before) || !reflect.DeepEqual(h.b.localPolicy().Policy, policy) || h.calls() != 1 {
+				t.Fatal("invalid removal proof changed the journal, native settings or policy")
+			}
+		})
+	}
+	test("missing digest", func(r *modelSettingsRetainedReview) { r.Source.NativeDigest = "" })
+	test("missing selection", func(r *modelSettingsRetainedReview) { r.Source.ReviewedModelChange = nil })
+	test("wrapped digest", func(r *modelSettingsRetainedReview) {
+		r.Source.NativeDigest = r.Preview.PreviewDigest
+		r.Source.ReviewedModelChange.PreviewDigest = r.Preview.PreviewDigest
+	})
+	test("wrong native digest", func(r *modelSettingsRetainedReview) {
+		r.Source.NativeDigest = strings.Repeat("0", 64)
+		r.Source.ReviewedModelChange.PreviewDigest = strings.Repeat("0", 64)
+	})
+}
+
+func TestModelSettingsApplyRemoveRechecksRetainedNativeSource(t *testing.T) {
+	h := newModelSettingsHarness(t)
+	h.createProfile(t, "model-8k", 8192)
+	p := h.review(t, h.removeRequest(t, "model-8k"), "")
+	before := h.record(t)
+	policy := h.b.localPolicy().Policy
+	h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+		result, failure := h.answer(method, raw)
+		if method == "engine:preview-launch" && failure == "" {
+			h.b.engineConfigMu.Lock()
+			h.b.modelReviews[0].Source.NativeDigest = strings.Repeat("0", 64)
+			h.b.engineConfigMu.Unlock()
+		}
+		return result, failure
+	})
+	if _, err := h.b.applyEngineSettings(context.Background(), p, ""); err == nil || engineSettingsErrorCode(err) != codePolicyConflict {
+		t.Fatalf("changed retained native source = %v", err)
+	}
+	if h.calls() != 1 || !reflect.DeepEqual(h.record(t), before) || !reflect.DeepEqual(h.b.localPolicy().Policy, policy) {
+		t.Fatal("native review source changed before acceptance but removal was accepted")
+	}
+}
+
+func TestModelSettingsApplyCreatesSiblingProfilesWithDerivedMetadata(t *testing.T) {
+	h := newModelSettingsHarness(t)
+	h.createProfile(t, "model-8k", 8192)
+	p := h.request(t, false)
+	p.ModelChange.ProfileKey = "model-32k"
+	p.ModelChange.Load.Set.Context.Tokens = 32768
+	slots := int32(2)
+	p.ModelChange.Load.Set.Slots = &slots
+	displayName := "Large context"
+	p.ModelChange.Policy = &modelconfig.PolicyPatch{DisplayName: &displayName}
+	p = h.review(t, p, "")
+	if receipt, err := h.b.applyEngineSettings(context.Background(), p, ""); err != nil || receipt.Phase != "succeeded" {
+		t.Fatalf("create sibling: %+v, %v", receipt, err)
+	}
+	policy := h.b.localPolicy().Policy
+	if len(policy.Profiles) != 2 {
+		t.Fatalf("profiles = %+v", policy.Profiles)
+	}
+	for _, want := range []struct {
+		key, display string
+		context      int
+	}{{"model-8k", "model-8k", 8192}, {"model-32k", "Large context", 32768}} {
+		profile, ok := policy.ProfileByKey(want.key)
+		if !ok || profile.Engine != "llamacpp" || profile.Model != want.key || profile.DisplayName != want.display || profile.ContextTokens != want.context {
+			t.Fatalf("profile %q = %+v", want.key, profile)
+		}
+		identity := engines.ModelIdentity{GeneralName: "Fixture model", Architecture: "llama", ConfiguredContextTokens: int64(want.context), Strength: "declared", Files: []engines.ModelIdentityFile{{Role: "model", Name: "fixture.gguf", SizeBytes: 256}}}
+		if profile.ModelIdentity == nil || !reflect.DeepEqual(*profile.ModelIdentity, identity) {
+			t.Fatalf("profile %q identity = %+v, want %+v", want.key, profile.ModelIdentity, identity)
+		}
+	}
+	loads := h.record(t).Snapshot.Settings.ModelLoads
+	if len(loads) != 2 || loads[0].ProfileKey != "model-32k" || loads[1].ProfileKey != "model-8k" || loads[0].ModelID != "fixture/model" || loads[1].ModelID != "fixture/model" || loads[0].Resolved == nil || loads[1].Resolved == nil || loads[0].Resolved.TotalContext != 65536 || loads[1].Resolved.TotalContext != 8192 {
+		t.Fatalf("sibling loads = %+v", loads)
+	}
+	data, err := os.ReadFile(h.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := nodepolicy.Parse(data)
+	if err != nil || modelPolicyFingerprint(stored) != modelPolicyFingerprint(policy) {
+		t.Fatalf("saved profiles differ: %+v, %v", stored.Profiles, err)
+	}
+}
+
+func TestModelSettingsApplyUpdatesOneSiblingAndKeepsDisplayName(t *testing.T) {
+	h := newModelSettingsHarness(t)
+	h.createProfile(t, "model-8k", 8192)
+	h.createProfile(t, "model-32k", 32768)
+	before, _ := h.b.localPolicy().Policy.ProfileByKey("model-32k")
+	p := h.request(t, false)
+	p.ModelChange.ProfileKey = "model-8k"
+	p.ModelChange.Load.Set.Context.Tokens = 16384
+	p = h.review(t, p, "")
+	if receipt, err := h.b.applyEngineSettings(context.Background(), p, ""); err != nil || receipt.Phase != "succeeded" {
+		t.Fatalf("update sibling: %+v, %v", receipt, err)
+	}
+	policy := h.b.localPolicy().Policy
+	selected, ok := policy.ProfileByKey("model-8k")
+	sibling, siblingOK := policy.ProfileByKey("model-32k")
+	if !ok || selected.DisplayName != "model-8k" || selected.ContextTokens != 16384 || selected.ModelIdentity == nil || selected.ModelIdentity.ConfiguredContextTokens != 16384 || !siblingOK || !reflect.DeepEqual(sibling, before) {
+		t.Fatalf("updated selected = %+v, sibling = %+v", selected, sibling)
+	}
+}
+
+func TestModelSettingsApplyRemoveCleansPolicyReferencesAndLastLoad(t *testing.T) {
+	h := newModelSettingsHarness(t)
+	h.createProfile(t, "model-8k", 8192)
+	policy := h.b.localPolicy().Policy
+	profile := &policy.Profiles[0]
+	profile.MaxOutputTokens, profile.MaxConcurrent, profile.MemoryBytes = 512, 1, 1024
+	profile.Qualification = &nodepolicy.QualificationRef{ID: "fixture-qualified", Revision: "1"}
+	policy.Profiles = append(policy.Profiles, nodepolicy.Profile{Key: "other", DisplayName: "Other", Engine: "llamacpp", Model: "other"})
+	policy.Roles = []nodepolicy.Role{{Name: nodepolicy.TierWeak, Profiles: []string{"model-8k"}}, {Name: nodepolicy.TierStrong, Profiles: []string{"other", "model-8k"}}}
+	policy.ServedModels = nodepolicy.ServedModels{{Engine: "llamacpp", Model: "model-8k"}, {Engine: "llamacpp", Model: "other"}}
+	policy.ResidentModels = nodepolicy.ResidentModels{{Engine: "llamacpp", Model: "model-8k"}}
+	policy.EngineBindings = nodepolicy.EngineBindings{{Engine: "llamacpp", Model: "model-8k"}, {Engine: "llamacpp", Model: "other"}}
+	if _, err := setCurrent(h.b, settingsJSON(policy)); err != nil {
+		t.Fatal(err)
+	}
+	p := h.review(t, h.removeRequest(t, "model-8k"), "")
+	receipt, err := h.b.applyEngineSettings(context.Background(), p, "")
+	if err != nil || receipt.Phase != "succeeded" {
+		t.Fatalf("remove: %+v, %v", receipt, err)
+	}
+	policy = h.b.localPolicy().Policy
+	wantRoles := []nodepolicy.Role{{Name: nodepolicy.TierWeak, Profiles: []string{}}, {Name: nodepolicy.TierStrong, Profiles: []string{"other"}}}
+	if len(policy.Profiles) != 1 || policy.Profiles[0].Key != "other" || !reflect.DeepEqual(policy.Roles, wantRoles) || !reflect.DeepEqual(policy.ServedModels, nodepolicy.ServedModels{{Engine: "llamacpp", Model: "other"}}) || len(policy.ResidentModels) != 0 || !reflect.DeepEqual(policy.EngineBindings, nodepolicy.EngineBindings{{Engine: "llamacpp", Model: "other"}}) {
+		t.Fatalf("removed profile references remain: %+v", policy)
+	}
+	record := h.record(t)
+	if record.Model.Stage != "completed" || !record.Model.Change.Remove || record.Model.Change.ProfileKey != "model-8k" || len(record.Snapshot.Settings.ModelLoads) != 0 || record.Snapshot.Settings.Serving != nil || record.Snapshot.EffectiveSettings == nil || len(record.Snapshot.EffectiveSettings.ModelLoads) != 0 || h.calls() != 2 {
+		t.Fatalf("last-load removal = %+v, configure calls = %d", record, h.calls())
+	}
+	again, err := h.b.applyEngineSettings(context.Background(), p, "")
+	if err != nil || again != receipt || h.calls() != 2 {
+		t.Fatalf("remove retry = %+v, %v, configure calls = %d", again, err, h.calls())
+	}
+}
+
+func newWithoutTypedRemovalFixture(t *testing.T, engine, model string) (*modelSettingsHarness, settings.Request) {
+	t.Helper()
+	h := newModelSettingsHarness(t)
+	if engine != engines.NameLlamaCPP {
+		descriptor := testDescriptor(engine, engines.ProtocolOpenAIV1)
+		descriptor.Family = "strata"
+		h.b.setDynamicEngines([]engines.Descriptor{descriptor}, func(int) bool { return true })
+	}
+	fronted, ok := h.b.frontedEngineProfile(engine)
+	if !ok {
+		t.Fatal("fixture engine was not fronted")
+	}
+	h.b.setEngineProxyHandle(fronted, h.pp)
+	h.pp.readyMu.Lock()
+	h.pp.facadeState[engine] = proxyFacadeState{ready: true, port: 18081}
+	h.pp.readyMu.Unlock()
+	h.launch.Engine = engine
+	policy := h.b.localPolicy().Policy
+	policy.Profiles = []nodepolicy.Profile{{Key: "descriptor-key", DisplayName: "Descriptor", Engine: engine, Model: model,
+		ContextTokens: 8192, MaxOutputTokens: 512, MaxConcurrent: 1, MemoryBytes: 1024, Qualification: &nodepolicy.QualificationRef{ID: "descriptor-qualified", Revision: "1"}}}
+	policy.Roles = []nodepolicy.Role{{Name: "weak", Profiles: []string{"descriptor-key"}}}
+	policy.ServedModels = nodepolicy.ServedModels{{Engine: engine, Model: model}}
+	policy.ResidentModels = nodepolicy.ResidentModels{{Engine: engine, Model: model}}
+	policy.EngineBindings = nodepolicy.EngineBindings{{Engine: engine, Model: model}}
+	if _, err := setCurrent(h.b, settingsJSON(policy)); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := h.b.getEngineSettings(context.Background(), settings.Request{Engine: engine}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := settings.Request{Engine: engine, RequestID: settingsID(), ExpectedRevision: snapshot.Revision, Settings: snapshot.Settings,
+		ModelChange: &modelconfig.ModelChange{ProfileKey: "descriptor-key", ModelID: model, Remove: true, ExpectedPolicyRevision: h.b.localPolicy().Policy.Revision}}
+	return h, p
+}
+
+func TestModelSettingsApplyRemoveWithoutTypedLoad(t *testing.T) {
+	test := func(name, engine, model string, recoverAccepted bool) {
+		t.Run(name, func(t *testing.T) {
+			h, p := newWithoutTypedRemovalFixture(t, engine, model)
+			start := len(h.engine.snapshot())
+			var receipt settingsReceipt
+			if recoverAccepted {
+				record := h.seedAcceptedRequest(t, p)
+				if record.Model.native() || record.Model.ReviewedModelChange != (modelconfig.ModelChange{}) {
+					t.Fatal("untyped removal retained native work or omission proof")
+				}
+				h.restartJournal(t)
+				if !h.b.recoverEngineSettings() || h.b.engineSettings[engine].Snapshot.Phase != "succeeded" {
+					t.Fatal("accepted untyped removal did not recover")
+				}
+			} else {
+				p = h.review(t, p, "")
+				var err error
+				receipt, err = h.b.applyEngineSettings(context.Background(), p, "")
+				if err != nil || receipt.Phase != "succeeded" {
+					t.Fatalf("untyped removal = %+v, %v", receipt, err)
+				}
+			}
+			got := h.b.localPolicy().Policy
+			if len(got.Profiles) != 0 || !reflect.DeepEqual(got.Roles, []nodepolicy.Role{{Name: "weak", Profiles: []string{}}}) ||
+				!reflect.DeepEqual(got.ServedModels, nodepolicy.ServedModels{{Engine: engine, Model: model}}) || len(got.ResidentModels) != 0 ||
+				!reflect.DeepEqual(got.EngineBindings, nodepolicy.EngineBindings{{Engine: engine, Model: model}}) {
+				t.Fatalf("untyped removal changed the wrong references: %+v", got)
+			}
+			for _, call := range h.engine.snapshot()[start:] {
+				if call.method == "engine:preview-launch" || call.method == "engine:configure-launch" {
+					t.Fatalf("untyped removal reached typed native work: %s", call.method)
+				}
+			}
+			if recoverAccepted {
+				if !h.b.recoverEngineSettings() || h.calls() != 0 {
+					t.Fatal("completed untyped recovery repeated effects")
+				}
+			} else if again, err := h.b.applyEngineSettings(context.Background(), p, ""); err != nil || again != receipt || h.calls() != 0 {
+				t.Fatalf("untyped removal retry = %+v, %v, native calls=%d", again, err, h.calls())
+			}
+		})
+	}
+	test("native id differs from profile key", "strata", "native-model", false)
+	test("native id equals profile key", "strata", "descriptor-key", false)
+	test("llama family without a typed load", "llamacpp", "native-model", false)
+	test("accepted removal recovers without native work", "strata", "native-model", true)
+}
+
+func TestModelSettingsRemoveKeyEqualToAnotherNativeModel(t *testing.T) {
+	h, p := newWithoutTypedRemovalFixture(t, "strata", "native-model")
+	policy := h.b.localPolicy().Policy
+	other := nodepolicy.Profile{Key: "other-key", DisplayName: "Other", Engine: "strata", Model: "descriptor-key",
+		ContextTokens: 4096, MaxOutputTokens: 256, MaxConcurrent: 1, MemoryBytes: 2048, Qualification: &nodepolicy.QualificationRef{ID: "other-qualified", Revision: "2"}}
+	policy.Profiles = append(policy.Profiles, other)
+	policy.Roles[0].Profiles = append(policy.Roles[0].Profiles, "other-key")
+	policy.ServedModels = append(policy.ServedModels, nodepolicy.ModelRef{Engine: "strata", Model: "descriptor-key"})
+	policy.ResidentModels = append(policy.ResidentModels, nodepolicy.ModelRef{Engine: "strata", Model: "descriptor-key"})
+	policy.EngineBindings = append(policy.EngineBindings, nodepolicy.ModelRef{Engine: "strata", Model: "descriptor-key"})
+	if _, err := setCurrent(h.b, settingsJSON(policy)); err != nil {
+		t.Fatal(err)
+	}
+	p.ModelChange.ExpectedPolicyRevision = h.b.localPolicy().Policy.Revision
+	p = h.review(t, p, "")
+	if receipt, err := h.b.applyEngineSettings(context.Background(), p, ""); err != nil || receipt.Phase != "succeeded" {
+		t.Fatalf("remove with key/native-name collision = %+v, %v", receipt, err)
+	}
+	got := h.b.localPolicy().Policy
+	if !reflect.DeepEqual(got.Profiles, []nodepolicy.Profile{other}) ||
+		!reflect.DeepEqual(got.Roles, []nodepolicy.Role{{Name: "weak", Profiles: []string{"other-key"}}}) ||
+		!reflect.DeepEqual(got.ServedModels, policy.ServedModels) ||
+		!reflect.DeepEqual(got.ResidentModels, nodepolicy.ResidentModels{{Engine: "strata", Model: "descriptor-key"}}) ||
+		!reflect.DeepEqual(got.EngineBindings, policy.EngineBindings) || h.calls() != 0 {
+		t.Fatalf("removal touched another native model's references: %+v", got)
+	}
+}
+
+func TestModelSettingsApplyRemovePreservesSiblingLoad(t *testing.T) {
+	h := newModelSettingsHarness(t)
+	h.createProfile(t, "model-8k", 8192)
+	h.createProfile(t, "model-32k", 32768)
+	p := h.removeRequest(t, "model-8k")
+	preview, err := h.b.previewEngineSettings(context.Background(), p, "")
+	if err != nil || preview.Impact == nil || !reflect.DeepEqual(preview.Impact.AffectedModels, []string{"model-32k", "model-8k"}) {
+		t.Fatalf("remove impact = %+v, %v", preview.Impact, err)
+	}
+	p.ModelChange.PreviewDigest = preview.PreviewDigest
+	if receipt, err := h.b.applyEngineSettings(context.Background(), p, ""); err != nil || receipt.Phase != "succeeded" {
+		t.Fatalf("remove sibling: %+v, %v", receipt, err)
+	}
+	policy := h.b.localPolicy().Policy
+	loads := h.record(t).Snapshot.Settings.ModelLoads
+	if len(policy.Profiles) != 1 || policy.Profiles[0].Key != "model-32k" || policy.Profiles[0].Model != "model-32k" || policy.Profiles[0].ContextTokens != 32768 || len(loads) != 1 || loads[0].ProfileKey != "model-32k" || loads[0].ModelID != "fixture/model" || loads[0].Resolved == nil || loads[0].Resolved.PerSlotContext != 32768 {
+		t.Fatalf("remove damaged sibling: profiles = %+v, loads = %+v", policy.Profiles, loads)
+	}
+}
+
+func TestModelSettingsReviewRetainsIndependentSiblingProfiles(t *testing.T) {
+	h := newModelSettingsHarness(t)
+	first := h.request(t, false)
+	first.ModelChange.ProfileKey = "model-8k"
+	first = h.review(t, first, "")
+	second := h.request(t, false)
+	second.ModelChange.ProfileKey = "model-32k"
+	second.ModelChange.Load.Set.Context.Tokens = 32768
+	second = h.review(t, second, "")
+	if _, _, err := h.b.retainedModelReview(context.Background(), first, ""); err != nil {
+		t.Fatalf("sibling review evicted first key: %v", err)
+	}
+	if _, _, err := h.b.retainedModelReview(context.Background(), second, ""); err != nil {
+		t.Fatalf("second sibling review unavailable: %v", err)
+	}
+}
+
+func TestModelSettingsPreviewMissingProfileIdentityHasNoWrites(t *testing.T) {
+	h := newModelSettingsHarness(t)
+	p := h.request(t, false)
+	p.ModelChange.ProfileKey = "model-8k"
+	before, policy := h.record(t), h.b.localPolicy().Policy
+	h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+		result, failure := h.answer(method, raw)
+		if method == "engine:preview-launch" && failure == "" {
+			preview, ok := result.(settings.Preview)
+			if !ok {
+				return nil, "fixture expected typed preview"
+			}
+			delete(preview.Identities, "model-8k")
+			return preview, ""
+		}
+		return result, failure
+	})
+	_, err := h.b.previewEngineSettings(context.Background(), p, "")
+	if err == nil || err.Error() != "native preview did not return the profile's model identity" || h.calls() != 0 || !reflect.DeepEqual(h.record(t), before) || !reflect.DeepEqual(h.b.localPolicy().Policy, policy) {
+		t.Fatalf("missing identity reached journal/native/policy effects: %v", err)
 	}
 }
 
@@ -854,14 +1348,21 @@ func TestModelSettingsApplyInferenceLockProtectsGenerationOnly(t *testing.T) {
 	h := newModelSettingsHarness(t)
 	r := h.b.nodePolicyRuntime()
 	r.mu.Lock()
-	r.current.Profiles = []nodepolicy.Profile{{Name: "locked", Engine: "llamacpp", Model: "fixture/model", LocalOnly: true, RequestOptions: json.RawMessage(`{"temperature":0.2}`)}}
+	r.current.Profiles = []nodepolicy.Profile{{Key: "fixture/locked", DisplayName: "Locked", Engine: "llamacpp", Model: "fixture/locked", LocalOnly: true, RequestOptions: json.RawMessage(`{"temperature":0.2}`)}}
 	r.mu.Unlock()
 	peerID := "peer"
 	clustertrusttest.Join(t, h.b.clusterDir, "cluster", h.b.nodeID, peerID)
 	grantRemoteManagement(t, h.b.clusterDir, "cluster", h.b.nodeID, peerID, true)
 	p := h.request(t, true)
+	p.ModelChange.ProfileKey = "fixture/locked"
+	before := len(h.engine.snapshot())
 	if _, err := h.b.previewEngineSettings(context.Background(), p, peerID); engineSettingsErrorCode(err) != codeRemoteSettingLocked {
 		t.Fatalf("generation lock=%v", err)
+	}
+	for _, call := range h.engine.snapshot()[before:] {
+		if call.method == "engine:preview-launch" {
+			t.Fatal("locked generation edit reached native preview")
+		}
 	}
 	p.ModelChange.Policy = nil
 	p = h.review(t, p, peerID)

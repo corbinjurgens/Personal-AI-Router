@@ -3,6 +3,7 @@
 
 import type { ModelConfiguration, NodeModelReference } from '@/shared/types/node-policy'
 import type { JsonValue } from '@/shared/types/json'
+import { parseNodeRoles } from '@/shared/utils/node-roles'
 import type { InspectModelResult, ModelChange, RequestedLoad } from '@/shared/types/model-config'
 import {
     applyModelSettings,
@@ -227,13 +228,13 @@ export function modelRoutingState(
         !Array.isArray(item) &&
         item.engine === identity.engine &&
         item.model === identity.model
-    const roles =
-        root.roles !== null && typeof root.roles === 'object' && !Array.isArray(root.roles)
-            ? root.roles
-            : {}
+    const roles = parseNodeRoles(root.roles)
     const member = (key: string) => Array.isArray(root[key]) && root[key].some(matches)
     const parsed = profile(text, identity)
     const profiles = Array.isArray(root.profiles) ? root.profiles : []
+    const selected = profiles.find(matches)
+    const profileKey =
+        jsonObject(selected) && typeof selected.key === 'string' ? selected.key : undefined
     const qualified = profiles.some(item => {
         if (!matches(item) || item === null || typeof item !== 'object' || Array.isArray(item))
             return false
@@ -264,6 +265,7 @@ export function modelRoutingState(
     })
     return {
         roles,
+        profileKey,
         served:
             root.servedModels == null
                 ? 'unrestricted'

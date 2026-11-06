@@ -148,7 +148,7 @@ func TestMemoryTelemetryEnvelopeStrictDecode(t *testing.T) {
 
 func TestEngineBindingOffersDirectoryWire(t *testing.T) {
 	node := DirectoryNode{HostUUID: "fixture", Models: []string{}, ModelsByEngine: map[string][]string{"llamacpp": {}},
-		Policy: &nodepolicy.Advertisement{Revision: "1", EngineBindingOffers: &nodepolicy.EngineBindingOffers{Version: 1, Models: []nodepolicy.Role{{Engine: "llamacpp", Model: "cold-model"}}}}}
+		Policy: &nodepolicy.Advertisement{Revision: "1", Roles: []nodepolicy.Role{}, Profiles: []nodepolicy.AdvertisedProfile{}, EngineBindingOffers: &nodepolicy.EngineBindingOffers{Version: 1, Models: []nodepolicy.ModelRef{{Engine: "llamacpp", Model: "cold-model"}}}}}
 	raw, err := json.Marshal(node)
 	if err != nil {
 		t.Fatal(err)
@@ -628,9 +628,8 @@ func TestDirectoryNodePolicy(t *testing.T) {
 	t.Run("advertisement round-trips", func(t *testing.T) {
 		orig := DirectoryNode{HostUUID: "host-1", Policy: &nodepolicy.Advertisement{
 			Revision: "42",
-			Roles: map[string]nodepolicy.AdvertisedRole{
-				nodepolicy.TierStrong: {Engine: "llamacpp", Model: "qwen3-32b", ContextTokens: 32768, Capabilities: []nodepolicy.Capability{nodepolicy.CapTools}},
-			},
+			Roles:    []nodepolicy.Role{{Name: nodepolicy.TierStrong, Profiles: []string{"qwen3-32b"}}},
+			Profiles: []nodepolicy.AdvertisedProfile{{Key: "qwen3-32b", DisplayName: "Qwen", Engine: "llamacpp", Model: "qwen3-32b", ContextTokens: 32768, Capabilities: []nodepolicy.Capability{nodepolicy.CapTools}}},
 			PausedBy: nodepolicy.PausedLocally,
 		}}
 		b, err := json.Marshal(orig)

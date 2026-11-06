@@ -53,7 +53,7 @@ func TestEngineBindingOffersDescriptorDefaultConfiguration(t *testing.T) {
 	h.b.engineConfigMu.Lock()
 	offers := h.b.bindingOffersLocked()
 	h.b.engineConfigMu.Unlock()
-	if offers == nil || !reflect.DeepEqual(offers.Models, []nodepolicy.Role{{Engine: "custom", Model: "fixture"}}) {
+	if offers == nil || !reflect.DeepEqual(offers.Models, []nodepolicy.ModelRef{{Engine: "custom", Model: "fixture"}}) {
 		t.Fatalf("descriptor naming or native spelling changed: %+v", offers)
 	}
 }
@@ -211,7 +211,7 @@ func TestEngineBindingOffersProjectionRefreshWithoutStrictChange(t *testing.T) {
 		t.Fatalf("unchanged strict readiness skipped offers: %+v", projections)
 	}
 	got := projections[len(projections)-1]
-	if got.StrictAdmission != nil || !reflect.DeepEqual(got.EngineBindingOffers.Models, []nodepolicy.Role{{Engine: "llamacpp-custom", Model: "model"}}) {
+	if got.StrictAdmission != nil || !reflect.DeepEqual(got.EngineBindingOffers.Models, []nodepolicy.ModelRef{{Engine: "llamacpp-custom", Model: "model"}}) {
 		t.Fatalf("projection=%+v", got)
 	}
 }

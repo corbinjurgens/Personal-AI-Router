@@ -220,11 +220,14 @@ func TestModelControlsSelectionRawDiscoveryAndManual(t *testing.T) {
 	f := p.soleFacade()
 	// Raw bytes must reach the accepting owner; marshaling a Go string would
 	// repair the synthetic invalid UTF-8 before the regression reaches it.
-	raw := `{"nodes":[{"hostUuid":"host","name":"fixture","ip":"127.0.0.1","services":{"` + string(f.profile.DiscoveryService) + `":{"port":30001}},"models":["legacy"],"modelsByEngine":{"` + f.profile.Name + `":["bad` + string([]byte{0xff}) + `","bad\n","good"]},"loadedByEngine":{"` + f.profile.Name + `":["bad\n","good"]},"policy":{"revision":"1","roles":{"weak":{"engine":"` + f.profile.Name + `","model":"bad\n"},"medium":{"engine":"` + f.profile.Name + `","model":"good"}},"servedModels":[{"engine":"` + f.profile.Name + `","model":"bad\n"},{"engine":"` + f.profile.Name + `","model":"good"}],"strictAdmission":{"version":99,"models":{"opaque":"bad\n"}}}}]}`
+	raw := `{"nodes":[{"hostUuid":"host","name":"fixture","ip":"127.0.0.1","services":{"` + string(f.profile.DiscoveryService) + `":{"port":30001}},"models":["legacy"],"modelsByEngine":{"` + f.profile.Name + `":["bad` + string([]byte{0xff}) + `","bad\n","good"]},"loadedByEngine":{"` + f.profile.Name + `":["bad\n","good"]},"policy":{"revision":"1","profiles":[{"key":"bad-profile","displayName":"Bad","engine":"` + f.profile.Name + `","model":"bad\n"},{"key":"good-profile","displayName":"Good","engine":"` + f.profile.Name + `","model":"good"}],"roles":[{"name":"weak","profiles":["bad-profile"]},{"name":"medium","profiles":["good-profile"]}],"servedModels":[{"engine":"` + f.profile.Name + `","model":"bad\n"},{"engine":"` + f.profile.Name + `","model":"good"}],"strictAdmission":{"version":99,"models":{"opaque":"bad\n"}}}}]}`
 	p.handleMessage(&Message{JSONRPC: "2.0", Method: engines.AddressMethod(f.profile.Name, noderec.NotifyNodes), Params: json.RawMessage(raw)})
 	nodes := f.discovery.Nodes()
-	if len(nodes) != 1 || !slices.Equal(nodes[0].Models, []string{"good"}) || !slices.Equal(nodes[0].Loaded, []string{"good"}) || len(nodes[0].Roles) != 1 || len(nodes[0].ServedModels) != 1 {
+	if len(nodes) != 1 || !slices.Equal(nodes[0].Models, []string{"good"}) || !slices.Equal(nodes[0].Loaded, []string{"good"}) || len(nodes[0].Roles) != 2 || len(nodes[0].Profiles) != 1 || len(nodes[0].ServedModels) != 1 {
 		t.Fatalf("raw discovery did not retain only valid siblings: %+v", nodes)
+	}
+	if nodes[0].Profiles[0].Key != "good-profile" || nodes[0].Profiles[0].Model != "good" || nodes[0].Roles[0].Name != "weak" || nodes[0].Roles[1].Name != "medium" || !slices.Equal(nodes[0].Roles[1].Profiles, []string{"good-profile"}) {
+		t.Fatalf("raw discovery changed profile facts or declarations: %+v", nodes[0])
 	}
 	if nodes[0].StrictAdmission.State() != nodepolicy.StrictCapabilityUnsupported {
 		t.Fatal("future capability was reinterpreted")
@@ -285,7 +288,7 @@ func TestModelControlsSelectionShortAliasConcreteBound(t *testing.T) {
 			pol.Tiers["weak"][0].Model = model
 			fx.p.admission.setPolicy(pol)
 			if role {
-				fx.declare(t, "peer", map[string]nodepolicy.AdvertisedRole{"weak": {Engine: tc.profile.Name, Model: model}})
+				fx.declare(t, "peer", map[string]nodepolicy.AdvertisedProfile{"weak": {Engine: tc.profile.Name, Model: model}})
 			}
 			got := fx.p.soleFacade().resolveTierCandidates("weak", requestNeeds{}, true)
 			if selectable {
@@ -336,7 +339,7 @@ func TestModelControlsSelectionPolicyBounds(t *testing.T) {
 				t.Fatalf("local tier validity = %v", err)
 			}
 			pol = nodepolicy.Default()
-			pol.Roles = map[string]nodepolicy.Role{"weak": {Engine: "llamacpp", Model: model}}
+			declarePolicyRole(&pol, "weak", "llamacpp", model)
 			if err := pol.Validate(); (err == nil) != valid {
 				t.Fatalf("role validity = %v", err)
 			}

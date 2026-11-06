@@ -533,7 +533,7 @@ func TestProxyReverseEffectiveFramingDefaults(t *testing.T) {
 				}
 			}))
 			pol := nodepolicy.Default()
-			pol.Profiles = []nodepolicy.Profile{{Name: "m", Engine: engine, Model: "fixture-model", RequestOptions: json.RawMessage(defaults)}}
+			pol.Profiles = []nodepolicy.Profile{{Key: "fixture-model", DisplayName: "Fixture", Engine: engine, Model: "fixture-model", RequestOptions: json.RawMessage(defaults)}}
 			f.peer.admission.setPolicy(pol)
 			fx := reverseContinuityOrigin(t, f)
 			resp, data, err := fx.request(t, path, request)
@@ -999,7 +999,7 @@ func TestProxyReverseHybridPeerSlotWaitIsBounded(t *testing.T) {
 		}
 	}))
 	defer stopHolding()
-	fx.node.Roles = map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("fixture-model")}
+	setAdvertisedProfilesByRole(&fx.node, map[string]nodepolicy.AdvertisedProfile{"weak": qualifiedProfile("fixture-model")})
 	fx.node.PolicyRevision = "1"
 	fx.node.StrictAdmission = strictCapabilityFor("llamacpp", "fixture-model")
 	fx.p.soleFacade().discovery.SetSubscribed([]Node{fx.node})
@@ -1155,7 +1155,7 @@ func TestProxyReverseHybridPeerSlotRecomputesSentBudgets(t *testing.T) {
 				}
 			}))
 			fx.directHealthy.Store(direct)
-			fx.node.Roles = map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("fixture-model")}
+			setAdvertisedProfilesByRole(&fx.node, map[string]nodepolicy.AdvertisedProfile{"weak": qualifiedProfile("fixture-model")})
 			fx.node.PolicyRevision = "1"
 			fx.node.StrictAdmission = strictCapabilityFor("llamacpp", "fixture-model")
 			fx.p.soleFacade().discovery.SetSubscribed([]Node{fx.node})

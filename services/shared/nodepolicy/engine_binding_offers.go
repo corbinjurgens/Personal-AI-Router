@@ -11,8 +11,8 @@ import (
 // EngineBindingOffers is advisory preparation support, never installed inventory,
 // loaded state or strict capacity. Only version 1 has meaning to this router.
 type EngineBindingOffers struct {
-	Version int    `json:"version"`
-	Models  []Role `json:"models"`
+	Version int        `json:"version"`
+	Models  []ModelRef `json:"models"`
 }
 
 func (o EngineBindingOffers) Validate() error {
@@ -51,5 +51,5 @@ func (o *EngineBindingOffers) Clone() *EngineBindingOffers {
 	if o == nil || o.Validate() != nil {
 		return nil
 	}
-	return &EngineBindingOffers{Version: o.Version, Models: append([]Role(nil), o.Models...)}
+	return &EngineBindingOffers{Version: o.Version, Models: append([]ModelRef(nil), o.Models...)}
 }

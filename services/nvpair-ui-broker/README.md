@@ -40,7 +40,7 @@ see the manager's
 
 The settings owner retains exact finite previews, caller/request/baseline, policy
 identity and worker source in a bounded in-memory table (64 records, 4 MiB,
-ten-minute monotonic expiry). Recalculate supersedes the prior caller/model review.
+ten-minute monotonic expiry). Recalculate supersedes the prior caller/profile review.
 Apply authenticates and checks receipts first, then validates full retained
 settings without a portable patch, helper or Auto search. Unaccepted Auto also
 requires fresh sufficient target facts, rechecked before journaling. Manual Apply
@@ -48,6 +48,33 @@ does not require advisory memory. Restart loses unaccepted authority and require
 Recalculate. Accepted journal recovery replays the exact finite settings without
 requiring current telemetry; grants, Pause, ownership, source drift and durable
 uncertainty fences still apply. No OOM retuning or automatic replacement occurs.
+
+Coupled model changes select a `profileKey` (defaulting to `modelId` when
+omitted); `modelId` selects the artifact and remains unchanged for an existing
+typed load. Each non-removal change creates or updates the policy profile,
+including load-only edits. A typed profile's served `model` is its key, so
+sibling profiles can use the same artifact with different load settings.
+Display names are retained, or default to the key with a bounded fallback;
+selected display-name and icon edits apply explicitly. The accepted preview's
+keyed identities provide model metadata, and its resolved per-slot context
+provides the policy context bound. Qualification and memory bounds are preserved.
+Native fit can realize a smaller context than requested; installed native-fit
+context agreement remains unverified (N7).
+
+Every accepted model change reserves policy through the existing settings
+journal. Native load changes and typed removals persist before policy publication.
+Removal deletes the selected profile and its role memberships, retaining empty
+role declarations. With a typed load it also clears served, resident and binding
+references for the engine and profile key. Without a typed load it clears only
+the resident reference for the engine and profile's native model; served and
+binding entries stay, including when the key equals that native model.
+Removing the last typed load is valid and leaves default mode, allowing the
+manager's existing model-sources preset path on the next start. Membership edits
+append a key once or remove only that key; selecting an undeclared role refuses
+before writes with `Role <name> is not declared on this node; create it in node settings.`
+Recovery uses the same accepted preview for derived metadata and the same
+before/after policy fingerprints, preserving native-first ordering and refusing
+third content. Policy-only edits perform no native configure or drain.
 
 ## Local build maintenance contract
 

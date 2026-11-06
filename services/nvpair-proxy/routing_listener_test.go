@@ -1528,7 +1528,7 @@ func TestModelControlsSelectionListenerShortAlias512ByteConcrete(t *testing.T) {
 			pol := tierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: model}}})
 			pol.TierPolicy.AllowStronger = false
 			fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"peer": {model}}, nil)
-			fx.advertise(t, "peer", map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole(model)}, strictCapabilityFor("llamacpp", model))
+			fx.advertise(t, "peer", map[string]nodepolicy.AdvertisedProfile{"weak": qualifiedProfile(model)}, strictCapabilityFor("llamacpp", model))
 			pinRecordingPairPeer(t, fx.p.soleFacade(), "peer", fx.eng["peer"])
 			port := inferenceListener(t, fx)
 			resp := inferencePost(t, port, `{"model":"weak"}`)
@@ -1882,7 +1882,7 @@ func inferencePeerHandler(t *testing.T, fx *tierFixture, id string, handler http
 	n := nodeFor(t, id, server.URL)
 	n.Models = []string{"q:1b"}
 	fx.p.soleFacade().discovery.AddManual(n)
-	fx.advertise(t, id, map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("q:1b")}, strictCapabilityFor("llamacpp", "q:1b"))
+	fx.advertise(t, id, map[string]nodepolicy.AdvertisedProfile{"weak": qualifiedProfile("q:1b")}, strictCapabilityFor("llamacpp", "q:1b"))
 }
 
 func TestRoutingListener_InferencePartialResponseNeverFallsBack(t *testing.T) {

@@ -408,6 +408,7 @@ func newAppliedKeyFixture(t *testing.T, configure ...func(inspectionFixture)) in
 	}
 	rt.ModelLoads = prepared.ModelLoads
 	f.st.plat.Runtime = rt
+	f.request.ProfileKey = "exact-alias"
 	return f
 }
 

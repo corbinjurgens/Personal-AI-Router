@@ -4,7 +4,6 @@
 import { Flex, Tag, Text } from '@nvidia/foundations-react-core'
 import { useMemo } from 'react'
 import { useShallow } from 'zustand/react/shallow'
-import { ROLE_TIERS } from '@/shared/utils/node-roles'
 import { useDiscoveredNodesStore } from '@/ui/stores/discovered-nodes.store'
 import { useEngineStatusStore } from '@/ui/stores/engine-status.store'
 import { roleIdentity, roleLabel } from '@/ui/stores/node-configuration.store'
@@ -16,8 +15,8 @@ import { useEngineModelsStore } from '@/ui/stores/engine-models.store'
  * tier entries for it.
  */
 export default function NodeDeclaredRoles({ nodeId }: { nodeId: string }) {
-    const roles = useDiscoveredNodesStore(
-        state => state.nodes.find(node => node.id === nodeId)?.policy?.roles
+    const policy = useDiscoveredNodesStore(
+        state => state.nodes.find(node => node.id === nodeId)?.policy
     )
     const descriptors = useEngineStatusStore(state => state.descriptors)
     const inventory = useEngineModelsStore(
@@ -27,19 +26,24 @@ export default function NodeDeclaredRoles({ nodeId }: { nodeId: string }) {
     )
     const declared = useMemo(
         () =>
-            ROLE_TIERS.flatMap(tier => {
-                const role = roles?.[tier]
-                return role
-                    ? [
-                          {
-                              tier,
-                              label: roleLabel(role, descriptors, roleIdentity(role, inventory)),
-                              title: `${role.model} (${role.engine})`
-                          }
-                      ]
-                    : []
+            (policy?.roles ?? []).map(declaration => {
+                const key = declaration.profiles[0]
+                const role = policy?.profiles.find(profile => profile.key === key)
+                return {
+                    tier: declaration.name,
+                    label: role
+                        ? roleLabel(
+                              role,
+                              descriptors,
+                              role.modelIdentity ?? roleIdentity(role, inventory)
+                          )
+                        : key
+                          ? 'Unavailable profile'
+                          : 'Unassigned',
+                    title: role ? `${role.model} (${role.engine})` : (key ?? 'No profile assigned')
+                }
             }),
-        [roles, descriptors, inventory]
+        [policy, descriptors, inventory]
     )
     if (declared.length === 0) return null
     return (

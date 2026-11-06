@@ -98,7 +98,7 @@ func TestStopPauseRouting(t *testing.T) {
 			if entry == "hybrid" {
 				installQualified(t, p.admission, admKey{engine: "llamacpp", model: "m"})
 				pol := p.admission.currentPolicy()
-				pol.Roles = map[string]nodepolicy.Role{"weak": {Engine: "llamacpp", Model: "m"}}
+				declarePolicyRole(&pol, "weak", "llamacpp", "m")
 				p.admission.setPolicy(pol)
 			}
 			go func() {
@@ -199,13 +199,13 @@ func TestStopPauseRouting(t *testing.T) {
 				configureStrict(t, p.admission, filepath.Join(t.TempDir(), "capacity.json"))
 				installQualified(t, p.admission, admKey{engine: "llamacpp", model: "m"})
 				pol := p.admission.currentPolicy()
-				pol.Roles = map[string]nodepolicy.Role{"weak": {Engine: "llamacpp", Model: "m"}}
+				declarePolicyRole(&pol, "weak", "llamacpp", "m")
 				p.admission.setPolicy(pol)
 			}
 			if alternate {
 				n := nodeForModel(t, "alternate", other.URL, "m")
 				if hybrid {
-					n.Roles = map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("m")}
+					setAdvertisedProfilesByRole(&n, map[string]nodepolicy.AdvertisedProfile{"weak": qualifiedProfile("m")})
 					n.PolicyRevision = "1"
 					n.StrictAdmission = strictCapabilityFor("llamacpp", "m")
 				}

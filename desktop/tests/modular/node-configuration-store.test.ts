@@ -122,15 +122,16 @@ describe('role identity labels', () => {
         expect(roleIdentity(role, inventory)).toEqual(identity)
         expect(roleIdentity({ ...role, engine: 'other' }, inventory)).toBeUndefined()
         expect(roleIdentity({ ...role, model: 'different' }, inventory)).toBeUndefined()
-        const choices = inventoryChoices(inventory)
-        expect(roleItems(choices, role, descriptors, inventory)).toEqual([
-            { value: 'unset', children: 'Unset' },
+        const profile = { ...role, key: 'long-context', displayName: 'Long context' }
+        const choices = inventoryChoices(inventory, [profile])
+        expect(roleItems(choices, profile.key, descriptors, inventory)).toEqual([
+            { value: '', children: 'Unset' },
             {
-                value: '["llamacpp","preset-ctx131072"]',
+                value: 'long-context',
                 children: 'LFM2.5 24B A2B (UD-Q4_K_XL) · llama.cpp'
             }
         ])
-        expect(roleItems(choices, role, descriptors, undefined)[1].children).toBe(
+        expect(roleItems(choices, profile.key, descriptors, undefined)[1].children).toBe(
             'preset-ctx131072 · llama.cpp'
         )
     })

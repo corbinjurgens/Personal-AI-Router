@@ -20,6 +20,7 @@ import (
 	"unicode/utf8"
 
 	"nvpair-shared/engines"
+	"nvpair-shared/nodepolicy"
 )
 
 const MaxPayloadBytes = 64 * 1024
@@ -112,9 +113,10 @@ type ResolvedLoad struct {
 // echo it only as an unchanged target baseline. Consumers must compare against
 // fresh target state and reject caller changes to this authority before effects.
 type ModelLoad struct {
-	ModelID   string        `json:"modelId"`
-	Requested RequestedLoad `json:"requested"`
-	Resolved  *ResolvedLoad `json:"resolved,omitempty"`
+	ProfileKey string        `json:"profileKey"`
+	ModelID    string        `json:"modelId"`
+	Requested  RequestedLoad `json:"requested"`
+	Resolved   *ResolvedLoad `json:"resolved,omitempty"`
 }
 
 // LoadPatch is the public load-edit boundary. There is deliberately no resolved,
@@ -126,11 +128,16 @@ type LoadPatch struct {
 
 // Generation selects existing numeric leaves: a number sets, null clears, and
 // absence preserves. Roles selects weak/medium/strong membership of this exact
-// engine/model: true assigns it (displacement requires preview); false removes
-// only its own assignment, never a different model. No profile is copied.
+// profile key: true appends it once to an already declared role; false removes
+// only that key, retaining the declaration and other keys. Undeclared true is
+// refused with "Role <name> is not declared on this node; create it in node settings."
+// No role is created by a membership patch. The enclosing ModelChange owns
+// profile creation and updates.
 // Served changes only selected membership, preserving nil/unrestricted versus
 // explicit empty permission; residency still needs existing qualified bounds.
 type PolicyPatch struct {
+	DisplayName        *string                 `json:"displayName,omitempty"`
+	Icon               *string                 `json:"icon,omitempty"`
 	Generation         map[string]*json.Number `json:"generation,omitempty"`
 	RequestOptionsMode *string                 `json:"requestOptionsMode,omitempty"`
 	Roles              map[string]bool         `json:"roles,omitempty"`
@@ -139,6 +146,8 @@ type PolicyPatch struct {
 	Binding            *bool                   `json:"binding,omitempty"`
 }
 type ModelChange struct {
+	ProfileKey             string       `json:"profileKey,omitempty"`
+	Remove                 bool         `json:"remove,omitempty"`
 	ModelID                string       `json:"modelId"`
 	ExpectedPolicyRevision string       `json:"expectedPolicyRevision"`
 	Load                   *LoadPatch   `json:"load,omitempty"`
@@ -147,9 +156,10 @@ type ModelChange struct {
 	SupersedesRequestID    string       `json:"supersedesRequestId,omitempty"`
 }
 type InspectRequest struct {
-	Engine  string `json:"engine"`
-	NodeID  string `json:"nodeId,omitempty"`
-	ModelID string `json:"modelId"`
+	ProfileKey string `json:"profileKey,omitempty"`
+	Engine     string `json:"engine"`
+	NodeID     string `json:"nodeId,omitempty"`
+	ModelID    string `json:"modelId"`
 }
 
 // ArtifactSummary is path-free. Identity is an opaque resolver binding identity,
@@ -500,28 +510,7 @@ func ValidateUnsignedDecimal(s string) error {
 	return nil
 }
 func validateModelID(id string) error {
-	// Keep this exact rule aligned with nodepolicy.ValidateModelIdentifier and
-	// checkModelRef (parity tested). Importing nodepolicy here would cycle its
-	// same-package engine-invalidation tests through enginesettings.
-	if id == "" || len(id) > 512 || !utf8.ValidString(id) {
-		return fmt.Errorf("modelId: expected nonempty valid UTF-8 of at most 512 bytes")
-	}
-	for _, c := range id {
-		if c < 0x20 || c >= 0x7f && c <= 0x9f {
-			return fmt.Errorf("modelId: control character")
-		}
-	}
-	tier := id
-	// Strip only one suffix, as nodepolicy.ParseAlias does.
-	if strings.HasSuffix(id, "-api") {
-		tier = strings.TrimSuffix(id, "-api")
-	} else if strings.HasSuffix(id, "-local") {
-		tier = strings.TrimSuffix(id, "-local")
-	}
-	if isTier(tier) {
-		return fmt.Errorf("modelId: reserved routing alias")
-	}
-	return nil
+	return nodepolicy.ValidateModelIdentifier(id)
 }
 func isTier(s string) bool {
 	return s == "weak" || s == "medium" || s == "strong"
@@ -580,6 +569,11 @@ func (r InspectRequest) Validate() error {
 	if err := boundedText(r.NodeID, 256, false); err != nil {
 		return fmt.Errorf("nodeId: %w", err)
 	}
+	if r.ProfileKey != "" {
+		if err := nodepolicy.ValidateProfileKey(r.ProfileKey); err != nil {
+			return fmt.Errorf("profileKey: %w", err)
+		}
+	}
 	return validateModelID(r.ModelID)
 }
 func (c ModelChange) Validate() error {
@@ -589,7 +583,17 @@ func (c ModelChange) Validate() error {
 	if err := ValidateRevision(c.ExpectedPolicyRevision); err != nil {
 		return err
 	}
-	if c.Load == nil && c.Policy == nil {
+	key := c.ProfileKey
+	if key == "" {
+		key = c.ModelID
+	}
+	if err := nodepolicy.ValidateProfileKey(key); err != nil {
+		return fmt.Errorf("profileKey: %w", err)
+	}
+	if c.Remove && (c.Load != nil || c.Policy != nil) {
+		return fmt.Errorf("modelChange: remove cannot select load or policy edits")
+	}
+	if !c.Remove && c.Load == nil && c.Policy == nil {
 		return fmt.Errorf("modelChange: select an edit")
 	}
 	if c.PreviewDigest != "" && !digest(c.PreviewDigest) {
@@ -635,6 +639,16 @@ func (p LoadPatch) Validate() error {
 	return nil
 }
 func (p PolicyPatch) Validate() error {
+	if p.DisplayName != nil {
+		if err := nodepolicy.ValidateProfileDisplayName(*p.DisplayName); err != nil {
+			return fmt.Errorf("displayName: %w", err)
+		}
+	}
+	if p.Icon != nil {
+		if err := nodepolicy.ValidateProfileIcon(*p.Icon); err != nil {
+			return fmt.Errorf("icon: %w", err)
+		}
+	}
 	for k, v := range p.Generation {
 		if err := validateGeneration(k, v); err != nil {
 			return err
@@ -648,7 +662,7 @@ func (p PolicyPatch) Validate() error {
 	if p.RequestOptionsMode != nil && *p.RequestOptionsMode != "defaults" && *p.RequestOptionsMode != "enforced" {
 		return fmt.Errorf("requestOptionsMode: invalid value")
 	}
-	if len(p.Generation) == 0 && p.RequestOptionsMode == nil && len(p.Roles) == 0 && p.Served == nil && p.Resident == nil && p.Binding == nil {
+	if p.DisplayName == nil && p.Icon == nil && len(p.Generation) == 0 && p.RequestOptionsMode == nil && len(p.Roles) == 0 && p.Served == nil && p.Resident == nil && p.Binding == nil {
 		return fmt.Errorf("policy: select an edit")
 	}
 	// Enforced-empty and residency prerequisites require merging the selected
@@ -657,7 +671,8 @@ func (p PolicyPatch) Validate() error {
 }
 
 // CanonicalLoads validates storage/readback, clones all fields and sorts only
-// exact model IDs. Artifact order is native semantic order, never sorted here.
+// exact profile keys. Empty keys are repaired to ModelID here only. Artifact
+// order is native semantic order, never sorted here.
 func CanonicalLoads(loads []ModelLoad) ([]ModelLoad, error) {
 	if len(loads) > MaxModels {
 		return nil, fmt.Errorf("modelLoads: too many entries")
@@ -666,13 +681,21 @@ func CanonicalLoads(loads []ModelLoad) ([]ModelLoad, error) {
 		return nil, err
 	}
 	out := CloneLoads(loads)
-	sort.Slice(out, func(i, j int) bool { return out[i].ModelID < out[j].ModelID })
+	for i := range out {
+		if out[i].ProfileKey == "" {
+			out[i].ProfileKey = out[i].ModelID
+		}
+	}
+	if err := CheckPayloadSize(out); err != nil {
+		return nil, err
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ProfileKey < out[j].ProfileKey })
 	for i, m := range out {
 		if err := m.Validate(); err != nil {
 			return nil, fmt.Errorf("modelLoads.%d: %w", i, err)
 		}
-		if i > 0 && out[i-1].ModelID == m.ModelID {
-			return nil, fmt.Errorf("modelLoads.%d.modelId: duplicate", i)
+		if i > 0 && out[i-1].ProfileKey == m.ProfileKey {
+			return nil, fmt.Errorf("modelLoads.%d.profileKey: duplicate", i)
 		}
 	}
 	return out, nil
@@ -720,8 +743,8 @@ func EqualLoads(a, b []ModelLoad) bool {
 		return false
 	}
 	a, b = CloneLoads(a), CloneLoads(b)
-	sort.Slice(a, func(i, j int) bool { return a[i].ModelID < a[j].ModelID })
-	sort.Slice(b, func(i, j int) bool { return b[i].ModelID < b[j].ModelID })
+	sort.Slice(a, func(i, j int) bool { return a[i].ProfileKey < a[j].ProfileKey })
+	sort.Slice(b, func(i, j int) bool { return b[i].ProfileKey < b[j].ProfileKey })
 	for i := range a {
 		if !reflect.DeepEqual(a[i], b[i]) {
 			return false
@@ -731,6 +754,7 @@ func EqualLoads(a, b []ModelLoad) bool {
 }
 
 func (p PolicyPatch) Clone() PolicyPatch {
+	p.DisplayName, p.Icon = clonePointer(p.DisplayName), clonePointer(p.Icon)
 	p.Generation = maps.Clone(p.Generation)
 	for key, value := range p.Generation {
 		p.Generation[key] = clonePointer(value)

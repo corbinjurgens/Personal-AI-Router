@@ -17,6 +17,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"nvpair-shared/nodepolicy"
 )
 
 // OptionDescriptor describes a service-owned option, without native flag names.
@@ -422,6 +424,9 @@ func (r ResolvedLoad) Validate() error {
 }
 
 func (m ModelLoad) Validate() error {
+	if err := nodepolicy.ValidateProfileKey(m.ProfileKey); err != nil {
+		return fmt.Errorf("profileKey: %w", err)
+	}
 	if err := validateModelID(m.ModelID); err != nil {
 		return err
 	}

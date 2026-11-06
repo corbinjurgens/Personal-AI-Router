@@ -275,7 +275,7 @@ func TestValidateRoutingRejects(t *testing.T) {
 	// Alias collisions.
 	for _, alias := range []string{"weak", "medium", "strong", "weak-api", "medium-api", "strong-api", "weak-local", "medium-local", "strong-local"} {
 		test("profile model "+alias, func(p *Policy) {
-			p.Profiles = []Profile{{Name: "p", Engine: "llamacpp", Model: alias}}
+			p.Profiles = []Profile{{Key: "p", DisplayName: "p", Engine: "llamacpp", Model: alias}}
 		}, "reserved alias")
 		test("local tier model "+alias, func(p *Policy) {
 			p.Tiers["strong"] = []TierEntry{{Kind: EntryLocal, Engine: "llamacpp", Model: alias}}

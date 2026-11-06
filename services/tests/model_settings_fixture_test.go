@@ -325,6 +325,29 @@ func runModelSettingsEngine() error {
 	if err := os.WriteFile(os.Getenv("NVPAIR_TEST_MODEL_CAPTURE"), preset, 0o600); err != nil {
 		return err
 	}
+	if err := os.WriteFile(os.Getenv("NVPAIR_TEST_MODEL_CAPTURE")+".path", []byte(os.Args[index+1]), 0o600); err != nil {
+		return err
+	}
+	sections, err := parseModelSettingsPreset(preset)
+	if err != nil {
+		return err
+	}
+	type modelEntry struct {
+		ID     string `json:"id"`
+		Status struct {
+			Value string `json:"value"`
+		} `json:"status"`
+	}
+	var models []modelEntry
+	for name := range sections {
+		if name == "*" {
+			continue
+		}
+		entry := modelEntry{ID: name}
+		entry.Status.Value = "unloaded"
+		models = append(models, entry)
+	}
+	slices.SortFunc(models, func(a, b modelEntry) int { return strings.Compare(a.ID, b.ID) })
 	listener, err := net.Listen("tcp", "127.0.0.1:"+os.Getenv("NVPAIR_TEST_MODEL_PORT"))
 	if err != nil {
 		return err
@@ -333,15 +356,26 @@ func runModelSettingsEngine() error {
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method != http.MethodGet {
 			path := "/mutation"
+			model := ""
 			if r.URL.Path == "/v1/chat/completions" {
-				path = "/inference"
+				var request struct {
+					Model string `json:"model"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil || sections[request.Model] == nil {
+					http.Error(w, "invalid synthetic model selection", http.StatusBadRequest)
+					return
+				}
+				model = request.Model
+				path = "/inference?" + url.Values{"model": {model}}.Encode()
 			}
 			if _, err := modelSettingsControl(path); err != nil {
 				http.Error(w, "private request interrupted", http.StatusServiceUnavailable)
 				return
 			}
-			if path == "/inference" {
-				fmt.Fprintln(w, `{"choices":[{"index":0,"message":{"role":"assistant","content":"fixture"},"finish_reason":"stop"}]}`)
+			if model != "" {
+				if err := json.NewEncoder(w).Encode(map[string]any{"model": model, "choices": []any{map[string]any{"index": 0, "message": map[string]string{"role": "assistant", "content": "fixture"}, "finish_reason": "stop"}}}); err != nil {
+					return
+				}
 				return
 			}
 			http.Error(w, "no synthetic content mutation is supported", http.StatusBadRequest)
@@ -351,7 +385,11 @@ func runModelSettingsEngine() error {
 		case "/props":
 			fmt.Fprintln(w, `{"role":"router"}`)
 		case "/models", "/v1/models":
-			fmt.Fprintln(w, `{"data":[{"id":"medium-model","status":{"value":"unloaded"}},{"id":"weak-model","status":{"value":"unloaded"}}]}`)
+			if err := json.NewEncoder(w).Encode(struct {
+				Data []modelEntry `json:"data"`
+			}{models}); err != nil {
+				return
+			}
 		default:
 			fmt.Fprintln(w, `{"status":"ok"}`)
 		}
@@ -381,6 +419,7 @@ type modelSettingsProcessFixture struct {
 	failReadback                   bool
 	failConfigureReply             bool
 	mutations, inferences          int
+	servedModels                   []string
 	inference                      *modelSettingsGate
 	client                         *http.Client
 	callerCluster                  string
@@ -493,11 +532,16 @@ func modelSettingsSamePath(actual, expected string) bool {
 
 func (f *modelSettingsProcessFixture) assertEngineImages(t *testing.T) {
 	t.Helper()
+	expected, err := canonicalServicePath(f.image)
+	if err != nil {
+		t.Error(err)
+		return
+	}
 	f.switchProcessFixture.mu.Lock()
 	defer f.switchProcessFixture.mu.Unlock()
 	for engine, identities := range f.engineIdentities {
 		for _, identity := range identities {
-			if (engine != "llamacpp" && engine != "llamacpp-custom") || !modelSettingsSamePath(identity.Path, f.image) || identity.PID == int32(os.Getpid()) {
+			if (engine != "llamacpp" && engine != "llamacpp-custom") || !modelSettingsSamePath(identity.Path, expected) || identity.PID == int32(os.Getpid()) {
 				t.Errorf("launched engine %s is not the expected fixed fake child", engine)
 			}
 		}
@@ -512,9 +556,17 @@ func (f *modelSettingsProcessFixture) recordEngineStart(t *testing.T, w http.Res
 		http.Error(w, "invalid child identity", http.StatusForbidden)
 		return
 	}
+	// The live process reports a canonical executable path. Resolve the expected
+	// image through the same existing owner before comparing macOS path aliases.
+	expected, err := canonicalServicePath(f.image)
+	if err != nil {
+		t.Error(err)
+		http.Error(w, "unavailable expected engine image", http.StatusForbidden)
+		return
+	}
 	identity, err := serviceProcessIdentityAt(r.Context(), int32(pid))
-	if err != nil || !modelSettingsSamePath(identity.Path, f.image) {
-		t.Error("synthetic engine launched an image other than the expected fixed fake")
+	if err != nil || !modelSettingsSamePath(identity.Path, expected) {
+		t.Errorf("synthetic engine image identity=%+v expected=%q inspectionErr=%v", identity, expected, err)
 		http.Error(w, "unexpected engine image", http.StatusForbidden)
 		return
 	}
@@ -557,7 +609,7 @@ func prepareModelSettingsProcessFixture(t *testing.T) *modelSettingsProcessFixtu
 		}
 	}
 	isolateModelSettingsPresetEnv(t)
-	base := t.TempDir()
+	base := shortClusterTempDir(t)
 	f := &modelSettingsProcessFixture{switchProcessFixture: prepareSwitchProcessFixture(t, base, reserveFixtureServicePorts(t), ""), managerInvocations: map[modelSettingsManagerInvocation]int{}}
 	f.image = image
 	t.Cleanup(func() { f.assertEngineImages(t) })
@@ -593,6 +645,7 @@ func prepareModelSettingsProcessFixture(t *testing.T) *modelSettingsProcessFixtu
 			f.mutations++
 		case "/inference":
 			f.inferences++
+			f.servedModels = append(f.servedModels, r.URL.Query().Get("model"))
 			gate = f.inference
 		default:
 			http.Error(w, "unknown controller route", http.StatusNotFound)
@@ -653,8 +706,8 @@ func prepareModelSettingsProcessFixture(t *testing.T) *modelSettingsProcessFixtu
 	jointWriteJSON(t, otherPath, other)
 	policy := nodepolicy.Default()
 	policy.Idle.UnloadAfterMinutes, policy.Idle.StopEngineAfterMinutes = 0, 0
-	policy.Profiles = []nodepolicy.Profile{{Name: "medium", Engine: "llamacpp", Model: "medium-model", RequestOptions: json.RawMessage(`{"temperature":0.2,"top_p":0.9,"opaque":{"integer":9007199254740993}}`)}, {Name: "weak", Engine: "llamacpp", Model: "weak-model", RequestOptions: json.RawMessage(`{"temperature":0.4}`)}}
-	policy.Roles = map[string]nodepolicy.Role{"weak": {Engine: "llamacpp", Model: "weak-model"}}
+	policy.Profiles = []nodepolicy.Profile{{Key: "medium-model", DisplayName: "medium", Engine: "llamacpp", Model: "medium-model", RequestOptions: json.RawMessage(`{"temperature":0.2,"top_p":0.9,"opaque":{"integer":9007199254740993}}`)}, {Key: "weak-model", DisplayName: "weak", Engine: "llamacpp", Model: "weak-model", RequestOptions: json.RawMessage(`{"temperature":0.4}`)}}
+	policy.Roles = []nodepolicy.Role{{Name: "weak", Profiles: []string{"weak-model"}}}
 	jointWriteJSON(t, filepath.Join(jointAppDir(base), nodepolicy.FileName), policy)
 	return f
 }
@@ -731,6 +784,7 @@ func (f *modelSettingsProcessFixture) startModelSettings(t *testing.T) {
 	env := append(f.proxyControl.env(), []string{
 		"NVPAIR_TEST_SUBSCRIPTION_SCANNER=" + f.scanner, "NVPAIR_TEST_SUBSCRIPTION_PORT=" + strconv.Itoa(f.scannerPort),
 		"NVPAIR_TEST_MODEL_MANAGER=" + f.manager, "NVPAIR_TEST_MODEL_REAL_MANAGER=" + engineMgrBin, "NVPAIR_TEST_MODEL_CONTROL=" + f.control,
+		"OLLAMA_MODELS=" + filepath.Join(f.base, "absent-model-sources", "ollama"),
 	}...)
 	args := append([]string{"--scanner-path", f.scanner, "--engine-manager-path", f.manager, "--engine-manager-control-host", "127.0.0.1", "--proxy-path", f.proxyControl.image, "--proxy-engines", "llamacpp", "--cluster-dir", filepath.Join(f.base, "cluster")}, f.ports.args()...)
 	f.p = startInteropProcess(t, f.base, brokerBin, f.ports.engineManagerHTTP, env, args...)
@@ -856,7 +910,7 @@ func (f *modelSettingsProcessFixture) request(t *testing.T, id string, patch *mo
 	t.Helper()
 	state, policy := f.snapshot(t), f.policy(t)
 	return settings.Request{Engine: "llamacpp", RequestID: id, ExpectedRevision: state.Revision, Settings: state.Settings.Clone(),
-		ModelChange: &modelconfig.ModelChange{ModelID: "medium-model", ExpectedPolicyRevision: policy.Revision,
+		ModelChange: &modelconfig.ModelChange{ProfileKey: "medium-model", ModelID: "medium-model", ExpectedPolicyRevision: policy.Revision,
 			Load: &modelconfig.LoadPatch{Set: modelconfig.RequestedLoad{Context: &modelconfig.Context{Mode: "fixed", Tokens: 8192}, Slots: modelSettingsInt(2), GPU: &modelconfig.GPU{Mode: "cpu"}}}, Policy: patch}}
 }
 

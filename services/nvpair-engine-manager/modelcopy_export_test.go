@@ -24,8 +24,81 @@ import (
 
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/durablefile"
+	"nvpair-shared/engines"
 	"nvpair-shared/modelconfig"
 )
+
+func TestModelCopyExportIdenticalSiblingBindings(t *testing.T) {
+	f := newSiblingInspectionFixture(t)
+	store := engineModelStore{engine: "llamacpp", adapter: "llamacpp", root: f.root}
+	list, err := f.ex.llamaExportFilesWithAccess(context.Background(), f.st, store, "exact-alias", servingFileAccess{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if list.Model != "exact-alias" || len(list.Files) != 1 || list.Files[0].configured != f.model || list.Files[0].Role != "model" {
+		t.Fatalf("artifact export=%+v", list)
+	}
+	if _, err := f.ex.llamaExportFilesBound(context.Background(), f.st, store, "exact-alias", servingFileAccess{}, &list); err != nil {
+		t.Fatalf("sibling export recheck: %v", err)
+	}
+	if _, err := f.ex.llamaExportFilesWithAccess(context.Background(), f.st, store, "lfm-8k", servingFileAccess{}); err == nil {
+		t.Fatal("profile key was accepted as the artifact export selector")
+	}
+}
+
+func TestModelCopyExportRefusesDifferingSiblingBindings(t *testing.T) {
+	f := newSiblingInspectionFixture(t)
+	other := filepath.Join(f.root, "other.gguf")
+	writeInspectionGGUF(t, other, "llama", 0.5, 4096)
+	binding, err := servingFileBinding(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.st.plat.Runtime.ModelLoads[1].Resolved.Artifacts = []modelconfig.ArtifactBinding{{Role: "model", Path: binding.SourcePath, ResolvedTarget: binding.ResolvedTarget, Size: "4096", MtimeNS: binding.MtimeNS, SampleSHA256: binding.SampleSHA256}}
+	store := engineModelStore{engine: "llamacpp", adapter: "llamacpp", root: f.root}
+	if _, err := f.ex.llamaExportFilesWithAccess(context.Background(), f.st, store, "exact-alias", servingFileAccess{}); err == nil {
+		t.Fatal("export chose an arbitrary differing sibling binding")
+	}
+	result := inspectFixture(t, f)
+	if result.Status != "ambiguous" || len(result.Artifacts) != 0 {
+		t.Fatalf("inspection chose an arbitrary differing sibling binding: %+v", result)
+	}
+}
+
+func TestModelCopyExportChecksEverySiblingDeclaration(t *testing.T) {
+	f := newSiblingInspectionFixture(t)
+	binding, err := servingFileBinding(f.model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(f.model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantHash := sha256Hex(data)
+	host, device := int64(1<<20), int64(0)
+	memory := engines.ServingMemory{HostRAMBytes: &host, VRAMBytes: &device}
+	provenance := engines.ServingProvenance{Kind: "one-time-sha256"}
+	f.st.plat.Runtime.Serving = &engines.ServingConfig{Version: 1, Models: []engines.ServingModel{
+		{ModelID: "lfm-8k", MaxOutputTokens: 256, Memory: memory, Artifacts: []engines.ServingArtifact{{Role: "model", SHA256: wantHash, Provenance: provenance, Binding: binding}}},
+		{ModelID: "lfm-32k", MaxOutputTokens: 256, Memory: memory, Artifacts: []engines.ServingArtifact{{Role: "model", SHA256: wantHash, Provenance: provenance, Binding: binding}}},
+	}}
+	if problems := f.st.plat.Runtime.Serving.Validate(); len(problems) != 0 {
+		t.Fatalf("sibling serving fixture=%v", problems)
+	}
+	store := engineModelStore{engine: "llamacpp", adapter: "llamacpp", root: f.root}
+	list, err := f.ex.llamaExportFilesWithAccess(context.Background(), f.st, store, "exact-alias", servingFileAccess{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Files) != 1 || list.Files[0].asserted != wantHash {
+		t.Fatalf("sibling declaration export=%+v", list)
+	}
+	f.st.plat.Runtime.Serving.Models[1].Artifacts[0].SHA256 = strings.Repeat("f", 64)
+	if _, err := f.ex.llamaExportFilesWithAccess(context.Background(), f.st, store, "exact-alias", servingFileAccess{}); err == nil {
+		t.Fatal("export ignored a conflicting sibling declaration")
+	}
+}
 
 func TestModelCopySelectedExport(t *testing.T) {
 	mutate := func(t *testing.T, path string, offset int64) {

@@ -14,7 +14,7 @@ import (
 )
 
 func bindingOffer(engine, model string) *nodepolicy.EngineBindingOffers {
-	return &nodepolicy.EngineBindingOffers{Version: 1, Models: []nodepolicy.Role{{Engine: engine, Model: model}}}
+	return &nodepolicy.EngineBindingOffers{Version: 1, Models: []nodepolicy.ModelRef{{Engine: engine, Model: model}}}
 }
 
 func TestEngineBindingSubscribedOfferIsNotInventory(t *testing.T) {
@@ -146,7 +146,7 @@ func TestEngineBindingCandidatesRejectConflictingInventory(t *testing.T) {
 	if !f.bindingConsistent(nil, "fixture") || !f.nodeOffersBinding(Node{PolicyRevision: "1", EngineBindingOffers: bindingOffer(f.profile.Name, "fixture")}, "fixture") {
 		t.Fatal("absent offers changed ordinary routing or valid native offer lost")
 	}
-	if f.nodeOffersBinding(Node{PolicyRevision: "1", EngineBindingOffers: &nodepolicy.EngineBindingOffers{Version: 2, Models: []nodepolicy.Role{{Engine: f.profile.Name, Model: "fixture"}}}}, "fixture") {
+	if f.nodeOffersBinding(Node{PolicyRevision: "1", EngineBindingOffers: &nodepolicy.EngineBindingOffers{Version: 2, Models: []nodepolicy.ModelRef{{Engine: f.profile.Name, Model: "fixture"}}}}, "fixture") {
 		t.Fatal("unsupported offers became eligible")
 	}
 	if !reflect.DeepEqual(n.Models, []string{"fixture"}) {
@@ -187,7 +187,7 @@ func TestEngineBindingCandidatesSelfOffUsesCurrentOffer(t *testing.T) {
 func TestEngineBindingCandidatesStrictExcludesOffersWithStaleIdentity(t *testing.T) {
 	pol := tierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "q:1b"}}})
 	fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"cold": {}}, nil)
-	fx.advertise(t, "cold", map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("q:1b")}, strictCapabilityFor("llamacpp", "q:1b"))
+	fx.advertise(t, "cold", map[string]nodepolicy.AdvertisedProfile{"weak": qualifiedProfile("q:1b")}, strictCapabilityFor("llamacpp", "q:1b"))
 	f := fx.p.soleFacade()
 	n, ok := discoveredNode(f, "cold")
 	if !ok {

@@ -202,7 +202,7 @@ func TestBoundEnginePreparationRefusals(t *testing.T) {
 	test("protected source", func(_ *testing.T, h *boundHarness) {
 		r := h.b.nodePolicyRuntime()
 		r.mu.Lock()
-		r.current.ResidentModels = []nodepolicy.Role{{Engine: "llamacpp", Model: "protected"}}
+		r.current.ResidentModels = []nodepolicy.ModelRef{{Engine: "llamacpp", Model: "protected"}}
 		r.mu.Unlock()
 	}, "no-fit")
 	test("paused", func(_ *testing.T, h *boundHarness) {
@@ -681,7 +681,7 @@ func TestBoundEngineSameEngineCoalescesWithPerModelReadback(t *testing.T) {
 	h.active.Store(1)
 	r := h.b.nodePolicyRuntime()
 	r.mu.Lock()
-	r.current.EngineBindings = append(r.current.EngineBindings, nodepolicy.Role{Engine: "llamacpp-custom", Model: "missing-model"})
+	r.current.EngineBindings = append(r.current.EngineBindings, nodepolicy.ModelRef{Engine: "llamacpp-custom", Model: "missing-model"})
 	r.mu.Unlock()
 	first := make(chan nodepolicy.BoundEnginePrepared, 1)
 	go func() { first <- h.b.prepareBoundEngine(context.Background(), h.pp, h.request) }()

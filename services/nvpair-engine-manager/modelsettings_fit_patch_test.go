@@ -75,11 +75,11 @@ func TestNativeFitSavedFieldPatchDirect(t *testing.T) {
 	target, ctx := "1024", int32(8192)
 	test := func(name string, set modelconfig.RequestedLoad, wantTarget string, wantCtx int32) {
 		t.Run(name, func(t *testing.T) {
-			saved := []modelconfig.ModelLoad{{ModelID: "model", Requested: savedNativeFitRequested()}}
+			saved := []modelconfig.ModelLoad{{ProfileKey: "model", ModelID: "model", Requested: savedNativeFitRequested()}}
 			if err := saved[0].Requested.Validate(); err != nil {
 				t.Fatalf("saved native-fit setup: %v", err)
 			}
-			got, err := patchModelLoad(saved, "model", modelconfig.LoadPatch{Set: set})
+			got, err := patchModelLoad(saved, "model", "model", modelconfig.LoadPatch{Set: set})
 			if err != nil {
 				t.Fatalf("single-leaf patch of saved native fit: %v", err)
 			}
@@ -148,9 +148,9 @@ func nativeFitPatchRefusalCases(t *testing.T, check func(*testing.T, modelconfig
 
 func TestNativeFitSavedFieldPatchDirectRefusesMergedConflicts(t *testing.T) {
 	nativeFitPatchRefusalCases(t, func(t *testing.T, requested modelconfig.RequestedLoad, patch modelconfig.LoadPatch, field string) {
-		saved := []modelconfig.ModelLoad{{ModelID: "model", Requested: requested}}
+		saved := []modelconfig.ModelLoad{{ProfileKey: "model", ModelID: "model", Requested: requested}}
 		before, patchBefore := modelconfig.CloneLoads(saved), patch.Set.Clone()
-		got, err := patchModelLoad(saved, "model", patch)
+		got, err := patchModelLoad(saved, "model", "model", patch)
 		var typed *ServingFieldError
 		if !errors.As(err, &typed) || typed.Field != "modelLoads."+field || typed.ModelID != "model" {
 			t.Fatalf("merged refusal = %v, want named field modelLoads.%s for model", err, field)
@@ -196,8 +196,8 @@ func TestNativeFitSavedFieldPatchExplicitClears(t *testing.T) {
 	off := "off"
 	test := func(name string, patch modelconfig.LoadPatch, wantFit *string) {
 		t.Run(name, func(t *testing.T) {
-			saved := []modelconfig.ModelLoad{{ModelID: "model", Requested: savedNativeFitRequested()}}
-			got, err := patchModelLoad(saved, "model", patch)
+			saved := []modelconfig.ModelLoad{{ProfileKey: "model", ModelID: "model", Requested: savedNativeFitRequested()}}
+			got, err := patchModelLoad(saved, "model", "model", patch)
 			if err != nil {
 				t.Fatalf("atomic clear: %v", err)
 			}
@@ -246,8 +246,8 @@ func TestNativeFitSavedFieldPatchPreviewExplicitClears(t *testing.T) {
 func TestNativeFitSavedFieldPatchInvalidLeaves(t *testing.T) {
 	test := func(name string, set modelconfig.RequestedLoad, field string) {
 		t.Run(name, func(t *testing.T) {
-			saved := []modelconfig.ModelLoad{{ModelID: "model", Requested: savedNativeFitRequested()}}
-			if got, err := patchModelLoad(saved, "model", modelconfig.LoadPatch{Set: set}); err == nil || got != nil || !strings.Contains(err.Error(), field) {
+			saved := []modelconfig.ModelLoad{{ProfileKey: "model", ModelID: "model", Requested: savedNativeFitRequested()}}
+			if got, err := patchModelLoad(saved, "model", "model", modelconfig.LoadPatch{Set: set}); err == nil || got != nil || !strings.Contains(err.Error(), field) {
 				t.Fatalf("invalid leaf patch = %+v, err=%v, want %s refusal", got, err, field)
 			}
 			requireSavedNativeFitFields(t, saved, "model", "512", 4096)
@@ -287,12 +287,12 @@ func TestNativeFitSavedFieldPatchRetainsOtherMergedRelationships(t *testing.T) {
 			if err := requested.Validate(); err != nil {
 				t.Fatalf("saved setup: %v", err)
 			}
-			saved := []modelconfig.ModelLoad{{ModelID: "model", Requested: requested}}
+			saved := []modelconfig.ModelLoad{{ProfileKey: "model", ModelID: "model", Requested: requested}}
 			before := modelconfig.CloneLoads(saved)
 			if err := (modelconfig.LoadPatch{Set: set}).Validate(); err != nil {
 				t.Fatalf("valid patch shape refused before merge: %v", err)
 			}
-			got, err := patchModelLoad(saved, "model", modelconfig.LoadPatch{Set: set})
+			got, err := patchModelLoad(saved, "model", "model", modelconfig.LoadPatch{Set: set})
 			if err == nil || !strings.Contains(err.Error(), wantError) || got != nil {
 				t.Fatalf("merged relationship = %+v, err=%v, want %s refusal", got, err, wantError)
 			}

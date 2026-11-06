@@ -143,7 +143,363 @@ func convertModelLoadFixture(t *testing.T, f modelLoadFixture) Runtime {
 	if len(conversion.Runtime.ModelLoads) != 2 || len(conversion.SourceDigest) != 64 || len(conversion.Diff) == 0 {
 		t.Fatalf("incomplete conversion: %+v", conversion)
 	}
+	for _, load := range conversion.Runtime.ModelLoads {
+		if load.ProfileKey != load.ModelID {
+			t.Fatalf("conversion renamed section %q to %q", load.ModelID, load.ProfileKey)
+		}
+	}
 	return conversion.Runtime
+}
+
+func twoProfileModelLoadFixture(t *testing.T) (modelLoadFixture, Runtime) {
+	t.Helper()
+	f := newModelLoadFixture(t)
+	rt := convertModelLoadFixture(t, f)
+	model := modelconfig.CloneLoads(rt.ModelLoads[:1])[0]
+	if model.ModelID != "medium-model" {
+		t.Fatalf("fixture artifact selector = %q, want medium-model", model.ModelID)
+	}
+	rt.ModelLoads = nil
+	for _, profile := range []struct {
+		key     string
+		context int32
+	}{{"lfm-8k", 8192}, {"lfm-32k", 32768}} {
+		load := modelconfig.CloneLoads([]modelconfig.ModelLoad{model})[0]
+		load.ProfileKey = profile.key
+		load.Requested.Context = &modelconfig.Context{Mode: "fixed", Tokens: profile.context}
+		load.Requested.Slots = keyTestPointer(int32(1))
+		rt.ModelLoads = append(rt.ModelLoads, load)
+	}
+	prepared, err := compileTypedLlamaInputs(context.Background(), f.st, typedFixtureCommand(t, f, rt), rt, false)
+	if err != nil {
+		t.Fatalf("compile sibling profiles: %v", err)
+	}
+	rt.ModelLoads = prepared.ModelLoads
+	return f, rt
+}
+
+func declareTwoProfileLoads(t *testing.T, f modelLoadFixture, rt *Runtime) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(f.root, "medium.gguf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt.Serving = &engines.ServingConfig{Version: 1}
+	// Declaration order intentionally differs from canonical profile order.
+	for _, profile := range []struct {
+		key    string
+		memory int64
+	}{{"lfm-8k", 4096}, {"lfm-32k", 8192}} {
+		host, vram := profile.memory, int64(0)
+		rt.Serving.Models = append(rt.Serving.Models, engines.ServingModel{
+			ModelID: profile.key, MaxOutputTokens: 128,
+			Memory:    engines.ServingMemory{HostRAMBytes: &host, VRAMBytes: &vram},
+			Artifacts: []engines.ServingArtifact{{Role: "model", SHA256: sha256Hex(data), Provenance: engines.ServingProvenance{Kind: "supplied-sha256"}}},
+		})
+	}
+}
+
+func TestTypedPresetTwoProfilesOneModel(t *testing.T) {
+	f, rt := twoProfileModelLoadFixture(t)
+	declareTwoProfileLoads(t, f, &rt)
+	prepared, err := compileTypedLlamaInputs(context.Background(), f.st, typedFixtureCommand(t, f, rt), rt, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sections, err := parseLlamaServingPreset(prepared.Snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(sortedKeys(sections), []string{"lfm-32k", "lfm-8k"}) {
+		t.Fatalf("preset sections = %v", sortedKeys(sections))
+	}
+	path := filepath.Join(f.root, "medium.gguf")
+	for _, profile := range []struct {
+		key     string
+		context int32
+		memory  int64
+	}{{"lfm-8k", 8192, 4096}, {"lfm-32k", 32768, 8192}} {
+		options := sections[profile.key]
+		if options["model"] != path || options["ctx-size"] != strconv.Itoa(int(profile.context)) || options["parallel"] != "1" {
+			t.Fatalf("profile %s options = %v", profile.key, options)
+		}
+		resolved := rtLoadResolution(prepared.ModelLoads, profile.key)
+		if resolved == nil || resolved.PerSlotContext != profile.context || resolved.TotalContext != profile.context || resolved.Slots != 1 || len(resolved.Artifacts) != 1 || resolved.Artifacts[0].Path != path {
+			t.Fatalf("profile %s resolution = %+v", profile.key, resolved)
+		}
+		list, exists := prepared.evidence.typed.models[profile.key]
+		if !exists || list.Model != "medium-model" || len(list.Files) != 1 || list.Files[0].configured != path {
+			t.Fatalf("profile %s evidence = %+v, exists=%t", profile.key, list, exists)
+		}
+		index := slices.IndexFunc(prepared.Envelopes, func(envelope engines.ServingEnvelope) bool { return envelope.ModelID == profile.key })
+		if index < 0 {
+			t.Fatalf("profile %s envelope missing: %+v", profile.key, prepared.Envelopes)
+		}
+		envelope := prepared.Envelopes[index]
+		if envelope.PerSlotContextTokens != int64(profile.context) || envelope.TotalContextTokens != int64(profile.context) || envelope.Memory.HostRAMBytes == nil || *envelope.Memory.HostRAMBytes != profile.memory {
+			t.Fatalf("profile %s envelope = %+v", profile.key, envelope)
+		}
+	}
+	if len(prepared.ModelLoads) != 2 || len(prepared.Envelopes) != 2 || len(prepared.evidence.typed.models) != 2 {
+		t.Fatalf("lost sibling profiles: loads=%+v envelopes=%+v evidence=%v", prepared.ModelLoads, prepared.Envelopes, sortedKeys(prepared.evidence.typed.models))
+	}
+	for _, load := range prepared.ModelLoads {
+		if load.ModelID != "medium-model" {
+			t.Fatalf("profile %s artifact selector = %q", load.ProfileKey, load.ModelID)
+		}
+	}
+	if !reflect.DeepEqual(prepared.ModelLoads[0].Resolved.Artifacts, prepared.ModelLoads[1].Resolved.Artifacts) {
+		t.Fatal("siblings did not retain identical artifact assertions")
+	}
+	rt.ModelLoads, rt.Serving, rt.servingLaunch = prepared.ModelLoads, prepared.Config, prepared
+	f.st.plat.Runtime = rt
+	f.st.runID, f.st.launchDigest = "profiles-run", prepared.Digest
+	identity := servingIdentityLocked(f.st)
+	if !slices.Equal(sortedKeys(identity.Serving), []string{"lfm-32k", "lfm-8k"}) || identity.Serving["lfm-8k"].PerSlotContextTokens != 8192 || identity.Serving["lfm-32k"].PerSlotContextTokens != 32768 || identity.ModelDigests["lfm-8k"] == "" || identity.ModelDigests["lfm-8k"] != identity.ModelDigests["lfm-32k"] {
+		t.Fatalf("served profile identities = %+v", identity)
+	}
+	if _, err := compileTypedLlamaInputs(context.Background(), f.st, typedFixtureCommand(t, f, rt), rt, true); err != nil {
+		t.Fatalf("frozen sibling evidence refused: %v", err)
+	}
+}
+
+func TestTypedProfileUnpricedSiblingKeepsFiniteEnvelope(t *testing.T) {
+	test := func(name string, reverse bool) {
+		t.Run(name, func(t *testing.T) {
+			f, rt := twoProfileModelLoadFixture(t)
+			declareTwoProfileLoads(t, f, &rt)
+			if reverse {
+				slices.Reverse(rt.Serving.Models)
+			}
+			for i := range rt.ModelLoads {
+				if rt.ModelLoads[i].ProfileKey == "lfm-8k" {
+					rt.ModelLoads[i].Requested.Fit = keyTestPointer("on")
+				}
+			}
+			prepared, err := compileTypedLlamaInputs(context.Background(), f.st, typedFixtureCommand(t, f, rt), rt, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			envelopes := servingEnvelopes(prepared)
+			if len(envelopes) != 1 || envelopes[0].ModelID != "lfm-32k" || envelopes[0].PerSlotContextTokens != 32768 || envelopes[0].Memory.HostRAMBytes == nil || *envelopes[0].Memory.HostRAMBytes != 8192 || envelopes[0].ContentDigest == "" {
+				t.Fatalf("finite sibling envelope = %+v", envelopes)
+			}
+		})
+	}
+	test("unpriced declaration first", false)
+	test("finite declaration first", true)
+}
+
+func TestTypedProfilesRefuseArtifactDisagreement(t *testing.T) {
+	test := func(name string, edit func(*testing.T, modelLoadFixture, *Runtime)) {
+		t.Run(name, func(t *testing.T) {
+			f, rt := twoProfileModelLoadFixture(t)
+			edit(t, f, &rt)
+			_, err := compileTypedLlamaInputs(context.Background(), f.st, typedFixtureCommand(t, f, rt), rt, false)
+			var typed *ServingFieldError
+			if !errors.As(err, &typed) || typed.Reason != "Profiles of one model disagree on artifacts." {
+				t.Fatalf("disagreeing sibling assertions error = %v", err)
+			}
+		})
+	}
+	test("stored sampled bindings differ", func(t *testing.T, f modelLoadFixture, rt *Runtime) {
+		rt.ModelLoads[1].Resolved.Artifacts[0].SampleSHA256 = strings.Repeat("f", 64)
+	})
+	test("declared content assertions differ", func(t *testing.T, f modelLoadFixture, rt *Runtime) {
+		declareTwoProfileLoads(t, f, rt)
+		rt.Serving.Models[1].Artifacts[0].SHA256 = strings.Repeat("f", 64)
+	})
+}
+
+func TestTypedProfileGPUSelectionRefusesSiblingAutoBeforeNative(t *testing.T) {
+	f, rt := twoProfileModelLoadFixture(t)
+	for i := range rt.ModelLoads {
+		load := &rt.ModelLoads[i]
+		if load.ProfileKey == "lfm-8k" {
+			load.Requested.GPU, load.Resolved = &modelconfig.GPU{Mode: "auto"}, nil
+		} else {
+			load.Requested.ExtraOptions = map[string]string{"device": "CPU"}
+		}
+	}
+	memory := &autoTestMemoryOwner{}
+	ctx := context.WithValue(context.Background(), modelAutoOperationKey{}, modelAutoOperation{Memory: memory})
+	command := typedFixtureCommand(t, f, rt)
+	command.Bin = filepath.Join(f.root, "missing-native-executable")
+	_, err := compileTypedLlamaInputs(ctx, f.st, command, rt, false)
+	var typed *ServingFieldError
+	if !errors.As(err, &typed) || typed.Reason != "lfm-32k selects GPUs and cannot share an engine with reviewed Auto profile lfm-8k; set that profile's GPU mode to layers." || memory.calls != 0 {
+		t.Fatalf("sibling GPU refusal = %v, memory calls=%d", err, memory.calls)
+	}
+}
+
+func TestTypedLoadArtifactIDIsNotASection(t *testing.T) {
+	test := func(name, model string) {
+		t.Run(name, func(t *testing.T) {
+			f, rt := twoProfileModelLoadFixture(t)
+			index := slices.IndexFunc(rt.ModelLoads, func(load modelconfig.ModelLoad) bool { return load.ProfileKey == "lfm-8k" })
+			rt.ModelLoads = modelconfig.CloneLoads(rt.ModelLoads[index : index+1])
+			rt.ModelLoads[0].ModelID = model
+			prepared, err := compileTypedLlamaInputs(context.Background(), f.st, typedFixtureCommand(t, f, rt), rt, false)
+			if err != nil {
+				t.Fatalf("artifact selector %q refused: %v", model, err)
+			}
+			sections, err := parseLlamaServingPreset(prepared.Snapshot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(sortedKeys(sections), []string{"lfm-8k"}) || sections["lfm-8k"]["model"] != filepath.Join(f.root, "medium.gguf") || prepared.ModelLoads[0].ModelID != model || prepared.evidence.typed.models["lfm-8k"].Model != model {
+				t.Fatalf("artifact selector changed section or resolution: sections=%v loads=%+v evidence=%+v", sections, prepared.ModelLoads, prepared.evidence.typed.models)
+			}
+		})
+	}
+	test("reserved alias is an artifact selector", "medium-local")
+	test("artifact tag is kept exact", "org/model:UD-Q4_K_XL")
+}
+
+func TestTypedLlamaExportAllowsIdenticalArtifactSiblings(t *testing.T) {
+	_, rt := twoProfileModelLoadFixture(t)
+	if err := validateTypedLlamaExport(rt, "medium-model"); err != nil {
+		t.Fatalf("identical artifact siblings refused: %v", err)
+	}
+	rt.ModelLoads[1].Resolved.Artifacts[0].SampleSHA256 = strings.Repeat("f", 64)
+	if err := validateTypedLlamaExport(rt, "medium-model"); !errors.Is(err, errNoArtifactBinding) {
+		t.Fatalf("disagreeing export assertions error = %v", err)
+	}
+}
+
+func TestModelLoadPatchKeepsProfileModel(t *testing.T) {
+	loads := []modelconfig.ModelLoad{
+		{ProfileKey: "lfm-8k", ModelID: "medium-model", Requested: modelconfig.RequestedLoad{Context: &modelconfig.Context{Mode: "fixed", Tokens: 8192}}},
+		{ProfileKey: "lfm-32k", ModelID: "medium-model", Requested: modelconfig.RequestedLoad{Context: &modelconfig.Context{Mode: "fixed", Tokens: 32768}}},
+	}
+	before := modelconfig.CloneLoads(loads)
+	threads := int32(4)
+	patched, err := patchModelLoad(loads, "lfm-8k", "medium-model", modelconfig.LoadPatch{Set: modelconfig.RequestedLoad{Threads: &threads}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(patched) != 2 || patched[0].ProfileKey != "lfm-32k" || patched[1].ProfileKey != "lfm-8k" || patched[1].ModelID != "medium-model" || patched[1].Requested.Threads == nil || *patched[1].Requested.Threads != 4 || patched[1].Requested.Context.Tokens != 8192 || !reflect.DeepEqual(patched[0], before[1]) {
+		t.Fatalf("patch changed profile identity or sibling: %+v", patched)
+	}
+	if !reflect.DeepEqual(loads, before) {
+		t.Fatal("patch mutated saved inputs")
+	}
+	refused, err := patchModelLoad(loads, "lfm-8k", "other-model", modelconfig.LoadPatch{Set: modelconfig.RequestedLoad{Threads: &threads}})
+	var typed *ServingFieldError
+	if refused != nil || !errors.As(err, &typed) || typed.Reason != "A profile keeps its model; create a new profile." || !reflect.DeepEqual(loads, before) {
+		t.Fatalf("retarget result = %+v, error = %v", refused, err)
+	}
+	created, err := patchModelLoad(loads, "lfm-64k", "medium-local", modelconfig.LoadPatch{Set: modelconfig.RequestedLoad{Context: &modelconfig.Context{Mode: "fixed", Tokens: 65536}}})
+	if err != nil {
+		t.Fatalf("create missing load: %v", err)
+	}
+	if len(created) != 3 || created[1].ProfileKey != "lfm-64k" || created[1].ModelID != "medium-local" || created[1].Requested.Context.Tokens != 65536 || created[1].Resolved != nil {
+		t.Fatalf("created profile target = %+v", created)
+	}
+}
+
+func TestModelLoadRemoveProfile(t *testing.T) {
+	test := func(name string, last bool) {
+		t.Run(name, func(t *testing.T) {
+			f, rt := twoProfileModelLoadFixture(t)
+			declareTwoProfileLoads(t, f, &rt)
+			if last {
+				index := slices.IndexFunc(rt.ModelLoads, func(load modelconfig.ModelLoad) bool { return load.ProfileKey == "lfm-8k" })
+				rt.ModelLoads = modelconfig.CloneLoads(rt.ModelLoads[index : index+1])
+				rt.Serving.Models = slices.DeleteFunc(rt.Serving.Models, func(model engines.ServingModel) bool { return model.ModelID != "lfm-8k" })
+			}
+			prepared, err := compileTypedLlamaInputs(context.Background(), f.st, typedFixtureCommand(t, f, rt), rt, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rt.ModelLoads, rt.Serving = prepared.ModelLoads, prepared.Config
+			f.st.plat.Runtime = rt
+			before := modelconfig.CloneLoads(rt.ModelLoads)
+			beforeServing := rt.Serving.Clone()
+			request := settingsRequest(t, f.ex)
+			request.ModelChange = &modelconfig.ModelChange{ProfileKey: "lfm-8k", ModelID: "medium-model", Remove: true, ExpectedPolicyRevision: "0"}
+			preview, err := f.ex.PreviewLaunch(request)
+			if err != nil || len(preview.Errors) != 0 {
+				t.Fatalf("remove preview errors=%v, err=%v", preview.Errors, err)
+			}
+			if len(preview.PreviewDigest) != 64 || preview.Impact == nil || preview.Impact.RestartScope != "router" || preview.Restart || !modelconfig.EqualLoads(before, f.st.plat.Runtime.ModelLoads) || !beforeServing.Equal(f.st.plat.Runtime.Serving) {
+				t.Fatalf("removal preview or read-only state = %+v", preview)
+			}
+			if _, exists := preview.Identities["lfm-8k"]; exists {
+				t.Fatal("removed profile retained an identity")
+			}
+			if last {
+				proposed := rt
+				proposed.ModelLoads, proposed.Serving = preview.Settings.ModelLoads, preview.Settings.Serving
+				if len(proposed.ModelLoads) != 0 || proposed.Serving != nil || preview.Serving != nil || preparedServingRuntime(f.st, proposed) || len(preview.Identities) != 0 || !slices.Equal(preview.Impact.AffectedModels, []string{"lfm-8k"}) {
+					t.Fatalf("last removal did not return to default mode: %+v", preview)
+				}
+			} else if len(preview.Settings.ModelLoads) != 1 || preview.Settings.ModelLoads[0].ProfileKey != "lfm-32k" || preview.Settings.ModelLoads[0].ModelID != "medium-model" || preview.Settings.ModelLoads[0].Resolved.PerSlotContext != 32768 || preview.Settings.Serving == nil || len(preview.Settings.Serving.Models) != 1 || preview.Settings.Serving.Models[0].ModelID != "lfm-32k" || len(preview.Identities) != 0 || !slices.Equal(preview.Impact.AffectedModels, []string{"lfm-32k", "lfm-8k"}) {
+				t.Fatalf("removal changed sibling: %+v", preview)
+			}
+			found := false
+			for _, diff := range preview.Diff {
+				if diff.Field != "models.lfm-8k.ctx-size" {
+					continue
+				}
+				var old string
+				var next *string
+				if err := json.Unmarshal(diff.Before, &old); err != nil {
+					t.Fatal(err)
+				}
+				if err := json.Unmarshal(diff.After, &next); err != nil {
+					t.Fatal(err)
+				}
+				if old != "8192" || next != nil {
+					t.Fatalf("removal context diff = %q -> %v", old, next)
+				}
+				found = true
+			}
+			if !found {
+				t.Fatal("removed profile has no field diff")
+			}
+		})
+	}
+	test("keeps sibling of same artifact", false)
+	test("last profile returns to default mode", true)
+	t.Run("mismatched artifact is refused", func(t *testing.T) {
+		loads := []modelconfig.ModelLoad{{ProfileKey: "lfm-8k", ModelID: "medium-model"}}
+		before := modelconfig.CloneLoads(loads)
+		removed, err := removeModelLoad(loads, "lfm-8k", "other-model")
+		var typed *ServingFieldError
+		if removed != nil || !errors.As(err, &typed) || typed.Reason != "A profile keeps its model; create a new profile." || !reflect.DeepEqual(loads, before) {
+			t.Fatalf("mismatched removal = %+v, err=%v", removed, err)
+		}
+	})
+}
+
+func TestModelLoadPreviewUsesSelectedProfileIdentity(t *testing.T) {
+	test := func(name, key string, tokens int32, create bool) {
+		t.Run(name, func(t *testing.T) {
+			f, rt := twoProfileModelLoadFixture(t)
+			if create {
+				index := slices.IndexFunc(rt.ModelLoads, func(load modelconfig.ModelLoad) bool { return load.ProfileKey == "lfm-8k" })
+				rt.ModelLoads = modelconfig.CloneLoads(rt.ModelLoads[index : index+1])
+			}
+			f.st.plat.Runtime = rt
+			before := modelconfig.CloneLoads(rt.ModelLoads)
+			request := settingsRequest(t, f.ex)
+			request.ModelChange = &modelconfig.ModelChange{ProfileKey: key, ModelID: "medium-model", ExpectedPolicyRevision: "0", Load: &modelconfig.LoadPatch{Set: modelconfig.RequestedLoad{Context: &modelconfig.Context{Mode: "fixed", Tokens: tokens}}}}
+			preview, err := f.ex.PreviewLaunch(request)
+			if err != nil || len(preview.Errors) != 0 {
+				t.Fatalf("selected preview errors=%v, err=%v", preview.Errors, err)
+			}
+			identity := preview.Identities[key]
+			if !slices.Equal(sortedKeys(preview.Identities), []string{key}) || identity.ConfiguredContextTokens != int64(tokens) || len(preview.Settings.ModelLoads) != 2 || len(identity.Files) != 1 || identity.Files[0].Name != "medium.gguf" {
+				t.Fatalf("profile identity map = %+v, loads=%+v", preview.Identities, preview.Settings.ModelLoads)
+			}
+			if !modelconfig.EqualLoads(before, f.st.plat.Runtime.ModelLoads) {
+				t.Fatal("preview persisted the selected change")
+			}
+		})
+	}
+	test("existing profile has its own context", "lfm-8k", 8192, false)
+	test("missing sibling uses artifact selector", "lfm-32k", 32768, true)
 }
 
 func TestTypedLlamaNativeFit(t *testing.T) {
@@ -444,7 +800,7 @@ func TestTypedLlamaExtraOptions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	parsed, err := parseLlamaServingPresetAllowing(data, modelLoadAllowedPresetKeys([]modelconfig.ModelLoad{{ModelID: "model", Requested: request}}))
+	parsed, err := parseLlamaServingPresetAllowing(data, modelLoadAllowedPresetKeys([]modelconfig.ModelLoad{{ProfileKey: "model", ModelID: "model", Requested: request}}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1277,11 +1633,11 @@ func TestModelSettingsLoadResetAndDefaultSemantics(t *testing.T) {
 	f := newModelLoadFixture(t)
 	rt := convertModelLoadFixture(t, f)
 	slots, threads := int32(3), int32(6)
-	patched, err := patchModelLoad(rt.ModelLoads, "medium-model", modelconfig.LoadPatch{Set: modelconfig.RequestedLoad{Slots: &slots, Threads: &threads}})
+	patched, err := patchModelLoad(rt.ModelLoads, "medium-model", "medium-model", modelconfig.LoadPatch{Set: modelconfig.RequestedLoad{Slots: &slots, Threads: &threads}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	reset, err := patchModelLoad(patched, "medium-model", modelconfig.LoadPatch{Clear: []string{"slots", "threads", "context", "gpu"}})
+	reset, err := patchModelLoad(patched, "medium-model", "medium-model", modelconfig.LoadPatch{Clear: []string{"slots", "threads", "context", "gpu"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1342,6 +1698,230 @@ func readModelLoadRuntimeOverride(t *testing.T, e *Executor) Runtime {
 		t.Fatal("persisted host platform missing")
 	}
 	return platform.Runtime
+}
+
+func reviewedRemovalConversionFixture(t *testing.T, last bool) (modelLoadFixture, settings.Preview, *modelconfig.ModelChange) {
+	t.Helper()
+	f := newModelLoadFixture(t)
+	if last {
+		writeTestFile(t, f.source, []byte("[*]\nfit = off\nload-on-startup = false\n[weak-model]\nmodel = weak.gguf\nctx-size = 4096\nparallel = 1\ngpu-layers = 0\n"))
+	}
+	request := settingsRequest(t, f.ex)
+	request.ModelChange = &modelconfig.ModelChange{ProfileKey: "weak-model", ModelID: "weak-model", Remove: true, ExpectedPolicyRevision: "0"}
+	preview, err := f.ex.PreviewLaunch(request)
+	if err != nil || len(preview.Errors) != 0 || len(preview.PreviewDigest) != 64 {
+		t.Fatalf("external removal preview=%+v error=%v", preview, err)
+	}
+	change := request.ModelChange.Clone()
+	change.PreviewDigest = preview.PreviewDigest
+	return f, preview, &change
+}
+
+func TestModelSettingsLoadConversionAcceptsReviewedRemoval(t *testing.T) {
+	test := func(name string, last bool) {
+		t.Run(name, func(t *testing.T) {
+			f, preview, change := reviewedRemovalConversionFixture(t, last)
+			if err := f.ex.desired.set("fake", false, intentPeer); err != nil {
+				t.Fatal(err)
+			}
+			frozen := settings.Request{Engine: "fake", Settings: preview.Settings}
+			if err := f.ex.validateReviewedModelRemoval(context.Background(), frozen, change); err != nil {
+				t.Fatalf("frozen removal refused: %v", err)
+			}
+			assertNoSettingsOverride(t, f.ex)
+			if len(f.st.plat.Runtime.ModelLoads) != 0 || f.st.running || f.st.proc != nil {
+				t.Fatal("frozen removal validation changed the external router")
+			}
+			rebinds := 0
+			result, err := f.ex.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: preview.Settings, ReviewedModelChange: change}, func() error { rebinds++; return nil })
+			if err != nil {
+				t.Fatalf("reviewed removal refused: %v", err)
+			}
+			if rebinds != 1 || result.Running || f.st.proc != nil || result.Serving != nil || !settings.ConfigFromLaunch(result, preview.Settings.ProxyPort).Equal(preview.Settings) {
+				t.Fatalf("accepted removal result=%+v rebinds=%d", result, rebinds)
+			}
+			stored := readModelLoadRuntimeOverride(t, f.ex)
+			if !modelconfig.EqualLoads(stored.ModelLoads, preview.Settings.ModelLoads) || stored.Serving != nil {
+				t.Fatalf("persisted removal changed reviewed settings: %+v", stored)
+			}
+			if last {
+				if len(result.ModelLoads) != 0 || preparedServingRuntime(f.st, f.st.plat.Runtime) || result.ServingReadback != nil || f.st.plat.Runtime.servingSnapshot != nil {
+					t.Fatalf("last external removal did not return to default mode: %+v", result)
+				}
+			} else if len(result.ModelLoads) != 1 || result.ModelLoads[0].ProfileKey != "medium-model" || result.ModelLoads[0].ModelID != "medium-model" || result.ModelLoads[0].Resolved == nil || result.ModelLoads[0].Resolved.PerSlotContext != 8192 || result.ModelLoads[0].Resolved.Slots != 2 || result.ModelLoads[0].Resolved.Artifacts[0].Path != filepath.Join(f.root, "medium.gguf") {
+				t.Fatalf("selected removal changed unselected profile: %+v", result.ModelLoads)
+			}
+			if _, err := os.Stat(f.capture); !os.IsNotExist(err) {
+				t.Fatalf("cold removal activated native work: %v", err)
+			}
+		})
+	}
+	test("preserves unselected external section", false)
+	test("final external section returns to default mode", true)
+}
+
+func TestModelSettingsLoadConversionRemovalKeepsUnselectedDeclaration(t *testing.T) {
+	f := newModelLoadFixture(t)
+	f.rt.Serving = &engines.ServingConfig{Version: 1}
+	for _, model := range []struct{ key, file string }{{"weak-model", "weak.gguf"}, {"medium-model", "medium.gguf"}} {
+		data, err := os.ReadFile(filepath.Join(f.root, model.file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		host, vram := int64(4096), int64(0)
+		f.rt.Serving.Models = append(f.rt.Serving.Models, engines.ServingModel{
+			ModelID: model.key, MaxOutputTokens: 128,
+			Memory:    engines.ServingMemory{HostRAMBytes: &host, VRAMBytes: &vram},
+			Artifacts: []engines.ServingArtifact{{Role: "model", SHA256: sha256Hex(data), Provenance: engines.ServingProvenance{Kind: "supplied-sha256"}}},
+		})
+	}
+	f.st.plat.Runtime = f.rt
+	request := settingsRequest(t, f.ex)
+	request.ModelChange = &modelconfig.ModelChange{ProfileKey: "weak-model", ModelID: "weak-model", Remove: true, ExpectedPolicyRevision: "0"}
+	preview, err := f.ex.PreviewLaunch(request)
+	if err != nil || len(preview.Errors) != 0 {
+		t.Fatalf("declared external removal preview=%+v error=%v", preview, err)
+	}
+	change := request.ModelChange.Clone()
+	change.PreviewDigest = preview.PreviewDigest
+	result, err := f.ex.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: preview.Settings, ReviewedModelChange: &change}, func() error { return nil })
+	if err != nil {
+		t.Fatalf("declared external removal refused: %v", err)
+	}
+	if result.Serving == nil || len(result.Serving.Models) != 1 || len(result.ModelLoads) != 1 || result.Serving.Models[0].ModelID != "medium-model" || result.Serving.Models[0].MaxOutputTokens != 128 || result.Serving.Models[0].Memory.HostRAMBytes == nil || *result.Serving.Models[0].Memory.HostRAMBytes != 4096 || result.Serving.Models[0].ExpectedNativeSourceDigest != result.ModelLoads[0].Resolved.SourceInputDigest || !result.Serving.Equal(preview.Settings.Serving) {
+		t.Fatalf("unselected serving declaration changed: %+v", result)
+	}
+}
+
+func TestModelSettingsLoadConversionRemovalRefusesUnreviewedSubset(t *testing.T) {
+	test := func(name string, last bool, edit func(*settings.Preview, **modelconfig.ModelChange)) {
+		t.Run(name, func(t *testing.T) {
+			f, preview, change := reviewedRemovalConversionFixture(t, last)
+			edit(&preview, &change)
+			_, err := f.ex.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: preview.Settings, ReviewedModelChange: change}, func() error { t.Fatal("unreviewed subset reached rebind"); return nil })
+			if err == nil {
+				t.Fatal("unreviewed external subset accepted")
+			}
+			assertNoSettingsOverride(t, f.ex)
+			if len(f.st.plat.Runtime.ModelLoads) != 0 || f.st.running || f.st.proc != nil {
+				t.Fatal("refused subset changed the external router")
+			}
+		})
+	}
+	test("no accepted selection", false, func(_ *settings.Preview, change **modelconfig.ModelChange) { *change = nil })
+	test("final removal without accepted selection", true, func(_ *settings.Preview, change **modelconfig.ModelChange) { *change = nil })
+	test("different selected profile", false, func(_ *settings.Preview, change **modelconfig.ModelChange) { (*change).ProfileKey = "medium-model" })
+	test("different selected artifact", false, func(_ *settings.Preview, change **modelconfig.ModelChange) { (*change).ModelID = "medium-model" })
+	test("unrelated section also missing", false, func(preview *settings.Preview, _ **modelconfig.ModelChange) { preview.Settings.ModelLoads = nil })
+	test("native review digest replaced", false, func(_ *settings.Preview, change **modelconfig.ModelChange) {
+		(*change).PreviewDigest = strings.Repeat("f", 64)
+	})
+	test("final native review digest replaced", true, func(_ *settings.Preview, change **modelconfig.ModelChange) {
+		(*change).PreviewDigest = strings.Repeat("f", 64)
+	})
+	test("final removal has no native review", true, func(_ *settings.Preview, change **modelconfig.ModelChange) { (*change).PreviewDigest = "" })
+	test("survivor retargeted", false, func(preview *settings.Preview, _ **modelconfig.ModelChange) {
+		preview.Settings.ModelLoads[0].ModelID = "other-artifact"
+	})
+	test("survivor edited", false, func(preview *settings.Preview, _ **modelconfig.ModelChange) {
+		preview.Settings.ModelLoads[0].Requested.Threads = keyTestPointer(int32(4))
+	})
+}
+
+func TestModelSettingsLoadOrdinaryExternalSettingsKeepSource(t *testing.T) {
+	f := newModelLoadFixture(t)
+	request := settingsRequest(t, f.ex)
+	recheck, err := f.ex.validateTypedLlamaConversion(context.Background(), f.st, f.rt, request.Settings, nil)
+	if err != nil || recheck != nil {
+		t.Fatalf("ordinary external settings were treated as a conversion: recheck present=%t error=%v", recheck != nil, err)
+	}
+	assertNoSettingsOverride(t, f.ex)
+}
+
+func TestModelSettingsLoadConversionRemovalRefusesStaleSource(t *testing.T) {
+	test := func(name string, last bool, edit func(*testing.T, modelLoadFixture)) {
+		t.Run(name, func(t *testing.T) {
+			f, preview, change := reviewedRemovalConversionFixture(t, last)
+			edit(t, f)
+			frozen := settings.Request{Engine: "fake", Settings: preview.Settings}
+			if err := f.ex.validateReviewedModelRemoval(context.Background(), frozen, change); err == nil {
+				t.Fatal("frozen preview accepted stale removal evidence")
+			}
+			_, err := f.ex.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: preview.Settings, ReviewedModelChange: change}, func() error { t.Fatal("stale removal reached rebind"); return nil })
+			if err == nil {
+				t.Fatal("stale removal accepted")
+			}
+			assertNoSettingsOverride(t, f.ex)
+			if len(f.st.plat.Runtime.ModelLoads) != 0 || f.st.running || f.st.proc != nil {
+				t.Fatal("stale removal changed the external router")
+			}
+		})
+	}
+	source := func(t *testing.T, f modelLoadFixture) {
+		t.Helper()
+		data, err := os.ReadFile(f.source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeTestFile(t, f.source, append(data, []byte("\n# source changed since review\n")...))
+	}
+	artifact := func(name string) func(*testing.T, modelLoadFixture) {
+		return func(t *testing.T, f modelLoadFixture) {
+			t.Helper()
+			path := filepath.Join(f.root, name+".gguf")
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeInspectionGGUF(t, path, "llama", 0.75, 4096)
+			if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	test("partial removal source drift", false, source)
+	test("final removal source drift", true, source)
+	test("removed artifact content changed", false, artifact("weak"))
+	test("final removed artifact content changed", true, artifact("weak"))
+	test("surviving artifact content changed", false, artifact("medium"))
+}
+
+func TestModelSettingsLoadConversionRemovalRetainsCompleteSourceCAS(t *testing.T) {
+	f, preview, change := reviewedRemovalConversionFixture(t, true)
+	recheck, err := f.ex.validateTypedLlamaConversion(context.Background(), f.st, f.rt, preview.Settings, change)
+	if err != nil || recheck == nil {
+		t.Fatalf("final removal did not retain complete source evidence: %v", err)
+	}
+	if err := recheck(); err != nil {
+		t.Fatalf("unchanged removal source refused: %v", err)
+	}
+	replaceNativeConversionLibrary(t, filepath.Join(f.root, "weak.gguf"))
+	if err := recheck(); err == nil {
+		t.Fatal("removed artifact object replacement passed the final source CAS")
+	}
+	assertNoSettingsOverride(t, f.ex)
+}
+
+func TestModelSettingsLoadConversionFinalRemovalRefusesNativeBuildDrift(t *testing.T) {
+	f := nativeModelLoadConversionFixture(t)
+	writeTestFile(t, f.source, []byte("[weak-model]\nmodel = weak.gguf\nctx-size = 4096\nparallel = 1\ngpu-layers = 0\n"))
+	request := settingsRequest(t, f.ex)
+	request.ModelChange = &modelconfig.ModelChange{ModelID: "weak-model", Remove: true, ExpectedPolicyRevision: "0"}
+	preview, err := f.ex.PreviewLaunch(request)
+	if err != nil || len(preview.Errors) != 0 || len(preview.Settings.ModelLoads) != 0 {
+		t.Fatalf("final native-fixture removal preview=%+v error=%v", preview, err)
+	}
+	change := request.ModelChange.Clone()
+	change.PreviewDigest = preview.PreviewDigest
+	writeTestFile(t, filepath.Join(f.root, "libggml-base.dylib"), []byte("changed native library content after review"))
+	_, err = f.ex.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: preview.Settings, ReviewedModelChange: &change}, func() error { t.Fatal("changed build reached rebind"); return nil })
+	if err == nil {
+		t.Fatal("final removal accepted changed native build without a surviving load binding")
+	}
+	assertNoSettingsOverride(t, f.ex)
+	if f.st.running || f.st.proc != nil || len(f.st.plat.Runtime.ModelLoads) != 0 {
+		t.Fatal("build refusal changed or activated the external router")
+	}
 }
 
 func TestModelSettingsLoadConversionPersistsWhileOff(t *testing.T) {
@@ -1636,7 +2216,7 @@ func TestModelSettingsLoadConversionRechecksCompleteExternalSource(t *testing.T)
 	f := newModelLoadFixture(t)
 	two := int32(2)
 	preview := previewModelLoadFixture(t, f, "weak-model", modelconfig.LoadPatch{Set: modelconfig.RequestedLoad{Slots: &two}})
-	recheck, err := f.ex.validateTypedLlamaConversion(context.Background(), f.st, f.rt, preview.Settings)
+	recheck, err := f.ex.validateTypedLlamaConversion(context.Background(), f.st, f.rt, preview.Settings, nil)
 	if err != nil || recheck == nil {
 		t.Fatalf("conversion source not captured: %v", err)
 	}
@@ -1725,7 +2305,7 @@ func TestModelLoadConversionApplyRetainsLibraryEvidence(t *testing.T) {
 	if len(preview.Settings.ModelLoads) == 0 {
 		t.Fatal("preview has no accepted loads")
 	}
-	recheck, err := f.ex.validateTypedLlamaConversion(context.Background(), f.st, f.rt, preview.Settings)
+	recheck, err := f.ex.validateTypedLlamaConversion(context.Background(), f.st, f.rt, preview.Settings, nil)
 	if err != nil || recheck == nil {
 		t.Fatalf("conversion apply validation=%v", err)
 	}
@@ -2205,7 +2785,7 @@ func TestModelSettingsLoadCPUExpertsInheritanceAndDetachment(t *testing.T) {
 			t.Fatalf("lost inherited external expert placement: %+v", load)
 		}
 	}
-	patched, err := patchModelLoad(rt.ModelLoads, "medium-model", modelconfig.LoadPatch{Set: modelconfig.RequestedLoad{CPUExperts: &modelconfig.CPUExperts{Mode: "layers", Layers: keyTestPointer(int32(2))}}})
+	patched, err := patchModelLoad(rt.ModelLoads, "medium-model", "medium-model", modelconfig.LoadPatch{Set: modelconfig.RequestedLoad{CPUExperts: &modelconfig.CPUExperts{Mode: "layers", Layers: keyTestPointer(int32(2))}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2752,7 +3332,7 @@ func TestModelSettingsLoadAutoConversionSourceRemainsBound(t *testing.T) {
 	if err != nil || len(preview.Errors) != 0 || preview.Auto == nil {
 		t.Fatalf("conversion Auto preview: %+v %v", preview, err)
 	}
-	recheck, err := f.ex.validateTypedLlamaConversion(ctx, f.st, f.rt, preview.Settings)
+	recheck, err := f.ex.validateTypedLlamaConversion(ctx, f.st, f.rt, preview.Settings, nil)
 	if err != nil || recheck == nil {
 		t.Fatalf("Auto conversion was not accepted against exact source: %v", err)
 	}

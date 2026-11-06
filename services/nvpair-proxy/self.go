@@ -135,7 +135,7 @@ func (f *facade) bindingConsistent(offers *nodepolicy.EngineBindingOffers, model
 }
 
 func (f *facade) localBindingConsistent(pol nodepolicy.Policy, model string) bool {
-	return f.bindingConsistent(&nodepolicy.EngineBindingOffers{Version: 1, Models: []nodepolicy.Role(pol.EngineBindings)}, model)
+	return f.bindingConsistent(&nodepolicy.EngineBindingOffers{Version: 1, Models: []nodepolicy.ModelRef(pol.EngineBindings)}, model)
 }
 
 func (f *facade) nodeOffersBinding(n Node, model string) bool {
@@ -158,7 +158,7 @@ func (f *facade) boundSelfCandidate(n Node, model string) (candidate, bool) {
 		!modelServed(pol.ServedModels, f.profile.Name, model, f.host.normalizeEngineModel) {
 		return candidate{}, false
 	}
-	bound := slices.ContainsFunc(pol.EngineBindings, func(ref nodepolicy.Role) bool {
+	bound := slices.ContainsFunc(pol.EngineBindings, func(ref nodepolicy.ModelRef) bool {
 		return ref.Engine == f.profile.Name && f.profile.normalizeModel(ref.Model) == f.profile.normalizeModel(model)
 	})
 	if !bound {

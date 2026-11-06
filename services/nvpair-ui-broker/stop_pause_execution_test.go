@@ -428,10 +428,12 @@ func TestStopPauseExecutionRetryAndLocalResume(t *testing.T) {
 	rb, manager := stopPauseExecutionFixture(t, "llamacpp")
 	r := rb.b.nodePolicyRuntime()
 	r.mu.Lock()
-	role := nodepolicy.Role{Engine: "llamacpp", Model: "tiny"}
-	r.current.Roles = map[string]nodepolicy.Role{"weak": role}
-	r.current.ResidentModels = nodepolicy.ResidentModels{role}
-	r.current.EngineBindings = nodepolicy.EngineBindings{role}
+	ref := nodepolicy.ModelRef{Engine: "llamacpp", Model: "tiny"}
+	r.current.Profiles = []nodepolicy.Profile{{Key: "tiny-profile", DisplayName: "Tiny", Engine: "llamacpp", Model: "tiny", ContextTokens: 8192, MaxOutputTokens: 1024, MaxConcurrent: 1, MemoryBytes: 1024,
+		Qualification: &nodepolicy.QualificationRef{ID: "fixture-only", Revision: "1"}}}
+	r.current.Roles = []nodepolicy.Role{{Name: nodepolicy.TierWeak, Profiles: []string{"tiny-profile"}}}
+	r.current.ResidentModels = nodepolicy.ResidentModels{ref}
+	r.current.EngineBindings = nodepolicy.EngineBindings{ref}
 	r.intent["llamacpp"] = true
 	r.loaded["llamacpp"] = []string{"tiny"}
 	r.mu.Unlock()

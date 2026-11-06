@@ -75,7 +75,7 @@ func newReadinessEnvelopeFixture(t *testing.T, engine string) readinessEnvelopeF
 	p := nodepolicy.Default()
 	p.Revision = "1"
 	p.Admission.MaxConcurrentPerModel = 2
-	p.Profiles = []nodepolicy.Profile{{Name: "ne-model", Engine: engine, Model: "m", ContextTokens: 4096,
+	p.Profiles = []nodepolicy.Profile{{Key: "m", DisplayName: "Model", Engine: engine, Model: "m", ContextTokens: 4096,
 		MaxOutputTokens: 1024, MemoryBytes: 4096, Qualification: &ref}}
 	if err := p.Validate(); err != nil {
 		t.Fatalf("policy fixture: %v", err)

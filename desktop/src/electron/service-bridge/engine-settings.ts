@@ -24,6 +24,7 @@ import type {
 import { isValidRoutingEngineId } from '@/shared/utils/engines'
 import type { JsonObject, JsonValue } from './json-rpc-client'
 import { proxyEngineFromManagerId } from './proxy-engines'
+import { parseModelIdentities } from './model-identity'
 
 type LoadBufferObservation = NonNullable<InspectModelResult['loadObservation']>
 
@@ -81,9 +82,12 @@ function optionalText(value: JsonValue | undefined, limit = 4096): string | unde
     return value === undefined ? undefined : boundedText(value, limit)
 }
 function modelId(value: JsonValue | undefined): string {
+    return boundedText(value, 512, true)
+}
+function profileKey(value: JsonValue | undefined): string {
     const id = boundedText(value, 512, true)
     if (['weak', 'medium', 'strong'].includes(id.replace(/-(api|local)$/, '')))
-        throw new Error('Reserved model identifier.')
+        throw new Error('Reserved profile key.')
     return id
 }
 function shape(value: JsonValue | undefined, keys: readonly string[]): JsonObject {
@@ -377,8 +381,9 @@ function resolved(value: JsonValue | undefined): ResolvedLoad {
     return result
 }
 function modelLoad(value: JsonValue): ModelLoad {
-    const row = shape(value, ['modelId', 'requested', 'resolved'])
+    const row = shape(value, ['profileKey', 'modelId', 'requested', 'resolved'])
     const result = {
+        profileKey: profileKey(row.profileKey),
         modelId: modelId(row.modelId),
         requested: requested(row.requested),
         resolved: row.resolved === undefined ? undefined : resolved(row.resolved)
@@ -1738,8 +1743,8 @@ function config(value: JsonValue | undefined): EngineSettingsConfig {
     const row = object(value)
     const modelLoads =
         row.modelLoads === undefined ? undefined : boundedArray(row.modelLoads, 256).map(modelLoad)
-    if (new Set(modelLoads?.map(load => load.modelId)).size !== (modelLoads?.length ?? 0))
-        throw new Error('Duplicate model load identifier.')
+    if (new Set(modelLoads?.map(load => load.profileKey)).size !== (modelLoads?.length ?? 0))
+        throw new Error('Duplicate model load profile key.')
     return {
         serverPort: number(row.serverPort),
         proxyPort: number(row.proxyPort),
@@ -1958,7 +1963,15 @@ export function parseEngineSettingsPreview(value: JsonValue | undefined): Engine
             ? undefined
             : boundedArray(row.requiredArtifacts, 1024).map(summary)
     if (requiredArtifacts?.length) orderedSummaryArtifacts(requiredArtifacts)
+    const identities = row.identities === undefined ? undefined : object(row.identities)
+    if (identities) for (const key of Object.keys(identities)) profileKey(key)
+    const parsedIdentities = identities
+        ? parseModelIdentities({ profiles: identities })?.profiles
+        : undefined
+    if (identities && Object.keys(parsedIdentities ?? {}).length !== Object.keys(identities).length)
+        throw new Error('Invalid preview model identity.')
     return {
+        identities: parsedIdentities,
         settings: config(row.settings),
         serving: servingReadback(row.serving),
         revision: number(row.revision),

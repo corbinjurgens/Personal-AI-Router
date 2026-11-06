@@ -94,7 +94,8 @@ function documentFor(
                 revision,
                 servedModels: null,
                 residentModels: [],
-                roles: { weak: { engine: 'llamacpp', model: 'role-model' } },
+                roles: [{ name: 'weak', profiles: ['role-model'] }],
+                profiles: [{ key: 'role-model', displayName: 'Role model', engine: 'llamacpp', model: 'role-model' }],
                 routing: { accounts: [{ id: 'private-account' }], tiers: { private: true } },
                 futureField: { enabled: false, values: ['retain', null, 0] },
                 ...extra

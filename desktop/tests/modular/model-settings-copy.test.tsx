@@ -36,7 +36,7 @@ vi.mock('@/ui/components/ModelManager/ModelCopyModal', () => ({
 
 const identity = { engine: 'llamacpp', model: 'model' }
 const source =
-    '{"profiles":[{"name":"source","engine":"llamacpp","model":"model","requestOptions":{"temperature":0.25}}]}'
+    '{"profiles":[{"key":"source-profile","displayName":"Source","name":"source","engine":"llamacpp","model":"model","requestOptions":{"temperature":0.25}}]}'
 const get = vi.fn<INodePolicyApi['get']>()
 const set = vi.fn<INodePolicyApi['set']>()
 const configure = vi.fn()
@@ -48,6 +48,8 @@ function snapshot(extra: Record<string, JsonValue> = {}, revision = '1'): NodePo
             profiles: [
                 {
                     name: 'target',
+                    key: 'target-profile',
+                    displayName: 'Target',
                     ...identity,
                     requestOptions: { temperature: 1, seed: 42 },
                     ...extra
@@ -457,6 +459,7 @@ describe('portable target-previewed copy', () => {
                     nodeId === 'self'
                         ? [
                               {
+                                  profileKey: 'model',
                                   modelId: 'model',
                                   requested: { slots: 2, gpu: { mode: 'layers', layers: 20 } },
                                   resolved: {
@@ -829,10 +832,10 @@ describe('portable target-previewed copy', () => {
             modelChange: { expectedPolicyRevision: '1', previewDigest: 'target-digest-peer' }
         })
     })
-    it('requires explicit destructive role selection and shows target diff and served semantics', async () => {
+    it('requires explicit role membership selection and shows target diff and served semantics', async () => {
         const routingSource = source.replace(
             '"profiles":',
-            '"roles":{"weak":{"engine":"llamacpp","model":"model"}},"servedModels":[],"profiles":'
+            '"roles":[{"name":"weak","profiles":["other-profile","source-profile"]}],"servedModels":[],"profiles":'
         )
         await render(routingSource)
         await click('Select portable load and routing preferences')
@@ -844,8 +847,21 @@ describe('portable target-previewed copy', () => {
             roles: { weak: true },
             served: false
         })
-        expect(container.textContent).toContain('can displace target tier')
+        expect(container.textContent).toContain('Explicitly copy weak role membership')
         expect(container.textContent).toContain('target nil/empty semantics reviewed')
+    })
+    it('does not copy membership from a native model id instead of the selected profile key', async () => {
+        await render(source.replace(
+            '"profiles":',
+            '"roles":[{"name":"weak","profiles":["model"]}],"profiles":'
+        ))
+        await click('Select portable load and routing preferences')
+        await check('Explicitly copy weak')
+        await check('Copy to peer')
+        await click('Preview selected targets')
+        expect(review.mock.calls[0]?.[0].modelChange?.policy?.roles).toEqual({ weak: false })
+        expect(apply).not.toHaveBeenCalled()
+        expect(set).not.toHaveBeenCalled()
     })
     it('permits load-only copy into a generation-locked target', async () => {
         get.mockResolvedValue(snapshot({ localOnly: true }))

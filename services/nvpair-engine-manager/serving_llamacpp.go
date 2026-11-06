@@ -1272,7 +1272,7 @@ func compileLlamaServingSectionsExpected(ctx context.Context, rt Runtime, requir
 		}
 		unpriced := false
 		for _, load := range rt.ModelLoads {
-			if load.ModelID == model.ModelID && modelLoadUnpriced(load.Requested) {
+			if load.ProfileKey == model.ModelID && modelLoadUnpriced(load.Requested) {
 				unpriced = true
 			}
 		}

@@ -463,7 +463,7 @@ func TestIngress_AppliesAdmission(t *testing.T) {
 		p.admission.setAvailability(nodepolicy.Available, false)
 		pol := nodepolicy.Default()
 		pol.Profiles = []nodepolicy.Profile{{
-			Name: "p", Engine: tc.profile.Name, Model: tc.advertisedModel,
+			Key: "p", DisplayName: "p", Engine: tc.profile.Name, Model: tc.advertisedModel,
 			RequestOptions: json.RawMessage(`{"keep_alive":"10m","stream":true}`),
 		}}
 		p.admission.setPolicy(pol)
@@ -777,7 +777,7 @@ func TestHandleHTTP_SoleBusySelfWaitsWithoutSpendingDispatches(t *testing.T) {
 			policy := nodepolicy.Default()
 			policy.Admission.QueueTimeoutSeconds = 1
 			if profileLimit {
-				policy.Profiles = []nodepolicy.Profile{{Name: "limited", Engine: tc.profile.Name, Model: tc.requestedModel, MaxConcurrent: 1}}
+				policy.Profiles = []nodepolicy.Profile{{Key: "limited", DisplayName: "limited", Engine: tc.profile.Name, Model: tc.requestedModel, MaxConcurrent: 1}}
 			} else {
 				policy.Admission.MaxConcurrentPerModel = 1
 			}
@@ -929,7 +929,7 @@ func TestHandleHTTP_SelfDispatchMergesRequestOptions(t *testing.T) {
 	setBackend(t, p.soleFacade(), local.URL, true)
 	pol := nodepolicy.Default()
 	pol.Profiles = []nodepolicy.Profile{{
-		Name: "q", Engine: tc.profile.Name, Model: tc.requestedModel,
+		Key: "q", DisplayName: "q", Engine: tc.profile.Name, Model: tc.requestedModel,
 		RequestOptions: json.RawMessage(`{"options":{"num_ctx":8192,"temperature":1},"keep_alive":"5m"}`),
 	}}
 	p.admission.setPolicy(pol)

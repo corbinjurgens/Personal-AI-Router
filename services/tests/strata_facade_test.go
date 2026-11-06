@@ -251,7 +251,7 @@ func TestStrataContractRequiresLocalQualification(t *testing.T) {
 	policy.Revision = "41"
 	policy.Admission.MaxConcurrentPerModel = 1
 	policy.Profiles = []nodepolicy.Profile{{
-		Name: "strata-contract", Engine: "strata", Model: "Org/Strata-Loaded:Q4_K_M",
+		Key: "Org/Strata-Loaded:Q4_K_M", DisplayName: "strata-contract", Engine: "strata", Model: "Org/Strata-Loaded:Q4_K_M",
 		ContextTokens: 4096, MaxOutputTokens: 1024, MaxConcurrent: 1,
 		Qualification: &nodepolicy.QualificationRef{ID: "synthetic-strata-contract", Revision: "1"},
 	}}

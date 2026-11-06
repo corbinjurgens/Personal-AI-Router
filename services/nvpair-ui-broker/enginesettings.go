@@ -258,6 +258,13 @@ func (b *Broker) prepareSettingsSnapshotLocked(ctx context.Context, engine strin
 	if err := b.settingsWorkerCall(ctx, "engine:get-launch", map[string]string{"engine": engine}, &launch); err != nil {
 		return nil, false, err
 	}
+	if launch.Engine != engine {
+		return nil, false, fmt.Errorf("engine settings readback did not identify %q", engine)
+	}
+	current, err := settings.ConfigFromLaunch(launch, 0).Canonical()
+	if err != nil {
+		return nil, false, fmt.Errorf("engine settings readback is invalid: %w", err)
+	}
 	proxyPort := 0
 	ready := false
 	if proxy := b.settingsProxy(engine); proxy != nil {
@@ -272,7 +279,7 @@ func (b *Broker) prepareSettingsSnapshotLocked(ctx context.Context, engine strin
 	if !ready && record != nil {
 		configuredProxy = record.Snapshot.Settings.ProxyPort
 	}
-	current := settings.ConfigFromLaunch(launch, configuredProxy)
+	current.ProxyPort = configuredProxy
 	if record == nil {
 		record = &engineSettingsRecord{Snapshot: settings.Snapshot{NodeID: b.nodeID, Engine: engine, Revision: 1, AppliedRevision: 1, Epoch: b.engineSettingsEpoch, Phase: "idle", Settings: current}, Receipts: make(map[string]settingsReceipt)}
 		save = true

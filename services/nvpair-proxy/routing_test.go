@@ -1965,7 +1965,7 @@ func hybridPeerFixture(t *testing.T, peers map[string]int) *tierFixture {
 			f.discovery.AddManual(n)
 			fx.eng[id] = e
 		}
-		fx.advertise(t, id, map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("q:1b")}, strictCapabilityFor("llamacpp", "q:1b"))
+		fx.advertise(t, id, map[string]nodepolicy.AdvertisedProfile{"weak": qualifiedProfile("q:1b")}, strictCapabilityFor("llamacpp", "q:1b"))
 		pinRecordingPairPeer(t, f, id, fx.eng[id])
 	}
 	return fx
@@ -2056,7 +2056,7 @@ func TestUnifiedDispatchHybridPreOutputDeadline(t *testing.T) {
 	n := nodeFor(t, "slow", stalled.URL)
 	n.Models = []string{"q:1b"}
 	fx.p.soleFacade().discovery.AddManual(n)
-	fx.advertise(t, "slow", map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("q:1b")}, strictCapabilityFor("llamacpp", "q:1b"))
+	fx.advertise(t, "slow", map[string]nodepolicy.AdvertisedProfile{"weak": qualifiedProfile("q:1b")}, strictCapabilityFor("llamacpp", "q:1b"))
 
 	started := time.Now()
 	recorder, ctl := serveHybridDispatch(t, fx.p.soleFacade(), hybridTestBody, hybridTestPolicy(3, 300*time.Millisecond))
@@ -2128,7 +2128,7 @@ func hybridSelfProxy(t *testing.T, resident bool) (*Proxy, *facade, *recordingEn
 	p.admission.strict.storageErr = nil
 	installQualified(t, p.admission, admKey{engine: "llamacpp", model: "llama3"})
 	pol := p.admission.currentPolicy()
-	pol.Roles = map[string]nodepolicy.Role{"weak": {Engine: "llamacpp", Model: "llama3"}}
+	declarePolicyRole(&pol, "weak", "llamacpp", "llama3")
 	pol.Admission.MaxConcurrentPerModel = 1
 	p.admission.setPolicy(pol)
 	if resident {
@@ -2163,7 +2163,7 @@ func TestUnifiedDispatchHybridSelfRefusalFallsBackToPeer(t *testing.T) {
 	peer := newRecordingEngine(t, http.StatusOK)
 	n := nodeFor(t, "peer", peer.URL)
 	n.Models = []string{"llama3"}
-	n.Roles = map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("llama3")}
+	setAdvertisedProfilesByRole(&n, map[string]nodepolicy.AdvertisedProfile{"weak": qualifiedProfile("llama3")})
 	n.PolicyRevision = "1"
 	n.StrictAdmission = strictCapabilityFor("llamacpp", "llama3")
 	lcpp.discovery.AddManual(n)

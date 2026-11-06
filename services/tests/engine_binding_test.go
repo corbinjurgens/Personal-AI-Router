@@ -778,7 +778,7 @@ func testEngineBindingProtectedResident(t *testing.T) {
 	profile := fixtureResidentProfile()
 	// Desired resident protection is sufficient for the stop guard. This
 	// declaration supplies no live qualification and claims no loaded model.
-	profile.Engine, profile.Model, profile.Name = "llamacpp-custom", "switch-model", "binding-protected-source"
+	profile.Engine, profile.Model, profile.Key, profile.DisplayName = "llamacpp-custom", "switch-model", "switch-model", "binding-protected-source"
 	want := fetchServicePolicy(t, f.client).Policy
 	want.Profiles = []nodepolicy.Profile{profile}
 	want.ResidentModels = nodepolicy.ResidentModels{{Engine: "llamacpp-custom", Model: "switch-model"}}

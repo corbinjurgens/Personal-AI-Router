@@ -8,10 +8,40 @@ import {
     defaultPortableLoadFields,
     portableLoadPatch
 } from '@/shared/utils/node-policy-model-copy'
+import { modelRoutingState } from '@/shared/utils/node-policy-model-copy'
 import { parseModelSettings } from '@/shared/utils/node-policy-model-settings'
 import type { InspectModelResult, RequestedLoad } from '@/shared/types/model-config'
 
 const source = { engine: 'llamacpp', model: 'source' }
+
+describe('keyed role membership', () => {
+    it('resolves the selected pair to its policy key beyond the first preference', () => {
+        const state = modelRoutingState(
+            JSON.stringify({
+                profiles: [{ key: 'selected-profile', engine: 'llamacpp', model: 'source' }],
+                roles: [{ name: 'strong', profiles: ['other-profile', 'selected-profile'] }]
+            }),
+            source
+        )
+        expect(state.profileKey).toBe('selected-profile')
+        expect(state.roles).toEqual([
+            { name: 'strong', profiles: ['other-profile', 'selected-profile'] }
+        ])
+        expect(state.roles.some(role => role.profiles.includes(state.profileKey ?? ''))).toBe(true)
+    })
+
+    it('does not invent membership for missing profiles or empty declarations', () => {
+        const state = modelRoutingState(
+            JSON.stringify({
+                profiles: [],
+                roles: [{ name: 'weak', profiles: [] }]
+            }),
+            source
+        )
+        expect(state.profileKey).toBeUndefined()
+        expect(state.roles).toEqual([{ name: 'weak', profiles: [] }])
+    })
+})
 const target = { engine: 'llamacpp', model: 'target' }
 const sourceText =
     '{"profiles":[{"engine":"llamacpp","model":"source","requestOptions":{"temperature":0.5,"top_k":20,"nested":{"x":1}},"requestOptionsMode":"defaults","localOnly":true}]}'

@@ -53,7 +53,7 @@ function snapshot(extra: Partial<EngineSettingsSnapshot> = {}): EngineSettingsSn
             serverPort: 1,
             proxyPort: 2,
             launchText: 'target-only',
-            modelLoads: [{ modelId: 'other', requested: { slots: 3 } }]
+            modelLoads: [{ profileKey: 'other', modelId: 'other', requested: { slots: 3 } }]
         },
         effectiveServerPort: 1,
         effectiveProxyPort: 2,
@@ -746,6 +746,7 @@ describe('reviewed model operations', () => {
         const native = snapshot()
         native.settings.modelLoads = [
             {
+                profileKey: 'model',
                 modelId: 'model',
                 requested: {},
                 resolved: {

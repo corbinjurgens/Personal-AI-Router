@@ -48,8 +48,8 @@ func TestPeerProjectionProtectsPauseMode(t *testing.T) {
 func inferenceLockPolicy() Policy {
 	p := Default()
 	p.Profiles = []Profile{
-		{Name: "locked", Engine: "llamacpp", Model: "stored-model", LocalOnly: true, RequestOptions: json.RawMessage(`{"temperature":0.5,"nested":{"seed":9007199254740993},"stop":["a","b"]}`)},
-		{Name: "editable", Engine: "llamacpp-custom", Model: "editable-model", RequestOptions: json.RawMessage(`{"temperature":1}`)},
+		{Key: "locked", DisplayName: "locked", Engine: "llamacpp", Model: "stored-model", LocalOnly: true, RequestOptions: json.RawMessage(`{"temperature":0.5,"nested":{"seed":9007199254740993},"stop":["a","b"]}`)},
+		{Key: "editable", DisplayName: "editable", Engine: "llamacpp-custom", Model: "editable-model", RequestOptions: json.RawMessage(`{"temperature":1}`)},
 	}
 	return p
 }
@@ -153,13 +153,13 @@ func TestPeerInferenceSettingsLockRefusesWholeWrite(t *testing.T) {
 			} else if err != nil || merged.Idle.UnloadAfterMinutes != 17 {
 				t.Fatalf("allowed edit refused: %v", err)
 			}
-			if stored.Profiles[0].Name != "locked" || string(stored.Profiles[0].RequestOptions) != `{"temperature":0.5,"nested":{"seed":9007199254740993},"stop":["a","b"]}` {
+			if stored.Profiles[0].DisplayName != "locked" || string(stored.Profiles[0].RequestOptions) != `{"temperature":0.5,"nested":{"seed":9007199254740993},"stop":["a","b"]}` {
 				t.Fatal("stored policy changed")
 			}
 		})
 	}
 	test("unlocked options", func(p *Policy) { p.Profiles[1].RequestOptions = json.RawMessage(`{"top_k":7}`) }, false)
-	test("display metadata", func(p *Policy) { p.Profiles[0].Name = "renamed"; p.Profiles[0].MemoryBytes = 100 }, false)
+	test("display metadata", func(p *Policy) { p.Profiles[0].DisplayName = "renamed"; p.Profiles[0].MemoryBytes = 100 }, false)
 	test("reordered profiles", func(p *Policy) { p.Profiles[0], p.Profiles[1] = p.Profiles[1], p.Profiles[0] }, false)
 	test("explicit default", func(p *Policy) { p.Profiles[0].RequestOptionsMode = RequestOptionsDefaults }, false)
 	test("clear lock", func(p *Policy) { p.Profiles[0].LocalOnly = false }, true)
@@ -188,7 +188,7 @@ func TestPeerInferenceSettingsNewLockAndInvalidIdentity(t *testing.T) {
 	stored := inferenceLockPolicy()
 	t.Run("new lock uses fixed message", func(t *testing.T) {
 		peer := stored.PeerProjection()
-		peer.Profiles = append(peer.Profiles, Profile{Name: "private-display", Engine: "llamacpp", Model: "incoming-secret", LocalOnly: true})
+		peer.Profiles = append(peer.Profiles, Profile{Key: "private-display", DisplayName: "private-display", Engine: "llamacpp", Model: "incoming-secret", LocalOnly: true})
 		raw, err := json.Marshal(peer)
 		if err != nil {
 			t.Fatal(err)
@@ -203,7 +203,8 @@ func TestPeerInferenceSettingsNewLockAndInvalidIdentity(t *testing.T) {
 		peer := stored.PeerProjection()
 		peer.Profiles[0].LocalOnly = false
 		duplicate := peer.Profiles[0]
-		duplicate.Name = "duplicate"
+		duplicate.Key = "duplicate"
+		duplicate.DisplayName = "duplicate"
 		peer.Profiles = append(peer.Profiles, duplicate)
 		raw, err := json.Marshal(peer)
 		if err != nil {
@@ -362,7 +363,8 @@ func TestServedResidentRoleAuthority(t *testing.T) {
 	p := servedResidentPolicy()
 	p.ServedModels = ServedModels{}
 	p.ResidentModels = nil
-	p.Roles = map[string]Role{TierStrong: {Engine: "llamacpp", Model: "outside"}}
+	p.Profiles = append(p.Profiles, Profile{Key: "outside", DisplayName: "Outside", Engine: "llamacpp", Model: "outside"})
+	p.Roles = []Role{{Name: TierStrong, Profiles: []string{"outside"}}}
 	if err := p.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -378,10 +380,10 @@ func TestServedResidentRoleAuthority(t *testing.T) {
 		t.Fatal("roles rewritten outside served permission")
 	}
 	adv := p.Advertisement()
-	if len(adv.Roles) != 1 || adv.Roles[TierStrong].Model != "outside" {
+	if len(adv.Roles) != 1 || adv.Roles[0].Name != TierStrong || !reflect.DeepEqual(adv.Roles[0].Profiles, []string{"outside"}) {
 		t.Fatal("advertisement lost declaring role")
 	}
-	if _, ok := adv.Roles[TierWeak]; ok {
+	if len(adv.Roles) != 1 {
 		t.Fatal("omitted role invented")
 	}
 }
@@ -485,12 +487,9 @@ func TestMergePeerSetAcceptsUnchangedProjection(t *testing.T) {
 		doc["tiers"].(map[string]any)["medium"] = []any{}
 	}, func(*Policy) {})
 	test("declared roles", func(doc map[string]any) {
-		doc["roles"] = map[string]any{
-			"weak":   map[string]any{"engine": "llamacpp", "model": "qwen3-8b"},
-			"strong": map[string]any{"engine": "llamacpp-custom", "model": "big"},
-		}
+		doc["roles"] = []Role{{Name: TierWeak, Profiles: []string{}}, {Name: TierStrong, Profiles: []string{}}}
 	}, func(p *Policy) {
-		p.Roles = map[string]Role{TierWeak: {Engine: "llamacpp", Model: "qwen3-8b"}, TierStrong: {Engine: "llamacpp-custom", Model: "big"}}
+		p.Roles = []Role{{Name: TierWeak, Profiles: []string{}}, {Name: TierStrong, Profiles: []string{}}}
 	})
 	test("peer pausedBy is ignored", func(doc map[string]any) {
 		doc["pausedBy"] = "peer"
@@ -503,7 +502,7 @@ func TestMergePeerSetAcceptsUnchangedProjection(t *testing.T) {
 
 func TestPeerProjectionCarriesRolesAndPausedBy(t *testing.T) {
 	stored := stagedPolicy(t)
-	stored.Roles = map[string]Role{TierMedium: {Engine: "llamacpp", Model: "qwen3-8b"}}
+	stored.Roles = []Role{{Name: TierMedium, Profiles: []string{}}}
 	stored.Availability = Paused
 	stored.PausedBy = PausedLocally
 
@@ -515,8 +514,31 @@ func TestPeerProjectionCarriesRolesAndPausedBy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal projection: %v", err)
 	}
-	if !strings.Contains(string(data), `"roles":{"medium":{"engine":"llamacpp","model":"qwen3-8b"}}`) || !strings.Contains(string(data), `"pausedBy":"local"`) {
+	if !strings.Contains(string(data), `"roles":[{"name":"medium","profiles":[]}]`) || !strings.Contains(string(data), `"pausedBy":"local"`) {
 		t.Errorf("projection JSON lacks roles or pausedBy: %s", data)
+	}
+}
+
+func TestRoleMembershipCopiesAreDetached(t *testing.T) {
+	p := Default()
+	p.Profiles = []Profile{{Key: "m", DisplayName: "Model", Engine: "llamacpp", Model: "m"}}
+	p.Roles = []Role{{Name: TierMedium, Profiles: []string{"m"}}}
+	peer := p.PeerProjection()
+	peer.Roles[0].Profiles[0] = "peer-change"
+	if p.Roles[0].Profiles[0] != "m" {
+		t.Fatal("projection aliases stored membership")
+	}
+	raw, err := json.Marshal(p.PeerProjection())
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged, err := MergePeerSet(p, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged.Roles[0].Profiles[0] = "merged-change"
+	if p.Roles[0].Profiles[0] != "m" {
+		t.Fatal("merged roles alias stored membership")
 	}
 }
 
@@ -652,13 +674,15 @@ func TestMergePeerSetRejectsProtectedChanges(t *testing.T) {
 		doc["idle"].(map[string]any)["unloadAfterMinutes"] = -1
 	}, "idle.unloadAfterMinutes")
 	test("role for an unknown tier", func(doc map[string]any) {
-		doc["roles"] = map[string]any{"huge": map[string]any{"engine": "llamacpp", "model": "m"}}
+		doc["roles"] = []Role{{Name: "huge", Profiles: []string{}}}
 	}, `unknown tier "huge"`)
 	test("role naming a reserved alias", func(doc map[string]any) {
-		doc["roles"] = map[string]any{"weak": map[string]any{"engine": "llamacpp", "model": "strong-local"}}
+		doc["profiles"] = []any{map[string]any{"key": "m", "displayName": "Model", "engine": "llamacpp", "model": "strong-local"}}
+		doc["roles"] = []Role{{Name: TierWeak, Profiles: []string{"m"}}}
 	}, "reserved alias")
 	test("role for an unknown engine", func(doc map[string]any) {
-		doc["roles"] = map[string]any{"weak": map[string]any{"engine": "no/pe", "model": "m"}}
+		doc["profiles"] = []any{map[string]any{"key": "m", "displayName": "Model", "engine": "no/pe", "model": "m"}}
+		doc["roles"] = []Role{{Name: TierWeak, Profiles: []string{"m"}}}
 	}, `unknown engine "no/pe"`)
 }
 

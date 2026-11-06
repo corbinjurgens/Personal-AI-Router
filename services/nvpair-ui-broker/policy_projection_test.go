@@ -175,8 +175,8 @@ func TestNodeProjectionPublishedOnPersistAvailabilityAndReady(t *testing.T) {
 	_, err := ab.b.dispatchPolicy(context.Background(), methodPolicySet, policyParams{
 		Policy: mustJSON(map[string]any{
 			"version":  nodepolicy.SchemaVersion,
-			"roles":    map[string]any{"weak": map[string]any{"engine": "llamacpp", "model": "qwen3:4b"}},
-			"profiles": []any{map[string]any{"name": "qwen-small", "engine": "llamacpp", "model": "qwen3:4b", "contextTokens": 8192, "capabilities": []string{"tools"}}},
+			"roles":    []nodepolicy.Role{{Name: nodepolicy.TierWeak, Profiles: []string{"small-profile"}}},
+			"profiles": []any{map[string]any{"key": "small-profile", "displayName": "Qwen small", "name": "qwen-small", "engine": "llamacpp", "model": "qwen3:4b", "contextTokens": 8192, "capabilities": []string{"tools"}}},
 		}),
 		ExpectedPersistedRevision: mustJSON(ab.b.localPolicy().Policy.Revision),
 	})
@@ -186,9 +186,8 @@ func TestNodeProjectionPublishedOnPersistAvailabilityAndReady(t *testing.T) {
 	got := waitProjections(t, engine, 1)
 	want := nodepolicy.Advertisement{
 		Revision: ab.b.localPolicy().Policy.Revision,
-		Roles: map[string]nodepolicy.AdvertisedRole{
-			nodepolicy.TierWeak: {Engine: "llamacpp", Model: "qwen3:4b", ContextTokens: 8192, Capabilities: []nodepolicy.Capability{nodepolicy.CapTools}},
-		},
+		Roles:    []nodepolicy.Role{{Name: nodepolicy.TierWeak, Profiles: []string{"small-profile"}}},
+		Profiles: []nodepolicy.AdvertisedProfile{{Key: "small-profile", DisplayName: "Qwen small", Engine: "llamacpp", Model: "qwen3:4b", ContextTokens: 8192, Capabilities: []nodepolicy.Capability{nodepolicy.CapTools}}},
 	}
 	if !reflect.DeepEqual(got[0], want) {
 		t.Fatalf("projection after policy:set = %+v, want %+v", got[0], want)

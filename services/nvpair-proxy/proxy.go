@@ -11,7 +11,6 @@ import (
 	"io"
 	"log"
 	"log/slog"
-	"maps"
 	"net"
 	"net/http"
 	"net/url"
@@ -1335,7 +1334,8 @@ func subscribedToNode(p engineProfile, n noderec.DirectoryNode) (Node, bool) {
 	// The node's own declaration, read by tier routing (declaredRoles), and
 	// its strict admission capability, read only by Node.strictModel.
 	if n.Policy != nil {
-		node.Roles = maps.Clone(n.Policy.Roles)
+		node.Roles = n.Policy.Roles
+		node.Profiles = n.Policy.Profiles
 		node.ServedModels = slices.Clone(n.Policy.ServedModels)
 		node.PolicyRevision = n.Policy.Revision
 		node.PausedBy = n.Policy.PausedBy

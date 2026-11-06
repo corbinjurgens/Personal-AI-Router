@@ -429,6 +429,14 @@ artifacts and unreviewed resolutions remain refusals. Advisory estimation errors
 are data, never an additional manual-preview or Apply refusal.
 
 Direct previews compile typed records without persistence or activation.
+Typed loads are keyed by `profileKey`. The preset section name, profile key
+and served id are identical; `modelId` separately selects artifact files.
+Distinct profiles may select the same artifact with different launch settings.
+Launch settings live only in the engine manager, while node policy owns profile
+metadata. The broker derives identity and context in its coupled policy stage.
+The existing stored decode/repair pass assigns missing keys from exact model
+ids before canonical validation; subsequent settings persistence records those
+keys without a separate migration or schema boundary.
 `launchStateLocked` clones stored requested/resolved records; configured native
 readback is distinct from accepted settings and strict declaration evidence.
 `persistRuntimeServing` can replace modelLoads with ports/launch/serving in the

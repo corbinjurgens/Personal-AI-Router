@@ -422,8 +422,8 @@ func i7HybridFixturePeers(t *testing.T, peerIDs []string, edits ...func(*nodepol
 			edit(p)
 		}
 	})
-	advertisement := &nodepolicy.Advertisement{Revision: "1", Roles: map[string]nodepolicy.AdvertisedRole{
-		"weak": {Engine: "llamacpp", Model: egressProcessModel, ContextTokens: 4096, MaxOutputTokens: 1024,
+	advertisement := &nodepolicy.Advertisement{Revision: "1", Roles: []nodepolicy.Role{{Name: "weak", Profiles: []string{"fixture-profile"}}}, Profiles: []nodepolicy.AdvertisedProfile{
+		{Key: "fixture-profile", DisplayName: "Fixture", Engine: "llamacpp", Model: egressProcessModel, ContextTokens: 4096, MaxOutputTokens: 1024,
 			Qualification: &nodepolicy.QualificationRef{ID: "i7-fixture-only", Revision: "1"}},
 	}, StrictAdmission: &nodepolicy.StrictAdmissionCapability{Version: nodepolicy.StrictAdmissionVersion,
 		Models: []nodepolicy.StrictAdmissionModel{{Engine: "llamacpp", Model: egressProcessModel, MaxConcurrent: 16, Identity: i7HybridIdentity()}}}}

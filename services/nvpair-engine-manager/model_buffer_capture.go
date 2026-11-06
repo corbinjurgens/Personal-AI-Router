@@ -284,7 +284,7 @@ func (e *Executor) newModelBufferCapture(st *engineState, engine string, prepare
 			c.budgetOmitted = true
 			break
 		}
-		in, ok := inputs[load.ModelID]
+		in, ok := inputs[load.ProfileKey]
 		if !ok || in.Allocation == nil {
 			if load.Resolved == nil {
 				continue
@@ -377,7 +377,7 @@ func (e *Executor) newModelBufferCapture(st *engineState, engine string, prepare
 		f.inputID = modelBufferHash(struct {
 			Advisory, Source, Options, Revision, Topology string
 		}{advisoryID, c.sourceID, f.optionsID, modelEstimatorRevision, f.topologyID})
-		c.frozen[load.ModelID] = f
+		c.frozen[load.ProfileKey] = f
 	}
 	c.owner.mu.Lock()
 	defer c.owner.mu.Unlock()
@@ -1368,7 +1368,7 @@ func modelBufferPreparedLoads(prepared *llamaServingLaunch) []modelconfig.ModelL
 			b := artifact.Binding
 			allocation.Artifacts = append(allocation.Artifacts, modelconfig.ArtifactBinding{Role: roles[i], Path: b.SourcePath, ResolvedTarget: b.ResolvedTarget, Size: strconv.FormatInt(b.SizeBytes, 10), MtimeNS: b.MtimeNS, SampleSHA256: b.SampleSHA256})
 		}
-		loads = append(loads, modelconfig.ModelLoad{ModelID: model.ModelID, Resolved: allocation})
+		loads = append(loads, modelconfig.ModelLoad{ProfileKey: model.ModelID, ModelID: model.ModelID, Resolved: allocation})
 	}
 	return loads
 }

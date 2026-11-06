@@ -55,6 +55,155 @@ func TestDecodeModelChangeNativeFitRejectsMalformedLeaves(t *testing.T) {
 	}
 }
 
+func TestCanonicalLoadsKeysByProfile(t *testing.T) {
+	t.Run("identity repair", func(t *testing.T) {
+		input := []ModelLoad{{ModelID: "org/model:Q4"}}
+		got, err := CanonicalLoads(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 1 || got[0].ProfileKey != "org/model:Q4" || input[0].ProfileKey != "" {
+			t.Fatalf("identity repair = %+v, input = %+v", got, input)
+		}
+		if err := input[0].Validate(); err == nil {
+			t.Fatal("uncanonicalized load accepted an absent profile key")
+		}
+	})
+	t.Run("shared artifact and key ordering", func(t *testing.T) {
+		input := []ModelLoad{{ProfileKey: "z-small", ModelID: "a-model"}, {ProfileKey: "a-large", ModelID: "a-model"}}
+		got, err := CanonicalLoads(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 2 || got[0].ProfileKey != "a-large" || got[1].ProfileKey != "z-small" || got[0].ModelID != "a-model" || got[1].ModelID != "a-model" || input[0].ProfileKey != "z-small" {
+			t.Fatalf("canonical loads = %+v, input = %+v", got, input)
+		}
+		if !EqualLoads(got, input) {
+			t.Fatal("load equality depends on profile order")
+		}
+	})
+	t.Run("duplicate key across different models", func(t *testing.T) {
+		_, err := CanonicalLoads([]ModelLoad{{ProfileKey: "same", ModelID: "one"}, {ProfileKey: "same", ModelID: "two"}})
+		if err == nil || !strings.Contains(err.Error(), "profileKey: duplicate") {
+			t.Fatalf("duplicate key error = %v", err)
+		}
+	})
+	t.Run("repair collides with explicit key", func(t *testing.T) {
+		if _, err := CanonicalLoads([]ModelLoad{{ModelID: "one"}, {ProfileKey: "one", ModelID: "two"}}); err == nil {
+			t.Fatal("accepted duplicate repaired key")
+		}
+	})
+	t.Run("invalid explicit key", func(t *testing.T) {
+		if _, err := CanonicalLoads([]ModelLoad{{ProfileKey: "weak", ModelID: "model"}}); err == nil {
+			t.Fatal("accepted a reserved profile key on a valid model")
+		}
+	})
+	t.Run("identity repair refuses reserved key", func(t *testing.T) {
+		_, err := CanonicalLoads([]ModelLoad{{ModelID: "medium-local"}})
+		if err == nil || !strings.Contains(err.Error(), "profileKey: profile key is a reserved routing alias") {
+			t.Fatalf("reserved repaired key error = %v", err)
+		}
+	})
+}
+
+func TestLoadArtifactIDIsNotAKey(t *testing.T) {
+	load := ModelLoad{ProfileKey: "lfm-8k", ModelID: "medium-local"}
+	if err := load.Validate(); err != nil {
+		t.Fatalf("valid profile with reserved-alias artifact ID: %v", err)
+	}
+	load.ProfileKey = ""
+	if err := load.Validate(); err == nil || !strings.Contains(err.Error(), "profileKey:") {
+		t.Fatalf("missing profile key error = %v", err)
+	}
+}
+
+func TestCoderProfileKeysRemainValid(t *testing.T) {
+	for _, key := range []string{"coder-api", "coder-local"} {
+		t.Run(key, func(t *testing.T) {
+			load := ModelLoad{ProfileKey: key, ModelID: "medium-local"}
+			if err := load.Validate(); err != nil {
+				t.Fatalf("valid coder profile key: %v", err)
+			}
+		})
+	}
+}
+
+func TestModelChangeProfileValidation(t *testing.T) {
+	accept := func(name, selection string) {
+		t.Run(name, func(t *testing.T) {
+			input := []byte(`{"modelId":"model","expectedPolicyRevision":"0",` + selection + `}`)
+			got, err := DecodeModelChange(input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			again, err := DecodeModelChange(mustJSON(t, got))
+			if err != nil || !reflect.DeepEqual(again, got) {
+				t.Fatalf("change round trip = %+v, %v", again, err)
+			}
+		})
+	}
+	accept("implicit model key", `"policy":{"displayName":"My model"}`)
+	accept("explicit key", `"profileKey":"model-8k","policy":{"displayName":"My model"}`)
+	accept("icon only", `"policy":{"icon":"code"}`)
+	accept("clear icon only", `"policy":{"icon":""}`)
+	accept("remove only", `"profileKey":"model-8k","remove":true`)
+	for name, selection := range map[string]string{
+		"reserved key":       `"profileKey":"weak","remove":true`,
+		"invalid key":        `"profileKey":"bad\nkey","remove":true`,
+		"empty display":      `"policy":{"displayName":""}`,
+		"oversized display":  `"policy":{"displayName":"` + strings.Repeat("x", 129) + `"}`,
+		"control display":    `"policy":{"displayName":"bad\nname"}`,
+		"null display":       `"policy":{"displayName":null}`,
+		"unknown icon":       `"policy":{"icon":"unknown"}`,
+		"null icon":          `"policy":{"icon":null}`,
+		"remove and load":    `"remove":true,"load":{"set":{"slots":1}}`,
+		"remove and policy":  `"remove":true,"policy":{"icon":""}`,
+		"false remove alone": `"remove":false`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := DecodeModelChange([]byte(`{"modelId":"model","expectedPolicyRevision":"0",` + selection + `}`)); err == nil {
+				t.Fatal("accepted invalid profile edit")
+			}
+		})
+	}
+}
+
+func TestModelChangeCloneDetachesDisplayPatches(t *testing.T) {
+	c := ModelChange{ProfileKey: "model-8k", ModelID: "model", Policy: &PolicyPatch{DisplayName: testPointer("Original"), Icon: testPointer("")}}
+	clone := c.Clone()
+	*clone.Policy.DisplayName, *clone.Policy.Icon = "Changed", "code"
+	if *c.Policy.DisplayName != "Original" || *c.Policy.Icon != "" || c.ProfileKey != "model-8k" {
+		t.Fatal("clone aliases display patches")
+	}
+}
+
+func TestModelChangePreservesProfileSelections(t *testing.T) {
+	change, err := DecodeModelChange([]byte(`{"profileKey":"model-8k","modelId":"artifact","expectedPolicyRevision":"0","policy":{"displayName":"Small context","icon":""}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if change.ProfileKey != "model-8k" || change.ModelID != "artifact" || change.Remove || change.Policy.DisplayName == nil || *change.Policy.DisplayName != "Small context" || change.Policy.Icon == nil || *change.Policy.Icon != "" {
+		t.Fatalf("selected profile metadata = %+v", change)
+	}
+	remove, err := DecodeModelChange([]byte(`{"profileKey":"model-8k","modelId":"artifact","expectedPolicyRevision":"0","remove":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !remove.Remove || remove.ProfileKey != "model-8k" || remove.Load != nil || remove.Policy != nil {
+		t.Fatalf("remove selection = %+v", remove)
+	}
+}
+
+func TestInspectRequestProfileKey(t *testing.T) {
+	r, err := DecodeInspectRequest([]byte(`{"engine":"llamacpp","modelId":"model","profileKey":"model-8k"}`))
+	if err != nil || r.ProfileKey != "model-8k" || r.ModelID != "model" {
+		t.Fatalf("profile inspection = %+v, %v", r, err)
+	}
+	if _, err := DecodeInspectRequest([]byte(`{"engine":"llamacpp","modelId":"model","profileKey":"weak"}`)); err == nil {
+		t.Fatal("inspection accepted a reserved profile key")
+	}
+}
+
 func TestInspectGPUSelectionTransport(t *testing.T) {
 	r := InspectResult{Engine: "llamacpp", ModelID: "model", Status: "unknown", Estimate: Estimate{Status: "unknown"}, ConfigurationKeyReason: "gpu-selection", ExecutionKey: strings.Repeat("a", 64)}
 	got, err := DecodeInspectResult(mustJSON(t, r))
@@ -170,8 +319,9 @@ func TestPublicMemoryAuthorityRejected(t *testing.T) {
 
 func testResolvedLoad() ModelLoad {
 	return ModelLoad{
-		ModelID:   "exact/Model:Q4",
-		Requested: RequestedLoad{Context: &Context{Mode: "fixed", Tokens: 8193}, Slots: testPointer(int32(2)), GPU: &GPU{Mode: "layers", Layers: testPointer(int32(12))}, KVOffload: testPointer(false)},
+		ProfileKey: "exact/Model:Q4",
+		ModelID:    "exact/Model:Q4",
+		Requested:  RequestedLoad{Context: &Context{Mode: "fixed", Tokens: 8193}, Slots: testPointer(int32(2)), GPU: &GPU{Mode: "layers", Layers: testPointer(int32(12))}, KVOffload: testPointer(false)},
 		Resolved: &ResolvedLoad{
 			PerSlotContext: 8448, TotalContext: 16896, Slots: 2,
 			GPU:           GPU{Mode: "layers", Layers: testPointer(int32(12))},
@@ -264,9 +414,9 @@ func TestPolicyRevisionIsCanonicalSignedInt64Text(t *testing.T) {
 }
 
 func TestModelIdentifiersMatchNodePolicy(t *testing.T) {
-	for _, id := range []string{"", "model", "Model", " model ", "a:b/c", "日本語", strings.Repeat("x", 512), strings.Repeat("x", 513), "bad\nmodel", "bad\u0085model", string([]byte{0xff}), "weak", "medium-api", "strong-local", "Weak", "weak-local-api", "weak-api-local", "weak:latest"} {
+	for _, id := range []string{"", "model", "Model", " model ", "a:b/c", "日本語", strings.Repeat("x", 512), strings.Repeat("x", 513), "bad\nmodel", "bad\u0085model", string([]byte{0xff}), "weak", "medium-api", "medium-local", "strong-local", "coder-api", "coder-local", "Weak", "weak-local-api", "weak-api-local", "weak:latest"} {
 		t.Run(id, func(t *testing.T) {
-			wantValid := nodepolicy.ValidateModelIdentifier(id) == nil && !nodepolicy.IsReservedAlias(id)
+			wantValid := nodepolicy.ValidateModelIdentifier(id) == nil
 			_, err := DecodeInspectRequest(mustJSON(t, InspectRequest{Engine: "llamacpp", ModelID: id}))
 			// Invalid UTF-8 must be checked before encoding replaces it.
 			if id == string([]byte{0xff}) {
@@ -308,7 +458,7 @@ func TestCanonicalLoadsCopiesAndOrdersWithoutSortingArtifacts(t *testing.T) {
 	m.Resolved.Artifacts = append(m.Resolved.Artifacts,
 		ArtifactBinding{Role: "model", Path: "/models/second.gguf", ResolvedTarget: "/blobs/second", Size: "1", MtimeNS: "-1", SampleSHA256: strings.Repeat("d", 64)},
 		ArtifactBinding{Role: "draft", Path: "/models/draft.gguf", ResolvedTarget: "/blobs/draft", Size: "2", MtimeNS: "0", SampleSHA256: strings.Repeat("e", 64)})
-	input := []ModelLoad{{ModelID: "z"}, m}
+	input := []ModelLoad{{ProfileKey: "z", ModelID: "z"}, m}
 	got, err := DecodeLoads(mustJSON(t, input))
 	if err != nil {
 		t.Fatal(err)

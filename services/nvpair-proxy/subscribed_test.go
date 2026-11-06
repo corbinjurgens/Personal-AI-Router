@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -85,7 +86,7 @@ func TestUnknownTierDeclarationPreventsRouterFallback(t *testing.T) {
 		"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "m"}},
 	})
 	fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"peer": {"m"}}, nil)
-	fx.declare(t, "peer", map[string]nodepolicy.AdvertisedRole{"future": llamacppRole("m")})
+	fx.declare(t, "peer", map[string]nodepolicy.AdvertisedProfile{"future": llamacppProfile("m")})
 	if got := resolvedTier(fx.p.soleFacade(), "weak", requestNeeds{}, false); len(got) != 0 {
 		t.Fatalf("unknown tier declaration enabled router fallback: %+v", got)
 	}
@@ -135,7 +136,7 @@ func TestDiscoveryInventoryModelLimit(t *testing.T) {
 	served := make(nodepolicy.ServedModels, len(models))
 	for i := range models {
 		models[i] = fmt.Sprintf("model-%04d", i)
-		served[i] = nodepolicy.Role{Engine: "llamacpp", Model: models[i]}
+		served[i] = nodepolicy.ModelRef{Engine: "llamacpp", Model: models[i]}
 	}
 	for _, source := range []string{"subscribed", "manual"} {
 		t.Run(source, func(t *testing.T) {
@@ -416,18 +417,20 @@ func TestSubscribedCarriesPolicyWithoutChurn(t *testing.T) {
 			t.Fatalf("node without an advertisement projected roles %+v at revision %q", undeclared.Roles, undeclared.PolicyRevision)
 		}
 
-		roles := map[string]nodepolicy.AdvertisedRole{nodepolicy.TierStrong: {Engine: tc.profile.Name, Model: "big", ContextTokens: 32768}}
-		n.Policy = &nodepolicy.Advertisement{Revision: "40", Roles: roles}
+		roles := []nodepolicy.Role{{Name: nodepolicy.TierStrong, Profiles: []string{"big"}}}
+		profiles := []nodepolicy.AdvertisedProfile{{Key: "big", DisplayName: "Large", Engine: tc.profile.Name, Model: "big", ContextTokens: 32768}}
+		n.Policy = &nodepolicy.Advertisement{Revision: "40", Roles: roles, Profiles: profiles}
 		declared, ok := subscribedToNode(tc.profile, n)
 		if !ok {
 			t.Fatal("declared node should project")
 		}
-		if !reflect.DeepEqual(declared.Roles, roles) || declared.PolicyRevision != "40" {
+		if !reflect.DeepEqual(declared.Roles, roles) || !reflect.DeepEqual(declared.Profiles, profiles) || declared.PolicyRevision != "40" {
 			t.Fatalf("projected roles %+v at revision %q, want %+v at 40", declared.Roles, declared.PolicyRevision, roles)
 		}
-		roles[nodepolicy.TierWeak] = nodepolicy.AdvertisedRole{Engine: tc.profile.Name, Model: "small"}
-		if _, aliased := declared.Roles[nodepolicy.TierWeak]; aliased {
-			t.Fatal("projected roles alias the directory node's map")
+		roles[0].Profiles[0] = "small"
+		profiles[0].Model = "small"
+		if !slices.Equal(declared.Roles[0].Profiles, []string{"big"}) || declared.Profiles[0].Model != "big" {
+			t.Fatal("projected role memberships or profile facts alias the directory node")
 		}
 
 		d := NewDiscovery()

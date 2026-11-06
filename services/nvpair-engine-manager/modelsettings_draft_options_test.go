@@ -41,7 +41,7 @@ func TestDraftExtraReportedBuildRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	parsed, err := parseLlamaServingPresetAllowing(data, modelLoadAllowedPresetKeys([]modelconfig.ModelLoad{{ModelID: "model", Requested: request}}))
+	parsed, err := parseLlamaServingPresetAllowing(data, modelLoadAllowedPresetKeys([]modelconfig.ModelLoad{{ProfileKey: "model", ModelID: "model", Requested: request}}))
 	if err != nil || parsed["model"]["spec-draft-n-max"] != "8" {
 		t.Fatalf("generated draft option = %v, err=%v", parsed, err)
 	}
