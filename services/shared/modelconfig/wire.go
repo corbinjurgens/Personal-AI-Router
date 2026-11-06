@@ -127,7 +127,7 @@ type LoadPatch struct {
 }
 
 // Generation selects existing numeric leaves: a number sets, null clears, and
-// absence preserves. Roles selects weak/medium/strong membership of this exact
+// absence preserves. Roles selects user-declared role membership of this exact
 // profile key: true appends it once to an already declared role; false removes
 // only that key, retaining the declaration and other keys. Undeclared true is
 // refused with "Role <name> is not declared on this node; create it in node settings."
