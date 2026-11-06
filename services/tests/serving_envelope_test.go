@@ -205,7 +205,8 @@ func runNEServingRuntime(args []string) (resultErr error) {
 			response = state
 		case r.Method == http.MethodGet && r.URL.Path == "/__ne/control" && r.Header.Get("X-NE-Fixture-Nonce") == config.Nonce:
 			response = state
-		case r.Method == http.MethodGet && r.URL.Path == "/props" && r.URL.RawQuery == "":
+		case r.Method == http.MethodGet && r.URL.Path == "/props" &&
+			(r.URL.RawQuery == "" || r.URL.RawQuery == "autoload=false&model="):
 			response = map[string]string{"role": "router"}
 		case r.Method == http.MethodGet && r.URL.Path == "/props" && r.URL.Query().Get("model") == neModel && r.URL.Query().Get("autoload") == "false" && state.Loaded:
 			state.ModelProps++
