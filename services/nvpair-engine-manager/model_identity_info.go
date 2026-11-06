@@ -134,6 +134,18 @@ func (m *modelIdentityInfo) resolve(parent context.Context, engine, model string
 	if e.downloads == nil {
 		return modelIdentityInfoEntry{}, false
 	}
+	st, err := e.state(engine)
+	if err != nil {
+		return modelIdentityInfoEntry{}, false
+	}
+	// Serialize passive scans with mutations so their read leases cannot
+	// turn an otherwise admissible content mutation into a busy refusal.
+	select {
+	case st.contentMu <- struct{}{}:
+	default:
+		return old, exists
+	}
+	defer func() { <-st.contentMu }()
 	downloads := e.downloads
 	key := downloadContentKey{engine: engine}
 	release, err := downloads.acquireRead(key, false)
@@ -144,10 +156,6 @@ func (m *modelIdentityInfo) resolve(parent context.Context, engine, model string
 	downloads.mu.Lock()
 	source, revision := downloads.source, downloads.revision
 	downloads.mu.Unlock()
-	st, err := e.state(engine)
-	if err != nil {
-		return modelIdentityInfoEntry{}, false
-	}
 	run := e.engineRunID(engine)
 	snapshot, err := inspectionSnapshot(st, engine)
 	if errors.Is(err, errModelInspectionBusy) {

@@ -160,6 +160,8 @@ func runSRTargetRuntime() error {
 		w.Header().Set("Content-Type", "application/json")
 		var result any
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/props" && r.URL.RawQuery == "autoload=false&model=":
+			result = map[string]string{"role": "router"}
 		case r.Method == http.MethodGet && r.URL.Path == "/__sr/control" && r.Header.Get("X-NE-Fixture-Nonce") == config.Nonce:
 			result = state
 		case r.Method == http.MethodGet && (r.URL.Path == "/v1/models" || r.URL.Path == "/models"):
@@ -299,7 +301,8 @@ func runSRRuntime(args []string) error {
 				state.HideInventoryOnDrop = true
 			}
 			response = state
-		case r.Method == http.MethodGet && r.URL.Path == "/props" && r.URL.RawQuery == "":
+		case r.Method == http.MethodGet && r.URL.Path == "/props" &&
+			(r.URL.RawQuery == "" || r.URL.RawQuery == "autoload=false&model="):
 			response = map[string]string{"role": "router"}
 		case r.Method == http.MethodGet && r.URL.Path == "/props":
 			model := r.URL.Query().Get("model")

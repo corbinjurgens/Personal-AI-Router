@@ -261,10 +261,11 @@ func TestFixtureBrokerLaunchSeamsRemainGuarded(t *testing.T) {
 		t.Fatal(err)
 	}
 	required := map[string]string{
-		"startInteropProcess":      "fixtureBrokerCommand",
-		"startTask1Process":        "startTask1ProcessWithEnv",
-		"startTask1ProcessWithEnv": "fixtureBrokerCommand",
-		"startChild":               "fixtureServiceCommand",
+		"startInteropProcess":           "fixtureBrokerCommand",
+		"startTask1Process":             "startTask1ProcessWithEnv",
+		"startTask1ProcessWithEnv":      "startTask1ProcessWithSettings",
+		"startTask1ProcessWithSettings": "fixtureBrokerCommand",
+		"startChild":                    "fixtureServiceCommand",
 	}
 	for _, path := range files {
 		file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
@@ -317,7 +318,7 @@ func TestFixtureBrokerLaunchSeamsRemainGuarded(t *testing.T) {
 				}
 				return true
 			})
-			if fn.Name.Name == "startTask1ProcessWithEnv" && !foundScanner {
+			if fn.Name.Name == "startTask1ProcessWithSettings" && !foundScanner {
 				t.Errorf("%s: direct scanner launch no longer guarded", path)
 			}
 			if guard != "" {
