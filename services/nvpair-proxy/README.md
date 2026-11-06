@@ -701,6 +701,11 @@ for the independent `localOnly` edit lock, desktop controls and precedence examp
   resolver for that model. Self facts require a self candidate; peer facts
   require that exact peer, so another node's inventory cannot qualify them.
   Supported binding/preparation offers count even without inventory.
+  Each catalog resolves each engine/model pair once and computes each tier's
+  bound once, sharing results across alias variants only until that catalog
+  returns. These resolver checks can refresh mesh state and start background
+  target-address confirmation. These observation effects are accepted; catalog
+  checks introduce no policy, engine or preparation action.
   It is omitted when none is known or any such profile is unbounded
   (`contextTokens: 0`). Missing or withheld keys supply no facts; router tier
   entries do not supply this field. Upstream records with the same alias id

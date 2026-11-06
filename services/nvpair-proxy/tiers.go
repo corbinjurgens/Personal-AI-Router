@@ -396,22 +396,11 @@ func candidateRoleProfile(profiles []nodepolicy.AdvertisedProfile, engine, model
 // roleContextLength is the largest known bound of the role's visible profiles
 // whose declaring node is a resolved candidate. Missing keys carry no facts;
 // a reachable unbounded profile omits the bound.
-func (p *Proxy) roleContextLength(d declaredRoles, t string) int {
+func (p *Proxy) roleContextLength(d declaredRoles, t string, reachable func(nodepolicy.AdvertisedProfile, string, bool) bool) int {
 	length, unbounded := 0, false
 	add := func(roles map[string][]nodepolicy.AdvertisedProfile, nodeID string, self bool) {
 		for _, profile := range roles[t] {
-			f := p.facadeFor(profile.Engine)
-			if f == nil || nodepolicy.ValidateModelIdentifier(profile.Model) != nil {
-				continue
-			}
-			reachable := false
-			for _, c := range f.resolveCandidates(profile.Model) {
-				if (self && c.self) || (!self && !c.self && c.id == nodeID) {
-					reachable = true
-					break
-				}
-			}
-			if !reachable {
+			if !reachable(profile, nodeID, self) {
 				continue
 			}
 			if profile.ContextTokens == 0 {
@@ -705,6 +694,30 @@ func configuredAliases(pol nodepolicy.Policy, peerTiers map[string]bool) []strin
 // Context comes only from the supplied visible role
 // facts, with unknown or unbounded contexts omitted.
 func (p *Proxy) hybridAliasRecords(pol nodepolicy.Policy, declared declaredRoles, skip map[string]modelListItem) []json.RawMessage {
+	type catalogNode struct {
+		id   string
+		self bool
+	}
+	candidates := map[nodepolicy.ModelRef]map[catalogNode]bool{}
+	reachable := func(profile nodepolicy.AdvertisedProfile, nodeID string, self bool) bool {
+		ref := nodepolicy.ModelRef{Engine: profile.Engine, Model: profile.Model}
+		nodes, resolved := candidates[ref]
+		if !resolved {
+			nodes = map[catalogNode]bool{}
+			if f := p.facadeFor(profile.Engine); f != nil && nodepolicy.ValidateModelIdentifier(profile.Model) == nil {
+				for _, c := range f.resolveCandidates(profile.Model) {
+					id := c.id
+					if c.self {
+						id = ""
+					}
+					nodes[catalogNode{id: id, self: c.self}] = true
+				}
+			}
+			candidates[ref] = nodes
+		}
+		return nodes[catalogNode{id: nodeID, self: self}]
+	}
+	lengths := map[string]int{}
 	var out []json.RawMessage
 	for _, id := range configuredAliases(pol, declared.peerTiers()) {
 		if _, dup := skip[id]; dup {
@@ -718,7 +731,12 @@ func (p *Proxy) hybridAliasRecords(pol nodepolicy.Policy, declared declaredRoles
 		}
 		for _, tier := range nodepolicy.TierOrder {
 			if id == tier || id == tier+"-api" || id == tier+"-local" {
-				if length := p.roleContextLength(declared, tier); length > 0 {
+				length, computed := lengths[tier]
+				if !computed {
+					length = p.roleContextLength(declared, tier, reachable)
+					lengths[tier] = length
+				}
+				if length > 0 {
 					record["context_length"] = length
 				}
 				break
