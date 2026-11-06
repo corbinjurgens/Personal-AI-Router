@@ -169,8 +169,8 @@ func TestLlamaCPPFacadeUsesRouterInventoryAndExactModelIDs(t *testing.T) {
 		if status := post(t, model); status != http.StatusOK {
 			t.Fatalf("matching model status = %d, want 200", status)
 		}
-		if status := post(t, "org/router-model-GGUF:q4_k_m"); status != http.StatusBadGateway {
-			t.Fatalf("case-changed model status = %d, want 502", status)
+		if status := post(t, "org/router-model-GGUF:q4_k_m"); status != http.StatusNotFound {
+			t.Fatalf("case-changed model status = %d, want 404", status)
 		}
 		if got := inferenceHits.Load(); got != 1 {
 			t.Fatalf("upstream inference hits = %d, want only the exact match", got)

@@ -202,8 +202,8 @@ func TestStrataContractFacade(t *testing.T) {
 			status, _, _ := strataContractHTTP(t, http.MethodPost, proxy.Port, "/v1/chat/completions", map[string]any{
 				"model": model, "messages": []any{},
 			})
-			if status != http.StatusBadGateway {
-				t.Fatalf("inexact model status = %d, want 502", status)
+			if status != http.StatusNotFound {
+				t.Fatalf("inexact model status = %d, want 404", status)
 			}
 			if after := countChats(fixture.strataContractControl(t, 0)); after != before {
 				t.Fatalf("rejected model reached runtime: chat count %d -> %d", before, after)
