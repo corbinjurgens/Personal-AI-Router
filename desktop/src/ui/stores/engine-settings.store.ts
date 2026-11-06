@@ -8,7 +8,7 @@ import type {
     EngineSettingsSnapshot,
     EngineSettingsTarget
 } from '@/shared/types/engine-settings'
-import type { InspectModelResult, ModelChange } from '@/shared/types/model-config'
+import type { Estimate, InspectModelResult, ModelChange } from '@/shared/types/model-config'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import { useClusterInvitationsStore } from '@/ui/stores/cluster-invitations.store'
 import { nodePaused, useNodeConfigurationStore } from '@/ui/stores/node-configuration.store'
@@ -80,6 +80,9 @@ interface ModelDraft {
     }
     uncertain?: boolean
     generation: number
+    retainedReview?: ModelDraft['review']
+    memoryDeadline?: number
+    memoryStale?: boolean
 }
 interface ModelPreviewOwner {
     key: string
@@ -103,14 +106,101 @@ let modelPreview: ModelPreviewOwner | undefined
 export const modelSettingsKey = (target: EngineSettingsTarget, profileKey?: string): string =>
     `${engineSettingsKey(target)}:${profileKey ?? ''}`
 
-function invalidateDraft(draft?: ModelDraft): ModelDraft {
-    return {
+function invalidateDraft(draft?: ModelDraft, retainReview = false): ModelDraft {
+    return withdrawMemory({
         ...draft,
+        retainedReview: retainReview ? (draft?.review ?? draft?.retainedReview) : undefined,
         review: undefined,
         advisory: undefined,
         generation: (draft?.generation ?? 0) + 1,
         ...(draft?.previewOperation ? { busy: false, previewOperation: undefined } : {})
+    })
+}
+
+function expireEstimate(estimate: Estimate): Estimate {
+    return {
+        ...estimate,
+        capacityFit: 'unknown',
+        freeFit: 'unknown',
+        domains: estimate.domains?.map(domain => ({
+            ...domain,
+            capacityFit: 'unknown',
+            freeFit: 'unknown',
+            remainingValidityMs: 0
+        }))
     }
+}
+
+function mapDraftEstimates(draft: ModelDraft, map: (estimate: Estimate) => Estimate): ModelDraft {
+    const preview = (value: EngineSettingsPreview): EngineSettingsPreview => ({
+        ...value,
+        estimate: value.estimate && map(value.estimate),
+        auto: value.auto && { ...value.auto, estimate: map(value.auto.estimate) }
+    })
+    return {
+        ...draft,
+        inspection: draft.inspection && {
+            ...draft.inspection,
+            estimate: draft.inspection.estimate && map(draft.inspection.estimate)
+        },
+        advisory: draft.advisory && preview(draft.advisory),
+        review: draft.review && { ...draft.review, preview: preview(draft.review.preview) },
+        retainedReview: draft.retainedReview && {
+            ...draft.retainedReview,
+            preview: preview(draft.retainedReview.preview)
+        }
+    }
+}
+
+function withdrawMemory(draft: ModelDraft): ModelDraft {
+    return {
+        ...mapDraftEstimates(draft, expireEstimate),
+        memoryDeadline: undefined,
+        memoryStale: true
+    }
+}
+
+function receiveMemory(draft: ModelDraft, startedAt: number): ModelDraft {
+    const now = performance.now()
+    const elapsed = Math.ceil(now - startedAt)
+    let budget: number | undefined
+    const result = mapDraftEstimates(draft, estimate => {
+        const domains = estimate.domains?.map(domain => {
+            const remaining =
+                Number.isFinite(elapsed) && elapsed >= 0
+                    ? Math.max(0, (domain.remainingValidityMs ?? 0) - elapsed)
+                    : 0
+            budget = Math.min(budget ?? remaining, remaining)
+            return { ...domain, remainingValidityMs: remaining }
+        })
+        const updated = { ...estimate, domains }
+        // A verdict without a carried observation budget cannot establish freshness.
+        return !domains?.length || domains.some(domain => !domain.remainingValidityMs)
+            ? expireEstimate(updated)
+            : updated
+    })
+    return {
+        ...result,
+        memoryDeadline: budget === undefined ? undefined : now + budget,
+        memoryStale: budget === 0
+    }
+}
+
+function scheduleMemoryExpiry(key: string): void {
+    const draft = useEngineSettingsStore.getState().modelDrafts[key]
+    const deadline = draft?.memoryDeadline
+    if (!draft || deadline === undefined) return
+    const generation = draft.generation
+    window.setTimeout(
+        () => {
+            const current = useEngineSettingsStore.getState().modelDrafts[key]
+            if (current?.generation !== generation || current.memoryDeadline !== deadline) return
+            useEngineSettingsStore.setState(state => ({
+                modelDrafts: { ...state.modelDrafts, [key]: withdrawMemory(current) }
+            }))
+        },
+        Math.max(0, deadline - performance.now())
+    )
 }
 
 function withdrawLoadObservation(draft: ModelDraft): ModelDraft {
@@ -172,7 +262,7 @@ function correlateModelOutcome(draft: ModelDraft, snapshot: EngineSettingsSnapsh
     return {
         ...draft,
         uncertain: snapshot.phase === 'applying',
-        ...(completed ? { change: undefined, review: undefined } : {}),
+        ...(completed ? { change: undefined, review: undefined, retainedReview: undefined } : {}),
         message: `Operation ${attempt.requestId}: ${snapshot.phase}. ${snapshot.unresolvedError || snapshot.error || ''} ${completed ? 'Completed edits cleared.' : 'Unsubmitted draft kept.'} Inspect and review before another model operation.`
     }
 }
@@ -250,7 +340,7 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
         set(state => ({
             modelDrafts: {
                 ...state.modelDrafts,
-                [key]: withdrawLoadObservation(invalidateDraft(state.modelDrafts[key]))
+                [key]: withdrawLoadObservation(invalidateDraft(state.modelDrafts[key], true))
             }
         })),
     inspectModel: async (target, modelId, profileKey) => {
@@ -263,6 +353,7 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
                 [key]: { ...state.modelDrafts[key], inspection: undefined }
             }
         }))
+        const startedAt = performance.now()
         try {
             const inspection = await window.pairApi.engines.inspectModel({
                 ...target,
@@ -276,16 +367,23 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
             )
                 throw new Error('Inspection target mismatch.')
             if (get().modelDrafts[key]?.generation !== generation) return
+            const received = receiveMemory(
+                { generation, inspection, message: inspection.reason },
+                startedAt
+            )
             set(state => ({
                 modelDrafts: {
                     ...state.modelDrafts,
                     [key]: {
                         ...state.modelDrafts[key],
-                        inspection,
-                        message: inspection.reason
+                        inspection: received.inspection,
+                        message: received.message,
+                        memoryDeadline: received.memoryDeadline,
+                        memoryStale: received.memoryStale
                     }
                 }
             }))
+            scheduleMemoryExpiry(key)
         } catch (error) {
             if (get().modelDrafts[key]?.generation !== generation) return
             set(state => ({
@@ -325,6 +423,21 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
             return
         }
         const draft = get().modelDrafts[key]
+        if (advisoryOnly && (draft?.review || draft?.retainedReview)) return
+        if (advisoryOnly) {
+            const saved = get().entries[
+                engineSettingsKey(target)
+            ]?.snapshot?.settings.modelLoads?.find(
+                load => load.profileKey === change.profileKey
+            )?.requested
+            const context = change.load?.clear?.includes('context')
+                ? undefined
+                : (change.load?.set.context ?? saved?.context)
+            const gpu = change.load?.clear?.includes('gpu')
+                ? undefined
+                : (change.load?.set.gpu ?? saved?.gpu)
+            if (context?.mode === 'auto' || gpu?.mode === 'auto') return
+        }
         const owner = modelPreview
         const authorityState = modelAuthority(target)
         const explicit = owner?.pending ?? owner
@@ -447,6 +560,7 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
             const savedLoad = snapshot.settings.modelLoads?.find(
                 load => change.profileKey !== undefined && load.profileKey === change.profileKey
             )
+            const startedAt = performance.now()
             const inspection = await window.pairApi.engines.inspectModel({
                 ...target,
                 modelId: change.modelId,
@@ -489,37 +603,49 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
                 (automatic &&
                     (!preview.auto?.resolved ||
                         preview.auto.status === 'unavailable' ||
-                        preview.auto.estimate.status !== 'estimated' ||
-                        !!preview.auto.estimate.unknowns?.length ||
                         !preview.auto.reviewedInputId ||
                         !preview.auto.resolverRevision?.startsWith('auto/')))
             ) {
-                put({
-                    inspection,
-                    review: undefined,
-                    advisory: preview,
-                    message:
-                        Object.values(preview.errors).join('; ') ||
-                        (advisoryOnly
-                            ? undefined
-                            : 'A reviewed Auto resolution, digest and current revisions are required.')
-                })
+                put(
+                    receiveMemory(
+                        {
+                            generation,
+                            inspection,
+                            review: undefined,
+                            advisory: preview,
+                            message:
+                                Object.values(preview.errors).join('; ') ||
+                                (advisoryOnly
+                                    ? undefined
+                                    : 'A reviewed Auto resolution, digest and current revisions are required.')
+                        },
+                        startedAt
+                    )
+                )
+                scheduleMemoryExpiry(key)
                 return
             }
-            put({
-                inspection,
-                review: {
-                    request: {
-                        ...request,
-                        modelChange: { ...change, previewDigest: preview.previewDigest }
+            put(
+                receiveMemory(
+                    {
+                        generation,
+                        inspection,
+                        review: {
+                            request: {
+                                ...request,
+                                modelChange: { ...change, previewDigest: preview.previewDigest }
+                            },
+                            preview,
+                            baseline: baselineIdentity(snapshot),
+                            authority,
+                            authorityState,
+                            inspection: inspectionIdentity(inspection)
+                        }
                     },
-                    preview,
-                    baseline: baselineIdentity(snapshot),
-                    authority,
-                    authorityState,
-                    inspection: inspectionIdentity(inspection)
-                }
-            })
+                    startedAt
+                )
+            )
+            scheduleMemoryExpiry(key)
         } catch (error) {
             put({ review: undefined, message: getErrorString(error) })
         } finally {
@@ -627,6 +753,7 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
             put({
                 attempt: request,
                 submittedPolicy,
+                retainedReview: review,
                 review: undefined,
                 uncertain: true,
                 message: `Awaiting operation ${request.requestId}.`
@@ -647,8 +774,14 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
                 ].includes(code)
             put({
                 review: undefined,
+                ...(get().modelDrafts[key]?.generation === generation
+                    ? {
+                          retainedReview: withdrawMemory({ generation, retainedReview: review })
+                              .retainedReview
+                      }
+                    : {}),
                 ...(refused ? { uncertain: false } : {}),
-                message: `${dispatched && !refused ? 'Outcome unknown. ' : refused ? 'Refused. ' : ''}${getErrorString(error)}`
+                message: `${dispatched && !refused ? 'Outcome unknown. ' : refused ? 'Refused. ' : ''}${getErrorString(error)} Your draft and reviewed proposal are kept. Recalculate to review again.`
             })
             if (dispatched && !refused) await get().readModelOutcome(key)
         } finally {
@@ -741,7 +874,7 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
                     const updated =
                         baselineIdentity(current?.snapshot) !== baselineIdentity(snapshot)
                             ? correlateModelOutcome(
-                                  withdrawLoadObservation(invalidateDraft(draft)),
+                                  withdrawLoadObservation(invalidateDraft(draft, true)),
                                   snapshot
                               )
                             : draft
@@ -765,7 +898,7 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
                 Object.entries(state.modelDrafts).map(([key, draft]) => [
                     key,
                     !nodeId || key.startsWith(`${nodeId}:`)
-                        ? withdrawLoadObservation(invalidateDraft(draft))
+                        ? withdrawLoadObservation(invalidateDraft(draft, true))
                         : draft
                 ])
             ),
@@ -834,8 +967,16 @@ let consumers = 0
 let unsubscribe: Array<() => void> = []
 /** Subscribe before fetching a baseline. All open editors share one push listener. */
 export function watchEngineSettings(): () => void {
-    if (consumers++ === 0)
+    if (consumers++ === 0) {
+        // Browser suspension can pause timers and the monotonic clock. Returning
+        // to an editor never makes its retained memory observation current.
+        const visibilityChanged = () => {
+            const store = useEngineSettingsStore.getState()
+            for (const key of Object.keys(store.modelDrafts)) store.invalidateModel(key)
+        }
+        document.addEventListener('visibilitychange', visibilityChanged)
         unsubscribe = [
+            () => document.removeEventListener('visibilitychange', visibilityChanged),
             window.pairApi.engines.onSettingsChanged(snapshot =>
                 useEngineSettingsStore.getState().receive(snapshot)
             ),
@@ -876,6 +1017,7 @@ export function watchEngineSettings(): () => void {
                 }
             })
         ]
+    }
     // Closing the last editor says nothing about any device, so cached
     // snapshots stay as they are. `disconnect` is reserved for a real
     // engines:settings-disconnected push and for losing the service

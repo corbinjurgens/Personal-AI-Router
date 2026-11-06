@@ -145,6 +145,16 @@ UMA represents one shared pool.
 Measurement source, sample identity, measurement timestamps and bounded remaining
 validity accompany comparisons. The estimate timestamp describes computation,
 not a new measurement. Expiry withdraws comparisons while preserving components.
+The estimate block renders the target service's comparisons without recomputing
+cost completeness, pool totals or reserves in the desktop. It shows expected
+memory, the lower-to-upper range and the source label: **Estimate**, **Your
+figure**, **Measured** or **Engine report**. Component rows retain their basis;
+heuristic costs are labelled uncalibrated. Unpriced source costs appear under
+**Not included in this estimate**, and each pool retains its reported Unknown
+reasons. Missing provenance, ranges and reserves display Unknown rather than
+invented values. Device pools retain their physical identity, and UMA appears
+once without adding host or device capacities. Stale evidence removes both
+capacity and free-memory verdicts, while retained amounts remain historical.
 
 The canonical component names are `weights`, `attention-cache`,
 `recurrent-state`, `compute-workspace`, `prompt-cache`, `companions` and

@@ -118,6 +118,7 @@ export default function ModelLoadSettings({
     const generation = modelPolicyPatch(savedPolicy, policy, identity)
     const routing = modelRoutingState(savedPolicy, identity, evidence)
     const load = draft?.change?.load
+    const displayedReview = draft?.review ?? draft?.retainedReview
     const removing = draft?.change?.remove === true
     const dirty = !!load || !!draft?.change?.policy || removing
     useEffect(() => {
@@ -199,17 +200,32 @@ export default function ModelLoadSettings({
     const draftIdentity = JSON.stringify(draft?.change)
     const invalid = Object.keys(validation).length > 0
     useEffect(() => {
-        if (!draftIdentity || disabled || invalid || !policyRevision) return
+        if (!draftIdentity || disabled || invalid || !policyRevision || autoSelected) return
         const timer = window.setTimeout(() => {
             const currentDraft = useEngineSettingsStore.getState().modelDrafts[key]
             const current = currentDraft?.change
-            if (!currentDraft?.review && current?.load && JSON.stringify(current) === draftIdentity)
+            if (
+                !currentDraft?.review &&
+                !currentDraft?.retainedReview &&
+                current?.load &&
+                JSON.stringify(current) === draftIdentity
+            )
                 void useEngineSettingsStore
                     .getState()
                     .previewModel({ nodeId, engine }, current, authority, true)
         }, 250)
         return () => window.clearTimeout(timer)
-    }, [draftIdentity, disabled, invalid, policyRevision, key, nodeId, engine, authority])
+    }, [
+        draftIdentity,
+        disabled,
+        invalid,
+        policyRevision,
+        key,
+        nodeId,
+        engine,
+        authority,
+        autoSelected
+    ])
     const controls = (basic: boolean) =>
         loadFields
             .filter(
@@ -753,7 +769,7 @@ export default function ModelLoadSettings({
                     </Text>
                 ))}
             {!generation.ok && <Text kind="body/regular/sm">{generation.error.message}</Text>}
-            {Object.entries((draft?.review?.preview ?? draft?.advisory)?.errors ?? {}).map(
+            {Object.entries((displayedReview?.preview ?? draft?.advisory)?.errors ?? {}).map(
                 ([field, error]) => (
                     <Text key={field} role="alert" kind="body/regular/sm">
                         {field}: {error}
@@ -770,12 +786,22 @@ export default function ModelLoadSettings({
                     {draft.message}
                 </Text>
             )}
+            {draft?.retainedReview && !draft.review && (
+                <Text role="status" kind="body/regular/sm">
+                    Reviewed proposal kept for reference. Recalculate before applying again.
+                </Text>
+            )}
             <ModelSettingsPreview
                 profileKey={newProfile ? undefined : profileKey}
                 inspection={inspection}
-                preview={draft?.review?.preview ?? draft?.advisory}
-                reviewed={!!draft?.review}
-                stale={!!draft?.previewOperation || (!!load && !draft?.review && !draft?.advisory)}
+                preview={displayedReview?.preview ?? draft?.advisory}
+                reviewed={!!displayedReview}
+                stale={
+                    !!draft?.memoryStale ||
+                    !!draft?.retainedReview ||
+                    !!draft?.previewOperation ||
+                    (!!load && !displayedReview && !draft?.advisory)
+                }
                 snapshot={snapshot}
             />
             <Button
@@ -826,7 +852,7 @@ export default function ModelLoadSettings({
                     )
                 }}
             >
-                {autoSelected ? 'Recalculate' : 'Preview model changes'}
+                {autoSelected || draft?.retainedReview ? 'Recalculate' : 'Preview model changes'}
             </Button>
             <Button
                 disabled={
