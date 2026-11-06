@@ -23,6 +23,15 @@ the current contract. The synthetic fixtures in
 
 ## Qualification evidence
 
+For typed llama.cpp profiles, the profile's context is derived from resolved
+launch settings as the per-slot context, separate from total native allocation.
+Each profile of the same artifact retains its own launch and request settings.
+Creating, editing, converting or deploying a profile does not qualify a model
+or transfer qualification evidence. Qualification still needs separately
+measured evidence for the exact content, launch, tokenizer, chat template,
+request settings and allowed request shapes. Native fit's requested context
+does not prove realized context agreement; native acceptance remains pending.
+
 Each node reads `local-qualification.json` from the per-user application data
 directory (the same directory as `node-policy.json`) once when its proxy starts.
 A missing file means no model is qualified. A file that cannot be read or that
@@ -429,8 +438,8 @@ always-loaded subset, not an inventory report or evidence of allocation. Saving
 either list does not qualify a model. Automatic residency requires the existing
 B qualification and current owned NE serving identity, a unique normalized
 profile, finite context, output and concurrency, and approved memory bounds.
-Profile context must equal native per-slot allocation; qualification must cover
-that allocation and its output ceiling, and effective concurrency must equal
+The profile's derived context must equal native per-slot allocation;
+qualification must cover that allocation and its output ceiling, and effective concurrency must equal
 native slots. A model-only load cannot shrink native allocation.
 
 Daily adapters require an explicit, non-mutating load contract: `POST` with exactly

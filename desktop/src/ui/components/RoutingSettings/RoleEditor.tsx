@@ -6,8 +6,9 @@ import { Badge, Button, Flex, Select, Stack, Text } from '@nvidia/foundations-re
 import { useShallow } from 'zustand/react/shallow'
 import type { NodePolicySnapshot } from '@/shared/types/node-policy'
 import type { RoleTier } from '@/shared/types/node-roles'
-import { ROLE_TIERS, sameNodeRoles } from '@/shared/utils/node-roles'
+import { sameNodeRoles } from '@/shared/utils/node-roles'
 import { InlineErrorBanner } from '@/ui/components/InlineErrorBanner'
+import { ModelIdentityTags } from '@/ui/components/ModelIdentity/ModelIdentityTags'
 import { useEngineModelsStore } from '@/ui/stores/engine-models.store'
 import { useEngineStatusStore } from '@/ui/stores/engine-status.store'
 import { useConnectionStore } from '@/ui/stores/connection.store'
@@ -80,7 +81,14 @@ export default function RoleEditor({ targetId, nodeId, onSaved }: RoleEditorProp
             const policies = own ? [baseline.policy, own.policy] : [baseline.policy]
             const roles = suggestRoles(choices, policies)
             if (roles.length === 0) setNoSuggestion(true)
-            else useNodeConfigurationStore.getState().setDraft(targetId, roles)
+            else
+                useNodeConfigurationStore.getState().setDraft(
+                    targetId,
+                    baseline.roles.map(role => {
+                        const suggestion = roles.find(suggestion => suggestion.name === role.name)
+                        return role.profiles.length > 0 ? role : (suggestion ?? role)
+                    })
+                )
         } finally {
             setSuggesting(false)
         }
@@ -96,26 +104,23 @@ export default function RoleEditor({ targetId, nodeId, onSaved }: RoleEditorProp
 
     const { draft, phase } = entry
     const edited = !sameNodeRoles(draft, baseline.roles)
-    // A bulk attempt on this node reads before it sends; both hold the draft.
+    // Reading and sending both hold the draft.
     const sending = phase === 'sending' || phase === 'reading'
     const store = useNodeConfigurationStore.getState()
 
-    const pick = (tier: RoleTier, value: string) => {
-        if (value === UNSET_ROLE) {
-            store.setRole(targetId, tier, undefined)
-            return
-        }
-        const role = chosenRole(choices, value)
-        if (role) store.setRole(targetId, tier, role)
-    }
-
     const differences = entry.latest ? roleDifferences(draft, entry.latest.roles) : []
-    const describe = (key: string | undefined, policy: string) => {
+    const describeProfile = (key: string, policy: string) => {
         const profile = policyRoleProfiles(policy).find(profile => profile.key === key)
         return profile
-            ? roleLabel(profile, descriptors, roleIdentity(profile, inventory))
-            : (key ?? 'unset')
+            ? `${profile.displayName} (${key}): ${roleLabel(profile, descriptors, roleIdentity(profile, inventory))}`
+            : key
     }
+    const describe = (keys: string[] | undefined, policy: string) =>
+        keys === undefined
+            ? 'undeclared'
+            : keys.length === 0
+              ? 'empty'
+              : keys.map(key => describeProfile(key, policy)).join(', ')
 
     return (
         <Stack gap="2">
@@ -146,31 +151,105 @@ export default function RoleEditor({ targetId, nodeId, onSaved }: RoleEditorProp
                     {management?.message || 'Reading remote management permission for this device.'}
                 </Text>
             )}
-            {ROLE_TIERS.map(tier => (
-                <Flex key={tier} align="center" gap="3" wrap="wrap">
+            {draft.map(role => (
+                <Stack key={role.name} gap="2" aria-label={`${TIER_LABELS[role.name]} role`}>
                     <Text kind="body/regular/sm" className="text-subtle-color w-16">
-                        {TIER_LABELS[tier]}
+                        {TIER_LABELS[role.name]}
                     </Text>
+                    {role.profiles.length === 0 && <Text>No profiles assigned</Text>}
+                    {role.profiles.map((key, index) => {
+                        const profile = profiles.find(profile => profile.key === key)
+                        const label = profile?.displayName ?? key
+                        return (
+                            <Flex key={key} align="center" gap="2" wrap="wrap" aria-label={label}>
+                                <Text title={label}>{label}</Text>
+                                <ModelIdentityTags
+                                    identity={
+                                        profile?.modelIdentity ??
+                                        (profile ? roleIdentity(profile, inventory) : undefined)
+                                    }
+                                />
+                                <Button
+                                    size="tiny"
+                                    kind="secondary"
+                                    aria-label={`Move ${label} up in ${role.name}`}
+                                    disabled={sending || readOnly || index === 0}
+                                    onClick={() =>
+                                        store.moveRoleProfile(targetId, role.name, index, -1)
+                                    }
+                                >
+                                    Move up
+                                </Button>
+                                <Button
+                                    size="tiny"
+                                    kind="secondary"
+                                    aria-label={`Move ${label} down in ${role.name}`}
+                                    disabled={
+                                        sending || readOnly || index === role.profiles.length - 1
+                                    }
+                                    onClick={() =>
+                                        store.moveRoleProfile(targetId, role.name, index, 1)
+                                    }
+                                >
+                                    Move down
+                                </Button>
+                                <Button
+                                    size="tiny"
+                                    kind="secondary"
+                                    aria-label={`Remove ${label} from ${role.name}`}
+                                    disabled={sending || readOnly}
+                                    onClick={() =>
+                                        store.removeRoleProfile(targetId, role.name, key)
+                                    }
+                                >
+                                    Remove
+                                </Button>
+                            </Flex>
+                        )
+                    })}
                     <div className="min-w-0 flex-1">
                         <Select
                             size="small"
-                            placeholder="Unset"
-                            aria-label={`${TIER_LABELS[tier]} role`}
+                            placeholder="Add profile"
+                            aria-label={`Add profile to ${TIER_LABELS[role.name]}`}
                             items={roleItems(
-                                choices,
-                                draft.find(role => role.name === tier)?.profiles[0],
-                                descriptors,
-                                inventory,
-                                profiles
-                            )}
-                            value={
-                                draft.find(role => role.name === tier)?.profiles[0] ?? UNSET_ROLE
-                            }
-                            onValueChange={(value: string) => pick(tier, value)}
+                                profiles.filter(profile => !role.profiles.includes(profile.key)),
+                                undefined,
+                                descriptors
+                            )
+                                .filter(item => item.value !== UNSET_ROLE)
+                                .map(item => {
+                                    const profile = profiles.find(
+                                        profile => profile.key === item.value
+                                    )
+                                    return {
+                                        value: item.value,
+                                        children: (
+                                            <Stack gap="1">
+                                                <Text title={profile?.displayName}>
+                                                    {profile?.displayName}
+                                                </Text>
+                                                <ModelIdentityTags
+                                                    identity={
+                                                        profile?.modelIdentity ??
+                                                        (profile
+                                                            ? roleIdentity(profile, inventory)
+                                                            : undefined)
+                                                    }
+                                                />
+                                            </Stack>
+                                        )
+                                    }
+                                })}
+                            value={UNSET_ROLE}
+                            onValueChange={(value: string) => {
+                                const key = chosenRole(profiles, value)
+                                if (key) store.addRoleProfile(targetId, role.name, key)
+                            }}
                             disabled={sending || readOnly}
                         />
                     </div>
-                </Flex>
+                </Stack>
             ))}
             {choices.length === 0 && (
                 <Text kind="body/regular/sm" className="text-subtle-color">

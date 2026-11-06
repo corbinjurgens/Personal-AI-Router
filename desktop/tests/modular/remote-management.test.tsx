@@ -65,7 +65,6 @@ import { usePendingActionsStore } from '@/ui/stores/pending-actions.store'
 import { useEngineStatusStore } from '@/ui/stores/engine-status.store'
 import { emptyEngineStatus } from '@/shared/utils/engines'
 
-vi.mock('@/ui/components/RoutingSettings/BulkNodeConfiguration', () => ({ default: () => null }))
 vi.mock('@/ui/components/NodeList/NodeEngineSettings', () => ({ default: () => null }))
 
 type BridgeState = ReturnType<typeof getModularBridgeState>
@@ -803,7 +802,7 @@ describe('permission controls', () => {
         })
     }
     beforeEach(() => {
-        useOverviewUiStore.setState({ settingsNodeId: null })
+        useOverviewUiStore.setState({ settingsNodeId: null, settingsProfileKey: null })
         vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
         vi.stubGlobal('CSS', { supports: () => true })
         Object.defineProperty(HTMLDialogElement.prototype, 'show', {
@@ -868,7 +867,7 @@ describe('permission controls', () => {
             management: new Map(),
             policyDrafts: new Map()
         })
-        useEngineSettingsStore.setState({ entries: {} })
+        useEngineSettingsStore.setState({ entries: {}, modelDrafts: {} })
         useEngineStatusStore.setState({ statusByNode: new Map() })
         container = document.createElement('div')
         document.body.append(container)
@@ -1077,9 +1076,7 @@ describe('permission controls', () => {
         async ({ state, revision, message }) => {
             capability.mockResolvedValue({ version: 1, allowed: false, state, revision })
             useNodeConfigurationStore.getState().adopt('peer-1', policy)
-            useNodeConfigurationStore
-                .getState()
-                .setRole('peer-1', 'weak', 'draft-profile')
+            useNodeConfigurationStore.getState().setRole('peer-1', 'weak', 'draft-profile')
             await act(async () =>
                 root.render(
                     <>
@@ -1098,9 +1095,9 @@ describe('permission controls', () => {
             )
             expect(document.body.textContent).toContain(message)
             expect(button('Save roles').disabled).toBe(true)
-            expect(
-                useNodeConfigurationStore.getState().editors.get('peer-1')?.draft
-            ).toEqual([{ name: 'weak', profiles: ['draft-profile'] }])
+            expect(useNodeConfigurationStore.getState().editors.get('peer-1')?.draft).toEqual([
+                { name: 'weak', profiles: ['draft-profile'] }
+            ])
             expect(button('Apply').disabled).toBe(true)
             expect(
                 document.querySelector<HTMLInputElement>('input[aria-label="Server port"]')
@@ -1123,9 +1120,7 @@ describe('permission controls', () => {
             state: 'unavailable'
         })
         useNodeConfigurationStore.getState().adopt('invalid-target', policy)
-        useNodeConfigurationStore
-            .getState()
-            .setRole('invalid-target', 'weak', 'draft-profile')
+        useNodeConfigurationStore.getState().setRole('invalid-target', 'weak', 'draft-profile')
         await act(async () =>
             root.render(
                 <RoleEditor
@@ -1155,7 +1150,9 @@ describe('permission controls', () => {
             document.querySelector<HTMLInputElement>('input[aria-label="Server port"]')?.value
         ).toBe('2345')
         expect(applySettings).toHaveBeenCalledTimes(1)
-        expect(usePendingActionsStore.getState().isSettingsPending('peer-1', 'llama-cpp')).toBe(false)
+        expect(usePendingActionsStore.getState().isSettingsPending('peer-1', 'llama-cpp')).toBe(
+            false
+        )
     })
 
     it.each([
@@ -1226,12 +1223,7 @@ describe('permission controls', () => {
     it('allows metadata-only settings apply', async () => {
         useEngineStatusStore.setState({
             statusByNode: new Map([
-                [
-                    'peer-1',
-                    new Map([
-                        ['llama-cpp', emptyEngineStatus('peer-1', 'llama-cpp')]
-                    ])
-                ]
+                ['peer-1', new Map([['llama-cpp', emptyEngineStatus('peer-1', 'llama-cpp')]])]
             ])
         })
         await renderSettings()
@@ -1333,7 +1325,8 @@ describe('permission controls', () => {
                 revision: '5',
                 profiles: [
                     {
-                        name: 'm',
+                        key: 'm',
+                        displayName: 'Model M',
                         engine: 'llamacpp',
                         model: 'm',
                         localOnly,
@@ -1369,6 +1362,9 @@ describe('permission controls', () => {
             expectedPersistedRevision: '5'
         })
         expect(getPolicy).toHaveBeenLastCalledWith('peer-1')
+        expect(getSettings).toHaveBeenCalled()
+        for (const [request] of getSettings.mock.calls)
+            expect(request).toEqual({ nodeId: 'peer-1', engine: 'llamacpp' })
         expect(availability).not.toHaveBeenCalled()
         expect(applySettings).not.toHaveBeenCalled()
         expect(previewSettings).not.toHaveBeenCalled()

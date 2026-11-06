@@ -8,14 +8,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { JsonValue } from '@/shared/types/json'
 import {
     applyModelSettings,
-    createModelSettingsProfile,
-    parseModelSettings,
-    removeModelSettingsProfile
+    defaultProfileKey,
+    isValidProfileKey,
+    newProfileKeyStatus,
+    parseModelSettings
 } from '@/shared/utils/node-policy-model-settings'
 import ModelSettingsEditor from '@/ui/components/RoutingSettings/ModelSettingsEditor'
+import type { ModelSettingsIdentity } from '@/shared/types/model-config'
 
-const identity = { engine: 'llamacpp', model: 'native/model' }
-const other = { engine: 'llamacpp', model: 'other/model' }
+const identity = { engine: 'llamacpp', model: 'native/model', profileKey: 'native/model' }
+const other = { engine: 'llamacpp', model: 'other/model', profileKey: 'other/model' }
 function policy(extra: Record<string, JsonValue> = {}, alternate = other): string {
     return JSON.stringify({
         version: 2,
@@ -25,11 +27,12 @@ function policy(extra: Record<string, JsonValue> = {}, alternate = other): strin
         profiles: [
             {
                 ...identity,
-                name: 'display name',
+                key: identity.profileKey,
+                displayName: 'display name',
                 qualification: { id: 'q', revision: '1' },
                 ...extra
             },
-            alternate
+            { ...alternate, key: alternate.profileKey, displayName: alternate.model }
         ]
     })
 }
@@ -49,9 +52,108 @@ function selected(text: string) {
 }
 
 describe('model settings policy helpers', () => {
+    it('keeps new keys distinct across engines and refuses an invalid policy', () => {
+        const text = JSON.stringify({
+            profiles: [
+                {
+                    key: 'occupied',
+                    displayName: 'Other engine',
+                    engine: 'llamacpp-custom',
+                    model: 'native'
+                }
+            ]
+        })
+        expect(newProfileKeyStatus(text, 'occupied')).toBe('duplicate')
+        expect(newProfileKeyStatus(text, 'coder-local')).toBe('available')
+        expect(newProfileKeyStatus('{', 'fresh')).toBe('invalid')
+        expect(newProfileKeyStatus(text, 'medium-local')).toBe('invalid')
+    })
+
+    it.each([
+        'coder-api',
+        'coder-local',
+        'role:api',
+        ' Has space ',
+        'é'.repeat(256),
+        'x'.repeat(512),
+        'Medium-local'
+    ])('accepts the saved UTF-8 key grammar for %j', key => {
+        expect(isValidProfileKey(key)).toBe(true)
+    })
+    it.each([
+        '',
+        'medium-local',
+        'weak',
+        'strong-api',
+        '\ud800',
+        'é'.repeat(257),
+        'x'.repeat(513),
+        'bad\nkey',
+        'bad\u0085key',
+        'bad\u007fkey'
+    ])('refuses malformed and fixed-tier reserved key %j', key => {
+        expect(isValidProfileKey(key)).toBe(false)
+    })
+    it('suggests only a lowercase ASCII slug capped at 64 bytes', () => {
+        expect(defaultProfileKey('Owner/Model Q4_K_M:Test')).toBe('owner-model-q4_k_m-test')
+        expect(defaultProfileKey('模型/É')).toBe('-')
+        expect(defaultProfileKey('A'.repeat(70))).toBe('a'.repeat(64))
+        expect(defaultProfileKey('medium-local')).toBe('medium-local')
+    })
+    it('selects a sibling by key even when both share the same native artifact identity', () => {
+        const text = JSON.stringify({
+            profiles: [
+                {
+                    key: 'small',
+                    displayName: 'Small',
+                    engine: 'llamacpp',
+                    model: 'artifact',
+                    requestOptions: { temperature: 0.1 }
+                },
+                {
+                    key: 'large',
+                    displayName: 'Large',
+                    icon: 'code',
+                    engine: 'llamacpp',
+                    model: 'artifact',
+                    requestOptions: { temperature: 0.9 }
+                }
+            ]
+        })
+        const result = applyModelSettings(
+            text,
+            { engine: 'llamacpp', model: 'artifact', profileKey: 'large' },
+            { kind: 'option', key: 'temperature', value: '0.7' }
+        )
+        if (!result.ok) throw new Error(result.error.message)
+        expect(JSON.parse(result.value).profiles).toEqual([
+            {
+                key: 'small',
+                displayName: 'Small',
+                engine: 'llamacpp',
+                model: 'artifact',
+                requestOptions: { temperature: 0.1 }
+            },
+            {
+                key: 'large',
+                displayName: 'Large',
+                icon: 'code',
+                engine: 'llamacpp',
+                model: 'artifact',
+                requestOptions: { temperature: 0.7 }
+            }
+        ])
+        expect(
+            applyModelSettings(
+                text,
+                { engine: 'llamacpp', model: 'artifact' },
+                { kind: 'option', key: 'temperature', value: '0.3' }
+            ).ok
+        ).toBe(false)
+    })
     it('changes only the selected value span across whitespace and escaped delimiters', () => {
         const text = String.raw` {
-            "profiles": [{"engine":"llamacpp","model":"native/model","requestOptions":{"note":"escaped quote \" and brackets } ],","nested":[{"x":[1,2]}],"temperature":1}}],
+            "profiles": [{"key":"native/model","displayName":"native/model","engine":"llamacpp","model":"native/model","requestOptions":{"note":"escaped quote \" and brackets } ],","nested":[{"x":[1,2]}],"temperature":1}}],
             "engineBindings": []
         } `
         expect(applied(text, { kind: 'option', key: 'temperature', value: '0.25' })).toBe(
@@ -66,7 +168,7 @@ describe('model settings policy helpers', () => {
         'preserves opaque number tokens when changing $kind',
         edit => {
             const text =
-                '{"version":2,"opaque":9007199254740993,"profiles":[{"engine":"llamacpp","model":"native/model","requestOptions":{"temperature":1,"nested":{"precise":1.0000000000000000001,"huge":1e400},"array":[9007199254740995]}},{"engine":"llamacpp","model":"other","requestOptions":{"seed":9007199254740997}}],"engineBindings":[]}'
+                '{"version":2,"opaque":9007199254740993,"profiles":[{"key":"native/model","displayName":"native/model","engine":"llamacpp","model":"native/model","requestOptions":{"temperature":1,"nested":{"precise":1.0000000000000000001,"huge":1e400},"array":[9007199254740995]}},{"key":"other","displayName":"other","engine":"llamacpp","model":"other","requestOptions":{"seed":9007199254740997}}],"engineBindings":[]}'
             const result = applied(text, edit)
             // Inspect original JSON tokens, not numbers rounded by JSON.parse.
             for (const token of [
@@ -117,24 +219,29 @@ describe('model settings policy helpers', () => {
         expect(parseModelSettings(policy(extra)).ok).toBe(false)
     })
 
-    it('identifies profiles by engine and model regardless of display name or order', () => {
+    it('identifies profiles by key regardless of display name or order', () => {
         const text = JSON.stringify({
             profiles: [
-                { ...other, name: 'same' },
-                { ...identity, name: 'same' }
+                { ...other, key: other.profileKey, displayName: 'same' },
+                { ...identity, key: identity.profileKey, displayName: 'same' }
             ]
         })
         const result = parseModelSettings(text)
         if (!result.ok) throw new Error(result.error.message)
         expect(result.value.map(profile => profile.key)).toEqual([
-            JSON.stringify([other.engine, other.model]),
-            JSON.stringify([identity.engine, identity.model])
+            other.profileKey,
+            identity.profileKey
         ])
         const edited = applied(text, { kind: 'option', key: 'temperature', value: '0.3' })
         expect(JSON.parse(edited)).toEqual({
             profiles: [
-                { ...other, name: 'same' },
-                { ...identity, name: 'same', requestOptions: { temperature: 0.3 } }
+                { ...other, key: other.profileKey, displayName: 'same' },
+                {
+                    ...identity,
+                    key: identity.profileKey,
+                    displayName: 'same',
+                    requestOptions: { temperature: 0.3 }
+                }
             ]
         })
     })
@@ -142,7 +249,12 @@ describe('model settings policy helpers', () => {
     it('rejects ambiguous duplicate identities', () => {
         expect(
             parseModelSettings(
-                JSON.stringify({ profiles: [identity, { ...identity, name: 'other' }] })
+                JSON.stringify({
+                    profiles: [
+                        { ...identity, key: identity.profileKey, displayName: 'first' },
+                        { ...identity, key: identity.profileKey, displayName: 'other' }
+                    ]
+                })
             ).ok
         ).toBe(false)
     })
@@ -267,9 +379,16 @@ describe('model settings policy helpers', () => {
         const unsupported = {
             engine: 'strata',
             model: 'native',
+            key: 'native',
+            displayName: 'Native',
             requestOptions: { options: { temperature: 2 } }
         }
-        const supported = { ...identity, requestOptions: { min_p: 0.2, uncommon: [1, 2] } }
+        const supported = {
+            ...identity,
+            key: identity.profileKey,
+            displayName: 'Native',
+            requestOptions: { min_p: 0.2, uncommon: [1, 2] }
+        }
         const text = JSON.stringify({ profiles: [unsupported, supported] })
         const result = applyModelSettings(text, identity, {
             kind: 'option',
@@ -296,183 +415,6 @@ describe('model settings policy helpers', () => {
     })
 })
 
-describe('typed profile lifecycle', () => {
-    const first = { name: 'first', ...identity }
-    const second = { name: 'second', ...other }
-    function success(result: ReturnType<typeof createModelSettingsProfile>): string {
-        if (!result.ok) throw new Error(result.error.message)
-        return result.value
-    }
-
-    it.each(['{}', '{"profiles":null}', '{"profiles":[]}', ' \n{ "profiles": [ ] }\n'])(
-        'creates the first minimal profile in %s',
-        text => {
-            const result = success(createModelSettingsProfile(text, identity, 'first'))
-            expect(JSON.parse(result)).toEqual({ profiles: [first] })
-            expect(parseModelSettings(result)).toMatchObject({
-                ok: true,
-                value: [{ ...identity, name: 'first' }]
-            })
-        }
-    )
-
-    it('appends without rewriting existing profiles, numeric tokens or unrelated references', () => {
-        const text = String.raw` {"opaque":9007199254740993,"profiles":[{"name":"first","engine":"llamacpp","model":"native/model","requestOptions":{"precise":1.00000000000000001,"huge":1e400,"nested":[null,{},[]]}}],"residentModels":null,"servedModels":[],"roles":[{"name":"medium","profiles":["native/model"]}],"engineBindings":null} `
-        const escaped = { engine: 'llamacpp', model: 'owner/"model\\file/模型' }
-        const raw = JSON.stringify({ name: 'new/model', ...escaped })
-        const edited = success(createModelSettingsProfile(text, escaped, 'new/model'))
-        expect(edited).toBe(text.replace('}}],"residentModels"', `}},${raw}],"residentModels"`))
-        expect(JSON.parse(edited).profiles[1]).toEqual({ name: 'new/model', ...escaped })
-    })
-
-    it.each([
-        { label: 'first', profiles: [first, second], selected: identity, remaining: [second] },
-        { label: 'last', profiles: [second, first], selected: identity, remaining: [second] },
-        {
-            label: 'middle',
-            profiles: [second, first, { name: 'third', engine: 'llamacpp-custom', model: 'm' }],
-            selected: identity,
-            remaining: [second, { name: 'third', engine: 'llamacpp-custom', model: 'm' }]
-        },
-        { label: 'only', profiles: [first], selected: identity, remaining: [] }
-    ])('removes only the $label profile', ({ profiles, selected, remaining }) => {
-        const keyedProfiles = profiles.map(profile => ({
-            ...profile, key: profile.model, displayName: profile.name
-        }))
-        const keyedRemaining = remaining.map(profile => ({
-            ...profile, key: profile.model, displayName: profile.name
-        }))
-        const text = JSON.stringify({
-            profiles: keyedProfiles,
-            residentModels: [],
-            servedModels: [identity],
-            engineBindings: [identity],
-            roles: [{ name: 'medium', profiles: [identity.model] }],
-            files: ['unchanged']
-        })
-        const edited = success(removeModelSettingsProfile(text, selected))
-        expect(JSON.parse(edited)).toEqual({
-            profiles: keyedRemaining,
-            residentModels: [],
-            servedModels: [identity],
-            engineBindings: [identity],
-            roles: [{ name: 'medium', profiles: [identity.model] }],
-            files: ['unchanged']
-        })
-    })
-
-    it('removes one raw span while retaining opaque numbers and null/empty values', () => {
-        const rawFirst = JSON.stringify(first)
-        const rawSecond =
-            '{"name":"second","engine":"llamacpp","model":"other/model","requestOptions":{"nested":{"n":9007199254740993,"x":1e400}},"opaque":null}'
-        const text = ` {"profiles":[ ${rawFirst}, \n${rawSecond} ],"servedModels":null,"residentModels":[],"opaque":[] } `
-        expect(success(removeModelSettingsProfile(text, identity))).toBe(
-            text.replace(`${rawFirst}, \n`, '')
-        )
-    })
-
-    it('requires removing the exact resident reference first', () => {
-        const text = JSON.stringify({ profiles: [first, second], residentModels: [identity] })
-        expect(removeModelSettingsProfile(text, identity)).toEqual({
-            ok: false,
-            error: {
-                code: 'profile',
-                message: 'Remove this model from residentModels before removing its profile.'
-            }
-        })
-        expect(JSON.parse(success(removeModelSettingsProfile(text, other))).profiles).toEqual([
-            first
-        ])
-    })
-
-    it.each(['', 'has space', '-leading', 'a'.repeat(129), 'line\nend', 'tail\n'])(
-        'rejects invalid new name %j',
-        name => {
-            expect(createModelSettingsProfile('{}', identity, name)).toMatchObject({
-                ok: false,
-                error: { code: 'profile' }
-            })
-        }
-    )
-
-    it.each([
-        { engine: '', model: 'm' },
-        { engine: 'llamacpp', model: '' },
-        { engine: 'llamacpp', model: 'line\nbreak' },
-        { engine: 'llamacpp', model: '\ud800' },
-        { engine: 'llamacpp', model: 'é'.repeat(257) },
-        { engine: 'llamacpp', model: 'weak-local' },
-        { engine: 'bad/engine', model: 'm' },
-        { engine: 'x'.repeat(41), model: 'm' }
-    ])('rejects incomplete exact identity %j', ref => {
-        expect(createModelSettingsProfile('{}', ref, 'first').ok).toBe(false)
-    })
-
-    it('rejects duplicate names or exact identities and missing removal targets', () => {
-        const text = JSON.stringify({ profiles: [first] })
-        expect(createModelSettingsProfile(text, other, first.name).ok).toBe(false)
-        expect(createModelSettingsProfile(text, identity, 'different').ok).toBe(false)
-        expect(removeModelSettingsProfile(text, other).ok).toBe(false)
-    })
-
-    it.each([
-        '{',
-        'null',
-        '{"profiles":{}}',
-        '{"profiles":[null]}',
-        '{"profiles":[],"profi\\u006ces":[]}',
-        '{"profiles":[{"name":"a","engine":"llamacpp-custom","engine":"llamacpp","model":"m"}]}',
-        '{"profiles":[{"name":"a","name":"b","engine":"llamacpp","model":"m"}]}',
-        '{"profiles":[{"name":"a","engine":"llamacpp","model":"m","requestOptions":{"temperature":1,"temperature":2}}]}',
-        JSON.stringify({ profiles: [identity] }),
-        JSON.stringify({ profiles: [first, { ...second, name: first.name }] }),
-        JSON.stringify({ profiles: [first, { ...first, name: 'other' }] }),
-        JSON.stringify({ profiles: [{ ...first, name: 'invalid name' }] }),
-        JSON.stringify({ profiles: [{ ...first, requestOptionsMode: 'enforced' }] })
-    ])('returns only an error for malformed or ambiguous draft %s', text => {
-        expect(
-            createModelSettingsProfile(text, { engine: 'llamacpp', model: 'new' }, 'new')
-        ).toMatchObject({ ok: false, error: { code: expect.any(String) } })
-        expect(removeModelSettingsProfile(text, identity)).toMatchObject({
-            ok: false,
-            error: { code: expect.any(String) }
-        })
-    })
-
-    it.each([{}, [null], [{ engine: 'llamacpp' }]])(
-        'refuses malformed residency %j',
-        residentModels => {
-            expect(
-                removeModelSettingsProfile(
-                    JSON.stringify({ profiles: [first], residentModels }),
-                    identity
-                ).ok
-            ).toBe(false)
-        }
-    )
-
-    it.each([
-        '{"Profiles":[{"name":"a","engine":"llamacpp","model":"m"}]}',
-        '{"profiles":[],"Profi\\u006ces":[]}',
-        '{"profi\\u006ceS":[]}',
-        '{"profiles":[],"ResidentModels":[]}',
-        '{"profiles":[{"name":"a","engine":"llamacpp","model":"m","Model":"shadow"}]}',
-        '{"profiles":[{"name":"a","engine":"llamacpp","model":"m","Mo\\u0064el":"shadow"}]}',
-        '{"profiles":[{"Name":"a","engine":"llamacpp","model":"m"}]}',
-        '{"profiles":[{"name":"a","engine":"llamacpp","model":"m","RequestOptions":{}}]}',
-        '{"profiles":[{"name":"a","engine":"llamacpp","model":"m","localOnly":true,"LocalOnly":false}]}',
-        '{"profiles":[{"name":"a","engine":"llamacpp","model":"m","requestOptions":{"stop":1,"ſtop":2}}]}'
-    ])('refuses service-equivalent key ambiguity without returning a draft: %s', text => {
-        for (const result of [
-            createModelSettingsProfile(text, { engine: 'llamacpp', model: 'new' }, 'new'),
-            removeModelSettingsProfile(text, { engine: 'llamacpp', model: 'm' })
-        ]) {
-            expect(result).toMatchObject({ ok: false, error: { code: 'parse' } })
-            expect(result).not.toHaveProperty('value')
-        }
-    })
-})
-
 describe('model settings form controls', () => {
     let container: HTMLDivElement
     let root: Root
@@ -496,7 +438,7 @@ describe('model settings form controls', () => {
         savedText = text,
         remote = false,
         disabled = false,
-        target = identity
+        target: ModelSettingsIdentity = identity
     ) {
         await act(async () =>
             root.render(
@@ -555,6 +497,24 @@ describe('model settings form controls', () => {
         const parsed = parseModelSettings(text)
         if (!parsed.ok) throw new Error(parsed.error.message)
         expect(parsed.value.map(profile => profile.options)).toEqual([{}, { temperature: 0.4 }])
+    })
+
+    it('requires a profile key instead of selecting the first sibling by artifact name', async () => {
+        const text = JSON.stringify({
+            profiles: ['first', 'second'].map(key => ({
+                key,
+                displayName: key,
+                engine: identity.engine,
+                model: identity.model,
+                requestOptions: { temperature: 0.25 }
+            }))
+        })
+        await render(text, text, false, false, {
+            engine: identity.engine,
+            model: identity.model
+        })
+        expect(container.querySelector('input[aria-label="Temperature"]')).toBeNull()
+        expect(changed).not.toHaveBeenCalled()
     })
 
     it('saves the selected override mode through the shared JSON draft', async () => {
@@ -660,7 +620,12 @@ describe('model settings form controls', () => {
 
     it('uses the saved identity when the draft reorders or renames profiles', async () => {
         const savedText = policy({ localOnly: true })
-        const text = JSON.stringify({ profiles: [{ ...identity, name: 'renamed' }, other] })
+        const text = JSON.stringify({
+            profiles: [
+                { ...identity, key: identity.profileKey, displayName: 'renamed' },
+                { ...other, key: other.profileKey, displayName: 'Other' }
+            ]
+        })
         await render(text, savedText, true)
         expect(input('Temperature').disabled).toBe(true)
     })
@@ -680,7 +645,13 @@ describe('model settings form controls', () => {
     })
 
     it('renders unsupported engines as an empty state without modifying JSON', async () => {
-        await render(JSON.stringify({ profiles: [{ engine: 'llamacpp-custom', model: 'm' }] }))
+        await render(
+            JSON.stringify({
+                profiles: [
+                    { key: 'custom', displayName: 'Custom', engine: 'llamacpp-custom', model: 'm' }
+                ]
+            })
+        )
         expect(container.textContent).toContain('No supported profiles')
         expect(container.querySelector('input')).toBeNull()
         expect(changed).not.toHaveBeenCalled()

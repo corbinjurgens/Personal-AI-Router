@@ -11,7 +11,7 @@ import {
     Text,
     TextInput
 } from '@nvidia/foundations-react-core'
-import type { NodeModelReference } from '@/shared/types/node-policy'
+import type { ModelSettingsIdentity } from '@/shared/types/model-config'
 import {
     applyModelSettings,
     MODEL_OPTION_FIELDS,
@@ -37,7 +37,7 @@ export default function ModelSettingsEditor({
     remote: boolean
     disabled: boolean
     onValidityChange: (valid: boolean) => void
-    identity: NodeModelReference
+    identity: ModelSettingsIdentity
 }) {
     const draft = useMemo(() => parseModelSettings(text), [text])
     const saved = useMemo(
@@ -51,7 +51,7 @@ export default function ModelSettingsEditor({
     }>({ text: '', profile: '', fields: {} })
     const profiles = draft.ok ? draft.value : []
     const profile = profiles.find(
-        item => item.engine === identity.engine && item.model === identity.model
+        item => item.engine === identity.engine && item.key === identity.profileKey
     )
     const fields = inputs.text === text && inputs.profile === profile?.key ? inputs.fields : {}
     const hasErrors = Object.values(fields).some(field => field.message !== undefined)
@@ -69,7 +69,7 @@ export default function ModelSettingsEditor({
         value: string
     ) => {
         if (!profile || readOnly) return
-        const result = applyModelSettings(text, profile, edit)
+        const result = applyModelSettings(text, { ...identity, profileKey: profile.key }, edit)
         if (!result.ok) {
             setInputs({
                 text,

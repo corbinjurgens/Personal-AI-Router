@@ -29,6 +29,7 @@ import RoleEditor from '@/ui/components/RoutingSettings/RoleEditor'
 import { useDiscoveredNodesStore } from '@/ui/stores/discovered-nodes.store'
 import { useEngineModelsStore } from '@/ui/stores/engine-models.store'
 import { useEngineStatusStore } from '@/ui/stores/engine-status.store'
+import { useConnectionStore } from '@/ui/stores/connection.store'
 import {
     inventoryChoices,
     NODE_PAUSED_MESSAGE,
@@ -393,8 +394,8 @@ describe('conflicts', () => {
         expect(roleDifferences(draft, latest?.roles ?? [])).toEqual([
             {
                 tier: 'weak',
-                mine: 'qwen3:4b',
-                theirs: 'gemma-3-27b'
+                mine: ['qwen3:4b'],
+                theirs: ['gemma-3-27b']
             }
         ])
         // A save while the conflict stands sends nothing.
@@ -690,14 +691,102 @@ describe('declared roles on the node card', () => {
                 ]
             })
 
+        it('moves and removes profile memberships and saves their order with the loaded revision', async () => {
+            vi.stubGlobal('CSS', { supports: () => true })
+            useConnectionStore.setState({ connected: true })
+            const store = useNodeConfigurationStore.getState()
+            store.adopt(
+                SELF,
+                snapshot('5', {
+                    roles: [
+                        { name: 'strong', profiles: ['qwen3:4b', 'gemma-3-27b'] },
+                        { name: 'weak', profiles: [] }
+                    ]
+                })
+            )
+            set.mockResolvedValue(
+                snapshot('6', {
+                    roles: [
+                        { name: 'strong', profiles: ['gemma-3-27b', 'qwen3:4b'] },
+                        { name: 'weak', profiles: [] }
+                    ]
+                })
+            )
+            await act(async () =>
+                root.render(
+                    createElement(RoleEditor, {
+                        targetId: SELF,
+                        nodeId: undefined,
+                        onSaved: vi.fn()
+                    })
+                )
+            )
+            const click = async (label: string) => {
+                const button = Array.from(container.querySelectorAll('button')).find(
+                    button =>
+                        button.getAttribute('aria-label') === label || button.textContent === label
+                )
+                if (!button) throw new Error(`Missing button: ${label}`)
+                await act(async () => button.click())
+            }
+            expect(container.textContent).toContain('No profiles assigned')
+            expect(
+                container
+                    .querySelector('[aria-label="Move Qwen up in strong"]')
+                    ?.hasAttribute('disabled')
+            ).toBe(true)
+            await click('Move Gemma up in strong')
+            expect(entry(SELF).draft).toEqual([
+                { name: 'strong', profiles: ['gemma-3-27b', 'qwen3:4b'] },
+                { name: 'weak', profiles: [] }
+            ])
+            await click('Move Gemma down in strong')
+            await click('Remove Qwen from strong')
+            await click('Remove Gemma from strong')
+            expect(entry(SELF).draft).toEqual([
+                { name: 'strong', profiles: [] },
+                { name: 'weak', profiles: [] }
+            ])
+            const add = async (name: string) => {
+                const trigger = container.querySelector<HTMLButtonElement>(
+                    '[aria-label="Add profile to Strong"]'
+                )
+                if (!trigger) throw new Error('Missing Add profile selector')
+                await act(async () => trigger.click())
+                const option = Array.from(
+                    document.querySelectorAll<HTMLElement>('[role="option"]')
+                ).find(item => item.textContent?.startsWith(name))
+                if (!option) throw new Error(`Missing profile option: ${name}`)
+                await act(async () => option.click())
+            }
+            await add('Gemma')
+            await add('Qwen')
+            expect(container.textContent).toContain('Gemma')
+            await click('Save roles')
+            expect(set).toHaveBeenCalledTimes(1)
+            const request = set.mock.calls[0][0]
+            expect(request.expectedPersistedRevision).toBe('5')
+            expect(JSON.parse(request.policy).roles).toEqual([
+                { name: 'strong', profiles: ['gemma-3-27b', 'qwen3:4b'] },
+                { name: 'weak', profiles: [] }
+            ])
+            useConnectionStore.setState({ connected: false })
+        })
+
         it('lists each declared tier', async () => {
             discovered([
                 { name: 'weak', profiles: ['qwen3:4b'] },
                 { name: 'strong', profiles: ['gemma-3-27b'] }
             ])
             await act(async () => root.render(createElement(NodeDeclaredRoles, { nodeId: PEER })))
-            expect(container.textContent).toContain('weak: qwen3:4b · llama.cpp')
-            expect(container.textContent).toContain('strong: gemma-3-27b · llama.cpp custom')
+            expect(
+                Array.from(container.querySelectorAll('button'), button =>
+                    button.getAttribute('aria-label')
+                )
+            ).toEqual(['weak: qwen3:4b', 'strong: gemma-3-27b'])
+            expect(
+                container.querySelectorAll('[title="Repository unknown: no source establishes it"]')
+            ).toHaveLength(2)
             expect(container.textContent).not.toContain('medium')
         })
 
@@ -757,11 +846,14 @@ describe('declared roles on the node card', () => {
                 ]
             )
             await act(async () => root.render(createElement(NodeDeclaredRoles, { nodeId: PEER })))
-            const tags = () => Array.from(container.querySelectorAll('[title]'))
-            expect(tags().map(tag => [tag.textContent, tag.getAttribute('title')])).toEqual([
-                ['strong: LFM2.5 24B A2B (UD-Q4_K_XL) · llama.cpp', 'preset-ctx131072 (llamacpp)'],
-                ['weak: gemma-3-27b · llama.cpp custom', 'gemma-3-27b (llamacpp-custom)']
+            const members = () => Array.from(container.querySelectorAll('button'))
+            expect(members().map(member => member.getAttribute('aria-label'))).toEqual([
+                'strong: preset-ctx131072',
+                'weak: gemma-3-27b'
             ])
+            expect(members()[0].textContent).toBe('strongunsloth/LFM2.5-24B-A2B-GGUFUD-Q4_K_XL')
+            expect(members()[1].textContent).toBe('weakUnknownUnknown')
+            expect(container.textContent).not.toContain('wrong/')
             await act(async () => {
                 const models = new Map(useEngineModelsStore.getState().models)
                 models.set(`${PEER}:llama-cpp`, {
@@ -776,7 +868,7 @@ describe('declared roles on the node card', () => {
                 })
                 useEngineModelsStore.setState({ models })
             })
-            expect(tags()[0].textContent).toBe('strong: updated/model · llama.cpp')
+            expect(members()[0].textContent).toBe('strongupdated/modelUnknown')
         })
 
         it('reports a declaration-order conflict without claiming matching roles', async () => {
@@ -803,6 +895,66 @@ describe('declared roles on the node card', () => {
             )
             expect(container.textContent).toContain('role declaration order differs')
             expect(container.textContent).not.toContain('Its roles match this draft')
+        })
+
+        it('distinguishes same-model siblings in a membership-order conflict', async () => {
+            vi.stubGlobal('CSS', { supports: () => true })
+            useEngineModelsStore.setState({
+                models: new Map([
+                    [
+                        `${SELF}:llama-cpp`,
+                        {
+                            nodeId: SELF,
+                            engineType: 'llama-cpp',
+                            models: ['fast-8k', 'fast-32k'].map(key => ({
+                                ...model(key),
+                                identity: {
+                                    repository: 'owner/same',
+                                    quantization: 'Q4_K_M',
+                                    strength: 'declared'
+                                }
+                            }))
+                        }
+                    ]
+                ])
+            })
+            const profiles = ['fast-8k', 'fast-32k'].map(key => ({
+                key,
+                displayName: 'Same label',
+                engine: 'llamacpp',
+                model: key,
+                modelIdentity: {
+                    repository: 'owner/same',
+                    quantization: 'Q4_K_M',
+                    strength: 'declared'
+                }
+            }))
+            const store = useNodeConfigurationStore.getState()
+            store.adopt(
+                SELF,
+                snapshot('5', { profiles, roles: [{ name: 'strong', profiles: ['fast-8k'] }] })
+            )
+            store.setDraft(SELF, [{ name: 'strong', profiles: ['fast-8k', 'fast-32k'] }])
+            set.mockRejectedValue(new Error('-32000: policy conflict: stale'))
+            get.mockResolvedValue(
+                policyDocument('6', {
+                    profiles,
+                    roles: [{ name: 'strong', profiles: ['fast-32k', 'fast-8k'] }]
+                })
+            )
+            await store.save(SELF, undefined)
+            expect(entry(SELF).phase).toBe('conflict')
+            await act(async () =>
+                root.render(
+                    createElement(RoleEditor, {
+                        targetId: SELF,
+                        nodeId: undefined,
+                        onSaved: vi.fn()
+                    })
+                )
+            )
+            expect(container.textContent).toContain('yours Same label (fast-8k)')
+            expect(container.textContent).toContain('node Same label (fast-32k)')
         })
 
         it('uses the edited node inventory for its role select label', async () => {
@@ -852,7 +1004,9 @@ describe('declared roles on the node card', () => {
                     createElement(RoleEditor, { targetId: PEER, nodeId: PEER, onSaved: vi.fn() })
                 )
             )
-            expect(container.textContent).toContain('LFM2.5 24B A2B (UD-Q4_K_XL) · llama.cpp')
+            expect(container.textContent).toContain(served)
+            expect(container.textContent).toContain('unsloth/LFM2.5-24B-A2B-GGUF')
+            expect(container.textContent).toContain('UD-Q4_K_XL')
             expect(container.textContent).not.toContain('other/node')
         })
 

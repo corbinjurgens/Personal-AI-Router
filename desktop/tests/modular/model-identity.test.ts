@@ -84,7 +84,7 @@ describe('shared profile identity decoding', () => {
 })
 
 describe('declared role display', () => {
-    it('keeps declaration order and never substitutes a later available preference', async () => {
+    it('renders every membership in declaration order, including unavailable profiles', async () => {
         const previous = useDiscoveredNodesStore.getState().nodes
         const container = document.createElement('div')
         document.body.append(container)
@@ -123,9 +123,25 @@ describe('declared role display', () => {
                 root.render(createElement(NodeDeclaredRoles, { nodeId: 'display-node' }))
             )
             const html = container.innerHTML
-            expect(html).toContain('strong: Unavailable profile')
+            const memberships = Array.from(container.querySelectorAll('button'))
+            expect(memberships.map(item => item.getAttribute('aria-label'))).toEqual([
+                'strong: missing',
+                'strong: available',
+                'medium: available'
+            ])
+            expect(memberships[0]?.textContent).toContain('Unavailable profile')
+            expect(memberships[1]?.textContent).not.toContain('Unavailable profile')
+            expect(memberships[2]?.textContent).not.toContain('Unavailable profile')
+            expect(
+                memberships[1]?.querySelector('[aria-label="Model identity"]')?.textContent
+            ).toContain('Unknown')
+            expect(
+                memberships[2]?.querySelector('[aria-label="Model identity"]')?.textContent
+            ).toContain('Unknown')
+            expect(container.textContent).not.toContain('native-model')
             expect(html).toContain('weak: Unassigned')
-            expect(html).toContain('medium: native-model')
+            expect(html).toContain('medium: available')
+            expect(html.indexOf('strong: missing')).toBeLessThan(html.indexOf('strong: available'))
             expect(html.indexOf('strong:')).toBeLessThan(html.indexOf('weak:'))
             expect(html.indexOf('weak:')).toBeLessThan(html.indexOf('medium:'))
             await act(async () =>

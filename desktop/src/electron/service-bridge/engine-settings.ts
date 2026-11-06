@@ -22,6 +22,7 @@ import type {
     ResolvedLoad
 } from '@/shared/types/model-config'
 import { isValidRoutingEngineId } from '@/shared/utils/engines'
+import { isValidProfileKey } from '@/shared/utils/node-policy-model-settings'
 import type { JsonObject, JsonValue } from './json-rpc-client'
 import { proxyEngineFromManagerId } from './proxy-engines'
 import { parseModelIdentities } from './model-identity'
@@ -86,8 +87,7 @@ function modelId(value: JsonValue | undefined): string {
 }
 function profileKey(value: JsonValue | undefined): string {
     const id = boundedText(value, 512, true)
-    if (['weak', 'medium', 'strong'].includes(id.replace(/-(api|local)$/, '')))
-        throw new Error('Reserved profile key.')
+    if (!isValidProfileKey(id)) throw new Error('Invalid profile key.')
     return id
 }
 function shape(value: JsonValue | undefined, keys: readonly string[]): JsonObject {

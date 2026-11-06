@@ -8,7 +8,11 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { EngineInitialState } from '@/shared/types/engine-api'
 import type { EngineModels, EngineProgress } from '@/shared/types/engines'
-import type { ModelCopyCapabilities, ModelCopyResponse } from '@/shared/types/model-copy'
+import type {
+    ModelCopyCapabilities,
+    ModelCopyOutcome,
+    ModelCopyResponse
+} from '@/shared/types/model-copy'
 import type { NodeItem } from '@/shared/types/nodes'
 import type { ServiceTransport } from '@/shared/types/service-bridge'
 import { engineProgressKey } from '@/shared/utils/engine-progress'
@@ -41,10 +45,14 @@ function deferred<T>() {
     let resolve: (value: T) => void = () => {
         throw new Error('Deferred not initialized')
     }
-    const promise = new Promise<T>(done => {
+    let reject: (reason: Error) => void = () => {
+        throw new Error('Deferred not initialized')
+    }
+    const promise = new Promise<T>((done, fail) => {
         resolve = done
+        reject = fail
     })
-    return { promise, resolve }
+    return { promise, resolve, reject }
 }
 function node(id: string, name: string): NodeItem {
     return {
@@ -152,7 +160,14 @@ async function select(index: number, value: string) {
     if (!found) throw new Error(`Missing option ${index}: ${value}`)
     await act(async () => found.click())
 }
-async function mount(opId?: string, open = true) {
+async function mount(
+    opId?: string,
+    open = true,
+    deploy?: {
+        fixedDestination: string
+        onOutcome: (outcome: ModelCopyOutcome) => void
+    }
+) {
     await act(async () =>
         root.render(
             <ModelCopyModal
@@ -162,6 +177,7 @@ async function mount(opId?: string, open = true) {
                 initialSource="msi-id"
                 initialModel={alias}
                 initialOpId={opId}
+                {...deploy}
             />
         )
     )
@@ -245,6 +261,200 @@ afterEach(async () => {
     useEngineProgressStore.setState({ progress: new Map() })
     container.remove()
     vi.unstubAllGlobals()
+})
+
+describe('pinned deploy copy outcomes', () => {
+    it('pins the exact destination and ignores attempted selection changes', async () => {
+        const onOutcome = vi.fn<(outcome: ModelCopyOutcome) => void>()
+        await mount(undefined, true, { fixedDestination: 'joes-id', onOutcome })
+        await select(2, 'mac-id')
+        await select(0, 'mac-id')
+        await act(async () => button('Copy model').click())
+        expect(start).toHaveBeenCalledWith(
+            expect.objectContaining({
+                sourceNodeId: 'msi-id',
+                destinationNodeId: 'joes-id',
+                model: alias
+            })
+        )
+        expect(onOutcome).not.toHaveBeenCalled()
+    })
+
+    it.each([
+        {
+            name: 'confirmed custom receipt',
+            layout: 'llama-artifacts-v1',
+            durability: 'confirmed',
+            disposition: 'copied'
+        },
+        {
+            name: 'uncertain custom receipt',
+            layout: 'llama-artifacts-v1',
+            durability: 'uncertain',
+            disposition: 'unknown'
+        },
+        {
+            name: 'native layout without durability',
+            layout: 'native-layout',
+            durability: undefined,
+            disposition: 'copied'
+        }
+    ] satisfies Array<{
+        name: string
+        layout: string
+        durability: 'confirmed' | 'uncertain' | undefined
+        disposition: string
+    }>)(
+        '$name propagates the actual response result',
+        async ({ layout, durability, disposition }) => {
+            const onOutcome = vi.fn<(outcome: ModelCopyOutcome) => void>()
+            const reply = deferred<ModelCopyResponse>()
+            start.mockReturnValue(reply.promise)
+            await mount(undefined, true, { fixedDestination: 'joes-id', onOutcome })
+            await act(async () => button('Copy model').click())
+            const request = start.mock.calls[0][0]
+            const result = {
+                engine: 'llamacpp',
+                model: alias,
+                files: 1,
+                filesSkipped: 0,
+                bytesTotal: 19,
+                bytesCopied: 19,
+                layout,
+                durability
+            }
+            await act(async () => reply.resolve({ opId: request.opId, result }))
+            expect(onOutcome).toHaveBeenCalledExactlyOnceWith({
+                ...request,
+                disposition,
+                result,
+                reason: undefined
+            })
+            expect(onOutcome.mock.calls[0][0].result).toBe(result)
+        }
+    )
+
+    it('keeps close and cancel requests nonterminal, then reports canonical cancellation once', async () => {
+        const onOutcome = vi.fn<(outcome: ModelCopyOutcome) => void>()
+        const deploy = { fixedDestination: 'joes-id', onOutcome }
+        await mount(undefined, true, deploy)
+        await act(async () => button('Copy model').click())
+        const request = start.mock.calls[0][0]
+        await act(async () => publish(progress({ opId: request.opId })))
+        await act(async () => button('Cancel copy').click())
+        await act(async () => button('Close').click())
+        expect(onOutcome).not.toHaveBeenCalled()
+        await mount(undefined, false, deploy)
+        await act(async () => publish(progress({ opId: request.opId, status: 'cancelled' })))
+        await act(async () => publish(progress({ opId: request.opId, status: 'cancelled' })))
+        expect(onOutcome).toHaveBeenCalledExactlyOnceWith(
+            expect.objectContaining({ ...request, disposition: 'cancelled' })
+        )
+    })
+
+    it.each([
+        { status: 'cancelled', disposition: 'cancelled', rejectFirst: true },
+        { status: 'cancelled', disposition: 'cancelled', rejectFirst: false },
+        { status: 'error', disposition: 'refused', rejectFirst: true },
+        { status: 'error', disposition: 'refused', rejectFirst: false }
+    ] satisfies Array<{
+        status: 'cancelled' | 'error'
+        disposition: 'cancelled' | 'refused'
+        rejectFirst: boolean
+    }>)(
+        'settles canonical $status with invoke rejection first=$rejectFirst',
+        async ({ status, disposition, rejectFirst }) => {
+            const onOutcome = vi.fn<(outcome: ModelCopyOutcome) => void>()
+            const reply = deferred<ModelCopyResponse>()
+            start.mockReturnValue(reply.promise)
+            await mount(undefined, true, { fixedDestination: 'joes-id', onOutcome })
+            await act(async () => button('Copy model').click())
+            const request = start.mock.calls[0][0]
+            await act(async () => publish(progress({ opId: request.opId })))
+            await act(async () => button('Cancel copy').click())
+            if (rejectFirst) {
+                await act(async () => reply.reject(new Error('Copy reply lost')))
+                expect(onOutcome.mock.calls.map(([outcome]) => outcome.disposition)).toEqual([
+                    'unknown'
+                ])
+            }
+            await act(async () => publish(progress({ opId: request.opId, status })))
+            if (!rejectFirst) await act(async () => reply.reject(new Error('Copy reply lost')))
+            await act(async () => publish(progress({ opId: request.opId, status })))
+            expect(onOutcome.mock.calls.map(([outcome]) => outcome.disposition)).toEqual(
+                rejectFirst ? ['unknown', disposition] : [disposition]
+            )
+        }
+    )
+
+    it('upgrades unknown after close only with verified success and deduplicates the reply', async () => {
+        const onOutcome = vi.fn<(outcome: ModelCopyOutcome) => void>()
+        const deploy = { fixedDestination: 'joes-id', onOutcome }
+        const reply = deferred<ModelCopyResponse>()
+        start.mockReturnValue(reply.promise)
+        await mount(undefined, true, deploy)
+        await act(async () => button('Copy model').click())
+        const request = start.mock.calls[0][0]
+        await mount(undefined, false, deploy)
+        await act(async () => publish(progress({ opId: request.opId, status: 'unknown' })))
+        await act(async () => publish(progress({ opId: request.opId, status: 'done' })))
+        expect(onOutcome.mock.calls.map(([outcome]) => outcome.disposition)).toEqual(['unknown'])
+        const result: ModelCopyResponse['result'] = {
+            engine: 'llamacpp',
+            model: alias,
+            files: 1,
+            filesSkipped: 0,
+            bytesTotal: 19,
+            bytesCopied: 19,
+            layout: 'llama-artifacts-v1',
+            durability: 'confirmed'
+        }
+        await act(async () =>
+            publish(progress({ opId: request.opId, status: 'done', copyResult: result }))
+        )
+        await act(async () => reply.resolve({ opId: request.opId, result }))
+        expect(onOutcome.mock.calls.map(([outcome]) => outcome.disposition)).toEqual([
+            'unknown',
+            'copied'
+        ])
+    })
+
+    it('reports a definite service refusal', async () => {
+        const onOutcome = vi.fn<(outcome: ModelCopyOutcome) => void>()
+        start.mockRejectedValue(new ServiceCallError('Grant revoked', -32012))
+        await mount(undefined, true, { fixedDestination: 'joes-id', onOutcome })
+        await act(async () => button('Copy model').click())
+        expect(onOutcome).toHaveBeenCalledExactlyOnceWith(
+            expect.objectContaining({ disposition: 'refused' })
+        )
+    })
+
+    it('ignores stale operations and a late reply after the pinned destination changes', async () => {
+        const onOutcome = vi.fn<(outcome: ModelCopyOutcome) => void>()
+        const reply = deferred<ModelCopyResponse>()
+        start.mockReturnValue(reply.promise)
+        await mount(undefined, true, { fixedDestination: 'joes-id', onOutcome })
+        await act(async () => button('Copy model').click())
+        const request = start.mock.calls[0][0]
+        await act(async () => publish(progress({ opId: 'stale', status: 'cancelled' })))
+        await mount(undefined, true, { fixedDestination: 'mac-id', onOutcome })
+        await act(async () =>
+            reply.resolve({
+                opId: request.opId,
+                result: {
+                    engine: 'llamacpp',
+                    model: alias,
+                    files: 1,
+                    filesSkipped: 0,
+                    bytesTotal: 19,
+                    bytesCopied: 19,
+                    layout: 'llama-artifacts-v1',
+                    durability: 'confirmed'
+                }
+            })
+        )
+        expect(onOutcome).not.toHaveBeenCalled()
+    })
 })
 
 describe('copy selection', () => {

@@ -11,11 +11,20 @@ import {
     Text,
     TextInput
 } from '@nvidia/foundations-react-core'
-import type { NodeModelReference } from '@/shared/types/node-policy'
+import type { ModelSettingsIdentity } from '@/shared/types/model-config'
 import { EngineManagerNames } from '@/shared/constants/engines'
 import ModelLoadSettings from './ModelLoadSettings'
-import { modelSettingsKey, useEngineSettingsStore } from '@/ui/stores/engine-settings.store'
-import { parseModelSettings } from '@/shared/utils/node-policy-model-settings'
+import {
+    engineSettingsKey,
+    modelSettingsKey,
+    useEngineSettingsStore,
+    watchEngineSettings
+} from '@/ui/stores/engine-settings.store'
+import {
+    defaultProfileKey,
+    newProfileKeyStatus,
+    parseModelSettings
+} from '@/shared/utils/node-policy-model-settings'
 import ModelSettingsEditor from '@/ui/components/RoutingSettings/ModelSettingsEditor'
 import ModelProfileControls from './ModelProfileControls'
 import ModelSettingsCopy from './ModelSettingsCopy'
@@ -48,6 +57,7 @@ export default function ModelSettingsPanel({
     nodeId,
     nodeName,
     identity: initialIdentity,
+    selectedProfileKey,
     routing,
     open: controlledOpen,
     onOpenChange,
@@ -56,13 +66,14 @@ export default function ModelSettingsPanel({
     targetId: string
     nodeId?: string
     nodeName: string
-    identity?: NodeModelReference
+    identity?: ModelSettingsIdentity
+    selectedProfileKey?: string
     routing?: RoutingDraft
     open?: boolean
     onOpenChange?: (open: boolean) => void
     /** Task 3 composes selective preference copy here; content copy has a separate owner. */
     renderCopy?: (source: {
-        identity: NodeModelReference
+        identity: ModelSettingsIdentity
         policy: string
         targetId: string
         nodeId?: string
@@ -74,14 +85,15 @@ export default function ModelSettingsPanel({
         setLocalOpen(value)
         onOpenChange?.(value)
     }
-    const [pickedIdentity, setPickedIdentity] = useState<NodeModelReference | null>(null)
+    const [pickedIdentity, setPickedIdentity] = useState<ModelSettingsIdentity | null>(null)
+    const [newProfile, setNewProfile] = useState(false)
     const [valid, setValid] = useState(true)
     const [showLoad, setShowLoad] = useState(false)
     const [copyTarget, setCopyTarget] = useState<{
         targetId: string
         nodeId?: string
         nodeName: string
-        identity: NodeModelReference
+        identity: ModelSettingsIdentity
     } | null>(null)
     const connected = useConnectionStore(state => state.connected)
     const permissionContext = useClusterInvitationsStore(state => state.remoteManagementContext)
@@ -101,11 +113,74 @@ export default function ModelSettingsPanel({
     const savedText = routing?.savedText ?? entry?.saved?.policy ?? null
     const profiles = useMemo(() => parseModelSettings(text), [text])
     const first = profiles.ok ? profiles.value[0] : undefined
-    const identity = initialIdentity ??
-        pickedIdentity ?? {
+    const settingsEntries = useEngineSettingsStore(state => state.entries)
+    const profileIdentity = (
+        profile: Extract<typeof profiles, { ok: true }>['value'][number]
+    ): ModelSettingsIdentity => ({
+        engine: profile.engine,
+        model:
+            Object.values(settingsEntries)
+                .flatMap(entry =>
+                    entry.snapshot?.nodeId === targetId && entry.snapshot.engine === profile.engine
+                        ? (entry.snapshot.settings.modelLoads ?? [])
+                        : []
+                )
+                .find(load => load.profileKey === profile.key)?.modelId ?? profile.model,
+        profileKey: profile.key
+    })
+    const focused = profiles.ok
+        ? profiles.value.find(profile => profile.key === selectedProfileKey)
+        : undefined
+    const initialProfile =
+        profiles.ok && initialIdentity
+            ? profiles.value.find(profile => {
+                  const candidate = profileIdentity(profile)
+                  return (
+                      candidate.engine === initialIdentity.engine &&
+                      (initialIdentity.profileKey !== undefined
+                          ? profile.key === initialIdentity.profileKey
+                          : candidate.model === initialIdentity.model)
+                  )
+              })
+            : undefined
+    const pickedProfile =
+        !newProfile && profiles.ok
+            ? profiles.value.find(profile => profile.key === pickedIdentity?.profileKey)
+            : undefined
+    const identity = (pickedProfile ? profileIdentity(pickedProfile) : pickedIdentity) ??
+        (focused
+            ? profileIdentity(focused)
+            : selectedProfileKey
+              ? { engine: 'llamacpp', model: '', profileKey: selectedProfileKey }
+              : initialProfile
+                ? profileIdentity(initialProfile)
+                : initialIdentity) ?? {
             engine: first?.engine ?? 'llamacpp',
-            model: first?.model ?? ''
+            model: first ? profileIdentity(first).model : '',
+            profileKey: first?.key
         }
+    const selected =
+        profiles.ok &&
+        profiles.value.some(
+            item => item.engine === identity.engine && item.key === identity.profileKey
+        )
+    const creatingProfile = newProfile || !selected
+    const draftProfileKey =
+        creatingProfile && newProfileKeyStatus(text, identity.profileKey) !== 'available'
+            ? undefined
+            : identity.profileKey
+    useEffect(() => {
+        if (!open) return
+        const stop = watchEngineSettings()
+        void useEngineSettingsStore.getState().reload({ nodeId: targetId, engine: 'llamacpp' })
+        return stop
+    }, [open, targetId])
+    useEffect(() => {
+        if (!selectedProfileKey) return
+        setPickedIdentity(null)
+        setNewProfile(false)
+        setShowLoad(true)
+    }, [selectedProfileKey])
     const concurrent = !routing && entry !== undefined && entry.owner !== 'Model Manager'
     const paused = nodeId !== undefined && nodePaused(savedText ?? '', entry?.saved?.availability)
     const permission = nodeId !== undefined && management?.state !== 'allowed'
@@ -115,11 +190,12 @@ export default function ModelSettingsPanel({
     const loadDraft = useEngineSettingsStore(state =>
         settingsEngine
             ? state.modelDrafts[
-                  modelSettingsKey({ nodeId: targetId, engine: settingsEngine }, identity.model)
+                  modelSettingsKey({ nodeId: targetId, engine: settingsEngine }, draftProfileKey)
               ]
             : undefined
     )
-    const loadDirty = !!loadDraft?.change?.load || !!loadDraft?.change?.policy
+    const loadDirty =
+        !!loadDraft?.change?.load || !!loadDraft?.change?.policy || !!loadDraft?.change?.remove
     const loadAuthority = JSON.stringify([
         targetId,
         identity,
@@ -150,7 +226,7 @@ export default function ModelSettingsPanel({
         if (settingsEngine) {
             const store = useEngineSettingsStore.getState()
             store.discardModel(
-                modelSettingsKey({ nodeId: targetId, engine: settingsEngine }, identity.model)
+                modelSettingsKey({ nodeId: targetId, engine: settingsEngine }, identity.profileKey)
             )
             if (showLoad) void store.reload({ nodeId: targetId, engine: settingsEngine })
         }
@@ -170,11 +246,6 @@ export default function ModelSettingsPanel({
         [routingValidityChange]
     )
     const message = routing?.message ?? entry?.message
-    const selected =
-        profiles.ok &&
-        profiles.value.some(
-            item => item.engine === identity.engine && item.model === identity.model
-        )
     if (copyTarget)
         return (
             <ModelSettingsPanel
@@ -271,74 +342,115 @@ export default function ModelSettingsPanel({
                         message={message}
                     />
                 )}
-                {!initialIdentity && (
+                {selectedProfileKey && !focused && (
+                    <InlineErrorBanner
+                        severity="warning"
+                        message={`Profile ${selectedProfileKey} is unavailable in this node's current policy.`}
+                    />
+                )}
+                <Button
+                    size="small"
+                    kind="secondary"
+                    disabled={disabled}
+                    onClick={() => {
+                        setPickedIdentity({
+                            engine: identity.engine,
+                            model: identity.model,
+                            profileKey: defaultProfileKey(identity.model)
+                        })
+                        setNewProfile(true)
+                        setShowLoad(true)
+                    }}
+                >
+                    New profile
+                </Button>
+                {
                     <>
                         {profiles.ok && profiles.value.length > 0 && (
                             <FormField slotLabel="Existing profile">
                                 <Select
                                     aria-label="Existing profile"
-                                    value={
-                                        selected
-                                            ? JSON.stringify([identity.engine, identity.model])
-                                            : ''
-                                    }
-                                    items={profiles.value.map(item => ({
-                                        value: item.key,
-                                        children: `${item.name || item.model} (${item.engine})`
-                                    }))}
+                                    value={selected && !newProfile ? identity.profileKey : ''}
+                                    items={profiles.value
+                                        .filter(
+                                            item =>
+                                                !initialIdentity ||
+                                                profileIdentity(item).model ===
+                                                    initialIdentity.model
+                                        )
+                                        .map(item => ({
+                                            value: item.key,
+                                            children: `${item.displayName} (${item.key}) · Context ${settingsEntries[engineSettingsKey({ nodeId: targetId, engine: 'llamacpp' })]?.snapshot?.settings.modelLoads?.find(load => load.profileKey === item.key)?.resolved?.perSlotContext ?? 'Unknown'}`
+                                        }))}
                                     onValueChange={value => {
                                         const found = profiles.value.find(
                                             item => item.key === value
                                         )
-                                        if (found)
-                                            setPickedIdentity({
-                                                engine: found.engine,
-                                                model: found.model
-                                            })
+                                        if (found) {
+                                            setPickedIdentity(profileIdentity(found))
+                                            setNewProfile(false)
+                                            setShowLoad(true)
+                                        }
                                     }}
                                 />
                             </FormField>
                         )}
-                        <FormField slotLabel="Engine">
-                            <Select
-                                aria-label="Model engine"
-                                value={identity.engine}
-                                items={[{ value: 'llamacpp', children: 'llama.cpp' }]}
-                                onValueChange={engine => setPickedIdentity({ ...identity, engine })}
-                            />
-                        </FormField>
-                        <FormField
-                            slotLabel="Exact native model"
-                            slotHelp="Enter the native model identifier, including when the engine is Off or inventory is unavailable."
-                        >
-                            <TextInput
-                                aria-label="Exact native model"
-                                value={identity.model}
-                                onValueChange={model => setPickedIdentity({ ...identity, model })}
-                            />
-                        </FormField>
+                        {!initialIdentity && (
+                            <FormField slotLabel="Engine">
+                                <Select
+                                    aria-label="Model engine"
+                                    value={identity.engine}
+                                    items={[{ value: 'llamacpp', children: 'llama.cpp' }]}
+                                    onValueChange={engine =>
+                                        setPickedIdentity({ ...identity, engine })
+                                    }
+                                />
+                            </FormField>
+                        )}
+                        {(!initialIdentity || newProfile) && (
+                            <FormField
+                                slotLabel="Exact native model"
+                                slotHelp="Enter the native model identifier, including when the engine is Off or inventory is unavailable."
+                            >
+                                <TextInput
+                                    aria-label="Exact native model"
+                                    value={identity.model}
+                                    onValueChange={model =>
+                                        setPickedIdentity({ ...identity, model })
+                                    }
+                                />
+                            </FormField>
+                        )}
                     </>
-                )}
+                }
                 <ModelProfileControls
-                    key={`profile:${JSON.stringify(identity)}`}
+                    key={`profile:${JSON.stringify([targetId, identity.engine, identity.model, newProfile ? 'new' : identity.profileKey])}`}
                     text={text}
                     savedText={savedText}
                     identity={identity}
                     remote={nodeId !== undefined}
                     disabled={disabled}
-                    onTextChange={changeText}
+                    target={
+                        settingsEngine ? { nodeId: targetId, engine: settingsEngine } : undefined
+                    }
+                    policyRevision={entry?.saved?.revision ?? ''}
+                    newProfile={creatingProfile}
+                    onIdentityChange={setPickedIdentity}
+                    onReview={() => setShowLoad(true)}
                 />
-                <ModelSettingsEditor
-                    key={`generation:${JSON.stringify(identity)}`}
-                    text={text}
-                    savedText={savedText}
-                    identity={identity}
-                    nodeName={nodeName}
-                    remote={nodeId !== undefined}
-                    disabled={disabled}
-                    onTextChange={changeText}
-                    onValidityChange={onValidityChange}
-                />
+                {!newProfile && (
+                    <ModelSettingsEditor
+                        key={`generation:${JSON.stringify(identity)}`}
+                        text={text}
+                        savedText={savedText}
+                        identity={identity}
+                        nodeName={nodeName}
+                        remote={nodeId !== undefined}
+                        disabled={disabled}
+                        onTextChange={changeText}
+                        onValidityChange={onValidityChange}
+                    />
+                )}
                 {settingsEngine && identity.model && (
                     <>
                         <Button kind="secondary" onClick={() => setShowLoad(value => !value)}>
@@ -348,9 +460,16 @@ export default function ModelSettingsPanel({
                         </Button>
                         {showLoad && (
                             <ModelLoadSettings
-                                key={JSON.stringify([targetId, identity])}
+                                key={JSON.stringify([
+                                    targetId,
+                                    identity.engine,
+                                    identity.model,
+                                    newProfile ? 'new' : identity.profileKey
+                                ])}
                                 target={{ nodeId: targetId, engine: settingsEngine }}
                                 modelId={identity.model}
+                                profileKey={identity.profileKey}
+                                newProfile={creatingProfile}
                                 policy={text}
                                 savedPolicy={savedText ?? ''}
                                 policyRevision={entry?.saved?.revision ?? ''}
@@ -372,11 +491,17 @@ export default function ModelSettingsPanel({
                         renderCopy({ identity, policy: text, targetId, nodeId })
                     ) : (
                         <ModelSettingsCopy
-                            key={JSON.stringify([targetId, identity.engine, identity.model])}
+                            key={JSON.stringify([
+                                targetId,
+                                identity.engine,
+                                identity.model,
+                                identity.profileKey
+                            ])}
                             identity={identity}
                             policy={text}
                             targetId={targetId}
                             disabled={
+                                creatingProfile ||
                                 !connected ||
                                 !entry?.current ||
                                 concurrent ||

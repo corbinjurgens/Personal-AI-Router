@@ -30,10 +30,10 @@ import { useEngineProgressStore } from '@/ui/stores/engine-progress.store'
 import { useNodeConfigurationStore } from '@/ui/stores/node-configuration.store'
 import { useNodesStore } from '@/ui/stores/nodes.store'
 import { usePendingActionsStore } from '@/ui/stores/pending-actions.store'
+import { modelSettingsKey, useEngineSettingsStore } from '@/ui/stores/engine-settings.store'
 
 vi.mock('@/ui/components/RoutingSettings/RoleEditor', () => ({ default: () => null }))
 vi.mock('@/ui/components/NodeList/NodeEngineSettings', () => ({ default: () => null }))
-vi.mock('@/ui/components/RoutingSettings/BulkNodeConfiguration', () => ({ default: () => null }))
 vi.mock('@/ui/components/ModelManager/ModelCopyModal', () => ({ ModelCopyModal: () => null }))
 vi.mock('@/ui/components/ModelHub/ModelHubModal', () => ({ ModelHubModal: () => null }))
 
@@ -55,7 +55,7 @@ function saved(
             version: 2,
             revision,
             availability,
-            profiles: [{ name: 'profile', ...identity }],
+            profiles: [{ key: identity.model, displayName: 'profile', ...identity }],
             ...extra
         }),
         revision,
@@ -163,7 +163,8 @@ function manager() {
 }
 
 beforeEach(() => {
-    useOverviewUiStore.setState({ settingsNodeId: null })
+    useOverviewUiStore.setState({ settingsNodeId: null, settingsProfileKey: null })
+    useEngineSettingsStore.setState({ entries: {}, modelDrafts: {} })
     vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
     vi.stubGlobal('CSS', { supports: () => false, escape: (value: string) => value })
     Object.defineProperty(HTMLDialogElement.prototype, 'show', {
@@ -222,6 +223,33 @@ beforeEach(() => {
     api.engines.loadModel = vi.fn<typeof api.engines.loadModel>()
     api.engines.deleteModel = vi.fn<typeof api.engines.deleteModel>()
     api.engines.unloadModel = vi.fn<typeof api.engines.unloadModel>()
+    api.engines.getSettings = vi
+        .fn<typeof api.engines.getSettings>()
+        .mockImplementation(async request => ({
+            ...request,
+            revision: 1,
+            appliedRevision: 1,
+            sequence: 1,
+            epoch: 'test',
+            settings: { serverPort: 1, proxyPort: 2, launchText: '', modelLoads: [] },
+            effectiveServerPort: 1,
+            effectiveProxyPort: 2,
+            running: false,
+            adopted: false,
+            editable: true,
+            reason: '',
+            format: '',
+            phase: 'idle',
+            error: '',
+            requestId: ''
+        }))
+    api.engines.inspectModel = vi
+        .fn<typeof api.engines.inspectModel>()
+        .mockImplementation(async request => ({
+            ...request,
+            status: 'resolved',
+            estimate: { status: 'unknown' }
+        }))
     Object.defineProperty(window, 'pairApi', { configurable: true, value: api })
     useConnectionStore.setState({ connected: true, selfId: 'self' })
     useNodesStore.setState({ nodes: new Map() })
@@ -249,22 +277,139 @@ afterEach(async () => {
 })
 
 describe('composed model settings', () => {
+    it('isolates a new profile when its suggested key already has a saved load and dirty draft', async () => {
+        const profileKey = 'owner-model-q4_k_m'
+        getPolicy.mockResolvedValue(
+            saved({
+                profiles: [
+                    {
+                        key: profileKey,
+                        displayName: 'Existing profile',
+                        ...identity,
+                        model: profileKey
+                    }
+                ]
+            })
+        )
+        const readSettings = window.pairApi.engines.getSettings
+        window.pairApi.engines.getSettings = vi
+            .fn<typeof window.pairApi.engines.getSettings>()
+            .mockImplementation(async request => {
+                const snapshot = await readSettings(request)
+                return {
+                    ...snapshot,
+                    settings: {
+                        ...snapshot.settings,
+                        modelLoads: [
+                            { profileKey, modelId: identity.model, requested: { slots: 7 } }
+                        ]
+                    }
+                }
+            })
+        await render(rowPanel())
+        const existingKey = modelSettingsKey({ nodeId: 'self', engine: 'llamacpp' }, profileKey)
+        const existingChange = {
+            modelId: identity.model,
+            profileKey,
+            expectedPolicyRevision: '1',
+            policy: { displayName: 'Unsaved existing name' }
+        }
+        await act(async () =>
+            useEngineSettingsStore.getState().editModel(existingKey, existingChange)
+        )
+        await act(async () => button('New profile', panel()).click())
+        expect(input('Profile key').value).toBe(profileKey)
+        expect(panel().textContent).toContain('This profile key already exists.')
+        expect(panel().textContent).toContain('Saved requested overrides: {}')
+        expect(button('Preview model changes', panel()).disabled).toBe(true)
+        expect(panel().textContent).not.toContain('Remove profile')
+        await type('Profile key', 'fresh-profile')
+        expect(useEngineSettingsStore.getState().modelDrafts[existingKey].change).toEqual(
+            existingChange
+        )
+        expect(panel().textContent).toContain('Saved requested overrides: {}')
+        expect(button('Create profile', panel()).disabled).toBe(false)
+        expect(setPolicy).not.toHaveBeenCalled()
+    })
+
+    it('creates a sibling with an explicit key and the original artifact model id', async () => {
+        await render(rowPanel())
+        await act(async () => button('New profile', panel()).click())
+        expect(input('Profile key').value).toBe('owner-model-q4_k_m')
+        await type('Profile key', 'second-profile')
+        await type('Display name', 'Large context')
+        await act(async () => button('Create profile', panel()).click())
+        expect(
+            useEngineSettingsStore.getState().modelDrafts[
+                modelSettingsKey({ nodeId: 'self', engine: 'llamacpp' }, 'second-profile')
+            ]?.change
+        ).toEqual({
+            profileKey: 'second-profile',
+            modelId: 'owner/model:Q4_K_M',
+            expectedPolicyRevision: '1',
+            load: { set: {}, clear: ['context'] },
+            policy: { displayName: 'Large context', icon: '' }
+        })
+        expect(selected()?.displayName).toBe('profile')
+        expect(setPolicy).not.toHaveBeenCalled()
+    })
+
+    it('blocks a reserved profile key while accepting coder-local', async () => {
+        await render(rowPanel())
+        await act(async () => button('New profile', panel()).click())
+        await type('Profile key', 'medium-local')
+        expect(button('Create profile', panel()).disabled).toBe(true)
+        await type('Profile key', 'coder-local')
+        expect(button('Create profile', panel()).disabled).toBe(false)
+    })
+
+    it('opens the card-selected keyed request editor on the selected node', async () => {
+        getPolicy.mockResolvedValue(
+            saved({
+                profiles: [
+                    {
+                        key: 'small',
+                        displayName: 'Small context',
+                        engine: 'llamacpp',
+                        model: 'small',
+                        requestOptions: { temperature: 0.1 }
+                    },
+                    {
+                        key: 'large',
+                        displayName: 'Large context',
+                        engine: 'llamacpp',
+                        model: 'large',
+                        requestOptions: { temperature: 0.8 }
+                    }
+                ]
+            })
+        )
+        useOverviewUiStore.getState().focusNodeSettings('self', 'large')
+        await render(<RoutingSettings />)
+        expect(panel().textContent).toContain('Draft profile: Large context')
+        expect(input('Temperature').value).toBe('0.8')
+        await type('Temperature', '0.6')
+        const parsed = parseModelSettings(draft().text)
+        if (!parsed.ok) throw new Error(parsed.error.message)
+        expect(parsed.value.map(profile => [profile.key, profile.options.temperature])).toEqual([
+            ['small', 0.1],
+            ['large', 0.6]
+        ])
+    })
+
     it.each(['Model Manager', 'Routing'])(
-        'creates and edits the same generation fields from %s without engine commands',
+        'edits the same keyed generation fields from %s without engine commands',
         async origin => {
-            getPolicy.mockResolvedValue(saved({ profiles: [] }))
             if (origin === 'Routing') {
                 await render(<RoutingSettings />)
                 await act(async () => button('Configure model').click())
-                await type('Exact native model', identity.model)
             } else await render(rowPanel())
             expect(panel().textContent).toContain('Node: This PC')
             expect(panel().textContent).toContain(identity.model)
-            await type('Profile name', 'new-profile')
-            await act(async () => button('Create profile', panel()).click())
             await type('Temperature', '0.6')
             expect(selected()).toMatchObject({
-                name: 'new-profile',
+                key: identity.model,
+                displayName: 'profile',
                 mode: 'defaults',
                 options: { temperature: 0.6 }
             })
@@ -280,7 +425,12 @@ describe('composed model settings', () => {
             const request = setPolicy.mock.lastCall?.[0]
             if (!request) throw new Error('Missing saved policy')
             expect(JSON.parse(request.policy).profiles).toEqual([
-                { name: 'new-profile', ...identity, requestOptions: { temperature: 0.25 } }
+                {
+                    key: identity.model,
+                    displayName: 'profile',
+                    ...identity,
+                    requestOptions: { temperature: 0.25 }
+                }
             ])
             expect(window.pairApi.engines.loadModel).not.toHaveBeenCalled()
             expect(window.pairApi.engines.deleteModel).not.toHaveBeenCalled()
@@ -307,8 +457,13 @@ describe('composed model settings', () => {
         getPolicy.mockResolvedValue(
             saved({
                 profiles: [
-                    { name: 'llama-profile', ...identity },
-                    { name: 'second-profile', engine: 'llamacpp', model: 'owner/second:Q8_0' }
+                    { key: 'llama-profile', displayName: 'llama-profile', ...identity },
+                    {
+                        key: 'second-profile',
+                        displayName: 'Second profile',
+                        engine: 'llamacpp',
+                        model: 'owner/second:Q8_0'
+                    }
                 ]
             })
         )
@@ -321,7 +476,7 @@ describe('composed model settings', () => {
         if (!(trigger instanceof HTMLButtonElement)) throw new Error('Missing profile selector')
         await act(async () => trigger.click())
         const option = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]')).find(
-            item => item.textContent?.trim() === 'second-profile (llamacpp)'
+            item => item.textContent?.trim() === 'Second profile (second-profile) · Context Unknown'
         )
         if (!option) throw new Error('Missing second profile option')
         await act(async () => option.click())
@@ -336,11 +491,23 @@ describe('composed model settings', () => {
         ])
     })
 
-    it('refuses resident profile removal and explains the qualification boundary', async () => {
+    it('stages untyped resident profile removal through the coupled operation', async () => {
         getPolicy.mockResolvedValue(saved({ residentModels: [identity] }))
         await render(rowPanel())
-        expect(button('Remove profile', panel()).disabled).toBe(true)
-        expect(panel().textContent).toContain('Remove this model from residentModels')
+        expect(button('Remove profile', panel()).disabled).toBe(false)
+        await act(async () => button('Remove profile', panel()).click())
+        expect(panel().textContent).toContain('Served permission and engine bindings stay in place')
+        await act(async () => button('Confirm remove profile', panel()).click())
+        expect(
+            useEngineSettingsStore.getState().modelDrafts[
+                modelSettingsKey({ nodeId: 'self', engine: 'llamacpp' }, identity.model)
+            ]?.change
+        ).toEqual({
+            modelId: identity.model,
+            profileKey: identity.model,
+            expectedPolicyRevision: '1',
+            remove: true
+        })
         expect(panel().textContent).toContain('Setup does not create qualifications')
         expect(setPolicy).not.toHaveBeenCalled()
     })
@@ -350,14 +517,76 @@ describe('composed model settings', () => {
         await act(async () => button('Remove profile', panel()).click())
         expect(selected()).toBeDefined()
         await act(async () => button('Confirm remove profile', panel()).click())
-        expect(selected()).toBeUndefined()
+        expect(selected()).toBeDefined()
+        expect(
+            useEngineSettingsStore.getState().modelDrafts[
+                modelSettingsKey({ nodeId: 'self', engine: 'llamacpp' }, identity.model)
+            ]?.change?.remove
+        ).toBe(true)
         expect(window.pairApi.engines.deleteModel).not.toHaveBeenCalled()
         expect(setPolicy).not.toHaveBeenCalled()
     })
 
+    it('reviews typed removal against the served key and preserves the artifact id', async () => {
+        getPolicy.mockResolvedValue(
+            saved({
+                profiles: [
+                    {
+                        key: 'large',
+                        displayName: 'Large context',
+                        engine: 'llamacpp',
+                        model: 'large'
+                    }
+                ]
+            })
+        )
+        const readSettings = window.pairApi.engines.getSettings
+        window.pairApi.engines.getSettings = vi
+            .fn<typeof readSettings>()
+            .mockImplementation(async request => {
+                const result = await readSettings(request)
+                return {
+                    ...result,
+                    settings: {
+                        ...result.settings,
+                        modelLoads: [
+                            { profileKey: 'large', modelId: identity.model, requested: {} }
+                        ]
+                    }
+                }
+            })
+        await render(rowPanel())
+        await act(async () => button('Remove profile', panel()).click())
+        expect(panel().textContent).toContain(
+            'served permission, residency and engine binding for this profile key'
+        )
+        expect(
+            useEngineSettingsStore.getState().modelDrafts[
+                modelSettingsKey({ nodeId: 'self', engine: 'llamacpp' }, 'large')
+            ]?.change
+        ).toBeUndefined()
+        await act(async () => button('Confirm remove profile', panel()).click())
+        expect(
+            useEngineSettingsStore.getState().modelDrafts[
+                modelSettingsKey({ nodeId: 'self', engine: 'llamacpp' }, 'large')
+            ]?.change
+        ).toEqual({
+            modelId: 'owner/model:Q4_K_M',
+            profileKey: 'large',
+            remove: true,
+            expectedPolicyRevision: '1'
+        })
+        expect(setPolicy).not.toHaveBeenCalled()
+        expect(window.pairApi.engines.deleteModel).not.toHaveBeenCalled()
+    })
+
     it('keeps peer generation controls locked when raw draft JSON removes the saved lock', async () => {
         getPolicy.mockResolvedValue(
-            saved({ profiles: [{ name: 'profile', ...identity, localOnly: true }] })
+            saved({
+                profiles: [
+                    { key: identity.model, displayName: 'profile', ...identity, localOnly: true }
+                ]
+            })
         )
         await render(rowPanel('peer'))
         await act(async () =>
@@ -543,7 +772,12 @@ describe('composed model settings', () => {
                 saved(
                     {
                         profiles: [
-                            { name: 'profile', ...identity, requestOptions: { temperature: 0.8 } }
+                            {
+                                key: identity.model,
+                                displayName: 'profile',
+                                ...identity,
+                                requestOptions: { temperature: 0.8 }
+                            }
                         ]
                     },
                     '3'
@@ -762,7 +996,7 @@ describe('composed model settings', () => {
             />
         )
         expect(copy).toHaveBeenLastCalledWith({
-            identity,
+            identity: { ...identity, profileKey: identity.model },
             policy: saved().policy,
             targetId: 'self',
             nodeId: undefined

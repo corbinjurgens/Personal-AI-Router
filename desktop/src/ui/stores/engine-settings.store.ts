@@ -14,6 +14,7 @@ import { useClusterInvitationsStore } from '@/ui/stores/cluster-invitations.stor
 import { nodePaused, useNodeConfigurationStore } from '@/ui/stores/node-configuration.store'
 import getErrorString from '@/shared/utils/get-error-string'
 import { modelPolicyPatch } from '@/shared/utils/node-policy-model-copy'
+import { isValidProfileKey } from '@/shared/utils/node-policy-model-settings'
 import { serviceErrorCode } from '@/ui/api/service-transport'
 import {
     INVALID_PARAMS_CODE,
@@ -41,7 +42,11 @@ interface SettingsStore {
     editModel: (key: string, change: ModelChange) => void
     discardModel: (key: string) => void
     invalidateModel: (key: string) => void
-    inspectModel: (target: EngineSettingsTarget, modelId: string) => Promise<void>
+    inspectModel: (
+        target: EngineSettingsTarget,
+        modelId: string,
+        profileKey?: string
+    ) => Promise<void>
     previewModel: (
         target: EngineSettingsTarget,
         change: ModelChange,
@@ -95,8 +100,8 @@ interface ModelPreviewOwner {
 // Transport calls cannot be aborted. Keep their ownership until they settle,
 // even when a draft is logically cancelled, and coalesce its next request.
 let modelPreview: ModelPreviewOwner | undefined
-export const modelSettingsKey = (target: EngineSettingsTarget, modelId: string): string =>
-    `${engineSettingsKey(target)}:${modelId}`
+export const modelSettingsKey = (target: EngineSettingsTarget, profileKey?: string): string =>
+    `${engineSettingsKey(target)}:${profileKey ?? ''}`
 
 function invalidateDraft(draft?: ModelDraft): ModelDraft {
     return {
@@ -248,12 +253,22 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
                 [key]: withdrawLoadObservation(invalidateDraft(state.modelDrafts[key]))
             }
         })),
-    inspectModel: async (target, modelId) => {
-        const key = modelSettingsKey(target, modelId)
+    inspectModel: async (target, modelId, profileKey) => {
+        const key = modelSettingsKey(target, profileKey)
         get().invalidateModel(key)
         const generation = get().modelDrafts[key].generation
+        set(state => ({
+            modelDrafts: {
+                ...state.modelDrafts,
+                [key]: { ...state.modelDrafts[key], inspection: undefined }
+            }
+        }))
         try {
-            const inspection = await window.pairApi.engines.inspectModel({ ...target, modelId })
+            const inspection = await window.pairApi.engines.inspectModel({
+                ...target,
+                modelId,
+                ...(profileKey === undefined ? {} : { profileKey })
+            })
             if (
                 inspection.engine !== target.engine ||
                 inspection.modelId !== modelId ||
@@ -295,7 +310,20 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
             if (!Object.values(change.policy).some(value => value !== undefined))
                 delete change.policy
         }
-        const key = modelSettingsKey(target, change.modelId)
+        const key = modelSettingsKey(target, change.profileKey)
+        if (!isValidProfileKey(change.profileKey ?? change.modelId)) {
+            get().invalidateModel(key)
+            set(state => ({
+                modelDrafts: {
+                    ...state.modelDrafts,
+                    [key]: {
+                        ...state.modelDrafts[key],
+                        message: 'Enter a valid profile key before reviewing.'
+                    }
+                }
+            }))
+            return
+        }
         const draft = get().modelDrafts[key]
         const owner = modelPreview
         const authorityState = modelAuthority(target)
@@ -416,9 +444,13 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
             }
             await authorizeModel(request, current)
             if (!current()) return
+            const savedLoad = snapshot.settings.modelLoads?.find(
+                load => change.profileKey !== undefined && load.profileKey === change.profileKey
+            )
             const inspection = await window.pairApi.engines.inspectModel({
                 ...target,
-                modelId: change.modelId
+                modelId: change.modelId,
+                ...(savedLoad ? { profileKey: savedLoad.profileKey } : {})
             })
             if (!current()) return
             if (
@@ -441,9 +473,7 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
                     preview.policyRevision !== change.expectedPolicyRevision)
             )
                 throw new Error('Preview revisions do not match the target. Review again.')
-            const saved = snapshot.settings.modelLoads?.find(
-                load => load.modelId === change.modelId
-            )?.requested
+            const saved = savedLoad?.requested
             const context = change.load?.clear?.includes('context')
                 ? undefined
                 : (change.load?.set.context ?? saved?.context)
@@ -541,11 +571,19 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
         put({ busy: true })
         try {
             if (!current()) throw new Error('Preview expired. Your draft is kept.')
+            await get().reload(request)
+            if (!current()) throw new Error('Preview expired. Your draft is kept.')
             await authorizeModel(request, current)
+            const profileKey = request.modelChange?.profileKey
+            const snapshot = get().entries[engineSettingsKey(request)]?.snapshot
+            const savedLoad = snapshot?.settings.modelLoads?.find(
+                load => profileKey !== undefined && load.profileKey === profileKey
+            )
             const inspection = await window.pairApi.engines.inspectModel({
                 engine: request.engine,
                 nodeId: request.nodeId,
-                modelId: request.modelChange?.modelId ?? ''
+                modelId: request.modelChange?.modelId ?? '',
+                ...(savedLoad ? { profileKey: savedLoad.profileKey } : {})
             })
             if (!current() || inspectionIdentity(inspection) !== review.inspection)
                 throw new Error('Artifact, build or target changed. Preview again.')
@@ -557,7 +595,8 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
                 policyDraft?.baseline && request.modelChange
                     ? modelPolicyPatch(policyDraft.baseline.policy, policyDraft.text, {
                           engine: request.engine,
-                          model: request.modelChange.modelId
+                          model: request.modelChange.modelId,
+                          profileKey: request.modelChange.profileKey
                       })
                     : undefined
             const submittedGeneration = request.modelChange?.policy?.generation ?? {}
@@ -566,7 +605,11 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
                 policyDraft?.baseline &&
                 selected?.ok &&
                 (Object.keys(draftGeneration).length > 0 ||
-                    selected.value.requestOptionsMode !== undefined) &&
+                    selected.value.requestOptionsMode !== undefined ||
+                    selected.value.displayName !== undefined ||
+                    selected.value.icon !== undefined) &&
+                selected.value.displayName === request.modelChange?.policy?.displayName &&
+                selected.value.icon === request.modelChange?.policy?.icon &&
                 selected.value.requestOptionsMode ===
                     request.modelChange?.policy?.requestOptionsMode &&
                 Object.keys(draftGeneration).length === Object.keys(submittedGeneration).length &&
@@ -741,7 +784,12 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
         })),
     reload: async target => {
         const key = engineSettingsKey(target)
-        const arrival = get().entries[key]?.arrival ?? 0
+        const arrival = (get().entries[key]?.arrival ?? 0) + 1
+        // Reserve this read even without a cached snapshot. A newer read or
+        // disconnect must fence an earlier first response too.
+        set(state => ({
+            entries: { ...state.entries, [key]: { ...state.entries[key], arrival } }
+        }))
         try {
             const snapshot = await window.pairApi.engines.getSettings(target)
             // A push/disconnect after this read began wins, including a new authority epoch.

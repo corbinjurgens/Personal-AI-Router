@@ -14,10 +14,12 @@ import (
 	"os"
 	"reflect"
 	"slices"
+	"strings"
 	"time"
 
 	"nvpair-shared/durablefile"
 	"nvpair-shared/engineintent"
+	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/modelconfig"
 	"nvpair-shared/nodepolicy"
@@ -57,6 +59,7 @@ type modelSettingsOperation struct {
 	Change              modelconfig.ModelChange `json:"change"`
 	Review              settings.Preview        `json:"review"`
 	ReviewedModelChange modelconfig.ModelChange `json:"reviewedModelChange,omitzero"`
+	ConversionProfiles  []string                `json:"conversionProfiles,omitempty"`
 	NativeBefore        settings.Config         `json:"nativeBefore"`
 	Before              string                  `json:"before"`
 	After               string                  `json:"after"`
@@ -91,6 +94,29 @@ func validateStoredModelSettings(record *engineSettingsRecord) error {
 	}
 	if _, err := op.reviewedRemoval(); err != nil {
 		return err
+	}
+	if err := validateConversionProfiles(op.Review, op.ConversionProfiles); err != nil {
+		return err
+	}
+	// Ordinary native previews return only the selected identity. Conversion
+	// reviews additionally retain sibling identities, so losing their scope
+	// cannot silently turn a fresh repair into an ordinary selected-only edit.
+	requireScope := len(op.ConversionProfiles) != 0
+	for _, load := range op.Review.Settings.ModelLoads {
+		if _, converted := modelConversionInput(load); converted {
+			if _, accepted := op.Review.Identities[load.ProfileKey]; accepted && (len(op.NativeBefore.ModelLoads) == 0 || load.ProfileKey != modelChangeKey(op.Change)) {
+				requireScope = true
+			}
+		}
+	}
+	if requireScope {
+		for _, load := range op.Review.Settings.ModelLoads {
+			_, converted := modelConversionInput(load)
+			_, accepted := op.Review.Identities[load.ProfileKey]
+			if converted && accepted && !slices.Contains(op.ConversionProfiles, load.ProfileKey) {
+				return fmt.Errorf("accepted conversion publication scope is incomplete")
+			}
+		}
 	}
 	for _, fingerprint := range []string{op.Before, op.After, op.Implications} {
 		if value, err := hex.DecodeString(fingerprint); err != nil || len(value) != sha256.Size {
@@ -302,7 +328,9 @@ func validateModelPolicyChange(policy nodepolicy.Policy, engine string, change m
 		if typed {
 			model = key
 		}
-		if profile.Engine != engine || profile.Model != model {
+		// An untyped descriptor names the artifact. Its first typed load uses
+		// the profile key as served id while retaining that exact artifact.
+		if profile.Engine != engine || profile.Model != model && (!typed || profile.Model != change.ModelID) {
 			return &invalidParamsError{err: fmt.Errorf("A profile keeps its model; create a new profile.")}
 		}
 	}
@@ -351,6 +379,9 @@ func patchModelPolicy(stored nodepolicy.Policy, engine string, change modelconfi
 			i = len(policy.Profiles) - 1
 		}
 		profile := &policy.Profiles[i]
+		if change.Load != nil || slices.ContainsFunc(loads, func(load modelconfig.ModelLoad) bool { return load.ProfileKey == key }) {
+			profile.Model = key
+		}
 		if patch != nil {
 			if patch.DisplayName != nil {
 				profile.DisplayName = *patch.DisplayName
@@ -427,6 +458,109 @@ func patchModelPolicy(stored nodepolicy.Policy, engine string, change modelconfi
 		}
 	}
 	return policy, nil
+}
+
+func modelConversionInput(load modelconfig.ModelLoad) (string, bool) {
+	if load.Resolved == nil {
+		return "", false
+	}
+	if load.Resolved.ResolverRevision == "external-conversion/llama" {
+		return load.Resolved.ReviewedInputID, true
+	}
+	if strings.HasPrefix(load.Resolved.ResolverRevision, "auto/") {
+		source, _, converted := strings.Cut(load.Resolved.ReviewedInputID, ":")
+		return source, converted
+	}
+	return "", false
+}
+
+func validateConversionProfiles(review settings.Preview, keys []string) error {
+	seen := map[string]bool{}
+	for _, key := range keys {
+		if seen[key] || !slices.ContainsFunc(review.Settings.ModelLoads, func(load modelconfig.ModelLoad) bool { return load.ProfileKey == key }) {
+			return modelSettingsConflict("accepted conversion profile is missing or duplicated")
+		}
+		seen[key] = true
+		if _, ok := review.Identities[key]; !ok {
+			return fmt.Errorf("native preview did not return converted profile %q's model identity", key)
+		}
+	}
+	return nil
+}
+
+// Conversion publication belongs to the accepted operation, not to provenance
+// left in an ordinary typed load. Fresh local repair carries that authority and
+// the unchanged siblings' accepted facts into its own review and journal.
+func modelConversionReview(previous *modelSettingsOperation, change modelconfig.ModelChange, review settings.Preview, before settings.Config) (settings.Preview, []string, error) {
+	var keys []string
+	if previous != nil && previous.Stage != "completed" && len(previous.ConversionProfiles) != 0 {
+		review = review.Clone()
+		if review.Identities == nil {
+			review.Identities = map[string]engines.ModelIdentity{}
+		}
+		for _, key := range previous.ConversionProfiles {
+			if key == modelChangeKey(change) && change.Remove {
+				continue
+			}
+			keys = append(keys, key)
+			if key == modelChangeKey(change) {
+				continue
+			}
+			old := slices.IndexFunc(previous.Review.Settings.ModelLoads, func(load modelconfig.ModelLoad) bool { return load.ProfileKey == key })
+			next := slices.IndexFunc(review.Settings.ModelLoads, func(load modelconfig.ModelLoad) bool { return load.ProfileKey == key })
+			if old < 0 || next < 0 || previous.Review.Settings.ModelLoads[old].Resolved == nil || review.Settings.ModelLoads[next].Resolved == nil {
+				return review, nil, modelSettingsConflict("unfinished conversion lost a resolved sibling")
+			}
+			accepted := previous.Review.Settings.ModelLoads[old]
+			resolved := *accepted.Resolved
+			// Whole-engine digests change with the selected edit. The fresh
+			// worker review owns those fences; sibling allocation and artifacts
+			// must still equal the accepted facts before carrying its identity.
+			resolved.SourceInputDigest = review.Settings.ModelLoads[next].Resolved.SourceInputDigest
+			resolved.PresetDigest = review.Settings.ModelLoads[next].Resolved.PresetDigest
+			accepted.Resolved = &resolved
+			if !reflect.DeepEqual(accepted, review.Settings.ModelLoads[next]) {
+				return review, nil, modelSettingsConflict("unfinished conversion sibling changed; preview its saved configuration explicitly")
+			}
+			identity, ok := previous.Review.Identities[key]
+			if !ok {
+				return review, nil, modelSettingsConflict("unfinished conversion lost an accepted sibling identity")
+			}
+			review.Identities[key] = identity
+		}
+	} else if len(before.ModelLoads) == 0 {
+		for _, load := range review.Settings.ModelLoads {
+			source, converted := modelConversionInput(load)
+			if !converted {
+				continue
+			}
+			if digest, err := hex.DecodeString(source); err != nil || len(digest) != sha256.Size {
+				return review, nil, fmt.Errorf("converted profile %q has no accepted external source", load.ProfileKey)
+			}
+			keys = append(keys, load.ProfileKey)
+		}
+	}
+	return review, keys, validateConversionProfiles(review, keys)
+}
+
+func (b *Broker) mergeModelPolicyFromNative(stored nodepolicy.Policy, engine string, change modelconfig.ModelChange, caller string, review settings.Preview, typedRemoval bool, conversion []string) (nodepolicy.Policy, error) {
+	if err := validateConversionProfiles(review, conversion); err != nil {
+		return stored, err
+	}
+	policy := stored
+	if len(conversion) != 0 {
+		policy.Profiles = slices.Clone(stored.Profiles)
+		for _, key := range conversion {
+			if profile, exists := policy.ProfileByKey(key); exists {
+				if profile.Engine != engine || profile.Model != key {
+					return stored, &invalidParamsError{err: fmt.Errorf("A profile keeps its model; create a new profile.")}
+				}
+				continue
+			}
+			policy.Profiles = append(policy.Profiles, nodepolicy.Profile{Key: key, DisplayName: key, Engine: engine, Model: key})
+		}
+	}
+	return b.mergeModelPolicy(policy, engine, change, caller, review, typedRemoval)
 }
 
 // Review and replay use this accepted preview, never current telemetry
@@ -683,7 +817,11 @@ func (b *Broker) reviewModelSettings(ctx context.Context, input settings.Request
 			}
 		}
 	}
-	nextPolicy, err := b.mergeModelPolicy(policy, p.Engine, *p.ModelChange, caller, preview, nativeRemoval != nil)
+	preview, conversion, err := modelConversionReview(base.Model, *p.ModelChange, preview, settings.ConfigFromLaunch(launch, preview.Settings.ProxyPort))
+	if err != nil {
+		return settings.Preview{}, err
+	}
+	nextPolicy, err := b.mergeModelPolicyFromNative(policy, p.Engine, *p.ModelChange, caller, preview, nativeRemoval != nil, conversion)
 	if err != nil {
 		return settings.Preview{}, err
 	}
@@ -939,7 +1077,11 @@ func (b *Broker) applyModelSettings(ctx context.Context, input settings.Request,
 	if !b.modelWorkerCurrent(worker, source.Source) || ctx.Err() != nil {
 		return settingsReceipt{}, modelSettingsConflict("engine source changed before acceptance")
 	}
-	next, err := b.mergeModelPolicy(policy, p.Engine, *p.ModelChange, caller, preview, source.ReviewedModelChange != nil)
+	preview, conversion, err := modelConversionReview(record.Model, *p.ModelChange, preview, settings.ConfigFromLaunch(source.Launch, preview.Settings.ProxyPort))
+	if err != nil {
+		return settingsReceipt{}, err
+	}
+	next, err := b.mergeModelPolicyFromNative(policy, p.Engine, *p.ModelChange, caller, preview, source.ReviewedModelChange != nil, conversion)
 	if err != nil {
 		return settingsReceipt{}, err
 	}
@@ -989,7 +1131,7 @@ func (b *Broker) applyModelSettings(ctx context.Context, input settings.Request,
 	if source.ReviewedModelChange != nil {
 		reviewed = source.ReviewedModelChange.Clone()
 	}
-	record.Model = &modelSettingsOperation{Caller: caller, Change: p.ModelChange.Clone(), Review: preview.Clone(), ReviewedModelChange: reviewed, NativeBefore: settings.ConfigFromLaunch(launch, preview.Settings.ProxyPort), Before: modelPolicyFingerprint(policy), After: modelPolicyFingerprint(next), Implications: modelPolicyImplications(policy, p.Engine, modelChangeKey(*p.ModelChange)), Stage: "accepted"}
+	record.Model = &modelSettingsOperation{Caller: caller, Change: p.ModelChange.Clone(), Review: preview.Clone(), ReviewedModelChange: reviewed, ConversionProfiles: conversion, NativeBefore: settings.ConfigFromLaunch(launch, preview.Settings.ProxyPort), Before: modelPolicyFingerprint(policy), After: modelPolicyFingerprint(next), Implications: modelPolicyImplications(policy, p.Engine, modelChangeKey(*p.ModelChange)), Stage: "accepted"}
 	record.Snapshot.Settings = preview.Settings.Clone()
 	record.Snapshot.Revision++
 	if record.Snapshot.Revision > settings.MaxSafeCounter {
@@ -1115,7 +1257,7 @@ func (b *Broker) commitModelPolicyLocked(record *engineSettingsRecord) error {
 	if fingerprint != op.Before {
 		return modelSettingsConflict("a third policy state cannot be overwritten")
 	}
-	policy, err := b.mergeModelPolicy(r.current, record.Snapshot.Engine, op.Change, op.Caller, op.Review, op.ReviewedModelChange.Remove)
+	policy, err := b.mergeModelPolicyFromNative(r.current, record.Snapshot.Engine, op.Change, op.Caller, op.Review, op.ReviewedModelChange.Remove, op.ConversionProfiles)
 	if err != nil {
 		return err
 	}

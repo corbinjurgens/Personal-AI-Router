@@ -21,6 +21,9 @@
  * reports disconnected. Without this a fired command would otherwise sit in the
  * optimistic "working" state until the safety-net timeout even though it can
  * never complete.
+ * Deployment attempts instead retain their stage and correlation for canonical
+ * readback. Disconnect and cleanup mark active attempts unknown; the ordinary
+ * command safety-net timeout never settles or removes them.
  *
  * This is the single sanctioned exception to the "no local loading state" rule:
  * it is centralized here, never scattered across component `useState`, and it is
@@ -150,7 +153,38 @@ function settingsKey(nodeId: string, engineType: EngineType): string {
     return `${nodeId}:${engineType}:settings`
 }
 
+interface Deployment {
+    nodeId: string
+    engineType: EngineType
+    profileKey: string
+    stage: 'copy' | 'review' | 'apply'
+    disposition?: 'applied' | 'refused' | 'cancelled' | 'unknown'
+    message?: string
+    modelKey?: string
+    copyOpId?: string
+}
+
+/** Losing observation cannot establish a terminal result. Keep correlation for readback. */
+function unresolvedDeployments(deployments: Map<string, Deployment>): Map<string, Deployment> {
+    const next = new Map(deployments)
+    for (const [id, deployment] of next) {
+        if (deployment.disposition === undefined) {
+            next.set(id, { ...deployment, disposition: 'unknown' })
+        }
+    }
+    return next
+}
+
 interface PendingActionsState {
+    deployments: Map<string, Deployment>
+    beginDeploy(id: string, target: Pick<Deployment, 'nodeId' | 'engineType' | 'profileKey'>): void
+    updateDeploy(
+        id: string,
+        update: Partial<
+            Pick<Deployment, 'stage' | 'disposition' | 'message' | 'modelKey' | 'copyOpId'>
+        >
+    ): void
+    clearDeploy(id: string): void
     pending: Map<string, PendingAction>
     switches: Map<string, { requestId: string; source: string; target: string }>
     beginSwitch(nodeId: string, requestId: string, source: string, target: string): boolean
@@ -191,6 +225,25 @@ let sweepTimer: ReturnType<typeof setInterval> | null = null
 let connectorStatus: ServiceStatus['connectorStatus'] = 'connected'
 
 export const usePendingActionsStore = create<PendingActionsState>((set, get) => ({
+    deployments: new Map(),
+    beginDeploy: (id, target) => {
+        const deployments = new Map(get().deployments)
+        deployments.set(id, { ...target, stage: 'review' })
+        set({ deployments })
+    },
+    updateDeploy: (id, update) => {
+        const deployment = get().deployments.get(id)
+        if (!deployment) return
+        const deployments = new Map(get().deployments)
+        deployments.set(id, { ...deployment, ...update })
+        set({ deployments })
+    },
+    clearDeploy: id => {
+        if (!get().deployments.has(id)) return
+        const deployments = new Map(get().deployments)
+        deployments.delete(id)
+        set({ deployments })
+    },
     pending: new Map(),
     switches: new Map(),
     beginSwitch: (nodeId, requestId, source, target) => {
@@ -415,11 +468,17 @@ export const usePendingActionsStore = create<PendingActionsState>((set, get) => 
                 .getStatus()
                 .then(status => {
                     connectorStatus = status.connectorStatus
+                    if (connectorStatus === 'disconnected') {
+                        set({ deployments: unresolvedDeployments(get().deployments) })
+                    }
                 })
                 .catch(() => {})
             unsubs.push(
                 window.windowApi.service.onStatusChanged(status => {
                     connectorStatus = status.connectorStatus
+                    if (connectorStatus === 'disconnected') {
+                        set({ deployments: unresolvedDeployments(get().deployments) })
+                    }
                     if (status.connectorStatus === 'disconnected' && get().pending.size > 0) {
                         set({ pending: new Map() })
                     }
@@ -445,6 +504,6 @@ export const usePendingActionsStore = create<PendingActionsState>((set, get) => 
             sweepTimer = null
         }
         if (get().pending.size > 0) set({ pending: new Map() })
-        set({ switches: new Map() })
+        set({ switches: new Map(), deployments: unresolvedDeployments(get().deployments) })
     }
 }))

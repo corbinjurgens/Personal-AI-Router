@@ -14,7 +14,6 @@ import AvailableNode from './AvailableNode'
 import PendingInviteCard from './PendingInviteCard'
 import JoinRequestCard from './JoinRequestCard'
 import { InlineErrorBanner } from '@/ui/components/InlineErrorBanner'
-import BulkNodeConfiguration from '@/ui/components/RoutingSettings/BulkNodeConfiguration'
 import RoutingHistory from '@/ui/components/RoutingSettings/RoutingHistory'
 
 export default function ClusterSettings() {
@@ -180,9 +179,6 @@ export default function ClusterSettings() {
                     ))}
                 </Stack>
             )}
-            <div className="settings-card pair-paper p-4">
-                <BulkNodeConfiguration />
-            </div>
             <RoutingHistory />
         </Stack>
     )

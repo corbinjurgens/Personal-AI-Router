@@ -24,7 +24,6 @@ import { useNodesStore } from '@/ui/stores/nodes.store'
 
 vi.mock('@/ui/components/RoutingSettings/RoleEditor', () => ({ default: () => null }))
 vi.mock('@/ui/components/NodeList/NodeEngineSettings', () => ({ default: () => null }))
-vi.mock('@/ui/components/RoutingSettings/BulkNodeConfiguration', () => ({ default: () => null }))
 
 function documentFor(
     availability: NodePolicyDocument['availability'],
@@ -32,8 +31,19 @@ function documentFor(
     pausedBy = 'local'
 ): NodePolicyDocument {
     return {
-        policy: JSON.stringify({ version: 2, revision, availability, pausedBy,
-            profiles: [{ key: 'unsent-role', displayName: 'Unsent', engine: 'llamacpp', model: 'unsent-model' }]
+        policy: JSON.stringify({
+            version: 2,
+            revision,
+            availability,
+            pausedBy,
+            profiles: [
+                {
+                    key: 'unsent-role',
+                    displayName: 'Unsent',
+                    engine: 'llamacpp',
+                    model: 'unsent-model'
+                }
+            ]
         }),
         revision,
         activation: null,

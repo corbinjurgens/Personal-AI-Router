@@ -11,7 +11,7 @@ identifier. Configuration is available while the engine is Off. A known row
 does not prove its model files are complete; Routing also accepts an exact
 model identifier when live inventory is unavailable.
 
-For llama.cpp, create a profile with a unique name, then edit the
+For llama.cpp, create a profile with a unique profile key, then edit the
 supported generation fields. Blank fields inherit the engine's behavior.
 Resetting a field removes its override. **Defaults** allows request values to
 override the configured defaults; **Enforced** replaces the configured keys in
@@ -20,6 +20,53 @@ subsequent requests. Other options remain in Advanced policy JSON.
 Saving generation preferences does not start an engine, load or download a
 model, or change native context allocation or GPU placement. It affects
 subsequent requests on the serving node. An Off engine stays Off.
+
+## Profiles
+
+A profile key identifies a node-local saved configuration. For typed llama.cpp
+loads it also identifies the preset section and served id; the native model
+identifier selects the artifacts. The display name and icon are presentation
+metadata, independent of that key. Several profiles can use the same model
+artifacts with different launch and request settings.
+
+Choose **New profile**, enter its key, display name and icon, then review and
+apply the change. The suggested key is a lowercase model slug; edit it as needed.
+New profiles inherit the target engine's load defaults until you select overrides.
+Keys must be unique on the node and satisfy the model-identifier rules. The
+fixed routing tiers and their reserved aliases, such as `medium-local`, cannot
+be profile keys. `coder-api` and `coder-local` are valid keys. Select an existing
+profile by its display name, key and context to edit its own settings.
+
+Profile context is derived from the resolved launch settings' per-slot context,
+not independently entered as a policy bound. Total native context and slots
+remain distinct. Native fit still requires realized native context evidence;
+requested context alone does not establish it. Creating or deploying a profile
+does not qualify its model.
+
+Each declared role holds an ordered list of this node's profile keys. In node
+settings, add or remove memberships and move entries up or down before saving
+the revision-checked policy. Deploy selects only existing target roles and never
+creates a role. Node cards show model repository and quantization tags by
+default, with Unknown for unavailable identity. **Show profile summaries** adds
+the icon, display name and differentiating settings for the session. Clicking
+an entry opens settings at that profile.
+
+### Hand-written preset conversion
+
+For a llama.cpp engine with an external hand-written preset and no typed loads,
+the first saved typed model change, including deploy, converts the whole preset.
+There is no separate Import action. The successful preview says **Saving
+converts this engine's hand-written preset into** a count of **profiles**, using
+the actual converted loads returned by that preview.
+
+Every section becomes a keyed profile with derived per-slot context and artifact
+identity. A new profile uses its original section name as its key and display
+name. Existing profiles retain their display name, icon, request options and
+other user-owned settings while their derived context and identity are updated.
+Conversion itself creates no roles and preserves role lists. An explicit role
+membership patch still applies to the selected profile. An unresolved section
+refuses the whole conversion; review and apply remain required. Native fit and
+extra options retain their validation and unpriced limitations below.
 
 ## Native load settings and inspection
 
@@ -97,8 +144,8 @@ inspection. Missing, ambiguous or unavailable content remains a reported
 condition. Manual finite llama.cpp load changes require a successful target
 preview. Reviewed Auto remains unavailable in production; advisory component
 estimates can report partial costs and Unknown comparisons. A refused
-preview does not enable Apply or produce a success receipt. Generation-only
-policy editing continues through its existing Save path.
+preview does not enable Apply or produce a success receipt. Profile edits use
+the same coupled target preview and apply operation.
 
 The broker retains an unaccepted review for ten minutes, within its bounded
 review table. Explicit Recalculate supersedes that caller's earlier recommendation.
@@ -175,6 +222,10 @@ After a lost response, status/readback checks that identity before any explicit
 retry. Failed or unresolved operations require local reconciliation and a fresh
 preview for explicit supersession; the editor never rolls them back, resumes a
 node or silently retries them.
+Native persistence can precede policy persistence. A failure at that boundary
+can leave the native preset changed while policy remains unchanged. Readback
+then stays applying, uneditable and unresolved, fencing ordinary policy writes
+until a fresh local preview and explicit supersession reconcile it.
 An operation interrupted at bare acceptance before any changes requires a fresh
 local preview and explicit supersession. Progressed operations recover their
 frozen target resolution; they do not recalculate preferences during restart.
@@ -220,76 +271,98 @@ native load settings remain separate.
 
 ## Profile removal and readiness
 
-**Remove profile** requires an explicit confirmation and removes only the
-selected profile. It does not delete model files or silently remove routing
-references. A profile referenced by `residentModels` cannot be removed until
-that reference is resolved separately.
+**Remove profile** requires confirmation followed by preview and apply. For a
+typed load it removes the selected load, profile, role memberships, served
+permission, residency and engine binding for that profile key. Without a typed
+load it removes the profile and role memberships and clears residency for its
+native model; served permission and engine bindings stay in place. Model files
+stay in place.
 
 Ordinary generation setup creates no qualification. Keep-loaded residency and
 strict readiness still require valid finite bounds, qualification and current
 target-side evidence. A saved profile alone does not establish readiness.
 
 After a positively reported model download completes, **Configure** is offered
-without automatically opening the panel or moving keyboard focus. Content copy
-and generation configuration remain separate operations.
+without automatically opening the panel or moving keyboard focus.
 
-## Copy selected generation preferences
+## Deploy a profile to another node
 
-In the model settings panel, choose the generation fields and target devices,
-then **Preview selected targets**. Initially only configured common numeric
+Choose **Deploy to node** in the model settings panel, then select the request
+and portable load fields and target devices. Initially only configured common numeric
 generation fields are selected. Request precedence is a separate opt-in. A
 selected field absent from the source is shown as **Clear on target** before
 confirmation. Unselected target options, nested fields and mode are retained.
 
-Copy starts with the same engine and exact native model name. You can explicitly
-map to another target model name; the comparison shows both names and labels
-content equivalence unverified. Matching names never prove matching bytes.
-Each target must already have a profile. **Configure/Create** opens its settings
-without creating a profile or saving anything automatically.
+Each target has its own copy, target review and apply stages. Copy is skipped
+automatically only when both verified main-model `contentId` values match and every draft
+or companion file used by the source has a recorded SHA-256 matching a target
+file of the same role. Equal main files alone do not verify a projector or draft.
+When companions are unverified, the row says **Model file matches** and names
+the unverified files. A match on repository, quantization and total size without
+content identity says **Possibly the same file (not verified)**. In either case,
+choose Copy or use the target's files; neither choice is preselected. Otherwise
+the existing model-copy flow copies the files before target review. Matching
+names never prove matching bytes, and deploy adds no whole-file hashing.
+
+Deploy uses the target model identifier returned by copy or the selected local
+match. If the source key is unused, deploy creates a profile. The same key for
+the same model updates that profile and previews changed fields, retaining the
+target display name and icon unless explicitly edited. A key belonging to a
+different model requires a new profile key.
+An existing descriptor-only profile can gain a typed load for the same engine
+and artifact; its key becomes the served id and its other saved fields remain.
+Select memberships from the target's
+declared roles, shown in their order. A target with no roles shows **No roles on**
+the target and asks you to create one in node settings; deployment can proceed
+without role membership.
 
 Each preview reads the target's current policy, revision and management
 permission. Confirm each target separately using that revision. Conflicts,
-denials, locks, missing profiles and disconnected targets remain separate from
+denials, locks and disconnected targets remain separate from
 other targets' results. A selected no-op still goes through the target's grant,
 Pause and CAS checks. An enforced mode cannot be left with no options.
 Readable source preferences can be copied even when that source is paused or
 does not permit remote management; only the destination is changed.
 
-Copy carries only the selected generation leaves and optional precedence. It
-does not carry locks, qualification, memory bounds, roles, keep-loaded intent,
-served permissions, bindings, paths, ports or devices. These routing and native
-settings are outside generation copy.
+The selected request settings and precedence, portable launch settings, profile
+key, display metadata and chosen role memberships form one coupled target
+change. Deploy never transfers locks, qualification, stated or measured memory,
+reviewed digests, resolved loads or hardware-specific bindings. The destination
+resolves its own artifacts and placement; `fitTarget` and other non-portable
+descriptor keys are omitted.
 
-### Reviewed load and routing copy
+### Target review and outcomes
 
-Choose **Select portable load and routing preferences** to extend generation
-copy's selection.
 Load fields are a separate explicit selection, restricted to portable requested
 preferences. The destination resolves placement and artifacts itself. Source
 resolutions, native device identifiers, paths, ports and approvals are never
 copied. Selected absent overrides mean Clear on target, with the destination's
 inherited source shown for review.
 
-Roles, served membership, keep-loaded intent and engine bindings are unselected
-by default. Selecting them requires target review of displaced tiers and served
-permission, including unrestricted versus explicit deny-all. Keep loaded stays
-unavailable without the target's current finite qualified profile and evidence.
-Copy never transfers locks, qualification or memory assertions.
+Role membership requires explicit target selection and review. Keep loaded
+still requires the target's current finite qualified profile and evidence.
 
 Each target uses its own inspection and reviewed operation with fresh policy
-and settings revisions. A failed or not-ready target does not authorize another
-target's Apply. Missing content is handed to the existing content-copy flow only
-when chosen; after that flow, inspect and preview the destination again. A
-content-copy receipt is not a settings approval and never triggers automatic
-Apply. Load copy requires the destination to resolve its own content and
-produce a successful preview.
+and settings revisions. Apply requires its successful preview and confirmation;
+a content-copy receipt alone is not settings approval. One target's refusal or
+cancellation does not stop the other targets. Rows end applied, refused with a
+reason, cancelled, or unknown. A revoked management grant or revision conflict
+refuses that target; **Review again** obtains a fresh review after a conflict.
+Cancelling a copy uses the existing copy cancellation. Files already copied
+stay on the target after later refusal or cancellation for a retry, with no
+rollback.
+
+A lost apply reply remains unknown until operation receipt and target settings
+and policy-revision readback establish the result. An unresolved readback stays
+unknown; matching selected fields alone does not establish an operation receipt.
+There is no distributed rollback or automatic apply retry. The native-first
+reconciliation fences described above still apply.
 
 ## Validation limits
 
 Manual finite configuration and partial memory advice are implemented. Production
 Auto and Fits still refuse until the complete-cost specification and
-implementation are accepted. The copy process families remain blocked by the
-separate copy fix. Windows process acceptance of native-buffer reporting remains
+implementation are accepted. Windows process acceptance of native-buffer reporting remains
 pending; source, component and UI checks are not native accuracy, physical
 occupancy or calibration evidence.
 
@@ -299,4 +372,10 @@ readback, never an automatic resend. If the selected fields match, the panel
 reports **Target already matches selected fields** without claiming an operation
 receipt. Retry requires a fresh preview and confirmation. Content copy has
 separate results: use Model Manager's existing **Copy model files** action when
-needed; copying preferences starts no transfer, load or download.
+needed. Deploy can include that transfer before the settings review.
+
+Native acceptance of profile creation and deployment, copy cancellation and
+retry, and whole-preset conversion remains pending on the owner machines.
+Phases 06 through 08 install together after the phase 08 gate and per-node
+preflight. Source and synthetic checks do not establish installed behavior,
+native-fit context agreement or Windows/GPU acceptance.

@@ -20,6 +20,7 @@ import ModelSettingsPreview from './ModelSettingsPreview'
 import ModelExtraOptions from './ModelExtraOptions'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import type { ModelConfiguration } from '@/shared/types/node-policy'
+import { isValidProfileKey, newProfileKeyStatus } from '@/shared/utils/node-policy-model-settings'
 
 function fieldPatch(
     field: keyof RequestedLoad,
@@ -67,6 +68,8 @@ function fieldPatch(
 export default function ModelLoadSettings({
     target,
     modelId,
+    profileKey,
+    newProfile = false,
     policy,
     savedPolicy,
     policyRevision,
@@ -76,6 +79,8 @@ export default function ModelLoadSettings({
 }: {
     target: EngineSettingsTarget
     modelId: string
+    profileKey?: string
+    newProfile?: boolean
     policy: string
     savedPolicy: string
     policyRevision: string
@@ -83,9 +88,13 @@ export default function ModelLoadSettings({
     disabled: boolean
     evidence?: ModelConfiguration
 }) {
-    const key = modelSettingsKey(target, modelId)
+    const newKeyUnavailable = newProfile && newProfileKeyStatus(policy, profileKey) !== 'available'
+    const key = modelSettingsKey(target, newKeyUnavailable ? undefined : profileKey)
     const entry = useEngineSettingsStore(state => state.entries[engineSettingsKey(target)])
     const draft = useEngineSettingsStore(state => state.modelDrafts[key])
+    const unkeyedInspection = useEngineSettingsStore(
+        state => state.modelDrafts[modelSettingsKey(target)]?.inspection
+    )
     const [values, setValues] = useState<Record<string, string>>({})
     const [validation, setValidation] = useState<Record<string, string>>({})
     const validateField = (field: string, error?: string) =>
@@ -96,12 +105,21 @@ export default function ModelLoadSettings({
             return next
         })
     const snapshot = entry?.snapshot
-    const inspection = draft?.inspection
-    const identity = { engine: target.engine, model: modelId }
+    const savedLoad = newProfile
+        ? undefined
+        : snapshot?.settings.modelLoads?.find(item => item.profileKey === profileKey)
+    const inspection =
+        newProfile || !savedLoad
+            ? unkeyedInspection?.modelId === modelId
+                ? unkeyedInspection
+                : undefined
+            : draft?.inspection
+    const identity = { engine: target.engine, model: modelId, profileKey }
     const generation = modelPolicyPatch(savedPolicy, policy, identity)
     const routing = modelRoutingState(savedPolicy, identity, evidence)
     const load = draft?.change?.load
-    const dirty = !!load || !!draft?.change?.policy
+    const removing = draft?.change?.remove === true
+    const dirty = !!load || !!draft?.change?.policy || removing
     useEffect(() => {
         if (!draft?.change) {
             setValues({})
@@ -113,30 +131,47 @@ export default function ModelLoadSettings({
         const stop = watchEngineSettings()
         const store = useEngineSettingsStore.getState()
         const currentTarget = { nodeId, engine }
-        void store.reload(currentTarget).then(() => store.inspectModel(currentTarget, modelId))
-        return stop
-    }, [nodeId, engine, modelId])
+        let active = true
+        void store.reload(currentTarget).then(() => {
+            if (!active) return
+            const currentSnapshot =
+                useEngineSettingsStore.getState().entries[engineSettingsKey(currentTarget)]
+                    ?.snapshot
+            const typed =
+                !newProfile &&
+                currentSnapshot?.settings.modelLoads?.some(load => load.profileKey === profileKey)
+            void store.inspectModel(currentTarget, modelId, typed ? profileKey : undefined)
+        })
+        return () => {
+            active = false
+            stop()
+        }
+    }, [nodeId, engine, modelId, profileKey, newProfile])
     useEffect(() => {
         useEngineSettingsStore.getState().invalidateModel(key)
         return () => useEngineSettingsStore.getState().invalidateModel(key)
     }, [key, authority, policy, policyRevision, disabled])
     const edit = (patch: Partial<ModelChange>) => {
+        if (unavailable || removing) return
         useEngineSettingsStore.getState().editModel(key, {
             ...draft?.change,
             modelId,
+            profileKey,
             expectedPolicyRevision: policyRevision,
             ...patch
         })
     }
-    const blocked =
+    const unavailable =
         disabled ||
+        newKeyUnavailable ||
+        (profileKey !== undefined && !isValidProfileKey(profileKey)) ||
         !!entry?.unavailable ||
         !snapshot?.editable ||
         (!!draft?.busy && !draft.previewOperation) ||
         !!draft?.uncertain
-    const requested =
-        snapshot?.settings.modelLoads?.find(item => item.modelId === modelId)?.requested ?? {}
-    const resolved = snapshot?.settings.modelLoads?.find(item => item.modelId === modelId)?.resolved
+    const blocked = unavailable || removing
+    const requested = savedLoad?.requested ?? {}
+    const resolved = savedLoad?.resolved
     const effectiveContext = load?.clear?.includes('context')
         ? undefined
         : (load?.set.context ?? requested.context)
@@ -732,6 +767,7 @@ export default function ModelLoadSettings({
                 </Text>
             )}
             <ModelSettingsPreview
+                profileKey={newProfile ? undefined : profileKey}
                 inspection={inspection}
                 preview={draft?.review?.preview ?? draft?.advisory}
                 reviewed={!!draft?.review}
@@ -741,14 +777,14 @@ export default function ModelLoadSettings({
             <Button
                 kind="secondary"
                 disabled={
-                    blocked ||
+                    unavailable ||
                     (!dirty && !autoSelected) ||
                     !generation.ok ||
                     Object.keys(validation).length > 0 ||
                     (!!load && resolved?.kvUnified === true)
                 }
                 onClick={() => {
-                    if (!generation.ok) return
+                    if (unavailable || !generation.ok) return
                     const selectedPolicy = { ...draft?.change?.policy }
                     delete selectedPolicy.generation
                     delete selectedPolicy.requestOptionsMode
@@ -767,13 +803,21 @@ export default function ModelLoadSettings({
                             : undefined
                     void useEngineSettingsStore.getState().previewModel(
                         target,
-                        {
-                            ...draft?.change,
-                            ...(savedAuto ? { load: savedAuto } : {}),
-                            modelId,
-                            expectedPolicyRevision: policyRevision,
-                            policy: { ...selectedPolicy, ...generation.value }
-                        },
+                        removing
+                            ? {
+                                  modelId,
+                                  profileKey,
+                                  remove: true,
+                                  expectedPolicyRevision: policyRevision
+                              }
+                            : {
+                                  ...draft?.change,
+                                  ...(savedAuto ? { load: savedAuto } : {}),
+                                  modelId,
+                                  profileKey,
+                                  expectedPolicyRevision: policyRevision,
+                                  policy: { ...selectedPolicy, ...generation.value }
+                              },
                         authority
                     )
                 }}
@@ -782,12 +826,15 @@ export default function ModelLoadSettings({
             </Button>
             <Button
                 disabled={
-                    blocked ||
+                    unavailable ||
                     Object.keys(validation).length > 0 ||
                     !draft?.review ||
                     draft.review.authority !== authority
                 }
-                onClick={() => void useEngineSettingsStore.getState().applyModel(key, authority)}
+                onClick={() => {
+                    if (!unavailable)
+                        void useEngineSettingsStore.getState().applyModel(key, authority)
+                }}
             >
                 Apply reviewed model changes
             </Button>

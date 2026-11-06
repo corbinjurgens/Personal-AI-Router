@@ -189,6 +189,34 @@ describe('single-profile controls over keyed lists', () => {
         expect(inventoryChoices(inventory, [])).toEqual([])
     })
 
+    it('edits only declared memberships and preserves empty roles and ordered keys', () => {
+        const store = useNodeConfigurationStore.getState()
+        store.adopt('ordered-edit', {
+            policy: JSON.stringify({
+                roles: [
+                    { name: 'strong', profiles: ['first', 'second'] },
+                    { name: 'weak', profiles: [] }
+                ]
+            }),
+            revision: '19'
+        })
+        store.addRoleProfile('ordered-edit', 'strong', 'third')
+        store.addRoleProfile('ordered-edit', 'strong', 'third')
+        store.addRoleProfile('ordered-edit', 'medium', 'not-declared')
+        store.moveRoleProfile('ordered-edit', 'strong', 2, -1)
+        expect(useNodeConfigurationStore.getState().editors.get('ordered-edit')?.draft).toEqual([
+            { name: 'strong', profiles: ['first', 'third', 'second'] },
+            { name: 'weak', profiles: [] }
+        ])
+        store.removeRoleProfile('ordered-edit', 'strong', 'first')
+        store.removeRoleProfile('ordered-edit', 'strong', 'third')
+        store.removeRoleProfile('ordered-edit', 'strong', 'second')
+        expect(useNodeConfigurationStore.getState().editors.get('ordered-edit')?.draft).toEqual([
+            { name: 'strong', profiles: [] },
+            { name: 'weak', profiles: [] }
+        ])
+    })
+
     it('saves a newly picked role as a one-element key list', () => {
         const store = useNodeConfigurationStore.getState()
         store.adopt('role-key-save', { policy, revision: '19' })
@@ -223,18 +251,14 @@ describe('single-profile controls over keyed lists', () => {
         expect(entry.baseline?.roles).toEqual([{ name: 'weak', profiles: ['fast-8k'] }])
     })
 
-    it('detaches role arrays when adopting drafts and sharing bulk choices', () => {
+    it('detaches role arrays when adopting drafts', () => {
         const store = useNodeConfigurationStore.getState()
         const roles: NodeRoles = [{ name: 'weak', profiles: ['fast-8k'] }]
         store.adopt('role-key-copy', { policy, revision: '19' })
         store.setDraft('role-key-copy', roles)
-        store.setBulk({ common: roles })
         roles[0].profiles.push('external-edit')
         roles.push({ name: 'strong', profiles: [] })
         expect(useNodeConfigurationStore.getState().editors.get('role-key-copy')?.draft).toEqual([
-            { name: 'weak', profiles: ['fast-8k'] }
-        ])
-        expect(useNodeConfigurationStore.getState().bulk.common).toEqual([
             { name: 'weak', profiles: ['fast-8k'] }
         ])
     })

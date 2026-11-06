@@ -18,7 +18,12 @@ import {
     Text
 } from '@nvidia/foundations-react-core'
 import type { EngineModels, EngineProgress, EngineType } from '@/shared/types/engines'
-import type { ModelCopyCapabilities, ModelCopyRequest } from '@/shared/types/model-copy'
+import type {
+    ModelCopyCapabilities,
+    ModelCopyOutcome,
+    ModelCopyRequest,
+    ModelCopyResult
+} from '@/shared/types/model-copy'
 import { engineManagerName } from '@/shared/utils/engines'
 import { isEngineCopyInProgress } from '@/shared/utils/engine-progress'
 import { ServiceCallError } from '@/ui/api/service-transport'
@@ -115,7 +120,9 @@ export function ModelCopyModal({
     engineType,
     initialSource,
     initialModel,
-    initialOpId
+    initialOpId,
+    fixedDestination,
+    onOutcome
 }: {
     open: boolean
     onOpenChange: (open: boolean) => void
@@ -123,6 +130,8 @@ export function ModelCopyModal({
     initialSource: string
     initialModel: string
     initialOpId?: string
+    fixedDestination?: string
+    onOutcome?: (outcome: ModelCopyOutcome) => void
 }) {
     const engine = engineManagerName(engineType)
     const connected = useConnectionStore(state => state.connected)
@@ -133,9 +142,13 @@ export function ModelCopyModal({
     const initialCopy = Array.from(progress.values()).find(
         p => p.opId === initialOpId && p.operation === 'copy'
     )
-    const [source, setSource] = useState(initialCopy?.sourceNodeId ?? initialSource)
-    const [model, setModel] = useState(initialCopy?.model ?? initialModel)
-    const [destination, setDestination] = useState(initialCopy?.destinationNodeId ?? '')
+    const [selectedSource, setSource] = useState(initialCopy?.sourceNodeId ?? initialSource)
+    const [selectedModel, setModel] = useState(initialCopy?.model ?? initialModel)
+    const [selectedDestination, setDestination] = useState(initialCopy?.destinationNodeId ?? '')
+    const pinned = fixedDestination !== undefined
+    const source = pinned ? initialSource : selectedSource
+    const model = pinned ? initialModel : selectedModel
+    const destination = fixedDestination ?? selectedDestination
     const [opId, setOpId] = useState(initialOpId)
     const [inventory, setInventory] = useState<{
         source: string
@@ -154,6 +167,44 @@ export function ModelCopyModal({
     // Synchronous guard also fences retained callbacks before React commits disabled controls.
     const submitting = useRef(false)
     const selectionGeneration = useRef(0)
+    const authority = JSON.stringify([selfId, source, destination, engine, model])
+    const currentAuthority = useRef(authority)
+    const authorityGeneration = useRef(0)
+    if (currentAuthority.current !== authority) authorityGeneration.current++
+    currentAuthority.current = authority
+    const ownerGeneration = authorityGeneration.current
+    const operation = useRef(initialOpId)
+    const operationAuthority = useRef(ownerGeneration)
+    const reported = useRef(new Map<string, ModelCopyOutcome['disposition']>())
+    const outcomeCallback = useRef(onOutcome)
+    outcomeCallback.current = onOutcome
+    const reportOutcome = useCallback(
+        (
+            request: ModelCopyRequest,
+            owner: number,
+            disposition: ModelCopyOutcome['disposition'],
+            result?: ModelCopyResult,
+            reason?: string
+        ) => {
+            if (
+                authorityGeneration.current !== owner ||
+                operationAuthority.current !== owner ||
+                operation.current !== request.opId
+            )
+                return
+            const previous = reported.current.get(request.opId)
+            if (previous && !(previous === 'unknown' && disposition !== 'unknown')) return
+            reported.current.set(request.opId, disposition)
+            outcomeCallback.current?.({
+                ...request,
+                model: result?.model ?? request.model,
+                disposition,
+                result,
+                reason
+            })
+        },
+        []
+    )
     const copy = Array.from(progress.values()).find(
         p =>
             p.operation === 'copy' &&
@@ -164,6 +215,41 @@ export function ModelCopyModal({
             p.model === model
     )
     const active = isEngineCopyInProgress(copy)
+    useEffect(() => {
+        if (!copy?.opId) return
+        const request: ModelCopyRequest = {
+            opId: copy.opId,
+            sourceNodeId: source,
+            destinationNodeId: destination,
+            engine,
+            model
+        }
+        if (copy.status === 'done' && copy.copyResult) {
+            const result = copy.copyResult
+            if (result.engine !== engine || result.model !== model) return
+            reportOutcome(
+                request,
+                ownerGeneration,
+                result.layout === 'llama-artifacts-v1' && result.durability !== 'confirmed'
+                    ? 'unknown'
+                    : 'copied',
+                result,
+                copy.message
+            )
+        } else if (
+            copy.status === 'cancelled' ||
+            copy.status === 'unknown' ||
+            copy.status === 'error'
+        ) {
+            reportOutcome(
+                request,
+                ownerGeneration,
+                copy.status === 'error' ? 'refused' : copy.status,
+                undefined,
+                copy.message
+            )
+        }
+    }, [copy, source, destination, engine, model, ownerGeneration, reportOutcome])
     const locked = active || checking
     const retry = !!copy && ['error', 'cancelled', 'unknown'].includes(copy.status)
     const expectedExportId = retry ? (copy.exportId ?? copy.expectedExportId) : undefined
@@ -295,7 +381,8 @@ export function ModelCopyModal({
         (!copy || retry)
 
     async function submit() {
-        if (!canSubmit || submitting.current) return
+        if (!canSubmit || submitting.current || authorityGeneration.current !== ownerGeneration)
+            return
         submitting.current = true
         setChecking(true)
         setError('')
@@ -303,7 +390,11 @@ export function ModelCopyModal({
         let submittedOpId: string | undefined
         try {
             const fresh = await readCapabilities()
-            if (generation !== selectionGeneration.current) return
+            if (
+                generation !== selectionGeneration.current ||
+                authorityGeneration.current !== ownerGeneration
+            )
+                return
             setCapabilities({ key, ...fresh })
             if (fresh.reason) {
                 setError(fresh.reason)
@@ -311,7 +402,11 @@ export function ModelCopyModal({
             }
             if (!expectedExportId) {
                 const snapshot = await window.pairApi.engines.getInitialState()
-                if (generation !== selectionGeneration.current) return
+                if (
+                    generation !== selectionGeneration.current ||
+                    authorityGeneration.current !== ownerGeneration
+                )
+                    return
                 const current = snapshot.models.find(
                     row => row.nodeId === source && row.engineType === engineType
                 )
@@ -347,10 +442,50 @@ export function ModelCopyModal({
                 ...(expectedExportId ? { expectedExportId } : {})
             }
             submittedOpId = request.opId
+            operation.current = request.opId
+            operationAuthority.current = ownerGeneration
             setOpId(request.opId)
             // The bridge publishes progress and retains verified completion, even after this modal closes.
-            await window.pairApi.engines.copyModel(request)
+            const response = await window.pairApi.engines.copyModel(request)
+            if (
+                response.opId === request.opId &&
+                response.result.engine === engine &&
+                response.result.model === model
+            )
+                reportOutcome(
+                    request,
+                    ownerGeneration,
+                    response.result.layout === 'llama-artifacts-v1' &&
+                        response.result.durability !== 'confirmed'
+                        ? 'unknown'
+                        : 'copied',
+                    response.result
+                )
         } catch (err) {
+            if (submittedOpId) {
+                const refused =
+                    err instanceof ServiceCallError &&
+                    [
+                        -32602,
+                        -32601,
+                        POLICY_CONFLICT_CODE,
+                        LOCAL_VETO_CODE,
+                        REMOTE_MANAGEMENT_DENIED_CODE
+                    ].includes(err.code ?? 0)
+                reportOutcome(
+                    {
+                        opId: submittedOpId,
+                        sourceNodeId: source,
+                        destinationNodeId: destination,
+                        engine,
+                        model
+                    },
+                    ownerGeneration,
+                    refused ? 'refused' : 'unknown',
+                    undefined,
+                    err instanceof Error ? failure(err) : 'Copy outcome unknown.'
+                )
+            }
             // A refusal before bridge admission has no new progress entry. Keep
             // the previous retry selection, including its learned export ID.
             if (
@@ -372,7 +507,8 @@ export function ModelCopyModal({
     }
 
     async function cancel() {
-        if (!copy?.opId || !active || cancelling) return
+        if (!copy?.opId || !active || cancelling || authorityGeneration.current !== ownerGeneration)
+            return
         setCancelling(true)
         setError('')
         try {
@@ -391,13 +527,18 @@ export function ModelCopyModal({
     if (selfId && !nodes.has(selfId))
         deviceItems.unshift({ value: selfId, children: 'This device' })
     const change = () => {
+        operation.current = undefined
         invalidateSelection()
         setOpId(undefined)
         setError('')
     }
+    const changeOpen = (next: boolean) => {
+        if (!next) invalidateSelection()
+        onOpenChange(next)
+    }
 
     return (
-        <ModalRoot open={open} onOpenChange={onOpenChange}>
+        <ModalRoot open={open} onOpenChange={changeOpen}>
             <ModalDialog>
                 <ModalContent className="no-drag-elements max-content-modal">
                     <ModalHeading>Copy model</ModalHeading>
@@ -407,13 +548,13 @@ export function ModelCopyModal({
                             <Select
                                 aria-label="Source device"
                                 value={source}
-                                disabled={locked}
+                                disabled={locked || pinned}
                                 items={deviceItems.map(item => ({
                                     ...item,
                                     disabled: item.value === destination
                                 }))}
                                 onValueChange={(value: string) => {
-                                    if (submitting.current || active) return
+                                    if (pinned || submitting.current || active) return
                                     change()
                                     setSource(value)
                                     setModel('')
@@ -434,14 +575,14 @@ export function ModelCopyModal({
                             <Select
                                 aria-label="Model"
                                 value={model}
-                                disabled={locked || !online(source)}
+                                disabled={locked || pinned || !online(source)}
                                 placeholder="Choose an installed model"
                                 items={readyModels.map(row => ({
                                     value: row.name,
                                     children: row.name
                                 }))}
                                 onValueChange={(value: string) => {
-                                    if (submitting.current || active) return
+                                    if (pinned || submitting.current || active) return
                                     change()
                                     setModel(value)
                                 }}
@@ -451,14 +592,14 @@ export function ModelCopyModal({
                             <Select
                                 aria-label="Destination device"
                                 value={destination}
-                                disabled={locked}
+                                disabled={locked || pinned}
                                 placeholder="Choose a destination device"
                                 items={deviceItems.map(item => ({
                                     ...item,
                                     disabled: item.value === source
                                 }))}
                                 onValueChange={(value: string) => {
-                                    if (submitting.current || active) return
+                                    if (pinned || submitting.current || active) return
                                     change()
                                     setDestination(value)
                                 }}
@@ -596,7 +737,7 @@ export function ModelCopyModal({
                             </Text>
                         )}
                         <Flex justify="end" gap="2">
-                            <Button kind="secondary" onClick={() => onOpenChange(false)}>
+                            <Button kind="secondary" onClick={() => changeOpen(false)}>
                                 Close
                             </Button>
                             {active && (

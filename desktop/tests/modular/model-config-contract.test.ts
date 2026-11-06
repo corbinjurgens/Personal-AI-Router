@@ -737,7 +737,12 @@ describe('pairApi model inspection composition', () => {
             destroy: vi.fn<ServiceTransport['destroy']>()
         }
         const api = createPairApi(transport)
-        const request = { engine: 'llamacpp', nodeId: 'target', modelId: 'owner/model:Q4_K_M' }
+        const request = {
+            engine: 'llamacpp',
+            nodeId: 'target',
+            modelId: 'owner/model:Q4_K_M',
+            profileKey: 'model-large'
+        }
         await expect(api.engines.inspectModel(request)).resolves.toEqual(response)
         expect(invoke).toHaveBeenCalledExactlyOnceWith('engines:inspect-model', request)
     })

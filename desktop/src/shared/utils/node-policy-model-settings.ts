@@ -3,6 +3,7 @@
 
 import type { JsonValue } from '@/shared/types/json'
 import type { NodeModelReference } from '@/shared/types/node-policy'
+import type { ModelSettingsIdentity } from '@/shared/types/model-config'
 import { isValidRoutingEngineId } from '@/shared/utils/engines'
 import { ROLE_TIERS } from '@/shared/utils/node-roles'
 
@@ -11,11 +12,44 @@ type SettingsError = { code: 'parse' | 'profile' | 'option' | 'mode' | 'flag'; m
 type Result<T> = { ok: true; value: T } | { ok: false; error: SettingsError }
 
 interface ModelSettingsProfile extends NodeModelReference {
-    name: string
     key: string
+    displayName: string
+    icon: string
     options: JsonMap
     mode: 'defaults' | 'enforced'
     localOnly: boolean
+}
+
+/** Mirror nodepolicy.ValidateProfileKey, including its fixed-tier alias namespace. */
+export function isValidProfileKey(key: string): boolean {
+    return (
+        validText(key, 512) &&
+        !ROLE_TIERS.some(tier => [tier, `${tier}-api`, `${tier}-local`].includes(key))
+    )
+}
+
+/** Only the suggested slug has an ASCII length limit; saved keys retain UTF-8. */
+export function defaultProfileKey(model: string): string {
+    return model
+        .toLowerCase()
+        .replace(/[^a-z0-9._-]+/g, '-')
+        .slice(0, 64)
+}
+
+function validText(text: string, limit: number): boolean {
+    return (
+        text.length > 0 &&
+        text.isWellFormed() &&
+        new TextEncoder().encode(text).length <= limit &&
+        !Array.from(text).some(character => {
+            const code = character.codePointAt(0) ?? 0
+            return code < 0x20 || (code >= 0x7f && code <= 0x9f)
+        })
+    )
+}
+
+function validIcon(icon: string): boolean {
+    return ['', 'chat-single', 'code', 'cube', 'document', 'image'].includes(icon)
 }
 
 export const MODEL_OPTION_FIELDS = [
@@ -92,7 +126,9 @@ function policyDraft(text: string): Result<{ policy: JsonMap; profiles: JsonMap[
             const options = fields.find(field => field.key === 'requestOptions')
             return (
                 ambiguousFields(fields, [
-                    'name',
+                    'key',
+                    'displayName',
+                    'icon',
                     'engine',
                     'model',
                     'requestOptions',
@@ -119,22 +155,30 @@ function policyDraft(text: string): Result<{ policy: JsonMap; profiles: JsonMap[
             typeof profile.engine !== 'string' ||
             !profile.engine ||
             typeof profile.model !== 'string' ||
-            !profile.model
+            !profile.model ||
+            !profileIdentityValid({ engine: profile.engine, model: profile.model }) ||
+            typeof profile.key !== 'string' ||
+            !isValidProfileKey(profile.key) ||
+            typeof profile.displayName !== 'string' ||
+            !validText(profile.displayName, 128) ||
+            (profile.icon !== undefined &&
+                (typeof profile.icon !== 'string' || !validIcon(profile.icon)))
         )
             return {
                 ok: false,
                 error: {
                     code: 'profile',
-                    message: 'Each profile needs an engine and native model name.'
+                    message:
+                        'Each profile needs a valid key, display name, icon, engine and served model.'
                 }
             }
-        const key = JSON.stringify([profile.engine, profile.model])
+        const key = profile.key
         if (identities.has(key))
             return {
                 ok: false,
                 error: {
                     code: 'profile',
-                    message: 'Profiles must have distinct engine and model identities.'
+                    message: 'Profiles must have distinct keys.'
                 }
             }
         identities.add(key)
@@ -174,6 +218,16 @@ function policyDraft(text: string): Result<{ policy: JsonMap; profiles: JsonMap[
     return { ok: true, value: { policy, profiles } }
 }
 
+/** New drafts cannot claim an existing key, including profiles of another engine. */
+export function newProfileKeyStatus(
+    text: string,
+    key?: string
+): 'invalid' | 'duplicate' | 'available' {
+    const draft = policyDraft(text)
+    if (key === undefined || !isValidProfileKey(key) || !draft.ok) return 'invalid'
+    return draft.value.profiles.some(profile => profile.key === key) ? 'duplicate' : 'available'
+}
+
 /** Supported controls are deliberately independent of inventory and profile display names. */
 export function parseModelSettings(text: string): Result<ModelSettingsProfile[]> {
     const draft = policyDraft(text)
@@ -181,12 +235,18 @@ export function parseModelSettings(text: string): Result<ModelSettingsProfile[]>
     const profiles: ModelSettingsProfile[] = []
     for (const profile of draft.value.profiles) {
         if (profile.engine !== 'llamacpp') continue
-        if (typeof profile.model !== 'string') continue
+        if (
+            typeof profile.model !== 'string' ||
+            typeof profile.key !== 'string' ||
+            typeof profile.displayName !== 'string'
+        )
+            continue
         profiles.push({
-            name: typeof profile.name === 'string' ? profile.name : '',
+            displayName: profile.displayName,
+            icon: typeof profile.icon === 'string' ? profile.icon : '',
             engine: profile.engine,
             model: profile.model,
-            key: JSON.stringify([profile.engine, profile.model]),
+            key: profile.key,
             options: object(profile.requestOptions) ? profile.requestOptions : {},
             mode: profile.requestOptionsMode === 'enforced' ? 'enforced' : 'defaults',
             localOnly: profile.localOnly === true
@@ -215,10 +275,6 @@ function ambiguousFields(fields: { key: string }[], canonical: string[] = []): b
     )
 }
 
-function profileNameValid(name: string): boolean {
-    return name.trim() === name && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(name)
-}
-
 function profileIdentityValid(identity: NodeModelReference): boolean {
     return (
         isValidRoutingEngineId(identity.engine) &&
@@ -232,142 +288,6 @@ function profileIdentityValid(identity: NodeModelReference): boolean {
         }) &&
         !ROLE_TIERS.some(tier => [tier, `${tier}-api`, `${tier}-local`].includes(identity.model))
     )
-}
-
-function lifecycleDraft(text: string) {
-    const draft = policyDraft(text)
-    if (!draft.ok) return draft
-    const names = new Set<string>()
-    for (const profile of draft.value.profiles) {
-        if (
-            typeof profile.name !== 'string' ||
-            !profileNameValid(profile.name) ||
-            names.has(profile.name) ||
-            typeof profile.engine !== 'string' ||
-            typeof profile.model !== 'string' ||
-            !profileIdentityValid({ engine: profile.engine, model: profile.model })
-        )
-            return {
-                ok: false,
-                error: {
-                    code: 'profile',
-                    message: 'Profiles need valid, unique names before changing the profile list.'
-                }
-            } satisfies Result<never>
-        names.add(profile.name)
-    }
-    return draft
-}
-
-/** Create only an ordinary profile; bounds, lock and evidence remain explicit choices. */
-export function createModelSettingsProfile(
-    text: string,
-    identity: NodeModelReference,
-    name: string
-): Result<string> {
-    const draft = lifecycleDraft(text)
-    if (!draft.ok) return draft
-    if (!profileNameValid(name) || !profileIdentityValid(identity))
-        return {
-            ok: false,
-            error: {
-                code: 'profile',
-                message: 'Enter a valid profile name, engine and exact native model.'
-            }
-        }
-    if (
-        draft.value.profiles.some(
-            profile =>
-                profile.name === name ||
-                (profile.engine === identity.engine && profile.model === identity.model)
-        )
-    )
-        return {
-            ok: false,
-            error: {
-                code: 'profile',
-                message: 'A profile already uses this name or engine/model identity.'
-            }
-        }
-    const raw = JSON.stringify({ name, engine: identity.engine, model: identity.model })
-    const field = objectFields(text, whitespaceEnd(text, 0)).find(item => item.key === 'profiles')
-    if (!field || !Array.isArray(draft.value.policy.profiles)) {
-        const start = whitespaceEnd(text, 0)
-        const end = valueEnd(text, start)
-        return {
-            ok: true,
-            value:
-                text.slice(0, start) +
-                replaceField(text.slice(start, end), 'profiles', `[${raw}]`) +
-                text.slice(end)
-        }
-    }
-    const last = arrayValues(text, field.start).at(-1)
-    const at = last ? last.end : field.start + 1
-    return { ok: true, value: text.slice(0, at) + (last ? ',' : '') + raw + text.slice(at) }
-}
-
-/** Remove one exact identity without altering routing references or model files. */
-export function removeModelSettingsProfile(
-    text: string,
-    identity: NodeModelReference
-): Result<string> {
-    const draft = lifecycleDraft(text)
-    if (!draft.ok) return draft
-    const index = draft.value.profiles.findIndex(
-        profile => profile.engine === identity.engine && profile.model === identity.model
-    )
-    if (index < 0)
-        return {
-            ok: false,
-            error: { code: 'profile', message: 'Select a profile in this policy.' }
-        }
-    const residents = draft.value.policy.residentModels
-    if (
-        residents !== undefined &&
-        residents !== null &&
-        (!Array.isArray(residents) ||
-            residents.some(
-                ref =>
-                    !object(ref) || typeof ref.engine !== 'string' || typeof ref.model !== 'string'
-            ))
-    )
-        return {
-            ok: false,
-            error: {
-                code: 'profile',
-                message: 'Fix the residentModels list before removing a profile.'
-            }
-        }
-    if (
-        Array.isArray(residents) &&
-        residents.some(
-            ref => object(ref) && ref.engine === identity.engine && ref.model === identity.model
-        )
-    )
-        return {
-            ok: false,
-            error: {
-                code: 'profile',
-                message: 'Remove this model from residentModels before removing its profile.'
-            }
-        }
-    const field = objectFields(text, whitespaceEnd(text, 0)).find(item => item.key === 'profiles')
-    const spans = field ? arrayValues(text, field.start) : []
-    const span = spans[index]
-    if (!span)
-        return {
-            ok: false,
-            error: { code: 'parse', message: 'Could not locate this profile in the policy draft.' }
-        }
-    const previous = spans[index - 1]
-    const next = spans[index + 1]
-    return {
-        ok: true,
-        value:
-            text.slice(0, previous ? previous.end : span.start) +
-            text.slice(!previous && next ? next.start : span.end)
-    }
 }
 
 function whitespaceEnd(text: string, start: number): number {
@@ -447,13 +367,13 @@ function replaceField(text: string, key: string, raw: string | undefined): strin
 /** Replace only the selected profile's settings; the service owns save authorization. */
 export function applyModelSettings(
     text: string,
-    identity: NodeModelReference,
+    identity: ModelSettingsIdentity,
     edit: ProfileEdit
 ): Result<string> {
     const draft = policyDraft(text)
     if (!draft.ok) return draft
     const profile = draft.value.profiles.find(
-        item => item.engine === identity.engine && item.model === identity.model
+        item => item.engine === identity.engine && item.key === identity.profileKey
     )
     if (!profile || identity.engine !== 'llamacpp')
         return {
