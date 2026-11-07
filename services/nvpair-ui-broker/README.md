@@ -92,10 +92,10 @@ An incomplete or invalid stored conversion scope refuses repair and replay.
 Every accepted model change reserves policy through the existing settings
 journal. Native load changes and typed removals persist before policy publication.
 Removal deletes the selected profile and its role memberships, retaining empty
-role declarations. With a typed load it also clears served, resident and binding
+role declarations. With a typed load it also clears served and resident
 references for the engine and profile key. Without a typed load it clears only
-the resident reference for the engine and profile's native model; served and
-binding entries stay, including when the key equals that native model.
+the resident reference for the engine and profile's native model; served
+entries stay, including when the key equals that native model.
 Removing the last typed load is valid and leaves default mode, allowing the
 manager's existing model-sources preset path on the next start. Membership edits
 append a key once or remove only that key; selecting an undeclared role refuses
@@ -129,7 +129,10 @@ missing section withdraws dependent facts without using cached intent as a
 fallback. A complete empty manager universe is valid; unobserved engines,
 unrepresented roots and uncertain reservations remain unknown. Manager paths
 and operation identities stay in the private envelope. Matching reads detect
-observed changes; they do not reserve the manager after the reply.
+observed changes; they do not reserve the manager after the reply. Resident
+reconciliation separately reads native `managerIncarnation` from this same
+parent-only method on its captured worker. Unrelated sections may be incomplete;
+the read supplies neither mutation permission nor a resident reservation.
 
 Production `buildApplyOwners` is nil, so prepare refuses before Pause. It
 remains unavailable because no owner can pin manager
@@ -158,61 +161,6 @@ write or inference trigger. See
 Production Fits/Auto remains blocked by complete-cost accounting. Copy-family
 acceptance awaits the separate copy fix; Windows buffer-process acceptance and
 real native accuracy remain unverified.
-
-Bound engine preparation uses private correlated notifications
-`admission/prepare-bound-engine`, `admission/cancel-bound-engine` and
-`node/bound-engine-prepared`. Requests contain request/proxy-run IDs, active
-policy revision, exact native engine/model and remaining `budgetMs` (bounded
-to 90 seconds). Peer ingress supplies its verified `peerId` and relationship
-`peerIncarnation` together. These are worker messages, blocked at public
-client and peer relay entry points. They carry no inference body or credential.
-
-The broker retains the submitting proxy and current manager through acceptance
-and reply. It resolves the current binding, served permission, availability,
-facade and installation evidence. A healthy target needs inference
-permission only and must expose the requested canonical model. A running target
-missing that model refuses without restart. A cold target with no running
-source uses the parent-only `engine:activate-bound-engine` wrapper around
-manager startup. One eligible conflicting source uses the existing bounded
-automatic E4 transaction and its drain, ownership, receipt and recovery fences.
-Multiple sources or a protected resident refuse displacement. Peer mutation
-requires a current target-local management grant in addition to the exact
-relationship incarnation, rechecked at serialized acceptance.
-
-Same-target waiters share one operation without extending its original deadline;
-another target refuses busy. Replacement waits for the minimum dwell after
-broker startup or any completed manual/automatic replacement, inside that same
-budget. Healthy targets bypass dwell. Last-waiter cancellation prevents new
-acceptance; accepted E4 work retains node ownership and its initial deadline.
-Relevant binding, served and resident edits refuse busy before persistence while
-automatic work or unresolved recovery reserves those engines. Unrelated policy
-edits remain allowed. Success requires healthy backend publication and fresh
-canonical inventory; it grants no model load, qualification or admission ticket.
-Terminal automatic receipts keep these reservations until manager release and
-durable settlement succeed. Local Off can preempt cold activation through the
-existing Stop owner, with operation-scoped delivery and physical discharge under
-the original operation lock. A transport-uncertain cold result retains its
-original operation ID and activation fence until verified Off or a recovered
-manager replaces the original worker.
-The seam is separate from stopped-engine offers and HTTP dispatch integration.
-
-`policy:set` accepts target-owned `engineBindings`, a list of `{engine, model}`
-native references. Absence and `[]` disable the binding configuration; new
-local and peer readbacks always emit `engineBindings: []` when empty. The policy
-schema remains version 2. Each native name has one binding, with at most 256
-entries and the existing identifier and encoded-reference bounds. The target
-uses current descriptor naming to reject overlapping matching sets and requires each binding to be served when served
-permission is explicit. Names remain case-sensitive. Saving changes no engine
-intent and starts no engine; request-triggered preparation is a separate feature.
-
-Bindings use the existing local or granted-peer CAS policy writer. Peer edits
-preserve private routing, accounts, tiers, availability and pause provenance.
-The relay checks that a target preserves requested model-control fields,
-including explicit empty bindings, and reports unsupported readback when an
-older target discards them. An uncertain save requires readback and review,
-never automatic CAS resubmission. Malformed stored bindings enter paused policy
-recovery and retain the original bytes for diagnosis; stored-model sanitation
-never removes them.
 
 Target-owned model download state uses the shared optional
 `downloadState:{version:1,sourceId,revision,recoveryRequired,entries}` snapshot.
@@ -278,8 +226,8 @@ approved and reported by the engine's serving envelope. The proxy owns batch
 admission and the final single-use grant. The broker relays that grant only for
 the live operation, original proxy run and paired manager source. Loads are
 serialized with an absolute budget bounded by 60 seconds and the policy's
-finite switch timeout. A failed load with unchanged evidence is retried at the
-30-second retry deadline, with no attempt limit: reconciliation wakes at that
+finite model-transition timeout. A failed load with unchanged evidence is retried
+at the 30-second retry deadline, with no attempt limit: reconciliation wakes at that
 deadline as well as on the idle tick, and does not re-evaluate unchanged
 evidence before it. A change in relevant policy, identity, readiness, intent,
 inventory or admission evidence is evaluated on the next wake without waiting
@@ -349,42 +297,6 @@ The TUI's current `policy:get` consumers read availability and pause provenance;
 they do not decode or render `modelConfiguration` reasons. Desktop policy
 get/set/push consumers preserve the bounded reason through their strict bridge.
 
-`engine:switch-fence {nodeId?, requestId}` resolves an absent switch without
-executing or cancelling engine work. Under the same `engineConfigMu` used at
-both switch admission lookups, it returns exactly one of
-`{nodeId, requestId, fenced:true}` or
-`{nodeId, requestId, fenced:false, receipt}`. An existing caller-owned receipt
-is returned unchanged, including accepted or terminal work; a foreign receipt
-is neither disclosed nor overwritten. Local identity and the authenticated
-pinned peer identity are the existing switch identities. Peer fencing requires
-a fresh remote-management mutation grant at HTTP entry and broker admission.
-There is no payload-supplied caller and no onward hop.
-
-For an absent receipt, the acknowledgement follows durable journal persistence.
-Optional `tombstones` contains insertion-ordered `{caller, requestId}` entries,
-globally bounded to 32, evicting the oldest insertion. Both fields use the
-nonempty ASCII identity syntax and 128-byte bound of switch request IDs.
-Uniqueness and refusal are scoped to the pair: a foreign tombstone does not
-reserve another caller's ID and may coexist with that caller's receipt.
-An identical fence retry neither appends nor advances generation, including
-when another caller subsequently accepted the same ID. The retained confirmed
-own tombstone wins over foreign receipt refusal without disclosing that receipt;
-a foreign receipt without prior own proof still refuses fencing. Storage
-uncertainty blocks fence acknowledgement even when a foreign receipt exists.
-A retained owned tombstone refuses switch acceptance with kind `fenced`, code `-32010`,
-before effects, regardless of payload. Receipts remain non-evicting and unchanged.
-
-Fence writes use the existing journal generation increment, without changing
-the version or revision algorithm. Even after eviction and trusted restart,
-the exact original payload's old `expectedRevision` remains stale. The result
-supplies no configuration token; read a fresh baseline before a deliberate new
-submission. Count/byte limits preserve the active receipt's terminal reservation.
-Capacity, cancellation and persistence failures do not acknowledge a fence.
-An uncertain replacement is adopted conservatively but its storage error stays
-latched in-process, including on retry; only a trusted restart can read that
-journal as durable evidence. Fence transport uses the existing manager relay,
-`engine:remote-switch-fence` and pinned POST `/v1/engine-switch/fence`.
-
 The [engine settings protocol](ENGINE_SETTINGS.md) documents local/paired
 launch and port editing, revision checks, serialized application and recovery.
 Built-in and fronted descriptor engines share the broker's settings owner,
@@ -393,68 +305,23 @@ fallback reserve descriptor siblings' saved and live proxy ports.
 Broker startup restores explicit journal ports for both engine kinds. A saved
 explicit facade port takes precedence over the proxy's port file, and a bind
 failure leaves that choice unchanged instead of selecting a fallback.
-Its [engine switching contract](ENGINE_SETTINGS.md#engine-switching) covers
-`engine:switch`, status/progress, acknowledged source drain, durable receipts
-and interrupted-operation reconciliation. The broker owns transaction order;
-the engine manager owns process lifecycle and intent. Switch recovery precedes
-settings replay and enabled-engine restoration. Local Off reaches the manager's
-durable veto path during remote reservations without waiting for the transaction
-lock. Forward steps are pinned to the preparing manager incarnation; replacement
-interrupts the operation and gates the new manager until reconciliation finishes.
-The gate applies to forward operations, including on the initial spawn. The
-manager's discovery subscription and node/settings projections still reach the
-current worker during recovery, including authoritative pause state and
-log-level changes. Mutating direct peer control also remains fenced inside the
-manager until the broker acknowledges successful recovery for its incarnation.
-Off/pause admission and terminal completion share a gate, so an admitted veto
-cannot produce a successful receipt while a stop response is pending. Broker
-cleanup carries the operation-specific Off/pause veto to the manager before
-reconciling a committed target. A veto admitted during cleanup requires another
-reconcile or retained recovery ownership; checkpoint release refuses an
-uncleaned committed target with a durable veto. A delayed Off response cancels
-only its original operation. The internal local stop carries that operation ID;
-manager admission makes the entire delayed request a no-op once the reservation
-is released or belongs to another operation, preserving later explicit On intent.
-Off/pause during retained recovery latches against its checkpoint identity;
-recovery rechecks after reconciliation and drain release, repeats cleanup for a
-new veto, and orders checkpoint release with that admission gate.
-Admission first persists an internal operation-keyed local obligation in the
-switch journal; failure visibly refuses the local request. Before recovery
-resolution, the broker holds the operation lock while discharging
-every obligated engine through a verified ordinary stop on the current manager.
-A completed Pause is persisted and applied; its operation-specific completion proof
-is saved before a later local Resume can run. Cleanup preserves that Resume and
-uses the saved proof without re-pausing. A reconciled manager reservation may
-be released while pause is still pending, with a durable recovery receipt and
-undischarged obligation retained behind the pause fence. This permits
-intent-neutral sleep without a reservation cycle. Shutdown readback uses one
-manager throughout; startup and replacement verify it before readiness. Local
-Resume may explicitly retire an unapplied pause after conservative switch
-cleanup, without recording false physical-completion proof.
-Discharge is durably recorded; failure retains recovery ownership.
-Restart replays undischarged obligations even with no
-manager checkpoint, before restoration/readiness. An older direct peer start loses
-to the subsequently admitted local Off; later local On waits for this discharge.
-Explicit local start, restart and install with `start: true` share the operation
-lock and recovery reservation check, including installs without a port override
-and the desktop install, installAll and update commands that send them.
-Install preparation runs without either global lock; only its separate start
-uses lifecycle admission. A local Off of that engine, or a pause of either origin, admitted during preparation supersedes
-that older start even after switch discharge. The install remains completed,
-but its start returns busy. A later On retains normal lifecycle ordering.
-The journal lock is released during lifecycle worker waits.
-Clients cannot relay the manager's private switch prepare, step or reconcile
-methods; only the coordinator dispatches those under its operation lock.
-Worker exit is fenced before supervisor
-notification, with already-closed worker
-channels checked again at completion. Transient conservative recovery failures
-retry with bounded backoff on the same replacement; exhausted recovery remains
-hidden and reports a sticky error. Journal/storage uncertainty stays blocked.
-Each of the three recovery attempts has a 60-second cleanup budget, plus
-one-/two-second backoffs: RPC budgets can occupy the synchronous spawn path for
-about 183 seconds. Entry lock waits precede those budgets, so this is not an
-unconditional end-to-end bound. A simultaneous drain-release failure cannot
-downgrade a permanent storage failure.
+On startup and manager replacement, the broker keeps the new worker hidden
+until its authoritative pause projection and, when paused, physical shutdown
+proof are restored. Recovery retries on the same still-current worker with
+bounded backoff; failure leaves its ordinary broker surface unavailable.
+Discovery subscription, node/settings projections and log-level delivery remain
+available during recovery. Current-worker and exit checks precede publication.
+Settings recovery, including native-first policy publication, still precedes
+enabled-intent restoration. Pause, saved Off, source identity and resident
+reservation fences remain authoritative.
+
+Explicit local start, restart and install with `start: true` share the settings
+operation lock, including installs without a port override. Install preparation
+runs without the global configuration/operation locks; only its separate start
+uses lifecycle admission. A local Off of that engine, or a pause of either
+origin, admitted during preparation supersedes that older start. The install
+remains completed, but its start returns busy. A later On retains normal
+lifecycle ordering. The configuration lock is released during worker waits.
 
 A Go service that exposes the NVIDIA Personal AI Router API to **UI processes**
 and other clients (CLIs, dashboards, mobile companions, scripts, tests, etc.).
@@ -471,7 +338,7 @@ never request or response bodies.
 
 Peer HTTP requests instead enter engine-manager's pinned mTLS control server,
 including its reverse transport, through the explicit `controlServer.routes`
-registry and the existing settings, switch and policy relays. That path has no
+registry and the existing settings and policy relays. That path has no
 generic peer-to-broker JSON-RPC ingress and no credential route, remote wrapper
 or credential subscription. Local dispatch refuses
 `internal:local-engine-credential` before generic relaying, regardless of a
@@ -701,8 +568,8 @@ Only the existing process watcher fences worker exit and closes its `Done`
 channel after `cmd.Wait`. Interruption does not call `Stop`, join the process,
 or force-kill engine-manager: stdin EOF retains its ordinary engine cleanup
 path and the broker's existing graceful engine-manager shutdown policy.
-The subscribed engine event relay and manager-originated switch progress use
-one FIFO queue for the broker's service-facing client. The queue holds at most
+The subscribed engine event relay uses one FIFO queue for the broker's
+service-facing client. The queue holds at most
 32 waiting events and 8 MiB of method/parameter bytes including the event in
 flight. It owns copies of queued parameters. Enqueue never waits for client IO
 or space: overflow drops that client's engine subscription and pending engine
@@ -856,7 +723,7 @@ Shared lifecycle for all workers:
 
 ## Node policy
 
-Remote policy, availability, settings Apply and switch writes require this
+Remote policy, availability and settings Apply writes require this
 target's admission-bound remote-management grant. Engine-manager first gates
 the authenticated mTLS caller; the broker freshly rechecks the shared
 `clustertrust.Mesh.RemoteManagement` predicate under each owning acceptance
@@ -1226,10 +1093,10 @@ proxy enforces it.
   Resume cannot publish an unblocked state. Other management, including peer
   engine-settings Apply, keeps the strict either-origin pause fence.
   Reads, outgoing management, local configuration, grants and manual-node
-  operations remain available. Local starts, loads and switches require Resume.
+  operations remain available. Local starts and loads require Resume.
   Local settings Apply and journal recovery may finish configuration while
-  paused, but never activate a stopped engine. Settings and switch acceptance
-  recheck after waiting for locks and worker validation, before writing any
+  paused, but never activate a stopped engine. Settings acceptance
+  rechecks after waiting for locks and worker validation, before writing any
   new receipt; no-op and duplicate peer requests are fenced too.
 - **Startup.** A persisted `paused` reaches the proxy before it can admit
   anything. A paused node skips `engine:restore-enabled` (also when
@@ -1309,7 +1176,7 @@ the numeric code or wire name, never diagnostic text.
 In Routing & resources, the desktop's Model inference settings editor uses
 `Allow request overrides`, `Force PAIR values` and the profile-level checkbox
 `Only this device can edit`. It shares the policy JSON draft and Save/CAS flow
-with the binding editor and `Advanced policy JSON`; there is no separate save.
+with `Advanced policy JSON`; there is no separate save.
 The editor shows `Editing settings on <node>` and exact numeric inputs for
 OpenAI-compatible engine profiles. Typed `min_p` is limited to llama.cpp.
 Uncommon settings stay in Advanced policy JSON.

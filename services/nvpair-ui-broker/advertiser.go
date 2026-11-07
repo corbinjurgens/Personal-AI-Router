@@ -62,7 +62,6 @@ func (b *Broker) runAutoAdvertiseEngine(ctx context.Context, profile engineProxy
 }
 
 func (b *Broker) reconcileAdvertiseEngine(profile engineProxyProfile, client *http.Client) {
-	defer b.refreshBindingAdvertisement()
 	b.engineConfigMu.Lock()
 	defer b.engineConfigMu.Unlock()
 	if b.loadEngineSettingsLocked() != nil && b.knownModelSettingsFenceLocked() {
@@ -87,9 +86,7 @@ func (b *Broker) reconcileAdvertiseEngine(profile engineProxyProfile, client *ht
 		b.setProxyLocalBackendKeyed(b.engineProxyHandle(profile), profile.Name, enginePort, true, credential)
 		return
 	}
-	if !b.registerBindingFacadeLocked(profile) {
-		b.unregisterService(profile.DiscoveryService)
-	}
+	b.unregisterService(profile.DiscoveryService)
 	b.setProxyLocalBackendKeyed(b.engineProxyHandle(profile), profile.Name, enginePort, false, "")
 }
 
@@ -138,11 +135,6 @@ func (b *Broker) setProxyLocalBackendKeyed(p *proxyProcess, engine string, port 
 			credential = ""
 		}
 	}
-	if healthy {
-		if profile, ok := b.frontedEngineProfile(engine); ok {
-			b.engineProxy(profile).bindingRegistered.Store(false)
-		}
-	}
 	raw, err := json.Marshal(proxyLocalBackend{
 		Engine:     engine,
 		Host:       "127.0.0.1",
@@ -161,11 +153,17 @@ func (b *Broker) setProxyLocalBackendKeyed(p *proxyProcess, engine string, port 
 	}
 }
 
+func (b *Broker) advertisementWithdrawnLocked(engine string) bool {
+	r := b.nodePolicyRuntime()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.drains[engine]
+}
+
 // localEngineCredential asks engine-manager for the native API key of the
 // engine's running instance (an owned launch or adopted command-mode server),
 // and keeps it only when that instance serves the port about to be configured.
-// Any failure gives no key. A protected engine then fails its health probe;
-// a managed cold facade may remain registered without a ready local engine.
+// Any failure gives no key. A protected engine then fails its health probe.
 func (b *Broker) localEngineCredential(engine string, port int) string {
 	em := b.getEngineMgr()
 	if em == nil {

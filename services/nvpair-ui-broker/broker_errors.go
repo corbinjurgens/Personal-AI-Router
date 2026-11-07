@@ -220,8 +220,7 @@ func (b *Broker) forwardErrorsClear(id string) {
 // replays whenever nvpair-errors (re)starts, because nvpair-errors holds errors
 // only in memory. These reports remain active until their producer clears them.
 var stickyErrorIDs = map[string]bool{
-	routingListenerBlockedID:      true,
-	engineSwitchRecoveryBlockedID: true,
+	routingListenerBlockedID: true,
 }
 
 // routingListenerBlockedID is the proxy's routing-listener bind failure; the

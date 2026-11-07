@@ -5,8 +5,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Divider, Stack } from '@nvidia/foundations-react-core'
 import type { BackendInfo } from '@/ui/types/engine-info'
 import type { EngineProcessStatus } from '@/shared/types/engines'
-import { engineManagerName, isBuiltinEngineType } from '@/shared/utils/engines'
-import { useEngineSwitchStore } from '@/ui/stores/engine-switch.store'
+import { isBuiltinEngineType } from '@/shared/utils/engines'
 
 import { engineProgressKey } from '@/shared/utils/engine-progress'
 import { useConnectionStore } from '@/ui/stores/connection.store'
@@ -84,13 +83,6 @@ export function BackendRow({
     const lifecyclePending = usePendingActionsStore(s =>
         s.getLifecyclePending(nodeId, backend.type)
     )
-    const switchPending = usePendingActionsStore(s =>
-        s.isSwitchPending(nodeId, engineManagerName(backend.type))
-    )
-    const switchReserved =
-        useEngineSwitchStore(s => s.reserved(nodeId, engineManagerName(backend.type))) ||
-        switchPending
-
     const displayBackend = useMemo((): BackendInfo => {
         // While an optimistic lifecycle command is in flight, show its
         // transitional status so the header spins immediately. Real transition
@@ -156,24 +148,20 @@ export function BackendRow({
     const targetOs = nodeOs ?? window.windowApi.platform
 
     const handleToggle = useCallback(() => {
-        if (switchReserved && !(isLocalNode && backend.processStatus === 'running')) return
         window.pairApi.engines.toggle(backend.type, nodeId)
-    }, [backend.type, backend.processStatus, nodeId, switchReserved, isLocalNode])
+    }, [backend.type, nodeId])
 
     const handleInstall = useCallback(() => {
-        if (switchReserved) return
         window.pairApi.engines.install(backend.type, nodeId)
-    }, [backend.type, nodeId, switchReserved])
+    }, [backend.type, nodeId])
 
     const handleUninstall = useCallback(() => {
-        if (switchReserved) return
         window.pairApi.engines.uninstall(backend.type, nodeId)
-    }, [backend.type, nodeId, switchReserved])
+    }, [backend.type, nodeId])
 
     const handleUpdate = useCallback(() => {
-        if (switchReserved) return
         window.pairApi.engines.update(backend.type, nodeId)
-    }, [backend.type, nodeId, switchReserved])
+    }, [backend.type, nodeId])
 
     const requestUninstall = useCallback(() => {
         setConfirmUninstall(true)
@@ -186,7 +174,7 @@ export function BackendRow({
 
     // Install/start/stop, model pull, and the settings editor work on clustered
     // peers; uninstall, update, and model load/delete remain local-only.
-    const controlsDisabled = isTransitioning || switchReserved
+    const controlsDisabled = isTransitioning
 
     const content = expanded ? (
         <Stack gap="4" className="max-w-full overflow-hidden pt-4">
@@ -233,9 +221,6 @@ export function BackendRow({
                         isTransitioning={isTransitioning}
                         isUnavailable={isUnavailable}
                         disabled={controlsDisabled}
-                        localOffAvailable={
-                            switchReserved && isLocalNode && backend.processStatus === 'running'
-                        }
                         onToggle={handleToggle}
                         onExpand={handleExpand}
                         expanded={expanded}

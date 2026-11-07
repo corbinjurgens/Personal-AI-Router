@@ -183,8 +183,8 @@ export default function ModelProfileControls({
                         <Text kind="body/regular/sm">
                             Remove profile {profile.displayName}?{' '}
                             {typed
-                                ? 'Removes its load, role memberships, served permission, residency and engine binding for this profile key.'
-                                : `Removes its role memberships and residency for native model ${profile.model}. Served permission and engine bindings stay in place.`}{' '}
+                                ? 'Removes its load, role memberships, served permission and residency for this profile key.'
+                                : `Removes its role memberships and residency for native model ${profile.model}. Served permission stays in place.`}{' '}
                             Model files stay in place. Preview and apply the removal below.
                         </Text>
                         <Button

@@ -24,14 +24,6 @@ import (
 	"nvpair-shared/nodepolicy"
 )
 
-func (p *Proxy) handleBoundEngineNotification(msg *Message, engine, method string) bool {
-	if engine != "" || method != nodepolicy.NotifyBoundEnginePrepared || !msg.IsNotification() {
-		return false
-	}
-	p.receiveBoundEnginePrepared(msg.Params)
-	return true
-}
-
 // bufferSettings checks conversions and old/new body overlap plus the separate
 // overflow probe before a policy can change admission or process authority.
 func (p *Proxy) bufferSettings(policy nodepolicy.Policy) (int64, time.Duration, error) {
@@ -70,8 +62,6 @@ func (p *Proxy) handlePolicyMethod(msg *Message, method string) bool {
 		err = p.applySetEngineDrain(msg.Params)
 	case nodepolicy.MethodSetResidency:
 		err = p.applySetResidency(msg.Params)
-	case nodepolicy.MethodInvalidateEngine:
-		result, err = p.applyInvalidateEngine(msg.Params)
 	case nodepolicy.MethodAdmissionSnapshot:
 		result, err = p.applyAdmissionSnapshot(msg.Params)
 	case nodepolicy.MethodSetEngineIntent:

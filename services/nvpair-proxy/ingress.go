@@ -22,6 +22,45 @@ import (
 
 const engineIdentityProbeHeader = "X-NVPAIR-Engine-Identity-Probe"
 
+// Capture the pinned relationship before any request body or storage wait.
+// HTTP fields cannot supply this authority.
+type ingressPeerKey struct{}
+type ingressPeer struct{ id, incarnation string }
+
+func (f *facade) ingressPeerCurrent(ctx context.Context) bool {
+	peer, ok := ctx.Value(ingressPeerKey{}).(ingressPeer)
+	if !ok {
+		return true // Local requests and internal terminal callers.
+	}
+	incarnation, current, diagnostic := f.host.mesh.PeerServiceIncarnationWithDiagnostic(peer.id)
+	if current && incarnation == peer.incarnation {
+		return true
+	}
+	if current {
+		diagnostic.Predicate = "incarnation_mismatch"
+	}
+	diagnostic.ExpectedIncarnation, diagnostic.ObservedIncarnation = peer.incarnation, incarnation
+	slog.Warn("proxy ingress peer relationship changed",
+		"site", "proxy.peer_incarnation", "reason", diagnostic.Predicate,
+		"node_id", diagnostic.NodeID, "peer_id", peer.id, "cluster_id", diagnostic.ClusterID,
+		"epoch", diagnostic.Epoch, "counter", diagnostic.Counter, "io_error_code", diagnostic.ErrorCode,
+		"expected_incarnation", diagnostic.ExpectedIncarnation,
+		"observed_incarnation", diagnostic.ObservedIncarnation,
+		"changed_component_authority_compared", diagnostic.ChangedComponentCompared,
+		"changed_component_authority_same", diagnostic.ChangedComponentSame,
+		"permission", "not_checked")
+	return false
+}
+
+func writeIngressPeerRefusal(w http.ResponseWriter) {
+	w.Header().Set(nodepolicy.AdmissionHeader, "management-denied")
+	writeInferenceErrorFields(w, http.StatusServiceUnavailable,
+		inferenceErrorField{"code", []string{"admission"}},
+		inferenceErrorField{"error", []string{"Peer relationship changed before inference dispatch."}},
+		inferenceErrorField{"reason", []string{"management-denied"}},
+	)
+}
+
 // localBackend is the explicit loopback engine the cluster mTLS ingress
 // forwards to. It is supplied by the broker over node/set-local-backend and is
 // deliberately NOT sourced from the discovery overlay: a request that arrived
@@ -184,7 +223,7 @@ func (f *facade) handleClusterIngress(w http.ResponseWriter, r *http.Request) {
 		writeIngressError(w, http.StatusForbidden, "cluster-auth", "peer relationship changed during authentication")
 		return
 	}
-	r = r.WithContext(context.WithValue(r.Context(), boundEnginePeerKey{}, boundEnginePeer{id: peer, incarnation: incarnation}))
+	r = r.WithContext(context.WithValue(r.Context(), ingressPeerKey{}, ingressPeer{id: peer, incarnation: incarnation}))
 	f.serveIngress(w, r, peer)
 }
 
@@ -232,7 +271,6 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 	}
 
 	r = r.WithContext(context.WithValue(r.Context(), routingDeadlineContextKey{}, start.Add(jobDeadline)))
-	r = withBoundEngineDeadline(r, start)
 	r, buffers := f.host.ownInferenceBuffers(r)
 	w = &inferenceErrorWriter{ResponseWriter: w, ctx: r.Context()}
 	defer buffers.close()
@@ -266,12 +304,8 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 		writeOriginStreamRequestError(w, err)
 		return
 	}
-	if !f.localBindingConsistent(f.host.admission.currentPolicy(), model) {
-		writeBoundEngineRefusal(w, boundEngineRefusal("model-unavailable"))
-		return
-	}
-	if !f.boundIngressPeerCurrent(ctx) {
-		writeBoundEngineRefusal(w, boundEngineRefusal("management-denied"))
+	if !f.ingressPeerCurrent(ctx) {
+		writeIngressPeerRefusal(w)
 		return
 	}
 	if strict != nil {
@@ -310,30 +344,12 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 		buffers.releaseAfterPendingBody(releaseBody)
 	}()
 	admissionStarted := time.Now()
-	bound := f.boundModel(f.host.admission.currentPolicy(), model)
-	var bindingEvidence *boundEngineEvidence
-	if f.needsBoundPreparation(model) {
-		if parseAdmissionWait(r.Header) == 0 {
-			writeBoundEngineRefusal(w, boundEngineRefusal("engine-switch-busy"))
-			return
-		}
-		var result nodepolicy.BoundEnginePrepared
-		bindingEvidence, result = f.prepareLocalBound(ctx, model, peer)
-		if !result.Success {
-			if ctx.Err() == nil {
-				writeBoundEngineRefusal(w, result)
-			}
-			return
-		}
-	}
 	prepareCtx, stopPreparation := routingPreparationContext(ctx)
 	decision := f.host.admission.admit(prepareCtx, admissionRequest{
-		engine:     f.profile.Name,
-		model:      model,
-		bound:      bound,
-		waitCap:    parseAdmissionWait(r.Header),
-		cancel:     func() { owner.withdrawLocalIf(attempt, false) },
-		revalidate: func() bool { return f.boundEvidenceCurrentLocked(bindingEvidence) },
+		engine:  f.profile.Name,
+		model:   model,
+		waitCap: parseAdmissionWait(r.Header),
+		cancel:  func() { owner.withdrawLocalIf(attempt, false) },
 		prepare: func(ctx context.Context, profile nodepolicy.Profile, hasProfile bool, _ uint64) error {
 			releasePreparation()
 			releasePreparation = func() {}
@@ -505,12 +521,8 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 		}
 		performance.finish(sc, returned)
 	}()
-	if !f.boundIngressPeerCurrent(ctx) {
-		writeBoundEngineRefusal(w, boundEngineRefusal("management-denied"))
-		return
-	}
-	if !f.beforeBoundDispatch(decision.ticket, bindingEvidence) {
-		writeBoundEngineRefusal(w, boundEngineRefusal("model-unavailable"))
+	if !f.ingressPeerCurrent(ctx) {
+		writeIngressPeerRefusal(w)
 		return
 	}
 	p.ServeHTTP(sc, out)
@@ -587,12 +599,8 @@ func (f *facade) newLocalReverseProxy(target *url.URL) *httputil.ReverseProxy {
 // reconciliation owner proves termination. It must never be interpreted as
 // engine-idle evidence.
 func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body []byte, model string, req nodepolicy.StrictAdmissionRequest, peer bool, origin ...*routingSpend) {
-	if !f.boundIngressPeerCurrent(r.Context()) {
-		writeBoundEngineRefusal(w, boundEngineRefusal("management-denied"))
-		return
-	}
-	if !f.localBindingConsistent(f.host.admission.currentPolicy(), model) {
-		writeBoundEngineRefusal(w, boundEngineRefusal("model-unavailable"))
+	if !f.ingressPeerCurrent(r.Context()) {
+		writeIngressPeerRefusal(w)
 		return
 	}
 	admissionStarted := time.Now()
@@ -680,8 +688,8 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 		return
 	}
 	defer func() { buffers.releaseAfterPendingBody(releasePreparation) }()
-	if !f.boundIngressPeerCurrent(r.Context()) {
-		writeBoundEngineRefusal(w, boundEngineRefusal("management-denied"))
+	if !f.ingressPeerCurrent(r.Context()) {
+		writeIngressPeerRefusal(w)
 		return
 	}
 	ticket, err := f.host.admission.AdmitStrict(prepareCtx, f.profile.Name, model, req, validated.generation)
@@ -710,8 +718,8 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 		writeStrictAdmissionError(w, errStrictUnavailable)
 		return
 	}
-	if !f.boundIngressPeerCurrent(r.Context()) {
-		writeBoundEngineRefusal(w, boundEngineRefusal("management-denied"))
+	if !f.ingressPeerCurrent(r.Context()) {
+		writeIngressPeerRefusal(w)
 		return
 	}
 	if err = ticket.BeforeStrictDispatch(); err != nil {

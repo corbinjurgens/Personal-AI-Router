@@ -23,7 +23,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -143,9 +142,8 @@ type policyRuntime struct {
 	// strictReadiness is the newest strict admission readiness the proxy
 	// reported (readiness.go), held until its fences match; replay clears it.
 	// strictPublished is the capability the last node projection carried.
-	strictReadiness        nodepolicy.StrictAdmissionReadiness
-	strictPublished        *nodepolicy.StrictAdmissionCapability
-	bindingOffersPublished *nodepolicy.EngineBindingOffers
+	strictReadiness nodepolicy.StrictAdmissionReadiness
+	strictPublished *nodepolicy.StrictAdmissionCapability
 	// live is the availability the node is actually in. It differs from
 	// current.Availability only while draining.
 	live         nodepolicy.Availability
@@ -534,7 +532,6 @@ func checkExpectedRevision(stored nodepolicy.Policy, expected string) error {
 
 func (b *Broker) localPolicy() policyGetResult {
 	e := b.captureModelConfig()
-	e.Policy.EngineBindings = slices.Clone(e.Policy.EngineBindings)
 	configuration := b.modelConfiguration(e)
 	origin := e.Policy.PausedBy
 	mode := e.Policy.PauseMode
@@ -778,16 +775,6 @@ func (b *Broker) persistPolicy(check func(stored nodepolicy.Policy) error, prepa
 		b.engineConfigMu.Unlock()
 		return nodepolicy.Policy{}, err
 	}
-	if err := b.boundPolicyChangeLocked(r.current, policy); err != nil {
-		r.mu.Unlock()
-		b.engineConfigMu.Unlock()
-		return nodepolicy.Policy{}, err
-	}
-	if err := policy.ValidateEngineBindings(b.engineModelNaming); err != nil {
-		r.mu.Unlock()
-		b.engineConfigMu.Unlock()
-		return nodepolicy.Policy{}, &invalidParamsError{err}
-	}
 	policy, err = r.publishLocked(policy)
 	if err != nil && !errors.Is(err, durablefile.ErrReplaced) {
 		r.mu.Unlock()
@@ -798,7 +785,6 @@ func (b *Broker) persistPolicy(check func(stored nodepolicy.Policy) error, prepa
 		policy.Routing.Listener.Port != r.current.Routing.Listener.Port
 	refsChanged := credentialRefsDiffer(policy, r.current)
 	r.current = policy
-	r.current.EngineBindings = slices.Clone(policy.EngineBindings)
 	r.recoveryRequired = false
 	r.activationErr = ""
 	r.mu.Unlock()
@@ -1025,7 +1011,7 @@ func modelControlReadbackSupported(request, result json.RawMessage) error {
 	if json.Unmarshal(request, &want) != nil || json.Unmarshal(result, &got) != nil {
 		return fmt.Errorf("unsupported policy readback")
 	}
-	for _, key := range []string{"servedModels", "residentModels", "engineBindings"} {
+	for _, key := range []string{"servedModels", "residentModels"} {
 		raw, present := want[key]
 		if !present {
 			continue
@@ -1604,42 +1590,11 @@ func (b *Broker) replayPolicyToProxy(ctx context.Context, pp *proxyProcess) bool
 	for _, kind := range kinds {
 		b.sendPolicyStateLocked(ctx, pp, kind)
 	}
-	if err := b.replaySwitchInvalidations(ctx, pp); err != nil {
-		slog.Error("switch invalidation replay blocked proxy facades", "err", err)
-		return false
-	}
 	// Client publication is independent of proxy acknowledgement. The spawn
 	// caller can hold proxySupMu, and a slow client must not retain that lock
 	// or the push slot after the ordered replay RPCs have finished.
 	b.schedulePolicyAnnouncement()
 	return true
-}
-
-// pushSwitchDrain returns the actual acknowledgement and validates the live
-// incarnation. Its caller's deadline covers push-slot contention as well.
-func (b *Broker) pushSwitchDrain(ctx context.Context, engine string, drain bool) (string, error) {
-	r := b.nodePolicyRuntime()
-	if !r.acquirePush(ctx) {
-		return "", ctx.Err()
-	}
-	defer r.releasePush()
-	pp := b.policyProxy()
-	r.mu.Lock()
-	runID, incarnation := r.runID, r.incarnation
-	r.mu.Unlock()
-	if pp == nil || pp != incarnation || runID == "" {
-		return "", fmt.Errorf("proxy incarnation is unverified")
-	}
-	if err := switchDrainAck(ctx, pp, engine, drain); err != nil {
-		return "", err
-	}
-	r.mu.Lock()
-	current := r.incarnation == pp && r.runID == runID
-	r.mu.Unlock()
-	if !current || b.policyProxy() != pp {
-		return "", fmt.Errorf("proxy incarnation changed during drain push")
-	}
-	return runID, nil
 }
 
 // sendPolicyStateLocked sends the current state of one kind. Caller holds the

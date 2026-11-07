@@ -216,7 +216,7 @@ func TestStrataModelsAndResidency(t *testing.T) {
 		}
 	})
 	got := ex.ModelsResult(context.Background())
-	managerIncarnation := ex.switchIncarnation
+	managerIncarnation := ex.managerIncarnation
 	downloadState := ex.downloads.snapshot()
 	want := ModelsResult{
 		Models:         []string{"resident", "cold", "unknown", "loading"},

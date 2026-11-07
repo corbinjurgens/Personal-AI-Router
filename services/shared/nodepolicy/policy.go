@@ -134,8 +134,6 @@ type Policy struct {
 	ServedModels ServedModels `json:"servedModels,omitzero"`
 	// ResidentModels names qualified models desired resident, not observed loads.
 	ResidentModels ResidentModels `json:"residentModels,omitempty"`
-	// EngineBindings assigns native model names to engines without starting them.
-	EngineBindings EngineBindings `json:"engineBindings"`
 	// Roles is this node's ordered declaration of the profiles it serves per
 	// role. These declarations are the only local candidate source.
 	Roles []Role `json:"roles"`
@@ -170,7 +168,6 @@ func (p *Policy) UnmarshalJSON(data []byte) error {
 	}
 	next.ServedModels = slices.Clone(next.ServedModels)
 	next.ResidentModels = slices.Clone(next.ResidentModels)
-	next.EngineBindings = slices.Clone(next.EngineBindings)
 	next.Roles = copyRoles(next.Roles)
 	next.Pause.canonicalize()
 	*p = Policy(next)
@@ -305,8 +302,8 @@ func validateModelList(name string, refs []ModelRef) error {
 	return nil
 }
 
-// CheckModelListKeys checks raw servedModels, residentModels and engineBindings
-// keys before JSON decoding collapses duplicates or folds case. Call it before preprocessing a
+// CheckModelListKeys checks raw servedModels and residentModels keys before
+// JSON decoding collapses duplicates or folds case. Call it before preprocessing a
 // policy object. It also checks raw model tokens and ambiguous effective keys
 // before preprocessing can lose their original encoding or occurrences.
 func CheckModelListKeys(data []byte) error {
@@ -336,7 +333,10 @@ func checkModelListKeys(data []byte) error {
 		if !ok {
 			return errors.New("invalid policy key")
 		}
-		for _, name := range []string{"servedModels", "residentModels", "engineBindings"} {
+		if strings.EqualFold(key, "engineBindings") {
+			return errors.New("engineBindings is no longer supported")
+		}
+		for _, name := range []string{"servedModels", "residentModels"} {
 			if strings.EqualFold(key, name) {
 				if key != name || seen[name] {
 					return fmt.Errorf("duplicate or case-variant %s key", name)
@@ -792,9 +792,6 @@ func (p Policy) Validate() error {
 	if err := validateModelList("residentModels", p.ResidentModels); err != nil {
 		return err
 	}
-	if err := p.EngineBindings.validate(); err != nil {
-		return err
-	}
 	for _, ref := range p.ResidentModels {
 		if p.ServedModels != nil && !slices.Contains(p.ServedModels, ref) {
 			return errors.New("residentModels must be a subset of servedModels")
@@ -1011,7 +1008,6 @@ func migrateV1(data []byte) (Policy, error) {
 // obsolete pause switches are true, a migrated version 1 document's included.
 func (p *Policy) normalize() {
 	p.Pause.canonicalize()
-	p.EngineBindings = nilIfEmpty(p.EngineBindings)
 	if p.Profiles == nil {
 		p.Profiles = []Profile{}
 	}

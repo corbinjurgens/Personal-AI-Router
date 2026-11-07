@@ -21,6 +21,19 @@ import (
 	"nvpair-shared/performancewire"
 )
 
+type stopPauseBodyReadBarrier struct {
+	io.ReadCloser
+	entered chan struct{}
+	release <-chan struct{}
+	once    sync.Once
+}
+
+func (b *stopPauseBodyReadBarrier) Read(p []byte) (int, error) {
+	b.once.Do(func() { close(b.entered) })
+	<-b.release
+	return b.ReadCloser.Read(p)
+}
+
 // The upstream and client barriers distinguish admission, raw commitment and
 // actual delivery. Timeouts only bound failed positive waits, never prove that
 // an unwanted send did not happen.
@@ -323,7 +336,7 @@ func stopPausePeerHeaders(t *testing.T) {
 			peer.peer.plainHTTPTransport().RegisterProtocol("http", publicTestRoundTrip(func(r *http.Request) (*http.Response, error) {
 				resp, err := transport.RoundTrip(r)
 				if err == nil {
-					resp.Body = &bindingBodyReadBarrier{ReadCloser: resp.Body, entered: readStarted, release: releaseRead}
+					resp.Body = &stopPauseBodyReadBarrier{ReadCloser: resp.Body, entered: readStarted, release: releaseRead}
 				}
 				return resp, err
 			}))

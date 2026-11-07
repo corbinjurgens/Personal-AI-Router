@@ -30,7 +30,7 @@ func TestModelDownloadEngineResponseRelay(t *testing.T) {
 			var wire bytes.Buffer
 			b := &Broker{codec: NewCodec(&wire)}
 			source := b.activateEngineManagerSource()
-			_, engine := attachBoundEngineManager(t, b, source)
+			_, engine := attachEngineManagerSource(t, b, source)
 			want := struct {
 				Models         []string                `json:"models"`
 				ModelsByEngine map[string][]string     `json:"modelsByEngine"`

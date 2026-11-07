@@ -132,7 +132,6 @@ func TestModelPublisherDoesNotBypassCopyAdmission(t *testing.T) {
 	test("Pause", func(f *copyControlFixture) {
 		f.destination.exec.nodeProjection.set(nodeProjection{ManagementBlocked: true})
 	})
-	test("switch recovery", func(f *copyControlFixture) { f.destination.exec.switchRecoveryPending.Store(true) })
 	test("download recovery", func(f *copyControlFixture) {
 		f.destination.copyJournal.mu.Lock()
 		f.destination.copyJournal.recoveryRequired = true
@@ -166,7 +165,6 @@ func copyControlManager(t *testing.T, exec *Executor, dir string) *Manager {
 	m.catalog.client.Transport = healthProbeTransport(func(*http.Request) (*http.Response, error) {
 		return nil, errors.New("synthetic provider unavailable")
 	})
-	exec.switchRecoveryPending.Store(false)
 	exec.nodeProjection.set(nodeProjection{})
 	acceptModelMutations(exec)
 	t.Cleanup(func() { m.stopCopies(); m.controlHTTP.CloseIdle(); m.controlReadyHTTP.CloseIdle() })
@@ -1198,15 +1196,10 @@ func TestModelCopyControlCapabilitiesReadiness(t *testing.T) {
 			t.Fatalf("capability=%+v", capability)
 		}
 	})
-	t.Run("unknown projection and recovery fail closed", func(t *testing.T) {
+	t.Run("unknown projection fails closed", func(t *testing.T) {
 		ex := copyTestExecutor(t, "llamacpp", t.TempDir(), true)
 		if ex.copyCapabilities("llamacpp").Writable {
 			t.Fatal("unknown policy became writable")
-		}
-		ex.nodeProjection.set(nodeProjection{})
-		ex.switchRecoveryPending.Store(true)
-		if ex.copyCapabilities("llamacpp").Writable {
-			t.Fatal("pending recovery became writable")
 		}
 	})
 	t.Run("unsupported protocol never becomes ready", func(t *testing.T) {

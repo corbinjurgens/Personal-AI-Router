@@ -2028,7 +2028,7 @@ func TestModelControlsPullStreamsAtEntryBoundaries(t *testing.T) {
 			var previousRevision uint64
 			for i, want := range wantProgress {
 				event := progress[i]
-				entry := modelControlsPullEntry(t, event, ex.switchIncarnation, progress[0].ID, model)
+				entry := modelControlsPullEntry(t, event, ex.managerIncarnation, progress[0].ID, model)
 				if event.Stage != want.stage || event.Percent != want.percent {
 					t.Fatalf("pull progress[%d]=%+v, want stage=%s percent=%d", i, event, want.stage, want.percent)
 				}
@@ -2092,8 +2092,8 @@ func TestModelControlsPullStoppedEngineReportsTerminalError(t *testing.T) {
 		t.Fatalf("stopped pull progress=%+v, want queued and failed", progress)
 	}
 	downloadID := progress[0].ID
-	queued := modelControlsPullEntry(t, progress[0], ex.switchIncarnation, downloadID, "tiny")
-	failed := modelControlsPullEntry(t, progress[1], ex.switchIncarnation, downloadID, "tiny")
+	queued := modelControlsPullEntry(t, progress[0], ex.managerIncarnation, downloadID, "tiny")
+	failed := modelControlsPullEntry(t, progress[1], ex.managerIncarnation, downloadID, "tiny")
 	if progress[0].Stage != "queued" || progress[0].Percent != 0 ||
 		!reflect.DeepEqual(queued, modeldownload.Entry{ID: downloadID, Engine: "llamacpp", Model: "tiny", Phase: modeldownload.PhaseQueued, BlocksReadiness: true}) {
 		t.Fatalf("stopped pull did not queue exact model: %+v", progress[0])

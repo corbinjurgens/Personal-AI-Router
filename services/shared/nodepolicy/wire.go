@@ -392,7 +392,7 @@ const (
 	ModelReasonNotInstalled       ModelConfigurationReason = "not-installed"
 	ModelReasonUnqualified        ModelConfigurationReason = "unqualified"
 	ModelReasonUnsupportedLoad    ModelConfigurationReason = "unsupported-load"
-	ModelReasonSwitchBusy         ModelConfigurationReason = "switch-busy"
+	ModelReasonOperationBusy      ModelConfigurationReason = "operation-busy"
 	ModelReasonLoadFailed         ModelConfigurationReason = "load-failed"
 	ModelReasonOperationTimeout   ModelConfigurationReason = "operation-timeout"
 	ModelReasonObservationUnknown ModelConfigurationReason = "observation-unknown"
@@ -403,7 +403,7 @@ func (r ModelConfigurationReason) Validate() error {
 	switch r {
 	case ModelReasonEngineOff, ModelReasonNoFit, ModelReasonPaused, ModelReasonPausedLocal, ModelReasonEngineOffLocal,
 		ModelReasonNotServed, ModelReasonNotInstalled, ModelReasonUnqualified, ModelReasonUnsupportedLoad,
-		ModelReasonSwitchBusy, ModelReasonLoadFailed, ModelReasonOperationTimeout, ModelReasonObservationUnknown, ModelReasonProjectionUnknown:
+		ModelReasonOperationBusy, ModelReasonLoadFailed, ModelReasonOperationTimeout, ModelReasonObservationUnknown, ModelReasonProjectionUnknown:
 		return nil
 	}
 	return errors.New("unknown model configuration reason")
@@ -421,7 +421,7 @@ func validateResidentRefusalReason(r ModelConfigurationReason) error {
 	switch r {
 	case ModelReasonEngineOff, ModelReasonNoFit, ModelReasonPaused, ModelReasonPausedLocal, ModelReasonEngineOffLocal,
 		ModelReasonNotServed, ModelReasonNotInstalled, ModelReasonUnqualified, ModelReasonUnsupportedLoad,
-		ModelReasonSwitchBusy, ModelReasonOperationTimeout, ModelReasonObservationUnknown, ModelReasonProjectionUnknown:
+		ModelReasonOperationBusy, ModelReasonOperationTimeout, ModelReasonObservationUnknown, ModelReasonProjectionUnknown:
 		return nil
 	}
 	return errors.New("unknown model configuration reason")
@@ -1011,8 +1011,7 @@ func (r StrictAdmissionReadiness) Validate() error {
 
 // Broker → proxy requests. Each is answered with {"ok":true} or a JSON-RPC
 // error, except the typed acknowledgements and snapshots below. The broker
-// re-sends policy state whenever the proxy (re)starts and replays pending switch
-// invalidations from its journal before enabling facades.
+// re-sends policy state whenever the proxy (re)starts.
 const (
 	// MethodSetPolicy carries SetPolicyParams and is answered with a
 	// PolicyAck of its revision. Availability inside it is ignored by the
@@ -1028,8 +1027,6 @@ const (
 	MethodSetResidency = "node/set-residency"
 	// MethodSetEngineIntent carries SetEngineIntentParams.
 	MethodSetEngineIntent = "node/set-engine-intent"
-	// MethodInvalidateEngine withdraws strict eligibility for an engine switch.
-	MethodInvalidateEngine = "node/invalidate-engine"
 	// MethodAdmissionSnapshot reads current admission counts, without notification caching.
 	MethodAdmissionSnapshot = "node/admission-snapshot"
 	// MethodSetModelIdentity carries SetModelIdentityParams: the identity
@@ -1038,49 +1035,6 @@ const (
 	// withdrawn, so withdrawal is in force before the change it guards.
 	MethodSetModelIdentity = "node/set-model-identity"
 )
-
-const InvalidationReasonEngineSwitch = "engine-switch"
-
-// InvalidateEngineParams identifies an engine within a switch operation. The
-// same operation may invalidate both source and target engines independently.
-type InvalidateEngineParams struct {
-	Engine      string `json:"engine"`
-	OperationID string `json:"operationId"`
-	Reason      string `json:"reason"`
-}
-
-func (p InvalidateEngineParams) Validate() error {
-	if !engines.ValidID(p.Engine) {
-		return errors.New("engine must be a valid engine ID")
-	}
-	// strictID is the shared switch request-id syntax: 1-128 ASCII bytes,
-	// alphanumeric first, then alphanumeric or . _ : -.
-	if !strictID.MatchString(p.OperationID) {
-		return errors.New("operationId must be a nonempty ASCII identity of at most 128 bytes")
-	}
-	if p.Reason != InvalidationReasonEngineSwitch {
-		return errors.New("reason must be engine-switch")
-	}
-	return nil
-}
-
-func (p *InvalidateEngineParams) UnmarshalJSON(data []byte) error {
-	type plain InvalidateEngineParams
-	var next plain
-	if err := decodeStrictContract(data, &next, "engine", "operationId", "reason"); err != nil {
-		return err
-	}
-	if err := InvalidateEngineParams(next).Validate(); err != nil {
-		return err
-	}
-	*p = InvalidateEngineParams(next)
-	return nil
-}
-
-type InvalidateEngineResult struct {
-	OK    bool   `json:"ok"`
-	RunID string `json:"runId"`
-}
 
 // AdmissionSnapshotParams is an explicit empty object. Request it after the
 // drain acknowledgement, and validate RunID before using zero as drain proof.

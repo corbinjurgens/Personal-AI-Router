@@ -14,7 +14,6 @@ import (
 
 	"nvpair-shared/applog"
 	"nvpair-shared/engines"
-	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/nodepolicy"
 )
@@ -24,32 +23,18 @@ import (
 // otherwise hand them to engine-manager, which serves several of them as its
 // own broker-side surface. One list so a new internal method is added once.
 var internalClientMethods = map[string]struct{}{
-	nodepolicy.MethodPrepareBoundEngine:  {},
-	nodepolicy.MethodCancelBoundEngine:   {},
-	nodepolicy.NotifyBoundEnginePrepared: {},
-	nodepolicy.MethodActivateBoundEngine: {},
-	notifyEngineNotificationsReset:       {},
+	notifyEngineNotificationsReset: {},
 	// Peer relay notifications: only engine-manager relays these, with a
 	// verified caller.
-	policyRelayRequestMethod:       {},
-	policyRelayReplyMethod:         {},
-	policyRelayCancelMethod:        {},
-	"engine:settings-request":      {},
-	"engine:settings-reply":        {},
-	"engine:settings-cancel":       {},
-	"engine:settings-projection":   {},
-	"engine:switch-request":        {},
-	"engine:switch-reply":          {},
-	"engine:switch-cancel":         {},
-	"engine:switch-changed":        {},
-	"engine:switch-recovery-ready": {},
-	// Switch executor calls belong to the coordinator, which retains the
-	// operation lock. Relaying a client's target-start step would bypass it.
-	settings.SwitchPrepareMethod:   {},
-	settings.SwitchStepMethod:      {},
-	settings.SwitchReconcileMethod: {},
-	"engine:set-reserved-port":     {},
-	"internal:set-reserved-port":   {},
+	policyRelayRequestMethod:     {},
+	policyRelayReplyMethod:       {},
+	policyRelayCancelMethod:      {},
+	"engine:settings-request":    {},
+	"engine:settings-reply":      {},
+	"engine:settings-cancel":     {},
+	"engine:settings-projection": {},
+	"engine:set-reserved-port":   {},
+	"internal:set-reserved-port": {},
 	// Broker/engine-manager coordination.
 	"engine:owner-evidence":               {},
 	nodepolicy.MethodModelMutationRequest: {},
@@ -231,8 +216,6 @@ func (b *Broker) handleMessage(msg *Message) {
 		go b.handleModelInspection(msg)
 	case "engine:set-stated-memory", "engine:clear-stated-memory":
 		go b.handleStatedMemory(msg)
-	case "engine:switch", "engine:switch-status", "engine:switch-fence":
-		go b.handleEngineSwitch(msg)
 	case "engine:get-settings", "engine:preview-settings", "engine:apply-settings":
 		go b.handleEngineSettings(msg)
 	case "ping":
@@ -507,49 +490,21 @@ func (b *Broker) relayToEngineNow(msg *Message) {
 		}
 	}()
 	lifecycleLocked := false
-	localOffEngine := ""
-	localOffOperationID := ""
-	offOperationLocked := false
-	if msg.Method == "engine:stop" {
-		var target struct {
-			Engine string `json:"engine"`
-		}
-		if json.Unmarshal(msg.Params, &target) == nil && target.Engine != "" {
-			if b.handleBoundEngineOff(msg, target.Engine) {
-				return
-			}
-			yieldsToOff, reserved, operationID, err := b.admitLocalEngineOff(target.Engine)
-			if err != nil {
-				_ = b.codec.RespondError(msg.ID, -32000, err.Error())
-				return
-			}
-			if reserved && !yieldsToOff {
-				_ = b.codec.RespondError(msg.ID, -32000, "Engine switch reserves this engine (busy).")
-				return
-			}
-			if yieldsToOff {
-				localOffEngine = target.Engine
-				localOffOperationID = operationID
-			} else {
-				offOperationLocked = true
-				defer b.settingsApplyMu.Unlock()
-			}
-		}
-	}
-	if localOffEngine == "" && (isEnginePortAssignment || msg.Method == "engine:stop" || engineLocalOnRequest(msg.Method, msg.Params)) {
-		if !offOperationLocked {
-			b.settingsApplyMu.Lock()
-			defer b.settingsApplyMu.Unlock()
-		}
+	if isEnginePortAssignment || msg.Method == "engine:stop" || engineLocalOnRequest(msg.Method, msg.Params) {
+		b.settingsApplyMu.Lock()
+		defer b.settingsApplyMu.Unlock()
 		b.engineConfigMu.Lock()
 		defer b.engineConfigMu.Unlock()
 		lifecycleLocked = true
 		var target struct {
 			Engine string `json:"engine"`
 		}
-		if err := json.Unmarshal(msg.Params, &target); err != nil || b.pendingSwitchLocked(target.Engine) != nil {
-			_ = b.codec.RespondError(msg.ID, -32000, "Engine switch recovery reserves this engine.")
+		if err := json.Unmarshal(msg.Params, &target); err != nil {
+			_ = b.codec.RespondError(msg.ID, -32602, err.Error())
 			return
+		}
+		if msg.Method == "engine:stop" {
+			b.supersedeInstallStartsLocked(target.Engine)
 		}
 		if installStart != nil && installStart.superseded {
 			_ = b.codec.RespondError(msg.ID, -32000, "Engine install start superseded by local Off or pause (busy).")
@@ -562,13 +517,6 @@ func (b *Broker) relayToEngineNow(msg *Message) {
 	}
 
 	em := b.getEngineMgr()
-	if localOffEngine != "" {
-		// Recovery hides the replacement from forward callers; local Off must
-		// still reach its durable veto owner while that reservation is held.
-		b.workersMu.Lock()
-		em = b.engineMgr
-		b.workersMu.Unlock()
-	}
 	if em == nil {
 		if err := b.codec.RespondError(msg.ID, -32000, "engine-manager not available"); err != nil {
 			log.Printf("failed to respond to %s: engine-manager unavailable", msg.Method)
@@ -586,48 +534,12 @@ func (b *Broker) relayToEngineNow(msg *Message) {
 	id := msg.ID
 	method := msg.Method
 	params := msg.Params
-	if localOffOperationID != "" {
-		// This Off was admitted against this yielding reservation. Once it has
-		// settled, the delayed request must not stop a later local On or switch.
-		var err error
-		params, err = json.Marshal(struct {
-			Engine            string `json:"engine"`
-			SwitchOperationID string `json:"switchOperationId"`
-		}{localOffEngine, localOffOperationID})
-		if err != nil {
-			_ = b.codec.RespondError(id, -32000, err.Error())
-			return
-		}
-		b.engineConfigMu.Lock()
-		// A delayed scoped stop is a no-op after durable discharge. Do not
-		// withdraw the identity of a later local On or switch in that case.
-		c := b.switchCoordinator()
-		withdrawn := c.withdrawnIdentityID == localOffOperationID && c.withdrawnIdentityProxy == b.policyProxy()
-		confirmWithdrawal := false
-		if obligation, ok := c.store.journal.LocalObligations[localOffOperationID]; ok && !obligation.Discharged && !withdrawn {
-			b.forgetSettingsIdentity(localOffEngine)
-			confirmWithdrawal = true
-		}
-		b.engineConfigMu.Unlock()
-		if confirmWithdrawal {
-			err = b.pushModelIdentityConfirmed(context.Background())
-		}
-		if err != nil {
-			_ = b.codec.RespondError(id, -32000, err.Error())
-			return
-		}
-	}
 	if lifecycleLocked {
 		b.engineConfigMu.Unlock()
 	}
 	result, rpcErr, err := em.CallNoTimeout(context.Background(), method, params)
 	if lifecycleLocked {
 		b.engineConfigMu.Lock()
-	}
-	if localOffEngine != "" {
-		// The manager has now persisted the veto and cancelled its startup;
-		// only then cancel the coordinator's drain/response wait.
-		b.cancelRemoteEngineSwitchOperation(localOffEngine, localOffOperationID)
 	}
 	switch {
 	case err != nil:

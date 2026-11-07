@@ -143,7 +143,6 @@ type PolicyPatch struct {
 	Roles              map[string]bool         `json:"roles,omitempty"`
 	Served             *bool                   `json:"served,omitempty"`
 	Resident           *bool                   `json:"resident,omitempty"`
-	Binding            *bool                   `json:"binding,omitempty"`
 }
 type ModelChange struct {
 	ProfileKey             string       `json:"profileKey,omitempty"`
@@ -659,7 +658,7 @@ func (p PolicyPatch) Validate() error {
 	if p.RequestOptionsMode != nil && *p.RequestOptionsMode != "defaults" && *p.RequestOptionsMode != "enforced" {
 		return fmt.Errorf("requestOptionsMode: invalid value")
 	}
-	if p.DisplayName == nil && p.Icon == nil && len(p.Generation) == 0 && p.RequestOptionsMode == nil && len(p.Roles) == 0 && p.Served == nil && p.Resident == nil && p.Binding == nil {
+	if p.DisplayName == nil && p.Icon == nil && len(p.Generation) == 0 && p.RequestOptionsMode == nil && len(p.Roles) == 0 && p.Served == nil && p.Resident == nil {
 		return fmt.Errorf("policy: select an edit")
 	}
 	// Enforced-empty and residency prerequisites require merging the selected
@@ -758,7 +757,7 @@ func (p PolicyPatch) Clone() PolicyPatch {
 	}
 	p.RequestOptionsMode = clonePointer(p.RequestOptionsMode)
 	p.Roles = maps.Clone(p.Roles)
-	p.Served, p.Resident, p.Binding = clonePointer(p.Served), clonePointer(p.Resident), clonePointer(p.Binding)
+	p.Served, p.Resident = clonePointer(p.Served), clonePointer(p.Resident)
 	return p
 }
 func (c ModelChange) Clone() ModelChange {

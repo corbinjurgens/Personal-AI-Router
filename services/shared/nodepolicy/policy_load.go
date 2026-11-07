@@ -18,6 +18,19 @@ import (
 // memory. Counts have fixed category keys and never contain document text.
 // Callers must not persist this repair or assign a new revision on load.
 func ParseStored(data []byte) (Policy, map[string]int, error) {
+	container, err := readPolicyModelContainer(data)
+	if err != nil {
+		return Policy{}, nil, errors.New("stored policy is invalid")
+	}
+	// Retired engine bindings have no authority. Drop them only on disk load,
+	// preserving the order and original values of every retained member.
+	container.members = slices.DeleteFunc(container.members, func(member modelContainerMember) bool {
+		return strings.EqualFold(member.key, "engineBindings")
+	})
+	data, err = container.marshal()
+	if err != nil {
+		return Policy{}, nil, errors.New("stored policy is invalid")
+	}
 	if err := checkModelListKeys(data); err != nil {
 		return Policy{}, nil, errors.New("stored policy is invalid")
 	}
@@ -424,7 +437,7 @@ type modelContainer struct {
 }
 
 func readPolicyModelContainer(data []byte) (*modelContainer, error) {
-	return readModelContainer(data, "profiles", "roles", "tiers", "servedModels", "residentModels", "engineBindings", "routing")
+	return readModelContainer(data, "profiles", "roles", "tiers", "servedModels", "residentModels", "routing")
 }
 
 func readModelContainer(data []byte, owned ...string) (*modelContainer, error) {
@@ -615,14 +628,6 @@ func filterPolicyModels(data []byte, remove bool) ([]byte, map[string]int, error
 	version := SchemaVersion
 	if raw := fields[modelField(fields, "version")]; len(raw) > 0 {
 		if err := json.Unmarshal(raw, &version); err != nil {
-			return nil, nil, err
-		}
-	}
-	// Bindings are activation authority. Never sanitize them away, even on
-	// disk load where unrelated invalid model entries can be repaired.
-	if raw, ok := fields["engineBindings"]; ok {
-		var bindings EngineBindings
-		if err := json.Unmarshal(raw, &bindings); err != nil {
 			return nil, nil, err
 		}
 	}

@@ -716,19 +716,11 @@ export default function ModelLoadSettings({
                 </Text>
             )}
             {(
-                ['served', 'resident', 'binding'] satisfies Array<
-                    keyof NonNullable<ModelChange['policy']>
-                >
+                ['served', 'resident'] satisfies Array<keyof NonNullable<ModelChange['policy']>>
             ).map(field => (
                 <FormField
                     key={field}
-                    slotLabel={
-                        field === 'resident'
-                            ? 'Keep loaded'
-                            : field === 'served'
-                              ? 'Served membership'
-                              : 'Engine binding'
-                    }
+                    slotLabel={field === 'resident' ? 'Keep loaded' : 'Served membership'}
                     slotHelp={
                         field === 'resident'
                             ? 'Requires the target’s existing finite qualified profile and current readiness; no evidence is authored here.'

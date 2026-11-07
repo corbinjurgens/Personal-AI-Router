@@ -280,9 +280,6 @@ func newPhase04FixtureWithOptions(t *testing.T, options phase04FixtureOptions) *
 		}
 		f.engineClusterDirs[n.uuid] = engineClusterDir
 		f.control.engines[n.uuid] = startTask1Process(t, n.base, engineMgrBin, "--cluster-dir", engineClusterDir, "--control-port", strconv.Itoa(n.ports[noderec.ServiceEngineControl]), "--http-port", strconv.Itoa(n.ports[noderec.ServiceEngineManager]), "--loaded-poll-interval", "0")
-		completeEngineManagerRecovery(t, func(method string, params any) jsonrpc.Message {
-			return f.control.engines[n.uuid].call(t, method, params)
-		})
 		f.control.engines[n.uuid].call(t, "engine:configured-ports", nil)
 		f.files[n.uuid] = newPhase04FileObserver(t, n, f.peer(n))
 		p := startTask1Process(t, n.base, proxyBin, "--cluster-dir", filepath.Join(n.base, "cluster"))

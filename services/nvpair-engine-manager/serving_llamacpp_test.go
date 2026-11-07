@@ -2437,8 +2437,8 @@ func TestLlamaServingLoadAcrossNEActivation(t *testing.T) {
 					st.opMu.Unlock()
 					t.Fatal(err)
 				}
-				ex.switchAdmission.Lock()
-				releaseAdmission = sync.OnceFunc(ex.switchAdmission.Unlock)
+				ex.mutationAdmission.Lock()
+				releaseAdmission = sync.OnceFunc(ex.mutationAdmission.Unlock)
 				t.Cleanup(releaseAdmission)
 			}
 			entered, release := make(chan struct{}), make(chan struct{})
@@ -2872,99 +2872,6 @@ func TestLlamaServingConcurrentReplaceAndLoad(t *testing.T) {
 	}
 }
 
-func TestLlamaServingRestartLoadConcurrentSwitchRelease(t *testing.T) {
-	ex, p := switchFixture(t)
-	p = prepareSwitch(t, ex, p)
-	st, err := ex.state("other")
-	if err != nil {
-		t.Fatal(err)
-	}
-	st.plat.Runtime.Serving = servingSettingsFixture()
-	st.manifest.Actions = map[string]Action{"warm": {HTTP: &ActionHTTP{Method: http.MethodPost, Path: "/ne-test-load"}, RestartAfter: true}}
-	st.manifest.Operations = map[string]OperationBinding{engines.OperationLoad: {Action: "warm", ModelParam: "target"}}
-	st.running = true
-	dispatchEntered, releaseStepDone := make(chan struct{}), make(chan struct{})
-	finishRelease := sync.OnceFunc(func() { close(releaseStepDone) })
-	t.Cleanup(finishRelease)
-	ex.client.Transport = memoryModelsTransport(func(r *http.Request) (*http.Response, error) {
-		close(dispatchEntered)
-		if st.opMu.TryLock() {
-			st.opMu.Unlock()
-			return nil, errors.New("Release-concurrent dispatch did not hold operation lock")
-		}
-		select {
-		case <-releaseStepDone:
-		case <-r.Context().Done():
-			return nil, r.Context().Err()
-		}
-		st.mu.Lock()
-		st.running = false // restart-after must acquire opMu and observe Off
-		st.mu.Unlock()
-		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}, nil
-	})
-	ex.switchAdmission.Lock()
-	releaseAdmission := sync.OnceFunc(ex.switchAdmission.Unlock)
-	t.Cleanup(releaseAdmission)
-	loadDone := make(chan error, 1)
-	go func() {
-		_, err := ex.ModelLoad(context.Background(), "other", "exact/model")
-		loadDone <- err
-	}()
-	// While admission is held, witness the load actually waiting there, then
-	// let the gate owner read operation
-	// state before the actual Release step. The old order creates a lock cycle
-	// here: load owns opMu waiting for admission; gate owner waits for opMu.
-	phaseCtx, phaseCancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer phaseCancel()
-	if err := servingWaitForPhase(phaseCtx, "(*Executor).admitMutation("); err != nil {
-		t.Fatal(err)
-	}
-	releaseDone := make(chan error, 1)
-	go func() {
-		_, err := ex.LaunchSettings("other")
-		releaseAdmission()
-		if err == nil {
-			<-dispatchEntered // real Release runs while the load still holds opMu
-			result := ex.SwitchStep(context.Background(), settings.SwitchStepRequest{SwitchPrepareRequest: p, Step: settings.SwitchStepRelease})
-			if result.Error != nil {
-				err = errors.New(result.Error.Message)
-			}
-		}
-		finishRelease()
-		releaseDone <- err
-	}()
-	timer := time.NewTimer(3 * time.Second)
-	defer timer.Stop()
-	timedOut := false
-	for _, done := range []<-chan error{loadDone, releaseDone} {
-		select {
-		case err := <-done:
-			if err != nil {
-				t.Error(err)
-			}
-		case <-timer.C:
-			timedOut = true
-			t.Error("RestartAfter load and switch Release deadlocked on admission/operation lock order")
-			// Break only the test-owned gate so a red proof exits cleanly rather
-			// than stranding goroutines or hanging executor cleanup.
-			releaseAdmission()
-			finishRelease()
-			if err := <-done; err != nil {
-				t.Error(err)
-			}
-		}
-	}
-	if timedOut {
-		return
-	}
-	ex.switchAdmission.Lock()
-	mutations := ex.switchMutations["other"]
-	ex.switchAdmission.Unlock()
-	if mutations != 0 {
-		t.Fatalf("completed load retained %d mutation guards", mutations)
-	}
-}
-
 func TestLlamaServingReplacementWinsBeforeLoadAdmission(t *testing.T) {
 	ex, seen := modelOperationEngine(t)
 	st, err := ex.state("variant")
@@ -2977,8 +2884,8 @@ func TestLlamaServingReplacementWinsBeforeLoadAdmission(t *testing.T) {
 	st.manifest.Actions["warm"] = act
 	// The load passes its unlocked check, then waits at admission while a
 	// replacement removes its model. Rejection under opMu must undo admission.
-	ex.switchAdmission.Lock()
-	releaseAdmission := sync.OnceFunc(ex.switchAdmission.Unlock)
+	ex.mutationAdmission.Lock()
+	releaseAdmission := sync.OnceFunc(ex.mutationAdmission.Unlock)
 	t.Cleanup(releaseAdmission)
 	done := make(chan error, 1)
 	go func() {
@@ -3011,9 +2918,9 @@ func TestLlamaServingReplacementWinsBeforeLoadAdmission(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("replacement-won load did not release its guards")
 	}
-	ex.switchAdmission.Lock()
-	mutations := ex.switchMutations["variant"]
-	ex.switchAdmission.Unlock()
+	ex.mutationAdmission.Lock()
+	mutations := ex.activeMutations["variant"]
+	ex.mutationAdmission.Unlock()
 	if mutations != 0 {
 		t.Fatalf("rejected load retained %d mutation guards", mutations)
 	}

@@ -267,7 +267,7 @@ func TestResidentRefusalReasons(t *testing.T) {
 	for _, reason := range []ModelConfigurationReason{
 		ModelReasonEngineOff, ModelReasonNoFit, ModelReasonPaused,
 		ModelReasonPausedLocal, ModelReasonEngineOffLocal, ModelReasonNotServed, ModelReasonNotInstalled,
-		ModelReasonUnqualified, ModelReasonUnsupportedLoad, ModelReasonSwitchBusy,
+		ModelReasonUnqualified, ModelReasonUnsupportedLoad, ModelReasonOperationBusy,
 		ModelReasonOperationTimeout, ModelReasonObservationUnknown, ModelReasonProjectionUnknown,
 	} {
 		t.Run(string(reason), func(t *testing.T) {
@@ -586,7 +586,10 @@ func TestResidentWireBoundsAccepted(t *testing.T) {
 }
 
 func TestResidentWireEnums(t *testing.T) {
-	for _, reason := range []ModelConfigurationReason{ModelReasonEngineOff, ModelReasonNoFit, ModelReasonPaused, ModelReasonPausedLocal, ModelReasonEngineOffLocal, ModelReasonNotServed, ModelReasonNotInstalled, ModelReasonUnqualified, ModelReasonUnsupportedLoad, ModelReasonSwitchBusy, ModelReasonOperationTimeout, ModelReasonObservationUnknown, ModelReasonProjectionUnknown} {
+	if ModelReasonOperationBusy != "operation-busy" {
+		t.Fatalf("ordinary operation busy reason=%q, want operation-busy", ModelReasonOperationBusy)
+	}
+	for _, reason := range []ModelConfigurationReason{ModelReasonEngineOff, ModelReasonNoFit, ModelReasonPaused, ModelReasonPausedLocal, ModelReasonEngineOffLocal, ModelReasonNotServed, ModelReasonNotInstalled, ModelReasonUnqualified, ModelReasonUnsupportedLoad, ModelReasonOperationBusy, ModelReasonOperationTimeout, ModelReasonObservationUnknown, ModelReasonProjectionUnknown} {
 		t.Run(string(reason), func(t *testing.T) {
 			testResidentWire(t, ResidentRefusal{Engine: "llamacpp", Model: "m", Reason: reason}, "engine model reason")
 		})

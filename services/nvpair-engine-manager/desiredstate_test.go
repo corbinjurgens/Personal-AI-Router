@@ -21,7 +21,6 @@ import (
 
 	"nvpair-shared/durablefile"
 	"nvpair-shared/engineintent"
-	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/nodepolicy"
 )
 
@@ -151,14 +150,9 @@ func desiredTestExecutor(t *testing.T, manifest *Manifest, baseDir string) *Exec
 
 func TestResidentPreservesDesiredStateAndFailedWrites(t *testing.T) {
 	f := newResidentFixture(t)
-	_, p := switchFixture(t)
-	p.SourceEngine, p.TargetEngine = "source", "target"
-	p.ConfigurationFence = "e3v1:" + nameDigest("configuration")
 	state := desiredStateFile{
-		PendingSwitch:      &settings.SwitchCheckpoint{SwitchPrepareRequest: p, Phase: settings.SwitchCheckpointSourceOff},
-		PendingSwitchPorts: &switchCheckpointPorts{Source: 17001, Target: 17002},
-		Engines:            map[string]bool{f.p.Engine: true, "source": false, "target": true, "legacy": false},
-		OffBy:              map[string]intentOrigin{"source": intentLocal, "legacy": intentPeer},
+		Engines: map[string]bool{f.p.Engine: true, "source": false, "target": true, "legacy": false},
+		OffBy:   map[string]intentOrigin{"source": intentLocal, "legacy": intentPeer},
 	}
 	if err := f.ex.desired.save(state); err != nil {
 		t.Fatal(err)
@@ -191,7 +185,7 @@ func TestResidentPreservesDesiredStateAndFailedWrites(t *testing.T) {
 		t.Fatalf("injected writer calls = %d, want one failed intent write", writes)
 	}
 	assertDesiredFileBytes(t, f.ex.desired.path, before)
-	// Reopen the store to prove checkpoint, port, intent and provenance survive
+	// Reopen the store to prove intent and provenance survive
 	// the disk round trip rather than relying on the original store instance.
 	after, err := newDesiredStateStore(filepath.Dir(f.ex.desired.path)).load()
 	if err != nil {
@@ -757,5 +751,35 @@ func TestDesiredStateLoadsOldDocumentAndSaveDropsObsoleteField(t *testing.T) {
 	}
 	if _, err := store.ownerEvidence(); err != nil {
 		t.Fatalf("saved document did not restore strict evidence: %v", err)
+	}
+}
+
+func TestDesiredStateDecodeDropsRetiredTransactionKeysWithoutWriting(t *testing.T) {
+	store := newDesiredStateStore(t.TempDir())
+	document := []byte(`{"engines":{"on":true,"off":false},"offBy":{"off":"peer"},"allocatedPorts":{"on":23456},"pendingSwitch":{"automatic":"retired-invalid-value"},"pendingSwitchPorts":{"target":-1}}`)
+	if err := os.WriteFile(store.path, document, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state, err := store.load()
+	if err != nil {
+		t.Fatalf("decode retained state: %v", err)
+	}
+	want := desiredStateFile{Engines: map[string]bool{"on": true, "off": false}, OffBy: map[string]intentOrigin{"off": intentPeer}, AllocatedPorts: map[string]int{"on": 23456}}
+	if !reflect.DeepEqual(state, want) {
+		t.Fatalf("retained state = %+v, want %+v", state, want)
+	}
+	assertDesiredFileBytes(t, store.path, document)
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"pendingSwitch", "pendingSwitchPorts"} {
+		if _, present := fields[key]; present {
+			t.Fatalf("decoded state retained %s", key)
+		}
 	}
 }

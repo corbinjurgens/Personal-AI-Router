@@ -764,7 +764,7 @@ func TestModelsMemoryEvidenceSourceChangesAcrossRead(t *testing.T) {
 		})
 	}
 	test("host disappears", func(h *memoryEvidenceHarness) { h.host = "" }, []string{memoryTestModel})
-	test("manager incarnation changes", func(h *memoryEvidenceHarness) { h.ex.switchIncarnation = "manager-replacement" }, []string{memoryTestModel})
+	test("manager incarnation changes", func(h *memoryEvidenceHarness) { h.ex.managerIncarnation = "manager-replacement" }, []string{memoryTestModel})
 	test("engine run changes", func(h *memoryEvidenceHarness) {
 		state := h.ex.engines[memoryTestEngine]
 		state.mu.Lock()

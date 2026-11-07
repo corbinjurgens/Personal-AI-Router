@@ -211,7 +211,7 @@ func TestOwnerEvidenceCopyAdmissionBaseline(t *testing.T) {
 			d := newModelDownloads(source, dir, map[string]string{"llamacpp": engines.ModelNamingExact})
 			registry := NewRegistry()
 			registry.engines["llamacpp"] = &Manifest{Engine: "llamacpp", ModelNaming: engines.ModelNamingExact}
-			m := &Manager{exec: &Executor{switchIncarnation: source}, copyJournal: d, copyRegistry: registry}
+			m := &Manager{exec: &Executor{managerIncarnation: source}, copyJournal: d, copyRegistry: registry}
 			p := copyRequest{OpID: newOpID(), Engine: "llamacpp", Model: "private-model", SourceNodeID: "source", DestinationNodeID: "destination"}
 			ctx, release, err := m.reserveCopy(context.Background(), p)
 			if err != nil {
@@ -260,7 +260,7 @@ func TestOwnerEvidenceCopyAdmissionBaseline(t *testing.T) {
 			if err != nil || complete || len(copies) != 0 {
 				t.Fatalf("reloaded journal: copies = %+v, complete = %v, error = %v", copies, complete, err)
 			}
-			if r := (&Manager{exec: &Executor{switchIncarnation: successor.source}, copyJournal: successor}).ownerReservations(); r.Complete {
+			if r := (&Manager{exec: &Executor{managerIncarnation: successor.source}, copyJournal: successor}).ownerReservations(); r.Complete {
 				t.Fatalf("historical baseline became complete: %+v", r)
 			}
 		})

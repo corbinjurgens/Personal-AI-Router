@@ -362,7 +362,6 @@ func patchModelPolicy(stored nodepolicy.Policy, engine string, change modelconfi
 		if typedRemoval {
 			policy.ServedModels = slices.DeleteFunc(policy.ServedModels, func(member nodepolicy.ModelRef) bool { return member == ref })
 			policy.ResidentModels = slices.DeleteFunc(policy.ResidentModels, func(member nodepolicy.ModelRef) bool { return member == ref })
-			policy.EngineBindings = slices.DeleteFunc(policy.EngineBindings, func(member nodepolicy.ModelRef) bool { return member == ref })
 		} else if exists {
 			resident := nodepolicy.ModelRef{Engine: engine, Model: profile.Model}
 			policy.ResidentModels = slices.DeleteFunc(policy.ResidentModels, func(member nodepolicy.ModelRef) bool { return member == resident })
@@ -454,9 +453,6 @@ func patchModelPolicy(stored nodepolicy.Policy, engine string, change modelconfi
 			}
 			if patch.Resident != nil {
 				policy.ResidentModels = member(policy.ResidentModels, *patch.Resident)
-			}
-			if patch.Binding != nil {
-				policy.EngineBindings = member(policy.EngineBindings, *patch.Binding)
 			}
 		}
 	}
@@ -599,9 +595,6 @@ func (b *Broker) mergeModelPolicy(stored nodepolicy.Policy, engine string, chang
 		return policy, &invalidParamsError{err: err}
 	}
 	policy = canonical
-	if err := policy.ValidateEngineBindings(b.engineModelNaming); err != nil {
-		return policy, &invalidParamsError{err: err}
-	}
 	if caller != "" {
 		merged, err := nodepolicy.MergePeerSet(stored, withoutRevision(settingsJSON(policy.PeerProjection())))
 		if err != nil {
@@ -855,9 +848,6 @@ func (b *Broker) reviewModelSettings(ctx context.Context, input settings.Request
 	if err == nil && (checked.Snapshot.Revision != base.Snapshot.Revision || latest.Revision != policy.Revision) {
 		err = modelSettingsConflict("model settings changed during preview")
 	}
-	if err == nil {
-		err = b.boundPolicyChangeLocked(policy, nextPolicy)
-	}
 	b.engineConfigMu.Unlock()
 	if err != nil {
 		return settings.Preview{}, err
@@ -898,13 +888,6 @@ func (b *Broker) modelSettingsBaselineLocked(p settings.Request, caller string, 
 	}
 	if err := b.loadEngineSettingsLocked(); err != nil {
 		return fail(err)
-	}
-	if err := b.pendingSwitchLocked(p.Engine); err != nil {
-		return fail(err)
-	}
-	b.retireReplacedBoundOperationLocked()
-	if op := b.boundCoordinator().active; op != nil && (op.request.Engine == p.Engine || op.sourceEngine == p.Engine) {
-		return fail(modelSettingsConflict("automatic engine preparation reserves this engine"))
 	}
 	if launch.Engine != p.Engine || !launch.Editable {
 		return fail(modelSettingsConflict("engine is not editable"))
@@ -1090,9 +1073,6 @@ func (b *Broker) applyModelSettings(ctx context.Context, input settings.Request,
 	if err != nil {
 		return settingsReceipt{}, err
 	}
-	if err := b.boundPolicyChangeLocked(policy, next); err != nil {
-		return settingsReceipt{}, err
-	}
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
 	// Last admission decision shares the policy/availability ordering with the
@@ -1217,9 +1197,9 @@ func (b *Broker) failModelSettingsLocked(record *engineSettingsRecord, err error
 	if record.Model.Stage == "completed" {
 		record.Model.Stage, record.Snapshot.CoupledStage = "completion-uncertain", "completion-uncertain"
 	}
-	// The operation itself remains nonterminal. Existing switch, cold binding
-	// and legacy mutation owners already fence applying settings rows; the
-	// failed attempt is the receipt, not permission to discard that reservation.
+	// The operation itself remains nonterminal. Existing mutation owners
+	// already fence applying settings rows; the failed attempt is the
+	// receipt, not permission to discard that reservation.
 	record.Snapshot.Phase = "applying"
 	record.Snapshot.Error, record.Snapshot.UnresolvedError = err.Error(), err.Error()
 	record.Snapshot.Editable = false
@@ -1268,9 +1248,6 @@ func (b *Broker) commitModelPolicyLocked(record *engineSettingsRecord) error {
 	}
 	if modelPolicyFingerprint(policy) != op.After {
 		return modelSettingsConflict("accepted policy patch no longer produces the reviewed content")
-	}
-	if err := b.boundPolicyChangeLocked(r.current, policy); err != nil {
-		return err
 	}
 	policy, err = r.publishLocked(policy)
 	if err != nil && !errors.Is(err, durablefile.ErrReplaced) {
@@ -1321,9 +1298,6 @@ func (b *Broker) runModelSettingsOperationLocked(ctx context.Context, engine str
 		return fail(err)
 	}
 	if err := b.checkModelPolicyLocked(record); err != nil {
-		return fail(err)
-	}
-	if err := b.pendingSwitchLocked(engine); err != nil {
 		return fail(err)
 	}
 	op := record.Model
@@ -1525,7 +1499,7 @@ func (b *Broker) runModelSettingsOperationLocked(ctx context.Context, engine str
 	}
 	if op.native() {
 		b.engineConfigMu.Unlock()
-		_, err = b.pushSwitchDrain(ctx, engine, false)
+		_, err = b.pushEngineDrain(ctx, engine, false)
 		b.engineConfigMu.Lock()
 		if err != nil {
 			return fail(err)
@@ -1541,7 +1515,7 @@ func (b *Broker) runModelSettingsOperationLocked(ctx context.Context, engine str
 		record.Resume = resume
 		if op.native() {
 			b.engineConfigMu.Unlock()
-			_, _ = b.pushSwitchDrain(ctx, engine, true)
+			_, _ = b.pushEngineDrain(ctx, engine, true)
 			b.engineConfigMu.Lock()
 		}
 		return fail(err)

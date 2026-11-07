@@ -23,7 +23,6 @@ import { InlineErrorBanner } from '@/ui/components/InlineErrorBanner'
 import NodeEngineSettings from '@/ui/components/NodeList/NodeEngineSettings'
 import { useOverviewUiStore } from '@/ui/stores/overview-ui.store'
 import RoleEditor from '@/ui/components/RoutingSettings/RoleEditor'
-import ModelEngineBindingsEditor from './ModelEngineBindingsEditor'
 import ModelSettingsPanel from '@/ui/components/ModelSettings/ModelSettingsPanel'
 import NodeAvailabilityControls from '@/ui/components/NodeList/NodeAvailabilityControls'
 import { useConnectionStore } from '@/ui/stores/connection.store'
@@ -452,17 +451,6 @@ export default function RoutingSettings() {
                             targetId={targetId}
                             nodeId={nodeId ?? undefined}
                             onSaved={adopt}
-                        />
-                    )}
-
-                    {targetId !== null && (
-                        <ModelEngineBindingsEditor
-                            targetId={targetId}
-                            text={text}
-                            onTextChange={setText}
-                            disabled={
-                                loading || saving || switching || permissionReadOnly || !canSave
-                            }
                         />
                     )}
 

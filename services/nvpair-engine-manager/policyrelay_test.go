@@ -33,7 +33,6 @@ func TestPolicyRelayAvailabilityDelegatesPauseAuthorityAfterOuterChecks(t *testi
 		projection *nodeProjection
 		denied     bool
 		unpinned   bool
-		recovery   bool
 		brokerVeto bool
 		status     int
 		calls      int
@@ -44,7 +43,6 @@ func TestPolicyRelayAvailabilityDelegatesPauseAuthorityAfterOuterChecks(t *testi
 		{name: "unknown projection", status: http.StatusServiceUnavailable},
 		{name: "grant before pause delegation", projection: &nodeProjection{ManagementBlocked: true}, denied: true, status: http.StatusConflict, code: "remote_management_denied"},
 		{name: "pin before pause delegation", projection: &nodeProjection{ManagementBlocked: true}, unpinned: true, status: http.StatusForbidden},
-		{name: "recovery before pause delegation", projection: &nodeProjection{ManagementBlocked: true}, recovery: true, status: http.StatusServiceUnavailable},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := rmNewFixture(t, "uuid-self", "uuid-a")
@@ -53,7 +51,6 @@ func TestPolicyRelayAvailabilityDelegatesPauseAuthorityAfterOuterChecks(t *testi
 			if tc.projection != nil {
 				ex.nodeProjection.set(*tc.projection)
 			}
-			ex.switchRecoveryPending.Store(tc.recovery)
 			var mu sync.Mutex
 			calls := 0
 			ex.policyParent = func(_ context.Context, method string, params json.RawMessage, caller string) (json.RawMessage, error) {

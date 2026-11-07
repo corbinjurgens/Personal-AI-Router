@@ -12,12 +12,10 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	settings "nvpair-shared/enginesettings"
 )
 
-func TestSwitchDischargeStopReturnsVerifiedInternalEvidence(t *testing.T) {
-	ex, _ := switchFixture(t)
+func TestStopReturnsVerifiedInternalEvidence(t *testing.T) {
+	ex := newLifecycleFixture(t)
 	if err := ex.desired.set("source", true, intentLocal); err != nil {
 		t.Fatal(err)
 	}
@@ -32,15 +30,49 @@ func TestSwitchDischargeStopReturnsVerifiedInternalEvidence(t *testing.T) {
 	if reply.Error != nil {
 		t.Fatalf("discharge reply: %+v", reply.Error)
 	}
-	var result settings.SwitchEngineState
+	var result stopObservation
 	if err := json.Unmarshal(reply.Result, &result); err != nil {
 		t.Fatal(err)
 	}
-	if err := result.Validate(); err != nil {
+	if result.Running == nil || result.Healthy == nil || result.ObservedAt == nil || result.ObservedAt.IsZero() || *result.Running || *result.Healthy {
+		t.Fatalf("stopped runtime observation: %+v", result)
+	}
+	if result.Intent != "off" || !result.TerminationVerified {
+		t.Fatalf("discharge evidence: %+v", result)
+	}
+}
+
+func TestGlobalMutationBusyRetainsRPCIdentity(t *testing.T) {
+	ex := newLifecycleFixture(t)
+	ex.mutationAdmission.Lock()
+	done, err := ex.trackMutationLocked("")
+	ex.mutationAdmission.Unlock()
+	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Intent != settings.SwitchIntentOff || !result.TerminationVerified {
-		t.Fatalf("discharge evidence: %+v", result)
+	defer done()
+	var out bytes.Buffer
+	m := NewManager(NewCodec(&out), ex, nil, "")
+	id := json.RawMessage(`195`)
+	m.runOp(context.Background(), &Message{ID: &id, Method: "engine:stop", Params: json.RawMessage(`{"engine":"source"}`)})
+	var reply Message
+	if err := json.Unmarshal(out.Bytes(), &reply); err != nil {
+		t.Fatal(err)
+	}
+	if reply.Error == nil || reply.Error.Code != -32000 {
+		t.Fatalf("global mutation reply: %+v", reply)
+	}
+	var data struct {
+		Kind string `json:"kind"`
+	}
+	if err := json.Unmarshal(reply.Error.Data, &data); err != nil {
+		t.Fatal(err)
+	}
+	if data.Kind != "busy" || strings.Contains(reply.Error.Message, "switch") {
+		t.Fatalf("global mutation error: %+v, data=%+v", reply.Error, data)
+	}
+	if _, known, err := ex.desired.get("source"); err != nil || known {
+		t.Fatalf("busy stop changed saved intent: known=%v error=%v", known, err)
 	}
 }
 

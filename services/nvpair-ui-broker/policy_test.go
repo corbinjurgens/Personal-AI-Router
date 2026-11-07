@@ -423,9 +423,6 @@ func attachFakeEngine(t *testing.T, b *Broker) *fakeWorker {
 	peer, f := newFakeWorkerPipe(t)
 	slept := make(map[string]bool)
 	f.setAnswer(func(method string, raw json.RawMessage) (any, string) {
-		if method == "engine:switch-prepare" {
-			return emptySwitchManagerSnapshot(), ""
-		}
 		switch method {
 		case "engine:get-launch":
 			var request struct {

@@ -548,11 +548,8 @@ func (e *Executor) copyCapabilities(engine string) copyCapabilities {
 }
 
 // Copy changes content, not engine activation. Saved Off is
-// irrelevant; the existing pause/recovery mutation gates still apply.
+// irrelevant; the existing pause mutation gate still applies.
 func (e *Executor) copyAdmission() error {
-	if e.switchRecoveryPending.Load() {
-		return fmt.Errorf("engine manager switch recovery is pending")
-	}
 	blocked, known := e.nodeProjection.managementBlocked()
 	if !known {
 		return errNoProjection

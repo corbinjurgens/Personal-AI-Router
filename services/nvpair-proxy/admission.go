@@ -47,10 +47,9 @@ type notification struct {
 
 // admissionController is the node-wide admission state and decision.
 type admissionController struct {
-	mu            sync.Mutex
-	strict        strictAdmissionState
-	resident      residentAdmissionState
-	invalidations map[nodepolicy.InvalidateEngineParams]struct{}
+	mu       sync.Mutex
+	strict   strictAdmissionState
+	resident residentAdmissionState
 	// changed is closed and replaced on every state change, waking every
 	// waiter to re-evaluate. A condition variable cannot be selected on
 	// together with a deadline and a request context; a channel can.
@@ -291,9 +290,6 @@ func (a *admissionController) backendChanged() {
 type admissionRequest struct {
 	engine string
 	model  string
-	// Bound requests never borrow the legacy local wake path, including when
-	// readiness or policy changes during request storage or queue waits.
-	bound bool
 	// Only the existing routing owner may attest a resolved inventory model.
 	// Terminal ingress can forward arbitrary names without minting timestamps.
 	resolvedInventory bool
@@ -306,9 +302,6 @@ type admissionRequest struct {
 	// prepare admits request storage before wake, unload, or grant. It runs
 	// outside mu and is retried if the authoritative policy changes.
 	prepare func(context.Context, nodepolicy.Profile, bool, uint64) error
-	// Bound preparation supplies fresh destination evidence. This pure check
-	// runs under mu, including after every queue/storage wait before grant.
-	revalidate func() bool
 }
 
 // admissionDecision is the outcome. Exactly one of ticket, reject and err is
@@ -400,18 +393,6 @@ func (a *admissionController) admit(ctx context.Context, req admissionRequest) a
 	for {
 		pol := a.policy
 		var sends []notification
-		if req.revalidate != nil && !req.revalidate() {
-			return reject(nodepolicy.RejectReason("model-unavailable"))
-		}
-		bound := req.bound
-		for _, binding := range pol.EngineBindings {
-			if a.normalize(binding.Engine, binding.Model) == a.normalize(binding.Engine, req.model) {
-				if binding.Engine != req.engine {
-					return reject(nodepolicy.RejectReason("model-unavailable"))
-				}
-				bound = true
-			}
-		}
 		// Admission is the serving linearization point under the policy mutex.
 		// Already-admitted work drains across restrictive policy activation;
 		// queued requests must recheck permission before receiving a ticket.
@@ -454,9 +435,6 @@ func (a *admissionController) admit(ctx context.Context, req admissionRequest) a
 		// 2. Is the engine running? Health is what node/set-local-backend
 		// reports, which is also what a wake waits for.
 		if !a.healthy(req.engine) {
-			if bound {
-				return reject(nodepolicy.RejectReason("model-unavailable"))
-			}
 			// An engine with no saved intent is unmanaged, or the broker has not
 			// said yet; either way nothing would start it, so waiting for a wake
 			// would only add the wake timeout to a rejection.

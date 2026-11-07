@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -453,7 +454,7 @@ func TestResidentCapacityAggregateRefusal(t *testing.T) {
 	}, nodepolicy.ModelReasonNoFit)
 	test("pending unload", func(a *admissionController, _ *nodepolicy.Policy) {
 		a.unloadSentAt[admKey{"llamacpp", "m"}] = a.strict.now()
-	}, nodepolicy.ModelReasonSwitchBusy)
+	}, nodepolicy.ModelReasonOperationBusy)
 	test("installed digest missing", func(a *admissionController, _ *nodepolicy.Policy) {
 		a.setModelIdentity(map[string]nodepolicy.EngineIdentity{"llamacpp": testIdentity("n")})
 	}, nodepolicy.ModelReasonNotInstalled)
@@ -537,6 +538,29 @@ func TestServedResidentPrepareBindingRefusals(t *testing.T) {
 	}
 }
 
+func TestIdentityWithdrawalFencesHeldTicketsUntilFreshObservation(t *testing.T) {
+	h := newStrictHarness(t)
+	held := mustStrictTicket(t, h.a)
+	defer held.Finish(strictNotDispatched)
+	key := admKey{engine: "llamacpp", model: "m"}
+	generation := h.a.strict.generation[key]
+	h.a.setModelIdentity(nil)
+	if h.a.strict.generation[key] != generation+1 {
+		t.Fatal("identity withdrawal did not fence the old installation")
+	}
+	h.a.setPolicy(h.a.currentPolicy())
+	if got := h.a.StrictReadiness(); got.Capability != nil {
+		t.Fatalf("policy refresh restored withdrawn identity: %+v", got)
+	}
+	h.a.setModelIdentity(map[string]nodepolicy.EngineIdentity{"llamacpp": testIdentity("m")})
+	if err := held.BeforeStrictDispatch(); !errors.Is(err, errStrictUnavailable) {
+		t.Fatalf("old ticket survived identity re-observation: %v", err)
+	}
+	if got := h.a.StrictReadiness(); got.Capability == nil || len(got.Capability.Models) != 1 {
+		t.Fatalf("fresh qualified identity was not restored: %+v", got)
+	}
+}
+
 func TestServedResidentFinalGrantRevocation(t *testing.T) {
 	test := func(name string, revoke func(*admissionController)) {
 		t.Run(name, func(t *testing.T) {
@@ -559,9 +583,6 @@ func TestServedResidentFinalGrantRevocation(t *testing.T) {
 	test("saved Off", func(a *admissionController) { a.setIntent(map[string]bool{"llamacpp": false}) })
 	test("drain", func(a *admissionController) { a.setDrain("llamacpp", true) })
 	test("identity withdrawal", func(a *admissionController) { a.setModelIdentity(map[string]nodepolicy.EngineIdentity{}) })
-	test("switch invalidation", func(a *admissionController) {
-		a.invalidateEngine(nodepolicy.InvalidateEngineParams{Engine: "llamacpp", OperationID: "switch", Reason: nodepolicy.InvalidationReasonEngineSwitch})
-	})
 	test("accepted launch digest changed", func(a *admissionController) {
 		a.mu.Lock()
 		for _, q := range a.strict.registry {

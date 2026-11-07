@@ -415,7 +415,6 @@ export function modelRoutingState(
                   ? 'included'
                   : 'excluded',
         resident: member('residentModels'),
-        binding: member('engineBindings'),
         locked: parsed.ok && parsed.value.localOnly,
         qualified
     }

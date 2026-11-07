@@ -10,8 +10,6 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
-
-	settings "nvpair-shared/enginesettings"
 )
 
 func TestEnabledEngineRestoreWaitsForFacadeStartup(t *testing.T) {
@@ -31,7 +29,7 @@ func TestEnabledEngineRestoreWaitsForFacadeStartup(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 	close(broker.facadesReady)
-	for _, want := range []string{engineNodeProjectionMethod, settings.SwitchPrepareMethod, "engine:settings-projection", restoreEnabledEnginesMethod} {
+	for _, want := range []string{engineNodeProjectionMethod, "engine:settings-projection", restoreEnabledEnginesMethod} {
 		select {
 		case got := <-method:
 			if got != want {

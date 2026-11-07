@@ -49,8 +49,7 @@ func (b *Broker) replyPeerRelay(source *engineManagerSource, worker *rpcWorker, 
 	}
 }
 
-// remoteManagementDeniedError is the typed refusal policyErrorCode and
-// switchErrorDetail map to -32012.
+// remoteManagementDeniedError is the typed refusal policyErrorCode maps to -32012.
 type remoteManagementDeniedError struct{}
 
 func (*remoteManagementDeniedError) Error() string { return remoteManagementDeniedMessage }
@@ -58,19 +57,19 @@ func (*remoteManagementDeniedError) Error() string { return remoteManagementDeni
 // authorizeRemoteManagement is the acceptance-time recheck. A local caller
 // (empty) is always allowed. For a paired node it reads the permission fresh
 // and emits one secret-free line for that acceptance decision.
-func (b *Broker) authorizeRemoteManagement(caller, family, operation string, boundRequest ...bool) error {
+func (b *Broker) authorizeRemoteManagement(caller, family, operation string) error {
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return b.authorizeRemoteManagementLocked(r, caller, family, operation, boundRequest...)
+	return b.authorizeRemoteManagementLocked(r, caller, family, operation)
 }
 
 // authorizeRemoteManagementLocked is shared by the r.mu-held policy entry
-// points and the settings/switch wrapper. Permission wins
+// points and the settings wrapper. Permission wins
 // over pause, preserving revocation's code. Never acquire engineConfigMu here:
-// settings and switch admission already own it before taking r.mu.
-func (b *Broker) authorizeRemoteManagementLocked(r *policyRuntime, caller, family, operation string, boundRequest ...bool) error {
-	if err := b.authorizeRemoteManagementGrantLocked(r, caller, family, operation, boundRequest...); err != nil {
+// settings admission already owns it before taking r.mu.
+func (b *Broker) authorizeRemoteManagementLocked(r *policyRuntime, caller, family, operation string) error {
+	if err := b.authorizeRemoteManagementGrantLocked(r, caller, family, operation); err != nil {
 		return err
 	}
 	if caller != "" && r.managementBlockedLocked() {
@@ -82,7 +81,7 @@ func (b *Broker) authorizeRemoteManagementLocked(r *policyRuntime, caller, famil
 // authorizeRemoteManagementGrantLocked checks only the fresh peer grant.
 // Availability uses it before its own mode-aware veto; other management uses
 // authorizeRemoteManagementLocked to retain the strict either-origin fence.
-func (b *Broker) authorizeRemoteManagementGrantLocked(r *policyRuntime, caller, family, operation string, boundRequest ...bool) error {
+func (b *Broker) authorizeRemoteManagementGrantLocked(r *policyRuntime, caller, family, operation string) error {
 	if caller == "" {
 		return nil
 	}
@@ -90,36 +89,9 @@ func (b *Broker) authorizeRemoteManagementGrantLocked(r *policyRuntime, caller, 
 	permission := mesh.RemoteManagement(caller)
 	b.logRemoteManagementDecision(caller, mesh.NodeUUID(), family, operation, permission)
 	if !permission.Allowed {
-		// The optional hint classifies automatic switch diagnostics only. It
-		// never changes authorization or the existing switch audit family.
-		if family == "bound-engine" || len(boundRequest) != 0 && boundRequest[0] {
-			logBoundManagementRefusal("broker.remote_management", caller, permission.State, r.runID, permission.Diagnostic)
-		}
 		return &remoteManagementDeniedError{}
 	}
 	return nil
-}
-
-// Keep the deciding read's metadata: another lookup could already observe a
-// different authority. Incarnations are public relationship comparison IDs,
-// not credentials. No certificate, key, request body or freeform error is logged.
-func logBoundManagementRefusal(site, peer, permission, run string, diagnostic clustertrust.PeerServiceDiagnostic) {
-	slog.Warn("bound engine management refused",
-		"site", site,
-		"reason", diagnostic.Predicate,
-		"node_id", diagnostic.NodeID,
-		"peer_id", peer,
-		"cluster_id", diagnostic.ClusterID,
-		"epoch", diagnostic.Epoch,
-		"counter", diagnostic.Counter,
-		"io_error_code", diagnostic.ErrorCode,
-		"expected_incarnation", diagnostic.ExpectedIncarnation,
-		"observed_incarnation", diagnostic.ObservedIncarnation,
-		"changed_component_authority_compared", diagnostic.ChangedComponentCompared,
-		"changed_component_authority_same", diagnostic.ChangedComponentSame,
-		"proxy_run_id", run,
-		"permission", permission,
-	)
 }
 
 // logRemoteManagementDecision records one permission decision. It carries no

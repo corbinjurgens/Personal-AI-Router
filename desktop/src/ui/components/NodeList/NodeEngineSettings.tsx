@@ -10,11 +10,10 @@ import { useEngineUpdateAvailableStore } from '@/ui/stores/engine-update-availab
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import type { BackendInfo } from '@/ui/types/engine-info'
 import { EngineDefaultLinks } from '@/shared/constants/engines'
-import { engineLabel, engineManagerName, isBuiltinEngineType } from '@/shared/utils/engines'
+import { engineLabel, isBuiltinEngineType } from '@/shared/utils/engines'
 import { engineTypesForNode } from '@/ui/utils/get-engines-for-node'
 import { BackendRow } from '@/ui/components/BackendRow/BackendRow'
 import { InlineErrorBanner } from '@/ui/components/InlineErrorBanner'
-import { EngineSwitchControls } from './EngineSwitchControls'
 
 /**
  * Engine editor for a single node, hosted by the node settings page.
@@ -116,23 +115,6 @@ export default function NodeEngineSettings({ nodeId }: { nodeId: string }) {
                     message="Node is disconnected. Controls are disabled until it reconnects."
                 />
             ) : null}
-            <EngineSwitchControls
-                key={nodeId}
-                nodeId={nodeId}
-                engines={allBackends
-                    .filter(
-                        ({ backend, statusKnown }) =>
-                            statusKnown &&
-                            backend.processStatus !== 'not-installed' &&
-                            backend.processStatus !== 'initializing' &&
-                            backend.processStatus !== 'installing' &&
-                            backend.processStatus !== 'uninstalling'
-                    )
-                    .map(({ backend }) => ({
-                        value: engineManagerName(backend.type),
-                        children: backend.displayName
-                    }))}
-            />
             {allBackends.map(({ backend, statusKnown }) => (
                 <BackendRow
                     key={backend.type}

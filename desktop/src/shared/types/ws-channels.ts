@@ -24,15 +24,6 @@
  *     service bridge generics — nothing else.
  */
 import type {
-    SwitchRequest,
-    SwitchFenceRequest,
-    SwitchFenceResult,
-    SwitchStatusRequest,
-    SwitchStatus,
-    SwitchReceipt,
-    SwitchChanged
-} from '@/shared/types/engine-switch'
-import type {
     EngineCommandPayload,
     EngineHubSearchResponse,
     EngineInitialState,
@@ -179,9 +170,6 @@ export interface WsInvokeChannelMap {
         request: ClearStatedMemoryRequest
         response: InspectModelResult
     }
-    'engines:switch': { request: SwitchRequest; response: { receipt: SwitchReceipt } }
-    'engines:switch-status': { request: SwitchStatusRequest; response: SwitchStatus }
-    'engines:switch-fence': { request: SwitchFenceRequest; response: SwitchFenceResult }
     'engines:preview-settings': { request: EngineSettingsRequest; response: EngineSettingsPreview }
     'engines:apply-settings': { request: EngineSettingsRequest; response: EngineSettingsReceipt }
     'engine:command': { request: EngineCommandPayload; response: null }
@@ -252,7 +240,6 @@ export interface WsPushChannelMap {
     'engines:state-changed': EngineStatePatch
     'engines:intent-changed': EngineIntentSnapshot | null
     'engines:settings-changed': EngineSettingsSnapshot
-    'engines:switch-changed': SwitchChanged
     'engines:settings-disconnected': { nodeId: string }
     'engines:progress-changed': EngineProgress
     'engines:progress-cleared': { key: string }

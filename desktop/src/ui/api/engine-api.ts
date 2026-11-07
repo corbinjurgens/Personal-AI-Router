@@ -10,15 +10,6 @@
 import type { ServiceTransport } from '@/shared/types/service-bridge'
 import type { WsInvokeRequest, WsInvokeResponse } from '@/shared/types/ws-channels'
 import type {
-    SwitchRequest,
-    SwitchFenceRequest,
-    SwitchFenceResult,
-    SwitchStatusRequest,
-    SwitchStatus,
-    SwitchReceipt,
-    SwitchChanged
-} from '@/shared/types/engine-switch'
-import type {
     EngineHubSearchResponse,
     EngineInitialState,
     EngineIntentSnapshot,
@@ -47,10 +38,6 @@ export interface IEngineApi {
     getIntent(): Promise<EngineIntentSnapshot | null>
     /** Replaces both intent maps together, including null on invalidation. */
     onIntentChanged(callback: (snapshot: EngineIntentSnapshot | null) => void): () => void
-    switchEngine(request: SwitchRequest): Promise<{ receipt: SwitchReceipt }>
-    switchStatus(request: SwitchStatusRequest): Promise<SwitchStatus>
-    fenceSwitch(request: SwitchFenceRequest): Promise<SwitchFenceResult>
-    onSwitchChanged(callback: (change: SwitchChanged) => void): () => void
     /** Read the owning node's authoritative settings snapshot for one engine. */
     getSettings(target: EngineSettingsTarget): Promise<EngineSettingsSnapshot>
     /** Read target-owned model facts while Off, without starting or loading an engine. */
@@ -133,14 +120,6 @@ export function createEngineApi(transport: ServiceTransport): IEngineApi {
     return {
         getIntent: () => transport.invoke('engines:get-intent'),
         onIntentChanged: cb => transport.subscribePush('engines:intent-changed', cb),
-        switchEngine: request =>
-            transport.invoke('engines:switch', request).then(result => {
-                refreshNodeManagement(request.nodeId)
-                return result
-            }),
-        switchStatus: request => transport.invoke('engines:switch-status', request),
-        fenceSwitch: request => transport.invoke('engines:switch-fence', request),
-        onSwitchChanged: cb => transport.subscribePush('engines:switch-changed', cb),
         getSettings: target => transport.invoke('engines:get-settings', target),
         inspectModel: request => transport.invoke('engines:inspect-model', request),
         setStatedMemory: request => transport.invoke('engines:set-stated-memory', request),

@@ -471,7 +471,7 @@ func TestWorkingSetLimitStatusReachesPublishedSettings(t *testing.T) {
 	}
 }
 
-func TestSettingsServingReceiptRecoveryAndSwitchPublication(t *testing.T) {
+func TestSettingsServingReceiptRecoveryAndReadback(t *testing.T) {
 	serving := brokerServingFixture()
 	h := newServingSettingsHarness(t, "llamacpp", serving)
 	p := h.request(t)
@@ -523,12 +523,9 @@ func TestSettingsServingReceiptRecoveryAndSwitchPublication(t *testing.T) {
 	if !ok || !again.Serving.Equal(serving) {
 		t.Fatal("recovery config aliases journal")
 	}
-	if err := h.b.publishSwitchTarget(context.Background(), "llamacpp"); err != nil {
-		t.Fatal(err)
-	}
 	snapshot, err := h.b.getEngineSettings(context.Background(), settings.Request{Engine: "llamacpp"}, "")
 	if err != nil || !snapshot.Settings.Serving.Equal(serving) {
-		t.Fatal("switch publication/readback lost serving")
+		t.Fatal("settings readback lost serving")
 	}
 	h.b.engineConfigMu.Lock()
 	beforeRefresh := h.b.engineSettings["llamacpp"].Snapshot.Sequence

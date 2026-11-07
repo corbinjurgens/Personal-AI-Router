@@ -361,9 +361,9 @@ func TestCrashRelaunchPauseDuringOperationWaitCancels(t *testing.T) {
 	tick := time.NewTicker(time.Millisecond)
 	defer tick.Stop()
 	for {
-		ex.switchAdmission.Lock()
-		admitted := ex.switchMutations["fake"] > 0
-		ex.switchAdmission.Unlock()
+		ex.mutationAdmission.Lock()
+		admitted := ex.activeMutations["fake"] > 0
+		ex.mutationAdmission.Unlock()
 		if admitted {
 			break // Restore passed the initial pause check and awaits opMu.
 		}
@@ -516,40 +516,6 @@ func TestCrashRelaunchIntentionalStopBeforeWatcherNeverSchedules(t *testing.T) {
 		defer st.mu.Unlock()
 		if st.relaunch != nil || !st.stopping {
 			t.Fatalf("late watcher escaped stop fence: episode=%p stopping=%v", st.relaunch, st.stopping)
-		}
-	})
-}
-
-func TestCrashRelaunchDefersToPendingSwitch(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		ex, request := switchFixture(t)
-		request = prepareSwitch(t, ex, request)
-		if err := ex.setDesiredEnabled("target", true, intentLocal); err != nil {
-			t.Fatalf("save target On: %v", err)
-		}
-		st, err := ex.state("target")
-		if err != nil {
-			t.Fatalf("target state: %v", err)
-		}
-		ex.scheduleCrashRelaunch(st, "target")
-		st.mu.Lock()
-		recovery := st.relaunch
-		st.mu.Unlock()
-		if recovery == nil {
-			t.Fatal("missing recovery episode")
-		}
-		<-recovery.done
-		st.mu.Lock()
-		defer st.mu.Unlock()
-		if st.proc != nil || st.running || st.gen != 0 {
-			t.Fatalf("reserved target launched: proc=%p running=%v generation=%d", st.proc, st.running, st.gen)
-		}
-		ex.desired.mu.Lock()
-		state, err := ex.desired.load()
-		ex.desired.mu.Unlock()
-		checkpoint := state.PendingSwitch
-		if err != nil || checkpoint == nil || checkpoint.OperationID != request.OperationID {
-			t.Fatalf("pending switch replaced: checkpoint=%+v err=%v", checkpoint, err)
 		}
 	})
 }

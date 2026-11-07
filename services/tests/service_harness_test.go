@@ -470,17 +470,34 @@ func (f *serviceFixture) readyClient() *serviceRPCClient {
 	f.t.Helper()
 	c := f.dial()
 	c.notification(f.t, "app:ready")
-	owned := f.scan()
-	for _, path := range f.inventory.paths {
-		found := false
-		for _, p := range owned {
-			if p.Path == path {
-				found = true
+	// app:ready does not wait for every optional worker. Port adapters also
+	// start their real worker after the broker has launched the adapter.
+	deadline := time.Now().Add(serviceCallTimeout)
+	var owned []serviceProcessIdentity
+	for {
+		owned = f.scan()
+		missing := ""
+		for _, path := range f.inventory.paths {
+			found := false
+			for _, p := range owned {
+				if p.Path == path {
+					found = true
+					break
+				}
+			}
+			if !found {
+				missing = path
+				break
 			}
 		}
-		if !found {
-			f.t.Fatalf("ready fixture missing running executable %q: %+v", path, owned)
+		if missing == "" {
+			break
 		}
+		if time.Now().After(deadline) {
+			f.logReadinessFailure(c)
+			f.t.Fatalf("ready fixture missing running executable %q: %+v", missing, owned)
+		}
+		time.Sleep(25 * time.Millisecond)
 	}
 	servicePolicy(f.t, c)
 	if f.facadePort != 0 {

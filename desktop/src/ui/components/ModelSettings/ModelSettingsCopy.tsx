@@ -209,7 +209,7 @@ export default function ModelSettingsCopy(props: CopyProps) {
                 onCheckedChange={value => setMode(value === true)}
             />
             <Text kind="body/regular/sm">
-                Portable requested load settings only. Target allocation, memory, bindings and
+                Portable requested load settings only. Target allocation, memory and
                 approval digests stay target owned.
             </Text>
             {inspection &&

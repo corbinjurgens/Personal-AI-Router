@@ -240,9 +240,6 @@ func notificationRelayCases(m *Manager) []notificationRelayCase {
 	pendingSettings, lateSettings := relayLifetimeProbe(&m.settingsRelay.mu, &m.settingsRelay.pending, m.settingsRelay.reply, func(id string) settingsReply {
 		return settingsReply{ID: id, Result: json.RawMessage(`{}`)}
 	})
-	pendingSwitch, lateSwitch := relayLifetimeProbe(&m.switchRelay.mu, &m.switchRelay.pending, m.switchRelay.reply, func(id string) switchRelayReply {
-		return switchRelayReply{ID: id, Result: json.RawMessage(`{}`)}
-	})
 	pendingMutation, lateMutation := relayLifetimeProbe(&m.modelMutation.mu, &m.modelMutation.pending, m.modelMutation.reply, func(id string) nodepolicy.ModelMutationReply {
 		return nodepolicy.ModelMutationReply{RequestID: id, Engine: "fake", OK: true}
 	})
@@ -258,10 +255,6 @@ func notificationRelayCases(m *Manager) []notificationRelayCase {
 			_, err := m.settingsRelay.call(ctx, "get", settings.Request{}, "")
 			return err
 		}, pendingSettings, lateSettings},
-		{"switch", func(ctx context.Context) error {
-			_, err := m.switchRelay.call(ctx, settings.SwitchStatusMethod, "", json.RawMessage(`{}`))
-			return err
-		}, pendingSwitch, lateSwitch},
 		{"mutation", func(ctx context.Context) error { return m.modelMutation.call(ctx, "fake") }, pendingMutation, lateMutation},
 		{"resident", func(ctx context.Context) error {
 			return m.residentDispatch.call(ctx, nodepolicy.DispatchResidentParams{})
@@ -374,8 +367,6 @@ func grantNotification(t *testing.T, m *Manager, method string, params any) {
 		response, reply = policyRelayReply{ID: request.ID, Result: json.RawMessage(`{}`)}, m.policyRelay.reply
 	case "engine:settings-request":
 		response, reply = settingsReply{ID: request.ID, Result: json.RawMessage(`{}`)}, m.settingsRelay.reply
-	case "engine:switch-request":
-		response, reply = switchRelayReply{ID: request.ID, Result: json.RawMessage(`{}`)}, m.switchRelay.reply
 	case nodepolicy.MethodModelMutationRequest:
 		response, reply = nodepolicy.ModelMutationReply{RequestID: request.RequestID, Engine: request.Engine, OK: true}, m.modelMutation.reply
 	case residentDispatchRequestMethod:
@@ -407,7 +398,7 @@ func TestNotificationLifetimeCancelledReplyCannotSucceed(t *testing.T) {
 				grantNotification(t, m, method, params)
 				return nil
 			}
-			m.policyRelay.send, m.settingsRelay.send, m.switchRelay.send = send, send, send
+			m.policyRelay.send, m.settingsRelay.send = send, send
 			m.modelMutation.send, m.residentDispatch.send = send, send
 			if err := c.call(ctx); !errors.Is(err, context.Canceled) || c.pending() != 0 {
 				t.Fatalf("cancelled queued grant = %v, pending=%d", err, c.pending())
@@ -417,7 +408,7 @@ func TestNotificationLifetimeCancelledReplyCannotSucceed(t *testing.T) {
 }
 
 func TestNotificationLifetimeRelayCleanupTail(t *testing.T) {
-	for index, name := range []string{"policy", "settings", "switch"} {
+	for index, name := range []string{"policy", "settings"} {
 		t.Run(name, func(t *testing.T) {
 			w := newNotificationWriter(2)
 			_, _, codec := lifetimeCodec(t, w, notificationWriteBudget)
@@ -434,7 +425,7 @@ func TestNotificationLifetimeRelayCleanupTail(t *testing.T) {
 				initial.Do(func() { close(sent) })
 				return err
 			}
-			m.policyRelay.send, m.settingsRelay.send, m.switchRelay.send = observe, observe, observe
+			m.policyRelay.send, m.settingsRelay.send = observe, observe
 			done := make(chan error, 1)
 			go func() { done <- c.call(ctx) }()
 			lifetimeReceive(t, sent)
@@ -442,7 +433,7 @@ func TestNotificationLifetimeRelayCleanupTail(t *testing.T) {
 			start := time.Now()
 			cancel()
 			msg := lifetimeMessage(t, lifetimeReceive(t, w.entered))
-			if msg.Method != map[string]string{"policy": policyCancelMethod, "settings": "engine:settings-cancel", "switch": "engine:switch-cancel"}[name] {
+			if msg.Method != map[string]string{"policy": policyCancelMethod, "settings": "engine:settings-cancel"}[name] {
 				t.Fatalf("cleanup method = %q", msg.Method)
 			}
 			late() // pending entry must be gone before the stalled cleanup write

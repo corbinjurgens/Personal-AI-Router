@@ -11,6 +11,76 @@ import (
 	"testing"
 )
 
+func TestParseStoredDropsEngineBindingsPreservingPolicy(t *testing.T) {
+	want := stagedPolicy(t)
+	want.Revision = "42"
+	want.Availability, want.PausedBy, want.PauseMode = Paused, PausedByPeer, PauseConfigured
+	models := servedResidentPolicy()
+	want.Profiles, want.ServedModels, want.ResidentModels = models.Profiles, models.ServedModels, models.ResidentModels
+	want.Roles = []Role{{Name: "strong", Profiles: []string{"m"}}, {Name: "weak", Profiles: []string{}}}
+	if err := want.Validate(); err != nil {
+		t.Fatalf("fixture policy: %v", err)
+	}
+	base, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, member := range []string{
+		`"engineBindings":[{"engine":"llamacpp","model":"retired-model"}]`,
+		`"EngineBindings":{"malformed":"obsolete input"}`,
+		`"engineBindings":null,"ENGINEBINDINGS":false`,
+	} {
+		t.Run(member, func(t *testing.T) {
+			raw := append([]byte("{"+member+","), base[1:]...)
+			before := bytes.Clone(raw)
+			got, _, err := ParseStored(raw)
+			if err != nil {
+				t.Fatalf("ParseStored: %v", err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("stored removal changed independent policy: got %+v, want %+v", got, want)
+			}
+			if !bytes.Equal(raw, before) {
+				t.Fatal("stored removal changed input bytes")
+			}
+			encoded, err := json.Marshal(got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(encoded, &fields); err != nil {
+				t.Fatal(err)
+			}
+			for key := range fields {
+				if strings.EqualFold(key, "engineBindings") {
+					t.Fatal("stored removal retained obsolete bindings")
+				}
+			}
+			again, err := Parse(encoded)
+			if err != nil || !reflect.DeepEqual(again, want) {
+				t.Fatalf("repaired policy round trip: %+v, %v", again, err)
+			}
+		})
+	}
+}
+
+func TestStoredBindingRemovalPreservesStrictModelKeys(t *testing.T) {
+	for _, retained := range []string{
+		`"servedModels":[],"servedModels":[]`,
+		`"servedModels":[],"ServedModels":[]`,
+		`"ResidentModels":[]`,
+		`"profiles":[],"Profiles":[]`,
+		`"roles":[],"Roles":[]`,
+	} {
+		t.Run(retained, func(t *testing.T) {
+			raw := []byte(`{"engineBindings":null,` + retained + `}`)
+			if _, _, err := ParseStored(raw); err == nil || err.Error() != "stored policy is invalid" {
+				t.Fatalf("retained ambiguous field error = %v, want invalid stored policy", err)
+			}
+		})
+	}
+}
+
 func TestParseStoredRetiresLocalEntriesAndOrphanRoutingRules(t *testing.T) {
 	for _, name := range []string{"no API entries", "coder API sibling"} {
 		t.Run(name, func(t *testing.T) {
@@ -69,7 +139,7 @@ func TestStoredReservedRepairedProfileKey(t *testing.T) {
 }
 
 func TestStoredReservedExplicitProfileKeySurvivesInvalidModelSanitation(t *testing.T) {
-	_, _, err := ParseStored([]byte(`{"profiles":[{"key":"coder:fast","displayName":"Bad","engine":"llamacpp","model":"bad\nmodel"}]}`))
+	_, _, err := ParseStored([]byte(`{"engineBindings":false,"profiles":[{"key":"coder:fast","displayName":"Bad","engine":"llamacpp","model":"bad\nmodel"}]}`))
 	const want = "profile key coder:fast is reserved: the text before its colon is a valid role name"
 	if err == nil || err.Error() != want {
 		t.Fatalf("stored explicit key error = %v, want %q", err, want)

@@ -224,9 +224,6 @@ func startProxyWithHistory(history *brokerRoutingHistory, name, binaryPath, logL
 }
 
 func (b *Broker) forwardProxyNotificationFrom(source *proxyProcess, method string, params json.RawMessage) {
-	if b.handleBoundEngineNotification(source, method, params) {
-		return
-	}
 	if routingHistoryMethod(method) {
 		b.routeRoutingHistoryFrom(source, method, params)
 		return

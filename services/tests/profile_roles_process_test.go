@@ -227,7 +227,6 @@ func TestModelSettingsLastTypedRemovalRecoversThenStartsSourcePreset(t *testing.
 	policy.Roles = []nodepolicy.Role{{Name: "weak", Profiles: []string{"lfm-8k"}}}
 	policy.ServedModels = nodepolicy.ServedModels{{Engine: "llamacpp", Model: "lfm-8k"}}
 	policy.ResidentModels = nodepolicy.ResidentModels{{Engine: "llamacpp", Model: "lfm-8k"}}
-	policy.EngineBindings = nodepolicy.EngineBindings{{Engine: "llamacpp", Model: "lfm-8k"}}
 	policy = f.setPolicy(t, policy)
 	state := f.snapshot(t)
 	request, preview := f.review(t, settings.Request{
@@ -256,7 +255,7 @@ func TestModelSettingsLastTypedRemovalRecoversThenStartsSourcePreset(t *testing.
 	want := policy
 	want.Profiles = []nodepolicy.Profile{}
 	want.Roles = []nodepolicy.Role{{Name: "weak", Profiles: []string{}}}
-	want.ServedModels, want.ResidentModels, want.EngineBindings = nodepolicy.ServedModels{}, nil, nil
+	want.ServedModels, want.ResidentModels = nodepolicy.ServedModels{}, nil
 	removed := f.policy(t)
 	want.Revision = removed.Revision
 	if !reflect.DeepEqual(want, removed) || removed.Revision == policy.Revision || f.disk(t).Model.Stage != "completed" {

@@ -33,16 +33,9 @@
 - ⚠️ nvpair-engine-manager → engine:remote-inspect-model
 - ⚠️ nvpair-engine-manager → engine:remote-preview-settings
 - ⚠️ nvpair-engine-manager → engine:remote-set-stated-memory
-- ⚠️ nvpair-engine-manager → engine:remote-switch
-- ⚠️ nvpair-engine-manager → engine:remote-switch-fence
-- ⚠️ nvpair-engine-manager → engine:remote-switch-status
 - ⚠️ nvpair-engine-manager → engine:restart
 - ⚠️ nvpair-engine-manager → engine:set-port
 - ⚠️ nvpair-engine-manager → engine:sleep
-- ⚠️ nvpair-engine-manager → engine:switch-prepare
-- ⚠️ nvpair-engine-manager → engine:switch-reconcile
-- ⚠️ nvpair-engine-manager → engine:switch-recovery-ready
-- ⚠️ nvpair-engine-manager → engine:switch-step
 - ⚠️ nvpair-engine-manager → engine:wake
 - ⚠️ nvpair-engine-manager → internal:local-engine-credential
 - ⚠️ nvpair-engine-manager → internal:set-reserved-port
@@ -64,7 +57,6 @@
 - ⚠️ nvpair-node-settings → settings/set-force-ports
 - ⚠️ nvpair-proxy → facade/enable
 - ⚠️ nvpair-proxy → node/admission-snapshot
-- ⚠️ nvpair-proxy → node/invalidate-engine
 - ⚠️ nvpair-proxy → node/selected
 - ⚠️ nvpair-proxy → node/set-availability
 - ⚠️ nvpair-proxy → node/set-engine-drain
@@ -141,14 +133,12 @@
 | `engine:settings-changed` | notification (we consume) | ✅ yes |
 | `engine:settings-disconnected` | notification (we consume) | ✅ yes |
 | `engine:state-changed` | notification (we consume) | ✅ yes |
-| `engine:switch-changed` | notification (we consume) | ✅ yes |
 | `errors:clear` | notification (we consume) | ✅ yes |
 | `errors:report` | notification (we consume) | ✅ yes |
 | `auto:16384` | request (we call) | ⚠️ not called |
 | `auto:32768` | request (we call) | ⚠️ not called |
 | `auto:8192` | request (we call) | ⚠️ not called |
 | `engine:action` | request (we call) | ✅ yes |
-| `engine:activate-bound-engine` | request (we call) | ➖ ignored |
 | `engine:active-model-copies` | request (we call) | ✅ yes |
 | `engine:cancel-model-copy` | request (we call) | ✅ yes |
 | `engine:catalog` | request (we call) | ✅ yes |
@@ -188,9 +178,6 @@
 | `engine:remote-set-stated-memory` | request (we call) | ⚠️ not called |
 | `engine:remote-start` | request (we call) | ✅ yes |
 | `engine:remote-stop` | request (we call) | ✅ yes |
-| `engine:remote-switch` | request (we call) | ⚠️ not called |
-| `engine:remote-switch-fence` | request (we call) | ⚠️ not called |
-| `engine:remote-switch-status` | request (we call) | ⚠️ not called |
 | `engine:remote-unload-model` | request (we call) | ✅ yes |
 | `engine:restart` | request (we call) | ⚠️ not called |
 | `engine:set-port` | request (we call) | ⚠️ not called |
@@ -199,10 +186,6 @@
 | `engine:start` | request (we call) | ✅ yes |
 | `engine:status` | request (we call) | ✅ yes |
 | `engine:stop` | request (we call) | ✅ yes |
-| `engine:switch-prepare` | request (we call) | ⚠️ not called |
-| `engine:switch-reconcile` | request (we call) | ⚠️ not called |
-| `engine:switch-recovery-ready` | request (we call) | ⚠️ not called |
-| `engine:switch-step` | request (we call) | ⚠️ not called |
 | `engine:uninstall` | request (we call) | ✅ yes |
 | `engine:uninstall-managed` | request (we call) | ✅ yes |
 | `engine:unload-model` | request (we call) | ✅ yes |
@@ -309,8 +292,6 @@
 
 | Method | Direction | In bridge? |
 |---|---|---|
-| `admission/cancel-bound-engine` | notification (we consume) | ➖ ignored |
-| `admission/prepare-bound-engine` | notification (we consume) | ➖ ignored |
 | `admission/state` | notification (we consume) | ➖ ignored |
 | `admission/strict-readiness` | notification (we consume) | ➖ ignored |
 | `discovery:subscribe` | notification (we consume) | ✅ yes |
@@ -332,7 +313,6 @@
 | `node/admission-snapshot` | request (we call) | ⚠️ not called |
 | `node/dispatch-resident` | request (we call) | ➖ ignored |
 | `node/finish-resident` | request (we call) | ➖ ignored |
-| `node/invalidate-engine` | request (we call) | ⚠️ not called |
 | `node/observe-resident` | request (we call) | ➖ ignored |
 | `node/prepare-resident` | request (we call) | ➖ ignored |
 | `node/remove-manual` | request (we call) | ✅ yes |
@@ -383,7 +363,6 @@
 | `engine:settings-changed` | request (we call) | ✅ yes |
 | `engine:settings-disconnected` | request (we call) | ✅ yes |
 | `engine:state-changed` | request (we call) | ✅ yes |
-| `engine:switch-changed` | request (we call) | ✅ yes |
 | `error` | request (we call) | ✅ yes |
 | `errors:update` | request (we call) | ✅ yes |
 | `node:availability-changed` | request (we call) | ✅ yes |
@@ -420,7 +399,6 @@
 | `errors:report` | notification (we consume) | ✅ yes |
 | `errors:update` | notification (we consume) | ✅ yes |
 | `log/set-level` | notification (we consume) | ✅ yes |
-| `node/bound-engine-prepared` | notification (we consume) | ➖ ignored |
 | `performance:changed` | notification (we consume) | ✅ yes |
 | `scheduler:telemetry` | notification (we consume) | ➖ ignored |
 | `service/engine-notifications-reset` | notification (we consume) | ➖ ignored |
@@ -458,12 +436,6 @@
 | `engine:status` | request (we call) | ✅ yes |
 | `engine:stop` | request (we call) | ✅ yes |
 | `engine:subscribe` | request (we call) | ✅ yes |
-| `engine:switch` | request (we call) | ✅ yes |
-| `engine:switch-cancel` | request (we call) | ➖ ignored |
-| `engine:switch-changed` | request (we call) | ✅ yes |
-| `engine:switch-fence` | request (we call) | ✅ yes |
-| `engine:switch-request` | request (we call) | ➖ ignored |
-| `engine:switch-status` | request (we call) | ✅ yes |
 | `engine:uninstall` | request (we call) | ✅ yes |
 | `engine:unsubscribe` | request (we call) | ⚠️ not called |
 | `engine:wake` | request (we call) | ⚠️ not called |

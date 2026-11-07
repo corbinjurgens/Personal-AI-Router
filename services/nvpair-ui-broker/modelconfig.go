@@ -13,6 +13,7 @@ import (
 	"sort"
 	"time"
 
+	"nvpair-shared/buildapply"
 	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/nodepolicy"
@@ -277,7 +278,7 @@ func (b *Broker) modelConfigEntry(e modelConfigEvidence, ref nodepolicy.ModelRef
 	case intentKnown && !enabled:
 		block(nodepolicy.ModelReasonEngineOff)
 	case e.Drains[ref.Engine]:
-		block(nodepolicy.ModelReasonSwitchBusy)
+		block(nodepolicy.ModelReasonOperationBusy)
 	case !intentKnown || e.Activation.Activation != activationActive || e.Source == nil || e.Worker == nil:
 		entry.Reason = nodepolicy.ModelReasonProjectionUnknown
 	case !e.Running[ref.Engine] && !e.RunningKnown[ref.Engine]:
@@ -543,7 +544,7 @@ func (b *Broker) confirmResident(parent context.Context, e modelConfigEvidence, 
 	ctx, cancel := context.WithTimeout(parent, proxyCallTimeout)
 	defer cancel()
 	var launch settings.LaunchState
-	if switchManagerCallOn(ctx, e.Worker, "engine:get-launch", map[string]string{"engine": entry.Engine}, &launch) != nil || !sameModelEvidence(e, b.captureModelConfig()) || !launch.Running || launch.Adopted || launch.Engine != entry.Engine || launch.ServingReadback == nil || launch.ServingReadback.Status != "observed" {
+	if !residentManagerRPC(ctx, e.Worker, "engine:get-launch", map[string]string{"engine": entry.Engine}, &launch) || !sameModelEvidence(e, b.captureModelConfig()) || !launch.Running || launch.Adopted || launch.Engine != entry.Engine || launch.ServingReadback == nil || launch.ServingReadback.Status != "observed" {
 		return entry
 	}
 	envelope := e.Identity.Engines[entry.Engine].Serving[entry.Model]
@@ -583,6 +584,18 @@ func residentRPC(ctx context.Context, pp *proxyProcess, method string, params an
 	return err == nil && rpcErr == nil && json.Unmarshal(raw, result) == nil
 }
 
+func residentManagerRPC(ctx context.Context, worker *rpcWorker, method string, params any, result any) bool {
+	if ctx.Err() != nil || worker == nil {
+		return false
+	}
+	data, err := json.Marshal(params)
+	if err != nil {
+		return false
+	}
+	raw, rpcErr, err := worker.CallNoTimeout(ctx, method, data)
+	return err == nil && rpcErr == nil && json.Unmarshal(raw, result) == nil
+}
+
 func (b *Broker) residentCurrent(op *modelConfigAttempt) bool {
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
@@ -597,7 +610,7 @@ func (b *Broker) residentSourceCurrent(op *modelConfigAttempt) bool {
 }
 
 func (b *Broker) reconcileResident(parent context.Context, e modelConfigEvidence, entry nodepolicy.ModelConfigurationEntry, pr nodepolicy.Profile, id nodepolicy.StrictModelIdentity, count int) nodepolicy.ModelConfigurationEntry {
-	bound := min(time.Minute, settings.SwitchDrainBudget, time.Duration(e.Policy.Admission.SwitchTimeoutSeconds)*time.Second)
+	bound := min(time.Minute, time.Duration(e.Policy.Admission.SwitchTimeoutSeconds)*time.Second)
 	if bound <= 0 {
 		entry.State, entry.Reason = nodepolicy.ModelStateBlocked, nodepolicy.ModelReasonUnqualified
 		return entry
@@ -605,12 +618,12 @@ func (b *Broker) reconcileResident(parent context.Context, e modelConfigEvidence
 	ctx, cancel := context.WithTimeout(parent, bound)
 	defer cancel()
 	deadline, _ := ctx.Deadline()
-	var manager switchManagerSnapshot
-	if switchManagerCallOn(ctx, e.Worker, settings.SwitchPrepareMethod, settings.SwitchPrepareRequest{}, &manager) != nil || manager.Error != nil || manager.Configuration.ManagerIncarnation == "" || !sameModelEvidence(e, b.captureModelConfig()) {
+	var manager buildapply.EngineOwnerEvidence
+	if !residentManagerRPC(ctx, e.Worker, buildapply.EngineOwnerEvidenceMethod, buildapply.EngineOwnerEvidenceRequest{}, &manager) || manager.ManagerIncarnation == "" || !sameModelEvidence(e, b.captureModelConfig()) {
 		entry.State, entry.Reason = nodepolicy.ModelStateUnknown, nodepolicy.ModelReasonProjectionUnknown
 		return entry
 	}
-	incarnation := manager.Configuration.ManagerIncarnation
+	incarnation := manager.ManagerIncarnation
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
 	if r.models.sequenceProxy != e.Proxy || r.models.sequenceRun != e.Run {

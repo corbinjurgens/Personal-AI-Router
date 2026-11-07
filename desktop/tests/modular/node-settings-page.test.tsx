@@ -31,9 +31,6 @@ vi.mock('@/ui/components/BackendRow/BackendRow', () => ({
         )
     }
 }))
-vi.mock('@/ui/components/NodeList/EngineSwitchControls', () => ({
-    EngineSwitchControls: () => null
-}))
 
 let root: Root
 let container: HTMLDivElement

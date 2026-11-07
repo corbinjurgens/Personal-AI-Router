@@ -286,7 +286,7 @@ func TestEnabledEngineRestorationSurvivesInvalidSettingsJournal(t *testing.T) {
 	restored := recordEnabledEngineRestoration(t, codec)
 	done := make(chan struct{})
 	go func() { b.restoreEnabledEngines(worker); close(done) }()
-	for _, want := range []string{engineNodeProjectionMethod, settings.SwitchPrepareMethod, restoreEnabledEnginesMethod} {
+	for _, want := range []string{engineNodeProjectionMethod, restoreEnabledEnginesMethod} {
 		select {
 		case method := <-restored:
 			if method != want {

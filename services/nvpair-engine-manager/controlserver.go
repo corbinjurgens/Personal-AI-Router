@@ -32,34 +32,10 @@ import (
 	"time"
 
 	"nvpair-shared/clustertrust"
-	settings "nvpair-shared/enginesettings"
 )
 
 // controlEnginesPath returns this node's engine install/run status.
 const controlEnginesPath = "/v1/engines"
-
-const switchRecoveryReadyMethod = "engine:switch-recovery-ready"
-
-// completeSwitchRecovery is parent-only: the pinned stdio worker handle and
-// incarnation prevent an acknowledgement for an old process opening a new one.
-func (e *Executor) completeSwitchRecovery(incarnation string) error {
-	e.switchAdmission.Lock()
-	defer e.switchAdmission.Unlock()
-	if incarnation == "" || incarnation != e.switchIncarnation {
-		return errors.New("switch recovery acknowledgement has a different manager incarnation")
-	}
-	e.desired.mu.Lock()
-	defer e.desired.mu.Unlock()
-	state, err := e.desired.load()
-	if err != nil {
-		return err
-	}
-	if cp := state.PendingSwitch; cp != nil && cp.Phase != settings.SwitchCheckpointReleased {
-		return errors.New("switch recovery still owns an unreleased checkpoint")
-	}
-	e.switchRecoveryPending.Store(false)
-	return nil
-}
 
 // controlServer holds the dependencies the ec handlers share.
 type controlServer struct {
@@ -111,15 +87,6 @@ func ignoreCaller(h http.HandlerFunc) pinnedPeerHandler {
 	return func(w http.ResponseWriter, r *http.Request, _ string) { h(w, r) }
 }
 
-// pinnedCallerGate re-supplies an already verified caller to a handler that
-// still expects the pin gate's shape (switchHandler). Identity always comes
-// from the certificate, never from the request.
-func pinnedCallerGate(caller string) func(pinnedPeerHandler) http.HandlerFunc {
-	return func(h pinnedPeerHandler) http.HandlerFunc {
-		return func(w http.ResponseWriter, r *http.Request) { h(w, r, caller) }
-	}
-}
-
 // requirePin gates a handler on cluster-peer mTLS, sharing the one gate the
 // model surface uses (requirePinnedPeer in httpserver.go) so both of this
 // service's LAN surfaces make the same decision the same way. It delegates to
@@ -136,7 +103,7 @@ func (s *controlServer) requirePinCaller(h pinnedPeerHandler) http.HandlerFunc {
 
 // authorize is the one ec authorization implementation after the mTLS pin
 // check has produced the verified caller UUID. It enforces the registered
-// method, keeps recovery's read exceptions, and requires a fresh
+// method and requires a fresh
 // Mesh.RemoteManagement(caller) grant before a mutation handler runs. A
 // request it cannot classify never reaches a handler.
 func (s *controlServer) authorize(route controlRoute, h pinnedPeerHandler) pinnedPeerHandler {
@@ -191,12 +158,9 @@ func (s *controlServer) authorize(route controlRoute, h pinnedPeerHandler) pinne
 			return
 		}
 		// Availability has its own authoritative Halt/configured-Pause gate
-		// at the broker. Keep pin, grant, hydration and recovery checks here.
+		// at the broker. Keep pin, grant and hydration checks here.
 		if blocked && route.path != controlAvailabilitySetPath {
 			writeCodedError(w, codeLocalVeto, nodePausedVeto)
-			return
-		}
-		if !s.allowControlDuringRecovery(w, r, route.class) {
 			return
 		}
 		h(w, request, caller)
@@ -210,18 +174,6 @@ func allowedMethods(route controlRoute) string {
 		return http.MethodGet + ", " + http.MethodHead
 	}
 	return route.method
-}
-
-// Keep read-only POST queries available along with inventory and event streams;
-// authoritative projections and conservative recovery use stdio, not ec. The
-// registry's class replaces the old hand-kept path list.
-func (s *controlServer) allowControlDuringRecovery(w http.ResponseWriter, r *http.Request, class controlClass) bool {
-	if s.exec == nil || !s.exec.switchRecoveryPending.Load() || class == controlRead ||
-		r.Method == http.MethodGet || r.Method == http.MethodHead {
-		return true
-	}
-	http.Error(w, "engine manager switch recovery is pending; try again shortly", http.StatusServiceUnavailable)
-	return false
 }
 
 // mux builds the ec routes from the registry. Split from the listener so tests
@@ -252,7 +204,6 @@ func (s *controlServer) routes() []controlRoute {
 		{controlCopyCapabilitiesPath, http.MethodGet, controlRead, "model-copy-capabilities", s.handleCopyCapabilities},
 	}
 	routes = append(routes, s.settingsRoutes()...)
-	routes = append(routes, s.switchRoutes()...)
 	routes = append(routes, s.policyRoutes()...)
 	return routes
 }

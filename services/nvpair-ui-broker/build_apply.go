@@ -643,18 +643,18 @@ func captureCachedBuildApplyImpact(read func() (buildApplyOwnerRead, bool)) (bui
 }
 
 type buildApplyOwnerRead struct {
-	impact                                                                   buildapply.Impact
-	worker                                                                   *rpcWorker
-	source                                                                   *engineManagerSource
-	proxy                                                                    *proxyProcess
-	policyProxy                                                              *proxyProcess
-	policySource                                                             *engineManagerSource
-	policyPath, policyDigest, settingsDigest, operationsDigest, engineDigest string
-	policyGeneration, runningGeneration, modelGeneration                     uint64
-	maintenanceGeneration                                                    uint64
-	recovering                                                               bool
-	pendingInstalls                                                          []buildApplyInstallRead
-	settingsRecords                                                          map[string]bool
+	impact                                                 buildapply.Impact
+	worker                                                 *rpcWorker
+	source                                                 *engineManagerSource
+	proxy                                                  *proxyProcess
+	policyProxy                                            *proxyProcess
+	policySource                                           *engineManagerSource
+	policyPath, policyDigest, settingsDigest, engineDigest string
+	policyGeneration, runningGeneration, modelGeneration   uint64
+	maintenanceGeneration                                  uint64
+	recovering                                             bool
+	pendingInstalls                                        []buildApplyInstallRead
+	settingsRecords                                        map[string]bool
 }
 
 type buildApplyInstallRead struct {
@@ -666,7 +666,7 @@ type buildApplyInstallRead struct {
 func sameCachedBuildApplyOwners(a, b buildApplyOwnerRead) bool {
 	// Compare live owners by identity, never by reflection into their mutable
 	// transports/mutexes. Every other compared value is a detached observation.
-	if a.worker != b.worker || a.source != b.source || a.proxy != b.proxy || a.policyProxy != b.policyProxy || a.policySource != b.policySource || a.recovering != b.recovering || a.policyGeneration != b.policyGeneration || a.runningGeneration != b.runningGeneration || a.modelGeneration != b.modelGeneration || a.maintenanceGeneration != b.maintenanceGeneration || a.policyPath != b.policyPath || a.policyDigest != b.policyDigest || a.settingsDigest != b.settingsDigest || a.operationsDigest != b.operationsDigest || a.engineDigest != b.engineDigest || len(a.pendingInstalls) != len(b.pendingInstalls) {
+	if a.worker != b.worker || a.source != b.source || a.proxy != b.proxy || a.policyProxy != b.policyProxy || a.policySource != b.policySource || a.recovering != b.recovering || a.policyGeneration != b.policyGeneration || a.runningGeneration != b.runningGeneration || a.modelGeneration != b.modelGeneration || a.maintenanceGeneration != b.maintenanceGeneration || a.policyPath != b.policyPath || a.policyDigest != b.policyDigest || a.settingsDigest != b.settingsDigest || a.engineDigest != b.engineDigest || len(a.pendingInstalls) != len(b.pendingInstalls) {
 		return false
 	}
 	for i, install := range a.pendingInstalls {
@@ -685,8 +685,8 @@ func (b *Broker) readCachedBuildApplyOwners() (buildApplyOwnerRead, bool) {
 	}
 	impact.RestorePolicy = buildapply.RestorePolicy{RemainPaused: true, RequireLocalResume: true, PreserveIntent: true, PreserveNewerPause: true}
 	impact.InterruptionPolicy = buildapply.InterruptionPolicy{StopsEngines: true, UnloadsModels: true, CommittedStreamsMayFail: true, IncludesWorkBeforeFence: true}
-	// engineConfigMu is the established settings/switch journal lock. Do not
-	// call loadEngineSettingsLocked, switchCoordinator or pendingSwitchLocked.
+	// engineConfigMu is the established settings journal lock. Do not call
+	// loadEngineSettingsLocked here.
 	if !b.engineConfigMu.TryLock() {
 		return buildApplyOwnerRead{}, false
 	}
@@ -748,24 +748,6 @@ func (b *Broker) readCachedBuildApplyOwners() (buildApplyOwnerRead, bool) {
 		impact.Maintenance.ModelSettingsActive = buildapply.Known(modelSettingsActive)
 	} else {
 		refuse("settings_unavailable", "The settings owner has no complete initialized baseline.")
-	}
-	c := b.engineSwitch
-	if c != nil && c.store != nil && c.store.loaded && c.err == nil && c.recoveryErr == nil && c.store.untrusted == nil && c.store.fenceErr == nil {
-		capture.operationsDigest = modelSettingsHash(struct {
-			Journal    settings.SwitchJournal
-			Checkpoint *settings.SwitchCheckpoint
-			Resolved   map[string]bool
-		}{c.store.journal, c.recoveryCheckpoint, c.resolved})
-		for _, receipt := range c.store.journal.Receipts {
-			if !receipt.Terminal || receipt.RecoveryRequired && !c.resolved[receipt.RequestID] {
-				operations = append(operations, buildapply.ModelOperation{Engine: receipt.Request.SourceEngine, Kind: "switch", BlocksApply: true})
-			}
-		}
-		if cp := c.recoveryCheckpoint; cp != nil && cp.Phase != settings.SwitchCheckpointReleased {
-			operations = append(operations, buildapply.ModelOperation{Engine: cp.SourceEngine, Kind: "switch-recovery", BlocksApply: true})
-		}
-	} else {
-		refuse("switch_unavailable", "The switch/recovery owner has no complete initialized baseline.")
 	}
 	b.engineConfigMu.Unlock()
 	sort.Slice(operations, func(i, j int) bool {
@@ -848,7 +830,7 @@ func (b *Broker) readCachedBuildApplyOwners() (buildApplyOwnerRead, bool) {
 	})
 	if len(operations) > 0 {
 		impact.ModelOperations = buildapply.Known(operations)
-		refuse("operation_busy", "An observed local settings, install, switch or model operation blocks apply.")
+		refuse("operation_busy", "An observed local settings, install or model operation blocks apply.")
 	}
 	if r.models.active != nil || r.models.busy {
 		refuse("resident_busy", "The resident-model owner has pending work.")

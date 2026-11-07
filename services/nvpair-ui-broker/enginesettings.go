@@ -332,11 +332,8 @@ func (b *Broker) publishSettingsLocked() {
 	worker := b.engineMgr
 	b.workersMu.Unlock()
 	identities := make([]settings.Snapshot, 0, len(all))
-	c := b.switchCoordinator()
 	for _, snapshot := range all {
-		// A settings refresh must not undo an acknowledged switch withdrawal
-		// while forward work or conservative cleanup still reserves the engine.
-		if !b.modelSettingsPendingLocked(snapshot.Engine) && (c.store == nil || b.pendingSwitchLocked(snapshot.Engine) == nil) {
+		if !b.modelSettingsPendingLocked(snapshot.Engine) {
 			identities = append(identities, snapshot)
 		}
 	}
@@ -723,9 +720,6 @@ func (b *Broker) applyEngineSettings(ctx context.Context, p settings.Request, ca
 			}
 			return receipt, nil
 		}
-	}
-	if err := b.pendingSwitchLocked(p.Engine); err != nil {
-		return settingsReceipt{}, err
 	}
 	// Recheck CORS after acquiring the target's apply lock. An HTTP ingress
 	// check alone can become stale while another accepted apply is running.

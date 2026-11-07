@@ -241,7 +241,7 @@ func TestRemoteManagementDirectMutationBoundary(t *testing.T) {
 	for _, path := range []string{
 		"/v1/engines/install", "/v1/models/pull", "/v1/models/load",
 		"/v1/models/unload", "/v1/models/delete", "/v1/engines/start", "/v1/engines/stop",
-		"/v1/node-policy/set", "/v1/node-availability/set", "/v1/engine-settings/apply", settings.SwitchApplyPath,
+		"/v1/node-policy/set", "/v1/node-availability/set", "/v1/engine-settings/apply",
 	} {
 		t.Run(path, func(t *testing.T) {
 			managementHTTP(t, f.denied, f.joint.ports[1], http.MethodPost, path,
@@ -284,7 +284,6 @@ func TestRemoteManagementDeniedReadsAndLocalWriterBoundary(t *testing.T) {
 		t.Fatalf("decode readable settings: %v", err)
 	}
 	managementHTTP(t, f.denied, port, http.MethodPost, "/v1/engine-settings/preview", settings.Request{Engine: "llamacpp", ExpectedRevision: snapshot.Revision, Settings: snapshot.Settings}, http.StatusOK)
-	managementHTTP(t, f.denied, port, http.MethodPost, settings.SwitchStatusPath, settings.SwitchStatusRequest{}, http.StatusOK)
 	f.permission(t, f.denied, false)
 	before := readLiveDurableFile(t, filepath.Join(f.joint.cluster, clustertrust.RemoteManagementFile))
 	for _, client := range []*http.Client{f.denied, f.joint.client} {
@@ -414,11 +413,11 @@ func managementPolicyWriterAt(t *testing.T, base string) *policyJointFixture {
 	return f
 }
 
-// The switch fixture's synthetic engine and real proxy are retained, with the
+// The private fixture's synthetic engine and real proxy are retained, with the
 // registered empty scanner replacing discovery of installed peers.
-func managementSwitchWriterAt(t *testing.T, base string) *switchProcessFixture {
+func managementEngineWriterAt(t *testing.T, base string) *engineProcessFixture {
 	t.Helper()
-	f := &switchProcessFixture{base: base, ports: reserveFixtureServicePorts(t), sourcePort: temporaryClusterPort(t), targetPort: temporaryClusterPort(t), facadePort: temporaryClusterPort(t), targetFacadePort: temporaryClusterPort(t), release: make(chan struct{}), starts: make(map[string][]int32)}
+	f := &engineProcessFixture{base: base, ports: reserveFixtureServicePorts(t), sourcePort: temporaryClusterPort(t), targetPort: temporaryClusterPort(t), facadePort: temporaryClusterPort(t), targetFacadePort: temporaryClusterPort(t), release: make(chan struct{}), starts: make(map[string][]int32)}
 	f.proxyControl = newFixtureProxyControl(t)
 	f.control = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		pid, err := strconv.ParseInt(r.URL.Query().Get("pid"), 10, 32)
@@ -455,7 +454,6 @@ func managementSwitchWriterAt(t *testing.T, base string) *switchProcessFixture {
 		}}
 	}
 	jointWriteJSON(t, filepath.Join(base, "engine-settings-operations.json"), journal)
-	jointWriteJSON(t, filepath.Join(base, "engine-switch-operations.json"), settings.SwitchJournal{Version: settings.SwitchVersion, Receipts: make(map[string]settings.SwitchReceipt)})
 	policy := nodepolicy.Default()
 	policy.Revision = "12"
 	jointWriteJSON(t, filepath.Join(jointAppDir(base), nodepolicy.FileName), policy)
@@ -481,8 +479,7 @@ func managementSwitchWriterAt(t *testing.T, base string) *switchProcessFixture {
 	f.proxyControl.ready(t, "llamacpp", f.targetFacadePort)
 	f.rpcOK(t, "engine:start", map[string]string{"engine": "llamacpp-custom"})
 	f.pid(t, "llamacpp-custom")
-	// Initialize every settings baseline before a switch revision is captured.
-	// Otherwise the periodic refresh can add an unrelated engine's revision.
+	// Initialize every settings baseline before tests capture their revisions.
 	for _, engine := range engines.Names() {
 		f.rpcOK(t, "engine:get-settings", map[string]string{"engine": engine})
 	}
@@ -492,7 +489,7 @@ func managementSwitchWriterAt(t *testing.T, base string) *switchProcessFixture {
 func TestRemoteManagementReverseMutationBoundary(t *testing.T) {
 	nodes, blockedPort := newTask1Nodes(t)
 	allowed, target, denied := nodes[0], nodes[1], nodes[2]
-	f := managementSwitchWriterAt(t, target.base)
+	f := managementEngineWriterAt(t, target.base)
 	target.ports[noderec.ServiceEngineControl] = f.ports.engineControl
 	ec := newTask1Observer(t, target, noderec.ServiceEngineControl, nodes)
 	target.cm.call(t, "cluster:set-local-services", map[string]any{"generation": 2, "services": []noderec.RegisterParams{
@@ -530,9 +527,6 @@ func TestRemoteManagementReverseMutationBoundary(t *testing.T) {
 	jointIsolateEngines(t, denied.base, blockedPort)
 	deniedOrigin := startInteropProcess(t, denied.base, engineMgrBin, 0, nil, "--cluster-dir", filepath.Join(denied.base, "cluster"), "--loaded-poll-interval", "0")
 	waitForMethod(t, deniedOrigin.msgs, "engine:ready", 10*time.Second)
-	completeEngineManagerRecovery(t, func(method string, params any) jsonrpc.Message {
-		return callRPC(t, deniedOrigin.in, deniedOrigin.msgs, method, params, 10*time.Second)
-	})
 	sendLine(t, deniedOrigin.in, jsonrpc.Message{JSONRPC: "2.0", Method: noderec.NotifyNodes, Params: mustMarshal(t, noderec.GetNodesResult{Nodes: []noderec.DirectoryNode{{HostUUID: target.uuid, ClusterUUID: target.uuid, IP: "127.0.0.1", Trusted: true,
 		Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceEngineControl: {Port: blockedPort}}}}})})
 	for _, caller := range []struct {
@@ -561,8 +555,6 @@ func TestRemoteManagementReverseMutationBoundary(t *testing.T) {
 		t.Helper()
 		policyBytes := readPolicyBytes(t, policyPath)
 		settingsBytes := readLiveDurableFile(t, filepath.Join(target.base, "engine-settings-operations.json"))
-		switchBytes := readLiveDurableFile(t, filepath.Join(target.base, "engine-switch-operations.json"))
-		status := f.status(t, settings.SwitchStatusRequest{})
 		f.mu.Lock()
 		starts := make(map[string][]int32)
 		for engine, pids := range f.starts {
@@ -571,9 +563,8 @@ func TestRemoteManagementReverseMutationBoundary(t *testing.T) {
 		f.mu.Unlock()
 		assertUnchanged := func() {
 			t.Helper()
-			afterStatus := f.status(t, settings.SwitchStatusRequest{})
-			if !bytes.Equal(readPolicyBytes(t, policyPath), policyBytes) || !bytes.Equal(readLiveDurableFile(t, filepath.Join(target.base, "engine-settings-operations.json")), settingsBytes) || !bytes.Equal(readLiveDurableFile(t, filepath.Join(target.base, "engine-switch-operations.json")), switchBytes) || afterStatus.ConfigurationRevision != status.ConfigurationRevision || afterStatus.ActiveRequestID != status.ActiveRequestID || !reflect.DeepEqual(afterStatus.Receipt, status.Receipt) {
-				t.Fatal("forged identity changed actual policy/settings/switch writer state")
+			if !bytes.Equal(readPolicyBytes(t, policyPath), policyBytes) || !bytes.Equal(readLiveDurableFile(t, filepath.Join(target.base, "engine-settings-operations.json")), settingsBytes) {
+				t.Fatal("forged identity changed actual policy/settings writer state")
 			}
 			beforePolicy, err := nodepolicy.Parse(policyBytes)
 			if err != nil {
@@ -619,12 +610,12 @@ func TestRemoteManagementReverseMutationBoundary(t *testing.T) {
 		}
 		count = ec.count(denied.uuid, http.MethodPost, path)
 		// The exact typed wire representation of RPC -32012 must precede body
-		// parsing, including strict settings/switch unknown-field validation.
+		// parsing, including strict settings unknown-field validation.
 		managementHTTP(t, deniedClient, blockedPort, http.MethodPost, path, forged, http.StatusConflict)
 		if ec.count(denied.uuid, http.MethodPost, path) != count+1 {
 			t.Fatal("forged request did not traverse denied caller's real reverse transport")
 		}
-		method := map[string]string{"/v1/node-policy/set": "engine:remote-policy-set", "/v1/engine-settings/apply": "engine:remote-apply-settings", settings.SwitchApplyPath: settings.RemoteSwitchMethod}[path]
+		method := map[string]string{"/v1/node-policy/set": "engine:remote-policy-set", "/v1/engine-settings/apply": "engine:remote-apply-settings"}[path]
 		var rpcParams map[string]json.RawMessage
 		if err := json.Unmarshal(mustMarshal(t, canonical), &rpcParams); err != nil {
 			t.Fatal(err)
@@ -680,33 +671,6 @@ func TestRemoteManagementReverseMutationBoundary(t *testing.T) {
 			t.Fatal("allowed settings receipt was not saved by the real writer")
 		}
 		assertAllowedRoute(t, "/v1/engine-settings/apply")
-	})
-	t.Run("switch forged identity", func(t *testing.T) {
-		request := f.request(t, "reverse-switch-control")
-		assertForgedDenied(t, settings.SwitchApplyPath, request)
-		var result settings.SwitchResult
-		task2Decode(t, managementHTTP(t, allowedClient, blockedPort, http.MethodPost, settings.SwitchApplyPath, request, http.StatusOK), &result)
-		if result.Receipt.Caller != allowed.uuid || result.Receipt.NodeID != target.uuid || result.Receipt.RequestID != request.RequestID {
-			t.Fatal("allowed switch control lost authenticated caller")
-		}
-		var terminal settings.SwitchStatus
-		task1Eventually(t, "allowed reverse switch completes", 45*time.Second, func() bool {
-			task2Decode(t, managementHTTP(t, allowedClient, blockedPort, http.MethodPost, settings.SwitchStatusPath, settings.SwitchStatusRequest{RequestID: request.RequestID}, http.StatusOK), &terminal)
-			return terminal.Receipt != nil && terminal.Receipt.Terminal
-		})
-		if terminal.Receipt.Phase != settings.SwitchCompleted || terminal.Receipt.Error != nil || terminal.Receipt.Caller != allowed.uuid || terminal.Receipt.NodeID != target.uuid {
-			t.Fatal("canonical allowed switch did not complete against the synthetic engines")
-		}
-		journal, err := settings.DecodeSwitchJournal(readLiveDurableFile(t, filepath.Join(target.base, "engine-switch-operations.json")))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !reflect.DeepEqual(journal.Receipts[request.RequestID], *terminal.Receipt) {
-			t.Fatal("allowed reverse switch did not persist its terminal receipt")
-		}
-		assertSwitchProcessStopped(t, f.pid(t, "llamacpp-custom"))
-		f.pid(t, "llamacpp")
-		assertAllowedRoute(t, settings.SwitchApplyPath)
 	})
 }
 
@@ -1245,6 +1209,7 @@ func TestRemoteManagementPersistsAcrossSeparateProcessRestarts(t *testing.T) {
 			}
 			return false
 		})
+		waitTCP(t, "127.0.0.1:"+strconv.Itoa(f.ports.engineControl), 10*time.Second)
 		assertOppositeGrants(t)
 	})
 }

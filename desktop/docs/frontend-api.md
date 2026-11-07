@@ -115,33 +115,11 @@ Pause affects this target's execution while routing remains available. An
 incomplete shutdown retains the fence and draining state. Committed interrupted
 streams fail cleanly where supported; seamless continuation remains separate work.
 
-### Model engine bindings in Routing & resources
+### Profiles
 
-The single-node **Model engine bindings** editor changes only `engineBindings`
-in the existing **Policy** JSON draft. Add, edit, remove and clear use that
-same draft and **Save** action; they introduce no API, draft store or lifecycle
-command. Clearing writes `engineBindings: []`. Other policy fields, including
-origin-private routing and accounts, are retained. Invalid JSON remains in the
-text editor with the existing save error; the binding controls cannot rebuild
-it from defaults.
-
-Engine choices use the selected node's existing engine view and descriptor
-labels. Model suggestions are labelled observations from that node and engine,
-not a complete inventory. Native model names can be typed even when a stopped
-engine has reported no models. A saved binding is configuration, not runtime
-readiness: saving starts nothing. Requests for this model can wait while this
-node activates its assigned engine.
-
-The existing `pairApi.nodePolicy.get(nodeId?)` and
-`set({nodeId?, policy, expectedPersistedRevision})`, policy-change notifications and target selection
-remain unchanged. The form sends the selected target's exact draft and base
-revision, retains unsaved edits across pushes, and clears them on target
-changes. Existing CAS conflicts, unsupported-target errors, management denial,
-pause vetoes and uncertain-save readback remain explicit; no automatic retry
-or second save path is added. The target can refuse changes to a binding
-reserved by automatic preparation as busy. Pause retains its
-Resume requirements. Existing engine switch controls show
-automatic receipt phases and errors; the binding editor owns no progress UI.
+A profile names its engine. The existing node policy draft and revision-checked
+Save own profile edits; saving configuration does not establish runtime
+readiness. Concrete model requests still route through their entry engine.
 
 ### Model copy
 
@@ -408,48 +386,6 @@ the desktop; the destination's Go service fetches the source artifacts.
   only source of applied settings state.
 - `onSettingsDisconnected(callback)` reports that a node's settings authority
   became unreachable, so its cached snapshot is stale.
-- `switchStatus(request)` reads the E3 configuration revision and active request;
-  a request-specific read returns that caller's receipt and current observations.
-  `afterSequence` allows a bounded wait; an unchanged result is not completion.
-- `switchEngine(request)` submits the existing broker transaction with explicit
-  node, source, target, fresh request ID and the revision just read. It is not a
-  pair of lifecycle commands. `onSwitchChanged(callback)` invalidates status;
-  receipts are merged only for the matching node/request and increasing sequence.
-- `fenceSwitch({nodeId?, requestId})` invokes the atomic caller-owned broker fence.
-  `SwitchFenceResult` is exactly `fenced: true` without a receipt, or
-  `fenced: false` with the already accepted owned receipt. The result's node is canonical;
-  an input discovery alias need not equal it. Request IDs must match, and any
-  receipt must match the result's node and request. Only acknowledged fencing
-  resolves non-acceptance; read a fresh revision before deliberate replacement.
-  Lost, denied or invalid results leave the original uncertain. Accepted work
-  continues; fencing does not cancel it. This is a programmatic API, with no
-  additional desktop control or change to read-only engine status.
-
-The expanded node engine settings expose **Switch engine**, **From**, **To**
-and **Switch**, plus **Refresh readback**. The node-scoped switch store owns
-correlation; pending actions interlock the source/target during submission.
-Missing revision, disconnect, active work/recovery, equal selections or remote
-permission not currently allowed disable submission with a visible reason.
-Other clients' receipts are observed activity. Local pause/Off remains available.
-
-The controls show node/request identity, sequence, phase, typed error and
-`recoveryRequired`, with saved intent, timestamped observations and termination
-evidence separately. Accepted, source-off and target-ready are not completed.
-Remote permission denial (`-32012`), local veto (`-32011`) and configuration conflict (`-32010`)
-remain distinct; denial refreshes permission and retains the draft. Permission
-changes belong on the target device.
-
-After an uncertain submit, read the original ID; no automatic resend occurs.
-Unknown/unreachable outcomes remain unknown. Refresh only reads: it cannot
-force, cancel, roll back, restart the source or perform recovery. An absent
-receipt is not proof of non-acceptance. The desktop controls retain their
-readback behavior; callers of `fenceSwitch` must explicitly handle its confirmed
-result and obtain a fresh baseline before replacement. The TUI automatically
-requests the fence after exact absence of its own unacknowledged request.
-Clearing client state, reconnecting or seeing an idle baseline does not resolve
-uncertainty. TUI correlation remains visit-scoped: leaving without an
-acknowledgement can forget an unresolved ID and does not prevent late acceptance.
-
 The only built-in `EngineType` is `llama-cpp`; any other engine arrives as a
 descriptor. `searchHub(engineType, query?)` serves the cached live Hugging Face
 catalog for llama.cpp. A non-empty llama.cpp
@@ -518,9 +454,6 @@ Commands return no state. Renderer stores update from
 | `engines:get-settings`      | `EngineSettingsTarget`       | `EngineSettingsSnapshot`  |
 | `engines:preview-settings`  | `EngineSettingsRequest`      | `EngineSettingsPreview`   |
 | `engines:apply-settings`    | `EngineSettingsRequest`      | `EngineSettingsReceipt`   |
-| `engines:switch`            | `SwitchRequest`              | `{ receipt: SwitchReceipt }` |
-| `engines:switch-status`     | `SwitchStatusRequest`        | `SwitchStatus`            |
-| `engines:switch-fence`      | `SwitchFenceRequest`         | `SwitchFenceResult`       |
 | `engine:command`            | `EngineCommandPayload`       | `null`                    |
 | `engine:copy-model`         | `ModelCopyRequest`           | `ModelCopyResponse`       |
 | `engine:model-copy-capabilities` | `{ nodeId, engine }` | `ModelCopyCapabilities` |
@@ -541,7 +474,6 @@ Commands return no state. Renderer stores update from
 | `engines:state-changed`           | `EngineStatePatch`               |
 | `engines:settings-changed`        | `EngineSettingsSnapshot`         |
 | `engines:settings-disconnected`   | `{ nodeId }`                     |
-| `engines:switch-changed`          | `SwitchChanged`                  |
 | `engines:progress-changed`        | `EngineProgress`                 |
 | `engines:progress-cleared`        | `{ key }`                        |
 | `metrics:update`                  | `NodeItemMetrics`                |

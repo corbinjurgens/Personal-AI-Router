@@ -106,9 +106,6 @@ type engineProxyRuntime struct {
 	// as last observed. Zero means not yet known, which several paths treat
 	// as a reason to fail closed rather than assume a default.
 	backendPort atomic.Int32
-	// bindingRegistered distinguishes a cold offer's registration from the
-	// ordinary healthy-engine registration when offer evidence is withdrawn.
-	bindingRegistered atomic.Bool
 
 	// startupPort is the explicit port the next spawn should bind. Zero lets
 	// the proxy restore its own persisted port.

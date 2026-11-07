@@ -141,29 +141,13 @@ func (b *Broker) sendNodeProjection(onlyOnStrictChange bool) {
 	}
 	running := b.policyProxy()
 	r.mu.Lock()
-	offerRevision := r.current.Revision
-	r.mu.Unlock()
-	// Recovery can call while already holding engineConfigMu. In that case
-	// withdraw offers; the periodic advertiser refreshes after recovery settles.
-	var offers *nodepolicy.EngineBindingOffers
-	if b.engineConfigMu.TryLock() {
-		offers = b.bindingOffersLocked()
-		b.withdrawBindingFacades(offers)
-		b.engineConfigMu.Unlock()
-	}
-	r.mu.Lock()
 	advertisement := r.current.Advertisement()
-	if r.current.Revision != offerRevision {
-		offers = nil
-	}
-	advertisement.EngineBindingOffers = offers
 	advertisement.StrictAdmission = r.strictReadinessLocked(running, b.engineModelNaming).Capability
-	if onlyOnStrictChange && reflect.DeepEqual(advertisement.StrictAdmission, r.strictPublished) && reflect.DeepEqual(offers, r.bindingOffersPublished) {
+	if onlyOnStrictChange && reflect.DeepEqual(advertisement.StrictAdmission, r.strictPublished) {
 		r.mu.Unlock()
 		return
 	}
 	r.strictPublished = advertisement.StrictAdmission
-	r.bindingOffersPublished = offers
 	projection := nodeProjection{
 		Policy:            advertisement,
 		PausedLocally:     pausedLocally(r.current) || r.localPauseRequested,

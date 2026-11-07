@@ -218,10 +218,6 @@ func (b *Broker) recoverEngineSettings() bool {
 		if record.Snapshot.Phase != "applying" {
 			continue
 		}
-		if err := b.pendingSwitchLocked(engine); err != nil {
-			slog.Error("settings replay conflicts with engine switch recovery", "engine", engine, "err", err)
-			return false
-		}
 		ctx, cancel := context.WithTimeout(context.Background(), settings.OperationBudget)
 		_ = b.runSettingsOperationLocked(ctx, engine, record)
 		cancel()

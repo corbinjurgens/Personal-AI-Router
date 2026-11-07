@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"nvpair-shared/engineintent"
-	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/nodepolicy"
 )
 
@@ -208,31 +207,6 @@ func TestXARemoteConfigurationStatus(t *testing.T) {
 		}
 	})
 
-	t.Run("switch status", func(t *testing.T) {
-		m := f.originCall(t, settings.RemoteSwitchStatusMethod, map[string]any{})
-		if m.Error != nil {
-			t.Fatalf("remote switch status failed: code=%d", m.Error.Code)
-		}
-		var remote settings.SwitchStatus
-		if err := json.Unmarshal(m.Result, &remote); err != nil {
-			t.Fatalf("decode remote switch status: %v", err)
-		}
-		m = callRPC(t, f.target.in, f.target.msgs, settings.SwitchStatusMethod, map[string]any{}, 10*time.Second)
-		if m.Error != nil {
-			t.Fatalf("local switch status failed: code=%d", m.Error.Code)
-		}
-		var local settings.SwitchStatus
-		if err := json.Unmarshal(m.Result, &local); err != nil {
-			t.Fatalf("decode local switch status: %v", err)
-		}
-		if remote.ConfigurationRevision == "" || remote.ConfigurationRevision != local.ConfigurationRevision {
-			t.Fatalf("switch configuration revision: remote=%q local=%q, want equal nonempty revisions", remote.ConfigurationRevision, local.ConfigurationRevision)
-		}
-		if remote.ActiveRequestID != "" || remote.Receipt != nil {
-			t.Fatalf("remote switch status: active_request_present=%t receipt_present=%t, want neither", remote.ActiveRequestID != "", remote.Receipt != nil)
-		}
-	})
-
 	t.Run("engine intent", func(t *testing.T) {
 		c := subscribeOBIntent(t, f.target)
 		assertOBIntent(t, decodeOBIntent(t, c.call(t, "engine:intent", nil)), obIntent(false, map[string]engineintent.Origin{}))
@@ -315,162 +289,6 @@ func TestXARemoteConfigurationVeto(t *testing.T) {
 	}) {
 		return
 	}
-}
-
-func TestXARemoteConfigurationSwitch(t *testing.T) {
-	xaPlatform(t)
-	p := newPinnedSwitchFixture(t, false)
-	f, origin := p.f, p.origin
-	var vetoReq, successReq settings.SwitchRequest
-	var terminal settings.SwitchStatus
-	var staleReceipt settings.SwitchReceipt
-	var resumedSourcePID int32
-	assertNoTargetStart := func(t *testing.T) {
-		t.Helper()
-		f.mu.Lock()
-		targetStarts := len(f.starts["llamacpp"])
-		f.mu.Unlock()
-		if targetStarts != 0 {
-			t.Fatalf("llamacpp starts=%d, want none", targetStarts)
-		}
-	}
-	assertNoVetoReceipt := func(t *testing.T) {
-		t.Helper()
-		m := task2Response(t, origin, origin.send(t, settings.RemoteSwitchStatusMethod, settings.SwitchStatusRequest{NodeID: p.mesh.b.uuid, RequestID: vetoReq.RequestID}, true))
-		if m.Error == nil || m.Error.Code != settings.SwitchOperationErrorCode || m.Error.Message != "Unknown switch receipt for this caller." || len(m.Result) != 0 {
-			t.Fatalf("paused switch receipt lookup = %+v, want exact unknown receipt", m.Error)
-		}
-		status := p.remoteStatus(t, "")
-		if status.Receipt != nil || status.ActiveRequestID != "" || status.ConfigurationRevision != vetoReq.ExpectedRevision {
-			t.Fatalf("paused switch changed coordinator state: %+v", status)
-		}
-	}
-
-	if !t.Run("stale revision is a typed conflict and a rejected receipt", func(t *testing.T) {
-		req := p.request(t, "xa-switch-stale")
-		req.ExpectedRevision = "e3v1:" + strings.Repeat("0", 64)
-		id := origin.send(t, settings.RemoteSwitchMethod, req, true)
-		m := task2Response(t, origin, id)
-		if m.Error == nil || m.Error.Code != settings.SwitchConfigurationConflictCode {
-			t.Fatalf("stale switch error = %+v, want configuration conflict", m.Error)
-		}
-		st := p.remoteStatus(t, req.RequestID)
-		if st.Receipt == nil || st.Receipt.RequestID != req.RequestID || st.Receipt.Phase != settings.SwitchRejected || !st.Receipt.Terminal || st.Receipt.Error == nil || st.Receipt.Error.Kind != settings.SwitchErrorConfigurationConflict || st.Receipt.Error.Code != settings.SwitchConfigurationConflictCode || st.Receipt.Caller != p.mesh.a.uuid || st.Receipt.NodeID != p.mesh.b.uuid || !reflect.DeepEqual(st.Receipt.Request, req) {
-			t.Fatalf("stale switch receipt = %+v, want correlated terminal configuration conflict", st.Receipt)
-		}
-		staleReceipt = *st.Receipt
-		f.pid(t, "llamacpp-custom")
-		assertNoTargetStart(t)
-	}) {
-		return
-	}
-
-	if !t.Run("local pause vetoes a remote switch", func(t *testing.T) {
-		f.rpcOK(t, "node:set-availability", map[string]string{"state": "paused"})
-		vetoReq = p.request(t, "xa-switch-veto")
-		id := origin.send(t, settings.RemoteSwitchMethod, vetoReq, true)
-		m := task2Response(t, origin, id)
-		if m.Error == nil || m.Error.Code != -32011 || m.Error.Message != "This node is paused. Resume it on this node before managing it remotely." || len(m.Result) != 0 {
-			t.Fatalf("paused switch error = %+v, want common pause refusal", m.Error)
-		}
-		assertNoVetoReceipt(t)
-		f.pid(t, "llamacpp-custom")
-		assertNoTargetStart(t)
-	}) {
-		return
-	}
-
-	if !t.Run("repeated paused refusal still has no coordinator receipt", func(t *testing.T) {
-		m := task2Response(t, origin, origin.send(t, settings.RemoteSwitchMethod, vetoReq, true))
-		if m.Error == nil || m.Error.Code != -32011 || m.Error.Message != "This node is paused. Resume it on this node before managing it remotely." || len(m.Result) != 0 {
-			t.Fatalf("repeated paused switch error = %+v, want common pause refusal", m.Error)
-		}
-		assertNoVetoReceipt(t)
-		f.pid(t, "llamacpp-custom")
-		assertNoTargetStart(t)
-	}) {
-		return
-	}
-
-	if !t.Run("local resume then a fresh request completes", func(t *testing.T) {
-		f.rpcOK(t, "node:set-availability", map[string]string{"state": "available"})
-		resumedSourcePID = f.resumedSource(t)
-		if after := p.remoteStatus(t, staleReceipt.RequestID); after.Receipt == nil || !reflect.DeepEqual(*after.Receipt, staleReceipt) {
-			t.Fatal("pause and resume changed the correlated stale-revision receipt")
-		}
-		successReq = p.request(t, "xa-switch-ok")
-		var accepted settings.SwitchResult
-		task2Decode(t, origin.call(t, settings.RemoteSwitchMethod, successReq).Result, &accepted)
-		if accepted.Receipt.Caller != p.mesh.a.uuid || accepted.Receipt.NodeID != p.mesh.b.uuid || accepted.Receipt.RequestID != successReq.RequestID || !reflect.DeepEqual(accepted.Receipt.Request, successReq) {
-			t.Fatalf("accepted remote switch lost caller, target or request correlation: %+v", accepted.Receipt)
-		}
-		task1Eventually(t, "remote terminal receipt", 45*time.Second, func() bool {
-			terminal = p.remoteStatus(t, successReq.RequestID)
-			return terminal.Receipt != nil && terminal.Receipt.Terminal
-		})
-		if terminal.Receipt.Phase != settings.SwitchCompleted || terminal.Receipt.Error != nil || terminal.Receipt.Caller != p.mesh.a.uuid || terminal.Receipt.NodeID != p.mesh.b.uuid || terminal.Receipt.RequestID != successReq.RequestID || !reflect.DeepEqual(terminal.Receipt.Request, successReq) {
-			t.Fatalf("remote terminal receipt = %+v, want correlated completion without error", terminal.Receipt)
-		}
-		assertSwitchProcessStopped(t, resumedSourcePID)
-		f.pid(t, "llamacpp")
-	}) {
-		return
-	}
-
-	if !t.Run("identical retry returns the terminal receipt", func(t *testing.T) {
-		before := p.ec.count(p.mesh.a.uuid, http.MethodPost, settings.SwitchApplyPath)
-		var replay settings.SwitchResult
-		task2Decode(t, origin.call(t, settings.RemoteSwitchMethod, successReq).Result, &replay)
-		if !reflect.DeepEqual(replay.Receipt, *terminal.Receipt) {
-			t.Fatal("identical success retry changed the stored terminal receipt")
-		}
-		if after := p.ec.count(p.mesh.a.uuid, http.MethodPost, settings.SwitchApplyPath); after != before+1 {
-			t.Fatalf("retry apply route count=%d, want %d", after, before+1)
-		}
-		f.pid(t, "llamacpp")
-	}) {
-		return
-	}
-
-	t.Run("reused request ID with another payload is refused", func(t *testing.T) {
-		bad := successReq
-		bad.SourceEngine, bad.TargetEngine = "llamacpp", "llamacpp-custom"
-		id := origin.send(t, settings.RemoteSwitchMethod, bad, true)
-		m := task2Response(t, origin, id)
-		if m.Error == nil || m.Error.Code != settings.SwitchInvalidParamsCode || m.Error.Message != "Request ID was already used by another caller or payload.\n" {
-			t.Fatalf("reused switch ID error = %+v, want exact invalid-params diagnostic", m.Error)
-		}
-		after := p.remoteStatus(t, successReq.RequestID)
-		if !reflect.DeepEqual(after.Receipt, terminal.Receipt) {
-			t.Fatal("reused switch ID changed the original terminal receipt")
-		}
-		f.pid(t, "llamacpp")
-		f.mu.Lock()
-		sourceStarts := len(f.starts["llamacpp-custom"])
-		f.mu.Unlock()
-		if sourceStarts != 2 {
-			t.Fatalf("custom engine starts=%d, want initial start and resume wake", sourceStarts)
-		}
-		journal, err := settings.DecodeSwitchJournal(readLiveDurableFile(t, filepath.Join(p.mesh.b.base, "engine-switch-operations.json")))
-		if err != nil {
-			t.Fatalf("decode final switch journal: %v", err)
-		}
-		wantIDs := []string{"xa-switch-stale", "xa-switch-ok"}
-		if len(journal.Receipts) != len(wantIDs) {
-			t.Fatalf("switch journal receipts=%d, want exactly %v", len(journal.Receipts), wantIDs)
-		}
-		for _, requestID := range wantIDs {
-			if _, ok := journal.Receipts[requestID]; !ok {
-				t.Fatalf("switch journal lacks receipt %q", requestID)
-			}
-		}
-		if _, ok := journal.Receipts[vetoReq.RequestID]; ok {
-			t.Fatal("common pause refusal reached the durable coordinator journal")
-		}
-		if !reflect.DeepEqual(journal.Receipts[staleReceipt.RequestID], staleReceipt) || !reflect.DeepEqual(journal.Receipts[successReq.RequestID], *terminal.Receipt) {
-			t.Fatal("durable journal differs from the stale-revision or completed receipt")
-		}
-	})
 }
 
 func xaEngineModelsPolicy(t *testing.T, p *interopProcess) *nodepolicy.Advertisement {
@@ -702,7 +520,7 @@ func TestXARemoteConfigurationServing(t *testing.T) {
 	})
 
 	t.Run("proxy enforces served set at its facade", func(t *testing.T) {
-		s := newSwitchProcessFixture(t)
+		s := newEngineProcessFixture(t)
 		s.unblock()
 		s.rpcOK(t, "llamacpp-custom-proxy:node/add-manual", map[string]any{"id": "xa-self", "host": "127.0.0.1", "port": s.facadePort, "addresses": []string{"127.0.0.1"}, "models": []string{"switch-model"}})
 		s.rpcOK(t, "llamacpp-custom-proxy:node/select", map[string]string{"id": "xa-self"})

@@ -329,7 +329,7 @@ func TestRoutingListenerCollisionSurvivesAnErrorsRestart(t *testing.T) {
 // Sticky error ids share one cache and replay.
 func TestStickyErrorsReplayEveryCachedIDInOrder(t *testing.T) {
 	b := &Broker{nodeID: "local-node"}
-	ids := []string{routingListenerBlockedID, engineSwitchRecoveryBlockedID}
+	ids := []string{routingListenerBlockedID}
 	for _, id := range ids {
 		b.forwardErrorsReport(errors.ServiceError{ID: id, Message: "m"})
 	}
@@ -347,10 +347,10 @@ func TestStickyErrorsReplayEveryCachedIDInOrder(t *testing.T) {
 			}
 			got = append(got, e.ID)
 		case <-time.After(2 * time.Second):
-			t.Fatalf("replayed %v, want both sticky ids", got)
+			t.Fatalf("replayed %v, want routing listener sticky id", got)
 		}
 	}
-	if want := []string{"engine-switch:recovery-blocked", "nvpair-proxy:routing-listener-blocked"}; got[0] != want[0] || got[1] != want[1] {
+	if want := []string{"nvpair-proxy:routing-listener-blocked"}; got[0] != want[0] {
 		t.Errorf("replayed %v, want %v", got, want)
 	}
 	select {

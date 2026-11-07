@@ -79,7 +79,6 @@ type nodeDetail struct {
 	performancePushes      int
 	performanceRefresh     bool
 	performanceViewport    viewport.Model
-	engineSwitch           detailSwitch
 
 	engines     []engineStatus
 	engineTable table.Model
@@ -278,7 +277,6 @@ func newNodeDetail(client *rpc.Client, node nodeRow) *nodeDetail {
 		telemetryGen:        telemetryChains,
 		telemetryFound:      true,
 		performanceViewport: viewport.New(0, 0),
-		engineSwitch:        detailSwitch{viewport: viewport.New(0, 0)},
 	}
 	if node.self {
 		d.proxy = newProxyTracker()
@@ -362,7 +360,7 @@ func (d *nodeDetail) Init() tea.Cmd {
 	// The telemetry chain is started by this first poll, not by a tick: each
 	// reading schedules the next one when it lands, so there is exactly one
 	// chain and it cannot outrun a slow node.
-	cmds := []tea.Cmd{d.enginesCmd(), d.modelsCmd(), d.telemetryCmd(), d.own(descriptorsCmd(d.client)), d.startPerformance(), d.policyCmd(), d.intentCmd(), d.switchStatusCmd(true)}
+	cmds := []tea.Cmd{d.enginesCmd(), d.modelsCmd(), d.telemetryCmd(), d.own(descriptorsCmd(d.client)), d.startPerformance(), d.policyCmd(), d.intentCmd()}
 	if d.proxy != nil {
 		cmds = append(cmds, d.proxy.init(d.client))
 	}
@@ -495,8 +493,6 @@ func (d *nodeDetail) own(cmd tea.Cmd) tea.Cmd {
 
 // close retires the detail's independent command and subscription lifetimes.
 func (d *nodeDetail) close() {
-	d.retireSwitch()
-	d.engineSwitch.transition(switchTransition{event: switchClose})
 	d.closePerformance()
 }
 
@@ -552,14 +548,12 @@ func (d *nodeDetail) followNode(row nodeRow, found bool) {
 		d.policyFresh = false
 		d.invalidateIntent()
 		d.remotePermissionFresh = false
-		d.retireSwitch()
 	}
 	if oldFound != d.telemetryFound || oldHostUUID != d.hostUUID ||
 		oldSelf != d.telemetrySelf || oldMember != newMember ||
 		oldTLS != d.node.nodeInfoTLS || oldAddress != d.node.address ||
 		!slices.Equal(oldAddresses, d.node.addresses) || oldPort != d.node.port {
 		d.telemetryRoute++
-		d.retireSwitch()
 		d.telemetryOK = false
 		d.telemetryAddress = ""
 	}
@@ -800,9 +794,6 @@ func (d *nodeDetail) hardwareHeight() int {
 }
 
 func (d *nodeDetail) CapturingInput() bool {
-	if d.engineSwitch.open {
-		return true
-	}
 	if d.catalog != nil {
 		// The browser owns every key while open, not only while its filter is
 		// focused: it has its own navigation, so the shell must not act on any
@@ -855,8 +846,6 @@ func (d *nodeDetail) update(msg tea.Msg) (tea.Cmd, bool) {
 	}
 
 	switch msg := msg.(type) {
-	case detailSwitchMsg:
-		return d.applySwitch(msg), true
 	case detailPerformanceMsg:
 		if msg.lease != d.performanceLease || msg.lease == nil || msg.lease.retired.Load() ||
 			!msg.lease.client.IsCurrent(msg.lease.generation) ||
@@ -869,7 +858,6 @@ func (d *nodeDetail) update(msg tea.Msg) (tea.Cmd, bool) {
 	case DisconnectedMsg:
 		d.modelsGeneration++
 		d.downloadsCurrent = false
-		d.retireSwitch()
 		if d.status.sticky && d.status.kind == toastInfo {
 			d.status.info("service disconnected; operation interrupted; outcome unknown")
 		} else {
@@ -911,7 +899,6 @@ func (d *nodeDetail) update(msg tea.Msg) (tea.Cmd, bool) {
 		d.refreshModels()
 		return nil, true
 	case sessionReadyMsg:
-		d.engineSwitch.brokerRestart = false
 		d.policyDisconnected = false
 		d.engines = nil
 		d.refreshEngines()
@@ -932,9 +919,6 @@ func (d *nodeDetail) update(msg tea.Msg) (tea.Cmd, bool) {
 		if d.policyRefresh {
 			d.policyRefresh = false
 			return tea.Batch(d.policyCmd(), d.intentCmd(), d.remotePermissionCmd()), true
-		}
-		if d.engineSwitch.started && !d.engineSwitch.fresh && !d.engineSwitch.inFlight && d.engineSwitch.err == nil && d.switchConnected() {
-			return d.switchStatusCmd(true), true
 		}
 		if !d.telemetryRunning && d.telemetryFound && !d.policyDisconnected {
 			return d.telemetryCmd(), true
@@ -1170,8 +1154,6 @@ func (d *nodeDetail) update(msg tea.Msg) (tea.Cmd, bool) {
 
 func (d *nodeDetail) handleNotification(msg *rpc.Message) tea.Cmd {
 	switch msg.Method {
-	case enginesettings.SwitchChangedNotification:
-		return d.switchChanged(msg.Params)
 	case "policy:changed", "node:availability-changed":
 		var p struct {
 			NodeID string `json:"nodeId"`
@@ -1211,8 +1193,6 @@ func (d *nodeDetail) handleNotification(msg *rpc.Message) tea.Cmd {
 		d.downloadsCurrent = false
 		d.models.current = false
 		d.refreshModels()
-		d.retireSwitch()
-		d.engineSwitch.brokerRestart = true
 		d.remotePermissionFresh = false
 		d.policyRoute++
 		d.policyFresh = false
@@ -1221,7 +1201,6 @@ func (d *nodeDetail) handleNotification(msg *rpc.Message) tea.Cmd {
 		return nil
 
 	case "app:ready":
-		d.engineSwitch.brokerRestart = false
 		d.policyDisconnected = false
 		d.policyRefresh = true
 		cmds := []tea.Cmd{d.modelsCmd()}
@@ -1338,7 +1317,6 @@ func (d *nodeDetail) handleNotification(msg *rpc.Message) tea.Cmd {
 			if oldAddress != d.node.address ||
 				!slices.Equal(oldAddresses, d.node.addresses) || oldPort != d.node.port {
 				d.telemetryRoute++
-				d.retireSwitch()
 				d.telemetryOK = false
 				d.telemetryAddress = ""
 			}
@@ -1468,9 +1446,6 @@ func progressPercent(pct *int) string {
 }
 
 func (d *nodeDetail) handleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
-	if d.engineSwitch.open {
-		return d.switchKey(msg), true
-	}
 	if d.mode != detailInputNone {
 		switch msg.String() {
 		case "enter":
@@ -1507,22 +1482,6 @@ func (d *nodeDetail) handleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 	if key.Matches(msg, detailPerformanceKey) {
 		d.performanceOpen = !d.performanceOpen
 		return nil, true
-	}
-	if key.Matches(msg, detailSwitchKey) && !d.performanceOpen {
-		d.engineSwitch.open = true
-		d.remotePermissionFresh = false
-		if d.engineSwitch.source == "" {
-			if e := d.selectedEngine(); e != nil {
-				d.engineSwitch.source = e.Engine
-			}
-			for _, id := range d.switchEngines() {
-				if id != d.engineSwitch.source {
-					d.engineSwitch.target = id
-					break
-				}
-			}
-		}
-		return tea.Batch(d.switchStatusCmd(true), d.remotePermissionCmd()), true
 	}
 	if d.performanceOpen {
 		var cmd tea.Cmd
@@ -2497,9 +2456,6 @@ func (d *nodeDetail) View() string {
 	if d.performanceOpen {
 		return d.performanceView(identity)
 	}
-	if d.engineSwitch.open {
-		return d.switchPanel(identity)
-	}
 
 	editor := ""
 	if d.mode != detailInputNone {
@@ -2533,13 +2489,6 @@ func (d *nodeDetail) View() string {
 	const separator = " "
 	status := d.status.render()
 	enginesHeading := d.paneHeading("Engines", detailEngines)
-	if d.engineSwitch.started {
-		reason := d.switchReason()
-		if r := d.engineSwitch.receipt; r != nil {
-			reason = r.Phase
-		}
-		enginesHeading += footerStyle.Render("  Switch engine: " + reason + " (w details)")
-	}
 	modelsHeading := d.paneHeading("Models", detailModels)
 	// Hardware must leave room even for the engine list's one-line fallback.
 	// Measure the current identity, editor and status before choosing its cap.
@@ -2781,9 +2730,6 @@ func (d *nodeDetail) inputLabel() string {
 // actually permits, so a remote node never advertises an operation the engine
 // manager cannot perform on it.
 func (d *nodeDetail) Help() []key.Binding {
-	if d.engineSwitch.open {
-		return []key.Binding{detailBackKey, key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "readback"))}
-	}
 	if d.catalog != nil {
 		return d.catalog.Help()
 	}
@@ -2803,9 +2749,6 @@ func (d *nodeDetail) Help() []key.Binding {
 		return []key.Binding{detailBackKey, detailPerformanceKey, performanceScrollKey}
 	}
 	bindings := []key.Binding{detailBackKey, detailPaneKey, detailPerformanceKey}
-	if d.switchConnected() {
-		bindings = append(bindings, detailSwitchKey)
-	}
 	if d.pane == detailEngines {
 		bindings = append(bindings, detailInstallKey, detailStartKey, detailStopKey)
 		// The settings keys are offered on a peer too: the engine manager

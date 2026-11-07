@@ -337,7 +337,7 @@ func (b *Broker) spawnProxy() (supervisedHandle, error) {
 	if !b.replayPolicyToProxy(bringUp, pp) {
 		pp.Stop()
 		b.clearProxyHandles()
-		return nil, fmt.Errorf("engine switch invalidations could not be replayed before facade enable")
+		return nil, fmt.Errorf("node policy could not be replayed before facade enable")
 	}
 	// A new proxy run has lost its in-memory resident holds. Refresh inventory
 	// after activation rather than reuse observations from the retired run.
@@ -481,12 +481,11 @@ func (b *Broker) spawnEngineMgr() (supervisedHandle, error) {
 	b.bindEngineMgr(w, source)
 	if !b.recoverReplacementEngineMgr(w) {
 		// Keep supervising the live replacement, but expose no forward surface
-		// while its inherited reservation cannot be reconciled. Recovery has
-		// exhausted its bounded retries or reported permanent journal uncertainty.
+		// while its pause shutdown proof cannot be verified after bounded retries.
 		return w, nil
 	}
 	// The recovery loop owns all retries; this continuation runs once, only
-	// after successful cleanup of this still-current replacement.
+	// after successful recovery of this still-current replacement.
 	go b.refreshEnginePolicySnapshotFrom(w, source)
 	// Initial restore waits for facade startup. A later engine-manager respawn
 	// restores here after that shared startup boundary has completed.
@@ -509,54 +508,6 @@ func (b *Broker) spawnEngineMgr() (supervisedHandle, error) {
 	}
 	slog.Info("engine-manager started", "path", b.engineMgrPath, "pid", w.cmd.Process.Pid, "httpPort", httpPort, "controlPort", controlPort)
 	return w, nil
-}
-
-// notifyEngineSwitchRecoveryReady opens the direct peer mutation surface only
-// for the worker whose conservative recovery just completed. The worker checks
-// its own incarnation before acknowledging; ordinary broker publication still
-// rechecks the worker identity and exit fence afterwards.
-func (b *Broker) notifyEngineSwitchRecoveryReady(ctx context.Context, w *rpcWorker, incarnation string) error {
-	b.workersMu.Lock()
-	current := w != nil && b.engineMgr == w
-	recovering := b.engineMgrRecovering
-	b.workersMu.Unlock()
-	if !current {
-		return fmt.Errorf("engine manager changed before recovery acknowledgement")
-	}
-	select {
-	case <-w.Done():
-		return fmt.Errorf("engine manager exited before recovery acknowledgement")
-	default:
-	}
-	// Restoration can re-inspect an already-published manager. Its direct
-	// surface was acknowledged at spawn; there is no startup gate to open.
-	if !recovering {
-		return nil
-	}
-	var result struct {
-		ManagerIncarnation string `json:"managerIncarnation"`
-	}
-	err := switchManagerCallOn(ctx, w, "engine:switch-recovery-ready", struct {
-		ManagerIncarnation string `json:"managerIncarnation"`
-	}{incarnation}, &result)
-	if err != nil {
-		return err
-	}
-	if incarnation == "" || result.ManagerIncarnation != incarnation {
-		return fmt.Errorf("engine manager recovery acknowledgement has a different incarnation")
-	}
-	b.workersMu.Lock()
-	current = b.engineMgr == w
-	b.workersMu.Unlock()
-	select {
-	case <-w.Done():
-		current = false
-	default:
-	}
-	if !current {
-		return fmt.Errorf("engine manager changed during recovery acknowledgement")
-	}
-	return nil
 }
 
 func (b *Broker) spawnManualNodes() (supervisedHandle, error) {

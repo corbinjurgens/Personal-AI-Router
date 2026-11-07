@@ -91,7 +91,6 @@ export type ModelChange = {
         roles?: Record<string, boolean>
         served?: boolean
         resident?: boolean
-        binding?: boolean
     }
     previewDigest?: string
     supersedesRequestId?: string

@@ -18,7 +18,6 @@ import (
 	"time"
 
 	settings "nvpair-shared/enginesettings"
-	"nvpair-shared/jsonrpc"
 	"nvpair-shared/modelconfig"
 )
 
@@ -298,7 +297,6 @@ func TestModelBufferSamplesProcessNoNativeFromInspection(t *testing.T) {
 		}
 	})
 	manager := startTask1Process(t, f.base, engineMgrBin, "--http-port", "0", "--control-port", "0", "--control-host", "127.0.0.1", "--loaded-poll-interval", "0")
-	completeEngineManagerRecovery(t, func(method string, params any) jsonrpc.Message { return manager.call(t, method, params) })
 	networkBefore := requests.Load()
 	effectsBefore := readLiveDurableFile(t, f.effects)
 	for range 3 {

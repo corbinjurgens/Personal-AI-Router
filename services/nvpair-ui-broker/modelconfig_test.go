@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"nvpair-shared/buildapply"
 	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/nodepolicy"
@@ -19,6 +20,20 @@ import (
 type modelConfigFixture struct {
 	*strictFixture
 	source *engineManagerSource
+}
+
+func modelConfigOwnerEvidence(t *testing.T) buildapply.EngineOwnerEvidence {
+	t.Helper()
+	evidence := buildapply.EngineOwnerEvidence{ManagerIncarnation: "fixture-manager", Reasons: []buildapply.EngineOwnerReason{
+		{Section: "intent", Code: "saved_state_unknown"},
+		{Section: "universe", Code: "unavailable"},
+		{Section: "stopAuthority", Code: "unavailable"},
+		{Section: "reservations", Code: "busy"},
+	}}
+	if err := evidence.Finalize(); err != nil {
+		t.Fatalf("finalize fixture manager evidence: %v", err)
+	}
+	return evidence
 }
 
 func newModelConfigFixture(t *testing.T) *modelConfigFixture {
@@ -71,8 +86,8 @@ func newModelConfigFixture(t *testing.T) *modelConfigFixture {
 		return f.acks.answer(method, params)
 	})
 	f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
-		if method == settings.SwitchPrepareMethod {
-			return emptySwitchManagerSnapshot(), ""
+		if method == buildapply.EngineOwnerEvidenceMethod {
+			return modelConfigOwnerEvidence(t), ""
 		}
 		if method == nodepolicy.MethodReconcileResident {
 			return nodepolicy.ReconcileResidentResult{Outcome: nodepolicy.ResidentNotDispatched}, ""
@@ -130,7 +145,7 @@ func TestModelConfigEventStateMachine(t *testing.T) {
 				identities := r.engineIdentity
 				baseModels := r.models
 				r.mu.Unlock()
-				seed := &modelConfigMatrixSeed{manager: emptySwitchManagerSnapshot()}
+				seed := &modelConfigMatrixSeed{manager: modelConfigOwnerEvidence(t)}
 				for firstIndex, first := range events {
 					if firstIndex%3 != partition {
 						continue
@@ -299,7 +314,7 @@ func runModelConfigEventTrace(t *testing.T, state string, events []string, f *mo
 	readback := residentLaunchReadback(base)
 	f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
 		switch method {
-		case settings.SwitchPrepareMethod:
+		case buildapply.EngineOwnerEvidenceMethod:
 			return seed.manager, ""
 		case "engine:get-launch":
 			return readback, ""
@@ -575,7 +590,7 @@ func runModelConfigEventTrace(t *testing.T, state string, events []string, f *mo
 
 type modelConfigMatrixSeed struct {
 	models  *modelConfigRuntime
-	manager switchManagerSnapshot
+	manager buildapply.EngineOwnerEvidence
 }
 
 func awaitModelConfigMatrixCall(t *testing.T, worker *fakeWorker, method string) {
@@ -620,13 +635,13 @@ func cloneModelConfigMatrixState(from modelConfigRuntime) modelConfigRuntime {
 	return copy
 }
 
-func startModelConfigMatrixAttempt(t *testing.T, ctx context.Context, f *modelConfigFixture, manager switchManagerSnapshot, outcome nodepolicy.ResidentOutcome, nonterminal bool) (<-chan struct{}, *nodepolicy.ReconcileResidentResult, <-chan struct{}) {
+func startModelConfigMatrixAttempt(t *testing.T, ctx context.Context, f *modelConfigFixture, manager buildapply.EngineOwnerEvidence, outcome nodepolicy.ResidentOutcome, nonterminal bool) (<-chan struct{}, *nodepolicy.ReconcileResidentResult, <-chan struct{}) {
 	t.Helper()
 	result := &nodepolicy.ReconcileResidentResult{Outcome: outcome}
 	encoded := make(chan struct{})
 	reply := &modelConfigMatrixReply{value: result, encoded: encoded}
 	f.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
-		if method == settings.SwitchPrepareMethod {
+		if method == buildapply.EngineOwnerEvidenceMethod {
 			return manager, ""
 		}
 		if method != nodepolicy.MethodReconcileResident {
@@ -677,6 +692,76 @@ func (r *modelConfigMatrixReply) MarshalJSON() ([]byte, error) {
 	return json.Marshal(r.value)
 }
 
+func TestModelConfigOwnerReadFailureHasNoLoad(t *testing.T) {
+	test := func(name string, response any, refusal string) {
+		t.Run(name, func(t *testing.T) {
+			f := newModelConfigFixture(t)
+			defer close(f.done)
+			f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+				if method == buildapply.EngineOwnerEvidenceMethod {
+					return response, refusal
+				}
+				return nodepolicy.ReconcileResidentResult{Outcome: nodepolicy.ResidentNotDispatched}, ""
+			})
+			f.b.reconcileModelConfig(context.Background())
+			status := f.b.modelConfiguration(f.b.captureModelConfig())
+			if len(status.Models) != 1 || status.Models[0].State != nodepolicy.ModelStateUnknown || status.Models[0].Reason != nodepolicy.ModelReasonProjectionUnknown {
+				t.Fatalf("failed owner read lost projection uncertainty: %+v", status)
+			}
+			if len(modelConfigCalls(f.engine, buildapply.EngineOwnerEvidenceMethod)) != 1 || len(modelConfigCalls(f.proxy, nodepolicy.MethodPrepareResident)) != 0 || len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)) != 0 {
+				t.Fatal("failed owner read prepared or loaded a resident model")
+			}
+		})
+	}
+	test("missing owner evidence", json.RawMessage(`{}`), "")
+	test("owner refuses read", nil, "fixture owner read refused")
+}
+
+func TestModelConfigOwnerReadRejectsChangedSource(t *testing.T) {
+	for _, replacement := range []string{"source", "worker"} {
+		t.Run(replacement, func(t *testing.T) {
+			f := newModelConfigFixture(t)
+			defer close(f.done)
+			manager := modelConfigOwnerEvidence(t)
+			f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+				if method == buildapply.EngineOwnerEvidenceMethod {
+					return manager, holdSuccessReply
+				}
+				return nodepolicy.ReconcileResidentResult{Outcome: nodepolicy.ResidentNotDispatched}, ""
+			})
+			e := f.b.captureModelConfig()
+			entry, profile, identity, count := f.b.modelConfigEntry(e, nodepolicy.ModelRef{Engine: "llamacpp", Model: "resident"})
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			done := make(chan nodepolicy.ModelConfigurationEntry, 1)
+			go func() { done <- f.b.reconcileResident(ctx, e, entry, profile, identity, count) }()
+			awaitModelConfigMatrixCall(t, f.engine, buildapply.EngineOwnerEvidenceMethod)
+			current := f.engine
+			if replacement == "worker" {
+				current = attachFakeEngine(t, f.b)
+			} else {
+				f.source = f.b.activateEngineManagerSource()
+				f.b.bindEngineMgr(f.b.getEngineMgr(), f.source)
+			}
+			f.engine.releaseHeld()
+			select {
+			case result := <-done:
+				if result.State != nodepolicy.ModelStateUnknown || result.Reason != nodepolicy.ModelReasonProjectionUnknown {
+					t.Fatalf("retired owner read lost projection uncertainty: %+v", result)
+				}
+			case <-ctx.Done():
+				t.Fatal("retired owner read did not finish")
+			}
+			if len(modelConfigCalls(f.proxy, nodepolicy.MethodPrepareResident)) != 0 || len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)) != 0 || len(modelConfigCalls(current, nodepolicy.MethodReconcileResident)) != 0 {
+				t.Fatal("retired owner read prepared or loaded a resident model")
+			}
+			if replacement == "worker" && len(modelConfigCalls(current, buildapply.EngineOwnerEvidenceMethod)) != 0 {
+				t.Fatal("captured owner read moved to the replacement worker")
+			}
+		})
+	}
+}
+
 func TestModelConfigLoadUsesRevisionProfile(t *testing.T) {
 	test := func(t *testing.T, contextTokens int) {
 		f := newModelConfigFixture(t)
@@ -691,6 +776,14 @@ func TestModelConfigLoadUsesRevisionProfile(t *testing.T) {
 		r.engineIdentity["llamacpp"] = id
 		r.mu.Unlock()
 		f.b.reconcileModelConfig(context.Background())
+		ownerReads := modelConfigCalls(f.engine, buildapply.EngineOwnerEvidenceMethod)
+		if len(ownerReads) != 1 {
+			t.Fatalf("manager owner reads=%d, want one", len(ownerReads))
+		}
+		request := decodeModelConfigCall[map[string]json.RawMessage](t, ownerReads[0])
+		if request == nil || len(request) != 0 {
+			t.Fatalf("owner read must use an empty request: %+v", request)
+		}
 		calls := modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)
 		if len(calls) != 1 {
 			t.Fatalf("manager reconcile calls=%d, want one", len(calls))
@@ -722,8 +815,8 @@ func TestModelConfigConfirmingInventoryDoesNotReload(t *testing.T) {
 	f.engine.releaseHeld()
 	awaitModelConfigDone(t, done)
 	f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
-		if method == settings.SwitchPrepareMethod {
-			return emptySwitchManagerSnapshot(), ""
+		if method == buildapply.EngineOwnerEvidenceMethod {
+			return modelConfigOwnerEvidence(t), ""
 		}
 		return nodepolicy.ReconcileResidentResult{Outcome: nodepolicy.ResidentNotDispatched}, ""
 	})
@@ -760,8 +853,8 @@ func TestModelConfigInflightConfirmingInventoryCoalesces(t *testing.T) {
 	f.engine.releaseHeld()
 	awaitModelConfigDone(t, done)
 	f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
-		if method == settings.SwitchPrepareMethod {
-			return emptySwitchManagerSnapshot(), ""
+		if method == buildapply.EngineOwnerEvidenceMethod {
+			return modelConfigOwnerEvidence(t), ""
 		}
 		return nodepolicy.ReconcileResidentResult{Outcome: nodepolicy.ResidentNotDispatched}, ""
 	})
@@ -834,7 +927,7 @@ func TestModelConfigNonterminalReplacementTimeoutPreservesBarrier(t *testing.T) 
 			})
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			done, _, _ := startModelConfigMatrixAttempt(t, ctx, f, emptySwitchManagerSnapshot(), nodepolicy.ResidentUnknown, true)
+			done, _, _ := startModelConfigMatrixAttempt(t, ctx, f, modelConfigOwnerEvidence(t), nodepolicy.ResidentUnknown, true)
 			f.awaitGrant(t)
 			cancel()
 			awaitModelConfigDone(t, done)
@@ -876,8 +969,8 @@ func TestModelConfigNonterminalReplacementTimeoutPreservesBarrier(t *testing.T) 
 			}
 			assertRetained("after replacement")
 			f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
-				if method == settings.SwitchPrepareMethod {
-					return emptySwitchManagerSnapshot(), ""
+				if method == buildapply.EngineOwnerEvidenceMethod {
+					return modelConfigOwnerEvidence(t), ""
 				}
 				return nodepolicy.ReconcileResidentResult{Outcome: nodepolicy.ResidentNotDispatched}, ""
 			})
@@ -947,8 +1040,8 @@ func TestModelConfigTerminalLoadedObservationBound(t *testing.T) {
 			t.Fatalf("terminal observation duration=%v, domain constant=%v, want 60s", hold.expires.Sub(initial), residentObservationTimeout)
 		}
 		f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
-			if method == settings.SwitchPrepareMethod {
-				return emptySwitchManagerSnapshot(), ""
+			if method == buildapply.EngineOwnerEvidenceMethod {
+				return modelConfigOwnerEvidence(t), ""
 			}
 			return nodepolicy.ReconcileResidentResult{Outcome: nodepolicy.ResidentNotDispatched}, ""
 		})
@@ -1066,8 +1159,8 @@ func TestModelConfigCompletedLoadWaitsForWatcher(t *testing.T) {
 	f.engine.releaseHeld()
 	awaitModelConfigDone(t, done)
 	f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
-		if method == settings.SwitchPrepareMethod {
-			return emptySwitchManagerSnapshot(), ""
+		if method == buildapply.EngineOwnerEvidenceMethod {
+			return modelConfigOwnerEvidence(t), ""
 		}
 		return nodepolicy.ReconcileResidentResult{Outcome: nodepolicy.ResidentNotDispatched}, ""
 	})
@@ -1119,8 +1212,8 @@ func TestModelConfigTemporaryVetoPreservesCompletedLoad(t *testing.T) {
 			f.engine.releaseHeld()
 			awaitModelConfigDone(t, done)
 			f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
-				if method == settings.SwitchPrepareMethod {
-					return emptySwitchManagerSnapshot(), ""
+				if method == buildapply.EngineOwnerEvidenceMethod {
+					return modelConfigOwnerEvidence(t), ""
 				}
 				return nodepolicy.ReconcileResidentResult{Outcome: nodepolicy.ResidentNotDispatched}, ""
 			})
@@ -1169,8 +1262,8 @@ func TestModelConfigPendingObservationAllowedExits(t *testing.T) {
 				t.Fatalf("completion pending=%v outcome=%s", pending, tc.outcome)
 			}
 			f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
-				if method == settings.SwitchPrepareMethod {
-					return emptySwitchManagerSnapshot(), ""
+				if method == buildapply.EngineOwnerEvidenceMethod {
+					return modelConfigOwnerEvidence(t), ""
 				}
 				return nodepolicy.ReconcileResidentResult{Outcome: nodepolicy.ResidentNotDispatched}, ""
 			})
@@ -1217,8 +1310,8 @@ func TestModelConfigObservationTimeoutReevaluates(t *testing.T) {
 	f.engine.releaseHeld()
 	awaitModelConfigDone(t, done)
 	f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
-		if method == settings.SwitchPrepareMethod {
-			return emptySwitchManagerSnapshot(), ""
+		if method == buildapply.EngineOwnerEvidenceMethod {
+			return modelConfigOwnerEvidence(t), ""
 		}
 		return nodepolicy.ReconcileResidentResult{Outcome: nodepolicy.ResidentNotDispatched}, ""
 	})
@@ -1417,8 +1510,8 @@ func TestModelConfigWorkerRestartConfirmsWithoutReload(t *testing.T) {
 				if method == "engine:get-launch" {
 					return readback, ""
 				}
-				if method == settings.SwitchPrepareMethod {
-					return emptySwitchManagerSnapshot(), ""
+				if method == buildapply.EngineOwnerEvidenceMethod {
+					return modelConfigOwnerEvidence(t), ""
 				}
 				return nodepolicy.ReconcileResidentResult{Outcome: nodepolicy.ResidentNotDispatched}, ""
 			})
@@ -1517,8 +1610,8 @@ func TestModelConfigUnchangedRevisionLoadRequestDoesNotReload(t *testing.T) {
 		switch method {
 		case "engine:get-launch":
 			return readback, ""
-		case settings.SwitchPrepareMethod:
-			return emptySwitchManagerSnapshot(), ""
+		case buildapply.EngineOwnerEvidenceMethod:
+			return modelConfigOwnerEvidence(t), ""
 		default:
 			return nodepolicy.ReconcileResidentResult{Outcome: nodepolicy.ResidentNotDispatched}, ""
 		}
@@ -2131,7 +2224,7 @@ func TestModelConfigNonfailureOutcomeReasons(t *testing.T) {
 			if outcome == nodepolicy.ResidentNotDispatched {
 				f.b.reconcileModelConfig(context.Background())
 			} else {
-				done, _, _ := startModelConfigMatrixAttempt(t, context.Background(), f, emptySwitchManagerSnapshot(), outcome, transportFailure)
+				done, _, _ := startModelConfigMatrixAttempt(t, context.Background(), f, modelConfigOwnerEvidence(t), outcome, transportFailure)
 				f.awaitGrant(t)
 				f.engine.releaseHeld()
 				awaitModelConfigDone(t, done)
@@ -2287,8 +2380,8 @@ func TestModelConfigAdmissionRefusalsHaveNoLoad(t *testing.T) {
 func TestModelConfigConcurrentTriggersCoalesce(t *testing.T) {
 	f := newModelConfigFixture(t)
 	f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
-		if method == settings.SwitchPrepareMethod {
-			return emptySwitchManagerSnapshot(), ""
+		if method == buildapply.EngineOwnerEvidenceMethod {
+			return modelConfigOwnerEvidence(t), ""
 		}
 		if method == nodepolicy.MethodReconcileResident {
 			return nodepolicy.ReconcileResidentResult{Outcome: nodepolicy.ResidentNotDispatched}, holdSuccessReply
@@ -2723,8 +2816,8 @@ func (f *modelConfigFixture) startResidentAttempt(t *testing.T, outcome nodepoli
 func (f *modelConfigFixture) setResidentAttemptAnswer(t *testing.T, outcome nodepolicy.ResidentOutcome) {
 	t.Helper()
 	f.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
-		if method == settings.SwitchPrepareMethod {
-			return emptySwitchManagerSnapshot(), ""
+		if method == buildapply.EngineOwnerEvidenceMethod {
+			return modelConfigOwnerEvidence(t), ""
 		}
 		if method != nodepolicy.MethodReconcileResident {
 			return map[string]bool{"ok": true}, ""
@@ -2986,8 +3079,8 @@ func TestModelConfigRecoveryRequiresTerminalManagerBarrier(t *testing.T) {
 			})
 			f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
 				switch method {
-				case settings.SwitchPrepareMethod:
-					return emptySwitchManagerSnapshot(), ""
+				case buildapply.EngineOwnerEvidenceMethod:
+					return modelConfigOwnerEvidence(t), ""
 				case nodepolicy.MethodReconcileResident:
 					if !terminal {
 						return nil, "fixture lost terminal response"
@@ -3320,8 +3413,8 @@ func TestModelConfigConcurrentEvidenceChangeIsReevaluated(t *testing.T) {
 				t.Fatalf("concurrent empty inventory lost its observation: %+v", status)
 			}
 			f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
-				if method == settings.SwitchPrepareMethod {
-					return emptySwitchManagerSnapshot(), ""
+				if method == buildapply.EngineOwnerEvidenceMethod {
+					return modelConfigOwnerEvidence(t), ""
 				}
 				return nodepolicy.ReconcileResidentResult{Outcome: nodepolicy.ResidentNotDispatched}, ""
 			})
@@ -3362,11 +3455,13 @@ func TestModelConfigNotificationWithoutLoadedInventoryClearsKnowledge(t *testing
 	}
 }
 
-func modelConfigNotDispatched(readback *settings.LaunchState) func(string, json.RawMessage) (any, string) {
+func modelConfigNotDispatched(t *testing.T, readback *settings.LaunchState) func(string, json.RawMessage) (any, string) {
+	t.Helper()
+	manager := modelConfigOwnerEvidence(t)
 	return func(method string, _ json.RawMessage) (any, string) {
 		switch method {
-		case settings.SwitchPrepareMethod:
-			return emptySwitchManagerSnapshot(), ""
+		case buildapply.EngineOwnerEvidenceMethod:
+			return manager, ""
 		case "engine:get-launch":
 			if readback != nil {
 				return *readback, ""
@@ -3401,7 +3496,7 @@ func TestModelConfigEnvelopeChangeThenInventoryReloads(t *testing.T) {
 	}
 	reportStrict(t, f.b, "1", f.acks.runID, strictCapability(t, "llamacpp", "resident"))
 	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
-	f.engine.setAnswer(modelConfigNotDispatched(&old))
+	f.engine.setAnswer(modelConfigNotDispatched(t, &old))
 	f.b.reconcileModelConfig(context.Background())
 	if loads := len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)); loads != 2 {
 		t.Fatalf("changed request after inventory produced %d loads, want 2; readbacks=%d", loads, len(modelConfigCalls(f.engine, "engine:get-launch")))
@@ -3423,7 +3518,7 @@ func TestModelConfigTerminalLoadedReplyPreventsTickReload(t *testing.T) {
 	f.awaitGrant(t)
 	f.engine.releaseHeld()
 	awaitModelConfigDone(t, done)
-	f.engine.setAnswer(modelConfigNotDispatched(nil))
+	f.engine.setAnswer(modelConfigNotDispatched(t, nil))
 	for range 2 {
 		r.mu.Lock()
 		now := r.now().Add(idleCheckInterval + time.Second)
@@ -3463,7 +3558,7 @@ func TestModelConfigObservedUnloadDropsRecordedRequest(t *testing.T) {
 	reportStrict(t, f.b, "1", f.acks.runID, strictCapability(t, "llamacpp", "resident"))
 	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
 	readback := residentLaunchReadback(f.b.captureModelConfig())
-	f.engine.setAnswer(modelConfigNotDispatched(&readback))
+	f.engine.setAnswer(modelConfigNotDispatched(t, &readback))
 	f.b.reconcileModelConfig(context.Background())
 	status := f.b.modelConfiguration(f.b.captureModelConfig())
 	if loads := len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)); loads != 1 || status.Models[0].State != nodepolicy.ModelStateSatisfied {
@@ -3479,7 +3574,7 @@ func (f *modelConfigFixture) completedResidentLoad(t *testing.T) {
 	f.awaitGrant(t)
 	f.engine.releaseHeld()
 	awaitModelConfigDone(t, done)
-	f.engine.setAnswer(modelConfigNotDispatched(nil))
+	f.engine.setAnswer(modelConfigNotDispatched(t, nil))
 }
 
 func (f *modelConfigFixture) residentEntry(t *testing.T) nodepolicy.ModelConfigurationEntry {
@@ -3643,12 +3738,12 @@ func (f *modelConfigFixture) nonterminalHold(t *testing.T) residentUnsettled {
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	done, _, _ := startModelConfigMatrixAttempt(t, ctx, f, emptySwitchManagerSnapshot(), nodepolicy.ResidentUnknown, true)
+	done, _, _ := startModelConfigMatrixAttempt(t, ctx, f, modelConfigOwnerEvidence(t), nodepolicy.ResidentUnknown, true)
 	f.awaitGrant(t)
 	cancel()
 	awaitModelConfigDone(t, done)
 	f.engine.releaseHeld()
-	f.engine.setAnswer(modelConfigNotDispatched(nil))
+	f.engine.setAnswer(modelConfigNotDispatched(t, nil))
 	r := f.b.nodePolicyRuntime()
 	r.mu.Lock()
 	hold, held := r.models.unsettled[nodepolicy.ModelRef{Engine: "llamacpp", Model: "resident"}]
@@ -3695,7 +3790,7 @@ func TestModelConfigNonterminalHoldConfirmsReplacementReadback(t *testing.T) {
 	})
 	f.b.refreshEnginePolicySnapshotFrom(f.b.getEngineMgr(), f.source)
 	readback := residentLaunchReadback(f.b.captureModelConfig())
-	f.engine.setAnswer(modelConfigNotDispatched(&readback))
+	f.engine.setAnswer(modelConfigNotDispatched(t, &readback))
 	assertBarrier := func(stage string, want nodepolicy.ModelConfigurationState) {
 		t.Helper()
 		f.b.reconcileModelConfig(context.Background())

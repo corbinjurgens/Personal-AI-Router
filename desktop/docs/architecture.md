@@ -9,8 +9,8 @@ Node configuration is available from one **Node settings** page in Settings.
 Choose a node with the page's node picker, or open the page for a specific node
 with the **Node settings** button on its Overview card. Cluster **Edit node**,
 the welcome flow and the tray's existing node-settings route open that same page
-for their selected node. The page groups Availability, Roles, Model settings
-(including engine bindings), Engines and Advanced policy JSON. Its Engines
+for their selected node. The page groups Availability, Roles, Model settings,
+Engines and Advanced policy JSON. A profile names its engine. Its Engines
 section contains the controls formerly shown in the card's expandable engine
 settings. Bulk configuration and routing history are cluster-wide sections in
 Cluster settings. These entry points do not change setting behavior.
@@ -417,15 +417,6 @@ ordinary environment assignments can be edited locally or by a pinned peer.
 `engine:set-port` remains a separate port-only RPC for the TUI. It runs the same
 authoritative settings operation rather than forwarding to the engine manager,
 so both entry points validate, restart, and persist identically.
-
-Engine-switch absence is resolved only by the broker's atomic caller-owned
-`engine:switch-fence`, exposed as `engines:switch-fence` / `IEngineApi.fenceSwitch`.
-The broker returns a durable non-acceptance acknowledgement or the already
-accepted owned receipt. The TUI requests it only for its own unacknowledged ID
-after exact unknown-receipt readback, preserving visit, route, command epoch and
-transport fences and one outstanding command. Acknowledged fencing requires a
-fresh baseline before deliberate replacement. Failed acknowledgements retain
-uncertainty; accepted work, recovery and engine status stay backend-owned.
 
 All engine proxies are cluster-aware. For model-bearing inference,
 each proxy first keeps only nodes whose per-engine discovery inventory advertises

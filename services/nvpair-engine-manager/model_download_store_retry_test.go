@@ -27,7 +27,7 @@ func copyRetrySafetyFixture(t *testing.T) (*Manager, *modelDownloads, copyReques
 	d := newModelDownloads(newOpID(), dir, map[string]string{"llamacpp": engines.ModelNamingExact})
 	registry := NewRegistry()
 	registry.engines["llamacpp"] = &Manifest{Engine: "llamacpp", ModelNaming: engines.ModelNamingExact}
-	m := &Manager{exec: &Executor{switchIncarnation: d.source}, copyJournal: d, copyRegistry: registry}
+	m := &Manager{exec: &Executor{managerIncarnation: d.source}, copyJournal: d, copyRegistry: registry}
 	t.Cleanup(m.stopCopies)
 	p := copyRequest{OpID: newOpID(), Engine: "llamacpp", Model: "tiny-retained", SourceNodeID: "source", DestinationNodeID: "destination", ExpectedExportID: strings.Repeat("a", 64)}
 	ctx, release, err := m.reserveCopy(context.Background(), p)
@@ -55,7 +55,7 @@ func TestModelCopyRetryRefusesRecoveryAndPredecessor(t *testing.T) {
 			m, d, original, marker := copyRetrySafetyFixture(t)
 			d = prepare(d)
 			marker = d.copies[original.OpID]
-			m.copyJournal, m.exec.switchIncarnation = d, d.source
+			m.copyJournal, m.exec.managerIncarnation = d, d.source
 			before, err := os.ReadFile(d.store.path)
 			if err != nil {
 				t.Fatalf("read retained journal: %v", err)

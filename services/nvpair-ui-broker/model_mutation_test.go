@@ -34,13 +34,13 @@ func newMutationFixture(t *testing.T) *mutationFixture {
 		_, ok := p.Engines["llamacpp"]
 		return ok
 	})
-	worker, engine := attachBoundEngineManager(t, ab.b, source)
+	worker, engine := attachEngineManagerSource(t, ab.b, source)
 	return &mutationFixture{activatedBroker: ab, source: source, worker: worker, engine: engine}
 }
 
-// attachBoundEngineManager installs a fake engine-manager worker and binds it
+// attachEngineManagerSource installs a fake engine-manager worker and binds it
 // the way spawnEngineMgr does.
-func attachBoundEngineManager(t *testing.T, b *Broker, source *engineManagerSource) (*rpcWorker, *fakeWorker) {
+func attachEngineManagerSource(t *testing.T, b *Broker, source *engineManagerSource) (*rpcWorker, *fakeWorker) {
 	t.Helper()
 	peer, engine := newFakeWorkerPipe(t)
 	worker := &rpcWorker{peer: peer}
@@ -211,7 +211,7 @@ func TestModelMutationConfirmsWithNoRunningProxy(t *testing.T) {
 	b, _ := newPolicyBroker(t)
 	source := b.activateEngineManagerSource()
 	seedStrictIdentity(b, "llamacpp")
-	_, engine := attachBoundEngineManager(t, b, source)
+	_, engine := attachEngineManagerSource(t, b, source)
 
 	b.forwardEngineNotificationFrom(source, nodepolicy.MethodModelMutationRequest, mutationParams(t, "no-proxy-1", "llamacpp"))
 	reply := waitMutationReply(t, engine, "no-proxy-1")
@@ -226,12 +226,12 @@ func TestModelMutationConfirmsWithNoRunningProxy(t *testing.T) {
 func TestModelMutationFromAReplacedSourceLeavesTheReplacement(t *testing.T) {
 	ab := newActivatedBroker(t)
 	old := ab.b.activateEngineManagerSource()
-	attachBoundEngineManager(t, ab.b, old)
+	attachEngineManagerSource(t, ab.b, old)
 	seedStrictIdentity(ab.b, "llamacpp")
 
 	replacement := ab.b.activateEngineManagerSource()
 	ab.b.observeModelIdentity(replacement, engineManagerSnapshot("llamacpp"))
-	_, replacementEngine := attachBoundEngineManager(t, ab.b, replacement)
+	_, replacementEngine := attachEngineManagerSource(t, ab.b, replacement)
 	if _, ok := joinedEngineIdentity(t, ab.b, "llamacpp"); !ok {
 		t.Fatal("the replacement's identity is not joined before the stale request")
 	}

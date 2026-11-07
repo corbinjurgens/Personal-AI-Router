@@ -25,7 +25,6 @@ import (
 	"syscall"
 	"time"
 
-	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/httpcon"
 )
 
@@ -34,6 +33,63 @@ const (
 	engineIdentityProbeHeader = "X-NVPAIR-Engine-Identity-Probe"
 	maxProbeJSONBytes         = 1 << 20
 )
+
+// stopObservation separates saved intent from timestamped physical evidence.
+type stopObservation struct {
+	Intent              string     `json:"intent"`
+	Running             *bool      `json:"running"`
+	Healthy             *bool      `json:"healthy"`
+	ObservedAt          *time.Time `json:"observedAt"`
+	TerminationVerified bool       `json:"terminationVerified"`
+}
+
+func savedIntent(state desiredStateFile, engine string) string {
+	on, known := state.Engines[engine]
+	if !known {
+		return "unknown"
+	}
+	if on {
+		return "on"
+	}
+	return "off"
+}
+
+func (e *Executor) observeStopped(st *engineState, intent string, terminated bool) stopObservation {
+	st.mu.Lock()
+	running, healthy, port := st.running, st.healthy, st.port
+	st.mu.Unlock()
+	now := time.Now().UTC()
+	if !running && port > 0 && !terminated {
+		ctx, cancel := context.WithTimeout(context.Background(), presenceRefusalWindow)
+		listener := probeListener(ctx, st.plat.Runtime.Ready, port)
+		cancel()
+		if listener == listenerProbeReachable {
+			running, healthy = true, false
+		}
+		if listener == listenerProbeIndeterminate {
+			return stopObservation{Intent: intent, ObservedAt: &now}
+		}
+	}
+	return stopObservation{Intent: intent, Running: &running, Healthy: &healthy, ObservedAt: &now, TerminationVerified: terminated && !running}
+}
+
+func (e *Executor) terminationVerified(st *engineState) bool {
+	return e.terminationVerifiedContext(context.Background(), st)
+}
+
+func (e *Executor) terminationVerifiedContext(ctx context.Context, st *engineState) bool {
+	st.mu.Lock()
+	proc, running, port := st.proc, st.running, st.port
+	fenced, reclaimPID := st.reclaimFailed, st.reclaimPID
+	st.mu.Unlock()
+	if proc != nil || running || (fenced && !orphanPIDExited(reclaimPID)) {
+		return false
+	}
+	if port == 0 {
+		return true
+	} // no allocated endpoint and no owned process
+	return e.waitUnavailableContext(ctx, st.plat.Runtime.Ready, port, time.Second)
+}
 
 type listenerProbeResult uint8
 
@@ -72,12 +128,9 @@ func waitForDetection(detected func() bool, timeout time.Duration) bool {
 // auto-assign a free loopback port); Bind "" => the manifest's
 // runtime.bind (which itself defaults to loopback).
 type startOpts struct {
-	// Private cold activation repeats authority after lifecycle admission.
-	boundGuard       func() error
-	boundOperationID string
-	RequireOwned     bool
-	ReclaimOwned     bool
-	// Automatic switches retain their deadline through failed-start cleanup.
+	RequireOwned bool
+	ReclaimOwned bool
+	// Preserve the caller deadline through failed-start cleanup.
 	BoundedCleanup bool
 	Port           int
 	Bind           string
@@ -113,22 +166,11 @@ func (e *Executor) Start(ctx context.Context, engine string) error {
 // rechecks target pause after taking the lifecycle lock. Saved Off
 // alone does not prohibit a fresh explicit start.
 func (e *Executor) StartWith(ctx context.Context, engine string, opts startOpts) error {
-	var done func()
-	var err error
-	if opts.boundGuard != nil {
-		done, err = e.admitBoundEngineMutation(engine, opts.boundOperationID)
-	} else {
-		done, err = e.admitMutation(engine)
-	}
+	done, err := e.admitMutation(engine)
 	if err != nil {
 		return err
 	}
 	defer done()
-	if opts.boundGuard != nil {
-		if err := opts.boundGuard(); err != nil {
-			return err
-		}
-	}
 	st, err := e.state(engine)
 	if err != nil {
 		return err
@@ -136,19 +178,8 @@ func (e *Executor) StartWith(ctx context.Context, engine string, opts startOpts)
 	if err := prepareStrataState(ctx, st); err != nil {
 		return err
 	}
-	if opts.boundGuard != nil {
-		if err := lockBoundEngineLifecycle(ctx, st); err != nil {
-			return err
-		}
-	} else {
-		st.opMu.Lock()
-	}
+	st.opMu.Lock()
 	defer st.opMu.Unlock()
-	if opts.boundGuard != nil {
-		if err := opts.boundGuard(); err != nil {
-			return err
-		}
-	}
 	if opts.Origin == intentPeer {
 		if err := e.remoteVeto(engine); err != nil {
 			return err
@@ -765,34 +796,20 @@ func (e *Executor) Stop(engine string) error {
 // loads of the engine, so one in progress does not hold the lifecycle lock
 // until it finishes.
 func (e *Executor) StopFrom(engine string, origin intentOrigin) error {
-	return e.stopFrom(engine, origin, "")
+	return e.stopFrom(engine, origin)
 }
 
-// StopForSwitch applies a broker-admitted local Off to its remote reservation,
-// after release or a rejected prepare it is a complete no-op. The broker owns
-// durable discharge before relinquishing the original operation lock.
-func (e *Executor) StopForSwitch(engine, operationID string) error {
-	return e.stopFrom(engine, intentLocal, operationID)
-}
-
-func (e *Executor) stopFrom(engine string, origin intentOrigin, operationID string) error {
-	return e.stopFromApplied(engine, origin, operationID, nil)
-}
-
-func (e *Executor) stopFromApplied(engine string, origin intentOrigin, operationID string, applied *bool) error {
+func (e *Executor) stopFrom(engine string, origin intentOrigin) error {
 	st, err := e.state(engine)
 	if err != nil {
 		return err
 	}
-	done, err := e.admitStopScoped(engine, origin, operationID, applied != nil)
+	done, err := e.admitStop(engine)
 	if err != nil {
 		return err
 	}
 	if done == nil {
 		return nil
-	}
-	if applied != nil {
-		*applied = true
 	}
 	defer done()
 	if origin == intentLocal {
@@ -813,15 +830,15 @@ func (e *Executor) stopFromApplied(engine string, origin intentOrigin, operation
 	return errors.Join(stopErr, setErr)
 }
 
-func (e *Executor) verifyStopped(engine string) (settings.SwitchEngineState, error) {
+func (e *Executor) verifyStopped(engine string) (stopObservation, error) {
 	done, err := e.admitOwnerCheckpoint()
 	if err != nil {
-		return settings.SwitchEngineState{}, err
+		return stopObservation{}, err
 	}
 	defer done()
 	st, err := e.state(engine)
 	if err != nil {
-		return settings.SwitchEngineState{}, err
+		return stopObservation{}, err
 	}
 	st.opMu.Lock()
 	defer st.opMu.Unlock()
@@ -829,28 +846,11 @@ func (e *Executor) verifyStopped(engine string) (settings.SwitchEngineState, err
 	state, err := e.desired.load()
 	e.desired.mu.Unlock()
 	if err != nil {
-		return settings.SwitchEngineState{}, err
+		return stopObservation{}, err
 	}
-	observed := e.switchObserved(st, switchIntent(state, engine), e.switchTerminated(st))
-	if observed.Intent != settings.SwitchIntentOff || !observed.TerminationVerified {
+	observed := e.observeStopped(st, savedIntent(state, engine), e.terminationVerified(st))
+	if observed.Intent != "off" || !observed.TerminationVerified {
 		return observed, errors.New("local Off termination is unverified")
-	}
-	e.desired.mu.Lock()
-	defer e.desired.mu.Unlock()
-	state, err = e.desired.load()
-	if err != nil {
-		return observed, err
-	}
-	if cp := state.PendingSwitch; cp != nil && cp.Phase != settings.SwitchCheckpointReleased {
-		if engine == cp.SourceEngine && cp.SourceLocalOff {
-			cp.Source = observed
-		}
-		if engine == cp.TargetEngine && cp.TargetLocalOff {
-			cp.Target = observed
-		}
-		if err := e.desired.save(state); err != nil {
-			return observed, err
-		}
 	}
 	return observed, nil
 }
@@ -860,14 +860,14 @@ func (e *Executor) doStop(st *engineState, engine string) error {
 	return e.doStopContext(context.Background(), st, engine)
 }
 
-// Switch recovery carries its cancellation through fallback orphan cleanup.
+// Carry caller cancellation through fallback orphan cleanup.
 func (e *Executor) doStopContext(ctx context.Context, st *engineState, engine string) (err error) {
 	return e.doStopOwnedContext(ctx, st, engine, nil)
 }
 
 // stopOwnership pins the observed source incarnation through the stop effect.
-// A switch must never turn a lost owned handle into permission to reclaim an
-// adopted replacement. Nil keeps ordinary Stop and manual E4 semantics.
+// Losing an owned handle cannot grant permission to reclaim an adopted
+// replacement. Nil retains ordinary Stop authority.
 type stopOwnership struct {
 	process *managedProc
 	runID   string

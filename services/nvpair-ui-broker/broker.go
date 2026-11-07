@@ -192,10 +192,6 @@ type Broker struct {
 	buildApplyOwners buildApplyOwners
 	// Only live install continuations are retained, under engineConfigMu.
 	pendingInstallStarts   map[*pendingInstallStart]struct{}
-	switchInit             sync.Once
-	engineSwitch           *engineSwitchCoordinator
-	boundInit              sync.Once
-	boundEngines           *boundEngineCoordinator
 	engineSettingsLoaded   bool
 	engineSettingsError    error
 	engineSettingsEpoch    string
@@ -669,18 +665,12 @@ func (b *Broker) getErrors() *errorsProcess {
 }
 
 func (b *Broker) setEngineMgr(w *rpcWorker) {
-	c := b.switchCoordinator()
 	b.workersMu.Lock()
 	if b.engineMgr != w {
 		// A different worker was installed, so any source the previous pair
 		// named is no longer that pair's. Only spawnEngineMgr binds again.
 		b.engineMgrSource = nil
 		b.wakeEngineMgrBindingLocked()
-		if c.activeCancel != nil {
-			b.engineMgrRecovering = true
-			c.interrupted = true
-			c.activeCancel()
-		}
 	}
 	b.engineMgr = w
 	b.workersMu.Unlock()
@@ -731,15 +721,10 @@ func (b *Broker) wakeEngineMgrBindingLocked() {
 }
 
 func (b *Broker) engineManagerExited(w *rpcWorker) {
-	c := b.switchCoordinator()
 	b.workersMu.Lock()
 	defer b.workersMu.Unlock()
 	if b.engineMgr == w {
 		b.engineMgrRecovering = true
-	}
-	if c.activeManager == w && c.activeCancel != nil {
-		c.interrupted = true
-		c.activeCancel()
 	}
 }
 
@@ -752,8 +737,8 @@ func (b *Broker) getEngineMgr() *rpcWorker {
 	return b.engineMgr
 }
 
-// The replacement stays hidden from ordinary callers until conservative switch
-// recovery has run. Cancellation above lets the active owner release its lock.
+// The replacement stays hidden until its pause projection and shutdown proof
+// have been restored. Settings recovery still precedes enabled restoration.
 func (b *Broker) recoverReplacementEngineMgr(w *rpcWorker) bool {
 	const attempts = 3
 	for attempt := 0; attempt < attempts; attempt++ {
@@ -768,7 +753,7 @@ func (b *Broker) recoverReplacementEngineMgr(w *rpcWorker) bool {
 			return false
 		default:
 		}
-		if b.recoverEngineSwitchOn(w) {
+		if b.recoverEngineManagerPause(w) {
 			b.workersMu.Lock()
 			current = b.engineMgr == w
 			select {
@@ -780,20 +765,13 @@ func (b *Broker) recoverReplacementEngineMgr(w *rpcWorker) bool {
 				b.engineMgrRecovering = false
 			}
 			b.workersMu.Unlock()
-			if current {
-				b.forwardErrorsClear(engineSwitchRecoveryBlockedID)
-			}
 			return current
 		}
-		b.engineConfigMu.Lock()
-		permanent := b.switchCoordinator().err != nil
-		b.engineConfigMu.Unlock()
-		if permanent || attempt == attempts-1 {
-			b.reportEngineSwitchRecoveryBlocked()
+		if attempt == attempts-1 {
+			slog.Error("engine manager remains unavailable because pause recovery could not be verified")
 			return false
 		}
-		// Recovery retries only conservative inspection/reconcile/release on the
-		// pinned replacement. The ordinary manager surface remains fenced.
+		// Retry the pinned replacement while its ordinary surface stays fenced.
 		timer := time.NewTimer(time.Second << attempt)
 		select {
 		case <-w.Done():
@@ -805,14 +783,47 @@ func (b *Broker) recoverReplacementEngineMgr(w *rpcWorker) bool {
 	return false
 }
 
+func (b *Broker) recoverEngineManagerPause(w *rpcWorker) bool {
+	r := b.nodePolicyRuntime()
+	r.transitionMu.Lock()
+	defer r.transitionMu.Unlock()
+	b.settingsApplyMu.Lock()
+	defer b.settingsApplyMu.Unlock()
+	worker, source := b.pauseManager()
+	if worker != w || w == nil {
+		return false
+	}
+	b.publishNodeProjection()
+	r.mu.Lock()
+	paused := r.current.Availability == nodepolicy.Paused
+	if paused {
+		r.live = nodepolicy.Draining
+		r.restoreSkipped = true
+	}
+	r.mu.Unlock()
+	if !paused {
+		return true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	err := b.pauseEnginesOn(ctx, w)
+	if err == nil {
+		err = b.publishPhysicalPause(ctx, w, source)
+	}
+	b.announceActivationChange(b.pushPolicyNow(context.Background(), pushAvailability))
+	b.notifyAvailability()
+	if err != nil {
+		slog.Error("engine manager pause recovery failed", "err", err)
+	}
+	return err == nil
+}
+
 func (b *Broker) restoreEnabledEngines(w *rpcWorker) {
 	if w == nil {
 		return
 	}
 	// Reconstruct settings withdrawal before restoring enabled intent.
-	if !b.recoverEngineSwitch() {
-		return
-	}
+	b.publishNodeProjection()
 	if !b.recoverEngineSettings() {
 		return
 	}
@@ -1181,8 +1192,7 @@ func (b *Broker) pushClusterIdentityToNodeInfo() {
 func enginePeerRelayNotification(method string) bool {
 	switch method {
 	case policyRelayRequestMethod, policyRelayCancelMethod,
-		"engine:settings-request", "engine:settings-cancel",
-		"engine:switch-request", "engine:switch-cancel":
+		"engine:settings-request", "engine:settings-cancel":
 		return true
 	}
 	return false
@@ -1226,9 +1236,6 @@ func (b *Broker) forwardEngineNotificationFrom(source *engineManagerSource, meth
 				return
 			}
 		}
-	}
-	if b.handleSwitchEngineNotification(source, method, params) {
-		return
 	}
 	if b.handlePolicyEngineNotification(source, method, params) {
 		return

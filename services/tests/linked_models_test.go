@@ -839,7 +839,6 @@ func linkedStartManager(t *testing.T, f *controllerCopyFixture, n *task1Node, cl
 		return result
 	}
 	p := startTask1ProcessWithSettings(t, n.base, engineMgrBin, extra, reply, "--cluster-dir", cluster, "--control-host", "127.0.0.1", "--control-port", strconv.Itoa(n.ports[noderec.ServiceEngineControl]), "--http-port", "0", "--loaded-poll-interval", "0")
-	completeEngineManagerRecovery(t, func(method string, params any) jsonrpc.Message { return p.call(t, method, params) })
 	p.send(t, "engine:node-projection", map[string]any{"policy": nodepolicy.Default().Advertisement(), "pausedLocally": false, "managementBlocked": false}, false)
 	p.call(t, "engine:models", nil)
 	return p

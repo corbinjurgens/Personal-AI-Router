@@ -496,7 +496,7 @@ describe('composed model settings', () => {
         await render(rowPanel())
         expect(button('Remove profile', panel()).disabled).toBe(false)
         await act(async () => button('Remove profile', panel()).click())
-        expect(panel().textContent).toContain('Served permission and engine bindings stay in place')
+        expect(panel().textContent).toContain('Served permission stays in place')
         await act(async () => button('Confirm remove profile', panel()).click())
         expect(
             useEngineSettingsStore.getState().modelDrafts[
@@ -558,7 +558,7 @@ describe('composed model settings', () => {
         await render(rowPanel())
         await act(async () => button('Remove profile', panel()).click())
         expect(panel().textContent).toContain(
-            'served permission, residency and engine binding for this profile key'
+            'served permission and residency for this profile key'
         )
         expect(
             useEngineSettingsStore.getState().modelDrafts[

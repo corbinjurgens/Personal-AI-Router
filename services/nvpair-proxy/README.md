@@ -506,40 +506,9 @@ One limit is outside the proxy's control: current Chromium-based browsers gate a
 
 ### Node policy: admission, tiers, cancel (fork)
 
-Explicit model engine bindings can make ordinary concrete and concrete-tier
-inference wait for the destination's existing engine-switch transaction.
-Supported binding offers keep a stopped engine's real facade reachable without
-advertising invented inventory or strict readiness. Ready equivalent choices
-lead cold offers even against scheduler priority; explicit eligible selection
-and tier loaded preferences remain in force. OpenAI-compatible concrete names
-cross compatible facades only for explicit bindings. Native and unbound
-requests retain their engine domain. A conflicting old-engine ingress refuses.
-
-Preparation has one absolute 90-second total bound, clamped to caller time and
-carried on authenticated PAIR hops as decreasing private
-`X-PAIR-Engine-Prepare-Budget-Ms` milliseconds. A cold peer's slot acquisition
-and response-header wait share this bound; an accepted stream can then drain
-beyond it. Directly configured manual engines receive no private PAIR headers.
-Malformed values allow no preparation. The header grants no authority: pinned
-ingress retains the principal and incarnation captured together before body
-waits and rejects a changed relationship. It never routes onward. Ready
-inference does not require management permission; loss of readiness during
-admission refuses instead of issuing a legacy local wake.
-Waiting holds no execution, strict or resident ticket. A receipt is followed
-by actual backend/inventory, binding, policy, identity and candidate readback,
-then ordinary admission with fresh final-engine defaults. Output starts only
-after preparation and revalidation; old streams retain their drain protection.
-
-Known preparation refusal is HTTP 503 with the existing JSON admission error
-and `X-PAIR-Admission`: `engine-switch-timeout`, `engine-switch-busy`,
-`engine-switch-cooldown`, `management-denied`,
-`model-unavailable`, or existing paused/draining/no-fit reasons. Transient
-reasons carry `Retry-After`; an optional `X-PAIR-Switch-Request-Id` names only
-known acceptance. Unknown acceptance is never resubmitted as a new operation.
-Ordinary no-owner 502 remains unchanged. Private headers are stripped before
-the engine; final model/engine/node headers describe actual execution. Strict
-hybrid cold switching and native engine acceptance remain outside this path.
-See [the admission specification](spec.md#122-admission).
+A profile names its engine. Concrete model names use the entry engine's
+inventory and eligible dormant self candidates; ordinary admission, on-demand
+wake and retryable failover retain their existing owners and bounds.
 
 The broker pushes this node's policy (`nvpair-shared/nodepolicy`) with
 process-scoped requests — `node/set-policy`, `node/set-availability`,
@@ -596,23 +565,12 @@ grants and immediate category refusals are detailed in `spec.md` §§5.2 and
 The desktop's Node policy JSON editor supports them; the TUI exposes no buffer
 controls. [Hybrid routing](../../docs/hybrid-routing.mdx) includes an edit example.
 
-Engine switching also has two internal process-scoped requests:
-
-- `node/invalidate-engine` takes `{engine, operationId, reason:"engine-switch"}`
-  and answers `{ok:true, runId}`. It removes the engine's installed strict
-  capabilities, advances their ticket generations and wakes queued admissions.
-  Held tickets fail their dispatch check; dispatched work and durable uncertain
-  capacity remain until normal terminal evidence or authoritative reconciliation.
-  Other engines retain eligibility. Repeats for the same engine and operation ID
-  have no further effect, including after fresh capability installation. The
-  broker must replay pending invalidations from its switch journal before
-  enabling facades after proxy restart. Strict readiness remains withdrawn.
-- `node/admission-snapshot` takes an explicit `{}` and answers
-  `{runId, active, activeByEngine, queued, lastActivityMs}`. It copies current
-  counts under the admission mutex, including held and quarantined slots. For
-  switch drain proof, the broker must request it after the drain acknowledgement
-  and match `runId` to the acknowledged proxy incarnation; a cached notification
-  zero is insufficient.
+The internal process-scoped `node/admission-snapshot` request takes an explicit
+`{}` and returns `{runId, active, activeByEngine, queued, lastActivityMs}`.
+It copies current counts under the admission mutex, including held and
+quarantined slots. When settings drain waits for active work, it requires fresh
+readback after the drain acknowledgement from that same proxy run; a cached
+zero is insufficient.
 
 `spec.md` §12 is normative; in short:
 
@@ -703,7 +661,6 @@ for the independent `localOnly` edit lock, desktop controls and precedence examp
   whose declaring node is returned by its engine facade's inference candidate
   resolver for that model. Self facts require a self candidate; peer facts
   require that exact peer, so another node's inventory cannot qualify them.
-  Supported binding/preparation offers count even without inventory.
   Each catalog resolves each engine/model pair once and computes each tier's
   bound once, sharing results across alias variants only until that catalog
   returns. These resolver checks can refresh mesh state and start background
