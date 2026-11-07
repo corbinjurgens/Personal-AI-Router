@@ -247,7 +247,7 @@ func TestManualLoadReplacementDrainsOnlyTargetBeforeActivation(t *testing.T) {
 	if entry.Reason != nodepolicy.ModelReasonOperationBusy {
 		t.Fatalf("draining operation reported as %s", entry.Reason)
 	}
-	if err := f.b.manualLoad(t.Context(), manualLoadParams{Engine: ref.Engine, Model: "other-model"}, nil); err == nil || !strings.Contains(err.Message, "draining") {
+	if err := f.b.manualLoad(t.Context(), manualLoadParams{Engine: ref.Engine, Model: "other-model"}, nil); err == nil || err.Message != "Engine is draining until its settings or uncertain load operation is resolved." {
 		t.Fatalf("another model bypassed the replacement drain: %+v", err)
 	}
 }

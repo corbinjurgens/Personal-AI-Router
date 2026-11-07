@@ -46,8 +46,11 @@ func (b *Broker) manualLoad(ctx context.Context, p manualLoadParams, source *eng
 		return &RPCError{Code: -32000, Message: "Model load unavailable: current node, proxy and engine observations are required."}
 	}
 	ref := b.modelRef(p.Engine, p.Model)
-	if !e.Running[ref.Engine] || e.Drains[ref.Engine] || e.Loaded[ref.Engine] == nil {
-		return &RPCError{Code: -32000, Message: "Model load unavailable: engine is stopped, draining or not observed."}
+	if e.Drains[ref.Engine] {
+		return &RPCError{Code: -32000, Message: "Engine is draining until its settings or uncertain load operation is resolved."}
+	}
+	if !e.Running[ref.Engine] || e.Loaded[ref.Engine] == nil {
+		return &RPCError{Code: -32000, Message: "Model load unavailable: engine is stopped or not observed."}
 	}
 	native := e.Identity.Engines[ref.Engine]
 	id := nodepolicy.StrictModelIdentity{EngineRunID: native.EngineRunID, SettingsFingerprint: native.SettingsFingerprint}

@@ -160,7 +160,7 @@ func TestStopPauseExecutionAcceptancePrecedesBarriers(t *testing.T) {
 			}
 		})
 	}
-	test("configuration", func(b *Broker) func() { b.engineConfigMu.Lock(); return b.engineConfigMu.Unlock })
+	test("settings apply", func(b *Broker) func() { b.settingsApplyMu.Lock(); return b.settingsApplyMu.Unlock })
 	test("earlier transition", func(b *Broker) func() {
 		r := b.nodePolicyRuntime()
 		r.transitionMu.Lock()
