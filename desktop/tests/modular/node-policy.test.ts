@@ -1264,6 +1264,37 @@ describe('model configuration policy evidence', () => {
         }
     )
 
+    it.each(['local', 'peer'])(
+        'preserves an ordinary settings drain on %s get, set and push',
+        node => {
+            const evidence: JsonObject = {
+                policyRevision: '9',
+                observationGeneration: 20,
+                models: [
+                    {
+                        engine: 'llamacpp',
+                        model: 'draining',
+                        desiredResident: true,
+                        observedLoaded: false,
+                        state: 'blocked',
+                        reason: 'operation-busy'
+                    }
+                ]
+            }
+            const snapshot = { policy: { revision: '9' }, modelConfiguration: evidence }
+            expect(
+                parsePolicyDocument(policyEnvelope({ ...snapshot, availability: 'available' }))
+                    .modelConfiguration
+            ).toEqual(evidence)
+            expect(parsePolicySetResult(policyEnvelope(snapshot)).modelConfiguration).toEqual(
+                evidence
+            )
+            expect(
+                parsePolicyChange(policyEnvelope({ ...snapshot, nodeId: node }))?.modelConfiguration
+            ).toEqual(evidence)
+        }
+    )
+
     it('keeps absent status absent on get, set and push', () => {
         const snapshot = { policy: '{"revision":"9"}' }
         expect(parsePolicyDocument({ ...snapshot, availability: 'available' })).not.toHaveProperty(
@@ -1400,6 +1431,10 @@ describe('model configuration policy evidence', () => {
         [
             'unknown reason',
             { ...configuration, models: [{ ...loaded, reason: 'engine error text' }] }
+        ],
+        [
+            'retired switch reason',
+            { ...configuration, models: [{ ...loaded, state: 'blocked', reason: 'switch-busy' }] }
         ],
         [
             'missing desired flag',

@@ -454,6 +454,7 @@ function modelConfigurationEntry(value: JsonValue): ModelConfigurationEntry {
             reason !== 'engine-off-local' &&
             reason !== 'not-served' &&
             reason !== 'not-installed' &&
+            reason !== 'operation-busy' &&
             reason !== 'unqualified' &&
             reason !== 'unsupported-load' &&
             reason !== 'load-failed' &&

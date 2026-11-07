@@ -137,6 +137,7 @@ export interface ModelConfigurationEntry extends NodeModelReference {
         | 'engine-off-local'
         | 'not-served'
         | 'not-installed'
+        | 'operation-busy'
         | 'unqualified'
         | 'unsupported-load'
         | 'load-failed'

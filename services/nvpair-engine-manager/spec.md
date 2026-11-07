@@ -1187,7 +1187,7 @@ A refusal is `result:{"dispatched":false,"reason":"reservation-revoked"}`.
 Reasons are `reservation-revoked`, `reservation-unknown`, or a shared resident
 refusal reason: `engine-off`, `no-fit`, `paused`,
 `paused-local`, `engine-off-local` (older inbound reasons), `not-served`, `not-installed`, `unqualified`,
-`unsupported-load`, `operation-timeout`, `observation-unknown`,
+`operation-busy`, `unsupported-load`, `operation-timeout`, `observation-unknown`,
 `projection-unknown`. The prepare and dispatch validators reject `load-failed`:
 it describes a completed load in model-configuration status, not refusal of
 permission to load. A relay error instead has
