@@ -340,7 +340,7 @@ func TestRoutingListener_ListFollowsTheActivatedPolicy(t *testing.T) {
 
 	pol := nodepolicy.Default()
 	pol.Revision = "2"
-	declarePolicyRole(&pol, "strong", "llamacpp", "big:70b")
+	declarePolicyRole(&pol, "strong", "llamacpp", "big/70b")
 	pol.Routing.Listener = listener
 	activate(t, p, w, pol)
 
@@ -348,7 +348,7 @@ func TestRoutingListener_ListFollowsTheActivatedPolicy(t *testing.T) {
 		t.Fatalf("an unchanged listener setting rebound %d to %d", port, boundPort(p))
 	}
 	got := call(t, port, http.MethodGet, "/v1/models", nil)
-	if ids, want := listedIDs(t, got), []string{"strong", "strong:api", "strong:local"}; !slices.Equal(ids, want) {
+	if ids, want := listedIDs(t, got), []string{"strong", "strong:api", "strong:local", "big/70b"}; !slices.Equal(ids, want) {
 		t.Errorf("listed %v, want %v", ids, want)
 	}
 }
@@ -380,7 +380,7 @@ func TestRoutingListener_BindsLoopbackOnly(t *testing.T) {
 func TestRoutingListener_InferenceUnqualifiedOrUnsupportedHasNoDispatchEffects(t *testing.T) {
 	const selfID = "self-uuid"
 	tc := llamacppCase(t)
-	models := append([]string{"mid:7b"}, allAliases...)
+	models := append([]string{"mid/7b"}, allAliases...)
 	newFixture := func(t *testing.T) (*Proxy, *recordingWriter, *recordingEngine) {
 		t.Helper()
 		redirectConfigDir(t)
@@ -389,6 +389,7 @@ func TestRoutingListener_InferenceUnqualifiedOrUnsupportedHasNoDispatchEffects(t
 		disc := NewDiscovery()
 		disc.AddManual(selfNode(selfID, tc.profile.FacadePort, models...))
 		p := newTestProxy(tc.profile, NewCodec(w), disc, tc.profile.FacadePort)
+		declareRoutingFixtureModel(p, "mid/7b")
 		setBackend(t, p.soleFacade(), local.URL, true)
 		p.noteSelf(selfID, tc.profile.Name, models)
 		p.SetPriority([]string{selfID})
@@ -413,7 +414,7 @@ func TestRoutingListener_InferenceUnqualifiedOrUnsupportedHasNoDispatchEffects(t
 	t.Run("control: the same request through the facade reaches the engine", func(t *testing.T) {
 		p, _, local := newFixture(t)
 		rec := httptest.NewRecorder()
-		p.soleFacade().handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"mid:7b"}`)))
+		p.soleFacade().handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"mid/7b"}`)))
 		if rec.Code != http.StatusOK || local.hits() != 1 {
 			t.Fatalf("control: status %d with %d engine hits, want 200 and 1", rec.Code, local.hits())
 		}
@@ -505,10 +506,12 @@ func TestRoutingListener_InferenceUnqualifiedOrUnsupportedHasNoDispatchEffects(t
 	})
 
 	t.Run("ordinary concrete requests dispatch", func(t *testing.T) {
-		for _, body := range []string{`{"model":"mid:7b"}`, `{"model":"mid:7b","stream":true}`} {
+		for _, body := range []string{`{"model":"mid/7b"}`, `{"model":"mid/7b","stream":true}`} {
 			t.Run(body, func(t *testing.T) {
 				p, w, local := newFixture(t)
-				port := startRouting(t, p, w, "1")
+				pol := listenerPolicy(t, "1", nodepolicy.Listener{})
+				pol.Profiles = append(pol.Profiles, nodepolicy.Profile{Key: "mid/7b", DisplayName: "Concrete fixture", Engine: "llamacpp", Model: "mid/7b"})
+				port := startRoutingPolicy(t, p, w, pol)
 				got := call(t, port, http.MethodPost, routeChatCompletions, func(r *http.Request) {
 					r.Body = io.NopCloser(strings.NewReader(body))
 					r.ContentLength = int64(len(body))
@@ -522,7 +525,7 @@ func TestRoutingListener_InferenceUnqualifiedOrUnsupportedHasNoDispatchEffects(t
 				if err := json.Unmarshal([]byte(local.lastBody()), &forwarded); err != nil {
 					t.Fatal(err)
 				}
-				if forwarded.Model != "mid:7b" || local.lastHeader().Get(nodepolicy.StrictAdmissionHeader) != "" {
+				if forwarded.Model != "mid/7b" || local.lastHeader().Get(nodepolicy.StrictAdmissionHeader) != "" {
 					t.Fatalf("concrete model/header = %q/%v", forwarded.Model, local.lastHeader())
 				}
 				waitInferenceDrained(t, p)
@@ -1624,8 +1627,8 @@ func TestModelControlsSelectionListenerShortAlias512ByteConcrete(t *testing.T) {
 			waitInferenceDrained(t, fx.p)
 		})
 	}
-	test("ASCII concrete model", strings.Repeat("a", 508)+":tag")
-	test("multibyte concrete model", strings.Repeat("界", 169)+"a:tag")
+	test("ASCII concrete model", strings.Repeat("a", 508)+"/tag")
+	test("multibyte concrete model", strings.Repeat("界", 169)+"a/tag")
 }
 
 func TestModelControlsIngressListenerKeyedRefusal(t *testing.T) {
@@ -1711,7 +1714,7 @@ func TestRoutingListener_InferenceModelMembers(t *testing.T) {
 				if err := json.Unmarshal([]byte(fx.eng["peer"].lastBody()), &forwarded); err != nil {
 					t.Fatal(err)
 				}
-				if forwarded.Model != "q:1b" {
+				if forwarded.Model != "q/1b" {
 					t.Fatalf("forwarded model = %q, want the selected concrete model", forwarded.Model)
 				}
 				if strings.Contains(body, `"payload"`) && forwarded.Payload.Model != "weak:api" {
@@ -1770,12 +1773,12 @@ func TestRoutingListener_InferenceConcreteNames(t *testing.T) {
 			waitInferenceDrained(t, fx.p)
 		})
 	}
-	test("ordinary concrete model", "q:1b")
+	test("ordinary concrete model", "q/1b")
 	test("hyphen API name", "coder-api")
 	test("hyphen local name", "coder-local")
 	test("undeclared former role", "strong")
-	test("undeclared API alias spelling", "strong:api")
-	test("undeclared local alias spelling", "strong:local")
+	test("served API suffix", "served-strong-api")
+	test("served local suffix", "served-strong-local")
 }
 
 func TestRoutingListener_InferenceDeclaredAliasWhitespaceRefused(t *testing.T) {
@@ -1952,8 +1955,8 @@ func TestRoutingListener_InferencePolicySnapshot(t *testing.T) {
 	if err := json.Unmarshal([]byte(fx.eng["a-busy"].lastBody()), &forwarded); err != nil {
 		t.Fatal(err)
 	}
-	if forwarded.Model != "q:1b" {
-		t.Fatalf("A forwarded model = %q, want qualified local q:1b", forwarded.Model)
+	if forwarded.Model != "q/1b" {
+		t.Fatalf("A forwarded model = %q, want qualified local q/1b", forwarded.Model)
 	}
 
 	connB, ownerB, deadlineB := begin(60 * time.Second)
@@ -2032,9 +2035,9 @@ func inferencePeerHandler(t *testing.T, fx *tierFixture, id string, handler http
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 	n := nodeFor(t, id, server.URL)
-	n.Models = []string{"q:1b"}
+	n.Models = []string{"q/1b"}
 	fx.p.soleFacade().discovery.AddManual(n)
-	fx.advertise(t, id, map[string]nodepolicy.AdvertisedProfile{"weak": qualifiedProfile("q:1b")}, strictCapabilityFor("llamacpp", "q:1b"))
+	fx.advertise(t, id, map[string]nodepolicy.AdvertisedProfile{"weak": qualifiedProfile("q/1b")}, strictCapabilityFor("llamacpp", "q/1b"))
 }
 
 func TestRoutingListener_InferencePartialResponseNeverFallsBack(t *testing.T) {

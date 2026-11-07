@@ -497,6 +497,12 @@ func TestRoutingHistoryBlockedWrite(t *testing.T) {
 				t.Fatal("missing fixture profile")
 			}
 			p := newTestProxy(profile, codec, NewDiscovery(), 0)
+			pol := nodepolicy.Default()
+			pol.Profiles = []nodepolicy.Profile{{Key: "m", DisplayName: "History pressure", Engine: profile.Name, Model: "m"}}
+			if err := pol.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			p.admission.setPolicy(pol)
 			p.admission.setAvailability(nodepolicy.Paused, false)
 			old := nativeRegistered(t, p, time.UnixMilli(10000))
 			nativeRegistered(t, p, time.UnixMilli(10000))
@@ -629,11 +635,17 @@ func TestRoutingHistoryBetweenFramesAllowsInference(t *testing.T) {
 			root, _, codec := historyOwnedCodec(t, w)
 			codec.budget = time.Second // A leaked gate fails promptly under the ordinary Notify owner.
 			profile := llamacppCase(t).profile
-			const model = "history-boundary:tag"
+			const model = "history-boundary/tag"
 			engine := newRecordingEngine(t, http.StatusOK)
 			discovery := NewDiscovery()
 			discovery.AddManual(selfNode("self", profile.FacadePort, model))
 			p := newTestProxy(profile, codec, discovery, profile.FacadePort)
+			pol := nodepolicy.Default()
+			pol.Profiles = []nodepolicy.Profile{{Key: model, DisplayName: "History boundary", Engine: profile.Name, Model: model}}
+			if err := pol.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			p.admission.setPolicy(pol)
 			setBackend(t, p.soleFacade(), engine.URL, true)
 			candidates := p.soleFacade().resolveCandidates(model)
 			if len(candidates) != 1 || !candidates[0].self || candidates[0].url.Host != strings.TrimPrefix(engine.URL, "http://") {
@@ -683,7 +695,7 @@ func TestRoutingHistoryBetweenFramesAllowsInference(t *testing.T) {
 				t.Fatal("fixture paused an active Write instead of a frame boundary")
 			}
 			rec := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"history-boundary:tag","stream":false}`)).WithContext(root)
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"history-boundary/tag","stream":false}`)).WithContext(root)
 			done := make(chan struct{})
 			go func() { defer close(done); p.soleFacade().handleHTTP(rec, req) }()
 			lifetimeReceive(t, done) // History remains paused until AFTER the entire handler returns.

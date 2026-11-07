@@ -534,9 +534,12 @@ point remain owned by the existing dispatch policy below.
 
 For a model-bearing inference request:
 
-1. Filter a request-local discovery snapshot to nodes whose per-engine inventory
-   advertises the requested model. Concrete names use the entry engine; a
-   profile names its engine. Model identifiers use that engine's normalization.
+1. Resolve a visible role before an equal profile key. Otherwise require the
+   requested key in self's `Policy.ProfileByKey` or a peer's
+   `Advertisement.Profiles`, including profiles outside every role. Other
+   names return `404` `no profile or role named <name>`, even when native
+   inventory or model sources advertise them. The profile names its engine
+   and native model; serving policy and qualification still apply.
    Eligible dormant self candidates retain their on-demand wake path (section
    12.2). An empty owner set returns a local
    `502` without contacting an engine.
@@ -647,10 +650,11 @@ while dispatch skips paused peers. This section makes no claim about whether a
 paused node stays in or leaves any inventory; that follows ordinary discovery.
 
 The llama.cpp facade exposes `GET /models` and `GET /v1/models` as aliases for
-the fleet's llama.cpp inventory. Both query every candidate's `GET /models`
-concurrently and merge duplicate model ids into an OpenAI list envelope
-(`{"object":"list","data":[...]}`). A selected node affects candidate ordering,
-not inventory scope. Its inference routes remain `/v1/*`.
+visible profile keys and declared roles with their `:api` and `:local` aliases,
+each once, in an OpenAI list envelope (`{"object":"list","data":[...]}`). Native
+inventory names without profiles are omitted. Engine inventory views and the
+desktop Models tab still show unprofiled files; those files are not routable.
+A selected node affects ordering, not catalog scope. Inference routes remain `/v1/*`.
 
 ### 5.1 Retry bounds
 
@@ -1279,7 +1283,11 @@ grant no CORS permissions. Multi-target preflights intersect permissions from al
 responding engines without forwarding caller credentials; unavailable engines
 are skipped, and no responders yields 502. Preflights take no reservations.
 
-Model inventories with an Origin require agreement from every responding engine:
+Profile catalogs with an Origin require permission from the entry engine and
+every engine contributing visible profiles, intersecting all responding nodes
+within each engine. An engine with no responders yields 502.
+Peer-ingress catalogs use the same records and check this node's local engines
+without forwarding permission probes onward. Permission checks require agreement:
 a denial yields 403, an invalid inventory yields 502 without a partial list. An
 invalid-inventory error retains CORS headers only when all responding engines
 approve. See README.md for the complete forwarding and intersection rules.
@@ -1642,7 +1650,8 @@ admission owner.
    (at most once per 10 s per engine) and the request waits for the engine to
    report healthy, up to `idle.wakeTimeoutSeconds` under the wait cap, then
    `wake-timeout`.
-3. **Profile** by `(engine, normalized model)`. In `requestOptionsMode:defaults`
+3. **Profile** is required for every admitted model request; there is no
+   unprofiled node-default admission path. In `requestOptionsMode:defaults`
    (also the omitted mode), `requestOptions` merge recursively for objects with
    request values winning. In `enforced` mode, configured scalar and array
    values replace request values; objects merge recursively and unconfigured
@@ -1725,8 +1734,9 @@ manual node, has an empty hint.
 **Waking a stopped engine.** The broker withdraws an unhealthy engine's service.
 The proxy remembers its own node id and each engine's last advertised
 models from discovery, and offers a *dormant* self candidate — last in the
-round — when the node is available, and the model was last advertised by that engine or is covered by a
-profile. Admission wakes it; the dispatch then targets the backend's reported
+round — when the node is available and the requested key is covered by a
+profile whose native model is served.
+Admission wakes it; the dispatch then targets the backend's reported
 address.
 
 **cancelActive** withdraws admitted target-local execution for Pause. Before
@@ -1793,9 +1803,10 @@ built-in, default or protected names and no cluster role store.
   scheduler priority, ID, self mapped to that engine's local backend, peers over
   cluster mTLS to the port that facade's discovery overlay carries — the peer's
   facade port for that engine. A role keeps only the nodes that declare it, and
-  each is sent the model as its node spells it. The owner filter applies to
-  roles too, so a declared model missing from the node's inventory is no
-  candidate. A node whose `loadedByEngine` (or, for this node,
+  each is sent its declared profile key. The owner filter applies to roles too:
+  the node must declare that exact profile key, and `ServedModels` checks its
+  native model rather than its public key. Native inventory grants no routing
+  permission. A node whose `loadedByEngine` (or, for this node,
   the reported residency) contains the model is warm.
 - **Engines**: `/v1/chat/completions`, `/v1/completions` and `/v1/embeddings`
   may cross engines. Every other inference route resolves only to its own
@@ -1825,7 +1836,7 @@ built-in, default or protected names and no cluster role store.
   is required. Undeclared canonical names remain concrete. An unknown named
   model returns `404` `no profile or role named <name>`, distinct from the
   declared-role no-eligible failure above. Unknown suffixes such as `coder:fast`
-  remain concrete and return that ordinary `404` unless advertised exactly.
+  remain concrete and return that ordinary `404` unless declared as a profile key.
 - **Refusals**: a request is answered `400`
   `{"error":"...","code":"feature_unavailable","reason":"alias_not_inference_ready"|"unsupported_alias_use","model":"<alias>"}`
   before the CORS preflight, candidate resolution, admission, wake, reservation,
@@ -1841,24 +1852,29 @@ built-in, default or protected names and no cluster role store.
     router read is covered; as any `model` query parameter value (llama.cpp
     `GET /props?model=`); or as the whole remainder of a `/v1/models/` path
     (`alias_not_inference_ready`);
-  - a bare declared role in the body `model` on a route that is not a classified
-    inference route (Responses, an unclassified native or passthrough path), or
-    a bare tier in `model` with surrounding whitespace
+  - a bare tier in `model` with surrounding whitespace
     (`unsupported_alias_use`).
   Nested keys, other fields and other paths are not checked. A bare tier in
   `name`, a query parameter or a model path keeps today's behavior. A bare tier
-  spelled exactly in `model` on a classified inference route (including native
-  and Messages routes) takes the local role path above on facade entry; unified
+  spelled exactly in `model` takes the local role path above on facade entry,
+  including Responses, Messages, native aliases and unlisted model-bearing
+  paths. `isInferenceRequest` derives registered paths from every protocol's
+  route table; a top-level JSON `model` also requires admission when the path
+  is not registered. Local and peer ingress use the same decision. Bodies read
+  to make this decision use the shared buffer owner and transfer into inference
+  without a second read or allocation. Model-less controls retain passthrough;
+  OPTIONS remains a browser permission query. Unified
   listener inference uses §12.6. An undeclared canonical model remains concrete;
   alternate selectors cannot smuggle override syntax past it. Cluster ingress
   (§7) has its own listener boundary.
 - **Model lists**: an OpenAI-shape model list (`/v1/models`, llama.cpp's
-  `/models`) gains `{"id":"<alias>","object":"model","created":0,"owned_by":"pair"}`
+  `/models`) lists visible profile keys, omitting unprofiled inventory and
+  model-source names. It includes `{"id":"<alias>","object":"model","created":0,"owned_by":"pair"}`
   for each declared role and its `:api` and `:local` variants. Self roles come
   first in policy order, then peer-only names sorted by name; each role is
   followed by its variants. Empty roles are included, API entries alone are
-  not. Peers come from every facade overlay in this process. Both facade and
-  unified-listener catalogs use these visible declarations. The records are
+  not. Peers come from every facade overlay in this process. Facade, peer-ingress
+  and unified-listener catalogs use these visible declarations. The records are
   built from the policy and those declarations (`configuredAliases`, `hybridAliasRecords`) and
   carry no credential, account, deployment or endpoint. Each alias variant
   carries `context_length` equal to the largest `ContextTokens` of that role's
@@ -1874,11 +1890,12 @@ built-in, default or protected names and no cluster role store.
   The field is absent when no such profile
   facts are known or any such profile has zero (unbounded)
   context. Missing or withheld keys do not count as zero-context facts.
-  Router tier entries do not supply this profile-derived field. An upstream
-  model colliding with a role record is replaced by that role record. When no
-  upstream yields a list and at least one alias is configured, the aliases are
-  returned with `200` instead of `503`; without a configured tier the statuses
-  are unchanged, and the browser `Origin` checks of §5.8 still apply.
+  Router tier entries do not supply this profile-derived field. A profile key
+  colliding with a role record is replaced by that role record. Requests without
+  `Origin` return the visible policy-derived catalog with `200`, including an
+  empty catalog, independently of engine availability. The browser `Origin`
+  checks of §5.8 still apply; native lists used by those permission checks never
+  supply catalog records.
 - **Selection**: on hybrid entry, `:api` excludes local destinations and
   `:local` excludes public destinations; bare roles follow `bareMode`.
   Local hybrid candidates still require their own finite qualification and
@@ -2264,7 +2281,8 @@ port. Inference uses the existing request/workload notification contract.
     `Access-Control-Allow-Origin: <origin>` on every response; `Vary: Origin` is
     always set. Engine CORS is not consulted.
   - `GET /v1/models` answers `200` `{"object":"list","data":[...]}` from
-    `hybridAliasRecords` over self and visible peer declarations, in the same
+    visible profile keys and `hybridAliasRecords` over self and visible peer
+    declarations, omitting unprofiled native and model-source names, in the same
     order as facade catalogs, `[]` when none; a query string on it is ignored.
     The shared role resolver supplies `context_length` from eligible declaring
     nodes' facts, including self's local-only profiles, with the same

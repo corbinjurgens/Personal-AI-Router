@@ -33,6 +33,14 @@ the process was one engine.
 `spec.md` is normative; where it and this file disagree, it wins. Everything
 below is shared behavior unless a section says otherwise.
 
+Inference requests name a visible profile key or a declared role. A role wins
+over an equal profile key. Other names return HTTP 404 with
+`no profile or role named <name>`, even when native inventory or model sources
+advertise them. `/v1/models` lists visible profile keys and declared roles with
+their `:api` and `:local` aliases, each once. Files without profiles remain
+visible in the desktop Models tab but are not routable. Strict, public and
+hybrid qualification requirements still apply.
+
 Request model and tier-alias identifiers are limited to 256 decoded UTF-8
 bytes, measured before trimming whitespace or engine normalization. This applies
 to body model/name identifiers, model query parameters and model-detail paths.
@@ -297,12 +305,16 @@ and the health crash key are matched against each other, so they move together
 | Where PAIR relocates the engine | 8081 |
 | Standalone port, used when `port` is omitted | 8080 |
 | Persisted-port file (declared, not derived) | `llamacpp-proxy-port.json` |
-| Model-list routes | `GET /models`, `GET /v1/models` (OpenAI; both query upstream `/models`) |
-| Inference routes | `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings` |
+| Model-list routes | `GET /models`, `GET /v1/models` (OpenAI; browser permission probes use upstream `/models`) |
+| Model request routes | Shared inference protocol routes in `engines.go`, plus any request body selecting `model` |
 | Model naming | identifiers compared byte for byte |
 
-The route table is a **classifier, not an allowlist**. An unlisted path is
-forwarded verbatim, including engine controls and `OPTIONS` preflights.
+The route table is a classifier. Inference routes from every registered protocol
+require role or profile-key admission, even on a facade with a narrower protocol
+declaration. An unlisted request with a top-level JSON `model` enters that same
+admission path. Controls without a model selector retain passthrough, including
+`OPTIONS` permission queries. Bodies inspected for classification use the shared
+buffer budget; promotion to inference reuses those owned bytes.
 
 The broker enables table-engine facades by default. Local llama.cpp-compatible
 clients use `8080`, while the managed `llama-server` stays on `8081`.
@@ -310,11 +322,10 @@ clients use `8080`, while the managed `llama-server` stays on `8081`.
 
 ### HTTP Reverse Proxy
 
-A facade listens on its enabled port and forwards incoming requests to the
-currently active node — except the model-list routes, which are queried across
-every candidate node concurrently and merged into one de-duplicated inventory.
+A facade listens on its enabled port and routes inference through declared
+roles and profile keys, including llama.cpp's native `POST /completion`.
 On the llama.cpp facade, `GET /models` and `GET /v1/models` return the same
-fleet inventory across llama.cpp candidates, even when a node is selected.
+policy-derived role and profile-key catalog, even when a node is selected.
 Point your client at the proxy and it handles routing.
 
 **Cluster ingress.** The listener carries two personalities, demultiplexed by
@@ -323,7 +334,9 @@ LAN caller is refused. When `--cluster-dir` shows this node is a cluster member,
 the same listener also terminates cluster mTLS: a peer whose client certificate
 matches one of this node's pins is forwarded straight to the local engine
 reported by `node/set-local-backend`, and is never re-routed onward to another
-node. Inference arriving this way is admitted first (see "Node policy" below). Membership and pins are re-derived per request, so joining or leaving a
+node. Inference arriving this way is admitted first (see "Node policy" below).
+Model-list reads use the same policy-derived catalog as local clients.
+Membership and pins are re-derived per request, so joining or leaving a
 cluster needs no restart.
 
 **Peer transport.** Cluster candidates use the shared pinned peer/service
@@ -454,7 +467,7 @@ still reports the save error. Memory and disk therefore agree in either case.
 
 A browser preflight (OPTIONS with Origin and Access-Control-Request-Method) queries every currently routable target, with concurrency eight, a ten-second query deadline, and no redirects. A single target's response is relayed. Multiple responding targets must all permit the requested origin, method, and headers; PAIR grants only their shared permissions. Credentials require unanimous explicit support. Synthesized preflights allow browsers to cache the result for 60 seconds; PAIR itself does not cache decisions. A policy denial returns 403. Unavailable targets are skipped; if none can answer, the proxy returns 502. Ordinary OPTIONS requests retain normal routing. Preflights do not create inference jobs or reserve scheduler capacity. Paired ingress forwards only to its local engine.
 
-Combined model lists forward the caller's origin and end-to-end headers, excluding Authorization and Cookie so credentials are not shared across engines. Multi-target preflights apply the same credential filtering. With an Origin header, every responding engine must return a valid list and permit sharing: one denial returns 403 and one invalid list returns 502, without partial inventory. An invalid-list error retains the combined CORS permissions when every responding engine allows the origin. Unavailable engines are skipped, with 502 returned when none can answer. Successful lists combine origin/credential permissions and Vary requirements. Requests without Origin retain partial aggregation when some inventories are unavailable. Engines without CORS support remain unavailable to cross-origin browser clients through PAIR.
+Profile catalogs with an Origin header require browser permission from the entry facade's engine and every engine contributing visible profiles. These checks forward the caller's origin and end-to-end headers, excluding Authorization and Cookie so credentials are not shared across engines. Multi-target preflights apply the same credential filtering. Every responding node of each contributing engine must return a valid list and permit sharing: one denial returns 403 and one invalid list returns 502. An invalid-list error retains the combined CORS permissions when every contributing engine allows the origin. Unavailable nodes are skipped within each engine, with 502 returned if any contributing engine has no responders. Successful checks combine origin/credential permissions and Vary requirements, but native model records never enter the profile catalog. Peer-ingress permission checks use only this node's local engines, without forwarding catalog reads onward. Requests without Origin use policy and advertised profiles without querying engine lists. Engines without CORS support remain unavailable to cross-origin browser clients through PAIR.
 
 Both engine facades use nvpair-shared/cors. Neither facade reads engine environment variables or parses launch commands to determine CORS policy.
 
@@ -463,9 +476,10 @@ One limit is outside the proxy's control: current Chromium-based browsers gate a
 ### Node selection
 
 - **Eligibility**: Before routing model-bearing inference, the proxy keeps only
-  nodes whose current inventory for this engine advertises the requested model,
-  compared using the engine's naming rule. An empty or non-matching inventory is
-  excluded until a later discovery update; if no advertised owner is routable,
+  nodes declaring the exact requested profile key for this engine. Self uses
+  policy profiles; peers use advertised profiles. `ServedModels` restricts the
+  profile's native model, compared using the engine's naming rule. Unprofiled
+  names return `404`; if a known profile has no routable owner,
   the proxy returns a local `502`.
 - **Auto**: When no eligible node is explicitly selected, the proxy follows
   `node/set-priority`, then discovered nodes in stable ID order.
@@ -694,13 +708,12 @@ for the independent `localOnly` edit lock, desktop controls and precedence examp
   alternate selector: a top-level JSON body key equal under case folding
   to `model` or `name` (repeated keys included), a `model` query parameter, or
   the remainder of a `/v1/models/` path; or when it names
-  a bare declared role in the body `model` on a route that is not a classified inference
-  route (Responses, an unclassified native or passthrough route), or with
-  surrounding whitespace. Nothing else is checked: nested keys, other fields and
+  a bare declared role in the body `model` with surrounding whitespace.
+  Nothing else is checked: nested keys, other fields and
   other paths are not. A bare tier in `name`, a query parameter or a model path
   keeps its existing behavior. An undeclared canonical body model remains concrete.
-  A bare declared role exactly spelled in `model` on a classified inference
-  route takes the facade's local role path. Unified listener inference uses
+  A bare declared role exactly spelled in `model` takes the facade's local role
+  path, including native aliases and unlisted model-bearing paths. Unified listener inference uses
   the hybrid entry below. Cluster ingress has its own listener boundary.
 - **Routing listener.** When the active policy sets `routing.listener.enabled`
   with a `port`, the process itself (not an engine facade) binds

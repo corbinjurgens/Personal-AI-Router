@@ -5,6 +5,13 @@ SPDX-License-Identifier: Apache-2.0
 
 # Configure model settings
 
+Requests name a declared role or a visible profile key. A declared role takes
+precedence over an equal profile key. Other names return HTTP 404 with
+`no profile or role named <name>`. `/v1/models` lists visible profile keys and
+roles, including their `:local` and `:api` overrides. Model files without a
+profile remain visible in the Models tab but are not routable, including native
+store and model-source names. Strict, public and hybrid qualification still apply.
+
 Open **Configure** on a model row in Model Manager, or **Configure model** in
 Routing settings. The side panel shows the node, engine and exact native model
 identifier. Configuration is available while the engine is Off. A known row

@@ -116,6 +116,8 @@ func residentHarnessFor(t *testing.T, engine string, models ...string) (*admHarn
 	p.Admission.SwitchTimeoutSeconds = 5
 	p.Admission.QueueTimeoutSeconds = 0
 	for i := range p.Profiles {
+		p.Profiles[i].Key = p.Profiles[i].Model
+		p.Profiles[i].DisplayName = p.Profiles[i].Model
 		p.Profiles[i].MemoryBytes = 40
 	}
 	p.ResidentModels = nodepolicy.ResidentModels{{Engine: engine, Model: models[0]}}

@@ -367,7 +367,7 @@ func (h *routingHandler) preflight(w http.ResponseWriter, r *http.Request, route
 // Context bounds use each profile's declaring node and enabled engine resolver.
 func (h *routingHandler) listModels(w http.ResponseWriter) {
 	pol := h.host.admission.currentPolicy()
-	data := h.host.hybridAliasRecords(pol, h.host.declaredRoles(pol, nil))
+	data := h.host.profileModelEntries(pol, nil)
 	if data == nil {
 		data = []json.RawMessage{}
 	}

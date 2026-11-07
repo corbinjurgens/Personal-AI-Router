@@ -6,9 +6,11 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strconv"
 	"testing"
 
+	"nvpair-shared/nodepolicy"
 	"nvpair-shared/schedulerwire"
 )
 
@@ -114,6 +116,9 @@ func TestResolveCandidates_FiltersBeforeSelectionAndPriority(t *testing.T) {
 	disc := NewDiscovery()
 	a, c, d := prNode("a"), prNode("c"), prNode("d")
 	a.Models, c.Models, d.Models = []string{"llama"}, []string{"llama"}, []string{"mistral"}
+	a.Profiles = []nodepolicy.AdvertisedProfile{{Key: "llama", Engine: anyProfile(t).Name, Model: "llama"}}
+	c.Profiles = slices.Clone(a.Profiles)
+	d.Profiles = []nodepolicy.AdvertisedProfile{{Key: "mistral", Engine: anyProfile(t).Name, Model: "mistral"}}
 	for _, n := range []Node{a, prNode("b"), c, d} {
 		disc.AddManual(n)
 	}

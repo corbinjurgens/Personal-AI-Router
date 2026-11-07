@@ -83,7 +83,7 @@ func TestModelControlsIngressRawBuffer(t *testing.T) {
 func TestModelControlsIngressFacade(t *testing.T) {
 	test := func(name, method, target, body string, status, hits int) {
 		t.Run(name, func(t *testing.T) {
-			fx := newTierFixture(t, llamacppCase(t), nodepolicy.Default(), map[string][]string{"peer": {"good:tag"}}, nil)
+			fx := newTierFixture(t, llamacppCase(t), nodepolicy.Default(), map[string][]string{"peer": {"good/tag"}}, nil)
 			rec := httptest.NewRecorder()
 			fx.p.soleFacade().handleHTTP(rec, httptest.NewRequest(method, target, strings.NewReader(body)))
 			if rec.Code != status || fx.eng["peer"].hits() != hits {
@@ -109,7 +109,7 @@ func TestModelControlsIngressFacade(t *testing.T) {
 			}
 		})
 	}
-	test("valid model and opaque content", http.MethodPost, "/v1/chat/completions", `{"model":"good:tag","messages":[{"content":"a\nb"}],"opaque":{"model":"bad\u0085"}}`, http.StatusOK, 1)
+	test("valid model and opaque content", http.MethodPost, "/v1/chat/completions", `{"model":"good/tag","messages":[{"content":"a\nb"}],"opaque":{"model":"bad\u0085"}}`, http.StatusOK, 1)
 	test("body control", http.MethodPost, "/v1/chat/completions", `{"model":"sentinel\nmodel"}`, http.StatusBadRequest, 0)
 	test("control operation name", http.MethodPost, "/props", `{"name":"sentinel\u0085model"}`, http.StatusBadRequest, 0)
 	test("query control", http.MethodGet, "/props?model=sentinel%0Amodel", "", http.StatusBadRequest, 0)
@@ -351,183 +351,95 @@ func TestModelControlsSelectionPolicyBounds(t *testing.T) {
 	test("control", "bad\n", false)
 }
 
-type modelControlsTransport struct{ body string }
-
-func (rt modelControlsTransport) RoundTrip(*http.Request) (*http.Response, error) {
-	return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(rt.body))}, nil
-}
-
-func TestModelControlsSelectionModelList(t *testing.T) {
-	test := func(name, body string, role routeRole, want int, profile engineProfile) {
+func TestModelControlsCatalogIgnoresNativeInventoryAndResponses(t *testing.T) {
+	test := func(name, body string) {
 		t.Run(name, func(t *testing.T) {
-			previous := modelListClient
-			modelListClient = &http.Client{Transport: modelControlsTransport{body: body}}
-			t.Cleanup(func() { modelListClient = previous })
-			p, _ := policyProxyFor(t, profile)
+			var upstreamHits atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				upstreamHits.Add(1)
+				if _, err := io.WriteString(w, body); err != nil {
+					t.Errorf("write native inventory: %v", err)
+				}
+			}))
+			t.Cleanup(upstream.Close)
+			p, _ := policyProxyFor(t, llamacppCase(t).profile)
 			f := p.soleFacade()
+			node := nodeFor(t, "peer", upstream.URL)
+			node.Models = []string{"bad\n", string([]byte{0xff}), "native-only"}
+			node.Profiles = []nodepolicy.AdvertisedProfile{
+				{Key: "visible-profile", Engine: f.profile.Name, Model: "native-only"},
+				{Key: "bad\n", Engine: f.profile.Name, Model: "native-only"},
+				{Key: "invalid-target", Engine: f.profile.Name, Model: "bad\n"},
+			}
+			f.discovery.AddManual(node)
+			target, err := url.Parse(upstream.URL)
+			if err != nil {
+				t.Fatalf("parse upstream URL: %v", err)
+			}
 			rec := httptest.NewRecorder()
-			status, err := f.serveModelList(rec, httptest.NewRequest(http.MethodGet, "/v1/models", nil), route{Path: "/v1/models", Role: role}, []candidate{{id: "fixture", url: &url.URL{Scheme: "http", Host: "fixture.invalid"}}})
+			status, err := f.serveModelList(rec, httptest.NewRequest(http.MethodGet, "/v1/models", nil),
+				[]candidate{{id: "peer", url: target}})
 			if err != nil || status != http.StatusOK {
-				t.Fatalf("list status/error = %d/%v", status, err)
+				t.Fatalf("catalog status/error = %d/%v", status, err)
 			}
 			var result struct {
-				Data   []json.RawMessage `json:"data"`
-				Models []json.RawMessage `json:"models"`
+				Object string `json:"object"`
+				Data   []struct {
+					ID string `json:"id"`
+				} `json:"data"`
 			}
 			if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
-				t.Fatal(err)
+				t.Fatalf("decode catalog: %v", err)
 			}
-			rows := result.Data
-			if len(rows) != want {
-				t.Fatalf("list rows = %s, want %d entries", rec.Body.Bytes(), want)
+			if result.Object != "list" || len(result.Data) != 1 || result.Data[0].ID != "visible-profile" {
+				t.Fatalf("catalog = %+v, want only advertised profile key", result)
 			}
-			if want == 1 {
-				var identity struct {
-					ID    string `json:"id"`
-					Model string `json:"model"`
-					Name  string `json:"name"`
-				}
-				if err := json.Unmarshal(rows[0], &identity); err != nil {
-					t.Fatal(err)
-				}
-				if identity.ID != "good" && identity.Model != "good" && identity.Name != "good" {
-					t.Fatalf("valid sibling lost: %+v", identity)
-				}
+			if upstreamHits.Load() != 0 {
+				t.Fatalf("native catalog fetches = %d, want 0", upstreamHits.Load())
 			}
 		})
 	}
-	test("OpenAI mixed raw entries", `{"data":[{"id":"bad`+string([]byte{0xff})+`"},{"id":"bad\n"},{"id":"good"}]}`, roleModelListOpenAIGET, 1, anyProfile(t))
-	test("all bad is successful empty", `{"data":[{"id":"bad\u0085"}]}`, roleModelListOpenAIGET, 0, anyProfile(t))
+	test("mixed invalid native identifiers", `{"data":[{"id":"bad`+string([]byte{0xff})+`"},{"id":"bad\n"},{"id":"native-only"}]}`)
+	test("malformed native envelope", `{"data":[42,null,{},{"name":"native-only"}]}`)
+	test("invalid native JSON", `{"data":[`)
 }
 
-func TestModelControlsSelectionModelListFailureSemantics(t *testing.T) {
-	dialect := func(name, path, upstreamPath, envelope, valid, missing string, profile engineProfile) {
+func TestModelControlsCatalogIndependentOfUnavailableEngines(t *testing.T) {
+	test := func(name string, profiles []nodepolicy.AdvertisedProfile, want []string) {
 		t.Run(name, func(t *testing.T) {
-			test := func(name, rows string, origin, healthyPeer bool, wantStatus int, wantModels []string) {
-				t.Run(name, func(t *testing.T) {
-					const browserOrigin = "http://app.test"
-					wantOrigin := ""
-					if origin {
-						wantOrigin = browserOrigin
-					}
-					var upstreamHits atomic.Int32
-					upstream := func(rows string) *httptest.Server {
-						t.Helper()
-						server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-							upstreamHits.Add(1)
-							if r.URL.Path != upstreamPath || r.Header.Get("Origin") != wantOrigin {
-								t.Error("model-list forwarding changed path or Origin")
-							}
-							w.Header().Set("Access-Control-Allow-Origin", browserOrigin)
-							w.Header().Set("Content-Type", "application/json")
-							if _, err := io.WriteString(w, `{"`+envelope+`":[`+rows+`]}`); err != nil {
-								t.Errorf("write model inventory: %v", err)
-							}
-						}))
-						t.Cleanup(server.Close)
-						return server
-					}
-					p, writer := policyProxyFor(t, profile)
-					f := p.soleFacade()
-					f.discovery.AddManual(nodeFor(t, "first", upstream(rows).URL))
-					wantHits := int32(1)
-					if healthyPeer {
-						f.discovery.AddManual(nodeFor(t, "second", upstream(valid).URL))
-						wantHits++
-					}
-					r := httptest.NewRequest(http.MethodGet, path, nil)
-					r.RemoteAddr = "127.0.0.1:4567"
-					if origin {
-						r.Header.Set("Origin", browserOrigin)
-					}
-					rec := httptest.NewRecorder()
-					f.handlePlain(rec, r)
-					if rec.Code != wantStatus || upstreamHits.Load() != wantHits {
-						t.Fatalf("model list status/hits = %d/%d, want %d/%d", rec.Code, upstreamHits.Load(), wantStatus, wantHits)
-					}
-					if rec.Header().Get("Access-Control-Allow-Origin") != wantOrigin {
-						t.Fatalf("model list Origin permission = %q, want %q", rec.Header().Get("Access-Control-Allow-Origin"), wantOrigin)
-					}
-					if rec.Code == http.StatusOK {
-						var result struct {
-							Data   []json.RawMessage `json:"data"`
-							Models []json.RawMessage `json:"models"`
-						}
-						if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
-							t.Fatal(err)
-						}
-						entries := result.Data
-						if envelope == "models" {
-							entries = result.Models
-						}
-						if entries == nil {
-							t.Fatal("successful inventory lost known-empty array")
-						}
-						got := make([]string, 0, len(entries))
-						for _, raw := range entries {
-							var model struct {
-								ID    string `json:"id"`
-								Model string `json:"model"`
-								Name  string `json:"name"`
-							}
-							if err := json.Unmarshal(raw, &model); err != nil {
-								t.Fatal(err)
-							}
-							id := model.ID
-							if envelope == "models" {
-								id = model.Model
-								if id == "" {
-									id = model.Name
-								}
-							}
-							got = append(got, id)
-						}
-						if !slices.Equal(got, wantModels) {
-							t.Fatalf("models = %v, want %v", got, wantModels)
-						}
-					} else {
-						var result struct {
-							Error string `json:"error"`
-						}
-						if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
-							t.Fatal(err)
-						}
-						if result.Error != "model inventory unavailable" {
-							t.Fatalf("failure = %+v", result)
-						}
-					}
-					requests := notificationsOf(t, writer, engines.AddressMethod(f.profile.Name, "proxy/request"))
-					if len(requests) != 1 {
-						t.Fatalf("completion count = %d, want 1", len(requests))
-					}
-					var event RequestEvent
-					if err := json.Unmarshal(requests[0], &event); err != nil {
-						t.Fatal(err)
-					}
-					if event.Path != path || event.Status != wantStatus || event.Target != "cluster" {
-						t.Fatalf("list completion = %+v", event)
-					}
-				})
+			p, _ := policyProxyFor(t, llamacppCase(t).profile)
+			f := p.soleFacade()
+			f.discovery.SetSubscribed([]Node{{ID: "unavailable", Profiles: profiles}})
+			rec := httptest.NewRecorder()
+			status, err := f.serveModelList(rec, httptest.NewRequest(http.MethodGet, "/v1/models", nil),
+				nil)
+			if err != nil || status != http.StatusOK || rec.Code != http.StatusOK {
+				t.Fatalf("catalog status/error = %d/%v (HTTP %d)", status, err, rec.Code)
 			}
-			test("nonobject record", `42`, false, false, http.StatusServiceUnavailable, nil)
-			test("null record", `null`, false, false, http.StatusServiceUnavailable, nil)
-			test("empty object", `{}`, false, false, http.StatusServiceUnavailable, nil)
-			test("missing dialect identity", missing, false, false, http.StatusServiceUnavailable, nil)
-			test("nonobject after valid sibling", valid+`,42`, false, false, http.StatusServiceUnavailable, nil)
-			test("missing identity after valid sibling", valid+`,`+missing, false, false, http.StatusServiceUnavailable, nil)
-			test("malformed candidate and valid peer", `42`, false, true, http.StatusOK, []string{"good"})
-			test("Origin nonobject after valid sibling", valid+`,42`, true, false, http.StatusBadGateway, nil)
-			test("Origin missing identity after valid sibling", valid+`,`+missing, true, false, http.StatusBadGateway, nil)
-			test("Origin malformed candidate and valid peer", `42`, true, true, http.StatusBadGateway, nil)
-			invalid := strings.ReplaceAll(valid, "good", `bad\n`)
-			test("supplied invalid sibling", invalid+`,`+valid, false, false, http.StatusOK, []string{"good"})
-			test("Origin supplied invalid sibling", invalid+`,`+valid, true, false, http.StatusOK, []string{"good"})
-			test("all supplied invalid is known empty", invalid, false, false, http.StatusOK, nil)
-			test("Origin all supplied invalid is known empty", invalid, true, false, http.StatusOK, nil)
-			test("Origin successful empty array", "", true, false, http.StatusOK, nil)
+			var result struct {
+				Data []struct {
+					ID string `json:"id"`
+				} `json:"data"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+				t.Fatalf("decode catalog: %v", err)
+			}
+			if result.Data == nil {
+				t.Fatal("catalog omitted known-empty array")
+			}
+			var got []string
+			for _, entry := range result.Data {
+				got = append(got, entry.ID)
+			}
+			if !slices.Equal(got, want) {
+				t.Fatalf("catalog identifiers = %v, want %v", got, want)
+			}
 		})
 	}
-	dialect("OpenAI", "/v1/models", "/models", "data", `{"id":"good"}`, `{"name":"bad\n"}`, llamacppCase(t).profile)
+	test("advertised profile without reachable engine", []nodepolicy.AdvertisedProfile{
+		{Key: "offline-profile", Engine: "unavailable-engine", Model: "native-model"},
+	}, []string{"offline-profile"})
+	test("no declarations is successful empty catalog", nil, nil)
 }
 
 func TestModelControlsStrictCapabilityIdentityThroughProjectionAndOverlay(t *testing.T) {
