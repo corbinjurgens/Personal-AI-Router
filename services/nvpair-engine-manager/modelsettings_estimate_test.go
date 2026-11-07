@@ -2889,3 +2889,339 @@ func TestModelSettingsEstimateTask9AutoCandidateHasNoOverlay(t *testing.T) {
 	f.set(t, map[string]string{"host": "17179869184"})
 	task9AssertBaseEstimate(t, candidate(), base)
 }
+
+type task8EstimateFixture struct {
+	result   modelconfig.InspectResult
+	input    modelEstimateInput
+	measured modelconfig.MeasuredProfile
+	now      time.Time
+}
+
+func newTask8EstimateFixture(t *testing.T, topology string) task8EstimateFixture {
+	t.Helper()
+	f := newTask9EstimateFixture(t, topology)
+	r := f.inspect(t)
+	var in modelEstimateInput
+	if _, err := f.f.ex.inspectModelArtifacts(f.ctx, f.f.request, &in); err != nil {
+		t.Fatalf("read applied estimate input: %v", err)
+	}
+	if in.Allocation == nil {
+		t.Fatal("applied allocation unavailable")
+	}
+	in.Memory = f.memory
+	identity := modelconfig.DiagnosticIdentity{
+		ConfigurationKey: r.ConfigurationKey, NativeBuildID: r.NativeBuildID,
+		BuildInfo: "fixture-build", CPUModel: "fixture CPU", TotalRAMBytes: "8589934592",
+		Artifacts: slices.Clone(r.Artifacts), Requested: in.Allocation.Options.Clone(),
+		PerSlotContext: in.Allocation.PerSlotContext, Slots: in.Allocation.Slots,
+	}
+	for _, d := range r.Estimate.Domains {
+		identity.Placement = append(identity.Placement, modelconfig.DiagnosticPlacement{DomainID: d.ID, Kind: d.Kind, DeviceID: d.DeviceID})
+		if d.Kind == "device" {
+			identity.GPUs = append(identity.GPUs, modelconfig.DiagnosticGPU{UUID: d.DeviceID, Name: "fixture GPU", TotalMemoryBytes: d.CapacityBytes})
+		}
+	}
+	in.BuildID, in.DiagnosticIdentity = r.NativeBuildID, &identity
+	now := f.f.ex.modelEstimates.clock()
+	m := modelconfig.MeasuredProfile{DiagnosticIdentity: identity.Clone(), RunID: "diagnostic-run", RecordedAt: now.UTC().Format(time.RFC3339Nano), Outcome: "completed"}
+	for _, placement := range identity.Placement {
+		m.Pools = append(m.Pools, modelconfig.MeasuredPool{
+			DomainID: placement.DomainID, Kind: placement.Kind, DeviceID: placement.DeviceID,
+			BaselineAvailableBytes: "8589934592", AfterLoadAvailableBytes: "8588886016",
+			LowMinAvailableBytes: "8588886016", HighMinAvailableBytes: "8588886016", PeakUsedBytes: "1048576",
+			Source: "fixture sampler", Samples: 6, IntervalMS: 2000,
+		})
+	}
+	prompt, cached, generated := identity.PerSlotContext-144, int32(0), int32(128)
+	first, end, overlap := 10.0, 100.0, true
+	m.High = &modelconfig.MeasuredPhase{Coverage: "complete", Overlapped: &overlap, OverlapWindowSampled: &overlap, WallMS: 100}
+	for range identity.Slots {
+		m.High.Requests = append(m.High.Requests, modelconfig.MeasuredRequest{
+			TargetPromptTokens: prompt, PromptTokens: &prompt, CachedTokens: &cached,
+			GeneratedTokens: &generated, FirstTokenMS: &first, EndMS: &end,
+		})
+	}
+	if err := m.Validate(); err != nil {
+		t.Fatalf("measured fixture: %v", err)
+	}
+	return task8EstimateFixture{result: r, input: in, measured: m, now: now}
+}
+
+func task8MemoryProfile(t *testing.T, m modelconfig.MeasuredProfile) modelconfig.MemoryProfile {
+	t.Helper()
+	p := modelconfig.MemoryProfile{
+		Kind: "measured", ConfigurationKey: m.ConfigurationKey, ExecutionKey: m.ExecutionKey,
+		NativeBuildID: m.NativeBuildID, RecordedAt: m.RecordedAt, Measured: &m, Current: true,
+	}
+	if m.ExecutionKey == "" && m.Outcome == "completed" {
+		var kinds []string
+		for _, placement := range m.Placement {
+			kinds = append(kinds, placement.Kind)
+		}
+		p.CoversPools = m.Covers(kinds)
+		for _, pool := range m.Pools {
+			switch pool.Kind {
+			case "host":
+				p.HostBytes = pool.PeakUsedBytes
+			case "device":
+				p.DeviceBytes = pool.PeakUsedBytes
+			case "shared":
+				p.SharedBytes = pool.PeakUsedBytes
+			}
+		}
+	}
+	if err := p.Validate(); err != nil {
+		t.Fatalf("memory profile fixture: %v", err)
+	}
+	return p
+}
+
+func TestModelSettingsEstimateTask8MeasuredPrecedence(t *testing.T) {
+	test := func(name, baseKind string, stated bool) {
+		t.Run(name, func(t *testing.T) {
+			f := newTask8EstimateFixture(t, "mapped")
+			r := f.result.Clone()
+			r.Estimate.EstimateSource.Kind = baseKind
+			r.MemoryProfiles = []modelconfig.MemoryProfile{task8MemoryProfile(t, f.measured)}
+			if stated {
+				r.MemoryProfiles = append(r.MemoryProfiles, modelconfig.MemoryProfile{
+					Kind: "stated", ConfigurationKey: r.ConfigurationKey, NativeBuildID: r.NativeBuildID,
+					RecordedAt: f.measured.RecordedAt, Current: true, HostBytes: "2", DeviceBytes: "3",
+				})
+			}
+			modelEstimateStated(&r, f.input, f.now)
+			if err := r.Validate(); err != nil {
+				t.Fatalf("overlay inspection: %v", err)
+			}
+			if !reflect.DeepEqual(r.Estimate.Components, f.result.Estimate.Components) {
+				t.Fatal("overlay changed component evidence")
+			}
+			source := r.Estimate.EstimateSource
+			if stated {
+				if source == nil || source.Kind != "user-stated" || r.Estimate.HostBytes != "2" || r.Estimate.DeviceBytes != "3" {
+					t.Fatalf("statement lost precedence: %+v", r.Estimate)
+				}
+				return
+			}
+			if source == nil || source.Kind != "measured" || source.Provider != "pair-diagnostic" || source.Revision != f.measured.RunID || source.Basis != "measured by sampling every ~2 s" || len(source.UnpricedCosts) == 0 {
+				t.Fatalf("measured provenance: %+v", source)
+			}
+			if r.Estimate.HostBytes != "1048576" || r.Estimate.DeviceBytes != "1048576" || r.Estimate.CapacityFit != "fits" || r.Estimate.FreeFit != "fits" {
+				t.Fatalf("measured totals and comparison: %+v", r.Estimate)
+			}
+		})
+	}
+	test("measured replaces component totals", "pair-estimate", false)
+	test("measured replaces engine report totals", "engine-report", false)
+	test("statement takes precedence", "pair-estimate", true)
+}
+
+func TestModelSettingsEstimateTask8DomainlessMeasuredPools(t *testing.T) {
+	test := func(topology string, exceeds bool) {
+		name := topology
+		if exceeds {
+			name += " exceeds capacity"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newTask8EstimateFixture(t, topology)
+			if exceeds {
+				f.measured.Pools[0].PeakUsedBytes = "17179869184"
+			}
+			r := f.result.Clone()
+			r.Estimate = modelEstimateUnknown("estimator busy")
+			r.MemoryProfiles = []modelconfig.MemoryProfile{task8MemoryProfile(t, f.measured)}
+			modelEstimateStated(&r, f.input, f.now)
+			if err := r.Validate(); err != nil {
+				t.Fatalf("domainless overlay: %v", err)
+			}
+			if r.Estimate.EstimateSource == nil || r.Estimate.EstimateSource.Kind != "measured" || len(r.Estimate.Domains) != len(r.ConfigurationPools) {
+				t.Fatalf("measured pools unavailable: %+v", r.Estimate)
+			}
+			wantFit := "fits"
+			if exceeds {
+				wantFit = "exceeds"
+			}
+			if r.Estimate.CapacityFit != wantFit || r.Estimate.FreeFit != wantFit {
+				t.Fatalf("comparison=%s/%s want %s", r.Estimate.CapacityFit, r.Estimate.FreeFit, wantFit)
+			}
+			for i, d := range r.Estimate.Domains {
+				if d.RequiredBytes != f.measured.Pools[i].PeakUsedBytes || d.RequiredLowBytes != d.RequiredBytes || d.RequiredHighBytes != "" || d.CapacitySource != "synthetic" || d.RemainingValidityMS <= 0 {
+					t.Fatalf("measured range or capacity: %+v", d)
+				}
+				if !slices.ContainsFunc(d.Unknowns, func(warning string) bool { return strings.Contains(warning, "short peaks may be missed") }) {
+					t.Fatalf("sampling warning absent: %+v", d)
+				}
+			}
+			if topology == "shared" && (len(r.Estimate.Domains) != 1 || r.Estimate.Domains[0].Kind != "shared" || r.Estimate.HostBytes != "" || r.Estimate.DeviceBytes != "") {
+				t.Fatalf("UMA double counted: %+v", r.Estimate)
+			}
+			// Round-trip the actual wire result, including absent high bounds.
+			data, err := json.Marshal(r)
+			if err != nil {
+				t.Fatalf("marshal measured inspection: %v", err)
+			}
+			var decoded modelconfig.InspectResult
+			if err := json.Unmarshal(data, &decoded); err != nil {
+				t.Fatalf("decode measured inspection: %v", err)
+			}
+			if err := decoded.Validate(); err != nil {
+				t.Fatalf("decoded measured inspection: %v", err)
+			}
+			if !reflect.DeepEqual(decoded.Estimate, r.Estimate) {
+				t.Fatal("measured estimate changed in transport")
+			}
+		})
+	}
+	test("host", false)
+	test("mapped", false)
+	test("shared", false)
+	test("host", true)
+}
+
+func TestModelSettingsEstimateTask8IncompleteMeasurementWarnings(t *testing.T) {
+	test := func(name, warning string, change func(*modelconfig.MeasuredProfile)) {
+		t.Run(name, func(t *testing.T) {
+			f := newTask8EstimateFixture(t, "mapped")
+			change(&f.measured)
+			r := f.result.Clone()
+			r.MemoryProfiles = []modelconfig.MemoryProfile{task8MemoryProfile(t, f.measured)}
+			if r.MemoryProfiles[0].OverlayEligible(*f.input.DiagnosticIdentity, r.ConfigurationPools) {
+				t.Fatal("incomplete fixture unexpectedly eligible")
+			}
+			modelEstimateStated(&r, f.input, f.now)
+			if err := r.Validate(); err != nil {
+				t.Fatalf("warning inspection: %v", err)
+			}
+			if !slices.Contains(r.Estimate.Unknowns, warning) {
+				t.Fatalf("missing %q: %v", warning, r.Estimate.Unknowns)
+			}
+			r.Estimate.Unknowns = f.result.Estimate.Unknowns
+			if !reflect.DeepEqual(r.Estimate, f.result.Estimate) {
+				t.Fatal("incomplete measurement changed base estimate")
+			}
+		})
+	}
+	test("host pool missing", "measured run did not cover host", func(m *modelconfig.MeasuredProfile) { m.Pools = m.Pools[1:] })
+	test("device pool missing", "measured run did not cover device", func(m *modelconfig.MeasuredProfile) { m.Pools = m.Pools[:1] })
+	test("phase sample missing", "measured run did not cover device", func(m *modelconfig.MeasuredProfile) { m.Pools[1].LowMinAvailableBytes = "" })
+	test("no samples", "measured run did not cover host", func(m *modelconfig.MeasuredProfile) { m.Pools[0].Samples = 0 })
+	test("partial context", "measured run did not fill the context (high phase coverage partial)", func(m *modelconfig.MeasuredProfile) { m.High.Coverage = "partial" })
+	test("short prompt", "measured run did not fill the context (prompt too short)", func(m *modelconfig.MeasuredProfile) {
+		m.High.Coverage, m.Reason = "partial", "prompt too short"
+		*m.High.Requests[0].PromptTokens = 1
+	})
+	test("cache reuse", "measured run did not fill the context (cache reused)", func(m *modelconfig.MeasuredProfile) {
+		m.High.Coverage, m.Reason = "partial", "cache reused"
+		*m.High.Requests[0].CachedTokens = 1
+	})
+	test("no overlap", "measured run did not fill the context (full-context requests did not overlap)", func(m *modelconfig.MeasuredProfile) { *m.High.Overlapped = false })
+	test("unsampled overlap", "measured run did not fill the context (overlap window not sampled)", func(m *modelconfig.MeasuredProfile) { *m.High.OverlapWindowSampled = false })
+	test("failed run", "measured run failed at high: exercise refused", func(m *modelconfig.MeasuredProfile) {
+		m.Outcome, m.FailedPhase, m.Reason = "failed", "high", "exercise refused"
+	})
+}
+
+func TestModelSettingsEstimateTask8FullIdentityRequired(t *testing.T) {
+	test := func(name string, change func(*modelEstimateInput)) {
+		t.Run(name, func(t *testing.T) {
+			f := newTask8EstimateFixture(t, "mapped")
+			// Every usable GPU belongs to identity, even when this load uses one.
+			second := modelconfig.DiagnosticGPU{UUID: "GPU-22222222-2222-2222-2222-222222222222", Name: "second dedicated GPU", TotalMemoryBytes: "8589934592"}
+			f.measured.GPUs = append(f.measured.GPUs, second)
+			f.input.DiagnosticIdentity.GPUs = append(f.input.DiagnosticIdentity.GPUs, second)
+			r := f.result.Clone()
+			r.MemoryProfiles = []modelconfig.MemoryProfile{task8MemoryProfile(t, f.measured)}
+			change(&f.input)
+			modelEstimateStated(&r, f.input, f.now)
+			if !reflect.DeepEqual(r.Estimate, f.result.Estimate) {
+				t.Fatalf("key-only Current flag authorized overlay: %+v", r.Estimate)
+			}
+		})
+	}
+	test("identity unavailable", func(in *modelEstimateInput) { in.DiagnosticIdentity = nil })
+	test("second dedicated GPU changed", func(in *modelEstimateInput) { in.DiagnosticIdentity.GPUs[1].TotalMemoryBytes = "17179869184" })
+	test("CPU changed", func(in *modelEstimateInput) { in.DiagnosticIdentity.CPUModel = "different CPU" })
+	test("RAM changed", func(in *modelEstimateInput) { in.DiagnosticIdentity.TotalRAMBytes = "17179869184" })
+	test("realized context changed", func(in *modelEstimateInput) { in.DiagnosticIdentity.PerSlotContext += 256 })
+	test("placement changed", func(in *modelEstimateInput) {
+		in.DiagnosticIdentity.Placement[1].DeviceID = in.DiagnosticIdentity.GPUs[1].UUID
+	})
+	test("requested settings changed", func(in *modelEstimateInput) {
+		off := "off"
+		in.DiagnosticIdentity.Requested.FlashAttention = &off
+	})
+	test("artifact changed", func(in *modelEstimateInput) { in.DiagnosticIdentity.Artifacts[0].Identity = "different-artifact" })
+	test("configuration changed", func(in *modelEstimateInput) { in.DiagnosticIdentity.ConfigurationKey = strings.Repeat("e", 64) })
+}
+
+func TestModelSettingsEstimateTask8EarlierBuildRemainsHistory(t *testing.T) {
+	f := newTask8EstimateFixture(t, "host")
+	f.measured.NativeBuildID = "sha256:" + strings.Repeat("e", 64)
+	f.measured.ConfigurationKey = strings.Repeat("f", 64)
+	r := f.result.Clone()
+	p := task8MemoryProfile(t, f.measured)
+	p.Current = false
+	r.MemoryProfiles = []modelconfig.MemoryProfile{p}
+	if p.AutoEligible(*f.input.DiagnosticIdentity, r.ConfigurationPools) {
+		t.Fatal("earlier build became eligible for Auto")
+	}
+	modelEstimateStated(&r, f.input, f.now)
+	if err := r.Validate(); err != nil {
+		t.Fatalf("historical inspection: %v", err)
+	}
+	if !slices.Contains(r.Estimate.Unknowns, "measured on "+p.NativeBuildID+"; not current validation") || len(r.MemoryProfiles) != 1 || r.MemoryProfiles[0].Current {
+		t.Fatalf("historical label or visibility lost: %+v", r)
+	}
+	r.Estimate.Unknowns = f.result.Estimate.Unknowns
+	if !reflect.DeepEqual(r.Estimate, f.result.Estimate) {
+		t.Fatal("earlier build changed current comparison or lifted warnings")
+	}
+}
+
+func TestModelSettingsEstimateTask8DifferentConfigurationHasNoOverlay(t *testing.T) {
+	f := newTask8EstimateFixture(t, "host")
+	f.measured.ConfigurationKey = strings.Repeat("e", 64)
+	p := task8MemoryProfile(t, f.measured)
+	p.Current = false
+	r := f.result.Clone()
+	r.MemoryProfiles = []modelconfig.MemoryProfile{p}
+	modelEstimateStated(&r, f.input, f.now)
+	if !reflect.DeepEqual(r.Estimate, f.result.Estimate) {
+		t.Fatal("measurement transferred to a different configuration")
+	}
+}
+
+func TestModelSettingsEstimateTask8UnpricedTwoDedicatedGPUs(t *testing.T) {
+	test := func(reason string, requested modelconfig.RequestedLoad) {
+		t.Run(reason, func(t *testing.T) {
+			f := newTask8EstimateFixture(t, "mapped")
+			m := f.measured.Clone()
+			m.ConfigurationKey, m.ExecutionKey, m.ConfigurationKeyReason = "", strings.Repeat("e", 64), reason
+			m.Requested = requested
+			second := modelconfig.DiagnosticGPU{UUID: "GPU-22222222-2222-2222-2222-222222222222", Name: "second dedicated GPU", TotalMemoryBytes: "8589934592"}
+			m.GPUs = append(m.GPUs, second)
+			m.Placement = append(m.Placement, modelconfig.DiagnosticPlacement{DomainID: "gpu-second", Kind: "device", DeviceID: second.UUID})
+			pool := m.Pools[1]
+			pool.DomainID, pool.DeviceID = "gpu-second", second.UUID
+			m.Pools = append(m.Pools, pool)
+			p := task8MemoryProfile(t, m)
+			r := f.result.Clone()
+			r.ConfigurationKey, r.ExecutionKey, r.ConfigurationKeyReason, r.ConfigurationPools = "", m.ExecutionKey, reason, nil
+			r.Estimate = modelEstimateUnknown("unpriced placement")
+			r.MemoryProfiles = []modelconfig.MemoryProfile{p}
+			identity := m.DiagnosticIdentity.Clone()
+			f.input.DiagnosticIdentity, f.input.Allocation.Options = &identity, requested
+			before := r.Estimate.Clone()
+			modelEstimateStated(&r, f.input, f.now)
+			if err := r.Validate(); err != nil {
+				t.Fatalf("unpriced inspection: %v", err)
+			}
+			if !reflect.DeepEqual(r.Estimate, before) || p.OverlayEligible(identity, []string{"host", "device"}) || p.AutoEligible(identity, []string{"host", "device"}) || p.HostBytes != "" || p.DeviceBytes != "" {
+				t.Fatal("unpriced two-GPU record affected estimates or Auto")
+			}
+		})
+	}
+	on := "on"
+	test("native-fit", modelconfig.RequestedLoad{Fit: &on})
+	test("gpu-selection", modelconfig.RequestedLoad{ExtraOptions: map[string]string{"device": "CUDA0,CUDA1", "split-mode": "layer", "tensor-split": "1,1", "main-gpu": "0"}})
+}
