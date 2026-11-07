@@ -506,6 +506,8 @@ func TestSettingsFreshRequestRenewsExhaustedProxySupervision(t *testing.T) {
 	sup.onExhausted = func(int) { h.b.proxySupExhausted.Store(true) }
 	h.b.setProxySupervisor(sup)
 	if err := sup.Start(); err != nil {
+		// A failed Start has no monitor for shutdown to join.
+		h.b.setProxySupervisor(nil)
 		t.Fatal(err)
 	}
 	first := h.b.proxyProcessHandle()
