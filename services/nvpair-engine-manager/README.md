@@ -1738,8 +1738,21 @@ model, profile, configuration/execution key and consented effects. Optional
 explicit run fields must match that reservation. `generate` defaults to 128;
 `deadline` is an RFC3339 timestamp bounded to twenty minutes. Unknown native-fit
 targets remain unspecified until identity-checked `/props` reports the realized
-per-slot context, slot count and build. Requested GPU options never manufacture
-observed placement.
+per-slot context, slot count and build. Managed `/props` supplies no device or
+GPU-layer fields. Placement requires complete buffer reports from that exact
+load through the existing capture/parser owner. Host allocations map to the
+host/shared pool; CUDA allocations join the native device identity owner's
+PCI/full UUID (and Windows LUID) report in the child's effective environment.
+Missing, incomplete, stale or unmapped evidence refuses identity before exercise.
+Requested GPU options never manufacture observed placement. Unpriced loads may
+retain private realization evidence without a public or persisted buffer sample.
+
+Ordinary inspection can mark matching authenticated finite or ExecutionKey
+measurements current, including retained valid realization after an unchanged
+restart. Live uncertain realization supersedes past records. Native fit's
+realized context can differ from its plan; changed inputs, artifacts, build, launch environment,
+CPU/RAM/GPU identity, context or placement withdraw currentness. ExecutionKey
+currentness grants neither an estimate overlay nor Auto eligibility.
 
 `engine:diagnostic-run-status` accepts `{runId}` (empty selects the active run).
 Its reply contains `state`, `token`, nested `run`, `workStopped`, retained

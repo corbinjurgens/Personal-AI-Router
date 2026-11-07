@@ -5,7 +5,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -13,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"nvpair-shared/durablefile"
 	"nvpair-shared/modelconfig"
@@ -152,7 +152,7 @@ func TestModelDiagnosticHardwareAndPlacementUseOneUnifiedPool(t *testing.T) {
 	if err := diagnosticHardwareMatchesAt(hardware, memory, true); err != nil {
 		t.Fatalf("unified hardware identity: %v", err)
 	}
-	placement, err := diagnosticPoolPlacement(memory, diagnosticLoadObservation{})
+	placement, err := modelBufferPoolPlacement(memory, []modelconfig.BufferReportRow{{Label: "CPU"}, {Label: "Metal"}}, nil)
 	if err != nil {
 		t.Fatalf("unified placement: %v", err)
 	}
@@ -165,15 +165,15 @@ func TestModelDiagnosticPlacementMapsTwoDedicatedGPUsByPhysicalID(t *testing.T) 
 	memory := modelBufferTestTargetMemory()
 	second := "GPU-22222222-2222-2222-2222-222222222222"
 	pool := memory.Observation.Domains[1]
-	pool.ID, pool.DeviceIDs = "second-gpu", []string{second}
+	pool.ID, pool.DeviceIDs = "second-gpu", []string{second, "pci:0000:ac:00.0", "luid_0x00000000_0x00005678_phys_0"}
 	memory.Observation.Domains = append(memory.Observation.Domains, pool)
 	first := autoTestDeviceBinding().DeviceID
-	devices, err := json.Marshal([]map[string]string{{"uuid": second}, {"uuid": first}})
-	if err != nil {
-		t.Fatalf("encode physical device evidence: %v", err)
+	devices := []modelNativeDevice{
+		{Selector: "CUDA0", Kind: 1, UUID: second, PCI: "0000:ac:00.0", LUID: "luid_0x00000000_0x00005678_phys_0"},
+		{Selector: "CUDA1", Kind: 1, UUID: first, PCI: "0000:ab:00.0", LUID: modelDevicesFixtureLUID},
 	}
-	observed := diagnosticLoadObservation{Placement: map[string]json.RawMessage{"devices": devices, "n_gpu_layers": json.RawMessage(`12`)}}
-	placement, err := diagnosticPoolPlacement(memory, observed)
+	rows := []modelconfig.BufferReportRow{{Label: "CPU"}, {Label: "CUDA0"}, {Label: "CUDA1"}}
+	placement, err := modelBufferPoolPlacement(memory, rows, devices)
 	if err != nil {
 		t.Fatalf("map physical placement: %v", err)
 	}
@@ -183,28 +183,67 @@ func TestModelDiagnosticPlacementMapsTwoDedicatedGPUsByPhysicalID(t *testing.T) 
 	}
 	// Neither pool order nor native enumeration order is physical authority.
 	memory.Observation.Domains = []noderec.MemoryDomain{pool, memory.Observation.Domains[0], memory.Observation.Domains[1]}
-	again, err := diagnosticPoolPlacement(memory, observed)
+	slices.Reverse(devices)
+	again, err := modelBufferPoolPlacement(memory, rows, devices)
 	if err != nil || !reflect.DeepEqual(again, want) {
 		t.Fatalf("reordered mapping=%+v error=%v", again, err)
 	}
 }
 
 func TestModelDiagnosticPlacementRefusesNativeOrdinal(t *testing.T) {
-	observed := diagnosticLoadObservation{Placement: map[string]json.RawMessage{"devices": json.RawMessage(`[{"id":"CUDA0"}]`), "n_gpu_layers": json.RawMessage(`12`)}}
-	if _, err := diagnosticPoolPlacement(modelBufferTestTargetMemory(), observed); err == nil {
+	if _, err := modelBufferPoolPlacement(modelBufferTestTargetMemory(), []modelconfig.BufferReportRow{{Label: "CUDA0"}}, []modelNativeDevice{{Selector: "CUDA0", Kind: 1, UUID: "CUDA0"}}); err == nil {
 		t.Fatal("native ordinal was accepted as physical identity")
 	}
 }
 
 func TestModelDiagnosticPlacementCPUDoesNotClaimEnumeratedGPUs(t *testing.T) {
-	observed := diagnosticLoadObservation{Placement: map[string]json.RawMessage{"devices": json.RawMessage(`[{"id":"CUDA0"}]`), "n_gpu_layers": json.RawMessage(`0`)}}
-	placement, err := diagnosticPoolPlacement(modelBufferTestTargetMemory(), observed)
+	placement, err := modelBufferPoolPlacement(modelBufferTestTargetMemory(), []modelconfig.BufferReportRow{{Label: "CPU"}, {Label: "CPU_Mapped"}, {Label: "CUDA_Host"}}, nil)
 	if err != nil {
 		t.Fatalf("map CPU placement: %v", err)
 	}
 	if !reflect.DeepEqual(placement, []modelconfig.DiagnosticPlacement{{DomainID: "host", Kind: "host"}}) {
 		t.Fatalf("CPU placement=%+v", placement)
 	}
+}
+
+func TestModelDiagnosticPlacementRefusesIncompletePhysicalMapping(t *testing.T) {
+	test := func(name string, change func(*modelconfig.TargetMemory, *[]modelNativeDevice, *[]modelconfig.BufferReportRow)) {
+		t.Run(name, func(t *testing.T) {
+			memory := modelBufferTestTargetMemory()
+			devices := []modelNativeDevice{{Selector: "CUDA0", Kind: 1, UUID: autoTestDeviceBinding().DeviceID, PCI: "0000:ab:00.0", LUID: modelDevicesFixtureLUID}}
+			rows := []modelconfig.BufferReportRow{{Label: "CUDA0"}}
+			change(memory, &devices, &rows)
+			if placement, err := modelBufferPoolPlacement(memory, rows, devices); err == nil {
+				t.Fatalf("incomplete evidence produced placement: %+v", placement)
+			}
+		})
+	}
+	test("missing allocation rows", func(_ *modelconfig.TargetMemory, _ *[]modelNativeDevice, rows *[]modelconfig.BufferReportRow) {
+		*rows = nil
+	})
+	test("missing device identity", func(_ *modelconfig.TargetMemory, devices *[]modelNativeDevice, _ *[]modelconfig.BufferReportRow) {
+		*devices = nil
+	})
+	test("wrong physical UUID", func(_ *modelconfig.TargetMemory, devices *[]modelNativeDevice, _ *[]modelconfig.BufferReportRow) {
+		(*devices)[0].UUID = "GPU-22222222-2222-2222-2222-222222222222"
+	})
+	test("wrong physical PCI", func(_ *modelconfig.TargetMemory, devices *[]modelNativeDevice, _ *[]modelconfig.BufferReportRow) {
+		(*devices)[0].PCI = "0000:ac:00.0"
+	})
+	test("unknown buffer label", func(_ *modelconfig.TargetMemory, _ *[]modelNativeDevice, rows *[]modelconfig.BufferReportRow) {
+		(*rows)[0].Label = "CUDA7"
+	})
+	test("duplicate selector", func(_ *modelconfig.TargetMemory, devices *[]modelNativeDevice, _ *[]modelconfig.BufferReportRow) {
+		*devices = append(*devices, (*devices)[0])
+	})
+	test("duplicate physical pool", func(memory *modelconfig.TargetMemory, _ *[]modelNativeDevice, _ *[]modelconfig.BufferReportRow) {
+		pool := memory.Observation.Domains[1]
+		pool.ID = "duplicate"
+		memory.Observation.Domains = append(memory.Observation.Domains, pool)
+	})
+	test("ambiguous pool alias", func(memory *modelconfig.TargetMemory, _ *[]modelNativeDevice, _ *[]modelconfig.BufferReportRow) {
+		memory.Observation.Domains[1].DeviceIDs = append(memory.Observation.Domains[1].DeviceIDs, "pci:0000:ac:00.0")
+	})
 }
 
 func TestModelDiagnosticRecordAuthenticatesCompletedProducingRun(t *testing.T) {
@@ -343,6 +382,285 @@ func TestModelDiagnosticInspectionRetainsCurrentFailedRealization(t *testing.T) 
 	}) || inspected.Estimate.EstimateSource != nil && inspected.Estimate.EstimateSource.Kind == "measured" {
 		t.Fatal("failed run changed estimated memory")
 	}
+}
+
+func recordAuthenticatedDiagnosticFixture(t *testing.T, f inspectionFixture, identity modelconfig.DiagnosticIdentity) modelconfig.MeasuredProfile {
+	t.Helper()
+	if err := os.Chmod(f.ex.baseDir, 0o700); err != nil {
+		t.Fatalf("secure measured store: %v", err)
+	}
+	f.ex.modelMemoryProfiles = newModelMemoryProfiles(f.ex.baseDir)
+	measured := measuredStoreFixture()
+	measured.DiagnosticIdentity, measured.BuildPin = identity.Clone(), identity.NativeBuildID
+	prompt := identity.PerSlotContext - 144
+	measured.High.Requests[0].TargetPromptTokens = prompt
+	measured.High.Requests[0].PromptTokens = &prompt
+	f.ex.diagnosticCompleted = map[string]diagnosticCompletedRun{measured.RunID: {
+		token:       "authenticated-fixture-token",
+		Reservation: diagnosticReserveParams{RunID: measured.RunID, Engine: f.request.Engine, ModelID: f.request.ModelID, ProfileKey: f.request.ProfileKey, ConfigurationKey: identity.ConfigurationKey, ExecutionKey: identity.ExecutionKey},
+		Status:      diagnosticOperationStatus{DiagnosticRun: modelconfig.DiagnosticRun{RunID: measured.RunID, Outcome: measured.Outcome}, WorkStopped: true, Identity: &identity, High: measured.High},
+	}}
+	if err := f.ex.recordDiagnostic(diagnosticRecordParams{RunID: measured.RunID, Token: "authenticated-fixture-token", Profile: measured}); err != nil {
+		t.Fatalf("record producing realization: %v", err)
+	}
+	return measured
+}
+
+func compileDiagnosticFixtureLoads(t *testing.T, f inspectionFixture) {
+	t.Helper()
+	rt := f.st.plat.Runtime
+	command, err := launchForState(f.st, rt.Port)
+	if err != nil {
+		t.Fatalf("prepare changed fixture: %v", err)
+	}
+	prepared, err := compileTypedLlamaInputs(context.Background(), f.st, command, rt, false)
+	if err != nil {
+		t.Fatalf("compile changed fixture: %v", err)
+	}
+	f.st.plat.Runtime.ModelLoads = modelconfig.CloneLoads(prepared.ModelLoads)
+}
+
+func diagnosticExecutionKeyInspectionFixture(t *testing.T, reason string) (inspectionFixture, context.Context, modelconfig.MeasuredProfile) {
+	t.Helper()
+	f := newAppliedKeyFixture(t)
+	if reason == "native-fit" {
+		on := "on"
+		f.st.plat.Runtime.ModelLoads[0].Requested.Fit = &on
+	} else {
+		f.st.plat.Runtime.ModelLoads[0].Requested.ExtraOptions = map[string]string{"device": "CUDA7"}
+	}
+	compileDiagnosticFixtureLoads(t, f)
+	ctx := withDiagnosticHardware(f.ex.modelMemoryContext(context.Background(), f.request.Engine, modelBufferTestTargetMemory(), false), diagnosticTestHardware())
+	result, err := f.ex.inspectModel(ctx, f.request, false)
+	if err != nil {
+		t.Fatalf("inspect unpriced fixture: %v", err)
+	}
+	identity, err := f.ex.diagnosticRequestedIdentity(ctx, f.request, result)
+	if err != nil || identity.ExecutionKey == "" || identity.ConfigurationKeyReason != reason {
+		t.Fatalf("unpriced requested identity=%+v error=%v", identity, err)
+	}
+	identity.BuildInfo, identity.PerSlotContext, identity.Slots = "synthetic-native-build", 4096, 1
+	if reason == "native-fit" {
+		identity.PerSlotContext = 2048
+	}
+	identity.Placement = []modelconfig.DiagnosticPlacement{{DomainID: "host", Kind: "host"}}
+	measured := recordAuthenticatedDiagnosticFixture(t, f, identity)
+	return f, ctx, measured
+}
+
+func TestModelDiagnosticExecutionKeyInspectionRetainsSemanticCurrentnessAfterRestart(t *testing.T) {
+	for _, reason := range []string{"native-fit", "gpu-selection"} {
+		t.Run(reason, func(t *testing.T) {
+			f, ctx, measured := diagnosticExecutionKeyInspectionFixture(t, reason)
+			assertCurrent := func(stage string) {
+				t.Helper()
+				result, err := f.ex.inspectModel(ctx, f.request, false)
+				if err != nil {
+					t.Fatalf("%s inspection: %v", stage, err)
+				}
+				if len(result.MemoryProfiles) != 1 || !result.MemoryProfiles[0].Current || result.MemoryProfiles[0].Measured.RunID != measured.RunID {
+					t.Fatalf("%s lost current unpriced realization: %+v", stage, result.MemoryProfiles)
+				}
+				profile := result.MemoryProfiles[0]
+				if profile.HostBytes != "" || profile.DeviceBytes != "" || profile.SharedBytes != "" || profile.CoversPools || profile.Measured.OverlayEligible(measured.DiagnosticIdentity, nil) || profile.Measured.AutoEligible(measured.DiagnosticIdentity, nil) {
+					t.Fatalf("%s unpriced record gained projection: %+v", stage, profile)
+				}
+				if result.Estimate.EstimateSource != nil && result.Estimate.EstimateSource.Kind == "measured" {
+					t.Fatalf("%s unpriced record overlaid estimate", stage)
+				}
+				if result.LoadObservation != nil && (result.LoadObservation.SampleID != "" || len(result.LoadObservation.Rows) != 0) {
+					t.Fatalf("%s unpriced public buffer sample: %+v", stage, result.LoadObservation)
+				}
+			}
+			assertCurrent("unchanged")
+			f.ex.modelMemoryProfiles = newModelMemoryProfiles(f.ex.baseDir)
+			f.ex.diagnosticCompleted = nil // process-local producing authority is gone
+			f.ex.managerIncarnation = "restarted-manager"
+			assertCurrent("reopened store and manager")
+		})
+	}
+}
+
+func TestModelDiagnosticGPUSelectionDoesNotExposePriorFiniteBufferSample(t *testing.T) {
+	f, ctx, measured := diagnosticExecutionKeyInspectionFixture(t, "gpu-selection")
+	store, sample := modelBufferStoreFixture(t)
+	store.now = time.Now
+	sample.ModelIdentity = modelBufferHash(struct{ Engine, Model string }{modelBufferHash(f.request.Engine), f.request.ProfileKey})
+	sample.Observation.RecordedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	sample.Observation.BuildID = measured.NativeBuildID
+	sample.Observation.ConfigurationKey = strings.Repeat("c", 64)
+	if state := store.publish(sample); state != "saved" {
+		t.Fatalf("seed prior finite history: %s", state)
+	}
+	f.ex.modelBuffers.store = store
+	if history := f.ex.projectModelBufferObservation(f.st, f.request.Engine, f.request.ProfileKey, nil); history.SampleID != sample.Observation.SampleID {
+		t.Fatalf("prior finite sample positive control: %+v", history)
+	}
+	result, err := f.ex.inspectModel(ctx, f.request, false)
+	if err != nil {
+		t.Fatalf("inspect GPU-selection with finite history: %v", err)
+	}
+	if result.LoadObservation != nil {
+		t.Fatalf("GPU selection exposed finite buffer history: %+v", result.LoadObservation)
+	}
+}
+
+func TestModelDiagnosticExecutionKeyInspectionInvalidatesChangedIdentity(t *testing.T) {
+	test := func(name string, change func(*testing.T, inspectionFixture, context.Context) context.Context) {
+		for _, reason := range []string{"native-fit", "gpu-selection"} {
+			t.Run(reason+"/"+name, func(t *testing.T) {
+				f, ctx, _ := diagnosticExecutionKeyInspectionFixture(t, reason)
+				ctx = change(t, f, ctx)
+				result, err := f.ex.inspectModel(ctx, f.request, false)
+				if err != nil {
+					t.Fatalf("inspect changed identity: %v", err)
+				}
+				if len(result.MemoryProfiles) != 1 || result.MemoryProfiles[0].Current {
+					t.Fatalf("changed identity retained current record: %+v", result.MemoryProfiles)
+				}
+				if result.Estimate.EstimateSource != nil && result.Estimate.EstimateSource.Kind == "measured" {
+					t.Fatal("changed unpriced identity overlaid an estimate")
+				}
+			})
+		}
+	}
+	test("requested inputs", func(t *testing.T, f inspectionFixture, ctx context.Context) context.Context {
+		cache := "q8_0"
+		f.st.plat.Runtime.ModelLoads[0].Requested.CacheTypeK = &cache
+		compileDiagnosticFixtureLoads(t, f)
+		return ctx
+	})
+	test("artifact", func(t *testing.T, f inspectionFixture, ctx context.Context) context.Context {
+		writeInspectionGGUF(t, f.model, "llama", 0.25, 8192)
+		return ctx
+	})
+	test("native build", func(t *testing.T, f inspectionFixture, ctx context.Context) context.Context {
+		writeTestFile(t, f.st.binPath, []byte("changed native executable"))
+		return ctx
+	})
+	test("native launch environment", func(t *testing.T, f inspectionFixture, ctx context.Context) context.Context {
+		if f.st.plat.Runtime.Env == nil {
+			f.st.plat.Runtime.Env = map[string]string{}
+		}
+		f.st.plat.Runtime.Env["GGML_CUDA_DISABLE_GRAPHS"] = "1"
+		compileDiagnosticFixtureLoads(t, f)
+		return ctx
+	})
+	test("CPU", func(_ *testing.T, _ inspectionFixture, ctx context.Context) context.Context {
+		hardware := diagnosticTestHardware()
+		hardware.CPUModel = "replacement CPU"
+		return withDiagnosticHardware(ctx, hardware)
+	})
+	test("RAM", func(_ *testing.T, f inspectionFixture, ctx context.Context) context.Context {
+		memory, hardware := modelBufferTestTargetMemory(), diagnosticTestHardware()
+		hardware.TotalRAMBytes = "17179869184"
+		memory.Observation.Domains[0].Total.Bytes = hardware.TotalRAMBytes
+		return withDiagnosticHardware(f.ex.modelMemoryContext(ctx, f.request.Engine, memory, false), hardware)
+	})
+	test("GPU UUID", func(_ *testing.T, f inspectionFixture, ctx context.Context) context.Context {
+		memory, hardware := modelBufferTestTargetMemory(), diagnosticTestHardware()
+		hardware.GPUs[0].UUID = "GPU-22222222-2222-2222-2222-222222222222"
+		memory.Observation.Domains[1].DeviceIDs[0] = hardware.GPUs[0].UUID
+		return withDiagnosticHardware(f.ex.modelMemoryContext(ctx, f.request.Engine, memory, false), hardware)
+	})
+	test("GPU name", func(_ *testing.T, _ inspectionFixture, ctx context.Context) context.Context {
+		hardware := diagnosticTestHardware()
+		hardware.GPUs[0].Name = "replacement GPU"
+		return withDiagnosticHardware(ctx, hardware)
+	})
+	test("GPU capacity", func(_ *testing.T, f inspectionFixture, ctx context.Context) context.Context {
+		memory, hardware := modelBufferTestTargetMemory(), diagnosticTestHardware()
+		hardware.GPUs[0].TotalMemoryBytes = "17179869184"
+		memory.Observation.Domains[1].Total.Bytes = hardware.GPUs[0].TotalMemoryBytes
+		return withDiagnosticHardware(f.ex.modelMemoryContext(ctx, f.request.Engine, memory, false), hardware)
+	})
+	test("placement pool", func(_ *testing.T, f inspectionFixture, ctx context.Context) context.Context {
+		memory := modelBufferTestTargetMemory()
+		memory.Observation.Domains[0].ID = "replacement-host-pool"
+		return f.ex.modelMemoryContext(ctx, f.request.Engine, memory, false)
+	})
+	test("requested context", func(t *testing.T, f inspectionFixture, ctx context.Context) context.Context {
+		f.st.plat.Runtime.ModelLoads[0].Requested.Context = &modelconfig.Context{Mode: "fixed", Tokens: 2048}
+		compileDiagnosticFixtureLoads(t, f)
+		return ctx
+	})
+	test("slots", func(t *testing.T, f inspectionFixture, ctx context.Context) context.Context {
+		slots := int32(2)
+		f.st.plat.Runtime.ModelLoads[0].Requested.Slots = &slots
+		compileDiagnosticFixtureLoads(t, f)
+		return ctx
+	})
+}
+
+func TestModelDiagnosticExecutionKeyLiveRealizationSupersedesHistory(t *testing.T) {
+	test := func(name string, change func(inspectionFixture, *modelDiagnosticOperationHTTP)) {
+		t.Run(name, func(t *testing.T) {
+			f, _, _, fixture := modelDiagnosticRunningOperationFixture(t, func(f inspectionFixture) { on := "on"; f.st.plat.Runtime.ModelLoads[0].Requested.Fit = &on })
+			fixture.afterLoad()
+			ctx := withDiagnosticHardware(f.ex.modelMemoryContext(context.Background(), f.request.Engine, modelBufferTestTargetMemory(), false), diagnosticTestHardware())
+			result, err := f.ex.inspectModel(ctx, f.request, false)
+			if err != nil {
+				t.Fatalf("inspect live fixture: %v", err)
+			}
+			identity := f.ex.inspectionDiagnosticIdentity(ctx, f.request, result)
+			if identity == nil {
+				t.Fatal("complete live realization unavailable")
+			}
+			recordAuthenticatedDiagnosticFixture(t, f, *identity)
+			before, err := f.ex.inspectModel(ctx, f.request, false)
+			if err != nil || len(before.MemoryProfiles) != 1 || !before.MemoryProfiles[0].Current {
+				t.Fatalf("unchanged live realization=%+v error=%v", before.MemoryProfiles, err)
+			}
+			change(f, fixture)
+			after, err := f.ex.inspectModel(ctx, f.request, false)
+			if err != nil || len(after.MemoryProfiles) != 1 || after.MemoryProfiles[0].Current {
+				t.Fatalf("live change hidden by retained record=%+v error=%v", after.MemoryProfiles, err)
+			}
+		})
+	}
+	test("changed realized context", func(_ inspectionFixture, fixture *modelDiagnosticOperationHTTP) { fixture.context = 2048 })
+	test("changed realized build claim", func(_ inspectionFixture, fixture *modelDiagnosticOperationHTTP) {
+		fixture.build = "changed-native-build-claim"
+	})
+	test("adopted uncertain process", func(f inspectionFixture, _ *modelDiagnosticOperationHTTP) {
+		f.st.mu.Lock()
+		f.st.adopted = true
+		f.st.mu.Unlock()
+	})
+	test("stopped flag with unresolved child", func(f inspectionFixture, _ *modelDiagnosticOperationHTTP) {
+		f.st.mu.Lock()
+		f.st.running = false
+		f.st.mu.Unlock()
+	})
+	test("unresolved process reclamation", func(f inspectionFixture, _ *modelDiagnosticOperationHTTP) {
+		f.st.mu.Lock()
+		f.st.running, f.st.proc, f.st.reclaimFailed = false, nil, true
+		f.st.mu.Unlock()
+	})
+	test("incomplete live buffers", func(f inspectionFixture, _ *modelDiagnosticOperationHTTP) {
+		f.st.bufferCapture.mu.Lock()
+		f.st.bufferCapture.children[31001].parser.partial = true
+		f.st.bufferCapture.mu.Unlock()
+	})
+	test("missing live capture", func(f inspectionFixture, _ *modelDiagnosticOperationHTTP) {
+		f.st.mu.Lock()
+		f.st.bufferCapture = nil
+		f.st.mu.Unlock()
+	})
+	test("load boundary changed during props", func(f inspectionFixture, fixture *modelDiagnosticOperationHTTP) {
+		fixture.beforeProps = func() {
+			f.st.bufferCapture.mu.Lock()
+			f.st.bufferCapture.boundary++
+			f.st.bufferCapture.mu.Unlock()
+		}
+	})
+	test("changed live placement", func(f inspectionFixture, _ *modelDiagnosticOperationHTTP) {
+		f.st.bufferCapture.mu.Lock()
+		child := f.st.bufferCapture.children[31001]
+		child.parser.rows[0].Label = "CUDA7"
+		child.devices = []modelNativeDevice{{Selector: "CUDA7", Kind: 1, UUID: autoTestDeviceBinding().DeviceID, PCI: "0000:ab:00.0", LUID: modelDevicesFixtureLUID}}
+		f.st.bufferCapture.mu.Unlock()
+	})
 }
 
 func TestDiagnosticReservationDurabilityFailureKeepsAdmissionHeld(t *testing.T) {

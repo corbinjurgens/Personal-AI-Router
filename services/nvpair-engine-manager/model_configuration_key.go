@@ -102,8 +102,8 @@ func modelConfigurationKeyForPools(in modelEstimateInput, source, optionsID stri
 }
 
 // Execution identity names an applied unpriced launch, never finite capacity.
-func modelExecutionKey(in modelEstimateInput, optionsID string) string {
-	if in.Allocation == nil || !modelLoadUnpriced(in.Allocation.Options) || in.Allocation.NativeBuildID == "" || optionsID == "" || len(in.Bindings) == 0 {
+func modelExecutionKey(in modelEstimateInput, source, optionsID string) string {
+	if in.Allocation == nil || !modelLoadUnpriced(in.Allocation.Options) || in.Allocation.NativeBuildID == "" || source == "" || optionsID == "" || len(in.Bindings) == 0 {
 		return ""
 	}
 	type artifact struct{ Role, Identity string }
@@ -112,7 +112,7 @@ func modelExecutionKey(in modelEstimateInput, optionsID string) string {
 		artifacts = append(artifacts, artifact{binding.Role, binding.Identity})
 	}
 	return modelBufferHash(struct {
-		Artifacts      []artifact
-		Build, Options string
-	}{artifacts, in.Allocation.NativeBuildID, optionsID})
+		Artifacts              []artifact
+		Build, Source, Options string
+	}{artifacts, in.Allocation.NativeBuildID, source, optionsID})
 }

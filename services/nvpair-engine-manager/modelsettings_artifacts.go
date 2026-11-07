@@ -713,7 +713,7 @@ func (e *Executor) inspectModelArtifacts(ctx context.Context, p modelconfig.Insp
 					if modelLoadUnpriced(input.Allocation.Options) {
 						result.ConfigurationKeyReason = modelLoadUnpricedReason(input.Allocation.Options)
 						result.ConfigurationPools = nil
-						result.ExecutionKey = modelExecutionKey(input, optionsID)
+						result.ExecutionKey = modelExecutionKey(input, source, optionsID)
 					} else {
 						result.ConfigurationKey = modelConfigurationKeyForPools(input, source, optionsID, result.ConfigurationPools)
 						if result.ConfigurationKey != "" {
@@ -754,7 +754,7 @@ func (e *Executor) inspectModelArtifacts(ctx context.Context, p modelconfig.Insp
 			observedArtifacts[i].Assurance = "sampled-local-binding"
 		}
 	}
-	if selected != nil {
+	if selected != nil && len(modelLoadGPUSelection(selected.Requested)) == 0 {
 		result = attachModelBufferObservation(result, e.projectModelBufferObservation(st, p.Engine, p.ProfileKey, observedArtifacts))
 	}
 	return result, nil

@@ -1989,9 +1989,21 @@ unloading, its Started obligation before wake, and its LoadedModels obligation
 before load. Wake and cleanup sleep synchronously dispatch through `Manager.runOp`
 with reservation-scoped contexts. Configured pause is preserved; Halt vetoes
 activation. Only post-load fenced props supply realized context, slots and native
-build claims. Observed physical device IDs map to pool IDs independently of pool
-enumeration order; native ordinals and requested GPU options cannot prove placement.
-Incomplete placement remains partial diagnostic evidence, without estimate authority.
+build claims. Managed native `/props` has no `devices` or `n_gpu_layers` fields.
+Realized placement requires the existing buffer parser's complete model,
+KV/recurrent and completed compute-reservation reports from the exact loaded
+child generation. Capture validates the current process/run, source, artifacts,
+build and load boundary. Missing, partial, stale or other-load reports refuse
+identity before exercise, including on a host-only or shared-memory machine.
+CPU/CPU-mapped/CUDA-host allocations map to the host pool; Metal allocations map
+to the sole shared pool. CUDA labels join through the existing selected-runtime
+device helper's PCI/full UUID (and Windows LUID) identity in the captured child
+environment, independently of pool or native enumeration order. A diagnostic
+may map several GPUs without creating a reviewed-Auto binding. Native ordinals
+and requested GPU options never prove physical placement. The helper runs only
+with the accepted diagnostic's activation authority. Its per-load identity
+evidence retires with that child generation; ordinary inspection never starts
+native enumeration to fill a gap.
 The live reservation retains accepted pool kinds for configuration-key checks
 through broker drain and the cold baseline. This is captured identity only;
 expired capacity/free-memory facts are never refreshed or reused as fit evidence.
@@ -2001,12 +2013,21 @@ joined producing run. It checks the reservation key, complete captured identity,
 outcome, native exercise evidence and any linked buffer sample before persistence.
 The broker may downgrade exercise coverage using its sample overlap evidence.
 It cannot promote native partial coverage or replace native timings and token counts.
-ExecutionKey results remain diagnostic history and never overlay estimates or feed Auto.
+ExecutionKey results can be semantically current and never overlay estimates or
+feed Auto. Unpriced loads retain only bounded private parser/device realization
+evidence, without a finite/public/persisted buffer sample. GPU-selection
+inspection also excludes buffer history from another configuration.
 
 The private `engine:inspect-model` worker envelope also accepts `hardware`.
 Inspection revalidates files, requested settings, native build and hardware before
 using authenticated stored realization, and uses fenced live realization when the
-profile is loaded. The same identity reaches record currentness and the estimate
+profile is loaded. Matching finite and ExecutionKey records retain applicable
+realization after an unchanged manager/store restart. Native fit may retain its
+authenticated realized context, which can differ from its pre-load plan; fixed
+contexts and slots still match the saved resolution. Changed requested inputs,
+artifacts, build, filtered native launch environment, CPU/RAM/GPU identity, context or physical placement withdraw
+currentness. A present but uncertain live load cannot fall back to retained
+realization. The same identity reaches record currentness and the estimate
 overlay. Missing hardware keeps measured history visible with currentness withdrawn.
 The ordinary shared worker envelope and its strict decoder are unchanged.
 

@@ -5,6 +5,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"runtime"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,6 +23,97 @@ import (
 	"nvpair-shared/durablefile"
 	"nvpair-shared/modelconfig"
 )
+
+// Realization is read from the live capture, never from persisted samples. The
+// parser must have joined a complete load/reservation on one exact child. This
+// private path also serves unpriced loads without publishing a buffer sample.
+func (e *Executor) modelBufferRealization(ctx context.Context, st *engineState, model string, notBefore time.Time) (string, []modelconfig.BufferReportRow, []modelNativeDevice, error) {
+	st.mu.Lock()
+	c := st.bufferCapture
+	current := c != nil && c.currentLocked(st)
+	command := st.plat.Runtime.servingCommand
+	st.mu.Unlock()
+	if !current || c.sourceID == "" || c.buildID == "" {
+		return "", nil, nil, errModelDiagnosticIdentity
+	}
+	command, err := modelConstrainCommand(command, c.prepared.ModelLoads)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	source, err := modelReviewedNativeSource(ctx, st, command)
+	build, buildErr := nativeBuildID(ctx, st)
+	if err != nil || buildErr != nil || source != c.sourceID || build != c.buildID || !modelBufferBindingsCurrent(ctx, modelBufferPreparedLoads(c.prepared)) {
+		return "", nil, nil, errModelDiagnosticIdentity
+	}
+	c.mu.Lock()
+	var selected *modelBufferChild
+	for _, child := range c.children {
+		if child.model == model {
+			if selected != nil {
+				c.mu.Unlock()
+				return "", nil, nil, errModelDiagnosticIdentity
+			}
+			selected = child
+		}
+	}
+	if c.retired || c.clockUncertain || time.Now().UnixNano() < c.wallHigh || selected == nil || selected.startedAt.Before(notBefore) || selected.poisoned || selected.sleeping || !selected.loading || !selected.ready || !modelBufferPlacementComplete(selected.parser) {
+		c.mu.Unlock()
+		return "", nil, nil, errModelDiagnosticIdentity
+	}
+	rows := slices.Clone(selected.parser.rows)
+	identity := modelBufferHash(struct {
+		Token, Run, Model, Phase string
+		Port                     int
+		Generation               uint64
+		Rows                     []modelconfig.BufferReportRow
+	}{c.token, c.run, model, selected.phase, selected.port, selected.generation, rows})
+	generation := selected.generation
+	devices := slices.Clone(selected.devices)
+	environment := slices.Clone(c.environment)
+	c.mu.Unlock()
+	needsDevices := slices.ContainsFunc(rows, func(row modelconfig.BufferReportRow) bool {
+		return strings.HasPrefix(row.Label, "CUDA") && row.Label != "CUDA_Host"
+	})
+	if needsDevices && len(devices) == 0 {
+		e.mutationAdmission.Lock()
+		authorized := e.diagnosticAuthorityLocked(ctx, "llamacpp")
+		e.mutationAdmission.Unlock()
+		if !authorized || e.diagnosticActivationVeto(ctx, "llamacpp") != nil {
+			return "", nil, nil, errModelDiagnosticIdentity
+		}
+		runtime, err := modelDeviceRuntimeSnapshot(ctx, st)
+		if err != nil || runtime.Build != build {
+			return "", nil, nil, errModelDiagnosticIdentity
+		}
+		environment, err = modelDeviceEnvironment(environment, "")
+		if err != nil {
+			return "", nil, nil, err
+		}
+		op, _ := ctx.Value(modelAutoOperationKey{}).(modelAutoOperation)
+		run := op.DeviceRunner
+		if run == nil {
+			run = runModelDeviceProcess
+		}
+		helperCtx, cancel := context.WithTimeout(ctx, modelDevicesBudget)
+		reply, err := run(helperCtx, runtime, environment)
+		failed := err != nil || helperCtx.Err() != nil || reply.Unknown != "" || reply.Commit == "" || len(reply.Devices) == 0 || len(reply.Devices) > modelDevicesLimit
+		cancel()
+		if failed {
+			return "", nil, nil, errModelDiagnosticIdentity
+		}
+		devices = slices.Clone(reply.Devices)
+	}
+	st.mu.Lock()
+	current = c.currentLocked(st)
+	st.mu.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !current || c.retired || selected != c.children[selected.port] || selected.generation != generation || selected.poisoned || selected.sleeping || !selected.ready || !modelBufferPlacementComplete(selected.parser) || modelBufferHash(selected.parser.rows) != modelBufferHash(rows) || ctx.Err() != nil {
+		return "", nil, nil, errModelDiagnosticIdentity
+	}
+	selected.devices = slices.Clone(devices)
+	return identity, rows, devices, nil
+}
 
 const modelBufferHistoryBytes = 4 << 20
 const modelBufferHistoryAge = 30 * 24 * time.Hour

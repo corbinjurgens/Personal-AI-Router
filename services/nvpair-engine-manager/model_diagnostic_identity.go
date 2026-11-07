@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"time"
 
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/modelconfig"
@@ -247,101 +248,6 @@ func (e *Executor) observeDiagnostic(ctx context.Context, p modelconfig.Diagnost
 	return result, modelconfig.CheckPayloadSize(result)
 }
 
-// Pool mapping uses observed physical IDs, never native ordinals, device names,
-// requested GPU layers or an estimate. An unmapped device leaves partial evidence.
-func diagnosticPoolPlacement(memory *modelconfig.TargetMemory, observed diagnosticLoadObservation) ([]modelconfig.DiagnosticPlacement, error) {
-	if memory == nil {
-		return nil, errModelDiagnosticIdentity
-	}
-	// Pool capacities/IDs are captured at reservation. They are not live free
-	// memory and do not acquire a new freshness lifetime during a long exercise.
-	if err := memory.Validate(); err != nil {
-		return nil, err
-	}
-	var devices []json.RawMessage
-	var layers *int32
-	if raw := observed.Placement["n_gpu_layers"]; len(raw) > 0 {
-		if err := json.Unmarshal(raw, &layers); err != nil {
-			return nil, errModelDiagnosticIdentity
-		}
-	}
-	deviceIDs := []string{}
-	if raw := observed.Placement["devices"]; len(raw) > 0 && (layers == nil || *layers != 0) {
-		if err := json.Unmarshal(raw, &devices); err != nil {
-			return nil, errModelDiagnosticIdentity
-		}
-		for _, device := range devices {
-			fields := modelBufferPropsFields(device, []string{"id", "uuid"})
-			if fields == nil {
-				return nil, errModelDiagnosticIdentity
-			}
-			var id string
-			if raw, ok := fields["uuid"]; ok && json.Unmarshal(raw, &id) != nil {
-				return nil, errModelDiagnosticIdentity
-			}
-			if id == "" {
-				if raw, ok := fields["id"]; ok && json.Unmarshal(raw, &id) != nil {
-					return nil, errModelDiagnosticIdentity
-				}
-			}
-			if id == "" {
-				return nil, errModelDiagnosticIdentity
-			}
-			deviceIDs = append(deviceIDs, id)
-		}
-	}
-	placements := []modelconfig.DiagnosticPlacement{}
-	mapped := map[string]bool{}
-	mappedPools := map[string]bool{}
-	shared := false
-	for _, pool := range memory.Observation.Domains {
-		if pool.Kind == "shared" {
-			shared = true
-		}
-	}
-	for _, pool := range memory.Observation.Domains {
-		if pool.Kind == "system" && !shared {
-			placements = append(placements, modelconfig.DiagnosticPlacement{DomainID: pool.ID, Kind: "host"})
-		}
-		if pool.Kind == "shared" {
-			placements = append(placements, modelconfig.DiagnosticPlacement{DomainID: pool.ID, Kind: "shared"})
-		}
-		if pool.Kind != "dedicated" {
-			continue
-		}
-		for _, id := range deviceIDs {
-			if !slices.Contains(pool.DeviceIDs, id) {
-				continue
-			}
-			if mapped[id] || mappedPools[pool.ID] {
-				return nil, errModelDiagnosticIdentity
-			}
-			mapped[id] = true
-			mappedPools[pool.ID] = true
-			physical := id
-			for _, alias := range pool.DeviceIDs {
-				if uuid := canonicalModelDeviceUUID(alias); uuid != "" {
-					physical = uuid
-					break
-				}
-			}
-			placements = append(placements, modelconfig.DiagnosticPlacement{DomainID: pool.ID, Kind: "device", DeviceID: physical})
-		}
-	}
-	if len(mapped) != len(deviceIDs) || len(placements) == 0 {
-		return nil, errModelDiagnosticIdentity
-	}
-	// Dedicated GPU use cannot be concluded from absent allocation metadata.
-	if !shared && layers == nil && len(deviceIDs) == 0 {
-		return nil, errModelDiagnosticIdentity
-	}
-	if !shared && layers != nil && *layers != 0 && len(deviceIDs) == 0 {
-		return nil, errModelDiagnosticIdentity
-	}
-	slices.SortFunc(placements, func(a, b modelconfig.DiagnosticPlacement) int { return strings.Compare(a.DomainID, b.DomainID) })
-	return placements, nil
-}
-
 func diagnosticRequestedMatches(a, b modelconfig.DiagnosticIdentity) bool {
 	a, b = a.Clone(), b.Clone()
 	a.BuildInfo, b.BuildInfo = "", ""
@@ -457,7 +363,7 @@ func decodeDiagnosticInspectEnvelope(raw []byte) (settings.WorkerRequest[modelco
 // or the persisted Current flag alone never establishes this identity.
 func (e *Executor) inspectionDiagnosticIdentity(ctx context.Context, p modelconfig.InspectRequest, result modelconfig.InspectResult) *modelconfig.DiagnosticIdentity {
 	requested, err := e.diagnosticRequestedIdentity(ctx, p, result)
-	if err != nil || result.ExecutionKey != "" || e.modelMemoryProfiles == nil {
+	if err != nil || e.modelMemoryProfiles == nil {
 		return nil
 	}
 	if live, observed := e.inspectionLoadedDiagnosticIdentity(ctx, p, requested); observed {
@@ -465,9 +371,10 @@ func (e *Executor) inspectionDiagnosticIdentity(ctx context.Context, p modelconf
 	}
 	e.modelMemoryProfiles.mu.Lock()
 	defer e.modelMemoryProfiles.mu.Unlock()
-	for _, record := range e.modelMemoryProfiles.records {
+	for i := len(e.modelMemoryProfiles.records) - 1; i >= 0; i-- {
+		record := e.modelMemoryProfiles.records[i]
 		m := record.Profile.Measured
-		if record.Engine != p.Engine || record.ProfileKey != p.ProfileKey || m == nil || !diagnosticRequestedMatches(m.DiagnosticIdentity, requested) {
+		if record.Engine != p.Engine || record.ModelID != p.ModelID || record.ProfileKey != p.ProfileKey || m == nil || !diagnosticRequestedMatches(m.DiagnosticIdentity, requested) {
 			continue
 		}
 		identity := m.DiagnosticIdentity.Clone()
@@ -482,7 +389,10 @@ func (e *Executor) inspectionDiagnosticIdentity(ctx context.Context, p modelconf
 		allocationMatches := false
 		for _, load := range st.plat.Runtime.ModelLoads {
 			if load.ProfileKey == p.ProfileKey && load.Resolved != nil {
-				allocationMatches = load.Resolved.PerSlotContext == identity.PerSlotContext && load.Resolved.Slots == identity.Slots
+				// Native fit chooses context at load time. Its authenticated
+				// realization survives an unchanged restart; a finite GPU-
+				// selection load must still match its resolved context/slots.
+				allocationMatches = load.Resolved.Slots == identity.Slots && (modelLoadNativeFit(load.Requested) || load.Resolved.PerSlotContext == identity.PerSlotContext)
 			}
 		}
 		st.mu.Unlock()
@@ -523,10 +433,11 @@ func (e *Executor) inspectionLoadedDiagnosticIdentity(ctx context.Context, p mod
 	}
 	st.mu.Lock()
 	running, proc, run, port, config := st.running, st.proc, st.runID, st.port, st.ownerConfigLocked()
-	owned := running && proc != nil && !st.adopted && !st.stopping
+	uncertain := st.adopted || st.stopping || st.reclaimFailed || st.reclaimPID != 0
+	owned := running && proc != nil && !uncertain
 	st.mu.Unlock()
 	if !running {
-		return nil, false
+		return nil, uncertain || proc != nil
 	}
 	if !owned {
 		return nil, true
@@ -538,12 +449,8 @@ func (e *Executor) inspectionLoadedDiagnosticIdentity(ctx context.Context, p mod
 	if !slices.Contains(loaded, p.ProfileKey) {
 		return nil, false
 	}
-	observed, err := e.diagnosticReadProps(ctx, port, p.ProfileKey)
+	observed, err := e.diagnosticReadLoad(ctx, st, port, p.ProfileKey, diagnosticMemory(ctx), time.Time{})
 	if err != nil || observed.BuildInfo == "" {
-		return nil, true
-	}
-	placement, err := diagnosticPoolPlacement(diagnosticMemory(ctx), observed)
-	if err != nil {
 		return nil, true
 	}
 	st.mu.Lock()
@@ -552,7 +459,7 @@ func (e *Executor) inspectionLoadedDiagnosticIdentity(ctx context.Context, p mod
 	if !current {
 		return nil, true
 	}
-	requested.BuildInfo, requested.PerSlotContext, requested.Slots, requested.Placement = observed.BuildInfo, observed.PerSlotContext, observed.Slots, placement
+	requested.BuildInfo, requested.PerSlotContext, requested.Slots, requested.Placement = observed.BuildInfo, observed.PerSlotContext, observed.Slots, observed.PoolPlacement
 	if requested.Validate() != nil {
 		return nil, true
 	}

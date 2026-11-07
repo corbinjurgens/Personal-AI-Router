@@ -77,40 +77,7 @@ func (e *Executor) modelMemoryContext(ctx context.Context, engine string, target
 	uuid := ""
 	dedicated := 0
 	for _, pool := range observation.Domains {
-		p := modelDevicePool{ID: pool.ID, Kind: pool.Kind}
-		if p.Kind == "system" {
-			p.Kind = "host"
-		}
-		for _, alias := range pool.DeviceIDs {
-			switch {
-			case strings.HasPrefix(alias, "GPU-"):
-				value := canonicalModelDeviceUUID(alias)
-				if p.UUID != "" && p.UUID != value {
-					p.Unsupported = "ambiguous physical UUID aliases"
-				}
-				p.UUID = value
-			case strings.HasPrefix(alias, "pci:"):
-				value := canonicalModelDevicePCI(strings.TrimPrefix(alias, "pci:"))
-				if p.PCI != "" && p.PCI != value {
-					p.Unsupported = "ambiguous physical PCI aliases"
-				}
-				p.PCI = value
-			case strings.HasPrefix(alias, "luid:"):
-				if p.LUID != "" && !strings.EqualFold(p.LUID, strings.TrimPrefix(alias, "luid:")) {
-					p.Unsupported = "ambiguous physical LUID aliases"
-				}
-				p.LUID = strings.TrimPrefix(alias, "luid:")
-			case strings.HasPrefix(alias, "luid_"):
-				if p.LUID != "" && !strings.EqualFold(p.LUID, alias) {
-					p.Unsupported = "ambiguous physical LUID aliases"
-				}
-				p.LUID = alias
-			default:
-				if pool.Kind == "dedicated" {
-					p.Unsupported = "unsupported physical alias"
-				}
-			}
-		}
+		p := modelDevicePoolFromMemory(pool)
 		if p.Kind == "dedicated" {
 			dedicated++
 			if dedicated > 1 || p.UUID == "" || p.PCI == "" || p.Unsupported != "" {

@@ -275,9 +275,8 @@ func runModelBufferFixture() error {
 				return
 			}
 			props := map[string]any{"build_info": model.build, "total_slots": model.slots, "default_generation_settings": map[string]int{"n_ctx": model.context}}
-			if diagnostic.faults != "" {
-				props["n_gpu_layers"], props["devices"] = 0, []string{}
-			}
+			// Managed native props report build/context/slots, not placement.
+			// The exact child load above emits the observed CPU buffer lines.
 			if err := json.NewEncoder(w).Encode(props); err != nil {
 				return
 			}

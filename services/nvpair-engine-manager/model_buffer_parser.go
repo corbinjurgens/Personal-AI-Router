@@ -33,6 +33,22 @@ type modelBufferParser struct {
 	reserveComplete bool
 }
 
+func modelBufferPlacementComplete(p modelBufferParser) bool {
+	if p.partial || p.inReserve || !p.reserveComplete || len(p.rows) == 0 {
+		return false
+	}
+	model, state, compute := false, false, false
+	for _, row := range p.rows {
+		if row.IntervalStatus != "bounded" {
+			return false
+		}
+		model = model || row.Component == "model"
+		state = state || row.Component == "kv" || row.Component == "recurrent"
+		compute = compute || row.Component == "compute"
+	}
+	return model && state && compute
+}
+
 // JSONL is an envelope around a diagnostic message, not an exact-byte API.
 func modelBufferMessage(line string) (string, bool) {
 	if len(line) > 64<<10 || !utf8.ValidString(line) {

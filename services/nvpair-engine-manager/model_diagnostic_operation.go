@@ -12,6 +12,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"reflect"
 	"slices"
 	"time"
 
@@ -52,15 +53,15 @@ type diagnosticBaselineParams struct {
 
 // Partial observations are useful even when load or readback fails. They are
 // deliberately separate from MeasuredProfile, whose complete identity is the
-// later record owner's responsibility. Placement is observed native metadata,
+// later record owner's responsibility. Placement is observed buffer evidence,
 // never synthesized from a finite estimate or the requested GPU switches.
 type diagnosticLoadObservation struct {
 	PerSlotContext int32                             `json:"perSlotContext"`
 	Slots          int32                             `json:"slots"`
 	BuildInfo      string                            `json:"buildInfo,omitempty"`
 	NativeBuildID  string                            `json:"nativeBuildId,omitempty"`
-	Placement      map[string]json.RawMessage        `json:"placement,omitempty"`
 	PoolPlacement  []modelconfig.DiagnosticPlacement `json:"poolPlacement,omitempty"`
+	bufferIdentity string
 }
 
 type diagnosticOperationStatus struct {
@@ -93,10 +94,6 @@ func (s diagnosticOperationStatus) clone() diagnosticOperationStatus {
 	if s.Observation != nil {
 		value := *s.Observation
 		value.PoolPlacement = slices.Clone(value.PoolPlacement)
-		value.Placement = make(map[string]json.RawMessage, len(s.Observation.Placement))
-		for key, raw := range s.Observation.Placement {
-			value.Placement[key] = slices.Clone(raw)
-		}
 		s.Observation = &value
 	}
 	if s.Low != nil {
@@ -131,6 +128,7 @@ type modelDiagnosticOperation struct {
 	afterLoad                    chan struct{}
 	afterLoadAccepted            bool
 	started                      time.Time
+	loadStarted                  time.Time
 	status                       diagnosticOperationStatus
 	engines                      []diagnosticEngineBefore
 	inspection                   modelconfig.InspectResult
@@ -701,6 +699,7 @@ func (m *Manager) measureDiagnostic(op *modelDiagnosticOperation) error {
 	if err := e.saveDiagnosticOperation(op); err != nil {
 		return err
 	}
+	op.loadStarted = time.Now()
 	if _, err := e.ModelLoad(engineCtx, op.params.Engine, op.reservation.ProfileKey); err != nil {
 		return err
 	}
@@ -714,13 +713,9 @@ func (m *Manager) measureDiagnostic(op *modelDiagnosticOperation) error {
 		return err
 	}
 	observed.NativeBuildID = inspection.NativeBuildID
-	observed.PoolPlacement, err = diagnosticPoolPlacement(op.reservation.TargetMemory, observed)
 	e.mutationAdmission.Lock()
 	op.status.Observation = &observed
 	e.mutationAdmission.Unlock()
-	if err != nil {
-		return err
-	}
 	if observed.BuildInfo == "" {
 		return errModelDiagnosticIdentity
 	}
@@ -977,7 +972,7 @@ func (e *Executor) diagnosticLoadedChild(ctx context.Context, op *modelDiagnosti
 	if err := check(ctx); err != nil {
 		return child, expected, err
 	}
-	observed, err := e.diagnosticReadProps(ctx, port, child.ModelID)
+	observed, err := e.diagnosticReadLoad(ctx, st, port, child.ModelID, op.reservation.TargetMemory, op.loadStarted)
 	if err != nil {
 		return child, expected, err
 	}
@@ -986,19 +981,11 @@ func (e *Executor) diagnosticLoadedChild(ctx context.Context, op *modelDiagnosti
 		if err := check(ctx); err != nil {
 			return err
 		}
-		props, err := e.diagnosticReadProps(ctx, port, child.ModelID)
+		props, err := e.diagnosticReadLoad(ctx, st, port, child.ModelID, op.reservation.TargetMemory, op.loadStarted)
 		if err != nil {
 			return err
 		}
-		left, err := json.Marshal(props)
-		if err != nil {
-			return err
-		}
-		right, err := json.Marshal(expected)
-		if err != nil {
-			return err
-		}
-		if string(left) != string(right) {
+		if !reflect.DeepEqual(props, expected) {
 			return errModelDiagnosticIdentity
 		}
 		return check(ctx)
@@ -1034,8 +1021,33 @@ func (e *Executor) diagnosticReadProps(ctx context.Context, port int, model stri
 	if props.Context < 208 || props.Context > math.MaxInt32 || props.Slots < 1 || props.Slots > 8 {
 		return diagnosticLoadObservation{}, errModelDiagnosticIdentity
 	}
-	// Keep only allocation metadata. /props may also contain templates and
-	// prompt defaults, which never belong in diagnostic evidence or logs.
-	placement := modelBufferPropsFields(raw, []string{"devices", "n_gpu_layers", "split_mode", "tensor_split", "main_gpu", "kv_unified"})
-	return diagnosticLoadObservation{PerSlotContext: int32(props.Context), Slots: int32(props.Slots), BuildInfo: props.Build, Placement: placement}, nil
+	return diagnosticLoadObservation{PerSlotContext: int32(props.Context), Slots: int32(props.Slots), BuildInfo: props.Build}, nil
+}
+
+func (e *Executor) diagnosticReadLoad(ctx context.Context, st *engineState, port int, model string, memory *modelconfig.TargetMemory, notBefore time.Time) (diagnosticLoadObservation, error) {
+	st.mu.Lock()
+	capture := st.bufferCapture
+	current := capture != nil && capture.currentLocked(st)
+	st.mu.Unlock()
+	if !current {
+		return diagnosticLoadObservation{}, errModelDiagnosticIdentity
+	}
+	boundary := capture.captureBoundary()
+	observed, err := e.diagnosticReadProps(ctx, port, model)
+	if err != nil {
+		return observed, err
+	}
+	identity, rows, devices, err := e.modelBufferRealization(ctx, st, model, notBefore)
+	if err != nil {
+		return observed, err
+	}
+	observed.bufferIdentity = identity
+	observed.PoolPlacement, err = modelBufferPoolPlacement(memory, rows, devices)
+	st.mu.Lock()
+	current = capture.currentLocked(st)
+	st.mu.Unlock()
+	if !current || boundary != capture.captureBoundary() {
+		return observed, errModelDiagnosticIdentity
+	}
+	return observed, err
 }
