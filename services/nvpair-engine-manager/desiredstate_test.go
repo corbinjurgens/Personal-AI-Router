@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"nvpair-shared/durablefile"
+	"nvpair-shared/modelconfig"
 )
 
 func desiredTestExecutor(t *testing.T, manifest *Manifest, baseDir string) *Executor {
@@ -391,4 +392,176 @@ func TestDesiredStateDecodeDropsRetiredTransactionKeysWithoutWriting(t *testing.
 			t.Fatalf("decoded state retained %s", key)
 		}
 	}
+}
+
+func TestDesiredStateDiagnosticCheckpointReopensWithProcessEvidence(t *testing.T) {
+	base := t.TempDir()
+	store := newDesiredStateStore(base)
+	evidence := processStopEvidence{Bin: filepath.Join(base, "engine.exe"), Port: 12345, Address: "127.0.0.1:12345", PID: 42}
+	if err := store.setProcessStop("other", evidence); err != nil {
+		t.Fatalf("save process evidence: %v", err)
+	}
+	if err := store.setAllocatedPort("other", evidence.Port); err != nil {
+		t.Fatalf("save allocated port: %v", err)
+	}
+	checkpoint := diagnosticRecoveryCheckpointFixture()
+	if err := store.setPendingDiagnostic(checkpoint); err != nil {
+		t.Fatalf("save checkpoint: %v", err)
+	}
+	reopened := newDesiredStateStore(base)
+	got, err := reopened.pendingDiagnostic()
+	if err != nil || got == nil || !reflect.DeepEqual(*got, checkpoint) {
+		t.Fatalf("reopened checkpoint = %+v, error = %v", got, err)
+	}
+	got.Identity.CPUModel = "changed copy"
+	got.Engines[0].LoadedModels[0] = "changed-model"
+	again, err := reopened.pendingDiagnostic()
+	if err != nil || again == nil || !reflect.DeepEqual(*again, checkpoint) {
+		t.Fatalf("read changed stored checkpoint: %+v, error = %v", again, err)
+	}
+	if err := reopened.setAllocatedPort("new-engine", 23456); err != nil {
+		t.Fatalf("save another port with pending checkpoint: %v", err)
+	}
+	state, err := reopened.load()
+	if err != nil {
+		t.Fatalf("read desired state: %v", err)
+	}
+	if state.ProcessStops["other"] != evidence || state.AllocatedPorts["other"] != evidence.Port ||
+		state.AllocatedPorts["new-engine"] != 23456 || !reflect.DeepEqual(*state.PendingDiagnostic, checkpoint) {
+		t.Fatalf("checkpoint write lost other owner records: %+v", state)
+	}
+	checkpoint.State = "cleanup-complete"
+	checkpoint.Engines[0].CleanupComplete = true
+	if err := reopened.setPendingDiagnostic(checkpoint); err != nil {
+		t.Fatalf("save confirmed cleanup: %v", err)
+	}
+	if err := reopened.clearPendingDiagnostic(checkpoint.Run.RunID); err != nil {
+		t.Fatalf("clear confirmed checkpoint: %v", err)
+	}
+	state, err = reopened.load()
+	if err != nil || state.PendingDiagnostic != nil || state.ProcessStops["other"] != evidence || state.AllocatedPorts["other"] != evidence.Port {
+		t.Fatalf("clear changed other owner evidence: %+v, error = %v", state, err)
+	}
+}
+
+func TestDesiredStateDiagnosticCheckpointRejectsInvalidEvidence(t *testing.T) {
+	test := func(name string, edit func(*diagnosticCheckpoint)) {
+		t.Run(name, func(t *testing.T) {
+			checkpoint := diagnosticRecoveryCheckpointFixture()
+			edit(&checkpoint)
+			data, err := json.Marshal(desiredStateFile{PendingDiagnostic: &checkpoint})
+			if err != nil {
+				t.Fatalf("encode invalid fixture: %v", err)
+			}
+			if _, err := decodeDesiredState(data); err == nil {
+				t.Fatal("decoded invalid diagnostic cleanup evidence")
+			}
+		})
+	}
+	test("unknown phase", func(c *diagnosticCheckpoint) { c.Run.Phase = "resume-measurement" })
+	test("missing run ID", func(c *diagnosticCheckpoint) { c.Run.RunID = "" })
+	test("both keys", func(c *diagnosticCheckpoint) { c.Run.ExecutionKey = strings.Repeat("c", 64) })
+	test("mismatched identity", func(c *diagnosticCheckpoint) { c.Identity.ConfigurationKey = strings.Repeat("c", 64) })
+	test("unbounded fence", func(c *diagnosticCheckpoint) { c.EffectsFence = strings.Repeat("x", 257) })
+	test("duplicate engine", func(c *diagnosticCheckpoint) { c.Engines = append(c.Engines, c.Engines[0]) })
+	test("too many models", func(c *diagnosticCheckpoint) { c.Engines[0].LoadedModels = make([]string, 65) })
+	test("started another engine", func(c *diagnosticCheckpoint) { c.Engines[0].Engine = "other" })
+	test("unconfirmed complete", func(c *diagnosticCheckpoint) { c.State = "cleanup-complete" })
+	test("measurement result in cleanup checkpoint", func(c *diagnosticCheckpoint) { c.Run.Result = &modelconfig.MeasuredProfile{} })
+}
+
+func TestDesiredStateDiagnosticCheckpointStrictDocument(t *testing.T) {
+	checkpoint := diagnosticRecoveryCheckpointFixture()
+	data, err := json.Marshal(checkpoint)
+	if err != nil {
+		t.Fatalf("encode checkpoint: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatalf("decode checkpoint fields: %v", err)
+	}
+	fields["resume"] = json.RawMessage(`true`)
+	unknown, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatalf("encode unknown field: %v", err)
+	}
+	for name, document := range map[string][]byte{
+		"unknown cleanup field": append(append([]byte(`{"pendingDiagnostic":`), unknown...), '}'),
+		"null cleanup":          []byte(`{"pendingDiagnostic":null}`),
+		"wrong field spelling":  []byte(`{"PendingDiagnostic":` + string(data) + `}`),
+		"duplicate checkpoint":  []byte(`{"pendingDiagnostic":` + string(data) + `,"pendingDiagnostic":` + string(data) + `}`),
+		"oversized document":    []byte(`{"retired":"` + strings.Repeat("x", desiredStateMaxBytes) + `"}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := decodeDesiredState(document); err == nil {
+				t.Fatal("accepted invalid checkpoint document")
+			}
+		})
+	}
+}
+
+func TestDesiredStateDiagnosticCheckpointCannotDiscardCleanup(t *testing.T) {
+	test := func(name string, edit func(*diagnosticCheckpoint)) {
+		t.Run(name, func(t *testing.T) {
+			store := newDesiredStateStore(t.TempDir())
+			checkpoint := diagnosticRecoveryCheckpointFixture()
+			if err := store.setPendingDiagnostic(checkpoint); err != nil {
+				t.Fatalf("seed checkpoint: %v", err)
+			}
+			before, err := os.ReadFile(store.path)
+			if err != nil {
+				t.Fatalf("read checkpoint: %v", err)
+			}
+			edit(&checkpoint)
+			if err := store.setPendingDiagnostic(checkpoint); err == nil {
+				t.Fatal("discarded a pending cleanup obligation")
+			}
+			assertDesiredFileBytes(t, store.path, before)
+		})
+	}
+	test("different run", func(c *diagnosticCheckpoint) { c.Run.RunID = "replacement" })
+	test("remove engine", func(c *diagnosticCheckpoint) { c.Engines = nil })
+	test("remove loaded model", func(c *diagnosticCheckpoint) { c.Engines[0].LoadedModels = nil })
+	test("remove attempted start", func(c *diagnosticCheckpoint) { c.Engines[0].Started = false })
+	test("replace native build", func(c *diagnosticCheckpoint) { c.Identity.NativeBuildID = "sha256:" + strings.Repeat("c", 64) })
+}
+
+func TestDesiredStateDiagnosticCheckpointRequiresConfirmedClear(t *testing.T) {
+	store := newDesiredStateStore(t.TempDir())
+	checkpoint := diagnosticRecoveryCheckpointFixture()
+	if err := store.setPendingDiagnostic(checkpoint); err != nil {
+		t.Fatalf("seed checkpoint: %v", err)
+	}
+	if err := store.clearPendingDiagnostic(checkpoint.Run.RunID); err == nil {
+		t.Fatal("cleared pending cleanup without confirmation")
+	}
+	checkpoint.State = "cleanup-complete"
+	checkpoint.Engines[0].CleanupComplete = true
+	if err := store.setPendingDiagnostic(checkpoint); err != nil {
+		t.Fatalf("save confirmed cleanup: %v", err)
+	}
+	if err := store.clearPendingDiagnostic("another-run"); err == nil {
+		t.Fatal("another run cleared cleanup")
+	}
+}
+
+func TestDesiredStateDiagnosticCheckpointFailedWritePreservesEvidence(t *testing.T) {
+	store := newDesiredStateStore(t.TempDir())
+	checkpoint := diagnosticRecoveryCheckpointFixture()
+	if err := store.setPendingDiagnostic(checkpoint); err != nil {
+		t.Fatalf("seed checkpoint: %v", err)
+	}
+	before, err := os.ReadFile(store.path)
+	if err != nil {
+		t.Fatalf("read checkpoint: %v", err)
+	}
+	failure := errors.New("checkpoint publication failed")
+	useEngineFileReplacer(t, durablefile.Replacer{CreateTemp: func(string, string, os.FileMode) (durablefile.File, error) {
+		return nil, failure
+	}})
+	checkpoint.Run.Phase = "high"
+	if err := store.setPendingDiagnostic(checkpoint); !errors.Is(err, failure) {
+		t.Fatalf("checkpoint write error = %v, want publication failure", err)
+	}
+	assertDesiredFileBytes(t, store.path, before)
 }
