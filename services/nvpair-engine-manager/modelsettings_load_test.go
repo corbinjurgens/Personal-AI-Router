@@ -568,6 +568,7 @@ func TestTypedLlamaNativeFit(t *testing.T) {
 	rt := f.st.plat.Runtime
 	on, margin, floor := "on", "512", int32(4096)
 	rt.ModelLoads[0].Requested.Fit = &on
+	rt.ModelLoads[0].Requested.GPU = &modelconfig.GPU{Mode: "native-default"}
 	rt.ModelLoads[0].Requested.FitTarget = &margin
 	rt.ModelLoads[0].Requested.FitCtx = &floor
 	command, err := launchForState(f.st, rt.Port)
@@ -584,7 +585,7 @@ func TestTypedLlamaNativeFit(t *testing.T) {
 		t.Fatal(err)
 	}
 	section := sections[f.request.ModelID]
-	if section["fit"] != "on" || section["fit-target"] != "512" || section["fit-ctx"] != "4096" {
+	if section["fit"] != "on" || section["fit-target"] != "512" || section["fit-ctx"] != "4096" || section["gpu-layers"] != "auto" {
 		t.Fatalf("native fit options=%v", section)
 	}
 	rt.ModelLoads = prepared.ModelLoads
@@ -879,7 +880,7 @@ func TestTypedLlamaExtraOptions(t *testing.T) {
 	for _, tc := range []struct{ key, value, reason string }{
 		{"ctx-size", "4096", "Use the typed field for ctx-size."},
 		{"alias", "x", "PAIR owns alias."},
-		{"mmproj-auto", "false", "mmproj-auto changes allocation and is not accepted."},
+		{"mmproj-auto", "true", "Automatic projector selection must be disabled"},
 		{"moe-cache-mib", "invalid", "moe-cache-mib"},
 		{"tensor-split", "1,1", "Reviewed Auto chooses the GPU; remove tensor-split or choose another GPU mode."},
 	} {
@@ -897,15 +898,16 @@ func TestTypedLlamaExtraOptions(t *testing.T) {
 }
 
 func TestConvertTypedLlamaExtraOptions(t *testing.T) {
-	extras := map[string]string{"spec-type": "draft-mtp", "moe-cache-mib": "2048", "expert-cache": "auto", "device": "CUDA0,CUDA1", "split-mode": "layer"}
+	extras := map[string]string{"spec-type": "draft-mtp", "moe-cache-mib": "2048", "expert-cache": "auto", "device": "CUDA0,CUDA1", "split-mode": "layer", "mmproj-auto": "false"}
 	r, err := convertTypedLlamaOptions("model", extras)
 	if err != nil || !reflect.DeepEqual(r.ExtraOptions, extras) {
 		t.Fatalf("converted=%+v err=%v", r, err)
 	}
-	for _, key := range []string{"mmproj-auto", "alias"} {
-		if _, err := convertTypedLlamaOptions("model", map[string]string{key: "false"}); err == nil || !strings.Contains(err.Error(), key) {
-			t.Fatalf("%s refusal=%v", key, err)
-		}
+	if _, err := convertTypedLlamaOptions("model", map[string]string{"alias": "false"}); err == nil || !strings.Contains(err.Error(), "alias") {
+		t.Fatalf("alias refusal=%v", err)
+	}
+	if _, err := convertTypedLlamaOptions("model", map[string]string{"mmproj-auto": "true"}); err == nil {
+		t.Fatal("conversion accepted automatic projector selection")
 	}
 }
 
@@ -2688,7 +2690,7 @@ func TestModelSettingsLoadConversionRejectsCompleteRouter(t *testing.T) {
 			}
 		})
 	}
-	test("sampling field", "temp = 0.4\n")
+	test("projector control", "mmproj = projector.gguf\n")
 	test("third model", "[third]\nmodel = third.gguf\ncache-prompt = true\n")
 	test("unified KV", "kv-unified = true\n")
 }
@@ -2886,7 +2888,7 @@ func TestModelSettingsLoadFiniteValidation(t *testing.T) {
 	}
 	zero, large := int32(0), int32(6)
 	batch, ubatch := int32(128), int32(256)
-	precision := "q8_0"
+	precision := "bf16"
 	test("zero slots", modelconfig.RequestedLoad{Slots: &zero}, "requested")
 	test("overflow", modelconfig.RequestedLoad{Context: &modelconfig.Context{Mode: "fixed", Tokens: math.MaxInt32}}, "requested")
 	test("too many layers", modelconfig.RequestedLoad{GPU: &modelconfig.GPU{Mode: "layers", Layers: &large}}, "gpu.layers")

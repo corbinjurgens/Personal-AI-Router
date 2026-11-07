@@ -1196,8 +1196,8 @@ func (b *Broker) failModelSettingsLocked(record *engineSettingsRecord, err error
 	if record.Model.Stage == "completed" {
 		record.Model.Stage, record.Snapshot.CoupledStage = "completion-uncertain", "completion-uncertain"
 	}
-	// The operation itself remains nonterminal. Existing switch and mutation
-	// owners already fence applying settings rows; the failed attempt is the
+	// The operation itself remains nonterminal. Existing mutation owners
+	// already fence applying settings rows; the failed attempt is the
 	// receipt, not permission to discard that reservation.
 	record.Snapshot.Phase = "applying"
 	record.Snapshot.Error, record.Snapshot.UnresolvedError = err.Error(), err.Error()

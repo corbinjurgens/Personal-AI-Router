@@ -526,8 +526,8 @@ func TestModelSettingsAutoUnknownMultiGPUAndCPUDisclosure(t *testing.T) {
 func TestModelSettingsAutoUnsupportedPrecisionIsFieldError(t *testing.T) {
 	now := time.Now()
 	r := autoTestRequest()
-	q8 := "q8_0"
-	r.CacheTypeV = &q8
+	precision := "bf16"
+	r.CacheTypeV = &precision
 	state := modelEstimateState{now: func() time.Time { return now }, run: func(context.Context, modelEstimateInput) modelconfig.Estimate {
 		t.Fatal("unsupported native control reached estimator")
 		return modelconfig.Estimate{}

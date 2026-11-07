@@ -1209,6 +1209,7 @@ func TestRemoteManagementPersistsAcrossSeparateProcessRestarts(t *testing.T) {
 			}
 			return false
 		})
+		waitTCP(t, "127.0.0.1:"+strconv.Itoa(f.ports.engineControl), 10*time.Second)
 		assertOppositeGrants(t)
 	})
 }

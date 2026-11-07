@@ -686,7 +686,7 @@ func calculateModelEstimate(ctx context.Context, in modelEstimateInput) modelcon
 	if in.Allocation != nil && in.Allocation.GPU.Mode == "layers" && in.Allocation.GPU.Layers != nil && *in.Allocation.GPU.Layers > 0 {
 		out.Components = append(out.Components, modelEstimateComputePortion(ctx, m, in, true))
 	}
-	if in.Allocation != nil && in.Allocation.Options.CacheRAM != nil && *in.Allocation.Options.CacheRAM > 0 {
+	if in.Allocation != nil && in.Allocation.Options.CacheRAM != nil && *in.Allocation.Options.CacheRAM >= 0 {
 		c := estimateComponent("prompt-cache", modelEstimateMul(uint64(*in.Allocation.Options.CacheRAM), 1<<20), "configured host prompt-cache ceiling; usage is demand-dependent")
 		c.LowBytes = "0"
 		out.Components = append(out.Components, c)

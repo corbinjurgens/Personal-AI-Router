@@ -685,6 +685,20 @@ directory retains self for model-copy identity resolution; mesh self-trust is
 not permission to start a peer subscription. Failed peer streams retry after
 three seconds.
 
+Preset conversion preserves native sampler defaults, reasoning budget and output
+limits as extra options. Native `flash-attn = auto` becomes inherited policy;
+f16 and q8_0 cache precision remain explicit. Native-fit `gpu-layers = auto`
+stays unpriced, while finite `all` resolves to the model plus output layer.
+`cache-ram = 0` disables the host prompt cache and is priced as zero; negative
+values are refused. None of these conversions proves native memory fit.
+
+The finite llama.cpp adapter accepts projector-disable switches `--no-mmproj`
+and `--no-mmproj-auto`, the presence of `LLAMA_ARG_NO_MMPROJ_AUTO`, and
+`mmproj-auto = false` (also `0` or `off`) in environment, presets and typed
+extra options. Negative preset keys such as `no-mmproj = true` disable
+automatic selection and survive whole-preset conversion, including in `[*]`.
+Enabling automatic selection, `--mmproj` and `--mmproj-url` remain refused.
+
 For custom llama.cpp launches using native `--models-preset` (including the
 equals form), model presets own context, parallelism, idle retention and cache
 RAM. Engine-manager omits the manifest's fixed `--ctx-size`, `--parallel`,
@@ -951,6 +965,15 @@ including inbound copies; there is no queue or terminal history. Cancellation
 and shutdown close the exact request context and retain resumable partials.
 Closing a GUI subscriber alone does not cancel a copy. A reconnect snapshot
 that no longer contains an operation establishes an unknown outcome, not success.
+
+The destination route is pinned `POST /v1/models/copy`, classified as a
+mutation. Its body contains only `opId`, `sourceNodeId`, `engine`, `model` and
+optional `expectedExportId`. The destination rechecks the authenticated
+controller's grant and its pause gate while holding a reservation.
+The destination independently needs a live source pin; controller trust cannot
+substitute for that relationship. Copy does not install or activate an engine,
+and does not require Running. A dispatched copy
+POST is never replayed through an alternate route.
 
 `engine:model-copy-capabilities {nodeId, engine}` reads the actual node's
 `{version:1, engine, available, installed, modelStore, exportLayouts, importLayouts, writable, reason, identityBoundRetry, receiptDurability}`.

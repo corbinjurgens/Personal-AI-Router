@@ -200,9 +200,12 @@ only, with no engine launch, model loading, listener or network request. Those
 reads can initialize a driver context, so operation permission must be supplied
 by the existing activation/Pause owner. CPU remains available when prohibited.
 An independent helper-local hard exit is armed before input parsing, bounding
-native calls even if the manager dies. Unix environment keys keep their exact
-case. Linux review and replay set `CUDA_MPS_PIPE_DIRECTORY=/dev/null` after
-verifying the character device, excluding implicit default-directory MPS.
+native calls even if the manager dies. Windows cmd.exe pseudo-variables (names
+beginning with `=`) are excluded before effective-environment merging, validation
+and identity calculation. Empty names and NUL, CR or LF still refuse. Unix
+environment keys keep their exact case. Linux review and replay set
+`CUDA_MPS_PIPE_DIRECTORY=/dev/null` after verifying the character device,
+excluding implicit default-directory MPS.
 
 Primary ABI/selection sources:
 
@@ -456,19 +459,29 @@ owner, including Serving=nil. Exact Task 5 artifact resolution, bounded GGUF
 facts and repeated binding checks run under engine content-read admission.
 The compiler emits sorted complete model sections, checked finite padded context
 (per request times native slots), non-unified KV and disabled startup loading.
+Host prompt cache accepts a nonnegative MiB ceiling; zero disables it and is
+priced as zero. Missing effective cache information remains Unknown.
 Fitting defaults to off, including the global preset defaults. A typed load may
 set `fit = on` with optional model-local `fit-target` margins and `fit-ctx`
-minimum context. Native-fit loads are unpriced: applied inspection has a
+minimum context. Native-fit default GPU placement emits native `auto`; its
+resolved layer count is a request ceiling, not observed placement. Conversion
+maps `gpu-layers = auto` only with fit on, and finite `all` to the bounded
+model-plus-output layer count. Native-fit loads are unpriced: applied inspection has a
 diagnostic execution key, no finite configuration key or pools, an unknown
 estimate and no buffer capture or stated memory record. External operator
 presets retain the finite parser; conversion validates native fit through the
 typed fields first. Reset removes requested leaves; inherited finite adapter
 defaults are regenerated, never retained in a hidden old source. Explicit CPU
 does not require estimate facts; finite layers/native-default resolution needs
-bounded layer facts. Only f16 KV precision is currently mapped; unmapped
+bounded layer facts. f16 and q8_0 KV precision are accepted; unmapped
 precision and unreviewed Auto are field refusals. Batch compatibility is checked against
 the pinned effective native defaults. Metadata context is a fact, not a
 universal training hard cap or permission to add unsupported scaling controls.
+
+Conversion maps native `flash-attn = auto` to inherited policy (the pinned native
+default). Native sampler defaults, reasoning budget and output token limits
+survive as native extra options, below per-request overrides. Thread controls
+remain typed. Projector controls remain refused except the disable forms below.
 
 Typed launch conflicts with external presets and overlapping CLI, explicit env
 or inherited native allocation sources. Router capacity and unrelated router
@@ -800,7 +813,8 @@ lists the envelope controls and unsupported selections. For those controls,
 duplicate aliases, conflicting repeated values, CLI plus environment for one
 setting and unsupported forms fail closed. Preset include/inheritance/substitution,
 startup loads and automatic fitting are unsupported. Finite numeric fields
-reject auto/zero/negative/overflow, except `sleep-idle-seconds = -1`, which
+reject auto/zero/negative/overflow, except nonnegative `cache-ram` and
+`sleep-idle-seconds = -1`, which
 disables idle retention in the pinned build. Positive retention remains valid;
 zero and values below -1 are refused. Retention stays string-valued (`"-1"`).
 The single `llamaServingOptions` table derives native spellings/environment names
@@ -817,6 +831,14 @@ exactly `auto`, `none`, `mmap`, `mlock`, `mmap+mlock` or `dio`. The b12020
 adapter also accepts canonical nonnegative int32 `moe-cache-mib`,
 `lazy-mode` (`auto`, `on`, `off`) and `spec-type` (`none`, `draft-mtp`).
 Built-in MTP uses the main model's head, without a separate draft artifact.
+Automatic projector selection accepts only disable forms: `--no-mmproj`,
+`--no-mmproj-auto`, presence of `LLAMA_ARG_NO_MMPROJ_AUTO` (even empty), or
+`mmproj-auto` set to `false`, `0` or `off` in environment, presets or typed
+extra options. Negative preset keys `no-mmproj` and `no-mmproj-auto` invert
+native truthiness (`on`, `enabled`, `true`, `1`). Wildcard preset disables are
+preserved in every converted profile. Enabling automatic selection and explicit
+`mmproj`/`mmproj-url` selections remain refused because projector allocation
+is unsupported.
 Each control is retained in placement readback. These controls
 have no typed override and do not change memory estimation. Unsupported SWA,
 context-shift and scaling controls, tensor overrides, CPU FFN, host buffers,
@@ -847,8 +869,11 @@ Artifact lookup for custom-alias copy export and inspection reads only
 `models-preset`, `model`, `model-draft`, `ctx-size` and `parallel`. Other preset
 options are ignored, and structural refusals apply to the affected section
 (including defaults inherited from `[*]`). Serving compilation keeps the strict
-parser. Selected artifacts still require their existing checked bindings;
-native controls grant no copy permission and add no separate draft artifact.
+parser. Both native option readers use the shared effective environment,
+including Windows pseudo-variable exclusion and explicit override precedence.
+An empty option name never denotes an optional alias. Selected artifacts still
+require their existing checked bindings; native controls grant no copy
+permission and add no separate draft artifact.
 
 Preview performs no probe, spawn, load, persistence or snapshot creation. It
 reads bounded source/configuration data and model samples only, returning a
@@ -887,8 +912,9 @@ settings/lifecycle replacement cannot send a load authorized under an older
 configuration to a newer process. If replacement wins before that lock, rejection
 releases admission without dispatch or saved-settings changes. Operation-lock
 cleanup runs before mutation cleanup reacquires admission and before the restart
-owner reacquires the operation lock. This preserves `switchAdmission` before
-`opMu` ordering. Declaration rejection is active for every engine with an
+owner reacquires the operation lock. The admission owner in
+`mutation_admission.go` preserves `mutationAdmission` before `opMu` ordering.
+Declaration rejection is active for every engine with an
 applied serving record; engines without one retain request bytes, responses and
 errors while serializing loads with their lifecycle. Once the operation lock is
 acquired, dispatch owns validation and error precedence, including for an
@@ -1633,8 +1659,8 @@ Requirements:
 - **Destination authority.** Pinned `POST /v1/models/copy` is a registered
   mutation. Its only fields are `opId`, `sourceNodeId`, `engine`, `model` and
   optional `expectedExportId`; the recipient always writes locally. A narrow
-  Manager callback rechecks the real caller's fresh grant and pause/recovery
-  gates under its reservation before effects. Previously accepted work is not
+  Manager callback rechecks the real caller's fresh grant and pause gate
+  under its reservation before effects. Previously accepted work is not
   undone by later grant revocation. The source independently pin-gates the
   destination as the actual reader. Preserve `-32012/remote_management_denied`,
   `-32011/local_veto`, and `-32010/policy_conflict` end to end. There is no

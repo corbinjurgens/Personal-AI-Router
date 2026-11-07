@@ -354,6 +354,24 @@ func mapModelSettingsDevices(ctx context.Context, op modelDeviceOperation, run m
 	return out
 }
 
+// modelEnvironment removes entries that are not native device settings before
+// effective-environment merging, validation or identity calculation. Windows
+// manages cmd.exe's per-drive directory and exit-code pseudo-variables itself.
+func modelEnvironment(input []string) []string {
+	out := secretenv.Remove(input)
+	if runtime.GOOS != "windows" {
+		return out
+	}
+	kept := out[:0]
+	for _, kv := range out {
+		if strings.HasPrefix(kv, "=") && strings.IndexByte(kv[1:], '=') > 0 && !strings.ContainsAny(kv, "\x00\r\n") {
+			continue
+		}
+		kept = append(kept, kv)
+	}
+	return kept
+}
+
 // Restrict inherited loader injection and MPS rather than allowing a helper to
 // observe a different program/library graph. The rest of the effective env is
 // preserved and bound (including CUDA_DEVICE_ORDER and visibility).
@@ -363,7 +381,7 @@ func modelDeviceEnvironment(input []string, uuid string) ([]string, error) {
 	}
 	values := map[string]string{}
 	bytes := 0
-	for _, kv := range secretenv.Remove(input) {
+	for _, kv := range modelEnvironment(input) {
 		bytes += len(kv)
 		if bytes > modelDevicesBytes {
 			return nil, errors.New("device environment bound")

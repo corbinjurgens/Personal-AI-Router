@@ -24,14 +24,13 @@ import (
 	"nvpair-shared/engines"
 	"nvpair-shared/modelconfig"
 	"nvpair-shared/nodepolicy"
-	"nvpair-shared/secretenv"
 )
 
-// Merge before filtering, matching exec's last-assignment semantics while
-// supplying the metadata helper a unique, canonical effective environment.
+// Remove pseudo-variables before merging, match exec's last-assignment
+// semantics, then filter again so overrides cannot reintroduce provider secrets.
 func modelEffectiveEnvironment(overrides map[string]string) []string {
 	values := map[string]string{}
-	for _, assignment := range os.Environ() {
+	for _, assignment := range modelEnvironment(os.Environ()) {
 		k, v, ok := strings.Cut(assignment, "=")
 		if ok {
 			values[environmentKey(k)] = v
@@ -40,7 +39,7 @@ func modelEffectiveEnvironment(overrides map[string]string) []string {
 	for k, v := range overrides {
 		values[environmentKey(k)] = v
 	}
-	return secretenv.Remove(literalAssignments(values))
+	return modelEnvironment(literalAssignments(values))
 }
 
 func modelNativeEnvironment(root string, overrides map[string]string) ([]string, error) {
@@ -397,7 +396,7 @@ var llamaServingOptions = []llamaServingOption{
 	{key: "alias", flags: []string{"--alias", "-a"}, env: "LLAMA_ARG_ALIAS", unsupported: true},
 	{key: "mmproj", flags: []string{"--mmproj", "-mm"}, env: "LLAMA_ARG_MMPROJ", unsupported: true},
 	{key: "mmproj-url", flags: []string{"--mmproj-url", "-mmu"}, env: "LLAMA_ARG_MMPROJ_URL", unsupported: true},
-	{key: "mmproj-auto", flags: []string{"--mmproj-auto", "--no-mmproj", "--no-mmproj-auto"}, env: "LLAMA_ARG_MMPROJ_AUTO", negEnv: "LLAMA_ARG_NO_MMPROJ_AUTO", bool: true, unsupported: true},
+	{key: "mmproj-auto", flags: []string{"--mmproj-auto", "--no-mmproj", "--no-mmproj-auto"}, negativeFlags: []string{"--no-mmproj", "--no-mmproj-auto"}, env: "LLAMA_ARG_MMPROJ_AUTO", negEnv: "LLAMA_ARG_NO_MMPROJ_AUTO", bool: true},
 	{key: "mmproj-offload", flags: []string{"--mmproj-offload", "--no-mmproj-offload"}, env: "LLAMA_ARG_MMPROJ_OFFLOAD", negEnv: "LLAMA_ARG_NO_MMPROJ_OFFLOAD", bool: true, unsupported: true},
 	{key: "mmproj-device", flags: []string{"-mmdev", "--mmproj-device"}, env: "MTMD_BACKEND_DEVICE", unsupported: true},
 	{key: "image-min-tokens", flags: []string{"--image-min-tokens"}, env: "LLAMA_ARG_IMAGE_MIN_TOKENS", unsupported: true},
@@ -492,7 +491,7 @@ func validateLlamaValue(key, value string) error {
 		return nil
 	}
 	switch key {
-	case "ctx-size", "parallel", "kv-unified-per-slot", "n-predict", "models-max", "sleep-idle-seconds", "cache-ram", "batch-size", "ubatch-size":
+	case "ctx-size", "parallel", "kv-unified-per-slot", "n-predict", "models-max", "sleep-idle-seconds", "batch-size", "ubatch-size":
 		_, err := llamaPositive(value)
 		return err
 	case "kv-unified", "cache-prompt", "cache-idle-slots", "repack":
@@ -506,7 +505,7 @@ func validateLlamaValue(key, value string) error {
 		if boolean != "true" {
 			return &ServingFieldError{Field: "cpu-moe", Reason: "Omit cpu-moe to leave experts unpinned."}
 		}
-	case "n-cpu-moe", "moe-cache-mib":
+	case "n-cpu-moe", "moe-cache-mib", "cache-ram":
 		n, err := strconv.ParseInt(value, 10, 32)
 		if err != nil || n < 0 || strconv.FormatInt(n, 10) != value {
 			return &ServingFieldError{Field: key, Reason: "Use a canonical nonnegative decimal int32 value."}
@@ -529,6 +528,10 @@ func validateLlamaValue(key, value string) error {
 		if value != "off" && value != "false" && value != "0" {
 			return servingError("Automatic fitting cannot establish a finite allocation.")
 		}
+	case "mmproj-auto":
+		if value != "off" && value != "false" && value != "0" {
+			return servingError("Automatic projector selection must be disabled; projector allocation is unsupported.")
+		}
 	}
 	return nil
 }
@@ -542,6 +545,9 @@ func llamaLongOption(name string) string {
 }
 
 func llamaOptionKey(name string) string {
+	if name == "" {
+		return ""
+	}
 	name = llamaLongOption(name)
 	for _, opt := range llamaServingOptions {
 		if name == opt.key || name == opt.env || name == opt.negEnv || slices.Contains(opt.flags, name) || slices.Contains(opt.flags, "--"+name) {
@@ -714,15 +720,8 @@ func llamaLaunchOptions(command launchCommand, policy *EditableLaunch) (map[stri
 		// Unrelated native options retain their exact tokens in command.Args.
 		// They are not projected into model presets or interpreted here.
 	}
-	effectiveEnv := map[string]string{}
-	for _, assignment := range os.Environ() {
-		key, value, _ := strings.Cut(assignment, "=")
-		effectiveEnv[environmentKey(key)] = value
-	}
-	for key, value := range command.Env {
-		effectiveEnv[environmentKey(key)] = value
-	}
-	for name, value := range effectiveEnv {
+	for _, assignment := range modelEffectiveEnvironment(command.Env) {
+		name, value, _ := strings.Cut(assignment, "=")
 		key := ""
 		for _, option := range llamaServingOptions {
 			if (option.env != "" && name == option.env) || (option.negEnv != "" && name == option.negEnv) {
@@ -857,15 +856,8 @@ func llamaArtifactLaunchOptions(command launchCommand, policy *EditableLaunch) (
 		}
 		i += arity
 	}
-	effectiveEnv := map[string]string{}
-	for _, assignment := range os.Environ() {
-		key, value, _ := strings.Cut(assignment, "=")
-		effectiveEnv[environmentKey(key)] = value
-	}
-	for key, value := range command.Env {
-		effectiveEnv[environmentKey(key)] = value
-	}
-	for name, value := range effectiveEnv {
+	for _, assignment := range modelEffectiveEnvironment(command.Env) {
+		name, value, _ := strings.Cut(assignment, "=")
 		if key := llamaOptionKey(environmentKey(name)); llamaArtifactKeys[key] {
 			if err := accept(env, key, value); err != nil {
 				return nil, nil, err
@@ -960,7 +952,7 @@ func parseLlamaServingPresetAllowing(data []byte, extra map[string]map[string]bo
 				value = strconv.FormatBool(value != "true")
 			}
 		}
-		if negative && (key == "kv-offload" || key == "op-offload" || key == "repack") {
+		if negative && (key == "kv-offload" || key == "op-offload" || key == "repack" || key == "mmproj-auto") {
 			// Pinned 0ec4027a2 preset.cpp parse_bool_arg reverses args_neg using
 			// is_truthy, including repack's nr/no-repack keys; every other value
 			// becomes true. Positive offload values remain native-owned.
