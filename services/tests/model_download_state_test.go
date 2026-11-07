@@ -1369,17 +1369,23 @@ func (f *downloadProcessFixture) assertFences(t *testing.T, model string) {
 	t.Helper()
 	beforePosts, beforeUnloads, beforeLoads := f.router.counts(model)
 	for _, call := range []struct {
-		method string
-		params any
+		method      string
+		params      any
+		wantCode    int
+		wantRefusal string
 	}{
-		{"engine:load-model", map[string]string{"engine": downloadProcessEngine, "model": model}},
-		{"engine:action", map[string]any{"engine": downloadProcessEngine, "action": "load_model", "params": map[string]string{"model": model}}},
+		// Typed manual loads now enter broker capacity admission. This adopted
+		// router has no proxy/serving observations, so admission fails before
+		// content dispatch. Raw loads cannot bypass that admission owner. The
+		// source-read checks below independently exercise the content fence.
+		{"engine:load-model", map[string]string{"engine": downloadProcessEngine, "model": model}, -32000, "Model load unavailable: current node, proxy and engine observations are required."},
+		{"engine:action", map[string]any{"engine": downloadProcessEngine, "action": "load_model", "params": map[string]string{"model": model}}, -32602, "Use admitted model loads or proxy inference; this raw action is unavailable."},
 	} {
 		response, err := f.local.call("420", call.method, mustMarshal(t, call.params), serviceCallTimeout)
 		if err != nil || response.Error == nil {
 			t.Fatalf("unsafe %s refusal: response=%+v error=%v", call.method, response, err)
 		}
-		if !strings.Contains(response.Error.Message, "model content is busy") {
+		if response.Error.Code != call.wantCode || response.Error.Message != call.wantRefusal {
 			t.Fatalf("%s refused at unrelated boundary: %+v", call.method, response.Error)
 		}
 	}

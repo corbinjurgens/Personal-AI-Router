@@ -25,7 +25,7 @@ import (
 	"nvpair-shared/nodepolicy"
 )
 
-func TestModelSettingsOffExactAliasAndShardsHaveNoEffects(t *testing.T) {
+func TestModelSettingsConfiguredPauseExactAliasAndShardsHaveNoEffects(t *testing.T) {
 	f := prepareModelSettingsProcessFixture(t)
 	modelSettingsWrite(t, filepath.Join(f.root, "split-00001-of-00002.gguf"), modelSettingsGGUF("blk.0.weight"))
 	modelSettingsWrite(t, filepath.Join(f.root, "split-00002-of-00002.gguf"), modelSettingsGGUF("blk.1.weight"))
@@ -56,7 +56,7 @@ func TestModelSettingsOffExactAliasAndShardsHaveNoEffects(t *testing.T) {
 	f.noMetadataEffects(t, baseline)
 }
 
-func TestModelSettingsOffManualCoupledPreservesUnselectedState(t *testing.T) {
+func TestModelSettingsConfiguredPauseManualCoupledPreservesUnselectedState(t *testing.T) {
 	f := newModelSettingsProcessFixture(t)
 	f.seedModelSettingsPolicyBounds(t)
 	baseline := f.metadataBaseline(t)
@@ -68,7 +68,7 @@ func TestModelSettingsOffManualCoupledPreservesUnselectedState(t *testing.T) {
 	accepted := f.rpcOK(t, "engine:apply-settings", request)
 	state := f.settled(t, request.RequestID, "succeeded")
 	if state.Running || state.CoupledStage != "completed" || state.Revision != state.AppliedRevision || state.EffectiveSettings == nil || !state.EffectiveSettings.Equal(preview.Settings) || !state.Settings.Equal(preview.Settings) {
-		t.Fatalf("Off completion did not match reviewed persisted settings: phase=%s stage=%s running=%t", state.Phase, state.CoupledStage, state.Running)
+		t.Fatalf("paused completion did not match reviewed persisted settings: phase=%s stage=%s running=%t", state.Phase, state.CoupledStage, state.Running)
 	}
 	assertModelSettingsPolicyPatch(t, policy, f.policy(t), preview, "0.75")
 	disk := f.disk(t)
@@ -88,7 +88,7 @@ func TestModelSettingsOffManualCoupledPreservesUnselectedState(t *testing.T) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.configureCalls != 1 || f.mutations != 0 || f.inferences != 0 {
-		t.Fatalf("Off apply effects configure=%d mutation=%d inference=%d", f.configureCalls, f.mutations, f.inferences)
+		t.Fatalf("paused apply effects configure=%d mutation=%d inference=%d", f.configureCalls, f.mutations, f.inferences)
 	}
 }
 
@@ -211,7 +211,7 @@ func TestModelSettingsEstimatorUnavailableManualResolutionRecoversExactly(t *tes
 	after := f.settled(t, request.RequestID, "succeeded")
 	assertModelSettingsSavedReadback(t, after, preview.Settings)
 	if after.Running {
-		t.Fatal("recovery started the Off engine")
+		t.Fatal("recovery started the configured-paused engine")
 	}
 	assertModelSettingsLoadPolicy(t, baseline.policy, f.policy(t), preview)
 	var replay struct {
@@ -296,6 +296,7 @@ func TestModelSettingsRawPolicyConflictDuringManagerWait(t *testing.T) {
 	f := prepareModelSettingsProcessFixture(t)
 	f.pinned(t)
 	f.startModelSettings(t)
+	f.resume(t)
 	before := f.policy(t)
 	request, preview := f.review(t, f.request(t, "writer-fence", &modelconfig.PolicyPatch{Generation: map[string]*json.Number{"temperature": modelSettingsNumber("0.6")}}))
 	gate := newModelSettingsGate()
@@ -355,7 +356,7 @@ func TestModelSettingsLoadOnlyFencesUnrelatedPolicyDuringManagerWait(t *testing.
 
 func TestModelSettingsPauseWhileApplyingDoesNotResume(t *testing.T) {
 	f := newModelSettingsProcessFixture(t)
-	f.rpcOK(t, "engine:install", map[string]any{"engine": "llamacpp"})
+	f.resume(t)
 	request, preview := f.review(t, f.request(t, "pause-apply", &modelconfig.PolicyPatch{Generation: map[string]*json.Number{"temperature": modelSettingsNumber("0.7")}}))
 	assertModelSettingsImpact(t, preview, true)
 	gate := newModelSettingsGate()
@@ -402,8 +403,8 @@ func TestModelSettingsPauseWhileApplyingDoesNotResume(t *testing.T) {
 
 func TestModelSettingsRunningRestartConsumesWholeFinitePreset(t *testing.T) {
 	f := newModelSettingsProcessFixture(t)
+	f.resume(t)
 	policy := f.policy(t)
-	f.rpcOK(t, "engine:install", map[string]any{"engine": "llamacpp"})
 	initial := f.engineIdentity(t, 1)
 	request, preview := f.review(t, f.request(t, "running-restart", nil))
 	assertModelSettingsImpact(t, preview, true)
@@ -433,7 +434,8 @@ func TestModelSettingsTimedDrainPrecedesWholeRouterRestart(t *testing.T) {
 	f := prepareModelSettingsProcessFixture(t)
 	f.enableAdmissionProbe(t)
 	f.startModelSettings(t)
-	f.rpcOK(t, "engine:install", map[string]any{"engine": "llamacpp"})
+	f.resume(t)
+	f.serveModelSettingsInference(t)
 	request, preview := f.review(t, f.request(t, "timed-drain", nil))
 	assertModelSettingsImpact(t, preview, true)
 	gate := newModelSettingsGate()
@@ -477,7 +479,7 @@ func TestModelSettingsTimedDrainPrecedesWholeRouterRestart(t *testing.T) {
 
 func TestModelSettingsFailedRestartRetainsDesiredEffectiveAndFence(t *testing.T) {
 	f := newModelSettingsProcessFixture(t)
-	f.rpcOK(t, "engine:install", map[string]any{"engine": "llamacpp"})
+	f.resume(t)
 	request, preview := f.review(t, f.request(t, "failed-restart", nil))
 	f.engineProcessFixture.mu.Lock()
 	f.failTarget = true
@@ -505,7 +507,8 @@ func TestModelSettingsBareAcceptedRestartRequiresFreshLocalSupersession(t *testi
 	f := prepareModelSettingsProcessFixture(t)
 	f.enableAdmissionProbe(t)
 	f.startModelSettings(t)
-	f.rpcOK(t, "engine:install", map[string]any{"engine": "llamacpp"})
+	f.resume(t)
+	f.serveModelSettingsInference(t)
 	before := f.policy(t)
 	request, _ := f.review(t, f.request(t, "bare-accepted", &modelconfig.PolicyPatch{Generation: map[string]*json.Number{"temperature": modelSettingsNumber("0.35")}}))
 	gate := newModelSettingsGate()
@@ -599,7 +602,7 @@ func TestModelSettingsBareAcceptedRestartRequiresFreshLocalSupersession(t *testi
 	f.rpcOK(t, "engine:apply-settings", fresh)
 	settled := f.settled(t, fresh.RequestID, "succeeded")
 	if !settled.Settings.Equal(preview.Settings) || !settled.Running {
-		t.Fatal("fresh local supersession lost reviewed settings or unresolved saved-On obligation")
+		t.Fatal("fresh local supersession lost reviewed settings or unresolved Resume obligation")
 	}
 	assertModelSettingsPolicyPatch(t, before, f.policy(t), preview, "0.35")
 }
@@ -715,6 +718,7 @@ func TestModelSettingsPinnedFiniteApplyPreservesTargetState(t *testing.T) {
 	f := prepareModelSettingsProcessFixture(t)
 	f.pinned(t)
 	f.startModelSettings(t)
+	f.resume(t)
 	before := f.policy(t)
 	request := f.request(t, "pinned-manual", &modelconfig.PolicyPatch{Generation: map[string]*json.Number{"temperature": modelSettingsNumber("0.45")}})
 	var preview settings.Preview
@@ -728,7 +732,7 @@ func TestModelSettingsPinnedFiniteApplyPreservesTargetState(t *testing.T) {
 	after := f.settled(t, request.RequestID, "succeeded")
 	var remote settings.Snapshot
 	modelSettingsDecode(t, f.peer(t, "get", settings.Request{Engine: "llamacpp"}, http.StatusOK), &remote)
-	if remote.NodeID != "model-settings-target" || !remote.Settings.Equal(after.Settings) || !remote.Settings.Equal(preview.Settings) || remote.Running {
+	if remote.NodeID != "model-settings-target" || !remote.Settings.Equal(after.Settings) || !remote.Settings.Equal(preview.Settings) || !remote.Running {
 		t.Fatal("pinned target readback differs from reviewed persisted configuration")
 	}
 	assertModelSettingsPolicyPatch(t, before, f.policy(t), preview, "0.45")
@@ -738,6 +742,7 @@ func TestModelSettingsPinnedInferenceLockProtectsGenerationOnly(t *testing.T) {
 	f := prepareModelSettingsProcessFixture(t)
 	f.pinned(t)
 	f.startModelSettings(t)
+	f.resume(t)
 	policy := f.policy(t)
 	policy.Profiles[0].LocalOnly = true
 	policy = f.setPolicy(t, policy)
@@ -761,10 +766,10 @@ func TestModelSettingsPinnedInferenceLockProtectsGenerationOnly(t *testing.T) {
 	request.ModelChange.PreviewDigest = preview.PreviewDigest
 	f.peer(t, "apply", request, http.StatusOK)
 	after := f.settled(t, request.RequestID, "succeeded")
-	assertModelSettingsSavedReadback(t, after, preview.Settings)
+	assertModelSettingsRunningReadback(t, after, preview.Settings)
 	var remote settings.Snapshot
 	modelSettingsDecode(t, f.peer(t, "get", settings.Request{Engine: "llamacpp"}, http.StatusOK), &remote)
-	assertModelSettingsSavedReadback(t, remote, preview.Settings)
+	assertModelSettingsRunningReadback(t, remote, preview.Settings)
 	if remote.NodeID != "model-settings-target" || remote.Revision != after.Revision {
 		t.Fatal("locked load-only readback did not identify the reviewed target revision")
 	}
@@ -1128,8 +1133,24 @@ func assertModelSettingsBindings(t *testing.T, root string, got, want []modelcon
 
 func assertModelSettingsSavedReadback(t *testing.T, after settings.Snapshot, reviewed settings.Config) {
 	t.Helper()
-	if after.Phase != "succeeded" || after.CoupledStage != "completed" || after.Revision != after.AppliedRevision || after.Running || !after.Settings.Equal(reviewed) || after.EffectiveSettings == nil || !after.EffectiveSettings.Equal(reviewed) {
-		t.Fatal("saved and effective Off settings differ from the exact reviewed configuration")
+	if after.Running {
+		t.Fatal("settings apply started the configured-paused engine")
+	}
+	assertModelSettingsExactReadback(t, after, reviewed)
+}
+
+func assertModelSettingsRunningReadback(t *testing.T, after settings.Snapshot, reviewed settings.Config) {
+	t.Helper()
+	if !after.Running {
+		t.Fatal("settings apply did not preserve the available engine")
+	}
+	assertModelSettingsExactReadback(t, after, reviewed)
+}
+
+func assertModelSettingsExactReadback(t *testing.T, after settings.Snapshot, reviewed settings.Config) {
+	t.Helper()
+	if after.Phase != "succeeded" || after.CoupledStage != "completed" || after.Revision != after.AppliedRevision || !after.Settings.Equal(reviewed) || after.EffectiveSettings == nil || !after.EffectiveSettings.Equal(reviewed) {
+		t.Fatal("saved and effective settings differ from the exact reviewed configuration")
 	}
 }
 
@@ -1228,6 +1249,13 @@ func parseModelSettingsPreset(data []byte) (map[string]map[string]string, error)
 	return sections, nil
 }
 
+func (f *modelSettingsProcessFixture) serveModelSettingsInference(t *testing.T) {
+	t.Helper()
+	policy := f.policy(t)
+	policy.ServedModels = nodepolicy.ServedModels{{Engine: "llamacpp", Model: "medium-model"}}
+	f.setPolicy(t, policy)
+}
+
 func (f *modelSettingsProcessFixture) holdModelSettingsInference(t *testing.T) <-chan error {
 	t.Helper()
 	// Advertise the facade, as discovery does, so the real proxy recognizes
@@ -1235,21 +1263,19 @@ func (f *modelSettingsProcessFixture) holdModelSettingsInference(t *testing.T) <
 	f.rpcOK(t, "llamacpp-proxy:node/add-manual", map[string]any{"id": "settings-held", "host": "127.0.0.1", "port": f.targetFacadePort, "addresses": []string{"127.0.0.1"}, "models": []string{"medium-model"}})
 	f.rpcOK(t, "llamacpp-proxy:node/select", map[string]string{"id": "settings-held"})
 	// Engine start and the broker's healthy-backend publication are separate
-	// observations. Wait for a real metadata read through the self route before
-	// submitting the one held inference; do not forge backend health over IPC.
+	// observations. The policy catalog exists before the engine is healthy, so
+	// wait for the router's own metadata through the self route.
 	client := &http.Client{Timeout: 2 * time.Second, Transport: &http.Transport{Proxy: nil}}
 	defer client.CloseIdleConnections()
-	task1Eventually(t, "healthy local model inventory through facade", 10*time.Second, func() bool {
-		response, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/v1/models", f.targetFacadePort))
+	task1Eventually(t, "healthy local router metadata through facade", 10*time.Second, func() bool {
+		response, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/props", f.targetFacadePort))
 		if err != nil {
 			return false
 		}
-		var inventory struct {
-			Data []struct {
-				ID string `json:"id"`
-			} `json:"data"`
+		var metadata struct {
+			Role string `json:"role"`
 		}
-		decodeErr := json.NewDecoder(response.Body).Decode(&inventory)
+		decodeErr := json.NewDecoder(response.Body).Decode(&metadata)
 		closeErr := response.Body.Close()
 		if closeErr != nil {
 			t.Fatal(closeErr)
@@ -1257,26 +1283,31 @@ func (f *modelSettingsProcessFixture) holdModelSettingsInference(t *testing.T) <
 		if response.StatusCode != http.StatusOK || decodeErr != nil {
 			return false
 		}
-		return slices.ContainsFunc(inventory.Data, func(model struct {
-			ID string `json:"id"`
-		}) bool {
-			return model.ID == "medium-model"
-		})
+		return metadata.Role == "router"
 	})
 	done := make(chan error, 1)
 	go func() {
 		response, err := (&http.Client{Timeout: 95 * time.Second}).Post(fmt.Sprintf("http://127.0.0.1:%d/v1/chat/completions", f.targetFacadePort), "application/json", strings.NewReader(`{"model":"medium-model","stream":false,"messages":[{"role":"user","content":"synthetic"}]}`))
 		if err == nil {
+			if response.StatusCode != http.StatusOK {
+				err = fmt.Errorf("synthetic inference HTTP %d", response.StatusCode)
+			}
 			_, readErr := io.Copy(io.Discard, response.Body)
 			closeErr := response.Body.Close()
 			if readErr != nil {
 				err = readErr
-			} else {
+			} else if err == nil {
 				err = closeErr
 			}
 		}
 		done <- err
 	}()
-	modelSettingsWait(t, f.inference)
+	select {
+	case <-f.inference.entered:
+	case err := <-done:
+		t.Fatalf("synthetic inference returned before the hold barrier: %v", err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("synthetic inference did not enter the hold barrier")
+	}
 	return done
 }
