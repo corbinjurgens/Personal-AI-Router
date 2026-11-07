@@ -568,6 +568,7 @@ func TestTypedLlamaNativeFit(t *testing.T) {
 	rt := f.st.plat.Runtime
 	on, margin, floor := "on", "512", int32(4096)
 	rt.ModelLoads[0].Requested.Fit = &on
+	rt.ModelLoads[0].Requested.GPU = &modelconfig.GPU{Mode: "native-default"}
 	rt.ModelLoads[0].Requested.FitTarget = &margin
 	rt.ModelLoads[0].Requested.FitCtx = &floor
 	command, err := launchForState(f.st, rt.Port)
@@ -584,7 +585,7 @@ func TestTypedLlamaNativeFit(t *testing.T) {
 		t.Fatal(err)
 	}
 	section := sections[f.request.ModelID]
-	if section["fit"] != "on" || section["fit-target"] != "512" || section["fit-ctx"] != "4096" {
+	if section["fit"] != "on" || section["fit-target"] != "512" || section["fit-ctx"] != "4096" || section["gpu-layers"] != "auto" {
 		t.Fatalf("native fit options=%v", section)
 	}
 	rt.ModelLoads = prepared.ModelLoads
@@ -2698,7 +2699,7 @@ func TestModelSettingsLoadConversionRejectsCompleteRouter(t *testing.T) {
 			}
 		})
 	}
-	test("sampling field", "temp = 0.4\n")
+	test("projector control", "mmproj = projector.gguf\n")
 	test("third model", "[third]\nmodel = third.gguf\ncache-prompt = true\n")
 	test("unified KV", "kv-unified = true\n")
 }
@@ -2896,7 +2897,7 @@ func TestModelSettingsLoadFiniteValidation(t *testing.T) {
 	}
 	zero, large := int32(0), int32(6)
 	batch, ubatch := int32(128), int32(256)
-	precision := "q8_0"
+	precision := "bf16"
 	test("zero slots", modelconfig.RequestedLoad{Slots: &zero}, "requested")
 	test("overflow", modelconfig.RequestedLoad{Context: &modelconfig.Context{Mode: "fixed", Tokens: math.MaxInt32}}, "requested")
 	test("too many layers", modelconfig.RequestedLoad{GPU: &modelconfig.GPU{Mode: "layers", Layers: &large}}, "gpu.layers")

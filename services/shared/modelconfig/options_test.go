@@ -121,6 +121,18 @@ func TestRequestedLoadNativeFitCloneAndPatch(t *testing.T) {
 	}
 }
 
+func TestRequestedLoadPromptCacheBound(t *testing.T) {
+	for _, cache := range []int32{0, 512} {
+		if err := (RequestedLoad{CacheRAM: &cache}).Validate(); err != nil {
+			t.Fatalf("cache RAM %d refused: %v", cache, err)
+		}
+	}
+	negative := int32(-1)
+	if err := (RequestedLoad{CacheRAM: &negative}).Validate(); err == nil {
+		t.Fatal("negative cache RAM accepted")
+	}
+}
+
 func TestLoadPatchDefersCompleteLoadRelationships(t *testing.T) {
 	test := func(name string, set RequestedLoad) {
 		t.Run(name, func(t *testing.T) {

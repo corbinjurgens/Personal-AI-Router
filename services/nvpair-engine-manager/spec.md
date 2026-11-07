@@ -451,19 +451,29 @@ owner, including Serving=nil. Exact Task 5 artifact resolution, bounded GGUF
 facts and repeated binding checks run under engine content-read admission.
 The compiler emits sorted complete model sections, checked finite padded context
 (per request times native slots), non-unified KV and disabled startup loading.
+Host prompt cache accepts a nonnegative MiB ceiling; zero disables it and is
+priced as zero. Missing effective cache information remains Unknown.
 Fitting defaults to off, including the global preset defaults. A typed load may
 set `fit = on` with optional model-local `fit-target` margins and `fit-ctx`
-minimum context. Native-fit loads are unpriced: applied inspection has a
+minimum context. Native-fit default GPU placement emits native `auto`; its
+resolved layer count is a request ceiling, not observed placement. Conversion
+maps `gpu-layers = auto` only with fit on, and finite `all` to the bounded
+model-plus-output layer count. Native-fit loads are unpriced: applied inspection has a
 diagnostic execution key, no finite configuration key or pools, an unknown
 estimate and no buffer capture or stated memory record. External operator
 presets retain the finite parser; conversion validates native fit through the
 typed fields first. Reset removes requested leaves; inherited finite adapter
 defaults are regenerated, never retained in a hidden old source. Explicit CPU
 does not require estimate facts; finite layers/native-default resolution needs
-bounded layer facts. Only f16 KV precision is currently mapped; unmapped
+bounded layer facts. f16 and q8_0 KV precision are accepted; unmapped
 precision and unreviewed Auto are field refusals. Batch compatibility is checked against
 the pinned effective native defaults. Metadata context is a fact, not a
 universal training hard cap or permission to add unsupported scaling controls.
+
+Conversion maps native `flash-attn = auto` to inherited policy (the pinned native
+default). Native sampler defaults, reasoning budget and output token limits
+survive as native extra options, below per-request overrides. Thread controls
+remain typed. Projector controls remain refused except the disable forms below.
 
 Typed launch conflicts with external presets and overlapping CLI, explicit env
 or inherited native allocation sources. Router capacity and unrelated router
@@ -819,7 +829,8 @@ lists the envelope controls and unsupported selections. For those controls,
 duplicate aliases, conflicting repeated values, CLI plus environment for one
 setting and unsupported forms fail closed. Preset include/inheritance/substitution,
 startup loads and automatic fitting are unsupported. Finite numeric fields
-reject auto/zero/negative/overflow, except `sleep-idle-seconds = -1`, which
+reject auto/zero/negative/overflow, except nonnegative `cache-ram` and
+`sleep-idle-seconds = -1`, which
 disables idle retention in the pinned build. Positive retention remains valid;
 zero and values below -1 are refused. Retention stays string-valued (`"-1"`).
 The single `llamaServingOptions` table derives native spellings/environment names

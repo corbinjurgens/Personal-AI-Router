@@ -127,9 +127,9 @@ func validateModelExtraOptions(model string, extras map[string]string) error {
 				return modelLoadError(model, "extraOptions", key+": "+err.Error())
 			}
 		}
-		// The preset-key owner also recognizes typed request and thread
-		// controls outside the finite allocation table.
-		if llamaPresetOptionKey(key) != "" && !slices.ContainsFunc(llamaServingOptions, func(option llamaServingOption) bool { return option.key == key }) {
+		// Thread controls have typed load owners. Sampling controls outside
+		// the allocation table remain native defaults, below request overrides.
+		if key == "threads" || key == "threads-batch" {
 			return modelLoadError(model, "extraOptions", "Use the typed field for "+key+".")
 		}
 		if key == "kv-unified" || key == "kv-unified-per-slot" {
@@ -1126,6 +1126,11 @@ func typedLlamaModelOptions(model string, requested modelconfig.RequestedLoad, l
 	if gpu.Mode == "layers" {
 		options["gpu-layers"] = strconv.Itoa(int(*gpu.Layers))
 	}
+	if modelLoadNativeFit(requested) && (requested.GPU == nil || requested.GPU.Mode == "native-default") {
+		// The resolved layer count bounds the request, not native fit's actual
+		// placement. Fit loads have no finite configuration key or estimate.
+		options["gpu-layers"] = "auto"
+	}
 	// llama.cpp b11146 common/arg.cpp:2755-2771 maps only these finite
 	// expert overrides. none deliberately emits neither native flag.
 	// https://github.com/ggml-org/llama.cpp/blob/b11146/common/arg.cpp#L2755-L2771
@@ -1145,8 +1150,8 @@ func typedLlamaModelOptions(model string, requested modelconfig.RequestedLoad, l
 		value     *string
 	}{{"cacheTypeK", "cache-type-k", requested.CacheTypeK}, {"cacheTypeV", "cache-type-v", requested.CacheTypeV}} {
 		if field.value != nil {
-			if *field.value != "f16" {
-				return fail(field.name, "This precision requires validated build/architecture support; only f16 is currently mapped.")
+			if *field.value != "f16" && *field.value != "q8_0" {
+				return fail(field.name, "This precision requires validated build/architecture support; only f16 and q8_0 are currently mapped.")
 			}
 			options[field.key] = *field.value
 		}
@@ -2120,6 +2125,14 @@ func convertTypedLlamaOptions(model string, options map[string]string) (modelcon
 			}
 			r.Context = &modelconfig.Context{Mode: "fixed", Tokens: *n}
 		case "parallel", "gpu-layers", "batch-size", "ubatch-size", "threads", "threads-batch", "sleep-idle-seconds", "cache-ram":
+			if key == "gpu-layers" && (value == "auto" || value == "all") {
+				fit, err := llamaBool(options["fit"])
+				if options["fit"] != "" && err != nil || value == "auto" && fit != "true" || value == "all" && fit == "true" {
+					return fail()
+				}
+				r.GPU = &modelconfig.GPU{Mode: "native-default"}
+				continue
+			}
 			n, err := integer()
 			if err != nil {
 				return fail()
@@ -2153,6 +2166,9 @@ func convertTypedLlamaOptions(model string, options map[string]string) (modelcon
 		case "cache-type-v":
 			r.CacheTypeV = &value
 		case "flash-attn":
+			if value == "auto" {
+				value = "inherit"
+			}
 			r.FlashAttention = &value
 		case "kv-offload", "op-offload":
 			text, err := llamaBool(value)
@@ -2340,8 +2356,8 @@ func llamaModelSettingsOptions() ([]modelSettingsOption, error) {
 			if native.key == "cache-type-v" {
 				field = "cacheTypeV"
 			}
-			d = modelconfig.OptionDescriptor{Field: field, Label: label, Kind: "enum", Values: []string{"f16"}, Supported: true, Portable: true, Owner: "model-load", Phase: "B", DefaultSource: "inherited native precision; unresolved", IdentityEffect: "KV precision/quality", EstimateEffect: "block-aware KV row sizes"}
-			preset = native.key + " = explicit precision; bf16/q8_0/q4_0 need validated build/architecture support"
+			d = modelconfig.OptionDescriptor{Field: field, Label: label, Kind: "enum", Values: []string{"f16", "q8_0"}, Supported: true, Portable: true, Owner: "model-load", Phase: "B", DefaultSource: "inherited native precision; unresolved", IdentityEffect: "KV precision/quality", EstimateEffect: "block-aware KV row sizes"}
+			preset = native.key + " = explicit precision; bf16/q4_0 need validated build/architecture support"
 		case "flash-attn":
 			d = modelconfig.OptionDescriptor{Field: "flashAttention", Label: label, Kind: "enum", Values: []string{"inherit", "on", "off"}, Supported: true, Portable: true, Owner: "model-load", Phase: "B", DefaultSource: "inherited native policy; unresolved", IdentityEffect: "attention implementation", EstimateEffect: "KV/workspace support"}
 			preset = "flash-attn = on/off when explicit; inherit emits no override; validate target combination"
@@ -2363,8 +2379,8 @@ func llamaModelSettingsOptions() ([]modelSettingsOption, error) {
 			d = modelSettingsInteger("sleepIdleSeconds", label, "-1", "300", "finite adapter inherited baseline", "retention; keep-loaded policy takes precedence")
 			preset = "sleep-idle-seconds = -1 or positive int32 (zero invalid)"
 		case "cache-ram":
-			d = modelSettingsInteger("cacheRAM", label, "1", "512", "finite adapter inherited baseline (MiB)", "host prompt cache; not admission memory")
-			preset = "cache-ram = explicit positive int32 MiB"
+			d = modelSettingsInteger("cacheRAM", label, "0", "512", "finite adapter inherited baseline (MiB)", "host prompt cache; not admission memory")
+			preset = "cache-ram = explicit nonnegative int32 MiB; zero disables the cache"
 		case "fit":
 			d = modelconfig.OptionDescriptor{Field: "fit", Label: label, Kind: "enum", Values: []string{"off", "on"}, Default: json.RawMessage(`"off"`), DefaultSource: "typed load baseline", Supported: true, Portable: true, Owner: "model-load", Phase: "B", IdentityEffect: "native placement", EstimateEffect: "unpriced when on"}
 			preset = "fit = off/on; native fit is unpriced"
@@ -2450,7 +2466,7 @@ func modelSettingsExtraOptions() []modelconfig.OptionDescriptor {
 		modelSettingsInteger("gpu.layers", "Finite GPU layers (target facts required)", "0", "", "inherited native placement; unresolved", "host/device weights; target layer count bounds this value"),
 	}
 	for _, field := range []struct{ key, label string }{{"cacheTypeK.alternatives", "Additional K cache precisions"}, {"cacheTypeV.alternatives", "Additional V cache precisions"}} {
-		options = append(options, modelconfig.OptionDescriptor{Field: field.key, Label: field.label, Kind: "enum", Values: []string{"bf16", "q8_0", "q4_0"}, Supported: false, Reason: "Validated native build/architecture support unavailable; quantized V also requires validated Flash Attention.", Owner: "model-load", Phase: "B conditional", DefaultSource: "inherited native precision; unresolved", IdentityEffect: "KV precision/quality", EstimateEffect: "block-aware KV sizes"})
+		options = append(options, modelconfig.OptionDescriptor{Field: field.key, Label: field.label, Kind: "enum", Values: []string{"bf16", "q4_0"}, Supported: false, Reason: "Validated native build/architecture support unavailable; quantized V also requires validated Flash Attention.", Owner: "model-load", Phase: "B conditional", DefaultSource: "inherited native precision; unresolved", IdentityEffect: "KV precision/quality", EstimateEffect: "block-aware KV sizes"})
 	}
 	for _, field := range []struct{ key, label string }{{"context.auto", "Auto context"}, {"gpu.auto", "Auto placement"}} {
 		options = append(options, modelconfig.OptionDescriptor{Field: field.key, Label: field.label, Kind: "enum", Values: []string{"auto"}, Supported: false, Reason: "Reviewed Auto resolver and owner trade choices are pending; no defaults selected.", Owner: "model-load", Phase: "C pending O2", DefaultSource: "none selected", IdentityEffect: "frozen reviewed native resolution", EstimateEffect: "requires bounded facts and mapped target memory"})

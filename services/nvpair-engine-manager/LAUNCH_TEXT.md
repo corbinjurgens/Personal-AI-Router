@@ -144,6 +144,7 @@ explicit envelope-option set is `llamaServingOptions` in `serving_llamacpp.go`:
   cap, prediction limit, router preset and capacity.
 - GPU layers, split mode, tensor split, main GPU and device (opaque placement).
 - Idle sleep, cache RAM, prompt caching, idle-slot caching and fitting off.
+  Cache RAM accepts nonnegative MiB; zero disables the host prompt cache.
 - Automatic projector selection off: `--no-mmproj`, `--no-mmproj-auto`,
   presence of `LLAMA_ARG_NO_MMPROJ_AUTO`, or `mmproj-auto` set to `false`, `0`
   or `off` in environment, presets or typed extra options. Negative preset
