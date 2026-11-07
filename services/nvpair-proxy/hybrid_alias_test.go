@@ -5,18 +5,149 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
+	"nvpair-shared/clustertrust"
+	"nvpair-shared/clustertrusttest"
 	"nvpair-shared/engines"
 	"nvpair-shared/nodepolicy"
 )
+
+// Wire-protocol tests record at a pinned PAIR receiving boundary. A directly
+// configured manual engine is not allowed to receive internal routing headers.
+func pinRecordingPairPeer(t *testing.T, f *facade, id string, receiver *recordingEngine) {
+	t.Helper()
+	p := f.host
+	if p.mesh == nil {
+		p.baseConfigDir = t.TempDir()
+		selfDir := filepath.Join(p.baseConfigDir, "cluster")
+		clustertrusttest.Join(t, selfDir, "fixture-cluster", p.originNodeID)
+		p.mesh = clustertrust.Open(selfDir)
+		t.Cleanup(p.closeIdleTransports)
+	}
+	selfDir := filepath.Join(p.baseConfigDir, "cluster")
+	peerDir, uuid := t.TempDir(), "recording-"+id
+	clustertrusttest.Join(t, peerDir, "fixture-cluster", uuid)
+	var members []map[string]any
+	data, err := os.ReadFile(filepath.Join(selfDir, "members.json"))
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if err == nil {
+		if err := json.Unmarshal(data, &members); err != nil {
+			t.Fatal(err)
+		}
+	}
+	proxyReversePin(t, selfDir, peerDir, uuid)
+	proxyReversePin(t, peerDir, selfDir, p.originNodeID)
+	members = append(members, map[string]any{"nodeUuid": uuid, "state": "member", "clusterId": "fixture-cluster", "admissionEpoch": 1})
+	data, err = json.Marshal(members)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(selfDir, "members.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p.mesh.Refresh()
+	mesh := clustertrust.Open(peerDir)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		principal, ok := mesh.VerifyClientPin(r)
+		if !ok || principal != p.originNodeID {
+			t.Error("recording PAIR receiver lacks authenticated origin")
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		stream, err := parseOriginStreamRequest(r.URL.Path, body)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		w.Header().Set(peerStreamFramingHeader, stream.peerMetadata())
+		w.Header().Add("Trailer", peerStreamFramingHeader)
+		setReplayBody(r, body)
+		receiver.Config.Handler.ServeHTTP(w, r)
+		// This recorder writes its complete response synchronously. Attest its
+		// ending as well as its initial framing for the real HTTP origin.
+		w.Header().Set(peerStreamFramingHeader, peerDisposition(streamFrameResult{Outcome: streamOutcomeCompleted}))
+	}))
+	server.TLS = mesh.ServerTLSConfig()
+	server.StartTLS()
+	t.Cleanup(server.Close)
+	n, ok := discoveredNode(f, id)
+	if !ok {
+		t.Fatalf("missing recording node %s", id)
+	}
+	endpoint := nodeFor(t, id, server.URL)
+	n.Addresses, n.Port, n.ClusterUUID = endpoint.Addresses, endpoint.Port, uuid
+	f.discovery.AddManual(n)
+}
+
+func TestIngressPeerCurrent(t *testing.T) {
+	selfDir, peerDir := t.TempDir(), t.TempDir()
+	clustertrusttest.Join(t, selfDir, "fixture-cluster", "destination")
+	clustertrusttest.Join(t, peerDir, "fixture-cluster", "authenticated-origin")
+	proxyReversePin(t, selfDir, peerDir, "authenticated-origin")
+	p := &Proxy{mesh: clustertrust.Open(selfDir)}
+	f := &facade{host: p}
+	incarnation, ok := p.mesh.PeerServiceIncarnation("authenticated-origin")
+	if !ok {
+		t.Fatal("missing fixture peer relationship")
+	}
+	ctx := context.WithValue(context.Background(), ingressPeerKey{}, ingressPeer{"authenticated-origin", incarnation})
+	if !f.ingressPeerCurrent(ctx) || !f.ingressPeerCurrent(context.Background()) {
+		t.Fatal("current peer or local caller refused")
+	}
+	replacement := t.TempDir()
+	clustertrusttest.Join(t, replacement, "fixture-cluster", "authenticated-origin")
+	proxyReversePin(t, selfDir, replacement, "authenticated-origin")
+	p.mesh.Refresh()
+	if f.ingressPeerCurrent(ctx) {
+		t.Fatal("replacement peer accepted the old ingress authority")
+	}
+}
+
+func TestRoleCandidatesPreserveDeclarationOrder(t *testing.T) {
+	pol := tierPolicy(nil)
+	fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"a": {"first"}, "b": {"second"}}, nil)
+	fx.declare(t, "a", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("first")})
+	fx.declare(t, "b", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("second")})
+	f := fx.p.soleFacade()
+	f.SetSelected("b")
+	cands := f.resolveTierCandidates("weak", requestNeeds{}, false)
+	if len(cands) != 2 || cands[0].id != "a" || cands[1].id != "b" {
+		t.Fatalf("declaration order changed: %+v", cands)
+	}
+}
+
+func TestConcreteCandidatesStayOnEntryEngine(t *testing.T) {
+	fx := newTierFixture(t, llamacppCase(t), nodepolicy.Default(), map[string][]string{"entry": {"fixture"}}, nil)
+	f := fx.p.soleFacade()
+	profile := customCase(t).profile
+	other := newFacade(fx.p, profile, NewDiscovery(), profile.FacadePort)
+	fx.p.facades[profile.Name] = other
+	n := nodeFor(t, "other", "http://127.0.0.1:9876")
+	n.Models = []string{"fixture"}
+	other.discovery.AddManual(n)
+	cands := f.resolveConcreteCandidates("fixture", routeChatCompletions)
+	if len(cands) != 1 || cands[0].id != "entry" || cands[0].fac != f || cands[0].engine != "llamacpp" {
+		t.Fatalf("concrete request crossed engines: %+v", cands)
+	}
+}
 
 // Fixture role names and their overrides, spelled independently of the code
 // under test.
@@ -718,11 +849,6 @@ func TestRoleCatalogContextUsesCandidateNodeRoutability(t *testing.T) {
 		n.Profiles[0].Model = "small"
 	}
 	routable := func(n *Node) {}
-	boundOffer := func(n *Node) {
-		n.Models = nil
-		n.PolicyRevision = "1"
-		n.EngineBindingOffers = bindingOffer("llamacpp", "large")
-	}
 	test("unserved larger profile cannot inflate context", 131072, unserved, false, 8192)
 	test("another node inventory cannot serve larger profile", 131072, missingInventory, false, 8192)
 	test("same model on another node cannot supply profile context", 131072, otherNodeOwnsModel, false, 8192)
@@ -730,8 +856,6 @@ func TestRoleCatalogContextUsesCandidateNodeRoutability(t *testing.T) {
 	test("missing inventory unbounded profile cannot hide context", 0, missingInventory, false, 8192)
 	test("routable larger profile raises context", 131072, routable, true, 131072)
 	test("routable unbounded profile omits context", 0, routable, true, 0)
-	test("binding offer without inventory raises context", 131072, boundOffer, true, 131072)
-	test("binding offer without inventory omits unbounded context", 0, boundOffer, true, 0)
 }
 
 func TestRoleCatalogIgnoresDisabledEngineContext(t *testing.T) {

@@ -30,6 +30,7 @@ import (
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
+	"nvpair-shared/testbin"
 )
 
 // This personality runs at the existing tests.test image, before TestMain can
@@ -299,8 +300,330 @@ func stopPauseBarrier(t *testing.T, ch <-chan struct{}, description string) {
 	}
 }
 
+// The stop/Pause cases retain the service and real inventory fixture after
+// removal of the binding-only process cases. Native HTTP and discovery are fake.
+type stopPauseServiceFixture struct {
+	service *remoteServiceFixture
+	engine  *switchProcessFixture
+	client  *serviceRPCClient
+	args    []string
+	nodeID  string
+}
+
+func newStopPauseServiceFixture(t *testing.T, s *remoteServiceFixture, configure func(*switchProcessFixture)) *stopPauseServiceFixture {
+	t.Helper()
+	e := prepareSwitchProcessFixture(t, s.configDir, s.ports, s.scannerPath)
+	if configure != nil {
+		configure(e)
+	}
+	// The service owns a separate config root and cluster root. Its broker's
+	// settings journal is beside clusterDir, rather than inside configDir.
+	var journal map[string]json.RawMessage
+	task2Decode(t, readPolicyBytes(t, filepath.Join(s.configDir, "engine-settings-operations.json")), &journal)
+	jointWriteJSON(t, filepath.Join(filepath.Dir(s.clusterDir), "engine-settings-operations.json"), journal)
+	facades := map[string]int{"llamacpp-custom": e.facadePort, "llamacpp": e.targetFacadePort}
+	for _, name := range engines.Names() {
+		if _, exists := facades[name]; !exists {
+			facades[name] = freePort(t)
+		}
+	}
+	writePrivateBrokerEngineSettings(t, s.configDir, s.clusterDir, facades)
+	// A paired standalone fixture may run concurrently in this test. Reuse the
+	// registered manager observation image for this proxy personality, and keep
+	// its real proxy in the service bundle so their cleanup inventories differ.
+	image, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.proxyControl.image = filepath.Join(testbin.Dir(t, "tests", "performance-observations", "observation-manager"), testbin.Exe("observation-manager"))
+	jointCopyExecutable(t, image, e.proxyControl.image)
+	e.proxyControl.real = s.copyBinary(proxyBin)
+	s.proxyPath = e.proxyControl.image
+	for _, path := range []string{s.proxyPath, e.proxyControl.real} {
+		canonical, err := canonicalServicePath(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.inventory.paths = append(s.inventory.paths, canonical)
+	}
+	s.facadePort = e.targetFacadePort
+	s.env = append(s.env, "NVPAIR_TEST_SUBSCRIPTION_SCANNER="+s.scannerPath,
+		"NVPAIR_TEST_SUBSCRIPTION_PORT="+strconv.Itoa(e.scannerPort))
+	s.env = append(s.env, e.proxyControl.env()...)
+	f := &stopPauseServiceFixture{service: s, engine: e, args: s.args(), nodeID: clustertrust.Open(s.clusterDir).NodeUUID()}
+	if f.args[len(f.args)-2] != "--proxy-engines" || f.args[len(f.args)-1] != "llamacpp" {
+		t.Fatal("service fixture no longer supplies the expected proxy argument")
+	}
+	f.start(t)
+	t.Cleanup(func() {
+		e.unblock()
+		err := s.cleanupChecked()
+		if t.Failed() {
+			// The existing owner has joined the stderr pumps; capture before
+			// removeBundle deletes the private log directory.
+			logStopPauseDecisions(t, s.serviceFixture)
+		}
+		if err != nil {
+			t.Errorf("stop/Pause service cleanup: %v", err)
+			return
+		}
+		s.assertStopped()
+		e.mu.Lock()
+		identities := append([]serviceProcessIdentity(nil), e.identities...)
+		e.mu.Unlock()
+		for _, identity := range identities {
+			e.assertProcessStopped(t, identity)
+		}
+		for _, port := range []int{e.sourcePort, e.targetPort, e.facadePort, e.targetFacadePort, e.scannerPort, e.proxyControl.port} {
+			assertInteropListenerClosed(t, port)
+		}
+	})
+	return f
+}
+
+func logStopPauseDecisions(t *testing.T, s *serviceFixture) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(s.dir, "logs", "broker.log"))
+	if err != nil {
+		t.Logf("stop/Pause permission decision log read: %v", err)
+		return
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.Contains(line, "remote management decision") {
+			t.Logf("stop/Pause permission decision: %s", line)
+		}
+	}
+}
+
+func (f *stopPauseServiceFixture) grant(t *testing.T, peer string, allowed bool) {
+	t.Helper()
+	var before managementSnapshot
+	task2Decode(t, f.call(t, "cluster:get-remote-management", map[string]any{}), &before)
+	var after managementSnapshot
+	task2Decode(t, f.call(t, "cluster:set-remote-management", map[string]any{"peerUuid": peer, "allowed": allowed, "expectedRevision": before.Revision}), &after)
+	wantState := "denied"
+	if allowed {
+		wantState = "allowed"
+	}
+	for _, grant := range after.Grants {
+		if grant.PeerUUID == peer && grant.Allowed == allowed && grant.State == wantState && after.Revision != before.Revision {
+			return
+		}
+	}
+	t.Fatal("service did not acknowledge the target-local management grant")
+}
+
+func (f *stopPauseServiceFixture) start(t *testing.T) {
+	t.Helper()
+	f.service.service = f.service.startChild(f.args...)
+	f.client = f.service.readyClient()
+	f.engine.proxyControl.ready(t, "llamacpp-custom", f.engine.facadePort)
+	f.engine.proxyControl.ready(t, "llamacpp", f.engine.targetFacadePort)
+	for _, name := range engines.Names() {
+		f.call(t, "engine:get-settings", map[string]string{"engine": name})
+	}
+}
+
+func (f *stopPauseServiceFixture) call(t *testing.T, method string, params any) json.RawMessage {
+	t.Helper()
+	if reply, handled := f.engine.proxyControl.componentCall(t, method, params); handled {
+		if reply.Error != nil {
+			t.Fatalf("fixture proxy %s: %+v", method, reply.Error)
+		}
+		return reply.Result
+	}
+	return f.client.mustCall(t, strconv.FormatInt(newRPCID(), 10), method, mustMarshal(t, params)).Result
+}
+
+// Relay a genuine inventory read through the existing scanner fixture. This is
+// deliberately not independent production-scanner enrichment coverage.
+func (f *stopPauseServiceFixture) publish(t *testing.T) noderec.DirectoryNode {
+	t.Helper()
+	var inventory struct {
+		Models   []string                  `json:"models"`
+		ByEngine map[string][]string       `json:"modelsByEngine"`
+		Loaded   map[string][]string       `json:"loadedByEngine"`
+		Policy   *nodepolicy.Advertisement `json:"policy"`
+	}
+	task1Eventually(t, "target-owned inventory and policy", 15*time.Second, func() bool {
+		task2Decode(t, f.call(t, "engine:models", nil), &inventory)
+		return inventory.Policy != nil
+	})
+	node := noderec.DirectoryNode{
+		HostUUID: f.nodeID, ClusterUUID: f.nodeID, Name: "stop-pause-target-" + inventory.Policy.Revision, IP: "127.0.0.1", Trusted: true,
+		Services: map[noderec.ServiceKey]noderec.ServiceStatus{
+			privateFixtureEngine(t, "llamacpp-custom").DiscoveryService: {Port: f.engine.facadePort}, noderec.ServiceLlamaCPP: {Port: f.engine.targetFacadePort},
+		}, Models: inventory.Models, ModelsByEngine: inventory.ByEngine, LoadedByEngine: inventory.Loaded, Policy: inventory.Policy,
+	}
+	f.publishDirectory(t, node)
+	for _, engine := range []string{"llamacpp-custom", "llamacpp"} {
+		if len(inventory.ByEngine[engine]) != 0 {
+			f.waitHealthy(t, engine)
+		}
+	}
+	return node
+}
+
+func (f *stopPauseServiceFixture) waitHealthy(t *testing.T, engine string) {
+	t.Helper()
+	port, path := f.engine.targetFacadePort, "/v1/models"
+	if engine == "llamacpp-custom" {
+		port, path = f.engine.facadePort, "/v1/models"
+	}
+	if f.service.peer == nil {
+		t.Fatal("health barrier requires a pinned peer client")
+	}
+	task1Eventually(t, "broker publishes healthy local "+engine+" to pinned ingress", 15*time.Second, func() bool {
+		response, err := f.service.peer.Get(fmt.Sprintf("https://127.0.0.1:%d%s", port, path))
+		if err != nil {
+			t.Fatalf("pinned health barrier: %v", err)
+		}
+		if _, err := io.Copy(io.Discard, response.Body); err != nil {
+			t.Fatal(err)
+		}
+		if err := response.Body.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return response.StatusCode == http.StatusOK
+	})
+}
+
+func (f *stopPauseServiceFixture) publishDirectory(t *testing.T, node noderec.DirectoryNode) {
+	t.Helper()
+	frame := jsonrpc.Message{JSONRPC: "2.0", Method: noderec.NotifyNodeUpdated, Params: mustMarshal(t, noderec.NodeEvent{Node: node})}
+	client := &http.Client{Timeout: 5 * time.Second}
+	defer client.CloseIdleConnections()
+	response, err := client.Post(fmt.Sprintf("http://127.0.0.1:%d", f.engine.scannerPort), "application/json", bytes.NewReader(mustMarshal(t, frame)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(io.Discard, response.Body); err != nil {
+		t.Fatal(err)
+	}
+	if err := response.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("scanner publication HTTP %d", response.StatusCode)
+	}
+	for _, engine := range []string{"llamacpp-custom", "llamacpp"} {
+		identity := privateFixtureEngine(t, engine)
+		task1Eventually(t, "proxy observed target inventory for "+engine, 10*time.Second, func() bool {
+			var result struct {
+				Nodes []struct {
+					ID     string   `json:"id"`
+					Host   string   `json:"host"`
+					Port   int      `json:"port"`
+					Models []string `json:"models"`
+				} `json:"nodes"`
+			}
+			task2Decode(t, f.call(t, identity.ComponentName()+":nodes/list", nil), &result)
+			for _, got := range result.Nodes {
+				if got.ID == node.HostUUID && got.Host == node.Name && got.Port == node.Services[identity.DiscoveryService].Port && slices.Equal(got.Models, node.ModelsByEngine[engine]) {
+					return true
+				}
+			}
+			return false
+		})
+	}
+}
+
+type stopPauseResponse struct {
+	status int
+	header http.Header
+	body   struct {
+		Model   string `json:"model"`
+		Code    string `json:"code"`
+		Reason  string `json:"reason"`
+		Error   string `json:"error"`
+		Choices []struct {
+			Index   int `json:"index"`
+			Message struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+	}
+	err error
+}
+
+func stopPauseHTTP(ctx context.Context, client *http.Client, endpoint string) stopPauseResponse {
+	var result stopPauseResponse
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(`{"model":"switch-model","stream":false,"messages":[]}`))
+	if err != nil {
+		result.err = err
+		return result
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-PAIR-Peer-Id", "management-service-allowed")
+	response, err := client.Do(request)
+	if err != nil {
+		result.err = err
+		return result
+	}
+	result.status, result.header = response.StatusCode, response.Header.Clone()
+	result.err = json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&result.body)
+	if err := response.Body.Close(); result.err == nil {
+		result.err = err
+	}
+	return result
+}
+
+func (f *stopPauseServiceFixture) request(t *testing.T, client *http.Client, port int, pinned bool) <-chan stopPauseResponse {
+	t.Helper()
+	scheme := "http"
+	if pinned {
+		scheme = "https"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Second)
+	t.Cleanup(cancel)
+	done := make(chan stopPauseResponse, 1)
+	go func() {
+		done <- stopPauseHTTP(ctx, client, fmt.Sprintf("%s://127.0.0.1:%d/v1/chat/completions", scheme, port))
+	}()
+	return done
+}
+
+func stopPauseAwait(t *testing.T, done <-chan stopPauseResponse) stopPauseResponse {
+	t.Helper()
+	select {
+	case response := <-done:
+		if response.err != nil {
+			t.Fatalf("stop/Pause inference transport/decode: %v", response.err)
+		}
+		return response
+	case <-time.After(100 * time.Second):
+		t.Fatal("stop/Pause inference exceeded HTTP request bound")
+	}
+	return stopPauseResponse{}
+}
+
+func assertStopPauseSuccess(t *testing.T, response stopPauseResponse, engine, node string) {
+	t.Helper()
+	if response.status != http.StatusOK || response.body.Error != "" || response.body.Model != "switch-model" || len(response.body.Choices) != 1 || response.body.Choices[0].Index != 0 || response.body.Choices[0].Message.Role != "assistant" || response.body.Choices[0].Message.Content != "finished" || response.body.Choices[0].FinishReason != "stop" || response.header.Get(nodepolicy.EngineHeader) != engine || response.header.Get(nodepolicy.NodeHeader) != node || response.header.Get(nodepolicy.ModelHeader) != "switch-model" {
+		t.Fatalf("stop/Pause success HTTP=%d engine=%q node=%q model=%q choices=%d admission=%q code=%q reason=%q error=%q", response.status, response.header.Get(nodepolicy.EngineHeader), response.header.Get(nodepolicy.NodeHeader), response.body.Model, len(response.body.Choices), response.header.Get(nodepolicy.AdmissionHeader), response.body.Code, response.body.Reason, response.body.Error)
+	}
+}
+
+func (f *stopPauseServiceFixture) assertEffects(t *testing.T, sourceStarts, targetStarts, sourceInference, targetInference int) {
+	t.Helper()
+	e := f.engine
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.effectError != nil {
+		t.Fatalf("fixture effect observation: %v", e.effectError)
+	}
+	if e.checkSourceExit && e.sourceAliveAtTarget {
+		t.Fatal("target started before actual source process exit")
+	}
+	if len(e.starts["llamacpp-custom"]) != sourceStarts || len(e.starts["llamacpp"]) != targetStarts || e.inferences["llamacpp-custom"] != sourceInference || e.inferences["llamacpp"] != targetInference {
+		t.Fatalf("engine effects starts=%v inference=%v, want starts=%d/%d inference=%d/%d", e.starts, e.inferences, sourceStarts, targetStarts, sourceInference, targetInference)
+	}
+}
+
 type stopPauseFixture struct {
-	*engineBindingFixture
+	*stopPauseServiceFixture
 	native *stopPauseNative
 }
 
@@ -336,11 +659,11 @@ func newStopPauseFixture(t *testing.T) *stopPauseFixture {
 	s := newRemoteServiceFixture(t)
 	release := holdStopPauseServicePorts(t, s.ports)
 	var native *stopPauseNative
-	f := newEngineBindingServiceFixture(t, s, func(e *switchProcessFixture) {
+	f := newStopPauseServiceFixture(t, s, func(e *switchProcessFixture) {
 		native = newStopPauseNative(t, e)
 		release()
 	})
-	return &stopPauseFixture{engineBindingFixture: f, native: native}
+	return &stopPauseFixture{stopPauseServiceFixture: f, native: native}
 }
 
 func (f *stopPauseFixture) startModel(t *testing.T) {
@@ -354,7 +677,7 @@ func (f *stopPauseFixture) startModel(t *testing.T) {
 		task2Decode(t, f.call(t, "engine:models", nil), &inventory)
 		return slices.Contains(inventory.Loaded["llamacpp"], "switch-model")
 	})
-	f.publish(t, false)
+	f.publish(t)
 }
 
 func assertStopPauseNativeLifetime(t *testing.T, e *switchProcessFixture) {
@@ -531,7 +854,7 @@ func testStopPauseRemoteRefusals(t *testing.T) {
 	f.native.holding(true)
 	client := &http.Client{Timeout: 45 * time.Second}
 	t.Cleanup(client.CloseIdleConnections)
-	demand := f.request(t, client, f.engine.targetFacadePort, false, 5000)
+	demand := f.request(t, client, f.engine.targetFacadePort, false)
 	gate := f.native.gate(t, 1)
 	// The target's own payload nodeId cannot forge a local caller.
 	f.peerHTTP(t, f.service.peer, "/v1/node-availability/set", map[string]any{"nodeId": f.nodeID, "state": "paused", "pauseMode": "immediate"}, http.StatusBadRequest)
@@ -557,7 +880,7 @@ func testStopPauseRemoteRefusals(t *testing.T) {
 		t.Fatalf("refusal stopped actual model lifetime: stopped=%t err=%v", stopped, err)
 	}
 	gate.once.Do(func() { close(gate.release) })
-	assertEngineBindingSuccess(t, engineBindingAwait(t, demand), "llamacpp", f.nodeID)
+	assertStopPauseSuccess(t, stopPauseAwait(t, demand), "llamacpp", f.nodeID)
 	f.native.assertCounts(t, 1, 0, 0)
 }
 
@@ -668,16 +991,16 @@ func testStopPauseActive(t *testing.T, peer bool) {
 		f.call(t, "llamacpp-proxy:node/add-manual", map[string]any{"id": "stop-pause-onward", "host": "127.0.0.1", "addresses": []string{"127.0.0.1"}, "port": portOfURL(t, trap.URL), "models": []string{"switch-model"}})
 		f.call(t, "llamacpp-proxy:node/select", map[string]string{"id": "stop-pause-onward"})
 	}
-	done := f.request(t, client, f.engine.targetFacadePort, peer, 5000)
+	done := f.request(t, client, f.engine.targetFacadePort, peer)
 	gate := f.native.gate(t, 1)
 	f.availability(t, nodepolicy.Paused, "immediate")
 	f.assertPaused(t, nodepolicy.PausedLocally)
 	stopPauseBarrier(t, gate.departed, "native execution actually cancelled")
-	response := engineBindingAwait(t, done)
+	response := stopPauseAwait(t, done)
 	if response.status == http.StatusOK {
 		t.Fatalf("interrupted precommit request returned success: %+v", response)
 	}
-	later := engineBindingAwait(t, f.request(t, client, f.engine.targetFacadePort, peer, 5000))
+	later := stopPauseAwait(t, f.request(t, client, f.engine.targetFacadePort, peer))
 	if later.status == http.StatusOK {
 		t.Fatal("fenced demand succeeded")
 	}
@@ -759,7 +1082,7 @@ func testStopPauseQueue(t *testing.T, pinned bool) {
 		return found
 	}
 	// Retain raw bytes and declared length for the interrupted active response.
-	// The shared binding helper deliberately requires a complete JSON body.
+	// The shared inference helper deliberately requires a complete JSON body.
 	type activeResponse struct {
 		status             int
 		declared           int64
@@ -771,7 +1094,6 @@ func testStopPauseQueue(t *testing.T, pinned bool) {
 		t.Fatal(err)
 	}
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set(nodepolicy.EnginePrepareBudgetHeader, "5000")
 	one := make(chan activeResponse, 1)
 	go func() {
 		response, err := client.Do(request)
@@ -789,7 +1111,7 @@ func testStopPauseQueue(t *testing.T, pinned bool) {
 	}()
 	gate := f.native.gate(t, 1)
 	running := waitWorkload("running", nil)
-	two := f.request(t, client, port, false, 5000)
+	two := f.request(t, client, port, false)
 	queued := waitWorkload("queued", &running)
 	f.native.assertCounts(t, 1, 0, 0)
 	f.availability(t, nodepolicy.Paused, "immediate")
@@ -817,7 +1139,7 @@ func testStopPauseQueue(t *testing.T, pinned bool) {
 	case <-time.After(100 * time.Second):
 		t.Fatal("active cancellation exceeded HTTP request bound")
 	}
-	if response := engineBindingAwait(t, two); response.status == http.StatusOK {
+	if response := stopPauseAwait(t, two); response.status == http.StatusOK {
 		t.Fatal("queued request succeeded after Pause")
 	}
 	f.native.assertCounts(t, 1, 0, 0)
@@ -855,7 +1177,7 @@ func testStopPauseQueue(t *testing.T, pinned bool) {
 		defer f.engine.mu.Unlock()
 		return len(f.engine.starts["llamacpp"]) == 2
 	})
-	f.publish(t, false)
+	f.publish(t)
 	if pinned {
 		origin.publishTarget(t, f)
 		// This origin has no cluster-manager reverse gateway; its direct route
@@ -896,7 +1218,7 @@ func testStopPauseQueue(t *testing.T, pinned bool) {
 			return false
 		})
 	}
-	assertEngineBindingSuccess(t, engineBindingAwait(t, f.request(t, client, port, false, 5000)), "llamacpp", f.nodeID)
+	assertStopPauseSuccess(t, stopPauseAwait(t, f.request(t, client, port, false)), "llamacpp", f.nodeID)
 	f.native.assertCounts(t, 2, 0, 0)
 	if pinned {
 		origin.native.assertCounts(t, 0, 0, 0)
@@ -978,7 +1300,7 @@ func testStopPauseDrain(t *testing.T, escalate bool) {
 	f.native.holding(true)
 	client := &http.Client{Timeout: 90 * time.Second}
 	t.Cleanup(client.CloseIdleConnections)
-	demand := f.request(t, client, f.engine.targetFacadePort, false, 5000)
+	demand := f.request(t, client, f.engine.targetFacadePort, false)
 	gate := f.native.gate(t, 1)
 	observer := f.service.readyClient()
 	pause := f.beginPause(t)
@@ -1007,12 +1329,12 @@ func testStopPauseDrain(t *testing.T, escalate bool) {
 		}
 		stopPauseBarrier(t, gate.departed, "held execution cancelled without release")
 		stopPauseAwaitRPC(t, pause, true)
-		if response := engineBindingAwait(t, demand); response.status == http.StatusOK {
+		if response := stopPauseAwait(t, demand); response.status == http.StatusOK {
 			t.Fatal("escalated precommit inference succeeded")
 		}
 	} else {
 		gate.once.Do(func() { close(gate.release) })
-		assertEngineBindingSuccess(t, engineBindingAwait(t, demand), "llamacpp", f.nodeID)
+		assertStopPauseSuccess(t, stopPauseAwait(t, demand), "llamacpp", f.nodeID)
 		stopPauseAwaitRPC(t, pause, false)
 	}
 	f.assertPaused(t, nodepolicy.PausedLocally)
@@ -1032,7 +1354,6 @@ func testStopPauseRestart(t *testing.T) {
 	policy.Profiles = []nodepolicy.Profile{profile}
 	policy.ResidentModels = nodepolicy.ResidentModels{{Engine: "llamacpp", Model: "switch-model"}}
 	policy.ServedModels = nodepolicy.ServedModels{{Engine: "llamacpp", Model: "switch-model"}}
-	policy.EngineBindings = nodepolicy.EngineBindings{{Engine: "llamacpp", Model: "switch-model"}}
 	policy = setServicePolicy(t, f.client, policy)
 	f.availability(t, nodepolicy.Paused, "immediate")
 	f.assertPaused(t, nodepolicy.PausedLocally)
@@ -1052,8 +1373,8 @@ func testStopPauseRestart(t *testing.T) {
 	task1Eventually(t, "replacement current manager proves startup pause", 30*time.Second, func() bool { return fetchServicePolicy(t, f.client).Availability == nodepolicy.Paused })
 	f.assertPaused(t, nodepolicy.PausedLocally)
 	got := fetchServicePolicy(t, f.client).Policy
-	if !reflect.DeepEqual(got.Profiles, policy.Profiles) || !reflect.DeepEqual(got.ResidentModels, policy.ResidentModels) || !reflect.DeepEqual(got.ServedModels, policy.ServedModels) || !reflect.DeepEqual(got.EngineBindings, policy.EngineBindings) {
-		t.Fatal("paused restart lost model declarations or bindings")
+	if !reflect.DeepEqual(got.Profiles, policy.Profiles) || !reflect.DeepEqual(got.ResidentModels, policy.ResidentModels) || !reflect.DeepEqual(got.ServedModels, policy.ServedModels) {
+		t.Fatal("paused restart lost model declarations")
 	}
 	var after struct {
 		Engines map[string]bool `json:"engines"`
@@ -1126,7 +1447,7 @@ func (p *stopPausePeer) assertPaused(t *testing.T) {
 	}
 }
 
-// Same composition as the existing ready-peer binding case: one real service
+// Same composition as the existing ready-peer inventory case: one real service
 // and one standalone real broker/manager/proxy, with mutual on-disk pins.
 func newStopPausePair(t *testing.T) (*stopPauseFixture, *stopPausePeer) {
 	t.Helper()
@@ -1150,11 +1471,11 @@ func newStopPausePair(t *testing.T) (*stopPauseFixture, *stopPausePeer) {
 	writePin(t, s.clusterDir, peerID, peerCert)
 	writeMembers(t, s.clusterDir, "management-service-target", "management-service-peer", "management-service-allowed", peerID)
 	var native *stopPauseNative
-	binding := newEngineBindingServiceFixture(t, s, func(e *switchProcessFixture) {
+	service := newStopPauseServiceFixture(t, s, func(e *switchProcessFixture) {
 		native = newStopPauseNative(t, e)
 		release()
 	})
-	f := &stopPauseFixture{engineBindingFixture: binding, native: native}
+	f := &stopPauseFixture{stopPauseServiceFixture: service, native: native}
 	f.startModel(t)
 	ports := reserveFixtureServicePorts(t)
 	releasePeer := holdStopPauseServicePorts(t, ports)
@@ -1211,7 +1532,7 @@ func (p *stopPausePeer) publishTarget(t *testing.T, f *stopPauseFixture) {
 	t.Helper()
 	// Publish the real target's control route through the existing scanner.
 	// Outbound RPCs retain the normal pinned client and target broker relay.
-	target := f.publish(t, false)
+	target := f.publish(t)
 	target.Services[noderec.ServiceEngineControl] = noderec.ServiceStatus{Port: f.service.ports.engineControl}
 	target.Services[noderec.ServiceEngineManager] = noderec.ServiceStatus{Port: f.service.ports.engineManagerHTTP}
 	frame := jsonrpc.Message{JSONRPC: "2.0", Method: noderec.NotifyNodeUpdated, Params: mustMarshal(t, noderec.NodeEvent{Node: target})}
@@ -1282,12 +1603,12 @@ func testStopPauseFallback(t *testing.T) {
 	f.call(t, "llamacpp-proxy:node/select", map[string]string{"id": f.nodeID})
 	client := &http.Client{Timeout: 90 * time.Second}
 	t.Cleanup(client.CloseIdleConnections)
-	demand := f.request(t, client, f.engine.targetFacadePort, false, 5000)
+	demand := f.request(t, client, f.engine.targetFacadePort, false)
 	gate := f.native.gate(t, 1)
 	f.availability(t, nodepolicy.Paused, "immediate")
 	f.assertPaused(t, nodepolicy.PausedLocally)
 	stopPauseBarrier(t, gate.departed, "precommit local execution withdrawn")
-	assertEngineBindingSuccess(t, engineBindingAwait(t, demand), "llamacpp", peer.id)
+	assertStopPauseSuccess(t, stopPauseAwait(t, demand), "llamacpp", peer.id)
 	f.native.assertCounts(t, 1, 0, 0)
 	peer.native.assertCounts(t, 1, 0, 0)
 	records := f.history(t, 1)
@@ -1433,7 +1754,7 @@ func testStopPauseCommitted(t *testing.T, remote bool) {
 		retryNode = f.nodeID
 	}
 	f.call(t, "llamacpp-proxy:node/select", map[string]string{"id": retryNode})
-	assertEngineBindingSuccess(t, engineBindingAwait(t, f.request(t, client, f.engine.targetFacadePort, false, 5000)), "llamacpp", retryNode)
+	assertStopPauseSuccess(t, stopPauseAwait(t, f.request(t, client, f.engine.targetFacadePort, false)), "llamacpp", retryNode)
 	executing.assertCounts(t, 1, 0, 0)
 	alternate.assertCounts(t, 1, 0, 0)
 	records = f.history(t, 2)
@@ -1479,7 +1800,7 @@ func testStopPauseRemoteExecution(t *testing.T) {
 		t.Fatalf("remote stream tail bytes=%d err=%v", len(rest), err)
 	}
 	peer.native.holding(false)
-	assertEngineBindingSuccess(t, engineBindingAwait(t, f.request(t, client, f.engine.targetFacadePort, false, 5000)), "llamacpp", peer.id)
+	assertStopPauseSuccess(t, stopPauseAwait(t, f.request(t, client, f.engine.targetFacadePort, false)), "llamacpp", peer.id)
 	f.native.assertCounts(t, 0, 0, 0)
 	peer.native.assertCounts(t, 2, 0, 0)
 	for _, record := range f.history(t, 2) {

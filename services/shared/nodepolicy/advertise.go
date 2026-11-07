@@ -82,8 +82,7 @@ type Advertisement struct {
 	PauseMode PauseMode   `json:"pauseMode,omitempty"`
 	// StrictAdmission is absent until destination enforcement and identity
 	// reconciliation are ready. Policy.Advertisement never sets it.
-	StrictAdmission     *StrictAdmissionCapability `json:"strictAdmission,omitempty"`
-	EngineBindingOffers *EngineBindingOffers       `json:"engineBindingOffers,omitempty"`
+	StrictAdmission *StrictAdmissionCapability `json:"strictAdmission,omitempty"`
 }
 
 // StrictCapabilityState keeps old peers, future peers and usable contracts
@@ -303,12 +302,6 @@ func FilterAdvertisementModels(data []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	offerFields := 0
-	for _, member := range container.members {
-		if strings.EqualFold(member.key, "engineBindingOffers") {
-			offerFields++
-		}
-	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return nil, err
@@ -345,9 +338,6 @@ func FilterAdvertisementModels(data []byte) ([]byte, error) {
 	first := true
 	for _, member := range container.members {
 		key, raw := member.key, member.value
-		if strings.EqualFold(key, "engineBindingOffers") && offerFields != 1 {
-			continue
-		}
 		if strings.EqualFold(key, "roles") {
 			var err error
 			raw, _, err = filterRoleMemberships(raw, dropped)
@@ -433,13 +423,6 @@ func filterAdvertisedProfiles(raw json.RawMessage) (json.RawMessage, map[string]
 }
 
 func filterAdvertisementField(key string, raw json.RawMessage) (json.RawMessage, error) {
-	if strings.EqualFold(key, "engineBindingOffers") {
-		// This optional extension cannot cost a peer its canonical inventory.
-		var offers EngineBindingOffers
-		if key != "engineBindingOffers" || json.Unmarshal(raw, &offers) != nil {
-			return nil, nil
-		}
-	}
 	if key == "servedModels" {
 		clean, _, err := filterModelArray(raw, true, "engine", "model")
 		return clean, err

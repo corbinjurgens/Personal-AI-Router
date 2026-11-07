@@ -23,7 +23,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -143,9 +142,8 @@ type policyRuntime struct {
 	// strictReadiness is the newest strict admission readiness the proxy
 	// reported (readiness.go), held until its fences match; replay clears it.
 	// strictPublished is the capability the last node projection carried.
-	strictReadiness        nodepolicy.StrictAdmissionReadiness
-	strictPublished        *nodepolicy.StrictAdmissionCapability
-	bindingOffersPublished *nodepolicy.EngineBindingOffers
+	strictReadiness nodepolicy.StrictAdmissionReadiness
+	strictPublished *nodepolicy.StrictAdmissionCapability
 	// live is the availability the node is actually in. It differs from
 	// current.Availability only while draining.
 	live         nodepolicy.Availability
@@ -534,7 +532,6 @@ func checkExpectedRevision(stored nodepolicy.Policy, expected string) error {
 
 func (b *Broker) localPolicy() policyGetResult {
 	e := b.captureModelConfig()
-	e.Policy.EngineBindings = slices.Clone(e.Policy.EngineBindings)
 	configuration := b.modelConfiguration(e)
 	origin := e.Policy.PausedBy
 	mode := e.Policy.PauseMode
@@ -778,16 +775,6 @@ func (b *Broker) persistPolicy(check func(stored nodepolicy.Policy) error, prepa
 		b.engineConfigMu.Unlock()
 		return nodepolicy.Policy{}, err
 	}
-	if err := b.boundPolicyChangeLocked(r.current, policy); err != nil {
-		r.mu.Unlock()
-		b.engineConfigMu.Unlock()
-		return nodepolicy.Policy{}, err
-	}
-	if err := policy.ValidateEngineBindings(b.engineModelNaming); err != nil {
-		r.mu.Unlock()
-		b.engineConfigMu.Unlock()
-		return nodepolicy.Policy{}, &invalidParamsError{err}
-	}
 	policy, err = r.publishLocked(policy)
 	if err != nil && !errors.Is(err, durablefile.ErrReplaced) {
 		r.mu.Unlock()
@@ -798,7 +785,6 @@ func (b *Broker) persistPolicy(check func(stored nodepolicy.Policy) error, prepa
 		policy.Routing.Listener.Port != r.current.Routing.Listener.Port
 	refsChanged := credentialRefsDiffer(policy, r.current)
 	r.current = policy
-	r.current.EngineBindings = slices.Clone(policy.EngineBindings)
 	r.recoveryRequired = false
 	r.activationErr = ""
 	r.mu.Unlock()
@@ -1025,7 +1011,7 @@ func modelControlReadbackSupported(request, result json.RawMessage) error {
 	if json.Unmarshal(request, &want) != nil || json.Unmarshal(result, &got) != nil {
 		return fmt.Errorf("unsupported policy readback")
 	}
-	for _, key := range []string{"servedModels", "residentModels", "engineBindings"} {
+	for _, key := range []string{"servedModels", "residentModels"} {
 		raw, present := want[key]
 		if !present {
 			continue

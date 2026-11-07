@@ -868,7 +868,7 @@ func TestModelSettingsExplicitRoutingSelectionPreservesOtherPolicy(t *testing.T)
 	before.ServedModels = nodepolicy.ServedModels{{Engine: "llamacpp", Model: "weak-model"}}
 	before = f.setPolicy(t, before)
 	yes := true
-	request := f.request(t, "explicit-routing", &modelconfig.PolicyPatch{Roles: map[string]bool{"weak": true}, Binding: &yes, Served: &yes})
+	request := f.request(t, "explicit-routing", &modelconfig.PolicyPatch{Roles: map[string]bool{"weak": true}, Served: &yes})
 	request.ModelChange.Load = nil
 	request, preview := f.review(t, request)
 	if preview.Impact == nil || preview.Impact.RestartScope != "none" {
@@ -879,7 +879,6 @@ func TestModelSettingsExplicitRoutingSelectionPreservesOtherPolicy(t *testing.T)
 	after := f.policy(t)
 	want := before
 	want.Roles = []nodepolicy.Role{{Name: "weak", Profiles: []string{"weak-model", "medium-model"}}}
-	want.EngineBindings = nodepolicy.EngineBindings{{Engine: "llamacpp", Model: "medium-model"}}
 	want.ServedModels = nodepolicy.ServedModels{{Engine: "llamacpp", Model: "weak-model"}, {Engine: "llamacpp", Model: "medium-model"}}
 	assertModelSettingsLoadPolicy(t, want, after, preview)
 	f.mu.Lock()

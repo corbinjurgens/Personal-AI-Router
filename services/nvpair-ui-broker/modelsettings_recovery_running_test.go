@@ -81,7 +81,7 @@ func TestModelSettingsRecoveryInvalidatesPreviousRunning(t *testing.T) {
 			h.mu.Lock()
 			h.launch.Running = false
 			h.mu.Unlock()
-			_, engine := attachBoundEngineManager(t, h.b, h.b.activateEngineManagerSource())
+			_, engine := attachEngineManagerSource(t, h.b, h.b.activateEngineManagerSource())
 			engine.setAnswer(h.answer)
 			// Source activation does not clear this separate cache. It cannot
 			// validate the old settings observation for the new incarnation.
@@ -130,7 +130,7 @@ func TestModelSettingsManagerReplacementInvalidatesPendingRunning(t *testing.T) 
 	h.mu.Lock()
 	h.launch.Running = false
 	h.mu.Unlock()
-	_, engine := attachBoundEngineManager(t, h.b, h.b.activateEngineManagerSource())
+	_, engine := attachEngineManagerSource(t, h.b, h.b.activateEngineManagerSource())
 	engine.setAnswer(h.answer)
 	if actual := h.record(t); actual.Snapshot.Epoch != want.Snapshot.Epoch || !h.b.engineSettingsLoaded {
 		t.Fatal("manager replacement reloaded the broker journal")

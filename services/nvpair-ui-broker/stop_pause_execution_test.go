@@ -433,7 +433,6 @@ func TestStopPauseExecutionRetryAndLocalResume(t *testing.T) {
 		Qualification: &nodepolicy.QualificationRef{ID: "fixture-only", Revision: "1"}}}
 	r.current.Roles = []nodepolicy.Role{{Name: "weak", Profiles: []string{"tiny-profile"}}}
 	r.current.ResidentModels = nodepolicy.ResidentModels{ref}
-	r.current.EngineBindings = nodepolicy.EngineBindings{ref}
 	r.intent["llamacpp"] = true
 	r.loaded["llamacpp"] = []string{"tiny"}
 	r.mu.Unlock()
@@ -459,7 +458,7 @@ func TestStopPauseExecutionRetryAndLocalResume(t *testing.T) {
 		t.Fatalf("local retry: %+v", got)
 	}
 	after := rb.b.localPolicy().Policy
-	if !reflect.DeepEqual(before.Roles, after.Roles) || !reflect.DeepEqual(before.ResidentModels, after.ResidentModels) || !reflect.DeepEqual(before.EngineBindings, after.EngineBindings) {
+	if !reflect.DeepEqual(before.Roles, after.Roles) || !reflect.DeepEqual(before.ResidentModels, after.ResidentModels) {
 		t.Fatal("pause changed execution declarations")
 	}
 	state, err := rb.b.setAvailability(context.Background(), nodepolicy.Available, nodepolicy.PausedLocally)

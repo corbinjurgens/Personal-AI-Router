@@ -2000,7 +2000,6 @@ func TestModelSettingsApplyRemoveCleansPolicyReferencesAndLastLoad(t *testing.T)
 	policy.Roles = []nodepolicy.Role{{Name: "weak", Profiles: []string{"model-8k"}}, {Name: "strong", Profiles: []string{"other", "model-8k"}}}
 	policy.ServedModels = nodepolicy.ServedModels{{Engine: "llamacpp", Model: "model-8k"}, {Engine: "llamacpp", Model: "other"}}
 	policy.ResidentModels = nodepolicy.ResidentModels{{Engine: "llamacpp", Model: "model-8k"}}
-	policy.EngineBindings = nodepolicy.EngineBindings{{Engine: "llamacpp", Model: "model-8k"}, {Engine: "llamacpp", Model: "other"}}
 	if _, err := setCurrent(h.b, settingsJSON(policy)); err != nil {
 		t.Fatal(err)
 	}
@@ -2011,7 +2010,7 @@ func TestModelSettingsApplyRemoveCleansPolicyReferencesAndLastLoad(t *testing.T)
 	}
 	policy = h.b.localPolicy().Policy
 	wantRoles := []nodepolicy.Role{{Name: "weak", Profiles: []string{}}, {Name: "strong", Profiles: []string{"other"}}}
-	if len(policy.Profiles) != 1 || policy.Profiles[0].Key != "other" || !reflect.DeepEqual(policy.Roles, wantRoles) || !reflect.DeepEqual(policy.ServedModels, nodepolicy.ServedModels{{Engine: "llamacpp", Model: "other"}}) || len(policy.ResidentModels) != 0 || !reflect.DeepEqual(policy.EngineBindings, nodepolicy.EngineBindings{{Engine: "llamacpp", Model: "other"}}) {
+	if len(policy.Profiles) != 1 || policy.Profiles[0].Key != "other" || !reflect.DeepEqual(policy.Roles, wantRoles) || !reflect.DeepEqual(policy.ServedModels, nodepolicy.ServedModels{{Engine: "llamacpp", Model: "other"}}) || len(policy.ResidentModels) != 0 {
 		t.Fatalf("removed profile references remain: %+v", policy)
 	}
 	record := h.record(t)
@@ -2047,7 +2046,6 @@ func newWithoutTypedRemovalFixture(t *testing.T, engine, model string) (*modelSe
 	policy.Roles = []nodepolicy.Role{{Name: "weak", Profiles: []string{"descriptor-key"}}}
 	policy.ServedModels = nodepolicy.ServedModels{{Engine: engine, Model: model}}
 	policy.ResidentModels = nodepolicy.ResidentModels{{Engine: engine, Model: model}}
-	policy.EngineBindings = nodepolicy.EngineBindings{{Engine: engine, Model: model}}
 	if _, err := setCurrent(h.b, settingsJSON(policy)); err != nil {
 		t.Fatal(err)
 	}
@@ -2085,8 +2083,7 @@ func TestModelSettingsApplyRemoveWithoutTypedLoad(t *testing.T) {
 			}
 			got := h.b.localPolicy().Policy
 			if len(got.Profiles) != 0 || !reflect.DeepEqual(got.Roles, []nodepolicy.Role{{Name: "weak", Profiles: []string{}}}) ||
-				!reflect.DeepEqual(got.ServedModels, nodepolicy.ServedModels{{Engine: engine, Model: model}}) || len(got.ResidentModels) != 0 ||
-				!reflect.DeepEqual(got.EngineBindings, nodepolicy.EngineBindings{{Engine: engine, Model: model}}) {
+				!reflect.DeepEqual(got.ServedModels, nodepolicy.ServedModels{{Engine: engine, Model: model}}) || len(got.ResidentModels) != 0 {
 				t.Fatalf("untyped removal changed the wrong references: %+v", got)
 			}
 			for _, call := range h.engine.snapshot()[start:] {
@@ -2118,7 +2115,6 @@ func TestModelSettingsRemoveKeyEqualToAnotherNativeModel(t *testing.T) {
 	policy.Roles[0].Profiles = append(policy.Roles[0].Profiles, "other-key")
 	policy.ServedModels = append(policy.ServedModels, nodepolicy.ModelRef{Engine: "strata", Model: "descriptor-key"})
 	policy.ResidentModels = append(policy.ResidentModels, nodepolicy.ModelRef{Engine: "strata", Model: "descriptor-key"})
-	policy.EngineBindings = append(policy.EngineBindings, nodepolicy.ModelRef{Engine: "strata", Model: "descriptor-key"})
 	if _, err := setCurrent(h.b, settingsJSON(policy)); err != nil {
 		t.Fatal(err)
 	}
@@ -2131,8 +2127,7 @@ func TestModelSettingsRemoveKeyEqualToAnotherNativeModel(t *testing.T) {
 	if !reflect.DeepEqual(got.Profiles, []nodepolicy.Profile{other}) ||
 		!reflect.DeepEqual(got.Roles, []nodepolicy.Role{{Name: "weak", Profiles: []string{"other-key"}}}) ||
 		!reflect.DeepEqual(got.ServedModels, policy.ServedModels) ||
-		!reflect.DeepEqual(got.ResidentModels, nodepolicy.ResidentModels{{Engine: "strata", Model: "descriptor-key"}}) ||
-		!reflect.DeepEqual(got.EngineBindings, policy.EngineBindings) || h.calls() != 0 {
+		!reflect.DeepEqual(got.ResidentModels, nodepolicy.ResidentModels{{Engine: "strata", Model: "descriptor-key"}}) || h.calls() != 0 {
 		t.Fatalf("removal touched another native model's references: %+v", got)
 	}
 }

@@ -332,6 +332,21 @@ func testResolvedLoad() ModelLoad {
 	}
 }
 
+func TestModelChangeRejectsRemovedBindingSelection(t *testing.T) {
+	const valid = `{"modelId":"model","expectedPolicyRevision":"0","policy":{"served":true}}`
+	if _, err := DecodeModelChange([]byte(valid)); err != nil {
+		t.Fatalf("retained served selection: %v", err)
+	}
+	for _, field := range []string{`"binding":true`, `"Binding":false`, `"binding":null`} {
+		t.Run(field, func(t *testing.T) {
+			input := strings.Replace(valid, `"served":true`, `"served":true,`+field, 1)
+			if _, err := DecodeModelChange([]byte(input)); err == nil || !strings.Contains(err.Error(), "unknown field") {
+				t.Fatalf("removed binding selection error = %v, want unknown field", err)
+			}
+		})
+	}
+}
+
 func TestDecodeModelChangeRejectsAmbiguousPayloads(t *testing.T) {
 	for name, input := range map[string]string{
 		"unknown":               `{"modelId":"x","unknown":1}`,

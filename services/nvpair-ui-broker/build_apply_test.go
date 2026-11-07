@@ -702,7 +702,7 @@ func TestBuildApplyImpactKnownOperationsBlockWithoutInitializingOtherOwners(t *t
 			t.Fatalf("missing operation %s", kind)
 		}
 	}
-	if b.boundEngines != nil || !b.engineSettingsLoaded || !b.engineSwitch.store.loaded {
+	if !b.engineSettingsLoaded || !b.engineSwitch.store.loaded {
 		t.Fatal("preview initialized or retired an owner")
 	}
 }

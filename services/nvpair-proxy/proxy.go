@@ -351,8 +351,7 @@ type Proxy struct {
 	// admission is the node-wide admission controller every facade shares
 	// (FORK_DESIGN.md §3.3). Process-wide for the same reason as the
 	// reservation map: the limits are the machine's, not an engine's.
-	admission    *admissionController
-	boundEngines boundEngineWaiters
+	admission *admissionController
 
 	// routing is the engine-independent routing listener. It follows the
 	// activated policy and is owned by the process, not by any facade.
@@ -580,9 +579,8 @@ type candidate struct {
 	peerUUID string
 
 	// fac is the facade that resolved this candidate, and engine the engine it
-	// targets. They can differ for a tier or explicitly bound concrete request
-	// that crossed engines; failover bookkeeping (discovery watch, confirmed
-	// addresses) belongs to fac.
+	// targets. They can differ for a tier request that crossed engines;
+	// failover bookkeeping (discovery watch, confirmed addresses) belongs to fac.
 	fac    *facade
 	engine string
 	// model is the concrete model to send, or empty to send the request's own.
@@ -592,9 +590,6 @@ type candidate struct {
 	// dormant marks a self candidate whose engine is stopped but can be woken
 	// on demand. Its url is a placeholder until admission has woken it.
 	dormant bool
-	// preparation is an offer-only candidate, conservatively classed as needing
-	// replacement until the destination freshly prepares it. Never strict-ready.
-	preparation bool
 	// warm reports the model already loaded on the node; tierRank is the
 	// position of its tier in the search order. Both order tier candidates.
 	warm     bool
@@ -604,6 +599,12 @@ type candidate struct {
 // resolveCandidates resolves inference targets, including requests without a model.
 func (f *facade) resolveCandidates(model string) []candidate {
 	return f.resolveRouteCandidates(model, true)
+}
+
+// Concrete names stay on their entry engine. Role routing owns cross-engine
+// candidates separately through the declared profiles.
+func (f *facade) resolveConcreteCandidates(model, _ string) []candidate {
+	return f.resolveCandidates(model)
 }
 
 // resolvePassthroughCandidates keeps paused peers visible to inventory and control.
@@ -648,8 +649,7 @@ func (f *facade) resolveRouteCandidates(model string, inference bool) []candidat
 	if model != "" {
 		owners := make([]Node, 0, len(nodes))
 		for _, node := range nodes {
-			if f.bindingConsistent(node.EngineBindingOffers, model) &&
-				(nodeAdvertisesModel(f.profile, node, model) || f.nodeOffersBinding(node, model)) {
+			if nodeAdvertisesModel(f.profile, node, model) {
 				owners = append(owners, node)
 			}
 		}
@@ -683,13 +683,8 @@ func (f *facade) resolveRouteCandidates(model string, inference bool) []candidat
 		}
 		peerUUID := ""
 		self := false
-		preparation := model != "" && !nodeAdvertisesModel(f.profile, n, model)
 		switch {
 		case isSelfTarget(u, selfPort):
-			pol := p.admission.currentPolicy()
-			if model != "" && !f.localBindingConsistent(pol, model) {
-				return
-			}
 			// Our own advertised endpoint (ol now points at this proxy). Serve
 			// it from the explicit local backend — the loopback engine — rather
 			// than dialing our own mTLS ingress, which would recurse. Ranking
@@ -697,9 +692,6 @@ func (f *facade) resolveRouteCandidates(model string, inference bool) []candidat
 			lb, ok := f.localBackendTarget()
 			if !ok {
 				// Fresh local liveness outranks a stale positive inventory.
-				if c, supported := f.boundSelfCandidate(n, model); supported {
-					out = append(out, c)
-				}
 				slog.Debug("resolveCandidates: no local backend for self", "node_id", n.ID)
 				return
 			}
@@ -747,14 +739,13 @@ func (f *facade) resolveRouteCandidates(model string, inference bool) []candidat
 				(self && p.admission.isLoaded(f.profile.Name, model))
 		}
 		out = append(out, candidate{
-			id:          n.ID,
-			url:         u,
-			peerUUID:    peerUUID,
-			fac:         f,
-			engine:      f.profile.Name,
-			self:        self,
-			warm:        warm && !preparation,
-			preparation: preparation,
+			id:       n.ID,
+			url:      u,
+			peerUUID: peerUUID,
+			fac:      f,
+			engine:   f.profile.Name,
+			self:     self,
+			warm:     warm,
 		})
 	}
 
@@ -784,14 +775,12 @@ func (f *facade) resolveRouteCandidates(model string, inference bool) []candidat
 			out = append(out, c)
 		}
 	}
-	// Explicit eligible selection remains authoritative. Otherwise the whole
-	// ready class leads, including owners omitted from the scheduler snapshot.
-	sort.SliceStable(out, func(i, j int) bool {
-		if id != "" && (out[i].id == id) != (out[j].id == id) {
-			return out[i].id == id
-		}
-		return !out[i].preparation && out[j].preparation
-	})
+	// A selected dormant self still leads the ordinary on-demand path.
+	if id != "" {
+		sort.SliceStable(out, func(i, j int) bool {
+			return out[i].id == id && out[j].id != id
+		})
+	}
 
 	slog.Debug("resolveCandidates resolved",
 		"selected", id, "priority", len(priority), "candidates", len(out),
@@ -932,11 +921,10 @@ func (p *Proxy) candidateChoiceLocked(candidates []candidate, selectedID string)
 	bestIndex := -1
 	bestOrder := len(p.priority)
 	var bestLoad uint64
-	ready := slices.ContainsFunc(candidates, func(c candidate) bool { return !c.preparation })
 	for order, id := range p.priority {
 		index := -1
 		for i, c := range candidates {
-			if c.id == id && (!ready || !c.preparation) {
+			if c.id == id {
 				index = i // Preserve the previous index map's last-ID entry.
 			}
 		}
@@ -952,12 +940,8 @@ func (p *Proxy) candidateChoiceLocked(candidates []candidate, selectedID string)
 			bestLoad = load
 		}
 	}
-	if bestIndex < 0 {
-		for i, c := range candidates {
-			if !ready || !c.preparation {
-				return i, false
-			}
-		}
+	if bestIndex < 0 && len(candidates) > 0 {
+		return 0, false
 	}
 	return bestIndex, true
 }
@@ -1337,7 +1321,6 @@ func subscribedToNode(p engineProfile, n noderec.DirectoryNode) (Node, bool) {
 		node.PolicyRevision = n.Policy.Revision
 		node.PausedBy = n.Policy.PausedBy
 		node.StrictAdmission = n.Policy.StrictAdmission
-		node.EngineBindingOffers = n.Policy.EngineBindingOffers.Clone()
 	}
 	return node.filteredModels(), true
 }
@@ -1434,9 +1417,6 @@ func (p *Proxy) handleMessage(msg *Message) {
 	// cannot know which facade a bare method is for. Split once here so every
 	// case below dispatches on the bare method.
 	engine, method := engines.SplitAddressedMethod(msg.Method)
-	if p.handleBoundEngineNotification(msg, engine, method) {
-		return
-	}
 
 	switch method {
 	case noderec.NotifyNodes:

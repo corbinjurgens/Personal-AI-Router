@@ -1214,11 +1214,6 @@ func TestOwnerEvidenceStopAuthority(t *testing.T) {
 		defer e.switchAdmission.Unlock()
 		return e.trackMutationLocked("")
 	})
-	admitted("cold activation", func(e *Executor) (func(), error) {
-		// An absent saved document is the normal cold admission baseline; no
-		// directory/file is created by its existing read owner.
-		return e.admitBoundEngineMutation("fake", "cold-operation")
-	})
 	admitted("checkpoint work", func(e *Executor) (func(), error) { return e.admitOwnerCheckpoint() })
 
 	t.Run("unreleased checkpoint blocks unchanged lifecycle cache", func(t *testing.T) {
@@ -1248,20 +1243,6 @@ func TestOwnerEvidenceStopAuthority(t *testing.T) {
 			t.Fatalf("ABA accepted: %+v, generation=%d held=%d", got, e.ownerAdmissionGeneration, e.ownerAdmissionHeld)
 		}
 	})
-	t.Run("cold activation retires inside the same generation fence", func(t *testing.T) {
-		e, _, _ := owned(t)
-		done, err := e.admitBoundEngineMutation("fake", "cold-operation")
-		if err != nil {
-			t.Fatalf("cold admission: %v", err)
-		}
-		if e.boundActivation == nil || e.ownerAdmissionGeneration != 1 || e.ownerAdmissionHeld != 1 || e.switchMutations[""] != 1 {
-			t.Fatal("cold entry lacks its reserved generation")
-		}
-		done()
-		if e.boundActivation != nil || e.ownerAdmissionGeneration != 2 || e.ownerAdmissionHeld != 0 || e.switchMutations[""] != 0 || e.switchMutations["fake"] != 0 {
-			t.Fatal("cold retirement escaped generation fence")
-		}
-	})
 	t.Run("admission reserves retirement without wrap or duplicate retirement", func(t *testing.T) {
 		e, _, _ := owned(t)
 		e.ownerAdmissionGeneration = math.MaxUint64 - 3
@@ -1276,9 +1257,6 @@ func TestOwnerEvidenceStopAuthority(t *testing.T) {
 		first()
 		if e.ownerAdmissionGeneration != math.MaxUint64-1 || e.ownerAdmissionHeld != 0 {
 			t.Fatalf("retirement = %d, held=%d", e.ownerAdmissionGeneration, e.ownerAdmissionHeld)
-		}
-		if done, err := e.admitBoundEngineMutation("fake", "cold"); err == nil || done != nil || e.boundActivation != nil {
-			t.Fatal("cold activation accepted exhausted generation")
 		}
 		if done, err := e.admitStop("fake", intentLocal, ""); err == nil || done != nil || e.switchMutations["fake"] != 0 {
 			t.Fatal("stop admitted effects without retirement capacity")

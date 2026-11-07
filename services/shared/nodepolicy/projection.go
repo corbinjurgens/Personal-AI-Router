@@ -31,7 +31,6 @@ type PeerPolicy struct {
 	Profiles       []Profile              `json:"profiles"`
 	ServedModels   ServedModels           `json:"servedModels,omitzero"`
 	ResidentModels ResidentModels         `json:"residentModels,omitempty"`
-	EngineBindings EngineBindings         `json:"engineBindings"`
 	Roles          []Role                 `json:"roles"`
 	Tiers          map[string][]TierEntry `json:"tiers"`
 	TierPolicy     TierPolicy             `json:"tierPolicy"`
@@ -65,7 +64,6 @@ func (p Policy) PeerProjection() PeerPolicy {
 		Profiles:       copyProfiles(p.Profiles),
 		ServedModels:   slices.Clone(p.ServedModels),
 		ResidentModels: slices.Clone(p.ResidentModels),
-		EngineBindings: slices.Clone(p.EngineBindings),
 		Roles:          copyRoles(p.Roles),
 		Tiers:          map[string][]TierEntry{},
 		TierPolicy:     p.TierPolicy,

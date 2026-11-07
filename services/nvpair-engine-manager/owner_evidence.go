@@ -478,7 +478,6 @@ type ownerUniverseEvidence struct {
 type ownerAdmissionCapture struct {
 	Generation, Held uint64
 	Mutations        map[string]int
-	Bound            *boundEngineActivation
 	Shutdown         bool
 }
 
@@ -492,10 +491,6 @@ func (e *Executor) captureOwnerAdmission() (ownerAdmissionCapture, bool) {
 		if count != 0 {
 			a.Mutations[name] = count
 		}
-	}
-	if e.boundActivation != nil {
-		copy := *e.boundActivation
-		a.Bound = &copy
 	}
 	return a, true
 }
@@ -708,7 +703,7 @@ func (e *Executor) captureOwnerUniverse(savedRead func() (desiredOwnerEvidence, 
 		if !ownerResolvedRoot(entry.ModelRoot) {
 			entry.ModelRoot = ""
 		}
-		busy := a.Held != 0 || a.Shutdown || a.Mutations[""] != 0 || a.Mutations[name.Name] != 0 || a.Bound != nil || c.Relaunch != nil
+		busy := a.Held != 0 || a.Shutdown || a.Mutations[""] != 0 || a.Mutations[name.Name] != 0 || c.Relaunch != nil
 		if cp := saved.State.PendingSwitch; cp != nil && cp.Phase != settings.SwitchCheckpointReleased && (cp.Automatic || cp.SourceEngine == name.Name || cp.TargetEngine == name.Name) {
 			busy = true
 		}

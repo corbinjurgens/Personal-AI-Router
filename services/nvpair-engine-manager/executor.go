@@ -124,7 +124,6 @@ type Executor struct {
 	modelEstimates      modelEstimateState
 	modelBuffers        modelBufferOwner
 	modelMemoryProfiles *modelMemoryProfiles
-	boundActivation     *boundEngineActivation // switchAdmission; current cold operation
 	// switchAdmission protects reservation admission and active mutation counts;
 	// switchMu serializes checkpoint steps without holding the admission gate.
 	switchAdmission   sync.Mutex

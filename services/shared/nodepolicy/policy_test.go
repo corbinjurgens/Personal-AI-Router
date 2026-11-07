@@ -360,6 +360,24 @@ func TestServedResidentPolicyOwnedSlices(t *testing.T) {
 	}
 }
 
+func TestLivePolicyRejectsRemovedEngineBindings(t *testing.T) {
+	for _, raw := range []string{
+		`{"engineBindings":[]}`,
+		`{"EngineBindings":null}`,
+		`{"engine\u0042indings":false}`,
+	} {
+		t.Run(raw, func(t *testing.T) {
+			if _, err := Parse([]byte(raw)); err == nil || !strings.Contains(err.Error(), "engineBindings is no longer supported") {
+				t.Fatalf("live policy error = %v, want removed-field refusal", err)
+			}
+			var peer PeerPolicy
+			if err := json.Unmarshal([]byte(raw), &peer); err == nil {
+				t.Fatal("peer policy accepted removed bindings")
+			}
+		})
+	}
+}
+
 func TestServedResidentPolicyRawKeys(t *testing.T) {
 	for _, raw := range []string{
 		`{"servedModels":[],"servedModels":[]}`, `{"servedModels":[],"ServedModels":[]}`,
