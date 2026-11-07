@@ -1674,3 +1674,17 @@ remain accepted and unpriced. These estimates are advisory, never admission or
 qualification. The process fixtures exercise fake observations through real
 workers; they establish no native allocation accuracy. Production Auto and its
 accepted-result recovery acceptance still require complete-cost accounting.
+
+Stated figures are stored by the target for an applied finite configuration key,
+with its content-based `nativeBuildId`. Local and pinned direct/reverse writes
+use the same broker relay and manager store. A settings or native-build change
+keeps the earlier record readable but makes it non-current. Earlier-build
+history is labelled as an estimate, never validated or selected as current
+measured evidence. A record with no retained build identity says so explicitly.
+GPU-selection extra options have reason `gpu-selection` and no finite key, so
+they cannot save a stated figure or use a buffer overlay.
+
+Peer inspection preserves `profileKey` through the typed inspection relay, so
+the target reports the selected applied configuration instead of inspecting
+only its artifacts. Stated-memory writes from an origin broker use the target
+`nodeId`; their replies and durable records belong only to that target.

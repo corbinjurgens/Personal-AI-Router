@@ -2172,6 +2172,13 @@ model-memory consumer expires facts after five seconds. UMA stays one shared
 pool, and GPU names or list order never join physical pools. Accepted production
 Auto process acceptance is held until complete-cost accounting lands.
 
+`engine:set-stated-memory` and `engine:clear-stated-memory` write only the target
+manager's existing profile store through the settings relay. Pinned direct and
+reverse routes retain target management permissions and Pause checks. Replies
+carry path-free configuration and native-build identities; the origin stores no
+copy. Earlier configuration records remain advisory history and never become
+current merely because their model name matches.
+
 - **Engine-advertise control surface.** Engine registration is auto-driven only:
   the broker tracks enabled local engines and registers each engine's service
   with the daemon while it is healthy. There's no manual-advertise

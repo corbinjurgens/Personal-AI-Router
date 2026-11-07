@@ -319,6 +319,28 @@ describe('applied configuration stated memory', () => {
         expect(container.textContent).not.toContain('Save figure')
     })
 
+    it('labels retained earlier-build figures as estimates without populating current inputs', async () => {
+        const build = `sha256:${'b'.repeat(64)}`
+        seed({
+            ...applied,
+            memoryProfiles: [
+                {
+                    configurationKey: 'earlier-key',
+                    kind: 'stated',
+                    recordedAt: '2026-11-06T00:00:00Z',
+                    nativeBuildId: build,
+                    hostBytes: '1073741824',
+                    current: false
+                }
+            ]
+        })
+        await render()
+        expect(container.textContent).toContain(`measured on ${build}`)
+        expect(container.textContent).toContain('not validated for this build')
+        expect(field('Host memory (GiB)').value).toBe('')
+        expect(save).not.toHaveBeenCalled()
+    })
+
     it('does not replace a newer key inspection when the old save response arrives', async () => {
         let finish: ((value: InspectModelResult) => void) | undefined
         save.mockImplementation(

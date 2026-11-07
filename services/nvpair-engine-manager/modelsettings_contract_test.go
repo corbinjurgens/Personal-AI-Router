@@ -660,7 +660,7 @@ func TestModelSettingsContractPinnedInspectIsReadOnlyAndCorrelated(t *testing.T)
 		}
 		// Exercise the maximum model identifier beyond Request.Resolution's
 		// public 128-byte budget: that field is never serialized for inspect.
-		if request.Inspect.ModelID != strings.Repeat("m", 512) {
+		if request.Inspect.ModelID != strings.Repeat("m", 512) || request.Inspect.ProfileKey != "saved-profile" {
 			return fmt.Errorf("inspect model identity was changed")
 		}
 		raw, err := json.Marshal(settingsReply{ID: request.ID, Result: json.RawMessage(`{"status":"unavailable"}`)})
@@ -670,14 +670,14 @@ func TestModelSettingsContractPinnedInspectIsReadOnlyAndCorrelated(t *testing.T)
 		relay.reply(raw)
 		return nil
 	}
-	e := &Executor{settingsParent: relay.call}
+	e := &Executor{inspectParent: relay.callInspect}
 	s := &controlServer{exec: e}
 	for _, route := range s.settingsRoutes() {
 		if route.path == settingsPath+"inspect" && (route.class != controlRead || route.method != http.MethodPost) {
 			t.Fatalf("inspect route is not a POST read: %+v", route)
 		}
 	}
-	body := `{"engine":"llamacpp","nodeId":"must-not-forward","modelId":"` + strings.Repeat("m", 512) + `"}`
+	body := `{"engine":"llamacpp","nodeId":"must-not-forward","profileKey":"saved-profile","modelId":"` + strings.Repeat("m", 512) + `"}`
 	r := httptest.NewRequest(http.MethodPost, settingsPath+"inspect", strings.NewReader(body))
 	w := httptest.NewRecorder()
 	s.settingsHandler("inspect")(w, r, "verified-peer")
@@ -687,7 +687,7 @@ func TestModelSettingsContractPinnedInspectIsReadOnlyAndCorrelated(t *testing.T)
 }
 
 func TestModelSettingsContractMalformedPinnedInspectNeverRelays(t *testing.T) {
-	e := &Executor{settingsParent: func(context.Context, string, settings.Request, string) (json.RawMessage, error) {
+	e := &Executor{inspectParent: func(context.Context, modelconfig.InspectRequest, string) (json.RawMessage, error) {
 		t.Fatal("invalid inspect reached broker")
 		return nil, nil
 	}}
@@ -725,7 +725,7 @@ func TestModelSettingsContractInspectKeepsTypedRefusals(t *testing.T) {
 				relay.reply(raw)
 				return nil
 			}
-			e := &Executor{settingsParent: relay.call}
+			e := &Executor{inspectParent: relay.callInspect}
 			s := &controlServer{exec: e}
 			w := httptest.NewRecorder()
 			r := httptest.NewRequest(http.MethodPost, settingsPath+"inspect", strings.NewReader(`{"engine":"llamacpp","modelId":"m"}`))
@@ -739,7 +739,7 @@ func TestModelSettingsContractInspectKeepsTypedRefusals(t *testing.T) {
 }
 
 func TestModelSettingsContractPinnedValidationKeepsInvalidParams(t *testing.T) {
-	s := &controlServer{exec: &Executor{settingsParent: func(context.Context, string, settings.Request, string) (json.RawMessage, error) {
+	s := &controlServer{exec: &Executor{inspectParent: func(context.Context, modelconfig.InspectRequest, string) (json.RawMessage, error) {
 		t.Fatal("invalid inspection reached broker")
 		return nil, nil
 	}}}

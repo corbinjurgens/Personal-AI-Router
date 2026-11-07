@@ -841,6 +841,16 @@ describe('unified settings bridge', () => {
             memoryProfiles: [profile]
         } satisfies JsonValue
         expect(parseInspectModel(fixture).memoryProfiles).toEqual([profile])
+        const buildProfile = { ...profile, nativeBuildId: `sha256:${'b'.repeat(64)}` }
+        expect(
+            parseInspectModel({ ...fixture, memoryProfiles: [buildProfile] }).memoryProfiles
+        ).toEqual([buildProfile])
+        expect(() =>
+            parseInspectModel({
+                ...fixture,
+                memoryProfiles: [{ ...profile, nativeBuildId: 'local-path' }]
+            })
+        ).toThrow('build identity')
         expect(
             parseInspectModel({ ...fixture, memoryProfiles: [], memoryProfilesUnavailable: true })
                 .memoryProfilesUnavailable
