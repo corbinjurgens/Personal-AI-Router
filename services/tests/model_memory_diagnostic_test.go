@@ -387,8 +387,29 @@ func (f *modelDiagnosticProcessFixture) preview(t *testing.T) modelconfig.Diagno
 func (f *modelDiagnosticProcessFixture) startRun(t *testing.T) modelconfig.DiagnosticRun {
 	t.Helper()
 	preview := f.preview(t)
+	return modelDiagnosticStartFromPreview(t, preview, func(request modelconfig.DiagnosticStartRequest) jsonrpc.Message {
+		return f.rpc(t, "engine:diagnostic-start", request)
+	})
+}
+
+func modelDiagnosticStartFromPreview(t *testing.T, preview modelconfig.DiagnosticPreview, start func(modelconfig.DiagnosticStartRequest) jsonrpc.Message) modelconfig.DiagnosticRun {
+	t.Helper()
+	request := modelconfig.DiagnosticStartRequest{DiagnosticPreviewRequest: preview.DiagnosticPreviewRequest, PreviewID: preview.PreviewID, Consent: true}
+	var reply jsonrpc.Message
+	// Start observes identity again before accepting. Only this exact refusal
+	// proves that no operation was accepted. Keep the same consent and preview
+	// so the broker rechecks expiry and unchanged effects on every attempt.
+	task1Eventually(t, "diagnostic Start identity converges before acceptance", 15*time.Second, func() bool {
+		reply = start(request)
+		return reply.Error == nil || reply.Error.Code != -32000 || reply.Error.Message != "diagnostic: exactly one configuration or execution key required" || len(reply.Result) != 0
+	})
+	if reply.Error != nil {
+		t.Fatalf("engine:diagnostic-start: code=%d message=%s", reply.Error.Code, reply.Error.Message)
+	}
 	var run modelconfig.DiagnosticRun
-	f.call(t, "engine:diagnostic-start", modelconfig.DiagnosticStartRequest{DiagnosticPreviewRequest: preview.DiagnosticPreviewRequest, PreviewID: preview.PreviewID, Consent: true}, &run)
+	if err := modelconfig.DecodeStrict(reply.Result, &run); err != nil {
+		t.Fatalf("public diagnostic acceptance contains invalid/private fields: %v", err)
+	}
 	if err := run.Validate(); err != nil || run.RunID == "" || run.Outcome != "running" {
 		t.Fatalf("public diagnostic acceptance=%+v error=%v", run, err)
 	}
@@ -894,7 +915,25 @@ func TestModelMemoryDiagnosticProcess(t *testing.T) {
 		if before.Availability != nodepolicy.Paused || before.PauseMode != nodepolicy.PauseConfigured || f.snapshot(t).Running {
 			t.Fatal("configured-pause precondition missing")
 		}
-		run := f.startRun(t)
+		preview := f.preview(t)
+		wantStart := modelconfig.DiagnosticStartRequest{DiagnosticPreviewRequest: preview.DiagnosticPreviewRequest, PreviewID: preview.PreviewID, Consent: true}
+		attempts := 0
+		run := modelDiagnosticStartFromPreview(t, preview, func(request modelconfig.DiagnosticStartRequest) jsonrpc.Message {
+			if request != wantStart {
+				t.Fatalf("Start retry changed preview, target or consent: got=%+v want=%+v", request, wantStart)
+			}
+			attempts++
+			if attempts == 1 {
+				// Deterministically exercise the pre-acceptance observation race,
+				// then obtain actual acceptance from the unmodified broker.
+				return jsonrpc.Message{Error: &jsonrpc.RPCError{Code: -32000, Message: "diagnostic: exactly one configuration or execution key required"}}
+			}
+			return f.rpc(t, "engine:diagnostic-start", request)
+		})
+		if attempts < 2 {
+			t.Fatal("Start did not retry the exact pre-acceptance refusal")
+		}
+		t.Logf("Start preserved reviewed request across %d attempts after forced pre-acceptance refusal", attempts)
 		run = f.terminal(t, run.RunID, "completed")
 		stored := f.stored(t, run)
 		if run.Result == nil || !reflect.DeepEqual(*stored.Measured, *run.Result) || stored.Measured.Low == nil || stored.Measured.High == nil || !stored.Measured.OverlayEligible(stored.Measured.DiagnosticIdentity, []string{"host"}) {
@@ -904,7 +943,8 @@ func TestModelMemoryDiagnosticProcess(t *testing.T) {
 		if value.Estimate.EstimateSource == nil || value.Estimate.EstimateSource.Kind != "measured" || !slices.ContainsFunc(value.MemoryProfiles, func(p modelconfig.MemoryProfile) bool {
 			return p.Current && p.Measured != nil && p.Measured.RunID == run.RunID
 		}) {
-			t.Fatal("ordinary inspection did not use the target-authenticated current measurement")
+			again := f.inspect(t, "medium-model")
+			t.Fatalf("ordinary inspection did not use the target-authenticated current measurement: key=%s reason=%s source=%+v profiles=%+v; repeated key=%s reason=%s source=%+v profiles=%+v", value.ConfigurationKey, value.ConfigurationKeyReason, value.Estimate.EstimateSource, value.MemoryProfiles, again.ConfigurationKey, again.ConfigurationKeyReason, again.Estimate.EstimateSource, again.MemoryProfiles)
 		}
 		f.closure(t, before, false, nil)
 		f.proxySnapshot(t)
