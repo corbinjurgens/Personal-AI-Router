@@ -370,9 +370,8 @@ func TestXARemoteConfigurationRoles(t *testing.T) {
 }
 
 func TestXARemoteConfigurationServing(t *testing.T) {
-	xaPlatform(t)
-
 	t.Run("declarations", func(t *testing.T) {
+		xaPlatform(t)
 		f := newManagementFixture(t, jointAvailable)
 		j := f.joint
 		setDeclaration := func(t *testing.T, draft nodepolicy.PeerPolicy) {
@@ -502,8 +501,14 @@ func TestXARemoteConfigurationServing(t *testing.T) {
 	})
 
 	t.Run("proxy enforces served set at its facade", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			xaPlatform(t)
+		}
 		s := newEngineProcessFixture(t)
 		s.unblock()
+		// Every installed synthetic engine starts on an available node. Routing
+		// this profile must leave the other engine's startup lifetime unchanged.
+		otherPID := s.pid(t, "llamacpp")
 		s.rpcOK(t, "llamacpp-custom-proxy:node/add-manual", map[string]any{"id": "xa-self", "host": "127.0.0.1", "port": s.facadePort, "addresses": []string{"127.0.0.1"}, "models": []string{"switch-model"}})
 		s.rpcOK(t, "llamacpp-custom-proxy:node/select", map[string]string{"id": "xa-self"})
 		client := &http.Client{Timeout: 30 * time.Second}
@@ -536,6 +541,7 @@ func TestXARemoteConfigurationServing(t *testing.T) {
 				t.Fatalf("decode current facade policy: %v", err)
 			}
 			p := current.Policy
+			p.Profiles = []nodepolicy.Profile{{Key: "switch-model", DisplayName: "Serving fixture", Engine: "llamacpp-custom", Model: "switch-model"}}
 			p.ServedModels = served
 			var accepted struct {
 				Policy nodepolicy.Policy `json:"policy"`
@@ -559,6 +565,12 @@ func TestXARemoteConfigurationServing(t *testing.T) {
 				return view.Activation == "active" && view.ActiveRevision == accepted.Policy.Revision && view.Policy.Revision == accepted.Policy.Revision
 			})
 		}
+		inferenceHits := func() int {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			return s.inferences["llamacpp-custom"]
+		}
+		wantInferenceHits := 0
 		assertDone := func(resp *http.Response, body []byte) {
 			t.Helper()
 			if resp.StatusCode != http.StatusOK {
@@ -576,27 +588,32 @@ func TestXARemoteConfigurationServing(t *testing.T) {
 			if result.Model != "switch-model" || len(result.Choices) != 1 || result.Choices[0].FinishReason != "stop" {
 				t.Fatal("facade generation did not complete")
 			}
+			wantInferenceHits++
+			if got := inferenceHits(); got != wantInferenceHits {
+				t.Fatalf("native inference hits=%d, want %d", got, wantInferenceHits)
+			}
 		}
 		assertNotServed := func(resp *http.Response, body []byte) {
 			t.Helper()
-			if resp.StatusCode != http.StatusServiceUnavailable || resp.Header.Get(nodepolicy.AdmissionHeader) != "not-served" || resp.Header.Get("Retry-After") == "" {
-				t.Fatalf("facade refusal status=%d admission=%q retry_after_present=%t", resp.StatusCode, resp.Header.Get(nodepolicy.AdmissionHeader), resp.Header.Get("Retry-After") != "")
+			// The origin filters the self candidate by its profile's served model
+			// before destination admission. A visible but unserved profile has no
+			// eligible node; it must never execute in the synthetic engine.
+			if resp.StatusCode != http.StatusBadGateway {
+				t.Fatalf("facade refusal status=%d, want %d", resp.StatusCode, http.StatusBadGateway)
 			}
 			var refusal struct {
-				Error  string `json:"error"`
-				Code   string `json:"code"`
-				Reason string `json:"reason"`
+				Error string `json:"error"`
 			}
 			if err := json.Unmarshal(body, &refusal); err != nil {
 				t.Fatalf("decode facade admission refusal: %v", err)
 			}
-			if refusal.Error != "this node is not accepting the request (not-served)" || refusal.Code != "admission" || refusal.Reason != "not-served" {
-				t.Fatal("facade refusal differs from the specified admission error, code or reason")
+			if refusal.Error != "no available node advertises the requested model" || inferenceHits() != wantInferenceHits {
+				t.Fatal("unserved profile was not refused before native execution")
 			}
 		}
 
-		// Engine start completes before the broker's advertisement poll supplies
-		// the proxy's healthy local endpoint. Wait through the facade itself.
+		setServed(nil)
+		// Catalogs expose configured profiles without consulting native inventory.
 		task1Eventually(t, "facade self model inventory", 10*time.Second, func() bool {
 			resp, err := client.Get("http://127.0.0.1:" + strconv.Itoa(s.facadePort) + "/v1/models")
 			if err != nil {
@@ -630,8 +647,14 @@ func TestXARemoteConfigurationServing(t *testing.T) {
 			return false
 		})
 
-		setServed(nil)
-		assertDone(generate())
+		task1Eventually(t, "healthy engine answers the configured profile", 15*time.Second, func() bool {
+			resp, body := generate()
+			if resp.StatusCode == http.StatusBadGateway || resp.StatusCode == http.StatusServiceUnavailable {
+				return false
+			}
+			assertDone(resp, body)
+			return true
+		})
 		setServed(nodepolicy.ServedModels{})
 		assertNotServed(generate())
 		setServed(nodepolicy.ServedModels{{Engine: "llamacpp-custom", Model: "other"}})
@@ -639,11 +662,8 @@ func TestXARemoteConfigurationServing(t *testing.T) {
 		setServed(nodepolicy.ServedModels{{Engine: "llamacpp-custom", Model: "switch-model"}})
 		assertDone(generate())
 		s.pid(t, "llamacpp-custom")
-		s.mu.Lock()
-		targetStarts := len(s.starts["llamacpp"])
-		s.mu.Unlock()
-		if targetStarts != 0 {
-			t.Fatalf("llamacpp starts=%d, want none", targetStarts)
+		if got := s.pid(t, "llamacpp"); got != otherPID {
+			t.Fatalf("profile routing replaced the other engine: pid=%d, want %d", got, otherPID)
 		}
 	})
 }
