@@ -182,7 +182,9 @@ func TestModelControlsRoutingAcrossProcesses(t *testing.T) {
 		for _, entry := range reply.Data {
 			ids = append(ids, entry.ID)
 		}
-		keys := []string{concrete, multibyte512, "overlong"}
+		// The profile with an overlong native model is discarded at discovery
+		// ingress, while valid siblings and declared role aliases survive.
+		keys := []string{concrete, multibyte512}
 		slices.Sort(keys)
 		expected := append(declaredAliases(), keys...)
 		if !reflect.DeepEqual(ids, expected) {
@@ -251,7 +253,7 @@ func TestModelControlsRoutingAcrossProcesses(t *testing.T) {
 		}
 		// Only the updated peer's currently declared roles supply aliases.
 		// Retired router-local entries cannot retain withdrawn role names.
-		want := append(declaredAliases(), "overlong")
+		want := declaredAliases()
 		if !reflect.DeepEqual(ids, want) {
 			t.Fatalf("all-invalid catalog IDs=%q, want configured aliases=%q", ids, want)
 		}

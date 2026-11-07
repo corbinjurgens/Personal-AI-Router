@@ -221,6 +221,12 @@ func (p *proxyProc) setLocalBackend(engine, host string, port int, healthy bool)
 // remote peer that runs llama.cpp at proxyPort, tagged as a trusted cluster member
 // keyed by clusterUUID (the peer's cluster cert principal).
 func (p *proxyProc) pushLlamaCPPPeer(name, ip, clusterUUID string, proxyPort int, models []string) {
+	advertisement := &nodepolicy.Advertisement{Revision: "1"}
+	for _, model := range models {
+		advertisement.Profiles = append(advertisement.Profiles, nodepolicy.AdvertisedProfile{
+			Key: model, DisplayName: model, Engine: engines.NameLlamaCPP, Model: model,
+		})
+	}
 	p.notify(engines.AddressMethod(engines.NameLlamaCPP, "discovery:nodes"), map[string]any{
 		"nodes": []map[string]any{{
 			"hostUuid":       name,
@@ -230,6 +236,7 @@ func (p *proxyProc) pushLlamaCPPPeer(name, ip, clusterUUID string, proxyPort int
 			"trusted":        true,
 			"services":       map[string]any{"lc": map[string]any{"port": proxyPort}},
 			"modelsByEngine": map[string]any{engines.NameLlamaCPP: models},
+			"policy":         advertisement,
 			"lastSeen":       time.Now().Unix(),
 		}},
 	})
@@ -314,6 +321,9 @@ func TestSecureInferenceClusterMTLS(t *testing.T) {
 
 	proxyB := startProxyProc(t, clusterB, bInfo.NodeUUID, freePort(t))
 	defer proxyB.stop()
+	policy := nodepolicy.Default()
+	policy.Profiles = []nodepolicy.Profile{{Key: "m", DisplayName: "Secure inference", Engine: engines.NameLlamaCPP, Model: "m"}}
+	proxyB.call(nodepolicy.MethodSetPolicy, nodepolicy.SetPolicyParams{OriginNodeID: bInfo.NodeUUID, Policy: policy})
 	proxyB.setLocalBackend(engines.NameLlamaCPP, bEngineHost, bEnginePort, true)
 
 	proxyA := startProxyProc(t, clusterA, aInfo.NodeUUID, freePort(t))

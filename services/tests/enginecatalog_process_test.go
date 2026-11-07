@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"nvpair-shared/appdir"
+	"nvpair-shared/nodepolicy"
 	"nvpair-shared/testbin"
 )
 
@@ -81,6 +82,12 @@ func TestDescriptorEngineIsFrontedFromAUserManifest(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(enginesDir, engineID+".json"), body, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	policy := nodepolicy.Default()
+	policy.Profiles = []nodepolicy.Profile{{Key: "custom-chat", DisplayName: "Custom chat", Engine: engineID, Model: "llama3.2:1b"}}
+	if err := policy.Validate(); err != nil {
+		t.Fatalf("descriptor fixture policy: %v", err)
+	}
+	jointWriteJSON(t, filepath.Join(jointAppDir(configDir), "node-policy.json"), policy)
 
 	stdin, msgs, stderr, cleanup := startBrokerWithConfigDir(t, configDir,
 		"--engine-manager-path", engineMgrBin,
@@ -118,7 +125,7 @@ func TestDescriptorEngineIsFrontedFromAUserManifest(t *testing.T) {
 	t.Cleanup(client.CloseIdleConnections)
 	deadline = time.Now().Add(30 * time.Second)
 	for {
-		status, text := postChat(client, facadePort, "llama3.2:1b")
+		status, text := postChat(client, facadePort, "custom-chat")
 		if status == http.StatusOK && strings.Contains(text, "chat.completion") {
 			return
 		}

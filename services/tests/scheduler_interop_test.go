@@ -29,6 +29,8 @@ import (
 	"time"
 
 	"nvpair-shared/jsonrpc"
+	"nvpair-shared/nodepolicy"
+	"nvpair-shared/noderec"
 	"nvpair-shared/schedulerwire"
 )
 
@@ -368,7 +370,8 @@ func runBlockedProxyBurst(t *testing.T, pending, pressure []int, requests int) (
 		}))
 	}
 
-	stdin, msgs, stderr, cleanup := startBrokerWith(t, "--proxy-path", proxyBin, "--proxy-engines", "llamacpp")
+	control := newFixtureProxyControl(t)
+	stdin, msgs, stderr, cleanup := startBrokerWithEnv(t, control.env(), "--proxy-path", control.image, "--proxy-engines", "llamacpp")
 	t.Cleanup(cleanup)
 	t.Cleanup(func() {
 		unblock()
@@ -385,6 +388,7 @@ func runBlockedProxyBurst(t *testing.T, pending, pressure []int, requests int) (
 	proxyPort := waitEngineProxyReady(t, "llamacpp-proxy", stdin, msgs, 15*time.Second)
 
 	requestID := 100
+	var directory []noderec.DirectoryNode
 	for i, server := range servers {
 		callBrokerRPC(t, stdin, msgs, requestID, "llamacpp-proxy:node/add-manual", map[string]any{
 			"id":        ids[i],
@@ -394,7 +398,18 @@ func runBlockedProxyBurst(t *testing.T, pending, pressure []int, requests int) (
 			"models":    []string{"burst-model"},
 		})
 		requestID++
+		directory = append(directory, noderec.DirectoryNode{
+			HostUUID: ids[i], IP: "127.0.0.1",
+			Services:       map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceLlamaCPP: {Port: portOfURL(t, server.URL)}},
+			ModelsByEngine: map[string][]string{"llamacpp": {"burst-model"}},
+			Policy: &nodepolicy.Advertisement{Revision: "1", Profiles: []nodepolicy.AdvertisedProfile{{
+				Key: "burst-model", DisplayName: "Burst model", Engine: "llamacpp", Model: "burst-model",
+			}}},
+		})
 	}
+	control.ready(t, "llamacpp", proxyPort)
+	control.call(t, "llamacpp", noderec.NotifyNodes, noderec.GetNodesResult{Nodes: directory})
+	control.call(t, "llamacpp", "nodes/list", nil)
 
 	order := append([]string(nil), ids...)
 	pendingByID := make(map[string]int, len(ids))
@@ -584,8 +599,9 @@ func TestLlamaCPPProxyIgnoresPriorityNodesAbsentFromDiscovery(t *testing.T) {
 	t.Cleanup(realEngine.Close)
 	realPort := portOfURL(t, realEngine.URL)
 
-	stdin, msgs, stderr, cleanup := startBrokerWith(t,
-		"--proxy-path", proxyBin, "--proxy-engines", "llamacpp",
+	control := newFixtureProxyControl(t)
+	stdin, msgs, stderr, cleanup := startBrokerWithEnv(t, control.env(),
+		"--proxy-path", control.image, "--proxy-engines", "llamacpp",
 	)
 	t.Cleanup(cleanup)
 	go func() {
@@ -603,6 +619,16 @@ func TestLlamaCPPProxyIgnoresPriorityNodesAbsentFromDiscovery(t *testing.T) {
 	if resp := waitForResponse(t, msgs, 5*time.Second); resp.Error != nil {
 		t.Fatalf("llamacpp-proxy:node/add-manual rejected: %d %s", resp.Error.Code, resp.Error.Message)
 	}
+	control.ready(t, "llamacpp", proxyPort)
+	control.call(t, "llamacpp", noderec.NotifyNodes, noderec.GetNodesResult{Nodes: []noderec.DirectoryNode{{
+		HostUUID: "real-engine", IP: "127.0.0.1",
+		Services:       map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceLlamaCPP: {Port: realPort}},
+		ModelsByEngine: map[string][]string{"llamacpp": {"chat-model"}},
+		Policy: &nodepolicy.Advertisement{Revision: "1", Profiles: []nodepolicy.AdvertisedProfile{{
+			Key: "chat-model", DisplayName: "Chat model", Engine: "llamacpp", Model: "chat-model",
+		}}},
+	}}})
+	control.call(t, "llamacpp", "nodes/list", nil)
 
 	// Priority puts a peer that never advertised llama.cpp first. The proxy must
 	// skip it and route to the discovered real-engine node.
