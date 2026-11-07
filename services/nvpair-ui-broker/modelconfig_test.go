@@ -86,6 +86,9 @@ func newModelConfigFixture(t *testing.T) *modelConfigFixture {
 		return f.acks.answer(method, params)
 	})
 	f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+		if method == "engine:diagnostic-run-status" {
+			return map[string]string{"state": "none"}, ""
+		}
 		if method == buildapply.EngineOwnerEvidenceMethod {
 			return modelConfigOwnerEvidence(t), ""
 		}
