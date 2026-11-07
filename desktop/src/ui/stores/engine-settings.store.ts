@@ -97,6 +97,31 @@ interface DiagnosticEntry {
     reading?: boolean
 }
 
+const diagnosticPhases: DiagnosticRun['phase'][] = [
+    'reserving',
+    'draining',
+    'unloading',
+    'baseline',
+    'starting',
+    'loading',
+    'low',
+    'high',
+    'restoring',
+    'done'
+]
+
+function diagnosticRegresses(previous: DiagnosticRun | undefined, run: DiagnosticRun): boolean {
+    // Reconstruction can adopt the manager's later clock origin. Cleanup and
+    // terminal outcomes are authoritative even when their elapsed display falls.
+    return (
+        previous?.runId === run.runId &&
+        run.outcome === 'running' &&
+        (previous.outcome !== 'running' ||
+            previous.elapsedMs > run.elapsedMs ||
+            diagnosticPhases.indexOf(previous.phase) > diagnosticPhases.indexOf(run.phase))
+    )
+}
+
 interface ModelDraft {
     change?: ModelChange
     inspection?: InspectModelResult
@@ -541,18 +566,13 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
             })
             if (get().diagnostics[nodeId]?.arrival !== arrival) return
             const latest = get().diagnostics[nodeId]?.run
-            if (
-                run &&
-                latest?.runId === run.runId &&
-                (latest.elapsedMs > run.elapsedMs ||
-                    (latest.outcome !== 'running' &&
-                        latest.outcome !== 'cleanup-failed' &&
-                        run.outcome === 'running'))
-            ) {
+            // Neither stale running data nor an absent exact-run reply proves
+            // that the retained operation is current or its cleanup has settled.
+            if ((run && diagnosticRegresses(latest, run)) || (!run && runId !== undefined)) {
                 set(state => ({
                     diagnostics: {
                         ...state.diagnostics,
-                        [nodeId]: { ...state.diagnostics[nodeId], current: true, reading: false }
+                        [nodeId]: { ...state.diagnostics[nodeId], current: false, reading: false }
                     }
                 }))
                 return
@@ -601,14 +621,7 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
     },
     receiveDiagnostic: (nodeId, run) => {
         const entry = get().diagnostics[nodeId]
-        if (
-            entry?.run?.runId === run.runId &&
-            (entry.run.elapsedMs > run.elapsedMs ||
-                (entry.run.outcome !== 'running' &&
-                    entry.run.outcome !== 'cleanup-failed' &&
-                    run.outcome === 'running'))
-        )
-            return
+        if (diagnosticRegresses(entry?.run, run)) return
         set(state => ({
             diagnostics: {
                 ...state.diagnostics,
@@ -1361,8 +1374,19 @@ export function watchModelDiagnostic(nodeId: string): () => void {
     if (!watcher) {
         let live = true
         const read = () => {
-            if (live && useConnectionStore.getState().connected)
-                void useEngineSettingsStore.getState().readDiagnostic(nodeId)
+            const store = useEngineSettingsStore.getState()
+            const entry = store.diagnostics[nodeId]
+            if (live && useConnectionStore.getState().connected && !entry?.reading) {
+                // An uncertain cancellation must reconcile its exact run. An
+                // absent discovery result is not proof that cleanup completed.
+                const run = entry?.run
+                const runId =
+                    !entry?.current &&
+                    (run?.outcome === 'running' || run?.outcome === 'cleanup-failed')
+                        ? run.runId
+                        : undefined
+                void store.readDiagnostic(nodeId, runId)
+            }
         }
         // Subscribe before active-run discovery so a delayed baseline cannot hide a push.
         const stopPush = window.pairApi.engines.onDiagnosticChanged(run => {
@@ -1387,8 +1411,14 @@ export function watchModelDiagnostic(nodeId: string): () => void {
                 read()
         })
         // Remote targets do not always deliver pushes to the origin window.
+        // Reuse this bounded cadence for uncertain local reads until readback
+        // succeeds; current local state remains push-driven.
         const timer = window.setInterval(() => {
-            if (nodeId !== useConnectionStore.getState().selfId) read()
+            if (
+                nodeId !== useConnectionStore.getState().selfId ||
+                !useEngineSettingsStore.getState().diagnostics[nodeId]?.current
+            )
+                read()
         }, 2000)
         watcher = {
             consumers: 0,

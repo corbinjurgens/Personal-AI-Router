@@ -24,7 +24,20 @@ to the exact current target manager source/worker pair. Its correlated
 stay worker-internal. The broker rechecks consent, grant, maintenance and Halt
 before accepting work and never transfers target cleanup ownership to the
 origin. Remote responses preserve the peer node and exact run ID after strict
-public projection. Shared strict decoding remains unchanged.
+public projection.
+
+Shared `modelconfig.DecodeStrict` supports flattened exported fields of untagged
+anonymous struct members, including private anonymous structs and embedded
+struct pointers. Anonymous structs with a nonempty JSON field name remain
+nested. Ordinary private fields and `json:"-"` fields remain inaccessible;
+unknown fields and duplicate JSON keys, including case-folded duplicates, are
+rejected. Field spelling must match exactly. This narrow promotion support
+allows diagnostic identities and public peer runs to decode in their flattened
+wire shape. It does not implement `encoding/json`'s full field-dominance rules:
+colliding promoted or declared JSON field names are refused as ambiguous, rather
+than resolved by depth or tag priority. Excessive embedding depth is also
+refused. Callers must still validate decoded values and authenticate private
+authority at their own boundary.
 
 Preview/start/status use the normal short RPC envelope; start acknowledges the
 broker-owned operation before long work. Cancel uses a 210-second desktop

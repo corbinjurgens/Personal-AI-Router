@@ -462,6 +462,139 @@ describe('applied profile memory measurement', () => {
         status.mockResolvedValueOnce(running)
         await act(async () => useEngineSettingsStore.getState().readDiagnostic('self'))
         expect(container.textContent).toContain('Measuring memory: high, 42 s elapsed')
+        expect(useEngineSettingsStore.getState().diagnostics.self.current).toBe(false)
+    })
+
+    it.each<Pick<DiagnosticRun, 'outcome' | 'phase'>>([
+        { outcome: 'cleanup-failed', phase: 'restoring' },
+        { outcome: 'failed', phase: 'done' },
+        { outcome: 'completed', phase: 'done' }
+    ])('reconciles recovered $outcome readback with a later clock origin', async recoveredState => {
+        await render()
+        await push({ ...running, phase: 'high', elapsedMs: 42000 })
+        await act(async () => useConnectionStore.setState({ connected: false }))
+        const recovered: DiagnosticRun = {
+            ...running,
+            ...recoveredState,
+            startedAt: '2026-11-07T01:00:30Z',
+            elapsedMs: 12000,
+            ...(recoveredState.outcome === 'completed' ? { result } : {})
+        }
+        status.mockResolvedValueOnce(recovered)
+        await act(async () => useConnectionStore.setState({ connected: true }))
+        expect(useEngineSettingsStore.getState().diagnostics.self).toMatchObject({
+            current: true,
+            reading: false,
+            run: recovered
+        })
+        if (recovered.outcome === 'cleanup-failed')
+            expect(button('Retry cleanup').disabled).toBe(false)
+    })
+
+    it.each<Pick<DiagnosticRun, 'outcome' | 'phase'>>([
+        { outcome: 'cleanup-failed', phase: 'restoring' },
+        { outcome: 'failed', phase: 'done' },
+        { outcome: 'completed', phase: 'done' }
+    ])('accepts a recovered $outcome push despite lower elapsed time', async recoveredState => {
+        await render()
+        await push({ ...running, phase: 'high', elapsedMs: 42000 })
+        await act(async () => useEngineSettingsStore.getState().disconnectDiagnostic('self'))
+        const recovered: DiagnosticRun = {
+            ...running,
+            ...recoveredState,
+            startedAt: '2026-11-07T01:00:30Z',
+            elapsedMs: 12000
+        }
+        await push(recovered)
+        expect(useEngineSettingsStore.getState().diagnostics.self).toMatchObject({
+            current: true,
+            run: recovered
+        })
+    })
+
+    it.each<{ name: string; outcome: DiagnosticRun['outcome']; elapsedMs: number }>([
+        { name: 'older running clock', outcome: 'running', elapsedMs: 12000 },
+        { name: 'earlier running phase at the same clock', outcome: 'running', elapsedMs: 42000 },
+        { name: 'earlier running phase at a later clock', outcome: 'running', elapsedMs: 45000 },
+        { name: 'running after cleanup failure', outcome: 'cleanup-failed', elapsedMs: 45000 },
+        { name: 'running after failure', outcome: 'failed', elapsedMs: 45000 },
+        { name: 'running after completion', outcome: 'completed', elapsedMs: 45000 }
+    ])(
+        'keeps retained state uncertain for $name in a snapshot or push',
+        async ({ outcome, elapsedMs }) => {
+            await render()
+            const latest: DiagnosticRun = {
+                ...running,
+                outcome,
+                phase: outcome === 'running' ? 'high' : 'done',
+                elapsedMs: 42000
+            }
+            await push(latest)
+            await act(async () => useEngineSettingsStore.getState().disconnectDiagnostic('self'))
+            const stale: DiagnosticRun = { ...running, elapsedMs }
+            status.mockResolvedValueOnce(stale)
+            await act(async () => useEngineSettingsStore.getState().readDiagnostic('self'))
+            expect(useEngineSettingsStore.getState().diagnostics.self).toMatchObject({
+                current: false,
+                reading: false,
+                run: latest
+            })
+            await push(stale)
+            expect(useEngineSettingsStore.getState().diagnostics.self).toMatchObject({
+                current: false,
+                run: latest
+            })
+        }
+    )
+
+    it.each<{ outcome: DiagnosticRun['outcome']; label: string }>([
+        { outcome: 'running', label: 'Cancel measurement' },
+        { outcome: 'cleanup-failed', label: 'Retry cleanup' }
+    ])('restores $label after a transient local read failure', async ({ outcome, label }) => {
+        await render()
+        const held: DiagnosticRun = { ...running, outcome, phase: 'restoring' }
+        await push(held)
+        cancel.mockRejectedValueOnce(new Error('Cancel reply lost'))
+        status.mockRejectedValueOnce(new Error('Transient status failure')).mockResolvedValue(held)
+        await click(label)
+        expect(button(label).disabled).toBe(true)
+        expect(useEngineSettingsStore.getState().diagnostics.self).toMatchObject({
+            current: false,
+            operation: undefined,
+            run: held
+        })
+        await act(async () => vi.advanceTimersByTimeAsync(1999))
+        expect(status).toHaveBeenCalledTimes(2)
+        await act(async () => vi.advanceTimersByTimeAsync(1))
+        expect(status).toHaveBeenCalledTimes(3)
+        expect(status).toHaveBeenLastCalledWith({ nodeId: 'self', runId: 'run' })
+        expect(button(label).disabled).toBe(false)
+        expect(useEngineSettingsStore.getState().diagnostics.self.run).toEqual(held)
+        if (outcome === 'cleanup-failed')
+            expect(container.textContent).toContain('Engines remain held until cleanup succeeds.')
+        await act(async () => vi.advanceTimersByTimeAsync(10000))
+        expect(status).toHaveBeenCalledTimes(3)
+        await click(label)
+        expect(cancel).toHaveBeenNthCalledWith(2, { nodeId: 'self', runId: 'run' })
+    })
+
+    it('retains cleanup uncertainty until exact-run retry returns authoritative state', async () => {
+        await render()
+        const held: DiagnosticRun = { ...running, outcome: 'cleanup-failed', phase: 'restoring' }
+        await push(held)
+        status.mockRejectedValueOnce(new Error('Transient status failure'))
+        await act(async () => useEngineSettingsStore.getState().readDiagnostic('self'))
+        status.mockResolvedValueOnce(null).mockResolvedValueOnce(held)
+        await act(async () => vi.advanceTimersByTimeAsync(2000))
+        expect(status).toHaveBeenLastCalledWith({ nodeId: 'self', runId: 'run' })
+        expect(useEngineSettingsStore.getState().diagnostics.self).toMatchObject({
+            current: false,
+            run: held
+        })
+        expect(button('Retry cleanup').disabled).toBe(true)
+        await act(async () => vi.advanceTimersByTimeAsync(2000))
+        expect(button('Retry cleanup').disabled).toBe(false)
+        expect(useEngineSettingsStore.getState().diagnostics.self.run).toEqual(held)
     })
 
     it('reconciles uncertain start acceptance even while an older discovery read is pending', async () => {

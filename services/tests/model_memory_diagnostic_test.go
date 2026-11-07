@@ -680,6 +680,61 @@ func (f *modelDiagnosticProcessFixture) recovered(t *testing.T, id string) model
 	return run
 }
 
+// The broker owns the production public envelope. This fixture consumes its
+// flattened run plus target node without admitting private manager authority.
+func decodeModelDiagnosticPeerRun(raw json.RawMessage, target string) (modelconfig.DiagnosticRun, error) {
+	var public struct {
+		modelconfig.DiagnosticRun
+		NodeID string `json:"nodeId,omitempty"`
+	}
+	if err := modelconfig.DecodeStrict(raw, &public); err != nil {
+		return modelconfig.DiagnosticRun{}, err
+	}
+	if public.NodeID != target || target == "" {
+		return modelconfig.DiagnosticRun{}, fmt.Errorf("peer diagnostic target: got %q, want %q", public.NodeID, target)
+	}
+	if err := public.DiagnosticRun.Validate(); err != nil {
+		return modelconfig.DiagnosticRun{}, err
+	}
+	return public.DiagnosticRun, nil
+}
+
+func TestModelMemoryDiagnosticPeerRunDecode(t *testing.T) {
+	const payload = `{"nodeId":"target","runId":"peer-run","engine":"llamacpp","modelId":"medium-model","profileKey":"medium-model","configurationKey":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","phase":"high","outcome":"running","startedAt":"2026-11-08T00:00:00Z","elapsedMs":123}`
+	t.Run("accepts flattened public run and exact target", func(t *testing.T) {
+		run, err := decodeModelDiagnosticPeerRun(json.RawMessage(payload), "target")
+		if err != nil {
+			t.Fatalf("decode public peer run: %v", err)
+		}
+		want := modelconfig.DiagnosticRun{
+			RunID: "peer-run", Engine: "llamacpp", ModelID: "medium-model", ProfileKey: "medium-model",
+			ConfigurationKey: strings.Repeat("a", 64), Phase: "high", Outcome: "running",
+			StartedAt: "2026-11-08T00:00:00Z", ElapsedMS: 123,
+		}
+		if !reflect.DeepEqual(run, want) {
+			t.Fatalf("public peer run=%+v, want %+v", run, want)
+		}
+	})
+	reject := func(name, raw, target string) {
+		t.Run(name, func(t *testing.T) {
+			if _, err := decodeModelDiagnosticPeerRun(json.RawMessage(raw), target); err == nil {
+				t.Fatal("accepted invalid public peer run")
+			}
+		})
+	}
+	withField := func(field string) string { return strings.TrimSuffix(payload, "}") + "," + field + "}" }
+	reject("rejects unknown field", withField(`"unexpected":true`), "target")
+	reject("rejects private token", withField(`"token":"private"`), "target")
+	reject("rejects private marker", withField(`"marker":1`), "target")
+	reject("rejects private observation", withField(`"observation":{}`), "target")
+	reject("rejects duplicate target", withField(`"nodeId":"target"`), "target")
+	reject("rejects case-folded duplicate target", withField(`"NodeID":"target"`), "target")
+	reject("rejects wrong target", payload, "other-target")
+	reject("rejects missing target", strings.Replace(payload, `"nodeId":"target",`, "", 1), "target")
+	reject("rejects empty expected target", payload, "")
+	reject("rejects invalid run", strings.Replace(payload, `"phase":"high"`, `"phase":"unknown"`, 1), "target")
+}
+
 func TestModelMemoryDiagnosticProcess(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("White Windows serialized fixed-image diagnostic process acceptance only")
@@ -909,7 +964,7 @@ func TestModelMemoryDiagnosticProcess(t *testing.T) {
 			originBase := filepath.Dir(f.callerCluster)
 			origin := modelMemoryOrigin(t, originBase, "model-settings-target", f.ports.engineControl)
 			request := modelconfig.DiagnosticPreviewRequest{Engine: "llamacpp", NodeID: "model-settings-target", ModelID: "medium-model", ProfileKey: "medium-model"}
-			peerCall := func(method string, params, out any) {
+			peerCall := func(method string, params any) json.RawMessage {
 				t.Helper()
 				// Reuse the origin's writer/reader and correlation, extending only
 				// its ordinary ten-second wait for the diagnostic cleanup contract.
@@ -932,34 +987,50 @@ func TestModelMemoryDiagnosticProcess(t *testing.T) {
 				if reply.Error != nil {
 					t.Fatalf("origin %s code=%d message=%s", method, reply.Error.Code, reply.Error.Message)
 				}
-				if err := modelconfig.DecodeStrict(reply.Result, out); err != nil {
-					t.Fatalf("origin public diagnostic payload: %v", err)
-				}
+				return reply.Result
 			}
 			var preview modelconfig.DiagnosticPreview
-			peerCall("engine:diagnostic-preview", request, &preview)
-			if err := preview.Validate(); err != nil || preview.TotalRAMBytes != "17179869184" {
+			if err := modelconfig.DecodeStrict(peerCall("engine:diagnostic-preview", request), &preview); err != nil {
+				t.Fatalf("origin public diagnostic preview: %v", err)
+			}
+			if err := preview.Validate(); err != nil || preview.TotalRAMBytes != "17179869184" || preview.DiagnosticPreviewRequest != request {
 				t.Fatalf("peer preview lost target hardware: %v", err)
 			}
-			var run modelconfig.DiagnosticRun
-			peerCall("engine:diagnostic-start", modelconfig.DiagnosticStartRequest{DiagnosticPreviewRequest: request, PreviewID: preview.PreviewID, Consent: true}, &run)
+			peerRun := func(method string, params any) modelconfig.DiagnosticRun {
+				t.Helper()
+				run, err := decodeModelDiagnosticPeerRun(peerCall(method, params), request.NodeID)
+				if err != nil {
+					t.Fatalf("origin %s public diagnostic run: %v", method, err)
+				}
+				return run
+			}
+			run := peerRun("engine:diagnostic-start", modelconfig.DiagnosticStartRequest{DiagnosticPreviewRequest: request, PreviewID: preview.PreviewID, Consent: true})
+			if run.Engine != request.Engine || run.ModelID != request.ModelID || run.ProfileKey != request.ProfileKey {
+				t.Fatalf("origin start accepted a different target profile: %+v", run)
+			}
 			f.phase(t, run.RunID, "high")
 			f.effect(t, "high:start", 2)
-			var remote modelconfig.DiagnosticRun
 			ref := modelconfig.DiagnosticRunRef{NodeID: request.NodeID, RunID: run.RunID}
-			peerCall("engine:diagnostic-status", ref, &remote)
+			remote := peerRun("engine:diagnostic-status", ref)
 			if remote.RunID != run.RunID || remote.Phase != "high" {
 				t.Fatal("origin status did not describe the target run")
 			}
 			if outcome == "cancelled" {
-				peerCall("engine:diagnostic-cancel", ref, &remote)
+				remote = peerRun("engine:diagnostic-cancel", ref)
+				if remote.RunID != run.RunID || remote.Outcome != "cancelled" || remote.Phase != "done" {
+					t.Fatalf("origin cancel did not join the exact target run: %+v", remote)
+				}
 			} else {
 				f.fault(t, "high", false)
 			}
 			run = f.terminal(t, run.RunID, outcome)
-			peerCall("engine:diagnostic-status", ref, &remote)
+			remote = peerRun("engine:diagnostic-status", ref)
 			if remote.RunID != run.RunID || remote.Outcome != outcome || remote.Phase != "done" {
 				t.Fatalf("origin lost the target's terminal result: %+v", remote)
+			}
+			remote = peerRun("engine:diagnostic-cancel", ref)
+			if remote.RunID != run.RunID || remote.Outcome != outcome || remote.Phase != "done" {
+				t.Fatalf("origin terminal cancel changed the exact target result: %+v", remote)
 			}
 			f.stored(t, run)
 			originStore := filepath.Join(jointAppDir(originBase), "engine-bin", "model-memory-profiles.json")

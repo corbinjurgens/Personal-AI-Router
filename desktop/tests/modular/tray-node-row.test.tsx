@@ -108,11 +108,11 @@ afterEach(async () => {
     else Reflect.deleteProperty(window, 'windowApi')
 })
 
-function cancelButton(): HTMLButtonElement {
+function cancelButton(label = 'Cancel'): HTMLButtonElement {
     const button = Array.from(container.querySelectorAll('button')).find(
-        item => item.textContent === 'Cancel'
+        item => item.textContent === label
     )
-    if (!button) throw new Error('Missing diagnostic Cancel button')
+    if (!button) throw new Error(`Missing diagnostic ${label} button`)
     return button
 }
 
@@ -158,6 +158,102 @@ describe('target tray diagnostics', () => {
         await act(async () => useConnectionStore.setState({ connected: false }))
         expect(cancelButton().disabled).toBe(true)
         expect(container.textContent).toContain('reconnecting')
+    })
+
+    it('shares local cleanup-status retries with an open diagnostic panel', async () => {
+        const held: DiagnosticRun = { ...run, outcome: 'cleanup-failed', phase: 'restoring' }
+        useEngineSettingsStore.getState().receiveDiagnostic('self', held)
+        status.mockRejectedValueOnce(new Error('Transient status failure')).mockResolvedValue(held)
+        await act(async () =>
+            root.render(
+                <>
+                    <TrayNodeRow node={node} activeWorkloads={[]} />
+                    <ModelMemoryDiagnostic
+                        nodeId="self"
+                        engine="llamacpp"
+                        modelId={run.modelId}
+                        applied={false}
+                    />
+                </>
+            )
+        )
+        expect(status).toHaveBeenCalledTimes(1)
+        expect(cancelButton('Retry cleanup').disabled).toBe(true)
+        await act(async () => vi.advanceTimersByTimeAsync(2000))
+        expect(status).toHaveBeenCalledTimes(2)
+        expect(status).toHaveBeenLastCalledWith({ nodeId: 'self', runId: run.runId })
+        expect(cancelButton('Retry cleanup').disabled).toBe(false)
+        expect(container.textContent).toContain('Measuring memory: cleanup required')
+        expect(useEngineSettingsStore.getState().diagnostics.self.run).toEqual(held)
+        await act(async () => cancelButton('Retry cleanup').click())
+        expect(cancel).toHaveBeenCalledExactlyOnceWith({ nodeId: 'self', runId: run.runId })
+    })
+
+    it('keeps failed local retries disabled and retires an in-flight retry on unmount', async () => {
+        const held: DiagnosticRun = { ...run, outcome: 'cleanup-failed', phase: 'restoring' }
+        useEngineSettingsStore.getState().receiveDiagnostic('self', held)
+        let resolveStatus: ((value: DiagnosticRun | null) => void) | undefined
+        status
+            .mockRejectedValueOnce(new Error('First status failure'))
+            .mockRejectedValueOnce(new Error('Second status failure'))
+            .mockImplementationOnce(
+                () =>
+                    new Promise(resolve => {
+                        resolveStatus = resolve
+                    })
+            )
+        await act(async () => root.render(<TrayNodeRow node={node} activeWorkloads={[]} />))
+        await act(async () => vi.advanceTimersByTimeAsync(2000))
+        expect(status).toHaveBeenCalledTimes(2)
+        expect(cancelButton('Retry cleanup').disabled).toBe(true)
+        expect(useEngineSettingsStore.getState().diagnostics.self.run).toEqual(held)
+        await act(async () => vi.advanceTimersByTimeAsync(2000))
+        expect(status).toHaveBeenCalledTimes(3)
+        await act(async () => vi.advanceTimersByTimeAsync(10000))
+        expect(status).toHaveBeenCalledTimes(3)
+        await act(async () => root.render(null))
+        if (!resolveStatus) throw new Error('Status retry was not sent')
+        await act(async () => resolveStatus?.({ ...run, phase: 'done', outcome: 'cancelled' }))
+        await act(async () => vi.advanceTimersByTimeAsync(10000))
+        expect(status).toHaveBeenCalledTimes(3)
+        expect(changed).toBeUndefined()
+        expect(useEngineSettingsStore.getState().diagnostics.self).toMatchObject({
+            current: false,
+            reading: false,
+            run: held
+        })
+    })
+
+    it('pauses local retries while disconnected and retires the old response before recovery', async () => {
+        const held: DiagnosticRun = { ...run, outcome: 'cleanup-failed', phase: 'restoring' }
+        useEngineSettingsStore.getState().receiveDiagnostic('self', held)
+        let resolveStatus: ((value: DiagnosticRun | null) => void) | undefined
+        status.mockRejectedValueOnce(new Error('Transient status failure')).mockImplementationOnce(
+            () =>
+                new Promise(resolve => {
+                    resolveStatus = resolve
+                })
+        )
+        await act(async () => root.render(<TrayNodeRow node={node} activeWorkloads={[]} />))
+        await act(async () => vi.advanceTimersByTimeAsync(2000))
+        expect(status).toHaveBeenCalledTimes(2)
+        await act(async () => useConnectionStore.setState({ connected: false }))
+        if (!resolveStatus) throw new Error('Status retry was not sent')
+        await act(async () => resolveStatus?.({ ...run, phase: 'done', outcome: 'cancelled' }))
+        await act(async () => vi.advanceTimersByTimeAsync(10000))
+        expect(status).toHaveBeenCalledTimes(2)
+        expect(cancelButton('Retry cleanup').disabled).toBe(true)
+        expect(useEngineSettingsStore.getState().diagnostics.self).toMatchObject({
+            current: false,
+            reading: false,
+            run: held
+        })
+        status.mockResolvedValueOnce(held)
+        await act(async () => useConnectionStore.setState({ connected: true }))
+        expect(status).toHaveBeenLastCalledWith({ nodeId: 'self', runId: run.runId })
+        expect(cancelButton('Retry cleanup').disabled).toBe(false)
+        await act(async () => vi.advanceTimersByTimeAsync(6000))
+        expect(status).toHaveBeenCalledTimes(3)
     })
 })
 
