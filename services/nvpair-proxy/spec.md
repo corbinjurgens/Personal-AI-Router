@@ -144,11 +144,11 @@ finite effective policy/profile concurrency limit for the normalized
 engine/model, which is also enforced for concrete traffic; an unlimited limit
 installs nothing. Caller fields never establish destination capability. Strict
 dispatch is terminal-local and never enters concrete route selection or retries.
-Headerless concrete admission retains its prior semantics, including its switch
-timeout behavior.
+Headerless concrete admission retains its ordinary model-transition timeout
+behavior.
 
 Queue and cold deadlines derive from remaining durations on a monotonic clock,
-share the pre-output cap, and never reset on wake, switch or state changes.
+share the pre-output cap, and never reset on wake or state changes.
 Zero cold allowance forbids wake/unload and excludes unloaded models and models
 with an unload pending authoritative residency acknowledgement. Tickets admitted
 warm-only (including already-warm requests with nonzero cold allowance) revalidate
@@ -497,7 +497,7 @@ which takes one off and puts the other on.
 | Class | Addressed? | Examples |
 | --- | --- | --- |
 | Facade-scoped | yes | `ready`, `error`, `node/*`, `errors:*`, `set-port`, `discovery:subscribe`, `discovery:nodes` |
-| Process-scoped | no | `log/set-level`, `node/set-priority`, `node/set-policy`, `node/set-availability`, `node/set-engine-drain`, `node/set-residency`, `node/set-engine-intent`, `node/invalidate-engine`, `node/admission-snapshot`, `workload/cancel`, `workload:*`, `admission/*`, `discovery:node-activity` |
+| Process-scoped | no | `log/set-level`, `node/set-priority`, `node/set-policy`, `node/set-availability`, `node/set-engine-drain`, `node/set-residency`, `node/set-engine-intent`, `node/admission-snapshot`, `workload/cancel`, `workload:*`, `admission/*`, `discovery:node-activity` |
 | Bootstrap | names its engine in the payload | `facade/enable` |
 
 `facade/enable` is unaddressed because it runs *before* the facade it names
@@ -535,11 +535,13 @@ point remain owned by the existing dispatch policy below.
 For a model-bearing inference request:
 
 1. Filter a request-local discovery snapshot to nodes whose per-engine inventory
-   advertises the requested model, or whose supported explicit binding offer
-   can prepare it (section 12.2). Model identifiers match exactly. An empty owner set returns a local
+   advertises the requested model. Concrete names use the entry engine; a
+   profile names its engine. Model identifiers use that engine's normalization.
+   Eligible dormant self candidates retain their on-demand wake path (section
+   12.2). An empty owner set returns a local
    `502` without contacting an engine.
 2. Order eligible owners: explicit `node/select` pin, then the ready class
-   before preparation candidates, then scheduler priority and deterministic
+   before dormant self candidates, then scheduler priority and deterministic
    default ordering within a class.
 3. Reserve the least estimated-loaded scheduler-listed candidate and move it to
    the front (§6).
@@ -1420,7 +1422,6 @@ state in force. The broker re-sends policy state whenever the proxy starts; unti
 | `node/set-engine-drain` | `{engine, drain}` | refuse new work for one engine during a settings restart |
 | `node/set-residency` | `{loadedByEngine}` | the models loaded per engine on this node, normalized per engine |
 | `node/set-engine-intent` | `{enabledByEngine}` | each managed engine's saved On/Off intent |
-| `node/invalidate-engine` | `{engine, operationId, reason:"engine-switch"}` | answers `{ok:true, runId}`; withdraws engine strict eligibility and fences held tickets (§12.1.2) |
 | `node/admission-snapshot` | `{}` | answers `{runId, active, activeByEngine, queued, lastActivityMs}` from current admission state (§12.1.2) |
 | `node/renew-egress-lease` | `{runId, revision, sequence, notAfterNanos}` | trusted parent only; answers `{runId, revision, sequence, nowNanos}`; zero deadline samples the receiver clock without changing authority; a nonzero deadline is a run/revision-bound grant (§12.9) |
 | `node/revoke-egress-lease` | `{runId, sequence}` | trusted parent only; answers `{runId, sequence}`; a higher sequence clears the current lease without activating policy (§12.9) |
@@ -1560,35 +1561,16 @@ Local pause/Off remains a veto, and PG retains route-policy ownership. See
 [Local qualification](../../docs/local-qualification.mdx#daily-adapter-and-residency-contract)
 for the on-demand/resident distinction and pending real-host acceptance.
 
-#### 12.1.2 Engine switch invalidation and fresh drain evidence
+#### 12.1.2 Fresh admission snapshots
 
-These are internal broker requests. Invalidation requires every field, rejects
-nulls and unknown fields, validates `engine` with `engines.ValidID`, and requires
-`operationId` to match the switch request-ID rule: 1–128 ASCII bytes, first
-alphanumeric, remaining alphanumeric or `.`, `_`, `:`, `-`. The only reason is
-`engine-switch`. Under the admission mutex it removes every installed strict
-model for that engine, advances each generation, and wakes queued admissions.
-Held tickets fail `BeforeStrictDispatch`. Dispatched work is not cancelled;
-capacity markers and quarantine are not cleared. Other engines are unaffected.
-`StrictReadiness` remains withdrawn until the authoritative qualification feed
-exists; invalidation never grants readiness.
-
-Deduplication is per engine and operation ID for the lifetime of the proxy.
-Repeating an invalidation has no effect even if fresh capabilities have since
-been installed. Source and target may be invalidated independently using the
-same operation ID. The broker must replay pending invalidations from its switch
-journal before enabling facades after proxy restart; `runId` identifies the
-incarnation acknowledging the invalidation. The proxy does not persist switch
-journal state.
-
-The snapshot request requires an explicit empty object, rejects other fields,
-and copies current admission counts and activity maps under the admission mutex
-at request time. Active counts include held tickets, dispatched work and
-quarantined capacity, matching `admission/state`. The broker must request a fresh
-snapshot after the drain acknowledgement and validate the returned `runId`
-against that proxy incarnation. A cached zero, missing snapshot or changed
-incarnation cannot prove a drained engine. The response is a snapshot, not a
-subscription or a capacity-release operation.
+The internal `node/admission-snapshot` request requires an explicit empty
+object, rejects other fields, and copies current admission counts and activity
+maps under the admission mutex at request time. Active counts include held
+tickets, dispatched work and quarantined capacity, matching `admission/state`.
+When waiting for active work, settings drain requests fresh readback after the
+drain acknowledgement and validates `runId` against that current proxy
+incarnation. A cached zero, missing snapshot or changed incarnation cannot prove
+a drained engine. This read neither subscribes nor releases capacity.
 
 Proxy → broker notifications, also process-scoped:
 
@@ -1718,88 +1700,13 @@ Availability itself is never carried in discovery TXT data; the hint arrives in
 the peer's inventory policy. A node without a policy advertisement, such as a
 manual node, has an empty hint.
 
-**Waking an unbound stopped engine.** Without an explicit binding offer, the
-broker withdraws an unhealthy engine's service. The proxy remembers its own
-node id and each engine's last advertised
+**Waking a stopped engine.** The broker withdraws an unhealthy engine's service.
+The proxy remembers its own node id and each engine's last advertised
 models from discovery, and offers a *dormant* self candidate — last in the
 round — when the engine is saved On, start-on-demand is set, the node is
 available, and the model was last advertised by that engine or is covered by a
 profile. Admission wakes it; the dispatch then targets the backend's reported
 address.
-
-**Preparing a bound engine.** Supported `engineBindingOffers` are independent
-of canonical inventory and strict readiness. An offered stopped facade keeps
-its actual listener reachable while its engine remains unhealthy. Ordinary
-concrete and existing concrete-tier requests may select it; strict hybrid
-requests exclude it. OpenAI-compatible concrete requests inspect other enabled
-compatible facades only for explicit bindings. Unbound concrete names stay on
-the entry engine. Native protocols never cross incompatible facades. A binding
-to another engine excludes conflicting old-engine inventory and direct ingress,
-including a stale strict envelope.
-
-Within equivalent tier/fallback and loaded-preference classes, ready candidates
-lead preparation candidates even against scheduler scores. Explicit eligible
-selection and the existing `preferLoaded` semantics remain authoritative.
-Ready alternatives receive `X-PAIR-Admission-Wait: 0` while alternatives remain.
-After those choices are exhausted, cold candidates can wait for preparation;
-their execution admission still uses a bounded queue allowance.
-
-The HTTP entry records one absolute preparation deadline, at most 90 seconds
-from entry and clamped to the request's remaining deadline. The private
-`X-PAIR-Engine-Prepare-Budget-Ms` header carries decreasing remaining milliseconds
-across attempts. Missing means the normal bound; excess is clamped to 90000;
-malformed, repeated, noncanonical, overflowing or nonpositive values permit no
-preparation. This header supplies time only, never activation authority.
-Refresh, dwell and failover cannot restart the bound. For a cold pinned peer,
-the same remaining allowance bounds acquisition of its existing peer-service
-slot and the wait for response headers. Expiry refuses with preparation 503
-before any output. The header timer ends when headers arrive in time; an
-accepted healthy stream can continue beyond the preparation deadline. Unbound
-and already-ready inference retain their existing deadlines.
-
-Self and terminal pinned-peer ingress use the same correlated
-`admission/prepare-bound-engine` notification owner. Peer authority consists only
-of the `VerifyClientPin` principal and its peer-service incarnation captured
-together at authenticated entry, before body or storage waits. Preparation
-and final dispatch reject a changed relationship rather than rebinding the
-old request to a new incarnation. Caller-supplied identity headers/body members
-are ignored. A destination prepares
-only its own engine and never routes onward. A ready engine can serve an
-inference-only peer without management permission. No execution, strict or
-resident ticket, placement/admission lock, or IPC reader is held while waiting.
-Existing buffer and waiter bounds remain in force. Cancellation retires the
-original waiter; an unknown acceptance never becomes a fresh submission.
-
-After successful preparation the proxy refreshes the real backend and queries
-its canonical native inventory under the remaining deadline and existing
-inference buffer account. It rechecks the binding revision, engine identity,
-candidate eligibility, serving permission, availability, protocol, model and
-tier capability/context constraints. Receipt success alone is insufficient.
-Pre-switch request transformations are discarded; ordinary admission rebuilds
-the final engine/model's profile defaults and revalidates policy/backend/identity
-after storage or queue waits and before dispatch. Bound requests that lose
-readiness during these waits refuse explicitly before the legacy wake path;
-they never borrow local wake authority. E4 retains drain, ownership,
-strict-generation and protected-resident responsibility. Old streams drain
-normally; new source work cannot extend a drain. No provisional output, SSE
-heartbeat or stream splice is emitted during preparation.
-
-A known preparation refusal returns HTTP 503 with the existing
-`{code:"admission",error,reason}` JSON shape and `X-PAIR-Admission` reason:
-`engine-switch-timeout`, `engine-switch-busy`, `engine-switch-cooldown`,
-`management-denied`, `model-unavailable`, or the existing
-`paused`, `draining`, `no-fit` reasons. Transient refusals carry `Retry-After`.
-`X-PAIR-Switch-Request-Id` is emitted only for a known accepted operation.
-Internal RPC codes remain on the correlated reply; engine/native error text
-is not forwarded. Refusal can fail over only before output within original
-eligibility and time bounds. No eligible inventory or supported offer retains
-the ordinary no-owner 502 (a concrete tier retains its existing no-model 404).
-Preparation metadata travels only on authenticated PAIR hops. The existing
-private-header stripping owner removes budget/activation and other PAIR headers
-before local or directly configured manual engines. Final `X-PAIR-Model`,
-`X-PAIR-Engine`, `X-PAIR-Node` identify
-actual execution. Waits feed the existing attempt/admission timing facts; no
-additional diagnostics store is introduced.
 
 **cancelActive** withdraws admitted target-local execution for Pause. Before
 commit, the origin can try another eligible candidate with this node excluded
@@ -1938,8 +1845,7 @@ built-in, default or protected names and no cluster role store.
   returned by the engine facade's inference candidate resolver for that model.
   Self facts require a self candidate; peer facts require a non-self candidate
   with the declaring peer's exact ID. Another node serving the same model does
-  not qualify a profile. Supported binding/preparation offers qualify even
-  without inventory. Each catalog resolves each engine/model pair once and
+  not qualify a profile. Each catalog resolves each engine/model pair once and
   computes each tier bound once, including zero bounds, sharing these results
   across alias variants only for that catalog. Resolver checks can refresh mesh
   state and start background target-address confirmation. These observation

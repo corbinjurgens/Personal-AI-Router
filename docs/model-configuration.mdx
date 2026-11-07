@@ -23,8 +23,9 @@ subsequent requests on the serving node. An Off engine stays Off.
 
 ## Profiles
 
-A profile key identifies a node-local saved configuration. For typed llama.cpp
-loads it also identifies the preset section and served id; the native model
+A profile names its engine, and its key identifies a node-local saved
+configuration. For typed llama.cpp loads it also identifies the preset section
+and served id; the native model
 identifier selects the artifacts. The display name and icon are presentation
 metadata, independent of that key. Several profiles can use the same model
 artifacts with different launch and request settings.
@@ -316,9 +317,9 @@ native load settings remain separate.
 
 **Remove profile** requires confirmation followed by preview and apply. For a
 typed load it removes the selected load, profile, role memberships, served
-permission, residency and engine binding for that profile key. Without a typed
+permission and residency for that profile key. Without a typed
 load it removes the profile and role memberships and clears residency for its
-native model; served permission and engine bindings stay in place. Model files
+native model; served permission stays in place. Model files
 stay in place.
 
 Ordinary generation setup creates no qualification. Keep-loaded residency and

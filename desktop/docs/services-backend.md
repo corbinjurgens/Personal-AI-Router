@@ -291,26 +291,9 @@ unreported engines. The nullable bridge snapshot is exposed through
 and service/broker/manager restarts invalidate it to null. Local read generations
 and broker session fences prevent late reads from replacing newer state.
 
-The typed engine API also exposes `switchEngine`, `switchStatus` and
-`fenceSwitch`, mapped to `engine:switch`, `engine:switch-status` and
-`engine:switch-fence`. The broker owns sequencing, drain,
-intent and recovery; the bridge validates the complete receipt and republishes
-`engine:switch-changed` as `engines:switch-changed` with node, request and sequence.
-Status accepts `afterSequence` for a bounded wait. Numeric refusal codes survive
-the IPC envelope, including configuration conflict (-32010) and local veto
-(-32011).
-
-The fence accepts `{nodeId?, requestId}` through `engines:switch-fence`.
-Its strict result is either confirmed `fenced: true` without a receipt or
-`fenced: false` with the accepted owned receipt; request identity and canonical
-result/receipt node identity must agree. Input node aliases may normalize.
-Remote relay uses `engine:remote-switch-fence` and `POST /v1/engine-switch/fence`.
-The broker serializes durable caller fencing with acceptance. Failure or
-uncertain storage is not success; repeated fences are idempotent and accepted
-work continues. A fenced switch submission is refused with `-32010` / `fenced`.
-After confirmed fencing, clients need a fresh revision before a new deliberate
-ID. The TUI does this for its own absent unacknowledged ID; desktop exposes the
-typed API without changing its controls or read-only engine status.
+A profile names its engine in node policy. Concrete model requests still route
+through their entry engine. The existing engine start/stop APIs, saved intent,
+on-demand wake and settings operations retain their owners and admission rules.
 
 The node projection the broker sends engine-manager
 carries `managementBlocked`; the desktop does not read it. Model configuration

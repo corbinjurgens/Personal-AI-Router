@@ -11,11 +11,6 @@ copy local artifact bindings or expose model-load Apply in the preparatory
 contract. Desired/effective settings and coupled stage/error remain distinct
 in the shared settings snapshot.
 
-Marked switch receipts display `Automatic engine switch` in the existing
-switch panel, retaining request identity, phases, current observations and
-refusal codes. Push notifications trigger authoritative readback. Automatic
-cause grants no management permission and creates no separate progress store.
-
 A terminal UI for running and supervising the NVPAIR fleet on a **headless
 machine over SSH**, where the bundled graphical UI cannot run. That is its
 purpose: it is an operations tool for hosts without a desktop, not a replacement
@@ -274,43 +269,6 @@ the authenticated source. Disconnection preserves last-known rows
 for presentation while invalidating readiness; a same-revision successful fetch
 can restore currentness.
 These guarantees require a coordinated fleet update; older peers remain unknown.
-
-#### Engine switching
-
-Node detail offers `w` / **switch engine**. Use `tab` for **From**/**To**,
-up/down to select installed engines, `enter` to **Switch**, `r` for status and
-permission readback, and `esc` to close the panel. Blocked submission shows its
-reason. Existing local pause/Off controls remain
-reachable. The TUI invokes the
-existing E3 `engine:switch` and
-`engine:switch-status` methods through the broker, with a peer `nodeId` only for
-a peer; it never orchestrates separate stop/start calls.
-
-Readback keeps node/request identity and receipt sequence, reported phase,
-typed errors and `recoveryRequired`. Saved intent, runtime observations and
-termination evidence are separate; intermediate acknowledgement/readiness is
-not completion. Remote permission denial (`-32012`), local veto (`-32011`) and
-revision conflict (`-32010`) retain distinct meanings. Failed or unavailable
-reads do not grant permission or establish success. After a lost response,
-read the original ID rather than resubmitting; readback performs no recovery,
-rollback or source restart.
-
-Absence is only a point-in-time observation. For this visit's own sent but
-unacknowledged ID, the exact unknown-receipt response triggers one
-`engine:switch-fence {nodeId?, requestId}` call through the broker. Only a valid,
-matching durable acknowledgement reports **Not accepted; original request
-fenced**. A fresh configuration baseline must then complete before a deliberate
-switch allocates a new ID. If acceptance won the race, the fence returns the
-owned receipt and the TUI follows it. It never cancels accepted work or fences
-another client's observed activity. Lost, denied or malformed fence replies
-retain uncertainty and the original ID; `r` retries readback and, if still absent,
-the same fence. No switch is automatically replayed.
-
-Correlation remains visit-scoped. Closing the panel retains the ID; leaving
-node detail clears it. Leaving without a fence acknowledgement does not resolve
-the outcome or prevent late acceptance. Reconnect/restart alone does not
-establish abandonment. Readback and fencing do not perform recovery, rollback
-or source restart, and report no engine start or model residency.
 
 The detail screen polls GPU, CPU and memory only for the open node, with the
 existing two-second interval between reads. Paired remote detail uses

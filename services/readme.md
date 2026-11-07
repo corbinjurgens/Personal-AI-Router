@@ -17,10 +17,8 @@ are too small to carry it.
 
 Locally, each node exposes an OpenAI-compatible proxy so an unmodified client on that machine can reach any capable
 node in the cluster. Routing requires a compatible engine and the requested
-model. Explicit [model engine bindings](../docs/model-engine-bindings.mdx) also
-allow bounded preparation of a stopped engine before fresh inventory checks and
-ordinary admission. Ready equivalent candidates lead cold offers; offers do not
-establish inventory, engine health or strict readiness.
+model. A profile names its engine. Concrete model names continue through the
+entry engine, with ordinary inventory eligibility, admission and on-demand wake.
 
 The llama.cpp facade is enabled by default. It
 exposes OpenAI-compatible traffic on `http://localhost:8080` while the managed
@@ -49,7 +47,7 @@ optionally, a Unix socket / Windows named pipe.
 | Binary | Role |
 | --- | --- |
 | `nvpair-ui-broker` | Parent service and JSON-RPC API surface used by the bundled UI and other clients. Supervises workers, relays consolidated discovery, and coordinates routing and scheduling. |
-| `nvpair-proxy` | The engine HTTP reverse proxy: one process hosting a facade per enabled engine, each enabled over `facade/enable` after spawn. Serves OpenAI-compatible traffic, selects inventory owners or supported binding offers, and applies fresh admission, failover and scheduler priorities. |
+| `nvpair-proxy` | The engine HTTP reverse proxy: one process hosting a facade per enabled engine, each enabled over `facade/enable` after spawn. Serves OpenAI-compatible traffic, selects inventory owners or eligible dormant self candidates, and applies fresh admission, failover and scheduler priorities. |
 | `nvpair-node-info` | Local HTTP service on `:14318` exposing GPU, CPU, and memory inventory at `/v1/node-info`. |
 | `nvpair-node-scanner` | Consolidated discovery daemon. Advertises and browses `_nvpair-node._tcp`, maintains the node directory, and enriches peers with hardware and model information over HTTP. |
 | `nvpair-manual-nodes` | Manages user-added nodes that don't appear via mDNS; probes them every 10 s. |
@@ -294,7 +292,7 @@ contact; TLS refusal alone is insufficient.
 `tests/remote_configuration_test.go` is the acceptance suite for remote
 configuration between paired nodes: status reads, revision conflicts,
 local veto, roles, served and resident model declarations, served-set
-enforcement at a proxy facade, idempotent engine switches, and the same
+enforcement at a proxy facade, and the same
 calls through `nvpair-service`. It drives real binaries through public
 JSON-RPC methods with fake engines only and never starts an installed engine.
 It skips on macOS and, on Windows, requires the fixed-path wrapper above.
@@ -308,11 +306,10 @@ go test -v -count=1 -run 'TestXARemoteConfigurationConflict$' .
 go test -v -count=1 -run 'TestXARemoteConfigurationVeto$' .
 go test -v -count=1 -run 'TestXARemoteConfigurationRoles$' .
 go test -v -count=1 -run 'TestXARemoteConfigurationServing$' .
-go test -v -count=1 -run 'TestXARemoteConfigurationSwitch$' .
 go test -v -count=1 -run 'TestXARemoteConfigurationService$' .
 ```
 
-`go test -v -count=1 -run '^TestXARemoteConfiguration(Status|Conflict|Veto|Roles|Serving|Switch|Service)$' .` runs all XA cases. On macOS,
+`go test -v -count=1 -run '^TestXARemoteConfiguration(Status|Conflict|Veto|Roles|Serving|Service)$' .` runs all XA cases. On macOS,
 `go vet ./...` and `go test -list 'TestXARemoteConfiguration' .` are the
 only checks; the cases themselves do not run there. Network isolation and
 protected-port repairs are coordinator-owned prerequisites; existing
@@ -335,10 +332,8 @@ Some tests need something the machine may not have, and skip rather than fail:
   browse and advertise a private per-test service under `local`.
 - Broker advertiser health checks require a current running endpoint from
   engine-manager; an absent manager or failed status RPC does not trigger a
-  guessed stock-port probe. Separately, a supported binding offer can keep a real
-  stopped-engine facade registered while engine health stays false. That listener
-  permits preparation/refusal, not a readiness claim. Configured engine targets
-  still need separate review before beside-installed execution.
+  guessed stock-port probe. Configured engine targets still need separate review
+  before beside-installed execution.
 - Tests needing a real mDNS responder skip when one is unavailable.
 - Live engine tests only run when you opt in:
 
@@ -351,19 +346,9 @@ deliberately, on a machine and network you control.
 
 A skip is not a pass. If you are relying on a test, check it actually ran.
 
-### Model engine binding proof status
-
-The service path supports persisted bindings, guarded automatic E4 replacement,
-stopped-engine offers and bounded HTTP preparation. The desktop editor uses the
-existing policy draft and Save/CAS flow. Joined Windows binding/switch checks,
-hybrid/history checks and a whole process-suite run passed on Task 7's joined
-source. See the
-[binding guide's process evidence](../docs/model-engine-bindings.mdx#joined-process-evidence-and-limits)
-for exact results, unproved boundaries and refusal-only authority diagnostics.
-The historical reverse refusal's predicate remains unestablished. Its
-[native matrix](../docs/model-engine-bindings.mdx#native-acceptance-matrix) is
-entirely pending, not observed. Component or fake-engine process results cannot establish
-installed-engine or multi-machine acceptance.
+Native engine, visual UI/TUI and joined Windows acceptance for the removal
+remain pending. Component documentation and source checks do not establish
+installed-engine or multi-machine results.
 
 ### Controller-selected model COPY
 

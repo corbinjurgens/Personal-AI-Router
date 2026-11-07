@@ -59,8 +59,8 @@ See [native buffer observations](../../docs/model-buffer-observations.mdx).
 optional target-owned finite `resolved` records. Several profiles can use one
 artifact with different load settings; llama.cpp preset sections and served ids
 use the profile key. An existing profile keeps its engine and artifact selection.
-Bindings, native build/source/preset digests and reviewed Auto inputs are target
-authority, not copyable preferences. Ordinary port/launch constructors preserve
+Artifact bindings, native build/source/preset digests and reviewed Auto inputs
+are target authority, not copyable preferences. Ordinary port/launch constructors preserve
 the collection. The complete settings request, not just this collection, must
 fit the existing 64 KiB transport limit. Unknown/ambiguous fields are rejected.
 The expanded complete preview must also fit; duplicating a large launch argument
@@ -82,9 +82,9 @@ selected-copy fields. The target merge preserves unrestricted
 Omitting `profileKey` selects the identity key equal to `modelId`. A Remove uses
 `remove: true` and no load or policy patch. It removes the selected typed native
 load when present, and the policy profile and role memberships. With a typed
-load, served, resident and binding references match the engine and profile key.
+load, served and resident references match the engine and profile key.
 Without a typed load, only the resident reference matching the engine and the
-profile's native model is removed; served and binding entries stay even when
+profile's native model is removed; served entries stay even when
 that native model equals the key. Empty role declarations remain. Removal
 without a typed load uses the policy-only operation and leaves native settings
 unchanged. Removing the final load leaves
@@ -221,8 +221,7 @@ readiness. The final receipt is durable before drain release, and `releasing`
 retains the reservation until release acknowledgement and final journal save.
 Failed or uncertain stages retain their fences. An unresolved model operation
 keeps snapshot phase `applying`, including after an attempt's receipt becomes
-`failed`; `unresolvedError` explains the reconciliation requirement. This retains
-the existing switch and cold-binding exclusions until the operation is settled.
+`failed`; `unresolvedError` explains the reconciliation requirement.
 If policy persistence fails after a typed Remove persisted native settings,
 the removed load stays absent while the previous policy stays saved. The failed
 attempt remains fenced and requires a fresh local superseding review; it does
@@ -354,7 +353,7 @@ pending, stored or live, including a no-op or a request for an existing receipt.
 The refusal is `-32011` with
 `This node is paused. Resume it on this node before managing it remotely.`
 No settings revision or receipt is written. Only local Resume lifts the fence;
-Get, preview, events and switch status remain readable. Advertisements and
+Get, preview and events remain readable. Advertisements and
 proxy upstream eligibility are disabled during application and restored only
 after readiness. Polling advertisers share the node lock.
 
@@ -367,6 +366,12 @@ operation lock is not, so readers stay responsive and no second Apply can start.
 Ordinary proxy-only edits and ordinary edits to a stopped engine do not drain.
 Typed load edits establish an acknowledged fence even while stopped so their
 native/policy sequence and recovery cannot expose stale authority.
+`settingsdrain.go` requires the drain acknowledgement from the current proxy
+run. When waiting for active work before a running engine resumes, it also
+requires fresh `node/admission-snapshot {}` readback from that same run. Missing
+acknowledgement, source replacement or failed required readback refuses progress.
+The push-slot wait shares the caller deadline; the proxy/source fence is rechecked
+before effects and drain release.
 
 Validation, stale revisions and journal-write failures cause no runtime
 mutation. Once accepted, desired settings remain saved if the engine or proxy
@@ -410,10 +415,9 @@ a plain-text 409. Cancellation and pin removal cancel queued
 work; the broker rechecks the caller after acquiring the node lock. Once
 durably accepted, the target completes under its own eleven-minute deadline even
 if the initiating peer disconnects. Revocation blocks new acceptance, including
-queued broker writes, but accepted Apply/switch work retains target-owned
+queued broker writes, but accepted Apply work retains target-owned
 completion and reconciliation. Progress and receipts remain readable; revocation
-does not roll back effects or replace pause/local-Off cancellation. The same
-fresh acceptance checks apply to switch receipt acceptance, and grants never
+does not roll back effects or replace pause/local-Off cancellation. Grants never
 override private/CORS, served/resident or target-admission restrictions.
 
 `engine:settings-projection` seeds the worker's subscription hub with full local
@@ -436,233 +440,3 @@ proxy persistence failure preserving its listener, renderer ordering and log
 redaction. The rendered editor is also exercised with isolated browser fixtures.
 Native vendor and Linux/macOS runtime verification remain release-platform
 checks; Windows fixture results do not certify vendor-option compatibility.
-
-## Engine switching
-
-The target broker coordinates `engine:switch` independently of settings Apply.
-Submit `{nodeId?, requestId, sourceEngine, targetEngine, expectedRevision}`;
-the result is `{receipt}` after durable acceptance. The target must be prepared,
-stopped and supported by a ready inference facade. A running target fails
-validation before drain. No download, provisioning, model loading or role/tier
-change is implied. Completion means server readiness and facade publication.
-
-Read `engine:switch-status {nodeId?, requestId?, afterSequence?}` for
-`{configurationRevision, activeRequestId?, receipt?, observed?}`. Omit requestId
-to obtain the opaque `e3v1:` configuration token for a new request. It combines
-node identity, journal generation, manager incarnation, registry/runtime and
-engine configuration digests, settings revisions and desired intent/provenance.
-Runtime health and idle Wake/Sleep do not change the token. The manager's own
-configuration fence is separate and passes unchanged in internal envelopes.
-The same caller and payload under the same request ID retrieve the original
-operation before revision checking; another caller or payload cannot reuse it.
-
-An unknown receipt is only a point-in-time absence observation. To prevent a
-late original request, call `engine:switch-fence {nodeId?, requestId}`. Under
-the same admission lock, the broker returns either an unchanged owned receipt
-or `{nodeId, requestId, fenced:true}` after durable tombstone persistence. The
-receipt variant is `{nodeId, requestId, fenced:false, receipt}`. Clients must
-validate this exclusive union and identity; lost, malformed or failed replies
-do not establish a fence. Remote calls use `engine:remote-switch-fence` and
-POST `/v1/engine-switch/fence`, with authenticated caller identity and a fresh
-management grant. Fencing does not cancel or start engine work.
-
-The journal retains at most 32 caller/request-ID pairs, evicting the oldest
-insertion. Duplicate fencing neither writes nor refreshes insertion order.
-Retained pairs reject that caller's switch admission as `fenced` (`-32010`);
-other callers retain their own namespace. Persistence advances the existing
-journal generation, so the original request's expected revision stays stale
-after eviction or restart. This does not reserve an evicted ID against a new
-payload with a fresh revision. Read a fresh baseline after a confirmed fence
-before deliberately submitting a new ID. Storage uncertainty never becomes a
-fence acknowledgement merely by retrying within the same process.
-
-`afterSequence` requires requestId and waits at most 25 seconds for a newer
-receipt, without holding operation/configuration locks. A timeout returns the
-unchanged receipt. Each durable sequence emits
-`engine:switch-changed {nodeId, requestId, sequence}`. Paired requests use pinned
-engine-control routes and authenticated caller identity. Manager-originated progress notifications
-retain the remote target node ID when forwarded to local clients. Relay
-`engine:switch-cancel` retires only its waiter. Accepted execution belongs to
-the target and continues after caller disconnect, with a 15-minute total bound.
-
-The normal persisted phases are `accepted`, `validating`, `draining`,
-`source-stopping`, `source-off`, `target-starting`, `target-ready`, `completed`.
-Each phase is saved before its effect and manager observations are saved after
-the effect. Source Off is committed before stopping; target On is committed by
-the manager only after readiness. A failed target start never restores source.
-One switch runs per node under the shared settings operation lock. Settings and
-legacy lifecycle/port mutations respect switch reservations. A pause of either origin cancels
-remote execution before waiting on transition locks; a switch never resumes the
-node. The pending `managementBlocked` projection reaches the manager before cancellation
-or transition-lock waiting. Local Off of either involved engine bypasses the
-broker operation lock during a remote switch, including recovery reservations,
-and reaches the manager's existing stop admission. That owner durably saves
-local Off and cancels remote startup before waiting for lifecycle locks. The
-switch fails with target Off and never restores source. Local Off during a local
-switch remains a busy refusal; unrelated engines do not veto the switch.
-The broker latches the veto for that accepted operation before waiting for the
-stop response. Its terminal-completion gate checks the latch, including after
-facade publication, and conservative cleanup produces a failure receipt.
-The internal reconcile envelope carries that operation's local Off engine or
-pause veto, so the manager durably admits it before committed-target cleanup
-even when the local lifecycle request has not arrived. A veto latched during
-reconcile requires another cleanup pass before terminal release, or retained
-recovery ownership if cleanup cannot finish within its budget. Manager release
-refuses a committed target with a durable veto recorded after reconcile read
-its checkpoint. The broker-to-manager `engine:stop` request includes internal
-`switchOperationId` when Off is admitted against a remote switch. Under the
-manager's admission lock, a settled, released or different reservation makes
-that entire scoped stop a no-op, including physical stop and intent writes.
-Thus an earlier Off cannot stop a later explicit On or veto a newer switch.
-Ordinary unscoped Off retains its serialized local stop semantics. A delayed
-local Off response cancels only its original switch.
-Failed veto delivery retains the exact operation veto for conservative recovery.
-After broker restart, a durable remote-veto failure receipt also requires target
-cleanup; it does not change node availability or invent local Off provenance.
-Off admission rechecks reservations while waiting for ordinary settings work;
-negative lookup and operation-lock acquisition are ordered with acceptance.
-Off/pause admitted during retained recovery latches against that checkpoint's
-operation ID. Recovery rechecks the latch after reconcile and drain release,
-repeating cleanup for any new veto within the cleanup budget. Its final
-metadata-only release and clearing recovery ownership share the local admission
-lock; long physical cleanup runs outside that lock. Failure retains recovery.
-
-The broker durably owns every admitted local Off and either-origin pause. Internal journal
-`localObligations[operationId]` records `sourceOff`, `targetOff`, `pause`, optional
-`pauseApplied`, and `discharged`; public receipts are unchanged. Admission persists before latching
-or returning to the local handler, and a failed write visibly refuses the request.
-After reconcile, while still holding `settingsApplyMu`, cleanup sends ordinary
-unscoped `engine:stop` with internal `verifyStop: true` to the current worker for
-each obligated engine. Its `SwitchEngineState` reply must prove saved Off and
-termination. A successful Pause of either origin durably records `pauseApplied` for its
-pending obligations before a later Resume can run. Cleanup relies on that proof
-independently of current availability, preserving the owner's later Resume while
-still reconciling the operation's target veto. An unapplied Pause remains
-unresolved. After conservative reconciliation, the manager reservation may be
-released behind the authoritative pause fence, retaining the durable recovery
-receipt and undischarged obligation. Intent-neutral sleep then runs without
-reservation contention; fresh readback from that same manager must verify
-shutdown before `pauseApplied` and discharge are saved. Startup and replacement
-perform this shutdown before acknowledging manager readiness. A later local
-Resume may supersede an unapplied pause after conservative switch cleanup:
-discharge records that explicit override without setting `pauseApplied`.
-Discharge precedes recovery resolution; failure keeps recovery ownership.
-Broker restart and manager replacement replay undischarged obligations even
-when inspection returns no checkpoint, before restore/readiness. An older direct
-peer start loses to a subsequently admitted Off at this settlement boundary.
-Later explicit local On takes the same operation lock and runs after discharge;
-the delayed scoped handler remains a no-op against later work. Historical local
-Off alone never authorizes a physical reconcile stop after failed drain: manager
-cleanup and release guards use operation-specific checkpoint veto flags.
-
-Switch drain is strict and separate from the settings restart drain. Withdraw
-source discovery and its local inference endpoint, acknowledge source drain,
-then invalidate source and target through `node/invalidate-engine` with the
-operation ID. Both `{ok, runId}` acknowledgements must match the live proxy.
-Only a fresh `node/admission-snapshot` requested afterward, from that same run,
-with zero source active/held work permits source-stop. Missing evidence, lost
-acknowledgement, proxy replacement, push-slot contention or the 60-second drain
-deadline fails without stopping source. Pending invalidations replay before any
-facade enables after proxy restart. Invalidation does not grant strict readiness
-or erase uncertain capacity markers.
-
-The sibling `engine-switch-operations.json` journal keeps manual terminal
-receipts with no eviction. Manual receipt capacity visibly rejects new IDs;
-reserved space permits progress, terminal writes, recovery and identical retries.
-Write failure halts effects; a landed but uncertain replacement is adopted for
-readback while fresh mutations remain fenced. Terminal receipts are durable
-before manager reservation release. Release/cleanup failure retains a recovery
-fence; completion receipts are never rewritten to describe later runtime.
-
-Broker-internal binding preparation uses the same transaction with optional
-`automatic: true` on receipts, prepare envelopes and checkpoints. The public
-switch request has no automatic flag. Automatic work retains its initial
-absolute deadline, at most 90 seconds including acceptance, drain and activation;
-each step uses the earlier existing bound. Manual work keeps its 15-minute
-budget. Server readiness does not establish model readiness.
-The private reconcile envelope carries `cleanupDeadline` from the broker's
-bounded cleanup context without changing operation identity. Live cleanup uses
-the original remaining window; later recovery gets a fresh bounded cleanup
-window and never resumes forward execution.
-
-Automatic IDs are broker-generated `binding:<brokerRunId>:<sequence>` values.
-New public switch/fence submissions cannot use that namespace. Existing legacy
-manual receipts and tombstones keep their exact retry/fence semantics. Status
-reads retain caller authorization. Internal acceptance consumes a single-use
-current-run sequence and rechecks its producing proxy session at acceptance;
-pruning or restart cannot make a delayed submission fresh.
-
-The journal retains a ring of 32 settled terminal automatic receipts, in durable
-settlement order, plus unresolved work. Manual receipts and tombstones do not
-consume that ring. Automatic rows become eligible after obligations are
-discharged and manager release is verified. Settlement and pruning share one
-durable write with monotonic generation. Recovery, failed cleanup, byte limits
-and uncertain writes remain fences. Old journals read as manual without a write.
-
-Automatic replacement requires the sole running conflicting engine to be
-PAIR-controlled, non-adopted and free of reclaim uncertainty. The manager
-rechecks this before reservation and source effects. Automatic reservations
-prevent another engine from starting during replacement. Local Off may preempt
-automatic work of either origin through the existing durable operation-specific
-obligation. Delayed scoped Off cannot affect newer work. Manual local switches
-retain busy behavior; pause guards remain authoritative. Desktop and
-TUI show `Automatic engine switch` with existing phases, request identities,
-observations and refusal codes.
-
-Failures terminate as `failed-validation`, `failed-drain`, `failed-source-stop`,
-`failed-target-start`, `failed-publication` or `failed-interrupted`; pre-acceptance
-refusals may have a durable `rejected` receipt. Errors carry a stable kind and
-numeric code: invalid/reused ID `-32602`, configuration conflict `-32010`, local
-remote veto `-32011`, remote-management denial `-32012`, and other operational/storage/full/busy errors `-32000`.
-Manager result envelopes are inspected even when JSON-RPC itself succeeds.
-
-Startup loads the switch journal, marks nonterminal operations
-`failed-interrupted`, and conservatively reconciles manager reservations before
-settings replay and enabled-intent restoration. It never resumes switch steps
-or starts target as recovery. Conflicting pending settings/switch journals fail
-closed. A committed target On is preserved unless a local-Off or either-origin pause veto applies
-to the unreleased remote reservation; that veto cleans up target to Off too.
-An uncommitted partial target launch is cleaned up. Unknown cleanup remains
-visibly recovery-required. Terminal receipts remain historical facts; current
-observations are reported separately.
-
-Forward prepare/source-stop/target-start calls use the original worker handle
-and carry its explicit `managerIncarnation` in the internal operation envelope.
-A manager rejects inherited forward steps with a coded `interrupted` error,
-including retries of previously acknowledged steps; reconcile and release still
-accept the original envelope. Manager exit or replacement synchronously cancels
-active forward work. The broker persists `failed-interrupted`, releases its
-operation lock, then reconciles/releases authoritative checkpoint evidence on
-the replacement before exposing it to restore or other forward callers. Recovery
-never waits behind a live switch that is itself waiting for replacement recovery.
-Older checkpoints without the incarnation remain readable for cleanup only.
-The worker exit owner fences execution before closing its peer/Done channel or
-notifying the supervisor. Terminal persistence shares that fence's gate and
-also checks the pinned worker's already-closed Done channel. This orders observed
-exit against completion, rather than claiming atomicity with an unobservable
-physical crash.
-
-Transient inspection, reconcile and drain-release errors are separate from
-permanent journal/storage uncertainty. Replacement recovery retries conservative
-cleanup on the same still-current worker with bounded backoff; the replacement
-stays hidden throughout. Success clears only the retryable error and permits the
-remaining bring-up continuation. This gate also applies on the initial spawn;
-the manager's discovery subscription and node/settings state projections bypass
-it so recovery receives the peer directory and authoritative pause state.
-Log-level changes also reach the current worker during this interval. The
-manager starts with its mutating authenticated peer-control surface fenced;
-read-only queries and state deliveries remain available. Only the broker's
-successful recovery sends internal `engine:switch-recovery-ready` with
-`managerIncarnation`. The manager verifies its incarnation and the absence of
-an unreleased checkpoint before acknowledging that same incarnation. Broker
-publication still rechecks the current worker and its exit fence after the ACK.
-Exhaustion keeps the manager unavailable and
-reports sticky `engine-switch:recovery-blocked`; it never resumes switch steps or
-silently treats the blocked replacement as usable. Corruption and uncertain
-durability remain fenced.
-Every constituent cleanup error is classified: simultaneous manager storage
-and proxy drain-release failures retain the permanent storage fence. Recovery
-makes at most three attempts, each with a 60-second cleanup context, separated
-by one-/two-second backoffs. Their RPC budgets can occupy synchronous manager
-spawn for approximately 183 seconds. Operation/configuration lock waits happen
-before each context, so there is no unconditional end-to-end spawn-time bound.

@@ -100,15 +100,15 @@ To download models:
 
 ## Starting and Stopping an Engine
 
-Use the engine switch in **Engine settings** to start or stop an NVPAIR-installed
-engine.
+Use the engine On/Off control in **Engine settings** to start or stop an
+NVPAIR-installed engine.
 
 - **Start** brings the engine up and marks it as something PAIR should keep
   running for you across relaunches. Refer to
   [What Persists Across Restarts](#what-persists-across-restarts).
 - **Stop** turns it off and remembers that you want it off.
 - Progress and status update live on the Overview and engine views. Wait for the
-  switch and status text to settle before assuming the change failed.
+  control and status text to settle before assuming the change failed.
 
 An engine must be **running** before **Endpoints** or your applications can use
 its models. If **Endpoints** says **No engines are running**, start an engine
@@ -174,7 +174,7 @@ PAIR remembers whether each local NVPAIR-installed engine should be on or off.
 - When you quit or restart PAIR, it stops running engines cleanly as part of
   shutdown.
 - The next time PAIR starts, it restores engines that were left **on**, so you
-  do not have to flip every switch again.
+  do not have to start each engine again.
 - On the **first** open of the application on a machine, PAIR also starts
   engines that are already installed once, so a fresh setup is ready to use.
 
@@ -189,7 +189,7 @@ working with **models** (download, load, unload, and delete):
 | Goal | Instructions |
 | ---- | ------------ |
 | Get the runtime on the machine | **Install** on the engine's card |
-| Make the runtime available for requests | The engine switch |
+| Make the runtime available for requests | The engine On/Off control |
 | Get a model's weights onto the machine | **Add model** |
 | Hold a model in memory, when the engine needs it | **Load** |
 | Free that memory without deleting anything | **Eject** |
@@ -229,7 +229,7 @@ These habits avoid the most common engine problems:
   machine and keep a compatible engine running there.
 - Prefer PAIR's engine controls for an NVPAIR-installed engine. Editing it by
   hand alongside them can confuse ports and status.
-- If an engine switch or install seems stuck, open **Settings > Service**, check
+- If an engine start, stop or install seems stuck, open **Settings > Service**, check
   service health and logs, then retry. Refer to
   [Troubleshooting](troubleshooting.mdx).
 

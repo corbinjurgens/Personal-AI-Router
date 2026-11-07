@@ -66,17 +66,17 @@ flowchart TB
 - A **node** is one machine. Nodes are peers where each runs the same services, and
   each can both serve requests and route them elsewhere.
 - An **engine** is an inference server on a node: llama.cpp, or an engine
-  defined by a manifest such as Strata. A node can run any combination. Serving requires a running engine;
-  an explicit model binding can let a request wait for guarded activation.
+  defined by a manifest such as Strata. A node can run any combination. Serving
+  requires a running engine.
 - **Models** belong to an engine on a specific node. Nothing is shared. The same
   model on two nodes is two independent copies and that duplication is what makes
   the two nodes interchangeable for a request.
 
 PAIR evaluates eligibility at the bottom of that hierarchy. A request names a
 model, and dispatch requires fresh evidence that the destination's running engine
-holds it. [Model engine bindings](model-engine-bindings.mdx) can additionally
-offer a stopped engine for bounded preparation before ordinary admission. Cluster
-membership admits a node to pinned peer routes; a working direct connection or
+holds it. A profile names its engine; concrete model requests still route through
+their entry engine. Cluster membership admits a node to pinned peer routes;
+a working direct connection or
 authenticated reverse session still determines reachability. Membership alone
 does not make a node reachable or capable.
 
@@ -466,44 +466,35 @@ two different mechanisms, and they compose in one direction:
 - **The scheduler is model-blind.** It ranks every node by pending work and GPU
   pressure. It does not know which models exist where, and its ordering never
   mentions a model.
-- **The proxy enforces model capability.** It requires matching inventory or a
-  supported explicit binding offer. Within equivalent policy classes, ready
-  owners precede preparation candidates before scheduler selection.
+- **The proxy enforces model capability.** It requires matching inventory for
+  the request's engine before scheduler selection.
 
 So load balancing happens **among the nodes that can serve the request**, not
 across the cluster as a whole.
 
 #### Capability Gate
 
-When an inference request contains a non-empty model, candidates need matching
-current engine inventory or a supported `engineBindingOffers` entry. Empty or
-nonmatching inventory alone remains ineligible. Offers are separate from
-inventory, engine health and strict readiness; a stopped offered facade can
-remain reachable without making its engine healthy. Model identifiers match
-exactly.
-
-Without an eligible owner or supported offer, the proxy retains its local
-no-owner `502`. A selected offer can wait within one preparation budget, then
-must pass fresh endpoint, native inventory, policy and ordinary admission checks
-before dispatch. Known preparation refusal is a bounded `503`. Strict hybrid
-dispatch excludes cold offers. The [binding guide](model-engine-bindings.mdx)
-describes ready-first classes, explicit selection, bounds and refusal semantics.
+When an inference request contains a non-empty concrete model, candidates need
+matching current inventory for its entry engine. Empty or nonmatching inventory
+remains ineligible. Model identity uses the engine's normalization rules.
+Without an eligible owner, the proxy returns its local no-owner `502`.
+Inventory, engine health and strict readiness remain separate evidence; dispatch
+still requires the applicable policy and admission checks.
 
 A request whose model cannot be parsed keeps the ordinary non-model ordering.
 
 Model listings are not routed at all. A `GET` of `/v1/models` or
 llama.cpp's `/models` is fanned out to every candidate for that
 engine concurrently and the replies are merged, which is why the answer is the
-cluster's inventory for that engine rather than one node's. Binding offers do
-not add invented models to those listings.
+cluster's inventory for that engine rather than one node's.
 
 #### Failover and Inventory Freshness
 
 An advertised owner's inventory can still become stale after candidate
 selection. If that owner answers inference with `404`, the proxy treats it as
-retryable and moves to another eligible inventory owner or supported preparation
-candidate, inside the original request bounds. It never broadens to unknown
-nodes. Genuine client errors such as `400` or `422` are
+retryable and moves to another eligible inventory owner inside the original
+request bounds. It never broadens to unknown nodes. Genuine client errors such
+as `400` or `422` are
 not retried, because they would fail identically everywhere.
 
 #### Planning Model Placement
@@ -520,9 +511,9 @@ Where you put each model decides what routing can do with it:
 - **Mixed inventories work.** Node A can hold a 70B model and node B a 7B one.
   Requests for each are steered to the node that has it, and neither blocks the
   other.
-- **A stopped engine is not ready capacity.** An explicit supported binding can
-  offer bounded activation; it still needs fresh model and admission evidence
-  before serving. Without a binding, existing unbound wake rules are unchanged.
+- **A stopped engine is not ready capacity.** Saved intent and on-demand wake
+  retain their existing rules; serving still needs current model and admission
+  evidence.
 - **Where work actually ran is observable.** Use the **Jobs** view rather than
   inferring routing from inventory.
 
@@ -548,8 +539,7 @@ are the same unit of pending work, so "fewest jobs" is not "least busy." A node
 running one enormous request looks more idle than a node running two trivial ones.
 
 **Loaded preference belongs to routing policy.** The scheduler remains
-model-blind. Concrete-tier routing applies its existing `preferLoaded` policy,
-and binding preparation is ordered within the resulting tier/warmth classes.
+model-blind. Role routing applies its existing `preferLoaded` policy.
 Ordinary inventory eligibility does not promise that the model is loaded or
 that admission will succeed.
 
@@ -936,7 +926,7 @@ state denies, without a cached allow. See the
 for local CAS RPCs and recovery limits.
 
 Engine-manager's `ec` route registry gates all mutations with the shared
-permission predicate; broker policy, availability, settings and switch owners
+permission predicate; broker policy, availability and settings owners
 recheck immediately before acceptance. Denial is HTTP 409
 `remote_management_denied`, preserved as RPC `-32012`; unpinned callers remain
 403, target veto is `-32011` and revision conflict is
@@ -1007,11 +997,9 @@ guards; cancelled requests are not replayed. The broker's
 model-configuration reasons are `paused` for either-origin pause and `engine-off`
 for ordinary saved Off.
 
-Conservative switch cleanup may release a reconciled manager reservation while
-retaining a durable pause obligation and recovery receipt behind the pause
-fence. This allows intent-neutral shutdown to finish. Inventory, controlled cleanup, sleep
-and shutdown verification use one manager; a replacement cannot complete an
-older manager's proof. Recovery verifies a stored pause before opening the
+Inventory, controlled cleanup, sleep and shutdown verification use one manager;
+a replacement cannot complete an older manager's proof. Recovery verifies a
+stored pause before opening the
 replacement's management surface. A repeated completed Pause rechecks physical
 shutdown without allocating another policy revision.
 
