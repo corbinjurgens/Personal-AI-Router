@@ -38,7 +38,12 @@ func applyModelMemoryConfiguration(t *testing.T, f *modelSettingsProcessFixture,
 func inspectAppliedModelMemory(t *testing.T, f *modelSettingsProcessFixture) modelconfig.InspectResult {
 	t.Helper()
 	var value modelconfig.InspectResult
-	modelSettingsDecode(t, f.rpcOK(t, "engine:inspect-model", modelconfig.InspectRequest{Engine: "llamacpp", ModelID: "medium-model", ProfileKey: "medium-model"}), &value)
+	// Resume also refreshes model identities through the manager's shared
+	// inspection slot. A busy reply has no applied key to reuse in a statement.
+	task1Eventually(t, "applied model memory inspection available", 15*time.Second, func() bool {
+		modelSettingsDecode(t, f.rpcOK(t, "engine:inspect-model", modelconfig.InspectRequest{Engine: "llamacpp", ModelID: "medium-model", ProfileKey: "medium-model"}), &value)
+		return value.Status != "busy"
+	})
 	return value
 }
 
