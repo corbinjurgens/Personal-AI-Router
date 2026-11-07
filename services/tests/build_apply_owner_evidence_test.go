@@ -125,6 +125,8 @@ func runOwnerEvidenceBridge(role string) (resultErr error) {
 		return err
 	}
 	defer listener.Close()
+	installedRelease := make(chan struct{})
+	releaseInstalled := sync.OnceFunc(func() { close(installedRelease) })
 	if role == "MANAGER" {
 		client := &http.Client{Timeout: 2 * time.Minute, Transport: &http.Transport{Proxy: nil}}
 		defer client.CloseIdleConnections()
@@ -133,11 +135,19 @@ func runOwnerEvidenceBridge(role string) (resultErr error) {
 			return err
 		}
 		status := response.StatusCode
+		var installedReleased bool
+		decodeErr := json.NewDecoder(response.Body).Decode(&installedReleased)
 		if err := response.Body.Close(); err != nil {
 			return err
 		}
 		if status != http.StatusOK {
 			return errors.New("private manager launch gate refused")
+		}
+		if decodeErr != nil {
+			return decodeErr
+		}
+		if installedReleased {
+			releaseInstalled()
 		}
 	}
 	if err := cmd.Start(); err != nil {
@@ -178,8 +188,6 @@ func runOwnerEvidenceBridge(role string) (resultErr error) {
 	// these cases isolate read-only owner evidence, while EngineLifecycle tests
 	// automatic restoration. Explicit installs still execute through the real
 	// manager. Never manufacture a lifecycle response or owner observation.
-	installedRelease := make(chan struct{})
-	releaseInstalled := sync.OnceFunc(func() { close(installedRelease) })
 	mux := http.NewServeMux()
 	mux.HandleFunc("/release-installed", func(w http.ResponseWriter, r *http.Request) {
 		if role != "MANAGER" || r.Method != http.MethodPost {
@@ -416,6 +424,7 @@ type ownerEvidenceProcessFixture struct {
 	releasePull              func()
 	heldReply                *ownerHeldReply
 	managerLaunch            *ownerManagerLaunchGate
+	installedReleased        bool
 	deliveries               map[string]*ownerHeldReply
 	allocatedPorts           map[int]bool
 }
@@ -692,6 +701,14 @@ func newOwnerEvidenceProcessFixture(t *testing.T) *ownerEvidenceProcessFixture {
 				case <-r.Context().Done():
 				}
 			}
+			// Only the initial never-observed captures hold installation reads.
+			// Successors must let the real broker recover a paused manager.
+			f.mu.Lock()
+			released := f.installedReleased
+			f.mu.Unlock()
+			if err := json.NewEncoder(w).Encode(released); err != nil {
+				return
+			}
 			return
 		}
 		if r.URL.Path == "/manager-reply" {
@@ -916,8 +933,12 @@ func (f *ownerEvidenceProcessFixture) impact(t *testing.T) buildapply.ImpactEnve
 			}
 		}
 		lastErr = err
+		if err == nil && observation.ReadRefused {
+			lastErr = errors.New(observation.ReadError)
+		}
 		select {
 		case <-deadline.C:
+			f.logReadinessFailure(f.clients[0])
 			t.Fatalf("native broker/manager owner capture unavailable: %v", lastErr)
 		case <-tick.C:
 		}
@@ -1360,6 +1381,9 @@ func TestBuildApplyOwnerEvidenceProcess(t *testing.T) {
 	if response.StatusCode != http.StatusNoContent {
 		t.Fatalf("installation refresh release status = %d", response.StatusCode)
 	}
+	f.mu.Lock()
+	f.installedReleased = true
+	f.mu.Unlock()
 	t.Run("public relay does not disclose private owner documents", func(t *testing.T) {
 		for i, method := range []string{buildapply.EngineOwnerEvidenceMethod, "build:apply-impact"} {
 			frame, err := c.call(strconv.Itoa(800+i), method, json.RawMessage(`{}`), serviceCallTimeout)
