@@ -689,8 +689,9 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
         }
     },
     saveStatedMemory: async (request, clear = false) => {
+        const { profileKey, ...wireRequest } = request
         const target: EngineSettingsTarget = { engine: request.engine, nodeId: request.nodeId }
-        const key = modelSettingsKey(target, request.profileKey)
+        const key = modelSettingsKey(target, profileKey)
         const original = get().modelDrafts[key]
         const inspection = original?.inspection
         if (!original || !inspection || inspection.configurationKey !== request.configurationKey)
@@ -702,8 +703,13 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
         )
         const startedAt = performance.now()
         const result = clear
-            ? await window.pairApi.engines.clearStatedMemory(request)
-            : await window.pairApi.engines.setStatedMemory(request)
+            ? await window.pairApi.engines.clearStatedMemory({
+                  engine: wireRequest.engine,
+                  nodeId: wireRequest.nodeId,
+                  modelId: wireRequest.modelId,
+                  configurationKey: wireRequest.configurationKey
+              })
+            : await window.pairApi.engines.setStatedMemory(wireRequest)
         const unchanged =
             get().modelDrafts[key]?.generation === original.generation &&
             get().modelDrafts[key]?.inspection?.configurationKey === request.configurationKey

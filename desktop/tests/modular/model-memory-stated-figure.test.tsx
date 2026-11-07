@@ -119,6 +119,38 @@ function seed(inspection: InspectModelResult) {
 }
 
 describe('applied configuration stated memory', () => {
+    it('keeps the named profile in UI state while Save and Clear send only Task8 wire fields', async () => {
+        const profileKey = 'profile-a'
+        const profiledKey = modelSettingsKey(target, profileKey)
+        useEngineSettingsStore.setState({
+            modelDrafts: { [profiledKey]: { generation: 1, inspection: applied } }
+        })
+        await act(async () => root.render(<Editor profileKey={profileKey} />))
+        await input('Host memory (GiB)', '1')
+        await input('Device memory (GiB)', '2')
+        await click('Save figure')
+        expect(save).toHaveBeenCalledExactlyOnceWith({
+            ...target,
+            modelId: 'model',
+            configurationKey: 'applied-key',
+            hostBytes: '1073741824',
+            deviceBytes: '2147483648'
+        })
+        expect(
+            useEngineSettingsStore.getState().modelDrafts[profiledKey].inspection
+                ?.memoryProfiles?.[0].current
+        ).toBe(true)
+        await click('Clear figure')
+        expect(clear).toHaveBeenCalledExactlyOnceWith({
+            ...target,
+            modelId: 'model',
+            configurationKey: 'applied-key'
+        })
+        expect(
+            useEngineSettingsStore.getState().modelDrafts[profiledKey].inspection?.memoryProfiles
+        ).toBeUndefined()
+    })
+
     it('saves a first figure with exact fractional GiB and an unknown estimate without a stored profile', async () => {
         await render()
         expect(container.textContent).toContain('I know how much this uses')
@@ -356,7 +388,6 @@ describe('applied configuration stated memory', () => {
         expect(save.mock.lastCall?.[0]).toEqual({
             ...peer,
             modelId: 'model',
-            profileKey: 'profile-b',
             configurationKey: 'peer-key',
             sharedBytes: '2147483648'
         })
