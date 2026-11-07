@@ -545,6 +545,9 @@ func llamaLongOption(name string) string {
 }
 
 func llamaOptionKey(name string) string {
+	if name == "" {
+		return ""
+	}
 	name = llamaLongOption(name)
 	for _, opt := range llamaServingOptions {
 		if name == opt.key || name == opt.env || name == opt.negEnv || slices.Contains(opt.flags, name) || slices.Contains(opt.flags, "--"+name) {
@@ -717,15 +720,8 @@ func llamaLaunchOptions(command launchCommand, policy *EditableLaunch) (map[stri
 		// Unrelated native options retain their exact tokens in command.Args.
 		// They are not projected into model presets or interpreted here.
 	}
-	effectiveEnv := map[string]string{}
-	for _, assignment := range os.Environ() {
-		key, value, _ := strings.Cut(assignment, "=")
-		effectiveEnv[environmentKey(key)] = value
-	}
-	for key, value := range command.Env {
-		effectiveEnv[environmentKey(key)] = value
-	}
-	for name, value := range effectiveEnv {
+	for _, assignment := range modelEffectiveEnvironment(command.Env) {
+		name, value, _ := strings.Cut(assignment, "=")
 		key := ""
 		for _, option := range llamaServingOptions {
 			if (option.env != "" && name == option.env) || (option.negEnv != "" && name == option.negEnv) {
@@ -860,15 +856,8 @@ func llamaArtifactLaunchOptions(command launchCommand, policy *EditableLaunch) (
 		}
 		i += arity
 	}
-	effectiveEnv := map[string]string{}
-	for _, assignment := range os.Environ() {
-		key, value, _ := strings.Cut(assignment, "=")
-		effectiveEnv[environmentKey(key)] = value
-	}
-	for key, value := range command.Env {
-		effectiveEnv[environmentKey(key)] = value
-	}
-	for name, value := range effectiveEnv {
+	for _, assignment := range modelEffectiveEnvironment(command.Env) {
+		name, value, _ := strings.Cut(assignment, "=")
 		if key := llamaOptionKey(environmentKey(name)); llamaArtifactKeys[key] {
 			if err := accept(env, key, value); err != nil {
 				return nil, nil, err
