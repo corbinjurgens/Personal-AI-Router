@@ -493,6 +493,8 @@ interface NodeConfigurationState {
     save(targetId: string, nodeId: string | undefined): Promise<NodePolicySnapshot | null>
     /** Take a first baseline for a target that has none, for its preview. */
     read(targetId: string, nodeId: string | undefined): Promise<void>
+    /** Read saved policy afresh, preserving any editor draft and its CAS baseline. */
+    readSavedPolicy(targetId: string, nodeId: string | undefined): Promise<NodePolicyDocument>
 }
 
 interface AvailabilityEntry {
@@ -1577,6 +1579,7 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
             }
             if (entry.phase === 'sending') return
             if (isOlder(next.revision, entry.baseline.revision)) return
+            if (entry.latest && isOlder(next.revision, entry.latest.revision)) return
             if (
                 next.availability === undefined &&
                 next.revision === entry.baseline.revision &&
@@ -1943,6 +1946,13 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
                 }
                 return null
             }
+        },
+
+        readSavedPolicy: async (targetId, nodeId) => {
+            const latest = await window.pairApi.nodePolicy.get(nodeId)
+            update(targetId, entry => ({ ...entry, remote: nodeId !== undefined }))
+            get().adopt(targetId, latest)
+            return latest
         },
 
         read: async (targetId, nodeId) => {

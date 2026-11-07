@@ -20,6 +20,7 @@ export function ConfirmModal({
     message,
     confirmLabel,
     confirmColor = 'brand',
+    confirmDisabled = false,
     onConfirm
 }: {
     open: boolean
@@ -28,6 +29,7 @@ export function ConfirmModal({
     message: ReactNode
     confirmLabel: string
     confirmColor?: 'brand' | 'danger'
+    confirmDisabled?: boolean
     onConfirm: () => void
 }) {
     const handleClose = () => onOpenChange(false)
@@ -49,6 +51,7 @@ export function ConfirmModal({
                                 kind="primary"
                                 size="small"
                                 color={confirmColor}
+                                disabled={confirmDisabled}
                                 onClick={() => {
                                     onOpenChange(false)
                                     onConfirm()

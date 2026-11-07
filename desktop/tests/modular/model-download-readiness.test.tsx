@@ -164,6 +164,18 @@ function commands(): EngineCommandPayload[] {
 
 beforeEach(() => {
     vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+    Object.defineProperty(HTMLDialogElement.prototype, 'showModal', {
+        configurable: true,
+        value: function (this: HTMLDialogElement) {
+            this.open = true
+        }
+    })
+    Object.defineProperty(HTMLDialogElement.prototype, 'close', {
+        configurable: true,
+        value: function (this: HTMLDialogElement) {
+            this.open = false
+        }
+    })
     vi.stubGlobal('CSS', { supports: () => false, escape: (value: string) => value })
     stateListeners.clear()
     progressListeners.clear()
@@ -337,11 +349,17 @@ describe('rendered target download readiness', () => {
         expect(commands()[0]?.command).toBe('unloadModel')
     })
 
-    it('allows explicit Delete outside an active pull', async () => {
+    it('confirms explicit Delete outside an active pull', async () => {
         report([entry({ phase: 'failed' })], [MODEL])
         await mount()
         await openActions()
         await act(async () => item('Delete').click())
+        expect(commands()).toEqual([])
+        const confirm = Array.from(document.querySelectorAll('button')).find(
+            button => button.textContent?.trim() === 'Delete model'
+        )
+        if (!confirm) throw new Error('Missing delete confirmation')
+        await act(async () => confirm.click())
         expect(commands()).toEqual([
             { command: 'deleteModel', engineType: 'llama-cpp', nodeId, model: MODEL }
         ])

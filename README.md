@@ -180,6 +180,10 @@ from **Settings → Cluster** and repeat the engine and model steps there. The
 inviting machine shows a six-digit PIN, and you enter that PIN on the machine you
 invited.
 
+Use **Models** to see model files across the cluster and copy them between
+nodes. **Profiles** shows each node's named configurations and the roles using
+them, with actions to edit a profile or deploy it to another node.
+
 ![The six-digit pairing PIN on the inviting machine beside the Cluster invitation modal on the machine being invited.](docs/assets/onboarding/getting-started/04-pairing-pin.png)
 
 The [Getting Started Guide](docs/getting-started.mdx) covers the same ground in

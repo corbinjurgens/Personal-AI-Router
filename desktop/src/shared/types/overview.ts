@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /** Top-level content tab of the consolidated Overview window. */
-export type OverviewTab = 'overview' | 'settings'
+export type OverviewTab = 'overview' | 'models' | 'profiles' | 'settings'
 
 /** What an Overview message modal's action button does when clicked. */
 export type OverviewMessageAction = 'open-update' | 'open-service'
