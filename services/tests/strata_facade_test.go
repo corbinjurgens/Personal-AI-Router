@@ -41,8 +41,12 @@ func strataContractU4Front(t *testing.T, prepareProxy func(*strataContractProxy)
 	}
 
 	proxy := strataContractStartProxy(t, prepareProxy)
+	policy := nodepolicy.Default()
+	for _, model := range wantInventory {
+		policy.Profiles = append(policy.Profiles, nodepolicy.Profile{Key: model, DisplayName: model, Engine: "strata", Model: model})
+	}
 	proxy.RPC.strataContractOK(t, nodepolicy.MethodSetPolicy,
-		nodepolicy.SetPolicyParams{OriginNodeID: "strata-contract-self", Policy: nodepolicy.Default()}, nil)
+		nodepolicy.SetPolicyParams{OriginNodeID: "strata-contract-self", Policy: policy}, nil)
 	proxy.strataContractEnable(t, descriptor)
 	data, err := os.ReadFile(filepath.Join(proxy.AppDir, "strata-proxy-port.json"))
 	if err != nil {
@@ -59,11 +63,13 @@ func strataContractU4Front(t *testing.T, prepareProxy func(*strataContractProxy)
 	proxy.RPC.strataContractOK(t, "e-strata:node/set-local-backend", map[string]any{
 		"engine": "strata", "host": "127.0.0.1", "port": fixture.Port, "healthy": true,
 	}, nil)
+	advertisement := policy.Advertisement()
 	proxy.RPC.strataContractNotify(t, "e-strata:discovery:nodes", noderec.GetNodesResult{Nodes: []noderec.DirectoryNode{{
 		HostUUID: "strata-contract-self", Name: "strata-contract-self", IP: "127.0.0.1",
 		Services:       map[noderec.ServiceKey]noderec.ServiceStatus{"e-strata": {Port: proxy.Port}},
 		ModelsByEngine: models.ModelsByEngine,
 		LoadedByEngine: models.LoadedByEngine,
+		Policy:         &advertisement,
 	}}})
 	// This response fences the preceding discovery notification before HTTP.
 	var nodes struct {
@@ -116,7 +122,6 @@ func TestStrataContractFacade(t *testing.T) {
 	fixture, proxy := strataContractU4Front(t, nil)
 
 	t.Run("serves exact model inventory", func(t *testing.T) {
-		before := strataContractCount(fixture.strataContractControl(t, 0), http.MethodGet, "/v1/models", "")
 		status, _, body := strataContractHTTP(t, http.MethodGet, proxy.Port, "/v1/models", nil)
 		var list struct {
 			Object string `json:"object"`
@@ -134,10 +139,7 @@ func TestStrataContractFacade(t *testing.T) {
 		if status != http.StatusOK || list.Object != "list" || !slices.Equal(ids, want) {
 			t.Fatalf("model list status=%d object=%q ids=%v", status, list.Object, ids)
 		}
-		// Background manager reads may also occur; require the facade's read.
-		if after := strataContractCount(fixture.strataContractControl(t, 0), http.MethodGet, "/v1/models", ""); after <= before {
-			t.Fatal("model list did not reach the owned runtime")
-		}
+		// The facade publishes declared profile keys without querying native inventory.
 	})
 	t.Run("routes exact model JSON chat", func(t *testing.T) {
 		strataContractU4Chat(t, fixture, proxy)

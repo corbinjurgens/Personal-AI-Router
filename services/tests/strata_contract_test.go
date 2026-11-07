@@ -793,7 +793,8 @@ func (f *strataContractFixture) strataContractStartRuntime(t *testing.T) {
 	}
 	for attempt := 0; attempt < 8; attempt++ {
 		f.strataContractWriteRuntime(t)
-		response, err := f.Manager.strataContractCallWithin("engine:install", map[string]any{"engine": "strata", "port": f.Port, "bind": "127.0.0.1"}, strataContractStartup)
+		// The manifest owns launch configuration; installation starts it when available.
+		response, err := f.Manager.strataContractCallWithin("engine:install", map[string]string{"engine": "strata"}, strataContractStartup)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -807,12 +808,14 @@ func (f *strataContractFixture) strataContractStartRuntime(t *testing.T) {
 		}
 		data, readErr := os.ReadFile(filepath.Join(f.Root, "start-error.json"))
 		if readErr != nil || json.Unmarshal(data, &failure) != nil || !failure.BindCollision {
-			t.Fatalf("engine:install with start: RPC %d: %s", response.Error.Code, response.Error.Message)
+			t.Fatalf("engine:install: RPC %d: %s", response.Error.Code, response.Error.Message)
 		}
 		if err := os.Remove(filepath.Join(f.Root, "start-error.json")); err != nil {
 			t.Fatal(err)
 		}
 		f.Port = strataContractPort(t)
+		f.strataContractWriteRuntime(t)
+		f.Manager.strataContractOK(t, "engine:set-port", map[string]any{"engine": "strata", "port": f.Port}, nil)
 	}
 	t.Fatal("runtime bind collisions exhausted bounded retry")
 }
@@ -1253,7 +1256,7 @@ func TestStrataContractDescriptorAndLifecycle(t *testing.T) {
 		}
 		strataContractWriteJSON(t, path, manifest)
 		fixture.strataContractStartManager(t)
-		response := fixture.Manager.strataContractCall(t, "engine:install", map[string]any{"engine": "strata", "port": port})
+		response := fixture.Manager.strataContractCall(t, "engine:install", map[string]string{"engine": "strata"})
 		if response.Error == nil || response.Error.Code != -32000 || !strings.Contains(response.Error.Message, "occupied by a service that did not identify as Strata") {
 			t.Fatalf("wrong-service start error=%v", response.Error)
 		}
