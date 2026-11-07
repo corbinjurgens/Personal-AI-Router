@@ -14,6 +14,28 @@ and the durable cleanup checkpoint. Configured pause permits consent; Halt
 refuses it. Saved pause never changes. Public notifications contain only the run,
 not the manager's token or internal observation envelope.
 
+Drain release removes only the diagnostic's contribution to the existing
+registry. The shared drain push owner acknowledges the effective drain with
+old-proxy active or unsettled manual loads still included; failed or retired
+acknowledgements retain the diagnostic hold for cleanup retry. Preexisting
+settings drains remain held independently.
+
+Preview warnings disclose fresh node-maximum GPU utilization and the existing
+GPU-memory and RAM-use thresholds. The sampler retains those observations for
+the cold baseline, including memory use above 5 percent of dedicated GPU
+capacity or half of RAM, in `MeasuredProfile.notes`. Baseline warnings include
+threshold counts and observed used/capacity byte ranges from the busiest of the
+same initial samples used for the median, including pools outside the measured
+model's placement. The GPU/RAM summaries fit the existing bounded notes contract
+independently of pool names or the number of physical pools.
+Missing baseline and exercise coverage is summarized by affected pool count;
+the structured pool records retain full identities and absent values.
+The utilization range comes from the existing scanner telemetry cache, with
+the diagnostic memory freshness bound; missing, invalid or stale utilization
+stays unknown, distinct from an observed zero. This compact feed reports a node
+maximum, not individual device use, and neither utilization nor pool memory
+identifies which application caused the activity.
+
 A peer `nodeId` routes through private manager
 `engine:remote-diagnostic-preview|start|status|cancel`, using the existing ec
 direct/reverse pinned transport. Inbound `engine:diagnostic-request` and

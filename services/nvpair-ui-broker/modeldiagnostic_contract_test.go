@@ -736,6 +736,14 @@ func TestModelDiagnosticRunSamplesAndRecordsThroughWorkerContracts(t *testing.T)
 	if len(record.Pools) != len(identity.Placement) {
 		t.Fatalf("recorded pool set=%+v", record.Pools)
 	}
+	for _, want := range []string{
+		"Cold baseline GPU utilization is unknown for some or all samples; missing or stale telemetry is not zero.",
+		"Cold baseline: GPU memory use above 5 percent (pools 2; used bytes 3000-3000; capacity bytes 10000-10000); activity included; source unidentified.",
+	} {
+		if !slices.Contains(record.Notes, want) {
+			t.Fatalf("stored result omitted baseline disclosure %q: %v", want, record.Notes)
+		}
+	}
 	for _, pool := range record.Pools {
 		if pool.BaselineAvailableBytes != "8000" || pool.AfterLoadAvailableBytes != "5000" || pool.LowMinAvailableBytes != "4500" || pool.HighMinAvailableBytes != "3500" || pool.PeakUsedBytes != "4500" {
 			t.Fatalf("pool=%+v", pool)
@@ -1087,7 +1095,7 @@ func TestModelDiagnosticUMASamplingUsesOneVerifiedSharedPool(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := samples.observe(observation, now); err != nil {
+		if err := samples.observe(observation, now, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1154,6 +1162,18 @@ func TestNodeDrainPreservesPreexistingOwnerAndWaitsForEveryEngine(t *testing.T) 
 	}
 	if snapshots.Load() != 3 {
 		t.Fatalf("idle accepted before all engine activity ended: %d", snapshots.Load())
+	}
+	for _, call := range proxy.snapshot() {
+		if call.method != nodepolicy.MethodSetEngineDrain {
+			continue
+		}
+		var drain nodepolicy.SetEngineDrainParams
+		if err := json.Unmarshal(call.params, &drain); err != nil {
+			t.Fatal(err)
+		}
+		if drain.Engine == "llamacpp" && !drain.Drain {
+			t.Fatal("diagnostic release cleared the independent settings proxy drain")
+		}
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()

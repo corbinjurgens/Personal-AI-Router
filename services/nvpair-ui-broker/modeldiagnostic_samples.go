@@ -19,9 +19,12 @@ import (
 )
 
 type diagnosticPoolSample struct {
-	at        time.Time
-	available uint64
-	source    string
+	at          time.Time
+	available   uint64
+	source      string
+	kind        string
+	total       uint64
+	utilization *uint32
 }
 
 type diagnosticSamples struct {
@@ -56,27 +59,115 @@ func (b *Broker) diagnosticMemoryWarnings() []string {
 	if err != nil {
 		return nil
 	}
-	warnings := []string{}
+	warnings := diagnosticUtilizationNotes("Preview", []*uint32{b.diagnosticGPUUtilization(observation, b.diagnosticNow())})
 	for _, domain := range observation.Domains {
 		total, totalErr := strconv.ParseUint(domain.Total.Bytes, 10, 64)
 		free, freeErr := strconv.ParseUint(domain.Free.Bytes, 10, 64)
 		if totalErr != nil || freeErr != nil || total == 0 || free > total {
 			continue
 		}
-		used := total - free
-		if domain.Kind == "dedicated" && used > total/20 {
-			warnings = append(warnings, "GPU memory use is above 5 percent on "+domain.ID+"; other programs may affect the result.")
-		}
-		if (domain.Kind == "system" || domain.Kind == "shared") && used > total/2 {
-			warnings = append(warnings, "RAM use is above half capacity on "+domain.ID+"; the diagnostic may run out of memory.")
-		}
+		warnings = append(warnings, diagnosticPoolMemoryWarnings(domain.ID, domain.Kind, total, free)...)
 	}
 	return warnings
 }
 
+func diagnosticPoolMemoryWarnings(id, kind string, total, free uint64) []string {
+	used := total - free
+	evidence := fmt.Sprintf("%s (%d of %d bytes used)", id, used, total)
+	if kind == "dedicated" && used > total/20 {
+		return []string{"GPU memory use is above 5 percent on " + evidence + "; activity is included, but its source is not identified."}
+	}
+	if (kind == "system" || kind == "shared") && used > total/2 {
+		return []string{"RAM use is above half capacity on " + evidence + "; the diagnostic may run out of memory."}
+	}
+	return nil
+}
+
+// The record has a bounded notes list and bounded note text. Summarize all
+// baseline pools by threshold category without embedding unbounded pool names.
+func diagnosticBaselineMemoryNotes(pools []diagnosticPoolSample) []string {
+	notes := []string{}
+	for _, group := range []struct {
+		gpu                       bool
+		label, threshold, caution string
+	}{
+		{true, "GPU memory use", "5 percent", "activity included; source unidentified"},
+		{false, "RAM use", "half capacity", "the diagnostic may run out of memory"},
+	} {
+		count := 0
+		var minUsed, maxUsed, minTotal, maxTotal uint64
+		for _, pool := range pools {
+			if group.gpu && pool.kind != "dedicated" || !group.gpu && pool.kind != "system" && pool.kind != "shared" {
+				continue
+			}
+			used := pool.total - pool.available
+			if group.gpu && used <= pool.total/20 || !group.gpu && used <= pool.total/2 {
+				continue
+			}
+			if count == 0 {
+				minUsed, minTotal = used, pool.total
+			}
+			minUsed, maxUsed = min(minUsed, used), max(maxUsed, used)
+			minTotal, maxTotal = min(minTotal, pool.total), max(maxTotal, pool.total)
+			count++
+		}
+		if count != 0 {
+			notes = append(notes, fmt.Sprintf("Cold baseline: %s above %s (pools %d; used bytes %d-%d; capacity bytes %d-%d); %s.", group.label, group.threshold, count, minUsed, maxUsed, minTotal, maxTotal, group.caution))
+		}
+	}
+	return notes
+}
+
+// Reuse the scanner's source-aware, aged telemetry. Its compact utilization is
+// the node maximum, not a per-device or per-application measurement. Apply the
+// same freshness bound as diagnostic memory without letting missing use be zero.
+func (b *Broker) diagnosticGPUUtilization(memory *noderec.MemoryObservation, now time.Time) *uint32 {
+	b.workersMu.Lock()
+	defer b.workersMu.Unlock()
+	if memory == nil || b.telemetry == nil || b.scannerSource == nil {
+		return nil
+	}
+	c := b.telemetry
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	sources := c.nodes[b.nodeID]
+	observation, ok := sources.projected()
+	if !ok || observation != sources.scanner || observation.value.Memory == nil || observation.value.Memory.RunID != memory.RunID || !observation.value.TelemetryValid || observation.value.MSSince < 0 || observation.value.GPUUtilizationPct > 100 || now.Before(observation.receivedAt) {
+		return nil
+	}
+	value := observedTelemetryAt(*observation, now)
+	if value.MSSince > noderec.MemoryFreshMS {
+		return nil
+	}
+	return &value.GPUUtilizationPct
+}
+
+func diagnosticUtilizationNotes(phase string, values []*uint32) []string {
+	var low, high uint32
+	known, unknown := false, len(values) == 0
+	for _, value := range values {
+		if value == nil {
+			unknown = true
+			continue
+		}
+		if !known || *value < low {
+			low = *value
+		}
+		high, known = max(high, *value), true
+	}
+	notes := []string{}
+	if known {
+		notes = append(notes, fmt.Sprintf("%s GPU utilization (node maximum): %d-%d percent. Activity is included; its source is not identified.", phase, low, high))
+	}
+	if unknown {
+		notes = append(notes, phase+" GPU utilization is unknown for some or all samples; missing or stale telemetry is not zero.")
+	}
+	return notes
+}
+
 // Sample identity excludes carried age and receipt time. Seeing the same source
 // fact on another tick cannot turn it into another baseline or overlap sample.
-func (s *diagnosticSamples) observe(observation *noderec.MemoryObservation, now time.Time) error {
+func (s *diagnosticSamples) observe(observation *noderec.MemoryObservation, now time.Time, utilization *uint32) error {
 	if observation == nil || observation.Validate() != nil {
 		return diagnosticError("invalid diagnostic telemetry")
 	}
@@ -128,7 +219,12 @@ func (s *diagnosticSamples) observe(observation *noderec.MemoryObservation, now 
 			continue
 		}
 		s.seen[key] = true
-		s.pools[domain.ID] = append(s.pools[domain.ID], diagnosticPoolSample{f.SampledAt, value, f.Source})
+		sample := diagnosticPoolSample{at: f.SampledAt, available: value, source: f.Source, kind: domain.Kind, total: capacity}
+		if utilization != nil {
+			v := *utilization
+			sample.utilization = &v
+		}
+		s.pools[domain.ID] = append(s.pools[domain.ID], sample)
 	}
 	return nil
 }
@@ -194,7 +290,8 @@ func (b *Broker) sampleDiagnostic(ctx context.Context, op *brokerDiagnostic) err
 			if err != nil {
 				return err
 			}
-			if err := op.samples.observe(observation, b.diagnosticNow()); err != nil {
+			now := b.diagnosticNow()
+			if err := op.samples.observe(observation, now, b.diagnosticGPUUtilization(observation, now)); err != nil {
 				return err
 			}
 			markers := b.diagnosticMarkers(op)
@@ -257,6 +354,31 @@ func (s *diagnosticSamples) measured(identity modelconfig.DiagnosticIdentity, st
 		result.High = &v
 	}
 	markers := status.Markers
+	utilization := []*uint32{}
+	baselineMemory := []diagnosticPoolSample{}
+	// Disclose all baseline pools, including GPUs outside the measured model's
+	// placement. Use exactly the same first samples as the cold median below.
+	for _, id := range s.baselinePools {
+		count := 0
+		var busiest *diagnosticPoolSample
+		for _, sample := range s.pools[id] {
+			if !diagnosticInWindow(sample.at, markers["baseline-ready"], markers["loaded"]) || count == 3 {
+				continue
+			}
+			count++
+			utilization = append(utilization, sample.utilization)
+			if busiest == nil || sample.available < busiest.available {
+				v := sample
+				busiest = &v
+			}
+		}
+		if busiest != nil {
+			baselineMemory = append(baselineMemory, *busiest)
+		}
+	}
+	result.Notes = append(result.Notes, diagnosticBaselineMemoryNotes(baselineMemory)...)
+	result.Notes = append(result.Notes, diagnosticUtilizationNotes("Cold baseline", utilization)...)
+	missingBaseline, missingPhase := 0, 0
 	for _, placement := range identity.Placement {
 		pool := modelconfig.MeasuredPool{DomainID: placement.DomainID, Kind: placement.Kind, DeviceID: placement.DeviceID, Source: "OS pool telemetry", IntervalMS: diagnosticSampleInterval.Milliseconds()}
 		samples := s.pools[placement.DomainID]
@@ -270,13 +392,13 @@ func (s *diagnosticSamples) measured(identity modelconfig.DiagnosticIdentity, st
 			slices.Sort(baseline)
 			pool.BaselineAvailableBytes = strconv.FormatUint(baseline[1], 10)
 		} else {
-			result.Notes = append(result.Notes, "Insufficient cold baseline samples for "+placement.DomainID+".")
+			missingBaseline++
 		}
 		pool.AfterLoadAvailableBytes, _ = diagnosticMinimum(samples, markers["loaded"], markers["low-start"])
 		pool.LowMinAvailableBytes, _ = diagnosticMinimum(samples, markers["low-start"], markers["low-end"])
 		pool.HighMinAvailableBytes, _ = diagnosticMinimum(samples, markers["high-start"], markers["high-end"])
 		if pool.AfterLoadAvailableBytes == "" || pool.LowMinAvailableBytes == "" || pool.HighMinAvailableBytes == "" {
-			result.Notes = append(result.Notes, "Too few fresh samples in an allocation or exercise phase for "+placement.DomainID+"; minimum absent.")
+			missingPhase++
 		}
 		for _, sample := range samples {
 			if diagnosticInWindow(sample.at, markers["baseline-ready"], markers["high-end"]) {
@@ -297,6 +419,14 @@ func (s *diagnosticSamples) measured(identity modelconfig.DiagnosticIdentity, st
 			pool.PeakUsedBytes = strconv.FormatUint(base-minimum, 10)
 		}
 		result.Pools = append(result.Pools, pool)
+	}
+	// Structured pools retain full IDs and absent values. Summaries keep prose
+	// bounded even when every permitted placement lacks coverage.
+	if missingBaseline > 0 {
+		result.Notes = append(result.Notes, fmt.Sprintf("Insufficient cold baseline samples in %d measured pools; baseline absent.", missingBaseline))
+	}
+	if missingPhase > 0 {
+		result.Notes = append(result.Notes, fmt.Sprintf("Too few fresh samples in an allocation or exercise phase in %d measured pools; minimum absent.", missingPhase))
 	}
 	if result.High != nil {
 		sampled := diagnosticOverlapSampled(*result.High, markers["high-start"], identity.Placement, s.pools)

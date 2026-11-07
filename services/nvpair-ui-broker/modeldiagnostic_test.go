@@ -314,16 +314,16 @@ func TestModelDiagnosticSamplesRequireNewFreshIdentities(t *testing.T) {
 	at := time.Date(2026, 11, 7, 0, 0, 0, 0, time.UTC)
 	var samples diagnosticSamples
 	observation := diagnosticMemoryFixture(at, 9000)
-	if err := samples.observe(observation, at); err != nil {
+	if err := samples.observe(observation, at, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := samples.observe(observation, at.Add(time.Second)); err != nil {
+	if err := samples.observe(observation, at.Add(time.Second), nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := len(samples.pools["ram"]); got != 1 {
 		t.Fatalf("duplicate fact counted %d times", got)
 	}
-	if err := samples.observe(diagnosticMemoryFixture(at.Add(time.Second), 8000), at.Add(10*time.Second)); err != nil {
+	if err := samples.observe(diagnosticMemoryFixture(at.Add(time.Second), 8000), at.Add(10*time.Second), nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := len(samples.pools["ram"]); got != 1 {
@@ -331,7 +331,7 @@ func TestModelDiagnosticSamplesRequireNewFreshIdentities(t *testing.T) {
 	}
 	changed := diagnosticMemoryFixture(at.Add(2*time.Second), 8000)
 	changed.RunID = "replacement"
-	if err := samples.observe(changed, at.Add(2*time.Second)); err == nil {
+	if err := samples.observe(changed, at.Add(2*time.Second), nil); err == nil {
 		t.Fatal("producer replacement accepted into run")
 	}
 }
@@ -343,7 +343,7 @@ func TestModelDiagnosticMedianAndPhaseMinimums(t *testing.T) {
 	var samples diagnosticSamples
 	for i, value := range []uint64{9000, 7000, 8000, 6000, 5500, 5000, 4500, 4000, 3500} {
 		time := at.Add(time.Duration(i) * 2 * time.Second)
-		if err := samples.observe(diagnosticMemoryFixture(time, value), time); err != nil {
+		if err := samples.observe(diagnosticMemoryFixture(time, value), time, nil); err != nil {
 			t.Fatal(err)
 		}
 	}

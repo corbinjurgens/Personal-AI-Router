@@ -159,11 +159,14 @@ func (l *nodeDrainLease) clearUnderPush(ctx context.Context, acquiringProxy *pro
 		if pp != nil && pp != incarnation && (acquiringProxy == nil || pp == acquiringProxy) {
 			return fmt.Errorf("node drain cleanup proxy run is unverified")
 		}
+		engine := l.added[0]
 		if pp != nil && pp == incarnation {
 			if err := b.nodeDrainProxyCurrent(pp, runID); err != nil {
 				return err
 			}
-			if err := engineDrainAck(ctx, pp, l.added[0], false); err != nil {
+			// The shared owner composes surviving manual-load holds. Retire
+			// this lease's registry contribution only after a current ACK.
+			if _, err := b.pushEngineDrainUnderPush(ctx, engine, false); err != nil {
 				return err
 			}
 			if err := b.nodeDrainProxyCurrent(pp, runID); err != nil {
@@ -173,7 +176,7 @@ func (l *nodeDrainLease) clearUnderPush(ctx context.Context, acquiringProxy *pro
 			return fmt.Errorf("proxy changed during node drain cleanup")
 		}
 		r.mu.Lock()
-		delete(r.drains, l.added[0])
+		delete(r.drains, engine)
 		r.mu.Unlock()
 		l.added = l.added[1:]
 	}
