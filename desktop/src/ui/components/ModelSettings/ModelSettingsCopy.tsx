@@ -83,6 +83,11 @@ function profile(text: string, identity: ModelSettingsIdentity) {
 }
 
 export default function ModelSettingsCopy(props: CopyProps) {
+    return <ProfileDeploy {...props} />
+}
+
+/** Shared deployment entry for a selected node-local profile. */
+export function ProfileDeploy(props: CopyProps) {
     const { identity, policy, targetId, disabled = false } = props
     const selfId = useConnectionStore(state => state.selfId)
     const nodes = useNodesStore(state => state.nodes)
@@ -209,8 +214,8 @@ export default function ModelSettingsCopy(props: CopyProps) {
                 onCheckedChange={value => setMode(value === true)}
             />
             <Text kind="body/regular/sm">
-                Portable requested load settings only. Target allocation, memory and
-                approval digests stay target owned.
+                Portable requested load settings only. Target allocation, memory and approval
+                digests stay target owned.
             </Text>
             {inspection &&
                 portableLoadFields(inspection)

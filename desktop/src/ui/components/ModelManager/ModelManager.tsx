@@ -24,8 +24,11 @@ import { ModelCopyModal } from './ModelCopyModal'
 import { formatCopyProgressLabel } from '@/ui/utils/formatters'
 import ModelSettingsPanel from '@/ui/components/ModelSettings/ModelSettingsPanel'
 import { useConnectionStore } from '@/ui/stores/connection.store'
+import { useModelDelete } from '@/ui/hooks/useModelDelete'
+import { ModelDeleteConfirmation } from '@/ui/components/Models/ModelDeleteConfirmation'
 
 export function ModelManager({ backend, nodeId }: { backend: BackendInfo; nodeId: string }) {
+    const deletion = useModelDelete()
     const [openModelHubModal, setOpenModelHubModal] = useState(false)
     const [configureModel, setConfigureModel] = useState<string | null>(null)
     const selfId = useConnectionStore(state => state.selfId)
@@ -226,11 +229,11 @@ export function ModelManager({ backend, nodeId }: { backend: BackendInfo; nodeId
                     setCopySelection({ source: nodeId, model: modelName })
                     break
                 case 'delete':
-                    window.pairApi.engines.deleteModel(backendType, nodeId, modelName)
+                    void deletion.request(backendType, nodeId, modelName)
                     break
             }
         },
-        [backendType, nodeId, actionAllowed, canConfigure]
+        [backendType, nodeId, actionAllowed, canConfigure, deletion]
     )
 
     const handleExpiryChange = useCallback(
@@ -270,6 +273,7 @@ export function ModelManager({ backend, nodeId }: { backend: BackendInfo; nodeId
 
     return (
         <Stack gap="4">
+            <ModelDeleteConfirmation deletion={deletion} />
             {transientModel && (
                 <TransientModelStatusRow
                     transientModel={transientModel}
