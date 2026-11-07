@@ -97,7 +97,7 @@ func TestE2ELlamaCPPPullRemoteDisconnectStopsDownload(t *testing.T) {
 	notify(t, manager.stdin, nodeProjectionMethod, nodeProjection{ManagementBlocked: false})
 	// The fake router is already listening. Start adopts it using its readiness
 	// probe; the child never spawns a real engine or another fake listener.
-	send(t, manager.stdin, 1, "engine:start", map[string]string{"engine": "fake"})
+	send(t, manager.stdin, 1, "engine:install", map[string]any{"engine": "fake", "start": true})
 	var status EngineStatus
 	if err := json.Unmarshal(waitResult(t, manager.frames, "1", 10*time.Second), &status); err != nil {
 		t.Fatalf("decode start status: %v", err)

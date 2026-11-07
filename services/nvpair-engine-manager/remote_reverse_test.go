@@ -272,7 +272,7 @@ func TestRemoteReverseReadsAndEveryControlRoute(t *testing.T) {
 	if _, err := client.getEngines(ctx); err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{controlStartPath, controlStopPath, controlLoadPath, controlUnloadPath, controlDeletePath} {
+	for _, path := range []string{controlLoadPath, controlUnloadPath, controlDeletePath} {
 		t.Run(path, func(t *testing.T) {
 			raw, err := client.postJSON(ctx, path, "fixture", map[string]string{"engine": "fixture"})
 			if err != nil {
@@ -348,17 +348,18 @@ func TestRemoteReverseReadsAndEveryControlRoute(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	for _, path := range []string{controlEnginesPath, controlStartPath, controlStopPath, controlLoadPath, controlUnloadPath, controlDeletePath, controlInstallPath, controlPullPath} {
+	wantPaths := []string{controlEnginesPath, controlLoadPath, controlUnloadPath, controlDeletePath, controlInstallPath, controlPullPath}
+	for _, path := range wantPaths {
 		if seen[path] != 1 {
 			t.Errorf("dispatches for %s = %d, want 1", path, seen[path])
 		}
 	}
-	if f.reverseCalls.Load() != 8 || f.directCalls.Load() != 2 {
-		t.Fatalf("reverse/direct = %d/%d, want 8/2 (ordinary and readiness routes)", f.reverseCalls.Load(), f.directCalls.Load())
+	if f.reverseCalls.Load() != int32(len(wantPaths)) || f.directCalls.Load() != 2 {
+		t.Fatalf("reverse/direct = %d/%d, want %d/2 (ordinary and readiness routes)", f.reverseCalls.Load(), f.directCalls.Load(), len(wantPaths))
 	}
 }
 
-func TestRemoteReverseSafeStopAndSettingsPolicyOwners(t *testing.T) {
+func TestRemoteReverseSettingsPolicyOwners(t *testing.T) {
 	exec := settingsExecutor(t, false)
 	exec.nodeProjection.set(nodeProjection{ManagementBlocked: false})
 	var mu sync.Mutex
@@ -389,17 +390,6 @@ func TestRemoteReverseSafeStopAndSettingsPolicyOwners(t *testing.T) {
 	grantRemoteManagement(t, f.peerDir, "1", map[string]bool{"uuid-self": true})
 	ctx := remoteFixtureContext(t)
 	client := f.client(t, ctx)
-	raw, err := client.postJSON(ctx, controlStopPath, "fake", stopRequest{Engine: "fake"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var status EngineStatus
-	if err := json.Unmarshal(raw, &status); err != nil {
-		t.Fatal(err)
-	}
-	if status.Engine != "fake" || status.Running {
-		t.Fatalf("safe stopped engine = %+v", status)
-	}
 	for _, method := range []string{"get", "preview", "apply"} {
 		if _, err := client.postJSON(ctx, settingsPath+method, "llamacpp", settings.Request{Engine: "llamacpp", ExpectedRevision: 7}); err != nil {
 			t.Fatal(err)
@@ -437,7 +427,7 @@ func TestRemoteReverseInvalidAuthorityNeverDispatches(t *testing.T) {
 			ctx := remoteFixtureContext(t)
 			client := f.client(t, ctx)
 			invalidate(t, f)
-			if _, err := client.postJSON(ctx, controlStopPath, "fixture", stopRequest{Engine: "fixture"}); err == nil {
+			if _, err := client.postJSON(ctx, controlUnloadPath, "fixture", modelActionRequest{Engine: "fixture", Model: "tiny"}); err == nil {
 				t.Fatal("invalid authority reached control handler")
 			}
 			if dispatches.Load() != 0 {
@@ -489,7 +479,7 @@ func TestRemoteMutationInterruptedAfterDispatchIsNeverReplayed(t *testing.T) {
 	})
 	ctx := remoteFixtureContext(t)
 	client := f.client(t, ctx)
-	if _, err := client.postJSON(ctx, controlStopPath, "fixture", stopRequest{Engine: "fixture"}); err == nil {
+	if _, err := client.postJSON(ctx, controlUnloadPath, "fixture", modelActionRequest{Engine: "fixture", Model: "tiny"}); err == nil {
 		t.Fatal("interrupted mutation reported success")
 	}
 	if dispatches.Load() != 1 || f.reverseCalls.Load() != 1 || f.directCalls.Load() != 1 {
@@ -528,8 +518,8 @@ func TestRemoteDispatchedDirectMutationDoesNotFallBack(t *testing.T) {
 			}
 		})
 	}
-	test("engine stop", func(ctx context.Context, c *remoteClient) error {
-		_, err := c.postJSON(ctx, controlStopPath, "fixture", stopRequest{Engine: "fixture"})
+	test("model unload", func(ctx context.Context, c *remoteClient) error {
+		_, err := c.postJSON(ctx, controlUnloadPath, "fixture", modelActionRequest{Engine: "fixture", Model: "tiny"})
 		return err
 	})
 	test("settings apply", func(ctx context.Context, c *remoteClient) error {
@@ -663,7 +653,7 @@ func testRemoteResponseBoundaries(t *testing.T, limit int, call func(context.Con
 
 func TestRemoteEngineResponseBoundaries(t *testing.T) {
 	testRemoteResponseBoundaries(t, 8<<20, func(ctx context.Context, c *remoteClient) (json.RawMessage, error) {
-		raw, err := c.postJSON(ctx, controlStopPath, "fixture", stopRequest{Engine: "fixture"})
+		raw, err := c.postJSON(ctx, controlUnloadPath, "fixture", modelActionRequest{Engine: "fixture", Model: "tiny"})
 		if err != nil && !strings.Contains(err.Error(), "HTTP 409") && !strings.Contains(err.Error(), "operation outcome may be uncertain") {
 			t.Errorf("mutation error lacks uncertain outcome: %v", err)
 		}

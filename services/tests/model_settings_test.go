@@ -355,7 +355,7 @@ func TestModelSettingsLoadOnlyFencesUnrelatedPolicyDuringManagerWait(t *testing.
 
 func TestModelSettingsPauseWhileApplyingDoesNotResume(t *testing.T) {
 	f := newModelSettingsProcessFixture(t)
-	f.rpcOK(t, "engine:start", map[string]string{"engine": "llamacpp"})
+	f.rpcOK(t, "engine:install", map[string]any{"engine": "llamacpp", "start": true})
 	request, preview := f.review(t, f.request(t, "pause-apply", &modelconfig.PolicyPatch{Generation: map[string]*json.Number{"temperature": modelSettingsNumber("0.7")}}))
 	assertModelSettingsImpact(t, preview, true)
 	gate := newModelSettingsGate()
@@ -403,7 +403,7 @@ func TestModelSettingsPauseWhileApplyingDoesNotResume(t *testing.T) {
 func TestModelSettingsRunningRestartConsumesWholeFinitePreset(t *testing.T) {
 	f := newModelSettingsProcessFixture(t)
 	policy := f.policy(t)
-	f.rpcOK(t, "engine:start", map[string]string{"engine": "llamacpp"})
+	f.rpcOK(t, "engine:install", map[string]any{"engine": "llamacpp", "start": true})
 	initial := f.engineIdentity(t, 1)
 	request, preview := f.review(t, f.request(t, "running-restart", nil))
 	assertModelSettingsImpact(t, preview, true)
@@ -433,7 +433,7 @@ func TestModelSettingsTimedDrainPrecedesWholeRouterRestart(t *testing.T) {
 	f := prepareModelSettingsProcessFixture(t)
 	f.enableAdmissionProbe(t)
 	f.startModelSettings(t)
-	f.rpcOK(t, "engine:start", map[string]string{"engine": "llamacpp"})
+	f.rpcOK(t, "engine:install", map[string]any{"engine": "llamacpp", "start": true})
 	request, preview := f.review(t, f.request(t, "timed-drain", nil))
 	assertModelSettingsImpact(t, preview, true)
 	gate := newModelSettingsGate()
@@ -477,7 +477,7 @@ func TestModelSettingsTimedDrainPrecedesWholeRouterRestart(t *testing.T) {
 
 func TestModelSettingsFailedRestartRetainsDesiredEffectiveAndFence(t *testing.T) {
 	f := newModelSettingsProcessFixture(t)
-	f.rpcOK(t, "engine:start", map[string]string{"engine": "llamacpp"})
+	f.rpcOK(t, "engine:install", map[string]any{"engine": "llamacpp", "start": true})
 	request, preview := f.review(t, f.request(t, "failed-restart", nil))
 	f.engineProcessFixture.mu.Lock()
 	f.failTarget = true
@@ -505,7 +505,7 @@ func TestModelSettingsBareAcceptedRestartRequiresFreshLocalSupersession(t *testi
 	f := prepareModelSettingsProcessFixture(t)
 	f.enableAdmissionProbe(t)
 	f.startModelSettings(t)
-	f.rpcOK(t, "engine:start", map[string]string{"engine": "llamacpp"})
+	f.rpcOK(t, "engine:install", map[string]any{"engine": "llamacpp", "start": true})
 	before := f.policy(t)
 	request, _ := f.review(t, f.request(t, "bare-accepted", &modelconfig.PolicyPatch{Generation: map[string]*json.Number{"temperature": modelSettingsNumber("0.35")}}))
 	gate := newModelSettingsGate()

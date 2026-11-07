@@ -249,10 +249,7 @@ func TestPullDeadlineReportsDetachedNotSilence(t *testing.T) {
 func TestDeadlineLeniencyTracksOperationLength(t *testing.T) {
 	// Only operations engineOps actually declares: the TUI offers no engine
 	// update, so listing one here would assert against a path nothing reaches.
-	// Start and restart wait on the engine's readiness probe, which the
-	// manifests allow up to ten minutes, so a deadline on either is a slow
-	// reply rather than a failed start.
-	for _, op := range []string{"pull", "load", "install", "uninstall", "start", "restart"} {
+	for _, op := range []string{"pull", "load", "install", "uninstall"} {
 		result, ok := classifyOpResult("x", "llamacpp", op, context.DeadlineExceeded).(engineOpMsg)
 		if !ok {
 			t.Fatalf("%s: unexpected message type", op)
@@ -265,7 +262,7 @@ func TestDeadlineLeniencyTracksOperationLength(t *testing.T) {
 		}
 	}
 
-	for _, op := range []string{"unload", "delete", "stop"} {
+	for _, op := range []string{"unload", "delete"} {
 		result, ok := classifyOpResult("x", "llamacpp", op, context.DeadlineExceeded).(engineOpMsg)
 		if !ok {
 			t.Fatalf("%s: unexpected message type", op)
@@ -384,10 +381,8 @@ func TestModelActionsCarryRemoteEquivalents(t *testing.T) {
 }
 
 // TestLifecycleRemoteCoverageMatchesManager pins which lifecycle operations have
-// a remote counterpart. The engine manager has remote install, start, and stop
-// but no remote restart, uninstall, or port change — those need process
-// ownership on the target host — so those three must be marked local-only or the
-// UI would offer an operation that always fails.
+// a remote counterpart. The engine manager exposes remote install but no
+// remote uninstall, so uninstall must be marked local-only.
 func TestLifecycleRemoteCoverageMatchesManager(t *testing.T) {
 	for name, op := range engineOps {
 		_, hasRemote := remoteEngineMethods[op.method]
@@ -399,12 +394,12 @@ func TestLifecycleRemoteCoverageMatchesManager(t *testing.T) {
 		}
 	}
 
-	for _, name := range []string{"restart", "uninstall"} {
+	for _, name := range []string{"uninstall"} {
 		if !engineOps[name].localOnly {
 			t.Errorf("%s must be local-only: the manager exposes no remote variant", name)
 		}
 	}
-	for _, name := range []string{"install", "start", "stop"} {
+	for _, name := range []string{"install"} {
 		if engineOps[name].localOnly {
 			t.Errorf("%s has a remote variant and should not be local-only", name)
 		}
@@ -467,13 +462,14 @@ func TestTerminalControlsCanonicalFrames(t *testing.T) {
 
 func TestTerminalControlsLifecycleFrames(t *testing.T) {
 	for _, tc := range []struct{ name, node, method, want string }{
-		{"local start", "", "engine:start", "engine:start"},
-		{"remote start", "peer", "engine:start", "engine:remote-start"},
-		{"remote stop", "peer", "engine:stop", "engine:remote-stop"},
+		{"local install", "", "engine:install", "engine:install"},
+		{"remote install", "peer", "engine:install", "engine:remote-install"},
+		{"local uninstall", "", "engine:uninstall", "engine:uninstall"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			client, broker := nodeInfoRPCFixture(t)
-			request, _ := terminalControlsReply(t, broker, engineCmd(client, tc.node, "llamacpp", tc.method, "start", "start"), &rpc.Message{Result: []byte(`{}`)})
+			op := strings.TrimPrefix(tc.method, "engine:")
+			request, _ := terminalControlsReply(t, broker, engineCmd(client, tc.node, "llamacpp", tc.method, op, op), &rpc.Message{Result: []byte(`{}`)})
 			var params map[string]string
 			if err := json.Unmarshal(request.Params, &params); err != nil {
 				t.Fatal(err)
@@ -504,7 +500,7 @@ func TestTerminalControlsTypedRefusals(t *testing.T) {
 				var cmd tea.Cmd
 				switch family {
 				case "lifecycle":
-					cmd = engineCmd(client, "peer", "llamacpp", "engine:start", "start", "start")
+					cmd = engineCmd(client, "peer", "llamacpp", "engine:install", "install", "install")
 				case "model":
 					cmd = modelCmd(client, "peer", "llamacpp", modelActions["load"], "model")
 				case "settings read":
@@ -854,9 +850,9 @@ func TestTerminalControlsTimeoutContracts(t *testing.T) {
 	if !load.detached || load.err != nil {
 		t.Fatalf("load deadline = %+v", load)
 	}
-	stop := classifyOpResult("stop", "llamacpp", "stop", context.DeadlineExceeded).(engineOpMsg)
-	if stop.detached || !errors.Is(stop.err, context.DeadlineExceeded) {
-		t.Fatalf("stop deadline = %+v", stop)
+	unload := classifyOpResult("eject", "llamacpp", "unload", context.DeadlineExceeded).(engineOpMsg)
+	if unload.detached || !errors.Is(unload.err, context.DeadlineExceeded) {
+		t.Fatalf("unload deadline = %+v", unload)
 	}
 	if got := commandFailure(errors.New("reload before applying")); got != "reload before applying" {
 		t.Fatalf("uncoded error rewritten: %q", got)
@@ -1148,17 +1144,10 @@ func TestTerminalControlsSavedIntentAndPause(t *testing.T) {
 		if rows[0][0] != "llamacpp (saved Off, local)" || rows[1][0] != "llamacpp-custom (saved Off, local)" {
 			t.Fatalf("labels = %q, %q", rows[0][0], rows[1][0])
 		}
-		// A saved Off engine is still startable; the target decides.
-		if cmd := d.lifecycle(&d.engines[0], "start"); cmd == nil {
-			t.Fatalf("saved Off start was refused: %s", d.status.render())
-		}
 	})
-	t.Run("stop and unload remain available", func(t *testing.T) {
+	t.Run("model operations remain available", func(t *testing.T) {
 		d := localDetail()
 		d.engines = []engineStatus{{Engine: "llamacpp", Installed: true}}
-		if cmd := d.lifecycle(&d.engines[0], "stop"); cmd == nil {
-			t.Fatalf("stop was refused: %s", d.status.render())
-		}
 		for _, op := range []string{"unload", "delete", "pull"} {
 			if d.refuseModelOp("llamacpp", modelActions[op]) {
 				t.Fatalf("%s was refused: %s", op, d.status.render())

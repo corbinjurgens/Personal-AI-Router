@@ -14,31 +14,28 @@ import (
 	"time"
 )
 
-func TestStopReturnsVerifiedInternalEvidence(t *testing.T) {
-	ex := newLifecycleFixture(t)
-	if err := ex.desired.set("source", true, intentLocal); err != nil {
-		t.Fatal(err)
-	}
-	var out bytes.Buffer
-	m := NewManager(NewCodec(&out), ex, nil, "")
-	id := json.RawMessage(`194`)
-	m.runOp(context.Background(), &Message{ID: &id, Method: "engine:stop", Params: json.RawMessage(`{"engine":"source","verifyStop":true}`)})
-	var reply Message
-	if err := json.Unmarshal(out.Bytes(), &reply); err != nil {
-		t.Fatal(err)
-	}
-	if reply.Error != nil {
-		t.Fatalf("discharge reply: %+v", reply.Error)
-	}
-	var result stopObservation
-	if err := json.Unmarshal(reply.Result, &result); err != nil {
-		t.Fatal(err)
-	}
-	if result.Running == nil || result.Healthy == nil || result.ObservedAt == nil || result.ObservedAt.IsZero() || *result.Running || *result.Healthy {
-		t.Fatalf("stopped runtime observation: %+v", result)
-	}
-	if result.Intent != "off" || !result.TerminationVerified {
-		t.Fatalf("discharge evidence: %+v", result)
+func TestManagerRejectsRemovedLifecycleMethods(t *testing.T) {
+	for _, method := range []string{
+		"engine:start", "engine:stop", "engine:restart",
+		"engine:remote-start", "engine:remote-stop",
+	} {
+		t.Run(method, func(t *testing.T) {
+			var out bytes.Buffer
+			// No executor or peer directory: refusal cannot perform an operation
+			// or resolve a remote target, even with invalid parameters.
+			m := &Manager{codec: NewCodec(&out)}
+			id := json.RawMessage(`194`)
+			m.handleMessage(context.Background(), &Message{
+				JSONRPC: "2.0", ID: &id, Method: method, Params: json.RawMessage(`{}`),
+			})
+			var reply Message
+			if err := json.Unmarshal(out.Bytes(), &reply); err != nil {
+				t.Fatal(err)
+			}
+			if reply.ID == nil || string(*reply.ID) != string(id) || reply.Error == nil || reply.Error.Code != -32601 {
+				t.Fatalf("removed method reply: %+v", reply)
+			}
+		})
 	}
 }
 
@@ -54,7 +51,7 @@ func TestGlobalMutationBusyRetainsRPCIdentity(t *testing.T) {
 	var out bytes.Buffer
 	m := NewManager(NewCodec(&out), ex, nil, "")
 	id := json.RawMessage(`195`)
-	m.runOp(context.Background(), &Message{ID: &id, Method: "engine:stop", Params: json.RawMessage(`{"engine":"source"}`)})
+	m.runOp(context.Background(), &Message{ID: &id, Method: "engine:uninstall", Params: json.RawMessage(`{"engine":"source"}`)})
 	var reply Message
 	if err := json.Unmarshal(out.Bytes(), &reply); err != nil {
 		t.Fatal(err)
@@ -72,7 +69,7 @@ func TestGlobalMutationBusyRetainsRPCIdentity(t *testing.T) {
 		t.Fatalf("global mutation error: %+v, data=%+v", reply.Error, data)
 	}
 	if _, known, err := ex.desired.get("source"); err != nil || known {
-		t.Fatalf("busy stop changed saved intent: known=%v error=%v", known, err)
+		t.Fatalf("busy uninstall changed saved intent: known=%v error=%v", known, err)
 	}
 }
 
@@ -97,11 +94,11 @@ func TestManagerErrorResponses(t *testing.T) {
 	mustContain(t, out.String(), "unknown engine")
 
 	m, out = newM()
-	m.runOp(ctx, &Message{JSONRPC: "2.0", ID: &id, Method: "engine:start", Params: json.RawMessage(`{}`)})
+	m.runOp(ctx, &Message{JSONRPC: "2.0", ID: &id, Method: "engine:install", Params: json.RawMessage(`{}`)})
 	mustContain(t, out.String(), "engine is required")
 
 	m, out = newM()
-	m.runOp(ctx, &Message{JSONRPC: "2.0", ID: &id, Method: "engine:start", Params: json.RawMessage(`{bad}`)})
+	m.runOp(ctx, &Message{JSONRPC: "2.0", ID: &id, Method: "engine:install", Params: json.RawMessage(`{bad}`)})
 	mustContain(t, out.String(), "invalid params")
 
 	m, out = newM()
@@ -114,7 +111,7 @@ func TestRunOpRejectsBadPort(t *testing.T) {
 	ex := NewExecutor(NewRegistry(), NewReporter(nil), func(string, any) {}, t.TempDir())
 	m := NewManager(NewCodec(&out), ex, nil, "")
 	id := json.RawMessage("1")
-	m.runOp(context.Background(), &Message{JSONRPC: "2.0", ID: &id, Method: "engine:start",
+	m.runOp(context.Background(), &Message{JSONRPC: "2.0", ID: &id, Method: "engine:install",
 		Params: json.RawMessage(`{"engine":"fake","port":70000}`)})
 	mustContain(t, out.String(), "port must be between")
 }
@@ -124,7 +121,7 @@ func TestRunOpRejectsBadBind(t *testing.T) {
 	ex := NewExecutor(NewRegistry(), NewReporter(nil), func(string, any) {}, t.TempDir())
 	m := NewManager(NewCodec(&out), ex, nil, "")
 	id := json.RawMessage("1")
-	m.runOp(context.Background(), &Message{JSONRPC: "2.0", ID: &id, Method: "engine:start",
+	m.runOp(context.Background(), &Message{JSONRPC: "2.0", ID: &id, Method: "engine:install",
 		Params: json.RawMessage(`{"engine":"fake","bind":"not-an-ip"}`)})
 	mustContain(t, out.String(), "bind must be a valid IP")
 }

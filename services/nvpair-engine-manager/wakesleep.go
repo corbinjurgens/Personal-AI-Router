@@ -6,8 +6,8 @@ package main
 // wakesleep.go holds the intent-neutral lifecycle operations the broker's node
 // policy drives (FORK_DESIGN.md §3.4, §3.5): engine:wake starts an engine only
 // when its saved intent is On, engine:sleep stops it, and neither rewrites the
-// saved intent. engine:start / engine:stop remain the only operations that
-// record what the user wants; wake and sleep only ever act on that record.
+// saved intent. Internal Executor operations still maintain saved intent;
+// wake and sleep only ever act on that record.
 
 import (
 	"context"

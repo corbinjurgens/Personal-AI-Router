@@ -9,7 +9,8 @@ import { useConnectionStore } from '@/ui/stores/connection.store'
 import { useNodesStore } from '@/ui/stores/nodes.store'
 import { usePendingActionsStore } from '@/ui/stores/pending-actions.store'
 import { engineTypesForNode, getEnginesForNode } from '@/ui/utils/get-engines-for-node'
-import { Button, Flex, Switch, Text } from '@nvidia/foundations-react-core'
+import { Button, Flex, Text } from '@nvidia/foundations-react-core'
+import { statusLabel } from '@/ui/utils/status'
 import { Download } from '@/ui/components/icons'
 import { useCallback, useMemo } from 'react'
 
@@ -64,13 +65,6 @@ export default function NodeEnginesInline({ nodeId }: { nodeId: string }) {
         })
     }, [engineTypes, selfEngines, descriptors])
 
-    const handleToggle = useCallback(
-        (engineType: EngineType) => {
-            window.pairApi.engines.toggle(engineType, nodeId)
-        },
-        [nodeId]
-    )
-
     const handleInstall = useCallback(
         (engineType: EngineType) => {
             window.pairApi.engines.install(engineType, nodeId)
@@ -90,7 +84,6 @@ export default function NodeEnginesInline({ nodeId }: { nodeId: string }) {
                     b.status === 'uninstalling' ||
                     b.status === 'starting' ||
                     b.status === 'stopping'
-                const switchLabel = `${b.status === 'running' ? 'Stop' : 'Start'} ${b.name}`
 
                 if (b.status === 'not-installed' && !pending) {
                     // An engine PAIR cannot install offers no control here.
@@ -126,46 +119,15 @@ export default function NodeEnginesInline({ nodeId }: { nodeId: string }) {
                         className="shrink-0 no-drag-elements pair-engines-inline"
                     >
                         <Flex align="center" gap="2" wrap="wrap">
-                            <Flex
-                                align="center"
-                                justify="center"
-                                className="h-4 w-7 shrink-0 -mr-1"
-                            >
-                                {isTransitioning ? (
-                                    <span
-                                        className="spinner-element-medium"
-                                        role="status"
-                                        aria-label=""
-                                    />
-                                ) : (
-                                    <Switch
-                                        size="small"
-                                        checked={b.status === 'running'}
-                                        onCheckedChange={() => handleToggle(b.type)}
-                                        disabled={isRemote && isDisconnected}
-                                        title={
-                                            isRemote && isDisconnected
-                                                ? 'Node is disconnected'
-                                                : switchLabel
-                                        }
-                                        aria-label={
-                                            isRemote && isDisconnected
-                                                ? 'Node is disconnected'
-                                                : switchLabel
-                                        }
-                                    />
-                                )}
-                            </Flex>
-                            <Text
-                                kind="body/regular/sm"
-                                className="cursor-pointer"
-                                onClick={() =>
-                                    !isTransitioning
-                                        ? handleToggle(b.type)
-                                        : undefined
-                                }
-                            >
-                                {b.name}
+                            {isTransitioning && (
+                                <span
+                                    className="spinner-element-medium"
+                                    role="status"
+                                    aria-label={statusLabel[b.status]}
+                                />
+                            )}
+                            <Text kind="body/regular/sm">
+                                {b.name}: {statusLabel[b.status]}
                             </Text>
                         </Flex>
                     </Flex>

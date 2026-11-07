@@ -6,12 +6,29 @@ package main
 import (
 	"context"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestControlRejectsRemovedLifecycleRoutes(t *testing.T) {
+	// An absent executor makes any accidental lifecycle dispatch fail. These
+	// paths must stay unregistered, independently of peer grants or projection.
+	mux := (&controlServer{}).mux()
+	for _, path := range []string{"/v1/engines/start", "/v1/engines/stop", "/v1/engines/restart", "/v1/engines/wake", "/v1/engines/sleep"} {
+		t.Run(path, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"engine":"fake"}`)))
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("removed route status = %d, want %d", rec.Code, http.StatusNotFound)
+			}
+		})
+	}
+}
 
 func TestControlHostDefault(t *testing.T) {
 	if defaultControlHost != "0.0.0.0" {

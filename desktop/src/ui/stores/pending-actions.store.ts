@@ -54,7 +54,6 @@ const SWEEP_INTERVAL_MS = 1_000
 
 /** Commands that flip an engine's lifecycle -- only one at a time per engine. */
 const LIFECYCLE_COMMANDS: ReadonlySet<EngineCommandType> = new Set<EngineCommandType>([
-    'toggle',
     'install',
     'uninstall',
     'update'

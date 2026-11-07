@@ -84,7 +84,7 @@ func enginePortAssignmentRequest(method string, params json.RawMessage) (string,
 		return "", 0, false
 	}
 	switch method {
-	case "engine:set-port", "engine:start":
+	case "engine:set-port":
 		return request.Engine, request.Port, true
 	case "engine:install":
 		return request.Engine, request.Port, request.Start

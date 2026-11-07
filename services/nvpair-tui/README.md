@@ -180,10 +180,9 @@ finish or reconcile.
 `enter` on a node opens a full-screen drill-down with two panes, switched with
 `h`/`l`:
 
-- **Engines** — install (`i`), start (`s`), stop (`x`), and, on this machine
-  only, restart (`r`), uninstall (`u`, confirmed with `y`), the engine's own port (`e`, via
-  `engine:set-port`), and the client-facing port of the proxy fronting it
-  (`p`, via `<prefix>:set-port`). Both ports are shown per engine because they
+- **Engines**: install (`i`), local uninstall (`u`, confirmed with `y`),
+  the engine's own port (`e`) and the client-facing port of the proxy fronting it
+  (`p`), through engine settings. Both ports are shown per engine because they
   are easily confused and were previously configured on different tabs.
 - **Models** — the inventory per engine with loaded state, plus browse-and-download
   (`p`), download by name (`n`), load (`enter`), eject (`e`), and delete (`d`,
@@ -198,9 +197,9 @@ one whose reply says it is `searchable` — llama.cpp's, a slice of Hugging Face
 `/` sends the query upstream instead, and `c` returns to the browse list.
 
 Both panes work on remote cluster peers through the engine manager's
-`engine:remote-*` methods. Restart, uninstall, and the port change need process
-ownership on the target host, so they are hidden on a peer rather than offered
-and then failed.
+`engine:remote-*` methods and the relayed engine settings methods. Uninstall is
+local-only. Engine state and installed build remain visible; there are no
+engine start, stop or restart keys.
 
 Load, eject and delete use the canonical `engine:load-model`,
 `engine:unload-model` and `engine:delete-model` methods and their remote
@@ -220,7 +219,6 @@ Off. These labels appear only on this machine's rows; there is no remote intent
 projection. Origin identifies a class relative to the engine-owning device,
 not a particular peer, and does not change lifecycle or permission decisions.
 
-Saved Off is ordinary intent and does not stop a granted peer from starting the engine.
 A paused target refuses remote changes until resumed under its availability policy;
 status, permission and receipt reads remain available.
 

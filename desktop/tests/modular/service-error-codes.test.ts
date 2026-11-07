@@ -38,7 +38,7 @@ import { ServiceCallError, serviceErrorCode, serviceTransport } from '@/ui/api/s
 import { rendererPath } from '@/electron/renderer-path'
 import { pathToFileURL } from 'url'
 
-const VETO_DETAIL = 'remote /v1/engines/start: HTTP 409: this node was paused on the node itself'
+const VETO_DETAIL = 'remote model load: HTTP 409: this node was paused on the node itself'
 
 afterEach(() => {
     vi.restoreAllMocks()
@@ -171,16 +171,6 @@ describe('remote engine actions refused by the target', () => {
         return `${explanation} Target: ${code}: ${detail}`
     }
 
-    it('explains a vetoed remote start', async () => {
-        const { supervisor, report } = refuse(LOCAL_VETO_CODE)
-        await supervisor.toggleEngineRemote('peer-node', 'llamacpp', 'llama-cpp', false)
-        expect(report).toHaveBeenCalledWith(
-            refusal(localVetoMessage('start llamacpp on peer-node'), LOCAL_VETO_CODE),
-            'error',
-            'engine-remote-toggle:peer-node:llamacpp'
-        )
-    })
-
     it('explains a vetoed remote model load', async () => {
         const { supervisor, report } = refuse(LOCAL_VETO_CODE)
         await supervisor.modelActionRemote('peer-node', 'llamacpp', 'llama-cpp', 'qwen3:4b', 'loadModel')
@@ -202,27 +192,25 @@ describe('remote engine actions refused by the target', () => {
         [LOCAL_VETO_CODE, localVetoMessage]
     ])('applies refusal %s to every remote mutation without a retry', async (code, explain) => {
         const { supervisor, report } = refuse(code)
-        await supervisor.toggleEngineRemote('peer-node', 'llamacpp', 'llama-cpp', true)
         await supervisor.modelActionRemote('peer-node', 'llamacpp', 'llama-cpp', 'm', 'unloadModel')
         await supervisor.modelActionRemote('peer-node', 'llamacpp', 'llama-cpp', 'm', 'deleteModel')
         await supervisor.pullModelRemote('peer-node', 'llamacpp', 'llama-cpp', 'm')
         await supervisor.installEngineRemote('peer-node', 'llamacpp', 'llama-cpp', false)
         expect(report.mock.calls.map(call => call[0])).toEqual([
-            refusal(explain('stop llamacpp on peer-node'), code),
             refusal(explain('unload m on peer-node'), code),
             refusal(explain('delete m on peer-node'), code),
             refusal(explain('download m on peer-node'), code),
             refusal(explain('install llamacpp on peer-node'), code)
         ])
+        expect(report.mock.calls[2][3]).not.toHaveProperty('action')
         expect(report.mock.calls[3][3]).not.toHaveProperty('action')
-        expect(report.mock.calls[4][3]).not.toHaveProperty('action')
     })
 
 
     it.each([
         [
             'an older target’s saved Off',
-            'remote /v1/engines/start: HTTP 409: llamacpp was turned off on the node itself; start it there'
+            'remote model load: HTTP 409: llamacpp was turned off on the node itself; start it there'
         ],
         [
             'a local stop that cancelled the operation',
@@ -230,26 +218,26 @@ describe('remote engine actions refused by the target', () => {
         ]
     ])('does not present %s as a pause', async (_name, detail) => {
         const { supervisor, report } = refuse(LOCAL_VETO_CODE, detail)
-        await supervisor.toggleEngineRemote('peer-node', 'llamacpp', 'llama-cpp', false)
+        await supervisor.modelActionRemote('peer-node', 'llamacpp', 'llama-cpp', 'm', 'loadModel')
         const message = report.mock.calls[0][0]
         expect(message).toBe(
-            refusal(localVetoMessage('start llamacpp on peer-node'), LOCAL_VETO_CODE, detail)
+            refusal(localVetoMessage('load m on peer-node'), LOCAL_VETO_CODE, detail)
         )
         expect(message).not.toMatch(/paused/i)
     })
 
     it('bounds the target’s text', async () => {
         const { supervisor, report } = refuse(LOCAL_VETO_CODE, 'x'.repeat(5000))
-        await supervisor.toggleEngineRemote('peer-node', 'llamacpp', 'llama-cpp', false)
-        const explanation = localVetoMessage('start llamacpp on peer-node')
+        await supervisor.modelActionRemote('peer-node', 'llamacpp', 'llama-cpp', 'm', 'loadModel')
+        const explanation = localVetoMessage('load m on peer-node')
         expect(report.mock.calls[0][0]).toHaveLength(`${explanation} Target: `.length + 1024)
     })
 
     it('reports any other refusal as before, by code and not by text', async () => {
         const { supervisor, report } = refuse(-32000)
-        await supervisor.toggleEngineRemote('peer-node', 'llamacpp', 'llama-cpp', false)
+        await supervisor.modelActionRemote('peer-node', 'llamacpp', 'llama-cpp', 'm', 'loadModel')
         expect(report.mock.calls[0][0]).toBe(
-            `Failed to start llamacpp on peer-node: -32000: ${VETO_DETAIL}`
+            `Failed to load m on peer-node: -32000: ${VETO_DETAIL}`
         )
         await supervisor.installEngineRemote('peer-node', 'llamacpp', 'llama-cpp', true)
         expect(report.mock.calls[1][3]).toHaveProperty('action', 'retry')

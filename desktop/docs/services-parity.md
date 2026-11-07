@@ -76,7 +76,7 @@ filesystem operation. See the [process fixture limits and native checklist](../.
 before using its eventual results as acceptance evidence.
 
 A profile names its engine. Concrete model requests still route through their
-entry engine. Existing engine start/stop APIs, saved intent and on-demand wake
+entry engine. Existing saved intent and private on-demand wake
 remain available under their existing admission rules. Native N23, visual,
 multi-engine, Windows and assembled-source acceptance remain pending.
 
@@ -87,8 +87,8 @@ multi-engine, Windows and assembled-source acceptance remain pending.
 | Node telemetry             | Integrated                      | Paired remotes use the broker-backed fresh getter; self and unpaired discovery retain direct `/v1/node-info`; remote OS remains backend-limited |
 | Manual nodes               | Complete with local persistence | Broker owns probing, proxy registration, and persistence; Electron's old entries are migrated once                                              |
 | llama.cpp backend          | Integrated                      | Desktop and TUI expose install, lifecycle, catalog pull, inventory, load/unload, endpoints, routing, and demo traffic                            |
-| Local engine lifecycle     | Complete                        | Install, start, stop, uninstall, update, and port configuration                                                                                 |
-| Remote engine lifecycle    | Partial                         | Remote install, start, stop, status, and model pull are supported                                                                               |
+| Local engine lifecycle     | Complete                        | Install, uninstall, update, state, and port configuration; no start, stop, restart or On/Off control |
+| Remote engine lifecycle    | Partial                         | Remote install, status, and model pull are supported; no start or stop control |
 | Engine models              | Partial                         | Core list, pull, load, unload, and supported delete actions are wired                                                                           |
 | Engine version metadata    | Backend-limited                 | The backend status surface does not provide a complete version/install-owner/update contract                                                    |
 | Errors                     | Complete                        | Broker-relayed registry with peer synchronization                                                                                               |
@@ -328,7 +328,6 @@ port state.
 Personal AI Router supports local:
 
 - install and uninstall;
-- start and stop;
 - managed update;
 - engine and proxy port changes;
 - desired-state restoration across app restarts;
@@ -344,11 +343,9 @@ waits for it to exit with no timeout: SIGTERM to the process group on Unix
 (never escalated to SIGKILL) and `taskkill /T /F` on Windows (its windowless
 engines cannot receive a graceful close).
 
-`engine:stop` records the OFF intent even when it returns an error. The backend
-reclaims an orphaned managed engine left on its own port, and declines only a
-genuinely foreign listener (with an actionable error). Personal AI Router treats the saved
-desired state as authoritative and surfaces a stop error as guidance, not as a
-sign the OFF choice was discarded.
+Start, stop and restart RPCs and peer start/stop routes are removed.
+`engine:wake` and `engine:sleep` are broker-private and refused from clients
+and peers. Settings application may still restart an engine internally.
 
 Desktop consumes local saved intent through `engine:intent` and
 `engine:intent-changed`, preserving required `enabledByEngine` booleans and
@@ -359,19 +356,17 @@ API feeds the existing engine-status store. Unavailable or invalid readback,
 disconnect and restart clear both maps together to null. Origin does not change
 lifecycle status or authorize controls; no desktop origin controls are added.
 
-For ease of use, Personal AI Router issues starts in two additional cases and
-keeps no auto-start list of its own: every install sends `engine:install` with
-`start: true`, so a successful install (or managed update) starts the engine;
-and on the first app open Personal AI Router starts every already-installed local
-engine once. Both paths rely on the backend recording desired-enabled as a side
-effect of start, so `nvpair-engine-manager` remains the single owner of
-desired-state persistence and restoration.
+Install still sends `engine:install` with `start: true`; the install start
+option remains. First-open desktop startup does not start installed engines.
+`nvpair-engine-manager` retains desired-state persistence and restoration until
+phase 15. This does not yet make every installed engine run while available.
+Phase 11 must not be installed without phase 15.
 
 Personal AI Router synthesizes one centralized pending-action state while waiting for
 terminal backend notifications. It never treats optimistic state as
 authoritative.
 
-Remote cluster support includes status, install, start, stop, model pull, and
+Remote cluster support includes status, install, model pull, and
 remote model load, unload (eject), and delete via the `ec` surface. Uninstall
 and update remain local-only. A refusal of any of these with `-32011`
 is reported with the neutral veto plus the
@@ -413,7 +408,7 @@ llama.cpp exposes Load, Eject, and Delete in the model manager. Any
 other engine engine-manager registers, such as a locally configured fork, is
 listed once installed, with its descriptor's label and only the operations its
 `engine:descriptors` entry declares. An engine without a descriptor here (a
-paired node's variant) shows status and start/stop only.
+paired node's variant) shows status without start/stop controls.
 User-configurable keep-alive / expiry controls remain unsupported; managed
 llama.cpp uses its fixed five-minute idle sleep.
 

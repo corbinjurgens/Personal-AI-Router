@@ -816,10 +816,7 @@ func (b *Broker) notifyClients(method string, params any) {
 	}
 }
 
-// handlePolicyRequest serves the broker-owned node policy methods, and holds
-// back engine:wake while the node is not available. It reports whether it
-// answered the message; an engine:wake that may proceed falls through to the
-// ordinary engine relay.
+// handlePolicyRequest serves the broker-owned node policy methods.
 func (b *Broker) handlePolicyRequest(msg *Message) bool {
 	switch msg.Method {
 	case methodPolicyGet, methodPolicySet, methodSetAvailability:
@@ -828,11 +825,6 @@ func (b *Broker) handlePolicyRequest(msg *Message) bool {
 	case methodWorkloadsCancel:
 		go b.handleWorkloadsCancel(msg)
 		return true
-	case engineWakeMethod:
-		if reason := b.wakeRefusal(); reason != "" {
-			_ = b.codec.RespondError(msg.ID, -32000, reason)
-			return true
-		}
 	}
 	return false
 }

@@ -99,33 +99,6 @@ func TestRemoteClientModelFilesUseOrdinaryHeaderBudget(t *testing.T) {
 	})
 }
 
-func TestRemoteStartUsesReadinessHeaderBudget(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !(r.Method == http.MethodPost && (r.URL.Path == controlStartPath || r.URL.Path == controlStopPath)) {
-			http.NotFound(w, r)
-			return
-		}
-		time.Sleep(100 * time.Millisecond)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"engine":"remote-only","running":true,"healthy":true}`))
-	}))
-	defer srv.Close()
-
-	base := http.DefaultTransport.(*http.Transport)
-	c := &remoteClient{
-		controlHTTP:      newRemoteHTTPClient(base, 20*time.Millisecond),
-		controlReadyHTTP: newRemoteHTTPClient(base, time.Second),
-		base:             srv.URL,
-	}
-	if _, err := c.postJSON(context.Background(), controlStartPath, "remote-only", startRequest{Engine: "remote-only"}); err != nil {
-		t.Fatalf("remote start was cut off by the ordinary response-header budget: %v", err)
-	}
-	if _, err := c.postJSON(context.Background(), controlStopPath, "llamacpp", stopRequest{Engine: "llamacpp"}); err == nil ||
-		!strings.Contains(err.Error(), "timeout awaiting response headers") {
-		t.Fatalf("ordinary remote call error = %v, want the ordinary bounded response-header timeout", err)
-	}
-}
-
 // A manifest-bound cold load and a remote delete use the longer response-header
 // budget; other model calls remain bounded.
 func TestRemoteSlowModelOperationsUseReadinessHeaderBudget(t *testing.T) {
@@ -186,11 +159,9 @@ func TestRemoteReadinessBudgetCoversEngineStartupAllowance(t *testing.T) {
 		engine string
 		want   bool
 	}{
-		{controlStartPath, "llamacpp", true},
 		{controlDeletePath, "llamacpp", true},
 		{controlLoadPath, "llamacpp", false},
 		{controlLoadPath, "peer-only", false},
-		{controlStopPath, "llamacpp", false},
 		{controlUnloadPath, "llamacpp", false},
 		{controlEnginesPath, "", false},
 	}
@@ -201,10 +172,10 @@ func TestRemoteReadinessBudgetCoversEngineStartupAllowance(t *testing.T) {
 	}
 }
 
-func TestRemoteStartHeaderWaitRemainsBounded(t *testing.T) {
+func TestRemoteDeleteHeaderWaitRemainsBounded(t *testing.T) {
 	release := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !(r.Method == http.MethodPost && r.URL.Path == controlStartPath) {
+		if !(r.Method == http.MethodPost && r.URL.Path == controlDeletePath) {
 			http.NotFound(w, r)
 			return
 		}
@@ -223,12 +194,12 @@ func TestRemoteStartHeaderWaitRemainsBounded(t *testing.T) {
 		base:             srv.URL,
 	}
 	started := time.Now()
-	_, err := c.postJSON(context.Background(), controlStartPath, "llamacpp", startRequest{Engine: "llamacpp"})
+	_, err := c.postJSON(context.Background(), controlDeletePath, "llamacpp", modelActionRequest{Engine: "llamacpp", Model: "tiny"})
 	if err == nil || !strings.Contains(err.Error(), "timeout awaiting response headers") {
-		t.Fatalf("remote start error = %v, want bounded response-header timeout", err)
+		t.Fatalf("remote delete error = %v, want bounded response-header timeout", err)
 	}
 	if elapsed := time.Since(started); elapsed > time.Second {
-		t.Fatalf("remote start took %s, want a prompt bounded failure", elapsed)
+		t.Fatalf("remote delete took %s, want a prompt bounded failure", elapsed)
 	}
 }
 
@@ -358,7 +329,7 @@ func TestRemoteManagementTypedDenialSurvivesRegularAndStreamingClients(t *testin
 		}))
 		defer srv.Close()
 
-		_, err := rmTestClient(srv).postJSON(context.Background(), controlStartPath, "fixture", startRequest{Engine: "fixture"})
+		_, err := rmTestClient(srv).postJSON(context.Background(), controlLoadPath, "fixture", modelActionRequest{Engine: "fixture", Model: "tiny"})
 		if code := rpcCode(err); code != codeRemoteManagementDenied {
 			t.Fatalf("regular typed error code = %d, want %d (%v)", code, codeRemoteManagementDenied, err)
 		}

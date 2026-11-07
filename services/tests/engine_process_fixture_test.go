@@ -39,7 +39,11 @@ func init() {
 }
 
 func runFixtureEngine() error {
-	ln, err := net.Listen("tcp", "127.0.0.1:"+os.Getenv("NVPAIR_TEST_SWITCH_PORT"))
+	port, err := strconv.Atoi(os.Getenv("NVPAIR_TEST_SWITCH_PORT"))
+	if err != nil || validateFixturePort(port) != nil {
+		return errors.New("fixture engine requires an isolated port")
+	}
+	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
 	if err != nil {
 		return err
 	}
@@ -125,7 +129,7 @@ func newEngineProcessFixtureAt(t *testing.T, base string, ports fixtureServicePo
 	t.Helper()
 	f := prepareEngineProcessFixture(t, base, ports, "")
 	f.start(t)
-	f.rpcOK(t, "engine:start", map[string]string{"engine": "llamacpp-custom"})
+	f.rpcOK(t, "engine:install", map[string]any{"engine": "llamacpp-custom", "start": true})
 	// Initialize every settings baseline before tests capture their revisions.
 	for _, engine := range engines.Names() {
 		f.rpcOK(t, "engine:get-settings", map[string]string{"engine": engine})

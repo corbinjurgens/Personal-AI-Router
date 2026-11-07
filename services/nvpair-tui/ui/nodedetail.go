@@ -58,9 +58,8 @@ const (
 // were always available on the broker, but there was nowhere to put them.
 //
 // Local and remote nodes differ in what they permit. The engine manager has
-// remote install, start, stop, and the four model operations, but no remote
-// restart, uninstall, or port change — those need process ownership on the
-// target host — so those verbs are hidden rather than offered and then failed.
+// remote install and model operations, but no remote uninstall. Settings are
+// relayed to the target, whose snapshot determines whether edits are allowed.
 type nodeDetail struct {
 	client *rpc.Client
 	node   nodeRow
@@ -237,9 +236,6 @@ var (
 	detailBackKey    = key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back"))
 	detailPaneKey    = key.NewBinding(key.WithKeys("left", "right", "h", "l"), key.WithHelp("h/l", "pane"))
 	detailInstallKey = key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "install"))
-	detailStartKey   = key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "start"))
-	detailStopKey    = key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "stop"))
-	detailRestartKey = key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "restart"))
 	detailUninstKey  = key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "uninstall"))
 	detailConfirmKey = key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "confirm"))
 	// In the engines pane only, so these do not collide with the models pane's
@@ -1516,12 +1512,6 @@ func (d *nodeDetail) handleEngineKey(msg tea.KeyMsg) tea.Cmd {
 	switch {
 	case key.Matches(msg, detailInstallKey):
 		return d.lifecycle(engine, "install")
-	case key.Matches(msg, detailStartKey):
-		return d.lifecycle(engine, "start")
-	case key.Matches(msg, detailStopKey):
-		return d.lifecycle(engine, "stop")
-	case key.Matches(msg, detailRestartKey):
-		return d.lifecycle(engine, "restart")
 	case key.Matches(msg, detailUninstKey):
 		if d.remote() {
 			// Refused before arming, not after. The footer hides this key on a
@@ -1899,7 +1889,7 @@ func (d *nodeDetail) lifecycle(engine *engineStatus, op string) tea.Cmd {
 func (d *nodeDetail) openCatalog() tea.Cmd {
 	engine := d.pullTargetEngine()
 	if engine == "" {
-		d.status.error("start an engine before downloading a model")
+		d.status.error("no running engine available for downloading a model")
 		return nil
 	}
 	if d.refuseModelOp(engine, modelActions["pull"]) {
@@ -2221,7 +2211,7 @@ func (d *nodeDetail) refreshEngines() {
 	}
 	d.engineTable.SetRows(rows)
 	// The engine list is briefly empty on a peer whose first read fails, and a
-	// cursor left at -1 disables install, start, stop, and the port editors for
+	// cursor left at -1 disables install, uninstall, and the port editors for
 	// the life of the screen.
 	restoreCursor(&d.engineTable, len(rows))
 }
@@ -2689,7 +2679,7 @@ func (d *nodeDetail) emptyModelsHint() string {
 		// what cannot be seen from outside the cluster.
 		return "  No models advertised by this node."
 	case !d.anyEngineRunning():
-		return "  No models reported - start an engine to see its models."
+		return "  No models reported - no engine is running."
 	case d.remote():
 		return "  No models reported by this node's engines."
 	default:
@@ -2750,13 +2740,13 @@ func (d *nodeDetail) Help() []key.Binding {
 	}
 	bindings := []key.Binding{detailBackKey, detailPaneKey, detailPerformanceKey}
 	if d.pane == detailEngines {
-		bindings = append(bindings, detailInstallKey, detailStartKey, detailStopKey)
+		bindings = append(bindings, detailInstallKey)
 		// The settings keys are offered on a peer too: the engine manager
 		// relays them, and whether a particular engine will accept the write
 		// is the snapshot's answer, given when the key is pressed.
 		bindings = append(bindings, detailPortKey, detailProxyKey, detailArgsKey)
 		if !d.remote() {
-			bindings = append(bindings, detailRestartKey, detailUninstKey)
+			bindings = append(bindings, detailUninstKey)
 		}
 		return bindings
 	}

@@ -137,7 +137,7 @@ func TestE2EStdinCloseStopsEngine(t *testing.T) {
 	}
 
 	m := startE2EManager(t, cfg, home)
-	send(t, m.stdin, 1, "engine:start", map[string]any{"engine": "fake"})
+	send(t, m.stdin, 1, "engine:install", map[string]any{"engine": "fake", "start": true})
 	var started EngineStatus
 	if err := json.Unmarshal(waitResult(t, m.frames, "1", 20*time.Second), &started); err != nil || !started.Running {
 		t.Fatalf("start status=%+v err=%v", started, err)

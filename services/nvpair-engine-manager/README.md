@@ -403,7 +403,7 @@ pending; native accuracy, occupancy and calibration remain unverified.
 A config-driven control plane for local inference engines. The bundled
 manifest supports llama.cpp. It manages everything about
 an engine **except serving inference**: detect, user-mode install,
-start/stop/restart, health, and config-declared actions. Adding an engine
+internal lifecycle, health, and config-declared actions. Adding an engine
 is a JSON manifest, not code.
 
 The bundled manifests under `manifests/` are the working reference for manifest
@@ -561,9 +561,6 @@ Requests (caller → service):
 | `engine:status` | `{ engine }` | `EngineStatus`, including optional `buildInfo` (running engine claim) and `buildId` (content fingerprint), cleared on stop; inspection exposes the same observed values as `nativeBuild` and `nativeBuildId` |
 | `engine:install` | `{ engine, start?, port?, bind? }` | `EngineStatus` (after install; also starts it if `start:true`) |
 | `engine:uninstall` | `{ engine }` | `EngineStatus` (after removal) |
-| `engine:start` | `{ engine, port?, bind? }` | `EngineStatus` (after readiness) |
-| `engine:stop` | `{ engine }` | `EngineStatus` |
-| `engine:restart` | `{ engine }` | `EngineStatus` |
 | `engine:set-port` | `{ engine, port }` | `EngineStatus` (after rebind) |
 | `engine:action` | `{ engine, action, params }` | the engine's raw response. `action:"pull_model"` is streamed: it emits live `engine:pull-progress` notifications and returns the pull's terminal result (see below). An action whose manifest declares `restart_after` restarts a running engine before replying, so the response also means the engine is back and healthy |
 | `engine:logs` | `{ engine }` | `{ lines: [LogLine] }` |
@@ -578,10 +575,8 @@ Requests (caller → service):
 | `engine:cancel-model-copy` | `{ opId }` | `{ cancelled: boolean }`; local channel only, exact active operation |
 | `engine:active-model-copies` | `{}` | `{ operations: [{ opId, sourceNodeId, destinationNodeId, engine, model, expectedExportId?, progress? }] }`; memory-only active snapshot |
 | `engine:model-copy-capabilities` | `{ nodeId, engine }` | Caller-specific versioned copy capabilities described below |
-| `engine:remote-start` | `{ node, engine, port? }` | `EngineStatus` from the remote node (always the manifest's `runtime.bind`; no per-call bind override on the remote path) |
-| `engine:remote-stop` | `{ node, engine }` | `EngineStatus` from the remote node |
-| `engine:wake` | `{ engine }` | `EngineStatus` — starts the engine only if its saved intent is On (an engine with no saved intent counts as Off and is refused). Never changes the saved intent. Refused once shutdown has begun |
-| `engine:sleep` | `{ engine }` | `EngineStatus` — stops the engine the way `engine:restart` and shutdown do, without recording Off intent, so `engine:wake` or the next launch's restore can start it again |
+| `engine:wake` | `{ engine }` | Broker-internal `EngineStatus`: starts only if saved intent is On (unknown counts as Off). Intent-neutral; refused during shutdown |
+| `engine:sleep` | `{ engine }` | Broker-internal `EngineStatus`: stops without recording Off intent, allowing a later wake or restore |
 | `engine:intent` | — | `{ enabledByEngine: { <engine>: bool }, offByEngine: { <engine>: "local" \| "peer" } }` — one saved-intent snapshot for registered engines, without taking any engine's lifecycle lock |
 | `engine:load-model` | `{ engine, model }` | the engine's raw response — loads one model through the manifest's `load` binding, the same one the remote load uses |
 | `engine:unload-model` | `{ engine, model }` | the engine's raw response — unloads one model through the manifest's `unload` binding, the same one the remote unload uses |
@@ -606,10 +601,13 @@ an unresolved spawn-to-PID-save crash window, foreign listeners and indeterminat
 probes cannot establish stop evidence, so node pause remains draining and refuses
 success. The record cannot authorize starting an unsupported engine.
 
-`engine:wake`, `engine:sleep` and `engine:intent` exist for the broker's node
-policy (pause, idle stop, start on demand). `engine:start` and `engine:stop`
-remain the only operations that record what the user wants; wake and sleep take
-the engine's lifecycle lock like `engine:restart` but only act on that record.
+`engine:wake` and `engine:sleep` are broker-internal lifecycle methods, refused
+from local clients, component-addressed clients and peers. Clients and peers have
+no engine start, stop or restart operation. `engine:intent` exposes saved intent
+for the broker's existing node policy (pause, idle stop, start on demand).
+Wake and sleep hold the lifecycle lock without changing that intent. Restore,
+internal Executor operations and the install `start` option retain their existing
+intent behavior; intent removal belongs to phase15.
 
 `engine:intent` and `engine:intent-changed` share the `engineintent.Snapshot`
 wire type. Both maps are always present and derived from one desired-store read.
@@ -653,8 +651,8 @@ UI converges even if its synchronous call already timed out),
 `engine:remote-progress{opId, node, engine, op, stage, percent?, message}`
 (relayed live progress for a remote install/pull; a model copy adds
 `file?, bytesDone?, bytesTotal?`),
-`engine:intent-changed{enabledByEngine, offByEngine}` (pushed after an explicit start, stop,
-restart or install-and-start changes saved intent; wake and sleep never do), and
+`engine:intent-changed{enabledByEngine, offByEngine}` (pushed after an internal
+Executor operation or install-and-start changes saved intent; wake and sleep never do), and
 `policy:request{id, method, caller, params}` / `policy:cancel{id}` (a paired
 node's node-policy call relayed to the broker, answered by the broker's
 `policy:reply{id, result, error?, errorCode?}`; see below), and — for the error
@@ -712,13 +710,13 @@ progress frame up as `engine:remote-progress`, and settles the request with the
 terminal result. They fail if this node isn't clustered or the target isn't a
 pinned cluster peer. See "Remote engine management" below.
 
-`engine:install`, `engine:start`, `engine:stop`, `engine:restart`,
+`engine:install`, `engine:uninstall`,
 `engine:set-port`, and `engine:action` run in their own goroutine on the
 service side, so the read loop never blocks and their responses arrive when
 the op finishes.
 
 `engine:set-port` is the **persistent** port setter (distinct from the
-one-shot `engine:start {port}` override, which reverts on the next restart).
+one-shot install-with-start `port` override, which reverts on the next restart).
 It validates `1-65535`, persists the choice as a manifest override (a
 `{ engine, runtime: { port } }` delta written
 to the per-user `engines/` dir that deep-merges onto the bundled manifest, so
@@ -731,8 +729,8 @@ settings and other platform overrides are preserved. A host-platform port is
 updated when necessary so it cannot shadow the saved value on restart.
 Malformed override files fail the save instead of being replaced.
 Because the chosen port lives in the
-effective manifest, restore is automatic: a normal `engine:start` (no explicit
-port) and the adopt-on-fixed-port path both come up on the retained port.
+effective manifest, restore is automatic: an internal start with no explicit
+port and the adopt-on-fixed-port path both come up on the retained port.
 Moving a **running, adopted** engine is **refused** with an error (nothing is
 persisted) — NVPAIR can't relocate a process it didn't start; see Adoption below.
 
@@ -797,8 +795,8 @@ preset retain their existing fixed arguments.
 
 ```
 NotInstalled --engine:install--> (HTTPS download + verify-if-pinned + user-mode run) --> Stopped
-Stopped      --engine:start----> (adopt if already serving the port, else spawn) --> Running --health--> Running
-Running      --engine:stop-----> (stop signal, bounded grace, force if needed) --> Stopped
+Stopped      --internal wake---> (adopt if already serving the port, else spawn) --> Running --health--> Running
+Running      --internal sleep--> (stop signal, bounded grace, force if needed) --> Stopped
 ```
 
 Detect uses the manifest's `detect` paths. Install is one-shot and
@@ -820,15 +818,15 @@ reclaim, so a shared group retains its unrelated processes.
 
 ### Adoption — start may attach to an engine it didn't launch
 
-Before spawning, `engine:start` **probes the chosen port's readiness
+Before spawning, the Executor **probes the chosen port's readiness
 endpoint**, including any manifest-declared JSON identity. If a compatible
 service answers there — the engine's own desktop
 app, or an instance left running from a previous session — the service **adopts** that instance: it marks the engine
 `running` without launching its own, rather than spawning a duplicate that
 would only collide on the port. Consequences worth knowing:
 
-- **An adopted engine has no child process the service owns**, so `engine:stop`
-  (and `engine:restart`'s stop phase, and shutdown's cleanup) resolves the PID
+- **An adopted engine has no child process the service owns**, so internal
+  lifecycle cleanup resolves the PID
   bound to the engine's port and terminates it **only when that process is
   running the very binary NVPAIR manages for the engine** — reclaiming an orphan
   a prior run left on our own managed port (e.g. an engine process whose
@@ -851,15 +849,10 @@ would only collide on the port. Consequences worth knowing:
   an existing executable with that literal suffix retains its distinct identity.
   Linux confirms an existing suffixed file against the `/proc` executable's
   file identity; a different file at that spelling makes inspection unknown.
-- **`engine:stop` may return an error while still saving OFF.** When stop
-  declines a foreign listener it returns an actionable error, but the user's
-  OFF choice is persisted anyway — UI layers should treat the saved desired
-  state as authoritative (the engine will not restore on restart) and surface
-  the error as guidance, not as proof the OFF intent was lost. The same applies
-  to cluster `POST /v1/engines/stop`, which may answer HTTP 500 even though OFF
-  was recorded. A local stop records local provenance and cancels accepted peer
-  activation; a cluster stop records peer provenance. Either ordinary Off permits
-  a fresh explicitly authorized peer start.
+- **Internal `Executor.Stop` still saves Off on an error.** A foreign listener
+  refusal preserves saved Off with local provenance and cancels accepted peer
+  activation. Sleep and shutdown preserve intent. Existing saved Off does not
+  veto an authorized peer install-with-start.
 - **`engine:set-port` on a running adopted engine is refused** (returns an
   error, persists nothing). Moving it would mean killing the old listener and
   spawning a new one; since NVPAIR can't kill what it didn't start, it errors
@@ -875,8 +868,8 @@ would only collide on the port. Consequences worth knowing:
 
 To get a **NVPAIR-owned, stoppable** instance, start it on a port nothing is
 already serving — the probe misses, so the service spawns and owns the child
-(tracked in `st.proc`), and a later `engine:stop` / `engine:restart` actually
-terminates it. `engine:set-port` to a free port does exactly this; quitting the
+(tracked in `st.proc`), so internal lifecycle cleanup can terminate it.
+`engine:set-port` to a free port does exactly this; quitting the
 external app first and re-starting on its usual port works too. Auto-assigned
 ports (manifest `runtime.port: 0`) never adopt — there's no fixed address to
 probe — so they always spawn an owned process.
@@ -957,7 +950,7 @@ registry explicitly classifies every route as read or mutation, including POST
 reads such as policy get and settings get/preview. Before dispatching any
 mutation, the common gate freshly reads
 `clustertrust.Mesh.RemoteManagement` for the verified mTLS UUID. Install, pull,
-start/stop, load/unload/delete, settings apply, policy edits and
+load/unload/delete, settings apply, policy edits and
 pause/resume all require an effective allow. Unclassified routes fail closed.
 Missing, corrupt, pending or changing permission state denies; an earlier UI
 read never authorizes a request. Broker-owned writes recheck at their locked
@@ -1001,8 +994,6 @@ Endpoints (all under `/v1`):
 | `GET /v1/remote-management` | JSON | caller-only effective permission, no grant list or setter |
 | `POST /v1/engines/install` | NDJSON stream | remote install (+ optional start) with live progress |
 | `POST /v1/models/pull` | NDJSON stream | remote model pull with live progress |
-| `POST /v1/engines/start` | JSON | remote start → `EngineStatus` |
-| `POST /v1/engines/stop` | JSON | remote stop → `EngineStatus` |
 | `GET /v1/models/files?engine=&model=` | NDJSON stream | the model's files with size and sha256, for a peer copying it |
 | `GET /v1/models/file?engine=&model=&path=` | file bytes | one listed file, with HTTP Range support |
 | `POST /v1/node-policy/get` | JSON | the target broker's peer projection of its policy, as for `engine:remote-policy-get` |
@@ -1050,7 +1041,7 @@ policy, persistence, activation, push or notification effects. See the
 [broker contract](../nvpair-ui-broker/README.md#model-inference-settings-and-target-owned-locks).
 
 **Off and pause.** Ordinary Off, whether local, peer, legacy or unknown,
-does not prohibit a new granted peer start or load. Load never implicitly
+does not prohibit a new granted peer install-with-start or load. Load never implicitly
 starts an Off engine: its real stopped-runtime error remains an ordinary error.
 Automatic restore/wake/residency still require saved On. `offBy` retains diagnostic
 and operation provenance: a peer Off never downgrades existing Off provenance,
@@ -1060,7 +1051,7 @@ and On clears it. A new local Stop can cancel an already accepted operation with
 After a fresh grant check, the common `ec` registry gate returns HTTP 503 for
 every mutation until the first projection. A known `managementBlocked` returns
 HTTP 409 `{"code":"local_veto","error":"This node is paused. Resume it on this node before managing it remotely."}`.
-This covers install, start, stop, load, unload, delete, pull, settings apply
+This covers install, load, unload, delete, pull, settings apply
 and policy set. Availability set alone passes the pause check to
 the broker, which permits configured Pause/Resume of either origin, refuses
 Resume of Halt, and accepts repeated Pause of completed local Halt as a no-op.
@@ -1070,7 +1061,7 @@ remain admitted. Grant denial keeps `-32012` precedence.
 Only a local Resume clears Halt or a pause whose mode is unknown.
 
 Local start/load also refuse known pause; local reads, configuration,
-stop and unload remain usable. Accepted starts/loads are canceled
+internal stop and unload remain usable. Accepted starts/loads are canceled
 for either pause origin, and settings/recovery cannot reactivate an engine.
 Accepted downloads may finish without activation. HTTP coded bodies, stream terminal errors,
 JSON-RPC relays preserve `-32011` and the target's message.
@@ -1491,7 +1482,7 @@ mTLS itself** (and dials peers' `ec` surfaces with the same pinned identity),
 matching how `nvpair-errors` and `nvpair-workload-manager` handle their own
 cluster traffic. Managed engines bind **loopback by default**, but a manifest's
 `runtime.bind` may open an inference engine to the LAN, overridable per call via
-`engine:start {bind}`; readiness/health probes always target loopback.
+install-with-start's `bind` option; readiness/health probes always target loopback.
 Downloads are **HTTPS-only** (plain `http` only from loopback) and verified
 against the manifest's `sha256` when one is pinned; an unpinned fetch runs
 with a loud warning.
@@ -1511,12 +1502,10 @@ to fence owner evidence and concurrent work. Lifecycle, settings, installation,
 model actions, residency, wake/sleep and restore use their existing executor
 owners; a profile names its engine.
 
-Ordinary `engine:stop` retains its saved-Off intent and status response. The
-stdio `verifyStop: true` option instead returns `stopObservation` with
-`intent`, `running`, `healthy`, `observedAt` and `terminationVerified`.
-Success requires saved Off and verified physical termination. Nullable runtime
-observations and a timestamp do not replace termination proof. Precise managed
-image/endpoint checks, failed-reclaim fences and foreign-listener refusal remain.
+Internal `Executor.Stop` retains saved-Off intent. Broker sleep and shutdown
+preserve it, and pause still requires positive `terminationVerified` evidence.
+Precise managed image/endpoint checks, failed-reclaim fences and foreign-listener
+refusal remain. There is no public stop response or stop-verification option.
 
 The existing desired-state decoder ignores retired transaction fields in place
 without writing on load. The strict raw saved-state read for build-apply owner

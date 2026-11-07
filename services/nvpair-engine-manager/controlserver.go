@@ -197,8 +197,6 @@ func (s *controlServer) routes() []controlRoute {
 		{controlDeletePath, http.MethodPost, controlMutation, "engine-delete", ignoreCaller(s.handleDelete)},
 		{controlModelFilesPath, http.MethodGet, controlRead, "model-files", ignoreCaller(s.handleModelFiles)},
 		{controlModelFilePath, http.MethodGet, controlRead, "model-file", ignoreCaller(s.handleModelFile)},
-		{controlStartPath, http.MethodPost, controlMutation, "engine-start", ignoreCaller(s.handleStart)},
-		{controlStopPath, http.MethodPost, controlMutation, "engine-stop", ignoreCaller(s.handleStop)},
 		{controlRemoteManagementPath, http.MethodGet, controlRead, remoteManagementReadFamily, s.handleRemoteManagement},
 		{controlCopyPath, http.MethodPost, controlMutation, "model-copy", s.handleCopy},
 		{controlCopyCapabilitiesPath, http.MethodGet, controlRead, "model-copy-capabilities", s.handleCopyCapabilities},

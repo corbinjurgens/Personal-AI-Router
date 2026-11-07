@@ -25,7 +25,6 @@ type remoteParam struct {
 	Node   string          `json:"node"`
 	Engine string          `json:"engine,omitempty"`
 	Start  bool            `json:"start,omitempty"`
-	Port   int             `json:"port,omitempty"`
 	Model  string          `json:"model,omitempty"`
 	Params json.RawMessage `json:"params,omitempty"`
 }
@@ -145,22 +144,6 @@ func (m *Manager) runRemote(ctx context.Context, msg *Message) {
 			path = controlDeletePath
 		}
 		res, err := client.postJSON(ctx, path, p.Engine, modelActionRequest{Engine: p.Engine, Model: p.Model})
-		m.respondOrErr(msg, res, err)
-
-	case "engine:remote-start":
-		if p.Engine == "" {
-			m.codec.RespondError(msg.ID, -32602, "engine is required")
-			return
-		}
-		res, err := client.postJSON(ctx, controlStartPath, p.Engine, startRequest{Engine: p.Engine, Port: p.Port})
-		m.respondOrErr(msg, res, err)
-
-	case "engine:remote-stop":
-		if p.Engine == "" {
-			m.codec.RespondError(msg.ID, -32602, "engine is required")
-			return
-		}
-		res, err := client.postJSON(ctx, controlStopPath, p.Engine, stopRequest{Engine: p.Engine})
 		m.respondOrErr(msg, res, err)
 
 	default:

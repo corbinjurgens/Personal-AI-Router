@@ -1481,7 +1481,7 @@ func TestWakeRefusedWhenPausedOrSavedOff(t *testing.T) {
 	r.mu.Unlock()
 	b.handleMessage(clientRequest(1, engineWakeMethod, map[string]string{"engine": "llamacpp"}))
 	resp := out.waitFrame(t, "engine:wake refusal", isResponse(1))
-	if resp.Error == nil || !strings.Contains(resp.Error.Message, "paused") {
+	if resp.Error == nil || resp.Error.Code != -32601 {
 		t.Fatalf("engine:wake while paused = %+v", resp)
 	}
 	b.wakeOnDemand("llamacpp")
@@ -1500,7 +1500,10 @@ func TestWakeRefusedWhenPausedOrSavedOff(t *testing.T) {
 		return len(calls) == 1 && calls[0].method == engineWakeMethod && strings.Contains(string(calls[0].params), "llamacpp-custom")
 	})
 	b.handleMessage(clientRequest(2, engineWakeMethod, map[string]string{"engine": "llamacpp-custom"}))
-	engine.waitFor("relayed client wake", func(calls []policyCall) bool { return len(calls) == 2 })
+	resp = out.waitFrame(t, "available client wake refusal", isResponse(2))
+	if resp.Error == nil || resp.Error.Code != -32601 || len(engine.snapshot()) != 1 {
+		t.Fatalf("client wake escaped internal refusal: %+v, calls=%v", resp, engine.snapshot())
+	}
 }
 
 func TestAdmissionUnloadUnloadsThoseModels(t *testing.T) {

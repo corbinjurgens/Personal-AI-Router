@@ -9,7 +9,7 @@ An **engine** is the local inference runtime Personal AI Router (PAIR) uses to
 run models. Today that means llama.cpp on a given machine.
 PAIR can install and run it for you, or work with an engine already running on
 its usual port. This page explains what you can
-expect when you install, start, stop, update, or remove an engine.
+expect when you install, configure, update, or remove an engine.
 
 For first-time setup, refer to [Getting started](getting-started.mdx). To change
 an engine's ports or launch command, refer to
@@ -38,7 +38,7 @@ In the desktop application:
 2. Select a machine (node).
 3. Use that node's **Engine settings**.
 
-From there you can install or remove an engine, turn it on or off, change its
+From there you can install or remove an engine, inspect its running state and build, change its
 port when PAIR manages it, download models, and review progress while long
 operations run.
 
@@ -54,9 +54,6 @@ On a machine with no desktop, the [terminal interface](terminal-interface.mdx)
 handles these engine lifecycle actions:
 
 - Install an engine.
-- Start an engine.
-- Stop an engine.
-- Restart an engine.
 - Uninstall an engine.
 - Pull a model.
 - List, load, and unload models.
@@ -98,21 +95,16 @@ To download models:
 
 ![The Install engines dialog with an engine downloading, reporting progress as it installs.](assets/onboarding/engine-lifecycle/01-engine-installing.png)
 
-## Starting and Stopping an Engine
+## Engine State and Availability
 
-Use the engine On/Off control in **Engine settings** to start or stop an
-NVPAIR-installed engine.
-
-- **Start** brings the engine up and marks it as something PAIR should keep
-  running for you across relaunches. Refer to
-  [What Persists Across Restarts](#what-persists-across-restarts).
-- **Stop** turns it off and remembers that you want it off.
-- Progress and status update live on the Overview and engine views. Wait for the
-  control and status text to settle before assuming the change failed.
+Engine settings shows installed build, running state and operation progress.
+Users and paired devices have no engine Start, Stop, Restart or On/Off control.
+Use node-wide Pause or local-only Halt to control availability. Settings Apply
+may restart an engine internally when required by a configuration change.
 
 An engine must be **running** before **Endpoints** or your applications can use
-its models. If **Endpoints** says **No engines are running**, start an engine
-first.
+its models. If **Endpoints** says **No engines are running**, check node
+availability, engine state and service errors.
 
 ## Updating and Uninstalling an Engine
 
@@ -150,7 +142,7 @@ architecture guide.
 ## Managing Engines on Other Machines
 
 After systems are paired, you can view another machine's engines from
-**Overview** and, where supported, start or stop engines and pull models on that
+**Overview** and, where supported, install engines and pull models on that
 peer.
 
 Some actions stay **local only** on each machine, for example uninstall, update,
@@ -169,27 +161,26 @@ eligible for a given request.
 
 ## What Persists Across Restarts
 
-PAIR remembers whether each local NVPAIR-installed engine should be on or off.
+PAIR still retains saved engine intent for restoration and idle policy.
 
 - When you quit or restart PAIR, it stops running engines cleanly as part of
   shutdown.
 - The next time PAIR starts, it restores engines that were left **on**, so you
   do not have to start each engine again.
-- On the **first** open of the application on a machine, PAIR also starts
-  engines that are already installed once, so a fresh setup is ready to use.
+- Opening the application for the first time does not start already-installed
+  engines.
 
-If you stopped an engine on purpose, it stays stopped after relaunch until you
-start it again.
+An engine saved Off remains ineligible for restoration and private wake.
 
 ## Working with Models
 
-The lifecycle of the **engine** (install, start, and stop) is separate from
+The lifecycle of the **engine** (install and uninstall) is separate from
 working with **models** (download, load, unload, and delete):
 
 | Goal | Instructions |
 | ---- | ------------ |
 | Get the runtime on the machine | **Install** on the engine's card |
-| Make the runtime available for requests | The engine On/Off control |
+| Control node availability | Node-wide Pause or local-only Halt |
 | Get a model's weights onto the machine | **Add model** |
 | Hold a model in memory, when the engine needs it | **Load** |
 | Free that memory without deleting anything | **Eject** |
@@ -200,8 +191,8 @@ brings it back without fetching it again.
 
 ![An engine's model list showing the Load, Eject, and Delete actions against a downloaded model.](assets/onboarding/engine-lifecycle/04-model-actions.png)
 
-On a headless machine the terminal interface covers installing, starting,
-stopping, restarting, and uninstalling an engine; pulling a model; and listing,
+On a headless machine the terminal interface covers installing
+and uninstalling an engine; pulling a model; and listing,
 loading, or unloading models. Operations it does not have, such as deleting a
 model or updating an engine, need the desktop application on that machine.
 
@@ -229,7 +220,7 @@ These habits avoid the most common engine problems:
   machine and keep a compatible engine running there.
 - Prefer PAIR's engine controls for an NVPAIR-installed engine. Editing it by
   hand alongside them can confuse ports and status.
-- If an engine start, stop or install seems stuck, open **Settings > Service**, check
+- If an engine operation seems stuck, open **Settings > Service**, check
   service health and logs, then retry. Refer to
   [Troubleshooting](troubleshooting.mdx).
 

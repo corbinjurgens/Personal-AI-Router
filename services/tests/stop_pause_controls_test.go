@@ -63,7 +63,11 @@ const stopPauseResponseBody = `{"model":"switch-model","choices":[{"index":0,"me
 // Native fake only: production owns lifetime, admission and availability. The
 // parent control request holds execution until release or upstream cancellation.
 func runStopPauseModel() error {
-	ln, err := net.Listen("tcp", "127.0.0.1:"+os.Getenv("NVPAIR_TEST_STOP_PAUSE_PORT"))
+	port, err := strconv.Atoi(os.Getenv("NVPAIR_TEST_STOP_PAUSE_PORT"))
+	if err != nil || validateFixturePort(port) != nil {
+		return errors.New("stop/Pause model requires an isolated port")
+	}
+	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
 	if err != nil {
 		return err
 	}
@@ -313,6 +317,11 @@ type stopPauseServiceFixture struct {
 func newStopPauseServiceFixture(t *testing.T, s *remoteServiceFixture, configure func(*engineProcessFixture)) *stopPauseServiceFixture {
 	t.Helper()
 	e := prepareEngineProcessFixture(t, s.configDir, s.ports, s.scannerPath)
+	// Saved Off is fixture input until phase 15 removes engine intent.
+	jointWriteJSON(t, filepath.Join(jointAppDir(s.configDir), "engine-bin", "engine-state.json"), map[string]any{
+		"engines": map[string]bool{"llamacpp-custom": false},
+		"offBy":   map[string]string{"llamacpp-custom": "local"},
+	})
 	if configure != nil {
 		configure(e)
 	}
@@ -668,7 +677,7 @@ func newStopPauseFixture(t *testing.T) *stopPauseFixture {
 
 func (f *stopPauseFixture) startModel(t *testing.T) {
 	t.Helper()
-	f.call(t, "engine:start", map[string]string{"engine": "llamacpp"})
+	f.call(t, "engine:install", map[string]any{"engine": "llamacpp", "start": true})
 	assertStopPauseNativeLifetime(t, f.engine)
 	var inventory struct {
 		Loaded map[string][]string `json:"loadedByEngine"`
@@ -906,10 +915,10 @@ func testStopPauseFence(t *testing.T, mode string, peerOrigin bool) {
 	f.assertPaused(t, origin)
 	before := readPolicyBytes(t, f.service.policyPath())
 	// The ec registry authorizes before executing mutation handlers. Include
-	// nominally harmless remote stop/unload. Availability has its own rule.
+	// nominally harmless remote unload. Availability has its own rule.
 	for _, client := range []*http.Client{f.service.peer, f.service.allowed} {
 		for _, path := range []string{
-			"/v1/engines/start", "/v1/engines/stop", "/v1/engines/install",
+			"/v1/engines/install",
 			"/v1/models/load", "/v1/models/unload", "/v1/models/pull", "/v1/models/delete", "/v1/models/copy",
 			"/v1/node-policy/set",
 			"/v1/engine-settings/apply",
@@ -940,8 +949,11 @@ func testStopPauseFence(t *testing.T, mode string, peerOrigin bool) {
 			t.Fatal("initiating peer repeated Pause changed saved policy")
 		}
 	}
-	for _, method := range []string{"engine:start", "engine:load-model"} {
-		params := map[string]string{"engine": "llamacpp"}
+	for _, method := range []string{"engine:install", "engine:load-model"} {
+		params := map[string]any{"engine": "llamacpp"}
+		if method == "engine:install" {
+			params["start"] = true
+		}
 		if method == "engine:load-model" {
 			params["model"] = "switch-model"
 		}
@@ -953,7 +965,6 @@ func testStopPauseFence(t *testing.T, mode string, peerOrigin bool) {
 	policy := fetchServicePolicy(t, f.client).Policy
 	policy.Admission.MaxConcurrentPerModel = 3
 	setServicePolicy(t, f.client, policy)
-	f.call(t, "engine:stop", map[string]string{"engine": "llamacpp-custom"})
 	// Explicit unload can fail because its HTTP server was physically stopped;
 	// that transport failure must not be an availability veto or cause a wake.
 	unload, err := f.client.call(strconv.FormatInt(newRPCID(), 10), "engine:unload-model", mustMarshal(t, map[string]string{"engine": "llamacpp", "model": "switch-model"}), serviceCallTimeout)
@@ -1015,8 +1026,9 @@ func testStopPauseQueue(t *testing.T, pinned bool) {
 	var origin *stopPausePeer
 	if pinned {
 		f, origin = newStopPausePair(t)
-		// Keep the real origin's fallback engine locally Off through its owner.
-		origin.engine.rpcOK(t, "engine:stop", map[string]string{"engine": "llamacpp"})
+		// Pause the origin through its broker so it cannot execute fallback
+		// locally; existing remote execution remains available while paused.
+		origin.engine.rpcOK(t, "node:set-availability", map[string]string{"state": "paused", "pauseMode": "immediate"})
 	} else {
 		f = newStopPauseFixture(t)
 		f.startModel(t)
@@ -1344,7 +1356,6 @@ func testStopPauseDrain(t *testing.T, escalate bool) {
 func testStopPauseRestart(t *testing.T) {
 	f := newStopPauseFixture(t)
 	f.startModel(t)
-	f.call(t, "engine:stop", map[string]string{"engine": "llamacpp-custom"})
 	policy := fetchServicePolicy(t, f.client).Policy
 	profile := fixtureResidentProfile()
 	// Resident configuration requires a qualification reference. This is only
@@ -1490,7 +1501,7 @@ func newStopPausePair(t *testing.T) (*stopPauseFixture, *stopPausePeer) {
 	writePrivateBrokerEngineSettings(t, base, cluster, facades)
 	releasePeer()
 	e.start(t)
-	e.rpcOK(t, "engine:start", map[string]string{"engine": "llamacpp"})
+	e.rpcOK(t, "engine:install", map[string]any{"engine": "llamacpp", "start": true})
 	assertStopPauseNativeLifetime(t, e)
 	p := &stopPausePeer{engine: e, native: peerNative, id: peerID}
 	var inventory struct {

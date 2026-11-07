@@ -176,7 +176,7 @@ func waitsForEngineReadiness(path string, loadBudget time.Duration) bool {
 	if path == controlLoadPath {
 		return loadBudget > remoteResponseHeaderTimeout
 	}
-	return path == controlStartPath || path == controlDeletePath
+	return path == controlDeletePath
 }
 
 func newRemoteHTTPClient(base *http.Transport, responseHeaderTimeout time.Duration) *http.Client {
@@ -306,7 +306,7 @@ func (c *remoteClient) getRemoteManagement(ctx context.Context) (remoteManagemen
 }
 
 // postJSON POSTs body to a non-streaming ec endpoint and returns the raw JSON
-// response (e.g. an EngineStatus from start/stop).
+// response (e.g. a model operation result).
 func (c *remoteClient) postJSON(ctx context.Context, path, engine string, body any) (json.RawMessage, error) {
 	b, err := json.Marshal(body)
 	if err != nil {

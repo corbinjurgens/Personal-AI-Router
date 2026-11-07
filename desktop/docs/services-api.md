@@ -33,7 +33,6 @@
 - ⚠️ nvpair-engine-manager → engine:remote-inspect-model
 - ⚠️ nvpair-engine-manager → engine:remote-preview-settings
 - ⚠️ nvpair-engine-manager → engine:remote-set-stated-memory
-- ⚠️ nvpair-engine-manager → engine:restart
 - ⚠️ nvpair-engine-manager → engine:set-port
 - ⚠️ nvpair-engine-manager → engine:sleep
 - ⚠️ nvpair-engine-manager → engine:wake
@@ -69,10 +68,8 @@
 - ⚠️ nvpair-ui-broker → admission/wake
 - ⚠️ nvpair-ui-broker → discovery:node-discovered
 - ⚠️ nvpair-ui-broker → discovery:unsubscribe
-- ⚠️ nvpair-ui-broker → engine:restart
 - ⚠️ nvpair-ui-broker → engine:set-port
 - ⚠️ nvpair-ui-broker → engine:unsubscribe
-- ⚠️ nvpair-ui-broker → engine:wake
 - ⚠️ nvpair-ui-broker → workloads:unsubscribe
 - ⚠️ nvpair-workload-manager → performance:capabilities
 - ⚠️ nvpair-workload-manager → performance:publish
@@ -176,16 +173,11 @@
 | `engine:remote-preview-settings` | request (we call) | ⚠️ not called |
 | `engine:remote-pull-model` | request (we call) | ✅ yes |
 | `engine:remote-set-stated-memory` | request (we call) | ⚠️ not called |
-| `engine:remote-start` | request (we call) | ✅ yes |
-| `engine:remote-stop` | request (we call) | ✅ yes |
 | `engine:remote-unload-model` | request (we call) | ✅ yes |
-| `engine:restart` | request (we call) | ⚠️ not called |
 | `engine:set-port` | request (we call) | ⚠️ not called |
 | `engine:set-stated-memory` | request (we call) | ✅ yes |
 | `engine:sleep` | request (we call) | ⚠️ not called |
-| `engine:start` | request (we call) | ✅ yes |
 | `engine:status` | request (we call) | ✅ yes |
-| `engine:stop` | request (we call) | ✅ yes |
 | `engine:uninstall` | request (we call) | ✅ yes |
 | `engine:uninstall-managed` | request (we call) | ✅ yes |
 | `engine:unload-model` | request (we call) | ✅ yes |
@@ -429,16 +421,12 @@
 | `engine:intent-changed` | request (we call) | ✅ yes |
 | `engine:models-changed` | request (we call) | ✅ yes |
 | `engine:preview-settings` | request (we call) | ✅ yes |
-| `engine:restart` | request (we call) | ⚠️ not called |
 | `engine:set-port` | request (we call) | ⚠️ not called |
 | `engine:set-stated-memory` | request (we call) | ✅ yes |
-| `engine:start` | request (we call) | ✅ yes |
 | `engine:status` | request (we call) | ✅ yes |
-| `engine:stop` | request (we call) | ✅ yes |
 | `engine:subscribe` | request (we call) | ✅ yes |
 | `engine:uninstall` | request (we call) | ✅ yes |
 | `engine:unsubscribe` | request (we call) | ⚠️ not called |
-| `engine:wake` | request (we call) | ⚠️ not called |
 | `errors:get-initial` | request (we call) | ✅ yes |
 | `node/activity` | request (we call) | ➖ ignored |
 | `node/add` | request (we call) | ✅ yes |

@@ -54,8 +54,7 @@ import type {
 import { parseModelsResult, type ModelsResult } from './model-download'
 import { resolvePullCatchError } from './pull-error-handling'
 import { isServiceLogLevelEnabled, serviceLogLevel } from './service-log-level'
-import { engineManagerName, engineTypeFromManagerName } from '@/shared/utils/engines'
-import { isFirstRun } from '@/electron/config/ui-config'
+import { engineTypeFromManagerName } from '@/shared/utils/engines'
 import { createOverviewWindow } from '@/electron/window'
 import {
     parseClusterNodes,
@@ -357,12 +356,6 @@ class ModularSupervisor {
     // cluster instead of stranding this node alone in an empty cluster. Cleared
     // the moment a real peer joins (`nodes:changed`) or the cluster is dissolved.
     private autoCreatedSoloForInvite = false
-    // One-shot guard for the first-app-open engine bootstrap: on the very first
-    // launch we start every already-installed local engine (which also persists
-    // the backend's desired-enabled state). In-memory only, so it dedupes across
-    // broker restarts within one app process without adding a second auto-start
-    // source of truth (the backend still owns lifecycle persistence).
-    private firstOpenEngineStartDone = false
     // Pinned cluster peer UUIDs (seeded from `nodes:get-initial` at broker ready,
     // then kept current by the `nodes:changed` membership push, self excluded).
     // These are the only nodes whose `ec` control surface we can reach, so they
@@ -1184,7 +1177,6 @@ class ModularSupervisor {
             // must not erase a newer submission that raced this read.
         }
         if (generation !== this.brokerSessionGeneration) return
-        this.startInstalledEnginesOnFirstOpen()
         await this.seedClusterPeerIds()
         if (generation !== this.brokerSessionGeneration) return
         await this.refreshAllRemoteEngineStatus()
@@ -1481,55 +1473,6 @@ class ModularSupervisor {
                 sublevel: 'engine-manager',
                 message: `Unable to read engine descriptors: ${getErrorString(err)}`
             })
-        }
-    }
-
-    /**
-     * On the very first app open, start every already-installed local engine.
-     * The backend persists desired-enabled as a side effect of start, so this is
-     * the "installed before PAIR" ease-of-use bootstrap — PAIR keeps no auto-start
-     * list of its own. Runs at most once per app process (the in-memory guard) and
-     * never completes first-run itself (the renderer's Welcome flow owns that).
-     * Starting an already-running engine is a no-op in the backend, so re-issuing
-     * start is safe.
-     */
-    private startInstalledEnginesOnFirstOpen(): void {
-        if (this.firstOpenEngineStartDone || !isFirstRun()) return
-
-        const state = getModularBridgeState()
-        const selfId = state.getSelfId()
-        // Self not resolved yet — leave the guard unset so a later broker-ready
-        // (e.g. after a restart) can still run the first-open bootstrap.
-        if (!selfId) return
-        this.firstOpenEngineStartDone = true
-
-        for (const status of state.getEngineInitialState().statuses) {
-            if (status.nodeId !== selfId) continue
-            if (status.processStatus !== 'stopped' && status.processStatus !== 'running') continue
-
-            const engine = engineManagerName(status.engineType)
-            // A stopped engine will emit `engine:state-changed` on start, which
-            // clears this optimistic op; a running engine's start is a backend
-            // no-op (no state event), so we skip the op to avoid a stuck spinner —
-            // it is already shown running and we only re-issue start to persist
-            // the backend's desired-enabled flag.
-            if (status.processStatus === 'stopped') {
-                state.beginLocalEngineOp(status.engineType, 'starting')
-            }
-            this.sendProcess(
-                'broker',
-                'engine:start',
-                { engine },
-                error => {
-                    state.clearPendingEngineOp(status.engineType)
-                    this.reportError(
-                        `Failed to start ${engine} on first open: ${error}`,
-                        'error',
-                        `engine-cmd:first-open-start:${engine}`
-                    )
-                },
-                true
-            )
         }
     }
 
@@ -2457,40 +2400,6 @@ class ModularSupervisor {
             )
         } finally {
             state.clearPendingRemoteEngineOp(nodeId, engineType)
-        }
-    }
-
-    /**
-     * Start or stop an engine on a remote peer via `engine:remote-start` /
-     * `engine:remote-stop`. These return the resulting `EngineStatus`, so we
-     * apply it authoritatively the instant the RPC resolves instead of waiting
-     * on the next facts poll or an mDNS presence flip.
-     */
-    async toggleEngineRemote(
-        nodeId: string,
-        engine: string,
-        engineType: EngineType,
-        running: boolean
-    ): Promise<void> {
-        const state = getModularBridgeState()
-        state.beginRemoteEngineOp(nodeId, engineType, running ? 'stopping' : 'starting')
-        try {
-            const result = await this.callProcess(
-                'broker',
-                running ? 'engine:remote-stop' : 'engine:remote-start',
-                { node: nodeId, engine },
-                PULL_TIMEOUT_MS
-            )
-            state.clearPendingRemoteEngineOp(nodeId, engineType)
-            state.applyRemoteEngineStatusResult(nodeId, engineType, result)
-        } catch (err) {
-            state.clearPendingRemoteEngineOp(nodeId, engineType)
-            const action = `${running ? 'stop' : 'start'} ${engine} on ${nodeId}`
-            this.reportError(
-                remoteRefusalMessage(err, action) ?? `Failed to ${action}: ${getErrorString(err)}`,
-                'error',
-                `engine-remote-toggle:${nodeId}:${engine}`
-            )
         }
     }
 

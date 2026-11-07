@@ -34,18 +34,13 @@ import { EngineSettingsSection } from './EngineSettingsSection'
  * between the click and the first real push (the entry clears the moment the
  * backend reports a status that differs from the captured baseline).
  */
-function syntheticPendingStatus(
-    action: EngineCommandType,
-    current: EngineProcessStatus
-): EngineProcessStatus | null {
+function syntheticPendingStatus(action: EngineCommandType): EngineProcessStatus | null {
     switch (action) {
         case 'install':
         case 'update':
             return 'installing'
         case 'uninstall':
             return 'uninstalling'
-        case 'toggle':
-            return current === 'running' ? 'stopping' : 'starting'
         default:
             return null
     }
@@ -88,7 +83,7 @@ export function BackendRow({
         // transitional status so the header spins immediately. Real transition
         // pushes clear the pending entry, at which point backend truth wins.
         const synthetic = lifecyclePending
-            ? syntheticPendingStatus(lifecyclePending, backend.processStatus)
+            ? syntheticPendingStatus(lifecyclePending)
             : null
         const base: BackendInfo =
             synthetic && synthetic !== backend.processStatus
@@ -147,10 +142,6 @@ export function BackendRow({
     const nodeOs = useNodesStore(state => state.nodes.get(nodeId)?.os)
     const targetOs = nodeOs ?? window.windowApi.platform
 
-    const handleToggle = useCallback(() => {
-        window.pairApi.engines.toggle(backend.type, nodeId)
-    }, [backend.type, nodeId])
-
     const handleInstall = useCallback(() => {
         window.pairApi.engines.install(backend.type, nodeId)
     }, [backend.type, nodeId])
@@ -172,7 +163,7 @@ export function BackendRow({
         setExpanded(prev => !prev)
     }, [isUnavailable])
 
-    // Install/start/stop, model pull, and the settings editor work on clustered
+    // Install, model pull, and the settings editor work on clustered
     // peers; uninstall, update, and model load/delete remain local-only.
     const controlsDisabled = isTransitioning
 
@@ -221,7 +212,6 @@ export function BackendRow({
                         isTransitioning={isTransitioning}
                         isUnavailable={isUnavailable}
                         disabled={controlsDisabled}
-                        onToggle={handleToggle}
                         onExpand={handleExpand}
                         expanded={expanded}
                         isLocalNode={isLocalNode}

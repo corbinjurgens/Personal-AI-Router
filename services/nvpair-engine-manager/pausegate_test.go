@@ -119,12 +119,12 @@ func TestPeerPauseProjectionCancelsActivation(t *testing.T) {
 			}
 		})
 	}
-	t.Run("accepted remote start", func(t *testing.T) {
+	t.Run("accepted remote install with start", func(t *testing.T) {
 		s, ex := vetoTestServer(t, slowStartManifest())
 		ex.nodeProjection.set(nodeProjection{ManagementBlocked: false})
-		done := startRemotely(t, s)
+		done := installRemotely(t, s)
 		(&Manager{exec: ex}).applyNodeProjection(&Message{Params: json.RawMessage(`{"policy":{"pausedBy":"peer"},"pausedLocally":false,"managementBlocked":true}`)})
-		requireLocalVeto(t, "peer pause cancels start", awaitResponse(t, done))
+		requireInstallTerminal(t, awaitResponse(t, done), "error", "local_veto")
 		if enabled, known, err := ex.desired.get("fake"); err != nil || (known && enabled) {
 			t.Fatalf("pause accepted late On: %v, %v, %v", enabled, known, err)
 		}

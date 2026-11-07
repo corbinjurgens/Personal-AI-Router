@@ -643,7 +643,7 @@ func (f *modelBufferProcessFixture) assertNativeRoot(t *testing.T) {
 
 func (f *modelBufferProcessFixture) rpcOK(t *testing.T, method string, params any) json.RawMessage {
 	t.Helper()
-	if method == "engine:start" || method == "engine:restart" {
+	if method == "engine:install" || method == "node:set-availability" {
 		f.assertNativeRoot(t)
 	}
 	return f.modelSettingsProcessFixture.rpcOK(t, method, params)

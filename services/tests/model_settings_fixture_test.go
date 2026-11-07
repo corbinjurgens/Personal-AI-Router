@@ -98,11 +98,11 @@ type modelSettingsManagerInvocation struct {
 func (call modelSettingsManagerInvocation) hasEffects() bool {
 	switch call.Method {
 	case "engine:action", "engine:load-model", "engine:unload-model", "engine:delete-model",
-		"engine:start", "engine:stop", "engine:restart", "engine:install", "engine:uninstall",
+		"engine:wake", "engine:sleep", "engine:install", "engine:uninstall",
 		"engine:configure-launch",
 		"engine:copy-model", "engine:remote-copy-model", "engine:remote-pull-model",
 		"engine:remote-load-model", "engine:remote-unload-model", "engine:remote-delete-model",
-		"engine:remote-start", "engine:remote-stop", "engine:remote-install":
+		"engine:remote-install":
 		return true
 	}
 	return false

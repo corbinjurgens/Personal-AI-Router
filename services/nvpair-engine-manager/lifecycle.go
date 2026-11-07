@@ -34,45 +34,6 @@ const (
 	maxProbeJSONBytes         = 1 << 20
 )
 
-// stopObservation separates saved intent from timestamped physical evidence.
-type stopObservation struct {
-	Intent              string     `json:"intent"`
-	Running             *bool      `json:"running"`
-	Healthy             *bool      `json:"healthy"`
-	ObservedAt          *time.Time `json:"observedAt"`
-	TerminationVerified bool       `json:"terminationVerified"`
-}
-
-func savedIntent(state desiredStateFile, engine string) string {
-	on, known := state.Engines[engine]
-	if !known {
-		return "unknown"
-	}
-	if on {
-		return "on"
-	}
-	return "off"
-}
-
-func (e *Executor) observeStopped(st *engineState, intent string, terminated bool) stopObservation {
-	st.mu.Lock()
-	running, healthy, port := st.running, st.healthy, st.port
-	st.mu.Unlock()
-	now := time.Now().UTC()
-	if !running && port > 0 && !terminated {
-		ctx, cancel := context.WithTimeout(context.Background(), presenceRefusalWindow)
-		listener := probeListener(ctx, st.plat.Runtime.Ready, port)
-		cancel()
-		if listener == listenerProbeReachable {
-			running, healthy = true, false
-		}
-		if listener == listenerProbeIndeterminate {
-			return stopObservation{Intent: intent, ObservedAt: &now}
-		}
-	}
-	return stopObservation{Intent: intent, Running: &running, Healthy: &healthy, ObservedAt: &now, TerminationVerified: terminated && !running}
-}
-
 func (e *Executor) terminationVerified(st *engineState) bool {
 	return e.terminationVerifiedContext(context.Background(), st)
 }
@@ -786,17 +747,9 @@ func (e *Executor) watch(st *engineState, engine string, proc *managedProc) {
 }
 
 // Stop terminates a running engine by signalling the owned process (graceful
-// then forced). No-op if not running. It is a local client's stop.
+// then forced). No-op if not running. Internal callers retain local Off intent.
 func (e *Executor) Stop(engine string) error {
-	return e.StopFrom(engine, intentLocal)
-}
-
-// StopFrom is Stop on behalf of origin, which the saved Off records. A local
-// stop is a local veto: it first cancels the paired nodes' accepted starts and
-// loads of the engine, so one in progress does not hold the lifecycle lock
-// until it finishes.
-func (e *Executor) StopFrom(engine string, origin intentOrigin) error {
-	return e.stopFrom(engine, origin)
+	return e.stopFrom(engine, intentLocal)
 }
 
 func (e *Executor) stopFrom(engine string, origin intentOrigin) error {
@@ -828,31 +781,6 @@ func (e *Executor) stopFrom(engine string, origin intentOrigin) error {
 	// rewrite intent — shutdown must not erase the user's saved choice.
 	setErr := e.setDesiredEnabled(engine, false, origin)
 	return errors.Join(stopErr, setErr)
-}
-
-func (e *Executor) verifyStopped(engine string) (stopObservation, error) {
-	done, err := e.admitOwnerCheckpoint()
-	if err != nil {
-		return stopObservation{}, err
-	}
-	defer done()
-	st, err := e.state(engine)
-	if err != nil {
-		return stopObservation{}, err
-	}
-	st.opMu.Lock()
-	defer st.opMu.Unlock()
-	e.desired.mu.Lock()
-	state, err := e.desired.load()
-	e.desired.mu.Unlock()
-	if err != nil {
-		return stopObservation{}, err
-	}
-	observed := e.observeStopped(st, savedIntent(state, engine), e.terminationVerified(st))
-	if observed.Intent != "off" || !observed.TerminationVerified {
-		return observed, errors.New("local Off termination is unverified")
-	}
-	return observed, nil
 }
 
 // doStop performs the stop. Callers must hold st.opMu.

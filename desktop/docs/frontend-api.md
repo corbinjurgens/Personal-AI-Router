@@ -323,6 +323,11 @@ destination UUID and a fresh operation ID, then delegates to the same canonical
 coordinator. Peer-to-peer transfers carry only control/status metadata through
 the desktop; the destination's Go service fetches the source artifacts.
 
+Engine commands expose no start, stop, restart or On/Off action. Install retains
+its start option; settings Apply can restart internally. Wake and sleep are
+private broker operations. First-open startup does not start installed engines.
+Saved intent remains read-only here until phase 15 changes its owner contract.
+
 - `getIntent()` reads the local bridge's `EngineIntentSnapshot | null` through
   `engines:get-intent`; `onIntentChanged(callback)` subscribes through
   `engines:intent-changed`. Both maps are required: `enabledByEngine` contains
@@ -527,9 +532,8 @@ bridge keeps only its message; the renderer's transport
 (`src/ui/api/service-transport.ts`) rejects a failure with a `ServiceCallError`
 whose `code` callers classify by, for example `-32010` for a policy conflict,
 `-32011` for the local veto.
-`-32011` alone does not establish a pause: an older target's saved Off and a
-local stop that cancelled the operation use it too, so `localVetoMessage` stays
-neutral. Electron main reports a remote start, stop, install, pull, load, unload
+`-32011` alone does not establish a pause; locally cancelled peer operations
+can use it too, so `localVetoMessage` stays neutral. Electron main reports a remote install, pull, load, unload
 or delete refused with `-32011` as `localVetoMessage`
 followed by the target's own message, bounded, without a
 retry action.

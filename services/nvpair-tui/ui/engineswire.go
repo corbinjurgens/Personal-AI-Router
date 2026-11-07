@@ -122,22 +122,15 @@ type engineOp struct {
 }
 
 // engineOps are the lifecycle operations, keyed by the local method name. The
-// remote variants take a node and cover a deliberately smaller set: the manager
-// has remote install/start/stop but no remote restart, uninstall, or port
-// change, because those need process ownership on the target host.
+// remote variant takes a node; uninstall remains local-only.
 var engineOps = map[string]engineOp{
 	"install":   {method: "engine:install", what: "install"},
-	"start":     {method: "engine:start", what: "start"},
-	"stop":      {method: "engine:stop", what: "stop"},
-	"restart":   {method: "engine:restart", what: "restart", localOnly: true},
 	"uninstall": {method: "engine:uninstall", what: "uninstall", localOnly: true},
 }
 
 // remoteEngineMethods maps a local lifecycle method to its remote counterpart.
 var remoteEngineMethods = map[string]string{
 	"engine:install": "engine:remote-install",
-	"engine:start":   "engine:remote-start",
-	"engine:stop":    "engine:remote-stop",
 }
 
 // modelAction is one model operation: the engine-manager method that performs
@@ -314,23 +307,13 @@ func modelCmd(client *rpc.Client, node, engine string, act modelAction, model st
 // A load does not answer until the model is resident, so a large model on cold
 // storage can exceed the reply deadline. Install downloads an engine.
 //
-// Start and restart belong here too. The engine manager answers only once the
-// engine passes its readiness probe, and the manifests allow that probe
-// several minutes — the desktop app gives
-// the same calls a fourteen-minute envelope for exactly this reason. Held to
-// the thirty-five-second reply deadline, a cold start behind a slow probe
-// reported failure while the engine went on to come up.
-//
-// Stop, delete, and unload, by contrast, are quick — stop is bounded by the
-// manifest's five-second grace — and a deadline there is a real fault worth
-// surfacing.
+// Delete and unload, by contrast, are quick, and a deadline there is a real
+// fault worth surfacing.
 var longRunningOps = map[string]bool{
 	"pull":      true,
 	"load":      true,
 	"install":   true,
 	"uninstall": true,
-	"start":     true,
-	"restart":   true,
 }
 
 // classifyOpResult reports an operation as done, failed, or still running.

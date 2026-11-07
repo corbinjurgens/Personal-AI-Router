@@ -655,7 +655,7 @@ func (f *neServingFixture) stop(t *testing.T) {
 	if f.p == nil {
 		return
 	}
-	// A fatal assertion may occur between engine:start and handle retention.
+	// A fatal assertion may occur between installation start and handle retention.
 	if f.fake == nil {
 		if state, err := f.state(); err == nil {
 			candidate, openErr := os.FindProcess(state.PID)
@@ -821,7 +821,7 @@ func TestNEServingEnvelope(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(f.app, "local-qualification.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("qualification evidence existed before bootstrap")
 	}
-	f.call(t, "engine:start", map[string]string{"engine": "llamacpp"}, nil)
+	f.call(t, "engine:install", map[string]any{"engine": "llamacpp", "start": true}, nil)
 	f.retainRuntime(t)
 	firstEnvelope := neAssertColdReadback(t, f.snapshot(t), true)
 	if !reflect.DeepEqual(configuredEnvelope, firstEnvelope) {
@@ -851,7 +851,7 @@ func TestNEServingEnvelope(t *testing.T) {
 		"evidence":   "Synthetic NE process wiring data only; no model, hardware, or native engine qualification was performed.",
 	}}})
 	f.start(t)
-	f.call(t, "engine:start", map[string]string{"engine": "llamacpp"}, nil)
+	f.call(t, "engine:install", map[string]any{"engine": "llamacpp", "start": true}, nil)
 	f.retainRuntime(t)
 	secondSnapshot := f.snapshot(t)
 	secondEnvelope := neAssertColdReadback(t, secondSnapshot, true)

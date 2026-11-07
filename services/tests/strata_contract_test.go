@@ -94,7 +94,7 @@ type strataContractRuntime struct {
 }
 
 func strataContractSafePort(port int) bool {
-	return port > 0 && port <= 65535 && port != 8080 && port != 11434 && port != 1234 && (port < 14318 || port > 14323)
+	return validateFixturePort(port) == nil
 }
 
 func strataContractRunRuntime(path string) error {
@@ -793,7 +793,7 @@ func (f *strataContractFixture) strataContractStartRuntime(t *testing.T) {
 	}
 	for attempt := 0; attempt < 8; attempt++ {
 		f.strataContractWriteRuntime(t)
-		response, err := f.Manager.strataContractCallWithin("engine:start", map[string]any{"engine": "strata", "port": f.Port, "bind": "127.0.0.1"}, strataContractStartup)
+		response, err := f.Manager.strataContractCallWithin("engine:install", map[string]any{"engine": "strata", "start": true, "port": f.Port, "bind": "127.0.0.1"}, strataContractStartup)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -807,7 +807,7 @@ func (f *strataContractFixture) strataContractStartRuntime(t *testing.T) {
 		}
 		data, readErr := os.ReadFile(filepath.Join(f.Root, "start-error.json"))
 		if readErr != nil || json.Unmarshal(data, &failure) != nil || !failure.BindCollision {
-			t.Fatalf("engine:start: RPC %d: %s", response.Error.Code, response.Error.Message)
+			t.Fatalf("engine:install with start: RPC %d: %s", response.Error.Code, response.Error.Message)
 		}
 		if err := os.Remove(filepath.Join(f.Root, "start-error.json")); err != nil {
 			t.Fatal(err)
@@ -891,7 +891,9 @@ func (f *strataContractFixture) strataContractWaitStatus(t *testing.T, running b
 
 func (f *strataContractFixture) strataContractStopRuntime(t *testing.T) {
 	t.Helper()
-	f.Manager.strataContractOK(t, "engine:stop", map[string]string{"engine": "strata"}, nil)
+	// This direct manager fixture owns its worker stream like the broker.
+	// End the worker's lifetime through its shutdown protocol.
+	f.Manager.strataContractOK(t, "engine:prepare-shutdown", nil, nil)
 	f.strataContractWaitStatus(t, false)
 	strataContractWaitClosed(t, f.Port)
 	f.runtimeStarted = false
@@ -908,9 +910,9 @@ func (f *strataContractFixture) strataContractStopRuntime(t *testing.T) {
 
 func (f *strataContractFixture) strataContractCleanupRuntime(t *testing.T) {
 	t.Helper()
-	// Stop only this manager's Strata; never invoke orphan reclamation on built-ins.
+	// Shut down this isolated manager. Built-ins have disabled private manifests.
 	if f.runtimeStarted {
-		response, err := f.Manager.strataContractCallWithin("engine:stop", map[string]string{"engine": "strata"}, strataContractTimeout)
+		response, err := f.Manager.strataContractCallWithin("engine:prepare-shutdown", nil, strataContractTimeout)
 		if err != nil || response.Error != nil {
 			t.Errorf("cleanup owned Strata: transport=%v RPC=%v", err, response.Error)
 		}
@@ -1251,7 +1253,7 @@ func TestStrataContractDescriptorAndLifecycle(t *testing.T) {
 		}
 		strataContractWriteJSON(t, path, manifest)
 		fixture.strataContractStartManager(t)
-		response := fixture.Manager.strataContractCall(t, "engine:start", map[string]any{"engine": "strata", "port": port})
+		response := fixture.Manager.strataContractCall(t, "engine:install", map[string]any{"engine": "strata", "start": true, "port": port})
 		if response.Error == nil || response.Error.Code != -32000 || !strings.Contains(response.Error.Message, "occupied by a service that did not identify as Strata") {
 			t.Fatalf("wrong-service start error=%v", response.Error)
 		}
