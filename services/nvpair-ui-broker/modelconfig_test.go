@@ -85,10 +85,7 @@ func newModelConfigFixture(t *testing.T) *modelConfigFixture {
 		}
 		return f.acks.answer(method, params)
 	})
-	f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
-		if method == "engine:diagnostic-run-status" {
-			return map[string]string{"state": "none"}, ""
-		}
+	f.engine.setEngineAnswer(func(method string, _ json.RawMessage) (any, string) {
 		if method == buildapply.EngineOwnerEvidenceMethod {
 			return modelConfigOwnerEvidence(t), ""
 		}
@@ -316,7 +313,7 @@ func runModelConfigEventTrace(t *testing.T, state string, events []string, f *mo
 	// After the seed operation, any accidental second dispatch gets an immediate
 	// negative reply. This makes duplicate detection finite, never a timeout.
 	readback := residentLaunchReadback(base)
-	f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+	f.engine.setEngineAnswer(func(method string, _ json.RawMessage) (any, string) {
 		switch method {
 		case buildapply.EngineOwnerEvidenceMethod:
 			return seed.manager, ""
@@ -644,7 +641,7 @@ func startModelConfigMatrixAttempt(t *testing.T, ctx context.Context, f *modelCo
 	result := &nodepolicy.ReconcileResidentResult{Outcome: outcome}
 	encoded := make(chan struct{})
 	reply := &modelConfigMatrixReply{value: result, encoded: encoded}
-	f.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+	f.engine.setEngineAnswer(func(method string, raw json.RawMessage) (any, string) {
 		if method == buildapply.EngineOwnerEvidenceMethod {
 			return manager, ""
 		}
@@ -701,7 +698,7 @@ func TestModelConfigOwnerReadFailureHasNoLoad(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := newModelConfigFixture(t)
 			defer close(f.done)
-			f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+			f.engine.setEngineAnswer(func(method string, _ json.RawMessage) (any, string) {
 				if method == buildapply.EngineOwnerEvidenceMethod {
 					return response, refusal
 				}
@@ -727,7 +724,7 @@ func TestModelConfigOwnerReadRejectsChangedSource(t *testing.T) {
 			f := newModelConfigFixture(t)
 			defer close(f.done)
 			manager := modelConfigOwnerEvidence(t)
-			f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+			f.engine.setEngineAnswer(func(method string, _ json.RawMessage) (any, string) {
 				if method == buildapply.EngineOwnerEvidenceMethod {
 					return manager, holdSuccessReply
 				}
@@ -818,7 +815,7 @@ func TestModelConfigConfirmingInventoryDoesNotReload(t *testing.T) {
 	f.awaitGrant(t)
 	f.engine.releaseHeld()
 	awaitModelConfigDone(t, done)
-	f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+	f.engine.setEngineAnswer(func(method string, _ json.RawMessage) (any, string) {
 		if method == buildapply.EngineOwnerEvidenceMethod {
 			return modelConfigOwnerEvidence(t), ""
 		}
@@ -856,7 +853,7 @@ func TestModelConfigInflightConfirmingInventoryCoalesces(t *testing.T) {
 	wg.Wait()
 	f.engine.releaseHeld()
 	awaitModelConfigDone(t, done)
-	f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+	f.engine.setEngineAnswer(func(method string, _ json.RawMessage) (any, string) {
 		if method == buildapply.EngineOwnerEvidenceMethod {
 			return modelConfigOwnerEvidence(t), ""
 		}
@@ -972,7 +969,7 @@ func TestModelConfigNonterminalReplacementTimeoutPreservesBarrier(t *testing.T) 
 				reportStrict(t, f.b, "0", acks.runID, strictCapability(t, "llamacpp", "resident"))
 			}
 			assertRetained("after replacement")
-			f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+			f.engine.setEngineAnswer(func(method string, _ json.RawMessage) (any, string) {
 				if method == buildapply.EngineOwnerEvidenceMethod {
 					return modelConfigOwnerEvidence(t), ""
 				}
@@ -1043,7 +1040,7 @@ func TestModelConfigTerminalLoadedObservationBound(t *testing.T) {
 		if residentObservationTimeout != time.Minute || hold.expires.Sub(initial) != residentObservationTimeout {
 			t.Fatalf("terminal observation duration=%v, domain constant=%v, want 60s", hold.expires.Sub(initial), residentObservationTimeout)
 		}
-		f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+		f.engine.setEngineAnswer(func(method string, _ json.RawMessage) (any, string) {
 			if method == buildapply.EngineOwnerEvidenceMethod {
 				return modelConfigOwnerEvidence(t), ""
 			}
@@ -1130,7 +1127,7 @@ func TestModelConfigTerminalFinishFailureHasBoundedExit(t *testing.T) {
 			}
 			reportStrict(t, f.b, "0", acks.runID, strictCapability(t, "llamacpp", "resident"))
 			readback := residentLaunchReadback(before)
-			f.engine.setAnswer(func(string, json.RawMessage) (any, string) { return readback, "" })
+			f.engine.setEngineAnswer(func(string, json.RawMessage) (any, string) { return readback, "" })
 			if exit == "fresh confirmation" {
 				f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
 			} else {
@@ -1162,7 +1159,7 @@ func TestModelConfigCompletedLoadWaitsForWatcher(t *testing.T) {
 	f.awaitGrant(t)
 	f.engine.releaseHeld()
 	awaitModelConfigDone(t, done)
-	f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+	f.engine.setEngineAnswer(func(method string, _ json.RawMessage) (any, string) {
 		if method == buildapply.EngineOwnerEvidenceMethod {
 			return modelConfigOwnerEvidence(t), ""
 		}
@@ -1215,7 +1212,7 @@ func TestModelConfigTemporaryVetoPreservesCompletedLoad(t *testing.T) {
 			}
 			f.engine.releaseHeld()
 			awaitModelConfigDone(t, done)
-			f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+			f.engine.setEngineAnswer(func(method string, _ json.RawMessage) (any, string) {
 				if method == buildapply.EngineOwnerEvidenceMethod {
 					return modelConfigOwnerEvidence(t), ""
 				}
@@ -1265,7 +1262,7 @@ func TestModelConfigPendingObservationAllowedExits(t *testing.T) {
 			if pending != (tc.outcome == nodepolicy.ResidentLoaded) {
 				t.Fatalf("completion pending=%v outcome=%s", pending, tc.outcome)
 			}
-			f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+			f.engine.setEngineAnswer(func(method string, _ json.RawMessage) (any, string) {
 				if method == buildapply.EngineOwnerEvidenceMethod {
 					return modelConfigOwnerEvidence(t), ""
 				}
@@ -1313,7 +1310,7 @@ func TestModelConfigObservationTimeoutReevaluates(t *testing.T) {
 	f.awaitGrant(t)
 	f.engine.releaseHeld()
 	awaitModelConfigDone(t, done)
-	f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+	f.engine.setEngineAnswer(func(method string, _ json.RawMessage) (any, string) {
 		if method == buildapply.EngineOwnerEvidenceMethod {
 			return modelConfigOwnerEvidence(t), ""
 		}
@@ -1363,7 +1360,7 @@ func TestModelConfigTransientRecoveryRetries(t *testing.T) {
 			engineAnswer := f.engine.answer
 			f.engine.mu.Unlock()
 			readback := residentLaunchReadback(f.b.captureModelConfig())
-			f.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+			f.engine.setEngineAnswer(func(method string, raw json.RawMessage) (any, string) {
 				mu.Lock()
 				ok := healthy
 				mu.Unlock()
@@ -1465,7 +1462,7 @@ func TestModelConfigRecoveryCannotUseReplacementManager(t *testing.T) {
 	r.engineIdentity = map[string]engineManagerIdentity{"llamacpp": {EngineRunID: id.EngineRunID, LaunchDigest: id.LaunchDigest, ModelDigests: id.ModelDigests, Serving: id.Serving}}
 	r.running["llamacpp"] = true
 	r.mu.Unlock()
-	manager.setAnswer(func(string, json.RawMessage) (any, string) { return residentLaunchReadback(before), "" })
+	manager.setEngineAnswer(func(string, json.RawMessage) (any, string) { return residentLaunchReadback(before), "" })
 	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
 	f.b.reconcileModelConfig(context.Background())
 	status := f.b.modelConfiguration(f.b.captureModelConfig())
@@ -1510,7 +1507,7 @@ func TestModelConfigWorkerRestartConfirmsWithoutReload(t *testing.T) {
 				reportStrict(t, f.b, "0", acks.runID, strictCapability(t, "llamacpp", "resident"))
 			}
 			readback := residentLaunchReadback(before)
-			manager.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+			manager.setEngineAnswer(func(method string, _ json.RawMessage) (any, string) {
 				if method == "engine:get-launch" {
 					return readback, ""
 				}
@@ -1565,7 +1562,7 @@ func TestModelConfigLoadedConfirmationRequiresObservedEnvelope(t *testing.T) {
 				r.localPauseRequested = true
 			}
 			r.mu.Unlock()
-			f.engine.setAnswer(func(string, json.RawMessage) (any, string) { return readback, "" })
+			f.engine.setEngineAnswer(func(string, json.RawMessage) (any, string) { return readback, "" })
 			f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
 			if invalid == "engine stopped" {
 				// The stop is newer than the inventory that established running.
@@ -1598,7 +1595,7 @@ func TestModelConfigConfirmingInventoryCannotSettleUncertainHold(t *testing.T) {
 	f.engine.releaseHeld()
 	awaitModelConfigDone(t, done)
 	readback := residentLaunchReadback(f.b.captureModelConfig())
-	f.engine.setAnswer(func(string, json.RawMessage) (any, string) { return readback, "" })
+	f.engine.setEngineAnswer(func(string, json.RawMessage) (any, string) { return readback, "" })
 	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
 	f.b.reconcileModelConfig(context.Background())
 	status := f.b.modelConfiguration(f.b.captureModelConfig())
@@ -1616,7 +1613,7 @@ func TestModelConfigUnchangedRevisionLoadRequestDoesNotReload(t *testing.T) {
 	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
 	f.b.reconcileModelConfig(context.Background())
 	readback := residentLaunchReadback(f.b.captureModelConfig())
-	f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+	f.engine.setEngineAnswer(func(method string, _ json.RawMessage) (any, string) {
 		switch method {
 		case "engine:get-launch":
 			return readback, ""
@@ -1665,7 +1662,7 @@ func TestModelConfigReplacedRevisionReconcilesOnce(t *testing.T) {
 		t.Fatal("changed load request accepted old inventory with unchanged identity")
 	}
 	oldReadback := residentLaunchReadback(stale)
-	f.engine.setAnswer(func(string, json.RawMessage) (any, string) { return oldReadback, "" })
+	f.engine.setEngineAnswer(func(string, json.RawMessage) (any, string) { return oldReadback, "" })
 	if !f.b.replayPolicyToProxy(context.Background(), f.pp) {
 		t.Fatal("activate changed load before identity publication")
 	}
@@ -1796,7 +1793,7 @@ func TestModelConfigDefiniteLoadFailureReason(t *testing.T) {
 				f.engine.mu.Lock()
 				answer := f.engine.answer
 				f.engine.mu.Unlock()
-				f.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+				f.engine.setEngineAnswer(func(method string, raw json.RawMessage) (any, string) {
 					if method == "engine:models" {
 						return map[string]any{"loadedByEngine": map[string][]string{"llamacpp": {}}}, ""
 					}
@@ -1880,7 +1877,7 @@ func TestModelConfigObservedLoadFailureReason(t *testing.T) {
 	f.engine.mu.Lock()
 	answer := f.engine.answer
 	f.engine.mu.Unlock()
-	f.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+	f.engine.setEngineAnswer(func(method string, raw json.RawMessage) (any, string) {
 		// The fixture answer still grants the dispatch; only its result changes.
 		value, reply := answer(method, raw)
 		if method != nodepolicy.MethodReconcileResident {
@@ -1948,7 +1945,7 @@ func TestModelConfigDefiniteLoadFailureRetainedReason(t *testing.T) {
 			f.engine.mu.Lock()
 			engineAnswer := f.engine.answer
 			f.engine.mu.Unlock()
-			f.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+			f.engine.setEngineAnswer(func(method string, raw json.RawMessage) (any, string) {
 				if method == "engine:models" {
 					if failure == "recovery inventory failure" {
 						return nil, "private fixture inventory failure"
@@ -2040,7 +2037,7 @@ func TestModelConfigUncertainReadbackSurvivesInventoryWithdrawal(t *testing.T) {
 	f.engine.mu.Lock()
 	engineAnswer := f.engine.answer
 	f.engine.mu.Unlock()
-	f.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+	f.engine.setEngineAnswer(func(method string, raw json.RawMessage) (any, string) {
 		if method == "engine:models" {
 			return nil, "private fixture inventory unavailable"
 		}
@@ -2389,7 +2386,7 @@ func TestModelConfigAdmissionRefusalsHaveNoLoad(t *testing.T) {
 
 func TestModelConfigConcurrentTriggersCoalesce(t *testing.T) {
 	f := newModelConfigFixture(t)
-	f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+	f.engine.setEngineAnswer(func(method string, _ json.RawMessage) (any, string) {
 		if method == buildapply.EngineOwnerEvidenceMethod {
 			return modelConfigOwnerEvidence(t), ""
 		}
@@ -2461,7 +2458,7 @@ func TestModelConfigSnapshotEmptyInventoryLoadsNewResident(t *testing.T) {
 	r.models.loadedSource = nil
 	r.models.loadedProxy = nil
 	r.mu.Unlock()
-	f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+	f.engine.setEngineAnswer(func(method string, _ json.RawMessage) (any, string) {
 		switch method {
 		case "engine:get-installed":
 			return map[string]any{"engines": []any{map[string]any{"engine": "llamacpp", "running": true}}}, ""
@@ -2516,7 +2513,7 @@ func TestModelConfigInstallResponseRecoversResident(t *testing.T) {
 	r.mu.Lock()
 	delete(r.running, "llamacpp") // Attach snapshot preceded installation.
 	r.mu.Unlock()
-	f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+	f.engine.setEngineAnswer(func(method string, _ json.RawMessage) (any, string) {
 		if method == "engine:install" {
 			return map[string]any{"engine": "llamacpp", "running": true}, ""
 		}
@@ -2644,7 +2641,7 @@ func TestModelConfigRestartSnapshotDoesNotUndoNewerRunningStatus(t *testing.T) {
 	r.mu.Lock()
 	delete(r.running, "llamacpp")
 	r.mu.Unlock()
-	f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+	f.engine.setEngineAnswer(func(method string, _ json.RawMessage) (any, string) {
 		switch method {
 		case "engine:get-installed":
 			return map[string]any{"engines": []any{map[string]any{"engine": "llamacpp", "running": false}}}, holdSuccessReply
@@ -2686,7 +2683,7 @@ func TestModelConfigRestartSnapshotDoesNotUndoNewerRunningStatus(t *testing.T) {
 
 func TestModelConfigStoppedStatusKeepsEngineOff(t *testing.T) {
 	f := newModelConfigFixture(t)
-	f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+	f.engine.setEngineAnswer(func(method string, _ json.RawMessage) (any, string) {
 		if method == "engine:status" {
 			return map[string]any{"engine": "llamacpp", "running": false}, ""
 		}
@@ -2738,7 +2735,7 @@ func TestModelConfigSourceEvidence(t *testing.T) {
 	t.Run("new source waits for running snapshot", func(t *testing.T) {
 		f := newModelConfigFixture(t)
 		activate(f)
-		f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+		f.engine.setEngineAnswer(func(method string, _ json.RawMessage) (any, string) {
 			switch method {
 			case "engine:get-installed":
 				return map[string]any{"engines": []any{map[string]any{"engine": "llamacpp", "running": true}}}, holdSuccessReply
@@ -2814,7 +2811,7 @@ func (f *modelConfigFixture) startResidentAttempt(t *testing.T, outcome nodepoli
 
 func (f *modelConfigFixture) setResidentAttemptAnswer(t *testing.T, outcome nodepolicy.ResidentOutcome) {
 	t.Helper()
-	f.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+	f.engine.setEngineAnswer(func(method string, raw json.RawMessage) (any, string) {
 		if method == buildapply.EngineOwnerEvidenceMethod {
 			return modelConfigOwnerEvidence(t), ""
 		}
@@ -3076,7 +3073,7 @@ func TestModelConfigRecoveryRequiresTerminalManagerBarrier(t *testing.T) {
 				}
 				return answer(method, raw)
 			})
-			f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+			f.engine.setEngineAnswer(func(method string, _ json.RawMessage) (any, string) {
 				switch method {
 				case buildapply.EngineOwnerEvidenceMethod:
 					return modelConfigOwnerEvidence(t), ""
@@ -3411,7 +3408,7 @@ func TestModelConfigConcurrentEvidenceChangeIsReevaluated(t *testing.T) {
 			if tc.name == "inventory" && (status.Models[0].ObservedLoaded == nil || *status.Models[0].ObservedLoaded) {
 				t.Fatalf("concurrent empty inventory lost its observation: %+v", status)
 			}
-			f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+			f.engine.setEngineAnswer(func(method string, _ json.RawMessage) (any, string) {
 				if method == buildapply.EngineOwnerEvidenceMethod {
 					return modelConfigOwnerEvidence(t), ""
 				}
@@ -3495,7 +3492,7 @@ func TestModelConfigEnvelopeChangeThenInventoryReloads(t *testing.T) {
 	}
 	reportStrict(t, f.b, "1", f.acks.runID, strictCapability(t, "llamacpp", "resident"))
 	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
-	f.engine.setAnswer(modelConfigNotDispatched(t, &old))
+	f.engine.setEngineAnswer(modelConfigNotDispatched(t, &old))
 	f.b.reconcileModelConfig(context.Background())
 	if loads := len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)); loads != 2 {
 		t.Fatalf("changed request after inventory produced %d loads, want 2; readbacks=%d", loads, len(modelConfigCalls(f.engine, "engine:get-launch")))
@@ -3517,7 +3514,7 @@ func TestModelConfigTerminalLoadedReplyPreventsTickReload(t *testing.T) {
 	f.awaitGrant(t)
 	f.engine.releaseHeld()
 	awaitModelConfigDone(t, done)
-	f.engine.setAnswer(modelConfigNotDispatched(t, nil))
+	f.engine.setEngineAnswer(modelConfigNotDispatched(t, nil))
 	for range 2 {
 		r.mu.Lock()
 		now := r.now().Add(idleCheckInterval + time.Second)
@@ -3557,7 +3554,7 @@ func TestModelConfigObservedUnloadDropsRecordedRequest(t *testing.T) {
 	reportStrict(t, f.b, "1", f.acks.runID, strictCapability(t, "llamacpp", "resident"))
 	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
 	readback := residentLaunchReadback(f.b.captureModelConfig())
-	f.engine.setAnswer(modelConfigNotDispatched(t, &readback))
+	f.engine.setEngineAnswer(modelConfigNotDispatched(t, &readback))
 	f.b.reconcileModelConfig(context.Background())
 	status := f.b.modelConfiguration(f.b.captureModelConfig())
 	if loads := len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)); loads != 1 || status.Models[0].State != nodepolicy.ModelStateSatisfied {
@@ -3573,7 +3570,7 @@ func (f *modelConfigFixture) completedResidentLoad(t *testing.T) {
 	f.awaitGrant(t)
 	f.engine.releaseHeld()
 	awaitModelConfigDone(t, done)
-	f.engine.setAnswer(modelConfigNotDispatched(t, nil))
+	f.engine.setEngineAnswer(modelConfigNotDispatched(t, nil))
 }
 
 func (f *modelConfigFixture) residentEntry(t *testing.T) nodepolicy.ModelConfigurationEntry {
@@ -3740,7 +3737,7 @@ func (f *modelConfigFixture) nonterminalHold(t *testing.T) residentUnsettled {
 	cancel()
 	awaitModelConfigDone(t, done)
 	f.engine.releaseHeld()
-	f.engine.setAnswer(modelConfigNotDispatched(t, nil))
+	f.engine.setEngineAnswer(modelConfigNotDispatched(t, nil))
 	r := f.b.nodePolicyRuntime()
 	r.mu.Lock()
 	hold, held := r.models.unsettled[nodepolicy.ModelRef{Engine: "llamacpp", Model: "resident"}]
@@ -3773,7 +3770,7 @@ func TestModelConfigNonterminalHoldConfirmsReplacementReadback(t *testing.T) {
 	f.engine.mu.Lock()
 	answer := f.engine.answer
 	f.engine.mu.Unlock()
-	f.engine.setAnswer(func(method string, params json.RawMessage) (any, string) {
+	f.engine.setEngineAnswer(func(method string, params json.RawMessage) (any, string) {
 		switch method {
 		case "engine:get-installed":
 			return map[string]any{"engines": []map[string]any{{"engine": "llamacpp", "running": true}}}, ""
@@ -3785,7 +3782,7 @@ func TestModelConfigNonterminalHoldConfirmsReplacementReadback(t *testing.T) {
 	})
 	f.b.refreshEnginePolicySnapshotFrom(f.b.getEngineMgr(), f.source)
 	readback := residentLaunchReadback(f.b.captureModelConfig())
-	f.engine.setAnswer(modelConfigNotDispatched(t, &readback))
+	f.engine.setEngineAnswer(modelConfigNotDispatched(t, &readback))
 	assertBarrier := func(stage string, want nodepolicy.ModelConfigurationState) {
 		t.Helper()
 		f.b.reconcileModelConfig(context.Background())

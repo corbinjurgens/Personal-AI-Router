@@ -124,6 +124,18 @@ func (f *fakeWorker) setAnswer(answer func(method string, params json.RawMessage
 	f.mu.Unlock()
 }
 
+// setEngineAnswer keeps the empty diagnostic checkpoint when a settings or
+// resident fixture changes its operation replies. Diagnostic fixtures use
+// setAnswer to supply their own checkpoint state instead.
+func (f *fakeWorker) setEngineAnswer(answer func(method string, params json.RawMessage) (any, string)) {
+	f.setAnswer(func(method string, params json.RawMessage) (any, string) {
+		if method == "engine:diagnostic-run-status" {
+			return diagnosticManagerStatus{State: "none"}, ""
+		}
+		return answer(method, params)
+	})
+}
+
 // methods lists the received method names, optionally only those with prefix.
 func (f *fakeWorker) methods(prefix string) []string {
 	var out []string
@@ -422,11 +434,8 @@ func attachFakeEngine(t *testing.T, b *Broker) *fakeWorker {
 	t.Helper()
 	peer, f := newFakeWorkerPipe(t)
 	slept := make(map[string]bool)
-	f.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+	f.setEngineAnswer(func(method string, raw json.RawMessage) (any, string) {
 		switch method {
-		case "engine:diagnostic-run-status":
-			// Policy replay requires an explicit empty diagnostic checkpoint.
-			return map[string]string{"state": "none"}, ""
 		case "engine:get-launch":
 			var request struct {
 				Engine string `json:"engine"`

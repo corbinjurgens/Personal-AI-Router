@@ -45,7 +45,11 @@ func TestEnginePortReplyFollowsSettingsOperationRelease(t *testing.T) {
 	w := &engineReplyBarrier{broker: h.b, replied: make(chan struct{}), publishing: make(chan struct{}), release: make(chan struct{})}
 	open := sync.OnceFunc(func() { close(w.release) })
 	t.Cleanup(open)
+	// Initial policy replay can still be announcing through the old codec.
+	r := h.b.nodePolicyRuntime()
+	r.publishMu.Lock()
 	h.b.codec = NewCodec(w)
+	r.publishMu.Unlock()
 	// A changed launch readback makes deferred reconciliation publish settings.
 	// Publication drops engineConfigMu but retains settingsApplyMu. Hold that
 	// publication to prove the response waits for reconciliation and release.

@@ -91,6 +91,8 @@ func (h *modelSettingsHarness) answer(method string, raw json.RawMessage) (any, 
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	switch method {
+	case "engine:diagnostic-run-status":
+		return diagnosticManagerStatus{State: "none"}, ""
 	case "engine:get-launch":
 		launch := h.launch
 		launch.ModelLoads = modelconfig.CloneLoads(launch.ModelLoads)
