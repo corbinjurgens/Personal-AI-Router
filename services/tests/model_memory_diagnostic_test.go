@@ -301,7 +301,7 @@ func (f *modelDiagnosticProcessFixture) review(t *testing.T, request settings.Re
 		if len(preview.Errors) != 1 {
 			return true
 		}
-		return preview.Errors["modelLoads.busy"] == "" && preview.Errors["modelLoads.baseline"] != "modelLoads.baseline: Engine settings changed during preview."
+		return preview.Errors["modelLoads.busy"] == "" && preview.Errors["modelLoads.baseline"] != "modelLoads.baseline: Engine settings changed during preview." && preview.Errors["modelLoads"] != "model artifact inspection busy"
 	})
 	if len(preview.Errors) != 0 || preview.Conflict != nil || preview.PreviewDigest == "" {
 		t.Fatalf("preview refused: errors=%v conflict=%v", preview.Errors, preview.Conflict)
@@ -363,10 +363,14 @@ func (f *modelDiagnosticProcessFixture) preview(t *testing.T) modelconfig.Diagno
 	var reply jsonrpc.Message
 	// Resident settlement and inventory/source-identity publication are
 	// separate. A changed inspection snapshot withholds both keys; wait for
-	// a real fresh preview rather than accepting any incomplete identity.
+	// a real fresh preview. Preview can also explicitly refuse lifecycle
+	// contention before any diagnostic operation is accepted.
 	task1Eventually(t, "diagnostic applied identity converges", 15*time.Second, func() bool {
 		reply = f.rpc(t, "engine:diagnostic-preview", modelconfig.DiagnosticPreviewRequest{Engine: "llamacpp", ModelID: "medium-model", ProfileKey: "medium-model"})
-		return reply.Error == nil || reply.Error.Message != "diagnostic: exactly one configuration or execution key required"
+		if reply.Error == nil || len(reply.Result) != 0 {
+			return true
+		}
+		return !(reply.Error.Code == -32000 && reply.Error.Message == "diagnostic: exactly one configuration or execution key required" || reply.Error.Code == -32010 && reply.Error.Message == "Memory measurement conflict: engine lifecycle is busy")
 	})
 	if reply.Error != nil {
 		inspection := f.inspect(t, "medium-model")
@@ -382,6 +386,18 @@ func (f *modelDiagnosticProcessFixture) preview(t *testing.T) modelconfig.Diagno
 		t.Fatalf("preview lost target identity or node drain: %+v", preview)
 	}
 	return preview
+}
+
+func (f *modelDiagnosticProcessFixture) inspectReady(t *testing.T, model string) modelconfig.InspectResult {
+	t.Helper()
+	var value modelconfig.InspectResult
+	// Read-only inspection may explicitly report lifecycle/snapshot contention.
+	// Never retry a resolved response, including a missing or historical overlay.
+	task1Eventually(t, "ordinary inspection leaves explicit busy state", 15*time.Second, func() bool {
+		value = f.inspect(t, model)
+		return value.Status != "busy"
+	})
+	return value
 }
 
 func (f *modelDiagnosticProcessFixture) startRun(t *testing.T) modelconfig.DiagnosticRun {
@@ -939,12 +955,12 @@ func TestModelMemoryDiagnosticProcess(t *testing.T) {
 		if run.Result == nil || !reflect.DeepEqual(*stored.Measured, *run.Result) || stored.Measured.Low == nil || stored.Measured.High == nil || !stored.Measured.OverlayEligible(stored.Measured.DiagnosticIdentity, []string{"host"}) {
 			t.Fatalf("complete native exercise/pool coverage missing: %+v", stored.Measured)
 		}
-		value := f.inspect(t, "medium-model")
+		value := f.inspectReady(t, "medium-model")
 		if value.Estimate.EstimateSource == nil || value.Estimate.EstimateSource.Kind != "measured" || !slices.ContainsFunc(value.MemoryProfiles, func(p modelconfig.MemoryProfile) bool {
 			return p.Current && p.Measured != nil && p.Measured.RunID == run.RunID
 		}) {
 			again := f.inspect(t, "medium-model")
-			t.Fatalf("ordinary inspection did not use the target-authenticated current measurement: key=%s reason=%s source=%+v profiles=%+v; repeated key=%s reason=%s source=%+v profiles=%+v", value.ConfigurationKey, value.ConfigurationKeyReason, value.Estimate.EstimateSource, value.MemoryProfiles, again.ConfigurationKey, again.ConfigurationKeyReason, again.Estimate.EstimateSource, again.MemoryProfiles)
+			t.Fatalf("ordinary inspection did not use the target-authenticated current measurement: status=%s inspectionReason=%s key=%s reason=%s source=%+v profiles=%+v; repeated status=%s inspectionReason=%s key=%s reason=%s source=%+v profiles=%+v", value.Status, value.Reason, value.ConfigurationKey, value.ConfigurationKeyReason, value.Estimate.EstimateSource, value.MemoryProfiles, again.Status, again.Reason, again.ConfigurationKey, again.ConfigurationKeyReason, again.Estimate.EstimateSource, again.MemoryProfiles)
 		}
 		f.closure(t, before, false, nil)
 		f.proxySnapshot(t)
@@ -954,7 +970,7 @@ func TestModelMemoryDiagnosticProcess(t *testing.T) {
 		request, _ = f.review(t, request)
 		f.call(t, "engine:apply-settings", request, nil)
 		f.settled(t, request.RequestID, "succeeded")
-		value = f.inspect(t, "medium-model")
+		value = f.inspectReady(t, "medium-model")
 		if slices.ContainsFunc(value.MemoryProfiles, func(p modelconfig.MemoryProfile) bool {
 			return p.Current && p.Measured != nil && p.Measured.RunID == run.RunID
 		}) || value.Estimate.EstimateSource != nil && value.Estimate.EstimateSource.Kind == "measured" {

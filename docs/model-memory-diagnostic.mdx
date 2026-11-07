@@ -176,15 +176,23 @@ even if files change or post-run inspection becomes unavailable. Such evidence
 may immediately be historical and has no buffer link in that case. Affirmative
 physical-stop proof still precedes record persistence and resource release.
 
+Ordinary model inspection can report `busy` while a lifecycle/status operation
+holds the engine snapshot lock or the configuration changes during inspection,
+including at the final currentness check. That response provides no current
+configuration or execution key and no measured overlay. A fresh read after the
+contention ends must establish currentness against the persisted measurement.
+Contention does not turn a finite configuration into a resolved `not-finite`
+result, and a completed diagnostic has already persisted its measurement before
+releasing its resources.
+
 ## Process acceptance
 
 `TestModelMemoryDiagnosticProcess` uses synthetic native HTTP and scanner-backed
 memory fixtures with real broker, manager and proxy owners. Its source covers
 configured-pause preservation, Halt refusal, complete storage/overlay, competing
 activation, cancellation, replacement/restart recovery, cleanup transport
-timeout/retry and peer target-only storage. Its Windows runtime acceptance is
-pending on White, through the serialized fixed-path procedure with firewall
-inventory and survivor checks:
+timeout/retry and peer target-only storage. On Windows, run it through the
+serialized fixed-path procedure with firewall inventory and survivor checks:
 
 ```sh
 go test -count=1 -timeout=60m -run '^TestModelMemoryDiagnosticProcess$' .

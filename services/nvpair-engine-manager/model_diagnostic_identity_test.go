@@ -353,6 +353,58 @@ func TestModelDiagnosticInspectionSuppliesSameIdentityToMeasuredOverlay(t *testi
 	}
 }
 
+type diagnosticInspectionMemoryFunc func(context.Context) (*modelEstimateMemory, error)
+
+func (f diagnosticInspectionMemoryFunc) ModelAutoMemory(ctx context.Context) (*modelEstimateMemory, error) {
+	return f(ctx)
+}
+
+func TestModelDiagnosticLateInspectionContentionKeepsMeasurement(t *testing.T) {
+	f, _ := memoryProfilesFixture(t)
+	ctx := withDiagnosticHardware(f.ex.modelMemoryContext(context.Background(), f.request.Engine, modelBufferTestTargetMemory(), false), diagnosticTestHardware())
+	artifacts, err := f.ex.inspectModelArtifacts(ctx, f.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := f.ex.diagnosticRequestedIdentity(ctx, f.request, artifacts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity.BuildInfo, identity.PerSlotContext, identity.Slots = "observed-native-build", 4096, 1
+	identity.Placement = []modelconfig.DiagnosticPlacement{{DomainID: "host", Kind: "host"}}
+	measured := recordAuthenticatedDiagnosticFixture(t, f, identity)
+	op := ctx.Value(modelAutoOperationKey{}).(modelAutoOperation)
+	memory := op.Memory
+	locked := false
+	defer func() {
+		if locked {
+			f.st.opMu.Unlock()
+		}
+	}()
+	op.Memory = diagnosticInspectionMemoryFunc(func(ctx context.Context) (*modelEstimateMemory, error) {
+		// Artifact checks already completed. Simulate a lifecycle/status owner
+		// acquiring the live lock while compilation reads detached inputs.
+		if !locked {
+			f.st.opMu.Lock()
+			locked = true
+		}
+		return memory.ModelAutoMemory(ctx)
+	})
+	busy, err := f.ex.inspectModel(context.WithValue(ctx, modelAutoOperationKey{}, op), f.request, false)
+	if !locked {
+		t.Fatal("inspection never reached the late memory boundary")
+	}
+	f.st.opMu.Unlock()
+	locked = false
+	if err != nil || busy.Status != "busy" || busy.ConfigurationKey != "" || busy.ExecutionKey != "" || busy.Estimate.EstimateSource != nil && busy.Estimate.EstimateSource.Kind == "measured" || slices.ContainsFunc(busy.MemoryProfiles, func(p modelconfig.MemoryProfile) bool { return p.Current }) {
+		t.Fatalf("late contention must be explicit busy without current proof: status=%s key=%s reason=%s profiles=%+v error=%v", busy.Status, busy.ConfigurationKey, busy.ConfigurationKeyReason, busy.MemoryProfiles, err)
+	}
+	current, err := f.ex.inspectModel(ctx, f.request, false)
+	if err != nil || len(current.MemoryProfiles) != 1 || !current.MemoryProfiles[0].Current || !reflect.DeepEqual(current.MemoryProfiles[0].Measured, &measured) || current.Estimate.EstimateSource == nil || current.Estimate.EstimateSource.Kind != "measured" {
+		t.Fatalf("settled inspection lost its actual persisted measurement: profiles=%+v source=%+v error=%v", current.MemoryProfiles, current.Estimate.EstimateSource, err)
+	}
+}
+
 func TestModelDiagnosticInspectionRetainsCurrentFailedRealization(t *testing.T) {
 	f, _ := memoryProfilesFixture(t)
 	ctx := withDiagnosticHardware(f.ex.modelMemoryContext(context.Background(), f.request.Engine, modelBufferTestTargetMemory(), false), diagnosticTestHardware())
