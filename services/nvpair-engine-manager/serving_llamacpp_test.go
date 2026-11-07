@@ -30,6 +30,24 @@ import (
 	"nvpair-shared/modelconfig"
 )
 
+func TestLlamaOptionKeyRejectsEmptyName(t *testing.T) {
+	if got := llamaOptionKey(""); got != "" {
+		t.Fatalf("empty option name resolved to %q", got)
+	}
+}
+
+func TestLlamaArtifactLaunchOptionsEffectivePresetEnvironment(t *testing.T) {
+	t.Setenv("LLAMA_ARG_MODELS_PRESET", "inherited.ini")
+	command := launchCommand{Env: map[string]string{"LLAMA_ARG_MODELS_PRESET": "selected.ini"}}
+	cli, env, err := llamaArtifactLaunchOptions(command, nil)
+	if err != nil {
+		t.Fatalf("effective preset environment: %v", err)
+	}
+	if len(cli) != 0 || !reflect.DeepEqual(env, map[string]string{"models-preset": "selected.ini"}) {
+		t.Fatalf("artifact options cli = %v, env = %v", cli, env)
+	}
+}
+
 func TestLlamaServingTypedCPUExpertFlags(t *testing.T) {
 	for _, tc := range []struct {
 		name    string

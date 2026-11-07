@@ -893,8 +893,11 @@ Artifact lookup for custom-alias copy export and inspection reads only
 `models-preset`, `model`, `model-draft`, `ctx-size` and `parallel`. Other preset
 options are ignored, and structural refusals apply to the affected section
 (including defaults inherited from `[*]`). Serving compilation keeps the strict
-parser. Selected artifacts still require their existing checked bindings;
-native controls grant no copy permission and add no separate draft artifact.
+parser. Both native option readers use the shared effective environment,
+including Windows pseudo-variable exclusion and explicit override precedence.
+An empty option name never denotes an optional alias. Selected artifacts still
+require their existing checked bindings; native controls grant no copy
+permission and add no separate draft artifact.
 
 Preview performs no probe, spawn, load, persistence or snapshot creation. It
 reads bounded source/configuration data and model samples only, returning a
