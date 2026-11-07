@@ -276,6 +276,38 @@ func TestModelMemoryTelemetryProcess(t *testing.T) {
 		}
 		_, recalculated := f.review(t, request)
 		assertModelMemoryProvenance(t, *recalculated.Estimate, "host", "34359738368", "4294967296")
+		f.noMetadataEffects(t, before)
+		// A manual applied CPU load supplies a positive comparison without
+		// depending on the separately held production Auto implementation.
+		applied, _ := f.review(t, request)
+		f.rpcOK(t, "engine:apply-settings", applied)
+		f.settled(t, applied.RequestID, "succeeded")
+		inspectApplied := func() modelconfig.InspectResult {
+			var value modelconfig.InspectResult
+			modelSettingsDecode(t, f.rpcOK(t, "engine:inspect-model", modelconfig.InspectRequest{Engine: "llamacpp", ModelID: "medium-model", ProfileKey: "medium-model"}), &value)
+			return value
+		}
+		cpu := inspectApplied()
+		// A user-stated finite requirement is already supported. It prices no
+		// missing native costs and supplies no capacity; the target scanner must
+		// still supply fresh memory for this advisory comparison to be positive.
+		f.rpcOK(t, "engine:set-stated-memory", modelconfig.SetStatedMemoryRequest{Engine: "llamacpp", ModelID: "medium-model", ConfigurationKey: cpu.ConfigurationKey, HostBytes: "128"})
+		assertFits := func() modelconfig.InspectResult {
+			t.Helper()
+			var value modelconfig.InspectResult
+			t.Cleanup(func() {
+				if t.Failed() {
+					t.Logf("positive comparison: key=%s estimate=%+v", value.ConfigurationKey, value.Estimate)
+				}
+			})
+			task1Eventually(t, "positive applied CPU comparison", 20*time.Second, func() bool {
+				value = inspectApplied()
+				return value.Estimate.CapacityFit == "fits" && value.Estimate.FreeFit == "fits"
+			})
+			return value
+		}
+		assertFits()
+		before = f.metadataBaseline(t)
 		f.mu.Lock()
 		for i := range f.memory.observation.Domains {
 			f.memory.observation.Domains[i].Total.AgeMS = 6000
@@ -283,14 +315,28 @@ func TestModelMemoryTelemetryProcess(t *testing.T) {
 		}
 		f.mu.Unlock()
 		task1Eventually(t, "stale observation loses fit", 20*time.Second, func() bool {
-			value := f.inspectMemory(t)
+			value := inspectApplied()
 			return value.Estimate.CapacityFit == "unknown" && value.Estimate.FreeFit == "unknown"
 		})
+		// Restore fresh positive evidence before testing removal, so an
+		// already-expired sample cannot satisfy the removal assertion.
+		f.mu.Lock()
+		f.memory.observation = &noderec.MemoryObservation{RunID: "private-memory-run-3", Domains: []noderec.MemoryDomain{modelMemoryPool("ram", "system", "34359738368", "4294967296")}}
+		f.mu.Unlock()
+		fresh := assertFits()
+		validity := int64(5000)
+		for _, domain := range fresh.Estimate.Domains {
+			validity = min(validity, domain.RemainingValidityMS)
+		}
+		if validity < 1000 {
+			t.Fatal("fresh removal precondition has too little validity")
+		}
 		f.mu.Lock()
 		f.memory.observation = nil
 		f.mu.Unlock()
-		task1Eventually(t, "removed sample has no capacity", 20*time.Second, func() bool {
-			value := f.inspectMemory(t)
+		// Finish before the known-positive sample could expire naturally.
+		task1Eventually(t, "removed sample has no capacity before expiry", time.Duration(validity-100)*time.Millisecond, func() bool {
+			value := inspectApplied()
 			return value.Estimate.CapacityFit == "unknown" && !slices.ContainsFunc(value.Estimate.Domains, func(d modelconfig.MemoryDomain) bool { return d.CapacityBytes != "" || d.FreeBytes != "" })
 		})
 		f.noMetadataEffects(t, before)
