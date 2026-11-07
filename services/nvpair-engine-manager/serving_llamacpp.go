@@ -1426,7 +1426,7 @@ func registerServingLoad(ctx context.Context, st *engineState) (context.Context,
 	return ctx, cleanup
 }
 
-// Caller already holds opMu, under switch admission. Share the same stop fence,
+// Caller already holds opMu, under mutation admission. Share the same stop fence,
 // registry and declaration check without recursively taking the lifecycle lock.
 func (e *Executor) guardServingLoadLocked(ctx context.Context, st *engineState, action string, params json.RawMessage) (context.Context, func(), error) {
 	reader, err := e.acquireLoadRead(ctx, st, action, params)
@@ -1448,7 +1448,7 @@ func (e *Executor) guardServingLoadLocked(ctx context.Context, st *engineState, 
 
 // Reject undeclared loads before mutation admission. guardServingLoad repeats
 // this check under opMu after admission, keeping authorization and dispatch on
-// one applied generation without reversing switchAdmission -> opMu lock order.
+// one applied generation without reversing mutationAdmission -> opMu lock order.
 func (e *Executor) checkServingLoad(st *engineState, action string, params json.RawMessage) error {
 	binding, load := st.manifest.operationBinding(engines.OperationLoad)
 	if !load || action != binding.Action {

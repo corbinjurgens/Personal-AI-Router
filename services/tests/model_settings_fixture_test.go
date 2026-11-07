@@ -413,7 +413,7 @@ func newModelSettingsGate() *modelSettingsGate {
 func (g *modelSettingsGate) unblock() { g.once.Do(func() { close(g.release) }) }
 
 type modelSettingsProcessFixture struct {
-	*switchProcessFixture
+	*engineProcessFixture
 	root, preset, capture, manager string
 	control                        string
 	mu                             sync.Mutex
@@ -460,7 +460,7 @@ func (f *modelSettingsProcessFixture) assertEngineManifests(t *testing.T) {
 		t.Fatal(err)
 	}
 	seen := map[int]bool{}
-	ports := []int{f.ports.nodeInfo, f.ports.errors, f.ports.workload, f.ports.clusterManager, f.ports.engineManagerHTTP, f.ports.engineControl, f.sourcePort, f.targetPort, f.facadePort, f.targetFacadePort, f.scannerPort, portOfURL(t, f.control), portOfURL(t, f.switchProcessFixture.control.URL)}
+	ports := []int{f.ports.nodeInfo, f.ports.errors, f.ports.workload, f.ports.clusterManager, f.ports.engineManagerHTTP, f.ports.engineControl, f.sourcePort, f.targetPort, f.facadePort, f.targetFacadePort, f.scannerPort, portOfURL(t, f.control), portOfURL(t, f.engineProcessFixture.control.URL)}
 	ports = append(ports, f.proxyControl.port)
 	for _, port := range ports {
 		if err := validateFixturePort(port); err != nil {
@@ -542,8 +542,8 @@ func (f *modelSettingsProcessFixture) assertEngineImages(t *testing.T) {
 		t.Error(err)
 		return
 	}
-	f.switchProcessFixture.mu.Lock()
-	defer f.switchProcessFixture.mu.Unlock()
+	f.engineProcessFixture.mu.Lock()
+	defer f.engineProcessFixture.mu.Unlock()
 	for engine, identities := range f.engineIdentities {
 		for _, identity := range identities {
 			if (engine != "llamacpp" && engine != "llamacpp-custom") || !modelSettingsSamePath(identity.Path, expected) || identity.PID == int32(os.Getpid()) {
@@ -575,7 +575,7 @@ func (f *modelSettingsProcessFixture) recordEngineStart(t *testing.T, w http.Res
 		http.Error(w, "unexpected engine image", http.StatusForbidden)
 		return
 	}
-	request, err := http.NewRequestWithContext(r.Context(), http.MethodGet, f.switchProcessFixture.control.URL+"/started?engine=llamacpp&pid="+strconv.FormatInt(pid, 10), nil)
+	request, err := http.NewRequestWithContext(r.Context(), http.MethodGet, f.engineProcessFixture.control.URL+"/started?engine=llamacpp&pid="+strconv.FormatInt(pid, 10), nil)
 	if err != nil {
 		t.Error(err)
 		http.Error(w, "invalid private controller request", http.StatusInternalServerError)
@@ -615,7 +615,7 @@ func prepareModelSettingsProcessFixture(t *testing.T) *modelSettingsProcessFixtu
 	}
 	isolateModelSettingsPresetEnv(t)
 	base := shortClusterTempDir(t)
-	f := &modelSettingsProcessFixture{switchProcessFixture: prepareSwitchProcessFixture(t, base, reserveFixtureServicePorts(t), ""), managerInvocations: map[modelSettingsManagerInvocation]int{}}
+	f := &modelSettingsProcessFixture{engineProcessFixture: prepareEngineProcessFixture(t, base, reserveFixtureServicePorts(t), ""), managerInvocations: map[modelSettingsManagerInvocation]int{}}
 	f.image = image
 	t.Cleanup(func() { f.assertEngineImages(t) })
 	f.root, f.preset, f.capture = filepath.Join(base, "models"), filepath.Join(base, "models", "external.ini"), filepath.Join(base, "capture.ini")
@@ -689,7 +689,7 @@ func prepareModelSettingsProcessFixture(t *testing.T) *modelSettingsProcessFixtu
 		"args": []string{"--models-preset", f.preset}, "editable_launch": map[string]any{"fixed_args": []string{}},
 		"env":  map[string]string{"LLAMA_CACHE": f.root, "NVPAIR_TEST_MODEL_ENGINE": image, "NVPAIR_TEST_MODEL_PORT": "{port}", "NVPAIR_TEST_MODEL_CONTROL": f.control, "NVPAIR_TEST_MODEL_CAPTURE": f.capture},
 		"stop": map[string]any{"signal": "term", "grace_s": 1}}
-	// prepareSwitchProcessFixture replaces its own manifests. Restore BOTH
+	// prepareEngineProcessFixture replaces its own manifests. Restore BOTH
 	// model roots here, before start, rather than relying on HOME isolation.
 	jointWriteJSON(t, filepath.Join(jointAppDir(base), "engines", "llamacpp.json"), map[string]any{
 		"engine": "llamacpp", "models_dir": f.root, "runtime": rt,
@@ -1122,8 +1122,8 @@ func (f *modelSettingsProcessFixture) noMetadataEffects(t *testing.T, before mod
 	if !maps.Equal(before.managerInvocations, f.managerInvocations) || f.configureCalls != before.configureCalls || f.mutations != before.mutations || f.inferences != before.inferences {
 		t.Fatalf("metadata effects: manager attempts=%v baseline=%v configure=%d mutation=%d inference=%d", f.managerInvocations, before.managerInvocations, f.configureCalls, f.mutations, f.inferences)
 	}
-	f.switchProcessFixture.mu.Lock()
-	defer f.switchProcessFixture.mu.Unlock()
+	f.engineProcessFixture.mu.Lock()
+	defer f.engineProcessFixture.mu.Unlock()
 	for engine, starts := range f.starts {
 		if len(starts) != 0 {
 			t.Fatalf("metadata read/preview started synthetic engine %s", engine)
@@ -1133,8 +1133,8 @@ func (f *modelSettingsProcessFixture) noMetadataEffects(t *testing.T, before mod
 
 func (f *modelSettingsProcessFixture) engineIdentity(t *testing.T, starts int) serviceProcessIdentity {
 	t.Helper()
-	f.switchProcessFixture.mu.Lock()
-	defer f.switchProcessFixture.mu.Unlock()
+	f.engineProcessFixture.mu.Lock()
+	defer f.engineProcessFixture.mu.Unlock()
 	identities := f.engineIdentities["llamacpp"]
 	if len(identities) != starts || len(f.starts["llamacpp"]) != starts {
 		t.Fatalf("synthetic router lifetimes=%d starts=%d, want %d", len(identities), len(f.starts["llamacpp"]), starts)

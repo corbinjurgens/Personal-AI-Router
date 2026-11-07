@@ -622,9 +622,6 @@ func rmExpectedClasses() map[string]controlClass {
 		controlPolicyGetPath:                 controlRead,
 		controlPolicySetPath:                 controlMutation,
 		controlAvailabilitySetPath:           controlMutation,
-		settings.SwitchStatusPath:            controlRead,
-		settings.SwitchApplyPath:             controlMutation,
-		settings.SwitchFencePath:             controlMutation,
 	}
 }
 
@@ -671,64 +668,6 @@ func TestRemoteManagementRegistryParity(t *testing.T) {
 	}
 	if _, pattern := mux.Handler(&http.Request{Method: http.MethodGet, URL: &url.URL{Path: "/v1/not-a-control-route"}}); pattern != "" {
 		t.Fatalf("unregistered path resolved to pattern %q", pattern)
-	}
-}
-
-func TestRemoteManagementFenceUsesPinnedCallerAndFreshMutationGrant(t *testing.T) {
-	f := rmNewFixture(t, "uuid-self", "uuid-a", "uuid-b")
-	f.writePermissions("1", map[string]bool{"uuid-a": true, "uuid-b": false})
-	ex := &Executor{}
-	ex.nodeProjection.set(nodeProjection{ManagementBlocked: false})
-	var mu sync.Mutex
-	calls := 0
-	ex.switchParent = func(_ context.Context, method, caller string, raw json.RawMessage) (json.RawMessage, error) {
-		mu.Lock()
-		defer mu.Unlock()
-		calls++
-		p, err := settings.DecodeSwitchFenceRequest(raw)
-		if err != nil {
-			return nil, err
-		}
-		if method != settings.SwitchFenceMethod || caller != "uuid-a" || p.NodeID != "uuid-self" || p.RequestID != "lost" {
-			return nil, fmt.Errorf("wrong fence relay: %s %s %+v", method, caller, p)
-		}
-		return json.Marshal(settings.SwitchFenceResult{NodeID: p.NodeID, RequestID: p.RequestID, Fenced: true})
-	}
-	s := &controlServer{mesh: f.mesh, exec: ex}
-	ts := rmTLSServer(t, f.mesh, s.mux())
-	allowed, denied := f.client("uuid-a"), f.client("uuid-b")
-	body := `{"nodeId":"spoofed-hop","requestId":"lost"}`
-	status, _, data := rmRequest(t, allowed, ts.URL, http.MethodPost, settings.SwitchFencePath, body)
-	if status != http.StatusOK {
-		t.Fatalf("granted fence HTTP %d: %s", status, data)
-	}
-	var result settings.SwitchFenceResult
-	if err := json.Unmarshal(data, &result); err != nil {
-		t.Fatal(err)
-	}
-	if err := result.Validate(); err != nil {
-		t.Fatal(err)
-	}
-	if !result.Fenced || result.NodeID != "uuid-self" {
-		t.Fatalf("fence = %+v", result)
-	}
-	status, _, data = rmRequest(t, denied, ts.URL, http.MethodPost, settings.SwitchFencePath, body)
-	if code, _ := rmCodedBody(t, data); status != http.StatusConflict || code != remoteManagementWireCode {
-		t.Fatalf("denied fence: HTTP %d %s", status, data)
-	}
-	status, _, data = rmRequest(t, allowed, ts.URL, http.MethodPost, settings.SwitchFencePath, `{"requestId":"lost","caller":"uuid-b"}`)
-	if status != http.StatusBadRequest {
-		t.Fatalf("spoofed caller: HTTP %d %s", status, data)
-	}
-	f.writePermissions("2", map[string]bool{"uuid-a": false, "uuid-b": false})
-	status, _, data = rmRequest(t, allowed, ts.URL, http.MethodPost, settings.SwitchFencePath, body)
-	if code, _ := rmCodedBody(t, data); status != http.StatusConflict || code != remoteManagementWireCode {
-		t.Fatalf("revoked fence: HTTP %d %s", status, data)
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if calls != 1 {
-		t.Fatalf("fence relay calls = %d", calls)
 	}
 }
 
@@ -782,7 +721,6 @@ func TestRemoteManagementRouteMatrixDeniesUngrantedMutation(t *testing.T) {
 		settingsPath + "preview":    http.StatusServiceUnavailable,
 		settingsPath + "events":     http.StatusServiceUnavailable,
 		controlPolicyGetPath:        http.StatusServiceUnavailable,
-		settings.SwitchStatusPath:   http.StatusBadRequest,
 	}
 
 	// The assertions follow the independent classification spec, never the
@@ -828,7 +766,7 @@ func TestRemoteManagementRouteMatrixDeniesUngrantedMutation(t *testing.T) {
 	}
 }
 
-func TestRemoteManagementRecoveryPermissionPrecedesFence(t *testing.T) {
+func TestRemoteManagementPermissionPrecedesHydration(t *testing.T) {
 	test := func(name string, allowed, missingStore bool, wantStatus int) {
 		t.Run(name, func(t *testing.T) {
 			f := rmNewFixture(t, "uuid-self", "uuid-a")
@@ -837,7 +775,6 @@ func TestRemoteManagementRecoveryPermissionPrecedesFence(t *testing.T) {
 				f.removeStore()
 			}
 			s := &controlServer{mesh: f.mesh, exec: &Executor{}}
-			s.exec.switchRecoveryPending.Store(true)
 			spy := newRMHandlerSpy()
 			route := findRMRoute(t, s, controlInstallPath)
 			ts := rmTLSServer(t, f.mesh, s.requirePinCaller(s.authorize(route, spy.handle(route.family))))
@@ -868,7 +805,7 @@ func TestRemoteManagementRecoveryPermissionPrecedesFence(t *testing.T) {
 	}
 	test("denied peer gets typed refusal", false, false, http.StatusConflict)
 	test("missing permission store gets typed refusal", false, true, http.StatusConflict)
-	test("granted peer waits for recovery", true, false, http.StatusServiceUnavailable)
+	test("granted peer waits for hydration", true, false, http.StatusServiceUnavailable)
 }
 
 // Hold target hydration explicitly. A readiness refusal can leave revision zero,
@@ -878,7 +815,6 @@ func TestRemoteManagementPullBeforeHydration(t *testing.T) {
 	f := rmNewFixture(t, "uuid-self", "uuid-a")
 	f.writePermissions("1", map[string]bool{"uuid-a": true})
 	ex := &Executor{downloads: newModelDownloads(strings.Repeat("a", 32), t.TempDir(), nil)}
-	ex.switchRecoveryPending.Store(true)
 	s := &controlServer{mesh: f.mesh, exec: ex}
 	route := findRMRoute(t, s, controlPullPath)
 	before := ex.downloads.snapshot()
@@ -920,7 +856,12 @@ func TestRemoteManagementPullBeforeHydration(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("target hydration barrier did not release")
 	}
-	assertRefusal("engine manager switch recovery is pending; try again shortly")
+	rec := httptest.NewRecorder()
+	calls := 0
+	s.authorize(route, func(w http.ResponseWriter, _ *http.Request, _ string) { calls++; w.WriteHeader(http.StatusNoContent) })(rec, httptest.NewRequest(http.MethodPost, controlPullPath, nil), "uuid-a")
+	if rec.Code != http.StatusNoContent || calls != 1 || !ex.downloads.snapshot().Equal(before) {
+		t.Fatalf("hydrated admission status=%d calls=%d snapshot=%+v", rec.Code, calls, ex.downloads.snapshot())
+	}
 }
 
 func TestRemoteManagementRouteMatrixGrantsMutation(t *testing.T) {
@@ -1080,7 +1021,6 @@ func TestRemoteManagementUnpinnedCallerForbidden(t *testing.T) {
 		{http.MethodGet, controlRemoteManagementPath},
 		{http.MethodPost, settingsPath + "apply"},
 		{http.MethodPost, controlPolicySetPath},
-		{http.MethodPost, settings.SwitchApplyPath},
 	} {
 		status, _, body := rmRequest(t, stranger, ts.URL, tc.method, tc.path, "{}")
 		if status != http.StatusForbidden {
@@ -1088,7 +1028,7 @@ func TestRemoteManagementUnpinnedCallerForbidden(t *testing.T) {
 		}
 	}
 	if total := spy.count("engine-inventory") + spy.count("engine-load") + spy.count("settings-apply") +
-		spy.count("policy-set") + spy.count("engine-switch"); total != 0 {
+		spy.count("policy-set"); total != 0 {
 		t.Fatalf("unpinned caller reached %d handlers", total)
 	}
 }
@@ -1148,7 +1088,7 @@ func TestRemoteManagementRevocationBetweenRequestsHasNoStaleAllow(t *testing.T) 
 	client := f.client("uuid-a")
 
 	for name, ts := range map[string]*httptest.Server{"first reader": tsFirst, "second reader": tsSecond} {
-		status, _, body := rmRequest(t, client, ts.URL, http.MethodPost, settings.SwitchApplyPath, switchApplyFixture)
+		status, _, body := rmRequest(t, client, ts.URL, http.MethodPost, controlInstallPath, `{"engine":"fixture"}`)
 		if status != http.StatusOK {
 			t.Fatalf("%s before revoke = %d, want 200: %s", name, status, body)
 		}
@@ -1161,16 +1101,16 @@ func TestRemoteManagementRevocationBetweenRequestsHasNoStaleAllow(t *testing.T) 
 		if name == "second reader" {
 			spy = spySecond
 		}
-		before := spy.count("engine-switch")
-		status, _, body := rmRequest(t, client, ts.URL, http.MethodPost, settings.SwitchApplyPath, switchApplyFixture)
+		before := spy.count("engine-install")
+		status, _, body := rmRequest(t, client, ts.URL, http.MethodPost, controlInstallPath, `{"engine":"fixture"}`)
 		if status != http.StatusConflict {
 			t.Fatalf("%s after revoke = %d, want 409: %s", name, status, body)
 		}
 		if code, _ := rmCodedBody(t, body); code != remoteManagementWireCode {
 			t.Fatalf("%s after revoke code = %q, want %q", name, code, remoteManagementWireCode)
 		}
-		if spy.count("engine-switch") != before {
-			t.Fatalf("%s reached the switch writer after revoke", name)
+		if spy.count("engine-install") != before {
+			t.Fatalf("%s reached the install handler after revoke", name)
 		}
 	}
 }
@@ -1568,22 +1508,6 @@ func TestRemoteManagementRelaysCarryTypedDenial(t *testing.T) {
 		rmAssertTypedRefusal(t, rec, "local_veto", codeLocalVeto)
 	})
 
-	t.Run("switch", func(t *testing.T) {
-		handler := switchHandler("target-self", switchTestGate, func(context.Context, string, string, json.RawMessage) (json.RawMessage, error) {
-			return nil, denial
-		})
-		rec := httptest.NewRecorder()
-		handler(rec, httptest.NewRequest(http.MethodPost, settings.SwitchApplyPath, strings.NewReader(switchApplyFixture)))
-		rmAssertTypedRefusal(t, rec, remoteManagementWireCode, codeRemoteManagementDenied)
-
-		// A granted peer that also hits R4's local pause still gets -32011.
-		vetoHandler := switchHandler("target-self", switchTestGate, func(context.Context, string, string, json.RawMessage) (json.RawMessage, error) {
-			return nil, &codedError{code: settings.SwitchRemoteVetoCode, message: veto.message}
-		})
-		rec = httptest.NewRecorder()
-		vetoHandler(rec, httptest.NewRequest(http.MethodPost, settings.SwitchApplyPath, strings.NewReader(switchApplyFixture)))
-		rmAssertTypedRefusal(t, rec, "local_veto", codeLocalVeto)
-	})
 }
 
 // newRelayExecutor is an executor whose settings parent always fails the way the

@@ -50,7 +50,7 @@ func (a *admissionController) residentPermissionLocked(k admKey) nodepolicy.Mode
 		return nodepolicy.ModelReasonPausedLocal
 	}
 	if a.drain[k.engine] {
-		return nodepolicy.ModelReasonSwitchBusy
+		return nodepolicy.ModelReasonOperationBusy
 	}
 	if !a.intent[k.engine] || !a.healthy(k.engine) {
 		return nodepolicy.ModelReasonEngineOff
@@ -90,7 +90,7 @@ func (a *admissionController) residentPermissionLocked(k admKey) nodepolicy.Mode
 		return nodepolicy.ModelReasonUnqualified
 	}
 	if _, unloading := a.unloadSentAt[k]; unloading {
-		return nodepolicy.ModelReasonSwitchBusy
+		return nodepolicy.ModelReasonOperationBusy
 	}
 	return ""
 }

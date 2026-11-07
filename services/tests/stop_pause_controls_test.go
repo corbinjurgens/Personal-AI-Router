@@ -190,7 +190,7 @@ type stopPauseNative struct {
 	resident       bool
 }
 
-func newStopPauseNative(t *testing.T, e *switchProcessFixture) *stopPauseNative {
+func newStopPauseNative(t *testing.T, e *engineProcessFixture) *stopPauseNative {
 	t.Helper()
 	n := &stopPauseNative{resident: true}
 	n.server = newFixtureHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -304,15 +304,15 @@ func stopPauseBarrier(t *testing.T, ch <-chan struct{}, description string) {
 // removal of the binding-only process cases. Native HTTP and discovery are fake.
 type stopPauseServiceFixture struct {
 	service *remoteServiceFixture
-	engine  *switchProcessFixture
+	engine  *engineProcessFixture
 	client  *serviceRPCClient
 	args    []string
 	nodeID  string
 }
 
-func newStopPauseServiceFixture(t *testing.T, s *remoteServiceFixture, configure func(*switchProcessFixture)) *stopPauseServiceFixture {
+func newStopPauseServiceFixture(t *testing.T, s *remoteServiceFixture, configure func(*engineProcessFixture)) *stopPauseServiceFixture {
 	t.Helper()
-	e := prepareSwitchProcessFixture(t, s.configDir, s.ports, s.scannerPath)
+	e := prepareEngineProcessFixture(t, s.configDir, s.ports, s.scannerPath)
 	if configure != nil {
 		configure(e)
 	}
@@ -627,7 +627,7 @@ type stopPauseFixture struct {
 	native *stopPauseNative
 }
 
-// Keep the service plan occupied while the reused switch fixture allocates
+// Keep the service plan occupied while the reused engine fixture allocates
 // native/facade ports. Independently released plans can otherwise reuse an ec
 // port for a fake model before either process starts. There is no bind retry.
 func holdStopPauseServicePorts(t *testing.T, ports fixtureServicePorts) func() {
@@ -659,7 +659,7 @@ func newStopPauseFixture(t *testing.T) *stopPauseFixture {
 	s := newRemoteServiceFixture(t)
 	release := holdStopPauseServicePorts(t, s.ports)
 	var native *stopPauseNative
-	f := newStopPauseServiceFixture(t, s, func(e *switchProcessFixture) {
+	f := newStopPauseServiceFixture(t, s, func(e *engineProcessFixture) {
 		native = newStopPauseNative(t, e)
 		release()
 	})
@@ -680,7 +680,7 @@ func (f *stopPauseFixture) startModel(t *testing.T) {
 	f.publish(t)
 }
 
-func assertStopPauseNativeLifetime(t *testing.T, e *switchProcessFixture) {
+func assertStopPauseNativeLifetime(t *testing.T, e *engineProcessFixture) {
 	t.Helper()
 	image, err := os.Executable()
 	if err != nil {
@@ -912,7 +912,7 @@ func testStopPauseFence(t *testing.T, mode string, peerOrigin bool) {
 			"/v1/engines/start", "/v1/engines/stop", "/v1/engines/install",
 			"/v1/models/load", "/v1/models/unload", "/v1/models/pull", "/v1/models/delete", "/v1/models/copy",
 			"/v1/node-policy/set",
-			"/v1/engine-settings/apply", "/v1/engine-switch/apply", "/v1/engine-switch/fence",
+			"/v1/engine-settings/apply",
 		} {
 			stopPauseRefusal(t, f.peerHTTP(t, client, path, map[string]any{"engine": "llamacpp", "model": "switch-model", "state": "available"}, http.StatusConflict), "local_veto")
 		}
@@ -1403,7 +1403,7 @@ func testStopPauseRestart(t *testing.T) {
 }
 
 type stopPausePeer struct {
-	engine *switchProcessFixture
+	engine *engineProcessFixture
 	native *stopPauseNative
 	id     string
 }
@@ -1471,7 +1471,7 @@ func newStopPausePair(t *testing.T) (*stopPauseFixture, *stopPausePeer) {
 	writePin(t, s.clusterDir, peerID, peerCert)
 	writeMembers(t, s.clusterDir, "management-service-target", "management-service-peer", "management-service-allowed", peerID)
 	var native *stopPauseNative
-	service := newStopPauseServiceFixture(t, s, func(e *switchProcessFixture) {
+	service := newStopPauseServiceFixture(t, s, func(e *engineProcessFixture) {
 		native = newStopPauseNative(t, e)
 		release()
 	})
@@ -1479,7 +1479,7 @@ func newStopPausePair(t *testing.T) (*stopPauseFixture, *stopPausePeer) {
 	f.startModel(t)
 	ports := reserveFixtureServicePorts(t)
 	releasePeer := holdStopPauseServicePorts(t, ports)
-	e := prepareSwitchProcessFixture(t, base, ports, "")
+	e := prepareEngineProcessFixture(t, base, ports, "")
 	peerNative := newStopPauseNative(t, e)
 	facades := map[string]int{"llamacpp-custom": e.facadePort, "llamacpp": e.targetFacadePort}
 	for _, name := range engines.Names() {

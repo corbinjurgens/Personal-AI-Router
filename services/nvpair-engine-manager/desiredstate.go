@@ -4,7 +4,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,10 +11,8 @@ import (
 	"net"
 	"nvpair-shared/durablefile"
 	"nvpair-shared/engineintent"
-	settings "nvpair-shared/enginesettings"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 )
@@ -27,9 +24,7 @@ const (
 )
 
 type desiredStateFile struct {
-	PendingSwitch      *settings.SwitchCheckpoint `json:"pendingSwitch,omitempty"`
-	PendingSwitchPorts *switchCheckpointPorts     `json:"pendingSwitchPorts,omitempty"`
-	Engines            map[string]bool            `json:"engines"`
+	Engines map[string]bool `json:"engines"`
 	// AllocatedPorts locates process-mode port-zero launches after manager death.
 	// A port is evidence only; reclaim still checks the current managed image.
 	AllocatedPorts map[string]int `json:"allocatedPorts,omitempty"`
@@ -81,44 +76,6 @@ func (s *desiredStateStore) setProcessStop(engine string, evidence processStopEv
 	}
 	state.ProcessStops[engine] = evidence
 	return s.save(state)
-}
-
-func (state *desiredStateFile) UnmarshalJSON(data []byte) error {
-	type document desiredStateFile
-	var decoded document
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		return err
-	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(data, &fields); err != nil {
-		return err
-	}
-	for name, raw := range fields {
-		if name == "pendingSwitch" && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-			var checkpoint map[string]json.RawMessage
-			if err := json.Unmarshal(raw, &checkpoint); err != nil {
-				return err
-			}
-			for key, cause := range checkpoint {
-				if strings.EqualFold(key, "automatic") && (key != "automatic" || (!bytes.Equal(bytes.TrimSpace(cause), []byte("true")) && !bytes.Equal(bytes.TrimSpace(cause), []byte("false")))) {
-					return errors.New("pending switch automatic must be boolean")
-				}
-			}
-		}
-	}
-	*state = desiredStateFile(decoded)
-	return nil
-}
-
-// Allocated ports are execution evidence, excluded from configuration tokens.
-// Keep them beside the shared checkpoint so crash cleanup can find a port-zero
-// engine's actual listener after the in-memory lifecycle state is lost.
-type switchCheckpointPorts struct {
-	Source int `json:"source"`
-	Target int `json:"target"`
-	// Automatic source execution evidence, never permission to signal a PID.
-	SourcePID   int    `json:"sourcePid,omitempty"`
-	SourceRunID string `json:"sourceRunId,omitempty"`
 }
 
 // intentOrigin says who saved an engine's intent: this node's own clients
@@ -307,19 +264,6 @@ func decodeDesiredState(data []byte) (desiredStateFile, error) {
 			return desiredStateFile{}, fmt.Errorf("invalid process stop evidence for %s", engine)
 		}
 	}
-	if cp := state.PendingSwitch; cp != nil {
-		if ports := state.PendingSwitchPorts; ports != nil && (ports.Source < 0 || ports.Source > 65535 || ports.Target < 0 || ports.Target > 65535 || ports.SourcePID < 0 || len(ports.SourceRunID) > settings.MaxSwitchRequestIDBytes) {
-			return desiredStateFile{}, errors.New("invalid pending switch endpoint")
-		}
-		if err := validSwitchEnvelope(cp.SwitchPrepareRequest); err != nil {
-			return desiredStateFile{}, fmt.Errorf("invalid pending switch: %w", err)
-		}
-		switch cp.Phase {
-		case settings.SwitchCheckpointReserved, settings.SwitchCheckpointStopPending, settings.SwitchCheckpointSourceOff, settings.SwitchCheckpointStartPending, settings.SwitchCheckpointTargetCommitted, settings.SwitchCheckpointReleased:
-		default:
-			return desiredStateFile{}, errors.New("invalid pending switch phase")
-		}
-	}
 	return state, nil
 }
 
@@ -381,8 +325,8 @@ func (e *Executor) RestoreEnabled(ctx context.Context) error {
 func (e *Executor) restoreEnabled(ctx context.Context, engine string) error {
 	done, err := e.admitMutation(engine)
 	if err != nil {
-		// A pending switch must be reconciled before automatic restore.
-		var busy *switchBusyError
+		// Global mutation admission also fences automatic restore.
+		var busy *mutationBusyError
 		if errors.As(err, &busy) {
 			return nil
 		}
@@ -406,7 +350,7 @@ func (e *Executor) restoreEnabled(ctx context.Context, engine string) error {
 	return e.doStart(ctx, st, engine, startOpts{ReclaimOwned: true})
 }
 
-// reclaimOrphan is shared by restore and switch recovery/start. It runs before
+// reclaimOrphan is shared by restore and start. It runs before
 // readiness/adoption, since an interrupted managed child may be unhealthy.
 // Callers hold opMu and register startCancel before entering this owner.
 func (e *Executor) reclaimOrphan(ctx context.Context, st *engineState, engine string, port int) (bool, error) {

@@ -337,7 +337,7 @@ func (b *Broker) spawnProxy() (supervisedHandle, error) {
 	if !b.replayPolicyToProxy(bringUp, pp) {
 		pp.Stop()
 		b.clearProxyHandles()
-		return nil, fmt.Errorf("engine switch invalidations could not be replayed before facade enable")
+		return nil, fmt.Errorf("node policy could not be replayed before facade enable")
 	}
 	// A new proxy run has lost its in-memory resident holds. Refresh inventory
 	// after activation rather than reuse observations from the retired run.

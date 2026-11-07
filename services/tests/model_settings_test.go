@@ -479,9 +479,9 @@ func TestModelSettingsFailedRestartRetainsDesiredEffectiveAndFence(t *testing.T)
 	f := newModelSettingsProcessFixture(t)
 	f.rpcOK(t, "engine:start", map[string]string{"engine": "llamacpp"})
 	request, preview := f.review(t, f.request(t, "failed-restart", nil))
-	f.switchProcessFixture.mu.Lock()
+	f.engineProcessFixture.mu.Lock()
 	f.failTarget = true
-	f.switchProcessFixture.mu.Unlock()
+	f.engineProcessFixture.mu.Unlock()
 	f.rpcOK(t, "engine:apply-settings", request)
 	after := f.settled(t, request.RequestID, "applying")
 	if after.UnresolvedError == "" || after.Running || after.EffectiveSettings == nil || !after.Settings.Equal(preview.Settings) || !after.EffectiveSettings.Equal(preview.Settings) || f.disk(t).Receipts[request.RequestID].Phase != "failed" {

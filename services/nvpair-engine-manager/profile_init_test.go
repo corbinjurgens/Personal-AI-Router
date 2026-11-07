@@ -36,7 +36,7 @@ func TestFreshProfileReloadAndCopyProvenance(t *testing.T) {
 	source := newOpID()
 	d := newModelDownloads(source, install, map[string]string{"llamacpp": engines.ModelNamingExact})
 	reg := &Registry{engines: map[string]*Manifest{"llamacpp": {Engine: "llamacpp", ModelNaming: engines.ModelNamingExact}}}
-	m := &Manager{exec: &Executor{switchIncarnation: source}, copyJournal: d, copyRegistry: reg}
+	m := &Manager{exec: &Executor{managerIncarnation: source}, copyJournal: d, copyRegistry: reg}
 	evidence := m.ownerReservations()
 	if !evidence.Complete || source == "" || evidence.Token.Incarnation != source || evidence.Token.DownloadSource != source {
 		t.Fatalf("baseline evidence: %+v", evidence)
@@ -44,7 +44,7 @@ func TestFreshProfileReloadAndCopyProvenance(t *testing.T) {
 	requireOwnerBool(t, evidence.Busy, false)
 	emptySuccessor := newOpID()
 	emptyDownloads := newModelDownloads(emptySuccessor, install, map[string]string{"llamacpp": engines.ModelNamingExact})
-	emptyManager := &Manager{exec: &Executor{switchIncarnation: emptySuccessor}, copyJournal: emptyDownloads, copyRegistry: reg}
+	emptyManager := &Manager{exec: &Executor{managerIncarnation: emptySuccessor}, copyJournal: emptyDownloads, copyRegistry: reg}
 	emptyEvidence := emptyManager.ownerReservations()
 	if emptySuccessor == source || emptySuccessor == "" || !emptyEvidence.Complete || emptyEvidence.Token.Incarnation != emptySuccessor || emptyEvidence.Token.DownloadSource != emptySuccessor {
 		t.Fatal("successor lost empty baseline")
@@ -74,7 +74,7 @@ func TestFreshProfileReloadAndCopyProvenance(t *testing.T) {
 	if err != nil || !complete || len(copies) != 1 || copies[p.OpID].ManagerIncarnation != source {
 		t.Fatalf("successor provenance: copies=%v complete=%t err=%v", copies, complete, err)
 	}
-	nextManager := &Manager{exec: &Executor{switchIncarnation: successor}, copyJournal: next, copyRegistry: reg}
+	nextManager := &Manager{exec: &Executor{managerIncarnation: successor}, copyJournal: next, copyRegistry: reg}
 	if nextManager.ownerReservations().Complete {
 		t.Fatal("unknown predecessor marked complete")
 	}
@@ -709,7 +709,7 @@ func TestFreshProfileMatchingCopyCompletion(t *testing.T) {
 	}
 	d := newModelDownloads(newOpID(), filepath.Join(current, "engine-bin"), map[string]string{"llamacpp": engines.ModelNamingExact})
 	reg := &Registry{engines: map[string]*Manifest{"llamacpp": {Engine: "llamacpp", ModelNaming: engines.ModelNamingExact}}}
-	m := &Manager{exec: &Executor{switchIncarnation: d.source}, copyJournal: d, copyRegistry: reg}
+	m := &Manager{exec: &Executor{managerIncarnation: d.source}, copyJournal: d, copyRegistry: reg}
 	old := modelCopyMarker{OpID: newOpID(), Engine: "llamacpp", Model: "old", ContentKey: "old", Naming: engines.ModelNamingExact, Role: "controller", OwnerNodeID: "controller", SourceNodeID: "source", DestinationNodeID: "destination", ManagerIncarnation: newOpID(), Phase: "unsafe"}
 	if landed, uncertain, err := d.store.save(nil, map[string]modelCopyMarker{old.OpID: old}, true, false); err != nil || !landed || uncertain {
 		t.Fatalf("seed predecessor: %v", err)

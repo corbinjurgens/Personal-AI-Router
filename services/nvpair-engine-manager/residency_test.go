@@ -36,7 +36,7 @@ func residentNativeFixture(t *testing.T) (llamaServingFixture, *loadedLlamaFake,
 	f.ex.storeInventory(map[string][]string{"fake": {"resident-model", "weak"}}, map[string]observedDigests{"fake": modelInventoryObservation(t, f.ex, "fake")}, f.ex.sweeps.Add(1))
 	p := nodepolicy.ReconcileResidentParams{OperationID: "resident:1", PolicyRevision: "1", DeclaredResidentCount: 1, Engine: "fake", Model: "resident-model",
 		Identity:  nodepolicy.StrictModelIdentity{EngineRunID: id.EngineRunID, ModelDigest: id.ModelDigests["resident-model"], SettingsFingerprint: nameDigest("synthetic-settings")},
-		TimeoutMs: 60000, Reservation: nodepolicy.ResidentReservationEvidence{ReservationID: "reservation", ProxyRunID: "proxy", ManagerIncarnation: f.ex.switchIncarnation},
+		TimeoutMs: 60000, Reservation: nodepolicy.ResidentReservationEvidence{ReservationID: "reservation", ProxyRunID: "proxy", ManagerIncarnation: f.ex.managerIncarnation},
 		Load: nodepolicy.ResidentLoadOptions{ContextLength: 8192, KeepAliveSeconds: 60}}
 	if err := p.Validate(); err != nil {
 		t.Fatal(err)
@@ -132,7 +132,7 @@ func TestResidentDailyAdapterNativeRequirements(t *testing.T) {
 			id := f.ex.modelIdentity().Engines["fake"]
 			p := nodepolicy.ReconcileResidentParams{OperationID: "native:1", PolicyRevision: "1", DeclaredResidentCount: count, Engine: "fake", Model: "resident-model",
 				Identity:  nodepolicy.StrictModelIdentity{EngineRunID: id.EngineRunID, ModelDigest: id.ModelDigests["resident-model"], SettingsFingerprint: nameDigest("settings")},
-				TimeoutMs: 60000, Reservation: nodepolicy.ResidentReservationEvidence{ReservationID: "r", ProxyRunID: "p", ManagerIncarnation: f.ex.switchIncarnation}, Load: nodepolicy.ResidentLoadOptions{ContextLength: 8192, KeepAliveSeconds: 60}}
+				TimeoutMs: 60000, Reservation: nodepolicy.ResidentReservationEvidence{ReservationID: "r", ProxyRunID: "p", ManagerIncarnation: f.ex.managerIncarnation}, Load: nodepolicy.ResidentLoadOptions{ContextLength: 8192, KeepAliveSeconds: 60}}
 			if got := f.ex.residentCheck(context.Background(), p); got != want {
 				t.Fatalf("preflight=%q, want %q", got, want)
 			}
@@ -520,7 +520,7 @@ func newResidentFixture(t *testing.T) *residentFixture {
 	id := ex.modelIdentity().Engines["fake"]
 	f.p = nodepolicy.ReconcileResidentParams{OperationID: "resident-op", PolicyRevision: "1", DeclaredResidentCount: 1, Engine: "fake", Model: "m",
 		Identity:  nodepolicy.StrictModelIdentity{EngineRunID: st.runID, SettingsFingerprint: nameDigest("settings-and-launch"), ModelDigest: id.ModelDigests["m"]},
-		TimeoutMs: 60000, Reservation: nodepolicy.ResidentReservationEvidence{ReservationID: "reservation-1", ProxyRunID: "proxy-1", ManagerIncarnation: ex.switchIncarnation},
+		TimeoutMs: 60000, Reservation: nodepolicy.ResidentReservationEvidence{ReservationID: "reservation-1", ProxyRunID: "proxy-1", ManagerIncarnation: ex.managerIncarnation},
 		Load: nodepolicy.ResidentLoadOptions{ContextLength: 8192, KeepAliveSeconds: 120}}
 	codec := NewCodec(&residentCodecIO{write: func(raw []byte) (int, error) {
 		var msg Message
@@ -650,7 +650,7 @@ func TestResidentContextBoundColdPreflight(t *testing.T) {
 func TestResidentLoadMappingAndObservation(t *testing.T) {
 	f := newResidentFixture(t)
 	f.grant = func(req residentDispatchRequest) {
-		want := nodepolicy.DispatchResidentParams{ReservationID: f.p.Reservation.ReservationID, ProxyRunID: f.p.Reservation.ProxyRunID, ManagerIncarnation: f.ex.switchIncarnation,
+		want := nodepolicy.DispatchResidentParams{ReservationID: f.p.Reservation.ReservationID, ProxyRunID: f.p.Reservation.ProxyRunID, ManagerIncarnation: f.ex.managerIncarnation,
 			OperationID: f.p.OperationID, PolicyRevision: f.p.PolicyRevision, Engine: f.p.Engine, Model: f.p.Model, Identity: f.p.Identity}
 		if !reflect.DeepEqual(req.Params, want) {
 			t.Errorf("dispatch params = %+v, want %+v", req.Params, want)
@@ -677,7 +677,7 @@ func TestResidentLoadMappingAndObservation(t *testing.T) {
 	if result.Outcome != nodepolicy.ResidentLoaded || result.Observation == nil {
 		t.Fatalf("result = %+v", result)
 	}
-	want := nodepolicy.ResidentLoadedObservation{ManagerIncarnation: f.ex.switchIncarnation, Generation: 1, Engine: "fake", Model: "m", Identity: f.p.Identity, Loaded: true}
+	want := nodepolicy.ResidentLoadedObservation{ManagerIncarnation: f.ex.managerIncarnation, Generation: 1, Engine: "fake", Model: "m", Identity: f.p.Identity, Loaded: true}
 	if !reflect.DeepEqual(*result.Observation, want) {
 		t.Fatalf("observation = %+v, want %+v", result.Observation, want)
 	}
@@ -809,9 +809,9 @@ func residentAwaitMutation(t *testing.T, ex *Executor) {
 	t.Helper()
 	deadline := time.After(5 * time.Second)
 	for {
-		ex.switchAdmission.Lock()
-		count := ex.switchMutations["fake"]
-		ex.switchAdmission.Unlock()
+		ex.mutationAdmission.Lock()
+		count := ex.activeMutations["fake"]
+		ex.mutationAdmission.Unlock()
 		if count != 0 {
 			return
 		}
@@ -850,24 +850,6 @@ func TestResidentPostLockVeto(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-}
-
-func TestResidentSwitchExclusion(t *testing.T) {
-	f := newResidentFixture(t)
-	f.grant = func(req residentDispatchRequest) {
-		// Exercise E3's actual switch configuration gate while the load is admitted.
-		f.ex.switchAdmission.Lock()
-		_, err := f.ex.switchConfiguration(desiredStateFile{})
-		f.ex.switchAdmission.Unlock()
-		var busy *switchBusyError
-		if !errors.As(err, &busy) {
-			t.Errorf("switch was not excluded: %v", err)
-		}
-		f.reply(t, req.ID, nodepolicy.DispatchResidentResult{Dispatched: true})
-	}
-	if result := f.run(t); result.Outcome != nodepolicy.ResidentLoaded {
-		t.Fatalf("result = %+v", result)
-	}
 }
 
 func TestResidentRefusalLogging(t *testing.T) {
@@ -921,7 +903,7 @@ func TestResidentRefusalLogging(t *testing.T) {
 }
 
 func TestResidentDispatchRefusal(t *testing.T) {
-	for _, reason := range []nodepolicy.DispatchResidentReason{"reservation-revoked", "reservation-unknown", "engine-off", "no-fit", "paused-local", "engine-off-local", "not-served", "not-installed", "unqualified", "unsupported-load", "switch-busy", "operation-timeout", "observation-unknown", "projection-unknown"} {
+	for _, reason := range []nodepolicy.DispatchResidentReason{"reservation-revoked", "reservation-unknown", "engine-off", "no-fit", "paused-local", "engine-off-local", "not-served", "not-installed", "unqualified", "unsupported-load", "operation-busy", "operation-timeout", "observation-unknown", "projection-unknown"} {
 		t.Run(string(reason), func(t *testing.T) {
 			f := newResidentFixture(t)
 			f.grant = func(req residentDispatchRequest) {
@@ -1325,32 +1307,4 @@ func TestResidentStrictDecode(t *testing.T) {
 	test("unbounded keep alive", func(s string) string {
 		return strings.Replace(s, `"keepAliveSeconds":120`, `"keepAliveSeconds":86401`, 1)
 	})
-}
-
-func TestResidentSwitchBusy(t *testing.T) {
-	f := newResidentFixture(t)
-	_, p := switchFixture(t)
-	p.SourceEngine, p.TargetEngine, p.ManagerIncarnation = "fake", "other", f.ex.switchIncarnation
-	p.ConfigurationFence = "e3v1:" + nameDigest("configuration")
-	state, err := f.ex.desired.load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	before := state
-	t.Cleanup(func() {
-		if err := f.ex.desired.save(before); err != nil {
-			t.Errorf("restore fixture switch checkpoint: %v", err)
-		}
-	})
-	state.PendingSwitch = &settings.SwitchCheckpoint{SwitchPrepareRequest: p, Phase: settings.SwitchCheckpointReserved}
-	if err := f.ex.desired.save(state); err != nil {
-		t.Fatal(err)
-	}
-	if got := f.ex.residentCheck(context.Background(), f.p); got != "switch-busy" {
-		t.Fatalf("reason = %s, want switch-busy", got)
-	}
-	if result := f.run(t); result.Outcome != nodepolicy.ResidentNotDispatched {
-		t.Fatalf("result = %+v", result)
-	}
-	f.noCalls(t)
 }

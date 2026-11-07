@@ -31,7 +31,7 @@ func retainFixtureProcessLifetime(expected serviceProcessIdentity) (*fixtureProc
 	if current != expected {
 		return nil, errors.New("fixture lifetime identity mismatch")
 	}
-	stopped, err := switchProcessIdentityStopped(ctx, expected)
+	stopped, err := fixtureProcessIdentityStopped(ctx, expected)
 	if err != nil {
 		return nil, err
 	}
@@ -57,7 +57,7 @@ func (p *fixtureProcessLifetime) stopped(ctx context.Context) (bool, error) {
 	if p.closed {
 		return false, errors.New("fixture lifetime released without exit proof")
 	}
-	stopped, err := switchProcessIdentityStopped(ctx, p.expected)
+	stopped, err := fixtureProcessIdentityStopped(ctx, p.expected)
 	if err == nil && stopped {
 		p.exited, p.closed = true, true
 	}

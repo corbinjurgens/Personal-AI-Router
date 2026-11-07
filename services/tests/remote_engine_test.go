@@ -28,43 +28,8 @@ import (
 	"testing"
 	"time"
 
-	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/jsonrpc"
 )
-
-// completeEngineManagerRecovery plays the parent broker's startup role for
-// fixtures that own a manager directly and have no switch journal to recover.
-func completeEngineManagerRecovery(t *testing.T, call func(string, any) jsonrpc.Message) {
-	t.Helper()
-	response := call(settings.SwitchPrepareMethod, settings.SwitchPrepareRequest{})
-	if response.Error != nil {
-		t.Fatalf("inspect manager recovery: %+v", response.Error)
-	}
-	var inspected struct {
-		settings.SwitchPrepareResult
-		Configuration settings.SwitchConfigurationSnapshot `json:"configuration"`
-	}
-	if err := json.Unmarshal(response.Result, &inspected); err != nil {
-		t.Fatalf("decode manager recovery inspection: %v", err)
-	}
-	incarnation := inspected.Configuration.ManagerIncarnation
-	if inspected.Error != nil || inspected.Checkpoint != nil || incarnation == "" {
-		t.Fatalf("unexpected manager startup recovery state: %+v", inspected)
-	}
-	response = call("engine:switch-recovery-ready", map[string]string{"managerIncarnation": incarnation})
-	if response.Error != nil {
-		t.Fatalf("acknowledge manager recovery: %+v", response.Error)
-	}
-	var ready struct {
-		ManagerIncarnation string `json:"managerIncarnation"`
-	}
-	if err := json.Unmarshal(response.Result, &ready); err != nil {
-		t.Fatalf("decode manager recovery acknowledgement: %v", err)
-	}
-	if ready.ManagerIncarnation != incarnation {
-		t.Fatalf("manager recovery acknowledgement = %+v, want incarnation %q", ready, incarnation)
-	}
-}
 
 // mintClusterIdentity writes a self-signed cluster leaf (node.crt + node.key)
 // for uuid into dir and returns the certificate PEM (for cross-pinning).
@@ -283,9 +248,6 @@ func startEngineManagerServer(t *testing.T, clusterDir string, controlPort int) 
 	})
 	msgs := startMsgReader(stdout)
 	waitForMethod(t, msgs, "engine:ready", 10*time.Second)
-	completeEngineManagerRecovery(t, func(method string, params any) jsonrpc.Message {
-		return callRPC(t, stdin, msgs, method, params, 10*time.Second)
-	})
 	go func() {
 		for range msgs {
 		}
@@ -323,8 +285,5 @@ func startEngineManagerStdio(t *testing.T, clusterDir string) (io.WriteCloser, <
 	})
 	msgs := startMsgReader(stdout)
 	waitForMethod(t, msgs, "engine:ready", 10*time.Second)
-	completeEngineManagerRecovery(t, func(method string, params any) jsonrpc.Message {
-		return callRPC(t, stdin, msgs, method, params, 10*time.Second)
-	})
 	return stdin, msgs
 }

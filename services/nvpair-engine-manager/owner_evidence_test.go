@@ -20,12 +20,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"nvpair-shared/buildapply"
 	"nvpair-shared/durablefile"
 	"nvpair-shared/engines"
-	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/modeldownload"
 )
 
@@ -41,7 +39,7 @@ func TestOwnerEvidenceReservations(t *testing.T) {
 		}
 		d := newModelDownloads(newOpID(), dir, map[string]string{"llamacpp": engines.ModelNamingExact})
 		reg := &Registry{engines: map[string]*Manifest{"llamacpp": {Engine: "llamacpp", ModelNaming: engines.ModelNamingExact}}}
-		m := &Manager{exec: &Executor{switchIncarnation: d.source}, copyJournal: d, copyRegistry: reg}
+		m := &Manager{exec: &Executor{managerIncarnation: d.source}, copyJournal: d, copyRegistry: reg}
 		return m, d, copyRequest{OpID: newOpID(), Engine: "llamacpp", Model: "model", SourceNodeID: "source", DestinationNodeID: "destination"}
 	}
 	reserve := func(t *testing.T, m *Manager, p copyRequest) (context.Context, func()) {
@@ -426,7 +424,7 @@ func TestOwnerEvidenceReservations(t *testing.T) {
 		}
 		newID := newOpID()
 		successor := newModelDownloads(newID, filepath.Dir(d.store.path), map[string]string{"llamacpp": engines.ModelNamingExact})
-		fresh := &Manager{exec: &Executor{switchIncarnation: newID}, copyJournal: successor}
+		fresh := &Manager{exec: &Executor{managerIncarnation: newID}, copyJournal: successor}
 		r := fresh.ownerReservations()
 		requireOwnerBool(t, r.Busy, true)
 		if r.Complete || len(r.Copies) != 0 || len(r.RetainedCopies) != 1 || r.RetainedCopies[0].ManagerIncarnation != d.source || len(r.UnsafeDownloads) != 1 || r.UnsafeDownloads[0].Incarnation != "" || r.UnsafeDownloads[0].Marker.ID != a.entry.ID || r.Token.Incarnation != newID {
@@ -603,7 +601,7 @@ func ownerEvidenceFixture(t *testing.T) (*Executor, *engineState, desiredOwnerEv
 	platform := Platform{ModelsDir: filepath.Join(root, "models"), Runtime: Runtime{Port: 0}}
 	manifest := &Manifest{Engine: "fake", Platforms: map[string]Platform{runtime.GOOS + "/" + runtime.GOARCH: platform}}
 	st := &engineState{manifest: manifest, plat: &platform, installDir: filepath.Join(root, "fake"), modelsDir: platform.ModelsDir}
-	e := &Executor{switchIncarnation: "manager-fixture", reg: &Registry{engines: map[string]*Manifest{"fake": manifest}}, engines: map[string]*engineState{"fake": st}, stopOnly: map[string]*engineState{},
+	e := &Executor{managerIncarnation: "manager-fixture", reg: &Registry{engines: map[string]*Manifest{"fake": manifest}}, engines: map[string]*engineState{"fake": st}, stopOnly: map[string]*engineState{},
 		desired: newDesiredStateStore(t.TempDir()),
 		client:  &http.Client{Transport: ownerEvidenceRejectHTTP{}}, emit: func(string, any) { panic("evidence notified") },
 		inventory: map[string][]string{"fake": {"must-not-be-read"}},
@@ -654,7 +652,7 @@ func requireOwnerBool(t *testing.T, observation buildapply.Observation[bool], wa
 func ownerEvidenceRPCFixture(t *testing.T) (*Manager, *bytes.Buffer) {
 	t.Helper()
 	e, _, _ := ownerEvidenceFixture(t)
-	d := &modelDownloads{source: e.switchIncarnation, copiesComplete: true}
+	d := &modelDownloads{source: e.managerIncarnation, copiesComplete: true}
 	e.downloads = d
 	var out bytes.Buffer
 	return &Manager{exec: e, copyJournal: d, codec: NewCodec(&out)}, &out
@@ -695,7 +693,7 @@ func TestOwnerEvidenceRPC(t *testing.T) {
 		}
 		first := decodeOwnerEvidenceRPC(t, callOwnerEvidenceRPC(t, m, out, `{}`))
 		second := decodeOwnerEvidenceRPC(t, callOwnerEvidenceRPC(t, m, out, `{}`))
-		if first.ManagerIncarnation != m.exec.switchIncarnation || first.CaptureToken == "" || !first.Complete || !reflect.DeepEqual(first, second) {
+		if first.ManagerIncarnation != m.exec.managerIncarnation || first.CaptureToken == "" || !first.Complete || !reflect.DeepEqual(first, second) {
 			t.Fatalf("unstable idle evidence: %+v / %+v", first, second)
 		}
 		if len(m.exec.engines) != 0 || !first.Universe.Known || first.Universe.Value == nil || *first.Universe.Value == nil || len(*first.Universe.Value) != 0 {
@@ -783,7 +781,7 @@ func TestOwnerEvidenceRPC(t *testing.T) {
 		m, out := ownerEvidenceRPCFixture(t)
 		m.copyJournal.source = "different-manager"
 		got := decodeOwnerEvidenceRPC(t, callOwnerEvidenceRPC(t, m, out, `{}`))
-		if got.ManagerIncarnation != m.exec.switchIncarnation || got.Reservations.Known || got.Complete {
+		if got.ManagerIncarnation != m.exec.managerIncarnation || got.Reservations.Known || got.Complete {
 			t.Fatalf("source mismatch trusted: %+v", got)
 		}
 	})
@@ -844,7 +842,7 @@ func TestOwnerEvidenceRPC(t *testing.T) {
 			m, out := ownerEvidenceRPCFixture(t)
 			mutate(m)
 			got := decodeOwnerEvidenceRPC(t, callOwnerEvidenceRPC(t, m, out, `{}`))
-			if got.Complete || got.ManagerIncarnation != m.exec.switchIncarnation {
+			if got.Complete || got.ManagerIncarnation != m.exec.managerIncarnation {
 				t.Fatalf("unknown state became complete: %+v", got)
 			}
 			found := false
@@ -900,7 +898,7 @@ func TestOwnerEvidenceRPC(t *testing.T) {
 	t.Run("native restart replaces identity even at idle", func(t *testing.T) {
 		m, out := ownerEvidenceRPCFixture(t)
 		first := decodeOwnerEvidenceRPC(t, callOwnerEvidenceRPC(t, m, out, `{}`))
-		m.exec.switchIncarnation, m.copyJournal.source = "successor-manager", "successor-manager"
+		m.exec.managerIncarnation, m.copyJournal.source = "successor-manager", "successor-manager"
 		second := decodeOwnerEvidenceRPC(t, callOwnerEvidenceRPC(t, m, out, `{}`))
 		if second.ManagerIncarnation == first.ManagerIncarnation || second.CaptureToken == first.CaptureToken {
 			t.Fatal("successor retained predecessor identity")
@@ -918,10 +916,9 @@ func TestOwnerEvidenceUniverse(t *testing.T) {
 		saved.State.OffBy["origin-only"] = intentPeer
 		saved.State.ProcessStops = map[string]processStopEvidence{"unsupported": {PID: 12}, "unregistered-cleanup": {PID: 13}}
 		saved.State.AllocatedPorts = map[string]int{"port-zero": 0}
-		saved.State.PendingSwitch = &settings.SwitchCheckpoint{SwitchPrepareRequest: settings.SwitchPrepareRequest{SourceEngine: "checkpoint-source", TargetEngine: "checkpoint-target"}, Phase: settings.SwitchCheckpointReleased}
 		e.downloads = &modelDownloads{active: map[downloadContentKey]*modelDownloadAttempt{{engine: "download"}: {}}, unsafe: map[downloadContentKey]modelDownloadMarker{{engine: "unsafe"}: {}}, writers: map[string]bool{"writer": true}, readers: map[string]int{"reader": 1}}
 		got := e.captureOwnerUniverse(func() (desiredOwnerEvidence, error) { return saved, nil }, func() ([]string, bool) { return []string{"copy"}, true })
-		want := []string{"checkpoint-source", "checkpoint-target", "cold", "copy", "download", "fake", "origin-only", "port-zero", "reader", "removed-host", "saved-off", "unregistered-cleanup", "unsafe", "unsupported", "writer"}
+		want := []string{"cold", "copy", "download", "fake", "origin-only", "port-zero", "reader", "removed-host", "saved-off", "unregistered-cleanup", "unsafe", "unsupported", "writer"}
 		var names []string
 		for _, entry := range got.Entries {
 			names = append(names, entry.Name)
@@ -1010,9 +1007,9 @@ func TestOwnerEvidenceUniverse(t *testing.T) {
 		st.mu.Lock()
 		check(t)
 		st.mu.Unlock()
-		e.switchAdmission.Lock()
+		e.mutationAdmission.Lock()
 		check(t)
-		e.switchAdmission.Unlock()
+		e.mutationAdmission.Unlock()
 		e.downloads = &modelDownloads{}
 		e.downloads.mu.Lock()
 		check(t)
@@ -1047,7 +1044,7 @@ func TestOwnerEvidenceUniverse(t *testing.T) {
 	t.Run("unavailable saved owner does not claim a complete union", func(t *testing.T) {
 		e, _, _ := ownerEvidenceFixture(t)
 		got := e.captureOwnerUniverse(func() (desiredOwnerEvidence, error) { return desiredOwnerEvidence{}, errors.New("unavailable") }, func() ([]string, bool) { return nil, true })
-		if got.Complete || got.Reason != "saved_state_unknown" || got.Incarnation != e.switchIncarnation {
+		if got.Complete || got.Reason != "saved_state_unknown" || got.Incarnation != e.managerIncarnation {
 			t.Fatalf("saved failure = %+v", got)
 		}
 	})
@@ -1077,9 +1074,6 @@ func TestOwnerEvidenceUniverse(t *testing.T) {
 		check("cached state", func(_ *Executor, st *engineState, _ *desiredOwnerEvidence) { st.installed = true })
 		check("saved intent", func(_ *Executor, _ *engineState, saved *desiredOwnerEvidence) {
 			saved.State = desiredStateFile{Engines: map[string]bool{"late": true}}
-		})
-		check("checkpoint", func(_ *Executor, _ *engineState, saved *desiredOwnerEvidence) {
-			saved.State.PendingSwitch = &settings.SwitchCheckpoint{Phase: settings.SwitchCheckpointReserved}
 		})
 	})
 }
@@ -1208,23 +1202,14 @@ func TestOwnerEvidenceStopAuthority(t *testing.T) {
 	track := func(e *Executor) (func(), error) { return e.admitMutation("fake") }
 	admitted("install admitted before native work", track)
 	admitted("start waiting for lifecycle lock", track)
-	admitted("ordinary stop admission", func(e *Executor) (func(), error) { return e.admitStop("fake", intentPeer, "") })
+	admitted("ordinary stop admission", func(e *Executor) (func(), error) { return e.admitStop("fake") })
 	admitted("global mutation", func(e *Executor) (func(), error) {
-		e.switchAdmission.Lock()
-		defer e.switchAdmission.Unlock()
+		e.mutationAdmission.Lock()
+		defer e.mutationAdmission.Unlock()
 		return e.trackMutationLocked("")
 	})
-	admitted("checkpoint work", func(e *Executor) (func(), error) { return e.admitOwnerCheckpoint() })
+	admitted("observation work", func(e *Executor) (func(), error) { return e.admitOwnerCheckpoint() })
 
-	t.Run("unreleased checkpoint blocks unchanged lifecycle cache", func(t *testing.T) {
-		e, _, saved := owned(t)
-		saved.State.PendingSwitch = &settings.SwitchCheckpoint{SwitchPrepareRequest: settings.SwitchPrepareRequest{SourceEngine: "fake"}, Phase: settings.SwitchCheckpointReserved}
-		entry := ownerFixtureEntry(t, readOwnerFixture(e, saved), "fake")
-		requireOwnerUnknown(t, entry.StopAuthority)
-		if entry.AuthorityReason != "busy" {
-			t.Fatalf("checkpoint authority = %+v", entry)
-		}
-	})
 	t.Run("admission enter exit ABA invalidates otherwise identical captures", func(t *testing.T) {
 		e, _, saved := owned(t)
 		reads := 0
@@ -1233,7 +1218,7 @@ func TestOwnerEvidenceStopAuthority(t *testing.T) {
 			if reads == 2 {
 				done, err := e.admitOwnerCheckpoint()
 				if err != nil {
-					t.Fatalf("checkpoint admission: %v", err)
+					t.Fatalf("observation admission: %v", err)
 				}
 				done()
 			}
@@ -1258,7 +1243,7 @@ func TestOwnerEvidenceStopAuthority(t *testing.T) {
 		if e.ownerAdmissionGeneration != math.MaxUint64-1 || e.ownerAdmissionHeld != 0 {
 			t.Fatalf("retirement = %d, held=%d", e.ownerAdmissionGeneration, e.ownerAdmissionHeld)
 		}
-		if done, err := e.admitStop("fake", intentLocal, ""); err == nil || done != nil || e.switchMutations["fake"] != 0 {
+		if done, err := e.admitStop("fake"); err == nil || done != nil || e.activeMutations["fake"] != 0 {
 			t.Fatal("stop admitted effects without retirement capacity")
 		}
 	})
@@ -1375,9 +1360,6 @@ func TestOwnerEvidenceDesiredState(t *testing.T) {
 			if _, present := got.State.Engines["unset"]; present {
 				t.Fatal("unset intent became explicit Off")
 			}
-			if got.State.PendingSwitch != nil || got.State.PendingSwitchPorts != nil {
-				t.Fatal("absent checkpoint became present")
-			}
 		})
 	})
 	t.Run("retains unregistered intent and cleanup keys", func(t *testing.T) {
@@ -1399,7 +1381,7 @@ func TestOwnerEvidenceDesiredState(t *testing.T) {
 		unchanged(t, store, func() {
 			got := read(t, store)
 			if len(got.State.Engines) != 0 || len(got.State.OffBy) != 0 ||
-				len(got.State.ProcessStops) != 0 || len(got.State.AllocatedPorts) != 0 || got.State.PendingSwitch != nil || got.State.PendingSwitchPorts != nil {
+				len(got.State.ProcessStops) != 0 || len(got.State.AllocatedPorts) != 0 {
 				t.Fatalf("missing saved document became nonempty: %+v", got.State)
 			}
 		})
@@ -1477,53 +1459,6 @@ func TestOwnerEvidenceDesiredState(t *testing.T) {
 	compareRevisions("execution evidence does not change intent revision", `{"engines":{"a":false}}`,
 		`{"engines":{"a":false},"allocatedPorts":{"removed":23456}}`, true)
 
-	checkpointState := func() desiredStateFile {
-		return desiredStateFile{
-			Engines: map[string]bool{"source": true, "target": false}, OffBy: map[string]intentOrigin{"target": intentPeer},
-			PendingSwitch: &settings.SwitchCheckpoint{
-				SwitchPrepareRequest: settings.SwitchPrepareRequest{
-					OperationID: "owner-evidence", Caller: "fixture", Origin: settings.SwitchOriginLocal,
-					SourceEngine: "source", TargetEngine: "target", PayloadHash: "sha256:" + strings.Repeat("a", 64),
-					ConfigurationFence: "e3v1:" + strings.Repeat("b", 64), ManagerIncarnation: "predecessor",
-					Deadline: time.Unix(1700000000, 0).UTC(),
-				},
-				Phase:     settings.SwitchCheckpointReserved,
-				PreSource: settings.SwitchEngineState{Intent: settings.SwitchIntentOn},
-				PreTarget: settings.SwitchEngineState{Intent: settings.SwitchIntentOff}, TargetProvenance: string(intentPeer),
-				Source: settings.SwitchEngineState{Intent: settings.SwitchIntentOn}, Target: settings.SwitchEngineState{Intent: settings.SwitchIntentOff},
-			},
-			PendingSwitchPorts: &switchCheckpointPorts{Source: 23456, Target: 23457, SourcePID: 123, SourceRunID: "old-run"},
-		}
-	}
-	t.Run("checkpoint status preserves unknown runtime observations", func(t *testing.T) {
-		state := checkpointState()
-		store := newStore(t, encode(t, state))
-		unchanged(t, store, func() {
-			got := read(t, store)
-			if !reflect.DeepEqual(got.State, state) {
-				t.Fatalf("checkpoint changed: got=%+v want=%+v", got.State, state)
-			}
-			for _, observed := range []settings.SwitchEngineState{got.State.PendingSwitch.PreSource, got.State.PendingSwitch.PreTarget, got.State.PendingSwitch.Source, got.State.PendingSwitch.Target} {
-				if observed.Running != nil || observed.Healthy != nil || observed.ObservedAt != nil || observed.TerminationVerified {
-					t.Fatalf("unknown checkpoint observation fabricated runtime evidence: %+v", observed)
-				}
-			}
-		})
-	})
-	badCheckpoint := func(name string, change func(*settings.SwitchCheckpoint)) {
-		t.Run(name, func(t *testing.T) {
-			state := checkpointState()
-			change(state.PendingSwitch)
-			store := newStore(t, encode(t, state))
-			unchanged(t, store, func() { unknown(t, store) })
-		})
-	}
-	badCheckpoint("invalid checkpoint phase is unknown", func(cp *settings.SwitchCheckpoint) { cp.Phase = "invalid" })
-	badCheckpoint("invalid checkpoint origin is unknown", func(cp *settings.SwitchCheckpoint) { cp.Origin = "peer" })
-	badCheckpoint("invalid checkpoint Off origin is unknown", func(cp *settings.SwitchCheckpoint) { cp.TargetProvenance = "external" })
-	badCheckpoint("checkpoint Off origin for On is unknown", func(cp *settings.SwitchCheckpoint) { cp.SourceProvenance = "local" })
-	badCheckpoint("invalid checkpoint observation is unknown", func(cp *settings.SwitchCheckpoint) { cp.Source.Intent = "invalid" })
-	badCheckpoint("checkpoint cannot fabricate termination from unknown running", func(cp *settings.SwitchCheckpoint) { cp.Source.TerminationVerified = true })
 	for _, document := range []string{
 		`{"engines":{"hidden":null},"engines":{}}`,
 		`{"engines":{"hidden":true,"hidden":false}}`,
@@ -1534,21 +1469,17 @@ func TestOwnerEvidenceDesiredState(t *testing.T) {
 		})
 	}
 	t.Run("case variant nested null refuses", func(t *testing.T) {
-		state := checkpointState()
+		state := desiredStateFile{Engines: map[string]bool{"source": true, "target": false}, OffBy: map[string]intentOrigin{"target": intentPeer}}
 		state.ProcessStops = map[string]processStopEvidence{"removed": {Bin: filepath.Join(t.TempDir(), "inert"), Port: 23456, Address: "127.0.0.1:23456", PID: 123}}
 		document := strings.Replace(encode(t, state), `"pid":123`, `"PID":null`, 1)
 		store := newStore(t, document)
 		unchanged(t, store, func() { unknown(t, store) })
 	})
 	for _, path := range [][]string{
-		{"pendingSwitch", "targetCommitted"},
-		{"pendingSwitch", "targetProvenance"},
-		{"pendingSwitch", "source", "terminationVerified"},
-		{"pendingSwitchPorts", "source"},
 		{"processStops", "removed", "pid"},
 	} {
 		t.Run("null nested scalar "+strings.Join(path, "."), func(t *testing.T) {
-			state := checkpointState()
+			state := desiredStateFile{Engines: map[string]bool{"source": true, "target": false}, OffBy: map[string]intentOrigin{"target": intentPeer}}
 			state.ProcessStops = map[string]processStopEvidence{"removed": {Bin: filepath.Join(t.TempDir(), "inert"), Port: 23456, Address: "127.0.0.1:23456", PID: 123}}
 			var fields map[string]json.RawMessage
 			if err := json.Unmarshal([]byte(encode(t, state)), &fields); err != nil {
@@ -1580,32 +1511,9 @@ func TestOwnerEvidenceDesiredState(t *testing.T) {
 			unchanged(t, store, func() { unknown(t, store) })
 		})
 	}
-	t.Run("checkpoint endpoint validation covers complete document", func(t *testing.T) {
-		state := checkpointState()
-		state.PendingSwitchPorts.Target = -1
-		store := newStore(t, encode(t, state))
-		unchanged(t, store, func() { unknown(t, store) })
-	})
-	t.Run("checkpoint does not change intent semantic digest", func(t *testing.T) {
-		state := checkpointState()
-		before := read(t, newStore(t, encode(t, state)))
-		state.PendingSwitch = nil
-		state.PendingSwitchPorts = nil
-		after := read(t, newStore(t, encode(t, state)))
-		if before.IntentRevision != after.IntentRevision {
-			t.Fatal("checkpoint changed protected intent semantics")
-		}
-	})
 
-	t.Run("all returned maps and nested checkpoint pointers are detached", func(t *testing.T) {
-		state := checkpointState()
-		stopped, healthy := false, false
-		observedAt := time.Unix(1700000001, 0).UTC()
-		state.PendingSwitch.Source.Running = &stopped
-		state.PendingSwitch.Source.Healthy = &healthy
-		state.PendingSwitch.Source.ObservedAt = &observedAt
-		state.PendingSwitch.Source.TerminationVerified = true
-		state.PendingSwitch.Error = &settings.SwitchError{Code: settings.SwitchOperationErrorCode, Kind: settings.SwitchErrorInterrupted, Message: "fixture"}
+	t.Run("all returned maps are detached", func(t *testing.T) {
+		state := desiredStateFile{Engines: map[string]bool{"source": true, "target": false}, OffBy: map[string]intentOrigin{"target": intentPeer}}
 		stop := processStopEvidence{Bin: filepath.Join(t.TempDir(), "inert-image"), Port: 23456, Address: "127.0.0.1:23456", PID: 123}
 		state.ProcessStops = map[string]processStopEvidence{"removed": stop}
 		state.AllocatedPorts = map[string]int{"removed": 23456}
@@ -1616,12 +1524,6 @@ func TestOwnerEvidenceDesiredState(t *testing.T) {
 			first.State.OffBy["target"] = intentLocal
 			first.State.ProcessStops["removed"] = processStopEvidence{}
 			first.State.AllocatedPorts["removed"] = 1
-			first.State.PendingSwitch.Phase = settings.SwitchCheckpointReleased
-			first.State.PendingSwitchPorts.Source = 1
-			*first.State.PendingSwitch.Source.Running = true
-			*first.State.PendingSwitch.Source.Healthy = true
-			*first.State.PendingSwitch.Source.ObservedAt = time.Time{}
-			first.State.PendingSwitch.Error.Message = "mutated"
 			third := read(t, store)
 			if !reflect.DeepEqual(second.State, state) || !reflect.DeepEqual(third, second) {
 				t.Fatalf("returned evidence aliases another capture: second=%+v third=%+v", second, third)

@@ -144,7 +144,7 @@ func (e *Executor) Sleep(engine string) (err error) {
 	if err := e.doStopContext(ctx, st, engine); err != nil {
 		return err
 	}
-	if !e.switchTerminatedContext(ctx, st) {
+	if !e.terminationVerifiedContext(ctx, st) {
 		return fmt.Errorf("cannot pause engine %q: physical termination is unverified", engine)
 	}
 	return nil

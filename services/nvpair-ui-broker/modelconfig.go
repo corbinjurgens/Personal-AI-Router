@@ -278,7 +278,7 @@ func (b *Broker) modelConfigEntry(e modelConfigEvidence, ref nodepolicy.ModelRef
 	case intentKnown && !enabled:
 		block(nodepolicy.ModelReasonEngineOff)
 	case e.Drains[ref.Engine]:
-		block(nodepolicy.ModelReasonSwitchBusy)
+		block(nodepolicy.ModelReasonOperationBusy)
 	case !intentKnown || e.Activation.Activation != activationActive || e.Source == nil || e.Worker == nil:
 		entry.Reason = nodepolicy.ModelReasonProjectionUnknown
 	case !e.Running[ref.Engine] && !e.RunningKnown[ref.Engine]:

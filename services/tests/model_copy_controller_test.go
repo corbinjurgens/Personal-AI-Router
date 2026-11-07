@@ -507,7 +507,6 @@ func newControllerCopyFixture(t *testing.T, descriptorEngines ...string) *contro
 			dir = f.copyCluster
 		}
 		manager := startTask1Process(t, n.base, engineMgrBin, "--cluster-dir", dir, "--control-host", "127.0.0.1", "--control-port", strconv.Itoa(n.ports[noderec.ServiceEngineControl]), "--http-port", "0", "--loaded-poll-interval", "0")
-		completeEngineManagerRecovery(t, func(method string, params any) jsonrpc.Message { return manager.call(t, method, params) })
 		policy := nodepolicy.Default()
 		manager.send(t, "engine:node-projection", map[string]any{"policy": policy.Advertisement(), "pausedLocally": false, "managementBlocked": false}, false)
 		manager.call(t, "engine:models", nil) // Ordered projection/recovery barrier.

@@ -195,7 +195,6 @@ func TestModelCopyControlUnsupportedDestinationPreservesPrivateJournal(t *testin
 			authority := rmNewFixture(t, "destination-certificate")
 			output := &syncBuffer{}
 			m := NewManager(NewCodec(output), exec, authority.mesh, authority.dir)
-			exec.switchRecoveryPending.Store(false)
 			exec.nodeProjection.set(nodeProjection{})
 			t.Cleanup(func() { m.stopCopies(); m.controlHTTP.CloseIdle(); m.controlReadyHTTP.CloseIdle() })
 			copyControlDirectory(m, copyControlNode(t, "destination", "destination-certificate", nil))

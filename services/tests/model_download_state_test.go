@@ -577,7 +577,6 @@ func newDownloadProcessFixture(t *testing.T, reverse bool) *downloadProcessFixtu
 	jointIsolateEngines(t, base, portOfURL(t, inert.URL))
 	f.writeManifest(t, base, 0, false)
 	f.controller = startTask1Process(t, base, engineMgrBin, "--cluster-dir", filepath.Join(base, "cluster"), "--control-host", "127.0.0.1", "--loaded-poll-interval", "0")
-	completeEngineManagerRecovery(t, func(method string, params any) jsonrpc.Message { return f.controller.call(t, method, params) })
 	ecPort, emPort := s.ports.engineControl, s.ports.engineManagerHTTP
 	if reverse {
 		ecPort, emPort = blockedPort, blockedPort
@@ -2163,7 +2162,6 @@ func downloadTransferAttachRouter(t *testing.T, f *controllerCopyFixture, node *
 	}
 	f.writeManifestWithRouter(t, node, portOfURL(t, router.server.URL))
 	manager := startTask1Process(t, node.base, engineMgrBin, "--cluster-dir", clusterDir, "--control-host", "127.0.0.1", "--control-port", strconv.Itoa(node.ports[noderec.ServiceEngineControl]), "--http-port", "0", "--loaded-poll-interval", "0")
-	completeEngineManagerRecovery(t, func(method string, params any) jsonrpc.Message { return manager.call(t, method, params) })
 	policy := nodepolicy.Default()
 	manager.send(t, "engine:node-projection", map[string]any{"policy": policy.Advertisement(), "pausedLocally": false, "managementBlocked": false}, false)
 	var status struct {

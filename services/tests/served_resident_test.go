@@ -120,7 +120,7 @@ func runSRTargetRuntime() error {
 	engine := os.Getenv("NVPAIR_SR_TARGET_ENGINE")
 	model := srCustomModel
 	if engine != "llamacpp-custom" {
-		return errors.New("invalid private switch engine")
+		return errors.New("invalid private secondary engine")
 	}
 	path := os.Getenv("NVPAIR_SR_CUSTOM_CONFIG")
 	data, err := os.ReadFile(path)
@@ -430,17 +430,17 @@ func runSRRuntime(args []string) error {
 }
 
 type srProcessFixture struct {
-	switchProxy *fixtureProxyControl
+	secondaryProxy *fixtureProxyControl
 	*neServingFixture
-	relay            *srWorkerRelay
-	peerClient       *http.Client
-	switchTarget     bool
-	switchEngine     string
-	switchEnginePort int
-	switchFacadePort int
-	switchControl    *httptest.Server
-	switchMu         sync.Mutex
-	switchStarts     []int32
+	relay               *srWorkerRelay
+	peerClient          *http.Client
+	secondaryEnabled    bool
+	secondaryEngine     string
+	secondaryEnginePort int
+	secondaryFacadePort int
+	secondaryControl    *httptest.Server
+	secondaryMu         sync.Mutex
+	secondaryStarts     []int32
 }
 
 // NE owns fixed-image dispatch, service-port reservations, private manifests,
@@ -449,24 +449,24 @@ func newSRProcessFixture(t *testing.T) *srProcessFixture {
 	return newSRProcessFixtureWithRetention(t, false, "-1")
 }
 
-func newSRSwitchProcessFixture(t *testing.T) *srProcessFixture {
+func newSRSecondaryProcessFixture(t *testing.T) *srProcessFixture {
 	return newSRProcessFixtureWithRetry(t, true, "-1", time.Second)
 }
 
-func newSRProcessFixtureWithRetention(t *testing.T, switchTarget bool, retention string) *srProcessFixture {
+func newSRProcessFixtureWithRetention(t *testing.T, secondaryEnabled bool, retention string) *srProcessFixture {
 	t.Helper()
-	return newSRProcessFixtureWithRetry(t, switchTarget, retention, time.Second)
+	return newSRProcessFixtureWithRetry(t, secondaryEnabled, retention, time.Second)
 }
 
-func newSRProcessFixtureWithRetry(t *testing.T, switchTarget bool, retention string, retry time.Duration) *srProcessFixture {
+func newSRProcessFixtureWithRetry(t *testing.T, secondaryEnabled bool, retention string, retry time.Duration) *srProcessFixture {
 	t.Helper()
 	if runtime.GOOS != "windows" {
 		t.Skip("SR process evidence requires the Windows fixed-path lane")
 	}
 	f := &srProcessFixture{neServingFixture: newNEServingFixture(t)}
 	f.residentRetryInterval = retry
-	if switchTarget {
-		f.enableSwitchTarget(t, "llamacpp-custom")
+	if secondaryEnabled {
+		f.enableSecondaryEngine(t, "llamacpp-custom")
 	}
 	peerDir := filepath.Join(t.TempDir(), "cluster")
 	targetDir := filepath.Join(f.root, "cluster")
@@ -616,34 +616,34 @@ func newSRProcessFixtureWithRetry(t *testing.T, switchTarget bool, retention str
 	return f
 }
 
-// Switch and cross-engine contention own a second fake engine. Its settings and
+// Cross-engine contention owns a second fake engine. Its settings and
 // executable are private before the first broker start; other SR cases keep
 // the NE fixture's single-facade startup and absent-engine manifests.
-func (f *srProcessFixture) enableSwitchTarget(t *testing.T, engine string) {
+func (f *srProcessFixture) enableSecondaryEngine(t *testing.T, engine string) {
 	t.Helper()
-	f.switchTarget = true
-	f.switchEngine = engine
-	f.switchProxy = newFixtureProxyControl(t)
+	f.secondaryEnabled = true
+	f.secondaryEngine = engine
+	f.secondaryProxy = newFixtureProxyControl(t)
 	reservations := []net.Listener{listenFixtureLoopback(t), listenFixtureLoopback(t)}
-	f.switchEnginePort = reservations[0].Addr().(*net.TCPAddr).Port
-	f.switchFacadePort = reservations[1].Addr().(*net.TCPAddr).Port
+	f.secondaryEnginePort = reservations[0].Addr().(*net.TCPAddr).Port
+	f.secondaryFacadePort = reservations[1].Addr().(*net.TCPAddr).Port
 	servicePorts := []int{f.ports.nodeInfo, f.ports.errors, f.ports.workload, f.ports.clusterManager, f.ports.engineManagerHTTP, f.ports.engineControl}
-	for _, port := range []int{f.switchEnginePort, f.switchFacadePort} {
+	for _, port := range []int{f.secondaryEnginePort, f.secondaryFacadePort} {
 		if !neSafePort(port) || port == f.enginePort || port == f.facadePort || port == f.scannerPort || port == f.inertPort {
-			t.Fatalf("switch fixture selected occupied or protected port %d", port)
+			t.Fatalf("secondary fixture selected occupied or protected port %d", port)
 		}
 		for _, servicePort := range servicePorts {
 			if port == servicePort {
-				t.Fatalf("switch fixture selected service port %d", port)
+				t.Fatalf("secondary fixture selected service port %d", port)
 			}
 		}
 	}
 	for _, listener := range reservations {
 		if err := listener.Close(); err != nil {
-			t.Fatalf("release switch port reservation: %v", err)
+			t.Fatalf("release secondary port reservation: %v", err)
 		}
 	}
-	f.switchControl = newFixtureHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	f.secondaryControl = newFixtureHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/started" || r.URL.Query().Get("engine") != engine {
 			http.Error(w, "unexpected fake engine callback", http.StatusBadRequest)
 			return
@@ -653,18 +653,18 @@ func (f *srProcessFixture) enableSwitchTarget(t *testing.T, engine string) {
 			http.Error(w, "invalid fake engine PID", http.StatusBadRequest)
 			return
 		}
-		f.switchMu.Lock()
-		f.switchStarts = append(f.switchStarts, int32(pid))
-		f.switchMu.Unlock()
+		f.secondaryMu.Lock()
+		f.secondaryStarts = append(f.secondaryStarts, int32(pid))
+		f.secondaryMu.Unlock()
 	}))
-	t.Cleanup(f.switchControl.Close)
+	t.Cleanup(f.secondaryControl.Close)
 	probePath := "/v1/models"
 	probe := map[string]any{"http": "http://127.0.0.1:{port}" + probePath, "status": http.StatusOK, "timeout_s": 10, "interval_s": 60, "json_match": nil}
 	configPath := filepath.Join(f.root, "switch-runtime.json")
-	jointWriteJSON(t, configPath, neRuntimeConfig{Root: f.root, Nonce: f.nonce, Port: f.switchEnginePort})
+	jointWriteJSON(t, configPath, neRuntimeConfig{Root: f.root, Nonce: f.nonce, Port: f.secondaryEnginePort})
 	runtimeConfig := map[string]any{
-		"args": []string{"serve"}, "bin": f.image, "port": f.switchEnginePort, "bind": "127.0.0.1", "ready": probe, "health": probe,
-		"env":  map[string]string{srCustomRuntimeEnv: f.image, "NVPAIR_SR_CUSTOM_CONFIG": configPath, "NVPAIR_SR_TARGET_ENGINE": engine, "NVPAIR_TEST_SWITCH_CONTROL": f.switchControl.URL},
+		"args": []string{"serve"}, "bin": f.image, "port": f.secondaryEnginePort, "bind": "127.0.0.1", "ready": probe, "health": probe,
+		"env":  map[string]string{srCustomRuntimeEnv: f.image, "NVPAIR_SR_CUSTOM_CONFIG": configPath, "NVPAIR_SR_TARGET_ENGINE": engine, "NVPAIR_TEST_SWITCH_CONTROL": f.secondaryControl.URL},
 		"stop": map[string]any{"signal": "term", "grace_s": 1},
 	}
 	modelsDir := filepath.Join(f.root, "switch-models")
@@ -676,26 +676,26 @@ func (f *srProcessFixture) enableSwitchTarget(t *testing.T, engine string) {
 		}
 	}
 	jointWriteJSON(t, filepath.Join(f.app, "engines", engine+".json"), manifest)
-	jointWriteJSON(t, filepath.Join(f.app, privateFixtureEngine(t, engine).PortFile), map[string]int{"port": f.switchFacadePort})
+	jointWriteJSON(t, filepath.Join(f.app, privateFixtureEngine(t, engine).PortFile), map[string]int{"port": f.secondaryFacadePort})
 	journalPath := filepath.Join(f.root, "engine-settings-operations.json")
 	data, err := os.ReadFile(journalPath)
 	if err != nil {
-		t.Fatalf("read SR switch settings journal: %v", err)
+		t.Fatalf("read SR secondary settings journal: %v", err)
 	}
 	var journal map[string]any
 	if err := json.Unmarshal(data, &journal); err != nil {
-		t.Fatalf("decode SR switch settings journal: %v", err)
+		t.Fatalf("decode SR secondary settings journal: %v", err)
 	}
 	journal[engine] = map[string]any{"explicit": true, "snapshot": settings.Snapshot{
-		Engine: engine, Revision: 1, AppliedRevision: 1, Phase: "idle", Format: "pair-arguments-v1", Settings: settings.Config{ServerPort: f.switchEnginePort, ProxyPort: f.switchFacadePort},
+		Engine: engine, Revision: 1, AppliedRevision: 1, Phase: "idle", Format: "pair-arguments-v1", Settings: settings.Config{ServerPort: f.secondaryEnginePort, ProxyPort: f.secondaryFacadePort},
 	}}
 	jointWriteJSON(t, journalPath, journal)
 }
 
 func (f *srProcessFixture) call(t *testing.T, method string, params, out any) {
 	t.Helper()
-	if f.switchProxy != nil {
-		if result, handled := f.switchProxy.componentCall(t, method, params); handled {
+	if f.secondaryProxy != nil {
+		if result, handled := f.secondaryProxy.componentCall(t, method, params); handled {
 			if result.Error != nil {
 				t.Fatalf("%s: %v", method, result.Error)
 			}
@@ -712,7 +712,7 @@ func (f *srProcessFixture) call(t *testing.T, method string, params, out any) {
 
 func (f *srProcessFixture) start(t *testing.T) {
 	t.Helper()
-	if f.relay == nil && !f.switchTarget {
+	if f.relay == nil && !f.secondaryEnabled {
 		f.neServingFixture.start(t)
 		return
 	}
@@ -730,7 +730,7 @@ func (f *srProcessFixture) start(t *testing.T) {
 	}
 	probeURL := "http://127.0.0.1:{port}/v1/models"
 	proxyEngines := "llamacpp"
-	// Check the active switch target separately from NE's built-in isolation
+	// Check the active secondary engine separately from NE's built-in isolation
 	// checks, while retaining every other private engine check.
 	for _, engine := range privateFixtureEngineNames() {
 		data, err := os.ReadFile(filepath.Join(f.app, "engines", engine+".json"))
@@ -745,39 +745,39 @@ func (f *srProcessFixture) start(t *testing.T) {
 		if err := json.Unmarshal(data, &manifest); err != nil {
 			t.Fatalf("decode %s private SR manifest: %v", engine, err)
 		}
-		if engine == f.switchEngine {
+		if engine == f.secondaryEngine {
 			platform, ok := manifest.Platforms[runtime.GOOS+"/"+runtime.GOARCH]
-			if !ok || !reflect.DeepEqual(platform.Detect, []string{f.image}) || manifest.Runtime.Bin != f.image || manifest.Runtime.Port != f.switchEnginePort || platform.Runtime.Port != f.switchEnginePort || platform.Runtime.Ready.HTTP != probeURL || platform.ModelsDir != filepath.Join(f.root, "switch-models") {
-				t.Fatal("switch target escaped private image, port or model directory")
+			if !ok || !reflect.DeepEqual(platform.Detect, []string{f.image}) || manifest.Runtime.Bin != f.image || manifest.Runtime.Port != f.secondaryEnginePort || platform.Runtime.Port != f.secondaryEnginePort || platform.Runtime.Ready.HTTP != probeURL || platform.ModelsDir != filepath.Join(f.root, "switch-models") {
+				t.Fatal("secondary engine escaped private image, port or model directory")
 			}
 			continue
 		}
 		f.assertRuntimeIsolation(t, engine, "raw shared", manifest.Runtime, manifest.ModelsDir)
 		f.assertPlatformIsolation(t, engine, "raw host", manifest.Platforms)
 	}
-	args := append([]string{"--scanner-path", f.scanner, "--engine-manager-path", engineMgrBin, "--proxy-path", f.switchProxy.image, "--proxy-engines=" + proxyEngines, "--cluster-dir", filepath.Join(f.root, "cluster"), "--log-level", "info"}, f.ports.args()...)
+	args := append([]string{"--scanner-path", f.scanner, "--engine-manager-path", engineMgrBin, "--proxy-path", f.secondaryProxy.image, "--proxy-engines=" + proxyEngines, "--cluster-dir", filepath.Join(f.root, "cluster"), "--log-level", "info"}, f.ports.args()...)
 	args = append(args, f.residentFixtureWaitArgs()...)
-	f.p = startInteropProcess(t, f.root, brokerBin, f.ports.engineManagerHTTP, append(f.switchProxy.env(), "NVPAIR_TEST_SUBSCRIPTION_SCANNER="+f.scanner, "NVPAIR_TEST_SUBSCRIPTION_PORT="+strconv.Itoa(f.scannerPort)), args...)
-	f.p.ports = append(f.p.ports, f.ports.engineControl, f.scannerPort, f.facadePort, f.switchEnginePort, f.switchFacadePort, f.switchProxy.port)
-	for _, path := range []string{engineMgrBin, proxyBin, f.switchProxy.image, f.scanner} {
+	f.p = startInteropProcess(t, f.root, brokerBin, f.ports.engineManagerHTTP, append(f.secondaryProxy.env(), "NVPAIR_TEST_SUBSCRIPTION_SCANNER="+f.scanner, "NVPAIR_TEST_SUBSCRIPTION_PORT="+strconv.Itoa(f.scannerPort)), args...)
+	f.p.ports = append(f.p.ports, f.ports.engineControl, f.scannerPort, f.facadePort, f.secondaryEnginePort, f.secondaryFacadePort, f.secondaryProxy.port)
+	for _, path := range []string{engineMgrBin, proxyBin, f.secondaryProxy.image, f.scanner} {
 		canonical, err := canonicalServicePath(path)
 		if err != nil {
-			t.Fatalf("canonicalize SR switch service image %s: %v", path, err)
+			t.Fatalf("canonicalize SR secondary service image %s: %v", path, err)
 		}
 		f.p.paths = append(f.p.paths, canonical)
 	}
 	waitForMethod(t, f.p.msgs, "app:ready", neCallBudget)
-	f.switchProxy.ready(t, "llamacpp", f.facadePort)
-	f.switchProxy.ready(t, f.switchEngine, f.switchFacadePort)
+	f.secondaryProxy.ready(t, "llamacpp", f.facadePort)
+	f.secondaryProxy.ready(t, f.secondaryEngine, f.secondaryFacadePort)
 	for _, engine := range privateFixtureEngineNames() {
 		var manifest struct {
 			Platforms map[string]neFixturePlatform `json:"platforms"`
 		}
 		f.call(t, "engine:describe", map[string]string{"engine": engine}, &manifest)
-		if engine == f.switchEngine {
+		if engine == f.secondaryEngine {
 			platform, ok := manifest.Platforms[runtime.GOOS+"/"+runtime.GOARCH]
-			if !ok || !reflect.DeepEqual(platform.Detect, []string{f.image}) || platform.Runtime.Bin != f.image || platform.Runtime.Port != f.switchEnginePort || platform.Runtime.Ready.HTTP != probeURL || platform.ModelsDir != filepath.Join(f.root, "switch-models") {
-				t.Fatal("effective switch target escaped private image, port, probe or model directory")
+			if !ok || !reflect.DeepEqual(platform.Detect, []string{f.image}) || platform.Runtime.Bin != f.image || platform.Runtime.Port != f.secondaryEnginePort || platform.Runtime.Ready.HTTP != probeURL || platform.ModelsDir != filepath.Join(f.root, "switch-models") {
+				t.Fatal("effective secondary engine escaped private image, port, probe or model directory")
 			}
 			continue
 		}
@@ -1213,7 +1213,7 @@ func (r *srWorkerRelay) wait(t *testing.T, description string, match func(srRela
 
 func (f *srProcessFixture) startRelayed(t *testing.T) {
 	t.Helper()
-	if f.p != nil || f.switchTarget {
+	if f.p != nil || f.secondaryEnabled {
 		t.Fatal("worker-loss relay requires a stopped single-facade fixture")
 	}
 	f.assertIsolationFiles(t)
@@ -1438,7 +1438,7 @@ func TestServedResidentPolicyPairedRoutes(t *testing.T) {
 	directConfigurations := make(map[string]nodepolicy.ModelConfiguration)
 	test := func(name string, reverse bool) {
 		t.Run(name, func(t *testing.T) {
-			p := newPinnedSwitchFixture(t, reverse)
+			p := newPinnedEngineProcessFixture(t, reverse)
 			mesh, f := p.mesh, p.f
 			path := filepath.Join(jointAppDir(f.base), nodepolicy.FileName)
 			if !reverse {
@@ -1907,7 +1907,7 @@ func TestServedResidentProcessResidency(t *testing.T) {
 
 func TestServedResidentProcessCrossEngineLastSlot(t *testing.T) {
 	// Exercise the node-wide resident limit across built-in and descriptor engines.
-	f := newSRSwitchProcessFixture(t)
+	f := newSRSecondaryProcessFixture(t)
 	// Observe the owned fake's actual launch digest before writing its synthetic
 	// qualification. The proxy reads that registry only at process startup.
 	f.call(t, "engine:start", map[string]string{"engine": "llamacpp-custom"}, nil)
@@ -1967,10 +1967,10 @@ func TestServedResidentProcessCrossEngineLastSlot(t *testing.T) {
 		}
 		return false
 	})
-	f.call(t, "llamacpp-custom-proxy:node/add-manual", map[string]any{"id": "sr-custom-self", "host": "127.0.0.1", "port": f.switchFacadePort, "addresses": []string{"127.0.0.1"}, "models": []string{srCustomModel}}, nil)
+	f.call(t, "llamacpp-custom-proxy:node/add-manual", map[string]any{"id": "sr-custom-self", "host": "127.0.0.1", "port": f.secondaryFacadePort, "addresses": []string{"127.0.0.1"}, "models": []string{srCustomModel}}, nil)
 	f.call(t, "llamacpp-custom-proxy:node/select", map[string]string{"id": "sr-custom-self"}, nil)
 	neEventually(t, "healthy descriptor engine facade", neCallBudget, func() bool {
-		status, _, err := f.http(http.MethodGet, f.switchFacadePort, "/v1/models", nil, nil)
+		status, _, err := f.http(http.MethodGet, f.secondaryFacadePort, "/v1/models", nil, nil)
 		return err == nil && status == http.StatusOK
 	})
 	f.resident(t, neModel)
@@ -1981,7 +1981,7 @@ func TestServedResidentProcessCrossEngineLastSlot(t *testing.T) {
 	})
 	targetState := func() srRuntimeState {
 		t.Helper()
-		status, data, err := f.http(http.MethodGet, f.switchEnginePort, "/__sr/control", nil, nil)
+		status, data, err := f.http(http.MethodGet, f.secondaryEnginePort, "/__sr/control", nil, nil)
 		var state srRuntimeState
 		if err != nil || status != http.StatusOK {
 			t.Fatalf("private descriptor engine control status=%d err=%v", status, err)
@@ -1995,9 +1995,9 @@ func TestServedResidentProcessCrossEngineLastSlot(t *testing.T) {
 		return state
 	}
 	targetStarts := func() int {
-		f.switchMu.Lock()
-		defer f.switchMu.Unlock()
-		return len(f.switchStarts)
+		f.secondaryMu.Lock()
+		defer f.secondaryMu.Unlock()
+		return len(f.secondaryStarts)
 	}
 	source, target := f.control(t, ""), targetState()
 	sourceStarts, starts := len(f.starts(t)), targetStarts()
@@ -2012,7 +2012,7 @@ func TestServedResidentProcessCrossEngineLastSlot(t *testing.T) {
 	unloadPattern := regexp.MustCompile(`(?m)^[^\r\n]*\[nvpair-ui-broker\] INFO model unloaded engine=(\S+) model=(\S+) reason=(\S+)\r?\n`)
 	refusalLogOffset := len(f.p.output.String())
 	started := time.Now()
-	status, data, err := f.http(http.MethodPost, f.switchFacadePort, "/v1/chat/completions", body, &request)
+	status, data, err := f.http(http.MethodPost, f.secondaryFacadePort, "/v1/chat/completions", body, &request)
 	elapsed := time.Since(started)
 	if err != nil {
 		t.Fatalf("cross-engine occupied request transport: %v", err)
@@ -2072,7 +2072,7 @@ func TestServedResidentProcessCrossEngineLastSlot(t *testing.T) {
 	// enough transport time to observe its full eight-second pre-output budget.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+net.JoinHostPort("127.0.0.1", strconv.Itoa(f.switchFacadePort))+"/v1/chat/completions", bytes.NewReader(body))
+	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+net.JoinHostPort("127.0.0.1", strconv.Itoa(f.secondaryFacadePort))+"/v1/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("create cross-engine released-slot HTTP request: %v", err)
 	}
@@ -2165,7 +2165,7 @@ func TestServedResidentProcessVeto(t *testing.T) {
 		// Pause can verify refusal while it stops the real managed runtime.
 		f.inert.Close()
 		f.call(t, "node:set-availability", map[string]string{"state": "paused"}, nil)
-		assertSwitchProcessStopped(t, int32(before.Base.PID))
+		assertFixtureProcessStopped(t, int32(before.Base.PID))
 		f.resident(t, neModel)
 		f.entry(t, neModel, nodepolicy.ModelStateBlocked, nodepolicy.ModelReasonPaused)
 		if got := len(f.starts(t)); got != starts {
@@ -2385,7 +2385,7 @@ func TestServedResidentProcessProxyLossBeforeGrant(t *testing.T) {
 	lost := f.relay.wait(t, "actual proxy killed and reaped before grant", func(event srRelayEvent) bool {
 		return event.Role == "proxy" && event.Phase == "reaped"
 	})
-	assertSwitchProcessStopped(t, int32(lost.PID))
+	assertFixtureProcessStopped(t, int32(lost.PID))
 	f.relay.mu.Lock()
 	old := f.relay.oldGrant
 	f.relay.mu.Unlock()
@@ -2609,91 +2609,5 @@ func TestServedResidentProcessLostManagerCompletion(t *testing.T) {
 	after := f.control(t, "")
 	if after.Base.PID == before.Base.PID || after.Models[neModel].Loads != 1 || after.Base.Chats != 0 || after.Base.Unloads != 0 || after.Content != 0 || after.Base.Unexpected != 0 {
 		t.Fatalf("full-stack restart native effects: before=%+v after=%+v", before, after)
-	}
-}
-
-func TestServedResidentProcessSwitch(t *testing.T) {
-	f := newSRSwitchProcessFixture(t)
-	f.resident(t, neModel)
-	f.entry(t, neModel, nodepolicy.ModelStateSatisfied, "")
-	// Capture every engine settings baseline before obtaining the CAS revision.
-	// A periodic broker refresh must not add an unrelated baseline mid-switch.
-	for _, engine := range engines.Names() {
-		f.call(t, "engine:get-settings", map[string]string{"engine": engine}, nil)
-	}
-	source := f.control(t, "hold")
-	sourceStarts := len(f.starts(t))
-	if source.Base.PID <= 0 || source.Models[neModel].Loads != 1 {
-		t.Fatalf("switch source was not resident before drain: %+v", source)
-	}
-	body := []byte(`{"model":"ne-fixture","messages":[{"role":"user","content":"fixture"}],"max_tokens":128,"stream":false}`)
-	completed := make(chan error, 1)
-	go func() {
-		client := &http.Client{Timeout: 80 * time.Second, Transport: &http.Transport{Proxy: nil}}
-		response, err := client.Post(fmt.Sprintf("http://127.0.0.1:%d/v1/chat/completions", f.facadePort), "application/json", bytes.NewReader(body))
-		if err == nil {
-			if response.StatusCode != http.StatusOK {
-				err = fmt.Errorf("held inference status=%d", response.StatusCode)
-			}
-			if closeErr := response.Body.Close(); err == nil {
-				err = closeErr
-			}
-		}
-		completed <- err
-	}()
-	neEventually(t, "source inference reached fake runtime", 10*time.Second, func() bool { return f.control(t, "").HeldChats == 1 })
-	var status settings.SwitchStatus
-	f.call(t, settings.SwitchStatusMethod, settings.SwitchStatusRequest{}, &status)
-	request := settings.SwitchRequest{RequestID: "sr-resident-drain", SourceEngine: "llamacpp", TargetEngine: "llamacpp-custom", ExpectedRevision: status.ConfigurationRevision}
-	f.call(t, settings.SwitchMethod, request, nil)
-	neEventually(t, "switch entered drain", 40*time.Second, func() bool {
-		f.call(t, settings.SwitchStatusMethod, settings.SwitchStatusRequest{RequestID: request.RequestID}, &status)
-		if status.Receipt != nil && status.Receipt.Terminal {
-			t.Fatalf("switch became terminal before held inference released: %+v", status.Receipt)
-		}
-		return status.Receipt != nil && status.Receipt.Phase == settings.SwitchDraining
-	})
-	beforeDrain := f.control(t, "")
-	f.entry(t, neModel, nodepolicy.ModelStateBlocked, nodepolicy.ModelReasonSwitchBusy)
-	srAssertNoEffects(t, beforeDrain, f.control(t, ""))
-	stopped, err := serviceProcessStopped(context.Background(), int32(source.Base.PID))
-	if err != nil || stopped || f.control(t, "").HeldChats != 1 {
-		t.Fatalf("switch stopped a busy resident source: stopped=%t err=%v", stopped, err)
-	}
-	f.control(t, "release")
-	select {
-	case err := <-completed:
-		if err != nil {
-			t.Fatalf("held inference did not finish: %v", err)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("held inference did not finish after release")
-	}
-	neEventually(t, "switch completed after resident request", 45*time.Second, func() bool {
-		f.call(t, settings.SwitchStatusMethod, settings.SwitchStatusRequest{RequestID: request.RequestID}, &status)
-		return status.Receipt != nil && status.Receipt.Terminal
-	})
-	receipt := status.Receipt
-	if receipt.Phase != settings.SwitchCompleted || receipt.Error != nil || receipt.RecoveryRequired || receipt.Source.Intent != settings.SwitchIntentOff || receipt.Target.Intent != settings.SwitchIntentOn || !receipt.Source.TerminationVerified {
-		t.Fatalf("resident switch receipt=%+v", receipt)
-	}
-	assertSwitchProcessStopped(t, int32(source.Base.PID))
-	assertInteropListenerClosed(t, f.enginePort)
-	f.switchMu.Lock()
-	starts := append([]int32(nil), f.switchStarts...)
-	f.switchMu.Unlock()
-	if len(starts) != 1 {
-		t.Fatalf("target starts=%v, want one", starts)
-	}
-	stopped, err = serviceProcessStopped(context.Background(), starts[0])
-	if err != nil || stopped {
-		t.Fatalf("switch target not running: stopped=%t err=%v", stopped, err)
-	}
-	f.entry(t, neModel, nodepolicy.ModelStateBlocked, nodepolicy.ModelReasonEngineOff)
-	if !reflect.DeepEqual(f.policy(t).Policy.ResidentModels, nodepolicy.ResidentModels{{Engine: "llamacpp", Model: neModel}}) {
-		t.Fatal("switch changed resident declaration")
-	}
-	if len(f.starts(t)) != sourceStarts {
-		t.Fatal("saved source Off automatically restarted resident engine")
 	}
 }

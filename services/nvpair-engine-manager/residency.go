@@ -271,7 +271,7 @@ func (e *Executor) residentIdentity(p nodepolicy.ReconcileResidentParams) bool {
 }
 
 func (e *Executor) residentPrecheck(p nodepolicy.ReconcileResidentParams) string {
-	if p.Reservation.ManagerIncarnation != e.switchIncarnation {
+	if p.Reservation.ManagerIncarnation != e.managerIncarnation {
 		return "unqualified"
 	}
 	if err := e.remoteVeto(p.Engine); err != nil {
@@ -288,9 +288,6 @@ func (e *Executor) residentPrecheck(p nodepolicy.ReconcileResidentParams) string
 	e.desired.mu.Unlock()
 	if err != nil {
 		return "observation-unknown"
-	}
-	if cp := state.PendingSwitch; cp != nil && cp.Phase != "released" && (cp.SourceEngine == p.Engine || cp.TargetEngine == p.Engine) {
-		return "switch-busy"
 	}
 	if !state.Engines[p.Engine] {
 		return "engine-off"
@@ -467,7 +464,7 @@ func (e *Executor) executeResident(ctx context.Context, p nodepolicy.ReconcileRe
 		return refused
 	}
 	grant := nodepolicy.DispatchResidentParams{ReservationID: p.Reservation.ReservationID, ProxyRunID: p.Reservation.ProxyRunID,
-		ManagerIncarnation: e.switchIncarnation, OperationID: p.OperationID, PolicyRevision: p.PolicyRevision, Engine: p.Engine, Model: p.Model, Identity: p.Identity}
+		ManagerIncarnation: e.managerIncarnation, OperationID: p.OperationID, PolicyRevision: p.PolicyRevision, Engine: p.Engine, Model: p.Model, Identity: p.Identity}
 	if err := e.residentParent(ctx, grant); err != nil {
 		var refusal residentDispatchRefusal
 		switch {
@@ -566,5 +563,5 @@ func (e *Executor) residentObservation(ctx context.Context, p nodepolicy.Reconci
 			}
 		}
 	}
-	return &nodepolicy.ResidentLoadedObservation{ManagerIncarnation: e.switchIncarnation, Generation: e.residentGeneration.Add(1), Engine: p.Engine, Model: model, Identity: p.Identity, Loaded: loaded}
+	return &nodepolicy.ResidentLoadedObservation{ManagerIncarnation: e.managerIncarnation, Generation: e.residentGeneration.Add(1), Engine: p.Engine, Model: model, Identity: p.Identity, Loaded: loaded}
 }

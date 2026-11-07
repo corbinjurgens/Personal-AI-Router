@@ -295,8 +295,8 @@ func TestProfileConversionChangedExternalSourceFailsWithoutPublishing(t *testing
 	if f.configureCalls != baseline.configureCalls+1 || f.mutations != baseline.mutations || f.inferences != baseline.inferences {
 		t.Fatalf("source failure/replay effects: configure=%d mutation=%d inference=%d", f.configureCalls, f.mutations, f.inferences)
 	}
-	f.switchProcessFixture.mu.Lock()
-	defer f.switchProcessFixture.mu.Unlock()
+	f.engineProcessFixture.mu.Lock()
+	defer f.engineProcessFixture.mu.Unlock()
 	for engine, starts := range f.starts {
 		if len(starts) != 0 {
 			t.Fatalf("source-failed conversion started synthetic engine %s", engine)

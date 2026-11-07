@@ -513,7 +513,7 @@ func TestModelSettingsContractIncompleteLaunchRPCsHaveNoEffects(t *testing.T) {
 					t.Fatalf("incomplete request produced an applicable result: %+v", reply)
 				}
 			}
-			if !reflect.DeepEqual(st.plat.Runtime, before) || st.running || st.proc != nil || len(e.switchMutations) != 0 || len(m.settingsRelay.pending) != 0 {
+			if !reflect.DeepEqual(st.plat.Runtime, before) || st.running || st.proc != nil || len(e.activeMutations) != 0 || len(m.settingsRelay.pending) != 0 {
 				t.Fatal("incomplete request changed runtime or entered mutation/rebind")
 			}
 			entries, err := os.ReadDir(e.overrideDir)

@@ -549,7 +549,7 @@ func (f *modelBufferProcessFixture) assertBufferEngineManifests(t *testing.T) {
 		t.Fatal(err)
 	}
 	seen := map[int]bool{}
-	ports := []int{f.ports.nodeInfo, f.ports.errors, f.ports.workload, f.ports.clusterManager, f.ports.engineManagerHTTP, f.ports.engineControl, f.sourcePort, f.targetPort, f.facadePort, f.targetFacadePort, f.scannerPort, portOfURL(t, f.modelSettingsProcessFixture.control), portOfURL(t, f.switchProcessFixture.control.URL)}
+	ports := []int{f.ports.nodeInfo, f.ports.errors, f.ports.workload, f.ports.clusterManager, f.ports.engineManagerHTTP, f.ports.engineControl, f.sourcePort, f.targetPort, f.facadePort, f.targetFacadePort, f.scannerPort, portOfURL(t, f.modelSettingsProcessFixture.control), portOfURL(t, f.engineProcessFixture.control.URL)}
 	ports = append(ports, f.proxyControl.port)
 	for _, port := range ports {
 		if err := validateFixturePort(port); err != nil {

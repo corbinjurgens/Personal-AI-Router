@@ -106,7 +106,7 @@ func TestModelCopyReceiptPreflightHasNoJournalEffects(t *testing.T) {
 	test("predecessor marker refuses verified receipt", func(t *testing.T, m *Manager, p copyRequest, _ engineModelStore) {
 		retainCopyReceiptAttempt(t, m, p)
 		d := newModelDownloads(newOpID(), filepath.Dir(m.copyJournal.store.path), map[string]string{"llamacpp": engines.ModelNamingExact})
-		m.copyJournal, m.exec.downloads, m.exec.switchIncarnation = d, d, d.source
+		m.copyJournal, m.exec.downloads, m.exec.managerIncarnation = d, d, d.source
 	}, false)
 }
 

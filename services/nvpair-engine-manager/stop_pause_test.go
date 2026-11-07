@@ -789,39 +789,6 @@ func TestDeleteRestartRefusalRetainsHTTPCode(t *testing.T) {
 	}
 }
 
-func TestRemoteSwitchOverridesPlainOff(t *testing.T) {
-	for _, origin := range []intentOrigin{intentLocal, intentPeer, "legacy", "missing"} {
-		t.Run(string(origin), func(t *testing.T) {
-			ex, p := switchFixture(t)
-			if err := ex.Start(context.Background(), "source"); err != nil {
-				t.Fatal(err)
-			}
-			if origin != "missing" {
-				state, err := ex.desired.load()
-				if err != nil {
-					t.Fatal(err)
-				}
-				state.Engines["target"] = false
-				if origin != "legacy" {
-					state.OffBy["target"] = origin
-				}
-				if err := ex.desired.save(state); err != nil {
-					t.Fatal(err)
-				}
-			}
-			p.Origin = settings.SwitchOriginRemote
-			p = prepareSwitch(t, ex, p)
-			switchStep(t, ex, p, settings.SwitchStepSourceStop)
-			switchStep(t, ex, p, settings.SwitchStepTargetStart)
-			status, err := ex.Status("target")
-			if err != nil || !status.Running {
-				t.Fatalf("peer switch over Off = %+v, %v", status, err)
-			}
-			requireOffOrigin(t, ex.desired, "target", "")
-		})
-	}
-}
-
 func TestRemoteCodesKeepNumericIdentity(t *testing.T) {
 	codes := map[int]string{
 		codePolicyConflict:         "policy_conflict",
@@ -875,25 +842,6 @@ func TestRemoteCodesKeepNumericIdentity(t *testing.T) {
 			})
 		})
 	}
-	t.Run("relay reply", func(t *testing.T) {
-		r := &switchRelay{}
-		r.send = func(_ context.Context, _ string, value any) error {
-			request, ok := value.(switchRelayRequest)
-			if !ok {
-				t.Fatalf("relay request = %T", value)
-			}
-			raw, err := json.Marshal(switchRelayReply{ID: request.ID, Error: "paused", ErrorCode: codeLocalVeto})
-			if err != nil {
-				return err
-			}
-			r.reply(raw)
-			return nil
-		}
-		_, err := r.call(context.Background(), settings.SwitchMethod, "pinned-peer", json.RawMessage(`{}`))
-		if rpcCode(err) != codeLocalVeto {
-			t.Fatalf("relay code = %d, want %d (%v)", rpcCode(err), codeLocalVeto, err)
-		}
-	})
 }
 
 func TestNodeProjectionManagementBlocked(t *testing.T) {
@@ -922,10 +870,10 @@ func TestNodeProjectionManagementBlocked(t *testing.T) {
 
 func TestPauseVetoIdentitySurvivesEveryErrorBoundary(t *testing.T) {
 	for _, tc := range []struct {
-		code                int
-		wire, kind, message string
+		code          int
+		wire, message string
 	}{
-		{-32011, "local_veto", "remote_veto", "This node is paused. Resume it on this node before managing it remotely."},
+		{-32011, "local_veto", "This node is paused. Resume it on this node before managing it remotely."},
 	} {
 		t.Run(tc.wire, func(t *testing.T) {
 			veto := &localVetoError{code: tc.code, reason: tc.message}
@@ -951,37 +899,7 @@ func TestPauseVetoIdentitySurvivesEveryErrorBoundary(t *testing.T) {
 			if frame.Type != "error" || frame.Code != tc.wire || frame.Message != tc.message {
 				t.Fatalf("terminal frame = %+v", frame)
 			}
-			failure := switchFailure(switchCode(veto), settings.SwitchErrorTargetStart, veto)
-			if failure.Code != tc.code || failure.Kind != tc.kind || failure.Message != tc.message {
-				t.Fatalf("switch refusal = %+v", failure)
-			}
 		})
-	}
-}
-
-func TestPauseCleansCommittedLocalSwitch(t *testing.T) {
-	ex, p := switchFixture(t)
-	if err := ex.Start(context.Background(), "source"); err != nil {
-		t.Fatal(err)
-	}
-	p = prepareSwitch(t, ex, p)
-	switchStep(t, ex, p, settings.SwitchStepSourceStop)
-	switchStep(t, ex, p, settings.SwitchStepTargetStart)
-	ex.nodeProjection.set(nodeProjection{ManagementBlocked: true})
-	result := ex.SwitchStep(context.Background(), settings.SwitchStepRequest{SwitchPrepareRequest: p, Step: settings.SwitchStepRelease})
-	if result.Error == nil || result.Error.Kind != settings.SwitchErrorBusy {
-		t.Fatalf("paused committed target released: %+v", result)
-	}
-	result = ex.SwitchReconcile(context.Background(), settings.SwitchReconcileRequest{SwitchPrepareRequest: p})
-	if result.Error == nil || result.Error.Code != -32011 || result.Checkpoint.TargetCommitted || !result.Observed.Target.TerminationVerified || result.Observed.Target.Intent != settings.SwitchIntentOff {
-		t.Fatalf("paused local cleanup = %+v", result)
-	}
-	switchStep(t, ex, p, settings.SwitchStepRelease)
-	for _, engine := range []string{"source", "target"} {
-		status, err := ex.Status(engine)
-		if err != nil || status.Running {
-			t.Fatalf("pause left %s running: %+v, %v", engine, status, err)
-		}
 	}
 }
 

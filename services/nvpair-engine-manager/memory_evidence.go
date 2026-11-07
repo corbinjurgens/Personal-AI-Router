@@ -407,7 +407,7 @@ func (e *Executor) memoryEvidenceSource(provider func() string) memoryEvidenceSo
 	}
 	return memoryEvidenceSourceSnapshot{
 		hostUUID:           host,
-		managerIncarnation: e.switchIncarnation,
+		managerIncarnation: e.managerIncarnation,
 		engines:            identity.Engines,
 		epochs:             identity.epochs,
 		settings:           e.memoryAppliedSettings(),

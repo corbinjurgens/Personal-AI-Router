@@ -230,7 +230,7 @@ func (e *Executor) newModelBufferCapture(st *engineState, engine string, prepare
 		slog.Warn("model buffer capture unavailable", "stage", "capture-create", "reason", "no-loads")
 		return nil
 	}
-	c := &modelBufferCapture{owner: &e.modelBuffers, token: modelBufferHash(newOpID()), engineID: modelBufferHash(engine), managerID: modelBufferHash(e.switchIncarnation), prepared: prepared, children: map[int]*modelBufferChild{}, frozen: map[string]*modelBufferFrozen{}, charge: 16 << 10, wallHigh: time.Now().UnixNano()}
+	c := &modelBufferCapture{owner: &e.modelBuffers, token: modelBufferHash(newOpID()), engineID: modelBufferHash(engine), managerID: modelBufferHash(e.managerIncarnation), prepared: prepared, children: map[int]*modelBufferChild{}, frozen: map[string]*modelBufferFrozen{}, charge: 16 << 10, wallHigh: time.Now().UnixNano()}
 	c.owner.mu.Lock()
 	if c.owner.closed || c.charge > modelBufferCaptureBytes-c.owner.bytes {
 		c.owner.mu.Unlock()

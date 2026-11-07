@@ -47,8 +47,6 @@ type opParam struct {
 	Port   int    `json:"port,omitempty"`
 	Bind   string `json:"bind,omitempty"`
 	Start  bool   `json:"start,omitempty"`
-	// SwitchOperationID scopes a delayed local Off to the admitted reservation.
-	SwitchOperationID string `json:"switchOperationId,omitempty"`
 	// VerifyStop requests internal cleanup evidence on an ordinary unscoped stop.
 	VerifyStop bool `json:"verifyStop,omitempty"`
 }
@@ -85,8 +83,6 @@ type Manager struct {
 	copyRegistry *Registry
 	// Preparation is read-only; its returned effect runs inside durable evidence.
 	copyPrepare      func(context.Context, copyRequest, string, func(copyProgress)) (func() (copyModelResult, error), copyModelResult, error)
-	switchWatchers   switchWatchers
-	switchRelay      switchRelay
 	settingsRelay    settingsRelay
 	policyRelay      policyRelay
 	modelMutation    modelMutationRelay
@@ -108,9 +104,6 @@ func NewManager(codec *Codec, exec *Executor, mesh *clustertrust.Mesh, clusterDi
 	exec.memoryEvidence.mu.Lock()
 	exec.memoryEvidence.hostUUID = mesh.NodeUUID
 	exec.memoryEvidence.mu.Unlock()
-	// Set the gate before main starts the direct mTLS listener. State delivery
-	// and conservative stdio recovery remain available while it is closed.
-	exec.switchRecoveryPending.Store(true)
 	// cancel defaults to a no-op so the "shutdown" handler is safe even if
 	// handleMessage is reached before Run() installs the real CancelFunc
 	// (e.g. a unit test calling it directly); Run overwrites it.
@@ -140,8 +133,6 @@ func NewManager(codec *Codec, exec *Executor, mesh *clustertrust.Mesh, clusterDi
 		BaseConfigDir:     baseDir, ResolveRoute: m.resolveControlRoute,
 	})
 	m.settingsRelay.send = codec.NotifyContext
-	m.switchRelay.send = codec.NotifyContext
-	exec.switchParent = m.switchRelay.call
 	exec.settingsParent = m.settingsRelay.call
 	exec.memoryProfilesParent = m.settingsRelay.callRelay
 	m.policyRelay.send = codec.NotifyContext
@@ -217,7 +208,7 @@ func (m *Manager) handleMessage(ctx context.Context, msg *Message) {
 		m.residentDispatch.reply(msg.Params)
 		return
 	}
-	if m.handleSwitchMessage(ctx, msg) || m.handleSettingsMessage(ctx, msg) || m.handlePolicyMessage(ctx, msg) {
+	if m.handleSettingsMessage(ctx, msg) || m.handlePolicyMessage(ctx, msg) {
 		return
 	}
 	if msg.Method == applog.SetLevelMethod {
@@ -292,19 +283,6 @@ func (m *Manager) handleMessage(ctx context.Context, msg *Message) {
 
 	case nodepolicy.MethodReconcileResident:
 		go m.runResident(ctx, msg)
-
-	case switchRecoveryReadyMethod:
-		var p struct {
-			ManagerIncarnation string `json:"managerIncarnation"`
-		}
-		if !m.parse(msg, &p) {
-			return
-		}
-		if err := m.exec.completeSwitchRecovery(p.ManagerIncarnation); err != nil {
-			m.respondOrErr(msg, nil, err)
-			return
-		}
-		m.codec.Respond(msg.ID, map[string]string{"managerIncarnation": m.exec.switchIncarnation})
 
 	case "shutdown":
 		if err := m.codec.Respond(msg.ID, nil); err != nil {
@@ -467,11 +445,7 @@ func (m *Manager) runOp(ctx context.Context, msg *Message) {
 	case "engine:start":
 		err = start()
 	case "engine:stop":
-		if p.SwitchOperationID != "" {
-			err = m.exec.StopForSwitch(p.Engine, p.SwitchOperationID)
-		} else {
-			err = m.exec.Stop(p.Engine)
-		}
+		err = m.exec.Stop(p.Engine)
 	case "engine:restart":
 		err = m.exec.Restart(ctx, p.Engine)
 	}
@@ -479,7 +453,7 @@ func (m *Manager) runOp(ctx context.Context, msg *Message) {
 		m.respondOrErr(msg, nil, err)
 		return
 	}
-	if msg.Method == "engine:stop" && p.VerifyStop && p.SwitchOperationID == "" {
+	if msg.Method == "engine:stop" && p.VerifyStop {
 		observed, err := m.exec.verifyStopped(p.Engine)
 		m.respondOrErr(msg, observed, err)
 		return
@@ -660,7 +634,7 @@ func (m *Manager) parse(msg *Message, v any) bool {
 
 func (m *Manager) respondOrErr(msg *Message, result any, err error) {
 	if err != nil {
-		var busy *switchBusyError
+		var busy *mutationBusyError
 		if errors.As(err, &busy) {
 			m.codec.RespondErrorData(msg.ID, -32000, err.Error(), map[string]string{"kind": "busy"})
 			return

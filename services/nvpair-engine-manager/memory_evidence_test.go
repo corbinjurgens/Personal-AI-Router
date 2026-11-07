@@ -82,7 +82,7 @@ func (h *memoryEvidenceHarness) record() memoryQualificationRecord {
 	engine := h.engine
 	return memoryQualificationRecord{
 		Source: &memoryArtifactSource{
-			HostUUID: memoryValue(h.host), ManagerIncarnation: memoryValue(h.ex.switchIncarnation),
+			HostUUID: memoryValue(h.host), ManagerIncarnation: memoryValue(h.ex.managerIncarnation),
 			Engine: &engine, EngineRunID: memoryValue(h.runID), LaunchDigest: memoryValue(h.launch),
 			Model: memoryValue(memoryTestModel), ModelDigest: memoryValue(h.digest),
 		},

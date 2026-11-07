@@ -97,7 +97,7 @@ func TestCopyBaselineAmendCurrentAndOld(t *testing.T) {
 			source := newOpID()
 			d := newModelDownloads(source, filepath.Dir(path), map[string]string{"llamacpp": engines.ModelNamingExact})
 			reg := &Registry{engines: map[string]*Manifest{"llamacpp": {Engine: "llamacpp", ModelNaming: engines.ModelNamingExact}}}
-			m := &Manager{exec: &Executor{switchIncarnation: source}, copyJournal: d, copyRegistry: reg}
+			m := &Manager{exec: &Executor{managerIncarnation: source}, copyJournal: d, copyRegistry: reg}
 			evidence := m.ownerReservations()
 			if !evidence.Complete || evidence.Token.DownloadSource != source || evidence.Token.Incarnation != source {
 				t.Fatalf("reload evidence %+v", evidence)
@@ -226,7 +226,7 @@ func TestCopyBaselineAmendRetainedRefusals(t *testing.T) {
 					t.Fatal("retained reload lost marker")
 				}
 				reg := &Registry{engines: map[string]*Manifest{"llamacpp": {Engine: "llamacpp", ModelNaming: engines.ModelNamingExact}}}
-				m := &Manager{exec: &Executor{switchIncarnation: d.source}, copyJournal: d, copyRegistry: reg}
+				m := &Manager{exec: &Executor{managerIncarnation: d.source}, copyJournal: d, copyRegistry: reg}
 				if m.ownerReservations().Complete {
 					t.Fatal("retained reload promoted owner evidence")
 				}

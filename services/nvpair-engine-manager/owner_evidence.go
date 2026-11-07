@@ -5,6 +5,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,9 +19,17 @@ import (
 	"time"
 
 	"nvpair-shared/buildapply"
-	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/modeldownload"
 )
+
+func ownerDigest(value any) (string, error) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	return "sha256:" + hex.EncodeToString(sum[:]), nil
+}
 
 var errOwnerAdmissionCapacity = errors.New("engine owner admission generation exhausted")
 var errOwnerEvidenceBusy = errors.New("engine owner evidence busy")
@@ -47,10 +57,10 @@ func (m *Manager) captureOwnerSections() ownerSections {
 
 func (m *Manager) engineOwnerEvidence() (buildapply.EngineOwnerEvidence, error) {
 	result := buildapply.EngineOwnerEvidence{Reasons: []buildapply.EngineOwnerReason{}}
-	if m.exec == nil || m.exec.switchIncarnation == "" {
+	if m.exec == nil || m.exec.managerIncarnation == "" {
 		return result, errors.New("engine owner evidence unavailable")
 	}
-	result.ManagerIncarnation = m.exec.switchIncarnation
+	result.ManagerIncarnation = m.exec.managerIncarnation
 	a, b := m.captureOwnerSections(), m.captureOwnerSections()
 	reason := func(section, engine, code string) {
 		result.Reasons = append(result.Reasons, buildapply.EngineOwnerReason{Section: section, Engine: engine, Code: code})
@@ -150,7 +160,7 @@ func projectOwnerReservations(r ownerReservationEvidence, admission uint64) (bui
 	result := buildapply.EngineOwnerReservations{BlocksApply: r.Busy, UnsafeCopiesComplete: r.Complete, Operations: []buildapply.EngineOwnerOperation{}}
 	// Admission and all content/copy authority generations participate even if
 	// the visible operations returned to their prior values between captures.
-	revision, err := switchDigest(struct {
+	revision, err := ownerDigest(struct {
 		Token     ownerReservationToken
 		Admission uint64
 	}{r.Token, admission})
@@ -199,7 +209,7 @@ func projectOwnerReservations(r ownerReservationEvidence, admission uint64) (bui
 		}
 	}
 	content := func(engine, kind string) error {
-		id, err := switchDigest(struct{ Engine, Kind string }{engine, kind})
+		id, err := ownerDigest(struct{ Engine, Kind string }{engine, kind})
 		if err != nil {
 			return err
 		}
@@ -270,7 +280,7 @@ type ownerReservationEvidence struct {
 func (m *Manager) ownerReservations() ownerReservationEvidence {
 	r := ownerReservationEvidence{Reason: "busy"}
 	if m.exec != nil {
-		r.Token.Incarnation = m.exec.switchIncarnation
+		r.Token.Incarnation = m.exec.managerIncarnation
 	}
 	if !m.copyMu.TryLock() {
 		return r
@@ -356,7 +366,7 @@ func (e *Executor) ownerAdmissionCapacityLocked() bool {
 		math.MaxUint64-e.ownerAdmissionGeneration-e.ownerAdmissionHeld >= 2
 }
 
-// Caller holds switchAdmission. The returned retirement also requires it.
+// Caller holds mutationAdmission. The returned retirement also requires it.
 func (e *Executor) reserveOwnerAdmissionLocked() (func(), error) {
 	if !e.ownerAdmissionCapacityLocked() {
 		return nil, errOwnerAdmissionCapacity
@@ -373,16 +383,15 @@ func (e *Executor) reserveOwnerAdmissionLocked() (func(), error) {
 	}, nil
 }
 
-// Switch checkpoint work has its own existing exclusion policy. This metadata
-// fences its observations without changing that policy or adding a reservation.
+// Observation work advances the admission fence without adding a reservation.
 func (e *Executor) admitOwnerCheckpoint() (func(), error) {
-	e.switchAdmission.Lock()
+	e.mutationAdmission.Lock()
 	retire, err := e.reserveOwnerAdmissionLocked()
-	e.switchAdmission.Unlock()
+	e.mutationAdmission.Unlock()
 	if err != nil {
 		return nil, err
 	}
-	return func() { e.switchAdmission.Lock(); retire(); e.switchAdmission.Unlock() }, nil
+	return func() { e.mutationAdmission.Lock(); retire(); e.mutationAdmission.Unlock() }, nil
 }
 
 // All fields are guarded by st.mu. A publication is bound to the actual state
@@ -404,7 +413,7 @@ func (st *engineState) ownerConfigLocked() string {
 	if st.plat == nil {
 		return ""
 	}
-	digest, err := switchDigest(struct {
+	digest, err := ownerDigest(struct {
 		Platform        *Platform
 		Install, Models string
 	}{st.plat, st.installDir, st.modelsDir})
@@ -482,12 +491,12 @@ type ownerAdmissionCapture struct {
 }
 
 func (e *Executor) captureOwnerAdmission() (ownerAdmissionCapture, bool) {
-	if !e.switchAdmission.TryLock() {
+	if !e.mutationAdmission.TryLock() {
 		return ownerAdmissionCapture{}, false
 	}
-	defer e.switchAdmission.Unlock()
+	defer e.mutationAdmission.Unlock()
 	a := ownerAdmissionCapture{Generation: e.ownerAdmissionGeneration, Held: e.ownerAdmissionHeld, Mutations: make(map[string]int), Shutdown: e.shuttingDown.Load()}
-	for name, count := range e.switchMutations {
+	for name, count := range e.activeMutations {
 		if count != 0 {
 			a.Mutations[name] = count
 		}
@@ -633,7 +642,7 @@ func (m *Manager) ownerCopyNames() ([]string, bool) {
 // Two detached captures reject changed owners, including admission enter/exit
 // ABA. This is evidence, not an atomic acceptance pin or physical liveness proof.
 func (e *Executor) captureOwnerUniverse(savedRead func() (desiredOwnerEvidence, error), copyNames func() ([]string, bool)) ownerUniverseEvidence {
-	result := ownerUniverseEvidence{Incarnation: e.switchIncarnation, Reason: "busy"}
+	result := ownerUniverseEvidence{Incarnation: e.managerIncarnation, Reason: "busy"}
 	a, ok := e.captureOwnerAdmission()
 	if !ok {
 		return result
@@ -704,9 +713,6 @@ func (e *Executor) captureOwnerUniverse(savedRead func() (desiredOwnerEvidence, 
 			entry.ModelRoot = ""
 		}
 		busy := a.Held != 0 || a.Shutdown || a.Mutations[""] != 0 || a.Mutations[name.Name] != 0 || c.Relaunch != nil
-		if cp := saved.State.PendingSwitch; cp != nil && cp.Phase != settings.SwitchCheckpointReleased && (cp.Automatic || cp.SourceEngine == name.Name || cp.TargetEngine == name.Name) {
-			busy = true
-		}
 		k := c.Knowledge
 		if busy {
 			entry.AuthorityReason = "busy"
@@ -803,10 +809,6 @@ func (e *Executor) ownerUniverseMembership(saved desiredOwnerEvidence) ([]ownerU
 	for name := range saved.State.AllocatedPorts {
 		add(name, true)
 	}
-	if cp := saved.State.PendingSwitch; cp != nil {
-		add(cp.SourceEngine, false)
-		add(cp.TargetEngine, false)
-	}
 	result := make([]ownerUniverseEntry, 0, len(names))
 	for _, entry := range names {
 		result = append(result, entry)
@@ -873,32 +875,10 @@ func (s *desiredStateStore) captureOwnerEvidenceLocked(read func() ([]byte, erro
 			}
 		}
 	}
-	if cp := state.PendingSwitch; cp != nil {
-		for _, observed := range []settings.SwitchEngineState{cp.PreSource, cp.PreTarget, cp.Source, cp.Target} {
-			if err := observed.Validate(); err != nil {
-				return desiredOwnerEvidence{}, fmt.Errorf("invalid pending switch state: %w", err)
-			}
-		}
-		for _, prior := range []struct {
-			intent string
-			origin string
-		}{{cp.PreSource.Intent, cp.SourceProvenance}, {cp.PreTarget.Intent, cp.TargetProvenance}} {
-			if prior.origin != "" && (prior.intent != settings.SwitchIntentOff || (prior.origin != string(intentLocal) && prior.origin != string(intentPeer))) {
-				return desiredOwnerEvidence{}, errors.New("invalid pending switch Off provenance")
-			}
-		}
-		if cp.Error != nil {
-			if err := cp.Error.Validate(); err != nil {
-				return desiredOwnerEvidence{}, fmt.Errorf("invalid pending switch error: %w", err)
-			}
-		}
-	} else if state.PendingSwitchPorts != nil {
-		return desiredOwnerEvidence{}, errors.New("pending switch endpoints lack a checkpoint")
-	}
 	// encoding/json sorts map keys. Intent key presence remains part of its
 	// baseline. Each decode owns all
-	// maps and nested checkpoint pointers, so no store or other read aliases them.
-	intent, err := switchDigest(struct {
+	// maps, so no store or other read aliases them.
+	intent, err := ownerDigest(struct {
 		Engines map[string]bool         `json:"engines"`
 		OffBy   map[string]intentOrigin `json:"offBy"`
 	}{state.Engines, state.OffBy})
@@ -937,8 +917,6 @@ func validateDesiredOwnerDocument(data []byte) error {
 					}
 				}
 			}
-		case "pendingSwitch", "pendingSwitchPorts":
-			// The document decoder validates these optional checkpoint records.
 		default:
 			return fmt.Errorf("unrecognized desired engine evidence field %q", name)
 		}

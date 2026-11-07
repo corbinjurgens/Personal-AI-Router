@@ -62,8 +62,6 @@ func (p *Proxy) handlePolicyMethod(msg *Message, method string) bool {
 		err = p.applySetEngineDrain(msg.Params)
 	case nodepolicy.MethodSetResidency:
 		err = p.applySetResidency(msg.Params)
-	case nodepolicy.MethodInvalidateEngine:
-		result, err = p.applyInvalidateEngine(msg.Params)
 	case nodepolicy.MethodAdmissionSnapshot:
 		result, err = p.applyAdmissionSnapshot(msg.Params)
 	case nodepolicy.MethodSetEngineIntent:

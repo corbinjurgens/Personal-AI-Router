@@ -244,9 +244,6 @@ func newTask2Fixture(t *testing.T, options ...task2FixtureOption) *task2Fixture 
 		}
 		task1WriteJSON(t, filepath.Join(n.base, "cluster", "members.json"), members)
 		f.engines[n.uuid] = startTask1Process(t, n.base, engineMgrBin, "--cluster-dir", filepath.Join(n.base, "cluster"), "--control-port", strconv.Itoa(n.ports[noderec.ServiceEngineControl]), "--http-port", strconv.Itoa(n.ports[noderec.ServiceEngineManager]), "--loaded-poll-interval", "0")
-		completeEngineManagerRecovery(t, func(method string, params any) jsonrpc.Message {
-			return f.engines[n.uuid].call(t, method, params)
-		})
 		// Standalone managers have no broker to publish policy. Supply its
 		// actual notification shape after recovery so granted mutations reach
 		// their handlers rather than the unknown-projection gate.

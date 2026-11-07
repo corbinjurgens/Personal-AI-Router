@@ -61,7 +61,7 @@ type engineState struct {
 	// opMu serializes lifecycle operations (install / start / stop /
 	// restart / uninstall), settings replacement and manifest-bound load
 	// recheck/dispatch, including loads without a serving record. Ordinary
-	// mutation admission precedes opMu; lock order is switchAdmission -> opMu
+	// mutation admission precedes opMu; lock order is mutationAdmission -> opMu
 	// -> mu (the admission gate is released before waiting for opMu). The per-op
 	// st.mu is released around probes, and the background health loop
 	// never takes opMu.
@@ -124,16 +124,13 @@ type Executor struct {
 	modelEstimates      modelEstimateState
 	modelBuffers        modelBufferOwner
 	modelMemoryProfiles *modelMemoryProfiles
-	// switchAdmission protects reservation admission and active mutation counts;
-	// switchMu serializes checkpoint steps without holding the admission gate.
-	switchAdmission   sync.Mutex
-	switchMu          sync.Mutex
-	switchMutations   map[string]int
-	switchIncarnation string
+	// mutationAdmission protects owner admission and active mutation counts.
+	mutationAdmission  sync.Mutex
+	activeMutations    map[string]int
+	managerIncarnation string
 	// Entry reserves retirement capacity, so this fence cannot wrap or miss ABA.
 	ownerAdmissionGeneration uint64
 	ownerAdmissionHeld       uint64
-	switchParent             switchBrokerCall
 	settingsHub              settings.Hub
 	settingsParent           func(context.Context, string, settings.Request, string) (json.RawMessage, error)
 	memoryProfilesParent     func(context.Context, settings.Relay) (json.RawMessage, error)
@@ -227,9 +224,6 @@ type Executor struct {
 	publishMu sync.Mutex
 
 	reservedPort atomic.Int32
-	// A broker-managed executor's direct peer mutations stay fenced until the
-	// parent acknowledges conservative recovery for this process incarnation.
-	switchRecoveryPending atomic.Bool
 	// StopAll is terminal for an Executor; the gate closes its start/snapshot race.
 	shuttingDown atomic.Bool
 	mu           sync.Mutex
@@ -241,7 +235,7 @@ type Executor struct {
 
 func NewExecutor(reg *Registry, reporter *Reporter, emit func(string, any), baseDir string) *Executor {
 	e := &Executor{
-		switchIncarnation:   newOpID(),
+		managerIncarnation:  newOpID(),
 		reg:                 reg,
 		reporter:            reporter,
 		emit:                emit,
@@ -279,7 +273,7 @@ func NewExecutor(reg *Registry, reporter *Reporter, emit func(string, any), base
 			slog.Warn("model download persistence directory unavailable")
 		}
 	}
-	e.downloads = newModelDownloads(e.switchIncarnation, baseDir, naming)
+	e.downloads = newModelDownloads(e.managerIncarnation, baseDir, naming)
 	e.modelBuffers.store = newModelBufferStore(baseDir)
 	e.modelMemoryProfiles = newModelMemoryProfiles(baseDir)
 	e.modelIdentities = newModelIdentityInfo(e)

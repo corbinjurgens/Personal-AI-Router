@@ -39,7 +39,7 @@ func TestOBOffOrigin(t *testing.T) {
 	t.Run("On clears", func(t *testing.T) {
 		// The switch fixture uses this test executable as a fake engine image,
 		// disposable manifests/settings, and loopback engine/controller ports.
-		f := newSwitchProcessFixture(t)
+		f := newEngineProcessFixture(t)
 		c := subscribeOBIntent(t, f.p)
 		c.call(t, "engine:stop", map[string]string{"engine": "llamacpp-custom"})
 		c.assertIntent(t, obIntent(false, map[string]engineintent.Origin{"llamacpp-custom": engineintent.Local}))
@@ -115,7 +115,7 @@ func TestOBOffOrigin(t *testing.T) {
 		pid := f.pid(t, "llamacpp-custom")
 		c.call(t, "engine:stop", map[string]string{"engine": "llamacpp-custom"})
 		c.assertIntent(t, obIntent(false, map[string]engineintent.Origin{"llamacpp-custom": engineintent.Local}))
-		assertSwitchProcessStopped(t, pid)
+		assertFixtureProcessStopped(t, pid)
 		path := filepath.Join(jointAppDir(f.base), "engine-bin", "engine-state.json")
 		assertOBStoredIntent(t, path, "llamacpp-custom", false, engineintent.Local)
 		// Only the owned fake engine image and loopback controller can start.
