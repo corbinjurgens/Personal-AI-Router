@@ -54,8 +54,76 @@ func capturingExecutor(t *testing.T, m *Manifest) (*Executor, *captured) {
 	reg.engines[m.Engine] = m
 	c := &captured{}
 	ex := NewExecutor(reg, NewReporter(nil), c.emit, t.TempDir())
+	t.Cleanup(ex.StopAll)
 	ex.detectTimeout = 2 * time.Second // keep failure paths fast in tests
 	return ex, c
+}
+
+func TestCapturingExecutorCleanupStopsOwnedEngine(t *testing.T) {
+	parent := t
+	var proc *managedProc
+	var port int
+	if !t.Run("fixture", func(t *testing.T) {
+		ex, _ := capturingExecutor(t, testEngineManifest(fakeEngineBin))
+		// Keep a failing cleanup regression from leaking its own child.
+		parent.Cleanup(ex.StopAll)
+		if err := ex.Start(context.Background(), "fake"); err != nil {
+			t.Fatalf("start fixture: %v", err)
+		}
+		st, err := ex.state("fake")
+		if err != nil {
+			t.Fatal(err)
+		}
+		st.mu.Lock()
+		proc, port = st.proc, st.port
+		st.mu.Unlock()
+		if proc == nil || port == 0 {
+			t.Fatal("fixture did not own a running child")
+		}
+	}) {
+		return
+	}
+	select {
+	case <-proc.done:
+	default:
+		t.Fatal("fixture cleanup did not reap its owned child")
+	}
+	if pidAlive(proc.cmd.Process.Pid) || portServing(port) {
+		t.Fatal("fixture child or listener survived cleanup")
+	}
+}
+
+func TestCapturingExecutorCleanupCancelsCrashRelaunch(t *testing.T) {
+	parent := t
+	var recovery *engineRelaunch
+	if !t.Run("fixture", func(t *testing.T) {
+		ex, _ := capturingExecutor(t, testEngineManifest(fakeEngineBin))
+		parent.Cleanup(ex.StopAll)
+		if err := ex.Start(context.Background(), "fake"); err != nil {
+			t.Fatalf("start fixture: %v", err)
+		}
+		st, err := ex.state("fake")
+		if err != nil {
+			t.Fatal(err)
+		}
+		st.mu.Lock()
+		proc := st.proc
+		st.mu.Unlock()
+		if proc == nil {
+			t.Fatal("fixture did not own a running child")
+		}
+		if err := proc.cmd.Process.Kill(); err != nil {
+			t.Fatalf("crash fixture child: %v", err)
+		}
+		recovery = waitCrashEpisode(t, st)
+	}) {
+		return
+	}
+	select {
+	case <-recovery.done:
+	default:
+		t.Fatal("fixture cleanup left a pending crash relaunch")
+	}
 }
 
 // TestDownloadUnpinned verifies a fetch with no sha256 succeeds (over
