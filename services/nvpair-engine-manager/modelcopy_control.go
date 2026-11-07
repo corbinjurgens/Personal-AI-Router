@@ -548,7 +548,7 @@ func (e *Executor) copyCapabilities(engine string) copyCapabilities {
 }
 
 // Copy changes content, not engine activation. Saved Off is
-// irrelevant; the existing pause mutation gate still apply.
+// irrelevant; the existing pause mutation gate still applies.
 func (e *Executor) copyAdmission() error {
 	blocked, known := e.nodeProjection.managementBlocked()
 	if !known {

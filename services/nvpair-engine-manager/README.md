@@ -1099,7 +1099,7 @@ that no longer contains an operation establishes an unknown outcome, not success
 The destination route is pinned `POST /v1/models/copy`, classified as a
 mutation. Its body contains only `opId`, `sourceNodeId`, `engine`, `model` and
 optional `expectedExportId`. The destination rechecks the authenticated
-controller's grant and its pause/recovery gates while holding a reservation.
+controller's grant and its pause gate while holding a reservation.
 The destination independently needs a live source pin; controller trust cannot
 substitute for that relationship. Copy does not install or activate an engine,
 and does not require Running or override saved Off. A dispatched copy

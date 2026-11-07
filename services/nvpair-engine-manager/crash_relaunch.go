@@ -72,7 +72,7 @@ func (e *Executor) runCrashRelaunch(ctx context.Context, st *engineState, engine
 		}
 		st.mu.Unlock()
 		// This is the existing restore owner, including current On intent under
-		// opMu, pending-switch deference and precise reclaim/adoption fencing.
+		// opMu and precise reclaim/adoption fencing.
 		err = e.restoreEnabled(ctx, engine)
 		st.mu.Lock()
 		ready := st.running

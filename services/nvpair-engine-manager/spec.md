@@ -911,8 +911,9 @@ settings/lifecycle replacement cannot send a load authorized under an older
 configuration to a newer process. If replacement wins before that lock, rejection
 releases admission without dispatch or saved-settings changes. Operation-lock
 cleanup runs before mutation cleanup reacquires admission and before the restart
-owner reacquires the operation lock. This preserves `switchAdmission` before
-`opMu` ordering. Declaration rejection is active for every engine with an
+owner reacquires the operation lock. The admission owner in
+`mutation_admission.go` preserves `mutationAdmission` before `opMu` ordering.
+Declaration rejection is active for every engine with an
 applied serving record; engines without one retain request bytes, responses and
 errors while serializing loads with their lifecycle. Once the operation lock is
 acquired, dispatch owns validation and error precedence, including for an
@@ -1700,8 +1701,8 @@ Requirements:
 - **Destination authority.** Pinned `POST /v1/models/copy` is a registered
   mutation. Its only fields are `opId`, `sourceNodeId`, `engine`, `model` and
   optional `expectedExportId`; the recipient always writes locally. A narrow
-  Manager callback rechecks the real caller's fresh grant and pause/recovery
-  gates under its reservation before effects. Previously accepted work is not
+  Manager callback rechecks the real caller's fresh grant and pause gate
+  under its reservation before effects. Previously accepted work is not
   undone by later grant revocation. The source independently pin-gates the
   destination as the actual reader. Preserve `-32012/remote_management_denied`,
   `-32011/local_veto`, and `-32010/policy_conflict` end to end. There is no
