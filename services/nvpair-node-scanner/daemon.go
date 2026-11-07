@@ -1434,12 +1434,18 @@ func (d *daemon) fetchNodeInfoForPeer(ctx context.Context, hostUUID, peerUUID, i
 }
 
 func (d *daemon) readNodeInfoWithin(ctx context.Context, client *http.Client, scheme, ip string, port int, current func() bool) (NodeInfoResponse, bool) {
+	if ctx.Err() != nil || !current() {
+		return NodeInfoResponse{}, false
+	}
 	origin := scheme + "://" + net.JoinHostPort(ip, strconv.Itoa(port))
 	release, acquired := d.nodeInfoOrigins.acquire(ctx, origin)
 	if !acquired {
 		return NodeInfoResponse{}, false
 	}
 	defer release()
+	if ctx.Err() != nil || !current() {
+		return NodeInfoResponse{}, false
+	}
 
 	url := origin + "/v1/node-info"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)

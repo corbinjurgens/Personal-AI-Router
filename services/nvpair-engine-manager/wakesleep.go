@@ -18,7 +18,7 @@ const (
 
 // Wake starts an installed engine subject to activation admission.
 func (e *Executor) Wake(ctx context.Context, engine string) error {
-	done, err := e.admitMutation(engine)
+	done, err := e.admitMutationContext(ctx, engine)
 	if err != nil {
 		return err
 	}
@@ -35,6 +35,9 @@ func (e *Executor) Wake(ctx context.Context, engine string) error {
 	if e.shuttingDown.Load() {
 		return fmt.Errorf("engine-manager is shutting down")
 	}
+	if err := e.diagnosticActivationVeto(ctx, engine); err != nil {
+		return err
+	}
 	installed, err := e.Detect(engine)
 	if err != nil {
 		return err
@@ -42,12 +45,34 @@ func (e *Executor) Wake(ctx context.Context, engine string) error {
 	if !installed {
 		return fmt.Errorf("engine %s is not installed", engine)
 	}
-	return e.doStart(ctx, st, engine, startOpts{})
+	_, diagnostic := ctx.Value(diagnosticAuthorityKey{}).(diagnosticAuthority)
+	return e.doStart(ctx, st, engine, startOpts{RequireOwned: diagnostic, BoundedCleanup: diagnostic})
+}
+
+// WakeDiagnostic grants activation only to the measured engine. The manager's
+// operation owner supplies this context; a token is never read from public
+// wake parameters and saved pause policy is never written here.
+func (e *Executor) WakeDiagnostic(ctx context.Context, engine, runID, token string) error {
+	ctx, err := e.diagnosticContext(ctx, engine, runID, token)
+	if err != nil {
+		return err
+	}
+	if err := e.diagnosticActivationVeto(ctx, engine); err != nil {
+		return err
+	}
+	return e.Wake(ctx, engine)
 }
 
 // Sleep stops an engine for node availability; a later Wake can start it.
 func (e *Executor) Sleep(engine string) (err error) {
-	done, err := e.admitMutation(engine)
+	e.abortDiagnosticAndJoin()
+	return e.sleepContext(context.Background(), engine)
+}
+
+// sleepContext reuses the ordinary physical-stop owner under explicit cleanup
+// authority. It does not clear the reservation or confirm the whole run stopped.
+func (e *Executor) sleepContext(parent context.Context, engine string) (err error) {
+	done, err := e.admitMutationContext(parent, engine)
 	if err != nil {
 		return err
 	}
@@ -76,7 +101,7 @@ func (e *Executor) Sleep(engine string) (err error) {
 	defer finishLoads()
 	st.opMu.Lock()
 	defer st.opMu.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), stopTimeout(st.plat.Runtime)+modelsTimeout)
+	ctx, cancel := context.WithTimeout(parent, stopTimeout(st.plat.Runtime)+modelsTimeout)
 	defer cancel()
 	// Passive status may not have discovered a listener yet. Only the lifecycle
 	// owner can decide whether it is external or an exact managed orphan.
@@ -217,6 +242,12 @@ func (e *Executor) unsupportedStatus(engine string, m *Manifest) EngineStatus {
 
 // handleLifecyclePolicyRequest serves internal wake and sleep requests.
 func (m *Manager) handleLifecyclePolicyRequest(ctx context.Context, msg *Message) bool {
+	if m.handleDiagnosticReservationRequest(ctx, msg) {
+		return true
+	}
+	if m.handleDiagnosticOperationRequest(msg) {
+		return true
+	}
 	switch msg.Method {
 	case wakeMethod, sleepMethod:
 		go func() {

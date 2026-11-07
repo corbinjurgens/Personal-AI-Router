@@ -109,6 +109,33 @@ inactive pages; AGX aliases share the RAM pool. Missing or unmatched counters
 remain unknown. No process GPU budget or name/ordinal capacity matching is
 used. Native accuracy acceptance is untested by portable fixture tests.
 
+Each GPU optionally carries `physicalId`, the exact observed `statsKey` when it
+matches a `deviceIds` alias in this response's validated dedicated or shared
+memory pool. All inventoried physical GPUs remain listed, including idle and
+unused adapters. Missing keys, unknown topology, unmatched pools and ambiguous
+inventory keys leave `physicalId` absent. Array order, adapter names, utilization
+and matching capacities never establish the association. Response assembly
+clones the inventory and preserves the separately reported `vram_bytes`; a
+consumer must verify that capacity against the associated pool before using it
+as hardware identity.
+
+Windows exposes the existing DXGI/PDH LUID alias
+(`luid_0xhhhhhhhh_0xllllllll_phys_0`). Its refreshed DXGI enumeration also fills
+the existing recovered-inventory path. This producer does not observe a
+UUID/PCI-to-LUID mapping and does not invent UUID or PCI aliases. Linux NVIDIA
+dedicated pools retain the GPU UUID and any observed canonical `pci:` alias;
+`physicalId` uses the UUID already shared by static inventory and dynamic
+memory. NVIDIA `[N/A]` totals remain unknown topology, even when legacy scalar
+display values use system RAM. They do not establish a usable UMA pool.
+Names-only ghw inventory has no physical association.
+
+Darwin uses the existing `ioreg:` entry alias. AGX GPU aliases identify the one
+shared RAM pool, without adding a dedicated pool or another RAM capacity. Other
+IORegistry GPUs require an observed dedicated pool. These identifiers describe
+the current producer observation; no cross-platform UUID conversion or native
+device enumeration is added. Scanner and directory GPU fields use the canonical
+`noderec.GPUInfo` shape, which retains `physicalId` unchanged.
+
 The process regression `TestModelMemoryTelemetryProcess` substitutes only the
 node-info producer and runs the real scanner, broker and engine manager. Its
 private loopback samples exercise source/time propagation, replacement, expiry,

@@ -35,6 +35,99 @@ func memoryProfilesFixture(t *testing.T) (inspectionFixture, modelconfig.ClearSt
 	}
 	return f, modelconfig.ClearStatedMemoryRequest{Engine: f.request.Engine, ModelID: f.request.ModelID, ConfigurationKey: result.ConfigurationKey}
 }
+
+func measuredStoreFixture() modelconfig.MeasuredProfile {
+	prompt, cached, generated := int32(880), int32(0), int32(128)
+	first, end, overlap := 10.0, 100.0, true
+	return modelconfig.MeasuredProfile{
+		DiagnosticIdentity: modelconfig.DiagnosticIdentity{
+			ConfigurationKey: strings.Repeat("a", 64), NativeBuildID: "sha256:" + strings.Repeat("b", 64), BuildInfo: "fixture-build", CPUModel: "fixture-cpu", TotalRAMBytes: "8192",
+			GPUs: []modelconfig.DiagnosticGPU{}, Artifacts: []modelconfig.ArtifactSummary{{Role: "model", Identity: "fixture-artifact", Size: "100", Assurance: "declared"}},
+			PerSlotContext: 1024, Slots: 1, Placement: []modelconfig.DiagnosticPlacement{{DomainID: "host", Kind: "host"}},
+		},
+		RunID: "complete-one", RecordedAt: "2026-11-07T00:00:00Z", Outcome: "completed", Notes: []string{},
+		Pools: []modelconfig.MeasuredPool{{DomainID: "host", Kind: "host", BaselineAvailableBytes: "1000", AfterLoadAvailableBytes: "900", LowMinAvailableBytes: "800", HighMinAvailableBytes: "700", PeakUsedBytes: "300", Source: "fixture", Samples: 6, IntervalMS: 2000}},
+		High:  &modelconfig.MeasuredPhase{Coverage: "complete", Overlapped: &overlap, OverlapWindowSampled: &overlap, WallMS: 100, Requests: []modelconfig.MeasuredRequest{{TargetPromptTokens: prompt, PromptTokens: &prompt, CachedTokens: &cached, GeneratedTokens: &generated, FirstTokenMS: &first, EndMS: &end}}},
+	}
+}
+
+func TestModelMemoryProfilesMeasuredRetentionAndReopen(t *testing.T) {
+	base := t.TempDir()
+	if err := os.Chmod(base, 0700); err != nil {
+		t.Fatal(err)
+	}
+	s := newModelMemoryProfiles(base)
+	m := measuredStoreFixture()
+	stated := modelconfig.MemoryProfile{ConfigurationKey: m.ConfigurationKey, NativeBuildID: m.NativeBuildID, Kind: "stated", RecordedAt: m.RecordedAt, HostBytes: "400"}
+	if err := s.update("llamacpp", "model", m.ConfigurationKey, &stated); err != nil {
+		t.Fatal(err)
+	}
+	for _, outcome := range []string{"completed", "failed"} {
+		for _, stamp := range []string{"01", "02"} {
+			candidate := m.Clone()
+			candidate.RunID = outcome + stamp
+			candidate.Outcome = outcome
+			candidate.RecordedAt = "2026-11-07T00:00:" + stamp + "Z"
+			if err := s.recordMeasured("llamacpp", "model", "profile", candidate); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	reopened := newModelMemoryProfiles(base)
+	if reopened.unavailable || len(reopened.records) != 3 {
+		t.Fatalf("reopen lost retention buckets: unavailable=%v records=%+v", reopened.unavailable, reopened.records)
+	}
+	want := map[string]bool{"completed02": false, "failed02": false}
+	for _, record := range reopened.records {
+		if record.Profile.Kind == "stated" {
+			if record.Profile.HostBytes != "400" {
+				t.Fatal("measured write changed statement")
+			}
+			continue
+		}
+		if _, ok := want[record.Profile.Measured.RunID]; !ok {
+			t.Fatalf("retained obsolete run %q", record.Profile.Measured.RunID)
+		}
+		want[record.Profile.Measured.RunID] = true
+	}
+	for runID, found := range want {
+		if !found {
+			t.Fatalf("lost run identity %q", runID)
+		}
+	}
+}
+
+func TestModelMemoryProfilesMeasuredCurrentnessRequiresFullEvidence(t *testing.T) {
+	base := t.TempDir()
+	if err := os.Chmod(base, 0700); err != nil {
+		t.Fatal(err)
+	}
+	s := newModelMemoryProfiles(base)
+	m := measuredStoreFixture()
+	if err := s.recordMeasured("llamacpp", "model", "profile", m); err != nil {
+		t.Fatal(err)
+	}
+	r := modelconfig.InspectResult{Engine: "llamacpp", ModelID: "model", ConfigurationKey: m.ConfigurationKey, ConfigurationPools: []string{"host"}, NativeBuildID: m.NativeBuildID, Artifacts: m.Artifacts}
+	s.attachWithIdentity(&r, "profile", nil)
+	if len(r.MemoryProfiles) != 1 || r.MemoryProfiles[0].Current {
+		t.Fatal("key alone marked measurement current")
+	}
+	s.attachWithIdentity(&r, "profile", &m.DiagnosticIdentity)
+	if !r.MemoryProfiles[0].Current {
+		t.Fatal("full matching identity was refused")
+	}
+	r.MemoryProfiles[0].Measured.Pools[0].PeakUsedBytes = "1"
+	s.attachWithIdentity(&r, "profile", &m.DiagnosticIdentity)
+	if r.MemoryProfiles[0].Measured.Pools[0].PeakUsedBytes != "300" {
+		t.Fatal("inspection mutated stored evidence")
+	}
+	changed := m.DiagnosticIdentity.Clone()
+	changed.TotalRAMBytes = "16384"
+	s.attachWithIdentity(&r, "profile", &changed)
+	if r.MemoryProfiles[0].Current {
+		t.Fatal("changed hardware retained validation")
+	}
+}
 func TestModelMemoryProfilesFirstSaveWithoutEstimate(t *testing.T) {
 	f, q := memoryProfilesFixture(t)
 	set := modelconfig.SetStatedMemoryRequest{Engine: q.Engine, ModelID: q.ModelID, ConfigurationKey: q.ConfigurationKey, HostBytes: "12345"}

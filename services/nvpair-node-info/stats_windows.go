@@ -323,6 +323,7 @@ func (c *statsCollector) decodeSnapshot() *statsSnapshot {
 	gpuStart, clockErr := memoryClock()
 	gpuAt := time.Now().UTC()
 	adapters := detectGPUs()
+	snap.GPUInventory = adapters
 	var currentGPU map[string]gpuStat
 
 	if c.query != 0 {

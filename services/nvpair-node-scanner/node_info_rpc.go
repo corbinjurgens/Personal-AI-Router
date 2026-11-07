@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net/http"
 	"strings"
 	"time"
 
@@ -42,9 +43,13 @@ func (d *daemon) handleNodeInfoRPC(msg *Message) {
 	_ = d.codec.Respond(msg.ID, info)
 }
 
-// getPeerNodeInfo reads a fresh full sample using only directory and admitted
-// peer authority. It never consults the enrichment cache or the unpaired client.
+// getPeerNodeInfo reads a fresh full sample from this scanner's registered self
+// over loopback, or from directory and admitted peer authority. It never
+// consults the enrichment cache or grants local authority to a directory claim.
 func (d *daemon) getPeerNodeInfo(ctx context.Context, hostUUID string) (NodeInfoResponse, bool) {
+	if d.reg != nil && hostUUID != "" && hostUUID == d.reg.record().HostUUID {
+		return d.getSelfNodeInfo(ctx, hostUUID)
+	}
 	if d.dir == nil || d.mesh == nil {
 		return NodeInfoResponse{}, false
 	}
@@ -67,4 +72,25 @@ func (d *daemon) getPeerNodeInfo(ctx context.Context, hostUUID string) (NodeInfo
 		}
 	}
 	return NodeInfoResponse{}, false
+}
+
+func (d *daemon) getSelfNodeInfo(ctx context.Context, hostUUID string) (NodeInfoResponse, bool) {
+	authority, registered := d.reg.selfNodeInfo(hostUUID)
+	if !registered || d.http == nil {
+		return NodeInfoResponse{}, false
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stop := context.AfterFunc(authority.incarnation, cancel)
+	defer stop()
+	current := func() bool { return ctx.Err() == nil && authority.incarnation.Err() == nil }
+	// Use the same loopback HTTP transport as self enrichment. Neither a LAN
+	// candidate, operator TLS, nor a redirect may supply this scanner's sample.
+	client := *d.http
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	info, ok := d.readNodeInfoWithin(ctx, &client, "http", loopbackHost, authority.port, current)
+	if !ok || info.HostUUID != authority.hostUUID || info.ClusterUUID == nil || *info.ClusterUUID != authority.clusterUUID || !current() {
+		return NodeInfoResponse{}, false
+	}
+	return info, true
 }

@@ -26,15 +26,24 @@ var internalClientMethods = map[string]struct{}{
 	notifyEngineNotificationsReset: {},
 	// Peer relay notifications: only engine-manager relays these, with a
 	// verified caller.
-	policyRelayRequestMethod:     {},
-	policyRelayReplyMethod:       {},
-	policyRelayCancelMethod:      {},
-	"engine:settings-request":    {},
-	"engine:settings-reply":      {},
-	"engine:settings-cancel":     {},
-	"engine:settings-projection": {},
-	"engine:set-reserved-port":   {},
-	"internal:set-reserved-port": {},
+	policyRelayRequestMethod:           {},
+	policyRelayReplyMethod:             {},
+	policyRelayCancelMethod:            {},
+	"engine:settings-request":          {},
+	"engine:settings-reply":            {},
+	"engine:settings-cancel":           {},
+	"engine:settings-projection":       {},
+	"engine:diagnostic-request":        {},
+	"engine:diagnostic-reply":          {},
+	"engine:diagnostic-request-cancel": {},
+	// Outbound diagnostic IPC is broker-owned so public clients cannot bypass
+	// the public diagnostic decoder and response projection.
+	"engine:remote-diagnostic-preview": {},
+	"engine:remote-diagnostic-start":   {},
+	"engine:remote-diagnostic-status":  {},
+	"engine:remote-diagnostic-cancel":  {},
+	"engine:set-reserved-port":         {},
+	"internal:set-reserved-port":       {},
 	// Broker/engine-manager coordination.
 	"engine:owner-evidence":               {},
 	nodepolicy.MethodModelMutationRequest: {},
@@ -49,6 +58,14 @@ var internalClientMethods = map[string]struct{}{
 	"engine:prepare-shutdown":             {},
 	"engine:wake":                         {},
 	"engine:sleep":                        {},
+	"engine:diagnostic-reserve":           {},
+	"engine:diagnostic-release":           {},
+	"engine:diagnostic-run":               {},
+	"engine:diagnostic-run-status":        {},
+	"engine:diagnostic-abort":             {},
+	"engine:diagnostic-baseline-done":     {},
+	"engine:record-measured-memory":       {},
+	diagnosticObserveMethod:               {},
 	"engine:get-launch":                   {},
 	"engine:preview-launch":               {},
 	"engine:configured-ports":             {},
@@ -231,6 +248,8 @@ func (b *Broker) handleMessage(msg *Message) {
 		go b.handleManualLoad(msg)
 	case "engine:inspect-model":
 		go b.handleModelInspection(msg)
+	case "engine:diagnostic-preview", "engine:diagnostic-start", "engine:diagnostic-status", "engine:diagnostic-cancel":
+		go b.handleModelDiagnostic(msg)
 	case "engine:set-stated-memory", "engine:clear-stated-memory":
 		go b.handleStatedMemory(msg)
 	case "engine:get-settings", "engine:preview-settings", "engine:apply-settings":

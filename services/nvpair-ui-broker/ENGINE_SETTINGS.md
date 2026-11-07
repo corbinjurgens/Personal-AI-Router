@@ -432,6 +432,30 @@ with an explicit unavailable state in the editor.
 
 ## Validation
 
+### Intentional memory measurement
+
+`engine:diagnostic-preview` targets an applied `profileKey`. Start requires its
+unexpired preview and explicit consent. Configured pause is permitted and
+preserved; Halt, maintenance, another diagnostic or missing fresh verified local
+memory telemetry refuses a new run. Preview binds requested hardware, build and
+artifact evidence. Runtime allocation and prompt targets may remain unknown until
+the consented load; completed records require the observed realized identity.
+
+The broker publishes its run before acquiring a build settings lease, manager
+reservation or node drain. Existing node-drain ownership proves same-proxy idle
+before unload/load work. Lost replies are reconciled through private run status
+and idempotent acceptance. Cancel waits for joins. Cleanup failure retains the
+hold and the same cancel method retries cleanup. The manager's checkpoint
+reconstructs drains before proxy ingress or replacement-manager activation;
+no second journal is created.
+
+Sampling uses fresh new facts from the existing local telemetry cache at a
+two-second cadence. Records contain a cold median baseline, per-phase minima,
+coverage notes and sampled overlap classification. Missing phase minima stay
+absent. Execution-key measurements remain diagnostic-only, and earlier-build
+results do not count as current validation. See
+[Model memory diagnostics](../../docs/model-memory-diagnostic.mdx).
+
 Tests cover literal argv, parser fuzz/table cases, managed-field validation,
 real process no-op/proxy-only/launch changes, ownership rejection, persistence
 failure, journal recovery, revision conflicts/deduplication, queued cancellation,

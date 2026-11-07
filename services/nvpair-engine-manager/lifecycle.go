@@ -163,7 +163,7 @@ func (e *Executor) doStart(ctx context.Context, st *engineState, engine string, 
 		err = vetoCause(ctx, err)
 		finish()
 	}()
-	if err := e.activationVeto(engine); err != nil {
+	if err := e.diagnosticActivationVeto(ctx, engine); err != nil {
 		return err
 	}
 	if err := ctx.Err(); err != nil {
@@ -232,7 +232,7 @@ func (e *Executor) doStart(ctx context.Context, st *engineState, engine string, 
 		return err
 	}
 	// A pause that landed while the identity probe ran refused its adoption.
-	if err := e.activationVeto(engine); err != nil {
+	if err := e.diagnosticActivationVeto(ctx, engine); err != nil {
 		return err
 	}
 	st.mu.Lock()
@@ -299,7 +299,7 @@ func (e *Executor) doStart(ctx context.Context, st *engineState, engine string, 
 			return errors.Join(fmt.Errorf("engine %q is not installed: mandatory detection files are incomplete", engine), e.doStopContext(cleanupCtx, st, engine))
 		}
 	}
-	if err := e.activationVeto(engine); err != nil {
+	if err := e.diagnosticActivationVeto(ctx, engine); err != nil {
 		st.mu.Lock()
 		st.running = true
 		st.mu.Unlock()
@@ -312,8 +312,8 @@ func (e *Executor) doStart(ctx context.Context, st *engineState, engine string, 
 	e.nodeProjection.mu.Lock()
 	st.mu.Lock()
 	readyErr := ctx.Err()
-	if readyErr == nil && e.nodeProjection.projection != nil && e.nodeProjection.projection.ManagementBlocked {
-		readyErr = &localVetoError{code: codeLocalVeto, reason: nodePausedVeto}
+	if readyErr == nil {
+		readyErr = e.activationProjectionVetoLocked(ctx, engine)
 	}
 	if readyErr != nil {
 		// bringUp succeeded: this start owns the launched process/control
@@ -558,9 +558,9 @@ func (e *Executor) bringUpProcessWithCleanup(ctx, cleanupCtx context.Context, st
 		e.nodeProjection.mu.Unlock()
 		return err
 	}
-	if e.nodeProjection.projection != nil && e.nodeProjection.projection.ManagementBlocked {
+	if err := e.activationProjectionVetoLocked(ctx, engine); err != nil {
 		e.nodeProjection.mu.Unlock()
-		return &localVetoError{code: codeLocalVeto, reason: nodePausedVeto}
+		return err
 	}
 	var observeOutput func(managedOutputFrame)
 	if capture != nil {

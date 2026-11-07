@@ -158,6 +158,7 @@ func runModelBufferFixture() error {
 	var mu sync.Mutex
 	nextPort := 31001
 	routerBuild := "b12020-0ec4027a2"
+	diagnostic := modelDiagnosticFixtureRuntime{faults: os.Getenv(modelDiagnosticFixtureEnv)}
 	// All pinned frames use one stream, so this fixture establishes real pump
 	// order. Native source: tools/server/server-models.cpp at the full pin.
 	line := func(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) }
@@ -178,6 +179,22 @@ func runModelBufferFixture() error {
 		model.status = "loaded"
 	}
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Diagnostic requests can overlap and cancellation must leave props and
+		// inventory readable. Never hold the router mutex across their barriers.
+		if diagnostic.serve(w, r, models, &mu, func(name string) {
+			model := models[name]
+			if model.port == 0 {
+				model.port = nextPort
+				nextPort++
+				line("srv         load: spawning server instance with name=%s on port %d", name, model.port)
+			}
+			allocations(name, model, true)
+		}, func(name string) {
+			line("srv          run: instance name=%s exited with status 0", name)
+			models[name].status, models[name].port = "unloaded", 0
+		}) {
+			return
+		}
 		mu.Lock()
 		defer mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
@@ -257,7 +274,10 @@ func runModelBufferFixture() error {
 				http.Error(w, "non-loading props required", http.StatusConflict)
 				return
 			}
-			if err := json.NewEncoder(w).Encode(map[string]any{"build_info": model.build, "total_slots": model.slots, "default_generation_settings": map[string]int{"n_ctx": model.context}}); err != nil {
+			props := map[string]any{"build_info": model.build, "total_slots": model.slots, "default_generation_settings": map[string]int{"n_ctx": model.context}}
+			// Managed native props report build/context/slots, not placement.
+			// The exact child load above emits the observed CPU buffer lines.
+			if err := json.NewEncoder(w).Encode(props); err != nil {
 				return
 			}
 		case "/models", "/v1/models":
@@ -273,6 +293,9 @@ func runModelBufferFixture() error {
 		}
 	})
 	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, MaxHeaderBytes: 4096}
+	if diagnostic.faults != "" {
+		server.WriteTimeout = 0 // cancelled by the real manager's request/lifecycle owner
+	}
 	return server.Serve(listener)
 }
 
@@ -473,6 +496,12 @@ func (f *modelBufferProcessFixture) start(t *testing.T) {
 	f.assertMergedBufferInstall(t)
 	args := append([]string{"--scanner-path", f.scanner, "--engine-manager-path", engineMgrBin, "--engine-manager-control-host", "127.0.0.1", "--proxy-path", f.proxyControl.image, "--proxy-engines", "llamacpp", "--cluster-dir", filepath.Join(f.base, "cluster")}, f.ports.args()...)
 	env := append(f.proxyControl.env(), "NVPAIR_TEST_SUBSCRIPTION_SCANNER="+f.scanner, "NVPAIR_TEST_SUBSCRIPTION_PORT="+strconv.Itoa(f.scannerPort))
+	if f.memory != nil {
+		// Same producer/scanner path as startModelSettings, with the actual
+		// manager rather than that family's configure/readback relay.
+		env = append(env, "NVPAIR_TEST_MEMORY_NODE_INFO="+f.image, "NVPAIR_TEST_MODEL_CONTROL="+f.modelSettingsProcessFixture.control)
+		args = append(args, "--node-info-path", f.image)
+	}
 	f.p = startInteropProcess(t, f.base, brokerBin, f.ports.engineManagerHTTP, env, args...)
 	f.p.ports = append(f.p.ports, f.scannerPort, f.targetPort, f.sourcePort, f.facadePort, f.targetFacadePort, f.ports.engineControl, f.proxyControl.port)
 	for _, path := range []string{engineMgrBin, proxyBin, f.scanner, f.proxyControl.image} {

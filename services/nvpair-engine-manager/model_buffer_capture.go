@@ -123,6 +123,9 @@ type modelBufferChild struct {
 	sample                             modelconfig.BufferObservation
 	checkpoint                         *modelBufferCheckpoint
 	startedAt                          time.Time
+	// Physical enumeration belongs to this exact child generation and launch
+	// environment. It is private realization evidence, never a buffer sample.
+	devices []modelNativeDevice
 }
 
 // Independent observational currentness; no ServingConfig is required.
@@ -151,6 +154,7 @@ type modelBufferCapture struct {
 	clockUncertain                                bool
 	budgetOmitted                                 bool
 	unsupportedLogged                             bool // guarded by mu; one warning per capture
+	environment                                   []string
 }
 
 type modelBufferSourceDiagnostic struct {
@@ -260,8 +264,26 @@ func (e *Executor) newModelBufferCapture(st *engineState, engine string, prepare
 		(modelBufferSourceDiagnostic{stage: "build-identity", err: buildErr}).warn()
 	}
 	if err == nil && constrainErr == nil && buildErr == nil {
+		environment, envErr := modelDeviceEnvironment(modelEffectiveEnvironment(command.Env), "")
+		if envErr != nil {
+			(modelBufferSourceDiagnostic{stage: "native-environment", err: envErr}).warn()
+			return nil
+		}
+		charge := len(environment) * 16
+		for _, value := range environment {
+			charge += len(value) * 4
+		}
+		c.owner.mu.Lock()
+		if charge > modelBufferCaptureBytes-c.owner.bytes {
+			c.owner.mu.Unlock()
+			return nil
+		}
+		c.owner.bytes += charge
+		c.charge += charge
+		c.owner.mu.Unlock()
 		c.sourceID = source
 		c.buildID = buildID
+		c.environment = environment
 	}
 	if len(prepared.ModelLoads) == 0 && c.sourceID == "" {
 		return nil
@@ -497,7 +519,9 @@ func (c *modelBufferCapture) observe(frame managedOutputFrame) {
 			}
 			return
 		}
-		if c.frozen[match[1]] == nil {
+		if c.frozen[match[1]] == nil && !slices.ContainsFunc(modelBufferPreparedLoads(c.prepared), func(load modelconfig.ModelLoad) bool {
+			return load.ProfileKey == match[1] && modelLoadUnpriced(load.Requested)
+		}) {
 			return
 		}
 		for _, old := range c.children {
@@ -510,7 +534,9 @@ func (c *modelBufferCapture) observe(frame managedOutputFrame) {
 		c.owner.mu.Lock()
 		if c.owner.children >= 64 || c.owner.bytes > modelBufferCaptureBytes-modelBufferChildCharge {
 			c.owner.mu.Unlock()
-			c.frozen[match[1]].captureBudget = true
+			if f := c.frozen[match[1]]; f != nil {
+				f.captureBudget = true
+			}
 			c.usedPorts[port/64] |= 1 << uint(port%64)
 			return
 		}
@@ -521,7 +547,9 @@ func (c *modelBufferCapture) observe(frame managedOutputFrame) {
 		c.owner.mu.Unlock()
 		c.usedPorts[port/64] |= 1 << uint(port%64)
 		c.children[port] = &modelBufferChild{model: strings.Clone(match[1]), port: port, generation: 1, phase: "initial"}
-		c.frozen[match[1]].captureBudget = false
+		if f := c.frozen[match[1]]; f != nil {
+			f.captureBudget = false
+		}
 		return
 	}
 	if match := modelBufferExit.FindStringSubmatch(line); match != nil {
@@ -595,6 +623,7 @@ func (c *modelBufferCapture) observe(frame managedOutputFrame) {
 		child.sleeping = false
 		child.sample = modelconfig.BufferObservation{}
 		child.checkpoint = nil
+		child.devices = nil
 		return
 	}
 	if modelBufferLoading.MatchString(message) {
@@ -711,6 +740,11 @@ func (e *Executor) observeModelBuffers(ctx context.Context, st *engineState, c *
 	c.confirmedAt = time.Now()
 	for port, child := range c.children {
 		f := c.frozen[child.model]
+		// Unpriced loads retain bounded parser evidence for diagnostics only.
+		// They never enter the public/persisted buffer observation owner.
+		if f == nil {
+			continue
+		}
 		p, ok := props[child.model]
 		if !ok || !slices.Contains(loaded, child.model) || child.sleeping || child.poisoned || !child.loading || child.phase == "initial" && !child.ready {
 			continue

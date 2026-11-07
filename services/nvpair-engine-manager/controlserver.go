@@ -157,9 +157,14 @@ func (s *controlServer) authorize(route controlRoute, h pinnedPeerHandler) pinne
 			http.Error(w, errNoProjection.Error(), http.StatusServiceUnavailable)
 			return
 		}
-		// Availability has its own authoritative Halt/configured-Pause gate
-		// at the broker. Keep pin, grant and hydration checks here.
-		if blocked && route.path != controlAvailabilitySetPath {
+		// Availability and diagnostics have authoritative mode-aware gates
+		// at the broker. Diagnostics also permit cleanup during Halt. Keep
+		// pin, grant and hydration checks here.
+		brokerGated := route.path == controlAvailabilitySetPath
+		for _, path := range diagnosticLocalPaths {
+			brokerGated = brokerGated || route.path == path
+		}
+		if blocked && !brokerGated {
 			writeCodedError(w, codeLocalVeto, nodePausedVeto)
 			return
 		}
@@ -202,6 +207,7 @@ func (s *controlServer) routes() []controlRoute {
 		{controlCopyCapabilitiesPath, http.MethodGet, controlRead, "model-copy-capabilities", s.handleCopyCapabilities},
 	}
 	routes = append(routes, s.settingsRoutes()...)
+	routes = append(routes, s.diagnosticRoutes()...)
 	routes = append(routes, s.policyRoutes()...)
 	return routes
 }

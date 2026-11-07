@@ -61,6 +61,12 @@ func modelConfigurationOptionsID(options modelconfig.RequestedLoad, snapshot []b
 // source binds the content-based native build ID and filtered launch/native
 // environment. Build paths and mtimes are evidence checks, not key inputs.
 func modelConfigurationKey(in modelEstimateInput, source, optionsID string) string {
+	return modelConfigurationKeyForPools(in, source, optionsID, modelConfigurationPools(in))
+}
+
+// A diagnostic retains accepted pool kinds while it holds exclusive execution.
+// This overload carries identity only, never renewed telemetry or fit authority.
+func modelConfigurationKeyForPools(in modelEstimateInput, source, optionsID string, pools []string) string {
 	a := in.Allocation
 	if a != nil && modelLoadUnpriced(a.Options) {
 		return ""
@@ -68,7 +74,6 @@ func modelConfigurationKey(in modelEstimateInput, source, optionsID string) stri
 	if a == nil || source == "" || optionsID == "" || a.PerSlotContext <= 0 || a.Slots <= 0 || len(in.Bindings) == 0 {
 		return ""
 	}
-	pools := modelConfigurationPools(in)
 	if len(pools) == 0 {
 		return ""
 	}
@@ -97,8 +102,8 @@ func modelConfigurationKey(in modelEstimateInput, source, optionsID string) stri
 }
 
 // Execution identity names an applied unpriced launch, never finite capacity.
-func modelExecutionKey(in modelEstimateInput, optionsID string) string {
-	if in.Allocation == nil || !modelLoadUnpriced(in.Allocation.Options) || in.Allocation.NativeBuildID == "" || optionsID == "" || len(in.Bindings) == 0 {
+func modelExecutionKey(in modelEstimateInput, source, optionsID string) string {
+	if in.Allocation == nil || !modelLoadUnpriced(in.Allocation.Options) || in.Allocation.NativeBuildID == "" || source == "" || optionsID == "" || len(in.Bindings) == 0 {
 		return ""
 	}
 	type artifact struct{ Role, Identity string }
@@ -107,7 +112,7 @@ func modelExecutionKey(in modelEstimateInput, optionsID string) string {
 		artifacts = append(artifacts, artifact{binding.Role, binding.Identity})
 	}
 	return modelBufferHash(struct {
-		Artifacts      []artifact
-		Build, Options string
-	}{artifacts, in.Allocation.NativeBuildID, optionsID})
+		Artifacts              []artifact
+		Build, Source, Options string
+	}{artifacts, in.Allocation.NativeBuildID, source, optionsID})
 }

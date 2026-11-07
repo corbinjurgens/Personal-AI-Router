@@ -76,9 +76,10 @@ type setPortParam struct {
 // uninstall, action) run in their own goroutine so the read
 // loop never blocks; the codec serializes the concurrent responses.
 type Manager struct {
-	copyMu       sync.Mutex
-	copies       map[string]*activeCopy
-	copiesClosed bool
+	diagnosticRecoveryMu sync.Mutex
+	copyMu               sync.Mutex
+	copies               map[string]*activeCopy
+	copiesClosed         bool
 	// Guarded by copyMu. Held steps include each live copy's retirement;
 	// one further step is always left for shutdown closure.
 	copyRevision uint64
@@ -90,6 +91,7 @@ type Manager struct {
 	// Preparation is read-only; its returned effect runs inside durable evidence.
 	copyPrepare      func(context.Context, copyRequest, string, func(copyProgress)) (func() (copyModelResult, error), copyModelResult, error)
 	settingsRelay    settingsRelay
+	diagnosticRelay  diagnosticRelay
 	policyRelay      policyRelay
 	modelMutation    modelMutationRelay
 	residentDispatch residentDispatchRelay
@@ -142,6 +144,8 @@ func NewManager(codec *Codec, exec *Executor, mesh *clustertrust.Mesh, clusterDi
 	m.admittedLoad.send = codec.NotifyContext
 	exec.admittedLoadParent = m.admittedLoad.call
 	m.settingsRelay.send = codec.NotifyContext
+	m.diagnosticRelay.send = codec.NotifyContext
+	exec.diagnosticParent = m.diagnosticRelay.call
 	exec.settingsParent = m.settingsRelay.call
 	exec.inspectParent = m.settingsRelay.callInspect
 	exec.memoryProfilesParent = m.settingsRelay.callRelay
@@ -159,6 +163,10 @@ func (m *Manager) Run(ctx context.Context) error {
 	m.cancel = cancel
 	defer cancel()
 	defer m.stopCopies()
+	// Restore exclusion before publishing readiness or accepting any activation.
+	if _, err := m.exec.restoreDiagnosticCheckpoint(); err != nil {
+		return fmt.Errorf("restore diagnostic cleanup hold: %w", err)
+	}
 
 	if err := m.codec.Notify("engine:ready", ReadyParams{Version: Version}); err != nil {
 		return fmt.Errorf("failed to send ready notification: %w", err)
@@ -178,12 +186,21 @@ func (m *Manager) Run(ctx context.Context) error {
 	go m.exec.watchLoaded(ctx)
 	go m.exec.modelIdentities.run(ctx)
 	go m.watchPeerSettings(ctx)
+	startupRecoveryDone := make(chan struct{})
+	go func() {
+		defer close(startupRecoveryDone)
+		if err := m.recoverDiagnosticBeforeRestore(ctx); err != nil {
+			slog.Warn("diagnostic startup cleanup remains held", "err", err)
+		}
+	}()
 
 	err := m.readLoop(ctx)
 	// Cancel first so any in-flight start aborts at its readiness wait,
 	// then stop engines so the parent's exit doesn't orphan them.
 	cancel()
 	m.stopCopies()
+	m.exec.abortDiagnosticAndJoin()
+	<-startupRecoveryDone
 	m.exec.StopAll()
 	m.controlHTTP.CloseIdle()
 	m.controlReadyHTTP.CloseIdle()
@@ -218,7 +235,7 @@ func (m *Manager) handleMessage(ctx context.Context, msg *Message) {
 		m.residentDispatch.reply(msg.Params)
 		return
 	}
-	if m.handleSettingsMessage(ctx, msg) || m.handlePolicyMessage(ctx, msg) {
+	if m.handleDiagnosticRelayMessage(ctx, msg) || m.handleSettingsMessage(ctx, msg) || m.handlePolicyMessage(ctx, msg) {
 		return
 	}
 	if msg.Method == applog.SetLevelMethod {
@@ -260,6 +277,10 @@ func (m *Manager) handleMessage(ctx context.Context, msg *Message) {
 	}
 	if msg.Method == restoreInstalledMethod && msg.IsNotification() {
 		go func() {
+			if err := m.recoverDiagnosticBeforeRestore(ctx); err != nil {
+				slog.Warn("installed restore held by diagnostic cleanup", "err", err)
+				return
+			}
 			if err := m.exec.RestoreInstalled(ctx); err != nil {
 				slog.Warn("one or more installed engines could not be restored", "err", err)
 			}
@@ -320,6 +341,7 @@ func (m *Manager) handleMessage(ctx context.Context, msg *Message) {
 
 	case prepareShutdownMethod:
 		go func() {
+			m.exec.abortDiagnosticAndJoin()
 			m.exec.StopAll()
 			m.codec.Respond(msg.ID, nil)
 		}()
@@ -425,14 +447,18 @@ func (m *Manager) handleMessage(ctx context.Context, msg *Message) {
 
 // runOp executes a lifecycle op asynchronously and responds with the
 // engine's resulting status (or an error).
-func (m *Manager) runOp(ctx context.Context, msg *Message) {
+func (m *Manager) runOp(ctx context.Context, msg *Message) error {
+	if msg.Method == diagnosticRunMethod {
+		m.startDiagnostic(msg)
+		return nil
+	}
 	var p opParam
 	if !m.parse(msg, &p) {
-		return
+		return fmt.Errorf("invalid lifecycle parameters")
 	}
 	if p.Engine == "" {
 		m.codec.RespondError(msg.ID, -32602, "engine is required")
-		return
+		return fmt.Errorf("engine is required")
 	}
 	var err error
 	switch msg.Method {
@@ -440,13 +466,23 @@ func (m *Manager) runOp(ctx context.Context, msg *Message) {
 		err = m.exec.Install(ctx, p.Engine)
 	case "engine:uninstall":
 		err = m.exec.Uninstall(ctx, p.Engine)
+	case wakeMethod:
+		err = m.exec.Wake(ctx, p.Engine)
+	case sleepMethod:
+		err = m.exec.sleepContext(ctx, p.Engine)
+	}
+	// Diagnostic dispatch is manager-internal and synchronous, with a scoped
+	// context. No JSON-RPC response is emitted for this joined lifecycle call.
+	if msg.ID == nil {
+		return err
 	}
 	if err != nil {
 		m.respondOrErr(msg, nil, err)
-		return
+		return err
 	}
 	st, err := m.exec.Status(p.Engine)
 	m.respondOrErr(msg, st, err)
+	return err
 }
 
 // runSetPort persists an engine's server port (as a manifest override) and

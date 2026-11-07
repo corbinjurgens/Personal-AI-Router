@@ -8,10 +8,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"nvpair-shared/durablefile"
+	"nvpair-shared/modelconfig"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -28,7 +31,8 @@ type desiredStateFile struct {
 	AllocatedPorts map[string]int `json:"allocatedPorts,omitempty"`
 	// ProcessStops survives removal of a manifest's host block. No arguments,
 	// environment, commands or credentials belong in this cleanup-only record.
-	ProcessStops map[string]processStopEvidence `json:"processStops,omitempty"`
+	ProcessStops      map[string]processStopEvidence `json:"processStops,omitempty"`
+	PendingDiagnostic *diagnosticCheckpoint          `json:"pendingDiagnostic,omitempty"`
 }
 
 type processStopEvidence struct {
@@ -147,17 +151,39 @@ func (s *desiredStateStore) readDocument() ([]byte, error) {
 	if s.path == "" {
 		return []byte(`{}`), nil
 	}
-	data, err := durablefile.ReadFile(s.path)
+	f, err := durablefile.Open(s.path)
 	if os.IsNotExist(err) {
 		return []byte(`{}`), nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("read desired engine state: %w", err)
 	}
+	data, readErr := io.ReadAll(io.LimitReader(f, desiredStateMaxBytes+1))
+	closeErr := f.Close()
+	if readErr != nil || closeErr != nil {
+		return nil, fmt.Errorf("read desired engine state: %w", errors.Join(readErr, closeErr))
+	}
+	if len(data) > desiredStateMaxBytes {
+		return nil, errors.New("desired engine state exceeds size limit")
+	}
 	return data, nil
 }
 
 func decodeDesiredState(data []byte) (desiredStateFile, error) {
+	if len(data) > desiredStateMaxBytes {
+		return desiredStateFile{}, errors.New("desired engine state exceeds size limit")
+	}
+	// Retired intent/transaction fields remain ignored. The surviving diagnostic
+	// obligation is strict, so unknown fields cannot silently lose cleanup work.
+	var fields map[string]json.RawMessage
+	if err := modelconfig.DecodeStrict(data, &fields); err != nil || fields == nil {
+		return desiredStateFile{}, errors.New("decode desired engine state: expected an object")
+	}
+	for field := range fields {
+		if strings.EqualFold(field, "pendingDiagnostic") && field != "pendingDiagnostic" {
+			return desiredStateFile{}, errors.New("decode desired engine state: invalid diagnostic field spelling")
+		}
+	}
 	var state desiredStateFile
 	if err := json.Unmarshal(data, &state); err != nil {
 		return desiredStateFile{}, fmt.Errorf("decode desired engine state: %w", err)
@@ -172,13 +198,38 @@ func decodeDesiredState(data []byte) (desiredStateFile, error) {
 			return desiredStateFile{}, fmt.Errorf("invalid process stop evidence for %s", engine)
 		}
 	}
+	if raw, present := fields["pendingDiagnostic"]; present {
+		var checkpoint diagnosticCheckpoint
+		if err := modelconfig.DecodeStrict(raw, &checkpoint); err != nil {
+			return desiredStateFile{}, fmt.Errorf("decode pending diagnostic: %w", err)
+		}
+		if err := checkpoint.validate(); err != nil {
+			return desiredStateFile{}, fmt.Errorf("invalid pending diagnostic: %w", err)
+		}
+		state.PendingDiagnostic = &checkpoint
+	}
 	return state, nil
 }
 
 func (s *desiredStateStore) save(state desiredStateFile) error {
+	data, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	if _, err := decodeDesiredState(data); err != nil {
+		return err
+	}
 	dir := filepath.Dir(s.path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create desired engine state directory: %w", err)
+	}
+	// A checkpoint publication with uncertain durability must never authorize
+	// the next diagnostic effect. Keep the existing semantics for other writes.
+	if state.PendingDiagnostic != nil {
+		if err := engineFileReplacer.WriteFile(s.path, data, 0o600); err != nil {
+			return fmt.Errorf("save desired engine state: %w", err)
+		}
+		return nil
 	}
 	if err := writeJSONAtomic(s.path, state); err != nil {
 		return fmt.Errorf("save desired engine state: %w", err)

@@ -26,8 +26,112 @@ import (
 	"unicode/utf8"
 	"unsafe"
 
+	"nvpair-shared/modelconfig"
+	"nvpair-shared/noderec"
 	"nvpair-shared/secretenv"
 )
+
+func modelDevicePoolFromMemory(pool noderec.MemoryDomain) modelDevicePool {
+	p := modelDevicePool{ID: pool.ID, Kind: pool.Kind}
+	if p.Kind == "system" {
+		p.Kind = "host"
+	}
+	for _, alias := range pool.DeviceIDs {
+		switch {
+		case strings.HasPrefix(alias, "GPU-"):
+			value := canonicalModelDeviceUUID(alias)
+			if p.UUID != "" && p.UUID != value {
+				p.Unsupported = "ambiguous physical UUID aliases"
+			}
+			p.UUID = value
+		case strings.HasPrefix(alias, "pci:"):
+			value := canonicalModelDevicePCI(strings.TrimPrefix(alias, "pci:"))
+			if p.PCI != "" && p.PCI != value {
+				p.Unsupported = "ambiguous physical PCI aliases"
+			}
+			p.PCI = value
+		case strings.HasPrefix(alias, "luid:"):
+			value := strings.TrimPrefix(alias, "luid:")
+			if p.LUID != "" && !strings.EqualFold(p.LUID, value) {
+				p.Unsupported = "ambiguous physical LUID aliases"
+			}
+			p.LUID = value
+		case strings.HasPrefix(alias, "luid_"):
+			if p.LUID != "" && !strings.EqualFold(p.LUID, alias) {
+				p.Unsupported = "ambiguous physical LUID aliases"
+			}
+			p.LUID = alias
+		default:
+			if pool.Kind == "dedicated" {
+				p.Unsupported = "unsupported physical alias"
+			}
+		}
+	}
+	return p
+}
+
+// Buffer labels identify allocations in the child's effective native device
+// namespace. Join those labels through the existing driver's physical identity
+// report; neither a requested selector nor its ordinal identifies a pool.
+// Unlike reviewed Auto, this read maps several devices and creates no binding.
+func modelBufferPoolPlacement(memory *modelconfig.TargetMemory, rows []modelconfig.BufferReportRow, devices []modelNativeDevice) ([]modelconfig.DiagnosticPlacement, error) {
+	if memory == nil || memory.Validate() != nil || len(rows) == 0 {
+		return nil, errModelDiagnosticIdentity
+	}
+	placements := map[string]modelconfig.DiagnosticPlacement{}
+	byLabel := map[string]modelNativeDevice{}
+	uuids, pcis := map[string]bool{}, map[string]bool{}
+	for _, device := range devices {
+		if device.Kind == 0 {
+			continue
+		}
+		uuid, pci := canonicalModelDeviceUUID(device.UUID), canonicalModelDevicePCI(device.PCI)
+		if _, exists := byLabel[device.Selector]; exists || device.Unknown != "" || device.Kind != 1 || !strings.HasPrefix(device.Selector, "CUDA") || uuid == "" || pci == "" || uuids[uuid] || pcis[pci] {
+			return nil, errModelDiagnosticIdentity
+		}
+		uuids[uuid], pcis[pci] = true, true
+		byLabel[device.Selector] = device
+	}
+	for _, row := range rows {
+		var placement modelconfig.DiagnosticPlacement
+		matches := 0
+		for _, pool := range memory.Observation.Domains {
+			host := row.Label == "CPU" || row.Label == "CPU_Mapped" || row.Label == "CUDA_Host"
+			shared := row.Label == "Metal" || row.Label == "Metal0"
+			if (host && (pool.Kind == "system" || pool.Kind == "shared")) || shared && pool.Kind == "shared" {
+				kind := "host"
+				if pool.Kind == "shared" {
+					kind = "shared"
+				}
+				placement = modelconfig.DiagnosticPlacement{DomainID: pool.ID, Kind: kind}
+				matches++
+				continue
+			}
+			device, ok := byLabel[row.Label]
+			if !ok || pool.Kind != "dedicated" {
+				continue
+			}
+			physical := modelDevicePoolFromMemory(pool)
+			if physical.Unsupported != "" {
+				return nil, errModelDiagnosticIdentity
+			}
+			if physical.UUID == canonicalModelDeviceUUID(device.UUID) && physical.PCI == canonicalModelDevicePCI(device.PCI) && (runtime.GOOS != "windows" || physical.LUID != "" && strings.EqualFold(physical.LUID, device.LUID)) {
+				placement = modelconfig.DiagnosticPlacement{DomainID: pool.ID, Kind: "device", DeviceID: physical.UUID}
+				matches++
+			}
+		}
+		if matches != 1 {
+			return nil, errModelDiagnosticIdentity
+		}
+		placements[placement.DomainID] = placement
+	}
+	out := make([]modelconfig.DiagnosticPlacement, 0, len(placements))
+	for _, placement := range placements {
+		out = append(out, placement)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].DomainID < out[j].DomainID })
+	return out, nil
+}
 
 const modelDevicesHelperArg = "--private-model-devices"
 const modelDevicesLimit = 64

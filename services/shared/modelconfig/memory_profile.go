@@ -13,17 +13,26 @@ import (
 
 // MemoryProfile is an advisory statement for one applied configuration.
 type MemoryProfile struct {
-	ConfigurationKey string `json:"configurationKey"`
-	Kind             string `json:"kind"`
-	RecordedAt       string `json:"recordedAt"`
-	NativeBuildID    string `json:"nativeBuildId,omitempty"`
-	HostBytes        string `json:"hostBytes,omitempty"`
-	DeviceBytes      string `json:"deviceBytes,omitempty"`
-	SharedBytes      string `json:"sharedBytes,omitempty"`
-	Current          bool   `json:"current"`
+	ConfigurationKey string           `json:"configurationKey"`
+	Kind             string           `json:"kind"`
+	RecordedAt       string           `json:"recordedAt"`
+	NativeBuildID    string           `json:"nativeBuildId,omitempty"`
+	HostBytes        string           `json:"hostBytes,omitempty"`
+	DeviceBytes      string           `json:"deviceBytes,omitempty"`
+	SharedBytes      string           `json:"sharedBytes,omitempty"`
+	Current          bool             `json:"current"`
+	ExecutionKey     string           `json:"executionKey,omitempty"`
+	Measured         *MeasuredProfile `json:"measured,omitempty"`
+	CoversPools      bool             `json:"coversPools,omitempty"`
 }
 
-func (p MemoryProfile) Clone() MemoryProfile { return p }
+func (p MemoryProfile) Clone() MemoryProfile {
+	if p.Measured != nil {
+		v := p.Measured.Clone()
+		p.Measured = &v
+	}
+	return p
+}
 func profileByteFields(data []byte) error {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(data, &fields); err != nil {
@@ -52,6 +61,25 @@ func (p *MemoryProfile) UnmarshalJSON(data []byte) error {
 	return nil
 }
 func (p MemoryProfile) Validate() error {
+	if p.Kind == "measured" {
+		if p.Measured == nil {
+			return fmt.Errorf("memoryProfile: measured detail required")
+		}
+		m := p.Measured
+		if err := m.Validate(); err != nil {
+			return err
+		}
+		if p.ConfigurationKey != m.ConfigurationKey || p.ExecutionKey != m.ExecutionKey || p.NativeBuildID != m.NativeBuildID || p.RecordedAt != m.RecordedAt {
+			return fmt.Errorf("memoryProfile: measured identity mismatch")
+		}
+		if err := profileMeasuredBytes(p); err != nil {
+			return err
+		}
+		return CheckPayloadSize(p)
+	}
+	if p.Measured != nil || p.ExecutionKey != "" || p.CoversPools {
+		return fmt.Errorf("memoryProfile: stated record has measured fields")
+	}
 	if !digest(p.ConfigurationKey) || p.Kind != "stated" {
 		return fmt.Errorf("memoryProfile: invalid configuration identity or kind")
 	}
@@ -77,9 +105,51 @@ func (p MemoryProfile) Validate() error {
 	}
 	return nil
 }
+
+// Measured pool projections are intentionally unavailable for unpriced records.
+// Multi-device placement remains in the detail, never collapsed into one GPU.
+func profileMeasuredBytes(p MemoryProfile) error {
+	m := p.Measured
+	if m.ExecutionKey != "" || m.Outcome != "completed" {
+		if p.HostBytes != "" || p.DeviceBytes != "" || p.SharedBytes != "" || p.CoversPools {
+			return fmt.Errorf("memoryProfile: diagnostic-only record has projection")
+		}
+		return nil
+	}
+	want := map[string]string{}
+	kinds := []string{}
+	for _, placement := range m.Placement {
+		kinds = append(kinds, placement.Kind)
+	}
+	for _, pool := range m.Pools {
+		if _, ok := want[pool.Kind]; ok {
+			return fmt.Errorf("memoryProfile: multi-device projection unavailable")
+		}
+		want[pool.Kind] = pool.PeakUsedBytes
+	}
+	if p.HostBytes != want["host"] || p.DeviceBytes != want["device"] || p.SharedBytes != want["shared"] || p.CoversPools != m.Covers(kinds) {
+		return fmt.Errorf("memoryProfile: measured projection mismatch")
+	}
+	return nil
+}
+func (p MemoryProfile) OverlayEligible(current DiagnosticIdentity, pools []string) bool {
+	return p.Kind == "measured" && p.Validate() == nil && p.CoversPools && p.Measured.OverlayEligible(current, pools)
+}
+func (p MemoryProfile) AutoEligible(current DiagnosticIdentity, pools []string) bool {
+	return p.OverlayEligible(current, pools)
+}
 func (p MemoryProfile) ValidatePools(pools []string) error {
 	if err := p.Validate(); err != nil {
 		return err
+	}
+	if p.Kind == "measured" {
+		if p.ExecutionKey != "" {
+			return fmt.Errorf("memoryProfile: unpriced record has no estimate pools")
+		}
+		if p.CoversPools != p.Measured.Covers(pools) {
+			return fmt.Errorf("memoryProfile: pool coverage mismatch")
+		}
+		return nil
 	}
 	if !slices.Equal(pools, []string{"host"}) && !slices.Equal(pools, []string{"host", "device"}) && !slices.Equal(pools, []string{"shared"}) {
 		return fmt.Errorf("memoryProfile: applied pools unavailable")

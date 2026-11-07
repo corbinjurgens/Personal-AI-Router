@@ -703,6 +703,9 @@ func (e *Executor) inspectModelArtifacts(ctx context.Context, p modelconfig.Insp
 					input.Memory, _ = op.Memory.ModelAutoMemory(ctx)
 				}
 				result.ConfigurationPools = modelConfigurationPools(input)
+				if pools := e.diagnosticInspectionPools(ctx, p.Engine); len(pools) > 0 {
+					result.ConfigurationPools = pools
+				}
 				command, commandErr := modelConstrainCommand(snapshot.command, prepared.ModelLoads)
 				source, sourceErr := modelReviewedNativeSource(ctx, snapshot.state, command)
 				if commandErr == nil && sourceErr == nil {
@@ -710,9 +713,9 @@ func (e *Executor) inspectModelArtifacts(ctx context.Context, p modelconfig.Insp
 					if modelLoadUnpriced(input.Allocation.Options) {
 						result.ConfigurationKeyReason = modelLoadUnpricedReason(input.Allocation.Options)
 						result.ConfigurationPools = nil
-						result.ExecutionKey = modelExecutionKey(input, optionsID)
+						result.ExecutionKey = modelExecutionKey(input, source, optionsID)
 					} else {
-						result.ConfigurationKey = modelConfigurationKey(input, source, optionsID)
+						result.ConfigurationKey = modelConfigurationKeyForPools(input, source, optionsID, result.ConfigurationPools)
 						if result.ConfigurationKey != "" {
 							result.ConfigurationKeyReason = ""
 						}
@@ -751,7 +754,7 @@ func (e *Executor) inspectModelArtifacts(ctx context.Context, p modelconfig.Insp
 			observedArtifacts[i].Assurance = "sampled-local-binding"
 		}
 	}
-	if selected != nil {
+	if selected != nil && len(modelLoadGPUSelection(selected.Requested)) == 0 {
 		result = attachModelBufferObservation(result, e.projectModelBufferObservation(st, p.Engine, p.ProfileKey, observedArtifacts))
 	}
 	return result, nil

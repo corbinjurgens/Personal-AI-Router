@@ -620,6 +620,10 @@ func rmExpectedClasses() map[string]controlClass {
 		controlPolicyGetPath:                 controlRead,
 		controlPolicySetPath:                 controlMutation,
 		controlAvailabilitySetPath:           controlMutation,
+		diagnosticPath + "preview":           controlMutation,
+		diagnosticPath + "start":             controlMutation,
+		diagnosticPath + "status":            controlRead,
+		diagnosticPath + "cancel":            controlMutation,
 	}
 }
 
@@ -719,6 +723,7 @@ func TestRemoteManagementRouteMatrixDeniesUngrantedMutation(t *testing.T) {
 		settingsPath + "preview":    http.StatusServiceUnavailable,
 		settingsPath + "events":     http.StatusServiceUnavailable,
 		controlPolicyGetPath:        http.StatusServiceUnavailable,
+		diagnosticPath + "status":   http.StatusServiceUnavailable,
 	}
 
 	// The assertions follow the independent classification spec, never the

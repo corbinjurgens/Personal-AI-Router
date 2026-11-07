@@ -263,15 +263,85 @@ export type SetStatedMemoryRequest = ClearStatedMemoryRequest & {
     deviceBytes?: string
     sharedBytes?: string
 }
+export type MeasuredProfile = {
+    configurationKey?: string
+    executionKey?: string
+    configurationKeyReason?: 'native-fit' | 'gpu-selection'
+    nativeBuildId: string
+    buildInfo: string
+    cpuModel: string
+    totalRamBytes: string
+    gpus: Array<{ uuid: string; name: string; totalMemoryBytes: string }>
+    artifacts: Array<{ role: string; identity: string; size: string; assurance: string }>
+    requested: RequestedLoad
+    perSlotContext: number
+    slots: number
+    placement: Array<{ domainId: string; kind: 'host' | 'device' | 'shared'; deviceId?: string }>
+    runId: string
+    recordedAt: string
+    outcome: 'completed' | 'failed' | 'cancelled' | 'cleanup-failed'
+    failedPhase?:
+        | 'reserving'
+        | 'draining'
+        | 'unloading'
+        | 'baseline'
+        | 'starting'
+        | 'loading'
+        | 'low'
+        | 'high'
+        | 'restoring'
+        | 'done'
+    reason?: string
+    buildPin: string
+    pools: Array<{
+        domainId: string
+        kind: 'host' | 'device' | 'shared'
+        deviceId?: string
+        baselineAvailableBytes?: string
+        afterLoadAvailableBytes?: string
+        lowMinAvailableBytes?: string
+        highMinAvailableBytes?: string
+        peakUsedBytes?: string
+        source: string
+        samples: number
+        intervalMs: number
+    }>
+    low?: MeasuredPhase
+    high?: MeasuredPhase
+    bufferSampleId?: string
+    notes: string[]
+}
+type MeasuredPhase = {
+    coverage: 'complete' | 'partial'
+    requests: Array<{
+        targetPromptTokens: number
+        promptTokens?: number
+        cachedTokens?: number
+        promptMs?: number
+        promptPerSecond?: number
+        generatedTokens?: number
+        decodeMs?: number
+        decodePerSecond?: number
+        firstTokenMs?: number
+        endMs?: number
+    }>
+    overlapped?: boolean
+    overlapWindowSampled?: boolean
+    combinedGeneratedPerSecond?: number
+    wallMs: number
+}
 export type MemoryProfile = {
     configurationKey: string
-    kind: 'stated'
+    kind: 'stated' | 'measured'
     recordedAt: string
     nativeBuildId?: string
     hostBytes?: string
     deviceBytes?: string
     sharedBytes?: string
     current: boolean
+    executionKey?: string
+    measured?: MeasuredProfile
+    coversPools?: boolean
 }
 export type InspectModelResult = {
     nativeOptions?: Array<{

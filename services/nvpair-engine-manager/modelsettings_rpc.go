@@ -77,40 +77,7 @@ func (e *Executor) modelMemoryContext(ctx context.Context, engine string, target
 	uuid := ""
 	dedicated := 0
 	for _, pool := range observation.Domains {
-		p := modelDevicePool{ID: pool.ID, Kind: pool.Kind}
-		if p.Kind == "system" {
-			p.Kind = "host"
-		}
-		for _, alias := range pool.DeviceIDs {
-			switch {
-			case strings.HasPrefix(alias, "GPU-"):
-				value := canonicalModelDeviceUUID(alias)
-				if p.UUID != "" && p.UUID != value {
-					p.Unsupported = "ambiguous physical UUID aliases"
-				}
-				p.UUID = value
-			case strings.HasPrefix(alias, "pci:"):
-				value := canonicalModelDevicePCI(strings.TrimPrefix(alias, "pci:"))
-				if p.PCI != "" && p.PCI != value {
-					p.Unsupported = "ambiguous physical PCI aliases"
-				}
-				p.PCI = value
-			case strings.HasPrefix(alias, "luid:"):
-				if p.LUID != "" && !strings.EqualFold(p.LUID, strings.TrimPrefix(alias, "luid:")) {
-					p.Unsupported = "ambiguous physical LUID aliases"
-				}
-				p.LUID = strings.TrimPrefix(alias, "luid:")
-			case strings.HasPrefix(alias, "luid_"):
-				if p.LUID != "" && !strings.EqualFold(p.LUID, alias) {
-					p.Unsupported = "ambiguous physical LUID aliases"
-				}
-				p.LUID = alias
-			default:
-				if pool.Kind == "dedicated" {
-					p.Unsupported = "unsupported physical alias"
-				}
-			}
-		}
+		p := modelDevicePoolFromMemory(pool)
 		if p.Kind == "dedicated" {
 			dedicated++
 			if dedicated > 1 || p.UUID == "" || p.PCI == "" || p.Unsupported != "" {
@@ -270,6 +237,15 @@ func modelSettingsParamsError(err error) error {
 
 type modelMemoryRecordRemoteKey struct{}
 type modelStatedInspectionKey struct{}
+
+type modelDiagnosticInspectionKey struct{}
+
+// withModelDiagnosticInspectionIdentity carries freshly observed hardware,
+// build, artifacts and realized settings from the diagnostic lifecycle owner.
+// Ordinary inspection assembles this proof through its target identity owner.
+func withModelDiagnosticInspectionIdentity(ctx context.Context, identity modelconfig.DiagnosticIdentity) context.Context {
+	return context.WithValue(ctx, modelDiagnosticInspectionKey{}, identity.Clone())
+}
 
 func (e *Executor) recordStatedMemory(ctx context.Context, p modelconfig.ClearStatedMemoryRequest, set *modelconfig.SetStatedMemoryRequest) (modelconfig.InspectResult, error) {
 	if err := p.Validate(); err != nil {
@@ -445,7 +421,16 @@ func (e *Executor) inspectModel(ctx context.Context, p modelconfig.InspectReques
 			}
 		}
 	}
-	e.modelMemoryProfiles.attach(&result)
+	diagnosticIdentity := e.inspectionDiagnosticIdentity(ctx, p, result)
+	if identity, ok := ctx.Value(modelDiagnosticInspectionKey{}).(modelconfig.DiagnosticIdentity); ok {
+		diagnosticIdentity = &identity
+	}
+	advisory.DiagnosticIdentity = diagnosticIdentity
+	profileKey := p.ProfileKey
+	if profileKey == "" {
+		profileKey = p.ModelID
+	}
+	e.modelMemoryProfiles.attachWithIdentity(&result, profileKey, diagnosticIdentity)
 	result.Estimate = modelEstimateObservedCPUWeights(result.Estimate, advisory, result.ConfigurationKey, e.modelBuffers.store)
 	if input, ok := ctx.Value(modelStatedInspectionKey{}).(*modelEstimateInput); ok && input != nil {
 		// The statement writer needs the observed/PAIR base until its new record
@@ -481,7 +466,7 @@ func completeModelInspectionReply(result *modelconfig.InspectResult) error {
 }
 
 func (m *Manager) inspectModel(ctx context.Context, msg *Message) {
-	envelope, err := settings.DecodeWorkerRequest[modelconfig.InspectRequest](msg.Params)
+	envelope, hardware, err := decodeDiagnosticInspectEnvelope(msg.Params)
 	if err != nil {
 		m.respondOrErr(msg, nil, modelSettingsParamsError(err))
 		return
@@ -492,6 +477,7 @@ func (m *Manager) inspectModel(ctx context.Context, msg *Message) {
 		return
 	}
 	ctx = m.exec.modelMemoryContext(ctx, p.Engine, envelope.Memory, envelope.NativeInitAllowed)
+	ctx = withDiagnosticHardware(ctx, hardware)
 	result, err := m.exec.InspectModel(ctx, p)
 	m.respondOrErr(msg, result, err)
 }

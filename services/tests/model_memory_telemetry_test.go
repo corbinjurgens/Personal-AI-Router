@@ -17,11 +17,13 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"nvpair-shared/clustertrust"
 	settings "nvpair-shared/enginesettings"
+	"nvpair-shared/jsonrpc"
 	"nvpair-shared/modelconfig"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
@@ -55,6 +57,8 @@ func runModelMemoryNodeInfo() error {
 	}
 	client := &http.Client{Timeout: 5 * time.Second}
 	defer client.CloseIdleConnections()
+	var identityMu sync.RWMutex
+	var principal *string
 	server := &http.Server{ReadHeaderTimeout: time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/node-info" {
 			http.NotFound(w, r)
@@ -66,15 +70,54 @@ func runModelMemoryNodeInfo() error {
 			return
 		}
 		defer response.Body.Close()
+		var payload map[string]json.RawMessage
+		if err := json.NewDecoder(io.LimitReader(response.Body, noderec.MaxMemoryObservationBytes)).Decode(&payload); err != nil || payload == nil {
+			http.Error(w, "invalid private producer response", http.StatusBadGateway)
+			return
+		}
+		identityMu.RLock()
+		if principal != nil {
+			encoded, encodeErr := json.Marshal(*principal)
+			if encodeErr != nil {
+				identityMu.RUnlock()
+				http.Error(w, "invalid private principal", http.StatusInternalServerError)
+				return
+			}
+			payload["clusterUuid"] = encoded
+		}
+		identityMu.RUnlock()
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(response.StatusCode)
-		if _, err := io.Copy(w, io.LimitReader(response.Body, noderec.MaxMemoryObservationBytes)); err != nil {
+		if err := json.NewEncoder(w).Encode(payload); err != nil {
 			fmt.Fprintln(os.Stderr, "private memory response failed")
 		}
 	})}
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(listener) }()
-	_, readErr := io.Copy(io.Discard, os.Stdin)
+	codec := jsonrpc.NewCodec(struct {
+		io.Reader
+		io.Writer
+	}{os.Stdin, io.Discard})
+	var readErr error
+	for {
+		message, err := codec.Read()
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				readErr = err
+			}
+			break
+		}
+		if message.Method != noderec.MethodSetClusterIdentity || !message.IsNotification() {
+			continue
+		}
+		var params noderec.ClusterIdentityParams
+		if err := json.Unmarshal(message.Params, &params); err != nil {
+			continue
+		}
+		identityMu.Lock()
+		principal = &params.ClusterUUID
+		identityMu.Unlock()
+	}
 	closeErr := server.Close()
 	serveErr := <-done
 	if errors.Is(serveErr, http.ErrServerClosed) {
@@ -117,14 +160,26 @@ func (f *modelSettingsProcessFixture) serveMemoryNodeInfo(w http.ResponseWriter,
 	}
 	f.memory.requests++
 	value := struct {
-		HostUUID string                     `json:"hostUuid"`
-		GPUs     []map[string]string        `json:"GPUs"`
-		Memory   *noderec.MemoryObservation `json:"memoryObservation,omitempty"`
-	}{HostUUID: r.URL.Query().Get("host"), Memory: f.memory.observation.Clone(), GPUs: []map[string]string{}}
+		HostUUID     string                     `json:"hostUuid"`
+		GPUs         []map[string]string        `json:"GPUs"`
+		Memory       *noderec.MemoryObservation `json:"memoryObservation,omitempty"`
+		CPU          noderec.CPUInfo            `json:"cpu"`
+		ScalarMemory noderec.MemoryInfo         `json:"memory"`
+	}{HostUUID: r.URL.Query().Get("host"), Memory: f.memory.observation.Clone(), GPUs: []map[string]string{}, CPU: noderec.CPUInfo{Name: "synthetic diagnostic CPU"}}
 	// Equal display names intentionally carry no physical joining authority.
 	if value.Memory != nil {
 		for i := range value.Memory.Domains {
 			pool := &value.Memory.Domains[i]
+			if pool.Kind == "system" || pool.Kind == "shared" {
+				if pool.Total.Valid {
+					total, err := strconv.ParseUint(pool.Total.Bytes, 10, 64)
+					if err != nil {
+						http.Error(w, "invalid synthetic RAM capacity", http.StatusInternalServerError)
+						return
+					}
+					value.ScalarMemory.TotalBytes = total
+				}
+			}
 			pool.Total.SampledAt = time.Now().UTC().Add(-time.Duration(pool.Total.AgeMS) * time.Millisecond)
 			pool.Free.SampledAt = time.Now().UTC().Add(-time.Duration(pool.Free.AgeMS) * time.Millisecond)
 			if pool.Kind == "dedicated" {

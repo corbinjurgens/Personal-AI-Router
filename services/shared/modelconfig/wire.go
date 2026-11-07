@@ -409,20 +409,9 @@ func checkShape(data []byte, t reflect.Type, path string) error {
 		if err := json.Unmarshal(data, &fields); err != nil {
 			return err
 		}
-		allowed := map[string]reflect.Type{}
-		for i := 0; i < t.NumField(); i++ {
-			f := t.Field(i)
-			if f.PkgPath != "" { // unexported implementation detail
-				continue
-			}
-			name := strings.Split(f.Tag.Get("json"), ",")[0]
-			if name == "-" {
-				continue
-			}
-			if name == "" {
-				name = f.Name
-			}
-			allowed[name] = f.Type
+		allowed := map[string]reflect.StructField{}
+		if err := shapeFields(t, allowed, 0); err != nil {
+			return err
 		}
 		for name, raw := range fields {
 			field, ok := allowed[name]
@@ -431,17 +420,13 @@ func checkShape(data []byte, t reflect.Type, path string) error {
 			}
 			// encoding/json's ,string accepts noncanonical numeric spellings.
 			// Revisions/sequences keep uint64 in Go and decimal strings on wire.
-			for i := 0; i < t.NumField(); i++ {
-				f := t.Field(i)
-				tag := strings.Split(f.Tag.Get("json"), ",")
-				if tag[0] == name && slices.Contains(tag[1:], "string") && f.Type.Kind() == reflect.Uint64 {
-					var text string
-					if json.Unmarshal(raw, &text) != nil || ValidateUnsignedDecimal(text) != nil {
-						return fmt.Errorf("%s.%s: expected canonical uint64 decimal string", path, name)
-					}
+			if slices.Contains(strings.Split(field.Tag.Get("json"), ",")[1:], "string") && field.Type.Kind() == reflect.Uint64 {
+				var text string
+				if json.Unmarshal(raw, &text) != nil || ValidateUnsignedDecimal(text) != nil {
+					return fmt.Errorf("%s.%s: expected canonical uint64 decimal string", path, name)
 				}
 			}
-			if err := checkShape(raw, field, path+"."+name); err != nil {
+			if err := checkShape(raw, field.Type, path+"."+name); err != nil {
 				return err
 			}
 		}
@@ -465,6 +450,44 @@ func checkShape(data []byte, t reflect.Type, path string) error {
 				return err
 			}
 		}
+	}
+	return nil
+}
+
+// Untagged embedded structs use the same flattened object as encoding/json.
+// Refuse ambiguous declarations rather than silently dropping a contract field.
+func shapeFields(t reflect.Type, fields map[string]reflect.StructField, depth int) error {
+	if depth > 32 {
+		return fmt.Errorf("payload: embedded fields exceed nesting limit")
+	}
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		name := strings.Split(field.Tag.Get("json"), ",")[0]
+		if name == "-" {
+			continue
+		}
+		kind := field.Type
+		if kind.Kind() == reflect.Pointer {
+			kind = kind.Elem()
+		}
+		// encoding/json also exposes exported members of private embedded
+		// structs, while ordinary private fields remain inaccessible.
+		if field.PkgPath != "" && (!field.Anonymous || kind.Kind() != reflect.Struct) {
+			continue
+		}
+		if field.Anonymous && name == "" && kind.Kind() == reflect.Struct {
+			if err := shapeFields(kind, fields, depth+1); err != nil {
+				return err
+			}
+			continue
+		}
+		if name == "" {
+			name = field.Name
+		}
+		if _, exists := fields[name]; exists {
+			return fmt.Errorf("payload: ambiguous embedded field %q", name)
+		}
+		fields[name] = field
 	}
 	return nil
 }
@@ -814,6 +837,9 @@ func (r InspectResult) Clone() InspectResult {
 	}
 	r.UnreportedLaunchOptions = slices.Clone(r.UnreportedLaunchOptions)
 	r.MemoryProfiles = slices.Clone(r.MemoryProfiles)
+	for i := range r.MemoryProfiles {
+		r.MemoryProfiles[i] = r.MemoryProfiles[i].Clone()
+	}
 	r.ConfigurationPools = slices.Clone(r.ConfigurationPools)
 	if r.LoadObservation != nil {
 		o := r.LoadObservation.Clone()
@@ -886,15 +912,33 @@ func (r InspectResult) Validate() error {
 		return fmt.Errorf("inspect.memoryProfiles: history limit exceeded")
 	}
 	seenProfiles := map[string]bool{}
-	for i, p := range r.MemoryProfiles {
+	history := false
+	for _, p := range r.MemoryProfiles {
 		if err := p.Validate(); err != nil {
 			return err
 		}
-		if seenProfiles[p.ConfigurationKey] || p.Current != (r.ConfigurationKey != "" && p.ConfigurationKey == r.ConfigurationKey) || p.Current && i != 0 {
+		key := p.Kind + ":configuration:" + p.ConfigurationKey
+		if p.Kind == "measured" {
+			if p.ExecutionKey != "" {
+				key = p.Kind + ":execution:" + p.ExecutionKey
+			}
+			if p.Measured.Outcome == "completed" {
+				key += ":completed"
+			} else {
+				key += ":unsuccessful"
+			}
+			if p.Current && (p.ConfigurationKey != r.ConfigurationKey || p.ExecutionKey != r.ExecutionKey || p.NativeBuildID != r.NativeBuildID || !slices.Equal(p.Measured.Artifacts, r.Artifacts)) {
+				return fmt.Errorf("inspect.memoryProfiles: measured identity mismatch")
+			}
+		} else if p.Current != (r.ConfigurationKey != "" && p.ConfigurationKey == r.ConfigurationKey) {
+			return fmt.Errorf("inspect.memoryProfiles: invalid stated current flag")
+		}
+		if seenProfiles[key] || p.Current && history {
 			return fmt.Errorf("inspect.memoryProfiles: invalid current record or duplicate")
 		}
-		seenProfiles[p.ConfigurationKey] = true
-		if p.Current {
+		seenProfiles[key] = true
+		history = history || !p.Current
+		if p.Current && p.ExecutionKey == "" && (p.Kind == "stated" || p.Measured.Outcome == "completed") {
 			if err := p.ValidatePools(r.ConfigurationPools); err != nil {
 				return err
 			}

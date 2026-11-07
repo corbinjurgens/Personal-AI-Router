@@ -5,6 +5,72 @@ SPDX-License-Identifier: Apache-2.0
 
 # Services Backend Integration
 
+Model diagnostics use `engines:diagnostic-preview`, `engines:diagnostic-start`,
+`engines:diagnostic-status` and `engines:diagnostic-cancel`, relayed to the public
+broker methods `engine:diagnostic-preview|start|status|cancel`. The public
+`engine:diagnostic-changed` notification is strictly decoded before fanout as
+`engines:diagnostic-changed`, preserving every public run field and the complete
+measured result. Private manager tokens, markers and load observations are
+rejected before renderer fanout or notification logging. The internal manager
+`engine:diagnostic-run-status` is a separate method and is never exposed here.
+
+Peer targets route through private manager IPC
+`engine:remote-diagnostic-preview|start|status|cancel` and classified ec POST
+`/v1/model-diagnostic/preview|start|status|cancel`, using the existing pinned
+direct/reverse client. Only status is a read; the other routes require a fresh
+management grant. Inbound `engine:diagnostic-request` carries the verified caller
+to the exact current target manager source/worker pair. Its correlated
+`engine:diagnostic-reply` and source-scoped `engine:diagnostic-request-cancel`
+stay worker-internal. The broker rechecks consent, grant, maintenance and Halt
+before accepting work and never transfers target cleanup ownership to the
+origin. Remote responses preserve the peer node and exact run ID after strict
+public projection.
+
+Shared `modelconfig.DecodeStrict` supports flattened exported fields of untagged
+anonymous struct members, including private anonymous structs and embedded
+struct pointers. Anonymous structs with a nonempty JSON field name remain
+nested. Ordinary private fields and `json:"-"` fields remain inaccessible;
+unknown fields and duplicate JSON keys, including case-folded duplicates, are
+rejected. Field spelling must match exactly. This narrow promotion support
+allows diagnostic identities and public peer runs to decode in their flattened
+wire shape. It does not implement `encoding/json`'s full field-dominance rules:
+colliding promoted or declared JSON field names are refused as ambiguous, rather
+than resolved by depth or tag priority. Excessive embedding depth is also
+refused. Callers must still validate decoded values and authenticate private
+authority at their own boundary.
+
+Preview/start/status use the normal short RPC envelope; start acknowledges the
+broker-owned operation before long work. Cancel uses a 210-second desktop
+envelope outside the broker's three-minute cleanup budget, waits for its reply, and
+retains `cleanup-failed` for an explicit retry. Detaching a client does not
+cancel accepted work. Active status accepts optional node and run IDs and can
+discover an operation during `reserving`; a missing run is `null`.
+
+The broker owns consent expiry, applied-profile and hardware/build/artifact
+binding, node-wide drain, fresh cold-baseline sampling, record publication and
+cleanup reconciliation. The manager owns exclusive execution and process
+restoration. Configured pause remains unchanged; Halt refuses. Preview exposes
+unload/reload effects, held engines, engine start, memory warnings and run
+limits. Unknown runtime allocation is valid before the authorized load and in
+failed records; completed records require realized allocation. Sampled peaks
+can miss short spikes. Unpriced execution-key results remain visible diagnostic
+evidence without estimate overlays or Auto authority. Peer routing stays in
+the broker and manager; no desktop peer transport is introduced.
+
+The renderer reconciles command receipts through status reads for the exact
+accepted run, including when a discovery read was already pending. Receipts
+never replace snapshots or newer pushes. Engine settings reconnect snapshots
+restore active diagnostic discovery after manager replacement. Terminal runs
+trigger fresh profile inspection when the applied profile has no draft; only
+the target's inspected `current` flag establishes measurement currentness.
+Matching a configuration or execution key alone does not establish it.
+
+The open diagnostic panel polls peer status at two-second intervals and stops
+on close. The target tray independently discovers active runs on mount and
+reconnect and follows local pushes for Measuring memory and Cancel, through the
+same engine-settings store. Remote cancellation budgets nest target 200 seconds,
+peer 205 seconds, origin 208 seconds and desktop 210 seconds.
+
 Stated memory recording follows the existing settings relay to its destination:
 `engine:set-stated-memory` and `engine:clear-stated-memory` (and manager
 `engine:remote-set-stated-memory` / `engine:remote-clear-stated-memory`) use
@@ -244,6 +310,7 @@ reserved for inference clients.
 | proxy `node/*`                                       | Update per-engine node presence; the advertised port is the peer's promoted proxy port (not the engine's private loopback port) | node and engine pushes                                    |
 | `engine:ready` / `engine:state-changed`              | Update engine facts and models                                                                                                  | `engines:state-changed`                                   |
 | `engine:settings-changed`                            | Validate and republish the owning node's settings snapshot                                                                      | `engines:settings-changed`                                |
+| `engine:diagnostic-changed` | Strictly decode the public run and measured result; exclude private manager authority | `engines:diagnostic-changed` |
 | `engine:install-progress` / `engine:remote-progress` | Update operation progress                                                                                                       | engine progress pushes                                    |
 | `errors:update`                                      | Replace the error snapshot                                                                                                      | `errors:update`                                           |
 | `cluster:invite-received`                            | Parse inbound invite                                                                                                            | `cluster:invite-received`                                 |

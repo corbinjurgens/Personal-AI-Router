@@ -17,6 +17,7 @@ import type {
     MemoryPlan,
     ModelImpact,
     ModelLoad,
+    MeasuredProfile,
     MemoryProfile,
     RequestedLoad,
     ResolvedLoad
@@ -253,7 +254,7 @@ function requested(value: JsonValue | undefined): RequestedLoad {
         threadsBatch: optionalInteger(row.threadsBatch),
         kvOffload: optionalFlag(row.kvOffload),
         opOffload: optionalFlag(row.opOffload),
-        cacheRAM: optionalInteger(row.cacheRAM)
+        cacheRAM: optionalInteger(row.cacheRAM, 0)
     }
     const c = result.context
     if (
@@ -1603,15 +1604,43 @@ export function parseInspectModel(value: JsonValue | undefined): InspectModelRes
     )
         throw new Error('Placement is unpriced.')
     const seenProfiles = new Set<string>()
-    for (const [index, profile] of (result.memoryProfiles ?? []).entries()) {
-        if (
-            seenProfiles.has(profile.configurationKey) ||
-            profile.current !== (profile.configurationKey === result.configurationKey) ||
-            (profile.current && index !== 0)
-        )
+    let history = false
+    for (const profile of result.memoryProfiles ?? []) {
+        let identity = `${profile.kind}:configuration:${profile.configurationKey}`
+        if (profile.kind === 'measured') {
+            const detail = profile.measured
+            if (!detail) throw new Error('Missing measured memory detail.')
+            if (profile.executionKey) identity = `${profile.kind}:execution:${profile.executionKey}`
+            identity += detail.outcome === 'completed' ? ':completed' : ':unsuccessful'
+            if (
+                profile.current &&
+                (profile.configurationKey !== (result.configurationKey ?? '') ||
+                    (profile.executionKey ?? '') !== (result.executionKey ?? '') ||
+                    profile.nativeBuildId !== result.nativeBuildId ||
+                    !sameDiagnosticArtifacts(detail.artifacts, result.artifacts ?? []))
+            )
+                throw new Error('Measured inspection identity mismatch.')
+        } else if (
+            profile.current !==
+            Boolean(result.configurationKey && profile.configurationKey === result.configurationKey)
+        ) {
+            throw new Error('Invalid current stated memory profile.')
+        }
+        if (seenProfiles.has(identity) || (profile.current && history))
             throw new Error('Invalid current memory profile.')
-        seenProfiles.add(profile.configurationKey)
-        if (profile.current) {
+        seenProfiles.add(identity)
+        history ||= !profile.current
+        if (profile.current && !profile.executionKey) {
+            if (profile.kind === 'measured') {
+                if (
+                    !profile.measured ||
+                    (profile.measured.outcome === 'completed' &&
+                        Boolean(profile.coversPools) !==
+                            measuredCovers(profile.measured, result.configurationPools ?? []))
+                )
+                    throw new Error('Measured memory pool coverage mismatch.')
+                continue
+            }
             const fields = [
                 profile.hostBytes === undefined ? '' : 'host',
                 profile.deviceBytes === undefined ? '' : 'device',
@@ -1648,24 +1677,67 @@ function memoryProfile(value: JsonValue): MemoryProfile {
         'hostBytes',
         'deviceBytes',
         'sharedBytes',
-        'current'
+        'current',
+        'executionKey',
+        'measured',
+        'coversPools'
     ])
-    const recordedAt = boundedText(row.recordedAt, 64, true)
-    if (
-        !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/.test(recordedAt) ||
-        !Number.isFinite(Date.parse(recordedAt))
-    )
-        throw new Error('Invalid memory profile timestamp.')
+    const kind = choice(row.kind, ['stated', 'measured'])
     const profile: MemoryProfile = {
-        configurationKey: digest(row.configurationKey),
-        kind: choice(row.kind, ['stated']),
-        recordedAt,
+        configurationKey:
+            kind === 'measured' && row.configurationKey === '' ? '' : digest(row.configurationKey),
+        kind,
+        recordedAt: diagnosticTimestamp(row.recordedAt),
         nativeBuildId: optionalText(row.nativeBuildId, 256),
         current: flag(row.current),
         hostBytes: row.hostBytes === undefined ? undefined : unsigned(row.hostBytes),
         deviceBytes: row.deviceBytes === undefined ? undefined : unsigned(row.deviceBytes),
-        sharedBytes: row.sharedBytes === undefined ? undefined : unsigned(row.sharedBytes)
+        sharedBytes: row.sharedBytes === undefined ? undefined : unsigned(row.sharedBytes),
+        executionKey: optionalDigest(row.executionKey),
+        measured: row.measured === undefined ? undefined : measuredProfile(row.measured),
+        coversPools: optionalFlag(row.coversPools)
     }
+    if (kind === 'measured') {
+        const detail = profile.measured
+        if (
+            !detail ||
+            profile.configurationKey !== (detail.configurationKey ?? '') ||
+            (profile.executionKey ?? '') !== (detail.executionKey ?? '') ||
+            profile.nativeBuildId !== detail.nativeBuildId ||
+            profile.recordedAt !== detail.recordedAt
+        )
+            throw new Error('Measured memory profile identity mismatch.')
+        if (detail.executionKey || detail.outcome !== 'completed') {
+            if (
+                profile.hostBytes !== undefined ||
+                profile.deviceBytes !== undefined ||
+                profile.sharedBytes !== undefined ||
+                profile.coversPools
+            )
+                throw new Error('Diagnostic-only record has a memory projection.')
+        } else {
+            const projected = new Map<string, string | undefined>()
+            for (const pool of detail.pools) {
+                if (projected.has(pool.kind))
+                    throw new Error('Multi-device memory projection is unavailable.')
+                projected.set(pool.kind, pool.peakUsedBytes)
+            }
+            if (
+                profile.hostBytes !== projected.get('host') ||
+                profile.deviceBytes !== projected.get('device') ||
+                profile.sharedBytes !== projected.get('shared') ||
+                Boolean(profile.coversPools) !==
+                    measuredCovers(
+                        detail,
+                        detail.placement.map(pool => pool.kind)
+                    )
+            )
+                throw new Error('Measured memory projection mismatch.')
+        }
+        return profile
+    }
+    if (profile.measured || profile.executionKey || profile.coversPools)
+        throw new Error('Stated memory profile has measured fields.')
     if (
         (profile.hostBytes === undefined &&
             profile.deviceBytes === undefined &&
@@ -1677,6 +1749,322 @@ function memoryProfile(value: JsonValue): MemoryProfile {
     if (profile.nativeBuildId && !/^sha256:[0-9a-f]{64}$/.test(profile.nativeBuildId))
         throw new Error('Invalid memory profile build identity.')
     return profile
+}
+
+export function diagnosticTimestamp(value: JsonValue | undefined): string {
+    const result = boundedText(value, 64, true)
+    const match =
+        /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})([.,]\d+)?(Z|[+-]\d{2}:\d{2})$/.exec(
+            result
+        )
+    if (!match) throw new Error('Invalid diagnostic timestamp.')
+    const year = Number(match[1])
+    const month = Number(match[2])
+    const day = Number(match[3])
+    const days = [
+        31,
+        year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0) ? 29 : 28,
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31
+    ]
+    const parsed = Date.parse(result.replace(',', '.'))
+    if (
+        month < 1 ||
+        month > 12 ||
+        day < 1 ||
+        day > (days[month - 1] ?? 0) ||
+        Number(match[4]) > 23 ||
+        Number(match[5]) > 59 ||
+        Number(match[6]) > 59 ||
+        !Number.isFinite(parsed) ||
+        (parsed === -62135596800000 && !/[1-9]/.test(match[7] ?? ''))
+    )
+        throw new Error('Invalid diagnostic timestamp.')
+    return result
+}
+
+function diagnosticArray(value: JsonValue | undefined, maximum = 64): JsonValue[] {
+    return value === undefined || value === null ? [] : boundedArray(value, maximum)
+}
+function diagnosticOptionalNumber(value: JsonValue | undefined): number | undefined {
+    if (value === undefined) return undefined
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0)
+        throw new Error('Invalid diagnostic numeric observation.')
+    return value
+}
+function diagnosticBytes(value: JsonValue | undefined): string | undefined {
+    return value === undefined || value === '' ? undefined : unsigned(value)
+}
+function measuredPhase(value: JsonValue): NonNullable<MeasuredProfile['high']> {
+    const row = shape(value, [
+        'coverage',
+        'requests',
+        'overlapped',
+        'overlapWindowSampled',
+        'combinedGeneratedPerSecond',
+        'wallMs'
+    ])
+    const result: NonNullable<MeasuredProfile['high']> = {
+        coverage: choice(row.coverage, ['complete', 'partial']),
+        requests: diagnosticArray(row.requests, 8).map(value => {
+            const request = shape(value, [
+                'targetPromptTokens',
+                'promptTokens',
+                'cachedTokens',
+                'promptMs',
+                'promptPerSecond',
+                'generatedTokens',
+                'decodeMs',
+                'decodePerSecond',
+                'firstTokenMs',
+                'endMs'
+            ])
+            const result = {
+                targetPromptTokens: integer(request.targetPromptTokens),
+                promptTokens: optionalInteger(request.promptTokens, 0),
+                cachedTokens: optionalInteger(request.cachedTokens, 0),
+                promptMs: diagnosticOptionalNumber(request.promptMs),
+                promptPerSecond: diagnosticOptionalNumber(request.promptPerSecond),
+                generatedTokens: optionalInteger(request.generatedTokens, 0),
+                decodeMs: diagnosticOptionalNumber(request.decodeMs),
+                decodePerSecond: diagnosticOptionalNumber(request.decodePerSecond),
+                firstTokenMs: diagnosticOptionalNumber(request.firstTokenMs),
+                endMs: diagnosticOptionalNumber(request.endMs)
+            }
+            if (
+                result.firstTokenMs !== undefined &&
+                result.endMs !== undefined &&
+                result.endMs < result.firstTokenMs
+            )
+                throw new Error('Reversed diagnostic request interval.')
+            return result
+        }),
+        overlapped: optionalFlag(row.overlapped),
+        overlapWindowSampled: optionalFlag(row.overlapWindowSampled),
+        combinedGeneratedPerSecond: diagnosticOptionalNumber(row.combinedGeneratedPerSecond),
+        wallMs: number(row.wallMs)
+    }
+    if (
+        result.requests.length === 0 ||
+        (result.coverage === 'complete' &&
+            result.requests.some(
+                request =>
+                    request.promptTokens === undefined ||
+                    BigInt(request.promptTokens) * 100n <
+                        BigInt(request.targetPromptTokens) * 95n ||
+                    request.cachedTokens !== 0
+            ))
+    )
+        throw new Error('Incomplete diagnostic prompt coverage.')
+    return result
+}
+
+/** The caller checks its full envelope; this decodes its shared consent identity. */
+export function parseDiagnosticIdentity(row: JsonObject) {
+    const result = {
+        configurationKey: optionalDigest(row.configurationKey),
+        executionKey: optionalDigest(row.executionKey),
+        configurationKeyReason:
+            row.configurationKeyReason === undefined
+                ? undefined
+                : choice(row.configurationKeyReason, ['native-fit', 'gpu-selection']),
+        nativeBuildId: boundedText(row.nativeBuildId, 256, true),
+        buildInfo: boundedText(row.buildInfo, 256),
+        cpuModel: boundedText(row.cpuModel, 256, true),
+        totalRamBytes: unsigned(row.totalRamBytes),
+        gpus: diagnosticArray(row.gpus).map(value => {
+            const gpu = shape(value, ['uuid', 'name', 'totalMemoryBytes'])
+            return {
+                uuid: boundedText(gpu.uuid, 256, true),
+                name: boundedText(gpu.name, 256, true),
+                totalMemoryBytes: unsigned(gpu.totalMemoryBytes)
+            }
+        }),
+        artifacts: diagnosticArray(row.artifacts).map(value => {
+            const artifact = shape(value, ['role', 'identity', 'size', 'assurance'])
+            return {
+                role: boundedText(artifact.role, 256, true),
+                identity: boundedText(artifact.identity, 256, true),
+                size: unsigned(artifact.size),
+                assurance: boundedText(artifact.assurance, 256, true)
+            }
+        }),
+        requested: requested(row.requested),
+        perSlotContext: integer(row.perSlotContext, 0),
+        slots: integer(row.slots, 0),
+        placement: diagnosticArray(row.placement).map(value => {
+            const pool = shape(value, ['domainId', 'kind', 'deviceId'])
+            return {
+                domainId: boundedText(pool.domainId, 256, true),
+                kind: choice(pool.kind, ['host', 'device', 'shared']),
+                deviceId: optionalText(pool.deviceId, 256)
+            }
+        })
+    }
+    if (
+        Boolean(result.configurationKey) === Boolean(result.executionKey) ||
+        (result.configurationKey && result.configurationKeyReason !== undefined) ||
+        (result.executionKey && !result.configurationKeyReason) ||
+        !/^sha256:[0-9a-f]{64}$/.test(result.nativeBuildId) ||
+        result.slots > 8 ||
+        result.artifacts.length === 0
+    )
+        throw new Error('Invalid measured diagnostic identity.')
+    const gpus = new Set(result.gpus.map(gpu => gpu.uuid))
+    const domains = new Set(result.placement.map(pool => pool.domainId))
+    if (gpus.size !== result.gpus.length || domains.size !== result.placement.length)
+        throw new Error('Duplicate diagnostic hardware or placement.')
+    for (const pool of result.placement) {
+        if (pool.kind === 'device' ? !gpus.has(pool.deviceId ?? '') : Boolean(pool.deviceId))
+            throw new Error('Invalid diagnostic placement.')
+    }
+    return result
+}
+
+export function measuredProfile(value: JsonValue): MeasuredProfile {
+    const row = shape(value, [
+        'configurationKey',
+        'executionKey',
+        'configurationKeyReason',
+        'nativeBuildId',
+        'buildInfo',
+        'cpuModel',
+        'totalRamBytes',
+        'gpus',
+        'artifacts',
+        'requested',
+        'perSlotContext',
+        'slots',
+        'placement',
+        'runId',
+        'recordedAt',
+        'outcome',
+        'failedPhase',
+        'reason',
+        'buildPin',
+        'pools',
+        'low',
+        'high',
+        'bufferSampleId',
+        'notes'
+    ])
+    const result: MeasuredProfile = {
+        ...parseDiagnosticIdentity(row),
+        runId: boundedText(row.runId, 256, true),
+        recordedAt: diagnosticTimestamp(row.recordedAt),
+        outcome: choice(row.outcome, ['completed', 'failed', 'cancelled', 'cleanup-failed']),
+        failedPhase:
+            row.failedPhase === undefined
+                ? undefined
+                : choice(row.failedPhase, [
+                      'reserving',
+                      'draining',
+                      'unloading',
+                      'baseline',
+                      'starting',
+                      'loading',
+                      'low',
+                      'high',
+                      'restoring',
+                      'done'
+                  ]),
+        reason: optionalText(row.reason, 256),
+        buildPin: boundedText(row.buildPin, 256),
+        pools: diagnosticArray(row.pools).map(value => {
+            const pool = shape(value, [
+                'domainId',
+                'kind',
+                'deviceId',
+                'baselineAvailableBytes',
+                'afterLoadAvailableBytes',
+                'lowMinAvailableBytes',
+                'highMinAvailableBytes',
+                'peakUsedBytes',
+                'source',
+                'samples',
+                'intervalMs'
+            ])
+            const intervalMs = number(pool.intervalMs)
+            if (intervalMs === 0) throw new Error('Invalid diagnostic sampling interval.')
+            return {
+                domainId: boundedText(pool.domainId, 256, true),
+                kind: choice(pool.kind, ['host', 'device', 'shared']),
+                deviceId: optionalText(pool.deviceId, 256),
+                baselineAvailableBytes: diagnosticBytes(pool.baselineAvailableBytes),
+                afterLoadAvailableBytes: diagnosticBytes(pool.afterLoadAvailableBytes),
+                lowMinAvailableBytes: diagnosticBytes(pool.lowMinAvailableBytes),
+                highMinAvailableBytes: diagnosticBytes(pool.highMinAvailableBytes),
+                peakUsedBytes: diagnosticBytes(pool.peakUsedBytes),
+                source: boundedText(pool.source, 256, true),
+                samples: integer(pool.samples, 0),
+                intervalMs
+            }
+        }),
+        low: row.low === undefined ? undefined : measuredPhase(row.low),
+        high: row.high === undefined ? undefined : measuredPhase(row.high),
+        bufferSampleId: optionalText(row.bufferSampleId, 256),
+        notes: diagnosticArray(row.notes).map(value => boundedText(value, 256))
+    }
+    if (
+        (result.outcome === 'completed' &&
+            (result.perSlotContext < 208 || result.slots < 1 || result.placement.length === 0)) ||
+        (result.configurationKeyReason === 'gpu-selection' && result.bufferSampleId)
+    )
+        throw new Error('Invalid measured diagnostic identity.')
+    const sampled = new Set<string>()
+    for (const pool of result.pools) {
+        if (
+            (pool.kind === 'device') !== Boolean(pool.deviceId) ||
+            sampled.has(pool.domainId) ||
+            !result.placement.some(
+                placement =>
+                    placement.domainId === pool.domainId &&
+                    placement.kind === pool.kind &&
+                    (placement.deviceId ?? '') === (pool.deviceId ?? '')
+            )
+        )
+            throw new Error('Diagnostic pool placement mismatch.')
+        sampled.add(pool.domainId)
+    }
+    return result
+}
+
+function measuredCovers(profile: MeasuredProfile, kinds: string[]): boolean {
+    return (
+        kinds.length > 0 &&
+        kinds.every(kind =>
+            profile.pools.some(pool => pool.kind === kind && pool.peakUsedBytes !== undefined)
+        ) &&
+        profile.placement.every(placement =>
+            profile.pools.some(
+                pool => pool.domainId === placement.domainId && pool.peakUsedBytes !== undefined
+            )
+        )
+    )
+}
+
+function sameDiagnosticArtifacts(a: MeasuredProfile['artifacts'], b: ArtifactSummary[]): boolean {
+    return (
+        a.length === b.length &&
+        a.every((artifact, index) => {
+            const other = b[index]
+            return (
+                other !== undefined &&
+                artifact.role === other.role &&
+                artifact.identity === other.identity &&
+                artifact.size === other.size &&
+                artifact.assurance === other.assurance
+            )
+        })
+    )
 }
 function option(value: JsonValue): NonNullable<InspectModelResult['options']>[number] {
     const row = shape(value, [

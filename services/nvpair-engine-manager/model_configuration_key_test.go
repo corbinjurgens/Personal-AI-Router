@@ -66,27 +66,33 @@ func TestModelConfigurationKeyNativeFitExecutionScope(t *testing.T) {
 		Allocation: &modelconfig.ResolvedLoad{NativeBuildID: "sha256:" + strings.Repeat("a", 64), Options: modelconfig.RequestedLoad{Fit: &on}},
 		Bindings:   []modelconfig.ArtifactSummary{{Role: "model", Identity: "artifact-a"}},
 	}
-	key := modelExecutionKey(in, "options-a")
+	key := modelExecutionKey(in, "source-a", "options-a")
 	if len(key) != 64 || modelConfigurationKey(in, "source", "options-a") != "" {
 		t.Fatalf("native fit identity: execution=%s finite=%s", key, modelConfigurationKey(in, "source", "options-a"))
 	}
-	if modelExecutionKey(in, "options-b") == key {
+	if modelExecutionKey(in, "source-a", "options-b") == key {
 		t.Fatal("execution key ignored resolved options")
 	}
+	if modelExecutionKey(in, "source-b", "options-a") == key {
+		t.Fatal("execution key ignored native launch source")
+	}
+	if modelExecutionKey(in, "", "options-a") != "" {
+		t.Fatal("unverified native source received execution identity")
+	}
 	in.Allocation.NativeBuildID = "sha256:" + strings.Repeat("b", 64)
-	if modelExecutionKey(in, "options-a") == key {
+	if modelExecutionKey(in, "source-a", "options-a") == key {
 		t.Fatal("execution key ignored native build")
 	}
 	in.Allocation.NativeBuildID = "sha256:" + strings.Repeat("a", 64)
 	in.Bindings[0].Identity = "artifact-b"
-	if modelExecutionKey(in, "options-a") == key {
+	if modelExecutionKey(in, "source-a", "options-a") == key {
 		t.Fatal("execution key ignored artifact identity")
 	}
-	if modelExecutionKey(modelEstimateInput{}, "options-a") != "" {
+	if modelExecutionKey(modelEstimateInput{}, "source-a", "options-a") != "" {
 		t.Fatal("unapplied load received execution identity")
 	}
 	in.Allocation.Options.Fit = nil
-	if modelExecutionKey(in, "options-a") != "" {
+	if modelExecutionKey(in, "source-a", "options-a") != "" {
 		t.Fatal("ordinary finite load received execution identity")
 	}
 }

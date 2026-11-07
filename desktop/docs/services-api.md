@@ -22,13 +22,24 @@
 - ⚠️ nvpair-engine-manager → engine:configure-launch
 - ⚠️ nvpair-engine-manager → engine:configured-ports
 - ⚠️ nvpair-engine-manager → engine:describe
+- ⚠️ nvpair-engine-manager → engine:diagnostic-abort
+- ⚠️ nvpair-engine-manager → engine:diagnostic-baseline-done
+- ⚠️ nvpair-engine-manager → engine:diagnostic-release
+- ⚠️ nvpair-engine-manager → engine:diagnostic-reserve
+- ⚠️ nvpair-engine-manager → engine:diagnostic-run
+- ⚠️ nvpair-engine-manager → engine:diagnostic-run-status
 - ⚠️ nvpair-engine-manager → engine:errors
 - ⚠️ nvpair-engine-manager → engine:get-launch
 - ⚠️ nvpair-engine-manager → engine:logs
 - ⚠️ nvpair-engine-manager → engine:preview-launch
+- ⚠️ nvpair-engine-manager → engine:record-measured-memory
 - ⚠️ nvpair-engine-manager → engine:remote-apply-settings
 - ⚠️ nvpair-engine-manager → engine:remote-clear-stated-memory
 - ⚠️ nvpair-engine-manager → engine:remote-copy-model
+- ⚠️ nvpair-engine-manager → engine:remote-diagnostic-cancel
+- ⚠️ nvpair-engine-manager → engine:remote-diagnostic-preview
+- ⚠️ nvpair-engine-manager → engine:remote-diagnostic-start
+- ⚠️ nvpair-engine-manager → engine:remote-diagnostic-status
 - ⚠️ nvpair-engine-manager → engine:remote-get-settings
 - ⚠️ nvpair-engine-manager → engine:remote-inspect-model
 - ⚠️ nvpair-engine-manager → engine:remote-preview-settings
@@ -36,6 +47,7 @@
 - ⚠️ nvpair-engine-manager → engine:set-port
 - ⚠️ nvpair-engine-manager → engine:sleep
 - ⚠️ nvpair-engine-manager → engine:wake
+- ⚠️ nvpair-engine-manager → internal:diagnostic-observe
 - ⚠️ nvpair-engine-manager → internal:local-engine-credential
 - ⚠️ nvpair-engine-manager → internal:set-reserved-port
 - ⚠️ nvpair-engine-manager → manager/router
@@ -119,6 +131,7 @@
 | Method | Direction | In bridge? |
 |---|---|---|
 | `discovery:subscribe` | notification (we consume) | ✅ yes |
+| `engine:diagnostic-changed` | notification (we consume) | ✅ yes |
 | `engine:install-progress` | notification (we consume) | ✅ yes |
 | `engine:model-identity` | notification (we consume) | ➖ ignored |
 | `engine:models-changed` | notification (we consume) | ✅ yes |
@@ -144,6 +157,16 @@
 | `engine:delete-model` | request (we call) | ✅ yes |
 | `engine:describe` | request (we call) | ⚠️ not called |
 | `engine:descriptors` | request (we call) | ✅ yes |
+| `engine:diagnostic-abort` | request (we call) | ⚠️ not called |
+| `engine:diagnostic-baseline-done` | request (we call) | ⚠️ not called |
+| `engine:diagnostic-cancel` | request (we call) | ✅ yes |
+| `engine:diagnostic-preview` | request (we call) | ✅ yes |
+| `engine:diagnostic-release` | request (we call) | ⚠️ not called |
+| `engine:diagnostic-reserve` | request (we call) | ⚠️ not called |
+| `engine:diagnostic-run` | request (we call) | ⚠️ not called |
+| `engine:diagnostic-run-status` | request (we call) | ⚠️ not called |
+| `engine:diagnostic-start` | request (we call) | ✅ yes |
+| `engine:diagnostic-status` | request (we call) | ✅ yes |
 | `engine:errors` | request (we call) | ⚠️ not called |
 | `engine:get-installed` | request (we call) | ✅ yes |
 | `engine:get-launch` | request (we call) | ⚠️ not called |
@@ -157,10 +180,15 @@
 | `engine:prepare-shutdown` | request (we call) | ➖ ignored |
 | `engine:preview-launch` | request (we call) | ⚠️ not called |
 | `engine:reconcile-resident` | request (we call) | ➖ ignored |
+| `engine:record-measured-memory` | request (we call) | ⚠️ not called |
 | `engine:remote-apply-settings` | request (we call) | ⚠️ not called |
 | `engine:remote-clear-stated-memory` | request (we call) | ⚠️ not called |
 | `engine:remote-copy-model` | request (we call) | ⚠️ not called |
 | `engine:remote-delete-model` | request (we call) | ✅ yes |
+| `engine:remote-diagnostic-cancel` | request (we call) | ⚠️ not called |
+| `engine:remote-diagnostic-preview` | request (we call) | ⚠️ not called |
+| `engine:remote-diagnostic-start` | request (we call) | ⚠️ not called |
+| `engine:remote-diagnostic-status` | request (we call) | ⚠️ not called |
 | `engine:remote-get-installed` | request (we call) | ✅ yes |
 | `engine:remote-get-settings` | request (we call) | ⚠️ not called |
 | `engine:remote-inspect-model` | request (we call) | ⚠️ not called |
@@ -180,6 +208,7 @@
 | `engine:unload-model` | request (we call) | ✅ yes |
 | `engine:wake` | request (we call) | ⚠️ not called |
 | `error` | request (we call) | ✅ yes |
+| `internal:diagnostic-observe` | request (we call) | ⚠️ not called |
 | `internal:local-engine-credential` | request (we call) | ⚠️ not called |
 | `internal:set-reserved-port` | request (we call) | ⚠️ not called |
 | `manager/router` | request (we call) | ⚠️ not called |
@@ -410,6 +439,10 @@
 | `discovery:unsubscribe` | request (we call) | ⚠️ not called |
 | `engine:apply-settings` | request (we call) | ✅ yes |
 | `engine:clear-stated-memory` | request (we call) | ✅ yes |
+| `engine:diagnostic-cancel` | request (we call) | ✅ yes |
+| `engine:diagnostic-preview` | request (we call) | ✅ yes |
+| `engine:diagnostic-start` | request (we call) | ✅ yes |
+| `engine:diagnostic-status` | request (we call) | ✅ yes |
 | `engine:get-settings` | request (we call) | ✅ yes |
 | `engine:inspect-model` | request (we call) | ✅ yes |
 | `engine:install` | request (we call) | ✅ yes |

@@ -399,8 +399,11 @@ type ReadyParams struct {
 // GPUInfo / CPUInfo / MemoryInfo are the node-info enrichment carried on a
 // directory entry. Consolidated here so the daemon, the broker relay, and
 // clients share one shape.
+// PhysicalID is an observed device alias in the node-info response's dedicated
+// or shared memory pool. Absence means the association is unknown.
 type GPUInfo struct {
 	Name               string `json:"name"`
+	PhysicalID         string `json:"physicalId,omitempty"`
 	VramBytes          uint64 `json:"vram_bytes,omitempty"`
 	VramUsedBytes      uint64 `json:"vram_used_bytes,omitempty"`
 	UtilizationPercent uint32 `json:"utilization_percent,omitempty"`

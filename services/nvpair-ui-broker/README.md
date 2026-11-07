@@ -5,6 +5,62 @@ SPDX-License-Identifier: Apache-2.0
 
 # nvpair-ui-broker
 
+Memory diagnostics use `engine:diagnostic-preview`,
+`engine:diagnostic-start`, `engine:diagnostic-status` and
+`engine:diagnostic-cancel`. The broker owns consent, a resource ledger, node
+draining with verified idle evidence, run-scoped telemetry sampling and recording.
+The manager owns reservation, process lifecycle, exercise, joining cancellation
+and the durable cleanup checkpoint. Configured pause permits consent; Halt
+refuses it. Saved pause never changes. Public notifications contain only the run,
+not the manager's token or internal observation envelope.
+
+Drain release removes only the diagnostic's contribution to the existing
+registry. The shared drain push owner acknowledges the effective drain with
+old-proxy active or unsettled manual loads still included; failed or retired
+acknowledgements retain the diagnostic hold for cleanup retry. Preexisting
+settings drains remain held independently.
+
+Preview warnings disclose fresh node-maximum GPU utilization and the existing
+GPU-memory and RAM-use thresholds. The sampler retains those observations for
+the cold baseline, including memory use above 5 percent of dedicated GPU
+capacity or half of RAM, in `MeasuredProfile.notes`. Baseline warnings include
+threshold counts and observed used/capacity byte ranges from the busiest of the
+same initial samples used for the median, including pools outside the measured
+model's placement. The GPU/RAM summaries fit the existing bounded notes contract
+independently of pool names or the number of physical pools.
+Missing baseline and exercise coverage is summarized by affected pool count;
+the structured pool records retain full identities and absent values.
+The utilization range comes from the existing scanner telemetry cache, with
+the diagnostic memory freshness bound; missing, invalid or stale utilization
+stays unknown, distinct from an observed zero. This compact feed reports a node
+maximum, not individual device use, and neither utilization nor pool memory
+identifies which application caused the activity.
+
+A peer `nodeId` routes through private manager
+`engine:remote-diagnostic-preview|start|status|cancel`, using the existing ec
+direct/reverse pinned transport. Inbound `engine:diagnostic-request` and
+`engine:diagnostic-request-cancel` are private manager notifications. The broker
+checks the current source and exact worker pair and replies only through that
+pair. Consent binds the verified caller and manager source; preview/start
+recheck the fresh grant, maintenance and Halt before publishing authority.
+Configured pause is allowed without changing saved pause. Status is a pinned
+read. Peer cancellation requires a grant but remains available during Halt or
+maintenance; local cancellation needs no peer grant. Cancellation addresses an
+exact run, and lost callers never abandon accepted target work. Remote replies
+are projected to the public contract before responding, including the target
+node ID, with no private manager authority. The origin owns no target resources.
+
+The origin diagnostic panel polls peer status every two seconds only while
+open. The target tray uses active-run lookup on mount/reconnect and local
+diagnostic pushes to display Measuring memory and Cancel, including peer-started
+runs. Both use the existing engine-settings store and exact run reconciliation.
+
+Checkpoint reconciliation precedes proxy policy/ingress replay and manager
+replacement recovery. Pending cleanup recreates the node hold; unknown cleanup
+never opens ingress. There is no broker diagnostic journal. See
+[Model memory diagnostics](../../docs/model-memory-diagnostic.mdx) for consent,
+record identity, sample coverage and limits.
+
 The existing telemetry cache retains detached memory observations alongside GPU
 utilization. It adds same-host IPC delay and suspend-aware elapsed time without
 comparing remote UTC clocks. Independent facts expire after five seconds;

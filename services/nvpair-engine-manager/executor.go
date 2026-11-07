@@ -126,13 +126,21 @@ type Executor struct {
 	modelBuffers        modelBufferOwner
 	modelMemoryProfiles *modelMemoryProfiles
 	// mutationAdmission protects owner admission and active mutation counts.
-	mutationAdmission  sync.Mutex
-	activeMutations    map[string]int
-	managerIncarnation string
+	mutationAdmission sync.Mutex
+	activeMutations   map[string]int
+	// diagnostic is guarded by mutationAdmission and owns the global mutation
+	// ticket until its work is conclusively stopped.
+	diagnostic *diagnosticReservation
+	// Operation and retained results share the reservation's admission lock.
+	diagnosticOperation      *modelDiagnosticOperation
+	diagnosticCompleted      map[string]diagnosticCompletedRun
+	diagnosticCompletedOrder []string
+	managerIncarnation       string
 	// Entry reserves retirement capacity, so this fence cannot wrap or miss ABA.
 	ownerAdmissionGeneration uint64
 	ownerAdmissionHeld       uint64
 	settingsHub              settings.Hub
+	diagnosticParent         func(context.Context, string, string, json.RawMessage) (json.RawMessage, error)
 	admittedLoadParent       func(context.Context, string, string) (json.RawMessage, error)
 	settingsParent           func(context.Context, string, settings.Request, string) (json.RawMessage, error)
 	inspectParent            func(context.Context, modelconfig.InspectRequest, string) (json.RawMessage, error)

@@ -1,0 +1,198 @@
+---
+title: Model memory diagnostics
+description: Consent, exclusion, sampling and recovery for an intentional model measurement.
+---
+{/*
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+*/}
+
+A memory diagnostic deliberately loads an applied llama.cpp-family profile and
+fills its context. The result is labelled **Measured on this machine**, with its
+date, build and configuration. It measures sampled operating-system memory-pool
+deltas and request speeds. Short peaks and unrelated applications can affect it.
+It does not qualify a configuration or guarantee that a future request will fit.
+
+## Consent and identity
+
+Preview and Start address a saved `profileKey`, alongside its engine and model
+artifact selector. Configured pause permits an explicitly consented run. Halt
+(`pauseMode: immediate`) refuses it. Neither operation changes saved pause.
+The manager decides whether the engine belongs to the supported native family.
+Paired peers can preview and start under a fresh target-local remote-management
+grant. Maintenance, an in-progress pause transition and Halt refuse new work;
+a stable configured pause permits it. Consent and the run belong to the target.
+
+The preview lists models to unload, saved residents eligible to return, held
+engines and whether the measured engine must start. It warns when dedicated GPU
+memory use exceeds 5 percent and when host or shared RAM use exceeds half its
+capacity. Unrelated GPU work cannot reliably be excluded or attributed. The
+preview also warns that a configuration can exhaust memory and stop its engine.
+
+Consent binds the applied configuration or unpriced execution key, selected GGUF
+and companions, requested options, file-native build identity, CPU model, total
+RAM and every usable GPU's UUID, name and total memory. Runtime `BuildInfo`,
+per-slot context, slots and placement remain unknown until observed when they
+cannot be established without loading. Preview discloses unknown prompt targets
+instead of substituting a finite estimate. Completed records require the full
+observed identity, including realized allocation.
+
+A preview expires after five minutes. The broker retains a bounded table of
+previews and rechecks identity, loaded-model effects, maintenance generation and
+saved policy before starting. No consent or a stale preview grants no execution
+authority. A manager-owned effects fence closes the race at reservation.
+
+## Execution and cleanup
+
+The broker publishes a run ID and creates its resource ledger before acquiring
+anything. It acquires a build-apply settings lease, the manager's execution
+reservation and the existing node drain lease, in that order. Every local engine
+facade must acknowledge its drain. A same-incarnation admission snapshot must
+explicitly show zero active and queued work before the run is dispatched.
+Public progress includes the draining phase before the idle wait. Its start time
+is the broker's acceptance time, and elapsed time cannot decrease when manager
+progress is adopted.
+
+The manager owns process control, unload, reservation-scoped wake, load, native
+exercise, cancellation and restoration through its existing lifecycle owner.
+Only the measured engine may start during configured pause. All models are
+unloaded for the cold baseline, including the selected model. Saved pause stays
+unchanged and diagnostic-started processes stop afterward. Saved residents are
+reloaded by their existing owner after the broker releases its drains.
+
+Lost reserve and run replies are reconciled by run ID. An uncertain acceptance
+is settled using the same idempotent request before the broker can interpret a
+status as permission to release. Cancel joins the manager's work; expiry or a
+transport error does not establish that work stopped. Cleanup failure retains
+the operation, drains and settings lease, with **Retry cleanup** available through
+the cancel method. Repeated cleanup does not acquire another lease.
+Physical cleanup has a two-minute manager budget inside the broker's three-minute
+cleanup envelope. Local cancellation allows acceptance reconciliation and the
+joined cleanup within 200 seconds; the desktop waits up to 210 seconds. A timeout
+keeps the hold until a later status or cleanup retry proves the outcome.
+
+The manager's durable checkpoint is the only restart journal. Before policy and
+ingress replay, and on manager replacement, the broker reads that checkpoint,
+reconstructs node drains and restores the public run identity. An unreadable or
+unknown checkpoint prevents ingress activation. Recovered runs never resume
+measurement. A confirmed cleanup-complete status releases the reconstructed hold.
+The checkpoint owner persists interrupted evidence. Replacement recovery keeps
+settings serialization with the retained operation rather than waiting on its
+own settings lock.
+
+## Sampling and limits
+
+Each run owns a two-second ticker over the existing verified local telemetry
+cache. The ticker stops and joins on every exit. Facts must be fresh and have a
+new producer/domain/source/sample-time identity. Repeated cache reads cannot
+create extra samples. A changed producer aborts the run rather than mixing runs.
+
+The cold baseline is the median of three new samples after the manager's
+`baseline-ready` marker. The broker then acknowledges the baseline barrier.
+After confirming the load identity, the manager waits for a second bounded
+acknowledgement: two fresh after-load samples from every pool. Only then may
+exercise begin. Both sample barriers are bound to the run, token and phase and
+join cancellation. After-load, low and high phase windows come from the manager's markers. A
+minimum without enough fresh samples stays absent with a coverage note. UMA
+uses one shared pool and is never counted again as separate host and GPU memory.
+
+Generation targets 128 tokens per request at temperature zero. The low prompt
+targets `min(512, highTarget / 2)` tokens. The high prompt targets
+`perSlotContext - 128 - 16` tokens in every slot concurrently. Targets below 64
+tokens and more than eight slots are refused. The manager resolves unknown
+native-fit targets from the consented load. Runs are bounded to twenty minutes.
+
+The high phase's sampled-overlap window starts at the latest first token and
+ends at the earliest request completion, using offsets from `high-start`.
+Every relevant pool needs a fresh sample inside that window. Missing coverage
+makes the high phase partial, even when native token/cache/overlap checks pass.
+Reported prompt and decode rates stay separate from combined throughput.
+
+The broker stores completed, partial and failed evidence before releasing its
+remaining resources after confirmed physical cleanup. A fresh inspection links
+buffer evidence only when its capture time, build, artifacts, requested options
+and realized context bind this run's load. GPU-selection profiles intentionally
+have no buffer sample. Unpriced native-fit and GPU-selection results use an
+`ExecutionKey` and never overlay estimates or feed Auto. Earlier-build records
+remain readable and labelled `measured on <build>`; they do not establish current
+validation or lift current warnings.
+
+## Broker methods
+
+| Method | Request | Result |
+| --- | --- | --- |
+| `engine:diagnostic-preview` | `engine`, `modelId`, `profileKey`, optional target `nodeId` | Consent preview |
+| `engine:diagnostic-start` | Same selection, `previewId`, `consent: true` | Accepted public run |
+| `engine:diagnostic-status` | Optional `runId` and target `nodeId` | Active run, latest terminal run, or null |
+| `engine:diagnostic-cancel` | Exact `runId` and optional target `nodeId` | Joined cancellation or cleanup retry |
+
+The origin broker routes a peer `nodeId` through manager IPC
+`engine:remote-diagnostic-preview|start|status|cancel`. These worker methods are
+private to the broker. The existing engine-control client and shared pinned
+peer-service transport select direct or reverse delivery, without replaying a
+sent mutation. The existing engine-control listener serves POST
+`/v1/model-diagnostic/preview|start|status|cancel`. Preview retains consent
+authority, so preview, start and cancel are management mutations; status is an
+authenticated read and remains readable without a management grant.
+
+The target manager strips the forwarding target and relays
+`engine:diagnostic-request{id,method,caller,params}` to its broker. The pin gate
+supplies the verified caller. The broker checks the exact current manager source
+and worker pair, rechecks the grant at preview/start/cancel acceptance, and binds
+unaccepted consent to that caller and source. The reply goes to that same pair.
+`engine:diagnostic-request-cancel{id}` cancels only its source-scoped waiter.
+Disconnecting the origin never cancels already accepted measurement or cleanup.
+Public replies are projected from the diagnostic contract; tokens, markers and
+private observations cannot become public state.
+
+The origin polls status every two seconds while its diagnostic panel is open.
+Closing it stops polling and leaves the target operation running. The target
+tray discovers peer-started work with the existing active-run lookup, follows
+local pushes and shows **Measuring memory** with **Cancel**. Cancellation always
+addresses the displayed run ID. Reconnection repeats active-run discovery.
+Status and cleanup remain available after Halt or maintenance begins; peer
+cancellation still needs its grant, and the target's local Cancel needs none.
+Remote cancellation nests the target's 200-second join inside the 205-second
+peer wait, the origin's 208-second wait and the desktop's 210-second envelope.
+
+`engine:diagnostic-changed` carries the public run. Private reservation tokens,
+manager markers and native observation envelopes are not forwarded to clients.
+Public clients cannot invoke reserve, release, run, baseline, abort, checkpoint
+or measured-record manager methods directly.
+Private record requests carry the producing run ID and reservation token, with the exact
+configuration or execution key and full requested/realized identity inside the
+measured profile. After recording, drains clear before explicit reservation
+release and settings-lease release. An uncertain release reestablishes drains
+and is reconciled before the remaining ledger resources are released.
+
+Finite consent previews report `plannedPerSlotContext` and `plannedSlots`
+separately from realized allocation, with low/high prompt targets derived from
+the saved finite profile. The manager verifies realized context and slots after
+load. More than eight planned slots are refused before consent and effects.
+Unknown native-fit targets remain unknown until load.
+
+An unsuccessful run is recorded under its authenticated producing identity
+even if files change or post-run inspection becomes unavailable. Such evidence
+may immediately be historical and has no buffer link in that case. Affirmative
+physical-stop proof still precedes record persistence and resource release.
+
+## Process acceptance
+
+`TestModelMemoryDiagnosticProcess` uses synthetic native HTTP and scanner-backed
+memory fixtures with real broker, manager and proxy owners. Its source covers
+configured-pause preservation, Halt refusal, complete storage/overlay, competing
+activation, cancellation, replacement/restart recovery, cleanup transport
+timeout/retry and peer target-only storage. Its Windows runtime acceptance is
+pending on White, through the serialized fixed-path procedure with firewall
+inventory and survivor checks:
+
+```sh
+go test -count=1 -timeout=60m -run '^TestModelMemoryDiagnosticProcess$' .
+go test -race -count=1 -timeout=60m -run '^TestModelMemoryDiagnosticProcess$' .
+go vet ./...
+```
+
+The extended buffer fixture also needs its `^TestModelBufferSamplesProcess`
+regression selectors on White. Source compilation and synthetic focused gates
+do not establish native memory behavior. Real-machine measurement remains
+pending a separately owner-authorized interval.

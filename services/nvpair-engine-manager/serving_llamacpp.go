@@ -1367,15 +1367,27 @@ func stopServingLoadsWithCause(st *engineState, cause error) func() {
 
 func (e *Executor) guardServingLoad(ctx context.Context, st *engineState, action string, params json.RawMessage) (context.Context, func(), error) {
 	noop := func() {}
-	binding, load := st.manifest.operationBinding(engines.OperationLoad)
-	if !load || action != binding.Action {
+	// This also fences other residency-affecting manifest actions. Admission
+	// precedes load registration and the lifecycle wait, so reservation cannot
+	// overtake a load that has not reached opMu yet.
+	if residencyNeutralActions[action] {
 		return ctx, noop, nil
 	}
-	if err := e.activationVeto(st.manifest.Engine); err != nil {
+	done, err := e.admitMutationContext(ctx, st.manifest.Engine)
+	if err != nil {
+		return ctx, noop, err
+	}
+	binding, load := st.manifest.operationBinding(engines.OperationLoad)
+	if !load || action != binding.Action {
+		return ctx, done, nil
+	}
+	if err := e.diagnosticActivationVeto(ctx, st.manifest.Engine); err != nil {
+		done()
 		return ctx, noop, err
 	}
 	reader, err := e.acquireLoadRead(ctx, st, action, params)
 	if err != nil {
+		done()
 		return ctx, noop, err
 	}
 	ctx, cleanup := registerServingLoad(ctx, st)
@@ -1383,10 +1395,15 @@ func (e *Executor) guardServingLoad(ctx context.Context, st *engineState, action
 	if !residentLock(ctx, &st.opMu) {
 		cleanup()
 		reader()
+		done()
 		return ctx, noop, vetoCause(ctx, ctx.Err())
 	}
-	release := sync.OnceFunc(func() { st.opMu.Unlock(); cleanup(); reader() })
-	if err := e.activationVeto(st.manifest.Engine); err != nil {
+	release := sync.OnceFunc(func() { st.opMu.Unlock(); cleanup(); reader(); done() })
+	if err := e.diagnosticMutationAllowed(ctx, st.manifest.Engine); err != nil {
+		release()
+		return ctx, noop, err
+	}
+	if err := e.diagnosticActivationVeto(ctx, st.manifest.Engine); err != nil {
 		release()
 		return ctx, noop, err
 	}
@@ -1421,13 +1438,16 @@ func registerServingLoad(ctx context.Context, st *engineState) (context.Context,
 // Caller already holds opMu, under mutation admission. Share the same stop fence,
 // registry and declaration check without recursively taking the lifecycle lock.
 func (e *Executor) guardServingLoadLocked(ctx context.Context, st *engineState, action string, params json.RawMessage) (context.Context, func(), error) {
+	if err := e.diagnosticMutationAllowed(ctx, st.manifest.Engine); err != nil {
+		return ctx, func() {}, err
+	}
 	reader, err := e.acquireLoadRead(ctx, st, action, params)
 	if err != nil {
 		return ctx, func() {}, err
 	}
 	ctx, cleanup := registerServingLoad(ctx, st)
 	release := sync.OnceFunc(func() { cleanup(); reader() })
-	if err := e.activationVeto(st.manifest.Engine); err != nil {
+	if err := e.diagnosticActivationVeto(ctx, st.manifest.Engine); err != nil {
 		release()
 		return ctx, func() {}, err
 	}

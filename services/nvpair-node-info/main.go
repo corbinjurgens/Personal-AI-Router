@@ -33,6 +33,7 @@ var serviceBuildID = buildinfo.Current()
 
 type GPUInfo struct {
 	Name               string `json:"name"`
+	PhysicalID         string `json:"physicalId,omitempty"`
 	VramBytes          uint64 `json:"vram_bytes,omitempty"`
 	VramUsedBytes      uint64 `json:"vram_used_bytes,omitempty"`
 	UtilizationPercent uint32 `json:"utilization_percent,omitempty"`
@@ -43,7 +44,8 @@ type GPUInfo struct {
 	// form of the adapter's LUID (e.g. "luid_0x00000000_0x000054f0_phys_0");
 	// on Linux it's the NVIDIA GPU UUID reported by nvidia-smi; on macOS it's
 	// the IORegistry entry ID. Empty on hosts with no dynamic GPU source.
-	// Unexported + json:"-" so it never travels over the wire.
+	// The private key is exposed as PhysicalID only after response assembly
+	// matches it to a device alias in the response's physical memory pools.
 	statsKey string `json:"-"`
 
 	// usesSystemMemoryUsage is set by Linux static detection when nvidia-smi
@@ -180,9 +182,17 @@ func buildResponse(gpus []GPUInfo, cpuStatic *CPUInfo, memTotal uint64, snap sta
 }
 
 func buildResponseAt(gpus []GPUInfo, cpuStatic *CPUInfo, memTotal uint64, snap statsSnapshot, hostUUID string, clusterUUID *string, now time.Time) []byte {
+	memory := responseMemory(snap)
+	physicalIDs := gpuPhysicalAliases(memory, gpus, snap.GPUInventory)
 	outGPUs := mergeGPUInventory(gpus, snap.GPUInventory)
 	for i := range outGPUs {
 		gpu := &outGPUs[i]
+		// Re-establish the association from this response's physical pools,
+		// including for idle GPUs. Never retain a caller-supplied association.
+		gpu.PhysicalID = ""
+		if physicalIDs[gpu.statsKey] {
+			gpu.PhysicalID = gpu.statsKey
+		}
 		if gpu.usesSystemMemoryUsage {
 			gpu.VramUsedBytes = snap.MemUsedBytes
 		}
@@ -196,7 +206,7 @@ func buildResponseAt(gpus []GPUInfo, cpuStatic *CPUInfo, memTotal uint64, snap s
 
 	telemetryValid, msSince := telemetryStatus(snap.GPUSampledAt, now)
 	resp := NodeInfoResponse{
-		MemoryObservation: responseMemory(snap),
+		MemoryObservation: memory,
 		ServiceBuildID:    serviceBuildID,
 		GPUs:              outGPUs,
 		TelemetryValid:    telemetryValid,
@@ -217,6 +227,34 @@ func buildResponseAt(gpus []GPUInfo, cpuStatic *CPUInfo, memTotal uint64, snap s
 	}
 	body, _ := json.Marshal(resp)
 	return body
+}
+
+// gpuPhysicalAliases joins only exact observed device aliases from validated
+// response memory. Unknown topology and duplicate inventory keys cannot prove
+// a GPU-to-pool association. A shared pool can identify several GPUs without
+// adding another RAM pool or changing the scalar display capacity.
+func gpuPhysicalAliases(memory *noderec.MemoryObservation, inventories ...[]GPUInfo) map[string]bool {
+	aliases := make(map[string]bool)
+	if memory == nil {
+		return aliases
+	}
+	for _, domain := range memory.Domains {
+		if domain.Kind == "dedicated" || domain.Kind == "shared" {
+			for _, id := range domain.DeviceIDs {
+				aliases[id] = true
+			}
+		}
+	}
+	for _, inventory := range inventories {
+		seen := make(map[string]bool, len(inventory))
+		for _, gpu := range inventory {
+			if seen[gpu.statsKey] {
+				delete(aliases, gpu.statsKey)
+			}
+			seen[gpu.statsKey] = true
+		}
+	}
+	return aliases
 }
 
 func telemetryStatus(sampledAt, now time.Time) (bool, int64) {

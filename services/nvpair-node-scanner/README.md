@@ -213,7 +213,7 @@ peer HTTP still requires independently owned fixture endpoints.
 | `discovery:unregister` | `{service}` | `{ok:true}` — drop a local service |
 | `discovery:update-txt` | `{service, port, txt?}` | `{ok:true}` — same as register with a new TXT |
 | `discovery:get-nodes` | `{service?}` | `{nodes:[DirectoryNode]}` — the directory, optionally filtered to nodes advertising one service |
-| `discovery:get-node-info` | `{hostUuid}` | Fresh full node-info sample for an admitted peer: `GPUs`, optional `cpu`/`memory`, `telemetryValid`, `msSince`, `hostUuid`, and nullable `clusterUuid` |
+| `discovery:get-node-info` | `{hostUuid}` | Fresh full node-info sample for this scanner's registered self or an admitted peer: `GPUs` (including optional `physicalId`), optional `cpu`/`memory`/`memoryObservation`, `serviceBuildId`, `telemetryValid`, `msSince`, `hostUuid`, and nullable `clusterUuid` |
 | `discovery:reload-identity` | — | `{ok:true}` — re-resolve and re-advertise this node's identity |
 | `discovery:reload-trust` | — | `{ok:true}` — re-derive `trusted` on every directory entry from the current pin set |
 | `discovery:set-observed-addresses` | `{addresses}` | `{ok:true}` — the local addresses peers have actually reached this node on, so address selection can rank a peer-proven address above an inferred one |
@@ -221,9 +221,25 @@ peer HTTP still requires independently owned fixture endpoints.
 
 `log/set-level` is also accepted.
 
-`discovery:get-node-info` is a read for paired remote telemetry. The scanner
-resolves the host identity to its current directory endpoint and admitted
-cluster principal; callers cannot supply a URL, port or principal. It uses the
+`discovery:get-node-info` reads fresh local or paired remote node information.
+Callers supply only a host identity, never a URL, port or principal. For this
+scanner's exact stamped host UUID, the local registry owns authority: it must
+have a valid `ni` service registration from the broker. The scanner reads that
+registered port exclusively over `127.0.0.1` using its existing plain HTTP
+client, independently of advertised LAN addresses, directory claims, peer pins
+and operator TLS. Redirects are refused. The full response must identify the
+same host and explicitly report the registered cluster principal (an empty
+string for unclustered self). Unknown or conflicting identity is unavailable.
+
+The registry's local node-info incarnation retires on every `ni` registration,
+including same-port replacement, unregister, or stamped host/principal change.
+Retirement cancels queued and in-flight reads; an already buffered response is
+also rejected. Address changes and unrelated service updates do not retire the
+loopback authority. Directory or mDNS entries, including entries advertising a
+loopback address, cannot establish self authority.
+
+For a remote host the scanner resolves its current directory endpoint and
+admitted cluster principal. It uses the
 shared pinned peer/service adapter for `ni`, preferring direct plain HTTP and
 using plain HTTP inside the authenticated reverse session when direct fails.
 This bodyless GET may retry once over reverse when direct TCP connects but
@@ -232,10 +248,13 @@ contain one JSON value with a clean body end, match the requested host UUID,
 and match the directory principal if `clusterUuid` is non-null. Authority is
 checked again before success.
 
-The fresh read has a 1500 ms backend budget covering queue wait, address
-attempts and HTTP/body work. It does not return the last-good enrichment cache
-or compact scheduling telemetry. Invalid params yield `-32602`; missing
-directory/admission/pin, unavailable transport, timeout or an invalid sample yields
+Both reads have a 1500 ms backend budget covering queue wait, address
+attempts and HTTP/body work. Neither returns the last-good enrichment cache
+or compact scheduling telemetry. Full GPU rows, including observed physical
+aliases, and the memory observation pass through without reconstruction.
+Invalid params yield `-32602`; missing local registration or remote
+directory/admission/pin, retired authority, unavailable transport, timeout or an
+invalid sample yields
 `-32000` (`node information unavailable`) without a successful result or a
 membership change. Recovery fetches a new sample through the same adapter.
 There is no unpaired or operator-TLS fallback for a failed paired getter.

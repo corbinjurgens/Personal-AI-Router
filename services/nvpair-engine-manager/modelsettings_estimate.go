@@ -42,6 +42,9 @@ type modelEstimateInput struct {
 	BuildID, Support string
 	Memory           *modelEstimateMemory
 	SWAFull          *bool
+	// Fresh full identity supplied by inspection, never inferred from Current.
+	// This advisory overlay input is deliberately outside the estimator cache key.
+	DiagnosticIdentity *modelconfig.DiagnosticIdentity
 }
 
 func modelEstimateBindings(bindings []modelconfig.ArtifactBinding) []modelconfig.ArtifactSummary {
@@ -312,9 +315,24 @@ func modelEstimateObservedCPUWeights(base modelconfig.Estimate, in modelEstimate
 }
 
 func modelEstimateStated(result *modelconfig.InspectResult, in modelEstimateInput, now time.Time) {
-	if result.Engine != "llamacpp" || result.ConfigurationKey == "" || result.ConfigurationKeyReason != "" || result.MemoryProfilesUnavailable || in.Allocation == nil || modelLoadUnpriced(in.Allocation.Options) {
+	if result.Engine != "llamacpp" || result.ConfigurationKey == "" || result.ExecutionKey != "" || result.ConfigurationKeyReason != "" || result.MemoryProfilesUnavailable || in.Allocation == nil || modelLoadUnpriced(in.Allocation.Options) {
 		return
 	}
+	measured, warnings := modelEstimateMeasuredProfile(result, in)
+	defer func() {
+		if len(warnings) == 0 {
+			return
+		}
+		candidate := result.Clone()
+		for _, warning := range warnings {
+			if !slices.Contains(candidate.Estimate.Unknowns, warning) {
+				candidate.Estimate.Unknowns = append(candidate.Estimate.Unknowns, warning)
+			}
+		}
+		if candidate.Validate() == nil {
+			*result = candidate
+		}
+	}()
 	var profile *modelconfig.MemoryProfile
 	for i := range result.MemoryProfiles {
 		p := &result.MemoryProfiles[i]
@@ -324,7 +342,10 @@ func modelEstimateStated(result *modelconfig.InspectResult, in modelEstimateInpu
 		}
 	}
 	if profile == nil {
-		return
+		profile = measured
+		if profile == nil {
+			return
+		}
 	}
 	candidate := result.Clone()
 	base := candidate.Estimate
@@ -353,6 +374,15 @@ func modelEstimateStated(result *modelconfig.InspectResult, in modelEstimateInpu
 		out.Domains = append(out.Domains, d)
 	}
 	modelEstimateDomains(&out, in, now)
+	if profile.Kind == "measured" {
+		const sampling = "sampled pool delta every ~2 s; unrelated programs may affect it and short peaks may be missed; upper bound unknown"
+		out.Status, out.Source = "partial", "pair-diagnostic"
+		out.EstimateSource = &modelconfig.EstimateSource{
+			Kind: "measured", Provider: "pair-diagnostic", Revision: profile.Measured.RunID,
+			Basis: "measured by sampling every ~2 s", UnpricedCosts: []string{sampling},
+		}
+		out.Unknowns = append(out.Unknowns, sampling)
+	}
 	shared := slices.Equal(result.ConfigurationPools, []string{"shared"})
 	if len(out.Domains) != len(result.ConfigurationPools) {
 		return
@@ -369,6 +399,14 @@ func modelEstimateStated(result *modelconfig.InspectResult, in modelEstimateInpu
 			return
 		}
 		d.RequiredBytes, d.RequiredLowBytes, d.RequiredHighBytes = value, value, value
+		if profile.Kind == "measured" {
+			// The pool projection must describe the measured physical placement.
+			if !slices.Contains(profile.Measured.Placement, modelconfig.DiagnosticPlacement{DomainID: d.ID, Kind: d.Kind, DeviceID: d.DeviceID}) {
+				warnings = append(warnings, "measured run did not cover "+d.Kind)
+				return
+			}
+			d.RequiredHighBytes = ""
+		}
 	}
 	if !shared {
 		out.HostBytes, out.DeviceBytes = profile.HostBytes, profile.DeviceBytes
@@ -399,6 +437,74 @@ func modelEstimateStated(result *modelconfig.InspectResult, in modelEstimateInpu
 	if candidate.Validate() == nil {
 		*result = candidate
 	}
+}
+
+// Selection reuses the full-identity eligibility owner. Current and CoversPools
+// alone cannot establish hardware, build, artifact or realized-load currentness.
+func modelEstimateMeasuredProfile(result *modelconfig.InspectResult, in modelEstimateInput) (*modelconfig.MemoryProfile, []string) {
+	var selected *modelconfig.MemoryProfile
+	var warnings []string
+	current := in.DiagnosticIdentity
+	identityAvailable := current != nil && current.ConfigurationKey == result.ConfigurationKey && current.ExecutionKey == "" &&
+		current.NativeBuildID == result.NativeBuildID && current.NativeBuildID == in.BuildID && slices.Equal(current.Artifacts, result.Artifacts)
+	for i := range result.MemoryProfiles {
+		p := &result.MemoryProfiles[i]
+		if p.Kind != "measured" || p.ExecutionKey != "" || p.Validate() != nil {
+			continue
+		}
+		m := p.Measured
+		if p.NativeBuildID != in.BuildID {
+			// Earlier builds remain labelled history. Keeping the base comparison
+			// also prevents historical evidence from lifting its current warnings.
+			warnings = append(warnings, m.BuildLabel(in.BuildID)+"; not current validation")
+			continue
+		}
+		if !identityAvailable || !m.Matches(*current) {
+			continue
+		}
+		if m.Outcome != "completed" {
+			warnings = append(warnings, "measured run failed at "+m.FailedPhase+": "+m.Reason)
+			continue
+		}
+		if p.OverlayEligible(*current, result.ConfigurationPools) {
+			if selected == nil {
+				selected = p
+			}
+			continue
+		}
+		poolMissing := false
+		for _, kind := range result.ConfigurationPools {
+			covered := false
+			for _, pool := range m.Pools {
+				if pool.Kind == kind && pool.PeakUsedBytes != "" && pool.BaselineAvailableBytes != "" && pool.AfterLoadAvailableBytes != "" && pool.LowMinAvailableBytes != "" && pool.HighMinAvailableBytes != "" && pool.Samples > 0 {
+					covered = true
+				}
+			}
+			if !covered {
+				warnings = append(warnings, "measured run did not cover "+kind)
+				poolMissing = true
+			}
+		}
+		if !poolMissing {
+			reason := m.Reason
+			if reason == "" {
+				switch {
+				case m.High == nil:
+					reason = "high phase unavailable"
+				case m.High.Coverage != "complete":
+					reason = "high phase coverage partial"
+				case m.High.Overlapped == nil || !*m.High.Overlapped:
+					reason = "full-context requests did not overlap"
+				case m.High.OverlapWindowSampled == nil || !*m.High.OverlapWindowSampled:
+					reason = "overlap window not sampled"
+				default:
+					reason = "prompt targets, cache reuse or full-context request timings not verified"
+				}
+			}
+			warnings = append(warnings, "measured run did not fill the context ("+reason+")")
+		}
+	}
+	return selected, warnings
 }
 
 // Detach string backing storage too; a bounded substring must not retain a

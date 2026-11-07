@@ -27,6 +27,15 @@ import {
     parseInspectModel
 } from './engine-settings'
 import {
+    DIAGNOSTIC_CANCEL_TIMEOUT_MS,
+    diagnosticPreviewParams,
+    diagnosticStartParams,
+    diagnosticRunParams,
+    parseDiagnosticPreview,
+    parseDiagnosticRun,
+    parseDiagnosticStatus
+} from './model-diagnostic'
+import {
     nodeTargetParams,
     parseAvailabilityResult,
     parseCancelResult,
@@ -871,6 +880,65 @@ const EMPTY_SERVICE_BRIDGE_HANDLERS: BridgeHandlerMap = {
                 (payload.nodeId && result.nodeId !== payload.nodeId))
         )
             throw new Error('Memory profile target identity mismatch.')
+        return result
+    },
+    'engines:diagnostic-preview': async payload => {
+        const params = diagnosticPreviewParams(payload ? { ...payload } : undefined)
+        const result = parseDiagnosticPreview(
+            await getModularSupervisor().callProcess('broker', 'engine:diagnostic-preview', params)
+        )
+        if (
+            result.engine !== params.engine ||
+            result.modelId !== params.modelId ||
+            result.profileKey !== params.profileKey ||
+            (params.nodeId && result.nodeId !== params.nodeId)
+        )
+            throw new Error('Diagnostic preview target identity mismatch.')
+        return result
+    },
+    'engines:diagnostic-start': async payload => {
+        const params = diagnosticStartParams(payload ? { ...payload } : undefined)
+        const result = parseDiagnosticRun(
+            await getModularSupervisor().callProcess('broker', 'engine:diagnostic-start', params)
+        )
+        if (
+            result.engine !== params.engine ||
+            result.modelId !== params.modelId ||
+            result.profileKey !== params.profileKey ||
+            (params.nodeId && result.nodeId && result.nodeId !== params.nodeId)
+        )
+            throw new Error('Diagnostic start target identity mismatch.')
+        return result
+    },
+    'engines:diagnostic-status': async payload => {
+        const params = diagnosticRunParams(payload ? { ...payload } : {})
+        const result = parseDiagnosticStatus(
+            await getModularSupervisor().callProcess('broker', 'engine:diagnostic-status', params)
+        )
+        if (
+            result &&
+            ((params.runId && result.runId !== params.runId) ||
+                (params.nodeId && result.nodeId && result.nodeId !== params.nodeId))
+        )
+            throw new Error('Diagnostic status run identity mismatch.')
+        return result
+    },
+    'engines:diagnostic-cancel': async payload => {
+        const params = diagnosticRunParams(payload ? { ...payload } : undefined, true)
+        const result = parseDiagnosticStatus(
+            await getModularSupervisor().callProcess(
+                'broker',
+                'engine:diagnostic-cancel',
+                params,
+                DIAGNOSTIC_CANCEL_TIMEOUT_MS
+            )
+        )
+        if (
+            result &&
+            (result.runId !== params.runId ||
+                (params.nodeId && result.nodeId && result.nodeId !== params.nodeId))
+        )
+            throw new Error('Diagnostic cancel run identity mismatch.')
         return result
     },
     'engines:preview-settings': async payload =>

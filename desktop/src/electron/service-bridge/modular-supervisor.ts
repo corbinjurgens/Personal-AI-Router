@@ -43,6 +43,7 @@ import {
 } from './proxy-engines'
 import { emitBridgePush } from './broadcaster'
 import { parseEngineSettings } from './engine-settings'
+import { parseDiagnosticRun } from './model-diagnostic'
 import { parseEngineDescriptors } from './engine-descriptors'
 import { parseActiveModelCopies, parseModelCopyResult } from './model-copy'
 import type {
@@ -1470,6 +1471,17 @@ class ModularSupervisor {
     }
 
     private handleNotification(notification: JsonRpcNotification): void {
+        if (notification.method === 'engine:diagnostic-changed') {
+            try {
+                emitBridgePush(
+                    'engines:diagnostic-changed',
+                    parseDiagnosticRun(notification.params)
+                )
+            } catch {
+                // Private manager frames and malformed public runs never reach clients or logs.
+            }
+            return
+        }
         if (notification.method === 'service/build-apply-changed') {
             try {
                 dispatchBuildApplyChanged(notification.params)

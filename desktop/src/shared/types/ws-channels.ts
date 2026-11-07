@@ -49,6 +49,13 @@ import type {
     SetStatedMemoryRequest,
     ClearStatedMemoryRequest
 } from '@/shared/types/model-config'
+import type {
+    DiagnosticPreviewRequest,
+    DiagnosticPreview,
+    DiagnosticStartRequest,
+    DiagnosticRun,
+    DiagnosticRunRef
+} from '@/shared/types/model-diagnostic'
 import type { AppInitialSnapshot, ClusterInitialSnapshot } from '@/shared/types/bootstrap'
 import type { ServiceError } from '@/shared/types/errors'
 import type { NodeItem } from '@/shared/types/nodes'
@@ -163,6 +170,13 @@ export interface WsInvokeChannelMap {
     'engines:get-initial': { request: void; response: EngineInitialState }
     'engines:get-settings': { request: EngineSettingsTarget; response: EngineSettingsSnapshot }
     'engines:inspect-model': { request: InspectModelRequest; response: InspectModelResult }
+    'engines:diagnostic-preview': { request: DiagnosticPreviewRequest; response: DiagnosticPreview }
+    'engines:diagnostic-start': { request: DiagnosticStartRequest; response: DiagnosticRun }
+    'engines:diagnostic-status': {
+        request: Partial<DiagnosticRunRef>
+        response: DiagnosticRun | null
+    }
+    'engines:diagnostic-cancel': { request: DiagnosticRunRef; response: DiagnosticRun | null }
     'engines:set-stated-memory': { request: SetStatedMemoryRequest; response: InspectModelResult }
     'engines:clear-stated-memory': {
         request: ClearStatedMemoryRequest
@@ -237,6 +251,7 @@ export interface WsPushChannelMap {
     // Engines
     'engines:state-changed': EngineStatePatch
     'engines:settings-changed': EngineSettingsSnapshot
+    'engines:diagnostic-changed': DiagnosticRun
     'engines:settings-disconnected': { nodeId: string }
     'engines:progress-changed': EngineProgress
     'engines:progress-cleared': { key: string }
