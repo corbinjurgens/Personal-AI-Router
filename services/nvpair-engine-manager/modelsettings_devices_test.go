@@ -376,6 +376,66 @@ func TestModelSettingsDevicesEnvironmentSemantics(t *testing.T) {
 	}
 }
 
+func TestModelSettingsDevicesCommandPseudoEnvironment(t *testing.T) {
+	base := []string{"CUDA_DEVICE_ORDER=PCI_BUS_ID"}
+	withPseudo := append(append([]string{}, base...), `=C:=C:\work`, "=ExitCode=00000000")
+	filtered := modelEnvironment(withPseudo)
+	if runtime.GOOS != "windows" {
+		if !reflect.DeepEqual(filtered, withPseudo) {
+			t.Fatalf("non-Windows environment changed: %v", filtered)
+		}
+		if _, err := modelDeviceEnvironment(withPseudo, ""); err == nil {
+			t.Fatal("non-Windows pseudo-environment accepted")
+		}
+		return
+	}
+	if !reflect.DeepEqual(filtered, base) {
+		t.Fatalf("filtered environment = %v, want %v", filtered, base)
+	}
+	op := modelDevicesFixtureOperation(t)
+	before := mapModelSettingsDevices(context.Background(), op, modelDevicesFixtureRunner)
+	op.Environment = withPseudo
+	after := mapModelSettingsDevices(context.Background(), op, modelDevicesFixtureRunner)
+	if before.Unknown != "" || after.Unknown != "" || before.Binding == nil || after.Binding == nil {
+		t.Fatalf("mapping before = %+v, after = %+v", before, after)
+	}
+	if !reflect.DeepEqual(before.Binding, after.Binding) {
+		t.Fatalf("pseudo-environment changed binding or digest: before = %+v, after = %+v", before.Binding, after.Binding)
+	}
+	if replay, err := modelDeviceEnvironment(after.Binding.Environment, modelDevicesFixtureUUID); err != nil || !reflect.DeepEqual(replay, before.Binding.Environment) {
+		t.Fatalf("replayed environment = %v, error = %v", replay, err)
+	}
+	// Also exercise the inherited merge when this test is launched by cmd.exe.
+	if _, err := modelDeviceEnvironment(modelEffectiveEnvironment(nil), ""); err != nil {
+		t.Fatalf("inherited effective environment rejected: %v", err)
+	}
+}
+
+func TestModelSettingsDevicesMalformedEnvironmentRefused(t *testing.T) {
+	test := func(name, assignment string) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			if _, err := modelDeviceEnvironment([]string{assignment}, ""); err == nil || err.Error() != "invalid device environment" {
+				t.Fatalf("malformed environment error = %v", err)
+			}
+		})
+	}
+	test("empty entry", "")
+	test("missing assignment", "CUDA_DEVICE_ORDER")
+	test("empty name", "=value")
+	test("empty name and value", "=")
+	test("empty pseudo name", "==value")
+	test("NUL in name", "CUDA_\x00ORDER=value")
+	test("NUL in value", "CUDA_DEVICE_ORDER=bad\x00value")
+	test("CR in name", "CUDA_\rORDER=value")
+	test("CR in value", "CUDA_DEVICE_ORDER=bad\rvalue")
+	test("LF in name", "CUDA_\nORDER=value")
+	test("LF in value", "CUDA_DEVICE_ORDER=bad\nvalue")
+	test("NUL in pseudo entry", "=C:=bad\x00value")
+	test("CR in pseudo entry", "=C:=bad\rvalue")
+	test("LF in pseudo entry", "=ExitCode=bad\nvalue")
+}
+
 func TestModelSettingsDevicesIndependentHelperDeadline(t *testing.T) {
 	exe, err := os.Executable()
 	if err != nil {

@@ -24,14 +24,13 @@ import (
 	"nvpair-shared/engines"
 	"nvpair-shared/modelconfig"
 	"nvpair-shared/nodepolicy"
-	"nvpair-shared/secretenv"
 )
 
-// Merge before filtering, matching exec's last-assignment semantics while
-// supplying the metadata helper a unique, canonical effective environment.
+// Remove pseudo-variables before merging, match exec's last-assignment
+// semantics, then filter again so overrides cannot reintroduce provider secrets.
 func modelEffectiveEnvironment(overrides map[string]string) []string {
 	values := map[string]string{}
-	for _, assignment := range os.Environ() {
+	for _, assignment := range modelEnvironment(os.Environ()) {
 		k, v, ok := strings.Cut(assignment, "=")
 		if ok {
 			values[environmentKey(k)] = v
@@ -40,7 +39,7 @@ func modelEffectiveEnvironment(overrides map[string]string) []string {
 	for k, v := range overrides {
 		values[environmentKey(k)] = v
 	}
-	return secretenv.Remove(literalAssignments(values))
+	return modelEnvironment(literalAssignments(values))
 }
 
 func modelNativeEnvironment(root string, overrides map[string]string) ([]string, error) {
