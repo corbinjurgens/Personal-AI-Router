@@ -127,3 +127,24 @@ Peer summaries are accepted only through the admitted-peer trust boundary;
 admission establishes the source identity, not the honesty or comparability of
 its benchmark claims. No prompts, response bodies or pairing secrets are shown
 in this section.
+
+## Memory observations for model estimates
+
+Memory observations are separate from inference performance samples. Node-info
+owns the measurement; the scanner forwards it to the broker's existing telemetry
+cache. Inspection and settings preview receive only that target broker's local
+observation, including when a pinned peer makes the request. Public requests
+cannot supply trusted capacity, timestamps, device maps or resolved allocations.
+
+Total and available bytes have independent sources, collection timestamps and
+ages. Every transport hop and local elapsed interval counts toward the five
+second freshness limit. Missing, expired, removed or replaced observations do
+not retain a positive comparison. Zero available bytes is a known value.
+
+UMA has one shared physical pool. Dedicated GPUs have separate pools identified
+by physical aliases; equal display names and array ordering never establish
+placement. Several dedicated GPUs leave reviewed Auto unavailable. GPU-selection
+extra options remain accepted as unpriced placement, with an Unknown estimate.
+Process fixtures test propagation and refusal boundaries, not native allocation
+accuracy. Accepted production Auto resolution and recovery remain pending the
+complete-cost implementation; telemetry alone does not enable them.
