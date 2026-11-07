@@ -352,7 +352,7 @@ func newNEServingFixture(t *testing.T) *neServingFixture {
 	// Hold fake/facade/scanner reservations while allocating the service plan.
 	var reservations []net.Listener
 	for range 3 {
-		listener := listenFixtureLoopback(t)
+		listener := listenFixtureServicePort(t)
 		reservations = append(reservations, listener)
 		defer func() {
 			if err := listener.Close(); err != nil {

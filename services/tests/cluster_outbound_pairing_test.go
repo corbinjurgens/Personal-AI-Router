@@ -32,12 +32,7 @@ type blockedPairingFixture struct {
 
 func temporaryClusterPort(t *testing.T) int {
 	t.Helper()
-	ln := listenFixtureLoopback(t)
-	port := ln.Addr().(*net.TCPAddr).Port
-	if err := ln.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return port
+	return freePort(t)
 }
 
 func assertClusterListenerRejects(t *testing.T, port int) {

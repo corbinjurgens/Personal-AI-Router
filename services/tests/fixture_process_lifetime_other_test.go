@@ -24,21 +24,27 @@ type fixtureProcessLifetime struct {
 func retainFixtureProcessLifetime(expected serviceProcessIdentity) (*fixtureProcessLifetime, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	current, err := serviceProcessIdentityAt(ctx, expected.PID)
+	return retainFixtureProcessLifetimeWithProbes(expected,
+		func() (serviceProcessIdentity, error) { return serviceProcessIdentityAt(ctx, expected.PID) },
+		func() (bool, error) { return fixtureProcessIdentityStopped(ctx, expected) })
+}
+
+func retainFixtureProcessLifetimeWithProbes(expected serviceProcessIdentity, identify func() (serviceProcessIdentity, error), stopped func() (bool, error)) (*fixtureProcessLifetime, error) {
+	current, err := identify()
 	if err != nil {
 		return nil, err
 	}
 	if current != expected {
 		return nil, errors.New("fixture lifetime identity mismatch")
 	}
-	stopped, err := fixtureProcessIdentityStopped(ctx, expected)
+	exited, err := stopped()
 	if err != nil {
 		return nil, err
 	}
-	if stopped {
-		return nil, errors.New("fixture lifetime was not alive at capture")
-	}
-	return &fixtureProcessLifetime{expected: expected}, nil
+	// A short-lived engine can exit after its exact identity was observed but
+	// before capture completes, including while a resumed fixture is torn down.
+	// Positive departure evidence already proves this matched lifetime ended.
+	return &fixtureProcessLifetime{expected: expected, exited: exited, closed: exited}, nil
 }
 
 func (p *fixtureProcessLifetime) close() error {
@@ -112,4 +118,28 @@ func TestFixtureProcessLifetime(t *testing.T) {
 			t.Fatal("released live lifetime became exit proof")
 		}
 	})
+}
+
+func TestFixtureProcessLifetimeExitDuringCapture(t *testing.T) {
+	expected := serviceProcessIdentity{PID: 123, Path: "fixture-engine", Created: 456}
+	proof, err := retainFixtureProcessLifetimeWithProbes(expected,
+		func() (serviceProcessIdentity, error) { return expected, nil },
+		func() (bool, error) { return true, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exited, err := proof.wait(time.Millisecond); err != nil || !exited {
+		t.Fatalf("matched process departed during capture: exited=%t error=%v", exited, err)
+	}
+}
+
+func TestFixtureProcessLifetimeCaptureRefusesUnprovenExit(t *testing.T) {
+	expected := serviceProcessIdentity{PID: 123, Path: "fixture-engine", Created: 456}
+	inspectionErr := errors.New("process status unavailable")
+	proof, err := retainFixtureProcessLifetimeWithProbes(expected,
+		func() (serviceProcessIdentity, error) { return expected, nil },
+		func() (bool, error) { return false, inspectionErr })
+	if proof != nil || !errors.Is(err, inspectionErr) {
+		t.Fatalf("unproven exit acquired a lifetime: proof=%v error=%v", proof, err)
+	}
 }

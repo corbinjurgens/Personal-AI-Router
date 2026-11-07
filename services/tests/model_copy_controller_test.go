@@ -379,7 +379,7 @@ func newControllerCopyFixture(t *testing.T, descriptorEngines ...string) *contro
 		}
 	}()
 	allocate := func() int {
-		ln := listenFixtureLoopback(t)
+		ln := listenFixtureServicePort(t)
 		reservations = append(reservations, ln)
 		port := ln.Addr().(*net.TCPAddr).Port
 		f.ports = append(f.ports, port)
@@ -550,12 +550,7 @@ func newControllerCopyFixture(t *testing.T, descriptorEngines ...string) *contro
 
 func allocatePrivateCopyPort(t *testing.T) int {
 	t.Helper()
-	ln := listenFixtureLoopback(t)
-	port := ln.Addr().(*net.TCPAddr).Port
-	if err := ln.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return port
+	return freePort(t)
 }
 
 func (f *controllerCopyFixture) cloneTargetAuthority(t *testing.T) string {
