@@ -107,14 +107,14 @@ func TestRoutingHistoryProductionChain(t *testing.T) {
 	}
 	var run nodepolicy.RoutingRequestKey
 	for _, route := range []struct {
-		name, body string
-		port       int
-		hybrid     bool
-		model      string
+		name, body       string
+		port             int
+		hybrid           bool
+		requested, model string
 	}{
-		{"hybrid listener", string(i7HybridBody()), listener, true, egressProcessModel},
-		{"concrete facade", string(i7BuffersBody(128)), f.port, false, egressProcessModel},
-		{"model-less facade", `{"messages":[],"stream":true}`, f.port, false, ""},
+		{"hybrid listener", string(i7HybridBody()), listener, true, "weak:local", egressProcessModel},
+		{"concrete facade", string(i7BuffersBody(128)), f.port, false, egressProcessModel, egressProcessModel},
+		{"role facade", `{"model":"weak","messages":[],"stream":true}`, f.port, false, "weak", egressProcessModel},
 	} {
 		t.Run(route.name, func(t *testing.T) {
 			slot := upstream.slot(t, route.name)
@@ -142,8 +142,8 @@ func TestRoutingHistoryProductionChain(t *testing.T) {
 				t.Fatalf("destination strict request=%+v, history owner=%+v", slot.strict.Request, key)
 			}
 			open := row(t, a, key, func(r nodepolicy.RoutingHistoryRecord) bool { return r.EndedAt == nil && len(r.Attempts) == 1 })
-			if open.Requested.Model != route.model && !route.hybrid {
-				t.Fatalf("requested model=%q, want %q", open.Requested.Model, route.model)
+			if open.Requested.Model != route.requested {
+				t.Fatalf("requested model=%q, want %q", open.Requested.Model, route.requested)
 			}
 			slot.release()
 			i7BuffersCompletedStream(t, request)
@@ -164,25 +164,12 @@ func TestRoutingHistoryProductionChain(t *testing.T) {
 					if destination.Kind != "local" || destination.NodeID == nil || *destination.NodeID != "i7-synthetic-node" || destination.Engine == nil || *destination.Engine != "llamacpp" || !reflect.DeepEqual(delivered.Served, &destination) {
 						t.Fatalf("history lost its actual delivered destination: %+v", delivered)
 					}
-					if route.model == "" {
-						if destination.Model != nil || delivered.Workload != nil {
-							t.Fatalf("model-less delivery invented a model or workload: %+v", delivered)
-						}
-					} else if destination.Model == nil || *destination.Model != route.model {
+					if destination.Model == nil || *destination.Model != route.model {
 						t.Fatalf("concrete destination model=%v, want %q", destination.Model, route.model)
 					}
 				}
 				if changed.CreatedAt != completed.CreatedAt || changed.State != completed.State {
 					t.Fatalf("initial/push differ across the real relay: initial=%+v changed=%+v", completed, changed)
-				}
-				if route.model == "" {
-					// This is the same nullable local destination consumed by the
-					// production desktop IPC and TUI history-factory regressions.
-					data, err := json.Marshal(changed)
-					if err != nil {
-						t.Fatal(err)
-					}
-					t.Logf("production_model_less_record=%s", data)
 				}
 			}
 		})

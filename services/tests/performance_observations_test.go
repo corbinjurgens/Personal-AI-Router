@@ -75,12 +75,26 @@ func observationDescriptor(engine string) engines.Descriptor {
 	return engines.Descriptor{Version: engines.DescriptorVersion, Engine: engine, Family: engine, Label: "Synthetic observation engine", Platforms: []string{runtime.GOOS + "/" + runtime.GOARCH}, Available: true, Protocols: []string{engines.ProtocolOpenAIChat}, ModelNaming: "exact", Operations: map[string]engines.OperationCapability{}}
 }
 
+func observationPolicy(engine string) nodepolicy.Policy {
+	policy := nodepolicy.Default()
+	// Use the synthetic engine's served ID as its explicit profile key, keeping
+	// the identity and measurement assertions on that same served ID.
+	policy.Profiles = []nodepolicy.Profile{{Key: observationModel, DisplayName: "Observation fixture", Engine: engine, Model: observationModel}}
+	return policy
+}
+
 func observationStartProxy(t *testing.T, base, cluster, host, engine, upstream string) *observationProxy {
 	t.Helper()
 	p := &observationProxy{rpc: startTask1Process(t, base, proxyBin, "--cluster-dir", cluster), port: observationPort(t), engine: engine, host: host}
-	bindProxyFixtureIdentity(t, host, func(method string, params any) jsonrpc.Message {
-		return p.rpc.call(t, method, params)
-	})
+	policy := observationPolicy(engine)
+	response := p.rpc.call(t, nodepolicy.MethodSetPolicy, nodepolicy.SetPolicyParams{OriginNodeID: host, Policy: policy})
+	var ack nodepolicy.PolicyAck
+	if err := json.Unmarshal(response.Result, &ack); err != nil {
+		t.Fatalf("decode observation proxy policy acknowledgement: %v", err)
+	}
+	if ack.OriginNodeID != host || ack.Revision != policy.Revision {
+		t.Fatalf("observation proxy policy acknowledgement=%+v, want origin=%q revision=%q", ack, host, policy.Revision)
+	}
 	params := map[string]any{"engine": engine, "port": p.port, "ignorePersistedPort": true}
 	if engine == "strata" {
 		params["descriptor"] = observationDescriptor(engine)
@@ -107,7 +121,8 @@ func (p *observationProxy) directory() noderec.DirectoryNode {
 	if p.engine == "strata" {
 		service = noderec.ServiceKey("e-strata")
 	}
-	return noderec.DirectoryNode{HostUUID: p.host, ClusterUUID: p.host, IP: "127.0.0.1", Trusted: true, Services: map[noderec.ServiceKey]noderec.ServiceStatus{service: {Port: p.port}}, ModelsByEngine: map[string][]string{p.engine: {observationModel}}}
+	advertisement := observationPolicy(p.engine).Advertisement()
+	return noderec.DirectoryNode{HostUUID: p.host, ClusterUUID: p.host, IP: "127.0.0.1", Trusted: true, Services: map[noderec.ServiceKey]noderec.ServiceStatus{service: {Port: p.port}}, ModelsByEngine: map[string][]string{p.engine: {observationModel}}, Policy: &advertisement}
 }
 
 func (p *observationProxy) backend(t *testing.T, upstream string) {
@@ -858,6 +873,7 @@ func observationBrokerFixture(t *testing.T, upstream string) (*observationBroker
 	const host = "observation-broker-b"
 	task1WriteJSON(t, filepath.Join(cluster, "identity.json"), map[string]any{"node_uuid": host})
 	task1WriteJSON(t, filepath.Join(cluster, "admission.json"), map[string]any{"counter": 1, "activated": 1, "clusterId": task1ClusterID, "epoch": 1})
+	jointWriteJSON(t, filepath.Join(jointAppDir(base), nodepolicy.FileName), observationPolicy("llamacpp"))
 	return observationStartBroker(t, base, cluster, host, upstream)
 }
 
@@ -1011,6 +1027,7 @@ func TestPerformanceObservationBrokerPersistenceAndPublication(t *testing.T) {
 	// Publication requires the admitted certificate principal, not just node metadata.
 	clustertrusttest.WriteKeypair(t, cluster, host)
 	task1WriteJSON(t, filepath.Join(cluster, "admission.json"), map[string]any{"counter": 1, "activated": 1, "clusterId": task1ClusterID, "epoch": 1})
+	jointWriteJSON(t, filepath.Join(jointAppDir(base), nodepolicy.FileName), observationPolicy("llamacpp"))
 	upstream := observationUpstream(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		if _, err := io.WriteString(w, "data: "+observationLlamaFinal+"\n\ndata: [DONE]\n\n"); err != nil {

@@ -104,11 +104,12 @@ func TestWorkloadDepartedRunRetired(t *testing.T) {
 	})
 
 	t.Run("PeerHearsFailed", func(t *testing.T) {
-		// Like the workload-manager restart neighbours, this needs working mDNS
-		// and a cross-pinned joined cluster, outside the network sandbox.
+		// Supply the cross-pinned peer through the same synthetic scanner as
+		// the inference profile; that scanner does not browse mDNS records.
 		cluster := newInterNodeCluster(t)
-		received := cluster.startStubClusterPeer(t, "departed-run-peer", "departed-run-peer-uuid")
-		f := startDepartedRunFixture(t, cluster.nodeDir, fixtureMDNSBrokerArgs(cluster.namespace)...)
+		received, peerPort := cluster.startDirectClusterPeer(t)
+		f := startDepartedRunFixture(t, cluster.nodeDir)
+		publishWorkloadNode(t, f.scannerPort, workloadPeerNode(cluster, "departed-run-peer-uuid", peerPort))
 		pid := mustPid(t, waitForStderr(t, f.proxyLines, proxyPidRe, 10*time.Second))
 		request := f.startRequest(t)
 		running := waitDepartedRunFrame(t, f.events, "workloads:upsert", 15*time.Second, func(p departedRunParams) bool {
@@ -434,9 +435,7 @@ func (f *departedRunFixture) selectEngine(t *testing.T) {
 		Policy: &nodepolicy.Advertisement{Revision: "1", Profiles: []nodepolicy.AdvertisedProfile{
 			{Key: "departed-run-model", DisplayName: "Departed run fixture", Engine: "llamacpp", Model: "departed-run-model"},
 		}}}
-	frame := jsonrpc.Message{JSONRPC: "2.0", Method: noderec.NotifyNodeDiscovered,
-		Params: egressProcessJSON(t, noderec.NodeEvent{Node: node})}
-	egressProcessHTTP(t, egressProcessHTTPClient(t), http.MethodPost, f.scannerPort, "/", egressProcessJSON(t, frame), http.StatusOK)
+	publishWorkloadNode(t, f.scannerPort, node)
 	neEventually(t, "departed-run profile directory entry reaches proxy", 10*time.Second, func() bool {
 		reply := f.call(t, "llamacpp-proxy:nodes/list", `{}`)
 		egressProcessOK(t, reply)

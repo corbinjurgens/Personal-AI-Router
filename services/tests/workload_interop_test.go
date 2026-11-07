@@ -929,16 +929,10 @@ func captureWorkloadBroadcast(t *testing.T) []json.RawMessage {
 	t.Logf("fixture_inventory owned=%+v", owned)
 	t.Logf("proxy ready on port %d", proxyPort)
 
-	// Register the fake llama.cpp as a manual node and pin it as the target so
-	// the proxy forwards there deterministically.
-	writeRawFrame(t, stdin, fmt.Sprintf(`{"jsonrpc":"2.0","id":50,"method":"llamacpp-proxy:node/add-manual","params":{"id":%q,"host":"127.0.0.1","port":%d,"addresses":["127.0.0.1"],"models":[%q,%q]}}`, workloadBroadcastNode, llamacppPort, workloadBroadcastModel, workloadBroadcastReadyModel))
-	if reply := waitForResponse(t, msgs, 5*time.Second); reply.Error != nil {
-		t.Fatalf("add manual upstream: %+v", reply.Error)
-	}
-	writeRawFrame(t, stdin, fmt.Sprintf(`{"jsonrpc":"2.0","id":51,"method":"llamacpp-proxy:node/select","params":{"id":%q}}`, workloadBroadcastNode))
-	if reply := waitForResponse(t, msgs, 5*time.Second); reply.Error != nil {
-		t.Fatalf("select upstream: %+v", reply.Error)
-	}
+	// Advertise the measured and readiness profiles through the owned scanner,
+	// then retain the private manual transport and deterministic target.
+	call := workloadBrokerCaller(stdin, msgs)
+	addWorkloadInferenceNode(t, call, scannerPort, "llamacpp", workloadBroadcastNode, llamacppPort, workloadBroadcastModel, workloadBroadcastReadyModel)
 	t.Log("fake llamacpp pinned as proxy target")
 
 	// A completed warmup is the discovery/delivery barrier. All frames,

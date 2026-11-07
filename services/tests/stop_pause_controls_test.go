@@ -314,6 +314,13 @@ type stopPauseServiceFixture struct {
 	nodeID  string
 }
 
+func stopPausePolicy() nodepolicy.Policy {
+	policy := nodepolicy.Default()
+	// The synthetic router's served ID is also its declared profile key.
+	policy.Profiles = []nodepolicy.Profile{{Key: "switch-model", DisplayName: "Stop/Pause inference", Engine: "llamacpp", Model: "switch-model"}}
+	return policy
+}
+
 func newStopPauseServiceFixture(t *testing.T, s *remoteServiceFixture, configure func(*engineProcessFixture)) *stopPauseServiceFixture {
 	t.Helper()
 	e := prepareEngineProcessFixture(t, s.configDir, s.ports, s.scannerPath)
@@ -332,6 +339,10 @@ func newStopPauseServiceFixture(t *testing.T, s *remoteServiceFixture, configure
 		}
 	}
 	writePrivateBrokerEngineSettings(t, s.configDir, s.clusterDir, facades)
+	var policy nodepolicy.Policy
+	task2Decode(t, readPolicyBytes(t, s.policyPath()), &policy)
+	policy.Profiles = stopPausePolicy().Profiles
+	jointWriteJSON(t, s.policyPath(), policy)
 	// A paired standalone fixture may run concurrently in this test. Reuse the
 	// registered manager observation image for this proxy personality, and keep
 	// its real proxy in the service bundle so their cleanup inventories differ.
@@ -470,15 +481,17 @@ func (f *stopPauseServiceFixture) publish(t *testing.T) noderec.DirectoryNode {
 
 func (f *stopPauseServiceFixture) waitHealthy(t *testing.T, engine string) {
 	t.Helper()
-	port, path := f.engine.targetFacadePort, "/v1/models"
+	port := f.engine.targetFacadePort
 	if engine == "llamacpp-custom" {
-		port, path = f.engine.facadePort, "/v1/models"
+		port = f.engine.facadePort
 	}
 	if f.service.peer == nil {
 		t.Fatal("health barrier requires a pinned peer client")
 	}
 	task1Eventually(t, "broker publishes healthy local "+engine+" to pinned ingress", 15*time.Second, func() bool {
-		response, err := f.service.peer.Get(fmt.Sprintf("https://127.0.0.1:%d%s", port, path))
+		// The profile catalog is available even while the engine is stopped.
+		// Pinned non-catalog ingress reaches only this facade's local engine.
+		response, err := f.service.peer.Get(fmt.Sprintf("https://127.0.0.1:%d/health", port))
 		if err != nil {
 			t.Fatalf("pinned health barrier: %v", err)
 		}
@@ -1005,6 +1018,17 @@ func testStopPauseActive(t *testing.T, peer bool) {
 	t.Cleanup(client.CloseIdleConnections)
 	if peer {
 		client = f.service.peer
+		advertisement := stopPausePolicy().Advertisement()
+		f.publishDirectory(t, noderec.DirectoryNode{
+			HostUUID: "stop-pause-onward", Name: "stop-pause-onward", IP: "127.0.0.1",
+			Services: map[noderec.ServiceKey]noderec.ServiceStatus{
+				privateFixtureEngine(t, "llamacpp-custom").DiscoveryService: {Port: portOfURL(t, trap.URL)},
+				noderec.ServiceLlamaCPP: {Port: portOfURL(t, trap.URL)},
+			},
+			ModelsByEngine: map[string][]string{"llamacpp": {"switch-model"}}, Policy: &advertisement,
+		})
+		// The trap is a synthetic plaintext destination. Keep the manual trust
+		// overlay as well as its profile declaration so it remains routable.
 		f.call(t, "llamacpp-proxy:node/add-manual", map[string]any{"id": "stop-pause-onward", "host": "127.0.0.1", "addresses": []string{"127.0.0.1"}, "port": portOfURL(t, trap.URL), "models": []string{"switch-model"}})
 		f.call(t, "llamacpp-proxy:node/select", map[string]string{"id": "stop-pause-onward"})
 	}
@@ -1484,6 +1508,7 @@ func newStopPausePair(t *testing.T) (*stopPauseFixture, *stopPausePeer) {
 		}
 	}
 	writePrivateBrokerEngineSettings(t, base, cluster, facades)
+	jointWriteJSON(t, filepath.Join(jointAppDir(base), nodepolicy.FileName), stopPausePolicy())
 	releasePeer()
 	e.start(t)
 	e.rpcOK(t, "engine:install", map[string]any{"engine": "llamacpp"})
@@ -1506,7 +1531,7 @@ func newStopPausePair(t *testing.T) (*stopPauseFixture, *stopPausePeer) {
 	pinned := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{TLSClientConfig: cfg}}
 	t.Cleanup(pinned.CloseIdleConnections)
 	task1Eventually(t, "peer broker publishes healthy native ingress", 15*time.Second, func() bool {
-		response, err := pinned.Get(fmt.Sprintf("https://127.0.0.1:%d/v1/models", e.targetFacadePort))
+		response, err := pinned.Get(fmt.Sprintf("https://127.0.0.1:%d/health", e.targetFacadePort))
 		if err != nil {
 			t.Fatal(err)
 		}
