@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"nvpair-shared/clustertrust"
 	"nvpair-shared/engines"
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/noderec"
@@ -428,6 +429,44 @@ func assertFixtureProcessStopped(t *testing.T, pid int32) {
 		case <-tick.C:
 		}
 	}
+}
+
+// Only the engine-control client reconnects; the ordinary broker and its fake
+// engines stay alive. The existing permission writer supplies pinned identity.
+func newEngineClientFixture(t *testing.T) (*engineProcessFixture, *task1Process, func() *http.Client) {
+	t.Helper()
+	base := shortClusterTempDir(t)
+	cluster := filepath.Join(base, "cluster")
+	origin := t.TempDir()
+	const targetID, callerID = "e4-switch-target", "e4-switch-caller"
+	if err := os.MkdirAll(cluster, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	targetCert := mintClusterIdentity(t, cluster, targetID)
+	callerCert := mintClusterIdentity(t, origin, callerID)
+	for _, identity := range []struct{ dir, id, peer, cert string }{
+		{cluster, targetID, callerID, callerCert}, {origin, callerID, targetID, targetCert},
+	} {
+		writeActiveAdmission(t, identity.dir)
+		writePin(t, identity.dir, identity.peer, identity.cert)
+		writeMembers(t, identity.dir, targetID, callerID)
+		jointWriteJSON(t, filepath.Join(identity.dir, "identity.json"), map[string]string{"node_uuid": identity.id})
+	}
+	managementGrantFixture(t, cluster, targetID, callerID)
+	cm := startTask1Process(t, base, clusterMgrBin, "--config-dir", base, "--port", strconv.Itoa(freePort(t)))
+	cm.call(t, "cluster:get-node-id", nil)
+	f := newEngineProcessFixtureAt(t, base, reserveFixtureServicePorts(t))
+	mesh := clustertrust.Open(origin)
+	newClient := func() *http.Client {
+		cfg, ok := mesh.ClientTLSConfig(targetID)
+		if !ok {
+			t.Fatal("engine caller has no pinned target TLS configuration")
+		}
+		client := &http.Client{Timeout: 35 * time.Second, Transport: &http.Transport{TLSClientConfig: cfg}}
+		t.Cleanup(client.CloseIdleConnections)
+		return client
+	}
+	return f, cm, newClient
 }
 
 type pinnedEngineProcessFixture struct {

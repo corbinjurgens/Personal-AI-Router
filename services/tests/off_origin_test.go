@@ -110,7 +110,7 @@ func TestOBOffOrigin(t *testing.T) {
 	})
 
 	t.Run("saved local Off permits peer start", func(t *testing.T) {
-		f, _, newClient := newSwitchClientFixture(t)
+		f, _, newClient := newEngineClientFixture(t)
 		c := subscribeOBIntent(t, f.p)
 		pid := f.pid(t, "llamacpp-custom")
 		c.call(t, "engine:stop", map[string]string{"engine": "llamacpp-custom"})

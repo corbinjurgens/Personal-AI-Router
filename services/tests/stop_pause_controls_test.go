@@ -58,7 +58,7 @@ func init() {
 	os.Exit(0)
 }
 
-const stopPauseResponse = `{"model":"switch-model","choices":[{"index":0,"message":{"role":"assistant","content":"finished"},"finish_reason":"stop"}]}` + "\n"
+const stopPauseResponseBody = `{"model":"switch-model","choices":[{"index":0,"message":{"role":"assistant","content":"finished"},"finish_reason":"stop"}]}` + "\n"
 
 // Native fake only: production owns lifetime, admission and availability. The
 // parent control request holds execution until release or upstream cancellation.
@@ -141,9 +141,9 @@ func runStopPauseModel() error {
 			resident.Store(true)
 			prefixBytes := 0
 			if gate.Prefix && !body.Stream {
-				w.Header().Set("Content-Length", strconv.Itoa(len(stopPauseResponse)))
+				w.Header().Set("Content-Length", strconv.Itoa(len(stopPauseResponseBody)))
 				prefixBytes = len(`{"model":"switch-model","choices":[`)
-				if _, err := io.WriteString(w, stopPauseResponse[:prefixBytes]); err != nil {
+				if _, err := io.WriteString(w, stopPauseResponseBody[:prefixBytes]); err != nil {
 					return
 				}
 				if err := http.NewResponseController(w).Flush(); err != nil {
@@ -167,7 +167,7 @@ func runStopPauseModel() error {
 			if body.Stream {
 				fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
 			} else {
-				fmt.Fprint(w, stopPauseResponse[prefixBytes:])
+				fmt.Fprint(w, stopPauseResponseBody[prefixBytes:])
 			}
 		default:
 			fmt.Fprintln(w, `{"version":"fixture","role":"router"}`)
@@ -1123,7 +1123,7 @@ func testStopPauseQueue(t *testing.T, pinned bool) {
 			// The first body byte commits status (routing.go:297); committed
 			// output is not replayed. A truncated 200 is an honest active
 			// interruption result only with incomplete body and decode errors.
-			if len(response.raw) == 0 || len(response.raw) >= len(stopPauseResponse) || !bytes.HasPrefix([]byte(stopPauseResponse), response.raw) || !errors.Is(response.readErr, io.ErrUnexpectedEOF) || !errors.Is(response.decodeErr, io.ErrUnexpectedEOF) {
+			if len(response.raw) == 0 || len(response.raw) >= len(stopPauseResponseBody) || !bytes.HasPrefix([]byte(stopPauseResponseBody), response.raw) || !errors.Is(response.readErr, io.ErrUnexpectedEOF) || !errors.Is(response.decodeErr, io.ErrUnexpectedEOF) {
 				t.Fatalf("active response was not an incomplete committed prefix: %+v", response)
 			}
 			if pinned {
@@ -1132,7 +1132,7 @@ func testStopPauseQueue(t *testing.T, pinned bool) {
 				if response.declared != -1 {
 					t.Fatalf("pinned response Content-Length = %d, want unknown chunked length", response.declared)
 				}
-			} else if response.declared != int64(len(stopPauseResponse)) || int64(len(response.raw)) >= response.declared {
+			} else if response.declared != int64(len(stopPauseResponseBody)) || int64(len(response.raw)) >= response.declared {
 				t.Fatalf("local response did not retain the declared native length: %+v", response)
 			}
 		}
