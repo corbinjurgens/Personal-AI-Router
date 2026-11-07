@@ -508,8 +508,39 @@ func (b *Browser) probeLiveness(nodes []Node) []verdict {
 // node map.
 func (b *Browser) browse(ctx context.Context) map[string]Node {
 	return b.browseWithDependencies(ctx, func() (browseResolver, error) {
-		return zeroconf.NewResolver(nil)
+		return NewResolver()
 	}, sendMulticastQuery, context.WithTimeout, context.WithTimeout)
+}
+
+// NewResolver omits addressless interfaces before zeroconf joins and queries
+// them. On macOS a write on an up, addressless virtual interface can stall
+// until cancellation, consuming the entire scan's send budget. Keep addressed
+// IPv4 and IPv6 interfaces, including loopback for local discovery fixtures.
+func NewResolver(options ...zeroconf.ClientOption) (*zeroconf.Resolver, error) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil, err
+	}
+	ifaces = browseInterfaces(ifaces, func(iface net.Interface) ([]net.Addr, error) { return iface.Addrs() })
+	if len(ifaces) == 0 {
+		// An empty SelectIfaces makes zeroconf enumerate every interface again.
+		return nil, fmt.Errorf("no addressed multicast interfaces")
+	}
+	return zeroconf.NewResolver(append([]zeroconf.ClientOption{zeroconf.SelectIfaces(ifaces)}, options...)...)
+}
+
+func browseInterfaces(ifaces []net.Interface, addresses func(net.Interface) ([]net.Addr, error)) []net.Interface {
+	var usable []net.Interface
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagMulticast == 0 {
+			continue
+		}
+		addrs, err := addresses(iface)
+		if err == nil && len(addrs) != 0 {
+			usable = append(usable, iface)
+		}
+	}
+	return usable
 }
 
 type browseResolver interface {

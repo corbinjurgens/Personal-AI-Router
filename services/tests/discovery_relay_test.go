@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/grandcat/zeroconf"
+	"nvpair-shared/discovery"
 	"nvpair-shared/noderec"
 )
 
@@ -103,7 +104,7 @@ func fixtureNodeUUID(t *testing.T, base string) string {
 // uuid= TXT is hostUUID.
 func browseForNodeRecord(t *testing.T, namespace noderec.MDNSNamespace, instance, hostUUID string, timeout time.Duration) *zeroconf.ServiceEntry {
 	t.Helper()
-	resolver, err := zeroconf.NewResolver(mdnsResolverOptions(nil)...)
+	resolver, err := discovery.NewResolver(mdnsResolverOptions(nil)...)
 	if err != nil {
 		t.Fatalf("resolver: %v", err)
 	}

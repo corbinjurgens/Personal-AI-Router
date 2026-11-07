@@ -16,7 +16,7 @@ vi.mock('electron', () => ({
         get isPackaged() {
             return native.packaged
         },
-        getPath: vi.fn<typeof app.getPath>(),
+        getPath: vi.fn<typeof app.getPath>(() => 'C:\\User data'),
         setPath: vi.fn<typeof app.setPath>(),
         setAppLogsPath: vi.fn<typeof app.setAppLogsPath>(),
         commandLine: { appendSwitch: vi.fn<typeof app.commandLine.appendSwitch>() }
