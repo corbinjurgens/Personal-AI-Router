@@ -53,6 +53,9 @@ func TestLlamaZeroPromptCache(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The conversion owner removes PAIR-owned idle sleep before translating
+	// the remaining native model options.
+	delete(sections["model"], "sleep-idle-seconds")
 	converted, err := convertTypedLlamaOptions("model", sections["model"])
 	if err != nil {
 		t.Fatal(err)
