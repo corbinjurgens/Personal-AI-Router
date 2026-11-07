@@ -9,7 +9,11 @@ import { engineTypeFromManagerName } from '@/shared/utils/engines'
 import { ConfirmModal } from '@/ui/components/ConfirmModal'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import { useEngineStatusStore } from '@/ui/stores/engine-status.store'
-import { useEngineSettingsStore, watchModelDiagnostic } from '@/ui/stores/engine-settings.store'
+import {
+    diagnosticRunActive,
+    useEngineSettingsStore,
+    watchModelDiagnostic
+} from '@/ui/stores/engine-settings.store'
 import { formatBytes } from '@/ui/utils/formatters'
 
 function bytes(value?: string): string {
@@ -186,7 +190,7 @@ export default function ModelMemoryDiagnostic({
         // The identity includes every applied input; service refusals remain service-owned.
     }, [identity, connected, applicable, disabled, nodeId, engine, modelId, profileKey, open])
     const run = entry?.run
-    const active = run?.outcome === 'running' || run?.outcome === 'cleanup-failed'
+    const active = diagnosticRunActive(run)
     const preview = entry?.preview
     const matchingPreview =
         applicable &&

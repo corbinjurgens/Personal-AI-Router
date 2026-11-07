@@ -110,6 +110,11 @@ const diagnosticPhases: DiagnosticRun['phase'][] = [
     'done'
 ]
 
+/** The broker owns completion, including recording and release after manager work. */
+export function diagnosticRunActive(run: DiagnosticRun | null | undefined): boolean {
+    return !!run && run.phase !== 'done'
+}
+
 function diagnosticRegresses(previous: DiagnosticRun | undefined, run: DiagnosticRun): boolean {
     // Reconstruction can adopt the manager's later clock origin. Cleanup and
     // terminal outcomes are authoritative even when their elapsed display falls.
@@ -389,8 +394,7 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
         const nodeId = request.nodeId ?? useConnectionStore.getState().selfId
         if (!nodeId) return
         const previous = get().diagnostics[nodeId]
-        if (previous?.run?.outcome === 'running' || previous?.run?.outcome === 'cleanup-failed')
-            return
+        if (diagnosticRunActive(previous?.run)) return
         if (previous?.operation && previous.operation !== 'preview') return
         const operationId = (previous?.operationId ?? 0) + 1
         set(state => ({
@@ -510,7 +514,7 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
             !entry?.current ||
             (entry.operation && entry.operation !== 'start') ||
             !entry.run ||
-            (entry.run.outcome !== 'running' && entry.run.outcome !== 'cleanup-failed')
+            !diagnosticRunActive(entry.run)
         )
             return
         const operationId = entry.operationId + 1
@@ -584,7 +588,7 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
                         ...state.diagnostics[nodeId],
                         current: true,
                         reading: false,
-                        ...(run?.outcome === 'running' || run?.outcome === 'cleanup-failed'
+                        ...(diagnosticRunActive(run)
                             ? {
                                   preview: undefined,
                                   ...(state.diagnostics[nodeId]?.operation === 'preview'
@@ -595,12 +599,7 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
                                       : {})
                               }
                             : {}),
-                        run:
-                            run ??
-                            (entry?.run?.outcome === 'running' ||
-                            entry?.run?.outcome === 'cleanup-failed'
-                                ? undefined
-                                : entry?.run)
+                        run: run ?? (diagnosticRunActive(entry?.run) ? undefined : entry?.run)
                     }
                 }
             }))
@@ -1380,11 +1379,7 @@ export function watchModelDiagnostic(nodeId: string): () => void {
                 // An uncertain cancellation must reconcile its exact run. An
                 // absent discovery result is not proof that cleanup completed.
                 const run = entry?.run
-                const runId =
-                    !entry?.current &&
-                    (run?.outcome === 'running' || run?.outcome === 'cleanup-failed')
-                        ? run.runId
-                        : undefined
+                const runId = !entry?.current && diagnosticRunActive(run) ? run?.runId : undefined
                 void store.readDiagnostic(nodeId, runId)
             }
         }

@@ -723,6 +723,37 @@ describe('applied profile memory measurement', () => {
         expect(container.textContent).not.toContain('Measured peak')
     })
 
+    it.each<MeasuredProfile['outcome']>(['completed', 'failed', 'cancelled'])(
+        'keeps a %s manager outcome active until the broker finishes restoring',
+        async outcome => {
+            await render()
+            await push(running)
+            const restoring: DiagnosticRun = {
+                ...running,
+                phase: 'restoring',
+                outcome,
+                result: { ...result, outcome }
+            }
+            await push(restoring)
+            expect(inspect).not.toHaveBeenCalled()
+            expect(container.textContent).toContain('Measuring memory: restoring')
+            expect(container.textContent).not.toContain('Refresh measurement preview')
+            expect(button('Measure this configuration').disabled).toBe(true)
+
+            await act(async () => useEngineSettingsStore.getState().previewDiagnostic(target))
+            expect(getPreview).toHaveBeenCalledTimes(1)
+            status.mockResolvedValue(restoring)
+            await click('Cancel measurement')
+            expect(cancel).toHaveBeenCalledExactlyOnceWith({ nodeId: 'self', runId: 'run' })
+            expect(inspect).not.toHaveBeenCalled()
+
+            await push({ ...restoring, phase: 'done' })
+            expect(inspect).toHaveBeenCalledExactlyOnceWith(target)
+            expect(container.textContent).not.toContain('Measuring memory: restoring')
+            expect(container.textContent).toContain('Refresh measurement preview')
+        }
+    )
+
     it('refreshes the measured profile after completion without inferring currentness from its key', async () => {
         await render()
         await push({ ...running, phase: 'done', outcome: 'completed', result })
