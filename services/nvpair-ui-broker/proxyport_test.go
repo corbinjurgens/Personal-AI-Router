@@ -78,6 +78,21 @@ func TestEnginePortAssignmentRequest(t *testing.T) {
 	}
 }
 
+func TestRetiredInstallStartDoesNotChangePortAdmission(t *testing.T) {
+	test := func(name, params string) {
+		t.Run(name, func(t *testing.T) {
+			engine, port, assignment := enginePortAssignmentRequest("engine:install", json.RawMessage(params))
+			if engine != "" || port != 0 || assignment {
+				t.Fatalf("install classified as port assignment: engine=%q port=%d assignment=%v", engine, port, assignment)
+			}
+		})
+	}
+	test("omitted", `{"engine":"llamacpp","port":49150}`)
+	test("true", `{"engine":"llamacpp","port":49150,"start":true}`)
+	test("false", `{"engine":"llamacpp","port":49150,"start":false}`)
+	test("retired value is not decoded", `{"engine":"llamacpp","port":49150,"start":"retired"}`)
+}
+
 func TestBrokerDoesNotExposeInternalReservationSetter(t *testing.T) {
 	brokerConn, clientConn := net.Pipe()
 	defer brokerConn.Close()

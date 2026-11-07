@@ -818,11 +818,12 @@ func runSettingsOccupiedProxyPortRecovery(t *testing.T, address string, targetPo
 	if err := response.Body.Close(); err != nil {
 		t.Fatal(err)
 	}
-	// The endpoint answers, while its local engine remains stopped and no
-	// peer offers models. Binding recovery must not imply engine readiness.
-	if response.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("stopped-engine catalog status=%d, want %d", response.StatusCode, http.StatusServiceUnavailable)
+	// The policy catalog answers independently of native engine readiness.
+	// Reading it after binding recovery must leave the local engine stopped.
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("policy catalog status=%d, want %d", response.StatusCode, http.StatusOK)
 	}
+	requireStoppedSettings(t, h, targetPort)
 	// Fresh HTTP requests still reach the competing owner on its original port.
 	askOccupant()
 	portPath, err := appdir.Path(profile.PortFile)
