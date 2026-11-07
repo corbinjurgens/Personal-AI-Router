@@ -424,6 +424,9 @@ func attachFakeEngine(t *testing.T, b *Broker) *fakeWorker {
 	slept := make(map[string]bool)
 	f.setAnswer(func(method string, raw json.RawMessage) (any, string) {
 		switch method {
+		case "engine:diagnostic-run-status":
+			// Policy replay requires an explicit empty diagnostic checkpoint.
+			return map[string]string{"state": "none"}, ""
 		case "engine:get-launch":
 			var request struct {
 				Engine string `json:"engine"`
