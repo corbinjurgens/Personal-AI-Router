@@ -186,10 +186,6 @@ interface PendingActionsState {
     ): void
     clearDeploy(id: string): void
     pending: Map<string, PendingAction>
-    switches: Map<string, { requestId: string; source: string; target: string }>
-    beginSwitch(nodeId: string, requestId: string, source: string, target: string): boolean
-    endSwitch(nodeId: string, requestId: string): void
-    isSwitchPending(nodeId: string, engine: string): boolean
     /** Record an optimistic pending entry for a fired command. No-op for non-lifecycle/non-model commands. */
     begin(payload: EngineCommandPayload): void
     /** The pending lifecycle action for an engine, or undefined when none is in flight. */
@@ -245,25 +241,6 @@ export const usePendingActionsStore = create<PendingActionsState>((set, get) => 
         set({ deployments })
     },
     pending: new Map(),
-    switches: new Map(),
-    beginSwitch: (nodeId, requestId, source, target) => {
-        if (connectorStatus === 'disconnected' || get().switches.has(nodeId)) return false
-        const switches = new Map(get().switches)
-        switches.set(nodeId, { requestId, source, target })
-        set({ switches })
-        return true
-    },
-    endSwitch: (nodeId, requestId) => {
-        if (get().switches.get(nodeId)?.requestId !== requestId) return
-        const switches = new Map(get().switches)
-        switches.delete(nodeId)
-        set({ switches })
-    },
-    isSwitchPending: (nodeId, engine) => {
-        const pending = get().switches.get(nodeId)
-        return pending?.source === engine || pending?.target === engine
-    },
-
     begin: payload => {
         // With the modular service stopped, no engine command (local or remote)
         // can reach the broker, so recording an optimistic entry would only spin
@@ -504,6 +481,6 @@ export const usePendingActionsStore = create<PendingActionsState>((set, get) => 
             sweepTimer = null
         }
         if (get().pending.size > 0) set({ pending: new Map() })
-        set({ switches: new Map(), deployments: unresolvedDeployments(get().deployments) })
+        set({ deployments: unresolvedDeployments(get().deployments) })
     }
 }))

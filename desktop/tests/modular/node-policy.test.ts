@@ -40,7 +40,7 @@ import type { IEngineApi } from '@/ui/api/engine-api'
 import type { EngineSettingsSnapshot } from '@/shared/types/engine-settings'
 import type { ServiceTransport } from '@/shared/types/service-bridge'
 import RoutingSettings from '@/ui/components/RoutingSettings/RoutingSettings'
-import { useNodeConfigurationStore, withRoles } from '@/ui/stores/node-configuration.store'
+import { useNodeConfigurationStore } from '@/ui/stores/node-configuration.store'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import { useOverviewUiStore } from '@/ui/stores/overview-ui.store'
 import { useEngineSettingsStore } from '@/ui/stores/engine-settings.store'
@@ -345,86 +345,9 @@ describe('role and concrete model namespaces', () => {
     )
 })
 
-describe('engine binding policy transport', () => {
-    const bindings = [{ engine: 'llamacpp', model: 'Native/Model' }]
-
-    it.each([undefined, [], bindings])('preserves bindings %j through get, set and push', value => {
-        const policy = {
-            revision: '31',
-            profiles: [{ key: 'selected-profile', displayName: 'Selected', ...bindings[0] }],
-            routing: { accounts: [] },
-            ...(value === undefined ? {} : { engineBindings: value })
-        }
-        const document = parsePolicyDocument(policyEnvelope({ policy, availability: 'available' }))
-        const params = policySetParams({
-            nodeId: 'peer',
-            policy: document.policy,
-            expectedPersistedRevision: document.revision
-        })
-        expect(params).toEqual({
-            nodeId: 'peer',
-            policy: document.policy,
-            expectedPersistedRevision: '31'
-        })
-        const saved = parsePolicySetResult({ policy: params.policy })
-        expect(parsePolicyText(saved.policy)).toEqual(policy)
-        expect(parsePolicyChange(policyEnvelope({ nodeId: 'peer', policy }))?.policy).toBe(
-            document.policy
-        )
-        expect(
-            parsePolicyText(
-                withRoles(document.policy, [{ name: 'weak', profiles: ['selected-profile'] }])
-            )
-        ).toEqual({
-            ...policy,
-            roles: [{ name: 'weak', profiles: ['selected-profile'] }]
-        })
-    })
-
-    const invalid: [string, JsonValue][] = [
-        ['null', null],
-        ['non-list', {}],
-        ['invalid engine', [{ engine: '../bad', model: 'm' }]],
-        ['empty model', [{ engine: 'llamacpp', model: '' }]],
-        ['alias', [{ engine: 'llamacpp', model: 'coder:local' }]],
-        ['control', [{ engine: 'llamacpp', model: 'm\u0080' }]],
-        ['encoded reference bound', [{ engine: 'llamacpp', model: 'm'.repeat(230) }]],
-        ['escaped reference bound', [{ engine: 'llamacpp', model: '<'.repeat(40) }]],
-        ['extra member', [{ engine: 'llamacpp', model: 'm', extra: true }]],
-        ['case variant member', [{ engine: 'llamacpp', Model: 'm' }]],
-        [
-            'duplicate native name',
-            [
-                { engine: 'llamacpp', model: 'm' },
-                { engine: 'llamacpp-custom', model: 'm' }
-            ]
-        ],
-        [
-            'entry bound',
-            Array.from({ length: 257 }, (_, i) => ({ engine: 'llamacpp', model: `m${i}` }))
-        ]
-    ]
-    it.each(invalid)('rejects %s across get, set, push and drafts', (_name, engineBindings) => {
-        const policy = { revision: '31', engineBindings }
-        expect(() => parsePolicyText(JSON.stringify(policy))).toThrow()
-        expect(() =>
-            parsePolicyDocument(policyEnvelope({ policy, availability: 'available' }))
-        ).toThrow()
-        expect(() => parsePolicySetResult(policyEnvelope({ policy }))).toThrow()
-        expect(parsePolicyChange(policyEnvelope({ nodeId: 'peer', policy }))).toBeNull()
-    })
-
-    it('refuses case variant binding keys', () => {
-        expect(() => parsePolicyText('{"EngineBindings":[]}')).toThrow()
-        expect(() => parsePolicyText('{"engineBindingſ":[]}')).toThrow()
-    })
-
+describe('revision-checked role writer', () => {
     it('keeps case-sensitive names and leaves descriptor checks to the target', () => {
         const policy = {
-            engineBindings: [
-                { engine: 'llamacpp', model: 'M' },
-                { engine: 'llamacpp-custom', model: 'm' }
-            ],
             servedModels: [
                 { engine: 'llamacpp', model: 'M:variant' },
                 { engine: 'llamacpp-custom', model: 'm' }
@@ -433,7 +356,7 @@ describe('engine binding policy transport', () => {
         expect(parsePolicyText(JSON.stringify(policy))).toEqual(policy)
     })
 
-    it('preserves each target binding and private fields in the revision-checked role writer', async () => {
+    it('preserves each target profile and private fields in the revision-checked role writer', async () => {
         const get = vi.fn<INodePolicyApi['get']>()
         const set = vi.fn<INodePolicyApi['set']>()
         get.mockImplementation(async target =>
@@ -450,7 +373,6 @@ describe('engine binding policy transport', () => {
                                 model: `${target}-model`
                             }
                         ],
-                        engineBindings: [{ engine: 'llamacpp', model: `${target}-model` }],
                         routing: { accounts: [] }
                     },
                     availability: 'available'
@@ -496,7 +418,6 @@ describe('engine binding policy transport', () => {
                         model: `${request.nodeId}-model`
                     }
                 ],
-                engineBindings: [{ engine: 'llamacpp', model: `${request.nodeId}-model` }],
                 routing: { accounts: [] }
             })
         }
@@ -1078,7 +999,6 @@ describe('policy revision and activation fields', () => {
                     requestOptions: { temperature: 0.5, stop: ['end'], nested: { leaf: 1 } }
                 }
             ],
-            engineBindings: [{ engine: 'llamacpp', model: 'm' }],
             routing: { accounts: [] }
         }
         const document = parsePolicyDocument(policyEnvelope({ policy, availability: 'available' }))
@@ -1756,7 +1676,6 @@ describe('routing settings editor', () => {
             version: 2,
             revision: '5',
             profiles,
-            engineBindings: [{ engine: 'llamacpp', model: 'm' }],
             routing: { accounts: [] }
         })
 

@@ -1335,7 +1335,6 @@ describe('permission controls', () => {
                         requestOptions: { temperature }
                     }
                 ],
-                engineBindings: [{ engine: 'llamacpp', model: 'm' }],
                 routing: { accounts: [] }
             })
         }

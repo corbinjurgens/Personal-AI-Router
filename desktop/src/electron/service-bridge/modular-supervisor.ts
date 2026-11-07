@@ -44,7 +44,6 @@ import {
 import { emitBridgePush } from './broadcaster'
 import { parseEngineSettings } from './engine-settings'
 import { parseEngineIntent } from './engine-intent'
-import { parseEngineSwitchChanged } from './engine-switch'
 import { parseEngineDescriptors } from './engine-descriptors'
 import { parseActiveModelCopies, parseModelCopyResult } from './model-copy'
 import type {
@@ -2022,17 +2021,6 @@ class ModularSupervisor {
     }
 
     private handleEngineManagerNotification(notification: JsonRpcNotification): void {
-        if (notification.method === 'engine:switch-changed') {
-            try {
-                emitBridgePush(
-                    'engines:switch-changed',
-                    parseEngineSwitchChanged(notification.params)
-                )
-            } catch {
-                /* Ignore an invalid peer notification. */
-            }
-            return
-        }
         if (notification.method === 'engine:settings-changed') {
             try {
                 emitBridgePush('engines:settings-changed', parseEngineSettings(notification.params))

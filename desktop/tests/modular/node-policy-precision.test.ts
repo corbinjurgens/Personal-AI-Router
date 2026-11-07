@@ -3,8 +3,6 @@
 // @vitest-environment jsdom
 
 import { Duplex } from 'node:stream'
-import { act, createElement } from 'react'
-import { createRoot } from 'react-dom/client'
 import { ipcRenderer } from 'electron'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { getModularSupervisor } from '@/electron/service-bridge/modular-supervisor'
@@ -48,7 +46,6 @@ import { createPairTransport } from '@/preload/api/pair-transport.api'
 import { createPairApi } from '@/ui/api/pair-api'
 import { serviceTransport } from '@/ui/api/service-transport'
 import { withRoles } from '@/ui/stores/node-configuration.store'
-import ModelEngineBindingsEditor from '@/ui/components/RoutingSettings/ModelEngineBindingsEditor'
 
 const REVISION = '9007199254740993'
 const OPAQUE = String.raw`{"integer":9007199254740993,"decimal":0.1000000000000000055511151231257827,"nested":[-0,1.2300e+004,1e400,1e-400,{"label":"line\nquote\"slash\\unicode\u0061, { ]"}]}`
@@ -197,42 +194,6 @@ describe('opaque policy JSON through renderer, preload, bridge and socket client
         expect(service.policy).toBe(POLICY)
     })
 
-    it('preserves opaque values through a binding UI edit and the real bridge', async () => {
-        const source =
-            POLICY.slice(0, -1) + ',"engineBindings":[{"engine":"llamacpp","model":"native"}]}'
-        let edited = source
-        const container = document.createElement('div')
-        document.body.appendChild(container)
-        const root = createRoot(container)
-        try {
-            await act(async () =>
-                root.render(
-                    createElement(ModelEngineBindingsEditor, {
-                        targetId: 'self',
-                        text: source,
-                        disabled: false,
-                        onTextChange: text => {
-                            edited = text
-                        }
-                    })
-                )
-            )
-            const clear = Array.from(container.querySelectorAll('button')).find(
-                button => button.textContent === 'Clear bindings'
-            )
-            if (!clear) throw new Error('Missing binding control')
-            await act(async () => clear.click())
-            const expected = POLICY.slice(0, -1) + ',"engineBindings":[]}'
-            expect(edited).toBe(expected)
-            await api.nodePolicy.set({ policy: edited, expectedPersistedRevision: REVISION })
-            expect(service.writes).toEqual([
-                `{"jsonrpc":"2.0","id":1,"method":"policy:set","params":{"expectedPersistedRevision":"${REVISION}","policy":${expected}}}\n`
-            ])
-        } finally {
-            await act(async () => root.unmount())
-            container.remove()
-        }
-    })
     it.each([
         ['local', undefined],
         ['remote', 'peer']

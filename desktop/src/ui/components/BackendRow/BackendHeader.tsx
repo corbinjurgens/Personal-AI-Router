@@ -25,7 +25,6 @@ export function BackendHeader({
     isTransitioning,
     isUnavailable,
     disabled,
-    localOffAvailable = false,
     onToggle,
     onExpand,
     expanded,
@@ -38,7 +37,6 @@ export function BackendHeader({
     /** Remote node never reported this engine — render a stable read-only label, no controls. */
     isUnavailable: boolean
     disabled: boolean
-    localOffAvailable?: boolean
     onToggle: () => void
     onExpand: () => void
     expanded: boolean
@@ -207,7 +205,7 @@ export function BackendHeader({
                 })()}
 
             {!isUnavailable &&
-                (!isTransitioning || localOffAvailable) &&
+                !isTransitioning &&
                 backend.processStatus !== 'not-installed' &&
                 (() => {
                     const missingPrereqs = (backend.prerequisites ?? []).filter(p => !p.installed)
@@ -221,7 +219,7 @@ export function BackendHeader({
                                 checked={backend.processStatus === 'running'}
                                 onCheckedChange={onToggle}
                                 onClick={e => e.stopPropagation()}
-                                disabled={(disabled && !localOffAvailable) || isStartDisabled}
+                                disabled={disabled || isStartDisabled}
                                 aria-label={`${backend.processStatus === 'running' ? 'Stop' : 'Start'} ${backend.displayName}`}
                             />
                         </Flex>

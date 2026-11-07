@@ -587,78 +587,33 @@ func TestModelDownloadReadyLoadDispatchesExactTypedRequest(t *testing.T) {
 	}
 }
 
-func TestNodeDetailSwitchExitCancelsPendingRPC(t *testing.T) {
-	for _, action := range []string{"reset", "close", "escape"} {
-		t.Run(action, func(t *testing.T) {
-			d, f := switchDetail(t, false)
-			v := newNodesView(f.client)
-			v.detail = d
-			done := holdReplacementCommand(t, f, d.submitSwitch(), enginesettings.SwitchMethod)
-			ctx := d.engineSwitch.ctx
-			switch action {
-			case "reset":
-				v.reset()
-			case "close":
-				v.close()
-			case "escape":
-				d.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
-			}
-			select {
-			case <-ctx.Done():
-			default:
-				t.Fatal("view exit left switch context alive")
-			}
-			select {
-			case <-done:
-			case <-time.After(time.Second):
-				t.Fatal("view exit left pending switch RPC")
-			}
-		})
-	}
-}
-
-func TestNodeDetailFenceLifecycleCancelsPendingRPC(t *testing.T) {
-	for _, action := range []string{"reset", "close", "escape", "route", "disconnect"} {
-		t.Run(action, func(t *testing.T) {
-			d, f := switchDetail(t, false)
-			v := newNodesView(f.client)
-			v.detail = d
-			id, fence := switchAbsentFence(t, d, f)
-			done := holdReplacementCommand(t, f, fence, enginesettings.SwitchFenceMethod)
-			ctx := d.engineSwitch.ctx
-			switch action {
-			case "reset":
-				v.reset()
-			case "close":
-				v.close()
-			case "escape":
-				d.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
-			case "route":
-				row := d.node
-				row.address = "changed-route"
-				d.followNode(row, true)
-			case "disconnect":
-				d.update(DisconnectedMsg{})
-			}
-			if !errors.Is(ctx.Err(), context.Canceled) {
-				t.Fatal("lifecycle left fence context alive")
-			}
-			select {
-			case late := <-done:
-				d.update(late)
-			case <-time.After(time.Second):
-				t.Fatal("lifecycle left pending fence RPC")
-			}
-			if d.engineSwitch.state == switchFenced {
-				t.Fatal("cancelled fence wait claimed non-acceptance")
-			}
-			if action == "route" || action == "disconnect" {
-				if d.engineSwitch.requestID != id || !d.engineSwitch.outcomeUnknown() || d.submitSwitch() != nil {
-					t.Fatal("transport retirement lost unresolved original")
+func TestNodeDetailIgnoresRemovedEngineKey(t *testing.T) {
+	test := func(name string, self bool, pane detailPane) {
+		t.Run(name, func(t *testing.T) {
+			d := newNodeDetail(nil, nodeRow{key: "target", self: self, presence: presenceOnline, membership: membershipMember})
+			d.SetSize(100, 30)
+			d.pane = pane
+			before := d.View()
+			for _, binding := range d.Help() {
+				for _, k := range binding.Keys() {
+					if k == "w" {
+						t.Fatal("node detail still advertises the removed engine key")
+					}
 				}
 			}
+			cmd, stay := d.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("w")})
+			if cmd != nil || !stay {
+				t.Fatal("removed engine key issued a command or closed node detail")
+			}
+			if d.pane != pane || d.CapturingInput() || d.View() != before {
+				t.Fatal("removed engine key changed the node detail view or input ownership")
+			}
 		})
 	}
+	test("local engines", true, detailEngines)
+	test("local models", true, detailModels)
+	test("peer engines", false, detailEngines)
+	test("peer models", false, detailModels)
 }
 
 func TestReplacementInterruptsEngineOperationStatus(t *testing.T) {

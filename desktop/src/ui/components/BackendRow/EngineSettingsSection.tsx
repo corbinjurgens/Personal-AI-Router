@@ -34,7 +34,6 @@ import { DismissibleTooltip } from '@/ui/components/DismissibleTooltip/Dismissib
 import { ConfirmModal } from '@/ui/components/ConfirmModal'
 import getErrorString from '@/shared/utils/get-error-string'
 import { engineManagerName } from '@/shared/utils/engines'
-import { engineRefusalLabel, useEngineSwitchStore } from '@/ui/stores/engine-switch.store'
 import {
     LOCAL_VETO_CODE,
     POLICY_CONFLICT_CODE,
@@ -67,6 +66,15 @@ const sameDraft = (a: Draft, b: Draft): boolean =>
     a.launchText === b.launchText &&
     a.workingSetLimitMiB === b.workingSetLimitMiB
 
+function engineRefusalLabel(code: number, message: string, policy?: NodePolicyDocument): string {
+    if (code === POLICY_CONFLICT_CODE) return 'Configuration conflict'
+    const blocked = policy?.availability === 'paused' || policy?.availability === 'draining'
+    return blocked ||
+        message === 'This node is paused. Resume it on this node before managing it remotely.'
+        ? 'Node paused'
+        : 'Target refused'
+}
+
 export function EngineSettingsSection({
     nodeId,
     engineType,
@@ -78,9 +86,6 @@ export function EngineSettingsSection({
 }) {
     const engine = engineManagerName(engineType)
     const status = useEngineStatusStore(state => state.statusByNode.get(nodeId)?.get(engineType))
-    const switchPending = usePendingActionsStore(state => state.isSwitchPending(nodeId, engine))
-    const switchReserved =
-        useEngineSwitchStore(state => state.reserved(nodeId, engine)) || switchPending
     const target = { nodeId, engine }
     const entry = useEngineSettingsStore(state => state.entries[engineSettingsKey(target)])
     const snapshot = entry?.snapshot
@@ -118,7 +123,7 @@ export function EngineSettingsSection({
         !!entry?.unavailable ||
         !snapshot?.editable ||
         snapshot.format !== 'pair-arguments-v1'
-    const locked = readOnly || disabled || applying || switchReserved
+    const locked = readOnly || disabled || applying
 
     useEffect(() => watchEngineSettings(), [])
     useEffect(
@@ -251,7 +256,6 @@ export function EngineSettingsSection({
         void useEngineSettingsStore.getState().reload(target)
     }
     async function apply(request: EngineSettingsRequest): Promise<void> {
-        if (useEngineSwitchStore.getState().reserved(nodeId, engine)) return
         const ticket = generation.current
         const requestId = request.requestId ?? crypto.randomUUID()
         submitted.current = requestId
@@ -284,8 +288,7 @@ export function EngineSettingsSection({
             reportError(
                 code === REMOTE_MANAGEMENT_DENIED_CODE
                     ? 'This device refused remote management permission. Your settings draft is kept. Change the permission on that device before trying again.'
-                    : code === LOCAL_VETO_CODE ||
-                        code === POLICY_CONFLICT_CODE
+                    : code === LOCAL_VETO_CODE || code === POLICY_CONFLICT_CODE
                       ? `${engineRefusalLabel(code, message, refusalPolicy)}: ${message}`
                       : message
             )
@@ -304,12 +307,6 @@ export function EngineSettingsSection({
                             llama.cpp {status.buildInfo || '(build information unavailable)'}
                         </Text>
                     </DismissibleTooltip>
-                )}
-                {switchReserved && (
-                    <Text kind="body/regular/sm" role="status">
-                        This engine is reserved by a switch. Refresh switch readback to check its
-                        status.
-                    </Text>
                 )}
                 {permissionReadOnly && (
                     <Text kind="body/regular/sm" role="status">

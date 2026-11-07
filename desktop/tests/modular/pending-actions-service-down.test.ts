@@ -15,22 +15,14 @@ import type { EngineType } from '@/shared/types/engines'
  */
 
 let statusCb: ((status: ServiceStatus) => void) | null = null
-let stateCb: Parameters<IEngineApi['onStateChanged']>[0]
-let progressCb: Parameters<IEngineApi['onProgress']>[0]
 
 function makeFakeWindow() {
     const noopUnsub = (): void => {}
     return {
         pairApi: {
             engines: {
-                onStateChanged: (cb: typeof stateCb) => {
-                    stateCb = cb
-                    return noopUnsub
-                },
-                onProgress: (cb: typeof progressCb) => {
-                    progressCb = cb
-                    return noopUnsub
-                },
+                onStateChanged: vi.fn<IEngineApi['onStateChanged']>(() => noopUnsub),
+                onProgress: vi.fn<IEngineApi['onProgress']>(() => noopUnsub),
                 onSettingsChanged: () => noopUnsub
             },
             errors: {
@@ -93,66 +85,6 @@ describe('pending-actions store honours the modular connector status', () => {
         expect(
             usePendingActionsStore.getState().getLifecyclePending('node-1', 'llama-cpp')
         ).toBeUndefined()
-    })
-
-    it('switch send gap reserves both engines and rejects concurrent submission', () => {
-        pushStatus('connected')
-        const store = usePendingActionsStore.getState()
-        expect(store.beginSwitch('node-1', 'switch-a', 'llamacpp', 'llamacpp-custom')).toBe(true)
-        expect(store.beginSwitch('node-1', 'switch-b', 'llamacpp-custom', 'llamacpp')).toBe(false)
-        expect(store.isSwitchPending('node-1', 'llamacpp')).toBe(true)
-        expect(store.isSwitchPending('node-1', 'llamacpp-custom')).toBe(true)
-        expect(store.isSwitchPending('node-1', 'other')).toBe(false)
-        store.endSwitch('node-1', 'wrong-request')
-        expect(store.isSwitchPending('node-1', 'llamacpp')).toBe(true)
-        store.endSwitch('node-1', 'switch-a')
-        expect(store.isSwitchPending('node-1', 'llamacpp')).toBe(false)
-        expect(store.isSwitchPending('node-1', 'llamacpp-custom')).toBe(false)
-    })
-
-    it('switch correlation does not expire with ordinary action safety nets', () => {
-        vi.useFakeTimers()
-        try {
-            pushStatus('connected')
-            const store = usePendingActionsStore.getState()
-            expect(store.beginSwitch('node-1', 'switch-a', 'llamacpp', 'llamacpp-custom')).toBe(
-                true
-            )
-            vi.advanceTimersByTime(120_000)
-            expect(store.isSwitchPending('node-1', 'llamacpp')).toBe(true)
-        } finally {
-            vi.useRealTimers()
-        }
-    })
-    it('ordinary status and progress pushes preserve switch correlation', () => {
-        pushStatus('connected')
-        const store = usePendingActionsStore.getState()
-        expect(store.beginSwitch('node-1', 'switch-a', 'llamacpp', 'llamacpp-custom')).toBe(true)
-        stateCb({
-            nodeId: 'node-1',
-            engineType: 'llama-cpp',
-            status: {
-                nodeId: 'node-1',
-                engineType: 'llama-cpp',
-                processStatus: 'stopped',
-                enginePort: null,
-                proxyPort: null
-            }
-        })
-        progressCb({
-            nodeId: 'node-1',
-            nodeName: 'Node 1',
-            engineType: 'llama-cpp',
-            operation: 'pull',
-            model: 'fixture',
-            status: 'completed',
-            percent: 100
-        })
-        expect(usePendingActionsStore.getState().switches.get('node-1')).toEqual({
-            requestId: 'switch-a',
-            source: 'llamacpp',
-            target: 'llamacpp-custom'
-        })
     })
 })
 

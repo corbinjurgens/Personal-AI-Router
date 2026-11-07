@@ -1376,7 +1376,7 @@ describe('selected policy and portable load patches', () => {
             )
         ).toEqual({ set: { slots: 2 }, clear: ['cacheTypeK'] })
     })
-    it('distinguishes nil/empty served permissions and reads the actual engineBindings container', () => {
+    it('distinguishes nil/empty served permissions and uses the selected profile model', () => {
         expect(modelRoutingState(policy.policy, identity).served).toBe('unrestricted')
         expect(modelRoutingState('{"servedModels":null}', identity).served).toBe('unrestricted')
         expect(modelRoutingState('{"servedModels":[]}', identity).served).toBe('excluded')
@@ -1390,21 +1390,13 @@ describe('selected policy and portable load patches', () => {
                     model: 'served-model'
                 }
             ],
-            engineBindings: [{ engine: 'llamacpp', model: 'served-model' }],
             servedModels: [{ engine: 'llamacpp', model: 'served-model' }]
         }
-        expect(modelRoutingState(JSON.stringify(routingPolicy), selected).binding).toBe(true)
         expect(modelRoutingState(JSON.stringify(routingPolicy), selected).served).toBe('included')
-        expect(
-            modelRoutingState(JSON.stringify({ ...routingPolicy, engineBindings: [] }), selected)
-                .binding
-        ).toBe(false)
         const artifactReferences = {
             ...routingPolicy,
-            engineBindings: [{ engine: 'llamacpp', model: 'artifact.gguf' }],
             servedModels: [{ engine: 'llamacpp', model: 'artifact.gguf' }]
         }
-        expect(modelRoutingState(JSON.stringify(artifactReferences), selected).binding).toBe(false)
         expect(modelRoutingState(JSON.stringify(artifactReferences), selected).served).toBe(
             'excluded'
         )

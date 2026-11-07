@@ -23,7 +23,6 @@ function policy(extra: Record<string, JsonValue> = {}, alternate = other): strin
     return JSON.stringify({
         version: 2,
         revision: '9007199254740993',
-        engineBindings: [identity],
         routing: { accounts: [{ id: 'private' }] },
         profiles: [
             {
@@ -190,7 +189,7 @@ describe('model settings policy helpers', () => {
     it('changes only the selected value span across whitespace and escaped delimiters', () => {
         const text = String.raw` {
             "profiles": [{"key":"native/model","displayName":"native/model","engine":"llamacpp","model":"native/model","requestOptions":{"note":"escaped quote \" and brackets } ],","nested":[{"x":[1,2]}],"temperature":1}}],
-            "engineBindings": []
+            "residentModels": []
         } `
         expect(applied(text, { kind: 'option', key: 'temperature', value: '0.25' })).toBe(
             text.replace('"temperature":1', '"temperature":0.25')
@@ -204,7 +203,7 @@ describe('model settings policy helpers', () => {
         'preserves opaque number tokens when changing $kind',
         edit => {
             const text =
-                '{"version":2,"opaque":9007199254740993,"profiles":[{"key":"native/model","displayName":"native/model","engine":"llamacpp","model":"native/model","requestOptions":{"temperature":1,"nested":{"precise":1.0000000000000000001,"huge":1e400},"array":[9007199254740995]}},{"key":"other","displayName":"other","engine":"llamacpp","model":"other","requestOptions":{"seed":9007199254740997}}],"engineBindings":[]}'
+                '{"version":2,"opaque":9007199254740993,"profiles":[{"key":"native/model","displayName":"native/model","engine":"llamacpp","model":"native/model","requestOptions":{"temperature":1,"nested":{"precise":1.0000000000000000001,"huge":1e400},"array":[9007199254740995]}},{"key":"other","displayName":"other","engine":"llamacpp","model":"other","requestOptions":{"seed":9007199254740997}}],"residentModels":[]}'
             const result = applied(text, edit)
             // Inspect original JSON tokens, not numbers rounded by JSON.parse.
             for (const token of [
@@ -346,7 +345,7 @@ describe('model settings policy helpers', () => {
         ).toMatchObject({ ok: false, error: { code: 'option' } })
     })
 
-    it('clears one option while preserving nested options, arrays, bindings and private fields', () => {
+    it('clears one option while preserving nested options, arrays and private fields', () => {
         const options = { temperature: 1, stop: ['end'], uncommon: { leaf: 2 } }
         const text = applied(
             policy({ requestOptions: options, requestOptionsMode: 'enforced', localOnly: true }),
