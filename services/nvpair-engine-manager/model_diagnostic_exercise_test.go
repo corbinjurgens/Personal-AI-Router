@@ -242,6 +242,19 @@ func TestModelDiagnosticExerciseConcurrentHighOverlap(t *testing.T) {
 				return
 			}
 		}
+		// Reading every first token proves ordering, but Windows can report
+		// both that read and all finishes in one monotonic clock tick. Cross
+		// an observed clock boundary before ending the shared decode window.
+		observed := time.Now()
+		tick := time.NewTicker(time.Millisecond)
+		defer tick.Stop()
+		for !time.Now().After(observed) {
+			select {
+			case <-tick.C:
+			case <-ctx.Done():
+				return
+			}
+		}
 		close(allRead)
 	}()
 	defer func() { cancel(); <-collectorDone }()

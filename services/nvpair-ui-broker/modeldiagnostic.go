@@ -452,6 +452,11 @@ func (b *Broker) setDiagnosticRun(op *brokerDiagnostic, run modelconfig.Diagnost
 	// origin and never regress when adopting the manager's later-started clock.
 	run.StartedAt = op.run.StartedAt
 	run.ElapsedMS = max(run.ElapsedMS, op.run.ElapsedMS)
+	// The manager has joined native work, but the broker still owns recording
+	// and drain/reservation release. Only cleanupDiagnostic publishes done.
+	if run.Phase == "done" {
+		run.Phase = "restoring"
+	}
 	if run.Phase == "reserving" && op.run.Phase == "draining" {
 		// Manager acceptance starts its operation in reserving, after the
 		// broker has already completed draining under the same public run.

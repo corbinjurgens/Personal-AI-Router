@@ -50,6 +50,37 @@ func reserveDiagnosticFixture(t *testing.T, f inspectionFixture, p diagnosticRes
 	return r
 }
 
+func TestDiagnosticReservationAfterConfirmedStop(t *testing.T) {
+	f, p := diagnosticReservationFixture(t)
+	f.ex.emit = nil
+	f.ex.markStopped(f.st, p.Engine)
+	fence, err := f.ex.diagnosticEffectsFence(context.Background())
+	if err != nil {
+		t.Fatalf("confirmed stopped engine refused preview: %v", err)
+	}
+	p.EffectsFence = fence
+	reserveDiagnosticFixture(t, f, p)
+}
+
+func TestDiagnosticReservationRefusesUnresolvedStop(t *testing.T) {
+	test := func(name string, change func(*engineState)) {
+		t.Run(name, func(t *testing.T) {
+			f, _ := diagnosticReservationFixture(t)
+			f.ex.emit = nil
+			f.ex.markStopped(f.st, f.request.Engine)
+			f.st.mu.Lock()
+			change(f.st)
+			f.st.mu.Unlock()
+			if _, err := f.ex.diagnosticEffectsFence(context.Background()); err == nil {
+				t.Fatal("unresolved stop accepted as diagnostic effects evidence")
+			}
+		})
+	}
+	test("running during stop", func(st *engineState) { st.running = true })
+	test("retained child", func(st *engineState) { st.proc = &managedProc{} })
+	test("failed reclaim", func(st *engineState) { st.reclaimFailed = true })
+}
+
 func TestDiagnosticReservationIdenticalRetryRetainsAuthority(t *testing.T) {
 	f, p := diagnosticReservationFixture(t)
 	first := reserveDiagnosticFixture(t, f, p)

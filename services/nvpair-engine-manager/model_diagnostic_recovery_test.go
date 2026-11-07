@@ -60,6 +60,16 @@ func TestModelDiagnosticRecoveryPhaseReopensAndPreservesPause(t *testing.T) {
 				t.Fatalf("seed interrupted phase: %v", err)
 			}
 			ex := diagnosticRecoveryExecutor(t, base)
+			var completed diagnosticOperationStatus
+			ex.emit = func(method string, value any) {
+				if method == diagnosticChangedMethod {
+					var ok bool
+					completed, ok = value.(diagnosticOperationStatus)
+					if !ok {
+						t.Error("recovery emitted an invalid diagnostic status")
+					}
+				}
+			}
 			pauseBefore := ex.nodeProjection.advertisement()
 			stops := 0
 			if err := ex.recoverDiagnosticCheckpoint(context.Background(), func(ctx context.Context, engine string) error {
@@ -67,6 +77,9 @@ func TestModelDiagnosticRecoveryPhaseReopensAndPreservesPause(t *testing.T) {
 				return ex.sleepContext(ctx, engine)
 			}); err != nil {
 				t.Fatalf("recover %s: %v", phase, err)
+			}
+			if completed.RunID != checkpoint.Run.RunID || completed.Phase != "done" || completed.Outcome != "failed" || completed.State != "cleanup-complete" || !completed.WorkStopped {
+				t.Fatalf("recovery omitted terminal stop-proof notification: %+v", completed)
 			}
 			wantStops := 0
 			if started || loaded {

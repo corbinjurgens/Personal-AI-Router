@@ -56,8 +56,13 @@ func TestPauseGateCoversEveryRegisteredMutationAndAllowsEveryRead(t *testing.T) 
 					want := http.StatusOK
 					if class == controlMutation {
 						want = scenario.status
-						if route.path == controlAvailabilitySetPath && scenario.projection != nil && scenario.allowed {
-							want = http.StatusOK
+						if scenario.projection != nil && scenario.allowed {
+							// Availability and diagnostics reach the broker's mode-aware
+							// gate. Pin, grant and projection checks still precede it.
+							switch route.path {
+							case controlAvailabilitySetPath, diagnosticPath + "preview", diagnosticPath + "start", diagnosticPath + "cancel":
+								want = http.StatusOK
+							}
 						}
 					}
 					if rec.Code != want {

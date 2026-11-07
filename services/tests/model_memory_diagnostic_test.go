@@ -6,6 +6,8 @@ package tests
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"runtime"
 	"slices"
 	"strconv"
@@ -25,6 +28,7 @@ import (
 
 	"github.com/shirou/gopsutil/v4/process"
 	"nvpair-shared/engines"
+	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/modelconfig"
 	"nvpair-shared/nodepolicy"
@@ -237,9 +241,36 @@ func newModelDiagnosticProcessFixture(t *testing.T, blocked string) *modelDiagno
 			env[modelDiagnosticFixtureEnv] = faults
 		}
 		jointWriteJSON(t, path, manifest)
+		// Resume also starts the inert companion engine. Its existing /models
+		// response reports unloaded status, so declare that observation for the
+		// manager's node-wide effects fence and unload verification.
+		otherPath := filepath.Join(jointAppDir(f.base), "engines", "llamacpp-custom.json")
+		var other map[string]any
+		modelSettingsDecode(t, readLiveDurableFile(t, otherPath), &other)
+		actions, ok := other["actions"].(map[string]any)
+		if !ok {
+			t.Fatal("missing companion engine actions")
+		}
+		actions["loaded_models"] = map[string]any{
+			"http":   map[string]any{"method": "GET", "path": "/models"},
+			"result": map[string]any{"array": "data", "field": "id", "match": map[string]any{"field": "status.value", "in": []string{"loaded"}}},
+		}
+		jointWriteJSON(t, otherPath, other)
 	})
 	d := &modelDiagnosticProcessFixture{modelBufferProcessFixture: f, faults: faults}
 	f.waitMemory(t, "17179869184")
+	policy := f.policy(t)
+	for i := range policy.Profiles {
+		profile := &policy.Profiles[i]
+		if profile.Key == "weak-model" {
+			profile.ContextTokens, profile.MaxOutputTokens, profile.MaxConcurrent = 4096, 512, 1
+			profile.MemoryBytes = 1048576
+			// Saved operator declaration for the synthetic resident, not a
+			// native qualification or a measured memory result.
+			profile.Qualification = &nodepolicy.QualificationRef{ID: "diagnostic-fixture-resident", Revision: "1"}
+		}
+	}
+	f.setPolicy(t, policy)
 	// Release barriers before the already-registered process cleanup runs.
 	t.Cleanup(func() {
 		for _, name := range []string{"load", "low", "high", "unload"} {
@@ -257,6 +288,26 @@ func (f *modelDiagnosticProcessFixture) fault(t *testing.T, name string, hold bo
 	} else if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		t.Fatal(err)
 	}
+}
+
+func (f *modelDiagnosticProcessFixture) review(t *testing.T, request settings.Request) (settings.Request, settings.Preview) {
+	t.Helper()
+	var preview settings.Preview
+	// A joined diagnostic can still overlap final inventory/native metadata
+	// publication. Retry only the no-effect snapshot/busy refusals, preserving
+	// the exact baseline revision and requested edit throughout.
+	task1Eventually(t, "post-diagnostic settings metadata settles", 15*time.Second, func() bool {
+		f.call(t, "engine:preview-settings", request, &preview)
+		if len(preview.Errors) != 1 {
+			return true
+		}
+		return preview.Errors["modelLoads.busy"] == "" && preview.Errors["modelLoads.baseline"] != "modelLoads.baseline: Engine settings changed during preview."
+	})
+	if len(preview.Errors) != 0 || preview.Conflict != nil || preview.PreviewDigest == "" {
+		t.Fatalf("preview refused: errors=%v conflict=%v", preview.Errors, preview.Conflict)
+	}
+	request.ModelChange.PreviewDigest = preview.PreviewDigest
+	return request, preview
 }
 
 // The ordinary fixture's 90-second reply bound is shorter than intentional
@@ -309,7 +360,21 @@ func (f *modelDiagnosticProcessFixture) call(t *testing.T, method string, params
 func (f *modelDiagnosticProcessFixture) preview(t *testing.T) modelconfig.DiagnosticPreview {
 	t.Helper()
 	var preview modelconfig.DiagnosticPreview
-	f.call(t, "engine:diagnostic-preview", modelconfig.DiagnosticPreviewRequest{Engine: "llamacpp", ModelID: "medium-model", ProfileKey: "medium-model"}, &preview)
+	var reply jsonrpc.Message
+	// Resident settlement and inventory/source-identity publication are
+	// separate. A changed inspection snapshot withholds both keys; wait for
+	// a real fresh preview rather than accepting any incomplete identity.
+	task1Eventually(t, "diagnostic applied identity converges", 15*time.Second, func() bool {
+		reply = f.rpc(t, "engine:diagnostic-preview", modelconfig.DiagnosticPreviewRequest{Engine: "llamacpp", ModelID: "medium-model", ProfileKey: "medium-model"})
+		return reply.Error == nil || reply.Error.Message != "diagnostic: exactly one configuration or execution key required"
+	})
+	if reply.Error != nil {
+		inspection := f.inspect(t, "medium-model")
+		t.Fatalf("diagnostic preview: code=%d message=%s configuration reason=%s", reply.Error.Code, reply.Error.Message, inspection.ConfigurationKeyReason)
+	}
+	if err := modelconfig.DecodeStrict(reply.Result, &preview); err != nil {
+		t.Fatal(err)
+	}
 	if err := preview.Validate(); err != nil {
 		t.Fatalf("public preview: %v", err)
 	}
@@ -399,8 +464,10 @@ func (f *modelDiagnosticProcessFixture) savedPause(t *testing.T, want nodepolicy
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("diagnostic changed saved policy: got=%+v want=%+v", got, want)
 	}
-	var disk nodepolicy.Policy
-	modelSettingsDecode(t, readLiveDurableFile(t, filepath.Join(jointAppDir(f.base), nodepolicy.FileName)), &disk)
+	disk, err := nodepolicy.Parse(readLiveDurableFile(t, filepath.Join(jointAppDir(f.base), nodepolicy.FileName)))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !reflect.DeepEqual(disk, want) {
 		t.Fatal("persisted pause/policy differs from the exact pre-run policy")
 	}
@@ -408,6 +475,7 @@ func (f *modelDiagnosticProcessFixture) savedPause(t *testing.T, want nodepolicy
 
 func (f *modelDiagnosticProcessFixture) resident(t *testing.T, reason nodepolicy.ModelConfigurationReason) {
 	t.Helper()
+	last := ""
 	task1Eventually(t, "resident owner settles "+string(reason), 90*time.Second, func() bool {
 		var view struct {
 			Policy             nodepolicy.Policy              `json:"policy"`
@@ -422,6 +490,11 @@ func (f *modelDiagnosticProcessFixture) resident(t *testing.T, reason nodepolicy
 		}
 		for _, entry := range view.ModelConfiguration.Models {
 			if entry.Engine == "llamacpp" && entry.Model == "weak-model" {
+				state := string(entry.State) + "/" + string(entry.Reason)
+				if state != last {
+					t.Logf("resident observation: %s", state)
+					last = state
+				}
 				return entry.DesiredResident && entry.Reason == reason && (reason != "" || entry.State == nodepolicy.ModelStateSatisfied && entry.ObservedLoaded != nil && *entry.ObservedLoaded)
 			}
 		}
@@ -508,13 +581,77 @@ func (f *modelDiagnosticProcessFixture) stored(t *testing.T, run modelconfig.Dia
 
 func (f *modelDiagnosticProcessFixture) availableResident(t *testing.T) nodepolicy.Policy {
 	t.Helper()
-	request := f.request(t, "diagnostic-resident-configuration", nil)
-	request.ModelChange.ProfileKey, request.ModelChange.ModelID = "weak-model", "weak-model"
-	request.ModelChange.Load.Set.Context.Tokens = 4096
-	request.ModelChange.Load.Set.Slots = modelSettingsInt(1)
-	request, _ = f.review(t, request)
+	before := f.snapshot(t)
+	request := settings.Request{Engine: "llamacpp", RequestID: "diagnostic-resident-configuration", ExpectedRevision: before.Revision, Settings: before.Settings.Clone()}
+	request.Settings.Serving = &engines.ServingConfig{Version: 1}
+	for _, name := range []string{"medium", "weak"} {
+		model, err := os.ReadFile(filepath.Join(f.root, name+".gguf"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		digest := sha256.Sum256(model)
+		ram, vram := int64(1048576), int64(0)
+		request.Settings.Serving.Models = append(request.Settings.Serving.Models, engines.ServingModel{
+			ModelID: name + "-model", MaxOutputTokens: 512,
+			Memory:    engines.ServingMemory{HostRAMBytes: &ram, VRAMBytes: &vram},
+			Artifacts: []engines.ServingArtifact{{Role: "model", SHA256: hex.EncodeToString(digest[:]), Provenance: engines.ServingProvenance{Kind: "supplied-sha256"}}},
+		})
+	}
+	var preview settings.Preview
+	f.call(t, "engine:preview-settings", request, &preview)
+	if len(preview.Errors) != 0 || preview.Conflict != nil {
+		t.Fatalf("resident declaration preview: errors=%v conflict=%v", preview.Errors, preview.Conflict)
+	}
 	f.call(t, "engine:apply-settings", request, nil)
 	f.settled(t, request.RequestID, "succeeded")
+	// Bootstrap the same synthetic strict-qualification recipe as the NE/SR
+	// fixture, bound to the real manager's launch and content identities.
+	f.call(t, "node:set-availability", map[string]string{"state": "available"}, nil)
+	var launch string
+	identity := regexp.MustCompile(`engine identity engine=llamacpp run_id=(run-[0-9a-f]+) launch_digest=([0-9a-f]{64}) models_with_digest=2`)
+	task1Eventually(t, "resident launch identity", 30*time.Second, func() bool {
+		matches := identity.FindAllStringSubmatch(f.p.output.String(), -1)
+		if len(matches) == 0 {
+			return false
+		}
+		launch = matches[len(matches)-1][2]
+		return true
+	})
+	snapshot := f.snapshot(t)
+	if snapshot.Serving == nil {
+		t.Fatal("resident serving evidence missing")
+	}
+	profile, ok := f.policy(t).ProfileFor("llamacpp", "weak-model")
+	if !ok {
+		t.Fatal("resident policy profile missing")
+	}
+	var qualifications []any
+	for _, envelope := range snapshot.Serving.LaunchValidated {
+		if envelope.ModelID == "weak-model" {
+			qualifications = append(qualifications, map[string]any{
+				"id": "diagnostic-fixture-resident", "revision": "1", "engine": "llamacpp", "model": envelope.ModelID,
+				"modelDigests": []string{envelope.ContentDigest}, "launchDigests": []string{launch},
+				"tokenizer": "synthetic-diagnostic-tokenizer", "chatTemplate": "synthetic-diagnostic-template",
+				"contextTokens": envelope.PerSlotContextTokens, "maxOutputTokens": envelope.MaxOutputTokens,
+				"requestOptions": profile.RequestOptions, "requestOptionsMode": profile.RequestOptionsMode,
+				"routes":     []string{"/v1/chat/completions"},
+				"shapes":     map[string]any{"tools": false, "structuredOutput": []string{}, "reasoningReplay": false},
+				"accounting": map[string]any{"method": "utf8-bytes", "requestOverheadTokens": 8, "messageOverheadTokens": 4, "toolOverheadTokens": 0, "schemaOverheadTokens": 0},
+				"evidence":   "Synthetic diagnostic resident wiring only; no native model, hardware or performance qualification.",
+			})
+		}
+	}
+	if len(qualifications) != 1 {
+		t.Fatal("resident launch-validated envelope missing")
+	}
+	oldProxy := f.proxySnapshot(t).RunID
+	jointWriteJSON(t, filepath.Join(jointAppDir(f.base), "local-qualification.json"), map[string]any{"version": 2, "qualifications": qualifications})
+	modelDiagnosticKillWorker(t, f.proxyControl.image)
+	waitTCP(t, net.JoinHostPort("127.0.0.1", strconv.Itoa(f.proxyControl.port)), 30*time.Second)
+	f.proxyControl.ready(t, "llamacpp", f.targetFacadePort)
+	task1Eventually(t, "qualification registry proxy replacement", 30*time.Second, func() bool {
+		return f.proxySnapshot(t).RunID != oldProxy
+	})
 	policy := f.policy(t)
 	for i := range policy.Profiles {
 		if policy.Profiles[i].Key == "weak-model" {
@@ -550,15 +687,17 @@ func (f *modelDiagnosticProcessFixture) peerLoadRefused(t *testing.T) {
 
 func (f *modelDiagnosticProcessFixture) facadeAdmission(t *testing.T, want nodepolicy.RejectReason) {
 	t.Helper()
-	client := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{Proxy: nil}}
-	defer client.CloseIdleConnections()
-	request, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/v1/chat/completions", f.targetFacadePort), bytes.NewReader(mustMarshal(t, map[string]any{"model": "weak-model", "messages": []map[string]string{{"role": "user", "content": "synthetic admission probe"}}, "max_tokens": 1})))
+	// The pinned terminal ingress tests this node's actual admission decision.
+	// Plaintext is an origin router, which can wait for other routing candidates.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("https://127.0.0.1:%d/v1/chat/completions", f.targetFacadePort), bytes.NewReader(mustMarshal(t, map[string]any{"model": "weak-model", "messages": []map[string]string{{"role": "user", "content": "synthetic admission probe"}}, "max_tokens": 1})))
 	if err != nil {
 		t.Fatal(err)
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set(nodepolicy.AdmissionWaitHeader, "0")
-	response, err := client.Do(request)
+	response, err := f.client.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -664,6 +803,7 @@ func modelDiagnosticSuspendManager(t *testing.T) func() {
 func (f *modelDiagnosticProcessFixture) recovered(t *testing.T, id string) modelconfig.DiagnosticRun {
 	t.Helper()
 	var run modelconfig.DiagnosticRun
+	last := ""
 	task1Eventually(t, "public interrupted-run recovery", 240*time.Second, func() bool {
 		reply := f.rpc(t, "engine:diagnostic-status", modelconfig.DiagnosticRunRef{RunID: id})
 		if reply.Error != nil {
@@ -671,6 +811,11 @@ func (f *modelDiagnosticProcessFixture) recovered(t *testing.T, id string) model
 		}
 		if err := modelconfig.DecodeStrict(reply.Result, &run); err != nil {
 			t.Fatal(err)
+		}
+		state := run.Phase + "/" + run.Outcome + ": " + run.Reason
+		if state != last {
+			t.Logf("interrupted run recovery: %s", state)
+			last = state
 		}
 		return run.RunID == id && run.Outcome == "failed" && run.Phase == "done"
 	})

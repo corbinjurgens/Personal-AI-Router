@@ -279,7 +279,9 @@ func (e *Executor) diagnosticEffectsFence(ctx context.Context) (string, error) {
 		}
 		st.mu.Lock()
 		entry := diagnosticEngineEffects{Engine: engine, Configuration: st.ownerConfigLocked(), RunID: st.runID, Running: st.running, Loaded: []string{}}
-		uncertain := st.reclaimFailed || st.stopping || st.proc != nil && !st.running
+		// markStopped retains stopping to prevent passive re-adoption. With
+		// the lifecycle lock held, that terminal flag is not an in-flight stop.
+		uncertain := st.reclaimFailed || st.stopping && st.running || st.proc != nil && !st.running
 		st.mu.Unlock()
 		st.opMu.Unlock()
 		if uncertain || entry.Configuration == "" {

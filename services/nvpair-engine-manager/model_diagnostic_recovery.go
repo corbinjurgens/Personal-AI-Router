@@ -521,7 +521,6 @@ func (m *Manager) abortRecoveredDiagnostic(p diagnosticReleaseParams) (diagnosti
 
 func (e *Executor) retainRecoveredDiagnostic(checkpoint diagnosticCheckpoint, reservation *diagnosticReservation) {
 	e.mutationAdmission.Lock()
-	defer e.mutationAdmission.Unlock()
 	status := diagnosticOperationStatus{DiagnosticRun: checkpoint.Run.Clone(), State: "cleanup-complete", Token: reservation.token, WorkStopped: true}
 	if checkpoint.Identity != nil {
 		identity := checkpoint.Identity.Clone()
@@ -541,6 +540,10 @@ func (e *Executor) retainRecoveredDiagnostic(checkpoint diagnosticCheckpoint, re
 		delete(e.diagnosticCompleted, e.diagnosticCompletedOrder[0])
 		e.diagnosticCompletedOrder = e.diagnosticCompletedOrder[1:]
 	}
+	e.mutationAdmission.Unlock()
+	// Startup recovery can finish after the broker read the pending checkpoint.
+	// Wake its existing source-fenced reconciliation after retaining stop proof.
+	e.notify(diagnosticChangedMethod, status)
 }
 
 func (e *Executor) recoverDiagnosticEngine(ctx context.Context, engine diagnosticCheckpointEngine, runID, token string, stop func(context.Context, string) error) error {

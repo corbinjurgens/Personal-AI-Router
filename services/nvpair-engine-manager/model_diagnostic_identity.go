@@ -433,7 +433,7 @@ func (e *Executor) inspectionLoadedDiagnosticIdentity(ctx context.Context, p mod
 	}
 	st.mu.Lock()
 	running, proc, run, port, config := st.running, st.proc, st.runID, st.port, st.ownerConfigLocked()
-	uncertain := st.adopted || st.stopping || st.reclaimFailed || st.reclaimPID != 0
+	uncertain := st.adopted || st.stopping && st.running || st.reclaimFailed || st.reclaimPID != 0
 	owned := running && proc != nil && !uncertain
 	st.mu.Unlock()
 	if !running {
