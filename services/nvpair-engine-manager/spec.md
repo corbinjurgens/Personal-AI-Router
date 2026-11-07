@@ -200,9 +200,12 @@ only, with no engine launch, model loading, listener or network request. Those
 reads can initialize a driver context, so operation permission must be supplied
 by the existing activation/Pause owner. CPU remains available when prohibited.
 An independent helper-local hard exit is armed before input parsing, bounding
-native calls even if the manager dies. Unix environment keys keep their exact
-case. Linux review and replay set `CUDA_MPS_PIPE_DIRECTORY=/dev/null` after
-verifying the character device, excluding implicit default-directory MPS.
+native calls even if the manager dies. Windows cmd.exe pseudo-variables (names
+beginning with `=`) are excluded before effective-environment merging, validation
+and identity calculation. Empty names and NUL, CR or LF still refuse. Unix
+environment keys keep their exact case. Linux review and replay set
+`CUDA_MPS_PIPE_DIRECTORY=/dev/null` after verifying the character device,
+excluding implicit default-directory MPS.
 
 Primary ABI/selection sources:
 
