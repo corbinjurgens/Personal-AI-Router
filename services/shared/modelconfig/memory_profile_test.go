@@ -35,6 +35,44 @@ func TestMemoryProfileExactPools(t *testing.T) {
 	})
 }
 
+func TestMemoryProfileMeasuredDetailRequired(t *testing.T) {
+	p := MemoryProfile{Kind: "measured", ConfigurationKey: strings.Repeat("a", 64), RecordedAt: "2026-11-07T00:00:00Z"}
+	if p.Validate() == nil {
+		t.Fatal("accepted measured record without detail")
+	}
+}
+
+func TestMemoryProfileUnpricedResultRetained(t *testing.T) {
+	m := diagnosticFixture()
+	m.ConfigurationKey = ""
+	m.ExecutionKey = strings.Repeat("c", 64)
+	m.ConfigurationKeyReason = "gpu-selection"
+	p := MemoryProfile{Kind: "measured", ExecutionKey: m.ExecutionKey, NativeBuildID: m.NativeBuildID, RecordedAt: m.RecordedAt, Measured: &m}
+	if err := p.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	c := p.Clone()
+	c.Measured.GPUs[1].Name = "changed"
+	if p.Measured.GPUs[1].Name != "GPU B" {
+		t.Fatal("profile clone aliases measured detail")
+	}
+	if p.OverlayEligible(m.DiagnosticIdentity, []string{"host", "device"}) {
+		t.Fatal("unpriced record eligible")
+	}
+}
+
+func TestMemoryProfileEarlierBuildLabel(t *testing.T) {
+	m := diagnosticFixture()
+	if got := m.BuildLabel("sha256:" + strings.Repeat("c", 64)); got != "measured on "+m.NativeBuildID {
+		t.Fatalf("label = %q", got)
+	}
+	current := m.DiagnosticIdentity.Clone()
+	current.NativeBuildID = "sha256:" + strings.Repeat("c", 64)
+	if m.Matches(current) || m.AutoEligible(current, []string{"host", "device"}) {
+		t.Fatal("earlier build counted as current")
+	}
+}
+
 func TestMemoryProfileRequestCanonicalDecoding(t *testing.T) {
 	valid := `{"engine":"llamacpp","modelId":"model","configurationKey":"` + strings.Repeat("a", 64) + `","hostBytes":"18446744073709551615"}`
 	if _, err := DecodeSetStatedMemoryRequest([]byte(valid)); err != nil {
