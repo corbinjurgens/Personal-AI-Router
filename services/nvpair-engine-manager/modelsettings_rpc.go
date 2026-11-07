@@ -311,7 +311,7 @@ func (e *Executor) recordStatedMemory(ctx context.Context, p modelconfig.ClearSt
 		if err := set.Validate(); err != nil {
 			return result, modelSettingsParamsError(err)
 		}
-		value := modelconfig.MemoryProfile{ConfigurationKey: p.ConfigurationKey, Kind: "stated", RecordedAt: time.Now().UTC().Format(time.RFC3339Nano), HostBytes: set.HostBytes, DeviceBytes: set.DeviceBytes, SharedBytes: set.SharedBytes}
+		value := modelconfig.MemoryProfile{ConfigurationKey: p.ConfigurationKey, Kind: "stated", RecordedAt: time.Now().UTC().Format(time.RFC3339Nano), NativeBuildID: result.NativeBuildID, HostBytes: set.HostBytes, DeviceBytes: set.DeviceBytes, SharedBytes: set.SharedBytes}
 		if err := value.ValidatePools(result.ConfigurationPools); err != nil {
 			return result, modelSettingsParamsError(err)
 		}

@@ -267,6 +267,7 @@ export type MemoryProfile = {
     configurationKey: string
     kind: 'stated'
     recordedAt: string
+    nativeBuildId?: string
     hostBytes?: string
     deviceBytes?: string
     sharedBytes?: string

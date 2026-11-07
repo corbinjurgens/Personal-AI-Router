@@ -28,6 +28,14 @@ build root replaced by `{build_root}`. Unrelated ambient values are excluded.
 Finite configuration keys bind this source alongside artifacts and allocation
 options, so unchanged build bytes retain keys across touches and moves.
 Expected-source replay checks still reject executable or library replacement.
+
+Target-owned stated-memory records also retain `nativeBuildId`, copied from the
+compiled applied configuration rather than accepted from a caller. Inspection
+projects it with the record's configuration key and currentness. An earlier key
+remains readable history, labelled with its build as an estimate, and never
+becomes current measured or validated evidence. A record without retained build
+identity reports that absence. GPU-selection loads remain unpriced and have no
+finite key for a statement or buffer overlay.
 This read-only calculation adds no persistent mutation or native initialization;
 device helper gates and pinned advisory defaults are separate checks.
 

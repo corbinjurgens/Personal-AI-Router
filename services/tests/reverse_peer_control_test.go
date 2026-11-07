@@ -203,6 +203,15 @@ func (p *task1Process) confirmModelMutation(params json.RawMessage) {
 
 func (p *task1Process) call(t *testing.T, method string, params any) jsonrpc.Message {
 	t.Helper()
+	response := p.callResponse(t, method, params)
+	if response.Error != nil {
+		t.Fatalf("%s: %+v", method, response.Error)
+	}
+	return response
+}
+
+func (p *task1Process) callResponse(t *testing.T, method string, params any) jsonrpc.Message {
+	t.Helper()
 	id := p.send(t, method, params, true)
 	var response jsonrpc.Message
 	task1Eventually(t, method, 10*time.Second, func() bool {
@@ -219,9 +228,6 @@ func (p *task1Process) call(t *testing.T, method string, params any) jsonrpc.Mes
 		}
 		return false
 	})
-	if response.Error != nil {
-		t.Fatalf("%s: %+v", method, response.Error)
-	}
 	return response
 }
 

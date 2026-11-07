@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -15,6 +16,7 @@ type MemoryProfile struct {
 	ConfigurationKey string `json:"configurationKey"`
 	Kind             string `json:"kind"`
 	RecordedAt       string `json:"recordedAt"`
+	NativeBuildID    string `json:"nativeBuildId,omitempty"`
 	HostBytes        string `json:"hostBytes,omitempty"`
 	DeviceBytes      string `json:"deviceBytes,omitempty"`
 	SharedBytes      string `json:"sharedBytes,omitempty"`
@@ -52,6 +54,9 @@ func (p *MemoryProfile) UnmarshalJSON(data []byte) error {
 func (p MemoryProfile) Validate() error {
 	if !digest(p.ConfigurationKey) || p.Kind != "stated" {
 		return fmt.Errorf("memoryProfile: invalid configuration identity or kind")
+	}
+	if p.NativeBuildID != "" && (!strings.HasPrefix(p.NativeBuildID, "sha256:") || !digest(strings.TrimPrefix(p.NativeBuildID, "sha256:"))) {
+		return fmt.Errorf("memoryProfile.nativeBuildId: content-based build identity required")
 	}
 	at, err := time.Parse(time.RFC3339Nano, p.RecordedAt)
 	if err != nil || at.IsZero() || len(p.RecordedAt) > 64 {

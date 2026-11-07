@@ -51,6 +51,7 @@ export default function ModelMemoryStatedFigure({
     const saved = inspection?.memoryProfiles?.find(
         profile => profile.current && profile.configurationKey === inspection.configurationKey
     )
+    const history = inspection?.memoryProfiles?.filter(profile => !profile.current) ?? []
     const [values, setValues] = useState<Record<Pool, string>>({ host: '', device: '', shared: '' })
     const [pending, setPending] = useState(false)
     const [message, setMessage] = useState<string>()
@@ -115,12 +116,24 @@ export default function ModelMemoryStatedFigure({
             if (operation.current.token === token) setPending(false)
         }
     }
+    const historyRows = history.map(profile => (
+        <Text key={profile.configurationKey} kind="body/regular/sm" className="break-words">
+            Earlier configuration: measured on {profile.nativeBuildId ?? 'build not recorded'}. Your
+            figure is an estimate only, not validated for this build.
+            {profile.hostBytes !== undefined && ` Host: ${toGiB(profile.hostBytes)} GiB.`}
+            {profile.deviceBytes !== undefined && ` Device: ${toGiB(profile.deviceBytes)} GiB.`}
+            {profile.sharedBytes !== undefined && ` Shared: ${toGiB(profile.sharedBytes)} GiB.`}
+        </Text>
+    ))
     if (!inspection?.configurationKey)
         return (
-            <Text kind="body/regular/sm">
-                Stated figure unavailable:{' '}
-                {inspection?.configurationKeyReason ?? 'Configuration key unavailable'}.
-            </Text>
+            <Stack gap="2">
+                <Text kind="body/regular/sm">
+                    Stated figure unavailable:{' '}
+                    {inspection?.configurationKeyReason ?? 'Configuration key unavailable'}.
+                </Text>
+                {historyRows}
+            </Stack>
         )
     return (
         <Stack gap="2">
@@ -129,6 +142,7 @@ export default function ModelMemoryStatedFigure({
                 For the applied configuration. Your figure (not verified by PAIR).
             </Text>
             {saved && <Text kind="body/regular/sm">Saved: {saved.recordedAt}</Text>}
+            {historyRows}
             {pools.map(pool => (
                 <FormField key={pool} slotLabel={labels[pool]}>
                     <TextInput

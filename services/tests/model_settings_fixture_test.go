@@ -428,10 +428,12 @@ type modelSettingsProcessFixture struct {
 	inference                      *modelSettingsGate
 	client                         *http.Client
 	callerCluster                  string
+	peerPort                       int
 	replies                        map[string]jsonrpc.Message
 	image                          string
 	proxyProbeImage                string
 	proxyProbePort                 int
+	memory                         *modelMemoryProcessSource
 }
 
 func isolateModelSettingsPresetEnv(t *testing.T) {
@@ -598,6 +600,11 @@ func (f *modelSettingsProcessFixture) recordEngineStart(t *testing.T, w http.Res
 
 func prepareModelSettingsProcessFixture(t *testing.T) *modelSettingsProcessFixture {
 	t.Helper()
+	return prepareModelSettingsProcessFixtureAt(t, shortClusterTempDir(t))
+}
+
+func prepareModelSettingsProcessFixtureAt(t *testing.T, base string) *modelSettingsProcessFixture {
+	t.Helper()
 	image, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -614,7 +621,6 @@ func prepareModelSettingsProcessFixture(t *testing.T) *modelSettingsProcessFixtu
 		}
 	}
 	isolateModelSettingsPresetEnv(t)
-	base := shortClusterTempDir(t)
 	f := &modelSettingsProcessFixture{engineProcessFixture: prepareEngineProcessFixture(t, base, reserveFixtureServicePorts(t), ""), managerInvocations: map[modelSettingsManagerInvocation]int{}}
 	f.image = image
 	t.Cleanup(func() { f.assertEngineImages(t) })
@@ -623,6 +629,10 @@ func prepareModelSettingsProcessFixture(t *testing.T) *modelSettingsProcessFixtu
 	modelSettingsWrite(t, filepath.Join(f.root, "weak.gguf"), modelSettingsGGUF("blk.1.weight"))
 	modelSettingsWrite(t, f.preset, []byte("[*]\nfit = off\nload-on-startup = false\n[medium-model]\nmodel = medium.gguf\nctx-size = 4096\nparallel = 1\ngpu-layers = 0\n[weak-model]\nmodel = weak.gguf\nctx-size = 4096\nparallel = 1\ngpu-layers = 0\n"))
 	server := newFixtureHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/memory-node-info" {
+			f.serveMemoryNodeInfo(w, r)
+			return
+		}
 		if r.URL.Path == "/engine-started" {
 			f.recordEngineStart(t, w, r)
 			return
@@ -792,6 +802,10 @@ func (f *modelSettingsProcessFixture) startModelSettings(t *testing.T) {
 		"OLLAMA_MODELS=" + filepath.Join(f.base, "absent-model-sources", "ollama"),
 	}...)
 	args := append([]string{"--scanner-path", f.scanner, "--engine-manager-path", f.manager, "--engine-manager-control-host", "127.0.0.1", "--proxy-path", f.proxyControl.image, "--proxy-engines", "llamacpp", "--cluster-dir", filepath.Join(f.base, "cluster")}, f.ports.args()...)
+	if f.memory != nil {
+		env = append(env, "NVPAIR_TEST_MEMORY_NODE_INFO="+f.image)
+		args = append(args, "--node-info-path", f.image)
+	}
 	f.p = startInteropProcess(t, f.base, brokerBin, f.ports.engineManagerHTTP, env, args...)
 	// Registered after process cleanup so a failed assertion cannot leave its
 	// own controller barrier blocking EOF and force-kill cleanup.
@@ -968,9 +982,11 @@ func (f *modelSettingsProcessFixture) seedModelSettingsPolicyBounds(t *testing.T
 func (f *modelSettingsProcessFixture) pinned(t *testing.T) {
 	t.Helper()
 	cluster := filepath.Join(f.base, "cluster")
-	f.callerCluster = t.TempDir()
-	if err := os.MkdirAll(cluster, 0o700); err != nil {
-		t.Fatal(err)
+	f.callerCluster = filepath.Join(t.TempDir(), "cluster")
+	for _, dir := range []string{cluster, f.callerCluster} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
 	const target, caller = "model-settings-target", "model-settings-caller"
 	targetCert, callerCert := mintClusterIdentity(t, cluster, target), mintClusterIdentity(t, f.callerCluster, caller)
@@ -992,7 +1008,11 @@ func (f *modelSettingsProcessFixture) pinned(t *testing.T) {
 
 func (f *modelSettingsProcessFixture) peer(t *testing.T, method string, p any, status int) []byte {
 	t.Helper()
-	response, err := f.client.Post(fmt.Sprintf("https://127.0.0.1:%d/v1/engine-settings/%s", f.ports.engineControl, method), "application/json", bytes.NewReader(mustMarshal(t, p)))
+	port := f.ports.engineControl
+	if f.peerPort != 0 {
+		port = f.peerPort
+	}
+	response, err := f.client.Post(fmt.Sprintf("https://127.0.0.1:%d/v1/engine-settings/%s", port, method), "application/json", bytes.NewReader(mustMarshal(t, p)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1002,7 +1022,14 @@ func (f *modelSettingsProcessFixture) peer(t *testing.T, method string, p any, s
 		t.Fatal("private peer reply exceeds bound or cannot be read")
 	}
 	if response.StatusCode != status {
-		t.Fatalf("pinned %s HTTP %d, want %d", method, response.StatusCode, status)
+		var failure struct {
+			Code  string `json:"code"`
+			Error string `json:"error"`
+		}
+		if err := json.Unmarshal(data, &failure); err != nil {
+			t.Fatalf("pinned %s HTTP %d, want %d (invalid error JSON: %v)", method, response.StatusCode, status, err)
+		}
+		t.Fatalf("pinned %s HTTP %d, want %d: code=%s error=%s", method, response.StatusCode, status, failure.Code, failure.Error)
 	}
 	return data
 }
@@ -1033,14 +1060,14 @@ func modelSettingsWait(t *testing.T, g *modelSettingsGate) {
 	}
 }
 
-func modelSettingsGGUF(tensor string) []byte {
+func modelSettingsGGUF(tensor string, metadata ...[2]string) []byte {
 	data := []byte("GGUF")
 	u32 := func(v uint32) { data = binary.LittleEndian.AppendUint32(data, v) }
 	u64 := func(v uint64) { data = binary.LittleEndian.AppendUint64(data, v) }
 	str := func(v string) { u64(uint64(len(v))); data = append(data, v...) }
 	u32(3)
 	u64(1)
-	u64(3)
+	u64(uint64(3 + len(metadata)))
 	str("general.architecture")
 	u32(8)
 	str("llama")
@@ -1050,6 +1077,11 @@ func modelSettingsGGUF(tensor string) []byte {
 	str("llama.block_count")
 	u32(4)
 	u32(4)
+	for _, item := range metadata {
+		str(item[0])
+		u32(8)
+		str(item[1])
+	}
 	str(tensor)
 	u32(1)
 	u64(32)

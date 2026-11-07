@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"reflect"
 	"sync"
 
 	settings "nvpair-shared/enginesettings"
@@ -30,13 +29,6 @@ type settingsRelay struct {
 }
 
 func (r *settingsRelay) call(ctx context.Context, method string, request settings.Request, caller string) (json.RawMessage, error) {
-	if method == "inspect" {
-		carrier := settings.Request{Engine: request.Engine, NodeID: request.NodeID, Resolution: request.Resolution}
-		if !reflect.DeepEqual(request, carrier) {
-			return nil, modelSettingsParamsError(fmt.Errorf("inspect: internal carrier must contain only target identity"))
-		}
-		return r.callInspect(ctx, modelconfig.InspectRequest{Engine: request.Engine, NodeID: request.NodeID, ModelID: request.Resolution}, caller)
-	}
 	return r.callRelay(ctx, settings.Relay{Method: method, Request: request, Caller: caller})
 }
 

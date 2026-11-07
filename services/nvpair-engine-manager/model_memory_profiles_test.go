@@ -63,6 +63,26 @@ func TestModelMemoryProfilesLocalRecordWhilePaused(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestModelMemoryProfilesEarlierBuildRemainsHistory(t *testing.T) {
+	f, q := memoryProfilesFixture(t)
+	set := modelconfig.SetStatedMemoryRequest{Engine: q.Engine, ModelID: q.ModelID, ConfigurationKey: q.ConfigurationKey, HostBytes: "12345"}
+	first, err := f.ex.recordStatedMemory(keyTestMemoryContext(), q, &set)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.MemoryProfiles) != 1 || first.MemoryProfiles[0].NativeBuildID == "" || first.MemoryProfiles[0].NativeBuildID != first.NativeBuildID {
+		t.Fatal("statement lost content-based native build provenance")
+	}
+	writeTestFile(t, filepath.Join(f.st.installDir, "libggml-base.dylib"), []byte("another private native build"))
+	next := inspectAppliedKeyFixture(t, f)
+	if next.ConfigurationKey == q.ConfigurationKey || len(next.MemoryProfiles) != 1 || next.MemoryProfiles[0].Current || next.MemoryProfiles[0].NativeBuildID != first.NativeBuildID || next.NativeBuildID == first.NativeBuildID {
+		t.Fatal("earlier-build statement was lost or marked current")
+	}
+	if next.Estimate.EstimateSource != nil && (next.Estimate.EstimateSource.Kind == "user-stated" || next.Estimate.EstimateSource.Kind == "measured") {
+		t.Fatal("earlier-build history lifted current-build estimate uncertainty")
+	}
+}
 func TestModelMemoryProfilesExactPools(t *testing.T) {
 	test := func(name string, host, device, shared string) {
 		t.Run(name, func(t *testing.T) {

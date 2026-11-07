@@ -109,6 +109,11 @@ inactive pages; AGX aliases share the RAM pool. Missing or unmatched counters
 remain unknown. No process GPU budget or name/ordinal capacity matching is
 used. Native accuracy acceptance is untested by portable fixture tests.
 
+The process regression `TestModelMemoryTelemetryProcess` substitutes only the
+node-info producer and runs the real scanner, broker and engine manager. Its
+private loopback samples exercise source/time propagation, replacement, expiry,
+removal and shared-pool accounting without collecting the host's hardware.
+
 ## Shutdown
 
 The service shuts down on:

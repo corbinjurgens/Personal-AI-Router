@@ -1663,3 +1663,28 @@ then emits private `engine:admitted-load-request{id,params:{engine,model}}` to t
 broker. The broker admits and executes through its existing reservation owner and
 answers `engine:admitted-load-reply{id,result?,error?:{code,message}}`. Caller
 cancellation removes the manager waiter; broker execution has its own bound.
+
+## Target memory telemetry
+
+Inspection and preview consume the target broker's scanner-backed memory,
+including its independent capacity/available provenance and remaining validity.
+UMA is one shared pool. Device names and array ordinals never select capacity;
+several dedicated GPUs leave placement unproved. GPU-selection extra options
+remain accepted and unpriced. These estimates are advisory, never admission or
+qualification. The process fixtures exercise fake observations through real
+workers; they establish no native allocation accuracy. Production Auto and its
+accepted-result recovery acceptance still require complete-cost accounting.
+
+Stated figures are stored by the target for an applied finite configuration key,
+with its content-based `nativeBuildId`. Local and pinned direct/reverse writes
+use the same broker relay and manager store. A settings or native-build change
+keeps the earlier record readable but makes it non-current. Earlier-build
+history is labelled as an estimate, never validated or selected as current
+measured evidence. A record with no retained build identity says so explicitly.
+GPU-selection extra options have reason `gpu-selection` and no finite key, so
+they cannot save a stated figure or use a buffer overlay.
+
+Peer inspection preserves `profileKey` through the typed inspection relay, so
+the target reports the selected applied configuration instead of inspecting
+only its artifacts. Stated-memory writes from an origin broker use the target
+`nodeId`; their replies and durable records belong only to that target.

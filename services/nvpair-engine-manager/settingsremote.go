@@ -143,7 +143,7 @@ func (m *Manager) remoteStatedMemory(ctx context.Context, msg *Message) {
 // remote-management grant.
 func (s *controlServer) settingsHandler(method string) pinnedPeerHandler {
 	return func(w http.ResponseWriter, r *http.Request, caller string) {
-		if s.exec.settingsParent == nil {
+		if method == "inspect" && s.exec.inspectParent == nil || method != "inspect" && s.exec.settingsParent == nil {
 			http.Error(w, "settings coordinator unavailable", 503)
 			return
 		}
@@ -157,17 +157,17 @@ func (s *controlServer) settingsHandler(method string) pinnedPeerHandler {
 			return
 		}
 		var p settings.Request
+		var inspection modelconfig.InspectRequest
 		if method == "inspect" {
 			inspect, err := modelconfig.DecodeInspectRequest(raw)
 			if err != nil {
 				http.Error(w, "invalid model inspection request", http.StatusBadRequest)
 				return
 			}
-			// settingsParent retains its existing executor signature. Resolution
-			// is an internal carrier only; settingsRelay.call converts it to the
-			// shared Relay.Inspect pointer (and no Relay.Request) before sending.
-			// NodeID is cleared here to prohibit forwarding another target hop.
-			p = settings.Request{Engine: inspect.Engine, Resolution: inspect.ModelID}
+			// Preserve the complete typed identity through the existing inspection
+			// relay. This peer can address only this target, never another hop.
+			inspection = inspect
+			inspection.NodeID = ""
 		} else {
 			p, err = settings.DecodeRequest(raw)
 			if err != nil {
@@ -201,7 +201,12 @@ func (s *controlServer) settingsHandler(method string) pinnedPeerHandler {
 				}
 			}
 		}()
-		result, err := s.exec.settingsParent(ctx, method, p, caller)
+		var result json.RawMessage
+		if method == "inspect" {
+			result, err = s.exec.inspectParent(ctx, inspection, caller)
+		} else {
+			result, err = s.exec.settingsParent(ctx, method, p, caller)
+		}
 		if err != nil {
 			// A local veto or a refused management operation is a typed 409
 			// the caller maps back to its code; anything else is a plain 409.

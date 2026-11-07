@@ -40,7 +40,7 @@ func TestMemoryProfileRequestCanonicalDecoding(t *testing.T) {
 	if _, err := DecodeSetStatedMemoryRequest([]byte(valid)); err != nil {
 		t.Fatal(err)
 	}
-	for _, suffix := range []string{`,"hostBytes":"1"`, `,"memory":{}`, `,"current":true`} {
+	for _, suffix := range []string{`,"hostBytes":"1"`, `,"memory":{}`, `,"current":true`, `,"nativeBuildId":"sha256:` + strings.Repeat("b", 64) + `"`} {
 		t.Run(suffix, func(t *testing.T) {
 			raw := strings.TrimSuffix(valid, "}") + suffix + "}"
 			if _, err := DecodeSetStatedMemoryRequest([]byte(raw)); err == nil {
@@ -52,6 +52,30 @@ func TestMemoryProfileRequestCanonicalDecoding(t *testing.T) {
 		t.Run(bytes, func(t *testing.T) {
 			if _, err := DecodeSetStatedMemoryRequest([]byte(strings.Replace(valid, "18446744073709551615", bytes, 1))); err == nil {
 				t.Fatal("accepted noncanonical bytes")
+			}
+		})
+	}
+}
+
+func TestMemoryProfileBuildProvenance(t *testing.T) {
+	p := MemoryProfile{ConfigurationKey: strings.Repeat("a", 64), Kind: "stated", RecordedAt: "2026-11-07T00:00:00Z", HostBytes: "1024", NativeBuildID: "sha256:" + strings.Repeat("b", 64)}
+	data, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded MemoryProfile
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded != p {
+		t.Fatal("record lost build provenance on round trip")
+	}
+	for _, id := range []string{"local-build-path", "sha256:", "sha256:" + strings.Repeat("B", 64)} {
+		t.Run(id, func(t *testing.T) {
+			candidate := p
+			candidate.NativeBuildID = id
+			if candidate.Validate() == nil {
+				t.Fatal("accepted non-content build identity")
 			}
 		})
 	}

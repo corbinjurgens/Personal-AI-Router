@@ -1644,6 +1644,7 @@ function memoryProfile(value: JsonValue): MemoryProfile {
         'configurationKey',
         'kind',
         'recordedAt',
+        'nativeBuildId',
         'hostBytes',
         'deviceBytes',
         'sharedBytes',
@@ -1659,6 +1660,7 @@ function memoryProfile(value: JsonValue): MemoryProfile {
         configurationKey: digest(row.configurationKey),
         kind: choice(row.kind, ['stated']),
         recordedAt,
+        nativeBuildId: optionalText(row.nativeBuildId, 256),
         current: flag(row.current),
         hostBytes: row.hostBytes === undefined ? undefined : unsigned(row.hostBytes),
         deviceBytes: row.deviceBytes === undefined ? undefined : unsigned(row.deviceBytes),
@@ -1672,6 +1674,8 @@ function memoryProfile(value: JsonValue): MemoryProfile {
             (profile.hostBytes !== undefined || profile.deviceBytes !== undefined))
     )
         throw new Error('Invalid memory profile pools.')
+    if (profile.nativeBuildId && !/^sha256:[0-9a-f]{64}$/.test(profile.nativeBuildId))
+        throw new Error('Invalid memory profile build identity.')
     return profile
 }
 function option(value: JsonValue): NonNullable<InspectModelResult['options']>[number] {

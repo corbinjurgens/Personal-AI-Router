@@ -696,6 +696,9 @@ func (e *Executor) inspectModelArtifacts(ctx context.Context, p modelconfig.Insp
 			}
 			if finite, ok := compiled[p.ProfileKey]; ok && finite.Allocation != nil {
 				input = finite
+				// Use the native source that compilation checked for this applied
+				// configuration, including offline inspection after a build change.
+				result.NativeBuildID = input.Allocation.NativeBuildID
 				if op, ok := ctx.Value(modelAutoOperationKey{}).(modelAutoOperation); ok && op.Memory != nil {
 					input.Memory, _ = op.Memory.ModelAutoMemory(ctx)
 				}

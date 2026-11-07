@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	settings "nvpair-shared/enginesettings"
+	"nvpair-shared/modelconfig"
 	"nvpair-shared/nodepolicy"
 	"os"
 	"path/filepath"
@@ -134,6 +135,7 @@ type Executor struct {
 	settingsHub              settings.Hub
 	admittedLoadParent       func(context.Context, string, string) (json.RawMessage, error)
 	settingsParent           func(context.Context, string, settings.Request, string) (json.RawMessage, error)
+	inspectParent            func(context.Context, modelconfig.InspectRequest, string) (json.RawMessage, error)
 	memoryProfilesParent     func(context.Context, settings.Relay) (json.RawMessage, error)
 	// policyParent relays a paired node's node-policy call to the broker
 	// (policyrelay.go). nil until a Manager wires it.
