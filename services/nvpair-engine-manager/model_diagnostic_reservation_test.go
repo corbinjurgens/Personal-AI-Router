@@ -28,7 +28,7 @@ func diagnosticReservationFixture(t *testing.T) (inspectionFixture, diagnosticRe
 	}
 	p := diagnosticReserveParams{RunID: "reservation-test", Engine: "llamacpp", ModelID: f.request.ModelID,
 		ProfileKey: f.request.ProfileKey, ConfigurationKey: identity.ConfigurationKey,
-		EffectsFence: fence, TargetMemory: modelBufferTestTargetMemory()}
+		EffectsFence: fence, TargetMemory: modelBufferTestTargetMemory(), Hardware: diagnosticTestHardware()}
 	if p.ConfigurationKey == "" {
 		p.ExecutionKey = identity.ExecutionKey
 	}

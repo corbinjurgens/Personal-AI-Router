@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,11 +21,14 @@ import (
 )
 
 type diagnosticStatusReply struct {
-	Run         modelconfig.DiagnosticRun `json:"run"`
-	State       string                    `json:"state"`
-	Token       string                    `json:"token,omitempty"`
-	WorkStopped bool                      `json:"workStopped"`
-	Markers     map[string]time.Time      `json:"markers,omitempty"`
+	Run         modelconfig.DiagnosticRun       `json:"run"`
+	State       string                          `json:"state"`
+	Token       string                          `json:"token,omitempty"`
+	WorkStopped bool                            `json:"workStopped"`
+	Markers     map[string]time.Time            `json:"markers,omitempty"`
+	Identity    *modelconfig.DiagnosticIdentity `json:"identity,omitempty"`
+	Low         *modelconfig.MeasuredPhase      `json:"low,omitempty"`
+	High        *modelconfig.MeasuredPhase      `json:"high,omitempty"`
 }
 
 func diagnosticIdentityFixture() modelconfig.DiagnosticIdentity {
@@ -42,7 +46,7 @@ func diagnosticBrokerFixture(t *testing.T) (*Broker, *fakeWorker, *brokerDiagnos
 	b.setEngineMgr(worker)
 	_, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	op := &brokerDiagnostic{runID: "diagnostic-run", worker: worker, cancel: cancel, done: make(chan struct{}), wake: make(chan struct{}, 1), token: "reservation", reserveAttempted: true, recorded: true}
+	op := &brokerDiagnostic{runID: "diagnostic-run", worker: worker, cancel: cancel, done: make(chan struct{}), wake: make(chan struct{}, 1), token: "reservation", reserveAttempted: true, runAttempted: true, accepted: true}
 	op.run = modelconfig.DiagnosticRun{RunID: op.runID, Engine: "llamacpp", ModelID: "fixture.gguf", ProfileKey: "fixture", ConfigurationKey: strings.Repeat("a", 64), Phase: "high", Outcome: "running", StartedAt: "2026-11-07T00:00:00Z"}
 	op.review.preview = modelconfig.DiagnosticPreview{DiagnosticIdentity: diagnosticIdentityFixture(), DiagnosticPreviewRequest: modelconfig.DiagnosticPreviewRequest{Engine: op.run.Engine, ModelID: op.run.ModelID, ProfileKey: op.run.ProfileKey}}
 	close(op.done)
@@ -159,7 +163,7 @@ func TestModelDiagnosticCancelWaitsForJoin(t *testing.T) {
 	unblock := func() { once.Do(func() { close(release) }) }
 	t.Cleanup(unblock)
 	run := op.run.Clone()
-	fake.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+	setDiagnosticContractAnswer(t, fake, op, func(method string, raw json.RawMessage) (any, string) {
 		switch method {
 		case "engine:diagnostic-run-status":
 			return diagnosticStatusReply{Run: run, State: "running"}, ""
@@ -206,7 +210,7 @@ func TestModelDiagnosticCleanupFailureRetainsHoldForRetry(t *testing.T) {
 	b, fake, op := diagnosticBrokerFixture(t)
 	run := op.run.Clone()
 	aborts := 0
-	fake.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+	setDiagnosticContractAnswer(t, fake, op, func(method string, raw json.RawMessage) (any, string) {
 		if method == "engine:diagnostic-run-status" {
 			return diagnosticStatusReply{Run: run, State: "running"}, ""
 		}
@@ -236,13 +240,14 @@ func TestModelDiagnosticCleanupFailureRetainsHoldForRetry(t *testing.T) {
 func TestModelDiagnosticLostReserveReplyReconcilesBeforeRelease(t *testing.T) {
 	b, fake, op := diagnosticBrokerFixture(t)
 	op.token = ""
+	op.accepted, op.runAttempted = false, false
 	op.reserveUncertain = true
 	op.reserveRequest = diagnosticReserveRequest{RunID: op.runID, Engine: "llamacpp", ModelID: "fixture.gguf", ProfileKey: "fixture", ConfigurationKey: strings.Repeat("a", 64), EffectsFence: "effects"}
 	run := op.run.Clone()
 	fake.setAnswer(func(method string, raw json.RawMessage) (any, string) {
 		switch method {
 		case "engine:diagnostic-run-status":
-			return diagnosticStatusReply{Run: run, State: "reserved"}, ""
+			return diagnosticStatusReply{Run: run, State: "reserved", WorkStopped: true}, ""
 		case "engine:diagnostic-reserve":
 			var p diagnosticReserveRequest
 			if err := json.Unmarshal(raw, &p); err != nil {
@@ -300,7 +305,7 @@ func TestModelDiagnosticAdmissionRequiresExplicitIdleEvidence(t *testing.T) {
 
 func diagnosticMemoryFixture(at time.Time, available uint64) *noderec.MemoryObservation {
 	fact := func(bytes uint64) noderec.MemoryFact {
-		return noderec.MemoryFact{Bytes: strconv.FormatUint(bytes, 10), Source: "fixture", SampledAt: at, Valid: true}
+		return noderec.MemoryFact{Bytes: strconv.FormatUint(bytes, 10), Source: "fixture", SampledAt: at.UTC(), Valid: true}
 	}
 	return &noderec.MemoryObservation{RunID: "memory-run", Domains: []noderec.MemoryDomain{{ID: "ram", Kind: "system", Total: fact(10000), Free: fact(available)}}}
 }
@@ -356,6 +361,21 @@ func TestModelDiagnosticMedianAndPhaseMinimums(t *testing.T) {
 	}
 }
 
+func TestModelDiagnosticAfterLoadNeedsTwoSamplesFromEveryPool(t *testing.T) {
+	at := time.Now().UTC()
+	samples := diagnosticSamples{baselinePools: []string{"ram", "gpu"}, pools: map[string][]diagnosticPoolSample{
+		"ram": {{at: at.Add(-time.Second)}, {at: at}, {at: at.Add(time.Second)}},
+		"gpu": {{at: at.Add(-time.Second)}, {at: at}},
+	}}
+	if samples.phaseReady(at, 2) {
+		t.Fatal("pre-load sample filled the missing GPU sample")
+	}
+	samples.pools["gpu"] = append(samples.pools["gpu"], diagnosticPoolSample{at: at.Add(time.Second)})
+	if !samples.phaseReady(at, 2) {
+		t.Fatal("two after-load samples from every pool were not ready")
+	}
+}
+
 func TestModelDiagnosticOverlapRequiresEveryPoolSample(t *testing.T) {
 	at := time.Date(2026, 11, 7, 0, 0, 0, 0, time.UTC)
 	first, end := float64(1000), float64(3000)
@@ -408,11 +428,19 @@ func TestModelDiagnosticCheckpointDrainsBeforePolicyReplay(t *testing.T) {
 		t.Fatal("pending checkpoint replay failed")
 	}
 	t.Cleanup(func() {
+		var released atomic.Bool
 		manager.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+			if method == "engine:diagnostic-release" {
+				released.Store(true)
+				return nil, ""
+			}
+			if released.Load() {
+				return diagnosticStatusReply{State: "none"}, ""
+			}
 			terminal := run.Clone()
 			terminal.Outcome = "failed"
 			terminal.Phase = "done"
-			return diagnosticStatusReply{Run: terminal, State: "cleanup-complete", WorkStopped: true}, ""
+			return diagnosticStatusReply{Run: terminal, State: "cleanup-complete", Token: "recovered", WorkStopped: true}, ""
 		})
 		if _, err := b.cancelDiagnostic(context.Background(), run.RunID); err != nil {
 			t.Errorf("release recovered fixture: %v", err)
@@ -548,6 +576,7 @@ func TestModelDiagnosticConfiguredPausePreviewsUnknownNativeAllocation(t *testin
 	identity.PerSlotContext = 0
 	identity.Slots = 0
 	identity.Placement = nil
+	seedDiagnosticHardware(t, b, identity, now)
 	peer, manager := newFakeWorkerPipe(t)
 	b.setEngineMgr(&rpcWorker{peer: peer})
 	manager.setAnswer(func(method string, raw json.RawMessage) (any, string) {
@@ -692,7 +721,7 @@ func TestModelDiagnosticLostRunAcceptanceIsJoined(t *testing.T) {
 	b, manager, _, op := diagnosticAcquisitionFixture(t)
 	run := op.run.Clone()
 	accepted := false
-	manager.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+	setDiagnosticContractAnswer(t, manager, op, func(method string, raw json.RawMessage) (any, string) {
 		switch method {
 		case "engine:diagnostic-reserve":
 			return map[string]string{"runId": op.runID, "token": "token", "state": "reserved"}, ""
@@ -720,7 +749,7 @@ func TestModelDiagnosticLostRunAcceptanceIsJoined(t *testing.T) {
 	if !op.accepted {
 		t.Fatal("lost accepted reply treated as refusal")
 	}
-	op.recorded = true // This case isolates acceptance/join from record persistence.
+	// The real record/release wire calls are part of the acceptance regression.
 	if err := b.cleanupDiagnostic(context.Background(), op); err != nil {
 		t.Fatal(err)
 	}

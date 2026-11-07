@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 
@@ -30,6 +31,7 @@ type diagnosticReserveParams struct {
 	ExecutionKey     string                    `json:"executionKey,omitempty"`
 	EffectsFence     string                    `json:"effectsFence"`
 	TargetMemory     *modelconfig.TargetMemory `json:"targetMemory,omitempty"`
+	Hardware         *diagnosticHardware       `json:"hardware,omitempty"`
 }
 
 type diagnosticReleaseParams struct {
@@ -44,13 +46,16 @@ type diagnosticReservationResult struct {
 }
 
 type diagnosticReservation struct {
-	params          diagnosticReserveParams
-	token           string
-	ready           bool
-	settled         chan struct{}
-	release         func()
-	workUnconfirmed bool
-	pauseGeneration uint64
+	params             diagnosticReserveParams
+	token              string
+	ready              bool
+	settled            chan struct{}
+	release            func()
+	workUnconfirmed    bool
+	pauseGeneration    uint64
+	identity           *modelconfig.DiagnosticIdentity
+	checkpoint         *diagnosticCheckpoint
+	configurationPools []string
 }
 
 type diagnosticAuthorityKey struct{}
@@ -85,7 +90,7 @@ func (p diagnosticReserveParams) sameRequest(other diagnosticReserveParams) bool
 	// A refreshed telemetry observation is not a different requested effect.
 	return p.RunID == other.RunID && p.Engine == other.Engine && p.ModelID == other.ModelID &&
 		p.ProfileKey == other.ProfileKey && p.ConfigurationKey == other.ConfigurationKey &&
-		p.ExecutionKey == other.ExecutionKey && p.EffectsFence == other.EffectsFence
+		p.ExecutionKey == other.ExecutionKey && p.EffectsFence == other.EffectsFence && reflect.DeepEqual(p.Hardware.clone(), other.Hardware.clone())
 }
 
 func (r *diagnosticReservation) result() diagnosticReservationResult {
@@ -94,8 +99,8 @@ func (r *diagnosticReservation) result() diagnosticReservationResult {
 
 // reserveDiagnostic closes admission before doing bounded observation I/O. The
 // provisional global ticket has no usable token. A mismatch retires that ticket
-// without starting, stopping, loading or writing policy. No lifecycle lock or
-// I/O is held under mutationAdmission.
+// without starting, stopping, loading or writing policy. Observation I/O holds
+// no admission/lifecycle lock; durable acceptance is serialized with admission.
 func (e *Executor) reserveDiagnostic(ctx context.Context, p diagnosticReserveParams) (diagnosticReservationResult, error) {
 	if err := p.validate(); err != nil {
 		return diagnosticReservationResult{}, modelSettingsParamsError(err)
@@ -143,10 +148,23 @@ func (e *Executor) reserveDiagnostic(ctx context.Context, p diagnosticReservePar
 	reservation.pauseGeneration = e.nodeProjection.pauseGeneration
 	e.nodeProjection.mu.Unlock()
 	reservation.params.TargetMemory = p.TargetMemory.Clone()
+	reservation.params.Hardware = p.Hardware.clone()
 	e.diagnostic = reservation
 	e.mutationAdmission.Unlock()
 
 	err = e.compareDiagnosticReservation(ctx, p)
+	var identity modelconfig.DiagnosticIdentity
+	var configurationPools []string
+	if err == nil {
+		identityCtx := withDiagnosticHardware(e.modelMemoryContext(ctx, p.Engine, p.TargetMemory, false), p.Hardware)
+		request := modelconfig.InspectRequest{Engine: p.Engine, ModelID: p.ModelID, ProfileKey: p.ProfileKey}
+		var inspection modelconfig.InspectResult
+		inspection, err = e.inspectModelArtifacts(identityCtx, request)
+		if err == nil {
+			identity, err = e.diagnosticRequestedIdentity(identityCtx, request, inspection)
+			configurationPools = slices.Clone(inspection.ConfigurationPools)
+		}
+	}
 	e.mutationAdmission.Lock()
 	if err == nil {
 		err = ctx.Err()
@@ -166,14 +184,24 @@ func (e *Executor) reserveDiagnostic(ctx context.Context, p diagnosticReservePar
 		}
 	}
 	if err == nil {
+		reservation.identity = &identity
+		reservation.configurationPools = configurationPools
+		// A failed publication may already be visible after rename. Retain the
+		// global hold, expose its authority through status, and recover it.
+		err = e.checkpointDiagnosticReservation(p)
 		reservation.ready = true
+		if err != nil {
+			reservation.workUnconfirmed = true
+		}
 	} else {
 		e.diagnostic = nil
 	}
 	close(reservation.settled)
 	e.mutationAdmission.Unlock()
 	if err != nil {
-		release()
+		if !reservation.ready {
+			release()
+		}
 		return diagnosticReservationResult{}, err
 	}
 	return reservation.result(), nil
@@ -182,6 +210,9 @@ func (e *Executor) reserveDiagnostic(ctx context.Context, p diagnosticReservePar
 // Caller holds mutationAdmission. Registrations are checked as well as mutation
 // tickets, including loads already waiting for the lifecycle lock.
 func (e *Executor) diagnosticIdleLocked() error {
+	if e.diagnosticOperation != nil {
+		return diagnosticConflict("diagnostic completion is in flight")
+	}
 	if e.shuttingDown.Load() {
 		return fmt.Errorf("engine-manager is shutting down")
 	}
@@ -390,18 +421,22 @@ func (e *Executor) diagnosticOperationsActiveLocked() bool {
 
 func (e *Executor) releaseDiagnostic(p diagnosticReleaseParams) error {
 	e.mutationAdmission.Lock()
-	if done, ok := e.diagnosticCompleted[p.RunID]; ok && done.token == p.Token && done.Status.WorkStopped {
-		e.mutationAdmission.Unlock()
-		return nil
-	}
 	r := e.diagnostic
 	if r == nil || !r.ready || r.params.RunID != p.RunID || r.token != p.Token {
+		if done, ok := e.diagnosticCompleted[p.RunID]; ok && done.token == p.Token && done.Status.WorkStopped {
+			e.mutationAdmission.Unlock()
+			return nil
+		}
 		e.mutationAdmission.Unlock()
 		return diagnosticConflict("invalid reservation authority")
 	}
 	if r.workUnconfirmed || e.diagnosticOperationsActiveLocked() {
 		e.mutationAdmission.Unlock()
 		return diagnosticConflict("diagnostic work is not confirmed stopped")
+	}
+	if err := e.clearDiagnosticCheckpointLocked(p.RunID, p.Token); err != nil {
+		e.mutationAdmission.Unlock()
+		return err
 	}
 	e.diagnostic = nil
 	e.mutationAdmission.Unlock()
@@ -410,6 +445,9 @@ func (e *Executor) releaseDiagnostic(p diagnosticReleaseParams) error {
 }
 
 func (m *Manager) handleDiagnosticReservationRequest(ctx context.Context, msg *Message) bool {
+	if m.handleDiagnosticEvidenceRequest(ctx, msg) {
+		return true
+	}
 	if !msg.IsRequest() {
 		return false
 	}

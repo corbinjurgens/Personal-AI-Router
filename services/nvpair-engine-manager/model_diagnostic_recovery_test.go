@@ -126,8 +126,8 @@ func TestModelDiagnosticRecoveryRestoresAdmissionBeforeCleanup(t *testing.T) {
 	if err := ex.Wake(context.Background(), "llamacpp"); !errors.As(err, &busy) {
 		t.Fatalf("activation during recovery = %v, want diagnostic busy", err)
 	}
-	if err := ex.RestoreInstalled(context.Background()); err != nil {
-		t.Fatalf("fenced automatic restore: %v", err)
+	if err := ex.RestoreInstalled(context.Background()); !errors.As(err, &busy) {
+		t.Fatalf("automatic restore during recovery = %v, want diagnostic busy", err)
 	}
 	st, err := ex.state("llamacpp")
 	if err != nil {

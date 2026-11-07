@@ -11,8 +11,8 @@ import { isValidProfileKey } from '@/shared/utils/node-policy-model-settings'
 import type { JsonObject, JsonValue } from './json-rpc-client'
 import { diagnosticTimestamp, measuredProfile, parseDiagnosticIdentity } from './engine-settings'
 
-// The broker owns a bounded cleanup join. Leave room outside its minute budget.
-export const DIAGNOSTIC_CANCEL_TIMEOUT_MS = 90_000
+// The broker owns a three-minute cleanup join, including the manager's stop budget.
+export const DIAGNOSTIC_CANCEL_TIMEOUT_MS = 210_000
 
 function invalid(): never {
     throw new Error('Invalid model diagnostic payload.')
@@ -129,6 +129,8 @@ export function parseDiagnosticPreview(value: JsonValue | undefined): Diagnostic
         'slots',
         'placement',
         'previewId',
+        'plannedPerSlotContext',
+        'plannedSlots',
         'lowPromptTokens',
         'highPromptTokens',
         'generateTokens',
@@ -146,6 +148,8 @@ export function parseDiagnosticPreview(value: JsonValue | undefined): Diagnostic
         ...target(row),
         ...parseDiagnosticIdentity(row),
         previewId: text(row.previewId),
+        plannedPerSlotContext: integer(row.plannedPerSlotContext),
+        plannedSlots: integer(row.plannedSlots, 8),
         lowPromptTokens: integer(row.lowPromptTokens),
         highPromptTokens: integer(row.highPromptTokens),
         generateTokens: integer(row.generateTokens),
@@ -158,12 +162,14 @@ export function parseDiagnosticPreview(value: JsonValue | undefined): Diagnostic
         expiresAt: diagnosticTimestamp(row.expiresAt)
     }
     const knownTargets =
-        result.perSlotContext >= 208 &&
-        result.slots >= 1 &&
-        result.highPromptTokens === result.perSlotContext - 144 &&
+        result.plannedPerSlotContext >= 208 &&
+        result.plannedSlots >= 1 &&
+        result.highPromptTokens === result.plannedPerSlotContext - 144 &&
         result.lowPromptTokens === Math.min(512, Math.floor(result.highPromptTokens / 2))
     const unknownTargets =
-        result.perSlotContext === 0 && result.lowPromptTokens === 0 && result.highPromptTokens === 0
+        result.plannedPerSlotContext === 0 &&
+        result.lowPromptTokens === 0 &&
+        result.highPromptTokens === 0
     if (
         result.generateTokens !== 128 ||
         result.timeLimitSeconds === 0 ||

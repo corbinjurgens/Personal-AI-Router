@@ -1937,6 +1937,89 @@ payloads and do not terminate the entire engine when cleanup fails.
 
 ## 15. Current integration / wiring
 
+### Intentional memory diagnostics
+
+Peer diagnostics use private parent IPC
+`engine:remote-diagnostic-preview|start|status|cancel` and POST
+`/v1/model-diagnostic/preview|start|status|cancel` on the existing classified ec
+listener. Preview, start and cancel require the verified caller's management
+grant; status is a pinned read. `remoteClient` and `NewPeerServiceClient` own
+direct/reverse delivery. No additional listener, polling worker or transport is
+introduced. The peer cannot forward through this target: the incoming node
+selector is stripped before the local broker call.
+
+`diagnosticRelay` emits `engine:diagnostic-request{id,method,caller,params}` and
+accepts only a correlated parent `engine:diagnostic-reply{id,result,error?,errorCode?}`.
+The broker binds that request and its consent to the current manager source and
+exact worker pair, rechecking grant, maintenance and Halt at acceptance.
+Configured pause is permitted. `engine:diagnostic-request-cancel{id}` retires a
+waiter, not accepted work. The relay is bounded and cancellation-safe; late
+replies cannot recreate authority. Cancel uses the readiness HTTP client and a
+205-second wait outside the target's 200-second cleanup join. Public responses
+are strictly validated and projected, retaining exact run and target identity.
+An empty status is JSON null; it is handled at this domain boundary without
+broadening shared strict decoding.
+
+The manager owns the diagnostic execution reservation and accepted operation.
+
+The broker acknowledges sampled barriers through
+`engine:diagnostic-baseline-done`, bound to the run and token: `phase: baseline`
+after three fresh cold samples, and `phase: after-load` after two fresh samples
+from every pool following `loaded`. The latter is accepted only while loading
+with a confirmed loaded marker. Each wait is bounded to thirty seconds and
+joins operation cancellation before any later native exercise.
+`internal:diagnostic-observe` accepts `{request,memory,hardware}` on the private
+parent connection. `request` is the diagnostic preview request, `memory` is the
+target broker's `TargetMemory`, and `hardware` is
+`{cpuModel,totalRamBytes,gpus:[{uuid,name,totalMemoryBytes}]}` from target node-info
+facts. Every usable GPU, including an unused GPU, must have a matching physical
+alias and capacity in the memory observation. A shared pool is system RAM and
+GPU memory together. Missing or ambiguous hardware fails observation closed.
+This read performs no wake, native enumeration, policy write or model load.
+Its effects fence uses the same owner as compare-and-reserve. Runtime build
+claims, context, slots and placement remain absent until the authorized load.
+The observation carries separately named planned context and slots from the
+saved finite profile, without treating them as realization. Diagnostic consent
+refuses explicit requested or resolved slot counts above eight before effects.
+
+`engine:diagnostic-reserve` carries the same private `hardware` object alongside
+`targetMemory`. Acceptance checkpoints the run/profile/key and requested identity
+before returning usable authority. The operation saves its engine ledger before
+unloading, its Started obligation before wake, and its LoadedModels obligation
+before load. Wake and cleanup sleep synchronously dispatch through `Manager.runOp`
+with reservation-scoped contexts. Configured pause is preserved; Halt vetoes
+activation. Only post-load fenced props supply realized context, slots and native
+build claims. Observed physical device IDs map to pool IDs independently of pool
+enumeration order; native ordinals and requested GPU options cannot prove placement.
+Incomplete placement remains partial diagnostic evidence, without estimate authority.
+The live reservation retains accepted pool kinds for configuration-key checks
+through broker drain and the cold baseline. This is captured identity only;
+expired capacity/free-memory facts are never refreshed or reused as fit evidence.
+
+`engine:record-measured-memory` accepts `{runId,token,profile}` only for a retained,
+joined producing run. It checks the reservation key, complete captured identity,
+outcome, native exercise evidence and any linked buffer sample before persistence.
+The broker may downgrade exercise coverage using its sample overlap evidence.
+It cannot promote native partial coverage or replace native timings and token counts.
+ExecutionKey results remain diagnostic history and never overlay estimates or feed Auto.
+
+The private `engine:inspect-model` worker envelope also accepts `hardware`.
+Inspection revalidates files, requested settings, native build and hardware before
+using authenticated stored realization, and uses fenced live realization when the
+profile is loaded. The same identity reaches record currentness and the estimate
+overlay. Missing hardware keeps measured history visible with currentness withdrawn.
+The ordinary shared worker envelope and its strict decoder are unchanged.
+
+`PendingDiagnostic` belongs to the existing desired-state store. Startup restores
+its admission hold before manager readiness and recovers through the lifecycle
+owner before installed-engine restore. Recovery never resumes measurement.
+Status exposes the nested run, token, identity, markers, optional observation with
+`poolPlacement`, and low/high exercise evidence. Pending checkpoint read errors are
+errors, not an empty status. A terminal checkpoint alone does not grant
+`workStopped`: durable cleanup confirmation and durable checkpoint clearing must
+finish before the reservation is released. Uncertain writes retain the hold;
+recovered abort retries cleanup with fresh authority. Saved pause is never changed.
+
 ### Ordinary mutation admission and verified stop
 
 `mutation_admission.go` is the canonical ordinary mutation-admission owner.

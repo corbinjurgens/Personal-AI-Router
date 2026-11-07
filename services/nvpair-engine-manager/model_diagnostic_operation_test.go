@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -38,7 +39,7 @@ func modelDiagnosticOperationFixture(t *testing.T, configure func(inspectionFixt
 	}
 	p := diagnosticReserveParams{RunID: "operation-test", Engine: "llamacpp", ModelID: f.request.ModelID,
 		ProfileKey: f.request.ProfileKey, ConfigurationKey: identity.ConfigurationKey, ExecutionKey: identity.ExecutionKey,
-		EffectsFence: fence, TargetMemory: modelBufferTestTargetMemory()}
+		EffectsFence: fence, TargetMemory: modelBufferTestTargetMemory(), Hardware: diagnosticTestHardware()}
 	reserved, err := f.ex.reserveDiagnostic(ctx, p)
 	if err != nil {
 		t.Fatalf("reserve operation: %v", err)
@@ -108,6 +109,19 @@ func TestModelDiagnosticBaselineAcknowledgementIsPhaseAndTokenBound(t *testing.T
 	if err := f.ex.diagnosticBaselineDone(valid); err == nil {
 		t.Fatal("late acknowledgement accepted after loading began")
 	}
+	valid.Phase = "after-load"
+	if err := f.ex.diagnosticBaselineDone(valid); err == nil {
+		t.Fatal("acknowledged before load identity was confirmed")
+	}
+	f.ex.diagnosticPhase(op, "loading", "loaded")
+	if err := f.ex.diagnosticBaselineDone(valid); err != nil {
+		t.Fatalf("acknowledge after-load samples: %v", err)
+	}
+	modelDiagnosticWait(t, op.afterLoad, "after-load acknowledgement")
+	f.ex.diagnosticPhase(op, "low", "low-start")
+	if err := f.ex.diagnosticBaselineDone(valid); err == nil {
+		t.Fatal("late after-load acknowledgement accepted during exercise")
+	}
 }
 
 func TestModelDiagnosticAbortJoinsBaselineAndRetainsCompletedBinding(t *testing.T) {
@@ -138,8 +152,20 @@ func TestModelDiagnosticAbortJoinsBaselineAndRetainsCompletedBinding(t *testing.
 	if f.ex.diagnosticRunStatus(op.params.RunID).Markers["baseline-ready"].IsZero() {
 		t.Fatal("caller mutated retained markers")
 	}
+	if _, err := f.ex.admitMutation("llamacpp"); err == nil {
+		t.Fatal("physical cleanup released execution before broker recording")
+	}
+	checkpoint, err := f.ex.desired.pendingDiagnostic()
+	if err != nil || checkpoint == nil || checkpoint.State != "cleanup-complete" {
+		t.Fatalf("cleanup proof was not retained for broker recording: checkpoint=%+v error=%v", checkpoint, err)
+	}
 	if err := f.ex.releaseDiagnostic(diagnosticReleaseParams{op.params.RunID, op.params.Token}); err != nil {
-		t.Fatalf("repeat release after conclusive cleanup: %v", err)
+		t.Fatalf("explicit release after conclusive cleanup: %v", err)
+	}
+	if done, err := f.ex.admitMutation("llamacpp"); err != nil {
+		t.Fatalf("explicit release retained execution: %v", err)
+	} else {
+		done()
 	}
 	if f.ex.diagnosticRunStatus("unknown").State != "none" {
 		t.Fatal("unknown run was reported as active")
@@ -201,6 +227,9 @@ func TestModelDiagnosticCleanupFailureRetainsHoldUntilRetry(t *testing.T) {
 	}
 	if !status.WorkStopped || status.Outcome != "cancelled" {
 		t.Fatalf("retry status: %+v", status)
+	}
+	if err := f.ex.releaseDiagnostic(diagnosticReleaseParams{op.params.RunID, op.params.Token}); err != nil {
+		t.Fatalf("release after cleanup and recording interval: %v", err)
 	}
 	if done, err := f.ex.admitMutation("llamacpp"); err != nil {
 		t.Fatalf("admission after cleanup: %v", err)
@@ -300,8 +329,14 @@ func modelDiagnosticRunningOperationFixture(t *testing.T, configure ...func(insp
 			fixture.markers = append(fixture.markers, status.Marker)
 			fixture.mu.Unlock()
 		}
+		phase := ""
 		if status.Marker == "baseline-ready" {
-			if err := f.ex.diagnosticBaselineDone(diagnosticBaselineParams{diagnosticReleaseParams{op.params.RunID, op.params.Token}, "baseline"}); err != nil {
+			phase = "baseline"
+		} else if status.Marker == "loaded" {
+			phase = "after-load"
+		}
+		if phase != "" {
+			if err := f.ex.diagnosticBaselineDone(diagnosticBaselineParams{diagnosticReleaseParams{op.params.RunID, op.params.Token}, phase}); err != nil {
 				t.Errorf("acknowledge baseline: %v", err)
 			}
 		}
@@ -355,10 +390,21 @@ func TestModelDiagnosticPauseJoinsNativeRequests(t *testing.T) {
 		t.Run(phase, func(t *testing.T) {
 			_, manager, op, fixture := modelDiagnosticRunningOperationFixture(t)
 			entered, ended := make(chan struct{}), make(chan struct{})
+			release := make(chan struct{})
+			t.Cleanup(func() { close(release) })
 			block := func(request *http.Request) bool {
+				// Consume the request so the HTTP server can observe a closed
+				// connection while the synthetic native operation is blocked.
+				if _, err := io.Copy(io.Discard, request.Body); err != nil {
+					t.Errorf("read blocked request body: %v", err)
+					return true
+				}
 				close(entered)
-				<-request.Context().Done()
-				close(ended)
+				select {
+				case <-request.Context().Done():
+					close(ended)
+				case <-release:
+				}
 				return true
 			}
 			if phase == "load" {

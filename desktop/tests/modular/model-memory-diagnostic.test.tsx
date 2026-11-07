@@ -9,6 +9,7 @@ import type { InspectModelResult, MeasuredProfile } from '@/shared/types/model-c
 import type { DiagnosticPreview, DiagnosticRun } from '@/shared/types/model-diagnostic'
 import type { ServiceTransport } from '@/shared/types/service-bridge'
 import type { EngineDescriptor } from '@/shared/types/engines'
+import type { EngineSettingsSnapshot } from '@/shared/types/engine-settings'
 import { engineTypeFromManagerName } from '@/shared/utils/engines'
 import type { IEngineApi } from '@/ui/api/engine-api'
 import { createPairApi } from '@/ui/api/pair-api'
@@ -39,6 +40,8 @@ const preview: DiagnosticPreview = {
     slots: 1,
     placement: [{ domainId: 'host', kind: 'host' }],
     previewId: 'reviewed-effects',
+    plannedPerSlotContext: 2048,
+    plannedSlots: 1,
     lowPromptTokens: 512,
     highPromptTokens: 1904,
     generateTokens: 128,
@@ -122,7 +125,12 @@ const start = vi.fn<IEngineApi['diagnosticStart']>()
 const status = vi.fn<IEngineApi['diagnosticStatus']>()
 const cancel = vi.fn<IEngineApi['diagnosticCancel']>()
 const subscribe = vi.fn<IEngineApi['onDiagnosticChanged']>()
+const inspect = vi.fn<IEngineApi['inspectModel']>()
+const subscribeSettings = vi.fn<IEngineApi['onSettingsChanged']>()
+const subscribeSettingsDisconnected = vi.fn<IEngineApi['onSettingsDisconnected']>()
 let changed: ((run: DiagnosticRun) => void) | undefined
+let settingsChanged: ((snapshot: EngineSettingsSnapshot) => void) | undefined
+let settingsDisconnected: ((target: { nodeId: string }) => void) | undefined
 let root: Root
 let container: HTMLDivElement
 
@@ -160,6 +168,19 @@ beforeEach(() => {
     })
     status.mockReset().mockResolvedValue(null)
     cancel.mockReset().mockResolvedValue(null)
+    inspect.mockReset().mockResolvedValue(inspection)
+    subscribeSettings.mockReset().mockImplementation(callback => {
+        settingsChanged = callback
+        return () => {
+            settingsChanged = undefined
+        }
+    })
+    subscribeSettingsDisconnected.mockReset().mockImplementation(callback => {
+        settingsDisconnected = callback
+        return () => {
+            settingsDisconnected = undefined
+        }
+    })
     subscribe.mockReset().mockImplementation(callback => {
         changed = callback
         return () => {
@@ -171,6 +192,9 @@ beforeEach(() => {
     api.engines.diagnosticStatus = status
     api.engines.diagnosticCancel = cancel
     api.engines.onDiagnosticChanged = subscribe
+    api.engines.inspectModel = inspect
+    api.engines.onSettingsChanged = subscribeSettings
+    api.engines.onSettingsDisconnected = subscribeSettingsDisconnected
     Object.defineProperty(window, 'pairApi', { configurable: true, value: api })
     useConnectionStore.setState({ connected: true, selfId: 'self' })
     useEngineSettingsStore.setState({ diagnostics: {}, modelDrafts: {}, entries: {} })
@@ -281,6 +305,8 @@ describe('applied profile memory measurement', () => {
         expect(dialog.textContent).toContain('Other GPU activity')
         expect(dialog.textContent).toContain('Configured pause is preserved.')
         expect(dialog.textContent).toContain('RAM use exceeds half of total RAM.')
+        expect(dialog.textContent).toContain('Profile profile, model model (llamacpp)')
+        expect(dialog.textContent).toContain('CPU: CPU. RAM: 32 GB.')
         expect(dialog.textContent).toContain(
             'This uses as much memory as the configuration needs at full context. If it does not fit, the engine can stop; PAIR will record that.'
         )
@@ -338,6 +364,23 @@ describe('applied profile memory measurement', () => {
         expect(cancel).toHaveBeenCalledExactlyOnceWith({ nodeId: 'self', runId: 'run' })
     })
 
+    it('reads the cancelled run by ID instead of losing cleanup failure to active discovery', async () => {
+        await render()
+        await push(running)
+        const held: DiagnosticRun = {
+            ...running,
+            outcome: 'cleanup-failed',
+            phase: 'restoring',
+            reason: 'Child still running'
+        }
+        cancel.mockResolvedValueOnce(held)
+        status.mockImplementation(async request => (request.runId === 'run' ? held : null))
+        await click('Cancel measurement')
+        expect(status).toHaveBeenLastCalledWith({ nodeId: 'self', runId: 'run' })
+        expect(button('Retry cleanup').disabled).toBe(false)
+        expect(container.textContent).toContain('Engines remain held until cleanup succeeds.')
+    })
+
     it('discovers a peer-started run after reconnect and retires old status reads', async () => {
         await render()
         await act(async () => useConnectionStore.setState({ connected: false }))
@@ -362,6 +405,120 @@ describe('applied profile memory measurement', () => {
         await push({ ...running, phase: 'high', elapsedMs: 42000 })
         await act(async () => resolveStatus(running))
         expect(container.textContent).toContain('Measuring memory: high, 42 s elapsed')
+    })
+
+    it('invalidates an in-flight preview when an active run is discovered', async () => {
+        let resolvePreview: ((value: DiagnosticPreview) => void) | undefined
+        getPreview.mockImplementationOnce(
+            () =>
+                new Promise(resolve => {
+                    resolvePreview = resolve
+                })
+        )
+        await render()
+        await push(running)
+        if (!resolvePreview) throw new Error('Preview request was not sent')
+        await act(async () => resolvePreview?.(preview))
+        expect(useEngineSettingsStore.getState().diagnostics.self.preview).toBeUndefined()
+        expect(button('Measure this configuration').disabled).toBe(true)
+    })
+
+    it('reconciles an accepted run by ID even while discovery is pending', async () => {
+        await render()
+        let resolveDiscovery: ((value: DiagnosticRun | null) => void) | undefined
+        status.mockImplementationOnce(
+            () =>
+                new Promise(resolve => {
+                    resolveDiscovery = resolve
+                })
+        )
+        let discovery: Promise<void> | undefined
+        await act(async () => {
+            discovery = useEngineSettingsStore.getState().readDiagnostic('self')
+        })
+        const completed: DiagnosticRun = {
+            ...running,
+            phase: 'done',
+            outcome: 'completed',
+            result
+        }
+        start.mockResolvedValueOnce(running)
+        status.mockResolvedValueOnce(completed)
+        await click('Measure this configuration')
+        await click('Measure')
+        expect(status).toHaveBeenLastCalledWith({ nodeId: 'self', runId: 'run' })
+        expect(useEngineSettingsStore.getState().diagnostics.self.run).toEqual(completed)
+        if (!resolveDiscovery || !discovery) throw new Error('Discovery request was not sent')
+        await act(async () => {
+            resolveDiscovery?.(null)
+            await discovery
+        })
+        expect(useEngineSettingsStore.getState().diagnostics.self.run).toEqual(completed)
+    })
+
+    it('rejects an older same-run status read after a newer phase push', async () => {
+        await render()
+        await push({ ...running, phase: 'high', elapsedMs: 42000 })
+        status.mockResolvedValueOnce(running)
+        await act(async () => useEngineSettingsStore.getState().readDiagnostic('self'))
+        expect(container.textContent).toContain('Measuring memory: high, 42 s elapsed')
+    })
+
+    it('reconciles uncertain start acceptance even while an older discovery read is pending', async () => {
+        await render()
+        let resolveDiscovery: ((value: DiagnosticRun | null) => void) | undefined
+        status.mockImplementationOnce(
+            () =>
+                new Promise(resolve => {
+                    resolveDiscovery = resolve
+                })
+        )
+        let discovery: Promise<void> | undefined
+        await act(async () => {
+            discovery = useEngineSettingsStore.getState().readDiagnostic('self')
+        })
+        start.mockRejectedValueOnce(new Error('Start reply lost'))
+        status.mockResolvedValueOnce(running)
+        await click('Measure this configuration')
+        await click('Measure')
+        expect(useEngineSettingsStore.getState().diagnostics.self.run).toEqual(running)
+        expect(status).toHaveBeenLastCalledWith({ nodeId: 'self' })
+        if (!resolveDiscovery || !discovery) throw new Error('Discovery request was not sent')
+        await act(async () => {
+            resolveDiscovery?.(null)
+            await discovery
+        })
+        expect(useEngineSettingsStore.getState().diagnostics.self.run).toEqual(running)
+    })
+
+    it('discovers retained cleanup after manager settings reconnect without service reconnect', async () => {
+        await render()
+        if (!settingsDisconnected || !settingsChanged) throw new Error('Settings watchers missing')
+        await act(async () => settingsDisconnected?.({ nodeId: 'self' }))
+        expect(useEngineSettingsStore.getState().diagnostics.self.current).toBe(false)
+        status.mockResolvedValueOnce({ ...running, outcome: 'cleanup-failed', phase: 'restoring' })
+        const snapshot: EngineSettingsSnapshot = {
+            nodeId: 'self',
+            engine: 'llamacpp',
+            revision: 1,
+            appliedRevision: 1,
+            sequence: 1,
+            epoch: 'replacement',
+            settings: { serverPort: 1, proxyPort: 2, launchText: '' },
+            effectiveServerPort: 1,
+            effectiveProxyPort: 2,
+            running: false,
+            adopted: false,
+            editable: true,
+            reason: '',
+            format: '',
+            phase: 'idle',
+            error: '',
+            requestId: ''
+        }
+        await act(async () => settingsChanged?.(snapshot))
+        expect(button('Retry cleanup').disabled).toBe(false)
+        expect(status).toHaveBeenLastCalledWith({ nodeId: 'self' })
     })
 
     it('ignores a late start receipt and keeps cancellation pending until cleanup settles', async () => {
@@ -433,6 +590,58 @@ describe('applied profile memory measurement', () => {
         expect(container.textContent).not.toContain('Measured peak')
     })
 
+    it('refreshes the measured profile after completion without inferring currentness from its key', async () => {
+        await render()
+        await push({ ...running, phase: 'done', outcome: 'completed', result })
+        expect(inspect).toHaveBeenCalledExactlyOnceWith(target)
+        expect(container.textContent).toContain('Measurement currentness awaits inspection')
+        expect(container.textContent).not.toContain('Current measurement for this configuration.')
+        await render({
+            ...inspection,
+            memoryProfiles: [
+                {
+                    configurationKey: 'configuration',
+                    kind: 'measured',
+                    recordedAt: result.recordedAt,
+                    current: false,
+                    measured: result
+                }
+            ]
+        })
+        expect(container.textContent).toContain(
+            'Historical measurement; configuration or machine identity'
+        )
+        expect(container.textContent).not.toContain('Current measurement for this configuration.')
+    })
+
+    it('refreshes inspection again when the broker publishes the persisted result after terminal status', async () => {
+        await render()
+        await push({ ...running, phase: 'done', outcome: 'completed' })
+        expect(inspect).toHaveBeenCalledTimes(1)
+        await push({ ...running, phase: 'done', outcome: 'completed', result })
+        expect(inspect).toHaveBeenCalledTimes(2)
+    })
+
+    it('uses target-inspected currentness and keeps missing phase observations absent', async () => {
+        const incomplete = { ...result, low: undefined, high: undefined }
+        await render({
+            ...inspection,
+            memoryProfiles: [
+                {
+                    configurationKey: 'configuration',
+                    kind: 'measured',
+                    recordedAt: result.recordedAt,
+                    current: true,
+                    measured: incomplete
+                }
+            ]
+        })
+        expect(container.textContent).toContain('Current measurement for this configuration.')
+        expect(container.textContent).toContain('Short prompt: Not sampled.')
+        expect(container.textContent).toContain('Full context: Not sampled.')
+        expect(container.textContent).not.toContain('Complete coverage.')
+    })
+
     it('labels earlier-build records as historical evidence', async () => {
         await render({
             ...inspection,
@@ -456,6 +665,7 @@ describe('applied profile memory measurement', () => {
             configurationKey: undefined,
             executionKey: 'execution',
             configurationKeyReason: 'native-fit',
+            plannedPerSlotContext: 0,
             perSlotContext: 0,
             lowPromptTokens: 0,
             highPromptTokens: 0

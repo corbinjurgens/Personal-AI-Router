@@ -55,28 +55,34 @@ type diagnosticBaselineParams struct {
 // later record owner's responsibility. Placement is observed native metadata,
 // never synthesized from a finite estimate or the requested GPU switches.
 type diagnosticLoadObservation struct {
-	PerSlotContext int32                      `json:"perSlotContext"`
-	Slots          int32                      `json:"slots"`
-	BuildInfo      string                     `json:"buildInfo,omitempty"`
-	NativeBuildID  string                     `json:"nativeBuildId,omitempty"`
-	Placement      map[string]json.RawMessage `json:"placement,omitempty"`
+	PerSlotContext int32                             `json:"perSlotContext"`
+	Slots          int32                             `json:"slots"`
+	BuildInfo      string                            `json:"buildInfo,omitempty"`
+	NativeBuildID  string                            `json:"nativeBuildId,omitempty"`
+	Placement      map[string]json.RawMessage        `json:"placement,omitempty"`
+	PoolPlacement  []modelconfig.DiagnosticPlacement `json:"poolPlacement,omitempty"`
 }
 
 type diagnosticOperationStatus struct {
 	modelconfig.DiagnosticRun `json:"run"`
-	State                     string                     `json:"state"`
-	Token                     string                     `json:"token,omitempty"`
-	WorkStopped               bool                       `json:"workStopped"`
-	Markers                   map[string]time.Time       `json:"markers,omitempty"`
-	Marker                    string                     `json:"marker,omitempty"`
-	MarkerAt                  string                     `json:"markerAt,omitempty"`
-	Observation               *diagnosticLoadObservation `json:"observation,omitempty"`
-	Low                       *modelconfig.MeasuredPhase `json:"low,omitempty"`
-	High                      *modelconfig.MeasuredPhase `json:"high,omitempty"`
+	State                     string                          `json:"state"`
+	Token                     string                          `json:"token,omitempty"`
+	WorkStopped               bool                            `json:"workStopped"`
+	Markers                   map[string]time.Time            `json:"markers,omitempty"`
+	Marker                    string                          `json:"marker,omitempty"`
+	MarkerAt                  string                          `json:"markerAt,omitempty"`
+	Observation               *diagnosticLoadObservation      `json:"observation,omitempty"`
+	Low                       *modelconfig.MeasuredPhase      `json:"low,omitempty"`
+	High                      *modelconfig.MeasuredPhase      `json:"high,omitempty"`
+	Identity                  *modelconfig.DiagnosticIdentity `json:"identity,omitempty"`
 }
 
 func (s diagnosticOperationStatus) clone() diagnosticOperationStatus {
 	s.DiagnosticRun = s.DiagnosticRun.Clone()
+	if s.Identity != nil {
+		identity := s.Identity.Clone()
+		s.Identity = &identity
+	}
 	if s.Markers != nil {
 		markers := make(map[string]time.Time, len(s.Markers))
 		for name, at := range s.Markers {
@@ -86,6 +92,7 @@ func (s diagnosticOperationStatus) clone() diagnosticOperationStatus {
 	}
 	if s.Observation != nil {
 		value := *s.Observation
+		value.PoolPlacement = slices.Clone(value.PoolPlacement)
 		value.Placement = make(map[string]json.RawMessage, len(s.Observation.Placement))
 		for key, raw := range s.Observation.Placement {
 			value.Placement[key] = slices.Clone(raw)
@@ -121,17 +128,19 @@ type modelDiagnosticOperation struct {
 	done                         chan struct{}
 	baseline                     chan struct{}
 	baselineAccepted             bool
+	afterLoad                    chan struct{}
+	afterLoadAccepted            bool
 	started                      time.Time
 	status                       diagnosticOperationStatus
 	engines                      []diagnosticEngineBefore
 	inspection                   modelconfig.InspectResult
+	configurationPools           []string
 	outcome, failedPhase, reason string
+	checkpoint                   *diagnosticCheckpoint
 }
 
-// Task4 can validate a broker record against this key-bound completed run,
+// The record owner authenticates broker samples against this completed run,
 // including failed/partial evidence. A detached copy survives the next run.
-// Task12 can checkpoint the reservation, before-state and phase boundaries;
-// no persistence or recovery authority is introduced by this in-memory owner.
 type diagnosticCompletedRun struct {
 	token       string
 	Reservation diagnosticReserveParams
@@ -144,29 +153,72 @@ func (e *Executor) completedDiagnosticRun(runID string) (diagnosticCompletedRun,
 	defer e.mutationAdmission.Unlock()
 	r, ok := e.diagnosticCompleted[runID]
 	r.Reservation.TargetMemory = r.Reservation.TargetMemory.Clone()
+	r.Reservation.Hardware = r.Reservation.Hardware.clone()
 	r.Status = r.Status.clone()
 	r.Inspection = r.Inspection.Clone()
 	return r, ok
 }
 
 func (e *Executor) diagnosticRunStatus(runID string) diagnosticOperationStatus {
+	status, err := e.diagnosticStatusWithCheckpoint(runID)
+	if err != nil {
+		return diagnosticOperationStatus{State: "cleanup-failed", DiagnosticRun: modelconfig.DiagnosticRun{RunID: runID, Outcome: "cleanup-failed", Reason: "checkpoint-unreadable"}}
+	}
+	return status
+}
+
+func (e *Executor) diagnosticStatusWithCheckpoint(runID string) (diagnosticOperationStatus, error) {
+	// Durable I/O precedes admission locking, never recursively takes it.
+	checkpoint, known, err := e.diagnosticCheckpointStatus(runID)
+	if err != nil {
+		return diagnosticOperationStatus{}, err
+	}
 	e.mutationAdmission.Lock()
 	defer e.mutationAdmission.Unlock()
 	if op := e.diagnosticOperation; op != nil && (runID == "" || op.params.RunID == runID) {
 		s := op.status.clone()
 		s.ElapsedMS = time.Since(op.started).Milliseconds()
-		return s
+		return s, nil
 	}
 	if done, ok := e.diagnosticCompleted[runID]; ok {
-		return done.Status.clone()
+		return done.Status.clone(), nil
 	}
 	if r := e.diagnostic; r != nil && r.ready && (runID == "" || r.params.RunID == runID) {
-		return diagnosticOperationStatus{State: "reserved", Token: r.token, WorkStopped: !r.workUnconfirmed, DiagnosticRun: modelconfig.DiagnosticRun{
+		if known && r.workUnconfirmed {
+			return checkpoint, nil
+		}
+		if r.workUnconfirmed && r.checkpoint != nil {
+			status := diagnosticOperationStatus{DiagnosticRun: r.checkpoint.Run.Clone(), State: r.checkpoint.State, Token: r.token, WorkStopped: false}
+			if r.checkpoint.Identity != nil {
+				identity := r.checkpoint.Identity.Clone()
+				status.Identity = &identity
+			}
+			return status, nil
+		}
+		status := diagnosticOperationStatus{State: "reserved", Token: r.token, WorkStopped: !r.workUnconfirmed, DiagnosticRun: modelconfig.DiagnosticRun{
 			RunID: r.params.RunID, Engine: r.params.Engine, ModelID: r.params.ModelID, ProfileKey: r.params.ProfileKey,
 			ConfigurationKey: r.params.ConfigurationKey, ExecutionKey: r.params.ExecutionKey, Phase: "reserving", Outcome: "running",
 		}}
+		if r.checkpoint == nil {
+			return diagnosticOperationStatus{}, diagnosticConflict("reservation checkpoint unavailable")
+		}
+		status.StartedAt = r.checkpoint.Run.StartedAt
+		if started, err := time.Parse(time.RFC3339Nano, status.StartedAt); err == nil {
+			status.ElapsedMS = max(0, time.Since(started).Milliseconds())
+		}
+		if r.identity != nil {
+			identity := r.identity.Clone()
+			status.Identity = &identity
+		}
+		return status, nil
 	}
-	return diagnosticOperationStatus{State: "none"}
+	if known {
+		return checkpoint, nil
+	}
+	if runID == "" && len(e.diagnosticCompletedOrder) > 0 {
+		return e.diagnosticCompleted[e.diagnosticCompletedOrder[len(e.diagnosticCompletedOrder)-1]].Status.clone(), nil
+	}
+	return diagnosticOperationStatus{State: "none"}, nil
 }
 
 func (e *Executor) acceptDiagnostic(p diagnosticRunParams) (*modelDiagnosticOperation, bool, error) {
@@ -233,13 +285,19 @@ func (e *Executor) acceptDiagnostic(p diagnosticRunParams) (*modelDiagnosticOper
 	}
 	ctx, cancel := context.WithDeadline(context.Background(), deadline)
 	op := &modelDiagnosticOperation{params: p, reservation: r.params, ctx: ctx, cancel: cancel,
-		done: make(chan struct{}), baseline: make(chan struct{}), started: time.Now(), outcome: "completed"}
+		done: make(chan struct{}), baseline: make(chan struct{}), afterLoad: make(chan struct{}), started: time.Now(), outcome: "completed"}
 	op.reservation.TargetMemory = r.params.TargetMemory.Clone()
+	op.reservation.Hardware = r.params.Hardware.clone()
+	op.configurationPools = slices.Clone(r.configurationPools)
 	op.status = diagnosticOperationStatus{State: "accepted", Token: p.Token, Markers: make(map[string]time.Time), DiagnosticRun: modelconfig.DiagnosticRun{
 		RunID: p.RunID, Engine: p.Engine, ModelID: p.ModelID, ProfileKey: r.params.ProfileKey,
 		ConfigurationKey: p.ConfigurationKey, ExecutionKey: p.ExecutionKey, Phase: "reserving", Outcome: "running",
 		StartedAt: op.started.UTC().Format(time.RFC3339Nano),
 	}}
+	if r.identity != nil {
+		identity := r.identity.Clone()
+		op.status.Identity = &identity
+	}
 	r.workUnconfirmed = true
 	e.diagnosticOperation = op
 	return op, true, nil
@@ -249,15 +307,38 @@ func (e *Executor) diagnosticBaselineDone(p diagnosticBaselineParams) error {
 	e.mutationAdmission.Lock()
 	defer e.mutationAdmission.Unlock()
 	op := e.diagnosticOperation
-	if op == nil || op.params.RunID != p.RunID || op.params.Token != p.Token || p.Phase != "baseline" ||
-		op.status.Phase != "baseline" || op.status.Outcome != "running" || op.ctx.Err() != nil {
+	if op == nil || op.params.RunID != p.RunID || op.params.Token != p.Token ||
+		op.status.Outcome != "running" || op.ctx.Err() != nil {
 		return diagnosticConflict("baseline acknowledgement does not match the active token, run and phase")
 	}
-	if !op.baselineAccepted {
-		close(op.baseline)
-		op.baselineAccepted = true
+	switch {
+	case p.Phase == "baseline" && op.status.Phase == "baseline":
+		if !op.baselineAccepted {
+			close(op.baseline)
+			op.baselineAccepted = true
+		}
+	case p.Phase == "after-load" && op.status.Phase == "loading" && !op.status.Markers["loaded"].IsZero():
+		if !op.afterLoadAccepted {
+			close(op.afterLoad)
+			op.afterLoadAccepted = true
+		}
+	default:
+		return diagnosticConflict("sample acknowledgement does not match the active phase")
 	}
 	return nil
+}
+
+func waitDiagnosticSamples(ctx context.Context, ready <-chan struct{}) error {
+	timer := time.NewTimer(diagnosticBaselineBudget)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return context.DeadlineExceeded
+	case <-ready:
+		return ctx.Err()
+	}
 }
 
 func (e *Executor) cancelDiagnosticForPause() {
@@ -316,7 +397,9 @@ func (m *Manager) startDiagnostic(msg *Message) {
 		m.respondOrErr(msg, nil, err)
 		return
 	}
-	status := m.exec.diagnosticRunStatus(p.RunID)
+	m.exec.mutationAdmission.Lock()
+	status := op.status.clone()
+	m.exec.mutationAdmission.Unlock()
 	if start {
 		m.exec.notify(diagnosticChangedMethod, status)
 	}
@@ -341,7 +424,8 @@ func (m *Manager) handleDiagnosticOperationRequest(msg *Message) bool {
 			m.respondOrErr(msg, nil, modelSettingsParamsError(err))
 			return true
 		}
-		m.respondOrErr(msg, m.exec.diagnosticRunStatus(p.RunID), nil)
+		status, err := m.exec.diagnosticStatusWithCheckpoint(p.RunID)
+		m.respondOrErr(msg, status, err)
 		return true
 	case diagnosticBaselineMethod:
 		var p diagnosticBaselineParams
@@ -374,7 +458,7 @@ func (m *Manager) abortDiagnostic(p diagnosticReleaseParams) (diagnosticOperatio
 			return done.Status.clone(), nil
 		}
 		e.mutationAdmission.Unlock()
-		return diagnosticOperationStatus{}, diagnosticConflict("no matching operation")
+		return m.abortRecoveredDiagnostic(p)
 	}
 	if op.params.RunID != p.RunID || op.params.Token != p.Token {
 		e.mutationAdmission.Unlock()
@@ -397,7 +481,7 @@ func (m *Manager) abortDiagnostic(p diagnosticReleaseParams) (diagnosticOperatio
 		go m.runDiagnosticOperation(op, true)
 	}
 	<-done
-	return e.diagnosticRunStatus(p.RunID), nil
+	return e.diagnosticStatusWithCheckpoint(p.RunID)
 }
 
 // This is the accepted runOp lifecycle worker. It calls the existing Wake,
@@ -419,13 +503,33 @@ func (m *Manager) runDiagnosticOperation(op *modelDiagnosticOperation, cleanupOn
 	op.cancel()
 	e.diagnosticPhase(op, "restoring", "")
 	ctx, cancel := context.WithTimeout(context.Background(), diagnosticCleanupBudget)
-	err := m.restoreDiagnostic(ctx, op)
+	var checkpointErr error
+	cleanupProved := false
+	if cleanupOnly {
+		checkpoint, readErr := e.desired.pendingDiagnostic()
+		checkpointErr = readErr
+		cleanupProved = readErr == nil && checkpoint != nil && checkpoint.State == "cleanup-complete"
+	}
+	if op.checkpoint != nil && !cleanupProved && checkpointErr == nil {
+		op.checkpoint.State = "pending"
+		checkpointErr = e.saveDiagnosticOperation(op)
+	}
+	err := checkpointErr
+	if !cleanupProved {
+		err = errors.Join(err, m.restoreDiagnostic(ctx, op))
+	}
 	cancel()
 	if err == nil {
 		err = e.confirmDiagnosticWorkStopped(op.params.RunID, op.params.Token)
 	}
 	if err == nil {
-		err = e.releaseDiagnostic(diagnosticReleaseParams{RunID: op.params.RunID, Token: op.params.Token})
+		e.mutationAdmission.Lock()
+		terminal := op.status.DiagnosticRun.Clone()
+		terminal.Phase = "done"
+		terminal.Outcome, terminal.Reason, terminal.FailedPhase = op.outcome, op.reason, op.failedPhase
+		terminal.ElapsedMS = time.Since(op.started).Milliseconds()
+		e.mutationAdmission.Unlock()
+		err = e.completeDiagnosticCheckpoint(op.params.RunID, op.params.Token, terminal)
 	}
 	e.mutationAdmission.Lock()
 	op.status.Phase, op.status.State = "done", "cleanup-complete"
@@ -450,6 +554,14 @@ func (m *Manager) runDiagnosticOperation(op *modelDiagnosticOperation, cleanupOn
 	}
 	status := op.status.clone()
 	e.mutationAdmission.Unlock()
+	if err != nil {
+		if checkpoint, loadErr := e.desired.pendingDiagnostic(); loadErr == nil && checkpoint != nil {
+			checkpoint.Run = status.DiagnosticRun.Clone()
+			checkpoint.State = "cleanup-failed"
+			op.checkpoint = checkpoint
+			_ = e.updateDiagnosticCheckpoint(op.params.RunID, op.params.Token, *checkpoint)
+		}
+	}
 	e.notify(diagnosticChangedMethod, status)
 	e.mutationAdmission.Lock()
 	close(op.done)
@@ -473,17 +585,30 @@ func diagnosticFailureReason(err error) string {
 
 func (m *Manager) measureDiagnostic(op *modelDiagnosticOperation) error {
 	e := m.exec
-	ctx := e.modelMemoryContext(op.ctx, op.params.Engine, op.reservation.TargetMemory, false)
+	ctx := withDiagnosticHardware(e.modelMemoryContext(op.ctx, op.params.Engine, op.reservation.TargetMemory, false), op.reservation.Hardware)
+	ctx, err := e.diagnosticContext(ctx, op.params.Engine, op.params.RunID, op.params.Token)
+	if err != nil {
+		return err
+	}
+	ctx = context.WithValue(ctx, diagnosticConfigurationPoolsKey{}, slices.Clone(op.configurationPools))
+	ctx = context.WithValue(ctx, diagnosticCapturedHardwareKey{}, true)
 	if err := e.compareDiagnosticReservation(ctx, op.reservation); err != nil {
 		return err
 	}
+	// Static accepted hardware capacity is not free-memory telemetry. The cold
+	// baseline outlives a sample's TTL, without renewing any sample freshness.
 	inspection, err := e.diagnosticInspectIdentity(ctx, op)
 	op.inspection = inspection
 	if err != nil {
 		return err
 	}
-	// Snapshot before the first effect. Task12's durable checkpoint belongs at
-	// this boundary and at phase publication before each subsequent effect.
+	op.checkpoint, err = e.desired.pendingDiagnostic()
+	if err != nil {
+		return err
+	}
+	if op.checkpoint == nil {
+		return diagnosticConflict("reservation checkpoint missing")
+	}
 	for _, engine := range e.reg.Names() {
 		st, err := e.state(engine)
 		if err != nil {
@@ -497,6 +622,10 @@ func (m *Manager) measureDiagnostic(op *modelDiagnosticOperation) error {
 			return errModelDiagnosticIdentity
 		}
 		op.engines = append(op.engines, before)
+		op.checkpoint.Engines = append(op.checkpoint.Engines, diagnosticCheckpointEngine{Engine: engine, RunningBefore: before.running, ProcessRunID: before.runID, AffectedModels: []string{}, LoadedModels: []string{}})
+	}
+	if err := e.saveDiagnosticOperation(op); err != nil {
+		return err
 	}
 	e.diagnosticPhase(op, "unloading", "")
 	for i := range op.engines {
@@ -505,21 +634,23 @@ func (m *Manager) measureDiagnostic(op *modelDiagnosticOperation) error {
 			continue
 		}
 		before.touched = true
+		loaded, err := e.diagnosticLoaded(ctx, before.engine)
+		if err != nil {
+			return err
+		}
+		op.checkpoint.Engines[i].AffectedModels = slices.Clone(loaded)
+		if err := e.saveDiagnosticOperation(op); err != nil {
+			return err
+		}
 		if err := e.diagnosticUnloadAll(ctx, op, before.engine); err != nil {
 			return err
 		}
 	}
 	e.diagnosticPhase(op, "baseline", "baseline-ready")
-	timer := time.NewTimer(diagnosticBaselineBudget)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return context.DeadlineExceeded
-	case <-op.baseline:
+	if err := e.saveDiagnosticOperation(op); err != nil {
+		return err
 	}
-	if err := ctx.Err(); err != nil {
+	if err := waitDiagnosticSamples(ctx, op.baseline); err != nil {
 		return err
 	}
 	engineCtx, err := e.diagnosticContext(ctx, op.params.Engine, op.params.RunID, op.params.Token)
@@ -532,7 +663,15 @@ func (m *Manager) measureDiagnostic(op *modelDiagnosticOperation) error {
 		}
 	}
 	e.diagnosticPhase(op, "starting", "")
-	wakeErr := e.Wake(engineCtx, op.params.Engine)
+	for i := range op.checkpoint.Engines {
+		if op.checkpoint.Engines[i].Engine == op.params.Engine {
+			op.checkpoint.Engines[i].Started = !op.checkpoint.Engines[i].RunningBefore
+		}
+	}
+	if err := e.saveDiagnosticOperation(op); err != nil {
+		return err
+	}
+	wakeErr := m.runDiagnosticLifecycle(engineCtx, op.params.Engine, true)
 	st, err := e.state(op.params.Engine)
 	if err != nil {
 		return err
@@ -550,6 +689,18 @@ func (m *Manager) measureDiagnostic(op *modelDiagnosticOperation) error {
 		return wakeErr
 	}
 	e.diagnosticPhase(op, "loading", "")
+	st.mu.Lock()
+	processRunID := st.runID
+	st.mu.Unlock()
+	for i := range op.checkpoint.Engines {
+		if op.checkpoint.Engines[i].Engine == op.params.Engine {
+			op.checkpoint.Engines[i].ProcessRunID = processRunID
+			op.checkpoint.Engines[i].LoadedModels = []string{op.reservation.ProfileKey}
+		}
+	}
+	if err := e.saveDiagnosticOperation(op); err != nil {
+		return err
+	}
 	if _, err := e.ModelLoad(engineCtx, op.params.Engine, op.reservation.ProfileKey); err != nil {
 		return err
 	}
@@ -563,11 +714,29 @@ func (m *Manager) measureDiagnostic(op *modelDiagnosticOperation) error {
 		return err
 	}
 	observed.NativeBuildID = inspection.NativeBuildID
+	observed.PoolPlacement, err = diagnosticPoolPlacement(op.reservation.TargetMemory, observed)
 	e.mutationAdmission.Lock()
 	op.status.Observation = &observed
 	e.mutationAdmission.Unlock()
+	if err != nil {
+		return err
+	}
 	if observed.BuildInfo == "" {
 		return errModelDiagnosticIdentity
+	}
+	identity, err := e.diagnosticRequestedIdentity(ctx, modelconfig.InspectRequest{Engine: op.params.Engine, ModelID: op.params.ModelID, ProfileKey: op.reservation.ProfileKey}, inspection)
+	if err != nil {
+		return err
+	}
+	identity.BuildInfo, identity.PerSlotContext, identity.Slots, identity.Placement = observed.BuildInfo, observed.PerSlotContext, observed.Slots, slices.Clone(observed.PoolPlacement)
+	if err := identity.Validate(); err != nil {
+		return err
+	}
+	e.mutationAdmission.Lock()
+	op.status.Identity = &identity
+	e.mutationAdmission.Unlock()
+	if err := e.saveDiagnosticOperation(op); err != nil {
+		return err
 	}
 	if op.params.ConfigurationKey != "" {
 		st.mu.Lock()
@@ -590,11 +759,20 @@ func (m *Manager) measureDiagnostic(op *modelDiagnosticOperation) error {
 		return errModelDiagnosticIdentity
 	}
 	e.diagnosticPhase(op, "loading", "loaded")
+	if err := e.saveDiagnosticOperation(op); err != nil {
+		return err
+	}
+	if err := waitDiagnosticSamples(ctx, op.afterLoad); err != nil {
+		return err
+	}
 	for _, phase := range []modelDiagnosticExercisePhase{
 		{Phase: "low", TargetPromptTokens: low, Requests: 1},
 		{Phase: "high", TargetPromptTokens: high, Requests: observed.Slots},
 	} {
 		phase.StartedAt = e.diagnosticPhase(op, phase.Phase, phase.Phase+"-start")
+		if err := e.saveDiagnosticOperation(op); err != nil {
+			return err
+		}
 		result, err := e.modelDiagnosticExercise(engineCtx, child, phase)
 		e.mutationAdmission.Lock()
 		if phase.Phase == "low" {
@@ -611,7 +789,7 @@ func (m *Manager) measureDiagnostic(op *modelDiagnosticOperation) error {
 	if err := child.Check(engineCtx); err != nil {
 		return err
 	}
-	_, err = e.diagnosticInspectIdentity(ctx, op)
+	op.inspection, err = e.diagnosticInspectIdentity(ctx, op)
 	return err
 }
 
@@ -749,7 +927,7 @@ func (m *Manager) restoreDiagnostic(ctx context.Context, op *modelDiagnosticOper
 		if err != nil || !before.running {
 			scoped, scopeErr := e.diagnosticContext(ctx, before.engine, op.params.RunID, op.params.Token)
 			if scopeErr == nil {
-				scopeErr = e.sleepContext(scoped, before.engine)
+				scopeErr = m.runDiagnosticLifecycle(scoped, before.engine, false)
 			}
 			if scopeErr != nil || !e.terminationVerifiedContext(ctx, st) {
 				failures = append(failures, errors.New("diagnostic-cleanup-unconfirmed"))

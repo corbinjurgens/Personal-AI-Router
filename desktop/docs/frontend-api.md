@@ -293,7 +293,14 @@ returns a public run or `null`; omit `runId` to discover the node's active run.
 and returns the resulting public run or `null`. `onDiagnosticChanged(callback)`
 subscribes to `engines:diagnostic-changed` and returns an unsubscribe function.
 Each invoke uses the corresponding `engines:diagnostic-*` logical channel.
-These methods currently target the local node; the broker owns peer admission.
+`nodeId` may select a paired peer; the broker and manager own peer admission and
+direct/reverse transport. Preview/start require the target's management grant,
+maintenance clearance and absence of Halt. Configured pause permits consent.
+Status remains an authenticated read; peer cancel requires a management grant
+and stays available during Halt or maintenance for cleanup. The origin polls
+every two seconds only while its diagnostic panel is open. The target tray
+discovers peer-started active runs on mount/reconnect, follows local pushes and
+shows Measuring memory and Cancel through the existing engine-settings store.
 
 The preview binds hardware, native build, artifacts, requested configuration
 and either a configuration key or an unpriced execution key. Runtime context,
@@ -313,6 +320,14 @@ held; call `diagnosticCancel` again to retry cleanup. Results are measured on
 the target machine, date and build. Sampling can miss short peaks. Unpriced
 native-fit or GPU-selection records do not overlay estimates or feed Auto.
 Manager tokens, markers and private observations are excluded from this API.
+
+Model Settings refreshes inspection after a terminal run and uses the target's
+inspected currentness for its result label. Until that read arrives, currentness
+is unverified. A matching key alone does not establish matching hardware,
+artifacts, native build and realized placement. Missing phase observations are
+shown as not sampled; request rates remain distinct from combined throughput.
+Command completion is reconciled with a status read for that exact run, while
+active-run discovery is restored after a manager settings reconnection.
 
 The copy control API uses manager engine IDs (`llamacpp`, for example), stable
 node UUIDs and exact model IDs. `copyModel(request)` invokes `engine:copy-model`
@@ -484,7 +499,7 @@ Commands return no state. Renderer stores update from
 | `engines:get-settings`      | `EngineSettingsTarget`       | `EngineSettingsSnapshot`  |
 | `engines:preview-settings`  | `EngineSettingsRequest`      | `EngineSettingsPreview`   |
 | `engines:apply-settings`    | `EngineSettingsRequest`      | `EngineSettingsReceipt`   |
-| `engines:diagnostic-preview` | `DiagnosticPreviewRequest` | `DiagnosticPreview` |
+| `engines:diagnostic-preview` | `DiagnosticPreviewRequest` | `DiagnosticPreview` (separate planned context/slots and unknown pre-load realization) |
 | `engines:diagnostic-start` | `DiagnosticStartRequest` | `DiagnosticRun` |
 | `engines:diagnostic-status` | `{ nodeId?, runId? }` | `DiagnosticRun` or `null` |
 | `engines:diagnostic-cancel` | `DiagnosticRunRef` | `DiagnosticRun` or `null` |

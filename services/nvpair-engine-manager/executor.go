@@ -140,6 +140,7 @@ type Executor struct {
 	ownerAdmissionGeneration uint64
 	ownerAdmissionHeld       uint64
 	settingsHub              settings.Hub
+	diagnosticParent         func(context.Context, string, string, json.RawMessage) (json.RawMessage, error)
 	admittedLoadParent       func(context.Context, string, string) (json.RawMessage, error)
 	settingsParent           func(context.Context, string, settings.Request, string) (json.RawMessage, error)
 	inspectParent            func(context.Context, modelconfig.InspectRequest, string) (json.RawMessage, error)

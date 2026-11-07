@@ -14,9 +14,21 @@ measured result. Private manager tokens, markers and load observations are
 rejected before renderer fanout or notification logging. The internal manager
 `engine:diagnostic-run-status` is a separate method and is never exposed here.
 
+Peer targets route through private manager IPC
+`engine:remote-diagnostic-preview|start|status|cancel` and classified ec POST
+`/v1/model-diagnostic/preview|start|status|cancel`, using the existing pinned
+direct/reverse client. Only status is a read; the other routes require a fresh
+management grant. Inbound `engine:diagnostic-request` carries the verified caller
+to the exact current target manager source/worker pair. Its correlated
+`engine:diagnostic-reply` and source-scoped `engine:diagnostic-request-cancel`
+stay worker-internal. The broker rechecks consent, grant, maintenance and Halt
+before accepting work and never transfers target cleanup ownership to the
+origin. Remote responses preserve the peer node and exact run ID after strict
+public projection. Shared strict decoding remains unchanged.
+
 Preview/start/status use the normal short RPC envelope; start acknowledges the
-broker-owned operation before long work. Cancel uses a 90-second desktop
-envelope outside the broker's minute cleanup budget, waits for its reply, and
+broker-owned operation before long work. Cancel uses a 210-second desktop
+envelope outside the broker's three-minute cleanup budget, waits for its reply, and
 retains `cleanup-failed` for an explicit retry. Detaching a client does not
 cancel accepted work. Active status accepts optional node and run IDs and can
 discover an operation during `reserving`; a missing run is `null`.
@@ -31,6 +43,20 @@ failed records; completed records require realized allocation. Sampled peaks
 can miss short spikes. Unpriced execution-key results remain visible diagnostic
 evidence without estimate overlays or Auto authority. Peer routing stays in
 the broker and manager; no desktop peer transport is introduced.
+
+The renderer reconciles command receipts through status reads for the exact
+accepted run, including when a discovery read was already pending. Receipts
+never replace snapshots or newer pushes. Engine settings reconnect snapshots
+restore active diagnostic discovery after manager replacement. Terminal runs
+trigger fresh profile inspection when the applied profile has no draft; only
+the target's inspected `current` flag establishes measurement currentness.
+Matching a configuration or execution key alone does not establish it.
+
+The open diagnostic panel polls peer status at two-second intervals and stops
+on close. The target tray independently discovers active runs on mount and
+reconnect and follows local pushes for Measuring memory and Cancel, through the
+same engine-settings store. Remote cancellation budgets nest target 200 seconds,
+peer 205 seconds, origin 208 seconds and desktop 210 seconds.
 
 Stated memory recording follows the existing settings relay to its destination:
 `engine:set-stated-memory` and `engine:clear-stated-memory` (and manager

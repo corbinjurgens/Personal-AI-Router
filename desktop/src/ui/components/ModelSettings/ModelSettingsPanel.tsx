@@ -506,6 +506,7 @@ export default function ModelSettingsPanel({
                 {identity.model && (
                     <ModelMemoryDiagnostic
                         key={diagnosticKey}
+                        open={open}
                         nodeId={targetId}
                         engine={identity.engine}
                         modelId={identity.model}

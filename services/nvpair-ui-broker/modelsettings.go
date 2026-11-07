@@ -1522,7 +1522,9 @@ func (b *Broker) inspectModelSettings(ctx context.Context, p modelconfig.Inspect
 	}
 	p.NodeID = ""
 	var raw json.RawMessage
-	envelope := modelWorkerRequest(b, p, caller, leaseErr == nil)
+	base := modelWorkerRequest(b, p, caller, leaseErr == nil)
+	hardware, _ := b.diagnosticTargetHardware(ctx, base.Memory)
+	envelope := diagnosticInspectEnvelope{WorkerRequest: base, Hardware: hardware}
 	started, clockErr := noderec.MemoryBootClock()
 	if err := b.settingsWorkerCall(ctx, "engine:inspect-model", envelope, &raw); err != nil {
 		return modelconfig.InspectResult{}, err

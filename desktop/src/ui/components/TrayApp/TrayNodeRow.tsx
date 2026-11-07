@@ -1,11 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import { memo, useCallback, useMemo } from 'react'
-import { Flex, Stack, Text } from '@nvidia/foundations-react-core'
+import { memo, useCallback, useEffect, useMemo } from 'react'
+import { Button, Flex, Stack, Text } from '@nvidia/foundations-react-core'
 import { useMetricsStore } from '@/ui/stores/metrics.store'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import { useEngineStatusStore } from '@/ui/stores/engine-status.store'
+import { useEngineSettingsStore, watchModelDiagnostic } from '@/ui/stores/engine-settings.store'
 import { LocalBadge } from '@/ui/components/LocalBadge'
 import type { NodeItem } from '@/shared/types/nodes'
 import type { Workload } from '@/shared/types/workloads'
@@ -30,6 +31,18 @@ const gridStyle = {
 function TrayNodeRow({ node, activeWorkloads }: { node: NodeItem; activeWorkloads: Workload[] }) {
     const nodeMetrics = useMetricsStore(state => state.nodeMetrics.get(node.id))
     const isLocal = useConnectionStore(state => state.selfId === node.id)
+    const connected = useConnectionStore(state => state.connected)
+    const diagnostic = useEngineSettingsStore(state => state.diagnostics[node.id])
+    const measuring =
+        isLocal &&
+        (diagnostic?.run?.outcome === 'running' || diagnostic?.run?.outcome === 'cleanup-failed')
+    // The target discovers peer-started work using the same active-run lookup
+    // and push subscription as Model Settings. Remote polling belongs only to
+    // an open diagnostic panel at the origin.
+    useEffect(() => {
+        if (isLocal) return watchModelDiagnostic(node.id)
+        return undefined
+    }, [isLocal, node.id])
     const statusByNode = useEngineStatusStore(s => s.statusByNode)
     const engineRows = useMemo(
         () =>
@@ -121,6 +134,33 @@ function TrayNodeRow({ node, activeWorkloads }: { node: NodeItem; activeWorkload
                     <Text kind="body/regular/xs" className="text-subtle-color">
                         Jobs ({jobCount})
                     </Text>
+                    {measuring && diagnostic && (
+                        <Flex align="center" gap="2">
+                            <Text role="status" kind="body/regular/xs">
+                                Measuring memory
+                                {diagnostic.run?.outcome === 'cleanup-failed' &&
+                                    ': cleanup required'}
+                                {!diagnostic.current && ' (reconnecting)'}
+                            </Text>
+                            <Button
+                                kind="secondary"
+                                size="small"
+                                disabled={
+                                    !connected ||
+                                    !diagnostic.current ||
+                                    (!!diagnostic.operation && diagnostic.operation !== 'start')
+                                }
+                                onClick={event => {
+                                    event.stopPropagation()
+                                    void useEngineSettingsStore.getState().cancelDiagnostic(node.id)
+                                }}
+                            >
+                                {diagnostic.run?.outcome === 'cleanup-failed'
+                                    ? 'Retry cleanup'
+                                    : 'Cancel'}
+                            </Button>
+                        </Flex>
+                    )}
                 </Stack>
             </div>
         </div>

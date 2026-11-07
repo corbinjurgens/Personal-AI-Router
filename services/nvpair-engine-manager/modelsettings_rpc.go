@@ -275,7 +275,7 @@ type modelDiagnosticInspectionKey struct{}
 
 // withModelDiagnosticInspectionIdentity carries freshly observed hardware,
 // build, artifacts and realized settings from the diagnostic lifecycle owner.
-// Ordinary inspection has no such proof and cannot mark measured records current.
+// Ordinary inspection assembles this proof through its target identity owner.
 func withModelDiagnosticInspectionIdentity(ctx context.Context, identity modelconfig.DiagnosticIdentity) context.Context {
 	return context.WithValue(ctx, modelDiagnosticInspectionKey{}, identity.Clone())
 }
@@ -454,10 +454,11 @@ func (e *Executor) inspectModel(ctx context.Context, p modelconfig.InspectReques
 			}
 		}
 	}
-	var diagnosticIdentity *modelconfig.DiagnosticIdentity
+	diagnosticIdentity := e.inspectionDiagnosticIdentity(ctx, p, result)
 	if identity, ok := ctx.Value(modelDiagnosticInspectionKey{}).(modelconfig.DiagnosticIdentity); ok {
 		diagnosticIdentity = &identity
 	}
+	advisory.DiagnosticIdentity = diagnosticIdentity
 	profileKey := p.ProfileKey
 	if profileKey == "" {
 		profileKey = p.ModelID
@@ -498,7 +499,7 @@ func completeModelInspectionReply(result *modelconfig.InspectResult) error {
 }
 
 func (m *Manager) inspectModel(ctx context.Context, msg *Message) {
-	envelope, err := settings.DecodeWorkerRequest[modelconfig.InspectRequest](msg.Params)
+	envelope, hardware, err := decodeDiagnosticInspectEnvelope(msg.Params)
 	if err != nil {
 		m.respondOrErr(msg, nil, modelSettingsParamsError(err))
 		return
@@ -509,6 +510,7 @@ func (m *Manager) inspectModel(ctx context.Context, msg *Message) {
 		return
 	}
 	ctx = m.exec.modelMemoryContext(ctx, p.Engine, envelope.Memory, envelope.NativeInitAllowed)
+	ctx = withDiagnosticHardware(ctx, hardware)
 	result, err := m.exec.InspectModel(ctx, p)
 	m.respondOrErr(msg, result, err)
 }

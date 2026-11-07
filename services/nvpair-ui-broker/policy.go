@@ -1571,6 +1571,12 @@ func (b *Broker) replayPolicyToProxy(ctx context.Context, pp *proxyProcess) bool
 	// caller can hold proxySupMu, and a slow client must not retain that lock
 	// or the push slot after the ordered replay RPCs have finished.
 	b.schedulePolicyAnnouncement()
+	if b.diagnosticHoldActive() {
+		// Completed cleanup can clear reconstructed drains only after this
+		// proxy has an acknowledged incarnation. Retain them through replay,
+		// then settle the same ledger off the push slot and spawn owner.
+		go func() { _ = b.reconcileDiagnostics(context.Background(), diagnosticManager) }()
+	}
 	return true
 }
 

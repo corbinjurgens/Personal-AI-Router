@@ -30,6 +30,8 @@ type DiagnosticIdentity = Pick<
 export type DiagnosticPreview = DiagnosticPreviewRequest &
     DiagnosticIdentity & {
         previewId: string
+        plannedPerSlotContext: number
+        plannedSlots: number
         lowPromptTokens: number
         highPromptTokens: number
         generateTokens: number

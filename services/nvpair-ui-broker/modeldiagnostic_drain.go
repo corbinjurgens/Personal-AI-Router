@@ -118,15 +118,34 @@ func (b *Broker) drainNode(parent context.Context) (lease *nodeDrainLease, err e
 }
 
 func (l *nodeDrainLease) release(ctx context.Context) error {
+	if err := l.clear(ctx); err != nil {
+		return err
+	}
+	l.releaseSettings()
+	return nil
+}
+
+// Clear proxy/registry drains while retaining settings serialization. The
+// diagnostic ledger uses this until its following manager release is settled,
+// so a failed release can reassert drains without a settings writer racing it.
+func (l *nodeDrainLease) clear(ctx context.Context) error {
 	r := l.broker.nodePolicyRuntime()
 	if !r.acquirePush(ctx) {
 		return ctx.Err()
 	}
 	defer r.releasePush()
-	return l.releaseUnderPush(ctx, nil)
+	return l.clearUnderPush(ctx, nil)
 }
 
 func (l *nodeDrainLease) releaseUnderPush(ctx context.Context, acquiringProxy *proxyProcess) error {
+	if err := l.clearUnderPush(ctx, acquiringProxy); err != nil {
+		return err
+	}
+	l.releaseSettings()
+	return nil
+}
+
+func (l *nodeDrainLease) clearUnderPush(ctx context.Context, acquiringProxy *proxyProcess) error {
 	b := l.broker
 	r := b.nodePolicyRuntime()
 	for len(l.added) != 0 {
@@ -158,11 +177,14 @@ func (l *nodeDrainLease) releaseUnderPush(ctx context.Context, acquiringProxy *p
 		r.mu.Unlock()
 		l.added = l.added[1:]
 	}
+	return nil
+}
+
+func (l *nodeDrainLease) releaseSettings() {
 	if l.settingsHeld {
 		l.settingsHeld = false
-		b.settingsApplyMu.Unlock()
+		l.broker.settingsApplyMu.Unlock()
 	}
-	return nil
 }
 
 func (b *Broker) nodeDrainProxyCurrent(pp *proxyProcess, runID string) error {

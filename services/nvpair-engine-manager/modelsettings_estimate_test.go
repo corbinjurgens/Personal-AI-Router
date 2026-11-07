@@ -2933,8 +2933,8 @@ func newTask8EstimateFixture(t *testing.T, topology string) task8EstimateFixture
 		})
 	}
 	prompt, cached, generated := identity.PerSlotContext-144, int32(0), int32(128)
-	first, end, overlap := 10.0, 100.0, true
-	m.High = &modelconfig.MeasuredPhase{Coverage: "complete", Overlapped: &overlap, OverlapWindowSampled: &overlap, WallMS: 100}
+	first, end, overlap, sampled := 10.0, 100.0, true, true
+	m.High = &modelconfig.MeasuredPhase{Coverage: "complete", Overlapped: &overlap, OverlapWindowSampled: &sampled, WallMS: 100}
 	for range identity.Slots {
 		m.High.Requests = append(m.High.Requests, modelconfig.MeasuredRequest{
 			TargetPromptTokens: prompt, PromptTokens: &prompt, CachedTokens: &cached,
@@ -3147,8 +3147,7 @@ func TestModelSettingsEstimateTask8FullIdentityRequired(t *testing.T) {
 		in.DiagnosticIdentity.Placement[1].DeviceID = in.DiagnosticIdentity.GPUs[1].UUID
 	})
 	test("requested settings changed", func(in *modelEstimateInput) {
-		off := "off"
-		in.DiagnosticIdentity.Requested.FlashAttention = &off
+		in.DiagnosticIdentity.Requested.Context = &modelconfig.Context{Mode: "fixed", Tokens: 12345}
 	})
 	test("artifact changed", func(in *modelEstimateInput) { in.DiagnosticIdentity.Artifacts[0].Identity = "different-artifact" })
 	test("configuration changed", func(in *modelEstimateInput) { in.DiagnosticIdentity.ConfigurationKey = strings.Repeat("e", 64) })

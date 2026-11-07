@@ -35,7 +35,7 @@ import {
     REMOTE_SETTING_LOCKED_CODE
 } from '@/shared/constants/service-errors'
 
-export const engineSettingsKey = (target: EngineSettingsTarget): string =>
+export const engineSettingsKey = (target: { nodeId: string; engine: string }): string =>
     `${target.nodeId}:${target.engine}`
 
 interface SettingsEntry {
@@ -48,7 +48,7 @@ interface SettingsStore {
     previewDiagnostic: (request: DiagnosticPreviewRequest) => Promise<void>
     startDiagnostic: (request: DiagnosticStartRequest) => Promise<void>
     cancelDiagnostic: (nodeId: string) => Promise<void>
-    readDiagnostic: (nodeId: string) => Promise<void>
+    readDiagnostic: (nodeId: string, runId?: string, supersedePending?: boolean) => Promise<void>
     receiveDiagnostic: (nodeId: string, run: DiagnosticRun) => void
     disconnectDiagnostic: (nodeId: string) => void
     entries: Record<string, SettingsEntry>
@@ -61,7 +61,7 @@ interface SettingsStore {
     discardModel: (key: string) => void
     invalidateModel: (key: string) => void
     inspectModel: (
-        target: EngineSettingsTarget,
+        target: { nodeId: string; engine: string },
         modelId: string,
         profileKey?: string
     ) => Promise<void>
@@ -144,8 +144,10 @@ interface ModelPreviewOwner {
 // Transport calls cannot be aborted. Keep their ownership until they settle,
 // even when a draft is logically cancelled, and coalesce its next request.
 let modelPreview: ModelPreviewOwner | undefined
-export const modelSettingsKey = (target: EngineSettingsTarget, profileKey?: string): string =>
-    `${engineSettingsKey(target)}:${profileKey ?? ''}`
+export const modelSettingsKey = (
+    target: { nodeId: string; engine: string },
+    profileKey?: string
+): string => `${engineSettingsKey(target)}:${profileKey ?? ''}`
 
 function invalidateDraft(draft?: ModelDraft, retainReview = false): ModelDraft {
     return withdrawMemory({
@@ -362,6 +364,8 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
         const nodeId = request.nodeId ?? useConnectionStore.getState().selfId
         if (!nodeId) return
         const previous = get().diagnostics[nodeId]
+        if (previous?.run?.outcome === 'running' || previous?.run?.outcome === 'cleanup-failed')
+            return
         if (previous?.operation && previous.operation !== 'preview') return
         const operationId = (previous?.operationId ?? 0) + 1
         set(state => ({
@@ -437,6 +441,7 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
         )
             return
         const operationId = entry.operationId + 1
+        let acceptedRunId: string | undefined
         set(state => ({
             diagnostics: {
                 ...state.diagnostics,
@@ -451,7 +456,8 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
         }))
         try {
             // Command receipts do not replace service snapshots or newer pushes.
-            await window.pairApi.engines.diagnosticStart(request)
+            const receipt = await window.pairApi.engines.diagnosticStart(request)
+            acceptedRunId = receipt.runId
         } catch (error) {
             if (get().diagnostics[nodeId]?.operationId === operationId)
                 set(state => ({
@@ -462,7 +468,7 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
                 }))
         } finally {
             if (get().diagnostics[nodeId]?.operationId === operationId) {
-                await get().readDiagnostic(nodeId)
+                await get().readDiagnostic(nodeId, acceptedRunId, true)
                 if (get().diagnostics[nodeId]?.operationId === operationId)
                     set(state => ({
                         diagnostics: {
@@ -501,7 +507,7 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
                 }))
         } finally {
             if (get().diagnostics[nodeId]?.operationId === operationId) {
-                await get().readDiagnostic(nodeId)
+                await get().readDiagnostic(nodeId, entry.run.runId)
                 if (get().diagnostics[nodeId]?.operationId === operationId)
                     set(state => ({
                         diagnostics: {
@@ -512,9 +518,9 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
             }
         }
     },
-    readDiagnostic: async nodeId => {
+    readDiagnostic: async (nodeId, runId, supersedePending = false) => {
         const entry = get().diagnostics[nodeId]
-        if (entry?.reading) return
+        if (entry?.reading && !runId && !supersedePending) return
         const arrival = (entry?.arrival ?? 0) + 1
         set(state => ({
             diagnostics: {
@@ -529,8 +535,28 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
             }
         }))
         try {
-            const run = await window.pairApi.engines.diagnosticStatus({ nodeId })
+            const run = await window.pairApi.engines.diagnosticStatus({
+                nodeId,
+                ...(runId === undefined ? {} : { runId })
+            })
             if (get().diagnostics[nodeId]?.arrival !== arrival) return
+            const latest = get().diagnostics[nodeId]?.run
+            if (
+                run &&
+                latest?.runId === run.runId &&
+                (latest.elapsedMs > run.elapsedMs ||
+                    (latest.outcome !== 'running' &&
+                        latest.outcome !== 'cleanup-failed' &&
+                        run.outcome === 'running'))
+            ) {
+                set(state => ({
+                    diagnostics: {
+                        ...state.diagnostics,
+                        [nodeId]: { ...state.diagnostics[nodeId], current: true, reading: false }
+                    }
+                }))
+                return
+            }
             set(state => ({
                 diagnostics: {
                     ...state.diagnostics,
@@ -538,6 +564,17 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
                         ...state.diagnostics[nodeId],
                         current: true,
                         reading: false,
+                        ...(run?.outcome === 'running' || run?.outcome === 'cleanup-failed'
+                            ? {
+                                  preview: undefined,
+                                  ...(state.diagnostics[nodeId]?.operation === 'preview'
+                                      ? {
+                                            operation: undefined,
+                                            operationId: state.diagnostics[nodeId].operationId + 1
+                                        }
+                                      : {})
+                              }
+                            : {}),
                         run:
                             run ??
                             (entry?.run?.outcome === 'running' ||
@@ -582,7 +619,10 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
                     reading: false,
                     arrival: (entry?.arrival ?? 0) + 1,
                     operationId: entry?.operationId ?? 0,
-                    preview: undefined
+                    preview: undefined,
+                    ...(entry?.operation === 'preview'
+                        ? { operation: undefined, operationId: entry.operationId + 1 }
+                        : {})
                 }
             }
         }))
@@ -1339,6 +1379,13 @@ export function watchModelDiagnostic(nodeId: string): () => void {
             if (target.nodeId === nodeId)
                 useEngineSettingsStore.getState().disconnectDiagnostic(nodeId)
         })
+        const stopSettingsChanged = window.pairApi.engines.onSettingsChanged(snapshot => {
+            if (
+                snapshot.nodeId === nodeId &&
+                !useEngineSettingsStore.getState().diagnostics[nodeId]?.current
+            )
+                read()
+        })
         // Remote targets do not always deliver pushes to the origin window.
         const timer = window.setInterval(() => {
             if (nodeId !== useConnectionStore.getState().selfId) read()
@@ -1350,6 +1397,7 @@ export function watchModelDiagnostic(nodeId: string): () => void {
                 stopPush()
                 stopConnection()
                 stopSettings()
+                stopSettingsChanged()
                 window.clearInterval(timer)
                 useEngineSettingsStore.getState().disconnectDiagnostic(nodeId)
             }

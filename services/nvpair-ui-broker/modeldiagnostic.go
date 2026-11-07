@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"reflect"
 	"slices"
 	"sync"
@@ -21,6 +20,14 @@ const diagnosticPreviewTTL = 5 * time.Minute
 const diagnosticRunLimit = 20 * time.Minute
 const diagnosticSampleInterval = 2 * time.Second
 
+// Manager cleanup has a two-minute physical-stop budget. Leave time for the
+// joined reply, durable record and release instead of timing it out at 5 s.
+const diagnosticCleanupLimit = 3 * time.Minute
+
+// Includes acceptance reconciliation and the owner's joined cleanup, and fits
+// inside the desktop's 210-second cancellation envelope.
+const diagnosticCancelLimit = 200 * time.Second
+
 // This private observation is deliberately outside the public engine:* relay.
 // The manager must observe the same effects used by its compare-and-reserve,
 // without waking an engine or running a native helper. Unsupported observation
@@ -28,13 +35,15 @@ const diagnosticSampleInterval = 2 * time.Second
 const diagnosticObserveMethod = "internal:diagnostic-observe"
 
 type diagnosticObservation struct {
-	Identity      modelconfig.DiagnosticIdentity   `json:"identity"`
-	EffectsFence  string                           `json:"effectsFence"`
-	UnloadModels  []modelconfig.DiagnosticModelRef `json:"unloadModels"`
-	ReloadedAfter []modelconfig.DiagnosticModelRef `json:"reloadedAfter"`
-	DrainEngines  []string                         `json:"drainEngines"`
-	StartsEngine  bool                             `json:"startsEngine"`
-	Supported     bool                             `json:"supported"`
+	Identity              modelconfig.DiagnosticIdentity   `json:"identity"`
+	PlannedPerSlotContext int32                            `json:"plannedPerSlotContext"`
+	PlannedSlots          int32                            `json:"plannedSlots"`
+	EffectsFence          string                           `json:"effectsFence"`
+	UnloadModels          []modelconfig.DiagnosticModelRef `json:"unloadModels"`
+	ReloadedAfter         []modelconfig.DiagnosticModelRef `json:"reloadedAfter"`
+	DrainEngines          []string                         `json:"drainEngines"`
+	StartsEngine          bool                             `json:"startsEngine"`
+	Supported             bool                             `json:"supported"`
 }
 
 type diagnosticReserveRequest struct {
@@ -46,6 +55,7 @@ type diagnosticReserveRequest struct {
 	ExecutionKey     string                    `json:"executionKey,omitempty"`
 	EffectsFence     string                    `json:"effectsFence"`
 	TargetMemory     *modelconfig.TargetMemory `json:"targetMemory,omitempty"`
+	Hardware         *diagnosticHardware       `json:"hardware,omitempty"`
 }
 
 type diagnosticAuthority struct {
@@ -127,15 +137,18 @@ type diagnosticReview struct {
 	policy     string
 	worker     *rpcWorker
 	expires    time.Time
+	caller     string
+	source     *engineManagerSource
 }
 
 type modelDiagnosticRuntime struct {
-	mu          sync.Mutex
-	reconcileMu sync.Mutex
-	previews    map[string]diagnosticReview
-	active      *brokerDiagnostic
-	last        *modelconfig.DiagnosticRun
-	now         func() time.Time
+	mu           sync.Mutex
+	reconcileMu  sync.Mutex
+	previews     map[string]diagnosticReview
+	active       *brokerDiagnostic
+	last         *modelconfig.DiagnosticRun
+	now          func() time.Time
+	relayCancels map[diagnosticRelayKey]context.CancelFunc
 }
 
 // One goroutine owns the ledger. It is published before the first acquisition.
@@ -143,6 +156,7 @@ type modelDiagnosticRuntime struct {
 // checkpoint is the only durable owner; this structure is never journalled.
 type brokerDiagnostic struct {
 	runID               string
+	started             time.Time
 	cleanupMu           sync.Mutex
 	run                 modelconfig.DiagnosticRun // diagnostics.mu
 	review              diagnosticReview
@@ -163,6 +177,7 @@ type brokerDiagnostic struct {
 	recorded            bool
 	stopped             bool
 	reservationReleased bool
+	releaseAttempted    bool
 	markers             map[string]time.Time // diagnostics.mu; manager marker notifications
 	samples             diagnosticSamples
 	status              diagnosticManagerStatus
@@ -180,43 +195,88 @@ func diagnosticError(reason string) error { return modelSettingsConflict(reason)
 // Saved pause, not managementBlockedLocked, is the consent gate. Configured
 // pause permits measurement; its availability and saved pause remain untouched.
 func (b *Broker) diagnosticGate() (uint64, string, error) {
+	return b.diagnosticRequestGate(context.Background())
+}
+
+func (b *Broker) diagnosticRequestGate(ctx context.Context) (generation uint64, policy string, err error) {
+	err = b.withDiagnosticGate(ctx, func(g uint64, p string) error {
+		generation, policy = g, p
+		return nil
+	})
+	return
+}
+
+// No I/O or lifecycle wait belongs in accept. Holding the policy and worker
+// pair through publication prevents a retired relay from accepting new work.
+func (b *Broker) withDiagnosticGate(ctx context.Context, accept func(uint64, string) error) error {
 	b.engineConfigMu.Lock()
 	defer b.engineConfigMu.Unlock()
 	if err := b.loadEngineSettingsLocked(); err != nil {
-		return 0, "", err
+		return err
 	}
-	if b.buildApplyMaintenance.active != nil || len(b.activeSettings) != 0 {
-		return 0, "", diagnosticError("node maintenance is active")
+	if b.buildApplyMaintenance.active != nil || len(b.buildApplyMaintenance.settings) != 0 || len(b.activeSettings) != 0 {
+		return diagnosticError("node maintenance is active")
 	}
 	for _, record := range b.engineSettings {
 		if record != nil && (record.Snapshot.Phase == "applying" || record.Model != nil && record.Model.Stage != "completed") {
-			return 0, "", diagnosticError("model settings are being applied")
+			return diagnosticError("model settings are being applied")
 		}
 	}
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	b.workersMu.Lock()
+	defer b.workersMu.Unlock()
+	if err := b.diagnosticAuthorityLocked(ctx, r); err != nil {
+		return err
+	}
+	if r.pendingPauseRequested || r.buildApplyOperation != "" {
+		return diagnosticError("node availability or maintenance is changing")
+	}
 	if r.current.PauseMode == nodepolicy.PauseImmediate {
-		return 0, "", diagnosticError("This node is halted. Resume it before measuring memory.")
+		return diagnosticError("This node is halted. Resume it before measuring memory.")
 	}
 	if r.recoveryRequired {
-		return 0, "", diagnosticError("node policy recovery is pending")
+		return diagnosticError("node policy recovery is pending")
 	}
-	return b.buildApplyMaintenance.generation, r.current.Revision, nil
+	return accept(b.buildApplyMaintenance.generation, r.current.Revision)
 }
 
 func (b *Broker) observeDiagnostic(ctx context.Context, p modelconfig.DiagnosticPreviewRequest) (diagnosticObservation, error) {
 	var observation diagnosticObservation
-	err := modelSettingsCall(ctx, b.getEngineMgr(), diagnosticObserveMethod, struct {
-		Request modelconfig.DiagnosticPreviewRequest `json:"request"`
-		Memory  *modelconfig.TargetMemory            `json:"memory"`
-	}{p, b.modelTargetMemory()}, &observation)
+	// The private target is already pinned to this node. Do not forward the
+	// public self alias as if it were a peer selection to the manager.
+	p.NodeID = ""
+	memory := b.modelTargetMemory()
+	hardware, err := b.diagnosticTargetHardware(ctx, memory)
+	if err != nil {
+		return observation, err
+	}
+	err = modelSettingsCall(ctx, b.getEngineMgr(), diagnosticObserveMethod, struct {
+		Request  modelconfig.DiagnosticPreviewRequest `json:"request"`
+		Memory   *modelconfig.TargetMemory            `json:"memory"`
+		Hardware *diagnosticHardware                  `json:"hardware"`
+	}{p, memory, hardware}, &observation)
 	if err != nil {
 		return observation, err
 	}
 	if !observation.Supported || observation.EffectsFence == "" || len(observation.DrainEngines) == 0 {
 		return observation, diagnosticError("diagnostic observation unavailable for this engine family")
 	}
+	if p.Engine != "llamacpp" {
+		return observation, diagnosticError("unsupported diagnostic engine")
+	}
+	if !reflect.DeepEqual(diagnosticIdentityHardware(observation.Identity), hardware) {
+		return observation, diagnosticError("manager observed different target hardware")
+	}
+	// Consent includes the exact broker-owned proxy drain catalog as well as
+	// the manager's execution hold, including descriptor-backed facades.
+	for _, profile := range b.frontedEngineProfiles() {
+		observation.DrainEngines = append(observation.DrainEngines, profile.Name)
+	}
+	slices.Sort(observation.DrainEngines)
+	observation.DrainEngines = slices.Compact(observation.DrainEngines)
+	observation.ReloadedAfter = b.diagnosticResidentReloads()
 	return observation, nil
 }
 
@@ -227,7 +287,7 @@ func (b *Broker) previewDiagnostic(ctx context.Context, p modelconfig.Diagnostic
 	if p.NodeID != "" && p.NodeID != b.nodeID {
 		return modelconfig.DiagnosticPreview{}, diagnosticError("unsupported: local diagnostics only")
 	}
-	generation, policy, err := b.diagnosticGate()
+	generation, policy, err := b.diagnosticRequestGate(ctx)
 	if err != nil {
 		return modelconfig.DiagnosticPreview{}, err
 	}
@@ -247,9 +307,10 @@ func (b *Broker) previewDiagnostic(ctx context.Context, p modelconfig.Diagnostic
 	}
 	now := b.diagnosticNow()
 	preview := modelconfig.DiagnosticPreview{DiagnosticPreviewRequest: p, DiagnosticIdentity: observation.Identity.Clone(), PreviewID: settingsID(), GenerateTokens: 128, TimeLimitSeconds: 1200,
+		PlannedPerSlotContext: observation.PlannedPerSlotContext, PlannedSlots: observation.PlannedSlots,
 		UnloadModels: observation.UnloadModels, ReloadedAfter: observation.ReloadedAfter, DrainEngines: slices.Clone(observation.DrainEngines), StartsEngine: observation.StartsEngine, ExpiresAt: now.Add(diagnosticPreviewTTL).Format(time.RFC3339Nano)}
-	if preview.PerSlotContext != 0 {
-		preview.HighPromptTokens = preview.PerSlotContext - 144
+	if preview.PlannedPerSlotContext != 0 {
+		preview.HighPromptTokens = preview.PlannedPerSlotContext - 144
 		if preview.HighPromptTokens < 64 {
 			return modelconfig.DiagnosticPreview{}, diagnosticError("context-too-small")
 		}
@@ -257,7 +318,7 @@ func (b *Broker) previewDiagnostic(ctx context.Context, p modelconfig.Diagnostic
 	} else {
 		preview.Warnings = append(preview.Warnings, "Prompt targets and realized allocation will be determined after the consented load.")
 	}
-	if preview.Slots > 8 {
+	if preview.PlannedSlots > 8 {
 		return modelconfig.DiagnosticPreview{}, diagnosticError("more than eight slots are unsupported")
 	}
 	preview.Warnings = append(preview.Warnings, b.diagnosticMemoryWarnings()...)
@@ -265,34 +326,40 @@ func (b *Broker) previewDiagnostic(ctx context.Context, p modelconfig.Diagnostic
 	if err := preview.Validate(); err != nil {
 		return modelconfig.DiagnosticPreview{}, err
 	}
-	currentGeneration, currentPolicy, err := b.diagnosticGate()
-	if err != nil || generation != currentGeneration || policy != currentPolicy || worker != b.getEngineMgr() {
-		return modelconfig.DiagnosticPreview{}, diagnosticError("node changed during preview")
-	}
-	b.diagnostics.mu.Lock()
-	defer b.diagnostics.mu.Unlock()
-	if b.diagnostics.active != nil {
-		return modelconfig.DiagnosticPreview{}, diagnosticError("a diagnostic is active")
-	}
-	if b.diagnostics.previews == nil {
-		b.diagnostics.previews = make(map[string]diagnosticReview)
-	}
-	for id, old := range b.diagnostics.previews {
-		if !now.Before(old.expires) {
-			delete(b.diagnostics.previews, id)
+	err = b.withDiagnosticGate(ctx, func(currentGeneration uint64, currentPolicy string) error {
+		if generation != currentGeneration || policy != currentPolicy || worker != b.engineMgr {
+			return diagnosticError("node changed during preview")
 		}
-	}
-	if len(b.diagnostics.previews) >= 16 {
-		oldest := ""
+		b.diagnostics.mu.Lock()
+		defer b.diagnostics.mu.Unlock()
+		if b.diagnostics.active != nil {
+			return diagnosticError("a diagnostic is active")
+		}
+		if b.diagnostics.previews == nil {
+			b.diagnostics.previews = make(map[string]diagnosticReview)
+		}
 		for id, old := range b.diagnostics.previews {
-			if oldest == "" || old.expires.Before(b.diagnostics.previews[oldest].expires) {
-				oldest = id
+			if !now.Before(old.expires) {
+				delete(b.diagnostics.previews, id)
 			}
 		}
-		delete(b.diagnostics.previews, oldest)
-	}
-	b.diagnostics.previews[preview.PreviewID] = diagnosticReview{preview.Clone(), observation.EffectsFence, generation, policy, worker, now.Add(diagnosticPreviewTTL)}
-	return preview, nil
+		if len(b.diagnostics.previews) >= 16 {
+			oldest := ""
+			for id, old := range b.diagnostics.previews {
+				if oldest == "" || old.expires.Before(b.diagnostics.previews[oldest].expires) {
+					oldest = id
+				}
+			}
+			delete(b.diagnostics.previews, oldest)
+		}
+		var source *engineManagerSource
+		if peer := diagnosticPeer(ctx); peer != nil {
+			source = peer.source
+		}
+		b.diagnostics.previews[preview.PreviewID] = diagnosticReview{preview: preview.Clone(), effects: observation.EffectsFence, generation: generation, policy: policy, worker: worker, expires: now.Add(diagnosticPreviewTTL), caller: diagnosticCaller(ctx), source: source}
+		return nil
+	})
+	return preview, err
 }
 
 func (b *Broker) startDiagnostic(ctx context.Context, p modelconfig.DiagnosticStartRequest) (modelconfig.DiagnosticRun, error) {
@@ -302,21 +369,25 @@ func (b *Broker) startDiagnostic(ctx context.Context, p modelconfig.DiagnosticSt
 	if p.NodeID != "" && p.NodeID != b.nodeID {
 		return modelconfig.DiagnosticRun{}, diagnosticError("unsupported: local diagnostics only")
 	}
-	generation, policy, err := b.diagnosticGate()
+	generation, policy, err := b.diagnosticRequestGate(ctx)
 	if err != nil {
 		return modelconfig.DiagnosticRun{}, err
 	}
 	b.diagnostics.mu.Lock()
 	review, found := b.diagnostics.previews[p.PreviewID]
 	b.diagnostics.mu.Unlock()
-	if !found || !b.diagnosticNow().Before(review.expires) || review.preview.DiagnosticPreviewRequest != p.DiagnosticPreviewRequest || generation != review.generation || policy != review.policy || b.getEngineMgr() != review.worker {
+	var source *engineManagerSource
+	if peer := diagnosticPeer(ctx); peer != nil {
+		source = peer.source
+	}
+	if !found || review.source != source || review.caller != diagnosticCaller(ctx) || !b.diagnosticNow().Before(review.expires) || review.preview.DiagnosticPreviewRequest != p.DiagnosticPreviewRequest || generation != review.generation || policy != review.policy || b.getEngineMgr() != review.worker {
 		return modelconfig.DiagnosticRun{}, diagnosticError("stale diagnostic preview; preview again")
 	}
 	observation, err := b.observeDiagnostic(ctx, p.DiagnosticPreviewRequest)
 	if err != nil {
 		return modelconfig.DiagnosticRun{}, err
 	}
-	if observation.EffectsFence != review.effects || !reflect.DeepEqual(observation.Identity, review.preview.DiagnosticIdentity) || !reflect.DeepEqual(observation.UnloadModels, review.preview.UnloadModels) || !reflect.DeepEqual(observation.ReloadedAfter, review.preview.ReloadedAfter) || !reflect.DeepEqual(observation.DrainEngines, review.preview.DrainEngines) || observation.StartsEngine != review.preview.StartsEngine {
+	if observation.EffectsFence != review.effects || !reflect.DeepEqual(observation.Identity, review.preview.DiagnosticIdentity) || observation.PlannedPerSlotContext != review.preview.PlannedPerSlotContext || observation.PlannedSlots != review.preview.PlannedSlots || !reflect.DeepEqual(observation.UnloadModels, review.preview.UnloadModels) || !reflect.DeepEqual(observation.ReloadedAfter, review.preview.ReloadedAfter) || !reflect.DeepEqual(observation.DrainEngines, review.preview.DrainEngines) || observation.StartsEngine != review.preview.StartsEngine {
 		return modelconfig.DiagnosticRun{}, diagnosticError("diagnostic effects changed; preview again")
 	}
 	if _, err := b.diagnosticMemory(); err != nil {
@@ -325,18 +396,29 @@ func (b *Broker) startDiagnostic(ctx context.Context, p modelconfig.DiagnosticSt
 	// A caller disappearing after acceptance must not abandon cleanup.
 	runCtx, cancel := context.WithTimeout(context.Background(), diagnosticRunLimit)
 	op := &brokerDiagnostic{review: review, worker: review.worker, cancel: cancel, done: make(chan struct{}), wake: make(chan struct{}, 1)}
-	op.run = modelconfig.DiagnosticRun{RunID: settingsID(), Engine: p.Engine, ModelID: p.ModelID, ProfileKey: p.ProfileKey, ConfigurationKey: review.preview.ConfigurationKey, ExecutionKey: review.preview.ExecutionKey, Phase: "reserving", Outcome: "running", StartedAt: b.diagnosticNow().Format(time.RFC3339Nano)}
+	op.started = b.diagnosticNow()
+	op.run = modelconfig.DiagnosticRun{RunID: settingsID(), Engine: p.Engine, ModelID: p.ModelID, ProfileKey: p.ProfileKey, ConfigurationKey: review.preview.ConfigurationKey, ExecutionKey: review.preview.ExecutionKey, Phase: "reserving", Outcome: "running", StartedAt: op.started.Format(time.RFC3339Nano)}
 	op.runID = op.run.RunID
-	b.diagnostics.mu.Lock()
-	if b.diagnostics.active != nil {
-		b.diagnostics.mu.Unlock()
+	var result modelconfig.DiagnosticRun
+	err = b.withDiagnosticGate(ctx, func(currentGeneration uint64, currentPolicy string) error {
+		if currentGeneration != generation || currentPolicy != policy || b.engineMgr != review.worker {
+			return diagnosticError("node changed before diagnostic acceptance")
+		}
+		b.diagnostics.mu.Lock()
+		defer b.diagnostics.mu.Unlock()
+		if b.diagnostics.active != nil {
+			return diagnosticError("a diagnostic is active")
+		}
+		delete(b.diagnostics.previews, p.PreviewID)
+		b.diagnostics.active = op
+		result = op.run.Clone()
+		return nil
+	})
+	if err != nil {
 		cancel()
-		return modelconfig.DiagnosticRun{}, diagnosticError("a diagnostic is active")
+		return modelconfig.DiagnosticRun{}, err
 	}
-	delete(b.diagnostics.previews, p.PreviewID)
-	b.diagnostics.active = op
-	result := op.run.Clone()
-	b.diagnostics.mu.Unlock()
+	b.publishDiagnostic(result)
 	go b.executeDiagnostic(runCtx, op)
 	return result, nil
 }
@@ -345,6 +427,7 @@ func (b *Broker) diagnosticStatus(runID string) (*modelconfig.DiagnosticRun, err
 	b.diagnostics.mu.Lock()
 	defer b.diagnostics.mu.Unlock()
 	if op := b.diagnostics.active; op != nil && (runID == "" || runID == op.run.RunID) {
+		b.updateDiagnosticElapsedLocked(op)
 		run := op.run.Clone()
 		return &run, nil
 	}
@@ -357,11 +440,40 @@ func (b *Broker) diagnosticStatus(runID string) (*modelconfig.DiagnosticRun, err
 
 func (b *Broker) setDiagnosticRun(op *brokerDiagnostic, run modelconfig.DiagnosticRun) {
 	b.diagnostics.mu.Lock()
-	if b.diagnostics.active == op {
-		op.run = run.Clone()
+	if b.diagnostics.active != op {
+		b.diagnostics.mu.Unlock()
+		return
 	}
+	if run.RunID != op.runID || run.Engine != op.run.Engine || run.ModelID != op.run.ModelID || run.ProfileKey != op.run.ProfileKey || run.ConfigurationKey != op.run.ConfigurationKey || run.ExecutionKey != op.run.ExecutionKey {
+		b.diagnostics.mu.Unlock()
+		return
+	}
+	// The public run starts before manager acceptance. Preserve that clock
+	// origin and never regress when adopting the manager's later-started clock.
+	run.StartedAt = op.run.StartedAt
+	run.ElapsedMS = max(run.ElapsedMS, op.run.ElapsedMS)
+	if run.Phase == "reserving" && op.run.Phase == "draining" {
+		// Manager acceptance starts its operation in reserving, after the
+		// broker has already completed draining under the same public run.
+		run.Phase = "draining"
+	}
+	if op.run.Result != nil && op.run.Result.RunID == run.RunID && op.run.Result.Outcome == run.Outcome {
+		run.Result = op.run.Result
+	}
+	op.run = run.Clone()
+	b.updateDiagnosticElapsedLocked(op)
+	run = op.run.Clone()
 	b.diagnostics.mu.Unlock()
 	b.publishDiagnostic(run)
+}
+
+func (b *Broker) updateDiagnosticElapsedLocked(op *brokerDiagnostic) {
+	if op.started.IsZero() {
+		op.started, _ = time.Parse(time.RFC3339Nano, op.run.StartedAt)
+	}
+	if !op.started.IsZero() {
+		op.run.ElapsedMS = max(op.run.ElapsedMS, b.diagnosticNow().Sub(op.started).Milliseconds())
+	}
 }
 
 func (b *Broker) publishDiagnostic(run modelconfig.DiagnosticRun) {
@@ -384,7 +496,11 @@ func (b *Broker) diagnosticCall(ctx context.Context, op *brokerDiagnostic, metho
 	if !b.diagnosticWorkerCurrent(op.worker) {
 		return diagnosticError("engine manager replaced; reconciliation required")
 	}
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	bound := 5 * time.Second
+	if method == "engine:diagnostic-abort" {
+		bound = diagnosticCleanupLimit - 15*time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, bound)
 	defer cancel()
 	if err := modelSettingsCall(ctx, op.worker, method, params, result); err != nil {
 		return err
@@ -407,11 +523,34 @@ func (b *Broker) readDiagnosticManager(ctx context.Context, op *brokerDiagnostic
 	if err != nil {
 		return status, err
 	}
-	if status.State != "none" && (status.Run == nil || status.Run.RunID != op.runID) {
-		return status, diagnosticError("manager diagnostic identity mismatch")
+	if err := validateDiagnosticManagerStatus(status, op.runID); err != nil {
+		return status, err
+	}
+	b.diagnostics.mu.Lock()
+	expected := op.run.Clone()
+	b.diagnostics.mu.Unlock()
+	if run := status.Run; status.State != "none" && run != nil && (run.Engine != expected.Engine || run.ModelID != expected.ModelID || run.ProfileKey != expected.ProfileKey || run.ConfigurationKey != expected.ConfigurationKey || run.ExecutionKey != expected.ExecutionKey) {
+		return status, diagnosticError("manager diagnostic target mismatch")
 	}
 	b.observeDiagnosticMarker(op, status)
 	return status, nil
+}
+
+func validateDiagnosticManagerStatus(status diagnosticManagerStatus, runID string) error {
+	if !slices.Contains([]string{"none", "reserved", "accepted", "running", "cleanup-failed", "cleanup-complete", "terminal", "pending"}, status.State) {
+		return diagnosticError("unknown manager diagnostic state")
+	}
+	if status.State == "none" {
+		// The manager's tagged embedded value emits a zero run for none.
+		if status.WorkStopped || status.Run != nil && !reflect.DeepEqual(*status.Run, modelconfig.DiagnosticRun{}) {
+			return diagnosticError("inconsistent empty diagnostic status")
+		}
+		return nil
+	}
+	if status.Run == nil || status.Run.RunID == "" || runID != "" && status.Run.RunID != runID {
+		return diagnosticError("manager diagnostic identity mismatch")
+	}
+	return nil
 }
 
 func (b *Broker) observeDiagnosticMarker(op *brokerDiagnostic, status diagnosticManagerStatus) {
@@ -456,7 +595,7 @@ func (b *Broker) executeDiagnostic(ctx context.Context, op *brokerDiagnostic) {
 	if err != nil {
 		b.diagnosticFailure(op, err)
 	}
-	cleanup, cancel := context.WithTimeout(context.Background(), time.Minute)
+	cleanup, cancel := context.WithTimeout(context.Background(), diagnosticCleanupLimit)
 	defer cancel()
 	if err := b.cleanupDiagnostic(cleanup, op); err != nil {
 		b.retainDiagnostic(op, err)
@@ -480,7 +619,7 @@ func (b *Broker) acquireDiagnostic(ctx context.Context, op *brokerDiagnostic) er
 		return err
 	}
 	preview := op.review.preview
-	params := diagnosticReserveRequest{op.runID, preview.Engine, preview.ModelID, preview.ProfileKey, preview.ConfigurationKey, preview.ExecutionKey, op.review.effects, b.modelTargetMemory()}
+	params := diagnosticReserveRequest{RunID: op.runID, Engine: preview.Engine, ModelID: preview.ModelID, ProfileKey: preview.ProfileKey, ConfigurationKey: preview.ConfigurationKey, ExecutionKey: preview.ExecutionKey, EffectsFence: op.review.effects, TargetMemory: b.modelTargetMemory(), Hardware: diagnosticIdentityHardware(preview.DiagnosticIdentity)}
 	op.reserveRequest = params
 	op.reserveAttempted = true // Before dispatch, including an uncertain reply.
 	op.reserveUncertain = true
@@ -495,6 +634,9 @@ func (b *Broker) acquireDiagnostic(ctx context.Context, op *brokerDiagnostic) er
 		op.reserveUncertain = false
 	}
 	if err != nil {
+		if refusal != nil {
+			return err // A definitive refusal has no delayed acceptance to settle.
+		}
 		// Repeating the same run ID is the manager's idempotent acceptance
 		// barrier. A cancelled request uses a fresh bounded cleanup context.
 		reconcile, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -526,8 +668,10 @@ func (b *Broker) acquireDiagnostic(ctx context.Context, op *brokerDiagnostic) er
 		return err
 	}
 	b.diagnostics.mu.Lock()
-	op.run.Phase = "draining"
+	draining := op.run.Clone()
 	b.diagnostics.mu.Unlock()
+	draining.Phase = "draining"
+	b.setDiagnosticRun(op, draining)
 	op.drain, err = b.drainNode(ctx)
 	if err != nil {
 		return err
@@ -553,6 +697,9 @@ func (b *Broker) acquireDiagnostic(ctx context.Context, op *brokerDiagnostic) er
 	if accepted.Run == nil || accepted.Run.RunID != op.runID || accepted.State == "reserved" || accepted.State == "none" {
 		return diagnosticError("diagnostic run was not accepted")
 	}
+	if err := validateDiagnosticManagerStatus(accepted, op.runID); err != nil {
+		return err
+	}
 	op.accepted, op.status = true, accepted
 	op.runUncertain = false
 	b.observeDiagnosticMarker(op, accepted)
@@ -573,8 +720,15 @@ func (b *Broker) diagnosticFailure(op *brokerDiagnostic, err error) {
 
 func (b *Broker) retainDiagnostic(op *brokerDiagnostic, err error) {
 	b.diagnostics.mu.Lock()
-	defer b.diagnostics.mu.Unlock()
 	op.run.Outcome, op.run.Reason = "cleanup-failed", "Cleanup could not be confirmed. Retry cleanup."
+	// A successfully stored record keeps its own original outcome. Do not
+	// publish a run/result pair whose outcomes disagree during release retry.
+	if op.run.Result != nil && op.run.Result.Outcome != op.run.Outcome {
+		op.run.Result = nil
+	}
+	run := op.run.Clone()
+	b.diagnostics.mu.Unlock()
+	b.publishDiagnostic(run)
 }
 
 // Even a pre-run failure reconciles reservation acceptance before releasing.
@@ -585,6 +739,11 @@ func (b *Broker) cleanupDiagnostic(ctx context.Context, op *brokerDiagnostic) er
 		status, err := b.readDiagnosticManager(ctx, op)
 		if err != nil {
 			return err
+		}
+		if status.State == "none" && op.releaseAttempted && op.stopped && (op.recorded || !op.accepted) {
+			// The explicit release's reply was lost, after physical cleanup and
+			// recording. The same manager now confirms no reservation remains.
+			op.reservationReleased = true
 		}
 		if op.reserveUncertain || status.State == "reserved" && op.token == "" {
 			var reserved struct {
@@ -613,15 +772,23 @@ func (b *Broker) cleanupDiagnostic(ctx context.Context, op *brokerDiagnostic) er
 			// before interpreting reserved as permission to release.
 			var accepted diagnosticManagerStatus
 			if err := b.diagnosticCall(ctx, op, "engine:diagnostic-run", op.runRequest, &accepted); err != nil {
-				return err
+				var refusal *settingsWorkerError
+				if !errors.As(err, &refusal) {
+					return err
+				}
+				// A definitive refusal settles the delayed acceptance barrier.
+				accepted, err = b.readDiagnosticManager(ctx, op)
+				if err != nil {
+					return err
+				}
 			}
 			status = accepted
 			if status.Run == nil || status.Run.RunID != op.runID {
 				return diagnosticError("uncertain run acceptance identity mismatch")
 			}
-			op.accepted, op.runUncertain = true, false
+			op.accepted, op.runUncertain = status.State != "reserved", false
 		}
-		if op.runAttempted && status.State == "none" {
+		if op.runAttempted && status.State == "none" && !op.reservationReleased {
 			return diagnosticError("attempted run disappeared without cleanup proof")
 		}
 		if op.runAttempted && status.State != "reserved" && status.State != "none" {
@@ -631,26 +798,26 @@ func (b *Broker) cleanupDiagnostic(ctx context.Context, op *brokerDiagnostic) er
 			if status.Token != "" {
 				op.token = status.Token
 			}
-			if !status.WorkStopped && status.State != "reserved" {
+			if op.token == "" {
+				return diagnosticError("pending diagnostic has no cleanup authority")
+			}
+			if !status.WorkStopped && status.State != "reserved" || status.State == "cleanup-failed" {
 				if err := b.diagnosticCall(ctx, op, "engine:diagnostic-abort", diagnosticAuthority{op.runID, op.token}, &status); err != nil {
 					return err
 				}
 				// A join response must still identify this operation.
-				if status.Run == nil || status.Run.RunID != op.runID {
+				if err := validateDiagnosticManagerStatus(status, op.runID); err != nil || status.State == "none" {
 					return diagnosticError("abort reply identity mismatch")
 				}
 			}
-			if (!status.WorkStopped && status.State != "reserved") || status.State == "cleanup-failed" {
+			if !status.WorkStopped || status.State == "cleanup-failed" {
 				return diagnosticError("diagnostic work is not confirmed stopped")
-			}
-			if status.State == "terminal" || status.State == "cleanup-complete" {
-				op.reservationReleased = true
 			}
 			op.stopped, op.status = true, status
 			if op.accepted && status.Run != nil {
 				b.setDiagnosticRun(op, *status.Run)
 			}
-		} else if op.accepted {
+		} else if op.accepted && !op.reservationReleased {
 			return diagnosticError("accepted diagnostic disappeared without cleanup proof")
 		}
 	}
@@ -661,52 +828,77 @@ func (b *Broker) cleanupDiagnostic(ctx context.Context, op *brokerDiagnostic) er
 		op.recorded = true
 	}
 	if op.drain != nil {
-		if err := op.drain.release(ctx); err != nil {
+		if err := op.drain.clear(ctx); err != nil {
 			return err
 		}
-		op.drain = nil
 	}
 	if op.token != "" && !op.reservationReleased {
+		op.releaseAttempted = true
 		if err := b.diagnosticCall(ctx, op, "engine:diagnostic-release", diagnosticAuthority{op.runID, op.token}, nil); err != nil {
-			return err
+			// Physical cleanup is proved, but a failed release must still keep
+			// the node drained until reconciliation settles its authority.
+			hold, cancel := context.WithTimeout(context.Background(), proxyCallTimeout)
+			defer cancel()
+			return errors.Join(err, b.holdDiagnosticDrains(hold, op))
 		}
+		op.reservationReleased = true
 		op.token = ""
+	}
+	if op.drain != nil {
+		op.drain.releaseSettings()
+		op.drain = nil
 	}
 	if op.lease != nil {
 		op.lease.Release()
 		op.lease = nil
 	}
 	b.diagnostics.mu.Lock()
+	var completed *modelconfig.DiagnosticRun
 	if b.diagnostics.active == op {
+		b.updateDiagnosticElapsedLocked(op)
 		result := op.run.Clone()
 		if result.Outcome == "running" {
 			result.Outcome = "cancelled"
 		}
 		result.Phase = "done"
 		b.diagnostics.last = &result
+		completed = &result
 		b.diagnostics.active = nil
 	}
 	b.diagnostics.mu.Unlock()
+	if completed != nil {
+		b.publishDiagnostic(*completed)
+	}
 	b.signalModelConfig()
 	return nil
 }
 
 func (b *Broker) cancelDiagnostic(ctx context.Context, runID string) (*modelconfig.DiagnosticRun, error) {
-	b.diagnostics.mu.Lock()
-	op := b.diagnostics.active
-	if op == nil || runID != "" && op.run.RunID != runID {
-		b.diagnostics.mu.Unlock()
+	var op *brokerDiagnostic
+	err := b.withDiagnosticAuthority(ctx, true, func() error {
+		b.diagnostics.mu.Lock()
+		defer b.diagnostics.mu.Unlock()
+		op = b.diagnostics.active
+		if op != nil && (runID == "" || op.run.RunID == runID) {
+			op.cancel()
+		} else {
+			op = nil
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if op == nil {
 		return b.diagnosticStatus(runID)
 	}
-	op.cancel()
-	b.diagnostics.mu.Unlock()
 	select {
 	case <-op.done:
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
 	op.cleanupMu.Lock()
-	err := b.cleanupDiagnostic(ctx, op)
+	err = b.cleanupDiagnostic(ctx, op)
 	if err != nil {
 		b.retainDiagnostic(op, err)
 	}
@@ -716,37 +908,19 @@ func (b *Broker) cancelDiagnostic(ctx context.Context, runID string) (*modelconf
 }
 
 func (b *Broker) handleModelDiagnostic(msg *Message) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-	var result any
-	var err error
-	switch msg.Method {
-	case "engine:diagnostic-preview":
-		var p modelconfig.DiagnosticPreviewRequest
-		err = modelconfig.DecodeStrict(msg.Params, &p)
-		if err == nil {
-			result, err = b.previewDiagnostic(ctx, p)
-		}
-	case "engine:diagnostic-start":
-		var p modelconfig.DiagnosticStartRequest
-		err = modelconfig.DecodeStrict(msg.Params, &p)
-		if err == nil {
-			result, err = b.startDiagnostic(ctx, p)
-		}
-	case "engine:diagnostic-status", "engine:diagnostic-cancel":
-		var p modelconfig.DiagnosticRunRef
-		err = modelconfig.DecodeStrict(msg.Params, &p)
-		if err == nil && p.NodeID != "" && p.NodeID != b.nodeID {
-			err = diagnosticError("unsupported: local diagnostics only")
-		}
-		if err == nil {
-			if msg.Method == "engine:diagnostic-cancel" {
-				result, err = b.cancelDiagnostic(ctx, p.RunID)
-			} else {
-				result, err = b.diagnosticStatus(p.RunID)
-			}
+	bound := diagnosticCleanupLimit
+	if msg.Method == "engine:diagnostic-cancel" {
+		bound = diagnosticCancelLimit
+		var target modelconfig.DiagnosticRunRef
+		if modelconfig.DecodeStrict(msg.Params, &target) == nil && target.NodeID != "" && target.NodeID != b.nodeID {
+			// Target 200 s, peer relay/transport 205 s, origin 208 s, desktop
+			// 210 s. Leave each owner time to return its joined outcome.
+			bound = 208 * time.Second
 		}
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), bound)
+	defer cancel()
+	result, err := b.dispatchDiagnostic(ctx, msg.Method, msg.Params, true)
 	if err != nil {
 		_ = b.codec.RespondError(msg.ID, engineSettingsErrorCode(err), err.Error())
 	} else {
@@ -780,7 +954,10 @@ func (b *Broker) diagnosticNotification(source *engineManagerSource, params json
 			}
 			select {
 			case <-op.done:
-				go func() { _ = b.reconcileDiagnostics(context.Background(), op.worker) }()
+				b.workersMu.Lock()
+				worker := b.engineMgr
+				b.workersMu.Unlock()
+				go func() { _ = b.reconcileDiagnostics(context.Background(), worker) }()
 			default:
 			}
 		}

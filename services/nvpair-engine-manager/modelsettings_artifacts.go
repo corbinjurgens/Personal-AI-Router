@@ -703,6 +703,9 @@ func (e *Executor) inspectModelArtifacts(ctx context.Context, p modelconfig.Insp
 					input.Memory, _ = op.Memory.ModelAutoMemory(ctx)
 				}
 				result.ConfigurationPools = modelConfigurationPools(input)
+				if pools := e.diagnosticInspectionPools(ctx, p.Engine); len(pools) > 0 {
+					result.ConfigurationPools = pools
+				}
 				command, commandErr := modelConstrainCommand(snapshot.command, prepared.ModelLoads)
 				source, sourceErr := modelReviewedNativeSource(ctx, snapshot.state, command)
 				if commandErr == nil && sourceErr == nil {
@@ -712,7 +715,7 @@ func (e *Executor) inspectModelArtifacts(ctx context.Context, p modelconfig.Insp
 						result.ConfigurationPools = nil
 						result.ExecutionKey = modelExecutionKey(input, optionsID)
 					} else {
-						result.ConfigurationKey = modelConfigurationKey(input, source, optionsID)
+						result.ConfigurationKey = modelConfigurationKeyForPools(input, source, optionsID, result.ConfigurationPools)
 						if result.ConfigurationKey != "" {
 							result.ConfigurationKeyReason = ""
 						}

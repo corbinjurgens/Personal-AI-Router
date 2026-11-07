@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # nvpair-ui-broker
 
-Local memory diagnostics use `engine:diagnostic-preview`,
+Memory diagnostics use `engine:diagnostic-preview`,
 `engine:diagnostic-start`, `engine:diagnostic-status` and
 `engine:diagnostic-cancel`. The broker owns consent, a resource ledger, node
 draining with verified idle evidence, run-scoped telemetry sampling and recording.
@@ -13,6 +13,25 @@ The manager owns reservation, process lifecycle, exercise, joining cancellation
 and the durable cleanup checkpoint. Configured pause permits consent; Halt
 refuses it. Saved pause never changes. Public notifications contain only the run,
 not the manager's token or internal observation envelope.
+
+A peer `nodeId` routes through private manager
+`engine:remote-diagnostic-preview|start|status|cancel`, using the existing ec
+direct/reverse pinned transport. Inbound `engine:diagnostic-request` and
+`engine:diagnostic-request-cancel` are private manager notifications. The broker
+checks the current source and exact worker pair and replies only through that
+pair. Consent binds the verified caller and manager source; preview/start
+recheck the fresh grant, maintenance and Halt before publishing authority.
+Configured pause is allowed without changing saved pause. Status is a pinned
+read. Peer cancellation requires a grant but remains available during Halt or
+maintenance; local cancellation needs no peer grant. Cancellation addresses an
+exact run, and lost callers never abandon accepted target work. Remote replies
+are projected to the public contract before responding, including the target
+node ID, with no private manager authority. The origin owns no target resources.
+
+The origin diagnostic panel polls peer status every two seconds only while
+open. The target tray uses active-run lookup on mount/reconnect and local
+diagnostic pushes to display Measuring memory and Cancel, including peer-started
+runs. Both use the existing engine-settings store and exact run reconciliation.
 
 Checkpoint reconciliation precedes proxy policy/ingress replay and manager
 replacement recovery. Pending cleanup recreates the node hold; unknown cleanup

@@ -67,10 +67,13 @@ func (e *Executor) mutationAllowedContextLocked(ctx context.Context, engine stri
 		}
 	}
 	e.desired.mu.Lock()
-	_, err := e.desired.load()
+	state, err := e.desired.load()
 	e.desired.mu.Unlock()
 	if err != nil {
 		return err
+	}
+	if state.PendingDiagnostic != nil && e.diagnostic == nil {
+		return &diagnosticBusyError{engine}
 	}
 	return nil
 }

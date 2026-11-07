@@ -29,6 +29,7 @@ type diagnosticSamples struct {
 	seen          map[string]bool
 	pools         map[string][]diagnosticPoolSample
 	baselineDone  bool
+	afterLoadDone bool
 	baselinePools []string
 	bindings      map[string]string
 }
@@ -137,6 +138,10 @@ func diagnosticInWindow(at, start, end time.Time) bool {
 }
 
 func (s *diagnosticSamples) baselineReady(at time.Time) bool {
+	return s.phaseReady(at, 3)
+}
+
+func (s *diagnosticSamples) phaseReady(at time.Time, minimum int) bool {
 	if at.IsZero() || len(s.baselinePools) == 0 {
 		return false
 	}
@@ -147,7 +152,7 @@ func (s *diagnosticSamples) baselineReady(at time.Time) bool {
 				count++
 			}
 		}
-		if count < 3 {
+		if count < minimum {
 			return false
 		}
 	}
@@ -192,21 +197,35 @@ func (b *Broker) sampleDiagnostic(ctx context.Context, op *brokerDiagnostic) err
 			if err := op.samples.observe(observation, b.diagnosticNow()); err != nil {
 				return err
 			}
-			if !op.samples.baselineDone && op.samples.baselineReady(b.diagnosticMarkers(op)["baseline-ready"]) {
+			markers := b.diagnosticMarkers(op)
+			phase := ""
+			if !op.samples.baselineDone && op.samples.baselineReady(markers["baseline-ready"]) {
+				phase = "baseline"
+			} else if !op.samples.afterLoadDone && op.samples.phaseReady(markers["loaded"], 2) {
+				phase = "after-load"
+			}
+			if phase != "" {
 				if err := b.diagnosticCall(ctx, op, "engine:diagnostic-baseline-done", struct {
 					RunID string `json:"runId"`
 					Token string `json:"token"`
 					Phase string `json:"phase"`
-				}{op.runID, op.token, "baseline"}, nil); err != nil {
+				}{op.runID, op.token, phase}, nil); err != nil {
 					return err
 				}
-				op.samples.baselineDone = true
+				if phase == "baseline" {
+					op.samples.baselineDone = true
+				} else {
+					op.samples.afterLoadDone = true
+				}
 			}
 		}
 	}
 }
 
 func diagnosticMinimum(samples []diagnosticPoolSample, start, end time.Time) (string, int) {
+	if start.IsZero() || end.IsZero() || end.Before(start) {
+		return "", 0
+	}
 	var minimum uint64
 	count := 0
 	for _, sample := range samples {
@@ -299,6 +318,9 @@ func diagnosticOverlapSampled(high modelconfig.MeasuredPhase, start time.Time, p
 		if request.FirstTokenMS == nil || request.EndMS == nil {
 			return false
 		}
+		if math.IsNaN(*request.FirstTokenMS) || math.IsInf(*request.FirstTokenMS, 0) || math.IsNaN(*request.EndMS) || math.IsInf(*request.EndMS, 0) || *request.FirstTokenMS < 0 || *request.EndMS < *request.FirstTokenMS {
+			return false
+		}
 		latest = max(latest, *request.FirstTokenMS)
 		earliest = min(earliest, *request.EndMS)
 	}
@@ -339,6 +361,9 @@ func (b *Broker) recordDiagnostic(ctx context.Context, op *brokerDiagnostic) err
 		known := op.review.preview.DiagnosticIdentity.Clone()
 		identity = &known // Failed pre-load evidence retains unknown runtime fields.
 	}
+	if op.status.Run != nil && op.status.Run.Outcome == "completed" && (identity.BuildInfo == "" || identity.Validate() != nil) {
+		return diagnosticError("completed run lacks full observed diagnostic identity")
+	}
 	// Requested evidence must still match consent. Realized allocation is
 	// supplied by the native observation and can differ for unpriced profiles.
 	if !diagnosticRequestedIdentityMatches(*identity, op.review.preview.DiagnosticIdentity) {
@@ -354,15 +379,27 @@ func (b *Broker) recordDiagnostic(ctx context.Context, op *brokerDiagnostic) err
 	if identity.ConfigurationKeyReason != "gpu-selection" {
 		var inspection modelconfig.InspectResult
 		preview := op.review.preview
-		request := settings.WorkerRequest[modelconfig.InspectRequest]{Request: modelconfig.InspectRequest{Engine: preview.Engine, ModelID: preview.ModelID, ProfileKey: preview.ProfileKey}, Memory: b.modelTargetMemory(), NativeInitAllowed: false}
-		if err := b.diagnosticCall(ctx, op, "engine:inspect-model", request, &inspection); err != nil {
-			return err
-		}
-		if inspection.ConfigurationKey != identity.ConfigurationKey || inspection.ExecutionKey != identity.ExecutionKey || inspection.NativeBuildID != identity.NativeBuildID {
-			return diagnosticError("post-run inspection identity changed")
-		}
-		if observation := inspection.LoadObservation; observation != nil && observation.Current {
-			profile.BufferSampleID = observation.SampleID
+		request := diagnosticInspectEnvelope{WorkerRequest: settings.WorkerRequest[modelconfig.InspectRequest]{Request: modelconfig.InspectRequest{Engine: preview.Engine, ModelID: preview.ModelID, ProfileKey: preview.ProfileKey}, Memory: b.modelTargetMemory(), NativeInitAllowed: false}, Hardware: diagnosticIdentityHardware(*identity)}
+		inspectErr := b.diagnosticCall(ctx, op, "engine:inspect-model", request, &inspection)
+		sameIdentity := inspectErr == nil && inspection.ConfigurationKey == identity.ConfigurationKey && inspection.ExecutionKey == identity.ExecutionKey && inspection.NativeBuildID == identity.NativeBuildID
+		if !sameIdentity {
+			// The joined manager authenticated the producing identity and final
+			// outcome. A later file change cannot erase that historical evidence
+			// or turn affirmative stop proof into a permanent hold. Ordinary
+			// inspection separately withdraws currentness for changed identity.
+			profile.Notes = append(profile.Notes, "Post-run identity unavailable or changed; no buffer sample linked.")
+		} else if observation := inspection.LoadObservation; observation != nil && observation.Current {
+			// Current alone can describe the previous load of this same profile.
+			// Bind the buffer record to this run's post-baseline load and the
+			// observed build/artifacts/options/context before linking its ID.
+			at, err := time.Parse(time.RFC3339Nano, observation.RecordedAt)
+			loaded := op.status.Markers["loaded"]
+			baseline := op.status.Markers["baseline-ready"]
+			if err == nil && !baseline.IsZero() && !loaded.IsZero() && !at.Before(baseline) && !at.After(b.diagnosticNow()) && observation.BuildID == identity.NativeBuildID && observation.ConfigurationKey == identity.ConfigurationKey && observation.PerSlotContext == identity.PerSlotContext && observation.Slots == identity.Slots && reflect.DeepEqual(observation.Artifacts, identity.Artifacts) && observation.CapturedOptions != nil && reflect.DeepEqual(*observation.CapturedOptions, identity.Requested) {
+				profile.BufferSampleID = observation.SampleID
+			} else {
+				profile.Notes = append(profile.Notes, "Buffer evidence did not bind this run's load; no buffer sample linked.")
+			}
 		}
 	}
 	if err := profile.Validate(); err != nil {
@@ -386,7 +423,12 @@ func (b *Broker) recordDiagnostic(ctx context.Context, op *brokerDiagnostic) err
 
 func diagnosticRequestedIdentityMatches(actual, expected modelconfig.DiagnosticIdentity) bool {
 	actual, expected = actual.Clone(), expected.Clone()
-	actual.BuildInfo, expected.BuildInfo = "", ""
+	if expected.ConfigurationKey != "" && (expected.PerSlotContext != 0 && actual.PerSlotContext != expected.PerSlotContext || expected.Slots != 0 && actual.Slots != expected.Slots) {
+		return false
+	}
+	if expected.BuildInfo == "" {
+		actual.BuildInfo = "" // Unknown before consent, supplied after load.
+	}
 	actual.PerSlotContext, expected.PerSlotContext = 0, 0
 	actual.Slots, expected.Slots = 0, 0
 	actual.Placement, expected.Placement = nil, nil

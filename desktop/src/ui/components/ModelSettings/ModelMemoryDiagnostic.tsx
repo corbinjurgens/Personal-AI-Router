@@ -46,6 +46,18 @@ function MeasurementResult({
                     Historical measurement; configuration or machine identity is no longer current.
                 </Text>
             )}
+            {current === true && !earlierBuild && (
+                <Text kind="body/regular/sm">
+                    {result.outcome === 'completed'
+                        ? 'Current measurement for this configuration.'
+                        : 'Current configuration and machine identity.'}
+                </Text>
+            )}
+            {current === undefined && !earlierBuild && (
+                <Text kind="body/regular/sm">
+                    Measurement currentness awaits inspection of this machine and configuration.
+                </Text>
+            )}
             {result.executionKey && (
                 <Text kind="body/regular/sm">
                     Diagnostic only ({result.configurationKeyReason}). No memory estimate or
@@ -72,7 +84,12 @@ function MeasurementResult({
             ))}
             {(['low', 'high'] satisfies Array<'low' | 'high'>).map(name => {
                 const phase = result[name]
-                if (!phase) return null
+                if (!phase)
+                    return (
+                        <Text key={name} kind="body/regular/sm">
+                            {name === 'low' ? 'Short prompt' : 'Full context'}: Not sampled.
+                        </Text>
+                    )
                 return (
                     <Stack key={name} gap="1">
                         {phase.requests.map((request, index) => (
@@ -114,6 +131,7 @@ export default function ModelMemoryDiagnostic({
     profileKey,
     inspection,
     applied,
+    open = true,
     disabled = false
 }: {
     nodeId: string
@@ -122,6 +140,7 @@ export default function ModelMemoryDiagnostic({
     profileKey?: string
     inspection?: InspectModelResult
     applied: boolean
+    open?: boolean
     disabled?: boolean
 }) {
     const [consentOpen, setConsentOpen] = useState(false)
@@ -154,15 +173,18 @@ export default function ModelMemoryDiagnostic({
         inspection?.configurationKey,
         inspection?.executionKey
     ])
-    useEffect(() => watchModelDiagnostic(nodeId), [nodeId])
+    useEffect(() => {
+        if (open) return watchModelDiagnostic(nodeId)
+        return undefined
+    }, [nodeId, open])
     useEffect(() => {
         setConsentOpen(false)
-        if (applicable && !disabled && connected && profileKey)
+        if (open && applicable && !disabled && connected && profileKey)
             void useEngineSettingsStore
                 .getState()
                 .previewDiagnostic({ nodeId, engine, modelId, profileKey })
         // The identity includes every applied input; service refusals remain service-owned.
-    }, [identity, connected, applicable, disabled, nodeId, engine, modelId, profileKey])
+    }, [identity, connected, applicable, disabled, nodeId, engine, modelId, profileKey, open])
     const run = entry?.run
     const active = run?.outcome === 'running' || run?.outcome === 'cleanup-failed'
     const preview = entry?.preview
@@ -185,8 +207,28 @@ export default function ModelMemoryDiagnostic({
     )
     const currentRun =
         run?.engine === engine && run.modelId === modelId && run.profileKey === profileKey
+    useEffect(() => {
+        if (open && connected && applied && profileKey && currentRun && !active && !disabled)
+            void useEngineSettingsStore
+                .getState()
+                .inspectModel({ nodeId, engine }, modelId, profileKey)
+    }, [
+        connected,
+        applied,
+        profileKey,
+        currentRun,
+        active,
+        disabled,
+        open,
+        run?.runId,
+        run?.result?.recordedAt,
+        nodeId,
+        engine,
+        modelId
+    ])
     const stored = inspection?.memoryProfiles?.filter(profile => profile.measured) ?? []
     const result = currentRun ? run.result : undefined
+    const resultProfile = stored.find(profile => profile.measured?.runId === result?.runId)
     if (!applicable && !run && !stored.length) return null
     const request: DiagnosticPreviewRequest | undefined = profileKey
         ? { nodeId, engine, modelId, profileKey }
@@ -280,13 +322,7 @@ export default function ModelMemoryDiagnostic({
                 <MeasurementResult
                     result={result}
                     nativeBuildId={inspection?.nativeBuildId}
-                    current={
-                        !!inspection &&
-                        (result.configurationKey
-                            ? result.configurationKey === inspection.configurationKey
-                            : !!result.executionKey &&
-                              result.executionKey === inspection.executionKey)
-                    }
+                    current={resultProfile?.current}
                 />
             )}
             {stored.map(
@@ -318,6 +354,10 @@ export default function ModelMemoryDiagnostic({
                 message={
                     preview && matchingPreview ? (
                         <Stack gap="2">
+                            <Text kind="body/regular/sm">
+                                Profile {preview.profileKey}, model {preview.modelId} (
+                                {preview.engine}).
+                            </Text>
                             <Text kind="body/regular/sm">
                                 This uses as much memory as the configuration needs at full context.
                                 If it does not fit, the engine can stop; PAIR will record that.
@@ -357,13 +397,23 @@ export default function ModelMemoryDiagnostic({
                             </Text>
                             <Text kind="body/regular/sm">
                                 {preview.highPromptTokens > 0
-                                    ? `Targets: short prompt ${preview.lowPromptTokens} tokens; full context ${preview.highPromptTokens} tokens; ${preview.generateTokens} generated tokens per request, ${preview.slots} slots.`
+                                    ? `Planned targets: short prompt ${preview.lowPromptTokens} tokens; full context ${preview.highPromptTokens} tokens; ${preview.generateTokens} generated tokens per request, ${preview.plannedSlots} slots. Actual allocation is verified after load.`
                                     : `${preview.configurationKeyReason === 'native-fit' ? 'Native-fit context' : 'Context'} and prompt targets are determined after load.`}
                             </Text>
                             <Text kind="body/regular/sm">
-                                Bound to this machine's hardware, build {preview.nativeBuildId},
-                                model artifacts and realized context and placement. Other GPU
+                                Bound to the hardware on this machine, build {preview.nativeBuildId}
+                                , model artifacts and realized context and placement. Other GPU
                                 activity can affect available memory and sampled peaks.
+                            </Text>
+                            <Text kind="body/regular/sm">
+                                CPU: {preview.cpuModel}. RAM: {bytes(preview.totalRamBytes)}. GPUs:{' '}
+                                {preview.gpus
+                                    .map(
+                                        gpu =>
+                                            `${gpu.name} (${gpu.uuid}), ${bytes(gpu.totalMemoryBytes)}`
+                                    )
+                                    .join('; ') || 'None'}
+                                .
                             </Text>
                             {preview.warnings.map((warning, index) => (
                                 <Text key={index} kind="body/regular/sm">

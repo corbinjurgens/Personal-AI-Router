@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -72,7 +73,7 @@ func (c diagnosticCheckpoint) validate() error {
 		return errors.New("invalid diagnostic checkpoint")
 	}
 	if c.Identity != nil {
-		if err := c.Identity.Validate(); err != nil {
+		if err := c.Identity.ValidateRequested(); err != nil {
 			return err
 		}
 		if c.Identity.ConfigurationKey != c.Run.ConfigurationKey || c.Identity.ExecutionKey != c.Run.ExecutionKey {
@@ -135,7 +136,7 @@ func (s *desiredStateStore) setPendingDiagnostic(checkpoint diagnosticCheckpoint
 			before.ProfileKey != after.ProfileKey || before.ConfigurationKey != after.ConfigurationKey ||
 			before.ExecutionKey != after.ExecutionKey ||
 			previous.EffectsFence != checkpoint.EffectsFence ||
-			previous.Identity != nil && !reflect.DeepEqual(previous.Identity, checkpoint.Identity) ||
+			previous.Identity != nil && (checkpoint.Identity == nil || !diagnosticRequestedMatches(*previous.Identity, *checkpoint.Identity)) ||
 			previous.State == "cleanup-complete" && checkpoint.State != "cleanup-failed" && !reflect.DeepEqual(*previous, checkpoint) {
 			return diagnosticConflict("pending cleanup identity cannot be replaced")
 		}
@@ -171,14 +172,20 @@ func (s *desiredStateStore) clearPendingDiagnostic(runID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	state, err := s.load()
-	if err != nil || state.PendingDiagnostic == nil {
+	if err != nil {
 		return err
 	}
-	if state.PendingDiagnostic.Run.RunID != runID || state.PendingDiagnostic.State != "cleanup-complete" {
+	if state.PendingDiagnostic != nil && (state.PendingDiagnostic.Run.RunID != runID || state.PendingDiagnostic.State != "cleanup-complete") {
 		return diagnosticConflict("pending cleanup is not confirmed complete")
 	}
 	state.PendingDiagnostic = nil
-	return s.save(state)
+	// Clearing is part of cleanup proof too. Do not downgrade directory-sync
+	// failure to success through the ordinary non-checkpoint save path.
+	data, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	return engineFileReplacer.WriteFile(s.path, data, 0o600)
 }
 
 // Reservation acceptance calls this under mutationAdmission after compare, but
@@ -187,12 +194,22 @@ func (e *Executor) checkpointDiagnosticReservation(p diagnosticReserveParams) er
 	if err := p.validate(); err != nil {
 		return err
 	}
-	return e.desired.setPendingDiagnostic(diagnosticCheckpoint{
+	checkpoint := diagnosticCheckpoint{
 		Run: modelconfig.DiagnosticRun{RunID: p.RunID, Engine: p.Engine, ModelID: p.ModelID, ProfileKey: p.ProfileKey,
 			ConfigurationKey: p.ConfigurationKey, ExecutionKey: p.ExecutionKey, Phase: "reserving", Outcome: "running",
 			StartedAt: time.Now().UTC().Format(time.RFC3339Nano)},
 		EffectsFence: p.EffectsFence, State: "pending", Engines: []diagnosticCheckpointEngine{},
-	})
+	}
+	if e.diagnostic != nil && e.diagnostic.identity != nil {
+		identity := e.diagnostic.identity.Clone()
+		checkpoint.Identity = &identity
+		checkpoint.BuildPin = identity.NativeBuildID
+	}
+	if e.diagnostic != nil {
+		copy := checkpoint.clone()
+		e.diagnostic.checkpoint = &copy
+	}
+	return e.desired.setPendingDiagnostic(checkpoint)
 }
 
 // The operation calls this before every effect/phase and on cleanup failure,
@@ -208,7 +225,40 @@ func (e *Executor) updateDiagnosticCheckpoint(runID, token string, checkpoint di
 		return diagnosticConflict("only cleanup confirmation may finish a checkpoint")
 	}
 	r.workUnconfirmed = true
+	copy := checkpoint.clone()
+	r.checkpoint = &copy
 	return e.desired.setPendingDiagnostic(checkpoint)
+}
+
+// Physical cleanup is durable before the broker records the measurement. Keep
+// the same reservation until its explicit release after record publication.
+func (e *Executor) completeDiagnosticCheckpoint(runID, token string, run modelconfig.DiagnosticRun) (err error) {
+	e.mutationAdmission.Lock()
+	defer e.mutationAdmission.Unlock()
+	r := e.diagnostic
+	if r == nil || !r.ready || r.params.RunID != runID || r.token != token || r.workUnconfirmed || e.diagnosticOperationsActiveLocked() || run.RunID != runID {
+		return diagnosticConflict("diagnostic work is not confirmed stopped")
+	}
+	defer func() {
+		if err != nil {
+			r.workUnconfirmed = true
+		}
+	}()
+	checkpoint, err := e.desired.pendingDiagnostic()
+	if err != nil {
+		return err
+	}
+	if checkpoint == nil || checkpoint.Run.RunID != runID {
+		return diagnosticConflict("reservation checkpoint unavailable")
+	}
+	checkpoint.Run = run.Clone()
+	checkpoint.State = "cleanup-complete"
+	for i := range checkpoint.Engines {
+		checkpoint.Engines[i].CleanupComplete = true
+	}
+	copy := checkpoint.clone()
+	r.checkpoint = &copy
+	return e.desired.setPendingDiagnostic(*checkpoint)
 }
 
 // Call after confirmDiagnosticWorkStopped and before releaseDiagnostic. A save
@@ -216,6 +266,10 @@ func (e *Executor) updateDiagnosticCheckpoint(runID, token string, checkpoint di
 func (e *Executor) clearDiagnosticCheckpoint(runID, token string) (err error) {
 	e.mutationAdmission.Lock()
 	defer e.mutationAdmission.Unlock()
+	return e.clearDiagnosticCheckpointLocked(runID, token)
+}
+
+func (e *Executor) clearDiagnosticCheckpointLocked(runID, token string) (err error) {
 	r := e.diagnostic
 	if r == nil || !r.ready || r.params.RunID != runID || r.token != token || r.workUnconfirmed || e.diagnosticOperationsActiveLocked() {
 		return diagnosticConflict("diagnostic work is not confirmed stopped")
@@ -226,8 +280,11 @@ func (e *Executor) clearDiagnosticCheckpoint(runID, token string) (err error) {
 		}
 	}()
 	checkpoint, err := e.desired.pendingDiagnostic()
-	if err != nil || checkpoint == nil {
+	if err != nil {
 		return err
+	}
+	if checkpoint == nil {
+		return e.desired.clearPendingDiagnostic(runID)
 	}
 	if checkpoint.Run.RunID != runID {
 		return diagnosticConflict("different pending cleanup")
@@ -237,6 +294,8 @@ func (e *Executor) clearDiagnosticCheckpoint(runID, token string) (err error) {
 		for i := range checkpoint.Engines {
 			checkpoint.Engines[i].CleanupComplete = true
 		}
+		copy := checkpoint.clone()
+		r.checkpoint = &copy
 		if err := e.desired.setPendingDiagnostic(*checkpoint); err != nil {
 			return err
 		}
@@ -250,9 +309,25 @@ func (e *Executor) clearDiagnosticCheckpoint(runID, token string) (err error) {
 func (e *Executor) restoreDiagnosticCheckpoint() (*diagnosticCheckpoint, error) {
 	e.mutationAdmission.Lock()
 	defer e.mutationAdmission.Unlock()
+	// A startup/installed-restore goroutine may run after a fresh broker
+	// reservation. Its accepted checkpoint is not interrupted cleanup work.
+	if r := e.diagnostic; r != nil && !r.workUnconfirmed {
+		return nil, nil
+	}
 	checkpoint, err := e.desired.pendingDiagnostic()
-	if err != nil || checkpoint == nil {
+	if err != nil {
 		return checkpoint, err
+	}
+	if checkpoint == nil {
+		if r := e.diagnostic; r != nil && r.workUnconfirmed && r.checkpoint != nil {
+			copy := r.checkpoint.clone()
+			checkpoint = &copy
+			if err := e.desired.setPendingDiagnostic(copy); err != nil {
+				return nil, err
+			}
+		} else {
+			return nil, nil
+		}
 	}
 	if e.diagnosticOperation != nil {
 		return nil, diagnosticConflict("a live diagnostic operation owns cleanup")
@@ -276,6 +351,12 @@ func (e *Executor) restoreDiagnosticCheckpoint() (*diagnosticCheckpoint, error) 
 			ConfigurationKey: run.ConfigurationKey, ExecutionKey: run.ExecutionKey, EffectsFence: checkpoint.EffectsFence},
 		token: newOpID(), ready: true, settled: make(chan struct{}), release: release, workUnconfirmed: true,
 	}
+	if checkpoint.Identity != nil {
+		identity := checkpoint.Identity.Clone()
+		r.identity = &identity
+	}
+	copy := checkpoint.clone()
+	r.checkpoint = &copy
 	close(r.settled)
 	e.diagnostic = r
 	return checkpoint, nil
@@ -346,11 +427,14 @@ func (e *Executor) recoverDiagnosticCheckpoint(ctx context.Context, stop func(co
 	if err := e.confirmDiagnosticWorkStopped(runID, token); err != nil {
 		return err
 	}
-	if err := e.clearDiagnosticCheckpoint(runID, token); err != nil {
+	// Release durably confirms/clears the checkpoint before retiring admission.
+	// Retain terminal status only after that succeeds, so its idempotent release
+	// acknowledgement cannot bypass retirement of the recovered live hold.
+	if err := e.releaseDiagnostic(diagnosticReleaseParams{RunID: runID, Token: token}); err != nil {
 		return err
 	}
 	e.retainRecoveredDiagnostic(*checkpoint, r)
-	return e.releaseDiagnostic(diagnosticReleaseParams{RunID: runID, Token: token})
+	return nil
 }
 
 // The status handler consults this when no live operation matches. Read errors
@@ -365,7 +449,11 @@ func (e *Executor) diagnosticCheckpointStatus(runID string) (diagnosticOperation
 		return diagnosticOperationStatus{}, false, nil
 	}
 	status := diagnosticOperationStatus{DiagnosticRun: checkpoint.Run.Clone(), State: checkpoint.State,
-		WorkStopped: checkpoint.State == "cleanup-complete"}
+		WorkStopped: false}
+	if checkpoint.Identity != nil {
+		identity := checkpoint.Identity.Clone()
+		status.Identity = &identity
+	}
 	e.mutationAdmission.Lock()
 	if r := e.diagnostic; r != nil && r.ready && r.params.RunID == checkpoint.Run.RunID {
 		status.Token = r.token
@@ -374,10 +462,71 @@ func (e *Executor) diagnosticCheckpointStatus(runID string) (diagnosticOperation
 	return status, true, nil
 }
 
+func (e *Executor) saveDiagnosticOperation(op *modelDiagnosticOperation) error {
+	if op.checkpoint == nil {
+		return diagnosticConflict("diagnostic checkpoint unavailable")
+	}
+	e.mutationAdmission.Lock()
+	op.checkpoint.Run = op.status.DiagnosticRun.Clone()
+	if op.status.Identity != nil {
+		identity := op.status.Identity.Clone()
+		op.checkpoint.Identity = &identity
+		op.checkpoint.BuildPin = identity.NativeBuildID
+	}
+	e.mutationAdmission.Unlock()
+	return e.updateDiagnosticCheckpoint(op.params.RunID, op.params.Token, *op.checkpoint)
+}
+
+func (m *Manager) runDiagnosticLifecycle(ctx context.Context, engine string, wake bool) error {
+	if err := m.exec.diagnosticMutationAllowed(ctx, engine); err != nil {
+		return err
+	}
+	raw, err := json.Marshal(opParam{Engine: engine})
+	if err != nil {
+		return err
+	}
+	method := sleepMethod
+	if wake {
+		method = wakeMethod
+	}
+	return m.runOp(ctx, &Message{Method: method, Params: raw})
+}
+
+func (m *Manager) recoverDiagnosticBeforeRestore(ctx context.Context) error {
+	m.diagnosticRecoveryMu.Lock()
+	defer m.diagnosticRecoveryMu.Unlock()
+	m.exec.mutationAdmission.Lock()
+	live := m.exec.diagnosticOperation != nil
+	m.exec.mutationAdmission.Unlock()
+	if live {
+		return diagnosticConflict("live diagnostic owns cleanup")
+	}
+	return m.exec.recoverDiagnosticCheckpoint(ctx, func(ctx context.Context, engine string) error { return m.runDiagnosticLifecycle(ctx, engine, false) })
+}
+
+func (m *Manager) abortRecoveredDiagnostic(p diagnosticReleaseParams) (diagnosticOperationStatus, error) {
+	e := m.exec
+	e.mutationAdmission.Lock()
+	r := e.diagnostic
+	authorized := r != nil && r.ready && r.params.RunID == p.RunID && r.token == p.Token
+	e.mutationAdmission.Unlock()
+	if !authorized {
+		return diagnosticOperationStatus{}, diagnosticConflict("no matching recovered operation")
+	}
+	if err := m.recoverDiagnosticBeforeRestore(context.Background()); err != nil {
+		return diagnosticOperationStatus{}, err
+	}
+	return e.diagnosticStatusWithCheckpoint(p.RunID)
+}
+
 func (e *Executor) retainRecoveredDiagnostic(checkpoint diagnosticCheckpoint, reservation *diagnosticReservation) {
 	e.mutationAdmission.Lock()
 	defer e.mutationAdmission.Unlock()
 	status := diagnosticOperationStatus{DiagnosticRun: checkpoint.Run.Clone(), State: "cleanup-complete", Token: reservation.token, WorkStopped: true}
+	if checkpoint.Identity != nil {
+		identity := checkpoint.Identity.Clone()
+		status.Identity = &identity
+	}
 	status.Phase = "done"
 	if e.diagnosticCompleted == nil {
 		e.diagnosticCompleted = make(map[string]diagnosticCompletedRun)

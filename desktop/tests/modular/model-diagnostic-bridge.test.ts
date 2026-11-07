@@ -6,7 +6,7 @@ import type { getModularSupervisor } from '@/electron/service-bridge/modular-sup
 import type { JsonObject, JsonValue } from '@/electron/service-bridge/json-rpc-client'
 import type { ServiceTransport } from '@/shared/types/service-bridge'
 import type { DiagnosticPreview, DiagnosticRun } from '@/shared/types/model-diagnostic'
-import type { MeasuredProfile } from '@/shared/types/model-config'
+import type { MeasuredProfile, MemoryProfile } from '@/shared/types/model-config'
 
 const mocks = vi.hoisted(() => ({
     supervisor: {
@@ -41,6 +41,7 @@ import {
 } from '@/electron/service-bridge/model-diagnostic'
 import { JsonRpcResponseError } from '@/electron/service-bridge/json-rpc-client'
 import { createEngineApi } from '@/ui/api/engine-api'
+import { measuredProfile, parseInspectModel } from '@/electron/service-bridge/engine-settings'
 
 const target = { engine: 'llamacpp', modelId: 'exact/model', profileKey: 'model-profile' }
 const key = 'a'.repeat(64)
@@ -64,6 +65,8 @@ function preview(): DiagnosticPreview {
         slots: 0,
         placement: [],
         previewId: 'review',
+        plannedPerSlotContext: 0,
+        plannedSlots: 0,
         lowPromptTokens: 0,
         highPromptTokens: 0,
         generateTokens: 128,
@@ -153,6 +156,145 @@ function measured(): MeasuredProfile {
 }
 
 describe('diagnostic public decoding', () => {
+    it('preserves current measured inspection and its sampled estimate overlay', () => {
+        const detail = measured()
+        const profile: MemoryProfile = {
+            configurationKey: key,
+            kind: 'measured',
+            recordedAt: detail.recordedAt,
+            nativeBuildId: detail.nativeBuildId,
+            hostBytes: '5192',
+            current: true,
+            coversPools: true,
+            measured: detail
+        }
+        const source = {
+            kind: 'measured',
+            provider: 'pair-diagnostic',
+            revision: detail.runId,
+            basis: 'measured by sampling every ~2 s',
+            unpricedCosts: ['Sampling can miss brief peaks.']
+        }
+        const wire = {
+            engine: target.engine,
+            modelId: target.modelId,
+            status: 'resolved',
+            configurationKey: key,
+            configurationPools: ['host'],
+            nativeBuildId: detail.nativeBuildId,
+            artifacts: detail.artifacts,
+            memoryProfiles: [profile],
+            estimate: {
+                status: 'estimated',
+                estimateSource: source,
+                domains: [{ id: 'host', kind: 'host', requiredBytes: '5192', freeFit: 'fits' }]
+            }
+        }
+        const parsed = parseInspectModel(wire)
+        expect(parsed.memoryProfiles).toEqual([profile])
+        expect(parsed.estimate.estimateSource).toEqual(source)
+        expect(parsed.estimate.domains?.[0]).toMatchObject(wire.estimate.domains[0])
+        expect(() =>
+            parseInspectModel({
+                ...wire,
+                memoryProfiles: [{ ...profile, hostBytes: '5193' }]
+            })
+        ).toThrow('projection mismatch')
+    })
+
+    it('keeps failed unpriced inspection records without a finite memory projection', () => {
+        const { configurationKey, ...identity } = measured()
+        expect(configurationKey).toBe(key)
+        const detail: MeasuredProfile = {
+            ...identity,
+            executionKey: key,
+            configurationKeyReason: 'gpu-selection',
+            outcome: 'failed',
+            failedPhase: 'loading',
+            reason: 'Load failed',
+            perSlotContext: 0,
+            slots: 0,
+            placement: [],
+            pools: [],
+            low: undefined,
+            high: undefined,
+            bufferSampleId: undefined
+        }
+        const profile: MemoryProfile = {
+            configurationKey: '',
+            executionKey: key,
+            kind: 'measured',
+            recordedAt: detail.recordedAt,
+            nativeBuildId: detail.nativeBuildId,
+            current: false,
+            measured: detail
+        }
+        const wire = {
+            engine: target.engine,
+            modelId: target.modelId,
+            status: 'resolved',
+            executionKey: key,
+            configurationKeyReason: 'gpu-selection',
+            nativeBuildId: detail.nativeBuildId,
+            artifacts: detail.artifacts,
+            memoryProfiles: [profile],
+            estimate: { status: 'unknown' }
+        }
+        expect(parseInspectModel(wire).memoryProfiles).toEqual([profile])
+        expect(() =>
+            parseInspectModel({
+                ...wire,
+                memoryProfiles: [{ ...profile, hostBytes: '0' }]
+            })
+        ).toThrow('memory projection')
+    })
+
+    it.each([
+        {
+            name: 'nonpositive prompt target',
+            patch: {
+                low: { coverage: 'partial', requests: [{ targetPromptTokens: 0 }], wallMs: 0 }
+            }
+        },
+        {
+            name: 'invalid pool interval',
+            patch: { pools: [{ ...measured().pools[0], intervalMs: 0 }] }
+        },
+        {
+            name: 'reversed request offsets',
+            patch: {
+                low: {
+                    coverage: 'partial',
+                    requests: [{ targetPromptTokens: 1, firstTokenMs: 2, endMs: 1 }],
+                    wallMs: 0
+                }
+            }
+        },
+        {
+            name: 'duplicate GPU identity',
+            patch: { gpus: [measured().gpus[0], measured().gpus[0]] }
+        },
+        {
+            name: 'unmapped placement',
+            patch: { placement: [{ domainId: 'device', kind: 'device', deviceId: 'missing' }] }
+        },
+        {
+            name: 'complete cached prompt',
+            patch: {
+                high: {
+                    coverage: 'complete',
+                    requests: [{ targetPromptTokens: 100, promptTokens: 100, cachedTokens: 1 }],
+                    wallMs: 0
+                }
+            }
+        }
+    ] satisfies Array<{ name: string; patch: JsonObject }>)(
+        'rejects measured $name',
+        ({ patch }) => {
+            expect(() => measuredProfile({ ...measured(), ...patch })).toThrow()
+        }
+    )
+
     it('preserves unknown runtime allocation in the consent preview', () => {
         expect(parseDiagnosticPreview(preview())).toEqual(preview())
     })
@@ -160,8 +302,8 @@ describe('diagnostic public decoding', () => {
     it('preserves known prompt targets and every consent effect', () => {
         const value = {
             ...preview(),
-            perSlotContext: 4096,
-            slots: 1,
+            plannedPerSlotContext: 4096,
+            plannedSlots: 2,
             lowPromptTokens: 512,
             highPromptTokens: 3952
         }
@@ -222,7 +364,7 @@ describe('diagnostic public decoding', () => {
         ).toThrow()
     })
 
-    it.each([
+    it.each<{ name: string; patch: JsonObject }>([
         { name: 'private manager authority', patch: { token: 'private' } },
         { name: 'private manager observation', patch: { observation: {} } },
         { name: 'unknown phase', patch: { phase: 'accepted' } },
@@ -231,7 +373,7 @@ describe('diagnostic public decoding', () => {
         { name: 'fractional elapsed', patch: { elapsedMs: 1.5 } },
         { name: 'invalid timestamp', patch: { startedAt: '2026-02-30T00:00:00Z' } },
         { name: 'two identity keys', patch: { executionKey: key } }
-    ] satisfies Array<{ name: string; patch: JsonObject }>)('rejects $name', ({ patch }) => {
+    ])('rejects $name', ({ patch }) => {
         expect(() => parseDiagnosticRun({ ...run(), ...patch })).toThrow()
     })
 

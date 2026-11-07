@@ -10,6 +10,10 @@ func TestDiagnosticInternalMethodsRefusePublicClients(t *testing.T) {
 		"engine:diagnostic-reserve", "engine:diagnostic-release", "engine:diagnostic-run",
 		"engine:diagnostic-run-status", "engine:diagnostic-abort",
 		"engine:diagnostic-baseline-done", "engine:record-measured-memory",
+		diagnosticObserveMethod,
+		"engine:diagnostic-request", "engine:diagnostic-reply", "engine:diagnostic-request-cancel",
+		"engine:remote-diagnostic-preview", "engine:remote-diagnostic-start",
+		"engine:remote-diagnostic-status", "engine:remote-diagnostic-cancel",
 	}
 	check := func(method string) {
 		t.Run(method, func(t *testing.T) {

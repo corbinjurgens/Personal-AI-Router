@@ -753,7 +753,11 @@ func (b *Broker) recoverReplacementEngineMgr(w *rpcWorker) bool {
 			return false
 		default:
 		}
-		if b.recoverEngineManagerPause(w) && b.reconcileDiagnostics(context.Background(), w) == nil {
+		// A retained diagnostic owns settingsApplyMu. Reconstruct its drains
+		// first; ordinary pause recovery cannot wait on that same lease. The
+		// manager reservation fences activation until cleanup and release.
+		if b.reconcileDiagnostics(context.Background(), w) == nil && (b.diagnosticHoldActive() || b.recoverEngineManagerPause(w)) {
+			b.publishNodeProjection()
 			b.workersMu.Lock()
 			current = b.engineMgr == w
 			select {
@@ -1191,7 +1195,8 @@ func (b *Broker) pushClusterIdentityToNodeInfo() {
 func enginePeerRelayNotification(method string) bool {
 	switch method {
 	case policyRelayRequestMethod, policyRelayCancelMethod,
-		"engine:settings-request", "engine:settings-cancel":
+		"engine:settings-request", "engine:settings-cancel",
+		"engine:diagnostic-request", "engine:diagnostic-request-cancel":
 		return true
 	}
 	return false
@@ -1251,6 +1256,17 @@ func (b *Broker) forwardEngineNotificationFrom(source *engineManagerSource, meth
 		}
 	}
 	if b.handlePolicyEngineNotification(source, method, params) {
+		return
+	}
+	if method == "engine:diagnostic-request" {
+		b.handleDiagnosticRelay(source, params)
+		return
+	}
+	if method == "engine:diagnostic-request-cancel" {
+		b.cancelDiagnosticRelay(source, params)
+		return
+	}
+	if method == "engine:diagnostic-reply" {
 		return
 	}
 	if method == "engine:settings-request" {
