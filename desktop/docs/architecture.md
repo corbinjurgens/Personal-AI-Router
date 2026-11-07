@@ -5,6 +5,20 @@ SPDX-License-Identifier: Apache-2.0
 
 # Personal AI Router Architecture
 
+The main window has **Overview**, **Models**, **Profiles** and **Settings** tabs,
+in that order. Models derives cluster inventory groups from the engine-models
+store, using content identity where available, then repository, quantization and
+size, or the inventory identifier when identity is unknown. Grouping is display
+only: it never skips a copy. The view reuses `ModelCopyModal` and shares the
+profile-aware delete confirmation with the per-engine `ModelManager`.
+
+Profiles groups cards by node and reads policies and advertisements through the
+existing node-configuration store on entry. Missing reads show loading or an
+unavailable reason. Cards derive identity, inspected settings and usage from
+their own node; missing inspected fields show Unknown. Deploy reuses
+`ModelSettingsCopy`. Edit uses `settingsNodeId` and `settingsProfileKey` in the
+overview UI store to open the existing node settings profile editor.
+
 Node configuration is available from one **Node settings** page in Settings.
 Choose a node with the page's node picker, or open the page for a specific node
 with the **Node settings** button on its Overview card. Cluster **Edit node**,

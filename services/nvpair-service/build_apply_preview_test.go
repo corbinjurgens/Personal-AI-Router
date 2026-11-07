@@ -109,7 +109,7 @@ func TestBuildApplyProcessOwnerChild(t *testing.T) {
 	}
 	bindBuildApplyOwnerProcessObserver()
 	s := newService(config{
-		endpoint: opts.endpoint, version: Version,
+		endpoint: opts.endpoint, version: Version, logPath: filepath.Join(opts.logDir, "broker.log"),
 		spawn: execSpawner(opts.brokerPath, opts.brokerArgs), backoff: defaultBackoff,
 		stopGrace: defaultStopGrace, shutdownRequestTimeout: defaultShutdownRequestTimeout,
 	})
@@ -141,7 +141,9 @@ func TestBuildApplyProcessOwnerChild(t *testing.T) {
 			s.mu.Unlock()
 			envelope, err := s.readBuildApplyImpact(r.Context(), run)
 			observation.ReadRefused = err != nil
-			if err == nil {
+			if err != nil {
+				observation.ReadError = err.Error()
+			} else {
 				observation.Envelope = &envelope
 			}
 		case "/preflight":

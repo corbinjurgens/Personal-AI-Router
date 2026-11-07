@@ -11,6 +11,8 @@ import WorkloadNodeConnections from '@/ui/components/Workloads/WorkloadNodeConne
 import ContentBar from './ContentBar'
 import NodeList from '@/ui/components/NodeList/NodeList'
 import Settings from '@/ui/components/Settings'
+import { ModelsView } from '@/ui/components/Models/ModelsView'
+import ProfilesView from '@/ui/components/Profiles/ProfilesView'
 import { useJobsFilterState } from '@/ui/hooks/useJobsFilterState'
 import { useOverviewUiStore } from '@/ui/stores/overview-ui.store'
 
@@ -42,6 +44,14 @@ export default function ClusterContent({
             />
             {activeTab === 'settings' ? (
                 <Settings />
+            ) : activeTab === 'models' ? (
+                <Stack className="grow min-h-0 overflow-y-auto">
+                    <ModelsView />
+                </Stack>
+            ) : activeTab === 'profiles' ? (
+                <Stack className="grow min-h-0 overflow-y-auto">
+                    <ProfilesView />
+                </Stack>
             ) : (
                 <Flex className={ContentBaseClass}>
                     <WorkloadListView filter={filter} setFilter={handleSetFilter} />

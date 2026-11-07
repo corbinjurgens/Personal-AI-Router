@@ -37,6 +37,17 @@ availability, roles, model settings and engine controls together; use its node
 picker to switch to another node. Cluster-wide configuration and routing history
 are in Cluster settings.
 
+The top-level tabs are **Overview**, **Models**, **Profiles** and **Settings**.
+Models groups cluster inventory by model identity and quantization, with each
+node's inventory identifier and actions to copy or delete its file. Declared
+matches across nodes show **Same file not verified**. Deletion asks for
+confirmation and lists the affected profiles and roles on that node.
+
+Profiles shows cards grouped by node, including identity tags, context, GPU
+placement, extra options and the roles that use each profile. Missing settings
+show **Unknown**, and unavailable policies show a reason. **Edit** opens that
+node's profile editor; **Deploy to node** opens the existing deployment flow.
+
 ## Concepts
 
 On a node card, **Pause node** uses that node's saved active-work and drain
