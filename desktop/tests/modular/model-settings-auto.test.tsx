@@ -287,6 +287,141 @@ describe('mounted Auto editor', () => {
         ).toEqual(saved.settings)
         expect(apply).not.toHaveBeenCalled()
     })
+    it('keeps service-reviewed finite Auto with advisory unpriced costs', async () => {
+        if (!reply.auto) throw new Error('Missing Auto fixture')
+        preview.mockResolvedValueOnce({
+            ...reply,
+            auto: {
+                ...reply.auto,
+                estimate: {
+                    status: 'partial',
+                    freeFit: 'tight',
+                    unknowns: ['not priced: runtime-overhead']
+                }
+            }
+        })
+        await select('Context mode', 'auto')
+        await act(async () => button('Recalculate').click())
+        expect(
+            useEngineSettingsStore.getState().modelDrafts[key].review?.request.modelChange
+                ?.previewDigest
+        ).toBe('d'.repeat(64))
+        expect(container.textContent).toContain('not priced: runtime-overhead')
+        expect(button('Apply reviewed model changes').disabled).toBe(false)
+        expect(apply).not.toHaveBeenCalled()
+    })
+
+    it('waits for explicit Recalculate before choosing an Auto identity', async () => {
+        await select('Context mode', 'auto')
+        await act(async () => vi.advanceTimersByTime(1000))
+        expect(preview).not.toHaveBeenCalled()
+        await act(async () => button('Recalculate').click())
+        expect(preview).toHaveBeenCalledTimes(1)
+        await act(async () => vi.advanceTimersByTime(6000))
+        expect(preview).toHaveBeenCalledTimes(1)
+        expect(
+            useEngineSettingsStore.getState().modelDrafts[key].review?.preview.auto?.reviewedInputId
+        ).toBe('input')
+    })
+    it('expires every Fits label while keeping the finite reviewed proposal and original digest', async () => {
+        if (!reply.auto) throw new Error('Missing Auto fixture')
+        preview.mockResolvedValueOnce({
+            ...reply,
+            auto: {
+                ...reply.auto,
+                estimate: {
+                    status: 'estimated',
+                    capacityFit: 'fits',
+                    freeFit: 'fits',
+                    domains: [
+                        {
+                            id: 'host',
+                            kind: 'host',
+                            capacityBytes: '16000',
+                            freeBytes: '12000',
+                            requiredBytes: '1000',
+                            capacityFit: 'fits',
+                            freeFit: 'fits',
+                            remainingValidityMs: 1000,
+                            source: 'fixture'
+                        }
+                    ]
+                }
+            }
+        })
+        await select('Context mode', 'auto')
+        await act(async () => button('Recalculate').click())
+        expect(container.textContent).toContain('(Fits)')
+        await act(async () => vi.advanceTimersByTime(1000))
+        expect(container.textContent).not.toContain('(Fits)')
+        expect(container.textContent).toContain('Feasible context: 4096')
+        expect(
+            useEngineSettingsStore.getState().modelDrafts[key].review?.request.modelChange
+                ?.previewDigest
+        ).toBe('d'.repeat(64))
+        expect(button('Apply reviewed model changes').disabled).toBe(false)
+        expect(preview).toHaveBeenCalledTimes(1)
+        expect(apply).not.toHaveBeenCalled()
+    })
+    it('retains the finite proposal while requested Auto fields change until explicit Recalculate', async () => {
+        if (!reply.auto?.resolved) throw new Error('Missing finite Auto fixture')
+        await select('Context mode', 'auto')
+        await act(async () => button('Recalculate').click())
+        const original = useEngineSettingsStore.getState().modelDrafts[key].review
+        if (!original) throw new Error('Missing reviewed proposal')
+
+        await input('Auto context cap', '16384')
+        await input('Auto context cap', '24576')
+        const edited = useEngineSettingsStore.getState().modelDrafts[key]
+        expect(edited.review).toBeUndefined()
+        expect(edited.retainedReview?.request).toEqual(original.request)
+        expect(edited.retainedReview?.preview.auto?.resolved).toEqual(reply.auto.resolved)
+        expect(container.textContent).toContain('Feasible context: 4096')
+        expect(button('Apply reviewed model changes').disabled).toBe(true)
+        await act(async () => vi.advanceTimersByTime(6000))
+        expect(preview).toHaveBeenCalledTimes(1)
+        expect(apply).not.toHaveBeenCalled()
+
+        preview.mockResolvedValueOnce({
+            ...reply,
+            previewDigest: 'e'.repeat(64),
+            auto: {
+                ...reply.auto,
+                reviewedInputId: 'replacement',
+                resolved: {
+                    ...reply.auto.resolved,
+                    perSlotContext: 8192,
+                    totalContext: 8192,
+                    reviewedInputId: 'replacement'
+                }
+            }
+        })
+        await act(async () => button('Recalculate').click())
+        const recalculated = useEngineSettingsStore.getState().modelDrafts[key]
+        expect(recalculated.retainedReview).toBeUndefined()
+        expect(recalculated.review?.request.modelChange?.previewDigest).toBe('e'.repeat(64))
+        expect(container.textContent).toContain('Feasible context: 8192')
+        expect(button('Apply reviewed model changes').disabled).toBe(false)
+        expect(preview).toHaveBeenCalledTimes(2)
+        expect(apply).not.toHaveBeenCalled()
+    })
+    it('keeps the reviewed finite proposal on hidden return until explicit Recalculate', async () => {
+        await select('Context mode', 'auto')
+        await act(async () => button('Recalculate').click())
+        await act(async () => document.dispatchEvent(new Event('visibilitychange')))
+        expect(container.textContent).toContain('Feasible context: 4096')
+        expect(container.textContent).toContain('Recalculate before applying again')
+        expect(button('Apply reviewed model changes').disabled).toBe(true)
+        await act(async () => vi.advanceTimersByTime(6000))
+        expect(preview).toHaveBeenCalledTimes(1)
+        expect(
+            useEngineSettingsStore.getState().modelDrafts[key].retainedReview?.request.modelChange
+                ?.previewDigest
+        ).toBe('d'.repeat(64))
+        await act(async () => button('Recalculate').click())
+        expect(preview).toHaveBeenCalledTimes(2)
+        expect(button('Apply reviewed model changes').disabled).toBe(false)
+    })
     it('clears Auto-only validation on switching to Fixed and preserves unrelated validation', async () => {
         await select('Context mode', 'auto')
         await input('Auto context cap', '')

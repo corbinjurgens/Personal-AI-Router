@@ -2,7 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // @vitest-environment jsdom
 
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { act } from 'react'
+import { createRoot, type Root } from 'react-dom/client'
+import ModelLoadSettings from '@/ui/components/ModelSettings/ModelLoadSettings'
 import type {
     EngineSettingsPreview,
     EngineSettingsSnapshot,
@@ -22,6 +25,8 @@ import {
 } from '@/ui/stores/engine-settings.store'
 import { useNodeConfigurationStore } from '@/ui/stores/node-configuration.store'
 import { applyModelSettings } from '@/shared/utils/node-policy-model-settings'
+import { ServiceCallError } from '@/ui/api/service-transport'
+import { POLICY_CONFLICT_CODE } from '@/shared/constants/service-errors'
 import {
     modelPolicyPatch,
     modelRoutingState,
@@ -155,6 +160,65 @@ beforeEach(() => {
 })
 
 describe('reviewed model operations', () => {
+    it('withdraws estimate authority after a stated mutation without replacing the draft or reviewing again', async () => {
+        const applied = inspection({ configurationKey: 'applied', configurationPools: ['host'] })
+        engine.inspectModel.mockResolvedValue(applied)
+        window.pairApi.engines.setStatedMemory = vi
+            .fn<IEngineApi['setStatedMemory']>()
+            .mockResolvedValue(applied)
+        const store = useEngineSettingsStore.getState()
+        await store.previewModel(target, change, 'authority')
+        const reviewed = useEngineSettingsStore.getState().modelDrafts[key].review?.request
+        await store.saveStatedMemory({
+            ...target,
+            modelId: 'model',
+            profileKey: 'model',
+            configurationKey: 'applied',
+            hostBytes: '1073741824'
+        })
+        const updated = useEngineSettingsStore.getState().modelDrafts[key]
+        expect(updated.review).toBeUndefined()
+        expect(updated.retainedReview?.request).toEqual(reviewed)
+        expect(updated.change).toEqual(change)
+        expect(engine.previewSettings).toHaveBeenCalledOnce()
+        expect(engine.applySettings).not.toHaveBeenCalled()
+    })
+
+    it('retains the refused digest and draft until explicit recalculation without retrying', async () => {
+        const store = useEngineSettingsStore.getState()
+        await store.previewModel(target, change, 'authority')
+        const reviewed = useEngineSettingsStore.getState().modelDrafts[key].review?.request
+        engine.applySettings.mockRejectedValueOnce(
+            new ServiceCallError('Reviewed memory is stale. Recalculate.', POLICY_CONFLICT_CODE)
+        )
+        await store.applyModel(key, 'authority')
+        const refused = useEngineSettingsStore.getState().modelDrafts[key]
+        expect(engine.applySettings).toHaveBeenCalledTimes(1)
+        expect(engine.applySettings.mock.calls[0]?.[0].modelChange?.previewDigest).toBe('reviewed')
+        expect(refused.change).toEqual(change)
+        expect(refused.retainedReview?.request).toEqual(reviewed)
+        expect(refused.review).toBeUndefined()
+        expect(refused.uncertain).toBe(false)
+        expect(refused.message).toContain('Reviewed memory is stale. Recalculate.')
+        await store.applyModel(key, 'authority')
+        await store.previewModel(target, change, 'authority', true)
+        expect(engine.applySettings).toHaveBeenCalledTimes(1)
+        expect(engine.previewSettings).toHaveBeenCalledTimes(1)
+        engine.previewSettings.mockResolvedValueOnce({
+            settings: snapshot().settings,
+            revision: 3,
+            policyRevision: '7',
+            previewDigest: 'explicit-replacement',
+            errors: {},
+            restart: false,
+            rebind: false
+        })
+        await store.previewModel(target, change, 'authority')
+        expect(
+            useEngineSettingsStore.getState().modelDrafts[key].review?.preview.previewDigest
+        ).toBe('explicit-replacement')
+        expect(useEngineSettingsStore.getState().modelDrafts[key].retainedReview).toBeUndefined()
+    })
     it('reviews and applies fit and raw options as one existing model operation', async () => {
         const store = useEngineSettingsStore.getState()
         const nativeChange: ModelChange = {
@@ -934,6 +998,308 @@ describe('reviewed model operations', () => {
         expect(
             useEngineSettingsStore.getState().modelDrafts[modelSettingsKey(peer, 'model')].message
         ).toContain('paused')
+    })
+})
+
+describe('reviewed memory confirmation', () => {
+    let root: Root
+    let container: HTMLDivElement
+    function memory(fit: 'exceeds' | 'tight' | 'unknown' | 'fits'): InspectModelResult['estimate'] {
+        return {
+            status: 'partial',
+            capacityFit: 'fits',
+            freeFit: fit,
+            domains: [
+                {
+                    id: 'host',
+                    kind: 'host',
+                    capacityFit: 'fits',
+                    freeFit: fit,
+                    remainingValidityMs: 5000
+                }
+            ]
+        }
+    }
+    function candidate(
+        fit: 'exceeds' | 'tight' | 'unknown' | 'fits',
+        digest = 'original-reviewed'
+    ): EngineSettingsPreview {
+        return {
+            settings: snapshot().settings,
+            revision: 3,
+            policyRevision: '7',
+            previewDigest: digest,
+            errors: {},
+            restart: false,
+            rebind: false,
+            estimate: memory(fit)
+        }
+    }
+    beforeEach(async () => {
+        vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+        vi.stubGlobal('CSS', { supports: () => false })
+        Object.defineProperty(HTMLDialogElement.prototype, 'showModal', {
+            configurable: true,
+            value: function (this: HTMLDialogElement) {
+                this.open = true
+            }
+        })
+        Object.defineProperty(HTMLDialogElement.prototype, 'close', {
+            configurable: true,
+            value: function (this: HTMLDialogElement) {
+                this.open = false
+            }
+        })
+        container = document.createElement('div')
+        document.body.append(container)
+        root = createRoot(container)
+        await act(async () =>
+            root.render(
+                <ModelLoadSettings
+                    target={target}
+                    modelId="model"
+                    profileKey="model"
+                    policy={policy.policy}
+                    savedPolicy={policy.policy}
+                    policyRevision="7"
+                    authority="authority"
+                    disabled={false}
+                />
+            )
+        )
+    })
+    afterEach(async () => {
+        await act(async () => root.unmount())
+        container.remove()
+        vi.unstubAllGlobals()
+    })
+    async function click(label: string) {
+        const button = Array.from(document.querySelectorAll('button')).find(
+            item => item.textContent === label
+        )
+        if (!button) throw new Error(`Missing ${label}`)
+        await act(async () => button.click())
+    }
+    async function review(
+        fit: 'exceeds' | 'tight' | 'unknown' | 'fits',
+        digest = 'original-reviewed'
+    ) {
+        engine.previewSettings.mockResolvedValue(candidate(fit, digest))
+        await act(async () =>
+            useEngineSettingsStore.getState().previewModel(target, change, 'authority')
+        )
+        expect(
+            useEngineSettingsStore.getState().modelDrafts[key].review?.preview.estimate?.freeFit
+        ).toBe(fit)
+    }
+
+    it('confirms the reviewed exceeding candidate and applies its original digest once', async () => {
+        // The saved inspection is unknown; only the candidate exceeds.
+        await review('exceeds')
+        await click('Apply reviewed model changes')
+        expect(engine.applySettings).not.toHaveBeenCalled()
+        expect(document.querySelectorAll('dialog[open]')).toHaveLength(1)
+        expect(document.body.textContent).toContain(
+            'The estimate says this configuration needs more memory than is available. Run it anyway?'
+        )
+        await click('Run anyway')
+        expect(engine.applySettings).toHaveBeenCalledOnce()
+        expect(engine.applySettings.mock.lastCall?.[0].modelChange?.previewDigest).toBe(
+            'original-reviewed'
+        )
+    })
+
+    it('cancels without mutation or replacement of the reviewed proposal', async () => {
+        await review('exceeds')
+        const original = useEngineSettingsStore.getState().modelDrafts[key].review
+        await click('Apply reviewed model changes')
+        await click('Cancel')
+        expect(engine.applySettings).not.toHaveBeenCalled()
+        expect(useEngineSettingsStore.getState().modelDrafts[key].review).toBe(original)
+        expect(document.querySelector('dialog[open]')).toBeNull()
+    })
+
+    it('cannot switch to a new review while its original confirmation remains open', async () => {
+        await review('exceeds')
+        await click('Apply reviewed model changes')
+        await review('fits', 'new-reviewed')
+        await click('Run anyway')
+        expect(engine.applySettings).not.toHaveBeenCalled()
+        expect(
+            useEngineSettingsStore.getState().modelDrafts[key].review?.request.modelChange
+                ?.previewDigest
+        ).toBe('new-reviewed')
+    })
+
+    it('does not adopt a later review even if its digest is identical', async () => {
+        await review('exceeds')
+        const generation = useEngineSettingsStore.getState().modelDrafts[key].generation
+        await click('Apply reviewed model changes')
+        await review('fits')
+        expect(useEngineSettingsStore.getState().modelDrafts[key].generation).toBeGreaterThan(
+            generation
+        )
+        await click('Run anyway')
+        expect(engine.applySettings).not.toHaveBeenCalled()
+    })
+
+    it.each(['tight', 'unknown'] satisfies Array<'tight' | 'unknown'>)(
+        'applies a %s candidate directly even when applied inspection exceeds',
+        async fit => {
+            engine.inspectModel.mockResolvedValue(inspection({ estimate: memory('exceeds') }))
+            await review(fit)
+            expect(
+                useEngineSettingsStore.getState().modelDrafts[key].inspection?.estimate.freeFit
+            ).toBe('exceeds')
+            await click('Apply reviewed model changes')
+            expect(document.querySelector('dialog[open]')).toBeNull()
+            expect(engine.applySettings).toHaveBeenCalledOnce()
+            expect(engine.applySettings.mock.lastCall?.[0].modelChange?.previewDigest).toBe(
+                'original-reviewed'
+            )
+        }
+    )
+})
+
+describe('memory observation lifetime', () => {
+    beforeEach(() => vi.useFakeTimers())
+    afterEach(() => vi.useRealTimers())
+    const estimate = {
+        status: 'estimated',
+        capacityFit: 'fits',
+        freeFit: 'fits',
+        domains: [
+            {
+                id: 'host',
+                kind: 'host',
+                capacityBytes: '16000',
+                freeBytes: '12000',
+                requiredBytes: '1000',
+                capacityFit: 'fits',
+                freeFit: 'fits',
+                source: 'fixture',
+                sampleId: 'unchanged-sample',
+                remainingValidityMs: 5000
+            }
+        ]
+    } satisfies NonNullable<InspectModelResult['estimate']>
+
+    it('deducts the complete inspection request and expires both comparisons with no refresh', async () => {
+        const response = deferred<InspectModelResult>()
+        engine.inspectModel.mockReturnValueOnce(response.promise)
+        const store = useEngineSettingsStore.getState()
+        const pending = store.inspectModel(target, 'model', 'model')
+        vi.advanceTimersByTime(1500)
+        response.resolve(inspection({ estimate }))
+        await pending
+        expect(
+            useEngineSettingsStore.getState().modelDrafts[key].inspection?.estimate?.domains?.[0]
+        ).toMatchObject({ remainingValidityMs: 3500, capacityFit: 'fits', freeFit: 'fits' })
+        vi.setSystemTime(new Date('2000-01-01T00:00:00Z'))
+        vi.advanceTimersByTime(3499)
+        expect(useEngineSettingsStore.getState().modelDrafts[key].memoryStale).toBe(false)
+        vi.advanceTimersByTime(1)
+        const expired = useEngineSettingsStore.getState().modelDrafts[key]
+        expect(expired.inspection?.estimate).toMatchObject({
+            capacityFit: 'unknown',
+            freeFit: 'unknown'
+        })
+        expect(expired.inspection?.estimate?.domains?.[0]).toMatchObject({
+            capacityFit: 'unknown',
+            freeFit: 'unknown',
+            remainingValidityMs: 0,
+            sampleId: 'unchanged-sample',
+            capacityBytes: '16000',
+            freeBytes: '12000'
+        })
+        expect(expired.memoryStale).toBe(true)
+        expect(engine.inspectModel).toHaveBeenCalledTimes(1)
+        expect(engine.previewSettings).not.toHaveBeenCalled()
+        expect(engine.applySettings).not.toHaveBeenCalled()
+    })
+
+    it('keeps a fresh applied inspection separate from a historical retained review', async () => {
+        const store = useEngineSettingsStore.getState()
+        engine.previewSettings.mockResolvedValueOnce({
+            settings: snapshot().settings,
+            revision: 3,
+            policyRevision: '7',
+            previewDigest: 'historical',
+            errors: {},
+            restart: false,
+            rebind: false,
+            estimate
+        })
+        await store.previewModel(target, change, 'authority')
+        vi.advanceTimersByTime(1000)
+        engine.inspectModel.mockResolvedValueOnce(inspection({ estimate }))
+        await store.inspectModel(target, 'model', 'model')
+        const draft = useEngineSettingsStore.getState().modelDrafts[key]
+        expect(draft.inspection?.estimate.capacityFit).toBe('fits')
+        expect(draft.inspection?.estimate.domains?.[0].remainingValidityMs).toBe(5000)
+        expect(draft.retainedReview?.preview.estimate?.capacityFit).toBe('unknown')
+        expect(draft.retainedReview?.request.modelChange?.previewDigest).toBe('historical')
+        expect(draft.review).toBeUndefined()
+    })
+
+    it('deducts preview request time while retaining the original reviewed digest after expiry', async () => {
+        const response = deferred<EngineSettingsPreview>()
+        const started = deferred<void>()
+        engine.previewSettings.mockImplementationOnce(() => {
+            started.resolve()
+            return response.promise
+        })
+        const pending = useEngineSettingsStore.getState().previewModel(target, change, 'authority')
+        await started.promise
+        vi.advanceTimersByTime(5000)
+        response.resolve({
+            settings: snapshot().settings,
+            revision: 3,
+            policyRevision: '7',
+            previewDigest: 'original',
+            errors: {},
+            restart: false,
+            rebind: false,
+            estimate
+        })
+        await pending
+        const reviewed = useEngineSettingsStore.getState().modelDrafts[key]
+        expect(reviewed.review?.preview.estimate).toMatchObject({
+            capacityFit: 'unknown',
+            freeFit: 'unknown'
+        })
+        expect(reviewed.review?.request.modelChange?.previewDigest).toBe('original')
+        expect(reviewed.change).toEqual(change)
+        expect(engine.previewSettings).toHaveBeenCalledTimes(1)
+    })
+
+    it('keeps hidden and disconnected observations historical after reconnect and rejects late hidden responses', async () => {
+        const store = useEngineSettingsStore.getState()
+        const stop = watchEngineSettings()
+        try {
+            engine.inspectModel.mockResolvedValue(inspection({ estimate }))
+            await store.inspectModel(target, 'model', 'model')
+            document.dispatchEvent(new Event('visibilitychange'))
+            expect(
+                useEngineSettingsStore.getState().modelDrafts[key].inspection?.estimate?.capacityFit
+            ).toBe('unknown')
+            const late = deferred<InspectModelResult>()
+            engine.inspectModel.mockReturnValueOnce(late.promise)
+            const pending = store.inspectModel(target, 'model', 'model')
+            document.dispatchEvent(new Event('visibilitychange'))
+            late.resolve(inspection({ estimate }))
+            await pending
+            expect(useEngineSettingsStore.getState().modelDrafts[key].inspection).toBeUndefined()
+            await store.inspectModel(target, 'model', 'model')
+            store.disconnect('self')
+            await store.reload(target)
+            expect(
+                useEngineSettingsStore.getState().modelDrafts[key].inspection?.estimate?.capacityFit
+            ).toBe('unknown')
+            expect(engine.previewSettings).not.toHaveBeenCalled()
+        } finally {
+            stop()
+        }
     })
 })
 

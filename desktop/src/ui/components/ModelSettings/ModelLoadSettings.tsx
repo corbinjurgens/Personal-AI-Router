@@ -21,6 +21,7 @@ import ModelExtraOptions from './ModelExtraOptions'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import type { ModelConfiguration } from '@/shared/types/node-policy'
 import { isValidProfileKey, newProfileKeyStatus } from '@/shared/utils/node-policy-model-settings'
+import { ConfirmModal } from '@/ui/components/ConfirmModal'
 
 function fieldPatch(
     field: keyof RequestedLoad,
@@ -97,6 +98,12 @@ export default function ModelLoadSettings({
     )
     const [values, setValues] = useState<Record<string, string>>({})
     const [validation, setValidation] = useState<Record<string, string>>({})
+    const [confirmation, setConfirmation] = useState<{
+        key: string
+        authority: string
+        digest: string
+        generation: number
+    }>()
     const validateField = (field: string, error?: string) =>
         setValidation(previous => {
             const next = { ...previous }
@@ -118,6 +125,7 @@ export default function ModelLoadSettings({
     const generation = modelPolicyPatch(savedPolicy, policy, identity)
     const routing = modelRoutingState(savedPolicy, identity, evidence)
     const load = draft?.change?.load
+    const displayedReview = draft?.review ?? draft?.retainedReview
     const removing = draft?.change?.remove === true
     const dirty = !!load || !!draft?.change?.policy || removing
     useEffect(() => {
@@ -199,17 +207,32 @@ export default function ModelLoadSettings({
     const draftIdentity = JSON.stringify(draft?.change)
     const invalid = Object.keys(validation).length > 0
     useEffect(() => {
-        if (!draftIdentity || disabled || invalid || !policyRevision) return
+        if (!draftIdentity || disabled || invalid || !policyRevision || autoSelected) return
         const timer = window.setTimeout(() => {
             const currentDraft = useEngineSettingsStore.getState().modelDrafts[key]
             const current = currentDraft?.change
-            if (!currentDraft?.review && current?.load && JSON.stringify(current) === draftIdentity)
+            if (
+                !currentDraft?.review &&
+                !currentDraft?.retainedReview &&
+                current?.load &&
+                JSON.stringify(current) === draftIdentity
+            )
                 void useEngineSettingsStore
                     .getState()
                     .previewModel({ nodeId, engine }, current, authority, true)
         }, 250)
         return () => window.clearTimeout(timer)
-    }, [draftIdentity, disabled, invalid, policyRevision, key, nodeId, engine, authority])
+    }, [
+        draftIdentity,
+        disabled,
+        invalid,
+        policyRevision,
+        key,
+        nodeId,
+        engine,
+        authority,
+        autoSelected
+    ])
     const controls = (basic: boolean) =>
         loadFields
             .filter(
@@ -753,7 +776,7 @@ export default function ModelLoadSettings({
                     </Text>
                 ))}
             {!generation.ok && <Text kind="body/regular/sm">{generation.error.message}</Text>}
-            {Object.entries((draft?.review?.preview ?? draft?.advisory)?.errors ?? {}).map(
+            {Object.entries((displayedReview?.preview ?? draft?.advisory)?.errors ?? {}).map(
                 ([field, error]) => (
                     <Text key={field} role="alert" kind="body/regular/sm">
                         {field}: {error}
@@ -770,12 +793,26 @@ export default function ModelLoadSettings({
                     {draft.message}
                 </Text>
             )}
+            {draft?.retainedReview && !draft.review && (
+                <Text role="status" kind="body/regular/sm">
+                    Reviewed proposal kept for reference.{' '}
+                    {autoSelected || draft.attempt ? 'Recalculate' : 'Review again'} before applying
+                    again.
+                </Text>
+            )}
             <ModelSettingsPreview
+                target={target}
+                disabled={unavailable}
                 profileKey={newProfile ? undefined : profileKey}
                 inspection={inspection}
-                preview={draft?.review?.preview ?? draft?.advisory}
-                reviewed={!!draft?.review}
-                stale={!!draft?.previewOperation || (!!load && !draft?.review && !draft?.advisory)}
+                preview={displayedReview?.preview ?? draft?.advisory}
+                reviewed={!!displayedReview}
+                stale={
+                    !!draft?.memoryStale ||
+                    !!draft?.retainedReview ||
+                    !!draft?.previewOperation ||
+                    (!!load && !displayedReview && !draft?.advisory)
+                }
                 snapshot={snapshot}
             />
             <Button
@@ -826,7 +863,9 @@ export default function ModelLoadSettings({
                     )
                 }}
             >
-                {autoSelected ? 'Recalculate' : 'Preview model changes'}
+                {autoSelected || (draft?.retainedReview && draft.attempt)
+                    ? 'Recalculate'
+                    : 'Preview model changes'}
             </Button>
             <Button
                 disabled={
@@ -836,12 +875,45 @@ export default function ModelLoadSettings({
                     draft.review.authority !== authority
                 }
                 onClick={() => {
-                    if (!unavailable)
-                        void useEngineSettingsStore.getState().applyModel(key, authority)
+                    const review = draft?.review
+                    const digest = review?.request.modelChange?.previewDigest
+                    if (unavailable || !review || !digest) return
+                    const estimate = review.preview.auto?.estimate ?? review.preview.estimate
+                    if (estimate?.capacityFit === 'exceeds' || estimate?.freeFit === 'exceeds')
+                        setConfirmation({ key, authority, digest, generation: draft.generation })
+                    else
+                        void useEngineSettingsStore
+                            .getState()
+                            .applyModel(key, authority, digest, draft.generation)
                 }}
             >
                 Apply reviewed model changes
             </Button>
+            <ConfirmModal
+                open={!!confirmation}
+                onOpenChange={open => {
+                    if (!open) setConfirmation(undefined)
+                }}
+                title="Exceeds available memory"
+                message="The estimate says this configuration needs more memory than is available. Run it anyway?"
+                confirmLabel="Run anyway"
+                onConfirm={() => {
+                    if (
+                        confirmation &&
+                        confirmation.key === key &&
+                        confirmation.authority === authority &&
+                        !unavailable
+                    )
+                        void useEngineSettingsStore
+                            .getState()
+                            .applyModel(
+                                key,
+                                authority,
+                                confirmation.digest,
+                                confirmation.generation
+                            )
+                }}
+            />
             {draft?.attempt && (
                 <Button
                     kind="secondary"

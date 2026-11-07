@@ -9,20 +9,37 @@ function bytes(value?: string): string {
     return value === undefined ? 'Unknown' : formatBytes(Number(value))
 }
 
-function comparison(
-    required: string | undefined,
-    available: string | undefined,
-    capacity: string | undefined,
-    complete: boolean
-): string {
-    if (!complete || required === undefined || available === undefined || capacity === undefined)
-        return 'Unknown'
-    const need = BigInt(required)
-    const amount = BigInt(available)
-    const reserve = BigInt(capacity) / 10n + 536870912n
-    if (need > amount) return 'Exceeds'
-    if (need + reserve > amount) return 'Tight'
-    return 'Fits'
+function amount(expected?: string, low?: string, high?: string): string {
+    return `${bytes(expected)} (up to ${bytes(high)}; range ${bytes(low)} to ${bytes(high)})`
+}
+
+function comparison(fit: Estimate['capacityFit'], stale: boolean): string {
+    if (stale) return 'Unknown'
+    switch (fit) {
+        case 'fits':
+            return 'Fits'
+        case 'tight':
+            return 'Tight: may not fit'
+        case 'exceeds':
+            return 'Exceeds available memory'
+        default:
+            return 'Unknown'
+    }
+}
+
+function sourceLabel(kind?: NonNullable<Estimate['estimateSource']>['kind']): string {
+    switch (kind) {
+        case 'pair-estimate':
+            return 'Estimate'
+        case 'user-stated':
+            return 'Your figure'
+        case 'measured':
+            return 'Measured'
+        case 'engine-report':
+            return 'Engine report'
+        default:
+            return 'Unknown'
+    }
 }
 
 export default function ModelMemoryEstimate({
@@ -33,105 +50,107 @@ export default function ModelMemoryEstimate({
     stale?: boolean
 }) {
     const domains = estimate?.domains ?? []
-    const components = estimate?.components ?? []
-    const missing = [
-        'weights',
-        'attention-cache',
-        'recurrent-state',
-        'compute-workspace',
-        'prompt-cache',
-        'companions'
-    ].filter(name => !components.some(component => component.name === name))
     const shared = domains.filter(domain => domain.kind === 'shared')
-    const independent = shared.length === 0 || (shared.length === 1 && domains.length === 1)
-    const complete =
-        estimate?.status === 'estimated' &&
-        !estimate.unknowns?.length &&
-        missing.length === 0 &&
-        independent &&
-        domains.every(domain => domain.kind !== 'device' || !!domain.deviceId) &&
-        components.every(component =>
-            component.status === 'excluded'
-                ? !!component.reason && (component.bytes === undefined || component.bytes === '0')
-                : component.status === 'estimated' &&
-                  component.bytes !== undefined &&
-                  domains.some(domain => domain.id === component.domainId)
-        )
+    const source = estimate?.estimateSource
     return (
         <Stack gap="2">
             <Text kind="body/semibold/sm">Advisory memory estimate{stale ? ' (stale)' : ''}</Text>
             <Text kind="body/regular/sm">
-                {estimate?.status ?? 'Unknown'} · Source: {estimate?.source ?? 'Unknown'} · Build:{' '}
-                {estimate?.buildId ?? 'Unknown'} · Estimate time: {estimate?.timestamp ?? 'Unknown'}
+                {sourceLabel(source?.kind)} · {estimate?.status ?? 'Unknown'} · Source:{' '}
+                {estimate?.source ?? 'Unknown'} · Build: {estimate?.buildId ?? 'Unknown'} · Estimate
+                time: {estimate?.timestamp ?? 'Unknown'}
             </Text>
             <Text kind="body/regular/sm">
-                Memory source: {estimate?.memorySource ?? 'Unknown'} · Free memory sampled:{' '}
+                Provider: {source?.provider ?? 'Unknown'} · Revision:{' '}
+                {source?.revision ?? 'Unknown'} · Basis: {source?.basis ?? 'Unknown'}
+            </Text>
+            <Text kind="body/regular/sm">
+                Memory source: {estimate?.memorySource ?? 'Unknown'} · Available memory sampled:{' '}
                 {estimate?.memoryTimestamp ?? 'Unknown'}. Selected model estimate; simultaneous
                 residents are not credited as released.
             </Text>
-            {missing.length > 0 && (
+            <Text kind="body/regular/sm">
+                Service comparison: capacity ({comparison(estimate?.capacityFit, stale)}) ·
+                available ({comparison(estimate?.freeFit, stale)})
+            </Text>
+            {stale && (
                 <Text kind="body/regular/sm">
-                    Unknown: missing component costs or explicit exclusions: {missing.join(', ')}.
+                    Memory evidence is stale. Comparisons are Unknown; retained amounts are
+                    historical.
                 </Text>
             )}
-            {!independent && (
+            {shared.length > 0 && domains.length > 1 && (
                 <Text kind="body/regular/sm">
-                    Unknown: shared UMA mapping overlaps other pools. Only the shared pool is
-                    displayed; capacities are not added.
+                    Shared UMA memory is displayed once. Other pool capacities are not added.
                 </Text>
             )}
             {domains.length === 0 && <Text kind="body/regular/sm">Memory domains: Unknown.</Text>}
-            {(shared.length ? shared.slice(0, 1) : domains).map(domain => {
-                const mapped = domain.kind !== 'device' || !!domain.deviceId
-                const sum = components
-                    .filter(
-                        component =>
-                            component.status === 'estimated' && component.domainId === domain.id
-                    )
-                    .reduce((total, component) => total + BigInt(component.bytes ?? '0'), 0n)
-                const known =
-                    !!complete &&
-                    mapped &&
-                    !stale &&
-                    domain.requiredBytes !== undefined &&
-                    sum === BigInt(domain.requiredBytes)
-                const reserve =
-                    domain.capacityBytes === undefined
-                        ? undefined
-                        : (BigInt(domain.capacityBytes) / 10n + 536870912n).toString()
-                return (
-                    <Text key={domain.id} kind="body/regular/sm">
+            {(shared.length ? shared.slice(0, 1) : domains).map(domain => (
+                <Stack key={domain.id} gap="1">
+                    <Text kind="body/regular/sm">
                         {domain.kind === 'shared'
                             ? 'Shared UMA pool'
                             : domain.kind === 'device'
                               ? `Device ${domain.deviceId ?? 'mapping unknown'}`
                               : 'Host'}{' '}
-                        ({domain.id}): required {bytes(domain.requiredBytes)} · capacity{' '}
-                        {bytes(domain.capacityBytes)} (
-                        {comparison(
+                        ({domain.id}): {sourceLabel(source?.kind)} expected{' '}
+                        {amount(
                             domain.requiredBytes,
-                            domain.capacityBytes,
-                            domain.capacityBytes,
-                            known
-                        )}
-                        ) · free {bytes(domain.freeBytes)} (
-                        {comparison(
-                            domain.requiredBytes,
-                            domain.freeBytes,
-                            domain.capacityBytes,
-                            known && !!estimate.memoryTimestamp
-                        )}
-                        ) · reserve {bytes(reserve)} (10% of capacity plus 512 MiB)
+                            domain.requiredLowBytes,
+                            domain.requiredHighBytes
+                        )}{' '}
+                        · capacity {bytes(domain.capacityBytes)} (
+                        {comparison(domain.capacityFit, stale)}) · available{' '}
+                        {bytes(domain.freeBytes)} ({comparison(domain.freeFit, stale)}) · service
+                        reserve {bytes(domain.reserveBytes)}
                     </Text>
-                )
-            })}
+                    <Text kind="body/regular/sm">
+                        Accounting source: {domain.source ?? 'Unknown'} · Sample:{' '}
+                        {domain.sampleId ?? 'Unknown'} · Capacity source:{' '}
+                        {domain.capacitySource ?? 'Unknown'} · Capacity sampled:{' '}
+                        {domain.capacityTimestamp ?? 'Unknown'} · Available source:{' '}
+                        {domain.freeSource ?? 'Unknown'} · Available sampled:{' '}
+                        {domain.freeTimestamp ?? 'Unknown'} · Remaining validity:{' '}
+                        {stale
+                            ? 'Expired'
+                            : domain.remainingValidityMs === undefined
+                              ? 'Unknown'
+                              : `${domain.remainingValidityMs} ms`}
+                    </Text>
+                    {domain.kind === 'device' && !domain.deviceId && (
+                        <Text kind="body/regular/sm">
+                            Unknown: physical device mapping unavailable.
+                        </Text>
+                    )}
+                    {domain.unknowns?.map((item, index) => (
+                        <Text key={index} kind="body/regular/sm">
+                            {item.startsWith('not priced')
+                                ? 'Not included in this estimate'
+                                : 'Unknown'}{' '}
+                            ({domain.id}): {item}
+                        </Text>
+                    ))}
+                </Stack>
+            ))}
             {estimate?.components?.map((component, index) => (
                 <Text key={`${component.name}:${index}`} kind="body/regular/sm">
-                    {component.name} ({component.domainId ?? 'unmapped'}): {component.status} ·{' '}
-                    {bytes(component.bytes)}
+                    {component.name} ({component.domainId ?? 'unmapped'}): {component.status} ·
+                    expected {amount(component.bytes, component.lowBytes, component.highBytes)} ·
+                    Basis: {component.basis ?? 'Unknown'}
+                    {component.basis === 'heuristic' ? ' (uncalibrated)' : ''}
                     {component.reason ? ` · ${component.reason}` : ''}
                 </Text>
             ))}
+            {!!source?.unpricedCosts?.length && (
+                <Stack gap="1">
+                    <Text kind="body/semibold/sm">Not included in this estimate</Text>
+                    {source.unpricedCosts.map((item, index) => (
+                        <Text key={index} kind="body/regular/sm">
+                            Not priced: {item}
+                        </Text>
+                    ))}
+                </Stack>
+            )}
             {estimate?.assumptions?.map((item, index) => (
                 <Text key={index} kind="body/regular/sm">
                     Assumption: {item}

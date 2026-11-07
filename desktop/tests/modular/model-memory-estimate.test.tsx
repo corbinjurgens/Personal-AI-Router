@@ -8,246 +8,223 @@ import ModelMemoryEstimate from '@/ui/components/ModelSettings/ModelMemoryEstima
 import type { Estimate } from '@/shared/types/model-config'
 
 const estimate: Estimate = {
-    status: 'estimated',
-    source: 'fixture',
-    buildId: 'native',
-    memoryTimestamp: '2026-10-28T00:00:00Z',
+    status: 'partial',
+    estimateSource: {
+        kind: 'pair-estimate',
+        provider: 'PAIR',
+        revision: 'pair-gguf/2',
+        basis: 'GGUF metadata',
+        unpricedCosts: ['driver allocations']
+    },
+    capacityFit: 'fits',
+    freeFit: 'tight',
+    memorySource: 'target node',
+    memoryTimestamp: '2026-11-07T01:00:00Z',
     domains: [
         {
             id: 'shared',
             kind: 'shared',
             capacityBytes: '10737418240',
             freeBytes: '6442450944',
-            requiredBytes: '4294967296'
+            requiredBytes: '4294967296',
+            requiredLowBytes: '3221225472',
+            requiredHighBytes: '5368709120',
+            reserveBytes: '268435456',
+            capacityFit: 'fits',
+            freeFit: 'tight',
+            source: 'OS available physical memory',
+            sampleId: 'target-sample-17',
+            capacitySource: 'physical capacity',
+            capacityTimestamp: '2026-11-07T00:59:59Z',
+            freeSource: 'available pages',
+            freeTimestamp: '2026-11-07T01:00:00Z',
+            remainingValidityMs: 1400,
+            unknowns: ['not priced: driver allocations']
         }
     ],
     components: [
-        { name: 'weights', domainId: 'shared', status: 'estimated', bytes: '4294967296' },
-        ...[
-            'attention-cache',
-            'recurrent-state',
-            'compute-workspace',
-            'prompt-cache',
-            'companions'
-        ].map(
-            name =>
-                ({
-                    name,
-                    status: 'excluded',
-                    reason: 'Not present in fixture'
-                }) satisfies NonNullable<Estimate['components']>[number]
-        )
+        {
+            name: 'compute-workspace',
+            domainId: 'shared',
+            status: 'partial',
+            bytes: '1073741824',
+            lowBytes: '536870912',
+            highBytes: '2147483648',
+            basis: 'heuristic',
+            reason: 'additional workspace not priced'
+        }
     ]
 }
 
+function display(value?: Estimate, stale = false): string {
+    const container = document.createElement('div')
+    container.innerHTML = renderToStaticMarkup(
+        <ModelMemoryEstimate estimate={value} stale={stale} />
+    )
+    return (container.textContent ?? '').replace(/\s+/g, ' ')
+}
+
 describe('advisory memory estimate', () => {
+    it('renders service comparisons independently of component completeness and renderer arithmetic', () => {
+        const text = display(estimate)
+        expect(text).toContain('capacity 10 GB (Fits)')
+        expect(text).toContain('available 6 GB (Tight: may not fit)')
+        expect(text).toContain('service reserve 256 MB')
+        expect(text).not.toContain('missing component')
+    })
+
+    it('keeps service comparisons when provenance, canonical rows and reserve are absent', () => {
+        const text = display({
+            status: 'partial',
+            capacityFit: 'fits',
+            freeFit: 'tight',
+            domains: [{ id: 'host', kind: 'host', capacityFit: 'fits', freeFit: 'tight' }]
+        })
+        expect(text).toContain('capacity Unknown (Fits)')
+        expect(text).toContain('available Unknown (Tight: may not fit)')
+        expect(text).toContain('service reserve Unknown')
+        expect(text).toContain('Capacity source: Unknown')
+        expect(text).toContain('Remaining validity: Unknown')
+    })
+
     it.each([
-        {
-            name: 'missing bytes',
-            components: estimate.components?.map(component =>
-                component.name === 'weights' ? { ...component, bytes: undefined } : component
-            )
-        },
-        {
-            name: 'unmapped cost',
-            components: estimate.components?.map(component =>
-                component.name === 'weights' ? { ...component, domainId: undefined } : component
-            )
-        },
-        {
-            name: 'unexplained exclusion',
-            components: estimate.components?.map(component =>
-                component.name === 'attention-cache'
-                    ? { ...component, reason: undefined }
-                    : component
-            )
-        },
-        {
-            name: 'weights only',
-            components: [{ name: 'weights', status: 'estimated', bytes: '1', domainId: 'shared' }]
-        }
-    ] satisfies Array<{ name: string; components: Estimate['components'] }>)(
-        'keeps $name Unknown',
-        ({ components }) => {
-            const html = renderToStaticMarkup(
-                <ModelMemoryEstimate estimate={{ ...estimate, components }} />
-            )
-            expect(html).not.toContain('(Fits)')
-            expect(html).toContain('Unknown')
+        { fit: 'fits', label: 'Fits' },
+        { fit: 'tight', label: 'Tight: may not fit' },
+        { fit: 'exceeds', label: 'Exceeds available memory' },
+        { fit: 'unknown', label: 'Unknown' }
+    ] satisfies Array<{ fit: Estimate['capacityFit']; label: string }>)(
+        'renders the service $fit verdict without recalculating it',
+        ({ fit, label }) => {
+            const text = display({
+                status: 'estimated',
+                domains: [{ id: 'host', kind: 'host', capacityFit: fit, freeFit: fit }]
+            })
+            expect(text).toContain(`capacity Unknown (${label})`)
+            expect(text).toContain(`available Unknown (${label})`)
         }
     )
+
+    it('withdraws both aggregate and domain verdicts while preserving stale amounts and notes', () => {
+        const text = display(estimate, true)
+        expect(text).toContain('Service comparison: capacity (Unknown) · available (Unknown)')
+        expect(text).toContain('capacity 10 GB (Unknown)')
+        expect(text).toContain('available 6 GB (Unknown)')
+        expect(text).toContain('Remaining validity: Expired')
+        expect(text).toContain('retained amounts are historical')
+        expect(text).toContain('expected 4 GB (up to 5 GB; range 3 GB to 5 GB)')
+        expect(text).toContain('driver allocations')
+        expect(text).not.toContain('(Fits)')
+        expect(text).not.toContain('Tight: may not fit')
+    })
+
+    it('displays expected ranges, component basis and unpriced warnings', () => {
+        const text = display(estimate)
+        expect(text).toContain('Estimate expected 4 GB (up to 5 GB; range 3 GB to 5 GB)')
+        expect(text).toContain('expected 1 GB (up to 2 GB; range 512 MB to 2 GB)')
+        expect(text).toContain('Basis: heuristic (uncalibrated)')
+        expect(text).toContain('Not included in this estimate')
+        expect(text).toContain('Not priced: driver allocations')
+        expect(text).toContain(
+            'Not included in this estimate (shared): not priced: driver allocations'
+        )
+    })
+
     it.each([
-        'attention-cache',
-        'recurrent-state',
-        'compute-workspace',
-        'prompt-cache',
-        'companions'
-    ])('requires an explicit cost or exclusion for %s', name => {
-        const html = renderToStaticMarkup(
-            <ModelMemoryEstimate
-                estimate={{
-                    ...estimate,
-                    components: estimate.components?.filter(component => component.name !== name)
-                }}
-            />
+        { kind: 'pair-estimate', label: 'Estimate' },
+        { kind: 'user-stated', label: 'Your figure' },
+        { kind: 'measured', label: 'Measured' },
+        { kind: 'engine-report', label: 'Engine report' }
+    ] satisfies Array<{ kind: NonNullable<Estimate['estimateSource']>['kind']; label: string }>)(
+        'labels the $kind source',
+        ({ kind, label }) => {
+            const text = display({
+                ...estimate,
+                estimateSource: {
+                    kind,
+                    provider: 'source provider',
+                    revision: 'r7',
+                    basis: 'source basis'
+                }
+            })
+            expect(text).toContain(`${label} expected 4 GB`)
+            expect(text).toContain('Provider: source provider · Revision: r7 · Basis: source basis')
+        }
+    )
+
+    it('retains independent capacity and free-memory provenance and service validity', () => {
+        const text = display(estimate)
+        expect(text).toContain(
+            'Accounting source: OS available physical memory · Sample: target-sample-17'
         )
-        expect(html).not.toContain('(Fits)')
-        expect(html).toContain(`explicit exclusions: ${name}`)
+        expect(text).toContain(
+            'Capacity source: physical capacity · Capacity sampled: 2026-11-07T00:59:59Z'
+        )
+        expect(text).toContain(
+            'Available source: available pages · Available sampled: 2026-11-07T01:00:00Z'
+        )
+        expect(text).toContain('Remaining validity: 1400 ms')
     })
-    it('does not add host and device capacities to an overlapping shared UMA pool', () => {
-        const html = renderToStaticMarkup(
-            <ModelMemoryEstimate
-                estimate={{
-                    ...estimate,
-                    domains: [
-                        ...(estimate.domains ?? []),
-                        { id: 'host', kind: 'host', capacityBytes: '10737418240' }
-                    ]
-                }}
-            />
-        )
-        expect(html.match(/Shared UMA pool/g)).toHaveLength(1)
-        expect(html).not.toContain('Host (host)')
-        expect(html).not.toContain('(Fits)')
+
+    it('shows UMA once without adding a duplicate host capacity', () => {
+        const text = display({
+            ...estimate,
+            domains: [
+                ...(estimate.domains ?? []),
+                { id: 'host', kind: 'host', capacityBytes: '10737418240' }
+            ]
+        })
+        expect(text.match(/Shared UMA pool/g)).toHaveLength(1)
+        expect(text).not.toContain('Host (host)')
+        expect(text).toContain('Other pool capacities are not added')
     })
-    it('keeps exact comparisons when rounded byte labels match', () => {
-        const requiredBytes = '9007199254740993'
-        const html = renderToStaticMarkup(
-            <ModelMemoryEstimate
-                estimate={{
-                    ...estimate,
-                    components: estimate.components?.map(component =>
-                        component.name === 'weights'
-                            ? { ...component, bytes: requiredBytes }
-                            : component
-                    ),
-                    domains: [
-                        {
-                            id: 'shared',
-                            kind: 'shared',
-                            requiredBytes,
-                            capacityBytes: '18014398509481984',
-                            freeBytes: '9007199254740992'
-                        }
-                    ]
-                }}
-            />
-        )
-        expect(html).toContain('free 8 PB (Exceeds)')
+
+    it('uses physical identity for separate devices and leaves unmatched comparisons Unknown', () => {
+        const text = display({
+            ...estimate,
+            capacityFit: 'unknown',
+            freeFit: 'unknown',
+            domains: [
+                { id: 'gpu-b', kind: 'device', deviceId: 'GPU-UUID-B', freeFit: 'tight' },
+                { id: 'gpu-a', kind: 'device', deviceId: 'GPU-UUID-A', freeFit: 'exceeds' },
+                {
+                    id: 'unmatched',
+                    kind: 'device',
+                    freeFit: 'unknown',
+                    unknowns: ['native map unavailable']
+                }
+            ]
+        })
+        expect(text).toContain('Device GPU-UUID-B (gpu-b)')
+        expect(text).toContain('Device GPU-UUID-A (gpu-a)')
+        expect(text).toContain('available Unknown (Exceeds available memory)')
+        expect(text).toContain('Device mapping unknown (unmatched)')
+        expect(text).toContain('Unknown (unmatched): native map unavailable')
+        expect(text).not.toContain('(Fits)')
     })
-    it('shows Tight when the estimate consumes the free-memory reserve', () => {
-        const html = renderToStaticMarkup(
-            <ModelMemoryEstimate
-                estimate={{
-                    ...estimate,
-                    domains: [
-                        {
-                            id: 'shared',
-                            kind: 'shared',
-                            capacityBytes: '10737418240',
-                            requiredBytes: '4294967296',
-                            freeBytes: '5368709120'
-                        }
-                    ]
-                }}
-            />
-        )
-        expect(html).toContain('capacity 10 GB (Fits)')
-        expect(html).toContain('free 5 GB (Tight)')
+
+    it('keeps missing service comparisons Unknown even when numeric amounts look sufficient', () => {
+        const text = display({
+            status: 'estimated',
+            domains: [
+                {
+                    id: 'host',
+                    kind: 'host',
+                    capacityBytes: '10737418240',
+                    freeBytes: '6442450944',
+                    requiredBytes: '1'
+                }
+            ]
+        })
+        expect(text).toContain('capacity 10 GB (Unknown)')
+        expect(text).toContain('available 6 GB (Unknown)')
+        expect(text).not.toContain('(Fits)')
     })
-    it('requires mapped estimated costs even when the exclusion list is complete', () => {
-        const html = renderToStaticMarkup(
-            <ModelMemoryEstimate
-                estimate={{
-                    ...estimate,
-                    components: estimate.components?.map(component =>
-                        component.name === 'weights' ? { ...component, domainId: 'gpu' } : component
-                    ),
-                    domains: [
-                        {
-                            id: 'gpu',
-                            kind: 'device',
-                            capacityBytes: '10737418240',
-                            requiredBytes: '4294967296',
-                            freeBytes: '6442450944'
-                        }
-                    ]
-                }}
-            />
-        )
-        expect(html).toContain('Device mapping unknown')
-        expect(html).not.toContain('(Fits)')
-    })
-    it('keeps inconsistent domain totals Unknown', () => {
-        const html = renderToStaticMarkup(
-            <ModelMemoryEstimate
-                estimate={{
-                    ...estimate,
-                    domains: [
-                        {
-                            id: 'shared',
-                            kind: 'shared',
-                            capacityBytes: '10737418240',
-                            requiredBytes: '1',
-                            freeBytes: '6442450944'
-                        }
-                    ]
-                }}
-            />
-        )
-        expect(html).not.toContain('(Fits)')
-    })
-    it('shows one UMA pool, sampled free memory and reserve', () => {
-        const html = renderToStaticMarkup(<ModelMemoryEstimate estimate={estimate} />)
-        expect(html).toContain('Shared UMA pool')
-        expect(html).toContain('free 6 GB (Fits)')
-        expect(html).toContain('reserve 1.5 GB')
-        expect(html).toContain('weights')
-        expect(html).not.toContain('Observed')
-    })
-    it('does not claim Fits for partial, stale or unmapped results', () => {
-        const partial = renderToStaticMarkup(
-            <ModelMemoryEstimate
-                estimate={{ ...estimate, status: 'partial', unknowns: ['workspace'] }}
-            />
-        )
-        const stale = renderToStaticMarkup(<ModelMemoryEstimate estimate={estimate} stale />)
-        const unmapped = renderToStaticMarkup(
-            <ModelMemoryEstimate
-                estimate={{
-                    ...estimate,
-                    domains: [{ ...estimate.domains?.[0], id: 'gpu', kind: 'device' }]
-                }}
-            />
-        )
-        for (const html of [partial, stale, unmapped]) expect(html).not.toContain('(Fits)')
-        expect(partial).toContain('Unknown: workspace')
-        expect(stale).toContain('(stale)')
-        expect(unmapped).toContain('mapping unknown')
-    })
-    it('distinguishes tight and exceeds from physical capacity', () => {
-        const html = renderToStaticMarkup(
-            <ModelMemoryEstimate
-                estimate={{
-                    ...estimate,
-                    components: estimate.components?.map(component =>
-                        component.status === 'estimated'
-                            ? { ...component, domainId: 'host', bytes: '5500000000' }
-                            : component
-                    ),
-                    domains: [
-                        {
-                            id: 'host',
-                            kind: 'host',
-                            capacityBytes: '10737418240',
-                            freeBytes: '5000000000',
-                            requiredBytes: '5500000000'
-                        }
-                    ]
-                }}
-            />
-        )
-        expect(html).toContain('capacity 10 GB (Fits)')
-        expect(html).toContain('free 4.66 GB (Exceeds)')
+
+    it('renders missing estimates without invented memory or provenance', () => {
+        const text = display()
+        expect(text).toContain('Memory domains: Unknown')
+        expect(text).toContain('Memory source: Unknown')
+        expect(text).toContain('Provider: Unknown')
+        expect(text).not.toContain('(Fits)')
     })
 })
