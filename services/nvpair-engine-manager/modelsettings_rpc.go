@@ -271,6 +271,15 @@ func modelSettingsParamsError(err error) error {
 type modelMemoryRecordRemoteKey struct{}
 type modelStatedInspectionKey struct{}
 
+type modelDiagnosticInspectionKey struct{}
+
+// withModelDiagnosticInspectionIdentity carries freshly observed hardware,
+// build, artifacts and realized settings from the diagnostic lifecycle owner.
+// Ordinary inspection has no such proof and cannot mark measured records current.
+func withModelDiagnosticInspectionIdentity(ctx context.Context, identity modelconfig.DiagnosticIdentity) context.Context {
+	return context.WithValue(ctx, modelDiagnosticInspectionKey{}, identity.Clone())
+}
+
 func (e *Executor) recordStatedMemory(ctx context.Context, p modelconfig.ClearStatedMemoryRequest, set *modelconfig.SetStatedMemoryRequest) (modelconfig.InspectResult, error) {
 	if err := p.Validate(); err != nil {
 		return modelconfig.InspectResult{}, modelSettingsParamsError(err)
@@ -445,7 +454,15 @@ func (e *Executor) inspectModel(ctx context.Context, p modelconfig.InspectReques
 			}
 		}
 	}
-	e.modelMemoryProfiles.attach(&result)
+	var diagnosticIdentity *modelconfig.DiagnosticIdentity
+	if identity, ok := ctx.Value(modelDiagnosticInspectionKey{}).(modelconfig.DiagnosticIdentity); ok {
+		diagnosticIdentity = &identity
+	}
+	profileKey := p.ProfileKey
+	if profileKey == "" {
+		profileKey = p.ModelID
+	}
+	e.modelMemoryProfiles.attachWithIdentity(&result, profileKey, diagnosticIdentity)
 	result.Estimate = modelEstimateObservedCPUWeights(result.Estimate, advisory, result.ConfigurationKey, e.modelBuffers.store)
 	if input, ok := ctx.Value(modelStatedInspectionKey{}).(*modelEstimateInput); ok && input != nil {
 		// The statement writer needs the observed/PAIR base until its new record
