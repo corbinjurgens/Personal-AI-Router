@@ -6,12 +6,14 @@ package tests
 import (
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -42,15 +44,50 @@ var installedServicePorts = map[int]string{
 // is closed and rejected before a fixture can serve or dial it.
 func listenFixtureLoopback(t *testing.T) net.Listener {
 	t.Helper()
-	ln, err := allocateFixtureLoopback(net.Listen)
+	ln, err := allocateFixtureListener(net.Listen, "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("allocate fixture listener: %v", err)
 	}
 	return ln
 }
 
-func allocateFixtureLoopback(listen func(string, string) (net.Listener, error)) (net.Listener, error) {
-	ln, err := listen("tcp", "127.0.0.1:0")
+var fixtureServicePortClaims sync.Map
+
+// A subprocess that binds a wildcard needs a reservation with the same scope.
+// Use explicit candidates below the default ephemeral ranges: on Darwin, :0 can
+// select a port whose old loopback connections prevent a later explicit bind.
+// Fixture-owned servers keep using loopback :0 because they retain the listener.
+func listenFixtureServicePort(t *testing.T) net.Listener {
+	t.Helper()
+	for range 32 {
+		port := 20000 + rand.IntN(10000)
+		if err := validateFixturePort(port); err != nil {
+			continue
+		}
+		if _, claimed := fixtureServicePortClaims.LoadOrStore(port, struct{}{}); claimed {
+			continue
+		}
+		ln, err := allocateFixtureListener(net.Listen, ":"+strconv.Itoa(port))
+		if err != nil {
+			fixtureServicePortClaims.Delete(port)
+		}
+		if errors.Is(err, syscall.EADDRINUSE) {
+			continue
+		}
+		if err != nil {
+			t.Fatalf("reserve fixture service port: %v", err)
+		}
+		// Keep the numeric claim through child startup and cleanup, after the
+		// allocation listener has been released for the subprocess to bind.
+		t.Cleanup(func() { fixtureServicePortClaims.Delete(port) })
+		return ln
+	}
+	t.Fatal("could not reserve a fixture service port outside the ephemeral range")
+	return nil
+}
+
+func allocateFixtureListener(listen func(string, string) (net.Listener, error), address string) (net.Listener, error) {
+	ln, err := listen("tcp", address)
 	if err != nil {
 		return nil, err
 	}
@@ -83,7 +120,7 @@ type fixtureServicePorts struct {
 	engineControl     int
 }
 
-// reserveFixtureServicePorts reserves six distinct ephemeral ports for one
+// reserveFixtureServicePorts reserves six distinct private service ports for one
 // fixture broker. All six listeners are held at once so the OS cannot hand the
 // same port out twice, then released so the workers can bind them.
 //
@@ -103,7 +140,7 @@ func reserveFixtureServicePorts(t *testing.T) fixtureServicePorts {
 		}
 	}()
 	for i := range ports {
-		ln := listenFixtureLoopback(t)
+		ln := listenFixtureServicePort(t)
 		listeners = append(listeners, ln)
 		ports[i] = ln.Addr().(*net.TCPAddr).Port
 	}
@@ -216,13 +253,13 @@ func TestFixtureLoopbackRejectsInstalledPorts(t *testing.T) {
 		t.Run(strconv.Itoa(port), func(t *testing.T) {
 			candidate := &fixtureAllocationListener{port: port}
 			calls := 0
-			ln, err := allocateFixtureLoopback(func(network, address string) (net.Listener, error) {
+			ln, err := allocateFixtureListener(func(network, address string) (net.Listener, error) {
 				calls++
 				if network != "tcp" || address != "127.0.0.1:0" {
 					t.Fatalf("allocation = %s %s, want tcp 127.0.0.1:0", network, address)
 				}
 				return candidate, nil
-			})
+			}, "127.0.0.1:0")
 			if err == nil || ln != nil || candidate.closes != 1 || calls != 1 {
 				t.Fatalf("rejected allocation: listener=%v err=%v closes=%d calls=%d, want nil, error, 1, 1", ln, err, candidate.closes, calls)
 			}
@@ -232,7 +269,7 @@ func TestFixtureLoopbackRejectsInstalledPorts(t *testing.T) {
 
 func TestFixtureLoopbackPreservesAllowedListener(t *testing.T) {
 	candidate := &fixtureAllocationListener{port: 24001}
-	ln, err := allocateFixtureLoopback(func(string, string) (net.Listener, error) { return candidate, nil })
+	ln, err := allocateFixtureListener(func(string, string) (net.Listener, error) { return candidate, nil }, "127.0.0.1:0")
 	if err != nil || ln != candidate || candidate.closes != 0 {
 		t.Fatalf("allowed allocation: listener=%v err=%v closes=%d, want original listener, nil, 0", ln, err, candidate.closes)
 	}
@@ -240,7 +277,7 @@ func TestFixtureLoopbackPreservesAllowedListener(t *testing.T) {
 
 func TestFixtureLoopbackReportsAllocationFailure(t *testing.T) {
 	want := errors.New("allocation failed")
-	ln, err := allocateFixtureLoopback(func(string, string) (net.Listener, error) { return nil, want })
+	ln, err := allocateFixtureListener(func(string, string) (net.Listener, error) { return nil, want }, "127.0.0.1:0")
 	if ln != nil || !errors.Is(err, want) {
 		t.Fatalf("failed allocation: listener=%v err=%v, want nil and allocation error", ln, err)
 	}
@@ -249,9 +286,39 @@ func TestFixtureLoopbackReportsAllocationFailure(t *testing.T) {
 func TestFixtureLoopbackReportsRejectedCloseFailure(t *testing.T) {
 	want := errors.New("close failed")
 	candidate := &fixtureAllocationListener{port: 14323, closeErr: want}
-	ln, err := allocateFixtureLoopback(func(string, string) (net.Listener, error) { return candidate, nil })
+	ln, err := allocateFixtureListener(func(string, string) (net.Listener, error) { return candidate, nil }, "127.0.0.1:0")
 	if ln != nil || !errors.Is(err, want) || candidate.closes != 1 {
 		t.Fatalf("rejected close failure: listener=%v err=%v closes=%d, want nil, close error, 1", ln, err, candidate.closes)
+	}
+}
+
+func TestFixtureServicePortUsesWildcardScope(t *testing.T) {
+	listener := listenFixtureServicePort(t)
+	defer func() {
+		if err := listener.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	address := listener.Addr().(*net.TCPAddr)
+	if !address.IP.IsUnspecified() {
+		t.Fatalf("service reservation bound %s, want the worker's wildcard scope", address)
+	}
+	if address.Port >= 32768 {
+		t.Fatalf("service reservation %s overlaps the native ephemeral ranges", address)
+	}
+	if err := validateFixturePort(address.Port); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFixtureServicePortsStayDistinctAfterRelease(t *testing.T) {
+	seen := make(map[int]bool)
+	for range 1024 {
+		port := freePort(t)
+		if seen[port] {
+			t.Fatalf("released service port %d was reassigned within the same fixture", port)
+		}
+		seen[port] = true
 	}
 }
 

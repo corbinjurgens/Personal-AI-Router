@@ -149,15 +149,12 @@ func startNodeInfo(t *testing.T, instanceName string, extraArgs ...string) (clea
 	}
 }
 
-// freePort grabs an OS-allocated TCP port and immediately closes
-// the listener, returning the port number. There's a tiny race
-// here — between Close() and the subprocess binding — but on a
-// quiet test host it's fine, and using a randomly-allocated port
-// avoids stomping on whatever the developer has running locally. Installed
-// PAIR's service and engine facade ports are rejected before returning.
+// freePort allocates in the subprocess's wildcard bind scope, then releases the
+// listener. Another socket can still take the port before the child binds it.
+// Installed PAIR's service and engine facade ports are rejected before returning.
 func freePort(t *testing.T) int {
 	t.Helper()
-	l := listenFixtureLoopback(t)
+	l := listenFixtureServicePort(t)
 	port := l.Addr().(*net.TCPAddr).Port
 	if err := l.Close(); err != nil {
 		t.Fatalf("release fixture port: %v", err)

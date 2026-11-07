@@ -181,7 +181,10 @@ func (p *task1Process) send(t *testing.T, method string, params any, request boo
 func (p *task1Process) write(frame any) error {
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
-	return json.NewEncoder(p.in).Encode(frame)
+	if err := json.NewEncoder(p.in).Encode(frame); err != nil {
+		return fmt.Errorf("write child %s: %w; stderr: %s", filepath.Base(p.cmd.Path), err, p.output.String())
+	}
+	return nil
 }
 
 // confirmModelMutation runs on the read goroutine, so it records a failure

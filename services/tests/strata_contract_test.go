@@ -315,19 +315,7 @@ func strataContractListen(t *testing.T) net.Listener {
 
 func strataContractPort(t *testing.T) int {
 	t.Helper()
-	listener := strataContractListen(t)
-	_, text, err := net.SplitHostPort(listener.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	port, err := strconv.Atoi(text)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := listener.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return port
+	return freePort(t)
 }
 
 func strataContractEnvironment(root string) (string, []string) {

@@ -623,7 +623,7 @@ func (f *srProcessFixture) enableSecondaryEngine(t *testing.T, engine string) {
 	f.secondaryEnabled = true
 	f.secondaryEngine = engine
 	f.secondaryProxy = newFixtureProxyControl(t)
-	reservations := []net.Listener{listenFixtureLoopback(t), listenFixtureLoopback(t)}
+	reservations := []net.Listener{listenFixtureServicePort(t), listenFixtureServicePort(t)}
 	f.secondaryEnginePort = reservations[0].Addr().(*net.TCPAddr).Port
 	f.secondaryFacadePort = reservations[1].Addr().(*net.TCPAddr).Port
 	servicePorts := []int{f.ports.nodeInfo, f.ports.errors, f.ports.workload, f.ports.clusterManager, f.ports.engineManagerHTTP, f.ports.engineControl}

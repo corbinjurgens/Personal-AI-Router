@@ -50,18 +50,7 @@ type observationProxy struct {
 
 func observationPort(t *testing.T) int {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := ln.Addr().(*net.TCPAddr).Port
-	if err := ln.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if _, installed := installedServicePorts[port]; installed {
-		t.Fatal("fixture selected installed port")
-	}
-	return port
+	return freePort(t)
 }
 
 func observationIdentity(engine string) nodepolicy.SetModelIdentityParams {
