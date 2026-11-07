@@ -40,17 +40,20 @@ export function ProfileCard({
     const manager = Object.values(EngineManagerNames).find(name => name === profile.engine)
     const target = manager ? { nodeId, engine: manager } : undefined
     const settings = target ? entries[engineSettingsKey(target)] : undefined
-    const load =
-        settings && !settings.unavailable
-            ? settings.snapshot?.settings.modelLoads?.find(item => item.profileKey === profile.key)
-            : undefined
+    const loads =
+        settings && !settings.unavailable ? (settings.snapshot?.settings.modelLoads ?? []) : []
+    const load = loads.find(item => item.profileKey === profile.key)
     const model = load?.modelId ?? profile.model
     const engine = engineTypeFromManagerName(profile.engine)
     const identity =
         inventory
             .get(`${nodeId}:${engine}`)
             ?.models.find(item =>
-                profileModelMatchesName({ profileKey: profile.key, modelId: model }, item.name)
+                profileModelMatchesName(
+                    loads,
+                    { profileKey: profile.key, modelId: model },
+                    item.name
+                )
             )?.identity ??
         profile.modelIdentity ??
         advertised?.modelIdentity

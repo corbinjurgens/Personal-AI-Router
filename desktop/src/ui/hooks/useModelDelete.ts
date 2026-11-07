@@ -43,12 +43,12 @@ export function useModelDelete() {
         const settings = target
             ? useEngineSettingsStore.getState().entries[engineSettingsKey(target)]
             : undefined
-        const loads =
-            settings?.snapshot?.settings.modelLoads
-                ?.filter(load => profileModelMatchesName(load, model))
-                .map(load => load.profileKey) ?? []
+        const loads = settings?.snapshot?.settings.modelLoads ?? []
+        const profileKeys = loads
+            .filter(load => profileModelMatchesName(loads, load, model))
+            .map(load => load.profileKey)
         const profiles = policyRoleProfiles(policy ?? '{}')
-            .filter(profile => profile.engine === engine && loads.includes(profile.key))
+            .filter(profile => profile.engine === engine && profileKeys.includes(profile.key))
             .map(profile => profile.key)
         const roles = policy
             ? policyRoles(policy)

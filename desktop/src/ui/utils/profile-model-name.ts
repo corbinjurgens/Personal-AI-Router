@@ -3,10 +3,13 @@
 
 import type { ModelLoad } from '@/shared/types/model-config'
 
-/** Inventory can name a typed profile's served section or its artifact. */
+/** A claimed served key wins over artifact matching within this node and engine. */
 export function profileModelMatchesName(
+    loads: readonly ModelLoad[],
     profile: Pick<ModelLoad, 'profileKey' | 'modelId'>,
     name: string
 ): boolean {
+    const owner = loads.find(load => load.profileKey === name)
+    if (owner) return owner.profileKey === profile.profileKey
     return name === profile.profileKey || name === profile.modelId
 }

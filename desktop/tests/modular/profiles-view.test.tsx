@@ -232,6 +232,72 @@ afterEach(async () => {
 })
 
 describe('Profiles tab', () => {
+    it('excludes another served section identity when its key equals this profile artifact id', async () => {
+        const getSettings = window.pairApi.engines.getSettings
+        window.pairApi.engines.getSettings = vi
+            .fn<typeof getSettings>()
+            .mockImplementation(async target => {
+                const snapshot = await getSettings(target)
+                snapshot.settings.modelLoads?.push({
+                    profileKey: `${target.nodeId}-artifact`,
+                    modelId: 'other-artifact',
+                    requested: {}
+                })
+                return snapshot
+            })
+        const observed: EngineModels = {
+            nodeId: 'self',
+            engineType: 'llama-cpp',
+            models: [
+                {
+                    name: 'self-artifact',
+                    downloaded: true,
+                    size: 200,
+                    status: 'idle',
+                    parameterSize: '',
+                    family: '',
+                    sizeVram: null,
+                    expiresAt: null,
+                    expiry: '0',
+                    capabilities: [],
+                    identity: {
+                        strength: 'verified',
+                        contentId: 'c'.repeat(64),
+                        repository: 'owner/Second',
+                        quantization: 'Q8_0',
+                        totalBytes: 200
+                    }
+                },
+                {
+                    name: 'shared-key',
+                    downloaded: true,
+                    size: 100,
+                    status: 'idle',
+                    parameterSize: '',
+                    family: '',
+                    sizeVram: null,
+                    expiresAt: null,
+                    expiry: '0',
+                    capabilities: [],
+                    identity: {
+                        strength: 'verified',
+                        contentId: 'b'.repeat(64),
+                        repository: 'owner/Tiel',
+                        quantization: 'Q4_K_M',
+                        totalBytes: 100
+                    }
+                }
+            ]
+        }
+        useEngineModelsStore.setState({ models: new Map([['self:llama-cpp', observed]]) })
+        await act(async () => root.render(<ProfilesView />))
+        const identity = card('self coding').querySelector(
+            '[aria-label="Model identity"]'
+        )?.textContent
+        expect(identity).toContain('owner/Tiel')
+        expect(identity).toContain('Q4_K_M')
+        expect(identity).not.toContain('owner/Second')
+    })
     it.each(['self-artifact', 'shared-key'])(
         'uses inventory identity tags for model name %s',
         async name => {

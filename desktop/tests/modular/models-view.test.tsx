@@ -253,6 +253,52 @@ afterEach(async () => {
 })
 
 describe('Models tab', () => {
+    it('gives a served profile key precedence over another load artifact id in delete usage', async () => {
+        const snapshot = settings()
+        snapshot.settings.modelLoads?.push({
+            profileKey: 'tiel-msi',
+            modelId: 'other-artifact',
+            requested: {}
+        })
+        useEngineSettingsStore.setState({ entries: { 'msi:llamacpp': { snapshot, arrival: 1 } } })
+        window.pairApi.nodePolicy.get = vi
+            .fn<typeof window.pairApi.nodePolicy.get>()
+            .mockResolvedValue({
+                revision: '1',
+                activation: null,
+                availability: 'available',
+                recoveryRequired: false,
+                policy: JSON.stringify({
+                    profiles: [
+                        {
+                            key: 'lfm-64k',
+                            displayName: 'First',
+                            engine: 'llamacpp',
+                            model: 'lfm-64k'
+                        },
+                        {
+                            key: 'tiel-msi',
+                            displayName: 'Second',
+                            engine: 'llamacpp',
+                            model: 'tiel-msi'
+                        }
+                    ],
+                    roles: [
+                        { name: 'coder', profiles: ['lfm-64k'] },
+                        { name: 'second-role', profiles: ['tiel-msi'] }
+                    ]
+                })
+            })
+        await act(async () => root.render(<ModelsView />))
+        await act(async () => button('Delete on node').click())
+        const message = document.querySelector('dialog')?.textContent ?? ''
+        expect(message).toContain(
+            'Profiles that use it stop serving: tiel-msi. Roles affected: second-role.'
+        )
+        expect(message).not.toContain('lfm-64k')
+        expect(message).not.toContain('coder')
+        expect(deleteModel).not.toHaveBeenCalled()
+    })
     it('shows declared grouped models with both node locations and an unverified note', async () => {
         await act(async () => root.render(<ModelsView />))
         expect(container.textContent).toContain('owner/Tiel')
