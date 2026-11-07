@@ -916,6 +916,98 @@ func controllerCopyTerminal(t *testing.T, manager *task1Process, request control
 }
 
 func TestModelCopyControllerProcess(t *testing.T) {
+	t.Run("canonical Hugging Face cache preserves baseline", func(t *testing.T) {
+		const repo, commit = "owner/tiny-GGUF", "0123456789abcdef0123456789abcdef01234567"
+		f := newControllerCopyFixture(t)
+		_, router := downloadTransferAttachRouter(t, f, f.source)
+		router.setStatus(repo+":Q4_K_M", "unloaded")
+		// Only the destination receives this proxy. It refuses the publisher
+		// CONNECT without opening a tunnel or forwarding any model bytes.
+		var publisherAttempts atomic.Int32
+		denyPublisher := newFixtureHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			publisherAttempts.Add(1)
+			if r.Method != http.MethodConnect || r.Host != "huggingface.co:443" || r.RequestURI != "huggingface.co:443" || r.URL.Host != "huggingface.co:443" || r.URL.Path != "" || r.URL.RawQuery != "" || r.URL.User != nil || r.ContentLength != 0 || len(r.TransferEncoding) != 0 || r.Header.Get("Proxy-Authorization") != "" {
+				t.Errorf("unexpected destination egress: method=%s host=%s uri=%s", r.Method, r.Host, r.RequestURI)
+			}
+			http.Error(w, "fixture blocks publisher metadata", http.StatusForbidden)
+		}))
+		t.Cleanup(denyPublisher.Close)
+		t.Cleanup(func() {
+			if calls := publisherAttempts.Load(); calls != 1 {
+				t.Errorf("destination publisher CONNECT attempts=%d, want exactly one", calls)
+			}
+		})
+		f.targetEM.stop()
+		f.targetEM = linkedStartManager(t, f, f.target, f.copyCluster, []string{"HTTP_PROXY=" + denyPublisher.URL, "HTTPS_PROXY=" + denyPublisher.URL, "ALL_PROXY=" + denyPublisher.URL})
+		f.directoryToManagers(t, false)
+		repoDir := "models--owner--tiny-GGUF"
+		data := []byte("GGUF\x03\x00\x00\x00 synthetic canonical fixture")
+		for rel, content := range map[string][]byte{filepath.Join(repoDir, "refs", "main"): []byte(commit), filepath.Join(repoDir, "snapshots", commit, "tiny-Q4_K_M.gguf"): data} {
+			path := filepath.Join(f.stores[f.source.uuid], rel)
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, content, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		id := f.broker.send(t, "engine:copy-model", f.request(repo+":Q4_K_M", ""), true)
+		response := task2Response(t, f.broker, id)
+		if response.Error != nil {
+			t.Fatalf("canonical COPY: %+v", response.Error)
+		}
+		var result struct {
+			Result struct {
+				Files               int `json:"files"`
+				PublisherComparison *struct {
+					Status string `json:"status"`
+					Files  []struct {
+						Path             string `json:"path"`
+						Status           string `json:"status"`
+						Provider         string `json:"provider"`
+						Repository       string `json:"repository"`
+						Revision         string `json:"revision"`
+						File             string `json:"file"`
+						ActualDigest     string `json:"actualDigest"`
+						ExpectedDigest   string `json:"expectedDigest"`
+						AcquisitionBasis string `json:"acquisitionBasis"`
+						AcquiredAt       string `json:"acquiredAt"`
+					} `json:"files"`
+				} `json:"publisherComparison"`
+			} `json:"result"`
+		}
+		task2Decode(t, response.Result, &result)
+		comparison := result.Result.PublisherComparison
+		if result.Result.Files != 1 || comparison == nil || comparison.Status != "unavailable" || len(comparison.Files) != result.Result.Files {
+			t.Fatalf("canonical publisher comparison=%+v, files=%d", comparison, result.Result.Files)
+		}
+		publisher := comparison.Files[0]
+		if publisher.Path != "tiny-Q4_K_M.gguf" || publisher.File != publisher.Path || publisher.Provider != "huggingface" || publisher.Repository != repo || publisher.Revision != commit || publisher.Status != "unavailable" || publisher.AcquisitionBasis != "unavailable" || publisher.ActualDigest != phase04SHA(data) || publisher.ExpectedDigest != "" || publisher.AcquiredAt != "" {
+			t.Fatalf("blocked statement acquired publisher authority: %+v", publisher)
+		}
+		copied := readLiveDurableFile(t, filepath.Join(f.stores[f.target.uuid], repoDir, "snapshots", commit, "tiny-Q4_K_M.gguf"))
+		if phase04SHA(copied) != phase04SHA(data) {
+			t.Fatal("canonical full hash differs")
+		}
+		if source := readLiveDurableFile(t, filepath.Join(f.stores[f.source.uuid], repoDir, "snapshots", commit, "tiny-Q4_K_M.gguf")); !bytes.Equal(source, data) {
+			t.Fatal("canonical source changed")
+		}
+		if ref := readLiveDurableFile(t, filepath.Join(f.stores[f.target.uuid], repoDir, "refs", "main")); string(ref) != commit {
+			t.Fatal("canonical snapshot not published")
+		}
+		if posts, unloads, loads := router.counts(repo + ":Q4_K_M"); posts != 0 || unloads != 0 || loads != 0 {
+			t.Fatalf("canonical COPY invoked native download/load operations: posts=%d unloads=%d loads=%d", posts, unloads, loads)
+		}
+		var status struct {
+			Running bool `json:"running"`
+		}
+		task2Decode(t, f.targetEM.call(t, "engine:status", map[string]string{"engine": "llamacpp"}).Result, &status)
+		if status.Running {
+			t.Fatal("canonical COPY activated the destination engine")
+		}
+		downloadTransferController(t, f)
+		f.idle(t)
+	})
 	f := newControllerCopyFixture(t)
 	custom := func(name string, reverse bool) {
 		t.Run(name, func(t *testing.T) {
@@ -966,36 +1058,6 @@ func TestModelCopyControllerProcess(t *testing.T) {
 		if !fetched {
 			t.Fatal("destination-local alias copy did not fetch source bytes")
 		}
-		f.idle(t)
-	})
-	t.Run("canonical Hugging Face cache preserves baseline", func(t *testing.T) {
-		const repo, commit = "owner/tiny-GGUF", "0123456789abcdef0123456789abcdef01234567"
-		repoDir := "models--owner--tiny-GGUF"
-		data := []byte("GGUF\x03\x00\x00\x00 synthetic canonical fixture")
-		for rel, content := range map[string][]byte{filepath.Join(repoDir, "refs", "main"): []byte(commit), filepath.Join(repoDir, "snapshots", commit, "tiny-Q4_K_M.gguf"): data} {
-			path := filepath.Join(f.stores[f.source.uuid], rel)
-			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(path, content, 0o600); err != nil {
-				t.Fatal(err)
-			}
-		}
-		id := f.broker.send(t, "engine:copy-model", f.request(repo+":Q4_K_M", ""), true)
-		if response := task2Response(t, f.broker, id); response.Error != nil {
-			t.Fatalf("canonical COPY: %+v", response.Error)
-		}
-		copied := readLiveDurableFile(t, filepath.Join(f.stores[f.target.uuid], repoDir, "snapshots", commit, "tiny-Q4_K_M.gguf"))
-		if phase04SHA(copied) != phase04SHA(data) {
-			t.Fatal("canonical full hash differs")
-		}
-		if source := readLiveDurableFile(t, filepath.Join(f.stores[f.source.uuid], repoDir, "snapshots", commit, "tiny-Q4_K_M.gguf")); !bytes.Equal(source, data) {
-			t.Fatal("canonical source changed")
-		}
-		if ref := readLiveDurableFile(t, filepath.Join(f.stores[f.target.uuid], repoDir, "refs", "main")); string(ref) != commit {
-			t.Fatal("canonical snapshot not published")
-		}
-		f.assertController(t)
 		f.idle(t)
 	})
 	t.Run("ambiguous source alias is explicitly refused", func(t *testing.T) {
