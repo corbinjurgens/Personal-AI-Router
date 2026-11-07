@@ -2,10 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { Stack, Text } from '@nvidia/foundations-react-core'
-import type { EngineSettingsPreview, EngineSettingsSnapshot } from '@/shared/types/engine-settings'
+import type {
+    EngineSettingsPreview,
+    EngineSettingsSnapshot,
+    EngineSettingsTarget
+} from '@/shared/types/engine-settings'
 import type { ArtifactSummary, InspectModelResult } from '@/shared/types/model-config'
 import ModelMemoryEstimate from './ModelMemoryEstimate'
 import ModelLoadBufferReport from './ModelLoadBufferReport'
+import ModelMemoryStatedFigure from './ModelMemoryStatedFigure'
 
 function artifactLabel(role: string): string {
     switch (role) {
@@ -38,7 +43,9 @@ export default function ModelSettingsPreview({
     snapshot,
     profileKey,
     reviewed = true,
-    stale = false
+    stale = false,
+    target,
+    disabled = false
 }: {
     inspection?: InspectModelResult
     preview?: EngineSettingsPreview
@@ -46,6 +53,8 @@ export default function ModelSettingsPreview({
     profileKey?: string
     reviewed?: boolean
     stale?: boolean
+    target?: EngineSettingsTarget
+    disabled?: boolean
 }) {
     const impact = preview?.impact
     const estimate = preview ? (preview.auto?.estimate ?? preview.estimate) : inspection?.estimate
@@ -84,6 +93,15 @@ export default function ModelSettingsPreview({
                 {inspection?.source ?? 'Unknown'} · Assurance: {inspection?.assurance ?? 'Unknown'}
             </Text>
             <ModelMemoryEstimate estimate={estimate} stale={stale} />
+            {target && (
+                <ModelMemoryStatedFigure
+                    key={`${target.nodeId}:${target.engine}:${profileKey ?? ''}:${matchingInspection?.modelId ?? ''}:${matchingInspection?.configurationKey ?? ''}`}
+                    target={target}
+                    inspection={matchingInspection}
+                    profileKey={profileKey}
+                    disabled={disabled}
+                />
+            )}
             <ModelLoadBufferReport inspection={matchingInspection} stale={!snapshot} />
             {preview?.auto && (
                 <>

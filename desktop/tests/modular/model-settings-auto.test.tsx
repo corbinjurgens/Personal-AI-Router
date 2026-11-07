@@ -302,8 +302,10 @@ describe('mounted Auto editor', () => {
         })
         await select('Context mode', 'auto')
         await act(async () => button('Recalculate').click())
-        expect(useEngineSettingsStore.getState().modelDrafts[key].review?.request.modelChange?.previewDigest)
-            .toBe('d'.repeat(64))
+        expect(
+            useEngineSettingsStore.getState().modelDrafts[key].review?.request.modelChange
+                ?.previewDigest
+        ).toBe('d'.repeat(64))
         expect(container.textContent).toContain('not priced: runtime-overhead')
         expect(button('Apply reviewed model changes').disabled).toBe(false)
         expect(apply).not.toHaveBeenCalled()

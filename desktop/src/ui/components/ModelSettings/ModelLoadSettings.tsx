@@ -21,6 +21,7 @@ import ModelExtraOptions from './ModelExtraOptions'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import type { ModelConfiguration } from '@/shared/types/node-policy'
 import { isValidProfileKey, newProfileKeyStatus } from '@/shared/utils/node-policy-model-settings'
+import { ConfirmModal } from '@/ui/components/ConfirmModal'
 
 function fieldPatch(
     field: keyof RequestedLoad,
@@ -97,6 +98,12 @@ export default function ModelLoadSettings({
     )
     const [values, setValues] = useState<Record<string, string>>({})
     const [validation, setValidation] = useState<Record<string, string>>({})
+    const [confirmation, setConfirmation] = useState<{
+        key: string
+        authority: string
+        digest: string
+        generation: number
+    }>()
     const validateField = (field: string, error?: string) =>
         setValidation(previous => {
             const next = { ...previous }
@@ -788,10 +795,14 @@ export default function ModelLoadSettings({
             )}
             {draft?.retainedReview && !draft.review && (
                 <Text role="status" kind="body/regular/sm">
-                    Reviewed proposal kept for reference. Recalculate before applying again.
+                    Reviewed proposal kept for reference.{' '}
+                    {autoSelected || draft.attempt ? 'Recalculate' : 'Review again'} before applying
+                    again.
                 </Text>
             )}
             <ModelSettingsPreview
+                target={target}
+                disabled={unavailable}
                 profileKey={newProfile ? undefined : profileKey}
                 inspection={inspection}
                 preview={displayedReview?.preview ?? draft?.advisory}
@@ -852,7 +863,9 @@ export default function ModelLoadSettings({
                     )
                 }}
             >
-                {autoSelected || draft?.retainedReview ? 'Recalculate' : 'Preview model changes'}
+                {autoSelected || (draft?.retainedReview && draft.attempt)
+                    ? 'Recalculate'
+                    : 'Preview model changes'}
             </Button>
             <Button
                 disabled={
@@ -862,12 +875,45 @@ export default function ModelLoadSettings({
                     draft.review.authority !== authority
                 }
                 onClick={() => {
-                    if (!unavailable)
-                        void useEngineSettingsStore.getState().applyModel(key, authority)
+                    const review = draft?.review
+                    const digest = review?.request.modelChange?.previewDigest
+                    if (unavailable || !review || !digest) return
+                    const estimate = review.preview.auto?.estimate ?? review.preview.estimate
+                    if (estimate?.capacityFit === 'exceeds' || estimate?.freeFit === 'exceeds')
+                        setConfirmation({ key, authority, digest, generation: draft.generation })
+                    else
+                        void useEngineSettingsStore
+                            .getState()
+                            .applyModel(key, authority, digest, draft.generation)
                 }}
             >
                 Apply reviewed model changes
             </Button>
+            <ConfirmModal
+                open={!!confirmation}
+                onOpenChange={open => {
+                    if (!open) setConfirmation(undefined)
+                }}
+                title="Exceeds available memory"
+                message="The estimate says this configuration needs more memory than is available. Run it anyway?"
+                confirmLabel="Run anyway"
+                onConfirm={() => {
+                    if (
+                        confirmation &&
+                        confirmation.key === key &&
+                        confirmation.authority === authority &&
+                        !unavailable
+                    )
+                        void useEngineSettingsStore
+                            .getState()
+                            .applyModel(
+                                key,
+                                authority,
+                                confirmation.digest,
+                                confirmation.generation
+                            )
+                }}
+            />
             {draft?.attempt && (
                 <Button
                     kind="secondary"

@@ -8,7 +8,12 @@ import type {
     EngineSettingsSnapshot,
     EngineSettingsTarget
 } from '@/shared/types/engine-settings'
-import type { Estimate, InspectModelResult, ModelChange } from '@/shared/types/model-config'
+import type {
+    Estimate,
+    InspectModelResult,
+    ModelChange,
+    SetStatedMemoryRequest
+} from '@/shared/types/model-config'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import { useClusterInvitationsStore } from '@/ui/stores/cluster-invitations.store'
 import { nodePaused, useNodeConfigurationStore } from '@/ui/stores/node-configuration.store'
@@ -53,7 +58,16 @@ interface SettingsStore {
         authority: string,
         advisoryOnly?: boolean
     ) => Promise<void>
-    applyModel: (key: string, authority: string) => Promise<void>
+    applyModel: (
+        key: string,
+        authority: string,
+        reviewedDigest?: string,
+        reviewedGeneration?: number
+    ) => Promise<void>
+    saveStatedMemory: (
+        request: SetStatedMemoryRequest & EngineSettingsTarget,
+        clear?: boolean
+    ) => Promise<void>
     readModelOutcome: (key: string) => Promise<void>
 }
 
@@ -83,6 +97,7 @@ interface ModelDraft {
     retainedReview?: ModelDraft['review']
     memoryDeadline?: number
     memoryStale?: boolean
+    reviewAttempted?: boolean
 }
 interface ModelPreviewOwner {
     key: string
@@ -322,6 +337,7 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
                 ...state.modelDrafts,
                 [key]: {
                     ...invalidateDraft(state.modelDrafts[key]),
+                    reviewAttempted: false,
                     change: structuredClone(change)
                 }
             }
@@ -423,7 +439,8 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
             return
         }
         const draft = get().modelDrafts[key]
-        if (advisoryOnly && (draft?.review || draft?.retainedReview)) return
+        if (advisoryOnly && (draft?.review || draft?.retainedReview || draft?.reviewAttempted))
+            return
         if (advisoryOnly) {
             const saved = get().entries[
                 engineSettingsKey(target)
@@ -533,6 +550,7 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
                     ...state.modelDrafts[key],
                     previewOperation: operation,
                     busy: true,
+                    reviewAttempted: !advisoryOnly,
                     message: undefined
                 }
             }
@@ -670,10 +688,63 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
             }
         }
     },
-    applyModel: async (key, authority) => {
+    saveStatedMemory: async (request, clear = false) => {
+        const target: EngineSettingsTarget = { engine: request.engine, nodeId: request.nodeId }
+        const key = modelSettingsKey(target, request.profileKey)
+        const original = get().modelDrafts[key]
+        const inspection = original?.inspection
+        if (!original || !inspection || inspection.configurationKey !== request.configurationKey)
+            throw new Error('Settings changed; reinspect and try again.')
+        const generations = Object.fromEntries(
+            Object.entries(get().modelDrafts)
+                .filter(([draftKey]) => draftKey.startsWith(`${engineSettingsKey(target)}:`))
+                .map(([draftKey, draft]) => [draftKey, draft.generation])
+        )
+        const startedAt = performance.now()
+        const result = clear
+            ? await window.pairApi.engines.clearStatedMemory(request)
+            : await window.pairApi.engines.setStatedMemory(request)
+        const unchanged =
+            get().modelDrafts[key]?.generation === original.generation &&
+            get().modelDrafts[key]?.inspection?.configurationKey === request.configurationKey
+        // A figure changes estimate authority, never the draft or its launch inputs.
+        // Do not withdraw a newer inspection/review that arrived during this call.
+        for (const [draftKey, generation] of Object.entries(generations))
+            if (get().modelDrafts[draftKey]?.generation === generation)
+                get().invalidateModel(draftKey)
+        if (
+            !unchanged ||
+            result.engine !== request.engine ||
+            result.modelId !== request.modelId ||
+            (result.nodeId && result.nodeId !== request.nodeId) ||
+            result.configurationKey !== request.configurationKey
+        )
+            return
+        const generation = get().modelDrafts[key].generation
+        const received = receiveMemory({ generation, inspection: result }, startedAt)
+        set(state => ({
+            modelDrafts: {
+                ...state.modelDrafts,
+                [key]: {
+                    ...state.modelDrafts[key],
+                    inspection: received.inspection,
+                    memoryDeadline: received.memoryDeadline,
+                    memoryStale: received.memoryStale
+                }
+            }
+        }))
+        scheduleMemoryExpiry(key)
+    },
+    applyModel: async (key, authority, reviewedDigest, reviewedGeneration) => {
         const draft = get().modelDrafts[key]
         const review = draft?.review
         if (!review || draft.busy || draft.uncertain) return
+        if (
+            reviewedDigest !== undefined &&
+            review.request.modelChange?.previewDigest !== reviewedDigest
+        )
+            return
+        if (reviewedGeneration !== undefined && draft.generation !== reviewedGeneration) return
         const generation = draft.generation
         const request = { ...structuredClone(review.request), requestId: crypto.randomUUID() }
         const put = (value: Partial<ModelDraft>) =>
@@ -781,7 +852,7 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
                       }
                     : {}),
                 ...(refused ? { uncertain: false } : {}),
-                message: `${dispatched && !refused ? 'Outcome unknown. ' : refused ? 'Refused. ' : ''}${getErrorString(error)} Your draft and reviewed proposal are kept. Recalculate to review again.`
+                message: `${dispatched && !refused ? 'Outcome unknown. ' : refused ? 'Refused. ' : ''}${getErrorString(error)}`
             })
             if (dispatched && !refused) await get().readModelOutcome(key)
         } finally {
