@@ -803,6 +803,13 @@ directory retains self for model-copy identity resolution; mesh self-trust is
 not permission to start a peer subscription. Failed peer streams retry after
 three seconds.
 
+Preset conversion preserves native sampler defaults, reasoning budget and output
+limits as extra options. Native `flash-attn = auto` becomes inherited policy;
+f16 and q8_0 cache precision remain explicit. Native-fit `gpu-layers = auto`
+stays unpriced, while finite `all` resolves to the model plus output layer.
+`cache-ram = 0` disables the host prompt cache and is priced as zero; negative
+values are refused. None of these conversions proves native memory fit.
+
 The finite llama.cpp adapter accepts projector-disable switches `--no-mmproj`
 and `--no-mmproj-auto`, the presence of `LLAMA_ARG_NO_MMPROJ_AUTO`, and
 `mmproj-auto = false` (also `0` or `off`) in environment, presets and typed

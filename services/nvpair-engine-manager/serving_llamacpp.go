@@ -492,7 +492,7 @@ func validateLlamaValue(key, value string) error {
 		return nil
 	}
 	switch key {
-	case "ctx-size", "parallel", "kv-unified-per-slot", "n-predict", "models-max", "sleep-idle-seconds", "cache-ram", "batch-size", "ubatch-size":
+	case "ctx-size", "parallel", "kv-unified-per-slot", "n-predict", "models-max", "sleep-idle-seconds", "batch-size", "ubatch-size":
 		_, err := llamaPositive(value)
 		return err
 	case "kv-unified", "cache-prompt", "cache-idle-slots", "repack":
@@ -506,7 +506,7 @@ func validateLlamaValue(key, value string) error {
 		if boolean != "true" {
 			return &ServingFieldError{Field: "cpu-moe", Reason: "Omit cpu-moe to leave experts unpinned."}
 		}
-	case "n-cpu-moe", "moe-cache-mib":
+	case "n-cpu-moe", "moe-cache-mib", "cache-ram":
 		n, err := strconv.ParseInt(value, 10, 32)
 		if err != nil || n < 0 || strconv.FormatInt(n, 10) != value {
 			return &ServingFieldError{Field: key, Reason: "Use a canonical nonnegative decimal int32 value."}

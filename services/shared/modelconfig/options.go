@@ -199,10 +199,13 @@ func (r RequestedLoad) validateFields() error {
 			return fmt.Errorf("gpu.mode: invalid value")
 		}
 	}
-	for name, value := range map[string]*int32{"batchSize": r.BatchSize, "ubatchSize": r.UBatchSize, "threads": r.Threads, "threadsBatch": r.ThreadsBatch, "cacheRAM": r.CacheRAM} {
+	for name, value := range map[string]*int32{"batchSize": r.BatchSize, "ubatchSize": r.UBatchSize, "threads": r.Threads, "threadsBatch": r.ThreadsBatch} {
 		if value != nil && *value <= 0 {
 			return fmt.Errorf("%s: must be positive", name)
 		}
+	}
+	if r.CacheRAM != nil && *r.CacheRAM < 0 {
+		return fmt.Errorf("cacheRAM: must be nonnegative")
 	}
 	if r.SleepIdleSeconds != nil && *r.SleepIdleSeconds != -1 && *r.SleepIdleSeconds <= 0 {
 		return fmt.Errorf("sleepIdleSeconds: must be -1 or positive")
