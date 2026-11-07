@@ -10,8 +10,8 @@ package main
 // so a stopped engine drops this node out of that engine's discovery overlay
 // and resolveCandidates stops offering it. For a request to wake the engine
 // (FORK_DESIGN.md §3.3 step 2) the router still needs a self candidate, so the
-// proxy remembers its node id and, per engine, the models that engine last
-// advertised, and offers a dormant self candidate built from that memory.
+// proxy remembers its node id and offers a dormant self candidate only for a
+// key in its current policy profiles.
 
 import (
 	"net"
@@ -75,8 +75,7 @@ func nodeHasLoaded(p engineProfile, n Node, model string) bool {
 
 // dormantSelfCandidate offers this node's stopped engine for a model it can
 // serve once woken: the engine must be saved On, start-on-demand enabled, the
-// node available, and the model either last advertised by this engine or
-// covered by one of this node's profiles.
+// node available, and the requested key covered by one of this node's profiles.
 func (f *facade) dormantSelfCandidate(model string) (candidate, bool) {
 	p := f.host
 	if p.localEngineHealthy(f.profile.Name) {
@@ -86,24 +85,15 @@ func (f *facade) dormantSelfCandidate(model string) (candidate, bool) {
 		return candidate{}, false
 	}
 	pol := p.admission.currentPolicy()
-	if !modelServed(pol.ServedModels, f.profile.Name, model, p.normalizeEngineModel) {
+	pr, ok := pol.ProfileByKey(model)
+	if !ok || pr.Engine != f.profile.Name || !modelServed(pol.ServedModels, pr.Engine, pr.Model, p.normalizeEngineModel) {
 		return candidate{}, false
 	}
 	if on, known := p.admission.engineIntent(f.profile.Name); !known || !on || !pol.Idle.StartOnDemand {
 		return candidate{}, false
 	}
-	selfID, models := p.selfIdentity(f.profile.Name)
+	selfID, _ := p.selfIdentity(f.profile.Name)
 	if selfID == "" {
-		return candidate{}, false
-	}
-	want := f.profile.normalizeModel(model)
-	served := slices.ContainsFunc(models, func(m string) bool { return f.profile.normalizeModel(m) == want })
-	if !served {
-		served = slices.ContainsFunc(pol.Profiles, func(pr nodepolicy.Profile) bool {
-			return pr.Engine == f.profile.Name && f.profile.normalizeModel(pr.Model) == want
-		})
-	}
-	if !served {
 		return candidate{}, false
 	}
 	// The real address is read again once admission has woken the engine; the

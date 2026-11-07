@@ -111,6 +111,9 @@ func TestHandleHTTP_PrecommitBlockingCloseRetainsOwnership(t *testing.T) {
 			discovery.AddManual(nodeForModel(t, "self", "http://127.0.0.1:11435", "m"))
 			discovery.AddManual(nodeForModel(t, "other", "http://127.0.0.1:11436", "m"))
 			p := testProxy(anyProfile(t), discovery, 11435)
+			pol := nodepolicy.Default()
+			pol.Profiles = []nodepolicy.Profile{{Key: "m", DisplayName: "M", Engine: p.soleFacade().profile.Name, Model: "m"}}
+			p.admission.setPolicy(pol)
 			p.SetPriority([]string{"self", "other"})
 			p.admission.setAvailability(nodepolicy.Available, false)
 			if err := p.soleFacade().setLocalBackend(localBackend{Host: "127.0.0.1", Port: 11434, Healthy: true}); err != nil {

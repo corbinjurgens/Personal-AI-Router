@@ -30,6 +30,7 @@ func setAdvertisedProfilesByRole(node *Node, profilesByRole map[string]nodepolic
 		if profile.Key == "" {
 			profile.Key = fixtureProfileKey(profile.Model)
 		}
+		profile.Model = profile.Key
 		if profile.DisplayName == "" {
 			profile.DisplayName = profile.Key
 		}
@@ -40,8 +41,7 @@ func setAdvertisedProfilesByRole(node *Node, profilesByRole map[string]nodepolic
 	}
 }
 
-// Native tags remain engine identifiers; public fixture keys must not occupy
-// the role-override namespace. Explicit keys are kept by the callers.
+// Public fixture keys must not occupy the role-override namespace.
 func fixtureProfileKey(model string) string {
 	if nodepolicy.IsReservedProfileKey(model) {
 		return "fixture/" + model
@@ -58,14 +58,12 @@ func declarePolicyRole(policy *nodepolicy.Policy, name, engine, model string) {
 	})
 	if index < 0 {
 		policy.Profiles = append(policy.Profiles, nodepolicy.Profile{
-			Key: key, DisplayName: "Role profile", Engine: engine, Model: model,
+			Key: key, DisplayName: "Role profile", Engine: engine, Model: key,
 		})
 	} else {
 		profile := &policy.Profiles[index]
-		if profile.Key == "" {
-			profile.Key = key
-		}
-		key = profile.Key
+		profile.Key = key
+		profile.Model = key
 		if profile.DisplayName == "" {
 			profile.DisplayName = "Role profile"
 		}
@@ -88,8 +86,8 @@ func TestRoleProfilesResolveOrderedMemberships(t *testing.T) {
 			}
 			n.Roles = []nodepolicy.Role{{Name: "weak", Profiles: keys}}
 			n.Profiles = []nodepolicy.AdvertisedProfile{
-				{Key: "first-key", Engine: "llamacpp", Model: firstModel, ContextTokens: 100},
-				{Key: "second-key", Engine: "llamacpp", Model: "second-model", ContextTokens: 10000, Capabilities: []nodepolicy.Capability{nodepolicy.CapTools}},
+				{Key: "first-model", Engine: "llamacpp", Model: firstModel, ContextTokens: 100},
+				{Key: "second-model", Engine: "llamacpp", Model: "second-model", ContextTokens: 10000, Capabilities: []nodepolicy.Capability{nodepolicy.CapTools}},
 			}
 			f.discovery.AddManual(n)
 			if got := resolvedTier(f, "weak", needs, false); !slices.Equal(got, want) {
@@ -97,13 +95,13 @@ func TestRoleProfilesResolveOrderedMemberships(t *testing.T) {
 			}
 		})
 	}
-	test("warm second leads cold first", []string{"first-key", "second-key"}, "first-model", requestNeeds{}, []tierCand{{"peer", "second-model", 0}, {"peer", "first-model", 0}})
-	test("missing first permits second without router fallback", []string{"withheld-key", "second-key"}, "first-model", requestNeeds{}, []tierCand{{"peer", "second-model", 0}})
-	test("malformed first permits second without router fallback", []string{"first-key", "second-key"}, "invalid\n", requestNeeds{}, []tierCand{{"peer", "second-model", 0}})
+	test("warm second leads cold first", []string{"first-model", "second-model"}, "first-model", requestNeeds{}, []tierCand{{"peer", "second-model", 0}, {"peer", "first-model", 0}})
+	test("missing first permits second without router fallback", []string{"withheld-key", "second-model"}, "first-model", requestNeeds{}, []tierCand{{"peer", "second-model", 0}})
+	test("malformed first permits second without router fallback", []string{"first-model", "second-model"}, "invalid\n", requestNeeds{}, []tierCand{{"peer", "second-model", 0}})
 	test("all missing remains authoritative", []string{"withheld-key"}, "first-model", requestNeeds{}, nil)
 	test("empty role remains authoritative", []string{}, "first-model", requestNeeds{}, nil)
-	test("context uses each member bound", []string{"first-key", "second-key"}, "first-model", requestNeeds{contextTokens: 101}, []tierCand{{"peer", "second-model", 0}})
-	test("capabilities use each member facts", []string{"first-key", "second-key"}, "first-model", requestNeeds{caps: []nodepolicy.Capability{nodepolicy.CapTools}}, []tierCand{{"peer", "second-model", 0}})
+	test("context uses each member bound", []string{"first-model", "second-model"}, "first-model", requestNeeds{contextTokens: 101}, []tierCand{{"peer", "second-model", 0}})
+	test("capabilities use each member facts", []string{"first-model", "second-model"}, "first-model", requestNeeds{caps: []nodepolicy.Capability{nodepolicy.CapTools}}, []tierCand{{"peer", "second-model", 0}})
 }
 
 func TestRoleProfilesEmptyDeclarationPreventsOtherTierFallback(t *testing.T) {
@@ -134,14 +132,14 @@ func TestRoleProfilesMembershipOrderBeforeLexicalOrder(t *testing.T) {
 		if !ok {
 			t.Fatalf("missing peer %s", id)
 		}
-		keys := []string{"z-key", "a-key"}
+		keys := []string{"z-model", "a-model"}
 		if id == "b" {
-			keys = []string{"a-key", "z-key"}
+			keys = []string{"a-model", "z-model"}
 		}
 		n.Roles = []nodepolicy.Role{{Name: "weak", Profiles: keys}}
 		n.Profiles = []nodepolicy.AdvertisedProfile{
-			{Key: "a-key", Engine: "llamacpp", Model: "a-model"},
-			{Key: "z-key", Engine: "llamacpp", Model: "z-model"},
+			{Key: "a-model", Engine: "llamacpp", Model: "a-model"},
+			{Key: "z-model", Engine: "llamacpp", Model: "z-model"},
 		}
 		f.discovery.AddManual(n)
 	}
@@ -179,10 +177,10 @@ func TestRoleProfilesEqualClassPreservesReverseEngineMembership(t *testing.T) {
 	}
 	pol := nodepolicy.Default()
 	pol.Profiles = []nodepolicy.Profile{
-		{Key: "custom", DisplayName: "Custom", Engine: "llamacpp-custom", Model: "z-model"},
-		{Key: "local", DisplayName: "Local", Engine: "llamacpp", Model: "a-model"},
+		{Key: "z-model", DisplayName: "Custom", Engine: "llamacpp-custom", Model: "z-model"},
+		{Key: "a-model", DisplayName: "Local", Engine: "llamacpp", Model: "a-model"},
 	}
-	pol.Roles = []nodepolicy.Role{{Name: "weak", Profiles: []string{"custom", "local"}}}
+	pol.Roles = []nodepolicy.Role{{Name: "weak", Profiles: []string{"z-model", "a-model"}}}
 	p.admission.setPolicy(pol)
 	got := local.resolveTierCandidates("weak", requestNeeds{}, true)
 	if len(got) != 2 || got[0].engine != "llamacpp-custom" || got[0].model != "z-model" || got[1].engine != "llamacpp" || got[1].model != "a-model" {
@@ -219,11 +217,11 @@ func TestRoleProfilesHybridChecksMatchingProfileFacts(t *testing.T) {
 			if !ok {
 				t.Fatal("missing fixture peer")
 			}
-			first.Key = "first-key"
+			first.Key = "first-model"
 			second := qualifiedProfile("second-model")
-			second.Key = "second-key"
+			second.Key = "second-model"
 			n.Profiles = []nodepolicy.AdvertisedProfile{first, second}
-			n.Roles = []nodepolicy.Role{{Name: "weak", Profiles: []string{"first-key", "second-key"}}}
+			n.Roles = []nodepolicy.Role{{Name: "weak", Profiles: []string{"first-model", "second-model"}}}
 			n.StrictAdmission = strictCapabilityFor("llamacpp", strictModels...)
 			f.discovery.AddManual(n)
 			want := []tierCand{{"peer", "first-model", 0}, {"peer", "second-model", 0}}
@@ -246,16 +244,16 @@ func TestRoleProfilesSelfIncludesWithheldLocalProfile(t *testing.T) {
 	f.discovery.AddManual(selfNode("self", f.profile.FacadePort, "private-model", "public-model"))
 	pol := nodepolicy.Default()
 	pol.Profiles = []nodepolicy.Profile{
-		{Key: "private-key", DisplayName: "Private", Engine: "llamacpp", Model: "private-model", LocalOnly: true},
-		{Key: "public-key", DisplayName: "Public", Engine: "llamacpp", Model: "public-model"},
+		{Key: "private-model", DisplayName: "Private", Engine: "llamacpp", Model: "private-model", LocalOnly: true},
+		{Key: "public-model", DisplayName: "Public", Engine: "llamacpp", Model: "public-model"},
 	}
-	pol.Roles = []nodepolicy.Role{{Name: "weak", Profiles: []string{"private-key", "public-key"}}}
+	pol.Roles = []nodepolicy.Role{{Name: "weak", Profiles: []string{"private-model", "public-model"}}}
 	if err := pol.Validate(); err != nil {
 		t.Fatalf("fixture policy: %v", err)
 	}
 	p.admission.setPolicy(pol)
 	ad := pol.Advertisement()
-	if len(ad.Profiles) != 1 || ad.Profiles[0].Key != "public-key" {
+	if len(ad.Profiles) != 1 || ad.Profiles[0].Key != "public-model" {
 		t.Fatalf("local-only profile was not withheld: %+v", ad.Profiles)
 	}
 	peerEngine := newRecordingEngine(t, http.StatusOK)
@@ -278,7 +276,7 @@ func TestRoleProfilesFilteredAdvertisementUsesRemainingFirstProfile(t *testing.T
 	f := fx.p.soleFacade()
 	upstream := newRecordingEngine(t, http.StatusOK)
 	port := nodeFor(t, "peer", upstream.URL).Port
-	raw := json.RawMessage(`{"nodes":[{"hostUuid":"peer","ip":"127.0.0.1","services":{"` + string(f.profile.DiscoveryService) + `":{"port":` + fmt.Sprint(port) + `}},"modelsByEngine":{"llamacpp":["second-model","router-model"]},"policy":{"revision":"1","profiles":[{"key":"first-key","displayName":"First","engine":"llamacpp","model":"bad\n"},{"key":"second-key","displayName":"Second","engine":"llamacpp","model":"second-model"}],"roles":[{"name":"weak","profiles":["first-key","second-key"]}]}}]}`)
+	raw := json.RawMessage(`{"nodes":[{"hostUuid":"peer","ip":"127.0.0.1","services":{"` + string(f.profile.DiscoveryService) + `":{"port":` + fmt.Sprint(port) + `}},"modelsByEngine":{"llamacpp":["second-model","router-model"]},"policy":{"revision":"1","profiles":[{"key":"first-model","displayName":"First","engine":"llamacpp","model":"bad\n"},{"key":"second-model","displayName":"Second","engine":"llamacpp","model":"second-model"}],"roles":[{"name":"weak","profiles":["first-model","second-model"]}]}}]}`)
 	f.replaceSubscribed(raw)
 	if !f.discovery.Has("peer") {
 		t.Fatal("malformed profile discarded the peer inventory")
@@ -330,10 +328,10 @@ func TestRoleProfilesSelfDetachesProfileFacts(t *testing.T) {
 }
 
 func TestRoleProfilesEveryResolvedMemberDetachesFacts(t *testing.T) {
-	roles := []nodepolicy.Role{{Name: "weak", Profiles: []string{"z-key", "a-key"}}}
+	roles := []nodepolicy.Role{{Name: "weak", Profiles: []string{"z-model", "a-model"}}}
 	profiles := []nodepolicy.AdvertisedProfile{
-		{Key: "a-key", Engine: "llamacpp", Model: "a-model", ContextTokens: 32768, Capabilities: []nodepolicy.Capability{nodepolicy.CapTools}, Qualification: &nodepolicy.QualificationRef{ID: "a", Revision: "1"}, ModelIdentity: &engines.ModelIdentity{Files: []engines.ModelIdentityFile{{Name: "a.gguf"}}}},
-		{Key: "z-key", Engine: "llamacpp", Model: "z-model", ContextTokens: 131072, Capabilities: []nodepolicy.Capability{nodepolicy.CapTools}, Qualification: &nodepolicy.QualificationRef{ID: "z", Revision: "1"}, ModelIdentity: &engines.ModelIdentity{Files: []engines.ModelIdentityFile{{Name: "z.gguf"}}}},
+		{Key: "a-model", Engine: "llamacpp", Model: "a-model", ContextTokens: 32768, Capabilities: []nodepolicy.Capability{nodepolicy.CapTools}, Qualification: &nodepolicy.QualificationRef{ID: "a", Revision: "1"}, ModelIdentity: &engines.ModelIdentity{Files: []engines.ModelIdentityFile{{Name: "a.gguf"}}}},
+		{Key: "z-model", Engine: "llamacpp", Model: "z-model", ContextTokens: 131072, Capabilities: []nodepolicy.Capability{nodepolicy.CapTools}, Qualification: &nodepolicy.QualificationRef{ID: "z", Revision: "1"}, ModelIdentity: &engines.ModelIdentity{Files: []engines.ModelIdentityFile{{Name: "z.gguf"}}}},
 	}
 	got := resolveRoleProfiles(roles, profiles)["weak"]
 	roles[0].Profiles[0] = "changed"
@@ -349,7 +347,7 @@ func TestRoleProfilesEveryResolvedMemberDetachesFacts(t *testing.T) {
 		key, model, qualification, file string
 		context                         int
 	}{
-		{"z-key", "z-model", "z", "z.gguf", 131072}, {"a-key", "a-model", "a", "a.gguf", 32768},
+		{"z-model", "z-model", "z", "z.gguf", 131072}, {"a-model", "a-model", "a", "a.gguf", 32768},
 	} {
 		p := got[i]
 		if p.Key != want.key || p.Model != want.model || p.ContextTokens != want.context || !slices.Equal(p.Capabilities, []nodepolicy.Capability{nodepolicy.CapTools}) || p.Qualification == nil || p.Qualification.ID != want.qualification || p.ModelIdentity == nil || len(p.ModelIdentity.Files) != 1 || p.ModelIdentity.Files[0].Name != want.file {

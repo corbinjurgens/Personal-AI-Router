@@ -70,6 +70,9 @@ func newProxyReverseFixtureFor(t *testing.T, profile engineProfile, handler http
 	f.p.mesh, f.p.baseConfigDir = mesh, filepath.Dir(f.selfDir)
 	f.peer = testProxy(profile, NewDiscovery(), 0)
 	f.peer.mesh = peerMesh
+	policy := nodepolicy.Default()
+	policy.Profiles = []nodepolicy.Profile{{Key: "fixture-model", DisplayName: "Fixture", Engine: engine, Model: "fixture-model"}}
+	f.peer.admission.setPolicy(policy)
 	backend := httptest.NewServer(handler)
 	t.Cleanup(backend.Close)
 	n := nodeFor(t, "local-engine", backend.URL)
@@ -90,6 +93,7 @@ func newProxyReverseFixtureFor(t *testing.T, profile engineProfile, handler http
 	t.Cleanup(f.server.Close)
 	f.node = nodeFor(t, "host-peer", f.server.URL)
 	f.node.ClusterUUID, f.node.Models = "uuid-peer", []string{"fixture-model"}
+	f.node.Profiles = []nodepolicy.AdvertisedProfile{{Key: "fixture-model", DisplayName: "Fixture", Engine: engine, Model: "fixture-model"}}
 	f.p.soleFacade().discovery.SetSubscribed([]Node{f.node})
 	resolve := func(ctx context.Context, _ clustertrust.ReversePeer, service noderec.ServiceKey) (clustertrust.ReverseTarget, error) {
 		if service != profile.DiscoveryService {
@@ -190,7 +194,7 @@ func TestProxyReverseCrossEngineTierUsesPeerService(t *testing.T) {
 	}
 	custom := f.p.soleFacade()
 	setAdvertisedProfilesByRole(&f.node, map[string]nodepolicy.AdvertisedProfile{
-		"weak": {Key: "reverse-profile", Engine: "llamacpp-custom", Model: "fixture-model"},
+		"weak": {Key: "fixture-model", DisplayName: "Fixture", Engine: "llamacpp-custom", Model: "fixture-model"},
 	})
 	custom.discovery.SetSubscribed([]Node{f.node})
 	lcpp := newFacade(f.p, profile, NewDiscovery(), 0)
@@ -730,6 +734,7 @@ func TestProxyReverseConnectFailureRetainsUnreachableInventoryOwner(t *testing.T
 		HostUUID: "host-peer", Name: "restricted", IP: f.node.Addresses[0], ClusterUUID: "uuid-peer",
 		Services:       map[noderec.ServiceKey]noderec.ServiceStatus{service: {Port: f.node.Port, Probe: noderec.ProbeUnreachable}},
 		ModelsByEngine: map[string][]string{"llamacpp": {"fixture-model"}},
+		Policy:         &nodepolicy.Advertisement{Profiles: f.node.Profiles},
 	}}})
 	if err != nil {
 		t.Fatal(err)
@@ -923,7 +928,7 @@ func TestProxyReverseStreamsAllEngineServicesAndRuntimePorts(t *testing.T) {
 	}
 }
 
-func TestProxyReverseInventoryUsesSelectedFacade(t *testing.T) {
+func TestProxyReverseInventoryUsesAdvertisedProfiles(t *testing.T) {
 	f := newProxyReverseFixture(t, "llamacpp", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/models" || r.Method != http.MethodGet {
 			t.Errorf("inventory method/path = %s %s", r.Method, r.URL.Path)
@@ -945,8 +950,8 @@ func TestProxyReverseInventoryUsesSelectedFacade(t *testing.T) {
 	if recorder.Code != http.StatusOK || len(result.Data) != 1 || result.Data[0].ID != "fixture-model" {
 		t.Fatalf("inventory status/result = %d/%+v", recorder.Code, result)
 	}
-	if f.reverseCalls.Load() != 1 {
-		t.Fatalf("reverse inventory dials = %d, want 1", f.reverseCalls.Load())
+	if f.reverseCalls.Load() != 0 || f.directCalls.Load() != 0 {
+		t.Fatalf("catalog dialed peer: direct=%d reverse=%d", f.directCalls.Load(), f.reverseCalls.Load())
 	}
 }
 
@@ -992,7 +997,7 @@ func TestProxyReverseHybridPeerSlotWaitIsBounded(t *testing.T) {
 	stopHolding := func() { releaseOnce.Do(func() { close(release) }) }
 	var held atomic.Int32
 	fx := newProxyReverseFixture(t, "llamacpp", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/models" {
+		if r.URL.Path == "/props" {
 			held.Add(1)
 			select {
 			case <-release:
@@ -1022,7 +1027,7 @@ func TestProxyReverseHybridPeerSlotWaitIsBounded(t *testing.T) {
 		occupying.Add(1)
 		go func() {
 			defer occupying.Done()
-			response, err := transport.RoundTrip(proxyReverseRequest(t, http.MethodGet, candidate.url.String()+"/v1/models", nil))
+			response, err := transport.RoundTrip(proxyReverseRequest(t, http.MethodGet, candidate.url.String()+"/props", nil))
 			if err != nil {
 				return
 			}

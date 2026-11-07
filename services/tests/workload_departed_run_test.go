@@ -11,13 +11,19 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"reflect"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"nvpair-shared/jsonrpc"
+	"nvpair-shared/nodepolicy"
+	"nvpair-shared/noderec"
+	"nvpair-shared/testbin"
 )
 
 func TestWorkloadDepartedRunRetired(t *testing.T) {
@@ -246,16 +252,17 @@ type departedRunHTTPResult struct {
 }
 
 type departedRunFixture struct {
-	stdin      io.WriteCloser
-	control    <-chan jsonrpc.Message
-	events     <-chan jsonrpc.Message
-	proxyLines <-chan string
-	port       int
-	enginePort int
-	nextID     int
-	client     *http.Client
-	ctx        context.Context
-	requests   sync.WaitGroup
+	stdin       io.WriteCloser
+	control     <-chan jsonrpc.Message
+	events      <-chan jsonrpc.Message
+	proxyLines  <-chan string
+	port        int
+	enginePort  int
+	scannerPort int
+	nextID      int
+	client      *http.Client
+	ctx         context.Context
+	requests    sync.WaitGroup
 }
 
 func startDepartedRunFixture(t *testing.T, clusterDir string, extraArgs ...string) *departedRunFixture {
@@ -293,13 +300,23 @@ func startDepartedRunFixture(t *testing.T, clusterDir string, extraArgs ...strin
 	})
 	f := &departedRunFixture{enginePort: portOfURL(t, engine.URL), nextID: 1000,
 		client: &http.Client{Transport: &http.Transport{}, Timeout: 120 * time.Second}}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatalf("locate subscription scanner fixture: %v", err)
+	}
+	scanner := filepath.Join(testbin.Dir(t, "tests", "subscription-scanner", "subscription-scanner"), testbin.Exe("subscription-scanner"))
+	jointCopyExecutable(t, self, scanner)
+	f.scannerPort = freePort(t)
 	var cancel context.CancelFunc
 	f.ctx, cancel = context.WithCancel(context.Background())
 	args := append([]string{
+		"--scanner-path", scanner,
 		"--proxy-path", proxyBin, "--proxy-engines", "llamacpp",
 		"--workload-manager-path", workloadMgrBin,
 	}, extraArgs...)
-	stdin, messages, stderr, cleanup := startBrokerWithDirs(t, configDir, clusterDir, args...)
+	stdin, messages, stderr, cleanup := startBrokerWithDirsAndEnv(t, configDir, clusterDir,
+		[]string{"NVPAIR_TEST_SUBSCRIPTION_SCANNER=" + scanner,
+			"NVPAIR_TEST_SUBSCRIPTION_PORT=" + strconv.Itoa(f.scannerPort)}, args...)
 	f.stdin = stdin
 	control, events := make(chan jsonrpc.Message, 64), make(chan jsonrpc.Message, 64)
 	proxyLines := make(chan string, 8)
@@ -406,6 +423,37 @@ func (f *departedRunFixture) call(t *testing.T, method, params string) jsonrpc.M
 
 func (f *departedRunFixture) selectEngine(t *testing.T) {
 	t.Helper()
+	if f.scannerPort == 0 {
+		t.Fatal("departed-run fixture requires its subscription scanner port")
+	}
+	// Supply profile facts through discovery while the same-ID manual overlay
+	// retains the private plaintext engine transport.
+	node := noderec.DirectoryNode{HostUUID: "fake-departed-llamacpp", Name: "fake-departed-llamacpp", IP: "127.0.0.1",
+		Services:       map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceLlamaCPP: {Port: f.enginePort}},
+		ModelsByEngine: map[string][]string{"llamacpp": {"departed-run-model"}},
+		Policy: &nodepolicy.Advertisement{Revision: "1", Profiles: []nodepolicy.AdvertisedProfile{
+			{Key: "departed-run-model", DisplayName: "Departed run fixture", Engine: "llamacpp", Model: "departed-run-model"},
+		}}}
+	frame := jsonrpc.Message{JSONRPC: "2.0", Method: noderec.NotifyNodeDiscovered,
+		Params: egressProcessJSON(t, noderec.NodeEvent{Node: node})}
+	egressProcessHTTP(t, egressProcessHTTPClient(t), http.MethodPost, f.scannerPort, "/", egressProcessJSON(t, frame), http.StatusOK)
+	neEventually(t, "departed-run profile directory entry reaches proxy", 10*time.Second, func() bool {
+		reply := f.call(t, "llamacpp-proxy:nodes/list", `{}`)
+		egressProcessOK(t, reply)
+		var result struct {
+			Nodes []struct {
+				ID     string   `json:"id"`
+				Models []string `json:"models"`
+			} `json:"nodes"`
+		}
+		egressProcessDecode(t, reply.Result, &result)
+		for _, candidate := range result.Nodes {
+			if candidate.ID == node.HostUUID && slices.Contains(candidate.Models, "departed-run-model") {
+				return true
+			}
+		}
+		return false
+	})
 	params := fmt.Sprintf(`{"id":"fake-departed-llamacpp","host":"127.0.0.1","port":%d,"addresses":["127.0.0.1"],"models":["departed-run-model"]}`, f.enginePort)
 	if reply := f.call(t, "llamacpp-proxy:node/add-manual", params); reply.Error != nil {
 		t.Fatalf("add fake engine: %+v", reply.Error)

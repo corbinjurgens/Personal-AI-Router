@@ -26,6 +26,7 @@ import (
 
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/nodepolicy"
+	"nvpair-shared/noderec"
 )
 
 const (
@@ -47,8 +48,9 @@ func TestPublicEgressLeaseProcessDisabled(t *testing.T) {
 		t.Fatalf("locate existing scanner fixture: %v", err)
 	}
 	f.copyExecutable(self, f.scannerPath)
+	scannerPort := freePort(t)
 	f.env = append(f.env, "NVPAIR_TEST_SUBSCRIPTION_SCANNER="+f.scannerPath,
-		"NVPAIR_TEST_SUBSCRIPTION_PORT="+strconv.Itoa(freePort(t)),
+		"NVPAIR_TEST_SUBSCRIPTION_PORT="+strconv.Itoa(scannerPort),
 		"USERPROFILE="+f.configDir)
 	policy := egressProcessPolicy(t, "17", upstream.publicPort)
 	jointWriteJSON(t, f.policyPath(), policy)
@@ -69,7 +71,7 @@ func TestPublicEgressLeaseProcessDisabled(t *testing.T) {
 		t.Fatal("broker changed the disabled staged policy")
 	}
 	stored := assertStoredPolicy(t, f.policyPath(), policy)
-	egressProcessAddConcrete(t, call, "llamacpp-proxy:", upstream.localPort)
+	egressProcessAddConcrete(t, call, "llamacpp-proxy:", upstream.localPort, scannerPort)
 	client := egressProcessHTTPClient(t)
 	egressProcessAssertConcrete(t, client, f.facadePort)
 	before := upstream.localCalls.Load()
@@ -250,7 +252,7 @@ func TestPublicEgressLeaseProcessEOF(t *testing.T) {
 		}
 	}))
 	t.Cleanup(func() { stop(); stream.Close() })
-	egressProcessAddConcrete(t, p.call, "llamacpp:", portOfURL(t, stream.URL))
+	p.addConcrete(t, portOfURL(t, stream.URL))
 	client := egressProcessHTTPClient(t)
 	client.Timeout = 0 // The request context owns its lifetime throughout the EOF proof.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -361,7 +363,7 @@ func TestPublicEgressLeaseProcessIncarnation(t *testing.T) {
 	}), -32602, egressBindingError)
 	ack := p.activate(t, policy)
 	port := p.enable(t)
-	egressProcessAddConcrete(t, p.call, "llamacpp:", upstream.localPort)
+	p.addConcrete(t, upstream.localPort)
 	client := egressProcessHTTPClient(t)
 	egressProcessAssertConcrete(t, client, port)
 	anchor := p.renew(t, ack.RunID, "17", "1", "0")
@@ -543,8 +545,39 @@ func (u *egressProcessUpstream) assertNoPublic(t *testing.T) {
 	}
 }
 
-func egressProcessAddConcrete(t *testing.T, call egressProcessCall, prefix string, port int) {
+func egressProcessConcreteNode(port int) noderec.DirectoryNode {
+	return noderec.DirectoryNode{HostUUID: "g-concrete-node", Name: "g-concrete-node", IP: "127.0.0.1",
+		Services:       map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceLlamaCPP: {Port: port}},
+		ModelsByEngine: map[string][]string{"llamacpp": {egressProcessModel}},
+		Policy: &nodepolicy.Advertisement{Revision: "1", Profiles: []nodepolicy.AdvertisedProfile{
+			{Key: egressProcessModel, DisplayName: "Concrete fixture", Engine: "llamacpp", Model: egressProcessModel},
+		}}}
+}
+
+func egressProcessAddConcrete(t *testing.T, call egressProcessCall, prefix string, port int, scannerPort ...int) {
 	t.Helper()
+	if len(scannerPort) != 0 {
+		frame := jsonrpc.Message{JSONRPC: "2.0", Method: noderec.NotifyNodeDiscovered,
+			Params: egressProcessJSON(t, noderec.NodeEvent{Node: egressProcessConcreteNode(port)})}
+		egressProcessHTTP(t, egressProcessHTTPClient(t), http.MethodPost, scannerPort[0], "/", egressProcessJSON(t, frame), http.StatusOK)
+		neEventually(t, "concrete profile directory entry reaches proxy", serviceCallTimeout, func() bool {
+			reply := call(t, prefix+"nodes/list", map[string]any{})
+			egressProcessOK(t, reply)
+			var result struct {
+				Nodes []struct {
+					ID     string   `json:"id"`
+					Models []string `json:"models"`
+				} `json:"nodes"`
+			}
+			egressProcessDecode(t, reply.Result, &result)
+			for _, node := range result.Nodes {
+				if node.ID == "g-concrete-node" && slices.Contains(node.Models, egressProcessModel) {
+					return true
+				}
+			}
+			return false
+		})
+	}
 	reply := call(t, prefix+"node/add-manual", map[string]any{"id": "g-concrete-node", "host": "127.0.0.1", "port": port,
 		"addresses": []string{"127.0.0.1"}, "models": []string{egressProcessModel}})
 	egressProcessOK(t, reply)
@@ -759,6 +792,17 @@ func (p *egressProcessProxy) stop(t *testing.T) {
 		t.Fatalf("close proxy parent input: %v", err)
 	}
 	p.awaitExit(t)
+}
+
+func (p *egressProcessProxy) addConcrete(t *testing.T, port int) {
+	t.Helper()
+	frame := jsonrpc.Message{JSONRPC: "2.0", Method: "llamacpp:" + noderec.NotifyNodes,
+		Params: egressProcessJSON(t, noderec.GetNodesResult{Nodes: []noderec.DirectoryNode{egressProcessConcreteNode(port)}})}
+	data := append(egressProcessJSON(t, frame), '\n')
+	if n, err := p.stdio.Write(data); err != nil || n != len(data) {
+		t.Fatalf("publish concrete profile: bytes=%d error=%v", n, err)
+	}
+	egressProcessAddConcrete(t, p.call, "llamacpp:", port)
 }
 
 func (p *egressProcessProxy) call(t *testing.T, method string, params any) jsonrpc.Message {

@@ -17,6 +17,23 @@ import (
 	"nvpair-shared/noderec"
 )
 
+func assertServedModelRejection(t *testing.T, path string, w *httptest.ResponseRecorder) {
+	t.Helper()
+	if path == "ingress" {
+		assertAdmissionRejection(t, w, rejectNotServed)
+		return
+	}
+	var body struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode routing rejection: %v", err)
+	}
+	if w.Code != http.StatusBadGateway || body.Error != "no available node advertises the requested model" {
+		t.Fatalf("routing rejection status/error = %d/%q", w.Code, body.Error)
+	}
+}
+
 func TestServedModelsConcrete(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, tc engineCase) {
 		test := func(name string, served nodepolicy.ServedModels, allowed bool) {
@@ -29,6 +46,7 @@ func TestServedModelsConcrete(t *testing.T) {
 						p := testProxy(tc.profile, d, tc.profile.FacadePort)
 						setBackend(t, p.soleFacade(), e.URL, true)
 						pol := p.admission.currentPolicy()
+						pol.Profiles = []nodepolicy.Profile{{Key: tc.requestedModel, DisplayName: "Served model", Engine: tc.profile.Name, Model: tc.advertisedModel}}
 						pol.ServedModels = served
 						p.admission.setPolicy(pol)
 						w := httptest.NewRecorder()
@@ -38,7 +56,7 @@ func TestServedModelsConcrete(t *testing.T) {
 								t.Fatalf("status=%d hits=%d", w.Code, e.hits())
 							}
 						} else {
-							assertAdmissionRejection(t, w, rejectNotServed)
+							assertServedModelRejection(t, path, w)
 							if e.hits() != 0 {
 								t.Fatal("denied request reached engine")
 							}
@@ -221,7 +239,7 @@ func TestServedModelsPeerOverlay(t *testing.T) {
 			n, ok := subscribedToNode(tc.profile, noderec.DirectoryNode{
 				HostUUID: "peer", IP: "192.0.2.1", Models: []string{"m"},
 				Services: map[noderec.ServiceKey]noderec.ServiceStatus{tc.profile.DiscoveryService: {Port: tc.profile.FacadePort}},
-				Policy:   &nodepolicy.Advertisement{ServedModels: served},
+				Policy:   &nodepolicy.Advertisement{ServedModels: served, Profiles: []nodepolicy.AdvertisedProfile{{Key: "m", DisplayName: "Served model", Engine: tc.profile.Name, Model: "m"}}},
 			})
 			if !ok {
 				t.Fatal("overlay projection failed")
@@ -253,6 +271,7 @@ func TestServedModelsDormantSelf(t *testing.T) {
 			p.admission.setIntent(map[string]bool{"llamacpp": true})
 			pol := p.admission.currentPolicy()
 			pol.Idle.StartOnDemand = true
+			pol.Profiles = []nodepolicy.Profile{{Key: "m", DisplayName: "Served model", Engine: "llamacpp", Model: "m"}}
 			pol.ServedModels = served
 			p.admission.setPolicy(pol)
 			_, ok := p.soleFacade().dormantSelfCandidate("m")
@@ -306,6 +325,9 @@ func TestServedModelsActivationBeforeForwarding(t *testing.T) {
 			d.AddManual(selfNode("self", tc.profile.FacadePort, tc.advertisedModel))
 			p := testProxy(tc.profile, d, tc.profile.FacadePort)
 			setBackend(t, p.soleFacade(), e.URL, true)
+			pol := p.admission.currentPolicy()
+			pol.Profiles = []nodepolicy.Profile{{Key: tc.requestedModel, DisplayName: "Served model", Engine: tc.profile.Name, Model: tc.advertisedModel}}
+			p.admission.setPolicy(pol)
 			activated := make(chan error, 1)
 			p.plainHTTPTransport().DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
 				pol := p.admission.currentPolicy()
@@ -329,7 +351,7 @@ func TestServedModelsActivationBeforeForwarding(t *testing.T) {
 			}
 			w = httptest.NewRecorder()
 			serveStrictHTTP(p, path, w, tc.inferenceRequest())
-			assertAdmissionRejection(t, w, rejectNotServed)
+			assertServedModelRejection(t, path, w)
 			if e.hits() != 1 {
 				t.Fatal("new work forwarded after restriction")
 			}

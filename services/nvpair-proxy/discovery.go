@@ -68,9 +68,8 @@ type Node struct {
 	Addresses []string `json:"addresses"`
 	TXT       []string `json:"txt"`
 	// Models is the latest model inventory carried by the broker's discovery
-	// snapshot. Model-bearing inference is eligible only when this list
-	// advertises the requested model; an empty list stays in discovery but is
-	// not an inference candidate until a later inventory update.
+	// snapshot. Inventory is informational; inference eligibility comes from
+	// Profiles, independently of native model files listed here.
 	Models []string `json:"models,omitempty"`
 	// Loaded is the subset of Models the node reports resident in memory for
 	// this engine (DirectoryNode.LoadedByEngine). Tier routing prefers a warm

@@ -26,8 +26,10 @@ Concrete HTTP inference calls the common `routingSpend.dispatch` owner with
 `concreteDispatchPolicy`: five dispatch attempts and ten minutes before output.
 The unified listener supplies `hybridDispatchPolicy` through the same entry.
 The facade classifies a name as a role only when that role is visibly declared;
-otherwise an advertised exact model name remains concrete. Unknown named models
-receive 404. The 2026-10-22 decision selects non-strict routing on
+otherwise the name must be a visible profile key. Other names receive 404 with
+`no profile or role named <name>`, including native and model-source names
+without profiles. Unprofiled files remain visible in the Models tab but are not
+routable. The 2026-10-22 decision selects non-strict routing on
 the listener for the daily milestone; strict-on-facade is a later unit.
 
 The implemented hybrid branch filters the role candidate order to
@@ -52,12 +54,12 @@ these prerequisites do not activate dispatch. Enabled deployments and remote or
 paid permissions cannot be saved in this build. `:api` selects only the API
 route and is refused with 404; `:local` excludes API destinations.
 
-The model catalogue lists each visible declared role followed by its `:api` and
+The model catalogue lists visible profile keys and each visible declared role followed by its `:api` and
 `:local` overrides, even without an API entry. Own roles appear in policy order,
 then peer-only roles in name order. API entries alone declare no role. A role
 record replaces a colliding concrete record, matching request classification.
 Only the exact `:api` and `:local` suffixes are overrides. For example,
-`coder:fast` is an ordinary exact model name and receives 404 unless advertised.
+`coder:fast` is an ordinary exact profile key and receives 404 unless declared.
 
 Hybrid `maxAttempts`, `preOutputBudgetSeconds`, `queueSeconds` and
 `coldStartSeconds` bound one request across destinations. They do not restart

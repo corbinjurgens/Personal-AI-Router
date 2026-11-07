@@ -105,12 +105,12 @@ func TestModelControlsRoutingAcrossProcesses(t *testing.T) {
 		Models:   models, ModelsByEngine: map[string][]string{"llamacpp": models, "llamacpp-custom": {}},
 		LoadedByEngine: map[string][]string{"llamacpp": models},
 		Policy: &nodepolicy.Advertisement{Revision: "304", Profiles: []nodepolicy.AdvertisedProfile{
-			{Key: "concrete", DisplayName: "Concrete", Engine: "llamacpp", Model: concrete},
-			{Key: "multibyte", DisplayName: "Multibyte", Engine: "llamacpp", Model: multibyte512},
+			{Key: concrete, DisplayName: "Concrete", Engine: "llamacpp", Model: concrete},
+			{Key: multibyte512, DisplayName: "Multibyte", Engine: "llamacpp", Model: multibyte512},
 			{Key: "overlong", DisplayName: "Overlong", Engine: "llamacpp", Model: overlong},
 		}, Roles: []nodepolicy.Role{
-			{Name: "weak", Profiles: []string{"concrete"}},
-			{Name: "medium", Profiles: []string{"multibyte"}},
+			{Name: "weak", Profiles: []string{concrete}},
+			{Name: "medium", Profiles: []string{multibyte512}},
 			{Name: "strong", Profiles: []string{"overlong"}},
 		}},
 	}}
@@ -167,8 +167,8 @@ func TestModelControlsRoutingAcrossProcesses(t *testing.T) {
 	t.Run("client catalog retains valid siblings and aliases", func(t *testing.T) {
 		before := catalogReads.Load()
 		raw := egressProcessHTTP(t, client, http.MethodGet, f.facadePort, "/v1/models", nil, http.StatusOK)
-		if catalogReads.Load() <= before {
-			t.Fatal("client catalog did not read the owned raw inventory")
+		if catalogReads.Load() != before {
+			t.Fatal("profile catalog fetched native inventory")
 		}
 		var reply struct {
 			Data []struct {
@@ -182,7 +182,9 @@ func TestModelControlsRoutingAcrossProcesses(t *testing.T) {
 		for _, entry := range reply.Data {
 			ids = append(ids, entry.ID)
 		}
-		expected := append(append([]string{}, want...), declaredAliases()...)
+		keys := []string{concrete, multibyte512, "overlong"}
+		slices.Sort(keys)
+		expected := append(declaredAliases(), keys...)
 		if !reflect.DeepEqual(ids, expected) {
 			t.Fatal("client catalog lost valid ordering/aliases or retained invalid identifiers")
 		}
@@ -232,8 +234,8 @@ func TestModelControlsRoutingAcrossProcesses(t *testing.T) {
 		catalog.Store(`{"data":[{"id":"raw-` + string([]byte{0xff}) + `"},{"id":""},{"id":"bad\u007f"},{"id":"` + overlong + `"},{"id":"` + multibyte513 + `"}]}`)
 		before := catalogReads.Load()
 		raw := egressProcessHTTP(t, client, http.MethodGet, f.facadePort, "/v1/models", nil, http.StatusOK)
-		if catalogReads.Load() <= before {
-			t.Fatal("all-invalid client catalog did not read the owned raw inventory")
+		if catalogReads.Load() != before {
+			t.Fatal("profile catalog fetched invalid native inventory")
 		}
 		var reply struct {
 			Data []struct {
@@ -249,7 +251,7 @@ func TestModelControlsRoutingAcrossProcesses(t *testing.T) {
 		}
 		// Only the updated peer's currently declared roles supply aliases.
 		// Retired router-local entries cannot retain withdrawn role names.
-		want := declaredAliases()
+		want := append(declaredAliases(), "overlong")
 		if !reflect.DeepEqual(ids, want) {
 			t.Fatalf("all-invalid catalog IDs=%q, want configured aliases=%q", ids, want)
 		}
@@ -321,8 +323,8 @@ func TestStrictModelRoutingAcrossProcesses(t *testing.T) {
 	manifest["protocols"] = []string{"openai-v1", "anthropic-messages"}
 	jointWriteJSON(t, filepath.Join(jointAppDir(configDir), "engines", "llamacpp-custom.json"), manifest)
 	control := newFixtureProxyControl(t)
-	// Reuse the registered empty-directory scanner, so the strict candidates
-	// below come only from the test's manual overlay, never host discovery.
+	// Reuse the registered empty-directory scanner. Candidates below receive
+	// explicit profile facts and manual plaintext trust, never host discovery.
 	self, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -400,6 +402,22 @@ func TestStrictModelRoutingAcrossProcesses(t *testing.T) {
 				}
 				proxyCall(t, tc.engine, "node/add-manual", params)
 			}
+			var directory []noderec.DirectoryNode
+			service := noderec.ServiceLlamaCPP
+			if tc.engine == "llamacpp-custom" {
+				service = "e-llamacpp-custom"
+			}
+			for _, node := range nodes {
+				entry := noderec.DirectoryNode{HostUUID: node.id, Name: node.id, IP: "127.0.0.1",
+					Services:       map[noderec.ServiceKey]noderec.ServiceStatus{service: {Port: node.port}},
+					ModelsByEngine: map[string][]string{tc.engine: node.models},
+					Policy:         &nodepolicy.Advertisement{Revision: "1"}}
+				for _, model := range node.models {
+					entry.Policy.Profiles = append(entry.Policy.Profiles, nodepolicy.AdvertisedProfile{Key: model, DisplayName: "Routing fixture", Engine: tc.engine, Model: model})
+				}
+				directory = append(directory, entry)
+			}
+			proxyCall(t, tc.engine, noderec.NotifyNodes, noderec.GetNodesResult{Nodes: directory})
 			proxyCall(t, tc.engine, "node/set-priority", map[string]any{
 				// Both facades share one proxy process, so every snapshot must
 				// advance the process-wide generation.

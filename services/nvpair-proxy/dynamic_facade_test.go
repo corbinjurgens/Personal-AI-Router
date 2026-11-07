@@ -53,13 +53,37 @@ func customProfile(t *testing.T) engineProfile {
 // engine is additive: nothing about these may move.
 func TestBuiltInProfilesAreUnchanged(t *testing.T) {
 	post := func(path string) route { return route{Path: path, Role: roleInferencePOST} }
-	openAI := []route{post("/v1/chat/completions"), post("/v1/completions"), post("/v1/embeddings")}
+	openAI := []route{post("/v1/chat/completions"), post("/v1/completions"), post("/v1/embeddings"), post("/v1/responses")}
 	want := []engineProfile{
 		{
 			Engine: engines.Engine{Name: "llamacpp", DisplayName: "llama.cpp", DiscoveryService: "lc", FacadePort: 8080, EnginePortBase: 8081, PortFile: "llamacpp-proxy-port.json"},
 			Routes: slices.Concat([]route{
 				{Path: "/models", Role: roleModelListOpenAIGET},
 				{Path: "/v1/models", UpstreamPath: "/models", Role: roleModelListOpenAIGET},
+				post("/completion"),
+				post("/completions"),
+				post("/chat/completions"),
+				post("/infill"),
+				post("/embedding"),
+				post("/embeddings"),
+				post("/rerank"),
+				post("/reranking"),
+				post("/v1/rerank"),
+				post("/v1/reranking"),
+				post("/responses"),
+				post("/tts"),
+				post("/audio/transcriptions"),
+				post("/v1/audio/transcriptions"),
+				post("/v1/chat/completions/control"),
+				post("/v1/systemone"),
+				post("/tokenize"),
+				post("/detokenize"),
+				post("/apply-template"),
+				post("/chat/completions/input_tokens"),
+				post("/v1/chat/completions/input_tokens"),
+				post("/responses/input_tokens"),
+				post("/v1/responses/input_tokens"),
+				post("/v1/messages/count_tokens"),
 			}, openAI),
 			StandalonePort: 8080, ModelNaming: exactID, ReservedPersistedPort: 8081,
 		},
@@ -184,6 +208,9 @@ func TestDynamicFacadeRoutesLocally(t *testing.T) {
 	t.Cleanup(engine.Close)
 
 	descriptor := customDescriptor()
+	policy := nodepolicy.Default()
+	policy.Profiles = []nodepolicy.Profile{{Key: "org/model:Q4_K_M", DisplayName: "Custom model", Engine: descriptor.Engine, Model: "org/model:Q4_K_M"}}
+	p.admission.setPolicy(policy)
 	var port int
 	for attempt := 0; attempt < 8 && port == 0; attempt++ {
 		candidate := freeTCPPort(t)

@@ -69,7 +69,7 @@ func TestBufferDecreasePreOutputRetryNewAdmission(t *testing.T) {
 					t.Errorf("read first attempt: %v", err)
 					return
 				}
-				if string(body) != `{"model":"small:1b","stream":true}` {
+				if string(body) != `{"model":"fixture/small:1b","stream":true}` {
 					t.Errorf("first attempt body = %q", body)
 				}
 				if call == 1 {
@@ -209,7 +209,7 @@ func TestBufferDecreasePreOutputRetryNewAdmission(t *testing.T) {
 				}
 				blocker.close()
 			} else {
-				if recorder.Code != http.StatusOK || recorder.Body.String() != "data: [DONE]\n\n" || secondCalls.Load() != 1 || secondBody != `{"model":"large:7b","stream":true}` {
+				if recorder.Code != http.StatusOK || recorder.Body.String() != "data: [DONE]\n\n" || secondCalls.Load() != 1 || secondBody != `{"model":"fixture/large:7b","stream":true}` {
 					t.Fatalf("retry control status=%d response=%q second=%d body=%q", recorder.Code, recorder.Body.String(), secondCalls.Load(), secondBody)
 				}
 			}

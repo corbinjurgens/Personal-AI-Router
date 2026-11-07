@@ -26,6 +26,16 @@ import (
 	"nvpair-shared/nodepolicy"
 )
 
+// httpAdmissionFixturePolicy explicitly serves the inference model for this engine.
+func httpAdmissionFixturePolicy(tc engineCase) nodepolicy.Policy {
+	p := nodepolicy.Default()
+	p.Profiles = []nodepolicy.Profile{{
+		Key: tc.requestedModel, DisplayName: tc.requestedModel,
+		Engine: tc.profile.Name, Model: tc.requestedModel,
+	}}
+	return p
+}
+
 func strictHTTPFixture(t *testing.T) (*Proxy, *recordingEngine) {
 	t.Helper()
 	return strictHTTPFixtureWithEngine(t, newRecordingEngineForRequest(t, http.StatusOK, http.MethodPost, routeChatCompletions))
@@ -446,6 +456,7 @@ func TestIngress_AppliesAdmission(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, tc engineCase) {
 		engine := newRecordingEngine(t, http.StatusOK)
 		p := testProxy(tc.profile, NewDiscovery(), tc.profile.FacadePort)
+		p.admission.setPolicy(httpAdmissionFixturePolicy(tc))
 		f := p.soleFacade()
 		setBackend(t, f, engine.URL, true)
 
@@ -461,9 +472,9 @@ func TestIngress_AppliesAdmission(t *testing.T) {
 		// request's own keys winning, and the router's wait header not passed
 		// to the engine.
 		p.admission.setAvailability(nodepolicy.Available, false)
-		pol := nodepolicy.Default()
+		pol := httpAdmissionFixturePolicy(tc)
 		pol.Profiles = []nodepolicy.Profile{{
-			Key: "p", DisplayName: "p", Engine: tc.profile.Name, Model: tc.advertisedModel,
+			Key: tc.requestedModel, DisplayName: "Ingress model", Engine: tc.profile.Name, Model: tc.requestedModel,
 			RequestOptions: json.RawMessage(`{"keep_alive":"10m","stream":true}`),
 		}}
 		p.admission.setPolicy(pol)
@@ -491,12 +502,14 @@ func TestIngress_NonInferenceBypassesAdmission(t *testing.T) {
 	tc := anyCase(t)
 	engine := newRecordingEngine(t, http.StatusOK)
 	p := testProxy(tc.profile, NewDiscovery(), tc.profile.FacadePort)
+	p.admission.setPolicy(httpAdmissionFixturePolicy(tc))
 	f := p.soleFacade()
 	setBackend(t, f, engine.URL, true)
 	p.admission.setAvailability(nodepolicy.Paused, false)
 	rec := httptest.NewRecorder()
 	f.serveIngress(rec, httptest.NewRequest(http.MethodGet, tc.modelListPath, nil), "peer")
-	if rec.Code != http.StatusOK || engine.hits() != 1 {
+	assertProfileCatalog(t, rec, tc.requestedModel)
+	if engine.hits() != 0 {
 		t.Fatalf("model list through a paused ingress: status %d, hits %d", rec.Code, engine.hits())
 	}
 }
@@ -505,9 +518,10 @@ func TestIngress_WaitHeaderZeroRejectsBusyImmediately(t *testing.T) {
 	tc := anyCase(t)
 	engine := newRecordingEngine(t, http.StatusOK)
 	p := testProxy(tc.profile, NewDiscovery(), tc.profile.FacadePort)
+	p.admission.setPolicy(httpAdmissionFixturePolicy(tc))
 	f := p.soleFacade()
 	setBackend(t, f, engine.URL, true)
-	pol := nodepolicy.Default()
+	pol := httpAdmissionFixturePolicy(tc)
 	pol.Admission.MaxConcurrentPerModel = 1
 	p.admission.setPolicy(pol)
 	held := mustAdmit(t, p.admission.admit(t.Context(), admissionRequest{engine: tc.profile.Name, model: tc.requestedModel, waitCap: -1}))
@@ -526,6 +540,7 @@ func TestIngress_DrainingFinishesActiveAndCancelActiveCancels(t *testing.T) {
 	tc := anyCase(t)
 	engine := newStallingEngine(t, tc.inferencePath)
 	p := testProxy(tc.profile, NewDiscovery(), tc.profile.FacadePort)
+	p.admission.setPolicy(httpAdmissionFixturePolicy(tc))
 	f := p.soleFacade()
 	setBackend(t, f, engine.URL, true)
 
@@ -611,6 +626,7 @@ func TestIngress_ClusterPathAppliesAdmission(t *testing.T) {
 
 	engine := newRecordingEngine(t, http.StatusOK)
 	peer := testProxy(tc.profile, NewDiscovery(), tc.profile.StandalonePort)
+	peer.admission.setPolicy(httpAdmissionFixturePolicy(tc))
 	peer.mesh = clustertrust.Open(bDir)
 	setBackend(t, peer.soleFacade(), engine.URL, true)
 	peer.admission.setAvailability(nodepolicy.Paused, false)
@@ -620,6 +636,7 @@ func TestIngress_ClusterPathAppliesAdmission(t *testing.T) {
 	defer ingress.Close()
 
 	router := testProxy(tc.profile, NewDiscovery(), tc.profile.StandalonePort)
+	router.admission.setPolicy(httpAdmissionFixturePolicy(tc))
 	router.mesh = clustertrust.Open(aDir)
 	n := nodeForModel(t, "peer", ingress.URL, tc.advertisedModel)
 	n.ClusterUUID = "b"
@@ -649,6 +666,7 @@ func TestHandleHTTP_SelfCandidateRejectedFailsOver(t *testing.T) {
 		disc.AddManual(selfNode("self", port, tc.advertisedModel))
 		disc.AddManual(nodeForModel(t, "peer", peer.URL, tc.advertisedModel))
 		p := testProxy(tc.profile, disc, port)
+		p.admission.setPolicy(httpAdmissionFixturePolicy(tc))
 		f := p.soleFacade()
 		setBackend(t, f, local.URL, true)
 		p.SetPriority([]string{"self", "peer"})
@@ -685,6 +703,7 @@ func TestHandleHTTP_SelfOnlyRejectionAnswersWithAdmission503(t *testing.T) {
 	disc := NewDiscovery()
 	disc.AddManual(selfNode("self", port, tc.advertisedModel))
 	p := testProxy(tc.profile, disc, port)
+	p.admission.setPolicy(httpAdmissionFixturePolicy(tc))
 	setBackend(t, p.soleFacade(), local.URL, true)
 	p.admission.setAvailability(nodepolicy.Paused, false)
 
@@ -714,8 +733,9 @@ func TestHandleHTTP_SendsAdmissionWaitHeader(t *testing.T) {
 	disc.AddManual(nodeForModel(t, "a", busy.URL, tc.advertisedModel))
 	disc.AddManual(nodeForModel(t, "b", ok.URL, tc.advertisedModel))
 	p := testProxy(tc.profile, disc, tc.profile.FacadePort)
+	p.admission.setPolicy(httpAdmissionFixturePolicy(tc))
 	p.SetPriority([]string{"a", "b"})
-	pol := nodepolicy.Default()
+	pol := httpAdmissionFixturePolicy(tc)
 	pol.Admission.QueueTimeoutSeconds = 17
 	p.admission.setPolicy(pol)
 	pinRecordingPairPeer(t, p.soleFacade(), "a", busy)
@@ -745,9 +765,10 @@ func TestHandleHTTP_BusySelfHandsOnImmediately(t *testing.T) {
 	disc.AddManual(selfNode("self", port, tc.advertisedModel))
 	disc.AddManual(nodeForModel(t, "peer", peer.URL, tc.advertisedModel))
 	p := testProxy(tc.profile, disc, port)
+	p.admission.setPolicy(httpAdmissionFixturePolicy(tc))
 	setBackend(t, p.soleFacade(), local.URL, true)
 	p.SetPriority([]string{"self", "peer"})
-	pol := nodepolicy.Default()
+	pol := httpAdmissionFixturePolicy(tc)
 	pol.Admission.MaxConcurrentPerModel = 1
 	p.admission.setPolicy(pol)
 	held := mustAdmit(t, p.admission.admit(t.Context(), admissionRequest{engine: tc.profile.Name, model: tc.requestedModel, waitCap: -1}))
@@ -773,11 +794,12 @@ func TestHandleHTTP_SoleBusySelfWaitsWithoutSpendingDispatches(t *testing.T) {
 			disc := NewDiscovery()
 			disc.AddManual(selfNode("self", tc.profile.FacadePort, tc.advertisedModel))
 			p := testProxy(tc.profile, disc, tc.profile.FacadePort)
+			p.admission.setPolicy(httpAdmissionFixturePolicy(tc))
 			setBackend(t, p.soleFacade(), local.URL, true)
-			policy := nodepolicy.Default()
+			policy := httpAdmissionFixturePolicy(tc)
 			policy.Admission.QueueTimeoutSeconds = 1
 			if profileLimit {
-				policy.Profiles = []nodepolicy.Profile{{Key: "limited", DisplayName: "limited", Engine: tc.profile.Name, Model: tc.requestedModel, MaxConcurrent: 1}}
+				policy.Profiles = []nodepolicy.Profile{{Key: tc.requestedModel, DisplayName: "Limited model", Engine: tc.profile.Name, Model: tc.requestedModel, MaxConcurrent: 1}}
 			} else {
 				policy.Admission.MaxConcurrentPerModel = 1
 			}
@@ -835,6 +857,7 @@ func TestHandleHTTP_SoleBusyPeerWaitsWithoutSpendingDispatches(t *testing.T) {
 	disc := NewDiscovery()
 	disc.AddManual(nodeForModel(t, "peer", peer.URL, tc.advertisedModel))
 	p := testProxy(tc.profile, disc, tc.profile.FacadePort)
+	p.admission.setPolicy(httpAdmissionFixturePolicy(tc))
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
 	rec := httptest.NewRecorder()
@@ -858,6 +881,7 @@ func TestHandleHTTP_SolePeerOtherRefusalsSpendDispatches(t *testing.T) {
 			disc := NewDiscovery()
 			disc.AddManual(nodeForModel(t, "peer", peer.URL, tc.advertisedModel))
 			p := testProxy(tc.profile, disc, tc.profile.FacadePort)
+			p.admission.setPolicy(httpAdmissionFixturePolicy(tc))
 			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 			defer cancel()
 			rec := httptest.NewRecorder()
@@ -888,6 +912,7 @@ func TestHandleHTTP_MultipleBusyPeersSpendDispatches(t *testing.T) {
 	disc.AddManual(nodeForModel(t, "first", first.URL, tc.advertisedModel))
 	disc.AddManual(nodeForModel(t, "second", second.URL, tc.advertisedModel))
 	p := testProxy(tc.profile, disc, tc.profile.FacadePort)
+	p.admission.setPolicy(httpAdmissionFixturePolicy(tc))
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 	rec := httptest.NewRecorder()
@@ -910,6 +935,7 @@ func TestHandleHTTP_SoleBusyPeerStopsAtJobDeadline(t *testing.T) {
 	disc := NewDiscovery()
 	disc.AddManual(nodeForModel(t, "peer", peer.URL, tc.advertisedModel))
 	p := testProxy(tc.profile, disc, tc.profile.FacadePort)
+	p.admission.setPolicy(httpAdmissionFixturePolicy(tc))
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 	rec := httptest.NewRecorder()
@@ -926,10 +952,11 @@ func TestHandleHTTP_SelfDispatchMergesRequestOptions(t *testing.T) {
 	disc := NewDiscovery()
 	disc.AddManual(selfNode("self", port, tc.advertisedModel))
 	p := testProxy(tc.profile, disc, port)
+	p.admission.setPolicy(httpAdmissionFixturePolicy(tc))
 	setBackend(t, p.soleFacade(), local.URL, true)
-	pol := nodepolicy.Default()
+	pol := httpAdmissionFixturePolicy(tc)
 	pol.Profiles = []nodepolicy.Profile{{
-		Key: "q", DisplayName: "q", Engine: tc.profile.Name, Model: tc.requestedModel,
+		Key: tc.requestedModel, DisplayName: "Self model", Engine: tc.profile.Name, Model: tc.requestedModel,
 		RequestOptions: json.RawMessage(`{"options":{"num_ctx":8192,"temperature":1},"keep_alive":"5m"}`),
 	}}
 	p.admission.setPolicy(pol)
@@ -953,6 +980,7 @@ func TestHandleHTTP_WakesStoppedEngineAndWaitsForHealthy(t *testing.T) {
 	local := newRecordingEngine(t, http.StatusOK)
 	w := &recordingWriter{}
 	p := newTestProxy(tc.profile, NewCodec(w), NewDiscovery(), tc.profile.FacadePort)
+	p.admission.setPolicy(httpAdmissionFixturePolicy(tc))
 	f := p.soleFacade()
 	setBackend(t, f, local.URL, false)
 	p.noteSelf("self-uuid", tc.profile.Name, []string{tc.advertisedModel})
@@ -990,6 +1018,7 @@ func TestHandleHTTP_EngineOffIsNotWoken(t *testing.T) {
 	local := newRecordingEngine(t, http.StatusOK)
 	w := &recordingWriter{}
 	p := newTestProxy(tc.profile, NewCodec(w), NewDiscovery(), tc.profile.FacadePort)
+	p.admission.setPolicy(httpAdmissionFixturePolicy(tc))
 	f := p.soleFacade()
 	setBackend(t, f, local.URL, false)
 	p.noteSelf("self-uuid", tc.profile.Name, []string{tc.advertisedModel})
@@ -1017,6 +1046,7 @@ func TestHandleHTTP_CancelActiveMovesSelfDispatchOn(t *testing.T) {
 	disc.AddManual(nodeForModel(t, "peer", peer.URL, tc.advertisedModel))
 	w := &recordingWriter{}
 	p := newTestProxy(tc.profile, NewCodec(w), disc, port)
+	p.admission.setPolicy(httpAdmissionFixturePolicy(tc))
 	setBackend(t, p.soleFacade(), local.URL, true)
 	p.SetPriority([]string{"self", "peer"})
 
@@ -1051,6 +1081,7 @@ func TestHandleHTTP_SelfAdmissionCancelStaysWithAttempt(t *testing.T) {
 		disc.AddManual(selfNode("self", port, tc.advertisedModel))
 		disc.AddManual(nodeForModel(t, "peer", peer.URL, tc.advertisedModel))
 		p := newTestProxy(tc.profile, NewCodec(&recordingWriter{}), disc, port)
+		p.admission.setPolicy(httpAdmissionFixturePolicy(tc))
 		setBackend(t, p.soleFacade(), local.URL, true)
 		p.SetPriority([]string{"self", "peer"})
 

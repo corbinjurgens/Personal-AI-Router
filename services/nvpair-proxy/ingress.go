@@ -230,11 +230,12 @@ func (f *facade) handleClusterIngress(w http.ResponseWriter, r *http.Request) {
 // serveIngress is the authenticated half of the cluster ingress. Inference is
 // admitted first (FORK_DESIGN.md §3.3): the body's model is read within the
 // same cap the router applies, admission decides, the model's profile
-// requestOptions are merged in, and only then is the request forwarded. Every
-// other route is forwarded as before.
+// requestOptions are merged in, and only then is the request forwarded.
+// Catalogs use the policy catalog; other routes retain engine passthrough.
 func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer string) {
 	start := time.Now()
-	if isInferenceRequest(f.profile, r.Method, r.URL.Path) && !f.host.routingIdentityReady() {
+	inference := isInferenceRequest(f.profile, r.Method, r.URL.Path)
+	if inference && !f.host.routingIdentityReady() {
 		writeIngressError(w, http.StatusServiceUnavailable, "identity-unavailable", "routing identity is unavailable")
 		return
 	}
@@ -247,11 +248,42 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 		writeIngressError(w, http.StatusForbidden, "strict-admission", "strict request origin does not match the authenticated peer")
 		return
 	}
-	if strict != nil && !isInferenceRequest(f.profile, r.Method, r.URL.Path) {
+	var controlBuffers *ownedInferenceBuffers
+	transferred := false
+	defer func() {
+		if controlBuffers != nil && !transferred {
+			controlBuffers.close()
+		}
+	}()
+	if !inference && r.Body != nil && r.Body != http.NoBody && r.Method != http.MethodOptions {
+		r, controlBuffers = f.host.ownInferenceBuffers(r)
+		bodyCtx, stopBody := context.WithDeadline(r.Context(), start.Add(jobDeadline))
+		body, model, err := bufferInferenceBody(w, r.WithContext(bodyCtx), f.host.requestBodyLimit())
+		stopBody()
+		if err != nil {
+			writeIngressError(w, bufferRequestStatus(err), "request-body", "request body could not be buffered")
+			return
+		}
+		inference = isInferenceRequest(f.profile, r.Method, r.URL.Path, body)
+		if inference {
+			r = r.WithContext(context.WithValue(r.Context(), bufferedModelBodyKey{}, bufferedModelBody{raw: body, model: model}))
+			if !f.host.routingIdentityReady() {
+				writeIngressError(w, http.StatusServiceUnavailable, "identity-unavailable", "routing identity is unavailable")
+				return
+			}
+		} else {
+			r.Body = io.NopCloser(bytes.NewReader(body))
+		}
+	}
+	if strict != nil && !inference {
 		writeIngressError(w, http.StatusBadRequest, "strict-admission", "strict admission requires inference")
 		return
 	}
-	if !isInferenceRequest(f.profile, r.Method, r.URL.Path) {
+	if !inference {
+		if route, ok := f.profile.routeFor(r.Method, r.URL.Path); ok && route.Role.isModelList() {
+			_, _ = f.serveIngressModelList(w, r)
+			return
+		}
 		target, ok := f.localBackendTarget()
 		if !ok {
 			writeIngressError(w, http.StatusServiceUnavailable, "no-local-backend",
@@ -260,18 +292,16 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 		}
 		slog.Debug("cluster ingress forwarding to local backend",
 			"peer", peer, "method", r.Method, "path", r.URL.Path, "target", target.Host)
-		// A peer's model-list read is the only non-inference route that
-		// carries the local key; any other path is forwarded as the peer sent it.
-		if route, ok := f.profile.routeFor(r.Method, r.URL.Path); ok && route.Role.isModelList() {
-			r = r.Clone(r.Context())
-			withLocalCredential(r.Header, f.localCredentialFor(target))
-		}
 		f.reverseProxyToLocal(w, r, target)
 		return
 	}
 
 	r = r.WithContext(context.WithValue(r.Context(), routingDeadlineContextKey{}, start.Add(jobDeadline)))
-	r, buffers := f.host.ownInferenceBuffers(r)
+	buffers := controlBuffers
+	if buffers == nil {
+		r, buffers = f.host.ownInferenceBuffers(r)
+	}
+	transferred = true
 	w = &inferenceErrorWriter{ResponseWriter: w, ctx: r.Context()}
 	defer buffers.close()
 	ctx, cancel := context.WithCancel(r.Context())
@@ -312,6 +342,11 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 		f.serveStrictLocal(w, r, body, model, *strict, true)
 		return
 	}
+	profile, exists := f.host.admission.currentPolicy().ProfileByKey(model)
+	if !exists || profile.Engine != f.profile.Name {
+		writeProxyError(w, http.StatusNotFound, []string{"no profile or role named ", model}, nil, false)
+		return
+	}
 	// Terminal ingress has one local transport and sink, not an origin key or
 	// registry entry. Reuse the same request arbitration without another driver.
 	owner := newRoutingRequest(func(string) { cancel() })
@@ -350,24 +385,18 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 		model:   model,
 		waitCap: parseAdmissionWait(r.Header),
 		cancel:  func() { owner.withdrawLocalIf(attempt, false) },
-		prepare: func(ctx context.Context, profile nodepolicy.Profile, hasProfile bool, _ uint64) error {
+		prepare: func(ctx context.Context, profile nodepolicy.Profile, _ bool, _ uint64) error {
 			releasePreparation()
 			releasePreparation = func() {}
 			releaseBody()
 			releaseBody = func() {}
-			var defaults []byte
-			mode := nodepolicy.RequestOptionsDefaults
-			if hasProfile {
-				defaults = profile.RequestOptions
-				mode = profile.RequestOptionsMode.Effective()
-			}
 			var err error
-			body, releaseBody, err = transformBody(ctx, rawBody, "", false, defaults, mode)
+			body, releaseBody, err = transformBody(ctx, rawBody, "", false, profile.RequestOptions, profile.RequestOptionsMode.Effective())
 			if err != nil {
 				releaseBody = func() {}
 				return err
 			}
-			if hasProfile && !bodyModelMatches(body, model) {
+			if !bodyModelMatches(body, model) {
 				return errAmbiguousModel
 			}
 			streamRequest, err = parseOriginStreamRequest(r.URL.Path, body)

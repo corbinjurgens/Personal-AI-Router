@@ -157,13 +157,32 @@ const (
 // isInferenceRequest reports whether a request should be tracked as a cluster
 // workload. Health checks, model listings and other control traffic are
 // deliberately excluded so we don't flood the cluster with non-inference
-// noise; the engine's profile declares which paths qualify.
+// noise. Model selection is an admission boundary even when the entry facade
+// does not declare that protocol, or a new endpoint is not registered yet.
 //
 // Kept a free function taking the profile rather than a method, so the
 // classification is testable without constructing a Proxy.
-func isInferenceRequest(p engineProfile, method, path string) bool {
+func isInferenceRequest(p engineProfile, method, path string, bodies ...[]byte) bool {
 	role, ok := p.roleFor(method, path)
-	return ok && role == roleInferencePOST
+	if ok && role == roleInferencePOST {
+		return true
+	}
+	for _, routes := range protocolRoutes {
+		for _, route := range routes {
+			if route.Role == roleInferencePOST && route.Role.method() == method && route.Path == path {
+				return true
+			}
+		}
+	}
+	// OPTIONS remains a permission query, even when a caller supplies a body.
+	if method == http.MethodOptions || len(bodies) == 0 {
+		return false
+	}
+	modelSelected := false
+	visitObject(bodies[0], func(key []byte, _, _ int) {
+		modelSelected = modelSelected || jsonKeyEqual(key, "model", true)
+	})
+	return modelSelected
 }
 
 // Workload mirrors the workload-manager spec 6 object. The proxy populates
@@ -239,6 +258,12 @@ func (p *Proxy) requestBodyLimit() int64 {
 // parseable. The caller restores r.Body from the returned bytes before each
 // forward attempt.
 func bufferBodyAndModel(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, string, error) {
+	if body, ok := r.Context().Value(bufferedModelBodyKey{}).(bufferedModelBody); ok {
+		if limit < 0 || int64(len(body.raw)) > limit {
+			return nil, "", &bufferLimitError{}
+		}
+		return body.raw, body.model, nil
+	}
 	if owner := inferenceBuffers(r.Context()); owner != nil {
 		return owner.readBody(r, limit)
 	}
@@ -649,7 +674,20 @@ func (f *facade) resolveRouteCandidates(model string, inference bool) []candidat
 	if model != "" {
 		owners := make([]Node, 0, len(nodes))
 		for _, node := range nodes {
-			if nodeAdvertisesModel(f.profile, node, model) {
+			self := false
+			for _, hp := range nodeCandidates(node) {
+				if isSelfTarget(&url.URL{Scheme: "http", Host: hp}, selfPort) {
+					self = true
+					break
+				}
+			}
+			eligible := nodeAdvertisesModel(f.profile, node, model)
+			if self {
+				pol := p.admission.currentPolicy()
+				pr, ok := pol.ProfileByKey(model)
+				eligible = ok && pr.Engine == f.profile.Name && modelServed(pol.ServedModels, pr.Engine, pr.Model, p.normalizeEngineModel)
+			}
+			if eligible {
 				owners = append(owners, node)
 			}
 		}
@@ -1031,27 +1069,15 @@ func (p *Proxy) moveReservation(r reservation, nodeID string) reservation {
 	}
 }
 
-// nodeAdvertisesModel reports whether a node's advertised inventory contains
-// the requested model, under the engine's naming convention. Both sides are
-// normalized so the answer agrees with the federated model list's dedupe key;
-// if they disagreed the proxy could advertise a model it then refuses to route.
-//
-// Kept a free function taking the profile so the match is testable without a
-// Proxy.
+// nodeAdvertisesModel requires an exact profile key on this engine. Native
+// inventory alone never makes a request routable.
 func nodeAdvertisesModel(p engineProfile, n Node, model string) bool {
 	if nodepolicy.ValidateModelIdentifier(model) != nil {
 		return false
 	}
-	if !modelServed(n.ServedModels, p.Name, model, func(_ string, m string) string { return p.normalizeModel(m) }) {
-		return false
-	}
-	requested := p.normalizeModel(model)
-	if nodepolicy.ValidateModelIdentifier(requested) != nil {
-		return false
-	}
-	for _, available := range n.Models {
-		if nodepolicy.ValidateModelIdentifier(available) == nil && p.normalizeModel(available) == requested {
-			return true
+	for _, available := range n.Profiles {
+		if available.Engine == p.Name && available.Key == model {
+			return modelServed(n.ServedModels, p.Name, available.Model, func(_ string, m string) string { return p.normalizeModel(m) })
 		}
 	}
 	return false

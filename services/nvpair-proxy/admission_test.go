@@ -37,6 +37,9 @@ func configureStrict(t *testing.T, a *admissionController, path string) {
 	p.Admission.MaxConcurrentPerModel = 1
 	a.setPolicy(p)
 	installQualified(t, a, admKey{engine: "llamacpp", model: "m"})
+	p = a.currentPolicy()
+	p.Profiles[0].Key = "m"
+	a.setPolicy(p)
 	a.setResidency(map[string][]string{"llamacpp": {"m"}})
 }
 
@@ -733,7 +736,21 @@ func newAdmHarness(t *testing.T) *admHarness {
 		},
 		normalizeEngineModel,
 	)
+	h.a.setPolicy(admissionFixturePolicy())
 	return h
+}
+
+// admissionFixturePolicy declares the ordinary models used by the controller
+// fixtures. Tests replacing Profiles must declare their own served keys.
+func admissionFixturePolicy() nodepolicy.Policy {
+	p := nodepolicy.Default()
+	p.Profiles = []nodepolicy.Profile{
+		{Key: "m", DisplayName: "M", Engine: "llamacpp", Model: "m"},
+		{Key: "qwen3", DisplayName: "Qwen", Engine: "llamacpp", Model: "qwen3"},
+		{Key: "llama3", DisplayName: "Llama", Engine: "llamacpp", Model: "llama3"},
+		{Key: "qwen3-8b", DisplayName: "Custom Qwen", Engine: "llamacpp-custom", Model: "qwen3-8b"},
+	}
+	return p
 }
 
 func (h *admHarness) setHealthy(engine string, ok bool) {
@@ -779,7 +796,7 @@ func TestOwnedInferenceBuffersAdmission(t *testing.T) {
 		h := newAdmHarness(t)
 		first := h.a.currentPolicy()
 		first.Revision = "1"
-		first.Profiles = []nodepolicy.Profile{{Engine: "llamacpp", Model: "m", RequestOptions: []byte(`{"a":1}`)}}
+		first.Profiles = []nodepolicy.Profile{{Key: "m", DisplayName: "M", Engine: "llamacpp", Model: "m", RequestOptions: []byte(`{"a":1}`)}}
 		h.a.setPolicy(first)
 		entered, resume := make(chan struct{}), make(chan struct{})
 		release := sync.OnceFunc(func() { close(resume) })
@@ -813,7 +830,7 @@ func TestOwnedInferenceBuffersAdmission(t *testing.T) {
 		}
 		second := first
 		second.Revision = "2"
-		second.Profiles = []nodepolicy.Profile{{Engine: "llamacpp", Model: "m", RequestOptions: []byte(`{"b":2}`)}}
+		second.Profiles = []nodepolicy.Profile{{Key: "m", DisplayName: "M", Engine: "llamacpp", Model: "m", RequestOptions: []byte(`{"b":2}`)}}
 		activated := make(chan error, 1)
 		go func() { activated <- h.a.activatePolicy(second) }()
 		select {
@@ -856,7 +873,7 @@ func (h *admHarness) notes(method string) []notification {
 }
 
 func (h *admHarness) policy(mutate func(*nodepolicy.Policy)) {
-	p := nodepolicy.Default()
+	p := admissionFixturePolicy()
 	mutate(&p)
 	if err := p.Validate(); err != nil {
 		panic(err)
@@ -924,7 +941,7 @@ func assertPending(t *testing.T, ch <-chan admissionDecision) {
 	}
 }
 
-func TestAdmission_DefaultPolicyAdmits(t *testing.T) {
+func TestAdmission_DefaultAdmissionWithServedProfileAdmits(t *testing.T) {
 	h := newAdmHarness(t)
 	tk := mustAdmit(t, h.admit("llamacpp", "qwen3", -1))
 	tk.release()
@@ -1086,9 +1103,8 @@ func TestAdmission_ConcurrencyQueuesThenBusy(t *testing.T) {
 	second.release()
 }
 
-// A profile's maxConcurrent overrides the node default, and finds the model
-// under the engine's own naming.
-func TestAdmission_ProfileConcurrencyUsesNormalizedModel(t *testing.T) {
+// A served profile's maxConcurrent overrides the node default for its key.
+func TestAdmission_ProfileConcurrencyUsesServedKey(t *testing.T) {
 	h := newAdmHarness(t)
 	h.policy(func(p *nodepolicy.Policy) {
 		p.Admission.MaxResidentModels = 0
@@ -1219,32 +1235,33 @@ func TestAdmission_MemoryBudget(t *testing.T) {
 		p.Admission.MemoryBudgetBytes = 10 * gb
 		p.Admission.SwitchTimeoutSeconds = 30
 		p.Profiles = []nodepolicy.Profile{
-			{Key: "a-1", DisplayName: "A", Engine: "llamacpp", Model: "a:1", MemoryBytes: 6 * gb},
-			{Key: "b-1", DisplayName: "B", Engine: "llamacpp", Model: "b:1", MemoryBytes: 6 * gb},
-			{Key: "c-1", DisplayName: "C", Engine: "llamacpp", Model: "c:1", MemoryBytes: 3 * gb},
-			{Key: "huge-1", DisplayName: "Huge", Engine: "llamacpp", Model: "huge:1", MemoryBytes: 11 * gb},
+			{Key: "a/1", DisplayName: "A", Engine: "llamacpp", Model: "a/1", MemoryBytes: 6 * gb},
+			{Key: "b/1", DisplayName: "B", Engine: "llamacpp", Model: "b/1", MemoryBytes: 6 * gb},
+			{Key: "c/1", DisplayName: "C", Engine: "llamacpp", Model: "c/1", MemoryBytes: 3 * gb},
+			{Key: "huge/1", DisplayName: "Huge", Engine: "llamacpp", Model: "huge/1", MemoryBytes: 11 * gb},
+			{Key: "unknown-memory", DisplayName: "Unknown memory", Engine: "llamacpp", Model: "unknown-memory"},
 		}
 	})
-	h.a.setResidency(map[string][]string{"llamacpp": {"a:1"}})
+	h.a.setResidency(map[string][]string{"llamacpp": {"a/1"}})
 
 	// 6 + 3 fits.
-	c := mustAdmit(t, h.admit("llamacpp", "c:1", 0))
+	c := mustAdmit(t, h.admit("llamacpp", "c/1", 0))
 	// 6 + 3 + 6 does not; unloading idle a makes room, c is busy and stays.
-	ch := h.admitAsync("llamacpp", "b:1", -1)
+	ch := h.admitAsync("llamacpp", "b/1", -1)
 	waitForCond(t, 2*time.Second, "unload of a", func() bool {
 		return len(h.notes(nodepolicy.NotifyAdmissionUnload)) == 1
 	})
 	unload, _ := h.notes(nodepolicy.NotifyAdmissionUnload)[0].params.(nodepolicy.UnloadRequest)
-	if len(unload.Models) != 1 || unload.Models[0] != "a:1" {
-		t.Fatalf("unload = %+v, want only the idle a:1", unload)
+	if len(unload.Models) != 1 || unload.Models[0] != "a/1" {
+		t.Fatalf("unload = %+v, want only the idle a/1", unload)
 	}
-	h.a.setResidency(map[string][]string{"llamacpp": {"c:1"}})
+	h.a.setResidency(map[string][]string{"llamacpp": {"c/1"}})
 	b := mustAdmit(t, awaitDecision(t, ch, 2*time.Second))
 
 	// A model larger than the whole budget never fits.
-	mustReject(t, h.admit("llamacpp", "huge:1", -1), nodepolicy.RejectNoFit)
+	mustReject(t, h.admit("llamacpp", "huge/1", -1), nodepolicy.RejectNoFit)
 	// Unknown memory counts as zero.
-	mustAdmit(t, h.admit("llamacpp", "unprofiled", 0)).release()
+	mustAdmit(t, h.admit("llamacpp", "unknown-memory", 0)).release()
 	b.release()
 	c.release()
 }

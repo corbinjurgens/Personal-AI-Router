@@ -254,18 +254,4 @@ func TestUpstreamTransportFailureReprobesTheNextSelection(t *testing.T) {
 	assertReprobed(t, p, n, fake, replacement)
 }
 
-// TestModelListTransportFailureReprobesTheNextSelection: the aggregated model list
-// reaches every candidate directly, so it learns about a dead address before any
-// inference request does, and must retire it on the same evidence.
-func TestModelListTransportFailureReprobesTheNextSelection(t *testing.T) {
-	const replacement = "192.0.2.11"
-	p, n, fake := confirmedDeadPeer(t, replacement)
-
-	rec := httptest.NewRecorder()
-	p.soleFacade().handleHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want 503 when the only inventory source is unreachable", rec.Code)
-	}
-
-	assertReprobed(t, p, n, fake, replacement)
-}
+// Catalog reads advertisements without contacting or invalidating a dead target.

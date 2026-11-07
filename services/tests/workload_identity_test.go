@@ -32,7 +32,7 @@ func TestRoutingIdentityProcess(t *testing.T) {
 		firstPort := first.enable(t)
 		engine := newRoutingIdentityEngine(t, egressProcessModel, "text/event-stream",
 			"data: {\"choices\":[{\"delta\":{\"content\":\"ready\"}}]}\n\n")
-		egressProcessAddConcrete(t, first.call, "llamacpp:", engine.port)
+		first.addConcrete(t, engine.port)
 		request := routingIdentityStream(t, firstPort, "/v1/chat/completions", egressProcessModel)
 		old := routingIdentityProxyRunning(t, first, firstAck)
 		routingIdentityCancel(t, first, firstAck.OriginNodeID, old, true)
@@ -48,7 +48,7 @@ func TestRoutingIdentityProcess(t *testing.T) {
 			t.Fatal("replacement proxy reused the previous process run")
 		}
 		secondPort := second.enable(t)
-		egressProcessAddConcrete(t, second.call, "llamacpp:", engine.port)
+		second.addConcrete(t, engine.port)
 		request = routingIdentityStream(t, secondPort, "/v1/chat/completions", egressProcessModel)
 		current := routingIdentityProxyRunning(t, second, secondAck)
 		if old.ID != "1" || current.ID != old.ID || current.Engine != old.Engine || secondAck.OriginNodeID != firstAck.OriginNodeID {
@@ -384,9 +384,10 @@ func routingIdentityBroker(t *testing.T, clusterDir string, ports fixtureService
 	}
 	scanner := filepath.Join(testbin.Dir(t, "tests", "subscription-scanner", "subscription-scanner"), testbin.Exe("subscription-scanner"))
 	jointCopyExecutable(t, self, scanner)
+	f.scannerPort = freePort(t)
 	stdin, messages, stderr, cleanup := startBrokerWithPorts(t, configDir, clusterDir,
 		[]string{"NVPAIR_TEST_SUBSCRIPTION_SCANNER=" + scanner,
-			"NVPAIR_TEST_SUBSCRIPTION_PORT=" + strconv.Itoa(freePort(t))}, ports,
+			"NVPAIR_TEST_SUBSCRIPTION_PORT=" + strconv.Itoa(f.scannerPort)}, ports,
 		"--scanner-path", scanner, "--engine-manager-path", engineMgrBin,
 		"--proxy-path", proxyBin, "--proxy-engines", "llamacpp", "--workload-manager-path", workloadMgrBin)
 	f.stdin = stdin

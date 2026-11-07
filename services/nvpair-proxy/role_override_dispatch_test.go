@@ -156,13 +156,13 @@ func TestRoleOverrideCoderLocalSelectsOnlyQualifiedCandidate(t *testing.T) {
 	qualified := newRecordingEngine(t, http.StatusOK)
 	unqualified := newRecordingEngine(t, http.StatusOK)
 	fx := &tierFixture{p: p, eng: map[string]*recordingEngine{"qualified": qualified, "unqualified": unqualified}}
-	f.discovery.AddManual(nodeForModel(t, "qualified", qualified.URL, "q:1b"))
-	f.discovery.AddManual(nodeForModel(t, "unqualified", unqualified.URL, "other:1b"))
-	qualifiedRole := qualifiedProfile("q:1b")
+	f.discovery.AddManual(nodeForModel(t, "qualified", qualified.URL, "qualified-profile"))
+	f.discovery.AddManual(nodeForModel(t, "unqualified", unqualified.URL, "unqualified-profile"))
+	qualifiedRole := qualifiedProfile("qualified-profile")
 	qualifiedRole.Key = "qualified-profile"
-	unqualifiedRole := qualifiedProfile("other:1b")
+	unqualifiedRole := qualifiedProfile("unqualified-profile")
 	unqualifiedRole.Key = "unqualified-profile"
-	fx.advertise(t, "qualified", map[string]nodepolicy.AdvertisedProfile{"coder": qualifiedRole}, strictCapabilityFor("llamacpp", "q:1b"))
+	fx.advertise(t, "qualified", map[string]nodepolicy.AdvertisedProfile{"coder": qualifiedRole}, strictCapabilityFor("llamacpp", "qualified-profile"))
 	fx.advertise(t, "unqualified", map[string]nodepolicy.AdvertisedProfile{"coder": unqualifiedRole}, nil)
 	p.SetPriority([]string{"unqualified", "qualified"})
 	pinRecordingPairPeer(t, f, "qualified", qualified)
@@ -188,16 +188,16 @@ func TestRoleOverrideCoderLocalSelectsOnlyQualifiedCandidate(t *testing.T) {
 	if err := json.Unmarshal([]byte(qualified.lastBody()), &forwarded); err != nil {
 		t.Fatal(err)
 	}
-	if forwarded.Model != "q:1b" {
-		t.Fatalf("forwarded model = %q, want q:1b", forwarded.Model)
+	if forwarded.Model != "qualified-profile" {
+		t.Fatalf("forwarded model = %q, want qualified-profile", forwarded.Model)
 	}
 	decodeStrictHeader(t, qualified.lastHeader())
 	roleOverrideNoPublicSpend(t, accounts, lookups)
 }
 
-func TestRoleOverrideUndeclaredCanonicalAliasUsesConcretePath(t *testing.T) {
-	fx := newTierFixture(t, customCase(t), nodepolicy.Default(), map[string][]string{"peer": {"x:api"}}, nil)
-	rec := roleOverrideHTTP(fx.p, http.MethodPost, "/v1/chat/completions", `{"model":"x:api","messages":[{"role":"user","content":"hi"}]}`)
+func TestRoleOverrideProfileWithAPISuffixUsesConcretePath(t *testing.T) {
+	fx := newTierFixture(t, customCase(t), nodepolicy.Default(), map[string][]string{"peer": {"x-api"}}, nil)
+	rec := roleOverrideHTTP(fx.p, http.MethodPost, "/v1/chat/completions", `{"model":"x-api","messages":[{"role":"user","content":"hi"}]}`)
 	if rec.Code != http.StatusOK || fx.eng["peer"].hits() != 1 {
 		t.Fatalf("concrete alias-shaped request = %d %q, hits = %d, want 200 and one hit", rec.Code, rec.Body.String(), fx.eng["peer"].hits())
 	}
@@ -207,7 +207,7 @@ func TestRoleOverrideUndeclaredCanonicalAliasUsesConcretePath(t *testing.T) {
 	if err := json.Unmarshal([]byte(fx.eng["peer"].lastBody()), &forwarded); err != nil {
 		t.Fatal(err)
 	}
-	if forwarded.Model != "x:api" || len(fx.eng["peer"].lastHeader().Values(nodepolicy.StrictAdmissionHeader)) != 0 {
+	if forwarded.Model != "x-api" || len(fx.eng["peer"].lastHeader().Values(nodepolicy.StrictAdmissionHeader)) != 0 {
 		t.Fatalf("concrete request changed model or acquired strict routing: model=%q headers=%v", forwarded.Model, fx.eng["peer"].lastHeader())
 	}
 	test := func(name, path, body string) {
@@ -229,12 +229,14 @@ func TestRoleOverrideUndeclaredCanonicalAliasUsesConcretePath(t *testing.T) {
 	test("query model remains refused", "/v1/chat/completions?model=x%3Aapi", `{"model":"x:api"}`)
 }
 
-func TestRoleOverrideMixedCatalogHTTPPreservesConcreteOrder(t *testing.T) {
+func TestRoleOverrideMixedCatalogHTTPExcludesNativeInventory(t *testing.T) {
 	pol := stagedHybridPolicy(t)
 	pol.Roles = []nodepolicy.Role{{Name: "deep"}, {Name: "coder"}}
 	pol.Tiers = map[string][]nodepolicy.TierEntry{"unlisted": {{Kind: nodepolicy.EntryAPI, Deployment: "cloud-small"}}}
 	fx := listFixture(t, pol, true)
+	var nativeFetches atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nativeFetches.Add(1)
 		if r.Method != http.MethodGet || r.URL.Path != "/v1/models" {
 			t.Errorf("catalog upstream received %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -245,10 +247,11 @@ func TestRoleOverrideMixedCatalogHTTPPreservesConcreteOrder(t *testing.T) {
 	t.Cleanup(upstream.Close)
 	n := nodeForModel(t, "n1", upstream.URL, "peer-coder")
 	n.Roles = []nodepolicy.Role{{Name: "ops"}, {Name: "batch"}, {Name: "coder", Profiles: []string{"peer-key"}}}
-	n.Profiles = []nodepolicy.AdvertisedProfile{{Key: "peer-key", Engine: fx.p.soleFacade().profile.Name, Model: "peer-coder", ContextTokens: 8192}}
+	n.Profiles = []nodepolicy.AdvertisedProfile{{Key: "peer-key", Engine: fx.p.soleFacade().profile.Name, Model: "peer-key", ContextTokens: 8192}}
 	fx.p.soleFacade().discovery.AddManual(n)
 
 	wantRoles := []string{"deep", "deep:api", "deep:local", "coder", "coder:api", "coder:local", "batch", "batch:api", "batch:local", "ops", "ops:api", "ops:local"}
+	wantCatalog := append(wantRoles, "peer-key")
 	assert := func(t *testing.T, rec *httptest.ResponseRecorder, want []string) {
 		t.Helper()
 		if rec.Code != http.StatusOK {
@@ -271,12 +274,8 @@ func TestRoleOverrideMixedCatalogHTTPPreservesConcreteOrder(t *testing.T) {
 			wantContext := 0
 			wantOwner := "pair"
 			switch item.ID {
-			case "coder", "coder:api", "coder:local":
+			case "coder", "coder:api", "coder:local", "peer-key":
 				wantContext = 8192
-			case "z-concrete":
-				wantOwner, wantContext = "engine", 2048
-			case "a-concrete":
-				wantOwner, wantContext = "engine", 1024
 			}
 			if item.Owner != wantOwner || (wantContext == 0 && item.Context != nil) || (wantContext != 0 && (item.Context == nil || *item.Context != wantContext)) {
 				t.Fatalf("catalog record = %+v, want owner %q and context %d (zero means omitted)", item, wantOwner, wantContext)
@@ -286,11 +285,13 @@ func TestRoleOverrideMixedCatalogHTTPPreservesConcreteOrder(t *testing.T) {
 			t.Fatalf("catalog = %q %v, want list %v", out.Object, ids, want)
 		}
 	}
-	t.Run("facade preserves surviving concrete order and replaces collisions", func(t *testing.T) {
-		want := append([]string{"z-concrete", "a-concrete"}, wantRoles...)
-		assert(t, fx.listModels(t, "/v1/models"), want)
+	t.Run("facade lists profiles and roles", func(t *testing.T) {
+		assert(t, fx.listModels(t, "/v1/models"), wantCatalog)
 	})
 	t.Run("listener lists own order then sorted empty peer roles", func(t *testing.T) {
-		assert(t, roleOverrideHTTP(fx.p, http.MethodGet, "/v1/models", ""), wantRoles)
+		assert(t, roleOverrideHTTP(fx.p, http.MethodGet, "/v1/models", ""), wantCatalog)
 	})
+	if nativeFetches.Load() != 0 {
+		t.Fatalf("catalog fetched native inventory %d times", nativeFetches.Load())
+	}
 }

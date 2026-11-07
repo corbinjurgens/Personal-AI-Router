@@ -214,26 +214,26 @@ func TestStrataContractFacade(t *testing.T) {
 	reject("rejects different model case", "org/strata-loaded:q4_k_m")
 	reject("rejects appended latest tag", "Org/Strata-Loaded:Q4_K_M:latest")
 
-	passThrough := func(name, path string) {
+	rejectModelPath := func(name, path string) {
 		t.Run(name, func(t *testing.T) {
-			// An unadvertised model also proves this path bypasses chat routing.
+			// A narrower descriptor protocol never exempts a model selector.
 			const model = "Org/Strata-Unadvertised:Q4_K_M"
 			before := strataContractCount(fixture.strataContractControl(t, 0), http.MethodPost, path, model)
 			status, _, body := strataContractHTTP(t, http.MethodPost, proxy.Port, path, map[string]any{"model": model})
 			var response map[string]string
 			strataContractDecode(t, body, &response)
-			if status != http.StatusNotFound || !reflect.DeepEqual(response, map[string]string{"error": "fixture unsupported path", "path": path}) {
-				t.Fatalf("unclassified %s did not preserve runtime 404 JSON (status=%d)", path, status)
+			if status != http.StatusNotFound || !reflect.DeepEqual(response, map[string]string{"error": "no profile or role named " + model}) {
+				t.Fatalf("model-bearing %s escaped profile refusal (status=%d)", path, status)
 			}
-			if after := strataContractCount(fixture.strataContractControl(t, 0), http.MethodPost, path, model); after != before+1 {
-				t.Fatalf("runtime %s exact method/path/model count = %d, want %d", path, after, before+1)
+			if after := strataContractCount(fixture.strataContractControl(t, 0), http.MethodPost, path, model); after != before {
+				t.Fatalf("refused %s reached runtime: count %d -> %d", path, before, after)
 			}
 		})
 	}
-	passThrough("passes legacy completions to runtime", "/v1/completions")
-	passThrough("passes embeddings to runtime", "/v1/embeddings")
-	passThrough("passes messages to runtime", "/v1/messages")
-	passThrough("passes responses to runtime", "/v1/responses")
+	rejectModelPath("rejects unprofiled legacy completions", "/v1/completions")
+	rejectModelPath("rejects unprofiled embeddings", "/v1/embeddings")
+	rejectModelPath("rejects unprofiled messages", "/v1/messages")
+	rejectModelPath("rejects unprofiled responses", "/v1/responses")
 }
 
 func TestStrataContractRequiresLocalQualification(t *testing.T) {
