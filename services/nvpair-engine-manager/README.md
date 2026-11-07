@@ -477,6 +477,47 @@ delivery acknowledgement or runtime budget setting is introduced.
 
 ## JSON-RPC surface
 
+### Diagnostic execution reservation (internal)
+
+`engine:diagnostic-reserve` accepts `{runId, engine, modelId, profileKey,
+configurationKey?, executionKey?, effectsFence, targetMemory?}` and returns
+`{runId, token, state: "reserved"}`. Exactly one identity key is required. The
+applied llama.cpp profile is inspected through the existing file-only owner,
+with target memory evidence for finite configuration keys. `effectsFence` is
+the manager's `diagnosticEffectsFence`: it binds the manager incarnation, each
+engine's applied configuration and process incarnation, and fresh loaded-model
+sets. Missing loaded-model evidence refuses reservation.
+
+Reservation compares the preview identity and effects under node-wide mutation
+exclusion. An admitted mutation or registered serving load, including one
+waiting for a lifecycle lock, refuses it. Repeating the same run ID, target,
+identity and effects returns the same token; different parameters conflict.
+Ordinary lifecycle operations, resident reconciliation and residency-affecting
+manifest actions refuse with `reserved by a memory measurement (busy)`.
+
+`engine:diagnostic-release` accepts `{runId, token}`. It refuses while any
+diagnostic mutation is in flight or its work is not confirmed stopped by the
+manager operation owner. It never trusts a broker-supplied cleanup flag.
+Reservations live in the executor and are lost on manager restart; durable
+recovery and the diagnostic operation loop are separate owners.
+
+The private `diagnosticContext` carries authority for one executor, reservation
+and engine. It bypasses only that reservation's global admission ticket and
+preserves other admission checks. `WakeDiagnostic` and `sleepContext` reuse the
+existing start and stop owners without writing pause policy. Diagnostic
+activation is restricted to the measured engine; configured pause permits
+scoped activation and Halt refuses it. The lifecycle and final dispatch owners
+must propagate this context and apply the scoped pause rule before executing a
+diagnostic under configured pause.
+
+The broker denies public client relay for `engine:diagnostic-reserve`,
+`engine:diagnostic-release`, `engine:diagnostic-run`,
+`engine:diagnostic-run-status`, `engine:diagnostic-abort`,
+`engine:diagnostic-baseline-done` and `engine:record-measured-memory`.
+Only reserve and release are implemented by the reservation handler. The
+distinct public `engine:diagnostic-status` is reserved for broker orchestration
+and is not in this denial list.
+
 ### Automatic resident loads (internal)
 
 The manifest must explicitly bind the semantic load operation to a `POST`
@@ -1688,3 +1729,38 @@ Peer inspection preserves `profileKey` through the typed inspection relay, so
 the target reports the selected applied configuration instead of inspecting
 only its artifacts. Stated-memory writes from an origin broker use the target
 `nodeId`; their replies and durable records belong only to that target.
+
+## Internal memory diagnostic operation
+
+The broker reserves execution with `engine:diagnostic-reserve`, then calls
+`engine:diagnostic-run` with `{runId, token}`. The reservation binds the applied
+model, profile, configuration/execution key and consented effects. Optional
+explicit run fields must match that reservation. `generate` defaults to 128;
+`deadline` is an RFC3339 timestamp bounded to twenty minutes. Unknown native-fit
+targets remain unspecified until identity-checked `/props` reports the realized
+per-slot context, slot count and build. Requested GPU options never manufacture
+observed placement.
+
+`engine:diagnostic-run-status` accepts `{runId}` (empty selects the active run).
+Its reply contains `state`, `token`, nested `run`, `workStopped`, retained
+`markers`, optional `observation`, and provisional `low`/`high` request results.
+`engine:diagnostic-changed` carries the same snapshot on phase/outcome changes.
+Markers are `baseline-ready`, `loaded`, `low-start`, `low-end`, `high-start` and
+`high-end`, with UTC times retained for the broker's memory samples. The broker
+acknowledges the cold baseline with
+`engine:diagnostic-baseline-done{runId,token,phase:"baseline"}`, which returns
+`{ok:true}` only at that run's baseline barrier. The barrier expires after
+thirty seconds.
+
+`engine:diagnostic-abort{runId,token}` cancels and joins the accepted work before
+replying. A new Pause/Halt cancels the run; the ordinary internal Sleep response
+joins cleanup before completing the transition. An unchanged configured pause
+permits the explicitly scoped measured engine and is preserved. Halt never
+permits activation. Cleanup unloads all touched engines, stops an engine started
+by the run, and escalates unconfirmed unloads through the existing owned-process
+Sleep owner. `cleanup-failed` retains exclusion and abort retries cleanup only.
+`workStopped:true` is affirmative cleanup evidence; a terminal phase alone is
+not. Completed key-bound results remain available to the later record owner.
+`engine:diagnostic-release` accepts repeated release of a completed matching
+token without affecting a newer reservation. These methods are broker-only;
+the public broker status method is the distinct `engine:diagnostic-status`.

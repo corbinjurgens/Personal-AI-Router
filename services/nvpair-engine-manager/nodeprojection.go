@@ -43,10 +43,15 @@ type nodeProjection struct {
 type nodeProjectionStore struct {
 	mu         sync.Mutex
 	projection *nodeProjection
+	// A new Pause/Halt retires authority granted during an earlier policy.
+	pauseGeneration uint64
 }
 
 func (s *nodeProjectionStore) set(p nodeProjection) {
 	s.mu.Lock()
+	if diagnosticPauseTransition(s.projection, p) {
+		s.pauseGeneration++
+	}
 	s.projection = &p
 	s.mu.Unlock()
 }
@@ -96,14 +101,21 @@ func (m *Manager) applyNodeProjection(msg *Message) {
 		return
 	}
 	m.exec.nodeProjection.mu.Lock()
+	newPause := diagnosticPauseTransition(m.exec.nodeProjection.projection, p)
+	if newPause {
+		m.exec.nodeProjection.pauseGeneration++
+	}
 	m.exec.nodeProjection.projection = &p
-	if p.ManagementBlocked {
+	if p.ManagementBlocked && newPause {
 		// Local execution cancellation must not queue behind a paired operation's
 		// bookkeeping mutex. The stored fence and registered execution contexts
 		// already own native starts/loads/chat, including their final dispatch.
 		m.exec.cancelBlockedActivations()
 	}
 	m.exec.nodeProjection.mu.Unlock()
+	if newPause {
+		m.exec.cancelDiagnosticForPause()
+	}
 	// Both cancellation owners preserve the same typed pause cause. Remote
 	// bookkeeping can wait independently after the execution fence is visible.
 	m.exec.cancelVetoedRemoteWork()
@@ -137,19 +149,45 @@ func beginActivationEffect(ctx context.Context) (func(), error) {
 		return noop, nil
 	}
 	e := dispatch.executor
-	if err := e.activationVeto(dispatch.engine); err != nil {
+	if err := e.diagnosticActivationVeto(ctx, dispatch.engine); err != nil {
 		return noop, err
 	}
 	e.nodeProjection.mu.Lock()
-	if e.nodeProjection.projection != nil && e.nodeProjection.projection.ManagementBlocked {
+	if err := e.activationProjectionVetoLocked(ctx, dispatch.engine); err != nil {
 		e.nodeProjection.mu.Unlock()
-		return noop, &localVetoError{code: codeLocalVeto, reason: nodePausedVeto}
+		return noop, err
 	}
 	if err := vetoCause(ctx, ctx.Err()); err != nil {
 		e.nodeProjection.mu.Unlock()
 		return noop, err
 	}
 	return e.nodeProjection.mu.Unlock, nil
+}
+
+func diagnosticPauseTransition(previous *nodeProjection, next nodeProjection) bool {
+	if !next.ManagementBlocked && next.Policy.PauseMode != nodepolicy.PauseImmediate && next.Policy.PauseMode != nodepolicy.PauseConfigured {
+		return false
+	}
+	return previous == nil || previous.ManagementBlocked != next.ManagementBlocked || previous.Policy.PauseMode != next.Policy.PauseMode
+}
+
+// Caller holds the projection gate, after admission checked the reservation.
+// Its ticket cannot be released until the registered work has joined. No
+// mutation-admission lock is taken here, preserving the existing lock order.
+func (e *Executor) activationProjectionVetoLocked(ctx context.Context, engine string) error {
+	p := e.nodeProjection.projection
+	authority, scoped := ctx.Value(diagnosticAuthorityKey{}).(diagnosticAuthority)
+	if scoped {
+		if authority.executor != e || authority.engine != engine || !authority.measured || p == nil ||
+			authority.pauseGeneration != e.nodeProjection.pauseGeneration || p.Policy.PauseMode == nodepolicy.PauseImmediate {
+			return &localVetoError{code: codeLocalVeto, reason: nodePausedVeto}
+		}
+		return nil
+	}
+	if p != nil && (p.ManagementBlocked || p.Policy.PauseMode == nodepolicy.PauseImmediate) {
+		return &localVetoError{code: codeLocalVeto, reason: nodePausedVeto}
+	}
+	return nil
 }
 
 // localVetoError retains the typed refusal as a cancellation cause.

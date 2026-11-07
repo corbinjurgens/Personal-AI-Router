@@ -184,6 +184,7 @@ func (m *Manager) Run(ctx context.Context) error {
 	// then stop engines so the parent's exit doesn't orphan them.
 	cancel()
 	m.stopCopies()
+	m.exec.abortDiagnosticAndJoin()
 	m.exec.StopAll()
 	m.controlHTTP.CloseIdle()
 	m.controlReadyHTTP.CloseIdle()
@@ -320,6 +321,7 @@ func (m *Manager) handleMessage(ctx context.Context, msg *Message) {
 
 	case prepareShutdownMethod:
 		go func() {
+			m.exec.abortDiagnosticAndJoin()
 			m.exec.StopAll()
 			m.codec.Respond(msg.ID, nil)
 		}()
@@ -426,6 +428,10 @@ func (m *Manager) handleMessage(ctx context.Context, msg *Message) {
 // runOp executes a lifecycle op asynchronously and responds with the
 // engine's resulting status (or an error).
 func (m *Manager) runOp(ctx context.Context, msg *Message) {
+	if msg.Method == diagnosticRunMethod {
+		m.startDiagnostic(msg)
+		return
+	}
 	var p opParam
 	if !m.parse(msg, &p) {
 		return
