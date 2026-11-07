@@ -201,6 +201,7 @@ type Broker struct {
 	settingsRelayMu         sync.Mutex
 	settingsCancels         map[string]context.CancelFunc
 	activeSettings          map[string]activeSettingsOperation
+	diagnostics             modelDiagnosticRuntime
 	codec                   *Codec
 	// Published before workers start; the service-facing session owns the
 	// relay and its physical transport interruption, including blocked writes.
@@ -752,7 +753,7 @@ func (b *Broker) recoverReplacementEngineMgr(w *rpcWorker) bool {
 			return false
 		default:
 		}
-		if b.recoverEngineManagerPause(w) {
+		if b.recoverEngineManagerPause(w) && b.reconcileDiagnostics(context.Background(), w) == nil {
 			b.workersMu.Lock()
 			current = b.engineMgr == w
 			select {
@@ -1203,6 +1204,13 @@ func (b *Broker) forwardEngineNotificationFrom(source *engineManagerSource, meth
 	if routingHistoryMethod(method) {
 		return
 	}
+	if method == "engine:diagnostic-changed" {
+		if !b.engineManagerSourceCurrent(source) {
+			return
+		}
+		b.diagnosticNotification(source, params)
+		return
+	}
 	if method == residentDispatchRequestMethod {
 		b.dispatchResidentFrom(source, params)
 		return
@@ -1269,8 +1277,19 @@ func (b *Broker) forwardEngineNotificationFrom(source *engineManagerSource, meth
 	if method == "engine:ready" {
 		// A (re)started engine-manager holds no node projection until it is
 		// sent one. Off the read pump, like the settings projection below.
-		go b.publishNodeProjection()
-		go b.replayLoadedEngineSettings()
+		go func() {
+			b.workersMu.Lock()
+			worker := b.engineMgr
+			b.workersMu.Unlock()
+			if b.engineManagerSourceCurrent(source) {
+				b.publishNodeProjection()
+				if err := b.reconcileDiagnostics(context.Background(), worker); err != nil {
+					slog.Warn("diagnostic checkpoint reconciliation requires retry")
+					return
+				}
+				b.replayLoadedEngineSettings()
+			}
+		}()
 	}
 	if method == noderec.MethodSubscribe {
 		// engine-manager subscribes upward for its ec peer set (nodes exposing

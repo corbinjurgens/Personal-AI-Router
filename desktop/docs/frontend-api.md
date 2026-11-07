@@ -283,6 +283,37 @@ contract lives in [cluster-manager spec §7.0.1](../../services/nvpair-cluster-m
 
 ### `pairApi.engines`
 
+`diagnosticPreview({engine, modelId, profileKey, nodeId?})` returns a bounded
+consent preview for the applied profile.
+`diagnosticStart({...request, previewId, consent: true})` accepts that preview
+and quickly returns a `DiagnosticRun`,
+including the initial `reserving` phase. `diagnosticStatus({nodeId?, runId?})`
+returns a public run or `null`; omit `runId` to discover the node's active run.
+`diagnosticCancel({nodeId?, runId})` waits for the owner's bounded cleanup join
+and returns the resulting public run or `null`. `onDiagnosticChanged(callback)`
+subscribes to `engines:diagnostic-changed` and returns an unsubscribe function.
+Each invoke uses the corresponding `engines:diagnostic-*` logical channel.
+These methods currently target the local node; the broker owns peer admission.
+
+The preview binds hardware, native build, artifacts, requested configuration
+and either a configuration key or an unpriced execution key. Runtime context,
+slots, placement and build text may remain unknown before the authorized load;
+zero prompt targets represent unknown targets. Consent lists all unloaded
+models, saved residents to reload, held engines, engine start, warnings, actual
+known prompt targets and the 20-minute run limit. The preview expires after
+5 minutes. Configured pause is preserved and permits explicit consent; Halt
+refuses measurement.
+
+Runs retain phase, outcome, failed phase, reason, start time, elapsed time and
+the complete measured result, including per-pool sampled memory and per-request
+prompt/decode observations. Absent observations stay absent. Completed results
+require realized allocation; failed results may lack it. Cancellation does not
+release exclusion until cleanup is confirmed. A `cleanup-failed` run remains
+held; call `diagnosticCancel` again to retry cleanup. Results are measured on
+the target machine, date and build. Sampling can miss short peaks. Unpriced
+native-fit or GPU-selection records do not overlay estimates or feed Auto.
+Manager tokens, markers and private observations are excluded from this API.
+
 The copy control API uses manager engine IDs (`llamacpp`, for example), stable
 node UUIDs and exact model IDs. `copyModel(request)` invokes `engine:copy-model`
 with `{opId, sourceNodeId, destinationNodeId, engine, model, expectedExportId?}`
@@ -453,6 +484,10 @@ Commands return no state. Renderer stores update from
 | `engines:get-settings`      | `EngineSettingsTarget`       | `EngineSettingsSnapshot`  |
 | `engines:preview-settings`  | `EngineSettingsRequest`      | `EngineSettingsPreview`   |
 | `engines:apply-settings`    | `EngineSettingsRequest`      | `EngineSettingsReceipt`   |
+| `engines:diagnostic-preview` | `DiagnosticPreviewRequest` | `DiagnosticPreview` |
+| `engines:diagnostic-start` | `DiagnosticStartRequest` | `DiagnosticRun` |
+| `engines:diagnostic-status` | `{ nodeId?, runId? }` | `DiagnosticRun` or `null` |
+| `engines:diagnostic-cancel` | `DiagnosticRunRef` | `DiagnosticRun` or `null` |
 | `engine:command`            | `EngineCommandPayload`       | `null`                    |
 | `engine:copy-model`         | `ModelCopyRequest`           | `ModelCopyResponse`       |
 | `engine:model-copy-capabilities` | `{ nodeId, engine }` | `ModelCopyCapabilities` |
@@ -472,6 +507,7 @@ Commands return no state. Renderer stores update from
 | `nodes:changed`                   | `ClusterNode[]`                  |
 | `engines:state-changed`           | `EngineStatePatch`               |
 | `engines:settings-changed`        | `EngineSettingsSnapshot`         |
+| `engines:diagnostic-changed`      | `DiagnosticRun`                  |
 | `engines:settings-disconnected`   | `{ nodeId }`                     |
 | `engines:progress-changed`        | `EngineProgress`                 |
 | `engines:progress-cleared`        | `{ key }`                        |

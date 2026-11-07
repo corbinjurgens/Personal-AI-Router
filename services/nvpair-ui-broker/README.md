@@ -5,6 +5,21 @@ SPDX-License-Identifier: Apache-2.0
 
 # nvpair-ui-broker
 
+Local memory diagnostics use `engine:diagnostic-preview`,
+`engine:diagnostic-start`, `engine:diagnostic-status` and
+`engine:diagnostic-cancel`. The broker owns consent, a resource ledger, node
+draining with verified idle evidence, run-scoped telemetry sampling and recording.
+The manager owns reservation, process lifecycle, exercise, joining cancellation
+and the durable cleanup checkpoint. Configured pause permits consent; Halt
+refuses it. Saved pause never changes. Public notifications contain only the run,
+not the manager's token or internal observation envelope.
+
+Checkpoint reconciliation precedes proxy policy/ingress replay and manager
+replacement recovery. Pending cleanup recreates the node hold; unknown cleanup
+never opens ingress. There is no broker diagnostic journal. See
+[Model memory diagnostics](../../docs/model-memory-diagnostic.mdx) for consent,
+record identity, sample coverage and limits.
+
 The existing telemetry cache retains detached memory observations alongside GPU
 utilization. It adds same-host IPC delay and suspend-aware elapsed time without
 comparing remote UTC clocks. Independent facts expire after five seconds;

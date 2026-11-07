@@ -31,6 +31,13 @@ import type {
     SetStatedMemoryRequest,
     ClearStatedMemoryRequest
 } from '@/shared/types/model-config'
+import type {
+    DiagnosticPreviewRequest,
+    DiagnosticPreview,
+    DiagnosticStartRequest,
+    DiagnosticRun,
+    DiagnosticRunRef
+} from '@/shared/types/model-diagnostic'
 
 export interface IEngineApi {
     /** Read the owning node's authoritative settings snapshot for one engine. */
@@ -39,6 +46,13 @@ export interface IEngineApi {
     inspectModel(request: InspectModelRequest): Promise<InspectModelResult>
     setStatedMemory(request: SetStatedMemoryRequest): Promise<InspectModelResult>
     clearStatedMemory(request: ClearStatedMemoryRequest): Promise<InspectModelResult>
+    diagnosticPreview(request: DiagnosticPreviewRequest): Promise<DiagnosticPreview>
+    diagnosticStart(request: DiagnosticStartRequest): Promise<DiagnosticRun>
+    /** Omit runId to discover a node's active operation, including reservation. */
+    diagnosticStatus(request: Partial<DiagnosticRunRef>): Promise<DiagnosticRun | null>
+    /** Waits for the owner's bounded cleanup join; cleanup-failed remains held. */
+    diagnosticCancel(request: DiagnosticRunRef): Promise<DiagnosticRun | null>
+    onDiagnosticChanged(callback: (run: DiagnosticRun) => void): () => void
     /**
      * Validate a draft against the owner without persisting or touching any
      * process: returns the normalized settings, per-field errors, any port
@@ -115,6 +129,11 @@ export function createEngineApi(transport: ServiceTransport): IEngineApi {
         inspectModel: request => transport.invoke('engines:inspect-model', request),
         setStatedMemory: request => transport.invoke('engines:set-stated-memory', request),
         clearStatedMemory: request => transport.invoke('engines:clear-stated-memory', request),
+        diagnosticPreview: request => transport.invoke('engines:diagnostic-preview', request),
+        diagnosticStart: request => transport.invoke('engines:diagnostic-start', request),
+        diagnosticStatus: request => transport.invoke('engines:diagnostic-status', request),
+        diagnosticCancel: request => transport.invoke('engines:diagnostic-cancel', request),
+        onDiagnosticChanged: cb => transport.subscribePush('engines:diagnostic-changed', cb),
         previewSettings: request => transport.invoke('engines:preview-settings', request),
         applySettings: request =>
             transport.invoke('engines:apply-settings', request).then(result => {

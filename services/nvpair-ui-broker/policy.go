@@ -1509,6 +1509,14 @@ func (b *Broker) activatePolicyNow() {
 // before the proxy's facades are enabled, so a paused node is paused before it
 // can admit anything. Availability goes first for the same reason.
 func (b *Broker) replayPolicyToProxy(ctx context.Context, pp *proxyProcess) bool {
+	// The manager checkpoint reconstructs diagnostic drains before any policy
+	// or ingress activation. The broker has no diagnostic journal of its own.
+	b.workersMu.Lock()
+	diagnosticManager := b.engineMgr
+	b.workersMu.Unlock()
+	if err := b.reconcileDiagnostics(ctx, diagnosticManager); err != nil {
+		return false
+	}
 	b.engineConfigMu.Lock()
 	err := b.loadEngineSettingsLocked()
 	blocked := err != nil && b.knownModelSettingsFenceLocked()
@@ -1547,6 +1555,16 @@ func (b *Broker) replayPolicyToProxy(ctx context.Context, pp *proxyProcess) bool
 	b.refreshStrictAdvertisement()
 	b.withdrawStrictReadinessOnExit(pp)
 	for _, kind := range kinds {
+		if strings.HasPrefix(kind, pushDrainPrefix) {
+			engine := strings.TrimPrefix(kind, pushDrainPrefix)
+			r.mu.Lock()
+			drained := r.engineDrainsLocked(pp)[engine]
+			r.mu.Unlock()
+			if err := engineDrainAck(ctx, pp, engine, drained); err != nil {
+				return false
+			}
+			continue
+		}
 		b.sendPolicyStateLocked(ctx, pp, kind)
 	}
 	// Client publication is independent of proxy acknowledgement. The spawn
