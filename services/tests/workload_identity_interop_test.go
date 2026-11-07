@@ -14,9 +14,8 @@
 //     the manager mid-flight and assert a discovered peer hears the active
 //     workload again from the restarted process.
 //
-// Both drive the real binaries TestMain builds. Test B needs mDNS (it
-// advertises a stub peer over zeroconf), so it runs outside the network
-// sandbox.
+// Both drive the real binaries TestMain builds. A synthetic scanner supplies
+// profile advertisements and pinned peers through the broker's discovery relay.
 package tests
 
 import (
@@ -30,6 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,6 +37,9 @@ import (
 	"time"
 
 	"nvpair-shared/jsonrpc"
+	"nvpair-shared/nodepolicy"
+	"nvpair-shared/noderec"
+	"nvpair-shared/testbin"
 )
 
 // TestWorkloadCrossEngineIdentityDistinct fires exactly one inference through
@@ -46,10 +49,6 @@ import (
 // broker's workloads:* stream. Before the identity fix the (origin,id) store
 // key collapsed them into one.
 func TestWorkloadCrossEngineIdentityDistinct(t *testing.T) {
-	if portBusy(11435) || portBusy(1234) {
-		t.Skip("native default-port occupancy guard (11435/1234); skipping")
-	}
-
 	// Fake engines: 200 on any request so each inference completes promptly.
 	fakeEngine := func(body string) *httptest.Server {
 		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -72,7 +71,9 @@ func TestWorkloadCrossEngineIdentityDistinct(t *testing.T) {
 	manifest := privateFixtureManifest(t, "llamacpp-custom", filepath.Join(configDir, "absent-models"), filepath.Join(configDir, "absent-engine"), map[string]any{"port": 0, "ready": nil, "health": nil}, "openai-v1")
 	jointWriteJSON(t, filepath.Join(jointAppDir(configDir), "engines", "llamacpp-custom.json"), manifest)
 	control := newFixtureProxyControl(t)
-	stdin, msgs, _, cleanup := startBrokerWithDirsAndEnv(t, configDir, clusterDir, control.env(),
+	scanner, scannerPort, scannerEnv := newWorkloadScanner(t)
+	stdin, msgs, _, cleanup := startBrokerWithDirsAndEnv(t, configDir, clusterDir, append(control.env(), scannerEnv...),
+		"--scanner-path", scanner,
 		"--proxy-path", control.image, "--proxy-engines", "llamacpp",
 		"--engine-manager-path", engineMgrBin,
 		"--workload-manager-path", workloadMgrBin,
@@ -93,28 +94,22 @@ func TestWorkloadCrossEngineIdentityDistinct(t *testing.T) {
 	control.ready(t, "llamacpp-custom", facades["llamacpp-custom"])
 	// Setup through the transparent proxy relay preserves the first HTTP
 	// inference request as workload id "1" for each facade.
+	call := func(t *testing.T, method string, params any) jsonrpc.Message {
+		t.Helper()
+		reply, ok := control.componentCall(t, method, params)
+		if !ok {
+			t.Fatalf("unexpected workload fixture method %q", method)
+		}
+		return reply
+	}
 	for engine, port := range map[string]int{"llamacpp": llamacppPort, "llamacpp-custom": customPort} {
-		params := map[string]any{"id": "fake-" + engine, "host": "127.0.0.1", "port": port, "addresses": []string{"127.0.0.1"}, "models": []string{"crossengine-model"}}
-		if result := control.call(t, engine, "node/add-manual", params); result.Error != nil {
-			t.Fatal(result.Error)
-		}
-		if result := control.call(t, engine, "node/select", map[string]string{"id": "fake-" + engine}); result.Error != nil {
-			t.Fatal(result.Error)
-		}
+		addWorkloadInferenceNode(t, call, scannerPort, engine, "fake-"+engine, port, "crossengine-model")
 	}
 	t.Log("both fake engines pinned as proxy targets")
 
 	client := &http.Client{Timeout: 5 * time.Second}
 	fire := func(port int, path string) {
-		resp, err := client.Post(
-			fmt.Sprintf("http://127.0.0.1:%d%s", port, path),
-			"application/json",
-			strings.NewReader(`{"model":"crossengine-model","messages":[]}`),
-		)
-		if err == nil {
-			io.Copy(io.Discard, resp.Body)
-			resp.Body.Close()
-		}
+		egressProcessHTTP(t, client, http.MethodPost, port, path, []byte(`{"model":"crossengine-model","messages":[]}`), http.StatusOK)
 	}
 	fire(facades["llamacpp"], "/v1/chat/completions")
 	fire(facades["llamacpp-custom"], "/v1/chat/completions")
@@ -135,10 +130,13 @@ func TestWorkloadCrossEngineIdentityDistinct(t *testing.T) {
 			}
 			var p wlParams
 			if err := json.Unmarshal(msg.Params, &p); err != nil {
-				continue
+				t.Fatalf("decode engine workload: %v", err)
 			}
 			eng := p.WorkloadInfo.Engine
 			if (eng == "llamacpp" || eng == "llamacpp-custom") && p.WorkloadInfo.ID != "" {
+				if p.WorkloadInfo.Model != "crossengine-model" {
+					t.Fatalf("%s workload model=%q, want crossengine-model", eng, p.WorkloadInfo.Model)
+				}
 				if _, seen := engineIDs[eng]; !seen {
 					engineIDs[eng] = p.WorkloadInfo.ID
 					t.Logf("tracked %s workload id=%q state=%q", eng, p.WorkloadInfo.ID, p.WorkloadInfo.State)
@@ -202,13 +200,14 @@ func TestWorkloadManagerRehydratesActiveWorkloadOnRestart(t *testing.T) {
 	// manager fans out to it. The inter-node interface is cluster mTLS only, so the
 	// stub must hold a cluster identity the node under test pins.
 	fx := newInterNodeCluster(t)
-	received := fx.startStubClusterPeer(t, "rehydrate-wm-peer", "rehydrate-peer-uuid")
+	received, peerPort := fx.startDirectClusterPeer(t)
 	configDir := t.TempDir()
 	privateProxyPort := freePort(t)
 	writePrivateBrokerEngineSettings(t, configDir, fx.nodeDir, map[string]int{"llamacpp": privateProxyPort})
 
-	stdin, msgs, stderr, cleanup := startBrokerWithDirs(t, configDir, fx.nodeDir,
-		"--scanner-mdns=true", "--scanner-mdns-service", fx.namespace.Service,
+	scanner, scannerPort, scannerEnv := newWorkloadScanner(t)
+	stdin, msgs, stderr, cleanup := startBrokerWithDirsAndEnv(t, configDir, fx.nodeDir, scannerEnv,
+		"--scanner-path", scanner,
 		"--proxy-path", proxyBin, "--proxy-engines", "llamacpp",
 		"--workload-manager-path", workloadMgrBin,
 	)
@@ -243,10 +242,10 @@ func TestWorkloadManagerRehydratesActiveWorkloadOnRestart(t *testing.T) {
 
 	// Pin the fake llamacpp, then fire one inference in the background — the
 	// backend blocks, so the workload stays running until teardown.
-	writeRawFrame(t, stdin, fmt.Sprintf(`{"jsonrpc":"2.0","id":50,"method":"llamacpp-proxy:node/add-manual","params":{"id":"fake-llamacpp","host":"127.0.0.1","port":%d,"addresses":["127.0.0.1"],"models":["rehydrate-model"]}}`, llamacppPort))
-	waitForResponse(t, msgs, 5*time.Second)
-	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","id":51,"method":"llamacpp-proxy:node/select","params":{"id":"fake-llamacpp"}}`)
-	waitForResponse(t, msgs, 5*time.Second)
+	call := workloadBrokerCaller(stdin, msgs)
+	addWorkloadInferenceNode(t, call, scannerPort, "llamacpp", "fake-llamacpp", llamacppPort, "rehydrate-model")
+	publishWorkloadNode(t, scannerPort, workloadPeerNode(fx, "rehydrate-peer-uuid", peerPort))
+	requestStarted := make(chan error, 1)
 	go func() {
 		c := &http.Client{Timeout: 120 * time.Second}
 		resp, err := c.Post(
@@ -254,11 +253,26 @@ func TestWorkloadManagerRehydratesActiveWorkloadOnRestart(t *testing.T) {
 			"application/json",
 			strings.NewReader(`{"model":"rehydrate-model","messages":[],"stream":true}`),
 		)
-		if err == nil {
-			io.Copy(io.Discard, resp.Body)
-			resp.Body.Close()
+		if err != nil {
+			requestStarted <- err
+			return
 		}
+		if resp.StatusCode != http.StatusOK {
+			requestStarted <- fmt.Errorf("inference status=%d, want %d", resp.StatusCode, http.StatusOK)
+		} else {
+			requestStarted <- nil
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
 	}()
+	select {
+	case err := <-requestStarted:
+		if err != nil {
+			t.Fatalf("start held workload: %v", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("held workload did not commit HTTP headers")
+	}
 
 	// The original manager backfills its active set to the discovered peer.
 	waitStubPeerWorkload(t, received, "rehydrate-model", "running", 45*time.Second)
@@ -306,13 +320,14 @@ func TestWorkloadManagerRehydratesRecentTerminalOnRestart(t *testing.T) {
 	llamacppPort := portOfURL(t, llamacpp.URL)
 
 	fx := newInterNodeCluster(t)
-	received := fx.startStubClusterPeer(t, "rehydrate-term-peer", "rehydrate-term-peer-uuid")
+	received, peerPort := fx.startDirectClusterPeer(t)
 	configDir := t.TempDir()
 	privateProxyPort := freePort(t)
 	writePrivateBrokerEngineSettings(t, configDir, fx.nodeDir, map[string]int{"llamacpp": privateProxyPort})
 
-	stdin, msgs, stderr, cleanup := startBrokerWithDirs(t, configDir, fx.nodeDir,
-		"--scanner-mdns=true", "--scanner-mdns-service", fx.namespace.Service,
+	scanner, scannerPort, scannerEnv := newWorkloadScanner(t)
+	stdin, msgs, stderr, cleanup := startBrokerWithDirsAndEnv(t, configDir, fx.nodeDir, scannerEnv,
+		"--scanner-path", scanner,
 		"--proxy-path", proxyBin, "--proxy-engines", "llamacpp",
 		"--workload-manager-path", workloadMgrBin,
 	)
@@ -339,22 +354,13 @@ func TestWorkloadManagerRehydratesRecentTerminalOnRestart(t *testing.T) {
 	}
 	pid1 := awaitInt(t, wmPids, 10*time.Second, "initial workload-manager start")
 
-	writeRawFrame(t, stdin, fmt.Sprintf(`{"jsonrpc":"2.0","id":50,"method":"llamacpp-proxy:node/add-manual","params":{"id":"fake-llamacpp","host":"127.0.0.1","port":%d,"addresses":["127.0.0.1"],"models":["rehydrate-term-model"]}}`, llamacppPort))
-	waitForResponse(t, msgs, 5*time.Second)
-	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","id":51,"method":"llamacpp-proxy:node/select","params":{"id":"fake-llamacpp"}}`)
-	waitForResponse(t, msgs, 5*time.Second)
+	call := workloadBrokerCaller(stdin, msgs)
+	addWorkloadInferenceNode(t, call, scannerPort, "llamacpp", "fake-llamacpp", llamacppPort, "rehydrate-term-model")
+	publishWorkloadNode(t, scannerPort, workloadPeerNode(fx, "rehydrate-term-peer-uuid", peerPort))
 
 	// Fire one inference; it completes promptly → terminal workload.
 	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Post(
-		fmt.Sprintf("http://127.0.0.1:%d/v1/chat/completions", proxyPort),
-		"application/json",
-		strings.NewReader(`{"model":"rehydrate-term-model","messages":[]}`),
-	)
-	if err == nil {
-		io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
-	}
+	egressProcessHTTP(t, client, http.MethodPost, proxyPort, "/v1/chat/completions", []byte(`{"model":"rehydrate-term-model","messages":[]}`), http.StatusOK)
 
 	// The original manager backfills the recent terminal to the discovered peer.
 	waitStubPeerWorkload(t, received, "rehydrate-term-model", "completed", 45*time.Second)
@@ -380,6 +386,87 @@ func TestWorkloadManagerRehydratesRecentTerminalOnRestart(t *testing.T) {
 }
 
 // --- helpers ---
+
+// Reuse the registered scanner role so inference fixtures can advertise
+// profiles without browsing installed nodes or relying on multicast delivery.
+func newWorkloadScanner(t *testing.T) (string, int, []string) {
+	t.Helper()
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatalf("locate workload scanner fixture: %v", err)
+	}
+	scanner := filepath.Join(testbin.Dir(t, "tests", "subscription-scanner", "subscription-scanner"), testbin.Exe("subscription-scanner"))
+	jointCopyExecutable(t, self, scanner)
+	port := freePort(t)
+	return scanner, port, []string{"NVPAIR_TEST_SUBSCRIPTION_SCANNER=" + scanner, "NVPAIR_TEST_SUBSCRIPTION_PORT=" + strconv.Itoa(port)}
+}
+
+func workloadBrokerCaller(stdin io.Writer, messages <-chan jsonrpc.Message) egressProcessCall {
+	nextID := 50
+	return func(t *testing.T, method string, params any) jsonrpc.Message {
+		t.Helper()
+		nextID++
+		writeRawFrame(t, stdin, fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":%q,"params":%s}`, nextID, method, mustMarshal(t, params)))
+		return waitForResponseID(t, messages, nextID, 5*time.Second)
+	}
+}
+
+func publishWorkloadNode(t *testing.T, scannerPort int, node noderec.DirectoryNode) {
+	t.Helper()
+	if err := validateFixturePort(scannerPort); err != nil {
+		t.Fatal(err)
+	}
+	waitTCP(t, "127.0.0.1:"+strconv.Itoa(scannerPort), 10*time.Second)
+	frame := jsonrpc.Message{JSONRPC: "2.0", Method: noderec.NotifyNodeDiscovered,
+		Params: mustMarshal(t, noderec.NodeEvent{Node: node})}
+	egressProcessHTTP(t, egressProcessHTTPClient(t), http.MethodPost, scannerPort, "/", mustMarshal(t, frame), http.StatusOK)
+}
+
+func workloadPeerNode(cluster *interNodeCluster, id string, port int) noderec.DirectoryNode {
+	return noderec.DirectoryNode{HostUUID: id, ClusterUUID: cluster.peerUUID, IP: "127.0.0.1",
+		Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceWorkload: {Port: port}}}
+}
+
+// The existing concrete workload names are explicitly declared profile keys.
+// A same-ID manual entry grants only the private plaintext fixture transport;
+// the scanner advertisement supplies the profile eligibility facts.
+func addWorkloadInferenceNode(t *testing.T, call egressProcessCall, scannerPort int, engine, id string, port int, models ...string) {
+	t.Helper()
+	advertisement := &nodepolicy.Advertisement{Revision: "1"}
+	for _, model := range models {
+		advertisement.Profiles = append(advertisement.Profiles, nodepolicy.AdvertisedProfile{
+			Key: model, DisplayName: model, Engine: engine, Model: model,
+		})
+	}
+	service := privateFixtureEngine(t, engine).DiscoveryService
+	publishWorkloadNode(t, scannerPort, noderec.DirectoryNode{
+		HostUUID: id, Name: id, IP: "127.0.0.1",
+		Services:       map[noderec.ServiceKey]noderec.ServiceStatus{service: {Port: port}},
+		ModelsByEngine: map[string][]string{engine: models}, Policy: advertisement,
+	})
+	prefix := engine + "-proxy:"
+	neEventually(t, "workload profile advertisement reaches "+engine+" proxy", 10*time.Second, func() bool {
+		reply := call(t, prefix+"nodes/list", map[string]any{})
+		egressProcessOK(t, reply)
+		var result struct {
+			Nodes []struct {
+				ID     string   `json:"id"`
+				Models []string `json:"models"`
+			} `json:"nodes"`
+		}
+		egressProcessDecode(t, reply.Result, &result)
+		for _, node := range result.Nodes {
+			if node.ID == id && slices.Equal(node.Models, models) {
+				return true
+			}
+		}
+		return false
+	})
+	egressProcessOK(t, call(t, prefix+"node/add-manual", map[string]any{
+		"id": id, "host": "127.0.0.1", "port": port, "addresses": []string{"127.0.0.1"}, "models": models,
+	}))
+	egressProcessOK(t, call(t, prefix+"node/select", map[string]string{"id": id}))
+}
 
 var wmStartedPidRe = regexp.MustCompile(`workload-manager started.*\bpid=(\d+)`)
 

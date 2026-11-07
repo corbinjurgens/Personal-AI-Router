@@ -26,11 +26,11 @@ import (
 
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/engines"
-	"nvpair-shared/jsonrpc"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 )
 
+// The synthetic router serves this exact declared profile key.
 const phase04Model = "phase04"
 
 // The broker boundary supplies discovery and current service registrations.
@@ -176,6 +176,11 @@ func newPhase04Fixture(t *testing.T) *phase04Fixture {
 
 func newPhase04FixtureWithOptions(t *testing.T, options phase04FixtureOptions) *phase04Fixture {
 	t.Helper()
+	policy := nodepolicy.Default()
+	policy.Profiles = []nodepolicy.Profile{{Key: phase04Model, DisplayName: "Phase04 inference", Engine: "llamacpp", Model: phase04Model}}
+	if err := policy.Validate(); err != nil {
+		t.Fatalf("invalid phase04 inference policy: %v", err)
+	}
 	f := &phase04Fixture{
 		control: &task2Fixture{engines: map[string]*task1Process{}},
 		proxies: map[string]*task1Process{}, engines: map[string]*phase04Engine{},
@@ -283,9 +288,12 @@ func newPhase04FixtureWithOptions(t *testing.T, options phase04FixtureOptions) *
 		f.control.engines[n.uuid].call(t, "engine:configured-ports", nil)
 		f.files[n.uuid] = newPhase04FileObserver(t, n, f.peer(n))
 		p := startTask1Process(t, n.base, proxyBin, "--cluster-dir", filepath.Join(n.base, "cluster"))
-		bindProxyFixtureIdentity(t, n.uuid, func(method string, params any) jsonrpc.Message {
-			return p.call(t, method, params)
-		})
+		response := p.call(t, nodepolicy.MethodSetPolicy, nodepolicy.SetPolicyParams{OriginNodeID: n.uuid, Policy: policy})
+		var ack nodepolicy.PolicyAck
+		task2Decode(t, response.Result, &ack)
+		if ack.OriginNodeID != n.uuid || ack.Revision != policy.Revision {
+			t.Fatalf("phase04 proxy policy acknowledgement=%+v, want origin=%q revision=%q", ack, n.uuid, policy.Revision)
+		}
 		p.call(t, "facade/enable", map[string]any{"engine": "llamacpp", "port": n.ports[noderec.ServiceLlamaCPP], "ignorePersistedPort": true})
 		p.call(t, engines.AddressMethod("llamacpp", "node/set-local-backend"), map[string]any{"engine": "llamacpp", "host": "127.0.0.1", "port": f.engines[n.uuid].port, "healthy": true})
 		f.proxies[n.uuid] = p
@@ -312,6 +320,8 @@ func newPhase04FixtureWithOptions(t *testing.T, options phase04FixtureOptions) *
 		directory.Services[noderec.ServiceLlamaCPP] = noderec.ServiceStatus{Port: port, Probe: noderec.ProbeUnreachable}
 		directory.Services[noderec.ServiceEngineControl] = noderec.ServiceStatus{Port: ec}
 		directory.ModelsByEngine = map[string][]string{"llamacpp": {phase04Model}}
+		advertisement := policy.Advertisement()
+		directory.Policy = &advertisement
 		f.proxies[n.uuid].send(t, engines.AddressMethod("llamacpp", noderec.NotifyNodes), noderec.GetNodesResult{Nodes: []noderec.DirectoryNode{directory}}, false)
 		// Destination-owned copy coordination resolves this manager's host ID
 		// from the broker directory, independently of its cluster principal.
@@ -320,7 +330,7 @@ func newPhase04FixtureWithOptions(t *testing.T, options phase04FixtureOptions) *
 		manager := f.control.engines[n.uuid]
 		manager.send(t, noderec.NotifyNodes, noderec.GetNodesResult{Nodes: []noderec.DirectoryNode{self, directory}}, false)
 		manager.send(t, "engine:node-projection", map[string]any{
-			"policy": nodepolicy.Default().Advertisement(), "pausedLocally": false, "managementBlocked": false,
+			"policy": advertisement, "pausedLocally": false, "managementBlocked": false,
 		}, false)
 		// A read on the same stream joins both fixture inputs before copy starts.
 		manager.call(t, "engine:configured-ports", nil)

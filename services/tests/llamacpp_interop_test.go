@@ -13,6 +13,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"nvpair-shared/nodepolicy"
+	"nvpair-shared/noderec"
 )
 
 func TestLlamaCPPProxyIsIncludedInBrokerDefaults(t *testing.T) {
@@ -68,6 +71,7 @@ func TestBrokerLlamaCPPProxySetPortRejectsInvalidPorts(t *testing.T) {
 
 func TestLlamaCPPFacadeUsesRouterInventoryAndExactModelIDs(t *testing.T) {
 	const model = "org/router-model-GGUF:Q4_K_M"
+	const profile = "router-profile-Q4_K_M"
 	var modelListHits atomic.Int32
 	var inferenceHits atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -80,8 +84,17 @@ func TestLlamaCPPFacadeUsesRouterInventoryAndExactModelIDs(t *testing.T) {
 				"data":   []map[string]string{{"id": model}},
 			})
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions":
+			var request struct {
+				Model string `json:"model"`
+			}
+			// This synthetic remote facade receives the declared profile key;
+			// destination admission owns its translation to the native model.
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil || request.Model != profile {
+				t.Errorf("upstream model=%q error=%v, want exact profile %q", request.Model, err, profile)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
 			inferenceHits.Add(1)
-			_, _ = io.Copy(io.Discard, r.Body)
 			_, _ = io.WriteString(w, `{"choices":[]}`)
 		default:
 			http.NotFound(w, r)
@@ -89,8 +102,9 @@ func TestLlamaCPPFacadeUsesRouterInventoryAndExactModelIDs(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	stdin, msgs, stderr, cleanup := startBrokerWith(t,
-		"--proxy-path", proxyBin, "--proxy-engines", "llamacpp",
+	control := newFixtureProxyControl(t)
+	stdin, msgs, stderr, cleanup := startBrokerWithEnv(t, control.env(),
+		"--proxy-path", control.image, "--proxy-engines", "llamacpp",
 	)
 	t.Cleanup(cleanup)
 	go func() {
@@ -110,6 +124,16 @@ func TestLlamaCPPFacadeUsesRouterInventoryAndExactModelIDs(t *testing.T) {
 		"addresses": []string{"127.0.0.1"},
 		"models":    []string{model},
 	})
+	control.ready(t, "llamacpp", proxyPort)
+	control.call(t, "llamacpp", noderec.NotifyNodes, noderec.GetNodesResult{Nodes: []noderec.DirectoryNode{{
+		HostUUID: "llamacpp-owner", IP: "127.0.0.1",
+		Services:       map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceLlamaCPP: {Port: portOfURL(t, upstream.URL)}},
+		ModelsByEngine: map[string][]string{"llamacpp": {model}},
+		Policy: &nodepolicy.Advertisement{Revision: "1", Profiles: []nodepolicy.AdvertisedProfile{{
+			Key: profile, DisplayName: "Router profile", Engine: "llamacpp", Model: model,
+		}}},
+	}}})
+	control.call(t, "llamacpp", "nodes/list", nil)
 
 	client := &http.Client{Timeout: 5 * time.Second}
 	t.Cleanup(client.CloseIdleConnections)
@@ -130,19 +154,13 @@ func TestLlamaCPPFacadeUsesRouterInventoryAndExactModelIDs(t *testing.T) {
 		if err := json.NewDecoder(response.Body).Decode(&list); err != nil {
 			t.Fatalf("decode model list: %v", err)
 		}
-		found := false
-		for _, item := range list.Data {
-			if item.ID == model {
-				found = true
-			}
-		}
 		if response.StatusCode != http.StatusOK || list.Object != "list" ||
-			!found || modelListHits.Load() != hitsBefore+1 {
+			len(list.Data) != 1 || list.Data[0].ID != profile || modelListHits.Load() != hitsBefore {
 			t.Fatalf("model list status=%d body=%+v upstreamHits=%d",
 				response.StatusCode, list, modelListHits.Load())
 		}
 	}
-	t.Run("remaps OpenAI model list to router inventory", func(t *testing.T) {
+	t.Run("lists configured profiles without fetching native inventory", func(t *testing.T) {
 		getModelList(t, "/v1/models")
 	})
 	t.Run("serves router model-list alias", func(t *testing.T) {
@@ -165,12 +183,15 @@ func TestLlamaCPPFacadeUsesRouterInventoryAndExactModelIDs(t *testing.T) {
 		}
 		return response.StatusCode
 	}
-	t.Run("routes only the exact advertised model id", func(t *testing.T) {
-		if status := post(t, model); status != http.StatusOK {
+	t.Run("routes only the exact advertised profile key", func(t *testing.T) {
+		if status := post(t, profile); status != http.StatusOK {
 			t.Fatalf("matching model status = %d, want 200", status)
 		}
-		if status := post(t, "org/router-model-GGUF:q4_k_m"); status != http.StatusNotFound {
+		if status := post(t, "router-profile-q4_k_m"); status != http.StatusNotFound {
 			t.Fatalf("case-changed model status = %d, want 404", status)
+		}
+		if status := post(t, model); status != http.StatusNotFound {
+			t.Fatalf("unprofiled native name status = %d, want 404", status)
 		}
 		if got := inferenceHits.Load(); got != 1 {
 			t.Fatalf("upstream inference hits = %d, want only the exact match", got)
