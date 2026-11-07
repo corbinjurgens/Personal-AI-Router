@@ -163,7 +163,7 @@ func TestSwitchRoutabilityUsesDescriptorProtocolsAndFacadeReadiness(t *testing.T
 
 func TestSwitchDynamicFacadeUsesCanonicalAddress(t *testing.T) {
 	h := newSwitchHarness(t)
-	if err := h.b.switchProxySetLocal(context.Background(), h.pp, "custom", 12345, true); err != nil {
+	if err := h.b.proxySetLocalEndpoint(context.Background(), h.pp, "custom", 12345, true); err != nil {
 		t.Fatal(err)
 	}
 	if calls := h.proxy.methods("e-custom:node/set-local-backend"); len(calls) != 1 {

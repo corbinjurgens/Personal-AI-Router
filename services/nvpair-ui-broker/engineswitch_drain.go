@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"time"
 
-	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/nodepolicy"
 )
@@ -93,7 +92,7 @@ func (b *Broker) drainNode(parent context.Context) (lease *nodeDrainLease, err e
 		if err := b.nodeDrainProxyCurrent(pp, runID); err != nil {
 			return nil, err
 		}
-		if err := switchDrainAck(ctx, pp, profile.Name, true); err != nil {
+		if err := engineDrainAck(ctx, pp, profile.Name, true); err != nil {
 			return nil, err
 		}
 		if err := b.nodeDrainProxyCurrent(pp, runID); err != nil {
@@ -175,7 +174,7 @@ func (l *nodeDrainLease) releaseUnderPush(ctx context.Context, acquiringProxy *p
 			if err := b.nodeDrainProxyCurrent(pp, runID); err != nil {
 				return err
 			}
-			if err := switchDrainAck(ctx, pp, l.added[0], false); err != nil {
+			if err := engineDrainAck(ctx, pp, l.added[0], false); err != nil {
 				return fmt.Errorf("release drain for %s: %w", l.added[0], err)
 			}
 			if err := ctx.Err(); err != nil {
@@ -264,14 +263,14 @@ func (b *Broker) drainEngineForSwitch(parent context.Context, p settings.SwitchP
 	if pp == nil {
 		return fmt.Errorf("proxy unavailable; drain is unverified")
 	}
-	if err := b.switchProxySetLocal(ctx, pp, p.SourceEngine, 0, false); err != nil {
+	if err := b.proxySetLocalEndpoint(ctx, pp, p.SourceEngine, 0, false); err != nil {
 		return err
 	}
 	if !r.acquirePush(ctx) {
 		return ctx.Err()
 	}
 	defer r.releasePush()
-	if err := switchDrainAck(ctx, pp, p.SourceEngine, true); err != nil {
+	if err := engineDrainAck(ctx, pp, p.SourceEngine, true); err != nil {
 		return err
 	}
 	runID, err := b.invalidateSwitchEngines(ctx, pp, p)
@@ -315,26 +314,6 @@ func (b *Broker) drainEngineForSwitch(parent context.Context, p settings.SwitchP
 	}
 }
 
-func switchDrainAck(ctx context.Context, pp *proxyProcess, engine string, drain bool) error {
-	if pp == nil {
-		return fmt.Errorf("proxy unavailable")
-	}
-	raw, rpcErr, err := pp.Call(ctx, nodepolicy.MethodSetEngineDrain, settingsJSON(nodepolicy.SetEngineDrainParams{Engine: engine, Drain: drain}))
-	if err != nil {
-		return err
-	}
-	if rpcErr != nil {
-		return fmt.Errorf("drain refused: %s", rpcErr.Message)
-	}
-	var ack struct {
-		OK bool `json:"ok"`
-	}
-	if json.Unmarshal(raw, &ack) != nil || !ack.OK {
-		return fmt.Errorf("proxy did not acknowledge the engine drain")
-	}
-	return nil
-}
-
 func (b *Broker) invalidateSwitchEngines(ctx context.Context, pp *proxyProcess, p settings.SwitchPrepareRequest) (string, error) {
 	runID := ""
 	for _, engine := range []string{p.SourceEngine, p.TargetEngine} {
@@ -371,36 +350,12 @@ func (b *Broker) releaseSwitchDrain(ctx context.Context, engine string) error {
 	if !draining {
 		return nil
 	}
-	if _, err := b.pushSwitchDrain(ctx, engine, false); err != nil {
+	if _, err := b.pushEngineDrain(ctx, engine, false); err != nil {
 		return err
 	}
 	r.mu.Lock()
 	delete(r.drains, engine)
 	r.mu.Unlock()
-	return nil
-}
-
-func (b *Broker) switchProxySetLocal(ctx context.Context, pp *proxyProcess, engine string, port int, healthy bool) error {
-	if pp == nil {
-		return fmt.Errorf("proxy unavailable")
-	}
-	credential := ""
-	if healthy && port > 0 {
-		credential = b.localEngineCredential(engine, port)
-	}
-	raw, rpcErr, err := pp.Call(ctx, engines.AddressMethod(engine, "node/set-local-backend"), settingsJSON(proxyLocalBackend{Engine: engine, Host: "127.0.0.1", Port: port, Healthy: healthy, Credential: credential}))
-	if err != nil {
-		return err
-	}
-	if rpcErr != nil {
-		return fmt.Errorf("local inference endpoint refused: %s", rpcErr.Message)
-	}
-	var ack struct {
-		OK bool `json:"ok"`
-	}
-	if json.Unmarshal(raw, &ack) != nil || !ack.OK {
-		return fmt.Errorf("local inference endpoint was not acknowledged")
-	}
 	return nil
 }
 
@@ -446,7 +401,7 @@ func (b *Broker) replaySwitchInvalidations(ctx context.Context, pp *proxyProcess
 		r.mu.Lock()
 		r.drains[receipt.Request.SourceEngine] = true
 		r.mu.Unlock()
-		if err := switchDrainAck(ctx, pp, receipt.Request.SourceEngine, true); err != nil {
+		if err := engineDrainAck(ctx, pp, receipt.Request.SourceEngine, true); err != nil {
 			return err
 		}
 		if _, err := b.invalidateSwitchEngines(ctx, pp, settings.SwitchPrepareRequest{OperationID: receipt.RequestID, SourceEngine: receipt.Request.SourceEngine, TargetEngine: receipt.Request.TargetEngine}); err != nil {

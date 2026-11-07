@@ -1505,7 +1505,7 @@ func (b *Broker) runModelSettingsOperationLocked(ctx context.Context, engine str
 	}
 	if op.native() {
 		b.engineConfigMu.Unlock()
-		_, err = b.pushSwitchDrain(ctx, engine, false)
+		_, err = b.pushEngineDrain(ctx, engine, false)
 		b.engineConfigMu.Lock()
 		if err != nil {
 			return fail(err)
@@ -1521,7 +1521,7 @@ func (b *Broker) runModelSettingsOperationLocked(ctx context.Context, engine str
 		record.Resume = resume
 		if op.native() {
 			b.engineConfigMu.Unlock()
-			_, _ = b.pushSwitchDrain(ctx, engine, true)
+			_, _ = b.pushEngineDrain(ctx, engine, true)
 			b.engineConfigMu.Lock()
 		}
 		return fail(err)

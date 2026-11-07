@@ -15,8 +15,80 @@ import (
 	"log/slog"
 	"time"
 
+	"nvpair-shared/engines"
 	"nvpair-shared/nodepolicy"
 )
+
+func engineDrainAck(ctx context.Context, pp *proxyProcess, engine string, drain bool) error {
+	if pp == nil {
+		return fmt.Errorf("proxy unavailable")
+	}
+	raw, rpcErr, err := pp.Call(ctx, nodepolicy.MethodSetEngineDrain, settingsJSON(nodepolicy.SetEngineDrainParams{Engine: engine, Drain: drain}))
+	if err != nil {
+		return err
+	}
+	if rpcErr != nil {
+		return fmt.Errorf("drain refused: %s", rpcErr.Message)
+	}
+	var ack struct {
+		OK bool `json:"ok"`
+	}
+	if json.Unmarshal(raw, &ack) != nil || !ack.OK {
+		return fmt.Errorf("proxy did not acknowledge the engine drain")
+	}
+	return nil
+}
+
+func (b *Broker) proxySetLocalEndpoint(ctx context.Context, pp *proxyProcess, engine string, port int, healthy bool) error {
+	if pp == nil {
+		return fmt.Errorf("proxy unavailable")
+	}
+	credential := ""
+	if healthy && port > 0 {
+		credential = b.localEngineCredential(engine, port)
+	}
+	raw, rpcErr, err := pp.Call(ctx, engines.AddressMethod(engine, "node/set-local-backend"), settingsJSON(proxyLocalBackend{Engine: engine, Host: "127.0.0.1", Port: port, Healthy: healthy, Credential: credential}))
+	if err != nil {
+		return err
+	}
+	if rpcErr != nil {
+		return fmt.Errorf("local inference endpoint refused: %s", rpcErr.Message)
+	}
+	var ack struct {
+		OK bool `json:"ok"`
+	}
+	if json.Unmarshal(raw, &ack) != nil || !ack.OK {
+		return fmt.Errorf("local inference endpoint was not acknowledged")
+	}
+	return nil
+}
+
+// pushEngineDrain returns the actual acknowledgement and validates the live
+// incarnation. Its caller's deadline covers push-slot contention as well.
+func (b *Broker) pushEngineDrain(ctx context.Context, engine string, drain bool) (string, error) {
+	r := b.nodePolicyRuntime()
+	if !r.acquirePush(ctx) {
+		return "", ctx.Err()
+	}
+	defer r.releasePush()
+	pp := b.policyProxy()
+	r.mu.Lock()
+	runID, incarnation := r.runID, r.incarnation
+	r.mu.Unlock()
+	if pp == nil || pp != incarnation || runID == "" {
+		return "", fmt.Errorf("proxy incarnation is unverified")
+	}
+	if err := engineDrainAck(ctx, pp, engine, drain); err != nil {
+		return "", err
+	}
+	r.mu.Lock()
+	current := r.incarnation == pp && r.runID == runID
+	r.mu.Unlock()
+	if !current || b.policyProxy() != pp {
+		return "", fmt.Errorf("proxy incarnation changed during drain push")
+	}
+	return runID, nil
+}
 
 // Typed settings retain this fence after every uncertain or failed operation.
 // Only a successful operation releases it. A timeout may interrupt active work
@@ -34,10 +106,10 @@ func (b *Broker) drainModelSettings(ctx context.Context, engine string, wait boo
 	r.drains[engine] = true
 	r.mu.Unlock()
 	pp := b.policyProxy()
-	if err := b.switchProxySetLocal(ctx, pp, engine, 0, false); err != nil {
+	if err := b.proxySetLocalEndpoint(ctx, pp, engine, 0, false); err != nil {
 		return err
 	}
-	run, err := b.pushSwitchDrain(ctx, engine, true)
+	run, err := b.pushEngineDrain(ctx, engine, true)
 	if err != nil {
 		return err
 	}

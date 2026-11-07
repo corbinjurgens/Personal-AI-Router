@@ -1179,7 +1179,7 @@ func (b *Broker) publishSwitchTarget(ctx context.Context, engine string) error {
 	if !launch.Running || launch.EffectivePort < 1 || launch.EffectivePort == port {
 		return fmt.Errorf("target server endpoint is not ready")
 	}
-	if err := b.switchProxySetLocal(ctx, p, engine, launch.EffectivePort, true); err != nil {
+	if err := b.proxySetLocalEndpoint(ctx, p, engine, launch.EffectivePort, true); err != nil {
 		return err
 	}
 	profile, _ := b.frontedEngineProfile(engine)

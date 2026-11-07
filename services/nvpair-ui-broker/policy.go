@@ -1601,33 +1601,6 @@ func (b *Broker) replayPolicyToProxy(ctx context.Context, pp *proxyProcess) bool
 	return true
 }
 
-// pushSwitchDrain returns the actual acknowledgement and validates the live
-// incarnation. Its caller's deadline covers push-slot contention as well.
-func (b *Broker) pushSwitchDrain(ctx context.Context, engine string, drain bool) (string, error) {
-	r := b.nodePolicyRuntime()
-	if !r.acquirePush(ctx) {
-		return "", ctx.Err()
-	}
-	defer r.releasePush()
-	pp := b.policyProxy()
-	r.mu.Lock()
-	runID, incarnation := r.runID, r.incarnation
-	r.mu.Unlock()
-	if pp == nil || pp != incarnation || runID == "" {
-		return "", fmt.Errorf("proxy incarnation is unverified")
-	}
-	if err := switchDrainAck(ctx, pp, engine, drain); err != nil {
-		return "", err
-	}
-	r.mu.Lock()
-	current := r.incarnation == pp && r.runID == runID
-	r.mu.Unlock()
-	if !current || b.policyProxy() != pp {
-		return "", fmt.Errorf("proxy incarnation changed during drain push")
-	}
-	return runID, nil
-}
-
 // sendPolicyStateLocked sends the current state of one kind. Caller holds the
 // push slot. It reports whether the answer changed what the broker reports of
 // activation, for a caller that has no result of its own to announce it in. An older proxy without the method only logs.
