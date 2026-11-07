@@ -14,6 +14,7 @@ import {
 import type { ModelSettingsIdentity } from '@/shared/types/model-config'
 import { EngineManagerNames } from '@/shared/constants/engines'
 import ModelLoadSettings from './ModelLoadSettings'
+import ModelMemoryDiagnostic from './ModelMemoryDiagnostic'
 import {
     engineSettingsKey,
     modelSettingsKey,
@@ -196,6 +197,22 @@ export default function ModelSettingsPanel({
     )
     const loadDirty =
         !!loadDraft?.change?.load || !!loadDraft?.change?.policy || !!loadDraft?.change?.remove
+    const diagnosticKey = `${targetId}:${identity.engine}:${identity.profileKey ?? ''}`
+    const diagnosticInspection = useEngineSettingsStore(
+        state => state.modelDrafts[diagnosticKey]?.inspection
+    )
+    const appliedDiagnosticProfile =
+        !creatingProfile &&
+        Object.values(settingsEntries).some(
+            item =>
+                item.snapshot?.nodeId === targetId &&
+                item.snapshot.engine === identity.engine &&
+                !item.unavailable &&
+                item.snapshot.settings.modelLoads?.some(
+                    load =>
+                        load.profileKey === identity.profileKey && load.modelId === identity.model
+                )
+        )
     const loadAuthority = JSON.stringify([
         targetId,
         identity,
@@ -485,6 +502,18 @@ export default function ModelSettingsPanel({
                             </Text>
                         )}
                     </>
+                )}
+                {identity.model && (
+                    <ModelMemoryDiagnostic
+                        key={diagnosticKey}
+                        nodeId={targetId}
+                        engine={identity.engine}
+                        modelId={identity.model}
+                        profileKey={identity.profileKey}
+                        inspection={diagnosticInspection}
+                        applied={appliedDiagnosticProfile}
+                        disabled={loadDirty || text !== savedText}
+                    />
                 )}
                 {(selected || (settingsEngine && identity.model)) &&
                     (renderCopy ? (

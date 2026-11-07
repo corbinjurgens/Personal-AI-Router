@@ -21,6 +21,12 @@ import getErrorString from '@/shared/utils/get-error-string'
 import { modelPolicyPatch } from '@/shared/utils/node-policy-model-copy'
 import { isValidProfileKey } from '@/shared/utils/node-policy-model-settings'
 import { serviceErrorCode } from '@/ui/api/service-transport'
+import type {
+    DiagnosticPreview,
+    DiagnosticPreviewRequest,
+    DiagnosticRun,
+    DiagnosticStartRequest
+} from '@/shared/types/model-diagnostic'
 import {
     INVALID_PARAMS_CODE,
     LOCAL_VETO_CODE,
@@ -38,6 +44,13 @@ interface SettingsEntry {
     arrival: number
 }
 interface SettingsStore {
+    diagnostics: Record<string, DiagnosticEntry>
+    previewDiagnostic: (request: DiagnosticPreviewRequest) => Promise<void>
+    startDiagnostic: (request: DiagnosticStartRequest) => Promise<void>
+    cancelDiagnostic: (nodeId: string) => Promise<void>
+    readDiagnostic: (nodeId: string) => Promise<void>
+    receiveDiagnostic: (nodeId: string, run: DiagnosticRun) => void
+    disconnectDiagnostic: (nodeId: string) => void
     entries: Record<string, SettingsEntry>
     receive: (snapshot: EngineSettingsSnapshot) => void
     disconnect: (nodeId?: string) => void
@@ -69,6 +82,19 @@ interface SettingsStore {
         clear?: boolean
     ) => Promise<void>
     readModelOutcome: (key: string) => Promise<void>
+}
+
+interface DiagnosticEntry {
+    preview?: DiagnosticPreview
+    previewRequest?: DiagnosticPreviewRequest
+    refusal?: string
+    message?: string
+    run?: DiagnosticRun
+    operation?: 'preview' | 'start' | 'cancel'
+    operationId: number
+    arrival: number
+    current: boolean
+    reading?: boolean
 }
 
 interface ModelDraft {
@@ -331,6 +357,253 @@ async function authorizeModel(
 export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
     entries: {},
     modelDrafts: {},
+    diagnostics: {},
+    previewDiagnostic: async request => {
+        const nodeId = request.nodeId ?? useConnectionStore.getState().selfId
+        if (!nodeId) return
+        const previous = get().diagnostics[nodeId]
+        if (previous?.operation && previous.operation !== 'preview') return
+        const operationId = (previous?.operationId ?? 0) + 1
+        set(state => ({
+            diagnostics: {
+                ...state.diagnostics,
+                [nodeId]: {
+                    ...previous,
+                    arrival: previous?.arrival ?? 0,
+                    current: previous?.current ?? false,
+                    preview: undefined,
+                    previewRequest: request,
+                    refusal: undefined,
+                    message: undefined,
+                    operation: 'preview',
+                    operationId
+                }
+            }
+        }))
+        try {
+            const preview = await window.pairApi.engines.diagnosticPreview(request)
+            if (get().diagnostics[nodeId]?.operationId !== operationId) return
+            set(state => ({
+                diagnostics: {
+                    ...state.diagnostics,
+                    [nodeId]: { ...state.diagnostics[nodeId], preview, operation: undefined }
+                }
+            }))
+            window.setTimeout(
+                () => {
+                    if (get().diagnostics[nodeId]?.preview?.previewId !== preview.previewId) return
+                    set(state => ({
+                        diagnostics: {
+                            ...state.diagnostics,
+                            [nodeId]: {
+                                ...state.diagnostics[nodeId],
+                                preview: undefined,
+                                refusal: 'Measurement preview expired. Refresh it before measuring.'
+                            }
+                        }
+                    }))
+                },
+                Math.max(0, Date.parse(preview.expiresAt) - Date.now())
+            )
+        } catch (error) {
+            if (get().diagnostics[nodeId]?.operationId !== operationId) return
+            set(state => ({
+                diagnostics: {
+                    ...state.diagnostics,
+                    [nodeId]: {
+                        ...state.diagnostics[nodeId],
+                        operation: undefined,
+                        refusal: getErrorString(error)
+                    }
+                }
+            }))
+        }
+    },
+    startDiagnostic: async request => {
+        const nodeId = request.nodeId ?? useConnectionStore.getState().selfId
+        if (!nodeId) return
+        const entry = get().diagnostics[nodeId]
+        if (
+            !entry?.current ||
+            entry.operation ||
+            !request.consent ||
+            !entry.preview ||
+            entry.preview.previewId !== request.previewId ||
+            entry.previewRequest?.engine !== request.engine ||
+            entry.previewRequest.nodeId !== request.nodeId ||
+            entry.previewRequest.modelId !== request.modelId ||
+            entry.previewRequest.profileKey !== request.profileKey ||
+            Date.parse(entry.preview.expiresAt) <= Date.now()
+        )
+            return
+        const operationId = entry.operationId + 1
+        set(state => ({
+            diagnostics: {
+                ...state.diagnostics,
+                [nodeId]: {
+                    ...entry,
+                    operation: 'start',
+                    operationId,
+                    preview: undefined,
+                    message: undefined
+                }
+            }
+        }))
+        try {
+            // Command receipts do not replace service snapshots or newer pushes.
+            await window.pairApi.engines.diagnosticStart(request)
+        } catch (error) {
+            if (get().diagnostics[nodeId]?.operationId === operationId)
+                set(state => ({
+                    diagnostics: {
+                        ...state.diagnostics,
+                        [nodeId]: { ...state.diagnostics[nodeId], message: getErrorString(error) }
+                    }
+                }))
+        } finally {
+            if (get().diagnostics[nodeId]?.operationId === operationId) {
+                await get().readDiagnostic(nodeId)
+                if (get().diagnostics[nodeId]?.operationId === operationId)
+                    set(state => ({
+                        diagnostics: {
+                            ...state.diagnostics,
+                            [nodeId]: { ...state.diagnostics[nodeId], operation: undefined }
+                        }
+                    }))
+            }
+        }
+    },
+    cancelDiagnostic: async nodeId => {
+        const entry = get().diagnostics[nodeId]
+        if (
+            !entry?.current ||
+            (entry.operation && entry.operation !== 'start') ||
+            !entry.run ||
+            (entry.run.outcome !== 'running' && entry.run.outcome !== 'cleanup-failed')
+        )
+            return
+        const operationId = entry.operationId + 1
+        set(state => ({
+            diagnostics: {
+                ...state.diagnostics,
+                [nodeId]: { ...entry, operation: 'cancel', operationId, message: undefined }
+            }
+        }))
+        try {
+            await window.pairApi.engines.diagnosticCancel({ nodeId, runId: entry.run.runId })
+        } catch (error) {
+            if (get().diagnostics[nodeId]?.operationId === operationId)
+                set(state => ({
+                    diagnostics: {
+                        ...state.diagnostics,
+                        [nodeId]: { ...state.diagnostics[nodeId], message: getErrorString(error) }
+                    }
+                }))
+        } finally {
+            if (get().diagnostics[nodeId]?.operationId === operationId) {
+                await get().readDiagnostic(nodeId)
+                if (get().diagnostics[nodeId]?.operationId === operationId)
+                    set(state => ({
+                        diagnostics: {
+                            ...state.diagnostics,
+                            [nodeId]: { ...state.diagnostics[nodeId], operation: undefined }
+                        }
+                    }))
+            }
+        }
+    },
+    readDiagnostic: async nodeId => {
+        const entry = get().diagnostics[nodeId]
+        if (entry?.reading) return
+        const arrival = (entry?.arrival ?? 0) + 1
+        set(state => ({
+            diagnostics: {
+                ...state.diagnostics,
+                [nodeId]: {
+                    ...entry,
+                    arrival,
+                    operationId: entry?.operationId ?? 0,
+                    current: entry?.current ?? false,
+                    reading: true
+                }
+            }
+        }))
+        try {
+            const run = await window.pairApi.engines.diagnosticStatus({ nodeId })
+            if (get().diagnostics[nodeId]?.arrival !== arrival) return
+            set(state => ({
+                diagnostics: {
+                    ...state.diagnostics,
+                    [nodeId]: {
+                        ...state.diagnostics[nodeId],
+                        current: true,
+                        reading: false,
+                        run:
+                            run ??
+                            (entry?.run?.outcome === 'running' ||
+                            entry?.run?.outcome === 'cleanup-failed'
+                                ? undefined
+                                : entry?.run)
+                    }
+                }
+            }))
+        } catch (error) {
+            if (get().diagnostics[nodeId]?.arrival !== arrival) return
+            set(state => ({
+                diagnostics: {
+                    ...state.diagnostics,
+                    [nodeId]: {
+                        ...state.diagnostics[nodeId],
+                        current: false,
+                        reading: false,
+                        message: getErrorString(error)
+                    }
+                }
+            }))
+        }
+    },
+    receiveDiagnostic: (nodeId, run) => {
+        const entry = get().diagnostics[nodeId]
+        if (
+            entry?.run?.runId === run.runId &&
+            (entry.run.elapsedMs > run.elapsedMs ||
+                (entry.run.outcome !== 'running' &&
+                    entry.run.outcome !== 'cleanup-failed' &&
+                    run.outcome === 'running'))
+        )
+            return
+        set(state => ({
+            diagnostics: {
+                ...state.diagnostics,
+                [nodeId]: {
+                    ...entry,
+                    run,
+                    current: true,
+                    reading: false,
+                    arrival: (entry?.arrival ?? 0) + 1,
+                    operationId: entry?.operationId ?? 0,
+                    preview: undefined
+                }
+            }
+        }))
+    },
+    disconnectDiagnostic: nodeId => {
+        const entry = get().diagnostics[nodeId]
+        set(state => ({
+            diagnostics: {
+                ...state.diagnostics,
+                [nodeId]: {
+                    ...entry,
+                    current: false,
+                    reading: false,
+                    preview: undefined,
+                    operation: undefined,
+                    operationId: (entry?.operationId ?? 0) + 1,
+                    arrival: (entry?.arrival ?? 0) + 1
+                }
+            }
+        }))
+    },
     editModel: (key, change) =>
         set(state => ({
             modelDrafts: {
@@ -1039,6 +1312,60 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
         }
     }
 }))
+
+const diagnosticWatchers = new Map<string, { consumers: number; stop: () => void }>()
+
+/** A node-scoped feature watcher shares active-run discovery across open panels. */
+export function watchModelDiagnostic(nodeId: string): () => void {
+    let watcher = diagnosticWatchers.get(nodeId)
+    if (!watcher) {
+        let live = true
+        const read = () => {
+            if (live && useConnectionStore.getState().connected)
+                void useEngineSettingsStore.getState().readDiagnostic(nodeId)
+        }
+        // Subscribe before active-run discovery so a delayed baseline cannot hide a push.
+        const stopPush = window.pairApi.engines.onDiagnosticChanged(run => {
+            const source = run.nodeId ?? useConnectionStore.getState().selfId
+            if (live && source === nodeId && useConnectionStore.getState().connected)
+                useEngineSettingsStore.getState().receiveDiagnostic(nodeId, run)
+        })
+        const stopConnection = useConnectionStore.subscribe((state, previous) => {
+            if (state.connected === previous.connected && state.selfId === previous.selfId) return
+            useEngineSettingsStore.getState().disconnectDiagnostic(nodeId)
+            read()
+        })
+        const stopSettings = window.pairApi.engines.onSettingsDisconnected(target => {
+            if (target.nodeId === nodeId)
+                useEngineSettingsStore.getState().disconnectDiagnostic(nodeId)
+        })
+        // Remote targets do not always deliver pushes to the origin window.
+        const timer = window.setInterval(() => {
+            if (nodeId !== useConnectionStore.getState().selfId) read()
+        }, 2000)
+        watcher = {
+            consumers: 0,
+            stop: () => {
+                live = false
+                stopPush()
+                stopConnection()
+                stopSettings()
+                window.clearInterval(timer)
+                useEngineSettingsStore.getState().disconnectDiagnostic(nodeId)
+            }
+        }
+        diagnosticWatchers.set(nodeId, watcher)
+        read()
+    }
+    watcher.consumers++
+    const activeWatcher = watcher
+    return () => {
+        if (--activeWatcher.consumers === 0) {
+            activeWatcher.stop()
+            diagnosticWatchers.delete(nodeId)
+        }
+    }
+}
 
 let consumers = 0
 let unsubscribe: Array<() => void> = []
