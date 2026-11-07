@@ -234,7 +234,8 @@ func (f *facade) handleClusterIngress(w http.ResponseWriter, r *http.Request) {
 // Catalogs use the policy catalog; other routes retain engine passthrough.
 func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer string) {
 	start := time.Now()
-	if isInferenceRequest(f.profile, r.Method, r.URL.Path) && !f.host.routingIdentityReady() {
+	inference := isInferenceRequest(f.profile, r.Method, r.URL.Path)
+	if inference && !f.host.routingIdentityReady() {
 		writeIngressError(w, http.StatusServiceUnavailable, "identity-unavailable", "routing identity is unavailable")
 		return
 	}
@@ -247,11 +248,38 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 		writeIngressError(w, http.StatusForbidden, "strict-admission", "strict request origin does not match the authenticated peer")
 		return
 	}
-	if strict != nil && !isInferenceRequest(f.profile, r.Method, r.URL.Path) {
+	var controlBuffers *ownedInferenceBuffers
+	transferred := false
+	defer func() {
+		if controlBuffers != nil && !transferred {
+			controlBuffers.close()
+		}
+	}()
+	if !inference && r.Body != nil && r.Body != http.NoBody && r.Method != http.MethodOptions {
+		r, controlBuffers = f.host.ownInferenceBuffers(r)
+		bodyCtx, stopBody := context.WithDeadline(r.Context(), start.Add(jobDeadline))
+		body, model, err := bufferInferenceBody(w, r.WithContext(bodyCtx), f.host.requestBodyLimit())
+		stopBody()
+		if err != nil {
+			writeIngressError(w, bufferRequestStatus(err), "request-body", "request body could not be buffered")
+			return
+		}
+		inference = isInferenceRequest(f.profile, r.Method, r.URL.Path, body)
+		if inference {
+			r = r.WithContext(context.WithValue(r.Context(), bufferedModelBodyKey{}, bufferedModelBody{raw: body, model: model}))
+			if !f.host.routingIdentityReady() {
+				writeIngressError(w, http.StatusServiceUnavailable, "identity-unavailable", "routing identity is unavailable")
+				return
+			}
+		} else {
+			r.Body = io.NopCloser(bytes.NewReader(body))
+		}
+	}
+	if strict != nil && !inference {
 		writeIngressError(w, http.StatusBadRequest, "strict-admission", "strict admission requires inference")
 		return
 	}
-	if !isInferenceRequest(f.profile, r.Method, r.URL.Path) {
+	if !inference {
 		if route, ok := f.profile.routeFor(r.Method, r.URL.Path); ok && route.Role.isModelList() {
 			_, _ = f.serveIngressModelList(w, r)
 			return
@@ -269,7 +297,11 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 	}
 
 	r = r.WithContext(context.WithValue(r.Context(), routingDeadlineContextKey{}, start.Add(jobDeadline)))
-	r, buffers := f.host.ownInferenceBuffers(r)
+	buffers := controlBuffers
+	if buffers == nil {
+		r, buffers = f.host.ownInferenceBuffers(r)
+	}
+	transferred = true
 	w = &inferenceErrorWriter{ResponseWriter: w, ctx: r.Context()}
 	defer buffers.close()
 	ctx, cancel := context.WithCancel(r.Context())

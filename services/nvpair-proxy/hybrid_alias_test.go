@@ -256,7 +256,7 @@ func assertRefusedWithoutSideEffects(t *testing.T, tc engineCase, fx *tierFixtur
 }
 
 // The engine facade refuses :api and :local overrides on every route. A bare
-// declared role is accepted only on a classified inference route.
+// declared role selects inference even on a previously unclassified route.
 func TestAliasRequestsAreRefusedBeforeAnySideEffect(t *testing.T) {
 	test := func(t *testing.T, tc engineCase, path, model, wantReason string) {
 		t.Helper()
@@ -272,15 +272,10 @@ func TestAliasRequestsAreRefusedBeforeAnySideEffect(t *testing.T) {
 				t.Run(path+" "+alias, func(t *testing.T) { test(t, tc, path, alias, aliasReasonNotInferenceReady) })
 			}
 		}
-		// Not classified as inference, so the proxy would forward the alias
-		// to the engine as if it were a model.
+		// Unlisted model-bearing paths also reject hybrid override syntax.
 		for _, path := range []string{"/v1/responses", "/props", "/unknown"} {
-			for _, alias := range allAliases {
-				reason := aliasReasonUnsupportedUse
-				if slices.Contains(suffixAliases, alias) {
-					reason = aliasReasonNotInferenceReady
-				}
-				t.Run(path+" "+alias, func(t *testing.T) { test(t, tc, path, alias, reason) })
+			for _, alias := range suffixAliases {
+				t.Run(path+" "+alias, func(t *testing.T) { test(t, tc, path, alias, aliasReasonNotInferenceReady) })
 			}
 		}
 	})
@@ -293,8 +288,8 @@ func TestAliasRequestsAreRefusedBeforeAnySideEffect(t *testing.T) {
 			}
 		}
 		for _, path := range []string{"/v1/responses", "/api/v0/chat/completions"} {
-			for _, alias := range bareAliases {
-				t.Run(path+" "+alias, func(t *testing.T) { test(t, tc, path, alias, aliasReasonUnsupportedUse) })
+			for _, alias := range suffixAliases {
+				t.Run(path+" "+alias, func(t *testing.T) { test(t, tc, path, alias, aliasReasonNotInferenceReady) })
 			}
 		}
 	})

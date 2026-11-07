@@ -289,7 +289,7 @@ func TestUnifiedDispatchPassthroughBeforeOwner(t *testing.T) {
 			first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				firstCalls.Add(1)
 				body, err := io.ReadAll(r.Body)
-				if err != nil || string(body) != `{"model":"ignored","value":1}` {
+				if err != nil || string(body) != `{"value":1}` {
 					t.Errorf("control body changed: %q %v", body, err)
 				}
 				w.WriteHeader(int(firstStatus))
@@ -310,9 +310,9 @@ func TestUnifiedDispatchPassthroughBeforeOwner(t *testing.T) {
 			p := newTestProxy(tc.profile, NewCodec(writer), discovery, 0)
 			p.SetPriority([]string{"a", "b"})
 			p.requestSequence = math.MaxInt64
-			p.buffers = bufferTestBudget(t, 0, 0)
+			p.buffers = bufferTestBudget(t, 256<<10, 0)
 			recorder := httptest.NewRecorder()
-			p.soleFacade().handleHTTP(recorder, httptest.NewRequest(http.MethodPost, "/control/test", strings.NewReader(`{"model":"ignored","value":1}`)))
+			p.soleFacade().handleHTTP(recorder, httptest.NewRequest(http.MethodPost, "/control/test", strings.NewReader(`{"value":1}`)))
 			if recorder.Code != int(wantStatus) || firstCalls.Load() != 1 || secondCalls.Load() != wantSecond {
 				t.Fatalf("single pass status=%d calls=%d/%d, want %d and 1/%d", recorder.Code, firstCalls.Load(), secondCalls.Load(), wantStatus, wantSecond)
 			}

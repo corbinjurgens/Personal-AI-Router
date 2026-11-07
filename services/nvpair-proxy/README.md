@@ -295,11 +295,15 @@ and the health crash key are matched against each other, so they move together
 | Standalone port, used when `port` is omitted | 8080 |
 | Persisted-port file (declared, not derived) | `llamacpp-proxy-port.json` |
 | Model-list routes | `GET /models`, `GET /v1/models` (OpenAI; browser permission probes use upstream `/models`) |
-| Inference routes | `/completion`, `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings` |
+| Model request routes | Shared inference protocol routes in `engines.go`, plus any request body selecting `model` |
 | Model naming | identifiers compared byte for byte |
 
-The route table is a **classifier, not an allowlist**. An unlisted path is
-forwarded verbatim, including engine controls and `OPTIONS` preflights.
+The route table is a classifier. Inference routes from every registered protocol
+require role or profile-key admission, even on a facade with a narrower protocol
+declaration. An unlisted request with a top-level JSON `model` enters that same
+admission path. Controls without a model selector retain passthrough, including
+`OPTIONS` permission queries. Bodies inspected for classification use the shared
+buffer budget; promotion to inference reuses those owned bytes.
 
 The broker enables table-engine facades by default. Local llama.cpp-compatible
 clients use `8080`, while the managed `llama-server` stays on `8081`.
@@ -690,13 +694,12 @@ for the independent `localOnly` edit lock, desktop controls and precedence examp
   alternate selector: a top-level JSON body key equal under case folding
   to `model` or `name` (repeated keys included), a `model` query parameter, or
   the remainder of a `/v1/models/` path; or when it names
-  a bare declared role in the body `model` on a route that is not a classified inference
-  route (Responses, an unclassified native or passthrough route), or with
-  surrounding whitespace. Nothing else is checked: nested keys, other fields and
+  a bare declared role in the body `model` with surrounding whitespace.
+  Nothing else is checked: nested keys, other fields and
   other paths are not. A bare tier in `name`, a query parameter or a model path
   keeps its existing behavior. An undeclared canonical body model remains concrete.
-  A bare declared role exactly spelled in `model` on a classified inference
-  route takes the facade's local role path. Unified listener inference uses
+  A bare declared role exactly spelled in `model` takes the facade's local role
+  path, including native aliases and unlisted model-bearing paths. Unified listener inference uses
   the hybrid entry below. Cluster ingress has its own listener boundary.
 - **Routing listener.** When the active policy sets `routing.listener.enabled`
   with a `port`, the process itself (not an engine facade) binds

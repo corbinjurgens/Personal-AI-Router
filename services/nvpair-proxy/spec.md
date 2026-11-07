@@ -1830,14 +1830,18 @@ built-in, default or protected names and no cluster role store.
     router read is covered; as any `model` query parameter value (llama.cpp
     `GET /props?model=`); or as the whole remainder of a `/v1/models/` path
     (`alias_not_inference_ready`);
-  - a bare declared role in the body `model` on a route that is not a classified
-    inference route (Responses, an unclassified native or passthrough path), or
-    a bare tier in `model` with surrounding whitespace
+  - a bare tier in `model` with surrounding whitespace
     (`unsupported_alias_use`).
   Nested keys, other fields and other paths are not checked. A bare tier in
   `name`, a query parameter or a model path keeps today's behavior. A bare tier
-  spelled exactly in `model` on a classified inference route (including native
-  and Messages routes) takes the local role path above on facade entry; unified
+  spelled exactly in `model` takes the local role path above on facade entry,
+  including Responses, Messages, native aliases and unlisted model-bearing
+  paths. `isInferenceRequest` derives registered paths from every protocol's
+  route table; a top-level JSON `model` also requires admission when the path
+  is not registered. Local and peer ingress use the same decision. Bodies read
+  to make this decision use the shared buffer owner and transfer into inference
+  without a second read or allocation. Model-less controls retain passthrough;
+  OPTIONS remains a browser permission query. Unified
   listener inference uses §12.6. An undeclared canonical model remains concrete;
   alternate selectors cannot smuggle override syntax past it. Cluster ingress
   (§7) has its own listener boundary.

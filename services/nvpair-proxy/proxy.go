@@ -157,13 +157,32 @@ const (
 // isInferenceRequest reports whether a request should be tracked as a cluster
 // workload. Health checks, model listings and other control traffic are
 // deliberately excluded so we don't flood the cluster with non-inference
-// noise; the engine's profile declares which paths qualify.
+// noise. Model selection is an admission boundary even when the entry facade
+// does not declare that protocol, or a new endpoint is not registered yet.
 //
 // Kept a free function taking the profile rather than a method, so the
 // classification is testable without constructing a Proxy.
-func isInferenceRequest(p engineProfile, method, path string) bool {
+func isInferenceRequest(p engineProfile, method, path string, bodies ...[]byte) bool {
 	role, ok := p.roleFor(method, path)
-	return ok && role == roleInferencePOST
+	if ok && role == roleInferencePOST {
+		return true
+	}
+	for _, routes := range protocolRoutes {
+		for _, route := range routes {
+			if route.Role == roleInferencePOST && route.Role.method() == method && route.Path == path {
+				return true
+			}
+		}
+	}
+	// OPTIONS remains a permission query, even when a caller supplies a body.
+	if method == http.MethodOptions || len(bodies) == 0 {
+		return false
+	}
+	modelSelected := false
+	visitObject(bodies[0], func(key []byte, _, _ int) {
+		modelSelected = modelSelected || jsonKeyEqual(key, "model", true)
+	})
+	return modelSelected
 }
 
 // Workload mirrors the workload-manager spec 6 object. The proxy populates
@@ -239,6 +258,12 @@ func (p *Proxy) requestBodyLimit() int64 {
 // parseable. The caller restores r.Body from the returned bytes before each
 // forward attempt.
 func bufferBodyAndModel(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, string, error) {
+	if body, ok := r.Context().Value(bufferedModelBodyKey{}).(bufferedModelBody); ok {
+		if limit < 0 || int64(len(body.raw)) > limit {
+			return nil, "", &bufferLimitError{}
+		}
+		return body.raw, body.model, nil
+	}
 	if owner := inferenceBuffers(r.Context()); owner != nil {
 		return owner.readBody(r, limit)
 	}

@@ -101,6 +101,29 @@ var llamaCPPBaseRoutes = []route{
 	{Path: "/models", Role: roleModelListOpenAIGET},
 	{Path: "/v1/models", UpstreamPath: "/models", Role: roleModelListOpenAIGET},
 	{Path: "/completion", Role: roleInferencePOST},
+	{Path: "/completions", Role: roleInferencePOST},
+	{Path: "/chat/completions", Role: roleInferencePOST},
+	{Path: "/infill", Role: roleInferencePOST},
+	{Path: "/embedding", Role: roleInferencePOST},
+	{Path: "/embeddings", Role: roleInferencePOST},
+	{Path: "/rerank", Role: roleInferencePOST},
+	{Path: "/reranking", Role: roleInferencePOST},
+	{Path: "/v1/rerank", Role: roleInferencePOST},
+	{Path: "/v1/reranking", Role: roleInferencePOST},
+	{Path: "/responses", Role: roleInferencePOST},
+	{Path: "/tts", Role: roleInferencePOST},
+	{Path: "/audio/transcriptions", Role: roleInferencePOST},
+	{Path: "/v1/audio/transcriptions", Role: roleInferencePOST},
+	{Path: "/v1/chat/completions/control", Role: roleInferencePOST},
+	{Path: "/v1/systemone", Role: roleInferencePOST},
+	{Path: "/tokenize", Role: roleInferencePOST},
+	{Path: "/detokenize", Role: roleInferencePOST},
+	{Path: "/apply-template", Role: roleInferencePOST},
+	{Path: "/chat/completions/input_tokens", Role: roleInferencePOST},
+	{Path: "/v1/chat/completions/input_tokens", Role: roleInferencePOST},
+	{Path: "/responses/input_tokens", Role: roleInferencePOST},
+	{Path: "/v1/responses/input_tokens", Role: roleInferencePOST},
+	{Path: "/v1/messages/count_tokens", Role: roleInferencePOST},
 }
 
 // openAIInferenceRoutes is the OpenAI-compatible inference surface.
@@ -108,6 +131,7 @@ var openAIInferenceRoutes = []route{
 	{Path: "/v1/chat/completions", Role: roleInferencePOST},
 	{Path: "/v1/completions", Role: roleInferencePOST},
 	{Path: "/v1/embeddings", Role: roleInferencePOST},
+	{Path: "/v1/responses", Role: roleInferencePOST},
 }
 
 // anthropicInferenceRoutes is the Anthropic-compatible inference surface.

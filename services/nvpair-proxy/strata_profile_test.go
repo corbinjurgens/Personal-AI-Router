@@ -290,10 +290,10 @@ func TestStrataRouteClassification(t *testing.T) {
 		{name: "model list", method: http.MethodGet, path: "/v1/models", wantRole: roleModelListOpenAIGET, wantClassed: true},
 		{name: "chat completions by GET", method: http.MethodGet, path: "/v1/chat/completions"},
 		{name: "model list by POST", method: http.MethodPost, path: "/v1/models"},
-		{name: "legacy completions", method: http.MethodPost, path: "/v1/completions"},
-		{name: "embeddings", method: http.MethodPost, path: "/v1/embeddings"},
-		{name: "anthropic messages", method: http.MethodPost, path: "/v1/messages"},
-		{name: "responses", method: http.MethodPost, path: "/v1/responses"},
+		{name: "legacy completions", method: http.MethodPost, path: "/v1/completions", wantInference: true},
+		{name: "embeddings", method: http.MethodPost, path: "/v1/embeddings", wantInference: true},
+		{name: "anthropic messages", method: http.MethodPost, path: "/v1/messages", wantInference: true},
+		{name: "responses", method: http.MethodPost, path: "/v1/responses", wantInference: true},
 		{name: "llama.cpp router list", method: http.MethodGet, path: "/models"},
 		{name: "load control", method: http.MethodPost, path: "/v1/load"},
 		{name: "unload control", method: http.MethodPost, path: "/v1/unload"},
@@ -469,11 +469,9 @@ func TestStrataChatCompletionsRefuseAnUnadvertisedModel(t *testing.T) {
 	}
 }
 
-// openai-chat claims two routes and the proxy classifies only those. Any other
-// path is forwarded verbatim as ordinary traffic: the proxy does not refuse it,
-// does not gate it on the advertised model, and does not track it as a
-// workload. The engine's own answer reaches the client.
-func TestStrataUnclassifiedPathsAreForwardedUntracked(t *testing.T) {
+// A narrow descriptor protocol does not exempt other model-bearing paths from
+// the profile boundary, including engine-specific controls.
+func TestStrataModelBearingPathsRequireProfiles(t *testing.T) {
 	for _, tc := range []struct {
 		method, path, body string
 	}{
@@ -481,7 +479,7 @@ func TestStrataUnclassifiedPathsAreForwardedUntracked(t *testing.T) {
 		{http.MethodPost, "/v1/embeddings", `{"model":"strata-unadvertised","input":"hi"}`},
 		{http.MethodPost, "/v1/messages", `{"model":"strata-unadvertised","messages":[]}`},
 		{http.MethodPost, "/v1/responses", `{"model":"strata-unadvertised","input":"hi"}`},
-		{http.MethodPost, "/v1/unload", `{"model":"strata-qwen"}`},
+		{http.MethodPost, "/v1/unload", `{"model":"strata-unadvertised"}`},
 	} {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
 			const notFound = `{"error":{"message":"not found"}}`
@@ -496,12 +494,18 @@ func TestStrataUnclassifiedPathsAreForwardedUntracked(t *testing.T) {
 			w := httptest.NewRecorder()
 			p.soleFacade().handleHTTP(w, httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body)))
 
-			if w.Code != http.StatusNotFound || w.Body.String() != notFound {
-				t.Fatalf("client saw %d %q, want the engine's own 404", w.Code, w.Body.String())
+			var refusal struct {
+				Error string `json:"error"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &refusal); err != nil {
+				t.Fatal(err)
+			}
+			if w.Code != http.StatusNotFound || refusal.Error != "no profile or role named strata-unadvertised" {
+				t.Fatalf("client saw %d %+v", w.Code, refusal)
 			}
 			got := upstream.requests()
-			if len(got) != 1 || got[0].path != tc.path || got[0].body != tc.body {
-				t.Fatalf("upstream requests = %+v, want one verbatim %s", got, tc.path)
+			if len(got) != 0 {
+				t.Fatalf("unprofiled request reached upstream: %+v", got)
 			}
 			if rec.has(workloadSubmittedMethod) {
 				t.Fatal("an unclassified path was tracked as a workload")

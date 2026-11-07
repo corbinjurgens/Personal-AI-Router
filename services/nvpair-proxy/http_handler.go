@@ -599,7 +599,7 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 	// whether a matching Started was seen.
 	reqID := strconv.FormatUint(f.nextRequestID.Add(1), 10)
 	if !isInf {
-		f.serveProxyPassthrough(w, r, start, reqID)
+		f.serveProxyPassthrough(w, r, start, reqID, streamIdle)
 		return
 	}
 	f.serveInference(w, r, start, reqID, streamIdle, concreteDispatchPolicy(start))
@@ -641,8 +641,10 @@ func (f *facade) serveInference(w http.ResponseWriter, r *http.Request, start ti
 	defer stopCancellation()
 	var requestOwner *routingRequest
 	{
-		var buffers *ownedInferenceBuffers
-		r, buffers = p.ownInferenceBuffers(r)
+		buffers := inferenceBuffers(r.Context())
+		if buffers == nil {
+			r, buffers = p.ownInferenceBuffers(r)
+		}
 		w = &inferenceErrorWriter{ResponseWriter: w, ctx: r.Context()}
 		// Keep cancellation discoverable until every final buffer borrower has
 		// joined, including registration refusal, body errors and panic unwind.
@@ -687,9 +689,8 @@ func (f *facade) serveInference(w http.ResponseWriter, r *http.Request, start ti
 			panic(aborted)
 		}
 	}()
-	// Parse the request's model before choosing a node. Model eligibility only
-	// applies to inference routes; control endpoints retain their existing
-	// routing behavior even when their JSON happens to contain a model field.
+	// Parse the request's model before choosing a node. Model-bearing requests
+	// enter this owner even when the entry facade does not declare their path.
 	bodyCtx, stopBodyPreparation := context.WithDeadline(r.Context(), ctl.deadline)
 	bodyBytes, model, err := bufferInferenceBody(w, r.WithContext(bodyCtx), p.requestBodyLimit())
 	stopBodyPreparation()
@@ -866,6 +867,15 @@ func (f *facade) serveInference(w http.ResponseWriter, r *http.Request, start ti
 	ctl.dispatch(f, w, r, start, reqID, bodyBytes, model, streamIdle, cancelReasonOr, requestOwner, policy)
 }
 
+type bufferedModelBodyKey struct{}
+
+// A model selector discovered on an unlisted route transfers its already owned
+// bytes into inference. Admission never needs a second read or uncharged copy.
+type bufferedModelBody struct {
+	raw   []byte
+	model string
+}
+
 // Storage cancellation alone cannot interrupt a socket-backed Body.Read (or
 // its deferred Close). Bound that same body phase at the HTTP connection and
 // join the interrupt before clearing its temporary read deadline. No body
@@ -912,12 +922,24 @@ func retryableProxyStatus(code int) bool {
 	return code >= http.StatusInternalServerError
 }
 
-// Control requests retain their single pass over concrete candidates. They do
-// not register inference identities, acquire inference buffers or enter its
-// request owner, admission, workload, performance or retry-deadline machinery.
-func (f *facade) serveProxyPassthrough(w http.ResponseWriter, r *http.Request, start time.Time, reqID string) {
+// Control requests retain their single pass over concrete candidates. A body
+// selecting a model instead enters the common inference owner and admission.
+func (f *facade) serveProxyPassthrough(w http.ResponseWriter, r *http.Request, start time.Time, reqID string, streamIdle time.Duration) {
 	p := f.host
-	body, model, err := bufferBodyAndModel(w, r, p.requestBodyLimit())
+	var buffers *ownedInferenceBuffers
+	if r.Body != nil && r.Body != http.NoBody && r.Method != http.MethodOptions {
+		r, buffers = p.ownInferenceBuffers(r)
+	}
+	transferred := false
+	defer func() {
+		if buffers != nil && !transferred {
+			buffers.close()
+		}
+	}()
+	bodyCtx, stopBody := context.WithDeadline(r.Context(), start.Add(jobDeadline))
+	rBody := r.WithContext(bodyCtx)
+	body, model, err := bufferInferenceBody(w, rBody, p.requestBodyLimit())
+	stopBody()
 	if err != nil {
 		reason := "request body read failed"
 		message := "request body could not be buffered"
@@ -931,6 +953,12 @@ func (f *facade) serveProxyPassthrough(w http.ResponseWriter, r *http.Request, s
 		// A model-detail path is still unvalidated when buffering fails.
 		_ = f.notify("proxy/request", RequestEvent{ID: reqID, Method: r.Method, Path: "",
 			Status: bufferRequestStatus(err), Duration: time.Since(start).Milliseconds(), Error: reason})
+		return
+	}
+	if isInferenceRequest(f.profile, r.Method, r.URL.Path, body) {
+		r = r.WithContext(context.WithValue(r.Context(), bufferedModelBodyKey{}, bufferedModelBody{raw: body, model: model}))
+		transferred = true
+		f.serveInference(w, r, start, reqID, streamIdle, concreteDispatchPolicy(start))
 		return
 	}
 	if err := validateRequestIdentifiers(r, body); err != nil {

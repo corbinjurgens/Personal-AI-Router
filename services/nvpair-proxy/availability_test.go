@@ -708,7 +708,7 @@ func TestPAExplicitProfileAllPausedResponse(t *testing.T) {
 				Error string `json:"error"`
 			}
 			if err := json.Unmarshal(response.body, &rejection); err != nil {
-					t.Fatalf("decode profile empty-candidate rejection: %v", err)
+				t.Fatalf("decode profile empty-candidate rejection: %v", err)
 			}
 			if rejection.Error != "no available node advertises the requested model" || peer.ingress.Load() != 0 || peer.inference.Load() != 0 {
 				t.Fatalf("profile rejection/paused ingress/engine = %q/%d/%d, want no available node advertises the requested model/0/0", rejection.Error, peer.ingress.Load(), peer.inference.Load())
@@ -887,7 +887,7 @@ func TestPAPauseRouteExceptions(t *testing.T) {
 				e.node.Policy.PausedBy = nodepolicy.PausedLocally
 				fx.replace(t, e.node)
 				fx.finish(t, fx.request(http.MethodGet, "/v1/models", ""), http.StatusOK)
-				response := fx.finish(t, fx.request(http.MethodPost, "/pa-control", `{"model":"pa-model"}`), http.StatusOK)
+				response := fx.finish(t, fx.request(http.MethodPost, "/pa-control", `{}`), http.StatusOK)
 				var control struct {
 					ID string `json:"id"`
 				}

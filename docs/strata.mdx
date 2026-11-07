@@ -136,9 +136,10 @@ These are not available for Strata, and no PAIR setting enables them:
   files belong to the prepared installation. Each Strata server instance has
   one configured model, so `/v1/load` selects that model rather than an
   arbitrary one.
-- Legacy completions, embeddings, Anthropic Messages (`/v1/messages`) and
-  Responses (`/v1/responses`) as PAIR-classified inference. Strata serves some
-  of these upstream, but PAIR does not claim them for Strata.
+- Prepared qualification for legacy completions, embeddings, Anthropic Messages
+  (`/v1/messages`) and Responses (`/v1/responses`). Model-bearing requests on
+  these or engine-specific paths still require PAIR role or profile-key admission;
+  the descriptor's narrower protocol declaration grants no native-name bypass.
 - The optional Strata features: request monitoring, before-load hooks and MCP
   hooks. Leave them disabled in the configuration.
 
