@@ -889,9 +889,6 @@ func (b *Broker) modelSettingsBaselineLocked(p settings.Request, caller string, 
 	if err := b.loadEngineSettingsLocked(); err != nil {
 		return fail(err)
 	}
-	if err := b.pendingSwitchLocked(p.Engine); err != nil {
-		return fail(err)
-	}
 	if launch.Engine != p.Engine || !launch.Editable {
 		return fail(modelSettingsConflict("engine is not editable"))
 	}
@@ -1301,9 +1298,6 @@ func (b *Broker) runModelSettingsOperationLocked(ctx context.Context, engine str
 		return fail(err)
 	}
 	if err := b.checkModelPolicyLocked(record); err != nil {
-		return fail(err)
-	}
-	if err := b.pendingSwitchLocked(engine); err != nil {
 		return fail(err)
 	}
 	op := record.Model

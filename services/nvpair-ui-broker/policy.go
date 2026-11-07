@@ -1590,10 +1590,6 @@ func (b *Broker) replayPolicyToProxy(ctx context.Context, pp *proxyProcess) bool
 	for _, kind := range kinds {
 		b.sendPolicyStateLocked(ctx, pp, kind)
 	}
-	if err := b.replaySwitchInvalidations(ctx, pp); err != nil {
-		slog.Error("switch invalidation replay blocked proxy facades", "err", err)
-		return false
-	}
 	// Client publication is independent of proxy acknowledgement. The spawn
 	// caller can hold proxySupMu, and a slow client must not retain that lock
 	// or the push slot after the ordered replay RPCs have finished.

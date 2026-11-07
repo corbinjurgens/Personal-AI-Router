@@ -496,7 +496,7 @@ func TestModelSettingsRecoveryFailedRecordsRequireLocalFreshSupersession(t *test
 	}
 }
 
-func TestModelSettingsRecoveryFailedAttemptRetainsExistingSwitchExclusion(t *testing.T) {
+func TestModelSettingsRecoveryFailedAttemptRetainsPendingOperation(t *testing.T) {
 	h := newModelSettingsHarness(t)
 	p := h.review(t, h.request(t, true), "")
 	h.mu.Lock()
@@ -509,21 +509,7 @@ func TestModelSettingsRecoveryFailedAttemptRetainsExistingSwitchExclusion(t *tes
 	if pending.Snapshot.Phase != "applying" || !modelSettingsNeedsReconciliation(pending) {
 		t.Fatal("failed attempt discarded its pending operation")
 	}
-	switchFixture := newSwitchHarness(t)
-	switchFixture.b.engineConfigMu.Lock()
-	if err := switchFixture.b.loadEngineSettingsLocked(); err != nil {
-		t.Fatal(err)
-	}
-	if switchFixture.b.engineSettings == nil {
-		switchFixture.b.engineSettings = map[string]*engineSettingsRecord{}
-	}
-	switchFixture.b.engineSettings["llamacpp"] = pending
-	switchFixture.b.engineConfigMu.Unlock()
-	request := switchFixture.request(t, "blocked-by-model-settings")
-	_, err := switchFixture.b.acceptEngineSwitch(context.Background(), request, "")
-	if err == nil || switchErrorDetail(err, "").Kind != settings.SwitchErrorBusy || len(switchSteps(t, switchFixture.engine)) != 0 {
-		t.Fatalf("switch bypassed pending model operation: %v", err)
-	}
+
 }
 
 func TestModelSettingsRecoveryTerminalSaveFailureRetainsDrain(t *testing.T) {

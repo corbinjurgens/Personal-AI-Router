@@ -37,8 +37,6 @@ func stopPauseExecutionFixture(t *testing.T, names ...string) (*routedBroker, *s
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		switch method {
-		case "engine:switch-prepare":
-			return emptySwitchManagerSnapshot(), ""
 		case "engine:get-installed":
 			rows := make([]map[string]any, 0, len(m.states))
 			for name, status := range m.states {
@@ -605,6 +603,39 @@ func TestStopPauseExecutionRestartAndRetirementFence(t *testing.T) {
 	stopPauseExecutionRequireFence(t, rb.b, nodepolicy.Draining)
 }
 
+func TestStopPauseExecutionLocalTransitionReleasesFailedRecoveryFence(t *testing.T) {
+	for _, state := range []nodepolicy.Availability{nodepolicy.Paused, nodepolicy.Available} {
+		t.Run(string(state), func(t *testing.T) {
+			rb, manager := stopPauseExecutionFixture(t, "owned")
+			r := rb.b.nodePolicyRuntime()
+			r.mu.Lock()
+			r.current.Availability = nodepolicy.Paused
+			r.live = nodepolicy.Draining
+			r.mu.Unlock()
+			worker, _ := rb.b.pauseManager()
+			rb.b.workersMu.Lock()
+			rb.b.engineMgrRecovering = true
+			rb.b.workersMu.Unlock()
+			manager.mu.Lock()
+			manager.failure = "injected shutdown failure"
+			manager.mu.Unlock()
+			if rb.b.recoverEngineManagerPause(worker) || rb.b.getEngineMgr() != nil {
+				t.Fatal("failed shutdown exposed the replacement manager")
+			}
+			manager.mu.Lock()
+			manager.failure = ""
+			manager.mu.Unlock()
+			got, err := rb.b.setAvailability(t.Context(), state, nodepolicy.PausedLocally)
+			if err != nil || got != state {
+				t.Fatalf("local transition = %q, %v; want %q", got, err, state)
+			}
+			if rb.b.getEngineMgr() != worker {
+				t.Fatal("local transition left the current manager hidden")
+			}
+		})
+	}
+}
+
 func TestStopPauseExecutionRecoveryRejectsRetirementBeforePublication(t *testing.T) {
 	rb, _ := stopPauseExecutionFixture(t, "owned")
 	r := rb.b.nodePolicyRuntime()
@@ -628,7 +659,7 @@ func TestStopPauseExecutionRecoveryRejectsRetirementBeforePublication(t *testing
 	})
 	worker, source := rb.b.pauseManager()
 	done := make(chan bool, 1)
-	go func() { done <- rb.b.recoverEngineSwitchOn(worker) }()
+	go func() { done <- rb.b.recoverEngineManagerPause(worker) }()
 	rb.engine.waitFor("recovery shutdown readback", func(calls []policyCall) bool {
 		count := 0
 		for _, call := range calls {
@@ -638,17 +669,13 @@ func TestStopPauseExecutionRecoveryRejectsRetirementBeforePublication(t *testing
 		}
 		return count == 2
 	})
-	// Recovery has released this lock for physical shutdown and must reacquire
-	// it before publication. Keep that boundary closed while its source retires.
-	rb.b.engineConfigMu.Lock()
-	unlock := sync.OnceFunc(rb.b.engineConfigMu.Unlock)
-	defer unlock()
-	rb.engine.releaseHeld()
+	// Retire the source while the physical readback is held. Publication must
+	// reject its evidence even if the reply then reports a successful shutdown.
 	rb.b.retireEngineManagerSource(source)
 	next := rb.b.activateEngineManagerSource()
 	attachFakeEngine(t, rb.b)
 	rb.b.bindEngineMgr(rb.b.getEngineMgr(), next)
-	unlock()
+	rb.engine.releaseHeld()
 	select {
 	case ok := <-done:
 		if ok {

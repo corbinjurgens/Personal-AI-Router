@@ -17,14 +17,8 @@ import (
 	"testing"
 	"time"
 
-	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/jsonrpc"
 )
-
-func emptySwitchManagerSnapshot() switchManagerSnapshot {
-	configuration := settings.SwitchConfigurationSnapshot{ManagerIncarnation: "fixture-manager", RegistryRuntimeFingerprint: "fixture-runtime"}
-	return switchManagerSnapshot{Configuration: configuration, ConfigurationFence: settings.SwitchConfigurationToken(configuration)}
-}
 
 // Pipe and fake-process fixtures exercise planning and ordering, not socket
 // occupancy. Report every candidate free so exclusions remain load-bearing,
@@ -124,7 +118,7 @@ func newTestRPCWorkerPipe(t *testing.T) (*rpcWorker, *Codec) {
 	return worker, NewCodec(server)
 }
 
-// recordEnabledEngineRestoration serves switch inspection and records every
+// recordEnabledEngineRestoration records every
 // frame, including the projection that must precede recovery and restoration.
 // Unexpected requests receive an error rather than stranding a synchronous call.
 func recordEnabledEngineRestoration(t *testing.T, codec *Codec) <-chan string {
@@ -142,11 +136,7 @@ func recordEnabledEngineRestoration(t *testing.T, codec *Codec) <-chan string {
 				return
 			}
 			if msg.IsRequest() {
-				if msg.Method == settings.SwitchPrepareMethod {
-					err = codec.Respond(msg.ID, emptySwitchManagerSnapshot())
-				} else {
-					err = codec.RespondError(msg.ID, -32601, "unexpected restoration request")
-				}
+				err = codec.RespondError(msg.ID, -32601, "unexpected restoration request")
 				if err != nil {
 					t.Error(err)
 					return

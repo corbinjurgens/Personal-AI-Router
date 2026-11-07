@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"log/slog"
 	"os"
@@ -446,51 +445,6 @@ func TestRemoteManagementDeniedSettingsCreatesNoJournal(t *testing.T) {
 	}
 }
 
-func rmSwitch(t *testing.T, id string) (*switchHarness, settings.SwitchRequest) {
-	t.Helper()
-	h := newSwitchHarness(t)
-	clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")
-	grantRemoteManagement(t, h.b.clusterDir, "cluster", "target", "peer", true)
-	return h, h.request(t, id)
-}
-
-func rmSwitchUnchanged(t *testing.T, h *switchHarness, id string, calls int) {
-	t.Helper()
-	h.b.engineConfigMu.Lock()
-	_, found := h.b.engineSwitch.store.Lookup(id)
-	h.b.engineConfigMu.Unlock()
-	if found || len(h.engine.snapshot()) != calls || len(switchSteps(t, h.engine)) != 0 {
-		t.Fatal("denied switch created receipt or called worker")
-	}
-}
-
-func TestRemoteManagementSwitchAcceptance(t *testing.T) {
-	h, p := rmSwitch(t, "permission-switch")
-	calls := len(h.engine.snapshot())
-	grantRemoteManagement(t, h.b.clusterDir, "cluster", "target", "peer", false)
-	_, err := h.b.acceptEngineSwitch(context.Background(), p, "peer")
-	rmDeny(t, err)
-	rmSwitchUnchanged(t, h, p.RequestID, calls)
-	grantRemoteManagement(t, h.b.clusterDir, "cluster", "target", "peer", true)
-	if _, err := h.b.acceptEngineSwitch(context.Background(), p, "peer"); err != nil {
-		t.Fatal(err)
-	}
-	if r := h.receipt(t, p.RequestID); r.Phase != settings.SwitchCompleted {
-		t.Fatalf("granted switch = %+v", r)
-	}
-}
-
-func TestRemoteManagementSwitchRetryRequiresGrant(t *testing.T) {
-	h, p := rmSwitch(t, "retry-requires-grant")
-	if _, err := h.b.acceptEngineSwitch(context.Background(), p, "peer"); err != nil {
-		t.Fatal(err)
-	}
-	h.receipt(t, p.RequestID)
-	grantRemoteManagement(t, h.b.clusterDir, "cluster", "target", "peer", false)
-	_, err := h.b.acceptEngineSwitch(context.Background(), p, "peer")
-	rmDeny(t, err)
-}
-
 func TestRemoteManagementDeniedPeerReads(t *testing.T) {
 	t.Run("policy", func(t *testing.T) {
 		rb := newRoutedBroker(t)
@@ -510,22 +464,6 @@ func TestRemoteManagementDeniedPeerReads(t *testing.T) {
 		}
 		if h.applies.Load() != 0 {
 			t.Fatal("read applied settings")
-		}
-	})
-	t.Run("switch status and receipt", func(t *testing.T) {
-		h, p := rmSwitch(t, "read-receipt")
-		if _, err := h.b.acceptEngineSwitch(context.Background(), p, "peer"); err != nil {
-			t.Fatal(err)
-		}
-		want := h.receipt(t, p.RequestID)
-		grantRemoteManagement(t, h.b.clusterDir, "cluster", "target", "peer", false)
-		result, err := h.b.dispatchEngineSwitch(context.Background(), settings.SwitchStatusMethod, rmJSON(t, settings.SwitchStatusRequest{RequestID: p.RequestID}), "peer")
-		if err != nil {
-			t.Fatal(err)
-		}
-		status, ok := result.(settings.SwitchStatus)
-		if !ok || status.Receipt == nil || !reflect.DeepEqual(*status.Receipt, want) {
-			t.Fatalf("denied peer status = %+v", result)
 		}
 	})
 }
@@ -660,62 +598,6 @@ func TestRemoteManagementSettingsRevokeBarrier(t *testing.T) {
 	}
 }
 
-func TestRemoteManagementSwitchRevokeBarrier(t *testing.T) {
-	h, p := rmSwitch(t, "switch-barrier")
-	calls := len(h.engine.snapshot())
-	unlock := rmHoldLock(t, &h.b.engineConfigMu)
-	done := rmBlockedCall(t, "acceptEngineSwitch", func() error { _, err := h.b.acceptEngineSwitch(context.Background(), p, "peer"); return err })
-	grantRemoteManagement(t, h.b.clusterDir, "cluster", "target", "peer", false)
-	unlock()
-	rmDeny(t, rmResult(t, done))
-	rmSwitchUnchanged(t, h, p.RequestID, calls)
-}
-
-type rmDecisionBarrier struct {
-	slog.Handler
-	entered, release chan struct{}
-	once             sync.Once
-}
-
-func (h *rmDecisionBarrier) Handle(ctx context.Context, record slog.Record) error {
-	family, outcome := "", ""
-	record.Attrs(func(a slog.Attr) bool {
-		if a.Key == "family" {
-			family = a.Value.String()
-		}
-		if a.Key == "outcome" {
-			outcome = a.Value.String()
-		}
-		return true
-	})
-	if record.Message == "remote management decision" && family == "switch" && outcome == "allowed" {
-		h.once.Do(func() { close(h.entered); <-h.release })
-	}
-	return h.Handler.Handle(ctx, record)
-}
-
-func TestRemoteManagementSwitchSecondAcceptanceRecheck(t *testing.T) {
-	h, p := rmSwitch(t, "second-acceptance")
-	calls := len(h.engine.snapshot())
-	barrier := &rmDecisionBarrier{Handler: slog.NewTextHandler(io.Discard, nil), entered: make(chan struct{}), release: make(chan struct{})}
-	previous := slog.Default()
-	previousWriter, previousFlags := log.Writer(), log.Flags()
-	slog.SetDefault(slog.New(barrier))
-	t.Cleanup(func() { slog.SetDefault(previous); log.SetOutput(previousWriter); log.SetFlags(previousFlags) })
-	var once sync.Once
-	release := func() { once.Do(func() { close(barrier.release) }) }
-	t.Cleanup(release)
-	done := make(chan error, 1)
-	go func() { _, err := h.b.acceptEngineSwitch(context.Background(), p, "peer"); done <- err }()
-	requireGateOpens(t, barrier.entered, "first switch permission snapshot")
-	// The first lock has read an allow, but receipt acceptance still lies
-	// behind the second acquisition. Revocation must be re-read there.
-	grantRemoteManagement(t, h.b.clusterDir, "cluster", "target", "peer", false)
-	release()
-	rmDeny(t, rmResult(t, done))
-	rmSwitchUnchanged(t, h, p.RequestID, calls)
-}
-
 type rmReply struct {
 	ID        string          `json:"id"`
 	Result    json.RawMessage `json:"result"`
@@ -752,7 +634,6 @@ func TestRemoteManagementBlankRelayCaller(t *testing.T) {
 			}{
 				{policyRelayRequestMethod, policyRelayReplyMethod, policyRelayRequest{ID: "blank-policy", Method: "get", Caller: caller}},
 				{"engine:settings-request", "engine:settings-reply", settings.Relay{ID: "blank-settings", Method: "get", Caller: caller, Request: settings.Request{Engine: "llamacpp"}}},
-				{"engine:switch-request", "engine:switch-reply", map[string]any{"id": "blank-switch", "method": settings.SwitchStatusMethod, "caller": caller, "params": map[string]any{}}},
 			} {
 				rb.b.forwardEngineNotificationFrom(rb.source, family.method, rmJSON(t, family.payload))
 				var request struct {
@@ -782,7 +663,6 @@ func TestRemoteManagementStaleWorkerDropped(t *testing.T) {
 	}{
 		{policyRelayRequestMethod, rmPolicyRequest(t, rb)},
 		{"engine:settings-request", settings.Relay{ID: "stale-settings", Method: "apply", Caller: "pinned-peer", Request: settings.Request{RequestID: "bad", Engine: "llamacpp"}}},
-		{"engine:switch-request", map[string]any{"id": "stale-switch", "method": settings.SwitchMethod, "caller": "pinned-peer", "params": map[string]any{}}},
 	} {
 		rb.b.forwardEngineNotificationFrom(old, notification.method, rmJSON(t, notification.params))
 	}
@@ -795,17 +675,13 @@ func TestRemoteManagementStaleWorkerDropped(t *testing.T) {
 	rb.b.settingsRelayMu.Lock()
 	queued += len(rb.b.settingsCancels)
 	rb.b.settingsRelayMu.Unlock()
-	c := rb.b.switchCoordinator()
-	c.waitMu.Lock()
-	queued += len(c.waiters)
-	c.waitMu.Unlock()
 	if queued != 0 {
 		t.Fatalf("stale source registered %d requests", queued)
 	}
 	rb.b.forwardEngineNotificationFrom(current, policyRelayRequestMethod, rmJSON(t, policyRelayRequest{ID: "fence", Method: "get", Caller: "pinned-peer"}))
 	rmWaitReply(t, rb.engine, policyRelayReplyMethod, "fence")
 	for _, call := range rb.engine.snapshot() {
-		if call.method == policyRelayReplyMethod || call.method == "engine:settings-reply" || call.method == "engine:switch-reply" {
+		if call.method == policyRelayReplyMethod || call.method == "engine:settings-reply" {
 			var reply rmReply
 			if err := json.Unmarshal(call.params, &reply); err != nil {
 				t.Fatal(err)
@@ -828,7 +704,6 @@ func TestRemoteManagementRetiredWorkerStillBoundIsDropped(t *testing.T) {
 	// alone is insufficient in that window: the source must still be current.
 	rb.b.forwardEngineNotificationFrom(rb.source, policyRelayRequestMethod, rmJSON(t, rmPolicyRequest(t, rb)))
 	rb.b.forwardEngineNotificationFrom(rb.source, "engine:settings-request", rmJSON(t, settings.Relay{ID: "retired-settings", Method: "apply", Caller: "pinned-peer"}))
-	rb.b.forwardEngineNotificationFrom(rb.source, "engine:switch-request", rmJSON(t, map[string]any{"id": "retired-switch", "method": settings.SwitchMethod, "caller": "pinned-peer", "params": map[string]any{}}))
 	r := rb.b.nodePolicyRuntime()
 	r.mu.Lock()
 	queued := len(r.relayCancels)
@@ -836,15 +711,11 @@ func TestRemoteManagementRetiredWorkerStillBoundIsDropped(t *testing.T) {
 	rb.b.settingsRelayMu.Lock()
 	queued += len(rb.b.settingsCancels)
 	rb.b.settingsRelayMu.Unlock()
-	c := rb.b.switchCoordinator()
-	c.waitMu.Lock()
-	queued += len(c.waiters)
-	c.waitMu.Unlock()
 	if queued != 0 {
 		t.Fatalf("retired source registered %d requests", queued)
 	}
 	for _, call := range rb.engine.snapshot() {
-		if call.method == policyRelayReplyMethod || call.method == "engine:settings-reply" || call.method == "engine:switch-reply" {
+		if call.method == policyRelayReplyMethod || call.method == "engine:settings-reply" {
 			t.Fatalf("retired source got %s", call.method)
 		}
 	}
@@ -891,8 +762,6 @@ func TestRemoteManagementPublicInternalMethods(t *testing.T) {
 	methods := []string{
 		"policy:request", "policy:reply", "policy:cancel",
 		"engine:settings-request", "engine:settings-reply", "engine:settings-cancel", "engine:settings-projection",
-		"engine:switch-request", "engine:switch-reply", "engine:switch-cancel", "engine:switch-changed", "engine:switch-recovery-ready",
-		settings.SwitchPrepareMethod, settings.SwitchStepMethod, settings.SwitchReconcileMethod,
 		"engine:set-reserved-port", "internal:set-reserved-port", "engine:configure-launch",
 		nodepolicy.MethodModelMutationRequest, nodepolicy.MethodModelMutationReply, nodepolicy.MethodReconcileResident,
 		"engine:dispatch-resident-request", "engine:dispatch-resident-reply", "engine:node-projection", "engine:restore-enabled",
@@ -946,24 +815,10 @@ func TestRemoteManagementReplyCodes(t *testing.T) {
 			t.Fatal("no settings denial reply")
 		}
 	})
-	t.Run("switch", func(t *testing.T) {
-		h, p := rmSwitch(t, "switch-code")
-		source := bindRemoteManagementTestSource(h.b)
-		grantRemoteManagement(t, h.b.clusterDir, "cluster", "target", "peer", false)
-		h.b.forwardEngineNotificationFrom(source, "engine:switch-request", rmJSON(t, map[string]any{"id": "switch-code", "method": settings.SwitchMethod, "caller": "peer", "params": p}))
-		reply := rmWaitReply(t, h.engine, "engine:switch-reply", "switch-code")
-		if reply.ErrorCode != -32012 || reply.Error != remoteManagementDeniedMessage {
-			t.Fatalf("switch denial reply = %+v", reply)
-		}
-		detail := switchErrorDetail(&remoteManagementDeniedError{}, settings.SwitchErrorStorage)
-		if detail.Code != -32012 || remoteManagementDeniedWire != "remote_management_denied" {
-			t.Fatalf("switch error mapping = %+v", detail)
-		}
-	})
 }
 
 func TestRemoteManagementOriginRelaysPreserveCode(t *testing.T) {
-	for _, method := range []string{methodPolicySet, methodSetAvailability, "engine:apply-settings", settings.SwitchMethod, "engine:remote-management-get"} {
+	for _, method := range []string{methodPolicySet, methodSetAvailability, "engine:apply-settings", "engine:remote-management-get"} {
 		t.Run(method, func(t *testing.T) {
 			b, out := newPolicyBroker(t)
 			worker, codec := newTestRPCWorkerPipe(t)
@@ -1012,28 +867,6 @@ func TestRemoteManagementGrantedLocalVeto(t *testing.T) {
 			t.Fatalf("granted settings veto = %v (%d)", err, policyErrorCode(err))
 		}
 	})
-	t.Run("switch pause", func(t *testing.T) {
-		h, p := rmSwitch(t, "veto-switch")
-		r := h.b.nodePolicyRuntime()
-		r.mu.Lock()
-		r.current.Availability, r.current.PausedBy = nodepolicy.Paused, nodepolicy.PausedLocally
-		r.mu.Unlock()
-		_, err := h.b.acceptEngineSwitch(context.Background(), p, "peer")
-		if err == nil || switchErrorDetail(err, "").Code != -32011 {
-			t.Fatalf("granted switch veto = %v", err)
-		}
-	})
-	t.Run("switch target Off", func(t *testing.T) {
-		h, p := rmSwitch(t, "off-switch")
-		h.failStep = settings.SwitchStepTargetStart
-		if _, err := h.b.acceptEngineSwitch(context.Background(), p, "peer"); err != nil {
-			t.Fatal(err)
-		}
-		r := h.receipt(t, p.RequestID)
-		if r.Error == nil || r.Error.Code != -32011 {
-			t.Fatalf("granted target Off veto = %+v", r)
-		}
-	})
 }
 
 func TestRemoteManagementAcceptedCleanupSurvivesRevocation(t *testing.T) {
@@ -1056,23 +889,6 @@ func TestRemoteManagementAcceptedCleanupSurvivesRevocation(t *testing.T) {
 			}
 		case <-time.After(5 * time.Second):
 			t.Fatal("no rebind reply")
-		}
-	})
-	t.Run("accepted switch completes and releases", func(t *testing.T) {
-		h, p := rmSwitch(t, "cleanup-switch")
-		reached, release := holdSwitchCompletion(t, h)
-		if _, err := h.b.acceptEngineSwitch(context.Background(), p, "peer"); err != nil {
-			t.Fatal(err)
-		}
-		requireGateOpens(t, reached, "accepted switch completion")
-		grantRemoteManagement(t, h.b.clusterDir, "cluster", "target", "peer", false)
-		release()
-		if r := h.receipt(t, p.RequestID); !r.Terminal || r.Phase != settings.SwitchCompleted {
-			t.Fatalf("accepted switch abandoned: %+v", r)
-		}
-		steps := switchSteps(t, h.engine)
-		if len(steps) == 0 || steps[len(steps)-1] != settings.SwitchStepRelease {
-			t.Fatalf("accepted switch cleanup = %v", steps)
 		}
 	})
 }
@@ -1172,17 +988,6 @@ func TestPausedBrokerRejectsManagementAndUnknownModeAvailability(t *testing.T) {
 				_, err := h.b.dispatchEngineSettings(context.Background(), "apply", p, "peer")
 				requireBrokerPauseRefusal(t, err)
 				rmSettingsUnchanged(t, h, before, p.RequestID, journal)
-			})
-			t.Run("switch apply", func(t *testing.T) {
-				h, p := rmSwitch(t, "paused-peer-switch")
-				r := h.b.nodePolicyRuntime()
-				r.mu.Lock()
-				r.current.Availability, r.current.PausedBy, r.live = nodepolicy.Paused, origin, nodepolicy.Paused
-				r.mu.Unlock()
-				calls := len(h.engine.snapshot())
-				_, err := h.b.dispatchEngineSwitch(context.Background(), settings.SwitchMethod, rmJSON(t, p), "peer")
-				requireBrokerPauseRefusal(t, err)
-				rmSwitchUnchanged(t, h, p.RequestID, calls)
 			})
 		})
 	}

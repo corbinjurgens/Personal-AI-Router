@@ -200,8 +200,6 @@ func (h *modelSettingsHarness) answer(method string, raw json.RawMessage) (any, 
 			return nil, "injected lost configure response"
 		}
 		return h.launch, ""
-	case settings.SwitchPrepareMethod:
-		return emptySwitchManagerSnapshot(), ""
 	case "engine:get-installed":
 		return map[string]any{"engines": []map[string]any{{"engine": "llamacpp", "running": h.launch.Running, "terminationVerified": !h.launch.Running}}}, ""
 	case engineIntentMethod:

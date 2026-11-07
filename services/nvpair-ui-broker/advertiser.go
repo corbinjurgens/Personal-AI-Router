@@ -154,9 +154,6 @@ func (b *Broker) setProxyLocalBackendKeyed(p *proxyProcess, engine string, port 
 }
 
 func (b *Broker) advertisementWithdrawnLocked(engine string) bool {
-	if b.pendingSwitchLocked(engine) != nil {
-		return true
-	}
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
 	defer r.mu.Unlock()

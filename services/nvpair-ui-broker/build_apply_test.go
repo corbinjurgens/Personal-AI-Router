@@ -138,7 +138,7 @@ func TestBuildApplyImpactBusyOwnerDoesNotWaitOrInitialize(t *testing.T) {
 	if _, ok := b.cachedBuildApplyImpact(); ok {
 		t.Fatal("busy settings owner produced a capture")
 	}
-	if b.nodePolicy.ready || b.engineSettingsLoaded || b.engineSwitch != nil {
+	if b.nodePolicy.ready || b.engineSettingsLoaded {
 		t.Fatal("read initialized an owner while busy")
 	}
 }
@@ -175,7 +175,6 @@ func buildApplyImpactFixture(t *testing.T) *Broker {
 		t.Fatal("invalid synthetic settings baseline")
 	}
 	r.settingsIdentity = map[string]string{"llamacpp": fingerprint}
-	b.engineSwitch = &engineSwitchCoordinator{store: &engineSwitchStore{loaded: true, journal: settings.SwitchJournal{Receipts: map[string]settings.SwitchReceipt{}}}}
 	return b
 }
 
@@ -685,7 +684,6 @@ func TestBuildApplyImpactKnownOperationsBlockWithoutInitializingOtherOwners(t *t
 	b := buildApplyImpactFixture(t)
 	b.pendingInstallStarts = map[*pendingInstallStart]struct{}{&pendingInstallStart{engine: "llamacpp"}: {}}
 	b.activeSettings = map[string]activeSettingsOperation{"settings-op": {Engine: "llamacpp"}}
-	b.engineSwitch.store.journal.Receipts["switch"] = settings.SwitchReceipt{Request: settings.SwitchRequest{SourceEngine: "llamacpp", TargetEngine: "llamacpp-custom"}}
 	impact, ok := b.cachedBuildApplyImpact()
 	if !ok || impact.Complete || !impact.ModelOperations.Known {
 		t.Fatalf("operations = %+v", impact)
@@ -697,12 +695,12 @@ func TestBuildApplyImpactKnownOperationsBlockWithoutInitializingOtherOwners(t *t
 		}
 		kinds[operation.Kind] = true
 	}
-	for _, kind := range []string{"install", "settings", "switch"} {
+	for _, kind := range []string{"install", "settings"} {
 		if !kinds[kind] {
 			t.Fatalf("missing operation %s", kind)
 		}
 	}
-	if !b.engineSettingsLoaded || !b.engineSwitch.store.loaded {
+	if !b.engineSettingsLoaded {
 		t.Fatal("preview initialized or retired an owner")
 	}
 }
@@ -985,7 +983,7 @@ func TestBuildApplyProductionMissingOwnersRefusesBeforeInitialization(t *testing
 	b := &Broker{}
 	request := buildapply.PrepareRequest{OperationID: "operation", PreviewID: "preview", Consent: buildapply.Consent{AllowInterruption: true, AllowEngineStop: true}}
 	requireBuildApplyRefusal(t, b.prepareBuildApply(request), buildapply.RefusalUnavailable)
-	if b.nodePolicy.ready || b.engineSettingsLoaded || b.engineSwitch != nil || b.buildApplyMaintenance.active != nil {
+	if b.nodePolicy.ready || b.engineSettingsLoaded || b.buildApplyMaintenance.active != nil {
 		t.Fatal("missing owner evidence initialized or mutated an owner")
 	}
 }

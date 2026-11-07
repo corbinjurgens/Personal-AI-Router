@@ -188,24 +188,11 @@ func (b *Broker) runAcceptedAvailability(ctx context.Context, r *policyRuntime, 
 			b.publishNodeProjection()
 			b.pushAvailabilityAndActivate(saved)
 		}
-		if err := b.vetoRemoteEngineSwitch("", false); err != nil {
-			cancel()
-			r.mu.Lock()
-			if r.transitionGen == gen {
-				r.localPauseRequested = false
-				r.pendingPauseRequested = false
-				r.pendingPauseMode = ""
-			}
-			r.mu.Unlock()
-			b.publishNodeProjection()
-			return "", err
-		}
 		// An install admitted before this pause must not start its engine
 		// afterwards; one submitted later is not affected.
 		b.engineConfigMu.Lock()
 		b.supersedeInstallStartsLocked("")
 		b.engineConfigMu.Unlock()
-		b.cancelRemoteSwitch()
 	}
 
 	type outcome struct {
@@ -254,13 +241,7 @@ func (b *Broker) runAvailabilityTransition(ctx context.Context, gen uint64, stat
 		return "", errAvailabilitySuperseded
 	}
 	if state == nodepolicy.Paused {
-		availability, err := b.pauseNode(ctx, origin, mode)
-		if availability == nodepolicy.Paused {
-			// transitionMu keeps a later Resume behind the durable completion
-			// proof, including a landed save that returned a durability warning.
-			err = errors.Join(err, b.settleSwitchPauseObligations())
-		}
-		return availability, err
+		return b.pauseNode(ctx, origin, mode)
 	}
 	return b.resumeNode(ctx, gen, origin)
 }
@@ -366,19 +347,15 @@ func (b *Broker) pauseNode(ctx context.Context, origin nodepolicy.PauseOrigin, m
 		return "", errAvailabilitySuperseded
 	}
 
-	// Recovery retries reservation release and can verify shutdown on a hidden
-	// replacement. Ordinary pauses wait for accepted settings/switch cleanup
-	// before intent-neutral sleep. The durable pause fence remains in force.
-	recovered, shutdownErr := b.prepareSwitchPause()
-	if !recovered && shutdownErr == nil {
-		b.settingsApplyMu.Lock()
-		worker, source := b.pauseManager()
-		shutdownErr = b.pauseEnginesOn(ctx, worker)
-		if shutdownErr == nil && ctx.Err() == nil {
-			shutdownErr = b.publishPhysicalPause(ctx, worker, source)
-		}
-		b.settingsApplyMu.Unlock()
+	// Wait for accepted settings work before intent-neutral sleep. The durable
+	// pause fence remains in force throughout shutdown and its source proof.
+	b.settingsApplyMu.Lock()
+	worker, source := b.pauseManager()
+	shutdownErr := b.pauseEnginesOn(ctx, worker)
+	if shutdownErr == nil && ctx.Err() == nil {
+		shutdownErr = b.publishPhysicalPause(ctx, worker, source)
 	}
+	b.settingsApplyMu.Unlock()
 	if ctx.Err() != nil {
 		return "", errAvailabilitySuperseded
 	}
@@ -386,7 +363,7 @@ func (b *Broker) pauseNode(ctx context.Context, origin nodepolicy.PauseOrigin, m
 		b.announceActivationChange(b.pushPolicyNow(context.Background(), pushAvailability))
 		b.notifyAvailability()
 		if !strings.HasPrefix(shutdownErr.Error(), "Pause could not stop every engine: ") {
-			detail := "switch recovery is incomplete: " + shutdownErr.Error()
+			detail := shutdownErr.Error()
 			if len(detail) > 512 {
 				detail = detail[:512]
 			}
@@ -440,6 +417,7 @@ func (b *Broker) publishPhysicalPause(ctx context.Context, worker *rpcWorker, so
 	}
 	r.live = nodepolicy.Paused
 	r.cancelActive = false
+	b.engineMgrRecovering = false
 	return nil
 }
 
@@ -557,12 +535,6 @@ func (b *Broker) pauseEnginesOn(ctx context.Context, worker *rpcWorker) error {
 // ones saved On. A paired node's resume is checked against the Halt/maintenance
 // boundary again here, where it would take effect.
 func (b *Broker) resumeNode(ctx context.Context, gen uint64, origin nodepolicy.PauseOrigin) (nodepolicy.Availability, error) {
-	// An authorized Resume may supersede a pause before physical completion. Retire its
-	// switch obligation only after conservative cleanup, without inventing a
-	// successful pause or preventing recovery from an incomplete shutdown.
-	if err := b.supersedeSwitchPauseObligations(gen); err != nil {
-		return "", err
-	}
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
 	// A later Pause may have registered after the transition's initial check.
@@ -607,6 +579,17 @@ func (b *Broker) resumeNode(ctx context.Context, gen uint64, origin nodepolicy.P
 	r.pauseSlept = map[string]bool{}
 	restore := r.restoreSkipped
 	r.restoreSkipped = false
+	// An explicit Resume supersedes a replacement's incomplete pause proof.
+	// Only the still-bound, live manager may become available for saved-On wake.
+	b.workersMu.Lock()
+	if b.engineMgr != nil && b.engineMgrSource != nil && b.engineMgrSource == r.engineManagerSource {
+		select {
+		case <-b.engineMgr.Done():
+		default:
+			b.engineMgrRecovering = false
+		}
+	}
+	b.workersMu.Unlock()
 	r.mu.Unlock()
 	b.publishNodeProjection()
 

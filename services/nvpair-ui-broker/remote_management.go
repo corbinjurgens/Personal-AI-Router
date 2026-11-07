@@ -49,8 +49,7 @@ func (b *Broker) replyPeerRelay(source *engineManagerSource, worker *rpcWorker, 
 	}
 }
 
-// remoteManagementDeniedError is the typed refusal policyErrorCode and
-// switchErrorDetail map to -32012.
+// remoteManagementDeniedError is the typed refusal policyErrorCode maps to -32012.
 type remoteManagementDeniedError struct{}
 
 func (*remoteManagementDeniedError) Error() string { return remoteManagementDeniedMessage }
@@ -66,9 +65,9 @@ func (b *Broker) authorizeRemoteManagement(caller, family, operation string) err
 }
 
 // authorizeRemoteManagementLocked is shared by the r.mu-held policy entry
-// points and the settings/switch wrapper. Permission wins
+// points and the settings wrapper. Permission wins
 // over pause, preserving revocation's code. Never acquire engineConfigMu here:
-// settings and switch admission already own it before taking r.mu.
+// settings admission already owns it before taking r.mu.
 func (b *Broker) authorizeRemoteManagementLocked(r *policyRuntime, caller, family, operation string) error {
 	if err := b.authorizeRemoteManagementGrantLocked(r, caller, family, operation); err != nil {
 		return err
