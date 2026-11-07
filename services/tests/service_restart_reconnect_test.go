@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -23,7 +24,9 @@ import (
 	"time"
 
 	"nvpair-shared/engines"
+	"nvpair-shared/jsonrpc"
 	"nvpair-shared/nodepolicy"
+	"nvpair-shared/noderec"
 	"nvpair-shared/servicectl"
 	"nvpair-shared/testbin"
 	"nvpair-tui/rpc"
@@ -82,7 +85,16 @@ func TestServiceRestartReconnect(t *testing.T) {
 	t.Cleanup(func() { close(release) })
 
 	f := newProxyServiceFixture(t)
-	f.env = append(f.env, "USERPROFILE="+f.configDir)
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Reuse the existing synthetic directory at the already ruled scanner path.
+	f.copyExecutable(self, f.scannerPath)
+	scannerPort := temporaryClusterPort(t)
+	f.env = append(f.env, "USERPROFILE="+f.configDir,
+		"NVPAIR_TEST_SUBSCRIPTION_SCANNER="+f.scannerPath,
+		"NVPAIR_TEST_SUBSCRIPTION_PORT="+strconv.Itoa(scannerPort))
 	managerPath := f.copyBinary(engineMgrBin)
 	f.inventory.paths = append(f.inventory.paths, managerPath)
 	writeRestartProofManifest(t, f, engine, portOfURL(t, upstream.URL))
@@ -215,8 +227,8 @@ func TestServiceRestartReconnect(t *testing.T) {
 			t.Fatalf("isolated bundled engine %s contributed models: %+v", bundled.Name, models)
 		}
 	}
-	// A private manifest HTTP action carries a token, so background inventory
-	// polling cannot be mistaken for this pending, externally observed POST.
+	// A declared unload carries a token, so background inventory polling cannot
+	// be mistaken for this pending, externally observed non-loading mutation.
 	pendingCtx, pendingCancel := context.WithTimeout(ctx, 20*time.Second)
 	defer pendingCancel()
 	pending := make(chan error, 1)
@@ -231,8 +243,8 @@ func TestServiceRestartReconnect(t *testing.T) {
 	})
 	go func() {
 		defer close(pendingDone)
-		_, err := client.Call(pendingCtx, "engine:action", map[string]any{
-			"engine": engine, "action": "restart_probe", "params": map[string]string{"token": heldToken},
+		_, err := client.Call(pendingCtx, "engine:unload-model", map[string]string{
+			"engine": engine, "model": heldToken,
 		})
 		pending <- err
 	}()
@@ -351,24 +363,58 @@ func TestServiceRestartReconnect(t *testing.T) {
 			break
 		}
 	}
+	httpClient := &http.Client{Timeout: 5 * time.Second}
+	defer httpClient.CloseIdleConnections()
+	// Publish the peer's profile through the scanner/broker discovery path.
+	// A manual native model list alone no longer authorizes inference.
+	frame := jsonrpc.Message{JSONRPC: "2.0", Method: noderec.NotifyNodeDiscovered, Params: mustMarshal(t, noderec.NodeEvent{Node: noderec.DirectoryNode{
+		HostUUID: "restart-proof-upstream", Name: "restart-proof-upstream", IP: "127.0.0.1",
+		Services:       map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceLlamaCPP: {Port: portOfURL(t, upstream.URL)}},
+		ModelsByEngine: map[string][]string{"llamacpp": {model}},
+		Policy: &nodepolicy.Advertisement{Revision: "1", Profiles: []nodepolicy.AdvertisedProfile{{
+			Key: model, DisplayName: model, Engine: "llamacpp", Model: model,
+		}}},
+	}})}
+	egressProcessHTTP(t, httpClient, http.MethodPost, scannerPort, "/", mustMarshal(t, frame), http.StatusOK)
+	task1Eventually(t, "replacement peer profile advertisement", serviceCallTimeout, func() bool {
+		callCtx, done := context.WithTimeout(ctx, serviceCallTimeout)
+		defer done()
+		message, err := client.Call(callCtx, "llamacpp-proxy:nodes/list", nil)
+		if err != nil {
+			return false
+		}
+		var result struct {
+			Nodes []struct {
+				Models []string `json:"models"`
+			} `json:"nodes"`
+		}
+		if err := json.Unmarshal(message.Result, &result); err != nil {
+			t.Fatalf("decode replacement engine nodes: %v", err)
+		}
+		for _, node := range result.Nodes {
+			if slices.Contains(node.Models, model) {
+				return true
+			}
+		}
+		return false
+	})
 	call("llamacpp-proxy:node/add-manual", map[string]any{
 		"id": "restart-proof-upstream", "host": "127.0.0.1", "port": portOfURL(t, upstream.URL),
 		"addresses": []string{"127.0.0.1"}, "models": []string{model},
 	})
-	httpClient := &http.Client{Timeout: 5 * time.Second}
-	defer httpClient.CloseIdleConnections()
 	response, err := httpClient.Post(fmt.Sprintf("http://127.0.0.1:%d/v1/chat/completions", f.facadePort), "application/json",
 		strings.NewReader(fmt.Sprintf(`{"model":%q,"messages":[]}`, model)))
 	if err != nil {
 		t.Fatalf("replacement proxy routed HTTP request: %v", err)
 	}
 	var inference struct {
-		ID string `json:"id"`
+		ID    string          `json:"id"`
+		Error json.RawMessage `json:"error"`
 	}
 	decodeErr := json.NewDecoder(response.Body).Decode(&inference)
 	closeErr := response.Body.Close()
 	if decodeErr != nil || closeErr != nil || response.StatusCode != http.StatusOK || inference.ID != "replacement-proxy-forwarded" || inferenceHits.Load() != 1 {
-		t.Fatalf("replacement HTTP inference status=%d id=%q upstream_hits=%d decode=%v close=%v", response.StatusCode, inference.ID, inferenceHits.Load(), decodeErr, closeErr)
+		t.Fatalf("replacement HTTP inference status=%d id=%q error=%s upstream_hits=%d decode=%v close=%v", response.StatusCode, inference.ID, inference.Error, inferenceHits.Load(), decodeErr, closeErr)
 	}
 	if posts, writes := probeHits.Load(), actionWrites.Load(); posts != 1 || writes != 1 {
 		t.Fatalf("interrupted mutation was replayed: tokenized upstream POSTs=%d RPC writes=%d, want exactly 1 each", posts, writes)
@@ -389,7 +435,7 @@ func (c *restartProofConnection) Write(data []byte) (int, error) {
 	if err := json.Unmarshal(data, &message); err != nil {
 		return 0, fmt.Errorf("inspect production RPC write: %w", err)
 	}
-	if message.Method == "engine:action" {
+	if message.Method == "engine:unload-model" {
 		c.actionWrites.Add(1)
 	}
 	return c.ReadWriteCloser.Write(data)
@@ -419,6 +465,9 @@ func writeRestartProofManifest(t *testing.T, f *serviceFixture, engine string, p
 			"health": map[string]any{"http": "http://127.0.0.1:{port}/ready", "status": http.StatusOK, "interval_s": 5},
 		},
 		"platforms": map[string]any{runtime.GOOS + "/" + runtime.GOARCH: map[string]any{"detect": []string{}}},
+		"operations": map[string]any{
+			"unload": map[string]string{"action": "restart_probe", "model_param": "token"},
+		},
 		"actions": map[string]any{
 			"list_models": map[string]any{
 				"http":   map[string]string{"method": http.MethodGet, "path": "/models"},

@@ -55,7 +55,7 @@ func TestStrataContractUnsupportedManagement(t *testing.T) {
 		}
 		f.strataContractStartManager(t)
 		assertAbsent(t, f)
-		response := f.Manager.strataContractCall(t, "engine:install", map[string]any{"engine": "strata", "port": f.Port, "bind": "127.0.0.1"})
+		response := f.Manager.strataContractCall(t, "engine:install", map[string]string{"engine": "strata"})
 		assertError(t, response, `engine "strata" has no install block for this platform`)
 		assertAbsent(t, f)
 	})
@@ -167,38 +167,17 @@ func TestStrataContractUnsupportedManagement(t *testing.T) {
 		response := f.Manager.strataContractCall(t, "engine:delete-model", map[string]string{"engine": "strata", "model": "Org/Strata-Loaded:Q4_K_M"})
 		assertError(t, response, `engine "strata" does not support the model delete operation`)
 	})
-	testRunning("raw delete rejects missing delete action", func(t *testing.T, f *strataContractFixture) {
-		response := f.Manager.strataContractCall(t, "engine:action", map[string]any{
-			"engine": "strata", "action": "delete_model", "params": map[string]string{"model": "Org/Strata-Loaded:Q4_K_M"},
-		})
-		assertError(t, response, `engine "strata" has no action "delete_model"`)
-	})
-	testRunning("raw pull rejects missing pull action and reports terminal failure", func(t *testing.T, f *strataContractFixture) {
-		// Local pull progress has no operation ID. This fresh manager issues
-		// exactly one pull, and the retained reader preserves either frame order.
-		response, notification := f.Manager.strataContractCallAndNotification(t, "engine:action", map[string]any{
-			"engine": "strata", "action": "pull_model", "params": map[string]string{"model": "Org/Strata-Unloaded:Q5_K_M"},
-		}, "engine:pull-progress", func(params json.RawMessage) bool {
-			var progress struct {
-				Engine string `json:"engine"`
-				Op     string `json:"op"`
-				Stage  string `json:"stage"`
+	testRawRefused := func(name, action, model string) {
+		testRunning(name, func(t *testing.T, f *strataContractFixture) {
+			response := f.Manager.strataContractCall(t, "engine:action", map[string]any{
+				"engine": "strata", "action": action, "params": map[string]string{"model": model},
+			})
+			const diagnostic = "Use admitted model loads or proxy inference; this raw action is unavailable."
+			if response.Error == nil || response.Error.Code != -32602 || response.Error.Message != diagnostic {
+				t.Fatalf("raw action error = %+v, want -32602 and %q", response.Error, diagnostic)
 			}
-			strataContractDecode(t, params, &progress)
-			return progress.Engine == "strata" && progress.Op == "pull" && progress.Stage == "error"
 		})
-		const diagnostic = `Strata experienced an error while downloading a model: engine "strata" has no action "pull_model"`
-		assertError(t, response, diagnostic)
-		var progress struct {
-			Engine  string `json:"engine"`
-			Op      string `json:"op"`
-			Stage   string `json:"stage"`
-			Percent int    `json:"percent"`
-			Message string `json:"message"`
-		}
-		strataContractDecode(t, notification.Params, &progress)
-		if progress.Engine != "strata" || progress.Op != "pull" || progress.Stage != "error" || progress.Percent != -1 || progress.Message != diagnostic {
-			t.Fatalf("terminal pull progress = %+v, want Strata pull error, percent -1 and message %q", progress, diagnostic)
-		}
-	})
+	}
+	testRawRefused("raw delete is refused before execution", "delete_model", "Org/Strata-Loaded:Q4_K_M")
+	testRawRefused("raw pull is refused before execution", "pull_model", "Org/Strata-Unloaded:Q5_K_M")
 }

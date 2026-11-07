@@ -56,6 +56,9 @@ func TestLlamaCPPInstallPreservesDestinationPathWithSpaces(t *testing.T) {
 	baseDir := filepath.Join(t.TempDir(), "Nvidia Corporation", "Personal AI Router", "engine-bin")
 	executor := NewExecutor(registry, NewReporter(nil), nil, baseDir)
 	executor.detectTimeout = 2 * time.Second
+	// This extraction fixture contains inert bytes, not a runnable engine.
+	// Installation on a paused node must preserve them without activation.
+	executor.nodeProjection.set(nodeProjection{PausedLocally: true, ManagementBlocked: true})
 	if err := executor.Install(context.Background(), "llamacpp"); err != nil {
 		t.Fatalf("install llama.cpp into a spaced path: %v", err)
 	}
