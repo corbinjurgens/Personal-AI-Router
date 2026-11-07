@@ -292,6 +292,19 @@ describe('Models tab', () => {
         expect(deleteModel).toHaveBeenCalledExactlyOnceWith('llama-cpp', 'msi', 'tiel-msi')
     })
 
+    it('lists profile and role usage when the selected inventory row is the served profile key', async () => {
+        useEngineModelsStore.setState({
+            models: new Map([['msi:llama-cpp', inventory('msi', 'lfm-64k')]])
+        })
+        await act(async () => root.render(<ModelsView />))
+        await act(async () => button('Delete on node').click())
+        expect(document.body.textContent).toContain('Profiles that use it stop serving: lfm-64k')
+        expect(document.body.textContent).toContain('Roles affected: coder')
+        expect(deleteModel).not.toHaveBeenCalled()
+        await act(async () => button('Delete model').click())
+        expect(deleteModel).toHaveBeenCalledExactlyOnceWith('llama-cpp', 'msi', 'lfm-64k')
+    })
+
     it('reads affected profiles afresh instead of using a cached policy without the new profile', async () => {
         useNodeConfigurationStore.setState({
             editors: new Map([
@@ -320,42 +333,49 @@ describe('Models tab', () => {
         expect(deleteModel).not.toHaveBeenCalled()
     })
 
-    it('requires the same profile-aware confirmation in the per-engine model view', async () => {
-        await act(async () =>
-            root.render(
-                <ModelManager
-                    nodeId="msi"
-                    backend={{
-                        type: 'llama-cpp',
-                        displayName: 'llama.cpp',
-                        source: 'installed',
-                        processStatus: 'running',
-                        port: 1,
-                        proxyPort: 2,
-                        models: inventory('msi', 'tiel-msi').models
-                    }}
-                />
+    it.each(['tiel-msi', 'lfm-64k'])(
+        'confirms per-engine deletion for inventory name %s',
+        async modelName => {
+            const observed = inventory('msi', modelName)
+            useEngineModelsStore.setState({ models: new Map([['msi:llama-cpp', observed]]) })
+            await act(async () =>
+                root.render(
+                    <ModelManager
+                        nodeId="msi"
+                        backend={{
+                            type: 'llama-cpp',
+                            displayName: 'llama.cpp',
+                            source: 'installed',
+                            processStatus: 'running',
+                            port: 1,
+                            proxyPort: 2,
+                            models: observed.models
+                        }}
+                    />
+                )
             )
-        )
-        const trigger = container.querySelector('button[aria-haspopup="menu"]')
-        if (!(trigger instanceof HTMLButtonElement)) throw new Error('Missing model actions')
-        const menu = document.getElementById(trigger.getAttribute('aria-controls') ?? '')
-        if (!menu) throw new Error('Missing model menu')
-        await act(async () => {
-            trigger.click()
-            const toggle = new Event('toggle')
-            Object.defineProperty(toggle, 'newState', { value: 'open' })
-            menu.dispatchEvent(toggle)
-        })
-        const remove = Array.from(menu.querySelectorAll('[role="menuitem"]')).find(
-            row => row.textContent === 'Delete'
-        )
-        if (!(remove instanceof HTMLElement)) throw new Error('Missing Delete action')
-        await act(async () => remove.click())
-        expect(document.body.textContent).toContain('Profiles that use it stop serving: lfm-64k')
-        expect(document.body.textContent).toContain('Roles affected: coder')
-        expect(deleteModel).not.toHaveBeenCalled()
-        await act(async () => button('Delete model').click())
-        expect(deleteModel).toHaveBeenCalledExactlyOnceWith('llama-cpp', 'msi', 'tiel-msi')
-    })
+            const trigger = container.querySelector('button[aria-haspopup="menu"]')
+            if (!(trigger instanceof HTMLButtonElement)) throw new Error('Missing model actions')
+            const menu = document.getElementById(trigger.getAttribute('aria-controls') ?? '')
+            if (!menu) throw new Error('Missing model menu')
+            await act(async () => {
+                trigger.click()
+                const toggle = new Event('toggle')
+                Object.defineProperty(toggle, 'newState', { value: 'open' })
+                menu.dispatchEvent(toggle)
+            })
+            const remove = Array.from(menu.querySelectorAll('[role="menuitem"]')).find(
+                row => row.textContent === 'Delete'
+            )
+            if (!(remove instanceof HTMLElement)) throw new Error('Missing Delete action')
+            await act(async () => remove.click())
+            expect(document.body.textContent).toContain(
+                'Profiles that use it stop serving: lfm-64k'
+            )
+            expect(document.body.textContent).toContain('Roles affected: coder')
+            expect(deleteModel).not.toHaveBeenCalled()
+            await act(async () => button('Delete model').click())
+            expect(deleteModel).toHaveBeenCalledExactlyOnceWith('llama-cpp', 'msi', modelName)
+        }
+    )
 })

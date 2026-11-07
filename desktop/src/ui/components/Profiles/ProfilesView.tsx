@@ -20,11 +20,13 @@ import { ProfileCard } from './ProfileCard'
 function NodeProfiles({
     nodeId,
     nodeName,
-    local
+    local,
+    advertisementsLoading
 }: {
     nodeId: string
     nodeName: string
     local: boolean
+    advertisementsLoading: boolean
 }) {
     const connected = useConnectionStore(state => state.connected)
     const entry = useNodeConfigurationStore(state => state.editors.get(nodeId))
@@ -87,6 +89,7 @@ function NodeProfiles({
     const loading =
         !unavailable &&
         (reading ||
+            advertisementsLoading ||
             !management ||
             management.state === 'loading' ||
             !policy ||
@@ -125,8 +128,20 @@ export default function ProfilesView() {
     const nodes = useOverviewNodes()
     const selfId = useConnectionStore(state => state.selfId)
     const connected = useConnectionStore(state => state.connected)
+    const [advertisementsLoading, setAdvertisementsLoading] = useState(true)
     useEffect(() => {
-        if (connected) void useDiscoveredNodesStore.getState().refresh()
+        let active = true
+        setAdvertisementsLoading(true)
+        if (connected)
+            void useDiscoveredNodesStore
+                .getState()
+                .refresh()
+                .finally(() => {
+                    if (active) setAdvertisementsLoading(false)
+                })
+        return () => {
+            active = false
+        }
     }, [connected])
     const targets = nodes.map(node => ({ id: node.id, name: node.name }))
     return (
@@ -138,6 +153,7 @@ export default function ProfilesView() {
                     nodeId={node.id}
                     nodeName={node.name}
                     local={node.id === selfId}
+                    advertisementsLoading={advertisementsLoading}
                 />
             ))}
             {targets.length === 0 && <Text kind="body/regular/sm">Waiting for nodes.</Text>}

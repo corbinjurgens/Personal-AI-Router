@@ -5,6 +5,7 @@ import { useRef, useState } from 'react'
 import type { EngineType } from '@/shared/types/engines'
 import { engineManagerName } from '@/shared/utils/engines'
 import { EngineManagerNames } from '@/shared/constants/engines'
+import { profileModelMatchesName } from '@/ui/utils/profile-model-name'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import { useNodesStore } from '@/ui/stores/nodes.store'
 import { useEngineSettingsStore, engineSettingsKey } from '@/ui/stores/engine-settings.store'
@@ -44,7 +45,7 @@ export function useModelDelete() {
             : undefined
         const loads =
             settings?.snapshot?.settings.modelLoads
-                ?.filter(load => load.modelId === model)
+                ?.filter(load => profileModelMatchesName(load, model))
                 .map(load => load.profileKey) ?? []
         const profiles = policyRoleProfiles(policy ?? '{}')
             .filter(profile => profile.engine === engine && loads.includes(profile.key))

@@ -14,6 +14,7 @@ import { useDiscoveredNodesStore } from '@/ui/stores/discovered-nodes.store'
 import { engineSettingsKey, useEngineSettingsStore } from '@/ui/stores/engine-settings.store'
 import { useOverviewUiStore } from '@/ui/stores/overview-ui.store'
 import { profileSummary } from '@/ui/utils/profile-summary'
+import { profileModelMatchesName } from '@/ui/utils/profile-model-name'
 
 export function ProfileCard({
     profile,
@@ -46,7 +47,11 @@ export function ProfileCard({
     const model = load?.modelId ?? profile.model
     const engine = engineTypeFromManagerName(profile.engine)
     const identity =
-        inventory.get(`${nodeId}:${engine}`)?.models.find(item => item.name === model)?.identity ??
+        inventory
+            .get(`${nodeId}:${engine}`)
+            ?.models.find(item =>
+                profileModelMatchesName({ profileKey: profile.key, modelId: model }, item.name)
+            )?.identity ??
         profile.modelIdentity ??
         advertised?.modelIdentity
     const summary = profileSummary(profile, nodeName, roles, load)

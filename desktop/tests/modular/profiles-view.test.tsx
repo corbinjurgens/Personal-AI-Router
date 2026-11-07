@@ -6,6 +6,8 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { NodeItem } from '@/shared/types/nodes'
+import type { AvailableNode } from '@/shared/types/cluster'
+import type { EngineModels } from '@/shared/types/engines'
 import type { NodePolicyDocument } from '@/shared/types/node-policy'
 import type { ServiceTransport } from '@/shared/types/service-bridge'
 import { createPairApi, type INodePolicyApi } from '@/ui/api/pair-api'
@@ -230,6 +232,67 @@ afterEach(async () => {
 })
 
 describe('Profiles tab', () => {
+    it.each(['self-artifact', 'shared-key'])(
+        'uses inventory identity tags for model name %s',
+        async name => {
+            const observed: EngineModels = {
+                nodeId: 'self',
+                engineType: 'llama-cpp',
+                models: [
+                    {
+                        name,
+                        downloaded: true,
+                        size: 100,
+                        status: 'idle',
+                        parameterSize: '',
+                        family: '',
+                        sizeVram: null,
+                        expiresAt: null,
+                        expiry: '0',
+                        capabilities: [],
+                        identity: {
+                            strength: 'verified',
+                            contentId: 'b'.repeat(64),
+                            repository: 'owner/Tiel',
+                            quantization: 'Q4_K_M',
+                            totalBytes: 100
+                        }
+                    }
+                ]
+            }
+            useEngineModelsStore.setState({ models: new Map([['self:llama-cpp', observed]]) })
+            await act(async () => root.render(<ProfilesView />))
+            expect(
+                card('self coding').querySelector('[aria-label="Model identity"]')?.textContent
+            ).toContain('owner/Tiel')
+            expect(
+                card('self coding').querySelector('[aria-label="Model identity"]')?.textContent
+            ).toContain('Q4_K_M')
+        }
+    )
+
+    it('keeps first-entry loading rows until the pending advertisement read completes', async () => {
+        let finish: ((nodes: AvailableNode[]) => void) | undefined
+        window.pairApi.discovery.getNodes = vi.fn<typeof window.pairApi.discovery.getNodes>(
+            () =>
+                new Promise(resolve => {
+                    finish = resolve
+                })
+        )
+        await act(async () => root.render(<ProfilesView />))
+        expect(getPolicy).toHaveBeenCalledTimes(2)
+        expect(
+            Array.from(container.querySelectorAll('[role="status"]')).map(row => row.textContent)
+        ).toEqual(['Loading profiles for MSI…', 'Loading profiles for Joes…'])
+        expect(container.textContent).not.toContain('self coding')
+        expect(container.textContent).not.toContain('peer coding')
+        const resolveAdvertisement = finish
+        if (!resolveAdvertisement) throw new Error('Missing advertisement read')
+        await act(async () => resolveAdvertisement([]))
+        expect(container.querySelector('[role="status"]')).toBeNull()
+        expect(card('self coding')).toBeDefined()
+        expect(card('peer coding')).toBeDefined()
+    })
     it('keeps current saved CPU placement authoritative over retained native-fit inspection', async () => {
         const getSettings = window.pairApi.engines.getSettings
         window.pairApi.engines.getSettings = vi
