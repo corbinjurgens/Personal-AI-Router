@@ -1338,8 +1338,8 @@ func TestLlamaServingUndeclaredLoadRoutes(t *testing.T) {
 		if err := json.Unmarshal(out.Bytes(), &reply); err != nil {
 			t.Fatal(err)
 		}
-		if reply.Error == nil || !strings.Contains(reply.Error.Message, "undeclared") {
-			t.Fatal("generic action bypassed the declared load boundary")
+		if reply.Error == nil || reply.Error.Code != -32602 || reply.Error.Message != "Use admitted model loads or proxy inference; this raw action is unavailable." {
+			t.Fatalf("raw allocation was not refused: %+v", reply.Error)
 		}
 		return errors.New(reply.Error.Message)
 	})
@@ -1727,8 +1727,8 @@ func TestLlamaServingUnconfiguredLoadUnchanged(t *testing.T) {
 	}
 }
 
-func TestLlamaServingUnconfiguredLoadErrorsUnchanged(t *testing.T) {
-	// Exact a03f026 dispatch error messages and RPC responses, for both routes.
+func TestLlamaServingUnconfiguredLoadErrors(t *testing.T) {
+	// Semantic dispatch preserves its errors; raw allocation is always refused.
 	for _, route := range []string{"action", "semantic"} {
 		for _, tc := range []struct {
 			name, want         string
@@ -1767,11 +1767,15 @@ func TestLlamaServingUnconfiguredLoadErrorsUnchanged(t *testing.T) {
 				} else {
 					manager.runModelOperation(ctx, &Message{ID: &id, Method: loadModelMethod, Params: json.RawMessage(`{"engine":"variant","model":"undeclared"}`)})
 				}
-				if err := NewCodec(&want).RespondError(&id, -32000, tc.want); err != nil {
+				code, message := -32000, tc.want
+				if route == "action" {
+					code, message = -32602, "Use admitted model loads or proxy inference; this raw action is unavailable."
+				}
+				if err := NewCodec(&want).RespondError(&id, code, message); err != nil {
 					t.Fatal(err)
 				}
 				if !bytes.Equal(out.Bytes(), want.Bytes()) {
-					t.Fatalf("legacy error response changed:\ngot  %s\nwant %s", out.Bytes(), want.Bytes())
+					t.Fatalf("unexpected error response:\ngot  %s\nwant %s", out.Bytes(), want.Bytes())
 				}
 			})
 		}
@@ -2467,15 +2471,7 @@ func TestLlamaServingLoadAcrossNEActivation(t *testing.T) {
 				if semantic {
 					_, err = ex.ModelLoad(ctx, "fake", "exact/model")
 				} else {
-					var out bytes.Buffer
-					manager := NewManager(NewCodec(&out), ex, nil, "")
-					id := json.RawMessage(`1`)
-					manager.runAction(ctx, &Message{ID: &id, Method: "engine:action", Params: json.RawMessage(`{"engine":"fake","action":"warm","params":{"target":"exact/model"}}`)})
-					var reply Message
-					err = json.Unmarshal(out.Bytes(), &reply)
-					if err == nil && reply.Error != nil {
-						err = errors.New(reply.Error.Message)
-					}
+					_, err = ex.Action(ctx, "fake", "warm", json.RawMessage(`{"target":"exact/model"}`))
 				}
 				loadDone <- err
 			}()
@@ -2547,9 +2543,9 @@ func TestLlamaServingLoadAcrossNEActivation(t *testing.T) {
 			}
 		})
 	}
-	test("nil to B action", false, false)
+	test("nil to B internal action", false, false)
 	test("nil to B semantic", false, true)
-	test("A to nil to B action", true, false)
+	test("A to nil to B internal action", true, false)
 	test("A to nil to B semantic", true, true)
 }
 
@@ -2726,7 +2722,7 @@ func TestLlamaServingStopFencesArrivingLoads(t *testing.T) {
 	}
 	stopped := make(chan error, 1)
 	go func() { stopped <- ex.Stop("variant") }()
-	if err := servingWaitForPhase(ctx, "(*Executor).stopFrom("); err != nil {
+	if err := servingWaitForPhase(ctx, "(*Executor).Stop("); err != nil {
 		t.Fatal(err)
 	}
 	arriving := make(chan error, 1)

@@ -132,6 +132,7 @@ type Executor struct {
 	ownerAdmissionGeneration uint64
 	ownerAdmissionHeld       uint64
 	settingsHub              settings.Hub
+	admittedLoadParent       func(context.Context, string, string) (json.RawMessage, error)
 	settingsParent           func(context.Context, string, settings.Request, string) (json.RawMessage, error)
 	memoryProfilesParent     func(context.Context, settings.Relay) (json.RawMessage, error)
 	// policyParent relays a paired node's node-policy call to the broker
@@ -163,8 +164,7 @@ type Executor struct {
 	// modelSources are the folders whose models engines offer in place
 	// (modelsources.go). main sets the built-in defaults; nil offers none.
 	modelSources []modelSource
-	// desired persists explicit per-engine ON/OFF intent and allocated endpoints.
-	// Shutdown clears endpoint evidence without rewriting saved intent.
+	// desired retains allocated endpoints and process cleanup evidence.
 	desired *desiredStateStore
 	// nodeProjection is the broker's last node projection, served with the
 	// model inventory (nodeprojection.go).

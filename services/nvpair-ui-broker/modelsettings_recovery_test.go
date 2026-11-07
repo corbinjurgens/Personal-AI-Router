@@ -722,7 +722,7 @@ func TestModelSettingsRecoveryExactNativeConvergesSavedResume(t *testing.T) {
 	h.b.bindEngineMgr(worker, source)
 	// The production startup entry must reach restore instead of failing a
 	// stopped exact-native readback before ordinary restoration can run.
-	h.b.restoreEnabledEngines(worker)
+	h.b.restoreInstalledEngines(worker)
 	got := h.record(t)
 	if got.Model.Stage != "completed" || !got.Snapshot.Running || got.Resume || h.calls() != 1 {
 		t.Fatalf("saved resume=%+v, calls=%d", got.Snapshot, h.calls())
@@ -732,17 +732,17 @@ func TestModelSettingsRecoveryExactNativeConvergesSavedResume(t *testing.T) {
 	}
 	found := false
 	for _, call := range h.engine.snapshot() {
-		if call.method == restoreEnabledEnginesMethod {
+		if call.method == restoreInstalledEnginesMethod {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatal("successful resume still blocked enabled-intent restoration")
+		t.Fatal("successful resume still blocked installed-engine restoration")
 	}
 }
 
 func TestModelSettingsRecoverySavedResumeHonorsCurrentVeto(t *testing.T) {
-	test := func(name string, off, paused bool, wantCalls int) {
+	test := func(name string, paused bool, wantCalls int) {
 		t.Run(name, func(t *testing.T) {
 			h := newModelSettingsHarness(t)
 			record := h.seedAccepted(t, true)
@@ -753,9 +753,6 @@ func TestModelSettingsRecoverySavedResumeHonorsCurrentVeto(t *testing.T) {
 				t.Fatal(err)
 			}
 			h.b.engineConfigMu.Unlock()
-			h.mu.Lock()
-			h.savedOff = off
-			h.mu.Unlock()
 			if paused {
 				r := h.b.nodePolicyRuntime()
 				r.mu.Lock()
@@ -772,8 +769,7 @@ func TestModelSettingsRecoverySavedResumeHonorsCurrentVeto(t *testing.T) {
 			}
 		})
 	}
-	test("Pause", false, true, 0)
-	test("saved local Off", true, false, 1)
+	test("Pause", true, 0)
 }
 
 func TestModelSettingsRecoveryEveryProgressedStageReplays(t *testing.T) {
@@ -982,13 +978,13 @@ func TestModelSettingsRecoveryUnknownInvalidJournalPreservesOrdinaryStartup(t *t
 		t.Fatal("ordinary invalid journal prevented policy replay")
 	}
 	worker := h.b.getEngineMgr()
-	h.b.restoreEnabledEngines(worker)
+	h.b.restoreInstalledEngines(worker)
 	if err := modelSettingsCall(t.Context(), worker, "engine:get-launch", map[string]string{"engine": "llamacpp"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	found := false
 	for _, call := range h.engine.snapshot() {
-		if call.method == restoreEnabledEnginesMethod {
+		if call.method == restoreInstalledEnginesMethod {
 			found = true
 		}
 	}
@@ -1028,12 +1024,12 @@ func TestModelSettingsRecoveryInvalidJournalRetainsKnownModelFence(t *testing.T)
 				t.Fatal("known model journal error enabled proxy replay")
 			}
 			worker := h.b.getEngineMgr()
-			h.b.restoreEnabledEngines(worker)
+			h.b.restoreInstalledEngines(worker)
 			if err := modelSettingsCall(t.Context(), worker, "engine:get-launch", map[string]string{"engine": "llamacpp"}, nil); err != nil {
 				t.Fatal(err)
 			}
 			for _, call := range h.engine.snapshot() {
-				if call.method == restoreEnabledEnginesMethod {
+				if call.method == restoreInstalledEnginesMethod {
 					t.Fatal("known unresolved model allowed global restoration")
 				}
 			}
@@ -1069,13 +1065,13 @@ func TestModelSettingsRecoveryCompletedHistoryDoesNotBlockOrdinaryJournalError(t
 		t.Fatal("completed model history blocked ordinary invalid-row replay")
 	}
 	worker := h.b.getEngineMgr()
-	h.b.restoreEnabledEngines(worker)
+	h.b.restoreInstalledEngines(worker)
 	if err := modelSettingsCall(t.Context(), worker, "engine:get-launch", map[string]string{"engine": "llamacpp"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	found := false
 	for _, call := range h.engine.snapshot() {
-		if call.method == restoreEnabledEnginesMethod {
+		if call.method == restoreInstalledEnginesMethod {
 			found = true
 		}
 	}

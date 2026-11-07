@@ -90,7 +90,6 @@ function fences(value: JsonValue | undefined): BuildApplyFences {
         'managerIncarnation',
         'policyRevision',
         'settingsRevision',
-        'intentRevision',
         'availabilityRevision'
     ])
     return {
@@ -100,7 +99,6 @@ function fences(value: JsonValue | undefined): BuildApplyFences {
         managerIncarnation: observed(row.managerIncarnation, text),
         policyRevision: observed(row.policyRevision, text),
         settingsRevision: observed(row.settingsRevision, text),
-        intentRevision: observed(row.intentRevision, text),
         availabilityRevision: observed(row.availabilityRevision, text)
     }
 }
@@ -119,7 +117,6 @@ function engine(value: JsonValue): BuildApplyEngineFact {
         active: observed(row.active, flag),
         running: observed(row.running, flag),
         loadedModels: observed(row.loadedModels, value => list(value, text)),
-        desiredState: observed(row.desiredState, text),
         scopedStopAuthority: observed(row.scopedStopAuthority, flag)
     }
 }
@@ -141,7 +138,12 @@ function impact(value: JsonValue | undefined): BuildApplyImpact {
     const maintenance = object(row.maintenance)
     const settings = object(row.expectedSettings)
     const interruption = object(row.interruptionPolicy)
-    const restore = object(row.restorePolicy)
+    const restore = fields(row.restorePolicy, [
+        'remainPaused',
+        'requireLocalResume',
+        'preserveNewerPause',
+        'automaticRollback'
+    ])
     return {
         complete: flag(row.complete),
         fences: fences(row.fences),
@@ -177,7 +179,6 @@ function impact(value: JsonValue | undefined): BuildApplyImpact {
         expectedSettings: {
             policyDigest: observed(settings.policyDigest, text),
             engineSettingsDigest: observed(settings.engineSettingsDigest, text),
-            intentDigest: observed(settings.intentDigest, text),
             stopEngines: observed(settings.stopEngines, flag),
             unloadModels: observed(settings.unloadModels, flag)
         },
@@ -195,7 +196,6 @@ function impact(value: JsonValue | undefined): BuildApplyImpact {
         restorePolicy: {
             remainPaused: flag(restore.remainPaused),
             requireLocalResume: flag(restore.requireLocalResume),
-            preserveIntent: flag(restore.preserveIntent),
             preserveNewerPause: flag(restore.preserveNewerPause),
             automaticRollback: flag(restore.automaticRollback)
         },

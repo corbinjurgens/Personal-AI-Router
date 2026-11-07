@@ -24,7 +24,6 @@ import (
 type remoteParam struct {
 	Node   string          `json:"node"`
 	Engine string          `json:"engine,omitempty"`
-	Start  bool            `json:"start,omitempty"`
 	Model  string          `json:"model,omitempty"`
 	Params json.RawMessage `json:"params,omitempty"`
 }
@@ -85,7 +84,7 @@ func (m *Manager) runRemote(ctx context.Context, msg *Message) {
 			return
 		}
 		opID := newOpID()
-		body := installRequest{OpID: opID, Engine: p.Engine, Start: p.Start}
+		body := installRequest{OpID: opID, Engine: p.Engine}
 		terminal, err := client.stream(ctx, controlInstallPath, body, m.remoteProgressFn(opID, peer.nodeID))
 		if err != nil {
 			m.codec.RespondError(msg.ID, rpcCode(err), err.Error())

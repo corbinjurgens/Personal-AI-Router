@@ -165,7 +165,7 @@ type InstallArtifact struct {
 // Runtime is how to launch + probe the engine. By default the launched
 // engine binds loopback; an engine may set Bind (substituted as {host})
 // to listen elsewhere — inference engines use "0.0.0.0" to serve the
-// cluster; an install-with-start bind override takes precedence. Readiness
+// cluster. Readiness
 // and health probes always target 127.0.0.1, which a 0.0.0.0 listener
 // also answers. The open default is an interim exception to loopback-only and
 // should be narrowed once authenticated inference transport is available.

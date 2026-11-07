@@ -15,12 +15,15 @@ import (
 )
 
 // writeRemoteError preserves typed local vetoes and unavailable node policy
-// for peer model operations and install-with-start.
+// for peer model operations and installation.
 func writeRemoteError(w http.ResponseWriter, err error) {
 	var veto *localVetoError
+	var coded *codedError
 	switch {
 	case errors.As(err, &veto):
 		writeCodedError(w, veto.code, veto.Error())
+	case errors.As(err, &coded):
+		writeCodedError(w, coded.code, coded.message)
 	case errors.Is(err, errNoProjection):
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 	default:
@@ -78,7 +81,11 @@ func (s *controlServer) handleModelAction(w http.ResponseWriter, r *http.Request
 			writeRemoteError(w, verr)
 			return
 		}
-		res, err = s.exec.ModelLoad(ctx, req.Engine, req.Model)
+		if s.exec.admittedLoadParent == nil {
+			err = errors.New("load admission coordinator unavailable")
+		} else {
+			res, err = s.exec.admittedLoadParent(ctx, req.Engine, req.Model)
+		}
 		done()
 		if err != nil {
 			writeRemoteError(w, vetoCause(ctx, err))

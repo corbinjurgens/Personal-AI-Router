@@ -89,10 +89,7 @@ func TestRestoreReclaimsSavedPIDBeforeOrphanBinds(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := ex.desired.set("fake", true, intentLocal); err != nil {
-		t.Fatal(err)
-	}
-	if err := ex.RestoreEnabled(context.Background()); err != nil {
+	if err := ex.RestoreInstalled(context.Background()); err != nil {
 		t.Fatalf("restore delayed orphan: %v", err)
 	}
 	if !orphanPIDExited(orphan.cmd.Process.Pid) {
@@ -341,9 +338,6 @@ func TestRestoreCancellationAfterVerifiedReclaimAllowsColdRetry(t *testing.T) {
 	m, dir, port := restoreOrphanManifest(t)
 	orphan := spawnFakeListener(t, m.Platforms[hostKey()].Runtime.Bin, port)
 	ex := restoreOrphanExecutor(t, m, dir)
-	if err := ex.desired.set("fake", true, intentLocal); err != nil {
-		t.Fatal(err)
-	}
 	st, err := ex.state("fake")
 	if err != nil {
 		t.Fatal(err)
@@ -363,7 +357,7 @@ func TestRestoreCancellationAfterVerifiedReclaimAllowsColdRetry(t *testing.T) {
 		cancelledAfterStop = true
 		cancel()
 	}
-	if err := ex.restoreEnabled(ctx, "fake"); !errors.Is(err, context.Canceled) {
+	if err := ex.restoreInstalled(ctx, "fake"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("restore cancelled after verified reclaim = %v", err)
 	}
 	if !cancelledAfterStop || !orphanPIDExited(orphan.Process.Pid) || portServing(port) {
@@ -375,10 +369,7 @@ func TestRestoreCancellationAfterVerifiedReclaimAllowsColdRetry(t *testing.T) {
 	if fenced || pid != 0 || proc != nil || running || adopted || generation != 0 {
 		t.Fatalf("cancelled restore lost verified stop or launched: fenced=%v pid=%d owned=%v running=%v adopted=%v generation=%d", fenced, pid, proc != nil, running, adopted, generation)
 	}
-	if enabled, known, err := ex.desired.get("fake"); err != nil || !known || !enabled {
-		t.Fatalf("cancellation changed desired On: enabled=%v known=%v err=%v", enabled, known, err)
-	}
-	if err := ex.restoreEnabled(context.Background(), "fake"); err != nil {
+	if err := ex.restoreInstalled(context.Background(), "fake"); err != nil {
 		t.Fatalf("cold restore retry after verified reclaim: %v", err)
 	}
 	st.mu.Lock()
@@ -397,9 +388,6 @@ func TestRestoreRejectsIdentifiedReplacementAfterSuccessfulReclaim(t *testing.T)
 	m, dir, port := restoreOrphanManifest(t)
 	orphan := spawnFakeListener(t, m.Platforms[hostKey()].Runtime.Bin, port)
 	ex := restoreOrphanExecutor(t, m, dir)
-	if err := ex.desired.set("fake", true, intentLocal); err != nil {
-		t.Fatal(err)
-	}
 	foreignBin := filepath.Join(testbin.Dir(t, "nvpair-engine-manager", "stop-foreign", "foreignengine"), testbin.Exe("foreignengine"))
 	copyFile(t, fakeEngineBin, foreignBin)
 	foreignPID := 0
@@ -415,7 +403,7 @@ func TestRestoreRejectsIdentifiedReplacementAfterSuccessfulReclaim(t *testing.T)
 		foreign := spawnFakeListener(t, foreignBin, port)
 		foreignPID = foreign.Process.Pid
 	}
-	err := ex.restoreEnabled(context.Background(), "fake")
+	err := ex.restoreInstalled(context.Background(), "fake")
 	if err == nil || err.Error() != "cannot start owned engine: another process already owns the server port" {
 		t.Fatalf("restore with post-reclaim replacement = %v", err)
 	}

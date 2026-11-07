@@ -71,7 +71,7 @@ func modelConversionAllowedKeys(data []byte) map[string]map[string]bool {
 			key := llamaPresetOptionKey(name)
 			if key == "" {
 				allowed[section][name] = true
-			} else if key == "fit" || key == "fit-target" || key == "fit-ctx" || key == "models-preset" || key == "models-max" || slices.ContainsFunc(llamaServingOptions, func(option llamaServingOption) bool { return option.key == key && option.unsupported }) {
+			} else if key == "fit" || key == "fit-target" || key == "fit-ctx" || key == "models-preset" || key == "models-max" || key == "sleep-idle-seconds" || slices.ContainsFunc(llamaServingOptions, func(option llamaServingOption) bool { return option.key == key && option.unsupported }) {
 				allowed[section][key] = true
 			}
 		}
@@ -97,8 +97,8 @@ func validateModelExtraOptions(model string, extras map[string]string) error {
 		return err
 	}
 	for _, key := range sortedKeys(extras) {
-		if key == "version" {
-			return modelLoadError(model, "extraOptions", "PAIR owns version.")
+		if key == "version" || key == "sleep-idle-seconds" {
+			return modelLoadError(model, "extraOptions", "PAIR owns "+key+".")
 		}
 		if canonical := llamaPresetOptionKey(key); canonical != "" && canonical != key {
 			return modelLoadError(model, "extraOptions", "Use the canonical key "+canonical+" for "+key+".")
@@ -231,14 +231,7 @@ func typedLlamaLaunchOptions(command launchCommand, rt Runtime) (int64, error) {
 			return 0, modelLoadError("", "threads", "Conflicting native thread environment source.")
 		}
 	}
-	capacity := cli["models-max"]
-	if capacity == "" {
-		capacity = env["models-max"]
-	}
-	if capacity == "" {
-		capacity = "1"
-	}
-	return llamaPositive(capacity)
+	return 0, nil
 }
 
 func literalAssignments(env map[string]string) []string {
@@ -1113,7 +1106,7 @@ func typedLlamaModelOptions(model string, requested modelconfig.RequestedLoad, l
 			return fail("gpu.layers", "Layer placement exceeds the model plus output layer.")
 		}
 	}
-	options := map[string]string{"ctx-size": strconv.Itoa(int(total)), "parallel": strconv.Itoa(int(slots)), "kv-unified": "false", "fit": "off", "sleep-idle-seconds": "300", "cache-ram": "512", "load-on-startup": "false", "gpu-layers": "0"}
+	options := map[string]string{"ctx-size": strconv.Itoa(int(total)), "parallel": strconv.Itoa(int(slots)), "kv-unified": "false", "fit": "off", "sleep-idle-seconds": "-1", "cache-ram": "512", "load-on-startup": "false", "gpu-layers": "0"}
 	if modelLoadNativeFit(requested) {
 		options["fit"] = "on"
 		if requested.FitTarget != nil {
@@ -1157,7 +1150,7 @@ func typedLlamaModelOptions(model string, requested modelconfig.RequestedLoad, l
 	for _, field := range []struct {
 		key   string
 		value *int32
-	}{{"batch-size", requested.BatchSize}, {"ubatch-size", requested.UBatchSize}, {"threads", requested.Threads}, {"threads-batch", requested.ThreadsBatch}, {"sleep-idle-seconds", requested.SleepIdleSeconds}, {"cache-ram", requested.CacheRAM}} {
+	}{{"batch-size", requested.BatchSize}, {"ubatch-size", requested.UBatchSize}, {"threads", requested.Threads}, {"threads-batch", requested.ThreadsBatch}, {"cache-ram", requested.CacheRAM}} {
 		if field.value != nil {
 			options[field.key] = strconv.Itoa(int(*field.value))
 		}
@@ -1924,7 +1917,7 @@ func (e *Executor) previewTypedLlamaConversionExpected(ctx context.Context, st *
 		if model == "*" {
 			continue
 		}
-		options := map[string]string{"ctx-size": "8192", "parallel": "1", "kv-unified": "false", "fit": "off", "sleep-idle-seconds": "300", "cache-ram": "512", "load-on-startup": "false"}
+		options := map[string]string{"ctx-size": "8192", "parallel": "1", "kv-unified": "false", "fit": "off", "sleep-idle-seconds": "-1", "cache-ram": "512", "load-on-startup": "false"}
 		maps.Copy(options, env)
 		maps.Copy(options, sections["*"])
 		maps.Copy(options, sections[model])
@@ -1932,6 +1925,7 @@ func (e *Executor) previewTypedLlamaConversionExpected(ctx context.Context, st *
 		delete(options, "models-preset")
 		delete(options, "models-max")
 		before[model] = maps.Clone(options)
+		delete(options, "sleep-idle-seconds")
 		requested, err := convertTypedLlamaOptions(model, options)
 		if err != nil {
 			return typedLlamaConversion{}, err
@@ -2119,7 +2113,7 @@ func convertTypedLlamaOptions(model string, options map[string]string) (modelcon
 				return fail()
 			}
 			r.Context = &modelconfig.Context{Mode: "fixed", Tokens: *n}
-		case "parallel", "gpu-layers", "batch-size", "ubatch-size", "threads", "threads-batch", "sleep-idle-seconds", "cache-ram":
+		case "parallel", "gpu-layers", "batch-size", "ubatch-size", "threads", "threads-batch", "cache-ram":
 			n, err := integer()
 			if err != nil {
 				return fail()
@@ -2143,8 +2137,6 @@ func convertTypedLlamaOptions(model string, options map[string]string) (modelcon
 				r.Threads = n
 			case "threads-batch":
 				r.ThreadsBatch = n
-			case "sleep-idle-seconds":
-				r.SleepIdleSeconds = n
 			case "cache-ram":
 				r.CacheRAM = n
 			}
@@ -2234,7 +2226,7 @@ func modelSettingsNativeLabels() map[string]string {
 		"n-predict": "Native output token limit", "gpu-layers": "GPU placement",
 		"split-mode": "GPU split mode", "tensor-split": "GPU tensor proportions",
 		"main-gpu": "Main native GPU", "device": "Native devices",
-		"backend-sampling": "Engine-side sampling", "sleep-idle-seconds": "Unload after idle (seconds; -1 or positive)",
+		"backend-sampling": "Engine-side sampling", "sleep-idle-seconds": "Native idle sleep (PAIR-owned)",
 		"cache-ram": "Host prompt cache (MiB)", "fit": "Native automatic fitting",
 		"cache-prompt": "Prompt caching", "cache-idle-slots": "Idle slot caching",
 		"batch-size": "Logical prompt batch", "ubatch-size": "Physical prompt batch",
@@ -2360,8 +2352,10 @@ func llamaModelSettingsOptions() ([]modelSettingsOption, error) {
 			d = modelconfig.OptionDescriptor{Field: field, Label: label, Kind: "boolean", Supported: true, Portable: true, Owner: "model-load", Phase: "B", DefaultSource: "inherited native policy; unresolved", IdentityEffect: "placement", EstimateEffect: "host/device allocation"}
 			preset = native.key + " = explicit true/false"
 		case "sleep-idle-seconds":
-			d = modelSettingsInteger("sleepIdleSeconds", label, "-1", "300", "finite adapter inherited baseline", "retention; keep-loaded policy takes precedence")
-			preset = "sleep-idle-seconds = -1 or positive int32 (zero invalid)"
+			d.Owner, d.Phase = "manager/router", "B"
+			d.Reason = "PAIR owns model idle release; native idle sleep is disabled."
+			d.IdentityEffect, d.EstimateEffect = "manager-owned fixed output", "PAIR per-model idle release"
+			preset = "sleep-idle-seconds = -1"
 		case "cache-ram":
 			d = modelSettingsInteger("cacheRAM", label, "1", "512", "finite adapter inherited baseline (MiB)", "host prompt cache; not admission memory")
 			preset = "cache-ram = explicit positive int32 MiB"
@@ -2386,7 +2380,7 @@ func llamaModelSettingsOptions() ([]modelSettingsOption, error) {
 			} else if native.key == "models-preset" {
 				preset = "manager-generated immutable preset path"
 			} else if native.key == "models-max" {
-				preset = "preserve existing finite router capacity"
+				preset = "models-max = 0 (PAIR admission owns capacity)"
 			}
 		case "model", "model-draft", "alias", "models-dir", "model-url", "hf-repo", "hf-file", "docker-repo", "hf-repo-draft":
 			d.Owner = "artifacts"

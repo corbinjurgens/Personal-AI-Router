@@ -161,16 +161,11 @@ eligible for a given request.
 
 ## What Persists Across Restarts
 
-PAIR still retains saved engine intent for restoration and idle policy.
+Every installed engine runs while the node is available. Service startup, Resume, installation and crash recovery start installed engines. Requests can wake a stopped installed engine on an available node. Pause and Halt control node availability.
 
-- When you quit or restart PAIR, it stops running engines cleanly as part of
-  shutdown.
-- The next time PAIR starts, it restores engines that were left **on**, so you
-  do not have to start each engine again.
-- Opening the application for the first time does not start already-installed
-  engines.
+PAIR releases each nonresident model after its own idle interval, defaulting to 5 minutes. The engine process stays running. Set the interval to 0 (Never) to disable idle release. Native idle sleep is disabled for PAIR-managed typed launches.
 
-An engine saved Off remains ineligible for restoration and private wake.
+The node setting "Models that can stay loaded at once" governs inference and manual loads from the desktop and terminal interface. At capacity, admission can evict the least recently used eligible model.
 
 ## Working with Models
 

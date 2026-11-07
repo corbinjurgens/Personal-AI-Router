@@ -43,7 +43,6 @@ export interface BuildApplyFences {
     managerIncarnation: Observation<string>
     policyRevision: Observation<string>
     settingsRevision: Observation<string>
-    intentRevision: Observation<string>
     availabilityRevision: Observation<string>
 }
 export interface BuildApplyEngineFact {
@@ -51,7 +50,6 @@ export interface BuildApplyEngineFact {
     active: Observation<boolean>
     running: Observation<boolean>
     loadedModels: Observation<string[]>
-    desiredState: Observation<string>
     scopedStopAuthority: Observation<boolean>
 }
 export interface BuildApplyModelOperation {
@@ -68,7 +66,6 @@ export interface BuildApplySettingsDifference {
 export interface BuildApplyExpectedSettings {
     policyDigest: Observation<string>
     engineSettingsDigest: Observation<string>
-    intentDigest: Observation<string>
     stopEngines: Observation<boolean>
     unloadModels: Observation<boolean>
 }
@@ -83,7 +80,6 @@ export interface BuildApplyInterruptionPolicy {
 export interface BuildApplyRestorePolicy {
     remainPaused: boolean
     requireLocalResume: boolean
-    preserveIntent: boolean
     preserveNewerPause: boolean
     automaticRollback: boolean
 }

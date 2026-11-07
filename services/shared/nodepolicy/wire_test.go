@@ -232,6 +232,8 @@ func testResidentWire[T interface{ Validate() error }](t *testing.T, valid T, re
 func TestPrepareResidentWire(t *testing.T) {
 	valid := PrepareResidentParams{PolicyRevision: "1", ProxyRunID: "proxy-1", ManagerIncarnation: "manager-1", Engine: "llamacpp", Model: "m", Identity: residentIdentity(), OperationID: "resident:1", TimeoutMs: 60_000}
 	testResidentWire(t, valid, "policyRevision proxyRunId engine model identity operationId timeoutMs",
+		residentWireRejection{"unknown purpose", "purpose", "bypass"},
+		residentWireRejection{"null purpose", "purpose", nil},
 		residentWireRejection{"noncanonical revision", "policyRevision", "01"},
 		residentWireRejection{"revision overflow", "policyRevision", strings.Repeat("9", 30)},
 		residentWireRejection{"empty proxy run", "proxyRunId", ""},
@@ -254,6 +256,13 @@ func TestPrepareResidentWire(t *testing.T) {
 		residentWireRejection{"invalid fingerprint", "identity", StrictModelIdentity{EngineRunID: "e", SettingsFingerprint: "bad", ModelDigest: strings.Repeat("b", 64)}},
 		residentWireRejection{"invalid digest", "identity", StrictModelIdentity{EngineRunID: "e", SettingsFingerprint: strings.Repeat("a", 64), ModelDigest: "bad"}},
 	)
+}
+
+func TestPrepareManualResidentWire(t *testing.T) {
+	valid := PrepareResidentParams{Purpose: ResidentPurposeManual, PolicyRevision: "1", ProxyRunID: "proxy-1", ManagerIncarnation: "manager-1", Engine: "llamacpp", Model: "m", Identity: residentIdentity(), OperationID: "resident:1", TimeoutMs: 1000}
+	testResidentWire(t, valid, "policyRevision proxyRunId engine model identity operationId timeoutMs",
+		residentWireRejection{"unknown purpose", "purpose", "automatic-and-manual"},
+		residentWireRejection{"numeric purpose", "purpose", 1})
 }
 
 func TestResidentRefusalWire(t *testing.T) {

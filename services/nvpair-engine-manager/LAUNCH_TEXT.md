@@ -88,6 +88,18 @@ The executable and optional startup subcommand come from the trusted manifest.
 The `--` terminator and vendor flags retain their token positions for that layer.
 Unknown vendor option semantics are not decided by the tokenizer.
 
+## Existing typed-load records at the lifecycle installation boundary
+
+This pre-release format change removes `requested.sleepIdleSeconds` and
+`resolved.options.sleepIdleSeconds`. Old typed-load records containing them are
+refused by strict manifest decoding. Before the combined phase 11/15
+installation, manually remove the old `runtime.modelLoads` entries from stored
+engine overrides (including platform runtime blocks where present), preserving
+ports and other engine settings. Recreate typed loads through fresh Preview/Apply
+after installation. Merely deleting the retired idle fields does not refresh the
+approved native-source and preset digests. Model files are unaffected; this
+source does not perform the configuration amendment or install anything.
+
 ## Serving records
 
 The settings `serving` object is independent of argument text; port or text
@@ -119,7 +131,7 @@ Split GGUFs select the `-00001-of-` shard and require every remaining shard.
 
 NE removes the bundled router's implicit context, parallelism, retention and
 cache arguments. Finite defaults live in the generated preset instead:
-context 8192, one slot, non-unified KV, fitting off, 300-second idle sleep and
+context 8192, one slot, non-unified KV, fitting off, disabled native idle sleep and
 512 MiB prompt cache. Model options override global `[*]` options; explicit
 router CLI options override model options. A native environment assignment
 fills a setting absent from both model and global source presets, because the
@@ -361,3 +373,8 @@ cannot bypass this check using a stale ingress check or a client-supplied false 
 Vendor option semantics can change independently of PAIR. New aliases or networking
 controls require a manifest/test update; this is the deliberately bounded portion
 of engine behavior PAIR owns.
+
+Typed model loads force `--models-max 0` and `sleep-idle-seconds = -1`.
+PAIR admission and per-model idle release govern capacity and memory release.
+External presets retain their positive native capacity until converted; conversion
+replaces sleep values and reports the change in its preview.

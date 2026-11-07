@@ -2356,15 +2356,6 @@ func downloadTransferController(t *testing.T, f *controllerCopyFixture) {
 			t.Fatalf("joined controller activated %s", engine.Engine)
 		}
 	}
-	for _, node := range []*task1Node{f.controller, f.source, f.target} {
-		var intent struct {
-			Engines map[string]bool `json:"engines"`
-		}
-		task2Decode(t, readLiveDurableFile(t, filepath.Join(jointAppDir(node.base), "engine-bin", "engine-state.json")), &intent)
-		if on, known := intent.Engines["llamacpp"]; !known || on {
-			t.Fatalf("joined COPY/download changed private Off intent for %s", node.uuid)
-		}
-	}
 }
 
 func TestModelDownloadStateTransferJoinProcess(t *testing.T) {

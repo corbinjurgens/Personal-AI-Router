@@ -131,7 +131,7 @@ func TestOverrideFailureAndRepairFenceCachedState(t *testing.T) {
 	if err != nil || status.Installed || status.Running || status.Healthy {
 		t.Fatalf("status = %+v, error = %v", status, err)
 	}
-	if err := ex.restoreEnabled(context.Background(), "fake"); err == nil {
+	if err := ex.restoreInstalled(context.Background(), "fake"); err == nil {
 		t.Fatal("restore accepted invalid override")
 	}
 	if probeCalls != 0 {

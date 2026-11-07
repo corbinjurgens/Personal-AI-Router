@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,7 +12,6 @@ import (
 	"io"
 	"log"
 	"log/slog"
-	"net"
 	"path/filepath"
 	"sync"
 
@@ -40,13 +40,21 @@ type engineParam struct {
 	Port   int    `json:"port,omitempty"`
 }
 
-// opParam is the install/uninstall input. Start and its Port/Bind overrides
-// apply only to install; they do not mutate the manifest.
+// opParam is the install/uninstall input.
 type opParam struct {
 	Engine string `json:"engine"`
-	Port   int    `json:"port,omitempty"`
-	Bind   string `json:"bind,omitempty"`
-	Start  bool   `json:"start,omitempty"`
+}
+
+func (p *opParam) UnmarshalJSON(data []byte) error {
+	type wire opParam
+	var value wire
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&value); err != nil {
+		return err
+	}
+	*p = opParam(value)
+	return nil
 }
 
 type actionParam struct {
@@ -85,6 +93,7 @@ type Manager struct {
 	policyRelay      policyRelay
 	modelMutation    modelMutationRelay
 	residentDispatch residentDispatchRelay
+	admittedLoad     admittedLoadRelay
 	codec            *Codec
 	exec             *Executor
 	peers            *peerDirectory
@@ -130,6 +139,8 @@ func NewManager(codec *Codec, exec *Executor, mesh *clustertrust.Mesh, clusterDi
 		PeerClientOptions: clustertrust.PeerClientOptions{ResponseHeaderTimeout: remoteReadyResponseHeaderTimeout},
 		BaseConfigDir:     baseDir, ResolveRoute: m.resolveControlRoute,
 	})
+	m.admittedLoad.send = codec.NotifyContext
+	exec.admittedLoadParent = m.admittedLoad.call
 	m.settingsRelay.send = codec.NotifyContext
 	exec.settingsParent = m.settingsRelay.call
 	exec.memoryProfilesParent = m.settingsRelay.callRelay
@@ -234,6 +245,10 @@ func (m *Manager) handleMessage(ctx context.Context, msg *Message) {
 	// (model_mutation.go). It is consumed as an internal notification here and
 	// never treated as a client request, so a public request with the same name
 	// cannot complete a pending wait.
+	if msg.Method == admittedLoadReplyMethod && msg.IsNotification() {
+		m.admittedLoad.reply(msg.Params)
+		return
+	}
 	if msg.Method == nodepolicy.MethodModelMutationReply && msg.IsNotification() {
 		m.modelMutation.reply(msg.Params)
 		return
@@ -242,10 +257,10 @@ func (m *Manager) handleMessage(ctx context.Context, msg *Message) {
 		m.applyNodeProjection(msg)
 		return
 	}
-	if msg.Method == restoreEnabledMethod && msg.IsNotification() {
+	if msg.Method == restoreInstalledMethod && msg.IsNotification() {
 		go func() {
-			if err := m.exec.RestoreEnabled(ctx); err != nil {
-				slog.Warn("one or more enabled engines could not be restored", "err", err)
+			if err := m.exec.RestoreInstalled(ctx); err != nil {
+				slog.Warn("one or more installed engines could not be restored", "err", err)
 			}
 		}()
 		return
@@ -418,22 +433,10 @@ func (m *Manager) runOp(ctx context.Context, msg *Message) {
 		m.codec.RespondError(msg.ID, -32602, "engine is required")
 		return
 	}
-	if p.Port < 0 || p.Port > 65535 {
-		m.codec.RespondError(msg.ID, -32602, "port must be between 0 and 65535")
-		return
-	}
-	if p.Bind != "" && net.ParseIP(p.Bind) == nil {
-		m.codec.RespondError(msg.ID, -32602, "bind must be a valid IP address")
-		return
-	}
 	var err error
 	switch msg.Method {
 	case "engine:install":
-		if p.Start {
-			err = m.exec.InstallWithStart(ctx, ctx, p.Engine, startOpts{Port: p.Port, Bind: p.Bind})
-		} else {
-			err = m.exec.Install(ctx, p.Engine)
-		}
+		err = m.exec.Install(ctx, p.Engine)
 	case "engine:uninstall":
 		err = m.exec.Uninstall(ctx, p.Engine)
 	}
@@ -504,6 +507,11 @@ func (m *Manager) runAction(ctx context.Context, msg *Message) {
 		m.codec.RespondError(msg.ID, -32602, "engine and action are required")
 		return
 	}
+	manifest, known := m.exec.reg.Get(p.Engine)
+	if !known || !manifest.clientActionAllowed(p.Action) {
+		m.codec.RespondError(msg.ID, -32602, "Use admitted model loads or proxy inference; this raw action is unavailable.")
+		return
+	}
 	// A model pull is routed through the streaming path so a local pull emits
 	// live engine:pull-progress just like a remote pull relays
 	// engine:remote-progress; the response is still the action's terminal result
@@ -543,8 +551,8 @@ func (m *Manager) runAction(ctx context.Context, msg *Message) {
 		m.respondOrErr(msg, nil, err)
 		return
 	}
-	// An action may have changed what's resident (load/unload/pull/delete/run, or
-	// a chat that JIT-loads); nudge the loaded watcher so engine:models-changed
+	// A permitted mutation may have changed what's resident; nudge the loaded
+	// watcher so engine:models-changed
 	// fires promptly instead of waiting for the next poll tick. Pure reads
 	// (list_models/loaded_models/list_downloaded) can't move residency, so skip
 	// the nudge and its wasted sweep for them.

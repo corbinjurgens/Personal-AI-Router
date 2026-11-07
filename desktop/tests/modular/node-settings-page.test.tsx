@@ -17,6 +17,7 @@ import { useOverviewUiStore } from '@/ui/stores/overview-ui.store'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import { useNodesStore } from '@/ui/stores/nodes.store'
 import { useOverviewCommands } from '@/ui/hooks/useOverviewCommands'
+import NodeMemorySettings from '@/ui/components/RoutingSettings/NodeMemorySettings'
 
 // Engine operations are outside this navigation contract; keep the real engine body.
 vi.mock('@/ui/components/BackendRow/BackendRow', () => ({
@@ -35,6 +36,49 @@ vi.mock('@/ui/components/BackendRow/BackendRow', () => ({
 let root: Root
 let container: HTMLDivElement
 const originalWindowApi = Object.getOwnPropertyDescriptor(window, 'windowApi')
+
+it('edits idle and capacity in the policy draft while preserving unrelated numeric tokens', async () => {
+    let policy =
+        '{"opaque":9007199254740993,"idle":{"wakeTimeoutSeconds":90},"admission":{"memoryBudgetBytes":0}}'
+    function MemoryEditor() {
+        const [text, setText] = useState(policy)
+        return (
+            <NodeMemorySettings
+                text={text}
+                disabled={false}
+                onChange={next => {
+                    policy = next
+                    setText(next)
+                }}
+            />
+        )
+    }
+    await act(async () => root.render(<MemoryEditor />))
+    const capacity = container.querySelector(
+        'input[aria-label="Models that can stay loaded at once"]'
+    )
+    const idle = container.querySelector(
+        'input[aria-label="Release model memory after N idle minutes"]'
+    )
+    if (!(capacity instanceof HTMLInputElement) || !(idle instanceof HTMLInputElement))
+        throw new Error('Missing memory settings')
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+    if (!setter) throw new Error('Missing native input setter')
+    await act(async () => {
+        setter.call(capacity, '2')
+        capacity.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await act(async () => {
+        setter.call(idle, '0')
+        idle.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    expect(JSON.parse(policy)).toMatchObject({
+        idle: { unloadAfterMinutes: 0, wakeTimeoutSeconds: 90 },
+        admission: { maxResidentModels: 2, memoryBudgetBytes: 0 }
+    })
+    expect(policy).toContain('9007199254740993')
+    expect(container.textContent).toContain('Never')
+})
 
 function node(id: string, name: string): NodeItem {
     return {

@@ -323,20 +323,14 @@ destination UUID and a fresh operation ID, then delegates to the same canonical
 coordinator. Peer-to-peer transfers carry only control/status metadata through
 the desktop; the destination's Go service fetches the source artifacts.
 
-Engine commands expose no start, stop, restart or On/Off action. Install retains
-its start option; settings Apply can restart internally. Wake and sleep are
-private broker operations. First-open startup does not start installed engines.
-Saved intent remains read-only here until phase 15 changes its owner contract.
+Engine commands expose no start, stop, restart or On/Off action. Install starts the engine when the node is available; settings Apply can restart internally. Wake and sleep are private broker operations. There is no saved engine intent API.
 
-- `getIntent()` reads the local bridge's `EngineIntentSnapshot | null` through
-  `engines:get-intent`; `onIntentChanged(callback)` subscribes through
-  `engines:intent-changed`. Both maps are required: `enabledByEngine` contains
-  booleans and `offByEngine` contains only explicitly saved Off engines with
-  origin `local` or `peer`, relative to the engine-owning device. Legacy saved
-  Off without stored provenance reports `local`; default false has no origin.
-  Null means unavailable after disconnect, restart or failed read. The existing
-  engine-status store subscribes before fetching and clears intent on teardown.
-  Intent and origin are independent of runtime lifecycle status.
+Every installed engine runs while the node is available. Service startup, Resume, installation and crash recovery start installed engines. Requests can wake a stopped installed engine on an available node. Pause and Halt control node availability.
+
+PAIR releases each nonresident model after its own idle interval, defaulting to 5 minutes. The engine process stays running. Set the interval to 0 (Never) to disable idle release. Native idle sleep is disabled for PAIR-managed typed launches.
+
+The node setting "Models that can stay loaded at once" governs inference and manual loads from the desktop and terminal interface. At capacity, admission can evict the least recently used eligible model.
+
 - `getInitialState()` returns engine statuses, models, active progress, and available
   updates.
 - Model snapshots carry `EngineModels.downloadState` (the target's full versioned

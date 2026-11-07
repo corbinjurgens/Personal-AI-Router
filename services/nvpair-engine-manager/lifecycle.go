@@ -95,9 +95,6 @@ type startOpts struct {
 	BoundedCleanup bool
 	Port           int
 	Bind           string
-	// Origin is who asked for the start. A paired node's start (intentPeer)
-	// is checked against the local veto again under the lifecycle lock.
-	Origin intentOrigin
 }
 
 // effectiveBind picks the listen address substituted as {host}: a per-call
@@ -123,9 +120,7 @@ func (e *Executor) Start(ctx context.Context, engine string) error {
 }
 
 // StartWith is Start with per-call overrides. The overrides are not
-// persisted — a service restart reverts to the manifest. A paired node's start
-// rechecks target pause after taking the lifecycle lock. Saved Off
-// alone does not prohibit a fresh explicit start.
+// persisted — a service restart reverts to the manifest. Starts obey availability admission.
 func (e *Executor) StartWith(ctx context.Context, engine string, opts startOpts) error {
 	done, err := e.admitMutation(engine)
 	if err != nil {
@@ -141,19 +136,8 @@ func (e *Executor) StartWith(ctx context.Context, engine string, opts startOpts)
 	}
 	st.opMu.Lock()
 	defer st.opMu.Unlock()
-	if opts.Origin == intentPeer {
-		if err := e.remoteVeto(engine); err != nil {
-			return err
-		}
-	}
 	if err := e.doStart(ctx, st, engine, opts); err != nil {
 		return err
-	}
-	if err := e.setDesiredEnabled(engine, true, opts.Origin); err != nil {
-		if opts.BoundedCleanup {
-			return errors.Join(err, e.doStopContext(ctx, st, engine))
-		}
-		return errors.Join(err, e.doStop(st, engine))
 	}
 	return nil
 }
@@ -747,12 +731,8 @@ func (e *Executor) watch(st *engineState, engine string, proc *managedProc) {
 }
 
 // Stop terminates a running engine by signalling the owned process (graceful
-// then forced). No-op if not running. Internal callers retain local Off intent.
+// then forced). No-op if not running.
 func (e *Executor) Stop(engine string) error {
-	return e.stopFrom(engine, intentLocal)
-}
-
-func (e *Executor) stopFrom(engine string, origin intentOrigin) error {
 	st, err := e.state(engine)
 	if err != nil {
 		return err
@@ -765,22 +745,12 @@ func (e *Executor) stopFrom(engine string, origin intentOrigin) error {
 		return nil
 	}
 	defer done()
-	if origin == intentLocal {
-		e.remoteWork.cancelEngine(engine, &localVetoError{code: codeLocalVeto, reason: engineOffVeto(engine)})
-	}
 	cancelCrashRelaunch(st)
 	finishLoads := stopServingLoads(st)
 	defer finishLoads()
 	st.opMu.Lock()
 	defer st.opMu.Unlock()
-	stopErr := e.doStop(st, engine)
-	// A user-initiated Stop is explicit OFF intent. Persist it even when
-	// doStop declines a genuinely-foreign listener we can't terminate, so the
-	// health loop and RestoreEnabled honor the OFF instead of flipping the
-	// engine back on. Restart and StopAll call doStop directly and never
-	// rewrite intent — shutdown must not erase the user's saved choice.
-	setErr := e.setDesiredEnabled(engine, false, origin)
-	return errors.Join(stopErr, setErr)
+	return e.doStop(st, engine)
 }
 
 // doStop performs the stop. Callers must hold st.opMu.
@@ -1095,11 +1065,11 @@ func (e *Executor) Restart(ctx context.Context, engine string) error {
 	if err := e.doStart(ctx, st, engine, startOpts{}); err != nil {
 		return err
 	}
-	return e.setDesiredEnabled(engine, true, intentLocal)
+	return nil
 }
 
 // StopAll rejects new starts and terminates every running engine during
-// shutdown without changing the user's saved ON/OFF intent.
+// shutdown.
 func (e *Executor) StopAll() {
 	e.shuttingDown.Store(true)
 	e.mu.Lock()

@@ -105,9 +105,10 @@ views, so nothing reaches it automatically.
 A profile names its engine. Shared `nodepolicy` owns profile validation and
 projection, the target broker owns policy persistence, engine-manager owns
 process effects, and the proxy owns routing and admission. Concrete model
-requests still route through their entry engine. Saved intent and private
-on-demand wake remain separate existing contracts. Users and peers cannot
-start, stop or restart engines.
+requests still route through their entry engine. Installed engines run while
+the node is available, and private on-demand wake repairs a stopped engine.
+PAIR owns per-model idle release and admits every model load through the node
+capacity limit. Users and peers cannot start, stop or restart engines.
 
 ### Changing an Existing JSON-RPC Method or Payload
 

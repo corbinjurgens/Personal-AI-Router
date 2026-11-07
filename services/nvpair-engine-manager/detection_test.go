@@ -311,6 +311,7 @@ func TestConfiguredDetectionInstallRequiresCompleteEvidence(t *testing.T) {
 	test := func(name, created string, wantError bool) {
 		t.Run(name, func(t *testing.T) {
 			ex, st := configuredDetectionExecutor(t)
+			t.Cleanup(ex.StopAll)
 			config := filepath.Join(st.installDir, "config.json")
 			removeDetectionFile(t, config)
 			st.plat.Runtime.Ready = nil

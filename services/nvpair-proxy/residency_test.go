@@ -25,7 +25,6 @@ func TestResidentNativeAllocation(t *testing.T) {
 			f.policy.ResidentModels = nodepolicy.ResidentModels{{Engine: f.engine, Model: "m"}}
 			edit(&f)
 			f.install(t)
-			f.a.setIntent(map[string]bool{f.engine: true})
 			f.a.setResidency(map[string][]string{f.engine: {}})
 			in := nodepolicy.PrepareResidentParams{PolicyRevision: "1", ProxyRunID: "proxy", ManagerIncarnation: "manager", Engine: f.engine, Model: "m", Identity: f.request().Identity, OperationID: "resident:1", TimeoutMs: 1000}
 			result, err := f.a.prepareResident("proxy", in)
@@ -62,7 +61,6 @@ func TestResidentNativeAllocationRevalidation(t *testing.T) {
 			f := newReadinessEnvelopeFixture(t, "llamacpp")
 			f.policy.ResidentModels = nodepolicy.ResidentModels{{Engine: f.engine, Model: "m"}}
 			f.install(t)
-			f.a.setIntent(map[string]bool{f.engine: true})
 			f.a.setResidency(map[string][]string{f.engine: {}})
 			in := nodepolicy.PrepareResidentParams{PolicyRevision: "1", ProxyRunID: "proxy", ManagerIncarnation: "manager", Engine: f.engine, Model: "m", Identity: f.request().Identity, OperationID: "resident:1", TimeoutMs: 1000}
 			prepared := prepareResidentOK(t, f.a, in)
@@ -122,7 +120,6 @@ func residentHarnessFor(t *testing.T, engine string, models ...string) (*admHarn
 	}
 	p.ResidentModels = nodepolicy.ResidentModels{{Engine: engine, Model: models[0]}}
 	h.a.setPolicy(p)
-	h.a.setIntent(map[string]bool{engine: true})
 	h.a.setResidency(map[string][]string{engine: {}})
 	return h, nodepolicy.PrepareResidentParams{PolicyRevision: "1", ProxyRunID: "proxy", ManagerIncarnation: "manager", Engine: engine, Model: models[0], Identity: strictRequest().Identity, OperationID: "resident:1", TimeoutMs: 10_000}
 }
@@ -580,7 +577,6 @@ func TestServedResidentFinalGrantRevocation(t *testing.T) {
 	})
 	test("revision replaced", func(a *admissionController) { p := a.currentPolicy(); p.Revision = "2"; a.setPolicy(p) })
 	test("local pause", func(a *admissionController) { a.setAvailability(nodepolicy.Paused, false) })
-	test("saved Off", func(a *admissionController) { a.setIntent(map[string]bool{"llamacpp": false}) })
 	test("drain", func(a *admissionController) { a.setDrain("llamacpp", true) })
 	test("identity withdrawal", func(a *admissionController) { a.setModelIdentity(map[string]nodepolicy.EngineIdentity{}) })
 	test("accepted launch digest changed", func(a *admissionController) {
@@ -841,14 +837,10 @@ func TestServedResidentConcreteSwitchTimeoutDoesNotBypassProtection(t *testing.T
 	if h.a.currentActive() != 0 {
 		t.Fatal("switch timeout granted over protected capacity")
 	}
-	// On an engine with no protected residents the existing timeout applies.
+	// The same cap remains hard without a protected resident preference.
 	p.ResidentModels = nil
 	h.a.setPolicy(p)
-	decision := h.admit("llamacpp", "n", 0)
-	if decision.ticket == nil {
-		t.Fatalf("legacy switch-timeout behavior changed: %+v", decision)
-	}
-	decision.ticket.release()
+	mustReject(t, h.admit("llamacpp", "n", 0), nodepolicy.RejectNoFit)
 }
 
 func TestServedResidentUnknownMemorySameModelFailsBeforeWarmShortcut(t *testing.T) {

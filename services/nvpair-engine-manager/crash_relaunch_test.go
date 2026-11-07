@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -15,7 +16,7 @@ import (
 	"time"
 )
 
-func TestCrashRelaunchSavedOnReturnsToReady(t *testing.T) {
+func TestCrashRelaunchInstalledEngineReturnsToReady(t *testing.T) {
 	m := testEngineManifest(fakeEngineBin)
 	p := m.Platforms[hostKey()]
 	p.Runtime.Health = nil
@@ -59,7 +60,7 @@ func TestCrashRelaunchSavedOnReturnsToReady(t *testing.T) {
 			t.Fatalf("relaunch state = %+v, want ready", status)
 		}
 	case <-time.After(12 * time.Second):
-		t.Fatal("saved-On engine did not publish running after unexpected exit")
+		t.Fatal("installed engine did not publish running after unexpected exit")
 	}
 	st.mu.Lock()
 	second := st.proc
@@ -340,9 +341,6 @@ func TestCrashRelaunchPauseDuringOperationWaitCancels(t *testing.T) {
 	p.Runtime.Ready, p.Runtime.Health = nil, nil
 	m.Platforms[hostKey()] = p
 	ex := desiredTestExecutor(t, m, t.TempDir())
-	if err := ex.setDesiredEnabled("fake", true, intentLocal); err != nil {
-		t.Fatalf("save On intent: %v", err)
-	}
 	st, err := ex.state("fake")
 	if err != nil {
 		t.Fatalf("engine state: %v", err)
@@ -393,20 +391,23 @@ func TestCrashRelaunchPauseDuringOperationWaitCancels(t *testing.T) {
 	}
 }
 
-// Virtual-time controls use a completed owned-process handle and an absent
-// executable. They cannot launch a child; the real-binary proof above owns
+// Virtual-time controls use a completed owned-process handle and an invalid
+// executable (or no installation). They cannot launch a child; the proof above owns
 // readiness, replacement identity and the running notification assertions.
-func crashRelaunchStoppedFixture(t *testing.T, enabled bool) (*Executor, *engineState, *engineRelaunch) {
+func crashRelaunchStoppedFixture(t *testing.T, installed bool) (*Executor, *engineState, *engineRelaunch) {
 	t.Helper()
-	m := testEngineManifest(filepath.Join(t.TempDir(), "absent-engine"))
+	bin := filepath.Join(t.TempDir(), "invalid-engine"+exeExt())
+	if installed {
+		if err := os.WriteFile(bin, []byte("not an executable image\n"), 0o755); err != nil {
+			t.Fatalf("write installed runtime with definite start failure: %v", err)
+		}
+	}
+	m := testEngineManifest(bin)
 	p := m.Platforms[hostKey()]
 	p.Runtime.Ready = nil
 	p.Runtime.Health = nil
 	m.Platforms[hostKey()] = p
 	ex := desiredTestExecutor(t, m, t.TempDir())
-	if err := ex.setDesiredEnabled(m.Engine, enabled, intentLocal); err != nil {
-		t.Fatalf("save fixture intent: %v", err)
-	}
 	st, err := ex.state(m.Engine)
 	if err != nil {
 		t.Fatalf("fixture state: %v", err)
@@ -427,14 +428,14 @@ func crashRelaunchStoppedFixture(t *testing.T, enabled bool) (*Executor, *engine
 	return ex, st, recovery
 }
 
-func TestCrashRelaunchSavedOffNeverStarts(t *testing.T) {
+func TestCrashRelaunchNotInstalledNeverStarts(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		_, st, recovery := crashRelaunchStoppedFixture(t, false)
 		<-recovery.done
 		st.mu.Lock()
 		defer st.mu.Unlock()
 		if st.proc != nil || st.running || st.gen != 0 {
-			t.Fatalf("saved Off started: running=%v proc=%p generation=%d", st.running, st.proc, st.gen)
+			t.Fatalf("absent installation started: running=%v proc=%p generation=%d", st.running, st.proc, st.gen)
 		}
 	})
 }

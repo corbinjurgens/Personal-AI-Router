@@ -121,7 +121,6 @@ function fences(): BuildApplyFences {
         managerIncarnation: known('manager-3'),
         policyRevision: known('4'),
         settingsRevision: known('5'),
-        intentRevision: known('6'),
         availabilityRevision: known('8')
     }
 }
@@ -162,7 +161,6 @@ function preview(): BuildApplyPreview {
                     active: known(false),
                     running: absent(),
                     loadedModels: known([]),
-                    desiredState: known('off'),
                     scopedStopAuthority: absent()
                 }
             ]),
@@ -179,7 +177,6 @@ function preview(): BuildApplyPreview {
             expectedSettings: {
                 policyDigest: known('policy-digest'),
                 engineSettingsDigest: known('settings-digest'),
-                intentDigest: known('intent-digest'),
                 stopEngines: known(true),
                 unloadModels: known(true)
             },
@@ -194,7 +191,6 @@ function preview(): BuildApplyPreview {
             restorePolicy: {
                 remainPaused: true,
                 requireLocalResume: true,
-                preserveIntent: true,
                 preserveNewerPause: true,
                 automaticRollback: false
             },
@@ -354,8 +350,7 @@ describe('build apply payloads', () => {
     })
     it('rejects removed lock fences and the old intent preservation key', () => {
         const value = preview()
-        const { preserveIntent, ...restorePolicy } = value.impact.restorePolicy
-        expect(preserveIntent).toBe(true)
+        const restorePolicy = value.impact.restorePolicy
         expect(() =>
             parseBuildApplyPreviewResult(
                 wire({

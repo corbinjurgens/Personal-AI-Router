@@ -7,8 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-
-	"nvpair-shared/engineintent"
 	"nvpair-tui/rpc"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -45,13 +43,6 @@ type detailPolicyMsg struct {
 	err    error
 }
 
-type detailIntentMsg struct {
-	visit      int
-	generation int
-	intent     engineintent.Snapshot
-	err        error
-}
-
 func (d *nodeDetail) policyCmd() tea.Cmd {
 	if !d.enginesQueryable() || d.policyDisconnected || (d.remote() && d.node.presence == presenceOffline) {
 		return nil
@@ -69,31 +60,6 @@ func (d *nodeDetail) policyCmd() tea.Cmd {
 		}
 		return out
 	}))
-}
-
-func (d *nodeDetail) intentCmd() tea.Cmd {
-	if d.remote() || d.policyDisconnected {
-		return nil
-	}
-	d.intentGeneration++
-	generation := d.intentGeneration
-	visit := d.telemetryGen
-	return d.own(call(d.client, "engine:intent", nil, func(msg *rpc.Message, err error) tea.Msg {
-		var result engineintent.Snapshot
-		if err == nil {
-			err = json.Unmarshal(msg.Result, &result)
-		}
-		if err == nil {
-			err = result.Validate()
-		}
-		return detailIntentMsg{visit: visit, generation: generation, intent: result, err: err}
-	}))
-}
-
-func (d *nodeDetail) invalidateIntent() {
-	d.intentGeneration++
-	d.intent = engineintent.Snapshot{}
-	d.refreshEngines()
 }
 
 func (d *nodeDetail) policyLabel() string {

@@ -30,7 +30,6 @@ const mocks = vi.hoisted(() => ({
         handleNotification: vi.fn<BridgeState['handleNotification']>(),
         clearWorkloads: vi.fn<BridgeState['clearWorkloads']>(),
         reconcileModelCopies: vi.fn<BridgeState['reconcileModelCopies']>(),
-        applyEngineIntent: vi.fn<BridgeState['applyEngineIntent']>(),
         invalidateModelObservations: vi.fn<BridgeState['invalidateModelObservations']>(),
         setLocalDiscoveryModelRefresher: vi.fn<BridgeState['setLocalDiscoveryModelRefresher']>()
     }

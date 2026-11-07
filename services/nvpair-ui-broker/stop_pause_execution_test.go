@@ -431,7 +431,6 @@ func TestStopPauseExecutionRetryAndLocalResume(t *testing.T) {
 		Qualification: &nodepolicy.QualificationRef{ID: "fixture-only", Revision: "1"}}}
 	r.current.Roles = []nodepolicy.Role{{Name: "weak", Profiles: []string{"tiny-profile"}}}
 	r.current.ResidentModels = nodepolicy.ResidentModels{ref}
-	r.intent["llamacpp"] = true
 	r.loaded["llamacpp"] = []string{"tiny"}
 	r.mu.Unlock()
 	before := rb.b.localPolicy().Policy
@@ -465,14 +464,13 @@ func TestStopPauseExecutionRetryAndLocalResume(t *testing.T) {
 	}
 	r.mu.Lock()
 	blocked := r.managementBlockedLocked()
-	intent := r.intent["llamacpp"]
 	r.mu.Unlock()
-	if blocked || !intent {
-		t.Fatalf("local Resume: blocked=%v preserved On intent=%v", blocked, intent)
+	if blocked {
+		t.Fatalf("local Resume: blocked=%v", blocked)
 	}
 	rb.engine.waitFor("intent-neutral wake after Resume", func(calls []policyCall) bool {
 		for _, call := range calls {
-			if call.method == engineWakeMethod {
+			if call.method == restoreInstalledEnginesMethod {
 				return true
 			}
 		}

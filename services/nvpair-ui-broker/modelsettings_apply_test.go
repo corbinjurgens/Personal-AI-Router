@@ -19,7 +19,6 @@ import (
 
 	"nvpair-shared/clustertrusttest"
 	"nvpair-shared/durablefile"
-	"nvpair-shared/engineintent"
 	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/modelconfig"
@@ -35,7 +34,6 @@ type modelSettingsHarness struct {
 	build            string
 	configureCount   int
 	configureFailure string
-	savedOff         bool
 	removalReviews   map[string]modelSettingsRemovalReview
 }
 
@@ -195,19 +193,13 @@ func (h *modelSettingsHarness) answer(method string, raw json.RawMessage) (any, 
 		}
 		h.launch.ServerPort, h.launch.LaunchText = p.Settings.ServerPort, p.Settings.LaunchText
 		h.launch.ModelLoads, h.launch.Serving = modelconfig.CloneLoads(p.Settings.ModelLoads), p.Settings.Serving.Clone()
-		h.launch.Running = p.Resume && !h.savedOff
+		h.launch.Running = p.Resume
 		if h.configureFailure == "lost response" {
 			return nil, "injected lost configure response"
 		}
 		return h.launch, ""
 	case "engine:get-installed":
 		return map[string]any{"engines": []map[string]any{{"engine": "llamacpp", "running": h.launch.Running, "terminationVerified": !h.launch.Running}}}, ""
-	case engineIntentMethod:
-		intent := engineintent.Snapshot{EnabledByEngine: map[string]bool{"llamacpp": !h.savedOff}, OffByEngine: map[string]engineintent.Origin{}}
-		if h.savedOff {
-			intent.OffByEngine["llamacpp"] = engineintent.Local
-		}
-		return intent, ""
 	case "engine:models":
 		return map[string]any{"loadedByEngine": map[string][]string{"llamacpp": {}}}, ""
 	case engineSleepMethod:
@@ -2218,7 +2210,6 @@ func TestModelSettingsApplyAcknowledgedActiveDrainMayTimeOut(t *testing.T) {
 	h.mu.Unlock()
 	r := h.b.nodePolicyRuntime()
 	r.mu.Lock()
-	r.intent["llamacpp"] = true
 	r.mu.Unlock()
 	p := h.request(t, true)
 	preview, err := h.b.previewEngineSettings(context.Background(), p, "")

@@ -258,9 +258,6 @@ func TestWindowsEngineImageAliasStop(t *testing.T) {
 		if portServing(port) || !orphanPIDExited(child.Process.Pid) || !fileExists(bin) {
 			t.Fatal("Stop must terminate the physical orphan and preserve its executable")
 		}
-		if enabled, known, err := ex.desired.get(engine); err != nil || !known || enabled {
-			t.Fatalf("desired state=(%v,%v,%v), want known Off", enabled, known, err)
-		}
 	})
 }
 
@@ -270,9 +267,6 @@ func TestWindowsEngineImageAliasRestoreReclaim(t *testing.T) {
 		child := spawnFakeListener(t, bin, port)
 		ex := windowsImageExecutor(t, dir, bin, reference, port)
 		engine := filepath.Base(dir)
-		if err := ex.desired.set(engine, true, intentLocal); err != nil {
-			t.Fatal(err)
-		}
 		st, err := ex.state(engine)
 		if err != nil {
 			t.Fatal(err)
@@ -289,7 +283,7 @@ func TestWindowsEngineImageAliasRestoreReclaim(t *testing.T) {
 		}
 		cold := windowsImageExecutor(t, dir, bin, bin, port)
 		cold.desired = ex.desired
-		if err := cold.RestoreEnabled(context.Background()); err != nil {
+		if err := cold.RestoreInstalled(context.Background()); err != nil {
 			t.Fatalf("cold restore through fixed physical image: %v", err)
 		}
 		st, err = cold.state(engine)
@@ -359,10 +353,7 @@ func testWindowsProtectedImage(t *testing.T, externalInstall bool) {
 				t.Fatalf("invalid protection fixture: image=%q reference=%q managed=%q", image, reference, managedDir)
 			}
 			if operation == "restore" {
-				if err := ex.desired.set(engine, true, intentLocal); err != nil {
-					t.Fatal(err)
-				}
-				if err := ex.RestoreEnabled(context.Background()); err != nil {
+				if err := ex.RestoreInstalled(context.Background()); err != nil {
 					t.Fatalf("restore must preserve external adoption: %v", err)
 				}
 			} else if operation == "stop" {

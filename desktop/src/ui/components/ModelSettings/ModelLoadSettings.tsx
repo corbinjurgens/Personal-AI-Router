@@ -535,8 +535,8 @@ export default function ModelLoadSettings({
         <Stack gap="3">
             <Text kind="body/semibold/sm">Basic load</Text>
             <Text kind="body/regular/sm">
-                Off remains Off. Saving settings never loads a model. The saved generation lock does
-                not lock load settings.
+                An already-stopped engine stays stopped. Saving settings never loads a model. The
+                saved generation lock does not lock load settings.
             </Text>
             {controls(true)}
             {effectiveFit === 'on' && (
@@ -715,42 +715,42 @@ export default function ModelLoadSettings({
                     No roles on this node; create one in node settings.
                 </Text>
             )}
-            {(
-                ['served', 'resident'] satisfies Array<keyof NonNullable<ModelChange['policy']>>
-            ).map(field => (
-                <FormField
-                    key={field}
-                    slotLabel={field === 'resident' ? 'Keep loaded' : 'Served membership'}
-                    slotHelp={
-                        field === 'resident'
-                            ? 'Requires the target’s existing finite qualified profile and current readiness; no evidence is authored here.'
-                            : 'Explicit selected membership only; target preview owns validation.'
-                    }
-                >
-                    <Select
-                        aria-label={field}
-                        value={
-                            draft?.change?.policy?.[field] === undefined
-                                ? ''
-                                : String(draft.change.policy[field])
+            {(['served', 'resident'] satisfies Array<keyof NonNullable<ModelChange['policy']>>).map(
+                field => (
+                    <FormField
+                        key={field}
+                        slotLabel={field === 'resident' ? 'Keep loaded' : 'Served membership'}
+                        slotHelp={
+                            field === 'resident'
+                                ? 'Requires the target’s existing finite qualified profile and current readiness; no evidence is authored here.'
+                                : 'Explicit selected membership only; target preview owns validation.'
                         }
-                        disabled={blocked}
-                        items={[
-                            { value: '', children: 'Unchanged' },
-                            ...(!routing.qualified && field === 'resident'
-                                ? []
-                                : [{ value: 'true', children: 'Include' }]),
-                            { value: 'false', children: 'Remove' }
-                        ]}
-                        onValueChange={value => {
-                            const policy = { ...draft?.change?.policy }
-                            if (!value) delete policy[field]
-                            else policy[field] = value === 'true'
-                            edit({ policy })
-                        }}
-                    />
-                </FormField>
-            ))}
+                    >
+                        <Select
+                            aria-label={field}
+                            value={
+                                draft?.change?.policy?.[field] === undefined
+                                    ? ''
+                                    : String(draft.change.policy[field])
+                            }
+                            disabled={blocked}
+                            items={[
+                                { value: '', children: 'Unchanged' },
+                                ...(!routing.qualified && field === 'resident'
+                                    ? []
+                                    : [{ value: 'true', children: 'Include' }]),
+                                { value: 'false', children: 'Remove' }
+                            ]}
+                            onValueChange={value => {
+                                const policy = { ...draft?.change?.policy }
+                                if (!value) delete policy[field]
+                                else policy[field] = value === 'true'
+                                edit({ policy })
+                            }}
+                        />
+                    </FormField>
+                )
+            )}
             <Text kind="body/semibold/sm">Advanced supported</Text>
             {controls(false)}
             {inspection?.options

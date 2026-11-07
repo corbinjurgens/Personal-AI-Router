@@ -74,9 +74,8 @@ func nodeHasLoaded(p engineProfile, n Node, model string) bool {
 }
 
 // dormantSelfCandidate offers this node's stopped engine for a model it can
-// serve once woken: the engine must be saved On, start-on-demand enabled, the
-// node available, and the model either last advertised by this engine or
-// covered by one of this node's profiles.
+// serve once woken: the node must be available, and the model either last
+// advertised by this engine or covered by one of this node's profiles.
 func (f *facade) dormantSelfCandidate(model string) (candidate, bool) {
 	p := f.host
 	if p.localEngineHealthy(f.profile.Name) {
@@ -87,9 +86,6 @@ func (f *facade) dormantSelfCandidate(model string) (candidate, bool) {
 	}
 	pol := p.admission.currentPolicy()
 	if !modelServed(pol.ServedModels, f.profile.Name, model, p.normalizeEngineModel) {
-		return candidate{}, false
-	}
-	if on, known := p.admission.engineIntent(f.profile.Name); !known || !on || !pol.Idle.StartOnDemand {
 		return candidate{}, false
 	}
 	selfID, models := p.selfIdentity(f.profile.Name)

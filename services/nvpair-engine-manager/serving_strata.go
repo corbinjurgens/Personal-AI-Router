@@ -1081,11 +1081,5 @@ func preparedSnapshotCommand(st *engineState, command launchCommand, snapshot st
 		}
 		return command
 	}
-	if len(st.plat.Runtime.ModelLoads) != 0 {
-		cli, env, err := llamaLaunchOptions(command, st.plat.Runtime.EditableLaunch)
-		if err == nil && cli["models-max"] == "" && env["models-max"] == "" {
-			command.Args = append(slices.Clone(command.Args), "--models-max", "1")
-		}
-	}
 	return llamaSnapshotCommand(command, snapshot, st.plat.Runtime.ModelLoads)
 }

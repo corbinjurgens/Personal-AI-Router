@@ -138,7 +138,7 @@ export default function ModelSettingsPreview({
             <Text kind="body/regular/sm">
                 Desired settings revision: {snapshot?.revision ?? 'Unknown'} · Applied settings
                 revision: {snapshot?.appliedRevision ?? 'Unknown'} · Observed engine:{' '}
-                {snapshot ? (snapshot.running ? 'Running' : 'Off') : 'Unknown'}
+                {snapshot ? (snapshot.running ? 'Running' : 'Stopped') : 'Unknown'}
             </Text>
             <Text kind="body/regular/sm">
                 Desired load preferences:{' '}
@@ -210,11 +210,11 @@ export default function ModelSettingsPreview({
                         Active work policy: {impact?.activeWorkPolicy ?? 'Unknown'}
                     </Text>
                     <Text kind="body/regular/sm">
-                        Off behavior:{' '}
+                        Stopped engine behavior:{' '}
                         {impact?.staysOff === undefined
                             ? 'Unknown'
                             : impact.staysOff
-                              ? 'Off remains Off. Save does not load a model.'
+                              ? 'An already-stopped engine stays stopped. Save does not load a model.'
                               : 'See target impact.'}
                     </Text>
                     {impact?.unknowns?.map(reason => (

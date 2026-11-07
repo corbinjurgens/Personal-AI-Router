@@ -29,7 +29,7 @@ func TestEnabledEngineRestoreWaitsForFacadeStartup(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 	close(broker.facadesReady)
-	for _, want := range []string{engineNodeProjectionMethod, "engine:settings-projection", restoreEnabledEnginesMethod} {
+	for _, want := range []string{engineNodeProjectionMethod, "engine:settings-projection", restoreInstalledEnginesMethod} {
 		select {
 		case got := <-method:
 			if got != want {

@@ -923,7 +923,7 @@ func TestPolicySetValidatesPushesAndNotifies(t *testing.T) {
 	if err := json.Unmarshal(resp.Result, &result); err != nil {
 		t.Fatalf("decode policy:set result %s: %v", resp.Result, err)
 	}
-	if result.Policy.Availability != nodepolicy.Available || result.Policy.Idle.UnloadAfterMinutes != 5 || !result.Policy.Idle.StartOnDemand {
+	if result.Policy.Availability != nodepolicy.Available || result.Policy.Idle.UnloadAfterMinutes != 5 {
 		t.Fatalf("policy:set result = %+v; want availability kept and omitted fields defaulted", result.Policy)
 	}
 	// The proxy acknowledged the exact revision this set persisted, so the
@@ -1004,7 +1004,6 @@ func TestPolicyStateReplayedToRestartedProxy(t *testing.T) {
 	r.admission.Active = 4
 	r.mu.Unlock()
 	source := b.activateEngineManagerSource()
-	b.observeIntentFrom(source, map[string]bool{"llamacpp": true, "llamacpp-custom": false})
 	b.observeEngineRunningFrom(source, "llamacpp", true)
 	b.observeLoadedFrom(source, map[string][]string{"llamacpp": {"qwen3:8b"}})
 
@@ -1014,12 +1013,12 @@ func TestPolicyStateReplayedToRestartedProxy(t *testing.T) {
 		t.Fatalf("before the replay the new proxy has acknowledged %+v; want pending with no active revision", got)
 	}
 	b.replayPolicyToProxy(context.Background(), pp)
-	calls := proxy.waitFor("all five pushes", func(calls []policyCall) bool {
+	calls := proxy.waitFor("all policy state pushes", func(calls []policyCall) bool {
 		seen := map[string]bool{}
 		for _, c := range calls {
 			seen[c.method] = true
 		}
-		return seen[nodepolicy.MethodSetAvailability] && seen[nodepolicy.MethodSetPolicy] && seen[nodepolicy.MethodSetEngineIntent] &&
+		return seen[nodepolicy.MethodSetAvailability] && seen[nodepolicy.MethodSetPolicy] &&
 			seen[nodepolicy.MethodSetResidency] && seen[nodepolicy.MethodSetEngineDrain]
 	})
 	if calls[0].method != nodepolicy.MethodSetAvailability {
@@ -1036,10 +1035,6 @@ func TestPolicyStateReplayedToRestartedProxy(t *testing.T) {
 		case nodepolicy.MethodSetResidency:
 			if !strings.Contains(string(c.params), `"llamacpp":["qwen3:8b"]`) {
 				t.Errorf("residency = %s", c.params)
-			}
-		case nodepolicy.MethodSetEngineIntent:
-			if !strings.Contains(string(c.params), `"llamacpp":true`) || !strings.Contains(string(c.params), `"llamacpp-custom":false`) {
-				t.Errorf("intent = %s", c.params)
 			}
 		case nodepolicy.MethodSetEngineDrain:
 			if !strings.Contains(string(c.params), `"drain":true`) {
@@ -1072,12 +1067,12 @@ func TestPolicyStateReplayedToRestartedProxy(t *testing.T) {
 
 func TestProxyAdmissionNotificationsReachThePolicy(t *testing.T) {
 	b, _ := newPolicyBroker(t)
-	b.forwardProxyProcessNotification(nodepolicy.NotifyAdmissionState, json.RawMessage(`{"active":3,"activeByEngine":{"llamacpp":3},"queued":1,"lastActivityMs":{"llamacpp":5}}`))
+	b.forwardProxyProcessNotification(nodepolicy.NotifyAdmissionState, json.RawMessage(`{"active":3,"activeByEngine":{"llamacpp":3},"queued":1,"lastActivityMs":{"llamacpp":{"m":5}}}`))
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
 	st, have := r.admission, r.haveAdmission
 	r.mu.Unlock()
-	if !have || st.Active != 3 || st.ActiveByEngine["llamacpp"] != 3 || st.LastActivityMs["llamacpp"] != 5 {
+	if !have || st.Active != 3 || st.ActiveByEngine["llamacpp"] != 3 || st.LastActivityMs["llamacpp"]["m"] != 5 {
 		t.Fatalf("admission state = %+v (have %v)", st, have)
 	}
 }
@@ -1100,139 +1095,6 @@ func TestResidencyFollowsEngineManager(t *testing.T) {
 	proxy.waitFor("residency with a", func(calls []policyCall) bool { return residency(calls) == `{"loadedByEngine":{"llamacpp":["a"]}}` })
 	b.forwardEngineNotificationFrom(source, engineStateChangedMethod, json.RawMessage(`{"engine":"llamacpp","running":false}`))
 	proxy.waitFor("residency without llamacpp", func(calls []policyCall) bool { return residency(calls) == `{"loadedByEngine":{}}` })
-	b.forwardEngineNotificationFrom(source, engineIntentChanged, json.RawMessage(`{"enabledByEngine":{"llamacpp":true},"offByEngine":{}}`))
-	proxy.waitFor("intent push", func(calls []policyCall) bool {
-		for _, c := range calls {
-			if c.method == nodepolicy.MethodSetEngineIntent && strings.Contains(string(c.params), `"llamacpp":true`) {
-				return true
-			}
-		}
-		return false
-	})
-}
-
-func TestIntentRequestRelayPreservesSnapshot(t *testing.T) {
-	b, out := newPolicyBroker(t)
-	engine := attachFakeEngine(t, b)
-	raw := json.RawMessage(`{"enabledByEngine":{"llamacpp":false,"llamacpp-custom":false,"strata":true},"offByEngine":{"llamacpp":"peer","llamacpp-custom":"local"},"relayMarker":"unchanged"}`)
-	engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
-		if method == engineIntentMethod {
-			return raw, ""
-		}
-		return map[string]bool{"ok": true}, ""
-	})
-	id := json.RawMessage(`42`)
-	b.handleMessage(&Message{JSONRPC: "2.0", ID: &id, Method: engineIntentMethod})
-	frame := out.waitFrame(t, "intent request reply", func(m Message) bool { return m.ID != nil && string(*m.ID) == "42" })
-	if frame.Error != nil {
-		t.Fatalf("intent request failed: %+v", frame.Error)
-	}
-	requireIntentRelayPayload(t, frame.Result, raw)
-}
-
-func TestEnginePolicyIntentHydrationAndChanges(t *testing.T) {
-	b, _ := newPolicyBroker(t)
-	engine := attachFakeEngine(t, b)
-	_, proxy := attachFakeProxy(t, b)
-	engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
-		if method == engineIntentMethod {
-			return json.RawMessage(`{"enabledByEngine":{"llamacpp":true,"llamacpp-custom":false,"strata":false},"offByEngine":{"llamacpp-custom":"local","strata":"peer"}}`), ""
-		}
-		return map[string]bool{"ok": true}, ""
-	})
-	source := b.activateEngineManagerSource()
-	b.refreshEnginePolicySnapshotFrom(b.getEngineMgr(), source)
-	waitPushesSettled(t, b)
-	requirePolicyIntent(t, b, map[string]bool{"llamacpp": true, "llamacpp-custom": false, "strata": false})
-	requireProxyIntent(t, proxy, `{"enabledByEngine":{"llamacpp":true,"llamacpp-custom":false,"strata":false}}`)
-
-	b.forwardEngineNotificationFrom(source, engineIntentChanged, json.RawMessage(`{"enabledByEngine":{"llamacpp":false,"llamacpp-custom":true,"strata":false},"offByEngine":{"llamacpp":"peer","strata":"local"}}`))
-	waitPushesSettled(t, b)
-	requirePolicyIntent(t, b, map[string]bool{"llamacpp": false, "llamacpp-custom": true, "strata": false})
-	requireProxyIntent(t, proxy, `{"enabledByEngine":{"llamacpp":false,"llamacpp-custom":true,"strata":false}}`)
-}
-
-func requirePolicyIntent(t *testing.T, b *Broker, want map[string]bool) {
-	t.Helper()
-	r := b.nodePolicyRuntime()
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if !reflect.DeepEqual(r.intent, want) {
-		t.Fatalf("policy intent = %v, want %v", r.intent, want)
-	}
-}
-
-func requireProxyIntent(t *testing.T, proxy *fakeWorker, want string) {
-	t.Helper()
-	var expected map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(want), &expected); err != nil {
-		t.Fatal(err)
-	}
-	var last json.RawMessage
-	for _, call := range proxy.snapshot() {
-		if call.method == nodepolicy.MethodSetEngineIntent {
-			last = call.params
-		}
-	}
-	var actual map[string]json.RawMessage
-	if err := json.Unmarshal(last, &actual); err != nil {
-		t.Fatalf("decode proxy intent: %v", err)
-	}
-	var actualEnabled, expectedEnabled map[string]bool
-	if err := json.Unmarshal(actual["enabledByEngine"], &actualEnabled); err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal(expected["enabledByEngine"], &expectedEnabled); err != nil {
-		t.Fatal(err)
-	}
-	if len(actual) != 1 || !reflect.DeepEqual(actualEnabled, expectedEnabled) {
-		t.Fatalf("proxy admission intent = %s, want only %s", last, want)
-	}
-}
-
-func TestEnginePolicyIntentRejectsMalformedSnapshot(t *testing.T) {
-	cases := []struct{ name, raw string }{
-		{"case variants without canonical maps", `{"EnabledByEngine":{"llamacpp":false},"OffByEngine":{"llamacpp":"local"}}`},
-		{"case variant without canonical enabled map", `{"EnabledByEngine":{"llamacpp":false},"offByEngine":{"llamacpp":"local"}}`},
-		{"case variant without canonical origins", `{"enabledByEngine":{"llamacpp":false},"OffByEngine":{"llamacpp":"local"}}`},
-		{"case variant cannot hide origin for On", `{"enabledByEngine":{"llamacpp":true},"EnabledByEngine":{"llamacpp":false},"offByEngine":{"llamacpp":"local"}}`},
-		{"last enabled object leaves unreported origin", `{"enabledByEngine":{"llamacpp":false},"enabledByEngine":{},"offByEngine":{"llamacpp":"local"}}`},
-		{"missing origins", `{"enabledByEngine":{"llamacpp":false}}`},
-		{"null origins", `{"enabledByEngine":{"llamacpp":false},"offByEngine":null}`},
-		{"missing booleans", `{"offByEngine":{}}`},
-		{"invalid boolean", `{"enabledByEngine":{"llamacpp":"off"},"offByEngine":{}}`},
-		{"null boolean", `{"enabledByEngine":{"llamacpp":null},"offByEngine":{}}`},
-		{"invalid origin", `{"enabledByEngine":{"llamacpp":false},"offByEngine":{"llamacpp":"other"}}`},
-		{"origin for On", `{"enabledByEngine":{"llamacpp":true},"offByEngine":{"llamacpp":"local"}}`},
-		{"unreported engine origin", `{"enabledByEngine":{"llamacpp":false},"offByEngine":{"llamacpp-custom":"peer"}}`},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			b, _ := newPolicyBroker(t)
-			engine := attachFakeEngine(t, b)
-			_, proxy := attachFakeProxy(t, b)
-			source := b.activateEngineManagerSource()
-			want := map[string]bool{"retained": true}
-			b.observeIntent(want)
-			waitPushesSettled(t, b)
-			before := len(proxy.snapshot())
-			engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
-				if method == engineIntentMethod {
-					return json.RawMessage(tc.raw), ""
-				}
-				return map[string]bool{"ok": true}, ""
-			})
-			b.refreshEnginePolicySnapshotFrom(b.getEngineMgr(), source)
-			waitPushesSettled(t, b)
-			requirePolicyIntent(t, b, want)
-			b.forwardEngineNotificationFrom(source, engineIntentChanged, json.RawMessage(tc.raw))
-			waitPushesSettled(t, b)
-			requirePolicyIntent(t, b, want)
-			if calls := proxy.snapshot(); len(calls) != before {
-				t.Fatalf("malformed intent triggered proxy calls: %+v", calls[before:])
-			}
-		})
-	}
 }
 
 // pausingBroker is a broker with a fake proxy and engine-manager, llamacpp
@@ -1246,7 +1108,6 @@ func pausingBroker(t *testing.T, pause nodepolicy.PauseConfig) (*Broker, *syncBu
 	r.mu.Lock()
 	r.current.Pause = pause
 	r.mu.Unlock()
-	b.observeIntent(map[string]bool{"llamacpp": true})
 	b.observeLoaded(map[string][]string{"llamacpp": {"m1"}})
 	return b, out, proxy, engine
 }
@@ -1344,7 +1205,7 @@ func TestPauseDrainTimeoutCancelsActiveWork(t *testing.T) {
 	}
 }
 
-func TestResumeWakesEnginesThePauseStopped(t *testing.T) {
+func TestResumeRestoresEveryInstalledEngine(t *testing.T) {
 	b, _, proxy, engine := pausingBroker(t, nodepolicy.PauseConfig{OnActive: nodepolicy.FinishActive, DrainTimeoutSeconds: 5, StopEngines: true})
 	if _, err := b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally); err != nil {
 		t.Fatal(err)
@@ -1352,9 +1213,9 @@ func TestResumeWakesEnginesThePauseStopped(t *testing.T) {
 	if a, err := b.setAvailability(context.Background(), nodepolicy.Available, nodepolicy.PausedLocally); err != nil || a != nodepolicy.Available {
 		t.Fatalf("resume = %q, %v", a, err)
 	}
-	engine.waitFor("engine:wake after resume", func(calls []policyCall) bool {
+	engine.waitFor("installed engine restoration after resume", func(calls []policyCall) bool {
 		for _, c := range calls {
-			if c.method == engineWakeMethod && strings.Contains(string(c.params), `"llamacpp"`) {
+			if c.method == restoreInstalledEnginesMethod {
 				return true
 			}
 		}
@@ -1418,19 +1279,19 @@ func TestStartupPausedWithStopEnginesSkipsRestoreUntilResume(t *testing.T) {
 	b.loadNodePolicy(path)
 	engine := attachFakeEngine(t, b)
 
-	b.restoreEnabledEngines(b.getEngineMgr())
+	b.restoreInstalledEngines(b.getEngineMgr())
 	time.Sleep(50 * time.Millisecond)
 	for _, c := range engine.snapshot() {
-		if c.method == restoreEnabledEnginesMethod {
+		if c.method == restoreInstalledEnginesMethod {
 			t.Fatal("a node paused with stopEngines restored its engines at startup")
 		}
 	}
 	if _, err := b.setAvailability(context.Background(), nodepolicy.Available, nodepolicy.PausedLocally); err != nil {
 		t.Fatal(err)
 	}
-	engine.waitFor("engine:restore-enabled after resume", func(calls []policyCall) bool {
+	engine.waitFor("engine:restore-installed after resume", func(calls []policyCall) bool {
 		for _, c := range calls {
-			if c.method == restoreEnabledEnginesMethod && c.notify {
+			if c.method == restoreInstalledEnginesMethod && c.notify {
 				return true
 			}
 		}
@@ -1455,10 +1316,10 @@ func TestStartupPausedWithLegacyFalseOptionsSkipsRestore(t *testing.T) {
 		t.Fatalf("loaded pause = %+v, want both legacy switches normalized to true", pause)
 	}
 	engine := attachFakeEngine(t, b)
-	b.restoreEnabledEngines(b.getEngineMgr())
+	b.restoreInstalledEngines(b.getEngineMgr())
 	time.Sleep(50 * time.Millisecond)
 	for _, c := range engine.snapshot() {
-		if c.method == restoreEnabledEnginesMethod {
+		if c.method == restoreInstalledEnginesMethod {
 			t.Fatal("a paused node with legacy false pause options restored its engines at startup")
 		}
 	}
@@ -1471,7 +1332,7 @@ func TestStartupPausedWithLegacyFalseOptionsSkipsRestore(t *testing.T) {
 	}
 }
 
-func TestWakeRefusedWhenPausedOrSavedOff(t *testing.T) {
+func TestWakeRefusedWhenPaused(t *testing.T) {
 	b, out := newPolicyBroker(t)
 	engine := attachFakeEngine(t, b)
 	r := b.nodePolicyRuntime()
@@ -1489,10 +1350,8 @@ func TestWakeRefusedWhenPausedOrSavedOff(t *testing.T) {
 	r.mu.Lock()
 	r.live = nodepolicy.Available
 	r.mu.Unlock()
-	b.observeIntent(map[string]bool{"llamacpp": false, "llamacpp-custom": true})
-	b.wakeOnDemand("llamacpp")
 	if got := engine.methods(engineWakeMethod); len(got) != 0 {
-		t.Fatalf("wake reached engine-manager while paused or for an engine saved Off: %v", got)
+		t.Fatalf("wake reached engine-manager while paused: %v", got)
 	}
 
 	b.handleAdmissionNotification(nodepolicy.NotifyAdmissionWake, json.RawMessage(`{"engine":"llamacpp-custom"}`))
@@ -1515,66 +1374,6 @@ func TestAdmissionUnloadUnloadsThoseModels(t *testing.T) {
 		if calls[i].method != engineUnloadModelMethod || !strings.Contains(string(calls[i].params), `"model":"`+model+`"`) || !strings.Contains(string(calls[i].params), `"engine":"llamacpp"`) {
 			t.Fatalf("call %d = %s %s", i, calls[i].method, calls[i].params)
 		}
-	}
-}
-
-func TestIdlePolicyUnloadsThenStopsOnSchedule(t *testing.T) {
-	b, _ := newPolicyBroker(t)
-	engine := attachFakeEngine(t, b)
-	clock := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
-	r := b.nodePolicyRuntime()
-	r.mu.Lock()
-	r.now = func() time.Time { return clock }
-	r.current.Idle.UnloadAfterMinutes = 5
-	r.current.Idle.StopEngineAfterMinutes = 20
-	r.mu.Unlock()
-	b.observeIntent(map[string]bool{"llamacpp": true, "llamacpp-custom": false})
-	b.observeLoaded(map[string][]string{"llamacpp": {"m1"}, "llamacpp-custom": {"x"}})
-	b.observeAdmission(nodepolicy.AdmissionState{LastActivityMs: map[string]int64{"llamacpp": clock.Add(2 * time.Minute).UnixMilli()}})
-
-	tick := func(at time.Duration) {
-		r.mu.Lock()
-		r.now = func() time.Time { return clock.Add(at) }
-		r.mu.Unlock()
-		b.idleTick(context.Background())
-	}
-	tick(4 * time.Minute)
-	if got := engine.methods(""); len(got) != 0 {
-		t.Fatalf("idle policy acted before any threshold: %v", got)
-	}
-	tick(6 * time.Minute) // llamacpp-custom idle 6m, llamacpp idle 4m since its last request
-	calls := engine.snapshot()
-	if len(calls) != 1 || !strings.Contains(string(calls[0].params), `"llamacpp-custom"`) {
-		t.Fatalf("calls at 6m = %v %v", engine.methods(""), calls)
-	}
-	tick(8 * time.Minute) // llamacpp now idle 6m
-	calls = engine.snapshot()
-	if len(calls) != 2 || calls[1].method != engineUnloadModelMethod || !strings.Contains(string(calls[1].params), `"llamacpp"`) {
-		t.Fatalf("calls at 8m = %v", engine.methods(""))
-	}
-	tick(9 * time.Minute)
-	if n := len(engine.snapshot()); n != 2 {
-		t.Fatalf("idle unload repeated for the same idle period: %v", engine.methods(""))
-	}
-	tick(23 * time.Minute) // llamacpp idle 21m; llamacpp-custom idle too but saved Off
-	calls = engine.snapshot()
-	if len(calls) != 3 || calls[2].method != engineSleepMethod || !strings.Contains(string(calls[2].params), `"llamacpp"`) {
-		t.Fatalf("calls at 23m = %v", engine.methods(""))
-	}
-	for _, c := range calls {
-		if c.method == engineSleepMethod && strings.Contains(string(c.params), "llamacpp-custom") {
-			t.Fatal("idle policy stopped an engine that is not saved On")
-		}
-	}
-
-	// A new request resets the clock.
-	b.observeAdmission(nodepolicy.AdmissionState{
-		ActiveByEngine: map[string]int{"llamacpp": 1},
-		LastActivityMs: map[string]int64{"llamacpp": clock.Add(30 * time.Minute).UnixMilli()},
-	})
-	tick(60 * time.Minute)
-	if n := len(engine.snapshot()); n != 3 {
-		t.Fatalf("idle policy acted on an engine with running work: %v", engine.methods(""))
 	}
 }
 
@@ -3194,14 +2993,14 @@ func TestAvailabilityLandedReplacementCompletesEngineActions(t *testing.T) {
 			requireLandedAvailability(t, rb, want, callStart, frameStart)
 			wantMethods := []string{"engine:get-installed", engineSleepMethod, "engine:get-installed"}
 			if to == nodepolicy.Available {
-				wantMethods = []string{restoreEnabledEnginesMethod, engineWakeMethod}
-				rb.engine.waitFor("restore and wake after landed resume", func(calls []policyCall) bool { return len(calls) >= engineStart+2 })
+				wantMethods = []string{restoreInstalledEnginesMethod}
+				rb.engine.waitFor("restore and wake after landed resume", func(calls []policyCall) bool { return len(calls) >= engineStart+1 })
 			}
 			calls := rb.engine.snapshot()[engineStart:]
 			var gotMethods []string
 			for _, call := range calls {
 				gotMethods = append(gotMethods, call.method)
-				if call.method == restoreEnabledEnginesMethod || call.method == "engine:get-installed" {
+				if call.method == restoreInstalledEnginesMethod || call.method == "engine:get-installed" {
 					continue
 				}
 				var params struct {
@@ -3234,7 +3033,7 @@ func TestAvailabilityLandedReplacementCompletesEngineActions(t *testing.T) {
 }
 
 func TestAvailabilityDuringRecoveryPreservesFileUntilPolicyReplacementLands(t *testing.T) {
-	const corrupt = `{"version":2,"availability":"available","idle":{"startOnDemand":"invalid"}}`
+	const corrupt = `{"version":2,"availability":"available","idle":{"wakeTimeoutSeconds":"invalid"}}`
 	test := func(name string, to nodepolicy.Availability) {
 		t.Run(name, func(t *testing.T) {
 			rb := newBrokerOnFile(t, corrupt)
@@ -3718,7 +3517,7 @@ func TestPolicyVersion1FirstSavePublicationFaultBoundaries(t *testing.T) {
 }
 
 func TestPolicyRecoveryPublicationFaultBoundaries(t *testing.T) {
-	const corruptAvailable = `{"version":2,"availability":"available","idle":{"startOnDemand":"invalid"}}`
+	const corruptAvailable = `{"version":2,"availability":"available","idle":{"wakeTimeoutSeconds":"invalid"}}`
 	for _, boundary := range publicationBoundariesWithFlushes() {
 		t.Run(boundary.name, func(t *testing.T) {
 			rb := newBrokerOnFile(t, corruptAvailable)

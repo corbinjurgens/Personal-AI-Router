@@ -394,18 +394,11 @@ type Admission struct {
 	SwitchTimeoutSeconds int `json:"switchTimeoutSeconds"`
 }
 
-// IdleConfig is the cross-engine idle policy. Zero disables each step.
+// IdleConfig is the cross-engine model memory release policy. Zero disables release.
 type IdleConfig struct {
-	// UnloadAfterMinutes unloads an engine's models after this long without a
-	// request on that engine.
+	// UnloadAfterMinutes unloads each nonresident model after this long without
+	// a request for that model, while keeping its engine running.
 	UnloadAfterMinutes int `json:"unloadAfterMinutes"`
-	// StopEngineAfterMinutes stops an idle engine, keeping its saved intent On so
-	// it can be started again on demand.
-	StopEngineAfterMinutes int `json:"stopEngineAfterMinutes"`
-	// StartOnDemand starts a stopped engine whose saved intent is On when a
-	// request for it arrives. An engine saved Off is never started this way,
-	// and nothing is started while the node is paused.
-	StartOnDemand bool `json:"startOnDemand"`
 	// WakeTimeoutSeconds bounds how long a request waits for that start.
 	WakeTimeoutSeconds int `json:"wakeTimeoutSeconds"`
 }
@@ -637,10 +630,8 @@ func Default() Policy {
 			SwitchTimeoutSeconds:  60,
 		},
 		Idle: IdleConfig{
-			UnloadAfterMinutes:     0,
-			StopEngineAfterMinutes: 0,
-			StartOnDemand:          true,
-			WakeTimeoutSeconds:     90,
+			UnloadAfterMinutes: 5,
+			WakeTimeoutSeconds: 90,
 		},
 		Profiles: []Profile{},
 		Roles:    []Role{},
@@ -695,7 +686,6 @@ func (p Policy) Validate() error {
 		"admission.queueTimeoutSeconds":   p.Admission.QueueTimeoutSeconds,
 		"admission.switchTimeoutSeconds":  p.Admission.SwitchTimeoutSeconds,
 		"idle.unloadAfterMinutes":         p.Idle.UnloadAfterMinutes,
-		"idle.stopEngineAfterMinutes":     p.Idle.StopEngineAfterMinutes,
 		"idle.wakeTimeoutSeconds":         p.Idle.WakeTimeoutSeconds,
 	} {
 		if v < 0 {

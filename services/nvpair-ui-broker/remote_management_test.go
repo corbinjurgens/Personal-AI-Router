@@ -764,7 +764,7 @@ func TestRemoteManagementPublicInternalMethods(t *testing.T) {
 		"engine:settings-request", "engine:settings-reply", "engine:settings-cancel", "engine:settings-projection",
 		"engine:set-reserved-port", "internal:set-reserved-port", "engine:configure-launch",
 		nodepolicy.MethodModelMutationRequest, nodepolicy.MethodModelMutationReply, nodepolicy.MethodReconcileResident,
-		"engine:dispatch-resident-request", "engine:dispatch-resident-reply", "engine:node-projection", "engine:restore-enabled",
+		"engine:dispatch-resident-request", "engine:dispatch-resident-reply", "engine:node-projection", "engine:restore-installed",
 		"engine:prepare-shutdown", "engine:get-launch", "engine:preview-launch", "engine:configured-ports",
 	}
 	for _, method := range methods {

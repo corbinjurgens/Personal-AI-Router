@@ -261,7 +261,7 @@ func TestStrataRuntimeHashOutsideOperationLock(t *testing.T) {
 				case "wake":
 					err = f.ex.Wake(ctx, "fake")
 				case "restore":
-					err = f.ex.restoreEnabled(ctx, "fake")
+					err = f.ex.restoreInstalled(ctx, "fake")
 				case "set port":
 					_, err = f.ex.SetPort(ctx, "fake", f.request.Settings.ServerPort)
 				case "action":

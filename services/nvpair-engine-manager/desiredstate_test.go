@@ -20,124 +20,7 @@ import (
 	"testing"
 
 	"nvpair-shared/durablefile"
-	"nvpair-shared/engineintent"
-	"nvpair-shared/nodepolicy"
 )
-
-func TestDesiredStateSnapshotReadOnly(t *testing.T) {
-	test := func(name, content string) {
-		t.Run(name, func(t *testing.T) {
-			store := newDesiredStateStore(t.TempDir())
-			if content != "" {
-				if err := os.WriteFile(store.path, []byte(content), 0o400); err != nil {
-					t.Fatal(err)
-				}
-			}
-			before, err := os.Stat(store.path)
-			if err != nil && !os.IsNotExist(err) {
-				t.Fatal(err)
-			}
-			writes := 0
-			useEngineFileReplacer(t, durablefile.Replacer{CreateTemp: func(string, string, os.FileMode) (durablefile.File, error) {
-				writes++
-				return nil, errors.New("read must not write")
-			}})
-			if _, err := store.snapshot([]string{"fake"}); err != nil {
-				t.Fatal(err)
-			}
-			if writes != 0 {
-				t.Fatalf("snapshot attempted %d writes", writes)
-			}
-			after, err := os.Stat(store.path)
-			if content == "" {
-				if !os.IsNotExist(err) {
-					t.Fatalf("snapshot created missing file: stat error %v", err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			data, err := os.ReadFile(store.path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if string(data) != content || !before.ModTime().Equal(after.ModTime()) || before.Mode() != after.Mode() {
-				t.Fatalf("snapshot changed desired file: content=%s before=%v after=%v", data, before, after)
-			}
-		})
-	}
-	test("missing file stays missing", "")
-	test("legacy Off stays byte-identical", `{"engines":{"fake":false}}`)
-	test("peer Off stays byte-identical", `{"engines":{"fake":false},"offBy":{"fake":"peer"}}`)
-}
-
-func TestDesiredStateSnapshotConcurrentConsistency(t *testing.T) {
-	store := newDesiredStateStore(t.TempDir())
-	states := []desiredStateFile{
-		{Engines: map[string]bool{"first": true, "second": false}, OffBy: map[string]intentOrigin{"second": intentLocal}},
-		{Engines: map[string]bool{"first": false, "second": true}, OffBy: map[string]intentOrigin{"first": intentPeer}},
-	}
-	want := []engineintent.Snapshot{
-		{EnabledByEngine: map[string]bool{"first": true, "second": false}, OffByEngine: map[string]engineintent.Origin{"second": "local"}},
-		{EnabledByEngine: map[string]bool{"first": false, "second": true}, OffByEngine: map[string]engineintent.Origin{"first": "peer"}},
-	}
-	if err := store.save(states[0]); err != nil {
-		t.Fatal(err)
-	}
-	start := make(chan struct{})
-	writer := make(chan error, 1)
-	go func() {
-		<-start
-		for i := 0; i < 100; i++ {
-			store.mu.Lock()
-			err := store.save(states[i%2])
-			store.mu.Unlock()
-			if err != nil {
-				writer <- err
-				return
-			}
-		}
-		writer <- nil
-	}()
-	close(start)
-	// Always join the writer before the temporary store is removed.
-	defer func() {
-		if err := <-writer; err != nil {
-			t.Error(err)
-		}
-	}()
-	for i := 0; i < 1000; i++ {
-		got, err := store.snapshot([]string{"first", "second"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !reflect.DeepEqual(got, want[0]) && !reflect.DeepEqual(got, want[1]) {
-			t.Fatalf("snapshot combined different store revisions: %+v", got)
-		}
-	}
-}
-
-func TestDesiredStateOnClearsOffBy(t *testing.T) {
-	for _, origin := range []intentOrigin{intentLocal, intentPeer} {
-		t.Run(string(origin), func(t *testing.T) {
-			store := newDesiredStateStore(t.TempDir())
-			if err := store.set("fake", false, origin); err != nil {
-				t.Fatal(err)
-			}
-			if err := store.set("fake", true, intentLocal); err != nil {
-				t.Fatal(err)
-			}
-			state, err := store.load()
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !state.Engines["fake"] || len(state.OffBy) != 0 {
-				t.Fatalf("saved On retained provenance: %+v", state)
-			}
-		})
-	}
-}
 
 func desiredTestExecutor(t *testing.T, manifest *Manifest, baseDir string) *Executor {
 	t.Helper()
@@ -146,87 +29,6 @@ func desiredTestExecutor(t *testing.T, manifest *Manifest, baseDir string) *Exec
 	ex := NewExecutor(reg, NewReporter(nil), func(string, any) {}, baseDir)
 	t.Cleanup(ex.StopAll)
 	return ex
-}
-
-func TestResidentPreservesDesiredStateAndFailedWrites(t *testing.T) {
-	f := newResidentFixture(t)
-	state := desiredStateFile{
-		Engines: map[string]bool{f.p.Engine: true, "source": false, "target": true, "legacy": false},
-		OffBy:   map[string]intentOrigin{"source": intentLocal, "legacy": intentPeer},
-	}
-	if err := f.ex.desired.save(state); err != nil {
-		t.Fatal(err)
-	}
-	before, err := os.ReadFile(f.ex.desired.path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	initial, err := f.ex.desired.load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Inject failure at the existing atomic writer, not a residency-only seam.
-	writes := 0
-	useEngineFileReplacer(t, durablefile.Replacer{CreateTemp: func(string, string, os.FileMode) (durablefile.File, error) {
-		writes++
-		return nil, errors.New("injected desired write failure")
-	}})
-	if result := f.run(t); result.Outcome != nodepolicy.ResidentLoaded {
-		t.Fatalf("result = %+v", result)
-	}
-	if writes != 0 {
-		t.Fatalf("residency attempted %d desired-state writes", writes)
-	}
-	assertDesiredFileBytes(t, f.ex.desired.path, before)
-	if err := f.ex.desired.set("unrelated", false, intentLocal); err == nil {
-		t.Fatal("failed write reported success")
-	}
-	if writes != 1 {
-		t.Fatalf("injected writer calls = %d, want one failed intent write", writes)
-	}
-	assertDesiredFileBytes(t, f.ex.desired.path, before)
-	// Reopen the store to prove intent and provenance survive
-	// the disk round trip rather than relying on the original store instance.
-	after, err := newDesiredStateStore(filepath.Dir(f.ex.desired.path)).load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(initial, after) {
-		t.Fatalf("desired state changed: before=%+v after=%+v", initial, after)
-	}
-}
-
-func TestResidentFailedDesiredReadDoesNotRepairState(t *testing.T) {
-	f := newResidentFixture(t)
-	before, err := os.ReadFile(f.ex.desired.path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := os.WriteFile(f.ex.desired.path, before, 0o600); err != nil {
-			t.Errorf("restore desired state for fixture cleanup: %v", err)
-		}
-	})
-	const malformed = `{"engines":`
-	if err := os.WriteFile(f.ex.desired.path, []byte(malformed), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	writes := 0
-	useEngineFileReplacer(t, durablefile.Replacer{CreateTemp: func(string, string, os.FileMode) (durablefile.File, error) {
-		writes++
-		return nil, errors.New("residency must not repair desired state")
-	}})
-	if result := f.run(t); result.Outcome != nodepolicy.ResidentNotDispatched {
-		t.Fatalf("failed desired read result = %+v", result)
-	}
-	f.noCalls(t)
-	if f.dispatches != 0 || writes != 0 {
-		t.Fatalf("failed desired read dispatched=%d writes=%d", f.dispatches, writes)
-	}
-	assertDesiredFileBytes(t, f.ex.desired.path, []byte(malformed))
-	if _, err := newDesiredStateStore(filepath.Dir(f.ex.desired.path)).load(); err == nil {
-		t.Fatal("malformed desired state became readable")
-	}
 }
 
 func assertDesiredFileBytes(t *testing.T, path string, want []byte) {
@@ -240,92 +42,7 @@ func assertDesiredFileBytes(t *testing.T, path string, want []byte) {
 	}
 }
 
-func TestDesiredStateStoresExplicitOffAndLeavesLegacyUnknown(t *testing.T) {
-	store := newDesiredStateStore(t.TempDir())
-	if enabled, known, err := store.get("fake"); err != nil || known || enabled {
-		t.Fatalf("legacy state = (%v, %v, %v), want unknown", enabled, known, err)
-	}
-	if err := store.set("fake", false, intentLocal); err != nil {
-		t.Fatal(err)
-	}
-	if enabled, known, err := store.get("fake"); err != nil || !known || enabled {
-		t.Fatalf("saved OFF = (%v, %v, %v), want known false", enabled, known, err)
-	}
-	if err := store.set("fake", true, intentLocal); err != nil {
-		t.Fatal(err)
-	}
-	if enabled, known, err := store.get("fake"); err != nil || !known || !enabled {
-		t.Fatalf("saved ON = (%v, %v, %v), want known true", enabled, known, err)
-	}
-}
-
-func TestDesiredStateRecordsOffProvenance(t *testing.T) {
-	requireOrigin := func(t *testing.T, store *desiredStateStore, want engineintent.Origin) {
-		t.Helper()
-		got, err := store.snapshot([]string{"fake"})
-		if err != nil || got.OffByEngine["fake"] != want {
-			t.Fatalf("snapshot = %+v, %v; want Off origin %q", got, err, want)
-		}
-	}
-	t.Run("unknown intent is not a local Off", func(t *testing.T) {
-		requireOrigin(t, newDesiredStateStore(t.TempDir()), "")
-	})
-	t.Run("On clears local Off provenance", func(t *testing.T) {
-		store := newDesiredStateStore(t.TempDir())
-		if err := store.set("fake", false, intentLocal); err != nil {
-			t.Fatal(err)
-		}
-		requireOrigin(t, store, engineintent.Local)
-		if err := store.set("fake", true, intentPeer); err != nil {
-			t.Fatal(err)
-		}
-		requireOrigin(t, store, "")
-		if state, err := store.load(); err != nil || len(state.OffBy) != 0 {
-			t.Fatalf("saving On left Off provenance %v (%v)", state.OffBy, err)
-		}
-	})
-	t.Run("peer Off does not veto", func(t *testing.T) {
-		store := newDesiredStateStore(t.TempDir())
-		if err := store.set("fake", false, intentPeer); err != nil {
-			t.Fatal(err)
-		}
-		requireOrigin(t, store, engineintent.Peer)
-	})
-	t.Run("peer Off never downgrades a local Off", func(t *testing.T) {
-		store := newDesiredStateStore(t.TempDir())
-		if err := store.set("fake", false, intentLocal); err != nil {
-			t.Fatal(err)
-		}
-		if err := store.set("fake", false, intentPeer); err != nil {
-			t.Fatal(err)
-		}
-		requireOrigin(t, store, engineintent.Local)
-	})
-	t.Run("local Off replaces a peer Off", func(t *testing.T) {
-		store := newDesiredStateStore(t.TempDir())
-		if err := store.set("fake", false, intentPeer); err != nil {
-			t.Fatal(err)
-		}
-		if err := store.set("fake", false, intentLocal); err != nil {
-			t.Fatal(err)
-		}
-		requireOrigin(t, store, engineintent.Local)
-	})
-	t.Run("legacy Off without provenance counts as local", func(t *testing.T) {
-		dir := t.TempDir()
-		if err := os.WriteFile(filepath.Join(dir, desiredStateFileName), []byte(`{"engines":{"fake":false}}`), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		store := newDesiredStateStore(dir)
-		requireOrigin(t, store, engineintent.Local)
-		if err := store.set("fake", false, intentPeer); err != nil {
-			t.Fatal(err)
-		}
-		requireOrigin(t, store, engineintent.Local)
-	})
-}
-
-func TestDesiredOnSurvivesShutdownAndExplicitOffDoesNot(t *testing.T) {
+func TestInstalledEngineRestoresAfterShutdownAndInternalStop(t *testing.T) {
 	baseDir := t.TempDir()
 	ctx := context.Background()
 
@@ -337,7 +54,7 @@ func TestDesiredOnSurvivesShutdownAndExplicitOffDoesNot(t *testing.T) {
 
 	second := desiredTestExecutor(t, testEngineManifest(fakeEngineBin), baseDir)
 	t.Cleanup(second.StopAll)
-	if err := second.RestoreEnabled(ctx); err != nil {
+	if err := second.RestoreInstalled(ctx); err != nil {
 		t.Fatalf("restore ON: %v", err)
 	}
 	if st, err := second.Status("fake"); err != nil || !st.Running {
@@ -348,23 +65,24 @@ func TestDesiredOnSurvivesShutdownAndExplicitOffDoesNot(t *testing.T) {
 	}
 
 	third := desiredTestExecutor(t, testEngineManifest(fakeEngineBin), baseDir)
-	if err := third.RestoreEnabled(ctx); err != nil {
+	t.Cleanup(third.StopAll)
+	if err := third.RestoreInstalled(ctx); err != nil {
 		t.Fatalf("restore after OFF: %v", err)
 	}
-	if st, err := third.Status("fake"); err != nil || st.Running {
-		t.Fatalf("OFF status = %+v, err=%v", st, err)
+	if st, err := third.Status("fake"); err != nil || !st.Running {
+		t.Fatalf("installed status = %+v, err=%v", st, err)
 	}
 }
 
-func TestRestoreEnabledPreservesForeignListenerOnManagedPort(t *testing.T) {
-	testRestoreEnabledPreservesForeignListener(t, false)
+func TestRestoreInstalledPreservesForeignListenerOnManagedPort(t *testing.T) {
+	testRestoreInstalledPreservesForeignListener(t, false)
 }
 
-func TestRestoreEnabledPreservesForeignListenerOnRecordedPort(t *testing.T) {
-	testRestoreEnabledPreservesForeignListener(t, true)
+func TestRestoreInstalledPreservesForeignListenerOnRecordedPort(t *testing.T) {
+	testRestoreInstalledPreservesForeignListener(t, true)
 }
 
-func testRestoreEnabledPreservesForeignListener(t *testing.T, portZero bool) {
+func testRestoreInstalledPreservesForeignListener(t *testing.T, portZero bool) {
 	t.Helper()
 	baseDir := t.TempDir()
 	managedDir := filepath.Join(baseDir, "fake")
@@ -389,15 +107,12 @@ func testRestoreEnabledPreservesForeignListener(t *testing.T, portZero bool) {
 	platform.Runtime.Health = nil
 	manifest.Platforms[hostKey()] = platform
 	ex := desiredTestExecutor(t, manifest, baseDir)
-	if err := ex.desired.set("fake", true, intentLocal); err != nil {
-		t.Fatalf("save ON intent: %v", err)
-	}
 	if portZero {
 		if err := ex.desired.setAllocatedPort("fake", port); err != nil {
 			t.Fatalf("save allocated port: %v", err)
 		}
 	}
-	if err := ex.RestoreEnabled(context.Background()); err != nil {
+	if err := ex.RestoreInstalled(context.Background()); err != nil {
 		t.Fatalf("restore with foreign listener: %v", err)
 	}
 	state, err := ex.state("fake")
@@ -440,7 +155,7 @@ func TestAllocatedPortLegacyStateAndFixedPort(t *testing.T) {
 	p.Runtime.Port = privateTestPorts(t, 1)[0]
 	m.Platforms[hostKey()] = p
 	ex := desiredTestExecutor(t, m, base)
-	if err := ex.RestoreEnabled(context.Background()); err != nil {
+	if err := ex.RestoreInstalled(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if st, err := ex.Status("fake"); err != nil || st.Port != p.Runtime.Port || !st.Running {
@@ -508,12 +223,12 @@ func TestAllocatedPortSleepRetriesFailedCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, present := saved.AllocatedPorts["fake"]; present || !saved.Engines["fake"] {
+	if _, present := saved.AllocatedPorts["fake"]; present {
 		t.Fatalf("retry retained endpoint or lost saved On: %+v", saved)
 	}
 }
 
-func TestRestoreEnabledPreservesDetectedExternalImage(t *testing.T) {
+func TestRestoreInstalledPreservesDetectedExternalImage(t *testing.T) {
 	externalBin := filepath.Join(t.TempDir(), filepath.Base(fakeEngineBin))
 	copyFile(t, fakeEngineBin, externalBin)
 	port, err := freePort()
@@ -541,10 +256,7 @@ func TestRestoreEnabledPreservesDetectedExternalImage(t *testing.T) {
 	if !found || pid != external.Process.Pid || !isOurEngineImage(image, binPath) || isManagedInstallPath(binPath, installDir) {
 		t.Fatalf("external fixture must match detected image outside managed install: listener=(%d,%q,%v) detected=%q installDir=%q", pid, image, found, binPath, installDir)
 	}
-	if err := ex.desired.set("fake", true, intentLocal); err != nil {
-		t.Fatalf("save ON intent: %v", err)
-	}
-	if err := ex.RestoreEnabled(context.Background()); err != nil {
+	if err := ex.RestoreInstalled(context.Background()); err != nil {
 		t.Fatalf("restore with detected external listener: %v", err)
 	}
 	state.mu.Lock()
@@ -592,7 +304,7 @@ func TestOrphanReclaimFailureReportsStartFailed(t *testing.T) {
 	test("PID still alive without readiness probe", false, "pid ")
 }
 
-func TestRestoreEnabledReclaimsUnhealthyManagedOrphan(t *testing.T) {
+func TestRestoreInstalledReclaimsUnhealthyManagedOrphan(t *testing.T) {
 	baseDir := t.TempDir()
 	managedDir := filepath.Join(baseDir, "fake")
 	if err := os.MkdirAll(managedDir, 0o700); err != nil {
@@ -613,10 +325,7 @@ func TestRestoreEnabledReclaimsUnhealthyManagedOrphan(t *testing.T) {
 	platform.Runtime.Health = nil
 	manifest.Platforms[hostKey()] = platform
 	ex := desiredTestExecutor(t, manifest, baseDir)
-	if err := ex.desired.set("fake", true, intentLocal); err != nil {
-		t.Fatalf("save ON intent: %v", err)
-	}
-	if err := ex.RestoreEnabled(context.Background()); err == nil || !strings.Contains(err.Error(), "did not become ready") {
+	if err := ex.RestoreInstalled(context.Background()); err == nil || !strings.Contains(err.Error(), "did not become ready") {
 		t.Fatalf("restore with deliberately unmatched readiness = %v, want cold-start readiness failure", err)
 	}
 	if portServing(port) {
@@ -638,13 +347,13 @@ func TestFailedRestoreRetainsDesiredOnForRetry(t *testing.T) {
 	platform.Runtime.Args = []string{"noserve"}
 	platform.Runtime.Ready.TimeoutS = 1
 	failing.Platforms[key] = platform
-	if err := desiredTestExecutor(t, failing, baseDir).RestoreEnabled(context.Background()); err == nil {
+	if err := desiredTestExecutor(t, failing, baseDir).RestoreInstalled(context.Background()); err == nil {
 		t.Fatal("expected restore failure")
 	}
 
 	retry := desiredTestExecutor(t, testEngineManifest(fakeEngineBin), baseDir)
 	t.Cleanup(retry.StopAll)
-	if err := retry.RestoreEnabled(context.Background()); err != nil {
+	if err := retry.RestoreInstalled(context.Background()); err != nil {
 		t.Fatalf("retry restore: %v", err)
 	}
 	if st, err := retry.Status("fake"); err != nil || !st.Running {
@@ -652,108 +361,8 @@ func TestFailedRestoreRetainsDesiredOnForRetry(t *testing.T) {
 	}
 }
 
-// TestDeclinedAdoptedStopStillPersistsOffIntent proves a user Stop that is
-// declined because the adopted listener is a genuinely foreign process (its
-// image is not our managed binary) still records the OFF intent, so a later
-// RestoreEnabled honors it rather than flipping the engine back on.
-func TestDeclinedAdoptedStopStillPersistsOffIntent(t *testing.T) {
-	baseDir := t.TempDir()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-	u, err := url.Parse(srv.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	port, err := strconv.Atoi(u.Port())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// The httptest listener runs in this test process, whose image is not the
-	// fake engine binary, so the stop is declined (never terminated).
-	m := testEngineManifest(fakeEngineBin)
-	key := runtime.GOOS + "/" + runtime.GOARCH
-	p := m.Platforms[key]
-	p.Runtime.Port = port
-	p.Runtime.Ready = &Probe{HTTP: srv.URL, Status: http.StatusOK}
-	p.Runtime.Health = nil
-	m.Platforms[key] = p
-
-	first := desiredTestExecutor(t, m, baseDir)
-	if st, err := first.Status("fake"); err != nil || !st.Running {
-		t.Fatalf("adopt foreign listener: status=%+v err=%v", st, err)
-	}
-	if err := first.Stop("fake"); err == nil || !strings.Contains(err.Error(), "external management") {
-		t.Fatalf("stop error = %v, want external-management decline", err)
-	}
-	if enabled, known, err := first.desired.get("fake"); err != nil || !known || enabled {
-		t.Fatalf("desired after declined stop = (%v, %v, %v), want known OFF", enabled, known, err)
-	}
-
-	srv.Close()
-	fresh := desiredTestExecutor(t, m, baseDir)
-	if err := fresh.RestoreEnabled(context.Background()); err != nil {
-		t.Fatalf("restore after declined OFF: %v", err)
-	}
-	if st, err := fresh.Status("fake"); err != nil || st.Running {
-		t.Fatalf("declined-OFF engine was restarted: status=%+v err=%v", st, err)
-	}
-}
-
-func TestDesiredStateLoadsOldDocumentAndSaveDropsObsoleteField(t *testing.T) {
-	store := newDesiredStateStore(t.TempDir())
-	document := []byte(`{"engines":{"on":true,"local-off":false,"peer-off":false},"offBy":{"local-off":"local","peer-off":"peer"},"allocatedPorts":{"on":23456},"locked":{"on":true,"local-off":true,"removed":false}}`)
-	if err := os.WriteFile(store.path, document, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	snapshot, err := store.snapshot([]string{"on", "local-off", "peer-off"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := engineintent.Snapshot{
-		EnabledByEngine: map[string]bool{"on": true, "local-off": false, "peer-off": false},
-		OffByEngine:     map[string]engineintent.Origin{"local-off": "local", "peer-off": "peer"},
-	}
-	if !reflect.DeepEqual(snapshot, want) {
-		t.Fatalf("old document intent = %+v, want %+v", snapshot, want)
-	}
-	unchanged, err := os.ReadFile(store.path)
-	if err != nil || !bytes.Equal(unchanged, document) {
-		t.Fatalf("load rewrote old document: %s, %v", unchanged, err)
-	}
-	if _, err := store.ownerEvidence(); err == nil || !strings.Contains(err.Error(), `unrecognized desired engine evidence field "locked"`) {
-		t.Fatalf("private evidence did not refuse obsolete field: %v", err)
-	}
-	// Use the existing intent save path; no migration or compatibility reader.
-	if err := store.set("on", true, intentLocal); err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(store.path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(data, &fields); err != nil {
-		t.Fatal(err)
-	}
-	if _, present := fields["locked"]; present {
-		t.Fatal("intent save retained obsolete field")
-	}
-	after, err := store.snapshot([]string{"on", "local-off", "peer-off"})
-	if err != nil || !reflect.DeepEqual(after, want) {
-		t.Fatalf("save changed remaining intent: %+v, %v", after, err)
-	}
-	state, err := store.load()
-	if err != nil || state.AllocatedPorts["on"] != 23456 {
-		t.Fatalf("save changed allocated endpoint: %+v, %v", state, err)
-	}
-	if _, err := store.ownerEvidence(); err != nil {
-		t.Fatalf("saved document did not restore strict evidence: %v", err)
-	}
-}
-
+// Retired transaction and engine intent fields do not change the retained
+// process cleanup evidence, and a read never rewrites the document.
 func TestDesiredStateDecodeDropsRetiredTransactionKeysWithoutWriting(t *testing.T) {
 	store := newDesiredStateStore(t.TempDir())
 	document := []byte(`{"engines":{"on":true,"off":false},"offBy":{"off":"peer"},"allocatedPorts":{"on":23456},"pendingSwitch":{"automatic":"retired-invalid-value"},"pendingSwitchPorts":{"target":-1}}`)
@@ -764,7 +373,7 @@ func TestDesiredStateDecodeDropsRetiredTransactionKeysWithoutWriting(t *testing.
 	if err != nil {
 		t.Fatalf("decode retained state: %v", err)
 	}
-	want := desiredStateFile{Engines: map[string]bool{"on": true, "off": false}, OffBy: map[string]intentOrigin{"off": intentPeer}, AllocatedPorts: map[string]int{"on": 23456}}
+	want := desiredStateFile{AllocatedPorts: map[string]int{"on": 23456}}
 	if !reflect.DeepEqual(state, want) {
 		t.Fatalf("retained state = %+v, want %+v", state, want)
 	}

@@ -11,6 +11,45 @@ import (
 	"testing"
 )
 
+func TestParseStoredDropsRetiredIdleSettings(t *testing.T) {
+	want := Default()
+	want.Revision = "42"
+	want.Idle.UnloadAfterMinutes = 7
+	base, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(base, &fields); err != nil {
+		t.Fatal(err)
+	}
+	fields["idle"] = json.RawMessage(`{"unloadAfterMinutes":7,"wakeTimeoutSeconds":90,"startondemand":false,"stopengineafterminutes":9}`)
+	raw, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := ParseStored(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("retired idle fields changed policy: got %+v, want %+v", got, want)
+	}
+	encoded, err := json.Marshal(got.Idle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var idle map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &idle); err != nil {
+		t.Fatal(err)
+	}
+	for key := range idle {
+		if key != "unloadAfterMinutes" && key != "wakeTimeoutSeconds" {
+			t.Fatalf("saved retired idle field %q", key)
+		}
+	}
+}
+
 func TestParseStoredDropsEngineBindingsPreservingPolicy(t *testing.T) {
 	want := stagedPolicy(t)
 	want.Revision = "42"

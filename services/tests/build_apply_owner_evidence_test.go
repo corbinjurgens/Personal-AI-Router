@@ -174,8 +174,10 @@ func runOwnerEvidenceBridge(role string) (resultErr error) {
 	stopped := make(chan struct{})
 	defer close(stopped)
 	// Hold ordinary broker installation refreshes until the never-observed
-	// capture finishes. Forward the original requests after release, without
-	// inventing responses or blocking unrelated native owner reads.
+	// capture finishes. Startup restoration is held for this bridge lifetime:
+	// these cases isolate read-only owner evidence, while EngineLifecycle tests
+	// automatic restoration. Explicit installs still execute through the real
+	// manager. Never manufacture a lifecycle response or owner observation.
 	installedRelease := make(chan struct{})
 	releaseInstalled := sync.OnceFunc(func() { close(installedRelease) })
 	mux := http.NewServeMux()
@@ -250,6 +252,10 @@ func runOwnerEvidenceBridge(role string) (resultErr error) {
 					case <-stopped:
 					}
 				}(frame)
+				continue
+			}
+			if role == "MANAGER" && frame.Method == "engine:restore-installed" {
+				go func() { <-stopped }()
 				continue
 			}
 			if err := write(frame); err != nil {
@@ -1363,7 +1369,7 @@ func TestBuildApplyOwnerEvidenceProcess(t *testing.T) {
 		}
 	})
 	t.Run("owned fake has a retained process lifetime", func(t *testing.T) {
-		c.mustCall(t, "810", "engine:install", mustMarshal(t, map[string]any{"engine": "owner-owned", "start": true}))
+		c.mustCall(t, "810", "engine:install", mustMarshal(t, map[string]any{"engine": "owner-owned"}))
 		e := *f.readWhileEngineListening(t, "owner-owned").ManagerEvidence.Value
 		entry, authority := ownerEvidenceEntry(t, e, "owner-owned")
 		if !entry.Running.Known || entry.Running.Value == nil || !*entry.Running.Value ||
@@ -1387,10 +1393,10 @@ func TestBuildApplyOwnerEvidenceProcess(t *testing.T) {
 		cmd := exec.Command(f.fake)
 		cmd.Env = append(slices.Clone(f.env), "NVPAIR_OWNER_ENGINE_PORT="+strconv.Itoa(f.enginePorts["owner-external"]))
 		child := f.launchChild(cmd)
-		// Installation's existing start option performs deliberate adoption.
+		// Installation performs deliberate adoption on an available node.
 		// Evidence reads never call Status, Detect or native HTTP to fill facts.
 		waitTCP(t, fmt.Sprintf("127.0.0.1:%d", f.enginePorts["owner-external"]), serviceCallTimeout)
-		c.mustCall(t, "812", "engine:install", mustMarshal(t, map[string]any{"engine": "owner-external", "start": true}))
+		c.mustCall(t, "812", "engine:install", mustMarshal(t, map[string]any{"engine": "owner-external"}))
 		entry, authority := ownerEvidenceEntry(t, *f.readWhileEngineListening(t, "owner-external").ManagerEvidence.Value, "owner-external")
 		if !entry.Running.Known || entry.Running.Value == nil || !*entry.Running.Value ||
 			!authority.Adopted.Known || authority.Adopted.Value == nil || !*authority.Adopted.Value ||

@@ -198,9 +198,7 @@ func TestServedModelsStrictRoutes(t *testing.T) {
 func TestServedModelsRejectBeforeWake(t *testing.T) {
 	h := newAdmHarness(t)
 	h.setHealthy("llamacpp", false)
-	h.a.setIntent(map[string]bool{"llamacpp": true})
 	pol := h.a.currentPolicy()
-	pol.Idle.StartOnDemand = true
 	pol.ServedModels = nodepolicy.ServedModels{{Engine: "llamacpp", Model: "m"}}
 	h.a.setPolicy(pol)
 	for _, model := range []string{"other", ""} {
@@ -250,9 +248,7 @@ func TestServedModelsDormantSelf(t *testing.T) {
 			tc := llamacppCase(t)
 			p := testProxy(tc.profile, NewDiscovery(), tc.profile.FacadePort)
 			p.noteSelf("self", "llamacpp", []string{"m"})
-			p.admission.setIntent(map[string]bool{"llamacpp": true})
 			pol := p.admission.currentPolicy()
-			pol.Idle.StartOnDemand = true
 			pol.ServedModels = served
 			p.admission.setPolicy(pol)
 			_, ok := p.soleFacade().dormantSelfCandidate("m")

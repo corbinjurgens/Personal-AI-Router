@@ -156,9 +156,10 @@ claim.
 | Native key | Actual flags/aliases and environment | UI label | Owner | Valid range/enums or refusal | Default source | B/D status | Portability | Generated preset mapping | Estimate/identity effect |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `models-preset` | `--models-preset`; env `LLAMA_ARG_MODELS_PRESET` | Generated model preset | Manager/router | No model-local override | Existing native/router policy, uninspected | B owner control; no editor | No | Manager-generated immutable preset path | Router identity/capacity/startup; no automatic retuning |
-| `models-max` | `--models-max`; env `LLAMA_ARG_MODELS_MAX` | Router model capacity | Manager/router | Existing positive finite int32 router capacity | Existing native/router policy, uninspected | B owner control; no editor | No | Preserve configured router capacity | Router identity/capacity/startup; no automatic retuning |
+| `models-max` | `--models-max`; env `LLAMA_ARG_MODELS_MAX` | Router model capacity | Manager/router | Typed: fixed 0 (unlimited); external: positive finite int32 | Existing native/router policy, uninspected | B owner control; no editor | No | PAIR admission owns typed capacity | Router identity/capacity/startup; no automatic retuning |
 | `ctx-size` | `--ctx-size`, `-c`; env `LLAMA_ARG_CTX_SIZE` | Tokens per request | Model load | Per request 1..2147483392; pad up to 256; checked total <= int32 | Finite adapter: 8192 per request | B | Requested only | ctx-size = padded per-request * slots; kv-unified = false | Native context identity; KV/state/workspace |
 | `parallel` | `--parallel`, `-np`; env `LLAMA_ARG_N_PARALLEL` | Native slots | Model load | 1..2147483647; context product bounded | Finite adapter: 1 | B | Requested only | parallel = slots | Native slots identity; KV/state/workspace |
+| `sleep-idle-seconds` | `--sleep-idle-seconds`; env `LLAMA_ARG_SLEEP_IDLE_SECONDS` | Native idle sleep | Manager/router | Fixed -1; no model-local override | PAIR per-model idle policy | B owner control; no editor | No | sleep-idle-seconds = -1 | Native sleep disabled; PAIR owns idle release |
 | `kv-unified-per-slot` | `--kv-unified-per-slot`; env `LLAMA_ARG_KV_UNIFIED_PER_SLOT` | Unified KV per-slot cap | Model load | No typed edit; preserve/read existing records | Existing finite adapter/source record | D typed override | No | B compiler requires non-unified; do not reinterpret saved unified loads | KV/slot identity; sharing arithmetic |
 | `kv-unified` | `--kv-unified`, `-kvu`, `--no-kv-unified`, `-no-kvu`; env `LLAMA_ARG_KV_UNIFIED`, `LLAMA_ARG_NO_KV_UNIFIED` | Unified KV allocation | Model load | No typed edit; preserve/read existing records | Existing finite adapter/source record | D typed override | No | B compiler requires non-unified; do not reinterpret saved unified loads | KV/slot identity; sharing arithmetic |
 | `n-predict` | `--predict`, `--n-predict`, `-n`; env `LLAMA_ARG_N_PREDICT` | Native output token limit | Request/native | Existing finite adapter: positive int32; typed override unavailable | Native/source behavior, uninspected | D | No typed copy | No generated B override | Request/native output identity; not context or admission limit |
@@ -168,7 +169,6 @@ claim.
 | `main-gpu` | `--main-gpu`, `-mg`; env `LLAMA_ARG_MAIN_GPU` | Main native GPU | Model load | No typed values accepted | Inherited native/model behavior, uninspected | D unsupported | No typed copy | None: typed override refused | Native semantics identity; unknown allocation/work cost |
 | `device` | `--device`, `-dev`; env `LLAMA_ARG_DEVICE` | Native devices | Model load | No typed values accepted | Inherited native/model behavior, uninspected | D unsupported | No typed copy | None: typed override refused | Native semantics identity; unknown allocation/work cost |
 | `backend-sampling` | `-bs`, `--backend-sampling`; env `LLAMA_ARG_BACKEND_SAMPLING` | Engine-side sampling | Model load | Native boolean; no typed override | Inherited native/model behavior, uninspected | D unsupported | No typed copy | None: typed override refused | Native semantics identity; unknown allocation/work cost |
-| `sleep-idle-seconds` | `--sleep-idle-seconds`; env `LLAMA_ARG_SLEEP_IDLE_SECONDS` | Unload after idle (seconds; -1 or positive) | Model load | -1 or positive int32; zero invalid | Finite adapter: 300 seconds | B advanced | Requested only | sleep-idle-seconds = explicit value | Retention identity; residency/keep-loaded protection wins |
 | `cache-ram` | `--cache-ram`, `-cram`; env `LLAMA_ARG_CACHE_RAM` | Host prompt cache (MiB) | Model load | 1..2147483647 MiB | Finite adapter: 512 MiB | B advanced | Requested only | cache-ram = explicit MiB | Native identity; host prompt cache, no admission bound |
 | `fit` | `--fit`, `-fit`; env `LLAMA_ARG_FIT` | Native automatic fitting | Model load | off or on; exclusive with reviewed Auto GPU | Off when unset | B supported | Yes | fit = off/on | On is unpriced native placement; execution identity only |
 | `cache-prompt` | `--cache-prompt`, `--no-cache-prompt`; env `LLAMA_ARG_CACHE_PROMPT`, `LLAMA_ARG_NO_CACHE_PROMPT` | Prompt caching | Model load | Native boolean; no typed override | Inherited native/model behavior, uninspected | D unsupported | No typed copy | None: typed override refused | Native semantics identity; unknown allocation/work cost |
@@ -673,7 +673,7 @@ applies to the host the test runs on.
 | `args` | string[] | no | Arguments. |
 | `env` | object | no | Extra environment (merged over the inherited env; the `NVPAIR_PROVIDER_SECRET_` namespace is removed after the merge). Use `{host}`/`{port}` for the listen address, e.g. `"LLAMA_ARG_HOST": "{host}"`. |
 | `port` | int | no | Fixed port, or `0` to auto-assign a free loopback port. |
-| `bind` | string | no | Listen address, substituted as `{host}`. Empty ⇒ `127.0.0.1` (the safe default); an inference engine that serves the cluster sets `"0.0.0.0"`, overridable by the local install-with-start `bind` option. Probes always target loopback. |
+| `bind` | string | no | Listen address, substituted as `{host}`. Empty ⇒ `127.0.0.1` (the safe default); an inference engine that serves the cluster sets `"0.0.0.0"`. Probes always target loopback. |
 | `ready` | probe | no | Readiness probe; `start` waits for it before reporting Running. |
 | `stop` | object | no | `signal` (`"term"` default, or `"kill"`) + `grace_s` (seconds before force-kill). |
 | `health` | probe | no | Periodic liveness probe while Running; `interval_s` between checks. |
@@ -750,12 +750,12 @@ flag and is never bounced.
 
 The rules the runner enforces:
 
-- **A stopped engine stays stopped.** There is no serving state to reconcile,
-  and starting one behind the user's back would be a surprise.
-- **The user's ON/OFF intent is never rewritten.** The bounce goes through
-  `doStop`/`doStart`, not `Restart`, precisely because `Restart` also persists
-  desired-enabled — an action must not turn "delete this model" into "and leave
-  this engine switched on".
+- **An already-stopped engine stays stopped during an action.** There is no
+  running serving state to reconcile. Installation, service restoration and
+  demand own activation while the node is available.
+- **The bounce restores only the engine this action stopped.** It runs through
+  `doStop`/`doStart` under availability admission. No engine On/Off state is
+  persisted.
 - **The running check and the bounce share `opMu`.** A concurrent `Stop` either
   wins the lock first (the action then sees a stopped engine and leaves it down)
   or waits and stops the engine we just brought back. It can never be silently
@@ -933,3 +933,7 @@ Caveats worth encoding when authoring these:
 - **llama.cpp** ships prebuilt archives with **published SHA-256s**, so it's an ideal checksum-pinned `fetch`+`run` target (no placeholder SHA needed).
 - **vLLM**: native Windows is unsupported (WSL only); the bind is a flag, not env.
 - **GPT4All**: no first-class headless CLI today — out of scope for a config-only manager unless targeting its Python SDK.
+
+Typed presets fix native sleep to `-1` and router capacity to `0`. PAIR owns
+per-model idle release and load admission. Native sleep is not a typed field or
+extra option; conversion previews its replacement with `-1`.

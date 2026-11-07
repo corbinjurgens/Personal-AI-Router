@@ -94,12 +94,12 @@ func journalInputs(t *testing.T, j *Journal) (Receipt, Inventory) {
 	receipt := Receipt{
 		OperationID: id, RunnerToken: id, PreviewID: "preview_" + id, Target: filepath.Join(filepath.Dir(j.Path()), "target"),
 		CandidateSHA256: inventory.PackageSHA256, PreviousSHA256: digest,
-		Protected: ProtectedDigests{Policy: digest, EngineSettings: digest, Intent: digest, IdentityMembership: digest},
-		Expected:  JournalExpectations{StopEngines: true, UnloadModels: true, RemainPaused: true, PreserveIntent: true, OnActive: nodepolicy.FinishActive, DrainTimeoutSeconds: 120},
+		Protected: ProtectedDigests{Policy: digest, EngineSettings: digest, IdentityMembership: digest},
+		Expected:  JournalExpectations{StopEngines: true, UnloadModels: true, RemainPaused: true, OnActive: nodepolicy.FinishActive, DrainTimeoutSeconds: 120},
 		Consent:   Consent{AllowEngineStop: true, AllowInterruption: true},
 		Fences: Fences{
 			RuntimeGeneration: Known("runtime"), ServiceInstance: Known("service"), BrokerGeneration: Known("broker"), ManagerIncarnation: Known("manager"),
-			PolicyRevision: Known("policy"), SettingsRevision: Known("settings"), IntentRevision: Known("intent"), AvailabilityRevision: Known("availability"),
+			PolicyRevision: Known("policy"), SettingsRevision: Known("settings"), AvailabilityRevision: Known("availability"),
 		},
 		Phase: PhasePrepare, Rename: RenameNone, Handoff: HandoffNone,
 	}
@@ -258,7 +258,6 @@ func TestJournalRejectsBoundaryAndAuthorityChanges(t *testing.T) {
 	test("skips phase", func(r *Receipt) { r.Phase = PhaseSwap })
 	test("changes target", func(r *Receipt) { r.Target += "-other" })
 	test("changes preview", func(r *Receipt) { r.PreviewID = "another_preview" })
-	test("changes protected digest", func(r *Receipt) { r.Protected.Intent = strings.Repeat("b", 64) })
 	test("extends accepted deadline", func(r *Receipt) {
 		r.Runtime.AcceptedAt = r.Runtime.AcceptedAt.Add(time.Second)
 		r.Runtime.Deadline = r.Runtime.Deadline.Add(time.Second)
@@ -721,7 +720,7 @@ func TestJournalRejectsRemovedEngineLockFields(t *testing.T) {
 			if err := json.Unmarshal(receipt[test.section], &section); err != nil {
 				t.Fatalf("decode %s fields: %v", test.section, err)
 			}
-			// Keep preserveIntent present so rejection proves unknown-field
+			// Keep the required fields present so rejection proves unknown-field
 			// validation, independently of its required-true semantic check.
 			section[test.field] = test.value
 			receipt[test.section], err = json.Marshal(section)
@@ -758,12 +757,8 @@ func TestJournalAdmissionRequiresConsentAndCompleteOwnerFacts(t *testing.T) {
 			}
 		})
 	}
-	test("saved intent preservation required", func(r *Receipt) { r.Expected.PreserveIntent = false })
-	test("unknown intent digest", func(r *Receipt) { r.Protected.Intent = "" })
 	test("no engine-stop consent", func(r *Receipt) { r.Consent.AllowEngineStop = false })
 	test("unknown manager lifetime", func(r *Receipt) { r.Fences.ManagerIncarnation = Observation[string]{} })
-	test("unknown intent revision", func(r *Receipt) { r.Fences.IntentRevision = Observation[string]{} })
-	test("invalid owner-fence UTF-8", func(r *Receipt) { r.Fences.IntentRevision = Known(string([]byte{0xff})) })
 	test("invalid total budget", func(r *Receipt) { r.Runtime.Deadline = r.Runtime.Deadline.Add(time.Second) })
 	test("partial recovery budget", func(r *Receipt) { r.RecoveryDeadline = time.Now().Add(time.Minute) })
 	test("private environment backup", func(r *Receipt) { r.Runtime.ServiceLaunch.Environment = []string{"API_TOKEN=private"} })

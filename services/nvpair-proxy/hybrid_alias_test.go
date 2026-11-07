@@ -1153,7 +1153,6 @@ func TestAliasRefusalPrecedesPreflightReservationAndAdmission(t *testing.T) {
 		setBackend(t, fx.p.soleFacade(), fx.local.URL, healthy)
 		fx.p.noteSelf(selfID, tc.profile.Name, models)
 		fx.p.SetPriority([]string{selfID})
-		fx.p.admission.setIntent(map[string]bool{tc.profile.Name: true})
 		pol := stagedHybridPolicy(t)
 		if err := pol.Validate(); err != nil {
 			t.Fatal(err)

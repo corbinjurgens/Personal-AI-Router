@@ -58,6 +58,36 @@ func TestBundledModelOperationsKeepTheirWire(t *testing.T) {
 	}
 }
 
+func TestClientActionsCannotBypassLoadAdmission(t *testing.T) {
+	ex := bundledTestExecutor(t)
+	manifest, ok := ex.reg.Get("llamacpp")
+	if !ok {
+		t.Fatal("bundled engine missing")
+	}
+	for _, action := range []string{"load_model", "run_model", "chat", "custom_warmup"} {
+		t.Run("refuses "+action, func(t *testing.T) {
+			if manifest.clientActionAllowed(action) {
+				t.Fatal("raw allocation action bypasses admission")
+			}
+		})
+	}
+	for _, action := range []string{"list_models", "loaded_models", "unload_model", "pull_model", "delete_model"} {
+		t.Run("retains "+action, func(t *testing.T) {
+			if !manifest.clientActionAllowed(action) {
+				t.Fatal("non-loading model action refused")
+			}
+		})
+	}
+	manifest.Operations["load"] = OperationBinding{Action: "custom_warmup"}
+	if manifest.clientActionAllowed("custom_warmup") {
+		t.Fatal("custom load binding bypasses admission")
+	}
+	manifest.Operations["load"] = OperationBinding{Action: "list_models"}
+	if manifest.clientActionAllowed("list_models") {
+		t.Fatal("read-name load binding bypasses admission")
+	}
+}
+
 // The bundled engine uses the ordinary response budget for load.
 func TestBundledLoadBudgets(t *testing.T) {
 	ex := bundledTestExecutor(t)

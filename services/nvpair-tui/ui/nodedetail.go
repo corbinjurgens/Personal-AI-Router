@@ -14,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"nvpair-shared/engineintent"
 	"nvpair-shared/engines"
 	"nvpair-shared/enginesettings"
 	"nvpair-shared/modeldownload"
@@ -171,8 +170,6 @@ type nodeDetail struct {
 	remotePermission           remotePermission
 	remotePermissionFresh      bool
 	remotePermissionGeneration int
-	intentGeneration           int
-	intent                     engineintent.Snapshot
 	// enginesHidden and modelsHidden record that the last frame had no room
 	// for that list. Its keys are refused while it is off screen, or they act
 	// on a row the operator cannot see.
@@ -356,7 +353,7 @@ func (d *nodeDetail) Init() tea.Cmd {
 	// The telemetry chain is started by this first poll, not by a tick: each
 	// reading schedules the next one when it lands, so there is exactly one
 	// chain and it cannot outrun a slow node.
-	cmds := []tea.Cmd{d.enginesCmd(), d.modelsCmd(), d.telemetryCmd(), d.own(descriptorsCmd(d.client)), d.startPerformance(), d.policyCmd(), d.intentCmd()}
+	cmds := []tea.Cmd{d.enginesCmd(), d.modelsCmd(), d.telemetryCmd(), d.own(descriptorsCmd(d.client)), d.startPerformance(), d.policyCmd()}
 	if d.proxy != nil {
 		cmds = append(cmds, d.proxy.init(d.client))
 	}
@@ -542,7 +539,6 @@ func (d *nodeDetail) followNode(row nodeRow, found bool) {
 	if oldFound != found || oldHostUUID != d.hostUUID || oldSelf != d.telemetrySelf || oldMember != newMember || (!found || d.node.presence == presenceOffline) {
 		d.policyRoute++
 		d.policyFresh = false
-		d.invalidateIntent()
 		d.remotePermissionFresh = false
 	}
 	if oldFound != d.telemetryFound || oldHostUUID != d.hostUUID ||
@@ -863,7 +859,6 @@ func (d *nodeDetail) update(msg tea.Msg) (tea.Cmd, bool) {
 		d.policyRoute++
 		d.policyFresh = false
 		d.policyDisconnected = true
-		d.invalidateIntent()
 		d.closePerformance()
 		d.performancePushes = 0
 		d.performanceRefresh, d.policyRefresh = false, false
@@ -914,7 +909,7 @@ func (d *nodeDetail) update(msg tea.Msg) (tea.Cmd, bool) {
 		}
 		if d.policyRefresh {
 			d.policyRefresh = false
-			return tea.Batch(d.policyCmd(), d.intentCmd(), d.remotePermissionCmd()), true
+			return tea.Batch(d.policyCmd(), d.remotePermissionCmd()), true
 		}
 		if !d.telemetryRunning && d.telemetryFound && !d.policyDisconnected {
 			return d.telemetryCmd(), true
@@ -946,16 +941,6 @@ func (d *nodeDetail) update(msg tea.Msg) (tea.Cmd, bool) {
 		if msg.visit == d.telemetryGen && msg.route == d.policyRoute && msg.generation == d.remotePermissionGeneration && !d.policyDisconnected && d.remote() && d.enginesQueryable() && d.node.presence != presenceOffline {
 			d.remotePermission = msg.permission
 			d.remotePermissionFresh = msg.err == nil
-		}
-		return nil, true
-
-	case detailIntentMsg:
-		if msg.visit == d.telemetryGen && msg.generation == d.intentGeneration && !d.remote() && !d.policyDisconnected {
-			d.intent = msg.intent
-			if msg.err != nil {
-				d.intent = engineintent.Snapshot{}
-			}
-			d.refreshEngines()
 		}
 		return nil, true
 
@@ -1165,14 +1150,7 @@ func (d *nodeDetail) handleNotification(msg *rpc.Message) tea.Cmd {
 			d.modelsGeneration++
 			d.models.current, d.downloadsCurrent = false, false
 			d.refreshModels()
-			d.invalidateIntent()
-			return tea.Batch(d.intentCmd(), d.modelsCmd())
-		}
-		return nil
-	case "engine:intent-changed":
-		if !d.remote() && !d.policyDisconnected {
-			d.invalidateIntent()
-			return d.intentCmd()
+			return d.modelsCmd()
 		}
 		return nil
 	case "performance:changed":
@@ -1192,7 +1170,6 @@ func (d *nodeDetail) handleNotification(msg *rpc.Message) tea.Cmd {
 		d.remotePermissionFresh = false
 		d.policyRoute++
 		d.policyFresh = false
-		d.invalidateIntent()
 		d.closePerformance()
 		return nil
 
@@ -2188,17 +2165,6 @@ func (d *nodeDetail) refreshEngines() {
 			port = strconv.Itoa(e.Port)
 		}
 		row := table.Row{e.label(), yesNo(e.Installed), yesNo(e.Running), yesNo(e.Healthy), port}
-		// Saved Off reports intent without deriving it from runtime state.
-		if enabled, present := d.intent.EnabledByEngine[e.Engine]; !d.remote() && present && !enabled {
-			switch d.intent.OffByEngine[e.Engine] {
-			case engineintent.Local:
-				row[0] += " (saved Off, local)"
-			case engineintent.Peer:
-				row[0] += " (saved Off, by peer)"
-			default:
-				row[0] += " (saved Off)"
-			}
-		}
 		if d.proxy != nil {
 			row = append(row, d.proxyPortCell(e.Engine))
 		}

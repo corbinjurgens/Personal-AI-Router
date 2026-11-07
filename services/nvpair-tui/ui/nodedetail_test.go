@@ -17,7 +17,6 @@ import (
 	"testing"
 	"time"
 
-	"nvpair-shared/engineintent"
 	"nvpair-shared/engines"
 	"nvpair-shared/enginesettings"
 	"nvpair-shared/modeldownload"
@@ -807,13 +806,12 @@ func TestSessionDetailWaitsForFreshTargetBeforeTelemetry(t *testing.T) {
 func TestSessionDetailKeepsOnlyUnknownEngineIdentityUntilReady(t *testing.T) {
 	d := localDetail()
 	d.engines = []engineStatus{{Engine: "llamacpp", DisplayName: "llama.cpp", Installed: true, Running: true, Healthy: true, Port: 12345}}
-	d.intent = engineintent.Snapshot{EnabledByEngine: map[string]bool{"llamacpp": false}, OffByEngine: map[string]engineintent.Origin{}}
 	d.refreshEngines()
 	d.mode = detailInputLaunchArgs
 	d.input.SetValue("unsent arguments")
 	d.update(DisconnectedMsg{})
-	if len(d.engines) != 1 || d.engines[0] != (engineStatus{Engine: "llamacpp", DisplayName: "llama.cpp"}) || d.intent.EnabledByEngine != nil || d.intent.OffByEngine != nil {
-		t.Fatal("disconnect retained runtime or intent facts beyond engine identity")
+	if len(d.engines) != 1 || d.engines[0] != (engineStatus{Engine: "llamacpp", DisplayName: "llama.cpp"}) {
+		t.Fatal("disconnect retained runtime facts beyond engine identity")
 	}
 	rows := d.engineTable.Rows()
 	if len(rows) != 1 || rows[0][0] != "llama.cpp" {

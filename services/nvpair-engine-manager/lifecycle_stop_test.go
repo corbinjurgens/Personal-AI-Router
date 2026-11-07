@@ -136,9 +136,6 @@ func TestStopReclaimsOurOrphanOnManagedPort(t *testing.T) {
 	if st, _ := ex.Status(m.Engine); st.Running || st.Healthy {
 		t.Fatalf("engine must stay stopped after reclaim, got %+v", st)
 	}
-	if enabled, known, err := ex.desired.get(m.Engine); err != nil || !known || enabled {
-		t.Fatalf("desired state = (%v, %v, %v), want known OFF", enabled, known, err)
-	}
 }
 
 func TestStopDoesNotReclaimSameExternalImage(t *testing.T) {
@@ -210,9 +207,6 @@ func TestStopDeclinesForeignListenerWithActionableError(t *testing.T) {
 	if !fileExists(ourBin) || !fileExists(foreignBin) {
 		t.Fatal("refused stop must preserve managed and external executable files")
 	}
-	if enabled, known, err := ex.desired.get(m.Engine); err != nil || !known || enabled {
-		t.Fatalf("desired state = (%v, %v, %v), want known OFF after a declined stop", enabled, known, err)
-	}
 }
 
 func TestStopDeclinesLiteralDeletedSuffixListener(t *testing.T) {
@@ -247,9 +241,6 @@ func TestStopDeclinesLiteralDeletedSuffixListener(t *testing.T) {
 	if !portServing(port) || !fileExists(managed) || !fileExists(distinct) {
 		t.Fatal("refused Stop must preserve the distinct live listener and both executable files")
 	}
-	if enabled, known, err := ex.desired.get(m.Engine); err != nil || !known || enabled {
-		t.Fatalf("desired state=(%v,%v,%v), want known OFF after refusal", enabled, known, err)
-	}
 }
 
 func TestStopReclaimsManagedLiteralDeletedSuffix(t *testing.T) {
@@ -280,9 +271,6 @@ func TestStopReclaimsManagedLiteralDeletedSuffix(t *testing.T) {
 	}
 	if portServing(port) || !fileExists(bin) {
 		t.Fatal("Stop must terminate the exact managed listener while preserving its literal-suffix file")
-	}
-	if enabled, known, err := ex.desired.get(m.Engine); err != nil || !known || enabled {
-		t.Fatalf("desired state=(%v,%v,%v), want known OFF", enabled, known, err)
 	}
 }
 

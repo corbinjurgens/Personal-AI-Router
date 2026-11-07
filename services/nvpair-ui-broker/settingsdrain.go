@@ -74,6 +74,7 @@ func (b *Broker) pushEngineDrain(ctx context.Context, engine string, drain bool)
 	pp := b.policyProxy()
 	r.mu.Lock()
 	runID, incarnation := r.runID, r.incarnation
+	drain = drain || r.manualLoadDrainsLocked(pp)[engine]
 	r.mu.Unlock()
 	if pp == nil || pp != incarnation || runID == "" {
 		return "", fmt.Errorf("proxy incarnation is unverified")

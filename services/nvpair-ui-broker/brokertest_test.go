@@ -142,7 +142,7 @@ func recordEnabledEngineRestoration(t *testing.T, codec *Codec) <-chan string {
 					return
 				}
 			}
-			if msg.Method == restoreEnabledEnginesMethod {
+			if msg.Method == restoreInstalledEnginesMethod {
 				return
 			}
 		}

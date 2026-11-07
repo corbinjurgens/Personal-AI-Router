@@ -43,7 +43,6 @@ import {
 } from './proxy-engines'
 import { emitBridgePush } from './broadcaster'
 import { parseEngineSettings } from './engine-settings'
-import { parseEngineIntent } from './engine-intent'
 import { parseEngineDescriptors } from './engine-descriptors'
 import { parseActiveModelCopies, parseModelCopyResult } from './model-copy'
 import type {
@@ -225,14 +224,13 @@ const MAX_REFUSAL_DETAIL_LENGTH = 1024
 /**
  * The explanation for a paired node's typed refusal of `action`, or undefined
  * for any other failure. A local veto stays
- * neutral: -32011 alone cannot tell a pause from an older target's saved Off or
- * from a local stop that cancelled the operation. The target's own message
+ * neutral: -32011 alone cannot tell a pause from a local stop that cancelled
+ * the operation. The target's own message
  * follows, bounded. Retrying from here cannot succeed until the target lifts it.
  */
 function remoteRefusalMessage(err: unknown, action: string): string | undefined {
     if (!(err instanceof JsonRpcResponseError)) return undefined
-    const explanation =
-        err.code === LOCAL_VETO_CODE ? localVetoMessage(action) : undefined
+    const explanation = err.code === LOCAL_VETO_CODE ? localVetoMessage(action) : undefined
     if (explanation === undefined) return undefined
     return `${explanation} Target: ${err.message.slice(0, MAX_REFUSAL_DETAIL_LENGTH)}`
 }
@@ -507,7 +505,6 @@ class ModularSupervisor {
 
         this.brokerSessionGeneration++
         getModularBridgeState().reconcileModelCopies([])
-        getModularBridgeState().applyEngineIntent(null)
         getModularBridgeState().invalidateModelObservations()
         this.shuttingDown = false
         this.performance.reset()
@@ -604,7 +601,6 @@ class ModularSupervisor {
         this.routingHistory.sourceReset()
         this.brokerSessionGeneration++
         getModularBridgeState().reconcileModelCopies([])
-        getModularBridgeState().applyEngineIntent(null)
         getModularBridgeState().invalidateModelObservations()
         await this.performance.stop()
         stopNodeInfoPoller()
@@ -952,7 +948,6 @@ class ModularSupervisor {
     private resetBrokerSession(): void {
         this.brokerSessionGeneration++
         getModularBridgeState().reconcileModelCopies([])
-        getModularBridgeState().applyEngineIntent(null)
         getModularBridgeState().invalidateModelObservations()
         this.performance.reset()
         this.brokerReady = false
@@ -1007,7 +1002,6 @@ class ModularSupervisor {
                 this.routingHistory.disconnected()
                 this.brokerSessionGeneration++
                 getModularBridgeState().reconcileModelCopies([])
-                getModularBridgeState().applyEngineIntent(null)
                 getModularBridgeState().invalidateModelObservations()
                 this.performance.reset()
                 this.brokerReady = false
@@ -1151,7 +1145,6 @@ class ModularSupervisor {
         // Engine events are opt-in and replay no baseline — subscribe then hydrate.
         await subscribe('engine:subscribe', 'subscribe to broker engine relay')
         if (generation !== this.brokerSessionGeneration) return
-        await this.hydrateEngineIntent()
         if (generation !== this.brokerSessionGeneration) return
         await subscribe('workloads:subscribe', 'subscribe to broker workloads stream')
         if (generation !== this.brokerSessionGeneration) return
@@ -1416,20 +1409,6 @@ class ModularSupervisor {
                 sublevel: proxySourceForEngine(engine),
                 message: `Unable to hydrate ${engine} proxy nodes: ${getErrorString(err)}`
             })
-        }
-    }
-
-    private async hydrateEngineIntent(): Promise<void> {
-        const session = this.brokerSessionGeneration
-        const state = getModularBridgeState()
-        const generation = state.beginEngineIntentRead()
-        try {
-            const result = await this.callProcess('broker', 'engine:intent')
-            if (session !== this.brokerSessionGeneration) return
-            state.applyEngineIntent(parseEngineIntent(result), generation)
-        } catch {
-            if (session !== this.brokerSessionGeneration) return
-            state.applyEngineIntent(null, generation)
         }
     }
 
@@ -1986,21 +1965,10 @@ class ModularSupervisor {
         if (notification.method === 'engine:ready') {
             getModularBridgeState().reconcileModelCopies([])
             this.modelWorkerGeneration++
-            getModularBridgeState().applyEngineIntent(null)
             getModularBridgeState().invalidateModelObservations()
-            void this.hydrateEngineIntent()
             void this.hydrateModels()
             void this.hydrateEngineManager()
             void this.activeModelCopies().catch(() => {})
-            return
-        }
-        if (notification.method === 'engine:intent-changed') {
-            const state = getModularBridgeState()
-            try {
-                state.applyEngineIntent(parseEngineIntent(notification.params))
-            } catch {
-                state.applyEngineIntent(null)
-            }
             return
         }
         if (notification.method === 'engine:state-changed') {
@@ -2356,7 +2324,7 @@ class ModularSupervisor {
     }
 
     /**
-     * Install (and optionally start) an engine on a remote peer via
+     * Install an engine on a remote peer via
      * `engine:remote-install`. Streams progress frames as `engine:remote-progress`
      * but its terminal is only the awaited RPC reply, so we clear the optimistic
      * `installing` op here and refresh the peer's authoritative status.
@@ -2364,8 +2332,7 @@ class ModularSupervisor {
     async installEngineRemote(
         nodeId: string,
         engine: string,
-        engineType: EngineType,
-        start: boolean
+        engineType: EngineType
     ): Promise<void> {
         const state = getModularBridgeState()
         state.beginRemoteEngineOp(nodeId, engineType, 'installing')
@@ -2373,7 +2340,7 @@ class ModularSupervisor {
             await this.callProcess(
                 'broker',
                 'engine:remote-install',
-                { node: nodeId, engine, start },
+                { node: nodeId, engine },
                 PULL_TIMEOUT_MS
             )
             await this.refreshRemoteEngineStatus(nodeId)
@@ -2382,10 +2349,7 @@ class ModularSupervisor {
             // upserts the backend's own report (and offers retry) rather than
             // duplicating it under a UI-synthesized id. A target refusal offers
             // no retry: only that node can lift it.
-            const refusal = remoteRefusalMessage(
-                err,
-                `${start ? 'install and start' : 'install'} ${engine} on ${nodeId}`
-            )
+            const refusal = remoteRefusalMessage(err, `install ${engine} on ${nodeId}`)
             this.reportError(
                 refusal ?? `Failed to install ${engine} on ${nodeId}: ${getErrorString(err)}`,
                 'error',

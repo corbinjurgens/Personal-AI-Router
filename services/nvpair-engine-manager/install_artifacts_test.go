@@ -79,6 +79,7 @@ func TestInstallDownloadsAllNamedArtifactsBeforeRunning(t *testing.T) {
 	}
 	manifest := artifactInstallManifest(t, "artifact-success", marker, artifacts)
 	executor := newTestExecutor(t, manifest)
+	t.Cleanup(executor.StopAll)
 	progress := &installProgressRecorder{}
 	executor.emit = progress.emit
 
@@ -208,10 +209,12 @@ func pinnedArtifact(name, url string, payload []byte) InstallArtifact {
 func artifactInstallManifest(t *testing.T, engine, marker string, artifacts []InstallArtifact) *Manifest {
 	t.Helper()
 	manifest := testEngineManifest(fakeEngineBin)
+	manifest.ManifestVersion = 2
 	manifest.Engine = engine
 	manifest.DisplayName = "Artifact Test"
 	platform := manifest.Platforms[hostKey()]
-	platform.Detect = []string{marker}
+	platform.Detect = []string{fakeEngineBin}
+	platform.DetectRequired = []string{marker}
 	platform.Install = &Install{
 		Artifacts: artifacts,
 		Run:       []string{fakeEngineBin, "captureargs", marker, "{download_server}", "{download_cudart}"},

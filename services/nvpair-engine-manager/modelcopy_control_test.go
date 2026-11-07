@@ -256,9 +256,6 @@ func controlCopyRequest() copyRequest {
 func TestModelCopyControlDestinationOwnsBytes(t *testing.T) {
 	f := newCopyControlFixture(t)
 	f.controller.exec = nil // Controller artifact/executor access would fail this operation.
-	if err := f.destination.exec.setDesiredEnabled("llamacpp", false, intentLocal); err != nil {
-		t.Fatal(err)
-	}
 	var progress []copyProgress
 	res, err := f.controller.executeCopy(remoteFixtureContext(t), controlCopyRequest(), false, nil, func(cp copyProgress) { progress = append(progress, cp) })
 	if err != nil {
@@ -291,10 +288,6 @@ func TestModelCopyControlDestinationOwnsBytes(t *testing.T) {
 	st, err := f.destination.exec.Status("llamacpp")
 	if err != nil || st.Running {
 		t.Fatalf("copy activated engine: %+v, %v", st, err)
-	}
-	enabled, known, err := f.destination.exec.desired.get("llamacpp")
-	if err != nil || !known || enabled {
-		t.Fatalf("copy changed saved Off: enabled=%v known=%v err=%v", enabled, known, err)
 	}
 	list, err := f.source.modelSourceFiles(context.Background(), "llamacpp", "tiny")
 	if err != nil {
@@ -1169,9 +1162,6 @@ func TestModelCopyControlCapabilitiesReadiness(t *testing.T) {
 	t.Run("installed stopped engine is copy writable", func(t *testing.T) {
 		ex := copyTestExecutor(t, "llamacpp", t.TempDir(), true)
 		ex.nodeProjection.set(nodeProjection{})
-		if err := ex.setDesiredEnabled("llamacpp", false, intentLocal); err != nil {
-			t.Fatal(err)
-		}
 		capability := ex.copyCapabilities("llamacpp")
 		if !capability.Available || !capability.Installed || !capability.Writable || capability.ModelStore != "llamacpp" || len(capability.ImportLayouts) != 2 || !capability.IdentityBoundRetry || !capability.ReceiptDurability {
 			t.Fatalf("capability=%+v", capability)

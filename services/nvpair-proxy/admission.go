@@ -13,8 +13,8 @@ package main
 //
 // It runs on the destination side: in the cluster ingress for work a peer
 // sends here, and in handleHTTP before dispatching to this node's own engine.
-// The broker feeds it policy, availability, drains, residency and saved
-// engine intent over the node/* requests in nodepolicy/wire.go, and it reports
+// The broker feeds it policy, availability, drains and residency
+// over the node/* requests in nodepolicy/wire.go, and it reports
 // back with admission/state, admission/unload and admission/wake.
 
 import (
@@ -59,7 +59,6 @@ type admissionController struct {
 	policyGeneration uint64
 	availability     nodepolicy.Availability
 	drain            map[string]bool
-	intent           map[string]bool
 
 	// loaded is the broker-reported residency (node/set-residency), keyed by
 	// engine then normalized model. residencyKnown stays false until the first
@@ -74,7 +73,7 @@ type admissionController struct {
 	active         int
 	activeByEngine map[string]int
 	queued         int
-	lastActivity   map[string]int64
+	lastActivity   map[admKey]int64
 	// finishedAt is when a model last finished a request here. A model that
 	// finished after the latest residency report is presumed still loaded:
 	// the engine keeps it, and the broker has not had the chance to say so.
@@ -113,11 +112,10 @@ func newAdmissionController(notify func(string, any), healthy func(string) bool,
 		policy:         initial,
 		availability:   nodepolicy.Available,
 		drain:          map[string]bool{},
-		intent:         map[string]bool{},
 		loaded:         map[string]map[string]bool{},
 		inflight:       map[admKey]int{},
 		activeByEngine: map[string]int{},
-		lastActivity:   map[string]int64{},
+		lastActivity:   map[admKey]int64{},
 		finishedAt:     map[admKey]time.Time{},
 		unloadSentAt:   map[admKey]time.Time{},
 		wakeSentAt:     map[string]time.Time{},
@@ -188,13 +186,6 @@ func (a *admissionController) currentActive() int {
 	return a.active
 }
 
-func (a *admissionController) engineIntent(engine string) (enabled, known bool) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	enabled, known = a.intent[engine]
-	return enabled, known
-}
-
 // setAvailability applies node/set-availability. With cancelActive every
 // admitted execution on this node is cancelled after the state is in force,
 // so nothing admitted in between escapes the cancel.
@@ -224,16 +215,6 @@ func (a *admissionController) setDrain(engine string, drain bool) {
 		a.drain[engine] = true
 	} else {
 		delete(a.drain, engine)
-	}
-	a.signalLocked()
-}
-
-func (a *admissionController) setIntent(enabled map[string]bool) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.intent = make(map[string]bool, len(enabled))
-	for engine, on := range enabled {
-		a.intent[engine] = on
 	}
 	a.signalLocked()
 }
@@ -435,12 +416,6 @@ func (a *admissionController) admit(ctx context.Context, req admissionRequest) a
 		// 2. Is the engine running? Health is what node/set-local-backend
 		// reports, which is also what a wake waits for.
 		if !a.healthy(req.engine) {
-			// An engine with no saved intent is unmanaged, or the broker has not
-			// said yet; either way nothing would start it, so waiting for a wake
-			// would only add the wake timeout to a rejection.
-			if on, known := a.intent[req.engine]; !known || !on || !pol.Idle.StartOnDemand {
-				return reject(nodepolicy.RejectOff)
-			}
 			if wakeDeadline.IsZero() {
 				wakeDeadline = start.Add(bounded(pol.Idle.WakeTimeoutSeconds, req.waitCap))
 			}
@@ -496,13 +471,7 @@ func (a *admissionController) admit(ctx context.Context, req admissionRequest) a
 				}
 				sends = append(sends, a.unloadLocked(evict, pol)...)
 				if !time.Now().Before(evictDeadline) {
-					if a.engineHasProtectedResidentLocked(req.engine) {
-						return reject(nodepolicy.RejectNoFit)
-					}
-					// The switch timeout passed: admit anyway and let the
-					// engine's own memory handling take over.
-					plan = fitOK
-					break
+					return reject(nodepolicy.RejectNoFit)
 				}
 				st := enqueue()
 				if err := a.waitLocked(ctx, evictDeadline, sends, st); err != nil {
@@ -538,7 +507,7 @@ func (a *admissionController) admit(ctx context.Context, req admissionRequest) a
 		}
 		a.active++
 		a.activeByEngine[req.engine]++
-		a.lastActivity[req.engine] = time.Now().UnixMilli()
+		a.lastActivity[key] = time.Now().UnixMilli()
 		st := a.noteChangeLocked()
 		a.mu.Unlock()
 		a.send(sends)
@@ -663,6 +632,14 @@ func (a *admissionController) fitLocked(key admKey, pol nodepolicy.Policy) (fitP
 	}
 	sort.Slice(idle, func(i, j int) bool {
 		ti, tj := a.finishedAt[idle[i]], a.finishedAt[idle[j]]
+		// Residency reports retire presumptions in finishedAt, but do not
+		// erase model activity or make a recently loaded model the LRU.
+		if activity := a.lastActivity[idle[i]]; activity > 0 && time.UnixMilli(activity).After(ti) {
+			ti = time.UnixMilli(activity)
+		}
+		if activity := a.lastActivity[idle[j]]; activity > 0 && time.UnixMilli(activity).After(tj) {
+			tj = time.UnixMilli(activity)
+		}
 		if !ti.Equal(tj) {
 			return ti.Before(tj)
 		}
@@ -780,7 +757,7 @@ func (t *admissionTicket) release() {
 		} else {
 			a.activeByEngine[t.key.engine]--
 		}
-		a.lastActivity[t.key.engine] = now.UnixMilli()
+		a.lastActivity[t.key] = now.UnixMilli()
 		a.signalLocked()
 		st := a.noteChangeLocked()
 		a.mu.Unlock()
@@ -838,13 +815,27 @@ func (a *admissionController) snapshotLocked() stateSnapshot {
 	for e, n := range a.activeByEngine {
 		byEngine[e] = n
 	}
-	last := make(map[string]int64, len(a.lastActivity))
-	for e, ms := range a.lastActivity {
-		last[e] = ms
+	byModel := make(map[string]map[string]int)
+	for k, n := range a.inflight {
+		if n <= 0 {
+			continue
+		}
+		if byModel[k.engine] == nil {
+			byModel[k.engine] = map[string]int{}
+		}
+		byModel[k.engine][k.model] = n
+	}
+	last := make(map[string]map[string]int64)
+	for k, ms := range a.lastActivity {
+		if last[k.engine] == nil {
+			last[k.engine] = map[string]int64{}
+		}
+		last[k.engine][k.model] = ms
 	}
 	return stateSnapshot{seq: a.stateSeq, state: nodepolicy.AdmissionState{
 		Active:         a.active,
 		ActiveByEngine: byEngine,
+		ActiveByModel:  byModel,
 		Queued:         a.queued,
 		LastActivityMs: last,
 	}}

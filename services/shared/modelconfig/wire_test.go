@@ -491,7 +491,7 @@ func TestCloneLoadsDetachesAllRequestedFieldsAndResolution(t *testing.T) {
 	m.Requested = RequestedLoad{
 		Context: &Context{Mode: "fixed", Tokens: 8193}, Slots: testPointer(int32(2)), GPU: &GPU{Mode: "layers", Layers: testPointer(int32(12))},
 		CacheTypeK: testPointer("f16"), CacheTypeV: testPointer("f16"), FlashAttention: testPointer("on"), BatchSize: testPointer(int32(8)), UBatchSize: testPointer(int32(4)),
-		Threads: testPointer(int32(3)), ThreadsBatch: testPointer(int32(4)), KVOffload: testPointer(false), OpOffload: testPointer(true), SleepIdleSeconds: testPointer(int32(-1)), CacheRAM: testPointer(int32(512)),
+		Threads: testPointer(int32(3)), ThreadsBatch: testPointer(int32(4)), KVOffload: testPointer(false), OpOffload: testPointer(true), CacheRAM: testPointer(int32(512)),
 	}
 	input := []ModelLoad{m}
 	before := mustJSON(t, input)
@@ -508,7 +508,6 @@ func TestCloneLoadsDetachesAllRequestedFieldsAndResolution(t *testing.T) {
 	*got[0].Requested.ThreadsBatch++
 	*got[0].Requested.KVOffload = true
 	*got[0].Requested.OpOffload = false
-	*got[0].Requested.SleepIdleSeconds = 300
 	*got[0].Requested.CacheRAM++
 	*got[0].Resolved.GPU.Layers++
 	*got[0].Resolved.Options.KVOffload = true

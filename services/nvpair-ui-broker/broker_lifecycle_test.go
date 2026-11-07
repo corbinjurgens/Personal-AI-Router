@@ -66,7 +66,7 @@ func TestEngineAvailabilityWaitsForFacadeStartup(t *testing.T) {
 	}
 	close(b.facadesReady)
 
-	for _, want := range []string{engineNodeProjectionMethod, "engine:settings-projection", restoreEnabledEnginesMethod} {
+	for _, want := range []string{engineNodeProjectionMethod, "engine:settings-projection", restoreInstalledEnginesMethod} {
 		select {
 		case got := <-restore:
 			if got != want {

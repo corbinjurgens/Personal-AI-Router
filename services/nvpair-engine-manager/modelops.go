@@ -233,6 +233,25 @@ func (p *modelActionRequest) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// clientActionAllowed keeps the generic RPC from becoming a second allocation
+// path. Known reads and non-loading model operations retain their declared
+// bindings. Other actions, including inference and custom warm-up commands,
+// cannot establish a capacity reservation through this interface.
+func (m *Manifest) clientActionAllowed(action string) bool {
+	if load, ok := m.operationBinding(engines.OperationLoad); ok && load.Action == action {
+		return false
+	}
+	if residencyNeutralActions[action] {
+		return true
+	}
+	for _, operation := range []string{engines.OperationUnload, engines.OperationPull, engines.OperationDelete} {
+		if binding, ok := m.operationBinding(operation); ok && binding.Action == action {
+			return true
+		}
+	}
+	return false
+}
+
 // ModelLoad warms a model into engine memory through the engine's load binding.
 func (e *Executor) ModelLoad(ctx context.Context, engine, model string) (json.RawMessage, error) {
 	return e.modelOperation(ctx, engine, engines.OperationLoad, model)

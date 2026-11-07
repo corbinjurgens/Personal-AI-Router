@@ -278,9 +278,6 @@ func TestStrictReadinessWithdrawn(t *testing.T) {
 			t.Fatalf("pause: %v", err)
 		}
 	})
-	withdrawn("when its only engine is saved Off", func(t *testing.T, f *strictFixture) {
-		f.b.observeIntent(map[string]bool{"llamacpp": false})
-	})
 }
 
 func TestStrictReadinessNotAdvertisedWhileActivationIsPending(t *testing.T) {
@@ -386,20 +383,6 @@ func TestStrictReadinessReadvertisedAfterResume(t *testing.T) {
 	if got.Revision != f.b.localPolicy().Policy.Revision {
 		t.Fatalf("readvertised at revision %q, want the resumed %s", got.Revision, f.b.localPolicy().Policy.Revision)
 	}
-}
-
-func TestStrictReadinessDropsModelsOfEnginesSavedOff(t *testing.T) {
-	f := newStrictFixture(t)
-	seedStrictIdentity(f.b, "llamacpp-custom", "n")
-	both := strictCapability(t, "llamacpp", "m:latest")
-	both.Models = append(both.Models, strictCapability(t, "llamacpp-custom", "n").Models...)
-	f.advertise(t, both)
-
-	f.b.observeIntent(map[string]bool{"llamacpp": false, "llamacpp-custom": true})
-	waitAdvertised(t, f, strictCapability(t, "llamacpp-custom", "n"))
-
-	f.b.observeIntent(map[string]bool{"llamacpp": true, "llamacpp-custom": true})
-	waitAdvertised(t, f, both)
 }
 
 func TestStrictReadinessReplayedAfterProxyRestart(t *testing.T) {

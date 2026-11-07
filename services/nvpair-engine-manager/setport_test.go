@@ -447,7 +447,7 @@ func TestOverrideDeepMergePreservesBundled(t *testing.T) {
 		t.Errorf("override port: got %d, want 54321", p.Runtime.Port)
 	}
 	// Shared launch arguments and the platform install source survive.
-	if !slices.Equal(p.Runtime.Args, []string{"--sleep-idle-seconds", "300", "--ctx-size", "8192", "--parallel", "1", "--cache-ram", "512", "--host", "{host}", "--port", "{port}", "--cors-origins", ""}) {
+	if !slices.Equal(p.Runtime.Args, []string{"--sleep-idle-seconds", "-1", "--ctx-size", "8192", "--parallel", "1", "--cache-ram", "512", "--host", "{host}", "--port", "{port}", "--cors-origins", ""}) {
 		t.Errorf("bundled runtime.args not preserved through merge: %v", p.Runtime.Args)
 	}
 	if p.Install == nil || ((p.Install.Fetch == nil || p.Install.Fetch.URL == "") && len(p.Install.Artifacts) == 0) {

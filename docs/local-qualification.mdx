@@ -456,14 +456,12 @@ The destination proxy owns admission and reserves against the whole desired set
 and existing resident/in-flight memory. The broker coordinates prepare, manager
 reconcile, final proxy dispatch grant, finish and authoritative observation.
 Either-origin pause fences automatic residency with the
-`paused` reason. Ordinary saved Off of any origin reports
-`engine-off`; reconciliation still requires saved On and a running engine and
-does not start one. A granted peer may explicitly start or switch to an
-engine despite saved Off, and may load a running one. Explicit load never starts
-an Off engine. Local Stop can still cancel work already accepted for that engine.
-Pause fences all peer management
-writes, including Resume, while reads stay available. Local activation also
-requires local Resume. These fences apply after acceptance as well as admission.
+`paused` reason. Reconciliation requires a running engine; installed engines
+start whenever the node is available, and admission wake repairs stopped ones.
+Manual loads use the same capacity owner and cannot bypass its cap. Pause fences
+peer management writes while reads stay available. A managing peer may Resume
+a configured pause; Halt requires local Resume. These fences apply after
+acceptance as well as admission.
 PG's existing route-policy owner continues to decide routes; residency does not
 select a route, broaden served permission or enable hybrid dispatch.
 

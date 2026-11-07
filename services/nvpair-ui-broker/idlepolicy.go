@@ -3,13 +3,8 @@
 
 package main
 
-// idlepolicy.go is the cross-engine idle policy and start-on-demand
-// (FORK_DESIGN.md §3.5). The proxy reports when each engine last started or
-// finished a request; every idleCheckInterval the broker unloads an idle
-// engine's models and stops an idle engine, as idle.* says. A stopped engine
-// keeps its saved intent On, so the proxy's admission/wake starts it again when
-// a request for it arrives. An engine saved Off is never started by any of this,
-// and nothing is started while the node is paused.
+// idlepolicy.go releases idle model memory and handles admission wake.
+// Each model has its own activity and residency baseline. Engines stay running.
 
 import (
 	"context"
@@ -74,69 +69,59 @@ type idleUnload struct {
 	models []string
 }
 
-// idleTick applies the idle policy once. An engine is idle from the latest of
-// its last admitted activity, the moment it was seen to start, and the moment
-// it last gained a loaded model (a model loaded outside admission is activity
-// too). Each action is taken once per idle baseline, so an engine that refuses
-// to stop (one run outside PAIR, say) is not retried every tick.
+// idleTick unloads each nonresident model once per idle baseline. Activity on
+// another model of the same engine does not renew this model's baseline.
 func (b *Broker) idleTick(ctx context.Context) {
+	pp := b.policyProxy()
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
 	idle := r.current.Idle
-	if r.live == nodepolicy.Draining || (idle.UnloadAfterMinutes <= 0 && idle.StopEngineAfterMinutes <= 0) {
+	if r.live != nodepolicy.Available || idle.UnloadAfterMinutes <= 0 {
 		r.mu.Unlock()
 		return
 	}
 	now := r.now()
 	unloadAfter := time.Duration(idle.UnloadAfterMinutes) * time.Minute
-	stopAfter := time.Duration(idle.StopEngineAfterMinutes) * time.Minute
 	engines := make([]string, 0, len(r.running))
 	for engine := range r.running {
 		engines = append(engines, engine)
 	}
 	sort.Strings(engines)
 	var unloads []idleUnload
-	var sleeps []string
+	drains := r.engineDrainsLocked(pp)
 	for _, engine := range engines {
-		if r.drains[engine] || r.admission.ActiveByEngine[engine] > 0 {
+		if drains[engine] {
 			continue
 		}
-		base := r.idleBaselineLocked(engine)
-		if base.IsZero() {
-			r.runningSince[engine] = now
-			continue
-		}
-		idleFor := now.Sub(base)
-		if unloadAfter > 0 && idleFor >= unloadAfter && len(r.loaded[engine]) > 0 && !r.idleUnloadedAt[engine].Equal(base) {
-			r.idleUnloadedAt[engine] = base
-			unloads = append(unloads, idleUnload{engine: engine, models: append([]string{}, r.loaded[engine]...)})
-		}
-		if stopAfter > 0 && idleFor >= stopAfter && r.intent[engine] && !b.protectedResidentLocked(engine, "") && !r.idleSleptAt[engine].Equal(base) {
-			r.idleSleptAt[engine] = base
-			sleeps = append(sleeps, engine)
+		for _, model := range r.loaded[engine] {
+			ref := b.modelRef(engine, model)
+			if b.protectedResidentLocked(engine, model) || modelActive(r.admission, ref) {
+				continue
+			}
+			base := r.idleBaselineLocked(ref)
+			if base.IsZero() {
+				r.residencyAt[ref] = now
+				continue
+			}
+			if now.Sub(base) >= unloadAfter && !r.idleUnloadedAt[ref].Equal(base) {
+				r.idleUnloadedAt[ref] = base
+				unloads = append(unloads, idleUnload{engine: engine, models: []string{model}})
+			}
 		}
 	}
 	r.mu.Unlock()
 
 	for _, u := range unloads {
-		slog.Info("unloading idle engine's models", "engine", u.engine, "models", len(u.models))
-		b.unloadModels(u.engine, u.models, "idle")
-	}
-	for _, engine := range sleeps {
 		if ctx.Err() != nil {
 			return
 		}
-		r.mu.Lock()
-		protected := b.protectedResidentLocked(engine, "")
-		r.mu.Unlock()
-		if protected {
-			continue
-		}
-		slog.Info("stopping idle engine", "engine", engine)
-		if _, err := b.callEngine(ctx, engineSleepMethod, map[string]string{"engine": engine}); err != nil {
-			slog.Warn("could not stop idle engine", "engine", engine, "err", err)
-		}
+		slog.Info("unloading idle model", "engine", u.engine)
+		b.unloadModels(u.engine, u.models, "idle")
 	}
+}
+
+func modelActive(state nodepolicy.AdmissionState, ref nodepolicy.ModelRef) bool {
+	return state.ActiveByModel[ref.Engine][ref.Model] > 0
 }
 
 // protectedResidentLocked checks the current desired resident set at the
@@ -156,22 +141,22 @@ func (b *Broker) protectedResidentLocked(engine, model string) bool {
 	return false
 }
 
-// idleBaselineLocked is when engine last did anything. Caller holds r.mu.
-func (r *policyRuntime) idleBaselineLocked(engine string) time.Time {
-	base := r.runningSince[engine]
-	if ms := r.admission.LastActivityMs[engine]; ms > 0 {
+// idleBaselineLocked is when this model last did anything. Caller holds r.mu.
+func (r *policyRuntime) idleBaselineLocked(ref nodepolicy.ModelRef) time.Time {
+	base := r.runningSince[ref.Engine]
+	if ms := r.admission.LastActivityMs[ref.Engine][ref.Model]; ms > 0 {
 		if t := time.UnixMilli(ms); t.After(base) {
 			base = t
 		}
 	}
-	if t := r.residencyAt[engine]; t.After(base) {
+	if t := r.residencyAt[ref]; t.After(base) {
 		base = t
 	}
 	return base
 }
 
 // wakeOnDemand answers the proxy's admission/wake. It is refused while the
-// node is not available and for an engine saved Off, and a wake already in
+// node is not available, and a wake already in
 // flight for the engine is not repeated.
 func (b *Broker) wakeOnDemand(engine string) {
 	if reason := b.wakeRefusal(); reason != "" {
@@ -180,12 +165,8 @@ func (b *Broker) wakeOnDemand(engine string) {
 	}
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
-	enabled, known := r.intent[engine]
-	if (known && !enabled) || r.waking[engine] {
+	if r.waking[engine] {
 		r.mu.Unlock()
-		if known && !enabled {
-			slog.Info("not starting engine on demand: it is saved Off", "engine", engine)
-		}
 		return
 	}
 	r.waking[engine] = true

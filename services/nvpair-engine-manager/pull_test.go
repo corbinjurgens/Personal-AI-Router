@@ -745,7 +745,7 @@ func TestModelDownloadNativeCompletionBelongsToDispatchRun(t *testing.T) {
 	}, modeldownload.PhaseUnknown, true)
 }
 
-func TestActionPullModelMissingActionEmitsTerminalError(t *testing.T) {
+func TestActionPullModelMissingActionIsRefusedBeforeEffects(t *testing.T) {
 	m := testEngineManifest(fakeEngineBin)
 	delete(m.Actions, pullModelAction)
 	reg := NewRegistry()
@@ -780,16 +780,11 @@ func TestActionPullModelMissingActionEmitsTerminalError(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
-	want := `Fake Engine experienced an error while downloading a model: engine "fake" has no action "pull_model"`
-	if response.Error.Code != -32000 || response.Error.Message != want {
+	if response.Error.Code != -32602 {
 		t.Fatalf("pull refusal = %+v", response.Error)
 	}
-	if len(progress) != 1 {
-		t.Fatalf("progress = %+v, want one terminal", progress)
-	}
-	event := progress[0]
-	if event.Engine != "fake" || event.Op != "pull" || event.Stage != "error" || event.Percent != -1 || event.Message != want || event.ID != "" || event.DownloadState != nil {
-		t.Fatalf("unreserved pull terminal = %+v", event)
+	if len(progress) != 0 {
+		t.Fatalf("refused raw action emitted progress: %+v", progress)
 	}
 	if state := ex.downloads.snapshot(); len(state.Entries) != 0 {
 		t.Fatalf("unreserved pull created lifecycle state: %+v", state)

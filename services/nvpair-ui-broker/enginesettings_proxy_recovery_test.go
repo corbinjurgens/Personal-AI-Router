@@ -33,7 +33,6 @@ func newStoppedSettingsHarness(t *testing.T) *settingsHarness {
 	h := newSettingsHarnessWithLaunch(t, "llamacpp", nil, false)
 	h.b.codec = NewCodec(&syncBuffer{})
 	h.b.regCache = relay.NewRegistrationCache()
-	h.b.observeIntent(map[string]bool{"llamacpp": false})
 	return h
 }
 
@@ -78,13 +77,6 @@ func requireStoppedSettings(t *testing.T, h *settingsHarness, port int) settings
 	}
 	if snapshot.Running || snapshot.EffectiveServerPort != 0 || h.engineStarts.Load() != 0 {
 		t.Fatalf("engine started during repair: snapshot=%+v starts=%d", snapshot, h.engineStarts.Load())
-	}
-	r := h.b.nodePolicyRuntime()
-	r.mu.Lock()
-	enabled, known := r.intent["llamacpp"]
-	r.mu.Unlock()
-	if !known || enabled {
-		t.Fatalf("saved intent projection changed: known=%v enabled=%v", known, enabled)
 	}
 	if snapshot.Settings.ProxyPort != port || snapshot.EffectiveProxyPort != port {
 		t.Fatalf("desired/effective proxy ports=%d/%d, want %d/%d", snapshot.Settings.ProxyPort, snapshot.EffectiveProxyPort, port, port)
@@ -160,7 +152,7 @@ func TestSettingsRecoversMissingFacadeWithoutReplacingProcessOrSibling(t *testin
 		t.Fatalf("sibling changed: ready=%v port=%d, want true/%d", ready, port, sibling)
 	}
 	if pp.listenerOnly.Load() || !reflect.DeepEqual(before, h.b.localPolicy().Policy) {
-		t.Fatal("facade recovery retained listener-only state or changed saved policy/intent")
+		t.Fatal("facade recovery retained listener-only state or changed saved policy")
 	}
 	if h.proxyRebinds.Load() != 2 {
 		t.Fatalf("addressed persistence and Configure rebind calls=%d, want 2", h.proxyRebinds.Load())
@@ -382,7 +374,7 @@ func TestSettingsFreshRequestRetriesAnUnavailableUnchangedEndpoint(t *testing.T)
 		t.Fatalf("fresh unchanged retry=%+v error=%v calls=%d", retried, err, h.applies.Load())
 	}
 	if !reflect.DeepEqual(before, h.b.localPolicy().Policy) {
-		t.Fatal("retry changed saved policy/intent")
+		t.Fatal("retry changed saved policy")
 	}
 	duplicate, err = h.b.applyEngineSettings(t.Context(), original, "")
 	if err != nil || duplicate != failed || h.applies.Load() != 1 {
@@ -556,7 +548,7 @@ func TestSettingsMissingProcessRecoversWithRoutingDisabled(t *testing.T) {
 		t.Fatalf("missing-process recovery=%+v error=%v", receipt, err)
 	}
 	if !reflect.DeepEqual(before, h.b.localPolicy().Policy) {
-		t.Fatal("process recovery changed saved policy/intent")
+		t.Fatal("process recovery changed saved policy")
 	}
 	if h.b.portAvailable(8080) {
 		t.Fatal("recovery required releasing the old port")
@@ -817,7 +809,7 @@ func runSettingsOccupiedProxyPortRecovery(t *testing.T, address string, targetPo
 	}
 	requireStoppedSettings(t, h, targetPort)
 	if !reflect.DeepEqual(before, h.b.localPolicy().Policy) {
-		t.Fatal("occupied-port recovery changed saved policy/intent")
+		t.Fatal("occupied-port recovery changed saved policy")
 	}
 	response, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/v1/models", targetPort))
 	if err != nil {

@@ -956,7 +956,6 @@ func TestHandleHTTP_WakesStoppedEngineAndWaitsForHealthy(t *testing.T) {
 	f := p.soleFacade()
 	setBackend(t, f, local.URL, false)
 	p.noteSelf("self-uuid", tc.profile.Name, []string{tc.advertisedModel})
-	p.admission.setIntent(map[string]bool{tc.profile.Name: true})
 
 	done := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
@@ -985,25 +984,6 @@ func TestHandleHTTP_WakesStoppedEngineAndWaitsForHealthy(t *testing.T) {
 }
 
 // An engine saved Off is neither offered nor woken.
-func TestHandleHTTP_EngineOffIsNotWoken(t *testing.T) {
-	tc := anyCase(t)
-	local := newRecordingEngine(t, http.StatusOK)
-	w := &recordingWriter{}
-	p := newTestProxy(tc.profile, NewCodec(w), NewDiscovery(), tc.profile.FacadePort)
-	f := p.soleFacade()
-	setBackend(t, f, local.URL, false)
-	p.noteSelf("self-uuid", tc.profile.Name, []string{tc.advertisedModel})
-	p.admission.setIntent(map[string]bool{tc.profile.Name: false})
-
-	rec := httptest.NewRecorder()
-	f.handleHTTP(rec, tc.inferenceRequest())
-	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("status = %d, want the no-owner 502", rec.Code)
-	}
-	if n := len(notificationsOf(t, w, nodepolicy.NotifyAdmissionWake)); n != 0 {
-		t.Fatalf("sent %d admission/wake for an engine saved Off", n)
-	}
-}
 
 // cancelActive on a request this node is running itself, before it commits,
 // moves the request to another candidate rather than failing it.

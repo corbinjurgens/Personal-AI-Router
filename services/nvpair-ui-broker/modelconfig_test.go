@@ -25,7 +25,6 @@ type modelConfigFixture struct {
 func modelConfigOwnerEvidence(t *testing.T) buildapply.EngineOwnerEvidence {
 	t.Helper()
 	evidence := buildapply.EngineOwnerEvidence{ManagerIncarnation: "fixture-manager", Reasons: []buildapply.EngineOwnerReason{
-		{Section: "intent", Code: "saved_state_unknown"},
 		{Section: "universe", Code: "unavailable"},
 		{Section: "stopAuthority", Code: "unavailable"},
 		{Section: "reservations", Code: "busy"},
@@ -52,8 +51,9 @@ func newModelConfigFixture(t *testing.T) *modelConfigFixture {
 		Qualification: &nodepolicy.QualificationRef{ID: "fixture-only", Revision: "1"}}}
 	r.current.ServedModels = nodepolicy.ServedModels{{Engine: "llamacpp", Model: "resident"}}
 	r.current.ResidentModels = nodepolicy.ResidentModels{{Engine: "llamacpp", Model: "resident"}}
-	r.intent = map[string]bool{"llamacpp": true}
 	r.running = map[string]bool{"llamacpp": true}
+	r.runningObserved = map[string]uint64{"llamacpp": 1}
+	r.runningGeneration = 1
 	r.loaded = map[string][]string{"llamacpp": {}}
 	r.models.loadedSource = f.source
 	r.models.loadedProxy = f.pp
@@ -126,7 +126,7 @@ func decodeModelConfigCall[T any](t *testing.T, call policyCall) T {
 // the only clock advanced is policyRuntime.now. The small triples exercise
 // capacity/watcher and veto/resume schedules with an intervening restart.
 func TestModelConfigEventStateMachine(t *testing.T) {
-	events := []string{"load ok", "load error", "finish ok", "finish error", "publish matching", "publish mismatching", "capacity", "revision", "pause", "resume", "Off", "On", "drain", "undrain", "proxy restart", "worker restart", "timeout", "shutdown"}
+	events := []string{"load ok", "load error", "finish ok", "finish error", "publish matching", "publish mismatching", "capacity", "revision", "pause", "resume", "stopped", "running", "drain", "undrain", "proxy restart", "worker restart", "timeout", "shutdown"}
 	states := []string{"prepare in flight", "grant in flight", "load in flight", "finish in flight", "pending observation", "terminal finish failure", "nonterminal uncertainty", "retry"}
 	for _, state := range states {
 		// Independent fixtures partition the first event, keeping long live-RPC
@@ -157,7 +157,7 @@ func TestModelConfigEventStateMachine(t *testing.T) {
 				for _, trace := range [][]string{
 					{"capacity", "publish matching", "capacity"},
 					{"pause", "capacity", "resume"},
-					{"Off", "proxy restart", "On"},
+					{"stopped", "proxy restart", "running"},
 					{"drain", "capacity", "undrain"},
 					{"proxy restart", "publish matching", "timeout"},
 					{"finish error", "proxy restart", "publish matching"},
@@ -186,7 +186,8 @@ func runModelConfigEventTrace(t *testing.T, state string, events []string, f *mo
 	r.activationErr, r.availabilityErr = "", ""
 	r.strictReadiness = base.Readiness
 	r.engineManagerSource, r.engineIdentity = base.Source, identities
-	r.intent, r.running, r.loaded = map[string]bool{"llamacpp": true}, map[string]bool{"llamacpp": true}, map[string][]string{"llamacpp": {}}
+	r.running, r.loaded = map[string]bool{"llamacpp": true}, map[string][]string{"llamacpp": {}}
+	r.runningObserved = map[string]uint64{"llamacpp": 1}
 	r.drains, r.admission.ActiveByEngine = nil, nil
 	r.models = baseModels
 	r.mu.Unlock()
@@ -356,7 +357,7 @@ func runModelConfigEventTrace(t *testing.T, state string, events []string, f *mo
 		beforeProof, beforePending := r.models.pending[ref]
 		beforeHold, beforeUnsettled := r.models.unsettled[ref]
 		revision := r.current.Revision
-		paused, intent, draining := r.localPauseRequested, r.intent["llamacpp"], r.drains["llamacpp"]
+		paused, running, draining := r.localPauseRequested, r.running["llamacpp"], r.drains["llamacpp"]
 		capacity := r.admission.ActiveByEngine["llamacpp"]
 		r.mu.Unlock()
 		allowedExit := (beforeActive != nil && beforeActive.evidence.Policy.Revision != revision) ||
@@ -422,10 +423,10 @@ func runModelConfigEventTrace(t *testing.T, state string, events []string, f *mo
 			r.mu.Lock()
 			r.localPauseRequested = event == "pause"
 			r.mu.Unlock()
-		case "Off", "On":
-			trigger = intent != (event == "On")
+		case "stopped", "running":
+			trigger = running != (event == "running")
 			r.mu.Lock()
-			r.intent["llamacpp"] = event == "On"
+			r.running["llamacpp"] = event == "running"
 			r.mu.Unlock()
 		case "drain", "undrain":
 			trigger = draining != (event == "drain")
@@ -495,7 +496,7 @@ func runModelConfigEventTrace(t *testing.T, state string, events []string, f *mo
 		active, busy := r.models.active, r.models.busy
 		pending, hasPending := r.models.pending[ref]
 		hold, hasHold := r.models.unsettled[ref]
-		veto := r.localPauseRequested || !r.intent["llamacpp"] || r.drains["llamacpp"]
+		veto := r.localPauseRequested || !r.running["llamacpp"] || r.drains["llamacpp"]
 		_, confirmed := r.models.confirmed[ref]
 		currentRevision := r.current.Revision
 		r.mu.Unlock()
@@ -1187,7 +1188,7 @@ func TestModelConfigCompletedLoadWaitsForWatcher(t *testing.T) {
 }
 
 func TestModelConfigTemporaryVetoPreservesCompletedLoad(t *testing.T) {
-	for _, scenario := range []string{"pause", "Off", "drain", "pause in flight"} {
+	for _, scenario := range []string{"pause", "stopped", "drain", "pause in flight"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := newModelConfigFixture(t)
 			r := f.b.nodePolicyRuntime()
@@ -1195,8 +1196,8 @@ func TestModelConfigTemporaryVetoPreservesCompletedLoad(t *testing.T) {
 				r.mu.Lock()
 				defer r.mu.Unlock()
 				switch scenario {
-				case "Off":
-					r.intent["llamacpp"] = !enabled
+				case "stopped":
+					r.running["llamacpp"] = !enabled
 				case "drain":
 					r.drains = map[string]bool{"llamacpp": enabled}
 				default:
@@ -1459,7 +1460,7 @@ func TestModelConfigRecoveryCannotUseReplacementManager(t *testing.T) {
 	r.mu.Lock()
 	id := before.Identity.Engines["llamacpp"]
 	r.engineIdentity = map[string]engineManagerIdentity{"llamacpp": {EngineRunID: id.EngineRunID, LaunchDigest: id.LaunchDigest, ModelDigests: id.ModelDigests, Serving: id.Serving}}
-	r.intent["llamacpp"], r.running["llamacpp"] = true, true
+	r.running["llamacpp"] = true
 	r.mu.Unlock()
 	manager.setAnswer(func(string, json.RawMessage) (any, string) { return residentLaunchReadback(before), "" })
 	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
@@ -1496,7 +1497,7 @@ func TestModelConfigWorkerRestartConfirmsWithoutReload(t *testing.T) {
 				r.mu.Lock()
 				id := before.Identity.Engines["llamacpp"]
 				r.engineIdentity = map[string]engineManagerIdentity{"llamacpp": {EngineRunID: id.EngineRunID, LaunchDigest: id.LaunchDigest, ModelDigests: id.ModelDigests, Serving: id.Serving}}
-				r.intent["llamacpp"], r.running["llamacpp"] = true, true
+				r.running["llamacpp"] = true
 				r.mu.Unlock()
 			} else {
 				pp, _, acks := attachAckingProxy(t, f.b)
@@ -1540,7 +1541,7 @@ func TestModelConfigWorkerRestartConfirmsWithoutReload(t *testing.T) {
 }
 
 func TestModelConfigLoadedConfirmationRequiresObservedEnvelope(t *testing.T) {
-	for _, invalid := range []string{"cold only", "wrong context", "wrong slots", "wrong envelope", "local Off", "local pause"} {
+	for _, invalid := range []string{"cold only", "wrong context", "wrong slots", "wrong envelope", "engine stopped", "local pause"} {
 		t.Run(invalid, func(t *testing.T) {
 			f := newModelConfigFixture(t)
 			readback := residentLaunchReadback(f.b.captureModelConfig())
@@ -1555,14 +1556,20 @@ func TestModelConfigLoadedConfirmationRequiresObservedEnvelope(t *testing.T) {
 				readback.ServingReadback.Observed[0].Slots++
 			case "wrong envelope":
 				readback.ServingReadback.LaunchValidated[0].RouterCapacity++
-			case "local Off":
-				r.intent["llamacpp"] = false
+			case "engine stopped":
+				r.running["llamacpp"] = false
 			case "local pause":
 				r.localPauseRequested = true
 			}
 			r.mu.Unlock()
 			f.engine.setAnswer(func(string, json.RawMessage) (any, string) { return readback, "" })
 			f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
+			if invalid == "engine stopped" {
+				// The stop is newer than the inventory that established running.
+				r.mu.Lock()
+				r.running["llamacpp"] = false
+				r.mu.Unlock()
+			}
 			f.b.reconcileModelConfig(context.Background())
 			status := f.b.modelConfiguration(f.b.captureModelConfig())
 			if status.Models[0].State == nodepolicy.ModelStateSatisfied || len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)) != 0 {
@@ -2085,7 +2092,7 @@ func TestModelConfigUncertainReadbackSurvivesInventoryWithdrawal(t *testing.T) {
 		assertReadback()
 	}
 	checkVeto("local pause", func(on bool) { r.localPauseRequested = on }, nodepolicy.ModelReasonPaused)
-	checkVeto("engine Off", func(on bool) { r.intent["llamacpp"] = !on }, nodepolicy.ModelReasonEngineOff)
+	checkVeto("engine stopped", func(on bool) { r.running["llamacpp"] = !on }, nodepolicy.ModelReasonEngineOff)
 }
 
 func TestModelConfigRetainedFailureReadbackTracksInventory(t *testing.T) {
@@ -2214,7 +2221,7 @@ func TestModelConfigRetainedFailureKeepsCurrentVeto(t *testing.T) {
 			r.current.Availability = nodepolicy.Paused
 		}
 	}, nodepolicy.ModelReasonPaused)
-	test("ordinary saved Off", func(r *policyRuntime, enabled bool) { r.intent["llamacpp"] = !enabled }, nodepolicy.ModelReasonEngineOff)
+	test("engine stopped", func(r *policyRuntime, enabled bool) { r.running["llamacpp"] = !enabled }, nodepolicy.ModelReasonEngineOff)
 }
 
 func TestModelConfigNonfailureOutcomeReasons(t *testing.T) {
@@ -2340,7 +2347,7 @@ func TestModelConfigAdmissionRefusalsHaveNoLoad(t *testing.T) {
 		change func(*policyRuntime)
 	}{
 		{"missing activation ack", func(r *policyRuntime) { r.activeRevision = "old" }},
-		{"local Off", func(r *policyRuntime) { r.intent["llamacpp"] = false }},
+		{"engine stopped", func(r *policyRuntime) { r.running["llamacpp"] = false }},
 		{"local pause", func(r *policyRuntime) { r.localPauseRequested = true }},
 		{"unknown loaded inventory", func(r *policyRuntime) { delete(r.loaded, "llamacpp") }},
 		{"missing qualification", func(r *policyRuntime) { r.strictReadiness.Capability = nil }},
@@ -2354,10 +2361,10 @@ func TestModelConfigAdmissionRefusalsHaveNoLoad(t *testing.T) {
 			id.Serving["resident"] = envelope
 			r.engineIdentity["llamacpp"] = id
 		}},
-		{"native router capacity absent", func(r *policyRuntime) {
+		{"invalid native router capacity", func(r *policyRuntime) {
 			id := r.engineIdentity["llamacpp"]
 			envelope := id.Serving["resident"]
-			envelope.RouterCapacity = 0
+			envelope.RouterCapacity = -1
 			id.Serving["resident"] = envelope
 			r.engineIdentity["llamacpp"] = id
 		}},
@@ -2713,7 +2720,7 @@ func TestModelConfigSourceEvidence(t *testing.T) {
 		}
 	}
 
-	t.Run("retired source withdraws intent and running evidence", func(t *testing.T) {
+	t.Run("retired source withdraws running evidence", func(t *testing.T) {
 		f := newModelConfigFixture(t)
 		f.b.retireEngineManagerSource(f.source)
 		assertStatus(t, f, nodepolicy.ModelStateUnknown, nodepolicy.ModelReasonProjectionUnknown)
@@ -2725,13 +2732,11 @@ func TestModelConfigSourceEvidence(t *testing.T) {
 		assertStatus(t, f, nodepolicy.ModelStateUnknown, nodepolicy.ModelReasonProjectionUnknown)
 	})
 
-	t.Run("new source intent reply precedes running snapshot", func(t *testing.T) {
+	t.Run("new source waits for running snapshot", func(t *testing.T) {
 		f := newModelConfigFixture(t)
 		activate(f)
 		f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
 			switch method {
-			case engineIntentMethod:
-				return map[string]any{"enabledByEngine": map[string]bool{"llamacpp": true}, "offByEngine": map[string]string{}}, ""
 			case "engine:get-installed":
 				return map[string]any{"engines": []any{map[string]any{"engine": "llamacpp", "running": true}}}, holdSuccessReply
 			case "engine:models":
@@ -2745,31 +2750,22 @@ func TestModelConfigSourceEvidence(t *testing.T) {
 			defer close(done)
 			f.b.refreshEnginePolicySnapshotFrom(f.b.getEngineMgr(), f.source)
 		}()
-		f.engine.waitFor("installed snapshot after intent reply", func(calls []policyCall) bool {
+		f.engine.waitFor("installed snapshot", func(calls []policyCall) bool {
 			return len(modelConfigCalls(f.engine, "engine:get-installed")) > 0
 		})
 		defer func() { f.engine.releaseHeld(); awaitModelConfigDone(t, done) }()
 		assertStatus(t, f, nodepolicy.ModelStateUnknown, nodepolicy.ModelReasonProjectionUnknown)
 	})
 
-	t.Run("known off intent", func(t *testing.T) {
+	t.Run("without running observation", func(t *testing.T) {
 		f := newModelConfigFixture(t)
 		activate(f)
-		f.b.observeIntentFrom(f.source, map[string]bool{"llamacpp": false})
-		assertStatus(t, f, nodepolicy.ModelStateBlocked, nodepolicy.ModelReasonEngineOff)
-	})
-
-	t.Run("known on intent without running observation", func(t *testing.T) {
-		f := newModelConfigFixture(t)
-		activate(f)
-		f.b.observeIntentFrom(f.source, map[string]bool{"llamacpp": true})
 		assertStatus(t, f, nodepolicy.ModelStateUnknown, nodepolicy.ModelReasonProjectionUnknown)
 	})
 
-	t.Run("known on intent with stopped observation", func(t *testing.T) {
+	t.Run("with stopped observation", func(t *testing.T) {
 		f := newModelConfigFixture(t)
 		activate(f)
-		f.b.observeIntentFrom(f.source, map[string]bool{"llamacpp": true})
 		if !f.b.observeEngineRunningFrom(f.source, "llamacpp", false) {
 			t.Fatal("current source stopped observation rejected")
 		}
@@ -3124,10 +3120,10 @@ func TestModelConfigAuthorityChangesDuringPreparePreventLoad(t *testing.T) {
 			r.localPauseRequested = true
 			r.mu.Unlock()
 		}},
-		{"local Off", func(f *modelConfigFixture) {
+		{"engine stopped", func(f *modelConfigFixture) {
 			r := f.b.nodePolicyRuntime()
 			r.mu.Lock()
-			r.intent["llamacpp"] = false
+			r.running["llamacpp"] = false
 			r.mu.Unlock()
 		}},
 		{"profile revision changes", func(f *modelConfigFixture) {
@@ -3171,7 +3167,7 @@ func TestModelConfigAuthorityChangesDuringPreparePreventLoad(t *testing.T) {
 
 func TestModelConfigAuthorityChangesDuringGrantLoadAndFinish(t *testing.T) {
 	for _, phase := range []string{"grant", "load", "finish"} {
-		for _, change := range []string{"proxy replacement", "local pause", "local Off"} {
+		for _, change := range []string{"proxy replacement", "local pause", "engine stopped"} {
 			t.Run(phase+"/"+change, func(t *testing.T) {
 				f := newModelConfigFixture(t)
 				f.proxy.mu.Lock()
@@ -3212,10 +3208,10 @@ func TestModelConfigAuthorityChangesDuringGrantLoadAndFinish(t *testing.T) {
 					r.mu.Lock()
 					r.localPauseRequested = true
 					r.mu.Unlock()
-				case "local Off":
+				case "engine stopped":
 					r := f.b.nodePolicyRuntime()
 					r.mu.Lock()
-					r.intent["llamacpp"] = false
+					r.running["llamacpp"] = false
 					r.mu.Unlock()
 				}
 				f.proxy.releaseHeld()
@@ -3692,7 +3688,7 @@ func TestModelConfigPendingObservationIgnoresUnprovenInventory(t *testing.T) {
 }
 
 func TestModelConfigRetirementDropsRecordedLoadRequest(t *testing.T) {
-	for _, scenario := range []string{"removal", "Off", "pause"} {
+	for _, scenario := range []string{"removal", "pause"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := newModelConfigFixture(t)
 			f.completedResidentLoad(t)
@@ -3703,8 +3699,6 @@ func TestModelConfigRetirementDropsRecordedLoadRequest(t *testing.T) {
 			switch scenario {
 			case "removal":
 				r.current.ResidentModels = nil
-			case "Off":
-				r.intent["llamacpp"] = false
 			default:
 				r.localPauseRequested = true
 			}
@@ -3778,8 +3772,6 @@ func TestModelConfigNonterminalHoldConfirmsReplacementReadback(t *testing.T) {
 	f.engine.mu.Unlock()
 	f.engine.setAnswer(func(method string, params json.RawMessage) (any, string) {
 		switch method {
-		case engineIntentMethod:
-			return map[string]any{"enabledByEngine": map[string]bool{"llamacpp": true}, "offByEngine": map[string]string{}}, ""
 		case "engine:get-installed":
 			return map[string]any{"engines": []map[string]any{{"engine": "llamacpp", "running": true}}}, ""
 		case "engine:models":
@@ -3823,7 +3815,7 @@ func TestModelConfigUnchangedStatusDoesNotNotify(t *testing.T) {
 				f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
 			case "blocked":
 				r.mu.Lock()
-				r.intent["llamacpp"] = false
+				r.running["llamacpp"] = false
 				r.mu.Unlock()
 			case "failed attempt":
 				// Each pass publishes pending, then the manager's not-dispatched reply.

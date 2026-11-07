@@ -22,7 +22,6 @@ import (
 	"time"
 
 	"nvpair-shared/clustertrust"
-	"nvpair-shared/engineintent"
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/testbin"
 )
@@ -88,9 +87,6 @@ func TestStopPauseOwnershipExternalEnginesHaveNoCleanupEffects(t *testing.T) {
 			if err != nil || !status.Running {
 				t.Fatalf("external adoption: %+v, %v", status, err)
 			}
-			if err := ex.setDesiredEnabled("fake", true, intentLocal); err != nil {
-				t.Fatal(err)
-			}
 			ex.nodeProjection.set(nodeProjection{ManagementBlocked: true})
 			if err := ex.Sleep("fake"); err == nil || !strings.Contains(err.Error(), "external management") {
 				t.Fatalf("external Sleep: %v", err)
@@ -100,10 +96,6 @@ func TestStopPauseOwnershipExternalEnginesHaveNoCleanupEffects(t *testing.T) {
 			}
 			if !portServing(port) {
 				t.Fatal("Pause terminated an external listener")
-			}
-			enabled, known, err := ex.desired.get("fake")
-			if err != nil || !known || !enabled {
-				t.Fatalf("Pause rewrote On intent: enabled=%v known=%v err=%v", enabled, known, err)
 			}
 			server.Close() // The fixture's external owner stops its own listener.
 			err = ex.Sleep("fake")
@@ -146,7 +138,7 @@ func TestStopPauseOwnershipUnknownListenerRefuses(t *testing.T) {
 	}
 }
 
-func TestStopPauseOwnershipControlledProcessStopsAndResumesSavedOn(t *testing.T) {
+func TestStopPauseOwnershipControlledProcessStopsAndResumesInstalled(t *testing.T) {
 	ex := wakeTestExecutor(t, t.TempDir(), nil)
 	if err := ex.Start(context.Background(), "fake"); err != nil {
 		t.Fatal(err)
@@ -174,13 +166,9 @@ func TestStopPauseOwnershipControlledProcessStopsAndResumesSavedOn(t *testing.T)
 	if portServing(port) || !orphanPIDExited(proc.cmd.Process.Pid) {
 		t.Fatal("owned process or listener survived Sleep")
 	}
-	enabled, known, err := ex.desired.get("fake")
-	if err != nil || !known || !enabled {
-		t.Fatalf("Pause changed saved On: %v %v %v", enabled, known, err)
-	}
 	ex.nodeProjection.set(nodeProjection{})
 	if err := ex.Wake(context.Background(), "fake"); err != nil {
-		t.Fatalf("saved-On Resume: %v", err)
+		t.Fatalf("installed engine Resume: %v", err)
 	}
 	st.mu.Lock()
 	next, running := st.proc, st.running
@@ -261,19 +249,12 @@ func TestStopPauseOwnershipReclaimsExactManagedOrphan(t *testing.T) {
 	if err := ex.desired.setAllocatedPort(m.Engine, port); err != nil {
 		t.Fatal(err)
 	}
-	if err := ex.setDesiredEnabled(m.Engine, true, intentLocal); err != nil {
-		t.Fatal(err)
-	}
 	ex.nodeProjection.set(nodeProjection{ManagementBlocked: true})
 	if err := ex.Sleep(m.Engine); err != nil {
 		t.Fatalf("managed orphan Sleep: %v", err)
 	}
 	if !orphanPIDExited(orphan.Process.Pid) || portServing(port) {
 		t.Fatal("Sleep completed before exact orphan termination")
-	}
-	enabled, known, err := ex.desired.get(m.Engine)
-	if err != nil || !known || !enabled {
-		t.Fatalf("orphan cleanup changed intent: %v %v %v", enabled, known, err)
 	}
 }
 
@@ -353,26 +334,6 @@ func TestStopPauseOwnershipCancelsDispatchedLoad(t *testing.T) {
 	st.mu.Lock()
 	st.running = false
 	st.mu.Unlock()
-}
-
-func TestStopPauseOwnershipResumePreservesOff(t *testing.T) {
-	ex := wakeTestExecutor(t, t.TempDir(), nil)
-	if err := ex.setDesiredEnabled("fake", false, intentLocal); err != nil {
-		t.Fatal(err)
-	}
-	ex.nodeProjection.set(nodeProjection{ManagementBlocked: true})
-	if err := ex.Sleep("fake"); err != nil {
-		t.Fatal(err)
-	}
-	ex.nodeProjection.set(nodeProjection{})
-	if err := ex.Wake(context.Background(), "fake"); !errors.Is(err, errIntentOff) {
-		t.Fatalf("Resume activated saved Off: %v", err)
-	}
-	state, err := ex.Status("fake")
-	if err != nil || state.Running {
-		t.Fatalf("Resume state=%+v err=%v", state, err)
-	}
-	requireOffOrigin(t, ex.desired, "fake", "local")
 }
 
 func TestStopPauseOwnershipSleepReplyCarriesPhysicalProof(t *testing.T) {
@@ -648,14 +609,6 @@ func mustJSONText(t *testing.T, v any) string {
 		t.Fatalf("encode %v: %v", v, err)
 	}
 	return string(data)
-}
-
-func requireOffOrigin(t *testing.T, store *desiredStateStore, engine string, want engineintent.Origin) {
-	t.Helper()
-	got, err := store.snapshot([]string{engine})
-	if err != nil || got.OffByEngine[engine] != want || (want != "" && got.EnabledByEngine[engine]) {
-		t.Fatalf("intent for %s = %+v, %v; want Off origin %q", engine, got, err, want)
-	}
 }
 
 func lockLoadManifest() *Manifest {

@@ -125,8 +125,7 @@ The impact read captures local policy, settings, admission and model fences
 around two `engine:owner-evidence {}` reads on one bound manager worker. Both
 manager calls share a four-second deadline. A retired/recovering worker, changed
 local owner, changed native incarnation or capture token, malformed response or
-missing section withdraws dependent facts without using cached intent as a
-fallback. A complete empty manager universe is valid; unobserved engines,
+missing section withdraws dependent facts. A complete empty manager universe is valid; unobserved engines,
 unrepresented roots and uncertain reservations remain unknown. Manager paths
 and operation identities stay in the private envelope. Matching reads detect
 observed changes; they do not reserve the manager after the reply. Resident
@@ -136,7 +135,7 @@ the read supplies neither mutation permission nor a resident reservation.
 
 Production `buildApplyOwners` is nil, so prepare refuses before Pause. It
 remains unavailable because no owner can pin manager
-intent, content reservations and Pause acceptance atomically through
+content reservations and Pause acceptance atomically through
 `WithLocked`. The service also requires independent identity/membership,
 worker-exit, durable-save, enforcement and physical-stop evidence before a
 real start. Finish retains the existing Pause and explicit target-local Resume
@@ -211,6 +210,24 @@ ends; it does not start another load meanwhile. Removing a preference
 does not unload the model. Older targets that drop requested served/resident
 preferences are refused as unsupported readback.
 
+Explicit `engine:load-model` requests enter this same prepare, dispatch, finish
+and observation lifecycle with the private `manual` purpose. They share its
+ordered operation IDs, capacity and memory limits, LRU eviction and resident
+and in-flight protection. The target broker also admits peer loads: the target
+manager's authenticated `/v1/models/load` handler uses a source-bound private
+`engine:admitted-load-request` / `engine:admitted-load-reply` exchange before
+execution. These notifications are rejected from clients and never forwarded
+to subscribers. The source broker never reserves capacity for a remote target.
+Success is `{ok:true}` only after a matching manager generation and loaded
+observation settle the reservation. Definite failure observed absent releases
+the hold; uncertain dispatch retains it and uses the existing completion barrier
+and fresh-read observation recovery. There is no raw-load fallback.
+
+Manual loads require a current authoritative serving envelope and model identity.
+They skip resident profile qualification. Engines or models without that envelope
+receive an explicit unsupported refusal; their previous unqualified manual-load
+path is unavailable.
+
 A revision-only policy save preserves loaded-inventory freshness when the
 resident's effective load request and engine identity are unchanged. If
 `contextTokens` changes while the engine's serving envelope does not, the
@@ -229,7 +246,7 @@ serialized with an absolute budget bounded by 60 seconds and the policy's
 finite model-transition timeout. A failed load with unchanged evidence is retried
 at the 30-second retry deadline, with no attempt limit: reconciliation wakes at that
 deadline as well as on the idle tick, and does not re-evaluate unchanged
-evidence before it. A change in relevant policy, identity, readiness, intent,
+evidence before it. A change in relevant policy, identity or readiness,
 inventory or admission evidence is evaluated on the next wake without waiting
 for the deadline. Each retry is a new operation subject to the same
 eligibility, inventory and hold checks.
@@ -277,7 +294,7 @@ Separating refusal validation does not make those configuration facts readable
 by older peers.
 
 A pause of either origin reports model-configuration reason `paused`, including
-the accepted interval before persistence. An ordinary saved Off reports
+the accepted interval before persistence. An observed stopped engine reports
 `engine-off`.
 
 Unknown completion retains the proxy's capacity hold. Recovery requires a
@@ -289,7 +306,7 @@ manager-owned observed serving envelope from the current source can report the
 resident `satisfied`; an uncertain hold then remains the barrier against another
 load. Holds remain in memory: a proxy restart loses their accounting;
 this is not durable recovery. Replacement invalidates prior status and waits for
-fresh activation and inventory. Automatic unload and idle sleep recheck current
+fresh activation and inventory. Automatic unload rechecks current
 resident protection immediately before execution; explicit pause retains its
 unload authority.
 
@@ -312,16 +329,13 @@ bounded backoff; failure leaves its ordinary broker surface unavailable.
 Discovery subscription, node/settings projections and log-level delivery remain
 available during recovery. Current-worker and exit checks precede publication.
 Settings recovery, including native-first policy publication, still precedes
-enabled-intent restoration. Pause, saved Off, source identity and resident
+installed-engine restoration. Pause, source identity and resident
 reservation fences remain authoritative.
 
-Explicit local start, restart and install with `start: true` share the settings
-operation lock, including installs without a port override. Install preparation
-runs without the global configuration/operation locks; only its separate start
-uses lifecycle admission. A local Off of that engine, or a pause of either
-origin, admitted during preparation supersedes that older start. The install
-remains completed, but its start returns busy. A later On retains normal
-lifecycle ordering. The configuration lock is released during worker waits.
+Installation starts the installed engine only while the node is available.
+Engine-manager owns that availability check and lifecycle admission, including
+a Pause arriving during installation. There is no install start option or
+broker-owned deferred start continuation.
 
 A Go service that exposes the NVIDIA Personal AI Router API to **UI processes**
 and other clients (CLIs, dashboards, mobile companions, scripts, tests, etc.).
@@ -653,7 +667,7 @@ proxy ports remain the configured choices. Otherwise a healthy facade reports it
 live port; an unavailable facade uses the startup plan, saved component port or
 default. Effective ports are zero unless a current facade is
 ready. Apply saves its explicit port and next-spawn plan before activation. A
-stopped engine stays stopped, with its saved intent unchanged. For a missing
+stopped engine stays stopped. For a missing
 facade the broker enables it in the existing process, preserving siblings; for
 a missing process it uses the existing supervisor even if routing is disabled.
 Recovery runs before the manager's Configure callback, which only rebinds and
@@ -891,27 +905,19 @@ proxy enforces it.
   availability push the proxy refused (Activation). A relayed
   `policy:set` from a paired node is refused during recovery.
 - **Proxy state.** The broker pushes `node/set-policy`, `node/set-availability`,
-  `node/set-residency`, `node/set-engine-intent`, `node/set-engine-drain` and
+  `node/set-residency`, `node/set-engine-drain` and
   `node/set-model-identity` (Engine identity below; methods and payloads in
   `nodepolicy/wire.go`). Residency comes from
   engine-manager's `engine:models-changed` (`loadedByEngine`) and
-  `engine:state-changed` (a stopped engine is absent); saved intent from
-  `engine:intent` and `engine:intent-changed`. Both are seeded from
-  `engine:intent`, `engine:get-installed` and `engine:models` whenever
-  engine-manager (re)starts. Both intent payloads require `enabledByEngine`
-  (engine to boolean) and `offByEngine` (explicitly saved Off engine to `local`
-  or `peer`). Legacy saved Off without stored provenance is reported as `local`;
-  unknown intent and On engines have no origin entry. The broker validates the
-  shared snapshot before applying any intent to policy; malformed snapshots
-  leave the previous policy inputs intact. Only booleans reach
-  `node/set-engine-intent`: provenance is client display data, not admission
-  policy. Subscribed notifications and request replies relay the original
-  payload, including both maps, unchanged. Each push sends the state current at
+  `engine:state-changed` (a stopped engine is absent). Running state and
+  residency are seeded from `engine:get-installed` and `engine:models` whenever
+  engine-manager (re)starts. Each push sends the state current at
   send time and
   pushes are serialized, so an older state can never overwrite a newer one.
   When the proxy (re)starts, all of them are re-sent from its spawn hook **before
-  any facade is enabled**, availability first, so a paused node is never briefly
-  admitting work, and `policy:changed` then reports the activation the replay
+  any facade is enabled**, engine drains before availability and policy, so a
+  paused node or an uncertain manual load is never briefly admitting work.
+  `policy:changed` then reports the activation the replay
   reached.
 - **Node projection.** After every persisted policy change, pause and resume,
   and on every `engine:ready` (and when a new engine-manager is attached), the
@@ -962,15 +968,14 @@ proxy enforces it.
   that sent it still runs and is the incarnation the policy was replayed to,
   `proxyRunId` is the run of that incarnation's acknowledgements, and
   `policyRevision` is both the active and the persisted revision, with the
-  availability push acknowledged and the node `available`. Models of an engine
-  saved Off are left out, and so are models whose identity is not the engine
+  availability push acknowledged and the node `available`. Models whose identity is not the engine
   identity below, and a capability with no model left is withdrawn.
   Anything else withdraws it: proxy exit or stop, a replay to a new proxy run
   (which clears the held report until the new run reports), a saved policy
   pending acknowledgement, and a pause or drain. A report may arrive before
   the acknowledgement it follows; it is advertised once that is recorded.
   Readiness is reconsidered, under the projection lock, after every report,
-  acknowledgement, proxy start or exit and intent change, and a projection is
+  acknowledgement, proxy start or exit and engine identity change, and a projection is
   sent only when the capability changes. `Policy.Advertisement()` never sets
   it. Peers without the capability keep concrete routing.
 - **Engine identity** (`model_identity.go`, `docs/local-qualification.mdx`).
@@ -1010,10 +1015,10 @@ proxy enforces it.
   leaving engine-manager to fail closed on its own deadline. Fresh inventory
   from engine-manager restores model identity after the mutation; already
   dispatched inference is not cancelled.
-- **Admission.** The proxy's `admission/state` (active, per-engine active, last
+- **Admission.** The proxy's `admission/state` (active, per-engine and per-model active, per-model last
   activity) feeds the drains below; `admission/unload` unloads the named models
   through `engine:unload-model`; `admission/wake` calls `engine:wake` unless the
-  node is not `available` or the engine is saved Off. None of them reach clients.
+  node is not `available`. None of them reach clients.
 - **Configured pausing** (`node:set-availability {state:"paused", pauseMode:"configured"}`,
   or omitted `pauseMode`): persist `paused`, push
   `draining` (with `cancelActive` when `pause.onActive` is `cancel`), wait for the
@@ -1053,9 +1058,8 @@ proxy enforces it.
   validation. Null or unknown modes, and any explicit mode with Resume, are
   invalid parameters. The accepted mode is saved with the pause; saved drain
   options remain unchanged.
-- **Resuming** persists and pushes `available`, then `engine:wake`s the engines
-  the pause stopped. Their saved intent was never changed, so only engines saved
-  On come back through engine-manager's activation guards; resident
+- **Resuming** persists and pushes `available`, then restores every installed
+  engine through `engine:restore-installed` and engine-manager's activation guards; resident
   declarations are reconciled and cancelled requests are not replayed.
 - **Ordering.** Transitions run one at a time. A newer `node:set-availability`
   cancels the one in progress, which returns the error `superseded by a later
@@ -1099,18 +1103,18 @@ proxy enforces it.
   rechecks after waiting for locks and worker validation, before writing any
   new receipt; no-op and duplicate peer requests are fenced too.
 - **Startup.** A persisted `paused` reaches the proxy before it can admit
-  anything. A paused node skips `engine:restore-enabled` (also when
+  anything. A paused node skips `engine:restore-installed` (also when
   engine-manager restarts while paused) and sends it on resume instead. Legacy
   `stopEngines` and `unloadModels` values remain readable but never weaken pause.
-- **Idle policy.** Every 30 s the broker looks at each running engine with no
-  active requests. Its idle time runs from the latest of its last admitted
-  request (`admission/state.lastActivityMs`), the moment it was seen to start,
-  and the moment it last gained a loaded model. Past `idle.unloadAfterMinutes`
-  its models are unloaded; past `idle.stopEngineAfterMinutes` an engine saved On
-  is put to sleep. Each step runs once per idle period, so an engine that refuses
-  to stop is not retried every tick. Nothing runs while the node is draining.
+- **Idle policy.** Every 30 s the broker checks each loaded nonresident model
+  without active requests. Its baseline is the latest of that model's activity
+  (`admission/state.lastActivityMs[engine][model]`), its arrival in residency,
+  and engine start. After `idle.unloadAfterMinutes` (default 5, 0 disables
+  release), the model is unloaded once per baseline. Other models' requests
+  and loads do not renew it. Resident models are protected and engines stay
+  running. Nothing is released while the node is paused or draining.
 - **Start on demand.** The broker's private `engine:wake` call (from
-  `admission/wake`) starts only an engine saved On, never while the node is
+  `admission/wake`) starts a stopped installed engine, never while the node is
   paused or draining. Clients and peers cannot call `engine:wake` or
   `engine:sleep`.
 - **Settings restarts.** When `engine:apply-settings` would restart a running
@@ -1119,6 +1123,15 @@ proxy enforces it.
   zero (releasing the settings journal lock meanwhile), applies, and clears the
   drain. See [ENGINE_SETTINGS.md](ENGINE_SETTINGS.md).
 ### Model inference settings and target-owned locks
+
+An active or unsettled manual load owned by a replaced proxy derives a drain
+for its target engine through the existing `node/set-engine-drain` owner. The
+replacement must acknowledge that drain before availability or policy activation.
+The ordinary settings drain and this derived drain combine by OR; clearing one
+does not clear the other. The derived reason ends when the existing operation
+record is retired. It has no separate store, expiry or latch. Engine health and
+node availability remain observed facts; model configuration reports
+`operation-busy` and admission reports `draining` while the hold applies.
 
 Each `(engine, model)` profile can contain `requestOptions`,
 `requestOptionsMode` and `localOnly`. Omitted mode means `defaults`, and explicit
@@ -1894,14 +1907,13 @@ Other public `engine:*` requests are forwarded to `nvpair-engine-manager`
 verbatim and their responses relayed straight back. These include
 `engine:get-installed`, `engine:describe`, `engine:status`, `engine:install`,
 `engine:uninstall`, `engine:action`, `engine:logs`, `engine:errors`,
-`engine:models`, `engine:intent` and `engine:unload-model`. Engine start, stop
+`engine:models` and `engine:unload-model`. Engine start, stop
 and restart methods and peer start/stop routes are removed. The internal-method
 guard refuses client calls to `engine:wake` and `engine:sleep`, including
-component-addressed calls; peers cannot invoke them either. Install retains its
-`start` option. Saved intent, restoration and idle behavior remain unchanged;
-opening the desktop for the first time does not start installed engines.
-This phase does not guarantee every installed engine runs while available;
-phase 11 must not be installed without phase 15's intent changes.
+component-addressed calls; peers cannot invoke them either. The internal
+`engine:restore-installed` starts every installed engine at service startup and
+after Resume, subject to availability. Installation starts the engine while
+available. No engine On/Off state is saved.
 Operations can run for minutes (reporting progress via
 `engine:install-progress` / `engine:state-changed`), so the relay imposes **no
 broker-side timeout**. Error `-32000 "engine-manager not available"` when no

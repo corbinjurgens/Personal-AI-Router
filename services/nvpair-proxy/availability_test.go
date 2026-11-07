@@ -841,9 +841,8 @@ func TestPAPauseRouteExceptions(t *testing.T) {
 					fx.f.discovery.SetSubscribed([]Node{n})
 					fx.f.noteSelfFromSnapshot([]Node{n})
 					fx.f.discovery.SetSubscribed(nil)
-					fx.p.admission.setIntent(map[string]bool{profile.Name: true})
 					pol := nodepolicy.Default()
-					pol.Idle.StartOnDemand, pol.Idle.WakeTimeoutSeconds = true, 2
+					pol.Idle.WakeTimeoutSeconds = 2
 					fx.p.admission.setPolicy(pol)
 					var wakes atomic.Int32
 					fx.p.admission.notify = func(method string, _ any) {

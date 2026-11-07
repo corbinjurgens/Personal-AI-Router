@@ -42,7 +42,7 @@ func vetoTestServer(t *testing.T, manifest *Manifest) (*controlServer, *Executor
 	return &controlServer{exec: exec}, exec
 }
 
-func TestRemoteInstallStartAndLoadFailClosedBeforeTheFirstProjection(t *testing.T) {
+func TestRemoteLoadFailsClosedBeforeTheFirstProjection(t *testing.T) {
 	s, exec := vetoTestServer(t, testEngineManifest(fakeEngineBin))
 	for _, c := range []struct {
 		what    string
@@ -50,7 +50,6 @@ func TestRemoteInstallStartAndLoadFailClosedBeforeTheFirstProjection(t *testing.
 		path    string
 		body    string
 	}{
-		{"remote install with start", s.handleInstall, controlInstallPath, `{"engine":"fake","start":true}`},
 		{"remote load", s.handleLoad, controlLoadPath, `{"engine":"fake","model":"tiny"}`},
 	} {
 		if rec := postControl(t, c.handler, c.path, c.body); rec.Code != http.StatusServiceUnavailable {
@@ -62,10 +61,9 @@ func TestRemoteInstallStartAndLoadFailClosedBeforeTheFirstProjection(t *testing.
 	}
 }
 
-func TestRemoteInstallStartAndLoadAreVetoedWhileLocallyPaused(t *testing.T) {
+func TestRemoteLoadIsVetoedWhileLocallyPaused(t *testing.T) {
 	s, exec := vetoTestServer(t, testEngineManifest(fakeEngineBin))
 	exec.nodeProjection.set(nodeProjection{PausedLocally: true, ManagementBlocked: true})
-	requireLocalVeto(t, "remote install with start", postControl(t, s.handleInstall, controlInstallPath, `{"engine":"fake","start":true}`))
 	requireLocalVeto(t, "remote load", postControl(t, s.handleLoad, controlLoadPath, `{"engine":"fake","model":"tiny"}`))
 	if st, err := exec.Status("fake"); err != nil || st.Running {
 		t.Fatalf("a vetoed remote start ran the engine: %+v %v", st, err)
@@ -78,17 +76,18 @@ func TestRemoteInstallStartAndLoadAreVetoedWhileLocallyPaused(t *testing.T) {
 	}
 }
 
-func TestRemotePlainOffDoesNotVetoManagingPeer(t *testing.T) {
-	for _, intent := range []struct{ name, document string }{
+func TestRemoteLoadIgnoresRetiredEngineIntent(t *testing.T) {
+	for _, stored := range []struct{ name, document string }{
 		{"local", `{"engines":{"fake":false},"offBy":{"fake":"local"}}`},
 		{"peer", `{"engines":{"fake":false},"offBy":{"fake":"peer"}}`},
 		{"legacy", `{"engines":{"fake":false}}`},
 		{"missing", `{"engines":{}}`},
 	} {
-		t.Run(intent.name, func(t *testing.T) {
+		t.Run(stored.name, func(t *testing.T) {
 			s, exec := vetoTestServer(t, lockLoadManifest())
 			exec.nodeProjection.set(nodeProjection{ManagementBlocked: false})
-			if err := os.WriteFile(exec.desired.path, []byte(intent.document), 0o600); err != nil {
+			exec.admittedLoadParent = exec.ModelLoad
+			if err := os.WriteFile(exec.desired.path, []byte(stored.document), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			// An explicit load does not start the stopped engine. Its runtime
@@ -97,13 +96,9 @@ func TestRemotePlainOffDoesNotVetoManagingPeer(t *testing.T) {
 			if load.Code != http.StatusInternalServerError {
 				t.Fatalf("stopped load = %d %s, want runtime failure", load.Code, load.Body.String())
 			}
-			requireInstallTerminal(t, postControl(t, s.handleInstall, controlInstallPath, `{"engine":"fake","start":true}`), "result", "")
+			requireInstallTerminal(t, postControl(t, s.handleInstall, controlInstallPath, `{"engine":"fake"}`), "result", "")
 			if rec := postControl(t, s.handleLoad, controlLoadPath, `{"engine":"fake","model":"tiny"}`); rec.Code != http.StatusOK {
 				t.Fatalf("peer load = %d %s", rec.Code, rec.Body.String())
-			}
-			requireOffOrigin(t, exec.desired, "fake", "")
-			if enabled, known, err := exec.desired.get("fake"); err != nil || !known || !enabled {
-				t.Fatalf("peer start did not save On: %v, %v, %v", enabled, known, err)
 			}
 		})
 	}
@@ -121,29 +116,26 @@ func slowStartManifest() *Manifest {
 	return m
 }
 
-// installRemotely runs install-with-start in the background, waits until it is
-// accepted, and returns the channel its response arrives on.
+// installRemotely waits for installation's automatic start to own a process
+// inside its readiness wait, then returns the channel its response arrives on.
 func installRemotely(t *testing.T, s *controlServer) <-chan *httptest.ResponseRecorder {
 	t.Helper()
+	st, err := s.exec.state("fake")
+	if err != nil {
+		t.Fatal(err)
+	}
 	done := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
 		rec := httptest.NewRecorder()
-		s.handleInstall(rec, httptest.NewRequest(http.MethodPost, controlInstallPath, strings.NewReader(`{"engine":"fake","start":true}`)))
+		s.handleInstall(rec, httptest.NewRequest(http.MethodPost, controlInstallPath, strings.NewReader(`{"engine":"fake"}`)))
 		done <- rec
 	}()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		s.exec.remoteWork.mu.Lock()
-		accepted := len(s.exec.remoteWork.ops) == 1
-		s.exec.remoteWork.mu.Unlock()
-		if accepted {
-			return done
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the remote start was not accepted")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	awaitLockCondition(t, "remote installation's owned startup", func() bool {
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		return st.proc != nil && st.startCancel != nil
+	})
+	return done
 }
 
 func requireInstallTerminal(t *testing.T, rec *httptest.ResponseRecorder, wantType, wantCode string) {
@@ -191,19 +183,6 @@ func TestLocalVetoCancelsAnAcceptedRemoteInstallStart(t *testing.T) {
 		done := installRemotely(t, s)
 		m.applyNodeProjection(&Message{Params: json.RawMessage(`{"policy":{"revision":"2","roles":[],"pausedBy":"local"},"pausedLocally":true,"managementBlocked":true}`)})
 		requireInstallTerminal(t, awaitResponse(t, done), "error", "local_veto")
-		if enabled, known, err := exec.desired.get("fake"); err != nil || (known && enabled) {
-			t.Fatalf("the canceled remote start saved On: %v %v %v", enabled, known, err)
-		}
-	})
-	t.Run("local stop", func(t *testing.T) {
-		s, exec := vetoTestServer(t, slowStartManifest())
-		exec.nodeProjection.set(nodeProjection{ManagementBlocked: false})
-		done := installRemotely(t, s)
-		if err := exec.Stop("fake"); err != nil {
-			t.Fatalf("local stop during a remote start: %v", err)
-		}
-		requireInstallTerminal(t, awaitResponse(t, done), "error", "local_veto")
-		requireOffOrigin(t, exec.desired, "fake", "local")
 	})
 	t.Run("a peer pause cancels", func(t *testing.T) {
 		_, exec := vetoTestServer(t, testEngineManifest(fakeEngineBin))
@@ -245,7 +224,7 @@ func TestRemoteClientMapsTypedRefusalsToRPCCodes(t *testing.T) {
 	if err == nil || rpcCode(err) != -32000 {
 		t.Fatalf("untyped 409 = %v (code %d), want an ordinary -32000 failure", err, rpcCode(err))
 	}
-	_, err = c.stream(context.Background(), controlInstallPath, installRequest{Engine: "fake", Start: true}, nil)
+	_, err = c.stream(context.Background(), controlInstallPath, installRequest{Engine: "fake"}, nil)
 	if rpcCode(err) != codeLocalVeto || err.Error() != nodePausedVeto {
 		t.Fatalf("vetoed streamed install = %v (code %d), want %d", err, rpcCode(err), codeLocalVeto)
 	}

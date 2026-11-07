@@ -170,9 +170,20 @@ covers native context/output, and effective concurrency equals native slots.
 The manager requires explicit model-only POST load and safe loaded-model GET
 bindings, native retention `"-1"`, and router capacity for the revision-bound
 engine resident set. No request keep-alive field changes native retention.
-Local pause/Off vetoes still apply; reconciliation cannot start an Off engine.
+Local pause vetoes still apply during reconciliation.
 The broker coordinates internal prepare/dispatch/finish/observe calls and publishes
 model-configuration status; desktop clients do not call these admission methods.
+Manual profile loads use these same operations with `purpose: "manual"` on
+preparation. They require current engine, model and serving identity but do not
+require automatic resident membership or qualification. The target broker still
+uses `engine:reconcile-resident` for dispatch and authoritative observation.
+Preparation uses the inference LRU planner and waits for confirmed unloads under
+the model cap and memory budget. Inflight models and qualified residents are
+protected. A switch timeout refuses with `no-fit`, including ordinary inference;
+it never grants an extra slot. Pause, Halt and settings drain remain vetoes.
+Both purposes share the ordered operation stream, reservation store, final grant
+and finish/observe recovery. Unknown dispatch keeps its hold until authoritative
+settlement; a failed load with a matching fresh unloaded observation releases it.
 A definite terminal manager load failure is published as `unknown`/`load-failed`,
 including retained finish/recovery readbacks. The reason does not establish
 unloaded inventory or free capacity, and leaves hold cleanup, expiry and retry
@@ -264,7 +275,7 @@ Its discovery service key is `e-<id>`, its facade-scoped messages are addressed
 `e-<id>:<method>`, and the port its facade first binds is persisted in
 `<id>-proxy-port.json` so it stays there across restarts. Peers that advertise
 the same engine ID are routed over the pinned direct and reverse paths like a
-built-in engine. Node policy, drain, residency, intent and strict capacity
+built-in engine. Node policy, drain, residency and strict capacity
 accept any `engines.ValidRoutingID`; an engine with no facade here simply has no
 local candidates.
 
@@ -512,7 +523,7 @@ wake and retryable failover retain their existing owners and bounds.
 
 The broker pushes this node's policy (`nvpair-shared/nodepolicy`) with
 process-scoped requests — `node/set-policy`, `node/set-availability`,
-`node/set-engine-drain`, `node/set-residency`, `node/set-engine-intent` — each
+`node/set-engine-drain`, `node/set-residency` — each
 validated and refused with the previous state kept when invalid. All but
 `node/set-policy` answer `{"ok":true}`; `node/set-policy` answers an
 acknowledgement `{revision, runId}` of the policy revision it activated and the
@@ -566,7 +577,10 @@ The desktop's Node policy JSON editor supports them; the TUI exposes no buffer
 controls. [Hybrid routing](../../docs/hybrid-routing.mdx) includes an edit example.
 
 The internal process-scoped `node/admission-snapshot` request takes an explicit
-`{}` and returns `{runId, active, activeByEngine, queued, lastActivityMs}`.
+`{}` and returns `{runId, active, activeByEngine, activeByModel, queued, lastActivityMs}`.
+`activeByModel` and `lastActivityMs` are indexed by engine then normalized model.
+Idle memory release uses each model's activity independently, defaults to five
+minutes, and keeps the engine process running.
 It copies current counts under the admission mutex, including held and
 quarantined slots. When settings drain waits for active work, it requires fresh
 readback after the drain acknowledgement from that same proxy run; a cached
@@ -592,8 +606,8 @@ for the independent `localOnly` edit lock, desktop controls and precedence examp
 - **Admission.** One controller for the whole process decides whether
   inference may run on this machine: in the cluster ingress before forwarding a
   peer's request, and before dispatching a local request to this node's own
-  engine. It checks availability and engine drains, wakes a stopped engine
-  saved On (`admission/wake`, then waits for `node/set-local-backend` healthy),
+  engine. It checks availability and engine drains, wakes a stopped installed
+  engine (`admission/wake`, then waits for `node/set-local-backend` healthy),
   limits concurrency per model, keeps the resident model set and the memory
   budget, unloading idle models via `admission/unload` when `switchModels` is
   set, and merges the model profile's `requestOptions` into the body. A refusal

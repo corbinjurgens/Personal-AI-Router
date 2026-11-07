@@ -18,37 +18,6 @@ import (
 	"nvpair-shared/nodepolicy"
 )
 
-func TestIntentSubscribedRelayPreservesSnapshot(t *testing.T) {
-	b, out := newPolicyBroker(t)
-	startTestEngineNotifications(t, b, func() {})
-	source := b.activateEngineManagerSource()
-	id := json.RawMessage(`1`)
-	b.handleMessage(&Message{JSONRPC: "2.0", ID: &id, Method: "engine:subscribe"})
-	raw := json.RawMessage(`{"enabledByEngine":{"llamacpp":true,"llamacpp-custom":false,"strata":false},"offByEngine":{"llamacpp-custom":"local","strata":"peer"},"relayMarker":"unchanged"}`)
-	b.forwardEngineNotificationFrom(source, engineIntentChanged, raw)
-	frame := out.waitFrame(t, "subscribed intent snapshot", func(m Message) bool { return m.Method == engineIntentChanged })
-	requireIntentRelayPayload(t, frame.Params, raw)
-}
-
-// requireIntentRelayPayload compares the complete decoded payload so missing
-// maps or a relay that reconstructs only known fields cannot pass.
-func requireIntentRelayPayload(t *testing.T, got, want json.RawMessage) {
-	t.Helper()
-	var actual, expected map[string]json.RawMessage
-	if err := json.Unmarshal(got, &actual); err != nil {
-		t.Fatalf("decode relayed intent: %v", err)
-	}
-	if err := json.Unmarshal(want, &expected); err != nil {
-		t.Fatalf("decode expected intent: %v", err)
-	}
-	if _, present := actual["offByEngine"]; !present {
-		t.Fatal("relayed intent omits offByEngine")
-	}
-	if !reflect.DeepEqual(actual, expected) {
-		t.Fatalf("relayed intent = %s, want %s", got, want)
-	}
-}
-
 // policyChangedEvent is one policy:changed this node announced for itself.
 type policyChangedEvent struct {
 	Policy nodepolicy.Policy `json:"policy"`
@@ -326,7 +295,7 @@ func TestPolicyReplayUnreadClientReleasesSupervisionAndPushes(t *testing.T) {
 		close(supervised)
 	}()
 	go func() {
-		b.pushPolicyNow(context.Background(), pushIntent)
+		b.pushPolicyNow(context.Background(), pushResidency)
 		close(pushed)
 	}()
 	// Neither operation may depend on the service/client reading its pipe.
@@ -439,7 +408,7 @@ func TestPolicyReplayRetainsPushSlotAcrossUnacknowledgedRPC(t *testing.T) {
 				}
 				return
 			}
-			want := []string{nodepolicy.MethodSetAvailability, nodepolicy.MethodSetPolicy, nodepolicy.MethodSetEngineIntent, nodepolicy.MethodSetResidency, nodepolicy.MethodSetModelIdentity, nodepolicy.MethodSetEngineDrain}
+			want := []string{nodepolicy.MethodSetAvailability, nodepolicy.MethodSetPolicy, nodepolicy.MethodSetResidency, nodepolicy.MethodSetModelIdentity, nodepolicy.MethodSetEngineDrain}
 			if got := proxy.methods(""); !reflect.DeepEqual(got, want) {
 				t.Fatalf("replay and later push order = %v, want %v", got, want)
 			}

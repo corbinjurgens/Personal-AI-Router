@@ -317,11 +317,6 @@ type stopPauseServiceFixture struct {
 func newStopPauseServiceFixture(t *testing.T, s *remoteServiceFixture, configure func(*engineProcessFixture)) *stopPauseServiceFixture {
 	t.Helper()
 	e := prepareEngineProcessFixture(t, s.configDir, s.ports, s.scannerPath)
-	// Saved Off is fixture input until phase 15 removes engine intent.
-	jointWriteJSON(t, filepath.Join(jointAppDir(s.configDir), "engine-bin", "engine-state.json"), map[string]any{
-		"engines": map[string]bool{"llamacpp-custom": false},
-		"offBy":   map[string]string{"llamacpp-custom": "local"},
-	})
 	if configure != nil {
 		configure(e)
 	}
@@ -677,7 +672,7 @@ func newStopPauseFixture(t *testing.T) *stopPauseFixture {
 
 func (f *stopPauseFixture) startModel(t *testing.T) {
 	t.Helper()
-	f.call(t, "engine:install", map[string]any{"engine": "llamacpp", "start": true})
+	f.call(t, "engine:install", map[string]any{"engine": "llamacpp"})
 	assertStopPauseNativeLifetime(t, f.engine)
 	var inventory struct {
 		Loaded map[string][]string `json:"loadedByEngine"`
@@ -816,7 +811,7 @@ func TestStopPauseControlsProcess(t *testing.T) {
 	t.Run("queued pinned peer demand is refused without later execution", func(t *testing.T) { testStopPauseQueue(t, true) })
 	t.Run("configured finish preserves execution until explicit completion", func(t *testing.T) { testStopPauseDrain(t, false) })
 	t.Run("immediate escalation bypasses the held configured drain", func(t *testing.T) { testStopPauseDrain(t, true) })
-	t.Run("paused restart preserves saved Off and resumes only saved On", func(t *testing.T) { testStopPauseRestart(t) })
+	t.Run("paused restart starts nothing and resumes every installed engine", func(t *testing.T) { testStopPauseRestart(t) })
 	t.Run("precommit local pause falls back at the origin", testStopPauseFallback)
 	t.Run("committed local stream fails and only a new client request retries", func(t *testing.T) { testStopPauseCommitted(t, false) })
 	t.Run("committed peer stream fails at origin without replay", func(t *testing.T) { testStopPauseCommitted(t, true) })
@@ -951,13 +946,24 @@ func testStopPauseFence(t *testing.T, mode string, peerOrigin bool) {
 	}
 	for _, method := range []string{"engine:install", "engine:load-model"} {
 		params := map[string]any{"engine": "llamacpp"}
-		if method == "engine:install" {
-			params["start"] = true
-		}
 		if method == "engine:load-model" {
 			params["model"] = "switch-model"
 		}
 		response, err := f.client.call(strconv.FormatInt(newRPCID(), 10), method, mustMarshal(t, params), serviceCallTimeout)
+		if method == "engine:install" {
+			// Installation may complete while paused, but cannot activate it.
+			if err != nil || response.Error != nil {
+				t.Fatalf("paused install: response=%+v transport=%v", response, err)
+			}
+			var status struct {
+				Running bool `json:"running"`
+			}
+			task2Decode(t, response.Result, &status)
+			if status.Running {
+				t.Fatal("installation started an engine through Pause")
+			}
+			continue
+		}
 		if err != nil || response.Error == nil || response.Error.Code != -32011 {
 			t.Fatalf("local activation escaped Pause: method=%s response=%+v transport=%v", method, response, err)
 		}
@@ -1368,14 +1374,6 @@ func testStopPauseRestart(t *testing.T) {
 	policy = setServicePolicy(t, f.client, policy)
 	f.availability(t, nodepolicy.Paused, "immediate")
 	f.assertPaused(t, nodepolicy.PausedLocally)
-	intentPath := filepath.Join(jointAppDir(f.service.configDir), "engine-bin", "engine-state.json")
-	var before struct {
-		Engines map[string]bool `json:"engines"`
-	}
-	task2Decode(t, readLiveDurableFile(t, intentPath), &before)
-	if !before.Engines["llamacpp"] || before.Engines["llamacpp-custom"] {
-		t.Fatalf("Pause changed On/Off: %+v", before)
-	}
 	if err := f.service.cleanupChecked(); err != nil {
 		t.Fatalf("stop paused service: %v", err)
 	}
@@ -1387,29 +1385,16 @@ func testStopPauseRestart(t *testing.T) {
 	if !reflect.DeepEqual(got.Profiles, policy.Profiles) || !reflect.DeepEqual(got.ResidentModels, policy.ResidentModels) || !reflect.DeepEqual(got.ServedModels, policy.ServedModels) {
 		t.Fatal("paused restart lost model declarations")
 	}
-	var after struct {
-		Engines map[string]bool `json:"engines"`
-	}
-	task2Decode(t, readLiveDurableFile(t, intentPath), &after)
-	if !reflect.DeepEqual(before, after) {
-		t.Fatalf("paused restart changed intent: before=%+v after=%+v", before, after)
-	}
-	f.assertEffects(t, 0, 1, 0, 0)
+	f.assertEffects(t, 1, 1, 0, 0)
 	f.native.assertCounts(t, 0, 0, 0)
 	f.availability(t, nodepolicy.Available, "")
-	task1Eventually(t, "eligible saved-On engine resumes", 30*time.Second, func() bool {
+	task1Eventually(t, "every installed engine resumes", 30*time.Second, func() bool {
 		f.engine.mu.Lock()
 		defer f.engine.mu.Unlock()
-		return len(f.engine.starts["llamacpp"]) == 2
+		return len(f.engine.starts["llamacpp"]) == 2 && len(f.engine.starts["llamacpp-custom"]) == 2
 	})
-	var status struct {
-		Running bool `json:"running"`
-	}
-	task2Decode(t, f.call(t, "engine:status", map[string]string{"engine": "llamacpp-custom"}), &status)
-	if status.Running {
-		t.Fatalf("Resume activated saved-Off engine: %+v", status)
-	}
-	f.assertEffects(t, 0, 2, 0, 0)
+	assertInstalledEnginesRunning(t, f.stopPauseServiceFixture)
+	f.assertEffects(t, 2, 2, 0, 0)
 	f.native.assertCounts(t, 0, 0, 0)
 }
 
@@ -1501,7 +1486,7 @@ func newStopPausePair(t *testing.T) (*stopPauseFixture, *stopPausePeer) {
 	writePrivateBrokerEngineSettings(t, base, cluster, facades)
 	releasePeer()
 	e.start(t)
-	e.rpcOK(t, "engine:install", map[string]any{"engine": "llamacpp", "start": true})
+	e.rpcOK(t, "engine:install", map[string]any{"engine": "llamacpp"})
 	assertStopPauseNativeLifetime(t, e)
 	p := &stopPausePeer{engine: e, native: peerNative, id: peerID}
 	var inventory struct {

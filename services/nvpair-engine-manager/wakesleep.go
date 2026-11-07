@@ -3,36 +3,20 @@
 
 package main
 
-// wakesleep.go holds the intent-neutral lifecycle operations the broker's node
-// policy drives (FORK_DESIGN.md §3.4, §3.5): engine:wake starts an engine only
-// when its saved intent is On, engine:sleep stops it, and neither rewrites the
-// saved intent. Internal Executor operations still maintain saved intent;
-// wake and sleep only ever act on that record.
+// Wake and Sleep are availability-driven lifecycle operations.
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"path/filepath"
-
-	"nvpair-shared/engineintent"
 )
 
 const (
-	wakeMethod          = "engine:wake"
-	sleepMethod         = "engine:sleep"
-	intentMethod        = "engine:intent"
-	intentChangedMethod = "engine:intent-changed"
+	wakeMethod  = "engine:wake"
+	sleepMethod = "engine:sleep"
 )
 
-// errIntentOff is returned by Wake for an engine whose saved intent is not On.
-// An engine with no saved intent counts as Off, matching RestoreEnabled.
-var errIntentOff = errors.New("engine is not saved On")
-
-// Wake starts an engine only if its saved intent is On, without changing that
-// intent. It holds the engine's lifecycle lock like Restart, so a concurrent
-// explicit Stop either finishes first (and Wake then sees intent Off) or waits
-// for the start to finish. A shutting-down manager refuses, like every start.
+// Wake starts an installed engine subject to activation admission.
 func (e *Executor) Wake(ctx context.Context, engine string) error {
 	done, err := e.admitMutation(engine)
 	if err != nil {
@@ -51,18 +35,17 @@ func (e *Executor) Wake(ctx context.Context, engine string) error {
 	if e.shuttingDown.Load() {
 		return fmt.Errorf("engine-manager is shutting down")
 	}
-	enabled, known, err := e.desired.get(engine)
+	installed, err := e.Detect(engine)
 	if err != nil {
 		return err
 	}
-	if !known || !enabled {
-		return fmt.Errorf("wake %s: %w", engine, errIntentOff)
+	if !installed {
+		return fmt.Errorf("engine %s is not installed", engine)
 	}
 	return e.doStart(ctx, st, engine, startOpts{})
 }
 
-// Sleep stops an engine the way Restart and StopAll do, without recording Off
-// intent, so a later Wake (or restore at the next launch) can start it again.
+// Sleep stops an engine for node availability; a later Wake can start it.
 func (e *Executor) Sleep(engine string) (err error) {
 	done, err := e.admitMutation(engine)
 	if err != nil {
@@ -112,7 +95,7 @@ func (e *Executor) Sleep(engine string) (err error) {
 	if err != nil {
 		return err
 	}
-	// Paused startup skips RestoreEnabled, so restore only its cleanup
+	// Paused startup skips RestoreInstalled, so restore only its cleanup
 	// endpoint here. This record never authorizes activation or a signal.
 	if port == 0 {
 		if known {
@@ -232,23 +215,7 @@ func (e *Executor) unsupportedStatus(engine string, m *Manifest) EngineStatus {
 	return status
 }
 
-// Intent reports every registered engine's saved intent. It reads only the
-// intent file, never an engine's lifecycle lock, so it answers immediately even
-// while an engine is starting.
-func (e *Executor) Intent() (engineintent.Snapshot, error) {
-	return e.desired.snapshot(e.reg.Names())
-}
-
-// emitIntent pushes the current saved intent after it changes. Best-effort:
-// unreadable or invalid snapshots are not published.
-func (e *Executor) emitIntent() {
-	if intent, err := e.Intent(); err == nil {
-		e.notify(intentChangedMethod, intent)
-	}
-}
-
-// handleLifecyclePolicyRequest serves engine:wake, engine:sleep and
-// engine:intent. It reports whether it took the method.
+// handleLifecyclePolicyRequest serves internal wake and sleep requests.
 func (m *Manager) handleLifecyclePolicyRequest(ctx context.Context, msg *Message) bool {
 	switch msg.Method {
 	case wakeMethod, sleepMethod:
@@ -279,10 +246,6 @@ func (m *Manager) handleLifecyclePolicyRequest(ctx context.Context, msg *Message
 			}
 			m.respondOrErr(msg, st, err)
 		}()
-		return true
-	case intentMethod:
-		intent, err := m.exec.Intent()
-		m.respondOrErr(msg, intent, err)
 		return true
 	}
 	return false
