@@ -525,7 +525,7 @@ func (e *Executor) previewLaunch(st *engineState, request settings.Request, prep
 
 // ConfigureLaunch owns the entire engine operation lock, including the narrow
 // parent rebind callback. The parent already holds the node configuration lock;
-// that callback must not acquire it again. Explicit ON/OFF intent is untouched.
+// that callback must not acquire it again.
 // ReviewedModelChange is transient evidence for frozen conversion, never
 // another edit to the desired settings.
 func (e *Executor) ConfigureLaunch(ctx context.Context, p settings.Configure, rebind func() error) (settings.LaunchState, error) {
@@ -687,10 +687,8 @@ func (e *Executor) configureLaunchLocked(ctx context.Context, st *engineState, p
 		e.emitState(p.Engine)
 		return e.launchStateLocked(p.Engine, st), err
 	}
+	// Resume records that settings coordination stopped this engine.
 	resume := p.Resume
-	if enabled, known, err := e.desired.get(p.Engine); err == nil && known && !enabled && !old.Running {
-		resume = false
-	}
 	if !activationBlocked && ((changed && old.Running) || resume) {
 		if recheckContent != nil {
 			if err := recheckContent(); err != nil {

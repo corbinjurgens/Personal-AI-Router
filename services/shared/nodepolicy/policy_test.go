@@ -549,7 +549,7 @@ func TestParseFillsOmittedFieldsFromDefault(t *testing.T) {
 	if p.Availability != Paused {
 		t.Fatalf("availability = %q", p.Availability)
 	}
-	if p.Admission.MaxResidentModels != 1 || !p.Idle.StartOnDemand || p.Tiers == nil || p.Profiles == nil {
+	if p.Admission.MaxResidentModels != 1 || p.Idle.UnloadAfterMinutes != 5 || p.Tiers == nil || p.Profiles == nil {
 		t.Fatalf("defaults not applied: %+v", p)
 	}
 }
@@ -754,7 +754,7 @@ const v1Document = `{
   "pause": {"onActive": "cancel", "drainTimeoutSeconds": 7, "unloadModels": false, "stopEngines": true},
   "admission": {"maxResidentModels": 2, "maxConcurrentPerModel": 3, "queueTimeoutSeconds": 11,
     "memoryBudgetBytes": 8589934592, "switchModels": false, "switchTimeoutSeconds": 13},
-  "idle": {"unloadAfterMinutes": 5, "stopEngineAfterMinutes": 9, "startOnDemand": false, "wakeTimeoutSeconds": 17},
+  "idle": {"unloadAfterMinutes": 5, "stopengineafterminutes": 9, "startondemand": false, "wakeTimeoutSeconds": 17},
   "profiles": [{"key": "qwen", "displayName": "qwen", "engine": "llamacpp", "model": "qwen3-8b",
     "contextTokens": 16384, "capabilities": ["tools"], "memoryBytes": 5000000000, "maxConcurrent": 2,
     "requestOptions": {  "options": { "num_ctx": 16384 }  }}],
@@ -776,7 +776,7 @@ func TestParseMigratesV1KeepingLocalSettings(t *testing.T) {
 			MaxResidentModels: 2, MaxConcurrentPerModel: 3, QueueTimeoutSeconds: 11,
 			MemoryBudgetBytes: 8589934592, SwitchModels: false, SwitchTimeoutSeconds: 13,
 		},
-		Idle: IdleConfig{UnloadAfterMinutes: 5, StopEngineAfterMinutes: 9, StartOnDemand: false, WakeTimeoutSeconds: 17},
+		Idle: IdleConfig{UnloadAfterMinutes: 5, WakeTimeoutSeconds: 17},
 		Profiles: []Profile{{
 			Key: "qwen", DisplayName: "qwen", Engine: "llamacpp", Model: "qwen3-8b", ContextTokens: 16384,
 			Capabilities: []Capability{CapTools}, MemoryBytes: 5000000000, MaxConcurrent: 2,

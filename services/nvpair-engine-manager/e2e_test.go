@@ -67,7 +67,7 @@ func TestE2EOverStdio(t *testing.T) {
 		t.Fatalf("get-installed did not list the injected engine: %s", r)
 	}
 
-	send(t, stdin, 2, "engine:install", map[string]any{"engine": "fake", "start": true})
+	send(t, stdin, 2, "engine:install", map[string]any{"engine": "fake"})
 	if r := waitResult(t, frames, "2", 20*time.Second); !strings.Contains(string(r), `"running":true`) {
 		t.Fatalf("start did not report running: %s", r)
 	}
@@ -78,8 +78,9 @@ func TestE2EOverStdio(t *testing.T) {
 	}
 
 	send(t, stdin, 4, sleepMethod, map[string]any{"engine": "fake"})
-	if r := waitResult(t, frames, "4", 10*time.Second); !strings.Contains(string(r), `"running":false`) {
-		t.Fatalf("stop did not report stopped: %s", r)
+	var stopped EngineStatus
+	if err := json.Unmarshal(waitResult(t, frames, "4", 10*time.Second), &stopped); err != nil || stopped.Running || !stopped.TerminationVerified {
+		t.Fatalf("sleep status=%+v err=%v, want verified stopped", stopped, err)
 	}
 
 	send(t, stdin, 5, "shutdown", nil)
@@ -129,7 +130,7 @@ func TestE2EPortSavePreservesLaunchOverrides(t *testing.T) {
 	second.stop(t)
 }
 
-func TestE2EDesiredStateAcrossShutdownRPC(t *testing.T) {
+func TestE2EInstalledEnginesRestoreAcrossShutdownRPC(t *testing.T) {
 	cfg := t.TempDir()
 	home := t.TempDir()
 	for _, dir := range []string{
@@ -140,7 +141,7 @@ func TestE2EDesiredStateAcrossShutdownRPC(t *testing.T) {
 	}
 
 	first := startE2EManager(t, cfg, home)
-	send(t, first.stdin, 1, "engine:install", map[string]any{"engine": "fake", "start": true})
+	send(t, first.stdin, 1, "engine:install", map[string]any{"engine": "fake"})
 	var started EngineStatus
 	if err := json.Unmarshal(waitResult(t, first.frames, "1", 20*time.Second), &started); err != nil || !started.Running {
 		t.Fatalf("start status=%+v err=%v", started, err)
@@ -153,36 +154,36 @@ func TestE2EDesiredStateAcrossShutdownRPC(t *testing.T) {
 	first.stop(t)
 
 	second := startE2EManager(t, cfg, home)
-	notify(t, second.stdin, restoreEnabledMethod, nil)
+	notify(t, second.stdin, restoreInstalledMethod, nil)
 	waitNotify(t, second.frames, "engine:state-changed", 20*time.Second)
 	send(t, second.stdin, 1, "engine:status", map[string]any{"engine": "fake"})
 	if r := waitResult(t, second.frames, "1", 5*time.Second); !strings.Contains(string(r), `"running":true`) {
-		t.Fatalf("saved ON state was not restored: %s", r)
+		t.Fatalf("installed engine was not restored: %s", r)
 	}
 	send(t, second.stdin, 2, sleepMethod, map[string]any{"engine": "fake"})
 	waitResult(t, second.frames, "2", 10*time.Second)
 	second.stop(t)
-	// Phase11 removes the public Off control; seed historical saved Off only
-	// after the worker exits to retain restore coverage without a new control.
+	// Historical saved Off fields are ignored when restoring installed engines.
 	base := cfg
 	if runtime.GOOS == "darwin" {
 		base = filepath.Join(home, "Library", "Application Support")
 	}
 	store := newDesiredStateStore(filepath.Join(base, "Nvidia Corporation", "Personal AI Router", "engine-bin"))
-	if err := store.set("fake", false, intentLocal); err != nil {
+	if err := os.WriteFile(store.path, []byte(`{"engines":{"fake":false},"offBy":{"fake":"local"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	third := startE2EManager(t, cfg, home)
-	notify(t, third.stdin, restoreEnabledMethod, nil)
+	notify(t, third.stdin, restoreInstalledMethod, nil)
+	waitNotify(t, third.frames, "engine:state-changed", 20*time.Second)
 	send(t, third.stdin, 1, "engine:status", map[string]any{"engine": "fake"})
-	if r := waitResult(t, third.frames, "1", 5*time.Second); !strings.Contains(string(r), `"running":false`) {
-		t.Fatalf("explicit OFF state was not preserved: %s", r)
+	if r := waitResult(t, third.frames, "1", 5*time.Second); !strings.Contains(string(r), `"running":true`) {
+		t.Fatalf("historical Off prevented installed engine restore: %s", r)
 	}
 	third.stop(t)
 }
 
-// A hard manager death leaves its owned child alive. Saved ON must reclaim
+// A hard manager death leaves its owned child alive. Restore must reclaim
 // that exact managed image on the configured port before starting a new child.
 func TestE2ERestoreReclaimsOwnedOrphanAfterHardKill(t *testing.T) {
 	testE2ERestoreReclaimsOwnedOrphan(t, false)
@@ -226,7 +227,7 @@ func testE2ERestoreReclaimsOwnedOrphan(t *testing.T, portZero bool) {
 	}
 
 	first := startE2EManager(t, cfg, home)
-	send(t, first.stdin, 1, "engine:install", map[string]any{"engine": "fake", "start": true})
+	send(t, first.stdin, 1, "engine:install", map[string]any{"engine": "fake"})
 	var started EngineStatus
 	if err := json.Unmarshal(waitResult(t, first.frames, "1", 20*time.Second), &started); err != nil || !started.Running || started.Port <= 0 || (!portZero && started.Port != port) {
 		t.Fatalf("initial start = %+v, err=%v; want running on port %d", started, err, port)
@@ -271,7 +272,7 @@ func testE2ERestoreReclaimsOwnedOrphan(t *testing.T, portZero bool) {
 	}
 
 	second := startE2EManager(t, cfg, home)
-	notify(t, second.stdin, restoreEnabledMethod, nil)
+	notify(t, second.stdin, restoreInstalledMethod, nil)
 	waitNotify(t, second.frames, "engine:state-changed", 20*time.Second)
 	send(t, second.stdin, 2, "engine:status", map[string]any{"engine": "fake"})
 	var restored EngineStatus
@@ -350,7 +351,7 @@ func TestE2EPrepareShutdownCancelsStartingEngine(t *testing.T) {
 	}
 
 	manager := startE2EManager(t, cfg, home)
-	send(t, manager.stdin, 1, "engine:install", map[string]any{"engine": "fake", "start": true})
+	send(t, manager.stdin, 1, "engine:install", map[string]any{"engine": "fake"})
 
 	var pid int
 	deadline := time.Now().Add(5 * time.Second)

@@ -264,9 +264,6 @@ func TestStartWaitsForDelayedReadinessWithinBudget(t *testing.T) {
 	if st, err := ex.Status("fake"); err != nil || !st.Running || !st.Healthy {
 		t.Fatalf("delayed start status = %+v, err=%v", st, err)
 	}
-	if enabled, known, err := ex.desired.get("fake"); err != nil || !known || !enabled {
-		t.Fatalf("desired state after delayed start = (%v, %v, %v), want known ON", enabled, known, err)
-	}
 	if hasErr(ex.Errors(), startFailedID("fake")) {
 		t.Fatalf("delayed success retained a start-failed error: %+v", ex.Errors())
 	}

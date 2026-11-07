@@ -14,6 +14,38 @@ import (
 	"nvpair-shared/engines"
 )
 
+func TestStoredModelLoadsRetiredIdleRefusalExplainsRecovery(t *testing.T) {
+	manifest := func(load string) []byte {
+		return []byte(`{"runtime":{"port":49150,"modelLoads":[{"modelId":"keep","requested":{}},` + load + `]},"platforms":{"linux/amd64":{}}}`)
+	}
+	t.Run("current shape remains accepted", func(t *testing.T) {
+		if _, err := applyPlatformDefaults(manifest(`{"modelId":"current","requested":{}}`)); err != nil {
+			t.Fatalf("current model loads refused: %v", err)
+		}
+	})
+	test := func(name, load, path string) {
+		t.Run(name, func(t *testing.T) {
+			_, err := applyPlatformDefaults(manifest(load))
+			if err == nil {
+				t.Fatal("accepted retired idle field")
+			}
+			for _, want := range []string{path, `unknown field "sleepIdleSeconds"`, "remove model load at runtime.modelLoads[1]", "recreate it with Preview and Apply", "Other settings and model files are unaffected."} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("refusal %q missing %q", err, want)
+				}
+			}
+		})
+	}
+	test("requested", `{"modelId":"retired","requested":{"sleepIdleSeconds":300}}`, "payload.1.requested:")
+	test("resolved options", `{"modelId":"retired","requested":{},"resolved":{"options":{"sleepIdleSeconds":300}}}`, "payload.1.resolved.options:")
+	t.Run("unrelated unknown field retains its refusal", func(t *testing.T) {
+		_, err := applyPlatformDefaults(manifest(`{"modelId":"invalid","requested":{"unknownOption":1,"extraOptions":{"sleepIdleSeconds":"-1"}}}`))
+		if err == nil || !strings.Contains(err.Error(), `unknown field "unknownOption"`) || strings.Contains(err.Error(), "Preview and Apply") {
+			t.Fatalf("unrelated field refusal changed: %v", err)
+		}
+	})
+}
+
 func TestStoredModelLoadsGainProfileKey(t *testing.T) {
 	m := validManifest()
 	raw, err := json.Marshal(m)

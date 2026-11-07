@@ -793,7 +793,7 @@ func (f *strataContractFixture) strataContractStartRuntime(t *testing.T) {
 	}
 	for attempt := 0; attempt < 8; attempt++ {
 		f.strataContractWriteRuntime(t)
-		response, err := f.Manager.strataContractCallWithin("engine:install", map[string]any{"engine": "strata", "start": true, "port": f.Port, "bind": "127.0.0.1"}, strataContractStartup)
+		response, err := f.Manager.strataContractCallWithin("engine:install", map[string]any{"engine": "strata", "port": f.Port, "bind": "127.0.0.1"}, strataContractStartup)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1253,7 +1253,7 @@ func TestStrataContractDescriptorAndLifecycle(t *testing.T) {
 		}
 		strataContractWriteJSON(t, path, manifest)
 		fixture.strataContractStartManager(t)
-		response := fixture.Manager.strataContractCall(t, "engine:install", map[string]any{"engine": "strata", "start": true, "port": port})
+		response := fixture.Manager.strataContractCall(t, "engine:install", map[string]any{"engine": "strata", "port": port})
 		if response.Error == nil || response.Error.Code != -32000 || !strings.Contains(response.Error.Message, "occupied by a service that did not identify as Strata") {
 			t.Fatalf("wrong-service start error=%v", response.Error)
 		}

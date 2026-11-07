@@ -112,7 +112,7 @@ func TestDescriptorEngineIsFrontedFromAUserManifest(t *testing.T) {
 		}
 	}
 
-	callBrokerRPC(t, stdin, msgs, 9101, "engine:install", map[string]any{"engine": engineID, "start": true})
+	callBrokerRPC(t, stdin, msgs, 9101, "engine:install", map[string]any{"engine": engineID})
 
 	client := &http.Client{Timeout: 5 * time.Second}
 	t.Cleanup(client.CloseIdleConnections)

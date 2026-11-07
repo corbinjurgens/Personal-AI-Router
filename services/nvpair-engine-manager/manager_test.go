@@ -68,9 +68,6 @@ func TestGlobalMutationBusyRetainsRPCIdentity(t *testing.T) {
 	if data.Kind != "busy" || strings.Contains(reply.Error.Message, "switch") {
 		t.Fatalf("global mutation error: %+v, data=%+v", reply.Error, data)
 	}
-	if _, known, err := ex.desired.get("source"); err != nil || known {
-		t.Fatalf("busy uninstall changed saved intent: known=%v error=%v", known, err)
-	}
 }
 
 // TestManagerErrorResponses drives handleMessage / runOp / runAction over
@@ -106,24 +103,24 @@ func TestManagerErrorResponses(t *testing.T) {
 	mustContain(t, out.String(), "engine and action are required")
 }
 
-func TestRunOpRejectsBadPort(t *testing.T) {
+func TestRunOpRejectsRetiredPortOverride(t *testing.T) {
 	var out bytes.Buffer
 	ex := NewExecutor(NewRegistry(), NewReporter(nil), func(string, any) {}, t.TempDir())
 	m := NewManager(NewCodec(&out), ex, nil, "")
 	id := json.RawMessage("1")
 	m.runOp(context.Background(), &Message{JSONRPC: "2.0", ID: &id, Method: "engine:install",
 		Params: json.RawMessage(`{"engine":"fake","port":70000}`)})
-	mustContain(t, out.String(), "port must be between")
+	mustContain(t, out.String(), "unknown field")
 }
 
-func TestRunOpRejectsBadBind(t *testing.T) {
+func TestRunOpRejectsRetiredBindOverride(t *testing.T) {
 	var out bytes.Buffer
 	ex := NewExecutor(NewRegistry(), NewReporter(nil), func(string, any) {}, t.TempDir())
 	m := NewManager(NewCodec(&out), ex, nil, "")
 	id := json.RawMessage("1")
 	m.runOp(context.Background(), &Message{JSONRPC: "2.0", ID: &id, Method: "engine:install",
 		Params: json.RawMessage(`{"engine":"fake","bind":"not-an-ip"}`)})
-	mustContain(t, out.String(), "bind must be a valid IP")
+	mustContain(t, out.String(), "unknown field")
 }
 
 func TestRunOpInstallAutostart(t *testing.T) {
@@ -133,7 +130,7 @@ func TestRunOpInstallAutostart(t *testing.T) {
 	m := NewManager(NewCodec(&out), ex, nil, "")
 	id := json.RawMessage("1")
 	m.runOp(context.Background(), &Message{JSONRPC: "2.0", ID: &id, Method: "engine:install",
-		Params: json.RawMessage(`{"engine":"fake","start":true}`)})
+		Params: json.RawMessage(`{"engine":"fake"}`)})
 	st, _ := ex.Status("fake")
 	if !st.Running {
 		t.Fatalf("expected running after install+autostart, got %+v", st)

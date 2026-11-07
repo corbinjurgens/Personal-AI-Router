@@ -14,6 +14,9 @@ import { useClusterInvitationsStore } from '@/ui/stores/cluster-invitations.stor
 import { useEngineSettingsStore } from '@/ui/stores/engine-settings.store'
 import type { EngineSettingsSnapshot } from '@/shared/types/engine-settings'
 import type { IEngineApi } from '@/ui/api/engine-api'
+import { useEngineStatusStore } from '@/ui/stores/engine-status.store'
+import { useNodeConfigurationStore } from '@/ui/stores/node-configuration.store'
+import { useErrorsStore } from '@/ui/stores/errors.store'
 
 const saved: EngineSettingsSnapshot = {
     nodeId: 'peer',
@@ -61,6 +64,9 @@ let container: HTMLDivElement
 const longName = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789AB'
 
 beforeEach(() => {
+    useEngineStatusStore.setState({ statusByNode: new Map() })
+    useNodeConfigurationStore.setState({ availability: new Map() })
+    useErrorsStore.setState({ errors: [] })
     vi.clearAllMocks()
     getSettings.mockResolvedValue(structuredClone(saved))
     onChanged.mockReturnValue(stopChanged)
@@ -360,6 +366,83 @@ describe('node card role members', () => {
         await act(async () => denyFresh(new Error('Management permission denied')))
         expect(container.textContent).toContain('Saved load unavailable')
         expect(container.textContent).not.toContain('GPU: 12 layers')
+    })
+
+    it('shows missing-engine warnings in role order and opens the assigned profile', async () => {
+        useEngineStatusStore.setState({
+            statusByNode: new Map([
+                [
+                    'peer',
+                    new Map([
+                        [
+                            'llama-cpp',
+                            {
+                                engineType: 'llama-cpp',
+                                nodeId: 'peer',
+                                processStatus: 'not-installed',
+                                enginePort: null,
+                                proxyPort: null
+                            }
+                        ]
+                    ])
+                ]
+            ])
+        })
+        await renderRoles()
+        const warnings = Array.from(container.querySelectorAll('button')).map(button =>
+            button.getAttribute('aria-label')
+        )
+        expect(warnings).toEqual([
+            'review: first engine not installed',
+            'review: second engine not installed',
+            'coder: first engine not installed'
+        ])
+        await act(async () => container.querySelector('button')?.click())
+        expect(useOverviewUiStore.getState().settingsProfileKey).toBe('first')
+    })
+
+    it('does not attribute a node-wide error to roles without engine status', async () => {
+        useErrorsStore.setState({
+            errors: [
+                { id: 'node-error', nodeId: 'peer', message: 'Discovery failed', timestamp: 1 }
+            ]
+        })
+        await renderRoles()
+        expect(container.textContent).not.toContain('engine error')
+        await act(async () =>
+            useErrorsStore.setState({
+                errors: [
+                    {
+                        id: 'engine-error',
+                        nodeId: 'peer',
+                        engineType: 'llamacpp',
+                        message: 'Engine failed',
+                        timestamp: 2
+                    }
+                ]
+            })
+        )
+        expect(container.textContent).toContain('engine error')
+    })
+
+    it('shows paused problems for assigned profiles', async () => {
+        useNodeConfigurationStore.setState({
+            availability: new Map([
+                [
+                    'peer',
+                    {
+                        value: 'paused',
+                        current: true,
+                        reading: false,
+                        stale: false
+                    }
+                ]
+            ])
+        })
+        await renderRoles()
+        expect(container.querySelector('button')?.getAttribute('aria-label')).toBe(
+            'review: first paused'
+        )
     })
 
     it('retains empty declared roles and unavailable memberships explicitly', async () => {

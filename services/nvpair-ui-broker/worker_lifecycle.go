@@ -490,7 +490,7 @@ func (b *Broker) spawnEngineMgr() (supervisedHandle, error) {
 	// Initial restore waits for facade startup. A later engine-manager respawn
 	// restores here after that shared startup boundary has completed.
 	if b.facadeStartupReady() {
-		b.restoreEnabledEngines(w)
+		b.restoreInstalledEngines(w)
 	}
 	// Register engine-manager's HTTP surface so the daemon advertises em= on this
 	// node's _nvpair-node record; peers enrich models from it. The same configured

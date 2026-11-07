@@ -12,8 +12,7 @@ package main
 // lives in memory, is replaced whole on every push and is unknown until the
 // first one, which the broker sends whenever engine-manager reports ready.
 //
-// Pause fences every peer mutation and activation; ordinary saved Off is
-// only lifecycle intent.
+// Pause fences every peer mutation and activation.
 
 import (
 	"context"

@@ -199,20 +199,20 @@ func TestDurableSetPortAdoptsUncertainReplacement(t *testing.T) {
 
 func TestDurableDesiredStateAdoptsUncertainReplacement(t *testing.T) {
 	store := newDesiredStateStore(t.TempDir())
-	if err := store.set("test", false, intentLocal); err != nil {
+	if err := store.setAllocatedPort("test", 12345); err != nil {
 		t.Fatal(err)
 	}
 	useEngineFileReplacer(t, durablefile.Replacer{
 		SyncDir: func(string) error { return errors.New("injected directory sync failure") },
 	})
-	if err := store.set("test", true, intentLocal); err != nil {
+	if err := store.setAllocatedPort("test", 23456); err != nil {
 		t.Fatal(err)
 	}
-	enabled, known, err := store.get("test")
-	if err != nil || !known || !enabled {
-		t.Fatalf("saved intent: enabled=%v known=%v err=%v", enabled, known, err)
+	port, err := store.allocatedPort("test")
+	if err != nil || port != 23456 {
+		t.Fatalf("allocated port=%d err=%v", port, err)
 	}
-	assertDurableFile(t, store.path, []byte("{\n  \"engines\": {\n    \"test\": true\n  }\n}"))
+	assertDurableFile(t, store.path, []byte("{\n  \"allocatedPorts\": {\n    \"test\": 23456\n  }\n}"))
 }
 
 func TestDurableInstallMarkerAdoptsUncertainReplacement(t *testing.T) {

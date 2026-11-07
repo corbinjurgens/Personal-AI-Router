@@ -267,7 +267,7 @@ scheduling traffic is forwarded to Personal AI Router.
 ## Engine lifecycle behavior
 
 `nvpair-engine-manager` owns installed/running state, persisted engine ports,
-model operations, and desired engine state across app restarts.
+model operations, and restoration of installed engines across service restarts.
 
 The backend emits terminal lifecycle state and install progress. Personal AI Router maintains
 one centralized pending-action layer so controls respond immediately while
@@ -280,21 +280,13 @@ remote control surface where supported.
 
 ### Engine settings
 
-The bridge subscribes to engine events before reading local `engine:intent`.
-The read and `engine:intent-changed` push carry required `enabledByEngine`
-and `offByEngine` maps. Origins are `local` or `peer`, relative to the owning
-device, and appear only for explicitly saved Off engines (legacy saved Off
-without provenance reports `local`). Default false and On have no origin.
-Strict parsing rejects missing maps, invalid values and origins for enabled or
-unreported engines. The nullable bridge snapshot is exposed through
-`engines:get-intent` and `engines:intent-changed`. Failed reads, malformed pushes
-and service/broker/manager restarts invalidate it to null. Local read generations
-and broker session fences prevent late reads from replacing newer state.
-
 A profile names its engine in node policy. Concrete model requests still route
-through their entry engine. Saved intent, private on-demand wake and settings
-operations retain their owners and admission rules. Users and peers have no
-engine start, stop, restart or On/Off control; wake and sleep are broker-private.
+through their entry engine. Every installed engine runs while the node is
+available. Admission repairs a stopped engine through private on-demand wake.
+Users and peers have no engine start, stop, restart or On/Off control; wake and
+sleep are broker-private. Pause and Halt stop engines, and Resume restores every
+installed engine. PAIR unloads idle models independently and admits all model
+loads through the proxy's node capacity limit.
 
 The node projection the broker sends engine-manager
 carries `managementBlocked`; the desktop does not read it. Model configuration
@@ -327,11 +319,10 @@ validated. Managed CORS origin-list and boolean-control changes must originate o
 environment assignments can also be changed by a pinned peer.
 
 Engine start, stop and restart RPCs and peer start/stop routes are removed.
-Install retains its `start` option, and settings application can restart an
-engine internally. First-open desktop startup does not start installed engines.
-Saved intent, restoration and idle semantics remain until phase 15; this does
-not mean every installed engine runs. Phase 11 must not be installed without
-phase 15.
+Install starts the engine when the node is available. Settings application
+restarts an engine that it stopped, while an already-stopped engine stays
+stopped until restoration or demand. Desktop startup attaches to the service;
+the service owns engine restoration. Phases 11 and 15 install together.
 
 Stopping a managed engine is bounded. On Unix, engine-manager sends SIGTERM to
 the owned process group, waits the manifest's `stop.grace_s` (five seconds by

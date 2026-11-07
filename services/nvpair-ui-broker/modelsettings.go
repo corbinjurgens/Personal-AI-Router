@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"nvpair-shared/durablefile"
-	"nvpair-shared/engineintent"
 	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/modelconfig"
@@ -274,7 +273,7 @@ func (b *Broker) modelPolicyReservationLocked() error {
 }
 
 // The journal is the reservation authority. Rebuild volatile admission and
-// identity fences before replaying proxy state, advertisements or engine intent.
+// identity fences before replaying proxy state, advertisements or restoring engines.
 func (b *Broker) reconstructModelSettingsLocked() {
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
@@ -1274,23 +1273,6 @@ func observeModelSettingsLaunch(record *engineSettingsRecord, launch settings.La
 	record.Snapshot.EffectiveServerPort = launch.EffectivePort
 }
 
-// ConfigureLaunch owns activation and its Pause/saved-Off guards. If its
-// resume converges to stopped, require fresh explicit veto evidence from that
-// same manager before treating the stopped result as a successful saved apply.
-func modelSettingsResumeVeto(ctx context.Context, worker *rpcWorker, engine string) (bool, error) {
-	var intent engineintent.Snapshot
-	if err := modelSettingsCall(ctx, worker, engineIntentMethod, nil, &intent); err != nil {
-		return false, err
-	}
-	if err := intent.Validate(); err != nil {
-		return false, err
-	}
-	if enabled, known := intent.EnabledByEngine[engine]; known && !enabled && intent.OffByEngine[engine] != "" {
-		return true, nil
-	}
-	return false, nil
-}
-
 func (b *Broker) runModelSettingsOperationLocked(ctx context.Context, engine string, record *engineSettingsRecord) error {
 	fail := func(err error) error { return b.failModelSettingsLocked(record, err) }
 	reviewed, err := record.Model.reviewedRemoval()
@@ -1462,19 +1444,7 @@ func (b *Broker) runModelSettingsOperationLocked(ctx context.Context, engine str
 		return fail(modelSettingsConflict("Pause is pending native shutdown; engine remains withdrawn"))
 	}
 	if record.Resume && !paused && !final.Running {
-		b.engineConfigMu.Unlock()
-		veto, vetoErr := modelSettingsResumeVeto(ctx, worker, engine)
-		b.engineConfigMu.Lock()
-		paused, _ = b.settingsPause()
-		if !b.modelWorkerCurrent(worker, source) {
-			return fail(modelSettingsConflict("engine manager changed during activation veto readback"))
-		}
-		if !paused && (vetoErr != nil || !veto) {
-			if vetoErr != nil {
-				return fail(vetoErr)
-			}
-			return fail(fmt.Errorf("settings are persisted but the requested running engine is not ready"))
-		}
+		return fail(fmt.Errorf("settings are persisted but the requested running engine is not ready"))
 	}
 	if final.ServingReadback != nil && (final.ServingReadback.Status == "mismatch" || final.ServingReadback.Status == "unknown") {
 		return fail(modelSettingsConflict("native serving readback is unresolved"))

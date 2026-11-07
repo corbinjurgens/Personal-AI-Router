@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"net"
 	"nvpair-shared/durablefile"
-	"nvpair-shared/engineintent"
 	"os"
 	"path/filepath"
 	"sync"
@@ -18,22 +17,18 @@ import (
 )
 
 const (
-	desiredStateFileName  = "engine-state.json"
-	restoreEnabledMethod  = "engine:restore-enabled"
-	prepareShutdownMethod = "engine:prepare-shutdown"
+	desiredStateFileName   = "engine-state.json"
+	restoreInstalledMethod = "engine:restore-installed"
+	prepareShutdownMethod  = "engine:prepare-shutdown"
 )
 
 type desiredStateFile struct {
-	Engines map[string]bool `json:"engines"`
 	// AllocatedPorts locates process-mode port-zero launches after manager death.
 	// A port is evidence only; reclaim still checks the current managed image.
 	AllocatedPorts map[string]int `json:"allocatedPorts,omitempty"`
 	// ProcessStops survives removal of a manifest's host block. No arguments,
 	// environment, commands or credentials belong in this cleanup-only record.
 	ProcessStops map[string]processStopEvidence `json:"processStops,omitempty"`
-	// OffBy records who saved each engine Off: intentLocal or intentPeer. An
-	// engine saved Off with no entry predates provenance and counts as local.
-	OffBy map[string]intentOrigin `json:"offBy,omitempty"`
 }
 
 type processStopEvidence struct {
@@ -78,17 +73,7 @@ func (s *desiredStateStore) setProcessStop(engine string, evidence processStopEv
 	return s.save(state)
 }
 
-// intentOrigin says who saved an engine's intent: an internal local Executor
-// operation or a local/peer install-with-start.
-type intentOrigin string
-
-const (
-	intentLocal intentOrigin = "local"
-	intentPeer  intentOrigin = "peer"
-)
-
-// desiredStateStore records explicit user intent. A missing engine key is a
-// legacy/unknown state and deliberately does not auto-start.
+// desiredStateStore retains process cleanup evidence and allocated endpoints.
 type desiredStateStore struct {
 	mu   sync.Mutex
 	path string
@@ -102,17 +87,6 @@ func newDesiredStateStore(baseDir string) *desiredStateStore {
 	return &desiredStateStore{path: path}
 }
 
-func (s *desiredStateStore) get(engine string) (enabled, known bool, err error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	state, err := s.load()
-	if err != nil {
-		return false, false, err
-	}
-	enabled, known = state.Engines[engine]
-	return enabled, known, nil
-}
-
 func (s *desiredStateStore) allocatedPort(engine string) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -121,7 +95,7 @@ func (s *desiredStateStore) allocatedPort(engine string) (int, error) {
 }
 
 // setAllocatedPort records the endpoint before spawn. Zero clears execution
-// evidence after a clean stop without changing the user's saved intent.
+// evidence after a clean stop.
 func (s *desiredStateStore) setAllocatedPort(engine string, port int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -159,66 +133,6 @@ func (e *Executor) clearAllocatedPort(st *engineState, engine string) error {
 	return err
 }
 
-// snapshot projects registered engines from one read under the store lock.
-// It never writes the file, including when legacy Off needs a local origin.
-func (s *desiredStateStore) snapshot(names []string) (engineintent.Snapshot, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	state, err := s.load()
-	if err != nil {
-		return engineintent.Snapshot{}, err
-	}
-	out := engineintent.Snapshot{
-		EnabledByEngine: make(map[string]bool, len(names)),
-		OffByEngine:     make(map[string]engineintent.Origin),
-	}
-	for _, name := range names {
-		enabled, known := state.Engines[name]
-		out.EnabledByEngine[name] = known && enabled
-		if known && !enabled {
-			origin, present := state.OffBy[name]
-			if !present {
-				origin = intentLocal
-			}
-			out.OffByEngine[name] = engineintent.Origin(origin)
-		}
-	}
-	if err := out.Validate(); err != nil {
-		return engineintent.Snapshot{}, err
-	}
-	return out, nil
-}
-
-// set saves engine's intent. Saving On clears the Off provenance; saving Off
-// records origin, except that a paired node's Off never replaces the
-// provenance of an engine already saved Off, so it cannot downgrade a local Off.
-func (s *desiredStateStore) set(engine string, enabled bool, origin intentOrigin) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.path == "" {
-		return errors.New("no user data directory is available")
-	}
-	state, err := s.load()
-	if err != nil {
-		return err
-	}
-	state.setIntent(engine, enabled, origin)
-	return s.save(state)
-}
-
-func (state *desiredStateFile) setIntent(engine string, enabled bool, origin intentOrigin) {
-	was, known := state.Engines[engine]
-	state.Engines[engine] = enabled
-	switch {
-	case enabled:
-		delete(state.OffBy, engine)
-	case origin == intentPeer && known && !was:
-		// A paired node's Off over an Off keeps the provenance it had.
-	default:
-		state.OffBy[engine] = origin
-	}
-}
-
 func (s *desiredStateStore) load() (desiredStateFile, error) {
 	data, err := s.readDocument()
 	if err != nil {
@@ -248,12 +162,6 @@ func decodeDesiredState(data []byte) (desiredStateFile, error) {
 	if err := json.Unmarshal(data, &state); err != nil {
 		return desiredStateFile{}, fmt.Errorf("decode desired engine state: %w", err)
 	}
-	if state.Engines == nil {
-		state.Engines = make(map[string]bool)
-	}
-	if state.OffBy == nil {
-		state.OffBy = make(map[string]intentOrigin)
-	}
 	for engine, port := range state.AllocatedPorts {
 		if port < 1 || port > 65535 {
 			return desiredStateFile{}, fmt.Errorf("invalid allocated port for %s", engine)
@@ -278,37 +186,15 @@ func (s *desiredStateStore) save(state desiredStateFile) error {
 	return nil
 }
 
-// setDesiredEnabled saves engine's intent; origin is who asked, which an Off
-// records (desiredStateStore.set).
-func (e *Executor) setDesiredEnabled(engine string, enabled bool, origin intentOrigin) error {
-	if err := e.desired.set(engine, enabled, origin); err != nil {
-		return fmt.Errorf("persist %s desired state: %w", engine, err)
-	}
-	// The broker mirrors saved intent into the proxy so admission can refuse a
-	// request for an engine saved Off instead of asking to wake it.
-	e.emitIntent()
-	return nil
-}
-
-// RestoreEnabled starts only engines with an explicit saved ON state. Each
-// engine rechecks its intent while holding the lifecycle lock so a concurrent
-// explicit OFF always wins.
-func (e *Executor) RestoreEnabled(ctx context.Context) error {
+// RestoreInstalled starts installed engines subject to activation admission.
+func (e *Executor) RestoreInstalled(ctx context.Context) error {
 	var wg sync.WaitGroup
 	errs := make(chan error, len(e.reg.Names()))
 	for _, engine := range e.reg.Names() {
-		enabled, known, err := e.desired.get(engine)
-		if err != nil {
-			errs <- fmt.Errorf("restore %s: %w", engine, err)
-			continue
-		}
-		if !known || !enabled {
-			continue
-		}
 		wg.Add(1)
 		go func(engine string) {
 			defer wg.Done()
-			if err := e.restoreEnabled(ctx, engine); err != nil {
+			if err := e.restoreInstalled(ctx, engine); err != nil {
 				errs <- fmt.Errorf("restore %s: %w", engine, err)
 			}
 		}(engine)
@@ -322,7 +208,7 @@ func (e *Executor) RestoreEnabled(ctx context.Context) error {
 	return errors.Join(joined...)
 }
 
-func (e *Executor) restoreEnabled(ctx context.Context, engine string) error {
+func (e *Executor) restoreInstalled(ctx context.Context, engine string) error {
 	done, err := e.admitMutation(engine)
 	if err != nil {
 		// Global mutation admission also fences automatic restore.
@@ -337,14 +223,14 @@ func (e *Executor) restoreEnabled(ctx context.Context, engine string) error {
 	if err != nil {
 		return err
 	}
-	// RestoreEnabled passes the manager's lifetime context through to hashing.
+	// RestoreInstalled passes the manager's lifetime context through to hashing.
 	if err := prepareStrataState(ctx, st); err != nil {
 		return err
 	}
 	st.opMu.Lock()
 	defer st.opMu.Unlock()
-	enabled, known, err := e.desired.get(engine)
-	if err != nil || !known || !enabled {
+	installed, err := e.Detect(engine)
+	if err != nil || !installed {
 		return err
 	}
 	return e.doStart(ctx, st, engine, startOpts{ReclaimOwned: true})

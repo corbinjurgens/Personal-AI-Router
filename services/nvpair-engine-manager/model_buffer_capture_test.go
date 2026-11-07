@@ -855,7 +855,7 @@ func TestModelBufferSamplesDoNotChangeAuthority(t *testing.T) {
 	filesBefore := files()
 	policyBefore := f.load.ex.nodeProjection.advertisement()
 	sourceBefore := f.load.ex.memoryEvidenceSource(nil)
-	desiredBefore, err := f.load.ex.desired.snapshot([]string{"fake"})
+	desiredBefore, err := f.load.ex.desired.load()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -878,7 +878,7 @@ func TestModelBufferSamplesDoNotChangeAuthority(t *testing.T) {
 	if f.load.st.plat.Runtime.Serving != nil {
 		t.Fatal("observation invented serving qualification")
 	}
-	desiredAfter, err := f.load.ex.desired.snapshot([]string{"fake"})
+	desiredAfter, err := f.load.ex.desired.load()
 	if err != nil {
 		t.Fatal(err)
 	}

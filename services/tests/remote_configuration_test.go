@@ -16,7 +16,6 @@ import (
 	"testing"
 	"time"
 
-	"nvpair-shared/engineintent"
 	"nvpair-shared/nodepolicy"
 )
 
@@ -38,10 +37,6 @@ func TestXARemoteConfigurationService(t *testing.T) {
 	// Lock verifies transport shutdown, so absent engines need a closed
 	// fixture port rather than the service fixture's live HTTP 503 sink.
 	jointIsolateEngines(t, rf.configDir, temporaryClusterPort(t))
-	jointWriteJSON(t, filepath.Join(jointAppDir(rf.configDir), "engine-bin", "engine-state.json"), map[string]any{
-		"engines": map[string]bool{"llamacpp": false},
-		"offBy":   map[string]engineintent.Origin{"llamacpp": engineintent.Local},
-	})
 	rf.start()
 	c := rf.readyClient()
 	var snap servicePolicySnapshot
@@ -153,18 +148,6 @@ func TestXARemoteConfigurationService(t *testing.T) {
 		return
 	}
 
-	if !t.Run("engine intent through the service", func(t *testing.T) {
-		before := decodeOBIntent(t, c.mustCall(t, "907", "engine:intent", nil).Result)
-		if before.EnabledByEngine["llamacpp"] || before.OffByEngine["llamacpp"] != engineintent.Local {
-			t.Fatal("service lost saved local Off intent")
-		}
-		c.mustCall(t, "908", "node:set-availability", mustMarshal(t, map[string]string{"state": "paused"}))
-		after := decodeOBIntent(t, c.mustCall(t, "1000", "engine:intent", nil).Result)
-		assertOBIntent(t, after, before)
-	}) {
-		return
-	}
-
 	t.Run("clean stop", func(t *testing.T) {
 		assertServiceStoppedReply(t, c.mustCall(t, "910", "service/stop", nil))
 		rf.waitChild(rf.service, serviceStopTimeout)
@@ -210,10 +193,6 @@ func TestXARemoteConfigurationStatus(t *testing.T) {
 		}
 	})
 
-	t.Run("engine intent", func(t *testing.T) {
-		c := subscribeOBIntent(t, f.target)
-		assertOBIntent(t, decodeOBIntent(t, c.call(t, "engine:intent", nil)), obIntent(false, map[string]engineintent.Origin{}))
-	})
 }
 
 func TestXARemoteConfigurationConflict(t *testing.T) {
@@ -286,7 +265,7 @@ func TestXARemoteConfigurationVeto(t *testing.T) {
 
 	if !t.Run("remote installation start is vetoed while paused", func(t *testing.T) {
 		task1Eventually(t, "remote installation refused by local pause", 15*time.Second, func() bool {
-			m := callRPC(t, f.origin.in, f.origin.msgs, "engine:remote-install", map[string]any{"node": "policy-joint-target", "engine": "llamacpp", "start": true}, 30*time.Second)
+			m := callRPC(t, f.origin.in, f.origin.msgs, "engine:remote-install", map[string]any{"node": "policy-joint-target", "engine": "llamacpp"}, 30*time.Second)
 			return m.Error != nil && m.Error.Code == -32011 && m.Error.Message == "remote /v1/engines/install: HTTP 409: This node is paused. Resume it on this node before managing it remotely." && len(m.Result) == 0
 		})
 	}) {

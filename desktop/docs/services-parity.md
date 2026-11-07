@@ -76,8 +76,8 @@ filesystem operation. See the [process fixture limits and native checklist](../.
 before using its eventual results as acceptance evidence.
 
 A profile names its engine. Concrete model requests still route through their
-entry engine. Existing saved intent and private on-demand wake
-remain available under their existing admission rules. Native N23, visual,
+entry engine. Installed engines run while the node is available; private
+on-demand wake repairs a stopped engine. Native N23, visual,
 multi-engine, Windows and assembled-source acceptance remain pending.
 
 | Domain                     | Status                          | Current state                                                                                                                                   |
@@ -347,14 +347,11 @@ Start, stop and restart RPCs and peer start/stop routes are removed.
 `engine:wake` and `engine:sleep` are broker-private and refused from clients
 and peers. Settings application may still restart an engine internally.
 
-Desktop consumes local saved intent through `engine:intent` and
-`engine:intent-changed`, preserving required `enabledByEngine` booleans and
-`offByEngine` origins (`local`/`peer`, relative to the owning device). Only
-explicitly saved Off has an origin; legacy Off without provenance reports local,
-while default false and On have none. The typed `getIntent`/`onIntentChanged`
-API feeds the existing engine-status store. Unavailable or invalid readback,
-disconnect and restart clear both maps together to null. Origin does not change
-lifecycle status or authorize controls; no desktop origin controls are added.
+Desktop renders reported engine state and availability. There is no saved
+engine On/Off state. Installed engines start with the available service, after
+installation and Resume, and recover after a crash or admission wake. PAIR
+releases idle memory per model and applies one capacity limit to inference and
+manual loads. Pause and Halt remain the availability controls.
 
 Install still sends `engine:install` with `start: true`; the install start
 option remains. First-open desktop startup does not start installed engines.

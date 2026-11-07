@@ -337,7 +337,6 @@ func TestStrictColdDeadlineSurvivesCapacityWait(t *testing.T) {
 		t.Run(scenario, func(t *testing.T) {
 			h := newStrictHarness(t)
 			c := useStrictClock(h.a)
-			h.a.setIntent(map[string]bool{"llamacpp": true})
 			h.setHealthy("llamacpp", false)
 			req := strictRequest()
 			req.ColdStartBudgetMs = 100
@@ -477,7 +476,6 @@ func TestStrictZeroColdHasNoWakeOrUnload(t *testing.T) {
 		t.Run(scenario, func(t *testing.T) {
 			h := newStrictHarness(t)
 			if scenario == "wake" {
-				h.a.setIntent(map[string]bool{"llamacpp": true})
 				h.setHealthy("llamacpp", false)
 			}
 			if scenario == "switch" {
@@ -565,7 +563,6 @@ func TestStrictQueueAndColdSharePreOutputCap(t *testing.T) {
 	ch := asyncStrict(h.a, context.Background(), strictRequest())
 	awaitStrictTimer(t, c)
 	c.Advance(700 * time.Millisecond)
-	h.a.setIntent(map[string]bool{"llamacpp": true})
 	h.setHealthy("llamacpp", false)
 	first.Finish(strictNotDispatched)
 	// Wake has only the remainder of the original deadline, never a fresh
@@ -591,7 +588,6 @@ func TestStrictStateChangeAtBudgetDoesNotAdmit(t *testing.T) {
 			if scenario == "queue" {
 				first = mustStrictTicket(t, h.a)
 			} else {
-				h.a.setIntent(map[string]bool{"llamacpp": true})
 				h.setHealthy("llamacpp", false)
 			}
 			req := strictRequest()
@@ -623,7 +619,6 @@ func TestStrictStateChangeAtBudgetDoesNotAdmit(t *testing.T) {
 func TestStrictWarmAfterWakeKeepsColdDeadline(t *testing.T) {
 	h := newStrictHarness(t)
 	c := useStrictClock(h.a)
-	h.a.setIntent(map[string]bool{"llamacpp": true})
 	h.setHealthy("llamacpp", false)
 	req := strictRequest()
 	req.ColdStartBudgetMs = 200
@@ -643,7 +638,7 @@ func TestStrictWarmAfterWakeKeepsColdDeadline(t *testing.T) {
 }
 
 func TestStrictAvailabilityAndOffAreTyped(t *testing.T) {
-	for _, state := range []string{"paused", "draining", "off"} {
+	for _, state := range []string{"paused", "draining"} {
 		t.Run(state, func(t *testing.T) {
 			h := newStrictHarness(t)
 			switch state {
@@ -651,8 +646,6 @@ func TestStrictAvailabilityAndOffAreTyped(t *testing.T) {
 				h.a.setAvailability(nodepolicy.Paused, false)
 			case "draining":
 				h.a.setDrain("llamacpp", true)
-			case "off":
-				h.a.setIntent(map[string]bool{"llamacpp": false})
 			}
 			_, err := h.a.admitStrictNow(context.Background(), "llamacpp", "m", strictRequest())
 			var typed *strictAdmissionError
@@ -694,7 +687,7 @@ func TestStrictPublishesActivityAndRelease(t *testing.T) {
 	ticket.Finish(strictNotDispatched)
 	notes = h.notes(nodepolicy.NotifyAdmissionState)
 	idle, ok := notes[len(notes)-1].params.(nodepolicy.AdmissionState)
-	if !ok || idle.Active != 0 || idle.ActiveByEngine["llamacpp"] != 0 || idle.LastActivityMs["llamacpp"] == 0 {
+	if !ok || idle.Active != 0 || idle.ActiveByEngine["llamacpp"] != 0 || idle.LastActivityMs["llamacpp"]["m"] == 0 {
 		t.Fatalf("state=%+v", notes[len(notes)-1])
 	}
 }
@@ -779,7 +772,6 @@ func TestOwnedInferenceBuffersAdmission(t *testing.T) {
 	})
 	t.Run("storage refusal precedes wake and ticket", func(t *testing.T) {
 		h := newAdmHarness(t)
-		h.a.setIntent(map[string]bool{"llamacpp": true})
 		h.setHealthy("llamacpp", false)
 		calls := 0
 		d := h.a.admit(context.Background(), admissionRequest{engine: "llamacpp", model: "m", waitCap: time.Second, prepare: func(context.Context, nodepolicy.Profile, bool, uint64) error { calls++; return &bufferLimitError{} }})
@@ -951,6 +943,23 @@ func TestAdmission_DefaultAdmissionWithServedProfileAdmits(t *testing.T) {
 	}
 }
 
+func TestAdmissionEngineDrainScopesAndReleases(t *testing.T) {
+	h := newAdmHarness(t)
+	h.a.setDrain("llamacpp", true)
+	mustReject(t, h.admit("llamacpp", "m", 0), nodepolicy.RejectDraining)
+	other := h.admit("llamacpp-custom", "qwen3-8b", 0)
+	if other.ticket == nil {
+		t.Fatalf("target drain blocked another engine: %+v", other)
+	}
+	other.ticket.release()
+	h.a.setDrain("llamacpp", false)
+	resumed := h.admit("llamacpp", "m", 0)
+	if resumed.ticket == nil {
+		t.Fatalf("released drain still refused admission: %+v", resumed)
+	}
+	resumed.ticket.release()
+}
+
 func TestAdmission_PausedAndDrainingReject(t *testing.T) {
 	h := newAdmHarness(t)
 	h.a.setAvailability(nodepolicy.Paused, false)
@@ -987,7 +996,7 @@ func TestAdmission_DrainingFinishesActive(t *testing.T) {
 	if last.Active != 0 {
 		t.Fatalf("last admission/state active = %d, want an immediate 0 once drained", last.Active)
 	}
-	if last.LastActivityMs["llamacpp"] == 0 {
+	if last.LastActivityMs["llamacpp"]["qwen3"] == 0 {
 		t.Fatal("admission/state carries no lastActivityMs for the engine")
 	}
 }
@@ -1012,31 +1021,9 @@ func TestAdmission_CancelActiveCancelsAdmitted(t *testing.T) {
 	}
 }
 
-func TestAdmission_EngineOffRejectsWithoutWake(t *testing.T) {
-	h := newAdmHarness(t)
-	h.setHealthy("llamacpp", false)
-
-	h.a.setIntent(map[string]bool{"llamacpp": false})
-	mustReject(t, h.admit("llamacpp", "qwen3", -1), nodepolicy.RejectOff)
-
-	// No saved intent at all: nothing would start it either.
-	h.a.setIntent(map[string]bool{})
-	mustReject(t, h.admit("llamacpp", "qwen3", -1), nodepolicy.RejectOff)
-
-	// Saved On but start-on-demand off.
-	h.a.setIntent(map[string]bool{"llamacpp": true})
-	h.policy(func(p *nodepolicy.Policy) { p.Idle.StartOnDemand = false })
-	mustReject(t, h.admit("llamacpp", "qwen3", -1), nodepolicy.RejectOff)
-
-	if got := h.notes(nodepolicy.NotifyAdmissionWake); len(got) != 0 {
-		t.Fatalf("sent %d admission/wake for an engine that must not be started", len(got))
-	}
-}
-
 func TestAdmission_WakeWaitsForHealthy(t *testing.T) {
 	h := newAdmHarness(t)
 	h.setHealthy("llamacpp", false)
-	h.a.setIntent(map[string]bool{"llamacpp": true})
 
 	ch := h.admitAsync("llamacpp", "qwen3", -1)
 	waitForCond(t, 2*time.Second, "admission/wake", func() bool {
@@ -1057,7 +1044,6 @@ func TestAdmission_WakeWaitsForHealthy(t *testing.T) {
 func TestAdmission_WakeTimeout(t *testing.T) {
 	h := newAdmHarness(t)
 	h.setHealthy("llamacpp", false)
-	h.a.setIntent(map[string]bool{"llamacpp": true})
 	started := time.Now()
 	mustReject(t, h.admit("llamacpp", "qwen3", 0), nodepolicy.RejectWake)
 	if time.Since(started) > time.Second {
@@ -1156,7 +1142,7 @@ func TestAdmission_ResidentSwitchUnloadsThenAdmits(t *testing.T) {
 	tk.release()
 }
 
-func TestAdmission_SwitchTimeoutAdmits(t *testing.T) {
+func TestAdmission_SwitchTimeoutRejects(t *testing.T) {
 	h := newAdmHarness(t)
 	h.policy(func(p *nodepolicy.Policy) {
 		p.Admission.MaxResidentModels = 1
@@ -1164,15 +1150,17 @@ func TestAdmission_SwitchTimeoutAdmits(t *testing.T) {
 	})
 	h.a.setResidency(map[string][]string{"llamacpp": {"llama3"}})
 	started := time.Now()
-	// Even a zero queue wait does not cut an eviction short: the switch is
-	// bounded by its own timeout and ends in admission.
-	tk := mustAdmit(t, h.admit("llamacpp", "qwen3", 0))
-	defer tk.release()
+	// A zero queue wait does not cut an eviction short, but the cap remains
+	// enforced when the engine never confirms the requested unload.
+	mustReject(t, h.admit("llamacpp", "qwen3", 0), nodepolicy.RejectNoFit)
 	if waited := time.Since(started); waited < 900*time.Millisecond {
-		t.Fatalf("admitted after %v, want the switch timeout to elapse first", waited)
+		t.Fatalf("rejected after %v, want the switch timeout to elapse first", waited)
 	}
 	if len(h.notes(nodepolicy.NotifyAdmissionUnload)) != 1 {
-		t.Fatal("no admission/unload sent before admitting")
+		t.Fatal("no admission/unload sent before refusal")
+	}
+	if h.a.currentActive() != 0 {
+		t.Fatal("timed out eviction retained admission capacity")
 	}
 }
 

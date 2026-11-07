@@ -306,8 +306,8 @@ export default function ModelSettingsPanel({
                 </Text>
                 <Text kind="body/regular/sm">
                     Generation settings affect subsequent requests. Saving does not load a model or
-                    change native context/GPU settings. An Off engine stays Off; its content
-                    completeness is unknown here.
+                    change native context/GPU settings. An already-stopped engine stays stopped; its
+                    content completeness is unknown here.
                 </Text>
                 <Text kind="body/regular/sm">
                     Draft owner: {routing ? 'Routing' : (entry?.owner ?? 'Model Manager')}.{' '}
@@ -410,7 +410,7 @@ export default function ModelSettingsPanel({
                         {(!initialIdentity || newProfile) && (
                             <FormField
                                 slotLabel="Exact native model"
-                                slotHelp="Enter the native model identifier, including when the engine is Off or inventory is unavailable."
+                                slotHelp="Enter the native model identifier, including when the engine is stopped or inventory is unavailable."
                             >
                                 <TextInput
                                     aria-label="Exact native model"

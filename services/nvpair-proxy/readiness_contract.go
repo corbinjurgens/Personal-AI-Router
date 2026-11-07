@@ -370,9 +370,6 @@ func (a *admissionController) AdmitStrict(ctx context.Context, engine, model str
 		if !ok || a.strict.generation[k] != generation || m.MaxConcurrent < 1 || m.Identity != req.Identity || a.strict.storageErr != nil || a.availability != nodepolicy.Available || a.drain[engine] {
 			return nil, errStrictUnavailable
 		}
-		if on, known := a.intent[engine]; known && !on {
-			return nil, errStrictUnavailable
-		}
 		now := a.strict.now()
 		if coldNeeded && !now.Before(cold) {
 			return nil, errStrictCold
@@ -421,7 +418,7 @@ func (a *admissionController) AdmitStrict(ctx context.Context, engine, model str
 				a.inflight[k]++
 				a.active++
 				a.activeByEngine[engine]++
-				a.lastActivity[engine] = now.UnixMilli()
+				a.lastActivity[k] = now.UnixMilli()
 				return &strictTicket{base: base, generation: a.strict.generation[k], identity: req.Identity, deadline: dispatchDeadline, ctx: ctx, warmOnly: true, servedModels: a.policy.ServedModels}, nil
 			}
 			if plan == fitWait {
@@ -438,9 +435,6 @@ func (a *admissionController) AdmitStrict(ctx context.Context, engine, model str
 					return nil, reason
 				}
 				if !healthy {
-					if on, known := a.intent[engine]; !known || !on || !a.policy.Idle.StartOnDemand {
-						return nil, errStrictUnavailable
-					}
 					if last, ok := a.wakeSentAt[engine]; !ok || now.Sub(last) >= wakeResendInterval {
 						a.wakeSentAt[engine] = now
 						sends = append(sends, notification{nodepolicy.NotifyAdmissionWake, nodepolicy.WakeRequest{Engine: engine}})
@@ -466,7 +460,7 @@ func (a *admissionController) AdmitStrict(ctx context.Context, engine, model str
 					a.inflight[k]++
 					a.active++
 					a.activeByEngine[engine]++
-					a.lastActivity[engine] = now.UnixMilli()
+					a.lastActivity[k] = now.UnixMilli()
 					return &strictTicket{base: base, generation: a.strict.generation[k], identity: req.Identity, deadline: deadline, ctx: ctx, servedModels: a.policy.ServedModels}, nil
 				}
 			}
@@ -531,9 +525,6 @@ func (t *strictTicket) BeforeStrictDispatch() error {
 		return errStrictUnavailable
 	}
 	if !ok || mc.Identity != t.identity || t.base.withdrawn || a.availability != nodepolicy.Available || a.drain[t.base.key.engine] || !a.healthy(t.base.key.engine) {
-		return errStrictUnavailable
-	}
-	if on, known := a.intent[t.base.key.engine]; known && !on {
 		return errStrictUnavailable
 	}
 	if err := t.ctx.Err(); err != nil {
@@ -603,7 +594,7 @@ func (a *admissionController) releaseStrictSlotLocked(k admKey) {
 	if a.residencyKnown {
 		a.finishedAt[k] = a.strict.now()
 	}
-	a.lastActivity[k.engine] = a.strict.now().UnixMilli()
+	a.lastActivity[k] = a.strict.now().UnixMilli()
 }
 
 func (t *strictTicket) Finish(e strictTerminalEvidence) {

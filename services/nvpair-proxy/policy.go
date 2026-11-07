@@ -13,6 +13,7 @@ package main
 // the broker's first acknowledged revision is the first the proxy holds.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -64,14 +65,20 @@ func (p *Proxy) handlePolicyMethod(msg *Message, method string) bool {
 		err = p.applySetResidency(msg.Params)
 	case nodepolicy.MethodAdmissionSnapshot:
 		result, err = p.applyAdmissionSnapshot(msg.Params)
-	case nodepolicy.MethodSetEngineIntent:
-		err = p.applySetEngineIntent(msg.Params)
 	case nodepolicy.MethodSetModelIdentity:
 		err = p.applySetModelIdentity(msg.Params)
 	case nodepolicy.MethodPrepareResident:
 		var in nodepolicy.PrepareResidentParams
 		err = decodeStrict(msg.Params, &in)
 		if err == nil {
+			if in.Purpose == nodepolicy.ResidentPurposeManual {
+				// Register in reader order, then let residency and availability
+				// updates through while the shared planner waits for capacity.
+				registered := make(chan struct{})
+				go p.prepareManualResidentRequest(msg, in, registered)
+				<-registered
+				return true
+			}
 			result, err = p.admission.prepareResident(p.runID, in)
 		}
 	case nodepolicy.MethodDispatchResident:
@@ -107,6 +114,25 @@ func (p *Proxy) handlePolicyMethod(msg *Message, method string) bool {
 		p.reportStrictReadiness()
 	}
 	return true
+}
+
+func (p *Proxy) prepareManualResidentRequest(msg *Message, in nodepolicy.PrepareResidentParams, registered chan struct{}) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			slog.Error("recovered from a panic while preparing a manual model load")
+			_ = p.codec.RespondError(msg.ID, -32603, "internal error preparing a manual model load")
+		}
+	}()
+	ctx := p.serveCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	result, err := p.admission.prepareResidentStarted(ctx, p.runID, in, registered)
+	if err != nil {
+		_ = p.codec.RespondError(msg.ID, -32602, err.Error())
+		return
+	}
+	_ = p.codec.Respond(msg.ID, result)
 }
 
 // applySetModelIdentity replaces the engine identity strict capacity and
@@ -243,24 +269,6 @@ func (p *Proxy) applySetResidency(params json.RawMessage) error {
 	}
 	p.admission.setResidency(in.LoadedByEngine)
 	slog.Debug("node residency set", "engines", len(in.LoadedByEngine))
-	return nil
-}
-
-func (p *Proxy) applySetEngineIntent(params json.RawMessage) error {
-	var in nodepolicy.SetEngineIntentParams
-	if err := decodeStrict(params, &in); err != nil {
-		return err
-	}
-	if in.EnabledByEngine == nil {
-		return fmt.Errorf("enabledByEngine is required")
-	}
-	for engine := range in.EnabledByEngine {
-		if err := knownEngine(engine); err != nil {
-			return err
-		}
-	}
-	p.admission.setIntent(in.EnabledByEngine)
-	slog.Info("engine intent set", "engines", len(in.EnabledByEngine))
 	return nil
 }
 

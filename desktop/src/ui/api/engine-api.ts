@@ -12,7 +12,6 @@ import type { WsInvokeRequest, WsInvokeResponse } from '@/shared/types/ws-channe
 import type {
     EngineHubSearchResponse,
     EngineInitialState,
-    EngineIntentSnapshot,
     EngineStatePatch,
     EngineCommandPayload
 } from '@/shared/types/engine-api'
@@ -34,13 +33,9 @@ import type {
 } from '@/shared/types/model-config'
 
 export interface IEngineApi {
-    /** Local saved intent; null when the bridge has no current authoritative readback. */
-    getIntent(): Promise<EngineIntentSnapshot | null>
-    /** Replaces both intent maps together, including null on invalidation. */
-    onIntentChanged(callback: (snapshot: EngineIntentSnapshot | null) => void): () => void
     /** Read the owning node's authoritative settings snapshot for one engine. */
     getSettings(target: EngineSettingsTarget): Promise<EngineSettingsSnapshot>
-    /** Read target-owned model facts while Off, without starting or loading an engine. */
+    /** Read target-owned model facts without starting or loading an engine. */
     inspectModel(request: InspectModelRequest): Promise<InspectModelResult>
     setStatedMemory(request: SetStatedMemoryRequest): Promise<InspectModelResult>
     clearStatedMemory(request: ClearStatedMemoryRequest): Promise<InspectModelResult>
@@ -116,8 +111,6 @@ function fireCommand(transport: ServiceTransport, payload: EngineCommandPayload)
 
 export function createEngineApi(transport: ServiceTransport): IEngineApi {
     return {
-        getIntent: () => transport.invoke('engines:get-intent'),
-        onIntentChanged: cb => transport.subscribePush('engines:intent-changed', cb),
         getSettings: target => transport.invoke('engines:get-settings', target),
         inspectModel: request => transport.invoke('engines:inspect-model', request),
         setStatedMemory: request => transport.invoke('engines:set-stated-memory', request),

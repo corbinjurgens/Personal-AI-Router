@@ -13,14 +13,13 @@ behavior as the Go services implement it; where this page and a component
 README differ, the source wins. [Architecture](architecture.mdx) places these
 rules among the other trust boundaries.
 
-## Saved intent and availability
+## Engine lifecycle and availability
 
 | | What it is | Who can set it | What it stops |
 | --- | --- | --- | --- |
-| Saved Off | Retained engine intent used by restore and idle policy; there is no On/Off control | Internal lifecycle operations, including uninstall | Restoration and private wake; it does not prohibit a granted peer from loading a model into a running engine |
 | Pause | A node-wide state | A client on the node, or a paired device that has been granted management | Work on this node and peer management other than permitted availability changes |
 
-Saved Off records intent; Pause fences activation and peer management.
+Installed engines run while the node is available. Pause fences activation and peer management.
 
 ## Pause and Resume
 
@@ -51,8 +50,7 @@ paused node is still routed to other machines in the cluster. Pausing a node:
    cancels it and waits up to 10 more seconds for it to unwind. While draining,
    new work is refused with `X-PAIR-Admission: draining` and `Retry-After: 5`.
 3. Reads the current engine and model inventory, unloads every loaded model and
-   stops every engine it reports. The stop does not change an engine's saved
-   intent, so an engine that was saved On is still saved On.
+   stops every engine it reports.
 4. Reports `paused` once the engines are verified stopped.
 
 The older `pause.stopEngines` and `pause.unloadModels` settings are obsolete.
@@ -111,10 +109,7 @@ The terminal interface shows `Paused (local)` or `Paused (peer)`.
 
 ### Resume and restart
 
-Resume saves the node as available, tells the proxy, and then starts the engines
-that the pause stopped. Because their saved intent never changed, only engines
-that are saved On come back. If the node restarted while paused,
-saved-On restoration was skipped, and Resume performs it.
+Resume saves the node as available, tells the proxy, and starts every installed engine. If the node restarted while paused, restoration was skipped until Resume.
 
 A paused state is saved, so it survives a restart. The proxy learns it before it
 can admit anything, and a paused node also skips engine restoration when its
@@ -161,26 +156,13 @@ management requests receive HTTP 503 until it is; retry shortly.
 
 When more than one applies, the permission check comes first, then the pause.
 
-## Saved Off no longer blocks a granted peer
+## Installed engines and model loads
 
-A granted peer may load a model into a running engine that is saved Off,
-whatever the Off origin: local, peer,
-legacy, or no recorded intent. Saved Off is ordinary intent, not a prohibition.
-Pause still refuses activation.
+Every installed engine runs while the node is available. Service startup, Resume, installation and crash recovery start installed engines. Requests can wake a stopped installed engine on an available node. Pause and Halt control node availability.
 
-These limits remain:
+PAIR releases each nonresident model after its own idle interval, defaulting to 5 minutes. The engine process stays running. Set the interval to 0 (Never) to disable idle release. Native idle sleep is disabled for PAIR-managed typed launches.
 
-- An explicit model load never starts a stopped engine. A load into an engine
-  that is not running fails with its real error.
-- Restoration after a restart, wake, and automatic model residency still require
-  the engine to be saved On. Residency reports `engine-off` for a saved-Off
-  engine and does not start it.
-- Uninstall records Off with `local` origin. Internal starts clear the origin.
-
-Users and peers cannot start, stop or restart engines, and private wake/sleep
-methods are not exposed as controls. Saved intent, restore and idle semantics
-remain until phase 15. Phase 11 must not be installed without phase 15; it does
-not yet guarantee that every installed engine runs while available.
+The node setting "Models that can stay loaded at once" governs inference and manual loads from the desktop and terminal interface. At capacity, admission can evict the least recently used eligible model.
 
 ## How peers learn a node is paused
 

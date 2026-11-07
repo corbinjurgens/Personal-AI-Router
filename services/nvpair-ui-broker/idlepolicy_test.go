@@ -13,6 +13,74 @@ import (
 	"nvpair-shared/nodepolicy"
 )
 
+func TestIdlePolicyUnloadsOnlyIdleNonresidentModels(t *testing.T) {
+	b, _ := newPolicyBroker(t)
+	worker := attachFakeEngine(t, b)
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	r := b.nodePolicyRuntime()
+	r.mu.Lock()
+	r.now = func() time.Time { return now }
+	r.current.Idle.UnloadAfterMinutes = 5
+	r.current.ResidentModels = nodepolicy.ResidentModels{{Engine: "llamacpp", Model: "resident"}}
+	r.mu.Unlock()
+	b.observeLoaded(map[string][]string{"llamacpp": {"idle", "active", "resident"}})
+	now = now.Add(6 * time.Minute)
+	b.observeAdmission(nodepolicy.AdmissionState{
+		Active: 1, ActiveByEngine: map[string]int{"llamacpp": 1},
+		ActiveByModel:  map[string]map[string]int{"llamacpp": {"active": 1}},
+		LastActivityMs: map[string]map[string]int64{"llamacpp": {"active": now.UnixMilli()}},
+	})
+	b.idleTick(context.Background())
+	calls := worker.snapshot()
+	if len(calls) != 1 || calls[0].method != engineUnloadModelMethod {
+		t.Fatalf("idle actions = %+v, want one model unload", calls)
+	}
+	var params struct {
+		Engine string `json:"engine"`
+		Model  string `json:"model"`
+	}
+	if err := json.Unmarshal(calls[0].params, &params); err != nil {
+		t.Fatal(err)
+	}
+	if params.Engine != "llamacpp" || params.Model != "idle" {
+		t.Fatalf("unload = %+v, want idle model", params)
+	}
+	b.idleTick(context.Background())
+	if len(worker.snapshot()) != 1 {
+		t.Fatal("idle unload repeated for unchanged baseline")
+	}
+	if got := b.runningSnapshot(); !reflect.DeepEqual(got, []string{"llamacpp"}) {
+		t.Fatalf("idle changed engine state: %v", got)
+	}
+}
+
+func TestIdleResidencyArrivalIsPerModel(t *testing.T) {
+	b, _ := newPolicyBroker(t)
+	worker := attachFakeEngine(t, b)
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	r := b.nodePolicyRuntime()
+	r.mu.Lock()
+	r.now = func() time.Time { return now }
+	r.current.Idle.UnloadAfterMinutes = 5
+	r.mu.Unlock()
+	b.observeLoaded(map[string][]string{"llamacpp": {"old"}})
+	now = now.Add(4 * time.Minute)
+	b.observeLoaded(map[string][]string{"llamacpp": {"old", "new"}})
+	now = now.Add(2 * time.Minute)
+	b.idleTick(context.Background())
+	calls := worker.snapshot()
+	if len(calls) != 1 || calls[0].method != engineUnloadModelMethod {
+		t.Fatalf("idle actions = %+v", calls)
+	}
+	var params map[string]string
+	if err := json.Unmarshal(calls[0].params, &params); err != nil {
+		t.Fatal(err)
+	}
+	if params["model"] != "old" {
+		t.Fatalf("unloaded %q, want old model", params["model"])
+	}
+}
+
 func TestResidentProtectionAutomaticUnload(t *testing.T) {
 	for _, reason := range []string{"idle", "admission"} {
 		t.Run(reason, func(t *testing.T) {
@@ -21,6 +89,7 @@ func TestResidentProtectionAutomaticUnload(t *testing.T) {
 			r := b.nodePolicyRuntime()
 			r.mu.Lock()
 			r.current.ResidentModels = nodepolicy.ResidentModels{{Engine: "llamacpp", Model: "resident"}}
+			r.runningSince["llamacpp"] = r.now().Add(-10 * time.Minute)
 			r.mu.Unlock()
 			b.unloadModels("llamacpp", []string{"resident", "neighbor"}, reason)
 			calls := worker.snapshot()
@@ -69,32 +138,6 @@ func TestResidentProtectionPauseMayUnload(t *testing.T) {
 	}
 }
 
-func TestResidentProtectionIdleSleepPlanning(t *testing.T) {
-	b, _ := newPolicyBroker(t)
-	worker := attachFakeEngine(t, b)
-	r := b.nodePolicyRuntime()
-	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
-	r.mu.Lock()
-	r.now = func() time.Time { return now }
-	r.current.Idle.StopEngineAfterMinutes = 1
-	r.current.ResidentModels = nodepolicy.ResidentModels{{Engine: "llamacpp", Model: "resident"}}
-	r.running["llamacpp"] = true
-	r.intent["llamacpp"] = true
-	r.runningSince["llamacpp"] = now.Add(-2 * time.Minute)
-	r.mu.Unlock()
-	b.idleTick(context.Background())
-	if calls := worker.snapshot(); len(calls) != 0 {
-		t.Fatalf("resident engine slept: %+v", calls)
-	}
-	r.mu.Lock()
-	r.current.ResidentModels = nil
-	r.mu.Unlock()
-	b.idleTick(context.Background())
-	if got := worker.methods(""); !reflect.DeepEqual(got, []string{engineSleepMethod}) {
-		t.Fatalf("calls after clearing resident preference = %v, want sleep", got)
-	}
-}
-
 func TestIdlePlanningWithdrawsEngineManagerSourceState(t *testing.T) {
 	test := func(name string, transition func(*Broker, *engineManagerSource) *engineManagerSource) {
 		t.Run(name, func(t *testing.T) {
@@ -103,42 +146,34 @@ func TestIdlePlanningWithdrawsEngineManagerSourceState(t *testing.T) {
 			now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 			r.mu.Lock()
 			r.now = func() time.Time { return now }
-			r.current.Idle.StopEngineAfterMinutes = 1
+			r.current.Idle.UnloadAfterMinutes = 1
 			r.mu.Unlock()
 			old := b.activateEngineManagerSource()
 			b.observeEngineRunningFrom(old, "llamacpp", true)
 			b.observeLoadedFrom(old, map[string][]string{"llamacpp": {"model"}})
-			b.observeIntentFrom(old, map[string]bool{"llamacpp": true})
 			r.mu.Lock()
 			r.runningSince["llamacpp"] = now.Add(-2 * time.Minute)
-			r.residencyAt["llamacpp"] = now.Add(-2 * time.Minute)
-			r.idleUnloadedAt["llamacpp"] = now.Add(-2 * time.Minute)
-			r.idleSleptAt["llamacpp"] = now.Add(-3 * time.Minute)
+			r.residencyAt[nodepolicy.ModelRef{Engine: "llamacpp", Model: "model"}] = now.Add(-2 * time.Minute)
+			r.idleUnloadedAt[nodepolicy.ModelRef{Engine: "llamacpp", Model: "model"}] = now.Add(-2 * time.Minute)
 			r.mu.Unlock()
 
 			current := transition(b, old)
 			// A late callback from the retired source must not restore its state.
 			b.observeEngineRunningFrom(old, "llamacpp", true)
 			b.observeLoadedFrom(old, map[string][]string{"llamacpp": {"model"}})
-			b.observeIntentFrom(old, map[string]bool{"llamacpp": true})
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel() // Allow planning but prevent any worker RPC.
 			b.idleTick(ctx)
 			r.mu.Lock()
-			planned := r.idleSleptAt["llamacpp"]
 			_, running := r.running["llamacpp"]
 			_, loaded := r.loaded["llamacpp"]
-			_, intent := r.intent["llamacpp"]
 			_, observed := r.runningObserved["llamacpp"]
 			_, runningSince := r.runningSince["llamacpp"]
-			_, residencyAt := r.residencyAt["llamacpp"]
-			_, unloadedAt := r.idleUnloadedAt["llamacpp"]
+			_, residencyAt := r.residencyAt[nodepolicy.ModelRef{Engine: "llamacpp", Model: "model"}]
+			_, unloadedAt := r.idleUnloadedAt[nodepolicy.ModelRef{Engine: "llamacpp", Model: "model"}]
 			r.mu.Unlock()
-			if !planned.IsZero() {
-				t.Errorf("idle policy planned sleep for retired source's engine at %v", planned)
-			}
-			if running || loaded || intent {
-				t.Errorf("retired source state remains: running=%v loaded=%v intent=%v", running, loaded, intent)
+			if running || loaded {
+				t.Errorf("retired source state remains: running=%v loaded=%v", running, loaded)
 			}
 			if observed || runningSince || residencyAt || unloadedAt {
 				t.Errorf("retired source bookkeeping remains: observed=%v runningSince=%v residencyAt=%v unloadedAt=%v", observed, runningSince, residencyAt, unloadedAt)
@@ -155,15 +190,13 @@ func TestIdlePlanningWithdrawsEngineManagerSourceState(t *testing.T) {
 			}
 			b.observeEngineRunningFrom(current, "llamacpp", true)
 			b.observeLoadedFrom(current, map[string][]string{"llamacpp": {"new-model"}})
-			b.observeIntentFrom(current, map[string]bool{"llamacpp": true})
 			b.retireEngineManagerSource(old)
 			r.mu.Lock()
 			newRunning := r.running["llamacpp"]
 			newLoaded := append([]string(nil), r.loaded["llamacpp"]...)
-			newIntent := r.intent["llamacpp"]
 			r.mu.Unlock()
-			if !newRunning || !newIntent || !reflect.DeepEqual(newLoaded, []string{"new-model"}) {
-				t.Errorf("replacement state lost after old retirement: running=%v loaded=%v intent=%v", newRunning, newLoaded, newIntent)
+			if !newRunning || !reflect.DeepEqual(newLoaded, []string{"new-model"}) {
+				t.Errorf("replacement state lost after old retirement: running=%v loaded=%v", newRunning, newLoaded)
 			}
 		})
 	}
@@ -174,32 +207,4 @@ func TestIdlePlanningWithdrawsEngineManagerSourceState(t *testing.T) {
 	test("activation replaces a live source", func(b *Broker, _ *engineManagerSource) *engineManagerSource {
 		return b.activateEngineManagerSource()
 	})
-}
-
-func TestResidentProtectionRechecksQueuedIdleSleep(t *testing.T) {
-	b, _ := newPolicyBroker(t)
-	worker := attachFakeEngine(t, b)
-	r := b.nodePolicyRuntime()
-	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
-	r.mu.Lock()
-	r.now = func() time.Time { return now }
-	r.current.Idle.UnloadAfterMinutes = 1
-	r.current.Idle.StopEngineAfterMinutes = 1
-	r.running["llamacpp"] = true
-	r.intent["llamacpp"] = true
-	r.runningSince["llamacpp"] = now.Add(-2 * time.Minute)
-	r.loaded["llamacpp"] = []string{"neighbor"}
-	r.mu.Unlock()
-	worker.setAnswer(func(method string, _ json.RawMessage) (any, string) {
-		if method == engineUnloadModelMethod {
-			r.mu.Lock()
-			r.current.ResidentModels = nodepolicy.ResidentModels{{Engine: "llamacpp", Model: "resident"}}
-			r.mu.Unlock()
-		}
-		return map[string]bool{"ok": true}, ""
-	})
-	b.idleTick(context.Background())
-	if got := worker.methods(""); !reflect.DeepEqual(got, []string{engineUnloadModelMethod}) {
-		t.Fatalf("queued idle sleep ignored new resident preference: %v", got)
-	}
 }

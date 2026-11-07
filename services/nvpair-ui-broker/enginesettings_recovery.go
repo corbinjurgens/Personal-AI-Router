@@ -199,7 +199,7 @@ func (b *Broker) recoverEngineSettings() bool {
 			slog.Error("engine settings recovery blocked by known model operation", "err", err)
 			return false
 		}
-		slog.Error("settings journal unreadable; model involvement is unknown; preserving ordinary enabled-intent restoration", "err", err)
+		slog.Error("settings journal unreadable; model involvement is unknown; preserving ordinary installed-engine restoration", "err", err)
 		return true
 	}
 	b.reconstructModelSettingsLocked()

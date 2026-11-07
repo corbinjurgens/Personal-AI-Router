@@ -143,13 +143,14 @@ func TestInstallFlowReportsOnlyMeasurablePercents(t *testing.T) {
 	m := &Manifest{
 		Engine: "fake", DisplayName: "Fake", ManifestVersion: 1,
 		Platforms: map[string]Platform{hostKey(): {
-			Detect: []string{bin},
+			Detect:         []string{fakeEngineBin},
+			DetectRequired: []string{bin},
 			Install: &Install{
 				Fetch: &Fetch{URL: srv.URL, SHA256: hex.EncodeToString(sum[:])},
 				Run:   []string{fakeEngineBin, "touch", bin},
 				Mode:  "user",
 			},
-			Runtime: Runtime{Bin: fakeEngineBin},
+			Runtime: testEngineManifest(fakeEngineBin).Platforms[hostKey()].Runtime,
 		}},
 	}
 
@@ -166,6 +167,7 @@ func TestInstallFlowReportsOnlyMeasurablePercents(t *testing.T) {
 		frames = append(frames, p)
 		mu.Unlock()
 	}, t.TempDir())
+	t.Cleanup(ex.StopAll)
 	ex.detectTimeout = 2 * time.Second
 
 	if err := ex.Install(context.Background(), m.Engine); err != nil {

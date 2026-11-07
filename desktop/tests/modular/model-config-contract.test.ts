@@ -33,7 +33,6 @@ function resolvedLoad(): ResolvedLoad {
             threadsBatch: 8,
             kvOffload: false,
             opOffload: true,
-            sleepIdleSeconds: -1,
             cacheRAM: 512
         },
         artifacts: [

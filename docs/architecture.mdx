@@ -511,9 +511,7 @@ Where you put each model decides what routing can do with it:
 - **Mixed inventories work.** Node A can hold a 70B model and node B a 7B one.
   Requests for each are steered to the node that has it, and neither blocks the
   other.
-- **A stopped engine is not ready capacity.** Saved intent and on-demand wake
-  retain their existing rules; serving still needs current model and admission
-  evidence.
+- **A stopped engine is not ready capacity.** On-demand wake starts an installed engine on an available node; serving still needs current model and admission evidence.
 - **Where work actually ran is observable.** Use the **Jobs** view rather than
   inferring routing from inventory.
 
@@ -990,12 +988,7 @@ The schema-v2 `stopEngines` and `unloadModels` inputs are obsolete and
 normalize to true; reading an old file does not rewrite it. Engine-stop failure
 retains stored pause and live draining, reports actual availability, and returns
 `-32000` with `Pause could not stop every engine: ` plus bounded detail. A local
-Pause can retry; peer retries remain fenced. A paused node skips saved-On
-restoration on startup and manager replacement. Local Resume wakes only
-saved-On engines and reconciles resident declarations through existing
-guards; cancelled requests are not replayed. The broker's
-model-configuration reasons are `paused` for either-origin pause and `engine-off`
-for ordinary saved Off.
+Pause can retry; peer retries remain fenced. A paused node skips installed-engine restoration on startup and manager replacement. Local Resume starts every installed engine and reconciles resident declarations through existing guards; cancelled requests are not replayed. The broker reports paused model configuration for either pause origin.
 
 Inventory, controlled cleanup, sleep and shutdown verification use one manager;
 a replacement cannot complete an older manager's proof. Recovery verifies a

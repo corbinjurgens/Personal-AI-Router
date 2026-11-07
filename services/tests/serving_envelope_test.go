@@ -393,7 +393,6 @@ func newNEServingFixture(t *testing.T) *neServingFixture {
 	policy.Revision = "1"
 	policy.Admission.MaxConcurrentPerModel = 1
 	policy.Admission.MemoryBudgetBytes = neMemory
-	policy.Idle.StartOnDemand = false
 	policy.Profiles = []nodepolicy.Profile{{Key: neModel, DisplayName: "ne-process", Engine: "llamacpp", Model: neModel, ContextTokens: neContext, MaxOutputTokens: neOutput, MemoryBytes: neMemory, MaxConcurrent: 1, Qualification: &nodepolicy.QualificationRef{ID: "ne-synthetic", Revision: "1"}}}
 	if err := policy.Validate(); err != nil {
 		t.Fatalf("invalid finite synthetic policy: %v", err)
@@ -821,7 +820,7 @@ func TestNEServingEnvelope(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(f.app, "local-qualification.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("qualification evidence existed before bootstrap")
 	}
-	f.call(t, "engine:install", map[string]any{"engine": "llamacpp", "start": true}, nil)
+	f.call(t, "engine:install", map[string]any{"engine": "llamacpp"}, nil)
 	f.retainRuntime(t)
 	firstEnvelope := neAssertColdReadback(t, f.snapshot(t), true)
 	if !reflect.DeepEqual(configuredEnvelope, firstEnvelope) {
@@ -851,7 +850,7 @@ func TestNEServingEnvelope(t *testing.T) {
 		"evidence":   "Synthetic NE process wiring data only; no model, hardware, or native engine qualification was performed.",
 	}}})
 	f.start(t)
-	f.call(t, "engine:install", map[string]any{"engine": "llamacpp", "start": true}, nil)
+	f.call(t, "engine:install", map[string]any{"engine": "llamacpp"}, nil)
 	f.retainRuntime(t)
 	secondSnapshot := f.snapshot(t)
 	secondEnvelope := neAssertColdReadback(t, secondSnapshot, true)

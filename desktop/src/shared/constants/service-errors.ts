@@ -8,8 +8,8 @@ export const INVALID_PARAMS_CODE = -32602
 /** A policy save based on a revision other than the persisted one. */
 export const POLICY_CONFLICT_CODE = -32010
 /**
- * A target node's own refusal: its pause, an older target's saved Off, or a
- * local stop that cancelled the operation. The code alone does not establish
+ * A target node's own refusal: its pause or a local stop that cancelled
+ * the operation. The code alone does not establish
  * which, so it is never presented as a pause without authoritative node state.
  */
 export const LOCAL_VETO_CODE = -32011

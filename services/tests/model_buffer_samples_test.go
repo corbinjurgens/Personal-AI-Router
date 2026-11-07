@@ -59,7 +59,7 @@ func TestModelBufferSamplesProcess(t *testing.T) {
 	t.Run("real manager captures repeated buffers, interleaved children and ordinary wakeup", func(t *testing.T) {
 		f := newModelBufferProcessFixture(t)
 		before, policy := f.snapshot(t), f.policy(t)
-		f.rpcOK(t, "engine:install", map[string]any{"engine": "llamacpp", "start": true})
+		f.rpcOK(t, "engine:install", map[string]any{"engine": "llamacpp"})
 		f.control(t, "medium-model", "initial")
 		first := f.observed(t, "medium-model", "initial")
 		if first.BuildAssurance != "recognized-output" || !strings.HasPrefix(first.BuildID, "sha256:") || first.ReportedBuild != "b12020-0ec4027a2" || first.SourceIdentity == first.BuildID {
@@ -152,7 +152,7 @@ func TestModelBufferSamplesProcess(t *testing.T) {
 			}
 			modelSettingsWrite(t, f.preset, updated)
 		})
-		f.rpcOK(t, "engine:install", map[string]any{"engine": "llamacpp", "start": true})
+		f.rpcOK(t, "engine:install", map[string]any{"engine": "llamacpp"})
 		f.control(t, "medium-model", "initial")
 		value := f.observed(t, "medium-model", "initial")
 		if len(value.Artifacts) != 2 || value.Artifacts[1].Role != "draft" {
@@ -179,7 +179,7 @@ func TestModelBufferSamplesProcess(t *testing.T) {
 
 func TestModelBufferSamplesProcessRestart(t *testing.T) {
 	f := newModelBufferProcessFixture(t)
-	f.rpcOK(t, "engine:install", map[string]any{"engine": "llamacpp", "start": true})
+	f.rpcOK(t, "engine:install", map[string]any{"engine": "llamacpp"})
 	f.control(t, "medium-model", "initial")
 	first := f.observed(t, "medium-model", "initial")
 	f.rpcOK(t, "node:set-availability", map[string]string{"state": "paused", "pauseMode": "immediate"})
@@ -226,7 +226,7 @@ func TestModelBufferSamplesProcessRestart(t *testing.T) {
 func TestModelBufferSamplesProcessPerBuildOutput(t *testing.T) {
 	t.Run("another props build with recognized grammar", func(t *testing.T) {
 		f := newModelBufferProcessFixture(t)
-		f.rpcOK(t, "engine:install", map[string]any{"engine": "llamacpp", "start": true})
+		f.rpcOK(t, "engine:install", map[string]any{"engine": "llamacpp"})
 		f.control(t, "medium-model", "other-build")
 		f.control(t, "medium-model", "initial")
 		value := f.observed(t, "medium-model", "initial")
@@ -237,7 +237,7 @@ func TestModelBufferSamplesProcessPerBuildOutput(t *testing.T) {
 	})
 	t.Run("unrecognized output remains a saved partial sample", func(t *testing.T) {
 		f := newModelBufferProcessFixture(t)
-		f.rpcOK(t, "engine:install", map[string]any{"engine": "llamacpp", "start": true})
+		f.rpcOK(t, "engine:install", map[string]any{"engine": "llamacpp"})
 		f.control(t, "medium-model", "other-build")
 		f.control(t, "medium-model", "unrecognized")
 		task1Eventually(t, "unrecognized output saved", 90*time.Second, func() bool {
@@ -274,7 +274,7 @@ func TestModelBufferSamplesProcessNoNativeFromInspection(t *testing.T) {
 	// Produce a real checkpoint first, then inspect the recovered history with
 	// the real manager's existing poller disabled. A trap owns the old engine
 	// port so any projection-added native network query is directly observable.
-	f.rpcOK(t, "engine:install", map[string]any{"engine": "llamacpp", "start": true})
+	f.rpcOK(t, "engine:install", map[string]any{"engine": "llamacpp"})
 	f.control(t, "medium-model", "initial")
 	first := f.observed(t, "medium-model", "initial")
 	f.rpcOK(t, "node:set-availability", map[string]string{"state": "paused", "pauseMode": "immediate"})

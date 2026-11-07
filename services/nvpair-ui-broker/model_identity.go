@@ -110,11 +110,9 @@ func (r *policyRuntime) clearEngineManagerObservationsLocked() {
 	clear(r.running)
 	clear(r.runningObserved)
 	clear(r.loaded)
-	clear(r.intent)
 	clear(r.runningSince)
 	clear(r.residencyAt)
 	clear(r.idleUnloadedAt)
-	clear(r.idleSleptAt)
 }
 
 // retireEngineManagerSource withdraws observations when engine-manager exits:

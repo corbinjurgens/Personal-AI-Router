@@ -192,12 +192,11 @@ function routeEngineManagerCommand(payload: WsInvokeRequest<'engine:command'>): 
         case 'install':
         case 'installAll':
             state.beginLocalEngineOp(payload.engineType, 'installing')
-            // Start the engine as soon as the install succeeds. The backend
-            // performs install-then-start atomically and persists desired-enabled.
+            // The engine owner starts installed engines when the node is available.
             supervisor.sendProcess(
                 'broker',
                 'engine:install',
-                { engine, start: true },
+                { engine },
                 failPendingOp('install', 'install'),
                 true
             )
@@ -228,7 +227,7 @@ function routeEngineManagerCommand(payload: WsInvokeRequest<'engine:command'>): 
             supervisor.sendProcess(
                 'broker',
                 'engine:install',
-                { engine, start: true },
+                { engine },
                 failPendingOp('update', 'install'),
                 true
             )
@@ -310,7 +309,7 @@ function routeRemoteEngineCommand(payload: WsInvokeRequest<'engine:command'>): v
     switch (payload.command) {
         case 'install':
         case 'installAll':
-            void supervisor.installEngineRemote(nodeId, engine, payload.engineType, true)
+            void supervisor.installEngineRemote(nodeId, engine, payload.engineType)
             break
         case 'pullModel':
             if (payload.model) {
@@ -815,7 +814,6 @@ const EMPTY_SERVICE_BRIDGE_HANDLERS: BridgeHandlerMap = {
             payload.engine
         )
     },
-    'engines:get-intent': () => getModularBridgeState().getEngineIntent(),
     'engines:get-settings': async payload =>
         parseEngineSettings(
             await getModularSupervisor().callProcess(

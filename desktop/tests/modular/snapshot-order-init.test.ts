@@ -85,8 +85,6 @@ it('subscribes to engine status during shared startup and resync snapshots', asy
                     refreshStarted.resolve()
                     return refreshSnapshot.promise
                 },
-                getIntent: async () => null,
-                onIntentChanged: () => () => {},
                 onDescriptorsChanged: () => () => {},
                 onStateChanged: (callback: typeof push) => {
                     push = callback

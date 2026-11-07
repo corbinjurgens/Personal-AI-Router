@@ -29,7 +29,7 @@ func TestBuildApplyLocalAdmission(t *testing.T) {
 		RuntimeGeneration: buildapply.Known("runtime"), ServiceInstance: buildapply.Known("service"),
 		BrokerGeneration: buildapply.Known("broker"), ManagerIncarnation: buildapply.Known("manager"),
 		PolicyRevision: buildapply.Known("1"), SettingsRevision: buildapply.Known("2"),
-		IntentRevision: buildapply.Known("3"), AvailabilityRevision: buildapply.Known("5"),
+		AvailabilityRevision: buildapply.Known("5"),
 	}
 	cases := []struct {
 		method string
@@ -165,7 +165,6 @@ func buildApplyImpactFixture(t *testing.T) *Broker {
 	r.runningGeneration = 1
 	r.runningObserved["llamacpp"] = 1
 	r.loaded["llamacpp"] = []string{"synthetic-model"}
-	r.intent["llamacpp"] = true
 	r.haveAdmission = true
 	r.admission = nodepolicy.AdmissionState{Active: 2, Queued: 1, ActiveByEngine: map[string]int{"llamacpp": 2}}
 	r.mu.Unlock()
@@ -183,8 +182,6 @@ func buildApplyOwnerEvidenceFixture(t *testing.T) buildapply.EngineOwnerEvidence
 	revision := "sha256:" + strings.Repeat("a", 64)
 	evidence := buildapply.EngineOwnerEvidence{
 		ManagerIncarnation: "native-manager",
-		Intent: buildapply.Known(buildapply.EngineOwnerIntent{Revision: revision,
-			EnabledByEngine: map[string]bool{"fake": false}, OffByEngine: map[string]string{"fake": "local"}}),
 		Universe: buildapply.Known([]buildapply.EngineOwnerUniverseEntry{{
 			Engine: "fake", Registered: true, Supported: buildapply.Known(true), Installed: buildapply.Known(false),
 			Running: buildapply.Known(false), TerminationVerified: buildapply.Known(true),
@@ -253,17 +250,13 @@ func TestBuildApplyOwnerEvidence(t *testing.T) {
 		}, current(bound))
 		if !ok || calls != 2 || !result.Impact.Complete || !result.ManagerEvidence.Known ||
 			*result.Impact.Fences.ManagerIncarnation.Value != evidence.ManagerIncarnation ||
-			*result.Impact.Fences.IntentRevision.Value != evidence.Intent.Value.Revision ||
-			!result.Impact.Engines.Known || len(*result.Impact.Engines.Value) != 1 ||
-			!(*result.Impact.Engines.Value)[0].DesiredState.Known {
+			!result.Impact.Engines.Known || len(*result.Impact.Engines.Value) != 1 {
 			t.Fatalf("stable owner evidence: available=%v calls=%d result=%+v", ok, calls, result)
 		}
 	})
 	t.Run("complete empty universe", func(t *testing.T) {
 		local, evidence, bound := newCapture(t)
 		local.impact.Engines = buildapply.Known([]buildapply.EngineFact{})
-		evidence.Intent.Value.EnabledByEngine = map[string]bool{}
-		evidence.Intent.Value.OffByEngine = map[string]string{}
 		evidence.Universe = buildapply.Known([]buildapply.EngineOwnerUniverseEntry{})
 		evidence.StopAuthority = buildapply.Known([]buildapply.EngineOwnerStopAuthority{})
 		if err := evidence.Finalize(); err != nil {
@@ -347,7 +340,7 @@ func TestBuildApplyOwnerEvidence(t *testing.T) {
 			t.Fatalf("post-capture replacement retained: available=%v checks=%d result=%+v", ok, checks, result)
 		}
 	})
-	t.Run("local intent settings lock and reservation fences", func(t *testing.T) {
+	t.Run("local settings and reservation fences", func(t *testing.T) {
 		for _, name := range []string{"settings", "maintenance", "policy", "running", "root"} {
 			t.Run(name, func(t *testing.T) {
 				local, evidence, bound := newCapture(t)
@@ -377,8 +370,8 @@ func TestBuildApplyOwnerEvidence(t *testing.T) {
 			})
 		}
 	})
-	t.Run("manager intent root and reservation changes", func(t *testing.T) {
-		for _, name := range []string{"intent", "root", "reservation", "incarnation"} {
+	t.Run("manager root and reservation changes", func(t *testing.T) {
+		for _, name := range []string{"root", "reservation", "incarnation"} {
 			t.Run(name, func(t *testing.T) {
 				local, evidence, bound := newCapture(t)
 				calls := 0
@@ -386,8 +379,6 @@ func TestBuildApplyOwnerEvidence(t *testing.T) {
 					calls++
 					if calls == 2 {
 						switch name {
-						case "intent":
-							evidence.Intent.Value.Revision = "sha256:" + strings.Repeat("b", 64)
 						case "root":
 							(*evidence.Universe.Value)[0].ModelRoots = buildapply.Known([]string{filepath.Join(t.TempDir(), "models")})
 						case "reservation":
@@ -431,12 +422,10 @@ func TestBuildApplyOwnerEvidence(t *testing.T) {
 		}
 	})
 	t.Run("missing manager sections refuse", func(t *testing.T) {
-		for _, section := range []string{"intent", "universe", "stopAuthority", "reservations"} {
+		for _, section := range []string{"universe", "stopAuthority", "reservations"} {
 			t.Run(section, func(t *testing.T) {
 				local, evidence, bound := newCapture(t)
 				switch section {
-				case "intent":
-					evidence.Intent = buildapply.Observation[buildapply.EngineOwnerIntent]{}
 				case "universe":
 					evidence.Universe = buildapply.Observation[[]buildapply.EngineOwnerUniverseEntry]{}
 					evidence.StopAuthority = buildapply.Observation[[]buildapply.EngineOwnerStopAuthority]{}
@@ -542,10 +531,10 @@ func TestBuildApplyImpactProjectsOnlyCurrentCachedOwners(t *testing.T) {
 		t.Fatalf("engines = %+v", impact.Engines)
 	}
 	engine := (*impact.Engines.Value)[0]
-	if engine.Engine != "llamacpp" || !engine.Running.Known || !*engine.Running.Value || !engine.DesiredState.Known || *engine.DesiredState.Value != "on" || !engine.LoadedModels.Known || !reflect.DeepEqual(*engine.LoadedModels.Value, []string{"synthetic-model"}) {
+	if engine.Engine != "llamacpp" || !engine.Running.Known || !*engine.Running.Value || !engine.LoadedModels.Known || !reflect.DeepEqual(*engine.LoadedModels.Value, []string{"synthetic-model"}) {
 		t.Fatalf("engine = %+v", engine)
 	}
-	if engine.ScopedStopAuthority.Known || impact.ExpectedSettings.IntentDigest.Known {
+	if engine.ScopedStopAuthority.Known {
 		t.Fatal("created facts the broker cache does not retain")
 	}
 	if !impact.ExpectedSettings.EngineSettingsDigest.Known || !impact.Fences.SettingsRevision.Known {
@@ -561,7 +550,7 @@ func TestBuildApplyImpactMixedManagerAndLoadedSourcesStayUnknown(t *testing.T) {
 		t.Fatalf("mixed incarnation = %+v", impact)
 	}
 	for _, engine := range *impact.Engines.Value {
-		if engine.Running.Known || engine.LoadedModels.Known || engine.DesiredState.Known {
+		if engine.Running.Known || engine.LoadedModels.Known {
 			t.Fatalf("stale engine became current: %+v", engine)
 		}
 	}
@@ -682,7 +671,6 @@ func TestBuildApplyImpactStoredFalsePauseIsEffectiveTrueWithoutWrites(t *testing
 
 func TestBuildApplyImpactKnownOperationsBlockWithoutInitializingOtherOwners(t *testing.T) {
 	b := buildApplyImpactFixture(t)
-	b.pendingInstallStarts = map[*pendingInstallStart]struct{}{&pendingInstallStart{engine: "llamacpp"}: {}}
 	b.activeSettings = map[string]activeSettingsOperation{"settings-op": {Engine: "llamacpp"}}
 	impact, ok := b.cachedBuildApplyImpact()
 	if !ok || impact.Complete || !impact.ModelOperations.Known {
@@ -695,7 +683,7 @@ func TestBuildApplyImpactKnownOperationsBlockWithoutInitializingOtherOwners(t *t
 		}
 		kinds[operation.Kind] = true
 	}
-	for _, kind := range []string{"install", "settings"} {
+	for _, kind := range []string{"settings"} {
 		if !kinds[kind] {
 			t.Fatalf("missing operation %s", kind)
 		}
@@ -806,11 +794,11 @@ func TestBuildApplyImpactOperationReplacementIsFenced(t *testing.T) {
 // The injected owner represents facts not yet exposed by the real manager.
 // It never asks a worker to discover/adopt engines to complete a preview.
 type buildApplyTestOwners struct {
-	mu                        sync.Mutex
-	b                         *Broker
-	manager, intent, settings string
-	mutateCapture             func(*buildApplyCapturedOwners)
-	afterCompare              func()
+	mu                sync.Mutex
+	b                 *Broker
+	manager, settings string
+	mutateCapture     func(*buildApplyCapturedOwners)
+	afterCompare      func()
 }
 
 func (o *buildApplyTestOwners) WithLocked(compare func(buildApplyCapturedOwners) error) error {
@@ -845,16 +833,16 @@ func (o *buildApplyTestOwners) captureLocked() buildApplyCapturedOwners {
 				RuntimeGeneration: buildapply.Known(fmt.Sprint(r.runningGeneration)),
 				ServiceInstance:   buildapply.Known("fixture-service"), BrokerGeneration: buildapply.Known("fixture-broker"),
 				ManagerIncarnation: buildapply.Known(o.manager), PolicyRevision: buildapply.Known(r.current.Revision),
-				SettingsRevision: buildapply.Known(o.settings), IntentRevision: buildapply.Known(o.intent),
+				SettingsRevision:     buildapply.Known(o.settings),
 				AvailabilityRevision: buildapply.Known(fmt.Sprint(r.transitionGen)),
 			},
 			Maintenance:  buildapply.MaintenanceState{BuildApplyActive: buildapply.Known(o.b.buildApplyMaintenance.active != nil), ModelSettingsActive: buildapply.Known(len(o.b.buildApplyMaintenance.settings) != 0)},
 			Availability: buildapply.Known(r.live), PauseOrigin: buildapply.Known(string(r.current.PausedBy)),
-			Engines:    buildapply.Known([]buildapply.EngineFact{{Engine: "llamacpp", Active: buildapply.Known(false), Running: buildapply.Known(!paused), LoadedModels: buildapply.Known(loaded), DesiredState: buildapply.Known("on"), ScopedStopAuthority: buildapply.Known(true)}}),
+			Engines:    buildapply.Known([]buildapply.EngineFact{{Engine: "llamacpp", Active: buildapply.Known(false), Running: buildapply.Known(!paused), LoadedModels: buildapply.Known(loaded), ScopedStopAuthority: buildapply.Known(true)}}),
 			ActiveWork: buildapply.Known(0), ModelOperations: buildapply.Known([]buildapply.ModelOperation{}), SettingsDifferences: buildapply.Known([]buildapply.SettingsDifference{}),
 			ExpectedSettings: buildapply.ExpectedSettings{
 				PolicyDigest: buildapply.Known(modelPolicyFingerprint(r.current)), EngineSettingsDigest: buildapply.Known("settings-" + o.settings),
-				IntentDigest: buildapply.Known("intent-" + o.intent), StopEngines: buildapply.Known(true), UnloadModels: buildapply.Known(true),
+				StopEngines: buildapply.Known(true), UnloadModels: buildapply.Known(true),
 			},
 			InterruptionPolicy: buildapply.InterruptionPolicy{OnActive: buildapply.Known(r.current.Pause.OnActive), DrainTimeoutSeconds: buildapply.Known(r.current.Pause.DrainTimeoutSeconds), StopsEngines: true, UnloadsModels: true, CommittedStreamsMayFail: true, IncludesWorkBeforeFence: true},
 		},
@@ -883,12 +871,11 @@ func newBuildApplyTestFixture(t *testing.T) *buildApplyTestFixture {
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
 	r.running["llamacpp"] = true
-	r.intent["llamacpp"] = true
 	r.loaded["llamacpp"] = []string{"fixture-model"}
 	r.haveAdmission = true
 	r.admission = nodepolicy.AdmissionState{ActiveByEngine: map[string]int{}}
 	r.mu.Unlock()
-	owner := &buildApplyTestOwners{b: b, manager: "fixture-manager", intent: "intent-1", settings: "settings-1"}
+	owner := &buildApplyTestOwners{b: b, manager: "fixture-manager", settings: "settings-1"}
 	b.buildApplyOwners = owner
 	return &buildApplyTestFixture{b: b, owner: owner, engine: engine, path: path}
 }
@@ -1022,9 +1009,6 @@ func TestBuildApplyRequiredEvidenceRefusesWithZeroEffects(t *testing.T) {
 		{"native incarnation", func(c *buildApplyCapturedOwners) {
 			c.Impact.Fences.ManagerIncarnation = buildapply.Observation[string]{}
 		}},
-		{"intent provenance", func(c *buildApplyCapturedOwners) {
-			c.Impact.ExpectedSettings.IntentDigest = buildapply.Observation[string]{}
-		}},
 		{"complete inventory", func(c *buildApplyCapturedOwners) {
 			c.Impact.Engines = buildapply.Observation[[]buildapply.EngineFact]{}
 		}},
@@ -1065,7 +1049,6 @@ func TestBuildApplyQueuedAcceptanceComparesCurrentOwnerFences(t *testing.T) {
 		{"policy", func(f *buildApplyTestFixture) { f.b.nodePolicy.current.Revision = "7" }},
 		{"manager", func(f *buildApplyTestFixture) { f.owner.manager = "replacement-manager" }},
 		{"settings", func(f *buildApplyTestFixture) { f.owner.settings = "settings-2" }},
-		{"intent", func(f *buildApplyTestFixture) { f.owner.intent = "intent-2" }},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
@@ -1154,7 +1137,7 @@ func awaitBuildApplyResult(t *testing.T, done <-chan buildapply.Result[buildappl
 	}
 }
 
-func TestBuildApplyFinishPreservesPauseProvenanceAndSavedIntent(t *testing.T) {
+func TestBuildApplyFinishPreservesPauseProvenance(t *testing.T) {
 	for _, origin := range []nodepolicy.PauseOrigin{"", nodepolicy.PausedLocally, nodepolicy.PausedByPeer} {
 		name := string(origin)
 		if name == "" {
@@ -1190,8 +1173,8 @@ func TestBuildApplyFinishPreservesPauseProvenanceAndSavedIntent(t *testing.T) {
 				wantOrigin = nodepolicy.PausedLocally
 			}
 			policy := f.b.localPolicy().Policy
-			if policy.Availability != nodepolicy.Paused || policy.PausedBy != wantOrigin || !f.b.nodePolicy.intent["llamacpp"] {
-				t.Fatalf("finish changed provenance or saved intent: %+v", policy)
+			if policy.Availability != nodepolicy.Paused || policy.PausedBy != wantOrigin {
+				t.Fatalf("finish changed pause provenance: %+v", policy)
 			}
 			if !reflect.DeepEqual(beforeCalls, buildApplyEffectCalls(f.engine.snapshot())) {
 				t.Fatal("finish called lifecycle")
@@ -1217,7 +1200,7 @@ func TestBuildApplyConflictingOperationAndUnmatchedFinishKeepReservation(t *test
 	requireBuildApplyRefusal(t, f.b.prepareBuildApply(conflict), buildapply.RefusalMaintenanceBusy)
 	requireBuildApplyRefusal(t, f.b.finishBuildApply(buildapply.FinishRequest{OperationID: conflict.OperationID, Fences: op.Fences}), "operation_conflict")
 	wrongFences := op.Fences
-	wrongFences.IntentRevision = buildapply.Known("other-intent")
+	wrongFences.SettingsRevision = buildapply.Known("other-settings")
 	requireBuildApplyRefusal(t, f.b.finishBuildApply(buildapply.FinishRequest{OperationID: op.OperationID, Fences: wrongFences}), "changed")
 	if f.b.buildApplyMaintenance.active == nil || f.b.nodePolicy.buildApplyOperation != op.OperationID {
 		t.Fatal("unmatched finish released the reserved operation")
@@ -1457,7 +1440,7 @@ func TestBuildApplyMaintenanceImpactDoesNotInventOtherOwnerFacts(t *testing.T) {
 	if !ok || !impact.Maintenance.BuildApplyActive.Known || *impact.Maintenance.BuildApplyActive.Value || !buildApplyTrue(impact.Maintenance.ModelSettingsActive) {
 		t.Fatalf("maintenance observation = %+v, available=%v", impact.Maintenance, ok)
 	}
-	if impact.Complete || impact.Fences.ManagerIncarnation.Known || impact.Fences.IntentRevision.Known || impact.Engines.Known || impact.ModelOperations.Known {
+	if impact.Complete || impact.Fences.ManagerIncarnation.Known || impact.Engines.Known || impact.ModelOperations.Known {
 		t.Fatal("maintenance evidence manufactured missing manager authority")
 	}
 }
@@ -1536,10 +1519,10 @@ func TestBuildApplyFinishCannotOverwriteNewerSafetyOrConfiguration(t *testing.T)
 			op := requireBuildApplyPrepared(t, f.b.prepareBuildApply(f.request(t)))
 			test.change(t, f)
 			before := f.b.localPolicy().Policy
-			intent, settings := f.owner.intent, f.owner.settings
+			settings := f.owner.settings
 			calls := buildApplyEffectCalls(f.engine.snapshot())
 			requireBuildApplyRefusal(t, f.b.finishBuildApply(buildapply.FinishRequest{OperationID: op.OperationID, Fences: op.Fences}), "changed")
-			if !reflect.DeepEqual(before, f.b.localPolicy().Policy) || f.owner.intent != intent || f.owner.settings != settings || !reflect.DeepEqual(calls, buildApplyEffectCalls(f.engine.snapshot())) {
+			if !reflect.DeepEqual(before, f.b.localPolicy().Policy) || f.owner.settings != settings || !reflect.DeepEqual(calls, buildApplyEffectCalls(f.engine.snapshot())) {
 				t.Fatal("finish overwrote a newer safety/configuration owner")
 			}
 			if f.b.buildApplyMaintenance.active == nil {

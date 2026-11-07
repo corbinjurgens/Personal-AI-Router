@@ -33,6 +33,7 @@ import {
 } from '@/ui/stores/node-configuration.store'
 import { useNodesStore } from '@/ui/stores/nodes.store'
 import { REMOTE_SETTING_LOCKED_CODE } from '@/shared/constants/service-errors'
+import NodeMemorySettings from './NodeMemorySettings'
 
 const THIS_PC = 'This PC'
 
@@ -492,6 +493,11 @@ export default function RoutingSettings() {
                     )}
 
                     <Stack gap="2">
+                        <NodeMemorySettings
+                            text={text}
+                            onChange={setText}
+                            disabled={loading || saving || permissionReadOnly || otherDraft}
+                        />
                         <Text kind="body/semibold/sm">Advanced policy JSON</Text>
                         <Text kind="body/regular/sm">
                             Pause unloads models and stops controlled engines. An incomplete stop

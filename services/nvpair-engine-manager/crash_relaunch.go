@@ -61,19 +61,14 @@ func (e *Executor) runCrashRelaunch(ctx context.Context, st *engineState, engine
 		if blocked, _ := e.nodeProjection.managementBlocked(); blocked {
 			return
 		}
-		enabled, known, err := e.desired.get(engine)
-		if err != nil || !known || !enabled {
-			return
-		}
 		st.mu.Lock()
 		if st.running || st.relaunch != recovery {
 			st.mu.Unlock()
 			return
 		}
 		st.mu.Unlock()
-		// This is the existing restore owner, including current On intent under
-		// opMu and precise reclaim/adoption fencing.
-		err = e.restoreEnabled(ctx, engine)
+		// Reuse restore's mutation admission and exact reclaim/adoption fencing.
+		err := e.restoreInstalled(ctx, engine)
 		st.mu.Lock()
 		ready := st.running
 		st.mu.Unlock()
@@ -81,7 +76,7 @@ func (e *Executor) runCrashRelaunch(ctx context.Context, st *engineState, engine
 			return
 		}
 		if err == nil {
-			return // Reserved switch or saved Off: do not bypass its owner.
+			return // Reserved mutation: do not bypass its owner.
 		}
 		slog.Warn("unexpected-exit restore failed", "engine", engine, "attempt", attempt+1, "err", err)
 	}

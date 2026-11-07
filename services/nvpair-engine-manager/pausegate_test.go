@@ -125,9 +125,6 @@ func TestPeerPauseProjectionCancelsActivation(t *testing.T) {
 		done := installRemotely(t, s)
 		(&Manager{exec: ex}).applyNodeProjection(&Message{Params: json.RawMessage(`{"policy":{"pausedBy":"peer"},"pausedLocally":false,"managementBlocked":true}`)})
 		requireInstallTerminal(t, awaitResponse(t, done), "error", "local_veto")
-		if enabled, known, err := ex.desired.get("fake"); err != nil || (known && enabled) {
-			t.Fatalf("pause accepted late On: %v, %v, %v", enabled, known, err)
-		}
 	})
 	t.Run("local and remote load waiters", func(t *testing.T) {
 		ex := newTestExecutor(t, lockLoadManifest())
@@ -252,9 +249,6 @@ func TestPauseDuringAdoptionProbeRefusesLocalStart(t *testing.T) {
 			}
 			if count := runningEvents.Load(); count != 0 {
 				t.Fatalf("refused adoption published %d running events", count)
-			}
-			if enabled, known, err := ex.desired.get("fake"); err != nil || (known && enabled) {
-				t.Fatalf("pause accepted late On: %v, %v, %v", enabled, known, err)
 			}
 			response, err := http.Get(server.URL)
 			if err != nil {

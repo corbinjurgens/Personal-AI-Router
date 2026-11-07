@@ -106,18 +106,15 @@ func TestStopAllCancelsInFlightOrphanConfirmation(t *testing.T) {
 	}
 }
 
-func TestRestoreEnabledWindowsConsoleOrphanDoesNotSpendGrace(t *testing.T) {
+func TestRestoreInstalledWindowsConsoleOrphanDoesNotSpendGrace(t *testing.T) {
 	m, dir, port := restoreOrphanManifest(t)
 	p := m.Platforms[hostKey()]
 	p.Runtime.Stop = &StopSpec{Signal: "term", GraceS: 10}
 	m.Platforms[hostKey()] = p
 	orphan := spawnFakeListener(t, p.Runtime.Bin, port)
 	ex := restoreOrphanExecutor(t, m, dir)
-	if err := ex.desired.set("fake", true, intentLocal); err != nil {
-		t.Fatal(err)
-	}
 	started := time.Now()
-	err := ex.RestoreEnabled(context.Background())
+	err := ex.RestoreInstalled(context.Background())
 	elapsed := time.Since(started)
 	if err != nil {
 		t.Fatalf("cold restore console orphan: %v", err)
@@ -137,7 +134,7 @@ func TestRestoreEnabledWindowsConsoleOrphanDoesNotSpendGrace(t *testing.T) {
 	}
 }
 
-func TestRestoreEnabledWindowsConsoleOrphanCancellation(t *testing.T) {
+func TestRestoreInstalledWindowsConsoleOrphanCancellation(t *testing.T) {
 	for _, scenario := range []string{"caller already cancelled", "manager already shutting down"} {
 		t.Run(scenario, func(t *testing.T) {
 			m, dir, port := restoreOrphanManifest(t)
@@ -146,9 +143,6 @@ func TestRestoreEnabledWindowsConsoleOrphanCancellation(t *testing.T) {
 			m.Platforms[hostKey()] = p
 			orphan := spawnFakeListener(t, p.Runtime.Bin, port)
 			ex := restoreOrphanExecutor(t, m, dir)
-			if err := ex.desired.set("fake", true, intentLocal); err != nil {
-				t.Fatal(err)
-			}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			if scenario == "caller already cancelled" {
@@ -157,7 +151,7 @@ func TestRestoreEnabledWindowsConsoleOrphanCancellation(t *testing.T) {
 				ex.StopAll()
 			}
 			started := time.Now()
-			err := ex.RestoreEnabled(ctx)
+			err := ex.RestoreInstalled(ctx)
 			elapsed := time.Since(started)
 			if elapsed >= 5*time.Second {
 				t.Errorf("cancelled reclaim took %s, must not wait full 10s grace", elapsed)
@@ -179,10 +173,6 @@ func TestRestoreEnabledWindowsConsoleOrphanCancellation(t *testing.T) {
 			st.mu.Unlock()
 			if proc != nil || running || adopted {
 				t.Errorf("cancelled reclaim relaunched/adopted: owned=%v running=%v adopted=%v err=%v", proc != nil, running, adopted, err)
-			}
-			enabled, known, desiredErr := ex.desired.get("fake")
-			if desiredErr != nil || !known || !enabled {
-				t.Errorf("cancellation changed desired On: enabled=%v known=%v err=%v", enabled, known, desiredErr)
 			}
 		})
 	}
@@ -221,9 +211,6 @@ func TestCallerCancellationDuringOrphanConfirmation(t *testing.T) {
 	p.Runtime.Stop = &StopSpec{Signal: "term", GraceS: 10}
 	m.Platforms[hostKey()] = p
 	ex := desiredTestExecutor(t, m, t.TempDir())
-	if err := ex.desired.set("fake", true, intentLocal); err != nil {
-		t.Fatal(err)
-	}
 	callerCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	st, err := ex.state("fake")
@@ -274,8 +261,5 @@ func TestCallerCancellationDuringOrphanConfirmation(t *testing.T) {
 	reports := ex.Errors()
 	if len(reports) != 1 || reports[0].ID != startFailedID("fake") || reports[0].Message != confirmationErr.Error() {
 		t.Errorf("cancelled reclaim reports = %+v, want StartFailed with %v", reports, confirmationErr)
-	}
-	if enabled, known, desiredErr := ex.desired.get("fake"); desiredErr != nil || !known || !enabled {
-		t.Errorf("caller cancellation changed desired On: enabled=%v known=%v err=%v", enabled, known, desiredErr)
 	}
 }

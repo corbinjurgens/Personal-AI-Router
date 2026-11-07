@@ -503,6 +503,7 @@ func TestRoutingHistoryBlockedWrite(t *testing.T) {
 				t.Fatal(err)
 			}
 			p.admission.setPolicy(pol)
+			p.admission.setAvailability(nodepolicy.Paused, false)
 			old := nativeRegistered(t, p, time.UnixMilli(10000))
 			nativeRegistered(t, p, time.UnixMilli(10000))
 			nativeRegistered(t, p, time.UnixMilli(10000))
@@ -566,7 +567,7 @@ func TestRoutingHistoryBlockedWrite(t *testing.T) {
 			// uses ordinary notifications and retains their existing pipe coupling;
 			// the separate between-frame test covers its progress guarantee.
 			decision := p.admission.admit(context.Background(), admissionRequest{engine: "llamacpp", model: "m", waitCap: 0})
-			if decision.reject != nodepolicy.RejectOff || decision.ticket != nil || decision.err != nil {
+			if decision.reject != nodepolicy.RejectPaused || decision.ticket != nil || decision.err != nil {
 				t.Fatalf("admission changed under history pressure: %+v", decision)
 			}
 			strict := strictRequest()

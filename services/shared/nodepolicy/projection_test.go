@@ -583,7 +583,6 @@ func TestMergePeerSetAcceptsLegacyDocumentOnDefaultTiers(t *testing.T) {
 	}
 	want := Default()
 	want.Idle.UnloadAfterMinutes = 3
-	want.Idle.StartOnDemand = true
 	want.Idle.WakeTimeoutSeconds = 90
 	if !reflect.DeepEqual(merged, want) {
 		t.Errorf("merged = %+v, want %+v", merged, want)

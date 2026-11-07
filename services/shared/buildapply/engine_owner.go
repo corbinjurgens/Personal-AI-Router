@@ -4,7 +4,6 @@
 package buildapply
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -19,12 +18,6 @@ const EngineOwnerEvidenceMethod = "engine:owner-evidence"
 
 // EngineOwnerEvidenceRequest has no selectors or mutation authority.
 type EngineOwnerEvidenceRequest struct{}
-
-type EngineOwnerIntent struct {
-	Revision        string            `json:"revision"`
-	EnabledByEngine map[string]bool   `json:"enabledByEngine"`
-	OffByEngine     map[string]string `json:"offByEngine"`
-}
 
 type EngineOwnerUniverseEntry struct {
 	Engine              string                `json:"engine"`
@@ -79,12 +72,10 @@ type EngineOwnerReason struct {
 }
 
 // Private parent evidence. Complete describes knowledge, never permission to
-// stop, reserve or apply. Explicit false intent and unknown provenance
-// survive transport. No field contains commands, native errors or credentials.
+// stop, reserve or apply. Unknown provenance survives transport. No field contains commands, native errors or credentials.
 type EngineOwnerEvidence struct {
 	ManagerIncarnation string                                  `json:"managerIncarnation"`
 	CaptureToken       string                                  `json:"captureToken"`
-	Intent             Observation[EngineOwnerIntent]          `json:"intent"`
 	Universe           Observation[[]EngineOwnerUniverseEntry] `json:"universe"`
 	StopAuthority      Observation[[]EngineOwnerStopAuthority] `json:"stopAuthority"`
 	Reservations       Observation[EngineOwnerReservations]    `json:"reservations"`
@@ -154,7 +145,7 @@ func ownerReason(code string) bool {
 }
 
 func (e EngineOwnerEvidence) knowledgeComplete() bool {
-	if !e.Intent.Known || !e.Universe.Known || !e.StopAuthority.Known || !e.Reservations.Known {
+	if !e.Universe.Known || !e.StopAuthority.Known || !e.Reservations.Known {
 		return false
 	}
 	for _, entry := range *e.Universe.Value {
@@ -176,28 +167,6 @@ func (e EngineOwnerEvidence) knowledgeComplete() bool {
 func (e EngineOwnerEvidence) validateSections() error {
 	invalid := errors.New("invalid engine owner evidence")
 	if !ownerIdentity(e.ManagerIncarnation) || e.Reasons == nil {
-		return invalid
-	}
-	if !validObservation(e.Intent, func(v EngineOwnerIntent) bool {
-		if !ownerRevision(v.Revision) || v.EnabledByEngine == nil || v.OffByEngine == nil {
-			return false
-		}
-		for engine, enabled := range v.EnabledByEngine {
-			if !ownerEngineID(engine) {
-				return false
-			}
-			origin, exists := v.OffByEngine[engine]
-			if enabled && exists || !enabled && (!exists || origin != "local" && origin != "peer") {
-				return false
-			}
-		}
-		for engine := range v.OffByEngine {
-			if enabled, exists := v.EnabledByEngine[engine]; !exists || enabled {
-				return false
-			}
-		}
-		return true
-	}) {
 		return invalid
 	}
 	names := map[string]bool{}
@@ -277,15 +246,6 @@ func (e EngineOwnerEvidence) validateSections() error {
 	}) {
 		return invalid
 	}
-	if e.Universe.Known {
-		if e.Intent.Known {
-			for engine := range e.Intent.Value.EnabledByEngine {
-				if !names[engine] {
-					return invalid
-				}
-			}
-		}
-	}
 	if !validObservation(e.Reservations, func(v EngineOwnerReservations) bool {
 		if !ownerRevision(v.Revision) || v.Operations == nil || !validObservation(v.BlocksApply, func(bool) bool { return true }) {
 			return false
@@ -325,7 +285,7 @@ func (e EngineOwnerEvidence) validateSections() error {
 			return invalid
 		}
 		switch reason.Section {
-		case "intent", "universe", "stopAuthority", "reservations":
+		case "universe", "stopAuthority", "reservations":
 		default:
 			return invalid
 		}
@@ -333,7 +293,7 @@ func (e EngineOwnerEvidence) validateSections() error {
 			return invalid
 		}
 	}
-	for section, known := range map[string]bool{"intent": e.Intent.Known, "universe": e.Universe.Known, "stopAuthority": e.StopAuthority.Known, "reservations": e.Reservations.Known} {
+	for section, known := range map[string]bool{"universe": e.Universe.Known, "stopAuthority": e.StopAuthority.Known, "reservations": e.Reservations.Known} {
 		if known {
 			continue
 		}
@@ -408,7 +368,7 @@ func (e *EngineOwnerEvidence) UnmarshalJSON(data []byte) error {
 	if len(data) == 0 || len(data) > MaxStatusBytes {
 		return errors.New("invalid engine owner evidence size")
 	}
-	if err := decodeResponse(data, &value, "managerIncarnation", "captureToken", "intent", "universe", "stopAuthority", "reservations", "complete", "reasons"); err != nil {
+	if err := decodeResponse(data, &value, "managerIncarnation", "captureToken", "universe", "stopAuthority", "reservations", "complete", "reasons"); err != nil {
 		return err
 	}
 	result := EngineOwnerEvidence(value)
@@ -419,31 +379,6 @@ func (e *EngineOwnerEvidence) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-func (v *EngineOwnerIntent) UnmarshalJSON(data []byte) error {
-	type wire EngineOwnerIntent
-	if err := decodeResponse(data, (*wire)(v), "revision", "enabledByEngine", "offByEngine"); err != nil {
-		return err
-	}
-	return ownerBooleanMap(data, "enabledByEngine")
-}
-
-func ownerBooleanMap(data []byte, field string) error {
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(data, &fields); err != nil {
-		return err
-	}
-	var values map[string]json.RawMessage
-	if err := json.Unmarshal(fields[field], &values); err != nil {
-		return err
-	}
-	for _, raw := range values {
-		raw = bytes.TrimSpace(raw)
-		if !bytes.Equal(raw, []byte("true")) && !bytes.Equal(raw, []byte("false")) {
-			return errors.New("invalid engine owner boolean")
-		}
-	}
-	return nil
-}
 func (v *EngineOwnerUniverseEntry) UnmarshalJSON(data []byte) error {
 	type wire EngineOwnerUniverseEntry
 	return decodeResponse(data, (*wire)(v), "engine", "registered", "supported", "installed", "running", "engineRunId", "terminationVerified", "modelRoots", "dataRoots", "rootsComplete")

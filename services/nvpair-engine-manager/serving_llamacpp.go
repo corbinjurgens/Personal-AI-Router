@@ -1149,14 +1149,14 @@ func compileLlamaServingSectionsExpected(ctx context.Context, rt Runtime, requir
 	result := &llamaServingLaunch{Config: rt.Serving.Clone(), Source: source, evidence: &llamaServingEvidence{artifacts: map[string]sourceEvidence{}}}
 	var snapshot strings.Builder
 	// Finite adapter defaults are presets, never router envelope arguments.
-	snapshot.WriteString("[*]\nctx-size = 8192\nparallel = 1\nkv-unified = false\nfit = off\nsleep-idle-seconds = 300\ncache-ram = 512\nload-on-startup = false\n")
+	snapshot.WriteString("[*]\nctx-size = 8192\nparallel = 1\nkv-unified = false\nfit = off\nsleep-idle-seconds = -1\ncache-ram = 512\nload-on-startup = false\n")
 	for mi := range result.Config.Models {
 		model := &result.Config.Models[mi]
 		preset, exists := sections[model.ModelID]
 		if !exists || model.ModelID == "*" || strings.ContainsAny(model.ModelID, "[]\r\n") {
 			return nil, servingError("Declared model has no exact native preset.")
 		}
-		options := map[string]string{"ctx-size": "8192", "parallel": "1", "kv-unified": "false", "fit": "off", "sleep-idle-seconds": "300", "cache-ram": "512", "load-on-startup": "false"}
+		options := map[string]string{"ctx-size": "8192", "parallel": "1", "kv-unified": "false", "fit": "off", "sleep-idle-seconds": "-1", "cache-ram": "512", "load-on-startup": "false"}
 		options["n-predict"] = strconv.FormatInt(model.MaxOutputTokens, 10)
 		// Environment is lowest precedence: snapshot defaults must not mask an
 		// explicit environment setting absent from the source presets.
@@ -1498,7 +1498,7 @@ func llamaSnapshotCommand(command launchCommand, snapshot string, finite ...[]mo
 	for i := 0; i < len(command.Args); i++ {
 		name, value, attached := strings.Cut(command.Args[i], "=")
 		name = llamaLongOption(name)
-		if name == "--models-preset" {
+		if name == "--models-preset" || (len(finite) > 0 && len(finite[0]) > 0 && name == "--models-max") {
 			if !attached {
 				i++
 			}
@@ -1509,6 +1509,9 @@ func llamaSnapshotCommand(command launchCommand, snapshot string, finite ...[]mo
 		} else {
 			args = append(args, command.Args[i])
 		}
+	}
+	if len(finite) > 0 && len(finite[0]) > 0 {
+		args = append(args, "--models-max", "0")
 	}
 	command.Args = append(args, "--models-preset", snapshot)
 	command.Env = maps.Clone(command.Env)
@@ -1523,7 +1526,7 @@ func llamaSnapshotCommand(command launchCommand, snapshot string, finite ...[]mo
 		}
 	}
 	for key := range command.Env {
-		if environmentKey(key) == environmentKey("LLAMA_ARG_MODELS_PRESET") {
+		if environmentKey(key) == environmentKey("LLAMA_ARG_MODELS_PRESET") || (len(finite) > 0 && len(finite[0]) > 0 && environmentKey(key) == environmentKey("LLAMA_ARG_MODELS_MAX")) {
 			delete(command.Env, key)
 		}
 	}

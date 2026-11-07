@@ -48,7 +48,6 @@ function operation(outcome: BuildApplyOperation['outcome']): BuildApplyOperation
         managerIncarnation: unknown,
         policyRevision: unknown,
         settingsRevision: unknown,
-        intentRevision: unknown,
         availabilityRevision: unknown
     }
     return {

@@ -48,7 +48,7 @@ const (
 	codePolicyConflict = -32010
 	// codeLocalVeto is a start, load, resume or other management change the
 	// target node's own pause forbids, or accepted peer work that a local Stop
-	// on the target cancelled. A saved Off alone does not raise it.
+	// on the target cancelled.
 	codeLocalVeto = -32011
 	// codeRemoteManagementDenied is a pinned peer's management operation the
 	// target's local remote-management permission refused. It is distinct from

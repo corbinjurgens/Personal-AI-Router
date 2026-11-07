@@ -393,7 +393,6 @@ func TestRoutingListener_InferenceUnqualifiedOrUnsupportedHasNoDispatchEffects(t
 		setBackend(t, p.soleFacade(), local.URL, true)
 		p.noteSelf(selfID, tc.profile.Name, models)
 		p.SetPriority([]string{selfID})
-		p.admission.setIntent(map[string]bool{tc.profile.Name: true})
 		t.Cleanup(func() { p.shutdown(context.Background()) })
 		return p, w, local
 	}

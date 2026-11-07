@@ -98,6 +98,24 @@ describe('profile-key load contracts', () => {
     const settings = { serverPort: 1234, proxyPort: 1235, launchText: '' }
     const preview = { settings, revision: 1, restart: false, rebind: false }
 
+    it('refuses native idle overrides in typed model loads', () => {
+        expect(() =>
+            parseEngineSettingsPreview({
+                ...preview,
+                settings: {
+                    ...settings,
+                    modelLoads: [
+                        {
+                            profileKey: 'model',
+                            modelId: 'model',
+                            requested: { sleepIdleSeconds: 300 }
+                        }
+                    ]
+                }
+            })
+        ).toThrow()
+    })
+
     it('preserves distinct profile keys for one model', () => {
         const loads = [
             { profileKey: 'model-8k', modelId: 'model', requested: {} },

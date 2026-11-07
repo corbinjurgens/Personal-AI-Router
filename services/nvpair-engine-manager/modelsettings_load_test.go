@@ -1784,9 +1784,6 @@ func TestModelSettingsLoadConversionAcceptsReviewedRemoval(t *testing.T) {
 	test := func(name string, last bool) {
 		t.Run(name, func(t *testing.T) {
 			f, preview, change := reviewedRemovalConversionFixture(t, last)
-			if err := f.ex.desired.set("fake", false, intentPeer); err != nil {
-				t.Fatal(err)
-			}
 			frozen := settings.Request{Engine: "fake", Settings: preview.Settings}
 			if err := f.ex.validateReviewedModelRemoval(context.Background(), frozen, change); err != nil {
 				t.Fatalf("frozen removal refused: %v", err)
@@ -1989,17 +1986,14 @@ func TestModelSettingsLoadConversionFinalRemovalRefusesNativeBuildDrift(t *testi
 
 func TestModelSettingsLoadConversionPersistsWhileOff(t *testing.T) {
 	f := newModelLoadFixture(t)
-	if err := f.ex.desired.set("fake", false, intentPeer); err != nil {
-		t.Fatal(err)
-	}
-	before, err := f.ex.desired.snapshot([]string{"fake"})
+	before, err := f.ex.desired.load()
 	if err != nil {
 		t.Fatal(err)
 	}
 	two := int32(2)
 	preview := previewModelLoadFixture(t, f, "weak-model", modelconfig.LoadPatch{Set: modelconfig.RequestedLoad{Slots: &two}})
 	rebinds := 0
-	result, err := f.ex.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: preview.Settings, Resume: true}, func() error { rebinds++; return nil })
+	result, err := f.ex.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: preview.Settings}, func() error { rebinds++; return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2010,9 +2004,9 @@ func TestModelSettingsLoadConversionPersistsWhileOff(t *testing.T) {
 	if !modelconfig.EqualLoads(stored.ModelLoads, preview.Settings.ModelLoads) || stored.Serving != nil || stored.Port != f.rt.Port {
 		t.Fatal("conversion lost typed settings, endpoint or serving independence")
 	}
-	after, err := f.ex.desired.snapshot([]string{"fake"})
+	after, err := f.ex.desired.load()
 	if err != nil || !reflect.DeepEqual(before, after) {
-		t.Fatalf("Off conversion changed lifecycle intent: before=%+v after=%+v err=%v", before, after, err)
+		t.Fatalf("stopped conversion changed cleanup evidence: before=%+v after=%+v err=%v", before, after, err)
 	}
 	if _, err := os.Stat(f.capture); !os.IsNotExist(err) {
 		t.Fatal("Off conversion spawned native work", err)
@@ -2105,9 +2099,6 @@ func TestModelSettingsLoadConfigureRestartsOwnedRouter(t *testing.T) {
 	if sections["weak-model"]["ctx-size"] != "8192" || sections["weak-model"]["parallel"] != "2" || sections["medium-model"]["ctx-size"] != "16384" {
 		t.Fatal("replacement did not consume the complete reviewed allocation")
 	}
-	if enabled, known, err := f.ex.desired.get("fake"); err != nil || !known || !enabled {
-		t.Fatalf("restart changed saved On: enabled=%v known=%v err=%v", enabled, known, err)
-	}
 }
 
 func TestModelSettingsLoadConfigureNoOpPreservesOwnedProcess(t *testing.T) {
@@ -2186,7 +2177,7 @@ func TestModelSettingsLoadConfigureVetoKeepsSavedConfigurationCold(t *testing.T)
 		t.Run(name, func(t *testing.T) {
 			f := newModelLoadFixture(t)
 			veto(t, f)
-			before, err := f.ex.desired.snapshot([]string{"fake"})
+			before, err := f.ex.desired.load()
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -2199,7 +2190,7 @@ func TestModelSettingsLoadConfigureVetoKeepsSavedConfigurationCold(t *testing.T)
 			if err != nil || result.Running || f.st.proc != nil || !modelconfig.EqualLoads(result.ModelLoads, preview.Settings.ModelLoads) {
 				t.Fatalf("vetoed configuration result=%+v err=%v", result, err)
 			}
-			after, err := f.ex.desired.snapshot([]string{"fake"})
+			after, err := f.ex.desired.load()
 			if err != nil || !reflect.DeepEqual(before, after) {
 				t.Fatalf("configuration changed intent: before=%+v after=%+v err=%v", before, after, err)
 			}
@@ -2983,7 +2974,7 @@ func TestModelSettingsLoadDeclaredServingValidatesGeneratedBytes(t *testing.T) {
 	}
 }
 
-func TestModelSettingsLoadInheritedCapacityChangesApproval(t *testing.T) {
+func TestModelSettingsLoadInheritedCapacityIsManagerOwned(t *testing.T) {
 	f := newModelLoadFixture(t)
 	rt := convertModelLoadFixture(t, f)
 	command := typedFixtureCommand(t, f, rt)
@@ -2999,15 +2990,15 @@ func TestModelSettingsLoadInheritedCapacityChangesApproval(t *testing.T) {
 	}
 	rt.ModelLoads = first.ModelLoads
 	t.Setenv("LLAMA_ARG_MODELS_MAX", "2")
-	if _, err := compilePreparedServing(f.st, command, rt, true); err == nil {
-		t.Fatal("changed inherited router capacity retained approval")
+	if _, err := compilePreparedServing(f.st, command, rt, true); err != nil {
+		t.Fatalf("manager-owned capacity changed approval: %v", err)
 	}
 	second, err := compilePreparedServing(f.st, command, rt, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.Digest == second.Digest {
-		t.Fatal("effective router capacity is absent from typed identity")
+	if first.Digest != second.Digest {
+		t.Fatal("inherited capacity changed manager-owned typed identity")
 	}
 }
 
@@ -3267,9 +3258,6 @@ func TestModelSettingsLoadAutoFrozenRestartCompilation(t *testing.T) {
 
 func TestModelSettingsLoadAutoPersistedManagerRestartKeepsUUID(t *testing.T) {
 	f, frozen, owner := autoTestFrozenLaunch(t)
-	if err := f.ex.desired.set("fake", false, intentPeer); err != nil {
-		t.Fatal(err)
-	}
 	if _, err := f.ex.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: frozen.Settings}, func() error { return nil }); err != nil {
 		t.Fatal(err)
 	}

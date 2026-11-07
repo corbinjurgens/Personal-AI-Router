@@ -42,7 +42,7 @@ The shared contract separates current GUI, bundled service, requested GUI and
 service, attached running service, measured SHA-256, source revision and dirty
 state. Unknown observations use `{known:false,value:null}`. Saved, enforced and
 physically stopped results are independent. The accepted restore policy finishes
-while paused, preserves intent (`PreserveIntent`, wire `preserveIntent`) and newer pauses, requires explicit local
+while paused, preserves newer pauses, requires explicit local
 Resume, and performs no automatic rollback. Preview validation is read-only;
 transaction admission still requires the missing production acceptance owner.
 

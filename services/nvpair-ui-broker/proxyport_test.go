@@ -29,7 +29,7 @@ func TestEnabledEngineRestoreWaitsForFacadeStartup(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 	close(broker.facadesReady)
-	for _, want := range []string{engineNodeProjectionMethod, "engine:settings-projection", restoreEnabledEnginesMethod} {
+	for _, want := range []string{engineNodeProjectionMethod, "engine:settings-projection", restoreInstalledEnginesMethod} {
 		select {
 		case got := <-method:
 			if got != want {
@@ -76,6 +76,21 @@ func TestEnginePortAssignmentRequest(t *testing.T) {
 			t.Fatalf("unexpected engine set-port match for %s %s", tc.method, tc.params)
 		}
 	}
+}
+
+func TestRetiredInstallStartDoesNotChangePortAdmission(t *testing.T) {
+	test := func(name, params string) {
+		t.Run(name, func(t *testing.T) {
+			engine, port, assignment := enginePortAssignmentRequest("engine:install", json.RawMessage(params))
+			if engine != "" || port != 0 || assignment {
+				t.Fatalf("install classified as port assignment: engine=%q port=%d assignment=%v", engine, port, assignment)
+			}
+		})
+	}
+	test("omitted", `{"engine":"llamacpp","port":49150}`)
+	test("true", `{"engine":"llamacpp","port":49150,"start":true}`)
+	test("false", `{"engine":"llamacpp","port":49150,"start":false}`)
+	test("retired value is not decoded", `{"engine":"llamacpp","port":49150,"start":"retired"}`)
 }
 
 func TestBrokerDoesNotExposeInternalReservationSetter(t *testing.T) {

@@ -29,9 +29,6 @@ func residentNativeFixture(t *testing.T) (llamaServingFixture, *loadedLlamaFake,
 	t.Helper()
 	f, server := residentOwnedFixture(t, "resident-model")
 	f.ex.nodeProjection.set(nodeProjection{ManagementBlocked: false})
-	if err := f.ex.desired.set("fake", true, intentLocal); err != nil {
-		t.Fatal(err)
-	}
 	id := f.ex.modelIdentity().Engines["fake"]
 	f.ex.storeInventory(map[string][]string{"fake": {"resident-model", "weak"}}, map[string]observedDigests{"fake": modelInventoryObservation(t, f.ex, "fake")}, f.ex.sweeps.Add(1))
 	p := nodepolicy.ReconcileResidentParams{OperationID: "resident:1", PolicyRevision: "1", DeclaredResidentCount: 1, Engine: "fake", Model: "resident-model",
@@ -125,9 +122,6 @@ func TestResidentDailyAdapterNativeRequirements(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f, server := residentOwnedRetentionFixture(t, "resident-model", retention)
 			f.ex.nodeProjection.set(nodeProjection{ManagementBlocked: false})
-			if err := f.ex.desired.set("fake", true, intentLocal); err != nil {
-				t.Fatal(err)
-			}
 			f.ex.storeInventory(map[string][]string{"fake": {"resident-model"}}, map[string]observedDigests{"fake": modelInventoryObservation(t, f.ex, "fake")}, f.ex.sweeps.Add(1))
 			id := f.ex.modelIdentity().Engines["fake"]
 			p := nodepolicy.ReconcileResidentParams{OperationID: "native:1", PolicyRevision: "1", DeclaredResidentCount: count, Engine: "fake", Model: "resident-model",
@@ -509,9 +503,6 @@ func newResidentFixture(t *testing.T) *residentFixture {
 		"arbitrary":     {HTTP: &ActionHTTP{Method: http.MethodPost, Path: "/forbidden/action"}},
 	}
 	ex.nodeProjection.set(nodeProjection{ManagementBlocked: false})
-	if err := ex.desired.set("fake", true, intentLocal); err != nil {
-		t.Fatal(err)
-	}
 	ex.storeInventory(map[string][]string{"fake": {"m"}}, map[string]observedDigests{"fake": modelInventoryObservation(t, ex, "fake")}, ex.sweeps.Add(1))
 	ex.settingsHub.Publish([]settings.Snapshot{})
 	f := &residentFixture{ex: ex, transport: &residentTransport{loaded: `{"data":[{"id":"m","status":{"value":"loaded"}}]}`}, responses: make(chan Message, 8)}
@@ -787,21 +778,6 @@ func TestResidentRefusesWithoutSideEffects(t *testing.T) {
 		st.mu.Unlock()
 	})
 	test("engine stopped", "engine-off", func(f *residentFixture) { f.ex.engines["fake"].running = false })
-	test("peer Off", "engine-off", func(f *residentFixture) {
-		if err := f.ex.desired.set("fake", false, intentPeer); err != nil {
-			t.Fatal(err)
-		}
-	})
-	test("local Off", "engine-off", func(f *residentFixture) {
-		if err := f.ex.desired.set("fake", false, intentLocal); err != nil {
-			t.Fatal(err)
-		}
-	})
-	test("legacy Off", "engine-off", func(f *residentFixture) {
-		if err := f.ex.desired.save(desiredStateFile{Engines: map[string]bool{"fake": false}}); err != nil {
-			t.Fatal(err)
-		}
-	})
 }
 
 // No sleeps: synchronize on E3's admitted mutation count before releasing opMu.
@@ -844,11 +820,6 @@ func TestResidentPostLockVeto(t *testing.T) {
 	}
 	test("projection pause wins", func(f *residentFixture) {
 		f.ex.nodeProjection.set(nodeProjection{PausedLocally: true, ManagementBlocked: true})
-	})
-	test("saved Off wins", func(f *residentFixture) {
-		if err := f.ex.desired.set("fake", false, intentLocal); err != nil {
-			t.Fatal(err)
-		}
 	})
 }
 

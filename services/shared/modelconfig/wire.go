@@ -51,25 +51,24 @@ type CPUExperts struct {
 // RequestedLoad contains model-load intent. Nil means inherited, including
 // explicit false versus absent booleans. No Auto defaults are selected here.
 type RequestedLoad struct {
-	Context          *Context          `json:"context,omitempty"`
-	Slots            *int32            `json:"slots,omitempty"`
-	GPU              *GPU              `json:"gpu,omitempty"`
-	CPUExperts       *CPUExperts       `json:"cpuExperts,omitempty"`
-	Fit              *string           `json:"fit,omitempty"`
-	FitTarget        *string           `json:"fitTarget,omitempty"`
-	FitCtx           *int32            `json:"fitCtx,omitempty"`
-	ExtraOptions     map[string]string `json:"extraOptions,omitempty"`
-	CacheTypeK       *string           `json:"cacheTypeK,omitempty"`
-	CacheTypeV       *string           `json:"cacheTypeV,omitempty"`
-	FlashAttention   *string           `json:"flashAttention,omitempty"`
-	BatchSize        *int32            `json:"batchSize,omitempty"`
-	UBatchSize       *int32            `json:"ubatchSize,omitempty"`
-	Threads          *int32            `json:"threads,omitempty"`
-	ThreadsBatch     *int32            `json:"threadsBatch,omitempty"`
-	KVOffload        *bool             `json:"kvOffload,omitempty"`
-	OpOffload        *bool             `json:"opOffload,omitempty"`
-	SleepIdleSeconds *int32            `json:"sleepIdleSeconds,omitempty"`
-	CacheRAM         *int32            `json:"cacheRAM,omitempty"` // MiB, not bytes
+	Context        *Context          `json:"context,omitempty"`
+	Slots          *int32            `json:"slots,omitempty"`
+	GPU            *GPU              `json:"gpu,omitempty"`
+	CPUExperts     *CPUExperts       `json:"cpuExperts,omitempty"`
+	Fit            *string           `json:"fit,omitempty"`
+	FitTarget      *string           `json:"fitTarget,omitempty"`
+	FitCtx         *int32            `json:"fitCtx,omitempty"`
+	ExtraOptions   map[string]string `json:"extraOptions,omitempty"`
+	CacheTypeK     *string           `json:"cacheTypeK,omitempty"`
+	CacheTypeV     *string           `json:"cacheTypeV,omitempty"`
+	FlashAttention *string           `json:"flashAttention,omitempty"`
+	BatchSize      *int32            `json:"batchSize,omitempty"`
+	UBatchSize     *int32            `json:"ubatchSize,omitempty"`
+	Threads        *int32            `json:"threads,omitempty"`
+	ThreadsBatch   *int32            `json:"threadsBatch,omitempty"`
+	KVOffload      *bool             `json:"kvOffload,omitempty"`
+	OpOffload      *bool             `json:"opOffload,omitempty"`
+	CacheRAM       *int32            `json:"cacheRAM,omitempty"` // MiB, not bytes
 }
 
 // ArtifactBinding is target-owned sampled local identity, not a verified full

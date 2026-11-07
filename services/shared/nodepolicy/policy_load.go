@@ -27,6 +27,23 @@ func ParseStored(data []byte) (Policy, map[string]int, error) {
 	container.members = slices.DeleteFunc(container.members, func(member modelContainerMember) bool {
 		return strings.EqualFold(member.key, "engineBindings")
 	})
+	for i := range container.members {
+		member := &container.members[i]
+		if !strings.EqualFold(member.key, "idle") || bytes.Equal(bytes.TrimSpace(member.value), []byte("null")) {
+			continue
+		}
+		idle, err := readModelContainer(member.value)
+		if err != nil {
+			return Policy{}, nil, errors.New("stored policy is invalid")
+		}
+		idle.members = slices.DeleteFunc(idle.members, func(field modelContainerMember) bool {
+			return strings.EqualFold(field.key, "startondemand") || strings.EqualFold(field.key, "stopengineafterminutes")
+		})
+		member.value, err = idle.marshal()
+		if err != nil {
+			return Policy{}, nil, errors.New("stored policy is invalid")
+		}
+	}
 	data, err = container.marshal()
 	if err != nil {
 		return Policy{}, nil, errors.New("stored policy is invalid")

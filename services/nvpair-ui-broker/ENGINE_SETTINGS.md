@@ -227,7 +227,7 @@ the removed load stays absent while the previous policy stays saved. The failed
 attempt remains fenced and requires a fresh local superseding review; it does
 not roll the native change back or release the old policy for ordinary writes.
 Startup reconstructs them before
-proxy replay/facade enablement, advertising and enabled-intent restoration.
+proxy replay/facade enablement, advertising and installed-engine restoration.
 Progressed applying records without failed receipts replay automatically.
 This includes `activation-pending` after restart. Fresh local supersession
 also reviews and carries any unresolved resume obligation through the existing
@@ -242,7 +242,7 @@ preserves unrelated newer policy content. A peer cannot clear that conflict.
 Pause of either origin always wins over completion and recovery. This recoverable
 sequence makes no ACID, qualification or native-hardware acceptance claim.
 
-An unreadable ordinary settings journal retains the existing enabled-intent
+An unreadable ordinary settings journal retains the existing installed-engine
 restoration and proxy-policy replay behavior, with its error reported. A
 recognizable unresolved or invalid model subrecord, or unresolved model reservation
 already known in memory, still blocks that restoration/replay on a load error.
@@ -345,7 +345,7 @@ engines require their official stop path.
 
 A normalized no-op changes no runtime. Proxy-only edits do not restart the
 engine. A stopped engine remains stopped. Running launch/server changes stop
-and start once without rewriting explicit enabled intent. While the node is
+and start once when the node is available. While the node is
 paused, a local Apply or a recovered operation never resumes a stopped engine,
 even one a failed Apply left with a pending resume; local settings are still
 applied. Every paired Apply is refused while a pause of either origin is

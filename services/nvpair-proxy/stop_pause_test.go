@@ -644,7 +644,6 @@ func stopPauseWaitingIngress(t *testing.T) {
 			pol.Admission.MaxConcurrentPerModel = 1
 			p.admission.setPolicy(pol)
 			if waking {
-				p.admission.setIntent(map[string]bool{"llamacpp": true})
 			} else {
 				blocker := mustAdmit(t, p.admission.admit(t.Context(), admissionRequest{engine: "llamacpp", model: "m", waitCap: -1}))
 				defer blocker.release()

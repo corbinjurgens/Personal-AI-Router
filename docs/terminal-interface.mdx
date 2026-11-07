@@ -317,21 +317,15 @@ Each engine shows two ports, because they are easy to confuse:
 
 Both are changed here, on the engine they belong to.
 
-On this machine, a current false saved-intent entry adds ` (saved Off, local)`
-when its reported origin is local, or ` (saved Off, by peer)` when the reported
-origin is a peer. Without a valid reported origin it shows ` (saved Off)`.
-Remote rows do not show local intent or origin. The label identifies an origin
-class, not a particular peer, and stays separate from installed, running and
-healthy state. A stopped engine alone does not establish saved Off, and reading
-origin does not grant permission to start an engine.
+Every installed engine runs while the node is available. Service startup, Resume, installation and crash recovery start installed engines. Requests can wake a stopped installed engine on an available node. Pause and Halt control node availability.
 
-Saved Off is ordinary intent and does not stop a granted peer from starting the engine.
-A paused target refuses remote changes until resumed under its availability policy;
-status, permission and receipt reads remain available.
+PAIR releases each nonresident model after its own idle interval, defaulting to 5 minutes. The engine process stays running. Set the interval to 0 (Never) to disable idle release. Native idle sleep is disabled for PAIR-managed typed launches.
 
-A port is a request rather than a promise. If a running engine already holds
-the port you asked for, PAIR binds elsewhere and tells you which port it ended
-up on — so a change you did not get is never reported as one you did.
+The node setting "Models that can stay loaded at once" governs inference and manual loads from the desktop and terminal interface. At capacity, admission can evict the least recently used eligible model.
+
+A paused target refuses remote changes until resumed under its availability policy; status, permission and receipt reads remain available.
+
+An explicit proxy port is exact. If it cannot bind, PAIR reports the failure and keeps the saved request available for retry; it does not silently choose another port. The effective port reports the actual listener separately from the saved setting.
 
 ### Startup Arguments
 

@@ -43,7 +43,9 @@ var internalClientMethods = map[string]struct{}{
 	"engine:dispatch-resident-request":    {},
 	"engine:dispatch-resident-reply":      {},
 	"engine:node-projection":              {},
-	"engine:restore-enabled":              {},
+	"engine:restore-installed":            {},
+	admittedLoadRequestMethod:             {},
+	admittedLoadReplyMethod:               {},
 	"engine:prepare-shutdown":             {},
 	"engine:wake":                         {},
 	"engine:sleep":                        {},
@@ -225,6 +227,8 @@ func (b *Broker) handleMessage(msg *Message) {
 	}
 
 	switch msg.Method {
+	case "engine:load-model":
+		go b.handleManualLoad(msg)
 	case "engine:inspect-model":
 		go b.handleModelInspection(msg)
 	case "engine:set-stated-memory", "engine:clear-stated-memory":
@@ -404,85 +408,7 @@ func (b *Broker) relayToEngine(msg *Message) {
 	go b.relayToEngineNow(msg)
 }
 
-func installStartRequest(method string, params json.RawMessage) bool {
-	var request struct {
-		Start bool `json:"start"`
-	}
-	return method == "engine:install" && json.Unmarshal(params, &request) == nil && request.Start
-}
-
-type pendingInstallStart struct {
-	engine     string
-	superseded bool
-}
-
-// Called after local pause admission succeeds, under engineConfigMu.
-func (b *Broker) supersedeInstallStartsLocked(engine string) {
-	for pending := range b.pendingInstallStarts {
-		if engine == "" || pending.engine == engine {
-			pending.superseded = true
-		}
-	}
-}
-
 func (b *Broker) relayToEngineNow(msg *Message) {
-	var installStart *pendingInstallStart
-	if installStartRequest(msg.Method, msg.Params) {
-		// Preserve early proxy-port refusal before doing installation work.
-		// Normal start admission rechecks after preparation has completed.
-		if engine, port, assigned := enginePortAssignmentRequest(msg.Method, msg.Params); assigned && b.rejectProxyHeldPort(msg, port, engine) {
-			return
-		}
-		// Preparation can take minutes. It must not hold either global lock,
-		// and must never leave a manager-owned unguarded start continuation.
-		var params map[string]json.RawMessage
-		var engine string
-		if err := json.Unmarshal(msg.Params, &params); err != nil {
-			_ = b.codec.RespondError(msg.ID, -32602, err.Error())
-			return
-		}
-		if err := json.Unmarshal(params["engine"], &engine); err != nil {
-			_ = b.codec.RespondError(msg.ID, -32602, "engine is required")
-			return
-		}
-		installStart = &pendingInstallStart{engine: engine}
-		b.engineConfigMu.Lock()
-		if b.pendingInstallStarts == nil {
-			b.pendingInstallStarts = make(map[*pendingInstallStart]struct{})
-		}
-		b.pendingInstallStarts[installStart] = struct{}{}
-		b.engineConfigMu.Unlock()
-		defer func() {
-			b.engineConfigMu.Lock()
-			delete(b.pendingInstallStarts, installStart)
-			b.engineConfigMu.Unlock()
-		}()
-		params["start"] = json.RawMessage(`false`)
-		preparation, err := json.Marshal(params)
-		if err != nil {
-			_ = b.codec.RespondError(msg.ID, -32602, err.Error())
-			return
-		}
-		em := b.getEngineMgr()
-		if em == nil {
-			_ = b.codec.RespondError(msg.ID, -32000, "engine-manager not available")
-			return
-		}
-		_, rpcErr, err := em.CallNoTimeout(context.Background(), "engine:install", preparation)
-		if err != nil {
-			_ = b.codec.RespondError(msg.ID, -32000, fmt.Sprintf("engine call failed: %v", err))
-			return
-		}
-		if rpcErr != nil {
-			_ = b.codec.RespondError(msg.ID, rpcErr.Code, rpcErr.Message)
-			return
-		}
-		// Re-enter the existing install/start executor path with the original
-		// options after preparation. Installation is idempotent; the executor
-		// retains ownership of start, without a public lifecycle RPC.
-		// V28 accepts the extra detection/progress and possible reinstall here:
-		// phases 11 and 15 ship together, and 15 removes the install start option.
-	}
 	requestedEngine, requestedPort, isEnginePortAssignment := enginePortAssignmentRequest(msg.Method, msg.Params)
 	// Send the manager reply only after reconciliation and the lifecycle lock
 	// defers finish, so the next client operation can acquire settingsApplyMu.
@@ -493,7 +419,7 @@ func (b *Broker) relayToEngineNow(msg *Message) {
 		}
 	}()
 	lifecycleLocked := false
-	if isEnginePortAssignment || installStartRequest(msg.Method, msg.Params) {
+	if isEnginePortAssignment {
 		b.settingsApplyMu.Lock()
 		defer b.settingsApplyMu.Unlock()
 		b.engineConfigMu.Lock()
@@ -504,10 +430,6 @@ func (b *Broker) relayToEngineNow(msg *Message) {
 		}
 		if err := json.Unmarshal(msg.Params, &target); err != nil {
 			_ = b.codec.RespondError(msg.ID, -32602, err.Error())
-			return
-		}
-		if installStart != nil && installStart.superseded {
-			_ = b.codec.RespondError(msg.ID, -32000, "Engine install start superseded by pause (busy).")
 			return
 		}
 		defer b.reconcileLegacySettingsLocked()

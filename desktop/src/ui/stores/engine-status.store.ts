@@ -13,7 +13,7 @@
  * the same set; one absent from it renders with safe defaults.
  */
 import { create } from 'zustand'
-import type { EngineInitialState, EngineIntentSnapshot } from '@/shared/types/engine-api'
+import type { EngineInitialState } from '@/shared/types/engine-api'
 import { emptyEngineStatus } from '@/shared/utils/engines'
 import type {
     EngineDescriptor,
@@ -27,7 +27,6 @@ function descriptorMap(descriptors: EngineDescriptor[]): Map<EngineType, EngineD
 }
 
 interface EngineStatusState {
-    intent: EngineIntentSnapshot | null
     statusByNode: EngineStatusByNode
     descriptors: Map<EngineType, EngineDescriptor>
     initialize(initial?: EngineInitialState | Promise<EngineInitialState>): Promise<void>
@@ -38,10 +37,8 @@ interface EngineStatusState {
 
 let unsubs: Array<() => void> = []
 let initializationGeneration = 0
-let intentGeneration = 0
 
 export const useEngineStatusStore = create<EngineStatusState>((set, get) => ({
-    intent: null,
     statusByNode: new Map(),
     descriptors: new Map(),
 
@@ -52,18 +49,11 @@ export const useEngineStatusStore = create<EngineStatusState>((set, get) => ({
         unsubs.forEach(u => u())
         unsubs = []
         const generation = ++initializationGeneration
-        const intentRead = ++intentGeneration
         const changes: Array<{ status: EngineStatusData } | { removed: string }> = []
         let loading = true
         let pushedDescriptors: EngineDescriptor[] | undefined
-        set({ intent: null })
         if (!window.pairApi) return
         unsubs.push(
-            window.pairApi.engines.onIntentChanged(intent => {
-                if (generation !== initializationGeneration) return
-                intentGeneration++
-                set({ intent })
-            }),
             window.pairApi.engines.onDescriptorsChanged(descriptors => {
                 if (generation !== initializationGeneration) return
                 if (loading) pushedDescriptors = descriptors
@@ -89,18 +79,6 @@ export const useEngineStatusStore = create<EngineStatusState>((set, get) => ({
                 outer.delete(nodeId)
                 set({ statusByNode: outer })
             })
-        )
-        const hydrateIntent = window.pairApi.engines.getIntent().then(
-            intent => {
-                if (generation !== initializationGeneration || intentRead !== intentGeneration)
-                    return
-                set({ intent })
-            },
-            () => {
-                if (generation !== initializationGeneration || intentRead !== intentGeneration)
-                    return
-                set({ intent: null })
-            }
         )
         try {
             const initial = await (initialSnapshot ?? window.pairApi.engines.getInitialState())
@@ -133,15 +111,12 @@ export const useEngineStatusStore = create<EngineStatusState>((set, get) => ({
         } finally {
             loading = false
         }
-        await hydrateIntent
     },
 
     cleanup: () => {
         initializationGeneration++
-        intentGeneration++
         unsubs.forEach(u => u())
         unsubs = []
-        set({ intent: null })
     },
 
     getStatus: (nodeId, engineType) => {

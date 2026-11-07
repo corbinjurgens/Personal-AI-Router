@@ -37,7 +37,6 @@ function preview(): BuildApplyPreview {
         managerIncarnation: known('manager'),
         policyRevision: known('policy'),
         settingsRevision: known('settings'),
-        intentRevision: known('intent'),
         availabilityRevision: known('availability')
     }
     return {
@@ -71,7 +70,6 @@ function preview(): BuildApplyPreview {
                     active: known(false),
                     running: known(false),
                     loadedModels: known(['model']),
-                    desiredState: known('off'),
                     scopedStopAuthority: known(true)
                 }
             ]),
@@ -88,7 +86,6 @@ function preview(): BuildApplyPreview {
             expectedSettings: {
                 policyDigest: known('d'.repeat(64)),
                 engineSettingsDigest: known('d'.repeat(64)),
-                intentDigest: known('d'.repeat(64)),
                 stopEngines: known(true),
                 unloadModels: known(true)
             },
@@ -103,7 +100,6 @@ function preview(): BuildApplyPreview {
             restorePolicy: {
                 remainPaused: true,
                 requireLocalResume: true,
-                preserveIntent: true,
                 preserveNewerPause: true,
                 automaticRollback: false
             },
@@ -376,7 +372,6 @@ describe('staged application UI', () => {
             'Requested service',
             'stored false, effective true',
             'Active work: 3',
-            'saved intent off',
             'Committed streams may fail',
             'ordinary local Resume',
             'not publisher authenticity'

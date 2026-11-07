@@ -18,9 +18,7 @@ func TestProfileRoutingAuditServedNativeModel(t *testing.T) {
 	t.Run("dormant self", func(t *testing.T) {
 		p := testProxy(llamacppCase(t).profile, NewDiscovery(), 11435)
 		p.noteSelf("self", "llamacpp", []string{"native-file"})
-		p.admission.setIntent(map[string]bool{"llamacpp": true})
 		pol := nodepolicy.Default()
-		pol.Idle.StartOnDemand = true
 		pol.Profiles = []nodepolicy.Profile{{Key: "public-profile", DisplayName: "Public", Engine: "llamacpp", Model: "native-file"}}
 		pol.ServedModels = nodepolicy.ServedModels{{Engine: "llamacpp", Model: "native-file"}}
 		p.admission.setPolicy(pol)

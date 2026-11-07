@@ -67,7 +67,7 @@ func (p buildApplyPlan) validate(now time.Time) error {
 	if !p.ownerFactsComplete || !r.Consent.AllowEngineStop || !r.Consent.AllowInterruption ||
 		!buildapply.ValidOperationID(r.OperationID) || r.PreviewID == "" || !now.Before(p.expires) ||
 		p.accepted.IsZero() || p.accepted.After(now) || p.deadline.Sub(p.accepted) != buildApplyTotalBudget || !now.Before(p.deadline) ||
-		!r.Expected.RemainPaused || !r.Expected.PreserveIntent || !r.Expected.StopEngines || !r.Expected.UnloadModels ||
+		!r.Expected.RemainPaused || !r.Expected.StopEngines || !r.Expected.UnloadModels ||
 		(r.Expected.OnActive != nodepolicy.FinishActive && r.Expected.OnActive != nodepolicy.CancelActive) ||
 		r.Expected.DrainTimeoutSeconds < 0 || time.Duration(r.Expected.DrainTimeoutSeconds)*time.Second+buildApplyShutdownBudget+4*buildApplyReadBudget >= p.deadline.Sub(now) {
 		return errors.New("incomplete, stale or unapproved apply authority/budget")
@@ -104,7 +104,7 @@ func (p buildApplyPlan) validate(now time.Time) error {
 		p.inventory.OperationID != r.OperationID || p.inventory.PackageSHA256 != r.CandidateSHA256 || len(p.oldProcesses) == 0 {
 		return errors.New("invalid initial transaction")
 	}
-	for _, f := range []buildapply.Observation[string]{r.Fences.RuntimeGeneration, r.Fences.ServiceInstance, r.Fences.BrokerGeneration, r.Fences.ManagerIncarnation, r.Fences.PolicyRevision, r.Fences.SettingsRevision, r.Fences.IntentRevision, r.Fences.AvailabilityRevision} {
+	for _, f := range []buildapply.Observation[string]{r.Fences.RuntimeGeneration, r.Fences.ServiceInstance, r.Fences.BrokerGeneration, r.Fences.ManagerIncarnation, r.Fences.PolicyRevision, r.Fences.SettingsRevision, r.Fences.AvailabilityRevision} {
 		if !f.Known || f.Value == nil || *f.Value == "" {
 			return errors.New("missing owner fence")
 		}
@@ -114,7 +114,7 @@ func (p buildApplyPlan) validate(now time.Time) error {
 			return errors.New("incomplete old process lifetime")
 		}
 	}
-	for _, digest := range []string{r.CandidateSHA256, r.PreviousSHA256, r.Protected.Policy, r.Protected.EngineSettings, r.Protected.Intent, r.Protected.IdentityMembership} {
+	for _, digest := range []string{r.CandidateSHA256, r.PreviousSHA256, r.Protected.Policy, r.Protected.EngineSettings, r.Protected.IdentityMembership} {
 		if !validBuildApplyDigest(digest) {
 			return errors.New("missing trusted protected digest")
 		}
@@ -198,7 +198,7 @@ func buildApplyObservedTrue(v buildapply.Observation[bool]) bool {
 }
 
 func buildApplyFencesComplete(f buildapply.Fences) bool {
-	for _, v := range []buildapply.Observation[string]{f.RuntimeGeneration, f.ServiceInstance, f.BrokerGeneration, f.ManagerIncarnation, f.PolicyRevision, f.SettingsRevision, f.IntentRevision, f.AvailabilityRevision} {
+	for _, v := range []buildapply.Observation[string]{f.RuntimeGeneration, f.ServiceInstance, f.BrokerGeneration, f.ManagerIncarnation, f.PolicyRevision, f.SettingsRevision, f.AvailabilityRevision} {
 		if !v.Known || v.Value == nil || *v.Value == "" {
 			return false
 		}
@@ -269,7 +269,7 @@ func verifyBuildApplySettings(r buildapply.Receipt, read buildApplySettingsReadb
 	// Secret-bearing snapshots stay inside their owners; only digests cross.
 	expected.Policy = r.Pause.PolicySHA256
 	if !reflect.DeepEqual(expected, read.protected) {
-		return errors.New("protected policy/settings/intent/identity semantics changed")
+		return errors.New("protected policy/settings/identity semantics changed")
 	}
 	return nil
 }
@@ -1034,7 +1034,6 @@ func (owner serviceBuildApplyEvidence) Read(ctx context.Context) (buildApplyEvid
 		}
 	}
 	e.Facts = buildApplyOwnerCompleteness{
-		IntentProvenance:         m.Intent.Known,
 		EngineUniverse:           m.Universe.Known,
 		ModelDataRoots:           true,
 		ScopedStopAuthority:      authorityKnown,
@@ -1046,9 +1045,6 @@ func (owner serviceBuildApplyEvidence) Read(ctx context.Context) (buildApplyEvid
 	}
 	if i.ExpectedSettings.EngineSettingsDigest.Known {
 		e.Protected.EngineSettings = *i.ExpectedSettings.EngineSettingsDigest.Value
-	}
-	if i.ExpectedSettings.IntentDigest.Known && m.Intent.Known {
-		e.Protected.Intent = *i.ExpectedSettings.IntentDigest.Value
 	}
 	s.mu.Lock()
 	current := s.broker == run && !s.stopping
@@ -1079,7 +1075,6 @@ type buildApplyEvidence struct {
 }
 
 type buildApplyOwnerCompleteness struct {
-	IntentProvenance         bool `json:"intentProvenance"`
 	EngineUniverse           bool `json:"engineUniverse"`
 	ModelDataRoots           bool `json:"modelDataRoots"`
 	ScopedStopAuthority      bool `json:"scopedStopAuthority"`
@@ -1093,11 +1088,11 @@ func completeBuildApplyEvidence(e buildApplyEvidence) bool {
 	}
 	f := e.Facts
 	i := e.Impact
-	if !f.IntentProvenance || !f.EngineUniverse || !f.ModelDataRoots || !f.ScopedStopAuthority || !f.DownloadCopyReservations || !f.ManagerIdleRunID || e.ProtectedRoots == nil || e.RecoveryRequired || !i.Complete || len(i.Refusals) != 0 || !buildApplyFencesComplete(i.Fences) ||
+	if !f.EngineUniverse || !f.ModelDataRoots || !f.ScopedStopAuthority || !f.DownloadCopyReservations || !f.ManagerIdleRunID || e.ProtectedRoots == nil || e.RecoveryRequired || !i.Complete || len(i.Refusals) != 0 || !buildApplyFencesComplete(i.Fences) ||
 		!i.Availability.Known || i.Availability.Value == nil || !i.PauseOrigin.Known || i.PauseOrigin.Value == nil || !i.Engines.Known || i.Engines.Value == nil || !i.ModelOperations.Known || i.ModelOperations.Value == nil || !i.ActiveWork.Known || i.ActiveWork.Value == nil || *i.ActiveWork.Value < 0 || !i.SettingsDifferences.Known || i.SettingsDifferences.Value == nil || !i.InterruptionPolicy.OnActive.Known || i.InterruptionPolicy.OnActive.Value == nil || !i.InterruptionPolicy.DrainTimeoutSeconds.Known || i.InterruptionPolicy.DrainTimeoutSeconds.Value == nil || !buildApplyObservedTrue(i.ExpectedSettings.StopEngines) || !buildApplyObservedTrue(i.ExpectedSettings.UnloadModels) || !i.Maintenance.BuildApplyActive.Known || i.Maintenance.BuildApplyActive.Value == nil || !i.Maintenance.ModelSettingsActive.Known || i.Maintenance.ModelSettingsActive.Value == nil || *i.Maintenance.ModelSettingsActive.Value {
 		return false
 	}
-	for _, digest := range []string{e.Protected.Policy, e.Protected.EngineSettings, e.Protected.Intent, e.Protected.IdentityMembership} {
+	for _, digest := range []string{e.Protected.Policy, e.Protected.EngineSettings, e.Protected.IdentityMembership} {
 		if !validBuildApplyDigest(digest) {
 			return false
 		}
@@ -1105,16 +1100,12 @@ func completeBuildApplyEvidence(e buildApplyEvidence) bool {
 	if !i.ExpectedSettings.PolicyDigest.Known || i.ExpectedSettings.PolicyDigest.Value == nil || !validBuildApplyDigest(*i.ExpectedSettings.PolicyDigest.Value) {
 		return false
 	}
-	for _, pair := range []struct {
-		observation buildapply.Observation[string]
-		digest      string
-	}{{i.ExpectedSettings.EngineSettingsDigest, e.Protected.EngineSettings}, {i.ExpectedSettings.IntentDigest, e.Protected.Intent}} {
-		if !pair.observation.Known || pair.observation.Value == nil || *pair.observation.Value != pair.digest {
-			return false
-		}
+	settingsDigest := i.ExpectedSettings.EngineSettingsDigest
+	if !settingsDigest.Known || settingsDigest.Value == nil || *settingsDigest.Value != e.Protected.EngineSettings {
+		return false
 	}
 	for _, engine := range *i.Engines.Value {
-		if !buildApplyObservedTrue(engine.ScopedStopAuthority) || !engine.Running.Known || engine.Running.Value == nil || !engine.Active.Known || engine.Active.Value == nil || !engine.LoadedModels.Known || engine.LoadedModels.Value == nil || !engine.DesiredState.Known || engine.DesiredState.Value == nil {
+		if !buildApplyObservedTrue(engine.ScopedStopAuthority) || !engine.Running.Known || engine.Running.Value == nil || !engine.Active.Known || engine.Active.Value == nil || !engine.LoadedModels.Known || engine.LoadedModels.Value == nil {
 			return false
 		}
 	}
@@ -1861,7 +1852,7 @@ func (s *Service) captureBuildApplyPlan(ctx context.Context, snapshot buildApply
 	if impact.InterruptionPolicy.OnActive.Value == nil || impact.InterruptionPolicy.DrainTimeoutSeconds.Value == nil {
 		return p, errors.New("saved drain policy unavailable")
 	}
-	p.receipt.Expected = buildapply.JournalExpectations{StopEngines: true, UnloadModels: true, RemainPaused: true, PreserveIntent: true, OnActive: *impact.InterruptionPolicy.OnActive.Value, DrainTimeoutSeconds: *impact.InterruptionPolicy.DrainTimeoutSeconds.Value}
+	p.receipt.Expected = buildapply.JournalExpectations{StopEngines: true, UnloadModels: true, RemainPaused: true, OnActive: *impact.InterruptionPolicy.OnActive.Value, DrainTimeoutSeconds: *impact.InterruptionPolicy.DrainTimeoutSeconds.Value}
 	if impact.Availability.Value == nil {
 		return p, errors.New("availability owner unavailable")
 	}

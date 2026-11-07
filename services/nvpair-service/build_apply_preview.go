@@ -457,7 +457,7 @@ func captureBuildApplyPreview(ctx context.Context, request buildapply.PreviewReq
 		first.ManagerEvidence.Value.CaptureToken != last.ManagerEvidence.Value.CaptureToken ||
 		first.ManagerEvidence.Value.ManagerIncarnation != last.ManagerEvidence.Value.ManagerIncarnation ||
 		!sameBuildApplyImpact(first.Impact, last.Impact) {
-		preview.Impact = buildapply.Impact{InterruptionPolicy: buildapply.InterruptionPolicy{StopsEngines: true, UnloadsModels: true, CommittedStreamsMayFail: true, IncludesWorkBeforeFence: true}, RestorePolicy: buildapply.RestorePolicy{RemainPaused: true, RequireLocalResume: true, PreserveIntent: true, PreserveNewerPause: true}, Refusals: []buildapply.Refusal{{Code: "changed_or_unavailable", Detail: "Local owner evidence changed or became unavailable during capture."}}}
+		preview.Impact = buildapply.Impact{InterruptionPolicy: buildapply.InterruptionPolicy{StopsEngines: true, UnloadsModels: true, CommittedStreamsMayFail: true, IncludesWorkBeforeFence: true}, RestorePolicy: buildapply.RestorePolicy{RemainPaused: true, RequireLocalResume: true, PreserveNewerPause: true}, Refusals: []buildapply.Refusal{{Code: "changed_or_unavailable", Detail: "Local owner evidence changed or became unavailable during capture."}}}
 	}
 	if err = buildapply.ValidateLocations(request.CandidatePath, root, excluded); err != nil {
 		return

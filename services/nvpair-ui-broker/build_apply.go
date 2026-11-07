@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"reflect"
 	"sort"
 	"time"
@@ -55,8 +54,8 @@ func (b *Broker) handleBuildApply(msg *Message) {
 // holds engineConfigMu -> policy mu; implementations must not reenter either
 // lock or perform transport I/O, and must return the callback's result without
 // failing after an accepted callback.
-// There is deliberately no production implementation: manager intent/lock
-// revisions, complete roots/inventory, scoped stop and copy/download reservation
+// There is deliberately no production implementation: complete roots/inventory,
+// scoped stop and copy/download reservation
 // evidence still lack safe read APIs. A cache or a worker probe cannot fill in.
 type buildApplyOwners interface {
 	WithLocked(func(buildApplyCapturedOwners) error) error
@@ -145,7 +144,7 @@ func buildApplyTrue(value buildapply.Observation[bool]) bool {
 }
 
 func buildApplyFencesKnown(f buildapply.Fences) bool {
-	for _, value := range []buildapply.Observation[string]{f.RuntimeGeneration, f.ServiceInstance, f.BrokerGeneration, f.ManagerIncarnation, f.PolicyRevision, f.SettingsRevision, f.IntentRevision, f.AvailabilityRevision} {
+	for _, value := range []buildapply.Observation[string]{f.RuntimeGeneration, f.ServiceInstance, f.BrokerGeneration, f.ManagerIncarnation, f.PolicyRevision, f.SettingsRevision, f.AvailabilityRevision} {
 		if !value.Known || value.Value == nil || *value.Value == "" {
 			return false
 		}
@@ -154,14 +153,13 @@ func buildApplyFencesKnown(f buildapply.Fences) bool {
 }
 
 // Pause legitimately changes policy, availability and runtime observations.
-// It never grants permission to cross a manager lifetime or a new settings,
-// intent or lock revision, even if the new values have equal semantic digests.
+// It never grants permission to cross a manager lifetime or a new settings
+// revision, even if the new values have equal semantic digests.
 func buildApplyStableFences(before, after buildapply.Fences) bool {
 	return reflect.DeepEqual(before.ServiceInstance, after.ServiceInstance) &&
 		reflect.DeepEqual(before.BrokerGeneration, after.BrokerGeneration) &&
 		reflect.DeepEqual(before.ManagerIncarnation, after.ManagerIncarnation) &&
-		reflect.DeepEqual(before.SettingsRevision, after.SettingsRevision) &&
-		reflect.DeepEqual(before.IntentRevision, after.IntentRevision)
+		reflect.DeepEqual(before.SettingsRevision, after.SettingsRevision)
 }
 
 func buildApplyStoppedEvidence(c buildApplyCapturedOwners) bool {
@@ -193,7 +191,7 @@ func buildApplyEvidenceComplete(c buildApplyCapturedOwners) bool {
 		!buildApplyTrue(i.ExpectedSettings.StopEngines) || !buildApplyTrue(i.ExpectedSettings.UnloadModels) {
 		return false
 	}
-	for _, digest := range []buildapply.Observation[string]{i.ExpectedSettings.PolicyDigest, i.ExpectedSettings.EngineSettingsDigest, i.ExpectedSettings.IntentDigest} {
+	for _, digest := range []buildapply.Observation[string]{i.ExpectedSettings.PolicyDigest, i.ExpectedSettings.EngineSettingsDigest} {
 		if !digest.Known || digest.Value == nil || *digest.Value == "" {
 			return false
 		}
@@ -201,7 +199,7 @@ func buildApplyEvidenceComplete(c buildApplyCapturedOwners) bool {
 	for _, engine := range *i.Engines.Value {
 		if !buildApplyTrue(engine.ScopedStopAuthority) || !engine.Running.Known || engine.Running.Value == nil ||
 			!engine.LoadedModels.Known || engine.LoadedModels.Value == nil ||
-			!engine.DesiredState.Known || engine.DesiredState.Value == nil || !engine.Active.Known || engine.Active.Value == nil {
+			!engine.Active.Known || engine.Active.Value == nil {
 			return false
 		}
 	}
@@ -408,7 +406,7 @@ func (b *Broker) callBuildApplyOwnerEvidence(ctx context.Context, worker *rpcWor
 
 func buildApplyIncomplete(code, detail string) buildapply.ImpactEnvelope {
 	return buildapply.ImpactEnvelope{Impact: buildapply.Impact{
-		RestorePolicy:      buildapply.RestorePolicy{RemainPaused: true, RequireLocalResume: true, PreserveIntent: true, PreserveNewerPause: true},
+		RestorePolicy:      buildapply.RestorePolicy{RemainPaused: true, RequireLocalResume: true, PreserveNewerPause: true},
 		InterruptionPolicy: buildapply.InterruptionPolicy{StopsEngines: true, UnloadsModels: true, CommittedStreamsMayFail: true, IncludesWorkBeforeFence: true},
 		Refusals:           []buildapply.Refusal{{Code: code, Detail: detail}},
 	}}
@@ -485,8 +483,6 @@ func projectBuildApplyOwnerEvidence(local buildApplyOwnerRead, manager buildappl
 	impact := local.impact
 	impact.Complete = false
 	impact.Fences.ManagerIncarnation = buildapply.Known(manager.ManagerIncarnation)
-	impact.Fences.IntentRevision = buildapply.Observation[string]{}
-	impact.ExpectedSettings.IntentDigest = buildapply.Observation[string]{}
 	impact.Engines = buildapply.Observation[[]buildapply.EngineFact]{}
 	impact.ModelOperations = buildapply.Observation[[]buildapply.ModelOperation]{}
 	// These refusals describe the older broker cache, which is no longer the
@@ -500,14 +496,6 @@ func projectBuildApplyOwnerEvidence(local buildApplyOwnerRead, manager buildappl
 	impact.Refusals = refusals
 	refuse := func(code, detail string) {
 		impact.Refusals = append(impact.Refusals, buildapply.Refusal{Code: code, Detail: detail})
-	}
-	if manager.Intent.Known {
-		intent := manager.Intent.Value
-		impact.Fences.IntentRevision = buildapply.Known(intent.Revision)
-		impact.ExpectedSettings.IntentDigest = buildapply.Known(modelSettingsHash(struct {
-			Enabled map[string]bool
-			OffBy   map[string]string
-		}{intent.EnabledByEngine, intent.OffByEngine}))
 	}
 	if manager.Universe.Known && manager.StopAuthority.Known {
 		cached := map[string]buildapply.EngineFact{}
@@ -528,16 +516,6 @@ func projectBuildApplyOwnerEvidence(local buildApplyOwnerRead, manager buildappl
 			fact.ScopedStopAuthority = (*manager.StopAuthority.Value)[i].Scoped
 			if !fact.ScopedStopAuthority.Known || !*fact.ScopedStopAuthority.Value {
 				refuse("unscoped_engine", "The manager cannot verify scoped stop authority for an engine.")
-			}
-			fact.DesiredState = buildapply.Observation[string]{}
-			if manager.Intent.Known {
-				if enabled, exists := manager.Intent.Value.EnabledByEngine[entry.Engine]; exists {
-					state := "off"
-					if enabled {
-						state = "on"
-					}
-					fact.DesiredState = buildapply.Known(state)
-				}
 			}
 			if !entry.Registered || !entry.Supported.Known || !*entry.Supported.Value {
 				// Retained and unsupported names have no settings or model
@@ -574,15 +552,15 @@ func projectBuildApplyOwnerEvidence(local buildApplyOwnerRead, manager buildappl
 	if !manager.Complete {
 		refuse("owner_evidence_unavailable", "The manager cannot attest every engine owner section and root.")
 	}
-	if !impact.Engines.Known || !impact.ModelOperations.Known || !impact.Fences.IntentRevision.Known {
-		refuse("owner_evidence_unavailable", "Complete manager intent, universe, stop authority and reservations are required.")
+	if !impact.Engines.Known || !impact.ModelOperations.Known {
+		refuse("owner_evidence_unavailable", "Complete manager universe, stop authority and reservations are required.")
 	}
 	return buildapply.ImpactEnvelope{Impact: impact, ManagerEvidence: buildapply.Known(manager)}
 }
 
 func buildApplyImpactKnowledgeComplete(i buildapply.Impact) bool {
 	if len(i.Refusals) != 0 || !i.Fences.RuntimeGeneration.Known || !i.Fences.ManagerIncarnation.Known ||
-		!i.Fences.PolicyRevision.Known || !i.Fences.SettingsRevision.Known || !i.Fences.IntentRevision.Known ||
+		!i.Fences.PolicyRevision.Known || !i.Fences.SettingsRevision.Known ||
 		!i.Fences.AvailabilityRevision.Known || !i.Availability.Known ||
 		!i.PauseOrigin.Known || !i.ActiveWork.Known || !i.Engines.Known || !i.ModelOperations.Known ||
 		!i.SettingsDifferences.Known || !i.Maintenance.BuildApplyActive.Known ||
@@ -591,14 +569,14 @@ func buildApplyImpactKnowledgeComplete(i buildapply.Impact) bool {
 		!i.ExpectedSettings.UnloadModels.Known {
 		return false
 	}
-	for _, digest := range []buildapply.Observation[string]{i.ExpectedSettings.PolicyDigest, i.ExpectedSettings.EngineSettingsDigest, i.ExpectedSettings.IntentDigest} {
+	for _, digest := range []buildapply.Observation[string]{i.ExpectedSettings.PolicyDigest, i.ExpectedSettings.EngineSettingsDigest} {
 		if !digest.Known {
 			return false
 		}
 	}
 	for _, engine := range *i.Engines.Value {
 		if !engine.Active.Known || !engine.Running.Known || !engine.LoadedModels.Known ||
-			!engine.DesiredState.Known || !engine.ScopedStopAuthority.Known {
+			!engine.ScopedStopAuthority.Known {
 			return false
 		}
 	}
@@ -631,14 +609,13 @@ func captureCachedBuildApplyImpact(read func() (buildApplyOwnerRead, bool)) (bui
 		// contributing owner changes during this capture.
 		return buildapply.Impact{RestorePolicy: impact.RestorePolicy, InterruptionPolicy: buildapply.InterruptionPolicy{StopsEngines: true, UnloadsModels: true, CommittedStreamsMayFail: true, IncludesWorkBeforeFence: true}, Refusals: []buildapply.Refusal{{Code: "changed", Detail: "Local owner evidence changed during capture."}}}, true
 	}
-	// The current broker cache does not retain lock revisions, per-manager
-	// intent provenance, complete installed inventory or download/copy
+	// The current broker cache does not retain complete installed inventory or download/copy
 	// reservations. Those observations stay unknown; never refresh via the
 	// engine status methods, which may probe/adopt/launch native engines.
-	if !impact.ExpectedSettings.IntentDigest.Known || !impact.Maintenance.BuildApplyActive.Known {
-		impact.Refusals = append(impact.Refusals, buildapply.Refusal{Code: "owner_evidence_unavailable", Detail: "Current manager intent provenance, complete inventory and download/copy reservations are not cached by this broker."})
+	if !impact.Engines.Known || !impact.ModelOperations.Known || !impact.Maintenance.BuildApplyActive.Known {
+		impact.Refusals = append(impact.Refusals, buildapply.Refusal{Code: "owner_evidence_unavailable", Detail: "Complete manager inventory and download/copy reservations are not cached by this broker."})
 	}
-	impact.Complete = len(impact.Refusals) == 0 && impact.ActiveWork.Known && impact.Engines.Known && impact.ModelOperations.Known && impact.SettingsDifferences.Known && impact.Fences.ManagerIncarnation.Known && impact.Fences.SettingsRevision.Known && impact.Fences.IntentRevision.Known
+	impact.Complete = len(impact.Refusals) == 0 && impact.ActiveWork.Known && impact.Engines.Known && impact.ModelOperations.Known && impact.SettingsDifferences.Known && impact.Fences.ManagerIncarnation.Known && impact.Fences.SettingsRevision.Known
 	return impact, true
 }
 
@@ -653,26 +630,14 @@ type buildApplyOwnerRead struct {
 	policyGeneration, runningGeneration, modelGeneration   uint64
 	maintenanceGeneration                                  uint64
 	recovering                                             bool
-	pendingInstalls                                        []buildApplyInstallRead
 	settingsRecords                                        map[string]bool
-}
-
-type buildApplyInstallRead struct {
-	Handle     *pendingInstallStart `json:"-"`
-	ID, Engine string
-	Superseded bool
 }
 
 func sameCachedBuildApplyOwners(a, b buildApplyOwnerRead) bool {
 	// Compare live owners by identity, never by reflection into their mutable
 	// transports/mutexes. Every other compared value is a detached observation.
-	if a.worker != b.worker || a.source != b.source || a.proxy != b.proxy || a.policyProxy != b.policyProxy || a.policySource != b.policySource || a.recovering != b.recovering || a.policyGeneration != b.policyGeneration || a.runningGeneration != b.runningGeneration || a.modelGeneration != b.modelGeneration || a.maintenanceGeneration != b.maintenanceGeneration || a.policyPath != b.policyPath || a.policyDigest != b.policyDigest || a.settingsDigest != b.settingsDigest || a.engineDigest != b.engineDigest || len(a.pendingInstalls) != len(b.pendingInstalls) {
+	if a.worker != b.worker || a.source != b.source || a.proxy != b.proxy || a.policyProxy != b.policyProxy || a.policySource != b.policySource || a.recovering != b.recovering || a.policyGeneration != b.policyGeneration || a.runningGeneration != b.runningGeneration || a.modelGeneration != b.modelGeneration || a.maintenanceGeneration != b.maintenanceGeneration || a.policyPath != b.policyPath || a.policyDigest != b.policyDigest || a.settingsDigest != b.settingsDigest || a.engineDigest != b.engineDigest {
 		return false
-	}
-	for i, install := range a.pendingInstalls {
-		if install != b.pendingInstalls[i] {
-			return false
-		}
 	}
 	return reflect.DeepEqual(a.impact, b.impact) && reflect.DeepEqual(a.settingsRecords, b.settingsRecords)
 }
@@ -683,7 +648,7 @@ func (b *Broker) readCachedBuildApplyOwners() (buildApplyOwnerRead, bool) {
 	refuse := func(code, detail string) {
 		impact.Refusals = append(impact.Refusals, buildapply.Refusal{Code: code, Detail: detail})
 	}
-	impact.RestorePolicy = buildapply.RestorePolicy{RemainPaused: true, RequireLocalResume: true, PreserveIntent: true, PreserveNewerPause: true}
+	impact.RestorePolicy = buildapply.RestorePolicy{RemainPaused: true, RequireLocalResume: true, PreserveNewerPause: true}
 	impact.InterruptionPolicy = buildapply.InterruptionPolicy{StopsEngines: true, UnloadsModels: true, CommittedStreamsMayFail: true, IncludesWorkBeforeFence: true}
 	// engineConfigMu is the established settings journal lock. Do not call
 	// loadEngineSettingsLocked here.
@@ -720,11 +685,6 @@ func (b *Broker) readCachedBuildApplyOwners() (buildApplyOwnerRead, bool) {
 		modelSettingsActive = true
 		operations = append(operations, buildapply.ModelOperation{Engine: op.Engine, Kind: "settings", BlocksApply: true})
 	}
-	for pending := range b.pendingInstallStarts {
-		capture.pendingInstalls = append(capture.pendingInstalls, buildApplyInstallRead{pending, fmt.Sprintf("%p", pending), pending.engine, pending.superseded})
-		operations = append(operations, buildapply.ModelOperation{Engine: pending.engine, Kind: "install", BlocksApply: true})
-	}
-	sort.Slice(capture.pendingInstalls, func(i, j int) bool { return capture.pendingInstalls[i].ID < capture.pendingInstalls[j].ID })
 	settingsEpoch := b.engineSettingsEpoch
 	capture.maintenanceGeneration = b.buildApplyMaintenance.generation
 	impact.Maintenance.BuildApplyActive = buildapply.Known(b.buildApplyMaintenance.active != nil)
@@ -736,10 +696,9 @@ func (b *Broker) readCachedBuildApplyOwners() (buildApplyOwnerRead, bool) {
 		impact.Maintenance.ModelSettingsActive = buildapply.Known(true)
 	}
 	capture.settingsDigest = modelSettingsHash(struct {
-		Records  map[string]*engineSettingsRecord
-		Active   map[string]activeSettingsOperation
-		Installs []buildApplyInstallRead
-	}{records, b.activeSettings, capture.pendingInstalls})
+		Records map[string]*engineSettingsRecord
+		Active  map[string]activeSettingsOperation
+	}{records, b.activeSettings})
 	if settingsKnown {
 		impact.ExpectedSettings.EngineSettingsDigest = buildapply.Known(modelSettingsHash(semanticSettings))
 		impact.Fences.SettingsRevision = buildapply.Known(modelSettingsHash(struct {
@@ -863,9 +822,6 @@ func (b *Broker) readCachedBuildApplyOwners() (buildApplyOwnerRead, bool) {
 	for name := range r.loaded {
 		names[name] = true
 	}
-	for name := range r.intent {
-		names[name] = true
-	}
 	for name := range records {
 		names[name] = true
 	}
@@ -897,16 +853,6 @@ func (b *Broker) readCachedBuildApplyOwners() (buildApplyOwnerRead, bool) {
 				sort.Strings(models)
 				fact.LoadedModels = buildapply.Known(models)
 			}
-			// Worker startup clears intent before binding this source. Only
-			// reported entries are known. Off provenance is not retained, so a
-			// complete protected intent digest remains unavailable.
-			if enabled, known := r.intent[name]; known {
-				desired := "off"
-				if enabled {
-					desired = "on"
-				}
-				fact.DesiredState = buildapply.Known(desired)
-			}
 			if record := records[name]; record != nil && record.Snapshot.Adopted {
 				refuse("unscoped_engine", "Cached engine "+name+" has no verified scoped stop authority.")
 			}
@@ -926,14 +872,10 @@ func (b *Broker) readCachedBuildApplyOwners() (buildApplyOwnerRead, bool) {
 	if len(facts) > 0 {
 		impact.Engines = buildapply.Known(facts)
 	}
-	// Include raw cached intent privately to detect a change, but do not label
-	// its hash as a complete protected intent expectation or authoritative
-	// intent revision: this cache does not retain the owner revision/provenance.
 	capture.engineDigest = modelSettingsHash(struct {
 		Running                            map[string]bool
 		Observed                           map[string]uint64
 		Loaded                             map[string][]string
-		Intent                             map[string]bool
 		Identity                           map[string]engineManagerIdentity
 		SettingsIdentity                   map[string]string
 		Drains, Waking                     map[string]bool
@@ -942,7 +884,7 @@ func (b *Broker) readCachedBuildApplyOwners() (buildApplyOwnerRead, bool) {
 		Run, ActiveRevision                string
 		Recovery                           bool
 		ActivationError, AvailabilityError string
-	}{r.running, r.runningObserved, r.loaded, r.intent, r.engineIdentity, r.settingsIdentity, r.drains, r.waking, r.admission, r.haveAdmission, r.runID, r.activeRevision, r.recoveryRequired, r.activationErr, r.availabilityErr})
+	}{r.running, r.runningObserved, r.loaded, r.engineIdentity, r.settingsIdentity, r.drains, r.waking, r.admission, r.haveAdmission, r.runID, r.activeRevision, r.recoveryRequired, r.activationErr, r.availabilityErr})
 	if managerCurrent {
 		impact.Fences.RuntimeGeneration = buildapply.Known(modelSettingsHash(struct {
 			ManagerSource, ProxyRun                 string

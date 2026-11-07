@@ -63,7 +63,6 @@ type streamFrame struct {
 type installRequest struct {
 	OpID   string `json:"opId"`
 	Engine string `json:"engine"`
-	Start  bool   `json:"start"`
 }
 
 // pullRequest is the POST /v1/models/pull body. Params, when set, is passed
@@ -93,25 +92,8 @@ func (s *controlServer) handleInstall(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `"engine" is required`, http.StatusBadRequest)
 		return
 	}
-	// Install with start is refused up front, as a 409, when a local veto
-	// forbids the start; a veto arriving during the install cancels only the
-	// start, and the start rechecks it under the lifecycle lock.
-	startCtx := r.Context()
-	if req.Start {
-		ctx, done, err := s.exec.beginRemote(r.Context(), req.Engine)
-		if err != nil {
-			writeRemoteError(w, err)
-			return
-		}
-		defer done()
-		startCtx = ctx
-	}
 	s.streamOp(w, r, req.OpID, req.Engine, "install", func(ctx context.Context) (streamFrame, error) {
-		if req.Start {
-			if err := s.exec.InstallWithStart(ctx, startCtx, req.Engine, startOpts{Origin: intentPeer}); err != nil {
-				return streamFrame{}, vetoCause(startCtx, err)
-			}
-		} else if err := s.exec.Install(ctx, req.Engine); err != nil {
+		if err := s.exec.Install(ctx, req.Engine); err != nil {
 			return streamFrame{}, err
 		}
 		st, err := s.exec.Status(req.Engine)

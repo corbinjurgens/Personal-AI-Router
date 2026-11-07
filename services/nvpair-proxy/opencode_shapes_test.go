@@ -256,12 +256,10 @@ func openCodeHTTPFixture(t *testing.T, q *localQualification, warm bool) (*Proxy
 	p.admission.strict.registry = qualificationRegistry{*openCodeProfile(q).Qualification: q}
 	policy := ne.policy
 	policy.Profiles = []nodepolicy.Profile{openCodeProfile(q)}
-	policy.Idle.StartOnDemand = true
 	if err := p.admission.activatePolicy(policy); err != nil {
 		t.Fatal(err)
 	}
 	p.admission.setModelIdentity(map[string]nodepolicy.EngineIdentity{"llamacpp": ne.id})
-	p.admission.setIntent(map[string]bool{"llamacpp": true})
 	residency := map[string][]string{}
 	if warm {
 		residency["llamacpp"] = []string{q.Model}

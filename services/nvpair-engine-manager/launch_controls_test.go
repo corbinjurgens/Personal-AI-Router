@@ -153,7 +153,7 @@ func TestBundledNetworkingControls(t *testing.T) {
 				var valid, invalid []string
 				switch name {
 				case "llamacpp":
-					if !slices.Equal(policy.FixedArgs, []string{"--sleep-idle-seconds", "300", "--ctx-size", "8192", "--parallel", "1", "--cache-ram", "512"}) {
+					if !slices.Equal(policy.FixedArgs, []string{"--sleep-idle-seconds", "-1", "--ctx-size", "8192", "--parallel", "1", "--cache-ram", "512"}) {
 						t.Fatal("llama.cpp fixed launch args are not the bundled defaults")
 					}
 					if !reflect.DeepEqual(policy.Controls, []LaunchControl{{Value: "{server.host}", Flags: []string{"--host"}}, {Value: "{server.port}", Flags: []string{"--port"}}, {Value: "{cors.origins}", Flags: []string{"--cors-origins"}}}) {

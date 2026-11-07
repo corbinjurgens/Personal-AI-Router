@@ -71,14 +71,15 @@ func TestAdmissionSnapshotCopiesMaps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	activity := first.LastActivityMs["llamacpp"]
+	activity := first.LastActivityMs["llamacpp"]["m"]
 	first.ActiveByEngine["llamacpp"] = 99
-	first.LastActivityMs["llamacpp"] = 0
+	first.ActiveByModel["llamacpp"]["m"] = 99
+	first.LastActivityMs["llamacpp"]["m"] = 0
 	next, err := p.applyAdmissionSnapshot(json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if next.ActiveByEngine["llamacpp"] != 1 || activity == 0 || next.LastActivityMs["llamacpp"] != activity {
+	if next.ActiveByEngine["llamacpp"] != 1 || next.ActiveByModel["llamacpp"]["m"] != 1 || activity == 0 || next.LastActivityMs["llamacpp"]["m"] != activity {
 		t.Fatalf("snapshot maps alias controller state: %+v", next)
 	}
 }

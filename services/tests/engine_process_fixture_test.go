@@ -129,7 +129,7 @@ func newEngineProcessFixtureAt(t *testing.T, base string, ports fixtureServicePo
 	t.Helper()
 	f := prepareEngineProcessFixture(t, base, ports, "")
 	f.start(t)
-	f.rpcOK(t, "engine:install", map[string]any{"engine": "llamacpp-custom", "start": true})
+	f.rpcOK(t, "engine:install", map[string]any{"engine": "llamacpp-custom"})
 	// Initialize every settings baseline before tests capture their revisions.
 	for _, engine := range engines.Names() {
 		f.rpcOK(t, "engine:get-settings", map[string]string{"engine": engine})

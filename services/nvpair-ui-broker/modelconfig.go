@@ -70,7 +70,6 @@ type modelConfigEvidence struct {
 	Activation    policyActivation
 	Readiness     nodepolicy.StrictAdmissionReadiness
 	Identity      nodepolicy.SetModelIdentityParams
-	Intent        map[string]bool
 	Running       map[string]bool
 	RunningKnown  map[string]bool
 	Loaded        map[string][]string
@@ -137,7 +136,7 @@ func (b *Broker) captureModelConfig() modelConfigEvidence {
 	defer r.mu.Unlock()
 	e := modelConfigEvidence{Policy: r.current, Live: r.live, Paused: r.managementBlockedLocked(), Recovery: r.recoveryRequired,
 		Activation: r.activationLocked(pp, r.current.Revision), Readiness: r.strictReadinessLocked(pp, b.engineModelNaming),
-		Identity: r.modelIdentityLocked(), Intent: r.intent, Running: r.running, Loaded: r.loaded, Drains: r.drains,
+		Identity: r.modelIdentityLocked(), Running: r.running, Loaded: r.loaded, Drains: r.engineDrainsLocked(pp),
 		Active: r.admission.ActiveByEngine, Proxy: pp, Worker: w, Source: source, Run: r.runID}
 	if source != r.engineManagerSource {
 		e.Source = nil
@@ -181,6 +180,32 @@ func (b *Broker) captureModelConfig() modelConfigEvidence {
 	}
 	detached.Key, detached.Proxy, detached.Worker, detached.Source = e.Key, pp, w, e.Source
 	return detached
+}
+
+// A replacement proxy cannot count a reservation owned by the old process.
+// Derive its engine drain from the existing operation records, never a latch.
+func (r *policyRuntime) manualLoadDrainsLocked(pp *proxyProcess) map[string]bool {
+	drains := make(map[string]bool)
+	add := func(op *modelConfigAttempt) {
+		if op != nil && op.prepare.Purpose == nodepolicy.ResidentPurposeManual && op.evidence.Proxy != pp {
+			drains[op.prepare.Engine] = true
+		}
+	}
+	if op := r.models.active; op != nil && op.granted {
+		add(op)
+	}
+	for _, hold := range r.models.unsettled {
+		add(hold.op)
+	}
+	return drains
+}
+
+func (r *policyRuntime) engineDrainsLocked(pp *proxyProcess) map[string]bool {
+	drains := r.manualLoadDrainsLocked(pp)
+	for engine, drain := range r.drains {
+		drains[engine] = drains[engine] || drain
+	}
+	return drains
 }
 
 func sameModelEvidence(a, b modelConfigEvidence) bool {
@@ -271,15 +296,12 @@ func (b *Broker) modelConfigEntry(e modelConfigEvidence, ref nodepolicy.ModelRef
 	block := func(reason nodepolicy.ModelConfigurationReason) {
 		entry.State, entry.Reason = nodepolicy.ModelStateBlocked, reason
 	}
-	enabled, intentKnown := e.Intent[ref.Engine]
 	switch {
 	case e.Live != nodepolicy.Available || e.Paused:
 		block(nodepolicy.ModelReasonPaused)
-	case intentKnown && !enabled:
-		block(nodepolicy.ModelReasonEngineOff)
 	case e.Drains[ref.Engine]:
 		block(nodepolicy.ModelReasonOperationBusy)
-	case !intentKnown || e.Activation.Activation != activationActive || e.Source == nil || e.Worker == nil:
+	case e.Activation.Activation != activationActive || e.Source == nil || e.Worker == nil:
 		entry.Reason = nodepolicy.ModelReasonProjectionUnknown
 	case !e.Running[ref.Engine] && !e.RunningKnown[ref.Engine]:
 		entry.Reason = nodepolicy.ModelReasonProjectionUnknown
@@ -300,7 +322,7 @@ func (b *Broker) modelConfigEntry(e modelConfigEvidence, ref nodepolicy.ModelRef
 		envelope, ok := id.Serving[ref.Model]
 		if identity.Validate() != nil {
 			block(nodepolicy.ModelReasonUnqualified)
-		} else if !ok || envelope.Validate(ref.Model, identity.ModelDigest) != nil || envelope.PerSlotContextTokens != int64(pr.ContextTokens) || envelope.Retention != "-1" || envelope.RouterCapacity < int64(count) {
+		} else if !ok || envelope.Validate(ref.Model, identity.ModelDigest) != nil || envelope.PerSlotContextTokens != int64(pr.ContextTokens) || envelope.Retention != "-1" || (envelope.RouterCapacity != 0 && envelope.RouterCapacity < int64(count)) {
 			block(nodepolicy.ModelReasonUnsupportedLoad)
 		} else {
 			entry.State, entry.Reason = nodepolicy.ModelStatePending, ""
@@ -398,10 +420,10 @@ func (b *Broker) reconcileModelConfig(ctx context.Context) {
 		return
 	}
 	r.models.busy = true
-	// A recorded request labels a resident allocation. Removal, Off and pause
+	// A recorded request labels a resident allocation. Removal and pause
 	// retire that allocation's declaration; a later one re-adopts inventory.
 	for ref := range r.models.loadedRequests {
-		if e.Live != nodepolicy.Available || e.Paused || !e.Intent[ref.Engine] || !slices.Contains(b.residentRefs(e.Policy), ref) {
+		if e.Live != nodepolicy.Available || e.Paused || !slices.Contains(b.residentRefs(e.Policy), ref) {
 			delete(r.models.loadedRequests, ref)
 		}
 	}
@@ -411,6 +433,9 @@ func (b *Broker) reconcileModelConfig(ctx context.Context) {
 		}
 	}
 	for ref, hold := range r.models.unsettled {
+		if hold.op.prepare.Purpose == nodepolicy.ResidentPurposeManual {
+			continue
+		}
 		// Keep original ownership across worker replacement; it is not unload
 		// evidence. A terminal reply can instead leave bounded observation;
 		// the Serve-owned idle tick expires it even if the proxy is retired.
@@ -463,6 +488,7 @@ func (b *Broker) reconcileModelConfig(ctx context.Context) {
 			b.signalModelConfig() // Recheck evidence that changed during this pass.
 		}
 	}()
+	b.recoverManualLoads(ctx)
 	for i, ref := range b.residentRefs(e.Policy) {
 		entry, pr, id, count := b.modelConfigEntry(e, ref)
 		r.mu.Lock()
@@ -473,6 +499,9 @@ func (b *Broker) reconcileModelConfig(ctx context.Context) {
 			switch {
 			case unsettled:
 				entry.State, entry.Reason = nodepolicy.ModelStateUnknown, residentAttemptReason(hold.terminal, hold.finish.Outcome)
+				if hold.op.prepare.Purpose == nodepolicy.ResidentPurposeManual {
+					break // The shared hold was retried by recoverManualLoads above.
+				}
 				// A replacement authority may confirm the allocation, but only with
 				// fresh inventory and envelope proof. Only a terminal hold, whose
 				// native execution has ended, is discharged; a nonterminal one stays
@@ -610,6 +639,12 @@ func (b *Broker) residentSourceCurrent(op *modelConfigAttempt) bool {
 }
 
 func (b *Broker) reconcileResident(parent context.Context, e modelConfigEvidence, entry nodepolicy.ModelConfigurationEntry, pr nodepolicy.Profile, id nodepolicy.StrictModelIdentity, count int) nodepolicy.ModelConfigurationEntry {
+	return b.reconcileModelLoad(parent, e, entry, pr, id, count, "")
+}
+
+// Both resident reconciliation and explicit loads use the same reservation,
+// final manager dispatch grant and authoritative observation settlement.
+func (b *Broker) reconcileModelLoad(parent context.Context, e modelConfigEvidence, entry nodepolicy.ModelConfigurationEntry, pr nodepolicy.Profile, id nodepolicy.StrictModelIdentity, count int, purpose nodepolicy.ResidentPurpose) nodepolicy.ModelConfigurationEntry {
 	bound := min(time.Minute, time.Duration(e.Policy.Admission.SwitchTimeoutSeconds)*time.Second)
 	if bound <= 0 {
 		entry.State, entry.Reason = nodepolicy.ModelStateBlocked, nodepolicy.ModelReasonUnqualified
@@ -638,7 +673,7 @@ func (b *Broker) reconcileResident(parent context.Context, e modelConfigEvidence
 		entry.State, entry.Reason = nodepolicy.ModelStateBlocked, nodepolicy.ModelReasonProjectionUnknown
 		return entry
 	}
-	op := &modelConfigAttempt{ctx: ctx, evidence: e, deadline: deadline, prepare: nodepolicy.PrepareResidentParams{PolicyRevision: e.Policy.Revision, ProxyRunID: e.Run, ManagerIncarnation: incarnation, Engine: entry.Engine, Model: entry.Model, Identity: id, OperationID: opID, TimeoutMs: int(time.Until(deadline).Milliseconds())}}
+	op := &modelConfigAttempt{ctx: ctx, evidence: e, deadline: deadline, prepare: nodepolicy.PrepareResidentParams{Purpose: purpose, PolicyRevision: e.Policy.Revision, ProxyRunID: e.Run, ManagerIncarnation: incarnation, Engine: entry.Engine, Model: entry.Model, Identity: id, OperationID: opID, TimeoutMs: int(time.Until(deadline).Milliseconds())}}
 	r.models.active = op
 	r.mu.Unlock()
 	holdUnsettled := true
@@ -658,6 +693,10 @@ func (b *Broker) reconcileResident(parent context.Context, e modelConfigEvidence
 			r.models.active = nil
 		}
 		r.mu.Unlock()
+		if purpose == nodepolicy.ResidentPurposeManual {
+			b.schedulePolicyPush(pushDrainPrefix + entry.Engine)
+			b.notifyPolicyChanged()
+		}
 	}()
 	entry.State, entry.Reason = nodepolicy.ModelStateUnknown, nodepolicy.ModelReasonOperationTimeout
 	if op.prepare.Validate() != nil {
@@ -702,6 +741,10 @@ func (b *Broker) reconcileResident(parent context.Context, e modelConfigEvidence
 		result = nodepolicy.ReconcileResidentResult{Outcome: nodepolicy.ResidentUnknown}
 		terminal = false
 	}
+	if purpose == nodepolicy.ResidentPurposeManual && result.Observation != nil && result.Observation.Generation == 0 {
+		result = nodepolicy.ReconcileResidentResult{Outcome: nodepolicy.ResidentUnknown}
+		terminal = false
+	}
 	r.mu.Lock()
 	granted := op.granted
 	r.mu.Unlock()
@@ -710,7 +753,7 @@ func (b *Broker) reconcileResident(parent context.Context, e modelConfigEvidence
 		terminal = false
 	}
 	entry.Reason = residentAttemptReason(terminal, result.Outcome)
-	if terminal && result.Outcome == nodepolicy.ResidentLoaded {
+	if purpose != nodepolicy.ResidentPurposeManual && terminal && result.Outcome == nodepolicy.ResidentLoaded {
 		r.mu.Lock()
 		if r.models.loadedRequests == nil {
 			r.models.loadedRequests = make(map[nodepolicy.ModelRef]nodepolicy.ResidentLoadOptions)
@@ -746,16 +789,80 @@ func (b *Broker) reconcileResident(parent context.Context, e modelConfigEvidence
 			loaded := true
 			entry.State, entry.Reason, entry.ObservedLoaded = nodepolicy.ModelStateSatisfied, "", &loaded
 		}
-		r.mu.Lock()
-		if r.models.pending == nil {
-			r.models.pending = make(map[nodepolicy.ModelRef]residentPendingObservation)
+		if purpose != nodepolicy.ResidentPurposeManual {
+			r.mu.Lock()
+			if r.models.pending == nil {
+				r.models.pending = make(map[nodepolicy.ModelRef]residentPendingObservation)
+			}
+			r.models.pending[nodepolicy.ModelRef{Engine: entry.Engine, Model: entry.Model}] = residentPendingObservation{evidence: e, expires: r.now().Add(residentObservationTimeout)}
+			r.mu.Unlock()
 		}
-		r.models.pending[nodepolicy.ModelRef{Engine: entry.Engine, Model: entry.Model}] = residentPendingObservation{evidence: e, expires: r.now().Add(residentObservationTimeout)}
-		r.mu.Unlock()
 	} else if result.Outcome == nodepolicy.ResidentNotDispatched {
 		entry.State, entry.Reason = nodepolicy.ModelStateBlocked, nodepolicy.ModelReasonUnsupportedLoad
 	}
 	return entry
+}
+
+func (b *Broker) recoverManualLoads(ctx context.Context) {
+	r := b.nodePolicyRuntime()
+	r.mu.Lock()
+	holds := make(map[nodepolicy.ModelRef]residentUnsettled)
+	for ref, hold := range r.models.unsettled {
+		if hold.op.prepare.Purpose == nodepolicy.ResidentPurposeManual {
+			holds[ref] = hold
+		}
+	}
+	r.mu.Unlock()
+	for ref, hold := range holds {
+		cleanup, cancel := context.WithTimeout(ctx, proxyCallTimeout)
+		var finished nodepolicy.FinishResidentResult
+		settled := b.recoverRetiredManualLoad(cleanup, hold)
+		if !settled {
+			settled = residentRPC(cleanup, hold.op.evidence.Proxy, nodepolicy.MethodFinishResident, hold.finish, &finished) && finished.ReservationID == hold.finish.ReservationID
+		}
+		if settled && finished.RecoveryID != "" {
+			settled = hold.terminal && b.recoverResident(cleanup, hold.op, finished)
+		}
+		cancel()
+		if settled {
+			r.mu.Lock()
+			if current, ok := r.models.unsettled[ref]; ok && current.op == hold.op {
+				delete(r.models.unsettled, ref)
+			}
+			r.mu.Unlock()
+			b.schedulePolicyPush(pushDrainPrefix + ref.Engine)
+			b.notifyPolicyChanged()
+		}
+	}
+}
+
+// A dead proxy has no reservation left to finish. Only a terminal response
+// from the same live manager plus fresh inventory can retire this broker hold.
+// Publish that inventory to the replacement before allowing another load.
+func (b *Broker) recoverRetiredManualLoad(ctx context.Context, hold residentUnsettled) bool {
+	op := hold.op
+	e := b.captureModelConfig()
+	if !hold.terminal || e.Proxy == nil || op.evidence.Proxy == nil || e.Proxy == op.evidence.Proxy || e.Worker != op.evidence.Worker || e.Source != op.evidence.Source || !b.engineMgrPairCurrent(e.Worker, e.Source) {
+		return false
+	}
+	select {
+	case <-op.evidence.Proxy.Done():
+	default:
+		return false
+	}
+	var owner buildapply.EngineOwnerEvidence
+	if !residentManagerRPC(ctx, e.Worker, buildapply.EngineOwnerEvidenceMethod, buildapply.EngineOwnerEvidenceRequest{}, &owner) || owner.ManagerIncarnation != op.prepare.ManagerIncarnation {
+		return false
+	}
+	var inventory struct {
+		Loaded map[string][]string `json:"loadedByEngine"`
+	}
+	if !residentManagerRPC(ctx, e.Worker, "engine:models", nil, &inventory) || inventory.Loaded[op.prepare.Engine] == nil || !b.engineMgrPairCurrent(e.Worker, e.Source) || b.policyProxy() != e.Proxy {
+		return false
+	}
+	b.observeLoadedFrom(e.Source, inventory.Loaded)
+	var ack json.RawMessage
+	return residentRPC(ctx, e.Proxy, nodepolicy.MethodSetResidency, nodepolicy.SetResidencyParams{LoadedByEngine: inventory.Loaded}, &ack) && b.engineMgrPairCurrent(e.Worker, e.Source) && b.policyProxy() == e.Proxy
 }
 
 func (b *Broker) recoverResident(ctx context.Context, op *modelConfigAttempt, finish nodepolicy.FinishResidentResult) bool {

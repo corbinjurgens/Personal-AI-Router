@@ -40,7 +40,7 @@ import (
 // See versions.json at the repo root for the source of truth.
 var Version = "dev"
 
-const restoreEnabledEnginesMethod = "engine:restore-enabled"
+const restoreInstalledEnginesMethod = "engine:restore-installed"
 const prepareEngineShutdownMethod = "engine:prepare-shutdown"
 
 // ReadyParams is the payload of the "app:ready" notification the broker
@@ -191,7 +191,6 @@ type Broker struct {
 	// Nil until complete, side-effect-free owner evidence can be supplied.
 	buildApplyOwners buildApplyOwners
 	// Only live install continuations are retained, under engineConfigMu.
-	pendingInstallStarts   map[*pendingInstallStart]struct{}
 	engineSettingsLoaded   bool
 	engineSettingsError    error
 	engineSettingsEpoch    string
@@ -798,7 +797,6 @@ func (b *Broker) recoverEngineManagerPause(w *rpcWorker) bool {
 	paused := r.current.Availability == nodepolicy.Paused
 	if paused {
 		r.live = nodepolicy.Draining
-		r.restoreSkipped = true
 	}
 	r.mu.Unlock()
 	if !paused {
@@ -818,11 +816,11 @@ func (b *Broker) recoverEngineManagerPause(w *rpcWorker) bool {
 	return err == nil
 }
 
-func (b *Broker) restoreEnabledEngines(w *rpcWorker) {
+func (b *Broker) restoreInstalledEngines(w *rpcWorker) {
 	if w == nil {
 		return
 	}
-	// Reconstruct settings withdrawal before restoring enabled intent.
+	// Reconstruct settings withdrawal before restoring installed engines.
 	b.publishNodeProjection()
 	if !b.recoverEngineSettings() {
 		return
@@ -831,8 +829,8 @@ func (b *Broker) restoreEnabledEngines(w *rpcWorker) {
 		slog.Info("node is paused; engines are restored when it resumes")
 		return
 	}
-	if err := w.Notify(restoreEnabledEnginesMethod, nil); err != nil {
-		slog.Warn("failed to request enabled-engine restoration", "err", err)
+	if err := w.Notify(restoreInstalledEnginesMethod, nil); err != nil {
+		slog.Warn("failed to request installed-engine restoration", "err", err)
 	}
 }
 
@@ -862,7 +860,7 @@ func (b *Broker) runEngineAvailability(
 	if ctx.Err() != nil {
 		return false
 	}
-	b.restoreEnabledEngines(b.getEngineMgr())
+	b.restoreInstalledEngines(b.getEngineMgr())
 	for index, run := range runners {
 		if index == len(runners)-1 {
 			run(ctx)
@@ -1207,6 +1205,13 @@ func (b *Broker) forwardEngineNotificationFrom(source *engineManagerSource, meth
 	}
 	if method == residentDispatchRequestMethod {
 		b.dispatchResidentFrom(source, params)
+		return
+	}
+	if method == admittedLoadRequestMethod {
+		b.admittedLoadFrom(source, params)
+		return
+	}
+	if method == admittedLoadReplyMethod {
 		return
 	}
 	if method == engineModelIdentityMethod {

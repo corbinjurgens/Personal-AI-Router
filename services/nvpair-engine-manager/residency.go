@@ -283,15 +283,6 @@ func (e *Executor) residentPrecheck(p nodepolicy.ReconcileResidentParams) string
 		}
 		return "observation-unknown"
 	}
-	e.desired.mu.Lock()
-	state, err := e.desired.load()
-	e.desired.mu.Unlock()
-	if err != nil {
-		return "observation-unknown"
-	}
-	if !state.Engines[p.Engine] {
-		return "engine-off"
-	}
 	m, ok := e.reg.Get(p.Engine)
 	if !ok {
 		return "unsupported-load"
@@ -345,7 +336,7 @@ func (e *Executor) residentCheck(ctx context.Context, p nodepolicy.ReconcileResi
 		if !residentConfiguredContext(p, m.ModelNamingOrDefault(), readback) {
 			return "unqualified"
 		}
-		if !servingRetentionDisabled(envelope) || envelope.RouterCapacity < int64(p.DeclaredResidentCount) {
+		if !servingRetentionDisabled(envelope) || (envelope.RouterCapacity != 0 && envelope.RouterCapacity < int64(p.DeclaredResidentCount)) {
 			return "unsupported-load"
 		}
 	}

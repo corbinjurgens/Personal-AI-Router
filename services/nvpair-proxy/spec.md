@@ -497,7 +497,7 @@ which takes one off and puts the other on.
 | Class | Addressed? | Examples |
 | --- | --- | --- |
 | Facade-scoped | yes | `ready`, `error`, `node/*`, `errors:*`, `set-port`, `discovery:subscribe`, `discovery:nodes` |
-| Process-scoped | no | `log/set-level`, `node/set-priority`, `node/set-policy`, `node/set-availability`, `node/set-engine-drain`, `node/set-residency`, `node/set-engine-intent`, `node/admission-snapshot`, `workload/cancel`, `workload:*`, `admission/*`, `discovery:node-activity` |
+| Process-scoped | no | `log/set-level`, `node/set-priority`, `node/set-policy`, `node/set-availability`, `node/set-engine-drain`, `node/set-residency`, `node/admission-snapshot`, `workload/cancel`, `workload:*`, `admission/*`, `discovery:node-activity` |
 | Bootstrap | names its engine in the payload | `facade/enable` |
 
 `facade/enable` is unaddressed because it runs *before* the facade it names
@@ -1429,8 +1429,7 @@ state in force. The broker re-sends policy state whenever the proxy starts; unti
 | `node/set-availability` | `{state, cancelActive?}` | `available`, `draining` or `paused`; `cancelActive` cancels every admitted execution on this node; it never changes the active revision (§12.1.1) |
 | `node/set-engine-drain` | `{engine, drain}` | refuse new work for one engine during a settings restart |
 | `node/set-residency` | `{loadedByEngine}` | the models loaded per engine on this node, normalized per engine |
-| `node/set-engine-intent` | `{enabledByEngine}` | each managed engine's saved On/Off intent |
-| `node/admission-snapshot` | `{}` | answers `{runId, active, activeByEngine, queued, lastActivityMs}` from current admission state (§12.1.2) |
+| `node/admission-snapshot` | `{}` | answers `{runId, active, activeByEngine, activeByModel, queued, lastActivityMs}` from current admission state (§12.1.2) |
 | `node/renew-egress-lease` | `{runId, revision, sequence, notAfterNanos}` | trusted parent only; answers `{runId, revision, sequence, nowNanos}`; zero deadline samples the receiver clock without changing authority; a nonzero deadline is a run/revision-bound grant (§12.9) |
 | `node/revoke-egress-lease` | `{runId, sequence}` | trusted parent only; answers `{runId, sequence}`; a higher sequence clears the current lease without activating policy (§12.9) |
 | `workload/cancel` | `{originatedFrom, runId, engine, workloadId, regenerate?}` | §12.5; answers `{found}` |
@@ -1518,7 +1517,7 @@ The desktop's Node policy JSON editor can change these settings; the TUI has
 no buffer controls. See [Hybrid routing](../../docs/hybrid-routing.mdx) for the
 desktop edit example.
 
-#### Automatic residency control
+#### Model load reservations
 
 The broker alone calls `node/prepare-resident`, `node/dispatch-resident`,
 `node/finish-resident` and `node/observe-resident`. `handlePolicyMethod` decodes
@@ -1529,15 +1528,39 @@ its correlated `engine:dispatch-resident-request` notification asks the broker
 to obtain the final proxy grant; only a valid matching notification reply
 `engine:dispatch-resident-reply` can authorize the manager's load.
 
-Prepare checks the whole revision-bound desired resident set against the same
+Automatic preparation checks the whole revision-bound desired resident set against the same
 resident/in-flight memory and model limits as inference, without eviction.
-Served permission, desired membership, healthy On intent, local availability,
+Served permission, desired membership, engine health, local availability,
 drain state and unique qualified identity are checked again at dispatch. NE
 resident context equals native per-slot context; qualification covers native
 context/output and effective concurrency equals native slots. Native retention
 must be `"-1"`, router capacity must cover this engine's desired resident count,
 and explicit load/loaded-read bindings must satisfy engine-manager's model-only
 POST and safe GET contract. No prompt or request keep-alive override is sent.
+
+Manual profile loads set `PrepareResidentParams.purpose` to `"manual"`; an
+omitted purpose requests automatic residency. No other method or result shape
+changes. Manual preparation requires a unique configured normalized profile and
+current engine/content identity with a validated serving envelope, without
+automatic desired-resident membership or qualification. Missing serving evidence
+is `unsupported-load`. Availability, drain, model cap and memory limits still
+apply. The broker enters the same target-local prepare/dispatch/finish/observe
+flow for local and remote manual loads and invokes `engine:reconcile-resident`
+for the manager's final grant and authoritative loaded readback.
+
+Manual preparation shares inference's `fitLocked` LRU planner, `unloadLocked`
+notifications and change waits. It takes no capacity until the target fits after
+confirmed unloads; inflight models and qualified automatic residents cannot be
+evicted. Waiting manual preparations register in reader order in the same
+`resident:<n>` stream while the reader continues to accept residency and Pause
+updates. Duplicate preparation payloads share the pending operation and its
+original deadline; a changed purpose conflicts. Dispatch matches the stored
+reservation, run, source, revision, engine, model and identity without a new
+purpose field, and rechecks current capacity. The existing uncertain-dispatch
+hold and finish/observe evidence fences apply to both purposes. A failed load
+alone cannot release a dispatched hold; a matching fresh authoritative unloaded
+observation can. Successful manual loads enter ordinary inventory and record
+per-model activity for idle release and LRU selection.
 
 Finish/observe reconcile operation-bound evidence; failed load, stale generation,
 source replacement or unknown observation cannot invent loaded satisfaction.
@@ -1565,7 +1588,7 @@ Fresh manager-owned observed context/slots are required for restart confirmation
 an engine adopted from a previous manager run is never confirmed and remains
 `unknown`. There is no persistent load queue replay. This protocol does not
 clear durable strict-inference quarantine from HTTP completion or elapsed time.
-Local pause/Off remains a veto, and PG retains route-policy ownership. See
+Local pause remains a veto, and PG retains route-policy ownership. See
 [Local qualification](../../docs/local-qualification.mdx#daily-adapter-and-residency-contract)
 for the on-demand/resident distinction and pending real-host acceptance.
 
@@ -1584,9 +1607,9 @@ Proxy → broker notifications, also process-scoped:
 
 | Notification | When |
 | --- | --- |
-| `admission/state` | `{active, activeByEngine, queued, lastActivityMs}`; at most once a second while it changes, and immediately when `active` reaches 0 |
+| `admission/state` | `{active, activeByEngine, activeByModel, queued, lastActivityMs}`; at most once a second while it changes, and immediately when `active` reaches 0 |
 | `admission/unload` | `{engine, models}`: idle models admission wants unloaded to make room; the result arrives as the next `node/set-residency` |
-| `admission/wake` | `{engine}`: a request arrived for a stopped engine saved On; the result arrives as `node/set-local-backend` reporting it healthy |
+| `admission/wake` | `{engine}`: a request arrived for a stopped installed engine; the result arrives as `node/set-local-backend` reporting it healthy |
 
 ### 12.2 Admission
 
@@ -1623,8 +1646,7 @@ admission owner.
 1. **Availability**: `paused` → `paused`, `draining` → `draining`; an engine
    drain → `draining`.
 2. **Engine running**, as `node/set-local-backend` last reported. A stopped
-   engine whose saved intent is Off, unknown, or with `idle.startOnDemand` off
-   is refused `engine-off` without a wake. Otherwise `admission/wake` is sent
+   engine is woken through `admission/wake`
    (at most once per 10 s per engine) and the request waits for the engine to
    report healthy, up to `idle.wakeTimeoutSeconds` under the wait cap, then
    `wake-timeout`.
@@ -1655,7 +1677,7 @@ admission owner.
    If the model would exceed `maxResidentModels`, idle models are unloaded least
    recently used first via `admission/unload` when `switchModels` is set; the
    eviction waits up to `switchTimeoutSeconds` for the residency to change and
-   then admits anyway. Without `switchModels`, or when unloading every idle
+   then refuses with `no-fit` if capacity is still unavailable. Without `switchModels`, or when unloading every idle
    model would not be enough, the request queues for in-flight work, then
    `no-fit`.
 6. **Memory**: with `memoryBudgetBytes > 0`, the resident and in-flight
@@ -1664,10 +1686,10 @@ admission owner.
    `no-fit` at once.
 7. **Bounds**: queue and wake waits are bounded by
    `min(policy timeout, X-PAIR-Admission-Wait)`; the eviction wait by
-   `switchTimeoutSeconds` alone, since it ends in admission. A caller that
+   `switchTimeoutSeconds` alone. No timeout bypasses the model or memory cap. A caller that
    leaves while waiting is dropped.
 8. **Admit**: the in-flight count is taken and released when the execution
-   ends, including a panic unwind; `lastActivityMs` is stamped per engine on
+   ends, including a panic unwind; `lastActivityMs` is stamped per (engine, model) on
    admit and release.
 
 A rejection is `503` with `X-PAIR-Admission: <reason>`, `Retry-After`, and a
@@ -1712,8 +1734,8 @@ manual node, has an empty hint.
 **Waking a stopped engine.** The broker withdraws an unhealthy engine's service.
 The proxy remembers its own node id and each engine's last advertised
 models from discovery, and offers a *dormant* self candidate — last in the
-round — when the engine is saved On, start-on-demand is set, the node is
-available, and the requested key is covered by a profile.
+round — when the node is available and the requested key is covered by a
+profile whose native model is served.
 Admission wakes it; the dispatch then targets the backend's reported
 address.
 

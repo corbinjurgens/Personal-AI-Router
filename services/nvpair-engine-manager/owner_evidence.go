@@ -66,23 +66,11 @@ func (m *Manager) engineOwnerEvidence() (buildapply.EngineOwnerEvidence, error) 
 		result.Reasons = append(result.Reasons, buildapply.EngineOwnerReason{Section: section, Engine: engine, Code: code})
 	}
 	if !reflect.DeepEqual(a, b) {
-		for _, section := range []string{"intent", "universe", "stopAuthority", "reservations"} {
+		for _, section := range []string{"universe", "stopAuthority", "reservations"} {
 			reason(section, "", "changed")
 		}
 		err := result.Finalize()
 		return result, err
-	}
-	if a.SavedKnown {
-		enabled, off := map[string]bool{}, map[string]string{}
-		for name, value := range a.Saved.State.Engines {
-			enabled[name] = value
-		}
-		for name, value := range a.Saved.State.OffBy {
-			off[name] = string(value)
-		}
-		result.Intent = buildapply.Known(buildapply.EngineOwnerIntent{Revision: a.Saved.IntentRevision, EnabledByEngine: enabled, OffByEngine: off})
-	} else {
-		reason("intent", "", "saved_state_unknown")
 	}
 	if a.Universe.Complete {
 		universe := make([]buildapply.EngineOwnerUniverseEntry, 0, len(a.Universe.Entries))
@@ -797,12 +785,6 @@ func (e *Executor) ownerUniverseMembership(saved desiredOwnerEvidence) ([]ownerU
 		entry.Cleanup = entry.Cleanup || cleanup
 		names[name] = entry
 	}
-	for name := range saved.State.Engines {
-		add(name, false)
-	}
-	for name := range saved.State.OffBy {
-		add(name, false)
-	}
 	for name := range saved.State.ProcessStops {
 		add(name, true)
 	}
@@ -823,8 +805,7 @@ func (e *Executor) ownerUniverseMembership(saved desiredOwnerEvidence) ([]ownerU
 // digests across restarts; a consumer must bind its fence to the manager's
 // separate incarnation. No runtime stop or completion fact follows from State.
 type desiredOwnerEvidence struct {
-	State          desiredStateFile
-	IntentRevision string
+	State desiredStateFile
 }
 
 func (s *desiredStateStore) ownerEvidence() (desiredOwnerEvidence, error) {
@@ -853,8 +834,7 @@ func (s *desiredStateStore) captureOwnerEvidenceLocked(read func() ([]byte, erro
 	if err != nil {
 		return desiredOwnerEvidence{}, err
 	}
-	// Ordinary intent accessors retain their existing decoding behavior. Evidence
-	// must not turn malformed null booleans into explicit Off values.
+	// Validate retained cleanup evidence before exposing owner authority.
 	if err := validateDesiredOwnerDocument(data); err != nil {
 		return desiredOwnerEvidence{}, err
 	}
@@ -862,30 +842,7 @@ func (s *desiredStateStore) captureOwnerEvidenceLocked(read func() ([]byte, erro
 	if err != nil {
 		return desiredOwnerEvidence{}, err
 	}
-	for name, origin := range state.OffBy {
-		enabled, present := state.Engines[name]
-		if !present || enabled || (origin != intentLocal && origin != intentPeer) {
-			return desiredOwnerEvidence{}, fmt.Errorf("invalid off provenance for %s", name)
-		}
-	}
-	for name, enabled := range state.Engines {
-		if !enabled {
-			if _, present := state.OffBy[name]; !present {
-				state.OffBy[name] = intentLocal
-			}
-		}
-	}
-	// encoding/json sorts map keys. Intent key presence remains part of its
-	// baseline. Each decode owns all
-	// maps, so no store or other read aliases them.
-	intent, err := ownerDigest(struct {
-		Engines map[string]bool         `json:"engines"`
-		OffBy   map[string]intentOrigin `json:"offBy"`
-	}{state.Engines, state.OffBy})
-	if err != nil {
-		return desiredOwnerEvidence{}, err
-	}
-	return desiredOwnerEvidence{State: state, IntentRevision: intent}, nil
+	return desiredOwnerEvidence{State: state}, nil
 }
 
 func validateDesiredOwnerDocument(data []byte) error {
@@ -904,18 +861,12 @@ func validateDesiredOwnerDocument(data []byte) error {
 	}
 	for name, raw := range fields {
 		switch name {
-		case "engines", "offBy", "processStops", "allocatedPorts":
+		case "engines", "offBy":
+			continue // Dropped by the existing state decoder.
+		case "processStops", "allocatedPorts":
 			var entries map[string]json.RawMessage
 			if err := json.Unmarshal(raw, &entries); err != nil || entries == nil {
 				return fmt.Errorf("desired engine evidence %s must be an object", name)
-			}
-			if name == "engines" {
-				for engine, value := range entries {
-					value = bytes.TrimSpace(value)
-					if !bytes.Equal(value, []byte("true")) && !bytes.Equal(value, []byte("false")) {
-						return fmt.Errorf("desired engine evidence %s.%s must be boolean", name, engine)
-					}
-				}
 			}
 		default:
 			return fmt.Errorf("unrecognized desired engine evidence field %q", name)

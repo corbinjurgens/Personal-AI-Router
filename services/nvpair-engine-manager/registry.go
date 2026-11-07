@@ -165,7 +165,7 @@ type InstallArtifact struct {
 // Runtime is how to launch + probe the engine. By default the launched
 // engine binds loopback; an engine may set Bind (substituted as {host})
 // to listen elsewhere — inference engines use "0.0.0.0" to serve the
-// cluster; an install-with-start bind override takes precedence. Readiness
+// cluster. Readiness
 // and health probes always target 127.0.0.1, which a 0.0.0.0 listener
 // also answers. The open default is an interim exception to loopback-only and
 // should be narrowed once authenticated inference transport is available.
@@ -834,6 +834,22 @@ func validateRuntimeModelLoadsJSON(data []byte) error {
 		}
 		var loads []modelconfig.ModelLoad
 		if err := modelconfig.DecodeStrict(raw, &loads); err != nil {
+			// Inspect retired leaves only to explain an existing strict refusal.
+			var stored []struct {
+				Requested map[string]json.RawMessage `json:"requested"`
+				Resolved  struct {
+					Options map[string]json.RawMessage `json:"options"`
+				} `json:"resolved"`
+			}
+			if json.Unmarshal(raw, &stored) == nil {
+				for i, load := range stored {
+					_, requested := load.Requested["sleepIdleSeconds"]
+					_, resolved := load.Resolved.Options["sleepIdleSeconds"]
+					if requested || resolved {
+						return fmt.Errorf("runtime.modelLoads: %w; remove model load at runtime.modelLoads[%d] and recreate it with Preview and Apply. Other settings and model files are unaffected.", err, i)
+					}
+				}
+			}
 			return fmt.Errorf("runtime.modelLoads: %w", err)
 		}
 		// Stored identities are repaired in this decode pass, before validation.

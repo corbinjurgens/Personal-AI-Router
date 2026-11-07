@@ -207,9 +207,6 @@ func (r RequestedLoad) validateFields() error {
 	if r.CacheRAM != nil && *r.CacheRAM < 0 {
 		return fmt.Errorf("cacheRAM: must be nonnegative")
 	}
-	if r.SleepIdleSeconds != nil && *r.SleepIdleSeconds != -1 && *r.SleepIdleSeconds <= 0 {
-		return fmt.Errorf("sleepIdleSeconds: must be -1 or positive")
-	}
 	for name, value := range map[string]*string{"cacheTypeK": r.CacheTypeK, "cacheTypeV": r.CacheTypeV} {
 		if value != nil && *value != "f16" && *value != "bf16" && *value != "q8_0" && *value != "q4_0" {
 			return fmt.Errorf("%s: invalid value", name)
@@ -237,8 +234,8 @@ func (r RequestedLoad) selectedFields() map[string]bool {
 		"flashAttention": r.FlashAttention != nil, "batchSize": r.BatchSize != nil,
 		"ubatchSize": r.UBatchSize != nil, "threads": r.Threads != nil,
 		"threadsBatch": r.ThreadsBatch != nil, "kvOffload": r.KVOffload != nil,
-		"opOffload": r.OpOffload != nil, "sleepIdleSeconds": r.SleepIdleSeconds != nil,
-		"cacheRAM": r.CacheRAM != nil,
+		"opOffload": r.OpOffload != nil,
+		"cacheRAM":  r.CacheRAM != nil,
 	}
 }
 
@@ -266,7 +263,6 @@ func (r RequestedLoad) Clone() RequestedLoad {
 	r.ThreadsBatch = clonePointer(r.ThreadsBatch)
 	r.KVOffload = clonePointer(r.KVOffload)
 	r.OpOffload = clonePointer(r.OpOffload)
-	r.SleepIdleSeconds = clonePointer(r.SleepIdleSeconds)
 	r.CacheRAM = clonePointer(r.CacheRAM)
 	return r
 }

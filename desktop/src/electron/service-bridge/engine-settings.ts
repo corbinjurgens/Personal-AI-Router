@@ -215,7 +215,6 @@ function requested(value: JsonValue | undefined): RequestedLoad {
         'threadsBatch',
         'kvOffload',
         'opOffload',
-        'sleepIdleSeconds',
         'cacheRAM'
     ])
     const context =
@@ -254,7 +253,6 @@ function requested(value: JsonValue | undefined): RequestedLoad {
         threadsBatch: optionalInteger(row.threadsBatch),
         kvOffload: optionalFlag(row.kvOffload),
         opOffload: optionalFlag(row.opOffload),
-        sleepIdleSeconds: optionalInteger(row.sleepIdleSeconds, -1),
         cacheRAM: optionalInteger(row.cacheRAM)
     }
     const c = result.context
@@ -275,10 +273,9 @@ function requested(value: JsonValue | undefined): RequestedLoad {
     )
         throw new Error('Model context allocation overflows int32.')
     if (
-        result.sleepIdleSeconds === 0 ||
-        (result.batchSize !== undefined &&
-            result.ubatchSize !== undefined &&
-            result.ubatchSize > result.batchSize)
+        result.batchSize !== undefined &&
+        result.ubatchSize !== undefined &&
+        result.ubatchSize > result.batchSize
     )
         throw new Error('Invalid model load bounds.')
     if (result.fit === 'on' && result.gpu?.mode === 'auto')
@@ -428,7 +425,6 @@ function validateResolution(intent: RequestedLoad, actual: ResolvedLoad | undefi
         'threadsBatch',
         'kvOffload',
         'opOffload',
-        'sleepIdleSeconds',
         'cacheRAM'
     ]
     if (

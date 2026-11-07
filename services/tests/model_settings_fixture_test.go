@@ -710,7 +710,7 @@ func prepareModelSettingsProcessFixture(t *testing.T) *modelSettingsProcessFixtu
 	platform["models_dir"] = other["models_dir"]
 	jointWriteJSON(t, otherPath, other)
 	policy := nodepolicy.Default()
-	policy.Idle.UnloadAfterMinutes, policy.Idle.StopEngineAfterMinutes = 0, 0
+	policy.Idle.UnloadAfterMinutes = 0
 	policy.Profiles = []nodepolicy.Profile{{Key: "medium-model", DisplayName: "medium", Engine: "llamacpp", Model: "medium-model", RequestOptions: json.RawMessage(`{"temperature":0.2,"top_p":0.9,"opaque":{"integer":9007199254740993}}`)}, {Key: "weak-model", DisplayName: "weak", Engine: "llamacpp", Model: "weak-model", RequestOptions: json.RawMessage(`{"temperature":0.4}`)}}
 	policy.Roles = []nodepolicy.Role{{Name: "weak", Profiles: []string{"weak-model"}}}
 	jointWriteJSON(t, filepath.Join(jointAppDir(base), nodepolicy.FileName), policy)

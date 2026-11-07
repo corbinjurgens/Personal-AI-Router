@@ -1346,7 +1346,6 @@ func TestStrictHTTPRejectsUnqualifiedRequestsBeforeSideEffects(t *testing.T) {
 				// A cold model on a stopped engine with start on demand: any
 				// admission would ask for a wake.
 				p.admission.setResidency(map[string][]string{})
-				p.admission.setIntent(map[string]bool{"llamacpp": true})
 				setBackend(t, p.soleFacade(), e.URL, false)
 				if tc.setup != nil {
 					tc.setup(p)

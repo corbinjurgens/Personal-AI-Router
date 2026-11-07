@@ -27,7 +27,6 @@ export type RequestedLoad = {
     threadsBatch?: number
     kvOffload?: boolean
     opOffload?: boolean
-    sleepIdleSeconds?: number
     cacheRAM?: number
 }
 export type ResolvedLoad = {

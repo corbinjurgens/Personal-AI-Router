@@ -176,7 +176,6 @@ export const loadFields: Array<keyof RequestedLoad> = [
     'threadsBatch',
     'kvOffload',
     'opOffload',
-    'sleepIdleSeconds',
     'cacheRAM'
 ]
 

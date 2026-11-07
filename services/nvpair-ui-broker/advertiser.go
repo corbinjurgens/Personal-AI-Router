@@ -154,10 +154,11 @@ func (b *Broker) setProxyLocalBackendKeyed(p *proxyProcess, engine string, port 
 }
 
 func (b *Broker) advertisementWithdrawnLocked(engine string) bool {
+	pp := b.policyProxy()
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.drains[engine]
+	return r.engineDrainsLocked(pp)[engine]
 }
 
 // localEngineCredential asks engine-manager for the native API key of the

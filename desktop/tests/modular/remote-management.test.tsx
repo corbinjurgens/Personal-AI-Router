@@ -77,10 +77,7 @@ const mocks = vi.hoisted(() => ({
         reconcileModelCopies: vi.fn<BridgeState['reconcileModelCopies']>(),
         getSelfId: vi.fn<BridgeState['getSelfId']>(() => 'self'),
         setLocalDiscoveryModelRefresher: vi.fn<BridgeState['setLocalDiscoveryModelRefresher']>(),
-        applyEngineIntent: vi.fn<BridgeState['applyEngineIntent']>(),
         invalidateModelObservations: vi.fn<BridgeState['invalidateModelObservations']>(),
-        beginEngineIntentRead: vi.fn<BridgeState['beginEngineIntentRead']>(() => 0),
-        getEngineIntent: vi.fn<BridgeState['getEngineIntent']>(() => null),
         prunePendingInvite: vi.fn<BridgeState['prunePendingInvite']>()
     }
 }))
@@ -1179,9 +1176,9 @@ describe('permission controls', () => {
             label: 'Node paused'
         },
         {
-            name: 'older saved Off',
+            name: 'operation refusal',
             code: -32011,
-            detail: 'engine was turned off locally',
+            detail: 'operation refused by the target',
             label: 'Target refused'
         },
         {

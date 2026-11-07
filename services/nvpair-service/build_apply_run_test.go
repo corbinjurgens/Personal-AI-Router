@@ -90,10 +90,10 @@ func newBuildApplyRunFixture(t *testing.T) *buildApplyRunFixture {
 		serviceLaunch: buildApplyLaunch{executable: serviceImage, env: []string{}},
 		guiLaunch:     buildApplyLaunch{executable: guiImage, env: []string{}}, expectedService: identity, expectedGUI: identity}
 	f.plan.receipt = buildapply.Receipt{OperationID: strings.Repeat("1", 32), PreviewID: "preview_one", Target: target, CandidateSHA256: digest, PreviousSHA256: strings.Repeat("c", 64),
-		Protected: buildapply.ProtectedDigests{Policy: digest, EngineSettings: digest, Intent: digest, IdentityMembership: digest},
-		Expected:  buildapply.JournalExpectations{StopEngines: true, UnloadModels: true, RemainPaused: true, PreserveIntent: true, OnActive: nodepolicy.FinishActive, DrainTimeoutSeconds: 120},
+		Protected: buildapply.ProtectedDigests{Policy: digest, EngineSettings: digest, IdentityMembership: digest},
+		Expected:  buildapply.JournalExpectations{StopEngines: true, UnloadModels: true, RemainPaused: true, OnActive: nodepolicy.FinishActive, DrainTimeoutSeconds: 120},
 		Consent:   buildapply.Consent{AllowInterruption: true, AllowEngineStop: true}, Phase: buildapply.PhasePrepare, Rename: buildapply.RenameNone, Handoff: buildapply.HandoffNone,
-		Fences: buildapply.Fences{RuntimeGeneration: buildapply.Known("runtime"), ServiceInstance: buildapply.Known("service"), BrokerGeneration: buildapply.Known("broker"), ManagerIncarnation: buildapply.Known("manager"), PolicyRevision: buildapply.Known("policy"), SettingsRevision: buildapply.Known("settings"), IntentRevision: buildapply.Known("intent"), AvailabilityRevision: buildapply.Known("availability")}}
+		Fences: buildapply.Fences{RuntimeGeneration: buildapply.Known("runtime"), ServiceInstance: buildapply.Known("service"), BrokerGeneration: buildapply.Known("broker"), ManagerIncarnation: buildapply.Known("manager"), PolicyRevision: buildapply.Known("policy"), SettingsRevision: buildapply.Known("settings"), AvailabilityRevision: buildapply.Known("availability")}}
 	f.plan.inventory = buildapply.Inventory{OperationID: f.plan.receipt.OperationID, PackageSHA256: digest, Platform: runtime.GOOS, Architecture: runtime.GOARCH}
 	endpoint := filepath.Join(filepath.Dir(target), "service.sock")
 	if runtime.GOOS == "windows" {
@@ -346,7 +346,7 @@ func TestBuildApplyTransactionInvalidAdmissionHasZeroEffects(t *testing.T) {
 		})
 	}
 	test("expired preview", func(p *buildApplyPlan) { p.expires = time.Now().Add(-time.Second) })
-	test("missing protected digest", func(p *buildApplyPlan) { p.receipt.Protected.Intent = "" })
+	test("missing protected digest", func(p *buildApplyPlan) { p.receipt.Protected.EngineSettings = "" })
 	test("drain budget does not fit", func(p *buildApplyPlan) { p.receipt.Expected.DrainTimeoutSeconds = 1800 })
 	test("missing process creation identity", func(p *buildApplyPlan) { p.oldProcesses[0].Identity.Created = "" })
 	test("untrusted successor path", func(p *buildApplyPlan) {
@@ -377,7 +377,6 @@ func TestBuildApplySettingsReadbackRejectsUnexpectedSemantics(t *testing.T) {
 		})
 	}
 	test("changed engine settings", func(r *buildApplySettingsReadback) { r.protected.EngineSettings = strings.Repeat("f", 64) })
-	test("changed saved intent", func(r *buildApplySettingsReadback) { r.protected.Intent = strings.Repeat("f", 64) })
 	test("changed identity membership", func(r *buildApplySettingsReadback) { r.protected.IdentityMembership = strings.Repeat("f", 64) })
 	test("newer local Pause", func(r *buildApplySettingsReadback) { r.pause.Revision = "newer" })
 	test("unknown activation", func(r *buildApplySettingsReadback) { r.activationVerified = false })
@@ -1116,13 +1115,13 @@ func TestBuildApplyAdmissionRequiresEveryOwnerProjection(t *testing.T) {
 			f := newBuildApplyRunFixture(t)
 			d := f.plan.receipt.Protected
 			e := buildApplyEvidence{
-				Facts:     buildApplyOwnerCompleteness{IntentProvenance: true, EngineUniverse: true, ModelDataRoots: true, ScopedStopAuthority: true, DownloadCopyReservations: true, ManagerIdleRunID: true},
+				Facts:     buildApplyOwnerCompleteness{EngineUniverse: true, ModelDataRoots: true, ScopedStopAuthority: true, DownloadCopyReservations: true, ManagerIdleRunID: true},
 				Protected: d, ProtectedRoots: []string{}, OwnedWorkers: []buildapply.RunnerReservation{},
 				Impact: buildapply.Impact{Complete: true, Fences: f.plan.receipt.Fences,
 					Availability: buildapply.Known(nodepolicy.Available), PauseOrigin: buildapply.Known("none"), Engines: buildapply.Known([]buildapply.EngineFact{}),
 					ActiveWork: buildapply.Known(0), ModelOperations: buildapply.Known([]buildapply.ModelOperation{}), SettingsDifferences: buildapply.Known([]buildapply.SettingsDifference{}),
 					Maintenance:        buildapply.MaintenanceState{BuildApplyActive: buildapply.Known(false), ModelSettingsActive: buildapply.Known(false)},
-					ExpectedSettings:   buildapply.ExpectedSettings{PolicyDigest: buildapply.Known(d.Policy), EngineSettingsDigest: buildapply.Known(d.EngineSettings), IntentDigest: buildapply.Known(d.Intent), StopEngines: buildapply.Known(true), UnloadModels: buildapply.Known(true)},
+					ExpectedSettings:   buildapply.ExpectedSettings{PolicyDigest: buildapply.Known(d.Policy), EngineSettingsDigest: buildapply.Known(d.EngineSettings), StopEngines: buildapply.Known(true), UnloadModels: buildapply.Known(true)},
 					InterruptionPolicy: buildapply.InterruptionPolicy{OnActive: buildapply.Known(nodepolicy.FinishActive), DrainTimeoutSeconds: buildapply.Known(120)},
 				},
 			}
@@ -1133,7 +1132,6 @@ func TestBuildApplyAdmissionRequiresEveryOwnerProjection(t *testing.T) {
 		})
 	}
 	test("all authoritative projections", func(*buildApplyEvidence) {}, true)
-	test("intent provenance missing", func(e *buildApplyEvidence) { e.Facts.IntentProvenance = false }, false)
 	test("engine universe incomplete", func(e *buildApplyEvidence) { e.Facts.EngineUniverse = false }, false)
 	test("model roots unknown", func(e *buildApplyEvidence) { e.Facts.ModelDataRoots = false }, false)
 	test("stop ownership missing", func(e *buildApplyEvidence) { e.Facts.ScopedStopAuthority = false }, false)
@@ -1143,8 +1141,5 @@ func TestBuildApplyAdmissionRequiresEveryOwnerProjection(t *testing.T) {
 	test("model settings owns mutation", func(e *buildApplyEvidence) { e.Impact.Maintenance.ModelSettingsActive = buildapply.Known(true) }, false)
 	test("unsafe model copy active", func(e *buildApplyEvidence) {
 		e.Impact.ModelOperations = buildapply.Known([]buildapply.ModelOperation{{Engine: "fixture", Kind: "copy", BlocksApply: true}})
-	}, false)
-	test("intent digest disagrees", func(e *buildApplyEvidence) {
-		e.Impact.ExpectedSettings.IntentDigest = buildapply.Known(strings.Repeat("f", 64))
 	}, false)
 }

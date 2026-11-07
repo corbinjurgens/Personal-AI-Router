@@ -4,7 +4,7 @@
 package main
 
 // What the proxy knows about its own node, and the dormant self candidate
-// that start-on-demand needs.
+// used to wake an available node's installed engine.
 //
 // The broker advertises an engine's service only while the engine is healthy,
 // so a stopped engine drops this node out of that engine's discovery overlay
@@ -74,8 +74,8 @@ func nodeHasLoaded(p engineProfile, n Node, model string) bool {
 }
 
 // dormantSelfCandidate offers this node's stopped engine for a model it can
-// serve once woken: the engine must be saved On, start-on-demand enabled, the
-// node available, and the requested key covered by one of this node's profiles.
+// serve once woken: the node must be available, and the requested key covered
+// by one of this node's profiles whose native model is served.
 func (f *facade) dormantSelfCandidate(model string) (candidate, bool) {
 	p := f.host
 	if p.localEngineHealthy(f.profile.Name) {
@@ -87,9 +87,6 @@ func (f *facade) dormantSelfCandidate(model string) (candidate, bool) {
 	pol := p.admission.currentPolicy()
 	pr, ok := pol.ProfileByKey(model)
 	if !ok || pr.Engine != f.profile.Name || !modelServed(pol.ServedModels, pr.Engine, pr.Model, p.normalizeEngineModel) {
-		return candidate{}, false
-	}
-	if on, known := p.admission.engineIntent(f.profile.Name); !known || !on || !pol.Idle.StartOnDemand {
 		return candidate{}, false
 	}
 	selfID, _ := p.selfIdentity(f.profile.Name)

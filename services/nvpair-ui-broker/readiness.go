@@ -68,9 +68,8 @@ func (b *Broker) StrictReadiness() nodepolicy.StrictAdmissionReadiness {
 }
 
 // strictReadinessLocked applies the fences to the held report. running is the
-// proxy process now published. Models of an engine saved Off are left out, as
-// the local veto keeps them from being started for anyone, and so are models
-// whose identity is no longer the one this broker knows for their engine
+// proxy process now published. Models are excluded when their identity is no
+// longer the one this broker knows for their engine
 // (model_identity.go), so a settings change, restart or replacement withdraws
 // them before the proxy reports again; a capability with no model left is
 // withdrawn. Caller holds r.mu.
@@ -93,9 +92,6 @@ func (r *policyRuntime) strictReadinessLocked(running *proxyProcess, modelNaming
 	}
 	models := make([]nodepolicy.StrictAdmissionModel, 0, len(held.Capability.Models))
 	for _, m := range held.Capability.Models {
-		if enabled, known := r.intent[m.Engine]; known && !enabled {
-			continue
-		}
 		naming, known := modelNaming(m.Engine)
 		if !known || !r.identityCurrentLocked(m, naming) {
 			continue

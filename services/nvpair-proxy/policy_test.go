@@ -333,18 +333,6 @@ func TestPolicyMethods_DrainResidencyIntent(t *testing.T) {
 		t.Fatal("invalid residency replaced the previous one")
 	}
 
-	rpcOK(t, p, w, nodepolicy.MethodSetEngineIntent, nodepolicy.SetEngineIntentParams{
-		EnabledByEngine: map[string]bool{"llamacpp": true, "llamacpp-custom": false},
-	})
-	if on, known := p.admission.engineIntent("llamacpp-custom"); !known || on {
-		t.Fatal("intent not applied")
-	}
-	rpcErr(t, p, w, nodepolicy.MethodSetEngineIntent, nodepolicy.SetEngineIntentParams{
-		EnabledByEngine: map[string]bool{"v/llm": true},
-	})
-	if on, _ := p.admission.engineIntent("llamacpp"); !on {
-		t.Fatal("invalid intent replaced the previous one")
-	}
 }
 
 // engine-manager reports every registered engine, so a descriptor engine in
@@ -361,12 +349,6 @@ func TestPolicyMethods_AcceptDescriptorEngineIDs(t *testing.T) {
 	})
 	if !p.admission.isLoaded("llamacpp-custom", "org/model:Q4_K_M") || !p.admission.isLoaded("llamacpp", "qwen3") {
 		t.Fatal("residency with a descriptor engine not applied")
-	}
-	rpcOK(t, p, w, nodepolicy.MethodSetEngineIntent, nodepolicy.SetEngineIntentParams{
-		EnabledByEngine: map[string]bool{"llamacpp": true, "strata": false},
-	})
-	if on, known := p.admission.engineIntent("strata"); !known || on {
-		t.Fatal("descriptor engine intent not applied")
 	}
 	policy := nodepolicy.Default()
 	declarePolicyRole(&policy, "weak", "llamacpp-custom", "m")

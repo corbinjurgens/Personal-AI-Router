@@ -78,7 +78,6 @@ func enginePortAssignmentRequest(method string, params json.RawMessage) (string,
 	var request struct {
 		Engine string `json:"engine"`
 		Port   int    `json:"port"`
-		Start  bool   `json:"start"`
 	}
 	if json.Unmarshal(params, &request) != nil || request.Engine == "" || request.Port <= 0 {
 		return "", 0, false
@@ -86,8 +85,6 @@ func enginePortAssignmentRequest(method string, params json.RawMessage) (string,
 	switch method {
 	case "engine:set-port":
 		return request.Engine, request.Port, true
-	case "engine:install":
-		return request.Engine, request.Port, request.Start
 	default:
 		return "", 0, false
 	}

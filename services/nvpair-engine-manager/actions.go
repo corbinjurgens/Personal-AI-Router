@@ -160,10 +160,7 @@ func (e *Executor) Action(ctx context.Context, engine, action string, params jso
 //     across both makes the two orderings the only possible ones: a Stop either
 //     wins the lock first (we observe stopped and leave it down) or waits and
 //     then stops the engine we brought back.
-//   - Restart ends with setDesiredEnabled(engine, true), which is the right
-//     thing for a user-initiated restart and the wrong thing here: deleting a
-//     model must not rewrite the engine's saved ON/OFF intent. doStop/doStart
-//     are the intent-neutral pair (StopAll uses them for the same reason).
+//   - Keep the stop/start pair under this lifecycle lock.
 func (e *Executor) restartAfterAction(ctx context.Context, st *engineState, engine, action string) error {
 	done, err := e.admitMutation(engine)
 	if err != nil {

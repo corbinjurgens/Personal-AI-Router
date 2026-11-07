@@ -55,7 +55,7 @@ func TestStrataContractUnsupportedManagement(t *testing.T) {
 		}
 		f.strataContractStartManager(t)
 		assertAbsent(t, f)
-		response := f.Manager.strataContractCall(t, "engine:install", map[string]any{"engine": "strata", "start": true, "port": f.Port, "bind": "127.0.0.1"})
+		response := f.Manager.strataContractCall(t, "engine:install", map[string]any{"engine": "strata", "port": f.Port, "bind": "127.0.0.1"})
 		assertError(t, response, `engine "strata" has no install block for this platform`)
 		assertAbsent(t, f)
 	})
@@ -77,8 +77,7 @@ func TestStrataContractUnsupportedManagement(t *testing.T) {
 		f := strataContractNew(t, false)
 		f.strataContractStartManager(t)
 		assertAbsent(t, f)
-		// The no-op legitimately saves Off intent, but creates no installation
-		// or model store. Compare every other private file and directory.
+		// The no-op creates no installation or model store.
 		intentPath := filepath.Join(f.AppDir, "engine-bin", "engine-state.json")
 		before := strataContractArtifacts(t, f.Root, filepath.Join(f.AppDir, "engine-bin"), intentPath)
 		var status strataContractStatus
@@ -90,18 +89,6 @@ func TestStrataContractUnsupportedManagement(t *testing.T) {
 		assertAbsent(t, f)
 		if after := strataContractArtifacts(t, f.Root, filepath.Join(f.AppDir, "engine-bin"), intentPath); !reflect.DeepEqual(after, before) {
 			t.Fatalf("absent uninstall changed private artifacts: before=%v after=%v", before, after)
-		}
-		data, err := os.ReadFile(intentPath)
-		if err != nil {
-			t.Fatalf("read saved Off intent: %v", err)
-		}
-		var intent struct {
-			Engines map[string]bool   `json:"engines"`
-			OffBy   map[string]string `json:"offBy"`
-		}
-		strataContractDecode(t, data, &intent)
-		if !reflect.DeepEqual(intent.Engines, map[string]bool{"strata": false}) || !reflect.DeepEqual(intent.OffBy, map[string]string{"strata": "local"}) {
-			t.Fatalf("saved intent = %+v, want Strata Off by local", intent)
 		}
 	})
 

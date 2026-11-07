@@ -118,7 +118,7 @@ func (b *Broker) publishNodeProjection() {
 // admission capability it would carry differs from the one last published.
 // Callers refresh after every change to what the capability rests on that
 // does not publish already: a readiness report, an acknowledgement, a proxy
-// start or exit, and saved engine intent.
+// start or exit, and engine identity changes.
 func (b *Broker) refreshStrictAdvertisement() {
 	b.sendNodeProjection(true)
 }

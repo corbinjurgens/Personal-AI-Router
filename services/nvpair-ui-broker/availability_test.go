@@ -361,7 +361,6 @@ func observePauseFixtureEngine(b *Broker) {
 	clear(r.runningSince)
 	clear(r.residencyAt)
 	r.mu.Unlock()
-	b.observeIntent(map[string]bool{"llamacpp": true})
 	b.observeLoaded(map[string][]string{"llamacpp": {"m1"}})
 }
 
@@ -471,12 +470,10 @@ func TestPauseUsesReplacementEngineManagerObservations(t *testing.T) {
 	old := b.activateEngineManagerSource()
 	b.observeEngineRunningFrom(old, "llamacpp", true)
 	b.observeLoadedFrom(old, map[string][]string{"llamacpp": {"old-model"}})
-	b.observeIntentFrom(old, map[string]bool{"llamacpp": true})
 	current := b.activateEngineManagerSource()
 	engine := attachFakeEngine(t, b)
 	b.observeEngineRunningFrom(current, "llamacpp-custom", true)
 	b.observeLoadedFrom(current, map[string][]string{"llamacpp-custom": {"new-model"}})
-	b.observeIntentFrom(current, map[string]bool{"llamacpp-custom": true})
 	b.retireEngineManagerSource(old)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -589,10 +586,9 @@ func TestPauseAlwaysStopsAndUnloadsDespiteLegacyOptions(t *testing.T) {
 				t.Fatalf("broker unloads=%v sleeps=%v, want manager-owned cleanup of cached and freshly discovered engines", unloaded, slept)
 			}
 			requirePauseManagerCleanup(t, b, "llamacpp", "llamacpp-custom")
-			requirePolicyIntent(t, b, map[string]bool{"llamacpp": true})
 			for _, call := range engine.snapshot() {
 				if call.method == "engine:stop" {
-					t.Fatal("pause rewrote engine intent with an ordinary stop")
+					t.Fatal("pause called the removed public stop method")
 				}
 			}
 		})
@@ -735,9 +731,9 @@ func TestPauseReplaySkipsRestoreForEveryOrigin(t *testing.T) {
 			check := func(engine *fakeWorker) {
 				t.Helper()
 				b.publishNodeProjection()
-				b.restoreEnabledEngines(b.getEngineMgr())
+				b.restoreInstalledEngines(b.getEngineMgr())
 				paProjectionBarrier(t, b)
-				if got := engine.methods(restoreEnabledEnginesMethod); len(got) != 0 {
+				if got := engine.methods(restoreInstalledEnginesMethod); len(got) != 0 {
 					t.Fatalf("paused replay restored engines: %v", got)
 				}
 				engine.mu.Lock()

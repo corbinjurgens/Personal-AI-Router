@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"reflect"
@@ -37,12 +38,81 @@ type residentHold struct {
 	context      int
 	deadline     time.Time
 	counted      bool
+	preparing    bool
 	dispatched   bool
 	revoked      bool
 	observation  uint64
 	finish       *nodepolicy.FinishResidentParams
 	finishResult nodepolicy.FinishResidentResult
 	recovery     *nodepolicy.ObserveResidentParams
+}
+
+// Manual loads share the resident operation owner and identity fences. Only
+// automatic desired membership and qualification are omitted; the manager's
+// current serving envelope must still identify the model-only load.
+func (a *admissionController) residentLoadPermissionLocked(k admKey, purpose nodepolicy.ResidentPurpose) nodepolicy.ModelConfigurationReason {
+	if purpose != nodepolicy.ResidentPurposeManual {
+		return a.residentPermissionLocked(k)
+	}
+	if a.availability != nodepolicy.Available {
+		return nodepolicy.ModelReasonPausedLocal
+	}
+	if a.drain[k.engine] {
+		return nodepolicy.ModelReasonOperationBusy
+	}
+	if !a.healthy(k.engine) {
+		return nodepolicy.ModelReasonEngineOff
+	}
+	if a.strict.storageErr != nil {
+		// Qualification is optional here; unreadable capacity ownership is not.
+		return nodepolicy.ModelReasonNoFit
+	}
+	profiles := 0
+	for _, pr := range a.policy.Profiles {
+		if pr.Engine == k.engine && a.normalize(pr.Engine, pr.Model) == k.model {
+			profiles++
+		}
+	}
+	if profiles != 1 {
+		return nodepolicy.ModelReasonNotServed
+	}
+	id := a.strict.identity[k.engine]
+	digest, ok := a.modelDigestLocked(id, k)
+	if !ok {
+		return nodepolicy.ModelReasonNotInstalled
+	}
+	if _, ok := a.servingEnvelopeLocked(id, k, digest); !ok {
+		return nodepolicy.ModelReasonUnsupportedLoad
+	}
+	if _, unloading := a.unloadSentAt[k]; unloading {
+		return nodepolicy.ModelReasonOperationBusy
+	}
+	return ""
+}
+
+func (a *admissionController) residentLoadContextLocked(k admKey, purpose nodepolicy.ResidentPurpose) (int, bool) {
+	if purpose != nodepolicy.ResidentPurposeManual {
+		return a.residentContextLocked(k)
+	}
+	id := a.strict.identity[k.engine]
+	digest, ok := a.modelDigestLocked(id, k)
+	if !ok {
+		return 0, false
+	}
+	envelope, ok := a.servingEnvelopeLocked(id, k, digest)
+	if !ok || envelope.PerSlotContextTokens > int64(int(^uint(0)>>1)) {
+		return 0, false
+	}
+	return int(envelope.PerSlotContextTokens), true
+}
+
+func (a *admissionController) residentLoadIdentityLocked(k admKey, purpose nodepolicy.ResidentPurpose) nodepolicy.StrictModelIdentity {
+	if purpose != nodepolicy.ResidentPurposeManual {
+		return a.strict.models[k].Identity
+	}
+	id := a.strict.identity[k.engine]
+	digest, _ := a.modelDigestLocked(id, k)
+	return nodepolicy.StrictModelIdentity{EngineRunID: id.EngineRunID, SettingsFingerprint: id.SettingsFingerprint, ModelDigest: digest}
 }
 
 func (a *admissionController) residentPermissionLocked(k admKey) nodepolicy.ModelConfigurationReason {
@@ -52,7 +122,7 @@ func (a *admissionController) residentPermissionLocked(k admKey) nodepolicy.Mode
 	if a.drain[k.engine] {
 		return nodepolicy.ModelReasonOperationBusy
 	}
-	if !a.intent[k.engine] || !a.healthy(k.engine) {
+	if !a.healthy(k.engine) {
 		return nodepolicy.ModelReasonEngineOff
 	}
 	if !modelServed(a.policy.ServedModels, k.engine, k.model, a.normalize) {
@@ -131,7 +201,8 @@ func (a *admissionController) residentContextLocked(k admKey) (int, bool) {
 }
 
 // Validate the whole desired set before reserving any member. Use the same
-// resident set and memory owner as inference; residency never plans eviction.
+// resident set and memory owner as inference; automatic residency never plans
+// eviction. Manual loads use fitLocked before taking the same kind of hold.
 func (a *admissionController) residentBatchLocked() nodepolicy.ModelConfigurationReason {
 	set := a.residentLocked()
 	desired := map[admKey]bool{}
@@ -146,6 +217,10 @@ func (a *admissionController) residentBatchLocked() nodepolicy.ModelConfiguratio
 		}
 		set[k] = true
 	}
+	return a.residentCapacityLocked(set)
+}
+
+func (a *admissionController) residentCapacityLocked(set map[admKey]bool) nodepolicy.ModelConfigurationReason {
 	if max := a.policy.Admission.MaxResidentModels; max > 0 && len(set) > max {
 		return nodepolicy.ModelReasonNoFit
 	}
@@ -163,6 +238,20 @@ func (a *admissionController) residentBatchLocked() nodepolicy.ModelConfiguratio
 }
 
 func (a *admissionController) prepareResident(run string, in nodepolicy.PrepareResidentParams) (nodepolicy.PrepareResidentResult, error) {
+	return a.prepareResidentStarted(context.Background(), run, in, nil)
+}
+
+// registered releases the control reader after the ordered operation has been
+// recorded, before any wait. Residency and Pause updates must remain readable
+// while a manual preparation waits for capacity.
+func (a *admissionController) prepareResidentStarted(ctx context.Context, run string, in nodepolicy.PrepareResidentParams, registered chan struct{}) (nodepolicy.PrepareResidentResult, error) {
+	started := func() {
+		if registered != nil {
+			close(registered)
+			registered = nil
+		}
+	}
+	defer started()
 	if err := in.Validate(); err != nil {
 		return nodepolicy.PrepareResidentResult{}, err
 	}
@@ -183,6 +272,15 @@ func (a *admissionController) prepareResident(run string, in nodepolicy.PrepareR
 	if old := a.resident.ops[in.OperationID]; old != nil {
 		if old.request != in {
 			return nodepolicy.PrepareResidentResult{}, errors.New("resident operation conflicts")
+		}
+		started()
+		for old.preparing {
+			if !a.strict.now().Before(old.deadline) {
+				return nodepolicy.PrepareResidentResult{}, errors.New("resident preparation timed out")
+			}
+			if err := a.waitLocked(ctx, old.deadline, nil, nil); err != nil {
+				return nodepolicy.PrepareResidentResult{}, err
+			}
 		}
 		return old.result, nil
 	}
@@ -208,14 +306,14 @@ func (a *admissionController) prepareResident(run string, in nodepolicy.PrepareR
 	case len(a.resident.ops) >= maxResidentOperations:
 		reason = nodepolicy.ModelReasonNoFit
 	default:
-		reason = a.residentPermissionLocked(k)
-		if reason == "" && a.strict.models[k].Identity != in.Identity {
+		reason = a.residentLoadPermissionLocked(k, in.Purpose)
+		if reason == "" && a.residentLoadIdentityLocked(k, in.Purpose) != in.Identity {
 			reason = nodepolicy.ModelReasonUnqualified
 		}
-		if reason == "" {
+		if reason == "" && in.Purpose != nodepolicy.ResidentPurposeManual {
 			reason = a.residentBatchLocked()
 		}
-		if reason == "" && a.inflight[k] > 0 {
+		if reason == "" && in.Purpose != nodepolicy.ResidentPurposeManual && a.inflight[k] > 0 {
 			reason = nodepolicy.ModelReasonNoFit
 		}
 	}
@@ -227,16 +325,30 @@ func (a *admissionController) prepareResident(run string, in nodepolicy.PrepareR
 		budget = switchBudget
 	}
 	hold := &residentHold{request: in, sequence: sequence, result: result, key: k, generation: a.strict.generation[k], memory: a.memoryLocked(k), deadline: a.strict.now().Add(budget)}
+	if reason == "" {
+		var ok bool
+		hold.context, ok = a.residentLoadContextLocked(k, in.Purpose)
+		if !ok {
+			reason = nodepolicy.ModelReasonUnqualified
+		}
+		hold.identity = a.strict.identity[in.Engine]
+		hold.identity.ModelDigests = make(map[string]string, len(a.strict.identity[in.Engine].ModelDigests))
+		for name, digest := range a.strict.identity[in.Engine].ModelDigests {
+			hold.identity.ModelDigests[name] = digest
+		}
+	}
+	if len(a.resident.ops) < maxResidentOperations {
+		a.resident.ops[in.OperationID] = hold
+	}
+	if reason == "" && in.Purpose == nodepolicy.ResidentPurposeManual {
+		hold.preparing = true
+		started()
+		reason = a.prepareManualResidentLocked(ctx, hold)
+		hold.preparing = false
+	}
 	if reason != "" {
 		hold.result.Refusals = []nodepolicy.ResidentRefusal{{Engine: in.Engine, Model: in.Model, Reason: reason}}
 	} else {
-		hold.context, _ = a.residentContextLocked(k)
-		id := a.strict.identity[in.Engine]
-		hold.identity = id
-		hold.identity.ModelDigests = make(map[string]string, len(id.ModelDigests))
-		for name, digest := range id.ModelDigests {
-			hold.identity.ModelDigests[name] = digest
-		}
 		hold.result.ReservationID = fmt.Sprintf("resident-%d", result.EvidenceGeneration)
 		hold.counted = true
 		a.inflight[k]++
@@ -249,18 +361,52 @@ func (a *admissionController) prepareResident(run string, in nodepolicy.PrepareR
 			a.resident.generations[in.ManagerIncarnation] = 0
 		}
 	}
-	if len(a.resident.ops) < maxResidentOperations {
-		a.resident.ops[in.OperationID] = hold
-	}
 	a.trimResidentSourcesLocked()
 	a.signalLocked()
 	return hold.result, nil
 }
 
+// Caller holds mu. No capacity is counted until the shared planner proves a
+// fit; every wake rechecks the original binding before requesting any effect.
+func (a *admissionController) prepareManualResidentLocked(ctx context.Context, h *residentHold) nodepolicy.ModelConfigurationReason {
+	deadline := time.Now().Add(h.deadline.Sub(a.strict.now()))
+	for {
+		if !a.residentBindingCurrentLocked(h) {
+			if reason := a.residentLoadPermissionLocked(h.key, h.request.Purpose); reason != "" {
+				return reason
+			}
+			return nodepolicy.ModelReasonUnqualified
+		}
+		if ctx.Err() != nil || !time.Now().Before(deadline) {
+			return nodepolicy.ModelReasonNoFit
+		}
+		plan, evict := a.fitLocked(h.key, a.policy)
+		if a.inflight[h.key] > 0 {
+			plan = fitWait
+		}
+		var sends []notification
+		switch plan {
+		case fitOK:
+			set := a.residentLocked()
+			set[h.key] = true
+			return a.residentCapacityLocked(set)
+		case fitNever:
+			return nodepolicy.ModelReasonNoFit
+		case fitEvict:
+			if a.policy.Admission.SwitchModels {
+				sends = a.unloadLocked(evict, a.policy)
+			}
+		}
+		if err := a.waitLocked(ctx, deadline, sends, a.noteChangeLocked()); err != nil {
+			return nodepolicy.ModelReasonNoFit
+		}
+	}
+}
+
 func (a *admissionController) residentBindingCurrentLocked(h *residentHold) bool {
-	context, ok := a.residentContextLocked(h.key)
+	context, ok := a.residentLoadContextLocked(h.key, h.request.Purpose)
 	return ok && context == h.context && h.request.PolicyRevision == a.policy.Revision && a.strict.generation[h.key] == h.generation &&
-		reflect.DeepEqual(h.identity, a.strict.identity[h.key.engine]) && a.residentPermissionLocked(h.key) == ""
+		reflect.DeepEqual(h.identity, a.strict.identity[h.key.engine]) && a.residentLoadPermissionLocked(h.key, h.request.Purpose) == ""
 }
 
 // Every state-change signal runs this while holding the admission mutex. A
@@ -305,7 +451,15 @@ func (a *admissionController) dispatchResident(run string, in nodepolicy.Dispatc
 		// second engine call after an uncertain response.
 		return nodepolicy.DispatchResidentResult{Reason: nodepolicy.DispatchReasonReservationRevoked}, nil
 	}
-	if reason := a.residentBatchLocked(); reason != "" {
+	reason := nodepolicy.ModelConfigurationReason("")
+	if p.Purpose == nodepolicy.ResidentPurposeManual {
+		// The hold already counts this model. Re-evaluate the complete set at
+		// dispatch as well, including a cap reduced since preparation.
+		reason = a.residentCapacityLocked(a.residentLocked())
+	} else {
+		reason = a.residentBatchLocked()
+	}
+	if reason != "" {
 		h.revoked = true
 		a.releaseResidentLocked(h)
 		a.signalLocked()
@@ -313,6 +467,9 @@ func (a *admissionController) dispatchResident(run string, in nodepolicy.Dispatc
 	}
 	h.observation = a.resident.generations[p.ManagerIncarnation]
 	h.dispatched = true
+	if p.Purpose == nodepolicy.ResidentPurposeManual {
+		a.lastActivity[h.key] = a.strict.now().UnixMilli()
+	}
 	return nodepolicy.DispatchResidentResult{Dispatched: true}, nil
 }
 
@@ -422,6 +579,11 @@ func (a *admissionController) settleResidentLocked(h *residentHold, loaded bool)
 		}
 		a.loaded[h.key.engine][h.key.model] = true
 		a.residencyKnown = true
+		if h.request.Purpose == nodepolicy.ResidentPurposeManual {
+			now := a.strict.now()
+			a.finishedAt[h.key] = now
+			a.lastActivity[h.key] = now.UnixMilli()
+		}
 	} else {
 		delete(a.loaded[h.key.engine], h.key.model)
 		delete(a.finishedAt, h.key)
@@ -433,7 +595,7 @@ func (a *admissionController) retireResidentOperationsLocked() {
 	for len(a.resident.ops) >= maxResidentOperations {
 		var oldest *residentHold
 		for _, h := range a.resident.ops {
-			if !h.counted && (oldest == nil || h.sequence < oldest.sequence) {
+			if !h.counted && !h.preparing && (oldest == nil || h.sequence < oldest.sequence) {
 				oldest = h
 			}
 		}

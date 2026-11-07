@@ -7,7 +7,7 @@ package main
 // §3.2). The broker owns <appdir>/node-policy.json and is its only writer; the
 // proxy enforces it. This file holds the store, the client methods
 // policy:get / policy:set, the state mirrored into the proxy (policy,
-// availability, residency, saved engine intent, settings drains), and the
+// availability, residency, settings drains), and the
 // remote relay that lets a paired node read or change this node's policy.
 //
 // Availability orchestration lives in availability.go, the idle policy and
@@ -32,7 +32,6 @@ import (
 	"nvpair-shared/appdir"
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/durablefile"
-	"nvpair-shared/engineintent"
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/modelconfig"
 	"nvpair-shared/nodepolicy"
@@ -51,8 +50,6 @@ const (
 const (
 	engineWakeMethod           = "engine:wake"
 	engineSleepMethod          = "engine:sleep"
-	engineIntentMethod         = "engine:intent"
-	engineIntentChanged        = "engine:intent-changed"
 	engineUnloadModelMethod    = "engine:unload-model"
 	engineStateChangedMethod   = "engine:state-changed"
 	engineModelsChangedMethod  = "engine:models-changed"
@@ -169,15 +166,13 @@ type policyRuntime struct {
 	haveAdmission bool
 	admissionCh   chan struct{}
 
-	// What engine-manager reports: which engines run, what each has loaded,
-	// and each engine's saved intent.
+	// What engine-manager reports: which engines run and what each has loaded.
 	running map[string]bool
 	// An installed-state snapshot cannot overwrite a newer observation made
 	// while its RPC was in flight.
 	runningGeneration uint64
 	runningObserved   map[string]uint64
 	loaded            map[string][]string
-	intent            map[string]bool
 	drains            map[string]bool
 
 	// Strict admission identity (model_identity.go): engine-manager's run,
@@ -187,12 +182,11 @@ type policyRuntime struct {
 	engineManagerSource *engineManagerSource
 	settingsIdentity    map[string]string
 
-	// Idle bookkeeping: when an engine was seen to start, when it last gained a
-	// loaded model, and the baseline the idle policy last acted on.
+	// Idle bookkeeping: engine start, each model's residency arrival and the
+	// per-model baseline the idle policy last acted on.
 	runningSince   map[string]time.Time
-	residencyAt    map[string]time.Time
-	idleUnloadedAt map[string]time.Time
-	idleSleptAt    map[string]time.Time
+	residencyAt    map[nodepolicy.ModelRef]time.Time
+	idleUnloadedAt map[nodepolicy.ModelRef]time.Time
 	now            func() time.Time
 
 	// Availability transitions: transitionMu runs one at a time; the newest
@@ -200,8 +194,6 @@ type policyRuntime struct {
 	transitionMu     sync.Mutex
 	transitionGen    uint64
 	transitionCancel context.CancelFunc
-	pauseSlept       map[string]bool
-	restoreSkipped   bool
 
 	waking map[string]bool
 
@@ -245,13 +237,10 @@ func (r *policyRuntime) initLocked() {
 	r.running = map[string]bool{}
 	r.runningObserved = map[string]uint64{}
 	r.loaded = map[string][]string{}
-	r.intent = map[string]bool{}
 	r.drains = map[string]bool{}
 	r.runningSince = map[string]time.Time{}
-	r.residencyAt = map[string]time.Time{}
-	r.idleUnloadedAt = map[string]time.Time{}
-	r.idleSleptAt = map[string]time.Time{}
-	r.pauseSlept = map[string]bool{}
+	r.residencyAt = map[nodepolicy.ModelRef]time.Time{}
+	r.idleUnloadedAt = map[nodepolicy.ModelRef]time.Time{}
 	r.waking = map[string]bool{}
 	r.pendingPush = map[string]bool{}
 	r.pushSlot = make(chan struct{}, 1)
@@ -1178,7 +1167,7 @@ func (b *Broker) cancelPolicyRelay(raw json.RawMessage) {
 // policy. It consumes the policy relay's own notifications and reports true for
 // them; everything else is only observed and continues to subscribed clients.
 func (b *Broker) handlePolicyEngineNotification(source *engineManagerSource, method string, params json.RawMessage) bool {
-	if (method == engineModelsChangedMethod || method == engineIntentChanged) && !b.engineManagerSourceCurrent(source) {
+	if method == engineModelsChangedMethod && !b.engineManagerSourceCurrent(source) {
 		return false
 	}
 	switch method {
@@ -1197,11 +1186,6 @@ func (b *Broker) handlePolicyEngineNotification(source *engineManagerSource, met
 		}
 		if json.Unmarshal(params, &p) == nil && (p.Models.Models != nil || p.Models.LoadedByEngine != nil) {
 			b.observeLoadedFrom(source, p.Models.LoadedByEngine)
-		}
-	case engineIntentChanged:
-		var p engineintent.Snapshot
-		if json.Unmarshal(params, &p) == nil && p.Validate() == nil {
-			b.observeIntentFrom(source, p.EnabledByEngine)
 		}
 	}
 	return false
@@ -1331,6 +1315,7 @@ func (b *Broker) observeLoadedFor(source *engineManagerSource, pp *proxyProcess,
 		}
 	}
 	now := r.now()
+	residentNow := make(map[nodepolicy.ModelRef]bool)
 	for engine, models := range loadedByEngine {
 		if !r.running[engine] {
 			r.running[engine] = true
@@ -1340,10 +1325,18 @@ func (b *Broker) observeLoadedFor(source *engineManagerSource, pp *proxyProcess,
 		}
 		prev := r.loaded[engine]
 		for _, m := range models {
+			ref := b.modelRef(engine, m)
+			residentNow[ref] = true
 			if !containsString(prev, m) {
-				r.residencyAt[engine] = now
-				break
+				r.residencyAt[ref] = now
+				delete(r.idleUnloadedAt, ref)
 			}
+		}
+	}
+	for ref := range r.residencyAt {
+		if !residentNow[ref] {
+			delete(r.residencyAt, ref)
+			delete(r.idleUnloadedAt, ref)
 		}
 	}
 	r.loaded = make(map[string][]string, len(loadedByEngine))
@@ -1356,27 +1349,6 @@ func (b *Broker) observeLoadedFor(source *engineManagerSource, pp *proxyProcess,
 	b.schedulePolicyPush(pushResidency)
 }
 
-func (b *Broker) observeIntent(enabledByEngine map[string]bool) {
-	b.observeIntentFrom(nil, enabledByEngine)
-}
-
-func (b *Broker) observeIntentFrom(source *engineManagerSource, enabledByEngine map[string]bool) {
-	r := b.nodePolicyRuntime()
-	r.mu.Lock()
-	if source != nil && source != r.engineManagerSource {
-		r.mu.Unlock()
-		return
-	}
-	r.intent = make(map[string]bool, len(enabledByEngine))
-	for k, v := range enabledByEngine {
-		r.intent[k] = v
-	}
-	r.mu.Unlock()
-	b.schedulePolicyPush(pushIntent)
-	// An engine saved Off leaves the strict capability. Off the read pump.
-	go b.refreshStrictAdvertisement()
-}
-
 func containsString(list []string, s string) bool {
 	for _, v := range list {
 		if v == s {
@@ -1386,8 +1358,8 @@ func containsString(list []string, s string) bool {
 	return false
 }
 
-// refreshEnginePolicySnapshotFrom seeds running engines, residency and saved
-// intent from a (re)started engine-manager, whose watcher pushes only changes,
+// refreshEnginePolicySnapshotFrom seeds running engines and residency
+// from a (re)started engine-manager, whose watcher pushes only changes,
 // and sends it the node projection. engine:ready sends the projection too, but
 // it can be read before the new worker's handle is installed; this runs after.
 // The worker's bound source fences running-state observations during replay.
@@ -1398,12 +1370,6 @@ func (b *Broker) refreshEnginePolicySnapshotFrom(w *rpcWorker, source *engineMan
 	b.publishNodeProjection()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	if result, rpcErr, err := w.CallNoTimeout(ctx, engineIntentMethod, nil); err == nil && rpcErr == nil {
-		var p engineintent.Snapshot
-		if json.Unmarshal(result, &p) == nil && p.Validate() == nil {
-			b.observeIntentFrom(source, p.EnabledByEngine)
-		}
-	}
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
 	runningGeneration := r.runningGeneration
@@ -1439,7 +1405,6 @@ const (
 	pushPolicy       = "policy"
 	pushAvailability = "availability"
 	pushResidency    = "residency"
-	pushIntent       = "intent"
 	pushIdentity     = "identity"
 	pushDrainPrefix  = "drain:"
 )
@@ -1572,10 +1537,12 @@ func (b *Broker) replayPolicyToProxy(ctx context.Context, pp *proxyProcess) bool
 	// So did its strict readiness. The new process reports its own once it
 	// has acknowledged the policy replayed below.
 	r.strictReadiness = nodepolicy.StrictAdmissionReadiness{}
-	kinds := []string{pushAvailability, pushPolicy, pushIntent, pushResidency, pushIdentity}
-	for engine := range r.drains {
+	kinds := []string{}
+	for engine := range r.engineDrainsLocked(pp) {
 		kinds = append(kinds, pushDrainPrefix+engine)
 	}
+	sort.Strings(kinds)
+	kinds = append(kinds, pushAvailability, pushPolicy, pushResidency, pushIdentity)
 	r.mu.Unlock()
 	b.refreshStrictAdvertisement()
 	b.withdrawStrictReadinessOnExit(pp)
@@ -1601,6 +1568,20 @@ func (b *Broker) sendPolicyStateLocked(ctx context.Context, pp *proxyProcess, ki
 		return false
 	}
 	r := &b.nodePolicy
+	if kind == pushAvailability || kind == pushPolicy {
+		r.mu.Lock()
+		drains := r.manualLoadDrainsLocked(pp)
+		r.mu.Unlock()
+		for engine := range drains {
+			guard, cancel := context.WithTimeout(ctx, proxyCallTimeout)
+			err := engineDrainAck(guard, pp, engine, true)
+			cancel()
+			if err != nil {
+				slog.Warn("uncertain manual load drain not acknowledged", "engine", engine, "err", err)
+				return false
+			}
+		}
+	}
 	if kind == pushPolicy {
 		r.mu.Lock()
 		retry, bound := r.availabilityErr != "", r.activationBoundLocked()
@@ -1635,17 +1616,11 @@ func (b *Broker) sendPolicyStateLocked(ctx context.Context, pp *proxyProcess, ki
 			loaded[engine] = models
 		}
 		method, params = nodepolicy.MethodSetResidency, nodepolicy.SetResidencyParams{LoadedByEngine: loaded}
-	case kind == pushIntent:
-		intent := make(map[string]bool, len(r.intent))
-		for k, v := range r.intent {
-			intent[k] = v
-		}
-		method, params = nodepolicy.MethodSetEngineIntent, nodepolicy.SetEngineIntentParams{EnabledByEngine: intent}
 	case kind == pushIdentity:
 		method, params = nodepolicy.MethodSetModelIdentity, r.modelIdentityLocked()
 	case len(kind) > len(pushDrainPrefix) && kind[:len(pushDrainPrefix)] == pushDrainPrefix:
 		engine := kind[len(pushDrainPrefix):]
-		method, params = nodepolicy.MethodSetEngineDrain, nodepolicy.SetEngineDrainParams{Engine: engine, Drain: r.drains[engine]}
+		method, params = nodepolicy.MethodSetEngineDrain, nodepolicy.SetEngineDrainParams{Engine: engine, Drain: r.engineDrainsLocked(pp)[engine]}
 	default:
 		r.mu.Unlock()
 		return activationChanged
@@ -1882,6 +1857,11 @@ func (b *Broker) unloadModels(engine string, models []string, reason string) {
 			r := b.nodePolicyRuntime()
 			r.mu.Lock()
 			protected := b.protectedResidentLocked(engine, model)
+			if reason == "idle" {
+				ref := b.modelRef(engine, model)
+				base := r.idleBaselineLocked(ref)
+				protected = protected || r.managementBlockedLocked() || r.drains[engine] || modelActive(r.admission, ref) || r.current.Idle.UnloadAfterMinutes <= 0 || base.IsZero() || r.now().Sub(base) < time.Duration(r.current.Idle.UnloadAfterMinutes)*time.Minute
+			}
 			r.mu.Unlock()
 			if protected {
 				continue

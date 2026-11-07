@@ -188,11 +188,6 @@ func (b *Broker) runAcceptedAvailability(ctx context.Context, r *policyRuntime, 
 			b.publishNodeProjection()
 			b.pushAvailabilityAndActivate(saved)
 		}
-		// An install admitted before this pause must not start its engine
-		// afterwards; one submitted later is not affected.
-		b.engineConfigMu.Lock()
-		b.supersedeInstallStartsLocked("")
-		b.engineConfigMu.Unlock()
 	}
 
 	type outcome struct {
@@ -425,7 +420,6 @@ func (b *Broker) publishPhysicalPause(ctx context.Context, worker *rpcWorker, so
 // Every RPC uses the same worker, so replacement cannot combine two inventories
 // into a shutdown proof. The caller serializes lifecycle and transitions.
 func (b *Broker) pauseEnginesOn(ctx context.Context, worker *rpcWorker) error {
-	r := b.nodePolicyRuntime()
 	known := make(map[string]bool)
 	for _, engine := range b.runningSnapshot() {
 		known[engine] = true
@@ -433,11 +427,6 @@ func (b *Broker) pauseEnginesOn(ctx context.Context, worker *rpcWorker) error {
 	for engine := range b.loadedSnapshot() {
 		known[engine] = true
 	}
-	r.mu.Lock()
-	for engine := range r.intent {
-		known[engine] = true
-	}
-	r.mu.Unlock()
 	var failures []string
 	// running:false can also mean an unprobed or failed-reclaim orphan.
 	// Only explicit physical-stop evidence may satisfy a failed Sleep.
@@ -445,11 +434,6 @@ func (b *Broker) pauseEnginesOn(ctx context.Context, worker *rpcWorker) error {
 	var stops sync.WaitGroup
 	var proofMu sync.Mutex
 	requestSleep := func(engine string) {
-		// A lost response can still have stopped the engine. A local Resume
-		// must retry saved-On wake through the manager's normal guards.
-		r.mu.Lock()
-		r.pauseSlept[engine] = true
-		r.mu.Unlock()
 		stops.Add(1)
 		go func() {
 			defer stops.Done()
@@ -529,10 +513,8 @@ func (b *Broker) pauseEnginesOn(ctx context.Context, worker *rpcWorker) error {
 	return ctx.Err()
 }
 
-// resumeNode makes the node available again and starts the engines a pause
-// stopped. Their saved intent was never changed, so engine:wake (and, after a
-// launch that skipped restoration, engine:restore-enabled) starts exactly the
-// ones saved On. A paired node's resume is checked against the Halt/maintenance
+// resumeNode makes the node available again and restores installed engines.
+// A paired node's resume is checked against the Halt/maintenance
 // boundary again here, where it would take effect.
 func (b *Broker) resumeNode(ctx context.Context, gen uint64, origin nodepolicy.PauseOrigin) (nodepolicy.Availability, error) {
 	r := b.nodePolicyRuntime()
@@ -571,16 +553,8 @@ func (b *Broker) resumeNode(ctx context.Context, gen uint64, origin nodepolicy.P
 	r.pendingPauseMode = ""
 	r.localPauseRequested = false
 	r.cancelActive = false
-	slept := make([]string, 0, len(r.pauseSlept))
-	for engine := range r.pauseSlept {
-		slept = append(slept, engine)
-	}
-	sort.Strings(slept)
-	r.pauseSlept = map[string]bool{}
-	restore := r.restoreSkipped
-	r.restoreSkipped = false
 	// An explicit Resume supersedes a replacement's incomplete pause proof.
-	// Only the still-bound, live manager may become available for saved-On wake.
+	// Only the still-bound, live manager may become available for restoration.
 	b.workersMu.Lock()
 	if b.engineMgr != nil && b.engineMgrSource != nil && b.engineMgrSource == r.engineManagerSource {
 		select {
@@ -595,40 +569,31 @@ func (b *Broker) resumeNode(ctx context.Context, gen uint64, origin nodepolicy.P
 
 	b.pushAvailabilityAndActivate(persisted)
 	b.notifyAvailability()
-	slog.Info("node resumed", "waking", slept, "restore", restore)
-	go b.wakeAfterResume(slept, restore)
+	slog.Info("node resumed")
+	go b.wakeAfterResume()
 	if err != nil {
 		return nodepolicy.Available, &policySaveError{err: err, revision: policy.Revision}
 	}
 	return nodepolicy.Available, nil
 }
 
-func (b *Broker) wakeAfterResume(slept []string, restore bool) {
-	if restore {
-		if w := b.getEngineMgr(); w != nil {
-			if err := w.Notify(restoreEnabledEnginesMethod, nil); err != nil {
-				slog.Warn("failed to request enabled-engine restoration after resume", "err", err)
-			}
-		}
+func (b *Broker) wakeAfterResume() {
+	if reason := b.wakeRefusal(); reason != "" {
+		return
 	}
-	for _, engine := range slept {
-		if _, err := b.callEngine(context.Background(), engineWakeMethod, map[string]string{"engine": engine}); err != nil {
-			slog.Warn("could not start engine after resume", "engine", engine, "err", err)
+	if w := b.getEngineMgr(); w != nil {
+		if err := w.Notify(restoreInstalledEnginesMethod, nil); err != nil {
+			slog.Warn("failed to restore installed engines after resume", "err", err)
 		}
 	}
 }
 
-// skipRestoreWhilePaused reports whether engine restoration must be skipped
-// because the node is paused, and records that resuming restores them instead.
+// skipRestoreWhilePaused reports whether engine restoration must be skipped.
 func (b *Broker) skipRestoreWhilePaused() bool {
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	skip := r.managementBlockedLocked()
-	if skip {
-		r.restoreSkipped = true
-	}
-	return skip
+	return r.managementBlockedLocked()
 }
 
 // pauseEngineInventory requires explicit running readback for every reported

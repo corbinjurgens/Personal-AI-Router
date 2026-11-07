@@ -786,7 +786,7 @@ describe('load editor and target impact', () => {
         expect(container.textContent).toContain('finite adapter inherited baseline')
         expect(container.textContent).toContain('Saved native total allocation: Unknown')
         expect(container.textContent).toContain('Mapping unavailable')
-        expect(container.textContent).toContain('Observed engine: Off')
+        expect(container.textContent).toContain('Observed engine: Stopped')
         expect(container.textContent).toContain(
             'saving settings never loads a model'.replace('saving', 'Saving')
         )
@@ -912,7 +912,7 @@ describe('load editor and target impact', () => {
         expect(container.textContent).toContain('Affected models: Unknown')
         expect(container.textContent).toContain('Drain bound: Unknown')
         expect(container.textContent).toContain('Active request interruption: Unknown')
-        expect(container.textContent).toContain('Off behavior: Unknown')
+        expect(container.textContent).toContain('Stopped engine behavior: Unknown')
         expect(container.textContent).toContain('Companion file: mmproj')
         expect(container.textContent).toContain('9007199254740993 bytes')
         expect(container.textContent?.indexOf('Main model file')).toBeLessThan(
@@ -928,6 +928,6 @@ describe('load editor and target impact', () => {
         expect(container.textContent).toContain('Affected models: model, other')
         expect(container.textContent).toContain('Drain bound: 60 seconds')
         expect(container.textContent).toContain('Active requests can be interrupted')
-        expect(container.textContent).toContain('Off remains Off')
+        expect(container.textContent).toContain('An already-stopped engine stays stopped')
     })
 })

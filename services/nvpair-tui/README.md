@@ -211,13 +211,7 @@ The detail header reports the selected target's live availability and reported
 admission mark availability unavailable; another target's replies and pushes
 cannot refresh it. The local header also retains reported pause provenance.
 Engine rows continue to show actual installed, running and healthy state.
-A false entry in the current local `enabledByEngine` snapshot adds
-` (saved Off, local)` when `offByEngine` reports `local`, or
-` (saved Off, by peer)` when it reports `peer`. Without a valid reported origin,
-the label remains ` (saved Off)`. A stopped engine alone does not establish saved
-Off. These labels appear only on this machine's rows; there is no remote intent
-projection. Origin identifies a class relative to the engine-owning device,
-not a particular peer, and does not change lifecycle or permission decisions.
+All installed engines run while the node is available; there is no saved On/Off state. Startup and Resume start installed engines. PAIR releases idle model memory independently while keeping the engine process running. Manual loads share the node loaded-model cap with inference.
 
 A paused target refuses remote changes until resumed under its availability policy;
 status, permission and receipt reads remain available.

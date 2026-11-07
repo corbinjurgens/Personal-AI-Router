@@ -306,6 +306,14 @@ func (r *DispatchResidentResult) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// ResidentPurpose distinguishes manual loads from automatic residency within
+// the same operation lifecycle. The empty purpose is automatic residency.
+type ResidentPurpose string
+
+// ResidentPurposeManual uses the same load reservation without requiring
+// automatic resident qualification or a desired resident declaration.
+const ResidentPurposeManual ResidentPurpose = "manual"
+
 // PrepareResidentParams asks the current proxy to evaluate and reserve under
 // its admission mutex. TimeoutMs is a remaining budget, avoiding clock skew;
 // the receiver fixes a deadline once, and retries must never extend it.
@@ -317,6 +325,7 @@ func (r *DispatchResidentResult) UnmarshalJSON(data []byte) error {
 // exits on broker EOF; attaching a future broker to a surviving proxy would
 // require explicit cursor readback rather than guessing a new sequence.
 type PrepareResidentParams struct {
+	Purpose            ResidentPurpose     `json:"purpose,omitempty"`
 	PolicyRevision     string              `json:"policyRevision"`
 	ProxyRunID         string              `json:"proxyRunId"`
 	ManagerIncarnation string              `json:"managerIncarnation,omitempty"`
@@ -338,6 +347,9 @@ func (p PrepareResidentParams) Validate() error {
 // ReconcileResidentParams shares these field checks, but keeps operation IDs
 // opaque: only the proxy grants execution and enforces its ordered ID stream.
 func (p PrepareResidentParams) validateFields() error {
+	if p.Purpose != "" && p.Purpose != ResidentPurposeManual {
+		return errors.New("invalid resident purpose")
+	}
 	if err := validateRevision(p.PolicyRevision); err != nil {
 		return err
 	}
@@ -756,7 +768,7 @@ func (c ModelConfiguration) Validate() error {
 func (p *PrepareResidentParams) UnmarshalJSON(data []byte) error {
 	type plain PrepareResidentParams
 	var next plain
-	if err := decodeResident(data, &next, []string{"policyRevision", "proxyRunId", "engine", "model", "identity", "operationId", "timeoutMs"}, "managerIncarnation"); err != nil {
+	if err := decodeResident(data, &next, []string{"policyRevision", "proxyRunId", "engine", "model", "identity", "operationId", "timeoutMs"}, "managerIncarnation", "purpose"); err != nil {
 		return err
 	}
 	if err := PrepareResidentParams(next).Validate(); err != nil {
@@ -1025,8 +1037,6 @@ const (
 	MethodSetEngineDrain = "node/set-engine-drain"
 	// MethodSetResidency carries SetResidencyParams.
 	MethodSetResidency = "node/set-residency"
-	// MethodSetEngineIntent carries SetEngineIntentParams.
-	MethodSetEngineIntent = "node/set-engine-intent"
 	// MethodAdmissionSnapshot reads current admission counts, without notification caching.
 	MethodAdmissionSnapshot = "node/admission-snapshot"
 	// MethodSetModelIdentity carries SetModelIdentityParams: the identity
@@ -1063,8 +1073,8 @@ const (
 	// the result from the next MethodSetResidency.
 	NotifyAdmissionUnload = "admission/unload"
 	// NotifyAdmissionWake carries WakeRequest: a request arrived for a stopped
-	// engine. The broker starts it only if its saved intent is On and the node
-	// is not paused; the proxy learns the result from node/set-local-backend.
+	// engine. The broker starts it only while the node is available; the proxy
+	// learns the result from node/set-local-backend.
 	NotifyAdmissionWake = "admission/wake"
 	// NotifyStrictReadiness carries StrictAdmissionReadiness. The proxy sends
 	// it after acknowledging each MethodSetPolicy, naming the revision it
@@ -1205,12 +1215,6 @@ type SetResidencyParams struct {
 	LoadedByEngine map[string][]string `json:"loadedByEngine"`
 }
 
-// SetEngineIntentParams is each managed engine's saved On/Off intent, so the
-// proxy can reject a request for an engine saved Off without asking to wake it.
-type SetEngineIntentParams struct {
-	EnabledByEngine map[string]bool `json:"enabledByEngine"`
-}
-
 // SetModelIdentityParams is the whole identity of every engine the proxy may
 // admit strict work for. An engine missing from the map has no identity, which
 // withdraws its strict capacity.
@@ -1316,12 +1320,13 @@ func (i EngineIdentity) Validate() error {
 }
 
 type AdmissionState struct {
-	Active         int            `json:"active"`
-	ActiveByEngine map[string]int `json:"activeByEngine"`
-	Queued         int            `json:"queued"`
-	// LastActivityMs is the unix-ms time each engine last started or finished
-	// a request on this node.
-	LastActivityMs map[string]int64 `json:"lastActivityMs"`
+	Active         int                       `json:"active"`
+	ActiveByEngine map[string]int            `json:"activeByEngine"`
+	ActiveByModel  map[string]map[string]int `json:"activeByModel"`
+	Queued         int                       `json:"queued"`
+	// LastActivityMs is the unix-ms time each model last started or finished
+	// a request on this node, indexed by engine then normalized model.
+	LastActivityMs map[string]map[string]int64 `json:"lastActivityMs"`
 }
 
 type UnloadRequest struct {

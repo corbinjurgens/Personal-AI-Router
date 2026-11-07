@@ -36,36 +36,33 @@ func TestClientLifecycleControlsNeverReachManager(t *testing.T) {
 	}
 }
 
-func TestInstallStartRetainsOptionsThroughExecutorInstallPath(t *testing.T) {
+func TestInstallUsesOneExecutorInstallPath(t *testing.T) {
 	b, out := newPolicyBroker(t)
 	engine := attachFakeEngine(t, b)
-	params := map[string]any{"engine": "llamacpp", "start": true, "port": 19181, "bind": "127.0.0.1"}
+	params := map[string]string{"engine": "llamacpp"}
 	b.relayToEngineNow(clientRequest(1, "engine:install", params))
 	response := out.waitFrame(t, "install response", isResponse(1))
 	if response.Error != nil {
 		t.Fatalf("install response: %+v", response.Error)
 	}
 	calls := engine.snapshot()
-	if len(calls) != 2 {
-		t.Fatalf("install calls = %v, want preparation and executor install/start", calls)
+	if len(calls) != 1 {
+		t.Fatalf("install calls = %v, want one executor install", calls)
 	}
 	for i, call := range calls {
 		var request struct {
 			Engine string `json:"engine"`
-			Start  bool   `json:"start"`
-			Port   int    `json:"port"`
-			Bind   string `json:"bind"`
 		}
 		if err := json.Unmarshal(call.params, &request); err != nil {
 			t.Fatalf("decode install %d: %v", i, err)
 		}
-		if call.method != "engine:install" || request.Start != (i == 1) || request.Engine != "llamacpp" || request.Port != 19181 || request.Bind != "127.0.0.1" {
+		if call.method != "engine:install" || request.Engine != "llamacpp" {
 			t.Fatalf("install %d = %s %+v", i, call.method, request)
 		}
 	}
 }
 
-func TestPauseSupersedesPreparedInstallStart(t *testing.T) {
+func TestPauseDuringInstallHasNoBrokerStartContinuation(t *testing.T) {
 	b, out := newPolicyBroker(t)
 	engine := attachFakeEngine(t, b)
 	engine.mu.Lock()
@@ -80,7 +77,7 @@ func TestPauseSupersedesPreparedInstallStart(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		b.relayToEngineNow(clientRequest(1, "engine:install", map[string]any{"engine": "llamacpp", "start": true}))
+		b.relayToEngineNow(clientRequest(1, "engine:install", map[string]string{"engine": "llamacpp"}))
 	}()
 	t.Cleanup(func() { engine.releaseHeld(); requireGateOpens(t, done, "install cleanup") })
 	engine.waitFor("install preparation", func(calls []policyCall) bool { return len(calls) == 1 })
@@ -89,9 +86,9 @@ func TestPauseSupersedesPreparedInstallStart(t *testing.T) {
 	}
 	engine.releaseHeld()
 	requireGateOpens(t, done, "superseded install")
-	response := out.waitFrame(t, "superseded install refusal", isResponse(1))
-	if response.Error == nil {
-		t.Fatalf("install continued after pause: %+v", response)
+	response := out.waitFrame(t, "manager install completion", isResponse(1))
+	if response.Error != nil {
+		t.Fatalf("manager completion was replaced: %+v", response)
 	}
 	if calls := engine.methods("engine:install"); len(calls) != 1 {
 		t.Fatalf("install continued after pause: %v", calls)

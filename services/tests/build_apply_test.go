@@ -107,7 +107,7 @@ func TestBuildApplyProcess(t *testing.T) {
 		for _, path := range []string{
 			f.policyPath(),
 			filepath.Join(f.dir, "engine-settings-operations.json"),
-			filepath.Join(jointAppDir(f.configDir), "engine-state.json"),
+			filepath.Join(jointAppDir(f.configDir), "engine-bin", "engine-state.json"),
 		} {
 			data, err := os.ReadFile(path)
 			if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -121,7 +121,7 @@ func TestBuildApplyProcess(t *testing.T) {
 	assertSaved := func(t *testing.T) {
 		t.Helper()
 		if !reflect.DeepEqual(savedBefore, captureSaved(t)) {
-			t.Fatal("refusal changed private saved policy, settings or intent")
+			t.Fatal("refusal changed private saved policy, settings or process evidence")
 		}
 	}
 	status := func(id string) buildapply.Result[buildapply.BuildApplyStatus] {

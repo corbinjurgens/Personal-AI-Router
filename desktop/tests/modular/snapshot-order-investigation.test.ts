@@ -184,8 +184,6 @@ describe('snapshot ordering', () => {
                 nodes: { onRemove: () => () => {} },
                 engines: {
                     getInitialState: () => pending.promise,
-                    getIntent: async () => null,
-                    onIntentChanged: () => () => {},
                     onDescriptorsChanged: () => () => {},
                     onStateChanged: (callback: typeof push) => {
                         push = callback
@@ -217,8 +215,6 @@ describe('snapshot ordering', () => {
                 },
                 engines: {
                     getInitialState: () => pending.promise,
-                    getIntent: async () => null,
-                    onIntentChanged: () => () => {},
                     onDescriptorsChanged: () => () => {},
                     onStateChanged: (callback: typeof push) => {
                         push = callback
@@ -256,8 +252,6 @@ describe('snapshot ordering', () => {
                 nodes: { onRemove: () => () => {} },
                 engines: {
                     getInitialState: () => pending.promise,
-                    getIntent: async () => null,
-                    onIntentChanged: () => () => {},
                     onDescriptorsChanged: (callback: typeof push) => {
                         push = callback
                         return () => {}
@@ -277,15 +271,12 @@ describe('snapshot ordering', () => {
         const pending = deferred<EngineInitialState>()
         const descriptorsOff = vi.fn<() => void>()
         const statesOff = vi.fn<() => void>()
-        const intentOff = vi.fn<() => void>()
         const nodesOff = vi.fn<() => void>()
         vi.stubGlobal('window', {
             pairApi: {
                 nodes: { onRemove: () => nodesOff },
                 engines: {
                     getInitialState: () => pending.promise,
-                    getIntent: async () => null,
-                    onIntentChanged: () => intentOff,
                     onDescriptorsChanged: () => descriptorsOff,
                     onStateChanged: () => statesOff
                 }
@@ -293,7 +284,7 @@ describe('snapshot ordering', () => {
         })
         const obsolete = useEngineStatusStore.getState().initialize()
         useEngineStatusStore.getState().cleanup()
-        for (const unsubscribe of [descriptorsOff, statesOff, intentOff, nodesOff]) {
+        for (const unsubscribe of [descriptorsOff, statesOff, nodesOff]) {
             expect(unsubscribe).toHaveBeenCalledOnce()
         }
         await useEngineStatusStore.getState().initialize({

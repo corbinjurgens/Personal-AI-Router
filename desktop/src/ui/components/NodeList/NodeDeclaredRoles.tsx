@@ -19,6 +19,9 @@ import { ModelIdentityTags } from '@/ui/components/ModelIdentity/ModelIdentityTa
 import { useOverviewUiStore } from '@/ui/stores/overview-ui.store'
 import { useEngineModelsStore } from '@/ui/stores/engine-models.store'
 import { ProfileIcon } from '@/ui/components/icons'
+import { useEngineStatusStore } from '@/ui/stores/engine-status.store'
+import { useErrorsStore } from '@/ui/stores/errors.store'
+import { engineManagerName } from '@/shared/utils/engines'
 
 function savedLoadSummary(load?: ModelLoad): string {
     if (!load) return 'Saved load unavailable'
@@ -62,6 +65,9 @@ export default function NodeDeclaredRoles({ nodeId }: { nodeId: string }) {
     const selfId = useConnectionStore(state => state.selfId)
     const permissionContext = useClusterInvitationsStore(state => state.remoteManagementContext)
     const management = useNodeConfigurationStore(state => state.management.get(nodeId))
+    const availability = useNodeConfigurationStore(state => state.availability.get(nodeId)?.value)
+    const statuses = useEngineStatusStore(state => state.statusByNode.get(nodeId))
+    const errors = useErrorsStore(state => state.errors)
     const authority = JSON.stringify([
         connected,
         selfId,
@@ -152,6 +158,30 @@ export default function NodeDeclaredRoles({ nodeId }: { nodeId: string }) {
                 const label = showSummaries ? `${tier}: ${name} (${key})` : `${tier}: ${key}`
                 const engine = engines.find(engine => engine === profile?.engine)
                 const entry = engine ? entries[engineSettingsKey({ nodeId, engine })] : undefined
+                const status =
+                    statuses &&
+                    Array.from(statuses.values()).find(
+                        status => engineManagerName(status.engineType) === profile?.engine
+                    )
+                const reportedAvailability =
+                    availability ?? (policy.pausedBy ? 'paused' : undefined)
+                const problem =
+                    reportedAvailability && reportedAvailability !== 'available'
+                        ? reportedAvailability
+                        : status?.processStatus === 'not-installed'
+                          ? 'engine not installed'
+                          : profile &&
+                              errors.some(
+                                  error =>
+                                      error.nodeId === nodeId &&
+                                      ((status?.engineType !== undefined &&
+                                          error.engineType === status.engineType) ||
+                                          error.engineType === profile.engine) &&
+                                      error.severity !== 'info'
+                              )
+                            ? 'engine error'
+                            : undefined
+                const warning = problem ? `${tier}: ${key} ${problem}` : undefined
                 const load =
                     canRead && ready === readIdentity && !entry?.unavailable
                         ? entry?.snapshot?.settings.modelLoads?.find(
@@ -162,12 +192,17 @@ export default function NodeDeclaredRoles({ nodeId }: { nodeId: string }) {
                     <Button
                         key={`${tier}:${key}`}
                         type="button"
-                        aria-label={label}
-                        title={label}
+                        aria-label={warning ?? label}
+                        title={warning ?? label}
                         className="min-w-0 max-w-full whitespace-normal break-all"
                         onClick={() => focusNodeSettings(nodeId, key)}
                     >
                         <Text kind="body/regular/sm">{tier}</Text>
+                        {warning && (
+                            <Tag color="yellow" density="compact" readOnly>
+                                {warning}
+                            </Tag>
+                        )}
                         {showSummaries && (
                             <Text kind="body/regular/sm">
                                 <ProfileIcon name={profile?.icon} /> {name}

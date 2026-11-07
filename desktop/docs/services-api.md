@@ -59,7 +59,6 @@
 - ⚠️ nvpair-proxy → node/selected
 - ⚠️ nvpair-proxy → node/set-availability
 - ⚠️ nvpair-proxy → node/set-engine-drain
-- ⚠️ nvpair-proxy → node/set-engine-intent
 - ⚠️ nvpair-proxy → node/set-local-backend
 - ⚠️ nvpair-proxy → node/set-model-identity
 - ⚠️ nvpair-proxy → node/set-policy
@@ -121,7 +120,6 @@
 |---|---|---|
 | `discovery:subscribe` | notification (we consume) | ✅ yes |
 | `engine:install-progress` | notification (we consume) | ✅ yes |
-| `engine:intent-changed` | notification (we consume) | ✅ yes |
 | `engine:model-identity` | notification (we consume) | ➖ ignored |
 | `engine:models-changed` | notification (we consume) | ✅ yes |
 | `engine:pull-progress` | notification (we consume) | ✅ yes |
@@ -151,7 +149,6 @@
 | `engine:get-launch` | request (we call) | ⚠️ not called |
 | `engine:inspect-model` | request (we call) | ✅ yes |
 | `engine:install` | request (we call) | ✅ yes |
-| `engine:intent` | request (we call) | ✅ yes |
 | `engine:load-model` | request (we call) | ✅ yes |
 | `engine:logs` | request (we call) | ⚠️ not called |
 | `engine:model-copy-capabilities` | request (we call) | ✅ yes |
@@ -314,7 +311,6 @@
 | `node/selected` | request (we call) | ⚠️ not called |
 | `node/set-availability` | request (we call) | ⚠️ not called |
 | `node/set-engine-drain` | request (we call) | ⚠️ not called |
-| `node/set-engine-intent` | request (we call) | ⚠️ not called |
 | `node/set-local-backend` | request (we call) | ⚠️ not called |
 | `node/set-model-identity` | request (we call) | ⚠️ not called |
 | `node/set-policy` | request (we call) | ⚠️ not called |
@@ -347,7 +343,6 @@
 | `cluster:remote-management-changed` | request (we call) | ✅ yes |
 | `discovery:nodes-changed` | request (we call) | ✅ yes |
 | `engine:install-progress` | request (we call) | ✅ yes |
-| `engine:intent-changed` | request (we call) | ✅ yes |
 | `engine:models-changed` | request (we call) | ✅ yes |
 | `engine:pull-progress` | request (we call) | ✅ yes |
 | `engine:ready` | request (we call) | ✅ yes |
@@ -384,7 +379,7 @@
 | `discovery:peer-services` | notification (we consume) | ➖ ignored |
 | `engine:model-mutation-reply` | notification (we consume) | ➖ ignored |
 | `engine:node-projection` | notification (we consume) | ➖ ignored |
-| `engine:restore-enabled` | notification (we consume) | ➖ ignored |
+| `engine:restore-installed` | notification (we consume) | ➖ ignored |
 | `engine:settings-changed` | notification (we consume) | ✅ yes |
 | `engine:settings-projection` | notification (we consume) | ➖ ignored |
 | `errors:clear` | notification (we consume) | ✅ yes |
@@ -418,7 +413,7 @@
 | `engine:get-settings` | request (we call) | ✅ yes |
 | `engine:inspect-model` | request (we call) | ✅ yes |
 | `engine:install` | request (we call) | ✅ yes |
-| `engine:intent-changed` | request (we call) | ✅ yes |
+| `engine:load-model` | request (we call) | ✅ yes |
 | `engine:models-changed` | request (we call) | ✅ yes |
 | `engine:preview-settings` | request (we call) | ✅ yes |
 | `engine:set-port` | request (we call) | ⚠️ not called |
