@@ -25,7 +25,9 @@ describe('remote engine status', () => {
                 ip: '192.0.2.190'
             }
         })
-        expect(state.isRemoteEngineRunning(remoteNodeId, 'llama-cpp')).toBe(true)
+        expect(
+            state.getEngineInitialState().statuses.find(status => status.nodeId === remoteNodeId)
+        ).toMatchObject({ processStatus: 'running' })
 
         state.applyRemoteEngineFacts(remoteNodeId, {
             engines: [
@@ -39,7 +41,6 @@ describe('remote engine status', () => {
             ]
         })
 
-        expect(state.isRemoteEngineRunning(remoteNodeId, 'llama-cpp')).toBe(false)
         expect(
             state
                 .getEngineInitialState()

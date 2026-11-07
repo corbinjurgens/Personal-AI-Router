@@ -199,7 +199,7 @@ func TestProfileConversionPublishesWholeEngineAcrossProcesses(t *testing.T) {
 	if !bytes.Equal(readLiveDurableFile(t, f.preset), []byte(profileConversionPreset)) {
 		t.Fatal("apply rewrote the operator's external source preset")
 	}
-	f.rpcOK(t, "engine:start", map[string]string{"engine": "llamacpp"})
+	f.rpcOK(t, "engine:install", map[string]any{"engine": "llamacpp", "start": true})
 	f.engineIdentity(t, 1)
 	sections := modelSettingsPreset(t, readLiveDurableFile(t, f.capture))
 	if len(sections) != 2 || sections["medium-model"]["ctx-size"] != "16384" || sections["medium-model"]["parallel"] != "2" || sections["medium-model"]["fit"] != "off" || sections["weak-model"]["ctx-size"] != "4096" || sections["weak-model"]["parallel"] != "1" || sections["weak-model"]["fit"] != "on" || sections["weak-model"]["fit-target"] != "1024" || sections["weak-model"]["fit-ctx"] != "2048" || sections["weak-model"]["spec-draft-n-max"] != "4" {

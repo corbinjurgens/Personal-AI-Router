@@ -78,8 +78,8 @@ func (s *desiredStateStore) setProcessStop(engine string, evidence processStopEv
 	return s.save(state)
 }
 
-// intentOrigin says who saved an engine's intent: this node's own clients
-// (stdio engine:start / engine:stop) or a paired node over the ec surface.
+// intentOrigin says who saved an engine's intent: an internal local Executor
+// operation or a local/peer install-with-start.
 type intentOrigin string
 
 const (

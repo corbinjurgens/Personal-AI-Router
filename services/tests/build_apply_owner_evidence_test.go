@@ -1363,7 +1363,7 @@ func TestBuildApplyOwnerEvidenceProcess(t *testing.T) {
 		}
 	})
 	t.Run("owned fake has a retained process lifetime", func(t *testing.T) {
-		c.mustCall(t, "810", "engine:start", mustMarshal(t, map[string]string{"engine": "owner-owned"}))
+		c.mustCall(t, "810", "engine:install", mustMarshal(t, map[string]any{"engine": "owner-owned", "start": true}))
 		e := *f.readWhileEngineListening(t, "owner-owned").ManagerEvidence.Value
 		entry, authority := ownerEvidenceEntry(t, e, "owner-owned")
 		if !entry.Running.Known || entry.Running.Value == nil || !*entry.Running.Value ||
@@ -1382,16 +1382,15 @@ func TestBuildApplyOwnerEvidenceProcess(t *testing.T) {
 		if !found {
 			t.Fatal("owner's retained process is not the fixed synthetic image")
 		}
-		c.mustCall(t, "811", "engine:stop", mustMarshal(t, map[string]string{"engine": "owner-owned"}))
 	})
 	t.Run("external fake adoption does not grant process stop authority", func(t *testing.T) {
 		cmd := exec.Command(f.fake)
 		cmd.Env = append(slices.Clone(f.env), "NVPAIR_OWNER_ENGINE_PORT="+strconv.Itoa(f.enginePorts["owner-external"]))
 		child := f.launchChild(cmd)
-		// A real start performs the deliberate adoption. Evidence reads never
-		// call Status, Detect or a native HTTP endpoint to fill missing facts.
+		// Installation's existing start option performs deliberate adoption.
+		// Evidence reads never call Status, Detect or native HTTP to fill facts.
 		waitTCP(t, fmt.Sprintf("127.0.0.1:%d", f.enginePorts["owner-external"]), serviceCallTimeout)
-		c.mustCall(t, "812", "engine:start", mustMarshal(t, map[string]string{"engine": "owner-external"}))
+		c.mustCall(t, "812", "engine:install", mustMarshal(t, map[string]any{"engine": "owner-external", "start": true}))
 		entry, authority := ownerEvidenceEntry(t, *f.readWhileEngineListening(t, "owner-external").ManagerEvidence.Value, "owner-external")
 		if !entry.Running.Known || entry.Running.Value == nil || !*entry.Running.Value ||
 			!authority.Adopted.Known || authority.Adopted.Value == nil || !*authority.Adopted.Value ||
@@ -1407,9 +1406,9 @@ func TestBuildApplyOwnerEvidenceProcess(t *testing.T) {
 		if external.PID == 0 {
 			t.Fatal("external fake lacks its recorded fixed-image identity")
 		}
-		refused, err := c.call("813", "engine:stop", mustMarshal(t, map[string]string{"engine": "owner-external"}), serviceCallTimeout)
+		refused, err := c.call("813", "node:set-availability", mustMarshal(t, map[string]string{"state": "paused", "pauseMode": "immediate"}), serviceCallTimeout)
 		if err != nil || refused.Error == nil {
-			t.Fatalf("external stop did not refuse: reply=%+v error=%v", refused, err)
+			t.Fatalf("Pause did not report the external engine's missing stop authority: reply=%+v error=%v", refused, err)
 		}
 		current, err := serviceProcessIdentityAt(t.Context(), external.PID)
 		if err != nil || current != external {
@@ -1491,26 +1490,29 @@ func TestBuildApplyOwnerEvidenceProcess(t *testing.T) {
 			t.Fatal("missing preview unexpectedly admitted a build transaction")
 		}
 		afterBroker, afterManager := f.stats(t, f.brokerURL), f.stats(t, f.managerURL)
-		for _, method := range []string{"shutdown", "engine:prepare-shutdown", "engine:stop", "build:apply-prepare", "build:apply-finish"} {
+		for _, method := range []string{"shutdown", "engine:prepare-shutdown", "engine:sleep", "build:apply-prepare", "build:apply-finish"} {
 			if beforeBroker.Requests[method] != afterBroker.Requests[method] || beforeManager.Requests[method] != afterManager.Requests[method] {
 				t.Fatalf("refused operation sent %s", method)
 			}
 		}
 		f.assertNoApplyEffects(t)
 	})
-	t.Run("manager restart replaces native incarnation and withdraws prior running facts", func(t *testing.T) {
+	t.Run("manager restart replaces native incarnation and withdraws prior running authority", func(t *testing.T) {
 		previous := *f.impact(t).ManagerEvidence.Value
 		next := *f.replaceManager(t, nil).ManagerEvidence.Value
 		if next.ManagerIncarnation == previous.ManagerIncarnation || next.CaptureToken == previous.CaptureToken {
 			t.Fatal("replacement manager reused predecessor authority")
 		}
 		entry, authority := ownerEvidenceEntry(t, next, "owner-never")
-		if entry.Running.Known || entry.TerminationVerified.Known || authority.Scoped.Known {
-			t.Fatal("replacement fabricated predecessor stop knowledge")
+		// The broker now recovers a paused node through its own inventory and
+		// Sleep calls. Those fresh observations may establish stopped facts;
+		// they must never resurrect a predecessor's running process authority.
+		if entry.Running.Known && (entry.Running.Value == nil || *entry.Running.Value) || authority.ProcessLifetime.Known {
+			t.Fatal("paused replacement claimed a running never-started engine")
 		}
 		owned, stop := ownerEvidenceEntry(t, next, "owner-owned")
-		if owned.Running.Known || owned.TerminationVerified.Known || stop.Scoped.Known || stop.ProcessLifetime.Known {
-			t.Fatal("replacement retained predecessor owned-process or stopped authority")
+		if owned.Running.Known && (owned.Running.Value == nil || *owned.Running.Value) || stop.ProcessLifetime.Known {
+			t.Fatal("paused replacement retained predecessor running process authority")
 		}
 		f.assertNoApplyEffects(t)
 	})

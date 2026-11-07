@@ -610,8 +610,6 @@ func rmExpectedClasses() map[string]controlClass {
 		controlLoadPath:                      controlMutation,
 		controlUnloadPath:                    controlMutation,
 		controlDeletePath:                    controlMutation,
-		controlStartPath:                     controlMutation,
-		controlStopPath:                      controlMutation,
 		settingsPath + "get":                 controlRead,
 		settingsPath + "inspect":             controlRead,
 		settingsPath + "preview":             controlRead,

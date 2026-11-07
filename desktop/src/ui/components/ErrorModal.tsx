@@ -109,8 +109,6 @@ function buildRetry(error: ServiceError): (() => void) | null {
             return () => engines.install(engineType, nodeId)
         case 'uninstall':
             return () => engines.uninstall(engineType, nodeId)
-        case 'start':
-            return () => engines.toggle(engineType, nodeId)
         case 'pull':
             return modelName ? () => engines.pullModel(engineType, nodeId, modelName) : null
         default:

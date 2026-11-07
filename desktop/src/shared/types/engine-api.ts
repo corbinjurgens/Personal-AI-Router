@@ -65,7 +65,6 @@ export interface EngineHubSearchResponse {
 
 /** Engine command discriminator. */
 export type EngineCommandType =
-    | 'toggle'
     | 'install'
     | 'installAll'
     | 'uninstall'

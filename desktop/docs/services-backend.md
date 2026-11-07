@@ -274,7 +274,7 @@ one centralized pending-action layer so controls respond immediately while
 waiting for authoritative state. Pending state clears on matching engine state,
 progress, or error pushes.
 
-Local engine operations include install, start, stop, uninstall, update, port
+Local engine operations include install, uninstall, update, port
 changes, and model actions. Remote cluster operations use the engine manager's
 remote control surface where supported.
 
@@ -292,8 +292,9 @@ and service/broker/manager restarts invalidate it to null. Local read generation
 and broker session fences prevent late reads from replacing newer state.
 
 A profile names its engine in node policy. Concrete model requests still route
-through their entry engine. The existing engine start/stop APIs, saved intent,
-on-demand wake and settings operations retain their owners and admission rules.
+through their entry engine. Saved intent, private on-demand wake and settings
+operations retain their owners and admission rules. Users and peers have no
+engine start, stop, restart or On/Off control; wake and sleep are broker-private.
 
 The node projection the broker sends engine-manager
 carries `managementBlocked`; the desktop does not read it. Model configuration
@@ -325,12 +326,12 @@ engine-option catalog. Only managed networking and CORS are semantically
 validated. Managed CORS origin-list and boolean-control changes must originate on the owning node; other
 environment assignments can also be changed by a pinned peer.
 
-`engine:stop` (and its cluster `ec` equivalent) reclaims an orphan a prior run
-left on the engine's own managed port, terminating it only when that PID is
-running the binary NVPAIR manages. A genuinely foreign listener on a different
-port is declined with an actionable error, but the user's OFF intent is still
-persisted. Personal AI Router therefore treats the saved desired state as authoritative and
-surfaces a stop error as guidance, not as proof the OFF choice was lost.
+Engine start, stop and restart RPCs and peer start/stop routes are removed.
+Install retains its `start` option, and settings application can restart an
+engine internally. First-open desktop startup does not start installed engines.
+Saved intent, restoration and idle semantics remain until phase 15; this does
+not mean every installed engine runs. Phase 11 must not be installed without
+phase 15.
 
 Stopping a managed engine is bounded. On Unix, engine-manager sends SIGTERM to
 the owned process group, waits the manifest's `stop.grace_s` (five seconds by

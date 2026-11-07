@@ -700,7 +700,7 @@ func jointListener(t *testing.T) net.Listener {
 		t.Fatal(err)
 	}
 	port := listener.Addr().(*net.TCPAddr).Port
-	if port == 8080 || port == 11434 || port == 1234 || port >= 14318 && port <= 14323 {
+	if err := validateFixturePort(port); err != nil {
 		if err := listener.Close(); err != nil {
 			t.Error(err)
 		}

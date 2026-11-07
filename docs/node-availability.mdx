@@ -17,7 +17,7 @@ rules among the other trust boundaries.
 
 | | What it is | Who can set it | What it stops |
 | --- | --- | --- | --- |
-| Saved Off | An engine's ordinary On/Off switch. It records intent. | The local device, or a paired device that has been granted management | Nothing on its own. A granted peer can still start or load into the engine. |
+| Saved Off | Retained engine intent used by restore and idle policy; there is no On/Off control | Internal lifecycle operations, including uninstall | Restoration and private wake; it does not prohibit a granted peer from loading a model into a running engine |
 | Pause | A node-wide state | A client on the node, or a paired device that has been granted management | Work on this node and peer management other than permitted availability changes |
 
 Saved Off records intent; Pause fences activation and peer management.
@@ -74,11 +74,11 @@ request wins, so a Resume never waits out a pause's drain.
 - Every read: status, settings and policy reads, model files, event streams and
   the node's inventory. Paired devices can still see the node and its models;
   Pause does not remove catalogue models or declared role aliases.
-- Local configuration: settings, grants, stop and unload, and
+- Local configuration: settings, grants and unload, and
   manual nodes.
 - Management that this node sends to other nodes.
 
-A local start or model load is refused until the node is resumed. Settings Apply
+A model load is refused until the node is resumed. Settings Apply
 may finish writing configuration while paused, but it does not start a stopped
 engine.
 
@@ -134,7 +134,7 @@ with `-32011` and the message:
 This node is paused. Resume it on this node before managing it remotely.
 ```
 
-This includes start, stop, load, unload, delete, pull, settings apply,
+This includes load, unload, delete, pull, settings apply,
 policy set and availability set. It includes the pause initiator's Resume
 and repeated Pause, and a settings change or receipt retry that would change
 nothing. A refused request saves no revision or receipt and supersedes no
@@ -146,7 +146,7 @@ previews and gets, event streams and model files stay open. A
 peer can therefore still see why a node will not accept its changes.
 
 Pause also acts on work that was accepted just before it. When the node learns it
-is blocked, it cancels accepted starts and model loads from paired devices, and
+is blocked, it cancels accepted model loads from paired devices, and
 any pending activation or crash relaunch. If the node has not yet been told
 whether it is paused (shortly after an engine manager starts), incoming
 management requests receive HTTP 503 until it is; retry shortly.
@@ -156,34 +156,31 @@ management requests receive HTTP 503 until it is; retry shortly.
 | Code | Meaning | HTTP body `code` |
 | --- | --- | --- |
 | `-32010` | Revision conflict | `policy_conflict` |
-| `-32011` | Local veto: the node is paused, or the node's own Stop cancelled a peer operation | `local_veto` |
+| `-32011` | Local veto, including a paused node or locally cancelled peer operation | `local_veto` |
 | `-32012` | The target has not granted this device management | `remote_management_denied` |
 
 When more than one applies, the permission check comes first, then the pause.
-A local Stop that cancels an accepted peer operation also reports
-`-32011`, with this message:
-`<engine> was turned off on the node itself; start it there`. It does not refuse
-later operations.
 
 ## Saved Off no longer blocks a granted peer
 
-A granted peer may start an engine that is saved Off or load a model into a
-running engine, whatever the Off origin: local, peer,
+A granted peer may load a model into a running engine that is saved Off,
+whatever the Off origin: local, peer,
 legacy, or no recorded intent. Saved Off is ordinary intent, not a prohibition.
 Pause still refuses activation.
 
-Four limits remain:
+These limits remain:
 
 - An explicit model load never starts a stopped engine. A load into an engine
   that is not running fails with its real error.
 - Restoration after a restart, wake, and automatic model residency still require
   the engine to be saved On. Residency reports `engine-off` for a saved-Off
   engine and does not start it.
-- A local stop or uninstall records Off with `local` origin. A peer stop records
-  `peer` unless the engine was already Off, in which case the earlier origin is
-  kept. Starting clears the origin.
-- A local Stop that happens while a peer's start or load is in progress cancels
-  that operation with `-32011`. It does not refuse the next one.
+- Uninstall records Off with `local` origin. Internal starts clear the origin.
+
+Users and peers cannot start, stop or restart engines, and private wake/sleep
+methods are not exposed as controls. Saved intent, restore and idle semantics
+remain until phase 15. Phase 11 must not be installed without phase 15; it does
+not yet guarantee that every installed engine runs while available.
 
 ## How peers learn a node is paused
 
@@ -231,7 +228,7 @@ destination:
 
 - [Architecture](architecture.mdx) for the remote-management grant and the
   trust boundaries.
-- [Managing engines](engine-lifecycle.mdx) for install, start and stop.
+- [Managing engines](engine-lifecycle.mdx) for installation and engine state.
 - [Local qualification](local-qualification.mdx) for how pause fences
   automatic model residency, with the `paused` reason.
 - Component contracts: the broker's availability and pause-fence sections in

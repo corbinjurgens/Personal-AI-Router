@@ -40,15 +40,13 @@ type engineParam struct {
 	Port   int    `json:"port,omitempty"`
 }
 
-// opParam is the lifecycle-op input. Port (start) and Start (install) are
-// optional, per-call overrides; no manifest mutation, no persistence.
+// opParam is the install/uninstall input. Start and its Port/Bind overrides
+// apply only to install; they do not mutate the manifest.
 type opParam struct {
 	Engine string `json:"engine"`
 	Port   int    `json:"port,omitempty"`
 	Bind   string `json:"bind,omitempty"`
 	Start  bool   `json:"start,omitempty"`
-	// VerifyStop requests internal cleanup evidence on an ordinary unscoped stop.
-	VerifyStop bool `json:"verifyStop,omitempty"`
 }
 
 type actionParam struct {
@@ -67,7 +65,7 @@ type setPortParam struct {
 
 // Manager is the engine-manager's JSON-RPC front end. It dispatches the
 // engine:* surface to the Executor. Long-running operations (install,
-// start, stop, restart, action) run in their own goroutine so the read
+// uninstall, action) run in their own goroutine so the read
 // loop never blocks; the codec serializes the concurrent responses.
 type Manager struct {
 	copyMu       sync.Mutex
@@ -361,7 +359,7 @@ func (m *Manager) handleMessage(ctx context.Context, msg *Message) {
 	case "engine:catalog":
 		go m.runCatalog(ctx, msg)
 
-	case "engine:install", "engine:uninstall", "engine:start", "engine:stop", "engine:restart":
+	case "engine:install", "engine:uninstall":
 		go m.runOp(ctx, msg)
 
 	case "engine:set-port":
@@ -387,8 +385,7 @@ func (m *Manager) handleMessage(ctx context.Context, msg *Message) {
 		go m.runModelOperation(ctx, msg)
 
 	case "engine:remote-get-installed", "engine:remote-install", "engine:remote-pull-model",
-		"engine:remote-load-model", "engine:remote-unload-model", "engine:remote-delete-model",
-		"engine:remote-start", "engine:remote-stop":
+		"engine:remote-load-model", "engine:remote-unload-model", "engine:remote-delete-model":
 		go m.runRemote(ctx, msg)
 
 	case "engine:remote-copy-model":
@@ -429,9 +426,6 @@ func (m *Manager) runOp(ctx context.Context, msg *Message) {
 		m.codec.RespondError(msg.ID, -32602, "bind must be a valid IP address")
 		return
 	}
-	start := func() error {
-		return m.exec.StartWith(ctx, p.Engine, startOpts{Port: p.Port, Bind: p.Bind})
-	}
 	var err error
 	switch msg.Method {
 	case "engine:install":
@@ -442,20 +436,9 @@ func (m *Manager) runOp(ctx context.Context, msg *Message) {
 		}
 	case "engine:uninstall":
 		err = m.exec.Uninstall(ctx, p.Engine)
-	case "engine:start":
-		err = start()
-	case "engine:stop":
-		err = m.exec.Stop(p.Engine)
-	case "engine:restart":
-		err = m.exec.Restart(ctx, p.Engine)
 	}
 	if err != nil {
 		m.respondOrErr(msg, nil, err)
-		return
-	}
-	if msg.Method == "engine:stop" && p.VerifyStop {
-		observed, err := m.exec.verifyStopped(p.Engine)
-		m.respondOrErr(msg, observed, err)
 		return
 	}
 	st, err := m.exec.Status(p.Engine)

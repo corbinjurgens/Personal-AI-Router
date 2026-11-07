@@ -63,8 +63,6 @@ export interface IEngineApi {
     /** Fetch initial engine state: statuses, models, progress, and update availability. */
     getInitialState(): Promise<EngineInitialState>
 
-    /** Start or stop an engine process on a node. */
-    toggle(engineType: EngineType, nodeId: string): void
     /** Install an engine on a node. */
     install(engineType: EngineType, nodeId: string): void
     /** Uninstall an engine from a node without removing downloaded models. */
@@ -138,8 +136,6 @@ export function createEngineApi(transport: ServiceTransport): IEngineApi {
         cancelModelCopy: opId => transport.invoke('engine:cancel-model-copy', { opId }),
         activeModelCopies: () => transport.invoke('engine:active-model-copies'),
 
-        toggle: (engineType, nodeId) =>
-            fireCommand(transport, { command: 'toggle', engineType, nodeId }),
         install: (engineType, nodeId) =>
             fireCommand(transport, { command: 'install', engineType, nodeId }),
         uninstall: (engineType, nodeId) =>

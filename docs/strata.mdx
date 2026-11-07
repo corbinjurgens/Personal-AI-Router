@@ -248,8 +248,8 @@ of the credential path are listed in the fixture and checked to still exist.
    fronts the engine. A manifest it cannot parse is logged and skipped rather
    than stopping startup.
 5. Check the engine through engine-manager: `engine:descriptors` should list
-   `strata` as available with protocol `openai-chat`, `engine:start` should
-   return once `/health` reports the Strata service, and `engine:models`
+   `strata` as available with protocol `openai-chat`. When internal lifecycle
+   policy starts it, `/health` must report the Strata service. `engine:models`
    should list the configured model under `modelsByEngine` but not under
    `loadedByEngine` until you load it with `engine:load-model`.
 6. Find the facade port in the broker log line `fronting descriptor engine` or

@@ -67,7 +67,7 @@ func TestE2EOverStdio(t *testing.T) {
 		t.Fatalf("get-installed did not list the injected engine: %s", r)
 	}
 
-	send(t, stdin, 2, "engine:start", map[string]any{"engine": "fake"})
+	send(t, stdin, 2, "engine:install", map[string]any{"engine": "fake", "start": true})
 	if r := waitResult(t, frames, "2", 20*time.Second); !strings.Contains(string(r), `"running":true`) {
 		t.Fatalf("start did not report running: %s", r)
 	}
@@ -77,7 +77,7 @@ func TestE2EOverStdio(t *testing.T) {
 		t.Fatalf("action result unexpected: %s", r)
 	}
 
-	send(t, stdin, 4, "engine:stop", map[string]any{"engine": "fake"})
+	send(t, stdin, 4, sleepMethod, map[string]any{"engine": "fake"})
 	if r := waitResult(t, frames, "4", 10*time.Second); !strings.Contains(string(r), `"running":false`) {
 		t.Fatalf("stop did not report stopped: %s", r)
 	}
@@ -140,7 +140,7 @@ func TestE2EDesiredStateAcrossShutdownRPC(t *testing.T) {
 	}
 
 	first := startE2EManager(t, cfg, home)
-	send(t, first.stdin, 1, "engine:start", map[string]any{"engine": "fake"})
+	send(t, first.stdin, 1, "engine:install", map[string]any{"engine": "fake", "start": true})
 	var started EngineStatus
 	if err := json.Unmarshal(waitResult(t, first.frames, "1", 20*time.Second), &started); err != nil || !started.Running {
 		t.Fatalf("start status=%+v err=%v", started, err)
@@ -159,9 +159,19 @@ func TestE2EDesiredStateAcrossShutdownRPC(t *testing.T) {
 	if r := waitResult(t, second.frames, "1", 5*time.Second); !strings.Contains(string(r), `"running":true`) {
 		t.Fatalf("saved ON state was not restored: %s", r)
 	}
-	send(t, second.stdin, 2, "engine:stop", map[string]any{"engine": "fake"})
+	send(t, second.stdin, 2, sleepMethod, map[string]any{"engine": "fake"})
 	waitResult(t, second.frames, "2", 10*time.Second)
 	second.stop(t)
+	// Phase11 removes the public Off control; seed historical saved Off only
+	// after the worker exits to retain restore coverage without a new control.
+	base := cfg
+	if runtime.GOOS == "darwin" {
+		base = filepath.Join(home, "Library", "Application Support")
+	}
+	store := newDesiredStateStore(filepath.Join(base, "Nvidia Corporation", "Personal AI Router", "engine-bin"))
+	if err := store.set("fake", false, intentLocal); err != nil {
+		t.Fatal(err)
+	}
 
 	third := startE2EManager(t, cfg, home)
 	notify(t, third.stdin, restoreEnabledMethod, nil)
@@ -216,7 +226,7 @@ func testE2ERestoreReclaimsOwnedOrphan(t *testing.T, portZero bool) {
 	}
 
 	first := startE2EManager(t, cfg, home)
-	send(t, first.stdin, 1, "engine:start", map[string]any{"engine": "fake"})
+	send(t, first.stdin, 1, "engine:install", map[string]any{"engine": "fake", "start": true})
 	var started EngineStatus
 	if err := json.Unmarshal(waitResult(t, first.frames, "1", 20*time.Second), &started); err != nil || !started.Running || started.Port <= 0 || (!portZero && started.Port != port) {
 		t.Fatalf("initial start = %+v, err=%v; want running on port %d", started, err, port)
@@ -278,7 +288,7 @@ func testE2ERestoreReclaimsOwnedOrphan(t *testing.T, portZero bool) {
 		t.Fatalf("cold relaunch PID=%q parsed=%d err=%v; old=%d oldAlive=%v listener=(%d,%q,%v)", data, newPID, err, oldPID, pidAlive(oldPID), listenerPID, image, found)
 	}
 	waitE2EProcessDead(t, oldPID)
-	send(t, second.stdin, 3, "engine:stop", map[string]any{"engine": "fake"})
+	send(t, second.stdin, 3, sleepMethod, map[string]any{"engine": "fake"})
 	waitResult(t, second.frames, "3", 10*time.Second)
 	if portZero {
 		if saved, err := store.allocatedPort("fake"); err != nil || saved != 0 {
@@ -340,7 +350,7 @@ func TestE2EPrepareShutdownCancelsStartingEngine(t *testing.T) {
 	}
 
 	manager := startE2EManager(t, cfg, home)
-	send(t, manager.stdin, 1, "engine:start", map[string]any{"engine": "fake"})
+	send(t, manager.stdin, 1, "engine:install", map[string]any{"engine": "fake", "start": true})
 
 	var pid int
 	deadline := time.Now().Add(5 * time.Second)

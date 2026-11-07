@@ -449,7 +449,7 @@ describe('running native build status', () => {
         expect(status()?.buildId).toBeUndefined()
     })
 
-    it('preserves remote list and operation builds and clears a replacement without them', () => {
+    it('preserves remote list builds and clears a replacement without them', () => {
         const state = getModularBridgeState()
         state.setSelfId('build-local')
         state.handleNotification({
@@ -476,19 +476,21 @@ describe('running native build status', () => {
                     value => value.nodeId === 'build-peer' && value.engineType === 'llama-cpp'
                 )
         expect(status()).toMatchObject({ buildInfo, buildId })
-        state.applyRemoteEngineStatusResult('build-peer', 'llama-cpp', {
-            ...wire,
-            buildInfo: 'replacement-build',
-            buildId: `sha256:${'b'.repeat(64)}`
+        state.applyRemoteEngineFacts('build-peer', {
+            engines: [
+                {
+                    ...wire,
+                    buildInfo: 'replacement-build',
+                    buildId: `sha256:${'b'.repeat(64)}`
+                }
+            ]
         })
         expect(status()).toMatchObject({
             buildInfo: 'replacement-build',
             buildId: `sha256:${'b'.repeat(64)}`
         })
-        state.applyRemoteEngineStatusResult('build-peer', 'llama-cpp', {
-            engine: 'llamacpp',
-            installed: true,
-            running: false
+        state.applyRemoteEngineFacts('build-peer', {
+            engines: [{ engine: 'llamacpp', installed: true, running: false }]
         })
         expect(status()?.buildInfo).toBeUndefined()
         expect(status()?.buildId).toBeUndefined()
@@ -930,7 +932,7 @@ describe('engine settings restart confirmation', () => {
 
     it('discloses the bounded request wait and applies only after restart confirmation', async () => {
         const dialog = confirmationDialog()
-        expect(dialog.textContent).toContain('Restart engine?')
+        expect(dialog.textContent).toContain('Apply engine settings?')
         expect(dialog.textContent).toContain(
             'PAIR waits up to 60 seconds for active requests to finish, then restarts even if requests remain. This can interrupt those requests.'
         )
@@ -942,7 +944,7 @@ describe('engine settings restart confirmation', () => {
             false
         )
 
-        await act(async () => buttonNamed(dialog, 'Restart').click())
+        await act(async () => buttonNamed(dialog, 'Apply settings').click())
 
         expect(apply).toHaveBeenCalledTimes(1)
         expect(apply).toHaveBeenCalledWith(
@@ -978,7 +980,7 @@ describe('engine settings restart confirmation', () => {
         if (!(button instanceof HTMLButtonElement)) throw new Error('Apply button missing')
         expect(button.disabled).toBe(false)
         await act(async () => button.click())
-        expect(confirmationDialog().textContent).toContain('Restart engine?')
+        expect(confirmationDialog().textContent).toContain('Apply engine settings?')
         expect(apply).not.toHaveBeenCalled()
     })
 })

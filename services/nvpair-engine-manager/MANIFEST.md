@@ -673,7 +673,7 @@ applies to the host the test runs on.
 | `args` | string[] | no | Arguments. |
 | `env` | object | no | Extra environment (merged over the inherited env; the `NVPAIR_PROVIDER_SECRET_` namespace is removed after the merge). Use `{host}`/`{port}` for the listen address, e.g. `"LLAMA_ARG_HOST": "{host}"`. |
 | `port` | int | no | Fixed port, or `0` to auto-assign a free loopback port. |
-| `bind` | string | no | Listen address, substituted as `{host}`. Empty ⇒ `127.0.0.1` (the safe default); an inference engine that serves the cluster sets `"0.0.0.0"`, overridable per call via `engine:start {bind}`. Probes always target loopback. |
+| `bind` | string | no | Listen address, substituted as `{host}`. Empty ⇒ `127.0.0.1` (the safe default); an inference engine that serves the cluster sets `"0.0.0.0"`, overridable by the local install-with-start `bind` option. Probes always target loopback. |
 | `ready` | probe | no | Readiness probe; `start` waits for it before reporting Running. |
 | `stop` | object | no | `signal` (`"term"` default, or `"kill"`) + `grace_s` (seconds before force-kill). |
 | `health` | probe | no | Periodic liveness probe while Running; `interval_s` between checks. |

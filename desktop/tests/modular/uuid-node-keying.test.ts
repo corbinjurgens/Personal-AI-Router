@@ -56,7 +56,9 @@ describe('UUID node keying', () => {
         expect(available).toMatchObject({ trusted: true, clustered: true })
         // Clustered peers need authoritative facts before run state is inferred, even
         // after the proxy presence is merged onto the UUID-keyed entry.
-        expect(state.isRemoteEngineRunning('uuid-merge-1', 'llama-cpp')).toBe(false)
+        expect(
+            state.getEngineInitialState().statuses.find(status => status.nodeId === 'uuid-merge-1')
+        ).toBeUndefined()
     })
 
     it('merges regardless of source order (proxy before broker)', () => {
@@ -95,7 +97,9 @@ describe('UUID node keying', () => {
         expect(nodes['uuid-merge-2'].name).toBe('merge-host-2')
         const available = state.getAvailableNodes().find(node => node.id === 'uuid-merge-2')
         expect(available).toMatchObject({ clustered: true })
-        expect(state.isRemoteEngineRunning('uuid-merge-2', 'llama-cpp')).toBe(false)
+        expect(
+            state.getEngineInitialState().statuses.find(status => status.nodeId === 'uuid-merge-2')
+        ).toBeUndefined()
     })
 
     it('skips a /v1/node-info response whose hostUuid disagrees with the polled node', () => {

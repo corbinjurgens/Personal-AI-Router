@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useCallback, useMemo, useState } from 'react'
-import { Button, Flex, Stack, Switch, Text } from '@nvidia/foundations-react-core'
+import { Button, Flex, Text } from '@nvidia/foundations-react-core'
 import { Check, ContentCopy, ExpandMore, OpenInNew } from '@/ui/components/icons'
 import type { BackendInfo } from '@/ui/types/engine-info'
 import type { PlatformDisplayName } from '@/shared/types/platform'
@@ -25,7 +25,6 @@ export function BackendHeader({
     isTransitioning,
     isUnavailable,
     disabled,
-    onToggle,
     onExpand,
     expanded,
     isLocalNode,
@@ -37,7 +36,6 @@ export function BackendHeader({
     /** Remote node never reported this engine — render a stable read-only label, no controls. */
     isUnavailable: boolean
     disabled: boolean
-    onToggle: () => void
     onExpand: () => void
     expanded: boolean
     isLocalNode: boolean
@@ -206,49 +204,9 @@ export function BackendHeader({
 
             {!isUnavailable &&
                 !isTransitioning &&
-                backend.processStatus !== 'not-installed' &&
-                (() => {
-                    const missingPrereqs = (backend.prerequisites ?? []).filter(p => !p.installed)
-                    const prereqsMet = missingPrereqs.length === 0
-                    const isStartDisabled = !prereqsMet && backend.processStatus !== 'running'
-
-                    const toggle = (
-                        <Flex align="center" justify="center" className="h-7 w-7 shrink-0">
-                            <Switch
-                                size="small"
-                                checked={backend.processStatus === 'running'}
-                                onCheckedChange={onToggle}
-                                onClick={e => e.stopPropagation()}
-                                disabled={disabled || isStartDisabled}
-                                aria-label={`${backend.processStatus === 'running' ? 'Stop' : 'Start'} ${backend.displayName}`}
-                            />
-                        </Flex>
-                    )
-
-                    if (isStartDisabled) {
-                        return (
-                            <DismissibleTooltip
-                                slotContent={
-                                    <Stack gap="1">
-                                        <Text kind="body/semibold/sm">Missing prerequisites:</Text>
-                                        {missingPrereqs.map(p => (
-                                            <Text key={p.name} kind="body/regular/sm">
-                                                {p.name}
-                                                {p.installUrl
-                                                    ? ` — install from ${p.installUrl}`
-                                                    : ''}
-                                            </Text>
-                                        ))}
-                                    </Stack>
-                                }
-                            >
-                                {toggle}
-                            </DismissibleTooltip>
-                        )
-                    }
-
-                    return toggle
-                })()}
+                backend.processStatus !== 'not-installed' && (
+                    <Text kind="body/regular/sm">{statusLabel[backend.processStatus]}</Text>
+                )}
 
             {!isUnavailable && !isTransitioning && backend.processStatus === 'not-installed' && (
                 <InstallButton

@@ -5,21 +5,16 @@ package main
 
 import (
 	"context"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 )
 
-func TestReservedAliasPortBlocksLocalAndRemoteStarts(t *testing.T) {
+func TestReservedAliasPortBlocksInternalStartAndPortChanges(t *testing.T) {
 	manifest := testEngineManifest(fakeEngineBin)
 	reg := NewRegistry()
 	reg.engines[manifest.Engine] = manifest
 	exec := NewExecutor(reg, NewReporter(nil), func(string, any) {}, t.TempDir())
 	exec.overrideDir = t.TempDir()
-	// The broker's projection says the node is available, so the remote start
-	// reaches the port check.
-	exec.nodeProjection.set(nodeProjection{})
 	if err := exec.SetReservedPort(15555); err != nil {
 		t.Fatal(err)
 	}
@@ -31,10 +26,4 @@ func TestReservedAliasPortBlocksLocalAndRemoteStarts(t *testing.T) {
 		t.Fatalf("set-port error = %v, want reserved-port rejection", err)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, controlStartPath, strings.NewReader(`{"engine":"fake","port":15555}`))
-	rec := httptest.NewRecorder()
-	(&controlServer{exec: exec}).handleStart(rec, req)
-	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), "reserved") {
-		t.Fatalf("remote start response = %d %q, want reserved-port rejection", rec.Code, rec.Body.String())
-	}
 }

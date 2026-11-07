@@ -45,6 +45,8 @@ var internalClientMethods = map[string]struct{}{
 	"engine:node-projection":              {},
 	"engine:restore-enabled":              {},
 	"engine:prepare-shutdown":             {},
+	"engine:wake":                         {},
+	"engine:sleep":                        {},
 	"engine:get-launch":                   {},
 	"engine:preview-launch":               {},
 	"engine:configured-ports":             {},
@@ -190,14 +192,10 @@ func (b *Broker) handleMessage(msg *Message) {
 		b.handleBuildApply(msg)
 		return
 	}
-	if componentAddressed {
-		if b.handleEngineProxyBrokerRequest(profile, method, msg) {
-			return
-		}
-	}
 	// Reject worker-internal methods before any generic relay can reach a
-	// worker that would serve them.
-	if _, internal := internalClientMethods[msg.Method]; internal {
+	// worker that would serve them. Resolve component aliases through the
+	// same list so an address cannot expose a private lifecycle operation.
+	if _, internal := internalClientMethods[method]; internal {
 		message := "method not found: " + msg.Method
 		if msg.Method == "engine:configure-launch" {
 			message = "use engine:apply-settings for launch configuration"
@@ -206,6 +204,21 @@ func (b *Broker) handleMessage(msg *Message) {
 			log.Printf("failed to reject private method %s: %v", msg.Method, err)
 		}
 		return
+	}
+	// The generic relay remains available for engine operations, but lifecycle
+	// controls no longer belong to the client or peer surface.
+	if strings.HasPrefix(method, "engine:") {
+		operation := strings.TrimPrefix(strings.TrimPrefix(method, "engine:"), "remote-")
+		switch operation {
+		case "start", "stop", "restart":
+			_ = b.codec.RespondError(msg.ID, -32601, "method not found: "+msg.Method)
+			return
+		}
+	}
+	if componentAddressed {
+		if b.handleEngineProxyBrokerRequest(profile, method, msg) {
+			return
+		}
 	}
 	if b.handlePolicyRequest(msg) {
 		return
@@ -391,20 +404,11 @@ func (b *Broker) relayToEngine(msg *Message) {
 	go b.relayToEngineNow(msg)
 }
 
-// Explicit local On must serialize with switch obligation discharge even when
-// the caller leaves the engine's port unchanged.
-func engineLocalOnRequest(method string, params json.RawMessage) bool {
-	switch method {
-	case "engine:start", "engine:restart":
-		return true
-	case "engine:install":
-		var request struct {
-			Start bool `json:"start"`
-		}
-		return json.Unmarshal(params, &request) == nil && request.Start
-	default:
-		return false
+func installStartRequest(method string, params json.RawMessage) bool {
+	var request struct {
+		Start bool `json:"start"`
 	}
+	return method == "engine:install" && json.Unmarshal(params, &request) == nil && request.Start
 }
 
 type pendingInstallStart struct {
@@ -412,8 +416,7 @@ type pendingInstallStart struct {
 	superseded bool
 }
 
-// Called only after local Off (one engine) or local pause (engine "", every
-// engine) admission succeeds, under engineConfigMu.
+// Called after local pause admission succeeds, under engineConfigMu.
 func (b *Broker) supersedeInstallStartsLocked(engine string) {
 	for pending := range b.pendingInstallStarts {
 		if engine == "" || pending.engine == engine {
@@ -424,7 +427,7 @@ func (b *Broker) supersedeInstallStartsLocked(engine string) {
 
 func (b *Broker) relayToEngineNow(msg *Message) {
 	var installStart *pendingInstallStart
-	if msg.Method == "engine:install" && engineLocalOnRequest(msg.Method, msg.Params) {
+	if installStartRequest(msg.Method, msg.Params) {
 		// Preserve early proxy-port refusal before doing installation work.
 		// Normal start admission rechecks after preparation has completed.
 		if engine, port, assigned := enginePortAssignmentRequest(msg.Method, msg.Params); assigned && b.rejectProxyHeldPort(msg, port, engine) {
@@ -474,11 +477,11 @@ func (b *Broker) relayToEngineNow(msg *Message) {
 			_ = b.codec.RespondError(msg.ID, rpcErr.Code, rpcErr.Message)
 			return
 		}
-		// Start and combined install/start both return Manager.runOp's Status.
-		// Preserve every original option (including port and bind) for start.
-		start := *msg
-		start.Method = "engine:start"
-		msg = &start
+		// Re-enter the existing install/start executor path with the original
+		// options after preparation. Installation is idempotent; the executor
+		// retains ownership of start, without a public lifecycle RPC.
+		// V28 accepts the extra detection/progress and possible reinstall here:
+		// phases 11 and 15 ship together, and 15 removes the install start option.
 	}
 	requestedEngine, requestedPort, isEnginePortAssignment := enginePortAssignmentRequest(msg.Method, msg.Params)
 	// Send the manager reply only after reconciliation and the lifecycle lock
@@ -490,7 +493,7 @@ func (b *Broker) relayToEngineNow(msg *Message) {
 		}
 	}()
 	lifecycleLocked := false
-	if isEnginePortAssignment || msg.Method == "engine:stop" || engineLocalOnRequest(msg.Method, msg.Params) {
+	if isEnginePortAssignment || installStartRequest(msg.Method, msg.Params) {
 		b.settingsApplyMu.Lock()
 		defer b.settingsApplyMu.Unlock()
 		b.engineConfigMu.Lock()
@@ -503,11 +506,8 @@ func (b *Broker) relayToEngineNow(msg *Message) {
 			_ = b.codec.RespondError(msg.ID, -32602, err.Error())
 			return
 		}
-		if msg.Method == "engine:stop" {
-			b.supersedeInstallStartsLocked(target.Engine)
-		}
 		if installStart != nil && installStart.superseded {
-			_ = b.codec.RespondError(msg.ID, -32000, "Engine install start superseded by local Off or pause (busy).")
+			_ = b.codec.RespondError(msg.ID, -32000, "Engine install start superseded by pause (busy).")
 			return
 		}
 		defer b.reconcileLegacySettingsLocked()
@@ -559,7 +559,7 @@ func (b *Broker) relayToEngineNow(msg *Message) {
 		// state-change notification. Seed the policy from the authoritative
 		// response, fenced to the manager that answered this request.
 		switch method {
-		case "engine:status", "engine:start", "engine:stop", "engine:restart", "engine:install", "engine:uninstall":
+		case "engine:status", "engine:install", "engine:uninstall":
 			var status struct {
 				Engine  string `json:"engine"`
 				Running *bool  `json:"running"`

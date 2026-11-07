@@ -627,8 +627,8 @@ func TestReplacementInterruptsEngineOperationStatus(t *testing.T) {
 	d.engines = []engineStatus{{Engine: "llamacpp", DisplayName: "llama.cpp", Installed: true}}
 	d.refreshEngines()
 	generation := f.client.Generation()
-	done := holdReplacementCommand(t, f, d.lifecycle(d.selectedEngine(), "start"), "engine:start")
-	if !d.status.sticky || !strings.Contains(d.status.render(), "start") {
+	done := holdReplacementCommand(t, f, d.lifecycle(d.selectedEngine(), "install"), "engine:install")
+	if !d.status.sticky || !strings.Contains(d.status.render(), "install") {
 		t.Fatal("submitted engine operation did not display persistent progress")
 	}
 	oldProgress := d.status.text
@@ -2043,22 +2043,22 @@ func TestLateSettingsReplyDoesNotOpenAnotherNodesEditor(t *testing.T) {
 // TestLateOperationReplyStaysWithItsNode is the regression guard for one
 // machine's outcome being reported on another's screen.
 //
-// A slow operation's reply outlives the screen that sent it. Start something
-// on node A, open node B, and A's "start failed" landed on B.
+// A slow operation's reply outlives the screen that sent it. Install on node A,
+// open node B, and A's "install failed" landed on B.
 func TestLateOperationReplyStaysWithItsNode(t *testing.T) {
 	b := newNodeDetail(nil, nodeRow{key: "node-b", name: "B", presence: presenceOnline})
 	b.SetSize(100, 30)
 	b.engines = []engineStatus{{Engine: "llamacpp", DisplayName: "llama.cpp", Installed: true}}
 	b.refreshEngines()
 
-	failed := classifyOpResult("start", "llamacpp", "start", errors.New("engine did not come up"))
+	failed := classifyOpResult("install", "llamacpp", "install", errors.New("engine download failed"))
 	b.update(detailReply{node: "node-a", msg: failed})
 	if got := b.status.render(); strings.Contains(got, "failed") {
 		t.Errorf("node A's outcome was reported on node B: %q", got)
 	}
 
 	b.update(detailReply{node: "node-b", msg: failed})
-	if got := b.status.render(); !strings.Contains(got, "start (llama.cpp) failed") {
+	if got := b.status.render(); !strings.Contains(got, "install (llama.cpp) failed") {
 		t.Errorf("node B's own outcome was not reported: %q", got)
 	}
 }
@@ -2068,7 +2068,7 @@ func TestLateOperationReplyStaysWithItsNode(t *testing.T) {
 // the time it lands.
 func TestDetailRepliesCarryTheirNode(t *testing.T) {
 	a := newNodeDetail(nil, nodeRow{key: "node-a", name: "A", presence: presenceOnline})
-	reply := engineOpMsg{what: "start", engine: "llamacpp"}
+	reply := engineOpMsg{what: "install", engine: "llamacpp"}
 	got := a.own(func() tea.Msg { return reply })()
 	tagged, ok := got.(detailReply)
 	if !ok || tagged.node != "node-a" || tagged.msg != reply {
@@ -2213,8 +2213,8 @@ func TestHiddenListsRefuseTheirKeys(t *testing.T) {
 	d.SetSize(100, both)
 	d.View()
 	d.pane = detailEngines
-	if cmd, _ := d.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")}); cmd != nil {
-		t.Error("an engine was started from an engine list that was not on screen")
+	if cmd, _ := d.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("i")}); cmd != nil {
+		t.Error("an engine was installed from an engine list that was not on screen")
 	}
 }
 
@@ -2563,7 +2563,7 @@ func TestActionsWorkAfterAnEmptyRefresh(t *testing.T) {
 			"load, eject, and delete are all dead", d.modelTable.Cursor())
 	}
 
-	// Same for the engines pane, which gates install/start/stop.
+	// Same for the engines pane, which gates install/uninstall and settings.
 	d.engines = []engineStatus{{Engine: "llamacpp", Installed: true}}
 	d.refreshEngines()
 	if d.selectedEngine() == nil {

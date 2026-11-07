@@ -23,8 +23,8 @@ import (
 
 // installedServicePorts are the default listeners of an installed PAIR: the
 // broker's local services (ni, er, wl, cl, em, ec) and the llama.cpp facade,
-// plus 11434 and 1234, which stay off-limits to fixtures because users run their
-// own engines there. No fixture is ever assigned one of them.
+// plus the owner's saved facade at 18080 and engine ports 11434 and 1234.
+// No fixture is ever assigned one of them.
 var installedServicePorts = map[int]string{
 	14318: "node-info",
 	14319: "errors",
@@ -35,6 +35,7 @@ var installedServicePorts = map[int]string{
 	11434: "reserved engine port",
 	1234:  "reserved engine port",
 	8080:  "llama.cpp facade",
+	18080: "installed PAIR facade",
 }
 
 // listenFixtureLoopback makes one bounded allocation attempt. A protected port
@@ -211,7 +212,7 @@ func (l *fixtureAllocationListener) Addr() net.Addr {
 }
 
 func TestFixtureLoopbackRejectsInstalledPorts(t *testing.T) {
-	for _, port := range []int{8080, 11434, 1234, 14318, 14319, 14320, 14321, 14322, 14323} {
+	for _, port := range []int{8080, 18080, 11434, 1234, 14318, 14319, 14320, 14321, 14322, 14323} {
 		t.Run(strconv.Itoa(port), func(t *testing.T) {
 			candidate := &fixtureAllocationListener{port: port}
 			calls := 0

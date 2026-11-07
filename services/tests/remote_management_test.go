@@ -240,7 +240,7 @@ func TestRemoteManagementDirectMutationBoundary(t *testing.T) {
 	// refused by permission before any handler parses them or starts a stream.
 	for _, path := range []string{
 		"/v1/engines/install", "/v1/models/pull", "/v1/models/load",
-		"/v1/models/unload", "/v1/models/delete", "/v1/engines/start", "/v1/engines/stop",
+		"/v1/models/unload", "/v1/models/delete",
 		"/v1/node-policy/set", "/v1/node-availability/set", "/v1/engine-settings/apply",
 	} {
 		t.Run(path, func(t *testing.T) {
@@ -477,7 +477,7 @@ func managementEngineWriterAt(t *testing.T, base string) *engineProcessFixture {
 	waitForMethod(t, f.p.msgs, "app:ready", 20*time.Second)
 	f.proxyControl.ready(t, "llamacpp-custom", f.facadePort)
 	f.proxyControl.ready(t, "llamacpp", f.targetFacadePort)
-	f.rpcOK(t, "engine:start", map[string]string{"engine": "llamacpp-custom"})
+	f.rpcOK(t, "engine:install", map[string]any{"engine": "llamacpp-custom", "start": true})
 	f.pid(t, "llamacpp-custom")
 	// Initialize every settings baseline before tests capture their revisions.
 	for _, engine := range engines.Names() {
@@ -927,7 +927,7 @@ func TestRemoteManagementDeniedPeerCanReadModelExports(t *testing.T) {
 func TestRemoteManagementGrantPreservesLocalPause(t *testing.T) {
 	f := newManagementFixture(t)
 	f.permission(t, f.joint.client, true)
-	response, err := f.joint.client.Post("https://127.0.0.1:"+strconv.Itoa(f.joint.ports[1])+"/v1/engines/start", "application/json", bytes.NewReader(mustMarshal(t, map[string]string{"engine": "llamacpp"})))
+	response, err := f.joint.client.Post("https://127.0.0.1:"+strconv.Itoa(f.joint.ports[1])+"/v1/engines/install", "application/json", bytes.NewReader(mustMarshal(t, map[string]any{"engine": "llamacpp", "start": true})))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1099,7 +1099,7 @@ func TestRemoteManagementPersistsAcrossSeparateProcessRestarts(t *testing.T) {
 		t.Helper()
 		client.CloseIdleConnections()
 		allowedClient.CloseIdleConnections()
-		managementHTTP(t, client, f.ports.engineControl, http.MethodPost, "/v1/engines/stop", map[string]any{"engine": "llamacpp"}, http.StatusConflict)
+		managementHTTP(t, client, f.ports.engineControl, http.MethodPost, "/v1/engines/install", map[string]any{"engine": "llamacpp", "start": true}, http.StatusConflict)
 		managementHTTP(t, client, f.ports.engineControl, http.MethodGet, "/v1/engines", nil, http.StatusOK)
 		for _, caller := range []struct {
 			client  *http.Client

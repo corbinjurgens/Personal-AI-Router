@@ -1109,9 +1109,10 @@ proxy enforces it.
   its models are unloaded; past `idle.stopEngineAfterMinutes` an engine saved On
   is put to sleep. Each step runs once per idle period, so an engine that refuses
   to stop is not retried every tick. Nothing runs while the node is draining.
-- **Start on demand.** `engine:wake` (from `admission/wake` or a client) starts
-  only an engine saved On, never while the node is paused or draining; a client's
-  `engine:wake` is refused with an error then.
+- **Start on demand.** The broker's private `engine:wake` call (from
+  `admission/wake`) starts only an engine saved On, never while the node is
+  paused or draining. Clients and peers cannot call `engine:wake` or
+  `engine:sleep`.
 - **Settings restarts.** When `engine:apply-settings` would restart a running
   engine (`preview.restart`), the broker pushes `node/set-engine-drain
   {engine, drain:true}`, waits up to 60 s for that engine's active count to reach
@@ -1889,10 +1890,22 @@ author trust, signatures or serving readiness. `modelcopy_relay_test.go` checks
 that the generic relay retains the complete observation without production relay
 rewrites or new RPC/capability versions.
 
-Any other `engine:*` request is forwarded to `nvpair-engine-manager` verbatim and its response relayed straight back. This covers the whole engine control plane: `engine:get-installed`, `engine:describe`, `engine:status`, `engine:install`, `engine:uninstall`, `engine:start`, `engine:stop`, `engine:restart`, `engine:action`, `engine:logs`, `engine:errors`, `engine:models`, and the node
-policy's `engine:wake`, `engine:sleep`, `engine:intent` and
-`engine:unload-model`. `engine:wake` is refused by the broker while this node is
-paused or draining. Lifecycle ops run for minutes (reporting progress via the `engine:install-progress` / `engine:state-changed` push events), so the relay imposes **no broker-side timeout** — fire the request and watch the event stream for the outcome. Error `-32000 "engine-manager not available"` when no engine-manager is supervised.
+Other public `engine:*` requests are forwarded to `nvpair-engine-manager`
+verbatim and their responses relayed straight back. These include
+`engine:get-installed`, `engine:describe`, `engine:status`, `engine:install`,
+`engine:uninstall`, `engine:action`, `engine:logs`, `engine:errors`,
+`engine:models`, `engine:intent` and `engine:unload-model`. Engine start, stop
+and restart methods and peer start/stop routes are removed. The internal-method
+guard refuses client calls to `engine:wake` and `engine:sleep`, including
+component-addressed calls; peers cannot invoke them either. Install retains its
+`start` option. Saved intent, restoration and idle behavior remain unchanged;
+opening the desktop for the first time does not start installed engines.
+This phase does not guarantee every installed engine runs while available;
+phase 11 must not be installed without phase 15's intent changes.
+Operations can run for minutes (reporting progress via
+`engine:install-progress` / `engine:state-changed`), so the relay imposes **no
+broker-side timeout**. Error `-32000 "engine-manager not available"` when no
+engine-manager is supervised.
 
 `engine:set-port` is **not** in that generic set. Like `<engine>-proxy:set-port` it is intercepted and run through the authoritative settings operation, so moving an engine's server port from a port-only caller validates and restarts exactly as the full editor does, and persists as a manifest override that survives a restart. Its response is the engine's `engine:status` result.
 

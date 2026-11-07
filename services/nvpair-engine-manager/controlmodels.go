@@ -9,9 +9,24 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 )
+
+// writeRemoteError preserves typed local vetoes and unavailable node policy
+// for peer model operations and install-with-start.
+func writeRemoteError(w http.ResponseWriter, err error) {
+	var veto *localVetoError
+	switch {
+	case errors.As(err, &veto):
+		writeCodedError(w, veto.code, veto.Error())
+	case errors.Is(err, errNoProjection):
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+	default:
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
 
 const (
 	controlLoadPath   = "/v1/models/load"

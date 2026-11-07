@@ -2500,26 +2500,26 @@ func TestModelConfigUnknownInventoryDoesNotLoadNewResident(t *testing.T) {
 	}
 }
 
-func TestModelConfigRestartStartResponseRecoversResident(t *testing.T) {
+func TestModelConfigInstallResponseRecoversResident(t *testing.T) {
 	f := newModelConfigFixture(t)
 	r := f.b.nodePolicyRuntime()
 	r.mu.Lock()
-	delete(r.running, "llamacpp") // Attach snapshot preceded the engine start.
+	delete(r.running, "llamacpp") // Attach snapshot preceded installation.
 	r.mu.Unlock()
 	f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
-		if method == "engine:start" {
+		if method == "engine:install" {
 			return map[string]any{"engine": "llamacpp", "running": true}, ""
 		}
 		return map[string]bool{"ok": true}, ""
 	})
-	f.b.relayToEngineNow(clientRequest(1, "engine:start", map[string]string{"engine": "llamacpp"}))
-	response := f.out.waitFrame(t, "engine:start response", isResponse(1))
+	f.b.relayToEngineNow(clientRequest(1, "engine:install", map[string]string{"engine": "llamacpp"}))
+	response := f.out.waitFrame(t, "engine:install response", isResponse(1))
 	if response.Error != nil {
-		t.Fatalf("engine:start response: %+v", response.Error)
+		t.Fatalf("engine:install response: %+v", response.Error)
 	}
 	status := f.b.modelConfiguration(f.b.captureModelConfig())
 	if len(status.Models) != 1 || status.Models[0].State != nodepolicy.ModelStatePending {
-		t.Fatalf("running start result left resident blocked: %+v", status)
+		t.Fatalf("running install result left resident blocked: %+v", status)
 	}
 	done := f.startLoadedAttempt(t)
 	f.awaitGrant(t)
@@ -2638,7 +2638,7 @@ func TestModelConfigRestartSnapshotDoesNotUndoNewerRunningStatus(t *testing.T) {
 		switch method {
 		case "engine:get-installed":
 			return map[string]any{"engines": []any{map[string]any{"engine": "llamacpp", "running": false}}}, holdSuccessReply
-		case "engine:start", "engine:status":
+		case "engine:status":
 			return map[string]any{"engine": "llamacpp", "running": true}, ""
 		case "engine:models":
 			return map[string]any{"models": []string{}, "loadedByEngine": map[string][]string{}}, ""
@@ -2654,7 +2654,7 @@ func TestModelConfigRestartSnapshotDoesNotUndoNewerRunningStatus(t *testing.T) {
 	f.engine.waitFor("initial installed snapshot", func(calls []policyCall) bool {
 		return len(modelConfigCalls(f.engine, "engine:get-installed")) > 0
 	})
-	for id, method := range []string{"engine:start", "engine:status"} {
+	for id, method := range []string{"engine:status"} {
 		requestID := id + 1
 		f.b.relayToEngineNow(clientRequest(requestID, method, map[string]string{"engine": "llamacpp"}))
 		response := f.out.waitFrame(t, method+" response", isResponse(requestID))

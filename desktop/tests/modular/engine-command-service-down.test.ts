@@ -36,15 +36,15 @@ describe('engine command while the modular service is stopped', () => {
         mocks.supervisor.hasProcess.mockReturnValue(false)
 
         await handleServiceBridgeInvoke('engine:command', {
-            command: 'toggle',
+            command: 'install',
             engineType: 'llama-cpp',
             nodeId: 'local-node'
         })
 
         expect(mocks.supervisor.reportError).toHaveBeenCalledWith(
-            'toggle is not available until the modular backend is running.',
+            'install is not available until the modular backend is running.',
             'warning',
-            'engine-cmd:toggle',
+            'engine-cmd:install',
             { nodeId: 'local-node', engineType: 'llama-cpp', modelName: undefined }
         )
     })
@@ -73,15 +73,15 @@ describe('engine command while the modular service is stopped', () => {
         mocks.supervisor.hasProcess.mockReturnValue(false)
 
         await handleServiceBridgeInvoke('engine:command', {
-            command: 'toggle',
+            command: 'install',
             engineType: 'llama-cpp',
             nodeId: 'remote-node'
         })
 
         expect(mocks.supervisor.reportError).toHaveBeenCalledWith(
-            'toggle is not available until the modular backend is running.',
+            'install is not available until the modular backend is running.',
             'warning',
-            'engine-cmd:toggle',
+            'engine-cmd:install',
             { nodeId: 'remote-node', engineType: 'llama-cpp', modelName: undefined }
         )
     })

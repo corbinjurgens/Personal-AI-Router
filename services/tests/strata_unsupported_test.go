@@ -55,8 +55,8 @@ func TestStrataContractUnsupportedManagement(t *testing.T) {
 		}
 		f.strataContractStartManager(t)
 		assertAbsent(t, f)
-		response := f.Manager.strataContractCall(t, "engine:start", map[string]any{"engine": "strata", "port": f.Port, "bind": "127.0.0.1"})
-		assertError(t, response, `engine "strata" is not installed: mandatory detection files are incomplete`)
+		response := f.Manager.strataContractCall(t, "engine:install", map[string]any{"engine": "strata", "start": true, "port": f.Port, "bind": "127.0.0.1"})
+		assertError(t, response, `engine "strata" has no install block for this platform`)
 		assertAbsent(t, f)
 	})
 

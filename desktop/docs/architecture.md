@@ -10,7 +10,13 @@ Choose a node with the page's node picker, or open the page for a specific node
 with the **Node settings** button on its Overview card. Cluster **Edit node**,
 the welcome flow and the tray's existing node-settings route open that same page
 for their selected node. The page groups Availability, Roles, Model settings,
-Engines and Advanced policy JSON. A profile names its engine. Its Engines
+Engines and Advanced policy JSON. Users and peers have no per-engine Start,
+Stop, Restart or On/Off control. Engine rows retain install/uninstall, build,
+settings and reported state. Only the broker uses private wake/sleep methods;
+settings application may restart internally. Saved intent, restore and idle
+semantics remain until phase 15, and first-open startup does not start installed
+engines. Phase 11 must be installed together with phase 15.
+A profile names its engine. Its Engines
 section contains the controls formerly shown in the card's expandable engine
 settings. Bulk configuration and routing history are cluster-wide sections in
 Cluster settings. These entry points do not change setting behavior.

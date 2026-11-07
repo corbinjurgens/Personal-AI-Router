@@ -40,7 +40,7 @@ func (w *engineReplyBarrier) Write(raw []byte) (int, error) {
 	return n, err
 }
 
-func TestEngineStartReplyFollowsSettingsOperationRelease(t *testing.T) {
+func TestEnginePortReplyFollowsSettingsOperationRelease(t *testing.T) {
 	h := newModelSettingsHarness(t)
 	w := &engineReplyBarrier{broker: h.b, replied: make(chan struct{}), publishing: make(chan struct{}), release: make(chan struct{})}
 	open := sync.OnceFunc(func() { close(w.release) })
@@ -57,7 +57,7 @@ func TestEngineStartReplyFollowsSettingsOperationRelease(t *testing.T) {
 	go func() {
 		defer close(done)
 		id := json.RawMessage(`991`)
-		h.b.relayToEngineNow(&Message{ID: &id, Method: "engine:start", Params: json.RawMessage(`{"engine":"llamacpp"}`)})
+		h.b.relayToEngineNow(&Message{ID: &id, Method: "engine:set-port", Params: json.RawMessage(`{"engine":"llamacpp","port":19181}`)})
 	}()
 	defer func() { open(); requireGateOpens(t, done, "relay cleanup") }()
 	requireGateOpens(t, w.publishing, "settings reconciliation publication")
@@ -67,13 +67,13 @@ func TestEngineStartReplyFollowsSettingsOperationRelease(t *testing.T) {
 	}
 	select {
 	case <-w.replied:
-		t.Fatal("engine:start reply preceded reconciliation completion")
+		t.Fatal("engine:set-port reply preceded reconciliation completion")
 	default:
 	}
 	open()
-	requireGateOpens(t, w.replied, "engine:start reply after reconciliation")
+	requireGateOpens(t, w.replied, "engine:set-port reply after reconciliation")
 	if !w.operationReleased {
-		t.Fatal("engine:start reply preceded settings operation lock release")
+		t.Fatal("engine:set-port reply preceded settings operation lock release")
 	}
 	frames := w.frames()
 	var reply *Message
@@ -83,6 +83,6 @@ func TestEngineStartReplyFollowsSettingsOperationRelease(t *testing.T) {
 		}
 	}
 	if reply == nil || reply.Error != nil {
-		t.Fatalf("engine:start reply = %+v", reply)
+		t.Fatalf("engine:set-port reply = %+v", reply)
 	}
 }

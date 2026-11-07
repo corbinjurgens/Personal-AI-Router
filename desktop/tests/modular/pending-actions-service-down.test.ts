@@ -64,7 +64,7 @@ describe('pending-actions store honours the modular connector status', () => {
 
         usePendingActionsStore
             .getState()
-            .begin({ command: 'toggle', engineType: 'llama-cpp', nodeId: 'node-1' })
+            .begin({ command: 'install', engineType: 'llama-cpp', nodeId: 'node-1' })
 
         expect(
             usePendingActionsStore.getState().getLifecyclePending('node-1', 'llama-cpp')
@@ -76,9 +76,9 @@ describe('pending-actions store honours the modular connector status', () => {
 
         usePendingActionsStore
             .getState()
-            .begin({ command: 'toggle', engineType: 'llama-cpp', nodeId: 'node-1' })
+            .begin({ command: 'install', engineType: 'llama-cpp', nodeId: 'node-1' })
         expect(usePendingActionsStore.getState().getLifecyclePending('node-1', 'llama-cpp')).toBe(
-            'toggle'
+            'install'
         )
 
         pushStatus('disconnected')

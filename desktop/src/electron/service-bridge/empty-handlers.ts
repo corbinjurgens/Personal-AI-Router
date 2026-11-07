@@ -10,7 +10,6 @@ import type {
     JoinRequest,
     JoinRequestsSnapshot
 } from '@/shared/types/cluster'
-import type { EngineType } from '@/shared/types/engines'
 import type { ServiceError } from '@/shared/types/errors'
 import { parseModelCopyCancel, parseModelCopyCapabilities } from './model-copy'
 import {
@@ -150,44 +149,6 @@ async function nodeSettingString(method: string): Promise<string> {
     }
 }
 
-async function toggleLocalEngine(engine: string, engineType: EngineType): Promise<void> {
-    const supervisor = getModularSupervisor()
-    try {
-        // `engine:status` is a fast detect (no lifecycle lock), so awaiting the
-        // read is fine. Lifecycle ops stay fire-and-forget to the renderer. A stop
-        // observes its eventual response because an ownership rejection has no
-        // resolving `engine:state-changed`; start keeps its existing push path.
-        const status = await supervisor.callProcess('broker', 'engine:status', { engine })
-        const running = booleanValue(objectValue(status)?.running)
-        // Synthesize the transitional status the engine-manager never emits, so
-        // the UI shows a spinner immediately instead of sitting idle until the
-        // terminal engine:state-changed lands.
-        getModularBridgeState().beginLocalEngineOp(engineType, running ? 'stopping' : 'starting')
-        supervisor.sendProcess(
-            'broker',
-            running ? 'engine:stop' : 'engine:start',
-            { engine },
-            error => {
-                // A send failure or rejected stop has no resolving
-                // engine:state-changed — clear the optimistic spinner and report.
-                getModularBridgeState().clearPendingEngineOp(engineType)
-                supervisor.reportError(
-                    `Failed to ${running ? 'stop' : 'start'} ${engine}: ${error}`,
-                    'error',
-                    `engine-cmd:toggle:${engine}`
-                )
-            },
-            running
-        )
-    } catch (err) {
-        supervisor.reportError(
-            `Failed to toggle ${engine}: ${getErrorString(err)}`,
-            'error',
-            `engine-cmd:toggle:${engine}`
-        )
-    }
-}
-
 /**
  * Dispatch a UI engine command to the local `nvpair-engine-manager`. Lifecycle and
  * model operations are **fire-and-forget**: the engine-manager runs each in its
@@ -272,9 +233,6 @@ function routeEngineManagerCommand(payload: WsInvokeRequest<'engine:command'>): 
                 true
             )
             break
-        case 'toggle':
-            void toggleLocalEngine(engine, payload.engineType)
-            break
         case 'pullModel':
             // Pulls need UI feedback the backend doesn't emit (progress + failure),
             // so the supervisor owns the optimistic-progress + awaited-completion
@@ -330,20 +288,10 @@ function routeEngineManagerCommand(payload: WsInvokeRequest<'engine:command'>): 
     }
 }
 
-async function toggleRemoteEngine(
-    nodeId: string,
-    engine: string,
-    engineType: EngineType
-): Promise<void> {
-    const supervisor = getModularSupervisor()
-    const running = getModularBridgeState().isRemoteEngineRunning(nodeId, engineType)
-    await supervisor.toggleEngineRemote(nodeId, engine, engineType, running)
-}
-
 /**
  * Dispatch a UI engine command to a remote peer via `nvpair-engine-manager`'s
  * `engine:remote-*` client methods (cluster-scoped mTLS `ec` surface). Install,
- * start/stop, pull, and model load/unload/delete are supported remotely;
+ * pull and model load/unload/delete are supported remotely;
  * uninstall and update remain local-only. Ports are not commands at all — they
  * travel the settings channels, which do reach a peer.
  * (optimistic status, awaited completion, authoritative refresh) lives on the
@@ -363,9 +311,6 @@ function routeRemoteEngineCommand(payload: WsInvokeRequest<'engine:command'>): v
         case 'install':
         case 'installAll':
             void supervisor.installEngineRemote(nodeId, engine, payload.engineType, true)
-            break
-        case 'toggle':
-            void toggleRemoteEngine(nodeId, engine, payload.engineType)
             break
         case 'pullModel':
             if (payload.model) {

@@ -944,22 +944,6 @@ class ModularBridgeState {
         return `${nodeId}:${engineType}`
     }
 
-    /**
-     * Whether a remote peer's proxy-engine is currently reported as running.
-     * Mirrors {@link resolveRemoteEngineStatus}: authoritative facts are used
-     * alone when present, and the coarser per-engine mDNS proxy presence
-     * (`up`/`down`) is the fallback only for a peer with no facts, so the toggle
-     * decision matches the displayed status.
-     */
-    isRemoteEngineRunning(nodeId: string, engineType: EngineType): boolean {
-        const facts = this.remoteEngineFacts.get(this.remoteOpKey(nodeId, engineType))
-        if (facts) return facts.running
-        if (!isProxyEngine(engineType)) return false
-        const node = this.nodes.get(nodeId)
-        if (!node || node.clustered || node.trusted) return false
-        return node.engines[engineType].up
-    }
-
     beginRemoteEngineOp(nodeId: string, engineType: EngineType, status: EngineProcessStatus): void {
         const key = this.remoteOpKey(nodeId, engineType)
         this.pendingRemoteEngineOps.set(key, status)
@@ -1435,16 +1419,14 @@ class ModularBridgeState {
      * cannot tell `stopped` from `not-installed` and never carries the engine's
      * own port. Facts are the peer engine-manager's own truth, so they win
      * outright for status/engine-port; an advertisement with no facts is still
-     * positive evidence of a running engine. A just-started engine lands
-     * immediately because {@link applyRemoteEngineStatusResult} writes the toggle
-     * RPC's `EngineStatus` into facts, and the `pendingRemoteEngineOps` overlay
-     * covers the gap before that.
+     * positive evidence of a running engine. The `pendingRemoteEngineOps`
+     * overlay covers installation until authoritative facts arrive.
      *
      * Returns **null** when nothing is known: no facts and no advertisement. An
      * absent advertisement is not evidence — it cannot distinguish a stopped
      * engine from one that was never installed — so no status is asserted and
      * the renderer renders the peer engine as unavailable rather than as an
-     * installed-but-off toggle.
+     * installed-but-stopped engine.
      *
      * The peer's promoted **proxy** port IS carried in discovery (the `ol`/`lm`
      * advertisement points at the proxy), so it is surfaced as `proxyPort` from
@@ -1544,29 +1526,6 @@ class ModularBridgeState {
             }
             this.emitRemoteEngineStatus(nodeId, engine)
         }
-    }
-
-    /**
-     * Apply the single `EngineStatus` returned by `engine:remote-start` /
-     * `engine:remote-stop`, so a toggled remote engine's resolved run state lands
-     * immediately instead of waiting on the next facts poll or mDNS flip.
-     */
-    applyRemoteEngineStatusResult(
-        nodeId: string,
-        engineType: EngineType,
-        result: JsonValue | undefined
-    ): void {
-        const obj = objectValue(result)
-        if (!obj) return
-        this.remoteEngineFacts.set(this.remoteOpKey(nodeId, engineType), {
-            installed: booleanValue(obj.installed),
-            running: booleanValue(obj.running),
-            healthy: booleanValue(obj.healthy),
-            port: numberValue(obj.port),
-            terminationVerified: obj.running === false && obj.terminationVerified === true,
-            ...reportedBuild(obj.buildInfo, obj.buildId)
-        })
-        this.emitRemoteEngineStatus(nodeId, engineType)
     }
 
     /** Forget a node's authoritative remote-engine facts (on eviction/leave). */
@@ -2012,10 +1971,9 @@ class ModularBridgeState {
     /**
      * Resolve the local node's status for an engine. `nvpair-engine-manager` is the
      * sole authority on the local engine's install/running state — we do NOT let
-     * a proxy's discovery `up` flag override it, so the UI's run state always
-     * matches what the toggle (`engine:status`) decides on. An externally-running
-     * engine the manager hasn't adopted therefore shows as `stopped` until the
-     * user starts it (which adopts it); discovery only contributes models. The
+     * a proxy's discovery `up` flag override it. An externally-running engine
+     * the manager hasn't adopted shows as `stopped` until an internal lifecycle
+     * operation adopts it; discovery only contributes models. The
      * backend has no managed/external distinction, so we never synthesize
      * `installType` — it reports install/uninstall/stop failures via
      * errors:report.

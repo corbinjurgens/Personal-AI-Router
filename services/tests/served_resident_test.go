@@ -572,7 +572,7 @@ func newSRProcessFixtureWithRetry(t *testing.T, secondaryEnabled bool, retention
 	request.Settings = preview.Settings.Clone()
 	request.ExpectedRevision = preview.Revision
 	f.call(t, "engine:apply-settings", request, nil)
-	f.call(t, "engine:start", map[string]string{"engine": "llamacpp"}, nil)
+	f.call(t, "engine:install", map[string]any{"engine": "llamacpp", "start": true}, nil)
 	f.retainRuntime(t)
 	snapshot := f.snapshot(t)
 	if snapshot.Serving == nil || len(snapshot.Serving.LaunchValidated) != 2 {
@@ -595,7 +595,7 @@ func newSRProcessFixtureWithRetry(t *testing.T, secondaryEnabled bool, retention
 	f.stop(t)
 	jointWriteJSON(t, filepath.Join(f.app, "local-qualification.json"), map[string]any{"version": 2, "qualifications": qualifications})
 	f.start(t)
-	f.call(t, "engine:start", map[string]string{"engine": "llamacpp"}, nil)
+	f.call(t, "engine:install", map[string]any{"engine": "llamacpp", "start": true}, nil)
 	f.retainRuntime(t)
 	neEventually(t, "two fixture-only strict capabilities", neCallBudget, func() bool {
 		models := f.models(t)
@@ -1262,7 +1262,7 @@ func newSRWorkerLossFixture(t *testing.T, mode string) *srProcessFixture {
 	// been reaped, including a fatal assertion at the gated loss boundary.
 	t.Cleanup(func() { f.relay.resume(); f.relay.resumeCompletion(); f.stop(t) })
 	f.start(t)
-	f.call(t, "engine:start", map[string]string{"engine": "llamacpp"}, nil)
+	f.call(t, "engine:install", map[string]any{"engine": "llamacpp", "start": true}, nil)
 	f.retainRuntime(t)
 	neEventually(t, "relayed qualified source", neCallBudget, func() bool { return neCapability(f.models(t)) != nil })
 	return f
@@ -1910,7 +1910,7 @@ func TestServedResidentProcessCrossEngineLastSlot(t *testing.T) {
 	f := newSRSecondaryProcessFixture(t)
 	// Observe the owned fake's actual launch digest before writing its synthetic
 	// qualification. The proxy reads that registry only at process startup.
-	f.call(t, "engine:start", map[string]string{"engine": "llamacpp-custom"}, nil)
+	f.call(t, "engine:install", map[string]any{"engine": "llamacpp-custom", "start": true}, nil)
 	identity := regexp.MustCompile(`engine identity engine=llamacpp-custom run_id=(run-[0-9a-f]+) launch_digest=([0-9a-f]{64}) models_with_digest=1`)
 	var launch string
 	neEventually(t, "owned descriptor engine fixture content identity", neCallBudget, func() bool {
@@ -1951,9 +1951,9 @@ func TestServedResidentProcessCrossEngineLastSlot(t *testing.T) {
 	registry.Qualifications = append(registry.Qualifications, qualification)
 	jointWriteJSON(t, path, registry)
 	f.start(t)
-	f.call(t, "engine:start", map[string]string{"engine": "llamacpp"}, nil)
+	f.call(t, "engine:install", map[string]any{"engine": "llamacpp", "start": true}, nil)
 	f.retainRuntime(t)
-	f.call(t, "engine:start", map[string]string{"engine": "llamacpp-custom"}, nil)
+	f.call(t, "engine:install", map[string]any{"engine": "llamacpp-custom", "start": true}, nil)
 	var capability nodepolicy.StrictAdmissionModel
 	neEventually(t, "qualified descriptor engine destination after registry restart", neCallBudget, func() bool {
 		models := f.models(t)
@@ -2226,11 +2226,16 @@ func TestServedResidentProcessVeto(t *testing.T) {
 		}
 		srAssertNoEffects(t, before, f.control(t, ""))
 	})
-	t.Run("local Off blocks desire without restarting engine", func(t *testing.T) {
+	t.Run("saved local Off blocks desire after restart", func(t *testing.T) {
 		f := newSRProcessFixture(t)
 		f.resident(t, neModel)
 		f.entry(t, neModel, nodepolicy.ModelStateSatisfied, "")
-		f.call(t, "engine:stop", map[string]string{"engine": "llamacpp"}, nil)
+		f.stop(t)
+		jointWriteJSON(t, filepath.Join(f.app, "engine-bin", "engine-state.json"), map[string]any{
+			"engines": map[string]bool{"llamacpp": false},
+			"offBy":   map[string]string{"llamacpp": "local"},
+		})
+		f.start(t)
 		starts := len(f.starts(t))
 		f.entry(t, neModel, nodepolicy.ModelStateBlocked, nodepolicy.ModelReasonEngineOff)
 		if len(f.starts(t)) != starts {
@@ -2251,7 +2256,7 @@ func TestServedResidentProcessRecovery(t *testing.T) {
 		}
 		f.stop(t)
 		f.start(t)
-		f.call(t, "engine:start", map[string]string{"engine": "llamacpp"}, nil)
+		f.call(t, "engine:install", map[string]any{"engine": "llamacpp", "start": true}, nil)
 		f.retainRuntime(t)
 		f.entry(t, neModel, nodepolicy.ModelStateSatisfied, "")
 		neEventually(t, "new source identity", neCallBudget, func() bool {
@@ -2585,7 +2590,7 @@ func TestServedResidentProcessLostManagerCompletion(t *testing.T) {
 	// clears uncertainty in the old run.
 	f.stop(t)
 	f.start(t)
-	f.call(t, "engine:start", map[string]string{"engine": "llamacpp"}, nil)
+	f.call(t, "engine:install", map[string]any{"engine": "llamacpp", "start": true}, nil)
 	f.retainRuntime(t)
 	f.entry(t, neModel, nodepolicy.ModelStateSatisfied, "")
 	recovered := f.relay.wait(t, "replacement manager supplies a fresh loaded observation", func(event srRelayEvent) bool {

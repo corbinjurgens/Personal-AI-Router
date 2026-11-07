@@ -1566,7 +1566,6 @@ describe('routing settings editor', () => {
     const set = vi.fn<INodePolicyApi['set']>()
     const setAvailability = vi.fn<INodePolicyApi['setAvailability']>()
     const getSettings = vi.fn<IEngineApi['getSettings']>()
-    const toggleEngine = vi.fn<IEngineApi['toggle']>()
     const loadModel = vi.fn<IEngineApi['loadModel']>()
     const unloadModel = vi.fn<IEngineApi['unloadModel']>()
     let emitPolicy: (change: NodePolicyChange) => void
@@ -1625,12 +1624,10 @@ describe('routing settings editor', () => {
             requestId: ''
         }
         getSettings.mockReset().mockResolvedValue(settings)
-        toggleEngine.mockReset()
         loadModel.mockReset()
         unloadModel.mockReset()
         const api = createPairApi(transport)
         api.engines.getSettings = getSettings
-        api.engines.toggle = toggleEngine
         api.engines.loadModel = loadModel
         api.engines.unloadModel = unloadModel
         api.nodePolicy.get = get
@@ -1748,7 +1745,6 @@ describe('routing settings editor', () => {
             for (const [request] of getSettings.mock.calls)
                 expect(request).toEqual({ nodeId: SELF, engine: 'llamacpp' })
             expect(setAvailability).not.toHaveBeenCalled()
-            expect(toggleEngine).not.toHaveBeenCalled()
             expect(loadModel).not.toHaveBeenCalled()
             expect(unloadModel).not.toHaveBeenCalled()
         })
@@ -1820,7 +1816,6 @@ describe('routing settings editor', () => {
             expect(button('Save').disabled).toBe(true)
             expect(set).not.toHaveBeenCalled()
             expect(setAvailability).not.toHaveBeenCalled()
-            expect(toggleEngine).not.toHaveBeenCalled()
             expect(loadModel).not.toHaveBeenCalled()
             expect(unloadModel).not.toHaveBeenCalled()
         })

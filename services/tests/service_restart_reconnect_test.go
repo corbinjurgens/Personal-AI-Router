@@ -185,7 +185,7 @@ func TestServiceRestartReconnect(t *testing.T) {
 		t.Fatal("initial retained-session policy differs from persisted policy")
 	}
 
-	// Identify only our loopback HTTP fixture, without engine:start or a child
+	// Identify only our loopback HTTP fixture, without engine activation or a child
 	// runtime. The ordinary public model read is the adoption positive control.
 	var status struct {
 		Running bool `json:"running"`

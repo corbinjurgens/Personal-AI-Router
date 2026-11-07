@@ -175,7 +175,7 @@ For each node that should serve a model:
 4. Download a model and wait for the operation to complete.
 5. Load the model when the engine requires an explicit load step.
 
-![A node card with Engine settings expanded, showing the engine's install state, its start switch, and its port.](assets/onboarding/getting-started/06-engine-settings.png)
+![A node card with Engine settings expanded.](assets/onboarding/getting-started/06-engine-settings.png)
 
 ![An engine's model list on the node card, with one model pulling and its progress shown.](assets/onboarding/getting-started/07-add-model.png)
 
@@ -198,7 +198,7 @@ see [Model sources](../services/nvpair-engine-manager/README.md#model-sources).
 
 Refer to [Managing engines](engine-lifecycle.mdx) for details about:
 
-- Installing, starting, stopping, updating, and uninstalling engines.
+- Installing, configuring, updating, and uninstalling engines.
 - Managing engines in a cluster.
 - Quitting or relaunching PAIR.
 
@@ -228,7 +228,7 @@ does not replace the literal role or colon name sent to PAIR. See
 Select **Endpoints** in the top toolbar to open the **API endpoints** window. It
 lists one copyable `http://127.0.0.1:<port>` URL per engine. Copy the one for the
 engine you prepared. If it says **No engines are running**, return to step 4 and
-start an engine.
+check engine state, service errors and node availability.
 
 ![The API endpoints window listing a copyable local URL for each running engine.](assets/onboarding/getting-started/08-api-endpoints.png)
 
@@ -515,8 +515,8 @@ activity you can filter and inspect like any other. A toast tracks the run and i
 where you stop it early.
 
 It needs what any request needs: an engine running with a text-generation model
-available. If nothing local qualifies, PAIR tells you to start an engine and try
-again rather than starting a run that cannot go anywhere.
+available. If nothing local qualifies, check engine state and node availability
+before trying again.
 
 It is a traffic generator, not a benchmark. It does not produce a score, show
 prompts or responses, or log prompts or responses. The run is local to the

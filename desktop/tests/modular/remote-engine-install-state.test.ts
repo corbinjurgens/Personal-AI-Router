@@ -40,7 +40,6 @@ describe('remote engine install state', () => {
         // Discovery alone creates the node with empty engine presence. Without
         // facts that must not become a confident "stopped" toggle.
         expect(llamaCPPStatus(remoteNodeId)).toBeUndefined()
-        expect(state.isRemoteEngineRunning(remoteNodeId, 'llama-cpp')).toBe(false)
     })
 
     it('maps authoritative installed:false to not-installed', () => {
@@ -81,7 +80,6 @@ describe('remote engine install state', () => {
             enginePort: null,
             proxyPort: null
         })
-        expect(state.isRemoteEngineRunning(remoteNodeId, 'llama-cpp')).toBe(false)
     })
 
     it('maps authoritative installed:true running:false to stopped', () => {
@@ -142,7 +140,6 @@ describe('remote engine install state', () => {
             }
         })
 
-        expect(state.isRemoteEngineRunning(remoteNodeId, 'llama-cpp')).toBe(true)
         expect(llamaCPPStatus(remoteNodeId)).toMatchObject({
             processStatus: 'running',
             enginePort: null,
@@ -184,7 +181,6 @@ describe('remote engine install state', () => {
         })
 
         expect(llamaCPPStatus(remoteNodeId)).toBeUndefined()
-        expect(state.isRemoteEngineRunning(remoteNodeId, 'llama-cpp')).toBe(false)
     })
 
     it('retracts a stale stopped projection when authoritative facts say not installed', () => {
