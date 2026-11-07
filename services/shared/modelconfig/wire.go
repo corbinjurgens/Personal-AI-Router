@@ -462,9 +462,6 @@ func shapeFields(t reflect.Type, fields map[string]reflect.StructField, depth in
 	}
 	for i := 0; i < t.NumField(); i++ {
 		field := t.Field(i)
-		if field.PkgPath != "" {
-			continue
-		}
 		name := strings.Split(field.Tag.Get("json"), ",")[0]
 		if name == "-" {
 			continue
@@ -472,6 +469,11 @@ func shapeFields(t reflect.Type, fields map[string]reflect.StructField, depth in
 		kind := field.Type
 		if kind.Kind() == reflect.Pointer {
 			kind = kind.Elem()
+		}
+		// encoding/json also exposes exported members of private embedded
+		// structs, while ordinary private fields remain inaccessible.
+		if field.PkgPath != "" && (!field.Anonymous || kind.Kind() != reflect.Struct) {
+			continue
 		}
 		if field.Anonymous && name == "" && kind.Kind() == reflect.Struct {
 			if err := shapeFields(kind, fields, depth+1); err != nil {

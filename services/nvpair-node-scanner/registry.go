@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"slices"
 	"sync"
 
@@ -32,6 +33,11 @@ type registry struct {
 	// direct-connect link works only for the machine on its far end.
 	ips      []string
 	services map[noderec.ServiceKey]int
+	// nodeInfoContext identifies the current local ni registration and stamped
+	// identity. Retirement cancels reads even if the same port is registered
+	// again before their response arrives. It is independent of LAN addresses.
+	nodeInfoContext context.Context
+	cancelNodeInfo  context.CancelFunc
 }
 
 func newRegistry(hostUUID, clusterUUID string, ips []string) *registry {
@@ -62,6 +68,11 @@ func (r *registry) register(p noderec.RegisterParams) bool {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if p.Service == noderec.ServiceNodeInfo {
+		// A repeated registration may be a replacement process at the same port.
+		// TXT publication remains idempotent, but in-flight authority is retired.
+		r.retireNodeInfoLocked()
+	}
 	if r.services[p.Service] == p.Port {
 		return false
 	}
@@ -76,6 +87,9 @@ func (r *registry) unregister(s noderec.ServiceKey) bool {
 	if _, ok := r.services[s]; !ok {
 		return false
 	}
+	if s == noderec.ServiceNodeInfo {
+		r.retireNodeInfoLocked()
+	}
 	delete(r.services, s)
 	return true
 }
@@ -89,8 +103,42 @@ func (r *registry) setIdentity(hostUUID, clusterUUID string, ips []string) bool 
 	if r.hostUUID == hostUUID && r.cluUUID == clusterUUID && slices.Equal(r.ips, ips) {
 		return false
 	}
+	if r.hostUUID != hostUUID || r.cluUUID != clusterUUID {
+		r.retireNodeInfoLocked()
+	}
 	r.hostUUID, r.cluUUID, r.ips = hostUUID, clusterUUID, ips
 	return true
+}
+
+type selfNodeInfoAuthority struct {
+	hostUUID, clusterUUID string
+	port                  int
+	incarnation           context.Context
+}
+
+// selfNodeInfo snapshots only this scanner's stamped identity and broker-fed
+// service registration. A directory, mDNS claim or caller-supplied address
+// cannot create local authority. The incarnation is cancelled on retirement.
+func (r *registry) selfNodeInfo(hostUUID string) (selfNodeInfoAuthority, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	port := r.services[noderec.ServiceNodeInfo]
+	if hostUUID == "" || hostUUID != r.hostUUID || port <= 0 || port > 65535 {
+		return selfNodeInfoAuthority{}, false
+	}
+	if r.nodeInfoContext == nil {
+		r.nodeInfoContext, r.cancelNodeInfo = context.WithCancel(context.Background())
+	}
+	return selfNodeInfoAuthority{r.hostUUID, r.cluUUID, port, r.nodeInfoContext}, true
+}
+
+// retireNodeInfoLocked is called with mu held at the registration/identity
+// mutation, before another reader can acquire the replacement incarnation.
+func (r *registry) retireNodeInfoLocked() {
+	if r.cancelNodeInfo != nil {
+		r.cancelNodeInfo()
+	}
+	r.nodeInfoContext, r.cancelNodeInfo = nil, nil
 }
 
 // setAddresses updates only the ranked address list, for the periodic re-rank

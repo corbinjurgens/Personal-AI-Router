@@ -123,6 +123,15 @@ func TestDiagnosticPreviewAllowsUnobservedAllocationBeforeConsent(t *testing.T) 
 	if identity.Validate() == nil {
 		t.Fatal("unobserved allocation accepted as realized evidence")
 	}
+	p.PlannedPerSlotContext, p.PlannedSlots = 4096, 2
+	p.LowPromptTokens, p.HighPromptTokens = 512, 3952
+	if err := p.Validate(); err != nil {
+		t.Fatalf("finite planned targets without realized allocation: %v", err)
+	}
+	p.PlannedSlots = 9
+	if p.Validate() == nil {
+		t.Fatal("preview accepted an unsupported planned slot count")
+	}
 }
 
 func TestDiagnosticMeasuredValidation(t *testing.T) {
@@ -217,6 +226,36 @@ func TestDiagnosticStrictRoundTripFlattensIdentity(t *testing.T) {
 		raw := strings.TrimSuffix(string(data), "}") + change + "}"
 		if err := DecodeStrict([]byte(raw), &got); err == nil {
 			t.Fatal("strict decode accepted duplicate or unknown embedded field")
+		}
+	}
+}
+
+func TestDiagnosticStrictRoundTripFlattensPrivateAuthority(t *testing.T) {
+	type authority struct {
+		RunID  string `json:"runId"`
+		Token  string `json:"token"`
+		hidden string
+	}
+	type request struct {
+		authority
+		Engine string `json:"engine"`
+	}
+	want := request{authority: authority{RunID: "synthetic-run", Token: "synthetic-authority"}, Engine: "llamacpp"}
+	raw, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("encode embedded authority: %v", err)
+	}
+	var got request
+	if err := DecodeStrict(raw, &got); err != nil {
+		t.Fatalf("decode embedded authority: %v", err)
+	}
+	if got != want {
+		t.Fatal("embedded authority did not round trip")
+	}
+	for _, field := range []string{`,"runId":"other"`, `,"hidden":"not exported"`, `,"unknown":true`} {
+		invalid := strings.TrimSuffix(string(raw), "}") + field + "}"
+		if err := DecodeStrict([]byte(invalid), &got); err == nil {
+			t.Fatal("strict authority decode accepted duplicate or unknown fields")
 		}
 	}
 }

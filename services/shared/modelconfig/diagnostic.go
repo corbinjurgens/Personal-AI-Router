@@ -162,17 +162,19 @@ func (i DiagnosticIdentity) validate(realized bool) error {
 type DiagnosticPreview struct {
 	DiagnosticPreviewRequest
 	DiagnosticIdentity
-	PreviewID        string               `json:"previewId"`
-	LowPromptTokens  int32                `json:"lowPromptTokens"`
-	HighPromptTokens int32                `json:"highPromptTokens"`
-	GenerateTokens   int32                `json:"generateTokens"`
-	TimeLimitSeconds int32                `json:"timeLimitSeconds"`
-	UnloadModels     []DiagnosticModelRef `json:"unloadModels"`
-	ReloadedAfter    []DiagnosticModelRef `json:"reloadedAfter"`
-	DrainEngines     []string             `json:"drainEngines"`
-	StartsEngine     bool                 `json:"startsEngine"`
-	Warnings         []string             `json:"warnings"`
-	ExpiresAt        string               `json:"expiresAt"`
+	PreviewID             string               `json:"previewId"`
+	PlannedPerSlotContext int32                `json:"plannedPerSlotContext"`
+	PlannedSlots          int32                `json:"plannedSlots"`
+	LowPromptTokens       int32                `json:"lowPromptTokens"`
+	HighPromptTokens      int32                `json:"highPromptTokens"`
+	GenerateTokens        int32                `json:"generateTokens"`
+	TimeLimitSeconds      int32                `json:"timeLimitSeconds"`
+	UnloadModels          []DiagnosticModelRef `json:"unloadModels"`
+	ReloadedAfter         []DiagnosticModelRef `json:"reloadedAfter"`
+	DrainEngines          []string             `json:"drainEngines"`
+	StartsEngine          bool                 `json:"startsEngine"`
+	Warnings              []string             `json:"warnings"`
+	ExpiresAt             string               `json:"expiresAt"`
 }
 
 func (p DiagnosticPreview) Clone() DiagnosticPreview {
@@ -190,8 +192,11 @@ func (p DiagnosticPreview) Validate() error {
 	if err := p.DiagnosticIdentity.ValidateRequested(); err != nil {
 		return err
 	}
-	knownTargets := p.PerSlotContext >= 208 && p.Slots >= 1 && p.HighPromptTokens == p.PerSlotContext-144 && p.LowPromptTokens == min(int32(512), p.HighPromptTokens/2)
-	unknownTargets := p.PerSlotContext == 0 && p.LowPromptTokens == 0 && p.HighPromptTokens == 0
+	knownTargets := p.PlannedPerSlotContext >= 208 && p.PlannedSlots >= 1 && p.HighPromptTokens == p.PlannedPerSlotContext-144 && p.LowPromptTokens == min(int32(512), p.HighPromptTokens/2)
+	unknownTargets := p.PlannedPerSlotContext == 0 && p.LowPromptTokens == 0 && p.HighPromptTokens == 0
+	if p.PlannedSlots < 0 || p.PlannedSlots > 8 {
+		return fmt.Errorf("diagnostic: unsupported planned slots")
+	}
 	if p.PreviewID == "" || p.GenerateTokens != 128 || (!knownTargets && !unknownTargets) || p.TimeLimitSeconds <= 0 || p.TimeLimitSeconds > 1200 {
 		return fmt.Errorf("diagnostic: invalid preview targets")
 	}
