@@ -879,7 +879,7 @@ func TestTypedLlamaExtraOptions(t *testing.T) {
 	for _, tc := range []struct{ key, value, reason string }{
 		{"ctx-size", "4096", "Use the typed field for ctx-size."},
 		{"alias", "x", "PAIR owns alias."},
-		{"mmproj-auto", "false", "mmproj-auto changes allocation and is not accepted."},
+		{"mmproj-auto", "true", "Automatic projector selection must be disabled"},
 		{"moe-cache-mib", "invalid", "moe-cache-mib"},
 		{"tensor-split", "1,1", "Reviewed Auto chooses the GPU; remove tensor-split or choose another GPU mode."},
 	} {
@@ -897,15 +897,16 @@ func TestTypedLlamaExtraOptions(t *testing.T) {
 }
 
 func TestConvertTypedLlamaExtraOptions(t *testing.T) {
-	extras := map[string]string{"spec-type": "draft-mtp", "moe-cache-mib": "2048", "expert-cache": "auto", "device": "CUDA0,CUDA1", "split-mode": "layer"}
+	extras := map[string]string{"spec-type": "draft-mtp", "moe-cache-mib": "2048", "expert-cache": "auto", "device": "CUDA0,CUDA1", "split-mode": "layer", "mmproj-auto": "false"}
 	r, err := convertTypedLlamaOptions("model", extras)
 	if err != nil || !reflect.DeepEqual(r.ExtraOptions, extras) {
 		t.Fatalf("converted=%+v err=%v", r, err)
 	}
-	for _, key := range []string{"mmproj-auto", "alias"} {
-		if _, err := convertTypedLlamaOptions("model", map[string]string{key: "false"}); err == nil || !strings.Contains(err.Error(), key) {
-			t.Fatalf("%s refusal=%v", key, err)
-		}
+	if _, err := convertTypedLlamaOptions("model", map[string]string{"alias": "false"}); err == nil || !strings.Contains(err.Error(), "alias") {
+		t.Fatalf("alias refusal=%v", err)
+	}
+	if _, err := convertTypedLlamaOptions("model", map[string]string{"mmproj-auto": "true"}); err == nil {
+		t.Fatal("conversion accepted automatic projector selection")
 	}
 }
 
