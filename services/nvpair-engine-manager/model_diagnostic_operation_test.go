@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -501,6 +502,39 @@ func TestModelDiagnosticUnpricedLoadsExerciseWithoutPublicBufferSamples(t *testi
 	test("GPU selection", func(f inspectionFixture) {
 		f.st.plat.Runtime.ModelLoads[0].Requested.ExtraOptions = map[string]string{"device": "CUDA7"}
 	})
+}
+
+func TestModelDiagnosticWaitsForOwnedLoadFrames(t *testing.T) {
+	f, manager, op, fixture := modelDiagnosticRunningOperationFixture(t)
+	load := fixture.afterLoad
+	fixture.afterLoad = func() {}
+	var reads atomic.Int32
+	fixture.beforeProps = func() {
+		if reads.Add(1) == 2 {
+			load()
+		}
+	}
+	manager.runDiagnosticOperation(op, false)
+	status := f.ex.diagnosticRunStatus(op.params.RunID)
+	if status.Outcome != "completed" || !status.WorkStopped || status.Identity == nil || status.Low == nil || status.High == nil {
+		t.Fatalf("owned load frames arriving after HTTP completion were refused: %+v", status)
+	}
+}
+
+func TestModelDiagnosticCancellationWhileWaitingForOwnedLoadFrames(t *testing.T) {
+	f, manager, op, fixture := modelDiagnosticRunningOperationFixture(t)
+	fixture.afterLoad = func() {}
+	var reads atomic.Int32
+	fixture.beforeProps = func() {
+		if reads.Add(1) == 2 {
+			op.cancel()
+		}
+	}
+	manager.runDiagnosticOperation(op, false)
+	status := f.ex.diagnosticRunStatus(op.params.RunID)
+	if status.Outcome != "cancelled" || status.Reason != "cancelled" || !status.WorkStopped {
+		t.Fatalf("pending load cancellation lost its reason or stop proof: %+v", status)
+	}
 }
 
 func TestModelDiagnosticRefusesMissingIncompleteStaleOrWrongLoadBuffers(t *testing.T) {

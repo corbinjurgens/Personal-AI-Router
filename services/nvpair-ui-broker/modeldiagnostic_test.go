@@ -124,6 +124,18 @@ func TestModelDiagnosticSavedPauseGate(t *testing.T) {
 	test("Halt refuses", nodepolicy.PauseImmediate, true)
 }
 
+func TestModelDiagnosticManagerCompletionRetainsPublicCleanupPhase(t *testing.T) {
+	b, _, op := diagnosticBrokerFixture(t)
+	run := op.run.Clone()
+	run.Phase, run.Outcome = "done", "completed"
+	b.setDiagnosticRun(op, run)
+	got, err := b.diagnosticStatus(run.RunID)
+	if err != nil || got == nil || got.Phase != "restoring" || got.Outcome != "completed" || got.Result != nil {
+		t.Fatalf("manager completion published premature public terminal result: run=%+v error=%v", got, err)
+	}
+	requireDiagnosticHeld(t, b, op)
+}
+
 func TestModelDiagnosticStartWithoutConsentHasNoEffects(t *testing.T) {
 	b, _ := newPolicyBroker(t)
 	peer, fake := newFakeWorkerPipe(t)
@@ -552,17 +564,8 @@ func TestModelDiagnosticPrivateObservationCannotRelayFromClient(t *testing.T) {
 
 func TestModelDiagnosticConfiguredPausePreviewsUnknownNativeAllocation(t *testing.T) {
 	b, _ := newPolicyBroker(t)
-	b.scannerSource = &scannerProcess{}
-	b.telemetry = newTelemetryCache()
 	now := time.Now().UTC()
-	boot, err := noderec.MemoryBootClock()
-	if err != nil {
-		t.Fatal(err)
-	}
-	input := noderec.NodeTelemetry{HostUUID: b.nodeID, Memory: diagnosticMemoryFixture(now, 9000), MemoryHop: noderec.NewMemoryHop("scanner", noderec.MemoryBootClock), MemoryRequest: &noderec.MemoryRequestContext{Generation: "1", RequestBootNS: strconv.FormatUint(boot, 10), VerifiedSelfLoopback: true}}
-	if _, ok := b.telemetry.Upsert(sourceScanner, input, now); !ok {
-		t.Fatal("fresh local sample refused")
-	}
+	seedDiagnosticTelemetry(t, b, now, diagnosticMemoryFixture(now, 9000))
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
 	r.current.PauseMode = nodepolicy.PauseConfigured

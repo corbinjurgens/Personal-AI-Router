@@ -181,13 +181,18 @@ func seedDiagnosticTelemetry(t *testing.T, b *Broker, at time.Time, memory *node
 func ingestDiagnosticTelemetry(b *Broker, at time.Time, memory *noderec.MemoryObservation) error {
 	if b.telemetry == nil {
 		b.telemetry = newTelemetryCache()
+		// These synthetic requests can be closer together than one Windows
+		// boot-clock tick. Give the fixture its own monotonic clock so distinct
+		// requests retain strictly ordered timestamps under the replay guard.
+		var clock atomic.Uint64
+		b.telemetry.clock = func() (uint64, error) { return clock.Add(1), nil }
 		b.scannerSource = &scannerProcess{}
 	}
-	boot, err := noderec.MemoryBootClock()
+	boot, err := b.telemetry.clock()
 	if err != nil {
 		return err
 	}
-	input := noderec.NodeTelemetry{HostUUID: b.nodeID, Memory: memory, MemoryHop: noderec.NewMemoryHop("scanner", noderec.MemoryBootClock), MemoryRequest: &noderec.MemoryRequestContext{Generation: "1", RequestBootNS: strconv.FormatUint(boot, 10), VerifiedSelfLoopback: true}}
+	input := noderec.NodeTelemetry{HostUUID: b.nodeID, Memory: memory, MemoryHop: noderec.NewMemoryHop("scanner", b.telemetry.clock), MemoryRequest: &noderec.MemoryRequestContext{Generation: "1", RequestBootNS: strconv.FormatUint(boot, 10), VerifiedSelfLoopback: true}}
 	if _, ok := b.telemetry.Upsert(sourceScanner, input, at); !ok {
 		return fmt.Errorf("fresh local telemetry refused")
 	}

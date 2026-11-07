@@ -24,6 +24,8 @@ import (
 	"nvpair-shared/modelconfig"
 )
 
+var errModelBufferRealizationPending = errors.New("model buffer load frames pending")
+
 // Realization is read from the live capture, never from persisted samples. The
 // parser must have joined a complete load/reservation on one exact child. This
 // private path also serves unpriced loads without publishing a buffer sample.
@@ -56,7 +58,19 @@ func (e *Executor) modelBufferRealization(ctx context.Context, st *engineState, 
 			selected = child
 		}
 	}
-	if c.retired || c.clockUncertain || time.Now().UnixNano() < c.wallHigh || selected == nil || selected.startedAt.Before(notBefore) || selected.poisoned || selected.sleeping || !selected.loading || !selected.ready || !modelBufferPlacementComplete(selected.parser) {
+	if c.retired || c.clockUncertain || time.Now().UnixNano() < c.wallHigh {
+		c.mu.Unlock()
+		return "", nil, nil, errModelDiagnosticIdentity
+	}
+	if selected == nil && len(c.children) != 0 {
+		c.mu.Unlock()
+		return "", nil, nil, errModelDiagnosticIdentity
+	}
+	if selected == nil || !selected.poisoned && !selected.sleeping && (!selected.loading || !selected.ready) {
+		c.mu.Unlock()
+		return "", nil, nil, errModelBufferRealizationPending
+	}
+	if selected.startedAt.Before(notBefore) || selected.poisoned || selected.sleeping || !modelBufferPlacementComplete(selected.parser) {
 		c.mu.Unlock()
 		return "", nil, nil, errModelDiagnosticIdentity
 	}

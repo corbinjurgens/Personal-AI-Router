@@ -336,6 +336,12 @@ func TestModelDiagnosticInspectionSuppliesSameIdentityToMeasuredOverlay(t *testi
 	if inspected.Estimate.EstimateSource == nil || inspected.Estimate.EstimateSource.Kind != "measured" || inspected.Estimate.EstimateSource.Revision != measured.RunID {
 		t.Fatalf("estimate source=%+v", inspected.Estimate.EstimateSource)
 	}
+	f.ex.emit = nil
+	f.ex.markStopped(f.st, f.request.Engine)
+	stopped, err := f.ex.inspectModel(ctx, f.request, false)
+	if err != nil || len(stopped.MemoryProfiles) != 1 || !stopped.MemoryProfiles[0].Current || stopped.Estimate.EstimateSource == nil || stopped.Estimate.EstimateSource.Kind != "measured" {
+		t.Fatalf("confirmed stop withdrew current measured overlay: profiles=%+v source=%+v error=%v", stopped.MemoryProfiles, stopped.Estimate.EstimateSource, err)
+	}
 	hardware := diagnosticTestHardware()
 	hardware.CPUModel = "replacement CPU"
 	changed, err := f.ex.inspectModel(withDiagnosticHardware(ctx, hardware), f.request, false)
@@ -665,6 +671,7 @@ func TestModelDiagnosticExecutionKeyLiveRealizationSupersedesHistory(t *testing.
 
 func TestDiagnosticReservationDurabilityFailureKeepsAdmissionHeld(t *testing.T) {
 	f, p := diagnosticReservationFixture(t)
+	f.ex.emit = nil
 	previous := engineFileReplacer
 	engineFileReplacer = durablefile.Replacer{SyncDir: func(string) error { return errors.New("synthetic directory sync failure") }}
 	t.Cleanup(func() { engineFileReplacer = previous })

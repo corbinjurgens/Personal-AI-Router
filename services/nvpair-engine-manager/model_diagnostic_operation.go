@@ -972,8 +972,39 @@ func (e *Executor) diagnosticLoadedChild(ctx context.Context, op *modelDiagnosti
 	if err := check(ctx); err != nil {
 		return child, expected, err
 	}
-	observed, err := e.diagnosticReadLoad(ctx, st, port, child.ModelID, op.reservation.TargetMemory, op.loadStarted)
+	// HTTP load completion and the owned stdout/stderr pumps are independent.
+	// Wait only for pending capture frames, keeping all identity refusals and
+	// the same process/load boundary on every attempt.
+	loadCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	var observed diagnosticLoadObservation
+	var err error
+	for {
+		observed, err = e.diagnosticReadLoad(loadCtx, st, port, child.ModelID, op.reservation.TargetMemory, op.loadStarted)
+		if !errors.Is(err, errModelBufferRealizationPending) {
+			break
+		}
+		select {
+		case <-loadCtx.Done():
+			if err := ctx.Err(); err != nil {
+				return child, expected, err
+			}
+			return child, expected, errModelDiagnosticIdentity
+		case <-ticker.C:
+		}
+		if err := check(loadCtx); err != nil {
+			if loadCtx.Err() != nil && ctx.Err() == nil {
+				return child, expected, errModelDiagnosticIdentity
+			}
+			return child, expected, err
+		}
+	}
 	if err != nil {
+		if loadCtx.Err() != nil && ctx.Err() == nil {
+			return child, expected, errModelDiagnosticIdentity
+		}
 		return child, expected, err
 	}
 	expected = observed
@@ -1046,8 +1077,11 @@ func (e *Executor) diagnosticReadLoad(ctx context.Context, st *engineState, port
 	st.mu.Lock()
 	current = capture.currentLocked(st)
 	st.mu.Unlock()
-	if !current || boundary != capture.captureBoundary() {
+	if !current {
 		return observed, errModelDiagnosticIdentity
+	}
+	if boundary != capture.captureBoundary() {
+		return observed, errModelBufferRealizationPending
 	}
 	return observed, err
 }
