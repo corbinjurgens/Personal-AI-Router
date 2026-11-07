@@ -9,6 +9,9 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -52,15 +55,13 @@ func TestReaderCancelsInheritedPipeRead(t *testing.T) {
 	if err := file.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		t.Fatalf("inherited pipe is not pollable: %v", err)
 	}
-	started := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
-		close(started)
 		var b [1]byte
 		_, err := owned.Read(b[:])
 		done <- err
 	}()
-	<-started
+	awaitBlockedRead(t, done, "TestReaderCancelsInheritedPipeRead.func")
 	if err := owned.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -72,6 +73,91 @@ func TestReaderCancelsInheritedPipeRead(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("close did not interrupt inherited pipe read")
 	}
+}
+
+// Observe the read goroutine parked in the runtime poller or a native read,
+// rather than a signal immediately before Read or an assumed scheduling delay.
+func awaitBlockedRead(t *testing.T, done <-chan error, caller string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	stacks := make([]byte, 1<<20)
+	for time.Now().Before(deadline) {
+		n := runtime.Stack(stacks, true)
+		for _, stack := range strings.Split(string(stacks[:n]), "\n\n") {
+			if !strings.Contains(stack, caller) || !strings.Contains(stack, "os.(*File).Read(") {
+				continue
+			}
+			if strings.Contains(stack, "[IO wait]") || strings.Contains(stack, "[syscall]") {
+				t.Log("observed pending os.File.Read before triggering completion")
+				return
+			}
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("read completed before blocked-read observation: %v", err)
+		default:
+			runtime.Gosched()
+		}
+	}
+	t.Fatal("read did not block in os.File.Read")
+}
+
+func TestReaderFilesystemFIFOReceivesLastWriterEOF(t *testing.T) {
+	test := func(name string, unlink bool) {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "input.fifo")
+			if err := unix.Mkfifo(path, 0600); err != nil {
+				t.Fatal(err)
+			}
+			fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			output, err := os.OpenFile(path, os.O_WRONLY, 0)
+			if err != nil {
+				_ = unix.Close(fd)
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = output.Close() })
+			if err := unix.SetNonblock(fd, false); err != nil {
+				_ = unix.Close(fd)
+				t.Fatal(err)
+			}
+			// Match inherited stdin: wrap only after clearing O_NONBLOCK.
+			input := os.NewFile(uintptr(fd), path)
+			t.Cleanup(func() { _ = input.Close() })
+			if unlink {
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+			}
+			owned, err := NewReader(input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = output.Close(); _ = owned.Close() })
+			done := make(chan error, 1)
+			go func() {
+				var b [1]byte
+				_, err := owned.Read(b[:])
+				done <- err
+			}()
+			awaitBlockedRead(t, done, "TestReaderFilesystemFIFOReceivesLastWriterEOF.func")
+			if err := output.Close(); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case err := <-done:
+				if !errors.Is(err, io.EOF) {
+					t.Fatalf("last-writer close read = %v, want EOF", err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("pending FIFO read did not receive last-writer EOF")
+			}
+		})
+	}
+	test("linked FIFO", false)
+	test("unlinked FIFO", true)
 }
 
 func TestReaderInheritedPipeDataAndEOF(t *testing.T) {
