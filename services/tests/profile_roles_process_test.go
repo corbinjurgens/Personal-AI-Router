@@ -33,6 +33,9 @@ func newProfileRolesProcessFixture(t *testing.T) *modelSettingsProcessFixture {
 	// Neither a policy profile nor a typed load is seeded here.
 	modelSettingsWrite(t, f.preset, []byte("[*]\nfit = off\nload-on-startup = false\n[lfm-8k]\nmodel = lfm.gguf\nctx-size = 4096\nparallel = 1\ngpu-layers = 0\n"))
 	policy := nodepolicy.Default()
+	policy.Availability = nodepolicy.Paused
+	policy.PausedBy = nodepolicy.PausedLocally
+	policy.PauseMode = nodepolicy.PauseConfigured
 	policy.Idle.UnloadAfterMinutes = 0
 	jointWriteJSON(t, filepath.Join(jointAppDir(f.base), nodepolicy.FileName), policy)
 	f.startModelSettings(t)
@@ -138,7 +141,7 @@ func TestProfileRolesKeyedSiblingsAcrossProcesses(t *testing.T) {
 			t.Fatalf("advertised sibling metadata differs: %+v", profile)
 		}
 	}
-	f.rpcOK(t, "engine:install", map[string]any{"engine": "llamacpp"})
+	f.resume(t)
 	f.engineIdentity(t, 1)
 	sections := modelSettingsPreset(t, readLiveDurableFile(t, f.capture))
 	if len(sections) != 2 || sections["lfm-8k"]["ctx-size"] != "8192" || sections["lfm-32k"]["ctx-size"] != "32768" || sections["lfm-8k"]["parallel"] != "1" || sections["lfm-32k"]["parallel"] != "1" {
@@ -274,7 +277,7 @@ func TestModelSettingsLastTypedRemovalRecoversThenStartsSourcePreset(t *testing.
 	// private HOME content, never an installed engine or model directory.
 	source := filepath.Join(f.base, ".lmstudio", "models", "source.gguf")
 	modelSettingsWrite(t, source, modelSettingsGGUF("blk.0.weight"))
-	f.rpcOK(t, "engine:install", map[string]any{"engine": "llamacpp"})
+	f.resume(t)
 	f.engineIdentity(t, 1)
 	wantPreset := filepath.Join(jointAppDir(f.base), "engine-bin", "model-sources", "llamacpp.ini")
 	capturedPath := string(readLiveDurableFile(t, f.capture+".path"))

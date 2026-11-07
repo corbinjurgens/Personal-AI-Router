@@ -186,7 +186,7 @@ func runModelSettingsManager() (resultErr error) {
 				call.Engine, call.Action = params.Engine, params.Action
 			}
 			if call.hasEffects() {
-				// Observe attempts before the real manager can refuse an Off
+				// Observe attempts before the real manager can refuse a paused
 				// load/pull. Every request and result is still forwarded.
 				query := url.Values{"method": {call.Method}, "engine": {call.Engine}, "action": {call.Action}}
 				if _, err := modelSettingsControl("/manager-invocation?" + query.Encode()); err != nil {
@@ -720,6 +720,11 @@ func prepareModelSettingsProcessFixtureAt(t *testing.T, base string) *modelSetti
 	platform["models_dir"] = other["models_dir"]
 	jointWriteJSON(t, otherPath, other)
 	policy := nodepolicy.Default()
+	// Installed engines follow availability. Keep metadata and cold apply
+	// cases stopped through the node's configured Pause, including restarts.
+	policy.Availability = nodepolicy.Paused
+	policy.PausedBy = nodepolicy.PausedLocally
+	policy.PauseMode = nodepolicy.PauseConfigured
 	policy.Idle.UnloadAfterMinutes = 0
 	policy.Profiles = []nodepolicy.Profile{{Key: "medium-model", DisplayName: "medium", Engine: "llamacpp", Model: "medium-model", RequestOptions: json.RawMessage(`{"temperature":0.2,"top_p":0.9,"opaque":{"integer":9007199254740993}}`)}, {Key: "weak-model", DisplayName: "weak", Engine: "llamacpp", Model: "weak-model", RequestOptions: json.RawMessage(`{"temperature":0.4}`)}}
 	policy.Roles = []nodepolicy.Role{{Name: "weak", Profiles: []string{"weak-model"}}}
@@ -732,6 +737,14 @@ func newModelSettingsProcessFixture(t *testing.T) *modelSettingsProcessFixture {
 	f := prepareModelSettingsProcessFixture(t)
 	f.startModelSettings(t)
 	return f
+}
+
+func (f *modelSettingsProcessFixture) resume(t *testing.T) {
+	t.Helper()
+	f.rpcOK(t, "node:set-availability", map[string]string{"state": "available"})
+	task1Eventually(t, "synthetic router running after Resume", 30*time.Second, func() bool {
+		return f.snapshot(t).Running
+	})
 }
 
 func (f *modelSettingsProcessFixture) enableAdmissionProbe(t *testing.T) {
@@ -936,7 +949,13 @@ func (f *modelSettingsProcessFixture) request(t *testing.T, id string, patch *mo
 func (f *modelSettingsProcessFixture) review(t *testing.T, p settings.Request) (settings.Request, settings.Preview) {
 	t.Helper()
 	var preview settings.Preview
-	modelSettingsDecode(t, f.rpcOK(t, "engine:preview-settings", p), &preview)
+	// Startup/Resume also refreshes profile identities through real manager
+	// inspections. Wait only for that bounded metadata contention; every other
+	// preview error remains an immediate failure.
+	task1Eventually(t, "model settings metadata inspection available", 15*time.Second, func() bool {
+		modelSettingsDecode(t, f.rpcOK(t, "engine:preview-settings", p), &preview)
+		return len(preview.Errors) != 1 || preview.Errors["modelLoads.busy"] == ""
+	})
 	if len(preview.Errors) != 0 || preview.Conflict != nil || preview.PreviewDigest == "" {
 		t.Fatalf("preview refused: errors=%v conflict=%v", preview.Errors, preview.Conflict)
 	}
@@ -1129,7 +1148,7 @@ func (f *modelSettingsProcessFixture) metadataBaseline(t *testing.T) modelSettin
 	before := modelSettingsMetadataBaseline{snapshot: f.snapshot(t), policy: f.policy(t),
 		journal: readLiveDurableFile(t, filepath.Join(f.base, "engine-settings-operations.json"))}
 	if before.snapshot.Running {
-		t.Fatal("metadata baseline requires an Off engine")
+		t.Fatal("metadata baseline requires a configured-paused engine")
 	}
 	f.mu.Lock()
 	before.managerInvocations = maps.Clone(f.managerInvocations)
