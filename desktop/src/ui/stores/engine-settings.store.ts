@@ -336,7 +336,7 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
             modelDrafts: {
                 ...state.modelDrafts,
                 [key]: {
-                    ...invalidateDraft(state.modelDrafts[key]),
+                    ...invalidateDraft(state.modelDrafts[key], true),
                     reviewAttempted: false,
                     change: structuredClone(change)
                 }

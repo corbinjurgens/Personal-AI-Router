@@ -363,6 +363,48 @@ describe('mounted Auto editor', () => {
         expect(preview).toHaveBeenCalledTimes(1)
         expect(apply).not.toHaveBeenCalled()
     })
+    it('retains the finite proposal while requested Auto fields change until explicit Recalculate', async () => {
+        if (!reply.auto?.resolved) throw new Error('Missing finite Auto fixture')
+        await select('Context mode', 'auto')
+        await act(async () => button('Recalculate').click())
+        const original = useEngineSettingsStore.getState().modelDrafts[key].review
+        if (!original) throw new Error('Missing reviewed proposal')
+
+        await input('Auto context cap', '16384')
+        await input('Auto context cap', '24576')
+        const edited = useEngineSettingsStore.getState().modelDrafts[key]
+        expect(edited.review).toBeUndefined()
+        expect(edited.retainedReview?.request).toEqual(original.request)
+        expect(edited.retainedReview?.preview.auto?.resolved).toEqual(reply.auto.resolved)
+        expect(container.textContent).toContain('Feasible context: 4096')
+        expect(button('Apply reviewed model changes').disabled).toBe(true)
+        await act(async () => vi.advanceTimersByTime(6000))
+        expect(preview).toHaveBeenCalledTimes(1)
+        expect(apply).not.toHaveBeenCalled()
+
+        preview.mockResolvedValueOnce({
+            ...reply,
+            previewDigest: 'e'.repeat(64),
+            auto: {
+                ...reply.auto,
+                reviewedInputId: 'replacement',
+                resolved: {
+                    ...reply.auto.resolved,
+                    perSlotContext: 8192,
+                    totalContext: 8192,
+                    reviewedInputId: 'replacement'
+                }
+            }
+        })
+        await act(async () => button('Recalculate').click())
+        const recalculated = useEngineSettingsStore.getState().modelDrafts[key]
+        expect(recalculated.retainedReview).toBeUndefined()
+        expect(recalculated.review?.request.modelChange?.previewDigest).toBe('e'.repeat(64))
+        expect(container.textContent).toContain('Feasible context: 8192')
+        expect(button('Apply reviewed model changes').disabled).toBe(false)
+        expect(preview).toHaveBeenCalledTimes(2)
+        expect(apply).not.toHaveBeenCalled()
+    })
     it('keeps the reviewed finite proposal on hidden return until explicit Recalculate', async () => {
         await select('Context mode', 'auto')
         await act(async () => button('Recalculate').click())
