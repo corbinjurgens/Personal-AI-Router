@@ -710,9 +710,6 @@ func prepareModelSettingsProcessFixture(t *testing.T) *modelSettingsProcessFixtu
 	platform["models_dir"] = other["models_dir"]
 	jointWriteJSON(t, otherPath, other)
 	policy := nodepolicy.Default()
-	// Installed engines restore automatically. Metadata-only cases require a
-	// stopped router, so establish that state through the node's pause owner.
-	policy.Availability, policy.PausedBy = nodepolicy.Paused, nodepolicy.PausedLocally
 	policy.Idle.UnloadAfterMinutes = 0
 	policy.Profiles = []nodepolicy.Profile{{Key: "medium-model", DisplayName: "medium", Engine: "llamacpp", Model: "medium-model", RequestOptions: json.RawMessage(`{"temperature":0.2,"top_p":0.9,"opaque":{"integer":9007199254740993}}`)}, {Key: "weak-model", DisplayName: "weak", Engine: "llamacpp", Model: "weak-model", RequestOptions: json.RawMessage(`{"temperature":0.4}`)}}
 	policy.Roles = []nodepolicy.Role{{Name: "weak", Profiles: []string{"weak-model"}}}
@@ -725,12 +722,6 @@ func newModelSettingsProcessFixture(t *testing.T) *modelSettingsProcessFixture {
 	f := prepareModelSettingsProcessFixture(t)
 	f.startModelSettings(t)
 	return f
-}
-
-func (f *modelSettingsProcessFixture) resumeModelSettings(t *testing.T) {
-	t.Helper()
-	f.rpcOK(t, "node:set-availability", map[string]string{"state": "available"})
-	f.rpcOK(t, "engine:install", map[string]any{"engine": "llamacpp"})
 }
 
 func (f *modelSettingsProcessFixture) enableAdmissionProbe(t *testing.T) {

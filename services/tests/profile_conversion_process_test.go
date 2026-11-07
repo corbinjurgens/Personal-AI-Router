@@ -44,7 +44,6 @@ func newProfileConversionProcessFixture(t *testing.T) *modelSettingsProcessFixtu
 	f := prepareModelSettingsProcessFixture(t)
 	modelSettingsWrite(t, f.preset, []byte(profileConversionPreset))
 	policy := nodepolicy.Default()
-	policy.Availability, policy.PausedBy = nodepolicy.Paused, nodepolicy.PausedLocally
 	policy.Idle.UnloadAfterMinutes = 0
 	policy.Profiles = []nodepolicy.Profile{{
 		Key: "medium-model", DisplayName: "My custom profile", Icon: "code",
@@ -169,7 +168,7 @@ func TestProfileConversionPublishesWholeEngineAcrossProcesses(t *testing.T) {
 	}
 	f.rpcOK(t, "engine:apply-settings", request)
 	after := f.settled(t, request.RequestID, "succeeded")
-	assertModelSettingsSavedReadback(t, after, preview.Settings, false)
+	assertModelSettingsSavedReadback(t, after, preview.Settings)
 	assertProfileConversionSettings(t, f, after.Settings)
 	policy := f.policy(t)
 	assertProfileConversionPolicy(t, baseline.policy, policy)
@@ -200,7 +199,7 @@ func TestProfileConversionPublishesWholeEngineAcrossProcesses(t *testing.T) {
 	if !bytes.Equal(readLiveDurableFile(t, f.preset), []byte(profileConversionPreset)) {
 		t.Fatal("apply rewrote the operator's external source preset")
 	}
-	f.resumeModelSettings(t)
+	f.rpcOK(t, "engine:install", map[string]any{"engine": "llamacpp"})
 	f.engineIdentity(t, 1)
 	sections := modelSettingsPreset(t, readLiveDurableFile(t, f.capture))
 	if len(sections) != 2 || sections["medium-model"]["ctx-size"] != "16384" || sections["medium-model"]["parallel"] != "2" || sections["medium-model"]["fit"] != "off" || sections["weak-model"]["ctx-size"] != "4096" || sections["weak-model"]["parallel"] != "1" || sections["weak-model"]["fit"] != "on" || sections["weak-model"]["fit-target"] != "1024" || sections["weak-model"]["fit-ctx"] != "2048" || sections["weak-model"]["spec-draft-n-max"] != "4" {
@@ -244,7 +243,7 @@ func TestProfileConversionRecoversEveryProfileAfterNativePersistence(t *testing.
 	f.crashBroker(t, gate)
 	f.startModelSettings(t)
 	after := f.settled(t, request.RequestID, "succeeded")
-	assertModelSettingsSavedReadback(t, after, preview.Settings, false)
+	assertModelSettingsSavedReadback(t, after, preview.Settings)
 	assertProfileConversionSettings(t, f, after.Settings)
 	assertProfileConversionPolicy(t, before, f.policy(t))
 	var replay struct {
