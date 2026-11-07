@@ -276,6 +276,9 @@ func newSettingsHarnessWithLaunch(t *testing.T, engine string, serving *engines.
 				continue
 			}
 			switch msg.Method {
+			case "engine:diagnostic-run-status":
+				// No diagnostic is retained by this settings fixture.
+				_ = codec.Respond(msg.ID, diagnosticManagerStatus{State: "none"})
 			case "engine:get-launch":
 				var request struct {
 					Engine string `json:"engine"`
