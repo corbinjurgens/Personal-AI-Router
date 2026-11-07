@@ -126,9 +126,9 @@ type Policy struct {
 	Pause        PauseConfig  `json:"pause"`
 	Admission    Admission    `json:"admission"`
 	Idle         IdleConfig   `json:"idle"`
-	// Profiles describe the models this node serves. Admission looks a request
-	// up by (engine, model); a model with no profile is admitted with the
-	// node-wide defaults.
+	// Profiles describe the configurations this node serves. Requests resolve
+	// through a role or an exact profile key; admission requires that profile
+	// on the destination engine.
 	Profiles []Profile `json:"profiles"`
 	// ServedModels is unrestricted when nil; a non-nil empty list serves nothing.
 	ServedModels ServedModels `json:"servedModels,omitzero"`

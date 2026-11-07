@@ -109,11 +109,18 @@ whole round trip stays protected rather than the outbound half alone. Your
 application sees an ordinary reply and never learns which machine served it,
 though you can see that yourself.
 
-A node is eligible when all three of these hold:
+Requests name a role or a profile key. A visible role takes precedence over an
+equal profile key. Other names return HTTP 404 with
+`no profile or role named <name>`. `/v1/models` lists visible profile keys and
+roles with their `:local` and `:api` overrides. Files without profiles remain
+visible in the Models tab but are not routable.
+
+A node is eligible when these hold:
 
 - It is reachable.
 - It is running an engine that can serve the request.
-- That engine's current inventory advertises the requested model.
+- It declares the requested profile key, or a profile in the requested role.
+- The profile satisfies the route's serving and qualification requirements.
 
 The proxy excludes unknown and non-matching inventories. If no owner is
 available, it returns a local `502`.

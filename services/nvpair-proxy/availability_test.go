@@ -243,6 +243,9 @@ func paNewFixture(t *testing.T, profile engineProfile) *paFixture {
 	dir := t.TempDir()
 	clustertrusttest.Join(t, dir, "fixture-cluster", "test-origin")
 	p.mesh = clustertrust.Open(dir)
+	policy := nodepolicy.Default()
+	policy.Profiles = []nodepolicy.Profile{{Key: paModel, DisplayName: "Pause fixture", Engine: profile.Name, Model: paModel}}
+	p.admission.setPolicy(policy)
 	t.Cleanup(p.closeIdleTransports)
 	fx := &paFixture{p: p, f: p.soleFacade(), dir: dir, w: w, returned: make(chan struct{}, 32)}
 	fx.origin = &httptest.Server{Listener: ln, Config: &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -352,6 +355,7 @@ func (fx *paFixture) peers(t *testing.T, ids ...string) []*paEndpoint {
 		e.p.mesh = clustertrust.Open(dir)
 		setBackend(t, e.p.soleFacade(), engine.URL, true)
 		pol := nodepolicy.Default()
+		pol.Profiles = []nodepolicy.Profile{{Key: paModel, DisplayName: "Pause fixture", Engine: fx.f.profile.Name, Model: paModel}}
 		pol.ServedModels = nodepolicy.ServedModels{{Engine: fx.f.profile.Name, Model: paModel}}
 		e.p.admission.setPolicy(pol)
 		s := &httptest.Server{Listener: ln, Config: &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -544,7 +548,7 @@ func TestPAPausedPinnedPeerEligibility(t *testing.T) {
 	}
 }
 
-func TestPAModelLessPausedPeerEligibility(t *testing.T) {
+func TestPAExplicitProfilePausedPeerEligibility(t *testing.T) {
 	for _, profile := range append(buildProfiles(), strataProfile(t)) {
 		t.Run(profile.Name, func(t *testing.T) {
 			test := func(name string, hint nodepolicy.PauseOrigin, selected bool) {
@@ -552,30 +556,22 @@ func TestPAModelLessPausedPeerEligibility(t *testing.T) {
 					fx := paNewFixture(t, profile)
 					peers := fx.peers(t, "a-paused", "z-available")
 					a, b := peers[0], peers[1]
-					for _, peer := range peers {
-						engine := paModelLessEngine(t, peer, peer.node.HostUUID)
-						setBackend(t, peer.p.soleFacade(), engine.URL, true)
-						policy := peer.p.admission.currentPolicy()
-						policy.ServedModels = nil
-						peer.p.admission.setPolicy(policy)
-					}
 					// Keep destination admission available: a leaked origin dispatch
 					// succeeds visibly instead of being hidden by a destination veto.
-					// Unrestricted serving above also accepts the omitted model.
 					a.node.Policy.PausedBy = hint
 					fx.replace(t, a.node, b.node)
 					fx.p.SetPriority([]string{"a-paused", "z-available"})
 					if selected {
 						fx.f.SetSelected("a-paused")
 					}
-					response := fx.finish(t, fx.request(http.MethodPost, routeChatCompletions, paModelLessBody), http.StatusOK)
+					response := fx.infer(t, paModel, http.StatusOK)
 					if a.ingress.Load() != 0 || a.inference.Load() != 0 {
 						t.Errorf("paused peer ingress/engine = %d/%d, want 0/0", a.ingress.Load(), a.inference.Load())
 					}
 					if b.ingress.Load() != 1 || b.inference.Load() != 1 {
 						t.Errorf("available peer ingress/engine = %d/%d, want 1/1", b.ingress.Load(), b.inference.Load())
 					}
-					paModelLessServed(t, response, profile, "z-available")
+					paServed(t, response, "z-available")
 				})
 			}
 			test("selected local pause", nodepolicy.PausedLocally, true)
@@ -591,15 +587,15 @@ func TestPAModelLessRouteExceptions(t *testing.T) {
 			t.Run("available peer without inventory", func(t *testing.T) {
 				fx := paNewFixture(t, profile)
 				peer := fx.peers(t, "available-peer")[0]
-				engine := paModelLessEngine(t, peer, "available-peer")
+				engine := paEngine(t, peer, profile, "available-peer")
 				setBackend(t, peer.p.soleFacade(), engine.URL, true)
 				policy := peer.p.admission.currentPolicy()
 				policy.ServedModels = nil
 				peer.p.admission.setPolicy(policy)
 				peer.node.ModelsByEngine = nil
 				fx.replace(t, peer.node)
-				response := fx.finish(t, fx.request(http.MethodPost, routeChatCompletions, paModelLessBody), http.StatusOK)
-				paModelLessServed(t, response, profile, "available-peer")
+				response := fx.infer(t, paModel, http.StatusOK)
+				paServed(t, response, "available-peer")
 				if peer.ingress.Load() != 1 || peer.inference.Load() != 1 {
 					t.Fatalf("available peer ingress/engine = %d/%d, want 1/1", peer.ingress.Load(), peer.inference.Load())
 				}
@@ -607,10 +603,12 @@ func TestPAModelLessRouteExceptions(t *testing.T) {
 			t.Run("manual without hint or inventory", func(t *testing.T) {
 				fx := paNewFixture(t, profile)
 				e := &paEndpoint{}
-				engine := paModelLessEngine(t, e, "manual")
-				fx.f.discovery.AddManual(nodeFor(t, "manual", engine.URL))
-				response := fx.finish(t, fx.request(http.MethodPost, routeChatCompletions, paModelLessBody), http.StatusOK)
-				paModelLessServed(t, response, profile, "manual")
+				engine := paEngine(t, e, profile, "manual")
+				node := nodeFor(t, "manual", engine.URL)
+				node.Profiles = []nodepolicy.AdvertisedProfile{{Key: paModel, Engine: profile.Name, Model: paModel}}
+				fx.f.discovery.AddManual(node)
+				response := fx.infer(t, paModel, http.StatusOK)
+				paServed(t, response, "manual")
 				if e.inference.Load() != 1 {
 					t.Fatalf("manual engine requests = %d, want 1", e.inference.Load())
 				}
@@ -618,13 +616,13 @@ func TestPAModelLessRouteExceptions(t *testing.T) {
 			t.Run("self ignores advertised pause hint", func(t *testing.T) {
 				fx := paNewFixture(t, profile)
 				e := &paEndpoint{}
-				engine := paModelLessEngine(t, e, "test-origin")
+				engine := paEngine(t, e, profile, "test-origin")
 				setBackend(t, fx.f, engine.URL, true)
 				n := selfNode("test-origin", fx.f.port)
 				n.PausedBy = nodepolicy.PausedLocally
 				fx.f.discovery.SetSubscribed([]Node{n})
-				response := fx.finish(t, fx.request(http.MethodPost, routeChatCompletions, paModelLessBody), http.StatusOK)
-				paModelLessServed(t, response, profile, "test-origin")
+				response := fx.infer(t, paModel, http.StatusOK)
+				paServed(t, response, "test-origin")
 				if e.inference.Load() != 1 {
 					t.Fatalf("self engine requests = %d, want 1", e.inference.Load())
 				}
@@ -658,21 +656,21 @@ func TestPAModelLessRouteExceptions(t *testing.T) {
 				if err := json.Unmarshal(response.body, &control); err != nil {
 					t.Fatalf("decode paused peer control: %v", err)
 				}
-				if control.ID != "paused-peer" || peer.inference.Load() != 0 || peer.list.Load() != 1 || peer.control.Load() != 1 || peer.ingress.Load() != 2 {
-					t.Fatalf("paused peer control/inference/list/passthrough/ingress = %s/%d/%d/%d/%d, want paused-peer/0/1/1/2", control.ID, peer.inference.Load(), peer.list.Load(), peer.control.Load(), peer.ingress.Load())
+				if control.ID != "paused-peer" || peer.inference.Load() != 0 || peer.list.Load() != 0 || peer.control.Load() != 1 || peer.ingress.Load() != 1 {
+					t.Fatalf("paused peer control/inference/list/passthrough/ingress = %s/%d/%d/%d/%d, want paused-peer/0/0/1/1", control.ID, peer.inference.Load(), peer.list.Load(), peer.control.Load(), peer.ingress.Load())
 				}
 			})
 		})
 	}
 }
 
-func TestPAModelLessPausedDuplicateDoesNotClaimHost(t *testing.T) {
+func TestPAExplicitProfilePausedDuplicateDoesNotClaimHost(t *testing.T) {
 	for _, profile := range append(buildProfiles(), strataProfile(t)) {
 		t.Run(profile.Name, func(t *testing.T) {
 			fx := paNewFixture(t, profile)
 			peers := fx.peers(t, "a-paused", "z-available")
 			peer := peers[1]
-			engine := paModelLessEngine(t, peer, "z-available")
+			engine := paEngine(t, peer, profile, "z-available")
 			setBackend(t, peer.p.soleFacade(), engine.URL, true)
 			serving := peer.p.admission.currentPolicy()
 			serving.ServedModels = nil
@@ -684,8 +682,8 @@ func TestPAModelLessPausedDuplicateDoesNotClaimHost(t *testing.T) {
 			paused.Policy.PausedBy = nodepolicy.PausedLocally
 			fx.replace(t, paused, peer.node)
 			fx.f.SetSelected("a-paused")
-			response := fx.finish(t, fx.request(http.MethodPost, routeChatCompletions, paModelLessBody), http.StatusOK)
-			paModelLessServed(t, response, profile, "z-available")
+			response := fx.infer(t, paModel, http.StatusOK)
+			paServed(t, response, "z-available")
 			if peer.ingress.Load() != 1 || peer.inference.Load() != 1 {
 				t.Fatalf("deduplicated peer ingress/engine = %d/%d, want 1/1", peer.ingress.Load(), peer.inference.Load())
 			}
@@ -693,7 +691,7 @@ func TestPAModelLessPausedDuplicateDoesNotClaimHost(t *testing.T) {
 	}
 }
 
-func TestPAModelLessAllPausedResponse(t *testing.T) {
+func TestPAExplicitProfileAllPausedResponse(t *testing.T) {
 	for _, profile := range append(buildProfiles(), strataProfile(t)) {
 		t.Run(profile.Name, func(t *testing.T) {
 			fx := paNewFixture(t, profile)
@@ -705,15 +703,15 @@ func TestPAModelLessAllPausedResponse(t *testing.T) {
 			peer.p.admission.setPolicy(policy)
 			peer.node.Policy.PausedBy = nodepolicy.PausedByPeer
 			fx.replace(t, peer.node)
-			response := fx.finish(t, fx.request(http.MethodPost, routeChatCompletions, paModelLessBody), http.StatusBadGateway)
+			response := fx.infer(t, paModel, http.StatusBadGateway)
 			var rejection struct {
 				Error string `json:"error"`
 			}
 			if err := json.Unmarshal(response.body, &rejection); err != nil {
-				t.Fatalf("decode model-less empty-candidate rejection: %v", err)
+					t.Fatalf("decode profile empty-candidate rejection: %v", err)
 			}
-			if rejection.Error != "no active node selected or available" || peer.ingress.Load() != 0 || peer.inference.Load() != 0 {
-				t.Fatalf("model-less rejection/paused ingress/engine = %q/%d/%d, want no active node selected or available/0/0", rejection.Error, peer.ingress.Load(), peer.inference.Load())
+			if rejection.Error != "no available node advertises the requested model" || peer.ingress.Load() != 0 || peer.inference.Load() != 0 {
+				t.Fatalf("profile rejection/paused ingress/engine = %q/%d/%d, want no available node advertises the requested model/0/0", rejection.Error, peer.ingress.Load(), peer.inference.Load())
 			}
 		})
 	}
@@ -789,8 +787,8 @@ func TestPAPausedPeerDynamicResume(t *testing.T) {
 					}
 				})
 			}
-			if peer.list.Load() != 3 {
-				t.Fatalf("catalogue HTTP calls = %d, want 3", peer.list.Load())
+			if peer.list.Load() != 0 {
+				t.Fatalf("catalogue HTTP calls = %d, want 0", peer.list.Load())
 			}
 		})
 	}
@@ -803,7 +801,9 @@ func TestPAPauseRouteExceptions(t *testing.T) {
 				fx := paNewFixture(t, profile)
 				e := &paEndpoint{}
 				engine := paEngine(t, e, profile, "manual")
-				fx.f.discovery.AddManual(nodeForModel(t, "manual", engine.URL, paModel))
+				node := nodeForModel(t, "manual", engine.URL, paModel)
+				node.Profiles = []nodepolicy.AdvertisedProfile{{Key: paModel, DisplayName: "Manual fixture", Engine: profile.Name, Model: paModel}}
+				fx.f.discovery.AddManual(node)
 				paServed(t, fx.infer(t, paModel, http.StatusOK), "manual")
 				if e.inference.Load() != 1 {
 					t.Fatalf("manual engine requests = %d, want 1", e.inference.Load())
@@ -842,7 +842,7 @@ func TestPAPauseRouteExceptions(t *testing.T) {
 					fx.f.noteSelfFromSnapshot([]Node{n})
 					fx.f.discovery.SetSubscribed(nil)
 					fx.p.admission.setIntent(map[string]bool{profile.Name: true})
-					pol := nodepolicy.Default()
+					pol := fx.p.admission.currentPolicy()
 					pol.Idle.StartOnDemand, pol.Idle.WakeTimeoutSeconds = true, 2
 					fx.p.admission.setPolicy(pol)
 					var wakes atomic.Int32
@@ -894,7 +894,7 @@ func TestPAPauseRouteExceptions(t *testing.T) {
 				if err := json.Unmarshal(response.body, &control); err != nil {
 					t.Fatalf("decode control response: %v", err)
 				}
-				if control.ID != "paused-peer" || e.inference.Load() != 1 || e.list.Load() != 1 || e.control.Load() != 1 || e.ingress.Load() != 3 {
+				if control.ID != "paused-peer" || e.inference.Load() != 1 || e.list.Load() != 0 || e.control.Load() != 1 || e.ingress.Load() != 2 {
 					t.Fatalf("paused peer control/inference/list/passthrough/ingress = %s/%d/%d/%d/%d", control.ID, e.inference.Load(), e.list.Load(), e.control.Load(), e.ingress.Load())
 				}
 			})

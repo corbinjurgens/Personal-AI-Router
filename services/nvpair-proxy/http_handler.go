@@ -840,6 +840,11 @@ func (f *facade) serveInference(w http.ResponseWriter, r *http.Request, start ti
 			return
 		}
 	}
+	if model == "" {
+		ctl.observeIngress(routingIngressResult{factFailed, factNoOwner, http.StatusNotFound})
+		writeProxyError(w, http.StatusNotFound, []string{"no profile or role named ", model}, nil, false)
+		return
+	}
 	if _, err := parseOriginStreamRequest(r.URL.Path, bodyBytes); err != nil {
 		ctl.observeIngress(routingIngressResult{factFailed, failureFactReason(err), bufferRequestStatus(err)})
 		writeOriginStreamRequestError(w, err)

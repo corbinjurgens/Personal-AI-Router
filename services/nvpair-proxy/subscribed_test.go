@@ -508,8 +508,8 @@ func TestSubscribedCarriesStrictCapabilityWithoutChurn(t *testing.T) {
 
 // TestStrictModelExcludesPeersWithoutAValidCapability covers the hybrid
 // exclusion rule: only a valid capability naming the engine and normalized
-// model makes a peer eligible, while every one of these peers stays a
-// concrete-routing candidate for the same model.
+// model makes a peer eligible. Ordinary routing independently requires a
+// profile declaration, including for peers without a strict capability.
 func TestStrictModelExcludesPeersWithoutAValidCapability(t *testing.T) {
 	profile := anyProfile(t)
 	model := profile.normalizeModel("m")
@@ -528,6 +528,9 @@ func TestStrictModelExcludesPeersWithoutAValidCapability(t *testing.T) {
 	var nodes []Node
 	var principals []string
 	for i, tc := range cases {
+		if tc.policy != nil {
+			tc.policy.Profiles = []nodepolicy.AdvertisedProfile{{Key: model, Engine: profile.Name, Model: model}}
+		}
 		principal := fmt.Sprintf("principal-%d", i)
 		principals = append(principals, principal)
 		n, ok := subscribedToNode(profile, noderec.DirectoryNode{
@@ -568,8 +571,9 @@ func TestStrictModelExcludesPeersWithoutAValidCapability(t *testing.T) {
 		got[c.id] = true
 	}
 	for _, n := range nodes {
-		if !got[n.ID] {
-			t.Errorf("concrete candidates %v lost %s", got, n.Host)
+		want := len(n.Profiles) != 0
+		if got[n.ID] != want {
+			t.Errorf("concrete candidate %s = %v, want %v (candidates %v)", n.Host, got[n.ID], want, got)
 		}
 	}
 }

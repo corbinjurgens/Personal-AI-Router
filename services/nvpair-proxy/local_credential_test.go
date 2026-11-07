@@ -4,6 +4,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -64,8 +65,8 @@ func TestLocalCredentialIsPairedWithTheBackendPort(t *testing.T) {
 	}
 }
 
-// Local self dispatch: inference and the model list carry the key in place of
-// the caller's; another forwarded path carries what the caller sent.
+// Local self dispatch carries the key for inference. The profile catalog does
+// not contact the engine.
 func TestLocalCredentialOnSelfRequests(t *testing.T) {
 	tc := customCase(t)
 	engine := newRecordingEngine(t, http.StatusOK)
@@ -75,6 +76,9 @@ func TestLocalCredentialOnSelfRequests(t *testing.T) {
 	p := testProxy(tc.profile, disc, port)
 	f := p.soleFacade()
 	setKeyedBackend(t, f, engine.URL, proxyTestKey)
+	policy := nodepolicy.Default()
+	policy.Profiles = []nodepolicy.Profile{{Key: tc.requestedModel, DisplayName: "Credential fixture", Engine: tc.profile.Name, Model: tc.requestedModel}}
+	p.admission.setPolicy(policy)
 
 	f.handleHTTP(httptest.NewRecorder(), withCallerCredentials(tc.inferenceRequest()))
 	if engine.hits() != 1 {
@@ -82,11 +86,25 @@ func TestLocalCredentialOnSelfRequests(t *testing.T) {
 	}
 	requireLocalKey(t, engine.lastHeader())
 
-	f.handleHTTP(httptest.NewRecorder(), withCallerCredentials(httptest.NewRequest(http.MethodGet, tc.modelListPath, nil)))
-	if engine.hits() != 2 {
+	catalog := httptest.NewRecorder()
+	f.handleHTTP(catalog, withCallerCredentials(httptest.NewRequest(http.MethodGet, tc.modelListPath, nil)))
+	if catalog.Code != http.StatusOK {
+		t.Fatalf("profile catalog status = %d", catalog.Code)
+	}
+	var inventory struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(catalog.Body.Bytes(), &inventory); err != nil {
+		t.Fatal(err)
+	}
+	if len(inventory.Data) != 1 || inventory.Data[0].ID != tc.requestedModel {
+		t.Fatalf("profile catalog = %+v", inventory)
+	}
+	if engine.hits() != 1 {
 		t.Fatalf("model list hits = %d", engine.hits())
 	}
-	requireLocalKey(t, engine.lastHeader())
 }
 
 // Peer ingress: admitted inference and the model list carry the key; any
@@ -98,6 +116,9 @@ func TestLocalCredentialOnPeerIngress(t *testing.T) {
 	f := p.soleFacade()
 	setKeyedBackend(t, f, engine.URL, proxyTestKey)
 	p.admission.setAvailability(nodepolicy.Available, false)
+	policy := nodepolicy.Default()
+	policy.Profiles = []nodepolicy.Profile{{Key: tc.requestedModel, DisplayName: "Credential fixture", Engine: tc.profile.Name, Model: tc.requestedModel}}
+	p.admission.setPolicy(policy)
 
 	rec := httptest.NewRecorder()
 	f.serveIngress(rec, withCallerCredentials(ingressRequest(tc, tc.inferenceBody(), "0")), "peer")
@@ -150,6 +171,9 @@ func TestUnkeyedBackendKeepsCallerCredentials(t *testing.T) {
 	p := testProxy(tc.profile, NewDiscovery(), tc.profile.FacadePort)
 	f := p.soleFacade()
 	setBackend(t, f, engine.URL, true)
+	policy := nodepolicy.Default()
+	policy.Profiles = []nodepolicy.Profile{{Key: tc.requestedModel, DisplayName: "Credential fixture", Engine: tc.profile.Name, Model: tc.requestedModel}}
+	p.admission.setPolicy(policy)
 	p.admission.setAvailability(nodepolicy.Available, false)
 	f.serveIngress(httptest.NewRecorder(), withCallerCredentials(ingressRequest(tc, tc.inferenceBody(), "0")), "peer")
 	if got := engine.lastHeader().Get("Authorization"); got != "Bearer caller-key" {

@@ -11,7 +11,6 @@ import (
 	"nvpair-shared/clustertrusttest"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -126,71 +125,6 @@ func TestCORSClusterRequiresEveryRespondingTarget(t *testing.T) {
 	})
 }
 
-// The model list is shared only where every engine that answered agrees. An
-// engine that could not answer has no permission to intersect: its models are
-// absent from the merged list either way, so treating its silence as a denial
-// would let one offline node cut a browser off from every online one.
-func TestCORSModelListRequiresEveryRespondingTarget(t *testing.T) {
-	forEachEngine(t, func(t *testing.T, tc engineCase) {
-		for _, policy := range []struct {
-			name, origin string
-			status, want int
-		}{
-			{"agree", "http://app.test", 200, 200}, {"different origin", "http://other.test", 200, 403},
-			{"missing policy", "", 200, 403}, {"denied", "", 403, 403}, {"unavailable", "", 503, 200},
-		} {
-			t.Run(policy.name, func(t *testing.T) {
-				a := corsEngine(t, tc, "http://app.test", 200)
-				defer a.Close()
-				b := corsEngine(t, tc, policy.origin, policy.status)
-				defer b.Close()
-				p := proxyForCORSTargets(t, tc, a, b)
-				rec := httptest.NewRecorder()
-				p.handlePlain(rec, corsRequest("GET", tc.modelListPath, "http://app.test"))
-				if rec.Code != policy.want {
-					t.Fatalf("status=%d want=%d body=%s", rec.Code, policy.want, rec.Body)
-				}
-				if policy.want != 200 {
-					if strings.Contains(rec.Body.String(), "private-model") || rec.Header().Get("Access-Control-Allow-Origin") != "" {
-						t.Fatal("partial inventory exposed")
-					}
-				} else if rec.Header().Get("Access-Control-Allow-Origin") != "http://app.test" || rec.Header().Get("Access-Control-Allow-Credentials") != "true" {
-					t.Fatal("shared permissions missing")
-				}
-			})
-		}
-	})
-}
-
-// An engine that is down must not be able to deny the browser, but one that
-// answers and refuses the origin still must.
-func TestCORSModelListSeparatesSilenceFromDenial(t *testing.T) {
-	forEachEngine(t, func(t *testing.T, tc engineCase) {
-		allowing := corsEngine(t, tc, "http://app.test", 200)
-		defer allowing.Close()
-		offline := corsEngine(t, tc, "", 503)
-		defer offline.Close()
-
-		rec := httptest.NewRecorder()
-		proxyForCORSTargets(t, tc, allowing, offline).
-			handlePlain(rec, corsRequest("GET", tc.modelListPath, "http://app.test"))
-		if rec.Code != 200 || rec.Header().Get("Access-Control-Allow-Origin") != "http://app.test" {
-			t.Fatalf("an offline engine denied the browser: status=%d body=%s", rec.Code, rec.Body)
-		}
-		if !strings.Contains(rec.Body.String(), "private-model") {
-			t.Fatal("the reachable engine's inventory was dropped")
-		}
-
-		refusing := corsEngine(t, tc, "http://other.test", 200)
-		defer refusing.Close()
-		rec = httptest.NewRecorder()
-		proxyForCORSTargets(t, tc, allowing, refusing).
-			handlePlain(rec, corsRequest("GET", tc.modelListPath, "http://app.test"))
-		if rec.Code != 403 || strings.Contains(rec.Body.String(), "private-model") {
-			t.Fatalf("a live refusal was overridden: status=%d body=%s", rec.Code, rec.Body)
-		}
-	})
-}
 func TestCORSNoRetryOnPermissionDenial(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, tc engineCase) {
 		for _, status := range []int{401, 403} {
@@ -245,58 +179,6 @@ func TestCORSOrdinaryOptionsAndPolicyChanges(t *testing.T) {
 		p.handleHTTP(rec, corsRequest("OPTIONS", "/policy", "http://app.test"))
 		if rec.Code != 403 {
 			t.Fatal("cached obsolete permission")
-		}
-	})
-}
-func TestCORSModelListStripsCredentialsAndDoesNotRedirect(t *testing.T) {
-	forEachEngine(t, func(t *testing.T, tc engineCase) {
-		var leaked atomic.Int32
-		sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { leaked.Add(1) }))
-		defer sink.Close()
-		for _, redirect := range []bool{false, true} {
-			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Header.Get("Origin") != "http://app.test" || r.Header.Get("X-Test") != "end-to-end" {
-					t.Error("CORS inputs lost")
-				}
-				if r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" {
-					t.Error("caller credentials forwarded to model-list candidate")
-				}
-				if r.Header.Get("X-Hop") != "" {
-					t.Error("hop header forwarded")
-				}
-				w.Header().Set("Access-Control-Allow-Origin", "http://app.test")
-				w.Header().Set("Vary", "X-Test")
-				if redirect {
-					http.Redirect(w, r, sink.URL, 307)
-					return
-				}
-				if _, err := io.WriteString(w, corsModels(tc)); err != nil {
-					t.Error(err)
-				}
-			}))
-			p := proxyForCORSTargets(t, tc, upstream, upstream)
-			req := corsRequest("GET", tc.modelListPath, "http://app.test")
-			req.Header.Set("Authorization", "Bearer test")
-			req.Header.Set("Cookie", "session=test")
-			req.Header.Set("X-Test", "end-to-end")
-			req.Header.Set("Connection", "X-Hop")
-			req.Header.Set("X-Hop", "local")
-			rec := httptest.NewRecorder()
-			p.handlePlain(rec, req)
-			want := 200
-			if redirect {
-				want = 502
-			}
-			if rec.Code != want {
-				t.Fatalf("status %d", rec.Code)
-			}
-			if !redirect && !strings.Contains(strings.Join(rec.Header().Values("Vary"), ","), "X-Test") {
-				t.Fatal("Vary lost")
-			}
-			upstream.Close()
-		}
-		if leaked.Load() != 0 {
-			t.Fatal("followed aggregate redirect")
 		}
 	})
 }
@@ -424,27 +306,6 @@ func TestCORSBrowserFixture(t *testing.T) {
 	})
 }
 
-func TestCORSInvalidModelListIsNotPartiallyExposed(t *testing.T) {
-	forEachEngine(t, func(t *testing.T, tc engineCase) {
-		good := corsEngine(t, tc, "http://app.test", 200)
-		defer good.Close()
-		for _, invalid := range []string{"not json", "{}", "null"} {
-			bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Access-Control-Allow-Origin", "http://app.test")
-				if _, err := io.WriteString(w, invalid); err != nil {
-					t.Error(err)
-				}
-			}))
-			p := proxyForCORSTargets(t, tc, good, bad)
-			rec := httptest.NewRecorder()
-			p.handlePlain(rec, corsRequest("GET", tc.modelListPath, "http://app.test"))
-			if rec.Code != http.StatusBadGateway || rec.Header().Get("Access-Control-Allow-Origin") != "http://app.test" || strings.Contains(rec.Body.String(), "private-model") {
-				t.Fatalf("invalid inventory exposed: %d %s", rec.Code, rec.Body)
-			}
-			bad.Close()
-		}
-	})
-}
 func TestCORSStreamingResponseIsPreserved(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, tc engineCase) {
 		release := make(chan struct{})

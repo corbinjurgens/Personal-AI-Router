@@ -399,6 +399,13 @@ func (a *admissionController) admit(ctx context.Context, req admissionRequest) a
 		if !modelServed(pol.ServedModels, req.engine, model, a.normalize) {
 			return reject(rejectNotServed)
 		}
+		profile, hasProfile := pol.ProfileByKey(req.model)
+		if !hasProfile || profile.Engine != req.engine {
+			return reject(rejectNotServed)
+		}
+		// Request keys select profiles; capacity remains keyed by the engine's
+		// model identity so ordinary and strict admission share the same limits.
+		key.model = a.normalize(profile.Engine, profile.Model)
 
 		// 1. Availability, then a settings-restart drain of this engine.
 		switch a.availability {
@@ -413,7 +420,6 @@ func (a *admissionController) admit(ctx context.Context, req admissionRequest) a
 		}
 		if req.prepare != nil && (!prepared || preparedGeneration != a.policyGeneration) {
 			generation := a.policyGeneration
-			profile, hasProfile := a.profileLocked(key)
 			a.mu.Unlock()
 			err := req.prepare(ctx, profile, hasProfile, generation)
 			a.mu.Lock()
@@ -460,9 +466,6 @@ func (a *admissionController) admit(ctx context.Context, req admissionRequest) a
 			}
 			continue
 		}
-
-		// 3. Profile.
-		profile, hasProfile := a.profileLocked(key)
 
 		if model != "" {
 			// 4. Per-model concurrency.
@@ -707,12 +710,8 @@ func (a *admissionController) concurrencyLimitLocked(k admKey) int {
 	return a.policy.Admission.MaxConcurrentPerModel
 }
 
-// profileLocked looks a model's profile up by engine and normalized model, so
-// a profile written "llama3" covers a request for "llama3:latest".
+// profileLocked looks up the engine model used by shared ordinary/strict capacity.
 func (a *admissionController) profileLocked(k admKey) (nodepolicy.Profile, bool) {
-	if k.model == "" {
-		return nodepolicy.Profile{}, false
-	}
 	for _, pr := range a.policy.Profiles {
 		if pr.Engine == k.engine && a.normalize(pr.Engine, pr.Model) == k.model {
 			return pr, true

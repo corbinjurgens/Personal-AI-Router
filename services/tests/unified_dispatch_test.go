@@ -41,7 +41,7 @@ func TestUnifiedDispatchProcess(t *testing.T) {
 	t.Run("request under storage pressure completes after owner release", func(t *testing.T) {
 		f, _, _ := i7BuffersBroker(t, 192, 30)
 		u := i7BuffersUpstream(t)
-		egressProcessAddConcrete(t, f.call, "llamacpp-proxy:", u.port)
+		egressProcessAddConcrete(t, f.call, "llamacpp-proxy:", u.port, f.scannerPort)
 		body := i7BuffersBody(50 << 20)
 		held := f.hold(t, u, body, 3)
 		waitingSlot := u.slot(t, "waiting")
@@ -59,7 +59,7 @@ func TestUnifiedDispatchProcess(t *testing.T) {
 	t.Run("zero wait refuses aggregate pressure with busy 503", func(t *testing.T) {
 		f, _, _ := i7BuffersBroker(t, 192, 0)
 		u := i7BuffersUpstream(t)
-		egressProcessAddConcrete(t, f.call, "llamacpp-proxy:", u.port)
+		egressProcessAddConcrete(t, f.call, "llamacpp-proxy:", u.port, f.scannerPort)
 		body := i7BuffersBody(50 << 20)
 		f.hold(t, u, body, 3)
 		slot := u.slot(t, "busy")
@@ -70,7 +70,7 @@ func TestUnifiedDispatchProcess(t *testing.T) {
 	t.Run("live cap decrease retains existing leases and blocks new storage", func(t *testing.T) {
 		f, _, _ := i7BuffersBroker(t, 256, 0)
 		u := i7BuffersUpstream(t)
-		egressProcessAddConcrete(t, f.call, "llamacpp-proxy:", u.port)
+		egressProcessAddConcrete(t, f.call, "llamacpp-proxy:", u.port, f.scannerPort)
 		held := f.hold(t, u, i7BuffersBody(50<<20), 4)
 		// Preserve terminal-frame headroom here.
 		f.set(t, 224, 0)
@@ -103,7 +103,7 @@ func TestUnifiedDispatchProcess(t *testing.T) {
 	t.Run("live cap decrease below usage drains existing streams before admitting new storage", func(t *testing.T) {
 		f, _, _ := i7BuffersBroker(t, 256, 0)
 		u := i7BuffersUpstream(t)
-		egressProcessAddConcrete(t, f.call, "llamacpp-proxy:", u.port)
+		egressProcessAddConcrete(t, f.call, "llamacpp-proxy:", u.port, f.scannerPort)
 		body := i7BuffersBody(50 << 20)
 		preOutputSlot := u.slot(t, "pre-output-owner")
 		u.mu.Lock()
@@ -144,7 +144,7 @@ func TestUnifiedDispatchProcess(t *testing.T) {
 	t.Run("client cancelled under storage pressure cannot dispatch after release", func(t *testing.T) {
 		f, _, _ := i7BuffersBroker(t, 192, 30)
 		u := i7BuffersUpstream(t)
-		egressProcessAddConcrete(t, f.call, "llamacpp-proxy:", u.port)
+		egressProcessAddConcrete(t, f.call, "llamacpp-proxy:", u.port, f.scannerPort)
 		body := i7BuffersBody(50 << 20)
 		held := f.hold(t, u, body, 3)
 		cancelledSlot := u.slot(t, "cancelled-waiter")
@@ -174,7 +174,7 @@ func TestUnifiedDispatchProcess(t *testing.T) {
 		f, service, policyPath := i7BuffersBroker(t, 192, 0)
 		stored := readPolicyBytes(t, policyPath)
 		upstream := newEgressProcessUpstream(t)
-		egressProcessAddConcrete(t, f.call, "llamacpp-proxy:", upstream.localPort)
+		egressProcessAddConcrete(t, f.call, "llamacpp-proxy:", upstream.localPort, f.scannerPort)
 		egressProcessAssertConcrete(t, f.client, f.port)
 		var old serviceProcessIdentity
 		for _, identity := range service.scan() {
@@ -232,7 +232,7 @@ func TestUnifiedDispatchProcess(t *testing.T) {
 			time.Sleep(25 * time.Millisecond)
 		}
 		u := i7BuffersUpstream(t)
-		egressProcessAddConcrete(t, f.call, "llamacpp-proxy:", u.port)
+		egressProcessAddConcrete(t, f.call, "llamacpp-proxy:", u.port, f.scannerPort)
 		body := i7BuffersBody(50 << 20)
 		f.hold(t, u, body, 3)
 		probe := u.slot(t, "replayed-busy")
@@ -246,7 +246,7 @@ func TestUnifiedDispatchProcess(t *testing.T) {
 		// ephemeral facade instead, retaining the departed-run wire assertions.
 		f, _, _ := i7BuffersBroker(t, 192, 0)
 		u := i7BuffersUpstream(t)
-		egressProcessAddConcrete(t, f.call, "llamacpp-proxy:", u.port)
+		egressProcessAddConcrete(t, f.call, "llamacpp-proxy:", u.port, f.scannerPort)
 		reply := f.call(t, "workloads:subscribe", map[string]any{})
 		egressProcessOK(t, reply)
 		var subscribed struct {
@@ -307,7 +307,7 @@ func TestUnifiedDispatchProcess(t *testing.T) {
 		p.activate(t, policy)
 		port := p.enable(t)
 		u := i7BuffersUpstream(t)
-		egressProcessAddConcrete(t, p.call, "llamacpp:", u.port)
+		p.addConcrete(t, u.port)
 		client := egressProcessHTTPClient(t)
 		client.Timeout = 0
 		started := make(map[string]departedRunInfo)
@@ -421,8 +421,8 @@ func i7HybridFixturePeers(t *testing.T, peerIDs []string, edits ...func(*nodepol
 			edit(p)
 		}
 	})
-	advertisement := &nodepolicy.Advertisement{Revision: "1", Roles: []nodepolicy.Role{{Name: "weak", Profiles: []string{"fixture-profile"}}}, Profiles: []nodepolicy.AdvertisedProfile{
-		{Key: "fixture-profile", DisplayName: "Fixture", Engine: "llamacpp", Model: egressProcessModel, ContextTokens: 4096, MaxOutputTokens: 1024,
+	advertisement := &nodepolicy.Advertisement{Revision: "1", Roles: []nodepolicy.Role{{Name: "weak", Profiles: []string{egressProcessModel}}}, Profiles: []nodepolicy.AdvertisedProfile{
+		{Key: egressProcessModel, DisplayName: "Fixture", Engine: "llamacpp", Model: egressProcessModel, ContextTokens: 4096, MaxOutputTokens: 1024,
 			Qualification: &nodepolicy.QualificationRef{ID: "i7-fixture-only", Revision: "1"}},
 	}, StrictAdmission: &nodepolicy.StrictAdmissionCapability{Version: nodepolicy.StrictAdmissionVersion,
 		Models: []nodepolicy.StrictAdmissionModel{{Engine: "llamacpp", Model: egressProcessModel, MaxConcurrent: 16, Identity: i7HybridIdentity()}}}}

@@ -21,6 +21,7 @@ import (
 
 	"nvpair-shared/engines"
 	"nvpair-shared/nodepolicy"
+	"nvpair-shared/noderec"
 	"nvpair-shared/testbin"
 )
 
@@ -367,6 +368,28 @@ func TestE2EFailoverOverRealBinary(t *testing.T) {
 			"addresses": []string{goodHost}, "models": []string{tc.advertisedModel},
 		})
 		e2eWaitResult(t, frames, "2", 5*time.Second)
+		// The broker relays each manual peer's policy through discovery. Native
+		// inventory alone does not declare a routable profile.
+		var peers []noderec.DirectoryNode
+		for _, peer := range []struct {
+			id, host string
+			port     int
+		}{{"busy", busyHost, busyPort}, {"good", goodHost, goodPort}} {
+			peers = append(peers, noderec.DirectoryNode{
+				HostUUID: peer.id, IP: peer.host,
+				Services: map[noderec.ServiceKey]noderec.ServiceStatus{tc.profile.DiscoveryService: {Port: peer.port}},
+				Models:   []string{tc.advertisedModel},
+				Policy: &nodepolicy.Advertisement{Revision: "1", Profiles: []nodepolicy.AdvertisedProfile{{
+					Key: tc.requestedModel, DisplayName: tc.requestedModel, Engine: tc.profile.Name, Model: tc.advertisedModel,
+				}}},
+			})
+		}
+		if err := json.NewEncoder(stdin).Encode(map[string]any{
+			"jsonrpc": "2.0", "method": addressed(noderec.NotifyNodes),
+			"params": noderec.GetNodesResult{Nodes: peers},
+		}); err != nil {
+			t.Fatalf("send discovery snapshot: %v", err)
+		}
 		// Select the busy node so the failover path is deterministic.
 		e2eSend(t, stdin, 3, addressed("node/select"), map[string]any{"id": "busy"})
 		e2eWaitResult(t, frames, "3", 5*time.Second)

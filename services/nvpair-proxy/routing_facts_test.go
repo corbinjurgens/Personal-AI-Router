@@ -302,13 +302,14 @@ func TestRoutingNativeFactsConcreteDelivery(t *testing.T) {
 	for _, model := range []string{"m", ""} {
 		name := "known model"
 		if model == "" {
-			name = "model-less ROOT amendment"
+			name = "missing profile is refused"
 		}
 		t.Run(name, func(t *testing.T) {
 			e := newRecordingEngine(t, http.StatusOK)
 			discovery := NewDiscovery()
 			discovery.AddManual(nodeForModel(t, "node", e.URL, "m"))
 			p := newTestProxy(anyProfile(t), NewCodec(&recordingWriter{}), discovery, 0)
+			declareRoutingFixtureModel(p, "m")
 			body := `{}`
 			if model != "" {
 				body = `{"model":"m"}`
@@ -316,6 +317,12 @@ func TestRoutingNativeFactsConcreteDelivery(t *testing.T) {
 			w := httptest.NewRecorder()
 			p.soleFacade().handleHTTP(w, httptest.NewRequest(http.MethodPost, routeChatCompletions, strings.NewReader(body)))
 			out := nativeOnlySource(t, p)
+			if model == "" {
+				if w.Code != http.StatusNotFound || e.hits() != 0 || out.total != 0 || out.served != 0 || out.binding != 0 {
+					t.Fatalf("missing profile status=%d hits=%d facts=%+v", w.Code, e.hits(), out)
+				}
+				return
+			}
 			c := out.attempts[0]
 			if w.Code != http.StatusOK || e.hits() != 1 || out.total != 1 || routingFactState(out.disposition&255) != factCompleted || out.served != 1 || c.flags&factFirstByteKnown == 0 || c.destination.kind != 1 || c.destination.modelKnown != (model != "") {
 				t.Fatalf("delivery status=%d hits=%d state=%d served=%d attempt=%+v", w.Code, e.hits(), out.disposition, out.served, c)
@@ -1132,6 +1139,7 @@ func TestRoutingNativeLifetimeLastBorrower(t *testing.T) {
 	discovery.AddManual(nodeForModel(t, "a", engine.URL, "m"))
 	discovery.AddManual(nodeForModel(t, "b", fallback.URL, "m"))
 	p := newTestProxy(anyProfile(t), NewCodec(&recordingWriter{}), discovery, 0)
+	declareRoutingFixtureModel(p, "m")
 	p.SetPriority([]string{"a", "b"})
 	w, done := httptest.NewRecorder(), make(chan struct{})
 	go func() {

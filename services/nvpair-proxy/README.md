@@ -33,6 +33,14 @@ the process was one engine.
 `spec.md` is normative; where it and this file disagree, it wins. Everything
 below is shared behavior unless a section says otherwise.
 
+Inference requests name a visible profile key or a declared role. A role wins
+over an equal profile key. Other names return HTTP 404 with
+`no profile or role named <name>`, even when native inventory or model sources
+advertise them. `/v1/models` lists visible profile keys and declared roles with
+their `:api` and `:local` aliases, each once. Files without profiles remain
+visible in the desktop Models tab but are not routable. Strict, public and
+hybrid qualification requirements still apply.
+
 Request model and tier-alias identifiers are limited to 256 decoded UTF-8
 bytes, measured before trimming whitespace or engine normalization. This applies
 to body model/name identifiers, model query parameters and model-detail paths.
@@ -443,7 +451,7 @@ still reports the save error. Memory and disk therefore agree in either case.
 
 A browser preflight (OPTIONS with Origin and Access-Control-Request-Method) queries every currently routable target, with concurrency eight, a ten-second query deadline, and no redirects. A single target's response is relayed. Multiple responding targets must all permit the requested origin, method, and headers; PAIR grants only their shared permissions. Credentials require unanimous explicit support. Synthesized preflights allow browsers to cache the result for 60 seconds; PAIR itself does not cache decisions. A policy denial returns 403. Unavailable targets are skipped; if none can answer, the proxy returns 502. Ordinary OPTIONS requests retain normal routing. Preflights do not create inference jobs or reserve scheduler capacity. Paired ingress forwards only to its local engine.
 
-Combined model lists forward the caller's origin and end-to-end headers, excluding Authorization and Cookie so credentials are not shared across engines. Multi-target preflights apply the same credential filtering. With an Origin header, every responding engine must return a valid list and permit sharing: one denial returns 403 and one invalid list returns 502, without partial inventory. An invalid-list error retains the combined CORS permissions when every responding engine allows the origin. Unavailable engines are skipped, with 502 returned when none can answer. Successful lists combine origin/credential permissions and Vary requirements. Requests without Origin retain partial aggregation when some inventories are unavailable. Engines without CORS support remain unavailable to cross-origin browser clients through PAIR.
+Profile catalogs with an Origin header retain the engine-owned browser permission check. These checks forward the caller's origin and end-to-end headers, excluding Authorization and Cookie so credentials are not shared across engines. Multi-target preflights apply the same credential filtering. Every responding engine must return a valid list and permit sharing: one denial returns 403 and one invalid list returns 502. An invalid-list error retains the combined CORS permissions when every responding engine allows the origin. Unavailable engines are skipped, with 502 returned when none can answer. Successful checks combine origin/credential permissions and Vary requirements, but native model records never enter the profile catalog. Requests without Origin use policy and advertised profiles without querying engine lists. Engines without CORS support remain unavailable to cross-origin browser clients through PAIR.
 
 Both engine facades use nvpair-shared/cors. Neither facade reads engine environment variables or parses launch commands to determine CORS policy.
 

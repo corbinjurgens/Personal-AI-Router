@@ -909,8 +909,8 @@ func TestOwnedInferenceBuffersFinishedModelStorage(t *testing.T) {
 	t.Run("known resolved key owns small decoded model storage", func(t *testing.T) {
 		budget := bufferTestBudget(t, 192<<20, 0)
 		p := &Proxy{buffers: budget}
-		input := strings.Repeat(" ", 255) + "m"
-		r, owner := p.ownInferenceBuffers(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"`+input+`"}`)))
+		input := strings.Repeat(" ", 255) + `{"model":"m"}`
+		r, owner := p.ownInferenceBuffers(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(input)))
 		defer owner.close()
 		_, model, err := bufferBodyAndModel(httptest.NewRecorder(), r, 64<<20)
 		if err != nil {
@@ -933,15 +933,17 @@ func TestOwnedInferenceBuffersFinishedModelStorage(t *testing.T) {
 		}
 	})
 	t.Run("terminal ingress unknown names do not grow history", func(t *testing.T) {
-		fx := newTierFixture(t, llamacppCase(t), tierPolicy(nil), map[string][]string{"a": {"known"}}, nil)
+		policy := tierPolicy(nil)
+		policy.Profiles = []nodepolicy.Profile{{Key: "known", DisplayName: "Known", Engine: "llamacpp", Model: "known"}}
+		fx := newTierFixture(t, llamacppCase(t), policy, map[string][]string{"a": {"known"}}, nil)
 		f := fx.p.soleFacade()
 		backend := newRecordingEngine(t, http.StatusNotFound)
 		setBackend(t, f, backend.URL, true)
 		for i := range 4 {
 			rec := httptest.NewRecorder()
 			f.serveIngress(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(fmt.Sprintf(`{"model":"unknown-%d"}`, i))), "peer")
-			if rec.Code != http.StatusNotFound || backend.hits() != i+1 {
-				t.Fatalf("terminal forwarding: status=%d hits=%d", rec.Code, backend.hits())
+			if rec.Code != http.StatusNotFound || backend.hits() != 0 {
+				t.Fatalf("unknown profile rejection: status=%d hits=%d", rec.Code, backend.hits())
 			}
 			fx.p.admission.mu.Lock()
 			timestamps := len(fx.p.admission.finishedAt)
@@ -982,8 +984,13 @@ func TestOwnedInferenceBuffersFinishedModelStorage(t *testing.T) {
 	t.Run("resolved cold self model records completion", func(t *testing.T) {
 		w := &recordingWriter{}
 		p, f, _ := twoEngineProxy(t, w)
+		policy := p.admission.currentPolicy()
+		policy.Profiles = []nodepolicy.Profile{{Key: "known", DisplayName: "Known", Engine: f.profile.Name, Model: "known"}}
+		p.admission.setPolicy(policy)
 		backend := newRecordingEngine(t, http.StatusOK)
-		f.discovery.AddManual(selfNode("self", f.profile.FacadePort, "known"))
+		self := selfNode("self", f.profile.FacadePort, "known")
+		self.Profiles = []nodepolicy.AdvertisedProfile{{Key: "known", DisplayName: "Known", Engine: f.profile.Name, Model: "known"}}
+		f.discovery.AddManual(self)
 		setBackend(t, f, backend.URL, true)
 		rec := httptest.NewRecorder()
 		f.handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"known"}`)))

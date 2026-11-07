@@ -27,6 +27,22 @@ import (
 	"nvpair-shared/nodepolicy"
 )
 
+// declareRoutingFixtureModel installs serving permission during fixture setup.
+// Preserve qualification when a strict fixture also exercises ordinary admission.
+func declareRoutingFixtureModel(p *Proxy, model string) {
+	pol := p.admission.currentPolicy()
+	engine := p.soleFacade().profile.Name
+	for i := range pol.Profiles {
+		if pol.Profiles[i].Engine == engine && pol.Profiles[i].Model == model {
+			pol.Profiles[i].Key = model
+			p.admission.setPolicy(pol)
+			return
+		}
+	}
+	pol.Profiles = append(pol.Profiles, nodepolicy.Profile{Key: model, DisplayName: model, Engine: engine, Model: model})
+	p.admission.setPolicy(pol)
+}
+
 func TestHandleHTTP_SoleOwnerWaitsForFirstContent(t *testing.T) {
 	setForTest(t, &firstBodyTimeout, 100*time.Millisecond)
 	setForTest(t, &retryBackoff, []time.Duration{time.Millisecond})
@@ -54,6 +70,9 @@ func TestHandleHTTP_SoleOwnerWaitsForFirstContent(t *testing.T) {
 	disc := NewDiscovery()
 	disc.AddManual(nodeForModel(t, "sole-owner", engine.URL, tc.advertisedModel))
 	p := testProxy(tc.profile, disc, tc.profile.FacadePort)
+	pol := p.admission.currentPolicy()
+	pol.Profiles = []nodepolicy.Profile{{Key: tc.advertisedModel, DisplayName: "Sole owner", Engine: tc.profile.Name, Model: tc.advertisedModel}}
+	p.admission.setPolicy(pol)
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
 	rec := httptest.NewRecorder()
@@ -342,6 +361,7 @@ func TestUnifiedDispatchPostcommitAllocationDrains(t *testing.T) {
 	discovery.AddManual(nodeForModel(t, "b", other.URL, "m"))
 	writer := &recordingWriter{}
 	p := newTestProxy(anyProfile(t), NewCodec(writer), discovery, 0)
+	declareRoutingFixtureModel(p, "m")
 	p.SetPriority([]string{"a", "b"})
 	p.buffers = bufferTestBudget(t, (256<<10)+bufferFixtureResponseBytes, 0)
 	recorder, done := httptest.NewRecorder(), make(chan struct{})
@@ -502,6 +522,7 @@ func TestUnifiedDispatchBodyPreparationDeadline(t *testing.T) {
 			discovery := NewDiscovery()
 			discovery.AddManual(nodeForModel(t, "a", engine.URL, "m"))
 			p := newTestProxy(anyProfile(t), NewCodec(writer), discovery, 0)
+			declareRoutingFixtureModel(p, "m")
 			p.buffers = bufferTestBudget(t, 256<<10, time.Hour)
 			var hold *bufferLease
 			defer func() {
@@ -587,12 +608,12 @@ func TestUnifiedDispatchCandidatePreparationDeadline(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			pol := tierPolicy(nil)
 			pol.Roles = []nodepolicy.Role{{Name: "weak"}}
-			fx := newTierFixtureForRequest(t, llamacppCase(t), pol, map[string][]string{"a": {"small:1b"}, "b": {"small:1b"}}, nil, http.MethodPost, "/v1/chat/completions")
-			fx.declare(t, "a", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("small:1b")})
-			fx.declare(t, "b", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("small:1b")})
+			fx := newTierFixtureForRequest(t, llamacppCase(t), pol, map[string][]string{"a": {"small/1b"}, "b": {"small/1b"}}, nil, http.MethodPost, "/v1/chat/completions")
+			fx.declare(t, "a", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("small/1b")})
+			fx.declare(t, "b", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("small/1b")})
 			capacity := int64(256<<10) + registryNextTestBytes(fx.p)
 			if later {
-				capacity += bufferFixtureRemotePreparationBytes(t, `{"model":"small:1b"}`)
+				capacity += bufferFixtureRemotePreparationBytes(t, `{"model":"small/1b"}`)
 			}
 			fx.p.buffers = bufferTestBudget(t, capacity, time.Hour)
 			held := make(chan *bufferLease, 1)
@@ -624,8 +645,8 @@ func TestUnifiedDispatchCandidatePreparationDeadline(t *testing.T) {
 				}))
 				defer first.Close()
 				firstURL = first.URL
-				fx.p.soleFacade().discovery.AddManual(nodeForModel(t, "a", first.URL, "small:1b"))
-				fx.declare(t, "a", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("small:1b")})
+				fx.p.soleFacade().discovery.AddManual(nodeForModel(t, "a", first.URL, "small/1b"))
+				fx.declare(t, "a", map[string]nodepolicy.AdvertisedProfile{"weak": llamacppProfile("small/1b")})
 			} else {
 				held <- bufferMustAcquire(t, fx.p.buffers, 128<<10)
 			}
@@ -700,6 +721,7 @@ func TestUnifiedDispatchDestinationPreparationDeadline(t *testing.T) {
 	for _, path := range []string{"self strict", "ingress strict", "ingress concrete", "self strict qualification", "ingress strict qualification"} {
 		t.Run(path, func(t *testing.T) {
 			p, engine := strictHTTPFixtureWithEngine(t, newRecordingEngineForRequest(t, http.StatusOK, http.MethodPost, routeChatCompletions))
+			declareRoutingFixtureModel(p, "m")
 			capacity := int64(256 << 10)
 			if strings.HasPrefix(path, "self") {
 				capacity += registryNextTestBytes(p)
@@ -765,6 +787,7 @@ func TestUnifiedDispatchPreparedStreamOutlivesDeadline(t *testing.T) {
 	for _, path := range []string{"self", "ingress", "self strict", "ingress strict"} {
 		t.Run(path, func(t *testing.T) {
 			p, _ := strictHTTPFixture(t)
+			declareRoutingFixtureModel(p, "m")
 			p.buffers = bufferTestBudget(t, (2<<20)+bufferFixtureResponseBytes, 0)
 			release := make(chan struct{})
 			var once sync.Once
@@ -845,6 +868,7 @@ func TestUnifiedDispatchStrictPreOutputDeadline(t *testing.T) {
 	for _, stage := range []string{"headers wait", "first body wait"} {
 		t.Run(stage, func(t *testing.T) {
 			p, _ := strictHTTPFixture(t)
+			declareRoutingFixtureModel(p, "m")
 			p.buffers = bufferTestBudget(t, 2<<20, 0)
 			entered, cancelled := make(chan struct{}), make(chan struct{})
 			stopEngine := make(chan struct{})
@@ -905,6 +929,7 @@ func TestUnifiedDispatchSocketBodyInterruption(t *testing.T) {
 				jobDeadline = 150 * time.Millisecond
 			}
 			p := newTestProxy(anyProfile(t), NewCodec(&recordingWriter{}), NewDiscovery(), 0)
+			declareRoutingFixtureModel(p, "m")
 			p.buffers = bufferTestBudget(t, 1<<20, time.Hour)
 			p.serveCtx, p.cancel = context.WithCancel(context.Background())
 			defer p.cancel()
@@ -1018,6 +1043,7 @@ func TestUnifiedDispatchConcretePreOutputDeadline(t *testing.T) {
 			discovery.AddManual(nodeForModel(t, "a", upstream.URL, "m"))
 			discovery.AddManual(nodeForModel(t, "b", fallback.URL, "m"))
 			p := newTestProxy(anyProfile(t), NewCodec(&recordingWriter{}), discovery, 0)
+			declareRoutingFixtureModel(p, "m")
 			p.buffers = bufferTestBudget(t, 2<<20, time.Hour)
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
@@ -1112,6 +1138,7 @@ func TestUnifiedDispatchClearsBodyReadDeadline(t *testing.T) {
 	discovery := NewDiscovery()
 	discovery.AddManual(nodeForModel(t, "a", engine.URL, "m"))
 	p := newTestProxy(anyProfile(t), NewCodec(&recordingWriter{}), discovery, 0)
+	declareRoutingFixtureModel(p, "m")
 	observations := make(chan []time.Time, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		wrapped := &routingReadDeadlineWriter{ResponseWriter: w}
@@ -1178,6 +1205,7 @@ func TestUnifiedDispatchJoinsBodyInterrupt(t *testing.T) {
 	jobDeadline = 10 * time.Second
 	defer func() { jobDeadline = original }()
 	p := newTestProxy(anyProfile(t), NewCodec(&recordingWriter{}), NewDiscovery(), 0)
+	declareRoutingFixtureModel(p, "m")
 	interrupted, release, cleared, done := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
 	var once sync.Once
 	unblock := func() { once.Do(func() { close(release) }) }
@@ -1230,6 +1258,7 @@ func TestUnifiedDispatchIngressPreOutputDeadline(t *testing.T) {
 				jobDeadline = 10 * time.Second
 			}
 			p, _ := strictHTTPFixture(t)
+			declareRoutingFixtureModel(p, "m")
 			p.buffers = bufferTestBudget(t, 2<<20, 0)
 			entered, engineDone, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
 			var once sync.Once
@@ -1301,6 +1330,7 @@ func TestUnifiedDispatchIngressPersistenceDeadline(t *testing.T) {
 	test := func(name string, panicOnWrite bool) {
 		t.Run(name, func(t *testing.T) {
 			p, engine := strictHTTPFixture(t)
+			declareRoutingFixtureModel(p, "m")
 			clock := useStrictClock(p.admission)
 			writeCapacity := p.admission.strict.write
 			writes := 0
@@ -1367,6 +1397,7 @@ func TestUnifiedDispatchIngressPanicCleanup(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			p, _ := strictHTTPFixture(t)
+			declareRoutingFixtureModel(p, "m")
 			p.buffers = bufferTestBudget(t, (2<<20)+bufferFixtureResponseBytes, 0)
 			var hits atomic.Int32
 			engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1477,6 +1508,7 @@ func TestUnifiedDispatchPostcommitModifyResponseRefusal(t *testing.T) {
 			discovery.AddManual(nodeForModel(t, "a", engine.URL, "m"))
 			discovery.AddManual(nodeForModel(t, "b", fallback.URL, "m"))
 			p := newTestProxy(anyProfile(t), NewCodec(&recordingWriter{}), discovery, 0)
+			declareRoutingFixtureModel(p, "m")
 			p.SetPriority([]string{"a", "b"})
 			p.buffers = bufferTestBudget(t, (256<<10)+bufferFixtureResponseBytes, 0)
 			transport := p.plainHTTPTransport()
@@ -1620,6 +1652,7 @@ func TestUnifiedDispatchCommittedPeekTimer(t *testing.T) {
 			}
 			writer := &recordingWriter{}
 			p := newTestProxy(anyProfile(t), NewCodec(writer), discovery, 0)
+			declareRoutingFixtureModel(p, "m")
 			p.SetPriority([]string{"a", "b"})
 			p.buffers = bufferTestBudget(t, (256<<10)+bufferFixtureResponseBytes, 0)
 			rec, done := httptest.NewRecorder(), make(chan struct{})
@@ -1954,10 +1987,11 @@ const hybridTestBody = `{"model":"weak","messages":[{"role":"user","content":"hi
 func hybridPeerFixture(t *testing.T, peers map[string]int) *tierFixture {
 	t.Helper()
 	pol := tierPolicy(nil)
+	pol.Roles = []nodepolicy.Role{{Name: "weak"}}
 	pol.TierPolicy.AllowStronger = false
 	nodes := map[string][]string{}
 	for id := range peers {
-		nodes[id] = []string{"q:1b"}
+		nodes[id] = []string{"q/1b"}
 	}
 	fx := newTierFixture(t, llamacppCase(t), pol, nodes, nil)
 	f := fx.p.soleFacade()
@@ -1965,11 +1999,11 @@ func hybridPeerFixture(t *testing.T, peers map[string]int) *tierFixture {
 		if status != http.StatusOK {
 			e := newRecordingEngine(t, status)
 			n := nodeFor(t, id, e.URL)
-			n.Models = []string{"q:1b"}
+			n.Models = []string{"q/1b"}
 			f.discovery.AddManual(n)
 			fx.eng[id] = e
 		}
-		fx.advertise(t, id, map[string]nodepolicy.AdvertisedProfile{"weak": qualifiedProfile("q:1b")}, strictCapabilityFor("llamacpp", "q:1b"))
+		fx.advertise(t, id, map[string]nodepolicy.AdvertisedProfile{"weak": qualifiedProfile("q/1b")}, strictCapabilityFor("llamacpp", "q/1b"))
 		pinRecordingPairPeer(t, f, id, fx.eng[id])
 	}
 	return fx
@@ -2020,8 +2054,8 @@ func TestUnifiedDispatchHybridPeerCarriesStrictRequest(t *testing.T) {
 	if err := json.Unmarshal([]byte(fx.eng["peer"].lastBody()), &concreteModel); err != nil {
 		t.Fatal(err)
 	}
-	if hybridModel.Model != "q:1b" || concreteModel.Model != hybridModel.Model {
-		t.Fatalf("forwarded models = %q (hybrid) and %q (concrete), want q:1b for both", hybridModel.Model, concreteModel.Model)
+	if hybridModel.Model != "q/1b" || concreteModel.Model != hybridModel.Model {
+		t.Fatalf("forwarded models = %q (hybrid) and %q (concrete), want q/1b for both", hybridModel.Model, concreteModel.Model)
 	}
 }
 
@@ -2053,14 +2087,15 @@ func TestUnifiedDispatchHybridSpendsOneAttemptBudget(t *testing.T) {
 
 func TestUnifiedDispatchHybridPreOutputDeadline(t *testing.T) {
 	pol := tierPolicy(nil)
+	pol.Roles = []nodepolicy.Role{{Name: "weak"}}
 	pol.TierPolicy.AllowStronger = false
-	fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"slow": {"q:1b"}}, nil)
+	fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"slow": {"q/1b"}}, nil)
 	stalled := newStallingEngine(t, routeChatCompletions)
 	defer stalled.doRelease()
 	n := nodeFor(t, "slow", stalled.URL)
-	n.Models = []string{"q:1b"}
+	n.Models = []string{"q/1b"}
 	fx.p.soleFacade().discovery.AddManual(n)
-	fx.advertise(t, "slow", map[string]nodepolicy.AdvertisedProfile{"weak": qualifiedProfile("q:1b")}, strictCapabilityFor("llamacpp", "q:1b"))
+	fx.advertise(t, "slow", map[string]nodepolicy.AdvertisedProfile{"weak": qualifiedProfile("q/1b")}, strictCapabilityFor("llamacpp", "q/1b"))
 
 	started := time.Now()
 	recorder, ctl := serveHybridDispatch(t, fx.p.soleFacade(), hybridTestBody, hybridTestPolicy(3, 300*time.Millisecond))

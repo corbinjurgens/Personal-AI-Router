@@ -184,6 +184,9 @@ func TestDynamicFacadeRoutesLocally(t *testing.T) {
 	t.Cleanup(engine.Close)
 
 	descriptor := customDescriptor()
+	policy := nodepolicy.Default()
+	policy.Profiles = []nodepolicy.Profile{{Key: "org/model:Q4_K_M", DisplayName: "Custom model", Engine: descriptor.Engine, Model: "org/model:Q4_K_M"}}
+	p.admission.setPolicy(policy)
 	var port int
 	for attempt := 0; attempt < 8 && port == 0; attempt++ {
 		candidate := freeTCPPort(t)

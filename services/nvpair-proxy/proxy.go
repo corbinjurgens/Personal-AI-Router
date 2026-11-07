@@ -649,7 +649,20 @@ func (f *facade) resolveRouteCandidates(model string, inference bool) []candidat
 	if model != "" {
 		owners := make([]Node, 0, len(nodes))
 		for _, node := range nodes {
-			if nodeAdvertisesModel(f.profile, node, model) {
+			self := false
+			for _, hp := range nodeCandidates(node) {
+				if isSelfTarget(&url.URL{Scheme: "http", Host: hp}, selfPort) {
+					self = true
+					break
+				}
+			}
+			eligible := nodeAdvertisesModel(f.profile, node, model)
+			if self {
+				pol := p.admission.currentPolicy()
+				pr, ok := pol.ProfileByKey(model)
+				eligible = ok && pr.Engine == f.profile.Name && modelServed(pol.ServedModels, f.profile.Name, model, p.normalizeEngineModel)
+			}
+			if eligible {
 				owners = append(owners, node)
 			}
 		}
@@ -1031,13 +1044,8 @@ func (p *Proxy) moveReservation(r reservation, nodeID string) reservation {
 	}
 }
 
-// nodeAdvertisesModel reports whether a node's advertised inventory contains
-// the requested model, under the engine's naming convention. Both sides are
-// normalized so the answer agrees with the federated model list's dedupe key;
-// if they disagreed the proxy could advertise a model it then refuses to route.
-//
-// Kept a free function taking the profile so the match is testable without a
-// Proxy.
+// nodeAdvertisesModel requires an exact profile key on this engine. Native
+// inventory alone never makes a request routable.
 func nodeAdvertisesModel(p engineProfile, n Node, model string) bool {
 	if nodepolicy.ValidateModelIdentifier(model) != nil {
 		return false
@@ -1045,12 +1053,8 @@ func nodeAdvertisesModel(p engineProfile, n Node, model string) bool {
 	if !modelServed(n.ServedModels, p.Name, model, func(_ string, m string) string { return p.normalizeModel(m) }) {
 		return false
 	}
-	requested := p.normalizeModel(model)
-	if nodepolicy.ValidateModelIdentifier(requested) != nil {
-		return false
-	}
-	for _, available := range n.Models {
-		if nodepolicy.ValidateModelIdentifier(available) == nil && p.normalizeModel(available) == requested {
+	for _, available := range n.Profiles {
+		if available.Engine == p.Name && available.Key == model {
 			return true
 		}
 	}

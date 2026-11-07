@@ -359,26 +359,22 @@ func (f *facade) roleRequested(model string) bool {
 	return false
 }
 
-// concreteModelAdvertised distinguishes an unknown name from an advertised
-// model excluded by availability, trust, serving policy or route eligibility.
+// concreteModelAdvertised distinguishes an unknown key from a visible profile
+// excluded by availability, trust, serving policy or route eligibility.
 func (f *facade) concreteModelAdvertised(model string) bool {
+	if _, ok := f.host.admission.currentPolicy().ProfileByKey(model); ok {
+		return true
+	}
+	selfID, _ := f.host.selfIdentity("")
 	for _, g := range append([]*facade{f}, f.host.enabledFacades()...) {
-		requested := g.profile.normalizeModel(model)
-		matches := func(models []string) bool {
-			for _, available := range models {
-				if nodepolicy.ValidateModelIdentifier(available) == nil && g.profile.normalizeModel(available) == requested {
+		for _, n := range g.discovery.Nodes() {
+			if selfID != "" && n.ID == selfID {
+				continue
+			}
+			for _, profile := range n.Profiles {
+				if profile.Key == model {
 					return true
 				}
-			}
-			return false
-		}
-		_, selfModels := f.host.selfIdentity(g.profile.Name)
-		if matches(selfModels) {
-			return true
-		}
-		for _, n := range g.discovery.Nodes() {
-			if matches(n.Models) {
-				return true
 			}
 		}
 	}
@@ -394,8 +390,8 @@ func (d declaredRoles) of(c candidate) map[string][]nodepolicy.AdvertisedProfile
 	return d.peers[c.id]
 }
 
-// forTier lists the distinct (engine, model) pairs declared for tier t by any
-// node, ordered by membership position, then engine and model. Each candidate
+// forTier lists the distinct (engine, profile key) pairs declared for tier t by any
+// node, ordered by membership position, then engine and key. Each candidate
 // is subsequently placed at its own node's membership position, since a pair
 // may occupy different positions on different nodes.
 func (d declaredRoles) forTier(t string) []nodepolicy.ModelRef {
@@ -407,7 +403,7 @@ func (d declaredRoles) forTier(t string) []nodepolicy.ModelRef {
 	add := func(roles map[string][]nodepolicy.AdvertisedProfile) {
 		for i, r := range roles[t] {
 			if nodepolicy.ValidateModelIdentifier(r.Model) == nil {
-				members = append(members, member{ref: nodepolicy.ModelRef{Engine: r.Engine, Model: r.Model}, position: i})
+				members = append(members, member{ref: nodepolicy.ModelRef{Engine: r.Engine, Model: r.Key}, position: i})
 			}
 		}
 	}
@@ -443,9 +439,9 @@ func (d declaredRoles) forTier(t string) []nodepolicy.ModelRef {
 
 // candidateRoleProfile selects only this candidate's own matching facts. The
 // first matching membership that meets the request supplies all its bounds.
-func candidateRoleProfile(profiles []nodepolicy.AdvertisedProfile, engine, model string, needs requestNeeds) (nodepolicy.AdvertisedProfile, int, bool) {
+func candidateRoleProfile(profiles []nodepolicy.AdvertisedProfile, engine, key string, needs requestNeeds) (nodepolicy.AdvertisedProfile, int, bool) {
 	for i, profile := range profiles {
-		if profile.Engine == engine && profile.Model == model && needs.metBy(profile.Capabilities, profile.ContextTokens) {
+		if profile.Engine == engine && profile.Key == key && needs.metBy(profile.Capabilities, profile.ContextTokens) {
 			return profile, i, true
 		}
 	}
@@ -514,15 +510,11 @@ func (f *facade) resolveTierCandidates(tier string, needs requestNeeds, crossEng
 	declared := f.declaredRoles(pol)
 	var out []candidate
 	seen := map[string]bool{}
-	add := func(c candidate, g *facade, model string, rank int) {
+	add := func(c candidate, model string, rank int) {
 		if nodepolicy.ValidateModelIdentifier(model) != nil {
 			return
 		}
-		normalized := g.profile.normalizeModel(model)
-		if nodepolicy.ValidateModelIdentifier(normalized) != nil {
-			return
-		}
-		key := c.id + "\x00" + c.engine + "\x00" + normalized
+		key := c.id + "\x00" + c.engine + "\x00" + model
 		if seen[key] {
 			return
 		}
@@ -547,7 +539,7 @@ func (f *facade) resolveTierCandidates(tier string, needs requestNeeds, crossEng
 				if !ok {
 					continue
 				}
-				c.model = r.Model
+				c.model = r.Key
 				roles = append(roles, roleCandidate{candidate: c, position: position})
 			}
 		}
@@ -565,7 +557,7 @@ func (f *facade) resolveTierCandidates(tier string, needs requestNeeds, crossEng
 		})
 		for _, role := range roles {
 			c := role.candidate
-			add(c, c.fac, c.model, rank)
+			add(c, c.model, rank)
 		}
 	}
 	anyLoaded := pol.TierPolicy.PreferLoaded == "any"
@@ -625,10 +617,13 @@ func (f *facade) hybridLocalCandidates(tier string, needs requestNeeds, crossEng
 		if !ok {
 			continue
 		}
-		m, ok := node.strictModel(c.engine, c.fac.profile.normalizeModel(c.model))
+		m, ok := node.strictModel(c.engine, c.fac.profile.normalizeModel(role.Model))
 		if !ok {
 			continue
 		}
+		// Strict qualification and dispatch retain the destination's model
+		// identity after the public profile key selected this role member.
+		c.model = role.Model
 		out = append(out, hybridCandidate{candidate: c, role: role, strict: m})
 	}
 	return out
@@ -691,6 +686,78 @@ func (f *facade) tierModelEntries() []json.RawMessage {
 	return f.host.hybridAliasRecords(pol, f.declaredRoles(pol))
 }
 
+// profileModelEntries lists visible roles first, then distinct profile keys.
+// Self facts come from policy, including local-only profiles; peer facts come
+// from advertisements, independently of role membership or native inventory.
+func (p *Proxy) profileModelEntries(pol nodepolicy.Policy, entry *facade) []json.RawMessage {
+	out := p.hybridAliasRecords(pol, p.declaredRoles(pol, entry))
+	seen := map[string]bool{}
+	for _, raw := range out {
+		var record struct {
+			ID string `json:"id"`
+		}
+		if json.Unmarshal(raw, &record) == nil {
+			seen[record.ID] = true
+		}
+	}
+	type bounds struct {
+		length    int
+		unbounded bool
+	}
+	profiles := map[string]bounds{}
+	reachable := p.catalogProfileReachability()
+	add := func(profile nodepolicy.AdvertisedProfile, nodeID string, self bool) {
+		key, context := profile.Key, profile.ContextTokens
+		if seen[key] || nodepolicy.ValidateModelIdentifier(key) != nil {
+			return
+		}
+		b := profiles[key]
+		if reachable(profile, nodeID, self) {
+			b.length = max(b.length, context)
+			b.unbounded = b.unbounded || context == 0
+		}
+		profiles[key] = b
+	}
+	for _, profile := range pol.Profiles {
+		add(nodepolicy.AdvertisedProfile{Key: profile.Key, Engine: profile.Engine, Model: profile.Model, ContextTokens: profile.ContextTokens}, "", true)
+	}
+	selfID, _ := p.selfIdentity("")
+	facades := p.enabledFacades()
+	if entry != nil && !slices.Contains(facades, entry) {
+		facades = append(facades, entry)
+	}
+	for _, f := range facades {
+		for _, node := range f.discovery.Nodes() {
+			if selfID != "" && node.ID == selfID {
+				continue
+			}
+			for _, profile := range node.Profiles {
+				add(profile, node.ID, false)
+			}
+		}
+	}
+	keys := make([]string, 0, len(profiles))
+	for key := range profiles {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	for _, key := range keys {
+		record := map[string]any{"id": key, "object": "model", "created": 0, "owned_by": "pair"}
+		b := profiles[key]
+		if !b.unbounded && b.length > 0 {
+			record["context_length"] = b.length
+		}
+		raw, err := json.Marshal(record)
+		if err == nil {
+			out = append(out, raw)
+		}
+	}
+	if out == nil {
+		return []json.RawMessage{}
+	}
+	return out
+}
+
 // configuredAliases lists own roles in policy order, then peer-only roles in
 // name order, each followed by its overrides. API entries declare no roles.
 func configuredAliases(pol nodepolicy.Policy, peerTiers map[string]bool) []string {
@@ -718,24 +785,21 @@ func configuredAliases(pol nodepolicy.Policy, peerTiers map[string]bool) []strin
 	return out
 }
 
-// hybridAliasRecords returns one synthetic OpenAI model record per configured
-// alias (configuredAliases). Concrete collisions must be replaced by these
-// role records. The record never names a credential, account, endpoint or deployment.
-// Context comes only from the supplied visible role
-// facts, with unknown or unbounded contexts omitted.
-func (p *Proxy) hybridAliasRecords(pol nodepolicy.Policy, declared declaredRoles) []json.RawMessage {
+// catalogProfileReachability resolves each profile key on its engine once and
+// retains the declaring-node check used by catalog context bounds.
+func (p *Proxy) catalogProfileReachability() func(nodepolicy.AdvertisedProfile, string, bool) bool {
 	type catalogNode struct {
 		id   string
 		self bool
 	}
 	candidates := map[nodepolicy.ModelRef]map[catalogNode]bool{}
-	reachable := func(profile nodepolicy.AdvertisedProfile, nodeID string, self bool) bool {
-		ref := nodepolicy.ModelRef{Engine: profile.Engine, Model: profile.Model}
+	return func(profile nodepolicy.AdvertisedProfile, nodeID string, self bool) bool {
+		ref := nodepolicy.ModelRef{Engine: profile.Engine, Model: profile.Key}
 		nodes, resolved := candidates[ref]
 		if !resolved {
 			nodes = map[catalogNode]bool{}
 			if f := p.facadeFor(profile.Engine); f != nil && nodepolicy.ValidateModelIdentifier(profile.Model) == nil {
-				for _, c := range f.resolveCandidates(profile.Model) {
+				for _, c := range f.resolveCandidates(profile.Key) {
 					id := c.id
 					if c.self {
 						id = ""
@@ -747,6 +811,13 @@ func (p *Proxy) hybridAliasRecords(pol nodepolicy.Policy, declared declaredRoles
 		}
 		return nodes[catalogNode{id: nodeID, self: self}]
 	}
+}
+
+// hybridAliasRecords returns synthetic role records in configured order.
+// Context uses reachable declaring-node facts, omitting unknown or unbounded
+// bounds. These records take precedence over colliding profile keys.
+func (p *Proxy) hybridAliasRecords(pol nodepolicy.Policy, declared declaredRoles) []json.RawMessage {
+	reachable := p.catalogProfileReachability()
 	lengths := map[string]int{}
 	var out []json.RawMessage
 	for _, id := range configuredAliases(pol, declared.peerTiers()) {

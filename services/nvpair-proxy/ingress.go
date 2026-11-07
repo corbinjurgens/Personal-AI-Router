@@ -312,6 +312,11 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 		f.serveStrictLocal(w, r, body, model, *strict, true)
 		return
 	}
+	profile, exists := f.host.admission.currentPolicy().ProfileByKey(model)
+	if !exists || profile.Engine != f.profile.Name {
+		writeProxyError(w, http.StatusNotFound, []string{"no profile or role named ", model}, nil, false)
+		return
+	}
 	// Terminal ingress has one local transport and sink, not an origin key or
 	// registry entry. Reuse the same request arbitration without another driver.
 	owner := newRoutingRequest(func(string) { cancel() })
@@ -350,24 +355,18 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 		model:   model,
 		waitCap: parseAdmissionWait(r.Header),
 		cancel:  func() { owner.withdrawLocalIf(attempt, false) },
-		prepare: func(ctx context.Context, profile nodepolicy.Profile, hasProfile bool, _ uint64) error {
+		prepare: func(ctx context.Context, profile nodepolicy.Profile, _ bool, _ uint64) error {
 			releasePreparation()
 			releasePreparation = func() {}
 			releaseBody()
 			releaseBody = func() {}
-			var defaults []byte
-			mode := nodepolicy.RequestOptionsDefaults
-			if hasProfile {
-				defaults = profile.RequestOptions
-				mode = profile.RequestOptionsMode.Effective()
-			}
 			var err error
-			body, releaseBody, err = transformBody(ctx, rawBody, "", false, defaults, mode)
+			body, releaseBody, err = transformBody(ctx, rawBody, "", false, profile.RequestOptions, profile.RequestOptionsMode.Effective())
 			if err != nil {
 				releaseBody = func() {}
 				return err
 			}
-			if hasProfile && !bodyModelMatches(body, model) {
+			if !bodyModelMatches(body, model) {
 				return errAmbiguousModel
 			}
 			streamRequest, err = parseOriginStreamRequest(r.URL.Path, body)

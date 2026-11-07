@@ -67,6 +67,9 @@ func performanceProxyWithCodec(t *testing.T, engine string, codec *Codec) *Proxy
 	disc := NewDiscovery()
 	disc.AddManual(selfNode("destination", profile.FacadePort, "m"))
 	p := newTestProxy(profile, codec, disc, profile.FacadePort)
+	pol := p.admission.currentPolicy()
+	pol.Profiles = []nodepolicy.Profile{{Key: "m", DisplayName: "Measured model", Engine: engine, Model: "m"}}
+	p.admission.setPolicy(pol)
 	performanceIdentify(p, "destination")
 	t.Cleanup(p.closeIdleTransports)
 	return p
@@ -982,6 +985,7 @@ func TestPerformanceFailedDialIsAttempt(t *testing.T) {
 func TestPerformanceRefusalHasNoAttempt(t *testing.T) {
 	p := performanceProxy(t, "llamacpp")
 	pol := nodepolicy.Default()
+	pol.Profiles = []nodepolicy.Profile{{Key: "m", DisplayName: "M", Engine: "llamacpp", Model: "m"}}
 	pol.Availability = nodepolicy.Paused
 	p.admission.setPolicy(pol)
 	w := httptest.NewRecorder()

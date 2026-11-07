@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"nvpair-shared/nodepolicy"
 )
 
 // rwNop is a no-op io.ReadWriter so a Codec can be constructed in tests
@@ -90,6 +92,12 @@ func nodeForModel(t *testing.T, id, serverURL, model string) Node {
 	t.Helper()
 	node := nodeFor(t, id, serverURL)
 	node.Models = []string{model}
+	// Shared fixtures exercise both the built-in and descriptor engines.
+	for _, tc := range engineCases(t) {
+		node.Profiles = append(node.Profiles, nodepolicy.AdvertisedProfile{
+			Key: fixtureProfileKey(model), Engine: tc.profile.Name, Model: model,
+		})
+	}
 	return node
 }
 
@@ -412,182 +420,100 @@ func TestHandleHTTP_404FailoverInferenceOnly(t *testing.T) {
 	})
 }
 
-// TestHandleHTTP_AggregatesOpenAIModelList runs for both engines: /v1/models
-// is the one model-list route they share, and the dedupe must keep the first
-// candidate's metadata on either.
-func TestHandleHTTP_AggregatesOpenAIModelList(t *testing.T) {
+func TestHandleHTTP_ModelListUsesProfilesWithoutFetching(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, tc engineCase) {
-		listRoute, ok := tc.profile.routeFor(http.MethodGet, "/v1/models")
-		if !ok {
-			t.Fatalf("%s has no /v1/models route", tc.profile.Name)
+		paths := []string{"/v1/models"}
+		if tc.profile.Name == "llamacpp" {
+			paths = append(paths, "/models")
 		}
-		serve := func(body string) *httptest.Server {
-			return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodGet || r.URL.Path != listRoute.upstreamPath() {
-					t.Errorf("upstream request = %s %s, want GET %s", r.Method, r.URL.Path, listRoute.upstreamPath())
+		for _, path := range paths {
+			t.Run(path, func(t *testing.T) {
+				var hits atomic.Int32
+				upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					hits.Add(1)
+					w.WriteHeader(http.StatusServiceUnavailable)
+				}))
+				defer upstream.Close()
+				a := nodeFor(t, "a", upstream.URL)
+				a.Models = []string{"native-only"}
+				a.Profiles = []nodepolicy.AdvertisedProfile{
+					{Key: "shared", Engine: tc.profile.Name, Model: "native-a"},
+					{Key: "a", Engine: tc.profile.Name, Model: "native-a"},
 				}
-				_, _ = io.WriteString(w, body)
-			}))
-		}
-		a := serve(`{"object":"list","data":[{"id":"a","owned_by":"a"},{"id":"shared","owned_by":"first"}]}`)
-		defer a.Close()
-		b := serve(`{"object":"list","data":[{"id":"shared","owned_by":"second"},{"id":"c","owned_by":"b"}]}`)
-		defer b.Close()
-
-		disc := NewDiscovery()
-		disc.AddManual(nodeFor(t, "a", a.URL))
-		disc.AddManual(nodeFor(t, "b", b.URL))
-		p := testProxy(tc.profile, disc, tc.profile.FacadePort)
-		p.soleFacade().SetSelected("a")
-		rec := httptest.NewRecorder()
-		p.soleFacade().handleHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
-
-		var got struct {
-			Object string `json:"object"`
-			Data   []struct {
-				ID      string `json:"id"`
-				OwnedBy string `json:"owned_by"`
-			} `json:"data"`
-		}
-		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-			t.Fatal(err)
-		}
-		if rec.Code != http.StatusOK || got.Object != "list" || len(got.Data) != 3 {
-			t.Fatalf("response = %d %+v", rec.Code, got)
-		}
-		if got.Data[0].ID != "a" || got.Data[1].ID != "shared" || got.Data[1].OwnedBy != "first" || got.Data[2].ID != "c" {
-			t.Fatalf("models = %+v, want a, shared(first), c", got.Data)
+				b := nodeFor(t, "b", upstream.URL)
+				b.Profiles = []nodepolicy.AdvertisedProfile{
+					{Key: "shared", Engine: tc.profile.Name, Model: "native-b"},
+					{Key: "c", Engine: tc.profile.Name, Model: "native-b"},
+				}
+				disc := NewDiscovery()
+				disc.AddManual(a)
+				disc.AddManual(b)
+				p := testProxy(tc.profile, disc, tc.profile.FacadePort)
+				policy := nodepolicy.Default()
+				policy.Profiles = []nodepolicy.Profile{{Key: "own", Engine: tc.profile.Name, Model: "local-native"}}
+				p.admission.setPolicy(policy)
+				p.soleFacade().SetSelected("a")
+				rec := httptest.NewRecorder()
+				p.soleFacade().handleHTTP(rec, httptest.NewRequest(http.MethodGet, path+"?scope=all", nil))
+				assertProfileCatalog(t, rec, "a", "c", "own", "shared")
+				if hits.Load() != 0 {
+					t.Fatalf("catalog fetched upstream %d times", hits.Load())
+				}
+			})
 		}
 	})
 }
 
-func TestHandleHTTP_LlamaCPPModelListsAggregateFleet(t *testing.T) {
-	for _, path := range []string{"/models", "/v1/models"} {
-		t.Run(path, func(t *testing.T) {
-			profile, ok := profileFor("llamacpp")
-			if !ok {
-				t.Fatal("llamacpp profile missing")
-			}
-			serve := func(body string, hits *atomic.Int32) *httptest.Server {
-				t.Helper()
-				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					hits.Add(1)
-					if r.Method != http.MethodGet || r.URL.Path != "/models" || r.URL.RawQuery != "scope=all" {
-						t.Errorf("upstream request = %s %s?%s, want GET /models?scope=all", r.Method, r.URL.Path, r.URL.RawQuery)
-					}
-					w.Header().Set("Content-Type", "application/json")
-					if _, err := io.WriteString(w, body); err != nil {
-						t.Errorf("write model list: %v", err)
-					}
-				}))
-				t.Cleanup(server.Close)
-				return server
-			}
-			var aHits, bHits atomic.Int32
-			a := serve(`{"object":"list","data":[{"id":"a","owned_by":"a"},{"id":"shared","owned_by":"first"}]}`, &aHits)
-			b := serve(`{"object":"list","data":[{"id":"shared","owned_by":"second"},{"id":"c","owned_by":"b"}]}`, &bHits)
-			disc := NewDiscovery()
-			disc.AddManual(nodeFor(t, "a", a.URL))
-			disc.AddManual(nodeFor(t, "b", b.URL))
-			f := testProxy(profile, disc, profile.FacadePort).soleFacade()
-			f.SetSelected("a")
-			rec := httptest.NewRecorder()
-			f.handleHTTP(rec, httptest.NewRequest(http.MethodGet, path+"?scope=all", nil))
-
-			if rec.Code != http.StatusOK {
-				t.Fatalf("model list status = %d, want %d", rec.Code, http.StatusOK)
-			}
-			var got struct {
-				Object string `json:"object"`
-				Data   []struct {
-					ID      string `json:"id"`
-					OwnedBy string `json:"owned_by"`
-				} `json:"data"`
-			}
-			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-				t.Fatalf("decode model list: %v", err)
-			}
-			if got.Object != "list" || len(got.Data) != 3 {
-				t.Fatalf("model list = %+v, want list envelope with three deduplicated models", got)
-			}
-			if got.Data[0].ID != "a" || got.Data[1].ID != "shared" || got.Data[1].OwnedBy != "first" || got.Data[2].ID != "c" {
-				t.Fatalf("models = %+v, want a, shared(first), c", got.Data)
-			}
-			if aHits.Load() != 1 || bHits.Load() != 1 {
-				t.Fatalf("upstream requests: a=%d, b=%d, want one per node despite selecting a", aHits.Load(), bHits.Load())
-			}
-		})
+func assertProfileCatalog(t *testing.T, rec *httptest.ResponseRecorder, keys ...string) {
+	t.Helper()
+	var got struct {
+		Object string `json:"object"`
+		Data   []struct {
+			ID      string `json:"id"`
+			Object  string `json:"object"`
+			OwnedBy string `json:"owned_by"`
+		} `json:"data"`
 	}
-}
-
-func TestHandleHTTP_ModelListRemapsUpstreamPath(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/models" || r.URL.RawQuery != "scope=all" {
-			t.Errorf("upstream request = %s %s?%s, want GET /models?scope=all", r.Method, r.URL.Path, r.URL.RawQuery)
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode catalog: %v", err)
+	}
+	if rec.Code != http.StatusOK || got.Object != "list" || got.Data == nil || len(got.Data) != len(keys) {
+		t.Fatalf("catalog = %d %+v, want keys %v", rec.Code, got, keys)
+	}
+	for i, key := range keys {
+		if got.Data[i].ID != key || got.Data[i].Object != "model" || got.Data[i].OwnedBy != "pair" {
+			t.Fatalf("catalog entry = %+v, want PAIR profile %q", got.Data[i], key)
 		}
-		_, _ = io.WriteString(w, `{"data":[{"id":"remapped"}]}`)
-	}))
-	defer upstream.Close()
-
-	profile := customCase(t).profile
-	profile.Routes = []route{{
-		Path:         "/v1/models",
-		UpstreamPath: "/models",
-		Role:         roleModelListOpenAIGET,
-	}}
-	disc := NewDiscovery()
-	disc.AddManual(nodeFor(t, "remapped", upstream.URL))
-	rec := httptest.NewRecorder()
-	testProxy(profile, disc, profile.FacadePort).soleFacade().
-		handleHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/models?scope=all", nil))
-
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"id":"remapped"`) {
-		t.Fatalf("response = %d %s, want remapped model list", rec.Code, rec.Body.String())
 	}
 }
 
-func TestHandleHTTP_ModelListEmptyAndUnavailable(t *testing.T) {
+func TestHandleHTTP_ModelListEmptyWithoutProfiles(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, tc engineCase) {
-		serveEmpty := func() *httptest.Server {
-			return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				_, _ = io.WriteString(w, tc.emptyModelList)
-			}))
-		}
-
-		// An unreachable sole node is 503, not an empty list: the client must
-		// be able to tell "nothing is answering" from "nothing is loaded".
-		down := serveEmpty()
-		downNode := nodeFor(t, "empty", down.URL)
-		down.Close()
-
-		disc := NewDiscovery()
-		disc.AddManual(downNode)
-		rec := httptest.NewRecorder()
-		testProxy(tc.profile, disc, tc.profile.FacadePort).soleFacade().
-			handleHTTP(rec, httptest.NewRequest(http.MethodGet, tc.modelListPath, nil))
-		if rec.Code != http.StatusServiceUnavailable {
-			t.Fatalf("unavailable status = %d, want 503", rec.Code)
-		}
-
-		// A reachable node with no models is 200 and this engine's own empty
-		// envelope, so its client can parse the response.
-		empty := serveEmpty()
-		defer empty.Close()
-		disc = NewDiscovery()
-		disc.AddManual(nodeFor(t, "empty", empty.URL))
-		rec = httptest.NewRecorder()
-		testProxy(tc.profile, disc, tc.profile.FacadePort).soleFacade().
-			handleHTTP(rec, httptest.NewRequest(http.MethodGet, tc.modelListPath, nil))
-		if rec.Code != http.StatusOK || rec.Body.String() != tc.emptyModelList {
-			t.Fatalf("empty response = %d %s, want 200 %s", rec.Code, rec.Body.String(), tc.emptyModelList)
-		}
+		t.Run("no nodes", func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			testProxy(tc.profile, NewDiscovery(), tc.profile.FacadePort).soleFacade().
+				handleHTTP(rec, httptest.NewRequest(http.MethodGet, tc.modelListPath, nil))
+			assertProfileCatalog(t, rec)
+		})
+		t.Run("unreachable inventory without profiles", func(t *testing.T) {
+			down := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+			node := nodeFor(t, "down", down.URL)
+			node.Models = []string{"native-only"}
+			down.Close()
+			disc := NewDiscovery()
+			disc.AddManual(node)
+			rec := httptest.NewRecorder()
+			testProxy(tc.profile, disc, tc.profile.FacadePort).soleFacade().
+				handleHTTP(rec, httptest.NewRequest(http.MethodGet, tc.modelListPath, nil))
+			assertProfileCatalog(t, rec)
+		})
 	})
 }
 
 // TestHandleHTTP_StrictModelRouting proves capability is a gate before
 // selection and priority, on every engine. The matching node advertises the
 // model in the engine's own spelling, as a client requests it. The gate
-// applies normalizeModel, which the model list also applies.
+// uses the declared profile key rather than the native inventory alone.
 func TestHandleHTTP_StrictModelRouting(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, tc engineCase) {
 		missHits, unknownHits, matchHits := 0, 0, 0
@@ -616,11 +542,9 @@ func TestHandleHTTP_StrictModelRouting(t *testing.T) {
 		defer match.Close()
 
 		disc := NewDiscovery()
-		missNode := nodeFor(t, "selected-miss", miss.URL)
-		missNode.Models = []string{"a-model-this-engine-does-not-have"}
+		missNode := nodeForModel(t, "selected-miss", miss.URL, "a-model-this-engine-does-not-have")
 		unknownNode := nodeFor(t, "a-unknown", unknown.URL)
-		matchNode := nodeFor(t, "z-match", match.URL)
-		matchNode.Models = []string{tc.advertisedModel}
+		matchNode := nodeForModel(t, "z-match", match.URL, tc.advertisedModel)
 		disc.AddManual(missNode)
 		disc.AddManual(unknownNode)
 		disc.AddManual(matchNode)

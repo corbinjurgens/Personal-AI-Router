@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"nvpair-shared/engines"
+	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 )
 
@@ -137,6 +138,9 @@ func strataProxy(t *testing.T, rec *recRW, nodes ...Node) *Proxy {
 	t.Helper()
 	disc := NewDiscovery()
 	for _, n := range nodes {
+		for _, model := range n.Models {
+			n.Profiles = append(n.Profiles, nodepolicy.AdvertisedProfile{Key: model, Engine: "strata", Model: model})
+		}
 		disc.AddManual(n)
 	}
 	profile := strataProfile(t)
@@ -197,6 +201,9 @@ func TestStrataFacadeServesThroughEnable(t *testing.T) {
 	t.Cleanup(func() { p.shutdown(t.Context()) })
 
 	const model = "strata-qwen"
+	policy := nodepolicy.Default()
+	policy.Profiles = []nodepolicy.Profile{{Key: model, DisplayName: model, Engine: "strata", Model: model}}
+	p.admission.setPolicy(policy)
 	engine := newStrataUpstream(t, func(rw http.ResponseWriter, r *http.Request) {
 		rw.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/v1/models" {
@@ -234,6 +241,7 @@ func TestStrataFacadeServesThroughEnable(t *testing.T) {
 		HostUUID: "uuid-self", Name: "self", IP: "127.0.0.1",
 		Services:       map[noderec.ServiceKey]noderec.ServiceStatus{"e-strata": {Port: port}},
 		ModelsByEngine: map[string][]string{descriptor.Engine: {model}},
+		Policy:         &nodepolicy.Advertisement{Revision: "1", Profiles: []nodepolicy.AdvertisedProfile{{Key: model, Engine: descriptor.Engine, Model: model}}},
 	}}})
 	if err != nil {
 		t.Fatal(err)
@@ -264,7 +272,7 @@ func TestStrataFacadeServesThroughEnable(t *testing.T) {
 	for _, r := range engine.requests() {
 		paths = append(paths, r.method+" "+r.path)
 	}
-	if want := []string{"POST /v1/chat/completions", "GET /v1/models"}; !slices.Equal(paths, want) {
+	if want := []string{"POST /v1/chat/completions"}; !slices.Equal(paths, want) {
 		t.Fatalf("engine saw %v, want %v", paths, want)
 	}
 }
@@ -312,12 +320,12 @@ func TestStrataModelIDsAreExact(t *testing.T) {
 			t.Errorf("normalizeModel(%q) = %q, want it unchanged", id, got)
 		}
 	}
-	node := Node{ID: "strata-node", Models: []string{"qwen3-30b-a3b:latest"}}
-	if nodeAdvertisesModel(profile, node, "qwen3-30b-a3b") {
-		t.Error("an untagged request matched a :latest inventory entry")
+	node := Node{ID: "strata-node", Profiles: []nodepolicy.AdvertisedProfile{{Key: "org/qwen3", Engine: "strata", Model: "org/qwen3"}}}
+	if nodeAdvertisesModel(profile, node, "qwen3") {
+		t.Error("a bare request matched a namespaced profile key")
 	}
-	if !nodeAdvertisesModel(profile, node, "qwen3-30b-a3b:latest") {
-		t.Error("the exact inventory id was not matched")
+	if !nodeAdvertisesModel(profile, node, "org/qwen3") {
+		t.Error("the exact profile key was not matched")
 	}
 }
 
@@ -377,7 +385,7 @@ func TestStrataStreamedChatCompletionsPassThrough(t *testing.T) {
 	}
 }
 
-func TestStrataModelListIsFederatedInTheOpenAIDialect(t *testing.T) {
+func TestStrataModelListUsesDeclaredProfilesInTheOpenAIDialect(t *testing.T) {
 	listing := func(rows ...string) http.HandlerFunc {
 		return func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
@@ -416,14 +424,17 @@ func TestStrataModelListIsFederatedInTheOpenAIDialect(t *testing.T) {
 	}
 	var ids []string
 	for _, m := range list.Data {
-		ids = append(ids, m.ID+"="+m.Status.Value)
+		ids = append(ids, m.ID)
+		if m.Status.Value != "" {
+			t.Fatalf("profile catalog exposed upstream status: %+v", m)
+		}
 	}
-	if want := []string{"strata-a=loaded", "strata-b=unloaded", "strata-c=unloaded"}; !slices.Equal(ids, want) {
-		t.Fatalf("model list = %v, want %v (one row per id, upstream status preserved)", ids, want)
+	if want := []string{"strata-a", "strata-c"}; !slices.Equal(ids, want) {
+		t.Fatalf("model list = %v, want declared profiles %v", ids, want)
 	}
 	for _, u := range []*strataUpstream{first, second} {
-		if got := u.requests(); len(got) != 1 || got[0].method != http.MethodGet || got[0].path != "/v1/models" {
-			t.Fatalf("upstream requests = %+v, want one GET /v1/models", got)
+		if got := u.requests(); len(got) != 0 {
+			t.Fatalf("upstream requests = %+v, want none", got)
 		}
 	}
 }
