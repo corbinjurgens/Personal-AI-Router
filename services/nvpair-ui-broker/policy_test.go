@@ -1021,8 +1021,8 @@ func TestPolicyStateReplayedToRestartedProxy(t *testing.T) {
 		return seen[nodepolicy.MethodSetAvailability] && seen[nodepolicy.MethodSetPolicy] &&
 			seen[nodepolicy.MethodSetResidency] && seen[nodepolicy.MethodSetEngineDrain]
 	})
-	if calls[0].method != nodepolicy.MethodSetAvailability {
-		t.Fatalf("first push after a restart = %s; availability must reach the proxy first", calls[0].method)
+	if len(calls) < 2 || calls[0].method != nodepolicy.MethodSetEngineDrain || calls[1].method != nodepolicy.MethodSetAvailability {
+		t.Fatalf("restart replay must apply drains, then availability, before policy: %+v", calls)
 	}
 	if p := availabilityPushes(calls); p[0].State != nodepolicy.Draining || p[0].CancelActive {
 		t.Fatalf("replayed availability = %+v, want draining until current-manager physical proof", p[0])
