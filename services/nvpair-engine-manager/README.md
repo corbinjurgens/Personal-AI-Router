@@ -803,6 +803,13 @@ directory retains self for model-copy identity resolution; mesh self-trust is
 not permission to start a peer subscription. Failed peer streams retry after
 three seconds.
 
+The finite llama.cpp adapter accepts projector-disable switches `--no-mmproj`
+and `--no-mmproj-auto`, the presence of `LLAMA_ARG_NO_MMPROJ_AUTO`, and
+`mmproj-auto = false` (also `0` or `off`) in environment, presets and typed
+extra options. Negative preset keys such as `no-mmproj = true` disable
+automatic selection and survive whole-preset conversion, including in `[*]`.
+Enabling automatic selection, `--mmproj` and `--mmproj-url` remain refused.
+
 For custom llama.cpp launches using native `--models-preset` (including the
 equals form), model presets own context, parallelism, idle retention and cache
 RAM. Engine-manager omits the manifest's fixed `--ctx-size`, `--parallel`,

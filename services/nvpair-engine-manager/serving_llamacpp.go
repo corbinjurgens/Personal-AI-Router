@@ -397,7 +397,7 @@ var llamaServingOptions = []llamaServingOption{
 	{key: "alias", flags: []string{"--alias", "-a"}, env: "LLAMA_ARG_ALIAS", unsupported: true},
 	{key: "mmproj", flags: []string{"--mmproj", "-mm"}, env: "LLAMA_ARG_MMPROJ", unsupported: true},
 	{key: "mmproj-url", flags: []string{"--mmproj-url", "-mmu"}, env: "LLAMA_ARG_MMPROJ_URL", unsupported: true},
-	{key: "mmproj-auto", flags: []string{"--mmproj-auto", "--no-mmproj", "--no-mmproj-auto"}, env: "LLAMA_ARG_MMPROJ_AUTO", negEnv: "LLAMA_ARG_NO_MMPROJ_AUTO", bool: true, unsupported: true},
+	{key: "mmproj-auto", flags: []string{"--mmproj-auto", "--no-mmproj", "--no-mmproj-auto"}, negativeFlags: []string{"--no-mmproj", "--no-mmproj-auto"}, env: "LLAMA_ARG_MMPROJ_AUTO", negEnv: "LLAMA_ARG_NO_MMPROJ_AUTO", bool: true},
 	{key: "mmproj-offload", flags: []string{"--mmproj-offload", "--no-mmproj-offload"}, env: "LLAMA_ARG_MMPROJ_OFFLOAD", negEnv: "LLAMA_ARG_NO_MMPROJ_OFFLOAD", bool: true, unsupported: true},
 	{key: "mmproj-device", flags: []string{"-mmdev", "--mmproj-device"}, env: "MTMD_BACKEND_DEVICE", unsupported: true},
 	{key: "image-min-tokens", flags: []string{"--image-min-tokens"}, env: "LLAMA_ARG_IMAGE_MIN_TOKENS", unsupported: true},
@@ -528,6 +528,10 @@ func validateLlamaValue(key, value string) error {
 	case "fit":
 		if value != "off" && value != "false" && value != "0" {
 			return servingError("Automatic fitting cannot establish a finite allocation.")
+		}
+	case "mmproj-auto":
+		if value != "off" && value != "false" && value != "0" {
+			return servingError("Automatic projector selection must be disabled; projector allocation is unsupported.")
 		}
 	}
 	return nil
@@ -960,7 +964,7 @@ func parseLlamaServingPresetAllowing(data []byte, extra map[string]map[string]bo
 				value = strconv.FormatBool(value != "true")
 			}
 		}
-		if negative && (key == "kv-offload" || key == "op-offload" || key == "repack") {
+		if negative && (key == "kv-offload" || key == "op-offload" || key == "repack" || key == "mmproj-auto") {
 			// Pinned 0ec4027a2 preset.cpp parse_bool_arg reverses args_neg using
 			// is_truthy, including repack's nr/no-repack keys; every other value
 			// becomes true. Positive offload values remain native-owned.

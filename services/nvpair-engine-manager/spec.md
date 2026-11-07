@@ -836,6 +836,14 @@ exactly `auto`, `none`, `mmap`, `mlock`, `mmap+mlock` or `dio`. The b12020
 adapter also accepts canonical nonnegative int32 `moe-cache-mib`,
 `lazy-mode` (`auto`, `on`, `off`) and `spec-type` (`none`, `draft-mtp`).
 Built-in MTP uses the main model's head, without a separate draft artifact.
+Automatic projector selection accepts only disable forms: `--no-mmproj`,
+`--no-mmproj-auto`, presence of `LLAMA_ARG_NO_MMPROJ_AUTO` (even empty), or
+`mmproj-auto` set to `false`, `0` or `off` in environment, presets or typed
+extra options. Negative preset keys `no-mmproj` and `no-mmproj-auto` invert
+native truthiness (`on`, `enabled`, `true`, `1`). Wildcard preset disables are
+preserved in every converted profile. Enabling automatic selection and explicit
+`mmproj`/`mmproj-url` selections remain refused because projector allocation
+is unsupported.
 Each control is retained in placement readback. These controls
 have no typed override and do not change memory estimation. Unsupported SWA,
 context-shift and scaling controls, tensor overrides, CPU FFN, host buffers,
