@@ -378,7 +378,7 @@ func TestModelControlsCatalogIgnoresNativeInventoryAndResponses(t *testing.T) {
 			}
 			rec := httptest.NewRecorder()
 			status, err := f.serveModelList(rec, httptest.NewRequest(http.MethodGet, "/v1/models", nil),
-				route{Path: "/v1/models", Role: roleModelListOpenAIGET}, []candidate{{id: "peer", url: target}})
+				[]candidate{{id: "peer", url: target}})
 			if err != nil || status != http.StatusOK {
 				t.Fatalf("catalog status/error = %d/%v", status, err)
 			}
@@ -412,7 +412,7 @@ func TestModelControlsCatalogIndependentOfUnavailableEngines(t *testing.T) {
 			f.discovery.SetSubscribed([]Node{{ID: "unavailable", Profiles: profiles}})
 			rec := httptest.NewRecorder()
 			status, err := f.serveModelList(rec, httptest.NewRequest(http.MethodGet, "/v1/models", nil),
-				route{Path: "/v1/models", Role: roleModelListOpenAIGET}, nil)
+				nil)
 			if err != nil || status != http.StatusOK || rec.Code != http.StatusOK {
 				t.Fatalf("catalog status/error = %d/%v (HTTP %d)", status, err, rec.Code)
 			}

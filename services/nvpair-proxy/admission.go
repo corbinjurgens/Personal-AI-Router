@@ -396,11 +396,11 @@ func (a *admissionController) admit(ctx context.Context, req admissionRequest) a
 		// Admission is the serving linearization point under the policy mutex.
 		// Already-admitted work drains across restrictive policy activation;
 		// queued requests must recheck permission before receiving a ticket.
-		if !modelServed(pol.ServedModels, req.engine, model, a.normalize) {
-			return reject(rejectNotServed)
-		}
 		profile, hasProfile := pol.ProfileByKey(req.model)
 		if !hasProfile || profile.Engine != req.engine {
+			return reject(rejectNotServed)
+		}
+		if !modelServed(pol.ServedModels, profile.Engine, profile.Model, a.normalize) {
 			return reject(rejectNotServed)
 		}
 		// Request keys select profiles; capacity remains keyed by the engine's

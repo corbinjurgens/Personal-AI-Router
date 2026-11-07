@@ -95,11 +95,12 @@ var openAIModelListRoutes = []route{
 	{Path: "/v1/models", Role: roleModelListOpenAIGET},
 }
 
-// llamaCPPBaseRoutes serves both model-list paths through the fleet inventory,
-// querying llama.cpp's router endpoint. Its response uses the OpenAI envelope.
+// llamaCPPBaseRoutes classifies the native completion endpoint and both
+// model-list paths. The router's catalog uses the OpenAI envelope.
 var llamaCPPBaseRoutes = []route{
 	{Path: "/models", Role: roleModelListOpenAIGET},
 	{Path: "/v1/models", UpstreamPath: "/models", Role: roleModelListOpenAIGET},
+	{Path: "/completion", Role: roleInferencePOST},
 }
 
 // openAIInferenceRoutes is the OpenAI-compatible inference surface.

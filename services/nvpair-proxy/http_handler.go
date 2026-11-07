@@ -968,7 +968,7 @@ func (f *facade) serveProxyPassthrough(w http.ResponseWriter, r *http.Request, s
 		if len(candidates) != 0 {
 			_ = f.notify("proxy/request-started", RequestStartedEvent{ID: reqID, Method: r.Method, Path: r.URL.Path, Target: "cluster"})
 		}
-		status, err := f.serveModelList(w, r, route, candidates)
+		status, err := f.serveModelList(w, r, candidates)
 		errText := ""
 		if err != nil {
 			errText = err.Error()

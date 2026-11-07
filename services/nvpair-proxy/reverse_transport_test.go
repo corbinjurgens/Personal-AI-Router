@@ -997,7 +997,7 @@ func TestProxyReverseHybridPeerSlotWaitIsBounded(t *testing.T) {
 	stopHolding := func() { releaseOnce.Do(func() { close(release) }) }
 	var held atomic.Int32
 	fx := newProxyReverseFixture(t, "llamacpp", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/models" {
+		if r.URL.Path == "/props" {
 			held.Add(1)
 			select {
 			case <-release:
@@ -1027,7 +1027,7 @@ func TestProxyReverseHybridPeerSlotWaitIsBounded(t *testing.T) {
 		occupying.Add(1)
 		go func() {
 			defer occupying.Done()
-			response, err := transport.RoundTrip(proxyReverseRequest(t, http.MethodGet, candidate.url.String()+"/v1/models", nil))
+			response, err := transport.RoundTrip(proxyReverseRequest(t, http.MethodGet, candidate.url.String()+"/props", nil))
 			if err != nil {
 				return
 			}

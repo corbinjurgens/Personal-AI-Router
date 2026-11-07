@@ -1283,7 +1283,11 @@ grant no CORS permissions. Multi-target preflights intersect permissions from al
 responding engines without forwarding caller credentials; unavailable engines
 are skipped, and no responders yields 502. Preflights take no reservations.
 
-Model inventories with an Origin require agreement from every responding engine:
+Profile catalogs with an Origin require permission from the entry engine and
+every engine contributing visible profiles, intersecting all responding nodes
+within each engine. An engine with no responders yields 502.
+Peer-ingress catalogs use the same records and check this node's local engines
+without forwarding permission probes onward. Permission checks require agreement:
 a denial yields 403, an invalid inventory yields 502 without a partial list. An
 invalid-inventory error retains CORS headers only when all responding engines
 approve. See README.md for the complete forwarding and intersection rules.
@@ -1777,9 +1781,10 @@ built-in, default or protected names and no cluster role store.
   scheduler priority, ID, self mapped to that engine's local backend, peers over
   cluster mTLS to the port that facade's discovery overlay carries — the peer's
   facade port for that engine. A role keeps only the nodes that declare it, and
-  each is sent the model as its node spells it. The owner filter applies to
-  roles too, so a declared model missing from the node's inventory is no
-  candidate. A node whose `loadedByEngine` (or, for this node,
+  each is sent its declared profile key. The owner filter applies to roles too:
+  the node must declare that exact profile key, and `ServedModels` checks its
+  native model rather than its public key. Native inventory grants no routing
+  permission. A node whose `loadedByEngine` (or, for this node,
   the reported residency) contains the model is warm.
 - **Engines**: `/v1/chat/completions`, `/v1/completions` and `/v1/embeddings`
   may cross engines. Every other inference route resolves only to its own
@@ -1842,8 +1847,8 @@ built-in, default or protected names and no cluster role store.
   for each declared role and its `:api` and `:local` variants. Self roles come
   first in policy order, then peer-only names sorted by name; each role is
   followed by its variants. Empty roles are included, API entries alone are
-  not. Peers come from every facade overlay in this process. Both facade and
-  unified-listener catalogs use these visible declarations. The records are
+  not. Peers come from every facade overlay in this process. Facade, peer-ingress
+  and unified-listener catalogs use these visible declarations. The records are
   built from the policy and those declarations (`configuredAliases`, `hybridAliasRecords`) and
   carry no credential, account, deployment or endpoint. Each alias variant
   carries `context_length` equal to the largest `ContextTokens` of that role's

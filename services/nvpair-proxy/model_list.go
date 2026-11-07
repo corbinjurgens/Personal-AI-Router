@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"sync"
 
 	"nvpair-shared/cors"
@@ -15,9 +16,32 @@ import (
 
 // serveModelList serves the same policy-derived catalog as the routing listener.
 // Engine inventories remain available through the engine inventory views.
-func (f *facade) serveModelList(w http.ResponseWriter, r *http.Request, matchedRoute route, candidates []candidate) (int, error) {
+func (f *facade) serveModelList(w http.ResponseWriter, r *http.Request, candidates []candidate) (int, error) {
+	return f.serveProfileCatalog(w, r, func(g *facade) []candidate {
+		if g == f {
+			return candidates
+		}
+		return g.resolvePassthroughCandidates()
+	})
+}
+
+// Peer ingress is terminal: its browser permission probes stay on this node,
+// just like inference, rather than recursively requesting another peer catalog.
+func (f *facade) serveIngressModelList(w http.ResponseWriter, r *http.Request) (int, error) {
+	return f.serveProfileCatalog(w, r, func(g *facade) []candidate {
+		target, ok := g.localBackendTarget()
+		if !ok {
+			return nil
+		}
+		return []candidate{{url: target, fac: g, engine: g.profile.Name, self: true}}
+	})
+}
+
+func (f *facade) serveProfileCatalog(w http.ResponseWriter, r *http.Request, candidatesFor func(*facade) []candidate) (int, error) {
+	pol := f.host.admission.currentPolicy()
+	models, engines := f.host.profileCatalog(pol, f)
 	if r.Header.Get("Origin") != "" {
-		status, headers, err := f.catalogPermissions(r, matchedRoute, candidates)
+		status, headers, err := f.profileCatalogPermissions(r, engines, candidatesFor)
 		for key, values := range headers {
 			w.Header()[key] = values
 		}
@@ -26,8 +50,6 @@ func (f *facade) serveModelList(w http.ResponseWriter, r *http.Request, matchedR
 			return status, err
 		}
 	}
-	pol := f.host.admission.currentPolicy()
-	models := f.host.profileModelEntries(pol, f)
 	body, err := json.Marshal(struct {
 		Object string            `json:"object"`
 		Data   []json.RawMessage `json:"data"`
@@ -42,6 +64,54 @@ func (f *facade) serveModelList(w http.ResponseWriter, r *http.Request, matchedR
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
 	return http.StatusOK, nil
+}
+
+// A facade catalog spans engines. Each contributing engine must approve the
+// browser origin, with the existing intersection across its responding nodes.
+func (f *facade) profileCatalogPermissions(r *http.Request, engines map[string]bool, candidatesFor func(*facade) []candidate) (int, http.Header, error) {
+	names := make([]string, 0, len(engines))
+	for name := range engines {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	var responding []http.Header
+	var invalid error
+	for _, name := range names {
+		g := f.host.facadeFor(name)
+		if name == f.profile.Name {
+			g = f
+		}
+		if g == nil {
+			return http.StatusBadGateway, nil, fmt.Errorf("catalog engine %q has no facade", name)
+		}
+		matched := false
+		for _, route := range g.profile.Routes {
+			if !route.Role.isModelList() {
+				continue
+			}
+			matched = true
+			status, headers, err := g.catalogPermissions(r, route, candidatesFor(g))
+			if err != nil {
+				if status != http.StatusBadGateway || headers == nil {
+					return status, nil, err
+				}
+				invalid = err
+			}
+			responding = append(responding, headers)
+			break
+		}
+		if !matched {
+			return http.StatusBadGateway, nil, fmt.Errorf("catalog engine %q has no model-list route", name)
+		}
+	}
+	headers, allowed := cors.Combine(r, responding)
+	if !allowed {
+		return http.StatusForbidden, nil, fmt.Errorf("catalog engines disagree on origin")
+	}
+	if invalid != nil {
+		return http.StatusBadGateway, headers, invalid
+	}
+	return http.StatusOK, headers, nil
 }
 
 // catalogPermissions retains the facade's engine-owned browser policy. Only

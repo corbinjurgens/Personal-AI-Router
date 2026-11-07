@@ -107,8 +107,8 @@ func TestLocalCredentialOnSelfRequests(t *testing.T) {
 	}
 }
 
-// Peer ingress: admitted inference and the model list carry the key; any
-// other path is forwarded with only what the peer sent.
+// Peer ingress: admitted inference carries the key, the policy catalog needs
+// no engine read, and passthrough retains only what the peer sent.
 func TestLocalCredentialOnPeerIngress(t *testing.T) {
 	tc := customCase(t)
 	engine := newRecordingEngine(t, http.StatusOK)
@@ -128,14 +128,14 @@ func TestLocalCredentialOnPeerIngress(t *testing.T) {
 	requireLocalKey(t, engine.lastHeader())
 
 	f.serveIngress(httptest.NewRecorder(), withCallerCredentials(httptest.NewRequest(http.MethodGet, tc.modelListPath, nil)), "peer")
-	if engine.hits() != 2 {
+	if engine.hits() != 1 {
 		t.Fatalf("ingress model list hits = %d", engine.hits())
 	}
 	requireLocalKey(t, engine.lastHeader())
 
 	other := httptest.NewRequest(http.MethodPost, tc.nonInferencePath, strings.NewReader(`{}`))
 	f.serveIngress(httptest.NewRecorder(), other, "peer")
-	if engine.hits() != 3 {
+	if engine.hits() != 2 {
 		t.Fatalf("ingress passthrough hits = %d", engine.hits())
 	}
 	if got := engine.lastHeader().Get("Authorization"); got != "" {

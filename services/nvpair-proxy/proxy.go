@@ -660,7 +660,7 @@ func (f *facade) resolveRouteCandidates(model string, inference bool) []candidat
 			if self {
 				pol := p.admission.currentPolicy()
 				pr, ok := pol.ProfileByKey(model)
-				eligible = ok && pr.Engine == f.profile.Name && modelServed(pol.ServedModels, f.profile.Name, model, p.normalizeEngineModel)
+				eligible = ok && pr.Engine == f.profile.Name && modelServed(pol.ServedModels, pr.Engine, pr.Model, p.normalizeEngineModel)
 			}
 			if eligible {
 				owners = append(owners, node)
@@ -1050,12 +1050,9 @@ func nodeAdvertisesModel(p engineProfile, n Node, model string) bool {
 	if nodepolicy.ValidateModelIdentifier(model) != nil {
 		return false
 	}
-	if !modelServed(n.ServedModels, p.Name, model, func(_ string, m string) string { return p.normalizeModel(m) }) {
-		return false
-	}
 	for _, available := range n.Profiles {
 		if available.Engine == p.Name && available.Key == model {
-			return true
+			return modelServed(n.ServedModels, p.Name, available.Model, func(_ string, m string) string { return p.normalizeModel(m) })
 		}
 	}
 	return false

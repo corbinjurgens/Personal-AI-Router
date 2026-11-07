@@ -230,8 +230,8 @@ func (f *facade) handleClusterIngress(w http.ResponseWriter, r *http.Request) {
 // serveIngress is the authenticated half of the cluster ingress. Inference is
 // admitted first (FORK_DESIGN.md §3.3): the body's model is read within the
 // same cap the router applies, admission decides, the model's profile
-// requestOptions are merged in, and only then is the request forwarded. Every
-// other route is forwarded as before.
+// requestOptions are merged in, and only then is the request forwarded.
+// Catalogs use the policy catalog; other routes retain engine passthrough.
 func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer string) {
 	start := time.Now()
 	if isInferenceRequest(f.profile, r.Method, r.URL.Path) && !f.host.routingIdentityReady() {
@@ -252,6 +252,10 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 		return
 	}
 	if !isInferenceRequest(f.profile, r.Method, r.URL.Path) {
+		if route, ok := f.profile.routeFor(r.Method, r.URL.Path); ok && route.Role.isModelList() {
+			_, _ = f.serveIngressModelList(w, r)
+			return
+		}
 		target, ok := f.localBackendTarget()
 		if !ok {
 			writeIngressError(w, http.StatusServiceUnavailable, "no-local-backend",
@@ -260,12 +264,6 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 		}
 		slog.Debug("cluster ingress forwarding to local backend",
 			"peer", peer, "method", r.Method, "path", r.URL.Path, "target", target.Host)
-		// A peer's model-list read is the only non-inference route that
-		// carries the local key; any other path is forwarded as the peer sent it.
-		if route, ok := f.profile.routeFor(r.Method, r.URL.Path); ok && route.Role.isModelList() {
-			r = r.Clone(r.Context())
-			withLocalCredential(r.Header, f.localCredentialFor(target))
-		}
 		f.reverseProxyToLocal(w, r, target)
 		return
 	}

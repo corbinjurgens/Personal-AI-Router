@@ -508,7 +508,8 @@ func TestIngress_NonInferenceBypassesAdmission(t *testing.T) {
 	p.admission.setAvailability(nodepolicy.Paused, false)
 	rec := httptest.NewRecorder()
 	f.serveIngress(rec, httptest.NewRequest(http.MethodGet, tc.modelListPath, nil), "peer")
-	if rec.Code != http.StatusOK || engine.hits() != 1 {
+	assertProfileCatalog(t, rec, tc.requestedModel)
+	if engine.hits() != 0 {
 		t.Fatalf("model list through a paused ingress: status %d, hits %d", rec.Code, engine.hits())
 	}
 }

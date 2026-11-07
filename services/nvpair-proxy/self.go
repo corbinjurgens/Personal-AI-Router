@@ -85,7 +85,8 @@ func (f *facade) dormantSelfCandidate(model string) (candidate, bool) {
 		return candidate{}, false
 	}
 	pol := p.admission.currentPolicy()
-	if !modelServed(pol.ServedModels, f.profile.Name, model, p.normalizeEngineModel) {
+	pr, ok := pol.ProfileByKey(model)
+	if !ok || pr.Engine != f.profile.Name || !modelServed(pol.ServedModels, pr.Engine, pr.Model, p.normalizeEngineModel) {
 		return candidate{}, false
 	}
 	if on, known := p.admission.engineIntent(f.profile.Name); !known || !on || !pol.Idle.StartOnDemand {
@@ -93,10 +94,6 @@ func (f *facade) dormantSelfCandidate(model string) (candidate, bool) {
 	}
 	selfID, _ := p.selfIdentity(f.profile.Name)
 	if selfID == "" {
-		return candidate{}, false
-	}
-	pr, ok := pol.ProfileByKey(model)
-	if !ok || pr.Engine != f.profile.Name {
 		return candidate{}, false
 	}
 	// The real address is read again once admission has woken the engine; the

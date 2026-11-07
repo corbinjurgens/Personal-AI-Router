@@ -690,7 +690,18 @@ func (f *facade) tierModelEntries() []json.RawMessage {
 // Self facts come from policy, including local-only profiles; peer facts come
 // from advertisements, independently of role membership or native inventory.
 func (p *Proxy) profileModelEntries(pol nodepolicy.Policy, entry *facade) []json.RawMessage {
+	models, _ := p.profileCatalog(pol, entry)
+	return models
+}
+
+// profileCatalog captures entries and their engines together so a discovery
+// update during browser permission checks cannot add an unchecked engine.
+func (p *Proxy) profileCatalog(pol nodepolicy.Policy, entry *facade) ([]json.RawMessage, map[string]bool) {
 	out := p.hybridAliasRecords(pol, p.declaredRoles(pol, entry))
+	engines := map[string]bool{}
+	if entry != nil {
+		engines[entry.profile.Name] = true
+	}
 	seen := map[string]bool{}
 	for _, raw := range out {
 		var record struct {
@@ -708,7 +719,11 @@ func (p *Proxy) profileModelEntries(pol nodepolicy.Policy, entry *facade) []json
 	reachable := p.catalogProfileReachability()
 	add := func(profile nodepolicy.AdvertisedProfile, nodeID string, self bool) {
 		key, context := profile.Key, profile.ContextTokens
-		if seen[key] || nodepolicy.ValidateModelIdentifier(key) != nil {
+		if nodepolicy.ValidateModelIdentifier(key) != nil {
+			return
+		}
+		engines[profile.Engine] = true
+		if seen[key] {
 			return
 		}
 		b := profiles[key]
@@ -753,9 +768,9 @@ func (p *Proxy) profileModelEntries(pol nodepolicy.Policy, entry *facade) []json
 		}
 	}
 	if out == nil {
-		return []json.RawMessage{}
+		out = []json.RawMessage{}
 	}
-	return out
+	return out, engines
 }
 
 // configuredAliases lists own roles in policy order, then peer-only roles in

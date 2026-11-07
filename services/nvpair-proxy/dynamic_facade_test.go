@@ -60,6 +60,7 @@ func TestBuiltInProfilesAreUnchanged(t *testing.T) {
 			Routes: slices.Concat([]route{
 				{Path: "/models", Role: roleModelListOpenAIGET},
 				{Path: "/v1/models", UpstreamPath: "/models", Role: roleModelListOpenAIGET},
+				post("/completion"),
 			}, openAI),
 			StandalonePort: 8080, ModelNaming: exactID, ReservedPersistedPort: 8081,
 		},
