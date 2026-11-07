@@ -727,9 +727,9 @@ func (e *Executor) inspectModelArtifacts(ctx context.Context, p modelconfig.Insp
 		}
 		current, err := inspectionSnapshot(st, p.Engine)
 		if err != nil || !snapshot.equal(current) {
-			result.ConfigurationKey, result.ConfigurationKeyReason, result.ConfigurationPools = "", "not-finite", nil
+			result.ConfigurationKey, result.ConfigurationKeyReason, result.ConfigurationPools = "", "artifacts-unavailable", nil
 			result.ExecutionKey = ""
-			input = modelEstimateInput{}
+			return unavailable("busy", "Engine configuration changed during inspection.")
 		}
 	}
 	for _, output := range advisory {
