@@ -1622,7 +1622,7 @@ func TestServedResidentPolicyPairedRoutes(t *testing.T) {
 					request := map[string]any{"nodeId": mesh.b.uuid, "policy": want.PeerProjection(), "expectedPersistedRevision": before.Revision}
 					denied := remote(t, "engine:remote-policy-set", request)
 					if denied.Error == nil || denied.Error.Code != -32012 || len(denied.Result) != 0 {
-						t.Fatalf("PG denial=%+v, want -32012 without a result", denied)
+						t.Fatalf("PG denial=%+v error=%+v, want -32012 without a result", denied, denied.Error)
 					}
 					if after, exists := readStored(t); exists != existed || !bytes.Equal(after, stored) {
 						t.Fatal("PG-denied configuration changed policy file presence or bytes")

@@ -67,7 +67,7 @@ func listenFixtureServicePort(t *testing.T) net.Listener {
 		if _, claimed := fixtureServicePortClaims.LoadOrStore(port, struct{}{}); claimed {
 			continue
 		}
-		ln, err := allocateFixtureListener(net.Listen, ":"+strconv.Itoa(port))
+		ln, err := listenFixtureServiceCandidate(port)
 		if err != nil {
 			fixtureServicePortClaims.Delete(port)
 		}
@@ -84,6 +84,15 @@ func listenFixtureServicePort(t *testing.T) net.Listener {
 	}
 	t.Fatal("could not reserve a fixture service port outside the ephemeral range")
 	return nil
+}
+
+func listenFixtureServiceCandidate(port int) (net.Listener, error) {
+	// A dual-stack bind can succeed beside an IPv4-only listener on Windows.
+	// Use the existing all-scope check before handing the port to a worker.
+	if address := portOccupant(port); address != "" {
+		return nil, fmt.Errorf("fixture service port occupied at %s: %w", address, syscall.EADDRINUSE)
+	}
+	return allocateFixtureListener(net.Listen, ":"+strconv.Itoa(port))
 }
 
 func allocateFixtureListener(listen func(string, string) (net.Listener, error), address string) (net.Listener, error) {
@@ -319,6 +328,44 @@ func TestFixtureServicePortsStayDistinctAfterRelease(t *testing.T) {
 			t.Fatalf("released service port %d was reassigned within the same fixture", port)
 		}
 		seen[port] = true
+	}
+}
+
+func TestFixtureServiceCandidateRejectsOccupiedAddressScopes(t *testing.T) {
+	for _, tc := range []struct {
+		name, network, host string
+	}{
+		{"IPv4 wildcard", "tcp4", "0.0.0.0"},
+		{"IPv4 loopback", "tcp4", "127.0.0.1"},
+		{"IPv6 wildcard", "tcp6", "::"},
+		{"IPv6 loopback", "tcp6", "::1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.network == "tcp6" && !ipv6LoopbackAvailable() {
+				t.Skip("IPv6 loopback unavailable")
+			}
+			occupant, err := allocateFixtureListener(func(_ string, address string) (net.Listener, error) {
+				return net.Listen(tc.network, address)
+			}, net.JoinHostPort(tc.host, "0"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := occupant.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			port := occupant.Addr().(*net.TCPAddr).Port
+			candidate, err := listenFixtureServiceCandidate(port)
+			if candidate != nil {
+				if closeErr := candidate.Close(); closeErr != nil {
+					t.Error(closeErr)
+				}
+			}
+			if candidate != nil || !errors.Is(err, syscall.EADDRINUSE) {
+				t.Fatalf("occupied %s port %d: listener=%v error=%v, want no listener and address-in-use", tc.name, port, candidate, err)
+			}
+		})
 	}
 }
 
