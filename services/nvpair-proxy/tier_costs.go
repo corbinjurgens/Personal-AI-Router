@@ -177,6 +177,7 @@ type tierScore struct {
 	Terms          [len(tierCostTerms)]float64
 	Total          float64
 	Imputed        bool
+	Measured       bool
 	EvidenceAgeMs  int64
 	PrefillSamples int
 	DecodeSamples  int
@@ -440,7 +441,7 @@ func (p *Proxy) tierScoresLocked(candidates []candidate, facts tierFacts) []tier
 		s.NodeID, s.Engine, s.Key = c.id, c.engine, m.key
 		prefill, decode := slowPrefill, slowDecode
 		if m.measured {
-			s.EvidenceAgeMs = m.ageMs
+			s.EvidenceAgeMs, s.Measured = m.ageMs, true
 		}
 		if r := m.evidence.Prefill; m.measured && r != nil {
 			prefill, s.PrefillSamples = r.TokensPerSecond, r.Samples

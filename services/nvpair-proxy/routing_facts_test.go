@@ -30,8 +30,8 @@ const nativeStrictProducerBytes = unsafe.Sizeof(routingFactAttempt{}) + unsafe.S
 // The spec bounds representation capacity, excluding allocator/GC overhead.
 // Both retained leaves and simultaneous replacement drafts use actual layouts.
 // Winning-descriptor and startup process drafts retain their conservative bounds.
-const nativeRetainedDescriptorBytes = 32*unsafe.Sizeof(routingDestinationDescriptor{}) + unsafe.Sizeof(routingRequestedDescriptor{}) + unsafe.Sizeof(routingWorkloadDescriptor{})
-const nativeReplacementDraftBytes = unsafe.Sizeof(routingDestinationDescriptor{}) + unsafe.Sizeof(routingRequestedDescriptor{}) + unsafe.Sizeof(routingWorkloadDescriptor{})
+const nativeRetainedDescriptorBytes = 32*unsafe.Sizeof(routingDestinationDescriptor{}) + unsafe.Sizeof(routingRequestedDescriptor{}) + unsafe.Sizeof(routingWorkloadDescriptor{}) + unsafe.Sizeof(routingSelectionDescriptor{})
+const nativeReplacementDraftBytes = unsafe.Sizeof(routingDestinationDescriptor{}) + unsafe.Sizeof(routingRequestedDescriptor{}) + unsafe.Sizeof(routingWorkloadDescriptor{}) + unsafe.Sizeof(routingSelectionDescriptor{})
 const nativeWinningDescriptorAllowance = 800
 const nativeProcessDraftAllowance = 512
 const nativeGraphBytes = unsafe.Sizeof(routingNativeFacts{}) + nativeRetainedDescriptorBytes + nativeReplacementDraftBytes + nativeWinningDescriptorAllowance + nativeProcessDraftAllowance + nativeStrictProducerBytes
@@ -50,7 +50,7 @@ var (
 	_ [65536 - unsafe.Sizeof(routingNativeCopy{})]byte
 	_ [272 - unsafe.Sizeof(routingSpend{})]byte
 	_ [176 - unsafe.Sizeof(publicAttemptLifecycle{})]byte
-	_ [32768 - nativeGraphBytes]byte
+	_ [35360 - nativeGraphBytes]byte
 )
 
 func nativeRegistered(t *testing.T, p *Proxy, at time.Time) *routingRequest {
@@ -147,19 +147,19 @@ func TestRoutingNativeFactsLayouts(t *testing.T) {
 	// captured by AfterFunc/admission callbacks; the result owner also clears
 	// statusCapture's completed body link before an old flush can retain it.
 	// Thus none survives actual unregister as an added callback-tail graph.
-	if nativeGraphBytes > 32768 {
+	if nativeGraphBytes > 35360 {
 		t.Fatalf("native graph plus all drafts/winning overlap=%d", nativeGraphBytes)
 	}
-	t.Logf("native graph representation=%d, retained descriptors=%d, replacement drafts=%d, limit=32768", nativeGraphBytes, nativeRetainedDescriptorBytes, nativeReplacementDraftBytes)
+	t.Logf("native graph representation=%d, retained descriptors=%d, replacement drafts=%d, limit=35360", nativeGraphBytes, nativeRetainedDescriptorBytes, nativeReplacementDraftBytes)
 	// Fixed proxy control C separately funds the ledger observation counter,
 	// both nested registry sidecar pointer fields (one remains nil), and the
 	// single monotonic reference. No inference grant funds these 48 bytes.
 	fixedControl := unsafe.Sizeof(uint64(0)) + 2*unsafe.Sizeof((*routingSourceDirectory)(nil)) + unsafe.Sizeof(routingFactsClock)
-	if fixedControl != 48 || routingHistoryDescriptorOverlap != 32*800+640+288 || 6144+2048+512+routingHistoryDescriptorOverlap+fixedControl > 131072 {
+	if fixedControl != 48 || routingHistoryDescriptorOverlap != 32*800+640+288+1792 || 6144+2048+512+routingHistoryDescriptorOverlap+fixedControl > 131072 {
 		t.Fatalf("fixed C control accounting=%d", fixedControl)
 	}
 	// The native historical graph may point only to immutable inline leaves.
-	for _, kind := range []reflect.Type{reflect.TypeOf(routingRequestedDescriptor{}), reflect.TypeOf(routingDestinationDescriptor{}), reflect.TypeOf(routingWorkloadDescriptor{}), reflect.TypeOf(routingProcessDescriptor{})} {
+	for _, kind := range []reflect.Type{reflect.TypeOf(routingRequestedDescriptor{}), reflect.TypeOf(routingDestinationDescriptor{}), reflect.TypeOf(routingWorkloadDescriptor{}), reflect.TypeOf(routingSelectionDescriptor{}), reflect.TypeOf(routingProcessDescriptor{})} {
 		for i := 0; i < kind.NumField(); i++ {
 			switch kind.Field(i).Type.Kind() {
 			case reflect.String, reflect.Pointer, reflect.Slice, reflect.Map, reflect.Interface, reflect.Func:
@@ -1366,4 +1366,143 @@ func TestRoutingNativeFactsAccountingSurvivesOwnCommitPrune(t *testing.T) {
 			a.finished(publicAttemptTerminal{})
 		})
 	}
+}
+
+func selectionScore(node, key string, total float64) *tierScore {
+	return &tierScore{NodeID: node, Engine: "llamacpp", Key: key, Total: total, Terms: [len(tierCostTerms)]float64{total, 0, 0, 0}, Measured: true, EvidenceAgeMs: 1500, PrefillSamples: 8, DecodeSamples: 5}
+}
+
+func selectionCandidateText(d *routingSelectionCandidate) (node, engine, model string) {
+	return string(d.node[:d.nodeLen]), string(d.engine[:d.engineLen]), string(d.model[:d.modelLen])
+}
+
+func TestRoutingSelectionDescriptorFromDecision(t *testing.T) {
+	chosen := candidate{id: "chosen", engine: "llamacpp", model: "native/model", key: "medium"}
+	t.Run("measured keeps both candidates with rounded bounded terms", func(t *testing.T) {
+		winner, runner := selectionScore("joes", "medium", 11772.4), selectionScore("msi", "medium", 56571.6)
+		winner.Terms = [len(tierCostTerms)]float64{11772.4, 0.4, 1e30, -5}
+		runner.Imputed, runner.Measured, runner.PrefillSamples = true, false, 0
+		d := selectionDescriptor(tierDecision{Decision: tierDecisionMeasured, Winner: winner, RunnerUp: runner, TierRank: 2, Warm: true}, chosen, "llamacpp")
+		if d == nil || !d.present || !d.runnerUpKnown || d.rank != 2 || !d.warm || routingSelectionDecisions[d.decision] != tierDecisionMeasured {
+			t.Fatalf("descriptor %+v", d)
+		}
+		if node, engine, model := selectionCandidateText(&d.winner); node != "joes" || engine != "llamacpp" || model != "medium" {
+			t.Fatalf("winner identity %q %q %q", node, engine, model)
+		}
+		if d.winner.terms != [4]uint64{11772, 0, factMaxRevision, 0} || d.winner.total != 11772 || d.winner.age != 1500 || d.winner.samples != 5 ||
+			d.winner.flags != selectionTotalKnown|selectionAgeKnown {
+			t.Fatalf("winner numbers %+v", d.winner)
+		}
+		if node, _, _ := selectionCandidateText(&d.runnerUp); node != "msi" || d.runnerUp.total != 56572 || d.runnerUp.flags != selectionTotalKnown|selectionImputed || d.runnerUp.samples != 0 {
+			t.Fatalf("runner-up %+v", d.runnerUp)
+		}
+	})
+	t.Run("pinned and baseline name the chosen candidate and carry no estimate", func(t *testing.T) {
+		for _, decision := range []string{tierDecisionPinned, tierDecisionBaseline} {
+			d := selectionDescriptor(tierDecision{Decision: decision, TierRank: 1}, chosen, "llamacpp")
+			if d == nil || d.runnerUpKnown || d.winner.flags != 0 || d.winner.total != 0 || d.winner.terms != [4]uint64{} {
+				t.Fatalf("%s descriptor %+v", decision, d)
+			}
+			if node, engine, model := selectionCandidateText(&d.winner); node != "chosen" || engine != "llamacpp" || model != "medium" {
+				t.Fatalf("%s identity %q %q %q", decision, node, engine, model)
+			}
+		}
+	})
+	t.Run("a candidate without an engine takes the facade's", func(t *testing.T) {
+		d := selectionDescriptor(tierDecision{Decision: tierDecisionBaseline}, candidate{id: "n", key: "k"}, "llamacpp")
+		if _, engine, _ := selectionCandidateText(&d.winner); d == nil || engine != "llamacpp" {
+			t.Fatalf("engine %q", engine)
+		}
+	})
+	t.Run("an unrepresentable identity or decision records nothing", func(t *testing.T) {
+		for name, d := range map[string]*routingSelectionDescriptor{
+			"bad node":         selectionDescriptor(tierDecision{Decision: tierDecisionBaseline}, candidate{id: "bad node", key: "k"}, "llamacpp"),
+			"no model":         selectionDescriptor(tierDecision{Decision: tierDecisionBaseline}, candidate{id: "n"}, "llamacpp"),
+			"unknown decision": selectionDescriptor(tierDecision{Decision: "fastest"}, chosen, "llamacpp"),
+			"zero decision":    selectionDescriptor(tierDecision{}, chosen, "llamacpp"),
+		} {
+			if d != nil {
+				t.Fatalf("%s produced %+v", name, d)
+			}
+		}
+	})
+}
+
+func TestRoutingSelectionObserveReplacesOnlyOnChange(t *testing.T) {
+	p := newBoundProxy(NewCodec(&recordingWriter{}))
+	r := nativeRegistered(t, p, time.UnixMilli(1000))
+	if nativeCopy(t, r.owner).selection.present {
+		t.Fatal("a request without a tier round has a selection")
+	}
+	r.owner.observeSelection(nil)
+	if nativeCopy(t, r.owner).selection.present {
+		t.Fatal("nil descriptor recorded")
+	}
+	first := selectionDescriptor(tierDecision{Decision: tierDecisionMeasured, Winner: selectionScore("a", "medium", 10)}, candidate{}, "llamacpp")
+	r.owner.observeSelection(first)
+	before := nativeCopy(t, r.owner)
+	if !before.selection.present || before.selection != *first {
+		t.Fatal("selection not copied")
+	}
+	r.owner.observeSelection(selectionDescriptor(tierDecision{Decision: tierDecisionMeasured, Winner: selectionScore("a", "medium", 10)}, candidate{}, "llamacpp"))
+	if nativeCopy(t, r.owner).revision != before.revision {
+		t.Fatal("an identical later round advanced the revision")
+	}
+	r.owner.observeSelection(selectionDescriptor(tierDecision{Decision: tierDecisionMeasured, Winner: selectionScore("b", "medium", 9)}, candidate{}, "llamacpp"))
+	after := nativeCopy(t, r.owner)
+	if after.revision != before.revision+1 || string(after.selection.winner.node[:after.selection.winner.nodeLen]) != "b" {
+		t.Fatalf("later round did not replace the selection once: revision %d -> %d", before.revision, after.revision)
+	}
+}
+
+// The native graph ceiling is the measured maximum descriptor, not headroom:
+// one retained leaf and one replacement draft of the selection descriptor.
+func TestRoutingSelectionNativeMaximumBound(t *testing.T) {
+	if strconv.IntSize != 64 {
+		t.Skip("C4 specifies supported 64-bit targets")
+	}
+	node, engine := strings.Repeat("n", 128), strings.Repeat("e", 128)
+	model := strings.Repeat(`"\`, 256)
+	score := func(total float64) *tierScore {
+		s := selectionScore(node, model, total)
+		s.Engine = engine
+		return s
+	}
+	d := selectionDescriptor(tierDecision{Decision: tierDecisionMeasured, Winner: score(1e30), TierRank: 1 << 40}, candidate{}, "")
+	if d == nil || d.runnerUpKnown || len(model) != 512 {
+		t.Fatalf("maximum winner descriptor %+v", d)
+	}
+	if size := unsafe.Sizeof(routingSelectionDescriptor{}); size != 1680 || nativeGraphBytes != 35360 {
+		t.Fatalf("selection descriptor=%d graph=%d, want 1680 / 35360", size, nativeGraphBytes)
+	}
+	if copySize := unsafe.Sizeof(routingNativeCopy{}); copySize != 30296 {
+		t.Fatalf("packed native copy=%d, want 30296", copySize)
+	}
+}
+
+func TestRoutingSelectionTierRequestsReachNativeFacts(t *testing.T) {
+	tc := llamacppCase(t)
+	t.Run("a tier request records the decision that chose its destination", func(t *testing.T) {
+		pol := nodepolicy.Default()
+		fx := newTierFixture(t, tc, pol, map[string][]string{"a": {"mid/7b"}}, nil)
+		fx.declare(t, "a", map[string]nodepolicy.AdvertisedProfile{"medium": llamacppProfile("mid/7b")})
+		if rec := fx.do(t, "/v1/chat/completions", `{"model":"medium","prompt":"x"}`); rec.Code != http.StatusOK {
+			t.Fatalf("status %d", rec.Code)
+		}
+		d := nativeOnlySource(t, fx.p).selection
+		node, engine, model := selectionCandidateText(&d.winner)
+		if !d.present || routingSelectionDecisions[d.decision] != tierDecisionBaseline || d.runnerUpKnown || node != "a" || engine != tc.profile.Name || model != fixtureProfileKey("mid/7b") {
+			t.Fatalf("selection %+v (%q %q %q)", d, node, engine, model)
+		}
+	})
+	t.Run("a concrete model request has no selection", func(t *testing.T) {
+		pol := nodepolicy.Default()
+		fx := newTierFixture(t, tc, pol, map[string][]string{"a": {"mid/7b"}}, nil)
+		if rec := fx.do(t, "/v1/chat/completions", `{"model":"mid/7b"}`); rec.Code != http.StatusOK {
+			t.Fatalf("status %d", rec.Code)
+		}
+		if nativeOnlySource(t, fx.p).selection.present {
+			t.Fatal("a concrete request recorded a tier selection")
+		}
+	})
 }

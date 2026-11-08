@@ -6,9 +6,12 @@ package nodepolicy
 import (
 	"encoding/json"
 	"errors"
+	"maps"
+	"nvpair-shared/jsonrpc"
 	"os"
 	"reflect"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -703,7 +706,7 @@ func TestRoutingHistoryContract(t *testing.T) {
 	t.Run("requested model emptiness follows retained lifecycle facts", func(t *testing.T) {
 		// Synthetic prevalidation rejection: no attempt, dropped prefix or
 		// association exists. Empty model is unavailable validated metadata.
-		early := []byte(`{"schema":1,"request":{"originNodeId":"synthetic-origin","proxyRunId":"synthetic-run","requestId":"6"},"workload":null,"seq":1,"requested":{"model":"","tier":"","mode":"other"},"createdAt":1700000050000,"endedAt":1700000050001,"state":"failed","reason":"request-invalid","status":400,"served":null,"recoverable":false,"spend":{"currency":"USD","ceilingNanoUsd":null,"grantedNanoUsd":null,"heldNanoUsd":null,"chargedNanoUsd":null,"accounting":"none"},"droppedAttempts":0,"attempts":[]}`)
+		early := []byte(`{"schema":1,"request":{"originNodeId":"synthetic-origin","proxyRunId":"synthetic-run","requestId":"6"},"workload":null,"seq":1,"requested":{"model":"","tier":"","mode":"other"},"createdAt":1700000050000,"endedAt":1700000050001,"state":"failed","reason":"request-invalid","status":400,"served":null,"recoverable":false,"spend":{"currency":"USD","ceilingNanoUsd":null,"grantedNanoUsd":null,"heldNanoUsd":null,"chargedNanoUsd":null,"accounting":"none"},"droppedAttempts":0,"selection":null,"attempts":[]}`)
 		for _, state := range []string{"routing", "failed", "cancelled"} {
 			t.Run("prevalidation "+state, func(t *testing.T) {
 				root := routingHistoryObject(t, early)
@@ -927,15 +930,15 @@ func TestRoutingHistoryContract(t *testing.T) {
 		}
 		t.Run("unknown members count toward limit", func(t *testing.T) {
 			// An early empty routing record has a fixed literal member inventory.
-			base := `{"schema":1,"request":{"originNodeId":"o","proxyRunId":"r","requestId":"1"},"workload":null,"seq":1,"requested":{"model":"","tier":"","mode":"other"},"createdAt":0,"endedAt":null,"state":"routing","reason":"","status":null,"served":null,"recoverable":false,"spend":{"currency":"USD","ceilingNanoUsd":null,"grantedNanoUsd":null,"heldNanoUsd":null,"chargedNanoUsd":null,"accounting":"none"},"droppedAttempts":0,"attempts":[]}`
-			// 15 root + 3 key + 3 requested + 6 spend = 27 members.
+			base := `{"schema":1,"request":{"originNodeId":"o","proxyRunId":"r","requestId":"1"},"workload":null,"seq":1,"requested":{"model":"","tier":"","mode":"other"},"createdAt":0,"endedAt":null,"state":"routing","reason":"","status":null,"served":null,"recoverable":false,"spend":{"currency":"USD","ceilingNanoUsd":null,"grantedNanoUsd":null,"heldNanoUsd":null,"chargedNanoUsd":null,"accounting":"none"},"droppedAttempts":0,"selection":null,"attempts":[]}`
+			// 16 root + 3 key + 3 requested + 6 spend = 28 members.
 			var extra strings.Builder
-			for i := 0; i < 2048-27; i++ {
+			for i := 0; i < 2048-28; i++ {
 				extra.WriteString(`,"u` + strconv.Itoa(i) + `":null`)
 			}
 			raw := base[:len(base)-1] + extra.String() + "}"
 			_, diag, err := DecodeRoutingHistoryRecord([]byte(raw))
-			if err != nil || diag.Count != 2021 {
+			if err != nil || diag.Count != 2020 {
 				t.Fatalf("member boundary: %+v %v", diag, err)
 			}
 			reject(t, []byte(raw[:len(raw)-1]+`,"`+sentinel+`":null}`), "limit-exceeded")
@@ -1116,4 +1119,142 @@ func TestHistorySemanticRegexpScratch(t *testing.T) {
 			t.Fatalf("semantic regexp needs a new scratch census: %s", re.String())
 		}
 	}
+}
+
+func routingSelectionCandidate(node, model string, numeric bool) RoutingHistorySelectionCandidate {
+	c := RoutingHistorySelectionCandidate{NodeID: node, Engine: "llamacpp", Model: model}
+	if numeric {
+		total, age := int64(routingHistorySafeInteger), int64(routingHistorySafeInteger)
+		c.TotalMs, c.EvidenceAgeMs, c.Samples = &total, &age, routingHistorySafeInteger
+		c.Terms = &RoutingHistorySelectionTerms{routingHistorySafeInteger, routingHistorySafeInteger, routingHistorySafeInteger, routingHistorySafeInteger}
+	}
+	return c
+}
+
+// selectionEncoding is the producer's encoding rule applied with the standard
+// encoder: no HTML escaping, and only quote/backslash in validated models.
+func selectionEncoding(t *testing.T, s RoutingHistorySelection) []byte {
+	t.Helper()
+	var b strings.Builder
+	e := json.NewEncoder(&b)
+	e.SetEscapeHTML(false)
+	if err := e.Encode(s); err != nil {
+		t.Fatal(err)
+	}
+	return []byte(strings.TrimSuffix(b.String(), "\n"))
+}
+
+func TestRoutingHistorySelectionValidation(t *testing.T) {
+	maxNode := strings.Repeat("n", 128)
+	escaped := strings.Repeat(`"\`, 256) // 512 bytes that encode to 1024.
+	measured := RoutingHistorySelection{Decision: "measured", Warm: true, Winner: routingSelectionCandidate(maxNode, escaped, true)}
+	t.Run("maximum winner and class envelope fit", func(t *testing.T) {
+		if !measured.valid() {
+			t.Fatalf("maximum winner refused at %d bytes", measured.EncodedBytes())
+		}
+		if got, want := measured.EncodedBytes(), len(selectionEncoding(t, measured)); got != want {
+			t.Fatalf("EncodedBytes = %d, encoding is %d", got, want)
+		}
+	})
+	t.Run("an escaped runner-up past the cap is refused", func(t *testing.T) {
+		s := measured
+		runner := routingSelectionCandidate(maxNode, escaped, true)
+		s.RunnerUp = &runner
+		if s.EncodedBytes() <= RoutingHistorySelectionBytes || s.valid() {
+			t.Fatalf("over-cap selection accepted at %d bytes", s.EncodedBytes())
+		}
+		if got, want := s.EncodedBytes(), len(selectionEncoding(t, s)); got != want {
+			t.Fatalf("EncodedBytes = %d, encoding is %d", got, want)
+		}
+	})
+	bad := map[string]func(*RoutingHistorySelection){
+		"unknown decision":       func(s *RoutingHistorySelection) { s.Decision = "fastest" },
+		"unsafe term":            func(s *RoutingHistorySelection) { s.Winner.Terms.Queue = routingHistorySafeInteger + 1 },
+		"negative term":          func(s *RoutingHistorySelection) { s.Winner.Terms.Cold = -1 },
+		"negative total":         func(s *RoutingHistorySelection) { n := int64(-1); s.Winner.TotalMs = &n },
+		"measured without total": func(s *RoutingHistorySelection) { s.Winner.TotalMs = nil },
+		"pinned with total":      func(s *RoutingHistorySelection) { s.Decision = "pinned" },
+		"baseline with runner-up": func(s *RoutingHistorySelection) {
+			s.Decision, s.Winner.TotalMs, s.Winner.Terms = "baseline", nil, nil
+			r := s.Winner
+			s.RunnerUp = &r
+		},
+		"invalid node":       func(s *RoutingHistorySelection) { s.Winner.NodeID = "bad node" },
+		"invalid model":      func(s *RoutingHistorySelection) { s.Winner.Model = "bad\nmodel" },
+		"negative tier rank": func(s *RoutingHistorySelection) { s.TierRank = -1 },
+		"null terms":         func(s *RoutingHistorySelection) { s.Winner.Terms = nil },
+	}
+	for name, edit := range bad {
+		t.Run(name, func(t *testing.T) {
+			s := RoutingHistorySelection{Decision: "measured", Winner: routingSelectionCandidate("node", "model", true)}
+			edit(&s)
+			if s.valid() {
+				t.Fatalf("accepted %+v", s)
+			}
+		})
+	}
+	for _, decision := range []string{"pinned", "baseline"} {
+		t.Run(decision+" carries no estimate", func(t *testing.T) {
+			s := RoutingHistorySelection{Decision: decision, Winner: routingSelectionCandidate("node", "model", false)}
+			if !s.valid() {
+				t.Fatal("refused a non-numeric decision")
+			}
+		})
+	}
+}
+
+func TestRoutingHistorySelectionSurvivesDecodeAndProjectedHeader(t *testing.T) {
+	fixtures := loadRoutingHistoryFixtures(t)
+	record, _, err := DecodeRoutingHistoryRecord(fixtures[0].Record)
+	if err != nil || record.Selection == nil || record.Selection.RunnerUp == nil {
+		t.Fatalf("fixture selection missing: %+v %v", record.Selection, err)
+	}
+	maxSelection := RoutingHistorySelection{Decision: "imputed", TierRank: routingHistorySafeInteger, Winner: routingSelectionCandidate(strings.Repeat("n", 128), strings.Repeat(`"\`, 256), true)}
+	record.Selection = &maxSelection
+	raw := routingHistoryJSON(t, record)
+	decoded, _, err := DecodeRoutingHistoryRecord(raw)
+	if err != nil || !reflect.DeepEqual(decoded.Selection, record.Selection) {
+		t.Fatalf("decode round trip: %v", err)
+	}
+	schema, _ := RoutingHistoryTransportSchema(NotifyRoutingRequest, false)
+	projected, _, err := jsonrpc.ProjectHistory(raw, make([]byte, 0, RoutingHistoryRecordBytes), make([]uint32, RoutingHistoryRecordBytes/4), schema)
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	view, err := ReadProjectedRoutingHistoryRecord(projected)
+	if err != nil {
+		t.Fatalf("projected record: %v", err)
+	}
+	var slot RoutingHistorySelection
+	if present, err := view.ReadSelection(&slot); err != nil || !present || !reflect.DeepEqual(&slot, record.Selection) {
+		t.Fatalf("projected selection = %+v, %v", slot, err)
+	}
+	t.Run("non-tier records keep null", func(t *testing.T) {
+		plain, _, err := DecodeRoutingHistoryRecord(fixtures[2].Record)
+		if err != nil || plain.Selection != nil {
+			t.Fatalf("selection = %+v, %v", plain.Selection, err)
+		}
+		projectedPlain, _, err := jsonrpc.ProjectHistory(fixtures[2].Record, make([]byte, 0, RoutingHistoryRecordBytes), make([]uint32, RoutingHistoryRecordBytes/4), schema)
+		if err != nil {
+			t.Fatal(err)
+		}
+		plainView, err := ReadProjectedRoutingHistoryRecord(projectedPlain)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if present, err := plainView.ReadSelection(&slot); err != nil || present || !reflect.DeepEqual(slot, RoutingHistorySelection{}) {
+			t.Fatalf("null selection = %+v present=%v err=%v", slot, present, err)
+		}
+	})
+	t.Run("selection key set carries no request content", func(t *testing.T) {
+		object := routingHistoryObject(t, raw)["selection"].(map[string]any)
+		keys := slices.Sorted(maps.Keys(object))
+		winner := slices.Sorted(maps.Keys(object["winner"].(map[string]any)))
+		term := slices.Sorted(maps.Keys(object["winner"].(map[string]any)["terms"].(map[string]any)))
+		if !reflect.DeepEqual(keys, []string{"decision", "runnerUp", "tierRank", "warm", "winner"}) ||
+			!reflect.DeepEqual(winner, []string{"engine", "evidenceAgeMs", "imputed", "model", "nodeId", "samples", "terms", "totalMs"}) ||
+			!reflect.DeepEqual(term, []string{"cold", "pressure", "queue", "service"}) {
+			t.Fatalf("selection keys %v / %v / %v", keys, winner, term)
+		}
+	})
 }

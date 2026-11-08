@@ -71,7 +71,8 @@ clients use the broker's `routing:subscribe`, `routing:unsubscribe`,
 `routing:get-initial` and `routing:changed` surface through `nvpair-service`.
 
 History keeps the newest 256 requests and the newest 32 attempts per request,
-preserving original indexes and `droppedAttempts`. A model-less local attempt
+preserving original indexes and `droppedAttempts`. A tier request's row also
+carries a `selection` naming why the winning destination won. A model-less local attempt
 retains its actual node/engine with `destination.model=null`; its presentation
 label is `model not specified`. API destinations require a model.
 Money is an exact decimal nano-USD string or null, never inferred from the

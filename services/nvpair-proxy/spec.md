@@ -1905,6 +1905,9 @@ built-in, default or protected names and no cluster role store.
   re-resolves the class. Only the final commit takes the reservation and
   advances the probe counter. Ties keep class order. A warm slow node is never
   compared with a cold fast one, because they are in different classes.
+  The latest committed round's decision is recorded once per request as the
+  history `selection` (§12.5.2): a fixed native descriptor that a later fresh
+  round's commit replaces.
 - **Body**: the top-level `model` is replaced by splicing its value's bytes;
   every other byte is forwarded as received.
 - **Nothing eligible** before any dispatch: `404` with
@@ -2175,7 +2178,20 @@ Rows sort by `createdAt` descending, origin/run lexically ascending, then
 numeric request ID descending. Every bank keeps the newest 256 rows and a
 retained rank floor, so delayed old snapshots cannot resurrect evicted rows.
 Each row keeps the newest 32 attempts with their original increasing indexes;
-`droppedAttempts` counts the trimmed prefix. `continuationOf` refers only to an
+`droppedAttempts` counts the trimmed prefix. `selection` (between
+`droppedAttempts` and `attempts`) is null for a request that is not a tier
+request and otherwise records why the latest committed tier round chose its
+destination: `decision` (`measured`, `imputed`, `probe`, `pinned` or
+`baseline`), `tierRank`, `warm`, the `winner` and, for a numeric decision, the
+`runnerUp`. A candidate carries `nodeId`, `engine`, the profile key as `model`,
+`totalMs`, the four named `terms` in milliseconds (`service`, `queue`,
+`pressure`, `cold`), `evidenceAgeMs` (null without measured evidence),
+`samples` (the weaker phase's sample count, 0 when a phase was imputed) and
+`imputed`. `totalMs` and `terms` are null for a pinned or baseline decision,
+which has no numeric estimate and no runner-up. The encoded selection is at
+most 2048 bytes: the proxy omits `runnerUp` (null) rather than exceed it and
+never truncates an identifier. It never carries request content, options or
+any new request identifier. `continuationOf` refers only to an
 actual interrupted predecessor, including a verified predecessor in that prefix.
 No continuation is inferred from an interrupted outcome alone.
 
@@ -2242,7 +2258,9 @@ For capacity accounting define `R=131072`, `M=33554432`, `S=65536`,
 | Each subscribed renderer | `3W+H+P+C` = 84,156,416 bytes |
 
 These are application-owned capacities, not RSS measurements or a heap ceiling.
-Demand-owned native fact graphs have a separate 32 KiB per-graph allowance,
+Demand-owned native fact graphs have a separate 35,360-byte per-graph allowance
+(the measured maximum, including one retained and one replacement selection
+descriptor of 1,680 bytes each),
 with detached graphs bounded by the source directory/scan/current-read lifetime;
 do not preallocate the maximum registered-owner allowance. Baseline runtime,
 allocator/GC overhead, ordinary queues and connection multiplicity are separate.

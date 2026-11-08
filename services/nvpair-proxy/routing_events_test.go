@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"math"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -320,8 +321,8 @@ func TestRoutingHistoryCapacityControlCensus(t *testing.T) {
 	if len(allowed) != 0 {
 		t.Fatal("census includes a referent the actual owner does not have")
 	}
-	actualOverlap := 32*unsafe.Sizeof(routingDestinationDescriptor{}) + unsafe.Sizeof(routingRequestedDescriptor{}) + unsafe.Sizeof(routingWorkloadDescriptor{})
-	if actualOverlap > routingHistoryDescriptorOverlap || routingHistoryDescriptorOverlap != 32*800+640+288 || unsafe.Sizeof(routingSourceScan{}.sources) != 256*8 {
+	actualOverlap := 32*unsafe.Sizeof(routingDestinationDescriptor{}) + unsafe.Sizeof(routingRequestedDescriptor{}) + unsafe.Sizeof(routingWorkloadDescriptor{}) + unsafe.Sizeof(routingSelectionDescriptor{})
+	if actualOverlap > routingHistoryDescriptorOverlap || routingHistoryDescriptorOverlap != 32*800+640+288+1792 || unsafe.Sizeof(routingSourceScan{}.sources) != 256*8 {
 		t.Fatal("native descriptor overlap or sole scan-pointer bank exceeded its row")
 	}
 	// Actual standard context layout, not sizeof(interface). Registration and
@@ -461,6 +462,21 @@ func TestRoutingHistoryProjectionNativeExhaustion(t *testing.T) {
 	}
 }
 
+// maximumSelection is the largest selection the producer admits for a model:
+// maximum identifiers and integers, and no runner-up.
+func maximumSelection(model string) (*routingSelectionDescriptor, *nodepolicy.RoutingHistorySelection) {
+	const safe = int64(9007199254740991)
+	node, engine := strings.Repeat("n", 128), strings.Repeat("e", 128)
+	score := &tierScore{NodeID: node, Engine: engine, Key: model, Total: 1e30, Terms: [len(tierCostTerms)]float64{1e30, 1e30, 1e30, 1e30},
+		Measured: true, EvidenceAgeMs: math.MaxInt64, PrefillSamples: math.MaxInt, DecodeSamples: math.MaxInt}
+	d := selectionDescriptor(tierDecision{Decision: tierDecisionImputed, Winner: score, RunnerUp: score, TierRank: 1 << 40, Warm: true}, candidate{}, "")
+	total, age := safe, safe
+	wire := &nodepolicy.RoutingHistorySelection{Decision: "imputed", TierRank: 1 << 40, Warm: true, Winner: nodepolicy.RoutingHistorySelectionCandidate{
+		NodeID: node, Engine: engine, Model: model, TotalMs: &total, EvidenceAgeMs: &age, Samples: safe,
+		Terms: &nodepolicy.RoutingHistorySelectionTerms{Service: safe, Queue: safe, Pressure: safe, Cold: safe}}}
+	return d, wire
+}
+
 func TestRoutingHistoryCapacityMaximumStrings(t *testing.T) {
 	test := func(name, model string, escapedBytes int) {
 		t.Run(name, func(t *testing.T) {
@@ -476,6 +492,8 @@ func TestRoutingHistoryCapacityMaximumStrings(t *testing.T) {
 			role := "a" + strings.Repeat("x", 62) + "z"
 			f.requested.length, f.requested.roleLen, f.requested.mode = uint16(copy(f.requested.model[:], model)), uint8(copy(f.requested.role[:], role)), 2
 			h.current.count, h.current.cells[0].sequence = 1, factMaxRevision
+			selection, wireSelection := maximumSelection(model)
+			f.selection = *selection
 			d := destinationDescriptor(model, first, second, true)
 			if d == nil || len(model) != 512 {
 				t.Fatal("maximum legal descriptor rejected")
@@ -489,6 +507,7 @@ func TestRoutingHistoryCapacityMaximumStrings(t *testing.T) {
 				Requested: nodepolicy.RoutingHistoryRequested{Model: model, Tier: role, Mode: "completion"}, CreatedAt: 9007199254740000, EndedAt: number(9007199254740002),
 				State: "completed", Reason: "deployment-quarantined", Status: number(599), Served: &destination,
 				Spend: nodepolicy.RoutingHistorySpend{Currency: "USD", CeilingNanoUSD: &money, GrantedNanoUSD: &money, HeldNanoUSD: &money, ChargedNanoUSD: &money, Accounting: "retained"}, DroppedAttempts: 9007199254739968,
+				Selection: wireSelection,
 			}
 			for i := 0; i < 32; i++ {
 				ordinal := f.total - 31 + uint64(i)
@@ -635,4 +654,134 @@ func TestRoutingHistoryReconciliation(t *testing.T) {
 	if string(h.generationText[:h.generationLength]) != "18446744073709551616" {
 		t.Fatal("generation is not canonical uint128 decimal")
 	}
+}
+
+func selectionEncodingOracle(t *testing.T, s nodepolicy.RoutingHistorySelection) []byte {
+	t.Helper()
+	var b bytes.Buffer
+	e := json.NewEncoder(&b)
+	e.SetEscapeHTML(false)
+	if err := e.Encode(s); err != nil {
+		t.Fatal(err)
+	}
+	return bytes.TrimSuffix(b.Bytes(), []byte("\n"))
+}
+
+func TestRoutingHistorySelectionProjection(t *testing.T) {
+	h := newBoundProxy(NewCodec(&recordingWriter{})).newRoutingHistory()
+	h.process.originLen, h.process.runLen = uint16(copy(h.process.origin[:], "origin")), uint16(copy(h.process.run[:], "run"))
+	f := &h.current.cells[0].facts
+	f.id, f.created, f.requested.length = 7, 1000, uint16(copy(f.requested.model[:], "medium"))
+	h.current.count, h.current.cells[0].sequence = 1, 1
+	number := func(n int64) *int64 { return &n }
+	terms := func(service, queue, pressure, cold int64) *nodepolicy.RoutingHistorySelectionTerms {
+		return &nodepolicy.RoutingHistorySelectionTerms{Service: service, Queue: queue, Pressure: pressure, Cold: cold}
+	}
+	winnerScore := &tierScore{NodeID: "joes", Engine: "llamacpp", Key: "medium", Total: 11772, Terms: [4]float64{11772, 0, 0, 0}, Measured: true, EvidenceAgeMs: 1500, PrefillSamples: 8, DecodeSamples: 8}
+	runnerScore := &tierScore{NodeID: "msi", Engine: "llamacpp", Key: "medium", Total: 56571, Terms: [4]float64{56571, 0, 0, 0}, Imputed: true}
+	winnerWire := nodepolicy.RoutingHistorySelectionCandidate{NodeID: "joes", Engine: "llamacpp", Model: "medium", TotalMs: number(11772), Terms: terms(11772, 0, 0, 0), EvidenceAgeMs: number(1500), Samples: 8}
+	runnerWire := nodepolicy.RoutingHistorySelectionCandidate{NodeID: "msi", Engine: "llamacpp", Model: "medium", TotalMs: number(56571), Terms: terms(56571, 0, 0, 0), Samples: 0, Imputed: true}
+	chosen := candidate{id: "joes", engine: "llamacpp", key: "medium"}
+	plain := nodepolicy.RoutingHistorySelectionCandidate{NodeID: "joes", Engine: "llamacpp", Model: "medium"}
+	for _, tc := range []struct {
+		name     string
+		decision tierDecision
+		want     *nodepolicy.RoutingHistorySelection
+	}{
+		{"no tier round", tierDecision{}, nil},
+		{"measured", tierDecision{Decision: tierDecisionMeasured, Winner: winnerScore, RunnerUp: runnerScore, TierRank: 1, Warm: true},
+			&nodepolicy.RoutingHistorySelection{Decision: "measured", TierRank: 1, Warm: true, Winner: winnerWire, RunnerUp: &runnerWire}},
+		{"probe without a runner-up", tierDecision{Decision: tierDecisionProbe, Winner: winnerScore},
+			&nodepolicy.RoutingHistorySelection{Decision: "probe", Winner: winnerWire}},
+		{"pinned", tierDecision{Decision: tierDecisionPinned, TierRank: 2}, &nodepolicy.RoutingHistorySelection{Decision: "pinned", TierRank: 2, Winner: plain}},
+		{"baseline", tierDecision{Decision: tierDecisionBaseline}, &nodepolicy.RoutingHistorySelection{Decision: "baseline", Winner: plain}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f.selection = routingSelectionDescriptor{}
+			if d := selectionDescriptor(tc.decision, chosen, "llamacpp"); d != nil {
+				f.selection = *d
+			}
+			record := historyTestRecord(t, h, 7)
+			if !reflect.DeepEqual(record.Selection, tc.want) {
+				t.Fatalf("selection = %+v, want %+v", record.Selection, tc.want)
+			}
+			if tc.want == nil {
+				return
+			}
+			w := routingHistoryJSON{data: make([]byte, 0, nodepolicy.RoutingHistorySelectionBytes)}
+			routingHistorySelection(&w, &f.selection)
+			if w.err != nil || !bytes.Equal(w.data, selectionEncodingOracle(t, *tc.want)) || len(w.data) != tc.want.EncodedBytes() {
+				t.Fatalf("encoding differs from the wire oracle: err=%v\n%s\n%s", w.err, w.data, selectionEncodingOracle(t, *tc.want))
+			}
+		})
+	}
+	t.Run("wire term names are the proxy cost terms in order", func(t *testing.T) {
+		typ := reflect.TypeOf(nodepolicy.RoutingHistorySelectionTerms{})
+		if typ.NumField() != len(tierCostTerms) {
+			t.Fatalf("%d wire terms, %d cost terms", typ.NumField(), len(tierCostTerms))
+		}
+		for i, term := range tierCostTerms {
+			if typ.Field(i).Tag.Get("json") != term.name {
+				t.Fatalf("wire term %d is %q, cost term is %q", i, typ.Field(i).Tag.Get("json"), term.name)
+			}
+		}
+	})
+	t.Run("the selection exposes only its documented keys", func(t *testing.T) {
+		d := selectionDescriptor(tierDecision{Decision: tierDecisionMeasured, Winner: winnerScore, RunnerUp: runnerScore}, chosen, "llamacpp")
+		f.selection = *d
+		w := routingHistoryJSON{data: h.frames[1][:0]}
+		h.encodeRecord(&w, &h.current.cells[0])
+		var record map[string]json.RawMessage
+		if err := json.Unmarshal(w.data, &record); err != nil {
+			t.Fatal(err)
+		}
+		var selection map[string]json.RawMessage
+		if err := json.Unmarshal(record["selection"], &selection); err != nil {
+			t.Fatal(err)
+		}
+		keys := func(m map[string]json.RawMessage) []string {
+			out := make([]string, 0, len(m))
+			for k := range m {
+				out = append(out, k)
+			}
+			slices.Sort(out)
+			return out
+		}
+		var winner map[string]json.RawMessage
+		var term map[string]json.RawMessage
+		if err := json.Unmarshal(selection["winner"], &winner); err != nil || json.Unmarshal(winner["terms"], &term) != nil {
+			t.Fatalf("winner/terms shape: %v", err)
+		}
+		if !slices.Equal(keys(selection), []string{"decision", "runnerUp", "tierRank", "warm", "winner"}) ||
+			!slices.Equal(keys(winner), []string{"engine", "evidenceAgeMs", "imputed", "model", "nodeId", "samples", "terms", "totalMs"}) ||
+			!slices.Equal(keys(term), []string{"cold", "pressure", "queue", "service"}) {
+			t.Fatalf("selection keys %v / %v / %v", keys(selection), keys(winner), keys(term))
+		}
+	})
+	t.Run("an escaped runner-up past the cap is omitted and the winner is kept", func(t *testing.T) {
+		escaped := strings.Repeat(`"\`, 256)
+		_, wire := maximumSelection(escaped)
+		score := func(node string) *tierScore {
+			s := *winnerScore
+			s.NodeID, s.Key = node, escaped
+			return &s
+		}
+		d := selectionDescriptor(tierDecision{Decision: tierDecisionMeasured, Winner: score(strings.Repeat("n", 128)), RunnerUp: score(strings.Repeat("m", 128))}, chosen, "llamacpp")
+		if d == nil || d.runnerUpKnown {
+			t.Fatalf("over-cap runner-up kept: %+v", d)
+		}
+		f.selection = *d
+		w := routingHistoryJSON{data: make([]byte, 0, nodepolicy.RoutingHistorySelectionBytes)}
+		routingHistorySelection(&w, &f.selection)
+		if w.err != nil || len(w.data) > nodepolicy.RoutingHistorySelectionBytes || wire.Winner.Model != escaped {
+			t.Fatalf("winner-only encoding failed: %v (%d bytes)", w.err, len(w.data))
+		}
+		if record := historyTestRecord(t, h, 7); record.Selection == nil || record.Selection.RunnerUp != nil || record.Selection.Winner.Model != escaped {
+			t.Fatalf("round trip lost the winner: %+v", record.Selection)
+		}
+		small := selectionDescriptor(tierDecision{Decision: tierDecisionMeasured, Winner: score("a"), RunnerUp: winnerScore}, chosen, "llamacpp")
+		if small == nil || !small.runnerUpKnown {
+			t.Fatal("a runner-up that fits was dropped")
+		}
+	})
 }

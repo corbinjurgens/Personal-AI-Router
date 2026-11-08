@@ -369,6 +369,10 @@ func TestRoutingHistoryWireMaximumPackedMetadata(t *testing.T) {
 	row.Request.ProxyRunID = strings.Repeat("r", 128)
 	row.Requested.Model = strings.Repeat("\\", 512)
 	row.Requested.Tier = strings.Repeat("r", 64)
+	const safe = int64(9007199254740991)
+	row.Selection = &nodepolicy.RoutingHistorySelection{Decision: "imputed", TierRank: safe, Warm: true, Winner: nodepolicy.RoutingHistorySelectionCandidate{
+		NodeID: strings.Repeat("n", 128), Engine: strings.Repeat("e", 128), Model: strings.Repeat(`"\`, 256), TotalMs: &[]int64{safe}[0], EvidenceAgeMs: &[]int64{safe}[0], Samples: safe, Imputed: true,
+		Terms: &nodepolicy.RoutingHistorySelectionTerms{Service: safe, Queue: safe, Pressure: safe, Cold: safe}}}
 	row.Attempts = make([]nodepolicy.RoutingHistoryAttempt, nodepolicy.RoutingHistoryAttempts)
 	model, account, deployment := strings.Repeat(`"`, 512), strings.Repeat("a", 128), strings.Repeat("d", 128)
 	maximum, err := nodepolicy.ParseNanoUSD("9223372036854775807")

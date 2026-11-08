@@ -4,9 +4,11 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"io"
+	"math"
 	"strconv"
 	"sync/atomic"
 	"time"
@@ -149,6 +151,118 @@ type routingProcessDescriptor struct {
 	originLen, runLen uint16
 }
 
+// routingSelectionCandidate is one tier candidate's identity and score terms,
+// in tierCostTerms order. total and age are meaningful only when their flag is
+// set; a pinned or baseline decision carries no numeric estimate.
+type routingSelectionCandidate struct {
+	node, engine                 [128]byte
+	model                        [512]byte
+	terms                        [len(tierCostTerms)]uint64
+	total, age, samples          uint64
+	nodeLen, engineLen, modelLen uint16
+	flags                        uint8
+}
+
+const (
+	selectionTotalKnown uint8 = 1 << iota
+	selectionAgeKnown
+	selectionImputed
+)
+
+// routingSelectionDescriptor is why the latest committed tier round chose its
+// winner. runnerUpKnown is false for a pinned, baseline or size-omitted runner-up.
+type routingSelectionDescriptor struct {
+	winner, runnerUp routingSelectionCandidate
+	rank             uint64
+	decision         uint8
+	warm, present    bool
+	runnerUpKnown    bool
+}
+
+var routingSelectionDecisions = [...]string{tierDecisionMeasured, tierDecisionImputed, tierDecisionProbe, tierDecisionPinned, tierDecisionBaseline}
+
+// selectionMs rounds a millisecond estimate to a non-negative safe integer.
+func selectionMs(v float64) uint64 {
+	if math.IsNaN(v) || v <= 0 {
+		return 0
+	}
+	return uint64(min(math.Round(v), float64(factMaxRevision)))
+}
+
+func selectionCandidate(node, engine, model string) (routingSelectionCandidate, bool) {
+	if !factIdentifier(node) || !factIdentifier(engine) || nodepolicy.ValidateModelIdentifier(model) != nil {
+		return routingSelectionCandidate{}, false
+	}
+	c := routingSelectionCandidate{}
+	c.nodeLen = uint16(copy(c.node[:], node))
+	c.engineLen = uint16(copy(c.engine[:], engine))
+	c.modelLen = uint16(copy(c.model[:], model))
+	return c, true
+}
+
+func scoredSelectionCandidate(s *tierScore, engine string) (routingSelectionCandidate, bool) {
+	c, ok := selectionCandidate(s.NodeID, engine, s.Key)
+	if !ok {
+		return c, false
+	}
+	for i, term := range s.Terms {
+		c.terms[i] = selectionMs(term)
+	}
+	c.total, c.flags = selectionMs(s.Total), selectionTotalKnown
+	if s.Measured {
+		c.age, c.flags = uint64(min(max(s.EvidenceAgeMs, 0), int64(factMaxRevision))), c.flags|selectionAgeKnown
+	}
+	if s.Imputed {
+		c.flags |= selectionImputed
+	}
+	// The weaker phase bounds how much measurement backs the estimate.
+	c.samples = uint64(min(max(min(s.PrefillSamples, s.DecodeSamples), 0), int(factMaxRevision)))
+	return c, true
+}
+
+// selectionDescriptor describes a committed tier decision. winner is the
+// chosen candidate, which names the winner of a pinned or baseline decision;
+// engineDefault names the engine of a candidate that carries none. It returns
+// nil when an identity is not representable, leaving the request without a
+// selection. The runner-up is dropped, never truncated, when the selection
+// would exceed the wire cap.
+func selectionDescriptor(decision tierDecision, winner candidate, engineDefault string) *routingSelectionDescriptor {
+	d := &routingSelectionDescriptor{rank: uint64(max(decision.TierRank, 0)), warm: decision.Warm, present: true}
+	known := false
+	for i, name := range routingSelectionDecisions {
+		if decision.Decision == name {
+			d.decision, known = uint8(i), true
+		}
+	}
+	if !known {
+		return nil
+	}
+	var ok bool
+	if decision.Winner == nil {
+		model := winner.key
+		if model == "" {
+			model = winner.model
+		}
+		d.winner, ok = selectionCandidate(winner.id, winner.engineOr(engineDefault), model)
+	} else {
+		d.winner, ok = scoredSelectionCandidate(decision.Winner, cmp.Or(decision.Winner.Engine, engineDefault))
+	}
+	if !ok {
+		return nil
+	}
+	if r := decision.RunnerUp; r != nil {
+		if d.runnerUp, d.runnerUpKnown = scoredSelectionCandidate(r, cmp.Or(r.Engine, engineDefault)); d.runnerUpKnown {
+			var buf [nodepolicy.RoutingHistorySelectionBytes]byte
+			w := routingHistoryJSON{data: buf[:0]}
+			routingHistorySelection(&w, d)
+			if w.err != nil {
+				d.runnerUp, d.runnerUpKnown = routingSelectionCandidate{}, false
+			}
+		}
+	}
+	return d
+}
+
 func requestedDescriptor(model, tier, path string) *routingRequestedDescriptor {
 	d := &routingRequestedDescriptor{}
 	if nodepolicy.ValidateModelIdentifier(model) == nil {
@@ -204,13 +318,14 @@ type routingNativeAttempt struct {
 	disposition, admission, firstByte, rawStarted, flags, accountVersion, held, charged atomic.Uint64
 }
 
-// Exactly sixteen request words and twelve words per ring cell on 64-bit Go.
+// Exactly seventeen request words and twelve words per ring cell on 64-bit Go.
 // flags also packs accounting (bits 16..23); attempt flags packs account state
 // (bits 24..31). Zero money and unavailable money remain distinguishable.
 type routingNativeFacts struct {
 	epoch, id, created, ended, disposition, ceiling, granted, held, charged, flags, total, binding, served atomic.Uint64
 	requested                                                                                              atomic.Pointer[routingRequestedDescriptor]
 	workload                                                                                               atomic.Pointer[routingWorkloadDescriptor]
+	selection                                                                                              atomic.Pointer[routingSelectionDescriptor]
 	sinkVersion                                                                                            atomic.Uint64
 	attempts                                                                                               [32]routingNativeAttempt
 }
@@ -248,6 +363,28 @@ func (r *routingSpend) observeRequested(d *routingRequestedDescriptor) {
 	defer r.mu.Unlock()
 	if f := r.facts; f.begin() {
 		f.requested.Store(d)
+		f.end()
+	}
+}
+
+// observeSelection replaces the request's selection with a later round's.
+func (r *routingSpend) observeSelection(d *routingSelectionDescriptor) {
+	if d == nil {
+		return
+	}
+	r.mu.Lock()
+	var old *routingSelectionDescriptor
+	if r.facts != nil {
+		old = r.facts.selection.Load()
+	}
+	r.mu.Unlock()
+	if old != nil && *old == *d {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if f := r.facts; f.begin() {
+		f.selection.Store(d)
 		f.end()
 	}
 }
@@ -1030,6 +1167,7 @@ type routingNativeCopy struct {
 	revision, id, created, ended, disposition, ceiling, granted, held, charged, flags, total, binding, served, sinkVersion uint64
 	requested                                                                                                              routingRequestedDescriptor
 	workload                                                                                                               routingWorkloadDescriptor
+	selection                                                                                                              routingSelectionDescriptor
 	attempts                                                                                                               [32]routingNativeAttemptCopy
 }
 
@@ -1047,6 +1185,9 @@ func (f *routingNativeFacts) copyInto(out *routingNativeCopy) bool {
 	}
 	if p := f.workload.Load(); p != nil {
 		out.workload = *p
+	}
+	if p := f.selection.Load(); p != nil {
+		out.selection = *p
 	}
 	for i := range f.attempts {
 		c, v := &f.attempts[i], &out.attempts[i]

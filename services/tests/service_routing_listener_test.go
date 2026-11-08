@@ -111,10 +111,11 @@ func TestRoutingHistoryProductionChain(t *testing.T) {
 		port             int
 		hybrid           bool
 		requested, model string
+		tier             bool
 	}{
-		{"hybrid listener", string(i7HybridBody()), listener, true, "weak:local", egressProcessModel},
-		{"concrete facade", string(i7BuffersBody(128)), f.port, false, egressProcessModel, egressProcessModel},
-		{"role facade", `{"model":"weak","messages":[],"stream":true}`, f.port, false, "weak", egressProcessModel},
+		{"hybrid listener", string(i7HybridBody()), listener, true, "weak:local", egressProcessModel, true},
+		{"concrete facade", string(i7BuffersBody(128)), f.port, false, egressProcessModel, egressProcessModel, false},
+		{"role facade", `{"model":"weak","messages":[],"stream":true}`, f.port, false, "weak", egressProcessModel, true},
 	} {
 		t.Run(route.name, func(t *testing.T) {
 			slot := upstream.slot(t, route.name)
@@ -166,6 +167,17 @@ func TestRoutingHistoryProductionChain(t *testing.T) {
 					}
 					if destination.Model == nil || *destination.Model != route.model {
 						t.Fatalf("concrete destination model=%v, want %q", destination.Model, route.model)
+					}
+					// A tier request records why its destination won, through every
+					// real hop; a concrete request has no selection.
+					if (delivered.Selection != nil) != route.tier {
+						t.Fatalf("selection=%+v, want present=%v", delivered.Selection, route.tier)
+					}
+					if delivered.Selection != nil {
+						winner := delivered.Selection.Winner
+						if winner.NodeID != *destination.NodeID || winner.Engine != *destination.Engine || delivered.Selection.RunnerUp != nil || winner.Model == "" {
+							t.Fatalf("selection does not name the delivered destination: %+v", delivered.Selection)
+						}
 					}
 				}
 				if changed.CreatedAt != completed.CreatedAt || changed.State != completed.State {

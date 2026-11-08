@@ -256,11 +256,16 @@ func TestHistoryProjectedRecordUsesSharedSemantics(t *testing.T) {
 				}
 			}
 			// The header is independent of both scratch slots and has no
-			// full attempt slice to retain after a nested lookup.
+			// full attempt slice or selection to retain after a nested lookup.
 			header := reflect.TypeOf(view.Header)
 			record := reflect.TypeOf(want)
-			if header.NumField()+1 != record.NumField() {
+			if header.NumField()+2 != record.NumField() || record.Field(header.NumField()).Name != "Selection" || record.Field(header.NumField()+1).Name != "Attempts" {
 				t.Fatal("header field count differs from record prefix")
+			}
+			var selection RoutingHistorySelection
+			present, err := view.ReadSelection(&selection)
+			if err != nil || present != (want.Selection != nil) || present && !reflect.DeepEqual(&selection, want.Selection) {
+				t.Fatalf("selection slot = %+v present=%v err=%v", selection, present, err)
 			}
 			for i := 0; i < header.NumField(); i++ {
 				if header.Field(i).Name != record.Field(i).Name || header.Field(i).Type != record.Field(i).Type || !reflect.DeepEqual(reflect.ValueOf(view.Header).Field(i).Interface(), reflect.ValueOf(want).Field(i).Interface()) {

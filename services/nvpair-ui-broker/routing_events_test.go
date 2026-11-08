@@ -1870,6 +1870,15 @@ func TestRoutingHistoryRawPrivateDispositions(t *testing.T) {
 	test("nested unknown duplicate", `"synthetic-secret-key":{"opaque":1,"opaque":2},`)
 }
 
+// historyMaxSelection is the largest selection a producer emits for a model:
+// maximum identifiers and integers, no runner-up (a second one would not fit).
+func historyMaxSelection(model string) *nodepolicy.RoutingHistorySelection {
+	const safe = int64(9007199254740991)
+	return &nodepolicy.RoutingHistorySelection{Decision: "imputed", TierRank: safe, Warm: true, Winner: nodepolicy.RoutingHistorySelectionCandidate{
+		NodeID: strings.Repeat("n", 128), Engine: strings.Repeat("e", 128), Model: model, TotalMs: &[]int64{safe}[0], EvidenceAgeMs: &[]int64{safe}[0], Samples: safe, Imputed: true,
+		Terms: &nodepolicy.RoutingHistorySelectionTerms{Service: safe, Queue: safe, Pressure: safe, Cold: safe}}}
+}
+
 func TestRoutingHistoryPackedCapacity(t *testing.T) {
 	b, _, _ := historyFixture(t)
 	h := b.routingHistory
@@ -1887,6 +1896,7 @@ func TestRoutingHistoryPackedCapacity(t *testing.T) {
 	row := historyRecord("9223372036854775807", 100, historyMaxSequence)
 	model := strings.Repeat(`"\`, 256)
 	row.Requested.Model = model
+	row.Selection = historyMaxSelection(model)
 	node, engine := strings.Repeat("n", 128), strings.Repeat("e", 128)
 	for i := 0; i < 32; i++ {
 		row.Attempts = append(row.Attempts, nodepolicy.RoutingHistoryAttempt{Index: int64(i), StartedAt: 100, Destination: nodepolicy.RoutingHistoryDestination{Kind: "local", Model: &model, NodeID: &node, Engine: &engine}, Outcome: "pending"})
@@ -1947,6 +1957,10 @@ func TestRoutingHistoryPackedCapacity(t *testing.T) {
 func TestRoutingHistoryPackedOutputPreservesKnownFields(t *testing.T) {
 	row := historyRecord("9223372036854775807", 100, 2)
 	row.Requested.Model = "synthetic-\"model\\with-多字"
+	row.Selection = historyMaxSelection(row.Requested.Model)
+	runner := row.Selection.Winner
+	runner.NodeID, runner.TotalMs = "runner", &[]int64{7}[0]
+	row.Selection.RunnerUp = &runner
 	var cell [historyCellBytes]byte
 	historyHeader(cell[:], row.Request, row.CreatedAt, row.Seq, 1)
 	n, err := historyPackRecord(cell[:], row)
@@ -2002,6 +2016,7 @@ func TestRoutingHistoryPackedOutputRejectsMalformedBacking(t *testing.T) {
 func TestRoutingHistoryProjectedPackingMatchesTypedPacking(t *testing.T) {
 	row := historyRecord("9223372036854775807", 100, historyMaxSequence)
 	row.Requested.Model = strings.Repeat(`"\`, 256)
+	row.Selection = historyMaxSelection(row.Requested.Model)
 	node, engine := strings.Repeat("n", 128), strings.Repeat("e", 128)
 	for i := 0; i < nodepolicy.RoutingHistoryAttempts; i++ {
 		row.Attempts = append(row.Attempts, nodepolicy.RoutingHistoryAttempt{
@@ -2096,9 +2111,9 @@ func TestRoutingHistoryControlScratchOwnership(t *testing.T) {
 	// at most 3074 encoded bytes, 512 decoded bytes and 3080 unquote scratch;
 	// invalid original JSON/unknown branches never enter that decoder.
 	const semantic = 25600
-	const writer = 12288 // grammar stack, fixed schema walk and scalar buffers
-	const retirement = 47104
-	const fixed = 20480 // indexes, reader/control objects, ID and generation copies
+	const writer = 12288     // grammar stack, fixed schema walk and scalar buffers
+	const retirement = 48640 // includes a valid selection of at most 2048 encoded bytes
+	const fixed = 17408      // indexes, reader/control objects, ID and generation copies; measured control is 16509
 	const currentHeader = 3072
 	const partialHeader = 4608 // workload text is checked after attempts
 	const currentAttempt = 1280
@@ -2153,11 +2168,19 @@ func TestRoutingHistoryControlScratchOwnership(t *testing.T) {
 	// Header failure precedes attempts. Current failure precedes related
 	// reads. A related lookup keeps only a validated current and clears its
 	// own slot immediately afterwards, including malformed related values.
-	liveFacts := max(malformedHeader, partialHeader+malformedAttempt, partialHeader+currentAttempt+malformedAttempt)
+	// The selection is read through its own slot after the header validates,
+	// and cleared before the first attempt is read.
+	selectionType := reflect.TypeOf(nodepolicy.RoutingHistorySelection{})
+	malformedSelection := int(selectionType.Size()) + referents(selectionType)
+	liveFacts := max(malformedHeader, partialHeader+malformedAttempt, partialHeader+currentAttempt+malformedAttempt, currentHeader+malformedSelection)
 	if liveFacts+max(grammar, stringDecode)+cursorControl > semantic {
 		t.Fatalf("semantic facts/decoder/control exceed role allowance: %d", liveFacts+max(grammar, stringDecode)+cursorControl)
 	}
-	retiredRecord := int(unsafe.Sizeof(nodepolicy.RoutingHistoryRecord{})) + currentHeader - int(headerType.Size()) + nodepolicy.RoutingHistoryAttempts*currentAttempt + cursorControl
+	// A retired DTO holds a valid selection: its runner-up candidate and two
+	// terms objects as referents, and at most the encoded cap of text.
+	validSelection := int(selectionType.Size()) + int(reflect.TypeOf(nodepolicy.RoutingHistorySelectionCandidate{}).Size()) +
+		2*int(reflect.TypeOf(nodepolicy.RoutingHistorySelectionTerms{}).Size()) + nodepolicy.RoutingHistorySelectionBytes
+	retiredRecord := int(unsafe.Sizeof(nodepolicy.RoutingHistoryRecord{})) + currentHeader - int(headerType.Size()) + validSelection + nodepolicy.RoutingHistoryAttempts*currentAttempt + cursorControl
 	if retiredRecord > retirement {
 		t.Fatalf("retirement DTO and validation scratch exceed allowance: %d", retiredRecord)
 	}

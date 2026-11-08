@@ -1686,7 +1686,9 @@ peers, managers or scheduler. No client can inject them or invoke a peer history
 route.
 
 History is memory-only: newest 256 requests, newest 32 attempts per request with
-original indexes and `droppedAttempts`. Broker restart clears it; proxy death
+original indexes and `droppedAttempts`; each row's `selection` (null for a non-tier
+request) is read through one bounded slot and packed before the attempts. Broker
+restart clears it; proxy death
 preserves accepted rows, loses possible unsent/partial windows and retires only
 that departed run's open presentation rows. It cannot manufacture delivery or
 charges. A model-less local attempt retains its node/engine and null model,
