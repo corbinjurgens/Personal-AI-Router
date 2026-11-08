@@ -1220,6 +1220,42 @@ type SetResidencyParams struct {
 // withdraws its strict capacity.
 type SetModelIdentityParams struct {
 	Engines map[string]EngineIdentity `json:"engines"`
+	// Measurements never grant strict admission or capacity. Replacement,
+	// including an omitted map, withdraws the previous measurement snapshot.
+	Measurements map[string]map[string]MeasurementState `json:"measurements,omitempty"`
+}
+
+// MeasurementIdentity is the bounded applicability value shared with modelconfig.
+// Unknown identities carry no digest, so partial inputs cannot assert equality.
+type MeasurementIdentity struct {
+	Digest   string `json:"digest"`
+	Complete bool   `json:"complete"`
+}
+
+func (i MeasurementIdentity) Validate() error {
+	if i.Complete && !strictDigest.MatchString(i.Digest) || !i.Complete && i.Digest != "" {
+		return errors.New("measurement identity requires a complete SHA-256 digest or explicit unknown")
+	}
+	return nil
+}
+
+// MeasurementState carries an existing same-host boot-clock observation budget.
+// Receivers subtract transit from ValidityMS; replay never renews the stamp.
+type MeasurementState struct {
+	Identity       MeasurementIdentity `json:"identity"`
+	ObservedBootNS string              `json:"observedBootNs"`
+	ValidityMS     int64               `json:"validityMs"`
+}
+
+func (s MeasurementState) Validate() error {
+	if err := s.Identity.Validate(); err != nil {
+		return err
+	}
+	n, err := strconv.ParseUint(s.ObservedBootNS, 10, 64)
+	if err != nil || strconv.FormatUint(n, 10) != s.ObservedBootNS || s.ValidityMS <= 0 || s.ValidityMS > 5000 {
+		return errors.New("invalid measurement observation lifetime")
+	}
+	return nil
 }
 
 // EngineIdentity is one running engine's identity. EngineRunID changes with
@@ -1279,6 +1315,27 @@ func (p SetModelIdentityParams) Validate() error {
 	for engine, id := range p.Engines {
 		if err := id.Validate(); err != nil {
 			return fmt.Errorf("engines.%s: %w", engine, err)
+		}
+	}
+	if len(p.Measurements) > 64 {
+		return errors.New("measurement engine limit exceeded")
+	}
+	count := 0
+	for engine, profiles := range p.Measurements {
+		if !engines.ValidRoutingID(engine) {
+			return errors.New("invalid measurement engine")
+		}
+		for key, state := range profiles {
+			count++
+			if count > 128 {
+				return errors.New("measurement profile limit exceeded")
+			}
+			if err := ValidateProfileKey(key); err != nil {
+				return err
+			}
+			if err := state.Validate(); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

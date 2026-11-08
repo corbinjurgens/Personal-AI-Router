@@ -173,6 +173,16 @@ permission-gated device-map helper; Pause, activation, ownership and maintenance
 vetoes still apply. Advisory estimates use the same bounded
 facts: tensor weights can be sized without an effective allocation; unresolved
 cache, workspace, placement and memory telemetry stay explicit Unknowns.
+The optional `measurementIdentity:{digest,complete}` is a separate applicability
+projection over applied sampled artifacts, semantic launch/load options, content
+build, physical hardware and authenticated realized context/slots/placement.
+Incomplete inputs return an empty digest with `complete:false`. Run IDs,
+settings revisions, paths, mtimes, routing endpoints and free memory are excluded.
+Cold native fit stays unknown even when diagnostic history remains current.
+Loaded profiles use the diagnostic owner's live readback, with no fallback to
+history after failed readback. The worker envelope's `nativeInitAllowed:false`
+also disables native help discovery for background inspection. This metadata
+starts no engine, loads no model and grants no admission or capacity.
 `engine:remote-inspect-model` uses the existing pinned POST
 `/v1/engine-settings/inspect` read route; the target broker supplies node identity.
 The remote reply is strictly decoded and checked against the requested identity.
@@ -593,7 +603,7 @@ Requests (caller → service):
 | `engine:load-model` | `{ engine, model }` | the engine's raw response — loads one model through the manifest's `load` binding, the same one the remote load uses |
 | `engine:unload-model` | `{ engine, model }` | the engine's raw response — unloads one model through the manifest's `unload` binding, the same one the remote unload uses |
 | `engine:delete-model` | `{ engine, model }` | the engine's raw response — deletes one model through the manifest's `delete` binding, the same one the remote delete uses. A binding whose action declares `restart_after` restarts a running server before replying |
-| `engine:remote-policy-get` | `{ nodeId }` | `{ policy, availability, pausedBy? }` — the target broker's peer projection of its policy: no routing section, and tiers keep only their local entries |
+| `engine:remote-policy-get` | `{ nodeId }` | `{ policy, availability, pausedBy?, activeRequestPolicy }` — the target broker's peer projection of its policy: no routing section, and tiers keep only their local entries. `activeRequestPolicy` is `{ revision, proxyRunId }` when the target's live proxy run has acknowledged exactly that revision, else `null`; it is relayed opaquely |
 | `engine:remote-policy-set` | `{ nodeId, policy, expectedPersistedRevision }` | `{ policy }` — the peer projection after the target broker merges the change into its stored policy; the revision is forwarded unchanged and compared by the broker |
 | `engine:remote-availability-set` | `{ nodeId, state, pauseMode? }` | the target broker's `{ availability, pausedBy? }` result (configured pause waits for the target's drain, on the readiness-sized response budget); immediate is refused by the target |
 | `shutdown` | — | `null` |

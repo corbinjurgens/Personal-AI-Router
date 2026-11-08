@@ -143,7 +143,8 @@ client, peer, manager or scheduler messages. Existing typed
 `pairApi.routing.active`/`cancel` controls are integrated and remain independent.
 
 History is memory-only, newest 256 requests and newest 32 attempts per row with
-original indexes and `droppedAttempts`. Broker restart clears it; proxy death
+original indexes and `droppedAttempts`; each row's `selection` records why the
+destination won (null for non-tier requests). Broker restart clears it; proxy death
 may lose unsent/partial windows but preserves accepted rows. Disconnect clears
 the client's generation; reconnect subscribes before baseline and merges pushes.
 Local model-less attempts keep their actual node/engine with null model

@@ -14,6 +14,50 @@ import (
 	"nvpair-shared/engines"
 )
 
+func TestMeasurementControlBoundsAndStrictSeparation(t *testing.T) {
+	state := MeasurementState{Identity: MeasurementIdentity{Digest: strings.Repeat("a", 64), Complete: true}, ObservedBootNS: "123", ValidityMS: 5000}
+	base := SetModelIdentityParams{Engines: map[string]EngineIdentity{}, Measurements: map[string]map[string]MeasurementState{"llamacpp": {"profile": state}}}
+	if err := base.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if len(base.Engines) != 0 {
+		t.Fatal("measurement manufactured strict identity")
+	}
+	for _, tc := range []struct {
+		name   string
+		change func(*MeasurementState)
+	}{
+		{"incomplete digest", func(s *MeasurementState) { s.Identity.Complete = false }},
+		{"missing digest", func(s *MeasurementState) { s.Identity.Digest = "" }},
+		{"oversized digest", func(s *MeasurementState) { s.Identity.Digest = strings.Repeat("a", 65) }},
+		{"noncanonical clock", func(s *MeasurementState) { s.ObservedBootNS = "0123" }},
+		{"oversized clock", func(s *MeasurementState) { s.ObservedBootNS = "18446744073709551616" }},
+		{"expired", func(s *MeasurementState) { s.ValidityMS = 0 }},
+		{"unbounded", func(s *MeasurementState) { s.ValidityMS = 5001 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			value := state
+			tc.change(&value)
+			p := SetModelIdentityParams{Engines: map[string]EngineIdentity{}, Measurements: map[string]map[string]MeasurementState{"llamacpp": {"profile": value}}}
+			if p.Validate() == nil {
+				t.Fatal("invalid metadata accepted")
+			}
+		})
+	}
+	profiles := map[string]MeasurementState{}
+	for i := 0; i < 129; i++ {
+		profiles[fmt.Sprintf("profile-%d", i)] = state
+	}
+	base.Measurements["llamacpp"] = profiles
+	if base.Validate() == nil {
+		t.Fatal("unbounded profile map accepted")
+	}
+	base.Measurements = nil
+	if err := base.Validate(); err != nil {
+		t.Fatalf("withdrawal: %v", err)
+	}
+}
+
 func TestWorkloadCancelWire(t *testing.T) {
 	testResidentWire(t, WorkloadCancelParams{OriginatedFrom: "origin-1", WorkloadID: "7", Engine: "llamacpp", RunID: "run-1"},
 		"originatedFrom workloadId engine runId",

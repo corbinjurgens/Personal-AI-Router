@@ -19,7 +19,50 @@ import (
 	"time"
 
 	"nvpair-shared/nodepolicy"
+	"nvpair-shared/noderec"
 )
+
+func TestMeasurementInvalidControlKeepsBothPreviousSnapshots(t *testing.T) {
+	p := performanceProxy(t, "llamacpp")
+	boot, err := noderec.MemoryBootClock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := nodepolicy.MeasurementState{Identity: nodepolicy.MeasurementIdentity{Digest: strings.Repeat("d", 64), Complete: true}, ObservedBootNS: strconv.FormatUint(boot, 10), ValidityMS: 5000}
+	in := nodepolicy.SetModelIdentityParams{Engines: map[string]nodepolicy.EngineIdentity{"llamacpp": performanceIdentity()}, Measurements: map[string]map[string]nodepolicy.MeasurementState{"llamacpp": {"m": state}}}
+	raw, err := json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.applySetModelIdentity(raw); err != nil {
+		t.Fatal(err)
+	}
+	p.admission.mu.Lock()
+	generation := p.admission.strict.generation[admKey{engine: "llamacpp", model: "m"}]
+	p.admission.mu.Unlock()
+	changed := performanceIdentity()
+	changed.EngineRunID = "rejected-run"
+	in.Engines["llamacpp"] = changed
+	state.ValidityMS = 5001
+	in.Measurements["llamacpp"]["m"] = state
+	raw, err = json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.applySetModelIdentity(raw); err == nil {
+		t.Fatal("invalid measurement accepted")
+	}
+	p.admission.mu.Lock()
+	strict := p.admission.strict.identity["llamacpp"]
+	currentGeneration := p.admission.strict.generation[admKey{engine: "llamacpp", model: "m"}]
+	p.admission.mu.Unlock()
+	if !reflect.DeepEqual(strict, performanceIdentity()) || currentGeneration != generation {
+		t.Fatal("rejected measurement mutated strict identity or capacity generation")
+	}
+	if got := p.currentMeasurementIdentity("llamacpp", "m"); got.Digest != strings.Repeat("d", 64) || !got.Complete {
+		t.Fatalf("rejected measurement mutated applicability: %+v", got)
+	}
+}
 
 type bufferAckWriter func([]byte) (int, error)
 

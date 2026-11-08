@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -377,7 +378,105 @@ type RoutingHistoryRecord struct {
 	Recoverable     bool                       `json:"recoverable"`
 	Spend           RoutingHistorySpend        `json:"spend"`
 	DroppedAttempts int64                      `json:"droppedAttempts"`
+	Selection       *RoutingHistorySelection   `json:"selection"`
 	Attempts        []RoutingHistoryAttempt    `json:"attempts"`
+}
+
+// RoutingHistorySelection is why the latest committed tier round chose its
+// winner. It is null for non-tier requests. Pinned and baseline decisions
+// carry no numeric estimate. It never carries request content or options.
+type RoutingHistorySelection struct {
+	Decision string                           `json:"decision"`
+	TierRank int64                            `json:"tierRank"`
+	Warm     bool                             `json:"warm"`
+	Winner   RoutingHistorySelectionCandidate `json:"winner"`
+	// RunnerUp is omitted by the producer when it would push the encoded
+	// selection past RoutingHistorySelectionBytes.
+	RunnerUp *RoutingHistorySelectionCandidate `json:"runnerUp"`
+}
+
+type RoutingHistorySelectionCandidate struct {
+	NodeID        string                        `json:"nodeId"`
+	Engine        string                        `json:"engine"`
+	Model         string                        `json:"model"`
+	TotalMs       *int64                        `json:"totalMs"`
+	Terms         *RoutingHistorySelectionTerms `json:"terms"`
+	EvidenceAgeMs *int64                        `json:"evidenceAgeMs"`
+	Samples       int64                         `json:"samples"`
+	Imputed       bool                          `json:"imputed"`
+}
+
+// RoutingHistorySelectionTerms are the named milliseconds that sum to a
+// candidate's total, one field per proxy cost term.
+type RoutingHistorySelectionTerms struct {
+	Service  int64 `json:"service"`
+	Queue    int64 `json:"queue"`
+	Pressure int64 `json:"pressure"`
+	Cold     int64 `json:"cold"`
+}
+
+const (
+	// RoutingHistorySelectionBytes bounds a selection's production encoding.
+	RoutingHistorySelectionBytes     = 2048
+	routingHistorySelectionDecisions = "measured|imputed|probe|pinned|baseline"
+)
+
+// EncodedBytes is the length of the selection in the producer's encoding:
+// fixed field order, no whitespace, integers in decimal, and strings escaped
+// only for quote and backslash (validated identifiers hold no control bytes).
+func (s RoutingHistorySelection) EncodedBytes() int {
+	text := func(v string) int { return 2 + len(v) + strings.Count(v, `"`) + strings.Count(v, `\`) }
+	number := func(n int64) int { return len(strconv.FormatInt(n, 10)) }
+	nullable := func(n *int64) int {
+		if n == nil {
+			return 4
+		}
+		return number(*n)
+	}
+	flag := func(b bool) int {
+		if b {
+			return 4
+		}
+		return 5
+	}
+	candidate := func(c RoutingHistorySelectionCandidate) int {
+		n := len(`{"nodeId":,"engine":,"model":,"totalMs":,"terms":,"evidenceAgeMs":,"samples":,"imputed":}`) +
+			text(c.NodeID) + text(c.Engine) + text(c.Model) + nullable(c.TotalMs) + nullable(c.EvidenceAgeMs) + number(c.Samples) + flag(c.Imputed)
+		if c.Terms == nil {
+			return n + 4
+		}
+		return n + len(`{"service":,"queue":,"pressure":,"cold":}`) + number(c.Terms.Service) + number(c.Terms.Queue) + number(c.Terms.Pressure) + number(c.Terms.Cold)
+	}
+	n := len(`{"decision":,"tierRank":,"warm":,"winner":,"runnerUp":}`) + text(s.Decision) + number(s.TierRank) + flag(s.Warm) + candidate(s.Winner)
+	if s.RunnerUp == nil {
+		return n + 4
+	}
+	return n + candidate(*s.RunnerUp)
+}
+
+func (s *RoutingHistorySelection) valid() bool {
+	if s == nil {
+		return true
+	}
+	numeric := historyEnum(s.Decision, "measured|imputed|probe")
+	if !historyEnum(s.Decision, routingHistorySelectionDecisions) || !historyNumber(s.TierRank) || !s.Winner.valid(numeric) {
+		return false
+	}
+	if s.RunnerUp != nil && (!numeric || !s.RunnerUp.valid(true)) {
+		return false
+	}
+	return s.EncodedBytes() <= RoutingHistorySelectionBytes
+}
+
+// A numeric candidate has a total and its terms; a pinned or baseline winner
+// has neither.
+func (c RoutingHistorySelectionCandidate) valid(numeric bool) bool {
+	if !strictID.MatchString(c.NodeID) || !strictID.MatchString(c.Engine) || ValidateModelIdentifier(c.Model) != nil ||
+		!historyNullableNumber(c.TotalMs) || !historyNullableNumber(c.EvidenceAgeMs) || !historyNumber(c.Samples) ||
+		numeric != (c.TotalMs != nil) || numeric != (c.Terms != nil) {
+		return false
+	}
+	return c.Terms == nil || historyNumber(c.Terms.Service) && historyNumber(c.Terms.Queue) && historyNumber(c.Terms.Pressure) && historyNumber(c.Terms.Cold)
 }
 
 type RoutingHistoryInitial struct {
@@ -772,14 +871,21 @@ func (r RoutingHistoryRecord) Validate() error {
 		CreatedAt: r.CreatedAt, EndedAt: r.EndedAt, State: r.State, Reason: r.Reason, Status: r.Status,
 		Served: r.Served, Recoverable: r.Recoverable, Spend: r.Spend, DroppedAttempts: r.DroppedAttempts,
 	}
-	return validateHistoryRecord(header, r.Attempts != nil, len(r.Attempts), func(i int, dst *RoutingHistoryAttempt) error {
+	selection := func() error {
+		if !r.Selection.valid() {
+			return historyError("invalid-value")
+		}
+		return nil
+	}
+	return validateHistoryRecord(header, selection, r.Attempts != nil, len(r.Attempts), func(i int, dst *RoutingHistoryAttempt) error {
 		*dst = r.Attempts[i]
 		return nil
 	})
 }
 
-// RoutingHistoryRecordHeader contains no attempt slice. Transport adapters keep
-// this bounded header and load only the current and related attempt slots.
+// RoutingHistoryRecordHeader contains no attempt slice and no selection.
+// Transport adapters keep this bounded header and load only the selection slot
+// and the current and related attempt slots.
 // Field order follows RoutingHistoryRecord for the private packed-bank writer.
 type RoutingHistoryRecordHeader struct {
 	Schema          int64
@@ -798,7 +904,9 @@ type RoutingHistoryRecordHeader struct {
 	DroppedAttempts int64
 }
 
-func validateHistoryRecord(r RoutingHistoryRecordHeader, attemptsPresent bool, count int, attempt func(int, *RoutingHistoryAttempt) error) error {
+// validateHistoryRecord checks the header, then the selection through its own
+// reader, then the attempts. The selection is loaded only inside that reader.
+func validateHistoryRecord(r RoutingHistoryRecordHeader, selection func() error, attemptsPresent bool, count int, attempt func(int, *RoutingHistoryAttempt) error) error {
 	invalid := func() error { return historyError("invalid-value") }
 	// Retained lifecycle facts require a model unless a retained local attempt
 	// explicitly records that its model is unknown.
@@ -812,6 +920,9 @@ func validateHistoryRecord(r RoutingHistoryRecordHeader, attemptsPresent bool, c
 		r.Spend.Currency != "USD" || !historyEnum(r.Spend.Accounting, historyAccounting) ||
 		!historyMoney(r.Spend.CeilingNanoUSD, r.Spend.GrantedNanoUSD, r.Spend.HeldNanoUSD, r.Spend.ChargedNanoUSD) || !attemptsPresent {
 		return invalid()
+	}
+	if err := selection(); err != nil {
+		return err
 	}
 	if count > RoutingHistoryAttempts {
 		return historyError("limit-exceeded")

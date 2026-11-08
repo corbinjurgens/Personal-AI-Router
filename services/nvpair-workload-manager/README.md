@@ -145,6 +145,14 @@ the broker, so a workload observed over several paths is reported once.
 
 ## Performance summaries
 
+Summary entries carry the destination's bounded optional measurement `provenance`
+(`configuration:{digest,complete}`, `engineFamily`, `api`, `extractorSchema`) and
+`applicability` (`current`, `historical`, `unknown`). Both local publish and peer
+receipt use the shared strict decoder. Missing old provenance remains unknown;
+malformed or private metadata is refused. The relay preserves the destination's
+attestation and its revision ordering, without recomputing configuration identity
+or changing sample ages. This extends the existing summary format in place.
+
 The broker can publish its latest complete own `performancewire.Summary` on
 stdin as `performance:publish`, with the summary directly in `params`. An
 optional JSON-RPC request receives `null` on acceptance or `-32602` for invalid

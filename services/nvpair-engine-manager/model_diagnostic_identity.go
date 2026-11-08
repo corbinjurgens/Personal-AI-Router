@@ -201,7 +201,7 @@ func (e *Executor) observeDiagnosticOnce(ctx context.Context, p modelconfig.Diag
 		*metadataDeadline = time.Now().Add(modelInspectionBudget)
 	}
 	metadataCtx, cancel := context.WithDeadline(ctx, *metadataDeadline)
-	inspection, err := e.inspectModelArtifactsOnce(metadataCtx, request, retry)
+	inspection, err := e.inspectModelArtifactsOnce(metadataCtx, request, retry, nil)
 	cancel()
 	if err != nil {
 		return diagnosticObservation{}, err
@@ -389,12 +389,15 @@ func decodeDiagnosticInspectEnvelope(raw []byte) (settings.WorkerRequest[modelco
 // Reuse it only
 // after re-reading current files, settings, build and every physical pool. A key
 // or the persisted Current flag alone never establishes this identity.
-func (e *Executor) inspectionDiagnosticIdentity(ctx context.Context, p modelconfig.InspectRequest, result modelconfig.InspectResult) *modelconfig.DiagnosticIdentity {
+func (e *Executor) inspectionDiagnosticIdentity(ctx context.Context, p modelconfig.InspectRequest, result modelconfig.InspectResult, liveRealization ...*bool) *modelconfig.DiagnosticIdentity {
 	requested, err := e.diagnosticRequestedIdentity(ctx, p, result)
 	if err != nil || e.modelMemoryProfiles == nil {
 		return nil
 	}
 	if live, observed := e.inspectionLoadedDiagnosticIdentity(ctx, p, requested); observed {
+		for _, target := range liveRealization {
+			*target = live != nil
+		}
 		return live
 	}
 	e.modelMemoryProfiles.mu.Lock()
@@ -450,6 +453,13 @@ func (e *Executor) inspectionDiagnosticIdentity(ctx context.Context, p modelconf
 		}
 	}
 	return nil
+}
+
+func inspectionMeasurementIdentity(semantic string, diagnostic *modelconfig.DiagnosticIdentity, live bool) modelconfig.MeasurementIdentity {
+	if diagnostic == nil || diagnostic.ConfigurationKeyReason == "native-fit" && !live {
+		return modelconfig.MeasurementIdentity{}
+	}
+	return modelconfig.MeasurementFromDiagnostic(semantic, *diagnostic)
 }
 
 // A present child supersedes retained realization. If its props cannot be

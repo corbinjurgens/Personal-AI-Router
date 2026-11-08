@@ -6,7 +6,8 @@ import type {
     RoutingHistoryAttempt,
     RoutingHistoryDestination,
     RoutingHistoryOutput,
-    RoutingHistoryReason
+    RoutingHistoryReason,
+    RoutingSelectionDecision
 } from '@/shared/types/routing'
 import type { Workload } from '@/shared/types/workloads'
 import { engineManagerName } from '@/shared/utils/engines'
@@ -80,6 +81,52 @@ export function routingDestination(
     return destination.kind === 'local'
         ? `${destination.nodeId} / ${destination.engine}`
         : `deployment ${destination.deploymentId} / account ${destination.accountId}`
+}
+
+function routingAge(value: number | null): string {
+    if (value === null) return 'not measured'
+    if (value < 60000) return routingWait(value)
+    if (value < 3600000) return `${(value / 60000).toFixed(1)} min`
+    return `${(value / 3600000).toFixed(1)} h`
+}
+
+const decisions: Record<RoutingSelectionDecision, string> = {
+    measured: 'Measured (lowest estimated total from measured speeds)',
+    imputed:
+        'Imputed (lowest estimated total, using the slowest measured speed for unmeasured phases)',
+    probe: 'Probe (an unmeasured engine was tried to gather evidence)',
+    pinned: 'Pinned (the selected node was used; no estimate was made)',
+    baseline:
+        'Baseline (the speed or request-size evidence was incomplete for some candidate; the default choice was kept and no estimate was made)'
+}
+type Selection = NonNullable<RoutingHistoryOutput['selection']>
+
+function selectionCandidate(role: string, candidate: Selection['winner']): string[] {
+    const terms = candidate.terms
+    const estimate =
+        candidate.totalMs === null || terms === null
+            ? 'Estimate: none, this decision does not use a numeric estimate'
+            : `Estimate: ${candidate.totalMs} ms (service ${terms.service} ms, queue ${terms.queue} ms, pressure ${terms.pressure} ms, cold ${terms.cold} ms)`
+    return [
+        `${role}: ${candidate.nodeId} / ${candidate.engine}, model ${candidate.model}`,
+        estimate,
+        `Evidence age: ${routingAge(candidate.evidenceAgeMs)} · Samples: ${candidate.samples}${
+            candidate.imputed ? ' · Imputed speeds' : ''
+        }`
+    ]
+}
+
+/** Returns presentation text only; never retains a borrowed history record. */
+export function routingSelectionLines(selection: RoutingHistoryOutput['selection']): string[] {
+    if (!selection) return ['Why this destination: not recorded (no tier selection)']
+    return [
+        `Why this destination: ${decisions[selection.decision]}`,
+        `Tier rank ${selection.tierRank} · ${selection.warm ? 'warm' : 'not warm'}`,
+        ...selectionCandidate('Winner', selection.winner),
+        ...(selection.runnerUp
+            ? selectionCandidate('Runner-up', selection.runnerUp)
+            : ['Runner-up: none recorded'])
+    ]
 }
 
 const states = {

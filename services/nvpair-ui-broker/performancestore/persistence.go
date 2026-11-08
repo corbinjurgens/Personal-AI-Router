@@ -52,9 +52,10 @@ type snapshot struct {
 }
 
 type snapshotKey struct {
-	Key     performancewire.ProfileKey `json:"key"`
-	Profile performancewire.Profile    `json:"profile"`
-	Samples []record                   `json:"samples"`
+	Key        performancewire.ProfileKey  `json:"key"`
+	Profile    performancewire.Profile     `json:"profile"`
+	Provenance *performancewire.Provenance `json:"provenance,omitempty"`
+	Samples    []record                    `json:"samples"`
 }
 
 // keyStates returns an independently owned copy of the snapshot's samples.
@@ -63,7 +64,7 @@ func (sn *snapshot) keyStates() map[performancewire.ProfileKey]*keyState {
 	for _, k := range sn.Keys {
 		profile := k.Profile
 		profile.ContextTokens = cloneValue(profile.ContextTokens)
-		keys[k.Key] = &keyState{profile: profile, samples: cloneRecords(k.Samples)}
+		keys[k.Key] = &keyState{profile: profile, provenance: k.Provenance.Clone(), samples: cloneRecords(k.Samples)}
 	}
 	return keys
 }
@@ -256,7 +257,7 @@ func (s *Store) encodeLocked(wallMs, ageMs int64) (*snapshot, []byte, error) {
 	for k, st := range s.keys {
 		profile := st.profile
 		profile.ContextTokens = cloneValue(profile.ContextTokens)
-		snap.Keys = append(snap.Keys, snapshotKey{Key: k, Profile: profile, Samples: cloneRecords(st.samples)})
+		snap.Keys = append(snap.Keys, snapshotKey{Key: k, Profile: profile, Provenance: st.provenance.Clone(), Samples: cloneRecords(st.samples)})
 	}
 	// Most recently measured first, so eviction takes from the tail.
 	sort.Slice(snap.Keys, func(i, j int) bool {
@@ -362,6 +363,12 @@ func (sn *snapshot) validate(host string) error {
 		seen[k.Key] = true
 		if err := k.Profile.Validate(); err != nil {
 			return fmt.Errorf("key %d: %w", i, err)
+		}
+		if err := k.Provenance.Validate(); err != nil {
+			return fmt.Errorf("key %d: %w", i, err)
+		}
+		if k.Provenance != nil && k.Provenance.EngineFamily != k.Profile.EngineFamily {
+			return fmt.Errorf("key %d: measurement family mismatch", i)
 		}
 		if len(k.Samples) == 0 || len(k.Samples) > performancewire.MaxSamplesPerKey {
 			return fmt.Errorf("key %d has %d samples, outside 1..%d", i, len(k.Samples), performancewire.MaxSamplesPerKey)

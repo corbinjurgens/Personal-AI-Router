@@ -1522,11 +1522,19 @@ func (b *Broker) inspectModelSettings(ctx context.Context, p modelconfig.Inspect
 	}
 	p.NodeID = ""
 	var raw json.RawMessage
+	b.workersMu.Lock()
+	worker, source := b.engineMgr, b.engineMgrSource
+	b.workersMu.Unlock()
+	r := b.nodePolicyRuntime()
+	r.mu.Lock()
+	observation := performanceConfiguration{broker: b, worker: worker, source: source, generation: r.measurementGeneration, settings: r.settingsIdentity[p.Engine], engineEvidence: modelSettingsHash(r.engineIdentity[p.Engine]), revision: r.current.Revision, model: p.ModelID}
+	r.mu.Unlock()
 	base := modelWorkerRequest(b, p, caller, leaseErr == nil)
+	observation.memory = base.Memory.Clone()
 	hardware, _ := b.diagnosticTargetHardware(ctx, base.Memory)
 	envelope := diagnosticInspectEnvelope{WorkerRequest: base, Hardware: hardware}
 	started, clockErr := noderec.MemoryBootClock()
-	if err := b.settingsWorkerCall(ctx, "engine:inspect-model", envelope, &raw); err != nil {
+	if err := modelSettingsCall(ctx, worker, "engine:inspect-model", envelope, &raw); err != nil {
 		return modelconfig.InspectResult{}, err
 	}
 	result, err := modelconfig.DecodeInspectResult(raw)
@@ -1538,6 +1546,16 @@ func (b *Broker) inspectModelSettings(ctx context.Context, p modelconfig.Inspect
 		elapsed = -1
 	}
 	modelAgeAdvice(&result.Estimate, elapsed)
+	key := p.ProfileKey
+	if key == "" {
+		key = p.ModelID
+	}
+	r.mu.Lock()
+	measurementCurrent := elapsed >= 0 && hardware != nil && observation.currentLocked(r, p.Engine, key)
+	r.mu.Unlock()
+	if result.MeasurementIdentity != nil && !measurementCurrent {
+		result.MeasurementIdentity = &modelconfig.MeasurementIdentity{}
+	}
 	if result.Engine != p.Engine || result.ModelID != p.ModelID {
 		return modelconfig.InspectResult{}, fmt.Errorf("model inspection: worker reply identity mismatch")
 	}

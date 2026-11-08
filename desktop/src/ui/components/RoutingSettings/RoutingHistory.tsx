@@ -21,6 +21,7 @@ import {
     routingDisplayReason,
     routingMoney,
     routingRequestKey,
+    routingSelectionLines,
     routingState,
     routingSummary
 } from '@/ui/utils/routing-labels'
@@ -118,6 +119,22 @@ export default function RoutingHistory() {
                                                 {routingSummary(record)}
                                             </Text>
                                             <Text kind="body/regular/sm">Request: {key}</Text>
+                                            <Stack gap="0">
+                                                {routingSelectionLines(record.selection).map(
+                                                    (line, position) => (
+                                                        <Text
+                                                            key={position}
+                                                            kind={
+                                                                position === 0
+                                                                    ? 'body/bold/sm'
+                                                                    : 'body/regular/sm'
+                                                            }
+                                                        >
+                                                            {line}
+                                                        </Text>
+                                                    )
+                                                )}
+                                            </Stack>
                                             {record.attempts.map(attempt =>
                                                 RoutingAttempt(record, attempt)
                                             )}

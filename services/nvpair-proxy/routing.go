@@ -721,6 +721,20 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 		return kept
 	}
 	candidates := resolve()
+	// round carries a tier request's body to the expected-completion chooser,
+	// which sizes each candidate's destination-effective body from it.
+	var tierInputs *tierRound
+	if tier != "" {
+		tierInputs = &tierRound{body: bodyBytes, route: r.URL.Path, hybrid: policy.hybrid}
+	}
+	// observeSelection records a committed tier round's decision for the
+	// request's history; a later fresh round replaces it. The chosen candidate
+	// leads the reordered round.
+	observeSelection := func(chosen []candidate, decision tierDecision) {
+		if tierInputs != nil && len(chosen) > 0 {
+			ctl.observeSelection(selectionDescriptor(decision, chosen[0], f.profile.Name))
+		}
+	}
 	// held is this request's claim on a node's capacity while it is in flight.
 	// resMu guards it because failover re-points it from the ReverseProxy's
 	// callbacks while the disconnect watcher may be releasing it.
@@ -836,7 +850,8 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 		return validated.generation, nil
 	}
 	if model != "" {
-		candidates, held, err = f.reserveRoundPrepared(preparationCtx, candidates, tier != "", model, prepareCandidate, resolve)
+		var decision tierDecision
+		candidates, held, decision, err = f.reserveRoundPrepared(preparationCtx, candidates, tierInputs, model, prepareCandidate, resolve)
 		if err != nil {
 			err = inferencePreparationRefusal(err)
 			ctl.observeIngress(routingIngressResult{factFailed, failureFactReason(err), bufferRequestStatus(err)})
@@ -845,6 +860,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 			}
 			return
 		}
+		observeSelection(candidates, decision)
 	}
 	roundReservations := held.held
 	roundGeneration := prepared.generation
@@ -1223,7 +1239,10 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 	// that re-resolves has to go back through it.
 	takeHeld := func(cands []candidate) ([]candidate, error) {
 		releaseHeld()
-		out, proposal, err := f.reserveRoundPrepared(preparationCtx, cands, tier != "", model, prepareCandidate, resolve)
+		out, proposal, decision, err := f.reserveRoundPrepared(preparationCtx, cands, tierInputs, model, prepareCandidate, resolve)
+		if err == nil {
+			observeSelection(out, decision)
+		}
 		resMu.Lock()
 		held = proposal
 		resMu.Unlock()

@@ -43,7 +43,7 @@ bounded table cells and a scrollable attempt detail. The shell's existing tick
 drains ready tokens, so changes appear within one second without another timer.
 Merge uses full origin/run/request identity and increasing seq, rejecting
 stale/terminal-regressing updates. Keep newest 256 requests and newest 32 attempts
-with original indexes and `droppedAttempts`; delayed baselines cannot resurrect
+with original indexes, `droppedAttempts` and the tier `selection`; delayed baselines cannot resurrect
 trimmed rows. Busy initial loads keep validated rows and remain loading with one
 250/500/1000 ms retry timer, then one-second retries. Disconnect clears banks
 and retires the generation; reconnect resubscribes/refetches.

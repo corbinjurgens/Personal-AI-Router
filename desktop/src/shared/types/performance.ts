@@ -23,6 +23,14 @@ export interface PerformanceReportedRate {
 export interface PerformanceEntry {
     key: { host: string; engine: string; model: string; fingerprint: string }
     profile: { engineFamily: string; quantization: string; contextTokens: number | null }
+    provenance?: {
+        configuration: { digest: string; complete: boolean }
+        engineFamily: string
+        api: string
+        extractorSchema: string
+    }
+    // Absence in retained history means unknown.
+    applicability?: 'current' | 'historical' | 'unknown'
     samples: number
     completed: number
     incomplete: number

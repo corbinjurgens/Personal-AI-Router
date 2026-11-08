@@ -472,18 +472,25 @@ func decodeInspectionFacts(ctx context.Context, list modelFileList, access servi
 }
 
 func (e *Executor) inspectModelArtifacts(ctx context.Context, p modelconfig.InspectRequest, advisory ...*modelEstimateInput) (modelconfig.InspectResult, error) {
+	return e.inspectModelArtifactsWithMeasurement(ctx, p, nil, advisory...)
+}
+
+func (e *Executor) inspectModelArtifactsWithMeasurement(ctx context.Context, p modelconfig.InspectRequest, semantic *string, advisory ...*modelEstimateInput) (modelconfig.InspectResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, modelInspectionBudget)
 	defer cancel()
 	var result modelconfig.InspectResult
 	err := retryModelRead(ctx, func(retry *bool) error {
 		var err error
-		result, err = e.inspectModelArtifactsOnce(ctx, p, retry, advisory...)
+		result, err = e.inspectModelArtifactsOnce(ctx, p, retry, semantic, advisory...)
 		return err
 	})
 	return result, err
 }
 
-func (e *Executor) inspectModelArtifactsOnce(ctx context.Context, p modelconfig.InspectRequest, retry *bool, advisory ...*modelEstimateInput) (modelconfig.InspectResult, error) {
+func (e *Executor) inspectModelArtifactsOnce(ctx context.Context, p modelconfig.InspectRequest, retry *bool, semantic *string, advisory ...*modelEstimateInput) (modelconfig.InspectResult, error) {
+	if semantic != nil {
+		*semantic = ""
+	}
 	// A separate read-only handoff; never stored in Task 5's facts cache or
 	// used for admission, binding identity, discovery or source revalidation.
 	for _, output := range advisory {
@@ -737,6 +744,9 @@ func (e *Executor) inspectModelArtifactsOnce(ctx context.Context, p modelconfig.
 				command, commandErr := modelConstrainCommand(snapshot.command, prepared.ModelLoads)
 				source, sourceErr := modelReviewedNativeSource(ctx, snapshot.state, command)
 				if commandErr == nil && sourceErr == nil {
+					if semantic != nil {
+						*semantic = modelMeasurementSemantic(ctx, snapshot.state, command, prepared, input, p.ProfileKey)
+					}
 					optionsID := modelConfigurationOptionsID(modelConfigurationOptions(*input.Allocation), prepared.Snapshot)
 					if modelLoadUnpriced(input.Allocation.Options) {
 						result.ConfigurationKeyReason = modelLoadUnpricedReason(input.Allocation.Options)
@@ -756,6 +766,9 @@ func (e *Executor) inspectModelArtifactsOnce(ctx context.Context, p modelconfig.
 		current, err := inspectionSnapshot(st, p.Engine)
 		if err != nil || !snapshot.equal(current) {
 			*retry = true
+			if semantic != nil {
+				*semantic = ""
+			}
 			result.ConfigurationKey, result.ConfigurationKeyReason, result.ConfigurationPools = "", "artifacts-unavailable", nil
 			result.ExecutionKey = ""
 			return unavailable("busy", "Engine configuration changed during inspection.")

@@ -71,12 +71,23 @@ settings fingerprint, launch digest and model-content digest when available), no
 effective request options, API and extractor schema. Request content is excluded.
 Models without a content digest use the normalized model name with an explicit
 identity kind for measurement only; this grants no strict or hybrid eligibility.
-Replacing a model file under the same name within one engine run is not detected.
+Replacing a model file under the same name within one engine run is not detected
+when measurement configuration is unknown.
 Unknown top-level overrides or missing required identity suppress observations;
 there is no placeholder digest. Finalization revalidates the identity/key and
 drops stale executions rather than relabeling them. Descriptor `Family` selects
 the pinned llama.cpp or Strata schema. Strengthened engine identity and
 native acceptance remain later gates owned by their respective units.
+
+The fingerprint also includes `Configuration`, the complete measurement digest
+or the literal `unknown` partition. This applicability identity is independent
+of the run/settings/launch/model/options aggregation inputs. Sample `provenance`
+contains only `configuration:{digest,complete}`, `engineFamily`, `api` and
+`extractorSchema`, with shared bounds. Capture and finalization compare the
+measurement identity as well as the existing strict tuple. Read it under
+`measurementMu` before acquiring the admission lock; never invoke its getter
+under `admission.mu`. Queue insertion detaches every provenance scalar/string.
+No raw settings, request options, artifact paths or request content enter it.
 
 The existing SC SSE reader invokes a synchronous numeric extractor only
 for validated genuine upstream JSON objects, including empty-choices usage
@@ -245,6 +256,15 @@ digest and model content digests. It is decoded strictly, validated, answered
 previous identity kept. The capability is derived from the active policy, that
 identity and the qualification registry read once at start from the `appdir`
 artifact `local-qualification.json` (absent: empty; invalid: empty and logged).
+The same control optionally carries `measurements`, a separate engine/exact
+profile-key map. Each value has `identity:{digest,complete}`, `observedBootNs`
+(canonical same-host boot nanoseconds) and `validityMs` (positive, at most 5000).
+The whole map replaces the prior measurement snapshot; omission withdraws it.
+Measurement lookups subtract boot-clock transit from the original observation
+budget and refuse expired or invalid-clock values, including replayed values.
+The map is bounded to 64 engines and 128 profiles, is process-local, and never
+enters `EngineIdentity`, qualification, capacity generations or admission.
+This control foundation does not score routes or change routing order.
 The accepted artifact schema integer is `2`: every entry requires non-null
 `shapes` with boolean `tools`, an array `structuredOutput` of distinct
 `json_object`/`json_schema` names, and boolean `reasoningReplay`. Replay is
@@ -497,8 +517,44 @@ which takes one off and puts the other on.
 | Class | Addressed? | Examples |
 | --- | --- | --- |
 | Facade-scoped | yes | `ready`, `error`, `node/*`, `errors:*`, `set-port`, `discovery:subscribe`, `discovery:nodes` |
-| Process-scoped | no | `log/set-level`, `node/set-priority`, `node/set-policy`, `node/set-availability`, `node/set-engine-drain`, `node/set-residency`, `node/admission-snapshot`, `workload/cancel`, `workload:*`, `admission/*`, `discovery:node-activity` |
+| Process-scoped | no | `log/set-level`, `node/set-priority`, `node/set-routing-costs`, `node/set-peer-sizing`, `node/set-policy`, `node/set-availability`, `node/set-engine-drain`, `node/set-residency`, `node/admission-snapshot`, `workload/cancel`, `workload:*`, `admission/*`, `discovery:node-activity` |
 | Bootstrap | names its engine in the payload | `facade/enable` |
+
+`node/set-routing-costs` is a broker-internal full replacement
+`{revision, profiles}` of current compatible speed evidence for later tier
+scoring. It is accepted only without an engine address. The strict
+`performancewire.RoutingCosts` decoder bounds identifiers, phase rates, tuple
+uniqueness, entry count and encoded bytes. Invalid or lower revisions return
+invalid params without mutation; equal revisions succeed without replacing the
+cache or receipt clock. A newer revision swaps the whole cache under its own
+lock, independently of priority and reservations, and acknowledges
+`{profiles: <stored count>}`. Lookups normalize the candidate engine's dispatched
+profile key and retain host, engine, family, API and schema as separate key
+dimensions. Age advances from monotonic receipt time and expires after
+`performancewire.RetentionMs`. The tier scorer (§12.3, Expected completion) is its
+only consumer.
+
+`node/set-peer-sizing` is a broker-internal full replacement
+`{revision, peers}` of destination-effective sizing recipes, accepted only
+without an engine address. Each peer entry carries the host, the admission
+identity and canonical epoch it was read under, the attested policy revision
+and proxy run, its observation age, and the request options and mode of each
+advertised shared profile. The strict `nodepolicy.PeerSizingSnapshot` decoder
+refuses unknown, duplicate and case-folded duplicate envelope fields, bounds the
+encoded snapshot to 256 KiB, peers to 256 and profiles per peer to 1024, and
+reuses the policy validators for keys, engines, models and options. Invalid or
+lower revisions return invalid params without mutation; equal revisions do not
+renew the receipt time. A lookup returns a recipe only while receipt age plus
+the observation age is below 90 seconds and the caller's current admission
+identity, epoch, advertised policy revision and profile engine/model all match;
+anything else is unknown sizing. The cache is ephemeral sizing configuration:
+it grants no admission, capacity or speed authority and is separate from
+priority, reservations and routing costs. The snapshot generation is readable
+without the cache lock. The discovery owner also keeps a routing-snapshot
+generation that advances on routing-relevant replacement or removal, including
+policy revision, profile and cluster principal changes that leave UI node
+events unchanged. The tier scorer reads the recipe, the snapshot generation and
+the discovery generations; nothing else does.
 
 `facade/enable` is unaddressed because it runs *before* the facade it names
 exists. Only a built-in engine id or a well-formed `e-<id>` counts as an address: plenty of unaddressed
@@ -1814,13 +1870,44 @@ built-in, default or protected names and no cluster role store.
   candidates, because the process has no routing view of it.
 - **Order**: `preferLoaded: "tier"` sorts by tier rank, then warm before cold;
   `"any"` by warm first, then tier rank. The existing preparation and selected
-  pin classes are unchanged. Inside equal comparator classes, earlier membership
+  pin classes are unchanged. Speed never changes this order: it chooses only
+  within the leading class (below). Inside equal comparator classes, earlier membership
   positions on each node lead. Distinct pairs at equal positions use engine/model order and retain
   the ordinary per-pair owner order. Another node's earlier occurrence of a
   pair cannot promote a later sibling on this node. Qualification uses that
   candidate node's selected engine/model facts. Reservations (§6) are taken only
   among the candidates
   sharing the leading tier rank, warmth and preparation class.
+- **Expected completion**: within that leading class a prepared tier round
+  chooses the candidate with the lowest expected completion time. Each term is
+  in milliseconds and weighted 1: `service = 1000 * (in/prefill + out/decode)`,
+  `queue = (pending + reservations) * service`, `pressure = gpuPressure *
+  service`, and `cold` = 0 when warm, else the measured load p95, else 120000.
+  `in` is a quarter of the destination-effective body's bytes and `out` its
+  first positive `max_tokens`, `max_completion_tokens` or `options.num_predict`
+  (512 when none). Rates come from `node/set-routing-costs` for the candidate's
+  own host, engine, profile key and extractor tuple. The effective body is the
+  self candidate's prepared body (rewrite plus its own profile options), or for
+  a peer the origin rewrite followed by the destination's `node/set-peer-sizing`
+  recipe applied as destination ingress applies it; hybrid then removes the
+  validated `store` no-op as strict qualification does. Scratch bodies are
+  released before the choice; only scalars are kept, and the sized body is never
+  sent. A pin keeps today's pin result. When no class member has a measured rate,
+  or any member lacks current sizing (a known no-op recipe counts as sizing), the
+  whole class keeps today's `candidateChoiceLocked` choice and reservation. An
+  unmeasured phase is imputed from the class's slowest measured rate for that
+  phase, else its slowest measured rate. Every 16th committed automatic choice
+  in a facade's class probes the next unmeasured candidate with no pending work
+  or reservations, in node/engine/profile-key order. Facts are gathered outside
+  the chooser locks; the choice before preparation and the recheck after it
+  require the same feed, sizing generation, pin, policy generation and unexpired
+  sizing, else the facts are rebuilt, and any facade discovery generation change
+  re-resolves the class. Only the final commit takes the reservation and
+  advances the probe counter. Ties keep class order. A warm slow node is never
+  compared with a cold fast one, because they are in different classes.
+  The latest committed round's decision is recorded once per request as the
+  history `selection` (§12.5.2): a fixed native descriptor that a later fresh
+  round's commit replaces.
 - **Body**: the top-level `model` is replaced by splicing its value's bytes;
   every other byte is forwarded as received.
 - **Nothing eligible** before any dispatch: `404` with
@@ -2091,7 +2178,20 @@ Rows sort by `createdAt` descending, origin/run lexically ascending, then
 numeric request ID descending. Every bank keeps the newest 256 rows and a
 retained rank floor, so delayed old snapshots cannot resurrect evicted rows.
 Each row keeps the newest 32 attempts with their original increasing indexes;
-`droppedAttempts` counts the trimmed prefix. `continuationOf` refers only to an
+`droppedAttempts` counts the trimmed prefix. `selection` (between
+`droppedAttempts` and `attempts`) is null for a request that is not a tier
+request and otherwise records why the latest committed tier round chose its
+destination: `decision` (`measured`, `imputed`, `probe`, `pinned` or
+`baseline`), `tierRank`, `warm`, the `winner` and, for a numeric decision, the
+`runnerUp`. A candidate carries `nodeId`, `engine`, the profile key as `model`,
+`totalMs`, the four named `terms` in milliseconds (`service`, `queue`,
+`pressure`, `cold`), `evidenceAgeMs` (null without measured evidence),
+`samples` (the weaker phase's sample count, 0 when a phase was imputed) and
+`imputed`. `totalMs` and `terms` are null for a pinned or baseline decision,
+which has no numeric estimate and no runner-up. The encoded selection is at
+most 2048 bytes: the proxy omits `runnerUp` (null) rather than exceed it and
+never truncates an identifier. It never carries request content, options or
+any new request identifier. `continuationOf` refers only to an
 actual interrupted predecessor, including a verified predecessor in that prefix.
 No continuation is inferred from an interrupted outcome alone.
 
@@ -2158,7 +2258,9 @@ For capacity accounting define `R=131072`, `M=33554432`, `S=65536`,
 | Each subscribed renderer | `3W+H+P+C` = 84,156,416 bytes |
 
 These are application-owned capacities, not RSS measurements or a heap ceiling.
-Demand-owned native fact graphs have a separate 32 KiB per-graph allowance,
+Demand-owned native fact graphs have a separate 35,360-byte per-graph allowance
+(the measured maximum, including one retained and one replacement selection
+descriptor of 1,680 bytes each),
 with detached graphs bounded by the source directory/scan/current-read lifetime;
 do not preallocate the maximum registered-owner allowance. Baseline runtime,
 allocator/GC overhead, ordinary queues and connection multiplicity are separate.

@@ -20,8 +20,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"nvpair-shared/discovery"
@@ -412,6 +414,25 @@ type Discovery struct {
 	// relay (discovery:nodes snapshots for the ol service), keyed by node ID (the
 	// directory instance name).
 	subscribedNodes map[string]Node
+	// routingGeneration advances, under mu, on every routing-relevant
+	// subscribed or manual replacement and removal, including policy-only
+	// revision/profile and cluster principal changes that nodeEqual leaves out of
+	// UI events. Readers load it without mu, so a chooser holding the priority
+	// lock never takes the discovery lock to compare it.
+	routingGeneration atomic.Uint64
+}
+
+// RoutingGeneration is the current routing-snapshot generation, read lock-free.
+func (d *Discovery) RoutingGeneration() uint64 {
+	return d.routingGeneration.Load()
+}
+
+// NodesWithGeneration captures the merged node set and the generation that
+// describes it together under the discovery lock.
+func (d *Discovery) NodesWithGeneration() ([]Node, uint64) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.nodesLocked(), d.routingGeneration.Load()
 }
 
 func NewDiscovery() *Discovery {
@@ -426,6 +447,10 @@ func NewDiscovery() *Discovery {
 func (d *Discovery) Nodes() []Node {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
+	return d.nodesLocked()
+}
+
+func (d *Discovery) nodesLocked() []Node {
 	out := make([]Node, 0, len(d.manualNodes)+len(d.subscribedNodes))
 	seen := make(map[string]struct{}, len(d.subscribedNodes))
 	for id, n := range d.subscribedNodes {
@@ -482,20 +507,29 @@ func (d *Discovery) SetSubscribed(nodes []Node) (discovered, updated, removed []
 		n = n.filteredModels()
 		next[n.ID] = n
 	}
+	changed := false
 	for id, n := range next {
 		switch prev, ok := d.subscribedNodes[id]; {
 		case !ok:
 			discovered = append(discovered, n)
+			changed = true
 		case !nodeEqual(prev, n):
 			updated = append(updated, n)
+			changed = true
+		case routingMetadataChanged(prev, n):
+			changed = true
 		}
 	}
 	for id, prev := range d.subscribedNodes {
 		if _, ok := next[id]; !ok {
 			removed = append(removed, prev)
+			changed = true
 		}
 	}
 	d.subscribedNodes = next
+	if changed {
+		d.routingGeneration.Add(1)
+	}
 	return discovered, updated, removed
 }
 
@@ -507,6 +541,13 @@ func nodeEqual(a, b Node) bool {
 	return a.ID == b.ID && a.Host == b.Host && a.Port == b.Port && a.IP == b.IP &&
 		slices.Equal(a.Addresses, b.Addresses) && slices.Equal(a.TXT, b.TXT) &&
 		slices.Equal(a.Models, b.Models)
+}
+
+// routingMetadataChanged reports a change to the routing metadata nodeEqual
+// deliberately omits but routing decisions depend on: the advertised policy
+// revision and profile facts, and the cluster principal.
+func routingMetadataChanged(a, b Node) bool {
+	return a.PolicyRevision != b.PolicyRevision || a.ClusterUUID != b.ClusterUUID || !reflect.DeepEqual(a.Profiles, b.Profiles)
 }
 
 func (d *Discovery) AddManual(node Node) (added bool) {
@@ -529,6 +570,7 @@ func (d *Discovery) AddManual(node Node) (added bool) {
 	}
 	node = node.filteredModels()
 	d.manualNodes[node.ID] = node
+	d.routingGeneration.Add(1)
 	return !exists
 }
 
@@ -538,6 +580,7 @@ func (d *Discovery) RemoveManual(id string) (removed bool) {
 	_, exists := d.manualNodes[id]
 	if exists {
 		delete(d.manualNodes, id)
+		d.routingGeneration.Add(1)
 	}
 	return exists
 }

@@ -116,8 +116,9 @@ const (
 		unsafe.Sizeof(sync.Mutex{}) + unsafe.Sizeof((*proxyRoutingHistory)(nil)) // Proxy's constructor fields.
 	routingHistoryNativeControlBytes = unsafe.Sizeof(routingSourceDirectory{}) + unsafe.Sizeof(routingProcessDescriptor{}) + unsafe.Sizeof(routingFactsClock)
 	// One current native read, no second pointer/copy bank. The 580B requested
-	// descriptor occupies the runtime's 640B size class with its inline role.
-	routingHistoryDescriptorOverlap = 32*800 + 640 + 288
+	// descriptor occupies the runtime's 640B size class with its inline role,
+	// and the 1680B selection descriptor the 1792B class.
+	routingHistoryDescriptorOverlap = 32*800 + 640 + 288 + 1792
 	// Empty struct channel elements have zero backing: wake, writeWake, Run's
 	// copier-join, run's writer-join, shared active-Write callback-join; plus the
 	// lazy parent Done and AfterFunc child's Done (normally shared closedchan).
@@ -643,6 +644,74 @@ func routingHistoryDestination(w *routingHistoryJSON, d *routingDestinationDescr
 	}
 }
 
+func routingHistorySelectionCandidate(w *routingHistoryJSON, c *routingSelectionCandidate) {
+	w.literal(`{"nodeId":`)
+	w.quote(c.node[:c.nodeLen])
+	w.literal(`,"engine":`)
+	w.quote(c.engine[:c.engineLen])
+	w.literal(`,"model":`)
+	w.quote(c.model[:c.modelLen])
+	w.literal(`,"totalMs":`)
+	numeric := c.flags&selectionTotalKnown != 0
+	w.nullable(c.total, numeric, false)
+	w.literal(`,"terms":`)
+	if numeric {
+		// Wire member names are the cost-term names, in tierCostTerms order.
+		for i, term := range tierCostTerms {
+			if i == 0 {
+				w.literal(`{"`)
+			} else {
+				w.literal(`,"`)
+			}
+			w.literal(term.name)
+			w.literal(`":`)
+			w.number(c.terms[i])
+		}
+		w.literal(`}`)
+	} else {
+		w.literal(`null`)
+	}
+	w.literal(`,"evidenceAgeMs":`)
+	w.nullable(c.age, c.flags&selectionAgeKnown != 0, false)
+	w.literal(`,"samples":`)
+	w.number(c.samples)
+	w.literal(`,"imputed":`)
+	if c.flags&selectionImputed != 0 {
+		w.literal(`true}`)
+	} else {
+		w.literal(`false}`)
+	}
+}
+
+// routingHistorySelection writes the request's selection, or null when no tier
+// round committed. The encoded size of a present selection is bounded by
+// nodepolicy.RoutingHistorySelectionBytes when the producer admitted it.
+func routingHistorySelection(w *routingHistoryJSON, d *routingSelectionDescriptor) {
+	if !d.present {
+		w.literal(`null`)
+		return
+	}
+	w.literal(`{"decision":`)
+	routingHistoryEnum(w, routingSelectionDecisions[:], uint64(d.decision))
+	w.literal(`,"tierRank":`)
+	w.number(d.rank)
+	w.literal(`,"warm":`)
+	if d.warm {
+		w.literal(`true`)
+	} else {
+		w.literal(`false`)
+	}
+	w.literal(`,"winner":`)
+	routingHistorySelectionCandidate(w, &d.winner)
+	w.literal(`,"runnerUp":`)
+	if d.runnerUpKnown {
+		routingHistorySelectionCandidate(w, &d.runnerUp)
+	} else {
+		w.literal(`null`)
+	}
+	w.literal(`}`)
+}
+
 func (h *proxyRoutingHistory) encodeRecord(w *routingHistoryJSON, cell *routingProjectionCell) {
 	f := &cell.facts
 	w.literal(`{"schema":1,"request":`)
@@ -701,6 +770,8 @@ func (h *proxyRoutingHistory) encodeRecord(w *routingHistoryJSON, cell *routingP
 	routingHistoryMoney(w, f.ceiling, f.granted, f.held, f.charged, f.flags, true)
 	w.literal(`,"droppedAttempts":`)
 	w.number(dropped)
+	w.literal(`,"selection":`)
+	routingHistorySelection(w, &f.selection)
 	w.literal(`,"attempts":[`)
 	for ordinal := dropped + 1; ordinal <= f.total; ordinal++ {
 		if ordinal > dropped+1 {

@@ -26,6 +26,138 @@ func diagnosticTestHardware() *diagnosticHardware {
 	}}
 }
 
+func measurementInspectionFixture(t *testing.T) (inspectionFixture, context.Context) {
+	t.Helper()
+	measurementTestEnvironment(t)
+	f, _ := memoryProfilesFixture(t)
+	ctx := withDiagnosticHardware(f.ex.modelMemoryContext(context.Background(), f.request.Engine, modelBufferTestTargetMemory(), false), diagnosticTestHardware())
+	artifacts, err := f.ex.inspectModelArtifacts(ctx, f.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := f.ex.diagnosticRequestedIdentity(ctx, f.request, artifacts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity.BuildInfo, identity.PerSlotContext, identity.Slots = "native-build", 4096, 1
+	identity.Placement = []modelconfig.DiagnosticPlacement{{DomainID: "host", Kind: "host"}}
+	recordAuthenticatedDiagnosticFixture(t, f, identity)
+	return f, ctx
+}
+
+func TestMeasurementInspectionReusesCompleteDiagnosticProofAfterRestart(t *testing.T) {
+	f, ctx := measurementInspectionFixture(t)
+	before, err := f.ex.inspectModel(ctx, f.request, false)
+	if err != nil || before.MeasurementIdentity == nil || !before.MeasurementIdentity.Complete {
+		t.Fatalf("inspection: %+v, %v", before.MeasurementIdentity, err)
+	}
+	f.ex.modelMemoryProfiles = newModelMemoryProfiles(f.ex.baseDir)
+	f.ex.managerIncarnation, f.st.runID = "replacement-manager", "replacement-run"
+	after, err := f.ex.inspectModel(ctx, f.request, false)
+	if err != nil || after.MeasurementIdentity == nil || *after.MeasurementIdentity != *before.MeasurementIdentity {
+		t.Fatalf("unchanged restart lost applicability: %+v, %v", after.MeasurementIdentity, err)
+	}
+	if f.st.running || f.st.proc != nil {
+		t.Fatal("read-only inspection started an engine")
+	}
+	unknown, err := f.ex.inspectModel(context.Background(), f.request, false)
+	if err != nil || unknown.MeasurementIdentity == nil || unknown.MeasurementIdentity.Complete {
+		t.Fatalf("missing hardware completed: %+v, %v", unknown.MeasurementIdentity, err)
+	}
+}
+
+func TestMeasurementInspectionWorkingSetLimitChangesApplicability(t *testing.T) {
+	f, ctx := measurementInspectionFixture(t)
+	before, err := f.ex.inspectModel(ctx, f.request, false)
+	if err != nil || before.MeasurementIdentity == nil || !before.MeasurementIdentity.Complete {
+		t.Fatalf("positive control: %+v, %v", before.MeasurementIdentity, err)
+	}
+	f.st.plat.Runtime.WorkingSetLimitMiB = keyTestPointer(4096)
+	after, err := f.ex.inspectModel(ctx, f.request, false)
+	if err != nil || after.MeasurementIdentity == nil || !after.MeasurementIdentity.Complete {
+		t.Fatalf("capped inspection: %+v, %v", after.MeasurementIdentity, err)
+	}
+	if after.MeasurementIdentity.Digest == before.MeasurementIdentity.Digest {
+		t.Fatal("process working-set change retained current measurement digest")
+	}
+	if f.st.running || f.st.proc != nil {
+		t.Fatal("inspection started an engine")
+	}
+}
+
+func TestMeasurementColdNativeFitDoesNotReuseRetainedRealization(t *testing.T) {
+	f, ctx, _ := diagnosticExecutionKeyInspectionFixture(t, "native-fit")
+	result, err := f.ex.inspectModel(ctx, f.request, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.MeasurementIdentity == nil || result.MeasurementIdentity.Complete {
+		t.Fatalf("cold fit claimed future realization: %+v", result.MeasurementIdentity)
+	}
+	if len(result.MemoryProfiles) != 1 || !result.MemoryProfiles[0].Current {
+		t.Fatal("measurement changed R2 historical diagnostic currentness")
+	}
+}
+
+func TestMeasurementLiveRealizationSupersedesHistory(t *testing.T) {
+	measurementTestEnvironment(t)
+	for _, scenario := range []string{"context", "slots unknown", "placement unknown", "owner changed", "settings changed during readback", "memory expired during readback"} {
+		t.Run(scenario, func(t *testing.T) {
+			f, _, _, fixture := modelDiagnosticRunningOperationFixture(t, func(f inspectionFixture) { on := "on"; f.st.plat.Runtime.ModelLoads[0].Requested.Fit = &on })
+			fixture.afterLoad()
+			memory := modelBufferTestTargetMemory()
+			ctx := withDiagnosticHardware(f.ex.modelMemoryContext(context.Background(), f.request.Engine, memory, false), diagnosticTestHardware())
+			before, err := f.ex.inspectModel(ctx, f.request, false)
+			if err != nil || before.MeasurementIdentity == nil || !before.MeasurementIdentity.Complete {
+				t.Fatalf("live positive control: %+v, %v", before.MeasurementIdentity, err)
+			}
+			identity := f.ex.inspectionDiagnosticIdentity(ctx, f.request, before)
+			if identity == nil {
+				t.Fatal("missing diagnostic identity")
+			}
+			recordAuthenticatedDiagnosticFixture(t, f, *identity)
+			switch scenario {
+			case "context":
+				fixture.context = 2048
+			case "slots unknown":
+				fixture.context = 0
+			case "placement unknown":
+				f.st.mu.Lock()
+				f.st.bufferCapture = nil
+				f.st.mu.Unlock()
+			case "owner changed":
+				f.st.mu.Lock()
+				f.st.adopted = true
+				f.st.mu.Unlock()
+			case "settings changed during readback":
+				fixture.beforeProps = func() {
+					f.st.mu.Lock()
+					f.st.plat.Runtime.ModelLoads[0].Requested.CacheTypeK = keyTestPointer("q8_0")
+					f.st.mu.Unlock()
+				}
+			case "memory expired during readback":
+				op := ctx.Value(modelAutoOperationKey{}).(modelAutoOperation)
+				owner := op.Memory.(modelTargetMemoryOwner)
+				fixture.beforeProps = func() { owner.target.Hop.BootNS = "0" }
+			}
+			after, err := f.ex.inspectModel(ctx, f.request, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.MeasurementIdentity == nil {
+				t.Fatal("missing explicit completeness")
+			}
+			if scenario == "context" {
+				if !after.MeasurementIdentity.Complete || *after.MeasurementIdentity == *before.MeasurementIdentity {
+					t.Fatalf("changed realized context reused identity: %+v", after.MeasurementIdentity)
+				}
+			} else if after.MeasurementIdentity.Complete {
+				t.Fatalf("uncertain live realization overruled by history: %+v", after.MeasurementIdentity)
+			}
+		})
+	}
+}
+
 func TestModelDiagnosticObservationHasRequestedIdentityWithoutEffects(t *testing.T) {
 	f := newAppliedKeyFixture(t)
 	f.ex.nodeProjection.set(nodeProjection{})

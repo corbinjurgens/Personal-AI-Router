@@ -553,6 +553,32 @@ func validateEnforcedOptions(raw json.RawMessage, depth int) error {
 	return nil
 }
 
+// checkRequestOptions is the one validation of a profile's request options and
+// mode, shared by policy validation and the peer sizing recipe.
+func checkRequestOptions(options json.RawMessage, mode RequestOptionsMode) error {
+	switch mode.Effective() {
+	case RequestOptionsDefaults:
+	case RequestOptionsEnforced:
+		if err := validateEnforcedOptions(options, 0); err != nil {
+			return err
+		}
+	default:
+		return errors.New("invalid requestOptionsMode")
+	}
+	if len(options) > 0 {
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(options, &obj); err != nil {
+			return errors.New("requestOptions must be a JSON object")
+		}
+		for key := range obj {
+			if strings.EqualFold(key, "model") {
+				return errors.New("requestOptions may not set model")
+			}
+		}
+	}
+	return nil
+}
+
 // QualificationRef names one revision of a local qualification. Revision is a
 // positive canonical decimal string.
 type QualificationRef struct {
@@ -603,7 +629,10 @@ type TierPolicy struct {
 	AllowWeaker bool `json:"allowWeaker"`
 	// PreferLoaded ranks candidates already loaded on their node ahead of cold
 	// ones. "tier" keeps tier order first and prefers loaded models within each
-	// tier; "any" prefers any loaded eligible model over a cold one.
+	// tier; "any" prefers any loaded eligible model over a cold one. Within the
+	// leading tier rank and warmth class, the candidate with the lowest
+	// expected completion time wins; speed never reorders the classes, and the
+	// destination keeps its preparation and admission authority.
 	PreferLoaded string `json:"preferLoaded"`
 }
 
@@ -743,25 +772,8 @@ func (p Policy) Validate() error {
 		if err := pr.validateOutputAndQualification(); err != nil {
 			return fmt.Errorf("profiles[%d] %q: %w", i, pr.Key, err)
 		}
-		switch pr.RequestOptionsMode.Effective() {
-		case RequestOptionsDefaults:
-		case RequestOptionsEnforced:
-			if err := validateEnforcedOptions(pr.RequestOptions, 0); err != nil {
-				return fmt.Errorf("profiles[%d]: %w", i, err)
-			}
-		default:
-			return fmt.Errorf("profiles[%d]: invalid requestOptionsMode", i)
-		}
-		if len(pr.RequestOptions) > 0 {
-			var obj map[string]json.RawMessage
-			if err := json.Unmarshal(pr.RequestOptions, &obj); err != nil {
-				return fmt.Errorf("profiles[%d] %q: requestOptions must be a JSON object", i, pr.Key)
-			}
-			for key := range obj {
-				if strings.EqualFold(key, "model") {
-					return fmt.Errorf("profiles[%d] %q: requestOptions may not set model", i, pr.Key)
-				}
-			}
+		if err := checkRequestOptions(pr.RequestOptions, pr.RequestOptionsMode); err != nil {
+			return fmt.Errorf("profiles[%d] %q: %w", i, pr.Key, err)
 		}
 	}
 	for i, role := range p.Roles {

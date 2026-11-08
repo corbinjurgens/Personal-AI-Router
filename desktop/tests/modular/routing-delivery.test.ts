@@ -330,6 +330,7 @@ function record(id: number): RoutingHistoryRecord {
             accounting: 'none'
         },
         droppedAttempts: 0,
+        selection: null,
         attempts: []
     }
 }
@@ -718,13 +719,25 @@ describe('production history sender IPC and broadcaster', () => {
         await settle()
         await commitInitial(a, initial)
         await settle()
+        expect(row.selection?.runnerUp).not.toBeNull()
         expect(
             history.consumeCurrent(0, value => {
                 expect(value).toEqual(row)
+                expect(value.selection).toEqual(row.selection)
+                expect(value.selection?.winner.terms).toEqual({
+                    service: 11772,
+                    queue: 0,
+                    pressure: 0,
+                    cold: 0
+                })
                 return undefined
             })
         ).toBe(true)
         row.seq++
+        if (row.selection) {
+            row.selection.decision = 'probe'
+            row.selection.runnerUp = null
+        }
         row.spend.chargedNanoUsd = '9007199254740993'
         row.spend.accounting = 'failed'
         applyRoutingHistoryChanged(new TextEncoder().encode(JSON.stringify(row)))
@@ -735,6 +748,7 @@ describe('production history sender IPC and broadcaster', () => {
             history.consumeCurrent(0, value => {
                 expect(value).toEqual(row)
                 expect(value.state).toBe('completed')
+                expect(value.selection).toMatchObject({ decision: 'probe', runnerUp: null })
                 expect(value.spend.accounting).toBe('failed')
                 return undefined
             })

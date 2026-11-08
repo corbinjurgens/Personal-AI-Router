@@ -780,6 +780,40 @@ three live feeds.
 
 `schedule:priority` and `node/set-priority` are internal worker contracts: the broker does not expose either notification to its connected client.
 
+The broker also feeds every live local proxy measured speed evidence through
+the process-scoped private `node/set-routing-costs` request. Each revision is a
+full replacement from the local and fresh admitted-peer performance projection,
+independent of desktop subscriptions. Only complete destination-attested current,
+clock-certain evidence with a usable phase qualifies. For each host, engine,
+dispatched profile key, family, API and extractor schema, the newest usable
+fingerprint wins (lexical fingerprint breaks age ties); entries are never pooled.
+Usable engine-reported decode wins over counted decode. Payload changes advance
+the process-local revision, and proxy spawn replay reuses the current revision.
+Failed delivery retains the proxy's previous cache until replacement or age
+expiry. Clients cannot invoke this feed, bare or component-addressed. The cache
+is for tier scoring; this feed alone changes neither scoring nor the scheduler.
+
+A peer `policy:get` result carries `activeRequestPolicy: {revision, proxyRunId}`
+only while the live proxy run has acknowledged exactly the returned policy
+revision, with no recovery, activation or availability error; otherwise it is
+explicit `null`. It grants no admission, launch or capacity authority. One
+background owner, `peerSizingRuntime`, subscribes to the discovery directory and
+reads each advertised, currently admitted peer's policy through the existing
+`engine:remote-policy-get` call, serially in lexical host order and refreshed
+every 30 seconds. It accepts a read only when the attestation, policy revision
+and advertised revision agree and the peer's mesh admission identity, epoch and
+the engine-manager source are unchanged across the read; it keeps only the
+advertised shared profiles whose engine and model match the read. Failed,
+malformed, unactivated or mismatched reads, directory and trust changes, and
+manager replacement withdraw the peer at once, and observations expire 90
+seconds after fetch start. Heartbeats never renew one. The resulting private
+`node/set-peer-sizing` snapshot goes to every live proxy through the same target
+pattern as `node/set-priority`, independent of desktop subscriptions; its
+process-local revision advances per changed observation set and spawn replay
+resends the current revision with advanced ages. Remote knowledge is an attested
+observation up to 90 seconds old, not an instantaneous cluster guarantee.
+Clients cannot invoke the method, bare or component-addressed.
+
 **`nvpair-cluster-manager`** owns the node's stable cryptographic identity (a self-generated UUID + Ed25519 self-signed certificate), the trusted-node store, and the EAP-NOOB PIN-based pairing flow that bootstraps mTLS trust between machines. Like llamacpp-proxy it's a full bidirectional JSON-RPC peer, and like the rest it's supervised **optionally and non-fatally**: a missing default sibling (and no `--cluster-manager-path`) just means the broker runs without cluster pairing. The broker is a **generic relay** for it in both directions: any `cluster:*` or `nodes:*` request a client sends is forwarded verbatim and the response (result or JSON-RPC error) is relayed straight back, and every notification the manager pushes is forwarded to the client unchanged. Unlike the proxy stream these events are not opt-in — they're low-volume, important pairing/membership pushes (`cluster:invite-received`, `cluster:identity-changed`, `nodes:changed`, ...), so they always flow. `errors:report` / `errors:clear` are the one exception: like the proxy's, they target `nvpair-errors` (which the broker doesn't supervise) and are dropped. Because pairing calls drive multi-round-trip inter-node network exchanges, the relay's per-call timeout is more generous (30 s) than the proxy's local control-plane timeout.
 
 Shared lifecycle for all workers:
@@ -1049,6 +1083,27 @@ proxy enforces it.
   acknowledge the identity without it; with no proxy running nothing needs
   withdrawing, and a proxy without the method holds no capability. Any other
   failure fails the operation before the engine is touched.
+- **Measurement configuration** (`performance_configuration.go`). The existing
+  performance sweep refreshes configured local llama.cpp profiles using the
+  private `engine:inspect-model` envelope with `nativeInitAllowed:false`, target
+  memory and the diagnostic hardware reader. Worker I/O stays outside policy and
+  performance locks. Manager source, applied settings, profile mapping, policy
+  revision and original memory lifetime fence installation and readback. Failed
+  inspection withdraws completeness; no current flag is persisted. Public
+  inspection uses the same currentness fence around its pinned manager call and
+  returns explicit unknown measurement metadata when the observation becomes
+  stale, preserving ordinary artifact inspection. Scanner binding, local memory
+  retirement/removal and current scanner exit advance the observation generation
+  and enqueue measurement withdrawal through the existing identity push. An old
+  response cannot restore completeness even if identical memory has reappeared;
+  retired scanner callbacks and other hosts do not invalidate local observations.
+  The existing
+  `node/set-model-identity` control adds a separate `measurements` map keyed by
+  engine and exact profile key. Values contain `identity:{digest,complete}`,
+  `observedBootNs` and `validityMs`. Replay preserves the observation's original
+  same-host boot stamp and remaining budget, bounded by the underlying memory
+  evidence. These fields convey no strict qualification, capacity or launch
+  authority, and do not enable speed scoring.
 - **Model content mutations** (`model_mutation.go`). The source-bound
   `forwardEngineNotificationFrom` consumes the private engine-manager
   `engine:model-mutation-request{requestId, engine}` notification, never
@@ -1631,7 +1686,9 @@ peers, managers or scheduler. No client can inject them or invoke a peer history
 route.
 
 History is memory-only: newest 256 requests, newest 32 attempts per request with
-original indexes and `droppedAttempts`. Broker restart clears it; proxy death
+original indexes and `droppedAttempts`; each row's `selection` (null for a non-tier
+request) is read through one bounded slot and packed before the attempts. Broker
+restart clears it; proxy death
 preserves accepted rows, loses possible unsent/partial windows and retires only
 that departed run's open presentation rows. It cannot manufacture delivery or
 charges. A model-less local attempt retains its node/engine and null model,
@@ -2107,6 +2164,29 @@ worker teardown. Startup and each distinct workload-manager incarnation force
 a durable `Store.Checkpoint()` before publication, including when no sample
 changed. A current local admission epoch change also forces a checkpoint.
 These restart/authority checkpoints are separate from the dirty-save timer.
+
+Measurement-configuration changes also checkpoint through this owner. The
+existing configuration observation owner supplies detached engine/exact-profile
+identities; performance retains only a generation fence, not another
+configuration cache. Save completion and summary freeze recheck this fence.
+Configuration withdrawal immediately blocks the prior publication and local
+eligibility; stale saves and failed checkpoints cannot make evidence current.
+Only a clean checkpoint for the current generation can publish new applicability.
+
+Samples, persisted per-key metadata and entries carry optional bounded provenance:
+`configuration:{digest,complete}`, `engineFamily`, `api` and `extractorSchema`.
+`Store.Record` rejects conflicting provenance or profile metadata for a retained
+key before accepting its sequence or changing statistics. Independent fingerprint
+partitions are never pooled. The existing snapshot layout accepts absent old
+metadata as visible unknown history, without persisting a current flag.
+
+Local projections and frozen summaries compute `applicability` (`current`,
+`historical`, `unknown`) from the destination's current complete identity for
+the exact engine/profile. Complete equality permits restart reuse after fresh
+reobservation; mismatch is historical and absent/expired observation is unknown.
+API and extractor schema remain separate compatibility dimensions. Peer entries
+retain this destination attestation through the existing authority, revision,
+tombstone and freshness checks; receivers do not infer applicability from age.
 
 Only a successful durable save/checkpoint becomes eligible for publication.
 A failed write keeps the live local view available and sets persistence

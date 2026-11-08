@@ -71,7 +71,8 @@ clients use the broker's `routing:subscribe`, `routing:unsubscribe`,
 `routing:get-initial` and `routing:changed` surface through `nvpair-service`.
 
 History keeps the newest 256 requests and the newest 32 attempts per request,
-preserving original indexes and `droppedAttempts`. A model-less local attempt
+preserving original indexes and `droppedAttempts`. A tier request's row also
+carries a `selection` naming why the winning destination won. A model-less local attempt
 retains its actual node/engine with `destination.model=null`; its presentation
 label is `model not specified`. API destinations require a model.
 Money is an exact decimal nano-USD string or null, never inferred from the
@@ -111,11 +112,21 @@ Unobserved responses count as completed only after the accepted response body
 reaches upstream EOF and delivery succeeds; protocol completion stays unknown.
 
 Samples require the joined engine run, settings, launch and model-content
-identity plus the measuring host. One proxy-local fingerprint includes that
+or name identity plus the measuring host. One proxy-local fingerprint includes that
 identity, effective request options, API and timing schema. Missing identity,
 unknown overrides or identity changes during execution suppress the sample.
 Descriptor family selects the reviewed extractor schema; native daily-engine
 acceptance still requires trustworthy installed identities and engine evidence.
+
+The fingerprint additionally partitions samples by the separately supplied
+measurement configuration digest, including an explicit unknown partition.
+Samples carry bounded provenance: `configuration:{digest,complete}`,
+`engineFamily`, `api` and `extractorSchema`. The proxy captures this configuration at dispatch and
+rechecks it at finalization, dropping a late sample after replacement, withdrawal
+or expiry. Observation replays preserve the original boot-clock lifetime.
+The fixed FIFO owns detached metadata. Measurement identity never changes strict
+identity or admission; name-based samples with unknown configuration stay useful
+as unscored history. Request options are hashed, never included in provenance.
 
 A process-wide FIFO holds at most 128 samples. Sequence numbers are assigned at
 enqueue in finalization order across facades. One sender writes notifications
@@ -475,6 +486,35 @@ One limit is outside the proxy's control: current Chromium-based browsers gate a
 
 ### Node selection
 
+The broker sends every live proxy a process-scoped `node/set-routing-costs`
+snapshot, independent of desktop subscriptions, and replays it after spawn.
+This private full replacement caches one newest usable, destination-attested
+current entry per host, engine, dispatched profile key, family, API and extractor
+schema for tier scoring. Historical, unknown and clock-uncertain evidence is
+excluded. Revisions increase only on payload changes; equal revisions are no-ops
+and older or invalid payloads are refused. Receipt age advances monotonically
+and evidence expires at the performance retention limit. Local clients cannot
+set this feed. Only tier scoring reads it; scheduler priority, reservations,
+admission and concrete routing retain their existing behavior.
+
+The broker likewise sends a private process-scoped `node/set-peer-sizing`
+snapshot of destination-effective request recipes for admitted peers' advertised
+shared profiles, obtained from authenticated policy reads that attest exact
+activation. The proxy replaces it whole, refuses lower revisions, and returns a
+recipe only while the observation is under 90 seconds old and still matches the
+peer's current admission, advertised policy revision and profile identity.
+Unknown sizing never removes a candidate.
+
+A tier request then chooses, within the leading tier rank and warmth class,
+the candidate expected to finish soonest: prefill and decode time for the
+destination-effective request size, multiplied by its pending work,
+reservations and GPU pressure, plus a load cost when the class is cold. A pin
+keeps today's result, and a class with no measured rate or with any member of
+unknown size keeps today's least-loaded choice. Every 16th automatic choice
+probes an idle unmeasured candidate. Tier rank and warmth still lead, so a warm
+slow node is never compared with a cold fast one; the destination keeps its own
+preparation and admission authority. See [spec.md](spec.md) §12.3.
+
 - **Eligibility**: Before routing model-bearing inference, the proxy keeps only
   nodes declaring the exact requested profile key for this engine. Self uses
   policy profiles; peers use advertised profiles. `ServedModels` restricts the
@@ -646,7 +686,8 @@ for the independent `localOnly` edit lock, desktop controls and precedence examp
   follows the requesting node's own role order: requested role, stronger roles
   nearest first with `allowStronger`, then weaker roles nearest first with
   `allowWeaker`. A peer-only role absent from that order never widens.
-  `preferLoaded` remains this router's policy.
+  `preferLoaded` remains this router's policy; within the leading class the
+  lowest expected completion time wins (see Node selection).
   Within equal rank, warmth, preparation and selected-pin classes, earlier
   list positions lead. Each candidate uses its own node's membership position,
   capabilities and context, even when another node lists the same pair earlier.

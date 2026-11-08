@@ -1047,14 +1047,31 @@ func historyPackRecord(cell []byte, record nodepolicy.RoutingHistoryRecord) (int
 }
 
 // Ingestion borrows the proper owner's projected view. The packed layout is
-// the same record prefix, count byte and attempts as historyPackRecord, with
-// one replaceable attempt slot and no whole-record DTO materialization.
+// the same record prefix, selection, count byte and attempts as
+// historyPackRecord, with one replaceable selection slot, one replaceable
+// attempt slot and no whole-record DTO materialization.
 func historyPackProjectedRecord(cell []byte, view *nodepolicy.RoutingHistoryRecordView) (int, error) {
 	if view.Header.State == "completed" || view.Header.State == "failed" || view.Header.State == "cancelled" {
 		cell[historySlotTerminal] = 1
 	}
 	out := cell[historySlotHeader:historySlotHeader:len(cell)]
 	if err := historyPackValue(&out, reflect.ValueOf(view.Header)); err != nil {
+		return 0, err
+	}
+	// The selection follows the header in record order and is decoded through
+	// one slot, as each attempt is below.
+	var selection nodepolicy.RoutingHistorySelection
+	present, err := view.ReadSelection(&selection)
+	if err != nil {
+		return 0, err
+	}
+	packed := (*nodepolicy.RoutingHistorySelection)(nil)
+	if present {
+		packed = &selection
+	}
+	err = historyPackValue(&out, reflect.ValueOf(packed))
+	packed, selection = nil, nodepolicy.RoutingHistorySelection{}
+	if err != nil {
 		return 0, err
 	}
 	if len(out) == cap(out) || view.AttemptCount() > nodepolicy.RoutingHistoryAttempts {

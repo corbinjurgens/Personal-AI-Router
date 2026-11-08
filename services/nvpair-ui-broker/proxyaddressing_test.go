@@ -21,9 +21,61 @@ import (
 	"time"
 
 	"nvpair-shared/engines"
+	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
+	"nvpair-shared/performancewire"
+	"nvpair-shared/schedulerwire"
 	"nvpair-ui-broker/relay"
 )
+
+func TestRoutingCostsSpawnReplaysPriorityAndCurrentRevisionToEveryLiveProxy(t *testing.T) {
+	f := newBrokerPerformanceFixture(t)
+	b := f.b
+	f.receive(t, routingCostsSummary(10), 0)
+	// Cache while no proxy is live, then restore both process-scoped feeds to
+	// the replacement. Replaying twice must keep each feed's revision stable.
+	b.sendRoutingCosts(context.Background(), false)
+	b.cachePrioritySnapshot(schedulerwire.Priority{Nodes: []string{"peer"}, Ranks: []schedulerwire.NodeRank{{ID: "peer", Pending: 2, Rank: 0}}})
+	a, workerA := newFakeWorkerPipe(t)
+	c, workerC := newFakeWorkerPipe(t)
+	b.setEngineProxyHandle(mustEngineProxyProfile("llamacpp"), &proxyProcess{peer: a})
+	b.setProxyProcessHandle(&proxyProcess{peer: c})
+	b.replayProxyStateAfterSpawn()
+	b.replayProxyStateAfterSpawn()
+	for _, worker := range []*fakeWorker{workerA, workerC} {
+		calls := worker.snapshot()
+		if len(calls) != 4 {
+			t.Fatalf("replay calls = %+v", calls)
+		}
+		for i, call := range calls {
+			if i%2 == 0 {
+				var priority schedulerwire.Priority
+				if call.method != "node/set-priority" {
+					t.Fatalf("priority replay method = %q", call.method)
+				}
+				if err := json.Unmarshal(call.params, &priority); err != nil {
+					t.Fatal(err)
+				}
+				if priority.Generation != 1 || len(priority.Nodes) != 1 || priority.Nodes[0] != "peer" || len(priority.Ranks) != 1 || priority.Ranks[0].Pending != 2 {
+					t.Fatalf("priority replay = %+v", priority)
+				}
+				continue
+			}
+			if call.method != performancewire.MethodRoutingCosts {
+				t.Fatalf("routing replay addressed or missing: %q", call.method)
+			}
+			costs, err := performancewire.DecodeRoutingCosts(call.params)
+			if err != nil || costs.Revision != 1 || len(costs.Profiles) != 1 || costs.Profiles[0].Decode.TokensPerSecond != 79 {
+				t.Fatalf("routing replay = %+v, %v", costs, err)
+			}
+		}
+	}
+	// Unchanged projections do not mint revisions or deliver duplicate calls.
+	b.sendRoutingCosts(context.Background(), false)
+	if len(workerA.snapshot()) != 4 || len(workerC.snapshot()) != 4 {
+		t.Fatal("unchanged projection was delivered again")
+	}
+}
 
 // The relay must address what it sends downward, not just strip the client's
 // prefix.
@@ -451,5 +503,61 @@ func TestFacadeMethodForStripsOnlyItsOwnEngine(t *testing.T) {
 					tc.profile.Name, tc.method, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestPeerSizingSpawnReplaysCurrentRevisionWithoutFetching(t *testing.T) {
+	b := &Broker{}
+	r := newPeerSizingRuntime("self", &fakeSizingAuthority{identity: map[string]string{}, epoch: map[string]uint64{}})
+	clock := time.Unix(5000, 0)
+	r.now = func() time.Time { return clock }
+	r.source = func() *rpcWorker { return nil }
+	r.fetch = func(context.Context, *rpcWorker, string) (json.RawMessage, error) {
+		t.Fatal("spawn replay waited for a fetch")
+		return nil, nil
+	}
+	r.deliver = b.deliverPeerSizing
+	r.observations["peer"] = peerSizingObservation{
+		target:     peerSizingTarget{host: "peer", cluster: "cluster-peer", revision: "3"},
+		admission:  peerSizingAdmission{identity: "incarnation-peer", epoch: 2},
+		proxyRunID: "run-3",
+		profiles:   []nodepolicy.PeerSizingProfile{{Key: "medium", Engine: "llamacpp", Model: "gemma"}},
+		fetchedAt:  clock.Add(-2 * time.Second),
+		serial:     1,
+	}
+	b.peerSizing = r
+	// Cache while no proxy is live, then replay to replacements twice.
+	b.sendPeerSizing(context.Background(), false)
+	a, workerA := newFakeWorkerPipe(t)
+	c, workerC := newFakeWorkerPipe(t)
+	b.setEngineProxyHandle(mustEngineProxyProfile("llamacpp"), &proxyProcess{peer: a})
+	b.setProxyProcessHandle(&proxyProcess{peer: c})
+	b.replayProxyStateAfterSpawn()
+	clock = clock.Add(3 * time.Second)
+	b.replayProxyStateAfterSpawn()
+	for _, worker := range []*fakeWorker{workerA, workerC} {
+		var ages []int64
+		for _, call := range worker.snapshot() {
+			if call.method != nodepolicy.MethodSetPeerSizing {
+				continue
+			}
+			var s nodepolicy.PeerSizingSnapshot
+			if err := json.Unmarshal(call.params, &s); err != nil {
+				t.Fatal(err)
+			}
+			if s.Revision != 1 || len(s.Peers) != 1 || s.Peers[0].Host != "peer" {
+				t.Fatalf("replayed snapshot = %+v", s)
+			}
+			ages = append(ages, s.Peers[0].AgeMs)
+		}
+		if len(ages) != 2 || ages[0] != 2000 || ages[1] != 5000 {
+			t.Fatalf("replay ages = %v, want advanced ages at a stable revision", ages)
+		}
+	}
+	// An unchanged projection mints no revision and sends nothing more.
+	before := len(workerA.snapshot())
+	b.sendPeerSizing(context.Background(), false)
+	if len(workerA.snapshot()) != before {
+		t.Fatal("unchanged projection was delivered again")
 	}
 }

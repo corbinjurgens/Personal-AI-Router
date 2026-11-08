@@ -140,7 +140,11 @@ History is private to the origin machine and memory-only. Broker restart clears
 it; proxy death can lose unsent/partial windows while preserving accepted rows.
 Clients clear banks on disconnect and resubscribe/refetch on reconnect. The
 newest 256 requests retain at most 32 attempts with original indexes and
-`droppedAttempts`. A model-less local destination keeps its node/engine and null
+`droppedAttempts`. Each record also carries a `selection` member (null for a
+non-tier request) recording why the winning destination was chosen: decision,
+tier rank, and the winner and runner-up estimate terms, evidence age and sample
+counts; the expanded desktop row renders it, and pinned/baseline decisions show
+no numeric estimate. A model-less local destination keeps its node/engine and null
 model (`model not specified`); API models remain required. Money stays exact
 decimal nano-USD strings, waits are measured, and detached workload associations
 remain historical. Completed delivery can have failed accounting. See
@@ -259,6 +263,16 @@ order, pending count, and pressure; the broker forwards each `schedule:priority`
 snapshot to the matching facade through `node/set-priority`. Each facade adds
 local reservations, so its estimate is
 `pending + gpuPressure + localReservations` during concurrent bursts.
+
+Alongside `node/set-priority`, the broker sends the private process-scoped
+`node/set-routing-costs` full replacement to every live proxy and replays its
+current revision after spawn, independently of desktop subscriptions. It caches
+newest usable destination-attested current speed evidence for tier scoring;
+scoring does not consume it yet. PAIR consumes routing results, not this feed.
+It sends `node/set-peer-sizing` the same way: a private projection of admitted
+peers' attested shared-profile request recipes for sizing. Neither feed reaches
+desktop state; the UI ignores the `activeRequestPolicy` attestation on peer
+policy reads.
 
 Current limitation: pressure does not represent GPU capability or available
 VRAM, and a multi-GPU node is represented by its busiest device rather than

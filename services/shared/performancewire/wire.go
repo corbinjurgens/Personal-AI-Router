@@ -23,8 +23,11 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"nvpair-shared/nodepolicy"
 )
 
 // MethodSummary is the peer message that carries a Summary.
@@ -118,6 +121,81 @@ type Profile struct {
 	Quantization  string `json:"quantization,omitempty"`
 	ContextTokens *int64 `json:"contextTokens,omitempty"`
 }
+
+// Provenance is bounded, content-free measurement compatibility and execution
+// configuration evidence. Configuration is independent of run/settings hashes.
+// A nil provenance on retained history means the measuring configuration is unknown.
+type Provenance struct {
+	Configuration   nodepolicy.MeasurementIdentity `json:"configuration"`
+	EngineFamily    string                         `json:"engineFamily"`
+	API             string                         `json:"api"`
+	ExtractorSchema string                         `json:"extractorSchema"`
+}
+
+func (p *Provenance) UnmarshalJSON(data []byte) error {
+	var fields struct {
+		Configuration *struct {
+			Digest   *string `json:"digest"`
+			Complete *bool   `json:"complete"`
+		} `json:"configuration"`
+		EngineFamily    string `json:"engineFamily"`
+		API             string `json:"api"`
+		ExtractorSchema string `json:"extractorSchema"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&fields); err != nil {
+		return err
+	}
+	if fields.Configuration == nil || fields.Configuration.Digest == nil || fields.Configuration.Complete == nil {
+		return errors.New("measurement configuration requires digest and completeness")
+	}
+	*p = Provenance{Configuration: nodepolicy.MeasurementIdentity{Digest: *fields.Configuration.Digest, Complete: *fields.Configuration.Complete}, EngineFamily: fields.EngineFamily, API: fields.API, ExtractorSchema: fields.ExtractorSchema}
+	return p.Validate()
+}
+
+func (p *Provenance) Validate() error {
+	if p == nil {
+		return nil
+	}
+	if err := p.Configuration.Validate(); err != nil {
+		return err
+	}
+	if err := checkID("engineFamily", p.EngineFamily); err != nil {
+		return err
+	}
+	if err := checkID("extractorSchema", p.ExtractorSchema); err != nil {
+		return err
+	}
+	// These are engine-facing API paths, never URLs, queries or request content.
+	switch p.API {
+	case "/v1/chat/completions", "/v1/completions", "/v1/embeddings", "/v1/responses":
+		return nil
+	default:
+		return errors.New("unsupported measurement API")
+	}
+}
+
+// Clone gives queues, stores and consumers independent ownership of metadata.
+func (p *Provenance) Clone() *Provenance {
+	if p == nil {
+		return nil
+	}
+	copy := *p
+	copy.Configuration.Digest = strings.Clone(p.Configuration.Digest)
+	copy.EngineFamily = strings.Clone(p.EngineFamily)
+	copy.API = strings.Clone(p.API)
+	copy.ExtractorSchema = strings.Clone(p.ExtractorSchema)
+	return &copy
+}
+
+type Applicability string
+
+const (
+	ApplicabilityCurrent    Applicability = "current"
+	ApplicabilityHistorical Applicability = "historical"
+	ApplicabilityUnknown    Applicability = "unknown"
+)
 
 // Validate checks the profile's fields against the contract limits.
 func (p Profile) Validate() error {
@@ -236,10 +314,11 @@ type Sample struct {
 	// Producer identifies the live producing process incarnation. Seq increases
 	// by at least one per sample within it, so a repeated (Producer, Seq) is a
 	// duplicate.
-	Producer string     `json:"producer"`
-	Seq      uint64     `json:"seq"`
-	Key      ProfileKey `json:"key"`
-	Profile  Profile    `json:"profile"`
+	Producer   string      `json:"producer"`
+	Seq        uint64      `json:"seq"`
+	Key        ProfileKey  `json:"key"`
+	Profile    Profile     `json:"profile"`
+	Provenance *Provenance `json:"provenance,omitempty"`
 	Measurement
 }
 
@@ -259,6 +338,12 @@ func (s Sample) Validate() error {
 	}
 	if err := s.Profile.Validate(); err != nil {
 		return err
+	}
+	if err := s.Provenance.Validate(); err != nil {
+		return err
+	}
+	if s.Provenance != nil && s.Profile.EngineFamily != s.Provenance.EngineFamily {
+		return errors.New("measurement family mismatch")
 	}
 	return s.Measurement.Validate()
 }
@@ -312,8 +397,12 @@ func (r *ReportedRate) UnmarshalJSON(data []byte) error {
 // Entry is one profile key's aggregates. A nil aggregate means no retained
 // sample qualified for it.
 type Entry struct {
-	Key     ProfileKey `json:"key"`
-	Profile Profile    `json:"profile"`
+	Key        ProfileKey  `json:"key"`
+	Profile    Profile     `json:"profile"`
+	Provenance *Provenance `json:"provenance,omitempty"`
+	// Applicability is attested by the destination at publication, never stored
+	// as authority. Absent old metadata is unknown, including absent applicability.
+	Applicability Applicability `json:"applicability,omitempty"`
 	// Samples counts every retained sample; Completed, Failed and Cancelled
 	// partition it. Incomplete counts the completed samples whose protocol
 	// end was known to be missing.
@@ -429,6 +518,21 @@ func (e Entry) validate(host string, w Window) error {
 	if err := e.Profile.Validate(); err != nil {
 		return err
 	}
+	if err := e.Provenance.Validate(); err != nil {
+		return err
+	}
+	if e.Provenance != nil && e.Profile.EngineFamily != e.Provenance.EngineFamily {
+		return errors.New("measurement family mismatch")
+	}
+	switch e.Applicability {
+	case "", ApplicabilityUnknown:
+	case ApplicabilityCurrent, ApplicabilityHistorical:
+		if e.Provenance == nil || !e.Provenance.Configuration.Complete {
+			return errors.New("applicability requires complete provenance")
+		}
+	default:
+		return errors.New("unsupported measurement applicability")
+	}
 	if e.Samples < 1 || e.Samples > w.MaxSamplesPerKey {
 		return fmt.Errorf("samples %d is outside 1..%d", e.Samples, w.MaxSamplesPerKey)
 	}
@@ -540,6 +644,11 @@ func DecodeSummary(data []byte) (Summary, error) {
 	}
 	if err := s.Validate(); err != nil {
 		return Summary{}, err
+	}
+	for i := range s.Entries {
+		if s.Entries[i].Applicability == "" {
+			s.Entries[i].Applicability = ApplicabilityUnknown
+		}
 	}
 	return s, nil
 }

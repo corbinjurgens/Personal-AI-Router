@@ -576,11 +576,17 @@ func assertJointPeer(t *testing.T, raw []byte, want nodepolicy.Policy) {
 		PausedBy           nodepolicy.PauseOrigin         `json:"pausedBy,omitempty"`
 		PauseMode          nodepolicy.PauseMode           `json:"pauseMode,omitempty"`
 		ModelConfiguration *nodepolicy.ModelConfiguration `json:"modelConfiguration"`
+		// Reads carry the activation attestation; the joint target runs no
+		// proxy, so it can only be null. Set results do not carry it.
+		ActiveRequestPolicy json.RawMessage `json:"activeRequestPolicy"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&envelope) != nil || decoder.Decode(&struct{}{}) != io.EOF {
 		t.Fatal("peer result contains unknown fields, origin-only routing, or invalid JSON")
+	}
+	if envelope.ActiveRequestPolicy != nil && string(envelope.ActiveRequestPolicy) != "null" {
+		t.Fatalf("peer result activeRequestPolicy = %s, want null without a live proxy", envelope.ActiveRequestPolicy)
 	}
 	if !reflect.DeepEqual(envelope.Policy, jointExpectedPeer(want)) {
 		t.Fatal("peer policy differs from the independently spelled device/local-only projection")

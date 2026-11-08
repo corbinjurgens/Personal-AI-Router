@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"os"
 	"path/filepath"
@@ -20,9 +21,289 @@ import (
 	"time"
 
 	"nvpair-shared/clustertrusttest"
+	"nvpair-shared/engines"
+	"nvpair-shared/nodepolicy"
 	"nvpair-shared/performancewire"
 	"nvpair-ui-broker/performancestore"
 )
+
+func routingCostsSummary(revision int64) performancewire.Summary {
+	s := performanceTestSummary(revision)
+	e := &s.Entries[0]
+	e.Profile.EngineFamily = "llamacpp"
+	e.Provenance = performanceConfiguredSample(1, strings.Repeat("a", 64), "", 79).Provenance
+	e.Provenance.ExtractorSchema = "llamacpp-b12020-0ec4027a"
+	e.Applicability = performancewire.ApplicabilityCurrent
+	e.EngineDecode = &performancewire.ReportedRate{Samples: 1, DurationNs: 1e9, TokensPerSecond: 79}
+	return s
+}
+
+func TestRoutingCostsSelectsCurrentBeforeNewestAndWithdraws(t *testing.T) {
+	f := newBrokerPerformanceFixture(t)
+	s := routingCostsSummary(10)
+	s.Entries[0].Key.Fingerprint = "current-slow"
+	old := s.Entries[0]
+	old.Key.Fingerprint, old.NewestAgeMs, old.OldestAgeMs = "obsolete-fast", 1, 1
+	old.EngineDecode = &performancewire.ReportedRate{Samples: 1, DurationNs: 1e9, TokensPerSecond: 900}
+	old.Applicability = performancewire.ApplicabilityHistorical
+	s.Entries = append(s.Entries, old)
+	f.receive(t, s, 30)
+	c := f.b.performance.routingCosts()
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Profiles) != 1 || c.Profiles[0].Fingerprint != "current-slow" || c.Profiles[0].Decode.TokensPerSecond != 79 || c.Profiles[0].AgeMs != 130 {
+		t.Fatalf("selected evidence = %+v", c)
+	}
+	s.Revision++
+	s.Entries = []performancewire.Entry{old}
+	f.receive(t, s, 0)
+	if c := f.b.performance.routingCosts(); len(c.Profiles) != 0 {
+		t.Fatalf("obsolete evidence substituted after withdrawal: %+v", c)
+	}
+}
+
+func TestRoutingCostsNewestUsableTupleAndDecodeSource(t *testing.T) {
+	f := newBrokerPerformanceFixture(t)
+	s := routingCostsSummary(10)
+	base := s.Entries[0]
+	base.Key.Fingerprint = "b"
+	base.Prefill = &performancewire.Rate{Samples: 1, Tokens: 378, DurationNs: 1e9, TokensPerSecond: 378}
+	base.Decode = &performancewire.Rate{Samples: 1, Tokens: 70, DurationNs: 1e9, TokensPerSecond: 70}
+	base.LoadNs = &performancewire.Distribution{Samples: 1, Median: 1e6, P95: 23e6}
+	tied := base
+	tied.Key.Fingerprint = "a"
+	zero := base
+	zero.Key.Fingerprint, zero.NewestAgeMs, zero.OldestAgeMs = "zero-newest", 0, 0
+	zero.Prefill, zero.Decode = nil, nil
+	zero.EngineDecode = &performancewire.ReportedRate{Samples: 1, DurationNs: 1e9}
+	count := base
+	count.Key.Model, count.Key.Fingerprint = "count-profile", "count"
+	count.EngineDecode = zero.EngineDecode
+	strata := base
+	strata.Provenance = base.Provenance.Clone()
+	strata.Provenance.EngineFamily, strata.Provenance.ExtractorSchema = "strata", "strata-f6726098"
+	strata.Profile.EngineFamily, strata.Key.Fingerprint = "strata", "strata"
+	unsupported := base
+	unsupported.Provenance = base.Provenance.Clone()
+	unsupported.Provenance.API = "/v1/completions"
+	unsupported.Key.Fingerprint = "unsupported-api"
+	s.Entries = []performancewire.Entry{base, tied, zero, count, strata, unsupported}
+	f.receive(t, s, 0)
+	c := f.b.performance.routingCosts()
+	if len(c.Profiles) != 3 {
+		t.Fatalf("profiles = %+v", c.Profiles)
+	}
+	for _, p := range c.Profiles {
+		switch p.Fingerprint {
+		case "a":
+			if p.Decode.Source != "engine" || p.Decode.TokensPerSecond != 79 || p.Prefill.TokensPerSecond != 378 || p.LoadP95Ms == nil || *p.LoadP95Ms != 23 || p.LoadSamples != 1 {
+				t.Fatalf("engine profile = %+v", p)
+			}
+		case "count":
+			if p.Decode.Source != "count" || p.Decode.TokensPerSecond != 70 {
+				t.Fatalf("count fallback = %+v", p)
+			}
+		case "strata":
+			if p.Family != "strata" || p.Schema != "strata-f6726098" {
+				t.Fatalf("tuple mixed: %+v", p)
+			}
+		default:
+			t.Fatalf("unexpected profile: %+v", p)
+		}
+	}
+	// A genuinely newer usable fingerprint replaces the lexical tie winner.
+	s.Revision++
+	s.Entries[0].NewestAgeMs = 50
+	f.receive(t, s, 0)
+	for _, p := range f.b.performance.routingCosts().Profiles {
+		if p.Model == "model" && p.Family == "llamacpp" && p.Fingerprint != "b" {
+			t.Fatalf("newest usable entry lost: %+v", p)
+		}
+	}
+}
+
+func TestRoutingCostsExcludesUnknownClockAndWithdrawnPeers(t *testing.T) {
+	for _, reason := range []string{"unknown", "incomplete", "clock uncertain", "stale", "withdrawn", "expired", "authority removed"} {
+		t.Run(reason, func(t *testing.T) {
+			f := newBrokerPerformanceFixture(t)
+			s := routingCostsSummary(10)
+			f.receive(t, s, 0)
+			if len(f.b.performance.routingCosts().Profiles) != 1 {
+				t.Fatal("positive current evidence missing")
+			}
+			s.Revision++
+			switch reason {
+			case "unknown":
+				s.Entries[0].Applicability = performancewire.ApplicabilityUnknown
+			case "incomplete":
+				s.Entries[0].Applicability = performancewire.ApplicabilityUnknown
+				s.Entries[0].Provenance.Configuration = nodepolicy.MeasurementIdentity{}
+			case "clock uncertain":
+				s.Entries[0].ClockUncertain = true
+			case "stale":
+				f.status(t, "stale", 0, 90_000)
+			case "withdrawn":
+				s.Entries = []performancewire.Entry{}
+			case "expired":
+				f.now = f.now.Add(time.Duration(performancewire.RetentionMs+1) * time.Millisecond)
+			case "authority removed":
+				clustertrusttest.RemovePeerPin(t, f.dir, "peer")
+			}
+			if reason != "stale" && reason != "expired" && reason != "authority removed" {
+				f.receive(t, s, 0)
+			}
+			if c := f.b.performance.routingCosts(); len(c.Profiles) != 0 {
+				t.Fatalf("excluded evidence retained: %+v", c)
+			}
+		})
+	}
+}
+
+func TestRoutingCostsIncludesLocalCurrentProjection(t *testing.T) {
+	f := newBrokerPerformanceFixture(t)
+	p := f.b.performance
+	p.configuration = func() performanceConfigurationSnapshot {
+		return performanceConfigurationFixture(strings.Repeat("a", 64), 1)
+	}
+	s := performanceConfiguredSample(1, strings.Repeat("a", 64), "local", 14)
+	s.Provenance.ExtractorSchema = "llamacpp-b12020-0ec4027a"
+	if err := p.store.Record(s); err != nil {
+		t.Fatal(err)
+	}
+	p.flush()
+	c := p.routingCosts()
+	if len(c.Profiles) != 1 || c.Profiles[0].Host != "self" || c.Profiles[0].Decode.TokensPerSecond != 14 {
+		t.Fatalf("local evidence = %+v", c)
+	}
+}
+
+func TestRoutingCostsDoesNotCombinePhasesAcrossFingerprints(t *testing.T) {
+	f := newBrokerPerformanceFixture(t)
+	s := routingCostsSummary(10)
+	newer := s.Entries[0]
+	newer.Key.Fingerprint, newer.NewestAgeMs, newer.OldestAgeMs = "prefill-only", 1, 10
+	newer.EngineDecode = nil
+	newer.Prefill = &performancewire.Rate{Samples: 1, Tokens: 378, DurationNs: 1e9, TokensPerSecond: 378}
+	s.Entries = append(s.Entries, newer)
+	f.receive(t, s, 0)
+	c := f.b.performance.routingCosts()
+	if len(c.Profiles) != 1 || c.Profiles[0].Fingerprint != "prefill-only" || c.Profiles[0].Decode != nil || c.Profiles[0].Prefill.TokensPerSecond != 378 || c.Profiles[0].AgeMs != 10 {
+		t.Fatalf("fingerprints were pooled: %+v", c)
+	}
+}
+
+func TestRoutingCostsDeliveredWithoutDesktopSubscriber(t *testing.T) {
+	f := newBrokerPerformanceFixture(t)
+	peer, worker := newFakeWorkerPipe(t)
+	f.b.setEngineProxyHandle(mustEngineProxyProfile("llamacpp"), &proxyProcess{peer: peer})
+	summary := routingCostsSummary(10)
+	zero := summary.Entries[0]
+	zero.Key.Model, zero.Key.Fingerprint = "zero-profile", "zero"
+	zero.EngineDecode = &performancewire.ReportedRate{Samples: 1, DurationNs: 1e9}
+	summary.Entries = append(summary.Entries, zero)
+	f.receive(t, summary, 0)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); f.b.performanceChangeLoop(ctx) }()
+	defer func() { cancel(); <-done }()
+	calls := worker.waitFor("routing costs without subscribers", func(calls []policyCall) bool { return len(calls) > 0 })
+	if f.b.performance.subscribed || len(calls) != 1 || calls[0].method != performancewire.MethodRoutingCosts {
+		t.Fatalf("calls = %+v", calls)
+	}
+	c, err := performancewire.DecodeRoutingCosts(calls[0].params)
+	if err != nil || c.Revision != 1 || len(c.Profiles) != 1 || c.Profiles[0].Decode.TokensPerSecond != 79 {
+		t.Fatalf("delivered costs = %+v, %v", c, err)
+	}
+}
+
+func TestRoutingCostsClientCannotPinCacheRevision(t *testing.T) {
+	for _, prefix := range []string{"", engines.ProxyComponent + ":", "llamacpp-proxy:"} {
+		t.Run(prefix, func(t *testing.T) {
+			peer, worker := newFakeWorkerPipe(t)
+			var output bytes.Buffer
+			b := &Broker{codec: NewCodec(readWriter{Reader: strings.NewReader(""), Writer: &output})}
+			b.setEngineProxyHandle(mustEngineProxyProfile("llamacpp"), &proxyProcess{peer: peer})
+			id := json.RawMessage(`1`)
+			b.handleMessage(&Message{JSONRPC: "2.0", ID: &id, Method: prefix + performancewire.MethodRoutingCosts, Params: json.RawMessage(`{"revision":9223372036854775807,"profiles":[]}`)})
+			var response Message
+			if err := json.Unmarshal(bytes.TrimSpace(output.Bytes()), &response); err != nil {
+				t.Fatal(err)
+			}
+			if response.Error == nil || response.Error.Code != -32601 || len(worker.snapshot()) != 0 {
+				t.Fatalf("client request was not privately refused: %+v, calls %+v", response, worker.snapshot())
+			}
+		})
+	}
+}
+
+func TestRoutingCostsFailedCallLogsAndNextChangeStillDelivers(t *testing.T) {
+	f := newBrokerPerformanceFixture(t)
+	peer, worker := newFakeWorkerPipe(t)
+	worker.setAnswer(func(string, json.RawMessage) (any, string) { return nil, "fixture rejection" })
+	f.b.setEngineProxyHandle(mustEngineProxyProfile("llamacpp"), &proxyProcess{peer: peer})
+	var output bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&output, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	f.receive(t, routingCostsSummary(10), 0)
+	f.b.sendRoutingCosts(context.Background(), false)
+	var logged map[string]json.RawMessage
+	if err := json.Unmarshal(bytes.TrimSpace(output.Bytes()), &logged); err != nil {
+		t.Fatal(err)
+	}
+	var level, engine, failure string
+	for name, dst := range map[string]*string{"level": &level, "engine": &engine, "err": &failure} {
+		if err := json.Unmarshal(logged[name], dst); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if level != "WARN" || engine != "llamacpp" || failure != "RPC -32000: fixture rejection" || len(logged) != 5 {
+		t.Fatalf("warning must contain only engine and error context: %s", output.Bytes())
+	}
+	worker.setAnswer(nil)
+	s := routingCostsSummary(11)
+	s.Entries = []performancewire.Entry{}
+	f.receive(t, s, 0)
+	f.b.sendRoutingCosts(context.Background(), false)
+	calls := worker.snapshot()
+	if len(calls) != 2 {
+		t.Fatalf("delivery stopped after rejection: %+v", calls)
+	}
+	c, err := performancewire.DecodeRoutingCosts(calls[1].params)
+	if err != nil || c.Revision != 2 || len(c.Profiles) != 0 {
+		t.Fatalf("withdrawal = %+v, %v", c, err)
+	}
+}
+
+func TestRoutingCostsTransportFailureDoesNotPreventReplacementReplay(t *testing.T) {
+	f := newBrokerPerformanceFixture(t)
+	f.b.setEngineProxyHandle(mustEngineProxyProfile("llamacpp"), &proxyProcess{})
+	f.receive(t, routingCostsSummary(10), 0)
+	var output bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&output, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	f.b.sendRoutingCosts(context.Background(), false)
+	var logged struct{ Level, Engine, Err string }
+	if err := json.Unmarshal(bytes.TrimSpace(output.Bytes()), &logged); err != nil {
+		t.Fatal(err)
+	}
+	if logged.Level != "WARN" || logged.Engine != "llamacpp" || logged.Err != "proxy peer not available" {
+		t.Fatalf("transport warning = %+v", logged)
+	}
+	peer, worker := newFakeWorkerPipe(t)
+	f.b.setEngineProxyHandle(mustEngineProxyProfile("llamacpp"), &proxyProcess{peer: peer})
+	f.b.replayProxyStateAfterSpawn()
+	calls := worker.snapshot()
+	if len(calls) != 1 || calls[0].method != performancewire.MethodRoutingCosts {
+		t.Fatalf("replacement did not receive feed: %+v", calls)
+	}
+	c, err := performancewire.DecodeRoutingCosts(calls[0].params)
+	if err != nil || c.Revision != 1 || len(c.Profiles) != 1 || c.Profiles[0].Decode.TokensPerSecond != 79 {
+		t.Fatalf("replacement replay = %+v, %v", c, err)
+	}
+}
 
 // These fixtures use certificate files, memory codecs and fake stdin writers.
 // No fixture launches a child, opens a listener or accesses real app data.
@@ -85,6 +366,229 @@ func performanceTestSample(seq uint64) performancewire.Sample {
 	return performancewire.Sample{Scope: performancewire.ScopeLocalExecution, Producer: "proxy-process", Seq: seq,
 		Key:         performancewire.ProfileKey{Host: "self", Engine: "llamacpp", Model: "model", Fingerprint: "profile"},
 		Measurement: performancewire.Measurement{Outcome: performancewire.OutcomeCompleted}}
+}
+
+func performanceConfigurationFixture(digest string, generation uint64) performanceConfigurationSnapshot {
+	var identities map[string]map[string]nodepolicy.MeasurementIdentity
+	if digest != "" {
+		identities = map[string]map[string]nodepolicy.MeasurementIdentity{"llamacpp": {"model": {Complete: true, Digest: digest}}}
+	}
+	return performanceConfigurationSnapshot{token: [32]byte{byte(generation)}, identities: identities}
+}
+
+func performanceConfiguredSample(seq uint64, digest, fingerprint string, speed float64) performancewire.Sample {
+	s := performanceTestSample(seq)
+	s.Key.Fingerprint = fingerprint
+	s.Profile.EngineFamily = "llamacpp"
+	s.Provenance = &performancewire.Provenance{Configuration: nodepolicy.MeasurementIdentity{Complete: true, Digest: digest}, EngineFamily: "llamacpp", API: "/v1/chat/completions", ExtractorSchema: "daily-schema"}
+	complete, duration := true, int64(1000000000)
+	s.ProtocolComplete = &complete
+	s.EngineDecodeNs = &duration
+	s.EngineDecodeTokensPerSecond = &speed
+	return s
+}
+
+func requirePerformanceApplicability(t *testing.T, p *performanceRuntime, want map[string]performancewire.Applicability) {
+	t.Helper()
+	entries := p.projection().Local.Summary.Entries
+	if len(entries) != len(want) {
+		t.Fatalf("entries = %+v, want %v", entries, want)
+	}
+	for _, e := range entries {
+		if e.Applicability != want[e.Key.Fingerprint] {
+			t.Fatalf("%s applicability = %s, want %s", e.Key.Fingerprint, e.Applicability, want[e.Key.Fingerprint])
+		}
+	}
+}
+
+func TestPerformanceConfigurationOnlyChangeCheckpointsAndPartitionsFasterHistory(t *testing.T) {
+	f := newBrokerPerformanceFixture(t)
+	p := f.b.performance
+	current := performanceConfigurationFixture(strings.Repeat("a", 64), 1)
+	p.configuration = func() performanceConfigurationSnapshot { return current }
+	if err := p.store.Record(performanceConfiguredSample(1, strings.Repeat("a", 64), "old-fast", 200)); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.store.Record(performanceConfiguredSample(2, strings.Repeat("b", 64), "new-slow", 20)); err != nil {
+		t.Fatal(err)
+	}
+	p.flush()
+	_, raw := p.publication()
+	before, err := performancewire.DecodeSummary(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requirePerformanceApplicability(t, p, map[string]performancewire.Applicability{"old-fast": performancewire.ApplicabilityCurrent, "new-slow": performancewire.ApplicabilityHistorical})
+	current = performanceConfigurationFixture(strings.Repeat("b", 64), 2)
+	requirePerformanceApplicability(t, p, map[string]performancewire.Applicability{"old-fast": performancewire.ApplicabilityHistorical, "new-slow": performancewire.ApplicabilityUnknown})
+	if _, raw := p.publication(); raw != nil {
+		t.Fatal("changed configuration published at old revision")
+	}
+	p.flush()
+	_, raw = p.publication()
+	after, err := performancewire.DecodeSummary(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Revision <= before.Revision || p.store.Stats().Samples != 2 {
+		t.Fatalf("configuration-only checkpoint = %+v", after)
+	}
+	for _, e := range after.Entries {
+		if e.Key.Fingerprint == "old-fast" && (e.Applicability != performancewire.ApplicabilityHistorical || e.EngineDecode.TokensPerSecond != 200 || e.Samples != 1) {
+			t.Fatalf("old faster statistics relabeled: %+v", e)
+		}
+		if e.Key.Fingerprint == "new-slow" && (e.Applicability != performancewire.ApplicabilityCurrent || e.EngineDecode.TokensPerSecond != 20 || e.Samples != 1) {
+			t.Fatalf("current statistics mixed: %+v", e)
+		}
+	}
+	_, repeat := p.publication()
+	if !bytes.Equal(raw, repeat) {
+		t.Fatal("configuration frame changed at equal revision")
+	}
+}
+
+func TestPerformanceLocalConfigurationDoesNotRequirePeerAdmission(t *testing.T) {
+	f := newBrokerPerformanceFixture(t)
+	p := f.b.performance
+	if err := os.Remove(filepath.Join(f.dir, "admission.json")); err != nil {
+		t.Fatal(err)
+	}
+	p.configuration = func() performanceConfigurationSnapshot {
+		return performanceConfigurationFixture(strings.Repeat("a", 64), 1)
+	}
+	if err := p.store.Record(performanceConfiguredSample(1, strings.Repeat("a", 64), "local-only", 40)); err != nil {
+		t.Fatal(err)
+	}
+	p.flush()
+	requirePerformanceApplicability(t, p, map[string]performancewire.Applicability{"local-only": performancewire.ApplicabilityCurrent})
+	if p.store.Stats().PublishedRevision <= 0 {
+		t.Fatal("local configuration was not checkpointed")
+	}
+	if _, raw := p.publication(); raw != nil {
+		t.Fatal("local applicability granted peer publication authority")
+	}
+}
+
+func TestPerformanceRestartRequiresCurrentReobservationAndReusesSemanticEvidence(t *testing.T) {
+	f := newBrokerPerformanceFixture(t)
+	p := f.b.performance
+	state := performanceConfigurationFixture(strings.Repeat("a", 64), 1)
+	p.configuration = func() performanceConfigurationSnapshot { return state }
+	if err := p.store.Record(performanceConfiguredSample(1, strings.Repeat("a", 64), "evidence", 40)); err != nil {
+		t.Fatal(err)
+	}
+	p.flush()
+	before := p.store.Stats().PublishedRevision
+	restarted := newPerformanceRuntime("self", f.path, f.dir)
+	state = performanceConfigurationFixture("", 2)
+	restarted.configuration = func() performanceConfigurationSnapshot { return state }
+	requirePerformanceApplicability(t, restarted, map[string]performancewire.Applicability{"evidence": performancewire.ApplicabilityUnknown})
+	restarted.flush()
+	state = performanceConfigurationFixture(strings.Repeat("a", 64), 3)
+	requirePerformanceApplicability(t, restarted, map[string]performancewire.Applicability{"evidence": performancewire.ApplicabilityUnknown})
+	restarted.flush()
+	requirePerformanceApplicability(t, restarted, map[string]performancewire.Applicability{"evidence": performancewire.ApplicabilityCurrent})
+	if restarted.store.Stats().PublishedRevision <= before || restarted.store.Local().Entries[0].Samples != 1 {
+		t.Fatal("restart did not reuse durable measurement under new revision")
+	}
+}
+
+func TestPerformanceConfigurationSaveAndFreezeGenerationFences(t *testing.T) {
+	for _, boundary := range []string{"save", "freeze"} {
+		t.Run(boundary, func(t *testing.T) {
+			f := newBrokerPerformanceFixture(t)
+			p := f.b.performance
+			state := performanceConfigurationFixture(strings.Repeat("a", 64), 1)
+			p.configuration = func() performanceConfigurationSnapshot { return state }
+			if err := p.store.Record(performanceConfiguredSample(1, strings.Repeat("a", 64), "evidence", 40)); err != nil {
+				t.Fatal(err)
+			}
+			if boundary == "freeze" {
+				p.flush()
+			}
+			calls := 0
+			p.configuration = func() performanceConfigurationSnapshot {
+				calls++
+				if calls == 2 {
+					state = performanceConfigurationFixture("", 2)
+				}
+				return state
+			}
+			if boundary == "save" {
+				p.flush()
+			} else {
+				if _, raw := p.publication(); raw != nil {
+					t.Fatal("freeze published a changed configuration")
+				}
+			}
+			if _, raw := p.publication(); raw != nil {
+				t.Fatal("stale generation published")
+			}
+			requirePerformanceApplicability(t, p, map[string]performancewire.Applicability{"evidence": performancewire.ApplicabilityUnknown})
+			staleRevision := p.store.Stats().PublishedRevision
+			p.flush()
+			_, raw := p.publication()
+			summary, err := performancewire.DecodeSummary(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if summary.Revision <= staleRevision || summary.Entries[0].Applicability != performancewire.ApplicabilityUnknown {
+				t.Fatalf("withdrawal did not checkpoint: %+v", summary)
+			}
+		})
+	}
+}
+
+func TestPerformanceConfigurationCheckpointFailureCannotPublishNewCurrent(t *testing.T) {
+	f := newBrokerPerformanceFixture(t)
+	p := f.b.performance
+	state := performanceConfigurationFixture("", 1)
+	p.configuration = func() performanceConfigurationSnapshot { return state }
+	if err := p.store.Record(performanceConfiguredSample(1, strings.Repeat("a", 64), "evidence", 40)); err != nil {
+		t.Fatal(err)
+	}
+	p.flush()
+	before := p.store.Stats().PublishedRevision
+	if err := os.Remove(f.path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(f.path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	state = performanceConfigurationFixture(strings.Repeat("a", 64), 2)
+	p.flush()
+	if p.persistenceError == "" || p.store.Stats().PublishedRevision != before {
+		t.Fatal("checkpoint failure was not exercised")
+	}
+	if _, raw := p.publication(); raw != nil {
+		t.Fatal("failed checkpoint published newly current history")
+	}
+	requirePerformanceApplicability(t, p, map[string]performancewire.Applicability{"evidence": performancewire.ApplicabilityUnknown})
+	if err := os.Remove(f.path); err != nil {
+		t.Fatal(err)
+	}
+	p.flush()
+	requirePerformanceApplicability(t, p, map[string]performancewire.Applicability{"evidence": performancewire.ApplicabilityCurrent})
+}
+
+func TestPerformancePeerApplicabilityWithdrawalCannotBeReordered(t *testing.T) {
+	f := newBrokerPerformanceFixture(t)
+	summary := performanceTestSummary(10)
+	summary.Entries[0].Profile.EngineFamily = "llamacpp"
+	summary.Entries[0].Provenance = performanceConfiguredSample(1, strings.Repeat("a", 64), "", 40).Provenance
+	summary.Entries[0].Applicability = performancewire.ApplicabilityCurrent
+	f.receive(t, summary, 100)
+	summary.Revision = 11
+	summary.Entries[0].Applicability = performancewire.ApplicabilityUnknown
+	f.receive(t, summary, 200)
+	summary.Entries[0].Applicability = performancewire.ApplicabilityCurrent
+	f.receive(t, summary, 0)
+	summary.Revision = 10
+	f.receive(t, summary, 0)
+	peer := requirePerformancePeer(t, f.b.performance)
+	if peer.Summary == nil || peer.Summary.Revision != 11 || peer.Summary.Entries[0].Applicability != performancewire.ApplicabilityUnknown || peer.Summary.Entries[0].NewestAgeMs < 300 {
+		t.Fatalf("reordered currentness revived evidence: %+v", peer.Summary)
+	}
 }
 
 func performanceTestSummary(revision int64) performancewire.Summary {
@@ -270,6 +774,30 @@ func TestPerformanceSampleHookIsStrictAndDeduplicatesProcessSample(t *testing.T)
 	}
 	if err := f.b.ingestPerformanceSample(append(raw, []byte(" {}")...)); err == nil {
 		t.Fatal("trailing sample data accepted")
+	}
+}
+
+func TestPerformanceSampleProvenanceStrictIntake(t *testing.T) {
+	for _, tc := range []struct{ name, old, replacement string }{
+		{"private metadata", `"extractorSchema":"daily-schema"`, `"extractorSchema":"daily-schema","options":{"secret":"private"}`},
+		{"unbounded digest", strings.Repeat("a", 64), strings.Repeat("a", 65)},
+		{"missing completeness", `"complete":true`, `"other":true`},
+		{"API query", `"api":"/v1/chat/completions"`, `"api":"/v1/chat/completions?secret=private"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newBrokerPerformanceFixture(t)
+			raw := performanceJSON(t, performanceConfiguredSample(1, strings.Repeat("a", 64), "fp", 40))
+			if !bytes.Contains(raw, []byte(tc.old)) {
+				t.Fatal("missing mutation target")
+			}
+			changed := bytes.Replace(raw, []byte(tc.old), []byte(tc.replacement), 1)
+			if err := f.b.ingestPerformanceSample(changed); err == nil {
+				t.Fatal("invalid provenance entered store")
+			}
+			if f.b.performance.store.Stats().Samples != 0 {
+				t.Fatal("rejected provenance mutated history")
+			}
+		})
 	}
 }
 
@@ -817,6 +1345,60 @@ func TestPerformanceGetReturnsOutputTokensIndependentlyOfDecodeTiming(t *testing
 				t.Fatalf("rates = decode %+v engineDecode %+v, want decode %+v engineDecode %+v", e.Decode, e.EngineDecode, tt.wantDecode, tt.wantEngine)
 			}
 		})
+	}
+}
+
+func TestPerformanceGetPreservesDestinationApplicabilityAndUnmixedRates(t *testing.T) {
+	f := newBrokerPerformanceFixture(t)
+	p := f.b.performance
+	state := performanceConfigurationFixture(strings.Repeat("b", 64), 1)
+	p.configuration = func() performanceConfigurationSnapshot { return state }
+	old := performanceConfiguredSample(1, strings.Repeat("a", 64), "historical-fast", 200)
+	current := performanceConfiguredSample(2, strings.Repeat("b", 64), "current-slow", 20)
+	legacy := performanceTestSample(3)
+	legacy.Key.Fingerprint = "unknown-history"
+	for _, sample := range []performancewire.Sample{old, current, legacy} {
+		if err := f.b.ingestPerformanceSample(performanceJSON(t, sample)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p.flush()
+	out := &performanceOutput{wake: make(chan struct{}, 1)}
+	f.b.codec = NewCodec(readWriter{Reader: strings.NewReader(""), Writer: out})
+	id := json.RawMessage("1")
+	if !f.b.handlePerformanceRequest(&Message{JSONRPC: "2.0", Method: methodPerformanceGet, ID: &id, Params: json.RawMessage("{}")}) {
+		t.Fatal("performance:get not handled")
+	}
+	frames := out.frames(t)
+	if len(frames) != 1 || frames[0].Error != nil {
+		t.Fatalf("get response: %+v", frames)
+	}
+	var projection performanceProjection
+	if err := json.Unmarshal(frames[0].Result, &projection); err != nil {
+		t.Fatal(err)
+	}
+	if projection.Local.Summary == nil || len(projection.Local.Summary.Entries) != 3 {
+		t.Fatalf("public history: %+v", projection.Local)
+	}
+	want := map[string]performancewire.Applicability{"historical-fast": performancewire.ApplicabilityHistorical, "current-slow": performancewire.ApplicabilityCurrent, "unknown-history": performancewire.ApplicabilityUnknown}
+	for _, entry := range projection.Local.Summary.Entries {
+		if entry.Applicability != want[entry.Key.Fingerprint] || entry.Samples != 1 {
+			t.Fatalf("public applicability: %+v", entry)
+		}
+		switch entry.Key.Fingerprint {
+		case "historical-fast":
+			if entry.EngineDecode == nil || entry.EngineDecode.TokensPerSecond != 200 {
+				t.Fatalf("historical rate: %+v", entry)
+			}
+		case "current-slow":
+			if entry.EngineDecode == nil || entry.EngineDecode.TokensPerSecond != 20 || entry.Provenance == nil || entry.Provenance.Configuration.Digest != strings.Repeat("b", 64) || entry.Provenance.API != "/v1/chat/completions" || entry.Provenance.ExtractorSchema != "daily-schema" {
+				t.Fatalf("current rate/provenance: %+v", entry)
+			}
+		case "unknown-history":
+			if entry.Provenance != nil {
+				t.Fatal("old metadata manufactured")
+			}
+		}
 	}
 }
 

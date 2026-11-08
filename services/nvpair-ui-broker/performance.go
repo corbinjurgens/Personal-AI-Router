@@ -9,7 +9,9 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"sort"
 	"strconv"
@@ -52,6 +54,8 @@ type performancePeer struct {
 }
 
 type performanceRuntime struct {
+	routingMu                         sync.Mutex
+	routingCurrent                    performancewire.RoutingCosts
 	mu                                sync.Mutex
 	store                             *performancestore.Store
 	host                              string
@@ -71,6 +75,12 @@ type performanceRuntime struct {
 	managerGeneration                 uint64
 	checkpointGeneration              uint64
 	saveWake, publishWake, changeWake chan struct{}
+	configurationWake                 chan struct{}
+	refreshConfiguration              func(context.Context)
+	configuration                     func() performanceConfigurationSnapshot
+	configurationToken                [32]byte
+	configurationGeneration           uint64
+	readyConfiguration                uint64
 }
 
 type performanceNode struct {
@@ -136,6 +146,9 @@ func (b *Broker) startPerformance(ctx context.Context) func() {
 	path, _ := appdir.Path(performancestore.FileName)
 	b.performance = newPerformanceRuntime(b.nodeID, path, b.clusterDir)
 	p := b.performance
+	p.configurationWake = make(chan struct{}, 1)
+	p.refreshConfiguration = b.refreshPerformanceConfigurations
+	p.configuration = b.performanceConfigurationSnapshot
 	fctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	done := make(chan struct{})
 	go func() {
@@ -186,13 +199,51 @@ func (p *performanceRuntime) localEpoch() (string, bool) {
 	return strconv.FormatUint(epoch, 10), ok && p.mesh.NodeUUID() == p.host
 }
 
+// Caller holds p.mu. Re-read the destination owner at every use so expiry,
+// failed refresh and withdrawal apply even before an asynchronous wake runs.
+func (p *performanceRuntime) syncConfigurationLocked() performanceConfigurationSnapshot {
+	var snapshot performanceConfigurationSnapshot
+	if p.configuration != nil {
+		snapshot = p.configuration()
+	}
+	if snapshot.token != p.configurationToken {
+		p.configurationToken = snapshot.token
+		p.configurationGeneration++
+		p.checkpoint = true
+		performanceSignal(p.saveWake)
+		performanceSignal(p.changeWake)
+	}
+	return snapshot
+}
+
+func performanceApplyConfiguration(summary *performancewire.Summary, snapshot performanceConfigurationSnapshot, ready bool) {
+	for i := range summary.Entries {
+		entry := &summary.Entries[i]
+		entry.Applicability = performancewire.ApplicabilityUnknown
+		if entry.Provenance == nil || !entry.Provenance.Configuration.Complete {
+			continue
+		}
+		identity := snapshot.identities[entry.Key.Engine][entry.Key.Model]
+		if !identity.Complete {
+			continue
+		}
+		if identity != entry.Provenance.Configuration {
+			entry.Applicability = performancewire.ApplicabilityHistorical
+		} else if ready {
+			entry.Applicability = performancewire.ApplicabilityCurrent
+		}
+	}
+}
+
 // flush is owned by the save loop. Checkpoint, not a synthetic sample, assigns
 // a new durable revision on startup, manager restart or local epoch change.
 func (p *performanceRuntime) flush() {
 	epoch, admitted := p.localEpoch()
 	p.mu.Lock()
+	p.syncConfigurationLocked()
 	checkpoint := p.checkpoint || (admitted && p.readyEpoch != "" && p.readyEpoch != epoch)
 	generation, blocked := p.managerGeneration, p.blocked
+	configuration := p.configurationGeneration
 	p.mu.Unlock()
 	if blocked {
 		return
@@ -205,6 +256,7 @@ func (p *performanceRuntime) flush() {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.syncConfigurationLocked()
 	if err != nil {
 		p.persistenceError = err.Error()
 		p.checkpoint = true
@@ -212,6 +264,11 @@ func (p *performanceRuntime) flush() {
 		return // even an adopted ErrReplaced revision is withheld until a clean checkpoint
 	}
 	p.persistenceError = ""
+	if configuration != p.configurationGeneration {
+		p.checkpoint = true
+		performanceSignal(p.saveWake)
+		return
+	}
 	if checkpoint {
 		p.checkpointGeneration = generation
 		p.checkpoint = p.managerGeneration != generation
@@ -221,6 +278,9 @@ func (p *performanceRuntime) flush() {
 			p.checkpointGeneration, p.checkpoint = 1, false
 		}
 	}
+	// Local applicability depends on the durable checkpoint, not cluster
+	// admission. Admission separately gates the authenticated peer publication.
+	p.readyConfiguration = configuration
 	if !admitted {
 		return
 	}
@@ -267,9 +327,10 @@ func (b *Broker) replayPerformanceToManager(wm *workloadManagerProcess) {
 func (p *performanceRuntime) publication() (*workloadManagerProcess, []byte) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	configuration := p.syncConfigurationLocked()
 	epoch, admitted := p.localEpoch()
 	if !admitted || p.blocked || p.checkpoint || p.checkpointGeneration != p.managerGeneration ||
-		epoch != p.readyEpoch || p.readyRevision == 0 {
+		p.readyConfiguration != p.configurationGeneration || epoch != p.readyEpoch || p.readyRevision == 0 {
 		return nil, nil
 	}
 	if p.frozenRevision != p.readyRevision {
@@ -279,11 +340,16 @@ func (p *performanceRuntime) publication() (*workloadManagerProcess, []byte) {
 		if !ok || summary.Revision != p.readyRevision {
 			return nil, nil
 		}
+		performanceApplyConfiguration(&summary, configuration, true)
 		raw, err := performancewire.EncodeSummary(summary)
 		if err != nil {
 			return nil, nil
 		}
 		p.frozen, p.frozenRevision = raw, summary.Revision
+	}
+	p.syncConfigurationLocked()
+	if p.checkpoint || p.readyConfiguration != p.configurationGeneration {
+		return nil, nil
 	}
 	if currentEpoch, ok := p.localEpoch(); !ok || currentEpoch != epoch {
 		return nil, nil
@@ -516,8 +582,15 @@ func (p *performanceRuntime) runSweeps(ctx context.Context, ticks <-chan time.Ti
 		case <-ctx.Done():
 			return
 		case <-ticks:
-			p.sweep()
-			performanceSignal(p.changeWake)
+		case <-p.configurationWake:
+		}
+		p.sweep()
+		p.mu.Lock()
+		p.syncConfigurationLocked()
+		p.mu.Unlock()
+		performanceSignal(p.changeWake)
+		if p.refreshConfiguration != nil {
+			p.refreshConfiguration(ctx)
 		}
 	}
 }
@@ -525,9 +598,11 @@ func (p *performanceRuntime) runSweeps(ctx context.Context, ticks <-chan time.Ti
 func (p *performanceRuntime) projection() performanceProjection {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	configuration := p.syncConfigurationLocked()
 	p.sweepLocked()
 	out := performanceProjection{Peers: []performanceNode{}, ExpiredPeers: p.expiredPeers}
 	local := p.store.Local()
+	performanceApplyConfiguration(&local, configuration, !p.checkpoint && !p.blocked && p.persistenceError == "" && p.readyConfiguration == p.configurationGeneration)
 	out.Local = performanceNode{MeasuringHost: local.MeasuringHost, Status: "fresh", Summary: &local}
 	if len(local.Entries) == 0 {
 		out.Local.Status = "missing"
@@ -622,6 +697,7 @@ func (b *Broker) performanceChangeLoop(ctx context.Context) {
 			return
 		case <-p.changeWake:
 		}
+		b.sendRoutingCosts(ctx, false)
 		p.mu.Lock()
 		subscribed := p.subscribed
 		p.mu.Unlock()
@@ -634,6 +710,119 @@ func (b *Broker) performanceChangeLoop(ctx context.Context) {
 		p.mu.Unlock()
 		if subscribed {
 			_ = b.codec.Notify(notifyPerformanceChanged, projection)
+		}
+	}
+}
+
+// routingCosts selects a single current aggregation fingerprint per compatible
+// tuple. Neither phases nor configurations are pooled across entries.
+func (p *performanceRuntime) routingCosts() performancewire.RoutingCosts {
+	projection := p.projection()
+	selected := make(map[[6]string]performancewire.Entry)
+	visit := func(node performanceNode) {
+		if node.Status != "fresh" || node.Summary == nil {
+			return
+		}
+		for _, e := range node.Summary.Entries {
+			v := e.Provenance
+			if e.ClockUncertain || e.Applicability != performancewire.ApplicabilityCurrent || v == nil || !v.Configuration.Complete || v.Validate() != nil || e.Profile.EngineFamily != v.EngineFamily ||
+				!performancewire.RoutingCompatible(v.EngineFamily, v.API, v.ExtractorSchema) || e.OldestAgeMs > performancewire.RetentionMs {
+				continue
+			}
+			profile := routingProfile(e)
+			if profile.Validate() != nil {
+				continue
+			}
+			key := [6]string{e.Key.Host, e.Key.Engine, e.Key.Model, v.EngineFamily, v.API, v.ExtractorSchema}
+			old, exists := selected[key]
+			if !exists || e.NewestAgeMs < old.NewestAgeMs || (e.NewestAgeMs == old.NewestAgeMs && e.Key.Fingerprint < old.Key.Fingerprint) {
+				selected[key] = e
+			}
+		}
+	}
+	visit(projection.Local)
+	for _, node := range projection.Peers {
+		visit(node)
+	}
+	keys := make([][6]string, 0, len(selected))
+	for key := range selected {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		for k := range keys[i] {
+			if keys[i][k] != keys[j][k] {
+				return keys[i][k] < keys[j][k]
+			}
+		}
+		return false
+	})
+	costs := performancewire.RoutingCosts{Revision: 1, Profiles: []performancewire.RoutingProfile{}}
+	for _, key := range keys {
+		costs.Profiles = append(costs.Profiles, routingProfile(selected[key]))
+		if costs.Validate() != nil {
+			costs.Profiles = costs.Profiles[:len(costs.Profiles)-1]
+			break
+		}
+	}
+	return costs
+}
+
+func routingRate(samples int, speed float64, source string) *performancewire.RoutingRate {
+	if samples <= 0 || speed <= 0 || math.IsNaN(speed) || math.IsInf(speed, 0) {
+		return nil
+	}
+	return &performancewire.RoutingRate{Samples: samples, TokensPerSecond: speed, Source: source}
+}
+
+func routingProfile(e performancewire.Entry) performancewire.RoutingProfile {
+	v := e.Provenance
+	p := performancewire.RoutingProfile{Host: e.Key.Host, Engine: e.Key.Engine, Model: e.Key.Model, Fingerprint: e.Key.Fingerprint,
+		Family: v.EngineFamily, APIPath: v.API, Schema: v.ExtractorSchema, AgeMs: e.OldestAgeMs}
+	if r := e.Prefill; r != nil {
+		p.Prefill = routingRate(r.Samples, r.TokensPerSecond, "count")
+	}
+	if r := e.EngineDecode; r != nil {
+		p.Decode = routingRate(r.Samples, r.TokensPerSecond, "engine")
+	}
+	if r := e.Decode; p.Decode == nil && r != nil {
+		p.Decode = routingRate(r.Samples, r.TokensPerSecond, "count")
+	}
+	if d := e.LoadNs; d != nil && d.Samples > 0 {
+		ms := d.P95 / 1e6
+		p.LoadP95Ms, p.LoadSamples = &ms, d.Samples
+	}
+	return p
+}
+
+// Serializing snapshot creation and delivery also fences spawn replay against
+// a concurrent projection change. An unchanged replay reuses the current revision.
+func (b *Broker) sendRoutingCosts(ctx context.Context, replay bool) {
+	p := b.performance
+	if p == nil {
+		return
+	}
+	p.routingMu.Lock()
+	defer p.routingMu.Unlock()
+	next := p.routingCosts()
+	oldProfiles, _ := json.Marshal(p.routingCurrent.Profiles)
+	newProfiles, _ := json.Marshal(next.Profiles)
+	if p.routingCurrent.Revision != 0 && bytes.Equal(oldProfiles, newProfiles) {
+		if !replay {
+			return
+		}
+	} else {
+		next.Revision = p.routingCurrent.Revision + 1
+		p.routingCurrent = next
+	}
+	params, err := json.Marshal(p.routingCurrent)
+	if err != nil {
+		return // routingCosts only retains validated, encodable profiles.
+	}
+	for _, target := range b.livePriorityTargets() {
+		if _, rpcErr, err := target.proxy.Call(ctx, performancewire.MethodRoutingCosts, params); err != nil {
+			slog.Warn("node/set-routing-costs call failed", "engine", target.engine, "err", err)
+		} else if rpcErr != nil {
+			slog.Warn("node/set-routing-costs rejected", "engine", target.engine, "err", fmt.Errorf("RPC %d: %s", rpcErr.Code, rpcErr.Message))
 		}
 	}
 }

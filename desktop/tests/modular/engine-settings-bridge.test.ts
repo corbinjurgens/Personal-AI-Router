@@ -822,6 +822,44 @@ describe('unified settings bridge', () => {
         expect(() => parseInspectModel({ ...fixture, nativeBuildId: 42 })).toThrow()
     })
 
+    it('preserves and detaches complete measurement identity and explicit unknown', () => {
+        const measurementIdentity = { digest: 'a'.repeat(64), complete: true }
+        const fixture = { ...memoryPlanInspectionFixture(), measurementIdentity }
+        const result = parseInspectModel(fixture)
+        expect(result.measurementIdentity).toEqual({ digest: 'a'.repeat(64), complete: true })
+        expect(result.measurementIdentity).not.toBe(measurementIdentity)
+        measurementIdentity.digest = 'b'.repeat(64)
+        measurementIdentity.complete = false
+        expect(result.measurementIdentity).toEqual({ digest: 'a'.repeat(64), complete: true })
+        expect(
+            parseInspectModel({
+                ...fixture,
+                measurementIdentity: { digest: '', complete: false }
+            }).measurementIdentity
+        ).toEqual({ digest: '', complete: false })
+        expect(parseInspectModel(memoryPlanInspectionFixture()).measurementIdentity).toBeUndefined()
+    })
+
+    it.each<JsonValue>([
+        null,
+        [],
+        {},
+        { digest: 'a'.repeat(64) },
+        { complete: false },
+        { digest: 'a'.repeat(64), complete: 'true' },
+        { digest: '', complete: true },
+        { digest: 'A'.repeat(64), complete: true },
+        { digest: 'g'.repeat(64), complete: true },
+        { digest: 'a'.repeat(65), complete: true },
+        { digest: 'a'.repeat(64), complete: false },
+        { digest: 0, complete: false },
+        { digest: '', complete: false, path: '/private/model.gguf' }
+    ])('rejects malformed or unbounded measurement identity %j', measurementIdentity => {
+        expect(() =>
+            parseInspectModel({ ...memoryPlanInspectionFixture(), measurementIdentity })
+        ).toThrow()
+    })
+
     it('decodes bounded stated history with exact applied pools and unavailable-store reporting', () => {
         const key = 'a'.repeat(64)
         const profile = {

@@ -150,7 +150,7 @@ func (p *Proxy) applySetModelIdentity(params json.RawMessage) error {
 			return err
 		}
 	}
-	changed := p.admission.setModelIdentity(in.Engines)
+	changed := p.setModelAndMeasurementIdentities(in)
 	slog.Info("engine identity set", "engines", len(in.Engines), "strict_capability_changed", changed)
 	return nil
 }

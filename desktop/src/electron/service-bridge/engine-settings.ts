@@ -1437,6 +1437,16 @@ function loadObservation(value: JsonValue | undefined): LoadBufferObservation {
     }
     return result
 }
+function measurementIdentity(
+    value: JsonValue | undefined
+): InspectModelResult['measurementIdentity'] {
+    if (value === undefined) return undefined
+    const row = shape(value, ['digest', 'complete'])
+    const complete = flag(row.complete)
+    const digest = complete ? modelDigest(row.digest) : boundedText(row.digest, 0)
+    return { digest, complete }
+}
+
 export function parseInspectModel(value: JsonValue | undefined): InspectModelResult {
     payload(value)
     const row = shape(value, [
@@ -1454,6 +1464,7 @@ export function parseInspectModel(value: JsonValue | undefined): InspectModelRes
         'nativeOptions',
         'unreportedLaunchOptions',
         'executionKey',
+        'measurementIdentity',
         'options',
         'estimate',
         'loadObservation',
@@ -1491,6 +1502,7 @@ export function parseInspectModel(value: JsonValue | undefined): InspectModelRes
         )
     }
     const result: InspectModelResult = {
+        measurementIdentity: measurementIdentity(row.measurementIdentity),
         memoryProfiles:
             row.memoryProfiles === undefined
                 ? undefined

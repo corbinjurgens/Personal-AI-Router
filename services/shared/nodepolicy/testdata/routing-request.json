@@ -16,6 +16,13 @@
         "recoverable": false,
         "spend": {"currency": "USD", "ceilingNanoUsd": null, "grantedNanoUsd": null, "heldNanoUsd": null, "chargedNanoUsd": null, "accounting": "none"},
         "droppedAttempts": 0,
+        "selection": {"decision": "measured", "tierRank": 0, "warm": true,
+          "winner": {"nodeId": "synthetic-node", "engine": "llamacpp", "model": "synthetic-model", "totalMs": 11772,
+            "terms": {"service": 11772, "queue": 0, "pressure": 0, "cold": 0},
+            "evidenceAgeMs": 1500, "samples": 8, "imputed": false},
+          "runnerUp": {"nodeId": "synthetic-peer", "engine": "llamacpp", "model": "synthetic-model", "totalMs": 56571,
+            "terms": {"service": 56571, "queue": 0, "pressure": 0, "cold": 0},
+            "evidenceAgeMs": null, "samples": 0, "imputed": true}},
         "attempts": [
           {"index": 0, "startedAt": 1700000000000, "endedAt": 1700000000350,
            "destination": {"kind": "local", "model": "synthetic-model", "nodeId": "synthetic-busy", "engine": "llamacpp", "deploymentId": null, "accountId": null},
@@ -39,6 +46,9 @@
         "state": "failed", "reason": "stream-interrupted", "status": 200, "served": null, "recoverable": false,
         "spend": {"currency": "USD", "ceilingNanoUsd": "1000000000", "grantedNanoUsd": "250000000", "heldNanoUsd": "250000000", "chargedNanoUsd": "123456789", "accounting": "retained"},
         "droppedAttempts": 0,
+        "selection": {"decision": "baseline", "tierRank": 1, "warm": false,
+          "winner": {"nodeId": "synthetic-node", "engine": "llamacpp", "model": "synthetic-model", "totalMs": null, "terms": null,
+            "evidenceAgeMs": null, "samples": 0, "imputed": false}, "runnerUp": null},
         "attempts": [
           {"index": 0, "startedAt": 1700000010000, "endedAt": 1700000012000,
            "destination": {"kind": "api", "model": "synthetic-model", "nodeId": null, "engine": null, "deploymentId": "synthetic-deployment", "accountId": "synthetic-account"},
@@ -59,6 +69,7 @@
         "state": "cancelled", "reason": "cancel", "status": null, "served": null, "recoverable": false,
         "spend": {"currency": "USD", "ceilingNanoUsd": null, "grantedNanoUsd": null, "heldNanoUsd": null, "chargedNanoUsd": null, "accounting": "none"},
         "droppedAttempts": 2,
+        "selection": null,
         "attempts": [
           {"index": 2, "startedAt": 1700000022000, "endedAt": 1700000023000,
            "destination": {"kind": "local", "model": "synthetic-model", "nodeId": "synthetic-node", "engine": "llamacpp", "deploymentId": null, "accountId": null},
@@ -78,6 +89,7 @@
         "state": "streaming", "reason": "", "status": 200, "served": null, "recoverable": true,
         "spend": {"currency": "USD", "ceilingNanoUsd": null, "grantedNanoUsd": null, "heldNanoUsd": null, "chargedNanoUsd": null, "accounting": "none"},
         "droppedAttempts": 0,
+        "selection": null,
         "attempts": [
           {"index": 0, "startedAt": 1700000030000, "endedAt": 1700000031000,
            "destination": {"kind": "local", "model": "synthetic-model", "nodeId": "synthetic-node", "engine": "llamacpp", "deploymentId": null, "accountId": null},
@@ -99,6 +111,7 @@
         "recoverable": false,
         "spend": {"currency": "USD", "ceilingNanoUsd": null, "grantedNanoUsd": null, "heldNanoUsd": null, "chargedNanoUsd": null, "accounting": "none"},
         "droppedAttempts": 0,
+        "selection": null,
         "attempts": [
           {"index": 0, "startedAt": 1700000040000, "endedAt": 1700000041000,
            "destination": {"kind": "local", "model": "synthetic-model", "nodeId": "synthetic-node", "engine": "llamacpp", "deploymentId": null, "accountId": null},
@@ -124,6 +137,7 @@
         "recoverable": false,
         "spend": {"currency": "USD", "ceilingNanoUsd": null, "grantedNanoUsd": null, "heldNanoUsd": null, "chargedNanoUsd": null, "accounting": "none"},
         "droppedAttempts": 0,
+        "selection": null,
         "attempts": [
           {"index": 0, "startedAt": 1700000060000, "endedAt": 1700000061000,
            "destination": {"kind": "local", "model": null, "nodeId": "synthetic-node", "engine": "llamacpp", "deploymentId": null, "accountId": null},

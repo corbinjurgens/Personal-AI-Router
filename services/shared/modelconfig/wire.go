@@ -242,28 +242,29 @@ type NativeOption struct {
 }
 
 type InspectResult struct {
-	NativeOptions             []NativeOption     `json:"nativeOptions"`
-	UnreportedLaunchOptions   []string           `json:"unreportedLaunchOptions,omitempty"`
-	ExecutionKey              string             `json:"executionKey,omitempty"`
-	NativeBuild               string             `json:"nativeBuild,omitempty"`
-	NativeBuildID             string             `json:"nativeBuildId,omitempty"`
-	MemoryProfiles            []MemoryProfile    `json:"memoryProfiles,omitempty"`
-	MemoryProfilesUnavailable bool               `json:"memoryProfilesUnavailable,omitempty"`
-	ConfigurationKey          string             `json:"configurationKey,omitempty"`
-	ConfigurationKeyReason    string             `json:"configurationKeyReason,omitempty"`
-	ConfigurationPools        []string           `json:"configurationPools,omitempty"`
-	Engine                    string             `json:"engine"`
-	NodeID                    string             `json:"nodeId,omitempty"`
-	ModelID                   string             `json:"modelId"`
-	Status                    string             `json:"status"`
-	Reason                    string             `json:"reason,omitempty"`
-	Source                    string             `json:"source,omitempty"`
-	Assurance                 string             `json:"assurance,omitempty"`
-	Artifacts                 []ArtifactSummary  `json:"artifacts,omitempty"`
-	Facts                     *Facts             `json:"facts,omitempty"`
-	Options                   []OptionDescriptor `json:"options,omitempty"`
-	Estimate                  Estimate           `json:"estimate"`
-	LoadObservation           *BufferObservation `json:"loadObservation,omitempty"`
+	MeasurementIdentity       *MeasurementIdentity `json:"measurementIdentity,omitempty"`
+	NativeOptions             []NativeOption       `json:"nativeOptions"`
+	UnreportedLaunchOptions   []string             `json:"unreportedLaunchOptions,omitempty"`
+	ExecutionKey              string               `json:"executionKey,omitempty"`
+	NativeBuild               string               `json:"nativeBuild,omitempty"`
+	NativeBuildID             string               `json:"nativeBuildId,omitempty"`
+	MemoryProfiles            []MemoryProfile      `json:"memoryProfiles,omitempty"`
+	MemoryProfilesUnavailable bool                 `json:"memoryProfilesUnavailable,omitempty"`
+	ConfigurationKey          string               `json:"configurationKey,omitempty"`
+	ConfigurationKeyReason    string               `json:"configurationKeyReason,omitempty"`
+	ConfigurationPools        []string             `json:"configurationPools,omitempty"`
+	Engine                    string               `json:"engine"`
+	NodeID                    string               `json:"nodeId,omitempty"`
+	ModelID                   string               `json:"modelId"`
+	Status                    string               `json:"status"`
+	Reason                    string               `json:"reason,omitempty"`
+	Source                    string               `json:"source,omitempty"`
+	Assurance                 string               `json:"assurance,omitempty"`
+	Artifacts                 []ArtifactSummary    `json:"artifacts,omitempty"`
+	Facts                     *Facts               `json:"facts,omitempty"`
+	Options                   []OptionDescriptor   `json:"options,omitempty"`
+	Estimate                  Estimate             `json:"estimate"`
+	LoadObservation           *BufferObservation   `json:"loadObservation,omitempty"`
 }
 
 // Impact represents unresolved owner choices without manufacturing a timeout,
@@ -831,6 +832,7 @@ func (a AutoProposal) Clone() AutoProposal {
 	return a
 }
 func (r InspectResult) Clone() InspectResult {
+	r.MeasurementIdentity = clonePointer(r.MeasurementIdentity)
 	r.NativeOptions = slices.Clone(r.NativeOptions)
 	for i := range r.NativeOptions {
 		r.NativeOptions[i].Choices = slices.Clone(r.NativeOptions[i].Choices)
@@ -874,6 +876,11 @@ func DecodeInspectResult(data []byte) (InspectResult, error) {
 	return r, nil
 }
 func (r InspectResult) Validate() error {
+	if r.MeasurementIdentity != nil {
+		if err := r.MeasurementIdentity.Validate(); err != nil {
+			return err
+		}
+	}
 	if len(r.NativeOptions) > 2048 || len(r.UnreportedLaunchOptions) > 2048 {
 		return fmt.Errorf("inspect: native option limit exceeded")
 	}

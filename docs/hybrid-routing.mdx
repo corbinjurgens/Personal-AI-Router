@@ -41,7 +41,14 @@ own weakest-to-strongest role list: the requested role first, then later roles
 when Allow stronger is set, then earlier roles nearest first when Allow weaker
 is set. A role absent from that list never widens. Role rank leads warmth unless
 `preferLoaded:any` puts loaded models first; reservations stay within the leading
-rank/warmth class. Self
+rank/warmth class, where the candidate with the lowest expected completion time
+wins: measured prefill and decode speed for its destination-effective request
+size, its pending work, reservations and GPU pressure, and a load cost when the
+class is cold. Destination sizing comes from authenticated, activation-attested
+peer policy reads that the origin knows asynchronously, up to 90 seconds old.
+When any class member's size is unknown, or no member has a measured rate, the
+whole class keeps the least-loaded choice. A warm slow node is not compared with
+a cold fast one. Self
 and peer candidates share this order. The requested role's API entries are
 considered in configured order after the first local/peer round, subject to
 public permission and availability. Public selection remains disabled in

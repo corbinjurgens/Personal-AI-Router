@@ -75,6 +75,7 @@ function fixture(): RoutingHistoryRecord {
             accounting: 'none'
         },
         droppedAttempts: 0,
+        selection: null,
         attempts: []
     }
 }

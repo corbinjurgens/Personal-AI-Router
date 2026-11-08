@@ -48,6 +48,11 @@ var embeddingsRoutes = map[string]bool{
 type requestNeeds struct {
 	caps          []nodepolicy.Capability
 	contextTokens int
+	// inputTokens and outputTokens size a destination-effective body for the
+	// tier scorer only: input is len(body)/4 and output the first positive
+	// limit, or 0 when the request sets none. Admission reads neither.
+	inputTokens  int
+	outputTokens int
 }
 
 // names lists the needed capabilities for the no-eligible-model answer.
@@ -68,7 +73,7 @@ func parseRequestNeeds(body []byte, path string) requestNeeds {
 }
 
 func parseRequestNeedsOwned(ctx context.Context, body []byte, path string) (requestNeeds, error) {
-	needs := requestNeeds{contextTokens: len(body) / 4}
+	needs := requestNeeds{contextTokens: len(body) / 4, inputTokens: len(body) / 4}
 	has := map[nodepolicy.Capability]bool{}
 	if ownedJSONValid(body) && isJSONObject(body) {
 		if nonEmptyArray(requestJSONField(body, "tools")) || nonEmptyArray(requestJSONField(body, "functions")) {
@@ -92,6 +97,7 @@ func parseRequestNeedsOwned(ctx context.Context, body []byte, path string) (requ
 		for _, n := range []int{requestStructPositiveInt(body, "max_tokens", 0), requestStructPositiveInt(body, "max_completion_tokens", 0), requestNestedPositiveInt(body, "options", "num_predict")} {
 			if n > 0 {
 				needs.contextTokens += n
+				needs.outputTokens = n
 				break
 			}
 		}
@@ -520,6 +526,7 @@ func (f *facade) resolveTierCandidates(tier string, needs requestNeeds, crossEng
 		}
 		seen[key] = true
 		c.model = model
+		c.key = model
 		c.tierRank = rank
 		out = append(out, c)
 	}
@@ -655,26 +662,32 @@ func (f *facade) reserveRound(cands []candidate, tier bool) ([]candidate, reserv
 	return cands, held
 }
 
-func (f *facade) reserveRoundPrepared(ctx context.Context, cands []candidate, tier bool, model string, prepare candidatePreparation, refresh ...func() []candidate) ([]candidate, reservation, error) {
+// reserveRoundPrepared reserves within the leading class. A non-nil round is
+// a tier request: its class is the leading tier rank and warmth, and every
+// facade's discovery generation is captured before the class is resolved.
+func (f *facade) reserveRoundPrepared(ctx context.Context, cands []candidate, round *tierRound, model string, prepare candidatePreparation, refresh ...func() []candidate) ([]candidate, reservation, tierDecision, error) {
 	for {
 		f.host.admission.mu.Lock()
 		generation := f.host.admission.policyGeneration
 		f.host.admission.mu.Unlock()
+		if round != nil {
+			round.discovery = f.host.discoveryGenerations()
+		}
 		if len(refresh) > 0 {
 			cands = refresh[0]()
 		}
 		n := len(cands)
-		if tier && n > 0 {
+		if round != nil && n > 0 {
 			n = 1
 			for n < len(cands) && cands[n].tierRank == cands[0].tierRank && cands[n].warm == cands[0].warm {
 				n++
 			}
 		}
-		_, held, err := f.host.reserveCandidatePrepared(ctx, f, cands[:n], model, prepare, &generation)
+		_, held, decision, err := f.host.reserveCandidatePrepared(ctx, f, cands[:n], model, prepare, &generation, round)
 		if err == errCandidatePreparationStale {
 			continue // Re-resolve the policy's candidate class before rebuilding.
 		}
-		return cands, held, err
+		return cands, held, decision, err
 	}
 }
 

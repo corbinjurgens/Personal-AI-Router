@@ -40,6 +40,23 @@ bindings, conversion provenance and build/source/preset digests remain target
 authority. A receipt records an attempt, while the snapshot reports desired,
 effective, coupled and observed state separately.
 
+Inspection may also supply `measurementIdentity: {digest, complete}` for the
+target's applied semantic configuration, physical hardware and observed realized
+execution. A complete identity has a lowercase SHA-256 hex digest; explicit
+unknown is `{digest:'',complete:false}`. Omission remains unavailable. The bridge
+strictly validates and detaches this bounded value. Stale manager, settings,
+policy, profile or memory observations withdraw completeness at the target.
+It grants no launch, capacity, admission or qualification authority and does not
+enable routing scores.
+
+Performance entries also expose optional bounded `provenance` containing
+`configuration:{digest,complete}`, `engineFamily`, `api` and `extractorSchema`.
+`applicability` is the destination's `current`, `historical` or `unknown`
+attestation; absent old metadata projects as unknown. The bridge validates each
+dimension separately, rejects private or malformed metadata, and detaches the
+projection. A complete identity is required for current/historical. This changes
+the existing performance projection in place without adding an IPC channel.
+
 Inspection also returns optional service-owned `loadObservation`, describing
 rounded native buffers and the frozen estimate for that captured load.
 `parseInspectModel` strictly validates and detaches supplied summaries; a missing
@@ -109,6 +126,8 @@ retain live `availability` and optional actual `pausedBy` (`local` or `peer`).
 Unknown provenance stays absent; available clears it. `policy:get` supplies
 initial/live readback. Local activation fields stay intact; remote projection
 does not expose them or private routing. Tray projection filters peer pushes.
+A paired read's private `activeRequestPolicy` sizing attestation is ignored by
+the parser and never enters desktop state.
 Availability mutation results never supply durable engine lifecycle state.
 
 Pause affects this target's execution while routing remains available. An
@@ -181,6 +200,20 @@ not broker methods. The private window/request/end/accepted methods never
 reach renderer clients or peers.
 
 Rows retain newest 32 attempts with original indexes and `droppedAttempts`.
+Each record's `selection` member (between `droppedAttempts` and `attempts`) is
+null for a non-tier request, otherwise `{decision, tierRank, warm, winner,
+runnerUp}` explaining why the latest committed tier round chose its destination.
+`decision` is `measured`, `imputed`, `probe`, `pinned` or `baseline`; each
+candidate holds `nodeId`, `engine`, `model`, `totalMs`, `terms`
+(`{service, queue, pressure, cold}`, all four required, in milliseconds),
+`evidenceAgeMs`, `samples` and `imputed`. Only the first three decisions are
+numeric (non-null `totalMs` and `terms`, and an optional runner-up); `pinned`
+and `baseline` carry `totalMs` and `terms` null and a null runner-up, so the
+expanded row says no estimate was made instead of showing zeros. A null `evidenceAgeMs` is displayed
+`not measured`.
+Unknown selection keys are rejected, the encoded selection is at most 2048
+bytes, and it never carries request content. It travels in the same packed
+record, so it adds no history store.
 Null local `destination.model` retains the actual node/engine and is labelled
 `model not specified`; API models remain required. Nullable keys stay present.
 Money is exact decimal nano-USD strings, never `Number`/floating point: ceiling

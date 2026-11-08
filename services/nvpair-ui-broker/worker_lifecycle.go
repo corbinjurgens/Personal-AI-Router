@@ -67,12 +67,17 @@ func (b *Broker) bindScannerSource(source *scannerProcess) {
 		b.telemetry.retireScannerMemory()
 	}
 	b.workersMu.Unlock()
+	b.invalidateMeasurementConfigurations()
 	source.current = func() bool { b.workersMu.Lock(); defer b.workersMu.Unlock(); return b.scannerSource == source }
 	source.onMemoryRetired = func(hostUUID string) {
 		b.workersMu.Lock()
-		defer b.workersMu.Unlock()
-		if b.scannerSource == source && b.telemetry != nil {
+		current := b.scannerSource == source
+		if current && b.telemetry != nil {
 			b.telemetry.retireScannerHostMemory(hostUUID)
+		}
+		b.workersMu.Unlock()
+		if current && hostUUID == b.nodeID {
+			b.invalidateMeasurementConfigurations()
 		}
 	}
 	source.onTelemetry = func(value noderec.NodeTelemetry) {
@@ -95,6 +100,9 @@ func (b *Broker) bindScannerSource(source *scannerProcess) {
 		}
 		projected, ok := b.telemetry.Remove(hostUUID, sourceScanner, time.Now())
 		b.workersMu.Unlock()
+		if hostUUID == b.nodeID {
+			b.invalidateMeasurementConfigurations()
+		}
 		if ok {
 			b.fanTelemetryToScheduler(projected)
 		}
@@ -109,6 +117,9 @@ func (b *Broker) bindScannerSource(source *scannerProcess) {
 			b.telemetry.retireScannerMemory()
 		}
 		b.workersMu.Unlock()
+		if current {
+			b.invalidateMeasurementConfigurations()
+		}
 	}
 }
 

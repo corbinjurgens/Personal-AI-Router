@@ -27,6 +27,7 @@ import {
     routingMoney,
     routingReason,
     routingRequestKey,
+    routingSelectionLines,
     routingState,
     routingSummary,
     routingWait,
@@ -311,6 +312,77 @@ describe('bounded history presentation and lifecycle', () => {
         ).toBe(true)
         await act(async () => button.click())
         expect(button.getAttribute('aria-expanded')).toBe('false')
+    })
+
+    it('shows the selection decision, terms, evidence age and samples in the expanded row', async () => {
+        const records = [fixture(0), fixture(1), fixture(2)]
+        await initial(records)
+        await act(async () => root.render(createElement(RoutingHistory)))
+        const buttons = Array.from(container.querySelectorAll('button'))
+        const open = async (index: number): Promise<void> => {
+            const button = buttons.find(value =>
+                value
+                    .getAttribute('aria-label')
+                    ?.includes(routingRequestKey(records[index].request))
+            )
+            if (!button) throw new Error('missing expansion button')
+            await act(async () => button.click())
+        }
+        const detail = (index: number): string => {
+            const button = buttons.find(value =>
+                value
+                    .getAttribute('aria-label')
+                    ?.includes(routingRequestKey(records[index].request))
+            )
+            return (
+                document.getElementById(button?.getAttribute('aria-controls') ?? '')?.textContent ??
+                ''
+            )
+        }
+        await open(0)
+        const measured = detail(0)
+        expect(measured).toContain('Why this destination: Measured')
+        expect(measured).toContain('Tier rank 0 · warm')
+        expect(measured).toContain('Winner: synthetic-node / llamacpp, model synthetic-model')
+        expect(measured).toContain(
+            'Estimate: 11772 ms (service 11772 ms, queue 0 ms, pressure 0 ms, cold 0 ms)'
+        )
+        expect(measured).toContain('Evidence age: 1.5 s · Samples: 8')
+        expect(measured).toContain('Runner-up: synthetic-peer / llamacpp, model synthetic-model')
+        expect(measured).toContain('Evidence age: not measured · Samples: 0 · Imputed speeds')
+        await open(1)
+        const baseline = detail(1)
+        expect(baseline).toContain('Why this destination: Baseline')
+        expect(baseline).toContain('Estimate: none, this decision does not use a numeric estimate')
+        expect(baseline).toContain('Evidence age: not measured · Samples: 0')
+        expect(baseline).toContain('Runner-up: none recorded')
+        expect(baseline).not.toMatch(/Estimate: \d/)
+        const baselineSelection = baseline.slice(0, baseline.indexOf('Attempt 1'))
+        expect(baselineSelection).not.toContain(' ms')
+        await open(2)
+        expect(detail(2)).toContain('Why this destination: not recorded (no tier selection)')
+    })
+
+    it('formats selection lines from closed labels and explicit unknowns', () => {
+        expect(routingSelectionLines(null)).toEqual([
+            'Why this destination: not recorded (no tier selection)'
+        ])
+        const record = fixture(0)
+        const selection = record.selection
+        if (!selection?.runnerUp) throw new Error('fixture needs a runner-up')
+        selection.winner.evidenceAgeMs = 90000
+        selection.runnerUp.evidenceAgeMs = 7200000
+        const lines = routingSelectionLines(selection)
+        expect(lines).toContain('Evidence age: 1.5 min · Samples: 8')
+        expect(lines).toContain('Evidence age: 2.0 h · Samples: 0 · Imputed speeds')
+        selection.decision = 'pinned'
+        selection.winner.totalMs = null
+        selection.winner.terms = null
+        selection.runnerUp = null
+        const pinned = routingSelectionLines(selection).join('\n')
+        expect(pinned).toContain('Pinned')
+        expect(pinned).toContain('Estimate: none')
+        expect(pinned).not.toContain(' ms')
     })
 
     it('shows only exact local attempt failures on workload cards without reflecting the workload error', async () => {

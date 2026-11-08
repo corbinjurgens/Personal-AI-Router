@@ -107,6 +107,11 @@ func decodePerformanceProjection(raw []byte) (*performanceProjection, error) {
 		if node.Status == "missing" && len(node.Summary.Entries) != 0 {
 			return nil, invalid
 		}
+		for j := range node.Summary.Entries {
+			if node.Summary.Entries[j].Applicability == "" {
+				node.Summary.Entries[j].Applicability = performancewire.ApplicabilityUnknown
+			}
+		}
 		summary := *node.Summary
 		if i == 0 {
 			if summary.Revision < 0 {
@@ -388,6 +393,14 @@ func (d *nodeDetail) performanceText() string {
 		}
 		fmt.Fprintf(&b, "\nHost %s | engine %s | model %s\nProfile %s | quantization %s | context %s tokens\n", e.Key.Host, e.Key.Engine, e.Key.Model, e.Key.Fingerprint, quant, context)
 		fmt.Fprintf(&b, "Engine family %s\n", family)
+		applicability := e.Applicability
+		if applicability == "" {
+			applicability = performancewire.ApplicabilityUnknown
+		}
+		fmt.Fprintf(&b, "Configuration applicability %s\n", applicability)
+		if e.Provenance != nil {
+			fmt.Fprintf(&b, "Measurement API %s | extractor schema %s\n", e.Provenance.API, e.Provenance.ExtractorSchema)
+		}
 		fmt.Fprintf(&b, "Samples %d | completed %d | failed %d | cancelled %d | protocol incomplete %d\n", e.Samples, e.Completed, e.Failed, e.Cancelled, e.Incomplete)
 		fmt.Fprintf(&b, "Source age newest %d ms / oldest %d ms", e.NewestAgeMs, e.OldestAgeMs)
 		if e.ClockUncertain {

@@ -242,13 +242,26 @@ func historyTransportInteger(raw []byte) (int64, bool) { return historyScalarInt
 type historySpan struct{ start, end int }
 
 // RoutingHistoryRecordView borrows only already-projected bytes. It has a
-// bounded header and attempt offsets, never an Attempts DTO slice. Callers must
-// finish use before releasing the ProjectHistory output lease.
+// bounded header, a selection span and attempt offsets, never an Attempts DTO
+// slice or a resident selection. Callers must finish use before releasing the
+// ProjectHistory output lease.
 type RoutingHistoryRecordView struct {
-	Header   RoutingHistoryRecordHeader
-	raw      []byte
-	attempts [RoutingHistoryAttempts]historySpan
-	count    int
+	Header    RoutingHistoryRecordHeader
+	raw       []byte
+	selection historySpan // Empty when the record carries no selection.
+	attempts  [RoutingHistoryAttempts]historySpan
+	count     int
+}
+
+// ReadSelection replaces the caller's slot with the record's selection and
+// reports whether there is one. Like ReadAttempt it drops every prior referent
+// before decoding, so one slot bounds the selection's live decode.
+func (v *RoutingHistoryRecordView) ReadSelection(dst *RoutingHistorySelection) (bool, error) {
+	*dst = RoutingHistorySelection{}
+	if v.selection.end == v.selection.start {
+		return false, nil
+	}
+	return true, jsonrpc.MaterializeHistory(v.raw[v.selection.start:v.selection.end], dst, historyTransportInteger)
 }
 
 func (v *RoutingHistoryRecordView) AttemptCount() int { return v.count }
@@ -278,6 +291,12 @@ func ReadProjectedRoutingHistoryRecord(raw []byte) (RoutingHistoryRecordView, er
 		if i < header.NumField() {
 			return jsonrpc.MaterializeHistory(token, header.Field(i).Addr().Interface(), historyTransportInteger)
 		}
+		if i == header.NumField() {
+			if !bytes.Equal(bytes.TrimSpace(token), []byte("null")) {
+				v.selection = historySpan{span.start, span.end}
+			}
+			return nil
+		}
 		present = !bytes.Equal(bytes.TrimSpace(token), []byte("null"))
 		if !present {
 			return nil
@@ -298,7 +317,18 @@ func ReadProjectedRoutingHistoryRecord(raw []byte) (RoutingHistoryRecordView, er
 	if err != nil {
 		return RoutingHistoryRecordView{}, err
 	}
-	if err := validateHistoryRecord(v.Header, present, v.count, v.ReadAttempt); err != nil {
+	selection := func() error {
+		var slot RoutingHistorySelection
+		present, err := v.ReadSelection(&slot)
+		if err != nil {
+			return err
+		}
+		if present && !slot.valid() {
+			return historyError("invalid-value")
+		}
+		return nil
+	}
+	if err := validateHistoryRecord(v.Header, selection, present, v.count, v.ReadAttempt); err != nil {
 		return RoutingHistoryRecordView{}, err
 	}
 	return v, nil

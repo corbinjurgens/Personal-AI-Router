@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"nvpair-shared/clustertrust"
+	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 	"nvpair-shared/performancewire"
 )
@@ -315,6 +316,7 @@ func TestPerformanceElapsedOffsetAdvancesWithoutDuplicateRejuvenation(t *testing
 	f := newPerformanceFixture(t)
 	summary := performanceSummary("uuid-peer", 1)
 	summary.Entries = []performancewire.Entry{{Key: performancewire.ProfileKey{Host: "uuid-peer", Engine: "llamacpp", Model: "model", Fingerprint: "profile"}, Samples: 1, Completed: 1, NewestAgeMs: 12_000, OldestAgeMs: 12_000, NewestObservedAtMs: 1700000000000}}
+	summary.Entries[0].Applicability = performancewire.ApplicabilityUnknown
 	raw := performanceEncode(t, summary)
 	post := func(elapsed string, wantElapsed int64) {
 		t.Helper()
@@ -415,6 +417,41 @@ func TestPerformanceStrictPayloadAndOuterFrameLimits(t *testing.T) {
 	test("outer frame over 1MiB", func(raw []byte) []byte { return append(raw, bytes.Repeat([]byte(" "), (1<<20)+1)...) })
 	test("trailing JSON", func(raw []byte) []byte { return append(raw, []byte(` {}`)...) })
 	test("invalid summary", func(raw []byte) []byte { return bytes.Replace(raw, []byte(`"revision":1`), []byte(`"revision":0`), 1) })
+}
+
+func TestPerformanceRelayCarriesConfigurationWithdrawalAndRejectsPrivateMetadata(t *testing.T) {
+	f := newPerformanceFixture(t)
+	summary := performanceSummary("uuid-peer", 1)
+	summary.Entries = []performancewire.Entry{{Key: performancewire.ProfileKey{Host: "uuid-peer", Engine: "llamacpp", Model: "model", Fingerprint: "fp"}, Profile: performancewire.Profile{EngineFamily: "llamacpp"}, Provenance: &performancewire.Provenance{Configuration: nodepolicy.MeasurementIdentity{Complete: true, Digest: strings.Repeat("a", 64)}, EngineFamily: "llamacpp", API: "/v1/chat/completions", ExtractorSchema: "daily-schema"}, Applicability: performancewire.ApplicabilityCurrent, Samples: 1, Completed: 1, NewestObservedAtMs: 1000}}
+	if code := f.post(t, summary); code != http.StatusOK {
+		t.Fatalf("current summary status = %d", code)
+	}
+	got := f.summaries(t)
+	if len(got) != 1 || got[0].Summary.Entries[0].Applicability != performancewire.ApplicabilityCurrent || got[0].Summary.Entries[0].Provenance.Configuration.Digest != strings.Repeat("a", 64) {
+		t.Fatalf("current summary lost metadata: %+v", got)
+	}
+	summary.Revision = 2
+	summary.Entries[0].Applicability = performancewire.ApplicabilityUnknown
+	if code := f.post(t, summary); code != http.StatusOK {
+		t.Fatalf("withdrawal status = %d", code)
+	}
+	summary.Revision = 1
+	summary.Entries[0].Applicability = performancewire.ApplicabilityCurrent
+	if code := f.post(t, summary); code != http.StatusOK {
+		t.Fatalf("old retry status = %d", code)
+	}
+	got = f.summaries(t)
+	if len(got) != 2 || got[1].Summary.Revision != 2 || got[1].Summary.Entries[0].Applicability != performancewire.ApplicabilityUnknown {
+		t.Fatalf("old retry revived current evidence: %+v", got)
+	}
+	raw := performanceEncode(t, summary)
+	private := bytes.Replace(raw, []byte(`"extractorSchema":"daily-schema"`), []byte(`"extractorSchema":"daily-schema","options":{"secret":"private"}`), 1)
+	if bytes.Equal(raw, private) {
+		t.Fatal("missing privacy mutation target")
+	}
+	if code := f.postRaw(private); code != http.StatusBadRequest {
+		t.Fatalf("private provenance status = %d", code)
+	}
 }
 
 func TestPerformanceRejectsV1SummaryBeforeBrokerEmission(t *testing.T) {
@@ -743,6 +780,7 @@ func TestPerformanceDelayedFirstSendPreservesPublicationAnchor(t *testing.T) {
 	})
 	summary := performanceSummary("uuid-self", 1)
 	summary.Entries = []performancewire.Entry{{Key: performancewire.ProfileKey{Host: "uuid-self", Engine: "llamacpp", Model: "model", Fingerprint: "profile"}, Samples: 1, Completed: 1, NewestAgeMs: 12_000, OldestAgeMs: 12_000, NewestObservedAtMs: 1700000000000}}
+	summary.Entries[0].Applicability = performancewire.ApplicabilityUnknown
 	raw := performanceEncode(t, summary)
 	if err := f.manager.performance.publish(raw); err != nil {
 		t.Fatalf("publish: %v", err)

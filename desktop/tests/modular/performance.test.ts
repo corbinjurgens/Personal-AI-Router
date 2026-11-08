@@ -48,6 +48,65 @@ function summary(extra: JsonObject = {}): JsonObject {
     }
 }
 
+describe('measurement configuration applicability', () => {
+    const provenance = {
+        configuration: { digest: 'a'.repeat(64), complete: true },
+        engineFamily: 'llamacpp',
+        api: '/v1/chat/completions',
+        extractorSchema: 'daily-schema'
+    }
+    function parse(extra: JsonObject) {
+        return parsePerformanceProjection(
+            projection([peer({ summary: summary({ entries: [entry(extra)] }) })])
+        )
+    }
+    it.each(['current', 'historical', 'unknown'])(
+        'preserves destination-attested %s',
+        applicability => {
+            const result = parse({ provenance, applicability }).get('peer')?.summary?.entries[0]
+            expect(result?.provenance).toEqual(provenance)
+            expect(result?.applicability).toBe(applicability)
+        }
+    )
+    it('keeps absent old provenance visible and unknown', () => {
+        const result = parse({}).get('peer')?.summary?.entries[0]
+        expect(result?.samples).toBe(1)
+        expect(result?.provenance).toBeUndefined()
+        expect(result?.applicability).toBe('unknown')
+    })
+    it.each([
+        ['current without provenance', { applicability: 'current' }],
+        ['unknown state', { applicability: 'fresh' }],
+        [
+            'unknown digest with current state',
+            {
+                provenance: { ...provenance, configuration: { digest: '', complete: false } },
+                applicability: 'current'
+            }
+        ],
+        [
+            'partial digest',
+            { provenance: { ...provenance, configuration: { digest: 'partial', complete: true } } }
+        ],
+        ['absent completeness', { provenance: { ...provenance, configuration: { digest: '' } } }],
+        ['family mismatch', { provenance: { ...provenance, engineFamily: 'strata' } }],
+        ['API query', { provenance: { ...provenance, api: '/v1/chat/completions?key=secret' } }],
+        ['private provenance', { provenance: { ...provenance, options: { secret: 'private' } } }],
+        [
+            'private configuration',
+            {
+                provenance: {
+                    ...provenance,
+                    configuration: { ...provenance.configuration, path: '/private' }
+                }
+            }
+        ],
+        ['oversize schema', { provenance: { ...provenance, extractorSchema: 's'.repeat(129) } }]
+    ])('rejects %s', (_name, extra) => {
+        expect(parse(extra).size).toBe(0)
+    })
+})
+
 function peer(extra: JsonObject = {}): JsonObject {
     return {
         measuringHost: 'peer',
@@ -129,6 +188,7 @@ describe('bounded broker performance projection', () => {
     it('preserves actual profile, measured zero and nullable unknowns', () => {
         const result = parsePerformanceProjection(projection())
         expect(result.get('peer')?.summary?.entries[0]).toEqual({
+            applicability: 'unknown',
             key: {
                 host: 'peer',
                 engine: 'llamacpp-custom',
@@ -501,9 +561,7 @@ describe('node snapshot performance attachment', () => {
 
     it('replaces output totals in node snapshots and pushes without retaining unknown counts', () => {
         for (const outputTokens of [42, 0, null]) {
-            change(
-                projection([peer({ summary: summary({ entries: [entry({ outputTokens })] }) })])
-            )
+            change(projection([peer({ summary: summary({ entries: [entry({ outputTokens })] }) })]))
             expect(
                 state.getNodesInitial().nodes.peer?.performance?.summary?.entries[0]?.outputTokens
             ).toBe(outputTokens)
