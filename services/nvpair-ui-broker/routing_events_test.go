@@ -1870,8 +1870,8 @@ func TestRoutingHistoryRawPrivateDispositions(t *testing.T) {
 	test("nested unknown duplicate", `"synthetic-secret-key":{"opaque":1,"opaque":2},`)
 }
 
-// historyMaxSelection is the largest selection a producer emits for a model:
-// maximum identifiers and integers, no runner-up (a second one would not fit).
+// historyMaxSelection is a winner-only selection with maximum identifiers and
+// integers for a model; a second maximal candidate would not fit the cap.
 func historyMaxSelection(model string) *nodepolicy.RoutingHistorySelection {
 	const safe = int64(9007199254740991)
 	return &nodepolicy.RoutingHistorySelection{Decision: "imputed", TierRank: safe, Warm: true, Winner: nodepolicy.RoutingHistorySelectionCandidate{

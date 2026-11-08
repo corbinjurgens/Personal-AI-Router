@@ -95,9 +95,9 @@ const decisions: Record<RoutingSelectionDecision, string> = {
     imputed:
         'Imputed (lowest estimated total, using the slowest measured speed for unmeasured phases)',
     probe: 'Probe (an unmeasured engine was tried to gather evidence)',
-    pinned: 'Pinned (the request named this engine; no estimate was made)',
+    pinned: 'Pinned (the selected node was used; no estimate was made)',
     baseline:
-        'Baseline (no usable measurements; the default choice was kept and no estimate was made)'
+        'Baseline (the speed or request-size evidence was incomplete for some candidate; the default choice was kept and no estimate was made)'
 }
 type Selection = NonNullable<RoutingHistoryOutput['selection']>
 

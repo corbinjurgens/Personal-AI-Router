@@ -613,6 +613,33 @@ func TestTierCostProbeCadenceCountsOnlyCommits(t *testing.T) {
 	})
 }
 
+// A pinned round never reads the policy fence, so an active policy generation
+// must not make its facts permanently stale.
+func TestTierCostPinnedRoundTerminatesUnderActivePolicy(t *testing.T) {
+	fx := newScoreFixture(t, "a", "b")
+	fx.sizeAll(t, nil, "")
+	fx.measure(t, map[string][2]float64{"a": {100, 14}, "b": {378, 79}}, nil)
+	if err := fx.p.admission.activatePolicy(fx.p.admission.currentPolicy()); err != nil {
+		t.Fatal(err)
+	}
+	fx.f.selectedMu.Lock()
+	fx.f.selectedID = "a"
+	fx.f.selectedMu.Unlock()
+	done := make(chan tierDecision, 1)
+	go func() {
+		_, _, decision := fx.choose(t, scoreBody(t, 8000, 512), fx.candidates(true, "", "a", "b"), nil)
+		done <- decision
+	}()
+	select {
+	case decision := <-done:
+		if decision.Decision != tierDecisionPinned {
+			t.Fatalf("decision %+v, want pinned", decision)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("pinned tier round never returned")
+	}
+}
+
 func TestTierCostStaleSourcesRebuildWithoutConsumingReservations(t *testing.T) {
 	body := scoreBody(t, 8000, 512)
 	for _, tc := range []struct {

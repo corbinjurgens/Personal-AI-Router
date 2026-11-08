@@ -221,6 +221,9 @@ func (p *Proxy) tierFactsFor(ctx context.Context, f *facade, candidates []candid
 		}
 		facts.anyRate = facts.anyRate || m.measured
 		if facts.pin != "" && c.id == facts.pin {
+			// The pin decides alone. Clearing anyRate keeps the policy fence,
+			// which these facts never read, from rejecting them forever.
+			facts.anyRate = false
 			return facts
 		}
 	}

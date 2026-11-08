@@ -939,6 +939,9 @@ func (p *Proxy) reserveCandidatePrepared(ctx context.Context, f *facade, candida
 		f.selectedMu.RUnlock()
 		if !current {
 			p.admission.mu.Unlock()
+			if ctx.Err() != nil {
+				return candidates, reservation{}, tierDecision{}, ctx.Err()
+			}
 			continue // Rebuild the facts outside every chooser lock.
 		}
 		if prepare != nil {
@@ -997,7 +1000,7 @@ func (p *Proxy) reserveCandidatePrepared(ctx context.Context, f *facade, candida
 		if prepare != nil {
 			p.admission.mu.Unlock()
 		}
-		return candidates, held, decision, nil
+		return candidates, held, currentDecision, nil
 	}
 }
 
