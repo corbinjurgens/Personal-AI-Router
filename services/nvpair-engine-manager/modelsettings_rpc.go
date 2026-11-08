@@ -398,7 +398,8 @@ func (e *Executor) inspectModel(ctx context.Context, p modelconfig.InspectReques
 	ctx, cancel := context.WithTimeout(ctx, modelInspectionBudget)
 	defer cancel()
 	var advisory modelEstimateInput
-	result, err := e.inspectModelArtifacts(ctx, p, &advisory)
+	var semantic string
+	result, err := e.inspectModelArtifactsWithMeasurement(ctx, p, &semantic, &advisory)
 	if err != nil {
 		return modelconfig.InspectResult{}, err
 	}
@@ -421,7 +422,20 @@ func (e *Executor) inspectModel(ctx context.Context, p modelconfig.InspectReques
 			}
 		}
 	}
-	diagnosticIdentity := e.inspectionDiagnosticIdentity(ctx, p, result)
+	var liveRealization bool
+	diagnosticIdentity := e.inspectionDiagnosticIdentity(ctx, p, result, &liveRealization)
+	measurement := inspectionMeasurementIdentity(semantic, diagnosticIdentity, liveRealization)
+	if measurement.Complete {
+		// Loaded readback can block. Recheck the same file/configuration owner
+		// after it, and never renew the private memory observation's lifetime.
+		var currentSemantic string
+		current, currentErr := e.inspectModelArtifactsWithMeasurement(ctx, p, &currentSemantic)
+		hardware, _ := ctx.Value(diagnosticHardwareKey{}).(*diagnosticHardware)
+		if currentErr != nil || current.Status != "resolved" || currentSemantic != semantic || diagnosticHardwareMatchesAt(hardware, diagnosticMemory(ctx), true) != nil {
+			measurement = modelconfig.MeasurementIdentity{}
+		}
+	}
+	result.MeasurementIdentity = &measurement
 	if identity, ok := ctx.Value(modelDiagnosticInspectionKey{}).(modelconfig.DiagnosticIdentity); ok {
 		diagnosticIdentity = &identity
 	}
@@ -478,7 +492,7 @@ func (m *Manager) inspectModel(ctx context.Context, msg *Message) {
 	}
 	ctx = m.exec.modelMemoryContext(ctx, p.Engine, envelope.Memory, envelope.NativeInitAllowed)
 	ctx = withDiagnosticHardware(ctx, hardware)
-	result, err := m.exec.InspectModel(ctx, p)
+	result, err := m.exec.inspectModel(ctx, p, envelope.NativeInitAllowed)
 	m.respondOrErr(msg, result, err)
 }
 

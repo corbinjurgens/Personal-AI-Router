@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"strings"
 
 	"nvpair-shared/engines"
@@ -48,7 +49,9 @@ func (b *Broker) activateEngineManagerSource() *engineManagerSource {
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
 	r.engineManagerSource = source
+	r.measurementGeneration++
 	r.engineIdentity = nil
+	r.measurementConfigurations = nil
 	r.clearEngineManagerObservationsLocked()
 	invalidated := r.current.Availability == nodepolicy.Paused && r.live == nodepolicy.Paused
 	if invalidated {
@@ -90,6 +93,10 @@ func (b *Broker) acceptModelIdentity(source *engineManagerSource, engines map[st
 		r.mu.Unlock()
 		return
 	}
+	if !reflect.DeepEqual(r.engineIdentity, engines) {
+		r.measurementGeneration++
+		r.measurementConfigurations = nil
+	}
 	r.engineIdentity = make(map[string]engineManagerIdentity, len(engines))
 	for name, id := range engines {
 		models := make(map[string]string, len(id.ModelDigests))
@@ -125,7 +132,9 @@ func (b *Broker) retireEngineManagerSource(source *engineManagerSource) {
 		return
 	}
 	r.engineManagerSource = nil
+	r.measurementGeneration++
 	r.engineIdentity = nil
+	r.measurementConfigurations = nil
 	r.clearEngineManagerObservationsLocked()
 	invalidated := r.current.Availability == nodepolicy.Paused && r.live == nodepolicy.Paused
 	if invalidated {
@@ -154,6 +163,9 @@ func (b *Broker) observeSettingsIdentity(snapshots []settings.Snapshot) {
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
 	changed := !sameStrings(r.settingsIdentity, next)
+	if changed {
+		r.measurementGeneration++
+	}
 	r.settingsIdentity = next
 	r.mu.Unlock()
 	if changed {
@@ -164,6 +176,7 @@ func (b *Broker) observeSettingsIdentity(snapshots []settings.Snapshot) {
 // identityChanged pushes the identity to the proxy and reconsiders the
 // published capability, whose models must match it (readiness.go).
 func (b *Broker) identityChanged() {
+	b.wakePerformanceConfiguration()
 	b.schedulePolicyPush(pushIdentity)
 	go b.refreshStrictAdvertisement()
 }
@@ -193,6 +206,7 @@ func settingsFingerprint(s settings.Snapshot) (string, bool) {
 // r.mu.
 func (r *policyRuntime) modelIdentityLocked() nodepolicy.SetModelIdentityParams {
 	out := nodepolicy.SetModelIdentityParams{Engines: map[string]nodepolicy.EngineIdentity{}}
+	out.Measurements = r.measurementStatesLocked()
 	for engine, em := range r.engineIdentity {
 		fp, ok := r.settingsIdentity[engine]
 		if !ok {
@@ -265,6 +279,8 @@ func (b *Broker) forgetSettingsIdentity(engine string) {
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
 	delete(r.settingsIdentity, engine)
+	r.measurementGeneration++
+	delete(r.measurementConfigurations, engine)
 	r.mu.Unlock()
 	go b.refreshStrictAdvertisement()
 }

@@ -344,6 +344,7 @@ export type MemoryProfile = {
     coversPools?: boolean
 }
 export type InspectModelResult = {
+    measurementIdentity?: { digest: string; complete: boolean }
     nativeOptions?: Array<{
         name: string
         kind: 'switch' | 'choice' | 'number' | 'text'

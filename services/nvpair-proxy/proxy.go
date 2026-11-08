@@ -363,15 +363,18 @@ type Proxy struct {
 	// separates two facades' records and only the process needs the nonce. It
 	// exists because each facade's request counter restarts at 1, so without it
 	// a reused id after a restart would collide in the broker's store.
-	runID            string
-	identityMu       sync.Mutex
-	originNodeID     string
-	requestSequence  int64
-	requests         map[string]*routingRequest
-	workloadRequests map[workloadKey]string
-	requestStorage   routingMapStorage // identityMu owns retained registry backing.
-	workloadStorage  routingMapStorage // identityMu owns retained workload-index backing.
-	performance      performanceQueue
+	runID               string
+	identityMu          sync.Mutex
+	originNodeID        string
+	requestSequence     int64
+	requests            map[string]*routingRequest
+	workloadRequests    map[workloadKey]string
+	requestStorage      routingMapStorage // identityMu owns retained registry backing.
+	workloadStorage     routingMapStorage // identityMu owns retained workload-index backing.
+	performance         performanceQueue
+	measurementMu       sync.Mutex
+	measurements        map[string]map[string]nodepolicy.MeasurementState
+	measurementRevision string
 
 	// admission is the node-wide admission controller every facade shares
 	// (FORK_DESIGN.md §3.3). Process-wide for the same reason as the

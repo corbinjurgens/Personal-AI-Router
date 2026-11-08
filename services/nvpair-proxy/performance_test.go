@@ -29,11 +29,104 @@ import (
 	"unsafe"
 
 	"nvpair-shared/nodepolicy"
+	"nvpair-shared/noderec"
 	"nvpair-shared/performancewire"
 )
 
 const performanceStrataFinal = `{"choices":[{"index":0,"finish_reason":"stop"}],"usage":{"completion_tokens":20},"timings":{"predicted_n":20,"predicted_ms":400,"predicted_per_second":55}}`
 const performanceLlamaFinal = `{"choices":[{"index":0,"finish_reason":"stop"}],"timings":{"predicted_n":11,"predicted_ms":250,"predicted_per_second":40}}`
+
+func TestMeasurementControlIsSeparateAndOmissionWithdraws(t *testing.T) {
+	p := performanceProxy(t, "llamacpp")
+	policy := p.admission.currentPolicy()
+	policy.Profiles = append(policy.Profiles, nodepolicy.Profile{Key: "sibling-profile", Engine: "llamacpp", Model: "m"})
+	p.admission.setPolicy(policy)
+	boot, err := noderec.MemoryBootClock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := nodepolicy.MeasurementState{Identity: nodepolicy.MeasurementIdentity{Digest: strings.Repeat("d", 64), Complete: true}, ObservedBootNS: strconv.FormatUint(boot, 10), ValidityMS: 5000}
+	in := nodepolicy.SetModelIdentityParams{Engines: map[string]nodepolicy.EngineIdentity{"llamacpp": performanceIdentity()}, Measurements: map[string]map[string]nodepolicy.MeasurementState{"llamacpp": {"m": state, "sibling-profile": state}}}
+	raw, err := json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.applySetModelIdentity(raw); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.currentMeasurementIdentity("llamacpp", "sibling-profile"); got != state.Identity {
+		t.Fatalf("exact profile missing: %+v", got)
+	}
+	p.admission.mu.Lock()
+	strict := p.admission.strict.identity["llamacpp"]
+	p.admission.mu.Unlock()
+	if !reflect.DeepEqual(strict, performanceIdentity()) {
+		t.Fatal("measurement changed strict identity")
+	}
+	in.Measurements["llamacpp"]["m"] = nodepolicy.MeasurementState{}
+	if got := p.currentMeasurementIdentity("llamacpp", "m"); got != state.Identity {
+		t.Fatal("control map retained caller alias")
+	}
+	if got := p.currentMeasurementIdentity("llamacpp", "unconfigured"); got.Complete {
+		t.Fatal("name fallback granted measurement applicability")
+	}
+	in.Measurements = nil
+	raw, err = json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.applySetModelIdentity(raw); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.currentMeasurementIdentity("llamacpp", "m"); got.Complete {
+		t.Fatal("omitted map retained completeness")
+	}
+}
+
+func TestMeasurementControlReplayCannotRenewExpiredObservation(t *testing.T) {
+	p := performanceProxy(t, "llamacpp")
+	state := nodepolicy.MeasurementState{Identity: nodepolicy.MeasurementIdentity{Digest: strings.Repeat("d", 64), Complete: true}, ObservedBootNS: "0", ValidityMS: 5000}
+	in := nodepolicy.SetModelIdentityParams{Engines: map[string]nodepolicy.EngineIdentity{}, Measurements: map[string]map[string]nodepolicy.MeasurementState{"llamacpp": {"m": state}}}
+	raw, err := json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := p.applySetModelIdentity(raw); err != nil {
+			t.Fatal(err)
+		}
+		if got := p.currentMeasurementIdentity("llamacpp", "m"); got.Complete {
+			t.Fatal("replay renewed expired evidence")
+		}
+	}
+}
+
+func TestMeasurementPolicyReplacementWithdrawsSnapshot(t *testing.T) {
+	p := performanceProxy(t, "llamacpp")
+	boot, err := noderec.MemoryBootClock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := nodepolicy.MeasurementState{Identity: nodepolicy.MeasurementIdentity{Digest: strings.Repeat("d", 64), Complete: true}, ObservedBootNS: strconv.FormatUint(boot, 10), ValidityMS: 5000}
+	in := nodepolicy.SetModelIdentityParams{Engines: map[string]nodepolicy.EngineIdentity{"llamacpp": performanceIdentity()}, Measurements: map[string]map[string]nodepolicy.MeasurementState{"llamacpp": {"m": state}}}
+	raw, err := json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.applySetModelIdentity(raw); err != nil {
+		t.Fatal(err)
+	}
+	if !p.currentMeasurementIdentity("llamacpp", "m").Complete {
+		t.Fatal("missing positive control")
+	}
+	policy := p.admission.currentPolicy()
+	policy.Revision = "1"
+	policy.Profiles[0].Model = "replacement-model"
+	p.admission.setPolicy(policy)
+	if got := p.currentMeasurementIdentity("llamacpp", "m"); got.Complete {
+		t.Fatalf("replaced profile retained measurement: %+v", got)
+	}
+}
 
 func performanceIdentity() nodepolicy.EngineIdentity {
 	return nodepolicy.EngineIdentity{EngineRunID: "runtime-1", SettingsFingerprint: strings.Repeat("a", 64), LaunchDigest: strings.Repeat("b", 64), ModelDigests: map[string]string{"m": strings.Repeat("c", 64), "fixture-model": strings.Repeat("c", 64)}}

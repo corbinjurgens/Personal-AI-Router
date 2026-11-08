@@ -178,9 +178,11 @@ type policyRuntime struct {
 	// Strict admission identity (model_identity.go): engine-manager's run,
 	// launch and model content identity per engine, and this broker's
 	// applied-settings fingerprint per engine. The proxy gets their join.
-	engineIdentity      map[string]engineManagerIdentity
-	engineManagerSource *engineManagerSource
-	settingsIdentity    map[string]string
+	engineIdentity            map[string]engineManagerIdentity
+	engineManagerSource       *engineManagerSource
+	settingsIdentity          map[string]string
+	measurementConfigurations map[string]map[string]performanceConfiguration
+	measurementGeneration     uint64
 
 	// Idle bookkeeping: engine start, each model's residency arrival and the
 	// per-model baseline the idle policy last acted on.
@@ -1435,6 +1437,10 @@ func (r *policyRuntime) releasePush() { <-r.pushSlot }
 
 // schedulePolicyPush sends one kind of state to the proxy in the background.
 func (b *Broker) schedulePolicyPush(kind string) {
+	if kind == pushPolicy {
+		b.wakePerformanceConfiguration()
+		b.schedulePolicyPush(pushIdentity)
+	}
 	b.signalModelConfig()
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()

@@ -21,10 +21,53 @@ import (
 	"unicode/utf8"
 
 	"nvpair-shared/nodepolicy"
+	"nvpair-shared/noderec"
 	"nvpair-shared/performancewire"
 )
 
 const performanceQueueCapacity = 128
+
+func (p *Proxy) setModelAndMeasurementIdentities(in nodepolicy.SetModelIdentityParams) bool {
+	source := in.Measurements
+	next := make(map[string]map[string]nodepolicy.MeasurementState, len(source))
+	for engine, profiles := range source {
+		next[engine] = make(map[string]nodepolicy.MeasurementState, len(profiles))
+		for key, state := range profiles {
+			next[engine][strings.Clone(key)] = state
+		}
+	}
+	p.measurementMu.Lock()
+	defer p.measurementMu.Unlock()
+	changed := p.admission.setModelIdentity(in.Engines)
+	p.measurements = next
+	p.measurementRevision = p.admission.currentPolicy().Revision
+	return changed
+}
+
+// Measurement applicability is separate from strict engine identity. A replay
+// cannot extend the underlying observation; transit and backwards clocks fail
+// closed using the existing same-host boot clock.
+func (p *Proxy) currentMeasurementIdentity(engine, profileKey string) nodepolicy.MeasurementIdentity {
+	p.measurementMu.Lock()
+	defer p.measurementMu.Unlock()
+	state, ok := p.measurements[engine][profileKey]
+	if !ok || state.Validate() != nil || !state.Identity.Complete {
+		return nodepolicy.MeasurementIdentity{}
+	}
+	policy := p.admission.currentPolicy()
+	profile, configured := policy.ProfileByKey(profileKey)
+	if policy.Revision != p.measurementRevision || !configured || profile.Engine != engine {
+		delete(p.measurements[engine], profileKey)
+		return nodepolicy.MeasurementIdentity{}
+	}
+	now, err := noderec.MemoryBootClock()
+	elapsed, hopErr := (noderec.MemoryHop{ForwarderID: "measurement-broker", BootNS: state.ObservedBootNS}).ElapsedAt(now)
+	if err != nil || hopErr != nil || elapsed >= state.ValidityMS {
+		delete(p.measurements[engine], profileKey)
+		return nodepolicy.MeasurementIdentity{}
+	}
+	return state.Identity
+}
 
 // The FIFO lock never covers codec IO. Counters saturate and have a fixed set
 // of reasons; neither pressure nor missing identity allocates drop records.

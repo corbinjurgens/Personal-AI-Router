@@ -1049,6 +1049,27 @@ proxy enforces it.
   acknowledge the identity without it; with no proxy running nothing needs
   withdrawing, and a proxy without the method holds no capability. Any other
   failure fails the operation before the engine is touched.
+- **Measurement configuration** (`performance_configuration.go`). The existing
+  performance sweep refreshes configured local llama.cpp profiles using the
+  private `engine:inspect-model` envelope with `nativeInitAllowed:false`, target
+  memory and the diagnostic hardware reader. Worker I/O stays outside policy and
+  performance locks. Manager source, applied settings, profile mapping, policy
+  revision and original memory lifetime fence installation and readback. Failed
+  inspection withdraws completeness; no current flag is persisted. Public
+  inspection uses the same currentness fence around its pinned manager call and
+  returns explicit unknown measurement metadata when the observation becomes
+  stale, preserving ordinary artifact inspection. Scanner binding, local memory
+  retirement/removal and current scanner exit advance the observation generation
+  and enqueue measurement withdrawal through the existing identity push. An old
+  response cannot restore completeness even if identical memory has reappeared;
+  retired scanner callbacks and other hosts do not invalidate local observations.
+  The existing
+  `node/set-model-identity` control adds a separate `measurements` map keyed by
+  engine and exact profile key. Values contain `identity:{digest,complete}`,
+  `observedBootNs` and `validityMs`. Replay preserves the observation's original
+  same-host boot stamp and remaining budget, bounded by the underlying memory
+  evidence. These fields convey no strict qualification, capacity or launch
+  authority, and do not enable speed scoring.
 - **Model content mutations** (`model_mutation.go`). The source-bound
   `forwardEngineNotificationFrom` consumes the private engine-manager
   `engine:model-mutation-request{requestId, engine}` notification, never

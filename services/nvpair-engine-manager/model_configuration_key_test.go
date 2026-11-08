@@ -33,6 +33,205 @@ func TestModelConfigurationKeyUnapplied(t *testing.T) {
 	}
 }
 
+func measurementSemanticFixture(t *testing.T, f inspectionFixture) string {
+	t.Helper()
+	var semantic string
+	result, err := f.ex.inspectModelArtifactsWithMeasurement(keyTestMemoryContext(), f.request, &semantic)
+	if err != nil || result.Status != "resolved" || semantic == "" {
+		t.Fatalf("semantic inspection: status=%s reason=%s semantic=%q error=%v", result.Status, result.Reason, semantic, err)
+	}
+	return semantic
+}
+
+func measurementTestEnvironment(t *testing.T) {
+	t.Helper()
+	// Positive controls describe a known native launch. Ambient developer
+	// settings are separate inputs, exercised explicitly by the unknown case.
+	for _, assignment := range os.Environ() {
+		name, _, _ := strings.Cut(assignment, "=")
+		if !strings.HasPrefix(name, "LLAMA_") && !strings.HasPrefix(name, "GGML_") && !strings.HasPrefix(name, "CUDA_") {
+			continue
+		}
+		t.Setenv(name, "")
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestMeasurementSemanticSourceCompleteness(t *testing.T) {
+	measurementTestEnvironment(t)
+	for _, tc := range []struct {
+		name   string
+		change func(*testing.T, inspectionFixture)
+	}{
+		{"requested cache", func(t *testing.T, f inspectionFixture) {
+			f.st.plat.Runtime.ModelLoads[0].Requested.CacheTypeK = keyTestPointer("q8_0")
+			compileDiagnosticFixtureLoads(t, f)
+		}},
+		{"extra launch option", func(t *testing.T, f inspectionFixture) {
+			args := append([]string(nil), (*f.st.plat.Runtime.LaunchArgs)...)
+			args = append(args, "--threads", "7")
+			f.st.plat.Runtime.LaunchArgs = &args
+		}},
+		{"native environment", func(t *testing.T, f inspectionFixture) {
+			env := []string{"GGML_CUDA_ENABLE_UNIFIED_MEMORY=1"}
+			f.st.plat.Runtime.LaunchEnv = &env
+		}},
+		{"native runtime library", func(t *testing.T, f inspectionFixture) {
+			writeTestFile(t, filepath.Join(f.root, "libggml-base.dylib"), []byte("replacement native library bytes"))
+		}},
+		{"native executable", func(t *testing.T, f inspectionFixture) {
+			file, err := os.OpenFile(f.st.binPath, os.O_APPEND|os.O_WRONLY, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := file.WriteString("\n# replacement native bytes\n"); err != nil {
+				t.Fatal(err)
+			}
+			if err := file.Close(); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"model content", func(t *testing.T, f inspectionFixture) {
+			file, err := os.OpenFile(f.model, os.O_RDWR, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			info, err := file.Stat()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := file.WriteAt([]byte{1}, info.Size()-1); err != nil {
+				t.Fatal(err)
+			}
+			if err := file.Close(); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newAppliedKeyFixture(t)
+			before := measurementSemanticFixture(t, f)
+			tc.change(t, f)
+			var after string
+			_, err := f.ex.inspectModelArtifactsWithMeasurement(keyTestMemoryContext(), f.request, &after)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after == before {
+				t.Fatal("speed-affecting source change reused semantic identity")
+			}
+		})
+	}
+}
+
+func TestMeasurementSemanticExcludesIncidentalSources(t *testing.T) {
+	measurementTestEnvironment(t)
+	f := newAppliedKeyFixture(t)
+	before := measurementSemanticFixture(t, f)
+	f.st.runID = "new-engine-run"
+	f.st.gen++
+	f.ex.managerIncarnation = "new-manager"
+	f.st.plat.Runtime.Port = 23456
+	info, err := os.Stat(f.model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(f.model, info.ModTime().Add(time.Second), info.ModTime().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	// An ordinary re-apply refreshes stat evidence without changing the sampled
+	// content. Preserve the source owner's exact binding checks in this fixture.
+	for i := range f.st.plat.Runtime.ModelLoads[0].Resolved.Artifacts {
+		binding := &f.st.plat.Runtime.ModelLoads[0].Resolved.Artifacts[i]
+		if binding.Path == f.model {
+			binding.MtimeNS = fmt.Sprint(info.ModTime().Add(time.Second).UnixNano())
+		}
+	}
+	// Recompile the same semantic configuration after the stat-only change.
+	compileDiagnosticFixtureLoads(t, f)
+	if after := measurementSemanticFixture(t, f); after != before {
+		t.Fatalf("run/stat churn changed semantic identity: %s != %s", after, before)
+	}
+}
+
+func TestMeasurementDraftArtifactParticipates(t *testing.T) {
+	measurementTestEnvironment(t)
+	f := newAppliedKeyFixture(t, func(f inspectionFixture) {
+		writeInspectionGGUF(t, filepath.Join(f.root, "draft.gguf"), "qwen2", 0.99, 4096)
+		preset, err := os.ReadFile(f.preset)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeTestFile(t, f.preset, append(preset, []byte("model-draft = draft.gguf\n")...))
+	})
+	before := measurementSemanticFixture(t, f)
+	if artifacts := f.st.plat.Runtime.ModelLoads[0].Resolved.Artifacts; len(artifacts) != 2 || artifacts[1].Role != "draft" {
+		t.Fatalf("draft positive control: %+v", artifacts)
+	}
+	file, err := os.OpenFile(filepath.Join(f.root, "draft.gguf"), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteAt([]byte{7}, 4095); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var after string
+	_, err = f.ex.inspectModelArtifactsWithMeasurement(keyTestMemoryContext(), f.request, &after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after == before {
+		t.Fatal("changed consumed draft retained applicability")
+	}
+}
+
+func TestMeasurementUnrepresentedEnvironmentFileIsUnknown(t *testing.T) {
+	measurementTestEnvironment(t)
+	f := newAppliedKeyFixture(t)
+	measurementSemanticFixture(t, f)
+	env := []string{"GGML_PRIVATE_CONFIG=/unobserved/native-config"}
+	f.st.plat.Runtime.LaunchEnv = &env
+	var semantic string
+	_, err := f.ex.inspectModelArtifactsWithMeasurement(keyTestMemoryContext(), f.request, &semantic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if semantic != "" {
+		t.Fatal("unobserved file-valued native environment claimed completeness")
+	}
+}
+
+func TestMeasurementInheritedEnvironmentFileIsUnknown(t *testing.T) {
+	measurementTestEnvironment(t)
+	f := newAppliedKeyFixture(t)
+	measurementSemanticFixture(t, f)
+	t.Setenv("LLAMA_CPP_REPO", f.root)
+	var semantic string
+	if _, err := f.ex.inspectModelArtifactsWithMeasurement(keyTestMemoryContext(), f.request, &semantic); err != nil {
+		t.Fatal(err)
+	}
+	if semantic != "" {
+		t.Fatal("unobserved inherited file input claimed completeness")
+	}
+}
+
+func TestMeasurementWorkingSetLimitParticipates(t *testing.T) {
+	measurementTestEnvironment(t)
+	f := newAppliedKeyFixture(t)
+	f.st.plat.Runtime.WorkingSetLimitMiB = keyTestPointer(8192)
+	before := measurementSemanticFixture(t, f)
+	f.st.plat.Runtime.WorkingSetLimitMiB = keyTestPointer(4096)
+	after := measurementSemanticFixture(t, f)
+	if before == after {
+		t.Fatal("changed process working-set cap reused measurement applicability")
+	}
+}
+
 func TestModelConfigurationKeyExtraOptionParticipation(t *testing.T) {
 	f := newAppliedKeyFixture(t)
 	before := inspectAppliedKeyFixture(t, f)

@@ -2031,6 +2031,20 @@ realization. The same identity reaches record currentness and the estimate
 overlay. Missing hardware keeps measured history visible with currentness withdrawn.
 The ordinary shared worker envelope and its strict decoder are unchanged.
 
+`InspectResult.measurementIdentity` optionally carries only `{digest,complete}`.
+Complete measurement applicability binds the configuration owner's semantic
+sampled-artifact, process working-set limit and effective launch/load inputs to this same diagnostic
+hardware and realization proof. It excludes run/epoch/revision, file paths and
+mtimes, routing endpoints and available-memory samples. Artifact assurance
+remains sampled local binding, not full model-content verification. Finite
+`ConfigurationKey`, unpriced `ExecutionKey`, measured-overlay and Auto semantics
+are unchanged. Missing source/build/hardware/realization returns
+`{digest:"",complete:false}`. In particular, cold native fit cannot predict its
+next realization from retained history. After live readback, inspection rechecks
+the canonical artifact/configuration owner and the original memory lifetime.
+An envelope with `nativeInitAllowed:false` performs no native help discovery or
+device initialization. Measurement metadata never starts, loads or unloads.
+
 `PendingDiagnostic` belongs to the existing desired-state store. Startup restores
 its admission hold before manager readiness and recovers through the lifecycle
 owner before installed-engine restore. Recovery never resumes measurement.

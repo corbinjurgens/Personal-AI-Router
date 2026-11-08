@@ -71,6 +71,8 @@ type performanceRuntime struct {
 	managerGeneration                 uint64
 	checkpointGeneration              uint64
 	saveWake, publishWake, changeWake chan struct{}
+	configurationWake                 chan struct{}
+	refreshConfiguration              func(context.Context)
 }
 
 type performanceNode struct {
@@ -136,6 +138,8 @@ func (b *Broker) startPerformance(ctx context.Context) func() {
 	path, _ := appdir.Path(performancestore.FileName)
 	b.performance = newPerformanceRuntime(b.nodeID, path, b.clusterDir)
 	p := b.performance
+	p.configurationWake = make(chan struct{}, 1)
+	p.refreshConfiguration = b.refreshPerformanceConfigurations
 	fctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	done := make(chan struct{})
 	go func() {
@@ -516,8 +520,12 @@ func (p *performanceRuntime) runSweeps(ctx context.Context, ticks <-chan time.Ti
 		case <-ctx.Done():
 			return
 		case <-ticks:
-			p.sweep()
-			performanceSignal(p.changeWake)
+		case <-p.configurationWake:
+		}
+		p.sweep()
+		performanceSignal(p.changeWake)
+		if p.refreshConfiguration != nil {
+			p.refreshConfiguration(ctx)
 		}
 	}
 }

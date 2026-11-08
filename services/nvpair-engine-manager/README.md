@@ -173,6 +173,16 @@ permission-gated device-map helper; Pause, activation, ownership and maintenance
 vetoes still apply. Advisory estimates use the same bounded
 facts: tensor weights can be sized without an effective allocation; unresolved
 cache, workspace, placement and memory telemetry stay explicit Unknowns.
+The optional `measurementIdentity:{digest,complete}` is a separate applicability
+projection over applied sampled artifacts, semantic launch/load options, content
+build, physical hardware and authenticated realized context/slots/placement.
+Incomplete inputs return an empty digest with `complete:false`. Run IDs,
+settings revisions, paths, mtimes, routing endpoints and free memory are excluded.
+Cold native fit stays unknown even when diagnostic history remains current.
+Loaded profiles use the diagnostic owner's live readback, with no fallback to
+history after failed readback. The worker envelope's `nativeInitAllowed:false`
+also disables native help discovery for background inspection. This metadata
+starts no engine, loads no model and grants no admission or capacity.
 `engine:remote-inspect-model` uses the existing pinned POST
 `/v1/engine-settings/inspect` read route; the target broker supplies node identity.
 The remote reply is strictly decoded and checked against the requested identity.

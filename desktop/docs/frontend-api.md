@@ -40,6 +40,15 @@ bindings, conversion provenance and build/source/preset digests remain target
 authority. A receipt records an attempt, while the snapshot reports desired,
 effective, coupled and observed state separately.
 
+Inspection may also supply `measurementIdentity: {digest, complete}` for the
+target's applied semantic configuration, physical hardware and observed realized
+execution. A complete identity has a lowercase SHA-256 hex digest; explicit
+unknown is `{digest:'',complete:false}`. Omission remains unavailable. The bridge
+strictly validates and detaches this bounded value. Stale manager, settings,
+policy, profile or memory observations withdraw completeness at the target.
+It grants no launch, capacity, admission or qualification authority and does not
+enable routing scores.
+
 Inspection also returns optional service-owned `loadObservation`, describing
 rounded native buffers and the frozen estimate for that captured load.
 `parseInspectModel` strictly validates and detaches supplied summaries; a missing

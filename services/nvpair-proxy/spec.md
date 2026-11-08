@@ -245,6 +245,15 @@ digest and model content digests. It is decoded strictly, validated, answered
 previous identity kept. The capability is derived from the active policy, that
 identity and the qualification registry read once at start from the `appdir`
 artifact `local-qualification.json` (absent: empty; invalid: empty and logged).
+The same control optionally carries `measurements`, a separate engine/exact
+profile-key map. Each value has `identity:{digest,complete}`, `observedBootNs`
+(canonical same-host boot nanoseconds) and `validityMs` (positive, at most 5000).
+The whole map replaces the prior measurement snapshot; omission withdraws it.
+Measurement lookups subtract boot-clock transit from the original observation
+budget and refuse expired or invalid-clock values, including replayed values.
+The map is bounded to 64 engines and 128 profiles, is process-local, and never
+enters `EngineIdentity`, qualification, capacity generations or admission.
+This control foundation does not score routes or change routing order.
 The accepted artifact schema integer is `2`: every entry requires non-null
 `shapes` with boolean `tools`, an array `structuredOutput` of distinct
 `json_object`/`json_schema` names, and boolean `reasoningReplay`. Replay is
