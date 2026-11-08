@@ -2218,7 +2218,9 @@ func TestModelSettingsEstimateInspectionSharesBudget(t *testing.T) {
 		}
 		return calculateModelEstimate(estimateCtx, in)
 	}
-	if _, err := f.ex.InspectModel(ctx, f.request); err != nil {
+	// Native help discovery has its own earlier budget, and the inspection budget
+	// starts after it, so it would move the first deadline check off that start.
+	if _, err := f.ex.inspectModel(ctx, f.request, false); err != nil {
 		t.Fatal(err)
 	}
 	if !called {
