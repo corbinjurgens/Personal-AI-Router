@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"reflect"
 	"slices"
 	"time"
@@ -30,6 +31,9 @@ type performanceConfiguration struct {
 
 func (b *Broker) wakePerformanceConfiguration() {
 	if p := b.performance; p != nil {
+		p.mu.Lock()
+		p.syncConfigurationLocked()
+		p.mu.Unlock()
 		performanceSignal(p.configurationWake)
 	}
 }
@@ -212,6 +216,11 @@ func (b *Broker) refreshPerformanceConfigurations(parent context.Context) {
 	after := r.measurementStatesLocked()
 	r.mu.Unlock()
 	if !reflect.DeepEqual(before, after) {
+		if p := b.performance; p != nil {
+			p.mu.Lock()
+			p.syncConfigurationLocked()
+			p.mu.Unlock()
+		}
 		b.schedulePolicyPush(pushIdentity)
 	}
 }
@@ -223,4 +232,37 @@ func (b *Broker) currentMeasurementIdentities() map[string]map[string]nodepolicy
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.measurementStatesLocked()
+}
+
+// A detached read from the existing identity owner. Only the generation fence
+// is retained by performanceRuntime, never a second configuration cache.
+type performanceConfigurationSnapshot struct {
+	token      [32]byte
+	identities map[string]map[string]nodepolicy.MeasurementIdentity
+}
+
+func (b *Broker) performanceConfigurationSnapshot() performanceConfigurationSnapshot {
+	r := b.nodePolicyRuntime()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	snapshot := performanceConfigurationSnapshot{identities: map[string]map[string]nodepolicy.MeasurementIdentity{}}
+	for engine, profiles := range r.measurementStatesLocked() {
+		for key, state := range profiles {
+			if !state.Identity.Complete || state.Validate() != nil {
+				continue
+			}
+			if snapshot.identities[engine] == nil {
+				snapshot.identities[engine] = map[string]nodepolicy.MeasurementIdentity{}
+			}
+			snapshot.identities[engine][key] = state.Identity
+		}
+	}
+	// Refresh timestamps do not change applicability or renew sample age. Owner
+	// invalidations still fence an ABA transition during a durable write.
+	raw := settingsJSON(struct {
+		Generation uint64
+		Identities map[string]map[string]nodepolicy.MeasurementIdentity
+	}{r.measurementGeneration, snapshot.identities})
+	snapshot.token = sha256.Sum256(raw)
+	return snapshot
 }

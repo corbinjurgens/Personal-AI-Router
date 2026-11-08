@@ -780,6 +780,7 @@ func (b *Broker) persistPolicy(check func(stored nodepolicy.Policy) error, prepa
 	r.activationErr = ""
 	r.mu.Unlock()
 	b.engineConfigMu.Unlock()
+	b.wakePerformanceConfiguration()
 	b.publishNodeProjection()
 	// A listener the policy just enabled has no proxy to activate it in until
 	// the background start has replayed the policy, so its revision is pending

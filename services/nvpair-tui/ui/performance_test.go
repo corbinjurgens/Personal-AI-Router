@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"nvpair-shared/modeldownload"
+	"nvpair-shared/nodepolicy"
 	"nvpair-shared/performancewire"
 	"nvpair-tui/rpc"
 
@@ -42,6 +43,38 @@ func performanceFixture(t *testing.T) *performanceProjection {
 		t.Fatalf("decode fixture: %v", err)
 	}
 	return p
+}
+
+func TestPerformanceConfigurationApplicabilityProjection(t *testing.T) {
+	p := performanceFixture(t)
+	if p.Local.Summary.Entries[0].Applicability != performancewire.ApplicabilityUnknown {
+		t.Fatal("absent old provenance did not decode as unknown")
+	}
+	e := &p.Local.Summary.Entries[0]
+	e.Profile.EngineFamily = "llamacpp"
+	e.Provenance = &performancewire.Provenance{Configuration: nodepolicy.MeasurementIdentity{Complete: true, Digest: strings.Repeat("a", 64)}, EngineFamily: "llamacpp", API: "/v1/chat/completions", ExtractorSchema: "daily-schema"}
+	e.Applicability = performancewire.ApplicabilityHistorical
+	raw := performanceJSON(t, p)
+	got, err := decodePerformanceProjection(raw)
+	if err != nil || got.Local.Summary.Entries[0].Applicability != performancewire.ApplicabilityHistorical || got.Local.Summary.Entries[0].Provenance.Configuration.Digest != strings.Repeat("a", 64) {
+		t.Fatalf("projection = %+v, %v", got, err)
+	}
+	for _, tc := range []struct{ name, old, replacement string }{
+		{"private provenance", `"extractorSchema":"daily-schema"`, `"extractorSchema":"daily-schema","options":{"secret":"private"}`},
+		{"incomplete configuration", `"complete":true`, `"complete":false`},
+		{"invalid applicability", `"applicability":"historical"`, `"applicability":"fresh"`},
+		{"oversize schema", `"extractorSchema":"daily-schema"`, `"extractorSchema":"` + strings.Repeat("s", 129) + `"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if !strings.Contains(string(raw), tc.old) {
+				t.Fatal("missing mutation target")
+			}
+			changed := strings.Replace(string(raw), tc.old, tc.replacement, 1)
+			if _, err := decodePerformanceProjection([]byte(changed)); err == nil {
+				t.Fatal("accepted invalid applicability/provenance")
+			}
+		})
+	}
 }
 
 func performanceJSON(t *testing.T, p *performanceProjection) json.RawMessage {

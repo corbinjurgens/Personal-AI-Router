@@ -50,6 +50,11 @@ func (p *Proxy) setModelAndMeasurementIdentities(in nodepolicy.SetModelIdentityP
 func (p *Proxy) currentMeasurementIdentity(engine, profileKey string) nodepolicy.MeasurementIdentity {
 	p.measurementMu.Lock()
 	defer p.measurementMu.Unlock()
+	return p.currentMeasurementIdentityLocked(engine, profileKey)
+}
+
+// Caller holds measurementMu, before any admission lock.
+func (p *Proxy) currentMeasurementIdentityLocked(engine, profileKey string) nodepolicy.MeasurementIdentity {
 	state, ok := p.measurements[engine][profileKey]
 	if !ok || state.Validate() != nil || !state.Identity.Complete {
 		return nodepolicy.MeasurementIdentity{}
@@ -120,6 +125,7 @@ func (p *Proxy) enqueuePerformance(s performancewire.Sample) {
 	s.Profile.EngineFamily = strings.Clone(s.Profile.EngineFamily)
 	s.Profile.Quantization = strings.Clone(s.Profile.Quantization)
 	s.Profile.ContextTokens = performanceScalarCopy(s.Profile.ContextTokens)
+	s.Provenance = s.Provenance.Clone()
 	s.Outcome = performancewire.Outcome(strings.Clone(string(s.Outcome)))
 	s.ProtocolComplete = performanceScalarCopy(s.ProtocolComplete)
 	s.AdmissionWaitMs = performanceScalarCopy(s.AdmissionWaitMs)
@@ -197,7 +203,10 @@ func (f *facade) performanceFamily() string {
 	return family
 }
 
-type performanceIdentityTuple struct{ run, settings, launch, kind, model, api, schema, host, engine, normalizedModel string }
+type performanceIdentityTuple struct {
+	run, settings, launch, kind, model, api, schema, host, engine, normalizedModel string
+	configuration                                                                  nodepolicy.MeasurementIdentity
+}
 
 func (f *facade) performanceCurrentIdentity(model, api string) (performancewire.ProfileKey, performanceExtractQualification, performanceIdentityTuple, bool) {
 	var tuple performanceIdentityTuple
@@ -213,6 +222,9 @@ func (f *facade) performanceCurrentIdentity(model, api string) (performancewire.
 	}
 	a := f.host.admission
 	normalized := f.profile.normalizeModel(model)
+	f.host.measurementMu.Lock()
+	defer f.host.measurementMu.Unlock()
+	configuration := f.host.currentMeasurementIdentityLocked(f.profile.Name, normalized)
 	a.mu.Lock()
 	id, exists := a.strict.identity[f.profile.Name]
 	digest, found := a.modelDigestLocked(id, admKey{engine: f.profile.Name, model: normalized})
@@ -228,7 +240,7 @@ func (f *facade) performanceCurrentIdentity(model, api string) (performancewire.
 	if !found {
 		kind, modelIdentity = "name", normalized
 	}
-	tuple = performanceIdentityTuple{run, settings, launch, kind, modelIdentity, api, family + ":" + q.SchemaID, host, f.profile.Name, normalized}
+	tuple = performanceIdentityTuple{run, settings, launch, kind, modelIdentity, api, family + ":" + q.SchemaID, host, f.profile.Name, normalized, configuration}
 	key := performancewire.ProfileKey{Host: host, Engine: tuple.engine, Model: tuple.normalizedModel}
 	return key, q, tuple, true
 }
@@ -252,6 +264,14 @@ func (f *facade) performanceFingerprintOwned(model, api string, body []byte) (pe
 		h.Write([]byte(":"))
 		performanceHashString(h, []byte(field.value))
 	}
+	// Explicit unknown is a distinct partition, never mixed with a complete
+	// configuration even when all older aggregation inputs match.
+	h.Write([]byte(`,"Configuration":`))
+	configuration := tuple.configuration.Digest
+	if !tuple.configuration.Complete {
+		configuration = "unknown"
+	}
+	performanceHashString(h, []byte(configuration))
 	h.Write([]byte(`,"Options":`))
 	if !performanceOptionsWrite(body, q.EngineFamily, h) {
 		return key, q, tuple, false
@@ -970,7 +990,7 @@ func (a *performanceAttempt) finish(sc *statusCapture, returned bool) {
 			m.Outcome = performancewire.OutcomeCompleted // unobserved protocol stays nil
 		}
 	}
-	a.f.host.enqueuePerformance(performancewire.Sample{Key: a.key, Profile: performancewire.Profile{EngineFamily: a.qualification.EngineFamily}, Measurement: m})
+	a.f.host.enqueuePerformance(performancewire.Sample{Key: a.key, Profile: performancewire.Profile{EngineFamily: a.qualification.EngineFamily}, Provenance: &performancewire.Provenance{Configuration: a.identity.configuration, EngineFamily: a.qualification.EngineFamily, API: a.api, ExtractorSchema: a.qualification.SchemaID}, Measurement: m})
 }
 
 // Metadata merges independent fields, never counters. Conflicts are sticky.

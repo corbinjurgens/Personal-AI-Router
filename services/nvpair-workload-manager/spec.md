@@ -239,6 +239,15 @@ Response: `200 OK`.
 
 ### 7.4 Performance summary transport
 
+Entries include optional bounded `provenance` with `configuration:{digest,complete}`,
+`engineFamily`, `api`, `extractorSchema`, and destination-attested `applicability`
+(`current`, `historical`, `unknown`). Absent old metadata means unknown history.
+Current/historical requires complete provenance. Both intake paths use the same
+shared strict decoder and reject unknown/private fields or out-of-bound values.
+Configuration-only changes arrive as new durable sender revisions; equal or
+older frames cannot revive an accepted withdrawal. The relay does not derive
+configuration currentness from freshness, admission or the aggregation hash.
+
 This is a separate bounded transport for own performance aggregates, not a
 workload lifecycle event or sample stream. The version 2 schema and strict
 validation limits live in `shared/performancewire/wire.go`; the manager does not

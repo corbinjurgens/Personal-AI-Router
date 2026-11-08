@@ -282,12 +282,16 @@ func (b *Broker) forgetSettingsIdentity(engine string) {
 	r.measurementGeneration++
 	delete(r.measurementConfigurations, engine)
 	r.mu.Unlock()
+	b.wakePerformanceConfiguration()
 	go b.refreshStrictAdvertisement()
 }
 
 // Confirm the current identity without holding engineConfigMu across the push
 // slot: proxy replay takes that slot before reading the switch journal.
 func (b *Broker) pushModelIdentityConfirmed(ctx context.Context) error {
+	// Also covers model-content mutation, whose owner withdraws engineIdentity
+	// before requesting this confirmed push.
+	b.wakePerformanceConfiguration()
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
 	bound := r.activationBoundLocked()

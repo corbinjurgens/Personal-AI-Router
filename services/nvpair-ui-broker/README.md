@@ -2129,6 +2129,29 @@ a durable `Store.Checkpoint()` before publication, including when no sample
 changed. A current local admission epoch change also forces a checkpoint.
 These restart/authority checkpoints are separate from the dirty-save timer.
 
+Measurement-configuration changes also checkpoint through this owner. The
+existing configuration observation owner supplies detached engine/exact-profile
+identities; performance retains only a generation fence, not another
+configuration cache. Save completion and summary freeze recheck this fence.
+Configuration withdrawal immediately blocks the prior publication and local
+eligibility; stale saves and failed checkpoints cannot make evidence current.
+Only a clean checkpoint for the current generation can publish new applicability.
+
+Samples, persisted per-key metadata and entries carry optional bounded provenance:
+`configuration:{digest,complete}`, `engineFamily`, `api` and `extractorSchema`.
+`Store.Record` rejects conflicting provenance or profile metadata for a retained
+key before accepting its sequence or changing statistics. Independent fingerprint
+partitions are never pooled. The existing snapshot layout accepts absent old
+metadata as visible unknown history, without persisting a current flag.
+
+Local projections and frozen summaries compute `applicability` (`current`,
+`historical`, `unknown`) from the destination's current complete identity for
+the exact engine/profile. Complete equality permits restart reuse after fresh
+reobservation; mismatch is historical and absent/expired observation is unknown.
+API and extractor schema remain separate compatibility dimensions. Peer entries
+retain this destination attestation through the existing authority, revision,
+tombstone and freshness checks; receivers do not infer applicability from age.
+
 Only a successful durable save/checkpoint becomes eligible for publication.
 A failed write keeps the live local view available and sets persistence
 degraded; even a replacement adopted by the store with a durability error is

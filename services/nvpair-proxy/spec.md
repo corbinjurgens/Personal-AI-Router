@@ -71,12 +71,23 @@ settings fingerprint, launch digest and model-content digest when available), no
 effective request options, API and extractor schema. Request content is excluded.
 Models without a content digest use the normalized model name with an explicit
 identity kind for measurement only; this grants no strict or hybrid eligibility.
-Replacing a model file under the same name within one engine run is not detected.
+Replacing a model file under the same name within one engine run is not detected
+when measurement configuration is unknown.
 Unknown top-level overrides or missing required identity suppress observations;
 there is no placeholder digest. Finalization revalidates the identity/key and
 drops stale executions rather than relabeling them. Descriptor `Family` selects
 the pinned llama.cpp or Strata schema. Strengthened engine identity and
 native acceptance remain later gates owned by their respective units.
+
+The fingerprint also includes `Configuration`, the complete measurement digest
+or the literal `unknown` partition. This applicability identity is independent
+of the run/settings/launch/model/options aggregation inputs. Sample `provenance`
+contains only `configuration:{digest,complete}`, `engineFamily`, `api` and
+`extractorSchema`, with shared bounds. Capture and finalization compare the
+measurement identity as well as the existing strict tuple. Read it under
+`measurementMu` before acquiring the admission lock; never invoke its getter
+under `admission.mu`. Queue insertion detaches every provenance scalar/string.
+No raw settings, request options, artifact paths or request content enter it.
 
 The existing SC SSE reader invokes a synchronous numeric extractor only
 for validated genuine upstream JSON objects, including empty-choices usage

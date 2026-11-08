@@ -8,14 +8,120 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"nvpair-shared/nodepolicy"
 	"nvpair-shared/performancewire"
 )
 
 const testHost = "host-a"
+
+func configurationSample(digest string) performancewire.Sample {
+	return performancewire.Sample{Scope: performancewire.ScopeLocalExecution, Producer: "proxy-1", Seq: 1, Key: testKey("m"), Profile: performancewire.Profile{EngineFamily: "llamacpp"}, Provenance: &performancewire.Provenance{Configuration: nodepolicy.MeasurementIdentity{Complete: true, Digest: digest}, EngineFamily: "llamacpp", API: "/v1/chat/completions", ExtractorSchema: "daily-schema"}, Measurement: completed()}
+}
+
+func TestPerformanceStoreRejectsConflictingKeyProvenance(t *testing.T) {
+	for _, change := range []string{"configuration", "family", "API", "schema", "missing", "profile"} {
+		t.Run(change, func(t *testing.T) {
+			s, _ := newTestStore(t, "")
+			sample := configurationSample(strings.Repeat("a", 64))
+			if err := s.Record(sample); err != nil {
+				t.Fatal(err)
+			}
+			before := s.Local()
+			sample.Seq = 2
+			sample.Provenance = sample.Provenance.Clone()
+			switch change {
+			case "configuration":
+				sample.Provenance.Configuration.Digest = strings.Repeat("b", 64)
+			case "family":
+				sample.Provenance.EngineFamily = "strata"
+				sample.Profile.EngineFamily = "strata"
+			case "API":
+				sample.Provenance.API = "/v1/completions"
+			case "schema":
+				sample.Provenance.ExtractorSchema = "new-schema"
+			case "missing":
+				sample.Provenance = nil
+			case "profile":
+				sample.Profile.Quantization = "Q8"
+			}
+			if err := s.Record(sample); err == nil {
+				t.Fatal("conflicting provenance accepted")
+			}
+			if got := s.Local(); !reflect.DeepEqual(got, before) {
+				t.Fatalf("conflict relabeled history: %+v", got)
+			}
+			original := configurationSample(strings.Repeat("a", 64))
+			original.Seq = 2
+			if err := s.Record(original); err != nil {
+				t.Fatalf("rejected metadata consumed producer sequence: %v", err)
+			}
+		})
+	}
+}
+
+func TestPerformanceStorePartitionAndMetadataOwnership(t *testing.T) {
+	s, _ := newTestStore(t, "")
+	a := configurationSample(strings.Repeat("a", 64))
+	a.Key.Fingerprint = "configuration-a"
+	a.EngineDecodeNs = ptr[int64](1000000000)
+	a.EngineDecodeTokensPerSecond = ptr(200.0)
+	if err := s.Record(a); err != nil {
+		t.Fatal(err)
+	}
+	a.Provenance.Configuration.Digest = strings.Repeat("b", 64)
+	b := configurationSample(strings.Repeat("b", 64))
+	b.Seq = 2
+	b.Key.Fingerprint = "configuration-b"
+	b.EngineDecodeNs = ptr[int64](1000000000)
+	b.EngineDecodeTokensPerSecond = ptr(20.0)
+	if err := s.Record(b); err != nil {
+		t.Fatal(err)
+	}
+	entries := s.Local().Entries
+	if len(entries) != 2 || entries[0].Samples != 1 || entries[1].Samples != 1 || entries[0].Provenance.Configuration.Digest != strings.Repeat("a", 64) || entries[0].EngineDecode.TokensPerSecond != 200 || entries[1].EngineDecode.TokensPerSecond != 20 {
+		t.Fatalf("mixed statistics: %+v", entries)
+	}
+	entries[0].Provenance.Configuration.Digest = "mutated"
+	if got := s.Local().Entries[0].Provenance.Configuration.Digest; got != strings.Repeat("a", 64) {
+		t.Fatalf("projection aliases retained metadata: %q", got)
+	}
+}
+
+func TestPerformanceSummaryReservesApplicabilityPayloadBound(t *testing.T) {
+	s, _ := newTestStore(t, "")
+	for i := 0; i < performancewire.MaxEntries; i++ {
+		sample := configurationSample(strings.Repeat("a", 64))
+		sample.Seq = uint64(i + 1)
+		sample.Key.Engine = strings.Repeat("e", 128)
+		sample.Key.Model = strings.Repeat("m", 256)
+		sample.Key.Fingerprint = fmt.Sprintf("%0128d", i)
+		sample.Profile.EngineFamily = strings.Repeat("f", 128)
+		sample.Profile.Quantization = strings.Repeat("q", 64)
+		sample.Provenance.EngineFamily = sample.Profile.EngineFamily
+		sample.Provenance.ExtractorSchema = strings.Repeat("s", 128)
+		if err := s.Record(sample); err != nil {
+			t.Fatal(err)
+		}
+	}
+	summary := s.Local()
+	if summary.OmittedEntries == 0 || len(summary.Entries) == 0 {
+		t.Fatal("maximum provenance fixture did not exercise payload trimming")
+	}
+	summary.Revision = 1
+	summary.AdmissionIncarnation = "1"
+	for i := range summary.Entries {
+		summary.Entries[i].Applicability = performancewire.ApplicabilityHistorical
+	}
+	raw, err := performancewire.EncodeSummary(summary)
+	if err != nil || len(raw) > performancewire.MaxPayloadBytes {
+		t.Fatalf("destination applicability exceeded payload budget: bytes=%d error=%v", len(raw), err)
+	}
+}
 
 func ptr[T any](v T) *T { return &v }
 

@@ -324,8 +324,8 @@ func TestPerformanceFingerprint(t *testing.T) {
 	if !ok {
 		t.Fatal("valid projection refused")
 	}
-	// Pinned on unchanged dc56af66 before name-based measurement was added.
-	const digestFingerprint = "cd191dc9cda763d54e91953dde3a7b8264ac5172ac492d32d14e73b2132bda97"
+	// Existing digest-backed inputs plus the explicit unknown configuration partition.
+	const digestFingerprint = "328e611b0811a13faace85f64ade35fa950404ea69dbf59fb9fb02e235755940"
 	if key.Fingerprint != digestFingerprint {
 		t.Fatalf("digest-backed fingerprint=%s, want %s", key.Fingerprint, digestFingerprint)
 	}
@@ -854,9 +854,9 @@ func TestPerformanceFingerprintMatchesLegacyJSONHash(t *testing.T) {
 			}
 		}
 		encoded, err := json.Marshal(struct {
-			Run, Settings, Launch, Model, API, Schema string
-			Options                                   map[string]any
-		}{"runtime-1", strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64), routeChatCompletions, "llamacpp:llamacpp-b12020-0ec4027a", options})
+			Run, Settings, Launch, Model, API, Schema, Configuration string
+			Options                                                  map[string]any
+		}{"runtime-1", strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64), routeChatCompletions, "llamacpp:llamacpp-b12020-0ec4027a", "unknown", options})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -883,6 +883,84 @@ func TestPerformanceFingerprintMatchesLegacyJSONHash(t *testing.T) {
 				t.Fatalf("legacy fingerprint changed: got %s want %s", key.Fingerprint, want)
 			}
 		})
+	}
+}
+
+func setPerformanceMeasurement(t *testing.T, p *Proxy, digest string) {
+	t.Helper()
+	boot, err := noderec.MemoryBootClock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var measurements map[string]map[string]nodepolicy.MeasurementState
+	if digest != "" {
+		measurements = map[string]map[string]nodepolicy.MeasurementState{"llamacpp": {"m": {Identity: nodepolicy.MeasurementIdentity{Complete: true, Digest: digest}, ObservedBootNS: strconv.FormatUint(boot, 10), ValidityMS: 5000}}}
+	}
+	p.setModelAndMeasurementIdentities(nodepolicy.SetModelIdentityParams{Engines: map[string]nodepolicy.EngineIdentity{"llamacpp": performanceIdentity()}, Measurements: measurements})
+}
+
+func TestPerformanceFingerprintPartitionsConfigurationAndUnknown(t *testing.T) {
+	p := performanceProxy(t, "llamacpp")
+	body := []byte(`{"model":"m","stream":true}`)
+	key := func() performancewire.ProfileKey {
+		k, _, ok := p.soleFacade().performanceFingerprint("m", routeChatCompletions, body)
+		if !ok {
+			t.Fatal("fingerprint missing")
+		}
+		return k
+	}
+	unknown := key()
+	setPerformanceMeasurement(t, p, strings.Repeat("d", 64))
+	first := key()
+	setPerformanceMeasurement(t, p, strings.Repeat("e", 64))
+	second := key()
+	if first.Fingerprint == unknown.Fingerprint || first.Fingerprint == second.Fingerprint || unknown.Fingerprint == second.Fingerprint {
+		t.Fatal("configuration statistics share a partition")
+	}
+	setPerformanceMeasurement(t, p, "")
+	if got := key(); got != unknown {
+		t.Fatalf("unknown partition = %+v, want %+v", got, unknown)
+	}
+}
+
+func TestPerformanceLateConfigurationSampleIsDropped(t *testing.T) {
+	for _, change := range []string{"replacement", "withdrawal", "expiry"} {
+		t.Run(change, func(t *testing.T) {
+			p := performanceProxy(t, "llamacpp")
+			setPerformanceMeasurement(t, p, strings.Repeat("d", 64))
+			a := p.soleFacade().newPerformanceAttempt(context.Background(), "m", routeChatCompletions, []byte(`{"model":"m","stream":true}`), 0)
+			if a == nil || !a.identity.configuration.Complete {
+				t.Fatal("missing admitted configuration")
+			}
+			a.start = time.Now()
+			switch change {
+			case "replacement":
+				setPerformanceMeasurement(t, p, strings.Repeat("e", 64))
+			case "withdrawal":
+				setPerformanceMeasurement(t, p, "")
+			case "expiry":
+				p.measurementMu.Lock()
+				state := p.measurements["llamacpp"]["m"]
+				state.ObservedBootNS = "0"
+				p.measurements["llamacpp"]["m"] = state
+				p.measurementMu.Unlock()
+			}
+			a.finish(&statusCapture{}, true)
+			if len(performanceSamples(p)) != 0 || p.performance.drops[2] != 1 {
+				t.Fatal("late sample retained stale applicability")
+			}
+		})
+	}
+}
+
+func TestPerformanceQueueOwnsConfigurationProvenance(t *testing.T) {
+	p := performanceProxy(t, "llamacpp")
+	s := performancewire.Sample{Key: performancewire.ProfileKey{Host: "destination", Engine: "llamacpp", Model: "m", Fingerprint: "fp"}, Profile: performancewire.Profile{EngineFamily: "llamacpp"}, Provenance: &performancewire.Provenance{Configuration: nodepolicy.MeasurementIdentity{Complete: true, Digest: strings.Repeat("d", 64)}, EngineFamily: "llamacpp", API: routeChatCompletions, ExtractorSchema: performanceExtractLlamaSchema}, Measurement: performancewire.Measurement{Outcome: performancewire.OutcomeCompleted}}
+	p.enqueuePerformance(s)
+	s.Provenance.Configuration.Digest = strings.Repeat("e", 64)
+	got := performanceOne(t, p)
+	if got.Provenance == nil || got.Provenance.Configuration.Digest != strings.Repeat("d", 64) || got.Provenance.API != "/v1/chat/completions" || got.Provenance.ExtractorSchema != "llamacpp-b12020-0ec4027a" {
+		t.Fatalf("queued provenance = %+v", got.Provenance)
 	}
 }
 

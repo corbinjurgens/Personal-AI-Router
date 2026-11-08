@@ -98,6 +98,8 @@ function entry(value: JsonValue, host: string, maxSamples: number): PerformanceE
     const obj = object(value, [
         'key',
         'profile',
+        'provenance',
+        'applicability',
         'samples',
         'completed',
         'incomplete',
@@ -121,6 +123,47 @@ function entry(value: JsonValue, host: string, maxSamples: number): PerformanceE
     const key = object(obj.key, ['host', 'engine', 'model', 'fingerprint'])
     if (id(key.host) !== host) throw new Error('host')
     const profile = object(obj.profile, ['engineFamily', 'quantization', 'contextTokens'])
+    let provenance: PerformanceEntry['provenance']
+    if (obj.provenance != null) {
+        const source = object(obj.provenance, [
+            'configuration',
+            'engineFamily',
+            'api',
+            'extractorSchema'
+        ])
+        const configuration = object(source.configuration, ['digest', 'complete'])
+        const complete = bool(configuration.complete)
+        const digest = text(configuration.digest, 64, false)
+        if (complete ? !/^[a-f0-9]{64}$/.test(digest) : digest !== '')
+            throw new Error('configuration')
+        const family = id(source.engineFamily)
+        if (family !== profile.engineFamily) throw new Error('measurement family')
+        const api = text(source.api, 128)
+        if (
+            ![
+                '/v1/chat/completions',
+                '/v1/completions',
+                '/v1/embeddings',
+                '/v1/responses'
+            ].includes(api)
+        )
+            throw new Error('measurement api')
+        provenance = {
+            configuration: { digest, complete },
+            engineFamily: family,
+            api,
+            extractorSchema: id(source.extractorSchema)
+        }
+    }
+    const applicability = obj.applicability ?? 'unknown'
+    if (
+        applicability !== 'current' &&
+        applicability !== 'historical' &&
+        applicability !== 'unknown'
+    )
+        throw new Error('applicability')
+    if (applicability !== 'unknown' && !provenance?.configuration.complete)
+        throw new Error('applicability configuration')
     const samples = count(obj.samples, maxSamples, 1)
     const completed = count(obj.completed, samples)
     const incomplete = count(obj.incomplete, completed)
@@ -130,6 +173,8 @@ function entry(value: JsonValue, host: string, maxSamples: number): PerformanceE
     if (obj.outputTokens != null && completed - incomplete < 1) throw new Error('output tokens')
     const newestAgeMs = count(obj.newestAgeMs)
     return {
+        ...(provenance ? { provenance } : {}),
+        applicability,
         key: {
             host,
             engine: id(key.engine),

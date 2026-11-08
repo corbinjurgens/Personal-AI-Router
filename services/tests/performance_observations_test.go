@@ -255,6 +255,42 @@ func TestPerformanceObservationNativeRates(t *testing.T) {
 	test("Strata preserves native work rate without usage option", "strata", "data: "+observationStrataFinal+"\n\ndata: [DONE]\n\n", false, 55, 400000000)
 }
 
+func TestPerformanceObservationConfigurationPartitions(t *testing.T) {
+	upstream := observationUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		if _, err := io.WriteString(w, "data: "+observationLlamaFinal+"\n\ndata: [DONE]\n\n"); err != nil {
+			t.Error(err)
+		}
+	})
+	base := t.TempDir()
+	p := observationStartProxy(t, base, filepath.Join(base, "cluster"), "destination-b", "llamacpp", upstream.URL)
+	measure := func(digest string, count int) performancewire.Sample {
+		t.Helper()
+		identity := observationIdentity("llamacpp")
+		if digest != "" {
+			boot, err := noderec.MemoryBootClock()
+			if err != nil {
+				t.Fatal(err)
+			}
+			identity.Measurements = map[string]map[string]nodepolicy.MeasurementState{"llamacpp": {observationModel: {Identity: nodepolicy.MeasurementIdentity{Complete: true, Digest: digest}, ObservedBootNS: strconv.FormatUint(boot, 10), ValidityMS: 5000}}}
+		}
+		p.rpc.call(t, nodepolicy.MethodSetModelIdentity, identity)
+		observationRead(t, observationRequest(t, p, context.Background(), true, false))
+		sample := observationWaitSamples(t, p.rpc, count)[count-1]
+		observationAssertRate(t, sample, p.host, p.engine, 40, 250000000)
+		if sample.Provenance == nil || sample.Provenance.Configuration.Digest != digest || sample.Provenance.Configuration.Complete != (digest != "") || sample.Provenance.API != "/v1/chat/completions" || sample.Provenance.EngineFamily != "llamacpp" || sample.Provenance.ExtractorSchema != "llamacpp-b12020-0ec4027a" {
+			t.Fatalf("wire provenance = %+v", sample.Provenance)
+		}
+		return sample
+	}
+	first := measure(strings.Repeat("d", 64), 1)
+	second := measure(strings.Repeat("e", 64), 2)
+	unknown := measure("", 3)
+	if first.Key.Fingerprint == second.Key.Fingerprint || first.Key.Fingerprint == unknown.Key.Fingerprint || second.Key.Fingerprint == unknown.Key.Fingerprint {
+		t.Fatal("public sample wire mixed configuration partitions")
+	}
+}
+
 func TestPerformanceObservationInvalidTimingRecovery(t *testing.T) {
 	test := func(name, invalidTimings string) {
 		t.Run(name, func(t *testing.T) {
@@ -400,9 +436,9 @@ func TestPerformanceObservationMissingIdentity(t *testing.T) {
 	// Bind the barrier to the restored EngineIdentity, not just the first frame.
 	id := observationIdentity(p.engine).Engines[p.engine]
 	encoded, err := json.Marshal(struct {
-		Run, Settings, Launch, Model, API, Schema string
-		Options                                   map[string]any
-	}{id.EngineRunID, id.SettingsFingerprint, id.LaunchDigest, id.ModelDigests[observationModel], "/v1/chat/completions", "llamacpp:llamacpp-b12020-0ec4027a", map[string]any{"stream": true}})
+		Run, Settings, Launch, Model, API, Schema, Configuration string
+		Options                                                  map[string]any
+	}{id.EngineRunID, id.SettingsFingerprint, id.LaunchDigest, id.ModelDigests[observationModel], "/v1/chat/completions", "llamacpp:llamacpp-b12020-0ec4027a", "unknown", map[string]any{"stream": true}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -987,10 +1023,10 @@ func TestPerformanceObservationDigestlessLlamaStoredByBroker(t *testing.T) {
 	sample := observationWaitBrokerSamples(t, b, 1)[0]
 	observationAssertRate(t, sample, p.host, "llamacpp", 40, 250000000)
 	canonical, err := json.Marshal(struct {
-		Run, Settings, Launch, Kind, Model, API, Schema string
-		Options                                         map[string]any
+		Run, Settings, Launch, Kind, Model, API, Schema, Configuration string
+		Options                                                        map[string]any
 	}{id.EngineRunID, id.SettingsFingerprint, id.LaunchDigest, "name", observationModel,
-		"/v1/chat/completions", "llamacpp:llamacpp-b12020-0ec4027a", map[string]any{"stream": true}})
+		"/v1/chat/completions", "llamacpp:llamacpp-b12020-0ec4027a", "unknown", map[string]any{"stream": true}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1114,6 +1150,8 @@ func observationSummary(t *testing.T, sample performancewire.Sample, revision in
 	t.Helper()
 	observationAssertRate(t, sample, sample.Key.Host, "llamacpp", 40, 250000000)
 	summary := performancewire.Summary{Version: performancewire.SchemaVersion, MeasuringHost: sample.Key.Host, AdmissionIncarnation: "1", Revision: revision, Window: performancewire.Window{MaxAgeMs: performancewire.RetentionMs, MaxSamplesPerKey: performancewire.MaxSamplesPerKey}, Entries: []performancewire.Entry{{Key: sample.Key, Profile: sample.Profile, Samples: 1, Completed: 1, NewestObservedAtMs: time.Now().UnixMilli(), EngineDecode: &performancewire.ReportedRate{Samples: 1, DurationNs: *sample.EngineDecodeNs, TokensPerSecond: *sample.EngineDecodeTokensPerSecond}}}}
+	summary.Entries[0].Provenance = sample.Provenance.Clone()
+	summary.Entries[0].Applicability = performancewire.ApplicabilityUnknown
 	if err := summary.Validate(); err != nil {
 		t.Fatal(err)
 	}

@@ -10,6 +10,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"nvpair-shared/nodepolicy"
 )
 
 func ptr[T any](v T) *T { return &v }
@@ -38,6 +40,7 @@ func validSample() Sample {
 
 func validEntry() Entry {
 	return Entry{
+		Applicability:      ApplicabilityUnknown,
 		Key:                validSample().Key,
 		Samples:            3,
 		Completed:          2,
@@ -48,6 +51,75 @@ func validEntry() Entry {
 		NewestObservedAtMs: 1_760_000_000_000,
 		FirstBodyMs:        &Distribution{Samples: 1, Median: 50, P95: 50},
 		Decode:             &Rate{Samples: 1, Tokens: 100, DurationNs: 1_000_000_000, TokensPerSecond: 100},
+	}
+}
+
+func TestPerformanceConfigurationProvenanceRoundTrip(t *testing.T) {
+	s := validSummary()
+	s.Entries[0].Profile.EngineFamily = "llamacpp"
+	s.Entries[0].Provenance = &Provenance{Configuration: nodepolicy.MeasurementIdentity{Complete: true, Digest: strings.Repeat("a", 64)}, EngineFamily: "llamacpp", API: "/v1/chat/completions", ExtractorSchema: "daily-schema"}
+	s.Entries[0].Applicability = ApplicabilityCurrent
+	raw, err := EncodeSummary(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := DecodeSummary(raw)
+	if err != nil || !reflect.DeepEqual(got, s) {
+		t.Fatalf("round trip = %+v, %v", got, err)
+	}
+	var root struct {
+		Entries []struct {
+			Provenance map[string]json.RawMessage `json:"provenance"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(raw, &root); err != nil {
+		t.Fatal(err)
+	}
+	fields := root.Entries[0].Provenance
+	if len(fields) != 4 || fields["configuration"] == nil || fields["engineFamily"] == nil || fields["api"] == nil || fields["extractorSchema"] == nil {
+		t.Fatalf("privacy keys: %v", fields)
+	}
+	for _, tc := range []struct{ name, old, replacement string }{
+		{"partial digest", strings.Repeat("a", 64), "partial"},
+		{"missing completeness", `"complete":true`, `"other":true`},
+		{"null configuration", `"configuration":{"digest":"` + strings.Repeat("a", 64) + `","complete":true}`, `"configuration":null`},
+		{"private configuration", `"complete":true`, `"complete":true,"options":{"secret":"private"}`},
+		{"private provenance", `"extractorSchema":"daily-schema"`, `"extractorSchema":"daily-schema","prompt":"private"`},
+		{"unknown applicability", `"applicability":"current"`, `"applicability":"fresh"`},
+		{"API query", `"api":"/v1/chat/completions"`, `"api":"/v1/chat/completions?key=secret"`},
+		{"oversize schema", `"extractorSchema":"daily-schema"`, `"extractorSchema":"` + strings.Repeat("s", 129) + `"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			changed := bytesReplacePerformance(t, raw, tc.old, tc.replacement)
+			if _, err := DecodeSummary(changed); err == nil {
+				t.Fatal("accepted invalid provenance")
+			}
+		})
+	}
+}
+
+func bytesReplacePerformance(t *testing.T, raw []byte, old, replacement string) []byte {
+	t.Helper()
+	if !strings.Contains(string(raw), old) {
+		t.Fatalf("fixture lacks %q", old)
+	}
+	return []byte(strings.Replace(string(raw), old, replacement, 1))
+}
+
+func TestPerformanceAbsentProvenanceIsUnknown(t *testing.T) {
+	s := validSummary()
+	s.Entries[0].Applicability = ""
+	raw, err := EncodeSummary(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := DecodeSummary(raw)
+	if err != nil || got.Entries[0].Provenance != nil || got.Entries[0].Applicability != ApplicabilityUnknown {
+		t.Fatalf("old metadata = %+v, %v", got, err)
+	}
+	s.Entries[0].Applicability = ApplicabilityCurrent
+	if err := s.Validate(); err == nil {
+		t.Fatal("current without provenance accepted")
 	}
 }
 

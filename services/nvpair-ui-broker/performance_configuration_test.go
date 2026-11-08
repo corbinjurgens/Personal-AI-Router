@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"reflect"
@@ -15,6 +16,7 @@ import (
 	"nvpair-shared/modelconfig"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
+	"nvpair-shared/performancewire"
 )
 
 func measurementBrokerFixture(t *testing.T) (*Broker, *fakeWorker) {
@@ -81,6 +83,165 @@ func TestMeasurementBackgroundInspectionAndReplayPreserveObservationLifetime(t *
 	}
 	if len(wire) != 2 || wire["engines"] == nil || wire["measurements"] == nil {
 		t.Fatalf("control envelope changed strict identity: %v", wire)
+	}
+}
+
+func TestPerformanceConfigurationOwnerWithdrawsImmediatelyAndReobservesUnchanged(t *testing.T) {
+	b, _ := measurementBrokerFixture(t)
+	f := newBrokerPerformanceFixture(t)
+	p := f.b.performance
+	b.performance = p
+	p.configuration = b.performanceConfigurationSnapshot
+	b.refreshPerformanceConfigurations(context.Background())
+	sample := performanceConfiguredSample(1, strings.Repeat("a", 64), "retained", 40)
+	sample.Key.Model = "exact-profile"
+	if err := p.store.Record(sample); err != nil {
+		t.Fatal(err)
+	}
+	p.flush()
+	requirePerformanceApplicability(t, p, map[string]performancewire.Applicability{"retained": performancewire.ApplicabilityCurrent})
+	prior := p.store.Stats().PublishedRevision
+	b.forgetSettingsIdentity("llamacpp")
+	p.mu.Lock()
+	withdrawn := p.checkpoint
+	p.mu.Unlock()
+	if !withdrawn {
+		t.Fatal("settings invalidation did not immediately schedule checkpoint")
+	}
+	if _, raw := p.publication(); raw != nil {
+		t.Fatal("settings invalidation left old current publication available")
+	}
+	requirePerformanceApplicability(t, p, map[string]performancewire.Applicability{"retained": performancewire.ApplicabilityUnknown})
+	// A new settings journal revision alone changes aggregation provenance,
+	// while the inspection owner can re-attest the same semantic identity.
+	b.observeSettingsIdentity([]settings.Snapshot{appliedSnapshot("llamacpp", 4)})
+	b.refreshPerformanceConfigurations(context.Background())
+	requirePerformanceApplicability(t, p, map[string]performancewire.Applicability{"retained": performancewire.ApplicabilityUnknown})
+	p.flush()
+	requirePerformanceApplicability(t, p, map[string]performancewire.Applicability{"retained": performancewire.ApplicabilityCurrent})
+	if p.store.Stats().PublishedRevision <= prior || p.store.Stats().Samples != 1 {
+		t.Fatal("reobservation did not reuse retained sample with a new durable revision")
+	}
+	_, frozen := p.publication()
+	revision := p.store.Stats().PublishedRevision
+	observed := p.store.Local().Entries[0].NewestObservedAtMs
+	b.refreshPerformanceConfigurations(context.Background())
+	p.flush()
+	_, replayed := p.publication()
+	if !bytes.Equal(frozen, replayed) || p.store.Stats().PublishedRevision != revision || p.store.Local().Entries[0].NewestObservedAtMs != observed {
+		t.Fatal("unchanged reobservation changed frozen bytes, revision or sample time")
+	}
+}
+
+func TestPerformanceApplicabilityRejectsChangedIdentityInputs(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		edit     func(*modelconfig.DiagnosticIdentity)
+		semantic string
+		want     performancewire.Applicability
+	}{
+		{name: "semantic settings and artifacts", semantic: strings.Repeat("d", 64), want: performancewire.ApplicabilityHistorical},
+		{name: "native build", edit: func(i *modelconfig.DiagnosticIdentity) { i.NativeBuildID = "sha256:" + strings.Repeat("d", 64) }, want: performancewire.ApplicabilityHistorical},
+		{name: "CPU", edit: func(i *modelconfig.DiagnosticIdentity) { i.CPUModel = "replacement CPU" }, want: performancewire.ApplicabilityHistorical},
+		{name: "total RAM", edit: func(i *modelconfig.DiagnosticIdentity) { i.TotalRAMBytes = "137438953472" }, want: performancewire.ApplicabilityHistorical},
+		{name: "GPU identity", edit: func(i *modelconfig.DiagnosticIdentity) {
+			i.GPUs[1].UUID = "replacement"
+			i.Placement[2].DeviceID = "replacement"
+		}, want: performancewire.ApplicabilityHistorical},
+		{name: "GPU total memory", edit: func(i *modelconfig.DiagnosticIdentity) { i.GPUs[1].TotalMemoryBytes = "34359738368" }, want: performancewire.ApplicabilityHistorical},
+		{name: "realized context", edit: func(i *modelconfig.DiagnosticIdentity) { i.PerSlotContext = 2048 }, want: performancewire.ApplicabilityHistorical},
+		{name: "realized slots", edit: func(i *modelconfig.DiagnosticIdentity) { i.Slots = 2 }, want: performancewire.ApplicabilityHistorical},
+		{name: "realized placement", edit: func(i *modelconfig.DiagnosticIdentity) { i.Placement = i.Placement[:1] }, want: performancewire.ApplicabilityHistorical},
+		{name: "cold native fit", edit: func(i *modelconfig.DiagnosticIdentity) { i.PerSlotContext = 0; i.Placement = nil }, want: performancewire.ApplicabilityUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, manager := measurementBrokerFixture(t)
+			f := newBrokerPerformanceFixture(t)
+			p := f.b.performance
+			b.performance = p
+			p.configuration = b.performanceConfigurationSnapshot
+			base := diagnosticIdentityFixture()
+			semantic := strings.Repeat("c", 64)
+			original := modelconfig.MeasurementFromDiagnostic(semantic, base)
+			if !original.Complete {
+				t.Fatal("missing complete positive control")
+			}
+			answer := func(identity modelconfig.MeasurementIdentity) {
+				manager.setEngineAnswer(func(method string, raw json.RawMessage) (any, string) {
+					if method != "engine:inspect-model" {
+						return nil, "unexpected inspection method"
+					}
+					return modelconfig.InspectResult{Engine: "llamacpp", ModelID: "model.gguf", Status: "resolved", Artifacts: base.Artifacts, Estimate: modelconfig.Estimate{Status: "unknown"}, MeasurementIdentity: &identity}, ""
+				})
+			}
+			answer(original)
+			b.refreshPerformanceConfigurations(context.Background())
+			sample := performanceConfiguredSample(1, original.Digest, "retained-fast", 200)
+			sample.Key.Model = "exact-profile"
+			if err := p.store.Record(sample); err != nil {
+				t.Fatal(err)
+			}
+			p.flush()
+			requirePerformanceApplicability(t, p, map[string]performancewire.Applicability{"retained-fast": performancewire.ApplicabilityCurrent})
+			if tc.edit != nil {
+				tc.edit(&base)
+			}
+			if tc.semantic != "" {
+				semantic = tc.semantic
+			}
+			changed := modelconfig.MeasurementFromDiagnostic(semantic, base)
+			if changed == original {
+				t.Fatal("identity owner did not detect changed input")
+			}
+			answer(changed)
+			b.refreshPerformanceConfigurations(context.Background())
+			requirePerformanceApplicability(t, p, map[string]performancewire.Applicability{"retained-fast": tc.want})
+			if _, raw := p.publication(); raw != nil {
+				t.Fatal("configuration change published old current frame")
+			}
+			p.flush()
+			_, raw := p.publication()
+			summary, err := performancewire.DecodeSummary(raw)
+			if err != nil || len(summary.Entries) != 1 || summary.Entries[0].Applicability != tc.want || summary.Entries[0].EngineDecode.TokensPerSecond != 200 {
+				t.Fatalf("changed-input publication = %+v, %v", summary, err)
+			}
+		})
+	}
+}
+
+func TestPerformancePolicySaveImmediatelyCheckpointsConfiguration(t *testing.T) {
+	b, _ := measurementBrokerFixture(t)
+	f := newBrokerPerformanceFixture(t)
+	p := f.b.performance
+	b.performance = p
+	p.configuration = b.performanceConfigurationSnapshot
+	b.refreshPerformanceConfigurations(context.Background())
+	sample := performanceConfiguredSample(1, strings.Repeat("a", 64), "retained", 40)
+	sample.Key.Model = "exact-profile"
+	if err := p.store.Record(sample); err != nil {
+		t.Fatal(err)
+	}
+	p.flush()
+	p.configurationWake = make(chan struct{}, 1)
+	p.mu.Lock()
+	pending := p.checkpoint
+	p.mu.Unlock()
+	if pending {
+		t.Fatal("positive control checkpoint did not finish")
+	}
+	_, err := b.persistPolicy(func(nodepolicy.Policy) error { return nil }, func(nodepolicy.Policy) error { return nil }, func(stored nodepolicy.Policy) (nodepolicy.Policy, error) { return stored, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.mu.Lock()
+	pending = p.checkpoint
+	p.mu.Unlock()
+	if !pending || len(p.configurationWake) != 1 {
+		t.Fatal("direct durable policy save did not immediately withdraw and wake configuration")
+	}
+	requirePerformanceApplicability(t, p, map[string]performancewire.Applicability{"retained": performancewire.ApplicabilityUnknown})
+	if _, raw := p.publication(); raw != nil {
+		t.Fatal("direct policy save left old current publication available")
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"slices"
 	"sort"
 	"sync"
@@ -52,8 +53,9 @@ func (r record) ageAtMs() int64 {
 
 // keyState is one profile key's retained samples, oldest received first.
 type keyState struct {
-	profile performancewire.Profile
-	samples []record
+	profile    performancewire.Profile
+	provenance *performancewire.Provenance
+	samples    []record
 }
 
 // Stats reports the store's size and what it dropped since it started.
@@ -146,15 +148,18 @@ func (s *Store) Record(sample performancewire.Sample) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	st := s.keys[sample.Key]
+	if st != nil && (!reflect.DeepEqual(st.provenance, sample.Provenance) || !reflect.DeepEqual(st.profile, sample.Profile)) {
+		return errors.New("performancestore: conflicting key provenance")
+	}
 	if err := s.acceptSeqLocked(sample.Producer, sample.Seq); err != nil {
 		return err
 	}
-	st := s.keys[sample.Key]
 	if st == nil {
 		if len(s.keys) >= performancewire.MaxEntries {
 			s.evictLeastRecentLocked()
 		}
-		st = &keyState{}
+		st = &keyState{provenance: sample.Provenance.Clone()}
 		s.keys[sample.Key] = st
 	}
 	st.profile = sample.Profile
@@ -325,7 +330,8 @@ func keyLess(a, b performancewire.ProfileKey) bool {
 // Output counts require a known protocol end but do not require any timing.
 // Unknown values are skipped, never counted as zero.
 func aggregate(key performancewire.ProfileKey, st *keyState, wallMs, ageMs int64) (performancewire.Entry, bool) {
-	e := performancewire.Entry{Key: key, Profile: st.profile}
+	e := performancewire.Entry{Key: key, Profile: st.profile, Provenance: st.provenance.Clone(), Applicability: performancewire.ApplicabilityUnknown}
+	e.Profile.ContextTokens = cloneValue(st.profile.ContextTokens)
 	var admission, header, firstBody, firstToken, total, load []int64
 	var prefill, decode rateSum
 	var engineDecode reportedRateSum
@@ -558,7 +564,11 @@ func fitPayload(sum *performancewire.Summary) {
 	size := encodedLen(envelope)
 	keep := 0
 	for _, e := range sum.Entries {
-		n := encodedLen(e)
+		// Destination applicability is attached after aggregation. Reserve its
+		// longest spelling so that projection cannot exceed the shared byte cap.
+		sized := e
+		sized.Applicability = performancewire.ApplicabilityHistorical
+		n := encodedLen(sized)
 		if keep > 0 {
 			n++ // separating comma
 		}

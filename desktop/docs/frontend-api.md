@@ -49,6 +49,14 @@ policy, profile or memory observations withdraw completeness at the target.
 It grants no launch, capacity, admission or qualification authority and does not
 enable routing scores.
 
+Performance entries also expose optional bounded `provenance` containing
+`configuration:{digest,complete}`, `engineFamily`, `api` and `extractorSchema`.
+`applicability` is the destination's `current`, `historical` or `unknown`
+attestation; absent old metadata projects as unknown. The bridge validates each
+dimension separately, rejects private or malformed metadata, and detaches the
+projection. A complete identity is required for current/historical. This changes
+the existing performance projection in place without adding an IPC channel.
+
 Inspection also returns optional service-owned `loadObservation`, describing
 rounded native buffers and the frozen estimate for that captured load.
 `parseInspectModel` strictly validates and detaches supplied summaries; a missing

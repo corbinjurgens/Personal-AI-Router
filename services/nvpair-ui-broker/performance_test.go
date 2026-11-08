@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"nvpair-shared/clustertrusttest"
+	"nvpair-shared/nodepolicy"
 	"nvpair-shared/performancewire"
 	"nvpair-ui-broker/performancestore"
 )
@@ -85,6 +86,229 @@ func performanceTestSample(seq uint64) performancewire.Sample {
 	return performancewire.Sample{Scope: performancewire.ScopeLocalExecution, Producer: "proxy-process", Seq: seq,
 		Key:         performancewire.ProfileKey{Host: "self", Engine: "llamacpp", Model: "model", Fingerprint: "profile"},
 		Measurement: performancewire.Measurement{Outcome: performancewire.OutcomeCompleted}}
+}
+
+func performanceConfigurationFixture(digest string, generation uint64) performanceConfigurationSnapshot {
+	var identities map[string]map[string]nodepolicy.MeasurementIdentity
+	if digest != "" {
+		identities = map[string]map[string]nodepolicy.MeasurementIdentity{"llamacpp": {"model": {Complete: true, Digest: digest}}}
+	}
+	return performanceConfigurationSnapshot{token: [32]byte{byte(generation)}, identities: identities}
+}
+
+func performanceConfiguredSample(seq uint64, digest, fingerprint string, speed float64) performancewire.Sample {
+	s := performanceTestSample(seq)
+	s.Key.Fingerprint = fingerprint
+	s.Profile.EngineFamily = "llamacpp"
+	s.Provenance = &performancewire.Provenance{Configuration: nodepolicy.MeasurementIdentity{Complete: true, Digest: digest}, EngineFamily: "llamacpp", API: "/v1/chat/completions", ExtractorSchema: "daily-schema"}
+	complete, duration := true, int64(1000000000)
+	s.ProtocolComplete = &complete
+	s.EngineDecodeNs = &duration
+	s.EngineDecodeTokensPerSecond = &speed
+	return s
+}
+
+func requirePerformanceApplicability(t *testing.T, p *performanceRuntime, want map[string]performancewire.Applicability) {
+	t.Helper()
+	entries := p.projection().Local.Summary.Entries
+	if len(entries) != len(want) {
+		t.Fatalf("entries = %+v, want %v", entries, want)
+	}
+	for _, e := range entries {
+		if e.Applicability != want[e.Key.Fingerprint] {
+			t.Fatalf("%s applicability = %s, want %s", e.Key.Fingerprint, e.Applicability, want[e.Key.Fingerprint])
+		}
+	}
+}
+
+func TestPerformanceConfigurationOnlyChangeCheckpointsAndPartitionsFasterHistory(t *testing.T) {
+	f := newBrokerPerformanceFixture(t)
+	p := f.b.performance
+	current := performanceConfigurationFixture(strings.Repeat("a", 64), 1)
+	p.configuration = func() performanceConfigurationSnapshot { return current }
+	if err := p.store.Record(performanceConfiguredSample(1, strings.Repeat("a", 64), "old-fast", 200)); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.store.Record(performanceConfiguredSample(2, strings.Repeat("b", 64), "new-slow", 20)); err != nil {
+		t.Fatal(err)
+	}
+	p.flush()
+	_, raw := p.publication()
+	before, err := performancewire.DecodeSummary(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requirePerformanceApplicability(t, p, map[string]performancewire.Applicability{"old-fast": performancewire.ApplicabilityCurrent, "new-slow": performancewire.ApplicabilityHistorical})
+	current = performanceConfigurationFixture(strings.Repeat("b", 64), 2)
+	requirePerformanceApplicability(t, p, map[string]performancewire.Applicability{"old-fast": performancewire.ApplicabilityHistorical, "new-slow": performancewire.ApplicabilityUnknown})
+	if _, raw := p.publication(); raw != nil {
+		t.Fatal("changed configuration published at old revision")
+	}
+	p.flush()
+	_, raw = p.publication()
+	after, err := performancewire.DecodeSummary(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Revision <= before.Revision || p.store.Stats().Samples != 2 {
+		t.Fatalf("configuration-only checkpoint = %+v", after)
+	}
+	for _, e := range after.Entries {
+		if e.Key.Fingerprint == "old-fast" && (e.Applicability != performancewire.ApplicabilityHistorical || e.EngineDecode.TokensPerSecond != 200 || e.Samples != 1) {
+			t.Fatalf("old faster statistics relabeled: %+v", e)
+		}
+		if e.Key.Fingerprint == "new-slow" && (e.Applicability != performancewire.ApplicabilityCurrent || e.EngineDecode.TokensPerSecond != 20 || e.Samples != 1) {
+			t.Fatalf("current statistics mixed: %+v", e)
+		}
+	}
+	_, repeat := p.publication()
+	if !bytes.Equal(raw, repeat) {
+		t.Fatal("configuration frame changed at equal revision")
+	}
+}
+
+func TestPerformanceLocalConfigurationDoesNotRequirePeerAdmission(t *testing.T) {
+	f := newBrokerPerformanceFixture(t)
+	p := f.b.performance
+	if err := os.Remove(filepath.Join(f.dir, "admission.json")); err != nil {
+		t.Fatal(err)
+	}
+	p.configuration = func() performanceConfigurationSnapshot {
+		return performanceConfigurationFixture(strings.Repeat("a", 64), 1)
+	}
+	if err := p.store.Record(performanceConfiguredSample(1, strings.Repeat("a", 64), "local-only", 40)); err != nil {
+		t.Fatal(err)
+	}
+	p.flush()
+	requirePerformanceApplicability(t, p, map[string]performancewire.Applicability{"local-only": performancewire.ApplicabilityCurrent})
+	if p.store.Stats().PublishedRevision <= 0 {
+		t.Fatal("local configuration was not checkpointed")
+	}
+	if _, raw := p.publication(); raw != nil {
+		t.Fatal("local applicability granted peer publication authority")
+	}
+}
+
+func TestPerformanceRestartRequiresCurrentReobservationAndReusesSemanticEvidence(t *testing.T) {
+	f := newBrokerPerformanceFixture(t)
+	p := f.b.performance
+	state := performanceConfigurationFixture(strings.Repeat("a", 64), 1)
+	p.configuration = func() performanceConfigurationSnapshot { return state }
+	if err := p.store.Record(performanceConfiguredSample(1, strings.Repeat("a", 64), "evidence", 40)); err != nil {
+		t.Fatal(err)
+	}
+	p.flush()
+	before := p.store.Stats().PublishedRevision
+	restarted := newPerformanceRuntime("self", f.path, f.dir)
+	state = performanceConfigurationFixture("", 2)
+	restarted.configuration = func() performanceConfigurationSnapshot { return state }
+	requirePerformanceApplicability(t, restarted, map[string]performancewire.Applicability{"evidence": performancewire.ApplicabilityUnknown})
+	restarted.flush()
+	state = performanceConfigurationFixture(strings.Repeat("a", 64), 3)
+	requirePerformanceApplicability(t, restarted, map[string]performancewire.Applicability{"evidence": performancewire.ApplicabilityUnknown})
+	restarted.flush()
+	requirePerformanceApplicability(t, restarted, map[string]performancewire.Applicability{"evidence": performancewire.ApplicabilityCurrent})
+	if restarted.store.Stats().PublishedRevision <= before || restarted.store.Local().Entries[0].Samples != 1 {
+		t.Fatal("restart did not reuse durable measurement under new revision")
+	}
+}
+
+func TestPerformanceConfigurationSaveAndFreezeGenerationFences(t *testing.T) {
+	for _, boundary := range []string{"save", "freeze"} {
+		t.Run(boundary, func(t *testing.T) {
+			f := newBrokerPerformanceFixture(t)
+			p := f.b.performance
+			state := performanceConfigurationFixture(strings.Repeat("a", 64), 1)
+			p.configuration = func() performanceConfigurationSnapshot { return state }
+			if err := p.store.Record(performanceConfiguredSample(1, strings.Repeat("a", 64), "evidence", 40)); err != nil {
+				t.Fatal(err)
+			}
+			if boundary == "freeze" {
+				p.flush()
+			}
+			calls := 0
+			p.configuration = func() performanceConfigurationSnapshot {
+				calls++
+				if calls == 2 {
+					state = performanceConfigurationFixture("", 2)
+				}
+				return state
+			}
+			if boundary == "save" {
+				p.flush()
+			} else {
+				if _, raw := p.publication(); raw != nil {
+					t.Fatal("freeze published a changed configuration")
+				}
+			}
+			if _, raw := p.publication(); raw != nil {
+				t.Fatal("stale generation published")
+			}
+			requirePerformanceApplicability(t, p, map[string]performancewire.Applicability{"evidence": performancewire.ApplicabilityUnknown})
+			staleRevision := p.store.Stats().PublishedRevision
+			p.flush()
+			_, raw := p.publication()
+			summary, err := performancewire.DecodeSummary(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if summary.Revision <= staleRevision || summary.Entries[0].Applicability != performancewire.ApplicabilityUnknown {
+				t.Fatalf("withdrawal did not checkpoint: %+v", summary)
+			}
+		})
+	}
+}
+
+func TestPerformanceConfigurationCheckpointFailureCannotPublishNewCurrent(t *testing.T) {
+	f := newBrokerPerformanceFixture(t)
+	p := f.b.performance
+	state := performanceConfigurationFixture("", 1)
+	p.configuration = func() performanceConfigurationSnapshot { return state }
+	if err := p.store.Record(performanceConfiguredSample(1, strings.Repeat("a", 64), "evidence", 40)); err != nil {
+		t.Fatal(err)
+	}
+	p.flush()
+	before := p.store.Stats().PublishedRevision
+	if err := os.Remove(f.path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(f.path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	state = performanceConfigurationFixture(strings.Repeat("a", 64), 2)
+	p.flush()
+	if p.persistenceError == "" || p.store.Stats().PublishedRevision != before {
+		t.Fatal("checkpoint failure was not exercised")
+	}
+	if _, raw := p.publication(); raw != nil {
+		t.Fatal("failed checkpoint published newly current history")
+	}
+	requirePerformanceApplicability(t, p, map[string]performancewire.Applicability{"evidence": performancewire.ApplicabilityUnknown})
+	if err := os.Remove(f.path); err != nil {
+		t.Fatal(err)
+	}
+	p.flush()
+	requirePerformanceApplicability(t, p, map[string]performancewire.Applicability{"evidence": performancewire.ApplicabilityCurrent})
+}
+
+func TestPerformancePeerApplicabilityWithdrawalCannotBeReordered(t *testing.T) {
+	f := newBrokerPerformanceFixture(t)
+	summary := performanceTestSummary(10)
+	summary.Entries[0].Profile.EngineFamily = "llamacpp"
+	summary.Entries[0].Provenance = performanceConfiguredSample(1, strings.Repeat("a", 64), "", 40).Provenance
+	summary.Entries[0].Applicability = performancewire.ApplicabilityCurrent
+	f.receive(t, summary, 100)
+	summary.Revision = 11
+	summary.Entries[0].Applicability = performancewire.ApplicabilityUnknown
+	f.receive(t, summary, 200)
+	summary.Entries[0].Applicability = performancewire.ApplicabilityCurrent
+	f.receive(t, summary, 0)
+	summary.Revision = 10
+	f.receive(t, summary, 0)
+	peer := requirePerformancePeer(t, f.b.performance)
+	if peer.Summary == nil || peer.Summary.Revision != 11 || peer.Summary.Entries[0].Applicability != performancewire.ApplicabilityUnknown || peer.Summary.Entries[0].NewestAgeMs < 300 {
+		t.Fatalf("reordered currentness revived evidence: %+v", peer.Summary)
+	}
 }
 
 func performanceTestSummary(revision int64) performancewire.Summary {
@@ -270,6 +494,30 @@ func TestPerformanceSampleHookIsStrictAndDeduplicatesProcessSample(t *testing.T)
 	}
 	if err := f.b.ingestPerformanceSample(append(raw, []byte(" {}")...)); err == nil {
 		t.Fatal("trailing sample data accepted")
+	}
+}
+
+func TestPerformanceSampleProvenanceStrictIntake(t *testing.T) {
+	for _, tc := range []struct{ name, old, replacement string }{
+		{"private metadata", `"extractorSchema":"daily-schema"`, `"extractorSchema":"daily-schema","options":{"secret":"private"}`},
+		{"unbounded digest", strings.Repeat("a", 64), strings.Repeat("a", 65)},
+		{"missing completeness", `"complete":true`, `"other":true`},
+		{"API query", `"api":"/v1/chat/completions"`, `"api":"/v1/chat/completions?secret=private"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newBrokerPerformanceFixture(t)
+			raw := performanceJSON(t, performanceConfiguredSample(1, strings.Repeat("a", 64), "fp", 40))
+			if !bytes.Contains(raw, []byte(tc.old)) {
+				t.Fatal("missing mutation target")
+			}
+			changed := bytes.Replace(raw, []byte(tc.old), []byte(tc.replacement), 1)
+			if err := f.b.ingestPerformanceSample(changed); err == nil {
+				t.Fatal("invalid provenance entered store")
+			}
+			if f.b.performance.store.Stats().Samples != 0 {
+				t.Fatal("rejected provenance mutated history")
+			}
+		})
 	}
 }
 
@@ -817,6 +1065,60 @@ func TestPerformanceGetReturnsOutputTokensIndependentlyOfDecodeTiming(t *testing
 				t.Fatalf("rates = decode %+v engineDecode %+v, want decode %+v engineDecode %+v", e.Decode, e.EngineDecode, tt.wantDecode, tt.wantEngine)
 			}
 		})
+	}
+}
+
+func TestPerformanceGetPreservesDestinationApplicabilityAndUnmixedRates(t *testing.T) {
+	f := newBrokerPerformanceFixture(t)
+	p := f.b.performance
+	state := performanceConfigurationFixture(strings.Repeat("b", 64), 1)
+	p.configuration = func() performanceConfigurationSnapshot { return state }
+	old := performanceConfiguredSample(1, strings.Repeat("a", 64), "historical-fast", 200)
+	current := performanceConfiguredSample(2, strings.Repeat("b", 64), "current-slow", 20)
+	legacy := performanceTestSample(3)
+	legacy.Key.Fingerprint = "unknown-history"
+	for _, sample := range []performancewire.Sample{old, current, legacy} {
+		if err := f.b.ingestPerformanceSample(performanceJSON(t, sample)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p.flush()
+	out := &performanceOutput{wake: make(chan struct{}, 1)}
+	f.b.codec = NewCodec(readWriter{Reader: strings.NewReader(""), Writer: out})
+	id := json.RawMessage("1")
+	if !f.b.handlePerformanceRequest(&Message{JSONRPC: "2.0", Method: methodPerformanceGet, ID: &id, Params: json.RawMessage("{}")}) {
+		t.Fatal("performance:get not handled")
+	}
+	frames := out.frames(t)
+	if len(frames) != 1 || frames[0].Error != nil {
+		t.Fatalf("get response: %+v", frames)
+	}
+	var projection performanceProjection
+	if err := json.Unmarshal(frames[0].Result, &projection); err != nil {
+		t.Fatal(err)
+	}
+	if projection.Local.Summary == nil || len(projection.Local.Summary.Entries) != 3 {
+		t.Fatalf("public history: %+v", projection.Local)
+	}
+	want := map[string]performancewire.Applicability{"historical-fast": performancewire.ApplicabilityHistorical, "current-slow": performancewire.ApplicabilityCurrent, "unknown-history": performancewire.ApplicabilityUnknown}
+	for _, entry := range projection.Local.Summary.Entries {
+		if entry.Applicability != want[entry.Key.Fingerprint] || entry.Samples != 1 {
+			t.Fatalf("public applicability: %+v", entry)
+		}
+		switch entry.Key.Fingerprint {
+		case "historical-fast":
+			if entry.EngineDecode == nil || entry.EngineDecode.TokensPerSecond != 200 {
+				t.Fatalf("historical rate: %+v", entry)
+			}
+		case "current-slow":
+			if entry.EngineDecode == nil || entry.EngineDecode.TokensPerSecond != 20 || entry.Provenance == nil || entry.Provenance.Configuration.Digest != strings.Repeat("b", 64) || entry.Provenance.API != "/v1/chat/completions" || entry.Provenance.ExtractorSchema != "daily-schema" {
+				t.Fatalf("current rate/provenance: %+v", entry)
+			}
+		case "unknown-history":
+			if entry.Provenance != nil {
+				t.Fatal("old metadata manufactured")
+			}
+		}
 	}
 }
 

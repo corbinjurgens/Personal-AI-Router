@@ -23,6 +23,133 @@ import (
 
 var errInjected = errors.New("injected failure")
 
+func TestPerformanceProvenancePersistsWithoutCurrentAuthority(t *testing.T) {
+	path := snapshotPath(t)
+	s, c := newTestStore(t, path)
+	sample := configurationSample(strings.Repeat("a", 64))
+	if err := s.Record(sample); err != nil {
+		t.Fatal(err)
+	}
+	c.advance(time.Minute)
+	mustSave(t, s)
+	loaded, lc := newTestStore(t, path)
+	lc.t = c.t
+	if err := loaded.Load(); err != nil {
+		t.Fatal(err)
+	}
+	e := onlyEntry(t, loaded)
+	if e.Provenance == nil || *e.Provenance != *sample.Provenance || e.Applicability != performancewire.ApplicabilityUnknown || e.NewestAgeMs != 60000 {
+		t.Fatalf("loaded applicability/provenance: %+v", e)
+	}
+	// The same schema decodes old absent metadata as visible unknown history.
+	snapshot := readFileSnapshot(t, path)
+	snapshot.Keys[0].Provenance = nil
+	raw, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	old, _ := newTestStore(t, path)
+	if err := old.Load(); err != nil {
+		t.Fatal(err)
+	}
+	e = onlyEntry(t, old)
+	if e.Provenance != nil || e.Applicability != performancewire.ApplicabilityUnknown || e.Samples != 1 || old.Stats().HistoryReset {
+		t.Fatalf("absent metadata discarded or authorized history: %+v", e)
+	}
+}
+
+func TestPerformanceCheckpointFailurePreservesProvenanceAndAges(t *testing.T) {
+	for _, boundary := range []string{"before replacement", "after replacement"} {
+		t.Run(boundary, func(t *testing.T) {
+			path := snapshotPath(t)
+			s, c := newTestStore(t, path)
+			sample := configurationSample(strings.Repeat("a", 64))
+			if err := s.Record(sample); err != nil {
+				t.Fatal(err)
+			}
+			mustSave(t, s)
+			before := mustPublished(t, s)
+			c.advance(time.Minute)
+			if boundary == "before replacement" {
+				s.replacer = durablefile.Replacer{Replace: func(string, string) error { return errInjected }, IsTransient: func(error) bool { return false }}
+			} else {
+				s.replacer = durablefile.Replacer{SyncDir: func(string) error { return errInjected }}
+			}
+			err := s.Checkpoint()
+			if !errors.Is(err, errInjected) || errors.Is(err, durablefile.ErrReplaced) != (boundary == "after replacement") {
+				t.Fatalf("checkpoint failure = %v", err)
+			}
+			got := mustPublished(t, s)
+			if !reflect.DeepEqual(got.Entries[0].Provenance, sample.Provenance) || got.Entries[0].NewestAgeMs != 60000 || got.Entries[0].Applicability != performancewire.ApplicabilityUnknown {
+				t.Fatalf("failure changed evidence: %+v", got)
+			}
+			if boundary == "before replacement" && got.Revision != before.Revision || boundary == "after replacement" && got.Revision <= before.Revision {
+				t.Fatalf("failure revision %d, before %d", got.Revision, before.Revision)
+			}
+		})
+	}
+}
+
+func TestPerformanceCheckpointLateSampleKeepsCommittedSnapshotCoherent(t *testing.T) {
+	path := snapshotPath(t)
+	s, _ := newTestStore(t, path)
+	a := configurationSample(strings.Repeat("a", 64))
+	if err := s.Record(a); err != nil {
+		t.Fatal(err)
+	}
+	mustSave(t, s)
+	entered, release := make(chan struct{}), make(chan struct{})
+	s.replacer = durablefile.Replacer{Replace: func(tmp, target string) error { close(entered); <-release; return os.Rename(tmp, target) }}
+	done := make(chan error, 1)
+	go func() { done <- s.Checkpoint() }()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		close(release)
+		t.Fatal("checkpoint did not reach replacement")
+	}
+	b := configurationSample(strings.Repeat("b", 64))
+	b.Seq = 2
+	b.Key.Fingerprint = "new-configuration"
+	if err := s.Record(b); err != nil {
+		close(release)
+		t.Fatal(err)
+	}
+	b.Provenance.Configuration.Digest = "mutated caller"
+	before := mustPublished(t, s)
+	if len(before.Entries) != 1 || before.Entries[0].Provenance.Configuration.Digest != strings.Repeat("a", 64) {
+		close(release)
+		t.Fatalf("in-flight checkpoint leaked live metadata: %+v", before)
+	}
+	close(release)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("checkpoint did not complete")
+	}
+	committed := mustPublished(t, s)
+	if committed.Revision <= before.Revision || len(committed.Entries) != 1 || committed.Entries[0].Provenance.Configuration.Digest != strings.Repeat("a", 64) || !s.Stats().Dirty {
+		t.Fatalf("late sample entered committed snapshot: %+v", committed)
+	}
+	s.replacer = durablefile.Replacer{}
+	mustSave(t, s)
+	final := mustPublished(t, s)
+	if final.Revision <= committed.Revision || len(final.Entries) != 2 {
+		t.Fatalf("late sample not saved independently: %+v", final)
+	}
+	for _, e := range final.Entries {
+		if e.Key.Fingerprint == "new-configuration" && (e.Provenance.Configuration.Digest != strings.Repeat("b", 64) || e.Applicability != performancewire.ApplicabilityUnknown) {
+			t.Fatalf("late sample relabeled: %+v", e)
+		}
+	}
+}
+
 func snapshotPath(t *testing.T) string {
 	t.Helper()
 	return filepath.Join(t.TempDir(), "state", FileName)

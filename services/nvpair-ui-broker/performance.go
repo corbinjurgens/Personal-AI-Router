@@ -73,6 +73,10 @@ type performanceRuntime struct {
 	saveWake, publishWake, changeWake chan struct{}
 	configurationWake                 chan struct{}
 	refreshConfiguration              func(context.Context)
+	configuration                     func() performanceConfigurationSnapshot
+	configurationToken                [32]byte
+	configurationGeneration           uint64
+	readyConfiguration                uint64
 }
 
 type performanceNode struct {
@@ -140,6 +144,7 @@ func (b *Broker) startPerformance(ctx context.Context) func() {
 	p := b.performance
 	p.configurationWake = make(chan struct{}, 1)
 	p.refreshConfiguration = b.refreshPerformanceConfigurations
+	p.configuration = b.performanceConfigurationSnapshot
 	fctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	done := make(chan struct{})
 	go func() {
@@ -190,13 +195,51 @@ func (p *performanceRuntime) localEpoch() (string, bool) {
 	return strconv.FormatUint(epoch, 10), ok && p.mesh.NodeUUID() == p.host
 }
 
+// Caller holds p.mu. Re-read the destination owner at every use so expiry,
+// failed refresh and withdrawal apply even before an asynchronous wake runs.
+func (p *performanceRuntime) syncConfigurationLocked() performanceConfigurationSnapshot {
+	var snapshot performanceConfigurationSnapshot
+	if p.configuration != nil {
+		snapshot = p.configuration()
+	}
+	if snapshot.token != p.configurationToken {
+		p.configurationToken = snapshot.token
+		p.configurationGeneration++
+		p.checkpoint = true
+		performanceSignal(p.saveWake)
+		performanceSignal(p.changeWake)
+	}
+	return snapshot
+}
+
+func performanceApplyConfiguration(summary *performancewire.Summary, snapshot performanceConfigurationSnapshot, ready bool) {
+	for i := range summary.Entries {
+		entry := &summary.Entries[i]
+		entry.Applicability = performancewire.ApplicabilityUnknown
+		if entry.Provenance == nil || !entry.Provenance.Configuration.Complete {
+			continue
+		}
+		identity := snapshot.identities[entry.Key.Engine][entry.Key.Model]
+		if !identity.Complete {
+			continue
+		}
+		if identity != entry.Provenance.Configuration {
+			entry.Applicability = performancewire.ApplicabilityHistorical
+		} else if ready {
+			entry.Applicability = performancewire.ApplicabilityCurrent
+		}
+	}
+}
+
 // flush is owned by the save loop. Checkpoint, not a synthetic sample, assigns
 // a new durable revision on startup, manager restart or local epoch change.
 func (p *performanceRuntime) flush() {
 	epoch, admitted := p.localEpoch()
 	p.mu.Lock()
+	p.syncConfigurationLocked()
 	checkpoint := p.checkpoint || (admitted && p.readyEpoch != "" && p.readyEpoch != epoch)
 	generation, blocked := p.managerGeneration, p.blocked
+	configuration := p.configurationGeneration
 	p.mu.Unlock()
 	if blocked {
 		return
@@ -209,6 +252,7 @@ func (p *performanceRuntime) flush() {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.syncConfigurationLocked()
 	if err != nil {
 		p.persistenceError = err.Error()
 		p.checkpoint = true
@@ -216,6 +260,11 @@ func (p *performanceRuntime) flush() {
 		return // even an adopted ErrReplaced revision is withheld until a clean checkpoint
 	}
 	p.persistenceError = ""
+	if configuration != p.configurationGeneration {
+		p.checkpoint = true
+		performanceSignal(p.saveWake)
+		return
+	}
 	if checkpoint {
 		p.checkpointGeneration = generation
 		p.checkpoint = p.managerGeneration != generation
@@ -225,6 +274,9 @@ func (p *performanceRuntime) flush() {
 			p.checkpointGeneration, p.checkpoint = 1, false
 		}
 	}
+	// Local applicability depends on the durable checkpoint, not cluster
+	// admission. Admission separately gates the authenticated peer publication.
+	p.readyConfiguration = configuration
 	if !admitted {
 		return
 	}
@@ -271,9 +323,10 @@ func (b *Broker) replayPerformanceToManager(wm *workloadManagerProcess) {
 func (p *performanceRuntime) publication() (*workloadManagerProcess, []byte) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	configuration := p.syncConfigurationLocked()
 	epoch, admitted := p.localEpoch()
 	if !admitted || p.blocked || p.checkpoint || p.checkpointGeneration != p.managerGeneration ||
-		epoch != p.readyEpoch || p.readyRevision == 0 {
+		p.readyConfiguration != p.configurationGeneration || epoch != p.readyEpoch || p.readyRevision == 0 {
 		return nil, nil
 	}
 	if p.frozenRevision != p.readyRevision {
@@ -283,11 +336,16 @@ func (p *performanceRuntime) publication() (*workloadManagerProcess, []byte) {
 		if !ok || summary.Revision != p.readyRevision {
 			return nil, nil
 		}
+		performanceApplyConfiguration(&summary, configuration, true)
 		raw, err := performancewire.EncodeSummary(summary)
 		if err != nil {
 			return nil, nil
 		}
 		p.frozen, p.frozenRevision = raw, summary.Revision
+	}
+	p.syncConfigurationLocked()
+	if p.checkpoint || p.readyConfiguration != p.configurationGeneration {
+		return nil, nil
 	}
 	if currentEpoch, ok := p.localEpoch(); !ok || currentEpoch != epoch {
 		return nil, nil
@@ -523,6 +581,9 @@ func (p *performanceRuntime) runSweeps(ctx context.Context, ticks <-chan time.Ti
 		case <-p.configurationWake:
 		}
 		p.sweep()
+		p.mu.Lock()
+		p.syncConfigurationLocked()
+		p.mu.Unlock()
 		performanceSignal(p.changeWake)
 		if p.refreshConfiguration != nil {
 			p.refreshConfiguration(ctx)
@@ -533,9 +594,11 @@ func (p *performanceRuntime) runSweeps(ctx context.Context, ticks <-chan time.Ti
 func (p *performanceRuntime) projection() performanceProjection {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	configuration := p.syncConfigurationLocked()
 	p.sweepLocked()
 	out := performanceProjection{Peers: []performanceNode{}, ExpiredPeers: p.expiredPeers}
 	local := p.store.Local()
+	performanceApplyConfiguration(&local, configuration, !p.checkpoint && !p.blocked && p.persistenceError == "" && p.readyConfiguration == p.configurationGeneration)
 	out.Local = performanceNode{MeasuringHost: local.MeasuringHost, Status: "fresh", Summary: &local}
 	if len(local.Entries) == 0 {
 		out.Local.Status = "missing"

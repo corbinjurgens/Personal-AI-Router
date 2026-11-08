@@ -111,11 +111,21 @@ Unobserved responses count as completed only after the accepted response body
 reaches upstream EOF and delivery succeeds; protocol completion stays unknown.
 
 Samples require the joined engine run, settings, launch and model-content
-identity plus the measuring host. One proxy-local fingerprint includes that
+or name identity plus the measuring host. One proxy-local fingerprint includes that
 identity, effective request options, API and timing schema. Missing identity,
 unknown overrides or identity changes during execution suppress the sample.
 Descriptor family selects the reviewed extractor schema; native daily-engine
 acceptance still requires trustworthy installed identities and engine evidence.
+
+The fingerprint additionally partitions samples by the separately supplied
+measurement configuration digest, including an explicit unknown partition.
+Samples carry bounded provenance: `configuration:{digest,complete}`,
+`engineFamily`, `api` and `extractorSchema`. The proxy captures this configuration at dispatch and
+rechecks it at finalization, dropping a late sample after replacement, withdrawal
+or expiry. Observation replays preserve the original boot-clock lifetime.
+The fixed FIFO owns detached metadata. Measurement identity never changes strict
+identity or admission; name-based samples with unknown configuration stay useful
+as unscored history. Request options are hashed, never included in provenance.
 
 A process-wide FIFO holds at most 128 samples. Sequence numbers are assigned at
 enqueue in finalization order across facades. One sender writes notifications

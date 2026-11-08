@@ -45,7 +45,8 @@ including direct and reverse peer ingress. The forwarding origin does not count
 another local execution. Missing required engine identity suppresses samples.
 Models without a content digest are measured under a name-based identity that
 grants no strict or hybrid eligibility. Replacing a model file under the same
-name within one engine run is not detected. An empty measured-run section can
+name within one engine run is not detected when configuration is unknown.
+An empty measured-run section can
 therefore remain expected. Hardware
 utilization history is independent of execution measurements.
 
@@ -57,6 +58,30 @@ identity (content digest when available, otherwise the normalized name with an
 explicit identity kind), effective request options, API and timing schema. Identity changes
 separate profiles; changes during execution drop the observation. No placeholder
 identity or response model field qualifies a measurement.
+
+The aggregation fingerprint also partitions by the complete measurement
+configuration digest, with a separate explicit unknown partition. Each sample
+and entry can carry bounded `provenance`: `configuration:{digest,complete}`,
+`engineFamily`, `api` and `extractorSchema`. These compatibility dimensions stay
+separate from the opaque aggregation hash. Request options remain hashed and
+never enter telemetry payloads.
+
+The destination recomputes entry `applicability` as `current`, `historical` or
+`unknown` from its current configuration observation. Complete matching semantic
+settings, artifact, native build, physical hardware and realized execution can
+reuse retained measurements after an engine or broker restart, following fresh
+reobservation. A mismatch is historical; missing or expired observations,
+including cold native fit, are unknown. Old history without provenance remains
+visible as unknown. Applicability grants no launch, admission or capacity
+authority and does not enable scoring in this change.
+
+Configuration changes withdraw eligibility immediately and force a new durable
+summary checkpoint even without new samples. The broker fences save and frozen
+publication by the configuration generation. A failed or stale checkpoint cannot
+publish newly current evidence. A summary body remains identical at the same
+revision; heartbeats advance elapsed ages rather than rejuvenating samples.
+Peer applicability is the destination's attestation within the existing peer
+freshness window. History stores provenance, never an authoritative current flag.
 
 The proxy queues a bounded window of samples and drops telemetry when full.
 One sender writes notifications without holding the queue lock or making the
