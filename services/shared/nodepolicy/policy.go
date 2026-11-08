@@ -629,7 +629,10 @@ type TierPolicy struct {
 	AllowWeaker bool `json:"allowWeaker"`
 	// PreferLoaded ranks candidates already loaded on their node ahead of cold
 	// ones. "tier" keeps tier order first and prefers loaded models within each
-	// tier; "any" prefers any loaded eligible model over a cold one.
+	// tier; "any" prefers any loaded eligible model over a cold one. Within the
+	// leading tier rank and warmth class, the candidate with the lowest
+	// expected completion time wins; speed never reorders the classes, and the
+	// destination keeps its preparation and admission authority.
 	PreferLoaded string `json:"preferLoaded"`
 }
 

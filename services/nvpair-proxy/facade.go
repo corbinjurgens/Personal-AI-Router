@@ -75,6 +75,12 @@ type facade struct {
 	selectedMu sync.RWMutex
 	selectedID string
 
+	// tierProbes counts committed automatic tier choices per reservation
+	// class, and remembers the class's last probed candidate. Per facade
+	// because the probe cadence is this entry's routing. Guarded by the host's
+	// priorityMu, the hold the tier scorer runs under.
+	tierProbes map[tierClass]tierProbeState
+
 	// backendMu guards backend, the explicit loopback engine this facade's
 	// cluster mTLS ingress forwards to. The broker sets/clears it via
 	// node/set-local-backend; it is never sourced from discovery, so an ingress

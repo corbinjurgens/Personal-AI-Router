@@ -208,8 +208,10 @@ type performanceIdentityTuple struct {
 	configuration                                                                  nodepolicy.MeasurementIdentity
 }
 
-func (f *facade) performanceCurrentIdentity(model, api string) (performancewire.ProfileKey, performanceExtractQualification, performanceIdentityTuple, bool) {
-	var tuple performanceIdentityTuple
+// performanceQualification names the extractor this facade's engine family
+// records samples with, so a sample producer and an evidence reader agree on
+// the family/API/schema tuple.
+func (f *facade) performanceQualification(api string) (performanceExtractQualification, bool) {
 	family := f.performanceFamily()
 	q := performanceExtractQualification{EngineFamily: family, APIPath: api, Streaming: true}
 	switch family {
@@ -218,8 +220,18 @@ func (f *facade) performanceCurrentIdentity(model, api string) (performancewire.
 	case "strata":
 		q.SchemaID = performanceExtractStrataSchema
 	default:
+		return q, false
+	}
+	return q, true
+}
+
+func (f *facade) performanceCurrentIdentity(model, api string) (performancewire.ProfileKey, performanceExtractQualification, performanceIdentityTuple, bool) {
+	var tuple performanceIdentityTuple
+	q, known := f.performanceQualification(api)
+	if !known {
 		return performancewire.ProfileKey{}, q, tuple, false
 	}
+	family := q.EngineFamily
 	a := f.host.admission
 	normalized := f.profile.normalizeModel(model)
 	f.host.measurementMu.Lock()

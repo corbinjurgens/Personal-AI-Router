@@ -200,7 +200,7 @@ func TestOwnedInferenceBuffersReservationRecheck(t *testing.T) {
 			done := make(chan result, 1)
 			var seen []string
 			go func() {
-				out, held, err := f.reserveRoundPrepared(ctx, cands, false, "m", func(_ context.Context, c candidate, _ nodepolicy.Profile, _ bool, _ uint64) error {
+				out, held, _, err := f.reserveRoundPrepared(ctx, cands, nil, "m", func(_ context.Context, c candidate, _ nodepolicy.Profile, _ bool, _ uint64) error {
 					fx.p.priorityMu.Lock()
 					claims := len(fx.p.priorityReservations)
 					fx.p.priorityMu.Unlock()

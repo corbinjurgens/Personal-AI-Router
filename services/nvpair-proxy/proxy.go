@@ -619,6 +619,10 @@ type candidate struct {
 	engine string
 	// model is the concrete model to send, or empty to send the request's own.
 	model string
+	// key is the declared profile key a tier candidate resolved through. Speed
+	// evidence and destination sizing are keyed by it, even where model later
+	// carries a hybrid candidate's native identity. Empty for concrete names.
+	key string
 	// self marks this node's own engine. Admission runs here before dispatch.
 	self bool
 	// dormant marks a self candidate whose engine is stopped but can be woken
@@ -870,7 +874,7 @@ type reservation struct {
 // Process-wide is the point: two facades bursting at once are competing for the
 // same GPU, so a dispatch through either has to be visible to the other.
 func (p *Proxy) reserveCandidate(f *facade, candidates []candidate) ([]candidate, reservation) {
-	out, held, _ := p.reserveCandidatePrepared(context.Background(), f, candidates, "", nil, nil)
+	out, held, _, _ := p.reserveCandidatePrepared(context.Background(), f, candidates, "", nil, nil, nil)
 	return out, held
 }
 
@@ -880,11 +884,39 @@ var errCandidatePreparationStale = stderrors.New("candidate preparation policy c
 
 // Selection has no effect until preparation succeeds. Both checks use the
 // original ranking owner; no placement/admission lock covers a storage wait.
-func (p *Proxy) reserveCandidatePrepared(ctx context.Context, f *facade, candidates []candidate, model string, prepare candidatePreparation, expected *uint64) ([]candidate, reservation, error) {
+//
+// A prepared tier round (round non-nil) chooses through tierChoiceLocked. Its
+// facts are materialized at the top of each attempt, before any chooser lock,
+// and both the choice before preparation and the recheck after it require
+// them current: a changed feed, sizing snapshot, pin, policy or sizing expiry
+// rebuilds them, and a discovery change re-resolves the class. The probe
+// counter advances only at the final commit. The concrete path keeps
+// candidateChoiceLocked.
+func (p *Proxy) reserveCandidatePrepared(ctx context.Context, f *facade, candidates []candidate, model string, prepare candidatePreparation, expected *uint64, round *tierRound) ([]candidate, reservation, tierDecision, error) {
 	if len(candidates) == 0 {
-		return candidates, reservation{}, nil
+		return candidates, reservation{}, tierDecision{}, nil
+	}
+	if prepare == nil {
+		round = nil // A tier choice needs the request body and its policy fence.
 	}
 	for {
+		var facts tierFacts
+		if round != nil {
+			facts = p.tierFactsFor(ctx, f, candidates, model, round)
+		}
+		// choose runs under selectedMu and priorityMu; ok is false when the
+		// tier facts no longer describe the sources.
+		choose := func() (int, bool, tierDecision, bool) {
+			if round == nil {
+				index, reserve := p.candidateChoiceLocked(candidates, f.selectedID)
+				return index, reserve, tierDecision{}, true
+			}
+			if !p.tierFactsCurrentLocked(facts, f.selectedID, true) {
+				return 0, false, tierDecision{}, false
+			}
+			index, reserve, decision := p.tierChoiceLocked(f, candidates, facts, f.selectedID)
+			return index, reserve, decision, true
+		}
 		var generation uint64
 		var profile nodepolicy.Profile
 		var hasProfile bool
@@ -893,14 +925,22 @@ func (p *Proxy) reserveCandidatePrepared(ctx context.Context, f *facade, candida
 			generation = p.admission.policyGeneration
 			if expected != nil && generation != *expected {
 				p.admission.mu.Unlock()
-				return candidates, reservation{}, errCandidatePreparationStale
+				return candidates, reservation{}, tierDecision{}, errCandidatePreparationStale
 			}
+		}
+		if round != nil && !round.discoveryCurrent() {
+			p.admission.mu.Unlock()
+			return candidates, reservation{}, tierDecision{}, errCandidatePreparationStale
 		}
 		f.selectedMu.RLock()
 		p.priorityMu.Lock()
-		index, reserve := p.candidateChoiceLocked(candidates, f.selectedID)
+		index, reserve, decision, current := choose()
 		p.priorityMu.Unlock()
 		f.selectedMu.RUnlock()
+		if !current {
+			p.admission.mu.Unlock()
+			continue // Rebuild the facts outside every chooser lock.
+		}
 		if prepare != nil {
 			c := candidates[index]
 			if c.self {
@@ -919,9 +959,10 @@ func (p *Proxy) reserveCandidatePrepared(ctx context.Context, f *facade, candida
 		}
 		f.selectedMu.RLock()
 		p.priorityMu.Lock()
-		current, currentReserve := p.candidateChoiceLocked(candidates, f.selectedID)
+		currentIndex, currentReserve, currentDecision, factsCurrent := choose()
 		policyStale := prepare != nil && generation != p.admission.policyGeneration
-		stale := current != index || currentReserve != reserve || policyStale
+		discoveryStale := round != nil && !round.discoveryCurrent()
+		stale := !factsCurrent || currentIndex != index || currentReserve != reserve || currentDecision.Decision != decision.Decision || policyStale || discoveryStale
 		if stale || err != nil || ctx.Err() != nil {
 			p.priorityMu.Unlock()
 			f.selectedMu.RUnlock()
@@ -929,20 +970,23 @@ func (p *Proxy) reserveCandidatePrepared(ctx context.Context, f *facade, candida
 				p.admission.mu.Unlock()
 			}
 			if ctx.Err() != nil {
-				return candidates, reservation{}, ctx.Err()
+				return candidates, reservation{}, tierDecision{}, ctx.Err()
 			}
-			if policyStale {
-				return candidates, reservation{}, errCandidatePreparationStale
+			if policyStale || discoveryStale {
+				return candidates, reservation{}, tierDecision{}, errCandidatePreparationStale
 			}
 			if stale {
 				continue // The next preparation releases/rebuilds its stale storage.
 			}
-			return candidates, reservation{}, err
+			return candidates, reservation{}, tierDecision{}, err
 		}
 		var held reservation
 		chosen := candidates[index]
 		if reserve {
 			held = p.claimReservationLocked(chosen.id)
+		}
+		if round != nil {
+			f.commitTierChoiceLocked(chosen, decision)
 		}
 		if index > 0 {
 			copy(candidates[1:index+1], candidates[:index])
@@ -953,7 +997,7 @@ func (p *Proxy) reserveCandidatePrepared(ctx context.Context, f *facade, candida
 		if prepare != nil {
 			p.admission.mu.Unlock()
 		}
-		return candidates, held, nil
+		return candidates, held, decision, nil
 	}
 }
 

@@ -531,7 +531,8 @@ lock, independently of priority and reservations, and acknowledges
 `{profiles: <stored count>}`. Lookups normalize the candidate engine's dispatched
 profile key and retain host, engine, family, API and schema as separate key
 dimensions. Age advances from monotonic receipt time and expires after
-`performancewire.RetentionMs`. There is no scoring consumer yet.
+`performancewire.RetentionMs`. The tier scorer (§12.3, Expected completion) is its
+only consumer.
 
 `node/set-peer-sizing` is a broker-internal full replacement
 `{revision, peers}` of destination-effective sizing recipes, accepted only
@@ -552,7 +553,8 @@ priority, reservations and routing costs. The snapshot generation is readable
 without the cache lock. The discovery owner also keeps a routing-snapshot
 generation that advances on routing-relevant replacement or removal, including
 policy revision, profile and cluster principal changes that leave UI node
-events unchanged. There is no scoring consumer yet.
+events unchanged. The tier scorer reads the recipe, the snapshot generation and
+the discovery generations; nothing else does.
 
 `facade/enable` is unaddressed because it runs *before* the facade it names
 exists. Only a built-in engine id or a well-formed `e-<id>` counts as an address: plenty of unaddressed
@@ -1868,13 +1870,41 @@ built-in, default or protected names and no cluster role store.
   candidates, because the process has no routing view of it.
 - **Order**: `preferLoaded: "tier"` sorts by tier rank, then warm before cold;
   `"any"` by warm first, then tier rank. The existing preparation and selected
-  pin classes are unchanged. Inside equal comparator classes, earlier membership
+  pin classes are unchanged. Speed never changes this order: it chooses only
+  within the leading class (below). Inside equal comparator classes, earlier membership
   positions on each node lead. Distinct pairs at equal positions use engine/model order and retain
   the ordinary per-pair owner order. Another node's earlier occurrence of a
   pair cannot promote a later sibling on this node. Qualification uses that
   candidate node's selected engine/model facts. Reservations (§6) are taken only
   among the candidates
   sharing the leading tier rank, warmth and preparation class.
+- **Expected completion**: within that leading class a prepared tier round
+  chooses the candidate with the lowest expected completion time. Each term is
+  in milliseconds and weighted 1: `service = 1000 * (in/prefill + out/decode)`,
+  `queue = (pending + reservations) * service`, `pressure = gpuPressure *
+  service`, and `cold` = 0 when warm, else the measured load p95, else 120000.
+  `in` is a quarter of the destination-effective body's bytes and `out` its
+  first positive `max_tokens`, `max_completion_tokens` or `options.num_predict`
+  (512 when none). Rates come from `node/set-routing-costs` for the candidate's
+  own host, engine, profile key and extractor tuple. The effective body is the
+  self candidate's prepared body (rewrite plus its own profile options), or for
+  a peer the origin rewrite followed by the destination's `node/set-peer-sizing`
+  recipe applied as destination ingress applies it; hybrid then removes the
+  validated `store` no-op as strict qualification does. Scratch bodies are
+  released before the choice; only scalars are kept, and the sized body is never
+  sent. A pin keeps today's pin result. When no class member has a measured rate,
+  or any member lacks current sizing (a known no-op recipe counts as sizing), the
+  whole class keeps today's `candidateChoiceLocked` choice and reservation. An
+  unmeasured phase is imputed from the class's slowest measured rate for that
+  phase, else its slowest measured rate. Every 16th committed automatic choice
+  in a facade's class probes the next unmeasured candidate with no pending work
+  or reservations, in node/engine/profile-key order. Facts are gathered outside
+  the chooser locks; the choice before preparation and the recheck after it
+  require the same feed, sizing generation, pin, policy generation and unexpired
+  sizing, else the facts are rebuilt, and any facade discovery generation change
+  re-resolves the class. Only the final commit takes the reservation and
+  advances the probe counter. Ties keep class order. A warm slow node is never
+  compared with a cold fast one, because they are in different classes.
 - **Body**: the top-level `model` is replaced by splicing its value's bytes;
   every other byte is forwarded as received.
 - **Nothing eligible** before any dispatch: `404` with

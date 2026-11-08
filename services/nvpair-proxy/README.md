@@ -493,8 +493,8 @@ schema for tier scoring. Historical, unknown and clock-uncertain evidence is
 excluded. Revisions increase only on payload changes; equal revisions are no-ops
 and older or invalid payloads are refused. Receipt age advances monotonically
 and evidence expires at the performance retention limit. Local clients cannot
-set this feed. The cache has no scoring consumer yet; scheduler priority,
-reservations, admission and concrete routing retain their existing behavior.
+set this feed. Only tier scoring reads it; scheduler priority, reservations,
+admission and concrete routing retain their existing behavior.
 
 The broker likewise sends a private process-scoped `node/set-peer-sizing`
 snapshot of destination-effective request recipes for admitted peers' advertised
@@ -502,7 +502,17 @@ shared profiles, obtained from authenticated policy reads that attest exact
 activation. The proxy replaces it whole, refuses lower revisions, and returns a
 recipe only while the observation is under 90 seconds old and still matches the
 peer's current admission, advertised policy revision and profile identity.
-Unknown sizing never removes a candidate. Nothing scores from it yet.
+Unknown sizing never removes a candidate.
+
+A tier request then chooses, within the leading tier rank and warmth class,
+the candidate expected to finish soonest: prefill and decode time for the
+destination-effective request size, multiplied by its pending work,
+reservations and GPU pressure, plus a load cost when the class is cold. A pin
+keeps today's result, and a class with no measured rate or with any member of
+unknown size keeps today's least-loaded choice. Every 16th automatic choice
+probes an idle unmeasured candidate. Tier rank and warmth still lead, so a warm
+slow node is never compared with a cold fast one; the destination keeps its own
+preparation and admission authority. See [spec.md](spec.md) §12.3.
 
 - **Eligibility**: Before routing model-bearing inference, the proxy keeps only
   nodes declaring the exact requested profile key for this engine. Self uses
@@ -675,7 +685,8 @@ for the independent `localOnly` edit lock, desktop controls and precedence examp
   follows the requesting node's own role order: requested role, stronger roles
   nearest first with `allowStronger`, then weaker roles nearest first with
   `allowWeaker`. A peer-only role absent from that order never widens.
-  `preferLoaded` remains this router's policy.
+  `preferLoaded` remains this router's policy; within the leading class the
+  lowest expected completion time wins (see Node selection).
   Within equal rank, warmth, preparation and selected-pin classes, earlier
   list positions lead. Each candidate uses its own node's membership position,
   capabilities and context, even when another node lists the same pair earlier.

@@ -721,6 +721,12 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 		return kept
 	}
 	candidates := resolve()
+	// round carries a tier request's body to the expected-completion chooser,
+	// which sizes each candidate's destination-effective body from it.
+	var tierInputs *tierRound
+	if tier != "" {
+		tierInputs = &tierRound{body: bodyBytes, route: r.URL.Path, hybrid: policy.hybrid}
+	}
 	// held is this request's claim on a node's capacity while it is in flight.
 	// resMu guards it because failover re-points it from the ReverseProxy's
 	// callbacks while the disconnect watcher may be releasing it.
@@ -836,7 +842,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 		return validated.generation, nil
 	}
 	if model != "" {
-		candidates, held, err = f.reserveRoundPrepared(preparationCtx, candidates, tier != "", model, prepareCandidate, resolve)
+		candidates, held, _, err = f.reserveRoundPrepared(preparationCtx, candidates, tierInputs, model, prepareCandidate, resolve)
 		if err != nil {
 			err = inferencePreparationRefusal(err)
 			ctl.observeIngress(routingIngressResult{factFailed, failureFactReason(err), bufferRequestStatus(err)})
@@ -1223,7 +1229,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 	// that re-resolves has to go back through it.
 	takeHeld := func(cands []candidate) ([]candidate, error) {
 		releaseHeld()
-		out, proposal, err := f.reserveRoundPrepared(preparationCtx, cands, tier != "", model, prepareCandidate, resolve)
+		out, proposal, _, err := f.reserveRoundPrepared(preparationCtx, cands, tierInputs, model, prepareCandidate, resolve)
 		resMu.Lock()
 		held = proposal
 		resMu.Unlock()
