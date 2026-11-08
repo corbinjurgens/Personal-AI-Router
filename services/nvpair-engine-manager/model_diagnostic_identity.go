@@ -117,6 +117,9 @@ func diagnosticHardwareMatchesAt(h *diagnosticHardware, memory *modelconfig.Targ
 }
 
 func (e *Executor) diagnosticRequestedIdentity(ctx context.Context, p modelconfig.InspectRequest, result modelconfig.InspectResult) (modelconfig.DiagnosticIdentity, error) {
+	if result.Status == "busy" {
+		return modelconfig.DiagnosticIdentity{}, diagnosticConflict(errModelInspectionBusy.Error())
+	}
 	hardware, _ := ctx.Value(diagnosticHardwareKey{}).(*diagnosticHardware)
 	captured, _ := ctx.Value(diagnosticCapturedHardwareKey{}).(bool)
 	if err := diagnosticHardwareMatchesAt(hardware, diagnosticMemory(ctx), !captured); err != nil {
@@ -163,6 +166,19 @@ type diagnosticObservation struct {
 }
 
 func (e *Executor) observeDiagnostic(ctx context.Context, p modelconfig.DiagnosticPreviewRequest, memory *modelconfig.TargetMemory, hardware *diagnosticHardware) (diagnosticObservation, error) {
+	ctx, cancel := context.WithTimeout(ctx, modelInspectionBudget+modelsTimeout)
+	defer cancel()
+	var result diagnosticObservation
+	var metadataDeadline time.Time
+	err := retryModelRead(ctx, func(retry *bool) error {
+		var err error
+		result, err = e.observeDiagnosticOnce(ctx, p, memory, hardware, retry, &metadataDeadline)
+		return err
+	})
+	return result, err
+}
+
+func (e *Executor) observeDiagnosticOnce(ctx context.Context, p modelconfig.DiagnosticPreviewRequest, memory *modelconfig.TargetMemory, hardware *diagnosticHardware, retry *bool, metadataDeadline *time.Time) (diagnosticObservation, error) {
 	if err := p.Validate(); err != nil {
 		return diagnosticObservation{}, modelSettingsParamsError(err)
 	}
@@ -174,13 +190,25 @@ func (e *Executor) observeDiagnostic(ctx context.Context, p modelconfig.Diagnost
 	}
 	ctx = withDiagnosticHardware(e.modelMemoryContext(ctx, p.Engine, memory, false), hardware)
 	request := modelconfig.InspectRequest{Engine: p.Engine, ModelID: p.ModelID, ProfileKey: p.ProfileKey}
-	before, err := e.diagnosticEffectsFence(ctx)
+	// No content lease or admission lock is held at either lifecycle capture.
+	lock := func(st *engineState) bool { return modelReadLock(ctx, &st.opMu) }
+	before, err := e.diagnosticEffectsFenceOnce(ctx, lock, retry)
 	if err != nil {
 		return diagnosticObservation{}, err
 	}
-	inspection, err := e.inspectModelArtifacts(ctx, request)
+	// Start the metadata budget at its first read, after initial effects I/O,
+	// and retain that absolute deadline if the whole observation must restart.
+	if metadataDeadline.IsZero() {
+		*metadataDeadline = time.Now().Add(modelInspectionBudget)
+	}
+	metadataCtx, cancel := context.WithDeadline(ctx, *metadataDeadline)
+	inspection, err := e.inspectModelArtifactsOnce(metadataCtx, request, retry)
+	cancel()
 	if err != nil {
 		return diagnosticObservation{}, err
+	}
+	if *retry {
+		return diagnosticObservation{}, diagnosticConflict("engine lifecycle is busy")
 	}
 	identity, err := e.diagnosticRequestedIdentity(ctx, request, inspection)
 	if err != nil {
@@ -238,11 +266,12 @@ func (e *Executor) observeDiagnostic(ctx context.Context, p modelconfig.Diagnost
 	}
 	// Resident reload is policy-owned after drains lift. Do not claim that all
 	// previously loaded models will be reloaded merely because they were present.
-	after, err := e.diagnosticEffectsFence(ctx)
+	after, err := e.diagnosticEffectsFenceOnce(ctx, lock, retry)
 	if err != nil {
 		return diagnosticObservation{}, err
 	}
 	if before != after {
+		*retry = true
 		return diagnosticObservation{}, diagnosticConflict("effects changed during observation")
 	}
 	return result, modelconfig.CheckPayloadSize(result)

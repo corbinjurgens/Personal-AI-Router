@@ -293,16 +293,7 @@ func (f *modelDiagnosticProcessFixture) fault(t *testing.T, name string, hold bo
 func (f *modelDiagnosticProcessFixture) review(t *testing.T, request settings.Request) (settings.Request, settings.Preview) {
 	t.Helper()
 	var preview settings.Preview
-	// A joined diagnostic can still overlap final inventory/native metadata
-	// publication. Retry only the no-effect snapshot/busy refusals, preserving
-	// the exact baseline revision and requested edit throughout.
-	task1Eventually(t, "post-diagnostic settings metadata settles", 15*time.Second, func() bool {
-		f.call(t, "engine:preview-settings", request, &preview)
-		if len(preview.Errors) != 1 {
-			return true
-		}
-		return preview.Errors["modelLoads.busy"] == "" && preview.Errors["modelLoads.baseline"] != "modelLoads.baseline: Engine settings changed during preview." && preview.Errors["modelLoads"] != "model artifact inspection busy"
-	})
+	f.call(t, "engine:preview-settings", request, &preview)
 	if len(preview.Errors) != 0 || preview.Conflict != nil || preview.PreviewDigest == "" {
 		t.Fatalf("preview refused: errors=%v conflict=%v", preview.Errors, preview.Conflict)
 	}
@@ -360,18 +351,7 @@ func (f *modelDiagnosticProcessFixture) call(t *testing.T, method string, params
 func (f *modelDiagnosticProcessFixture) preview(t *testing.T) modelconfig.DiagnosticPreview {
 	t.Helper()
 	var preview modelconfig.DiagnosticPreview
-	var reply jsonrpc.Message
-	// Resident settlement and inventory/source-identity publication are
-	// separate. A changed inspection snapshot withholds both keys; wait for
-	// a real fresh preview. Preview can also explicitly refuse lifecycle
-	// contention before any diagnostic operation is accepted.
-	task1Eventually(t, "diagnostic applied identity converges", 15*time.Second, func() bool {
-		reply = f.rpc(t, "engine:diagnostic-preview", modelconfig.DiagnosticPreviewRequest{Engine: "llamacpp", ModelID: "medium-model", ProfileKey: "medium-model"})
-		if reply.Error == nil || len(reply.Result) != 0 {
-			return true
-		}
-		return !(reply.Error.Code == -32000 && reply.Error.Message == "diagnostic: exactly one configuration or execution key required" || reply.Error.Code == -32010 && reply.Error.Message == "Memory measurement conflict: engine lifecycle is busy")
-	})
+	reply := f.rpc(t, "engine:diagnostic-preview", modelconfig.DiagnosticPreviewRequest{Engine: "llamacpp", ModelID: "medium-model", ProfileKey: "medium-model"})
 	if reply.Error != nil {
 		inspection := f.inspect(t, "medium-model")
 		t.Fatalf("diagnostic preview: code=%d message=%s configuration reason=%s", reply.Error.Code, reply.Error.Message, inspection.ConfigurationKeyReason)
@@ -388,18 +368,6 @@ func (f *modelDiagnosticProcessFixture) preview(t *testing.T) modelconfig.Diagno
 	return preview
 }
 
-func (f *modelDiagnosticProcessFixture) inspectReady(t *testing.T, model string) modelconfig.InspectResult {
-	t.Helper()
-	var value modelconfig.InspectResult
-	// Read-only inspection may explicitly report lifecycle/snapshot contention.
-	// Never retry a resolved response, including a missing or historical overlay.
-	task1Eventually(t, "ordinary inspection leaves explicit busy state", 15*time.Second, func() bool {
-		value = f.inspect(t, model)
-		return value.Status != "busy"
-	})
-	return value
-}
-
 func (f *modelDiagnosticProcessFixture) startRun(t *testing.T) modelconfig.DiagnosticRun {
 	t.Helper()
 	preview := f.preview(t)
@@ -411,14 +379,7 @@ func (f *modelDiagnosticProcessFixture) startRun(t *testing.T) modelconfig.Diagn
 func modelDiagnosticStartFromPreview(t *testing.T, preview modelconfig.DiagnosticPreview, start func(modelconfig.DiagnosticStartRequest) jsonrpc.Message) modelconfig.DiagnosticRun {
 	t.Helper()
 	request := modelconfig.DiagnosticStartRequest{DiagnosticPreviewRequest: preview.DiagnosticPreviewRequest, PreviewID: preview.PreviewID, Consent: true}
-	var reply jsonrpc.Message
-	// Start observes identity again before accepting. Only this exact refusal
-	// proves that no operation was accepted. Keep the same consent and preview
-	// so the broker rechecks expiry and unchanged effects on every attempt.
-	task1Eventually(t, "diagnostic Start identity converges before acceptance", 15*time.Second, func() bool {
-		reply = start(request)
-		return reply.Error == nil || reply.Error.Code != -32000 || reply.Error.Message != "diagnostic: exactly one configuration or execution key required" || len(reply.Result) != 0
-	})
+	reply := start(request)
 	if reply.Error != nil {
 		t.Fatalf("engine:diagnostic-start: code=%d message=%s", reply.Error.Code, reply.Error.Message)
 	}
@@ -933,29 +894,18 @@ func TestModelMemoryDiagnosticProcess(t *testing.T) {
 		}
 		preview := f.preview(t)
 		wantStart := modelconfig.DiagnosticStartRequest{DiagnosticPreviewRequest: preview.DiagnosticPreviewRequest, PreviewID: preview.PreviewID, Consent: true}
-		attempts := 0
 		run := modelDiagnosticStartFromPreview(t, preview, func(request modelconfig.DiagnosticStartRequest) jsonrpc.Message {
 			if request != wantStart {
-				t.Fatalf("Start retry changed preview, target or consent: got=%+v want=%+v", request, wantStart)
-			}
-			attempts++
-			if attempts == 1 {
-				// Deterministically exercise the pre-acceptance observation race,
-				// then obtain actual acceptance from the unmodified broker.
-				return jsonrpc.Message{Error: &jsonrpc.RPCError{Code: -32000, Message: "diagnostic: exactly one configuration or execution key required"}}
+				t.Fatalf("Start changed preview, target or consent: got=%+v want=%+v", request, wantStart)
 			}
 			return f.rpc(t, "engine:diagnostic-start", request)
 		})
-		if attempts < 2 {
-			t.Fatal("Start did not retry the exact pre-acceptance refusal")
-		}
-		t.Logf("Start preserved reviewed request across %d attempts after forced pre-acceptance refusal", attempts)
 		run = f.terminal(t, run.RunID, "completed")
 		stored := f.stored(t, run)
 		if run.Result == nil || !reflect.DeepEqual(*stored.Measured, *run.Result) || stored.Measured.Low == nil || stored.Measured.High == nil || !stored.Measured.OverlayEligible(stored.Measured.DiagnosticIdentity, []string{"host"}) {
 			t.Fatalf("complete native exercise/pool coverage missing: %+v", stored.Measured)
 		}
-		value := f.inspectReady(t, "medium-model")
+		value := f.inspect(t, "medium-model")
 		if value.Estimate.EstimateSource == nil || value.Estimate.EstimateSource.Kind != "measured" || !slices.ContainsFunc(value.MemoryProfiles, func(p modelconfig.MemoryProfile) bool {
 			return p.Current && p.Measured != nil && p.Measured.RunID == run.RunID
 		}) {
@@ -970,7 +920,7 @@ func TestModelMemoryDiagnosticProcess(t *testing.T) {
 		request, _ = f.review(t, request)
 		f.call(t, "engine:apply-settings", request, nil)
 		f.settled(t, request.RequestID, "succeeded")
-		value = f.inspectReady(t, "medium-model")
+		value = f.inspect(t, "medium-model")
 		if slices.ContainsFunc(value.MemoryProfiles, func(p modelconfig.MemoryProfile) bool {
 			return p.Current && p.Measured != nil && p.Measured.RunID == run.RunID
 		}) || value.Estimate.EstimateSource != nil && value.Estimate.EstimateSource.Kind == "measured" {

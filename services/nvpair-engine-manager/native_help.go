@@ -104,6 +104,8 @@ func (e *Executor) nativeOptions(ctx context.Context, st *engineState) ([]modelc
 	if st == nil {
 		return nil, false
 	}
+	ctx, cancel := context.WithTimeout(ctx, nativeHelpBudget)
+	defer cancel()
 	st.mu.Lock()
 	engine := ""
 	if st.manifest != nil {
@@ -128,7 +130,7 @@ func (e *Executor) nativeOptions(ctx context.Context, st *engineState) ([]modelc
 	if err != nil {
 		return nil, false
 	}
-	if !st.opMu.TryLock() {
+	if !modelReadLock(ctx, &st.opMu) {
 		return nil, false
 	}
 	snapshot := snapshotLlamaState(st)
@@ -149,7 +151,7 @@ func (e *Executor) nativeOptions(ctx context.Context, st *engineState) ([]modelc
 		if ctx.Err() != nil || e.activationVeto(engine) != nil || validateSource(executable) != nil {
 			return false
 		}
-		if !st.opMu.TryLock() {
+		if !modelReadLock(ctx, &st.opMu) {
 			return false
 		}
 		afterState := snapshotLlamaState(st)

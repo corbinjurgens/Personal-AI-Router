@@ -949,13 +949,7 @@ func (f *modelSettingsProcessFixture) request(t *testing.T, id string, patch *mo
 func (f *modelSettingsProcessFixture) review(t *testing.T, p settings.Request) (settings.Request, settings.Preview) {
 	t.Helper()
 	var preview settings.Preview
-	// Startup/Resume also refreshes profile identities through real manager
-	// inspections. Wait only for that bounded metadata contention; every other
-	// preview error remains an immediate failure.
-	task1Eventually(t, "model settings metadata inspection available", 15*time.Second, func() bool {
-		modelSettingsDecode(t, f.rpcOK(t, "engine:preview-settings", p), &preview)
-		return len(preview.Errors) != 1 || preview.Errors["modelLoads.busy"] == ""
-	})
+	modelSettingsDecode(t, f.rpcOK(t, "engine:preview-settings", p), &preview)
 	if len(preview.Errors) != 0 || preview.Conflict != nil || preview.PreviewDigest == "" {
 		t.Fatalf("preview refused: errors=%v conflict=%v", preview.Errors, preview.Conflict)
 	}

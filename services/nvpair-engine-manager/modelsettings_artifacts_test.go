@@ -1006,23 +1006,27 @@ func TestModelSettingsArtifactsSourceAndConfigurationRaces(t *testing.T) {
 			}
 			var once sync.Once
 			modelOpens := 0
+			baseArgs := append([]string(nil), f.st.plat.Runtime.Args...)
 			f.ex.modelInspection.open = func(path string) (servingArtifactFile, error) {
 				if path == f.model {
 					modelOpens++
+					// Keep runtime drift active across every fresh attempt. A
+					// single completed change may now converge under V36.
+					if scenario == "generation" {
+						f.st.mu.Lock()
+						f.st.gen++
+						f.st.mu.Unlock()
+					} else if scenario == "launch" {
+						f.st.opMu.Lock()
+						f.st.mu.Lock()
+						f.st.plat.Runtime.Args = append(append([]string(nil), baseArgs...), "--threads", strconv.Itoa(3+modelOpens%2))
+						f.st.mu.Unlock()
+						f.st.opMu.Unlock()
+					}
 				}
 				if path == f.model && modelOpens == 2 {
 					once.Do(func() {
 						switch scenario {
-						case "generation":
-							f.st.mu.Lock()
-							f.st.gen++
-							f.st.mu.Unlock()
-						case "launch":
-							f.st.opMu.Lock()
-							f.st.mu.Lock()
-							f.st.plat.Runtime.Args = append(f.st.plat.Runtime.Args, "--threads", "3")
-							f.st.mu.Unlock()
-							f.st.opMu.Unlock()
 						case "preset":
 							writeTestFile(t, f.preset, []byte("# changed\n[exact-alias]\nmodel = main.gguf\n"))
 						case "gate source":

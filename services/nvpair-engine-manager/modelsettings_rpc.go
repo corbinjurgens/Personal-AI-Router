@@ -96,10 +96,10 @@ func (e *Executor) modelMemoryContext(ctx context.Context, engine string, target
 			st.mu.Lock()
 			permitted := !st.adopted
 			st.mu.Unlock()
-			snapshot, snapshotErr := inspectionSnapshot(st, engine)
+			snapshot, snapshotErr := readOnlyInspectionSnapshot(ctx, st, engine)
 			if permitted && snapshotErr == nil {
 				current = func() bool {
-					after, err := inspectionSnapshot(st, engine)
+					after, err := readOnlyInspectionSnapshot(ctx, st, engine)
 					return err == nil && snapshot.equal(after) && e.activationVeto(engine) == nil
 				}
 				runtime, runtimeErr := modelDeviceRuntimeSnapshot(ctx, st)

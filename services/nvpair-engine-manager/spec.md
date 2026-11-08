@@ -73,10 +73,12 @@ into `reportedBuild` with an empty build identity; no migration pass is added.
 
 The executor's in-memory model identity owner reads the latest stored inventory
 for llama.cpp-family engines only. It resolves checked local artifacts under
-download read admission and the inspection budget. Background scans first try
-the engine's content semaphore without waiting, yielding to reserved mutations;
+download read admission and the inspection budget. Each background scan attempt
+tries the engine's content semaphore without waiting, yielding to reserved mutations;
 a mutation waits behind an admitted scan with its existing context. Snapshots
-perform no I/O and detach file slices. Busy reads retain the previous entry; resolution failures
+perform no I/O and detach file slices. Runtime contention can retry the complete
+read within the bounded read-observation window described below. Busy reads
+after that bound retain the previous entry; resolution failures
 remove it. Explicit refresh, changed run/configuration and a ten-minute interval
 invalidate resolution. Each full inventory sweep requests a coalesced refresh
 without waiting for artifact I/O.
@@ -447,6 +449,24 @@ artifacts and unreviewed resolutions remain refusals. Advisory estimation errors
 are data, never an additional manual-preview or Apply refusal.
 
 Direct previews compile typed records without persistence or activation.
+Read-only model previews, inspection and diagnostic observation absorb brief
+runtime-lock contention inside the manager. Each contended lock acquisition is
+limited to one second. An observation that needs restarting gets at most 21
+attempts, with retries started within one second of the first contention, within the caller's
+context and the existing help/metadata budgets. A reader holding a content lease releases
+that lease and the inspection slot before retrying its entire observation; it
+never waits for a runtime owner that may need the same content guard. Native
+help/device snapshots and diagnostic lifecycle captures can wait without those
+inverse locks. A completed runtime change requires a fresh revalidated snapshot,
+not reuse of earlier facts or effects. Continuous drift or contention past the
+bound retains the explicit busy/conflict/unknown response without current proof.
+Mutation acceptance, reservation comparisons, source/ownership checks, consent,
+revision checks and stored-measurement publication keep their existing fences.
+These are read retries, never automatic replay of an accepted or uncertain action.
+Diagnostic reservation and exercise identity rechecks use the same inspection
+owner. Busy inspection after its bound remains an explicit observation conflict;
+its absent key is never classified as proof that the accepted identity changed.
+
 Typed loads are keyed by `profileKey`. The preset section name, profile key
 and served id are identical; `modelId` separately selects artifact files.
 Distinct profiles may select the same artifact with different launch settings.

@@ -793,6 +793,9 @@ func (e *Executor) diagnosticInspectIdentity(ctx context.Context, op *modelDiagn
 	if err != nil {
 		return result, err
 	}
+	if result.Status == "busy" {
+		return result, diagnosticConflict(errModelInspectionBusy.Error())
+	}
 	if result.ConfigurationKey != op.params.ConfigurationKey || result.ExecutionKey != op.params.ExecutionKey || result.NativeBuildID == "" {
 		return result, errModelDiagnosticIdentity
 	}
