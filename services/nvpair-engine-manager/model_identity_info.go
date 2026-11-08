@@ -124,8 +124,23 @@ func (m *modelIdentityInfo) reconcile(ctx context.Context, force bool, now time.
 }
 
 func (m *modelIdentityInfo) resolve(parent context.Context, engine, model string, old modelIdentityInfoEntry, exists, force bool, now time.Time) (modelIdentityInfoEntry, bool) {
+	ctx, cancel := context.WithTimeout(parent, modelInspectionBudget)
+	defer cancel()
+	var value modelIdentityInfoEntry
+	var keep bool
+	if err := retryModelRead(ctx, func(retry *bool) error {
+		value, keep = m.resolveOnce(ctx, engine, model, old, exists, force, now, retry)
+		return nil
+	}); err != nil {
+		return old, exists
+	}
+	return value, keep
+}
+
+func (m *modelIdentityInfo) resolveOnce(parent context.Context, engine, model string, old modelIdentityInfoEntry, exists, force bool, now time.Time, retry *bool) (modelIdentityInfoEntry, bool) {
 	e := m.executor
 	if !e.modelInspection.active.CompareAndSwap(false, true) {
+		*retry = true
 		return old, exists
 	}
 	defer e.modelInspection.active.Store(false)
@@ -143,6 +158,7 @@ func (m *modelIdentityInfo) resolve(parent context.Context, engine, model string
 	select {
 	case st.contentMu <- struct{}{}:
 	default:
+		*retry = true
 		return old, exists
 	}
 	defer func() { <-st.contentMu }()
@@ -159,6 +175,7 @@ func (m *modelIdentityInfo) resolve(parent context.Context, engine, model string
 	run := e.engineRunID(engine)
 	snapshot, err := inspectionSnapshot(st, engine)
 	if errors.Is(err, errModelInspectionBusy) {
+		*retry = true
 		return old, exists
 	}
 	if err != nil {
@@ -195,6 +212,7 @@ func (m *modelIdentityInfo) resolve(parent context.Context, engine, model string
 	}
 	current, err := inspectionSnapshot(st, engine)
 	if err != nil || !snapshot.equal(current) || e.engineRunID(engine) != run {
+		*retry = true
 		return old, exists
 	}
 	if validateResolutionEvidence(ctx, list.source) != nil {

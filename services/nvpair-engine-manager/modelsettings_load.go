@@ -1191,35 +1191,53 @@ func typedLlamaModelOptions(model string, requested modelconfig.RequestedLoad, l
 // Read-only worker preview. Acceptance and policy implications remain with
 // the settings operation owner.
 func (e *Executor) previewModelLoadChange(ctx context.Context, st *engineState, p settings.Request) (settings.Preview, error) {
-	result := settings.Preview{Settings: p.Settings.Clone(), Args: []string{}, Env: []string{}, Errors: map[string]string{}}
+	if err := validateModelLoadPreview(st, p); err != nil {
+		result := settings.Preview{Settings: p.Settings.Clone(), Args: []string{}, Env: []string{}, Errors: map[string]string{}}
+		return modelLoadPreviewFailure(ctx, p, result, err)
+	}
+	// Validate before discovery, then establish one metadata deadline for all
+	// attempts. Help keeps its separate budget and is never repeated here.
+	_, known := e.nativeOptions(ctx, st)
+	ctx = context.WithValue(ctx, nativeHelpDiscoveryKey{}, known)
+	ctx, cancel := context.WithTimeout(ctx, modelInspectionBudget)
+	defer cancel()
+	var result settings.Preview
+	var pending *modelEstimateInput
+	err := retryModelRead(ctx, func(retry *bool) error {
+		var err error
+		pending = nil
+		result, err = e.previewModelLoadChangeOnce(ctx, st, p, retry, &pending)
+		return err
+	})
+	if err != nil || pending == nil {
+		return result, err
+	}
+	// All authoritative work is complete and its content lease is released.
+	// The advisory estimate uses the remaining metadata budget; its failure,
+	// panic or expiration is an Unknown estimate, never a Preview refusal.
+	attachModelLoadEstimate(&result, e.modelEstimates.estimate(ctx, *pending))
+	return result, nil
+}
+
+// A reply-size failure after attachment drops only the advisory estimate.
+func attachModelLoadEstimate(result *settings.Preview, estimate modelconfig.Estimate) {
+	result.Estimate = &estimate
+	if err := modelconfig.CheckPayloadSize(*result); err != nil {
+		result.Estimate = nil
+	}
+}
+
+func validateModelLoadPreview(st *engineState, p settings.Request) error {
 	profileKey := ""
 	if p.ModelChange != nil {
 		profileKey = modelLoadChangeProfileKey(p.ModelChange)
 	}
-	fail := func(err error) (settings.Preview, error) {
-		if ctx.Err() != nil {
-			return settings.Preview{}, ctx.Err()
-		}
-		field := "modelLoads"
-		var typed *ServingFieldError
-		if errors.As(err, &typed) {
-			field = typed.Field
-		}
-		result.Errors[field] = err.Error()
-		if p.ModelChange != nil {
-			op, _ := ctx.Value(modelAutoOperationKey{}).(modelAutoOperation)
-			if proposal, ok := op.Proposals[profileKey]; ok {
-				result.Auto = &proposal
-			}
-		}
-		return result, nil
-	}
 	if err := p.Validate(); err != nil {
-		return fail(err)
+		return err
 	}
 	if p.ModelChange != nil && p.ModelChange.Load != nil {
 		if err := validateModelLoadGPUSelection(profileKey, p.ModelChange.Load.Set); err != nil {
-			return fail(err)
+			return err
 		}
 		st.mu.Lock()
 		loads := modelconfig.CloneLoads(st.plat.Runtime.ModelLoads)
@@ -1229,20 +1247,44 @@ func (e *Executor) previewModelLoadChange(ctx context.Context, st *engineState, 
 			// placement combination. Merge through the existing owner before
 			// native help, not only before the later typed compilation.
 			if _, err := patchModelLoad(loads, profileKey, p.ModelChange.ModelID, *p.ModelChange.Load); err != nil {
-				return fail(err)
+				return err
 			}
 		}
 	}
 	if st.manifest.FamilyOrDefault() != "llamacpp" || p.ModelChange == nil || p.ModelChange.Load == nil && !p.ModelChange.Remove || p.ModelChange.Policy != nil {
-		return fail(modelLoadError("", "request", "Only a local llama.cpp load-only preview is available."))
+		return modelLoadError("", "request", "Only a local llama.cpp load-only preview is available.")
 	}
-	// This explicit operation may discover help; compiler/frozen callers only
-	// consume completed evidence for their selected build and never spawn it.
-	_, known := e.nativeOptions(ctx, st)
-	ctx = context.WithValue(ctx, nativeHelpDiscoveryKey{}, known)
-	ctx, cancel := context.WithTimeout(ctx, modelInspectionBudget)
-	defer cancel()
+	return nil
+}
+
+func modelLoadPreviewFailure(ctx context.Context, p settings.Request, result settings.Preview, err error) (settings.Preview, error) {
+	if ctx.Err() != nil {
+		return settings.Preview{}, ctx.Err()
+	}
+	field := "modelLoads"
+	var typed *ServingFieldError
+	if errors.As(err, &typed) {
+		field = typed.Field
+	}
+	result.Errors[field] = err.Error()
+	if p.ModelChange != nil {
+		op, _ := ctx.Value(modelAutoOperationKey{}).(modelAutoOperation)
+		if proposal, ok := op.Proposals[modelLoadChangeProfileKey(p.ModelChange)]; ok {
+			result.Auto = &proposal
+		}
+	}
+	return result, nil
+}
+
+func (e *Executor) previewModelLoadChangeOnce(ctx context.Context, st *engineState, p settings.Request, retry *bool, pending **modelEstimateInput) (settings.Preview, error) {
+	result := settings.Preview{Settings: p.Settings.Clone(), Args: []string{}, Env: []string{}, Errors: map[string]string{}}
+	fail := func(err error) (settings.Preview, error) { return modelLoadPreviewFailure(ctx, p, result, err) }
+	if err := validateModelLoadPreview(st, p); err != nil {
+		return fail(err)
+	}
+	profileKey := modelLoadChangeProfileKey(p.ModelChange)
 	if !e.modelInspection.active.CompareAndSwap(false, true) {
+		*retry = true
 		return fail(modelLoadError("", "busy", "Another model metadata preview or inspection is active."))
 	}
 	defer e.modelInspection.active.Store(false)
@@ -1253,6 +1295,7 @@ func (e *Executor) previewModelLoadChange(ctx context.Context, st *engineState, 
 	defer release()
 	snapshot, err := inspectionSnapshot(st, p.Engine)
 	if err != nil {
+		*retry = errors.Is(err, errModelInspectionBusy)
 		return fail(err)
 	}
 	rt := snapshot.state.plat.Runtime
@@ -1363,6 +1406,7 @@ func (e *Executor) previewModelLoadChange(ctx context.Context, st *engineState, 
 	}
 	current, err := inspectionSnapshot(st, p.Engine)
 	if err != nil || !snapshot.equal(current) {
+		*retry = true
 		return fail(modelLoadError("", "baseline", "Engine settings changed during preview."))
 	}
 	if err := recheck(); err != nil {
@@ -1458,21 +1502,17 @@ func (e *Executor) previewModelLoadChange(ctx context.Context, st *engineState, 
 	if err := modelconfig.CheckPayloadSize(result); err != nil {
 		return fail(err)
 	}
-	// All authoritative work is already complete. Estimate failures, panic or
-	// expiration remain advisory, including a reply-size failure after attachment.
-	var estimate modelconfig.Estimate
+	// All authoritative work is already complete. A fresh estimate is left to
+	// the caller, after this attempt releases its content lease.
 	if p.ModelChange.Remove {
 		return result, nil
 	}
 	if proposal, ok := op.Proposals[profileKey]; ok {
-		estimate = proposal.Estimate
 		result.Auto = &proposal
+		attachModelLoadEstimate(&result, proposal.Estimate)
 	} else {
-		estimate = e.modelEstimates.estimate(ctx, advisory[profileKey])
-	}
-	result.Estimate = &estimate
-	if err := modelconfig.CheckPayloadSize(result); err != nil {
-		result.Estimate = nil
+		in := advisory[profileKey]
+		*pending = &in
 	}
 	return result, nil
 }

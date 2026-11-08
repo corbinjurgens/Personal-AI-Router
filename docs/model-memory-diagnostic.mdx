@@ -176,8 +176,13 @@ even if files change or post-run inspection becomes unavailable. Such evidence
 may immediately be historical and has no buffer link in that case. Affirmative
 physical-stop proof still precedes record persistence and resource release.
 
-Ordinary model inspection can report `busy` while a lifecycle/status operation
-holds the engine snapshot lock or the configuration changes during inspection,
+The manager absorbs brief lifecycle/status-lock contention during read-only
+Preview and inspection. Each read observation has a single one-second contention
+window, within the caller's deadline and the operation's existing budgets; lock
+acquisitions inside a retried read do not start windows of their own. Inspection releases its
+content leases before retrying. Every attempt revalidates the runtime, files and
+effects; mutation acceptance and consent checks keep their existing fences.
+Ordinary model inspection can still report `busy` when that bound is exhausted,
 including at the final currentness check. That response provides no current
 configuration or execution key and no measured overlay. A fresh read after the
 contention ends must establish currentness against the persisted measurement.

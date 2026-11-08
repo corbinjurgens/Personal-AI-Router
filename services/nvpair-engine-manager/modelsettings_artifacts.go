@@ -254,6 +254,18 @@ func inspectionSnapshot(st *engineState, engine string) (modelInspectionSnapshot
 		return modelInspectionSnapshot{}, errModelInspectionBusy
 	}
 	defer st.opMu.Unlock()
+	return inspectionSnapshotLocked(st, engine)
+}
+
+func readOnlyInspectionSnapshot(ctx context.Context, st *engineState, engine string) (modelInspectionSnapshot, error) {
+	if !modelReadLock(ctx, &st.opMu) {
+		return modelInspectionSnapshot{}, errModelInspectionBusy
+	}
+	defer st.opMu.Unlock()
+	return inspectionSnapshotLocked(st, engine)
+}
+
+func inspectionSnapshotLocked(st *engineState, engine string) (modelInspectionSnapshot, error) {
 	snapshot := snapshotLlamaState(st)
 	command, err := launchForState(snapshot, snapshot.plat.Runtime.Port)
 	if err != nil {
@@ -460,6 +472,18 @@ func decodeInspectionFacts(ctx context.Context, list modelFileList, access servi
 }
 
 func (e *Executor) inspectModelArtifacts(ctx context.Context, p modelconfig.InspectRequest, advisory ...*modelEstimateInput) (modelconfig.InspectResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, modelInspectionBudget)
+	defer cancel()
+	var result modelconfig.InspectResult
+	err := retryModelRead(ctx, func(retry *bool) error {
+		var err error
+		result, err = e.inspectModelArtifactsOnce(ctx, p, retry, advisory...)
+		return err
+	})
+	return result, err
+}
+
+func (e *Executor) inspectModelArtifactsOnce(ctx context.Context, p modelconfig.InspectRequest, retry *bool, advisory ...*modelEstimateInput) (modelconfig.InspectResult, error) {
 	// A separate read-only handoff; never stored in Task 5's facts cache or
 	// used for admission, binding identity, discovery or source revalidation.
 	for _, output := range advisory {
@@ -489,6 +513,7 @@ func (e *Executor) inspectModelArtifacts(ctx context.Context, p modelconfig.Insp
 		return unavailable("unavailable", "Local GGUF inspection is supported for llama.cpp only.")
 	}
 	if !e.modelInspection.active.CompareAndSwap(false, true) {
+		*retry = true
 		return unavailable("busy", "Another model facts inspection is active.")
 	}
 	defer e.modelInspection.active.Store(false)
@@ -523,6 +548,7 @@ func (e *Executor) inspectModelArtifacts(ctx context.Context, p modelconfig.Insp
 	}
 	snapshot, err := inspectionSnapshot(st, p.Engine)
 	if errors.Is(err, errModelInspectionBusy) {
+		*retry = true
 		return unavailable("busy", "Engine configuration is being changed.")
 	}
 	if err != nil {
@@ -605,6 +631,7 @@ func (e *Executor) inspectModelArtifacts(ctx context.Context, p modelconfig.Insp
 	// Cache hits repeat resolution, binding samples and all owner checks too.
 	current, err := inspectionSnapshot(st, p.Engine)
 	if err != nil || !snapshot.equal(current) {
+		*retry = true
 		return unavailable("busy", "Engine configuration changed during inspection.")
 	}
 	if list.source.inventory != nil {
@@ -638,6 +665,7 @@ func (e *Executor) inspectModelArtifacts(ctx context.Context, p modelconfig.Insp
 	// Finish with a nonblocking configuration check after the last file I/O.
 	current, err = inspectionSnapshot(st, p.Engine)
 	if err != nil || !snapshot.equal(current) {
+		*retry = true
 		return unavailable("busy", "Engine configuration changed during inspection.")
 	}
 	downloads.mu.Lock()
@@ -727,6 +755,7 @@ func (e *Executor) inspectModelArtifacts(ctx context.Context, p modelconfig.Insp
 		}
 		current, err := inspectionSnapshot(st, p.Engine)
 		if err != nil || !snapshot.equal(current) {
+			*retry = true
 			result.ConfigurationKey, result.ConfigurationKeyReason, result.ConfigurationPools = "", "artifacts-unavailable", nil
 			result.ExecutionKey = ""
 			return unavailable("busy", "Engine configuration changed during inspection.")

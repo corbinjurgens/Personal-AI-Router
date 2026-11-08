@@ -244,6 +244,9 @@ func (e *Executor) compareDiagnosticReservation(ctx context.Context, p diagnosti
 	if err != nil {
 		return err
 	}
+	if result.Status == "busy" {
+		return diagnosticConflict(errModelInspectionBusy.Error())
+	}
 	if p.ConfigurationKey != "" && result.ConfigurationKey != p.ConfigurationKey ||
 		p.ExecutionKey != "" && result.ExecutionKey != p.ExecutionKey {
 		return diagnosticConflict("applied profile identity changed; obtain a fresh preview")
@@ -268,6 +271,21 @@ type diagnosticEngineEffects struct {
 // loaded-model evidence for a running engine fails closed; stopped engines have
 // an explicitly empty loaded set. The incarnation prevents cross-restart reuse.
 func (e *Executor) diagnosticEffectsFence(ctx context.Context) (string, error) {
+	// Reservation comparison and the pre-exercise check call this without an
+	// admission/lifecycle lock or content lease held. Retry only this read;
+	// callers still compare the fresh digest with the accepted effects fence.
+	var fence string
+	err := retryModelRead(ctx, func(retry *bool) error {
+		var err error
+		fence, err = e.diagnosticEffectsFenceOnce(ctx, retry)
+		return err
+	})
+	return fence, err
+}
+
+// Lock acquisition here never waits: the enclosing whole-read retry owns the
+// single contention deadline.
+func (e *Executor) diagnosticEffectsFenceOnce(ctx context.Context, retry *bool) (string, error) {
 	effects := make([]diagnosticEngineEffects, 0)
 	for _, engine := range e.reg.Names() {
 		st, err := e.state(engine)
@@ -275,6 +293,7 @@ func (e *Executor) diagnosticEffectsFence(ctx context.Context) (string, error) {
 			return "", diagnosticConflict("engine state unavailable")
 		}
 		if !st.opMu.TryLock() {
+			*retry = true
 			return "", diagnosticConflict("engine lifecycle is busy")
 		}
 		st.mu.Lock()
@@ -305,6 +324,7 @@ func (e *Executor) diagnosticEffectsFence(ctx context.Context) (string, error) {
 			entry.Loaded = slices.Compact(entry.Loaded)
 		}
 		if !st.opMu.TryLock() {
+			*retry = true
 			return "", diagnosticConflict("engine lifecycle changed during observation")
 		}
 		st.mu.Lock()
@@ -312,6 +332,7 @@ func (e *Executor) diagnosticEffectsFence(ctx context.Context) (string, error) {
 		st.mu.Unlock()
 		st.opMu.Unlock()
 		if changed {
+			*retry = true
 			return "", diagnosticConflict("engine changed during loaded-model observation")
 		}
 		effects = append(effects, entry)
