@@ -200,6 +200,20 @@ not broker methods. The private window/request/end/accepted methods never
 reach renderer clients or peers.
 
 Rows retain newest 32 attempts with original indexes and `droppedAttempts`.
+Each record's `selection` member (between `droppedAttempts` and `attempts`) is
+null for a non-tier request, otherwise `{decision, tierRank, warm, winner,
+runnerUp}` explaining why the latest committed tier round chose its destination.
+`decision` is `measured`, `imputed`, `probe`, `pinned` or `baseline`; each
+candidate holds `nodeId`, `engine`, `model`, `totalMs`, `terms`
+(`{service, queue, pressure, cold}`, all four required, in milliseconds),
+`evidenceAgeMs`, `samples` and `imputed`. Only the first three decisions are
+numeric (non-null `totalMs` and `terms`, and an optional runner-up); `pinned`
+and `baseline` carry `totalMs` and `terms` null and a null runner-up, so the
+expanded row says no estimate was made instead of showing zeros. A null `evidenceAgeMs` is displayed
+`not measured`.
+Unknown selection keys are rejected, the encoded selection is at most 2048
+bytes, and it never carries request content. It travels in the same packed
+record, so it adds no history store.
 Null local `destination.model` retains the actual node/engine and is labelled
 `model not specified`; API models remain required. Nullable keys stay present.
 Money is exact decimal nano-USD strings, never `Number`/floating point: ceiling

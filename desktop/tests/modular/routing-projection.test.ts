@@ -50,6 +50,94 @@ function altered(
     else parent[leaf] = replacement
     return new TextEncoder().encode(JSON.stringify(value))
 }
+type SelectionJson = NonNullable<RoutingHistoryRecord['selection']>
+type CandidateJson = SelectionJson['winner']
+
+function numericCandidate(overrides: Partial<CandidateJson> = {}): CandidateJson {
+    return {
+        nodeId: 'synthetic-node',
+        engine: 'llamacpp',
+        model: 'synthetic-model',
+        totalMs: 120,
+        terms: { service: 100, queue: 20, pressure: 0, cold: 0 },
+        evidenceAgeMs: 4500,
+        samples: 3,
+        imputed: false,
+        ...overrides
+    }
+}
+function plainCandidate(): CandidateJson {
+    return numericCandidate({ totalMs: null, terms: null, evidenceAgeMs: null, samples: 0 })
+}
+function selectionRecord(selection: SelectionJson | null): RoutingHistoryRecord {
+    const record: RoutingHistoryRecord = JSON.parse(JSON.stringify(corpus.cases[0].record))
+    record.selection = selection
+    return record
+}
+function encoded(record: RoutingHistoryRecord): Uint8Array {
+    return new TextEncoder().encode(JSON.stringify(record))
+}
+// One-character strings and sixteen-digit numbers: padding then fills the rest of the cap.
+function wideCandidate(): CandidateJson {
+    const wide = Number.MAX_SAFE_INTEGER
+    return numericCandidate({
+        model: 'm',
+        nodeId: 'n',
+        engine: 'e',
+        totalMs: wide,
+        terms: { service: wide, queue: wide, pressure: wide, cold: wide },
+        evidenceAgeMs: wide,
+        samples: wide
+    })
+}
+function selectionPaddedTo(bytes: number): SelectionJson {
+    const selection: SelectionJson = {
+        decision: 'measured',
+        tierRank: 0,
+        warm: true,
+        winner: wideCandidate(),
+        runnerUp: wideCandidate()
+    }
+    if (!selection.runnerUp) throw new Error('fixture needs a runner-up')
+    const fields: [CandidateJson, 'model' | 'nodeId' | 'engine', number][] = [
+        [selection.winner, 'model', 512],
+        [selection.runnerUp, 'model', 512],
+        [selection.winner, 'nodeId', 128],
+        [selection.runnerUp, 'nodeId', 128],
+        [selection.winner, 'engine', 128],
+        [selection.runnerUp, 'engine', 128]
+    ]
+    for (const [candidate, field, limit] of fields) {
+        const grow = Math.min(limit - 1, bytes - JSON.stringify(selection).length)
+        if (grow > 0) candidate[field] = candidate[field].padEnd(1 + grow, 'x')
+    }
+    return selection
+}
+
+// Longest identifiers and models, with zero-valued numbers: the schema maximum
+// that still fits the 2048-byte encoding cap.
+function maximalSelection(): SelectionJson {
+    const candidate = (): CandidateJson =>
+        numericCandidate({
+            nodeId: 'a'.repeat(128),
+            engine: 'e'.repeat(128),
+            model: 'm'.repeat(512),
+            totalMs: 0,
+            terms: { service: 0, queue: 0, pressure: 0, cold: 0 },
+            evidenceAgeMs: 0,
+            samples: 0
+        })
+    return {
+        decision: 'measured',
+        tierRank: 0,
+        warm: true,
+        winner: candidate(),
+        runnerUp: candidate()
+    }
+}
+// Per candidate: 130 + 130 + 514 + 9 + (1 + 4 * 8) + 9 + 8 + 1; plus the selection tag,
+// decision, rank, warm and the runner-up tag.
+const maximalSelectionPackedBytes = 1 + 1 + 8 + 1 + 834 + 1 + 834
 const requiredPaths = [
     'schema',
     'request',
@@ -89,6 +177,27 @@ const requiredPaths = [
     'spend.chargedNanoUsd',
     'spend.accounting',
     'droppedAttempts',
+    'selection',
+    'selection.decision',
+    'selection.tierRank',
+    'selection.warm',
+    'selection.winner',
+    'selection.winner.nodeId',
+    'selection.winner.engine',
+    'selection.winner.model',
+    'selection.winner.totalMs',
+    'selection.winner.terms',
+    'selection.winner.terms.service',
+    'selection.winner.terms.queue',
+    'selection.winner.terms.pressure',
+    'selection.winner.terms.cold',
+    'selection.winner.evidenceAgeMs',
+    'selection.winner.samples',
+    'selection.winner.imputed',
+    'selection.runnerUp',
+    'selection.runnerUp.nodeId',
+    'selection.runnerUp.terms',
+    'selection.runnerUp.terms.cold',
     'attempts',
     'attempts.0.index',
     'attempts.0.startedAt',
@@ -432,6 +541,7 @@ describe('routing history schema parity', () => {
                 accounting: 'recorded'
             },
             droppedAttempts: maximum - 32,
+            selection: maximalSelection(),
             attempts
         }
         const wire = JSON.stringify(value),
@@ -455,9 +565,10 @@ describe('routing history schema parity', () => {
         }
         expect(bank.size).toBe(256)
         // Source-derived fixture size; the schema ceiling also covers other valid shapes.
-        expect(bank.at(0).byteLength).toBe(30766)
-        expect(bank.at(0).byteLength).toBeLessThanOrEqual(30833)
+        // 30,766 bytes without a selection, plus the selection's packed size.
+        expect(bank.at(0).byteLength).toBe(30766 + maximalSelectionPackedBytes)
         expect(bank.at(0).byteLength).toBeLessThanOrEqual(32752)
+        expect(JSON.stringify(value.selection).length).toBeLessThanOrEqual(2048)
         const packed = bank.at(0).slice()
         expect(packed.byteLength).toBe(packed.buffer.byteLength)
         expect(packed.byteLength + 4096).toBeLessThanOrEqual(135168)
@@ -531,6 +642,240 @@ describe('routing history schema parity', () => {
             expect(record.state).toBe('completed')
             return undefined
         })
+    })
+})
+
+describe('routing selection record member', () => {
+    const accepted: [string, SelectionJson | null][] = [
+        ['null', null],
+        [
+            'numeric with a runner-up',
+            {
+                decision: 'measured',
+                tierRank: 2,
+                warm: false,
+                winner: numericCandidate(),
+                runnerUp: numericCandidate({ nodeId: 'synthetic-peer', imputed: true, samples: 0 })
+            }
+        ],
+        [
+            'numeric without a runner-up',
+            {
+                decision: 'probe',
+                tierRank: 0,
+                warm: true,
+                winner: numericCandidate({ evidenceAgeMs: null }),
+                runnerUp: null
+            }
+        ],
+        [
+            'imputed',
+            {
+                decision: 'imputed',
+                tierRank: 1,
+                warm: true,
+                winner: numericCandidate({ imputed: true }),
+                runnerUp: numericCandidate()
+            }
+        ],
+        [
+            'pinned',
+            {
+                decision: 'pinned',
+                tierRank: 0,
+                warm: true,
+                winner: plainCandidate(),
+                runnerUp: null
+            }
+        ],
+        [
+            'baseline',
+            {
+                decision: 'baseline',
+                tierRank: 3,
+                warm: false,
+                winner: plainCandidate(),
+                runnerUp: null
+            }
+        ],
+        [
+            'safe-integer bounds',
+            {
+                decision: 'measured',
+                tierRank: Number.MAX_SAFE_INTEGER,
+                warm: true,
+                winner: numericCandidate({
+                    totalMs: Number.MAX_SAFE_INTEGER,
+                    terms: {
+                        service: 0,
+                        queue: 1,
+                        pressure: 2,
+                        cold: Number.MAX_SAFE_INTEGER
+                    },
+                    evidenceAgeMs: Number.MAX_SAFE_INTEGER,
+                    samples: Number.MAX_SAFE_INTEGER
+                }),
+                runnerUp: null
+            }
+        ]
+    ]
+    it.each(accepted)(
+        'round-trips a %s selection through projection, bank and packed IPC',
+        (_, selection) => {
+            const record = selectionRecord(selection)
+            const raw = encoded(record)
+            consumeRoutingHistoryRecord(new RoutingJsonProjector().record(raw), value => {
+                expect(value).toEqual(record)
+                return undefined
+            })
+            const main = new RoutingHistoryBank(),
+                renderer = new RoutingHistoryBank()
+            expect(main.apply(raw)).toBe(true)
+            expect(renderer.applyPacked(main.at(0).slice())).toBe(true)
+            expect(
+                renderer.consume(0, value => {
+                    expect(value).toEqual(record)
+                    expect(value.selection).toEqual(selection)
+                    return undefined
+                })
+            ).toBe(true)
+        }
+    )
+
+    it('carries the selection member in the corpus fixtures', () => {
+        const records: RoutingHistoryRecord[] = corpus.cases.map(entry =>
+            JSON.parse(JSON.stringify(entry.record))
+        )
+        expect(records[0].selection?.runnerUp).not.toBeNull()
+        expect(records[1].selection?.decision).toBe('baseline')
+        expect(records[2].selection).toBeNull()
+    })
+
+    const rejected: [string, (selection: SelectionJson) => void][] = [
+        ['a bad decision', s => void Object.assign(s, { decision: 'cheapest' })],
+        ['an empty decision', s => void Object.assign(s, { decision: '' })],
+        ['a negative tier rank', s => void (s.tierRank = -1)],
+        ['a fractional total', s => void (s.winner.totalMs = 1.5)],
+        [
+            'an unsafe term value',
+            s => void Object.assign(s.winner.terms ?? {}, { cold: Number.MAX_SAFE_INTEGER + 1 })
+        ],
+        ['a negative term value', s => void Object.assign(s.winner.terms ?? {}, { queue: -1 })],
+        [
+            'a fractional term value',
+            s => void Object.assign(s.winner.terms ?? {}, { service: 0.5 })
+        ],
+        ['a string term value', s => void Object.assign(s.winner.terms ?? {}, { pressure: '0' })],
+        [
+            'a missing term member',
+            s => void (s.winner.terms && Reflect.deleteProperty(s.winner.terms, 'cold'))
+        ],
+        ['an array of terms', s => void Object.assign(s.winner, { terms: [] })],
+        ['an unsafe sample count', s => void (s.winner.samples = Number.MAX_SAFE_INTEGER + 1)],
+        ['a negative evidence age', s => void (s.winner.evidenceAgeMs = -1)],
+        ['a string integer', s => void Object.assign(s, { tierRank: '1' })],
+        ['a non-boolean warm', s => void Object.assign(s, { warm: 1 })],
+        ['a null total on a numeric winner', s => void (s.winner.totalMs = null)],
+        [
+            'a null total on a numeric runner-up',
+            s => void (s.runnerUp && (s.runnerUp.totalMs = null))
+        ],
+        [
+            'a runner-up on a pinned decision',
+            s => {
+                s.decision = 'pinned'
+                s.winner = plainCandidate()
+            }
+        ],
+        [
+            'a numeric winner on a baseline decision',
+            s => {
+                s.decision = 'baseline'
+                s.runnerUp = null
+            }
+        ],
+        [
+            'terms on a baseline winner',
+            s => {
+                s.decision = 'baseline'
+                s.winner = numericCandidate({ totalMs: null })
+                s.runnerUp = null
+            }
+        ],
+        [
+            'a total on a baseline winner',
+            s => {
+                s.decision = 'baseline'
+                s.winner = numericCandidate({ terms: null })
+                s.runnerUp = null
+            }
+        ],
+        ['null terms on a numeric winner', s => void (s.winner.terms = null)],
+        ['null terms on a numeric runner-up', s => void (s.runnerUp && (s.runnerUp.terms = null))],
+        ['an empty model', s => void (s.winner.model = '')],
+        ['an over-long model', s => void (s.winner.model = 'm'.repeat(513))],
+        ['a control character in the model', s => void (s.winner.model = 'bad\u0007model')],
+        ['an over-long node identifier', s => void (s.winner.nodeId = 'n'.repeat(129))],
+        ['a malformed engine identifier', s => void (s.winner.engine = '-llamacpp')],
+        [
+            'a runner-up node identifier with a slash',
+            s => void (s.runnerUp && (s.runnerUp.nodeId = 'a/b'))
+        ],
+        [
+            'an encoded selection above 2048 bytes',
+            s => void Object.assign(s, selectionPaddedTo(2049))
+        ]
+    ]
+    it.each(rejected)('rejects %s in every entry point', (_, mutate) => {
+        const selection: SelectionJson = {
+            decision: 'measured',
+            tierRank: 0,
+            warm: true,
+            winner: numericCandidate(),
+            runnerUp: numericCandidate()
+        }
+        mutate(selection)
+        const raw = encoded(selectionRecord(selection))
+        expect(() => consumeRoutingHistoryRecord(raw, () => undefined)).toThrow()
+        expect(() => new RoutingJsonProjector().record(raw)).toThrow()
+        const bank = new RoutingHistoryBank()
+        expect(() => bank.apply(raw)).toThrow()
+        expect(bank.size).toBe(0)
+    })
+
+    it('accepts an encoded selection of exactly 2048 bytes', () => {
+        const selection = selectionPaddedTo(2048)
+        expect(JSON.stringify(selection).length).toBe(2048)
+        const record = selectionRecord(selection)
+        consumeRoutingHistoryRecord(encoded(record), value => {
+            expect(value.selection).toEqual(selection)
+            return undefined
+        })
+        expect(new RoutingHistoryBank().apply(encoded(record))).toBe(true)
+    })
+
+    it('rejects an unknown selection key at storage and strips it at projection', () => {
+        for (const owner of [[], ['winner'], ['winner', 'terms'], ['runnerUp']]) {
+            const raw = altered(0, ['selection', ...owner, 'prompt'], 'synthetic-private-text')
+            expect(() => consumeRoutingHistoryRecord(raw, () => undefined)).toThrow('invalid-shape')
+            expect(() => new RoutingHistoryBank().apply(raw)).toThrow('invalid-shape')
+            const projected = new RoutingJsonProjector().record(raw)
+            expect(new TextDecoder().decode(projected)).not.toContain('synthetic-private-text')
+            consumeRoutingHistoryRecord(projected, value => {
+                expect(value).toEqual(corpus.cases[0].record)
+                return undefined
+            })
+        }
+    })
+
+    it('rejects an unknown key in a packed selection and a truncated packed record', () => {
+        const main = new RoutingHistoryBank()
+        expect(main.apply(encoded(selectionRecord(accepted[1][1])))).toBe(true)
+        const packed = main.at(0).slice()
+        const renderer = new RoutingHistoryBank()
+        expect(() => renderer.applyPacked(packed.subarray(0, packed.length - 1))).toThrow()
+        expect(() => renderer.applyPacked(packed.subarray(0, packed.length - 20))).toThrow()
+        expect(renderer.size).toBe(0)
     })
 })
 

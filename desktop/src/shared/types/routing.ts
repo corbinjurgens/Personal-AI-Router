@@ -110,6 +110,35 @@ export interface RoutingHistoryAttempt {
     account: RoutingHistoryAccount | null
 }
 
+export type RoutingSelectionDecision = 'measured' | 'imputed' | 'probe' | 'pinned' | 'baseline'
+
+interface RoutingSelectionTerms {
+    service: number
+    queue: number
+    pressure: number
+    cold: number
+}
+
+interface RoutingSelectionCandidate {
+    nodeId: string
+    engine: string
+    model: string
+    totalMs: number | null
+    terms: RoutingSelectionTerms | null
+    evidenceAgeMs: number | null
+    samples: number
+    imputed: boolean
+}
+
+/** Why the latest committed tier round chose its winner. Never carries request content. */
+interface RoutingSelection {
+    decision: RoutingSelectionDecision
+    tierRank: number
+    warm: boolean
+    winner: RoutingSelectionCandidate
+    runnerUp: RoutingSelectionCandidate | null
+}
+
 export interface RoutingHistoryRecord {
     schema: 1
     request: RoutingRequestKey
@@ -143,6 +172,7 @@ export interface RoutingHistoryRecord {
         accounting: RoutingHistoryAccounting
     }
     droppedAttempts: number
+    selection: RoutingSelection | null
     attempts: RoutingHistoryAttempt[]
 }
 
@@ -206,6 +236,7 @@ export interface RoutingHistoryShape {
         | 'accountState'
         | 'mode'
         | 'currency'
+        | 'decision'
 }
 const text: RoutingHistoryShape = { kind: 'string', limit: 512 }
 const identityText: RoutingHistoryShape = { kind: 'string', limit: 128 }
@@ -242,6 +273,40 @@ const accountShape: RoutingHistoryShape = {
         ['heldNanoUsd', moneyText],
         ['chargedNanoUsd', moneyText],
         ['accounting', { kind: 'string', limit: 8, enum: 'accounting' }]
+    ]
+}
+const selectionTermsShape: RoutingHistoryShape = {
+    kind: 'object',
+    nullable: true,
+    fields: [
+        ['service', integer],
+        ['queue', integer],
+        ['pressure', integer],
+        ['cold', integer]
+    ]
+}
+const selectionCandidateShape: RoutingHistoryShape = {
+    kind: 'object',
+    fields: [
+        ['nodeId', identityText],
+        ['engine', identityText],
+        ['model', text],
+        ['totalMs', nullableInteger],
+        ['terms', selectionTermsShape],
+        ['evidenceAgeMs', nullableInteger],
+        ['samples', integer],
+        ['imputed', flag]
+    ]
+}
+const selectionShape: RoutingHistoryShape = {
+    kind: 'object',
+    nullable: true,
+    fields: [
+        ['decision', { kind: 'string', limit: 8, enum: 'decision' }],
+        ['tierRank', integer],
+        ['warm', flag],
+        ['winner', selectionCandidateShape],
+        ['runnerUp', { ...selectionCandidateShape, nullable: true }]
     ]
 }
 const attemptShape: RoutingHistoryShape = {
@@ -322,6 +387,7 @@ export const routingHistoryRecordShape: RoutingHistoryShape = {
             }
         ],
         ['droppedAttempts', integer],
+        ['selection', selectionShape],
         ['attempts', { kind: 'array', item: attemptShape, limit: 32 }]
     ]
 }
@@ -376,6 +442,13 @@ const accounting: readonly RoutingHistoryAccounting[] = [
     'failed',
     'unknown'
 ]
+const selectionDecisions: readonly RoutingSelectionDecision[] = [
+    'measured',
+    'imputed',
+    'probe',
+    'pinned',
+    'baseline'
+]
 const historyEnums: Record<NonNullable<RoutingHistoryShape['enum']>, readonly string[]> = {
     destination: ['local', 'api'],
     state: ['routing', 'streaming', 'completed', 'failed', 'cancelled'],
@@ -401,7 +474,8 @@ const historyEnums: Record<NonNullable<RoutingHistoryShape['enum']>, readonly st
         'unknown'
     ],
     mode: ['chat', 'completion', 'embedding', 'other'],
-    currency: ['USD']
+    currency: ['USD'],
+    decision: selectionDecisions
 }
 
 function invalid(): never {
@@ -503,6 +577,75 @@ function sameDestination(
         a.accountId === b.accountId
     )
 }
+// The producer's encoding of a selection: fixed field order, no whitespace,
+// decimal integers, strings escaped only for quote and backslash.
+const selectionBytesLimit = 2048
+function textBytes(value: string): number {
+    let bytes = 2
+    for (let i = 0; i < value.length; i++) {
+        const c = value.charCodeAt(i)
+        if (c === 34 || c === 92) bytes += 2
+        else if (c < 128) bytes++
+        else if (c < 2048) bytes += 2
+        else if (c >= 0xd800 && c <= 0xdbff) {
+            bytes += 4
+            i++
+        } else bytes += 3
+    }
+    return bytes
+}
+function numberBytes(value: number | null): number {
+    return value === null ? 4 : String(value).length
+}
+function selectionCandidate(value: JsonValue | undefined, numeric: boolean): number {
+    const c = object(value)
+    const nodeId = id(c.nodeId),
+        engine = id(c.engine),
+        modelName = model(c.model, false)
+    const total = nullableNumber(c.totalMs),
+        age = nullableNumber(c.evidenceAgeMs),
+        samples = number(c.samples),
+        imputed = boolean(c.imputed)
+    const terms = c.terms === null ? null : object(c.terms)
+    if ((total !== null) !== numeric || (terms !== null) !== numeric) return invalid()
+    let bytes =
+        '{"nodeId":,"engine":,"model":,"totalMs":,"terms":,"evidenceAgeMs":,"samples":,"imputed":}'
+            .length +
+        textBytes(nodeId) +
+        textBytes(engine) +
+        textBytes(modelName) +
+        numberBytes(total) +
+        numberBytes(age) +
+        numberBytes(samples) +
+        (imputed ? 4 : 5)
+    if (terms === null) bytes += 4
+    else
+        bytes +=
+            '{"service":,"queue":,"pressure":,"cold":}'.length +
+            numberBytes(number(terms.service)) +
+            numberBytes(number(terms.queue)) +
+            numberBytes(number(terms.pressure)) +
+            numberBytes(number(terms.cold))
+    return bytes
+}
+function selection(value: JsonValue | undefined): void {
+    if (value === null) return
+    const s = object(value)
+    const decision = choice<RoutingSelectionDecision>(s.decision, selectionDecisions)
+    const numeric = decision === 'measured' || decision === 'imputed' || decision === 'probe'
+    const tierRank = number(s.tierRank),
+        warm = boolean(s.warm)
+    let bytes =
+        '{"decision":,"tierRank":,"warm":,"winner":,"runnerUp":}'.length +
+        textBytes(decision) +
+        numberBytes(tierRank) +
+        (warm ? 4 : 5) +
+        selectionCandidate(s.winner, numeric)
+    if (s.runnerUp === null) bytes += 4
+    else if (numeric) bytes += selectionCandidate(s.runnerUp, true)
+    else return invalid()
+    if (bytes > selectionBytesLimit) return invalid()
+}
 function attempt(value: JsonValue): { [key: string]: JsonValue } {
     const v = object(value)
     const w = object(v.waits)
@@ -576,6 +719,7 @@ function validRecord(value: JsonValue | RoutingHistoryRecord): value is RoutingH
         'cancelled'
     ])
     const droppedAttempts = number(v.droppedAttempts)
+    selection(v.selection)
     id(k.originNodeId)
     id(k.proxyRunId)
     decimal(k.requestId, true)
@@ -675,8 +819,10 @@ function validRecord(value: JsonValue | RoutingHistoryRecord): value is RoutingH
 
 const cellBytes = 65536,
     headerBytes = 320
-// Valid schema-1 records require at most 30,833 packed bytes, including the
-// format tag and a length-prefixed role of up to 64 bytes. Private IPC loans
+// Valid schema-1 records require at most 32,446 packed bytes: 30,766 for the
+// maximal record without a selection (including the format tag and a
+// length-prefixed role of up to 64 bytes) plus 1,680 for a selection with two
+// candidates of maximal identifiers and models. Private IPC loans
 // contain one such record, never a packed window.
 // Native serializer capacities/lifetimes remain a separate proof from this cap.
 // The private cap never lowers R/M.
