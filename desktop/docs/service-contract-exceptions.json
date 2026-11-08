@@ -1,6 +1,7 @@
 {
     "$comment": "Intentionally unintegrated JSON-RPC methods for desktop ↔ services contract checks. Each ignoredMethods entry needs a current technical reason. Edit by hand; run npm run service-contracts:write to refresh docs/services-api.md after services/ changes.",
     "ignoredMethods": {
+        "node/set-routing-costs": "Broker-internal. nvpair-ui-broker sends each local proxy the newest per-(host, engine, model) speed evidence from its performance projection for tier scoring; PAIR consumes the routing result, not this feed.",
         "build:apply-impact": "Private broker-to-nvpair-service read-only envelope containing public impact and manager owner evidence. Only the impact projection reaches preview; the service checks native incarnation and protected roots before inspection. Never a renderer or peer request.",
         "engine:owner-evidence": "Existing private broker-to-engine-manager parent read with a strict empty-object request, used by captured-source build:apply-impact and resident reconciliation's native manager incarnation read. Unrelated evidence sections may remain incomplete for the resident token consumer. Never forwarded to clients or peers; grants no mutation or maintenance authority.",
         "build:apply-prepare": "Private nvpair-service-to-broker prepare request for the one-operation build-apply owner, never a renderer or peer request. Production refuses before Pause because buildApplyOwners is nil.",

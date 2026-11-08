@@ -517,8 +517,21 @@ which takes one off and puts the other on.
 | Class | Addressed? | Examples |
 | --- | --- | --- |
 | Facade-scoped | yes | `ready`, `error`, `node/*`, `errors:*`, `set-port`, `discovery:subscribe`, `discovery:nodes` |
-| Process-scoped | no | `log/set-level`, `node/set-priority`, `node/set-policy`, `node/set-availability`, `node/set-engine-drain`, `node/set-residency`, `node/admission-snapshot`, `workload/cancel`, `workload:*`, `admission/*`, `discovery:node-activity` |
+| Process-scoped | no | `log/set-level`, `node/set-priority`, `node/set-routing-costs`, `node/set-policy`, `node/set-availability`, `node/set-engine-drain`, `node/set-residency`, `node/admission-snapshot`, `workload/cancel`, `workload:*`, `admission/*`, `discovery:node-activity` |
 | Bootstrap | names its engine in the payload | `facade/enable` |
+
+`node/set-routing-costs` is a broker-internal full replacement
+`{revision, profiles}` of current compatible speed evidence for later tier
+scoring. It is accepted only without an engine address. The strict
+`performancewire.RoutingCosts` decoder bounds identifiers, phase rates, tuple
+uniqueness, entry count and encoded bytes. Invalid or lower revisions return
+invalid params without mutation; equal revisions succeed without replacing the
+cache or receipt clock. A newer revision swaps the whole cache under its own
+lock, independently of priority and reservations, and acknowledges
+`{profiles: <stored count>}`. Lookups normalize the candidate engine's dispatched
+profile key and retain host, engine, family, API and schema as separate key
+dimensions. Age advances from monotonic receipt time and expires after
+`performancewire.RetentionMs`. There is no scoring consumer yet.
 
 `facade/enable` is unaddressed because it runs *before* the facade it names
 exists. Only a built-in engine id or a well-formed `e-<id>` counts as an address: plenty of unaddressed

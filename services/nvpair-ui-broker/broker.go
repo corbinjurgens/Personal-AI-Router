@@ -1750,6 +1750,7 @@ func (b *Broker) replayProxyStateAfterSpawn() {
 	ctx, cancel := b.proxyBringUpContext()
 	defer cancel()
 	b.repushPriority(ctx)
+	b.sendRoutingCosts(ctx, true)
 }
 
 // repushPriority re-sends the cached ranking after a proxy (re)spawns, because

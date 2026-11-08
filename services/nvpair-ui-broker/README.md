@@ -780,6 +780,19 @@ three live feeds.
 
 `schedule:priority` and `node/set-priority` are internal worker contracts: the broker does not expose either notification to its connected client.
 
+The broker also feeds every live local proxy measured speed evidence through
+the process-scoped private `node/set-routing-costs` request. Each revision is a
+full replacement from the local and fresh admitted-peer performance projection,
+independent of desktop subscriptions. Only complete destination-attested current,
+clock-certain evidence with a usable phase qualifies. For each host, engine,
+dispatched profile key, family, API and extractor schema, the newest usable
+fingerprint wins (lexical fingerprint breaks age ties); entries are never pooled.
+Usable engine-reported decode wins over counted decode. Payload changes advance
+the process-local revision, and proxy spawn replay reuses the current revision.
+Failed delivery retains the proxy's previous cache until replacement or age
+expiry. Clients cannot invoke this feed, bare or component-addressed. The cache
+is for tier scoring; this feed alone changes neither scoring nor the scheduler.
+
 **`nvpair-cluster-manager`** owns the node's stable cryptographic identity (a self-generated UUID + Ed25519 self-signed certificate), the trusted-node store, and the EAP-NOOB PIN-based pairing flow that bootstraps mTLS trust between machines. Like llamacpp-proxy it's a full bidirectional JSON-RPC peer, and like the rest it's supervised **optionally and non-fatally**: a missing default sibling (and no `--cluster-manager-path`) just means the broker runs without cluster pairing. The broker is a **generic relay** for it in both directions: any `cluster:*` or `nodes:*` request a client sends is forwarded verbatim and the response (result or JSON-RPC error) is relayed straight back, and every notification the manager pushes is forwarded to the client unchanged. Unlike the proxy stream these events are not opt-in — they're low-volume, important pairing/membership pushes (`cluster:invite-received`, `cluster:identity-changed`, `nodes:changed`, ...), so they always flow. `errors:report` / `errors:clear` are the one exception: like the proxy's, they target `nvpair-errors` (which the broker doesn't supervise) and are dropped. Because pairing calls drive multi-round-trip inter-node network exchanges, the relay's per-call timeout is more generous (30 s) than the proxy's local control-plane timeout.
 
 Shared lifecycle for all workers:

@@ -345,6 +345,7 @@
 | `node/set-policy` | request (we call) | ⚠️ not called |
 | `node/set-priority` | request (we call) | ✅ yes |
 | `node/set-residency` | request (we call) | ⚠️ not called |
+| `node/set-routing-costs` | request (we call) | ➖ ignored |
 | `nodes/list` | request (we call) | ✅ yes |
 | `routing/active` | request (we call) | ➖ ignored |
 | `routing/cancel` | request (we call) | ➖ ignored |

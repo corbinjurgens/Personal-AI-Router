@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"os"
 	"path/filepath"
@@ -20,10 +21,289 @@ import (
 	"time"
 
 	"nvpair-shared/clustertrusttest"
+	"nvpair-shared/engines"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/performancewire"
 	"nvpair-ui-broker/performancestore"
 )
+
+func routingCostsSummary(revision int64) performancewire.Summary {
+	s := performanceTestSummary(revision)
+	e := &s.Entries[0]
+	e.Profile.EngineFamily = "llamacpp"
+	e.Provenance = performanceConfiguredSample(1, strings.Repeat("a", 64), "", 79).Provenance
+	e.Provenance.ExtractorSchema = "llamacpp-b12020-0ec4027a"
+	e.Applicability = performancewire.ApplicabilityCurrent
+	e.EngineDecode = &performancewire.ReportedRate{Samples: 1, DurationNs: 1e9, TokensPerSecond: 79}
+	return s
+}
+
+func TestRoutingCostsSelectsCurrentBeforeNewestAndWithdraws(t *testing.T) {
+	f := newBrokerPerformanceFixture(t)
+	s := routingCostsSummary(10)
+	s.Entries[0].Key.Fingerprint = "current-slow"
+	old := s.Entries[0]
+	old.Key.Fingerprint, old.NewestAgeMs, old.OldestAgeMs = "obsolete-fast", 1, 1
+	old.EngineDecode = &performancewire.ReportedRate{Samples: 1, DurationNs: 1e9, TokensPerSecond: 900}
+	old.Applicability = performancewire.ApplicabilityHistorical
+	s.Entries = append(s.Entries, old)
+	f.receive(t, s, 30)
+	c := f.b.performance.routingCosts()
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Profiles) != 1 || c.Profiles[0].Fingerprint != "current-slow" || c.Profiles[0].Decode.TokensPerSecond != 79 || c.Profiles[0].AgeMs != 130 {
+		t.Fatalf("selected evidence = %+v", c)
+	}
+	s.Revision++
+	s.Entries = []performancewire.Entry{old}
+	f.receive(t, s, 0)
+	if c := f.b.performance.routingCosts(); len(c.Profiles) != 0 {
+		t.Fatalf("obsolete evidence substituted after withdrawal: %+v", c)
+	}
+}
+
+func TestRoutingCostsNewestUsableTupleAndDecodeSource(t *testing.T) {
+	f := newBrokerPerformanceFixture(t)
+	s := routingCostsSummary(10)
+	base := s.Entries[0]
+	base.Key.Fingerprint = "b"
+	base.Prefill = &performancewire.Rate{Samples: 1, Tokens: 378, DurationNs: 1e9, TokensPerSecond: 378}
+	base.Decode = &performancewire.Rate{Samples: 1, Tokens: 70, DurationNs: 1e9, TokensPerSecond: 70}
+	base.LoadNs = &performancewire.Distribution{Samples: 1, Median: 1e6, P95: 23e6}
+	tied := base
+	tied.Key.Fingerprint = "a"
+	zero := base
+	zero.Key.Fingerprint, zero.NewestAgeMs, zero.OldestAgeMs = "zero-newest", 0, 0
+	zero.Prefill, zero.Decode = nil, nil
+	zero.EngineDecode = &performancewire.ReportedRate{Samples: 1, DurationNs: 1e9}
+	count := base
+	count.Key.Model, count.Key.Fingerprint = "count-profile", "count"
+	count.EngineDecode = zero.EngineDecode
+	strata := base
+	strata.Provenance = base.Provenance.Clone()
+	strata.Provenance.EngineFamily, strata.Provenance.ExtractorSchema = "strata", "strata-f6726098"
+	strata.Profile.EngineFamily, strata.Key.Fingerprint = "strata", "strata"
+	unsupported := base
+	unsupported.Provenance = base.Provenance.Clone()
+	unsupported.Provenance.API = "/v1/completions"
+	unsupported.Key.Fingerprint = "unsupported-api"
+	s.Entries = []performancewire.Entry{base, tied, zero, count, strata, unsupported}
+	f.receive(t, s, 0)
+	c := f.b.performance.routingCosts()
+	if len(c.Profiles) != 3 {
+		t.Fatalf("profiles = %+v", c.Profiles)
+	}
+	for _, p := range c.Profiles {
+		switch p.Fingerprint {
+		case "a":
+			if p.Decode.Source != "engine" || p.Decode.TokensPerSecond != 79 || p.Prefill.TokensPerSecond != 378 || p.LoadP95Ms == nil || *p.LoadP95Ms != 23 || p.LoadSamples != 1 {
+				t.Fatalf("engine profile = %+v", p)
+			}
+		case "count":
+			if p.Decode.Source != "count" || p.Decode.TokensPerSecond != 70 {
+				t.Fatalf("count fallback = %+v", p)
+			}
+		case "strata":
+			if p.Family != "strata" || p.Schema != "strata-f6726098" {
+				t.Fatalf("tuple mixed: %+v", p)
+			}
+		default:
+			t.Fatalf("unexpected profile: %+v", p)
+		}
+	}
+	// A genuinely newer usable fingerprint replaces the lexical tie winner.
+	s.Revision++
+	s.Entries[0].NewestAgeMs = 50
+	f.receive(t, s, 0)
+	for _, p := range f.b.performance.routingCosts().Profiles {
+		if p.Model == "model" && p.Family == "llamacpp" && p.Fingerprint != "b" {
+			t.Fatalf("newest usable entry lost: %+v", p)
+		}
+	}
+}
+
+func TestRoutingCostsExcludesUnknownClockAndWithdrawnPeers(t *testing.T) {
+	for _, reason := range []string{"unknown", "incomplete", "clock uncertain", "stale", "withdrawn", "expired", "authority removed"} {
+		t.Run(reason, func(t *testing.T) {
+			f := newBrokerPerformanceFixture(t)
+			s := routingCostsSummary(10)
+			f.receive(t, s, 0)
+			if len(f.b.performance.routingCosts().Profiles) != 1 {
+				t.Fatal("positive current evidence missing")
+			}
+			s.Revision++
+			switch reason {
+			case "unknown":
+				s.Entries[0].Applicability = performancewire.ApplicabilityUnknown
+			case "incomplete":
+				s.Entries[0].Applicability = performancewire.ApplicabilityUnknown
+				s.Entries[0].Provenance.Configuration = nodepolicy.MeasurementIdentity{}
+			case "clock uncertain":
+				s.Entries[0].ClockUncertain = true
+			case "stale":
+				f.status(t, "stale", 0, 90_000)
+			case "withdrawn":
+				s.Entries = []performancewire.Entry{}
+			case "expired":
+				f.now = f.now.Add(time.Duration(performancewire.RetentionMs+1) * time.Millisecond)
+			case "authority removed":
+				clustertrusttest.RemovePeerPin(t, f.dir, "peer")
+			}
+			if reason != "stale" && reason != "expired" && reason != "authority removed" {
+				f.receive(t, s, 0)
+			}
+			if c := f.b.performance.routingCosts(); len(c.Profiles) != 0 {
+				t.Fatalf("excluded evidence retained: %+v", c)
+			}
+		})
+	}
+}
+
+func TestRoutingCostsIncludesLocalCurrentProjection(t *testing.T) {
+	f := newBrokerPerformanceFixture(t)
+	p := f.b.performance
+	p.configuration = func() performanceConfigurationSnapshot {
+		return performanceConfigurationFixture(strings.Repeat("a", 64), 1)
+	}
+	s := performanceConfiguredSample(1, strings.Repeat("a", 64), "local", 14)
+	s.Provenance.ExtractorSchema = "llamacpp-b12020-0ec4027a"
+	if err := p.store.Record(s); err != nil {
+		t.Fatal(err)
+	}
+	p.flush()
+	c := p.routingCosts()
+	if len(c.Profiles) != 1 || c.Profiles[0].Host != "self" || c.Profiles[0].Decode.TokensPerSecond != 14 {
+		t.Fatalf("local evidence = %+v", c)
+	}
+}
+
+func TestRoutingCostsDoesNotCombinePhasesAcrossFingerprints(t *testing.T) {
+	f := newBrokerPerformanceFixture(t)
+	s := routingCostsSummary(10)
+	newer := s.Entries[0]
+	newer.Key.Fingerprint, newer.NewestAgeMs, newer.OldestAgeMs = "prefill-only", 1, 10
+	newer.EngineDecode = nil
+	newer.Prefill = &performancewire.Rate{Samples: 1, Tokens: 378, DurationNs: 1e9, TokensPerSecond: 378}
+	s.Entries = append(s.Entries, newer)
+	f.receive(t, s, 0)
+	c := f.b.performance.routingCosts()
+	if len(c.Profiles) != 1 || c.Profiles[0].Fingerprint != "prefill-only" || c.Profiles[0].Decode != nil || c.Profiles[0].Prefill.TokensPerSecond != 378 || c.Profiles[0].AgeMs != 10 {
+		t.Fatalf("fingerprints were pooled: %+v", c)
+	}
+}
+
+func TestRoutingCostsDeliveredWithoutDesktopSubscriber(t *testing.T) {
+	f := newBrokerPerformanceFixture(t)
+	peer, worker := newFakeWorkerPipe(t)
+	f.b.setEngineProxyHandle(mustEngineProxyProfile("llamacpp"), &proxyProcess{peer: peer})
+	summary := routingCostsSummary(10)
+	zero := summary.Entries[0]
+	zero.Key.Model, zero.Key.Fingerprint = "zero-profile", "zero"
+	zero.EngineDecode = &performancewire.ReportedRate{Samples: 1, DurationNs: 1e9}
+	summary.Entries = append(summary.Entries, zero)
+	f.receive(t, summary, 0)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); f.b.performanceChangeLoop(ctx) }()
+	defer func() { cancel(); <-done }()
+	calls := worker.waitFor("routing costs without subscribers", func(calls []policyCall) bool { return len(calls) > 0 })
+	if f.b.performance.subscribed || len(calls) != 1 || calls[0].method != performancewire.MethodRoutingCosts {
+		t.Fatalf("calls = %+v", calls)
+	}
+	c, err := performancewire.DecodeRoutingCosts(calls[0].params)
+	if err != nil || c.Revision != 1 || len(c.Profiles) != 1 || c.Profiles[0].Decode.TokensPerSecond != 79 {
+		t.Fatalf("delivered costs = %+v, %v", c, err)
+	}
+}
+
+func TestRoutingCostsClientCannotPinCacheRevision(t *testing.T) {
+	for _, prefix := range []string{"", engines.ProxyComponent + ":", "llamacpp-proxy:"} {
+		t.Run(prefix, func(t *testing.T) {
+			peer, worker := newFakeWorkerPipe(t)
+			var output bytes.Buffer
+			b := &Broker{codec: NewCodec(readWriter{Reader: strings.NewReader(""), Writer: &output})}
+			b.setEngineProxyHandle(mustEngineProxyProfile("llamacpp"), &proxyProcess{peer: peer})
+			id := json.RawMessage(`1`)
+			b.handleMessage(&Message{JSONRPC: "2.0", ID: &id, Method: prefix + performancewire.MethodRoutingCosts, Params: json.RawMessage(`{"revision":9223372036854775807,"profiles":[]}`)})
+			var response Message
+			if err := json.Unmarshal(bytes.TrimSpace(output.Bytes()), &response); err != nil {
+				t.Fatal(err)
+			}
+			if response.Error == nil || response.Error.Code != -32601 || len(worker.snapshot()) != 0 {
+				t.Fatalf("client request was not privately refused: %+v, calls %+v", response, worker.snapshot())
+			}
+		})
+	}
+}
+
+func TestRoutingCostsFailedCallLogsAndNextChangeStillDelivers(t *testing.T) {
+	f := newBrokerPerformanceFixture(t)
+	peer, worker := newFakeWorkerPipe(t)
+	worker.setAnswer(func(string, json.RawMessage) (any, string) { return nil, "fixture rejection" })
+	f.b.setEngineProxyHandle(mustEngineProxyProfile("llamacpp"), &proxyProcess{peer: peer})
+	var output bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&output, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	f.receive(t, routingCostsSummary(10), 0)
+	f.b.sendRoutingCosts(context.Background(), false)
+	var logged map[string]json.RawMessage
+	if err := json.Unmarshal(bytes.TrimSpace(output.Bytes()), &logged); err != nil {
+		t.Fatal(err)
+	}
+	var level, engine, failure string
+	for name, dst := range map[string]*string{"level": &level, "engine": &engine, "err": &failure} {
+		if err := json.Unmarshal(logged[name], dst); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if level != "WARN" || engine != "llamacpp" || failure != "RPC -32000: fixture rejection" || len(logged) != 5 {
+		t.Fatalf("warning must contain only engine and error context: %s", output.Bytes())
+	}
+	worker.setAnswer(nil)
+	s := routingCostsSummary(11)
+	s.Entries = []performancewire.Entry{}
+	f.receive(t, s, 0)
+	f.b.sendRoutingCosts(context.Background(), false)
+	calls := worker.snapshot()
+	if len(calls) != 2 {
+		t.Fatalf("delivery stopped after rejection: %+v", calls)
+	}
+	c, err := performancewire.DecodeRoutingCosts(calls[1].params)
+	if err != nil || c.Revision != 2 || len(c.Profiles) != 0 {
+		t.Fatalf("withdrawal = %+v, %v", c, err)
+	}
+}
+
+func TestRoutingCostsTransportFailureDoesNotPreventReplacementReplay(t *testing.T) {
+	f := newBrokerPerformanceFixture(t)
+	f.b.setEngineProxyHandle(mustEngineProxyProfile("llamacpp"), &proxyProcess{})
+	f.receive(t, routingCostsSummary(10), 0)
+	var output bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&output, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	f.b.sendRoutingCosts(context.Background(), false)
+	var logged struct{ Level, Engine, Err string }
+	if err := json.Unmarshal(bytes.TrimSpace(output.Bytes()), &logged); err != nil {
+		t.Fatal(err)
+	}
+	if logged.Level != "WARN" || logged.Engine != "llamacpp" || logged.Err != "proxy peer not available" {
+		t.Fatalf("transport warning = %+v", logged)
+	}
+	peer, worker := newFakeWorkerPipe(t)
+	f.b.setEngineProxyHandle(mustEngineProxyProfile("llamacpp"), &proxyProcess{peer: peer})
+	f.b.replayProxyStateAfterSpawn()
+	calls := worker.snapshot()
+	if len(calls) != 1 || calls[0].method != performancewire.MethodRoutingCosts {
+		t.Fatalf("replacement did not receive feed: %+v", calls)
+	}
+	c, err := performancewire.DecodeRoutingCosts(calls[0].params)
+	if err != nil || c.Revision != 1 || len(c.Profiles) != 1 || c.Profiles[0].Decode.TokensPerSecond != 79 {
+		t.Fatalf("replacement replay = %+v, %v", c, err)
+	}
+}
 
 // These fixtures use certificate files, memory codecs and fake stdin writers.
 // No fixture launches a child, opens a listener or accesses real app data.

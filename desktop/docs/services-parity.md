@@ -260,6 +260,12 @@ snapshot to the matching facade through `node/set-priority`. Each facade adds
 local reservations, so its estimate is
 `pending + gpuPressure + localReservations` during concurrent bursts.
 
+Alongside `node/set-priority`, the broker sends the private process-scoped
+`node/set-routing-costs` full replacement to every live proxy and replays its
+current revision after spawn, independently of desktop subscriptions. It caches
+newest usable destination-attested current speed evidence for tier scoring;
+scoring does not consume it yet. PAIR consumes routing results, not this feed.
+
 Current limitation: pressure does not represent GPU capability or available
 VRAM, and a multi-GPU node is represented by its busiest device rather than
 engine-to-device affinity.

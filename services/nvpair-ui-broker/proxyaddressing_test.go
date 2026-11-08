@@ -22,8 +22,59 @@ import (
 
 	"nvpair-shared/engines"
 	"nvpair-shared/noderec"
+	"nvpair-shared/performancewire"
+	"nvpair-shared/schedulerwire"
 	"nvpair-ui-broker/relay"
 )
+
+func TestRoutingCostsSpawnReplaysPriorityAndCurrentRevisionToEveryLiveProxy(t *testing.T) {
+	f := newBrokerPerformanceFixture(t)
+	b := f.b
+	f.receive(t, routingCostsSummary(10), 0)
+	// Cache while no proxy is live, then restore both process-scoped feeds to
+	// the replacement. Replaying twice must keep each feed's revision stable.
+	b.sendRoutingCosts(context.Background(), false)
+	b.cachePrioritySnapshot(schedulerwire.Priority{Nodes: []string{"peer"}, Ranks: []schedulerwire.NodeRank{{ID: "peer", Pending: 2, Rank: 0}}})
+	a, workerA := newFakeWorkerPipe(t)
+	c, workerC := newFakeWorkerPipe(t)
+	b.setEngineProxyHandle(mustEngineProxyProfile("llamacpp"), &proxyProcess{peer: a})
+	b.setProxyProcessHandle(&proxyProcess{peer: c})
+	b.replayProxyStateAfterSpawn()
+	b.replayProxyStateAfterSpawn()
+	for _, worker := range []*fakeWorker{workerA, workerC} {
+		calls := worker.snapshot()
+		if len(calls) != 4 {
+			t.Fatalf("replay calls = %+v", calls)
+		}
+		for i, call := range calls {
+			if i%2 == 0 {
+				var priority schedulerwire.Priority
+				if call.method != "node/set-priority" {
+					t.Fatalf("priority replay method = %q", call.method)
+				}
+				if err := json.Unmarshal(call.params, &priority); err != nil {
+					t.Fatal(err)
+				}
+				if priority.Generation != 1 || len(priority.Nodes) != 1 || priority.Nodes[0] != "peer" || len(priority.Ranks) != 1 || priority.Ranks[0].Pending != 2 {
+					t.Fatalf("priority replay = %+v", priority)
+				}
+				continue
+			}
+			if call.method != performancewire.MethodRoutingCosts {
+				t.Fatalf("routing replay addressed or missing: %q", call.method)
+			}
+			costs, err := performancewire.DecodeRoutingCosts(call.params)
+			if err != nil || costs.Revision != 1 || len(costs.Profiles) != 1 || costs.Profiles[0].Decode.TokensPerSecond != 79 {
+				t.Fatalf("routing replay = %+v, %v", costs, err)
+			}
+		}
+	}
+	// Unchanged projections do not mint revisions or deliver duplicate calls.
+	b.sendRoutingCosts(context.Background(), false)
+	if len(workerA.snapshot()) != 4 || len(workerC.snapshot()) != 4 {
+		t.Fatal("unchanged projection was delivered again")
+	}
+}
 
 // The relay must address what it sends downward, not just strip the client's
 // prefix.

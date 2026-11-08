@@ -38,8 +38,14 @@ grouped by measuring host, actual serving engine, concrete model and effective
 serving profile fingerprint. Quantization, engine family and context tokens
 describe that profile when known. Different profiles stay separate.
 
-This view only displays reported measurements. It does not run benchmarks,
-estimate throughput, rank nodes, sort by speed or change scheduling. The
+This view displays reported measurements without running benchmarks. The broker
+also feeds local proxies a private revisioned `node/set-routing-costs` full
+replacement for tier scoring, even without a desktop subscriber. It selects the
+newest usable fingerprint only after filtering for complete destination-attested
+current applicability, matching family/API/extractor schema and reliable clocks.
+Historical or unknown evidence never substitutes for a current configuration.
+The proxy caches this feed with monotonic age expiry; scoring does not consume
+it yet, and the job scheduler's priority contract is unchanged. The
 proxy records actual local inference attempts at their executing destination,
 including direct and reverse peer ingress. The forwarding origin does not count
 another local execution. Missing required engine identity suppresses samples.

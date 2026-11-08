@@ -32,6 +32,7 @@ import (
 	"nvpair-shared/nodeactivity"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
+	"nvpair-shared/performancewire"
 	"nvpair-shared/schedulerwire"
 )
 
@@ -292,6 +293,10 @@ func bufferBodyAndModel(w http.ResponseWriter, r *http.Request, limit int64) ([]
 }
 
 type Proxy struct {
+	routingCostsMu       sync.RWMutex
+	routingCostsRevision int64
+	routingCostsReceived time.Time
+	routingCosts         map[[6]string]performancewire.RoutingProfile
 	// One process-wide diagnostics owner. Inference never acquires this mutex.
 	routingHistoryMu sync.Mutex
 	routingHistory   *proxyRoutingHistory
@@ -1561,6 +1566,24 @@ func (p *Proxy) handleMessage(msg *Message) {
 		if err := p.codec.Respond(msg.ID, SelectedResult{ID: f.SelectedID()}); err != nil {
 			log.Printf("failed to respond to node/selected: %v", err)
 		}
+
+	case performancewire.MethodRoutingCosts:
+		if engine != "" {
+			p.codec.RespondError(msg.ID, -32602, "routing costs are process-scoped")
+			return
+		}
+		costs, err := performancewire.DecodeRoutingCosts(msg.Params)
+		if err == nil {
+			err = p.setRoutingCosts(costs)
+		}
+		if err != nil {
+			p.codec.RespondError(msg.ID, -32602, "invalid routing costs")
+			return
+		}
+		p.routingCostsMu.RLock()
+		count := len(p.routingCosts)
+		p.routingCostsMu.RUnlock()
+		p.codec.Respond(msg.ID, map[string]int{"profiles": count})
 
 	case "node/set-priority":
 		var params schedulerwire.Priority

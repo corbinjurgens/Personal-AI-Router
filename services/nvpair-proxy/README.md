@@ -485,6 +485,17 @@ One limit is outside the proxy's control: current Chromium-based browsers gate a
 
 ### Node selection
 
+The broker sends every live proxy a process-scoped `node/set-routing-costs`
+snapshot, independent of desktop subscriptions, and replays it after spawn.
+This private full replacement caches one newest usable, destination-attested
+current entry per host, engine, dispatched profile key, family, API and extractor
+schema for tier scoring. Historical, unknown and clock-uncertain evidence is
+excluded. Revisions increase only on payload changes; equal revisions are no-ops
+and older or invalid payloads are refused. Receipt age advances monotonically
+and evidence expires at the performance retention limit. Local clients cannot
+set this feed. The cache has no scoring consumer yet; scheduler priority,
+reservations, admission and concrete routing retain their existing behavior.
+
 - **Eligibility**: Before routing model-bearing inference, the proxy keeps only
   nodes declaring the exact requested profile key for this engine. Self uses
   policy profiles; peers use advertised profiles. `ServedModels` restricts the

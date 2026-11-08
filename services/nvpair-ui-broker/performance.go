@@ -9,7 +9,9 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"sort"
 	"strconv"
@@ -52,6 +54,8 @@ type performancePeer struct {
 }
 
 type performanceRuntime struct {
+	routingMu                         sync.Mutex
+	routingCurrent                    performancewire.RoutingCosts
 	mu                                sync.Mutex
 	store                             *performancestore.Store
 	host                              string
@@ -693,6 +697,7 @@ func (b *Broker) performanceChangeLoop(ctx context.Context) {
 			return
 		case <-p.changeWake:
 		}
+		b.sendRoutingCosts(ctx, false)
 		p.mu.Lock()
 		subscribed := p.subscribed
 		p.mu.Unlock()
@@ -705,6 +710,119 @@ func (b *Broker) performanceChangeLoop(ctx context.Context) {
 		p.mu.Unlock()
 		if subscribed {
 			_ = b.codec.Notify(notifyPerformanceChanged, projection)
+		}
+	}
+}
+
+// routingCosts selects a single current aggregation fingerprint per compatible
+// tuple. Neither phases nor configurations are pooled across entries.
+func (p *performanceRuntime) routingCosts() performancewire.RoutingCosts {
+	projection := p.projection()
+	selected := make(map[[6]string]performancewire.Entry)
+	visit := func(node performanceNode) {
+		if node.Status != "fresh" || node.Summary == nil {
+			return
+		}
+		for _, e := range node.Summary.Entries {
+			v := e.Provenance
+			if e.ClockUncertain || e.Applicability != performancewire.ApplicabilityCurrent || v == nil || !v.Configuration.Complete || v.Validate() != nil || e.Profile.EngineFamily != v.EngineFamily ||
+				!performancewire.RoutingCompatible(v.EngineFamily, v.API, v.ExtractorSchema) || e.OldestAgeMs > performancewire.RetentionMs {
+				continue
+			}
+			profile := routingProfile(e)
+			if profile.Validate() != nil {
+				continue
+			}
+			key := [6]string{e.Key.Host, e.Key.Engine, e.Key.Model, v.EngineFamily, v.API, v.ExtractorSchema}
+			old, exists := selected[key]
+			if !exists || e.NewestAgeMs < old.NewestAgeMs || (e.NewestAgeMs == old.NewestAgeMs && e.Key.Fingerprint < old.Key.Fingerprint) {
+				selected[key] = e
+			}
+		}
+	}
+	visit(projection.Local)
+	for _, node := range projection.Peers {
+		visit(node)
+	}
+	keys := make([][6]string, 0, len(selected))
+	for key := range selected {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		for k := range keys[i] {
+			if keys[i][k] != keys[j][k] {
+				return keys[i][k] < keys[j][k]
+			}
+		}
+		return false
+	})
+	costs := performancewire.RoutingCosts{Revision: 1, Profiles: []performancewire.RoutingProfile{}}
+	for _, key := range keys {
+		costs.Profiles = append(costs.Profiles, routingProfile(selected[key]))
+		if costs.Validate() != nil {
+			costs.Profiles = costs.Profiles[:len(costs.Profiles)-1]
+			break
+		}
+	}
+	return costs
+}
+
+func routingRate(samples int, speed float64, source string) *performancewire.RoutingRate {
+	if samples <= 0 || speed <= 0 || math.IsNaN(speed) || math.IsInf(speed, 0) {
+		return nil
+	}
+	return &performancewire.RoutingRate{Samples: samples, TokensPerSecond: speed, Source: source}
+}
+
+func routingProfile(e performancewire.Entry) performancewire.RoutingProfile {
+	v := e.Provenance
+	p := performancewire.RoutingProfile{Host: e.Key.Host, Engine: e.Key.Engine, Model: e.Key.Model, Fingerprint: e.Key.Fingerprint,
+		Family: v.EngineFamily, APIPath: v.API, Schema: v.ExtractorSchema, AgeMs: e.OldestAgeMs}
+	if r := e.Prefill; r != nil {
+		p.Prefill = routingRate(r.Samples, r.TokensPerSecond, "count")
+	}
+	if r := e.EngineDecode; r != nil {
+		p.Decode = routingRate(r.Samples, r.TokensPerSecond, "engine")
+	}
+	if r := e.Decode; p.Decode == nil && r != nil {
+		p.Decode = routingRate(r.Samples, r.TokensPerSecond, "count")
+	}
+	if d := e.LoadNs; d != nil && d.Samples > 0 {
+		ms := d.P95 / 1e6
+		p.LoadP95Ms, p.LoadSamples = &ms, d.Samples
+	}
+	return p
+}
+
+// Serializing snapshot creation and delivery also fences spawn replay against
+// a concurrent projection change. An unchanged replay reuses the current revision.
+func (b *Broker) sendRoutingCosts(ctx context.Context, replay bool) {
+	p := b.performance
+	if p == nil {
+		return
+	}
+	p.routingMu.Lock()
+	defer p.routingMu.Unlock()
+	next := p.routingCosts()
+	oldProfiles, _ := json.Marshal(p.routingCurrent.Profiles)
+	newProfiles, _ := json.Marshal(next.Profiles)
+	if p.routingCurrent.Revision != 0 && bytes.Equal(oldProfiles, newProfiles) {
+		if !replay {
+			return
+		}
+	} else {
+		next.Revision = p.routingCurrent.Revision + 1
+		p.routingCurrent = next
+	}
+	params, err := json.Marshal(p.routingCurrent)
+	if err != nil {
+		return // routingCosts only retains validated, encodable profiles.
+	}
+	for _, target := range b.livePriorityTargets() {
+		if _, rpcErr, err := target.proxy.Call(ctx, performancewire.MethodRoutingCosts, params); err != nil {
+			slog.Warn("node/set-routing-costs call failed", "engine", target.engine, "err", err)
+		} else if rpcErr != nil {
+			slog.Warn("node/set-routing-costs rejected", "engine", target.engine, "err", fmt.Errorf("RPC %d: %s", rpcErr.Code, rpcErr.Message))
 		}
 	}
 }

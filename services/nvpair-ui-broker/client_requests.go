@@ -16,6 +16,7 @@ import (
 	"nvpair-shared/engines"
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/nodepolicy"
+	"nvpair-shared/performancewire"
 )
 
 // internalClientMethods are worker- and broker-internal methods a public
@@ -23,7 +24,8 @@ import (
 // otherwise hand them to engine-manager, which serves several of them as its
 // own broker-side surface. One list so a new internal method is added once.
 var internalClientMethods = map[string]struct{}{
-	notifyEngineNotificationsReset: {},
+	performancewire.MethodRoutingCosts: {},
+	notifyEngineNotificationsReset:     {},
 	// Peer relay notifications: only engine-manager relays these, with a
 	// verified caller.
 	policyRelayRequestMethod:           {},
