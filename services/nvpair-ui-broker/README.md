@@ -793,6 +793,27 @@ Failed delivery retains the proxy's previous cache until replacement or age
 expiry. Clients cannot invoke this feed, bare or component-addressed. The cache
 is for tier scoring; this feed alone changes neither scoring nor the scheduler.
 
+A peer `policy:get` result carries `activeRequestPolicy: {revision, proxyRunId}`
+only while the live proxy run has acknowledged exactly the returned policy
+revision, with no recovery, activation or availability error; otherwise it is
+explicit `null`. It grants no admission, launch or capacity authority. One
+background owner, `peerSizingRuntime`, subscribes to the discovery directory and
+reads each advertised, currently admitted peer's policy through the existing
+`engine:remote-policy-get` call, serially in lexical host order and refreshed
+every 30 seconds. It accepts a read only when the attestation, policy revision
+and advertised revision agree and the peer's mesh admission identity, epoch and
+the engine-manager source are unchanged across the read; it keeps only the
+advertised shared profiles whose engine and model match the read. Failed,
+malformed, unactivated or mismatched reads, directory and trust changes, and
+manager replacement withdraw the peer at once, and observations expire 90
+seconds after fetch start. Heartbeats never renew one. The resulting private
+`node/set-peer-sizing` snapshot goes to every live proxy through the same target
+pattern as `node/set-priority`, independent of desktop subscriptions; its
+process-local revision advances per changed observation set and spawn replay
+resends the current revision with advanced ages. Remote knowledge is an attested
+observation up to 90 seconds old, not an instantaneous cluster guarantee.
+Clients cannot invoke the method, bare or component-addressed.
+
 **`nvpair-cluster-manager`** owns the node's stable cryptographic identity (a self-generated UUID + Ed25519 self-signed certificate), the trusted-node store, and the EAP-NOOB PIN-based pairing flow that bootstraps mTLS trust between machines. Like llamacpp-proxy it's a full bidirectional JSON-RPC peer, and like the rest it's supervised **optionally and non-fatally**: a missing default sibling (and no `--cluster-manager-path`) just means the broker runs without cluster pairing. The broker is a **generic relay** for it in both directions: any `cluster:*` or `nodes:*` request a client sends is forwarded verbatim and the response (result or JSON-RPC error) is relayed straight back, and every notification the manager pushes is forwarded to the client unchanged. Unlike the proxy stream these events are not opt-in — they're low-volume, important pairing/membership pushes (`cluster:invite-received`, `cluster:identity-changed`, `nodes:changed`, ...), so they always flow. `errors:report` / `errors:clear` are the one exception: like the proxy's, they target `nvpair-errors` (which the broker doesn't supervise) and are dropped. Because pairing calls drive multi-round-trip inter-node network exchanges, the relay's per-call timeout is more generous (30 s) than the proxy's local control-plane timeout.
 
 Shared lifecycle for all workers:

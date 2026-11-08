@@ -2178,3 +2178,31 @@ describe('routing settings editor', () => {
         })
     })
 })
+
+describe('private peer sizing attestation', () => {
+    it.each([null, { revision: '8', proxyRunId: 'run-8' }])(
+        'ignores activeRequestPolicy %j on a paired policy read',
+        activeRequestPolicy => {
+            const policy = {
+                revision: '8',
+                profiles: [
+                    {
+                        key: 'medium',
+                        engine: 'llamacpp',
+                        model: 'gemma',
+                        requestOptions: { max_tokens: 64 },
+                        requestOptionsMode: 'enforced'
+                    }
+                ]
+            }
+            const document = parsePolicyDocument(
+                policyEnvelope({ policy, availability: 'available', activeRequestPolicy })
+            )
+            expect(document.revision).toBe('8')
+            expect(document).not.toHaveProperty('activeRequestPolicy')
+            expect(Object.keys(document).sort()).toEqual(
+                ['activation', 'availability', 'policy', 'recoveryRequired', 'revision'].sort()
+            )
+        }
+    )
+})

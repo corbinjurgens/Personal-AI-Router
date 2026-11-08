@@ -297,6 +297,7 @@ type Proxy struct {
 	routingCostsRevision int64
 	routingCostsReceived time.Time
 	routingCosts         map[[6]string]performancewire.RoutingProfile
+	peerSizing           peerSizingCache
 	// One process-wide diagnostics owner. Inference never acquires this mutex.
 	routingHistoryMu sync.Mutex
 	routingHistory   *proxyRoutingHistory
@@ -1584,6 +1585,22 @@ func (p *Proxy) handleMessage(msg *Message) {
 		count := len(p.routingCosts)
 		p.routingCostsMu.RUnlock()
 		p.codec.Respond(msg.ID, map[string]int{"profiles": count})
+
+	case nodepolicy.MethodSetPeerSizing:
+		if engine != "" {
+			p.codec.RespondError(msg.ID, -32602, "peer sizing is process-scoped")
+			return
+		}
+		var snapshot nodepolicy.PeerSizingSnapshot
+		err := json.Unmarshal(msg.Params, &snapshot)
+		if err == nil {
+			err = p.peerSizing.set(snapshot)
+		}
+		if err != nil {
+			p.codec.RespondError(msg.ID, -32602, "invalid peer sizing")
+			return
+		}
+		p.codec.Respond(msg.ID, map[string]int{"peers": p.peerSizing.count()})
 
 	case "node/set-priority":
 		var params schedulerwire.Priority

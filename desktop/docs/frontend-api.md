@@ -126,6 +126,8 @@ retain live `availability` and optional actual `pausedBy` (`local` or `peer`).
 Unknown provenance stays absent; available clears it. `policy:get` supplies
 initial/live readback. Local activation fields stay intact; remote projection
 does not expose them or private routing. Tray projection filters peer pushes.
+A paired read's private `activeRequestPolicy` sizing attestation is ignored by
+the parser and never enters desktop state.
 Availability mutation results never supply durable engine lifecycle state.
 
 Pause affects this target's execution while routing remains available. An

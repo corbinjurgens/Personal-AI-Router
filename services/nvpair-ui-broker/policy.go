@@ -546,17 +546,42 @@ func (b *Broker) activationOf(revision string) policyActivation {
 
 // peerPolicyGetResult is the policy:get result a paired node receives: the
 // peer projection, without the routing section or API tier entries.
+// ActiveRequestPolicy is null unless the live proxy run has acknowledged
+// exactly this policy's revision; peers size requests only from such reads.
 type peerPolicyGetResult struct {
-	ModelConfiguration nodepolicy.ModelConfiguration `json:"modelConfiguration"`
-	Policy             nodepolicy.PeerPolicy         `json:"policy"`
-	Availability       nodepolicy.Availability       `json:"availability"`
-	PausedBy           nodepolicy.PauseOrigin        `json:"pausedBy,omitempty"`
-	PauseMode          nodepolicy.PauseMode          `json:"pauseMode,omitempty"`
+	ModelConfiguration  nodepolicy.ModelConfiguration   `json:"modelConfiguration"`
+	Policy              nodepolicy.PeerPolicy           `json:"policy"`
+	Availability        nodepolicy.Availability         `json:"availability"`
+	PausedBy            nodepolicy.PauseOrigin          `json:"pausedBy,omitempty"`
+	PauseMode           nodepolicy.PauseMode            `json:"pauseMode,omitempty"`
+	ActiveRequestPolicy *nodepolicy.ActiveRequestPolicy `json:"activeRequestPolicy"`
 }
 
 func (b *Broker) peerPolicy() peerPolicyGetResult {
 	local := b.localPolicy()
-	return peerPolicyGetResult{ModelConfiguration: local.ModelConfiguration, Policy: local.Policy.PeerProjection(), Availability: local.Availability, PausedBy: local.PausedBy, PauseMode: local.PauseMode}
+	return peerPolicyGetResult{ModelConfiguration: local.ModelConfiguration, Policy: local.Policy.PeerProjection(), Availability: local.Availability, PausedBy: local.PausedBy, PauseMode: local.PauseMode, ActiveRequestPolicy: b.activeRequestPolicy(local.Policy.Revision)}
+}
+
+// activeRequestPolicy attests revision only while the current, active and
+// captured revisions agree for the same live, acknowledged proxy incarnation,
+// with no recovery, activation or availability error. It never attaches a
+// newer activation to an older captured policy.
+func (b *Broker) activeRequestPolicy(revision string) *nodepolicy.ActiveRequestPolicy {
+	r := b.nodePolicyRuntime()
+	running := b.policyProxy()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if running == nil || running != r.incarnation || r.runID == "" || r.recoveryRequired ||
+		r.activationErr != "" || r.availabilityErr != "" || revision == "" ||
+		r.current.Revision != revision || r.activeRevision != revision {
+		return nil
+	}
+	select {
+	case <-running.Done():
+		return nil
+	default:
+	}
+	return &nodepolicy.ActiveRequestPolicy{Revision: revision, ProxyRunID: r.runID}
 }
 
 // setLocalPolicy validates, persists and applies a new policy. Availability and

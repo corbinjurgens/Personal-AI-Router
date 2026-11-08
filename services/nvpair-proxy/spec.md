@@ -517,7 +517,7 @@ which takes one off and puts the other on.
 | Class | Addressed? | Examples |
 | --- | --- | --- |
 | Facade-scoped | yes | `ready`, `error`, `node/*`, `errors:*`, `set-port`, `discovery:subscribe`, `discovery:nodes` |
-| Process-scoped | no | `log/set-level`, `node/set-priority`, `node/set-routing-costs`, `node/set-policy`, `node/set-availability`, `node/set-engine-drain`, `node/set-residency`, `node/admission-snapshot`, `workload/cancel`, `workload:*`, `admission/*`, `discovery:node-activity` |
+| Process-scoped | no | `log/set-level`, `node/set-priority`, `node/set-routing-costs`, `node/set-peer-sizing`, `node/set-policy`, `node/set-availability`, `node/set-engine-drain`, `node/set-residency`, `node/admission-snapshot`, `workload/cancel`, `workload:*`, `admission/*`, `discovery:node-activity` |
 | Bootstrap | names its engine in the payload | `facade/enable` |
 
 `node/set-routing-costs` is a broker-internal full replacement
@@ -532,6 +532,27 @@ lock, independently of priority and reservations, and acknowledges
 profile key and retain host, engine, family, API and schema as separate key
 dimensions. Age advances from monotonic receipt time and expires after
 `performancewire.RetentionMs`. There is no scoring consumer yet.
+
+`node/set-peer-sizing` is a broker-internal full replacement
+`{revision, peers}` of destination-effective sizing recipes, accepted only
+without an engine address. Each peer entry carries the host, the admission
+identity and canonical epoch it was read under, the attested policy revision
+and proxy run, its observation age, and the request options and mode of each
+advertised shared profile. The strict `nodepolicy.PeerSizingSnapshot` decoder
+refuses unknown, duplicate and case-folded duplicate envelope fields, bounds the
+encoded snapshot to 256 KiB, peers to 256 and profiles per peer to 1024, and
+reuses the policy validators for keys, engines, models and options. Invalid or
+lower revisions return invalid params without mutation; equal revisions do not
+renew the receipt time. A lookup returns a recipe only while receipt age plus
+the observation age is below 90 seconds and the caller's current admission
+identity, epoch, advertised policy revision and profile engine/model all match;
+anything else is unknown sizing. The cache is ephemeral sizing configuration:
+it grants no admission, capacity or speed authority and is separate from
+priority, reservations and routing costs. The snapshot generation is readable
+without the cache lock. The discovery owner also keeps a routing-snapshot
+generation that advances on routing-relevant replacement or removal, including
+policy revision, profile and cluster principal changes that leave UI node
+events unchanged. There is no scoring consumer yet.
 
 `facade/enable` is unaddressed because it runs *before* the facade it names
 exists. Only a built-in engine id or a well-formed `e-<id>` counts as an address: plenty of unaddressed

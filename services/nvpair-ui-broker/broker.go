@@ -382,6 +382,7 @@ type Broker struct {
 	// failWorkloadsForNode); it is internally synchronized.
 	workloads   *workloadstore.Store
 	performance *performanceRuntime
+	peerSizing  *peerSizingRuntime
 	// lastLocalRunID is guarded by workloadEmitMu. Only actual proxy input
 	// advances the fence; broker-synthesized retirement never does.
 	lastLocalRunID string
@@ -1356,6 +1357,7 @@ func (b *Broker) handleEngineSubscribe(params json.RawMessage) {
 	id, sub, err := subscribeRelay(b.relayDir, params, send)
 	b.engineRelaySubID = id
 	b.engineRelayMu.Unlock()
+	b.peerSizing.signal()
 	if err != nil {
 		slog.Warn("engine-manager sent invalid discovery:subscribe", "err", err)
 		return
@@ -1372,6 +1374,7 @@ func (b *Broker) clearEngineRelaySub() {
 		b.relayDir.Unsubscribe(b.engineRelaySubID)
 		b.engineRelaySubID = 0
 	}
+	b.peerSizing.signal()
 	b.engineRelayMu.Unlock()
 }
 
@@ -1751,6 +1754,7 @@ func (b *Broker) replayProxyStateAfterSpawn() {
 	defer cancel()
 	b.repushPriority(ctx)
 	b.sendRoutingCosts(ctx, true)
+	b.sendPeerSizing(ctx, true)
 }
 
 // repushPriority re-sends the cached ranking after a proxy (re)spawns, because
@@ -1895,6 +1899,8 @@ func (b *Broker) serve(ctx context.Context, lifetime *brokerMainLifetime) error 
 	}
 	stopPerformance := b.startPerformance(ctx)
 	defer stopPerformance()
+	stopPeerSizing := b.startPeerSizing(ctx)
+	defer stopPeerSizing()
 
 	// Enable durable workload history: load the prior session's terminal
 	// records so a late-subscribing client / workloads:get-initial has a
@@ -2380,6 +2386,9 @@ func (b *Broker) forwardClusterManagerNotification(method string, params json.Ra
 	}
 	if b.performance != nil && (method == "cluster:identity-changed" || method == "cluster:trust-changed" || method == "nodes:changed") {
 		performanceSignal(b.performance.changeWake)
+	}
+	if method == "cluster:identity-changed" || method == "cluster:trust-changed" || method == "nodes:changed" {
+		b.peerSizing.signal()
 	}
 	if err := b.codec.Notify(method, params); err != nil {
 		slog.Warn("forward cluster-manager notification failed", "method", method, "err", err)

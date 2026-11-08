@@ -25,6 +25,7 @@ import (
 // own broker-side surface. One list so a new internal method is added once.
 var internalClientMethods = map[string]struct{}{
 	performancewire.MethodRoutingCosts: {},
+	nodepolicy.MethodSetPeerSizing:     {},
 	notifyEngineNotificationsReset:     {},
 	// Peer relay notifications: only engine-manager relays these, with a
 	// verified caller.

@@ -496,6 +496,14 @@ and evidence expires at the performance retention limit. Local clients cannot
 set this feed. The cache has no scoring consumer yet; scheduler priority,
 reservations, admission and concrete routing retain their existing behavior.
 
+The broker likewise sends a private process-scoped `node/set-peer-sizing`
+snapshot of destination-effective request recipes for admitted peers' advertised
+shared profiles, obtained from authenticated policy reads that attest exact
+activation. The proxy replaces it whole, refuses lower revisions, and returns a
+recipe only while the observation is under 90 seconds old and still matches the
+peer's current admission, advertised policy revision and profile identity.
+Unknown sizing never removes a candidate. Nothing scores from it yet.
+
 - **Eligibility**: Before routing model-bearing inference, the proxy keeps only
   nodes declaring the exact requested profile key for this engine. Self uses
   policy profiles; peers use advertised profiles. `ServedModels` restricts the

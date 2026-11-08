@@ -265,6 +265,10 @@ Alongside `node/set-priority`, the broker sends the private process-scoped
 current revision after spawn, independently of desktop subscriptions. It caches
 newest usable destination-attested current speed evidence for tier scoring;
 scoring does not consume it yet. PAIR consumes routing results, not this feed.
+It sends `node/set-peer-sizing` the same way: a private projection of admitted
+peers' attested shared-profile request recipes for sizing. Neither feed reaches
+desktop state; the UI ignores the `activeRequestPolicy` attestation on peer
+policy reads.
 
 Current limitation: pressure does not represent GPU capability or available
 VRAM, and a multi-GPU node is represented by its busiest device rather than
