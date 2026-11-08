@@ -1202,12 +1202,29 @@ func (e *Executor) previewModelLoadChange(ctx context.Context, st *engineState, 
 	ctx, cancel := context.WithTimeout(ctx, modelInspectionBudget)
 	defer cancel()
 	var result settings.Preview
+	var pending *modelEstimateInput
 	err := retryModelRead(ctx, func(retry *bool) error {
 		var err error
-		result, err = e.previewModelLoadChangeOnce(ctx, st, p, retry)
+		pending = nil
+		result, err = e.previewModelLoadChangeOnce(ctx, st, p, retry, &pending)
 		return err
 	})
-	return result, err
+	if err != nil || pending == nil {
+		return result, err
+	}
+	// All authoritative work is complete and its content lease is released.
+	// The advisory estimate uses the remaining metadata budget; its failure,
+	// panic or expiration is an Unknown estimate, never a Preview refusal.
+	attachModelLoadEstimate(&result, e.modelEstimates.estimate(ctx, *pending))
+	return result, nil
+}
+
+// A reply-size failure after attachment drops only the advisory estimate.
+func attachModelLoadEstimate(result *settings.Preview, estimate modelconfig.Estimate) {
+	result.Estimate = &estimate
+	if err := modelconfig.CheckPayloadSize(*result); err != nil {
+		result.Estimate = nil
+	}
 }
 
 func validateModelLoadPreview(st *engineState, p settings.Request) error {
@@ -1259,7 +1276,7 @@ func modelLoadPreviewFailure(ctx context.Context, p settings.Request, result set
 	return result, nil
 }
 
-func (e *Executor) previewModelLoadChangeOnce(ctx context.Context, st *engineState, p settings.Request, retry *bool) (settings.Preview, error) {
+func (e *Executor) previewModelLoadChangeOnce(ctx context.Context, st *engineState, p settings.Request, retry *bool, pending **modelEstimateInput) (settings.Preview, error) {
 	result := settings.Preview{Settings: p.Settings.Clone(), Args: []string{}, Env: []string{}, Errors: map[string]string{}}
 	fail := func(err error) (settings.Preview, error) { return modelLoadPreviewFailure(ctx, p, result, err) }
 	if err := validateModelLoadPreview(st, p); err != nil {
@@ -1485,21 +1502,17 @@ func (e *Executor) previewModelLoadChangeOnce(ctx context.Context, st *engineSta
 	if err := modelconfig.CheckPayloadSize(result); err != nil {
 		return fail(err)
 	}
-	// All authoritative work is already complete. Estimate failures, panic or
-	// expiration remain advisory, including a reply-size failure after attachment.
-	var estimate modelconfig.Estimate
+	// All authoritative work is already complete. A fresh estimate is left to
+	// the caller, after this attempt releases its content lease.
 	if p.ModelChange.Remove {
 		return result, nil
 	}
 	if proposal, ok := op.Proposals[profileKey]; ok {
-		estimate = proposal.Estimate
 		result.Auto = &proposal
+		attachModelLoadEstimate(&result, proposal.Estimate)
 	} else {
-		estimate = e.modelEstimates.estimate(ctx, advisory[profileKey])
-	}
-	result.Estimate = &estimate
-	if err := modelconfig.CheckPayloadSize(result); err != nil {
-		result.Estimate = nil
+		in := advisory[profileKey]
+		*pending = &in
 	}
 	return result, nil
 }

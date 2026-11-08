@@ -450,14 +450,17 @@ are data, never an additional manual-preview or Apply refusal.
 
 Direct previews compile typed records without persistence or activation.
 Read-only model previews, inspection and diagnostic observation absorb brief
-runtime-lock contention inside the manager. Each contended lock acquisition is
-limited to one second. An observation that needs restarting gets at most 21
-attempts, with retries started within one second of the first contention, within the caller's
-context and the existing help/metadata budgets. A reader holding a content lease releases
-that lease and the inspection slot before retrying its entire observation; it
-never waits for a runtime owner that may need the same content guard. Native
-help/device snapshots and diagnostic lifecycle captures can wait without those
-inverse locks. A completed runtime change requires a fresh revalidated snapshot,
+runtime-lock contention inside the manager. An observation that needs restarting
+gets at most 21 attempts, with retries started within one second of the first
+contention, within the caller's context and the existing help/metadata budgets.
+Lock acquisitions inside such a whole-read retry never wait on their own, so one
+contention window governs the entire observation, including diagnostic
+lifecycle and effects captures. A reader holding a content lease releases that
+lease and the inspection slot before retrying its entire observation; it never
+waits for a runtime owner that may need the same content guard. A standalone
+native help or device snapshot, which holds no inverse lock and is not inside a
+whole-read retry, may wait up to one second for its lock. A completed runtime
+change requires a fresh revalidated snapshot,
 not reuse of earlier facts or effects. Continuous drift or contention past the
 bound retains the explicit busy/conflict/unknown response without current proof.
 Mutation acceptance, reservation comparisons, source/ownership checks, consent,
@@ -466,6 +469,10 @@ These are read retries, never automatic replay of an accepted or uncertain actio
 Diagnostic reservation and exercise identity rechecks use the same inspection
 owner. Busy inspection after its bound remains an explicit observation conflict;
 its absent key is never classified as proof that the accepted identity changed.
+A manual load Preview attaches its fresh advisory estimate only after the
+authoritative read has completed and released its content lease. The estimate
+uses the remaining metadata budget; its expiration yields an Unknown estimate
+and never turns a completed Preview into a refusal.
 
 Typed loads are keyed by `profileKey`. The preset section name, profile key
 and served id are identical; `modelId` separately selects artifact files.
@@ -661,7 +668,8 @@ The dense graph has additional batch/dimension/element bounds before its
 synchronous library call. Checks honor the existing five-second operation
 deadline before/after bounded work; no abandoned timeout goroutine exists.
 Library panic, overflow and budget exhaustion produce specific Unknown reasons.
-The zero-ready executor-owned estimator uses nonblocking cache admission.
+The zero-ready executor-owned estimator uses nonblocking cache admission; a
+contended cache yields the advisory Unknown reason `estimator busy`.
 Its derived LRU has 128-record, 1-MiB and 30-second limits, including charged
 record/string/slice overhead and detached backing storage. Keys bind ordered
 artifacts, effective allocation, revision, native build/support and the complete

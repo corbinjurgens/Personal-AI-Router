@@ -277,25 +277,23 @@ func (e *Executor) diagnosticEffectsFence(ctx context.Context) (string, error) {
 	var fence string
 	err := retryModelRead(ctx, func(retry *bool) error {
 		var err error
-		fence, err = e.diagnosticEffectsFenceOnce(ctx, func(st *engineState) bool {
-			return modelReadLock(ctx, &st.opMu)
-		}, retry)
+		fence, err = e.diagnosticEffectsFenceOnce(ctx, retry)
 		return err
 	})
 	return fence, err
 }
 
-func (e *Executor) diagnosticEffectsFenceOnce(ctx context.Context, lock func(*engineState) bool, retry *bool) (string, error) {
+// Lock acquisition here never waits: the enclosing whole-read retry owns the
+// single contention deadline.
+func (e *Executor) diagnosticEffectsFenceOnce(ctx context.Context, retry *bool) (string, error) {
 	effects := make([]diagnosticEngineEffects, 0)
 	for _, engine := range e.reg.Names() {
 		st, err := e.state(engine)
 		if err != nil {
 			return "", diagnosticConflict("engine state unavailable")
 		}
-		if !lock(st) {
-			if retry != nil {
-				*retry = true
-			}
+		if !st.opMu.TryLock() {
+			*retry = true
 			return "", diagnosticConflict("engine lifecycle is busy")
 		}
 		st.mu.Lock()
@@ -325,10 +323,8 @@ func (e *Executor) diagnosticEffectsFenceOnce(ctx context.Context, lock func(*en
 			slices.Sort(entry.Loaded)
 			entry.Loaded = slices.Compact(entry.Loaded)
 		}
-		if !lock(st) {
-			if retry != nil {
-				*retry = true
-			}
+		if !st.opMu.TryLock() {
+			*retry = true
 			return "", diagnosticConflict("engine lifecycle changed during observation")
 		}
 		st.mu.Lock()
@@ -336,9 +332,7 @@ func (e *Executor) diagnosticEffectsFenceOnce(ctx context.Context, lock func(*en
 		st.mu.Unlock()
 		st.opMu.Unlock()
 		if changed {
-			if retry != nil {
-				*retry = true
-			}
+			*retry = true
 			return "", diagnosticConflict("engine changed during loaded-model observation")
 		}
 		effects = append(effects, entry)

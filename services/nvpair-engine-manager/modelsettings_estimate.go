@@ -156,7 +156,7 @@ func (s *modelEstimateState) estimate(ctx context.Context, in modelEstimateInput
 	if ctx.Err() != nil {
 		return modelEstimateUnknown("estimator operation budget exhausted")
 	}
-	if !modelReadLock(ctx, &s.mu) {
+	if !s.mu.TryLock() {
 		return modelEstimateUnknown("estimator busy")
 	}
 	defer s.mu.Unlock()

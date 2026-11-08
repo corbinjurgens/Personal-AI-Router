@@ -921,6 +921,11 @@ func TestModelMemoryDiagnosticProcess(t *testing.T) {
 		f.call(t, "engine:apply-settings", request, nil)
 		f.settled(t, request.RequestID, "succeeded")
 		value = f.inspect(t, "medium-model")
+		// Withdrawal is only established by a resolved read of the new
+		// configuration; a busy, keyless inspection proves nothing here.
+		if value.Status != "resolved" || value.ConfigurationKey == "" || value.ConfigurationKey == preview.ConfigurationKey {
+			t.Fatalf("changed configuration was not inspected as resolved under a new key: status=%s reason=%s key=%q previewKey=%q", value.Status, value.Reason, value.ConfigurationKey, preview.ConfigurationKey)
+		}
 		if slices.ContainsFunc(value.MemoryProfiles, func(p modelconfig.MemoryProfile) bool {
 			return p.Current && p.Measured != nil && p.Measured.RunID == run.RunID
 		}) || value.Estimate.EstimateSource != nil && value.Estimate.EstimateSource.Kind == "measured" {

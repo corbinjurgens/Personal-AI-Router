@@ -8,12 +8,20 @@ import (
 	"errors"
 	"os"
 	"reflect"
+	"slices"
 	"sync"
 	"testing"
 	"time"
 
 	"nvpair-shared/modelconfig"
 )
+
+// Continuous contention must refuse after one contention window, not before it
+// and not after a renewed one. The slack covers the final attempt, scheduling
+// and Windows timer granularity, and stays well below a second window.
+func modelReadWithinBound(elapsed time.Duration) bool {
+	return elapsed >= modelReadContentionBudget && elapsed < modelReadContentionBudget+modelReadContentionBudget/2
+}
 
 // An opMu owner needs the same content guard held by the first read attempt.
 // The read must release its lease, retry from scratch and validate again.
@@ -158,6 +166,37 @@ func TestModelReadPreviewContentionThenSuccess(t *testing.T) {
 	}
 }
 
+// Authoritative validation succeeds; only the advisory estimate exhausts its
+// internal deadline. The Preview stays valid with an Unknown estimate, and the
+// estimate runs after the attempt released its content lease and scan slot.
+func TestModelReadPreviewAdvisoryDeadlineKeepsPreview(t *testing.T) {
+	f := newAppliedKeyFixture(t)
+	request := nativeOptionsPreviewRequest(t, f, nil)
+	request.ModelChange.Load.Set.Context = &modelconfig.Context{Mode: "fixed", Tokens: 4096}
+	memory := modelTargetMemoryOwner{target: modelBufferTestTargetMemory()}
+	ctx := context.WithValue(context.Background(), modelAutoOperationKey{}, modelAutoOperation{Memory: memory})
+	ran, leaseHeld := false, false
+	f.ex.modelEstimates.run = func(ctx context.Context, _ modelEstimateInput) modelconfig.Estimate {
+		ran = true
+		f.ex.downloads.mu.Lock()
+		leaseHeld = f.ex.downloads.readers[f.request.Engine] != 0
+		f.ex.downloads.mu.Unlock()
+		leaseHeld = leaseHeld || f.ex.modelInspection.active.Load()
+		<-ctx.Done()
+		return modelconfig.Estimate{}
+	}
+	result, err := f.ex.previewModelLoadChange(ctx, f.st, request)
+	if err != nil {
+		t.Fatalf("advisory estimate expiration rejected a valid Preview: %v", err)
+	}
+	if !ran || leaseHeld {
+		t.Fatalf("advisory estimate did not run after releasing the content lease: ran=%t leaseHeld=%t", ran, leaseHeld)
+	}
+	if len(result.Errors) != 0 || result.Conflict != nil || result.PreviewDigest == "" || result.Estimate == nil || !slices.Contains(result.Estimate.Unknowns, "estimator operation budget exhausted") {
+		t.Fatalf("Preview lost its reviewed result or its Unknown advisory estimate: %+v", result)
+	}
+}
+
 func TestModelReadInspectionContentionPastBound(t *testing.T) {
 	f := newAppliedKeyFixture(t)
 	f.st.opMu.Lock()
@@ -167,7 +206,7 @@ func TestModelReadInspectionContentionPastBound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if time.Since(started) < modelReadContentionBudget || result.Status != "busy" || result.ConfigurationKey != "" || result.ExecutionKey != "" || len(result.Artifacts) != 0 {
+	if !modelReadWithinBound(time.Since(started)) || result.Status != "busy" || result.ConfigurationKey != "" || result.ExecutionKey != "" || len(result.Artifacts) != 0 {
 		t.Fatalf("still-busy inspection granted proof or refused before its bound: elapsed=%s result=%+v", time.Since(started), result)
 	}
 }
@@ -213,7 +252,7 @@ func TestModelReadDiagnosticContentionPastBound(t *testing.T) {
 	started := time.Now()
 	result, err := f.ex.observeDiagnostic(context.Background(), p, modelBufferTestTargetMemory(), diagnosticTestHardware())
 	var coded *codedError
-	if time.Since(started) < modelReadContentionBudget || !errors.As(err, &coded) || coded.code != -32010 || coded.message != "Memory measurement conflict: engine lifecycle is busy" || result.Identity.ConfigurationKey != "" {
+	if !modelReadWithinBound(time.Since(started)) || !errors.As(err, &coded) || coded.code != -32010 || coded.message != "Memory measurement conflict: engine lifecycle is busy" || result.Identity.ConfigurationKey != "" {
 		t.Fatalf("still-busy diagnostic observation granted proof or lost its refusal: elapsed=%s result=%+v err=%v", time.Since(started), result, err)
 	}
 }
@@ -240,7 +279,7 @@ func TestModelReadReservationEffectsContentionPastBound(t *testing.T) {
 	started := time.Now()
 	fence, err := f.ex.diagnosticEffectsFence(context.Background())
 	var coded *codedError
-	if time.Since(started) < modelReadContentionBudget || !errors.As(err, &coded) || coded.code != -32010 || coded.message != "Memory measurement conflict: engine lifecycle is busy" || fence != "" {
+	if !modelReadWithinBound(time.Since(started)) || !errors.As(err, &coded) || coded.code != -32010 || coded.message != "Memory measurement conflict: engine lifecycle is busy" || fence != "" {
 		t.Fatalf("still-busy reservation observation granted proof or lost its refusal: elapsed=%s fence=%q err=%v", time.Since(started), fence, err)
 	}
 }
@@ -303,9 +342,10 @@ func TestModelReadDiagnosticIdentityRecheckPastBoundKeepsBusy(t *testing.T) {
 	ctx := f.ex.modelMemoryContext(op.ctx, op.params.Engine, op.reservation.TargetMemory, false)
 	f.ex.modelInspection.active.Store(true)
 	defer f.ex.modelInspection.active.Store(false)
+	started := time.Now()
 	result, err := f.ex.diagnosticInspectIdentity(ctx, op)
 	var coded *codedError
-	if result.Status != "busy" || result.ConfigurationKey != "" || result.ExecutionKey != "" || !errors.As(err, &coded) || coded.code != -32010 || errors.Is(err, errModelDiagnosticIdentity) || diagnosticFailureReason(err) == "identity-changed" {
-		t.Fatalf("past-bound busy inspection was misreported as changed identity: result=%+v err=%v", result, err)
+	if !modelReadWithinBound(time.Since(started)) || result.Status != "busy" || result.ConfigurationKey != "" || result.ExecutionKey != "" || !errors.As(err, &coded) || coded.code != -32010 || errors.Is(err, errModelDiagnosticIdentity) || diagnosticFailureReason(err) == "identity-changed" {
+		t.Fatalf("past-bound busy inspection was misreported as changed identity or missed its bound: elapsed=%s result=%+v err=%v", time.Since(started), result, err)
 	}
 }

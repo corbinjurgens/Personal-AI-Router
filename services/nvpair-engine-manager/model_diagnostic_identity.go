@@ -190,9 +190,8 @@ func (e *Executor) observeDiagnosticOnce(ctx context.Context, p modelconfig.Diag
 	}
 	ctx = withDiagnosticHardware(e.modelMemoryContext(ctx, p.Engine, memory, false), hardware)
 	request := modelconfig.InspectRequest{Engine: p.Engine, ModelID: p.ModelID, ProfileKey: p.ProfileKey}
-	// No content lease or admission lock is held at either lifecycle capture.
-	lock := func(st *engineState) bool { return modelReadLock(ctx, &st.opMu) }
-	before, err := e.diagnosticEffectsFenceOnce(ctx, lock, retry)
+	// Lifecycle captures do not wait; observeDiagnostic's retry owns the window.
+	before, err := e.diagnosticEffectsFenceOnce(ctx, retry)
 	if err != nil {
 		return diagnosticObservation{}, err
 	}
@@ -266,7 +265,7 @@ func (e *Executor) observeDiagnosticOnce(ctx context.Context, p modelconfig.Diag
 	}
 	// Resident reload is policy-owned after drains lift. Do not claim that all
 	// previously loaded models will be reloaded merely because they were present.
-	after, err := e.diagnosticEffectsFenceOnce(ctx, lock, retry)
+	after, err := e.diagnosticEffectsFenceOnce(ctx, retry)
 	if err != nil {
 		return diagnosticObservation{}, err
 	}

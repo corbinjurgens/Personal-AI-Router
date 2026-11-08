@@ -177,8 +177,9 @@ may immediately be historical and has no buffer link in that case. Affirmative
 physical-stop proof still precedes record persistence and resource release.
 
 The manager absorbs brief lifecycle/status-lock contention during read-only
-Preview and inspection. Lock waits and whole-read retries have one-second bounds
-within the caller's deadline and the operation's existing budgets. Inspection releases its
+Preview and inspection. Each read observation has a single one-second contention
+window, within the caller's deadline and the operation's existing budgets; lock
+acquisitions inside a retried read do not start windows of their own. Inspection releases its
 content leases before retrying. Every attempt revalidates the runtime, files and
 effects; mutation acceptance and consent checks keep their existing fences.
 Ordinary model inspection can still report `busy` when that bound is exhausted,

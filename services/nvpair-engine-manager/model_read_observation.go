@@ -28,10 +28,12 @@ func retryModelRead(ctx context.Context, observe func(*bool) error) error {
 		}
 		retry := false
 		err = observe(&retry)
-		if err := ctx.Err(); err != nil {
+		// A completed observation is the owner's answer; deadline handling for
+		// its own phases, including advisory ones, belongs to that owner.
+		if !retry || attempt == modelReadContentionAttempts-1 {
 			return err
 		}
-		if !retry || attempt == modelReadContentionAttempts-1 {
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 		// Budget contention from its first occurrence, not from metadata I/O
@@ -53,7 +55,9 @@ func retryModelRead(ctx context.Context, observe func(*bool) error) error {
 	return err
 }
 
-// Only for read owners holding no inverse lock or content lease. Unlike the
+// Only for read owners holding no inverse lock or content lease, and never
+// inside retryModelRead: a nested wait would start its own contention window.
+// Whole-read retries use TryLock and let the outer retry own waiting. Unlike the
 // resident mutation's queued join, a bounded read leaves no mutex waiter behind
 // when its context or contention budget expires.
 func modelReadLock(ctx context.Context, mu *sync.Mutex) bool {
