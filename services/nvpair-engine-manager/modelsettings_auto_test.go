@@ -1116,3 +1116,62 @@ func TestModelSettingsAutoLayerDependentWorkspaceKeepsCPU(t *testing.T) {
 	test("no total-cost proof enumerates", nil)
 	test("estimate disagrees with proof falls back", autoTestLayerCosts{})
 }
+
+// A build change on a frozen Auto load cannot be cleared by the plain preview
+// that reports it, so its message names the path that can.
+func TestAutoBuildChangeNamesRecalculate(t *testing.T) {
+	f, frozen, owner := autoTestFrozenLaunch(t)
+	configure := func(config settings.Config) {
+		t.Helper()
+		if _, err := f.ex.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: config, OperationID: "auto"}, func() error { return nil }); err != nil {
+			t.Fatalf("ConfigureLaunch: %v", err)
+		}
+	}
+	readback := func() (string, string) {
+		t.Helper()
+		state, err := f.ex.LaunchSettings("fake")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if state.ServingReadback == nil {
+			return "", ""
+		}
+		return state.ServingReadback.Status, state.ServingReadback.Reason
+	}
+	configure(frozen.Settings)
+	if status, reason := readback(); status == "mismatch" {
+		t.Fatalf("false mismatch on a frozen Auto load: %s", reason)
+	}
+	owner.memory.Identity = "changed-snapshot"
+	if status, reason := readback(); status == "mismatch" {
+		t.Fatalf("false mismatch after memory moved: %s", reason)
+	}
+
+	writeTestFile(t, f.st.binPath, []byte("second synthetic Auto native build"))
+	const way = "explicitly Recalculate"
+	if status, reason := readback(); status != "mismatch" || !strings.Contains(reason, way) {
+		t.Fatalf("readback after a build change: status=%q reason=%q", status, reason)
+	}
+	preview, err := f.ex.PreviewLaunch(settingsRequest(t, f.ex))
+	if err != nil {
+		t.Fatalf("plain preview: %v", err)
+	}
+	found := false
+	for _, reason := range preview.Errors {
+		found = found || strings.Contains(reason, way)
+	}
+	if !found {
+		t.Fatalf("plain preview errors do not name Recalculate: %v", preview.Errors)
+	}
+	ctx := context.WithValue(context.Background(), modelAutoOperationKey{}, modelAutoOperation{Memory: owner})
+	recalculate := settingsRequest(t, f.ex)
+	recalculate.ModelChange = &modelconfig.ModelChange{ModelID: "weak-model", ExpectedPolicyRevision: "0", Load: &modelconfig.LoadPatch{Set: autoTestRequest()}}
+	recalculated, err := f.ex.previewModelLoadChange(ctx, f.st, recalculate)
+	if err != nil || len(recalculated.Errors) != 0 {
+		t.Fatalf("Recalculate: %+v %v", recalculated.Errors, err)
+	}
+	configure(recalculated.Settings)
+	if status, reason := readback(); status == "mismatch" {
+		t.Fatalf("mismatch after Recalculate: %s", reason)
+	}
+}
