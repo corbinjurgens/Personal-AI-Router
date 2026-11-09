@@ -293,11 +293,13 @@ func (e *Executor) PreviewLaunch(p settings.Request, contexts ...context.Context
 			return settings.Preview{}, err
 		}
 	}
-	return e.previewLaunchLocked(st, p), nil
+	return e.previewLaunchLocked(st, p, true), nil
 }
 
-func (e *Executor) previewLaunchLocked(st *engineState, request settings.Request) settings.Preview {
-	return e.previewLaunch(st, request, nil)
+// Only the settings preview request may accept a moved model file, which its
+// diff then names. Internal recompiles refuse one their settings do not carry.
+func (e *Executor) previewLaunchLocked(st *engineState, request settings.Request, acceptMoved bool) settings.Preview {
+	return e.previewLaunch(st, request, acceptMoved, nil)
 }
 
 func workingSetLimitError(st *engineState, rt Runtime) string {
@@ -318,7 +320,7 @@ func workingSetLimitError(st *engineState, rt Runtime) string {
 
 // Preparation supplies a bounded compiler on a state snapshot, sharing the
 // exact proposed-launch parser without reading current runtime digests.
-func (e *Executor) previewLaunch(st *engineState, request settings.Request, prepare func(launchCommand, Runtime) (*llamaServingLaunch, error)) settings.Preview {
+func (e *Executor) previewLaunch(st *engineState, request settings.Request, acceptMoved bool, prepare func(launchCommand, Runtime) (*llamaServingLaunch, error)) settings.Preview {
 	result := settings.Preview{Settings: request.Settings.Clone(), Args: []string{}, Env: []string{}, Errors: servingDeclarationErrors(request.Settings.Serving), Serving: servingDeclarationReadback(request.Settings.Serving)}
 	if len(result.Errors) > 0 {
 		return result
@@ -481,7 +483,7 @@ func (e *Executor) previewLaunch(st *engineState, request settings.Request, prep
 		if prepare != nil {
 			compile = prepare
 		}
-		rt.acceptMoved = prepare == nil
+		rt.acceptMoved = acceptMoved
 		prepared, err := compile(command, rt)
 		if err != nil {
 			field := "serving"
@@ -518,6 +520,7 @@ func (e *Executor) previewLaunch(st *engineState, request settings.Request, prep
 		result.Errors["modelLoads.artifacts"] = modelconfig.MovedArtifactReason(moved, false)
 		return result
 	}
+	result.Diff = append(result.Diff, modelconfig.MovedArtifactDiff(current.ModelLoads, result.Settings.ModelLoads)...)
 	changed := limitChanged || current.ServerPort != result.Settings.ServerPort || current.LaunchText != result.Settings.LaunchText || !current.Serving.Equal(result.Settings.Serving) || !modelconfig.EqualLoads(current.ModelLoads, result.Settings.ModelLoads)
 	if limitChanged {
 		before, _ := json.Marshal(current.WorkingSetLimitMiB)
@@ -606,7 +609,7 @@ func (e *Executor) configureLaunchLocked(ctx context.Context, st *engineState, p
 	if err != nil {
 		return settings.LaunchState{}, err
 	}
-	preview := e.previewLaunchLocked(st, settings.Request{Engine: p.Engine, Settings: p.Settings})
+	preview := e.previewLaunchLocked(st, settings.Request{Engine: p.Engine, Settings: p.Settings}, false)
 	if len(preview.Errors) > 0 || preview.Conflict != nil {
 		for field, reason := range preview.Errors {
 			if field == "workingSetLimitMiB" || field == "serving" || strings.HasPrefix(field, "serving.") || strings.HasPrefix(field, "modelLoads.") {

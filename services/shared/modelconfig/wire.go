@@ -777,6 +777,41 @@ func EqualLoads(a, b []ModelLoad) bool {
 // MovedArtifact returns the path of the first file compiled binds with another
 // modified time than baseline binds for the same profile, or "" if there is none.
 func MovedArtifact(baseline, compiled []ModelLoad) string {
+	if moved := movedArtifacts(baseline, compiled); len(moved) != 0 {
+		return moved[0].after.Path
+	}
+	return ""
+}
+
+// MovedArtifactDiff names each file whose new modified time compiled accepts,
+// so the person approving a preview sees every file it accepts. Like the
+// refusal text, it names the file only by its base name.
+func MovedArtifactDiff(baseline, compiled []ModelLoad) []FieldDiff {
+	var diff []FieldDiff
+	for _, moved := range movedArtifacts(baseline, compiled) {
+		entry := func(binding ArtifactBinding) json.RawMessage {
+			at := binding.MtimeNS
+			if ns, err := strconv.ParseInt(at, 10, 64); err == nil {
+				at = time.Unix(0, ns).UTC().Format(time.RFC3339Nano)
+			}
+			data, _ := json.Marshal(struct {
+				File         string `json:"file"`
+				ModifiedTime string `json:"modifiedTime"`
+			}{filepath.Base(binding.Path), at})
+			return data
+		}
+		diff = append(diff, FieldDiff{Field: "models." + moved.profile + ".fileModifiedTime", Before: entry(moved.before), After: entry(moved.after)})
+	}
+	return diff
+}
+
+type movedArtifact struct {
+	profile       string
+	before, after ArtifactBinding
+}
+
+func movedArtifacts(baseline, compiled []ModelLoad) []movedArtifact {
+	var moved []movedArtifact
 	for _, load := range compiled {
 		if load.Resolved == nil {
 			continue
@@ -786,14 +821,14 @@ func MovedArtifact(baseline, compiled []ModelLoad) string {
 			continue
 		}
 		for _, artifact := range load.Resolved.Artifacts {
-			if slices.ContainsFunc(baseline[i].Resolved.Artifacts, func(saved ArtifactBinding) bool {
-				return saved.Path == artifact.Path && saved.MtimeNS != artifact.MtimeNS
-			}) {
-				return artifact.Path
+			for _, saved := range baseline[i].Resolved.Artifacts {
+				if saved.Path == artifact.Path && saved.MtimeNS != artifact.MtimeNS {
+					moved = append(moved, movedArtifact{load.ProfileKey, saved, artifact})
+				}
 			}
 		}
 	}
-	return ""
+	return moved
 }
 
 // MovedArtifactReason states a refusal for a file whose modified time moved while

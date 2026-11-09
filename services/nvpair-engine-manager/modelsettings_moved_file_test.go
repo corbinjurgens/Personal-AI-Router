@@ -74,6 +74,48 @@ func movedFileRequest(t *testing.T, f modelLoadFixture) settings.Request {
 	return settings.Request{Engine: "fake", Settings: settings.ConfigFromLaunch(state, 54301)}
 }
 
+// movedFilesUnnamed returns each file whose modified time preview moves from
+// saved without a diff entry naming it, the files an apply would accept unseen.
+func movedFilesUnnamed(saved []modelconfig.ModelLoad, preview settings.Preview) []string {
+	var unnamed []string
+	for _, load := range preview.Settings.ModelLoads {
+		if load.Resolved == nil {
+			continue
+		}
+		for _, before := range saved {
+			if before.ProfileKey != load.ProfileKey || before.Resolved == nil {
+				continue
+			}
+			for _, artifact := range load.Resolved.Artifacts {
+				for _, old := range before.Resolved.Artifacts {
+					if old.Path != artifact.Path || old.MtimeNS == artifact.MtimeNS {
+						continue
+					}
+					named := false
+					for _, diff := range preview.Diff {
+						named = named || (strings.Contains(string(diff.After), filepath.Base(artifact.Path)) && string(diff.Before) != string(diff.After))
+					}
+					if !named {
+						unnamed = append(unnamed, filepath.Base(artifact.Path))
+					}
+				}
+			}
+		}
+	}
+	return unnamed
+}
+
+// movedFileRecalculate previews Recalculate of the frozen Auto weak-model.
+func movedFileRecalculate(t *testing.T, f modelLoadFixture, owner *autoTestMemoryOwner) (settings.Preview, error) {
+	t.Helper()
+	recalculate := movedFileRequest(t, f)
+	set := autoTestRequest()
+	set.Context = &modelconfig.Context{Mode: "auto", Floor: 4096, Cap: 8192}
+	recalculate.ModelChange = &modelconfig.ModelChange{ModelID: "weak-model", ExpectedPolicyRevision: "0", Load: &modelconfig.LoadPatch{Set: set}}
+	ctx := context.WithValue(context.Background(), modelAutoOperationKey{}, modelAutoOperation{Memory: owner})
+	return f.ex.PreviewLaunch(recalculate, ctx)
+}
+
 func movedFileErrors(preview settings.Preview) string {
 	joined := ""
 	for _, reason := range preview.Errors {
@@ -119,6 +161,9 @@ func TestMovedFileNeedsReview(t *testing.T) {
 		}
 		if got := modelconfig.MovedArtifact(before, preview.Settings.ModelLoads); filepath.Base(got) != "medium.gguf" {
 			t.Fatalf("moved artifact = %q", got)
+		}
+		if unnamed := movedFilesUnnamed(before, preview); len(unnamed) != 0 {
+			t.Fatalf("the preview accepts %v without naming it", unnamed)
 		}
 		if !modelconfig.EqualLoads(before, f.st.plat.Runtime.ModelLoads) {
 			t.Fatal("a preview changed the saved loads")
@@ -185,8 +230,16 @@ func TestMovedFileNeedsReview(t *testing.T) {
 				t.Fatalf("%s: errors=%v err=%v", name, preview.Errors, err)
 			}
 		}
+		saved := modelconfig.CloneLoads(f.st.plat.Runtime.ModelLoads)
 		if _, err := f.ex.SetPort(context.Background(), "fake", 54398); err == nil {
 			t.Fatal("a port change accepted the moved file")
+		}
+		// A request to keep the port carries no edit, and still is no review.
+		if _, err := f.ex.SetPort(context.Background(), "fake", f.st.plat.Runtime.Port); err == nil {
+			t.Fatal("setting the same port accepted the moved file")
+		}
+		if !modelconfig.EqualLoads(saved, f.st.plat.Runtime.ModelLoads) {
+			t.Fatal("a port request saved the moved file's time")
 		}
 	})
 	t.Run("a finite model change names the file", func(t *testing.T) {
@@ -252,20 +305,42 @@ func TestMovedFileAutoRecalculates(t *testing.T) {
 		t.Fatalf("plain preview: errors=%v err=%v", preview.Errors, previewErr)
 	}
 
-	recalculate := movedFileRequest(t, f)
-	set := autoTestRequest()
-	set.Context = &modelconfig.Context{Mode: "auto", Floor: 4096, Cap: 8192}
-	recalculate.ModelChange = &modelconfig.ModelChange{ModelID: "weak-model", ExpectedPolicyRevision: "0", Load: &modelconfig.LoadPatch{Set: set}}
-	ctx := context.WithValue(context.Background(), modelAutoOperationKey{}, modelAutoOperation{Memory: owner})
-	preview, previewErr = f.ex.PreviewLaunch(recalculate, ctx)
+	preview, previewErr = movedFileRecalculate(t, f, owner)
 	if previewErr != nil || len(preview.Errors) != 0 {
 		t.Fatalf("Recalculate: errors=%v err=%v", preview.Errors, previewErr)
 	}
 	if got := modelconfig.MovedArtifact(before, preview.Settings.ModelLoads); filepath.Base(got) != "weak.gguf" {
 		t.Fatalf("Recalculate moved artifact = %q", got)
 	}
+	if unnamed := movedFilesUnnamed(before, preview); len(unnamed) != 0 {
+		t.Fatalf("Recalculate accepts %v without naming it", unnamed)
+	}
 	f.st.plat.Runtime.ModelLoads = preview.Settings.ModelLoads
 	if err := movedFileApproved(t, f); err != nil {
 		t.Fatalf("approved compile after Recalculate: %v", err)
+	}
+}
+
+// Recalculate also accepts a finite sibling's moved file, since plain Apply
+// cannot pass the Auto load, but only with the file named in its preview: the
+// apply then saves exactly the times that preview showed.
+func TestMovedFileRecalculateNamesSiblingFile(t *testing.T) {
+	f, request, owner := autoTestFrozenLaunch(t)
+	f.st.plat.Runtime.ModelLoads = modelconfig.CloneLoads(request.Settings.ModelLoads)
+	saved := modelconfig.CloneLoads(f.st.plat.Runtime.ModelLoads)
+	movedFileLater(t, filepath.Join(f.root, "medium.gguf"))
+
+	preview, err := movedFileRecalculate(t, f, owner)
+	if err != nil || len(preview.Errors) != 0 {
+		t.Fatalf("Recalculate: errors=%v err=%v", preview.Errors, err)
+	}
+	if got := modelconfig.MovedArtifact(saved, preview.Settings.ModelLoads); filepath.Base(got) != "medium.gguf" {
+		t.Fatalf("Recalculate moved artifact = %q", got)
+	}
+	if unnamed := movedFilesUnnamed(saved, preview); len(unnamed) != 0 {
+		t.Fatalf("Recalculate accepts %v without naming it", unnamed)
+	}
+	if !modelconfig.EqualLoads(saved, f.st.plat.Runtime.ModelLoads) {
+		t.Fatal("a preview changed the saved loads")
 	}
 }

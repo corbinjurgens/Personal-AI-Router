@@ -198,7 +198,7 @@ func (e *Executor) prepareStrataRequest(ctx context.Context, st *engineState, re
 	}
 	var command launchCommand
 	var rt Runtime
-	preview := e.previewLaunch(snapshot, request, func(candidate launchCommand, proposed Runtime) (*llamaServingLaunch, error) {
+	preview := e.previewLaunch(snapshot, request, false, func(candidate launchCommand, proposed Runtime) (*llamaServingLaunch, error) {
 		command, rt = candidate, proposed
 		return deriveStrataServing(candidate, proposed)
 	})

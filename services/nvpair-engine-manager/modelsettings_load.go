@@ -1581,6 +1581,7 @@ func (e *Executor) previewModelLoadChangeOnce(ctx context.Context, st *engineSta
 		return fail(err)
 	}
 	result.Diff = append(result.Diff, modelconfig.FieldDiff{Field: "launchText", Before: a, After: b})
+	result.Diff = append(result.Diff, modelconfig.MovedArtifactDiff(baseline.ModelLoads, prepared.ModelLoads)...)
 	result.PreviewDigest, err = modelLoadPreviewDigest(prepared.Digest, conversionDigest, p.ModelChange, baseline)
 	if err != nil {
 		return fail(err)
@@ -1761,7 +1762,7 @@ func (e *Executor) validateTypedLlamaConversion(ctx context.Context, st *engineS
 		// An ordinary external-router edit keeps an external source. Dropping
 		// the complete router into default mode requires the same reviewed
 		// selection as removing a section into a nonempty typed configuration.
-		preview := e.previewLaunchLocked(st, settings.Request{Engine: st.manifest.Engine, Settings: desired})
+		preview := e.previewLaunchLocked(st, settings.Request{Engine: st.manifest.Engine, Settings: desired}, false)
 		if len(preview.Errors) != 0 || preview.Conflict != nil {
 			return nil, modelLoadError("", "conversion", "External router settings failed authoritative validation.")
 		}

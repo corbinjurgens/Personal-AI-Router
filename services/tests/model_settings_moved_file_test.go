@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -135,6 +136,11 @@ func TestModelSettingsMovedFileTimeRecovery(t *testing.T) {
 	}
 	if typedSourceDigest(t, preview.Settings) == digest {
 		t.Fatal("the accepted preview kept the old digest")
+	}
+	if !slices.ContainsFunc(preview.Diff, func(diff modelconfig.FieldDiff) bool {
+		return strings.HasSuffix(diff.Field, ".fileModifiedTime") && strings.Contains(string(diff.After), filepath.Base(artifact.Path))
+	}) {
+		t.Fatalf("the accepting preview does not name %s: %+v", filepath.Base(artifact.Path), preview.Diff)
 	}
 	if recovered.Serving != nil && recovered.Serving.Status == "mismatch" {
 		t.Fatalf("readback after the reviewed apply: %+v", recovered.Serving)

@@ -165,7 +165,7 @@ func (e *Executor) validateUnacceptedAutoMemory(ctx context.Context, p settings.
 	}
 	var inputs map[string]modelEstimateInput
 	var compileErr error
-	validated := e.previewLaunch(snapshot.state, p, func(command launchCommand, rt Runtime) (*llamaServingLaunch, error) {
+	validated := e.previewLaunch(snapshot.state, p, false, func(command launchCommand, rt Runtime) (*llamaServingLaunch, error) {
 		prepared, err := compileTypedLlamaInputs(ctx, snapshot.state, command, rt, true, &inputs)
 		compileErr = err
 		return prepared, err

@@ -190,7 +190,7 @@ type Runtime struct {
 	ModelLoads   []modelconfig.ModelLoad `json:"modelLoads,omitempty"`
 	// Bound by the executor at read/launch owners, never persisted or portable.
 	modelLoadOwner *Executor
-	// Set only by a plain settings preview, the acceptance of a moved model file.
+	// Set only by the settings preview request, the acceptance of a moved model file.
 	acceptMoved    bool
 	EditableLaunch *EditableLaunch   `json:"editable_launch,omitempty"`
 	LaunchArgs     *[]string         `json:"launch_args,omitempty"` // literal arguments after managed fields
