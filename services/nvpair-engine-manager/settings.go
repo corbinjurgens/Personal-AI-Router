@@ -154,6 +154,10 @@ func (e *Executor) launchStateLocked(engine string, st *engineState) settings.La
 						result.ServingReadback.Reason = "Serving inputs no longer match the owned launch; explicit apply or restart is required."
 					}
 				}
+				if typedServingDigestStale(rt, prepared) {
+					result.ServingReadback.Status = "mismatch"
+					result.ServingReadback.Reason = "Native source conflict; obtain a fresh preview before applying."
+				}
 			} else {
 				result.ServingReadback = &engines.ServingReadback{Status: "mismatch", Reason: servingErr.Error()}
 			}

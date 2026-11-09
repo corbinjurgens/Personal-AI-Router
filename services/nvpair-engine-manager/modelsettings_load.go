@@ -906,6 +906,18 @@ func typedLlamaIdentityCommand(command launchCommand, rt Runtime) (launchCommand
 	return identity, nil
 }
 
+// typedServingDigestStale reports a saved declaration that restore or start
+// would refuse. An unapproved typed compile replaces the saved digest with the
+// one it computed, so unlike a finite compile it cannot refuse the difference.
+func typedServingDigestStale(rt Runtime, prepared *llamaServingLaunch) bool {
+	if len(rt.ModelLoads) == 0 || rt.Serving == nil {
+		return false
+	}
+	return slices.ContainsFunc(rt.Serving.Models, func(model engines.ServingModel) bool {
+		return model.ExpectedNativeSourceDigest != prepared.Digest
+	})
+}
+
 func rtLoadResolution(loads []modelconfig.ModelLoad, profileKey string) *modelconfig.ResolvedLoad {
 	for _, load := range loads {
 		if load.ProfileKey == profileKey {
