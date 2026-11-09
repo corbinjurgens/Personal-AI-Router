@@ -110,6 +110,10 @@ export function EngineSettingsSection({
     const submitted = useRef('')
     const serverPortEdited = useRef(false)
     const dirty = !!base && !sameDraft(draft, asDraft(base.settings))
+    // Saved settings the current build refuses have nothing to edit, yet need
+    // the preview and apply that re-approve them.
+    const mismatch = snapshot?.serving?.status === 'mismatch'
+    const applicable = dirty || snapshot?.phase === 'failed' || mismatch
     const stale =
         !!base &&
         !!snapshot &&
@@ -124,6 +128,10 @@ export function EngineSettingsSection({
         !snapshot?.editable ||
         snapshot.format !== 'pair-arguments-v1'
     const locked = readOnly || disabled || applying
+    const mismatchReason =
+        !locked && !dirty && snapshot?.phase !== 'failed' && mismatch
+            ? snapshot.serving?.reason
+            : undefined
 
     useEffect(() => watchEngineSettings(), [])
     useEffect(
@@ -324,6 +332,11 @@ export function EngineSettingsSection({
                                 'Waiting for this device’s settings. Older devices require an update to support editing.'}
                         </Text>
                     )}
+                {mismatchReason && (
+                    <Text kind="body/regular/sm" role="status">
+                        {mismatchReason}
+                    </Text>
+                )}
                 {!readOnly && !isLocalNode && (
                     <Text kind="body/regular/sm">
                         Ports and options can be changed from here. Managed CORS origin settings
@@ -401,7 +414,7 @@ export function EngineSettingsSection({
                         kind="primary"
                         color="brand"
                         size="small"
-                        disabled={locked || checking || (!dirty && snapshot?.phase !== 'failed')}
+                        disabled={locked || checking || !applicable}
                         className="relative"
                         aria-label="Apply"
                         aria-busy={applying || checking}

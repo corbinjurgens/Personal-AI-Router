@@ -18,6 +18,7 @@ import (
 
 	"nvpair-shared/appdir"
 	"nvpair-shared/clustertrust"
+	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/modelconfig"
 	"nvpair-shared/noderec"
@@ -660,7 +661,23 @@ func (b *Broker) previewEngineSettings(ctx context.Context, p settings.Request, 
 		return settings.Preview{}, err
 	}
 	p.PreserveCORS = caller != ""
+	// A client preview is the fresh approval, so it does not compete with the
+	// digest the clients echo from the saved settings. Without this, a build
+	// that changes a digest input refuses the only preview that can re-approve.
+	// Apply keeps its digest: the worker's check refuses one that no longer
+	// matches, which is what catches a source change after the review.
+	p.Settings.Serving = withoutNativeSourceDigest(p.Settings.Serving)
 	return b.previewSettingsLocked(ctx, p)
+}
+
+func withoutNativeSourceDigest(config *engines.ServingConfig) *engines.ServingConfig {
+	cleared := config.Clone()
+	if cleared != nil {
+		for i := range cleared.Models {
+			cleared.Models[i].ExpectedNativeSourceDigest = ""
+		}
+	}
+	return cleared
 }
 
 // applyEngineSettings accepts a change into the journal and then converges the
@@ -760,7 +777,10 @@ func (b *Broker) applyEngineSettings(ctx context.Context, p settings.Request, ca
 			b.engineSettings[p.Engine] = previous
 		}
 	}
-	if preview.Settings.Equal(record.Snapshot.Settings) && record.Snapshot.Phase != "failed" && record.Snapshot.EffectiveProxyPort == preview.Settings.ProxyPort {
+	// A mismatch can be latched in the worker, where only an apply clears it, so
+	// unchanged settings are not a no-op while the readback reports one.
+	mismatch := record.Snapshot.Serving != nil && record.Snapshot.Serving.Status == "mismatch"
+	if preview.Settings.Equal(record.Snapshot.Settings) && record.Snapshot.Phase != "failed" && !mismatch && record.Snapshot.EffectiveProxyPort == preview.Settings.ProxyPort {
 		record.Explicit = true
 		record.Snapshot.RequestID = p.RequestID
 		record.Snapshot.Phase = "succeeded"

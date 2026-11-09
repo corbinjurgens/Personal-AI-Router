@@ -18,7 +18,7 @@ import type {
     RemoteManagementCapability,
     RemoteManagementSnapshot
 } from '@/shared/types/cluster'
-import type { EngineSettingsSnapshot } from '@/shared/types/engine-settings'
+import type { EngineServingConfig, EngineSettingsSnapshot } from '@/shared/types/engine-settings'
 import type { NodePolicyDocument, NodePolicySnapshot } from '@/shared/types/node-policy'
 import type { NodeItem } from '@/shared/types/nodes'
 import type { StructuredLogger } from '@/shared/types/log'
@@ -1240,6 +1240,54 @@ describe('permission controls', () => {
                 settings: expect.objectContaining({ serverPort: 2345 })
             })
         )
+    })
+
+    it('re-approves unedited settings whose serving readback is a mismatch', async () => {
+        usePendingActionsStore.setState({ pending: new Map() })
+        useEngineStatusStore.setState({
+            statusByNode: new Map([
+                ['peer-1', new Map([['llama-cpp', emptyEngineStatus('peer-1', 'llama-cpp')]])]
+            ])
+        })
+        const servingWithDigest = (digest: string): EngineServingConfig => ({
+            version: 1,
+            models: [
+                {
+                    modelId: 'exact/model',
+                    maxOutputTokens: 128,
+                    memory: { hostRamBytes: 4096, vramBytes: 0 },
+                    expectedNativeSourceDigest: digest,
+                    artifacts: [
+                        {
+                            role: 'model',
+                            sha256: 'a'.repeat(64),
+                            provenance: { kind: 'supplied-sha256' }
+                        }
+                    ]
+                }
+            ]
+        })
+        const reason = 'Native source conflict; obtain a fresh preview before applying.'
+        const reviewed = servingWithDigest('d'.repeat(64))
+        getSettings.mockResolvedValue({
+            ...settings,
+            settings: { ...settings.settings, serving: servingWithDigest('c'.repeat(64)) },
+            serving: { status: 'mismatch', reason }
+        })
+        previewSettings.mockImplementation(async request => ({
+            settings: { ...request.settings, serving: reviewed },
+            revision: 1,
+            errors: {},
+            restart: false,
+            rebind: false
+        }))
+        await renderSettings()
+        await vi.waitFor(() => expect(button('Apply').disabled).toBe(false))
+        expect(document.body.textContent).toContain(reason)
+        await act(async () => button('Apply').click())
+        expect(previewSettings).toHaveBeenCalledTimes(1)
+        expect(applySettings).toHaveBeenCalledTimes(1)
+        expect(applySettings.mock.calls[0][0].settings.serving).toEqual(reviewed)
     })
 
     it('keeps settings read-only when the peer is unreachable rather than calling it unsupported', async () => {

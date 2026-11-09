@@ -913,9 +913,13 @@ permission and add no separate draft artifact.
 
 Preview performs no probe, spawn, load, persistence or snapshot creation. It
 reads bounded source/configuration data and model samples only, returning a
-native-source approval digest and candidate local bindings. Apply requires the
-exact reviewed digest/bindings, prepares an immutable small snapshot before
-stopping a process or saving settings, and rejects changed inputs. Snapshots
+native-source approval digest and candidate local bindings. The broker clears
+the digest on a client preview, so unchanged settings can be re-approved after a
+build changes compiled launch defaults. Apply requires the exact reviewed
+digest/bindings, prepares an immutable small snapshot before stopping a process
+or saving settings, and rejects changed inputs. Apply and startup restore/start
+still refuse a saved digest that the inputs they are about to launch did not
+produce, and the settings readback reports it as a mismatch. Snapshots
 reference absolute existing source model paths, preserving HF symlinks and
 requiring all selected shards; model files are neither copied nor fully hashed.
 Start re-reads source bytes, resolved targets, stat and bounded samples directly
