@@ -742,6 +742,109 @@ describe('model load and serving preservation in the settings editor', () => {
         }
     )
 
+    const staleReadback: EngineSettingsSnapshot['serving'] = {
+        status: 'mismatch',
+        reason: 'Native source conflict.'
+    }
+    it.each([
+        {
+            name: 'a launch text edit',
+            edit: 'managed serve --keep',
+            readback: undefined
+        },
+        {
+            name: 're-approving a mismatch with no edit',
+            edit: undefined,
+            readback: staleReadback
+        }
+    ])(
+        'sends the saved loads to preview and applies the loads it returned on $name',
+        async ({ edit, readback }) => {
+            const snapshot: EngineSettingsSnapshot = {
+                ...baseline,
+                engine: 'llamacpp',
+                running: false,
+                settings: { ...baseline.settings, serving: structuredClone(serving) },
+                ...(readback ? { serving: readback } : {})
+            }
+            const compiled = structuredClone(snapshot.settings)
+            const resolved = compiled.modelLoads?.[0].resolved
+            if (!resolved || !compiled.serving) throw new Error('Typed fixture missing')
+            resolved.sourceInputDigest = 'd'.repeat(64)
+            resolved.presetDigest = 'e'.repeat(64)
+            resolved.nativeBuildId = 'rebuilt'
+            compiled.serving.models[0].expectedNativeSourceDigest = 'd'.repeat(64)
+            const preview = vi.fn<IEngineApi['previewSettings']>().mockResolvedValue({
+                settings: compiled,
+                revision: 1,
+                errors: {},
+                restart: false,
+                rebind: false
+            })
+            const apply = vi
+                .fn<IEngineApi['applySettings']>()
+                .mockResolvedValue({ revision: 2, phase: 'applying' })
+            Object.defineProperty(window, 'pairApi', {
+                configurable: true,
+                value: {
+                    engines: {
+                        getSettings: vi.fn<IEngineApi['getSettings']>().mockResolvedValue(snapshot),
+                        previewSettings: preview,
+                        applySettings: apply,
+                        onSettingsChanged: () => () => {},
+                        onSettingsDisconnected: () => () => {}
+                    }
+                }
+            })
+            vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+            vi.stubGlobal('CSS', { supports: () => false })
+            useConnectionStore.setState({ connected: true, selfId: 'remote' })
+            store.setState({ entries: {} })
+            usePendingActionsStore.setState({ pending: new Map() })
+            const container = document.createElement('div')
+            document.body.appendChild(container)
+            const root = createRoot(container)
+            try {
+                await act(async () =>
+                    root.render(
+                        createElement(EngineSettingsSection, {
+                            nodeId: 'remote',
+                            engineType: 'llama-cpp',
+                            disabled: false
+                        })
+                    )
+                )
+                if (edit) {
+                    const input = container.querySelector('[aria-label="Engine arguments"]')
+                    const setter = Object.getOwnPropertyDescriptor(
+                        HTMLTextAreaElement.prototype,
+                        'value'
+                    )?.set
+                    if (!input || !setter) throw new Error('Engine arguments input missing')
+                    await act(async () => {
+                        setter.call(input, edit)
+                        input.dispatchEvent(new Event('input', { bubbles: true }))
+                    })
+                }
+                const button = container.querySelector('button[aria-label="Apply"]')
+                if (!(button instanceof HTMLButtonElement)) throw new Error('Apply button missing')
+                expect(button.disabled).toBe(false)
+                await act(async () => button.click())
+                const previewRequest = preview.mock.calls[0]?.[0]
+                const applyRequest = apply.mock.calls[0]?.[0]
+                if (!previewRequest || !applyRequest) throw new Error('Settings requests missing')
+                expect(previewRequest.settings.modelLoads).toEqual(snapshot.settings.modelLoads)
+                expect(previewRequest.resolution).toBe('launch')
+                expect(applyRequest.settings).toEqual(compiled)
+                expect(applyRequest.resolution).toBeUndefined()
+                expect(applyRequest.requestId).toBeTruthy()
+            } finally {
+                await act(async () => root.unmount())
+                container.remove()
+            }
+        }
+    )
+
     it.each(['1e', '8191.5', '-1'])(
         'refuses malformed working-set limit %s without previewing',
         async value => {

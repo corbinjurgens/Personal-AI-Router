@@ -257,6 +257,70 @@ describe('working-set settings decoding', () => {
         })
         expect(snapshot.settings.modelLoads?.[0]?.requested.cpuExperts).toBeUndefined()
     })
+    // The target compares what a client sends back against its own loads, so the
+    // parser must keep every field of a load exactly as it arrived.
+    it('keeps a whole typed load through the parser', () => {
+        const options = {
+            context: { mode: 'fixed', tokens: 8192 },
+            slots: 2,
+            gpu: { mode: 'layers', layers: 12 },
+            cpuExperts: { mode: 'layers', layers: 12 },
+            extraOptions: { 'cache-reuse': '256' },
+            cacheTypeK: 'q8_0',
+            cacheTypeV: 'q8_0',
+            flashAttention: 'on',
+            batchSize: 2048,
+            ubatchSize: 512,
+            threads: 8,
+            threadsBatch: 8,
+            kvOffload: false,
+            opOffload: true,
+            cacheRAM: 0
+        }
+        const modelLoads = [
+            {
+                profileKey: 'exact/model',
+                modelId: 'exact/model',
+                requested: options,
+                resolved: {
+                    perSlotContext: 8192,
+                    totalContext: 16384,
+                    slots: 2,
+                    kvUnified: false,
+                    gpu: { mode: 'layers', layers: 12 },
+                    options,
+                    artifacts: [
+                        {
+                            role: 'model',
+                            path: 'model.gguf',
+                            resolvedTarget: 'blob',
+                            size: '9007199254740993',
+                            mtimeNs: '1780000000000000001',
+                            sampleSha256: 'a'.repeat(64)
+                        }
+                    ],
+                    nativeBuildId: 'fixture',
+                    sourceInputDigest: 'b'.repeat(64),
+                    presetDigest: 'c'.repeat(64),
+                    resolverRevision: 'external-conversion/llama',
+                    reviewedInputId: 'd'.repeat(64)
+                }
+            }
+        ]
+        const wire = { ...baseline, settings: { ...baseline.settings, modelLoads } }
+        const sent = (settings: object): object => JSON.parse(JSON.stringify(settings))
+        expect(sent(parseEngineSettings(wire).settings)).toEqual(wire.settings)
+        expect(
+            sent(
+                parseEngineSettingsPreview({
+                    settings: wire.settings,
+                    revision: 1,
+                    restart: false,
+                    rebind: false
+                }).settings
+            )
+        ).toEqual(wire.settings)
+    })
     it('retains resolved CPU experts and rejects a changed explicit placement', () => {
         const allocation = {
             perSlotContext: 8192,

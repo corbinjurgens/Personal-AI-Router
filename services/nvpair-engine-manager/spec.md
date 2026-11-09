@@ -915,8 +915,10 @@ Preview performs no probe, spawn, load, persistence or snapshot creation. It
 reads bounded source/configuration data and model samples only, returning a
 native-source approval digest and candidate local bindings. The broker clears
 the digest on a client preview, so unchanged settings can be re-approved after a
-build changes compiled launch defaults. Apply requires the exact reviewed
-digest/bindings, prepares an immutable small snapshot before stopping a process
+build changes compiled launch defaults. The broker compiles every plain request
+from the target's own model loads, and the request may send back only those
+loads or that compile's exact result, which is what the preview returned. Apply
+requires the exact reviewed digest/bindings, prepares an immutable small snapshot before stopping a process
 or saving settings, and rejects changed inputs. Apply and startup restore/start
 still refuse a saved digest that the inputs they are about to launch did not
 produce, and the settings readback reports it as a mismatch. Snapshots

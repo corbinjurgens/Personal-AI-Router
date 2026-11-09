@@ -472,6 +472,41 @@ func storedModelLoad() modelconfig.ModelLoad {
 	}}
 }
 
+func TestPlainRequestEchoesOnlyTargetOwnedLoads(t *testing.T) {
+	baseline := []modelconfig.ModelLoad{storedModelLoad()}
+	compiled := modelconfig.CloneLoads(baseline)
+	compiled[0].Resolved.SourceInputDigest = strings.Repeat("d", 64)
+	compiled[0].Resolved.PresetDigest = strings.Repeat("e", 64)
+	compiled[0].Resolved.NativeBuildID = "rebuilt"
+	change := func(edit func(*modelconfig.ResolvedLoad)) []modelconfig.ModelLoad {
+		loads := modelconfig.CloneLoads(compiled)
+		edit(loads[0].Resolved)
+		return loads
+	}
+	for _, tc := range []struct {
+		name  string
+		loads []modelconfig.ModelLoad
+		ok    bool
+	}{
+		{"saved loads", baseline, true},
+		{"loads the target compiled", compiled, true},
+		{"no loads", nil, false},
+		{"introduced load", append(modelconfig.CloneLoads(baseline), modelconfig.ModelLoad{ProfileKey: "other", ModelID: "other"}), false},
+		{"forged source digest", change(func(r *modelconfig.ResolvedLoad) { r.SourceInputDigest = strings.Repeat("f", 64) }), false},
+		{"forged preset digest", change(func(r *modelconfig.ResolvedLoad) { r.PresetDigest = strings.Repeat("f", 64) }), false},
+		{"replaced build", change(func(r *modelconfig.ResolvedLoad) { r.NativeBuildID = "caller" }), false},
+		{"replaced path", change(func(r *modelconfig.ResolvedLoad) { r.Artifacts[0].Path = "/caller/supplied.gguf" }), false},
+		{"replaced allocation", change(func(r *modelconfig.ResolvedLoad) { r.PerSlotContext, r.TotalContext = 16384, 16384 }), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := Request{Engine: "llamacpp", Settings: Config{ModelLoads: tc.loads}}
+			if err := r.ValidateLoadEcho(baseline, compiled); (err == nil) != tc.ok {
+				t.Fatalf("ValidateLoadEcho = %v, want accepted=%t", err, tc.ok)
+			}
+		})
+	}
+}
+
 func TestCallerCannotReplaceTargetResolvedAuthority(t *testing.T) {
 	baseline := Config{ModelLoads: []modelconfig.ModelLoad{storedModelLoad()}}
 	r := Request{Engine: "llamacpp", Settings: baseline.Clone()}
