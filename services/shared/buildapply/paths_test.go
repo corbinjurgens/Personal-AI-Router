@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -134,6 +135,31 @@ func TestPackagePathsRejectLinkedRoot(t *testing.T) {
 	if root, err := OpenRealRoot(link); err == nil {
 		root.Close()
 		t.Fatal("accepted symlink/reparse root")
+	}
+}
+
+// A link above the path is refused, and the refusal names the link so the user
+// can find it: a message that only says "linked root or ancestor" leaves them
+// searching the whole profile path.
+func TestRealAncestorsRefusalNamesTheLink(t *testing.T) {
+	root := packageTempRoot(t)
+	target := filepath.Join(root, "target")
+	if err := os.MkdirAll(filepath.Join(target, "below"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "linked")
+	if err := os.Symlink(target, link); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("symlink privilege unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+	_, err := checkRealAncestors(filepath.Join(link, "below"))
+	if err == nil {
+		t.Fatal("accepted a path below a symlink")
+	}
+	if want := "linked root or ancestor: " + link; !strings.Contains(err.Error(), want) {
+		t.Fatalf("refusal %q does not contain %q", err, want)
 	}
 }
 

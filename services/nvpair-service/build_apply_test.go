@@ -6,12 +6,31 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"nvpair-shared/buildapply"
 	"nvpair-shared/jsonrpc"
+	"nvpair-shared/servicectl"
 )
+
+// A refused start names its real reason. Only an unfinished build apply points
+// at apply-build; an unreadable journal reports what the filesystem said.
+func TestBuildApplyStartupRefusalNamesTheRealReason(t *testing.T) {
+	unfinished := buildapply.ErrRecoveryNeeded
+	if got := buildApplyStartupRefusal(unfinished); !strings.Contains(got, "unresolved build apply") {
+		t.Fatalf("unfinished build apply refusal = %q", got)
+	}
+
+	cause := errors.New("linked root or ancestor: /home/user/link")
+	unreadable := fmt.Errorf("gate: %w", &servicectl.JournalUnreadableError{Cause: cause})
+	got := buildApplyStartupRefusal(unreadable)
+	if !strings.Contains(got, cause.Error()) || strings.Contains(got, "unresolved build apply") {
+		t.Fatalf("unreadable journal refusal = %q", got)
+	}
+}
 
 func TestBuildApplyStatusStartupAuthority(t *testing.T) {
 	f := newBuildApplyRunFixture(t)

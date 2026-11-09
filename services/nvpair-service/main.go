@@ -173,7 +173,7 @@ func hasFlag(args []string, name string) bool {
 
 func serve(opts *runOptions, stdout io.Writer) int {
 	if err := checkBuildApplyProcessEntry(context.Background()); err != nil {
-		fmt.Fprintln(os.Stderr, "nvpair-service: an unresolved build apply prevents startup; read apply-build status --json")
+		fmt.Fprintln(os.Stderr, "nvpair-service:", buildApplyStartupRefusal(err))
 		return 1
 	}
 	logDir := opts.logDir

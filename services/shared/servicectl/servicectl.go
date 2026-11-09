@@ -49,9 +49,24 @@ func CheckBuildApplyStartup() error {
 	return checkBuildApplyState(state, err)
 }
 
+// JournalUnreadableError reports that the build-apply journal could not be read
+// at all, as when a link sits above it. That is a refusal to start, but it is
+// not an unfinished build apply, so its message carries the reason read from the
+// filesystem. It still satisfies errors.Is for buildapply.ErrRecoveryNeeded, so
+// every caller keeps refusing the start.
+type JournalUnreadableError struct{ Cause error }
+
+func (e *JournalUnreadableError) Error() string {
+	return "the build-apply journal cannot be read, so startup is refused: " + e.Cause.Error()
+}
+
+func (e *JournalUnreadableError) Unwrap() []error {
+	return []error{buildapply.ErrRecoveryNeeded, e.Cause}
+}
+
 func checkBuildApplyState(state buildapply.JournalState, err error) error {
 	if err != nil {
-		return errors.Join(buildapply.ErrRecoveryNeeded, err)
+		return &JournalUnreadableError{Cause: err}
 	}
 	if !state.StartupAllowed() {
 		return buildapply.ErrRecoveryNeeded

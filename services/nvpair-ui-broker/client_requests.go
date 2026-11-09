@@ -26,7 +26,11 @@ import (
 var internalClientMethods = map[string]struct{}{
 	performancewire.MethodRoutingCosts: {},
 	nodepolicy.MethodSetPeerSizing:     {},
-	notifyEngineNotificationsReset:     {},
+	// The scheduler ranking the broker pushes to each proxy. A component
+	// address would otherwise relay it to the proxy, which applies it and
+	// clears its reservations.
+	"node/set-priority":            {},
+	notifyEngineNotificationsReset: {},
 	// Peer relay notifications: only engine-manager relays these, with a
 	// verified caller.
 	policyRelayRequestMethod:           {},
