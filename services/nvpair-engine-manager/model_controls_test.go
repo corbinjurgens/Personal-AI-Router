@@ -1091,7 +1091,7 @@ func TestModelControlsServingDeclarationOwnersRejectBeforeDerivation(t *testing.
 			}
 			ex := llamaModelControlsExecutor(t)
 			st := ex.engines["llamacpp"]
-			preview := ex.previewLaunch(st, settings.Request{Settings: settings.Config{Serving: config}}, func(launchCommand, Runtime) (*llamaServingLaunch, error) {
+			preview := ex.previewLaunch(st, settings.Request{Settings: settings.Config{Serving: config}}, false, func(launchCommand, Runtime) (*llamaServingLaunch, error) {
 				t.Error("invalid declaration reached compiler")
 				return nil, errors.New("unexpected compiler")
 			})

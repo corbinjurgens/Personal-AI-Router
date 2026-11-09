@@ -63,7 +63,7 @@ func (e *Executor) SetPort(ctx context.Context, engine string, port int) (Engine
 		if err != nil {
 			return EngineStatus{}, err
 		}
-		preview := e.previewLaunchLocked(st, settings.Request{Engine: engine, Settings: config, Resolution: "server"})
+		preview := e.previewLaunchLocked(st, settings.Request{Engine: engine, Settings: config, Resolution: "server"}, false)
 		if len(preview.Errors) != 0 || preview.Conflict != nil {
 			return EngineStatus{}, modelLoadError("", "serverPort", "Port change requires a valid native settings preview.")
 		}

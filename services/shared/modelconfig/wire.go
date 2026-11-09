@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"sort"
@@ -771,6 +772,85 @@ func EqualLoads(a, b []ModelLoad) bool {
 		}
 	}
 	return true
+}
+
+// MovedArtifacts returns the path of each file compiled binds with another
+// modified time than baseline binds for the same profile, once per path.
+func MovedArtifacts(baseline, compiled []ModelLoad) []string {
+	var paths []string
+	for _, moved := range movedArtifacts(baseline, compiled) {
+		if !slices.Contains(paths, moved.after.Path) {
+			paths = append(paths, moved.after.Path)
+		}
+	}
+	return paths
+}
+
+// MovedArtifactDiff names each file whose new modified time compiled accepts,
+// so the person approving a preview sees every file it accepts. Like the
+// refusal text, it names the file only by its base name.
+func MovedArtifactDiff(baseline, compiled []ModelLoad) []FieldDiff {
+	var diff []FieldDiff
+	for _, moved := range movedArtifacts(baseline, compiled) {
+		entry := func(binding ArtifactBinding) json.RawMessage {
+			at := binding.MtimeNS
+			if ns, err := strconv.ParseInt(at, 10, 64); err == nil {
+				at = time.Unix(0, ns).UTC().Format(time.RFC3339Nano)
+			}
+			data, _ := json.Marshal(struct {
+				File         string `json:"file"`
+				ModifiedTime string `json:"modifiedTime"`
+			}{filepath.Base(binding.Path), at})
+			return data
+		}
+		diff = append(diff, FieldDiff{Field: "models." + moved.profile + ".fileModifiedTime", Before: entry(moved.before), After: entry(moved.after)})
+	}
+	return diff
+}
+
+type movedArtifact struct {
+	profile       string
+	before, after ArtifactBinding
+}
+
+func movedArtifacts(baseline, compiled []ModelLoad) []movedArtifact {
+	var moved []movedArtifact
+	for _, load := range compiled {
+		if load.Resolved == nil {
+			continue
+		}
+		i := slices.IndexFunc(baseline, func(saved ModelLoad) bool { return saved.ProfileKey == load.ProfileKey })
+		if i < 0 || baseline[i].Resolved == nil {
+			continue
+		}
+		for _, artifact := range load.Resolved.Artifacts {
+			for _, saved := range baseline[i].Resolved.Artifacts {
+				if saved.Path == artifact.Path && saved.MtimeNS != artifact.MtimeNS {
+					moved = append(moved, movedArtifact{load.ProfileKey, saved, artifact})
+				}
+			}
+		}
+	}
+	return moved
+}
+
+// MovedArtifactReason states a refusal for files whose modified times moved while
+// their sizes and samples still match, naming every file the acceptance would
+// bind. Only file names are named: this text also reaches logs. Recalculate is
+// the acceptance an Auto load takes instead of Apply.
+func MovedArtifactReason(paths []string, recalculate bool) string {
+	accept := "Apply these settings with no other edits"
+	if recalculate {
+		accept = "Recalculate this model"
+	}
+	names := make([]string, len(paths))
+	for i, path := range paths {
+		names[i] = filepath.Base(path)
+	}
+	if len(names) == 1 {
+		return fmt.Sprintf("Model file %s has a new modified time. Its size and first and last samples match the saved settings, but the rest of the file is not checked. If this is expected, %s to accept it; otherwise restore the file.", names[0], accept)
+	}
+	return fmt.Sprintf("Model files %s have new modified times. Their sizes and first and last samples match the saved settings, but the rest of each file is not checked. If this is expected, %s to accept them; otherwise restore the files.", strings.Join(names, ", "), accept)
 }
 
 func (p PolicyPatch) Clone() PolicyPatch {

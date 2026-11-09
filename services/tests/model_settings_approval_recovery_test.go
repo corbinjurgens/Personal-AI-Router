@@ -103,11 +103,17 @@ func typedPause(t *testing.T, f *modelBufferProcessFixture) {
 // and a resume, and returns once the restore has refused the old approval.
 func typedRestoreRefused(t *testing.T, f *modelBufferProcessFixture) settings.Snapshot {
 	t.Helper()
+	return typedRestoreRefusedAfter(t, f, func() { typedRebuild(t, f) })
+}
+
+// typedRestoreRefusedAfter is typedRestoreRefused with the paused change given.
+func typedRestoreRefusedAfter(t *testing.T, f *modelBufferProcessFixture, change func()) settings.Snapshot {
+	t.Helper()
 	if !f.snapshot(t).Running {
 		f.resume(t)
 	}
 	typedPause(t, f)
-	typedRebuild(t, f)
+	change()
 	refusals := strings.Count(f.p.output.String(), restoreRefusedLine)
 	f.modelSettingsProcessFixture.rpcOK(t, "node:set-availability", map[string]string{"state": "available"})
 	task1Eventually(t, "restore refused the stale approval", 30*time.Second, func() bool {
