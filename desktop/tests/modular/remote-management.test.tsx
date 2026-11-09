@@ -1290,6 +1290,44 @@ describe('permission controls', () => {
         expect(applySettings.mock.calls[0][0].settings.serving).toEqual(reviewed)
     })
 
+    it('offers a no-edit Apply on a stale typed configuration with no declaration', async () => {
+        usePendingActionsStore.setState({ pending: new Map() })
+        useEngineStatusStore.setState({
+            statusByNode: new Map([
+                ['peer-1', new Map([['llama-cpp', emptyEngineStatus('peer-1', 'llama-cpp')]])]
+            ])
+        })
+        const load = (digest: string) => ({
+            profileKey: 'exact/model',
+            modelId: 'exact/model',
+            requested: { slots: 2 },
+            resolved: { sourceInputDigest: digest }
+        })
+        const reason = 'Native source conflict; obtain a fresh preview before applying.'
+        getSettings.mockResolvedValue({
+            ...settings,
+            running: false,
+            settings: { ...settings.settings, modelLoads: [load('c'.repeat(64))] },
+            serving: { status: 'mismatch', reason }
+        })
+        const reviewed = [load('d'.repeat(64))]
+        previewSettings.mockImplementation(async request => ({
+            settings: { ...request.settings, modelLoads: reviewed },
+            revision: 1,
+            errors: {},
+            restart: false,
+            rebind: false
+        }))
+        await renderSettings()
+        await vi.waitFor(() => expect(button('Apply').disabled).toBe(false))
+        expect(document.body.textContent).toContain(reason)
+        await act(async () => button('Apply').click())
+        expect(previewSettings).toHaveBeenCalledTimes(1)
+        expect(applySettings).toHaveBeenCalledTimes(1)
+        expect(applySettings.mock.calls[0][0].settings.modelLoads).toEqual(reviewed)
+        expect(applySettings.mock.calls[0][0].settings.serving).toBeUndefined()
+    })
+
     it('keeps settings read-only when the peer is unreachable rather than calling it unsupported', async () => {
         capability.mockRejectedValue(new Error('device is offline'))
         await renderSettings()

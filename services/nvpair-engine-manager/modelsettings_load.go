@@ -906,14 +906,21 @@ func typedLlamaIdentityCommand(command launchCommand, rt Runtime) (launchCommand
 	return identity, nil
 }
 
-// typedServingDigestStale reports a saved declaration that restore or start
-// would refuse. An unapproved typed compile replaces the saved digest with the
-// one it computed, so unlike a finite compile it cannot refuse the difference.
-func typedServingDigestStale(rt Runtime, prepared *llamaServingLaunch) bool {
-	if len(rt.ModelLoads) == 0 || rt.Serving == nil {
+// typedApprovalStale reports saved typed settings that restore or start would
+// refuse: the same two comparisons the approved compile makes. An unapproved
+// typed compile replaces the saved values with the ones it computed, so unlike a
+// finite compile it cannot refuse the difference. Saved loads carry their own
+// digests, so a configuration with no declaration still has an approval to lose.
+func typedApprovalStale(rt Runtime, prepared *llamaServingLaunch) bool {
+	if len(rt.ModelLoads) == 0 {
 		return false
 	}
-	return slices.ContainsFunc(rt.Serving.Models, func(model engines.ServingModel) bool {
+	if slices.ContainsFunc(prepared.ModelLoads, func(load modelconfig.ModelLoad) bool {
+		return !reflect.DeepEqual(load.Resolved, rtLoadResolution(rt.ModelLoads, load.ProfileKey))
+	}) {
+		return true
+	}
+	return rt.Serving != nil && slices.ContainsFunc(rt.Serving.Models, func(model engines.ServingModel) bool {
 		return model.ExpectedNativeSourceDigest != prepared.Digest
 	})
 }

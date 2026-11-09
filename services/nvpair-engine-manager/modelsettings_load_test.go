@@ -199,9 +199,11 @@ func declareTwoProfileLoads(t *testing.T, f modelLoadFixture, rt *Runtime) {
 	}
 }
 
-func TestTypedServingDigestStaleComparesEverySavedDigest(t *testing.T) {
-	loads := []modelconfig.ModelLoad{{ProfileKey: "model", ModelID: "model"}}
+func TestTypedApprovalStaleMirrorsTheApprovedCompile(t *testing.T) {
 	current, stale := strings.Repeat("a", 64), strings.Repeat("b", 64)
+	loads := func(digest string) []modelconfig.ModelLoad {
+		return []modelconfig.ModelLoad{{ProfileKey: "model", ModelID: "model", Resolved: &modelconfig.ResolvedLoad{SourceInputDigest: digest, PresetDigest: digest}}}
+	}
 	declared := func(digests ...string) *engines.ServingConfig {
 		config := &engines.ServingConfig{Version: 1}
 		for _, digest := range digests {
@@ -209,22 +211,25 @@ func TestTypedServingDigestStaleComparesEverySavedDigest(t *testing.T) {
 		}
 		return config
 	}
-	prepared := &llamaServingLaunch{Digest: current}
+	prepared := &llamaServingLaunch{Digest: current, ModelLoads: loads(current)}
 	for _, tc := range []struct {
 		name string
 		rt   Runtime
 		want bool
 	}{
-		{"typed without a declaration has no approval", Runtime{ModelLoads: loads}, false},
+		{"typed without a declaration, current loads", Runtime{ModelLoads: loads(current)}, false},
+		{"typed without a declaration, stale loads", Runtime{ModelLoads: loads(stale)}, true},
+		{"typed without a declaration, no saved resolution", Runtime{ModelLoads: []modelconfig.ModelLoad{{ProfileKey: "model", ModelID: "model"}}}, true},
 		{"finite compile refuses the difference itself", Runtime{Serving: declared(stale)}, false},
-		{"approved digest", Runtime{ModelLoads: loads, Serving: declared(current, current)}, false},
-		{"stale digest", Runtime{ModelLoads: loads, Serving: declared(stale, stale)}, true},
-		{"one stale digest", Runtime{ModelLoads: loads, Serving: declared(current, stale)}, true},
-		{"empty digest", Runtime{ModelLoads: loads, Serving: declared("")}, true},
+		{"approved digest", Runtime{ModelLoads: loads(current), Serving: declared(current, current)}, false},
+		{"stale digest", Runtime{ModelLoads: loads(current), Serving: declared(stale, stale)}, true},
+		{"one stale digest", Runtime{ModelLoads: loads(current), Serving: declared(current, stale)}, true},
+		{"empty digest", Runtime{ModelLoads: loads(current), Serving: declared("")}, true},
+		{"stale loads with an approved digest", Runtime{ModelLoads: loads(stale), Serving: declared(current)}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := typedServingDigestStale(tc.rt, prepared); got != tc.want {
-				t.Fatalf("typedServingDigestStale = %t, want %t", got, tc.want)
+			if got := typedApprovalStale(tc.rt, prepared); got != tc.want {
+				t.Fatalf("typedApprovalStale = %t, want %t", got, tc.want)
 			}
 		})
 	}

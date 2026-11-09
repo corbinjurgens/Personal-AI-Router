@@ -920,8 +920,9 @@ from the target's own model loads, and the request may send back only those
 loads or that compile's exact result, which is what the preview returned. Apply
 requires the exact reviewed digest/bindings, prepares an immutable small snapshot before stopping a process
 or saving settings, and rejects changed inputs. Apply and startup restore/start
-still refuse a saved digest that the inputs they are about to launch did not
-produce, and the settings readback reports it as a mismatch. Snapshots
+still refuse saved typed loads or a saved digest that the inputs they are about
+to launch did not produce, and the settings readback reports either as a
+mismatch, whether or not the configuration has a declaration. Snapshots
 reference absolute existing source model paths, preserving HF symlinks and
 requiring all selected shards; model files are neither copied nor fully hashed.
 Start re-reads source bytes, resolved targets, stat and bounded samples directly
