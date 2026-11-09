@@ -270,6 +270,84 @@ func TestModelSettingsReapprovalHeldByPause(t *testing.T) {
 	f.resume(t)
 }
 
+// C2: the record outlives the staleness. Inputs back at the approved state leave
+// nothing for an apply to replace, so an unrelated edit does not start the engine;
+// a later staleness on the same stopped engine is replaced and does.
+func TestModelSettingsRecoveredInputsThenUnrelatedEdit(t *testing.T) {
+	f := newModelBufferProcessFixture(t)
+	original, err := os.ReadFile(f.library)
+	if err != nil {
+		t.Fatal(err)
+	}
+	typedRestoreRefused(t, f)
+	if err := os.WriteFile(f.library, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var recovered settings.Snapshot
+	task1Eventually(t, "staleness gone with the inputs", 30*time.Second, func() bool {
+		recovered = f.snapshot(t)
+		return recovered.Serving != nil && recovered.Serving.Status != "mismatch"
+	})
+	_, edited := typedClientEdit(t, f, "recovered-unrelated", "", func(c *settings.Config) { c.ProxyPort = freePort(t) })
+	if typedSourceDigest(t, edited.Settings) != typedSourceDigest(t, recovered.Settings) {
+		t.Fatal("the unrelated edit moved the digest")
+	}
+	typedAssertStaysStopped(t, f, "unrelated edit after the inputs recovered")
+
+	typedRebuild(t, f)
+	task1Eventually(t, "stale again", 30*time.Second, func() bool {
+		state := f.snapshot(t)
+		return state.Serving != nil && state.Serving.Status == "mismatch"
+	})
+	typedClientEdit(t, f, "recovered-reapprove", "", typedNoEdit)
+	typedAssertRunningSoon(t, f, "engine started by replacing the later stale approval")
+}
+
+// typedKillEngine kills the fixture engine as a crash would. Windows only, as is
+// the fixture that reaches it.
+func typedKillEngine(t *testing.T, f *modelBufferProcessFixture) {
+	t.Helper()
+	read := func(script string) string {
+		out, err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script).Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	pid, err := strconv.Atoi(read(fmt.Sprintf("(Get-NetTCPConnection -LocalPort %d -State Listen | Select-Object -First 1).OwningProcess", f.targetPort)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if image := read(fmt.Sprintf("(Get-Process -Id %d).Path", pid)); pid == os.Getpid() || !strings.EqualFold(image, f.image) {
+		t.Fatalf("listener %d is not the fixture engine: %s", pid, image)
+	}
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// V44 counts a crash relaunch: it goes through the same restore as a startup.
+func TestModelSettingsCrashRelaunchRefusalCounts(t *testing.T) {
+	f := newModelBufferProcessFixture(t)
+	f.resume(t)
+	typedRebuild(t, f)
+	task1Eventually(t, "stale readback while running", 30*time.Second, func() bool {
+		state := f.snapshot(t)
+		return state.Serving != nil && state.Serving.Status == "mismatch"
+	})
+	typedKillEngine(t, f)
+	task1Eventually(t, "relaunch refused the stale approval", 30*time.Second, func() bool {
+		return strings.Contains(f.p.output.String(), "unexpected-exit restore failed")
+	})
+	typedAssertStaysStopped(t, f, "relaunch refused")
+	typedClientEdit(t, f, "crash-reapprove", "", typedNoEdit)
+	typedAssertRunningSoon(t, f, "engine started by the reviewed apply")
+}
+
 // V44, typed, negatives: an engine stopped for any reason other than a refused
 // restore keeps today's behaviour, and a refused wake does not count.
 func TestModelSettingsApplyDoesNotStartOtherStoppedEngine(t *testing.T) {
