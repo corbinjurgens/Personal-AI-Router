@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -71,7 +72,7 @@ func listenFixtureServicePort(t *testing.T) net.Listener {
 		if err != nil {
 			fixtureServicePortClaims.Delete(port)
 		}
-		if errors.Is(err, syscall.EADDRINUSE) {
+		if fixtureAddressInUse(err) {
 			continue
 		}
 		if err != nil {
@@ -84,6 +85,15 @@ func listenFixtureServicePort(t *testing.T) net.Listener {
 	}
 	t.Fatal("could not reserve a fixture service port outside the ephemeral range")
 	return nil
+}
+
+// fixtureAddressInUse reports a bind refused because the address is taken,
+// including the occupancy that listenFixtureServiceCandidate reports. On
+// Windows a refused bind returns the native WSAEADDRINUSE, which is not Go's
+// syscall.EADDRINUSE and which Errno.Is does not map to it.
+func fixtureAddressInUse(err error) bool {
+	const wsaeaddrinuse syscall.Errno = 10048
+	return errors.Is(err, syscall.EADDRINUSE) || runtime.GOOS == "windows" && errors.Is(err, wsaeaddrinuse)
 }
 
 func listenFixtureServiceCandidate(port int) (net.Listener, error) {
@@ -365,7 +375,34 @@ func TestFixtureServiceCandidateRejectsOccupiedAddressScopes(t *testing.T) {
 			if candidate != nil || !errors.Is(err, syscall.EADDRINUSE) {
 				t.Fatalf("occupied %s port %d: listener=%v error=%v, want no listener and address-in-use", tc.name, port, candidate, err)
 			}
+			if !fixtureAddressInUse(err) {
+				t.Fatalf("occupied %s port %d: %v is not recognized as address-in-use", tc.name, port, err)
+			}
 		})
+	}
+}
+
+// A candidate taken after the occupancy probe fails in the allocation bind
+// itself, with the platform's native error, which must continue the search.
+func TestFixtureAddressInUseRecognizesNativeBindError(t *testing.T) {
+	occupant := listenFixtureLoopback(t)
+	t.Cleanup(func() {
+		if err := occupant.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	ln, err := allocateFixtureListener(net.Listen, occupant.Addr().String())
+	if ln != nil {
+		if closeErr := ln.Close(); closeErr != nil {
+			t.Error(closeErr)
+		}
+		t.Fatalf("second bind of %s succeeded", occupant.Addr())
+	}
+	if !fixtureAddressInUse(err) {
+		t.Fatalf("native bind error %v is not recognized as address-in-use", err)
+	}
+	if fixtureAddressInUse(errors.New("unrelated listen failure")) {
+		t.Fatal("an unrelated error was recognized as address-in-use")
 	}
 }
 

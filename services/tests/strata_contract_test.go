@@ -120,7 +120,7 @@ func strataContractRunRuntime(path string) error {
 	if err != nil {
 		failure, encodeErr := json.Marshal(struct {
 			BindCollision bool `json:"bindCollision"`
-		}{strataContractAddressInUse(err)})
+		}{fixtureAddressInUse(err)})
 		if encodeErr != nil {
 			return encodeErr
 		}
@@ -945,18 +945,6 @@ func strataContractConnectionRefused(err error) bool {
 		return errno == wsaeconnrefused
 	}
 	return errno == syscall.ECONNREFUSED
-}
-
-func strataContractAddressInUse(err error) bool {
-	var errno syscall.Errno
-	if !errors.As(err, &errno) {
-		return false
-	}
-	if runtime.GOOS == "windows" {
-		const wsaeaddrinuse syscall.Errno = 10048
-		return errno == wsaeaddrinuse
-	}
-	return errno == syscall.EADDRINUSE
 }
 
 func strataContractWaitClosed(t *testing.T, port int) {
