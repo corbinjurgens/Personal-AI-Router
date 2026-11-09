@@ -343,9 +343,13 @@ func TestModelSettingsCrashRelaunchRefusalCounts(t *testing.T) {
 	task1Eventually(t, "relaunch refused the stale approval", 30*time.Second, func() bool {
 		return strings.Contains(f.p.output.String(), "unexpected-exit restore failed")
 	})
-	typedAssertStaysStopped(t, f, "relaunch refused")
+	// The relaunch tries again 30 s after this refusal and would start a re-approved
+	// engine itself, so only a start before then shows that the apply did it.
+	refused := time.Now()
 	typedClientEdit(t, f, "crash-reapprove", "", typedNoEdit)
-	typedAssertRunningSoon(t, f, "engine started by the reviewed apply")
+	task1Eventually(t, "engine started by the reviewed apply, before the next relaunch attempt", time.Until(refused.Add(25*time.Second)), func() bool {
+		return f.snapshot(t).Running
+	})
 }
 
 // V44, typed, negatives: an engine stopped for any reason other than a refused
