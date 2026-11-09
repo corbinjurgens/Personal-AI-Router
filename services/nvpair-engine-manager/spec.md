@@ -915,11 +915,14 @@ Preview performs no probe, spawn, load, persistence or snapshot creation. It
 reads bounded source/configuration data and model samples only, returning a
 native-source approval digest and candidate local bindings. The broker clears
 the digest on a client preview, so unchanged settings can be re-approved after a
-build changes compiled launch defaults. Apply requires the exact reviewed
-digest/bindings, prepares an immutable small snapshot before stopping a process
+build changes compiled launch defaults. The broker compiles every plain request
+from the target's own model loads, and the request may send back only those
+loads or that compile's exact result, which is what the preview returned. Apply
+requires the exact reviewed digest/bindings, prepares an immutable small snapshot before stopping a process
 or saving settings, and rejects changed inputs. Apply and startup restore/start
-still refuse a saved digest that the inputs they are about to launch did not
-produce, and the settings readback reports it as a mismatch. Snapshots
+still refuse saved typed loads or a saved digest that the inputs they are about
+to launch did not produce, and the settings readback reports either as a
+mismatch, whether or not the configuration has a declaration. Snapshots
 reference absolute existing source model paths, preserving HF symlinks and
 requiring all selected shards; model files are neither copied nor fully hashed.
 Start re-reads source bytes, resolved targets, stat and bounded samples directly
@@ -2245,7 +2248,10 @@ notification restores installed engines at startup and Resume. `engine:wake`
 repairs a stopped installed engine, subject to pause and Halt. Installation starts
 an engine only while available; install requests have no `start` option. Crash
 relaunch follows the same availability guards. Settings restarts only an engine
-that settings stopped (`resume`), or the running engine it changed.
+that settings stopped (`resume`), or the running engine it changed. It also starts
+an engine whose last startup restore refused the stale approval the apply replaced,
+unless the node is paused or the engine was since stopped; that record is in memory
+only. A refused wake does not count: the next request retries it.
 
 `engine-state.json` retains allocated ports and process-stop evidence. Its old
 `engines` and `offBy` fields are ignored on decode and omitted on the next write.

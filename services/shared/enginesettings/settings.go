@@ -133,6 +133,8 @@ func (r Request) ValidateModelChange(baseline Config, applying bool) error {
 	// Full settings is a baseline echo for model loads. Only selected portable
 	// modelChange edits can alter them, including on ordinary port/launch writes.
 	// This rejects new/replaced caller resolutions, paths, builds and allocations.
+	// A plain settings request compiles from the baseline and checks what it sent
+	// with ValidateLoadEcho instead, because a preview returns recompiled loads.
 	if !modelconfig.EqualLoads(r.Settings.ModelLoads, baseline.ModelLoads) {
 		return fmt.Errorf("settings.modelLoads: target-owned baseline required; use modelChange for portable edits")
 	}
@@ -149,6 +151,19 @@ func (r Request) ValidateModelChange(baseline Config, applying bool) error {
 		return fmt.Errorf("modelChange.previewDigest: reviewed preview required")
 	}
 	return nil
+}
+
+// ValidateLoadEcho checks the model loads of a plain settings request after the
+// target compiled that request from its own baseline. The request may send back
+// only the baseline or that compile's exact result, which is what a preview
+// returned. Either way the caller chose nothing: every other value is refused,
+// including new or replaced resolutions, paths, builds and allocations, and a
+// preview that no longer matches what the target would compile now.
+func (r Request) ValidateLoadEcho(baseline, compiled []modelconfig.ModelLoad) error {
+	if modelconfig.EqualLoads(r.Settings.ModelLoads, baseline) || modelconfig.EqualLoads(r.Settings.ModelLoads, compiled) {
+		return nil
+	}
+	return fmt.Errorf("settings.modelLoads: not the saved or freshly previewed loads; preview again, or use modelChange for portable edits")
 }
 
 // Validate checks shape/portable semantics and the COMPLETE request budget on
@@ -182,8 +197,8 @@ func (r Request) Validate() error {
 }
 
 // DecodeRequest is the public untrusted settings boundary. It does not authorize
-// effects. An unchanged Config may echo existing resolved readback; baseline
-// comparison in ValidateModelChange must reject any supplied replacement.
+// effects. A Config may echo existing resolved readback; ValidateModelChange or
+// ValidateLoadEcho must reject any supplied replacement against fresh target state.
 // Internal launch/configure traffic and journal readback use their own types.
 func DecodeRequest(data []byte) (Request, error) {
 	var r Request

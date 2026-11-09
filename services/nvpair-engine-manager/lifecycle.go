@@ -148,11 +148,13 @@ func (e *Executor) doStart(ctx context.Context, st *engineState, engine string, 
 	st.withdrawOwnerKnowledgeLocked()
 	st.mu.Unlock()
 	defer func() {
+		st.mu.Lock()
 		if err != nil {
-			st.mu.Lock()
 			st.withdrawOwnerKnowledgeLocked()
-			st.mu.Unlock()
+		} else {
+			st.restoreApprovalRefused = false
 		}
+		st.mu.Unlock()
 	}()
 	ctx, finish := e.startContext(ctx, st)
 	cleanupCtx := context.Background()

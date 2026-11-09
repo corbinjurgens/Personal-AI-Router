@@ -229,6 +229,9 @@ func (e *Executor) Uninstall(ctx context.Context, engine string) (err error) {
 		e.reporter.report(serviceError{ID: uninstallFailedID(engine), Message: werr.Error(), Severity: "error", Action: "none", EngineType: engine, Operation: "uninstall"})
 		return werr
 	}
+	st.mu.Lock()
+	st.restoreApprovalRefused = false
+	st.mu.Unlock()
 
 	vars := st.pathVars()
 	args, err := resolveArgs(un.Run, vars)

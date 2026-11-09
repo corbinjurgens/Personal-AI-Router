@@ -570,7 +570,7 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 				options, resolved, err = modelAutoCompileFrozen(load.ProfileKey, load.Requested, load.Resolved, layerCount, artifacts, buildID)
 			} else {
 				if approved {
-					return nil, modelLoadError(load.ProfileKey, "auto", "Accepted Auto resolution missing; explicitly Recalculate.")
+					return nil, staleApproval(modelLoadError(load.ProfileKey, "auto", "Accepted Auto resolution missing; explicitly Recalculate."))
 				}
 				op, _ := ctx.Value(modelAutoOperationKey{}).(modelAutoOperation)
 				if op.Memory == nil {
@@ -674,7 +674,7 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 		nativeSource = current
 		if modelAutoNativeSource(load.Resolved) != current {
 			if approved || rtLoadResolution(assertedLoads, load.ProfileKey) != nil && operation.RecalculateModel != load.ProfileKey {
-				return nil, modelLoadError(load.ProfileKey, "nativeBuildId", "Reviewed native source changed; explicitly Recalculate.")
+				return nil, staleApproval(modelLoadError(load.ProfileKey, "nativeBuildId", "Reviewed native source changed; explicitly Recalculate."))
 			}
 			conversion, memory, ok := modelAutoReviewParts(load.Resolved.ReviewedInputID)
 			if !ok {
@@ -746,7 +746,7 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 		for i := range result.Config.Models {
 			expected := rt.Serving.Models[i].ExpectedNativeSourceDigest
 			if approved && expected != result.Digest {
-				return nil, modelLoadError(result.Config.Models[i].ModelID, "serving", "Declaration requires a fresh typed preview.")
+				return nil, staleApproval(modelLoadError(result.Config.Models[i].ModelID, "serving", "Declaration requires a fresh typed preview."))
 			}
 			result.Config.Models[i].ExpectedNativeSourceDigest = result.Digest
 		}
@@ -758,7 +758,7 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 		loads[i].Resolved.SourceInputDigest = result.Digest
 		loads[i].Resolved.PresetDigest = presetDigest
 		if approved && !reflect.DeepEqual(loads[i].Resolved, rtLoadResolution(assertedLoads, loads[i].ProfileKey)) {
-			return nil, modelLoadError(loads[i].ProfileKey, "resolved", "Typed inputs changed; obtain a fresh preview before starting.")
+			return nil, staleApproval(modelLoadError(loads[i].ProfileKey, "resolved", "Typed inputs changed; obtain a fresh preview before starting."))
 		}
 	}
 	// Re-resolve through Task 5 after facts and samples. Do not trust the first
@@ -904,6 +904,25 @@ func typedLlamaIdentityCommand(command launchCommand, rt Runtime) (launchCommand
 		i = end
 	}
 	return identity, nil
+}
+
+// typedApprovalStale reports saved typed settings that restore or start would
+// refuse: the same two comparisons the approved compile makes. An unapproved
+// typed compile replaces the saved values with the ones it computed, so unlike a
+// finite compile it cannot refuse the difference. Saved loads carry their own
+// digests, so a configuration with no declaration still has an approval to lose.
+func typedApprovalStale(rt Runtime, prepared *llamaServingLaunch) bool {
+	if len(rt.ModelLoads) == 0 {
+		return false
+	}
+	if slices.ContainsFunc(prepared.ModelLoads, func(load modelconfig.ModelLoad) bool {
+		return !reflect.DeepEqual(load.Resolved, rtLoadResolution(rt.ModelLoads, load.ProfileKey))
+	}) {
+		return true
+	}
+	return rt.Serving != nil && slices.ContainsFunc(rt.Serving.Models, func(model engines.ServingModel) bool {
+		return model.ExpectedNativeSourceDigest != prepared.Digest
+	})
 }
 
 func rtLoadResolution(loads []modelconfig.ModelLoad, profileKey string) *modelconfig.ResolvedLoad {

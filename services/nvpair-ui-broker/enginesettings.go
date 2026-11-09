@@ -441,15 +441,26 @@ func (b *Broker) previewSettingsLocked(ctx context.Context, p settings.Request) 
 }
 
 func (b *Broker) previewSettingsSnapshotLocked(ctx context.Context, p settings.Request, current settings.Snapshot) (settings.Preview, error) {
-	if err := p.ValidateModelChange(current.Settings, false); err != nil {
+	// The worker compiles from the target's own loads, so nothing the caller sent
+	// can reach a resolution. What it sent is checked against the result below: a
+	// client applies the settings its preview returned, whose loads carry the
+	// digests and build that this compile recomputes.
+	compile := p
+	compile.Settings.ModelLoads = modelconfig.CloneLoads(current.Settings.ModelLoads)
+	if err := compile.ValidateModelChange(current.Settings, false); err != nil {
 		return settings.Preview{}, &invalidParamsError{err: err}
 	}
 	if current.Revision != p.ExpectedRevision {
 		return settings.Preview{}, fmt.Errorf("settings changed on this device; reload before applying")
 	}
 	var preview settings.Preview
-	if err := b.settingsWorkerCall(ctx, "engine:preview-launch", settings.WorkerRequest[settings.Request]{Request: p}, &preview); err != nil {
+	if err := b.settingsWorkerCall(ctx, "engine:preview-launch", settings.WorkerRequest[settings.Request]{Request: compile}, &preview); err != nil {
 		return preview, err
+	}
+	if len(preview.Errors) == 0 && preview.Conflict == nil {
+		if err := p.ValidateLoadEcho(current.Settings.ModelLoads, preview.Settings.ModelLoads); err != nil {
+			return settings.Preview{}, &invalidParamsError{err: err}
+		}
 	}
 	preview.Revision = current.Revision
 	preview.Rebind = preview.Settings.ProxyPort != current.EffectiveProxyPort

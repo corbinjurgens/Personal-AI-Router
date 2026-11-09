@@ -93,6 +93,7 @@ func (e *Executor) sleepContext(parent context.Context, engine string) (err erro
 	// fence also catches a registration racing this cancellation sweep.
 	veto := &localVetoError{code: codeLocalVeto, reason: nodePausedVeto}
 	st.mu.Lock()
+	st.restoreApprovalRefused = false
 	if st.startCancel != nil {
 		st.startCancel(veto)
 	}
