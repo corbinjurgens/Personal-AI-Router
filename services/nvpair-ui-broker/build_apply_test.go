@@ -131,15 +131,67 @@ func TestBuildApplyImpactDoesNotInitializePolicy(t *testing.T) {
 	}
 }
 
-func TestBuildApplyImpactBusyOwnerDoesNotWaitOrInitialize(t *testing.T) {
+func TestBuildApplyImpactBusyOwnerWaitsBoundThenRefusesWithoutInitializing(t *testing.T) {
 	b := &Broker{}
 	b.engineConfigMu.Lock()
 	defer b.engineConfigMu.Unlock()
+	start := time.Now()
 	if _, ok := b.cachedBuildApplyImpact(); ok {
 		t.Fatal("busy settings owner produced a capture")
 	}
+	if elapsed := time.Since(start); elapsed < buildApplyReadContentionBudget {
+		t.Fatalf("busy settings owner refused after %v, before the %v contention bound", elapsed, buildApplyReadContentionBudget)
+	}
 	if b.nodePolicy.ready || b.engineSettingsLoaded {
 		t.Fatal("read initialized an owner while busy")
+	}
+}
+
+func TestBuildApplyImpactCapturesAfterBriefOwnerContention(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mu   func(*Broker) *sync.Mutex
+	}{
+		{"settings", func(b *Broker) *sync.Mutex { return &b.engineConfigMu }},
+		{"workers", func(b *Broker) *sync.Mutex { return &b.workersMu }},
+		{"policy", func(b *Broker) *sync.Mutex { return &b.nodePolicyRuntime().mu }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := &Broker{}
+			r := b.nodePolicyRuntime()
+			r.mu.Lock()
+			r.current.Revision = "12"
+			r.mu.Unlock()
+			mu := tc.mu(b)
+			mu.Lock()
+			released := make(chan struct{})
+			go func() {
+				<-time.After(buildApplyReadContentionBudget / 5)
+				mu.Unlock()
+				close(released)
+			}()
+			impact, ok := b.cachedBuildApplyImpact()
+			<-released
+			if !ok || !impact.Fences.PolicyRevision.Known || *impact.Fences.PolicyRevision.Value != "12" {
+				t.Fatalf("capture after brief %s contention = %+v, available = %v", tc.name, impact, ok)
+			}
+		})
+	}
+}
+
+func TestBuildApplyOwnerReadRefusesBusyOwnerWhenContextEnds(t *testing.T) {
+	b := &Broker{}
+	b.nodePolicyRuntime()
+	b.engineConfigMu.Lock()
+	defer b.engineConfigMu.Unlock()
+	ctx, cancel := context.WithTimeout(t.Context(), buildApplyReadContentionBudget/10)
+	defer cancel()
+	start := time.Now()
+	if _, ok := b.readCachedBuildApplyOwners(ctx); ok {
+		t.Fatal("busy settings owner produced a capture")
+	}
+	if elapsed := time.Since(start); elapsed >= buildApplyReadContentionBudget {
+		t.Fatalf("ended context still waited %v, the full contention bound", elapsed)
 	}
 }
 
@@ -594,7 +646,7 @@ func TestBuildApplyImpactChangedOwnerFencesWithdrawDependentFacts(t *testing.T) 
 		if calls == 2 {
 			b.nodePolicy.runningGeneration++
 		}
-		return b.readCachedBuildApplyOwners()
+		return b.readCachedBuildApplyOwners(t.Context())
 	})
 	if !ok || impact.Complete || impact.Engines.Known || impact.ExpectedSettings.PolicyDigest.Known || len(impact.Refusals) != 1 || impact.Refusals[0].Code != "changed" {
 		t.Fatalf("changed capture = %+v", impact)
@@ -784,7 +836,7 @@ func TestBuildApplyImpactOperationReplacementIsFenced(t *testing.T) {
 			delete(b.activeSettings, "old")
 			b.activeSettings["new"] = activeSettingsOperation{Engine: "llamacpp"}
 		}
-		return b.readCachedBuildApplyOwners()
+		return b.readCachedBuildApplyOwners(t.Context())
 	})
 	if !ok || impact.Complete || impact.Engines.Known || len(impact.Refusals) != 1 || impact.Refusals[0].Code != "changed" {
 		t.Fatalf("replaced operation was not fenced: %+v", impact)
@@ -1464,7 +1516,7 @@ func TestBuildApplyImpactFencesReplacementOfSettingsMaintenanceLease(t *testing.
 			}
 			lease = next
 		}
-		return b.readCachedBuildApplyOwners()
+		return b.readCachedBuildApplyOwners(t.Context())
 	})
 	if !ok || impact.Complete || len(impact.Refusals) != 1 || impact.Refusals[0].Code != "changed" {
 		t.Fatalf("replaced maintenance lease = %+v, available=%v", impact, ok)
