@@ -603,6 +603,61 @@ func TestSettingsPreviewReapprovesStaleNativeDigest(t *testing.T) {
 	}
 }
 
+// An apply must carry the native source digest the preview returned. Apply
+// previews internally and would persist that digest, so an empty one would
+// otherwise approve source inputs the caller never reviewed.
+func TestSettingsApplyRequiresReviewedNativeDigest(t *testing.T) {
+	stale, current := strings.Repeat("c", 64), strings.Repeat("d", 64)
+	saved := brokerServingFixture()
+	saved.Models[0].ExpectedNativeSourceDigest = stale
+	h := newServingSettingsHarness(t, "llamacpp", saved)
+	h.nativeDigest.Store(&current)
+
+	unreviewed := h.request(t)
+	unreviewed.Settings.Serving.Models[0].ExpectedNativeSourceDigest = ""
+	applies := h.applies.Load()
+	if _, err := h.b.applyEngineSettings(context.Background(), unreviewed, ""); err == nil {
+		t.Fatal("apply with an empty digest was accepted")
+	}
+	if h.applies.Load() != applies {
+		t.Fatal("apply with an empty digest reached the worker")
+	}
+	after, err := h.b.getEngineSettings(context.Background(), settings.Request{Engine: "llamacpp"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := after.Settings.Serving.Models[0].ExpectedNativeSourceDigest; got != stale {
+		t.Fatalf("saved digest = %q, want the refused apply to leave %q", got, stale)
+	}
+
+	// A first-time native configuration is reviewed by its preview, and the
+	// digest that preview returns is what the apply carries.
+	fresh := newServingSettingsHarness(t, "llamacpp", nil)
+	fresh.nativeDigest.Store(&current)
+	first := fresh.request(t)
+	first.Settings.Serving = brokerServingFixture()
+	preview, err := fresh.b.previewEngineSettings(context.Background(), first, "")
+	if err != nil || len(preview.Errors) != 0 {
+		t.Fatalf("first preview errors=%v err=%v", preview.Errors, err)
+	}
+	first.Settings = preview.Settings
+	first.ExpectedRevision = preview.Revision
+	receipt, err := fresh.b.applyEngineSettings(context.Background(), first, "")
+	if err != nil || receipt.Phase != "succeeded" {
+		t.Fatalf("first-time apply of the reviewed digest = %q: %v", receipt.Phase, err)
+	}
+
+	// Without a compiled native source the preview returns no digest, so an
+	// apply that changes other settings still needs no review.
+	plain := newServingSettingsHarness(t, "llamacpp", brokerServingFixture())
+	edit := plain.request(t)
+	edit.Settings.LaunchText += " --non-native-edit"
+	receipt, err = plain.b.applyEngineSettings(context.Background(), edit, "")
+	if err != nil || receipt.Phase != "succeeded" {
+		t.Fatalf("non-native apply = %q: %v", receipt.Phase, err)
+	}
+}
+
 func TestSettingsApplyOfUnchangedSettings(t *testing.T) {
 	test := func(name, status string, wantApplies int32) {
 		t.Run(name, func(t *testing.T) {

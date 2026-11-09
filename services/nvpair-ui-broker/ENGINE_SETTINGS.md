@@ -291,6 +291,12 @@ startup subcommand. The argument grammar is
 change component configuration or runtime. A snapshot read may persist the
 initial revision baseline or reconcile an external component change.
 
+An apply of a configuration that compiles to native serving must carry the
+native source digest its preview returned. The apply's internal preview compiles
+that same digest, so a request without one is refused instead of approving
+source inputs no caller reviewed. Configurations with no compiled native source
+carry no digest and are unaffected.
+
 `unverified` means this manager started the running engine with the saved value,
 but its containment has not verified every live member: a member could not be
 capped (it is terminated, and the status returns to `applied` after the next clean

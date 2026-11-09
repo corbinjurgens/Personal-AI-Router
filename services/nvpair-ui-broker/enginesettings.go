@@ -680,6 +680,24 @@ func withoutNativeSourceDigest(config *engines.ServingConfig) *engines.ServingCo
 	return cleared
 }
 
+// unreviewedNativeSourceDigest reports whether the preview approved a native
+// source digest the apply request did not carry. A nonempty digest that no
+// longer matches is already refused by the worker preview.
+func unreviewedNativeSourceDigest(request, approved *engines.ServingConfig) bool {
+	if approved == nil {
+		return false
+	}
+	for i, model := range approved.Models {
+		if model.ExpectedNativeSourceDigest == "" {
+			continue
+		}
+		if request == nil || i >= len(request.Models) || request.Models[i].ExpectedNativeSourceDigest == "" {
+			return true
+		}
+	}
+	return false
+}
+
 // applyEngineSettings accepts a change into the journal and then converges the
 // engine onto it. RequestID makes it idempotent: replaying one returns the
 // original receipt, and reusing it for different settings is refused.
@@ -764,6 +782,16 @@ func (b *Broker) applyEngineSettings(ctx context.Context, p settings.Request, ca
 	if len(preview.Errors) > 0 || preview.Conflict != nil {
 		r.mu.Unlock()
 		return settingsReceipt{}, fmt.Errorf("resolve settings errors and port conflicts before applying")
+	}
+	// A client preview is the review of a native source: it returns the
+	// approval digest an apply must send back, and the worker refuses one that
+	// no longer matches. Apply compiles that digest in its own preview and
+	// persists it, so accepting an empty one here would approve source inputs
+	// the caller never saw. Configurations without a compiled native source
+	// produce no digest and are unaffected.
+	if unreviewedNativeSourceDigest(p.Settings.Serving, preview.Settings.Serving) {
+		r.mu.Unlock()
+		return settingsReceipt{}, &invalidParamsError{err: fmt.Errorf("native source review is required; preview these settings and apply the digest the preview returns")}
 	}
 	previous := b.engineSettings[p.Engine]
 	record.Model = nil

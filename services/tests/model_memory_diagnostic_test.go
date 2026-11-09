@@ -600,6 +600,10 @@ func (f *modelDiagnosticProcessFixture) availableResident(t *testing.T) nodepoli
 	if len(preview.Errors) != 0 || preview.Conflict != nil {
 		t.Fatalf("resident declaration preview: errors=%v conflict=%v", preview.Errors, preview.Conflict)
 	}
+	// Apply commits the normalized settings the preview returned, including the
+	// native source digest that reviewed this declaration.
+	request.Settings = preview.Settings.Clone()
+	request.ExpectedRevision = preview.Revision
 	f.call(t, "engine:apply-settings", request, nil)
 	f.settled(t, request.RequestID, "succeeded")
 	// Bootstrap the same synthetic strict-qualification recipe as the NE/SR
