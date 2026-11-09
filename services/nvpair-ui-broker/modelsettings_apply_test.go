@@ -216,6 +216,9 @@ func (h *modelSettingsHarness) answer(method string, raw json.RawMessage) (any, 
 // the build, as a rebuilt engine does.
 func TestPlainSettingsCompileFromTargetLoadsAndEchoOnlyTheResult(t *testing.T) {
 	h := newModelSettingsHarness(t)
+	// A plain preview checks the fixture's ports against this machine; a model
+	// change, which the harness's other tests send, does not.
+	useSyntheticBrokerPortChecks(t, h.b)
 	if receipt, err := h.b.applyEngineSettings(context.Background(), h.review(t, h.request(t, true), ""), ""); err != nil || receipt.Phase != "succeeded" {
 		t.Fatalf("typed setup = %+v, %v", receipt, err)
 	}
