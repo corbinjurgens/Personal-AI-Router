@@ -1301,7 +1301,17 @@ describe('permission controls', () => {
             profileKey: 'exact/model',
             modelId: 'exact/model',
             requested: { slots: 2 },
-            resolved: { sourceInputDigest: digest }
+            resolved: {
+                perSlotContext: 4096,
+                totalContext: 8192,
+                slots: 2,
+                gpu: { mode: 'cpu' as const },
+                options: { slots: 2 },
+                artifacts: [],
+                nativeBuildId: 'build',
+                sourceInputDigest: digest,
+                presetDigest: 'e'.repeat(64)
+            }
         })
         const reason = 'Native source conflict; obtain a fresh preview before applying.'
         getSettings.mockResolvedValue({
