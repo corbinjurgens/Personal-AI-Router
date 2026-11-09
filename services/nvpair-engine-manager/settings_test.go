@@ -236,6 +236,43 @@ func TestServingDriftClearsOnlyAfterSuccessfulApply(t *testing.T) {
 	}
 }
 
+// The broker forwards unchanged settings while the readback is a mismatch. That
+// apply must not restart the engine, and clearing the latch must not hide a
+// launch that really differs.
+func TestServingDriftApplyOfUnchangedSettings(t *testing.T) {
+	f := ownedServingFixture(t)
+	st := settingsState(t, f.ex)
+	st.mu.Lock()
+	proc := st.proc
+	st.plat.Runtime.servingDrift = "synthetic input drift"
+	st.mu.Unlock()
+	request := settingsRequest(t, f.ex)
+	apply := func() engines.ServingReadback {
+		t.Helper()
+		result, err := f.ex.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: request.Settings}, func() error { return nil })
+		if err != nil {
+			t.Fatal(err)
+		}
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		if st.proc != proc {
+			t.Fatal("apply of unchanged settings restarted the engine")
+		}
+		return *result.ServingReadback
+	}
+	if readback := apply(); readback.Status == "mismatch" {
+		t.Fatalf("readback after the latch cleared = %+v", readback)
+	}
+	st.mu.Lock()
+	launch := *st.plat.Runtime.servingLaunch
+	launch.Digest = strings.Repeat("e", 64)
+	st.plat.Runtime.servingLaunch = &launch
+	st.mu.Unlock()
+	if readback := apply(); readback.Status != "mismatch" {
+		t.Fatalf("readback with a differing launch = %+v, want a mismatch", readback)
+	}
+}
+
 // graftPlatform points the fake engine at a bundled platform's runtime.
 //
 // Both fields move together: a runtime referencing {models_dir} — llama.cpp's

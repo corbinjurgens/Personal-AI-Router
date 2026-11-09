@@ -777,7 +777,10 @@ func (b *Broker) applyEngineSettings(ctx context.Context, p settings.Request, ca
 			b.engineSettings[p.Engine] = previous
 		}
 	}
-	if preview.Settings.Equal(record.Snapshot.Settings) && record.Snapshot.Phase != "failed" && record.Snapshot.EffectiveProxyPort == preview.Settings.ProxyPort {
+	// A mismatch can be latched in the worker, where only an apply clears it, so
+	// unchanged settings are not a no-op while the readback reports one.
+	mismatch := record.Snapshot.Serving != nil && record.Snapshot.Serving.Status == "mismatch"
+	if preview.Settings.Equal(record.Snapshot.Settings) && record.Snapshot.Phase != "failed" && !mismatch && record.Snapshot.EffectiveProxyPort == preview.Settings.ProxyPort {
 		record.Explicit = true
 		record.Snapshot.RequestID = p.RequestID
 		record.Snapshot.Phase = "succeeded"

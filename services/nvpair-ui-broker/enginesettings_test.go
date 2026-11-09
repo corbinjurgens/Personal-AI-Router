@@ -54,6 +54,7 @@ type settingsHarness struct {
 	launchMu        sync.Mutex
 	launchStatus    string
 	configureStatus string
+	launchReadback  *engines.ServingReadback
 	// proxyCalls records the unaddressed requests the fake proxy answered,
 	// such as node/set-engine-drain, in arrival order.
 	proxyCallsMu sync.Mutex
@@ -298,6 +299,7 @@ func newSettingsHarnessWithLaunch(t *testing.T, engine string, serving *engines.
 				h.launchMu.Lock()
 				current := launch
 				current.WorkingSetLimitStatus = h.launchStatus
+				current.ServingReadback = h.launchReadback.Clone()
 				h.launchMu.Unlock()
 				if request.Engine == engine && h.serializeLaunch.Load() {
 					h.configureMu.Unlock()
@@ -599,6 +601,32 @@ func TestSettingsPreviewReapprovesStaleNativeDigest(t *testing.T) {
 	if h.applies.Load() != applies+1 {
 		t.Fatal("apply with the reviewed digest did not reach the worker")
 	}
+}
+
+func TestSettingsApplyOfUnchangedSettings(t *testing.T) {
+	test := func(name, status string, wantApplies int32) {
+		t.Run(name, func(t *testing.T) {
+			h := newServingSettingsHarness(t, "llamacpp", brokerServingFixture())
+			h.launchMu.Lock()
+			h.launchReadback = &engines.ServingReadback{Status: status}
+			h.launchMu.Unlock()
+			receipt, err := h.b.applyEngineSettings(context.Background(), h.request(t), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if receipt.Phase != "succeeded" {
+				t.Fatalf("receipt phase = %q, want succeeded", receipt.Phase)
+			}
+			if got := h.applies.Load(); got != wantApplies {
+				t.Fatalf("worker applies = %d, want %d", got, wantApplies)
+			}
+			if got := h.engineStarts.Load(); got != 0 {
+				t.Fatalf("engine starts = %d, want 0", got)
+			}
+		})
+	}
+	test("reach the worker on a mismatch", "mismatch", 1)
+	test("skip the worker on a healthy readback", "unverified", 0)
 }
 
 func TestSettingsServingJournalWriteFailureRestoresDeclaration(t *testing.T) {
