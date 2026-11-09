@@ -630,7 +630,7 @@ func modelAutoCompileFrozen(model string, requested modelconfig.RequestedLoad, p
 		resolved.DeviceBinding = &binding
 	}
 	if !reflect.DeepEqual(resolved.Artifacts, previous.Artifacts) || resolved.NativeBuildID != previous.NativeBuildID {
-		return nil, nil, modelLoadError(model, "auto", "Auto artifact or native build changed; explicitly Recalculate.")
+		return nil, nil, staleApproval(modelLoadError(model, "auto", "Auto artifact or native build changed; explicitly Recalculate."))
 	}
 	checked := resolved.Clone()
 	checked.SourceInputDigest, checked.PresetDigest = previous.SourceInputDigest, previous.PresetDigest

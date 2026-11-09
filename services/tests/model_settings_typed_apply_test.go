@@ -451,6 +451,8 @@ func TestModelSettingsTypedStaleDigestAfterBuildChange(t *testing.T) {
 	if recovered.Settings.ModelLoads[0].Resolved.NativeBuildID == staleBuild {
 		t.Fatal("recovered settings kept the old native build")
 	}
+	// The node stayed paused throughout, so only resuming starts the engine.
+	typedAssertStaysStopped(t, f, "re-approved on a paused node")
 	f.resume(t)
 	typedAssertLaunches(t, f, 0)
 }
@@ -512,9 +514,7 @@ func TestModelSettingsTypedStaleDigestAfterSourceChange(t *testing.T) {
 	if before.NativeBuildID != after.NativeBuildID || before.PerSlotContext != after.PerSlotContext {
 		t.Fatalf("source-only change moved more than the digests: build %s to %s", before.NativeBuildID, after.NativeBuildID)
 	}
-	// An apply restarts only an engine it stopped; this one was already stopped.
-	typedCycleAvailability(t, f, "paused")
-	typedCycleAvailability(t, f, "available")
+	// V44: the restore refused this approval, so replacing it starts the engine.
 	typedAssertLaunches(t, f, launches)
 	identities := typedLaunchIdentities(f)
 	if identities[0] == identities[len(identities)-1] {

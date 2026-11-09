@@ -691,8 +691,12 @@ func (e *Executor) configureLaunchLocked(ctx context.Context, st *engineState, p
 		e.emitState(p.Engine)
 		return e.launchStateLocked(p.Engine, st), err
 	}
-	// Resume records that settings coordination stopped this engine.
-	resume := p.Resume
+	// Resume records that settings coordination stopped this engine. An apply
+	// also starts an engine whose restore refused the approval it just replaced.
+	// A pause holds that start in activationBlocked; resuming retries the restore.
+	st.mu.Lock()
+	resume := p.Resume || st.restoreApprovalRefused
+	st.mu.Unlock()
 	if !activationBlocked && ((changed && old.Running) || resume) {
 		if recheckContent != nil {
 			if err := recheckContent(); err != nil {

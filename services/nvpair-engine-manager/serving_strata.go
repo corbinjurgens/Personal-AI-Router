@@ -552,7 +552,7 @@ func compileStrataServingExpected(ctx context.Context, command launchCommand, rt
 	}
 	approvedDigest := rt.Serving.Models[0].ExpectedNativeSourceDigest
 	if (approved && approvedDigest == "") || (approvedDigest != "" && approvedDigest != result.Digest) {
-		return nil, servingError("Strata native source conflict; obtain a fresh preview.")
+		return nil, staleApproval(servingError("Strata native source conflict; obtain a fresh preview."))
 	}
 	return result, nil
 }
