@@ -1575,7 +1575,7 @@ func (d *nodeDetail) openSettingsField(snap enginesettings.Snapshot, mode detail
 		return nil
 	}
 	if reason := settingsMismatchReason(snap); reason != "" {
-		d.status.error("%s: %s Submit this field to re-approve.", d.engineLabel(snap.Engine), reason)
+		d.status.error("%s: %s Submit this field to re-approve; an Auto load needs Recalculate in the desktop app.", d.engineLabel(snap.Engine), reason)
 	}
 	d.input.Focus()
 	d.input.CursorEnd()

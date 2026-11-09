@@ -1228,8 +1228,10 @@ func TestSettingsMismatchIsShownAndStaysEditable(t *testing.T) {
 			t.Fatalf("mode = %v, field did not open", d.mode)
 		}
 		got := d.status.render()
-		if !strings.Contains(got, "Native source conflict") || !strings.Contains(got, "re-approve") {
-			t.Errorf("status %q does not give the reason and the way out", got)
+		for _, want := range []string{"Native source conflict", "re-approve", "Recalculate in the desktop app"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("status %q does not give the reason and both ways out: missing %q", got, want)
+			}
 		}
 		if d.submitSettings(detailInputEnginePort, "8081", "8081") == nil {
 			t.Fatal("submitting the unchanged value issued no preview")
