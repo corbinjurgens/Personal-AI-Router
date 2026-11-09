@@ -9,6 +9,7 @@ import (
 	"errors"
 	"reflect"
 	"sort"
+	"sync"
 	"time"
 
 	"nvpair-shared/buildapply"
@@ -380,7 +381,8 @@ func (b *Broker) finishBuildApply(request buildapply.FinishRequest) buildapply.R
 func (b *Broker) buildApplyOwnerEvidence(parent context.Context) (buildapply.ImpactEnvelope, bool) {
 	ctx, cancel := context.WithTimeout(parent, 4*time.Second)
 	defer cancel()
-	return captureBuildApplyOwnerEvidence(ctx, b.readCachedBuildApplyOwners, b.callBuildApplyOwnerEvidence, b.buildApplyManagerCurrent)
+	read := func() (buildApplyOwnerRead, bool) { return b.readCachedBuildApplyOwners(ctx) }
+	return captureBuildApplyOwnerEvidence(ctx, read, b.callBuildApplyOwnerEvidence, b.buildApplyManagerCurrent)
 }
 
 func (b *Broker) buildApplyManagerCurrent(worker *rpcWorker, source *engineManagerSource) bool {
@@ -587,7 +589,7 @@ func buildApplyImpactKnowledgeComplete(i buildapply.Impact) bool {
 // worker for engine status, or schedules a policy push. Repeat all local owner
 // fences, including those not representable on the public wire.
 func (b *Broker) cachedBuildApplyImpact() (buildapply.Impact, bool) {
-	return captureCachedBuildApplyImpact(b.readCachedBuildApplyOwners)
+	return captureCachedBuildApplyImpact(func() (buildApplyOwnerRead, bool) { return b.readCachedBuildApplyOwners(context.Background()) })
 }
 
 func captureCachedBuildApplyImpact(read func() (buildApplyOwnerRead, bool)) (buildapply.Impact, bool) {
@@ -642,7 +644,45 @@ func sameCachedBuildApplyOwners(a, b buildApplyOwnerRead) bool {
 	return reflect.DeepEqual(a.impact, b.impact) && reflect.DeepEqual(a.settingsRecords, b.settingsRecords)
 }
 
-func (b *Broker) readCachedBuildApplyOwners() (buildApplyOwnerRead, bool) {
+const buildApplyReadContentionBudget = time.Second
+const buildApplyReadContentionAttempts = 21
+
+// buildApplyReadLock waits a bounded, context-respecting interval for an owner
+// lock that routine broker work holds briefly, with the shape of
+// engine-manager's modelReadLock for read-only observations. It leaves no
+// mutex waiter behind, and refuses when the bound or the context ends first.
+// Only for read-only capture that holds no other owner lock while it waits.
+func buildApplyReadLock(ctx context.Context, mu *sync.Mutex) bool {
+	var until time.Time
+	for attempt := 0; attempt < buildApplyReadContentionAttempts; attempt++ {
+		if ctx.Err() != nil {
+			return false
+		}
+		if mu.TryLock() {
+			return true
+		}
+		// Budget contention from its first occurrence.
+		if until.IsZero() {
+			until = time.Now().Add(buildApplyReadContentionBudget)
+		}
+		wait := min(time.Until(until), buildApplyReadContentionBudget/(buildApplyReadContentionAttempts-1))
+		if wait <= 0 || attempt == buildApplyReadContentionAttempts-1 {
+			return false
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false
+		case <-timer.C:
+		}
+	}
+	return false
+}
+
+// readCachedBuildApplyOwners takes each owner lock in turn, never two at once,
+// so its bounded waits cannot invert the engineConfigMu -> policy lock order.
+func (b *Broker) readCachedBuildApplyOwners(ctx context.Context) (buildApplyOwnerRead, bool) {
 	var capture buildApplyOwnerRead
 	impact := &capture.impact
 	refuse := func(code, detail string) {
@@ -652,7 +692,7 @@ func (b *Broker) readCachedBuildApplyOwners() (buildApplyOwnerRead, bool) {
 	impact.InterruptionPolicy = buildapply.InterruptionPolicy{StopsEngines: true, UnloadsModels: true, CommittedStreamsMayFail: true, IncludesWorkBeforeFence: true}
 	// engineConfigMu is the established settings journal lock. Do not call
 	// loadEngineSettingsLocked here.
-	if !b.engineConfigMu.TryLock() {
+	if !buildApplyReadLock(ctx, &b.engineConfigMu) {
 		return buildApplyOwnerRead{}, false
 	}
 	settingsKnown := b.engineSettingsLoaded && b.engineSettingsError == nil && b.engineSettingsEpoch != ""
@@ -718,13 +758,13 @@ func (b *Broker) readCachedBuildApplyOwners() (buildApplyOwnerRead, bool) {
 	if len(operations) > 0 {
 		impact.ModelOperations = buildapply.Known(operations)
 	}
-	if !b.workersMu.TryLock() {
+	if !buildApplyReadLock(ctx, &b.workersMu) {
 		return buildApplyOwnerRead{}, false
 	}
 	capture.worker, capture.source, capture.proxy, capture.recovering = b.engineMgr, b.engineMgrSource, b.proxyProc, b.engineMgrRecovering
 	b.workersMu.Unlock()
 	r := &b.nodePolicy
-	if !r.mu.TryLock() {
+	if !buildApplyReadLock(ctx, &r.mu) {
 		return buildApplyOwnerRead{}, false
 	}
 	if !r.ready {
@@ -896,7 +936,7 @@ func (b *Broker) readCachedBuildApplyOwners() (buildApplyOwnerRead, bool) {
 		}{capture.source.settingsEpoch, r.runID, r.runningGeneration, r.transitionGen, r.running, r.loaded, r.engineIdentity, r.settingsIdentity}))
 	}
 	r.mu.Unlock()
-	if !b.workersMu.TryLock() {
+	if !buildApplyReadLock(ctx, &b.workersMu) {
 		return buildApplyOwnerRead{}, false
 	}
 	current := capture.worker == b.engineMgr && capture.source == b.engineMgrSource && capture.proxy == b.proxyProc && capture.recovering == b.engineMgrRecovering

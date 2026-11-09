@@ -179,7 +179,10 @@ destination field.
 `maintenance_busy` refusal (`-32015` when returned as a JSON-RPC error).
 The impact read captures local policy, settings, admission and model fences
 around two `engine:owner-evidence {}` reads on one bound manager worker. Both
-manager calls share a four-second deadline. A retired/recovering worker, changed
+manager calls share a four-second deadline. Each local capture takes the
+settings, worker and policy locks one at a time; a lock that other broker work
+holds is awaited for at most one second, within that deadline, and still busy
+past it the capture is unavailable. A retired/recovering worker, changed
 local owner, changed native incarnation or capture token, malformed response or
 missing section withdraws dependent facts. A complete empty manager universe is valid; unobserved engines,
 unrepresented roots and uncertain reservations remain unknown. Manager paths
