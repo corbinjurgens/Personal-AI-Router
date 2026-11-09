@@ -774,13 +774,16 @@ func EqualLoads(a, b []ModelLoad) bool {
 	return true
 }
 
-// MovedArtifact returns the path of the first file compiled binds with another
-// modified time than baseline binds for the same profile, or "" if there is none.
-func MovedArtifact(baseline, compiled []ModelLoad) string {
-	if moved := movedArtifacts(baseline, compiled); len(moved) != 0 {
-		return moved[0].after.Path
+// MovedArtifacts returns the path of each file compiled binds with another
+// modified time than baseline binds for the same profile, once per path.
+func MovedArtifacts(baseline, compiled []ModelLoad) []string {
+	var paths []string
+	for _, moved := range movedArtifacts(baseline, compiled) {
+		if !slices.Contains(paths, moved.after.Path) {
+			paths = append(paths, moved.after.Path)
+		}
 	}
-	return ""
+	return paths
 }
 
 // MovedArtifactDiff names each file whose new modified time compiled accepts,
@@ -831,15 +834,23 @@ func movedArtifacts(baseline, compiled []ModelLoad) []movedArtifact {
 	return moved
 }
 
-// MovedArtifactReason states a refusal for a file whose modified time moved while
-// its size and samples still match. Only the file name is named: this text also
-// reaches logs. Recalculate is the acceptance an Auto load takes instead of Apply.
-func MovedArtifactReason(path string, recalculate bool) string {
+// MovedArtifactReason states a refusal for files whose modified times moved while
+// their sizes and samples still match, naming every file the acceptance would
+// bind. Only file names are named: this text also reaches logs. Recalculate is
+// the acceptance an Auto load takes instead of Apply.
+func MovedArtifactReason(paths []string, recalculate bool) string {
 	accept := "Apply these settings with no other edits"
 	if recalculate {
 		accept = "Recalculate this model"
 	}
-	return fmt.Sprintf("Model file %s has a new modified time. Its size and first and last samples match the saved settings, but the rest of the file is not checked. If this is expected, %s to accept it; otherwise restore the file.", filepath.Base(path), accept)
+	names := make([]string, len(paths))
+	for i, path := range paths {
+		names[i] = filepath.Base(path)
+	}
+	if len(names) == 1 {
+		return fmt.Sprintf("Model file %s has a new modified time. Its size and first and last samples match the saved settings, but the rest of the file is not checked. If this is expected, %s to accept it; otherwise restore the file.", names[0], accept)
+	}
+	return fmt.Sprintf("Model files %s have new modified times. Their sizes and first and last samples match the saved settings, but the rest of each file is not checked. If this is expected, %s to accept them; otherwise restore the files.", strings.Join(names, ", "), accept)
 }
 
 func (p PolicyPatch) Clone() PolicyPatch {

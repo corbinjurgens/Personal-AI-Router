@@ -934,7 +934,7 @@ Typed loads hold no full hash, so a new modified time is the only signal for a
 change between the samples, and matching samples do not show the content is the
 same. A saved binding whose file has a new time with the same target, size and
 samples is refused as stale approval, and the readback reports it as a mismatch
-that names the file. A no-edit plain Apply accepts the new time, or Recalculate
+that names every such file. A no-edit plain Apply accepts the new time, or Recalculate
 on a frozen Auto load; Recalculate also accepts moved files of finite profiles,
 which plain Apply cannot pass while the Auto load is refused. Only the settings
 preview request accepts, and its diff names every file it accepts in a

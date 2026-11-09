@@ -946,10 +946,13 @@ func typedApprovalStale(rt Runtime, prepared *llamaServingLaunch) bool {
 // Typed loads hold no full hash, so a new modified time is the only signal for a
 // change between the samples: matching samples cannot show the content is the
 // same, and only a reviewed acceptance may bind the new time. It updates asserted
-// in place for accepted files and returns their new times by path. A missing or
-// unsafe file, or a same-time sample change, is left to the resolver's refusal.
+// in place for accepted files and returns their new times by path. A refusal
+// names every moved file it does not accept. A missing or unsafe file, or a
+// same-time sample change, is left to the resolver's refusal.
 func bindMovedArtifacts(ctx context.Context, loads, asserted []modelconfig.ModelLoad, access servingFileAccess, accept func(modelconfig.ModelLoad) bool) (map[string]string, error) {
 	moved := map[string]string{}
+	var refused []string
+	refusedProfile, recalculate := "", false
 	for _, load := range loads {
 		resolved := rtLoadResolution(asserted, load.ProfileKey)
 		if resolved == nil {
@@ -980,11 +983,21 @@ func bindMovedArtifacts(ctx context.Context, loads, asserted []modelconfig.Model
 				return nil, modelLoadError(load.ProfileKey, "artifacts", fmt.Sprintf("Model file %s is not the file these settings saved: its location, size or samples differ. Restore the original file to use these settings.", filepath.Base(artifact.Path)))
 			}
 			if !accept(load) {
-				return nil, staleApproval(modelLoadError(load.ProfileKey, "artifacts", modelconfig.MovedArtifactReason(artifact.Path, modelLoadHasAuto(load.Requested))))
+				if refusedProfile == "" {
+					refusedProfile = load.ProfileKey
+				}
+				if !slices.Contains(refused, artifact.Path) {
+					refused = append(refused, artifact.Path)
+				}
+				recalculate = recalculate || modelLoadHasAuto(load.Requested)
+				continue
 			}
 			artifact.MtimeNS = mtime
 			moved[artifact.Path] = mtime
 		}
+	}
+	if len(refused) != 0 {
+		return nil, staleApproval(modelLoadError(refusedProfile, "artifacts", modelconfig.MovedArtifactReason(refused, recalculate)))
 	}
 	return moved, nil
 }

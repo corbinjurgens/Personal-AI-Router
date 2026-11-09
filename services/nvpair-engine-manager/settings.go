@@ -516,7 +516,7 @@ func (e *Executor) previewLaunch(st *engineState, request settings.Request, acce
 	limitChanged := !reflect.DeepEqual(current.WorkingSetLimitMiB, result.Settings.WorkingSetLimitMiB)
 	// Accepting a moved model file is its own Apply, so it cannot pass unseen
 	// with an edit the user made for another reason, or with a port change.
-	if moved := modelconfig.MovedArtifact(current.ModelLoads, result.Settings.ModelLoads); moved != "" && (limitChanged || current.ServerPort != result.Settings.ServerPort || current.LaunchText != result.Settings.LaunchText || !servingWithoutReview(current.Serving).Equal(servingWithoutReview(request.Settings.Serving))) {
+	if moved := modelconfig.MovedArtifacts(current.ModelLoads, result.Settings.ModelLoads); len(moved) != 0 && (limitChanged || current.ServerPort != result.Settings.ServerPort || current.LaunchText != result.Settings.LaunchText || !servingWithoutReview(current.Serving).Equal(servingWithoutReview(request.Settings.Serving))) {
 		result.Errors["modelLoads.artifacts"] = modelconfig.MovedArtifactReason(moved, false)
 		return result
 	}

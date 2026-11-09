@@ -159,8 +159,8 @@ func TestMovedFileNeedsReview(t *testing.T) {
 		if err != nil || len(preview.Errors) != 0 {
 			t.Fatalf("no-edit preview: errors=%v err=%v", preview.Errors, err)
 		}
-		if got := modelconfig.MovedArtifact(before, preview.Settings.ModelLoads); filepath.Base(got) != "medium.gguf" {
-			t.Fatalf("moved artifact = %q", got)
+		if got := modelconfig.MovedArtifacts(before, preview.Settings.ModelLoads); len(got) != 1 || filepath.Base(got[0]) != "medium.gguf" {
+			t.Fatalf("moved artifacts = %q", got)
 		}
 		if unnamed := movedFilesUnnamed(before, preview); len(unnamed) != 0 {
 			t.Fatalf("the preview accepts %v without naming it", unnamed)
@@ -255,6 +255,34 @@ func TestMovedFileNeedsReview(t *testing.T) {
 	})
 }
 
+// One Apply accepts every moved finite file, so the refusal and the readback
+// name each of them, not only the first.
+func TestMovedFilesAreAllNamed(t *testing.T) {
+	f, path := movedFileFixture(t)
+	weak := filepath.Join(f.root, "weak.gguf")
+	movedFileLater(t, path)
+	movedFileLater(t, weak)
+	err := movedFileApproved(t, f)
+	if err == nil || !isStaleApproval(err) || !strings.Contains(err.Error(), "medium.gguf") || !strings.Contains(err.Error(), "weak.gguf") {
+		t.Fatalf("approved compile: %v", err)
+	}
+	state, err := f.ex.LaunchSettings("fake")
+	if err != nil || state.ServingReadback == nil || state.ServingReadback.Status != "mismatch" || !strings.Contains(state.ServingReadback.Reason, "medium.gguf") || !strings.Contains(state.ServingReadback.Reason, "weak.gguf") {
+		t.Fatalf("readback: %+v err=%v", state.ServingReadback, err)
+	}
+	saved := modelconfig.CloneLoads(f.st.plat.Runtime.ModelLoads)
+	preview, err := f.ex.PreviewLaunch(movedFileRequest(t, f))
+	if err != nil || len(preview.Errors) != 0 {
+		t.Fatalf("no-edit preview: errors=%v err=%v", preview.Errors, err)
+	}
+	if got := modelconfig.MovedArtifacts(saved, preview.Settings.ModelLoads); len(got) != 2 {
+		t.Fatalf("moved artifacts = %q", got)
+	}
+	if unnamed := movedFilesUnnamed(saved, preview); len(unnamed) != 0 {
+		t.Fatalf("the preview accepts %v without naming it", unnamed)
+	}
+}
+
 func TestMovedFileChangedContentIsRefused(t *testing.T) {
 	for name, change := range map[string]func(data []byte) []byte{
 		"head": func(data []byte) []byte { data[0] ^= 0xff; return data },
@@ -309,8 +337,8 @@ func TestMovedFileAutoRecalculates(t *testing.T) {
 	if previewErr != nil || len(preview.Errors) != 0 {
 		t.Fatalf("Recalculate: errors=%v err=%v", preview.Errors, previewErr)
 	}
-	if got := modelconfig.MovedArtifact(before, preview.Settings.ModelLoads); filepath.Base(got) != "weak.gguf" {
-		t.Fatalf("Recalculate moved artifact = %q", got)
+	if got := modelconfig.MovedArtifacts(before, preview.Settings.ModelLoads); len(got) != 1 || filepath.Base(got[0]) != "weak.gguf" {
+		t.Fatalf("Recalculate moved artifacts = %q", got)
 	}
 	if unnamed := movedFilesUnnamed(before, preview); len(unnamed) != 0 {
 		t.Fatalf("Recalculate accepts %v without naming it", unnamed)
@@ -334,8 +362,8 @@ func TestMovedFileRecalculateNamesSiblingFile(t *testing.T) {
 	if err != nil || len(preview.Errors) != 0 {
 		t.Fatalf("Recalculate: errors=%v err=%v", preview.Errors, err)
 	}
-	if got := modelconfig.MovedArtifact(saved, preview.Settings.ModelLoads); filepath.Base(got) != "medium.gguf" {
-		t.Fatalf("Recalculate moved artifact = %q", got)
+	if got := modelconfig.MovedArtifacts(saved, preview.Settings.ModelLoads); len(got) != 1 || filepath.Base(got[0]) != "medium.gguf" {
+		t.Fatalf("Recalculate moved artifacts = %q", got)
 	}
 	if unnamed := movedFilesUnnamed(saved, preview); len(unnamed) != 0 {
 		t.Fatalf("Recalculate accepts %v without naming it", unnamed)

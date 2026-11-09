@@ -472,7 +472,7 @@ func (b *Broker) previewSettingsSnapshotLocked(ctx context.Context, p settings.R
 	}
 	// The worker refuses other edits made along with accepting a moved model
 	// file, but the proxy port is the broker's own setting.
-	if moved := modelconfig.MovedArtifact(current.Settings.ModelLoads, preview.Settings.ModelLoads); moved != "" && p.Settings.ProxyPort != current.Settings.ProxyPort {
+	if moved := modelconfig.MovedArtifacts(current.Settings.ModelLoads, preview.Settings.ModelLoads); len(moved) != 0 && p.Settings.ProxyPort != current.Settings.ProxyPort {
 		preview.Errors["modelLoads.artifacts"] = modelconfig.MovedArtifactReason(moved, false)
 	}
 	if len(preview.Errors) == 0 && preview.Conflict == nil {
@@ -817,7 +817,7 @@ func (b *Broker) applyEngineSettings(ctx context.Context, p settings.Request, ca
 	}
 	// A moved model file is accepted only by sending back the loads the preview
 	// returned. Saved loads here would approve a file state no caller saw.
-	if modelconfig.MovedArtifact(p.Settings.ModelLoads, preview.Settings.ModelLoads) != "" {
+	if len(modelconfig.MovedArtifacts(p.Settings.ModelLoads, preview.Settings.ModelLoads)) != 0 {
 		r.mu.Unlock()
 		return settingsReceipt{}, &invalidParamsError{err: fmt.Errorf("model file review is required; preview these settings and apply the loads the preview returns")}
 	}
