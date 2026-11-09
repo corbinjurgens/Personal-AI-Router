@@ -352,8 +352,12 @@ An optional local `binding` records `sourcePath`, `resolvedTarget`, `sizeBytes`,
 and `sampleSha256`. Structural validation does no file I/O. The llama adapter
 checks bounded samples and resolved targets during native preview, returning
 candidate bindings and `expectedNativeSourceDigest`; authoritative apply
-requires the exact reviewed values. A changed binding requires renewed
-verification rather than silently rebinding an existing digest.
+requires the exact reviewed values. The broker clears the digest on a client
+preview, so the normal preview/apply flow re-approves a build that changed only
+compiled launch defaults. Apply and startup restore/start still refuse a saved
+digest that current inputs did not produce, and the settings readback reports
+it as a mismatch. A changed binding requires renewed verification rather than
+silently rebinding an existing digest.
 
 Serving settings use the existing revisioned preview/apply/journal route.
 Port-only persistence preserves serving and unrelated override fields. Settings

@@ -31,6 +31,7 @@ import (
 type settingsHarness struct {
 	b                   *Broker
 	engine              string
+	nativeDigest        atomic.Pointer[string]
 	applies             atomic.Int32
 	proxyRebinds        atomic.Int32
 	engineStarts        atomic.Int32
@@ -319,7 +320,19 @@ func newSettingsHarnessWithLaunch(t *testing.T, engine string, serving *engines.
 				h.launchMu.Lock()
 				restart := launch.Running && (p.Settings.ServerPort != launch.ServerPort || p.Settings.LaunchText != launch.LaunchText)
 				h.launchMu.Unlock()
-				_ = codec.Respond(msg.ID, settings.Preview{Settings: p.Settings, Restart: restart})
+				preview := settings.Preview{Settings: p.Settings, Restart: restart}
+				if digest := h.nativeDigest.Load(); digest != nil && p.Settings.Serving != nil {
+					// The engine manager's digest rule: an expected digest must match;
+					// an absent one is filled in.
+					for i := range p.Settings.Serving.Models {
+						model := &p.Settings.Serving.Models[i]
+						if model.ExpectedNativeSourceDigest != "" && model.ExpectedNativeSourceDigest != *digest {
+							preview.Errors = map[string]string{"serving": "Native source conflict"}
+						}
+						model.ExpectedNativeSourceDigest = *digest
+					}
+				}
+				_ = codec.Respond(msg.ID, preview)
 			case "engine:configure-launch":
 				// Serve this off the reader loop: a suspended apply must not
 				// stop the fixture from answering an unrelated read, which is
@@ -545,6 +558,46 @@ func TestSettingsServingReceiptRecoveryAndReadback(t *testing.T) {
 	duplicate, err := h.b.applyEngineSettings(context.Background(), p, "")
 	if err != nil || duplicate != receipt {
 		t.Fatal("recovery changed immutable failed receipt")
+	}
+}
+
+func TestSettingsPreviewReapprovesStaleNativeDigest(t *testing.T) {
+	stale, current := strings.Repeat("c", 64), strings.Repeat("d", 64)
+	saved := brokerServingFixture()
+	saved.Models[0].ExpectedNativeSourceDigest = stale
+	h := newServingSettingsHarness(t, "llamacpp", saved)
+	h.nativeDigest.Store(&current)
+
+	preview, err := h.b.previewEngineSettings(context.Background(), h.request(t), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(preview.Errors) != 0 {
+		t.Fatalf("preview of the saved settings refused: %v", preview.Errors)
+	}
+	if got := preview.Settings.Serving.Models[0].ExpectedNativeSourceDigest; got != current {
+		t.Fatalf("preview digest = %q, want %q", got, current)
+	}
+
+	applies := h.applies.Load()
+	if _, err := h.b.applyEngineSettings(context.Background(), h.request(t), ""); err == nil {
+		t.Fatal("apply with the stale digest was accepted")
+	}
+	if h.applies.Load() != applies {
+		t.Fatal("apply with the stale digest reached the worker")
+	}
+
+	reviewed := h.request(t)
+	reviewed.Settings = preview.Settings
+	receipt, err := h.b.applyEngineSettings(context.Background(), reviewed, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt.Phase != "succeeded" {
+		t.Fatalf("apply with the reviewed digest = %q, want succeeded", receipt.Phase)
+	}
+	if h.applies.Load() != applies+1 {
+		t.Fatal("apply with the reviewed digest did not reach the worker")
 	}
 }
 

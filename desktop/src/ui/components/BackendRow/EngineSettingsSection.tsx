@@ -110,6 +110,10 @@ export function EngineSettingsSection({
     const submitted = useRef('')
     const serverPortEdited = useRef(false)
     const dirty = !!base && !sameDraft(draft, asDraft(base.settings))
+    // Saved settings the current build refuses have nothing to edit, yet need
+    // the preview and apply that re-approve them.
+    const applicable =
+        dirty || snapshot?.phase === 'failed' || snapshot?.serving?.status === 'mismatch'
     const stale =
         !!base &&
         !!snapshot &&
@@ -401,7 +405,7 @@ export function EngineSettingsSection({
                         kind="primary"
                         color="brand"
                         size="small"
-                        disabled={locked || checking || (!dirty && snapshot?.phase !== 'failed')}
+                        disabled={locked || checking || !applicable}
                         className="relative"
                         aria-label="Apply"
                         aria-busy={applying || checking}

@@ -299,6 +299,48 @@ func TestLlamaServingPreparedDigestChangesWithApprovedInputs(t *testing.T) {
 	})
 }
 
+// A build that changes compiled launch defaults changes the approval digest
+// without changing any saved owner value. The broker clears the digest on a
+// client preview; everything that still carries one keeps refusing it.
+func TestLlamaServingStaleApprovalDigestStaysRefused(t *testing.T) {
+	f := newLlamaServingFixture(t)
+	const conflict = "Native source conflict"
+	staleDigest := strings.Repeat("b", 64)
+	fresh := approveLlamaServing(t, f)
+	freshDigest := fresh.Settings.Serving.Models[0].ExpectedNativeSourceDigest
+	if freshDigest == staleDigest {
+		t.Fatal("fixture approval digest equals the stale sentinel")
+	}
+	withStaleDigest := func(config *engines.ServingConfig) {
+		for i := range config.Models {
+			config.Models[i].ExpectedNativeSourceDigest = staleDigest
+		}
+	}
+
+	stale := fresh.Settings.Clone()
+	withStaleDigest(stale.Serving)
+	if _, err := f.ex.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: stale}, func() error { return nil }); err == nil || !strings.Contains(err.Error(), conflict) {
+		t.Fatalf("apply with the stale digest = %v, want a native source conflict", err)
+	}
+
+	applyLlamaServing(t, f, fresh)
+	st := settingsState(t, f.ex)
+	st.mu.Lock()
+	withStaleDigest(st.plat.Runtime.Serving)
+	st.mu.Unlock()
+
+	state, err := f.ex.LaunchSettings("fake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.ServingReadback == nil || state.ServingReadback.Status != "mismatch" || !strings.Contains(state.ServingReadback.Reason, conflict) {
+		t.Fatalf("state readback for the stale digest = %+v, want a native source conflict mismatch", state.ServingReadback)
+	}
+	if err := f.ex.restoreInstalled(context.Background(), "fake"); err == nil || !strings.Contains(err.Error(), conflict) {
+		t.Fatalf("restore with the stale digest = %v, want a native source conflict", err)
+	}
+}
+
 func newLlamaServingFixture(t *testing.T) llamaServingFixture {
 	t.Helper()
 	ex := settingsExecutor(t, false)

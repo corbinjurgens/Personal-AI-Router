@@ -770,6 +770,81 @@ func neAssertColdReadback(t *testing.T, snapshot settings.Snapshot, launched boo
 	return envelope
 }
 
+// The saved digest here goes stale through its preset rather than a new build;
+// both reach the same check, and this one needs no second set of binaries.
+func TestNEServingStaleDigestReapproved(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("NE serving envelope process acceptance is reserved for Windows PC3")
+	}
+	f := newNEServingFixture(t)
+	modelBytes := []byte("NE synthetic model; no model runtime or hardware qualification")
+	modelPath := filepath.Join(f.root, "model.gguf")
+	if err := os.WriteFile(modelPath, modelBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source := "[*]\nfit = off\nload-on-startup = false\n\n[" + neModel + "]\nmodel = " + filepath.ToSlash(modelPath) + "\nctx-size = 2048\nparallel = 1\nkv-unified = false\nsleep-idle-seconds = -1\n"
+	if err := os.WriteFile(f.source, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.start(t)
+	before := f.snapshot(t)
+	ram, vram := int64(neMemory), int64(0)
+	modelHash := sha256.Sum256(modelBytes)
+	request := settings.Request{Engine: "llamacpp", ExpectedRevision: before.Revision, RequestID: "first-apply", Settings: settings.Config{
+		ServerPort: f.enginePort, ProxyPort: f.facadePort,
+		LaunchText: neRuntimeArg + " --ne-serving-config " + strconv.Quote(filepath.Join(f.root, "runtime.json")) + " --models-preset " + strconv.Quote(f.source) + " --models-max 1",
+		Serving:    &engines.ServingConfig{Version: 1, Models: []engines.ServingModel{{ModelID: neModel, MaxOutputTokens: neOutput, Memory: engines.ServingMemory{HostRAMBytes: &ram, VRAMBytes: &vram}, Artifacts: []engines.ServingArtifact{{Role: "model", SHA256: hex.EncodeToString(modelHash[:]), Provenance: engines.ServingProvenance{Kind: "supplied-sha256"}}}}}},
+	}}
+	var preview settings.Preview
+	f.call(t, "engine:preview-settings", request, &preview)
+	if len(preview.Errors) != 0 || preview.Conflict != nil {
+		t.Fatalf("first preview rejected: errors=%v conflict=%v", preview.Errors, preview.Conflict)
+	}
+	request.Settings = preview.Settings.Clone()
+	request.ExpectedRevision = preview.Revision
+	f.call(t, "engine:apply-settings", request, nil)
+
+	if err := os.WriteFile(f.source, []byte(source+"# changed after approval\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	saved := f.snapshot(t)
+	staleDigest := saved.Settings.Serving.Models[0].ExpectedNativeSourceDigest
+	if saved.Serving == nil || saved.Serving.Status != "mismatch" {
+		t.Fatalf("readback with a stale digest = %+v, want a mismatch", saved.Serving)
+	}
+
+	echoed := settings.Request{Engine: "llamacpp", ExpectedRevision: saved.Revision, Settings: saved.Settings}
+	var recovered settings.Preview
+	f.call(t, "engine:preview-settings", echoed, &recovered)
+	if len(recovered.Errors) != 0 || recovered.Conflict != nil {
+		t.Fatalf("preview of the saved settings refused: errors=%v conflict=%v", recovered.Errors, recovered.Conflict)
+	}
+	freshDigest := recovered.Settings.Serving.Models[0].ExpectedNativeSourceDigest
+	if freshDigest == "" || freshDigest == staleDigest {
+		t.Fatalf("preview digest = %q, want one replacing %q", freshDigest, staleDigest)
+	}
+
+	echoed.RequestID = "stale-apply"
+	if response := callRPC(t, f.p.in, f.p.msgs, "engine:apply-settings", echoed, neCallBudget); response.Error == nil {
+		t.Fatal("apply with the stale digest was accepted")
+	}
+
+	reviewed := echoed
+	reviewed.RequestID = "reviewed-apply"
+	reviewed.Settings = recovered.Settings.Clone()
+	var receipt struct {
+		Phase string `json:"Phase"`
+	}
+	f.call(t, "engine:apply-settings", reviewed, &receipt)
+	if receipt.Phase != "succeeded" {
+		t.Fatalf("apply with the reviewed digest = %q, want succeeded", receipt.Phase)
+	}
+	after := f.snapshot(t)
+	if !after.Settings.Equal(recovered.Settings) || after.Serving == nil || after.Serving.Status == "mismatch" {
+		t.Fatalf("settings after re-approval: serving readback %+v", after.Serving)
+	}
+}
+
 func TestNEServingEnvelope(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("NE serving envelope process acceptance is reserved for Windows PC3")

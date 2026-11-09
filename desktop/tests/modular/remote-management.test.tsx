@@ -1242,6 +1242,27 @@ describe('permission controls', () => {
         )
     })
 
+    it('offers Apply for unedited settings whose serving readback is a mismatch', async () => {
+        usePendingActionsStore.setState({ pending: new Map() })
+        useEngineStatusStore.setState({
+            statusByNode: new Map([
+                ['peer-1', new Map([['llama-cpp', emptyEngineStatus('peer-1', 'llama-cpp')]])]
+            ])
+        })
+        getSettings.mockResolvedValue({
+            ...settings,
+            serving: {
+                status: 'mismatch',
+                reason: 'Native source conflict; obtain a fresh preview before applying.'
+            }
+        })
+        await renderSettings()
+        await vi.waitFor(() => expect(button('Apply').disabled).toBe(false))
+        await act(async () => button('Apply').click())
+        expect(previewSettings).toHaveBeenCalledTimes(1)
+        expect(applySettings).toHaveBeenCalledTimes(1)
+    })
+
     it('keeps settings read-only when the peer is unreachable rather than calling it unsupported', async () => {
         capability.mockRejectedValue(new Error('device is offline'))
         await renderSettings()
