@@ -680,9 +680,13 @@ func withoutNativeSourceDigest(config *engines.ServingConfig) *engines.ServingCo
 	return cleared
 }
 
-// unreviewedNativeSourceDigest reports whether the preview approved a native
-// source digest the apply request did not carry. A nonempty digest that no
-// longer matches is already refused by the worker preview.
+// unreviewedNativeSourceDigest reports whether the apply request does not carry
+// the native source digest the apply's internal preview compiled. A client
+// preview is the review that returns that digest, so an empty or different one
+// would approve source inputs no caller saw. The comparison must use the
+// preview result: a typed model-load preview replaces a nonempty request digest
+// with the one it compiled, so a stale or forged value never reaches the
+// worker's own check.
 func unreviewedNativeSourceDigest(request, approved *engines.ServingConfig) bool {
 	if approved == nil {
 		return false
@@ -691,7 +695,7 @@ func unreviewedNativeSourceDigest(request, approved *engines.ServingConfig) bool
 		if model.ExpectedNativeSourceDigest == "" {
 			continue
 		}
-		if request == nil || i >= len(request.Models) || request.Models[i].ExpectedNativeSourceDigest == "" {
+		if request == nil || i >= len(request.Models) || request.Models[i].ExpectedNativeSourceDigest != model.ExpectedNativeSourceDigest {
 			return true
 		}
 	}
@@ -784,11 +788,13 @@ func (b *Broker) applyEngineSettings(ctx context.Context, p settings.Request, ca
 		return settingsReceipt{}, fmt.Errorf("resolve settings errors and port conflicts before applying")
 	}
 	// A client preview is the review of a native source: it returns the
-	// approval digest an apply must send back, and the worker refuses one that
-	// no longer matches. Apply compiles that digest in its own preview and
-	// persists it, so accepting an empty one here would approve source inputs
-	// the caller never saw. Configurations without a compiled native source
-	// produce no digest and are unaffected.
+	// approval digest an apply must send back, and the worker refuses a finite
+	// or Strata digest that no longer matches. A typed model-load preview
+	// replaces a nonempty request digest with the one it compiled, so the
+	// request must match the preview result itself. Apply persists that digest,
+	// so accepting an empty or different one here would approve source inputs
+	// the caller never saw. A preview with no native serving declaration
+	// returns no digest and is unaffected.
 	if unreviewedNativeSourceDigest(p.Settings.Serving, preview.Settings.Serving) {
 		r.mu.Unlock()
 		return settingsReceipt{}, &invalidParamsError{err: fmt.Errorf("native source review is required; preview these settings and apply the digest the preview returns")}

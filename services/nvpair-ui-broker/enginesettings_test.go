@@ -32,6 +32,7 @@ type settingsHarness struct {
 	b                   *Broker
 	engine              string
 	nativeDigest        atomic.Pointer[string]
+	typedDigest         atomic.Bool
 	applies             atomic.Int32
 	proxyRebinds        atomic.Int32
 	engineStarts        atomic.Int32
@@ -324,11 +325,13 @@ func newSettingsHarnessWithLaunch(t *testing.T, engine string, serving *engines.
 				h.launchMu.Unlock()
 				preview := settings.Preview{Settings: p.Settings, Restart: restart}
 				if digest := h.nativeDigest.Load(); digest != nil && p.Settings.Serving != nil {
-					// The engine manager's digest rule: an expected digest must match;
-					// an absent one is filled in.
+					// The engine manager's digest rule: a finite or Strata compile
+					// refuses an expected digest that does not match, and fills in an
+					// absent one. A typed model-load compile instead replaces any
+					// nonempty digest with the one it compiled.
 					for i := range p.Settings.Serving.Models {
 						model := &p.Settings.Serving.Models[i]
-						if model.ExpectedNativeSourceDigest != "" && model.ExpectedNativeSourceDigest != *digest {
+						if !h.typedDigest.Load() && model.ExpectedNativeSourceDigest != "" && model.ExpectedNativeSourceDigest != *digest {
 							preview.Errors = map[string]string{"serving": "Native source conflict"}
 						}
 						model.ExpectedNativeSourceDigest = *digest
@@ -655,6 +658,54 @@ func TestSettingsApplyRequiresReviewedNativeDigest(t *testing.T) {
 	receipt, err = plain.b.applyEngineSettings(context.Background(), edit, "")
 	if err != nil || receipt.Phase != "succeeded" {
 		t.Fatalf("non-native apply = %q: %v", receipt.Phase, err)
+	}
+}
+
+// A typed model-load apply's request digest is not the guard: its internal
+// preview replaces a nonempty value with the one it compiled, so the broker
+// must compare the request against the preview result, not just refuse an empty
+// one.
+func TestSettingsApplyRejectsForgedNativeDigest(t *testing.T) {
+	forged, stale, current := strings.Repeat("e", 64), strings.Repeat("c", 64), strings.Repeat("d", 64)
+	saved := brokerServingFixture()
+	saved.Models[0].ExpectedNativeSourceDigest = stale
+	h := newServingSettingsHarness(t, "llamacpp", saved)
+	h.nativeDigest.Store(&current)
+	h.typedDigest.Store(true)
+
+	forgedApply := h.request(t)
+	forgedApply.Settings.Serving.Models[0].ExpectedNativeSourceDigest = forged
+	applies := h.applies.Load()
+	if _, err := h.b.applyEngineSettings(context.Background(), forgedApply, ""); err == nil {
+		t.Fatal("apply with a forged digest was accepted")
+	} else if !strings.Contains(err.Error(), "native source review is required") {
+		t.Fatalf("forged apply refused as %v, want the native source review error", err)
+	}
+	if h.applies.Load() != applies {
+		t.Fatal("apply with a forged digest reached the worker")
+	}
+	after, err := h.b.getEngineSettings(context.Background(), settings.Request{Engine: "llamacpp"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := after.Settings.Serving.Models[0].ExpectedNativeSourceDigest; got != stale {
+		t.Fatalf("saved digest = %q, want the refused apply to leave %q", got, stale)
+	}
+
+	// The preview's returned digest is the review, and echoing it applies.
+	preview, err := h.b.previewEngineSettings(context.Background(), h.request(t), "")
+	if err != nil || len(preview.Errors) != 0 {
+		t.Fatalf("preview errors=%v err=%v", preview.Errors, err)
+	}
+	reviewed := h.request(t)
+	reviewed.Settings = preview.Settings
+	reviewed.ExpectedRevision = preview.Revision
+	receipt, err := h.b.applyEngineSettings(context.Background(), reviewed, "")
+	if err != nil || receipt.Phase != "succeeded" {
+		t.Fatalf("apply of the reviewed digest = %q: %v", receipt.Phase, err)
+	}
+	if h.applies.Load() != applies+1 {
+		t.Fatal("apply of the reviewed digest did not reach the worker")
 	}
 }
 

@@ -291,11 +291,16 @@ startup subcommand. The argument grammar is
 change component configuration or runtime. A snapshot read may persist the
 initial revision baseline or reconcile an external component change.
 
-An apply of a configuration that compiles to native serving must carry the
-native source digest its preview returned. The apply's internal preview compiles
-that same digest, so a request without one is refused instead of approving
-source inputs no caller reviewed. Configurations with no compiled native source
-carry no digest and are unaffected.
+An apply whose configuration carries a native serving declaration must send
+back the native source digest its preview returned. The apply's internal preview
+compiles that same digest, so a request that omits it, or carries one the
+preview no longer compiles, is refused instead of approving source inputs no
+caller reviewed. A typed model-load configuration without a serving declaration
+also compiles a generated native preset and computes a digest internally, but no
+declaration carries that digest to the preview, so the shape has no review
+anchor. A plain apply cannot change its model loads, which must echo the target
+baseline; what an unreviewed apply can still change there is launch text, ports
+and the working-set limit.
 
 `unverified` means this manager started the running engine with the saved value,
 but its containment has not verified every live member: a member could not be
