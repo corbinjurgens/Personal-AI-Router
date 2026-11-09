@@ -56,6 +56,9 @@ func TestHistoryProductionEntryServesHistoryAndOrdinaryRPC(t *testing.T) {
 		if !joined {
 			<-done
 		}
+		if t.Failed() {
+			t.Logf("production service output: %s", output.String())
+		}
 	})
 	waitUntil(t, "production service endpoint", func() bool { return alreadyAnswering(ctx, box.endpoint) })
 	h := &harness{t: t, endpoint: box.endpoint}
