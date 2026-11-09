@@ -829,6 +829,17 @@ func TestNEServingStaleDigestReapproved(t *testing.T) {
 		t.Fatal("apply with the stale digest was accepted")
 	}
 
+	// Review comes from the preview's digest, not from the apply itself: an
+	// apply without one cannot re-approve the stale settings instead.
+	unreviewed := settings.Request{Engine: "llamacpp", ExpectedRevision: saved.Revision, RequestID: "unreviewed-apply", Settings: saved.Settings.Clone()}
+	unreviewed.Settings.Serving.Models[0].ExpectedNativeSourceDigest = ""
+	if response := callRPC(t, f.p.in, f.p.msgs, "engine:apply-settings", unreviewed, neCallBudget); response.Error == nil {
+		t.Fatal("apply with an empty digest re-approved the stale native settings")
+	}
+	if afterRefusal := f.snapshot(t); afterRefusal.Revision != saved.Revision || !afterRefusal.Settings.Equal(saved.Settings) {
+		t.Fatal("refused empty-digest apply changed the saved settings")
+	}
+
 	reviewed := echoed
 	reviewed.RequestID = "reviewed-apply"
 	reviewed.Settings = recovered.Settings.Clone()

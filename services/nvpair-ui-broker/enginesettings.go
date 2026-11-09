@@ -680,6 +680,28 @@ func withoutNativeSourceDigest(config *engines.ServingConfig) *engines.ServingCo
 	return cleared
 }
 
+// unreviewedNativeSourceDigest reports whether the apply request does not carry
+// the native source digest the apply's internal preview compiled. A client
+// preview is the review that returns that digest, so an empty or different one
+// would approve source inputs no caller saw. The comparison must use the
+// preview result: a typed model-load preview replaces a nonempty request digest
+// with the one it compiled, so a stale or forged value never reaches the
+// worker's own check.
+func unreviewedNativeSourceDigest(request, approved *engines.ServingConfig) bool {
+	if approved == nil {
+		return false
+	}
+	for i, model := range approved.Models {
+		if model.ExpectedNativeSourceDigest == "" {
+			continue
+		}
+		if request == nil || i >= len(request.Models) || request.Models[i].ExpectedNativeSourceDigest != model.ExpectedNativeSourceDigest {
+			return true
+		}
+	}
+	return false
+}
+
 // applyEngineSettings accepts a change into the journal and then converges the
 // engine onto it. RequestID makes it idempotent: replaying one returns the
 // original receipt, and reusing it for different settings is refused.
@@ -764,6 +786,18 @@ func (b *Broker) applyEngineSettings(ctx context.Context, p settings.Request, ca
 	if len(preview.Errors) > 0 || preview.Conflict != nil {
 		r.mu.Unlock()
 		return settingsReceipt{}, fmt.Errorf("resolve settings errors and port conflicts before applying")
+	}
+	// A client preview is the review of a native source: it returns the
+	// approval digest an apply must send back, and the worker refuses a finite
+	// or Strata digest that no longer matches. A typed model-load preview
+	// replaces a nonempty request digest with the one it compiled, so the
+	// request must match the preview result itself. Apply persists that digest,
+	// so accepting an empty or different one here would approve source inputs
+	// the caller never saw. A preview with no native serving declaration
+	// returns no digest and is unaffected.
+	if unreviewedNativeSourceDigest(p.Settings.Serving, preview.Settings.Serving) {
+		r.mu.Unlock()
+		return settingsReceipt{}, &invalidParamsError{err: fmt.Errorf("native source review is required; preview these settings and apply the digest the preview returns")}
 	}
 	previous := b.engineSettings[p.Engine]
 	record.Model = nil

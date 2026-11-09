@@ -600,6 +600,10 @@ func (f *modelDiagnosticProcessFixture) availableResident(t *testing.T) nodepoli
 	if len(preview.Errors) != 0 || preview.Conflict != nil {
 		t.Fatalf("resident declaration preview: errors=%v conflict=%v", preview.Errors, preview.Conflict)
 	}
+	// Apply sends back the declaration the preview returned, whose native source
+	// digest reviewed it. Model loads stay the target's baseline.
+	request.Settings.Serving = preview.Settings.Serving.Clone()
+	request.ExpectedRevision = preview.Revision
 	f.call(t, "engine:apply-settings", request, nil)
 	f.settled(t, request.RequestID, "succeeded")
 	// Bootstrap the same synthetic strict-qualification recipe as the NE/SR
