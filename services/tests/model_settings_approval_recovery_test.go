@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -327,6 +328,9 @@ func TestModelSettingsApplyDoesNotStartOtherStoppedEngine(t *testing.T) {
 // restore has nothing to serve, and an apply does not repair that.
 func neApprovedFixture(t *testing.T) (*neServingFixture, string) {
 	t.Helper()
+	if runtime.GOOS != "windows" {
+		t.Skip("NE serving envelope process acceptance is reserved for Windows PC3")
+	}
 	f := newNEServingFixture(t)
 	modelBytes := []byte("NE synthetic model; no model runtime or hardware qualification")
 	modelPath := filepath.Join(f.root, "model.gguf")
