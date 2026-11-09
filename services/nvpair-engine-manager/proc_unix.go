@@ -252,7 +252,19 @@ func signalPID(pid int, force bool) error {
 		sig = syscall.SIGKILL
 	}
 	if pgid, err := syscall.Getpgid(pid); err == nil && pgid == pid {
-		return syscall.Kill(-pgid, sig)
+		return signalGroupLeader(pid, sig)
+	}
+	return syscall.Kill(pid, sig)
+}
+
+// signalGroupLeader signals the group led by pid. Darwin refuses a group
+// whose only member is a zombie with EPERM, and a leader can exit between
+// Getpgid and the group signal. Signal the leader alone then, as signalPID
+// does for a zombie it sees before the group check; a real permission
+// refusal still fails there.
+func signalGroupLeader(pid int, sig syscall.Signal) error {
+	if err := syscall.Kill(-pid, sig); !errors.Is(err, syscall.EPERM) {
+		return err
 	}
 	return syscall.Kill(pid, sig)
 }
