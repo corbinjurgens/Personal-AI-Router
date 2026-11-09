@@ -438,6 +438,18 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 			return nil, modelLoadError("", "artifacts", "Prepared inputs changed before compilation.")
 		}
 	}
+	movedArtifacts, err := bindMovedArtifacts(ctx, loads, assertedLoads, access, func(load modelconfig.ModelLoad) bool {
+		if approved {
+			return false
+		}
+		if modelLoadHasAuto(load.Requested) {
+			return operation.RecalculateModel == load.ProfileKey
+		}
+		return rt.acceptMoved || operation.RecalculateModel != ""
+	})
+	if err != nil {
+		return nil, err
+	}
 	var buildEvidence sourceEvidence
 	if expected != nil {
 		buildEvidence = expected.build
@@ -702,6 +714,11 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 			if sections[model.ModelID] == nil {
 				return nil, modelLoadError(model.ModelID, "serving", "Declaration and typed router model sets must match exactly.")
 			}
+			for _, artifact := range model.Artifacts {
+				if artifact.Binding != nil && movedArtifacts[artifact.Binding.SourcePath] != "" {
+					artifact.Binding.MtimeNS = movedArtifacts[artifact.Binding.SourcePath]
+				}
+			}
 			sections[model.ModelID]["n-predict"] = strconv.FormatInt(model.MaxOutputTokens, 10)
 		}
 		data, err = typedLlamaPreset(sections)
@@ -923,6 +940,53 @@ func typedApprovalStale(rt Runtime, prepared *llamaServingLaunch) bool {
 	return rt.Serving != nil && slices.ContainsFunc(rt.Serving.Models, func(model engines.ServingModel) bool {
 		return model.ExpectedNativeSourceDigest != prepared.Digest
 	})
+}
+
+// bindMovedArtifacts compares each saved binding to its file before resolution.
+// Typed loads hold no full hash, so a new modified time is the only signal for a
+// change between the samples: matching samples cannot show the content is the
+// same, and only a reviewed acceptance may bind the new time. It updates asserted
+// in place for accepted files and returns their new times by path. A missing or
+// unsafe file, or a same-time sample change, is left to the resolver's refusal.
+func bindMovedArtifacts(ctx context.Context, loads, asserted []modelconfig.ModelLoad, access servingFileAccess, accept func(modelconfig.ModelLoad) bool) (map[string]string, error) {
+	moved := map[string]string{}
+	for _, load := range loads {
+		resolved := rtLoadResolution(asserted, load.ProfileKey)
+		if resolved == nil {
+			continue
+		}
+		for i := range resolved.Artifacts {
+			artifact := &resolved.Artifacts[i]
+			if !artifactPathSafe(artifact.Path) {
+				continue
+			}
+			file, err := captureSource(artifact.Path, false)
+			if err != nil {
+				continue
+			}
+			mtime := strconv.FormatInt(file.mtime, 10)
+			if file.target == artifact.ResolvedTarget && strconv.FormatInt(file.size, 10) == artifact.Size && mtime == artifact.MtimeNS {
+				continue
+			}
+			sampleMatches := false
+			if file.target == artifact.ResolvedTarget && strconv.FormatInt(file.size, 10) == artifact.Size {
+				current, err := access.bindingExpected(ctx, file.configured, file.target, file.info)
+				if err != nil {
+					continue
+				}
+				sampleMatches = current.SampleSHA256 == artifact.SampleSHA256
+			}
+			if !sampleMatches {
+				return nil, modelLoadError(load.ProfileKey, "artifacts", fmt.Sprintf("Model file %s is not the file these settings saved: its location, size or samples differ. Restore the original file to use these settings.", filepath.Base(artifact.Path)))
+			}
+			if !accept(load) {
+				return nil, staleApproval(modelLoadError(load.ProfileKey, "artifacts", modelconfig.MovedArtifactReason(artifact.Path, modelLoadHasAuto(load.Requested))))
+			}
+			artifact.MtimeNS = mtime
+			moved[artifact.Path] = mtime
+		}
+	}
+	return moved, nil
 }
 
 func rtLoadResolution(loads []modelconfig.ModelLoad, profileKey string) *modelconfig.ResolvedLoad {
@@ -1350,6 +1414,9 @@ func (e *Executor) previewModelLoadChangeOnce(ctx context.Context, st *engineSta
 			// without requiring its old native build to remain installed. This
 			// is not a launch or a new recommendation. Artifact bindings and
 			// every sibling's frozen identity still pass the normal compiler.
+			// A moved file is judged by the Recalculate compile below, since
+			// nothing this render binds is saved.
+			beforeRT.acceptMoved = true
 			beforeRT.ModelLoads = modelconfig.CloneLoads(rt.ModelLoads)
 			for i := range beforeRT.ModelLoads {
 				load := &beforeRT.ModelLoads[i]

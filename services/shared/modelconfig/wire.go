@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"sort"
@@ -771,6 +772,39 @@ func EqualLoads(a, b []ModelLoad) bool {
 		}
 	}
 	return true
+}
+
+// MovedArtifact returns the path of the first file compiled binds with another
+// modified time than baseline binds for the same profile, or "" if there is none.
+func MovedArtifact(baseline, compiled []ModelLoad) string {
+	for _, load := range compiled {
+		if load.Resolved == nil {
+			continue
+		}
+		i := slices.IndexFunc(baseline, func(saved ModelLoad) bool { return saved.ProfileKey == load.ProfileKey })
+		if i < 0 || baseline[i].Resolved == nil {
+			continue
+		}
+		for _, artifact := range load.Resolved.Artifacts {
+			if slices.ContainsFunc(baseline[i].Resolved.Artifacts, func(saved ArtifactBinding) bool {
+				return saved.Path == artifact.Path && saved.MtimeNS != artifact.MtimeNS
+			}) {
+				return artifact.Path
+			}
+		}
+	}
+	return ""
+}
+
+// MovedArtifactReason states a refusal for a file whose modified time moved while
+// its size and samples still match. Only the file name is named: this text also
+// reaches logs. Recalculate is the acceptance an Auto load takes instead of Apply.
+func MovedArtifactReason(path string, recalculate bool) string {
+	accept := "Apply these settings with no other edits"
+	if recalculate {
+		accept = "Recalculate this model"
+	}
+	return fmt.Sprintf("Model file %s has a new modified time. Its size and first and last samples match the saved settings, but the rest of the file is not checked. If this is expected, %s to accept it; otherwise restore the file.", filepath.Base(path), accept)
 }
 
 func (p PolicyPatch) Clone() PolicyPatch {

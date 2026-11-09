@@ -930,6 +930,16 @@ before spawn, without a manager/state/content lock over file I/O. Recovery
 regenerates identical bytes from matching approved inputs. Each owned process
 retains its generation until exit. Same-stat middle-only artifact changes
 outside the samples remain outside this cheap local binding's assurance.
+Typed loads hold no full hash, so a new modified time is the only signal for a
+change between the samples, and matching samples do not show the content is the
+same. A saved binding whose file has a new time with the same target, size and
+samples is refused as stale approval, and the readback reports it as a mismatch
+that names the file. A no-edit plain Apply accepts the new time, or Recalculate
+on a frozen Auto load. Accepting is its own Apply: a plain preview with another
+edit is refused, a plain apply must send back the loads the preview returned,
+and a port change or finite model change refuses until it has happened. A file
+with another target, size or samples is refused with no acceptance; restoring
+the original file recovers.
 Superseded pending generations and unconsumed cold generations at orderly
 executor shutdown are released independently of running-process leases.
 

@@ -481,6 +481,7 @@ func (e *Executor) previewLaunch(st *engineState, request settings.Request, prep
 		if prepare != nil {
 			compile = prepare
 		}
+		rt.acceptMoved = prepare == nil
 		prepared, err := compile(command, rt)
 		if err != nil {
 			field := "serving"
@@ -511,6 +512,12 @@ func (e *Executor) previewLaunch(st *engineState, request settings.Request, prep
 	}
 	current := e.launchStateLocked(request.Engine, st)
 	limitChanged := !reflect.DeepEqual(current.WorkingSetLimitMiB, result.Settings.WorkingSetLimitMiB)
+	// Accepting a moved model file is its own Apply, so it cannot pass unseen
+	// with an edit the user made for another reason, or with a port change.
+	if moved := modelconfig.MovedArtifact(current.ModelLoads, result.Settings.ModelLoads); moved != "" && (limitChanged || current.ServerPort != result.Settings.ServerPort || current.LaunchText != result.Settings.LaunchText || !servingWithoutReview(current.Serving).Equal(servingWithoutReview(request.Settings.Serving))) {
+		result.Errors["modelLoads.artifacts"] = modelconfig.MovedArtifactReason(moved, false)
+		return result
+	}
 	changed := limitChanged || current.ServerPort != result.Settings.ServerPort || current.LaunchText != result.Settings.LaunchText || !current.Serving.Equal(result.Settings.Serving) || !modelconfig.EqualLoads(current.ModelLoads, result.Settings.ModelLoads)
 	if limitChanged {
 		before, _ := json.Marshal(current.WorkingSetLimitMiB)
@@ -525,6 +532,23 @@ func (e *Executor) previewLaunch(st *engineState, request settings.Request, prep
 		return fail(current.Reason)
 	}
 	return result
+}
+
+// servingWithoutReview leaves what the user declared, without the review digest
+// a preview may clear and the file times an acceptance moves.
+func servingWithoutReview(config *engines.ServingConfig) *engines.ServingConfig {
+	cleared := config.Clone()
+	if cleared != nil {
+		for i := range cleared.Models {
+			cleared.Models[i].ExpectedNativeSourceDigest = ""
+			for _, artifact := range cleared.Models[i].Artifacts {
+				if artifact.Binding != nil {
+					artifact.Binding.MtimeNS = ""
+				}
+			}
+		}
+	}
+	return cleared
 }
 
 // ConfigureLaunch owns the entire engine operation lock, including the narrow
