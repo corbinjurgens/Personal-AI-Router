@@ -6,8 +6,9 @@
 //
 //   - Scheduler process tests drive workload, telemetry, staleness, and restart
 //     baselines over stdin and inspect complete schedule:priority snapshots.
-//   - TestProxySetPriorityViaBroker exercises the proxy's node/set-priority
-//     through the broker's llamacpp-proxy:<method> relay end-to-end.
+//   - TestBrokerRefusesClientSetPriority confirms a client cannot reach the
+//     proxy's node/set-priority through the broker's llamacpp-proxy:<method>
+//     relay; only the broker's own sendPriority delivers a ranking.
 //   - TestProxyConcurrentBurstDistribution holds real upstream requests open and
 //     verifies the proxy balances before scheduler feedback can arrive.
 //   - TestBrokerSpawnsScheduler confirms the broker comes up healthy with the
@@ -438,8 +439,7 @@ func runBlockedProxyBurst(t *testing.T, pending, pressure []int, requests int) (
 			Rank:        rank,
 		})
 	}
-	callBrokerRPC(t, stdin, msgs, requestID, "llamacpp-proxy:node/set-priority",
-		schedulerwire.Priority{Generation: 1, Nodes: order, Ranks: ranks})
+	deliverFixturePriority(t, control, schedulerwire.Priority{Generation: 1, Nodes: order, Ranks: ranks})
 
 	// Workload and request notifications can exceed the reader's buffer while
 	// the upstreams are blocked. Drain them after setup so proxy writes never
@@ -553,9 +553,25 @@ func assertBurstTotalsSkew(
 	}
 }
 
-// TestProxySetPriorityViaBroker: the proxy's node/set-priority is reachable
-// through the broker's llamacpp-proxy:<method> relay and returns {count}.
-func TestProxySetPriorityViaBroker(t *testing.T) {
+// deliverFixturePriority hands the proxy a ranking the way the broker's
+// sendPriority does: an unaddressed node/set-priority on the proxy's stdin.
+// Clients cannot send it (TestBrokerRefusesClientSetPriority).
+func deliverFixturePriority(t *testing.T, control *fixtureProxyControl, priority schedulerwire.Priority) {
+	t.Helper()
+	reply := control.processCall(t, "node/set-priority", priority)
+	var result struct {
+		Count int `json:"count"`
+	}
+	if reply.Error != nil || json.Unmarshal(reply.Result, &result) != nil || result.Count != len(priority.Nodes) {
+		t.Fatalf("node/set-priority delivery = result %s error %+v, want count %d", reply.Result, reply.Error, len(priority.Nodes))
+	}
+}
+
+// TestBrokerRefusesClientSetPriority: node/set-priority is the broker's own
+// call to its proxies. A client that addresses it to the proxy component is
+// refused before the relay (V46), while other addressed proxy requests still
+// relay.
+func TestBrokerRefusesClientSetPriority(t *testing.T) {
 	stdin, msgs, cleanup := startBrokerProc(t,
 		"--scanner-path", scannerBin,
 		"--proxy-path", proxyBin, "--proxy-engines", "llamacpp",
@@ -565,20 +581,13 @@ func TestProxySetPriorityViaBroker(t *testing.T) {
 	waitForMethod(t, msgs, "app:ready", 10*time.Second)
 	waitEngineProxyReady(t, "llamacpp-proxy", stdin, msgs, 15*time.Second)
 
-	// A generation is required: an unversioned snapshot would clear the
-	// reservations without advancing the epoch, so the proxy rejects one.
 	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","id":70,"method":"llamacpp-proxy:node/set-priority","params":{"generation":1,"nodes":["alpha","beta","gamma"]}}`)
-	resp := waitForResponse(t, msgs, 5*time.Second)
-	var r struct {
-		Count int `json:"count"`
+	resp := waitForResponseID(t, msgs, 70, 5*time.Second)
+	if resp.Error == nil || resp.Error.Code != -32601 || len(resp.Result) != 0 {
+		t.Fatalf("client node/set-priority was not refused: result %s error %+v", resp.Result, resp.Error)
 	}
-	if err := json.Unmarshal(resp.Result, &r); err != nil {
-		t.Fatalf("node/set-priority result = %s (err %v)", resp.Result, err)
-	}
-	if r.Count != 3 {
-		t.Fatalf("node/set-priority count = %d, want 3", r.Count)
-	}
-	t.Logf("proxy accepted priority list of %d nodes via broker relay", r.Count)
+	// The refusal is specific to the private method: the relay itself works.
+	callBrokerRPC(t, stdin, msgs, 71, "llamacpp-proxy:nodes/list", nil)
 }
 
 // TestLlamaCPPProxyIgnoresPriorityNodesAbsentFromDiscovery: the scheduler
@@ -632,10 +641,7 @@ func TestLlamaCPPProxyIgnoresPriorityNodesAbsentFromDiscovery(t *testing.T) {
 
 	// Priority puts a peer that never advertised llama.cpp first. The proxy must
 	// skip it and route to the discovered real-engine node.
-	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","id":91,"method":"llamacpp-proxy:node/set-priority","params":{"generation":1,"nodes":["no-engine-peer","real-engine"]}}`)
-	if resp := waitForResponse(t, msgs, 5*time.Second); resp.Error != nil {
-		t.Fatalf("llamacpp-proxy:node/set-priority rejected: %d %s", resp.Error.Code, resp.Error.Message)
-	}
+	deliverFixturePriority(t, control, schedulerwire.Priority{Generation: 1, Nodes: []string{"no-engine-peer", "real-engine"}})
 
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Post(

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"nvpair-engine-manager/internal/artifactbinding"
 	"nvpair-shared/engines"
 	"nvpair-shared/modelconfig"
 )
@@ -473,9 +474,15 @@ func TestLinkedModelHFBinding(t *testing.T) {
 		if err := os.Symlink(outside, path); err != nil {
 			t.Skipf("symlink unavailable: %v", err)
 		}
+		// The binding records the link's resolved target. macOS temporary
+		// directories sit under the /var -> /private/var link.
+		target, err := artifactbinding.Resolve(outside)
+		if err != nil {
+			t.Fatal(err)
+		}
 		list, err := boundedLlamaCacheArtifacts(context.Background(), store, model, servingFileAccess{})
-		if err != nil || len(list.Files) != 1 || list.Files[0].abs != outside {
-			t.Fatalf("outside artifact: files=%v err=%v", list.Files, err)
+		if err != nil || len(list.Files) != 1 || list.Files[0].abs != target {
+			t.Fatalf("outside artifact: files=%v err=%v, want target %s", list.Files, err, target)
 		}
 		if _, err := boundedLlamaCacheArtifactsExpected(context.Background(), store, model, servingFileAccess{}, list); err != nil {
 			t.Fatal(err)

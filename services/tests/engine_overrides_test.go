@@ -201,9 +201,17 @@ func (p *fixtureProxyControl) env() []string {
 
 func (p *fixtureProxyControl) call(t *testing.T, engine, method string, params any) jsonrpc.Message {
 	t.Helper()
+	return p.processCall(t, engines.AddressMethod(engine, method), params)
+}
+
+// processCall writes an unaddressed request to the proxy's stdin, the channel
+// the broker's own process-wide calls use (for example sendPriority's
+// node/set-priority, which clients cannot send).
+func (p *fixtureProxyControl) processCall(t *testing.T, method string, params any) jsonrpc.Message {
+	t.Helper()
 	var reply jsonrpc.Message
 	observationWorkerHTTP(t, p.client, fmt.Sprintf("http://127.0.0.1:%d", p.port), "/control", jsonrpc.Message{
-		JSONRPC: "2.0", Method: engines.AddressMethod(engine, method), Params: mustMarshal(t, params),
+		JSONRPC: "2.0", Method: method, Params: mustMarshal(t, params),
 	}, &reply)
 	return reply
 }

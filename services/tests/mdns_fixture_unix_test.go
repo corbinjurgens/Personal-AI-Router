@@ -47,7 +47,7 @@ func registerMDNSFixture(fixture mdnsAdvertiserFixture, iface net.Interface) (fu
 	return func() error { server.Shutdown(); return nil }, nil
 }
 
-func mdnsBrowse(t *testing.T, resolver *zeroconf.Resolver, ctx context.Context, service, domain string, entries chan<- *zeroconf.ServiceEntry, _ []net.Interface) error {
+func mdnsBrowse(t *testing.T, resolver mdnsResolver, ctx context.Context, service, domain string, entries chan<- *zeroconf.ServiceEntry, _ []net.Interface) error {
 	t.Helper()
 	return resolver.Browse(ctx, service, domain, entries)
 }

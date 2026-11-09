@@ -231,7 +231,7 @@ func serveMDNSFixture(ctx context.Context, conn *net.UDPConn, sender fixtureMDNS
 
 // zeroconf still receives/decodes entries. Its Windows IfIndex writes do not
 // select egress, so supplement them after Browse has started its receiver.
-func mdnsBrowse(t *testing.T, resolver *zeroconf.Resolver, ctx context.Context, service, domain string, entries chan<- *zeroconf.ServiceEntry, ifaces []net.Interface) error {
+func mdnsBrowse(t *testing.T, resolver mdnsResolver, ctx context.Context, service, domain string, entries chan<- *zeroconf.ServiceEntry, ifaces []net.Interface) error {
 	t.Helper()
 	if ifaces == nil {
 		ifaces = []net.Interface{mdnsFixtureInterface(t)}

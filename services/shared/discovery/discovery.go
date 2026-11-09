@@ -512,35 +512,111 @@ func (b *Browser) browse(ctx context.Context) map[string]Node {
 	}, sendMulticastQuery, context.WithTimeout, context.WithTimeout)
 }
 
+// Resolver browses each IP family with its own zeroconf client.
+//
+// zeroconf sends its query from the socket it reads, on every selected
+// interface, and stops reading at the first read error. On macOS an IPv4
+// multicast send on loopback, or on an interface without an IPv4 address,
+// leaves ENETUNREACH pending on that socket. A single interface list for both
+// families therefore ended IPv4 reception after the first query, and the
+// _nvpair-node responder answers over IPv4 only. Each family is limited to
+// interfaces that carry an address of that family; see browseInterfaces.
+type Resolver struct {
+	families []*zeroconf.Resolver
+}
+
 // NewResolver omits addressless interfaces before zeroconf joins and queries
 // them. On macOS a write on an up, addressless virtual interface can stall
-// until cancellation, consuming the entire scan's send budget. Keep addressed
-// IPv4 and IPv6 interfaces, including loopback for local discovery fixtures.
-func NewResolver(options ...zeroconf.ClientOption) (*zeroconf.Resolver, error) {
+// until cancellation, consuming the entire scan's send budget.
+func NewResolver() (*Resolver, error) {
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return nil, err
 	}
-	ifaces = browseInterfaces(ifaces, func(iface net.Interface) ([]net.Addr, error) { return iface.Addrs() })
-	if len(ifaces) == 0 {
-		// An empty SelectIfaces makes zeroconf enumerate every interface again.
+	v4, v6 := browseInterfaces(ifaces, func(iface net.Interface) ([]net.Addr, error) { return iface.Addrs() })
+	r := &Resolver{}
+	for _, family := range []struct {
+		traffic zeroconf.IPType
+		ifaces  []net.Interface
+	}{{zeroconf.IPv4, v4}, {zeroconf.IPv6, v6}} {
+		if len(family.ifaces) == 0 {
+			// An empty SelectIfaces makes zeroconf enumerate every interface again.
+			continue
+		}
+		z, err := zeroconf.NewResolver(zeroconf.SelectIPTraffic(family.traffic), zeroconf.SelectIfaces(family.ifaces))
+		if err != nil {
+			return nil, err
+		}
+		r.families = append(r.families, z)
+	}
+	if len(r.families) == 0 {
 		return nil, fmt.Errorf("no addressed multicast interfaces")
 	}
-	return zeroconf.NewResolver(append([]zeroconf.ClientOption{zeroconf.SelectIfaces(ifaces)}, options...)...)
+	return r, nil
 }
 
-func browseInterfaces(ifaces []net.Interface, addresses func(net.Interface) ([]net.Addr, error)) []net.Interface {
-	var usable []net.Interface
+// Browse follows zeroconf's contract: entries is closed once ctx ends, also
+// after an error, when every family has stopped.
+func (r *Resolver) Browse(ctx context.Context, service, domain string, entries chan<- *zeroconf.ServiceEntry) error {
+	ctx, cancel := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	var err error
+	for _, z := range r.families {
+		family := make(chan *zeroconf.ServiceEntry)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for entry := range family {
+				select {
+				case entries <- entry:
+				case <-ctx.Done():
+				}
+			}
+		}()
+		if err = z.Browse(ctx, service, domain, family); err != nil {
+			cancel()
+			break
+		}
+	}
+	go func() {
+		wg.Wait()
+		cancel()
+		close(entries)
+	}()
+	return err
+}
+
+// browseInterfaces returns the up, multicast interfaces holding an IPv4 and an
+// IPv6 address respectively. IPv4 omits loopback, which carries no IPv4
+// multicast route on macOS; local fixtures on loopback remain reachable over
+// IPv6.
+func browseInterfaces(ifaces []net.Interface, addresses func(net.Interface) ([]net.Addr, error)) (v4, v6 []net.Interface) {
 	for _, iface := range ifaces {
 		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagMulticast == 0 {
 			continue
 		}
 		addrs, err := addresses(iface)
-		if err == nil && len(addrs) != 0 {
-			usable = append(usable, iface)
+		if err != nil {
+			continue
+		}
+		var hasV4, hasV6 bool
+		for _, addr := range addrs {
+			if ipnet, ok := addr.(*net.IPNet); ok {
+				if ipnet.IP.To4() != nil {
+					hasV4 = true
+				} else if ipnet.IP.To16() != nil {
+					hasV6 = true
+				}
+			}
+		}
+		if hasV4 && iface.Flags&net.FlagLoopback == 0 {
+			v4 = append(v4, iface)
+		}
+		if hasV6 {
+			v6 = append(v6, iface)
 		}
 	}
-	return usable
+	return v4, v6
 }
 
 type browseResolver interface {
