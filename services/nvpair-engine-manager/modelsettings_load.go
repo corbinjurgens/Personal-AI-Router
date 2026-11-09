@@ -983,13 +983,15 @@ func bindMovedArtifacts(ctx context.Context, loads, asserted []modelconfig.Model
 				return nil, modelLoadError(load.ProfileKey, "artifacts", fmt.Sprintf("Model file %s is not the file these settings saved: its location, size or samples differ. Restore the original file to use these settings.", filepath.Base(artifact.Path)))
 			}
 			if !accept(load) {
-				if refusedProfile == "" {
+				// A refusal that says Recalculate names an Auto profile to Recalculate.
+				auto := modelLoadHasAuto(load.Requested)
+				if refusedProfile == "" || (auto && !recalculate) {
 					refusedProfile = load.ProfileKey
 				}
 				if !slices.Contains(refused, artifact.Path) {
 					refused = append(refused, artifact.Path)
 				}
-				recalculate = recalculate || modelLoadHasAuto(load.Requested)
+				recalculate = recalculate || auto
 				continue
 			}
 			artifact.MtimeNS = mtime

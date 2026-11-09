@@ -372,3 +372,20 @@ func TestMovedFileRecalculateNamesSiblingFile(t *testing.T) {
 		t.Fatal("a preview changed the saved loads")
 	}
 }
+
+// A refusal that says Recalculate names an Auto profile to Recalculate, even
+// when a finite profile with a moved file comes first.
+func TestMovedFileRecalculateRefusalNamesAutoProfile(t *testing.T) {
+	f, request, _ := autoTestFrozenLaunch(t)
+	f.st.plat.Runtime.ModelLoads = modelconfig.CloneLoads(request.Settings.ModelLoads)
+	loads := f.st.plat.Runtime.ModelLoads
+	if len(loads) < 2 || loads[0].ProfileKey != "medium-model" || modelLoadHasAuto(loads[0].Requested) || loads[1].ProfileKey != "weak-model" || !modelLoadHasAuto(loads[1].Requested) {
+		t.Fatal("fixture no longer orders the finite profile before the Auto profile")
+	}
+	movedFileLater(t, filepath.Join(f.root, "medium.gguf"))
+	movedFileLater(t, filepath.Join(f.root, "weak.gguf"))
+	err := movedFileApproved(t, f)
+	if err == nil || !isStaleApproval(err) || !strings.Contains(err.Error(), "Recalculate") || !strings.Contains(err.Error(), `"weak-model"`) || strings.Contains(err.Error(), `"medium-model"`) {
+		t.Fatalf("approved compile: %v", err)
+	}
+}
