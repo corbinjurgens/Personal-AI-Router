@@ -170,7 +170,7 @@ func (s *Service) superviseBroker() {
 		if err := s.checkBuildApplyEntry(context.Background()); err != nil {
 			// An accepted transaction owns the next executable lifetime. A
 			// crash of the predecessor broker cannot create an old-byte retry.
-			slog.Warn("broker start gated by unresolved build apply")
+			slog.Warn("broker start gated by the build-apply check", "reason", buildApplyStartupRefusal(err))
 			return
 		}
 		proc, err := s.cfg.spawn()

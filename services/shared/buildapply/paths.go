@@ -67,7 +67,7 @@ func checkRealAncestors(path string) (os.FileInfo, error) {
 			return nil, err
 		}
 		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-			return nil, errors.New("linked root or ancestor")
+			return nil, fmt.Errorf("linked root or ancestor: %s", current)
 		}
 		if err := nativePathCheck(current, info, false); err != nil {
 			return nil, err

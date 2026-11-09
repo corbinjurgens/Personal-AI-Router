@@ -322,6 +322,17 @@ func buildApplyStartupGate() error {
 	return servicectl.CheckBuildApplyStartup()
 }
 
+// buildApplyStartupRefusal is the line a refused start gives the user. An
+// unreadable journal (a link above it, for example) is not an unresolved build
+// apply, so it reports its own reason rather than pointing at apply-build.
+func buildApplyStartupRefusal(err error) string {
+	var unreadable *servicectl.JournalUnreadableError
+	if errors.As(err, &unreadable) {
+		return unreadable.Error()
+	}
+	return "an unresolved build apply prevents startup; read apply-build status --json"
+}
+
 func (s *Service) buildApplyAllowsActivation(msg *jsonrpc.Message) bool {
 	if msg.Method != "node:set-availability" {
 		return true
