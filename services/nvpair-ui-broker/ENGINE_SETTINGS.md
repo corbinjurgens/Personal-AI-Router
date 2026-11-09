@@ -302,6 +302,10 @@ anchor. A plain apply cannot change its model loads, which must echo the target
 baseline; what an unreviewed apply can still change there is launch text, ports
 and the working-set limit.
 
+The port-only `engine:set-port` sends the saved digest with no client preview. It
+is refused on a typed model-load configuration with a serving declaration, whose
+digest covers the server port; that caller previews and applies instead.
+
 `unverified` means this manager started the running engine with the saved value,
 but its containment has not verified every live member: a member could not be
 capped (it is terminated, and the status returns to `applied` after the next clean

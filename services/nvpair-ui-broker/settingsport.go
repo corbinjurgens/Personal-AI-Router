@@ -12,13 +12,17 @@ import (
 )
 
 // handleSettingsPortRPC serves the port-only RPCs — engine:set-port,
-// <engine>-proxy:set-port — which nvpair-tui calls to move
-// a single port without rendering the full launch settings form. They keep
-// their own narrow request and response shapes, but run through the same
-// authoritative settings operation as the desktop editor, so a port change
-// made from the terminal cannot diverge from one made from the UI. In
-// particular a proxy change now fails on a busy port instead of silently
-// binding a different one.
+// <engine>-proxy:set-port — for local service callers that move a single port
+// without rendering the full launch settings form. No shipped client calls
+// them. They keep their own narrow request and response shapes, but run through
+// the same authoritative settings operation as the desktop editor, so a port
+// change made here cannot diverge from one made from the UI. In particular a
+// proxy change now fails on a busy port instead of silently binding a different
+// one.
+//
+// They send the saved native source digest with no client preview, so a port
+// that moves the digest is refused rather than approved unreviewed: a typed
+// model-load configuration with a serving declaration has to preview and apply.
 //
 // proxyEngine selects which port the request addresses: "" is the engine's own
 // server port, and a non-empty value names the proxy in front of that engine.

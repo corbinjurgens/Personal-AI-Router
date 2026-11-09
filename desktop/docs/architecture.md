@@ -434,9 +434,12 @@ per-engine option catalog. Semantic validation is limited to managed networking
 and CORS. The owning node rejects managed CORS origin changes relayed from a peer;
 ordinary environment assignments can be edited locally or by a pinned peer.
 
-`engine:set-port` remains a separate port-only RPC for the TUI. It runs the same
-authoritative settings operation rather than forwarding to the engine manager,
-so both entry points validate, restart, and persist identically.
+`engine:set-port` remains a separate port-only RPC for local service callers; no
+shipped client uses it. It runs the same authoritative settings operation rather
+than forwarding to the engine manager, so both entry points validate, restart,
+and persist identically. It sends no reviewed preview, so it is refused when the
+port change moves the native source digest, which a typed model-load
+configuration with a serving declaration does.
 
 All engine proxies are cluster-aware. For model-bearing inference,
 each proxy first keeps only nodes whose per-engine discovery inventory advertises
