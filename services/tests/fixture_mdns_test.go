@@ -4,12 +4,20 @@
 package tests
 
 import (
+	"context"
 	"crypto/rand"
 	"fmt"
 	"testing"
 
+	"github.com/grandcat/zeroconf"
 	"nvpair-shared/noderec"
 )
+
+// mdnsResolver is satisfied by zeroconf's resolver and by the product's
+// per-family discovery.Resolver.
+type mdnsResolver interface {
+	Browse(ctx context.Context, service, domain string, entries chan<- *zeroconf.ServiceEntry) error
+}
 
 // Participants receive this value explicitly; no process-wide test registry.
 func newFixtureMDNSNamespace(t *testing.T) noderec.MDNSNamespace {

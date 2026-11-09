@@ -18,33 +18,50 @@ import (
 
 type fakeBrowseResolver struct{}
 
-func TestBrowseInterfacesExcludeAddresslessAdapters(t *testing.T) {
+func TestBrowseInterfacesSelectEachFamilyByAddress(t *testing.T) {
 	active := net.FlagUp | net.FlagMulticast
 	ifaces := []net.Interface{
 		{Name: "ipv4", Flags: active},
 		{Name: "ipv6", Flags: active},
+		{Name: "dual", Flags: active},
 		{Name: "loopback", Flags: active | net.FlagLoopback},
 		{Name: "addressless", Flags: active},
 		{Name: "removed", Flags: active},
 		{Name: "down", Flags: net.FlagMulticast},
 		{Name: "unicast", Flags: net.FlagUp},
 	}
-	got := browseInterfaces(ifaces, func(iface net.Interface) ([]net.Addr, error) {
+	v4Addr := &net.IPNet{IP: net.IPv4(192, 0, 2, 1), Mask: net.CIDRMask(24, 32)}
+	v6Addr := &net.IPNet{IP: net.ParseIP("fe80::1"), Mask: net.CIDRMask(64, 128)}
+	v4, v6 := browseInterfaces(ifaces, func(iface net.Interface) ([]net.Addr, error) {
 		switch iface.Name {
 		case "addressless":
 			return nil, nil
 		case "removed":
 			return nil, errors.New("interface disappeared")
 		case "ipv6":
-			return []net.Addr{&net.IPNet{IP: net.ParseIP("fe80::1"), Mask: net.CIDRMask(64, 128)}}, nil
+			return []net.Addr{v6Addr}, nil
+		case "dual":
+			return []net.Addr{v6Addr, v4Addr}, nil
 		case "loopback":
-			return []net.Addr{&net.IPNet{IP: net.IPv4(127, 0, 0, 1), Mask: net.CIDRMask(8, 32)}}, nil
+			return []net.Addr{&net.IPNet{IP: net.IPv4(127, 0, 0, 1), Mask: net.CIDRMask(8, 32)}, &net.IPNet{IP: net.IPv6loopback, Mask: net.CIDRMask(128, 128)}}, nil
 		default:
-			return []net.Addr{&net.IPNet{IP: net.IPv4(192, 0, 2, 1), Mask: net.CIDRMask(24, 32)}}, nil
+			return []net.Addr{v4Addr}, nil
 		}
 	})
-	if !slices.EqualFunc(got, ifaces[:3], func(a, b net.Interface) bool { return a.Name == b.Name }) {
-		t.Fatalf("browse interfaces = %v, want %v", got, ifaces[:3])
+	names := func(list []net.Interface) []string {
+		var out []string
+		for _, iface := range list {
+			out = append(out, iface.Name)
+		}
+		return out
+	}
+	// An IPv4 query on loopback or on an interface without an IPv4 address
+	// leaves an error on zeroconf's socket that ends its IPv4 reception.
+	if got, want := names(v4), []string{"ipv4", "dual"}; !slices.Equal(got, want) {
+		t.Fatalf("IPv4 browse interfaces = %v, want %v", got, want)
+	}
+	if got, want := names(v6), []string{"ipv6", "dual", "loopback"}; !slices.Equal(got, want) {
+		t.Fatalf("IPv6 browse interfaces = %v, want %v", got, want)
 	}
 }
 
