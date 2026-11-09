@@ -44,7 +44,12 @@ type nativeSandbox struct {
 
 func newNativeSandbox(t *testing.T, endpoint string) nativeSandbox {
 	t.Helper()
-	dir := shortTempDir(t)
+	// The build-apply startup gate refuses a profile reached through a symlink,
+	// and macOS's default temp directory is under /var -> /private/var.
+	dir, err := filepath.EvalSymlinks(shortTempDir(t))
+	if err != nil {
+		t.Fatalf("resolve the sandbox directory: %v", err)
+	}
 	profile := filepath.Join(dir, "profile")
 	if err := os.Mkdir(profile, 0o700); err != nil {
 		t.Fatalf("create the empty profile: %v", err)
