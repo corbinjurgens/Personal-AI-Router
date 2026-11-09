@@ -25,6 +25,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -361,6 +362,51 @@ func modelBufferAssertOnlyStub(t *testing.T, root, stub string) {
 	}
 }
 
+// modelBufferStubHeld is set while a fixture in this process owns the metadata
+// stub, and stays set when its cleanup could not remove it, so only an earlier
+// process's leftover is ever replaced.
+var modelBufferStubHeld atomic.Bool
+
+// modelBufferRemoveStaleStub removes the stub that an interrupted earlier run
+// left beside the fixed image. Only the exact inert bytes are removed, and only
+// while no fixture in this process owns them and no other process runs the
+// fixed image. The wrapper swaps that image in only while nothing runs it, so a
+// leftover then belongs to no live run. Anything else is left for the exclusive
+// create to refuse.
+func modelBufferRemoveStaleStub(t *testing.T, library, image string, stub []byte) {
+	t.Helper()
+	data, err := os.ReadFile(library)
+	if errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	if err != nil || !bytes.Equal(data, stub) || modelBufferStubHeld.Load() {
+		return
+	}
+	canonical, err := serviceExecutablePath(image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inventory := &serviceProcessInventory{paths: []string{canonical}, known: map[int32]serviceProcessIdentity{}}
+	live, err := inventory.scan()
+	if err != nil {
+		t.Fatalf("inspect fixed image processes before removing stale stub %s: %v", library, err)
+	}
+	self := false
+	for _, identity := range live {
+		if identity.PID != int32(os.Getpid()) {
+			t.Fatalf("stale stub %s kept: fixed image also runs as %+v", library, identity)
+		}
+		self = true
+	}
+	if !self {
+		t.Fatalf("stale stub %s kept: the process scan did not find this test process at %s", library, canonical)
+	}
+	if err := os.Remove(library); err != nil {
+		t.Fatalf("remove stale stub %s: %v", library, err)
+	}
+	t.Logf("model_buffer_stale_stub_removed path=%s bytes=%d", library, len(data))
+}
+
 func newModelBufferProcessFixture(t *testing.T, configure ...func(*modelSettingsProcessFixture)) *modelBufferProcessFixture {
 	t.Helper()
 	if runtime.GOOS != "windows" {
@@ -389,12 +435,13 @@ func newModelBufferProcessFixture(t *testing.T, configure ...func(*modelSettings
 	if !filepath.IsAbs(expectedImage) || !strings.EqualFold(filepath.Clean(expectedImage), filepath.Clean(f.image)) || !strings.Contains(os.Getenv("GOFLAGS"), "nvpair-test-exec") {
 		t.Fatal("requires existing registered fixed image and firewall rule via serialized PC3 wrapper")
 	}
-	fixedBefore, imageBefore := modelBufferFixedSnapshot(t, imageDir, f.image)
 	f.library = filepath.Join(imageDir, "libggml-pair-model-buffer-fixture.dll")
 	stub := []byte("Synthetic metadata binding only, never a loadable library.\n")
 	if bytes.HasPrefix(stub, []byte("MZ")) {
 		t.Fatal("fixture metadata stub must be non-PE")
 	}
+	modelBufferRemoveStaleStub(t, f.library, f.image, stub)
+	fixedBefore, imageBefore := modelBufferFixedSnapshot(t, imageDir, f.image)
 	junctionCreated, stubCreated := false, false
 	// Registered after TempDir, before processes: LIFO closes every process,
 	// removes only the junction, then the owned stub, then checks fixed state.
@@ -410,6 +457,8 @@ func newModelBufferProcessFixture(t *testing.T, configure ...func(*modelSettings
 				t.Errorf("owned stub changed; preserve stale leftover for root at %s: %v", f.library, err)
 			} else if err := os.Remove(f.library); err != nil {
 				t.Error(err)
+			} else {
+				modelBufferStubHeld.Store(false)
 			}
 		}
 		fixedAfter, imageAfter := modelBufferFixedSnapshot(t, imageDir, f.image)
@@ -450,6 +499,7 @@ func newModelBufferProcessFixture(t *testing.T, configure ...func(*modelSettings
 		t.Fatalf("metadata stub path occupied or unavailable; preserve stale leftover for root at %s: %v", f.library, err)
 	}
 	stubCreated = true
+	modelBufferStubHeld.Store(true)
 	_, writeErr := library.Write(stub)
 	if err := errors.Join(writeErr, library.Close()); err != nil {
 		t.Fatal(err)

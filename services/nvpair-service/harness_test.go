@@ -67,6 +67,10 @@ func (b *fakeBroker) proc() *brokerProc {
 		wait:   func() int { return <-b.exitCh },
 		kill: func() error {
 			b.exitOnce.Do(func() { close(b.killed) })
+			// A killed process's blocked write ends with it. Close the output
+			// ends first: a write nobody reads holds wmu, which exit needs.
+			_ = b.stdoutW.Close()
+			_ = b.stderrW.Close()
 			b.exit(-1)
 			return nil
 		},

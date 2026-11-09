@@ -340,6 +340,53 @@ func TestSignalStopsTheBrokerCleanly(t *testing.T) {
 	}
 }
 
+// A stop that lands while the broker is still being spawned finds no broker to
+// shut down, so supervision kills the new one before reading any of its output.
+func TestStopDuringBrokerSpawnKillsThatBroker(t *testing.T) {
+	dir := shortTempDir(t)
+	var svc *Service
+	spawned := make(chan *fakeBroker, 1)
+	svc = newService(config{
+		endpoint: testEndpoint(dir),
+		spawn: func() (*brokerProc, error) {
+			b := newFakeBroker(1, false)
+			go b.run()
+			spawned <- b
+			for !svc.isStopping() {
+				time.Sleep(time.Millisecond)
+			}
+			return b.proc(), nil
+		},
+		backoff:                func(int) time.Duration { return time.Hour },
+		stopGrace:              2 * time.Second,
+		shutdownRequestTimeout: 500 * time.Millisecond,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- svc.Run(ctx) }()
+	var b *fakeBroker
+	select {
+	case b = <-spawned:
+	case <-time.After(waitTimeout):
+		cancel()
+		t.Fatal("no broker spawned")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(waitTimeout):
+		t.Fatal("Run did not return when stopped during broker spawn")
+	}
+	select {
+	case <-b.killed:
+	default:
+		t.Fatal("the broker spawned during stop was not killed")
+	}
+}
+
 func TestRequestsFailFastWhileNoBrokerRuns(t *testing.T) {
 	dir := shortTempDir(t)
 	endpoint := testEndpoint(dir)
