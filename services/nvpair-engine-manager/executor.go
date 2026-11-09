@@ -54,6 +54,11 @@ type engineState struct {
 	plat       *Platform
 	logs       *logBuffer
 	installDir string
+	// restoreApprovalRefused records that the last restore, at startup, on resume
+	// or in a crash relaunch, refused a stale approval. A successful start, sleep
+	// or uninstall ends it; a failed start, before or after spawn, keeps it. In
+	// memory only: a new process retries the restore.
+	restoreApprovalRefused bool
 	// modelsDir is the resolved {models_dir}: the engine's model store, which no
 	// removal this service performs may delete. Empty when the manifest declares
 	// none, in which case uninstall has nothing to preserve.

@@ -1190,6 +1190,55 @@ func llamaCPPSettings() enginesettings.Snapshot {
 	}
 }
 
+// TestSettingsMismatchIsShownAndStaysEditable covers a saved configuration the
+// current build refuses. The backend's reason reaches the operator when the
+// snapshot arrives and again when a field opens, and the field still opens:
+// submitting it is the recovery, including with the value unchanged.
+func TestSettingsMismatchIsShownAndStaysEditable(t *testing.T) {
+	const reason = "Native source conflict; obtain a fresh preview before applying."
+	stale := llamaCPPSettings()
+	stale.Serving = &engines.ServingReadback{Status: "mismatch", Reason: reason}
+
+	t.Run("a snapshot that brings a mismatch reports it", func(t *testing.T) {
+		d := localDetail()
+		d.settings = map[string]enginesettings.Snapshot{}
+		d.cacheSettings(stale)
+		if got := d.status.render(); !strings.Contains(got, "Native source conflict") {
+			t.Errorf("status %q does not carry the reason", got)
+		}
+	})
+	t.Run("a snapshot with no mismatch reports nothing", func(t *testing.T) {
+		d := localDetail()
+		d.settings = map[string]enginesettings.Snapshot{}
+		clean := llamaCPPSettings()
+		clean.Serving = &engines.ServingReadback{Status: "unverified", Reason: "Native launch configured."}
+		d.cacheSettings(clean)
+		if got := d.status.render(); strings.Contains(got, "Native launch configured") {
+			t.Errorf("status %q reports a readback that is not a mismatch", got)
+		}
+	})
+	t.Run("the field opens with the reason and resubmits unchanged", func(t *testing.T) {
+		d := localDetail()
+		seedSettings(d, stale)
+		if settingsUnavailableReason(stale) != "" {
+			t.Fatal("a mismatch must not refuse the edit")
+		}
+		d.openSettingsField(stale, detailInputEnginePort)
+		if d.mode != detailInputEnginePort {
+			t.Fatalf("mode = %v, field did not open", d.mode)
+		}
+		got := d.status.render()
+		for _, want := range []string{"Native source conflict", "re-approve", "Recalculate in the desktop app"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("status %q does not give the reason and both ways out: missing %q", got, want)
+			}
+		}
+		if d.submitSettings(detailInputEnginePort, "8081", "8081") == nil {
+			t.Fatal("submitting the unchanged value issued no preview")
+		}
+	})
+}
+
 // TestSettingsKeysAskTheBackendBeforeOpening checks an edit key fetches the
 // snapshot rather than opening a field against values this screen guessed.
 //

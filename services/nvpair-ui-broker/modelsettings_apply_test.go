@@ -211,6 +211,81 @@ func (h *modelSettingsHarness) answer(method string, raw json.RawMessage) (any, 
 	return map[string]bool{"ok": true}, ""
 }
 
+// A plain request compiles from the target's own loads whatever it sent, and may
+// send back only those loads or that compile's result. The fixture's compile moves
+// the build, as a rebuilt engine does.
+func TestPlainSettingsCompileFromTargetLoadsAndEchoOnlyTheResult(t *testing.T) {
+	h := newModelSettingsHarness(t)
+	// A plain preview checks the fixture's ports against this machine; a model
+	// change, which the harness's other tests send, does not.
+	useSyntheticBrokerPortChecks(t, h.b)
+	if receipt, err := h.b.applyEngineSettings(context.Background(), h.review(t, h.request(t, true), ""), ""); err != nil || receipt.Phase != "succeeded" {
+		t.Fatalf("typed setup = %+v, %v", receipt, err)
+	}
+	saved := h.record(t).Snapshot
+	if len(saved.Settings.ModelLoads) == 0 {
+		t.Fatal("setup saved no typed load")
+	}
+	h.build = "rebuilt"
+	plain := settings.Request{Engine: "llamacpp", ExpectedRevision: saved.Revision, Settings: saved.Settings.Clone()}
+	preview, err := h.b.previewEngineSettings(context.Background(), plain, "")
+	if err != nil || len(preview.Errors) != 0 {
+		t.Fatalf("preview = %+v, %v", preview, err)
+	}
+	if preview.Settings.ModelLoads[0].Resolved.NativeBuildID != "rebuilt" {
+		t.Fatal("fixture compile did not move the build")
+	}
+
+	forged := plain
+	forged.RequestID = "forged-loads"
+	forged.Settings = preview.Settings.Clone()
+	forged.Settings.ModelLoads[0].Resolved.NativeBuildID = "caller"
+	calls := len(h.engine.snapshot())
+	configures := h.configureCount
+	for _, attempt := range []func() error{
+		func() error { _, err := h.b.previewEngineSettings(context.Background(), forged, ""); return err },
+		func() error { _, err := h.b.applyEngineSettings(context.Background(), forged, ""); return err },
+	} {
+		err := attempt()
+		if err == nil || engineSettingsErrorCode(err) != -32602 || !strings.Contains(err.Error(), "settings.modelLoads:") {
+			t.Fatalf("forged loads refusal = %v", err)
+		}
+	}
+	if h.configureCount != configures {
+		t.Fatal("forged loads reached Configure")
+	}
+	if got := h.record(t).Snapshot; got.Revision != saved.Revision || !got.Settings.Equal(saved.Settings) {
+		t.Fatal("refused forged loads changed saved settings")
+	}
+	for _, call := range h.engine.snapshot()[calls:] {
+		if call.method != "engine:preview-launch" {
+			continue
+		}
+		envelope, err := settings.DecodeWorkerRequest[settings.Request](call.params)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !modelconfig.EqualLoads(envelope.Request.Settings.ModelLoads, saved.Settings.ModelLoads) {
+			t.Fatal("caller loads reached the worker compile")
+		}
+	}
+
+	whole := plain
+	whole.RequestID = "whole-preview"
+	whole.Settings = preview.Settings.Clone()
+	receipt, err := h.b.applyEngineSettings(context.Background(), whole, "")
+	if err != nil || receipt.Phase != "succeeded" {
+		t.Fatalf("whole preview apply = %+v, %v", receipt, err)
+	}
+	if got := h.record(t).Snapshot.Settings; got.ModelLoads[0].Resolved.NativeBuildID != "rebuilt" {
+		t.Fatal("whole preview apply did not save the target's compile")
+	}
+	replay, err := h.b.applyEngineSettings(context.Background(), whole, "")
+	if err != nil || replay.Revision != receipt.Revision {
+		t.Fatalf("replay of the whole preview = %+v, %v", replay, err)
+	}
+}
+
 func TestModelSettingsApplyRetainedReviewExpiresBeforeWorkerIO(t *testing.T) {
 	h := newModelSettingsHarness(t)
 	p := h.review(t, h.request(t, true), "")

@@ -109,8 +109,9 @@ type ResolvedLoad struct {
 }
 
 // ModelLoad is storage/readback, not a caller patch. Full settings requests may
-// echo it only as an unchanged target baseline. Consumers must compare against
-// fresh target state and reject caller changes to this authority before effects.
+// echo it only as the target's baseline or its own fresh compile of that baseline.
+// Consumers must compare against fresh target state and reject caller changes to
+// this authority before effects.
 type ModelLoad struct {
 	ProfileKey string        `json:"profileKey"`
 	ModelID    string        `json:"modelId"`

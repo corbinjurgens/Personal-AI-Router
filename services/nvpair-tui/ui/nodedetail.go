@@ -1000,8 +1000,7 @@ func (d *nodeDetail) update(msg tea.Msg) (tea.Cmd, bool) {
 		if d.settings == nil {
 			d.settings = map[string]enginesettings.Snapshot{}
 		}
-		d.settings[msg.snapshot.Engine] = msg.snapshot
-		d.reportSettingsOutcome(msg.snapshot)
+		d.cacheSettings(msg.snapshot)
 		// A snapshot arrives either because a field was asked for or because
 		// the backend pushed a change. Only the first opens an editor, and only
 		// for the engine that was asked about — a push for another engine while
@@ -1220,8 +1219,7 @@ func (d *nodeDetail) handleNotification(msg *rpc.Message) tea.Cmd {
 		if d.settings == nil {
 			d.settings = map[string]enginesettings.Snapshot{}
 		}
-		d.settings[snap.Engine] = snap
-		d.reportSettingsOutcome(snap)
+		d.cacheSettings(snap)
 
 	case "engine:settings-disconnected":
 		// The settings worker behind a peer went away, so every revision held
@@ -1576,9 +1574,23 @@ func (d *nodeDetail) openSettingsField(snap enginesettings.Snapshot, mode detail
 		d.mode = detailInputNone
 		return nil
 	}
+	if reason := settingsMismatchReason(snap); reason != "" {
+		d.status.error("%s: %s Submit this field to re-approve; an Auto load needs Recalculate in the desktop app.", d.engineLabel(snap.Engine), reason)
+	}
 	d.input.Focus()
 	d.input.CursorEnd()
 	return textinput.Blink
+}
+
+// cacheSettings stores a fetched or pushed snapshot and reports what it changed:
+// the outcome of this screen's own write, or a mismatch that has just appeared.
+func (d *nodeDetail) cacheSettings(snap enginesettings.Snapshot) {
+	previous := d.settings[snap.Engine]
+	d.settings[snap.Engine] = snap
+	d.reportSettingsOutcome(snap)
+	if reason := settingsMismatchReason(snap); reason != "" && reason != settingsMismatchReason(previous) {
+		d.status.error("%s: %s", d.engineLabel(snap.Engine), reason)
+	}
 }
 
 // settingsRequest builds a write for one field against the snapshot's revision.

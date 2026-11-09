@@ -154,6 +154,10 @@ func (e *Executor) launchStateLocked(engine string, st *engineState) settings.La
 						result.ServingReadback.Reason = "Serving inputs no longer match the owned launch; explicit apply or restart is required."
 					}
 				}
+				if typedApprovalStale(rt, prepared) {
+					result.ServingReadback.Status = "mismatch"
+					result.ServingReadback.Reason = "Native source conflict; obtain a fresh preview before applying."
+				}
 			} else {
 				result.ServingReadback = &engines.ServingReadback{Status: "mismatch", Reason: servingErr.Error()}
 			}
@@ -687,8 +691,16 @@ func (e *Executor) configureLaunchLocked(ctx context.Context, st *engineState, p
 		e.emitState(p.Engine)
 		return e.launchStateLocked(p.Engine, st), err
 	}
-	// Resume records that settings coordination stopped this engine.
-	resume := p.Resume
+	// Resume records that settings coordination stopped this engine. An apply
+	// also starts an engine refused for a stale approval by a restore or crash
+	// relaunch, if the approval it replaced still read as stale: old is from before
+	// the swap above. A failed start, before or after spawn, keeps the record, but
+	// that apply already saved its approval, so a later apply does not retry it.
+	// A pause holds this start in activationBlocked; resuming retries the restore.
+	replacedStale := old.ServingReadback != nil && old.ServingReadback.Status == "mismatch"
+	st.mu.Lock()
+	resume := p.Resume || (st.restoreApprovalRefused && replacedStale)
+	st.mu.Unlock()
 	if !activationBlocked && ((changed && old.Running) || resume) {
 		if recheckContent != nil {
 			if err := recheckContent(); err != nil {

@@ -175,3 +175,15 @@ func settingsUnavailableReason(snap enginesettings.Snapshot) string {
 	}
 	return "this engine's startup settings cannot be edited right now"
 }
+
+// settingsMismatchReason is the backend's reason when the saved settings no
+// longer match what the engine would launch, or empty when they do. Unlike
+// settingsUnavailableReason it refuses nothing: submitting a field previews and
+// applies, which re-approves the settings. A frozen Auto load is the exception:
+// its preview refuses until Recalculate, which only the desktop app offers.
+func settingsMismatchReason(snap enginesettings.Snapshot) string {
+	if snap.Serving == nil || snap.Serving.Status != "mismatch" {
+		return ""
+	}
+	return snap.Serving.Reason
+}

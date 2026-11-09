@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"math"
@@ -261,6 +262,8 @@ type ServingFieldError struct {
 	Field   string
 	ModelID string
 	Reason  string
+	// StaleApproval marks a refusal that a reviewed apply clears (V44).
+	StaleApproval bool
 }
 
 func (e *ServingFieldError) Error() string {
@@ -272,6 +275,21 @@ func (e *ServingFieldError) Error() string {
 
 func servingError(reason string) error {
 	return &ServingFieldError{Field: "serving", Reason: reason}
+}
+
+// staleApproval marks a refusal caused by saved approval the current inputs no
+// longer produce, as opposed to inputs that are missing or invalid.
+func staleApproval(err error) error {
+	var field *ServingFieldError
+	if errors.As(err, &field) {
+		field.StaleApproval = true
+	}
+	return err
+}
+
+func isStaleApproval(err error) bool {
+	var field *ServingFieldError
+	return errors.As(err, &field) && field.StaleApproval
 }
 
 type llamaServingLaunch struct {
@@ -1307,7 +1325,7 @@ func compileLlamaServingSectionsExpected(ctx context.Context, rt Runtime, requir
 	for i := range result.Config.Models {
 		expected := rt.Serving.Models[i].ExpectedNativeSourceDigest
 		if (requireApproved && expected == "") || (expected != "" && expected != result.Digest) {
-			return nil, servingError("Native source conflict; obtain a fresh preview before applying.")
+			return nil, staleApproval(servingError("Native source conflict; obtain a fresh preview before applying."))
 		}
 		result.Config.Models[i].ExpectedNativeSourceDigest = result.Digest
 	}

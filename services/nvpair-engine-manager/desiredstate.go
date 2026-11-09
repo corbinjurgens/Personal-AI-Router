@@ -284,7 +284,11 @@ func (e *Executor) restoreInstalled(ctx context.Context, engine string) error {
 	if err != nil || !installed {
 		return err
 	}
-	return e.doStart(ctx, st, engine, startOpts{ReclaimOwned: true})
+	err = e.doStart(ctx, st, engine, startOpts{ReclaimOwned: true})
+	st.mu.Lock()
+	st.restoreApprovalRefused = isStaleApproval(err)
+	st.mu.Unlock()
+	return err
 }
 
 // reclaimOrphan is shared by restore and start. It runs before

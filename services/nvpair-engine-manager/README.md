@@ -1697,7 +1697,14 @@ notification restores installed engines at startup and Resume. `engine:wake`
 repairs a stopped installed engine, subject to pause and Halt. Installation starts
 an engine only while available; install requests have no `start` option. Crash
 relaunch follows the same availability guards. Settings restarts only an engine
-that settings stopped (`resume`), or the running engine it changed.
+that settings stopped (`resume`), or the running engine it changed. It also starts
+an engine whose last restore, at startup, on resume or in a crash relaunch, refused
+a stale approval, when the approval the apply replaces still reads as `mismatch`,
+unless the node is paused or the engine was since stopped. That record is in memory
+only. A failed start, before or after spawn, keeps it, but that apply has already
+saved its approval, so a later apply starts the engine only if that approval has
+gone stale too; a request or resume starts it otherwise. A refused wake does not
+count: the next request retries it.
 
 `engine-state.json` retains allocated ports and process-stop evidence. Its old
 `engines` and `offBy` fields are ignored on decode and omitted on the next write.
