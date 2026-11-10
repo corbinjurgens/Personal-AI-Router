@@ -70,7 +70,7 @@ func (m *Manager) buildLocalRoster() *Roster {
 	r.Members = append(r.Members, RosterEntry{
 		NodeUUID:        m.identity.NodeUUID,
 		NodeID:          m.identity.NodeID,
-		Name:            m.identity.Name,
+		Name:            m.selfName(),
 		AdmissionEpoch:  func() uint64 { _, epoch := m.currentAdmission(); return epoch }(),
 		CertPem:         string(m.identity.CertPEM),
 		CertFingerprint: m.identity.CertFingerprint,

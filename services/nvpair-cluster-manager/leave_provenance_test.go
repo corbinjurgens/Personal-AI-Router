@@ -147,7 +147,7 @@ func TestExpirePendingInviteClearsBothSides(t *testing.T) {
 	peer := &PairingInfo{
 		NodeID:   inviter.identity.NodeID,
 		NodeUUID: inviter.identity.NodeUUID,
-		Name:     inviter.identity.Name,
+		Name:     inviter.selfName(),
 	}
 	toID := receiver.identity.NodeID
 	receiver.putInvite(&Invite{

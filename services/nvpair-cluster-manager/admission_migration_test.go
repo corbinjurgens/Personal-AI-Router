@@ -14,7 +14,7 @@ func TestLegacyPairingInfoMapsToFirstAdmission(t *testing.T) {
 		V:         1,
 		NodeUUID:  peer.identity.NodeUUID,
 		NodeID:    peer.identity.NodeID,
-		Name:      peer.identity.Name,
+		Name:      peer.selfName(),
 		ClusterID: "cluster-1",
 		Cert:      string(peer.identity.CertPEM),
 	})
@@ -45,7 +45,7 @@ func TestRestartMigratesLegacyPinnedMemberAdmission(t *testing.T) {
 	if err := m.trust.Pin(&TrustedPin{
 		NodeUUID:        peer.identity.NodeUUID,
 		NodeID:          peer.identity.NodeID,
-		Name:            peer.identity.Name,
+		Name:            peer.selfName(),
 		CertPem:         string(peer.identity.CertPEM),
 		CertFingerprint: peer.identity.CertFingerprint,
 	}); err != nil {

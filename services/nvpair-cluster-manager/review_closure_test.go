@@ -28,7 +28,7 @@ func TestInboundInitialCannotPublishAfterTeardown(t *testing.T) {
 		peerPairing: &PairingInfo{
 			NodeUUID:  peer.identity.NodeUUID,
 			NodeID:    peer.identity.NodeID,
-			Name:      peer.identity.Name,
+			Name:      peer.selfName(),
 			ClusterID: "cluster-1",
 		},
 	}

@@ -135,7 +135,7 @@ func (m *Manager) handleInviteNode(msg *Message) {
 		InviteID:            inviteID,
 		FromNodeID:          m.identity.NodeID,
 		FromNodeUUID:        m.identity.NodeUUID,
-		FromNodeName:        m.identity.Name,
+		FromNodeName:        m.selfName(),
 		ToNodeID:            p.NodeID,
 		ClusterID:           cid,
 		ClusterFriendlyName: friendly,

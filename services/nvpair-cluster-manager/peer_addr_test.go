@@ -313,7 +313,7 @@ func publishPendingInvite(t *testing.T, m *Manager, inviteID string) {
 		InviteID:            inviteID,
 		FromNodeID:          m.identity.NodeID,
 		FromNodeUUID:        m.identity.NodeUUID,
-		FromNodeName:        m.identity.Name,
+		FromNodeName:        m.selfName(),
 		ClusterID:           cid,
 		ClusterFriendlyName: friendly,
 		State:               inviteStatePending,

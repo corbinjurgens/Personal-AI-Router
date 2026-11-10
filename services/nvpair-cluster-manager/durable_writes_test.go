@@ -401,7 +401,7 @@ func TestIdentityDurableWriteFailurePreservesExistingKeypair(t *testing.T) {
 	}
 	failure := errors.New("injected key replacement failure")
 	injectClusterReplacer(t, durablefile.Replacer{Replace: func(string, string) error { return failure }})
-	id, err := loadOrMintIdentity(dir)
+	id, _, err := loadOrMintIdentity(dir)
 	if !errors.Is(err, failure) || id != nil {
 		t.Fatalf("identity returned = %v, error = %v, want nil and injected failure", id != nil, err)
 	}
@@ -434,14 +434,14 @@ func TestIdentityCompletesAfterMidSequenceDurabilityFailure(t *testing.T) {
 				}
 				return nil
 			}})
-			id, err := loadOrMintIdentity(dir)
+			id, _, err := loadOrMintIdentity(dir)
 			if err != nil {
 				t.Fatalf("mint identity: %v", err)
 			}
 			if calls != 3 {
 				t.Fatalf("completed writes = %d, want key, cert and identity", calls)
 			}
-			loaded, err := loadOrMintIdentity(dir)
+			loaded, _, err := loadOrMintIdentity(dir)
 			if err != nil {
 				t.Fatalf("reload complete identity: %v", err)
 			}

@@ -8,6 +8,8 @@ import (
 	"slices"
 	"sort"
 	"time"
+
+	"nvpair-shared/nodename"
 )
 
 // MembershipState is a node's standing in the local view of the cluster (§6).
@@ -55,7 +57,13 @@ type ClusterNode struct {
 	ID        string `json:"id"`
 	NodeUUID  string `json:"nodeUuid"`
 	Name      string `json:"name"`
-	IPAddress string `json:"ipAddress"`
+	// Nickname is a name only this node uses for the member; it never leaves
+	// the node (rosters are built from pins). Empty until a setter exists.
+	Nickname string `json:"nickname,omitempty"`
+	// DisplayName is filled only on snapshots (snapshotNodes): the nickname
+	// when set, else the member's own name, else the UUID fallback.
+	DisplayName string `json:"displayName,omitempty"`
+	IPAddress   string `json:"ipAddress"`
 	// AdvertisedAddresses are authenticated, bounded routing hints, not identity
 	// or liveness. An old member record without hints remains valid.
 	AdvertisedAddresses []string        `json:"advertisedAddresses,omitempty"`
@@ -124,10 +132,17 @@ func cloneInvite(inv *Invite) *Invite {
 	return &cp
 }
 
-// upsertMember inserts or replaces a member, keyed by nodeUuid.
+// upsertMember inserts or replaces a member, keyed by nodeUuid. An existing
+// member's nickname survives a replacement that carries none, so readmission
+// and repinning never drop it.
 func (m *Manager) upsertMember(node *ClusterNode) {
 	m.memMu.Lock()
-	m.members[node.NodeUUID] = cloneClusterNode(node)
+	next := cloneClusterNode(node)
+	next.DisplayName = "" // derived on snapshots only
+	if prev, ok := m.members[node.NodeUUID]; ok && next.Nickname == "" {
+		next.Nickname = prev.Nickname
+	}
+	m.members[node.NodeUUID] = next
 	m.memMu.Unlock()
 	m.clusterGen.Add(1)
 	m.revalidateReverse()
@@ -283,7 +298,7 @@ func (m *Manager) updateMemberIdentity(uuid, nodeID, name string) bool {
 // old name — a ghost the local instance couldn't remove. Keyed by the
 // stable nodeUuid; only the display id/name change. Persists when it changed.
 func (m *Manager) refreshSelfMemberIdentity() {
-	if m.updateMemberIdentity(m.identity.NodeUUID, m.identity.NodeID, m.identity.Name) {
+	if m.updateMemberIdentity(m.identity.NodeUUID, m.identity.NodeID, m.selfName()) {
 		m.persistMembers()
 	}
 }
@@ -294,10 +309,24 @@ func (m *Manager) snapshotNodes() []ClusterNode {
 	defer m.memMu.Unlock()
 	out := make([]ClusterNode, 0, len(m.members))
 	for _, n := range m.members {
-		out = append(out, *cloneClusterNode(n))
+		cp := cloneClusterNode(n)
+		cp.DisplayName = memberDisplayName(cp)
+		out = append(out, *cp)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
+}
+
+// memberDisplayName is the name this node shows for a member: its local
+// nickname, else the member's own name, else the UUID fallback.
+func memberDisplayName(n *ClusterNode) string {
+	switch {
+	case n.Nickname != "":
+		return n.Nickname
+	case n.Name != "":
+		return n.Name
+	}
+	return nodename.Fallback(n.NodeUUID)
 }
 
 // putInvite records (or replaces) a pairing session's Broker-facing view.
@@ -333,7 +362,7 @@ func (m *Manager) addSelfMemberForAdmission(clusterID string, epoch uint64) {
 	m.upsertMember(&ClusterNode{
 		ID:             m.identity.NodeID,
 		NodeUUID:       m.identity.NodeUUID,
-		Name:           m.identity.Name,
+		Name:           m.selfName(),
 		IPAddress:      "127.0.0.1",
 		Port:           m.port,
 		ClusterID:      clusterID,

@@ -8,19 +8,50 @@ import (
 	"errors"
 	"fmt"
 	"log"
+
+	"nvpair-shared/nodename"
 )
 
 // handleGetNodeID returns this node's own identity (§7.0). Always available —
 // the identity is minted at startup.
 func (m *Manager) handleGetNodeID(msg *Message) {
 	id, _ := m.clusterIdentity()
+	view := m.selfNameView()
 	m.codec.Respond(msg.ID, map[string]any{
-		"nodeUuid":        m.identity.NodeUUID,
-		"nodeId":          m.identity.NodeID,
-		"name":            m.identity.Name,
+		"nodeUuid":        view.NodeUUID,
+		"name":            view.Name,
+		"customName":      view.CustomName,
 		"certFingerprint": m.identity.CertFingerprint,
 		"clusterId":       id,
 	})
+}
+
+// handleSetNodeName sets or clears this node's user-set display name. Params
+// are exactly {name: string|null}; null clears to the generated default.
+func (m *Manager) handleSetNodeName(msg *Message) {
+	nameField := map[string]string{"field": "name"}
+	fields, err := decodeRemoteManagementParams(msg.Params, map[string]bool{"name": true})
+	raw, present := fields["name"]
+	if err != nil || !present {
+		m.codec.RespondErrorData(msg.ID, codeInvalidParams, "invalid params", nameField)
+		return
+	}
+	var custom *string
+	if err := json.Unmarshal(raw, &custom); err != nil {
+		m.codec.RespondErrorData(msg.ID, codeInvalidParams, "invalid params", nameField)
+		return
+	}
+	view, err := m.setSelfName(custom)
+	if reason := nodename.Reason(err); reason != "" {
+		m.codec.RespondErrorData(msg.ID, codeInvalidParams, err.Error(),
+			map[string]string{"field": "name", "reason": reason})
+		return
+	}
+	if err != nil {
+		m.codec.RespondErrorData(msg.ID, codeInternalError, err.Error(), nil)
+		return
+	}
+	m.codec.Respond(msg.ID, view)
 }
 
 type setIdentityParams struct {
@@ -168,7 +199,7 @@ func (m *Manager) foundCluster(friendly string) (id, name string, err error) {
 	}
 	name = friendly
 	if name == "" {
-		name = m.identity.Name
+		name = m.selfName()
 	}
 	var admissionErr error
 	m.withClusterComposition(func() {

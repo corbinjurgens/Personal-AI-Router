@@ -29,17 +29,20 @@ import (
 const nodeURISANPrefix = "urn:nvpair:node:"
 
 // identityFile is the on-disk shape of cluster/identity.json.
+// DisplayName is the user-set node name; empty means unset, in which case the
+// manager shows the generated default (defaultNodeName).
 type identityFile struct {
-	NodeUUID  string `json:"node_uuid"`
-	CreatedAt int64  `json:"created_at"`
+	NodeUUID    string `json:"node_uuid"`
+	CreatedAt   int64  `json:"created_at"`
+	DisplayName string `json:"display_name,omitempty"`
 }
 
 // NodeIdentity is this node's cryptographic identity: a stable UUID, the
-// hostname-derived display fields, and the self-signed leaf used for mTLS.
+// hostname-derived logical id, and the self-signed leaf used for mTLS. The
+// display name is Manager state (node_name.go), not part of the identity.
 type NodeIdentity struct {
 	NodeUUID        string
 	NodeID          string // OS hostname (display/logical, never trusted)
-	Name            string // OS hostname (display)
 	CertPEM         []byte
 	KeyPEM          []byte
 	Cert            tls.Certificate
@@ -51,7 +54,9 @@ type NodeIdentity struct {
 // one on genuine first launch (no identity.json). If identity.json exists but
 // the keypair is gone or unreadable it fails loudly rather than minting a new
 // UUID — silently re-minting would orphan every pin peers hold for this node.
-func loadOrMintIdentity(clusterDir string) (*NodeIdentity, error) {
+// It also returns the stored identity.json record so the manager can rewrite
+// the file (display_name) without losing created_at.
+func loadOrMintIdentity(clusterDir string) (*NodeIdentity, identityFile, error) {
 	idPath := filepath.Join(clusterDir, "identity.json")
 	keyPath := filepath.Join(clusterDir, "node.key")
 	crtPath := filepath.Join(clusterDir, "node.crt")
@@ -65,16 +70,17 @@ func loadOrMintIdentity(clusterDir string) (*NodeIdentity, error) {
 	if idErr == nil {
 		var idf identityFile
 		if err := json.Unmarshal(idData, &idf); err != nil || idf.NodeUUID == "" {
-			return nil, fmt.Errorf("identity.json is present but unreadable (%v); refusing to mint a new UUID — restore the file or remove the cluster dir to re-pair", err)
+			return nil, identityFile{}, fmt.Errorf("identity.json is present but unreadable (%v); refusing to mint a new UUID — restore the file or remove the cluster dir to re-pair", err)
 		}
 		certPEM, keyPEM, kerr := readKeypair(crtPath, keyPath)
 		if kerr != nil {
-			return nil, fmt.Errorf("identity.json exists (uuid %s) but the keypair is missing or corrupt: %w; refusing to mint a new identity (would orphan peer pins) — restore node.key/node.crt or re-pair this node", idf.NodeUUID, kerr)
+			return nil, identityFile{}, fmt.Errorf("identity.json exists (uuid %s) but the keypair is missing or corrupt: %w; refusing to mint a new identity (would orphan peer pins) — restore node.key/node.crt or re-pair this node", idf.NodeUUID, kerr)
 		}
-		return assembleIdentity(idf.NodeUUID, hostname, certPEM, keyPEM)
+		identity, err := assembleIdentity(idf.NodeUUID, hostname, certPEM, keyPEM)
+		return identity, idf, err
 	}
 	if !os.IsNotExist(idErr) {
-		return nil, fmt.Errorf("read identity.json: %w", idErr)
+		return nil, identityFile{}, fmt.Errorf("read identity.json: %w", idErr)
 	}
 
 	// Genuine first launch: adopt this host's stable UUID rather than minting an
@@ -86,26 +92,39 @@ func loadOrMintIdentity(clusterDir string) (*NodeIdentity, error) {
 	// process converges on one node UUID with no A/B identity divergence.
 	uuid := nodeid.Resolve(filepath.Dir(clusterDir))
 	if uuid == "" {
-		return nil, fmt.Errorf("mint node uuid: system CSPRNG unavailable")
+		return nil, identityFile{}, fmt.Errorf("mint node uuid: system CSPRNG unavailable")
 	}
 	certPEM, keyPEM, err := generateLeaf(uuid, hostname)
 	if err != nil {
-		return nil, fmt.Errorf("generate leaf cert: %w", err)
+		return nil, identityFile{}, fmt.Errorf("generate leaf cert: %w", err)
 	}
 	// atomicWrite adopts ErrReplaced: continue after a landed key or cert so
 	// uncertain durability alone does not leave the identity sequence incomplete.
 	if err := atomicWrite(keyPath, keyPEM, 0o600); err != nil {
-		return nil, fmt.Errorf("write node.key: %w", err)
+		return nil, identityFile{}, fmt.Errorf("write node.key: %w", err)
 	}
 	if err := atomicWrite(crtPath, certPEM, 0o644); err != nil {
-		return nil, fmt.Errorf("write node.crt: %w", err)
+		return nil, identityFile{}, fmt.Errorf("write node.crt: %w", err)
 	}
 	idf := identityFile{NodeUUID: uuid, CreatedAt: time.Now().UnixMilli()}
-	idJSON, _ := json.MarshalIndent(idf, "", "  ")
-	if err := atomicWrite(idPath, idJSON, 0o600); err != nil {
-		return nil, fmt.Errorf("write identity.json: %w", err)
+	if err := writeIdentityFile(clusterDir, idf); err != nil {
+		return nil, identityFile{}, err
 	}
-	return assembleIdentity(uuid, hostname, certPEM, keyPEM)
+	identity, err := assembleIdentity(uuid, hostname, certPEM, keyPEM)
+	return identity, idf, err
+}
+
+// writeIdentityFile durably replaces cluster/identity.json with idf.
+func writeIdentityFile(clusterDir string, idf identityFile) error {
+	idJSON, err := json.MarshalIndent(idf, "", "  ")
+	if err != nil {
+		return err
+	}
+	// atomicWrite adopts a landed durablefile.ErrReplaced.
+	if err := atomicWrite(filepath.Join(clusterDir, "identity.json"), idJSON, 0o600); err != nil {
+		return fmt.Errorf("write identity.json: %w", err)
+	}
+	return nil
 }
 
 func readKeypair(crtPath, keyPath string) (certPEM, keyPEM []byte, err error) {
@@ -136,7 +155,6 @@ func assembleIdentity(uuid, hostname string, certPEM, keyPEM []byte) (*NodeIdent
 	return &NodeIdentity{
 		NodeUUID:        uuid,
 		NodeID:          hostname,
-		Name:            hostname,
 		CertPEM:         certPEM,
 		KeyPEM:          keyPEM,
 		Cert:            cert,

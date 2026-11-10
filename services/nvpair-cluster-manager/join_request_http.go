@@ -296,7 +296,7 @@ func (m *Manager) applyJoinRequestWireContext(ctx context.Context, source string
 				r.State = "pairing"
 				inviteID := *r.InviteID
 				peerID := r.PeerNodeUUID
-				m.putInvite(&Invite{InviteID: inviteID, FromNodeID: m.identity.NodeID, FromNodeUUID: m.identity.NodeUUID, FromNodeName: m.identity.Name, ToNodeID: &peerID, ClusterID: cid, ClusterFriendlyName: friendly, State: inviteStatePending, CreatedAt: now.UnixMilli()})
+				m.putInvite(&Invite{InviteID: inviteID, FromNodeID: m.identity.NodeID, FromNodeUUID: m.identity.NodeUUID, FromNodeName: m.selfName(), ToNodeID: &peerID, ClusterID: cid, ClusterFriendlyName: friendly, State: inviteStatePending, CreatedAt: now.UnixMilli()})
 				target := net.JoinHostPort(source, strconv.Itoa(r.PeerPort))
 				gen, allow := r.sessionGeneration, r.allowRemoteManagement
 				go func() { m.completeInitialInvite(inviteID, []string{target}, cid, gen, allow); m.wakeJoinRequests() }()
@@ -413,7 +413,7 @@ func (m *Manager) driveJoinRequest(id string, endpoints []string) {
 		if operation == "request" {
 			p := m.port
 			wire.Port = &p
-			wire.Requester = &joinRequester{m.identity.NodeUUID, m.identity.Name}
+			wire.Requester = &joinRequester{m.identity.NodeUUID, m.selfName()}
 		}
 		remaining := time.Duration(deadline-m.joinTime().UnixMilli()) * time.Millisecond
 		if remaining > pairingHTTPTimeout {

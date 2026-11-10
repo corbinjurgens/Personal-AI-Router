@@ -35,7 +35,7 @@ func remoteManagementAddPeer(t *testing.T, m *Manager) *Manager {
 	peer := testManagerAt(t, t.TempDir(), 15130)
 	if err := m.trust.Pin(&TrustedPin{
 		NodeUUID: peer.identity.NodeUUID, NodeID: peer.identity.NodeID,
-		Name: peer.identity.Name, CertPem: string(peer.identity.CertPEM),
+		Name: peer.selfName(), CertPem: string(peer.identity.CertPEM),
 		CertFingerprint: peer.identity.CertFingerprint, ClusterID: "management-test", AdmissionEpoch: 1,
 	}); err != nil {
 		t.Fatal(err)

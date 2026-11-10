@@ -1402,7 +1402,7 @@ type pairingRosterReplayProbe struct {
 
 func permissionProbeRosterEntry(target, peer *Manager, epoch uint64) RosterEntry {
 	return RosterEntry{
-		NodeUUID: peer.identity.NodeUUID, NodeID: peer.identity.NodeID, Name: peer.identity.Name,
+		NodeUUID: peer.identity.NodeUUID, NodeID: peer.identity.NodeID, Name: peer.selfName(),
 		AdmissionEpoch: epoch, CertPem: string(peer.identity.CertPEM), CertFingerprint: peer.identity.CertFingerprint,
 		Endorsements: []Endorsement{target.endorsePeer(peer.identity.NodeUUID, peer.identity.CertFingerprint, epoch)},
 	}

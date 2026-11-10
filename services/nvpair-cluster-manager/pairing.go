@@ -71,7 +71,7 @@ func (m *Manager) localPairingInfo(addr string, admissionEpoch ...uint64) *Pairi
 		V:                   pairingInfoVersion,
 		NodeUUID:            m.identity.NodeUUID,
 		NodeID:              m.identity.NodeID,
-		Name:                m.identity.Name,
+		Name:                m.selfName(),
 		ClusterID:           cid,
 		AdmissionEpoch:      epoch,
 		ClusterFriendlyName: friendly,

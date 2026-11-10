@@ -79,8 +79,8 @@ func TestRefreshSelfMemberIdentityOnRestart(t *testing.T) {
 	if !ok {
 		t.Fatal("self member missing after refresh")
 	}
-	if self.ID != m.identity.NodeID || self.Name != m.identity.Name {
+	if self.ID != m.identity.NodeID || self.Name != m.selfName() {
 		t.Fatalf("self not re-stamped: got id=%q name=%q want id=%q name=%q",
-			self.ID, self.Name, m.identity.NodeID, m.identity.Name)
+			self.ID, self.Name, m.identity.NodeID, m.selfName())
 	}
 }
