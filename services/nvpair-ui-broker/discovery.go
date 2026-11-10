@@ -205,8 +205,10 @@ func (sn storedNode) hasSource(source nodeSource) bool {
 
 // discoveryStore is the broker's live view of network-discovered nodes.
 // It's the single source of truth that "discovery:get-nodes" reads from.
-// All mutations come from the scanner-event reader goroutine; reads come
-// from RPC handlers, so the lock is sized for a low-contention r/w mix.
+// Node mutations come from the scanner-event and manual-nodes reader
+// goroutines; the member and self names (SetMemberNames, SetSelf) come from the
+// cluster-manager reader goroutine and the broker's spawn-time reads. Reads
+// come from RPC handlers, so the lock is sized for a low-contention r/w mix.
 //
 // onChange, when non-nil, is invoked after every Upsert and Remove
 // AFTER the write lock has been released. It's the broker's hook for
@@ -214,9 +216,9 @@ func (sn storedNode) hasSource(source nodeSource) bool {
 // off the lock means a caller is free to snapshot inside it without
 // deadlocking. The store does not guarantee that two rapid mutations
 // produce two separate callback invocations in strict happens-before
-// order with the lock — but since the only writer in practice is the
-// single-threaded scanner-event reader, that ordering already holds at
-// the call site.
+// order with the lock: with writers on several goroutines, two callbacks that
+// run at nearly the same time can publish their snapshots out of order, and
+// the next mutation republishes the current state.
 type discoveryStore struct {
 	mu    sync.RWMutex
 	nodes map[string]storedNode

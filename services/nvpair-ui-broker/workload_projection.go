@@ -849,7 +849,7 @@ func (b *Broker) failStaleForeignWorkloads(staleAfter time.Duration) {
 	}
 }
 
-// nodeDisplayNames maps node UUID to advertised hostname for user-facing error
+// nodeDisplayNames maps node UUID to its shown name for user-facing error
 // text. Built once per sweep rather than per record: Snapshot projects and sorts
 // the whole directory on every call, and a sweep can touch many records at once.
 // A UUID missing from the map (a peer that has since left) falls back to itself.
