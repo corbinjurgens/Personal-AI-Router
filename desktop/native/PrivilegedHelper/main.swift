@@ -82,13 +82,13 @@ enum Firewall {
                 // binary. TOCTOU guard: re-check identity of this object
                 // immediately before socketfilterfw. Reject symlinks (so a
                 // swapped link cannot redirect the firewall to an attacker
-                // binary), re-verify the binary's own NVIDIA signature, and fail
-                // hard on any non-zero socketfilterfw exit.
+                // binary), re-verify the binary's own signature against the
+                // pinned signer, and fail hard on any non-zero socketfilterfw exit.
                 try assertRealFile(binPath)
                 guard
                     verifySignature(
                         path: binPath,
-                        requirement: HelperConstants.nvidiaSignedRequirement
+                        requirement: HelperConstants.signedBinaryRequirement
                     )
                 else {
                     throw FirewallError.untrustedAppPath(binPath)
