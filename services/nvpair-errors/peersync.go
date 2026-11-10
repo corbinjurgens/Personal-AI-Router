@@ -371,7 +371,7 @@ func (ps *PeerSync) post(ctx context.Context, nodeID string, target peerTarget, 
 // peerHostPorts builds every "host:port" worth pushing to for a discovered node,
 // in the peer's own ranked order — its ip=/ips= list first, then anything else
 // discovery resolved for it. The node's Host is a display name and is never
-// dialed, so a node with no address has nowhere to be reached and yields nil.
+// dialed, so a node with no address has nowhere to be reached and gets an empty slice.
 //
 // Every address, because which of them this host can reach is not something the
 // peer can know: it ranks from its own vantage point, and a link only its cabled

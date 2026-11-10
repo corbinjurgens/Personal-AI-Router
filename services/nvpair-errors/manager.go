@@ -76,8 +76,9 @@ type Manager struct {
 	// via --node-id) and this node's advertised hostUuid, so "is this entry
 	// mine?" is a single equality check that survives a PC rename. Used
 	// to decide what we serve/push to peers (only our own origin) and what
-	// clear-by-id targets. Defaults to the hostname for the bare/standalone
-	// binary; the broker overrides it with the UUID via SetLocalNodeID.
+	// clear-by-id targets. Empty until main.go sets it via SetLocalNodeID from
+	// --node-id (the broker's UUID) or nodeid.Resolve; the hostname is never an
+	// identity.
 	localNodeID string
 
 	mu     sync.RWMutex
@@ -510,8 +511,8 @@ func (m *Manager) emitRelayEvent(ev DiscoveryEvent) {
 // EvictNode key on an identity that survives a peer's PC rename. A
 // relay DirectoryNode always carries a hostUuid (the scanner guarantees it), so
 // there is no name fallback. Host is the node's display name and is never
-// dialed (the peer is reached by its ip=/Addresses); cluster-uuid= is reconstructed into TXT so PeerSync's mTLS pin lookup is
-// unchanged.
+// dialed (the peer is reached by its ip=/Addresses); cluster-uuid= is
+// reconstructed into TXT so PeerSync's mTLS pin lookup is unchanged.
 func directoryToPeer(n noderec.DirectoryNode) (RawNode, bool) {
 	svc, ok := n.Services[noderec.ServiceErrors]
 	addresses := n.CandidateIPs()
@@ -531,10 +532,10 @@ func directoryToPeer(n noderec.DirectoryNode) (RawNode, bool) {
 	}, true
 }
 
-// rawNodeEqual reports whether two projected peers carry the same dialable
-// identity — the fields PeerSync uses to build a push target. Only these matter:
-// a change in any of them warrants a fresh cold-start push, anything else does
-// not.
+// rawNodeEqual reports whether two projected peers are unchanged for PeerSync.
+// ID, Port, Addresses and TXT determine the push target. Host is a display name
+// only, never dialed and not part of the peer's identity; it is compared so that
+// a changed display name still refreshes the stored peer.
 func rawNodeEqual(a, b RawNode) bool {
 	if a.ID != b.ID || a.Host != b.Host || a.Port != b.Port {
 		return false
