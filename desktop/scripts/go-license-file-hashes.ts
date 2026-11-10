@@ -18,6 +18,7 @@ export const goLicenseFileHashes: Readonly<Record<string, string>> = {
     'golang.org/x/exp@v0.0.0-20241108190413-2d47ceb2692f':
         '22975ebe413674bc619428a26e53412013dccffa69e2f27100dbd8d946fde287',
     'golang.org/x/sync@v0.9.0': '22975ebe413674bc619428a26e53412013dccffa69e2f27100dbd8d946fde287',
+    'golang.org/x/sync@v0.22.0': '22975ebe413674bc619428a26e53412013dccffa69e2f27100dbd8d946fde287',
     'github.com/atotto/clipboard@v0.1.4':
         '0e1f61fe679ee07057fae3afcfab85b7dc9892fd705e9d2e8708230bf4db7b58',
     'github.com/aymanbagabas/go-osc52/v2@v2.0.1':

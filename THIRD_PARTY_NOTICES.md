@@ -210,9 +210,9 @@ binaries across the Windows, Linux, and macOS targets. First-party modules
 | `golang.org/x/crypto` | v0.55.0 | BSD-3-Clause |
 | `golang.org/x/exp` | v0.0.0-20241108190413-2d47ceb2692f | BSD-3-Clause |
 | `golang.org/x/net` | v0.58.0 | BSD-3-Clause |
-| `golang.org/x/sync` | v0.9.0 | BSD-3-Clause |
+| `golang.org/x/sync` | v0.22.0 | BSD-3-Clause |
 | `golang.org/x/sys` | v0.47.0 | BSD-3-Clause |
-| `golang.org/x/text` | v0.3.8 | BSD-3-Clause |
+| `golang.org/x/text` | v0.41.0 | BSD-3-Clause |
 | `gopd` | 1.2.0 | MIT |
 | `gopkg.in/yaml.v3` | v3.0.1 | Apache-2.0 |
 | `graceful-fs` | 4.2.11 | ISC |
@@ -8760,7 +8760,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-### golang.org/x/sync v0.9.0
+### golang.org/x/sync v0.22.0
 
 License: BSD-3-Clause
 
@@ -8832,14 +8832,14 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-### golang.org/x/text v0.3.8
+### golang.org/x/text v0.41.0
 
 License: BSD-3-Clause
 
 Repository: https://golang.org/x/text
 
 ```text
-Copyright (c) 2009 The Go Authors. All rights reserved.
+Copyright 2009 The Go Authors.
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are
@@ -8851,7 +8851,7 @@ notice, this list of conditions and the following disclaimer.
 copyright notice, this list of conditions and the following disclaimer
 in the documentation and/or other materials provided with the
 distribution.
-   * Neither the name of Google Inc. nor the names of its
+   * Neither the name of Google LLC nor the names of its
 contributors may be used to endorse or promote products derived from
 this software without specific prior written permission.
 
