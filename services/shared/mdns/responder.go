@@ -3,7 +3,9 @@
 
 // Package mdns provides a minimal, cross-platform mDNS responder that
 // advertises a single service instance and answers queries for it on every
-// multicast-capable IPv4 interface.
+// multicast-capable IPv4 interface. The caller supplies both the instance
+// label and the host label the SRV and A records use; nothing is derived from
+// the OS hostname.
 //
 // It exists because grandcat/zeroconf's Server (and its Resolver, which the
 // browser side in nvpair-shared/discovery works around too) binds a single UDP
@@ -77,7 +79,7 @@ type Responder struct {
 	service  string // e.g. "_nvpair-node._tcp"
 	domain   string // e.g. "local"
 	port     int
-	hostName string // e.g. "myhost.local."
+	hostName string // caller-supplied host label, e.g. "nvpair-<uuid>.local."
 
 	serviceName  string // "_nvpair-node._tcp.local."
 	instanceName string // "myhost._nvpair-node._tcp.local."

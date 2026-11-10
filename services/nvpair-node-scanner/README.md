@@ -47,8 +47,9 @@ payload fields are unchanged.
 
 Concretely, the daemon:
 
-- **Advertises** this node's one `_nvpair-node._tcp` record, built from a registry of the local services its parent (the broker) registers — `ni`/`ol`/`lm`/`er`/`wl`/`cl`/`em`/`ec` ports plus the node identity (`uuid=`, `cluster-uuid=` when clustered, `ip=`). One record per node covers every service.
-- **Browses** `_nvpair-node._tcp` for every node on the LAN (including itself) and maintains a queryable directory keyed by host UUID.
+- **Advertises** this node's one `_nvpair-node._tcp` record, built from a registry of the local services its parent (the broker) registers — `ni`/`ol`/`lm`/`er`/`wl`/`cl`/`em`/`ec` ports plus the node identity (`uuid=`, `cluster-uuid=` when clustered, `ip=`) and the display name (`name=`, once set). One record per node covers every service. The instance label and the SRV/A host are `nvpair-<uuid>` (host `nvpair-<uuid>.local.`), built from the node UUID, so generic Bonjour browsers show `nvpair-<uuid>`. When a re-stamp changes the UUID, the responder is replaced and the old instance withdrawn.
+- **Carries the display name in `name=`.** The name is chosen by the node's cluster manager and is not identity; names need not be unique. The broker passes this node's name to the daemon with `discovery:set-self-name`; until then the record and the self entry carry no name. TXT strings travel byte for byte (backslashes, quotes and UTF-8 included; see `mdns.EscapeTXT`/`mdns.UnescapeTXT`).
+- **Browses** `_nvpair-node._tcp` for every node on the LAN (including itself) and maintains a queryable directory keyed by host UUID. A browsed node's directory name comes from its `name=` value, validated on receipt with `nodename.Normalize` (missing or invalid gives an empty name); the instance label is never used as a name.
 - **Bootstraps admitted peers without mDNS:** cluster-manager reads the peer's
   complete self-description through its pinned direct/reverse `cl` route. The
   broker privately relays `discovery:peer-services` notifications to the scanner,
@@ -195,7 +196,7 @@ provides neither general network isolation nor an authentication bypass.
 For genuine multicast fixtures, give all participants the same private service
 under `local`, for example `_pair-example._tcp`. Only `local` is supported:
 zeroconf v1.0.0 caches its receive-matching service name under that domain.
-The responder retains `<OS-hostname>.local.` as its SRV/A target; sharing a host
+The responder uses `nvpair-<uuid>.local.` as its SRV/A target; sharing a host
 name cannot match another service's PTR, SRV or TXT records. Service names are
 lowercased and accept one optional trailing root dot. Empty names, invalid DNS
 labels and service types other than `_name._tcp` fail before
@@ -215,11 +216,17 @@ peer HTTP still requires independently owned fixture endpoints.
 | `discovery:get-nodes` | `{service?}` | `{nodes:[DirectoryNode]}` — the directory, optionally filtered to nodes advertising one service |
 | `discovery:get-node-info` | `{hostUuid}` | Fresh full node-info sample for this scanner's registered self or an admitted peer: `GPUs` (including optional `physicalId`), optional `cpu`/`memory`/`memoryObservation`, `serviceBuildId`, `telemetryValid`, `msSince`, `hostUuid`, and nullable `clusterUuid` |
 | `discovery:reload-identity` | — | `{ok:true}` — re-resolve and re-advertise this node's identity |
+| `discovery:set-self-name` | `{name}` | `{ok:true}` — advertise `name` as this node's `name=` and on its self entry; a name `nodename.Normalize` refuses is rejected with `-32602` |
 | `discovery:reload-trust` | — | `{ok:true}` — re-derive `trusted` on every directory entry from the current pin set |
 | `discovery:set-observed-addresses` | `{addresses}` | `{ok:true}` — the local addresses peers have actually reached this node on, so address selection can rank a peer-proven address above an inferred one |
 | `shutdown` | — | `null` |
 
 `log/set-level` is also accepted.
+
+`discovery:set-self-name` is private worker IPC: the broker sends it with the
+display name from this node's cluster manager, which owns the name. The daemon
+stores the normalized value, re-announces the TXT record and republishes its
+self entry when the name changed.
 
 `discovery:get-node-info` reads fresh local or paired remote node information.
 Callers supply only a host identity, never a URL, port or principal. For this
