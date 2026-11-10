@@ -588,8 +588,11 @@ caller's remote-management grant and answers:
 | `409` | `{code:"remote_management_denied", message}` | grant not `allowed`; message `Remote management is blocked on this device. Change permission locally on that device.` |
 | `500` | text | the name could not be saved |
 
-The target logs one line per authenticated request with the caller UUID, the
-decision and the permission revision, never the body. On `200` the viewer
+The target reads and decodes the body before it checks the grant, so the
+grant is evaluated right before the rename; a malformed body answers `400`
+even without the grant. It logs one line per authenticated, well-formed
+request with the caller UUID, the decision and the permission revision, never
+the body. On `200` the viewer
 records the returned name for that member at once; the target's own roster
 reconcile carries it to the other members.
 

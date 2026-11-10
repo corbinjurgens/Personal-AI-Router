@@ -66,9 +66,9 @@ func decodePeerNodeNameBody(body []byte) (*string, bool) {
 }
 
 // handlePeerNodeName applies a pinned peer's request to rename this node, when
-// this node has granted that peer remote management. It logs one audit line
-// per authenticated request (caller, decision, permission revision), never the
-// body.
+// this node has granted that peer remote management. Order: method, pin,
+// bounded body decode, grant, rename. It logs one audit line per authenticated
+// well-formed request (caller, decision, permission revision), never the body.
 func (m *Manager) handlePeerNodeName(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPut {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -79,13 +79,8 @@ func (m *Manager) handlePeerNodeName(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	perm := m.remoteManagementFor(uuid)
-	if !perm.Allowed {
-		log.Printf("peer rename: caller %s denied (state %s, revision %s)", uuid, perm.State, perm.Revision)
-		writePeerJSON(w, http.StatusConflict, peerNodeNameError{Code: remoteManagementDeniedWire, Message: remoteManagementDeniedText})
-		return
-	}
-	log.Printf("peer rename: caller %s allowed (revision %s)", uuid, perm.Revision)
+	// Read the body before the grant check, so the grant is evaluated right
+	// before the rename and a slow body cannot widen the gap after a revoke.
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
 	if err != nil {
 		http.Error(w, "read body", http.StatusBadRequest)
@@ -96,6 +91,13 @@ func (m *Manager) handlePeerNodeName(w http.ResponseWriter, r *http.Request) {
 		writePeerJSON(w, http.StatusBadRequest, peerNodeNameError{Code: peerNameInvalidCode, Message: "body must be exactly {\"name\": string or null}"})
 		return
 	}
+	perm := m.remoteManagementFor(uuid)
+	if !perm.Allowed {
+		log.Printf("peer rename: caller %s denied (state %s, revision %s)", uuid, perm.State, perm.Revision)
+		writePeerJSON(w, http.StatusConflict, peerNodeNameError{Code: remoteManagementDeniedWire, Message: remoteManagementDeniedText})
+		return
+	}
+	log.Printf("peer rename: caller %s allowed (revision %s)", uuid, perm.Revision)
 	view, err := m.setSelfName(custom)
 	if reason := nodename.Reason(err); reason != "" {
 		writePeerJSON(w, http.StatusBadRequest, peerNodeNameError{Code: peerNameInvalidCode, Reason: reason, Message: err.Error()})

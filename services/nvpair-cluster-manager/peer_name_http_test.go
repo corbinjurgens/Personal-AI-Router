@@ -213,3 +213,19 @@ func TestPeerNodeNameRejectsMalformedBodies(t *testing.T) {
 		})
 	}
 }
+
+// The body is decoded before the grant check, so the grant is evaluated right
+// before the rename: a caller without the grant gets 400 for a malformed body
+// and 409 only for a well-formed one.
+func TestPeerNodeNameDecodesBodyBeforeGrant(t *testing.T) {
+	target, caller, _ := peerNameFixture(t, false)
+	if w := servePeerName(target, peerNameRequest(t, http.MethodPut, caller, `{"bogus":1}`)); w.Code != http.StatusBadRequest {
+		t.Fatalf("malformed body without grant: status %d, want 400", w.Code)
+	}
+	if w := servePeerName(target, peerNameRequest(t, http.MethodPut, caller, `{"name":"x"}`)); w.Code != http.StatusConflict {
+		t.Fatalf("well-formed body without grant: status %d, want 409", w.Code)
+	}
+	if target.customSelfName() != nil {
+		t.Fatal("refused request changed the name")
+	}
+}
