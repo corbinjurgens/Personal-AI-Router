@@ -308,3 +308,36 @@ func TestUpsertMemberKeepsNickname(t *testing.T) {
 		t.Fatalf("member = %+v, want name new and nickname kept", n)
 	}
 }
+
+// TestNodeNameSelfMemberUpdateWaitsForComposition simulates an addSelfMember
+// that read the old name and commits under rosterMu after the rename assigned
+// the new name; the rename's self-member update must land after it.
+func TestNodeNameSelfMemberUpdateWaitsForComposition(t *testing.T) {
+	m := newTestManager(t)
+	m.addSelfMember()
+	stale, _ := m.memberByUUID(m.identity.NodeUUID)
+	name := "Renamed while composing"
+
+	m.rosterMu.Lock()
+	done := make(chan error, 1)
+	go func() {
+		_, err := m.setSelfName(&name)
+		done <- err
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for m.selfName() != name {
+		if time.Now().After(deadline) {
+			m.rosterMu.Unlock()
+			t.Fatal("rename did not assign the new name")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	m.upsertMember(stale) // the concurrent addSelfMember commit with the old name
+	m.rosterMu.Unlock()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if self, _ := m.memberByUUID(m.identity.NodeUUID); self.Name != name {
+		t.Fatalf("self member name = %q, want %q", self.Name, name)
+	}
+}

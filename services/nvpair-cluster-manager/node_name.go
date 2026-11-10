@@ -110,8 +110,9 @@ func (m *Manager) selfNameView() nodeNameView {
 // cluster:node-name-changed when the effective or custom name changed.
 //
 // nameWriteMu stays held through the member update and notification so two
-// concurrent setters publish in the order they persisted. nameMu is held only
-// for the assignment; no other lock is taken under it.
+// concurrent setters publish in the order they persisted; the self-member
+// update takes rosterMu after it. nameMu is held only for the assignment; no
+// other lock is taken under it.
 func (m *Manager) setSelfName(custom *string) (nodeNameView, error) {
 	next := ""
 	if custom != nil {
@@ -138,10 +139,18 @@ func (m *Manager) setSelfName(custom *string) (nodeNameView, error) {
 
 	view := m.selfNameView()
 	if view.Name != prevName {
-		if clusterID, _ := m.clusterIdentity(); clusterID != "" {
-			if m.updateMemberIdentity(m.identity.NodeUUID, view.Name) {
-				m.emitNodesChanged()
-			}
+		// The self member is written only under the composition boundary
+		// (foundCluster, the pairing commit). Taking rosterMu here means an
+		// addSelfMember that read the old name commits before this update.
+		// Order: nameWriteMu, then rosterMu, then memMu.
+		m.rosterMu.Lock()
+		clusterID, _ := m.clusterIdentity()
+		renamed := clusterID != "" && m.updateMemberIdentity(m.identity.NodeUUID, m.selfName())
+		m.rosterMu.Unlock()
+		if renamed {
+			m.emitNodesChanged()
+		}
+		if clusterID != "" {
 			go m.reconcileAllMembers()
 		}
 	}
