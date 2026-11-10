@@ -3,7 +3,7 @@
 
 import fs from 'fs'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { NodeNameResult } from '@/shared/types/cluster'
+import type { NodeNameResult, PeerNicknameResult } from '@/shared/types/cluster'
 import type { ServiceTransport } from '@/shared/types/service-bridge'
 import type { StructuredLogger } from '@/shared/types/log'
 import type { getModularBridgeState } from '@/electron/service-bridge/modular-state'
@@ -13,7 +13,10 @@ import type {
     stopNodeInfoPoller
 } from '@/electron/service-bridge/node-info-poller'
 import { JsonRpcSocketClient, type JsonValue } from '@/electron/service-bridge/json-rpc-client'
-import { parseNodeNameResult } from '@/electron/service-bridge/cluster-json'
+import {
+    parseNodeNameResult,
+    parsePeerNicknameResult
+} from '@/electron/service-bridge/cluster-json'
 import { emitBridgePush } from '@/electron/service-bridge/broadcaster'
 import type { createOverviewWindow } from '@/electron/window'
 import { createPairApi } from '@/ui/api/pair-api'
@@ -181,5 +184,96 @@ describe('supervisor node name push dispatch', () => {
         } finally {
             await supervisor.stop()
         }
+    })
+})
+
+const nicknamed = {
+    nodeUuid: 'peer-uuid',
+    nickname: 'Kitchen',
+    displayName: 'Kitchen'
+} satisfies PeerNicknameResult
+
+describe('peer nickname result parsing', () => {
+    it('keeps a nickname', () => {
+        expect(parsePeerNicknameResult(nicknamed)).toEqual(nicknamed)
+    })
+
+    it('keeps a null nickname once cleared', () => {
+        const value = { nodeUuid: 'peer-uuid', nickname: null, displayName: 'Peer PC' }
+        expect(parsePeerNicknameResult(value)).toEqual(value)
+    })
+
+    it.each<{ name: string; value: JsonValue | undefined }>([
+        { name: 'missing payload', value: undefined },
+        { name: 'missing node UUID', value: { nickname: null, displayName: 'Peer PC' } },
+        { name: 'missing display name', value: { nodeUuid: 'peer-uuid', nickname: null } },
+        { name: 'missing nickname', value: { nodeUuid: 'peer-uuid', displayName: 'Peer PC' } },
+        { name: 'numeric nickname', value: { ...nicknamed, nickname: 1 } }
+    ])('rejects $name', ({ value }) => {
+        expect(() => parsePeerNicknameResult(value)).toThrow('Invalid peer nickname response')
+    })
+})
+
+describe('peer name and nickname invokes', () => {
+    beforeEach(() => {
+        vi.spyOn(getModularSupervisor(), 'callProcess').mockReset()
+    })
+
+    it.each<{ name: string; value: string | null }>([
+        { name: 'a name', value: 'Kitchen PC' },
+        { name: 'null for the generated default', value: null }
+    ])('relays a peer rename with $name', async ({ value }) => {
+        const result = { nodeUuid: 'peer-uuid', name: value ?? 'PAIR 9f8e7d6c', customName: value }
+        vi.mocked(getModularSupervisor().callProcess).mockResolvedValue(result)
+        const transport = mockTransport()
+        transport.invoke.mockResolvedValue(result)
+        await expect(
+            createPairApi(transport).cluster.setPeerName('peer-uuid', value)
+        ).resolves.toEqual(result)
+        expect(transport.invoke).toHaveBeenCalledExactlyOnceWith('cluster:set-peer-name', {
+            nodeUuid: 'peer-uuid',
+            name: value
+        })
+        await expect(
+            handleServiceBridgeInvoke('cluster:set-peer-name', {
+                nodeUuid: 'peer-uuid',
+                name: value
+            })
+        ).resolves.toEqual(result)
+        expect(getModularSupervisor().callProcess).toHaveBeenCalledExactlyOnceWith(
+            'broker',
+            'cluster:set-peer-name',
+            { nodeUuid: 'peer-uuid', name: value },
+            undefined
+        )
+    })
+
+    it.each<{ name: string; value: string | null }>([
+        { name: 'a nickname', value: 'Kitchen' },
+        { name: 'null to clear it', value: null }
+    ])('relays a peer nickname with $name', async ({ value }) => {
+        const result = { nodeUuid: 'peer-uuid', nickname: value, displayName: value ?? 'Peer PC' }
+        vi.mocked(getModularSupervisor().callProcess).mockResolvedValue(result)
+        const transport = mockTransport()
+        transport.invoke.mockResolvedValue(result)
+        await expect(
+            createPairApi(transport).cluster.setPeerNickname('peer-uuid', value)
+        ).resolves.toEqual(result)
+        expect(transport.invoke).toHaveBeenCalledExactlyOnceWith('cluster:set-peer-nickname', {
+            nodeUuid: 'peer-uuid',
+            nickname: value
+        })
+        await expect(
+            handleServiceBridgeInvoke('cluster:set-peer-nickname', {
+                nodeUuid: 'peer-uuid',
+                nickname: value
+            })
+        ).resolves.toEqual(result)
+        expect(getModularSupervisor().callProcess).toHaveBeenCalledExactlyOnceWith(
+            'broker',
+            'cluster:set-peer-nickname',
+            { nodeUuid: 'peer-uuid', nickname: value },
+            undefined
+        )
     })
 })

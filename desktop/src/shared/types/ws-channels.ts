@@ -95,6 +95,7 @@ import type {
     JoinRequest,
     JoinRequestsSnapshot,
     NodeNameResult,
+    PeerNicknameResult,
     RemoteManagementCapability,
     RemoteManagementSetRequest,
     RemoteManagementSnapshot,
@@ -157,6 +158,14 @@ export interface WsInvokeChannelMap {
     }
     /** Set this node's name; `null` returns to the generated default. */
     'cluster:set-node-name': { request: { name: string | null }; response: NodeNameResult }
+    'cluster:set-peer-name': {
+        request: { nodeUuid: string; name: string | null }
+        response: NodeNameResult
+    }
+    'cluster:set-peer-nickname': {
+        request: { nodeUuid: string; nickname: string | null }
+        response: PeerNicknameResult
+    }
     'engine:remote-management-get': {
         request: { nodeId: string }
         response: RemoteManagementCapability

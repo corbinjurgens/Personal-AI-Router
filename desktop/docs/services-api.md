@@ -121,6 +121,8 @@
 | `cluster:set-identity` | request (we call) | ✅ yes |
 | `cluster:set-local-services` | request (we call) | ➖ ignored |
 | `cluster:set-node-name` | request (we call) | ✅ yes |
+| `cluster:set-peer-name` | request (we call) | ✅ yes |
+| `cluster:set-peer-nickname` | request (we call) | ✅ yes |
 | `cluster:set-remote-management` | request (we call) | ✅ yes |
 | `discovery:nodes` | request (we call) | ✅ yes |
 | `nodes:get-initial` | request (we call) | ✅ yes |

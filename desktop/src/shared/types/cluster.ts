@@ -99,6 +99,15 @@ export interface NodeNameResult {
     customName: string | null
 }
 
+/** Result of `cluster:set-peer-nickname`. */
+export interface PeerNicknameResult {
+    nodeUuid: string
+    /** The name only this node uses for the peer; `null` when none is set. */
+    nickname: string | null
+    /** The peer's name as this node now shows it: the nickname, else the peer's own name. */
+    displayName: string
+}
+
 /**
  * Terminal/transient state of a pairing session (cluster-manager `InviteState`).
  * - `pending` — Initial Exchange done; awaiting the user's PIN entry.

@@ -19,6 +19,7 @@ import type {
     JoinRequestState,
     MembershipState,
     NodeNameResult,
+    PeerNicknameResult,
     RemoteManagementCapability,
     RemoteManagementSnapshot,
     RemoteManagementState
@@ -161,6 +162,20 @@ export function parseNodeNameResult(value: JsonValue | undefined): NodeNameResul
         throw new Error('Invalid node name response')
     }
     return { nodeUuid: obj.nodeUuid, name: obj.name, customName: obj.customName }
+}
+
+/** Parse a `cluster:set-peer-nickname` result. */
+export function parsePeerNicknameResult(value: JsonValue | undefined): PeerNicknameResult {
+    const obj = objectValue(value)
+    if (
+        !obj ||
+        typeof obj.nodeUuid !== 'string' ||
+        typeof obj.displayName !== 'string' ||
+        (obj.nickname !== null && typeof obj.nickname !== 'string')
+    ) {
+        throw new Error('Invalid peer nickname response')
+    }
+    return { nodeUuid: obj.nodeUuid, nickname: obj.nickname, displayName: obj.displayName }
 }
 
 function exactFields(obj: JsonObject, fields: string[]): boolean {

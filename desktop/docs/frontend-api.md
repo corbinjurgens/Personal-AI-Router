@@ -273,6 +273,14 @@ for the full wire semantics and capacity ownership.
   `{nodeUuid, name, customName}`; an invalid name rejects with the service's
   readable message. `onNodeNameChanged(callback)` reports every change of this
   node's name, from any client.
+- `setPeerName(nodeUuid, name)` renames a cluster member on that member itself
+  (`null` for its generated default) and resolves to `NodeNameResult`. The
+  member enforces the remote-management grant: without it the call rejects with
+  code `-32012` and the member's message. The new name arrives through
+  `nodes:changed`.
+- `setPeerNickname(nodeUuid, nickname)` sets a name only this node uses for the
+  member (`null` clears it) and resolves to `PeerNicknameResult`
+  `{nodeUuid, nickname, displayName}`.
 
 The admission-request API is separate from `getInitial()` and its
 `ClusterInitialSnapshot`: `getJoinRequests()`, `askToJoin(params)`,
@@ -534,6 +542,8 @@ Commands return no state. Renderer stores update from
 | `cluster:cancel-invite`     | `{ inviteId }`               | `Invite`                  |
 | `cluster:abandon-if-solo`   | `void`                       | `null`                    |
 | `cluster:set-node-name`     | `{ name: string \| null }`   | `NodeNameResult`          |
+| `cluster:set-peer-name`     | `{ nodeUuid, name: string \| null }` | `NodeNameResult`  |
+| `cluster:set-peer-nickname` | `{ nodeUuid, nickname: string \| null }` | `PeerNicknameResult` |
 | `engines:get-initial`       | `void`                       | `EngineInitialState`      |
 | `engines:get-settings`      | `EngineSettingsTarget`       | `EngineSettingsSnapshot`  |
 | `engines:preview-settings`  | `EngineSettingsRequest`      | `EngineSettingsPreview`   |

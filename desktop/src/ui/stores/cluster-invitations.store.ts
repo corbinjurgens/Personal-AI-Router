@@ -10,9 +10,14 @@ import type {
     JoinRequest,
     JoinRequestsSnapshot,
     NodeNameResult,
+    PeerNicknameResult,
     RemoteManagementSnapshot
 } from '@/shared/types/cluster'
-import { INVALID_PARAMS_CODE, POLICY_CONFLICT_CODE } from '@/shared/constants/service-errors'
+import {
+    INVALID_PARAMS_CODE,
+    POLICY_CONFLICT_CODE,
+    REMOTE_MANAGEMENT_DENIED_CODE
+} from '@/shared/constants/service-errors'
 import { getPairTransport } from '@/ui/api/bootstrap'
 import { serviceErrorCode } from '@/ui/api/service-transport'
 import getErrorString from '@/shared/utils/get-error-string'
@@ -26,6 +31,14 @@ interface RemoteManagementChange {
 }
 
 type NodeNameChange = { phase: 'saving' } | { phase: 'saved' } | { phase: 'error'; message: string }
+
+/** Outcome of the latest rename or nickname request for one peer. */
+interface PeerNameChange {
+    phase: 'saving' | 'saved' | 'error'
+    message?: string
+    /** The target refused because it has not allowed this node to manage it. */
+    denied?: boolean
+}
 
 interface ClusterInvitationsStore {
     joinSnapshot: JoinRequestsSnapshot | null
@@ -69,6 +82,13 @@ interface ClusterInvitationsStore {
     /** Rename this node; `null` returns to the generated default. */
     setSelfName: (name: string | null) => Promise<void>
     clearNameChange: () => void
+    /** Outcome of the latest peer rename or nickname request, by peer UUID. */
+    peerNameChanges: Record<string, PeerNameChange>
+    /** Rename a peer on that peer; `null` returns it to its generated default. */
+    setPeerName: (nodeUuid: string, name: string | null) => Promise<void>
+    /** Set the name only this node uses for a peer; `null` clears it. */
+    setPeerNickname: (nodeUuid: string, nickname: string | null) => Promise<void>
+    clearPeerNameChange: (nodeUuid: string) => void
     initialize: (initial?: ClusterInitialSnapshot) => Promise<void>
     hydrate: (snapshot: ClusterInitialSnapshot) => void
     refresh: () => Promise<void>
@@ -287,6 +307,35 @@ function receiveNodeName(result: NodeNameResult): void {
         selfName: result.name,
         selfCustomName: result.customName
     })
+}
+
+function setPeerNameChange(nodeUuid: string, change: PeerNameChange): void {
+    useClusterInvitationsStore.setState(state => ({
+        peerNameChanges: { ...state.peerNameChanges, [nodeUuid]: change }
+    }))
+}
+
+/**
+ * Run one peer name request. The roster push (`nodes:changed`) delivers the new
+ * name, so success only records the phase; a denial is flagged so the modal can
+ * fall back to nicknames.
+ */
+async function runPeerNameChange(
+    nodeUuid: string,
+    request: () => Promise<NodeNameResult | PeerNicknameResult>
+): Promise<void> {
+    if (useClusterInvitationsStore.getState().peerNameChanges[nodeUuid]?.phase === 'saving') return
+    setPeerNameChange(nodeUuid, { phase: 'saving' })
+    try {
+        await request()
+        setPeerNameChange(nodeUuid, { phase: 'saved' })
+    } catch (error) {
+        setPeerNameChange(nodeUuid, {
+            phase: 'error',
+            message: getErrorString(error),
+            denied: serviceErrorCode(error) === REMOTE_MANAGEMENT_DENIED_CODE
+        })
+    }
 }
 
 function invalidatePermissions(resetRevision = false): void {
@@ -534,6 +583,26 @@ export const useClusterInvitationsStore = create<ClusterInvitationsStore>((set, 
 
     clearNameChange: () => {
         set({ nameChange: null })
+    },
+
+    peerNameChanges: {},
+
+    setPeerName: async (nodeUuid, name) => {
+        await runPeerNameChange(nodeUuid, () => window.pairApi.cluster.setPeerName(nodeUuid, name))
+    },
+
+    setPeerNickname: async (nodeUuid, nickname) => {
+        await runPeerNameChange(nodeUuid, () =>
+            window.pairApi.cluster.setPeerNickname(nodeUuid, nickname)
+        )
+    },
+
+    clearPeerNameChange: nodeUuid => {
+        useClusterInvitationsStore.setState(state => {
+            const peerNameChanges = { ...state.peerNameChanges }
+            delete peerNameChanges[nodeUuid]
+            return { peerNameChanges }
+        })
     },
 
     hydrate: snapshot => {

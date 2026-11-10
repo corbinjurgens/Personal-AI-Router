@@ -68,6 +68,7 @@ import {
     parseJoinRequestsSnapshot,
     parseNodeIdentity,
     parseNodeNameResult,
+    parsePeerNicknameResult,
     parseRemoteManagementCapability,
     parseRemoteManagementSnapshot
 } from './cluster-json'
@@ -790,6 +791,24 @@ const EMPTY_SERVICE_BRIDGE_HANDLERS: BridgeHandlerMap = {
         if (!payload) throw new Error('Missing node name request')
         return parseNodeNameResult(
             await callCluster('cluster:set-node-name', { name: payload.name })
+        )
+    },
+    'cluster:set-peer-name': async payload => {
+        if (!payload) throw new Error('Missing peer name request')
+        return parseNodeNameResult(
+            await callCluster('cluster:set-peer-name', {
+                nodeUuid: payload.nodeUuid,
+                name: payload.name
+            })
+        )
+    },
+    'cluster:set-peer-nickname': async payload => {
+        if (!payload) throw new Error('Missing peer nickname request')
+        return parsePeerNicknameResult(
+            await callCluster('cluster:set-peer-nickname', {
+                nodeUuid: payload.nodeUuid,
+                nickname: payload.nickname
+            })
         )
     },
     'engine:remote-management-get': async payload => {

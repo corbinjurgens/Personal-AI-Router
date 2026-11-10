@@ -555,7 +555,12 @@ Personal AI Router:
 - renames this node through `cluster:set-node-name` (`{name}`, `null` for the
   generated default) and follows `cluster:node-name-changed`; an invalid name's
   readable reason travels in the error message because the broker relay drops
-  error `data`.
+  error `data`;
+- renames a peer through `cluster:set-peer-name` (`{nodeUuid, name}`, which the
+  target accepts only while it has allowed this node remote management; refusal
+  is code `-32012`) and sets a name only this node uses through
+  `cluster:set-peer-nickname` (`{nodeUuid, nickname}`); both results reach the
+  roster through `nodes:changed`.
 
 Cluster membership correlates by `ClusterNode.nodeUuid` — the stable per-host
 UUID that also keys discovery, workloads, errors, and `selfId` — never a name.

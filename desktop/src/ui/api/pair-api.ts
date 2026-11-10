@@ -15,6 +15,7 @@ import type {
     JoinRequest,
     JoinRequestsSnapshot,
     NodeNameResult,
+    PeerNicknameResult,
     RemoteManagementCapability,
     RemoteManagementSetRequest,
     RemoteManagementSnapshot
@@ -99,6 +100,13 @@ export interface IClusterApi {
     /** Set this node's name; `null` returns to the generated default. */
     setNodeName(name: string | null): Promise<NodeNameResult>
     onNodeNameChanged(callback: (result: NodeNameResult) => void): () => void
+    /**
+     * Rename a cluster member on that member itself; `null` returns it to its
+     * generated default. The target enforces the remote-management grant.
+     */
+    setPeerName(nodeUuid: string, name: string | null): Promise<NodeNameResult>
+    /** Set the name only this node uses for a member; `null` clears it. */
+    setPeerNickname(nodeUuid: string, nickname: string | null): Promise<PeerNicknameResult>
     /**
      * Abort a still-pending outbound invite this node sent: tears down the
      * pairing session and invalidates the PIN so it can no longer complete.
@@ -260,6 +268,10 @@ export function createPairApi(transport: ServiceTransport): IPairApi {
                 transport.invoke('engine:remote-management-get', { nodeId }),
             setNodeName: name => transport.invoke('cluster:set-node-name', { name }),
             onNodeNameChanged: cb => transport.subscribePush('cluster:node-name-changed', cb),
+            setPeerName: (nodeUuid, name) =>
+                transport.invoke('cluster:set-peer-name', { nodeUuid, name }),
+            setPeerNickname: (nodeUuid, nickname) =>
+                transport.invoke('cluster:set-peer-nickname', { nodeUuid, nickname }),
             cancelInvite: inviteId => transport.invoke('cluster:cancel-invite', { inviteId }),
             abandonIfSolo: async () => {
                 await transport.invoke('cluster:abandon-if-solo')
