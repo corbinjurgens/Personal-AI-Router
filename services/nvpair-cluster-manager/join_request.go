@@ -54,8 +54,12 @@ type joinRequestsSnapshot struct {
 
 type joinRequestRecord struct {
 	JoinRequest
-	source                string
-	requesterName         string // original bounded claim, for exact duplicate detection
+	source string
+	// requesterName is the requester's name claim: on an incoming record the
+	// original bounded claim, for exact duplicate detection; on an outgoing
+	// record this node's name captured at creation and sent on every attempt,
+	// so a rename between attempts cannot make a retry conflict.
+	requesterName         string
 	replaceSolo           bool
 	allowRemoteManagement bool
 	clusterID             string
@@ -456,6 +460,7 @@ func (m *Manager) handleAskToJoin(msg *Message) {
 	port, _ := strconv.Atoi(portText)
 	r := &joinRequestRecord{JoinRequest: JoinRequest{RequestID: id, Direction: "outgoing", PeerAddress: host, PeerPort: port, State: "awaiting-approval", CreatedAt: now.UnixMilli(), ExpiresAt: now.Add(m.effectiveInviteTTL()).UnixMilli()}, replaceSolo: *p.ReplaceSoloCluster, generation: m.clusterGen.Load(), sessionGeneration: m.sessGen.Load()}
 	r.PeerNodeUUID = peerUUID
+	r.requesterName = m.selfName()
 	m.joinRequests[id] = r
 	result := cloneJoinRequest(r)
 	m.joinMu.Unlock()
