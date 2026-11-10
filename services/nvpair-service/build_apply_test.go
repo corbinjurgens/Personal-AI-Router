@@ -7,7 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -166,6 +169,60 @@ func TestBuildApplyLocalAdmission(t *testing.T) {
 					}
 					check(t, bad, -32602)
 				})
+			}
+		})
+	}
+}
+
+// os.Executable and Electron's execPath keep a link above the installation,
+// while the kernel reports the resolved image path. Both name one image.
+func TestBuildApplyImagesCompareByIdentityAcrossALinkAbove(t *testing.T) {
+	links := map[string]func(t *testing.T, target, link string){
+		"symbolic link": func(t *testing.T, target, link string) {
+			if err := os.Symlink(target, link); err != nil {
+				if runtime.GOOS == "windows" {
+					t.Skipf("symlink privilege unavailable: %v", err)
+				}
+				t.Fatal(err)
+			}
+		},
+	}
+	if runtime.GOOS == "windows" {
+		links["junction"] = func(t *testing.T, target, link string) {
+			if out, err := exec.Command("cmd", "/c", "mklink", "/J", link, target).CombinedOutput(); err != nil {
+				t.Skipf("junction unavailable: %v: %s", err, out)
+			}
+		}
+	}
+	for name, makeLink := range links {
+		t.Run(name, func(t *testing.T) {
+			root := buildApplyTempDir(t)
+			image := filepath.Join(root, "real", "install", "PAIR.exe")
+			other := filepath.Join(root, "real", "other", "PAIR.exe")
+			for _, path := range []string{image, other} {
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			above := filepath.Join(root, "above")
+			makeLink(t, filepath.Join(root, "real"), above)
+			linked := filepath.Join(above, "install", "PAIR.exe")
+			if !sameBuildApplyImage(linked, image) || !sameBuildApplyImage(image, linked) {
+				t.Fatal("one image named through a link above was not recognised")
+			}
+			if sameBuildApplyImage(filepath.Join(above, "other", "PAIR.exe"), image) {
+				t.Fatal("a different image matched")
+			}
+			if err := os.Rename(filepath.Join(root, "real", "install"), filepath.Join(root, "real", "moved")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Join(root, "real", "moved"), filepath.Join(root, "real", "install")); err == nil {
+				if sameBuildApplyImage(linked, filepath.Join(root, "real", "moved", "PAIR.exe")) {
+					t.Fatal("an image inside a linked installation directory matched")
+				}
 			}
 		})
 	}

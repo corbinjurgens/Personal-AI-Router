@@ -381,6 +381,9 @@ func captureBuildApplyPreview(ctx context.Context, request buildapply.PreviewReq
 		err = errors.New("attached service process identity is unavailable")
 		return
 	}
+	// Continue with the kernel's resolved image path; os.Executable may keep a
+	// link above the installation.
+	service = serviceProcess.Executable
 	root, readErr := buildapply.TargetFromExecutables(gui.Executable, service, runtime.GOOS)
 	if readErr != nil {
 		err = readErr
@@ -459,7 +462,7 @@ func captureBuildApplyPreview(ctx context.Context, request buildapply.PreviewReq
 		!sameBuildApplyImpact(first.Impact, last.Impact) {
 		preview.Impact = buildapply.Impact{InterruptionPolicy: buildapply.InterruptionPolicy{StopsEngines: true, UnloadsModels: true, CommittedStreamsMayFail: true, IncludesWorkBeforeFence: true}, RestorePolicy: buildapply.RestorePolicy{RemainPaused: true, RequireLocalResume: true, PreserveNewerPause: true}, Refusals: []buildapply.Refusal{{Code: "changed_or_unavailable", Detail: "Local owner evidence changed or became unavailable during capture."}}}
 	}
-	if err = buildapply.ValidateLocations(request.CandidatePath, root, excluded); err != nil {
+	if err = buildapply.ValidateLocations(candidate.Root.Path, target.Root.Path, excluded); err != nil {
 		return
 	}
 	after, readErr := reads.process(request.GUI.PID)
@@ -519,30 +522,45 @@ func fullServiceIdentity(id buildapply.Identity) bool {
 	return id.BuildID.Known && id.SourceRevision.Known && id.Dirty.Known && id.SHA256.Known
 }
 
+// sameBuildApplyImage compares two executable images by file identity, not
+// spelling: os.Executable and Electron's execPath keep a link above the
+// installation, while the kernel reports the resolved path. Each spelling is
+// validated as local (a UNC path or network mount is refused) before anything
+// is read through it, and the directory holding each image must be real below
+// any link above it. The installation's own layout is checked separately, by
+// TargetFromExecutables. A link above never renames the image itself, so a
+// different file name is rejected without a read (process inventory scans
+// call this for every process).
 func sameBuildApplyImage(a, b string) bool {
-	// A supplied UNC path or alias must not trigger a filesystem read. Native
-	// process paths and bundle paths must have the same canonical spelling.
 	if runtime.GOOS == "windows" {
-		if !strings.EqualFold(filepath.Clean(a), filepath.Clean(b)) {
+		if !strings.EqualFold(filepath.Base(a), filepath.Base(b)) {
 			return false
 		}
-	} else if filepath.Clean(a) != filepath.Clean(b) {
+	} else if filepath.Base(a) != filepath.Base(b) {
 		return false
 	}
-	if !filepath.IsAbs(a) || strings.HasPrefix(a, `\\`) || strings.HasPrefix(a, "//") {
+	x, ok := buildApplyImage(a)
+	if !ok {
 		return false
 	}
-	parent, err := buildapply.OpenRealRoot(filepath.Dir(a))
+	y, ok := buildApplyImage(b)
+	return ok && os.SameFile(x, y)
+}
+
+func buildApplyImage(path string) (os.FileInfo, bool) {
+	if !filepath.IsAbs(path) {
+		return nil, false
+	}
+	parent, err := buildapply.OpenResolvedRoot(filepath.Dir(path))
 	if err != nil {
-		return false
+		return nil, false
 	}
 	defer parent.Close()
-	x, err := os.Lstat(a)
-	if err != nil || !x.Mode().IsRegular() {
-		return false
+	info, err := os.Lstat(filepath.Join(parent.Path, filepath.Base(path)))
+	if err != nil || !info.Mode().IsRegular() || parent.Revalidate() != nil {
+		return nil, false
 	}
-	y, err := os.Lstat(b)
-	return err == nil && y.Mode().IsRegular() && os.SameFile(x, y) && parent.Revalidate() == nil
+	return info, true
 }
 
 func validBuildApplyID(id string) bool {
@@ -636,9 +654,8 @@ func readBuildApplyHostID() buildapply.Observation[string] {
 	if err != nil {
 		return buildapply.Observation[string]{}
 	}
-	for _, name := range []string{filepath.Join("cluster", "identity.json"), "node-id.json"} {
-		path := filepath.Join(base, name)
-		data, err := buildapply.ReadLocalFile(path, 64<<10)
+	for _, name := range []string{"cluster/identity.json", "node-id.json"} {
+		data, err := buildapply.ReadLocalFile(base, name, 64<<10)
 		if err != nil {
 			if os.IsNotExist(err) {
 				continue

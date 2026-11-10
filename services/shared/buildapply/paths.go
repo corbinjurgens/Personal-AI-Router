@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
@@ -53,17 +54,15 @@ func ValidateLocalPath(path string) error {
 // nothing below the root is ever resolved.
 //
 // A link in an ancestor the user or the OS owns (a linked HOME or ~/Library,
-// macOS's /var -> /private/var, a linked parent of a selected bundle) adds no
-// attack surface: whoever can replace it already controls the account. The
-// time-of-check risk these checks exist for is a link swapped inside PAIR's
-// tree between check and use, which the held os.Root and the identity
-// revalidation cover. Missing trailing directories are kept as named so a root
-// that does not exist yet still resolves (journal creation, absent stores).
-//
-// Go's EvalSymlinks does not evaluate Windows mount points (junctions), so a
-// junction above a root still fails here and stays refused.
+// macOS's /var -> /private/var, a junction that relocates a Windows profile or
+// AppData, a linked parent of a selected bundle) adds no attack surface:
+// whoever can replace it already controls the account. The time-of-check risk
+// these checks exist for is a link swapped inside PAIR's tree between check and
+// use, which the held os.Root and the identity revalidation cover. Missing
+// trailing directories are kept as named so a root that does not exist yet
+// still resolves (journal creation, absent stores).
 func resolveRoot(path string) (string, error) {
-	if err := localRootSyntax(path); err != nil {
+	if err := ValidateLocalPath(path); err != nil {
 		return "", err
 	}
 	path = filepath.Clean(path)
@@ -71,23 +70,78 @@ func resolveRoot(path string) (string, error) {
 	if parent == path {
 		return path, nil
 	}
-	rest := []string{filepath.Base(path)}
-	for {
-		resolved, err := filepath.EvalSymlinks(parent)
-		if err == nil {
-			real := filepath.Join(append([]string{resolved}, rest...)...)
-			if err := localRootSyntax(real); err != nil {
-				return "", err
-			}
-			return real, nil
-		}
-		next := filepath.Dir(parent)
-		if !os.IsNotExist(err) || next == parent {
+	resolved, err := resolveAncestors(parent)
+	if err != nil {
+		return "", err
+	}
+	real := filepath.Join(resolved, filepath.Base(path))
+	if err := ValidateLocalPath(real); err != nil {
+		return "", err
+	}
+	return real, nil
+}
+
+// maxAncestorLinks bounds the links followed while resolving one path, as the
+// kernels bound symbolic link traversal.
+const maxAncestorLinks = 40
+
+// resolveAncestors walks path from its volume root and follows each symbolic
+// link or Windows junction it meets. Every prefix is validated as local before
+// it is read, and a link target is checked before it is followed, so a link
+// into a network share or an automount is refused without being touched.
+// Missing components are kept as named.
+func resolveAncestors(path string) (string, error) {
+	current, rest := splitVolumeRoot(path)
+	if err := ValidateLocalPath(current); err != nil {
+		return "", err
+	}
+	for links := 0; len(rest) > 0; {
+		next := filepath.Join(current, rest[0])
+		if err := ValidateLocalPath(next); err != nil {
 			return "", err
 		}
-		rest = append([]string{filepath.Base(parent)}, rest...)
-		parent = next
+		info, err := os.Lstat(next)
+		if os.IsNotExist(err) {
+			return filepath.Join(append([]string{current}, rest...)...), nil
+		}
+		if err != nil {
+			return "", err
+		}
+		target, linked, err := nativeLinkTarget(next, info)
+		if err != nil {
+			return "", err
+		}
+		if !linked {
+			current, rest = next, rest[1:]
+			continue
+		}
+		if links++; links > maxAncestorLinks {
+			return "", fmt.Errorf("too many links above a root: %s", path)
+		}
+		if !filepath.IsAbs(target) {
+			if filepath.VolumeName(target) != "" || target != "" && os.IsPathSeparator(target[0]) {
+				return "", fmt.Errorf("link above a root has a drive-relative target: %s", next)
+			}
+			target = filepath.Join(current, target)
+		}
+		target = filepath.Clean(target)
+		if err := localRootSyntax(target); err != nil {
+			return "", fmt.Errorf("link above a root does not lead to a local path: %s", next)
+		}
+		var targetRest []string
+		current, targetRest = splitVolumeRoot(target)
+		if err := ValidateLocalPath(current); err != nil {
+			return "", err
+		}
+		rest = append(targetRest, rest[1:]...)
 	}
+	return current, nil
+}
+
+// splitVolumeRoot returns the root of path's volume and the names below it.
+func splitVolumeRoot(path string) (string, []string) {
+	volume := filepath.VolumeName(path)
+	return volume + string(filepath.Separator), strings.FieldsFunc(path[len(volume):], func(c rune) bool { return c < utf8.RuneSelf && os.IsPathSeparator(uint8(c)) })
 }
 
 // checkRealAncestors refuses a link anywhere in path, including path itself.
@@ -117,7 +171,8 @@ func checkRealAncestors(path string) (os.FileInfo, error) {
 			return nil, fmt.Errorf("linked root or ancestor: %s", current)
 		}
 		if err := nativePathCheck(current, info, false); err != nil {
-			return nil, err
+			// A Windows junction or other reparse point is refused here.
+			return nil, fmt.Errorf("%w: %s", err, current)
 		}
 		selected = info
 	}
@@ -146,6 +201,17 @@ func OpenRealRoot(path string) (*RealRoot, error) {
 		return nil, err
 	}
 	return r, nil
+}
+
+// OpenResolvedRoot resolves the links above path (resolveRoot) and then holds
+// path like OpenRealRoot, so path itself and everything below it must be real.
+// It is the entry for a spelling that comes from outside buildapply.
+func OpenResolvedRoot(path string) (*RealRoot, error) {
+	real, err := resolveRoot(path)
+	if err != nil {
+		return nil, err
+	}
+	return OpenRealRoot(real)
 }
 
 func (r *RealRoot) Close() error { return r.root.Close() }
@@ -194,11 +260,55 @@ func containsPath(root, path string) bool {
 	return err == nil && (rel == "." || rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel))
 }
 
+// overlapping reports whether a contains b or b contains a. Spelling alone
+// cannot decide it: a Windows 8.3 alias, or a different case on a
+// case-insensitive volume, names the same directory. The string comparison is
+// only a fast path; otherwise each existing ancestor of one path is compared
+// with the other path by file identity. Both paths are resolved roots.
+func overlapping(a, b string) (bool, error) {
+	if containsPath(a, b) || containsPath(b, a) {
+		return true, nil
+	}
+	for _, pair := range [][2]string{{a, b}, {b, a}} {
+		if inside, err := containsByIdentity(pair[0], pair[1]); err != nil || inside {
+			return inside, err
+		}
+	}
+	return false, nil
+}
+
+// containsByIdentity reports whether root is path or one of path's existing
+// ancestors. Nothing exists below a missing root, so a missing root contains
+// nothing; components of path that do not exist are skipped.
+func containsByIdentity(root, path string) (bool, error) {
+	rootInfo, err := os.Lstat(root)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	for current := path; ; current = filepath.Dir(current) {
+		info, err := os.Lstat(current)
+		if err == nil && os.SameFile(info, rootInfo) {
+			return true, nil
+		}
+		if err != nil && !os.IsNotExist(err) {
+			return false, err
+		}
+		if filepath.Dir(current) == current {
+			return false, nil
+		}
+	}
+}
+
 // ValidateLocations rejects both containment directions: a bundle cannot own a
 // profile/source/model tree, nor be nested in one. Exclusions are trusted owner
-// paths, never supplied by a candidate descriptor. Every path is resolved
-// first and only resolved paths are compared, so a selection cannot reach a
-// protected tree through a link that a string comparison would miss.
+// paths, never supplied by a candidate descriptor. Links above each path are
+// resolved first; a selected or protected root that is itself a link is
+// refused. Containment is decided on the resolved paths by spelling and by the
+// file identity of their existing directories (overlapping), so a link above,
+// an 8.3 alias or a case variant does not hide an overlap.
 func ValidateLocations(source, target string, excluded []string) error {
 	if !filepath.IsAbs(source) || !filepath.IsAbs(target) {
 		return errors.New("unresolved bundle root")
@@ -214,7 +324,9 @@ func ValidateLocations(source, target string, excluded []string) error {
 		}
 		selected = append(selected, real)
 	}
-	if containsPath(selected[0], selected[1]) || containsPath(selected[1], selected[0]) {
+	if overlap, err := overlapping(selected[0], selected[1]); err != nil {
+		return err
+	} else if overlap {
 		return errors.New("source and target overlap")
 	}
 	protectedRoots := make([]string, 0, len(excluded))
@@ -229,9 +341,6 @@ func ValidateLocations(source, target string, excluded []string) error {
 		if err != nil {
 			return errors.New("protected root is linked or unavailable")
 		}
-		if err := nativeLocalPath(real); err != nil {
-			return err
-		}
 		// Missing default stores are harmless. A protected root that is
 		// itself a link, or is otherwise unavailable, cannot authorize a
 		// selection: do not follow it to an unknown filesystem merely to
@@ -243,7 +352,9 @@ func ValidateLocations(source, target string, excluded []string) error {
 	}
 	for _, path := range selected {
 		for _, protected := range protectedRoots {
-			if containsPath(path, protected) || containsPath(protected, path) {
+			if overlap, err := overlapping(path, protected); err != nil {
+				return err
+			} else if overlap {
 				return errors.New("bundle overlaps protected data or model root")
 			}
 		}
@@ -343,27 +454,28 @@ func InspectProcess(pid int) (ProcessIdentity, error) {
 	return nativeProcessIdentity(pid)
 }
 
-// ReadLocalFile is a bounded, rooted read of an existing owner file. It never
-// creates missing state and refuses links, nonlocal mounts and substitutions.
-// The file and the directory holding it must be real; links above that
-// directory are resolved (resolveRoot).
-func ReadLocalFile(path string, limit int64) ([]byte, error) {
+// ReadLocalFile is a bounded, rooted read of the existing owner file name, a
+// slash-separated path relative to the owning root (a profile directory). It
+// never creates missing state and refuses links, nonlocal mounts and
+// substitutions. Links above root are resolved (resolveRoot); root, the
+// directories below it and the file must be real, as for the journal.
+func ReadLocalFile(owner, file string, limit int64) ([]byte, error) {
 	if limit <= 0 || limit > MaxFileBytes {
 		return nil, errors.New("invalid local read bound")
 	}
-	if err := localRootSyntax(path); err != nil {
-		return nil, err
+	if !validRelative(file) {
+		return nil, errors.New("invalid owner file name")
 	}
-	dir, err := resolveRoot(filepath.Dir(path))
+	real, err := resolveRoot(owner)
 	if err != nil {
 		return nil, err
 	}
-	root, err := OpenRealRoot(dir)
+	root, err := OpenRealRoot(filepath.Join(real, filepath.FromSlash(path.Dir(file))))
 	if err != nil {
 		return nil, err
 	}
 	defer root.Close()
-	name := filepath.Base(path)
+	name := path.Base(file)
 	before, err := root.root.Lstat(name)
 	if err != nil {
 		return nil, err

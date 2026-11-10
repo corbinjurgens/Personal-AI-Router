@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"sync"
@@ -951,7 +952,7 @@ func (b *Broker) readCachedBuildApplyOwners(ctx context.Context) (buildApplyOwne
 // Parse result must equal the current owner, and file identity is fenced. No
 // canonical write is claimed or performed by preview.
 func readBuildApplyStoredPause(path, digest string) ([]buildapply.SettingsDifference, bool) {
-	data, err := buildapply.ReadLocalFile(path, 2<<20)
+	data, err := buildapply.ReadLocalFile(filepath.Dir(path), filepath.Base(path), 2<<20)
 	if err != nil {
 		return nil, false
 	}

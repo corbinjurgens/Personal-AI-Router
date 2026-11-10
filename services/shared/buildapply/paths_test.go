@@ -189,9 +189,11 @@ func TestRootsAllowLinksAboveAndRefuseLinksAtOrBelow(t *testing.T) {
 		if want := filepath.Join(real, "profile", "build-apply"); j.Path() != want {
 			t.Fatalf("journal path %q, want resolved %q", j.Path(), want)
 		}
-		if _, err := openJournalAt(filepath.Join(root, "profile", "build-apply"), false); err != nil {
+		reopened, err := openJournalAt(filepath.Join(root, "profile", "build-apply"), false)
+		if err != nil {
 			t.Fatalf("reopen journal: %v", err)
 		}
+		reopened.Close()
 	})
 	t.Run("link as selected root", func(t *testing.T) {
 		root := packageTempRoot(t)
@@ -273,6 +275,46 @@ func TestLocationsRefuseOverlapThroughALink(t *testing.T) {
 			t.Fatalf("linked protected root error = %v", err)
 		}
 	})
+}
+
+// An owner file is read below its owning root: a link above the root is
+// resolved, while a linked root is refused even for a file one level down.
+func TestOwnerFileReadResolvesOnlyAboveTheOwningRoot(t *testing.T) {
+	root := packageTempRoot(t)
+	real := filepath.Join(root, "real")
+	packageWrite(t, filepath.Join(real, "profile", "cluster", "identity.json"), []byte("{}"))
+	above := filepath.Join(root, "above")
+	packageSymlink(t, real, above)
+	t.Run("link above the owning root", func(t *testing.T) {
+		if data, err := ReadLocalFile(filepath.Join(above, "profile"), "cluster/identity.json", 1024); err != nil || string(data) != "{}" {
+			t.Fatalf("read below a link above the profile: %q, %v", data, err)
+		}
+	})
+	t.Run("owning root is a link", func(t *testing.T) {
+		profile := filepath.Join(root, "profile")
+		packageSymlink(t, filepath.Join(real, "profile"), profile)
+		_, err := ReadLocalFile(profile, "cluster/identity.json", 1024)
+		if err == nil || !strings.Contains(err.Error(), "linked root or ancestor: "+profile) {
+			t.Fatalf("linked profile read error = %v", err)
+		}
+	})
+}
+
+// Containment does not depend on spelling: a case variant on a
+// case-insensitive volume names the protected root itself.
+func TestLocationsRefuseOverlapThroughACaseVariant(t *testing.T) {
+	root := packageTempRoot(t)
+	protected := filepath.Join(root, "Protected")
+	target := filepath.Join(root, "target")
+	packageMkdirs(t, protected, target)
+	variant := filepath.Join(root, "PROTECTED")
+	if _, err := os.Lstat(variant); err != nil {
+		t.Skipf("volume is case-sensitive: %v", err)
+	}
+	err := ValidateLocations(variant, target, []string{protected})
+	if err == nil || !strings.Contains(err.Error(), "bundle overlaps protected data or model root") {
+		t.Fatalf("case variant of a protected root error = %v", err)
+	}
 }
 
 // Allowing a link above does not weaken substitution detection: the held root
@@ -359,7 +401,7 @@ func TestPackageOwnerFileReadIsBoundedAndReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data, err := ReadLocalFile(path, 1024)
+	data, err := ReadLocalFile(root, "policy.json", 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -373,11 +415,17 @@ func TestPackageOwnerFileReadIsBoundedAndReadOnly(t *testing.T) {
 	if !os.SameFile(before, after) || !before.ModTime().Equal(after.ModTime()) {
 		t.Fatal("owner read wrote the file")
 	}
-	if _, err := ReadLocalFile(path, 2); err == nil {
+	if _, err := ReadLocalFile(root, "policy.json", 2); err == nil {
 		t.Fatal("unbounded owner file read")
 	}
-	missing := filepath.Join(root, "missing.json")
-	if _, err := ReadLocalFile(missing, 1024); !os.IsNotExist(err) {
-		t.Fatalf("missing owner state = %v", err)
+	for _, missing := range []string{"missing.json", "cluster/identity.json"} {
+		if _, err := ReadLocalFile(root, missing, 1024); !os.IsNotExist(err) {
+			t.Fatalf("missing owner state %s = %v", missing, err)
+		}
+	}
+	for _, hostile := range []string{"../policy.json", "/policy.json", `cluster\identity.json`} {
+		if _, err := ReadLocalFile(root, hostile, 1024); err == nil {
+			t.Fatalf("read owner file through hostile name %q", hostile)
+		}
 	}
 }

@@ -118,6 +118,15 @@ func nativePathCheck(path string, info os.FileInfo, owned bool) error {
 	return nil
 }
 
+// nativeLinkTarget reports where a symbolic link above a root leads.
+func nativeLinkTarget(path string, info os.FileInfo) (string, bool, error) {
+	if info.Mode()&os.ModeSymlink == 0 {
+		return "", false, nil
+	}
+	target, err := os.Readlink(path)
+	return target, err == nil, err
+}
+
 func nativeInfoCheck(info os.FileInfo, owned bool) error {
 	s, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {

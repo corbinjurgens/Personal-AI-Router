@@ -65,6 +65,43 @@ func nativePathCheck(path string, info os.FileInfo, owned bool) error {
 	return nativeHandleCheck(h, info, owned)
 }
 
+// nativeLinkTarget reports where a link above a root leads: a symbolic link or
+// a junction (mount point), the usual unprivileged way to relocate a profile or
+// AppData. Go's EvalSymlinks does not follow junctions. Other reparse points
+// are not followed, and the strict walk refuses them. The target is read from
+// the reparse data without opening through it; a UNC or volume GUID target
+// keeps its \\ spelling, which localRootSyntax refuses.
+func nativeLinkTarget(path string, info os.FileInfo) (string, bool, error) {
+	data, ok := info.Sys().(*syscall.Win32FileAttributeData)
+	if !ok || data.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+		return "", false, nil
+	}
+	p, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return "", false, err
+	}
+	var find windows.Win32finddata
+	h, err := windows.FindFirstFile(p, &find)
+	if err != nil {
+		return "", false, err
+	}
+	windows.FindClose(h)
+	// Reserved0 holds the reparse tag when the entry is a reparse point.
+	if find.Reserved0 != windows.IO_REPARSE_TAG_SYMLINK && find.Reserved0 != windows.IO_REPARSE_TAG_MOUNT_POINT {
+		return "", false, nil
+	}
+	target, err := os.Readlink(path)
+	if err != nil {
+		return "", false, err
+	}
+	// A \\?\X:\ spelling names a local drive; \\?\UNC\ and \\?\Volume{...}
+	// keep the prefix and are refused.
+	if len(target) >= 7 && strings.HasPrefix(target, `\\?\`) && target[5] == ':' && os.IsPathSeparator(target[6]) {
+		target = target[4:]
+	}
+	return target, true, nil
+}
+
 func nativeInfoCheck(info os.FileInfo, owned bool) error {
 	data, ok := info.Sys().(*syscall.Win32FileAttributeData)
 	if !ok || data.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
