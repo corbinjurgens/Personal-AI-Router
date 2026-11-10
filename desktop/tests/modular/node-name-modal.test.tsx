@@ -5,15 +5,21 @@
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { ClusterNode } from '@/shared/types/cluster'
+import type { ClusterNode, RemoteManagementCapability } from '@/shared/types/cluster'
 import type { IClusterApi } from '@/ui/api/pair-api'
 import { NodeNameModal } from '@/ui/components/NodeName/NodeNameModal'
 import { ServiceCallError } from '@/ui/api/service-transport'
 import { useClusterInvitationsStore } from '@/ui/stores/cluster-invitations.store'
 import { useConnectionStore } from '@/ui/stores/connection.store'
+import { useNodeConfigurationStore } from '@/ui/stores/node-configuration.store'
 
 const setNodeName = vi.fn<IClusterApi['setNodeName']>()
+const setPeerName = vi.fn<IClusterApi['setPeerName']>()
+const setPeerNickname = vi.fn<IClusterApi['setPeerNickname']>()
+const getRemoteManagementForNode = vi.fn<IClusterApi['getRemoteManagementForNode']>()
 const onClose = vi.fn<() => void>()
+const DENIED_MESSAGE =
+    'Remote management is blocked on this device. Change permission locally on that device.'
 
 const peer: ClusterNode = {
     nodeUuid: 'peer-uuid',
@@ -81,9 +87,7 @@ async function renderModal(customName: string | null, shownName = 'PAIR 1a2b3c4d
     await act(async () =>
         root.render(
             <NodeNameModal
-                nodeUuid="self-uuid"
-                shownName={shownName}
-                customName={customName}
+                target={{ kind: 'self', nodeUuid: 'self-uuid', shownName, customName }}
                 open
                 onClose={onClose}
             />
@@ -91,20 +95,44 @@ async function renderModal(customName: string | null, shownName = 'PAIR 1a2b3c4d
     )
 }
 
+async function renderPeerModal(node: ClusterNode = peer): Promise<void> {
+    await act(async () =>
+        root.render(<NodeNameModal target={{ kind: 'peer', node }} open onClose={onClose} />)
+    )
+}
+
+function capability(state: RemoteManagementCapability['state']): RemoteManagementCapability {
+    return { version: 1, allowed: state === 'allowed', revision: '1', state }
+}
+
+function visibleText(): string {
+    return document.body.textContent ?? ''
+}
+
 beforeEach(() => {
     vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
     setNodeName.mockReset()
+    setPeerName.mockReset()
+    setPeerNickname.mockReset()
+    getRemoteManagementForNode.mockReset()
     onClose.mockReset()
     Object.defineProperty(window, 'pairApi', {
         configurable: true,
-        value: { cluster: { setNodeName } }
+        value: {
+            cluster: { setNodeName, setPeerName, setPeerNickname, getRemoteManagementForNode }
+        }
     })
     Object.defineProperty(window, 'windowApi', {
         configurable: true,
         value: { platform: 'Windows' }
     })
     useConnectionStore.setState({ selfId: 'self-uuid' })
-    useClusterInvitationsStore.setState({ members: [self, peer], nameChange: null })
+    useClusterInvitationsStore.setState({
+        members: [self, peer],
+        nameChange: null,
+        peerNameChanges: {}
+    })
+    useNodeConfigurationStore.setState({ management: new Map() })
     container = document.createElement('div')
     document.body.append(container)
     root = createRoot(container)
@@ -113,7 +141,8 @@ beforeEach(() => {
 afterEach(async () => {
     await act(async () => root.unmount())
     container.remove()
-    useClusterInvitationsStore.setState({ members: [], nameChange: null })
+    useClusterInvitationsStore.setState({ members: [], nameChange: null, peerNameChanges: {} })
+    useNodeConfigurationStore.setState({ management: new Map() })
     vi.unstubAllGlobals()
 })
 
@@ -180,5 +209,148 @@ describe('node name modal', () => {
             'name must be at most 63 characters'
         )
         expect(onClose).not.toHaveBeenCalled()
+    })
+})
+
+describe('node name modal for a peer', () => {
+    it('offers Save, Set nickname and Use default name when the peer allows management', async () => {
+        getRemoteManagementForNode.mockResolvedValue(capability('allowed'))
+        await renderPeerModal()
+        expect(getRemoteManagementForNode).toHaveBeenCalledExactlyOnceWith('peer-uuid')
+        expect(button('Save')).toBeDefined()
+        expect(button('Set nickname')).toBeDefined()
+        expect(button('Use default name')).toBeDefined()
+        expect(visibleText()).toContain(
+            'Renames Studio on that device. Every node in the cluster will show the new name.'
+        )
+        expect(visibleText()).toContain(
+            "A nickname is only used on this device. Other devices keep showing the node's own name."
+        )
+        expect(visibleText()).not.toContain('has not allowed this device')
+    })
+
+    it.each<RemoteManagementCapability['state']>([
+        'denied',
+        'unreviewed',
+        'unavailable',
+        'unsupported'
+    ])('offers only Set nickname when the state is %s', async state => {
+        getRemoteManagementForNode.mockResolvedValue(capability(state))
+        await renderPeerModal()
+        expect(button('Save')).toBeUndefined()
+        expect(button('Use default name')).toBeUndefined()
+        expect(button('Set nickname')).toBeDefined()
+        expect(visibleText()).toContain(
+            "Studio has not allowed this device to manage it, so you can't rename it from here. You can still give it a nickname."
+        )
+    })
+
+    it('hides Save while the permission read is pending', async () => {
+        getRemoteManagementForNode.mockReturnValue(new Promise(() => {}))
+        await renderPeerModal()
+        expect(button('Save')).toBeUndefined()
+        expect(button('Set nickname')).toBeDefined()
+        expect(visibleText()).not.toContain('has not allowed this device')
+    })
+
+    it('prefills the peer name, or its nickname when one is set', async () => {
+        getRemoteManagementForNode.mockResolvedValue(capability('allowed'))
+        await renderPeerModal()
+        expect(nameInput().value).toBe('Studio')
+        await act(async () => root.render(null))
+        await renderPeerModal({ ...peer, nickname: 'Kitchen', displayName: 'Kitchen' })
+        expect(nameInput().value).toBe('Kitchen')
+    })
+
+    it('renames the peer with the trimmed name and closes', async () => {
+        getRemoteManagementForNode.mockResolvedValue(capability('allowed'))
+        setPeerName.mockResolvedValue({ nodeUuid: 'peer-uuid', name: 'Den', customName: 'Den' })
+        await renderPeerModal()
+        await typeName('  Den  ')
+        await click('Save')
+        expect(setPeerName).toHaveBeenCalledExactlyOnceWith('peer-uuid', 'Den')
+        expect(setNodeName).not.toHaveBeenCalled()
+        expect(onClose).toHaveBeenCalledOnce()
+    })
+
+    it('sends null for the peer from Use default name', async () => {
+        getRemoteManagementForNode.mockResolvedValue(capability('allowed'))
+        setPeerName.mockResolvedValue({
+            nodeUuid: 'peer-uuid',
+            name: 'PAIR 9f8e7d6c',
+            customName: null
+        })
+        await renderPeerModal()
+        await click('Use default name')
+        expect(setPeerName).toHaveBeenCalledExactlyOnceWith('peer-uuid', null)
+        expect(onClose).toHaveBeenCalledOnce()
+    })
+
+    it('sets the trimmed nickname without the grant and closes', async () => {
+        getRemoteManagementForNode.mockResolvedValue(capability('denied'))
+        setPeerNickname.mockResolvedValue({
+            nodeUuid: 'peer-uuid',
+            nickname: 'Kitchen',
+            displayName: 'Kitchen'
+        })
+        await renderPeerModal()
+        await typeName('  Kitchen  ')
+        await click('Set nickname')
+        expect(setPeerNickname).toHaveBeenCalledExactlyOnceWith('peer-uuid', 'Kitchen')
+        expect(setPeerName).not.toHaveBeenCalled()
+        expect(onClose).toHaveBeenCalledOnce()
+    })
+
+    it('clears the nickname only when one is set', async () => {
+        getRemoteManagementForNode.mockResolvedValue(capability('denied'))
+        await renderPeerModal()
+        expect(button('Clear nickname')).toBeUndefined()
+        await act(async () => root.render(null))
+        setPeerNickname.mockResolvedValue({
+            nodeUuid: 'peer-uuid',
+            nickname: null,
+            displayName: 'Studio'
+        })
+        await renderPeerModal({ ...peer, nickname: 'Kitchen', displayName: 'Kitchen' })
+        await click('Clear nickname')
+        expect(setPeerNickname).toHaveBeenCalledExactlyOnceWith('peer-uuid', null)
+        expect(onClose).toHaveBeenCalledOnce()
+    })
+
+    it('shows the target message and switches to Nickname-only after a denial', async () => {
+        getRemoteManagementForNode.mockResolvedValue(capability('allowed'))
+        setPeerName.mockRejectedValue(new ServiceCallError(DENIED_MESSAGE, -32012))
+        await renderPeerModal()
+        await click('Save')
+        expect(document.querySelector('[role="alert"]')?.textContent).toBe(DENIED_MESSAGE)
+        expect(onClose).not.toHaveBeenCalled()
+        expect(button('Save')).toBeUndefined()
+        expect(button('Use default name')).toBeUndefined()
+        expect(button('Set nickname')).toBeDefined()
+    })
+
+    it('shows a validation message from the target and keeps Save', async () => {
+        getRemoteManagementForNode.mockResolvedValue(capability('allowed'))
+        setPeerName.mockRejectedValue(
+            new ServiceCallError('name must be at most 63 characters', -32602)
+        )
+        await renderPeerModal()
+        await typeName('x'.repeat(80))
+        await click('Save')
+        expect(document.querySelector('[role="alert"]')?.textContent).toBe(
+            'name must be at most 63 characters'
+        )
+        expect(button('Save')).toBeDefined()
+    })
+
+    it('warns about a duplicate shown name without blocking Save or Set nickname', async () => {
+        getRemoteManagementForNode.mockResolvedValue(capability('allowed'))
+        await renderPeerModal()
+        await typeName('pair 1a2b3c4d')
+        expect(document.querySelector('[role="status"]')?.textContent).toBe(
+            'Another node is already shown as "PAIR 1a2b3c4d". You can still save; PAIR adds a hardware label to tell them apart.'
+        )
+        expect(button('Save')?.disabled).toBe(false)
+        expect(button('Set nickname')?.disabled).toBe(false)
     })
 })

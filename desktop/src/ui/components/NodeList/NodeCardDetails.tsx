@@ -25,7 +25,7 @@ import { hasInferenceReadyGpu, isGpuInferenceReady } from '@/ui/utils/gpu-infere
 import NodeEnginesInline from './NodeEnginesInline'
 import NodeDeclaredRoles from './NodeDeclaredRoles'
 import NodeAvailabilityControls from './NodeAvailabilityControls'
-import { NodeNameModal } from '@/ui/components/NodeName/NodeNameModal'
+import { NodeNameModal, type NodeNameTarget } from '@/ui/components/NodeName/NodeNameModal'
 import { useClusterInvitationsStore } from '@/ui/stores/cluster-invitations.store'
 
 const MAX_CHART_SIZE = 60
@@ -43,6 +43,9 @@ function NodeCardDetails({ node, distinguishingLabel }: NodeCardDetailsProps) {
     const focusNodeSettings = useOverviewUiStore(state => state.focusNodeSettings)
     const selfName = useClusterInvitationsStore(state => state.selfName)
     const selfCustomName = useClusterInvitationsStore(state => state.selfCustomName)
+    const member = useClusterInvitationsStore(state =>
+        state.members.find(value => value.nodeUuid === node.id && value.state === 'member')
+    )
     const [renaming, setRenaming] = useState(false)
     const closeRename = useCallback(() => setRenaming(false), [])
     // "Has a GPU" means "has an inference-ready GPU" per the backend readiness
@@ -170,6 +173,18 @@ function NodeCardDetails({ node, distinguishingLabel }: NodeCardDetailsProps) {
         }
     }, [measure, scheduleResize])
 
+    // This node renames itself; another node can be renamed or nicknamed only as a cluster member.
+    const renameTarget: NodeNameTarget | null = isLocal
+        ? {
+              kind: 'self',
+              nodeUuid: node.id,
+              shownName: selfName || node.name,
+              customName: selfCustomName
+          }
+        : member
+          ? { kind: 'peer', node: member }
+          : null
+
     const expandButtons = (placement: 'left' | 'top') => (
         <>
             <DismissibleTooltip slotContent="Show performance" placement={placement}>
@@ -199,7 +214,7 @@ function NodeCardDetails({ node, distinguishingLabel }: NodeCardDetailsProps) {
                     <SettingsOutlined style={{ fontSize: 14 }} />
                 </Button>
             </DismissibleTooltip>
-            {isLocal && (
+            {renameTarget && (
                 <DismissibleTooltip slotContent="Rename" placement={placement}>
                     <Button
                         kind="tertiary"
@@ -319,14 +334,8 @@ function NodeCardDetails({ node, distinguishingLabel }: NodeCardDetailsProps) {
                     </div>
                 </div>
             </div>
-            {isLocal && renaming && (
-                <NodeNameModal
-                    nodeUuid={node.id}
-                    shownName={selfName || node.name}
-                    customName={selfCustomName}
-                    open={renaming}
-                    onClose={closeRename}
-                />
+            {renameTarget && renaming && (
+                <NodeNameModal target={renameTarget} open={renaming} onClose={closeRename} />
             )}
         </div>
     )

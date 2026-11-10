@@ -14,47 +14,82 @@ import {
     TextInput
 } from '@nvidia/foundations-react-core'
 import { useShallow } from 'zustand/react/shallow'
+import type { ClusterNode } from '@/shared/types/cluster'
 import { DialogHeader } from '@/ui/components/DialogHeader'
 import { useBlurOnOpen } from '@/ui/hooks/useBlurOnOpen'
 import { useOverviewNodes } from '@/ui/hooks/useOverviewNodes'
 import { useClusterInvitationsStore } from '@/ui/stores/cluster-invitations.store'
+import {
+    useNodeConfigurationStore,
+    watchNodeManagement
+} from '@/ui/stores/node-configuration.store'
 import { duplicateShownName } from '@/ui/utils/node-name-labels'
 
+/** What the modal renames: this node, or another cluster member. */
+export type NodeNameTarget =
+    | {
+          kind: 'self'
+          nodeUuid: string
+          /** The node's shown name. */
+          shownName: string
+          /** The node's user-set name; `null` while the generated default is shown. */
+          customName: string | null
+      }
+    | { kind: 'peer'; node: ClusterNode }
+
 interface NodeNameModalProps {
-    /** UUID of the node being renamed. */
-    nodeUuid: string
-    /** The node's shown name. */
-    shownName: string
-    /** The node's user-set name; `null` while the generated default is shown. */
-    customName: string | null
+    target: NodeNameTarget
     open: boolean
     onClose: () => void
 }
 
-/** Rename this node; the cluster manager validates and stores the name. */
-export function NodeNameModal({
-    nodeUuid,
-    shownName,
-    customName,
-    open,
-    onClose
-}: NodeNameModalProps) {
+/** Management states in which the target has told this node it may not rename it. */
+const NO_GRANT_STATES = ['denied', 'unreviewed', 'unavailable', 'unsupported']
+
+/**
+ * Rename this node, or a peer. This node's name is saved through its own
+ * cluster manager. A peer can be renamed on that peer only while it has allowed
+ * this node remote management (the peer enforces it); a nickname is always
+ * available and only changes what this node shows.
+ */
+export function NodeNameModal({ target, open, onClose }: NodeNameModalProps) {
     useBlurOnOpen(open)
     const [draft, setDraft] = useState('')
     const [prefilledOpen, setPrefilledOpen] = useState(false)
+    const peer = target.kind === 'peer' ? target.node : null
+    const nodeUuid = target.kind === 'peer' ? target.node.nodeUuid : target.nodeUuid
     const nameChange = useClusterInvitationsStore(state => state.nameChange)
+    const peerChange = useClusterInvitationsStore(state => state.peerNameChanges[nodeUuid])
     const members = useClusterInvitationsStore(useShallow(state => state.members))
+    const managementState = useNodeConfigurationStore(state =>
+        peer ? state.management.get(nodeUuid)?.state : undefined
+    )
     const overviewNodes = useOverviewNodes()
 
     // Prefill when the modal opens, not on every later name update.
     if (open !== prefilledOpen) {
         setPrefilledOpen(open)
-        if (open) setDraft(customName ?? shownName)
+        if (open)
+            setDraft(
+                target.kind === 'peer'
+                    ? (target.node.nickname ?? target.node.name)
+                    : (target.customName ?? target.shownName)
+            )
     }
 
     useEffect(() => {
-        if (open) useClusterInvitationsStore.getState().clearNameChange()
-    }, [open])
+        if (!open) return
+        const store = useClusterInvitationsStore.getState()
+        store.clearNameChange()
+        store.clearPeerNameChange(nodeUuid)
+    }, [open, nodeUuid])
+
+    // The shared permission read for this peer; Save is offered only on `allowed`.
+    const watchedPeerUuid = open && peer ? nodeUuid : null
+    useEffect(
+        () => (watchedPeerUuid ? watchNodeManagement(watchedPeerUuid, watchedPeerUuid) : undefined),
+        [watchedPeerUuid]
+    )
 
     const otherNames = useMemo(
         () => [
@@ -67,14 +102,36 @@ export function NodeNameModal({
     )
     const trimmed = draft.trim()
     const duplicate = duplicateShownName(trimmed, otherNames)
-    const saving = nameChange?.phase === 'saving'
+    const change = peer ? peerChange : nameChange
+    const saving = change?.phase === 'saving'
+    const canSaveName = !peer || (managementState === 'allowed' && !peerChange?.denied)
+    const noGrant =
+        peer !== null &&
+        !canSaveName &&
+        (peerChange?.denied === true ||
+            (managementState !== undefined && NO_GRANT_STATES.includes(managementState)))
+    const shownName = target.kind === 'peer' ? target.node.displayName : target.shownName
+    const hasDefaultToRestore = target.kind === 'peer' || target.customName !== null
 
-    async function save(name: string | null): Promise<void> {
+    function closeWhenSaved(): void {
         const store = useClusterInvitationsStore.getState()
-        await store.setSelfName(name)
-        if (useClusterInvitationsStore.getState().nameChange?.phase !== 'saved') return
+        const outcome = peer ? store.peerNameChanges[nodeUuid] : store.nameChange
+        if (outcome?.phase !== 'saved') return
         store.clearNameChange()
+        store.clearPeerNameChange(nodeUuid)
         onClose()
+    }
+
+    async function saveName(name: string | null): Promise<void> {
+        const store = useClusterInvitationsStore.getState()
+        if (peer) await store.setPeerName(nodeUuid, name)
+        else await store.setSelfName(name)
+        closeWhenSaved()
+    }
+
+    async function saveNickname(nickname: string | null): Promise<void> {
+        await useClusterInvitationsStore.getState().setPeerNickname(nodeUuid, nickname)
+        closeWhenSaved()
     }
 
     return (
@@ -89,41 +146,79 @@ export function NodeNameModal({
                                 aria-label="Node name"
                                 onValueChange={setDraft}
                                 onKeyDown={event => {
-                                    if (event.key === 'Enter' && trimmed && !saving)
-                                        void save(trimmed)
+                                    if (event.key !== 'Enter' || !trimmed || saving) return
+                                    if (canSaveName) void saveName(trimmed)
+                                    else void saveNickname(trimmed)
                                 }}
                                 disabled={saving}
                             />
                         </FormField>
+                        {peer && canSaveName && (
+                            <Text kind="body/regular/sm">
+                                {`Renames ${shownName} on that device. Every node in the cluster will show the new name.`}
+                            </Text>
+                        )}
+                        {noGrant && (
+                            <Text kind="body/regular/sm">
+                                {`${shownName} has not allowed this device to manage it, so you can't rename it from here. You can still give it a nickname.`}
+                            </Text>
+                        )}
+                        {peer && (
+                            <Text kind="body/regular/sm">
+                                A nickname is only used on this device. Other devices keep showing
+                                the node&apos;s own name.
+                            </Text>
+                        )}
                         {duplicate !== null && (
                             <Text kind="body/regular/sm" role="status">
                                 {`Another node is already shown as "${duplicate}". You can still save; PAIR adds a hardware label to tell them apart.`}
                             </Text>
                         )}
-                        {nameChange?.phase === 'error' && (
+                        {change?.phase === 'error' && (
                             <Text kind="body/regular/sm" role="alert">
-                                {nameChange.message}
+                                {change.message}
                             </Text>
                         )}
-                        <Flex gap="2" justify="end">
-                            {customName !== null && (
+                        <Flex gap="2" justify="end" className="flex-wrap">
+                            {peer?.nickname !== undefined && (
                                 <Button
                                     kind="secondary"
                                     disabled={saving}
-                                    onClick={() => void save(null)}
+                                    onClick={() => void saveNickname(null)}
+                                >
+                                    Clear nickname
+                                </Button>
+                            )}
+                            {canSaveName && hasDefaultToRestore && (
+                                <Button
+                                    kind="secondary"
+                                    disabled={saving}
+                                    onClick={() => void saveName(null)}
                                 >
                                     Use default name
                                 </Button>
                             )}
-                            <Button
-                                kind="primary"
-                                color="brand"
-                                disabled={saving || !trimmed}
-                                aria-busy={saving}
-                                onClick={() => void save(trimmed)}
-                            >
-                                Save
-                            </Button>
+                            {peer && (
+                                <Button
+                                    kind={canSaveName ? 'secondary' : 'primary'}
+                                    color={canSaveName ? undefined : 'brand'}
+                                    disabled={saving || !trimmed}
+                                    onClick={() => void saveNickname(trimmed)}
+                                >
+                                    Set nickname
+                                </Button>
+                            )}
+                            {canSaveName && (
+                                <Button
+                                    kind="primary"
+                                    color="brand"
+                                    disabled={saving || !trimmed}
+                                    aria-busy={saving}
+                                    onClick={() => void saveName(trimmed)}
+                                >
+                                    Save
+                                </Button>
+                            )}
                         </Flex>
                     </Stack>
                 </ModalContent>

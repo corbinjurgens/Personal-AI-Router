@@ -17,6 +17,7 @@ import { useOverviewUiStore } from '@/ui/stores/overview-ui.store'
 import { useClusterInvitationsStore } from '@/ui/stores/cluster-invitations.store'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import { RemoteManagementChoice } from '@/ui/components/InvitePairingPanel'
+import { NodeNameModal } from '@/ui/components/NodeName/NodeNameModal'
 
 export default function ActiveNode({
     node,
@@ -33,6 +34,8 @@ export default function ActiveNode({
     const permissionLoading = useClusterInvitationsStore(state => state.remoteManagementLoading)
     const change = useClusterInvitationsStore(state => state.remoteManagementChanges[node.nodeUuid])
     const [draft, setDraft] = useState<boolean | null>(null)
+    const [renaming, setRenaming] = useState(false)
+    const closeRename = useCallback(() => setRenaming(false), [])
     const draftGeneration = useRef(0)
     const invalidateDraft = useCallback(() => {
         draftGeneration.current++
@@ -80,6 +83,9 @@ export default function ActiveNode({
                 children: 'Edit node',
                 onSelect: () => focusNodeSettings(node.nodeUuid)
             },
+            ...(node.state === 'member'
+                ? [{ children: 'Rename', onSelect: () => setRenaming(true) }]
+                : []),
             {
                 children: 'Remove from cluster',
                 danger: true,
@@ -88,7 +94,7 @@ export default function ActiveNode({
                 }
             }
         ],
-        [node.nodeUuid, focusNodeSettings]
+        [node.nodeUuid, node.state, focusNodeSettings]
     )
 
     return (
@@ -117,6 +123,13 @@ export default function ActiveNode({
                     <MoreHoriz style={{ fontSize: 16 }} />
                 </Dropdown>
             </Flex>
+            {renaming && (
+                <NodeNameModal
+                    target={{ kind: 'peer', node }}
+                    open={renaming}
+                    onClose={closeRename}
+                />
+            )}
             {node.state === 'member' && (
                 <Stack gap="2" className="pt-3">
                     <Text kind="body/regular/sm">
