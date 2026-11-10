@@ -58,8 +58,8 @@ func newTestManager(t *testing.T) (*Manager, *captureRW) {
 	// Pin the local node id to match the fixtures' NodeID so clear
 	// (now scoped to local-origin entries) resolves against the
 	// errors these tests report. Without this the manager's localNodeID
-	// is the host's real hostname and clear-by-id would never match the
-	// "test-node"-stamped fixtures.
+	// is empty and clear-by-id would never match the "test-node"-stamped
+	// fixtures.
 	m.localNodeID = "test-node"
 	return m, rw
 }

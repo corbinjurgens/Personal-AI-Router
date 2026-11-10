@@ -68,10 +68,14 @@ func TestDirectoryPeerWithoutParseableAddressIsNotDialed(t *testing.T) {
 	}
 }
 
-// TestSetLocalNodeID: the broker's --node-id override replaces the hostname
-// default so local errors are attributed to this node's stable UUID.
+// TestSetLocalNodeID: a new Manager has no node id (the hostname is not an
+// identity), and the broker's --node-id sets it so local errors are attributed to
+// this node's stable UUID.
 func TestSetLocalNodeID(t *testing.T) {
 	m := NewManager(NewCodec(nopReadWriter{}))
+	if m.LocalNodeID() != "" {
+		t.Fatalf("new Manager LocalNodeID = %q, want empty", m.LocalNodeID())
+	}
 	m.SetLocalNodeID("uuid-self")
 	if m.LocalNodeID() != "uuid-self" {
 		t.Fatalf("LocalNodeID = %q, want uuid-self", m.LocalNodeID())

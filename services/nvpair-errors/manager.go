@@ -10,7 +10,6 @@ import (
 	"io"
 	"log"
 	"log/slog"
-	"os"
 	"slices"
 	"sort"
 	"sync"
@@ -93,19 +92,15 @@ type Manager struct {
 	onLocalChange func()
 }
 
-// NewManager builds a Manager whose local node id defaults to the hostname for
-// the bare/standalone binary; the broker overrides it with this node's stable
-// per-host UUID via SetLocalNodeID (--node-id) so cluster attribution survives a
-// PC rename. Networking is wired separately in main.go; a Manager with no HTTP
+// NewManager builds a Manager with no local node id. main.go resolves this
+// node's stable UUID (--node-id from the broker, else nodeid.Resolve) and sets it
+// with SetLocalNodeID before the read loop starts; the UUID is the only node
+// identity. Networking is wired separately in main.go; a Manager with no HTTP
 // server / discovery behaves exactly like the pre-sync datastore.
 func NewManager(codec *Codec) *Manager {
-	host, err := os.Hostname()
-	if err != nil || host == "" {
-		host = "unknown"
-	}
 	return &Manager{
 		codec:       codec,
-		localNodeID: host,
+		localNodeID: "",
 		errors:      make(map[errKey]ServiceError),
 		relayPeers:  make(map[string]RawNode),
 	}

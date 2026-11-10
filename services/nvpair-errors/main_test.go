@@ -55,7 +55,7 @@ func TestPeerSyncStartupIdentity(t *testing.T) {
 				writeIdentity(t, filepath.Join(base, "node-id.json"), want)
 			}
 
-			mgr := newStartupManager(NewCodec(nopReadWriter{}), true, "", clusterDir)
+			mgr := newStartupManager(NewCodec(nopReadWriter{}), "", clusterDir)
 			if got := mgr.LocalNodeID(); got != want {
 				t.Fatalf("startup node ID = %q, want persisted UUID %q", got, want)
 			}
@@ -100,7 +100,7 @@ func TestPeerSyncStartupPersistsFirstUUID(t *testing.T) {
 	}
 	base := t.TempDir()
 	clusterDir := filepath.Join(base, "cluster")
-	mgr := newStartupManager(NewCodec(nopReadWriter{}), true, "", clusterDir)
+	mgr := newStartupManager(NewCodec(nopReadWriter{}), "", clusterDir)
 	body, err := os.ReadFile(filepath.Join(base, "node-id.json"))
 	if err != nil {
 		t.Fatalf("read startup identity: %v", err)
@@ -119,21 +119,17 @@ func TestPeerSyncStartupPersistsFirstUUID(t *testing.T) {
 	if got := nodeid.Resolve(base); got != stored.NodeUUID {
 		t.Fatalf("future cluster resolver = %q, want persisted UUID %q", got, stored.NodeUUID)
 	}
-	restarted := newStartupManager(NewCodec(nopReadWriter{}), true, "", clusterDir)
+	restarted := newStartupManager(NewCodec(nopReadWriter{}), "", clusterDir)
 	if got := restarted.LocalNodeID(); got != stored.NodeUUID {
 		t.Fatalf("restarted UUID = %q, want persisted UUID %q", got, stored.NodeUUID)
 	}
 }
 
-func TestStartupIdentityPreservesExplicitAndLocalOnly(t *testing.T) {
-	hostname, err := os.Hostname()
-	if err != nil || hostname == "" {
-		hostname = "unknown"
-	}
-	test := func(name string, peerSync bool, override, want string) {
+func TestStartupIdentityPreservesExplicitOverride(t *testing.T) {
+	test := func(name, override, want string) {
 		t.Run(name, func(t *testing.T) {
 			base := t.TempDir()
-			mgr := newStartupManager(NewCodec(nopReadWriter{}), peerSync, override, filepath.Join(base, "cluster"))
+			mgr := newStartupManager(NewCodec(nopReadWriter{}), override, filepath.Join(base, "cluster"))
 			if got := mgr.LocalNodeID(); got != want {
 				t.Fatalf("startup node ID = %q, want %q", got, want)
 			}
@@ -146,7 +142,6 @@ func TestStartupIdentityPreservesExplicitAndLocalOnly(t *testing.T) {
 			}
 		})
 	}
-	test("peer sync preserves broker override", true, "broker-uuid", "broker-uuid")
-	test("local only preserves explicit override", false, "explicit-id", "explicit-id")
-	test("local only keeps hostname default", false, "", hostname)
+	test("preserves broker override", "broker-uuid", "broker-uuid")
+	test("preserves explicit override", "explicit-id", "explicit-id")
 }
