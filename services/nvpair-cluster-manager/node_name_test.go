@@ -8,6 +8,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -251,6 +253,16 @@ func TestNodeNameChangeEmitsNotification(t *testing.T) {
 func TestNodeNameRenamesSelfMemberAndReconciles(t *testing.T) {
 	a, b := newClusterPeerFixture(t, false), newClusterPeerFixture(t, false)
 	pairClusterFixtures(t, a, b)
+	// B applies the reconcile, then answers 500 so A's background reconcile
+	// writes nothing after the test observes the result; the fixture removes
+	// its config directories at cleanup.
+	applied := make(chan struct{})
+	once := sync.Once{}
+	b.rosterReply = func(w http.ResponseWriter, r *http.Request) {
+		b.m.handleRoster(httptest.NewRecorder(), r)
+		once.Do(func() { close(applied) })
+		w.WriteHeader(http.StatusInternalServerError)
+	}
 	name := "Renamed A"
 	if _, err := a.m.setSelfName(&name); err != nil {
 		t.Fatal(err)
@@ -258,16 +270,13 @@ func TestNodeNameRenamesSelfMemberAndReconciles(t *testing.T) {
 	if self, ok := a.m.memberByUUID(a.m.identity.NodeUUID); !ok || self.Name != name {
 		t.Fatalf("self member = %+v, want name %q", self, name)
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		peer, ok := b.m.memberByUUID(a.m.identity.NodeUUID)
-		if b.rosters.Load() > 0 && ok && peer.Name == name {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("peer did not learn the rename: rosters=%d member=%+v", b.rosters.Load(), peer)
-		}
-		time.Sleep(20 * time.Millisecond)
+	select {
+	case <-applied:
+	case <-time.After(5 * time.Second):
+		t.Fatal("rename did not start a reconcile with the peer")
+	}
+	if peer, ok := b.m.memberByUUID(a.m.identity.NodeUUID); !ok || peer.Name != name {
+		t.Fatalf("peer member = %+v, want name %q", peer, name)
 	}
 }
 
