@@ -176,7 +176,9 @@ func TestBuildApplyLocalAdmission(t *testing.T) {
 
 // os.Executable and Electron's execPath keep a link above the installation,
 // while the kernel reports the resolved image path. Both name one image.
-func TestBuildApplyImagesCompareByIdentityAcrossALinkAbove(t *testing.T) {
+// buildApplyTestLinks returns the ways a user relocates a folder: a symbolic
+// link everywhere, and a junction on Windows (no privilege needed).
+func buildApplyTestLinks() map[string]func(t *testing.T, target, link string) {
 	links := map[string]func(t *testing.T, target, link string){
 		"symbolic link": func(t *testing.T, target, link string) {
 			if err := os.Symlink(target, link); err != nil {
@@ -194,6 +196,11 @@ func TestBuildApplyImagesCompareByIdentityAcrossALinkAbove(t *testing.T) {
 			}
 		}
 	}
+	return links
+}
+
+func TestBuildApplyImagesCompareByIdentityAcrossALinkAbove(t *testing.T) {
+	links := buildApplyTestLinks()
 	for name, makeLink := range links {
 		t.Run(name, func(t *testing.T) {
 			root := buildApplyTempDir(t)

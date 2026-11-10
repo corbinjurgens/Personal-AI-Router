@@ -539,28 +539,27 @@ func sameBuildApplyImage(a, b string) bool {
 	} else if filepath.Base(a) != filepath.Base(b) {
 		return false
 	}
-	x, ok := buildApplyImage(a)
-	if !ok {
+	if !filepath.IsAbs(a) || !filepath.IsAbs(b) {
 		return false
 	}
-	y, ok := buildApplyImage(b)
-	return ok && os.SameFile(x, y)
-}
-
-func buildApplyImage(path string) (os.FileInfo, bool) {
-	if !filepath.IsAbs(path) {
-		return nil, false
-	}
-	parent, err := buildapply.OpenResolvedRoot(filepath.Dir(path))
+	// Both parents stay held while the identities are read through them and
+	// compared, and both are revalidated before either is released.
+	parentA, err := buildapply.OpenResolvedRoot(filepath.Dir(a))
 	if err != nil {
-		return nil, false
+		return false
 	}
-	defer parent.Close()
-	info, err := os.Lstat(filepath.Join(parent.Path, filepath.Base(path)))
-	if err != nil || !info.Mode().IsRegular() || parent.Revalidate() != nil {
-		return nil, false
+	defer parentA.Close()
+	parentB, err := buildapply.OpenResolvedRoot(filepath.Dir(b))
+	if err != nil {
+		return false
 	}
-	return info, true
+	defer parentB.Close()
+	x, err := parentA.StatFile(filepath.Base(a))
+	if err != nil {
+		return false
+	}
+	y, err := parentB.StatFile(filepath.Base(b))
+	return err == nil && os.SameFile(x, y) && parentA.Revalidate() == nil && parentB.Revalidate() == nil
 }
 
 func validBuildApplyID(id string) bool {

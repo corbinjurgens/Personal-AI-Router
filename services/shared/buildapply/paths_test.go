@@ -315,6 +315,29 @@ func TestLocationsRefuseOverlapThroughACaseVariant(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "bundle overlaps protected data or model root") {
 		t.Fatalf("case variant of a protected root error = %v", err)
 	}
+	// Windows's path comparison already folds case; check that identity alone
+	// also decides it, as it must on macOS.
+	for _, pair := range [][2]string{{variant, filepath.Join(protected, "child")}, {protected, filepath.Join(variant, "child")}} {
+		if inside, err := containsByIdentity(pair[0], pair[1]); err != nil || !inside {
+			t.Fatalf("identity containment of %q in %q = %v, %v", pair[1], pair[0], inside, err)
+		}
+	}
+}
+
+// A ".." in a link target leaves the directory that the preceding target
+// component resolved to, as POSIX resolves it, not the lexical parent.
+func TestLinkTargetParentFollowsTheResolvedDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows resolves link targets lexically")
+	}
+	root := packageTempRoot(t)
+	packageMkdirs(t, filepath.Join(root, "deep", "a", "b"), filepath.Join(root, "deep", "a", "x"), filepath.Join(root, "x"))
+	packageSymlink(t, filepath.Join(root, "deep", "a", "b"), filepath.Join(root, "inner"))
+	packageSymlink(t, "inner/../x", filepath.Join(root, "above"))
+	got, err := resolveRoot(filepath.Join(root, "above", "stage"))
+	if want := filepath.Join(root, "deep", "a", "x", "stage"); err != nil || got != want {
+		t.Fatalf("resolved %q, %v; want %q", got, err, want)
+	}
 }
 
 // Allowing a link above does not weaken substitution detection: the held root
@@ -380,7 +403,7 @@ func TestPackageNativeProcessIdentityIsReadOnly(t *testing.T) {
 }
 
 func TestPackageRootSyntaxRejectsBeforeOpening(t *testing.T) {
-	for _, path := range []string{`\\server\share\bundle`, `\\?\C:\bundle`, `\\.\C:\bundle`, "//server/share/bundle", filepath.Join(packageTempRoot(t), "safe") + string(filepath.Separator) + ".." + string(filepath.Separator) + "escape", filepath.Join(packageTempRoot(t), "file:stream")} {
+	for _, path := range []string{`\\server\share\bundle`, `\\?\C:\bundle`, `\\.\C:\bundle`, `\??\C:\bundle`, `\??\UNC\server\share\bundle`, "//server/share/bundle", filepath.Join(packageTempRoot(t), "safe") + string(filepath.Separator) + ".." + string(filepath.Separator) + "escape", filepath.Join(packageTempRoot(t), "file:stream")} {
 		if err := localRootSyntax(path); err == nil {
 			t.Fatalf("accepted ambiguous root syntax %q", path)
 		}

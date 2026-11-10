@@ -234,28 +234,40 @@ func TestRootsAllowJunctionsAboveAndRefuseJunctionsAtOrBelow(t *testing.T) {
 // leads to a network share is refused without being followed.
 func TestLinkAboveARootToANetworkShareIsRefusedUnread(t *testing.T) {
 	root := packageTempRoot(t)
-	above := filepath.Join(root, "above")
-	// os.Symlink stats its target to choose the link type, which would reach
-	// for the share; create the directory link directly instead.
-	linkName, err := windows.UTF16PtrFromString(above)
-	if err != nil {
-		t.Fatal(err)
-	}
-	share, err := windows.UTF16PtrFromString(`\\pair-test-host.invalid\share`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	const allowUnprivilegedCreate = 0x2 // SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE
-	if err := windows.CreateSymbolicLink(linkName, share, windows.SYMBOLIC_LINK_FLAG_DIRECTORY|allowUnprivilegedCreate); err != nil {
-		t.Skipf("symlink privilege unavailable: %v", err)
-	}
-	started := time.Now()
-	err = ValidateLocations(filepath.Join(above, "stage"), filepath.Join(root, "target"), nil)
-	if err == nil || !strings.Contains(err.Error(), "does not lead to a local path: "+above) {
-		t.Fatalf("network link above a root error = %v", err)
-	}
-	if elapsed := time.Since(started); elapsed > 5*time.Second {
-		t.Fatalf("refusal took %v; the share was probably contacted", elapsed)
+	real := filepath.Join(root, "real")
+	packageMkdirs(t, filepath.Join(real, "stage"), filepath.Join(root, "target"))
+	for _, test := range []struct{ name, target string }{
+		{"UNC share", `\\pair-test-host.invalid\share`},
+		// Go reads \??\ as a volume name; a stored NT-namespace spelling
+		// must not be followed even when it names an existing local folder.
+		{"NT namespace drive", `\??\` + real},
+		{"NT namespace UNC", `\??\UNC\pair-test-host.invalid\share`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			above := filepath.Join(root, strings.ReplaceAll(test.name, " ", "-"))
+			// os.Symlink stats its target to choose the link type, which
+			// would reach for the share; create the directory link directly.
+			linkName, err := windows.UTF16PtrFromString(above)
+			if err != nil {
+				t.Fatal(err)
+			}
+			target, err := windows.UTF16PtrFromString(test.target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			const allowUnprivilegedCreate = 0x2 // SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE
+			if err := windows.CreateSymbolicLink(linkName, target, windows.SYMBOLIC_LINK_FLAG_DIRECTORY|allowUnprivilegedCreate); err != nil {
+				t.Skipf("symlink privilege unavailable: %v", err)
+			}
+			started := time.Now()
+			err = ValidateLocations(filepath.Join(above, "stage"), filepath.Join(root, "target"), nil)
+			if err == nil || !strings.Contains(err.Error(), "does not lead to a local path: "+above) {
+				t.Fatalf("link above a root to %s error = %v", test.target, err)
+			}
+			if elapsed := time.Since(started); elapsed > 5*time.Second {
+				t.Fatalf("refusal took %v; the share was probably contacted", elapsed)
+			}
+		})
 	}
 }
 

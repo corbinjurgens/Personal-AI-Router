@@ -26,7 +26,13 @@ func localRootSyntax(path string) error {
 	if !filepath.IsAbs(path) || !utf8.ValidString(path) || len(path) > MaxPathBytes || strings.ContainsAny(path, "\x00\r\n") || strings.HasPrefix(path, `\\`) || strings.HasPrefix(path, "//") {
 		return errors.New("an absolute local real path is required")
 	}
-	withoutVolume := path[len(filepath.VolumeName(path)):]
+	volume := filepath.VolumeName(path)
+	// Go also treats device and NT namespace prefixes (\??\C:, \??\UNC\...)
+	// as volume names on Windows; only a drive letter names a local volume.
+	if volume != "" && (len(volume) != 2 || volume[1] != ':' || !strings.ContainsRune("ABCDEFGHIJKLMNOPQRSTUVWXYZ", rune(volume[0]&^0x20))) {
+		return errors.New("an absolute drive-letter path is required")
+	}
+	withoutVolume := path[len(volume):]
 	if strings.Contains(withoutVolume, ":") {
 		return errors.New("alternate-stream path")
 	}
@@ -44,7 +50,20 @@ func ValidateLocalPath(path string) error {
 	if err := localRootSyntax(path); err != nil {
 		return err
 	}
-	return nativeLocalPath(path)
+	mounts, err := readMountTable()
+	if err != nil {
+		return err
+	}
+	return mounts.localPath(path)
+}
+
+// validateLocalPathIn is ValidateLocalPath against a mount table the caller
+// already read, so one resolve or walk reads the table once.
+func validateLocalPathIn(mounts mountTable, path string) error {
+	if err := localRootSyntax(path); err != nil {
+		return err
+	}
+	return mounts.localPath(path)
 }
 
 // resolveRoot resolves the links above a root PAIR selects or owns, once, and
@@ -62,7 +81,14 @@ func ValidateLocalPath(path string) error {
 // trailing directories are kept as named so a root that does not exist yet
 // still resolves (journal creation, absent stores).
 func resolveRoot(path string) (string, error) {
-	if err := ValidateLocalPath(path); err != nil {
+	if err := localRootSyntax(path); err != nil {
+		return "", err
+	}
+	mounts, err := readMountTable()
+	if err != nil {
+		return "", err
+	}
+	if err := mounts.localPath(path); err != nil {
 		return "", err
 	}
 	path = filepath.Clean(path)
@@ -70,12 +96,12 @@ func resolveRoot(path string) (string, error) {
 	if parent == path {
 		return path, nil
 	}
-	resolved, err := resolveAncestors(parent)
+	resolved, err := resolveAncestors(mounts, parent)
 	if err != nil {
 		return "", err
 	}
 	real := filepath.Join(resolved, filepath.Base(path))
-	if err := ValidateLocalPath(real); err != nil {
+	if err := validateLocalPathIn(mounts, real); err != nil {
 		return "", err
 	}
 	return real, nil
@@ -87,21 +113,37 @@ const maxAncestorLinks = 40
 
 // resolveAncestors walks path from its volume root and follows each symbolic
 // link or Windows junction it meets. Every prefix is validated as local before
-// it is read, and a link target is checked before it is followed, so a link
-// into a network share or an automount is refused without being touched.
-// Missing components are kept as named.
-func resolveAncestors(path string) (string, error) {
+// it is read, and the volume of an absolute link target is checked before the
+// target is followed, so a link into a network share or an automount is
+// refused without being touched. A target's names are walked like the path's
+// own, so ".." after a link inside the target leaves that link's target, as on
+// POSIX (nativeLinkTarget returns Windows targets already cleaned, matching
+// its lexical resolution). Missing components are kept as named.
+func resolveAncestors(mounts mountTable, path string) (string, error) {
 	current, rest := splitVolumeRoot(path)
-	if err := ValidateLocalPath(current); err != nil {
+	if err := validateLocalPathIn(mounts, current); err != nil {
 		return "", err
 	}
 	for links := 0; len(rest) > 0; {
+		switch rest[0] {
+		case ".":
+			rest = rest[1:]
+			continue
+		case "..":
+			current, rest = filepath.Dir(current), rest[1:]
+			continue
+		}
 		next := filepath.Join(current, rest[0])
-		if err := ValidateLocalPath(next); err != nil {
+		if err := validateLocalPathIn(mounts, next); err != nil {
 			return "", err
 		}
 		info, err := os.Lstat(next)
 		if os.IsNotExist(err) {
+			for _, name := range rest {
+				if name == "." || name == ".." {
+					return "", err // nothing exists below a missing directory
+				}
+			}
 			return filepath.Join(append([]string{current}, rest...)...), nil
 		}
 		if err != nil {
@@ -118,20 +160,19 @@ func resolveAncestors(path string) (string, error) {
 		if links++; links > maxAncestorLinks {
 			return "", fmt.Errorf("too many links above a root: %s", path)
 		}
-		if !filepath.IsAbs(target) {
-			if filepath.VolumeName(target) != "" || target != "" && os.IsPathSeparator(target[0]) {
-				return "", fmt.Errorf("link above a root has a drive-relative target: %s", next)
-			}
-			target = filepath.Join(current, target)
-		}
-		target = filepath.Clean(target)
-		if err := localRootSyntax(target); err != nil {
-			return "", fmt.Errorf("link above a root does not lead to a local path: %s", next)
-		}
 		var targetRest []string
-		current, targetRest = splitVolumeRoot(target)
-		if err := ValidateLocalPath(current); err != nil {
-			return "", err
+		switch {
+		case filepath.IsAbs(target):
+			var volume string
+			volume, targetRest = splitVolumeRoot(target)
+			if err := validateLocalPathIn(mounts, volume); err != nil {
+				return "", fmt.Errorf("link above a root does not lead to a local path: %s: %w", next, err)
+			}
+			current = volume
+		case target == "" || filepath.VolumeName(target) != "" || os.IsPathSeparator(target[0]):
+			return "", fmt.Errorf("link above a root does not lead to a local path: %s", next)
+		default:
+			_, targetRest = splitVolumeRoot(target)
 		}
 		rest = append(targetRest, rest[1:]...)
 	}
@@ -155,12 +196,16 @@ func checkRealAncestors(path string) (os.FileInfo, error) {
 			break
 		}
 	}
+	mounts, err := readMountTable()
+	if err != nil {
+		return nil, err
+	}
 	var selected os.FileInfo
 	// Inspect parents first. Lstat of a child still follows its ancestors, so
 	// checking leaf-to-root could read through a substituted network link.
 	for i := len(ancestors) - 1; i >= 0; i-- {
 		current := ancestors[i]
-		if err := ValidateLocalPath(current); err != nil {
+		if err := validateLocalPathIn(mounts, current); err != nil {
 			return nil, err
 		}
 		info, err := os.Lstat(current)
@@ -215,6 +260,35 @@ func OpenResolvedRoot(path string) (*RealRoot, error) {
 }
 
 func (r *RealRoot) Close() error { return r.root.Close() }
+
+// StatFile returns the identity of the regular file name directly inside the
+// held root. The identity comes from a handle opened through the root, not
+// from a later lookup by path, so it describes the file the held root holds.
+func (r *RealRoot) StatFile(name string) (os.FileInfo, error) {
+	if !validRelative(name) || strings.Contains(name, "/") {
+		return nil, errors.New("invalid file name")
+	}
+	named, err := r.root.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	if !named.Mode().IsRegular() {
+		return nil, fmt.Errorf("not a regular file: %s", filepath.Join(r.Path, name))
+	}
+	f, err := r.root.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	held, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !held.Mode().IsRegular() {
+		return nil, fmt.Errorf("not a regular file: %s", filepath.Join(r.Path, name))
+	}
+	return held, nil
+}
 
 func sameIdentity(a, b os.FileInfo) bool {
 	return os.SameFile(a, b) && a.Mode() == b.Mode() && a.Size() == b.Size() && a.ModTime().Equal(b.ModTime())
@@ -335,18 +409,18 @@ func ValidateLocations(source, target string, excluded []string) error {
 			continue
 		}
 		if err := localRootSyntax(protected); err != nil {
-			return errors.New("protected root is unresolved")
+			return fmt.Errorf("protected root is unresolved: %s: %w", protected, err)
 		}
 		real, err := resolveRoot(protected)
 		if err != nil {
-			return errors.New("protected root is linked or unavailable")
+			return fmt.Errorf("protected root is linked or unavailable: %s: %w", protected, err)
 		}
 		// Missing default stores are harmless. A protected root that is
 		// itself a link, or is otherwise unavailable, cannot authorize a
 		// selection: do not follow it to an unknown filesystem merely to
 		// improve preview.
 		if _, err := checkRealAncestors(real); err != nil && !os.IsNotExist(err) {
-			return errors.New("protected root is linked or unavailable")
+			return fmt.Errorf("protected root is linked or unavailable: %s: %w", real, err)
 		}
 		protectedRoots = append(protectedRoots, real)
 	}
