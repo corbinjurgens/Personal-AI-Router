@@ -333,6 +333,21 @@ describe('node name modal for a peer', () => {
         expect(button('Set nickname')).toBeDefined()
     })
 
+    it('keeps Save hidden after a denial when a later nickname save fails', async () => {
+        getRemoteManagementForNode
+            .mockResolvedValueOnce(capability('allowed'))
+            .mockResolvedValue(capability('denied'))
+        setPeerName.mockRejectedValue(new ServiceCallError(DENIED_MESSAGE, -32012))
+        setPeerNickname.mockRejectedValue(new ServiceCallError('device is offline', -32000))
+        await renderPeerModal()
+        await click('Save')
+        expect(getRemoteManagementForNode).toHaveBeenCalledTimes(2)
+        await click('Set nickname')
+        expect(document.querySelector('[role="alert"]')?.textContent).toBe('device is offline')
+        expect(button('Save')).toBeUndefined()
+        expect(button('Use default name')).toBeUndefined()
+    })
+
     it('shows a validation message from the target and keeps Save', async () => {
         getRemoteManagementForNode.mockResolvedValue(capability('allowed'))
         setPeerName.mockRejectedValue(

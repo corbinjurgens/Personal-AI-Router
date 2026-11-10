@@ -20,6 +20,7 @@ import {
 } from '@/shared/constants/service-errors'
 import { getPairTransport } from '@/ui/api/bootstrap'
 import { serviceErrorCode } from '@/ui/api/service-transport'
+import { refreshNodeManagement } from '@/ui/stores/node-configuration.store'
 import getErrorString from '@/shared/utils/get-error-string'
 import { formatJoinRequestError, isInviteStatusUnknown } from '@/ui/utils/cluster-invite-error'
 import { MODULAR_INVITE_STATUS_POLL_INTERVAL_MS } from '@/shared/constants/modular-runtime'
@@ -324,7 +325,7 @@ function setPeerNameChange(nodeUuid: string, change: PeerNameChange): void {
 /**
  * Run one peer name request. The roster push (`nodes:changed`) delivers the new
  * name, so success only records the phase; a denial is flagged so the modal can
- * fall back to nicknames.
+ * fall back to nicknames, and re-reads the peer's permission.
  */
 async function runPeerNameChange(
     nodeUuid: string,
@@ -336,11 +337,10 @@ async function runPeerNameChange(
         await request()
         setPeerNameChange(nodeUuid, { phase: 'saved' })
     } catch (error) {
-        setPeerNameChange(nodeUuid, {
-            phase: 'error',
-            message: getErrorString(error),
-            denied: serviceErrorCode(error) === REMOTE_MANAGEMENT_DENIED_CODE
-        })
+        const denied = serviceErrorCode(error) === REMOTE_MANAGEMENT_DENIED_CODE
+        setPeerNameChange(nodeUuid, { phase: 'error', message: getErrorString(error), denied })
+        // The cached permission is stale: read it back so every panel stops offering Save.
+        if (denied) refreshNodeManagement(nodeUuid)
     }
 }
 
