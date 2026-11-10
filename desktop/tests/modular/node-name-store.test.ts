@@ -145,6 +145,23 @@ describe('this node name state', () => {
         expect(store().nameChange).toBeNull()
     })
 
+    it('keeps a push received while a passed snapshot is in flight', async () => {
+        const fetched = deferred<ClusterInitialSnapshot>()
+        const initializing = store().initialize(fetched.promise)
+        namePush?.({ nodeUuid: 'self', name: 'Studio', customName: 'Studio' })
+        fetched.resolve(snapshot('PAIR 1a2b3c4d', null))
+        await initializing
+        expect(getInitial).not.toHaveBeenCalled()
+        expect(store().selfName).toBe('Studio')
+        expect(store().selfCustomName).toBe('Studio')
+    })
+
+    it('applies a passed snapshot when no push arrived', async () => {
+        await store().initialize(Promise.resolve(snapshot('Studio', 'Studio')))
+        expect(store().selfName).toBe('Studio')
+        expect(store().selfCustomName).toBe('Studio')
+    })
+
     it('keeps a push received during the initial fetch over the older snapshot', async () => {
         const fetched = deferred<ClusterInitialSnapshot>()
         getInitial.mockReturnValue(fetched.promise)

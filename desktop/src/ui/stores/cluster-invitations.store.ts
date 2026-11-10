@@ -89,7 +89,13 @@ interface ClusterInvitationsStore {
     /** Set the name only this node uses for a peer; `null` clears it. */
     setPeerNickname: (nodeUuid: string, nickname: string | null) => Promise<void>
     clearPeerNameChange: (nodeUuid: string) => void
-    initialize: (initial?: ClusterInitialSnapshot) => Promise<void>
+    /**
+     * Subscribe to pushes, then apply the snapshot. A snapshot still in flight is
+     * awaited after subscribing, so a push that arrives meanwhile is kept.
+     */
+    initialize: (
+        initial?: ClusterInitialSnapshot | Promise<ClusterInitialSnapshot | undefined>
+    ) => Promise<void>
     hydrate: (snapshot: ClusterInitialSnapshot) => void
     refresh: () => Promise<void>
     cleanup: () => void
@@ -335,6 +341,16 @@ async function runPeerNameChange(
             message: getErrorString(error),
             denied: serviceErrorCode(error) === REMOTE_MANAGEMENT_DENIED_CODE
         })
+    }
+}
+
+/** A snapshot fetched at `revision` must not undo a name update accepted since. */
+function keepNewerName(fetched: ClusterInitialSnapshot, revision: number): ClusterInitialSnapshot {
+    if (revision === nameRevision) return fetched
+    const { selfName, selfCustomName } = useClusterInvitationsStore.getState()
+    return {
+        ...fetched,
+        identity: { ...fetched.identity, name: selfName, customName: selfCustomName }
     }
 }
 
@@ -744,11 +760,18 @@ export const useClusterInvitationsStore = create<ClusterInvitationsStore>((set, 
                     void get().refresh()
                 })
             )
-        if (initial) get().hydrate(initial)
-        else {
+        if (!initial) {
             await get().refresh()
             return
         }
+        const nameRevisionAtSubscribe = nameRevision
+        const snapshot = await initial
+        if (subscriptionGeneration !== generation) return
+        if (!snapshot) {
+            await get().refresh()
+            return
+        }
+        get().hydrate(keepNewerName(snapshot, nameRevisionAtSubscribe))
         if (connected) await get().refreshRemoteManagement()
     },
 
@@ -759,19 +782,7 @@ export const useClusterInvitationsStore = create<ClusterInvitationsStore>((set, 
             const fetched = await window.pairApi.cluster.getInitial()
             if (currentGeneration !== permissionGeneration || !connected) return
             // A name update that landed during the fetch is newer than the snapshot.
-            const { selfName, selfCustomName } = get()
-            const snapshot =
-                currentNameRevision === nameRevision
-                    ? fetched
-                    : {
-                          ...fetched,
-                          identity: {
-                              ...fetched.identity,
-                              name: selfName,
-                              customName: selfCustomName
-                          }
-                      }
-            get().hydrate(snapshot)
+            get().hydrate(keepNewerName(fetched, currentNameRevision))
             await get().refreshRemoteManagement()
         } catch {
             if (currentGeneration !== permissionGeneration) return

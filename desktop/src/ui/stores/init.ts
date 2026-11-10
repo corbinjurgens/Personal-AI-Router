@@ -71,14 +71,18 @@ function watchServiceRestart(): void {
 async function initializeAllStores(): Promise<void> {
     cleanupAllStores()
 
+    // The cluster store subscribes while its snapshot is in flight, so a push
+    // (such as a node name change) between the fetch and the subscription is kept.
+    const clusterInitialRequest = fetchClusterInitial()
+    const clusterReady = useClusterInvitationsStore.getState().initialize(clusterInitialRequest)
     const appInitial = await fetchAppInitial()
-    const clusterInitial = await fetchClusterInitial()
+    const clusterInitial = await clusterInitialRequest
 
     await useConnectionStore.getState().initialize(appInitial, clusterInitial)
     if (overviewStores) await useErrorsStore.getState().initialize()
     await useNodesStore.getState().initialize()
     if (overviewStores) await useDiscoveredNodesStore.getState().initialize()
-    await useClusterInvitationsStore.getState().initialize(clusterInitial)
+    await clusterReady
     if (overviewStores) unsubNodeAvailability = initializeNodeAvailability()
     useMetricsStore.getState().initialize()
 
