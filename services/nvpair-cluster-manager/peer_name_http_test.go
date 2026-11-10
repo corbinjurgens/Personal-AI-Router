@@ -195,6 +195,8 @@ func TestPeerNodeNameRejectsMalformedBodies(t *testing.T) {
 		{"number name", `{"name":5}`, ""},
 		{"trailing data", `{"name":"x"} {}`, ""},
 		{"not JSON", `name=x`, ""},
+		{"case-variant key", `{"NAME":"x"}`, ""},
+		{"duplicate key", `{"name":"a","name":"b"}`, ""},
 		{"invalid name", `{"name":"bad\u0007name"}`, "invalid-character"},
 		{"empty name", `{"name":"  "}`, "empty"},
 	} {

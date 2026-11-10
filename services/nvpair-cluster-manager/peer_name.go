@@ -29,11 +29,6 @@ const (
 	peerNameUnavailableText    = "the device is offline or does not trust this node"
 )
 
-// peerNodeNameRequest is the exact PUT body: {"name": string|null}.
-type peerNodeNameRequest struct {
-	Name json.RawMessage `json:"name"`
-}
-
 // peerNodeNameError is the JSON body of a 400 or 409 answer.
 type peerNodeNameError struct {
 	Code    string `json:"code"`
@@ -47,19 +42,17 @@ func writePeerJSON(w http.ResponseWriter, status int, body any) {
 	_ = json.NewEncoder(w).Encode(body)
 }
 
-// decodePeerNodeNameBody parses the exact {"name": string|null} body.
+// decodePeerNodeNameBody parses the exact {"name": string|null} body with the
+// local RPCs' exact-key decoder: the key is case-sensitive and must appear
+// once, with no other keys and no trailing data.
 func decodePeerNodeNameBody(body []byte) (*string, bool) {
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.DisallowUnknownFields()
-	var req peerNodeNameRequest
-	if err := dec.Decode(&req); err != nil || req.Name == nil {
-		return nil, false
-	}
-	if _, err := dec.Token(); err != io.EOF {
+	fields, err := decodeRemoteManagementParams(body, map[string]bool{"name": true})
+	raw, present := fields["name"]
+	if err != nil || !present {
 		return nil, false
 	}
 	var name *string
-	if err := json.Unmarshal(req.Name, &name); err != nil {
+	if err := json.Unmarshal(raw, &name); err != nil {
 		return nil, false
 	}
 	return name, true
