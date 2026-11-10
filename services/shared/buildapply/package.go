@@ -68,7 +68,7 @@ func inspectPackage(ctx context.Context, path, platform, arch string, limits pac
 	if !ok || (arch != "amd64" && arch != "arm64") {
 		return nil, errors.New("unsupported package platform or architecture")
 	}
-	root, err := OpenRealRoot(path)
+	root, err := OpenResolvedRoot(path)
 	if err != nil {
 		return nil, err
 	}
@@ -157,12 +157,16 @@ func (p *Package) OpenVerifiedFile(ctx context.Context, path string) (*os.File, 
 
 func (p *Package) inventory(ctx context.Context, limits packageLimits) error {
 	seen := map[string]bool{}
+	mounts, err := readMountTable()
+	if err != nil {
+		return err
+	}
 	var walk func(string) error
 	walk = func(dir string) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := nativeLocalPath(filepath.Join(p.Root.Path, filepath.FromSlash(dir))); err != nil {
+		if err := mounts.localPath(filepath.Join(p.Root.Path, filepath.FromSlash(dir))); err != nil {
 			return err
 		}
 		file, err := p.Root.root.Open(dir)
@@ -204,7 +208,7 @@ func (p *Package) inventory(ctx context.Context, limits packageLimits) error {
 				if child.Name() == ".git" || child.Name() == ".hg" || child.Name() == ".svn" {
 					return errors.New("source checkout content")
 				}
-				if err := nativeLocalPath(filepath.Join(p.Root.Path, filepath.FromSlash(name))); err != nil {
+				if err := mounts.localPath(filepath.Join(p.Root.Path, filepath.FromSlash(name))); err != nil {
 					return err
 				}
 				info, err := p.Root.root.Lstat(filepath.FromSlash(name))

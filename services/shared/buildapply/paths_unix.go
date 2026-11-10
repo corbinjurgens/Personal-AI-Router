@@ -20,61 +20,39 @@ import (
 	"unsafe"
 )
 
-func nativeLocalPath(path string) error {
+// mountTable is one read of the kernel's mount table. Callers read it once per
+// resolve or validate call and check every path against it.
+type mountTable []mountEntry
+
+type mountEntry struct {
+	path  string
+	local bool
+}
+
+func readMountTable() (mountTable, error) {
 	if runtime.GOOS == "darwin" {
-		// getfsstat64(MNT_NOWAIT) reads the cached kernel mount table. Calling
-		// statfs on the selected path first could contact a remote filesystem.
-		const recordBytes = 2168 // Darwin 64-bit statfs ABI, both supported CPUs.
-		const maxMounts = 1024
-		data := make([]byte, recordBytes*maxMounts)
-		n, _, errno := syscall.Syscall6(347, uintptr(unsafe.Pointer(&data[0])), uintptr(len(data)), 2, 0, 0, 0)
-		runtime.KeepAlive(data)
-		if errno != 0 {
-			return errno
-		}
-		if n > maxMounts {
-			return errors.New("oversized native mount table")
-		}
-		best := ""
-		local := false
-		for i := 0; i < int(n); i++ {
-			record := data[i*recordBytes : (i+1)*recordBytes]
-			end := bytes.IndexByte(record[88:1112], 0)
-			if end < 0 {
-				return errors.New("invalid native mount record")
-			}
-			mount := string(record[88 : 88+end])
-			if containsPath(mount, path) && len(mount) > len(best) {
-				best = mount
-				local = binary.LittleEndian.Uint32(record[64:68])&0x1000 != 0
-			}
-		}
-		if best == "" || !local {
-			return errors.New("unverified or nonlocal filesystem")
-		}
-		return nil
+		return readDarwinMounts()
 	}
 	if runtime.GOOS != "linux" {
-		return errors.New("native mount observation unavailable")
+		return nil, errors.New("native mount observation unavailable")
 	}
 	f, err := os.Open("/proc/self/mountinfo")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer f.Close()
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 4096), 1<<20)
-	best := ""
-	kind := ""
+	var table mountTable
 	total := 0
 	for scanner.Scan() {
 		total += len(scanner.Bytes())
 		if total > 8<<20 {
-			return errors.New("oversized mount table")
+			return nil, errors.New("oversized mount table")
 		}
 		fields := strings.Fields(scanner.Text())
 		if len(fields) < 10 {
-			return errors.New("invalid mount table")
+			return nil, errors.New("invalid mount table")
 		}
 		separator := 0
 		for i, field := range fields {
@@ -84,22 +62,93 @@ func nativeLocalPath(path string) error {
 			}
 		}
 		if separator == 0 || separator+1 >= len(fields) {
-			return errors.New("invalid mount table")
+			return nil, errors.New("invalid mount table")
 		}
 		mount := strings.NewReplacer(`\040`, " ", `\011`, "\t", `\012`, "\n", `\134`, `\`).Replace(fields[4])
-		if containsPath(mount, path) && len(mount) > len(best) {
-			best = mount
-			kind = fields[separator+1]
+		switch fields[separator+1] {
+		case "ext2", "ext3", "ext4", "xfs", "btrfs", "tmpfs", "overlay", "zfs", "f2fs":
+			table = append(table, mountEntry{path: mount, local: true})
+		default:
+			table = append(table, mountEntry{path: mount})
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return err
+		return nil, err
 	}
-	switch kind {
-	case "ext2", "ext3", "ext4", "xfs", "btrfs", "tmpfs", "overlay", "zfs", "f2fs":
-		return nil
+	return table, nil
+}
+
+// readDarwinMounts uses getfsstat64(MNT_NOWAIT), which reads the cached kernel
+// mount table. Calling statfs on the selected path first could contact a remote
+// filesystem. A first call without a buffer returns the mount count.
+func readDarwinMounts() (mountTable, error) {
+	const recordBytes = 2168 // Darwin 64-bit statfs ABI, both supported CPUs.
+	const maxMounts = 1024
+	count, _, errno := syscall.Syscall6(347, 0, 0, 2, 0, 0, 0)
+	if errno != 0 {
+		return nil, errno
 	}
-	return errors.New("unverified or network source filesystem")
+	// Room for mounts added between the two calls. A full buffer may have
+	// dropped entries, so it is refused rather than trusted.
+	capacity := int(count) + 8
+	if capacity > maxMounts {
+		return nil, errors.New("oversized native mount table")
+	}
+	data := make([]byte, recordBytes*capacity)
+	n, _, errno := syscall.Syscall6(347, uintptr(unsafe.Pointer(&data[0])), uintptr(len(data)), 2, 0, 0, 0)
+	runtime.KeepAlive(data)
+	if errno != 0 {
+		return nil, errno
+	}
+	if int(n) >= capacity {
+		return nil, errors.New("native mount table changed while reading")
+	}
+	table := make(mountTable, 0, n)
+	for i := 0; i < int(n); i++ {
+		record := data[i*recordBytes : (i+1)*recordBytes]
+		end := bytes.IndexByte(record[88:1112], 0)
+		if end < 0 {
+			return nil, errors.New("invalid native mount record")
+		}
+		table = append(table, mountEntry{path: string(record[88 : 88+end]), local: binary.LittleEndian.Uint32(record[64:68])&0x1000 != 0})
+	}
+	return table, nil
+}
+
+// localPath reports whether the filesystem mounted over path is local. Later
+// entries are mounted on top of earlier ones at the same point, so the last
+// longest match wins. macOS volumes are normally case-insensitive, so a case
+// variant of a mount point still names that mount.
+func (t mountTable) localPath(path string) error {
+	best := ""
+	local := false
+	for _, entry := range t {
+		if mountContains(entry.path, path) && len(entry.path) >= len(best) {
+			best = entry.path
+			local = entry.local
+		}
+	}
+	if best == "" || !local {
+		return errors.New("unverified or nonlocal filesystem")
+	}
+	return nil
+}
+
+func mountContains(mount, path string) bool {
+	if runtime.GOOS != "darwin" {
+		return containsPath(mount, path)
+	}
+	mountParts := strings.FieldsFunc(mount, func(c rune) bool { return c == '/' })
+	pathParts := strings.FieldsFunc(path, func(c rune) bool { return c == '/' })
+	if !strings.HasPrefix(mount, "/") || !strings.HasPrefix(path, "/") || len(mountParts) > len(pathParts) {
+		return false
+	}
+	for i, part := range mountParts {
+		if !strings.EqualFold(part, pathParts[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 func nativePathCheck(path string, info os.FileInfo, owned bool) error {
@@ -116,6 +165,15 @@ func nativePathCheck(path string, info os.FileInfo, owned bool) error {
 		}
 	}
 	return nil
+}
+
+// nativeLinkTarget reports where a symbolic link above a root leads.
+func nativeLinkTarget(path string, info os.FileInfo) (string, bool, error) {
+	if info.Mode()&os.ModeSymlink == 0 {
+		return "", false, nil
+	}
+	target, err := os.Readlink(path)
+	return target, err == nil, err
 }
 
 func nativeInfoCheck(info os.FileInfo, owned bool) error {

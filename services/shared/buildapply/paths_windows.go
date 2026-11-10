@@ -17,7 +17,13 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func nativeLocalPath(path string) error {
+// mountTable is empty on Windows: each drive's type is asked directly, which
+// reads no path below the drive root.
+type mountTable struct{}
+
+func readMountTable() (mountTable, error) { return mountTable{}, nil }
+
+func (mountTable) localPath(path string) error {
 	if !filepath.IsAbs(path) || strings.HasPrefix(path, `\\`) || strings.Contains(path[len(filepath.VolumeName(path)):], ":") {
 		return errors.New("network or device path")
 	}
@@ -63,6 +69,46 @@ func nativePathCheck(path string, info os.FileInfo, owned bool) error {
 	}
 	defer windows.CloseHandle(h)
 	return nativeHandleCheck(h, info, owned)
+}
+
+// nativeLinkTarget reports where a link above a root leads: a symbolic link or
+// a junction (mount point), the usual unprivileged way to relocate a profile or
+// AppData. Go's EvalSymlinks does not follow junctions. Other reparse points
+// are not followed, and the strict walk refuses them. The target is read from
+// the reparse data without opening through it. Windows resolves ".." in a link
+// target lexically against the link's directory, so the target is joined and
+// cleaned here. A target that names no drive letter (UNC, \\?\, \??\, a volume
+// GUID) keeps that spelling, which localRootSyntax refuses before any read.
+func nativeLinkTarget(path string, info os.FileInfo) (string, bool, error) {
+	data, ok := info.Sys().(*syscall.Win32FileAttributeData)
+	if !ok || data.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+		return "", false, nil
+	}
+	p, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return "", false, err
+	}
+	var find windows.Win32finddata
+	h, err := windows.FindFirstFile(p, &find)
+	if err != nil {
+		return "", false, err
+	}
+	windows.FindClose(h)
+	// Reserved0 holds the reparse tag when the entry is a reparse point.
+	if find.Reserved0 != windows.IO_REPARSE_TAG_SYMLINK && find.Reserved0 != windows.IO_REPARSE_TAG_MOUNT_POINT {
+		return "", false, nil
+	}
+	target, err := os.Readlink(path)
+	if err != nil {
+		return "", false, err
+	}
+	if filepath.IsAbs(target) {
+		return filepath.Clean(target), true, nil
+	}
+	if filepath.VolumeName(target) != "" || target != "" && os.IsPathSeparator(target[0]) {
+		return target, true, nil // drive- or root-relative: the walk refuses it
+	}
+	return filepath.Clean(filepath.Join(filepath.Dir(path), target)), true, nil
 }
 
 func nativeInfoCheck(info os.FileInfo, owned bool) error {

@@ -44,7 +44,8 @@ type buildApplyRunFixture struct {
 }
 
 // buildApplyTempDir resolves the test root: macOS TMPDIR sits under the /var
-// symlink, which the linked-ancestor checks correctly refuse.
+// symlink, and fixtures pass derived paths straight to OpenRealRoot and
+// compare them with resolved RealRoot paths.
 func buildApplyTempDir(t *testing.T) string {
 	t.Helper()
 	root, err := filepath.EvalSymlinks(t.TempDir())

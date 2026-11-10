@@ -380,7 +380,7 @@ func buildApplyPreviewFixture(t *testing.T) (buildapply.PreviewRequest, buildApp
 	evidence := buildApplyPreviewEvidence(t)
 	reads := buildApplyPreviewReads{
 		inspect: func(_ context.Context, path, _, _ string) (*buildapply.Package, error) {
-			r, err := buildapply.OpenRealRoot(path)
+			r, err := buildapply.OpenResolvedRoot(path)
 			if err != nil {
 				return nil, err
 			}
@@ -406,6 +406,52 @@ func buildApplyPreviewFixture(t *testing.T) (buildapply.PreviewRequest, buildApp
 		running:    func() buildapply.Identity { return identity },
 	}
 	return request, reads
+}
+
+// An installation under a linked folder (a relocated AppData or ~/Applications)
+// previews: the GUI's own executable path, os.Executable and the candidate
+// keep the link spelling, while the kernel reports the resolved images.
+func TestBuildApplyPreviewUnderALinkedInstallFolder(t *testing.T) {
+	for name, makeLink := range buildApplyTestLinks() {
+		t.Run(name, func(t *testing.T) {
+			request, reads := buildApplyPreviewFixture(t)
+			protected, err := reads.protected()
+			if err != nil {
+				t.Fatal(err)
+			}
+			root := filepath.Dir(protected[0])
+			above := filepath.Join(buildApplyTempDir(t), "above")
+			makeLink(t, root, above)
+			spell := func(path string) string {
+				t.Helper()
+				rel, err := filepath.Rel(root, path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return filepath.Join(above, rel)
+			}
+			service, err := reads.executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			realGUI := request.GUI.Executable
+			request.GUI.Executable = spell(realGUI)
+			request.CandidatePath = spell(request.CandidatePath)
+			reads.executable = func() (string, error) { return spell(service), nil }
+			preview, candidate, target, gui, err := captureBuildApplyPreview(context.Background(), request, reads)
+			if err != nil {
+				t.Fatalf("preview under a linked install folder: %v", err)
+			}
+			defer candidate.Close()
+			defer target.Close()
+			if gui.Executable != realGUI || !strings.HasPrefix(realGUI, target.Root.Path+string(filepath.Separator)) {
+				t.Fatalf("preview did not settle on the resolved installation: gui=%q target=%q", gui.Executable, target.Root.Path)
+			}
+			if !strings.HasPrefix(candidate.Root.Path, root) || len(preview.Impact.Refusals) != 0 {
+				t.Fatalf("candidate=%q refusals=%+v", candidate.Root.Path, preview.Impact.Refusals)
+			}
+		})
+	}
 }
 
 func buildApplyPreviewEvidence(t *testing.T) buildapply.EngineOwnerEvidence {

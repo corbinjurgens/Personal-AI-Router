@@ -171,7 +171,7 @@ func (s *Service) startBuildApply(c *client, r buildapply.StartRequest, owner bu
 	}
 	p := s.currentBuildApplyPreviewLocked(c, time.Now())
 	if p == nil || p.preview.PreviewID != r.PreviewID || !p.preview.ObservationsComplete || !p.preview.Impact.Complete || len(p.preview.Impact.Refusals) != 0 ||
-		p.gui.Executable != r.GUI.Executable || p.client != c || !p.preview.CurrentGUI.BuildID.Known || p.preview.CurrentGUI.BuildID.Value == nil || *p.preview.CurrentGUI.BuildID.Value != r.GUI.BuildID {
+		!sameBuildApplyImage(p.gui.Executable, r.GUI.Executable) || p.client != c || !p.preview.CurrentGUI.BuildID.Known || p.preview.CurrentGUI.BuildID.Value == nil || *p.preview.CurrentGUI.BuildID.Value != r.GUI.BuildID {
 		s.mu.Unlock()
 		return refusedBuildApply("stale_preview", "A complete current preview and the same native GUI are required.")
 	}

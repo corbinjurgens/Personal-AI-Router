@@ -50,10 +50,11 @@ func CheckBuildApplyStartup() error {
 }
 
 // JournalUnreadableError reports that the build-apply journal could not be read
-// at all, as when a link sits above it. That is a refusal to start, but it is
-// not an unfinished build apply, so its message carries the reason read from the
-// filesystem. It still satisfies errors.Is for buildapply.ErrRecoveryNeeded, so
-// every caller keeps refusing the start.
+// at all, as when its profile directory is a link (a link above the profile is
+// allowed). That is a refusal to start, but it is not an unfinished build
+// apply, so its message carries the reason read from the filesystem. It still
+// satisfies errors.Is for buildapply.ErrRecoveryNeeded, so every caller keeps
+// refusing the start.
 type JournalUnreadableError struct{ Cause error }
 
 func (e *JournalUnreadableError) Error() string {

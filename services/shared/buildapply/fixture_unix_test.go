@@ -11,7 +11,8 @@ import (
 )
 
 // packageFixtureTempDir resolves the test root: macOS TMPDIR sits under the
-// /var symlink, which the linked-ancestor checks correctly refuse.
+// /var symlink, and fixtures pass derived paths straight to OpenRealRoot and
+// compare them with resolved RealRoot paths.
 func packageFixtureTempDir(t *testing.T) string {
 	t.Helper()
 	root, err := filepath.EvalSymlinks(t.TempDir())
