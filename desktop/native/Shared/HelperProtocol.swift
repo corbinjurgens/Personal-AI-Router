@@ -43,7 +43,7 @@ protocol PAIRHelperProtocol {
     /// Firewall. `appPath` is **ignored** (retained only for wire compatibility):
     /// the daemon derives the target bundle from the *verified* identity of the
     /// connecting process, so a caller can only ever configure its own bundle —
-    /// never point the daemon at an arbitrary NVIDIA-signed `.app`.
+    /// never point the daemon at an arbitrary `.app` signed by the pinned signer.
     func configureFirewall(appPath: String, reply: @escaping (Bool, String?) -> Void)
 
     /// Removes the bundled networked binaries from the Application Firewall.

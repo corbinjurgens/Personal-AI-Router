@@ -11,7 +11,9 @@
  * so the app must have been built with PAIR_MAC_SIGNING_TEAM and
  * PAIR_MAC_SIGNING_CLASS describing this identity. The script refuses when the
  * identity's team or certificate class differs from `native/build/helper-signing.json`,
- * or when the app's helper binaries are not the ones in `native/build/`.
+ * when the app's helper binaries are not the ones in `native/build/`, or when
+ * its `cli-bin` files or file set differ from `cli-bin/manifest.json`. Nothing is
+ * modified before these checks pass.
  *
  * Signing runs inside out, with no `--deep` on the outer bundle (which would
  * re-sign the helpers under codesign's default identifiers):
@@ -21,8 +23,10 @@
  *   3. the daemon and control tool with explicit identifiers;
  *   4. the outer bundle.
  * It then verifies the bundle and checks every helper requirement against the
- * signed code. No hardened runtime, entitlements or notarization: this is for
- * the owner's own machines only. Identity hashes and names are never printed.
+ * signed code, and that the packaged daemon and control tool contain each
+ * requirement string. No hardened runtime, entitlements or notarization: this is
+ * for the owner's own machines only. Identity hashes are never printed; codesign
+ * output is redacted of 40-hex runs but may include the certificate's common name.
  */
 
 import { spawnSync } from 'node:child_process'
@@ -56,6 +60,9 @@ interface Identity {
 
 function run(command: string, args: string[]): string {
     const result = spawnSync(command, args, { encoding: 'utf8' })
+    if (result.error) {
+        throw new Error(`Could not start ${command}: ${result.error.message}`)
+    }
     if (result.status !== 0) {
         throw new Error(
             `${command} ${args[0] ?? ''} failed (exit ${result.status ?? 'signal'}): ` +
@@ -118,15 +125,15 @@ function identityTeam(identity: Identity): string {
     throw new Error('The identity certificate was not found in the keychain.')
 }
 
-function sha256(file: string): string {
-    return createHash('sha256').update(readFileSync(file)).digest('hex')
+function sha256(bytes: Buffer): string {
+    return createHash('sha256').update(bytes).digest('hex')
 }
 
 /** The app must carry exactly the helper binaries the signing record describes. */
 function assertHelpersFromThisBuild(appPath: string): void {
     for (const name of [DAEMON_IDENTIFIER, CTL_IDENTIFIER]) {
         const packaged = path.join(appPath, 'Contents/MacOS', name)
-        if (sha256(packaged) !== sha256(path.join(HELPER_BUILD_DIR, name))) {
+        if (!readFileSync(packaged).equals(readFileSync(path.join(HELPER_BUILD_DIR, name)))) {
             throw new Error(
                 `${name} in the app differs from ${HELPER_BUILD_DIR}. Sign an unsigned copy ` +
                     'of the app packaged from this build.'
@@ -163,22 +170,86 @@ function isJsonObject(value: JsonValue | undefined): value is { [key: string]: J
     )
 }
 
-/** Re-record the signed `cli-bin` bytes so the manifest still describes the package. */
-function updateCliBinManifest(cliBinDir: string): void {
+interface ManifestFile {
+    [key: string]: JsonValue
+    fileName: string
+    size: number
+    sha256: string
+}
+
+/**
+ * The `files` entries of `cli-bin/manifest.json`, written by
+ * scripts/build-modular-binaries.ts; this script only reads and updates the
+ * `size` and `sha256` fields, so keep the two in step if that format changes.
+ */
+function readCliBinManifest(cliBinDir: string): {
+    manifest: { [key: string]: JsonValue }
+    files: ManifestFile[]
+} {
     const manifestPath = path.join(cliBinDir, 'manifest.json')
     const manifest: JsonValue = JSON.parse(readFileSync(manifestPath, 'utf8'))
-    const files = isJsonObject(manifest) ? manifest['files'] : undefined
-    if (!Array.isArray(files)) throw new Error(`${manifestPath} has no files list`)
-    for (const file of files) {
-        const fileName = isJsonObject(file) ? file['fileName'] : undefined
-        if (!isJsonObject(file) || typeof fileName !== 'string') {
+    const entries = isJsonObject(manifest) ? manifest['files'] : undefined
+    if (!isJsonObject(manifest) || !Array.isArray(entries)) {
+        throw new Error(`${manifestPath} has no files list`)
+    }
+    const files: ManifestFile[] = []
+    for (const entry of entries) {
+        const fileName = isJsonObject(entry) ? entry['fileName'] : undefined
+        const size = isJsonObject(entry) ? entry['size'] : undefined
+        const hash = isJsonObject(entry) ? entry['sha256'] : undefined
+        if (
+            !isJsonObject(entry) ||
+            typeof fileName !== 'string' ||
+            typeof size !== 'number' ||
+            typeof hash !== 'string'
+        ) {
             throw new Error(`${manifestPath} has a malformed files entry`)
         }
-        const bytes = readFileSync(path.join(cliBinDir, fileName))
-        file['size'] = bytes.length
-        file['sha256'] = createHash('sha256').update(bytes).digest('hex')
+        files.push({ ...entry, fileName, size, sha256: hash })
     }
-    writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
+    return { manifest, files }
+}
+
+/** `cli-bin` must be exactly the unsigned set the manifest recorded at build time. */
+function assertCliBinFromThisBuild(cliBinDir: string): void {
+    const { files } = readCliBinManifest(cliBinDir)
+    const listed = new Set(files.map(file => file.fileName))
+    const present = new Set(
+        readdirSync(cliBinDir, { withFileTypes: true })
+            .filter(entry => entry.name !== 'manifest.json')
+            .map(entry => entry.name)
+    )
+    const extra = [...present].filter(name => !listed.has(name))
+    const missing = [...listed].filter(name => !present.has(name))
+    if (listed.size !== files.length || extra.length > 0 || missing.length > 0) {
+        throw new Error(
+            'cli-bin files differ from cli-bin/manifest.json ' +
+                `(unlisted: ${extra.join(', ') || 'none'}; missing: ${missing.join(', ') || 'none'}).`
+        )
+    }
+    for (const file of files) {
+        const bytes = readFileSync(path.join(cliBinDir, file.fileName))
+        if (bytes.length !== file.size || sha256(bytes) !== file.sha256) {
+            throw new Error(
+                `cli-bin/${file.fileName} differs from cli-bin/manifest.json. Sign an unsigned ` +
+                    'copy of the app packaged from this build.'
+            )
+        }
+    }
+}
+
+/** Re-record the signed `cli-bin` bytes so the manifest still describes the package. */
+function updateCliBinManifest(cliBinDir: string): void {
+    const { manifest, files } = readCliBinManifest(cliBinDir)
+    const signed = files.map(file => {
+        const bytes = readFileSync(path.join(cliBinDir, file.fileName))
+        return { ...file, size: bytes.length, sha256: sha256(bytes) }
+    })
+    writeFileSync(
+        path.join(cliBinDir, 'manifest.json'),
+        `${JSON.stringify({ ...manifest, files: signed }, null, 2)}\n`,
+        'utf8'
+    )
 }
 
 function sign(identity: Identity, target: string, extra: string[] = []): void {
@@ -205,14 +276,15 @@ function main(): void {
                 `certificate, the ${signer.signingClass} class the helper was built to trust.`
         )
     }
-    assertHelpersFromThisBuild(appPath)
-
     const contents = path.join(appPath, 'Contents')
+    const resources = path.join(contents, 'Resources')
+    assertHelpersFromThisBuild(appPath)
+    assertCliBinFromThisBuild(path.join(resources, 'cli-bin'))
+
     const frameworks = path.join(contents, 'Frameworks')
     for (const entry of readdirSync(frameworks).sort()) {
         sign(identity, path.join(frameworks, entry), ['--deep'])
     }
-    const resources = path.join(contents, 'Resources')
     for (const file of machOFiles(resources)) sign(identity, file)
     updateCliBinManifest(path.join(resources, 'cli-bin'))
 
@@ -235,6 +307,18 @@ function main(): void {
     ]
     for (const [target, requirement] of checks) {
         run('codesign', ['--verify', '--strict', `-R=${requirement}`, target])
+    }
+    // Prove the compiled strings, not only the record they were generated from.
+    for (const binary of [daemon, ctl]) {
+        const bytes = readFileSync(binary)
+        for (const requirement of Object.values(requirements)) {
+            if (!bytes.includes(requirement)) {
+                throw new Error(
+                    `${path.basename(binary)} does not contain a pinned requirement string; ` +
+                        `its build differs from ${HELPER_SIGNING_RECORD}.`
+                )
+            }
+        }
     }
     console.log(
         `[sign-local] signed ${appPath} for ${signer.signingClass} team ${signer.team}; ` +

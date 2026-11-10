@@ -145,8 +145,8 @@ any non-zero `socketfilterfw` exit.
   `xcrun` for `arm64` + `x86_64`, then `lipo`s them into universal Mach-Os under
   `native/build/`. It also generates `HelperVersion.swift` from `package.json`
   and `HelperSigning.swift` plus `helper-signing.json` from the signer
-  configuration. Wired as a `prebuild` for `build:electron:mac:{x64,arm64}` in
-  `package.json`.
+  configuration. Run by `build:electron:mac:{x64,arm64}` in `package.json` before
+  electron-builder.
 - `electron-builder.config.ts` bundles the binaries + plist via `mac.extraFiles`.
 - Official (signed) builds sign each helper binary individually with hardened
   runtime **before** the app, alongside the modular binaries. The public build
@@ -183,7 +183,8 @@ npm run sign:mac:local -- --identity <SHA-1 or common name> "<scratch>/NVIDIA PA
 
 `scripts/build/macos/sign-local.ts` signs an **unsigned** copy packaged from
 the same build (it refuses when the app's helper binaries differ from
-`native/build/`). It reads the identity's Team ID from its certificate and
+`native/build/`, or when any `cli-bin` file or the set of files differs from
+`cli-bin/manifest.json`). It reads the identity's Team ID from its certificate and
 refuses when the team or certificate class differs from `helper-signing.json`.
 It signs inside out without `--deep` on the outer bundle: each
 `Contents/Frameworks` entry, every Mach-O under `Contents/Resources` (then
@@ -194,7 +195,9 @@ default identifier strips a dotted "extension" from the file name, so the
 daemon would otherwise be signed as `com.nvidia.nvpair` and fail its pin.
 Finally it runs `codesign --verify --deep --strict --all-architectures` and
 checks the control tool, daemon, app and every `cli-bin` binary against the
-compiled requirement strings.
+requirement strings, and confirms the packaged daemon and control tool contain
+each of those strings. Identity hashes are never printed; codesign output is
+redacted of 40-hex runs, but may still include the certificate's common name.
 
 ## Uninstall
 
