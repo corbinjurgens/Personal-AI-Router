@@ -67,6 +67,7 @@ import {
     parseJoinRequest,
     parseJoinRequestsSnapshot,
     parseNodeIdentity,
+    parseNodeNameResult,
     parseRemoteManagementCapability,
     parseRemoteManagementSnapshot
 } from './cluster-json'
@@ -783,6 +784,12 @@ const EMPTY_SERVICE_BRIDGE_HANDLERS: BridgeHandlerMap = {
                 allowed: payload.allowed,
                 expectedRevision: payload.expectedRevision
             })
+        )
+    },
+    'cluster:set-node-name': async payload => {
+        if (!payload) throw new Error('Missing node name request')
+        return parseNodeNameResult(
+            await callCluster('cluster:set-node-name', { name: payload.name })
         )
     },
     'engine:remote-management-get': async payload => {

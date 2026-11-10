@@ -9,6 +9,7 @@ import type {
     Invite,
     JoinRequest,
     JoinRequestsSnapshot,
+    NodeNameResult,
     RemoteManagementSnapshot
 } from '@/shared/types/cluster'
 import { INVALID_PARAMS_CODE, POLICY_CONFLICT_CODE } from '@/shared/constants/service-errors'
@@ -23,6 +24,8 @@ interface RemoteManagementChange {
     phase: 'saving' | 'saved' | 'conflict' | 'failed' | 'unknown'
     message?: string
 }
+
+type NodeNameChange = { phase: 'saving' } | { phase: 'saved' } | { phase: 'error'; message: string }
 
 interface ClusterInvitationsStore {
     joinSnapshot: JoinRequestsSnapshot | null
@@ -57,6 +60,15 @@ interface ClusterInvitationsStore {
     remoteManagementContext: number | null
     refreshRemoteManagement: () => Promise<void>
     setRemoteManagement: (peerUuid: string, allowed: boolean) => Promise<void>
+    /** This node's shown name (identity snapshot, then `cluster:node-name-changed`). */
+    selfName: string
+    /** This node's user-set name; `null` while the generated default is shown. */
+    selfCustomName: string | null
+    /** Outcome of the latest `setSelfName`; null when none is in progress or shown. */
+    nameChange: NodeNameChange | null
+    /** Rename this node; `null` returns to the generated default. */
+    setSelfName: (name: string | null) => Promise<void>
+    clearNameChange: () => void
     initialize: (initial?: ClusterInitialSnapshot) => Promise<void>
     hydrate: (snapshot: ClusterInitialSnapshot) => void
     refresh: () => Promise<void>
@@ -266,6 +278,16 @@ let permissionRead: { generation: number; request: Promise<void> } | null = null
 // identity boundary, only a current read can establish authority again.
 let permissionPushRequiresReadback = false
 let permissionPushReadback: object | null = null
+// Counts accepted name updates, so a snapshot fetched before one cannot undo it.
+let nameRevision = 0
+
+function receiveNodeName(result: NodeNameResult): void {
+    nameRevision++
+    useClusterInvitationsStore.setState({
+        selfName: result.name,
+        selfCustomName: result.customName
+    })
+}
 
 function invalidatePermissions(resetRevision = false): void {
     permissionGeneration++
@@ -495,6 +517,24 @@ export const useClusterInvitationsStore = create<ClusterInvitationsStore>((set, 
     remoteManagementError: null,
     remoteManagementChanges: {},
     remoteManagementContext: null,
+    selfName: '',
+    selfCustomName: null,
+    nameChange: null,
+
+    setSelfName: async name => {
+        if (get().nameChange?.phase === 'saving') return
+        set({ nameChange: { phase: 'saving' } })
+        try {
+            receiveNodeName(await window.pairApi.cluster.setNodeName(name))
+            set({ nameChange: { phase: 'saved' } })
+        } catch (error) {
+            set({ nameChange: { phase: 'error', message: getErrorString(error) } })
+        }
+    },
+
+    clearNameChange: () => {
+        set({ nameChange: null })
+    },
 
     hydrate: snapshot => {
         const firstBaseline = localIdentity === ''
@@ -521,6 +561,8 @@ export const useClusterInvitationsStore = create<ClusterInvitationsStore>((set, 
             return {
                 pendingInvites,
                 members: snapshot.members,
+                selfName: snapshot.identity.name,
+                selfCustomName: snapshot.identity.customName,
                 remoteManagementContext: permissionGeneration,
                 activeInviteId: retainSubmittedSelection(state.activeInviteId, state.inviteResults)
                     ? state.activeInviteId
@@ -573,6 +615,9 @@ export const useClusterInvitationsStore = create<ClusterInvitationsStore>((set, 
             // A fresh arrival: surface it in the modal. Main also emits the full
             // list via `cluster:pending-invites-changed`, so this only picks which
             // invite the modal shows.
+            window.pairApi.cluster.onNodeNameChanged(result => {
+                if (subscriptionGeneration === generation) receiveNodeName(result)
+            }),
             window.pairApi.cluster.onInviteReceived(invite => {
                 if (invite.state === 'pending' && !retiredJoinInvites.has(invite.inviteId))
                     set({ activeInviteId: invite.inviteId })
@@ -640,9 +685,23 @@ export const useClusterInvitationsStore = create<ClusterInvitationsStore>((set, 
 
     refresh: async () => {
         const currentGeneration = permissionGeneration
+        const currentNameRevision = nameRevision
         try {
-            const snapshot = await window.pairApi.cluster.getInitial()
+            const fetched = await window.pairApi.cluster.getInitial()
             if (currentGeneration !== permissionGeneration || !connected) return
+            // A name update that landed during the fetch is newer than the snapshot.
+            const { selfName, selfCustomName } = get()
+            const snapshot =
+                currentNameRevision === nameRevision
+                    ? fetched
+                    : {
+                          ...fetched,
+                          identity: {
+                              ...fetched.identity,
+                              name: selfName,
+                              customName: selfCustomName
+                          }
+                      }
             get().hydrate(snapshot)
             await get().refreshRemoteManagement()
         } catch {

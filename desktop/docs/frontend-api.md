@@ -268,6 +268,11 @@ for the full wire semantics and capacity ownership.
 - `abandonIfSolo()` removes a cluster created only for an unsuccessful invite.
 - `onInviteReceived(callback)` reports a freshly-arrived inbound pairing request.
 - `onPendingInvitesChanged(callback)` reports the full authoritative set of live inbound invites (re-emitted on every add or prune).
+- `setNodeName(name)` renames this node through the cluster manager; `null`
+  returns to the generated default. It resolves to `NodeNameResult`
+  `{nodeUuid, name, customName}`; an invalid name rejects with the service's
+  readable message. `onNodeNameChanged(callback)` reports every change of this
+  node's name, from any client.
 
 The admission-request API is separate from `getInitial()` and its
 `ClusterInitialSnapshot`: `getJoinRequests()`, `askToJoin(params)`,
@@ -528,6 +533,7 @@ Commands return no state. Renderer stores update from
 | `cluster:respond-to-invite` | `{ inviteId, accept:true, pin, allowRemoteManagement }` or `{ inviteId, accept:false }` | `Invite` |
 | `cluster:cancel-invite`     | `{ inviteId }`               | `Invite`                  |
 | `cluster:abandon-if-solo`   | `void`                       | `null`                    |
+| `cluster:set-node-name`     | `{ name: string \| null }`   | `NodeNameResult`          |
 | `engines:get-initial`       | `void`                       | `EngineInitialState`      |
 | `engines:get-settings`      | `EngineSettingsTarget`       | `EngineSettingsSnapshot`  |
 | `engines:preview-settings`  | `EngineSettingsRequest`      | `EngineSettingsPreview`   |
@@ -566,6 +572,7 @@ Commands return no state. Renderer stores update from
 | `cluster:invite-received`         | `Invite`                         |
 | `cluster:pending-invites-changed` | `Invite[]`                       |
 | `cluster:join-requests-changed` | Join-request eligibility and full snapshot |
+| `cluster:node-name-changed`       | `NodeNameResult`                 |
 | `discovery:nodes-changed`         | `AvailableNode[]`                |
 | `connection:cluster-identity`     | `ClusterIdentityPayload`         |
 | `state:request-refresh`           | `void`                           |

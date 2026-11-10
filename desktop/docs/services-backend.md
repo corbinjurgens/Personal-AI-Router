@@ -318,6 +318,7 @@ reserved for inference clients.
 | `cluster:invite-canceled` / `cluster:invite-expired` | Prune the canceled or timed-out inbound invite from the authoritative set                                                       | `cluster:pending-invites-changed`                         |
 | `cluster:identity-changed`                           | Persist local identity                                                                                                          | `connection:cluster-identity`                             |
 | `cluster:join-requests-changed` | Strictly parse the complete manager-owned eligibility/request snapshot | `cluster:join-requests-changed` |
+| `cluster:node-name-changed` | Strictly parse this node's `{nodeUuid, name, customName}`; drop a malformed update | `cluster:node-name-changed` |
 | `nodes:changed`                                      | Replace membership snapshot                                                                                                     | `nodes:changed`                                           |
 | `workloads:upsert` / `workloads:remove`              | Update workload catalog                                                                                                         | workload pushes                                           |
 
@@ -550,7 +551,11 @@ Personal AI Router:
 - surfaces a `rejected` invite reason (notably `already-clustered`) and disables
   inviting a discovered node the broker reports as already `clustered`;
 - persists identity changes through `nvpair-node-settings`;
-- renders membership from `nodes:changed`.
+- renders membership from `nodes:changed`;
+- renames this node through `cluster:set-node-name` (`{name}`, `null` for the
+  generated default) and follows `cluster:node-name-changed`; an invalid name's
+  readable reason travels in the error message because the broker relay drops
+  error `data`.
 
 Cluster membership correlates by `ClusterNode.nodeUuid` — the stable per-host
 UUID that also keys discovery, workloads, errors, and `selfId` — never a name.

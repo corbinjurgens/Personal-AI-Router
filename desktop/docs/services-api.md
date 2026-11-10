@@ -60,6 +60,7 @@
 - ⚠️ nvpair-node-scanner → discovery:reload-identity
 - ⚠️ nvpair-node-scanner → discovery:reload-trust
 - ⚠️ nvpair-node-scanner → discovery:set-observed-addresses
+- ⚠️ nvpair-node-scanner → discovery:set-self-name
 - ⚠️ nvpair-node-scanner → discovery:unregister
 - ⚠️ nvpair-node-scanner → discovery:update-txt
 - ⚠️ nvpair-node-settings → settings/get-cluster-auto-sync
@@ -99,6 +100,7 @@
 | `cluster:invite-failed` | notification (we consume) | ✅ yes |
 | `cluster:invite-received` | notification (we consume) | ✅ yes |
 | `cluster:join-requests-changed` | notification (we consume) | ✅ yes |
+| `cluster:node-name-changed` | notification (we consume) | ✅ yes |
 | `cluster:peer-services` | notification (we consume) | ➖ ignored |
 | `cluster:remote-management-changed` | notification (we consume) | ✅ yes |
 | `cluster:trust-changed` | notification (we consume) | ➖ ignored |
@@ -118,6 +120,7 @@
 | `cluster:respond-to-join-request` | request (we call) | ✅ yes |
 | `cluster:set-identity` | request (we call) | ✅ yes |
 | `cluster:set-local-services` | request (we call) | ➖ ignored |
+| `cluster:set-node-name` | request (we call) | ✅ yes |
 | `cluster:set-remote-management` | request (we call) | ✅ yes |
 | `discovery:nodes` | request (we call) | ✅ yes |
 | `nodes:get-initial` | request (we call) | ✅ yes |
@@ -283,6 +286,7 @@
 | `discovery:reload-identity` | request (we call) | ⚠️ not called |
 | `discovery:reload-trust` | request (we call) | ⚠️ not called |
 | `discovery:set-observed-addresses` | request (we call) | ⚠️ not called |
+| `discovery:set-self-name` | request (we call) | ⚠️ not called |
 | `discovery:unregister` | request (we call) | ⚠️ not called |
 | `discovery:update-txt` | request (we call) | ⚠️ not called |
 

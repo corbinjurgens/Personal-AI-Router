@@ -18,6 +18,7 @@ import type {
     JoinRequestsSnapshot,
     JoinRequestState,
     MembershipState,
+    NodeNameResult,
     RemoteManagementCapability,
     RemoteManagementSnapshot,
     RemoteManagementState
@@ -146,6 +147,20 @@ export function parseNodeIdentity(value: JsonValue | undefined): ClusterNodeIden
         certFingerprint: stringValue(obj?.certFingerprint),
         clusterId: stringValue(obj?.clusterId)
     }
+}
+
+/** Parse a `cluster:set-node-name` result or `cluster:node-name-changed` payload. */
+export function parseNodeNameResult(value: JsonValue | undefined): NodeNameResult {
+    const obj = objectValue(value)
+    if (
+        !obj ||
+        typeof obj.nodeUuid !== 'string' ||
+        typeof obj.name !== 'string' ||
+        (obj.customName !== null && typeof obj.customName !== 'string')
+    ) {
+        throw new Error('Invalid node name response')
+    }
+    return { nodeUuid: obj.nodeUuid, name: obj.name, customName: obj.customName }
 }
 
 function exactFields(obj: JsonObject, fields: string[]): boolean {

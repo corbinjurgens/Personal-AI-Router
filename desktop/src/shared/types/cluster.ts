@@ -92,6 +92,13 @@ export interface ClusterNodeIdentity {
     clusterId: string
 }
 
+/** Result of `cluster:set-node-name` and payload of `cluster:node-name-changed`. */
+export interface NodeNameResult {
+    nodeUuid: string
+    name: string
+    customName: string | null
+}
+
 /**
  * Terminal/transient state of a pairing session (cluster-manager `InviteState`).
  * - `pending` — Initial Exchange done; awaiting the user's PIN entry.

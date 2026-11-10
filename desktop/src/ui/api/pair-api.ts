@@ -14,6 +14,7 @@ import type {
     Invite,
     JoinRequest,
     JoinRequestsSnapshot,
+    NodeNameResult,
     RemoteManagementCapability,
     RemoteManagementSetRequest,
     RemoteManagementSnapshot
@@ -95,6 +96,9 @@ export interface IClusterApi {
     setRemoteManagement(request: RemoteManagementSetRequest): Promise<RemoteManagementSnapshot>
     onRemoteManagementChanged(callback: (snapshot: RemoteManagementSnapshot) => void): () => void
     getRemoteManagementForNode(nodeId: string): Promise<RemoteManagementCapability>
+    /** Set this node's name; `null` returns to the generated default. */
+    setNodeName(name: string | null): Promise<NodeNameResult>
+    onNodeNameChanged(callback: (result: NodeNameResult) => void): () => void
     /**
      * Abort a still-pending outbound invite this node sent: tears down the
      * pairing session and invalidates the PIN so it can no longer complete.
@@ -254,6 +258,8 @@ export function createPairApi(transport: ServiceTransport): IPairApi {
                 transport.subscribePush('cluster:remote-management-changed', cb),
             getRemoteManagementForNode: nodeId =>
                 transport.invoke('engine:remote-management-get', { nodeId }),
+            setNodeName: name => transport.invoke('cluster:set-node-name', { name }),
+            onNodeNameChanged: cb => transport.subscribePush('cluster:node-name-changed', cb),
             cancelInvite: inviteId => transport.invoke('cluster:cancel-invite', { inviteId }),
             abandonIfSolo: async () => {
                 await transport.invoke('cluster:abandon-if-solo')

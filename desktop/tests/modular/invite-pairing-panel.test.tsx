@@ -76,6 +76,7 @@ describe('failed invitation recovery', () => {
                         push = callback
                         return () => {}
                     },
+                    onNodeNameChanged: () => () => {},
                     onInviteReceived: () => () => {},
                     onPendingInvitesChanged: () => () => {}
                 },

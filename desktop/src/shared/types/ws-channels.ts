@@ -94,6 +94,7 @@ import type {
     Invite,
     JoinRequest,
     JoinRequestsSnapshot,
+    NodeNameResult,
     RemoteManagementCapability,
     RemoteManagementSetRequest,
     RemoteManagementSnapshot,
@@ -154,6 +155,8 @@ export interface WsInvokeChannelMap {
         request: RemoteManagementSetRequest
         response: RemoteManagementSnapshot
     }
+    /** Set this node's name; `null` returns to the generated default. */
+    'cluster:set-node-name': { request: { name: string | null }; response: NodeNameResult }
     'engine:remote-management-get': {
         request: { nodeId: string }
         response: RemoteManagementCapability
@@ -242,6 +245,8 @@ export interface WsPushChannelMap {
     'routing-history:committed': RoutingHistoryCommit
     'cluster:join-requests-changed': JoinRequestsSnapshot
     'cluster:remote-management-changed': RemoteManagementSnapshot
+    /** This node's name changed (cluster-manager `cluster:node-name-changed`). */
+    'cluster:node-name-changed': NodeNameResult
     // Nodes / cluster state
     'nodes:upsert': NodeItem
     'nodes:remove': string

@@ -386,6 +386,7 @@ beforeEach(() => {
                         permissionPush = undefined
                     }
                 },
+                onNodeNameChanged: () => () => {},
                 onInviteReceived: (callback: (invite: Invite) => void) => {
                     received = callback
                     return () => {
