@@ -403,7 +403,7 @@ func (m *Manager) driveJoinRequest(id string, endpoints []string) {
 			m.joinMu.Unlock()
 			return
 		}
-		deadline := r.ExpiresAt
+		deadline, requesterName := r.ExpiresAt, r.requesterName
 		m.joinMu.Unlock()
 		if m.joinTime().UnixMilli() >= deadline {
 			m.joinSnapshot()
@@ -414,7 +414,7 @@ func (m *Manager) driveJoinRequest(id string, endpoints []string) {
 		if operation == "request" {
 			p := m.port
 			wire.Port = &p
-			wire.Requester = &joinRequester{m.identity.NodeUUID, m.selfName()}
+			wire.Requester = &joinRequester{m.identity.NodeUUID, requesterName}
 		}
 		remaining := time.Duration(deadline-m.joinTime().UnixMilli()) * time.Millisecond
 		if remaining > pairingHTTPTimeout {
