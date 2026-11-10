@@ -16,10 +16,10 @@ const gpuTexts = (name: string, ip: string, gpus: string[]) =>
         .map(segment => segment.text)
 
 describe('buildNodeLabelSegments', () => {
-    it('puts the name first, uppercased, followed by the address', () => {
+    it('puts the name first, as given, followed by the address', () => {
         const segments = buildNodeLabelSegments('pluto.local.tld', '172.16.24.46', [])
         expect(segments).toEqual([
-            { id: 'primary', text: 'PLUTO.LOCAL.TLD' },
+            { id: 'primary', text: 'pluto.local.tld' },
             { id: 'ip', text: '172.16.24.46' }
         ])
     })

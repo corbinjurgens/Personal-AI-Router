@@ -25,7 +25,7 @@ export function buildNodeLabelSegments(
     ipAddress: string,
     gpuLabels: string[]
 ): LabelSegment[] {
-    const primaryText = (name || ipAddress).toUpperCase()
+    const primaryText = name || ipAddress
     const segments: LabelSegment[] = [{ id: 'primary', text: primaryText }]
 
     if (name && ipAddress) {

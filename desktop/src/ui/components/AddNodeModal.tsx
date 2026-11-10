@@ -170,10 +170,7 @@ export function AddNodeModal({ open, onOpenChange }: AddNodeModalProps) {
                                                     className="py-1"
                                                 >
                                                     <Stack gap="0">
-                                                        <Text
-                                                            kind="body/semibold/sm"
-                                                            className="uppercase"
-                                                        >
+                                                        <Text kind="body/semibold/sm">
                                                             {node.name || node.ipAddress}
                                                         </Text>
                                                         <Text

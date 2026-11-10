@@ -25,7 +25,7 @@ export default function OfflineNode({
         <div key={`ledger:${nodeId}`} className="node-card pair-paper">
             <Flex align="center" wrap="wrap" gap="3" className="min-w-0 overflow-hidden">
                 <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 overflow-hidden grow">
-                    <Text kind="body/semibold/sm" className="min-w-0 truncate uppercase">
+                    <Text kind="body/semibold/sm" className="min-w-0 truncate">
                         {name || ipAddress || nodeId}
                     </Text>
                     {isLocal && <LocalBadge />}
