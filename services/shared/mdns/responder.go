@@ -3,7 +3,9 @@
 
 // Package mdns provides a minimal, cross-platform mDNS responder that
 // advertises a single service instance and answers queries for it on every
-// multicast-capable IPv4 interface.
+// multicast-capable IPv4 interface. The caller supplies both the instance
+// label and the host label the SRV and A records use; nothing is derived from
+// the OS hostname.
 //
 // It exists because grandcat/zeroconf's Server (and its Resolver, which the
 // browser side in nvpair-shared/discovery works around too) binds a single UDP
@@ -36,7 +38,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -78,7 +79,7 @@ type Responder struct {
 	service  string // e.g. "_nvpair-node._tcp"
 	domain   string // e.g. "local"
 	port     int
-	hostName string // e.g. "myhost.local."
+	hostName string // caller-supplied host label, e.g. "nvpair-<uuid>.local."
 
 	serviceName  string // "_nvpair-node._tcp.local."
 	instanceName string // "myhost._nvpair-node._tcp.local."
@@ -98,20 +99,26 @@ type Responder struct {
 	ifaceAddrs map[int][]net.IP
 }
 
-// NewResponder builds a Responder for the given service instance. domain
-// defaults to "local" if empty. The hostname is taken from os.Hostname().
-// Returns an error if no multicast-capable IPv4 interface with at least one
-// non-loopback address can be found.
-func NewResponder(instance, service, domain string, port int, txt []string) (*Responder, error) {
+// NewResponder builds a Responder for the given service instance. host is the
+// label the SRV record targets and the A records answer for (host.<domain>.);
+// the caller supplies it, so the advertised host name never depends on the OS
+// hostname. domain defaults to "local" if empty. Returns an error if no
+// multicast-capable IPv4 interface with at least one non-loopback address can
+// be found.
+func NewResponder(instance, host, service, domain string, port int, txt []string) (*Responder, error) {
 	domain = strings.Trim(domain, ".")
 	if domain == "" {
 		domain = "local"
 	}
 	instance = strings.Trim(instance, ".")
+	host = strings.Trim(host, ".")
 	service = strings.Trim(service, ".")
 
 	if instance == "" {
 		return nil, errors.New("missing instance name")
+	}
+	if host == "" {
+		return nil, errors.New("missing host name")
 	}
 	if service == "" {
 		return nil, errors.New("missing service")
@@ -120,12 +127,7 @@ func NewResponder(instance, service, domain string, port int, txt []string) (*Re
 		return nil, errors.New("missing port")
 	}
 
-	hostBase, err := os.Hostname()
-	if err != nil {
-		return nil, fmt.Errorf("hostname: %w", err)
-	}
-	hostBase = strings.Trim(hostBase, ".")
-	hostName := hostBase + "." + domain + "."
+	hostName := host + "." + domain + "."
 
 	r := &Responder{
 		instance:     instance,
@@ -413,7 +415,7 @@ func (r *Responder) srvRR(flushCache bool) *dns.SRV {
 }
 
 // txtRR builds the instance's TXT record from the live set (which UpdateTXT may
-// have swapped). See srvRR for flushCache.
+// have swapped), escaped for packing. See srvRR for flushCache.
 func (r *Responder) txtRR(flushCache bool) *dns.TXT {
 	class := uint16(dns.ClassINET)
 	if flushCache {
@@ -424,6 +426,11 @@ func (r *Responder) txtRR(flushCache bool) *dns.TXT {
 		// An empty TXT record set is valid; emit a single empty string so the
 		// record exists (some resolvers expect a TXT RR alongside SRV).
 		txt = []string{""}
+	}
+	// miekg/dns interprets backslash escapes when packing; escape so the
+	// wire carries the strings unchanged (see EscapeTXT).
+	for i, s := range txt {
+		txt[i] = EscapeTXT(s)
 	}
 	return &dns.TXT{
 		Hdr: dns.RR_Header{Name: r.instanceName, Rrtype: dns.TypeTXT, Class: class, Ttl: recordTTL},

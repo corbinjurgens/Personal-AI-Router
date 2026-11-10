@@ -4,6 +4,7 @@
 package main
 
 import (
+	"slices"
 	"testing"
 
 	"nvpair-shared/noderec"
@@ -63,6 +64,22 @@ func TestRegistrySetIdentity(t *testing.T) {
 	rec := r.record()
 	if rec.HostUUID != "new" || rec.ClusterUUID != "clu" || rec.IP != "2.2.2.2" {
 		t.Fatalf("identity not applied: %+v", rec)
+	}
+}
+
+func TestRegistrySetName(t *testing.T) {
+	r := newRegistry("h", "c", []string{"1.1.1.1"})
+	if got := r.record().Name; got != "" {
+		t.Fatalf("Name before the first set = %q, want empty", got)
+	}
+	if !r.setName("Desk A") {
+		t.Fatal("a new name should report a change")
+	}
+	if r.setName("Desk A") {
+		t.Error("the same name should not report a change")
+	}
+	if got, want := r.txt(), []string{"v=1", "uuid=h", "cluster-uuid=c", "name=Desk A", "ip=1.1.1.1"}; !slices.Equal(got, want) {
+		t.Fatalf("txt = %q, want %q", got, want)
 	}
 }
 

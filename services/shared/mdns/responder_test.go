@@ -42,18 +42,20 @@ func TestNewResponderValidation(t *testing.T) {
 	// These cases return before any interface enumeration, so they're
 	// environment-independent.
 	cases := []struct {
-		name                      string
-		instance, service, domain string
-		port                      int
+		name                            string
+		instance, host, service, domain string
+		port                            int
 	}{
-		{"missing instance", "", "_nvpair-test._tcp", "local", 14318},
-		{"missing service", "myhost", "", "local", 14318},
-		{"missing port", "myhost", "_nvpair-test._tcp", "local", 0},
+		{"missing instance", "", "myhost", "_nvpair-test._tcp", "local", 14318},
+		{"missing host", "myhost", "", "_nvpair-test._tcp", "local", 14318},
+		{"host of only dots", "myhost", "..", "_nvpair-test._tcp", "local", 14318},
+		{"missing service", "myhost", "myhost", "", "local", 14318},
+		{"missing port", "myhost", "myhost", "_nvpair-test._tcp", "local", 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := NewResponder(tc.instance, tc.service, tc.domain, tc.port, nil); err == nil {
-				t.Fatalf("NewResponder(%q,%q,%q,%d) = nil error, want error", tc.instance, tc.service, tc.domain, tc.port)
+			if _, err := NewResponder(tc.instance, tc.host, tc.service, tc.domain, tc.port, nil); err == nil {
+				t.Fatalf("NewResponder(%q,%q,%q,%q,%d) = nil error, want error", tc.instance, tc.host, tc.service, tc.domain, tc.port)
 			}
 		})
 	}
@@ -62,7 +64,7 @@ func TestNewResponderValidation(t *testing.T) {
 func TestNewResponderNormalizesNames(t *testing.T) {
 	// The success path needs a real multicast-capable interface; skip where
 	// there isn't one (e.g. a locked-down CI sandbox) rather than fail.
-	r, err := NewResponder(".myhost.", "._nvpair-test._tcp.", "", 14318, []string{"v=1"})
+	r, err := NewResponder(".myhost.", ".nvpair-host.", "._nvpair-test._tcp.", "", 14318, []string{"v=1"})
 	if err != nil {
 		t.Skipf("NewResponder unavailable in this environment: %v", err)
 	}
@@ -74,6 +76,14 @@ func TestNewResponderNormalizesNames(t *testing.T) {
 	}
 	if want := "myhost._nvpair-test._tcp.local."; r.instanceName != want {
 		t.Errorf("instanceName = %q, want %q", r.instanceName, want)
+	}
+	// The host label comes from the caller, never from the OS hostname, and
+	// the SRV record targets exactly that host name.
+	if want := "nvpair-host.local."; r.hostName != want {
+		t.Errorf("hostName = %q, want %q", r.hostName, want)
+	}
+	if got := r.srvRR(false).Target; got != r.hostName {
+		t.Errorf("SRV target = %q, want host name %q", got, r.hostName)
 	}
 }
 

@@ -76,7 +76,7 @@ func TestModelsRefreshConvergesWithoutMDNSChange(t *testing.T) {
 	// Advertise em=<port> + ip=127.0.0.1 once and never touch the record again,
 	// so the only thing that changes during the test is the /v1/models body.
 	txt := []string{"v=1", "uuid=" + instance + "-uuid", "ip=127.0.0.1", fmt.Sprintf("em=%d", emPort)}
-	zsrv, err := mdns.NewResponder(instance, namespace.Service, namespace.Domain, emPort, txt)
+	zsrv, err := mdns.NewResponder(instance, instance, namespace.Service, namespace.Domain, emPort, txt)
 	if err != nil {
 		t.Fatalf("register %s: %v", instance, err)
 	}

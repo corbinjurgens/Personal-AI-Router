@@ -4,6 +4,9 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,13 +16,17 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
 	"nvpair-shared/clustertrust"
+	"nvpair-shared/jsonrpc"
 	"nvpair-shared/noderec"
 )
 
@@ -40,7 +47,6 @@ func newSelfTestDaemon(hostUUID, ip string) *daemon {
 	return &daemon{
 		mesh:               clustertrust.Open(""),
 		reg:                newRegistry(hostUUID, "", selfAddrs(ip)),
-		instance:           "myhost",
 		dir:                newDirectory(),
 		http:               &http.Client{Timeout: nodeInfoFetchTimeout},
 		modelsHTTP:         &http.Client{Timeout: modelsFetchTimeout},
@@ -120,6 +126,7 @@ func TestSelfNotEvictedByBrowse(t *testing.T) {
 	d.http.Transport = intercept
 	d.modelsHTTP.Transport = intercept
 	d.reg.register(noderec.RegisterParams{Service: noderec.ServiceNodeInfo, Port: 14318})
+	d.reg.setName("Self Desk")
 	d.publishSelf()
 	if publicationReads.Load() != 1 {
 		t.Fatalf("intercepted publication reads = %d, want 1", publicationReads.Load())
@@ -130,18 +137,19 @@ func TestSelfNotEvictedByBrowse(t *testing.T) {
 
 	// Its own record aged out of the browse (Windows self-multicast loss): the
 	// browser emits removed for our uuid. It must NOT drop the self entry.
-	selfTXT := []string{"v=1", "uuid=self-uuid", "ip=192.168.1.17", "ni=14318"}
-	d.onBrowse(DiscoveryEvent{Type: "removed", Node: RawNode{ID: "myhost", TXT: selfTXT}})
+	selfTXT := []string{"v=1", "uuid=self-uuid", "name=Stale Name", "ip=192.168.1.17", "ni=14318"}
+	selfLabel := mdnsLabel("self-uuid")
+	d.onBrowse(DiscoveryEvent{Type: "removed", Node: RawNode{ID: selfLabel, TXT: selfTXT}})
 	if _, ok := d.dir.get("self-uuid"); !ok {
 		t.Error("a browse 'removed' for our own uuid must not evict the local node")
 	}
 
 	// A later self re-appearance in the browse is also a no-op (self stays
 	// registry-driven; the browse never clobbers it).
-	d.onBrowse(DiscoveryEvent{Type: "discovered", Node: RawNode{ID: "myhost", TXT: selfTXT}})
+	d.onBrowse(DiscoveryEvent{Type: "discovered", Node: RawNode{ID: selfLabel, TXT: selfTXT}})
 	if n, ok := d.dir.get("self-uuid"); !ok {
 		t.Error("self entry disappeared after a self 'discovered' browse event")
-	} else if n.Name != "myhost" {
+	} else if n.Name != "Self Desk" {
 		t.Errorf("self entry Name = %q, want the registry-driven name", n.Name)
 	}
 	if publicationReads.Load() != 1 {
@@ -373,8 +381,8 @@ func TestEnrichFallsBackToASecondPublishedAddress(t *testing.T) {
 
 // TestReachableSelfDialsLoopback pins the uuid-keyed self probe: when the
 // threshold-missed record is this host, reachable dials loopbackHost rather than
-// the advertised peer endpoint. A hostname-keyed browse filter is not required — and
-// would wrongly drop a peer that merely shares our instance name.
+// the advertised peer endpoint. A name-keyed browse filter is not required — and
+// would wrongly drop a peer that merely shares our display name.
 func TestReachableSelfDialsLoopback(t *testing.T) {
 	const selfUUID, peerUUID = "self-uuid", "peer-uuid"
 	const peerIP = "127.0.0.2"
@@ -443,8 +451,8 @@ func TestReachableSelfDialsLoopback(t *testing.T) {
 	d.http.Timeout = nodeInfoFetchTimeout
 	// Both possible dial addresses are owned; the UUID must choose between them.
 	self := RawNode{
-		ID:  "myhost",
-		TXT: []string{"v=1", "uuid=" + selfUUID, "ip=" + peerIP, fmt.Sprintf("ni=%d", port)},
+		ID:  mdnsLabel(selfUUID),
+		TXT: []string{"v=1", "uuid=" + selfUUID, "name=Desk", "ip=" + peerIP, fmt.Sprintf("ni=%d", port)},
 	}
 	if !d.reachable(self) {
 		t.Fatal("self record must reach its own loopback identity despite advertising the peer address")
@@ -459,11 +467,11 @@ func TestReachableSelfDialsLoopback(t *testing.T) {
 	selfConnectionsBeforePeer := selfConnections.Load()
 
 	peer := RawNode{
-		ID:  "myhost", // same instance name as self — must not be treated as us
-		TXT: []string{"v=1", "uuid=" + peerUUID, "ip=" + peerIP, fmt.Sprintf("ni=%d", port)},
+		ID:  mdnsLabel(peerUUID),
+		TXT: []string{"v=1", "uuid=" + peerUUID, "name=Desk", "ip=" + peerIP, fmt.Sprintf("ni=%d", port)}, // same display name as self — must not be treated as us
 	}
 	if !d.reachable(peer) {
-		t.Fatal("same-hostname peer must reach the advertised peer identity")
+		t.Fatal("same-named peer must reach the advertised peer identity")
 	}
 	if alive, conclusive := d.identityAlive(noderec.ParseTXT(peer.TXT), []string{peerIP}); !alive || !conclusive {
 		t.Fatalf("peer identity = %v,%v, want alive and conclusive", alive, conclusive)
@@ -471,5 +479,177 @@ func TestReachableSelfDialsLoopback(t *testing.T) {
 	if selfHits.Load() != 2 || peerHits.Load() != 2 || peerConnections.Load() < 2 || selfConnections.Load() != selfConnectionsBeforePeer {
 		t.Fatalf("peer phase: self identity hits=%d, peer identity hits=%d, peer connections=%d, self connections=%d (before peer=%d)",
 			selfHits.Load(), peerHits.Load(), peerConnections.Load(), selfConnections.Load(), selfConnectionsBeforePeer)
+	}
+}
+
+// privateNamespace returns a random DNS-SD service no production browser
+// listens for, so a responder built in a test can never be mistaken for a node.
+func privateNamespace(t *testing.T) noderec.MDNSNamespace {
+	t.Helper()
+	var token [6]byte
+	if _, err := rand.Read(token[:]); err != nil {
+		t.Fatal(err)
+	}
+	return noderec.MDNSNamespace{Service: fmt.Sprintf("_pair-%x._tcp", token[:]), Domain: noderec.Domain}
+}
+
+// responderTXT reads the responder's live TXT set without sending anything.
+func responderTXT(d *daemon) []string {
+	v := reflect.ValueOf(d.responder).Elem().FieldByName("txt")
+	out := make([]string, v.Len())
+	for i := range out {
+		out[i] = v.Index(i).String()
+	}
+	return out
+}
+
+func responderField(d *daemon, field string) string {
+	return reflect.ValueOf(d.responder).Elem().FieldByName(field).String()
+}
+
+// setSelfNameRequest sends discovery:set-self-name as a request and returns the
+// reply, skipping the node events the daemon emits before it.
+func setSelfNameRequest(t *testing.T, d *daemon, wire *bytes.Buffer, name string) *jsonrpc.Message {
+	t.Helper()
+	params, err := json.Marshal(noderec.SetSelfNameParams{Name: name})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := json.RawMessage(`"set-self-name"`)
+	if !d.handle(&Message{JSONRPC: "2.0", ID: &id, Method: noderec.MethodSetSelfName, Params: params}) {
+		t.Fatal("discovery:set-self-name was not handled")
+	}
+	reader := jsonrpc.NewCodec(wire)
+	for {
+		msg, err := reader.Read()
+		if err != nil {
+			t.Fatalf("read reply: %v", err)
+		}
+		if msg.ID != nil {
+			return msg
+		}
+	}
+}
+
+func TestSetSelfNameUpdatesTXTAndSelfRow(t *testing.T) {
+	var wire bytes.Buffer
+	d := newSelfTestDaemon("self-uuid", "192.168.1.17")
+	d.codec = NewCodec(&wire)
+	d.mdnsEnabled = true
+	d.mdnsNamespace = privateNamespace(t)
+	// The responder is built but never run; UpdateTXT announces only on the
+	// private namespace.
+	d.responder = d.newResponder("self-uuid")
+	d.publishSelf()
+	if n, _ := d.dir.get("self-uuid"); n.Name != "" {
+		t.Fatalf("self row Name before the first set = %q, want empty", n.Name)
+	}
+
+	reply := setSelfNameRequest(t, d, &wire, "  Desk A ")
+	if reply.Error != nil {
+		t.Fatalf("set-self-name error = %+v", reply.Error)
+	}
+	if string(reply.Result) != `{"ok":true}` {
+		t.Fatalf("set-self-name result = %s, want {\"ok\":true}", reply.Result)
+	}
+	if !slices.Contains(d.reg.txt(), "name=Desk A") {
+		t.Fatalf("registry TXT = %q, want the normalized name=Desk A", d.reg.txt())
+	}
+	if d.responder != nil && !slices.Contains(responderTXT(d), "name=Desk A") {
+		t.Fatalf("responder TXT = %q, want name=Desk A advertised", responderTXT(d))
+	}
+	if n, ok := d.dir.get("self-uuid"); !ok || n.Name != "Desk A" {
+		t.Fatalf("self row = %+v (present %v), want Name Desk A", n, ok)
+	}
+}
+
+func TestSetSelfNameRejectsInvalid(t *testing.T) {
+	for label, name := range map[string]string{
+		"empty":             "",
+		"blank":             "   ",
+		"control character": "bad\u0007name",
+		"too long":          strings.Repeat("x", 129),
+	} {
+		t.Run(label, func(t *testing.T) {
+			var wire bytes.Buffer
+			d := newSelfTestDaemon("self-uuid", "192.168.1.17")
+			d.codec = NewCodec(&wire)
+			d.reg.setName("Kept")
+			d.publishSelf()
+
+			reply := setSelfNameRequest(t, d, &wire, name)
+			if reply.Error == nil || reply.Error.Code != -32602 {
+				t.Fatalf("reply = %+v, want a -32602 error", reply)
+			}
+			if got := d.reg.record().Name; got != "Kept" {
+				t.Fatalf("registry name = %q, want the previous name kept", got)
+			}
+			if n, _ := d.dir.get("self-uuid"); n.Name != "Kept" {
+				t.Fatalf("self row Name = %q, want the previous name kept", n.Name)
+			}
+		})
+	}
+}
+
+// TestReloadIdentityReplacesResponderOnUUIDChange: the mDNS label derives from
+// the host UUID, so a re-stamp must retire the old responder (its goodbye
+// withdraws the old instance) and advertise under the new label.
+func TestReloadIdentityReplacesResponderOnUUIDChange(t *testing.T) {
+	base := t.TempDir()
+	d := newSelfTestDaemon("scanner-minted-X", "127.0.0.1")
+	d.baseDir = base
+	d.mdnsEnabled = true
+	d.mdnsNamespace = privateNamespace(t)
+	d.responder = d.newResponder("scanner-minted-X")
+	if d.responder == nil {
+		t.Skip("responder construction unavailable without a multicast-capable interface")
+	}
+	old := d.responder
+	// A cancelled run context lets the replacement start without opening any
+	// socket: Run returns at once.
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	cancelRun()
+	d.runCtx = runCtx
+	oldCtx, oldCancel := context.WithCancel(context.Background())
+	defer oldCancel()
+	d.responderCancel = oldCancel
+
+	idPath := filepath.Join(base, "cluster", "identity.json")
+	if err := os.MkdirAll(filepath.Dir(idPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(map[string]any{"node_uuid": "cluster-principal-Y", "created_at": 1})
+	if err := os.WriteFile(idPath, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d.reloadIdentity()
+
+	select {
+	case <-oldCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("the old responder was not stopped on the uuid change")
+	}
+	if d.responder == nil || d.responder == old {
+		t.Fatal("reloadIdentity kept the old responder after a uuid change")
+	}
+	if d.responderCancel == nil {
+		t.Fatal("the replacement responder was not started")
+	}
+	label := mdnsLabel("cluster-principal-Y")
+	if got := responderField(d, "instanceName"); !strings.HasPrefix(got, label+".") {
+		t.Fatalf("instanceName = %q, want it under %q", got, label)
+	}
+	if got := responderField(d, "hostName"); got != label+".local." {
+		t.Fatalf("hostName = %q, want %q", got, label+".local.")
+	}
+	if !slices.Contains(responderTXT(d), "uuid=cluster-principal-Y") {
+		t.Fatalf("replacement TXT = %q, want the new uuid=", responderTXT(d))
+	}
+
+	// An unchanged uuid re-announces on the same responder.
+	current := d.responder
+	d.reloadIdentity()
+	if d.responder != current {
+		t.Fatal("reloadIdentity replaced the responder without a uuid change")
 	}
 }

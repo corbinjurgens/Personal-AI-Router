@@ -13,7 +13,6 @@ import (
 	"maps"
 	"net"
 	"net/http"
-	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -29,6 +28,7 @@ import (
 	"nvpair-shared/netmon"
 	"nvpair-shared/netpick"
 	"nvpair-shared/nodeid"
+	"nvpair-shared/nodename"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 	"nvpair-shared/reach"
@@ -52,14 +52,22 @@ type daemon struct {
 	peerServicesEnriching map[string]bool
 	reg                   *registry
 	dir                   *directory
-	responder             *mdns.Responder
-	browser               *Discovery
-	timings               scannerTimings
-	// instance is this node's mDNS instance name (the hostname). It names the
-	// registry-driven self directory entry (publishSelf), which is anchored to
-	// our own identity rather than to hearing our own multicast.
-	instance string
-	http     *http.Client
+	// responder advertises this node under mdnsLabel(hostUUID). Because the
+	// label derives from the host UUID, reloadIdentity replaces it when the UUID
+	// changes; responder, responderCancel and runCtx are therefore guarded by
+	// selfMu once run has started.
+	responder *mdns.Responder
+	// responderCancel stops the running responder (nil before run starts it).
+	responderCancel context.CancelFunc
+	// runCtx is run's context, the parent of every responder's Run.
+	runCtx context.Context
+	// mdnsEnabled and mdnsNamespace record the advertisement configuration so a
+	// replacement responder is built exactly like the first.
+	mdnsEnabled   bool
+	mdnsNamespace noderec.MDNSNamespace
+	browser       *Discovery
+	timings       scannerTimings
+	http          *http.Client
 	// modelsHTTP fetches a peer's /v1/models. It gets a longer timeout than http
 	// (node-info): engine-manager's models sweep is bounded by its own, larger
 	// deadline, so a peer with several engines can legitimately take longer than
@@ -269,13 +277,13 @@ func newDaemon(codec *Codec, mesh *clustertrust.Mesh, clusterDir string, tlsHTTP
 	// evidence arrives.
 	reg := newRegistry(hostUUID, cluUUID, netpick.LocalCandidates(netpick.Evidence{}))
 
-	instance, _ := os.Hostname()
 	d := &daemon{
 		codec:               codec,
 		timings:             timings,
 		mesh:                mesh,
 		reg:                 reg,
-		instance:            instance,
+		mdnsEnabled:         mdnsEnabled,
+		mdnsNamespace:       namespace,
 		baseDir:             baseDir,
 		clusterDir:          clusterDir,
 		dir:                 newDirectory(),
@@ -299,7 +307,7 @@ func newDaemon(codec *Codec, mesh *clustertrust.Mesh, clusterDir string, tlsHTTP
 	// Inference ports (ol/lm) are never probed — they are the promoted proxies
 	// and SYN spam there contributed to accept-queue exhaustion on macOS.
 	//
-	// Key by uuid= (not the mDNS instance name): two hosts sharing a hostname but
+	// Key by uuid= (not the mDNS instance name): two hosts sharing a name but
 	// holding distinct UUIDs must not collapse into one directory entry (matching
 	// cluster-manager's browser). Self re-stamps are handled separately in
 	// reloadIdentity, which moves this node's own directory entry to the new uuid.
@@ -310,24 +318,74 @@ func newDaemon(codec *Codec, mesh *clustertrust.Mesh, clusterDir string, tlsHTTP
 			WithLivenessProbe(func(n RawNode) bool { return d.reachable(n) }),
 			WithKeyFunc(func(n RawNode) string { return UUIDFromTXT(n.TXT) }),
 		)
-		if resp, err := mdns.NewResponder(instance, namespace.Service, namespace.Domain, noderec.SRVPort, reg.txt()); err != nil {
-			slog.Warn("mDNS advertising disabled for _nvpair-node", "err", err)
-		} else {
-			d.responder = resp
-		}
+		d.responder = d.newResponder(hostUUID)
 	}
 	return d
+}
+
+// mdnsLabel is this node's mDNS instance label and SRV/A host label. It derives
+// from the host UUID, never from the OS hostname or the display name: names
+// need not be unique and the responder does no conflict probing, while the UUID
+// is unique and changes only on a re-stamp. The display name travels in name=.
+func mdnsLabel(hostUUID string) string { return "nvpair-" + hostUUID }
+
+// newResponder builds the _nvpair-node responder for hostUUID with the current
+// TXT record, or returns nil (advertising disabled) when it cannot be built.
+func (d *daemon) newResponder(hostUUID string) *mdns.Responder {
+	label := mdnsLabel(hostUUID)
+	resp, err := mdns.NewResponder(label, label, d.mdnsNamespace.Service, d.mdnsNamespace.Domain, noderec.SRVPort, d.reg.txt())
+	if err != nil {
+		slog.Warn("mDNS advertising disabled for _nvpair-node", "hostUuid", hostUUID, "err", err)
+		return nil
+	}
+	return resp
+}
+
+// startResponderLocked runs the current responder under a child of runCtx. It
+// does nothing before run has started or when advertising is disabled. Must be
+// called with selfMu held.
+func (d *daemon) startResponderLocked() {
+	if d.responder == nil || d.runCtx == nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(d.runCtx)
+	d.responderCancel = cancel
+	resp := d.responder
+	go func() {
+		if err := resp.Run(ctx); err != nil {
+			slog.Warn("_nvpair-node responder exited", "err", err)
+		}
+	}()
+}
+
+// replaceResponderLocked stops the current responder (which sends its goodbye)
+// and starts one advertising under hostUUID's label. Must be called with selfMu
+// held.
+func (d *daemon) replaceResponderLocked(hostUUID string) {
+	if d.responderCancel != nil {
+		d.responderCancel()
+		d.responderCancel = nil
+	}
+	d.responder = d.newResponder(hostUUID)
+	d.startResponderLocked()
+}
+
+// announceLocked re-announces the current TXT record. Must be called with
+// selfMu held, which guards the responder against a concurrent replacement.
+func (d *daemon) announceLocked() {
+	if d.responder != nil {
+		d.responder.UpdateTXT(d.reg.txt())
+	}
 }
 
 // run starts the _nvpair-node responder and browser, folding browse events into
 // the directory and emitting discovery:node-* until ctx is cancelled.
 func (d *daemon) run(ctx context.Context) {
-	if d.responder != nil {
-		go func() {
-			if err := d.responder.Run(ctx); err != nil {
-				slog.Warn("_nvpair-node responder exited", "err", err)
-			}
-		}()
+	d.selfMu.Lock()
+	d.runCtx = ctx
+	d.startResponderLocked()
+	d.selfMu.Unlock()
+	if d.mdnsEnabled {
 		// Keep the advertised ip= tracking the host's live network the same way
 		// the responder keeps its A records live (both via netmon).
 		go d.watchAddress(ctx)
@@ -694,14 +752,18 @@ func (d *daemon) reloadIdentity() {
 	if !d.reg.setIdentity(hostUUID, cluUUID, d.localAddresses()) {
 		return
 	}
-	if d.responder != nil {
-		d.responder.UpdateTXT(d.reg.txt())
-	}
 	// A changed hostUuid (fresh-host re-stamp onto the cluster principal) leaves
 	// our old entry under the stale uuid. Drop it (carrying its enrichment cache
 	// onto the new uuid) so no ghost is served, then republish self under the new
-	// identity below.
-	if oldHostUUID != "" && oldHostUUID != hostUUID {
+	// identity below. The mDNS label derives from the uuid, so the responder is
+	// replaced rather than re-announced.
+	uuidChanged := oldHostUUID != "" && oldHostUUID != hostUUID
+	if uuidChanged && d.mdnsEnabled {
+		d.replaceResponderLocked(hostUUID)
+	} else {
+		d.announceLocked()
+	}
+	if uuidChanged {
 		d.dropSelf(oldHostUUID, hostUUID)
 	}
 	d.publishSelfLocked()
@@ -790,9 +852,7 @@ func (d *daemon) refreshAdvertisedAddressesOnce() {
 	}
 	rec := d.reg.record()
 	slog.Info("advertised addresses re-ranked", "ip", rec.IP, "candidates", rec.IPs)
-	if d.responder != nil {
-		d.responder.UpdateTXT(d.reg.txt())
-	}
+	d.announceLocked()
 	d.publishSelfLocked()
 }
 
@@ -855,6 +915,28 @@ func (d *daemon) publishSelf() {
 	d.publishSelfLocked()
 }
 
+// republishSelf re-announces the current TXT record and republishes the self
+// entry, after a service (un)registration.
+func (d *daemon) republishSelf() {
+	d.selfMu.Lock()
+	defer d.selfMu.Unlock()
+	d.announceLocked()
+	d.publishSelfLocked()
+}
+
+// setSelfName adopts this node's display name, as supplied by the broker from
+// the cluster manager (discovery:set-self-name), and re-advertises it when it
+// changed. name has already passed nodename.Normalize.
+func (d *daemon) setSelfName(name string) {
+	d.selfMu.Lock()
+	defer d.selfMu.Unlock()
+	if !d.reg.setName(name) {
+		return
+	}
+	d.announceLocked()
+	d.publishSelfLocked()
+}
+
 // publishSelfLocked is publishSelf's body; the caller must hold selfMu (so a
 // registration burst and a concurrent reloadIdentity can't tear the self entry).
 func (d *daemon) publishSelfLocked() {
@@ -882,7 +964,7 @@ func (d *daemon) publishSelfLocked() {
 	}
 	node := noderec.DirectoryNode{
 		HostUUID:    rec.HostUUID,
-		Name:        d.instance,
+		Name:        rec.Name,
 		IP:          ip,
 		IPs:         ips,
 		ClusterUUID: rec.ClusterUUID,
@@ -1736,13 +1818,10 @@ func (d *daemon) handle(msg *Message) bool {
 			return true
 		}
 		if d.reg.register(p) {
-			if d.responder != nil {
-				d.responder.UpdateTXT(d.reg.txt())
-			}
-			// Reflect the new service set into our own directory entry. Async so a
-			// registration burst at startup can't serialize the read loop behind
-			// the loopback enrichment fetch.
-			go d.publishSelf()
+			// Re-announce and reflect the new service set into our own directory
+			// entry. Async so a registration burst at startup can't serialize the
+			// read loop behind the loopback enrichment fetch.
+			go d.republishSelf()
 		}
 		if msg.IsRequest() {
 			_ = d.codec.Respond(msg.ID, map[string]bool{"ok": true})
@@ -1758,12 +1837,10 @@ func (d *daemon) handle(msg *Message) bool {
 			return true
 		}
 		if d.reg.unregister(p.Service) {
-			if d.responder != nil {
-				d.responder.UpdateTXT(d.reg.txt())
-			}
-			// Drop the service from our own directory entry (e.g. an engine going
-			// away). Self stays present; only its service set shrinks.
-			go d.publishSelf()
+			// Drop the service from our advertisement and our own directory entry
+			// (e.g. an engine going away). Self stays present; only its service
+			// set shrinks.
+			go d.republishSelf()
 		}
 		if msg.IsRequest() {
 			_ = d.codec.Respond(msg.ID, map[string]bool{"ok": true})
@@ -1786,6 +1863,27 @@ func (d *daemon) handle(msg *Message) bool {
 
 	case noderec.MethodReloadIdentity:
 		d.reloadIdentity()
+		if msg.IsRequest() {
+			_ = d.codec.Respond(msg.ID, map[string]bool{"ok": true})
+		}
+		return true
+
+	case noderec.MethodSetSelfName:
+		var p noderec.SetSelfNameParams
+		if err := json.Unmarshal(msg.Params, &p); err != nil {
+			if msg.IsRequest() {
+				_ = d.codec.RespondError(msg.ID, -32602, err.Error())
+			}
+			return true
+		}
+		name, err := nodename.Normalize(p.Name)
+		if err != nil {
+			if msg.IsRequest() {
+				_ = d.codec.RespondError(msg.ID, -32602, err.Error())
+			}
+			return true
+		}
+		d.setSelfName(name)
 		if msg.IsRequest() {
 			_ = d.codec.Respond(msg.ID, map[string]bool{"ok": true})
 		}

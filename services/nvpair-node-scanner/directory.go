@@ -12,14 +12,17 @@ import (
 
 	"nvpair-shared/buildinfo"
 	"nvpair-shared/netpick"
+	"nvpair-shared/nodename"
 	"nvpair-shared/noderec"
 )
 
 // toDirectoryNode converts a browsed _nvpair-node instance into a directory entry
 // — identity + advertised services — without enrichment or liveness (those
 // decorate it later in the daemon). The directory is keyed by hostUuid (the
-// stable identity invite/attribution correlate on); name is the mDNS instance
-// (hostname). trusted is supplied by the caller from the cluster pin set.
+// stable identity invite/attribution correlate on); name is the record's name=
+// display name, validated with nodename.Normalize and empty when missing or
+// invalid. The instance label (nvpair-<uuid>) is a transport name and is never
+// used as a name. trusted is supplied by the caller from the cluster pin set.
 //
 // Addresses are carried through whole rather than reduced to one. The node ranked
 // its own addresses from evidence no observer has — which of its interfaces the
@@ -31,8 +34,8 @@ import (
 // It returns ok=false for a record without a uuid= TXT: a conformant
 // _nvpair-node record always carries one (the daemon stamps it from
 // nodeid.Resolve), so a record without it can't be keyed by a stable identity.
-// We skip it (and warn) rather than key it by the mutable, non-unique hostname —
-// node identity is the UUID everywhere, with no hostname fallback.
+// We skip it (and warn) rather than key it by the instance label — node identity
+// is the UUID everywhere, with no fallback.
 func toDirectoryNode(raw RawNode, trusted bool) (noderec.DirectoryNode, bool) {
 	rec := noderec.ParseTXT(raw.TXT)
 	if rec.HostUUID == "" {
@@ -51,9 +54,15 @@ func toDirectoryNode(raw RawNode, trusted bool) (noderec.DirectoryNode, bool) {
 	for k, port := range rec.Services {
 		svcs[k] = noderec.ServiceStatus{Port: port}
 	}
+	// An invalid name= is dropped rather than shown: the record is
+	// unauthenticated and the name reaches every UI.
+	name, err := nodename.Normalize(rec.Name)
+	if err != nil {
+		name = ""
+	}
 	return noderec.DirectoryNode{
 		HostUUID:    rec.HostUUID,
-		Name:        raw.ID,
+		Name:        name,
 		IP:          ip,
 		IPs:         ips,
 		ClusterUUID: rec.ClusterUUID,
