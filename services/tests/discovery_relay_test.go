@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -28,7 +27,8 @@ import (
 // (distinct from node-info's own transitional _nvpair-node-info advertisement).
 //
 // A private service under local separates the fixture from installed PAIR. The
-// record must also carry the fixture's own node UUID.
+// record must also carry the fixture's own node UUID, and its instance label and
+// SRV host are derived from that UUID (nvpair-<uuid>), never the OS hostname.
 func TestBrokerAdvertisesNodeRecord(t *testing.T) {
 	namespace := newFixtureMDNSNamespace(t)
 	base := t.TempDir()
@@ -49,11 +49,7 @@ func TestBrokerAdvertisesNodeRecord(t *testing.T) {
 		}
 	}()
 
-	host, err := os.Hostname()
-	if err != nil {
-		t.Fatalf("hostname: %v", err)
-	}
-	instance := strings.Trim(host, ".")
+	instance := "nvpair-" + hostUUID
 	wantNodeInfo := "ni=" + strconv.Itoa(ports.nodeInfo)
 
 	// The scanner first announces the base node record, then re-announces after
@@ -61,10 +57,12 @@ func TestBrokerAdvertisesNodeRecord(t *testing.T) {
 	// base record for a moment; wait for the enriched update instead of treating
 	// the first packet as final.
 	var entry []string
+	var srvHost string
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
 		if found := browseForNodeRecord(t, namespace, instance, hostUUID, 2*time.Second); found != nil {
 			entry = found.Text
+			srvHost = found.HostName
 			if slices.Contains(entry, wantNodeInfo) {
 				break
 			}
@@ -72,7 +70,10 @@ func TestBrokerAdvertisesNodeRecord(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	if entry == nil {
-		t.Fatalf("did not discover this fixture's _nvpair-node record (uuid=%s) within timeout", hostUUID)
+		t.Fatalf("did not discover this fixture's _nvpair-node record (instance %s) within timeout", instance)
+	}
+	if want := instance + ".local."; srvHost != want {
+		t.Errorf("_nvpair-node SRV host = %q, want %q", srvHost, want)
 	}
 	if !slices.Contains(entry, wantNodeInfo) {
 		t.Errorf("_nvpair-node TXT missing %s (register->advertise path): %v", wantNodeInfo, entry)

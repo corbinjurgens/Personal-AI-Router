@@ -95,7 +95,8 @@ func TestMDNSEnabledConstructsDiscovery(t *testing.T) {
 	// NewResponder only enumerates interfaces; Run and UpdateTXT send traffic.
 	// Compare availability without starting either discovery component, including
 	// on hosts without multicast-capable interfaces where construction must fail.
-	_, err = mdns.NewResponder(d.instance, d.instance, noderec.ServiceType, noderec.Domain, noderec.SRVPort, d.reg.txt())
+	label := mdnsLabel(d.reg.record().HostUUID)
+	_, err = mdns.NewResponder(label, label, noderec.ServiceType, noderec.Domain, noderec.SRVPort, d.reg.txt())
 	if got, want := d.responder != nil, err == nil; got != want {
 		t.Fatalf("responder constructed = %v, want %v (interface availability: %v)", got, want, err)
 	}
@@ -186,16 +187,17 @@ func TestScannerNamespaceReachesBrowserAndResponder(t *testing.T) {
 			t.Fatalf("browser %s = %q, want %q", field, got, want)
 		}
 	}
+	label := mdnsLabel(d.reg.record().HostUUID)
 	if d.responder == nil {
-		if _, err := mdns.NewResponder(d.instance, d.instance, "_pair-fixture._tcp", noderec.Domain, noderec.SRVPort, nil); err == nil {
+		if _, err := mdns.NewResponder(label, label, "_pair-fixture._tcp", noderec.Domain, noderec.SRVPort, nil); err == nil {
 			t.Fatal("configured responder missing despite available interfaces")
 		}
 		t.Skip("responder construction unavailable without a multicast-capable interface; browser checked")
 	}
 	for field, want := range map[string]string{
 		"serviceName":  "_pair-fixture._tcp.local.",
-		"instanceName": strings.Trim(d.instance, ".") + "._pair-fixture._tcp.local.",
-		"hostName":     strings.Trim(d.instance, ".") + ".local.",
+		"instanceName": label + "._pair-fixture._tcp.local.",
+		"hostName":     label + ".local.",
 	} {
 		if got := reflect.ValueOf(d.responder).Elem().FieldByName(field).String(); got != want {
 			t.Fatalf("responder %s = %q, want %q", field, got, want)

@@ -89,7 +89,7 @@ func TestPeerServicesReconcilesBrowseClaims(t *testing.T) {
 			d, claim := newPeerServicesScanner(t)
 			d.lastActivityAt = make(map[string]time.Time)
 			d.noteActivity("peer", 0)
-			browse := DiscoveryEvent{Type: "discovered", Node: RawNode{ID: "browse-name", Addresses: []string{"192.0.2.90"}, TXT: []string{"uuid=peer", "cluster-uuid=peer", "cl=14444"}}}
+			browse := DiscoveryEvent{Type: "discovered", Node: RawNode{ID: mdnsLabel("peer"), Addresses: []string{"192.0.2.90"}, TXT: []string{"uuid=peer", "cluster-uuid=peer", "name=browse-name", "cl=14444"}}}
 			if browseFirst {
 				d.onBrowse(browse)
 			}
