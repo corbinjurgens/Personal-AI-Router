@@ -94,25 +94,33 @@ The set in `native/PrivilegedHelper/main.swift` must stay in sync with the
 
 ## Security
 
-Code-signing requirements are pinned (constants in `HelperProtocol.swift`, Team
-ID `6KR3T733EC`). Each shares a common `developerIdAnchor`: `anchor apple
-generic` **plus** the Developer ID intermediate marker
-(`certificate 1[field.1.2.840.113635.100.6.2.6]`), the Developer ID Application
-leaf marker (`certificate leaf[field.1.2.840.113635.100.6.1.13]`), and the Team
-ID OU. Pinning the Developer ID markers (not just `anchor apple generic` + OU)
-prevents any Apple-anchored cert under the same Team ID from satisfying the
-requirement.
+Code-signing requirements are pinned to one signer, chosen at build time (see
+[Signer configuration](#signer-configuration)). `scripts/build/macos/helper-signing.ts`
+composes every requirement string and `build-helper.ts` compiles them into both
+binaries as the generated `HelperSigning.swift` extension of `HelperConstants`.
+Each shares a common anchor: `anchor apple generic` **plus** the signing class's
+intermediate marker (`certificate 1[field.<oid>] exists`), its leaf marker
+(`certificate leaf[field.<oid>] exists`), and the leaf's Team ID OU. Pinning the
+class markers (not just `anchor apple generic` + OU) prevents any other
+Apple-anchored cert under the same Team ID from satisfying the requirement.
+
+| Signing class            | Intermediate marker                          | Leaf marker                                            |
+| ------------------------ | -------------------------------------------- | ------------------------------------------------------ |
+| `developer-id` (default) | `1.2.840.113635.100.6.2.6` (Developer ID CA) | `1.2.840.113635.100.6.1.13` (Developer ID Application) |
+| `apple-development`      | `1.2.840.113635.100.6.2.1` (WWDR CA)         | `1.2.840.113635.100.6.1.12` (Mac Development)          |
 
 - **`ctlCodeSigningRequirement`** — `identifier "nvpair-helper-ctl" and
-<developerIdAnchor>`. The daemon pins this on every **inbound** XPC connection
+<anchor>`. The daemon pins this on every **inbound** XPC connection
   (`setCodeSigningRequirement`), so only the control tool — pinned by signing
   identifier, not merely Team ID — can drive privileged ops.
 - **`daemonCodeSigningRequirement`** — `identifier "com.nvidia.nvpair.helper" and
-<developerIdAnchor>`. The control tool pins this on its **outbound** connection
+<anchor>`. The control tool pins this on its **outbound** connection
   so a hijacked Mach service name cannot answer.
 - **`appCodeSigningRequirement`** — `identifier
-"com.nvidia.nvpair" and <developerIdAnchor>`, used to
+"com.nvidia.nvpair" and <anchor>`, used to
   re-verify the target bundle.
+- **`signedBinaryRequirement`** — `<anchor>` alone, used to re-verify each
+  `cli-bin` executable before `socketfilterfw`.
 
 **Confused-deputy fix.** The daemon no longer trusts an `--app-path` argument.
 It derives the target bundle from the **verified identity of the connecting
@@ -128,21 +136,68 @@ re-validates the derived bundle: reject path traversal, reject a symlinked
 world-writable ancestor directories, and verify the bundle signature
 against `appCodeSigningRequirement`. Immediately before each `socketfilterfw`
 invocation it re-opens the individual binary with `O_NOFOLLOW` and re-verifies
-that binary's own NVIDIA signature, and it now **fails** (rather than ignoring)
+that binary's own signature against `signedBinaryRequirement`, and it now **fails** (rather than ignoring)
 any non-zero `socketfilterfw` exit.
 
 ## Build & signing
 
 - `scripts/build/macos/build-helper.ts` compiles both binaries with `swiftc` via
   `xcrun` for `arm64` + `x86_64`, then `lipo`s them into universal Mach-Os under
-  `native/build/`. It also generates `HelperVersion.swift` from `package.json`.
-  Wired as a `prebuild` for `build:electron:mac:{x64,arm64}` in `package.json`.
+  `native/build/`. It also generates `HelperVersion.swift` from `package.json`
+  and `HelperSigning.swift` plus `helper-signing.json` from the signer
+  configuration. Run by `build:electron:mac:{x64,arm64}` in `package.json` before
+  electron-builder.
 - `electron-builder.config.ts` bundles the binaries + plist via `mac.extraFiles`.
 - Official (signed) builds sign each helper binary individually with hardened
   runtime **before** the app, alongside the modular binaries. The public build
   is unsigned.
 - macOS packaging requires `swiftc`; build environments should verify it with
   `xcrun --find swiftc`.
+
+### Signer configuration
+
+The signer the helper trusts is a build input. Set both variables or neither:
+
+| Variable                 | Value                                    | Unset          |
+| ------------------------ | ---------------------------------------- | -------------- |
+| `PAIR_MAC_SIGNING_TEAM`  | 10-character Team ID of the signing cert | `6KR3T733EC`   |
+| `PAIR_MAC_SIGNING_CLASS` | `developer-id` or `apple-development`    | `developer-id` |
+
+Unset, the requirement strings are NVIDIA's Developer ID ones. A helper built
+for one signer rejects code signed by any other team or class, so the app must
+be signed by exactly the identity the build was configured for.
+
+### Local signing (personal builds)
+
+A personal build signed with the developer's own Apple Development identity
+(no hardened runtime, entitlements or notarization; for the developer's own
+machines only):
+
+```bash
+cd desktop
+export PAIR_MAC_SIGNING_TEAM=<team id> PAIR_MAC_SIGNING_CLASS=apple-development
+npm run build && npm run build:electron:mac:arm64
+ditto "release/<version>/mac/mac-arm64/NVIDIA PAIR.app" "<scratch>/NVIDIA PAIR.app"
+npm run sign:mac:local -- --identity <SHA-1 or common name> "<scratch>/NVIDIA PAIR.app"
+```
+
+`scripts/build/macos/sign-local.ts` signs an **unsigned** copy packaged from
+the same build (it refuses when the app's helper binaries differ from
+`native/build/`, or when any `cli-bin` file or the set of files differs from
+`cli-bin/manifest.json`). It reads the identity's Team ID from its certificate and
+refuses when the team or certificate class differs from `helper-signing.json`.
+It signs inside out without `--deep` on the outer bundle: each
+`Contents/Frameworks` entry, every Mach-O under `Contents/Resources` (then
+re-records the signed sizes and hashes in `cli-bin/manifest.json`), the daemon
+and control tool with explicit `--identifier com.nvidia.nvpair.helper` /
+`nvpair-helper-ctl`, then the bundle. Explicit identifiers matter: codesign's
+default identifier strips a dotted "extension" from the file name, so the
+daemon would otherwise be signed as `com.nvidia.nvpair` and fail its pin.
+Finally it runs `codesign --verify --deep --strict --all-architectures` and
+checks the control tool, daemon, app and every `cli-bin` binary against the
+requirement strings, and confirms the packaged daemon and control tool contain
+each of those strings. Identity hashes are never printed; codesign output is
+redacted of 40-hex runs, but may still include the certificate's common name.
 
 ## Uninstall
 

@@ -16,7 +16,7 @@ enum FirewallError: Error, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidAppPath(let p): return "Invalid application path: \(p)"
-        case .untrustedAppPath(let p): return "Application is not signed by NVIDIA: \(p)"
+        case .untrustedAppPath(let p): return "Application does not satisfy the pinned code-signing requirement: \(p)"
         case .socketfilterfwMissing: return "Application Firewall tool is unavailable"
         case .socketfilterfwFailed(let op, let code):
             return "socketfilterfw \(op) failed with status \(code)"
@@ -82,13 +82,13 @@ enum Firewall {
                 // binary. TOCTOU guard: re-check identity of this object
                 // immediately before socketfilterfw. Reject symlinks (so a
                 // swapped link cannot redirect the firewall to an attacker
-                // binary), re-verify the binary's own NVIDIA signature, and fail
-                // hard on any non-zero socketfilterfw exit.
+                // binary), re-verify the binary's own signature against the
+                // pinned signer, and fail hard on any non-zero socketfilterfw exit.
                 try assertRealFile(binPath)
                 guard
                     verifySignature(
                         path: binPath,
-                        requirement: HelperConstants.nvidiaSignedRequirement
+                        requirement: HelperConstants.signedBinaryRequirement
                     )
                 else {
                     throw FirewallError.untrustedAppPath(binPath)
@@ -135,7 +135,7 @@ enum Firewall {
     }
 
     /// Validate that `appPath` (already derived from the *verified* connecting
-    /// process, never from caller argv) is the canonical, NVIDIA-signed host
+    /// process, never from caller argv) is the canonical host
     /// bundle and return its cli-bin directory. Defense in depth on top of the
     /// caller-identity check: reject traversal, reject a symlinked `.app` /
     /// `cli-bin` (open the final component with `O_NOFOLLOW`), reject
@@ -208,7 +208,7 @@ enum Firewall {
 /// Resolve the filesystem path of the current XPC peer from its *verified* code
 /// identity, then derive the host `.app` bundle from it. Because the daemon acts
 /// only on the connecting process's own bundle, a caller can never point it at an
-/// arbitrary NVIDIA-signed app (the confused-deputy the `--app-path` argv enabled).
+/// arbitrary app signed by the pinned signer (the confused-deputy the `--app-path` argv enabled).
 func callerAppBundlePath() throws -> String {
     guard let connection = NSXPCConnection.current() else {
         throw FirewallError.untrustedCaller("no XPC peer")
@@ -220,11 +220,11 @@ func callerAppBundlePath() throws -> String {
     // PID path. The PID-reuse window is not exploitable here because:
     //   1. The listener already pins the connection with
     //      `setCodeSigningRequirement(ctlCodeSigningRequirement)` (macOS 13's
-    //      Apple-recommended client validation), so only the NVIDIA-signed
+    //      Apple-recommended client validation), so only the pinned
     //      control tool can open this connection at all; and
     //   2. `SecCodeCheckValidity` below re-validates whatever process the PID
     //      currently maps to against the same pinned requirement, rejecting any
-    //      non-NVIDIA process that might have reused the PID.
+    //      process not signed by the pinned signer that might have reused the PID.
     let attributes = [kSecGuestAttributePid: NSNumber(value: connection.processIdentifier)]
         as CFDictionary
     var code: SecCode?
@@ -342,7 +342,7 @@ final class ListenerDelegate: NSObject, NSXPCListenerDelegate {
         _ listener: NSXPCListener,
         shouldAcceptNewConnection newConnection: NSXPCConnection
     ) -> Bool {
-        // Only the NVIDIA-signed control tool may drive privileged operations
+        // Only the control tool signed by this build's signer may drive privileged operations
         // (pinned by signing identifier, not just Team ID). The connection
         // rejects messages from peers that fail this requirement.
         newConnection.setCodeSigningRequirement(HelperConstants.ctlCodeSigningRequirement)
