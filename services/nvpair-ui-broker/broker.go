@@ -1015,12 +1015,65 @@ type nodeNameIdentity struct {
 }
 
 // recordSelfName caches this node's UUID and name as the cluster manager
-// reported them.
+// reported them, and hands them to the discovery store, which shows this node
+// with that name.
 func (b *Broker) recordSelfName(id nodeNameIdentity) {
 	b.selfNameMu.Lock()
 	b.selfNodeUUID = id.NodeUUID
 	b.selfNodeName = id.Name
 	b.selfNameMu.Unlock()
+	if b.store != nil {
+		b.store.SetSelf(id.NodeUUID, id.Name)
+	}
+}
+
+// clusterNodesPayload is the part of the nodes:get-initial result and the
+// nodes:changed params the discovery store needs: each member's UUID and the
+// display name the cluster manager decided for it.
+type clusterNodesPayload struct {
+	Nodes []struct {
+		NodeUUID    string `json:"nodeUuid"`
+		DisplayName string `json:"displayName"`
+		State       string `json:"state"`
+	} `json:"nodes"`
+}
+
+// applyMemberNames feeds the members' display names from a nodes:get-initial
+// result or nodes:changed params into the discovery store. Pending invitees
+// are not members and keep their discovery name.
+func (b *Broker) applyMemberNames(raw json.RawMessage) {
+	if b.store == nil {
+		return
+	}
+	var payload clusterNodesPayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		slog.Warn("cluster nodes payload undecodable; member names not updated", "err", err)
+		return
+	}
+	names := make(map[string]string, len(payload.Nodes))
+	for _, node := range payload.Nodes {
+		if node.State == "member" && node.NodeUUID != "" && node.DisplayName != "" {
+			names[node.NodeUUID] = node.DisplayName
+		}
+	}
+	b.store.SetMemberNames(names)
+}
+
+// refreshMemberNames reads nodes:get-initial from a freshly spawned cluster
+// manager, so member names are current before its first nodes:changed.
+func (b *Broker) refreshMemberNames() {
+	cm := b.getClusterMgr()
+	if cm == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	result, rpcErr, err := cm.Call(ctx, "nodes:get-initial", nil)
+	if err != nil || rpcErr != nil {
+		slog.Warn("member names unavailable from cluster-manager", "err", err, "rpcError", rpcErr != nil)
+		return
+	}
+	b.applyMemberNames(result)
 }
 
 // pushSelfName sends the cached name to the current scanner with
@@ -2444,6 +2497,9 @@ func (b *Broker) forwardClusterManagerNotification(method string, params json.Ra
 	}
 	if method == "cluster:identity-changed" || method == "cluster:trust-changed" || method == "nodes:changed" {
 		b.peerSizing.signal()
+	}
+	if method == "nodes:changed" {
+		b.applyMemberNames(params)
 	}
 	if err := b.codec.Notify(method, params); err != nil {
 		slog.Warn("forward cluster-manager notification failed", "method", method, "err", err)

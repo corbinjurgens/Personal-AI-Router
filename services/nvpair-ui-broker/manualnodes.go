@@ -78,6 +78,7 @@ func manualToEnriched(s manualNodeStatus) EnrichedNode {
 		ServiceBuildID: s.ServiceBuildID,
 		ID:             s.ID,
 		HostUUID:       hostUUID,
+		Name:           s.ID,
 		Host:           s.Address,
 		Port:           s.NodeInfoPort,
 		GPUs:           s.GPUs,

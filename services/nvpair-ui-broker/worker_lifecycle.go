@@ -647,6 +647,8 @@ func (b *Broker) spawnClusterManager() (supervisedHandle, error) {
 	// scanner spawns first and mints its own node-id before cluster-manager
 	// writes identity.json, so on a fresh host its uuid= can start out diverged.
 	go b.convergeScannerIdentity()
+	// Seed member display names for the discovery projection.
+	go b.refreshMemberNames()
 	slog.Info("cluster-manager started", "path", b.clusterMgrPath, "pid", cm.cmd.Process.Pid)
 	return cm, nil
 }

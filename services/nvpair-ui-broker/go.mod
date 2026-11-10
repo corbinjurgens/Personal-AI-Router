@@ -12,4 +12,5 @@ replace nvpair-shared => ../shared
 require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/hashicorp/yamux v0.1.2 // indirect
+	golang.org/x/text v0.41.0 // indirect
 )

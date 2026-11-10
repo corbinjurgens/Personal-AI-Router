@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"os/exec"
 	"sort"
 	"strconv"
@@ -21,6 +22,7 @@ import (
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/modeldownload"
 	"nvpair-shared/netpick"
+	"nvpair-shared/nodename"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 
@@ -42,13 +44,14 @@ type (
 type EnrichedNode struct {
 	ServiceBuildID buildinfo.ID `json:"serviceBuildId,omitempty"`
 	ID             string       `json:"id"`
-	// HostUUID is the node's stable per-host identity (the daemon's uuid= TXT).
-	// It's the discovery-store key, so a PC rename — which changes the hostname
-	// (ID) but not the UUID — updates the existing entry in place instead of
-	// leaving a ghost under the old name. It stays off the wire; the
-	// client-facing id/name remain the hostname. Empty for manual nodes, which
-	// fall back to keying by their own ID.
-	HostUUID  string      `json:"-"`
+	// HostUUID is the node's stable per-host identity (the daemon's uuid= TXT)
+	// and the discovery-store key. A manual node carries its manual id here
+	// until its node-info probe reports the real UUID.
+	HostUUID string `json:"-"`
+	// Name is the source's own name for the node: the scanner directory's
+	// validated mDNS name= (empty when none), or a manual node's user-entered
+	// id. It is one input to the shown name, which the store decides.
+	Name      string      `json:"name"`
 	Host      string      `json:"host"`
 	Port      int         `json:"port"`
 	Addresses []string    `json:"addresses"`
@@ -90,8 +93,8 @@ type EnrichedNode struct {
 // directoryToEnriched projects the promoted daemon's DirectoryNode onto the
 // broker's EnrichedNode so the client-facing store (which already merges manual
 // nodes and serves discovery:get-nodes) can be fed by the new pipeline. ID is
-// the mDNS instance name (hostname), matching the legacy node/* key so the two
-// feeds dedup during the migration; Port is the node-info port.
+// the node UUID, Name the directory's name= (possibly empty), Host the primary
+// address (as for manual nodes); Port is the node-info port.
 //
 // The node's whole ranked address list travels through, both as Addresses and as
 // the ip= / ips= TXT the netpick projection reads, so its own order survives to
@@ -111,9 +114,10 @@ func directoryToEnriched(n noderec.DirectoryNode) EnrichedNode {
 	}
 	return EnrichedNode{
 		ServiceBuildID:       n.ServiceBuildID,
-		ID:                   n.Name,
+		ID:                   n.HostUUID,
 		HostUUID:             n.HostUUID,
-		Host:                 n.Name,
+		Name:                 n.Name,
+		Host:                 n.IP,
 		Port:                 port,
 		Addresses:            addrs,
 		TXT:                  txt,
@@ -132,12 +136,11 @@ func directoryToEnriched(n noderec.DirectoryNode) EnrichedNode {
 	}
 }
 
-// storeKey is the discovery-store key for a node: its stable host UUID. Every
-// node carries one by the time it reaches the store — a real UUID for mDNS and
-// manual nodes alike (manual nodes learn theirs from the peer's node-info),
-// computed at each ingestion boundary — so keying is uniform and a hostname
-// change never duplicates or splits an entry. No id fallback: an empty
-// key is rejected by Upsert rather than silently keyed by name.
+// storeKey is the discovery-store key for a node: its HostUUID. A scanner node
+// always has its real UUID; a manual node carries its manual id until its
+// node-info probe reports the real UUID (manualToEnriched sets that at the
+// manual ingestion boundary), after which it collapses onto any scanner entry
+// for the same machine. An empty key is rejected by Upsert.
 func (n EnrichedNode) storeKey() string {
 	return n.HostUUID
 }
@@ -215,8 +218,15 @@ func (sn storedNode) hasSource(source nodeSource) bool {
 // single-threaded scanner-event reader, that ordering already holds at
 // the call site.
 type discoveryStore struct {
-	mu       sync.RWMutex
-	nodes    map[string]storedNode
+	mu    sync.RWMutex
+	nodes map[string]storedNode
+	// memberNames maps each cluster member's UUID to the display name the
+	// cluster manager decided for it (nickname, else the member's own name).
+	memberNames map[string]string
+	// selfUUID and selfName are this node's identity and name as the cluster
+	// manager reports them.
+	selfUUID string
+	selfName string
 	onChange func()
 }
 
@@ -233,6 +243,66 @@ func (s *discoveryStore) SetOnChange(fn func()) {
 	s.mu.Lock()
 	s.onChange = fn
 	s.mu.Unlock()
+}
+
+// SetMemberNames replaces the cluster members' display names, keyed by node
+// UUID, and republishes when they changed.
+func (s *discoveryStore) SetMemberNames(names map[string]string) {
+	s.mu.Lock()
+	if maps.Equal(s.memberNames, names) {
+		s.mu.Unlock()
+		return
+	}
+	s.memberNames = names
+	cb := s.onChange
+	s.mu.Unlock()
+	if cb != nil {
+		cb()
+	}
+}
+
+// SetSelf records this node's UUID and name and republishes when they changed.
+func (s *discoveryStore) SetSelf(uuid, name string) {
+	s.mu.Lock()
+	if s.selfUUID == uuid && s.selfName == name {
+		s.mu.Unlock()
+		return
+	}
+	s.selfUUID, s.selfName = uuid, name
+	cb := s.onChange
+	s.mu.Unlock()
+	if cb != nil {
+		cb()
+	}
+}
+
+// displayNameLocked is the one name a node is shown with: the cluster
+// manager's display name for a member; else this node's own name for self;
+// else the source's name (mDNS name= or a manual node's user-entered id); else
+// PAIR <short UUID>. The caller holds s.mu.
+func (s *discoveryStore) displayNameLocked(key string, n EnrichedNode) string {
+	if name := s.memberNames[key]; name != "" {
+		return name
+	}
+	if key == s.selfUUID && s.selfName != "" {
+		return s.selfName
+	}
+	if n.Name != "" {
+		return n.Name
+	}
+	return nodename.Fallback(key)
+}
+
+// DisplayName returns the name the node stored under key is shown with, or ""
+// when the store does not hold it.
+func (s *discoveryStore) DisplayName(key string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	sn, ok := s.nodes[key]
+	if !ok {
+		return ""
+	}
+	return s.displayNameLocked(key, sn.projected())
 }
 
 // Upsert records one source's view of a node (node/discovered or node/updated).
@@ -308,18 +378,23 @@ func (s *discoveryStore) Remove(key string, source nodeSource) bool {
 }
 
 // Snapshot returns the narrow wire-format view used by
-// discovery:get-nodes and discovery:nodes-changed, sorted by id for
-// stable rendering. The rich EnrichedNode payload stays in the store
+// discovery:get-nodes and discovery:nodes-changed, sorted by shown name, then
+// UUID, for stable rendering. The rich EnrichedNode payload stays in the store
 // for future RPCs; only the fields the external schema requires are
 // projected out here.
 func (s *discoveryStore) Snapshot() []AvailableNode {
 	s.mu.RLock()
 	out := make([]AvailableNode, 0, len(s.nodes))
-	for _, sn := range s.nodes {
-		out = append(out, sn.toAvailable())
+	for key, sn := range s.nodes {
+		out = append(out, sn.toAvailable(s.displayNameLocked(key, sn.projected())))
 	}
 	s.mu.RUnlock()
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name != out[j].Name {
+			return out[i].Name < out[j].Name
+		}
+		return out[i].HostUUID < out[j].HostUUID
+	})
 	return out
 }
 
@@ -335,16 +410,17 @@ func discoveryNotificationNodes(nodes []AvailableNode) []AvailableNode {
 	return nodes
 }
 
-// toAvailable projects a storedNode onto the wire format. Name currently mirrors
-// ID (the mDNS instance name is already human-readable for our use case); lastSeen
-// is emitted as Unix seconds to match the external schema's "number of seconds"
+// toAvailable projects a storedNode onto the wire format with the shown name
+// the store decided. ID is the node UUID for a scanner node and the manual id
+// for a node only a manual entry claims; lastSeen is emitted
+// as Unix seconds to match the external schema's "number of seconds"
 // expectation.
 //
 // Addresses are carried through as a ranked list with the canonical one first,
 // rather than collapsed to a single preferred IP. The node ranked them from
 // evidence no observer has, and a client that must connect needs somewhere to go
 // when the first address turns out to be a link only one other machine can reach.
-func (sn storedNode) toAvailable() AvailableNode {
+func (sn storedNode) toAvailable(name string) AvailableNode {
 	n := sn.projected()
 	state, current := cloneDownloadObservation(n.DownloadState, n.DownloadStateCurrent)
 	candidates := netpick.Candidates(n.TXT, n.Addresses)
@@ -360,7 +436,7 @@ func (sn storedNode) toAvailable() AvailableNode {
 	return AvailableNode{
 		ServiceBuildID:       n.ServiceBuildID,
 		ID:                   n.ID,
-		Name:                 n.ID,
+		Name:                 name,
 		HostUUID:             n.HostUUID,
 		IPAddress:            primary,
 		IPAddresses:          candidates,
@@ -723,8 +799,10 @@ func (s *scannerProcess) handleNotify(method string, params json.RawMessage) {
 				// present, so we must not fail its jobs. Identify the departed
 				// node by HostUUID, the value workloads are stamped/keyed with,
 				// not the display hostname.
-				if s.store.Remove(directoryToEnriched(ev.Node).storeKey(), sourceScanner) && s.onNodeLost != nil {
-					s.onNodeLost(ev.Node.HostUUID, ev.Node.Name)
+				key := directoryToEnriched(ev.Node).storeKey()
+				name := s.store.DisplayName(key)
+				if s.store.Remove(key, sourceScanner) && s.onNodeLost != nil {
+					s.onNodeLost(ev.Node.HostUUID, name)
 				}
 			} else {
 				s.store.Upsert(directoryToEnriched(ev.Node), sourceScanner)
