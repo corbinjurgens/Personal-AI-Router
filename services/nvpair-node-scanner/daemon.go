@@ -310,7 +310,7 @@ func newDaemon(codec *Codec, mesh *clustertrust.Mesh, clusterDir string, tlsHTTP
 			WithLivenessProbe(func(n RawNode) bool { return d.reachable(n) }),
 			WithKeyFunc(func(n RawNode) string { return UUIDFromTXT(n.TXT) }),
 		)
-		if resp, err := mdns.NewResponder(instance, namespace.Service, namespace.Domain, noderec.SRVPort, reg.txt()); err != nil {
+		if resp, err := mdns.NewResponder(instance, instance, namespace.Service, namespace.Domain, noderec.SRVPort, reg.txt()); err != nil {
 			slog.Warn("mDNS advertising disabled for _nvpair-node", "err", err)
 		} else {
 			d.responder = resp
