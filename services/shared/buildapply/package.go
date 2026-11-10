@@ -68,7 +68,11 @@ func inspectPackage(ctx context.Context, path, platform, arch string, limits pac
 	if !ok || (arch != "amd64" && arch != "arm64") {
 		return nil, errors.New("unsupported package platform or architecture")
 	}
-	root, err := OpenRealRoot(path)
+	real, err := resolveRoot(path)
+	if err != nil {
+		return nil, err
+	}
+	root, err := OpenRealRoot(real)
 	if err != nil {
 		return nil, err
 	}
