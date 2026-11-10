@@ -204,13 +204,13 @@ describe('node name modal', () => {
 
     it('shows the service error and stays open', async () => {
         setNodeName.mockRejectedValue(
-            new ServiceCallError('name must be at most 63 characters', -32602)
+            new ServiceCallError('node name is longer than 128 bytes', -32602)
         )
         await renderModal(null)
-        await typeName('x'.repeat(80))
+        await typeName('x'.repeat(200))
         await click('Save')
         expect(document.querySelector('[role="alert"]')?.textContent).toBe(
-            'name must be at most 63 characters'
+            'node name is longer than 128 bytes'
         )
         expect(onClose).not.toHaveBeenCalled()
     })
@@ -336,13 +336,13 @@ describe('node name modal for a peer', () => {
     it('shows a validation message from the target and keeps Save', async () => {
         getRemoteManagementForNode.mockResolvedValue(capability('allowed'))
         setPeerName.mockRejectedValue(
-            new ServiceCallError('name must be at most 63 characters', -32602)
+            new ServiceCallError('node name is longer than 128 bytes', -32602)
         )
         await renderPeerModal()
-        await typeName('x'.repeat(80))
+        await typeName('x'.repeat(200))
         await click('Save')
         expect(document.querySelector('[role="alert"]')?.textContent).toBe(
-            'name must be at most 63 characters'
+            'node name is longer than 128 bytes'
         )
         expect(button('Save')).toBeDefined()
     })

@@ -126,14 +126,14 @@ describe('this node name state', () => {
     it('keeps the old name and exposes the service message on failure', async () => {
         await store().initialize(snapshot('Studio', 'Studio'))
         setNodeName.mockRejectedValue(
-            new ServiceCallError('name must be at most 63 characters', -32602)
+            new ServiceCallError('node name is longer than 128 bytes', -32602)
         )
-        await store().setSelfName('x'.repeat(80))
+        await store().setSelfName('x'.repeat(200))
         expect(store().selfName).toBe('Studio')
         expect(store().selfCustomName).toBe('Studio')
         expect(store().nameChange).toEqual({
             phase: 'error',
-            message: 'name must be at most 63 characters'
+            message: 'node name is longer than 128 bytes'
         })
     })
 
@@ -207,11 +207,13 @@ describe('peer name and nickname state', () => {
     })
 
     it('exposes a validation message without marking a denial', async () => {
-        setPeerName.mockRejectedValue(new ServiceCallError('name is too long', -32602))
+        setPeerName.mockRejectedValue(
+            new ServiceCallError('node name is longer than 128 bytes', -32602)
+        )
         await store().setPeerName('peer', 'x'.repeat(200))
         expect(store().peerNameChanges.peer).toEqual({
             phase: 'error',
-            message: 'name is too long',
+            message: 'node name is longer than 128 bytes',
             denied: false
         })
     })
