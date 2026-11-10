@@ -49,6 +49,7 @@ func newClusterPeerFixture(t *testing.T, blocked bool) *clusterPeerFixture {
 		}
 		f.m.handleRoster(w, r)
 	})
+	mux.HandleFunc(peerNodeNamePath, f.m.handlePeerNodeName)
 	mux.HandleFunc(membersRemovePath, func(w http.ResponseWriter, r *http.Request) {
 		f.removes.Add(1)
 		f.m.handleMembersRemove(w, r)

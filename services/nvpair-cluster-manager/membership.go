@@ -278,6 +278,24 @@ func (m *Manager) updateMemberIdentity(uuid, name string) bool {
 	return true
 }
 
+// setMemberNickname sets (or clears, with "") the local nickname of a member in
+// state member. It returns a copy with DisplayName filled as snapshotNodes
+// does, whether the member was found, and whether the nickname changed.
+// Callers persist and emit nodes:changed when it changed.
+func (m *Manager) setMemberNickname(uuid, nickname string) (member ClusterNode, found, changed bool) {
+	m.memMu.Lock()
+	defer m.memMu.Unlock()
+	n, ok := m.members[uuid]
+	if !ok || n.State != stateMember {
+		return ClusterNode{}, false, false
+	}
+	changed = n.Nickname != nickname
+	n.Nickname = nickname
+	cp := cloneClusterNode(n)
+	cp.DisplayName = memberDisplayName(cp)
+	return *cp, true, changed
+}
+
 // refreshSelfMemberIdentity updates this node's own member record (if it is
 // clustered) to the current effective name after a restart, so a changed
 // generated default doesn't leave a stale self entry in the roster. Persists
