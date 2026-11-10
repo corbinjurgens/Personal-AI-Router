@@ -80,8 +80,8 @@ func TestMergeKeepsOfflineMembersListed(t *testing.T) {
 				LastSeen: seenAgo(2 * time.Second)},
 		},
 		members: []clusterNode{
-			{NodeUUID: "up", Name: "up-host", State: "joined"},
-			{NodeUUID: "gone", Name: "gone-host", State: "joined", IPAddress: "10.0.0.9"},
+			{NodeUUID: "up", Name: "up-host", DisplayName: "up-host", State: "joined"},
+			{NodeUUID: "gone", Name: "gone-host", DisplayName: "gone-host", State: "joined", IPAddress: "10.0.0.9"},
 		},
 	})
 
@@ -164,7 +164,7 @@ func TestMergeDeduplicatesAcrossFeeds(t *testing.T) {
 			Trusted:   true,
 			Models:    []string{"llama3.2", "qwen3"},
 		}},
-		members: []clusterNode{{NodeUUID: "u1", Name: "host", State: "joined"}},
+		members: []clusterNode{{NodeUUID: "u1", Name: "host", DisplayName: "host", State: "joined"}},
 		manual:  []manualNode{{ID: "m1", Address: "10.0.0.5", NodeInfoUp: true}},
 	})
 
@@ -402,7 +402,7 @@ func TestMergeSortsOnlineBeforeOffline(t *testing.T) {
 			{HostUUID: "z", Name: "zzz", IPAddress: "10.0.0.2", Port: 14318,
 				LastSeen: seenAgo(time.Second)},
 		},
-		members: []clusterNode{{ID: "a", NodeUUID: "a", Name: "aaa", State: "joined"}},
+		members: []clusterNode{{NodeUUID: "a", Name: "aaa", DisplayName: "aaa", State: "joined"}},
 	})
 
 	if rows[0].name != "zzz" {

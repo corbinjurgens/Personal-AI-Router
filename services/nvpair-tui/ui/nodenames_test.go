@@ -43,9 +43,9 @@ func TestNamerResolvesFromDiscovery(t *testing.T) {
 // but absent from the current discovery snapshot.
 func TestNamerResolvesFromMembership(t *testing.T) {
 	n := newNodeNamer()
-	n.learnMembers([]clusterNode{{NodeUUID: sampleNodeUUID, Name: "peer-a"}})
-	if got := n.name(sampleNodeUUID); got != "peer-a" {
-		t.Errorf("name = %q, want the member name", got)
+	n.learnMembers([]clusterNode{{NodeUUID: sampleNodeUUID, Name: "peer-a", DisplayName: "My Peer"}})
+	if got := n.name(sampleNodeUUID); got != "My Peer" {
+		t.Errorf("name = %q, want the member display name", got)
 	}
 }
 
@@ -107,11 +107,11 @@ func TestNamerSelf(t *testing.T) {
 	if got := n.name(sampleNodeUUID); got != "this-host" {
 		t.Errorf("self name = %q", got)
 	}
-	// Falls back to nodeId when the manager reports no friendly name.
+	// No hostname fallback: an unnamed self reads as its short UUID.
 	n2 := newNodeNamer()
-	n2.setSelf(clusterIdentity{NodeUUID: "u", NodeID: "host-b"})
-	if got := n2.name("u"); got != "host-b" {
-		t.Errorf("name = %q, want the nodeId fallback", got)
+	n2.setSelf(clusterIdentity{NodeUUID: sampleNodeUUID})
+	if got := n2.name(sampleNodeUUID); got != truncate(sampleNodeUUID, shortNodeIDLen) {
+		t.Errorf("name = %q, want the short UUID", got)
 	}
 }
 

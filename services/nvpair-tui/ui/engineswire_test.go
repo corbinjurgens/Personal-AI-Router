@@ -633,7 +633,7 @@ func TestTerminalControlsPolicyRouteLoss(t *testing.T) {
 func TestTerminalControlsLocalPauseProvenance(t *testing.T) {
 	client, broker := nodeInfoRPCFixture(t)
 	_, msg := terminalControlsReply(t, broker, policyGetCmd(client), &rpc.Message{Result: []byte(`{"availability":"paused","policy":{"pausedBy":"local"}}`)})
-	a := availabilityState{selfID: "me"}
+	a := availabilityState{selfUUID: "me"}
 	a.update(msg)
 	if a.label() != "Paused (local)" {
 		t.Fatalf("label = %q", a.label())

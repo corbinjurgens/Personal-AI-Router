@@ -183,7 +183,7 @@ func TestLocalManagementSelectionFollowsPeer(t *testing.T) {
 func TestLocalManagementStatesAndLocalDirection(t *testing.T) {
 	v := newNodesView(nil)
 	v.SetSize(180, 35)
-	v.feeds.members = []clusterNode{{NodeUUID: "peer", Name: "Workstation", State: "member"}}
+	v.feeds.members = []clusterNode{{NodeUUID: "peer", Name: "Workstation", DisplayName: "Workstation", State: "member"}}
 	v.rebuild()
 	v.grantsOpen = true
 	for _, tc := range []struct {

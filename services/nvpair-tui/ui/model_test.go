@@ -172,7 +172,7 @@ func TestSessionReadyRebootstrapsExistingViewsOnce(t *testing.T) {
 	nodes.filter = "keep-filter"
 	nodes.mode = nodesInputManualAddress
 	nodes.input.SetValue("unsent-address")
-	nodes.feeds.members = []clusterNode{{ID: "removed", NodeUUID: "removed", Name: "keep-filter-old"}}
+	nodes.feeds.members = []clusterNode{{NodeUUID: "removed", Name: "keep-filter-old", DisplayName: "keep-filter-old"}}
 	nodes.rebuild()
 	if len(nodes.rows) != 1 {
 		t.Fatal("old Nodes fixture did not contain its removable row")
@@ -200,7 +200,7 @@ func TestSessionReadyRebootstrapsExistingViewsOnce(t *testing.T) {
 	f.serve(t, map[string]json.RawMessage{
 		"workloads:get-initial": json.RawMessage(`{"workloads":[{"id":"fresh","originatedFrom":"new","state":"running"}]}`),
 		"errors:get-initial":    json.RawMessage(`[{"id":"fresh-error"}]`),
-		"cluster:get-node-id":   json.RawMessage(`{"nodeId":"new-id","nodeUuid":"new-uuid"}`),
+		"cluster:get-node-id":   json.RawMessage(`{"nodeUuid":"new-uuid"}`),
 		"policy:get":            json.RawMessage(`{"availability":"paused"}`),
 		"ping":                  json.RawMessage(`{"version":"new-ping","uptime_ms":10}`),
 	})
@@ -216,7 +216,7 @@ func TestSessionReadyRebootstrapsExistingViewsOnce(t *testing.T) {
 	if len(jobs.byKey) != 1 || jobs.byKey[jobs.order[0]].ID != "fresh" || !jobs.baselined || !jobs.subscribed {
 		t.Fatalf("replacement jobs = %+v, baselined:%v subscribed:%v", jobs.byKey, jobs.baselined, jobs.subscribed)
 	}
-	if len(errs.errs) != 1 || errs.errs[0].ID != "fresh-error" || !service.errsKnown || service.brokerVersion != "new-ping" || m.avail.value != "paused" || m.avail.selfID != "new-id" || m.avail.selfUUID != "new-uuid" {
+	if len(errs.errs) != 1 || errs.errs[0].ID != "fresh-error" || !service.errsKnown || service.brokerVersion != "new-ping" || m.avail.value != "paused" || m.avail.selfUUID != "new-uuid" {
 		t.Fatal("replacement baselines or shell policy did not apply")
 	}
 	if nodes.filter != "keep-filter" || nodes.input.Value() != "unsent-address" || !jobs.showAll || !service.editing || service.input.Value() != "unsent-name" {

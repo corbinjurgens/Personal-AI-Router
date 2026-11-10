@@ -173,7 +173,7 @@ func mergeNodes(in nodeFeeds) []nodeRow {
 	for _, d := range in.discovered {
 		key := d.HostUUID
 		if key == "" {
-			key = "name:" + d.Name
+			continue
 		}
 		row := get(key)
 		discoveredKeys[key] = true
@@ -200,11 +200,11 @@ func mergeNodes(in nodeFeeds) []nodeRow {
 	for _, m := range in.members {
 		key := m.NodeUUID
 		if key == "" {
-			key = m.ID
+			continue
 		}
 		row := get(key)
 		if row.name == "" {
-			row.name = m.Name
+			row.name = m.DisplayName
 		}
 		if row.address == "" {
 			row.address = m.IPAddress

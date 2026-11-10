@@ -43,7 +43,7 @@ func TestAvailabilityLabels(t *testing.T) {
 func TestAvailabilityPauseModeObservations(t *testing.T) {
 	for _, mode := range []string{"configured", "immediate"} {
 		t.Run(mode, func(t *testing.T) {
-			a := availabilityState{selfID: "me"}
+			a := availabilityState{selfUUID: "me"}
 			a.update(policyGetMsg{availability: availPaused, pausedBy: "local", pauseMode: mode})
 			if a.pauseMode != mode || a.pausedBy != "local" {
 				t.Fatalf("readback lost pause metadata: %+v", a)
@@ -73,18 +73,14 @@ func TestAvailabilityNotificationsFilterByNode(t *testing.T) {
 	if a.value != availPaused {
 		t.Fatalf("unknown identity should accept all, got %q", a.value)
 	}
-	a.update(selfIdentityMsg{id: clusterIdentity{NodeID: "me", NodeUUID: "uuid-me"}})
+	a.update(selfIdentityMsg{id: clusterIdentity{NodeUUID: "uuid-me"}})
 	a.update(availNote("other", availAvailable))
 	if a.value != availPaused {
 		t.Errorf("another node's change applied: %q", a.value)
 	}
-	a.update(availNote("me", availDraining))
+	a.update(availNote("uuid-me", availDraining))
 	if a.value != availDraining {
 		t.Errorf("own change ignored: %q", a.value)
-	}
-	a.update(availNote("uuid-me", availAvailable))
-	if a.value != availAvailable {
-		t.Errorf("uuid-addressed change ignored: %q", a.value)
 	}
 }
 

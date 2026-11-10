@@ -47,12 +47,12 @@ func TestJoinRequestForeignRowUsesAdmission(t *testing.T) {
 	if err := json.Unmarshal(request.Params, &params); err != nil {
 		t.Fatal(err)
 	}
-	// NodeID's wire spelling is checked separately because it is not nodeUUID.
+	// The target UUID is checked from the raw fields.
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(request.Params, &fields); err != nil {
 		t.Fatal(err)
 	}
-	if request.Method != "cluster:ask-to-join" || params.Address != "192.0.2.2" || string(fields["nodeId"]) != `"foreign-uuid"` || params.ReplaceSolo || len(fields) != 3 {
+	if request.Method != "cluster:ask-to-join" || params.Address != "192.0.2.2" || string(fields["nodeUuid"]) != `"foreign-uuid"` || params.ReplaceSolo || len(fields) != 3 {
 		t.Fatalf("wrong admission frame: %s %s", request.Method, request.Params)
 	}
 	msg, ok := result.(joinActionMsg)
