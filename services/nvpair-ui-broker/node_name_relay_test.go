@@ -171,3 +171,107 @@ func TestNodeNameRelaySendsNothingBeforeTheManagerReportsAName(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 }
+
+// A rename notification that lands while the spawn-time cluster:get-node-id
+// read is in flight wins over the older name in that read.
+func TestNodeNameRelayRenameDuringSlowGetNodeIDWins(t *testing.T) {
+	requested, release := make(chan struct{}), make(chan struct{})
+	cmPeer, _ := nodeNameRelayChild(t, func(msg *Message) json.RawMessage {
+		if msg.Method != "cluster:get-node-id" {
+			return json.RawMessage(`{}`)
+		}
+		close(requested)
+		<-release
+		return json.RawMessage(`{"nodeUuid":"self-uuid","name":"Old Name","customName":null,"certFingerprint":"","clusterId":""}`)
+	})
+	scanner, scannerReceived := nodeNameRelayScanner(t)
+	store := newDiscoveryStore()
+	var output bytes.Buffer
+	b := &Broker{codec: NewCodec(struct {
+		io.Reader
+		io.Writer
+	}{bytes.NewReader(nil), &output}), clusterMgr: &clusterManagerProcess{peer: cmPeer}, scanner: scanner, store: store}
+
+	done := make(chan struct{})
+	go func() { b.convergeScannerIdentity(); close(done) }()
+	<-requested
+	b.forwardClusterManagerNotification("cluster:node-name-changed", json.RawMessage(`{"nodeUuid":"self-uuid","name":"New Name","customName":"New Name"}`))
+	requireSetSelfName(t, scannerReceived, "New Name")
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("convergeScannerIdentity did not finish")
+	}
+
+	b.selfNameMu.Lock()
+	name := b.selfNodeName
+	b.selfNameMu.Unlock()
+	if name != "New Name" {
+		t.Fatalf("cached self name = %q, want the newer New Name", name)
+	}
+	store.mu.RLock()
+	storeName := store.selfName
+	store.mu.RUnlock()
+	if storeName != "New Name" {
+		t.Fatalf("store self name = %q, want New Name", storeName)
+	}
+	// convergeScannerIdentity's own push reads the cache, so it also carries
+	// the newer name.
+	requireSetSelfName(t, scannerReceived, "New Name")
+}
+
+// The same for member names: a nodes:changed that lands while the spawn-time
+// nodes:get-initial read is in flight wins over that read.
+func TestNodeNameRelayNodesChangedDuringSlowGetInitialWins(t *testing.T) {
+	requested, release := make(chan struct{}), make(chan struct{})
+	cmPeer, _ := nodeNameRelayChild(t, func(msg *Message) json.RawMessage {
+		if msg.Method != "nodes:get-initial" {
+			return json.RawMessage(`{}`)
+		}
+		close(requested)
+		<-release
+		return json.RawMessage(`{"nodes":[{"nodeUuid":"peer-uuid","name":"Peer","displayName":"Old Member","state":"member"}]}`)
+	})
+	store := newDiscoveryStore()
+	var output bytes.Buffer
+	b := &Broker{codec: NewCodec(struct {
+		io.Reader
+		io.Writer
+	}{bytes.NewReader(nil), &output}), clusterMgr: &clusterManagerProcess{peer: cmPeer}, store: store}
+
+	done := make(chan struct{})
+	go func() { b.refreshMemberNames(); close(done) }()
+	<-requested
+	b.forwardClusterManagerNotification("nodes:changed", json.RawMessage(`{"nodes":[{"nodeUuid":"peer-uuid","name":"Peer","displayName":"New Member","state":"member"}]}`))
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("refreshMemberNames did not finish")
+	}
+
+	store.mu.RLock()
+	name := store.memberNames["peer-uuid"]
+	store.mu.RUnlock()
+	if name != "New Member" {
+		t.Fatalf("member name = %q, want the newer New Member", name)
+	}
+}
+
+// Without an overtaking notification the spawn-time read applies.
+func TestNodeNameRelaySpawnReadsApplyWhenNotOvertaken(t *testing.T) {
+	cmPeer, _ := nodeNameRelayChild(t, func(msg *Message) json.RawMessage {
+		return json.RawMessage(`{"nodes":[{"nodeUuid":"peer-uuid","name":"Peer","displayName":"Read Member","state":"member"}]}`)
+	})
+	store := newDiscoveryStore()
+	b := &Broker{clusterMgr: &clusterManagerProcess{peer: cmPeer}, store: store}
+	b.applyMemberNames(json.RawMessage(`{"nodes":[]}`))
+	b.refreshMemberNames()
+	store.mu.RLock()
+	name := store.memberNames["peer-uuid"]
+	store.mu.RUnlock()
+	if name != "Read Member" {
+		t.Fatalf("member name = %q, want the read's Read Member", name)
+	}
+}

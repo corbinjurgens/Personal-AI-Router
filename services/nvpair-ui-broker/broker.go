@@ -264,6 +264,15 @@ type Broker struct {
 	selfNameMu   sync.Mutex
 	selfNodeUUID string
 	selfNodeName string
+	// selfNameGen counts cluster:node-name-changed notifications. A
+	// cluster:get-node-id read is applied only if none arrived while it was in
+	// flight, so a slow read never replaces a newer name.
+	selfNameGen uint64
+	// memberNamesMu and memberNamesGen do the same for member display names:
+	// nodes:changed bumps the generation, and a nodes:get-initial read that a
+	// notification overtook is discarded.
+	memberNamesMu  sync.Mutex
+	memberNamesGen uint64
 	// selfNamePushMu serializes name pushes to the scanner; each push reads
 	// the cached name under it, so the last push always carries the latest.
 	selfNamePushMu sync.Mutex
@@ -987,6 +996,9 @@ func (b *Broker) convergeScannerIdentity() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	b.selfNameMu.Lock()
+	sentAt := b.selfNameGen
+	b.selfNameMu.Unlock()
 	result, rpcErr, err := cm.Call(ctx, "cluster:get-node-id", nil)
 	if err != nil {
 		slog.Warn("scanner identity convergence skipped: cluster-manager node id unavailable", "err", err)
@@ -997,7 +1009,7 @@ func (b *Broker) convergeScannerIdentity() {
 		if err := json.Unmarshal(result, &id); err != nil {
 			slog.Warn("cluster:get-node-id result undecodable; node name not relayed", "err", err)
 		} else {
-			b.recordSelfName(id)
+			b.storeSelfName(id, &sentAt)
 			b.pushSelfName()
 		}
 	}
@@ -1014,14 +1026,26 @@ type nodeNameIdentity struct {
 	Name     string `json:"name"`
 }
 
-// recordSelfName caches this node's UUID and name as the cluster manager
-// reported them, and hands them to the discovery store, which shows this node
-// with that name.
+// recordSelfName applies a cluster:node-name-changed notification.
 func (b *Broker) recordSelfName(id nodeNameIdentity) {
+	b.storeSelfName(id, nil)
+}
+
+// storeSelfName caches this node's UUID and name as the cluster manager
+// reported them, and hands them to the discovery store, which shows this node
+// with that name. A notification (readSentAt nil) always applies and bumps the
+// generation; a cluster:get-node-id read applies only if no notification
+// arrived after it was sent.
+func (b *Broker) storeSelfName(id nodeNameIdentity, readSentAt *uint64) {
 	b.selfNameMu.Lock()
+	defer b.selfNameMu.Unlock()
+	if readSentAt == nil {
+		b.selfNameGen++
+	} else if *readSentAt != b.selfNameGen {
+		return
+	}
 	b.selfNodeUUID = id.NodeUUID
 	b.selfNodeName = id.Name
-	b.selfNameMu.Unlock()
 	if b.store != nil {
 		b.store.SetSelf(id.NodeUUID, id.Name)
 	}
@@ -1038,11 +1062,25 @@ type clusterNodesPayload struct {
 	} `json:"nodes"`
 }
 
-// applyMemberNames feeds the members' display names from a nodes:get-initial
-// result or nodes:changed params into the discovery store. Pending invitees
-// are not members and keep their discovery name.
+// applyMemberNames applies nodes:changed params.
 func (b *Broker) applyMemberNames(raw json.RawMessage) {
+	b.storeMemberNames(raw, nil)
+}
+
+// storeMemberNames feeds the members' display names from nodes:changed params
+// or a nodes:get-initial result into the discovery store. Pending invitees are
+// not members and keep their discovery name. A notification (readSentAt nil)
+// always applies and bumps the generation; a nodes:get-initial read applies
+// only if no notification arrived after it was sent.
+func (b *Broker) storeMemberNames(raw json.RawMessage, readSentAt *uint64) {
 	if b.store == nil {
+		return
+	}
+	b.memberNamesMu.Lock()
+	defer b.memberNamesMu.Unlock()
+	if readSentAt == nil {
+		b.memberNamesGen++
+	} else if *readSentAt != b.memberNamesGen {
 		return
 	}
 	var payload clusterNodesPayload
@@ -1068,12 +1106,15 @@ func (b *Broker) refreshMemberNames() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	b.memberNamesMu.Lock()
+	sentAt := b.memberNamesGen
+	b.memberNamesMu.Unlock()
 	result, rpcErr, err := cm.Call(ctx, "nodes:get-initial", nil)
 	if err != nil || rpcErr != nil {
 		slog.Warn("member names unavailable from cluster-manager", "err", err, "rpcError", rpcErr != nil)
 		return
 	}
-	b.applyMemberNames(result)
+	b.storeMemberNames(result, &sentAt)
 }
 
 // pushSelfName sends the cached name to the current scanner with
