@@ -413,7 +413,7 @@ func (r *Responder) srvRR(flushCache bool) *dns.SRV {
 }
 
 // txtRR builds the instance's TXT record from the live set (which UpdateTXT may
-// have swapped). See srvRR for flushCache.
+// have swapped), escaped for packing. See srvRR for flushCache.
 func (r *Responder) txtRR(flushCache bool) *dns.TXT {
 	class := uint16(dns.ClassINET)
 	if flushCache {
@@ -424,6 +424,11 @@ func (r *Responder) txtRR(flushCache bool) *dns.TXT {
 		// An empty TXT record set is valid; emit a single empty string so the
 		// record exists (some resolvers expect a TXT RR alongside SRV).
 		txt = []string{""}
+	}
+	// miekg/dns interprets backslash escapes when packing; escape so the
+	// wire carries the strings unchanged (see EscapeTXT).
+	for i, s := range txt {
+		txt[i] = EscapeTXT(s)
 	}
 	return &dns.TXT{
 		Hdr: dns.RR_Header{Name: r.instanceName, Rrtype: dns.TypeTXT, Class: class, Ttl: recordTTL},
