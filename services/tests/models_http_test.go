@@ -57,7 +57,7 @@ func TestModelsHTTPEnrichment(t *testing.T) {
 	// Advertise a _nvpair-node with em=<port> and ip=127.0.0.1 so the daemon
 	// fetches the model list from the stub over loopback (ip= wins over the mDNS
 	// address in the daemon's enrichment target selection).
-	txt := []string{"v=1", "uuid=" + instance + "-uuid", "ip=127.0.0.1", fmt.Sprintf("em=%d", emPort)}
+	txt := []string{"v=1", "uuid=" + xprocInstanceUUID(instance), "ip=127.0.0.1", fmt.Sprintf("em=%d", emPort)}
 	startMDNSAdvertiser(t, mdnsAdvertiserFixture{
 		Instance: instance, Service: namespace.Service, Domain: namespace.Domain, Port: emPort, TXT: txt, Interface: mdnsFixtureInterface(t).Name,
 	})
@@ -81,7 +81,7 @@ func TestModelsHTTPEnrichment(t *testing.T) {
 			if msg.Method == "" && msg.ID != nil {
 				var res availableNodesResult
 				if json.Unmarshal(msg.Result, &res) == nil {
-					if n, found := findNode(res.Nodes, instance); found &&
+					if n, found := findNode(res.Nodes, xprocInstanceUUID(instance)); found &&
 						modelsMatch(n.Models) && modelsByEngineMatch(n.ModelsByEngine) &&
 						loadedByEngineMatch(n.LoadedByEngine) {
 						return // enriched flat + per-engine + loaded lists surfaced
@@ -92,7 +92,7 @@ func TestModelsHTTPEnrichment(t *testing.T) {
 			id++
 			sendReq(t, stdin, id, "discovery:get-nodes")
 		case <-deadline:
-			t.Fatalf("timed out waiting for %q with an enriched model list", instance)
+			t.Fatalf("timed out waiting for node %q with an enriched model list", xprocInstanceUUID(instance))
 		}
 	}
 }

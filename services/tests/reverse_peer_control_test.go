@@ -689,9 +689,16 @@ func TestReversePeerControlTask1(t *testing.T) {
 				t.Fatalf("restricted direct endpoint %s answered", path)
 			}
 		}
-		hostname, err := os.Hostname()
-		if err != nil {
-			t.Fatal(err)
+		// Each member's expected display name is the one its own CM reports.
+		wantNames := map[string]string{}
+		for _, n := range nodes {
+			name := decodeResult[struct {
+				Name string `json:"name"`
+			}](t, n.cm.call(t, "cluster:get-node-id", nil)).Name
+			if name == "" {
+				t.Fatalf("%s reports an empty node name", n.uuid)
+			}
+			wantNames[n.uuid] = name
 		}
 		// Each member starts with stale peer display names. Merely preserving
 		// the seeded three-row roster cannot satisfy convergence below.
@@ -721,7 +728,7 @@ func TestReversePeerControlTask1(t *testing.T) {
 					return false
 				}
 				for _, row := range result.Nodes {
-					if row.Name != hostname || row.ClusterID != task1ClusterID || row.AdmissionEpoch != 1 || row.State != "member" {
+					if row.Name != wantNames[row.NodeUUID] || row.ClusterID != task1ClusterID || row.AdmissionEpoch != 1 || row.State != "member" {
 						return false
 					}
 				}
