@@ -370,8 +370,8 @@ func (ps *PeerSync) post(ctx context.Context, nodeID string, target peerTarget, 
 
 // peerHostPorts builds every "host:port" worth pushing to for a discovered node,
 // in the peer's own ranked order — its ip=/ips= list first, then anything else
-// discovery resolved for it, then its hostname when it published no address at
-// all. Empty when the node has nowhere to be reached.
+// discovery resolved for it. The node's Host is a display name and is never
+// dialed, so a node with no address has nowhere to be reached and yields nil.
 //
 // Every address, because which of them this host can reach is not something the
 // peer can know: it ranks from its own vantage point, and a link only its cabled
@@ -382,9 +382,6 @@ func peerHostPorts(node RawNode) []string {
 		return nil
 	}
 	hosts := netpick.Candidates(node.TXT, node.Addresses)
-	if len(hosts) == 0 && node.Host != "" {
-		hosts = []string{node.Host}
-	}
 	out := make([]string, 0, len(hosts))
 	for _, host := range hosts {
 		out = append(out, net.JoinHostPort(host, strconv.Itoa(node.Port)))

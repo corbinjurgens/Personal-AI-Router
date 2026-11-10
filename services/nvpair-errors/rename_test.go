@@ -21,8 +21,8 @@ func (nopReadWriter) Write(p []byte) (int, error) { return len(p), nil }
 // TestDirectoryToPeerKeysByHostUUID: a peer is keyed by its stable hostUuid (the
 // same identity it stamps as the origin of its errors and uses as its own
 // localNodeID), so the self-check and EvictNode survive a peer's PC rename and
-// never conflate two same-named peers. Host stays the hostname for dialing /
-// display.
+// never conflate two same-named peers. Host carries the node's display name and
+// is never dialed.
 func TestDirectoryToPeerKeysByHostUUID(t *testing.T) {
 	n := noderec.DirectoryNode{
 		HostUUID: "uuid-x",
@@ -39,10 +39,32 @@ func TestDirectoryToPeerKeysByHostUUID(t *testing.T) {
 		t.Fatalf("peer ID = %q, want hostUuid", p.ID)
 	}
 	if p.Host != "host-x" {
-		t.Fatalf("peer Host = %q, want hostname", p.Host)
+		t.Fatalf("peer Host = %q, want display name", p.Host)
 	}
 	if want := []string{"10.0.0.4", "192.168.1.4"}; !slices.Equal(p.Addresses, want) {
 		t.Fatalf("peer addresses = %v, want %v", p.Addresses, want)
+	}
+}
+
+// TestDirectoryPeerWithoutParseableAddressIsNotDialed: a display name is not a
+// resolvable host, so a projected peer whose published address does not parse
+// yields no host ports even though its Host is non-empty.
+func TestDirectoryPeerWithoutParseableAddressIsNotDialed(t *testing.T) {
+	n := noderec.DirectoryNode{
+		HostUUID: "uuid-x",
+		Name:     "Kitchen PC",
+		IP:       "not-an-ip",
+		Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceErrors: {Port: 14319}},
+	}
+	p, ok := directoryToPeer(n)
+	if !ok {
+		t.Fatal("node advertising er with an address entry should project")
+	}
+	if p.Host != "Kitchen PC" {
+		t.Fatalf("peer Host = %q, want display name", p.Host)
+	}
+	if got := peerHostPorts(p); len(got) != 0 {
+		t.Fatalf("peerHostPorts = %v, want none", got)
 	}
 }
 

@@ -63,6 +63,25 @@ func TestSameNameDistinctUUIDPeersSurviveReplace(t *testing.T) {
 	}
 }
 
+// TestPeerWithoutParseableAddressHasNoAddresses: Host is a display name, so a
+// projected peer whose published address does not parse yields no dial
+// addresses even though its Host is non-empty.
+func TestPeerWithoutParseableAddressHasNoAddresses(t *testing.T) {
+	svc := map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceWorkload: {Port: 14320}}
+	p, ok := directoryToPeerNode(noderec.DirectoryNode{
+		HostUUID: "peer-uuid", Name: "Kitchen PC", IP: "not-an-ip", Services: svc,
+	})
+	if !ok {
+		t.Fatal("node advertising wl with an address entry should project")
+	}
+	if p.Host != "Kitchen PC" {
+		t.Fatalf("peer Host = %q, want display name", p.Host)
+	}
+	if got := p.addresses(); got != nil {
+		t.Fatalf("addresses = %v, want none", got)
+	}
+}
+
 // TestSelfFilteredByUUID confirms the self-filter drops our own record by
 // hostUuid, keeping a same-named peer that holds a different UUID.
 func TestSelfFilteredByUUID(t *testing.T) {

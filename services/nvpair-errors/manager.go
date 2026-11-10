@@ -514,8 +514,8 @@ func (m *Manager) emitRelayEvent(ev DiscoveryEvent) {
 // of its errors and uses as its own localNodeID — so the self-check and
 // EvictNode key on an identity that survives a peer's PC rename. A
 // relay DirectoryNode always carries a hostUuid (the scanner guarantees it), so
-// there is no name fallback. Host stays the hostname (display / dial name);
-// cluster-uuid= is reconstructed into TXT so PeerSync's mTLS pin lookup is
+// there is no name fallback. Host is the node's display name and is never
+// dialed (the peer is reached by its ip=/Addresses); cluster-uuid= is reconstructed into TXT so PeerSync's mTLS pin lookup is
 // unchanged.
 func directoryToPeer(n noderec.DirectoryNode) (RawNode, bool) {
 	svc, ok := n.Services[noderec.ServiceErrors]

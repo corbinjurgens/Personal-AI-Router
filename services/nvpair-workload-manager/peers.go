@@ -19,22 +19,17 @@ import (
 // inter-node HTTP server listens on (from its mDNS SRV record).
 type PeerNode struct {
 	ID        string
-	Host      string
+	Host      string // the node's display name; never dialed
 	Addresses []string
 	Port      int
 	TXT       []string // mDNS TXT records (carries cluster-uuid= for cluster mTLS pin lookup)
 }
 
 // addresses returns every dialable host for this peer via the shared ranker,
-// falling back to the hostname when discovery supplied no address.
+// and nil when discovery supplied no usable address: Host is a display name and
+// is never dialed.
 func (n PeerNode) addresses() []string {
-	if hosts := netpick.Candidates(n.TXT, n.Addresses); len(hosts) > 0 {
-		return hosts
-	}
-	if n.Host != "" {
-		return []string{n.Host}
-	}
-	return nil
+	return netpick.Candidates(n.TXT, n.Addresses)
 }
 
 // PeerSource supplies the current set of peer nodes to broadcast to.
