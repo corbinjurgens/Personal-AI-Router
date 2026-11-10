@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"nvpair-shared/clustertrust"
 	"nvpair-shared/durablefile"
 )
 
@@ -31,6 +32,16 @@ func (m *Manager) peerServiceIncarnation(uuid string) (string, bool) {
 	m.membersStoreMu.Lock()
 	defer m.membersStoreMu.Unlock()
 	return m.mesh.PeerServiceIncarnation(uuid)
+}
+
+// remoteManagementFor evaluates this node's remote-management grant for a peer
+// against current admission, under the same storage exclusion as
+// peerServiceIncarnation. Callers must not hold membersStoreMu or memMu.
+func (m *Manager) remoteManagementFor(uuid string) clustertrust.RemoteManagementPermission {
+	m.membersStoreMu.Lock()
+	defer m.membersStoreMu.Unlock()
+	m.mesh.Refresh()
+	return m.mesh.RemoteManagement(uuid)
 }
 
 // persistMembers atomically writes the confirmed member roster.

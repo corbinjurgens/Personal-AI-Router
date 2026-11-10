@@ -75,6 +75,7 @@ func (m *Manager) runHTTP(ctx context.Context) error {
 	trustedMux.HandleFunc(membersRemovePath, m.handleMembersRemove)
 	trustedMux.HandleFunc(rosterPath, m.handleRoster)
 	trustedMux.HandleFunc(peerServicesPath, m.handlePeerServices)
+	trustedMux.HandleFunc(peerNodeNamePath, m.handlePeerNodeName)
 	trustedMux.HandleFunc(clustertrust.ReverseUpgradePath, m.handleReverseUpgrade)
 
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", m.port))
