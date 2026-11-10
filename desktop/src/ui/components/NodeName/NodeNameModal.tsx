@@ -133,8 +133,9 @@ export function NodeNameModal({ target, open, onClose }: NodeNameModalProps) {
         await send()
         if (instance !== openInstance.current || currentOutcome()?.phase !== 'saved') return
         const store = useClusterInvitationsStore.getState()
-        store.clearNameChange()
-        store.clearPeerNameChange(nodeUuid)
+        // Only this target's outcome: another target's in-flight save keeps its guard.
+        if (peer) store.clearPeerNameChange(nodeUuid)
+        else store.clearNameChange()
         onClose()
     }
 

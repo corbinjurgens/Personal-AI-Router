@@ -440,4 +440,26 @@ describe('node name modal across opens', () => {
         expect(button('Save')).toBeDefined()
         expect(document.querySelector('[role="alert"]')).toBeNull()
     })
+
+    it('keeps the in-flight guard of this node when a peer save succeeds', async () => {
+        getRemoteManagementForNode.mockResolvedValue(capability('allowed'))
+        setPeerName.mockResolvedValue({ nodeUuid: 'peer-uuid', name: 'Den', customName: 'Den' })
+        await renderPeerModal()
+        useClusterInvitationsStore.setState({ nameChange: { phase: 'saving' } })
+        await click('Save')
+        expect(onClose).toHaveBeenCalledOnce()
+        expect(useClusterInvitationsStore.getState().nameChange).toEqual({ phase: 'saving' })
+        expect(useClusterInvitationsStore.getState().peerNameChanges['peer-uuid']).toBeUndefined()
+    })
+
+    it('keeps a peer outcome when a save of this node succeeds', async () => {
+        setNodeName.mockResolvedValue({ nodeUuid: 'self-uuid', name: 'Desk', customName: 'Desk' })
+        useClusterInvitationsStore.setState({ peerNameChanges: { other: { phase: 'saving' } } })
+        await renderModal(null)
+        await click('Save')
+        expect(onClose).toHaveBeenCalledOnce()
+        expect(useClusterInvitationsStore.getState().peerNameChanges.other).toEqual({
+            phase: 'saving'
+        })
+    })
 })
