@@ -926,19 +926,6 @@ func (d *daemon) republishSelf() {
 	d.publishSelfLocked()
 }
 
-// setSelfName adopts this node's display name, as supplied by the broker from
-// the cluster manager (discovery:set-self-name), and re-advertises it when it
-// changed. name has already passed nodename.Normalize.
-func (d *daemon) setSelfName(name string) {
-	d.selfMu.Lock()
-	defer d.selfMu.Unlock()
-	if !d.reg.setName(name) {
-		return
-	}
-	d.announceLocked()
-	d.publishSelfLocked()
-}
-
 // publishSelfLocked is publishSelf's body; the caller must hold selfMu (so a
 // registration burst and a concurrent reloadIdentity can't tear the self entry).
 func (d *daemon) publishSelfLocked() {
@@ -1885,7 +1872,13 @@ func (d *daemon) handle(msg *Message) bool {
 			}
 			return true
 		}
-		d.setSelfName(name)
+		// Adopt this node's display name, as supplied by the broker from the
+		// cluster manager, and re-advertise it when it changed. Async, like
+		// register, so the loopback enrichment fetch in the republish never
+		// holds the read loop.
+		if d.reg.setName(name) {
+			go d.republishSelf()
+		}
 		if msg.IsRequest() {
 			_ = d.codec.Respond(msg.ID, map[string]bool{"ok": true})
 		}

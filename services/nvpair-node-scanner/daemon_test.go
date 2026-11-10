@@ -508,8 +508,10 @@ func responderField(d *daemon, field string) string {
 }
 
 // setSelfNameRequest sends discovery:set-self-name as a request and returns the
-// reply, skipping the node events the daemon emits before it.
-func setSelfNameRequest(t *testing.T, d *daemon, wire *bytes.Buffer, name string) *jsonrpc.Message {
+// reply, skipping the node events the daemon emits around it. The republish
+// runs in the background: a non-nil settled waits for it to show, then for it
+// to release selfMu, before the wire is read.
+func setSelfNameRequest(t *testing.T, d *daemon, wire *bytes.Buffer, name string, settled func() bool) *jsonrpc.Message {
 	t.Helper()
 	params, err := json.Marshal(noderec.SetSelfNameParams{Name: name})
 	if err != nil {
@@ -518,6 +520,11 @@ func setSelfNameRequest(t *testing.T, d *daemon, wire *bytes.Buffer, name string
 	id := json.RawMessage(`"set-self-name"`)
 	if !d.handle(&Message{JSONRPC: "2.0", ID: &id, Method: noderec.MethodSetSelfName, Params: params}) {
 		t.Fatal("discovery:set-self-name was not handled")
+	}
+	if settled != nil {
+		waitMDNSCondition(t, "set-self-name republish", settled)
+		d.selfMu.Lock()
+		d.selfMu.Unlock()
 	}
 	reader := jsonrpc.NewCodec(wire)
 	for {
@@ -545,7 +552,10 @@ func TestSetSelfNameUpdatesTXTAndSelfRow(t *testing.T) {
 		t.Fatalf("self row Name before the first set = %q, want empty", n.Name)
 	}
 
-	reply := setSelfNameRequest(t, d, &wire, "  Desk A ")
+	reply := setSelfNameRequest(t, d, &wire, "  Desk A ", func() bool {
+		n, _ := d.dir.get("self-uuid")
+		return n.Name == "Desk A"
+	})
 	if reply.Error != nil {
 		t.Fatalf("set-self-name error = %+v", reply.Error)
 	}
@@ -577,7 +587,7 @@ func TestSetSelfNameRejectsInvalid(t *testing.T) {
 			d.reg.setName("Kept")
 			d.publishSelf()
 
-			reply := setSelfNameRequest(t, d, &wire, name)
+			reply := setSelfNameRequest(t, d, &wire, name, nil)
 			if reply.Error == nil || reply.Error.Code != -32602 {
 				t.Fatalf("reply = %+v, want a -32602 error", reply)
 			}

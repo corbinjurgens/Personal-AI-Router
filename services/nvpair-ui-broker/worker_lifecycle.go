@@ -56,6 +56,9 @@ func (b *Broker) spawnScanner() (supervisedHandle, error) {
 	for _, p := range b.regCache.Snapshot() {
 		go sp.pushRegister(p)
 	}
+	// Replay this node's name too; until the cluster manager reports one there
+	// is nothing to send, and convergeScannerIdentity sends it then.
+	go b.pushSelfName()
 	slog.Info("scanner started", "path", b.scannerPath, "pid", sp.cmd.Process.Pid)
 	return sp, nil
 }

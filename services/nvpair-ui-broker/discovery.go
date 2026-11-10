@@ -561,6 +561,22 @@ func (s *scannerProcess) reloadIdentity() {
 	}
 }
 
+// setSelfName tells the daemon this node's display name, which it advertises
+// as name= and shows on its own directory row.
+func (s *scannerProcess) setSelfName(name string) {
+	params, err := json.Marshal(noderec.SetSelfNameParams{Name: name})
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), pushRegisterTimeout)
+	defer cancel()
+	if _, rpcErr, err := s.peer.Call(ctx, noderec.MethodSetSelfName, params); err != nil {
+		slog.Warn("relay set-self-name to daemon failed", "err", err)
+	} else if rpcErr != nil {
+		slog.Warn("daemon rejected set-self-name", "code", rpcErr.Code, "msg", rpcErr.Message)
+	}
+}
+
 // reloadTrust tells the daemon this node's cluster pin set changed, so it
 // re-derives the trusted annotation on every node in its directory. The daemon
 // otherwise only answers that question when a peer's mDNS record moves, and a
