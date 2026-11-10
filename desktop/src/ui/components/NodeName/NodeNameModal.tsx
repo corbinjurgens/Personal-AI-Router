@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
     Button,
     Flex,
@@ -56,6 +56,11 @@ export function NodeNameModal({ target, open, onClose }: NodeNameModalProps) {
     useBlurOnOpen(open)
     const [draft, setDraft] = useState('')
     const [prefilledOpen, setPrefilledOpen] = useState(false)
+    // The outcome the store already held when this modal opened. It belongs to an
+    // earlier open, so it is neither shown nor acted on.
+    const [priorOutcome, setPriorOutcome] = useState<object | null>(null)
+    // Bumped when this open ends, so a save started earlier cannot close a later open.
+    const openInstance = useRef(0)
     const peer = target.kind === 'peer' ? target.node : null
     const nodeUuid = target.kind === 'peer' ? target.node.nodeUuid : target.nodeUuid
     const nameChange = useClusterInvitationsStore(state => state.nameChange)
@@ -69,20 +74,20 @@ export function NodeNameModal({ target, open, onClose }: NodeNameModalProps) {
     // Prefill when the modal opens, not on every later name update.
     if (open !== prefilledOpen) {
         setPrefilledOpen(open)
-        if (open)
+        if (open) {
+            setPriorOutcome((peer ? peerChange : nameChange) ?? null)
             setDraft(
                 target.kind === 'peer'
                     ? (target.node.nickname ?? target.node.name)
                     : (target.customName ?? target.shownName)
             )
+        }
     }
 
-    useEffect(() => {
-        if (!open) return
-        const store = useClusterInvitationsStore.getState()
-        store.clearNameChange()
-        store.clearPeerNameChange(nodeUuid)
-    }, [open, nodeUuid])
+    const endOpen = useCallback(() => {
+        openInstance.current++
+    }, [])
+    useEffect(() => (open ? endOpen : undefined), [open, endOpen])
 
     // The shared permission read for this peer; Save is offered only on `allowed`.
     const watchedPeerUuid = open && peer ? nodeUuid : null
@@ -103,35 +108,45 @@ export function NodeNameModal({ target, open, onClose }: NodeNameModalProps) {
     const trimmed = draft.trim()
     const duplicate = duplicateShownName(trimmed, otherNames)
     const change = peer ? peerChange : nameChange
+    // A save still running from an earlier open keeps the form busy (the store
+    // refuses a second one); any other earlier outcome is not shown.
     const saving = change?.phase === 'saving'
-    const canSaveName = !peer || (managementState === 'allowed' && !peerChange?.denied)
+    const outcome = change && change !== priorOutcome ? change : null
+    const denied = peerChange !== priorOutcome && peerChange?.denied === true
+    const canSaveName = !peer || (managementState === 'allowed' && !denied)
     const noGrant =
         peer !== null &&
         !canSaveName &&
-        (peerChange?.denied === true ||
-            (managementState !== undefined && NO_GRANT_STATES.includes(managementState)))
+        (denied || (managementState !== undefined && NO_GRANT_STATES.includes(managementState)))
     const shownName = target.kind === 'peer' ? target.node.displayName : target.shownName
     const hasDefaultToRestore = target.kind === 'peer' || target.customName !== null
 
-    function closeWhenSaved(): void {
+    function currentOutcome() {
         const store = useClusterInvitationsStore.getState()
-        const outcome = peer ? store.peerNameChanges[nodeUuid] : store.nameChange
-        if (outcome?.phase !== 'saved') return
+        return peer ? store.peerNameChanges[nodeUuid] : store.nameChange
+    }
+
+    /** Send one request and close only if it saved while this same open is still showing. */
+    async function submit(send: () => Promise<void>): Promise<void> {
+        if (currentOutcome()?.phase === 'saving') return
+        const instance = openInstance.current
+        await send()
+        if (instance !== openInstance.current || currentOutcome()?.phase !== 'saved') return
+        const store = useClusterInvitationsStore.getState()
         store.clearNameChange()
         store.clearPeerNameChange(nodeUuid)
         onClose()
     }
 
-    async function saveName(name: string | null): Promise<void> {
+    function saveName(name: string | null): Promise<void> {
         const store = useClusterInvitationsStore.getState()
-        if (peer) await store.setPeerName(nodeUuid, name)
-        else await store.setSelfName(name)
-        closeWhenSaved()
+        return submit(() => (peer ? store.setPeerName(nodeUuid, name) : store.setSelfName(name)))
     }
 
-    async function saveNickname(nickname: string | null): Promise<void> {
-        await useClusterInvitationsStore.getState().setPeerNickname(nodeUuid, nickname)
-        closeWhenSaved()
+    function saveNickname(nickname: string | null): Promise<void> {
+        return submit(() =>
+            useClusterInvitationsStore.getState().setPeerNickname(nodeUuid, nickname)
+        )
     }
 
     return (
@@ -174,9 +189,9 @@ export function NodeNameModal({ target, open, onClose }: NodeNameModalProps) {
                                 {`Another node is already shown as "${duplicate}". You can still save; PAIR adds a hardware label to tell them apart.`}
                             </Text>
                         )}
-                        {change?.phase === 'error' && (
+                        {outcome?.phase === 'error' && (
                             <Text kind="body/regular/sm" role="alert">
-                                {change.message}
+                                {outcome.message}
                             </Text>
                         )}
                         <Flex gap="2" justify="end" className="flex-wrap">

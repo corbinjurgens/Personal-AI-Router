@@ -5,7 +5,11 @@
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { ClusterNode, RemoteManagementCapability } from '@/shared/types/cluster'
+import type {
+    ClusterNode,
+    NodeNameResult,
+    RemoteManagementCapability
+} from '@/shared/types/cluster'
 import type { IClusterApi } from '@/ui/api/pair-api'
 import { NodeNameModal } from '@/ui/components/NodeName/NodeNameModal'
 import { ServiceCallError } from '@/ui/api/service-transport'
@@ -352,5 +356,73 @@ describe('node name modal for a peer', () => {
         )
         expect(button('Save')?.disabled).toBe(false)
         expect(button('Set nickname')?.disabled).toBe(false)
+    })
+})
+
+describe('node name modal across opens', () => {
+    function pendingSave() {
+        let resolve: (value: NodeNameResult) => void = () => {
+            throw new Error('save not started')
+        }
+        const promise = new Promise<NodeNameResult>(finish => {
+            resolve = finish
+        })
+        return { promise, resolve }
+    }
+
+    async function reopen(): Promise<void> {
+        await act(async () => root.render(null))
+        await renderModal(null)
+    }
+
+    it('keeps a save from an earlier open in flight when reopened', async () => {
+        const save = pendingSave()
+        setNodeName.mockReturnValue(save.promise)
+        await renderModal(null)
+        await click('Save')
+        await reopen()
+        expect(useClusterInvitationsStore.getState().nameChange).toEqual({ phase: 'saving' })
+        expect(nameInput().disabled).toBe(true)
+        expect(button('Save')?.disabled).toBe(true)
+        expect(setNodeName).toHaveBeenCalledOnce()
+    })
+
+    it('does not close a later open when an earlier save finishes', async () => {
+        const save = pendingSave()
+        setNodeName.mockReturnValue(save.promise)
+        await renderModal(null)
+        await click('Save')
+        await reopen()
+        await act(async () =>
+            save.resolve({ nodeUuid: 'self-uuid', name: 'Desk', customName: 'Desk' })
+        )
+        expect(onClose).not.toHaveBeenCalled()
+        expect(button('Save')?.disabled).toBe(false)
+    })
+
+    it('does not show an error from an earlier open', async () => {
+        useClusterInvitationsStore.setState({ nameChange: { phase: 'error', message: 'old' } })
+        await renderModal(null)
+        expect(document.querySelector('[role="alert"]')).toBeNull()
+    })
+
+    it('shows an error from a save made in this open', async () => {
+        useClusterInvitationsStore.setState({ nameChange: { phase: 'error', message: 'old' } })
+        setNodeName.mockRejectedValue(new ServiceCallError('new problem', -32602))
+        await renderModal(null)
+        await click('Save')
+        expect(document.querySelector('[role="alert"]')?.textContent).toBe('new problem')
+    })
+
+    it('offers Save to a peer again after a denial from an earlier open', async () => {
+        getRemoteManagementForNode.mockResolvedValue(capability('allowed'))
+        useClusterInvitationsStore.setState({
+            peerNameChanges: {
+                'peer-uuid': { phase: 'error', message: DENIED_MESSAGE, denied: true }
+            }
+        })
+        await renderPeerModal()
+        expect(button('Save')).toBeDefined()
+        expect(document.querySelector('[role="alert"]')).toBeNull()
     })
 })
