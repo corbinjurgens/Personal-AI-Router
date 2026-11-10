@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"unicode/utf8"
 
 	"nvpair-shared/httpcon"
 	"nvpair-shared/nodename"
@@ -186,27 +187,43 @@ func (m *Manager) answerPeerRename(msg *Message, uuid string, status int, answer
 		}
 		m.codec.Respond(msg.ID, view)
 	case http.StatusConflict:
-		_ = json.Unmarshal(answer, &peerErr)
-		if peerErr.Message == "" {
-			peerErr.Message = remoteManagementDeniedText
-		}
-		m.codec.RespondErrorData(msg.ID, codeRemoteManagementDenied, peerErr.Message, nil)
+		// The denial text is fixed locally; the target's body is not relayed.
+		m.codec.RespondErrorData(msg.ID, codeRemoteManagementDenied, remoteManagementDeniedText, nil)
 	case http.StatusBadRequest:
+		// The target's text is relayed only within fixed bounds.
 		_ = json.Unmarshal(answer, &peerErr)
-		if peerErr.Message == "" {
-			peerErr.Message = "the device rejected the name"
+		message := truncateUTF8(peerErr.Message, peerMessageMaxBytes)
+		if message == "" {
+			message = "the device rejected the name"
 		}
 		data := map[string]string{"field": "name"}
-		if peerErr.Reason != "" {
-			data["reason"] = peerErr.Reason
+		if reason := truncateUTF8(peerErr.Reason, peerReasonMaxBytes); reason != "" {
+			data["reason"] = reason
 		}
-		m.codec.RespondErrorData(msg.ID, codeInvalidParams, peerErr.Message, data)
+		m.codec.RespondErrorData(msg.ID, codeInvalidParams, message, data)
 	case http.StatusForbidden:
 		m.codec.RespondErrorData(msg.ID, codePeerUnavailable, peerNameUnavailableText, nil)
 	default:
 		log.Printf("peer rename: %s answered status %d", uuid, status)
 		m.codec.RespondErrorData(msg.ID, codeInternalError, "the device could not apply the name", nil)
 	}
+}
+
+// Bounds on target-supplied text relayed in a cluster:set-peer-name error.
+const (
+	peerMessageMaxBytes = 256
+	peerReasonMaxBytes  = 64
+)
+
+// truncateUTF8 cuts s to at most n bytes on a rune boundary.
+func truncateUTF8(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 // peerNicknameView is the cluster:set-peer-nickname result.

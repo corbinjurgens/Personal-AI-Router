@@ -132,8 +132,10 @@ as a JSON-RPC `error`. See [Errors](#errors).
 //   applies it only if it granted this node remote management (state allowed). On success this node records
 //   the returned name for that member and emits nodes:changed.
 //   errors: malformed params, this node's own UUID or a non-member -> -32602;
-//   name the target rejects -> -32602 with the target's message and {field:"name", reason};
-//   target has not granted remote management -> -32012 with the target's message;
+//   name the target rejects -> -32602 with the target's message cut to 256 bytes and {field:"name", reason}
+//   (reason cut to 64 bytes);
+//   target has not granted remote management -> -32012 with the fixed local text
+//   "Remote management is blocked on this device. Change permission locally on that device.";
 //   target unreachable or no longer trusts this node -> -32000 "the device is offline or does not trust this node";
 //   target failed to save, or an unusable answer -> -32603.
 
@@ -519,7 +521,7 @@ signal. Use the standard JSON-RPC `error` object `{code, message, data?}`.
 | `-32001` | unknown invite or local join-request ID |
 | `-32002` | invalid invite or join-request state |
 | `-32010` | remote-management revision conflict — fetch the local snapshot and retry with a current revision |
-| `-32012` | `cluster:set-peer-name`: the target has not granted this node remote management; the message is the target's |
+| `-32012` | `cluster:set-peer-name`: the target has not granted this node remote management; fixed message `Remote management is blocked on this device. Change permission locally on that device.` (the target's body is not relayed) |
 | `-32000` | `cluster:set-peer-name`: the target did not answer or no longer trusts this node |
 | `-32004` | precondition not met — `create` while clustered (`{reason:"already-clustered"}`). `invite-node` while unclustered no longer errors: it auto-founds a cluster of one instead. |
 

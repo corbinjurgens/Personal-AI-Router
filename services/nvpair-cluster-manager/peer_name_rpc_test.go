@@ -6,8 +6,10 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // setPeerNameFixture pairs a viewer and a target over real mTLS listeners.
@@ -132,7 +134,7 @@ func TestSetPeerNameNullResetsTargetToDefault(t *testing.T) {
 	}
 }
 
-func TestSetPeerNameDeniedReturnsTargetMessage(t *testing.T) {
+func TestSetPeerNameDeniedReturnsDenialText(t *testing.T) {
 	viewer, target := setPeerNameFixture(t)
 	setTestGrant(t, target.m, viewer.m.identity.NodeUUID, false)
 	targetUUID := target.m.identity.NodeUUID
@@ -141,7 +143,7 @@ func TestSetPeerNameDeniedReturnsTargetMessage(t *testing.T) {
 	res := callSetPeerName(t, viewer.m, targetUUID, "Hijacked")
 	if res.err == nil || res.err.Code != codeRemoteManagementDenied ||
 		res.err.Message != "Remote management is blocked on this device. Change permission locally on that device." {
-		t.Fatalf("response = %+v, want -32012 with the target's message", res.err)
+		t.Fatalf("response = %+v, want -32012 with the denial text", res.err)
 	}
 	if target.m.customSelfName() != nil {
 		t.Fatal("denied rename changed the target")
@@ -189,4 +191,50 @@ func TestSetPeerNameRejectsSelfAndNonMembers(t *testing.T) {
 			}
 		})
 	}
+}
+
+// answerPeerRenameError maps a synthetic target answer and returns the error.
+func answerPeerRenameError(t *testing.T, status int, body string) *rpcResult {
+	t.Helper()
+	m := newTestManager(t)
+	out := captureCodec(m)
+	id := json.RawMessage(`21`)
+	m.answerPeerRename(&Message{ID: &id}, "77777777-0000-4000-8000-000000000000", status, []byte(body))
+	for _, frame := range out.lines(t) {
+		if string(frame["id"]) != "21" {
+			continue
+		}
+		var res rpcResult
+		if err := json.Unmarshal(frame["error"], &res.err); err != nil || res.err == nil {
+			t.Fatalf("no error in %v", frame)
+		}
+		return &res
+	}
+	t.Fatal("no response")
+	return nil
+}
+
+func TestSetPeerNameBoundsTargetText(t *testing.T) {
+	huge := strings.Repeat("é", 4096) // two bytes per rune
+	body, err := json.Marshal(map[string]string{"code": "invalid_name", "reason": strings.Repeat("r", 500), "message": huge})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Run("400 message and reason are capped on a rune boundary", func(t *testing.T) {
+		res := answerPeerRenameError(t, http.StatusBadRequest, string(body))
+		if res.err.Code != codeInvalidParams || len(res.err.Message) > peerMessageMaxBytes ||
+			!utf8.ValidString(res.err.Message) || !strings.HasPrefix(huge, res.err.Message) || res.err.Message == "" {
+			t.Fatalf("message length %d, valid %t; want a non-empty valid prefix of at most %d bytes",
+				len(res.err.Message), utf8.ValidString(res.err.Message), peerMessageMaxBytes)
+		}
+		if got := res.err.Data["reason"]; len(got) != peerReasonMaxBytes {
+			t.Fatalf("reason length %d, want %d", len(got), peerReasonMaxBytes)
+		}
+	})
+	t.Run("409 uses the fixed local denial text", func(t *testing.T) {
+		res := answerPeerRenameError(t, http.StatusConflict, `{"code":"remote_management_denied","message":"`+strings.Repeat("x", 10000)+`"}`)
+		if res.err.Code != codeRemoteManagementDenied || res.err.Message != remoteManagementDeniedText {
+			t.Fatalf("denial = %d %q, want -32012 with the fixed text", res.err.Code, res.err.Message)
+		}
+	})
 }
