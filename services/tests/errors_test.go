@@ -7,7 +7,6 @@ import (
 	"bufio"
 	"encoding/json"
 	"io"
-	"os"
 	"sort"
 	"strconv"
 	"sync"
@@ -34,22 +33,17 @@ import (
 //   - clear   →  update broadcast with empty list
 //   - re-report after clear  →  resurrect (ack-until-reemit)
 func TestErrorsBrokerPipeline_EndToEnd(t *testing.T) {
-	p := startInteropProcess(t, t.TempDir(), errorsBin, 0, nil)
+	// The broker stamps every local report/clear with the local node UUID and
+	// passes the same UUID to nvpair-errors as --node-id, which becomes its
+	// localNodeID. We mirror that here so the clear step (now scoped to
+	// local-origin entries for cross-node correctness) resolves against the
+	// reports.
+	const localNode = "11111111-2222-4333-8444-555555555555"
+	p := startInteropProcess(t, t.TempDir(), errorsBin, 0, nil, "--node-id", localNode)
 	stdin, out := p.in, p.msgs
 
 	// First frame: the subprocess emits "ready" right after startup.
 	waitForMethodOrTimeout(t, out, "ready", 5*time.Second)
-
-	// The broker stamps every local report/clear with the local node
-	// id (os.Hostname()), which is exactly what nvpair-errors resolves as
-	// its own localNodeID. We mirror that here so the clear step (now
-	// scoped to local-origin entries for cross-node correctness)
-	// resolves against the reports — a fixed fake nodeId would no
-	// longer match the binary's real hostname.
-	localNode, err := os.Hostname()
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	// 1. errors:report (REQUEST form, id=1). Expect a null response,
 	//    then an errors:update notification with the new entry.

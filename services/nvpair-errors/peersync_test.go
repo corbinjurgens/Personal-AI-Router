@@ -253,7 +253,7 @@ func mustJSON(t *testing.T, v any) json.RawMessage {
 }
 
 // TestPeerHostPorts covers address propagation: preserve every ranked address,
-// fall back to the hostname, and reject nodes with no usable destination.
+// never dial the display name, and reject nodes with no usable destination.
 func TestPeerHostPorts(t *testing.T) {
 	cases := []struct {
 		name string
@@ -261,7 +261,8 @@ func TestPeerHostPorts(t *testing.T) {
 		want []string
 	}{
 		{"ip preserved", RawNode{Addresses: []string{"192.168.1.5"}, Host: "h.local.", Port: 14319}, []string{"192.168.1.5:14319"}},
-		{"host fallback", RawNode{Host: "h.local.", Port: 14319}, []string{"h.local.:14319"}},
+		{"display name is not dialed", RawNode{Host: "h.local.", Port: 14319}, nil},
+		{"unparseable address is not dialed", RawNode{Host: "h.local.", Addresses: []string{"h.local."}, Port: 14319}, nil},
 		{"no address", RawNode{Port: 14319}, nil},
 		{"no port", RawNode{Addresses: []string{"192.168.1.5"}}, nil},
 		{"all ipv4 deterministic", RawNode{Addresses: []string{"192.168.1.9", "192.168.1.5"}, Port: 14319}, []string{"192.168.1.5:14319", "192.168.1.9:14319"}},
