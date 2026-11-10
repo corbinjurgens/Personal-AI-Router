@@ -75,7 +75,7 @@ func TestLapsedClaimIsReportedOnceAndClearedByTheNextClaim(t *testing.T) {
 	if err := json.Unmarshal(msgs[0].Params, &report); err != nil {
 		t.Fatal(err)
 	}
-	if report.ID != peerUnreachableID || report.Severity != "warning" || report.Action != "none" || !strings.Contains(report.Message, "peer-name") {
+	if report.ID != peerUnreachableID || report.Severity != "warning" || report.Action != "none" || !strings.Contains(report.Message, `"peer"`) {
 		t.Fatalf("report = %+v", report)
 	}
 

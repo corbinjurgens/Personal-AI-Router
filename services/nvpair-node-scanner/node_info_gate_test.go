@@ -33,7 +33,7 @@ func TestScannerPeerRouteUsesDirectoryGeneration(t *testing.T) {
 		t.Fatal("initial directory route unavailable")
 	}
 	claim.Sequence++
-	claim.Descriptor.Name = "renamed peer"
+	claim.ObservedAt = time.Now().UnixMilli()
 	if !d.acceptPeerServices(claim) {
 		t.Fatal("unchanged authenticated route rejected")
 	}

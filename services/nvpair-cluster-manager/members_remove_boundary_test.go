@@ -43,7 +43,7 @@ type removalHintFixture struct {
 func newRemovalHintFixture(t *testing.T) *removalHintFixture {
 	t.Helper()
 	f := &removalHintFixture{a: newReverseTestManager(t), b: newReverseTestManager(t)}
-	f.descriptor = noderec.PeerServicesDescriptor{HostUUID: f.b.identity.NodeUUID, Name: "removal-peer", Addresses: []string{"192.0.2.55", "100.90.0.8"}, Services: []noderec.PeerService{}}
+	f.descriptor = noderec.PeerServicesDescriptor{HostUUID: f.b.identity.NodeUUID, Addresses: []string{"192.0.2.55", "100.90.0.8"}, Services: []noderec.PeerService{}}
 	f.listener = startWalkServer(t, f.b, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case peerServicesPath:

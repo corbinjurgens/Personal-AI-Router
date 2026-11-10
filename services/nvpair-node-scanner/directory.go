@@ -91,16 +91,25 @@ func newDirectory() *directory {
 }
 
 // upsert stores a node and reports whether it was new (vs. an update).
-func (d *directory) upsert(n noderec.DirectoryNode) (isNew bool) {
+// While an authenticated claim owns the visible row, the browse observation
+// still supplies its name (the descriptor carries none): renamed reports that
+// the visible row's name changed, and no other visible field changes.
+func (d *directory) upsert(n noderec.DirectoryNode) (isNew, renamed bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	_, existed := d.nodes[n.HostUUID]
+	visible, existed := d.nodes[n.HostUUID]
 	n = cloneDownloadNode(n)
 	d.browse[n.HostUUID] = n
 	if _, authenticated := d.peerServices[n.HostUUID]; !authenticated {
 		d.storeLocked(n)
+		return !existed, false
 	}
-	return !existed
+	if existed && visible.Name != n.Name {
+		visible.Name = n.Name
+		d.nodes[n.HostUUID] = visible
+		return false, true
+	}
+	return !existed, false
 }
 
 // supersedeMinAge is how much older a record must be than the one arriving at

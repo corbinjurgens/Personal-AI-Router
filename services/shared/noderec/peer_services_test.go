@@ -15,7 +15,7 @@ import (
 )
 
 func validPeerServices() PeerServicesDescriptor {
-	return PeerServicesDescriptor{HostUUID: "peer-a", Name: "peer host", Addresses: []string{"192.168.1.5"}, Services: []PeerService{{Service: ServiceNodeInfo, Port: 21435}, {Service: ServiceEngineControl, Port: 31421}}}
+	return PeerServicesDescriptor{HostUUID: "peer-a", Addresses: []string{"192.168.1.5"}, Services: []PeerService{{Service: ServiceNodeInfo, Port: 21435}, {Service: ServiceEngineControl, Port: 31421}}}
 }
 
 func TestPeerServicesDescriptorRejectsInvalidSnapshot(t *testing.T) {
@@ -47,7 +47,6 @@ func TestPeerServicesDescriptorRejectsInvalidSnapshot(t *testing.T) {
 	test("hostname", func(d *PeerServicesDescriptor) { d.Addresses = []string{"localhost"} })
 	test("URL", func(d *PeerServicesDescriptor) { d.Addresses = []string{"http://192.168.1.5"} })
 	test("duplicate address", func(d *PeerServicesDescriptor) { d.Addresses = []string{"192.168.1.5", "192.168.1.5"} })
-	test("name control character", func(d *PeerServicesDescriptor) { d.Name = "host\nforged" })
 }
 
 // A descriptor-backed engine's service key travels on this authenticated
@@ -117,13 +116,19 @@ func TestPeerServicesDecodeRequiresCompleteBoundedDocument(t *testing.T) {
 	test("trailing document", string(body)+" {}")
 	test("trailing junk", string(body)+" x")
 	test("oversized", string(body)+strings.Repeat(" ", PeerServicesMaxBytes))
-	test("unknown protocol field", strings.Replace(string(body), `"name":`, `"protocol":"plain","name":`, 1))
+	test("unknown protocol field", strings.Replace(string(body), `"addresses":`, `"protocol":"plain","addresses":`, 1))
+	// Names travel on the roster only; the strict decoder rejects a
+	// descriptor that still carries one.
+	test("name field", strings.Replace(string(body), `"addresses":`, `"name":"peer host","addresses":`, 1))
 	t.Run("transport error after complete JSON", func(t *testing.T) {
 		if _, err := DecodePeerServices(peerServicesReadError{strings.NewReader(string(body))}, "peer-a"); err == nil {
 			t.Fatal("incomplete transport accepted")
 		}
 	})
 	t.Run("complete valid document", func(t *testing.T) {
+		if strings.Contains(string(body), `"name"`) {
+			t.Fatalf("descriptor JSON carries a name: %s", body)
+		}
 		d, err := DecodePeerServices(strings.NewReader(string(body)), "peer-a")
 		if err != nil {
 			t.Fatal(err)

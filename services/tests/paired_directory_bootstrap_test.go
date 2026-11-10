@@ -33,10 +33,6 @@ import (
 func pairedBootstrapSelf(t *testing.T, remote *task1Node) noderec.DirectoryNode {
 	t.Helper()
 	scanner := startTask1Process(t, remote.base, scannerBin, "--mdns=false", "--cluster-dir", filepath.Join(remote.base, "cluster"))
-	// The self row carries no name until it is told one; the broker relays
-	// the cluster manager's name the same way, and the peer-services
-	// descriptor built from this row requires a name.
-	scanner.call(t, noderec.MethodSetSelfName, noderec.SetSelfNameParams{Name: "bootstrap-" + remote.uuid})
 	var self noderec.DirectoryNode
 	task1Eventually(t, "serving scanner self snapshot", 10*time.Second, func() bool {
 		var result noderec.GetNodesResult
@@ -448,7 +444,7 @@ func (f *pairedBootstrapFixture) bootstrap(t *testing.T) {
 			}
 		}
 	}
-	if descriptor.HostUUID != f.b.uuid || descriptor.Name != f.self.Name || !reflect.DeepEqual(descriptor.Addresses, wantAddresses) || !reflect.DeepEqual(descriptor.Services, wantServices) {
+	if descriptor.HostUUID != f.b.uuid || !reflect.DeepEqual(descriptor.Addresses, wantAddresses) || !reflect.DeepEqual(descriptor.Services, wantServices) {
 		t.Fatalf("complete authenticated advertised identity/ports differ: %+v", descriptor)
 	}
 }

@@ -17,7 +17,7 @@ import (
 
 func brokerPeerClaim(t *testing.T) json.RawMessage {
 	t.Helper()
-	claim := noderec.PeerServicesClaim{Descriptor: noderec.PeerServicesDescriptor{HostUUID: "peer-a", Name: "peer-a", Addresses: []string{"192.168.42.8"}, Services: []noderec.PeerService{{Service: noderec.ServiceNodeInfo, Port: 25441}}}, Incarnation: "original-admission", Source: "current-child", Sequence: 1, ObservedAt: time.Now().UnixMilli()}
+	claim := noderec.PeerServicesClaim{Descriptor: noderec.PeerServicesDescriptor{HostUUID: "peer-a", Addresses: []string{"192.168.42.8"}, Services: []noderec.PeerService{{Service: noderec.ServiceNodeInfo, Port: 25441}}}, Incarnation: "original-admission", Source: "current-child", Sequence: 1, ObservedAt: time.Now().UnixMilli()}
 	body, err := json.Marshal(claim)
 	if err != nil {
 		t.Fatal(err)

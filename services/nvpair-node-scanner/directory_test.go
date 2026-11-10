@@ -330,10 +330,10 @@ func TestDirectoryUpsertRemoveSnapshot(t *testing.T) {
 	a := noderec.DirectoryNode{HostUUID: "a", Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceLlamaCPP: {Port: 8080}}}
 	b := noderec.DirectoryNode{HostUUID: "b", Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceErrors: {Port: 14319}}}
 
-	if !d.upsert(a) {
+	if isNew, _ := d.upsert(a); !isNew {
 		t.Error("first upsert should be new")
 	}
-	if d.upsert(a) {
+	if isNew, _ := d.upsert(a); isNew {
 		t.Error("second upsert of same hostUuid should not be new")
 	}
 	d.upsert(b)

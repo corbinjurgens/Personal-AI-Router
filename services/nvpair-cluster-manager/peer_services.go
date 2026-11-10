@@ -83,7 +83,7 @@ func (m *Manager) selfServicesDescriptor() (noderec.PeerServicesDescriptor, erro
 	m.serviceRefresh.mu.Lock()
 	self := m.serviceRefresh.self
 	m.serviceRefresh.mu.Unlock()
-	d := noderec.PeerServicesDescriptor{HostUUID: self.HostUUID, Name: self.Name, Addresses: self.CandidateIPs(), Services: []noderec.PeerService{}}
+	d := noderec.PeerServicesDescriptor{HostUUID: self.HostUUID, Addresses: self.CandidateIPs(), Services: []noderec.PeerService{}}
 	m.reverse.mu.RLock()
 	initialized := m.reverse.initialized
 	for _, service := range m.reverse.services {

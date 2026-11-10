@@ -154,7 +154,7 @@ type peerWalkFixture struct {
 func newPeerWalkFixture(t *testing.T) *peerWalkFixture {
 	t.Helper()
 	f := &peerWalkFixture{a: newReverseTestManager(t), b: newReverseTestManager(t), guard: newPeerDialGuard(t)}
-	f.descriptor = noderec.PeerServicesDescriptor{HostUUID: f.b.identity.NodeUUID, Name: "walk-peer", Addresses: []string{"192.0.2.55", "100.90.0.8"}, Services: []noderec.PeerService{{Service: noderec.ServiceNodeInfo, Port: 23456}}}
+	f.descriptor = noderec.PeerServicesDescriptor{HostUUID: f.b.identity.NodeUUID, Addresses: []string{"192.0.2.55", "100.90.0.8"}, Services: []noderec.PeerService{{Service: noderec.ServiceNodeInfo, Port: 23456}}}
 	if err := noderec.ValidatePeerServicesDescriptor(f.descriptor, f.b.identity.NodeUUID); err != nil {
 		t.Fatal(err)
 	}
@@ -579,7 +579,7 @@ func newPeerHintFixture(t *testing.T) *peerHintFixture {
 		t.Fatal("private hint fixture lacks current peer")
 	}
 	f.descriptor = noderec.PeerServicesDescriptor{
-		HostUUID: f.remote.identity.NodeUUID, Name: "hint-peer",
+		HostUUID: f.remote.identity.NodeUUID,
 		Addresses: []string{"192.0.2.55", "100.90.0.8"}, Services: []noderec.PeerService{},
 	}
 	if err := noderec.ValidatePeerServicesDescriptor(f.descriptor, f.peer.UUID); err != nil {
@@ -911,7 +911,7 @@ func TestDescriptorAddresses(t *testing.T) {
 				t.Fatalf("assembly mutated inputs: scanner=%v overlay=%v", scanner, overlay)
 			}
 			descriptor := noderec.PeerServicesDescriptor{
-				HostUUID: "descriptor-test", Name: "descriptor", Addresses: got,
+				HostUUID: "descriptor-test", Addresses: got,
 				Services: []noderec.PeerService{},
 			}
 			err := noderec.ValidatePeerServicesDescriptor(descriptor, descriptor.HostUUID)

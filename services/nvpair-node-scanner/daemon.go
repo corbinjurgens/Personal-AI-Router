@@ -453,8 +453,10 @@ func (d *daemon) onBrowse(ev DiscoveryEvent) {
 	if d.dir.authenticated(node.HostUUID) {
 		if ev.Type == "removed" {
 			d.dir.removeBrowse(node.HostUUID)
-		} else {
-			d.dir.upsert(node)
+		} else if _, renamed := d.dir.upsert(node); renamed {
+			if current, ok := d.dir.get(node.HostUUID); ok {
+				d.emit(noderec.NotifyNodeUpdated, current)
+			}
 		}
 		d.peerServicesMu.Unlock()
 		return
@@ -978,7 +980,7 @@ func (d *daemon) publishSelfLocked() {
 	d.enrichAt(&node, loopbackHost)
 
 	method := noderec.NotifyNodeUpdated
-	if isNew := d.dir.upsert(node); isNew {
+	if isNew, _ := d.dir.upsert(node); isNew {
 		method = noderec.NotifyNodeDiscovered
 	}
 	d.emit(method, node)

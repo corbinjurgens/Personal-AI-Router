@@ -141,16 +141,15 @@ func TestMDNSDisabledPeerServicesRefreshAndMaintenance(t *testing.T) {
 		}
 	}
 	send(claim)
-	if node := peerServicesNode(t, d); !node.Trusted || node.ClusterUUID != "peer" || node.Name != "peer-name" || node.Services[noderec.ServiceCluster].Port != 14311 || node.LastSeen != 0 {
+	if node := peerServicesNode(t, d); !node.Trusted || node.ClusterUUID != "peer" || node.Name != "" || node.Services[noderec.ServiceCluster].Port != 14311 || node.LastSeen != 0 {
 		t.Fatalf("admitted peer was not ingested with existing authority: %+v", node)
 	}
 	refreshed := claim
 	refreshed.Sequence = 2
-	refreshed.Descriptor.Name = "refreshed-peer"
 	refreshed.Descriptor.Services = []noderec.PeerService{{Service: noderec.ServiceCluster, Port: 15000}}
 	send(refreshed)
 	send(claim)
-	if node := peerServicesNode(t, d); node.Name != "refreshed-peer" || node.Services[noderec.ServiceCluster].Port != 15000 || node.LastSeen != 0 {
+	if node := peerServicesNode(t, d); node.Services[noderec.ServiceCluster].Port != 15000 || node.LastSeen != 0 {
 		t.Fatalf("fresh metadata did not replace the peer or stale replay won: %+v", node)
 	}
 	// Age the accepted claim, then let the real daemon's one-second maintenance
