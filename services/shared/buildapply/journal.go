@@ -289,7 +289,10 @@ func OpenJournal(create bool) (*Journal, error) {
 
 // ReadJournal is the no-start status primitive. Only genuinely absent canonical
 // state is idle. A corrupt, oversized, linked, substituted or unreadable journal
-// returns an error, never a fabricated empty state.
+// returns an error, never a fabricated empty state. "Linked" means the journal,
+// the profile directory holding it, or anything inside them is a link: those
+// are PAIR's own. Links above the profile directory (a linked HOME, macOS's
+// /var) are resolved and allowed, by design (see resolveRoot).
 func ReadJournal() (JournalState, error) {
 	j, err := OpenJournal(false)
 	if os.IsNotExist(err) {
@@ -306,7 +309,13 @@ func openJournalAt(name string, create bool) (*Journal, error) {
 	if err := localRootSyntax(name); err != nil {
 		return nil, err
 	}
-	name = filepath.Clean(name)
+	// The journal and the profile directory holding it must be real; links
+	// above the profile directory are resolved once here.
+	profile, err := resolveRoot(filepath.Dir(filepath.Clean(name)))
+	if err != nil {
+		return nil, err
+	}
+	name = filepath.Join(profile, filepath.Base(name))
 	root, err := OpenRealRoot(name)
 	if os.IsNotExist(err) && create {
 		parentName := filepath.Dir(name)

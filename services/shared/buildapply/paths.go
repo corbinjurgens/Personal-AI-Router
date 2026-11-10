@@ -46,6 +46,53 @@ func ValidateLocalPath(path string) error {
 	return nativeLocalPath(path)
 }
 
+// resolveRoot resolves the links above a root PAIR selects or owns, once, and
+// returns the real spelling every later check, comparison and open uses. It
+// resolves only the parent: the final component stays as named, so the strict
+// walk in checkRealAncestors still refuses a root that is itself a link, and
+// nothing below the root is ever resolved.
+//
+// A link in an ancestor the user or the OS owns (a linked HOME or ~/Library,
+// macOS's /var -> /private/var, a linked parent of a selected bundle) adds no
+// attack surface: whoever can replace it already controls the account. The
+// time-of-check risk these checks exist for is a link swapped inside PAIR's
+// tree between check and use, which the held os.Root and the identity
+// revalidation cover. Missing trailing directories are kept as named so a root
+// that does not exist yet still resolves (journal creation, absent stores).
+//
+// Go's EvalSymlinks does not evaluate Windows mount points (junctions), so a
+// junction above a root still fails here and stays refused.
+func resolveRoot(path string) (string, error) {
+	if err := localRootSyntax(path); err != nil {
+		return "", err
+	}
+	path = filepath.Clean(path)
+	parent := filepath.Dir(path)
+	if parent == path {
+		return path, nil
+	}
+	rest := []string{filepath.Base(path)}
+	for {
+		resolved, err := filepath.EvalSymlinks(parent)
+		if err == nil {
+			real := filepath.Join(append([]string{resolved}, rest...)...)
+			if err := localRootSyntax(real); err != nil {
+				return "", err
+			}
+			return real, nil
+		}
+		next := filepath.Dir(parent)
+		if !os.IsNotExist(err) || next == parent {
+			return "", err
+		}
+		rest = append([]string{filepath.Base(parent)}, rest...)
+		parent = next
+	}
+}
+
+// checkRealAncestors refuses a link anywhere in path, including path itself.
+// Callers pass a path resolveRoot produced, or one derived below such a root,
+// so a link it finds is at or inside a root PAIR selects or owns.
 func checkRealAncestors(path string) (os.FileInfo, error) {
 	ancestors := []string{}
 	for current := path; ; current = filepath.Dir(current) {
@@ -77,6 +124,9 @@ func checkRealAncestors(path string) (os.FileInfo, error) {
 	return selected, nil
 }
 
+// OpenRealRoot holds a directory whose every component is real. path must
+// already be resolved (resolveRoot) or derived below a resolved root; entry
+// points that take an outside spelling resolve it first.
 func OpenRealRoot(path string) (*RealRoot, error) {
 	if err := localRootSyntax(path); err != nil {
 		return nil, err
@@ -146,47 +196,58 @@ func containsPath(root, path string) bool {
 
 // ValidateLocations rejects both containment directions: a bundle cannot own a
 // profile/source/model tree, nor be nested in one. Exclusions are trusted owner
-// paths, never supplied by a candidate descriptor.
+// paths, never supplied by a candidate descriptor. Every path is resolved
+// first and only resolved paths are compared, so a selection cannot reach a
+// protected tree through a link that a string comparison would miss.
 func ValidateLocations(source, target string, excluded []string) error {
 	if !filepath.IsAbs(source) || !filepath.IsAbs(target) {
 		return errors.New("unresolved bundle root")
 	}
+	selected := make([]string, 0, 2)
 	for _, path := range []string{source, target} {
-		if err := localRootSyntax(path); err != nil {
+		real, err := resolveRoot(path)
+		if err != nil {
 			return err
 		}
-		if err := nativeLocalPath(path); err != nil {
+		if _, err := checkRealAncestors(real); err != nil {
 			return err
 		}
-		if _, err := checkRealAncestors(path); err != nil {
-			return err
-		}
+		selected = append(selected, real)
 	}
-	if containsPath(source, target) || containsPath(target, source) {
+	if containsPath(selected[0], selected[1]) || containsPath(selected[1], selected[0]) {
 		return errors.New("source and target overlap")
 	}
-	for _, selected := range []string{source, target} {
-		for _, protected := range excluded {
-			if protected == "" {
-				continue
-			}
-			if err := localRootSyntax(protected); err != nil {
-				return errors.New("protected root is unresolved")
-			}
-			if err := nativeLocalPath(protected); err != nil {
-				return err
-			}
-			// Missing default stores are harmless. Linked or otherwise
-			// unresolved protected roots cannot authorize a selection: do not
-			// follow one to an unknown filesystem merely to improve preview.
-			if _, err := checkRealAncestors(protected); err != nil && !os.IsNotExist(err) {
-				return errors.New("protected root is linked or unavailable")
-			}
-			if containsPath(selected, protected) || containsPath(protected, selected) {
+	protectedRoots := make([]string, 0, len(excluded))
+	for _, protected := range excluded {
+		if protected == "" {
+			continue
+		}
+		if err := localRootSyntax(protected); err != nil {
+			return errors.New("protected root is unresolved")
+		}
+		real, err := resolveRoot(protected)
+		if err != nil {
+			return errors.New("protected root is linked or unavailable")
+		}
+		if err := nativeLocalPath(real); err != nil {
+			return err
+		}
+		// Missing default stores are harmless. A protected root that is
+		// itself a link, or is otherwise unavailable, cannot authorize a
+		// selection: do not follow it to an unknown filesystem merely to
+		// improve preview.
+		if _, err := checkRealAncestors(real); err != nil && !os.IsNotExist(err) {
+			return errors.New("protected root is linked or unavailable")
+		}
+		protectedRoots = append(protectedRoots, real)
+	}
+	for _, path := range selected {
+		for _, protected := range protectedRoots {
+			if containsPath(path, protected) || containsPath(protected, path) {
 				return errors.New("bundle overlaps protected data or model root")
 			}
 		}
-		for parent := selected; ; parent = filepath.Dir(parent) {
+		for parent := path; ; parent = filepath.Dir(parent) {
 			for _, marker := range []string{".git", ".hg", ".svn"} {
 				if _, err := os.Lstat(filepath.Join(parent, marker)); err == nil {
 					return errors.New("source checkout is not an installation")
@@ -213,19 +274,24 @@ func TargetFromExecutables(gui, service, platform string) (string, error) {
 		if err := localRootSyntax(path); err != nil {
 			return "", err
 		}
-		if err := nativeLocalPath(path); err != nil {
-			return "", err
-		}
-		if _, err := checkRealAncestors(filepath.Dir(path)); err != nil {
-			return "", err
-		}
 	}
-	root := filepath.Dir(gui)
+	named := filepath.Dir(gui)
 	if platform == "darwin" {
-		root = filepath.Dir(filepath.Dir(root))
+		named = filepath.Dir(filepath.Dir(named))
+	}
+	// Links above the installation are resolved; the bundle root and the
+	// directories inside it that hold both executables must be real.
+	root, err := resolveRoot(named)
+	if err != nil {
+		return "", err
 	}
 	wantGUI := filepath.Join(root, filepath.FromSlash(layout.Executable))
 	wantService := filepath.Join(root, filepath.FromSlash(layout.ServiceDir), layout.ServiceExecutable)
+	for _, path := range []string{root, filepath.Dir(wantGUI), filepath.Dir(wantService)} {
+		if _, err := checkRealAncestors(path); err != nil {
+			return "", err
+		}
+	}
 	for _, pair := range [][2]string{{gui, wantGUI}, {service, wantService}} {
 		a, err := os.Lstat(pair[0])
 		if err != nil {
@@ -279,14 +345,20 @@ func InspectProcess(pid int) (ProcessIdentity, error) {
 
 // ReadLocalFile is a bounded, rooted read of an existing owner file. It never
 // creates missing state and refuses links, nonlocal mounts and substitutions.
+// The file and the directory holding it must be real; links above that
+// directory are resolved (resolveRoot).
 func ReadLocalFile(path string, limit int64) ([]byte, error) {
 	if limit <= 0 || limit > MaxFileBytes {
 		return nil, errors.New("invalid local read bound")
 	}
-	if err := ValidateLocalPath(path); err != nil {
+	if err := localRootSyntax(path); err != nil {
 		return nil, err
 	}
-	root, err := OpenRealRoot(filepath.Dir(path))
+	dir, err := resolveRoot(filepath.Dir(path))
+	if err != nil {
+		return nil, err
+	}
+	root, err := OpenRealRoot(dir)
 	if err != nil {
 		return nil, err
 	}
