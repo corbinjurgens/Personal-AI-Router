@@ -243,7 +243,7 @@ func startSubscriptionBroker(t *testing.T, ports fixtureServicePorts, extraArgs 
 	return p, func(method, instance string, nodeInfoPort int) {
 		t.Helper()
 		event := noderec.NodeEvent{Node: noderec.DirectoryNode{
-			HostUUID: instance + "-uuid", Name: instance, IP: "127.0.0.1",
+			HostUUID: xprocInstanceUUID(instance), Name: instance, IP: "127.0.0.1",
 			Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceNodeInfo: {Port: nodeInfoPort}},
 		}}
 		frame := jsonrpc.Message{JSONRPC: "2.0", Method: method, Params: mustMarshal(t, event)}
@@ -261,6 +261,12 @@ func startSubscriptionBroker(t *testing.T, ports fixtureServicePorts, extraArgs 
 	}
 }
 
+// xprocInstanceUUID is the node UUID the fixtures publish for a fixture instance
+// label. The broker identifies a node by that UUID, not by the label.
+func xprocInstanceUUID(instance string) string {
+	return instance + "-uuid"
+}
+
 func containsNode(nodes []availableNode, id string) bool {
 	for _, n := range nodes {
 		if n.ID == id {
@@ -270,11 +276,11 @@ func containsNode(nodes []availableNode, id string) bool {
 	return false
 }
 
-// pollNodeListed repeatedly issues discovery:get-nodes until `instance`
-// appears in the snapshot. Every discovery:nodes-changed seen in the
+// pollNodeListed repeatedly issues discovery:get-nodes until the node with
+// UUID `nodeID` appears in the snapshot. Every discovery:nodes-changed seen in the
 // meantime is passed to allowPush; if allowPush returns false the test
 // fails (used to assert the stream is silent while unsubscribed).
-func pollNodeListed(t *testing.T, stdin io.Writer, msgs <-chan jsonrpc.Message, instance string, baseReqID int, timeout time.Duration, allowPush func([]availableNode) bool) {
+func pollNodeListed(t *testing.T, stdin io.Writer, msgs <-chan jsonrpc.Message, nodeID string, baseReqID int, timeout time.Duration, allowPush func([]availableNode) bool) {
 	t.Helper()
 	deadline := time.After(timeout)
 	ticker := time.NewTicker(1500 * time.Millisecond)
@@ -299,7 +305,7 @@ func pollNodeListed(t *testing.T, stdin io.Writer, msgs <-chan jsonrpc.Message, 
 				}
 			case msg.Method == "" && msg.ID != nil:
 				var res availableNodesResult
-				if json.Unmarshal(msg.Result, &res) == nil && containsNode(res.Nodes, instance) {
+				if json.Unmarshal(msg.Result, &res) == nil && containsNode(res.Nodes, nodeID) {
 					return
 				}
 			}
@@ -307,33 +313,33 @@ func pollNodeListed(t *testing.T, stdin io.Writer, msgs <-chan jsonrpc.Message, 
 			id++
 			sendReq(t, stdin, id, "discovery:get-nodes")
 		case <-deadline:
-			t.Fatalf("timed out (%s) waiting for %q in discovery:get-nodes", timeout, instance)
+			t.Fatalf("timed out (%s) waiting for node %q in discovery:get-nodes", timeout, nodeID)
 		}
 	}
 }
 
-// waitForPushContaining blocks until a discovery:nodes-changed carrying
-// `instance` arrives, failing on timeout.
-func waitForPushContaining(t *testing.T, msgs <-chan jsonrpc.Message, instance string, timeout time.Duration) {
+// waitForPushContaining blocks until a discovery:nodes-changed carrying the
+// node with UUID `nodeID` arrives, failing on timeout.
+func waitForPushContaining(t *testing.T, msgs <-chan jsonrpc.Message, nodeID string, timeout time.Duration) {
 	t.Helper()
 	to := time.After(timeout)
 	for {
 		select {
 		case msg, ok := <-msgs:
 			if !ok {
-				t.Fatalf("broker stream closed before push containing %q", instance)
+				t.Fatalf("broker stream closed before push containing %q", nodeID)
 			}
 			if msg.Method == "discovery:nodes-changed" {
 				var nodes []availableNode
 				if err := json.Unmarshal(msg.Params, &nodes); err != nil {
 					t.Fatalf("unmarshal discovery:nodes-changed: %v\nraw: %s", err, msg.Params)
 				}
-				if containsNode(nodes, instance) {
+				if containsNode(nodes, nodeID) {
 					return
 				}
 			}
 		case <-to:
-			t.Fatalf("timed out (%s) waiting for discovery:nodes-changed containing %q", timeout, instance)
+			t.Fatalf("timed out (%s) waiting for discovery:nodes-changed containing %q", timeout, nodeID)
 		}
 	}
 }
@@ -357,7 +363,7 @@ func TestCrossProcessBrokerSubscription(t *testing.T) {
 
 	// Phase 1 — unsubscribed: the node must be visible via the on-demand
 	// snapshot, but the broker must push NOTHING.
-	pollNodeListed(t, stdin, msgs, inst1, 1, 25*time.Second, func([]availableNode) bool { return false })
+	pollNodeListed(t, stdin, msgs, xprocInstanceUUID(inst1), 1, 25*time.Second, func([]availableNode) bool { return false })
 	t.Log("phase 1 OK: node visible via get-nodes, no push while unsubscribed")
 
 	// Phase 2 — subscribe: expect an ack {subscribed:true} and an
@@ -385,8 +391,8 @@ func TestCrossProcessBrokerSubscription(t *testing.T) {
 				if err := json.Unmarshal(msg.Params, &nodes); err != nil {
 					t.Fatalf("unmarshal baseline: %v\nraw: %s", err, msg.Params)
 				}
-				if !containsNode(nodes, inst1) {
-					t.Errorf("baseline snapshot missing %q: %s", inst1, msg.Params)
+				if !containsNode(nodes, xprocInstanceUUID(inst1)) {
+					t.Errorf("baseline snapshot missing %q: %s", xprocInstanceUUID(inst1), msg.Params)
 				}
 				gotBaseline = true
 			}
@@ -398,7 +404,7 @@ func TestCrossProcessBrokerSubscription(t *testing.T) {
 
 	// Phase 3 — subscribed: a newly advertised node must be pushed.
 	publish(noderec.NotifyNodeDiscovered, inst2, port2)
-	waitForPushContaining(t, msgs, inst2, 25*time.Second)
+	waitForPushContaining(t, msgs, xprocInstanceUUID(inst2), 25*time.Second)
 	t.Log("phase 3 OK: live push received for new node while subscribed")
 
 	// Phase 4 — unsubscribe: expect an ack {subscribed:false}.
@@ -434,8 +440,8 @@ func TestCrossProcessBrokerSubscription(t *testing.T) {
 	// the negative assertion on inst3 (which only exists from now on)
 	// makes it immune to any pre-unsubscribe push still draining.
 	publish(noderec.NotifyNodeDiscovered, inst3, port3)
-	pollNodeListed(t, stdin, msgs, inst3, 300, 25*time.Second, func(nodes []availableNode) bool {
-		return !containsNode(nodes, inst3)
+	pollNodeListed(t, stdin, msgs, xprocInstanceUUID(inst3), 300, 25*time.Second, func(nodes []availableNode) bool {
+		return !containsNode(nodes, xprocInstanceUUID(inst3))
 	})
 	t.Log("phase 5 OK: node discovered after unsubscribe with no push — gating confirmed")
 }
