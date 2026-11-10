@@ -526,6 +526,10 @@ func (m *Manager) handleMessage(msg *Message) {
 		m.handleGetNodeID(msg)
 	case "cluster:set-node-name":
 		m.handleSetNodeName(msg)
+	case "cluster:set-peer-name":
+		// Network-bound: answer from its own goroutine so the read loop
+		// keeps serving other requests.
+		go m.handleSetPeerName(msg)
 	case "cluster:set-peer-nickname":
 		m.handleSetPeerNickname(msg)
 	case "cluster:get-join-requests":

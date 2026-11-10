@@ -5,11 +5,13 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log"
 	"net/http"
 
+	"nvpair-shared/httpcon"
 	"nvpair-shared/nodename"
 )
 
@@ -24,6 +26,7 @@ const (
 	peerNameInvalidCode        = "invalid_name"
 	remoteManagementDeniedWire = "remote_management_denied"
 	remoteManagementDeniedText = "Remote management is blocked on this device. Change permission locally on that device."
+	peerNameUnavailableText    = "the device is offline or does not trust this node"
 )
 
 // peerNodeNameRequest is the exact PUT body: {"name": string|null}.
@@ -106,6 +109,111 @@ func (m *Manager) handlePeerNodeName(w http.ResponseWriter, r *http.Request) {
 	writePeerJSON(w, http.StatusOK, view)
 }
 
+// handleSetPeerName asks a member to rename itself. Params are exactly
+// {nodeUuid, name: string|null}. The target applies the name only when it has
+// granted this node remote management; on its 200 answer this node records the
+// returned name for that member at once, through the same received-name path
+// as a roster refresh. The target's roster push repairs anything missed here.
+func (m *Manager) handleSetPeerName(msg *Message) {
+	member, name, errMsg, errData := m.decodePeerTarget(msg.Params, "name")
+	if errMsg != "" {
+		m.codec.RespondErrorData(msg.ID, codeInvalidParams, errMsg, errData)
+		return
+	}
+	uuid := member.NodeUUID
+	body, err := json.Marshal(map[string]*string{"name": name})
+	if err != nil {
+		m.codec.RespondErrorData(msg.ID, codeInternalError, err.Error(), nil)
+		return
+	}
+	// The removal client keeps fresh connections, so a lost reply is never
+	// replayed as a second rename.
+	client, err := m.removalPeerClient(uuid)
+	if err != nil {
+		log.Printf("peer rename: %s: %v", uuid, err)
+		m.codec.RespondErrorData(msg.ID, codePeerUnavailable, peerNameUnavailableText, nil)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), pairingHTTPTimeout)
+	defer cancel()
+	addrs := m.resolvePeerAddrs(*member)
+	for _, addr := range confirmedFirst(addrs, m.peerAddrs.ChooseWithin(ctx, uuid, addrs)) {
+		if !m.selectPeerServiceAddress(uuid, addr) {
+			continue
+		}
+		status, answer, answered := sendPeerRename(ctx, client, addr, body)
+		if answered {
+			m.answerPeerRename(msg, uuid, status, answer)
+			return
+		}
+		m.peerAddrs.Forget(uuid)
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	m.codec.RespondErrorData(msg.ID, codePeerUnavailable, peerNameUnavailableText, nil)
+}
+
+// sendPeerRename sends one rename request to addr. answered is false only
+// when the peer never responded there.
+func sendPeerRename(ctx context.Context, client *http.Client, addr string, body []byte) (status int, answer []byte, answered bool) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, "https://"+addr+peerNodeNamePath, bytes.NewReader(body))
+	if err != nil {
+		return 0, nil, false
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("peer rename: %s: %v", addr, err)
+		return 0, nil, false
+	}
+	defer httpcon.DrainAndClose(resp.Body)
+	answer, err = io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+	if err != nil {
+		return 0, nil, false
+	}
+	return resp.StatusCode, answer, true
+}
+
+// answerPeerRename maps the target's answer to the local RPC response.
+func (m *Manager) answerPeerRename(msg *Message, uuid string, status int, answer []byte) {
+	var peerErr peerNodeNameError
+	switch status {
+	case http.StatusOK:
+		var view nodeNameView
+		if err := json.Unmarshal(answer, &view); err != nil || view.NodeUUID != uuid {
+			log.Printf("peer rename: %s sent an unusable answer", uuid)
+			m.codec.RespondErrorData(msg.ID, codeInternalError, "the device sent an unusable answer", nil)
+			return
+		}
+		if m.refreshMemberIdentity(&RosterEntry{NodeUUID: uuid, Name: view.Name}) {
+			m.emitNodesChanged()
+		}
+		m.codec.Respond(msg.ID, view)
+	case http.StatusConflict:
+		_ = json.Unmarshal(answer, &peerErr)
+		if peerErr.Message == "" {
+			peerErr.Message = remoteManagementDeniedText
+		}
+		m.codec.RespondErrorData(msg.ID, codeRemoteManagementDenied, peerErr.Message, nil)
+	case http.StatusBadRequest:
+		_ = json.Unmarshal(answer, &peerErr)
+		if peerErr.Message == "" {
+			peerErr.Message = "the device rejected the name"
+		}
+		data := map[string]string{"field": "name"}
+		if peerErr.Reason != "" {
+			data["reason"] = peerErr.Reason
+		}
+		m.codec.RespondErrorData(msg.ID, codeInvalidParams, peerErr.Message, data)
+	case http.StatusForbidden:
+		m.codec.RespondErrorData(msg.ID, codePeerUnavailable, peerNameUnavailableText, nil)
+	default:
+		log.Printf("peer rename: %s answered status %d", uuid, status)
+		m.codec.RespondErrorData(msg.ID, codeInternalError, "the device could not apply the name", nil)
+	}
+}
+
 // peerNicknameView is the cluster:set-peer-nickname result.
 type peerNicknameView struct {
 	NodeUUID    string  `json:"nodeUuid"`
@@ -114,34 +222,37 @@ type peerNicknameView struct {
 }
 
 // decodePeerTarget decodes strict {nodeUuid, <valueKey>: string|null} params
-// and checks that nodeUuid names a current member other than this node. On
-// failure it returns the -32602 message and data to send.
-func (m *Manager) decodePeerTarget(params json.RawMessage, valueKey string) (uuid string, value *string, errMsg string, errData map[string]string) {
+// and returns the member nodeUuid names, which must be a current member other
+// than this node. On failure it returns the -32602 message and data to send.
+func (m *Manager) decodePeerTarget(params json.RawMessage, valueKey string) (member *ClusterNode, value *string, errMsg string, errData map[string]string) {
+	var uuid string
 	fields, err := decodeRemoteManagementParams(params, map[string]bool{"nodeUuid": true, valueKey: true})
 	rawValue, hasValue := fields[valueKey]
 	if err != nil || len(fields) != 2 || !hasValue ||
 		json.Unmarshal(fields["nodeUuid"], &uuid) != nil || json.Unmarshal(rawValue, &value) != nil {
-		return "", nil, "invalid params", nil
+		return nil, nil, "invalid params", nil
 	}
 	nodeField := map[string]string{"field": "nodeUuid"}
 	if uuid == m.identity.NodeUUID {
-		return "", nil, "nodeUuid is this node", nodeField
+		return nil, nil, "nodeUuid is this node", nodeField
 	}
-	if member, ok := m.memberByUUID(uuid); !ok || member.State != stateMember {
-		return "", nil, "nodeUuid is not a cluster member", nodeField
+	member, ok := m.memberByUUID(uuid)
+	if !ok || member.State != stateMember {
+		return nil, nil, "nodeUuid is not a cluster member", nodeField
 	}
-	return uuid, value, "", nil
+	return member, value, "", nil
 }
 
 // handleSetPeerNickname sets (string) or clears (null) the nickname this node
 // uses for a peer. Params are exactly {nodeUuid, nickname}. The nickname lives
 // on the member record in members.json and never leaves this node.
 func (m *Manager) handleSetPeerNickname(msg *Message) {
-	uuid, raw, errMsg, errData := m.decodePeerTarget(msg.Params, "nickname")
+	target, raw, errMsg, errData := m.decodePeerTarget(msg.Params, "nickname")
 	if errMsg != "" {
 		m.codec.RespondErrorData(msg.ID, codeInvalidParams, errMsg, errData)
 		return
 	}
+	uuid := target.NodeUUID
 	nickname := ""
 	if raw != nil {
 		normalized, err := nodename.Normalize(*raw)
