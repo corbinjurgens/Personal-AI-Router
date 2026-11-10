@@ -697,12 +697,12 @@ export const useClusterInvitationsStore = create<ClusterInvitationsStore>((set, 
                     queuePermissionReadback()
                 } else receivePermissions(snapshot)
             }),
-            // A fresh arrival: surface it in the modal. Main also emits the full
-            // list via `cluster:pending-invites-changed`, so this only picks which
-            // invite the modal shows.
             window.pairApi.cluster.onNodeNameChanged(result => {
                 if (subscriptionGeneration === generation) receiveNodeName(result)
             }),
+            // A fresh arrival: surface it in the modal. Main also emits the full
+            // list via `cluster:pending-invites-changed`, so this only picks which
+            // invite the modal shows.
             window.pairApi.cluster.onInviteReceived(invite => {
                 if (invite.state === 'pending' && !retiredJoinInvites.has(invite.inviteId))
                     set({ activeInviteId: invite.inviteId })

@@ -57,11 +57,11 @@ interface ModularNode {
     // proxies key `Node.ID` by it, and `/v1/node-info` reports it, so every
     // domain now agrees on this id: workload `originatedFrom`/`scheduledOn`,
     // error `nodeId`, and proxy routing all resolve against it. Never key,
-    // dedupe, or attribute by hostname — that is display only (`name`).
+    // dedupe, or attribute by name — that is display only (`name`).
     id: string
     sources: BrokerNodeSource[]
-    // Display hostname (broker `AvailableNode.name` / proxy `Node.Host`). Shown
-    // to the user; never a correlation key.
+    // Shown name, decided in Go and carried on broker `AvailableNode.name`; the
+    // proxy `node/*` feed supplies none. Shown to the user; never a correlation key.
     name: string
     host: string
     // Whether the node is a locally-trusted (pinned) peer and whether it already
@@ -540,7 +540,7 @@ function toNodeItem(node: ModularNode, selfId: string | null): NodeItem {
         id: node.id,
         serviceBuildId: node.serviceBuildId,
         ...(node.performance ? { performance: node.performance } : {}),
-        // Display label: the hostname, else the reachable address; never the raw
+        // Display label: the shown name, else the reachable address; never the raw
         // UUID key (falls back to it only if a node somehow has neither).
         name: node.name || ipAddress || node.id,
         // The backend evicts mDNS nodes on its own (~60s of unbroken silence with

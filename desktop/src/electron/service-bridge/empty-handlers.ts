@@ -130,7 +130,7 @@ async function handleGetSelfId(): Promise<string | null> {
     const state = getModularBridgeState()
     const identity = await getClusterIdentity()
     // Self is the stable node UUID — the same key discovery/proxy/workloads/
-    // errors use — never the hostname. `nodeUuid` is minted at cluster-manager
+    // errors use — never a name. `nodeUuid` is minted at cluster-manager
     // startup, so it is available immediately.
     if (identity.nodeUuid) {
         state.setSelfId(identity.nodeUuid)
@@ -595,7 +595,7 @@ async function handleClusterAbandonIfSolo(): Promise<null> {
 
     const members = await getClusterMembers()
     const selfId = getModularBridgeState().getSelfId()
-    // Self is keyed by nodeUuid; `id` is the hostname (display only).
+    // Self is keyed by nodeUuid; names are display only.
     const hasPeer = members.some(m => m.state === 'member' && m.nodeUuid !== selfId)
     if (hasPeer) {
         supervisor.clearAutoCreatedSoloForInvite()
@@ -676,9 +676,9 @@ async function removeManualNode(
     nodeId: string
 ): Promise<void> {
     const state = getModularBridgeState()
-    const hostname = state.getNodeHostname(nodeId)
-    // A manual-only discovery projection uses the worker's ID as its name/key.
-    const knownManual = nodeId.startsWith('manual:') || hostname.startsWith('manual:')
+    const shownName = state.getNodeHostname(nodeId)
+    // A manual-only discovery projection uses the worker's ID as its shown name.
+    const knownManual = nodeId.startsWith('manual:') || shownName.startsWith('manual:')
     let result: JsonObject | null
     try {
         result = objectValue(await supervisor.callProcess('broker', 'nodes/list'))
@@ -692,7 +692,7 @@ async function removeManualNode(
         entry =>
             entry.id === nodeId ||
             entry.hostUuid === nodeId ||
-            (knownManual && entry.id === hostname)
+            (knownManual && entry.id === shownName)
     )
     if (matches.length === 0) {
         const addresses = state.getNodeAddresses(nodeId)

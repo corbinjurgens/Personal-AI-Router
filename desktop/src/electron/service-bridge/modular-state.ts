@@ -354,8 +354,9 @@ class ModularBridgeState {
     }
 
     /**
-     * The display hostname for a node key (UUID), or '' when unknown. Manual-only
-     * projections display the worker's entry ID; scanner projections display the hostname.
+     * The shown name for a node key (UUID), or '' when unknown. Manual-only
+     * projections show the worker's entry ID; scanner projections show the name
+     * the broker decided.
      */
     getNodeHostname(nodeId: string): string {
         return this.nodes.get(nodeId)?.name ?? ''
@@ -520,7 +521,7 @@ class ModularBridgeState {
             const addresses = nodeAddresses(node)
             return {
                 id: node.id,
-                // Display label: hostname, else reachable address; never the raw UUID.
+                // Display label: shown name, else reachable address; never the raw UUID.
                 name: node.name || primaryNodeAddress(node) || node.id,
                 ipAddress: primaryNodeAddress(node),
                 // Only for a genuinely multi-homed node: a one-entry list would just
