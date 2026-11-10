@@ -93,7 +93,7 @@ settings store**. Concretely, the parent must:
   `cluster:invite-canceled` for the old ID before `cluster:invite-received`
   for the replacement; dismiss the old prompt and keep the newest one.
 - **Resolve invite targets to an address.** `cluster:invite-node` takes a
-  reachable `address` (and optional `port`/`nodeId`). You pick the target
+  reachable `address` (and optional `port`/`nodeUuid`). You pick the target
   (from `nvpair-node-scanner`, manual nodes, etc.) and pass a resolved
   address; the manager does not do UUID→address resolution for you.
 - **Don't re-invite an already-clustered node.** If the target is already
@@ -116,7 +116,15 @@ as a JSON-RPC `error`. See [Errors](#errors).
 ```jsonc
 // --- identity ---
 {"jsonrpc":"2.0","id":1,"method":"cluster:get-node-id"}
-//   -> {"nodeUuid":"b3d4...","nodeId":"NODE-A","name":"Lab desk A","certFingerprint":"sha256:...","clusterId":""}
+//   -> {"nodeUuid":"b3d4...","name":"Lab desk A","customName":"Lab desk A","certFingerprint":"sha256:...","clusterId":""}
+//   name is the effective display name; customName is the user-set name or null.
+
+{"jsonrpc":"2.0","id":11,"method":"cluster:set-node-name","params":{"name":"Lab desk A"}}   // {"name":null} clears
+//   -> {"nodeUuid":"b3d4...","name":"Lab desk A","customName":"Lab desk A"}
+//   persists display_name in identity.json; emits cluster:node-name-changed when the name changed.
+//   errors: missing/unknown/duplicate key or non-string non-null value -> -32602 {field:"name"};
+//   rejected name -> -32602 with the validator's message and {field:"name", reason:"invalid-utf8"|"empty"|"invalid-character"|"too-long"};
+//   failed identity.json write -> -32603.
 
 {"jsonrpc":"2.0","id":2,"method":"cluster:set-identity","params":{"clusterId":"cluster-xyz","clusterFriendlyName":"Lab 3 desks"}}
 //   -> {"clusterId":"cluster-xyz","clusterFriendlyName":"Lab 3 desks"}   (reflects node-settings; no identity-changed push)
@@ -135,8 +143,8 @@ as a JSON-RPC `error`. See [Errors](#errors).
 {"jsonrpc":"2.0","id":4,"method":"nodes:get-initial"}
 //   -> {"nodes":[ <ClusterNode>, ... ]}   (members + pending invites; empty list is normal)
 
-{"jsonrpc":"2.0","id":5,"method":"nodes:remove","params":{"nodeId":"NODE-B"}}   // nodeUuid also accepted
-//   -> {"nodeId":"NODE-B","removed":true}   (removed:false if it wasn't a member)
+{"jsonrpc":"2.0","id":5,"method":"nodes:remove","params":{"nodeUuid":"7a1c..."}}   // required; missing -> -32602 {field:"nodeUuid"}
+//   -> {"nodeUuid":"7a1c...","removed":true}   (removed:false if it wasn't a member)
 //   removing self -> error -32602 {field:"nodeUuid"} — use cluster:leave instead.
 
 {"jsonrpc":"2.0","id":10,"method":"cluster:leave"}   // this node unjoins its own cluster
@@ -145,7 +153,7 @@ as a JSON-RPC `error`. See [Errors](#errors).
 //   (emits cluster:identity-changed with clusterId:"" and an empty nodes:changed).
 
 // --- pairing (inviter side) ---
-{"jsonrpc":"2.0","id":6,"method":"cluster:invite-node","params":{"address":"192.168.1.22","port":14321,"nodeId":"NODE-B","allowRemoteManagement":false}}
+{"jsonrpc":"2.0","id":6,"method":"cluster:invite-node","params":{"address":"192.168.1.22","port":14321,"nodeUuid":"7a1c...","allowRemoteManagement":false}}
 //   -> {"inviteId":"inv-9f3a1c","state":"pending","pin":"402199"}   (show the PIN; "failed" + no pin if unreachable)
 //   -> {"inviteId":"inv-9f3a1c","state":"rejected","reason":"already-clustered"}   (no pin; target is already in a cluster - remove/leave first)
 //   if this node is unclustered, it auto-founds a cluster of one first (same as
@@ -227,6 +235,9 @@ No `id`; never carry an error; handle them off your read loop.
 // Persist {clusterId, clusterFriendlyName} to nvpair-node-settings. NOT emitted for changes you drove via set-identity.
 {"jsonrpc":"2.0","method":"cluster:identity-changed","params":{"clusterId":"...","clusterFriendlyName":"..."}}
 
+// This node's effective or user-set display name changed (after cluster:set-node-name).
+{"jsonrpc":"2.0","method":"cluster:node-name-changed","params":{"nodeUuid":"...","name":"...","customName":"..." | null}}
+
 // (PROPOSED, spec §4) Full membership snapshot on every change, so you can avoid polling nodes:get-initial.
 {"jsonrpc":"2.0","method":"nodes:changed","params":{"nodes":[ <ClusterNode>, ... ]}}
 ```
@@ -238,9 +249,10 @@ No `id`; never carry an error; handle them off your read loop.
 
 ```jsonc
 {
-  "id":        "NODE-B",            // logical id (hostname); the membership key, display only
-  "nodeUuid":  "7a1c...",           // stable cryptographic id; the trust principal
-  "name":      "Lab desk B",        // display name
+  "nodeUuid":  "7a1c...",           // the only identity: membership key and trust principal
+  "name":      "Lab desk B",        // the member's own display name
+  "nickname":  "Bench B",           // optional; a name only this node uses (never sent to peers)
+  "displayName": "Bench B",         // snapshots only: nickname, else name, else "PAIR <first 8 UUID chars>"
   "ipAddress": "192.168.1.22",
   "advertisedAddresses": ["192.168.1.22", "100.64.0.10"], // optional authenticated locator hints
   "port":      14321,
@@ -263,10 +275,9 @@ replace `ipAddress` nor grant membership, trust, liveness or service presence.
 ```jsonc
 {
   "inviteId":  "inv-9f3a1c",        // correlation / dedup key
-  "fromNodeId":   "NODE-A",
   "fromNodeUuid": "b3d4...",
   "fromNodeName": "Lab desk A",
-  "toNodeId":  "NODE-B",            // null if unknown to the inviter
+  "toNodeUuid": "7a1c...",          // inviter: the UUID the target resolved to (null if only an address was given); joiner: its own UUID
   "clusterId": "cluster-xyz",
   "clusterFriendlyName": "Lab 3 desks",
   "pin":       "402199",            // inviter-local invite-node or pending outbound invite-status only; never logged
@@ -303,7 +314,7 @@ with `accept:false`. A replacement invite from the same `fromNodeUuid`
 automatically cancels the older ID; handle its `cluster:invite-canceled`
 notification before presenting the replacement.
 
-**Remove a node.** `nodes:remove {nodeId}` → `{removed:true}`. The manager
+**Remove a node.** `nodes:remove {nodeUuid}` → `{nodeUuid, removed:true}`. The manager
 prepares an exact-admission removal proof, selects a current endpoint, persists
 the proof only once that selection and the original admissions are still
 current, and attempts one authenticated notification while the pin still
@@ -325,7 +336,7 @@ joiner rejection retain their existing contract.
 | Local method | Params | Result |
 | --- | --- | --- |
 | `cluster:get-join-requests` | `{}` | `{supported:true, canAskToJoin, requiresSoloReplacement, blockedReason, requests:JoinRequest[]}` |
-| `cluster:ask-to-join` | `{address, port?, nodeId?, replaceSoloCluster:boolean}` | `JoinRequest`; returns promptly, manager owns progress |
+| `cluster:ask-to-join` | `{address, port?, nodeUuid?, replaceSoloCluster:boolean}` | `JoinRequest`; returns promptly, manager owns progress |
 | `cluster:respond-to-join-request` | `{requestId, accept:true, allowRemoteManagement:boolean}` or `{requestId, accept:false}` | Updated incoming `JoinRequest` |
 | `cluster:cancel-join-request` | `{requestId}` | Updated outgoing `JoinRequest` |
 | `cluster:join-requests-changed` | Notification | Same full snapshot as the getter |
@@ -336,7 +347,8 @@ joiner rejection retain their existing contract.
 `awaiting-approval`, `awaiting-requester`, `pairing`, `paired`, `declined`,
 `canceled`, `expired`, `failed` and `rejected`. IDs have at least 128 random bits;
 they correlate operations and never authorize membership. Names/UUIDs before
-pairing are unverified claims; names are bounded and sanitized. Request records
+pairing are unverified claims; a name that fails validation is shown as the
+UUID fallback. Request records
 and snapshots contain no PIN, certificate, key or grant. Member clients read
 the pending inviter PIN locally through `cluster:invite-status` once the exact
 child `inviteId` exists. Only the existing per-user local endpoint can approve.
@@ -503,7 +515,7 @@ Generated on first run and reused forever after, under
 
 ```
 <config-dir>/cluster/
-  identity.json            # { "node_uuid": "...", "created_at": <epoch ms> }
+  identity.json            # { "node_uuid": "...", "created_at": <epoch ms>, "display_name": "..." }  (display_name optional)
   node.key                 # this node's private key (PEM) — never leaves the host
   node.crt                 # this node's self-signed leaf (PEM)
   trusted/                 # the trusted-node store: ONE <peerUuid>.json per pinned peer
@@ -511,12 +523,32 @@ Generated on first run and reused forever after, under
   pairing-receipts.json     # bounded public transcript/terminal confirmation receipts
 ```
 
-The **node UUID is the trust principal** (cert subject `CN`/URI SAN), not
-the hostname — hostnames are mutable, non-unique, and spoofable. Removing a
+The **node UUID is the only identity and the trust principal** (cert subject
+`CN`/URI SAN). There is no hostname-valued id, and new leaf certificates carry
+no DNS SAN (hostnames are mutable, non-unique, and spoofable). Removing a
 node deletes its `trusted/<uuid>.json`, which is the only revocation
 mechanism (no CRL/OCSP). This keypair + `trusted/` store is the shared
 trust fabric other inter-node services (`nvpair-workload-manager`,
 `nvpair-errors` peer-sync) are intended to reuse. Full format in spec §7.4.
+
+## Node display name
+
+The manager owns this node's display name. `identity.json` stores an optional
+user-set `display_name`; while it is unset the manager shows a generated
+default, computed once at each service start: on macOS `ComputerName`, then
+`LocalHostName` (`/usr/sbin/scutil --get`); on Windows the computer name; on
+Linux the pretty hostname (`/etc/machine-info`), then `/etc/hostname`, then
+the kernel hostname; and finally `PAIR <first 8 UUID characters>`. Every name
+the manager accepts, set locally or received, passes the shared
+`nvpair-shared/nodename` validator (NFC, trimmed, 1 to 128 UTF-8 bytes, no
+control or bidirectional control characters). Names need not be unique.
+
+Each roster carries every node's own name. A rename that changes the effective
+name on a clustered node renames the self member and starts an immediate
+reconcile with reachable members; the periodic reconcile repairs the rest. A
+received name that fails validation never replaces a stored name; a record
+with no stored name gets the UUID fallback. Members are sorted by name, then
+UUID. Spec section 7.4.1 has the full contract.
 
 ## Inter-node networking
 
