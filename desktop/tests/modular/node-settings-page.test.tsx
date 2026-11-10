@@ -215,9 +215,9 @@ it('Cluster Edit node targets the stable node identity', async () => {
         root.render(
             <ActiveNode
                 node={{
-                    id: 'display-hostname',
                     nodeUuid: 'peer',
                     name: 'Peer B',
+                    displayName: 'Peer B',
                     ipAddress: '127.0.0.1',
                     port: 1,
                     clusterId: 'cluster',

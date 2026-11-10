@@ -657,10 +657,9 @@ function parseProxyNode(params: JsonValue | undefined, engine: ProxyEngine): Mod
     return {
         id,
         sources: [proxySourceForEngine(engine)],
-        // `Node.Host` is the hostname; empty for the self-bridge manual node,
-        // in which case the broker discovery entry supplies the display name on
-        // merge (see mergeNode). Never fall back to the UUID id here.
-        name: stringValue(obj.name) || stringValue(obj.host),
+        // Display names come only from broker discovery, which decides them in
+        // Go; the proxy feed supplies none (see mergeNode).
+        name: '',
         host: stringValue(obj.host),
         // The proxy `node/*` feed carries no trust/cluster flags; keep whatever
         // the broker last reported (see mergeNode).
@@ -701,8 +700,9 @@ function parseBrokerNode(params: JsonValue | undefined): ModularNode | null {
     // payload without it is malformed and dropped rather than keyed by hostname.
     const hostUuid = stringValue(obj.hostUuid)
     if (!hostUuid) return null
-    // `AvailableNode.id`/`.name` are the mDNS instance hostname (display only).
-    const hostname = stringValue(obj.name) || stringValue(obj.id)
+    // `AvailableNode.name` is the display name the broker decided; never
+    // substitute an id for it.
+    const displayName = stringValue(obj.name)
     const ipAddress = stringValue(obj.ipAddress) || stringValue(obj.ip_address)
     const port = numberValue(obj.port)
     // `AvailableNode.ipAddresses` is the node's own ranked candidate list, omitted
@@ -713,7 +713,7 @@ function parseBrokerNode(params: JsonValue | undefined): ModularNode | null {
     return {
         id: hostUuid,
         sources: ['broker'],
-        name: hostname,
+        name: displayName,
         host: ipAddress,
         // Broker discovery is authoritative for trust/cluster membership state.
         trusted: booleanValue(obj.trusted),

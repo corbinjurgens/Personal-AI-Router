@@ -211,7 +211,13 @@ async function fetchClusterInitial(): Promise<ClusterInitialSnapshot | undefined
         console.error('Failed to fetch cluster initial state')
         return {
             info: { clusterId: null, isClustered: false, clusterFriendlyName: '' },
-            identity: { nodeUuid: '', nodeId: '', name: '', certFingerprint: '', clusterId: '' },
+            identity: {
+                nodeUuid: '',
+                name: '',
+                customName: null,
+                certFingerprint: '',
+                clusterId: ''
+            },
             members: [],
             pendingInvites: []
         }

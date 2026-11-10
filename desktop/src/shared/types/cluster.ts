@@ -15,7 +15,7 @@ import type { NodePolicyAdvertisement } from '@/shared/types/node-roles'
 export interface AvailableNode {
     /** Canonical node key = the backend's stable per-host UUID (matches `NodeItem.id`). */
     id: string
-    /** Display hostname. */
+    /** Display name decided by the broker. */
     name: string
     ipAddress: string
     /**
@@ -57,16 +57,19 @@ export type MembershipState = 'member' | 'pending-outbound' | 'pending-inbound'
 
 /** A cluster member (or pending invitee) as reported by the cluster-manager. */
 export interface ClusterNode {
-    /** Logical node id (hostname). Display identity only. */
-    id: string
     /**
      * Stable cryptographic identity; the trusted-node-store key and cert subject.
      * This is the cross-domain correlation key — it equals a discovered node's
      * hostUuid / `NodeItem.id` / `selfId`, so member↔node matching keys on this,
-     * never `id` (hostname).
+     * never a name.
      */
     nodeUuid: string
+    /** The node's own name (its custom name or generated default). */
     name: string
+    /** This node's local nickname for the member; absent when none is set. */
+    nickname?: string
+    /** Name to show, decided by the cluster manager. */
+    displayName: string
     ipAddress: string
     port: number
     clusterId: string
@@ -80,8 +83,10 @@ export interface ClusterNode {
 /** This node's own identity (`cluster:get-node-id`). */
 export interface ClusterNodeIdentity {
     nodeUuid: string
-    nodeId: string
+    /** This node's shown name: the custom name, else the generated default. */
     name: string
+    /** The user-set name; `null` when the generated default is in use. */
+    customName: string | null
     certFingerprint: string
     /** `""` until the node creates a cluster or adopts one by accepting an invite. */
     clusterId: string
@@ -117,10 +122,9 @@ export type InviteState =
  */
 export interface Invite {
     inviteId: string
-    fromNodeId: string
     fromNodeUuid: string
     fromNodeName: string
-    toNodeId: string | null
+    toNodeUuid: string | null
     clusterId: string
     clusterFriendlyName: string
     pin: string | null

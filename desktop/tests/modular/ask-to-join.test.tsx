@@ -53,10 +53,9 @@ const baseline: JoinRequestsSnapshot = {
 }
 const invite: Invite = {
     inviteId: 'child',
-    fromNodeId: 'member',
     fromNodeUuid: 'peer',
     fromNodeName: 'Member',
-    toNodeId: null,
+    toNodeUuid: null,
     clusterId: 'cluster',
     clusterFriendlyName: 'Home',
     pin: '123456',

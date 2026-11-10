@@ -33,7 +33,7 @@ describe('redactSensitiveLogText', () => {
         const frame = JSON.stringify({
             jsonrpc: '2.0',
             method: 'cluster:invite-received',
-            params: { invite: { inviteId: 'x', pin: '135790', fromNodeId: 'peer-1' } }
+            params: { invite: { inviteId: 'x', pin: '135790', fromNodeUuid: 'peer-1' } }
         })
 
         const out = redactSensitiveLogText(frame)

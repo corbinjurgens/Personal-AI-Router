@@ -14,10 +14,9 @@ import { MODULAR_INVITE_STATUS_POLL_INTERVAL_MS } from '@/shared/constants/modul
 
 const invite: Invite = {
     inviteId: 'one',
-    fromNodeId: 'sender',
     fromNodeUuid: 'uuid',
     fromNodeName: 'Sender',
-    toNodeId: null,
+    toNodeUuid: null,
     clusterId: 'cluster',
     clusterFriendlyName: 'Home',
     pin: null,

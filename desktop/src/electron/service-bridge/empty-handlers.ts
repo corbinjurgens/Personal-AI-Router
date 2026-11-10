@@ -112,7 +112,7 @@ async function getClusterIdentity(): Promise<ClusterNodeIdentity> {
     try {
         return parseNodeIdentity(await callCluster('cluster:get-node-id'))
     } catch {
-        return { nodeUuid: '', nodeId: '', name: '', certFingerprint: '', clusterId: '' }
+        return { nodeUuid: '', name: '', customName: null, certFingerprint: '', clusterId: '' }
     }
 }
 
@@ -517,7 +517,7 @@ async function handleClusterAskToJoin(
         replaceSoloCluster: payload.replaceSoloCluster
     }
     if (payload.port !== undefined) params.port = payload.port
-    if (payload.nodeId !== undefined) params.nodeId = payload.nodeId
+    if (payload.nodeId !== undefined) params.nodeUuid = payload.nodeId
     return parseJoinRequest(await callCluster('cluster:ask-to-join', params))
 }
 
@@ -749,9 +749,9 @@ async function handleNodeRemoveMember(
     }
 
     // Peer removal: revoke the peer's membership + pinned trust.
-    const result = objectValue(await callCluster('nodes:remove', { nodeId: payload.nodeId }))
+    const result = objectValue(await callCluster('nodes:remove', { nodeUuid: payload.nodeId }))
     return {
-        nodeId: stringValue(result?.nodeId) || payload.nodeId,
+        nodeId: stringValue(result?.nodeUuid) || payload.nodeId,
         removed: booleanValue(result?.removed),
         ...cleanupResult
     }

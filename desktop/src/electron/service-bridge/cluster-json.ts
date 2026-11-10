@@ -83,10 +83,9 @@ export function parseInvite(value: JsonValue | undefined): Invite {
     const obj = objectValue(value)
     return {
         inviteId: stringValue(obj?.inviteId),
-        fromNodeId: stringValue(obj?.fromNodeId),
         fromNodeUuid: stringValue(obj?.fromNodeUuid),
         fromNodeName: stringValue(obj?.fromNodeName),
-        toNodeId: nullableString(obj?.toNodeId),
+        toNodeUuid: nullableString(obj?.toNodeUuid),
         clusterId: stringValue(obj?.clusterId),
         clusterFriendlyName: stringValue(obj?.clusterFriendlyName),
         pin: nullableString(obj?.pin),
@@ -101,10 +100,9 @@ export function parseInvite(value: JsonValue | undefined): Invite {
 export function emptyInvite(): Invite {
     return {
         inviteId: '',
-        fromNodeId: '',
         fromNodeUuid: '',
         fromNodeName: '',
-        toNodeId: null,
+        toNodeUuid: null,
         clusterId: '',
         clusterFriendlyName: '',
         pin: null,
@@ -117,10 +115,14 @@ export function emptyInvite(): Invite {
 
 function parseClusterNode(value: JsonValue | undefined): ClusterNode {
     const obj = objectValue(value)
+    const nodeUuid = stringValue(obj?.nodeUuid)
+    const name = stringValue(obj?.name)
+    const nickname = stringValue(obj?.nickname)
     return {
-        id: stringValue(obj?.id),
-        nodeUuid: stringValue(obj?.nodeUuid),
-        name: stringValue(obj?.name),
+        nodeUuid,
+        name,
+        ...(nickname ? { nickname } : {}),
+        displayName: stringValue(obj?.displayName) || name || nodeUuid,
         ipAddress: stringValue(obj?.ipAddress),
         port: numberValue(obj?.port),
         clusterId: stringValue(obj?.clusterId),
@@ -139,8 +141,8 @@ export function parseNodeIdentity(value: JsonValue | undefined): ClusterNodeIden
     const obj = objectValue(value)
     return {
         nodeUuid: stringValue(obj?.nodeUuid),
-        nodeId: stringValue(obj?.nodeId),
         name: stringValue(obj?.name),
+        customName: nullableString(obj?.customName),
         certFingerprint: stringValue(obj?.certFingerprint),
         clusterId: stringValue(obj?.clusterId)
     }

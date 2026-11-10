@@ -799,7 +799,7 @@ function clusterSnapshot(certFingerprint = 'A'): ClusterInitialSnapshot {
     return {
         identity: {
             nodeUuid: 'self',
-            nodeId: 'self.local',
+            customName: null,
             name: 'Self',
             certFingerprint,
             clusterId: 'home'
@@ -808,8 +808,8 @@ function clusterSnapshot(certFingerprint = 'A'): ClusterInitialSnapshot {
         members: [
             {
                 nodeUuid: 'peer',
-                id: 'peer.local',
                 name: 'Peer',
+                displayName: 'Peer',
                 ipAddress: '192.0.2.1',
                 port: 1,
                 clusterId: 'home',

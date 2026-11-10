@@ -37,10 +37,9 @@ import { handleServiceBridgeInvoke } from '@/electron/service-bridge/empty-handl
 
 const pendingInvite = {
     inviteId: 'invite-1',
-    fromNodeId: 'sender.local',
     fromNodeUuid: 'sender-uuid',
     fromNodeName: 'Sender',
-    toNodeId: null,
+    toNodeUuid: null,
     clusterId: 'cluster-1',
     clusterFriendlyName: 'Home',
     pin: null,

@@ -14,10 +14,9 @@ import { MODULAR_INVITE_STATUS_POLL_INTERVAL_MS } from '@/shared/constants/modul
 
 const invite: Invite = {
     inviteId: 'one',
-    fromNodeId: 'sender',
     fromNodeUuid: 'uuid',
     fromNodeName: 'Sender',
-    toNodeId: null,
+    toNodeUuid: null,
     clusterId: 'cluster',
     clusterFriendlyName: 'Home',
     pin: '123456',
@@ -87,7 +86,7 @@ describe('failed invitation recovery', () => {
             info: { clusterId: 'cluster', isClustered: true, clusterFriendlyName: 'Home' },
             identity: {
                 nodeUuid: 'self',
-                nodeId: 'self',
+                customName: null,
                 name: 'Self',
                 certFingerprint: 'cert',
                 clusterId: 'cluster'
@@ -95,9 +94,9 @@ describe('failed invitation recovery', () => {
             pendingInvites: [],
             members: [
                 {
-                    id: 'peer',
                     nodeUuid: 'paired-peer',
                     name: 'Peer',
+                    displayName: 'Peer',
                     ipAddress: '127.0.0.1',
                     port: 1,
                     clusterId: 'cluster',

@@ -128,10 +128,9 @@ const unavailableSnapshot = { version: 1, revision: '', grants: [] }
 const unavailableCapability = { version: 1, revision: '', allowed: false, state: 'unavailable' }
 const inviteResult = {
     inviteId: 'invite-1',
-    fromNodeId: 'sender.local',
     fromNodeUuid: 'sender-uuid',
     fromNodeName: 'Sender',
-    toNodeId: null,
+    toNodeUuid: null,
     clusterId: 'cluster-1',
     clusterFriendlyName: 'Home',
     pin: null,
@@ -681,9 +680,9 @@ describe('permission controls', () => {
         clustered: false
     }
     const member: ClusterNode = {
-        id: 'display-hostname',
         nodeUuid: 'peer-1',
         name: 'Peer',
+        displayName: 'Peer',
         ipAddress: peer.ipAddress,
         port: peer.port,
         clusterId: 'home',
@@ -788,7 +787,7 @@ describe('permission controls', () => {
         await useClusterInvitationsStore.getState().initialize({
             identity: {
                 nodeUuid: 'self',
-                nodeId: 'self.local',
+                customName: null,
                 name: 'Self',
                 certFingerprint: 'cert',
                 clusterId: 'home'
@@ -986,7 +985,7 @@ describe('permission controls', () => {
             useClusterInvitationsStore.getState().hydrate({
                 identity: {
                     nodeUuid: 'self',
-                    nodeId: 'self.local',
+                    customName: null,
                     name: 'Self',
                     certFingerprint: 'replacement-cert',
                     clusterId: 'home'

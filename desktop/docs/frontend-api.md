@@ -309,7 +309,7 @@ contract lives in [cluster-manager spec §7.0.1](../../services/nvpair-cluster-m
 
 - `getNodes()` returns discoverable nodes. Each `AvailableNode` carries the
   backend `id` (the stable per-host UUID that keys every domain), the display
-  `name` (hostname), the reachable `ipAddress`/`port`, and the `trusted` and
+  `name` (decided by the broker), the reachable `ipAddress`/`port`, and the `trusted` and
   `clustered` flags. A `clustered` node already belongs to some cluster and is
   rendered non-invitable.
 - `onNodesChanged(callback)` reports discovery changes.

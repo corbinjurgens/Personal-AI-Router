@@ -417,8 +417,11 @@ model attribution.
 
 Personal AI Router keys every node by that `hostUuid`, the same identity the backend stamps on
 workloads (`originatedFrom`/`scheduledOn`), errors (`nodeId`), proxy routing
-(`Node.ID`), `/v1/node-info`, and cluster membership (`ClusterNode.nodeUuid`); the
-hostname is kept only as the display `name`. This lets a single broker+proxy merge
+(`Node.ID`), `/v1/node-info`, and cluster membership (`ClusterNode.nodeUuid`).
+`AvailableNode.name` is the display name the broker decides (a member's
+cluster-manager `displayName`, else this node's name, else the advertised or
+manual name, else `PAIR` and the first UUID characters); the desktop shows it
+as given and takes no name from the proxy `node/*` feed. This lets a single broker+proxy merge
 resolve to one node and lets workload/error attribution land on the right node.
 
 Local model state comes from `nvpair-engine-manager`; remote model state comes
@@ -550,9 +553,10 @@ Personal AI Router:
 - renders membership from `nodes:changed`.
 
 Cluster membership correlates by `ClusterNode.nodeUuid` — the stable per-host
-UUID that also keys discovery, workloads, errors, and `selfId` — never the
-hostname (`ClusterNode.id`, which is display only). `nodes:remove` is sent the
-UUID (self-removal routes to `cluster:leave`); a manual node's `node/remove` is
+UUID that also keys discovery, workloads, errors, and `selfId` — never a name.
+`ClusterNode` has no `id`; it carries the node's own `name`, an optional local
+`nickname`, and the cluster manager's `displayName`, which the desktop shows as
+given. `nodes:remove` is sent `{nodeUuid}` (self-removal routes to `cluster:leave`); a manual node's `node/remove` is
 resolved back to the hostname the entry was keyed by.
 
 ### Ask-to-join admission contract
@@ -566,6 +570,8 @@ snapshot, fetched independently of `ClusterInitialSnapshot` on attach/reconnect.
 The strict bridge parser, invoke registration and supervisor notification
 demux/allowlist project this contract; Electron does not reconstruct request
 eligibility or replace the manager's deadlines.
+The desktop's optional `nodeId` on `cluster:ask-to-join` carries the peer's node
+UUID; the bridge sends it to the cluster manager as `nodeUuid`.
 
 The selected member remains inviter/EAP Server, approves locally with its
 own `allowRemoteManagement` choice and displays the pending child PIN via local
