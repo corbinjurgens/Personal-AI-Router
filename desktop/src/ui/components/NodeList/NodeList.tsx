@@ -12,6 +12,7 @@ import NodeCardDetails from './NodeCardDetails'
 import { CONNECTIONS_WIDTH } from '@/ui/constants/app'
 import OfflineNode from './OfflineNode'
 import { useOverviewUiStore } from '@/ui/stores/overview-ui.store'
+import { distinguishingLabels } from '@/ui/utils/node-name-labels'
 
 const SCROLLBAR_OPTIONS = {
     scrollbars: { autoHide: 'leave', autoHideDelay: 800 }
@@ -21,6 +22,8 @@ function NodeList() {
     const allNodes = useOverviewNodes()
     const showProfileSummaries = useOverviewUiStore(state => state.showProfileSummaries)
     const setShowProfileSummaries = useOverviewUiStore(state => state.setShowProfileSummaries)
+
+    const labels = useMemo(() => distinguishingLabels(allNodes), [allNodes])
 
     const { online, offline } = useMemo(() => {
         const on: NodeItem[] = []
@@ -57,7 +60,11 @@ function NodeList() {
             >
                 <Stack className="min-w-0 min-h-full dir-ltr" gap="3" data-node-list-content>
                     {online.map(node => (
-                        <NodeCardDetails key={node.id} node={node} />
+                        <NodeCardDetails
+                            key={node.id}
+                            node={node}
+                            distinguishingLabel={labels.get(node.id)}
+                        />
                     ))}
 
                     {offline &&

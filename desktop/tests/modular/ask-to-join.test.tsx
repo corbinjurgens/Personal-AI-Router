@@ -93,6 +93,7 @@ async function setAddress(): Promise<void> {
 }
 
 beforeEach(() => {
+    vi.stubGlobal('windowApi', { platform: 'Windows' })
     // Modal blur/focus frames belong to their test, including after unmount.
     vi.useFakeTimers({ toFake: ['requestAnimationFrame', 'cancelAnimationFrame'] })
     vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)

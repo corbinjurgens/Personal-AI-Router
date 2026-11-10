@@ -10,12 +10,15 @@ export default function NodeLabel({
     name,
     ipAddress,
     gpuLabels,
-    isLocal
+    isLocal,
+    distinguishingLabel
 }: {
     name: string
     ipAddress: string
     gpuLabels: string[]
     isLocal?: boolean
+    /** Hardware label telling this node apart from others with the same name. */
+    distinguishingLabel?: string
 }) {
     const segmentRefs = useRef<(HTMLDivElement | null)[]>([])
     const containerRef = useRef<HTMLDivElement | null>(null)
@@ -92,6 +95,11 @@ export default function NodeLabel({
                         >
                             {segment.text}
                         </Text>
+                        {isPrimary && distinguishingLabel && (
+                            <Text kind="body/regular/sm" className="text-subtle-color truncate">
+                                ({distinguishingLabel})
+                            </Text>
+                        )}
                         {isPrimary && isLocal && <LocalBadge />}
                         {separatorAfter[index] && (
                             <Text

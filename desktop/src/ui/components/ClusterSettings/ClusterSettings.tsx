@@ -9,6 +9,8 @@ import { MODULAR_CLUSTER_MANAGER_PORT } from '@/shared/constants/modular-runtime
 import getErrorString from '@/shared/utils/get-error-string'
 import { useClusterInvitationsStore } from '@/ui/stores/cluster-invitations.store'
 import { useInvitablePeers } from '@/ui/hooks/useInvitablePeers'
+import { useOverviewNodes } from '@/ui/hooks/useOverviewNodes'
+import { distinguishingLabels } from '@/ui/utils/node-name-labels'
 import ActiveNode from './ActiveNode'
 import AvailableNode from './AvailableNode'
 import PendingInviteCard from './PendingInviteCard'
@@ -24,9 +26,10 @@ export default function ClusterSettings() {
     const joinError = useClusterInvitationsStore(state => state.joinError)
     const selfNode = useNodesStore(state => (selfId ? (state.nodes.get(selfId) ?? null) : null))
     const [error, setError] = useState<string | null>(null)
+    const overviewNodes = useOverviewNodes()
+    const labels = useMemo(() => distinguishingLabels(overviewNodes), [overviewNodes])
 
-    // `selfId` is the node UUID, so members correlate on `nodeUuid` (the
-    // hostname `m.id` is display only).
+    // `selfId` is the node UUID, so members correlate on `nodeUuid`, never a name.
     const connectedMembers = useMemo(
         () => members.filter(m => m.nodeUuid !== selfId && m.state === 'member'),
         [members, selfId]
@@ -151,7 +154,11 @@ export default function ClusterSettings() {
                     </Text>
 
                     {connectedMembers.map(node => (
-                        <ActiveNode node={node} key={node.nodeUuid} />
+                        <ActiveNode
+                            node={node}
+                            key={node.nodeUuid}
+                            distinguishingLabel={labels.get(node.nodeUuid)}
+                        />
                     ))}
                 </Stack>
             )}
@@ -163,7 +170,11 @@ export default function ClusterSettings() {
                     </Text>
 
                     {pendingMembers.map(node => (
-                        <ActiveNode node={node} key={node.nodeUuid} />
+                        <ActiveNode
+                            node={node}
+                            key={node.nodeUuid}
+                            distinguishingLabel={labels.get(node.nodeUuid)}
+                        />
                     ))}
                 </Stack>
             )}

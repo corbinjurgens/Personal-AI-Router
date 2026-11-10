@@ -18,7 +18,14 @@ import { useClusterInvitationsStore } from '@/ui/stores/cluster-invitations.stor
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import { RemoteManagementChoice } from '@/ui/components/InvitePairingPanel'
 
-export default function ActiveNode({ node }: { node: ClusterNode }) {
+export default function ActiveNode({
+    node,
+    distinguishingLabel
+}: {
+    node: ClusterNode
+    /** Hardware label telling this node apart from others with the same name. */
+    distinguishingLabel?: string
+}) {
     const focusNodeSettings = useOverviewUiStore(state => state.focusNodeSettings)
     const connected = useConnectionStore(state => state.connected)
     const permissions = useClusterInvitationsStore(state => state.remoteManagement)
@@ -66,8 +73,7 @@ export default function ActiveNode({ node }: { node: ClusterNode }) {
     const ipAddress = discoveredIp ?? node.ipAddress
 
     // Every node key is the stable UUID (`nodeUuid`) — the nodes-store key, the
-    // engine-settings focus id, and the removal target. `node.id` is the display
-    // hostname only.
+    // engine-settings focus id, and the removal target. Names are display only.
     const items: DropdownEntry[] = useMemo(
         () => [
             {
@@ -90,9 +96,12 @@ export default function ActiveNode({ node }: { node: ClusterNode }) {
             <Flex align="center" justify="between" gap="2">
                 <Stack gap="1">
                     <Flex align="center" gap="1">
-                        <Text kind="body/bold/sm" className="uppercase">
-                            {node.name}
-                        </Text>
+                        <Text kind="body/bold/sm">{node.displayName}</Text>
+                        {distinguishingLabel && (
+                            <Text kind="body/regular/sm" className="text-subtle-color">
+                                ({distinguishingLabel})
+                            </Text>
+                        )}
                     </Flex>
                     <Text kind="body/regular/sm" className="text-subtle-color">
                         {ipAddress}
@@ -103,7 +112,7 @@ export default function ActiveNode({ node }: { node: ClusterNode }) {
                     items={items}
                     showChevron={false}
                     size="small"
-                    aria-label={`Open ${node.name} menu`}
+                    aria-label={`Open ${node.displayName} menu`}
                 >
                     <MoreHoriz style={{ fontSize: 16 }} />
                 </Dropdown>
@@ -111,7 +120,7 @@ export default function ActiveNode({ node }: { node: ClusterNode }) {
             {node.state === 'member' && (
                 <Stack gap="2" className="pt-3">
                     <Text kind="body/regular/sm">
-                        Choose whether {node.name} may manage this device.
+                        Choose whether {node.displayName} may manage this device.
                     </Text>
                     <RemoteManagementChoice
                         allowed={allowed}

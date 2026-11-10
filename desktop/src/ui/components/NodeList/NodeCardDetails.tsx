@@ -3,7 +3,7 @@
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button, Flex, Stack, Text } from '@nvidia/foundations-react-core'
-import { BarChartOutlined, SettingsOutlined } from '@/ui/components/icons'
+import { BarChartOutlined, EditOutlined, SettingsOutlined } from '@/ui/components/icons'
 import { DismissibleTooltip } from '@/ui/components/DismissibleTooltip/DismissibleTooltip'
 import type { NodeItem } from '@/shared/types/nodes'
 import { useMetricsStore } from '@/ui/stores/metrics.store'
@@ -25,18 +25,26 @@ import { hasInferenceReadyGpu, isGpuInferenceReady } from '@/ui/utils/gpu-infere
 import NodeEnginesInline from './NodeEnginesInline'
 import NodeDeclaredRoles from './NodeDeclaredRoles'
 import NodeAvailabilityControls from './NodeAvailabilityControls'
+import { NodeNameModal } from '@/ui/components/NodeName/NodeNameModal'
+import { useClusterInvitationsStore } from '@/ui/stores/cluster-invitations.store'
 
 const MAX_CHART_SIZE = 60
 
 interface NodeCardDetailsProps {
     node: NodeItem
+    /** Hardware label telling this node apart from others with the same name. */
+    distinguishingLabel?: string
 }
 
-function NodeCardDetails({ node }: NodeCardDetailsProps) {
+function NodeCardDetails({ node, distinguishingLabel }: NodeCardDetailsProps) {
     const nodeMetrics = useMetricsStore(state => state.nodeMetrics.get(node.id))
     const isLocal = useConnectionStore(state => state.selfId === node.id)
     const [isExpanded, setIsExpanded] = useState(false)
     const focusNodeSettings = useOverviewUiStore(state => state.focusNodeSettings)
+    const selfName = useClusterInvitationsStore(state => state.selfName)
+    const selfCustomName = useClusterInvitationsStore(state => state.selfCustomName)
+    const [renaming, setRenaming] = useState(false)
+    const closeRename = useCallback(() => setRenaming(false), [])
     // "Has a GPU" means "has an inference-ready GPU" per the backend readiness
     // list (or any GPU when the backend sends no list); see gpu-inference.ts.
     // A node with none renders the CPU + RAM fallback instead of a GPU ring.
@@ -191,6 +199,20 @@ function NodeCardDetails({ node }: NodeCardDetailsProps) {
                     <SettingsOutlined style={{ fontSize: 14 }} />
                 </Button>
             </DismissibleTooltip>
+            {isLocal && (
+                <DismissibleTooltip slotContent="Rename" placement={placement}>
+                    <Button
+                        kind="tertiary"
+                        color="neutral"
+                        size="tiny"
+                        className="px-2"
+                        onClick={() => setRenaming(true)}
+                        aria-label="Rename"
+                    >
+                        <EditOutlined style={{ fontSize: 14 }} />
+                    </Button>
+                </DismissibleTooltip>
+            )}
         </>
     )
 
@@ -245,6 +267,7 @@ function NodeCardDetails({ node }: NodeCardDetailsProps) {
                                 ipAddress={node.ipAddress}
                                 gpuLabels={gpuLabels}
                                 isLocal={isLocal}
+                                distinguishingLabel={distinguishingLabel}
                             />
                         </div>
                         <Flex
@@ -296,6 +319,15 @@ function NodeCardDetails({ node }: NodeCardDetailsProps) {
                     </div>
                 </div>
             </div>
+            {isLocal && renaming && (
+                <NodeNameModal
+                    nodeUuid={node.id}
+                    shownName={selfName || node.name}
+                    customName={selfCustomName}
+                    open={renaming}
+                    onClose={closeRename}
+                />
+            )}
         </div>
     )
 }
