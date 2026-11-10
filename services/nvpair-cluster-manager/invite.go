@@ -50,7 +50,7 @@ func (e *pairingRejectedError) Error() string {
 type inviteNodeParams struct {
 	Address               string  `json:"address"`
 	Port                  *int    `json:"port"`
-	NodeID                *string `json:"nodeId"`
+	NodeUUID              *string `json:"nodeUuid"`
 	AllowRemoteManagement *bool   `json:"allowRemoteManagement"`
 }
 
@@ -84,16 +84,16 @@ func (m *Manager) handleInviteNode(msg *Message) {
 	// A Broker-supplied address is tried first; the peer's own remaining
 	// addresses follow it as failover candidates, because the address any
 	// observer holds for a multi-homed node can be one only its cabled
-	// neighbour can reach. With no supplied address, resolve the nodeId/UUID
+	// neighbour can reach. With no supplied address, resolve the nodeUuid
 	// through the mDNS browse map (§7.5).
 	//
 	// Each candidate carries its own port. The discovered ones use the port the
 	// peer advertises for its cluster service, which is the only authority on
 	// where that peer listens; a caller-supplied port still overrides everything,
 	// and this node's own port is the last resort.
-	endpoints, endpointErr := m.inviteEndpoints(p.Address, p.Port, p.NodeID)
+	endpoints, targetUUID, endpointErr := m.joinRequestEndpoints(p.Address, p.Port, p.NodeUUID)
 	if endpointErr != nil {
-		m.codec.RespondErrorData(msg.ID, codeInvalidParams, "address is required (or a discoverable nodeId)",
+		m.codec.RespondErrorData(msg.ID, codeInvalidParams, "address is required (or a discoverable nodeUuid)",
 			map[string]string{"field": "address"})
 		return
 	}
@@ -133,10 +133,9 @@ func (m *Manager) handleInviteNode(msg *Message) {
 	now := time.Now().UnixMilli()
 	inv := &Invite{
 		InviteID:            inviteID,
-		FromNodeID:          m.identity.NodeID,
 		FromNodeUUID:        m.identity.NodeUUID,
 		FromNodeName:        m.selfName(),
-		ToNodeID:            p.NodeID,
+		ToNodeUUID:          optionalString(targetUUID),
 		ClusterID:           cid,
 		ClusterFriendlyName: friendly,
 		State:               inviteStatePending,

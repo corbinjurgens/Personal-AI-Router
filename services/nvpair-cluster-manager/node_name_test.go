@@ -255,12 +255,12 @@ func TestNodeNameRenamesSelfMemberAndReconciles(t *testing.T) {
 	if _, err := a.m.setSelfName(&name); err != nil {
 		t.Fatal(err)
 	}
-	if self, ok := a.m.memberByNodeID(a.m.identity.NodeUUID); !ok || self.Name != name {
+	if self, ok := a.m.memberByUUID(a.m.identity.NodeUUID); !ok || self.Name != name {
 		t.Fatalf("self member = %+v, want name %q", self, name)
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		peer, ok := b.m.memberByNodeID(a.m.identity.NodeUUID)
+		peer, ok := b.m.memberByUUID(a.m.identity.NodeUUID)
 		if b.rosters.Load() > 0 && ok && peer.Name == name {
 			return
 		}
@@ -283,7 +283,7 @@ func TestSnapshotDisplayNamePrecedence(t *testing.T) {
 			t.Fatalf("displayName for %s = %q, want %q", n.NodeUUID, n.DisplayName, want[n.NodeUUID])
 		}
 	}
-	stored, _ := m.memberByNodeID(named)
+	stored, _ := m.memberByUUID(named)
 	if stored.DisplayName != "" {
 		t.Fatalf("stored member carries displayName %q; it is snapshot-only", stored.DisplayName)
 	}
@@ -294,7 +294,7 @@ func TestUpsertMemberKeepsNickname(t *testing.T) {
 	uuid := "44444444-0000-4000-8000-000000000000"
 	m.upsertMember(&ClusterNode{NodeUUID: uuid, Name: "old", Nickname: "mine", State: stateMember})
 	m.upsertMember(&ClusterNode{NodeUUID: uuid, Name: "new", State: stateMember})
-	n, ok := m.memberByNodeID(uuid)
+	n, ok := m.memberByUUID(uuid)
 	if !ok || n.Name != "new" || n.Nickname != "mine" {
 		t.Fatalf("member = %+v, want name new and nickname kept", n)
 	}

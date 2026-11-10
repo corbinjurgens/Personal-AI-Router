@@ -539,7 +539,7 @@ func newTask1Nodes(t *testing.T) ([]*task1Node, int) {
 			}
 			fingerprint := sha256.Sum256(block.Bytes)
 			task1WriteJSON(t, filepath.Join(n.base, "cluster", "trusted", peer.uuid+".json"), map[string]any{
-				"nodeUuid": peer.uuid, "nodeId": peer.uuid, "name": "stale peer name", "certPem": peer.cert,
+				"nodeUuid": peer.uuid, "name": "stale peer name", "certPem": peer.cert,
 				"certFingerprint": "sha256:" + hex.EncodeToString(fingerprint[:]), "clusterId": task1ClusterID, "admissionEpoch": 1,
 			})
 		}

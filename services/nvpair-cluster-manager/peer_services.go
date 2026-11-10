@@ -210,7 +210,7 @@ func (m *Manager) refreshPeerServices(ctx context.Context, uuid string) error {
 	if !ok {
 		return errors.New("no current member")
 	}
-	member, ok := m.memberByNodeID(uuid)
+	member, ok := m.memberByUUID(uuid)
 	if !ok {
 		return errors.New("member unavailable")
 	}
@@ -312,7 +312,7 @@ func (m *Manager) commitPeerServiceHints(descriptor noderec.PeerServicesDescript
 	if !valid || current != incarnation || !memberValid || currentPeer != peer {
 		return errors.New("admission changed during descriptor read")
 	}
-	authenticated, ok := m.memberByNodeID(descriptor.HostUUID)
+	authenticated, ok := m.memberByUUID(descriptor.HostUUID)
 	if !ok {
 		return errors.New("member unavailable during descriptor commit")
 	}

@@ -54,14 +54,13 @@ func makePin(t *testing.T) *TrustedPin {
 	if err != nil {
 		t.Fatalf("uuid: %v", err)
 	}
-	certPEM, _, err := generateLeaf(uuid, "peer-host")
+	certPEM, _, err := generateLeaf(uuid)
 	if err != nil {
 		t.Fatalf("leaf: %v", err)
 	}
 	fp, _ := certFingerprintFromPEM(certPEM)
 	return &TrustedPin{
 		NodeUUID:        uuid,
-		NodeID:          "peer-host",
 		Name:            "peer-host",
 		ClusterID:       "cluster-1",
 		CertPem:         string(certPEM),

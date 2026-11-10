@@ -89,7 +89,7 @@ func TestClusterAuthorityReadsShareDeleteAccess(t *testing.T) {
 		if err != nil {
 			t.Fatalf("create trusted directory: %v", err)
 		}
-		cert, _, err := generateLeaf("peer", "peer")
+		cert, _, err := generateLeaf("peer")
 		if err != nil {
 			t.Fatalf("generate peer certificate: %v", err)
 		}

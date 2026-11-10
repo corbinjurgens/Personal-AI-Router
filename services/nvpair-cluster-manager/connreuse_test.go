@@ -64,7 +64,7 @@ func addPeerConnectionFixture(t *testing.T, m *Manager, handler http.Handler, gu
 	if err != nil {
 		t.Fatal(err)
 	}
-	certPEM, keyPEM, err := generateLeaf(peerUUID, "node-peer")
+	certPEM, keyPEM, err := generateLeaf(peerUUID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +100,7 @@ func addPeerConnectionFixture(t *testing.T, m *Manager, handler http.Handler, gu
 	t.Cleanup(ts.Close)
 
 	addr := ts.Listener.Addr().String()
-	m.upsertMember(&ClusterNode{NodeUUID: peerUUID, ID: "peer", IPAddress: "127.0.0.1", Port: ts.Listener.Addr().(*net.TCPAddr).Port, ClusterID: "cluster-1", AdmissionEpoch: 1, State: stateMember})
+	m.upsertMember(&ClusterNode{NodeUUID: peerUUID, IPAddress: "127.0.0.1", Port: ts.Listener.Addr().(*net.TCPAddr).Port, ClusterID: "cluster-1", AdmissionEpoch: 1, State: stateMember})
 	f.address = addr
 	guard.allow(t, addr, owned)
 	replaceClusterPeerServices(t, m, m.peerServiceOptions(), guard)
@@ -277,7 +277,7 @@ func TestPeerClient_ForgetRevokesWithPinStillOnDisk(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	certPEM, _, err := generateLeaf(peerUUID, "node-peer")
+	certPEM, _, err := generateLeaf(peerUUID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -286,7 +286,7 @@ func TestPeerClient_ForgetRevokesWithPinStillOnDisk(t *testing.T) {
 		t.Fatal(err)
 	}
 	pinTrusted(t, m, peerUUID, string(certPEM), fp)
-	m.upsertMember(&ClusterNode{NodeUUID: peerUUID, ID: "peer", IPAddress: "127.0.0.1", Port: 14321, ClusterID: "cluster-1", AdmissionEpoch: 1, State: stateMember})
+	m.upsertMember(&ClusterNode{NodeUUID: peerUUID, IPAddress: "127.0.0.1", Port: 14321, ClusterID: "cluster-1", AdmissionEpoch: 1, State: stateMember})
 
 	if _, err := m.peerClient(peerUUID); err != nil {
 		t.Fatalf("pinned peer must yield a client: %v", err)

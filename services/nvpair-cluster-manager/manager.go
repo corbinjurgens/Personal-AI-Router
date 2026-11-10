@@ -340,10 +340,9 @@ func NewManager(codec *Codec, configDir string, port int) (*Manager, error) {
 			return nil, fmt.Errorf("prune unauthenticated members: %w", err)
 		}
 	}
-	// A PC rename changes os.Hostname() but not the stable nodeUuid, so the self
-	// entry restored from members.json can carry an old display name. Re-stamp it
-	// from the current identity so this node doesn't linger as a stale-named ghost
-	// in its own roster, preserving stable identity across host renames.
+	// The generated default is re-derived at each start, so the self entry
+	// restored from members.json can carry an old name. Re-stamp it from the
+	// current effective name.
 	mgr.refreshSelfMemberIdentity()
 	mgr.loadTombstones()
 	if err := mgr.loadRemovalProofs(); err != nil {

@@ -46,7 +46,7 @@ func (m *Manager) selfName() string {
 func (m *Manager) customSelfName() *string {
 	m.nameMu.RLock()
 	defer m.nameMu.RUnlock()
-	return optionalName(m.customName)
+	return optionalString(m.customName)
 }
 
 func (m *Manager) effectiveNameLocked() string {
@@ -56,11 +56,12 @@ func (m *Manager) effectiveNameLocked() string {
 	return m.generatedName
 }
 
-func optionalName(name string) *string {
-	if name == "" {
+// optionalString returns nil for "" and a pointer to s otherwise.
+func optionalString(s string) *string {
+	if s == "" {
 		return nil
 	}
-	return &name
+	return &s
 }
 
 func (m *Manager) selfNameView() nodeNameView {
@@ -69,7 +70,7 @@ func (m *Manager) selfNameView() nodeNameView {
 	return nodeNameView{
 		NodeUUID:   m.identity.NodeUUID,
 		Name:       m.effectiveNameLocked(),
-		CustomName: optionalName(m.customName),
+		CustomName: optionalString(m.customName),
 	}
 }
 
@@ -110,7 +111,7 @@ func (m *Manager) setSelfName(custom *string) (nodeNameView, error) {
 	view := m.selfNameView()
 	if view.Name != prevName {
 		if clusterID, _ := m.clusterIdentity(); clusterID != "" {
-			if m.updateMemberIdentity(m.identity.NodeUUID, "", view.Name) {
+			if m.updateMemberIdentity(m.identity.NodeUUID, view.Name) {
 				m.emitNodesChanged()
 			}
 			go m.reconcileAllMembers()

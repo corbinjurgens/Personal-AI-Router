@@ -144,7 +144,7 @@ func newPairedBootstrapFixture(t *testing.T, blocked bool) *pairedBootstrapFixtu
 		if node == f.a {
 			peer = f.b
 		}
-		task1WriteJSON(t, filepath.Join(node.base, "cluster", "trusted", peer.uuid+".json"), map[string]any{"nodeUuid": peer.uuid, "nodeId": peer.uuid, "certPem": peer.cert, "clusterId": task1ClusterID, "admissionEpoch": 1})
+		task1WriteJSON(t, filepath.Join(node.base, "cluster", "trusted", peer.uuid+".json"), map[string]any{"nodeUuid": peer.uuid, "certPem": peer.cert, "clusterId": task1ClusterID, "admissionEpoch": 1})
 		node.mesh = clustertrust.Open(filepath.Join(node.base, "cluster"))
 	}
 	f.self = pairedBootstrapSelf(t, f.b)
@@ -653,10 +653,10 @@ func TestPairedDirectoryBootstrap(t *testing.T) {
 		}
 		assertAuthority("removed pin rejects before protected dispatch", func(t *testing.T, path string) { removeAuthorityFile(t, path) })
 		assertAuthority("wrong pinned certificate rejects before protected dispatch", func(t *testing.T, path string) {
-			task1WriteJSON(t, path, map[string]any{"nodeUuid": f.b.uuid, "nodeId": f.b.uuid, "certPem": f.a.cert, "clusterId": task1ClusterID, "admissionEpoch": 1})
+			task1WriteJSON(t, path, map[string]any{"nodeUuid": f.b.uuid, "certPem": f.a.cert, "clusterId": task1ClusterID, "admissionEpoch": 1})
 		})
 		assertAuthority("replaced admission rejects old authority before protected dispatch", func(t *testing.T, path string) {
-			task1WriteJSON(t, path, map[string]any{"nodeUuid": f.b.uuid, "nodeId": f.b.uuid, "certPem": f.b.cert, "clusterId": task1ClusterID, "admissionEpoch": 2})
+			task1WriteJSON(t, path, map[string]any{"nodeUuid": f.b.uuid, "certPem": f.b.cert, "clusterId": task1ClusterID, "admissionEpoch": 2})
 		})
 	})
 }

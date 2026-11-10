@@ -190,7 +190,7 @@ func TestRemoteManagementSetterWaitsForMemberReplacement(t *testing.T) {
 	other := newReverseTestManager(t)
 	containHintDials(t, other, false)
 	pinTrusted(t, f.m, other.identity.NodeUUID, string(other.identity.CertPEM), other.identity.CertFingerprint)
-	f.m.upsertMember(&ClusterNode{NodeUUID: other.identity.NodeUUID, ID: "other-peer", ClusterID: "cluster-1", AdmissionEpoch: 1, State: stateMember})
+	f.m.upsertMember(&ClusterNode{NodeUUID: other.identity.NodeUUID, ClusterID: "cluster-1", AdmissionEpoch: 1, State: stateMember})
 	if err := f.m.persistMembersErr(); err != nil {
 		t.Fatal(err)
 	}

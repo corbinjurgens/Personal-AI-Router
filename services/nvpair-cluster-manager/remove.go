@@ -13,7 +13,6 @@ import (
 )
 
 type removeParams struct {
-	NodeID   *string `json:"nodeId"`
 	NodeUUID *string `json:"nodeUuid"`
 }
 
@@ -27,9 +26,9 @@ func (m *Manager) handleNodesRemove(msg *Message) {
 		m.codec.RespondErrorData(msg.ID, codeInvalidParams, "invalid params: "+err.Error(), nil)
 		return
 	}
-	if p.NodeID == nil && p.NodeUUID == nil {
-		m.codec.RespondErrorData(msg.ID, codeInvalidParams, "nodeId or nodeUuid is required",
-			map[string]string{"field": "nodeId"})
+	if p.NodeUUID == nil {
+		m.codec.RespondErrorData(msg.ID, codeInvalidParams, "nodeUuid is required",
+			map[string]string{"field": "nodeUuid"})
 		return
 	}
 
@@ -44,19 +43,10 @@ func (m *Manager) handleNodesRemove(msg *Message) {
 	// boundary, a leave/rejoin between lookup and persistence could introduce an
 	// old-cluster proof into the new admission.
 	m.rosterMu.Lock()
-	if p.NodeUUID != nil {
-		node, _ = m.memberByNodeID(*p.NodeUUID)
-	}
-	if node == nil && p.NodeID != nil {
-		node, _ = m.memberByNodeID(*p.NodeID)
-	}
+	node, _ = m.memberByUUID(*p.NodeUUID)
 	if node == nil {
 		m.rosterMu.Unlock()
-		id := ""
-		if p.NodeID != nil {
-			id = *p.NodeID
-		}
-		m.codec.Respond(msg.ID, map[string]any{"nodeId": id, "removed": false})
+		m.codec.Respond(msg.ID, map[string]any{"nodeUuid": *p.NodeUUID, "removed": false})
 		return
 	}
 	// Removing self is not a peer removal — it would evict this node from
@@ -100,7 +90,7 @@ func (m *Manager) handleNodesRemove(msg *Message) {
 	defer cancel()
 	address := m.peerAddrs.ChooseWithin(ctx, node.NodeUUID, m.resolvePeerAddrs(*node))
 	m.rosterMu.Lock()
-	current, ok := m.memberByNodeID(node.NodeUUID)
+	current, ok := m.memberByUUID(node.NodeUUID)
 	stale := !m.removalAdmissionCurrent(node, cid0, selfEpoch0, preparedPeer) ||
 		(address != "" && (!ok || !slices.Contains(m.resolvePeerAddrs(*current), address)))
 	var persistErr error
@@ -159,7 +149,7 @@ func (m *Manager) handleNodesRemove(msg *Message) {
 		return
 	}
 	m.emitNodesChanged()
-	m.codec.Respond(msg.ID, map[string]any{"nodeId": node.ID, "removed": true})
+	m.codec.Respond(msg.ID, map[string]any{"nodeUuid": node.NodeUUID, "removed": true})
 	// Fan the tombstone out to the remaining members.
 	go m.reconcileAllMembers()
 }
@@ -169,7 +159,7 @@ func (m *Manager) handleNodesRemove(msg *Message) {
 func (m *Manager) removalAdmissionCurrent(node *ClusterNode, cid0 string, selfEpoch0 uint64, prepared clustertrust.ReversePeer) bool {
 	cid, epoch := m.currentAdmission()
 	liveCID, _ := m.clusterIdentity()
-	current, ok := m.memberByNodeID(node.NodeUUID)
+	current, ok := m.memberByUUID(node.NodeUUID)
 	peer, valid := m.reversePeer(node.NodeUUID)
 	return cid == cid0 && epoch == selfEpoch0 && liveCID == cid0 && ok &&
 		current.ClusterID == cid0 && current.AdmissionEpoch == node.AdmissionEpoch && valid && peer == prepared

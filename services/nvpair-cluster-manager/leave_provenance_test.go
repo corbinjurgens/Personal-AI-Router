@@ -145,16 +145,14 @@ func TestExpirePendingInviteClearsBothSides(t *testing.T) {
 	// (addr points at the inviter's pairing endpoint) + tentative member.
 	receiver.setClusterIdentity("", "")
 	peer := &PairingInfo{
-		NodeID:   inviter.identity.NodeID,
 		NodeUUID: inviter.identity.NodeUUID,
 		Name:     inviter.selfName(),
 	}
-	toID := receiver.identity.NodeID
+	toID := receiver.identity.NodeUUID
 	receiver.putInvite(&Invite{
 		InviteID:     inviteID,
-		FromNodeID:   inviter.identity.NodeID,
 		FromNodeUUID: inviter.identity.NodeUUID,
-		ToNodeID:     &toID,
+		ToNodeUUID:   &toID,
 		State:        inviteStatePending,
 		CreatedAt:    time.Now().Add(-time.Hour).UnixMilli(),
 	})
@@ -178,7 +176,7 @@ func TestExpirePendingInviteClearsBothSides(t *testing.T) {
 	if _, ok := receiver.getSession(inviteID); ok {
 		t.Fatal("receiver retained session after expiry")
 	}
-	if _, ok := receiver.memberByNodeID(inviter.identity.NodeUUID); ok {
+	if _, ok := receiver.memberByUUID(inviter.identity.NodeUUID); ok {
 		t.Fatal("receiver retained pending member after expiry")
 	}
 

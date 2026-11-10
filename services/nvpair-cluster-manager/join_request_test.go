@@ -603,7 +603,7 @@ func TestJoinRequestSoloReplacementWaitsForApproval(t *testing.T) {
 func TestJoinRequestAddressResolutionUsesExplicitPort(t *testing.T) {
 	m := joinTestManager(t)
 	p := 12345
-	endpoints, err := m.inviteEndpoints("::1", &p, nil)
+	endpoints, _, err := m.joinRequestEndpoints("::1", &p, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -612,7 +612,7 @@ func TestJoinRequestAddressResolutionUsesExplicitPort(t *testing.T) {
 	}
 }
 
-func TestJoinRequestHostnameSelectorCorrelatesCanonicalPeerUUID(t *testing.T) {
+func TestJoinRequestUUIDSelectorCorrelatesCanonicalPeerUUID(t *testing.T) {
 	m := joinTestManager(t)
 	peer := joinTestManager(t)
 	requestStarted := make(chan struct{})
@@ -646,31 +646,30 @@ func TestJoinRequestHostnameSelectorCorrelatesCanonicalPeerUUID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hostname := "discovered-member"
 	m.browser = newBrowser()
-	m.browser.relay[peer.identity.NodeUUID] = discovery.Node{ID: hostname, Addresses: []string{host}, Port: port, TXT: []string{"uuid=" + peer.identity.NodeUUID}}
-	response := joinTestRPC(t, m, "cluster:ask-to-join", map[string]any{"nodeId": hostname, "replaceSoloCluster": false})
+	m.browser.relay[peer.identity.NodeUUID] = discovery.Node{Addresses: []string{host}, Port: port, TXT: []string{"uuid=" + peer.identity.NodeUUID}}
+	response := joinTestRPC(t, m, "cluster:ask-to-join", map[string]any{"nodeUuid": peer.identity.NodeUUID, "replaceSoloCluster": false})
 	if response.Error != nil {
-		t.Fatalf("ask by hostname: %+v", response.Error)
+		t.Fatalf("ask by node UUID: %+v", response.Error)
 	}
 	var result JoinRequest
 	if err := json.Unmarshal(response.Result, &result); err != nil {
 		t.Fatal(err)
 	}
 	if result.PeerNodeUUID != peer.identity.NodeUUID || result.PeerAddress != host || result.PeerPort != port {
-		t.Fatalf("hostname resolution = %+v", result)
+		t.Fatalf("node UUID resolution = %+v", result)
 	}
 	select {
 	case <-requestStarted:
 	case <-time.After(5 * time.Second):
 		t.Fatal("request did not reach the owned discovery endpoint")
 	}
-	id := "hostname-child"
+	id := "uuid-selected-child"
 	m.joinMu.Lock()
 	r := m.joinRequests[result.RequestID]
 	r.InviteID, r.State, r.ready = &id, "pairing", true
 	m.joinMu.Unlock()
-	if _, _, err := peer.foundCluster("hostname member"); err != nil {
+	if _, _, err := peer.foundCluster("selected member"); err != nil {
 		t.Fatal(err)
 	}
 	incoming := joinTestRecord(t, peer, "incoming")
@@ -684,7 +683,7 @@ func TestJoinRequestHostnameSelectorCorrelatesCanonicalPeerUUID(t *testing.T) {
 	pairingServer := httptest.NewServer(http.HandlerFunc(m.handlePairing))
 	defer pairingServer.Close()
 	if _, _, err := peer.runInitialExchange(id, strings.TrimPrefix(pairingServer.URL, "http://"), cid, peer.sessGen.Load(), false); err != nil {
-		t.Fatal("hostname-selected member failed the exact Initial Exchange correlation")
+		t.Fatal("UUID-selected member failed the exact Initial Exchange correlation")
 	}
 	sess, live := m.getSession(id)
 	if !live || sess.peerPairing == nil || sess.peerPairing.NodeUUID != result.PeerNodeUUID || sess.peerPairing.JoinRequestID != result.RequestID {
@@ -693,11 +692,11 @@ func TestJoinRequestHostnameSelectorCorrelatesCanonicalPeerUUID(t *testing.T) {
 	info := peer.localPairingInfo(server.Listener.Addr().String())
 	info.JoinRequestID = result.RequestID
 	if !m.matchJoinRequestPeer(id, info) {
-		t.Fatal("hostname selection rejected the exact transcript peer UUID")
+		t.Fatal("UUID selection rejected the exact transcript peer UUID")
 	}
 	info.NodeUUID = "different-authenticated-peer"
 	if m.matchJoinRequestPeer(id, info) {
-		t.Fatal("hostname selection accepted a mismatched transcript peer UUID")
+		t.Fatal("UUID selection accepted a mismatched transcript peer UUID")
 	}
 	m.joinMu.Lock()
 	m.finishJoinRequestLocked(r, "canceled", "")
@@ -714,9 +713,10 @@ func TestJoinRequestHostnameSelectorCorrelatesCanonicalPeerUUID(t *testing.T) {
 	}
 }
 
-func TestJoinRequestUnresolvedSelectorDoesNotBecomePeerUUID(t *testing.T) {
+func TestJoinRequestUnresolvedUUIDSelectorDoesNotBecomePeerUUID(t *testing.T) {
 	m := joinTestManager(t)
-	selector := "unresolved-hostname"
+	m.browser = newBrowser()
+	selector := "5f0c0e7a-0000-4000-8000-000000000000"
 	endpoints, uuid, err := m.joinRequestEndpoints("127.0.0.1", nil, &selector)
 	if err != nil {
 		t.Fatal(err)

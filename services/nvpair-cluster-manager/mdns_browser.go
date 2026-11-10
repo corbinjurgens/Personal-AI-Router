@@ -3,8 +3,8 @@
 
 package main
 
-// mdns_browser.go resolves a cluster peer's host:port from a nodeUuid / nodeId,
-// used to resolve an invite target given only a UUID or hostname and to
+// mdns_browser.go resolves a cluster peer's host:port from its nodeUuid, used
+// to resolve an invite or join target given only a UUID and to
 // corroborate a member's advertised addr (§7.5). It exposes no RPC; node
 // selection is the Broker's job and a Broker-supplied address always wins.
 //
@@ -56,7 +56,7 @@ func (b *Browser) setRelay(nodes []noderec.DirectoryNode) {
 			continue
 		}
 		m[n.HostUUID] = discovery.Node{
-			ID:        n.Name,
+			ID:        n.HostUUID,
 			Addresses: hosts,
 			Port:      svc.Port,
 			TXT:       append([]string{"uuid=" + n.HostUUID}, n.AddressTXT()...),
@@ -68,43 +68,25 @@ func (b *Browser) setRelay(nodes []noderec.DirectoryNode) {
 }
 
 // Resolve returns a node's addresses in the order it ranked them, plus its
-// cluster-manager port, for a UUID or nodeId (hostname); a UUID match wins. The
+// cluster-manager port, for a node UUID. The
 // list is what a caller dials down until one address answers — the publisher's
 // ranking is evidence from its vantage point, not a promise about this host's.
-func (b *Browser) Resolve(idOrUUID string) (hosts []string, port int, ok bool) {
-	hosts, port, _, ok = b.resolvePeer(idOrUUID)
+func (b *Browser) Resolve(nodeUUID string) (hosts []string, port int, ok bool) {
+	hosts, port, _, ok = b.resolvePeer(nodeUUID)
 	return
 }
 
-// resolvePeer also retains the selected discovery record's canonical UUID.
+// resolvePeer also returns the selected discovery record's canonical UUID.
 // It is an expected pairing identity, not authenticated discovery data.
-func (b *Browser) resolvePeer(idOrUUID string) (hosts []string, port int, uuid string, ok bool) {
+func (b *Browser) resolvePeer(nodeUUID string) (hosts []string, port int, uuid string, ok bool) {
 	b.mu.RLock()
-	nodes := make([]discovery.Node, 0, len(b.relay))
-	for _, n := range b.relay {
-		nodes = append(nodes, n)
-	}
+	n, found := b.relay[nodeUUID]
 	b.mu.RUnlock()
-
-	var byNode discovery.Node
-	haveNode := false
-	for _, n := range nodes {
-		if n.Port == 0 {
-			continue
-		}
-		if discovery.UUIDFromTXT(n.TXT) == idOrUUID {
-			if h := pickHosts(n); len(h) > 0 {
-				return h, n.Port, discovery.UUIDFromTXT(n.TXT), true
-			}
-		}
-		if n.ID == idOrUUID && !haveNode {
-			byNode, haveNode = n, true
-		}
+	if !found || n.Port == 0 || discovery.UUIDFromTXT(n.TXT) != nodeUUID {
+		return nil, 0, "", false
 	}
-	if haveNode {
-		if h := pickHosts(byNode); len(h) > 0 {
-			return h, byNode.Port, discovery.UUIDFromTXT(byNode.TXT), true
-		}
+	if h := pickHosts(n); len(h) > 0 {
+		return h, n.Port, nodeUUID, true
 	}
 	return nil, 0, "", false
 }

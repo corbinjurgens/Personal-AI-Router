@@ -37,12 +37,11 @@ type identityFile struct {
 	DisplayName string `json:"display_name,omitempty"`
 }
 
-// NodeIdentity is this node's cryptographic identity: a stable UUID, the
-// hostname-derived logical id, and the self-signed leaf used for mTLS. The
-// display name is Manager state (node_name.go), not part of the identity.
+// NodeIdentity is this node's cryptographic identity: a stable UUID and the
+// self-signed leaf used for mTLS. The UUID is the only identity; the display
+// name is Manager state (node_name.go).
 type NodeIdentity struct {
 	NodeUUID        string
-	NodeID          string // OS hostname (display/logical, never trusted)
 	CertPEM         []byte
 	KeyPEM          []byte
 	Cert            tls.Certificate
@@ -61,11 +60,6 @@ func loadOrMintIdentity(clusterDir string) (*NodeIdentity, identityFile, error) 
 	keyPath := filepath.Join(clusterDir, "node.key")
 	crtPath := filepath.Join(clusterDir, "node.crt")
 
-	hostname, err := os.Hostname()
-	if err != nil || hostname == "" {
-		hostname = "unknown-host"
-	}
-
 	idData, idErr := durablefile.ReadFile(idPath)
 	if idErr == nil {
 		var idf identityFile
@@ -76,7 +70,7 @@ func loadOrMintIdentity(clusterDir string) (*NodeIdentity, identityFile, error) 
 		if kerr != nil {
 			return nil, identityFile{}, fmt.Errorf("identity.json exists (uuid %s) but the keypair is missing or corrupt: %w; refusing to mint a new identity (would orphan peer pins) — restore node.key/node.crt or re-pair this node", idf.NodeUUID, kerr)
 		}
-		identity, err := assembleIdentity(idf.NodeUUID, hostname, certPEM, keyPEM)
+		identity, err := assembleIdentity(idf.NodeUUID, certPEM, keyPEM)
 		return identity, idf, err
 	}
 	if !os.IsNotExist(idErr) {
@@ -94,7 +88,7 @@ func loadOrMintIdentity(clusterDir string) (*NodeIdentity, identityFile, error) 
 	if uuid == "" {
 		return nil, identityFile{}, fmt.Errorf("mint node uuid: system CSPRNG unavailable")
 	}
-	certPEM, keyPEM, err := generateLeaf(uuid, hostname)
+	certPEM, keyPEM, err := generateLeaf(uuid)
 	if err != nil {
 		return nil, identityFile{}, fmt.Errorf("generate leaf cert: %w", err)
 	}
@@ -110,7 +104,7 @@ func loadOrMintIdentity(clusterDir string) (*NodeIdentity, identityFile, error) 
 	if err := writeIdentityFile(clusterDir, idf); err != nil {
 		return nil, identityFile{}, err
 	}
-	identity, err := assembleIdentity(uuid, hostname, certPEM, keyPEM)
+	identity, err := assembleIdentity(uuid, certPEM, keyPEM)
 	return identity, idf, err
 }
 
@@ -139,7 +133,7 @@ func readKeypair(crtPath, keyPath string) (certPEM, keyPEM []byte, err error) {
 	return certPEM, keyPEM, nil
 }
 
-func assembleIdentity(uuid, hostname string, certPEM, keyPEM []byte) (*NodeIdentity, error) {
+func assembleIdentity(uuid string, certPEM, keyPEM []byte) (*NodeIdentity, error) {
 	cert, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
 		return nil, fmt.Errorf("parse keypair: %w", err)
@@ -154,7 +148,6 @@ func assembleIdentity(uuid, hostname string, certPEM, keyPEM []byte) (*NodeIdent
 	}
 	return &NodeIdentity{
 		NodeUUID:        uuid,
-		NodeID:          hostname,
 		CertPEM:         certPEM,
 		KeyPEM:          keyPEM,
 		Cert:            cert,
@@ -164,9 +157,9 @@ func assembleIdentity(uuid, hostname string, certPEM, keyPEM []byte) (*NodeIdent
 }
 
 // generateLeaf creates an Ed25519 keypair and a long-lived self-signed leaf
-// whose subject CN and URI SAN both carry the node UUID; the hostname rides
-// along only as a (display-only) DNS SAN.
-func generateLeaf(nodeUUID, hostname string) (certPEM, keyPEM []byte, err error) {
+// whose subject CN and URI SAN both carry the node UUID. It carries no DNS SAN:
+// peers pin the exact certificate and read the UUID, never a host name.
+func generateLeaf(nodeUUID string) (certPEM, keyPEM []byte, err error) {
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, nil, err
@@ -189,9 +182,6 @@ func generateLeaf(nodeUUID, hostname string) (certPEM, keyPEM []byte, err error)
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
 		BasicConstraintsValid: true,
 		URIs:                  []*url.URL{uri},
-	}
-	if hostname != "" {
-		tmpl.DNSNames = []string{hostname}
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, pub, priv)
 	if err != nil {

@@ -31,13 +31,12 @@ func newAnnouncingStore(t *testing.T) (*TrustStore, func() int) {
 
 func testPin(t *testing.T, uuid string) *TrustedPin {
 	t.Helper()
-	certPEM, _, err := generateLeaf(uuid, uuid)
+	certPEM, _, err := generateLeaf(uuid)
 	if err != nil {
 		t.Fatalf("generate leaf: %v", err)
 	}
 	return &TrustedPin{
 		NodeUUID:  uuid,
-		NodeID:    uuid,
 		Name:      uuid,
 		ClusterID: "cluster-1",
 		CertPem:   string(certPEM),
@@ -66,7 +65,7 @@ func TestTrustStoreAnnouncesEveryMutation(t *testing.T) {
 		t.Fatalf("announcements after pin = %d, want 1", count())
 	}
 
-	if ok, err := ts.UpdateIdentity(uuid, "renamed-host", "Renamed"); err != nil || !ok {
+	if ok, err := ts.UpdateIdentity(uuid, "Renamed"); err != nil || !ok {
 		t.Fatalf("update identity: ok=%v err=%v", ok, err)
 	}
 	if count() != 2 {
@@ -324,7 +323,7 @@ func TestTrustStoreStaysSilentWhenNothingChanged(t *testing.T) {
 		t.Fatalf("empty endorsement merge: %v", err)
 	}
 	// A rename to the values already stored changes nothing.
-	if ok, err := ts.UpdateIdentity(uuid, uuid, uuid); err != nil || ok {
+	if ok, err := ts.UpdateIdentity(uuid, uuid); err != nil || ok {
 		t.Fatalf("no-op rename: ok=%v err=%v, want false/nil", ok, err)
 	}
 	// Removing a peer we do not hold is not a change.

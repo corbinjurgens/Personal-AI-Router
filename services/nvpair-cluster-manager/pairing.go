@@ -45,7 +45,6 @@ var pinPattern = regexp.MustCompile(`^[0-9]{6}$`)
 type PairingInfo struct {
 	V                   int    `json:"v"`
 	NodeUUID            string `json:"nodeUuid"`
-	NodeID              string `json:"nodeId"`
 	Name                string `json:"name"`
 	ClusterID           string `json:"clusterId"`
 	AdmissionEpoch      uint64 `json:"admissionEpoch,omitempty"`
@@ -70,7 +69,6 @@ func (m *Manager) localPairingInfo(addr string, admissionEpoch ...uint64) *Pairi
 	return &PairingInfo{
 		V:                   pairingInfoVersion,
 		NodeUUID:            m.identity.NodeUUID,
-		NodeID:              m.identity.NodeID,
 		Name:                m.selfName(),
 		ClusterID:           cid,
 		AdmissionEpoch:      epoch,
@@ -101,7 +99,7 @@ func (pi *PairingInfo) toMap() (map[string]any, error) {
 func parsePairingInfo(raw []byte) (*PairingInfo, *x509.Certificate, error) {
 	var pi PairingInfo
 	fields, err := decodeRemoteManagementParams(raw, map[string]bool{
-		"v": true, "nodeUuid": true, "nodeId": true, "name": true, "clusterId": true,
+		"v": true, "nodeUuid": true, "name": true, "clusterId": true,
 		"admissionEpoch": true, "clusterFriendlyName": true, "addr": true, "cert": true, "completion": true, "joinRequestId": true,
 	})
 	if err != nil {

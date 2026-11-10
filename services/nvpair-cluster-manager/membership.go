@@ -51,12 +51,11 @@ const reasonAlreadyClustered = "already-clustered"
 // failed causes (peer unreachable, malformed) leave the reason empty.
 const reasonIncorrectPIN = "incorrect-pin"
 
-// ClusterNode is a cluster member or pending invitee (§6). The logical id is the
-// membership key for display; nodeUuid is the cryptographic principal.
+// ClusterNode is a cluster member or pending invitee (§6). nodeUuid is the only
+// identity: the membership key and the cryptographic principal.
 type ClusterNode struct {
-	ID        string `json:"id"`
-	NodeUUID  string `json:"nodeUuid"`
-	Name      string `json:"name"`
+	NodeUUID string `json:"nodeUuid"`
+	Name     string `json:"name"`
 	// Nickname is a name only this node uses for the member; it never leaves
 	// the node (rosters are built from pins). Empty until a setter exists.
 	Nickname string `json:"nickname,omitempty"`
@@ -78,11 +77,13 @@ type ClusterNode struct {
 // Invite is the Broker-facing view of a pairing session (§6). Certificates are
 // not carried here; they travel inside the EAP-NOOB transcript.
 type Invite struct {
-	InviteID            string      `json:"inviteId"`
-	FromNodeID          string      `json:"fromNodeId"`
-	FromNodeUUID        string      `json:"fromNodeUuid"`
-	FromNodeName        string      `json:"fromNodeName"`
-	ToNodeID            *string     `json:"toNodeId"`
+	InviteID     string `json:"inviteId"`
+	FromNodeUUID string `json:"fromNodeUuid"`
+	FromNodeName string `json:"fromNodeName"`
+	// ToNodeUUID is the invited node's UUID: on the inviter the UUID the
+	// target resolved to (nil when only an address was given), on the joiner
+	// this node's UUID.
+	ToNodeUUID          *string     `json:"toNodeUuid"`
 	ClusterID           string      `json:"clusterId"`
 	ClusterFriendlyName string      `json:"clusterFriendlyName"`
 	Pin                 *string     `json:"pin"`
@@ -117,9 +118,9 @@ func cloneInvite(inv *Invite) *Invite {
 		return nil
 	}
 	cp := *inv
-	if inv.ToNodeID != nil {
-		v := *inv.ToNodeID
-		cp.ToNodeID = &v
+	if inv.ToNodeUUID != nil {
+		v := *inv.ToNodeUUID
+		cp.ToNodeUUID = &v
 	}
 	if inv.Pin != nil {
 		v := *inv.Pin
@@ -190,17 +191,12 @@ func (m *Manager) resetInvites() {
 	}
 }
 
-// memberByNodeID resolves a member by either its logical nodeId or its nodeUuid.
-func (m *Manager) memberByNodeID(idOrUUID string) (*ClusterNode, bool) {
+// memberByUUID returns a copy of the member with this nodeUuid.
+func (m *Manager) memberByUUID(uuid string) (*ClusterNode, bool) {
 	m.memMu.Lock()
 	defer m.memMu.Unlock()
-	if n, ok := m.members[idOrUUID]; ok {
+	if n, ok := m.members[uuid]; ok {
 		return cloneClusterNode(n), true
-	}
-	for _, n := range m.members {
-		if n.ID == idOrUUID {
-			return cloneClusterNode(n), true
-		}
 	}
 	return nil, false
 }
@@ -267,43 +263,42 @@ func (m *Manager) observedPeerHost(uuid string) string {
 	return m.observedPeerHosts[uuid]
 }
 
-// updateMemberIdentity refreshes a member's display fields (id/name) in place,
-// keyed by its stable nodeUuid. Empty inputs are ignored so a partial update
-// can't blank a known value. Returns whether anything changed. Display-only: the
-// map key (nodeUuid) is untouched, so a peer's PC rename updates the shown name
-// rather than creating a duplicate member after a host rename. Callers persist and emit
+// updateMemberIdentity refreshes a member's display name in place, keyed by its
+// stable nodeUuid. An empty name is ignored so a partial update can't blank a
+// known value. Returns whether anything changed. Callers persist and emit
 // nodes:changed when this returns true.
-func (m *Manager) updateMemberIdentity(uuid, nodeID, name string) bool {
+func (m *Manager) updateMemberIdentity(uuid, name string) bool {
 	m.memMu.Lock()
 	defer m.memMu.Unlock()
 	n, ok := m.members[uuid]
-	if !ok {
+	if !ok || name == "" || n.Name == name {
 		return false
 	}
-	changed := false
-	if nodeID != "" && n.ID != nodeID {
-		n.ID = nodeID
-		changed = true
-	}
-	if name != "" && n.Name != name {
-		n.Name = name
-		changed = true
-	}
-	return changed
+	n.Name = name
+	return true
 }
 
 // refreshSelfMemberIdentity updates this node's own member record (if it is
-// clustered) to the current hostname-derived display fields after a restart, so
-// a PC rename doesn't leave a stale self entry lingering in the roster under the
-// old name — a ghost the local instance couldn't remove. Keyed by the
-// stable nodeUuid; only the display id/name change. Persists when it changed.
+// clustered) to the current effective name after a restart, so a changed
+// generated default doesn't leave a stale self entry in the roster. Persists
+// when it changed.
 func (m *Manager) refreshSelfMemberIdentity() {
-	if m.updateMemberIdentity(m.identity.NodeUUID, m.identity.NodeID, m.selfName()) {
+	if m.updateMemberIdentity(m.identity.NodeUUID, m.selfName()) {
 		m.persistMembers()
 	}
 }
 
-// snapshotNodes returns a stable, id-sorted copy of the member set.
+// sortMembers orders members by display name, then nodeUuid.
+func sortMembers(nodes []ClusterNode) {
+	sort.Slice(nodes, func(i, j int) bool {
+		if nodes[i].Name != nodes[j].Name {
+			return nodes[i].Name < nodes[j].Name
+		}
+		return nodes[i].NodeUUID < nodes[j].NodeUUID
+	})
+}
+
+// snapshotNodes returns a stable copy of the member set sorted by name, then UUID.
 func (m *Manager) snapshotNodes() []ClusterNode {
 	m.memMu.Lock()
 	defer m.memMu.Unlock()
@@ -313,7 +308,7 @@ func (m *Manager) snapshotNodes() []ClusterNode {
 		cp.DisplayName = memberDisplayName(cp)
 		out = append(out, *cp)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	sortMembers(out)
 	return out
 }
 
@@ -360,7 +355,6 @@ func (m *Manager) addSelfMember() {
 func (m *Manager) addSelfMemberForAdmission(clusterID string, epoch uint64) {
 	now := time.Now().UnixMilli()
 	m.upsertMember(&ClusterNode{
-		ID:             m.identity.NodeID,
 		NodeUUID:       m.identity.NodeUUID,
 		Name:           m.selfName(),
 		IPAddress:      "127.0.0.1",

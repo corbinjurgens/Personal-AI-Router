@@ -222,7 +222,7 @@ func TestClusterRosterBlockedTLSUsesRealReverseSession(t *testing.T) {
 	}
 	// The tunneled listener sees the gateway's loopback source. It must not
 	// replace the reachable peer's original public address with that source.
-	node, ok := b.m.memberByNodeID(a.m.identity.NodeUUID)
+	node, ok := b.m.memberByUUID(a.m.identity.NodeUUID)
 	if !ok || node.IPAddress != "localhost" || node.Port != a.m.port {
 		t.Fatalf("reverse roster corrupted public peer address: %+v", node)
 	}
@@ -244,7 +244,7 @@ func TestClusterRosterUnavailableRouteDoesNotRemoveMembership(t *testing.T) {
 	if _, ok := a.m.trust.Get(b.m.identity.NodeUUID); !ok {
 		t.Fatal("route failure removed peer pin")
 	}
-	if node, ok := a.m.memberByNodeID(b.m.identity.NodeUUID); !ok || node.State != stateMember {
+	if node, ok := a.m.memberByUUID(b.m.identity.NodeUUID); !ok || node.State != stateMember {
 		t.Fatalf("route failure removed member: %+v", node)
 	}
 	if reverse.Load() != 1 || b.rosters.Load() != 0 {
@@ -282,7 +282,7 @@ func TestClusterRosterDisconnectDoesNotLearnGatewaySource(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("disconnected roster did not finish")
 	}
-	node, ok := b.m.memberByNodeID(a.m.identity.NodeUUID)
+	node, ok := b.m.memberByUUID(a.m.identity.NodeUUID)
 	if !ok || node.IPAddress != "localhost" || node.Port != a.m.port || b.rosters.Load() != 1 {
 		t.Fatalf("gateway source learned after disconnect: member=%+v dispatched=%d", node, b.rosters.Load())
 	}
@@ -318,7 +318,7 @@ func TestClusterRosterPairwiseThreePeerFanout(t *testing.T) {
 			if _, ok := local.m.trust.Get(remote.m.identity.NodeUUID); !ok {
 				t.Fatalf("%s did not learn pin %s", local.m.identity.NodeUUID, remote.m.identity.NodeUUID)
 			}
-			member, ok := local.m.memberByNodeID(remote.m.identity.NodeUUID)
+			member, ok := local.m.memberByUUID(remote.m.identity.NodeUUID)
 			if !ok || member.State != stateMember || member.AdmissionEpoch != 1 || member.ClusterID != "cluster-1" {
 				t.Fatalf("fanout did not converge member %s: %+v", remote.m.identity.NodeUUID, member)
 			}
@@ -358,12 +358,12 @@ func TestClusterPeerRouteUsesCurrentAuthority(t *testing.T) {
 	}
 	test("forgotten pin remains on disk", func(a, b *Manager) { a.trust.Forget(b.identity.NodeUUID) })
 	test("pending member", func(a, b *Manager) {
-		node, _ := a.memberByNodeID(b.identity.NodeUUID)
+		node, _ := a.memberByUUID(b.identity.NodeUUID)
 		node.State = statePendingOutbound
 		a.upsertMember(node)
 	})
 	test("admission mismatch", func(a, b *Manager) {
-		node, _ := a.memberByNodeID(b.identity.NodeUUID)
+		node, _ := a.memberByUUID(b.identity.NodeUUID)
 		node.AdmissionEpoch++
 		a.upsertMember(node)
 	})
@@ -413,7 +413,7 @@ func TestClusterPeerAdaptersRejectRevokedAuthority(t *testing.T) {
 		}
 	})
 	test("admission mismatch with roster idle", func(t *testing.T, a, b *Manager) {
-		node, ok := a.memberByNodeID(b.identity.NodeUUID)
+		node, ok := a.memberByUUID(b.identity.NodeUUID)
 		if !ok {
 			t.Fatal("missing peer before admission mutation")
 		}
@@ -488,11 +488,10 @@ func readmitClusterPeer(t *testing.T, local, peer *Manager) {
 	if err := local.trust.Remove(peer.identity.NodeUUID); err != nil {
 		t.Fatal(err)
 	}
-	if err := local.trust.Pin(&TrustedPin{NodeUUID: peer.identity.NodeUUID, NodeID: peer.identity.NodeID,
-		ClusterID: "cluster-1", AdmissionEpoch: 2, CertPem: string(peer.identity.CertPEM), CertFingerprint: peer.identity.CertFingerprint}); err != nil {
+	if err := local.trust.Pin(&TrustedPin{NodeUUID: peer.identity.NodeUUID, ClusterID: "cluster-1", AdmissionEpoch: 2, CertPem: string(peer.identity.CertPEM), CertFingerprint: peer.identity.CertFingerprint}); err != nil {
 		t.Fatal(err)
 	}
-	node, ok := local.memberByNodeID(peer.identity.NodeUUID)
+	node, ok := local.memberByUUID(peer.identity.NodeUUID)
 	if !ok {
 		t.Fatal("readmission fixture lost member")
 	}

@@ -390,7 +390,7 @@ func TestIdentityDurableWriteFailurePreservesExistingKeypair(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	cert, key, err := generateLeaf("existing-principal", "existing-host")
+	cert, key, err := generateLeaf("existing-principal")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -579,13 +579,12 @@ func (m *Manager) prepareJoinerInitialComplete(inviteID string, sess *pairingSes
 	sess.invitedEmitted = true
 
 	now := time.Now().UnixMilli()
-	toID := m.identity.NodeID
+	toUUID := m.identity.NodeUUID
 	return &Invite{
 		InviteID:            inviteID,
-		FromNodeID:          pi.NodeID,
 		FromNodeUUID:        pi.NodeUUID,
 		FromNodeName:        pi.Name,
-		ToNodeID:            &toID,
+		ToNodeUUID:          &toUUID,
 		ClusterID:           pi.ClusterID,
 		ClusterFriendlyName: pi.ClusterFriendlyName,
 		State:               inviteStatePending,
@@ -755,7 +754,7 @@ func (m *Manager) finalizePairing(inviteID string, sess *pairingSession, pi *Pai
 	}
 	sess.awaitingAck = true
 	sess.createdAt = now
-	log.Printf("pairing %s: inviter commit complete for %s (%s), awaiting joiner ack", inviteID, pi.NodeID, pi.NodeUUID)
+	log.Printf("pairing %s: inviter commit complete for %s (%s), awaiting joiner ack", inviteID, pi.Name, pi.NodeUUID)
 	return nil
 }
 
@@ -866,7 +865,6 @@ func testCommitDelay() {
 func (m *Manager) pinPeer(pi *PairingInfo, cert *x509.Certificate, endorsements []Endorsement) error {
 	return m.trust.Pin(&TrustedPin{
 		NodeUUID:        pi.NodeUUID,
-		NodeID:          pi.NodeID,
 		Name:            pi.Name,
 		ClusterID:       pi.ClusterID,
 		AdmissionEpoch:  pi.AdmissionEpoch,
@@ -881,7 +879,6 @@ func (m *Manager) pinPeer(pi *PairingInfo, cert *x509.Certificate, endorsements 
 func (m *Manager) recordMember(pi *PairingInfo, state MembershipState, joinedAt *int64) {
 	host, port := splitAddr(pi.Addr, m.port)
 	m.upsertMember(&ClusterNode{
-		ID:             pi.NodeID,
 		NodeUUID:       pi.NodeUUID,
 		Name:           pi.Name,
 		IPAddress:      host,

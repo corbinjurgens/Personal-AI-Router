@@ -418,23 +418,23 @@ func (m *Manager) handleGetJoinRequests(msg *Message) {
 type askToJoinParams struct {
 	Address            string  `json:"address"`
 	Port               *int    `json:"port"`
-	NodeID             *string `json:"nodeId"`
+	NodeUUID           *string `json:"nodeUuid"`
 	ReplaceSoloCluster *bool   `json:"replaceSoloCluster"`
 }
 
 func (m *Manager) handleAskToJoin(msg *Message) {
 	var p askToJoinParams
-	_, err := decodeRemoteManagementParams(msg.Params, map[string]bool{"address": true, "port": true, "nodeId": true, "replaceSoloCluster": true})
+	_, err := decodeRemoteManagementParams(msg.Params, map[string]bool{"address": true, "port": true, "nodeUuid": true, "replaceSoloCluster": true})
 	if err != nil || json.Unmarshal(msg.Params, &p) != nil || p.ReplaceSoloCluster == nil || (p.Port != nil && (*p.Port < 1 || *p.Port > 65535)) {
 		m.codec.RespondError(msg.ID, codeInvalidParams, "invalid params: replaceSoloCluster and valid address/port are required")
 		return
 	}
-	endpoints, peerUUID, err := m.joinRequestEndpoints(p.Address, p.Port, p.NodeID)
+	endpoints, peerUUID, err := m.joinRequestEndpoints(p.Address, p.Port, p.NodeUUID)
 	if err != nil {
 		m.codec.RespondError(msg.ID, codeInvalidParams, err.Error())
 		return
 	}
-	if (p.NodeID != nil && (*p.NodeID == m.identity.NodeUUID || *p.NodeID == m.identity.NodeID)) || m.selfJoinEndpoint(endpoints) {
+	if (p.NodeUUID != nil && *p.NodeUUID == m.identity.NodeUUID) || m.selfJoinEndpoint(endpoints) {
 		m.codec.RespondErrorData(msg.ID, codePrecondition, "self-target", map[string]string{"reason": "self-target"})
 		return
 	}
@@ -481,15 +481,10 @@ func (m *Manager) handleAskToJoin(msg *Message) {
 	go m.driveJoinRequest(id, endpoints)
 }
 
-// inviteEndpoints shares ordinary Invite's discovery/explicit-port authority.
-func (m *Manager) inviteEndpoints(address string, port *int, nodeID *string) ([]string, error) {
-	endpoints, _, err := m.joinRequestEndpoints(address, port, nodeID)
-	return endpoints, err
-}
-
-// Keep endpoint selection and the expected peer UUID tied to one browser record;
-// a hostname selector is never itself a cryptographic peer identity.
-func (m *Manager) joinRequestEndpoints(address string, port *int, nodeID *string) ([]string, string, error) {
+// joinRequestEndpoints is the discovery/explicit-port authority shared by
+// invite and ask-to-join. It keeps endpoint selection and the expected peer
+// UUID tied to one browser record.
+func (m *Manager) joinRequestEndpoints(address string, port *int, nodeUUID *string) ([]string, string, error) {
 	p := m.port
 	if port != nil {
 		p = *port
@@ -508,8 +503,8 @@ func (m *Manager) joinRequestEndpoints(address string, port *int, nodeID *string
 	}
 	add(address, p)
 	peerUUID := ""
-	if nodeID != nil && m.browser != nil {
-		if hosts, discoveredPort, uuid, ok := m.browser.resolvePeer(*nodeID); ok {
+	if nodeUUID != nil && m.browser != nil {
+		if hosts, discoveredPort, uuid, ok := m.browser.resolvePeer(*nodeUUID); ok {
 			peerUUID = uuid
 			if port == nil && discoveredPort > 0 {
 				p = discoveredPort
@@ -520,7 +515,7 @@ func (m *Manager) joinRequestEndpoints(address string, port *int, nodeID *string
 		}
 	}
 	if len(endpoints) == 0 {
-		return nil, "", fmt.Errorf("address is required (or a discoverable nodeId)")
+		return nil, "", fmt.Errorf("address is required (or a discoverable nodeUuid)")
 	}
 	return endpoints, peerUUID, nil
 }

@@ -27,7 +27,6 @@ func TestInboundInitialCannotPublishAfterTeardown(t *testing.T) {
 		role:     roleJoiner,
 		peerPairing: &PairingInfo{
 			NodeUUID:  peer.identity.NodeUUID,
-			NodeID:    peer.identity.NodeID,
 			Name:      peer.selfName(),
 			ClusterID: "cluster-1",
 		},
@@ -56,7 +55,7 @@ func TestFailedTeardownBlocksTrustAndReadmission(t *testing.T) {
 	peer := newPinFixture(t, "peer")
 	pinTrusted(t, m, peer.uuid, peer.cert, peer.fp)
 	m.upsertMember(&ClusterNode{
-		NodeUUID: peer.uuid, ID: "peer", ClusterID: "cluster-1",
+		NodeUUID: peer.uuid, ClusterID: "cluster-1",
 		AdmissionEpoch: 1, State: stateMember,
 	})
 
@@ -156,7 +155,7 @@ func TestDirectPairingRejectsRemovedAdmission(t *testing.T) {
 	peer := newPinFixture(t, "readmission")
 	pinTrusted(t, m, peer.uuid, peer.cert, peer.fp)
 	m.upsertMember(&ClusterNode{
-		NodeUUID: peer.uuid, ID: "readmission", ClusterID: "cluster-1",
+		NodeUUID: peer.uuid, ClusterID: "cluster-1",
 		AdmissionEpoch: 1, State: stateMember,
 	})
 	proof, err := m.newRemovalProof(peer.uuid, 1)
@@ -192,7 +191,7 @@ func TestRestartRollsBackProvisionalAdmission(t *testing.T) {
 	peer := newPinFixture(t, "provisional-peer")
 	pinTrusted(t, m, peer.uuid, peer.cert, peer.fp)
 	m.upsertMember(&ClusterNode{
-		NodeUUID: peer.uuid, ID: "provisional-peer", ClusterID: "cluster-new",
+		NodeUUID: peer.uuid, ClusterID: "cluster-new",
 		AdmissionEpoch: 1, State: stateMember,
 	})
 	m.addSelfMemberForAdmission("cluster-new", epoch)
@@ -228,7 +227,7 @@ func TestRemovalIgnoresUnrelatedCompositionChange(t *testing.T) {
 	target := newPinFixture(t, "target")
 	pinTrusted(t, m, target.uuid, target.cert, target.fp)
 	m.upsertMember(&ClusterNode{
-		NodeUUID: target.uuid, ID: "target", ClusterID: "cluster-1",
+		NodeUUID: target.uuid, ClusterID: "cluster-1",
 		AdmissionEpoch: 1, State: stateMember,
 	})
 	targetUUID := target.uuid
@@ -241,7 +240,7 @@ func TestRemovalIgnoresUnrelatedCompositionChange(t *testing.T) {
 	}()
 	<-m.testRemovalPrepared
 	m.upsertMember(&ClusterNode{
-		NodeUUID: "unrelated", ID: "unrelated", ClusterID: "cluster-1",
+		NodeUUID: "unrelated", ClusterID: "cluster-1",
 		AdmissionEpoch: 1, State: stateMember,
 	})
 	close(m.testRemovalContinue)
@@ -249,7 +248,7 @@ func TestRemovalIgnoresUnrelatedCompositionChange(t *testing.T) {
 	if _, ok := m.trust.Get(target.uuid); ok {
 		t.Fatal("target pin survived because an unrelated member changed")
 	}
-	if _, ok := m.memberByNodeID(target.uuid); ok {
+	if _, ok := m.memberByUUID(target.uuid); ok {
 		t.Fatal("target member survived because an unrelated member changed")
 	}
 }
@@ -259,7 +258,7 @@ func TestRosterFixpointContinuesAfterAdmissionUpgrade(t *testing.T) {
 	aUUID, aCert, aFP, aPriv := makeNode(t, "node-a")
 	pinTrusted(t, m, aUUID, aCert, aFP)
 	m.upsertMember(&ClusterNode{
-		NodeUUID: aUUID, ID: "node-a", ClusterID: "cluster-1",
+		NodeUUID: aUUID, ClusterID: "cluster-1",
 		AdmissionEpoch: 1, State: stateMember,
 	})
 	cUUID, cCert, cFP, _ := makeNode(t, "node-c")
@@ -271,11 +270,11 @@ func TestRosterFixpointContinuesAfterAdmissionUpgrade(t *testing.T) {
 
 	entries := []RosterEntry{
 		{
-			NodeUUID: cUUID, NodeID: "node-c", AdmissionEpoch: 1,
+			NodeUUID: cUUID, AdmissionEpoch: 1,
 			CertPem: cCert, CertFingerprint: cFP, Endorsements: []Endorsement{endC},
 		},
 		{
-			NodeUUID: aUUID, NodeID: "node-a", AdmissionEpoch: 2,
+			NodeUUID: aUUID, AdmissionEpoch: 2,
 			CertPem: aCert, CertFingerprint: aFP, Endorsements: []Endorsement{endA2},
 		},
 	}
@@ -314,7 +313,7 @@ func TestJoinerFailureAfterInviterCommitRollsBackPairing(t *testing.T) {
 	if _, ok := m.trust.Get(peer.uuid); ok {
 		t.Fatal("inviter retained peer after joiner reported post-success commit failure")
 	}
-	if _, ok := m.memberByNodeID(peer.uuid); ok {
+	if _, ok := m.memberByUUID(peer.uuid); ok {
 		t.Fatal("inviter retained member after joiner reported post-success commit failure")
 	}
 	invite, ok := m.getInvite(inviteID)

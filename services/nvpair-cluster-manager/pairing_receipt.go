@@ -238,7 +238,7 @@ func (m *Manager) receiptCommitMatchesLocked(receipt pairingReceipt, pi *Pairing
 		return false
 	}
 	cid, epoch := m.currentAdmission()
-	member, memberOK := m.memberByNodeID(pi.NodeUUID)
+	member, memberOK := m.memberByUUID(pi.NodeUUID)
 	pin, pinOK := m.trust.Get(pi.NodeUUID)
 	if !m.teardownPending.Load() && cid == receipt.ClusterID && epoch == receipt.LocalEpoch &&
 		memberOK && pinOK && member.State == stateMember && member.ClusterID == cid && pin.ClusterID == cid &&
@@ -335,7 +335,7 @@ func (m *Manager) pairingRollbackMatchesAdmissionLocked(receipt pairingReceipt) 
 		if activated >= receipt.LocalEpoch && !(receipt.Rollback && receipt.AllowRemoteManagement != nil && activated == receipt.LocalEpoch && m.admissionWasRetired()) {
 			return false, nil
 		}
-		if self, ok := m.memberByNodeID(m.identity.NodeUUID); ok && self.AdmissionEpoch != 0 &&
+		if self, ok := m.memberByUUID(m.identity.NodeUUID); ok && self.AdmissionEpoch != 0 &&
 			(self.ClusterID != receipt.ClusterID || self.AdmissionEpoch != receipt.LocalEpoch) {
 			return false, nil // preserve a newer provisional local admission too
 		}
@@ -392,13 +392,13 @@ func (m *Manager) rollbackPairingPeerLocked(receipt pairingReceipt) error {
 			}
 		}
 	}
-	if member, ok := m.memberByNodeID(pi.NodeUUID); ok &&
+	if member, ok := m.memberByUUID(pi.NodeUUID); ok &&
 		member.ClusterID == receipt.ClusterID && member.AdmissionEpoch == pi.AdmissionEpoch {
 		m.removeMemberByUUID(pi.NodeUUID)
 	}
 	var provisionalSelf *ClusterNode
 	if receipt.Role == roleJoiner && rollbackErr == nil {
-		if self, ok := m.memberByNodeID(m.identity.NodeUUID); ok &&
+		if self, ok := m.memberByUUID(m.identity.NodeUUID); ok &&
 			self.ClusterID == receipt.ClusterID && self.AdmissionEpoch == receipt.LocalEpoch {
 			provisionalSelf = self
 			m.removeMemberByUUID(m.identity.NodeUUID)

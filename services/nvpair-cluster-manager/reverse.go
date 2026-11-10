@@ -328,7 +328,7 @@ func (m *Manager) reversePeerCertificate(uuid string, authenticatedDER []byte) (
 	if cid == "" || id != cid || localEpoch == 0 {
 		return clustertrust.ReversePeer{}, false
 	}
-	node, ok := m.memberByNodeID(uuid)
+	node, ok := m.memberByUUID(uuid)
 	if !ok || node.NodeUUID != uuid || node.State != stateMember || node.ClusterID != cid || node.AdmissionEpoch == 0 {
 		return clustertrust.ReversePeer{}, false
 	}

@@ -33,19 +33,19 @@ func TestReconcileMTLSFanout(t *testing.T) {
 	// records so reconcile has an address.
 	pinTrusted(t, mA, mB.identity.NodeUUID, string(mB.identity.CertPEM), mB.identity.CertFingerprint)
 	pinTrusted(t, mB, mA.identity.NodeUUID, string(mA.identity.CertPEM), mA.identity.CertFingerprint)
-	mA.upsertMember(&ClusterNode{NodeUUID: mB.identity.NodeUUID, ID: "node-b", IPAddress: "127.0.0.1", Port: 15012, ClusterID: "cluster-1", AdmissionEpoch: 1, State: stateMember})
-	mB.upsertMember(&ClusterNode{NodeUUID: mA.identity.NodeUUID, ID: "node-a", IPAddress: "127.0.0.1", Port: 15011, ClusterID: "cluster-1", AdmissionEpoch: 1, State: stateMember})
+	mA.upsertMember(&ClusterNode{NodeUUID: mB.identity.NodeUUID, IPAddress: "127.0.0.1", Port: 15012, ClusterID: "cluster-1", AdmissionEpoch: 1, State: stateMember})
+	mB.upsertMember(&ClusterNode{NodeUUID: mA.identity.NodeUUID, IPAddress: "127.0.0.1", Port: 15011, ClusterID: "cluster-1", AdmissionEpoch: 1, State: stateMember})
 
 	// A holds a third member C, endorsed by A.
 	cUUID, cCert, cFP, _ := makeNode(t, "node-c")
 	if err := mA.trust.Pin(&TrustedPin{
-		NodeUUID: cUUID, NodeID: "node-c", ClusterID: "cluster-1",
+		NodeUUID: cUUID, ClusterID: "cluster-1",
 		AdmissionEpoch: 1, CertPem: cCert, CertFingerprint: cFP, PinnedAt: time.Now().UnixMilli(),
 		Endorsements: []Endorsement{mA.endorsePeer(cUUID, cFP, 1)},
 	}); err != nil {
 		t.Fatalf("pin C on A: %v", err)
 	}
-	mA.upsertMember(&ClusterNode{NodeUUID: cUUID, ID: "node-c", IPAddress: "10.0.0.9", Port: 14321, AdmissionEpoch: 1, State: stateMember})
+	mA.upsertMember(&ClusterNode{NodeUUID: cUUID, IPAddress: "10.0.0.9", Port: 14321, AdmissionEpoch: 1, State: stateMember})
 
 	// B reconciles with A and must transitively learn C.
 	mB.reconcileWith([]string{net.JoinHostPort("127.0.0.1", strconv.Itoa(15011))}, mA.identity.NodeUUID)
@@ -89,7 +89,7 @@ func makeNode(t *testing.T, host string) (uuid, certPEM, fingerprint string, pri
 	if err != nil {
 		t.Fatalf("uuid: %v", err)
 	}
-	certPEMb, keyPEMb, err := generateLeaf(uuid, host)
+	certPEMb, keyPEMb, err := generateLeaf(uuid)
 	if err != nil {
 		t.Fatalf("leaf: %v", err)
 	}
@@ -108,7 +108,6 @@ func pinTrusted(t *testing.T, m *Manager, uuid, certPEM, fp string) {
 	t.Helper()
 	if err := m.trust.Pin(&TrustedPin{
 		NodeUUID:        uuid,
-		NodeID:          uuid,
 		ClusterID:       "cluster-1",
 		AdmissionEpoch:  1,
 		CertPem:         certPEM,
@@ -135,7 +134,7 @@ func TestMergeRosterTransitivePin(t *testing.T) {
 	roster := &Roster{
 		ClusterID: "cluster-1",
 		Members: []RosterEntry{{
-			NodeUUID: cUUID, NodeID: "node-c", Addr: "10.0.0.3:14321", AdmissionEpoch: 1,
+			NodeUUID: cUUID, Addr: "10.0.0.3:14321", AdmissionEpoch: 1,
 			CertPem: cCert, CertFingerprint: cFP, Endorsements: []Endorsement{endC},
 		}},
 	}
@@ -145,7 +144,7 @@ func TestMergeRosterTransitivePin(t *testing.T) {
 	if _, ok := m.trust.Get(cUUID); !ok {
 		t.Fatal("C should have been transitively pinned via A's endorsement")
 	}
-	if _, ok := m.memberByNodeID(cUUID); !ok {
+	if _, ok := m.memberByUUID(cUUID); !ok {
 		t.Fatal("C should have been recorded as a member")
 	}
 }
@@ -164,8 +163,8 @@ func TestMergeRosterFixpoint(t *testing.T) {
 	endC := signEndorsement(bPriv, bUUID, cUUID, cFP, "cluster-1", time.Now().UnixMilli(), 1, 1)
 
 	roster := &Roster{ClusterID: "cluster-1", Members: []RosterEntry{
-		{NodeUUID: cUUID, NodeID: "node-c", AdmissionEpoch: 1, CertPem: cCert, CertFingerprint: cFP, Endorsements: []Endorsement{endC}},
-		{NodeUUID: bUUID, NodeID: "node-b", AdmissionEpoch: 1, CertPem: bCert, CertFingerprint: bFP, Endorsements: []Endorsement{endB}},
+		{NodeUUID: cUUID, AdmissionEpoch: 1, CertPem: cCert, CertFingerprint: cFP, Endorsements: []Endorsement{endC}},
+		{NodeUUID: bUUID, AdmissionEpoch: 1, CertPem: bCert, CertFingerprint: bFP, Endorsements: []Endorsement{endB}},
 	}}
 	m.mergeRoster(roster, aUUID)
 	if _, ok := m.trust.Get(bUUID); !ok {
@@ -187,7 +186,7 @@ func TestMergeRosterRejectsUntrustedEndorser(t *testing.T) {
 	endC := signEndorsement(xPriv, xUUID, cUUID, cFP, "cluster-1", time.Now().UnixMilli())
 
 	roster := &Roster{ClusterID: "cluster-1", Members: []RosterEntry{
-		{NodeUUID: cUUID, NodeID: "node-c", CertPem: cCert, CertFingerprint: cFP, Endorsements: []Endorsement{endC}},
+		{NodeUUID: cUUID, CertPem: cCert, CertFingerprint: cFP, Endorsements: []Endorsement{endC}},
 	}}
 	if m.mergeRoster(roster, cUUID) {
 		t.Fatal("merge should report no change for an unendorsed entry")
@@ -211,7 +210,7 @@ func TestMergeRosterTamperedFingerprint(t *testing.T) {
 	// Swap in a different node's cert while keeping C's uuid + A's endorsement.
 	_, otherCert, _, _ := makeNode(t, "node-other")
 	roster := &Roster{ClusterID: "cluster-1", Members: []RosterEntry{
-		{NodeUUID: cUUID, NodeID: "node-c", CertPem: otherCert, CertFingerprint: cFP, Endorsements: []Endorsement{endC}},
+		{NodeUUID: cUUID, CertPem: otherCert, CertFingerprint: cFP, Endorsements: []Endorsement{endC}},
 	}}
 	m.mergeRoster(roster, aUUID)
 	if _, ok := m.trust.Get(cUUID); ok {
@@ -231,7 +230,7 @@ func TestMergeTombstoneRemoves(t *testing.T) {
 	addedAt := time.Now().UnixMilli()
 	endC := signEndorsement(aPriv, aUUID, cUUID, cFP, "cluster-1", addedAt, 1, 1)
 	m.mergeRoster(&Roster{ClusterID: "cluster-1", Members: []RosterEntry{
-		{NodeUUID: cUUID, NodeID: "node-c", AdmissionEpoch: 1, CertPem: cCert, CertFingerprint: cFP, Endorsements: []Endorsement{endC}},
+		{NodeUUID: cUUID, AdmissionEpoch: 1, CertPem: cCert, CertFingerprint: cFP, Endorsements: []Endorsement{endC}},
 	}}, aUUID)
 	if _, ok := m.trust.Get(cUUID); !ok {
 		t.Fatal("precondition: C should be pinned")
@@ -249,7 +248,7 @@ func TestMergeTombstoneRemoves(t *testing.T) {
 
 	// A stale re-add (older than the tombstone) must not resurrect C.
 	m.mergeRoster(&Roster{ClusterID: "cluster-1", Members: []RosterEntry{
-		{NodeUUID: cUUID, NodeID: "node-c", AdmissionEpoch: 1, CertPem: cCert, CertFingerprint: cFP, Endorsements: []Endorsement{endC}},
+		{NodeUUID: cUUID, AdmissionEpoch: 1, CertPem: cCert, CertFingerprint: cFP, Endorsements: []Endorsement{endC}},
 	}}, aUUID)
 	if _, ok := m.trust.Get(cUUID); ok {
 		t.Fatal("a stale add must not resurrect a tombstoned node")

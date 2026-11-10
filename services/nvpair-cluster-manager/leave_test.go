@@ -39,14 +39,13 @@ func TestHandleLeave_NotBlockedByUnreachableMember(t *testing.T) {
 
 	uuid, cert, fp, _ := makeNode(t, "ghost")
 	if err := m.trust.Pin(&TrustedPin{
-		NodeUUID: uuid, NodeID: "ghost", Name: "ghost", ClusterID: "cluster-1",
+		NodeUUID: uuid, Name: "ghost", ClusterID: "cluster-1",
 		CertPem: cert, CertFingerprint: fp, PinnedAt: time.Now().UnixMilli(),
 	}); err != nil {
 		t.Fatalf("pin ghost: %v", err)
 	}
 	m.upsertMember(&ClusterNode{
-		NodeUUID: uuid, ID: "ghost",
-		IPAddress: "127.0.0.1", Port: addr.Port, State: stateMember,
+		NodeUUID: uuid, IPAddress: "127.0.0.1", Port: addr.Port, State: stateMember,
 	})
 
 	start := time.Now()

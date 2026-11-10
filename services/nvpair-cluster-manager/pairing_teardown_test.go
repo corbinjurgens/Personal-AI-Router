@@ -24,7 +24,6 @@ func pairingInfoFor(t *testing.T, f pinFixture) (*PairingInfo, *x509.Certificate
 	pi := &PairingInfo{
 		V:              pairingInfoVersion,
 		NodeUUID:       f.uuid,
-		NodeID:         "peer-2",
 		Name:           "peer-2",
 		ClusterID:      "",
 		AdmissionEpoch: legacyAdmissionEpoch,
@@ -228,7 +227,7 @@ func TestPairingCommitPersistenceFailureGrantsNoPin(t *testing.T) {
 	if _, ok := m.trust.Get(f.uuid); ok {
 		t.Fatal("pairing persistence failure still granted an mTLS pin")
 	}
-	if _, ok := m.memberByNodeID(f.uuid); ok {
+	if _, ok := m.memberByUUID(f.uuid); ok {
 		t.Fatal("pairing persistence failure left an in-memory member")
 	}
 }
