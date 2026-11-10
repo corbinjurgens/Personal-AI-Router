@@ -77,12 +77,12 @@ type VersionResult struct {
 type AvailableNode struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
-	// HostUUID is the node's stable per-host identity (the daemon's uuid= TXT).
-	// It is invariant across a PC rename and unique per physical machine, so it
-	// is the key clients should dedup/track nodes by; id/name stay the hostname
-	// for display. Two machines sharing a hostname are distinct by HostUUID. It
-	// is the same value the cluster surface exposes as nodeUuid.
-	// Omitted for manual nodes, which carry no UUID and are keyed by id.
+	// HostUUID is the node's stable per-host identity (the daemon's uuid= TXT),
+	// the key clients dedup and track nodes by and the same value the cluster
+	// surface exposes as nodeUuid. ID equals it for a scanner node. A manual
+	// node carries its manual id here until its node-info probe reports the
+	// real UUID. Name is the broker-decided display name (discoveryStore
+	// displayNameLocked) and is not unique.
 	HostUUID  string `json:"hostUuid,omitempty"`
 	IPAddress string `json:"ipAddress"`
 	// IPAddresses is every address this node published, in its own ranked order
