@@ -526,6 +526,8 @@ func (m *Manager) handleMessage(msg *Message) {
 		m.handleGetNodeID(msg)
 	case "cluster:set-node-name":
 		m.handleSetNodeName(msg)
+	case "cluster:set-peer-nickname":
+		m.handleSetPeerNickname(msg)
 	case "cluster:get-join-requests":
 		m.handleGetJoinRequests(msg)
 	case "cluster:ask-to-join":
