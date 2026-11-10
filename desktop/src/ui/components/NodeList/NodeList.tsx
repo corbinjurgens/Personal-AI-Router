@@ -75,6 +75,7 @@ function NodeList() {
                                 nodeId={node.id}
                                 name={node.name}
                                 ipAddress={node.ipAddress}
+                                distinguishingLabel={labels.get(node.id)}
                             />
                         ))}
                 </Stack>

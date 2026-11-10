@@ -3,7 +3,9 @@
 
 import { describe, expect, it } from 'vitest'
 import type { NodeItem } from '@/shared/types/nodes'
+import type { ClusterNode } from '@/shared/types/cluster'
 import { distinguishingLabels, duplicateShownName } from '@/ui/utils/node-name-labels'
+import { offlineMemberNode } from '@/ui/utils/overview-nodes'
 
 function node(id: string, name: string, hardware: { gpu?: string; cpu?: string } = {}): NodeItem {
     return {
@@ -55,6 +57,43 @@ describe('distinguishing labels', () => {
             'aaaaaaaa-1': 'RTX 4090 (aaaaaaaa)',
             'bbbbbbbb-2': 'RTX 4090 (bbbbbbbb)',
             'cccccccc-3': 'RTX 4080'
+        })
+    })
+})
+
+describe('labels follow the duplicate warning comparison', () => {
+    it('groups names that differ only by case or surrounding spaces', () => {
+        const names = ['Studio', 'studio', ' STUDIO ']
+        const nodes = names.map((name, index) => node(`id${index}aaaaaa`, name))
+        expect(duplicateShownName(' studio ', ['Studio'])).toBe('Studio')
+        expect([...distinguishingLabels(nodes).keys()]).toEqual(nodes.map(value => value.id))
+    })
+
+    it('does not group nodes without a name', () => {
+        expect(distinguishingLabels([node('aaaaaaaa-1', ''), node('bbbbbbbb-2', '  ')]).size).toBe(
+            0
+        )
+    })
+
+    it('labels a pending member that shares a name with a card', () => {
+        const pending: ClusterNode = {
+            nodeUuid: 'dddddddd-4',
+            name: 'studio',
+            displayName: 'studio',
+            ipAddress: '192.0.2.4',
+            port: 1,
+            clusterId: 'home',
+            state: 'pending-outbound',
+            joinedAt: null,
+            lastSeen: null
+        }
+        const labels = distinguishingLabels([
+            node('aaaaaaaa-1', 'Studio', { gpu: 'RTX 4090' }),
+            offlineMemberNode(pending)
+        ])
+        expect(Object.fromEntries(labels)).toEqual({
+            'aaaaaaaa-1': 'RTX 4090',
+            'dddddddd-4': 'ID dddddddd'
         })
     })
 })

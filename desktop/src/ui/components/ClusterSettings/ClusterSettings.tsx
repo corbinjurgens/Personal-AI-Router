@@ -11,6 +11,7 @@ import { useClusterInvitationsStore } from '@/ui/stores/cluster-invitations.stor
 import { useInvitablePeers } from '@/ui/hooks/useInvitablePeers'
 import { useOverviewNodes } from '@/ui/hooks/useOverviewNodes'
 import { distinguishingLabels } from '@/ui/utils/node-name-labels'
+import { offlineMemberNode } from '@/ui/utils/overview-nodes'
 import ActiveNode from './ActiveNode'
 import AvailableNode from './AvailableNode'
 import PendingInviteCard from './PendingInviteCard'
@@ -27,7 +28,7 @@ export default function ClusterSettings() {
     const selfNode = useNodesStore(state => (selfId ? (state.nodes.get(selfId) ?? null) : null))
     const [error, setError] = useState<string | null>(null)
     const overviewNodes = useOverviewNodes()
-    const labels = useMemo(() => distinguishingLabels(overviewNodes), [overviewNodes])
+    const discoveredNodes = useNodesStore(state => state.nodes)
 
     // `selfId` is the node UUID, so members correlate on `nodeUuid`, never a name.
     const connectedMembers = useMemo(
@@ -51,6 +52,18 @@ export default function ClusterSettings() {
     const pendingMembers = useMemo(
         () => members.filter(m => m.nodeUuid !== selfId && m.state !== 'member'),
         [members, selfId]
+    )
+
+    // Every card on this page that shows a node name takes part, pending members included.
+    const labels = useMemo(
+        () =>
+            distinguishingLabels([
+                ...overviewNodes,
+                ...pendingMembers.map(
+                    member => discoveredNodes.get(member.nodeUuid) ?? offlineMemberNode(member)
+                )
+            ]),
+        [overviewNodes, pendingMembers, discoveredNodes]
     )
 
     const availableNodes = useInvitablePeers()

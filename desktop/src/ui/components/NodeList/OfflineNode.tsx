@@ -14,11 +14,14 @@ import { LocalBadge } from '@/ui/components/LocalBadge'
 export default function OfflineNode({
     nodeId,
     name,
-    ipAddress
+    ipAddress,
+    distinguishingLabel
 }: {
     nodeId: string
     name?: string | null
     ipAddress?: string | null
+    /** Hardware label telling this node apart from others with the same name. */
+    distinguishingLabel?: string
 }) {
     const isLocal = useConnectionStore(state => state.selfId === nodeId)
     return (
@@ -28,6 +31,11 @@ export default function OfflineNode({
                     <Text kind="body/semibold/sm" className="min-w-0 truncate">
                         {name || ipAddress || nodeId}
                     </Text>
+                    {distinguishingLabel && (
+                        <Text kind="body/regular/sm" className="text-subtle-color">
+                            ({distinguishingLabel})
+                        </Text>
+                    )}
                     {isLocal && <LocalBadge />}
                     <Text kind="body/regular/sm" className="text-subtle-color">
                         (Offline)

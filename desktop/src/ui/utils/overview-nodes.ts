@@ -5,7 +5,8 @@ import type { ClusterNode } from '@/shared/types/cluster'
 import type { NodeItem } from '@/shared/types/nodes'
 import type { PlatformDisplayName } from '@/shared/types/platform'
 
-function offlineMemberNode(member: ClusterNode): NodeItem {
+/** A card item for a member that has no live discovery entry. */
+export function offlineMemberNode(member: ClusterNode): NodeItem {
     return {
         // NodeItem.id is the stable node UUID (the cross-domain key); the
         // cluster manager's `displayName` is display only.
