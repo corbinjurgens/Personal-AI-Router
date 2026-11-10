@@ -182,7 +182,7 @@ func TestJoinRequestPendingApprovalDoesNotMutateAuthority(t *testing.T) {
 	if err := json.Unmarshal(response.Result, &approved); err != nil {
 		t.Fatal(err)
 	}
-	if approved.State != "awaiting-requester" || approved.InviteID == nil || approved.PeerName != "unverifiedname" {
+	if approved.State != "awaiting-requester" || approved.InviteID == nil || approved.PeerName != "PAIR requeste" {
 		t.Fatalf("approval = %+v", approved)
 	}
 	if !reflect.DeepEqual(before, joinTestAuthority(t, m)) {

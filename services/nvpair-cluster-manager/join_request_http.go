@@ -275,7 +275,8 @@ func (m *Manager) applyJoinRequestWireContext(ctx context.Context, source string
 		}
 		r = &joinRequestRecord{JoinRequest: JoinRequest{RequestID: wire.RequestID, Direction: "incoming", PeerAddress: source, PeerPort: m.port, State: "awaiting-approval", CreatedAt: now.UnixMilli(), ExpiresAt: now.Add(m.effectiveInviteTTL()).UnixMilli()}, source: source, clusterID: cid, admission: epoch, generation: m.clusterGen.Load(), sessionGeneration: m.sessGen.Load()}
 		if wire.Operation == "request" {
-			r.PeerNodeUUID, r.PeerName, r.PeerPort, r.requesterName = wire.Requester.NodeUUID, joinRequestName(wire.Requester.Name), *wire.Port, wire.Requester.Name
+			peerName, _ := receivedNodeName(wire.Requester.Name, wire.Requester.NodeUUID)
+			r.PeerNodeUUID, r.PeerName, r.PeerPort, r.requesterName = wire.Requester.NodeUUID, peerName, *wire.Port, wire.Requester.Name
 		}
 		m.joinRequests[wire.RequestID] = r
 	}

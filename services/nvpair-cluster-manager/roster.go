@@ -309,9 +309,10 @@ func (m *Manager) pinEntry(e *RosterEntry, der []byte) error {
 	host, port := splitAddr(e.Addr, m.port)
 	cid, _ := m.clusterIdentity()
 	previous, hadPrevious := m.memberByUUID(e.NodeUUID)
+	name := m.peerNameToStore(e.Name, e.NodeUUID)
 	m.upsertMember(&ClusterNode{
 		NodeUUID:       e.NodeUUID,
-		Name:           e.Name,
+		Name:           name,
 		IPAddress:      host,
 		Port:           port,
 		ClusterID:      cid,
@@ -332,7 +333,7 @@ func (m *Manager) pinEntry(e *RosterEntry, der []byte) error {
 	}
 	if err := m.trust.Pin(&TrustedPin{
 		NodeUUID:        e.NodeUUID,
-		Name:            e.Name,
+		Name:            name,
 		ClusterID:       func() string { c, _ := m.clusterIdentity(); return c }(),
 		AdmissionEpoch:  e.AdmissionEpoch,
 		CertPem:         e.CertPem,
@@ -366,11 +367,15 @@ func (m *Manager) refreshMemberAddr(e *RosterEntry) {
 
 // refreshMemberIdentity updates a still-trusted peer's name — in both the member
 // record and the persisted pin — from its own roster entry, keyed by the stable
-// nodeUuid. This is how a peer's rename reaches this node. Returns whether
-// anything changed.
+// nodeUuid. This is how a peer's rename reaches this node. An invalid name
+// changes nothing. Returns whether anything changed.
 func (m *Manager) refreshMemberIdentity(e *RosterEntry) bool {
-	changed := m.updateMemberIdentity(e.NodeUUID, e.Name)
-	if ok, err := m.trust.UpdateIdentity(e.NodeUUID, e.Name); err != nil {
+	name, ok := receivedNodeName(e.Name, e.NodeUUID)
+	if !ok {
+		return false
+	}
+	changed := m.updateMemberIdentity(e.NodeUUID, name)
+	if ok, err := m.trust.UpdateIdentity(e.NodeUUID, name); err != nil {
 		log.Printf("roster: update pin identity for %s: %v", e.NodeUUID, err)
 	} else if ok {
 		changed = true

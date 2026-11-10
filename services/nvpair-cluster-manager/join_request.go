@@ -16,7 +16,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	"nvpair-shared/durablefile"
 )
@@ -91,20 +90,6 @@ func newJoinRequestID() (string, error) {
 		return "", err
 	}
 	return "jr-" + hex.EncodeToString(b[:]), nil
-}
-
-func joinRequestName(name string) string {
-	name = strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
-			return -1
-		}
-		return r
-	}, name)
-	runes := []rune(strings.TrimSpace(name))
-	if len(runes) > 80 {
-		runes = runes[:80]
-	}
-	return string(runes)
 }
 
 func (m *Manager) joinTime() time.Time {

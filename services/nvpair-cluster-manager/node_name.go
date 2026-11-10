@@ -17,6 +17,34 @@ type nodeNameView struct {
 	CustomName *string `json:"customName"`
 }
 
+// receivedNodeName validates a name received from a peer or requester. It
+// returns the normalized name and true, or nodename.Fallback(nodeUUID) and
+// false when the name is invalid.
+func receivedNodeName(raw, nodeUUID string) (string, bool) {
+	if name, err := nodename.Normalize(raw); err == nil {
+		return name, true
+	}
+	return nodename.Fallback(nodeUUID), false
+}
+
+// peerNameToStore is the name to record for a peer from a received name: the
+// normalized name when valid; otherwise the name already stored for that peer
+// (member, then pin), so an invalid name never replaces a stored one; else the
+// UUID fallback.
+func (m *Manager) peerNameToStore(raw, nodeUUID string) string {
+	name, ok := receivedNodeName(raw, nodeUUID)
+	if ok {
+		return name
+	}
+	if n, found := m.memberByUUID(nodeUUID); found && n.Name != "" {
+		return n.Name
+	}
+	if pin, found := m.trust.Get(nodeUUID); found && pin.Name != "" {
+		return pin.Name
+	}
+	return name
+}
+
 // initSelfName loads the name state at startup: the generated default for this
 // boot and the stored user-set name. A stored name that fails validation is
 // treated as unset.

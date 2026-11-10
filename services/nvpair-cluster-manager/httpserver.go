@@ -580,10 +580,11 @@ func (m *Manager) prepareJoinerInitialComplete(inviteID string, sess *pairingSes
 
 	now := time.Now().UnixMilli()
 	toUUID := m.identity.NodeUUID
+	fromName, _ := receivedNodeName(pi.Name, pi.NodeUUID)
 	return &Invite{
 		InviteID:            inviteID,
 		FromNodeUUID:        pi.NodeUUID,
-		FromNodeName:        pi.Name,
+		FromNodeName:        fromName,
 		ToNodeUUID:          &toUUID,
 		ClusterID:           pi.ClusterID,
 		ClusterFriendlyName: pi.ClusterFriendlyName,
@@ -865,7 +866,7 @@ func testCommitDelay() {
 func (m *Manager) pinPeer(pi *PairingInfo, cert *x509.Certificate, endorsements []Endorsement) error {
 	return m.trust.Pin(&TrustedPin{
 		NodeUUID:        pi.NodeUUID,
-		Name:            pi.Name,
+		Name:            m.peerNameToStore(pi.Name, pi.NodeUUID),
 		ClusterID:       pi.ClusterID,
 		AdmissionEpoch:  pi.AdmissionEpoch,
 		CertPem:         pi.Cert,
@@ -880,7 +881,7 @@ func (m *Manager) recordMember(pi *PairingInfo, state MembershipState, joinedAt 
 	host, port := splitAddr(pi.Addr, m.port)
 	m.upsertMember(&ClusterNode{
 		NodeUUID:       pi.NodeUUID,
-		Name:           pi.Name,
+		Name:           m.peerNameToStore(pi.Name, pi.NodeUUID),
 		IPAddress:      host,
 		Port:           port,
 		ClusterID:      pi.ClusterID,
