@@ -63,9 +63,22 @@ func (m *Manager) loadPairingReceipts() error {
 	if err != nil {
 		return err
 	}
-	var receipts map[string]pairingReceipt
-	if err := json.Unmarshal(data, &receipts); err != nil {
+	var stored map[string]pairingReceipt
+	if err := json.Unmarshal(data, &stored); err != nil {
 		return err
+	}
+	// The publication guard names its receipt; recovery aborts that exact
+	// transaction even after the receipt's retention lapsed.
+	guardOwner, err := m.pairingGuardOwner()
+	if err != nil {
+		return err
+	}
+	now := time.Now().UnixMilli()
+	receipts := make(map[string]pairingReceipt, len(stored))
+	for id, receipt := range stored {
+		if id == guardOwner || pairingReceiptRetained(receipt, now) {
+			receipts[id] = receipt
+		}
 	}
 	if len(receipts) > maxPreInviteSessions {
 		return fmt.Errorf("too many pairing receipts")
@@ -101,12 +114,19 @@ func (m *Manager) loadPairingReceipts() error {
 	return nil
 }
 
+// A receipt outlives its expiry only while it carries an abort intent.
+// Expired receipts are dropped unread, so their stored format is never checked.
+func pairingReceiptRetained(receipt pairingReceipt, now int64) bool {
+	return receipt.Rollback || receipt.ExpiresAt > now
+}
+
 func (m *Manager) savePairingReceipt(receipt pairingReceipt) error {
 	m.receiptMu.Lock()
 	defer m.receiptMu.Unlock()
+	now := time.Now().UnixMilli()
 	next := make(map[string]pairingReceipt)
 	for id, current := range m.pairingReceipts {
-		if current.Rollback || current.ExpiresAt > time.Now().UnixMilli() {
+		if pairingReceiptRetained(current, now) {
 			next[id] = current
 		}
 	}
