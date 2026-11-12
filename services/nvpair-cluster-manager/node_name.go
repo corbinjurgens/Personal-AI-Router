@@ -158,6 +158,7 @@ func (m *Manager) setSelfName(custom *string) (nodeNameView, error) {
 		if err := m.codec.Notify("cluster:node-name-changed", view); err != nil {
 			log.Printf("emit cluster:node-name-changed: %v", err)
 		}
+		m.signalPeerState()
 	}
 	return view, nil
 }

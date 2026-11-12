@@ -401,6 +401,7 @@ func (m *Manager) applyLocalServices(params json.RawMessage) error {
 		}
 	}
 	m.reverse.services, m.reverse.generation, m.reverse.initialized = services, snapshot.Generation, true
+	m.signalPeerState()
 	return nil
 }
 

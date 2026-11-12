@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -579,7 +580,7 @@ func newPeerHintFixture(t *testing.T) *peerHintFixture {
 		t.Fatal("private hint fixture lacks current peer")
 	}
 	f.descriptor = noderec.PeerServicesDescriptor{
-		HostUUID: f.remote.identity.NodeUUID,
+		HostUUID:  f.remote.identity.NodeUUID,
 		Addresses: []string{"192.0.2.55", "100.90.0.8"}, Services: []noderec.PeerService{},
 	}
 	if err := noderec.ValidatePeerServicesDescriptor(f.descriptor, f.peer.UUID); err != nil {
@@ -1264,5 +1265,193 @@ func TestPeerServicesUnavailableRoutePreservesMembership(t *testing.T) {
 	member, ok := a.m.memberByUUID(b.m.identity.NodeUUID)
 	if !ok || member.State != stateMember {
 		t.Fatalf("route failure altered membership: %+v", member)
+	}
+}
+
+// pipeResponse is a streaming http.ResponseWriter for direct handler calls:
+// every write blocks until the test reads it, so a served stream is observed
+// line by line without a shared buffer.
+type pipeResponse struct {
+	header http.Header
+	pipe   *io.PipeWriter
+	code   atomic.Int32
+}
+
+func (p *pipeResponse) Header() http.Header  { return p.header }
+func (p *pipeResponse) WriteHeader(code int) { p.code.CompareAndSwap(0, int32(code)) }
+func (p *pipeResponse) Write(b []byte) (int, error) {
+	p.code.CompareAndSwap(0, http.StatusOK)
+	return p.pipe.Write(b)
+}
+func (p *pipeResponse) Flush() {}
+
+type servedPeerState struct {
+	lines <-chan string
+	done  <-chan struct{}
+}
+
+// servePeerState runs handlePeerState for request on its own goroutine and
+// returns the served lines. The stream ends at test cleanup.
+func servePeerState(t *testing.T, m *Manager, request *http.Request) servedPeerState {
+	t.Helper()
+	ctx, cancel := context.WithCancel(request.Context())
+	reader, writer := io.Pipe()
+	response := &pipeResponse{header: http.Header{}, pipe: writer}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		m.handlePeerState(response, request.WithContext(ctx))
+		writer.Close()
+	}()
+	lines := make(chan string, 16)
+	go func() {
+		defer close(lines)
+		scanner := bufio.NewScanner(reader)
+		for scanner.Scan() {
+			lines <- scanner.Text()
+		}
+	}()
+	t.Cleanup(func() {
+		cancel()
+		reader.Close()
+		<-done
+	})
+	return servedPeerState{lines: lines, done: done}
+}
+
+func (s servedPeerState) next(t *testing.T, within time.Duration) string {
+	t.Helper()
+	select {
+	case line, ok := <-s.lines:
+		if !ok {
+			t.Fatal("peer-state stream ended")
+		}
+		return line
+	case <-time.After(within):
+		t.Fatalf("no peer-state line within %s", within)
+	}
+	return ""
+}
+
+func (s servedPeerState) frame(t *testing.T, within time.Duration, uuid string) noderec.PeerStateFrame {
+	t.Helper()
+	line := s.next(t, within)
+	frame, err := noderec.DecodePeerStateFrame([]byte(line), uuid)
+	if err != nil {
+		t.Fatalf("decode %q: %v", line, err)
+	}
+	return frame
+}
+
+// peerStateServingPair pairs a and b, gives b a valid descriptor and a
+// published frame, and returns a request carrying a's client certificate.
+func peerStateServingPair(t *testing.T, port int) (a, b *Manager, request func() *http.Request) {
+	t.Helper()
+	a, b = newReverseTestManager(t), newReverseTestManager(t)
+	pairReverseManagers(t, a, b)
+	persistPeerServicesMembers(t, a, b)
+	setDescriptorSelf(t, b)
+	setReverseServices(t, b, 1, noderec.RegisterParams{Service: noderec.ServiceNodeInfo, Port: port})
+	b.rebuildPeerState()
+	cert, err := x509.ParseCertificate(a.identity.Cert.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a, b, func() *http.Request {
+		r := httptest.NewRequest(http.MethodGet, peerStatePath, nil)
+		r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}}
+		return r
+	}
+}
+
+func shortenPeerStateKeepalive(t *testing.T, interval time.Duration) {
+	t.Helper()
+	previous := peerStateKeepalive
+	peerStateKeepalive = interval
+	t.Cleanup(func() { peerStateKeepalive = previous })
+}
+
+func TestPeerStateEndpointRequiresCurrentAdmission(t *testing.T) {
+	a, b, request := peerStateServingPair(t, 23441)
+	stream := servePeerState(t, b, request())
+	frame := stream.frame(t, 5*time.Second, b.identity.NodeUUID)
+	if frame.Descriptor.Services[0].Port != 23441 || frame.RosterHash != b.rosterHash() {
+		t.Fatalf("first frame = %+v", frame)
+	}
+
+	b.peerState.markUnavailable()
+	w := httptest.NewRecorder()
+	b.handlePeerState(w, request())
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unavailable publisher status=%d", w.Code)
+	}
+	b.rebuildPeerState()
+
+	b.removeMemberByUUID(a.identity.NodeUUID)
+	persistPeerServicesMembers(t, b)
+	w = httptest.NewRecorder()
+	b.handlePeerState(w, request())
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("removed admitted member status=%d", w.Code)
+	}
+}
+
+func TestPeerStateEndpointRejectsBodyAndQuery(t *testing.T) {
+	m := newReverseTestManager(t)
+	test := func(name, method, url string, body io.Reader, want int) {
+		t.Run(name, func(t *testing.T) {
+			r := httptest.NewRequest(method, url, body)
+			w := httptest.NewRecorder()
+			m.handlePeerState(w, r)
+			if w.Code != want {
+				t.Fatalf("status=%d want=%d", w.Code, want)
+			}
+		})
+	}
+	test("post", http.MethodPost, peerStatePath, nil, http.StatusMethodNotAllowed)
+	test("body", http.MethodGet, peerStatePath, bytes.NewBufferString("{}"), http.StatusBadRequest)
+	test("query", http.MethodGet, peerStatePath+"?peer=other", nil, http.StatusBadRequest)
+	test("unpaired", http.MethodGet, peerStatePath, nil, http.StatusForbidden)
+}
+
+func TestPeerStateStreamSendsFrameOnSignal(t *testing.T) {
+	_, b, request := peerStateServingPair(t, 23441)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go b.peerStatePublishLoop(ctx)
+	stream := servePeerState(t, b, request())
+	if frame := stream.frame(t, 5*time.Second, b.identity.NodeUUID); frame.Descriptor.Services[0].Port != 23441 {
+		t.Fatalf("first frame = %+v", frame)
+	}
+	setReverseServices(t, b, 2, noderec.RegisterParams{Service: noderec.ServiceNodeInfo, Port: 23442})
+	if frame := stream.frame(t, time.Second, b.identity.NodeUUID); frame.Descriptor.Services[0].Port != 23442 {
+		t.Fatalf("changed frame = %+v", frame)
+	}
+}
+
+func TestPeerStateStreamKeepaliveWhenUnchanged(t *testing.T) {
+	shortenPeerStateKeepalive(t, 50*time.Millisecond)
+	_, b, request := peerStateServingPair(t, 23441)
+	stream := servePeerState(t, b, request())
+	stream.frame(t, 5*time.Second, b.identity.NodeUUID)
+	b.rebuildPeerState() // unchanged: publishes nothing
+	for range 3 {
+		if line := stream.next(t, time.Second); line != "null" {
+			t.Fatalf("line %q, want a null keepalive", line)
+		}
+	}
+}
+
+func TestPeerStateStreamEndsOnAdmissionChange(t *testing.T) {
+	shortenPeerStateKeepalive(t, 50*time.Millisecond)
+	a, b, request := peerStateServingPair(t, 23441)
+	stream := servePeerState(t, b, request())
+	stream.frame(t, 5*time.Second, b.identity.NodeUUID)
+	b.removeMemberByUUID(a.identity.NodeUUID)
+	persistPeerServicesMembers(t, b)
+	select {
+	case <-stream.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stream outlived the peer's admission")
 	}
 }

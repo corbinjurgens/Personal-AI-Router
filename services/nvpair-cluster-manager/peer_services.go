@@ -26,6 +26,16 @@ const peerServicesPath = "/v1/cluster/services"
 const peerServicesEvent = "cluster:peer-services"
 const peerServicesRefreshEvery = 2 * time.Second
 
+// peerStatePath serves this node's peer-state stream to paired members.
+const peerStatePath = "/v1/cluster/peer-state"
+
+// peerStateKeepalive is the interval between null keepalive lines on a served
+// peer-state stream. A var so tests can shorten it.
+var peerStateKeepalive = 10 * time.Second
+
+// peerStateWriteTimeout bounds each frame write on a served stream.
+const peerStateWriteTimeout = 5 * time.Second
+
 type peerServicesState struct {
 	mu       sync.Mutex
 	self     noderec.DirectoryNode
@@ -45,6 +55,7 @@ func (m *Manager) setSelfServicesIdentity(nodes []noderec.DirectoryNode) {
 	m.serviceRefresh.mu.Lock()
 	m.serviceRefresh.self = self
 	m.serviceRefresh.mu.Unlock()
+	m.signalPeerState()
 }
 
 func descriptorAddresses(scanner, overlay []string) []string {
@@ -134,6 +145,58 @@ func (m *Manager) handlePeerServices(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(d)
+}
+
+// handlePeerState serves this node's peer-state stream: the latest frame at
+// once, every published change, and a null keepalive every peerStateKeepalive.
+// Pin, admission and publisher availability are rechecked before every line.
+func (m *Manager) handlePeerState(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if r.ContentLength != 0 || len(r.TransferEncoding) != 0 || r.URL.RawQuery != "" {
+		http.Error(w, "bodyless read required", http.StatusBadRequest)
+		return
+	}
+	uuid, ok := m.verifyClientPin(r)
+	if !ok {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	peer, ok := m.reversePeerCertificate(uuid, r.TLS.PeerCertificates[0].Raw)
+	if !ok {
+		http.Error(w, "admission required", http.StatusForbidden)
+		return
+	}
+	if !m.peerState.available() {
+		http.Error(w, "self services unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	current, ok := m.reversePeer(uuid)
+	if !ok || current != peer {
+		http.Error(w, "admission changed", http.StatusForbidden)
+		return
+	}
+	updates, unsubscribe, ok := m.peerState.subscribe()
+	if !ok {
+		http.Error(w, "too many peer-state streams", http.StatusServiceUnavailable)
+		return
+	}
+	defer unsubscribe()
+	w.Header().Set("Cache-Control", "no-store")
+	clustertrust.ServeSnapshotStream(w, r, clustertrust.SnapshotStreamServer[noderec.PeerStateFrame]{
+		Keepalive:    peerStateKeepalive,
+		WriteTimeout: peerStateWriteTimeout,
+		Updates:      updates,
+		Authorize: func() bool {
+			if pinned, ok := m.verifyClientPin(r); !ok || pinned != uuid {
+				return false
+			}
+			current, ok := m.reversePeer(uuid)
+			return ok && current == peer && m.peerState.available()
+		},
+	})
 }
 
 // There is at most one complete fetch/publish per peer, and four network reads

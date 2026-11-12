@@ -60,6 +60,8 @@ type Manager struct {
 	peerRoutes           map[string]clusterPeerRoute
 	serviceRefresh       peerServicesState
 	reconcileRequest     chan struct{} // requestReconcilePass -> reconcileLoop
+	peerState            peerStatePublisher
+	peerStateSignal      chan struct{} // signalPeerState -> peerStatePublishLoop
 	reverse              *reverseState
 	localServicesAllowed bool
 	controlTransport     io.Closer
@@ -289,6 +291,7 @@ func NewManager(codec *Codec, configDir string, port int) (*Manager, error) {
 		joinNow:       time.Now,
 
 		reconcileRequest: make(chan struct{}, 1),
+		peerStateSignal:  make(chan struct{}, 1),
 	}
 	mgr.initSelfName(storedIdentity)
 	log.Printf("node identity %s name %s fingerprint %s", identity.NodeUUID, mgr.selfName(), identity.CertFingerprint)
@@ -433,6 +436,7 @@ func (m *Manager) Run(ctx context.Context) error {
 	}
 
 	go m.reconcileLoop(ctx)
+	go m.peerStatePublishLoop(ctx)
 	go m.inviteExpiryLoop(ctx)
 	go m.joinRequestsLoop(ctx)
 	go m.resumeOutboundPairings()

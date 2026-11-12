@@ -397,6 +397,7 @@ func (m *Manager) emitNodesChanged() {
 	if err := m.codec.Notify("nodes:changed", map[string]any{"nodes": m.snapshotNodes()}); err != nil {
 		log.Printf("emit nodes:changed: %v", err)
 	}
+	m.signalPeerState()
 }
 
 // announceTrustChanged tells the rest of this node that the pin set moved. It is
@@ -416,4 +417,5 @@ func (m *Manager) announceTrustChanged() {
 	if err := m.codec.Notify("cluster:trust-changed", struct{}{}); err != nil {
 		log.Printf("emit cluster:trust-changed: %v", err)
 	}
+	m.signalPeerState()
 }
