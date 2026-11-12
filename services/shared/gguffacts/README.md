@@ -39,7 +39,8 @@ UTF-8 without embedded NUL bytes. Every count and length is checked before count
 allocation. Minimum directory/file sizes are checked before allocating maps or
 tensor descriptors; numeric payload ranges are checked before numeric array
 allocation. Unsupported or excessive declarations stop without reading their
-payload. Internal lower limits let tests exercise complete economical fixtures
+payload, except that read-ahead (below) can already hold the start of a later
+item. Internal lower limits let tests exercise complete economical fixtures
 at exact boundaries as well as full production declarations.
 
 Retained accounting is a conservative cumulative allocation charge, not a
@@ -60,7 +61,14 @@ buffers are not retained facts. `Clone` detaches mutable collections;
 Scanned bytes count every logical byte from each artifact's magic through its
 last tensor descriptor (or the last metadata value when there are no tensors),
 including discarded strings and skipped array contents. Reads are sequential,
-at most 4096 bytes each, and stop at the directory end. Alignment is computed
+each byte is read once, and reads stop at the directory end. Once a string's
+length, an array's count or a value's size has been checked, a read extends
+ahead by up to 64 KiB, but never past the smallest encoding of the declared
+items not yet decoded: each remaining array element (8 bytes for a string),
+metadata key (14 bytes) and tensor descriptor (33 bytes) still has to follow.
+A tokenizer vocabulary is hundreds of thousands of values, and one read per
+value is one system call each, which on Windows took longer than the deadline.
+Read-ahead also stays within the scanned-byte ceiling. Alignment is computed
 without reading padding; tensor ranges are validated arithmetically against the
 declared file size. Tensor offsets must be aligned, nonoverlapping and ordered.
 No tensor payload is read, including for quantized row validation. External

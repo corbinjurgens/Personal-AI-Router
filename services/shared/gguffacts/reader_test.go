@@ -1077,19 +1077,19 @@ func TestCancellationBetweenBoundedReads(t *testing.T) {
 			if tc.typ == 9 {
 				f.u32(0)
 			}
-			f.u64(8192)
+			f.u64(2 * readAhead)
 			body := int64(f.Len())
-			f.WriteString(strings.Repeat("a", 8192))
-			a, r := countedArtifact(&f, body+4096)
+			f.WriteString(strings.Repeat("a", 2*readAhead))
+			a, r := countedArtifact(&f, body+readAhead)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			r.after = func() {
-				if r.end == body+4096 {
+				if r.end == body+readAhead {
 					cancel()
 				}
 			}
 			facts, err := Decode(ctx, []Artifact{a})
-			if !errors.Is(err, context.Canceled) || len(facts.Shards) != 0 || r.end != body+4096 || r.denied != 0 || r.maxRequest > 4096 {
+			if !errors.Is(err, context.Canceled) || len(facts.Shards) != 0 || r.end != body+readAhead || r.denied != 0 || r.maxRequest > readAhead {
 				t.Fatalf("facts=%+v error=%v reads=%+v", facts, err, r)
 			}
 		})
@@ -1454,4 +1454,79 @@ func TestRetainedChargeBeforeDescriptorsAndMaps(t *testing.T) {
 		lim.retained--
 		requireLimitAt(t, &f, lim, 24)
 	})
+}
+
+func TestLargeVocabularyReadsAreBatched(t *testing.T) {
+	const tokens = 100000
+	f := fixture{order: binary.LittleEndian}
+	f.header(3, 2, 4)
+	f.key("general.architecture", 8)
+	f.str("llama")
+	f.key("tokenizer.ggml.tokens", 9)
+	f.u32(8)
+	f.u64(tokens)
+	for i := 0; i < tokens; i++ {
+		f.str("tok" + strconv.Itoa(i))
+	}
+	f.key("tokenizer.ggml.token_type", 9)
+	f.u32(5)
+	f.u64(tokens)
+	for i := 0; i < tokens; i++ {
+		f.u32(1)
+	}
+	f.key("tokenizer.ggml.merges", 9)
+	f.u32(8)
+	f.u64(tokens)
+	for i := 0; i < tokens; i++ {
+		f.str("a b" + strconv.Itoa(i))
+	}
+	f.tensor("blk.0.attn_q.weight", 0, 32, 0)
+	f.tensor("blk.0.attn_k.weight", 0, 32, 128)
+	// The tensor data region is not part of the header and must not be read.
+	header := int64(f.Len())
+	f.WriteString(strings.Repeat("\x00", int(aligned(f.Len())-header)+256))
+	r := &countingReader{r: bytes.NewReader(f.Bytes()), ceiling: header}
+	facts, err := Decode(context.Background(), []Artifact{{Role: RoleMain, Reader: r, Size: int64(f.Len())}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if facts.Shards[0].Vocabulary != (Count{true, tokens}) || facts.Shards[0].Merges != (Count{true, tokens}) || len(facts.Shards[0].Tensors) != 2 {
+		t.Fatalf("facts=%+v", facts.Shards[0])
+	}
+	// Two reads per token would be hundreds of thousands of system calls; each
+	// byte is read once, in reads no larger than the read-ahead.
+	if r.denied != 0 || r.end != header || r.bytes != uint64(header) || facts.Usage.ScannedHeaderBytes != uint64(header) || r.maxRequest > readAhead || r.calls > 200 {
+		t.Fatalf("reads=%+v usage=%+v header=%d", r, facts.Usage, header)
+	}
+}
+
+// Read-ahead must stop exactly at the end of a header whose remaining items all
+// have their smallest encodings: 14-byte metadata and 33-byte tensor entries.
+func TestReadAheadStopsAtMinimalItems(t *testing.T) {
+	f := fixture{order: binary.LittleEndian}
+	f.header(3, 2, 4)
+	f.key("general.architecture", 8)
+	f.str("llama")
+	f.key("tokenizer.ggml.tokens", 9)
+	f.u32(8)
+	f.u64(3)
+	for _, token := range []string{"a", "b", "c"} {
+		f.str(token)
+	}
+	f.key("x", 0)
+	f.WriteByte(1)
+	f.key("y", 0)
+	f.WriteByte(2)
+	f.tensor("t", 0, 1, 0)
+	f.tensor("u", 0, 1, 32)
+	header := int64(f.Len())
+	f.Write(make([]byte, int(aligned(f.Len())-header)+64))
+	r := &countingReader{r: bytes.NewReader(f.Bytes()), ceiling: header}
+	facts, err := Decode(context.Background(), []Artifact{{Role: RoleMain, Reader: r, Size: int64(f.Len())}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(facts.Shards[0].Tensors) != 2 || r.denied != 0 || r.end != header || r.bytes != uint64(header) || facts.Usage.ScannedHeaderBytes != uint64(header) {
+		t.Fatalf("reads=%+v usage=%+v header=%d", r, facts.Usage, header)
+	}
 }
