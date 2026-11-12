@@ -17,6 +17,8 @@ func commandFailure(err error) string {
 	var refusal *rpc.RPCError
 	if errors.As(err, &refusal) {
 		switch refusal.Code {
+		// clustertrust.RemoteManagementDeniedRPCCode. The TUI keeps the literal:
+		// importing clustertrust would add yamux and the mesh package to it.
 		case -32012:
 			return fmt.Sprintf("remote management denied (%d): %s", refusal.Code, refusal.Message)
 		case -32011:
