@@ -537,6 +537,39 @@ func TestModelDiagnosticCancellationWhileWaitingForOwnedLoadFrames(t *testing.T)
 	}
 }
 
+// cancelAfterProps cancels the run once its second /props response is in hand,
+// so the read sees a complete response and only later work sees the ended run.
+type cancelAfterProps struct {
+	base   http.RoundTripper
+	cancel func()
+	reads  atomic.Int32
+}
+
+func (c *cancelAfterProps) RoundTrip(r *http.Request) (*http.Response, error) {
+	resp, err := c.base.RoundTrip(r)
+	if r.URL.Path == "/props" && c.reads.Add(1) == 2 {
+		c.cancel()
+	}
+	return resp, err
+}
+
+// Cancellation that lands after the engine answered /props reaches the buffer
+// evidence checks on an ended context, which refuse identity. Which side of the
+// response the cancellation lands on is scheduling-dependent in a live run;
+// this pins the late side.
+func TestModelDiagnosticCancellationAfterPropsResponseKeepsItsReason(t *testing.T) {
+	f, manager, op, fixture := modelDiagnosticRunningOperationFixture(t)
+	fixture.afterLoad = func() {}
+	client := *f.ex.client
+	client.Transport = &cancelAfterProps{base: client.Transport, cancel: op.cancel}
+	f.ex.client = &client
+	manager.runDiagnosticOperation(op, false)
+	status := f.ex.diagnosticRunStatus(op.params.RunID)
+	if status.Outcome != "cancelled" || status.Reason != "cancelled" || !status.WorkStopped {
+		t.Fatalf("cancellation after the props response lost its reason or stop proof: %+v", status)
+	}
+}
+
 func TestModelDiagnosticRefusesMissingIncompleteStaleOrWrongLoadBuffers(t *testing.T) {
 	test := func(name string, change func(inspectionFixture, *modelDiagnosticOperationHTTP)) {
 		t.Run(name, func(t *testing.T) {
