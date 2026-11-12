@@ -4,6 +4,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Badge, Button, Flex, Stack, Text } from '@nvidia/foundations-react-core'
 import { DismissibleTooltip } from '@/ui/components/DismissibleTooltip/DismissibleTooltip'
+import { HaltConfirmModal } from '@/ui/components/HaltConfirmModal'
 import { HALT_CONSEQUENCE } from '@/ui/constants/availability-copy'
 import type { NodeAvailabilityRequest } from '@/shared/types/node-policy'
 import {
@@ -42,6 +43,7 @@ export function AvailabilityControls({
     onRequest,
     onRefresh
 }: ControlsProps) {
+    const [haltConfirmOpen, setHaltConfirmOpen] = useState(false)
     const value = entry?.value
     const known = enabled && entry?.current && !entry.stale && value !== undefined
     const busy = entry?.pending !== undefined
@@ -128,7 +130,7 @@ export function AvailabilityControls({
                             disabled={!canStop}
                             aria-description={HALT_EXPLANATION}
                             aria-busy={entry?.pendingPauseMode === 'immediate'}
-                            onClick={() => onRequest({ state: 'paused', pauseMode: 'immediate' })}
+                            onClick={() => setHaltConfirmOpen(true)}
                         >
                             Halt
                         </Button>
@@ -167,6 +169,15 @@ export function AvailabilityControls({
                 <Text kind="body/regular/sm" role="alert" className="break-words min-w-0">
                     {entry.readError}
                 </Text>
+            )}
+            {local && (
+                <HaltConfirmModal
+                    open={haltConfirmOpen}
+                    onOpenChange={setHaltConfirmOpen}
+                    onConfirm={() => {
+                        if (canStop) onRequest({ state: 'paused', pauseMode: 'immediate' })
+                    }}
+                />
             )}
         </Stack>
     )
