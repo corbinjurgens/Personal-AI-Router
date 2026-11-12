@@ -353,7 +353,7 @@ func TestReadSnapshotStream(t *testing.T) {
 		var keepalives atomic.Int32
 		start := time.Now()
 		err := read(t, handler, SnapshotStreamClient[streamFrame]{
-			Idle: 100 * time.Millisecond, Recheck: 10 * time.Millisecond, MaxLine: 1024,
+			Idle: 100 * time.Millisecond, Recheck: 20 * time.Millisecond, MaxLine: 1024,
 			Current: live.Load, Decode: decode,
 			OnFrame:     func(streamFrame) error { return nil },
 			OnKeepalive: func() { keepalives.Add(1) },
@@ -373,13 +373,19 @@ func TestReadSnapshotStream(t *testing.T) {
 		var live atomic.Bool
 		live.Store(true)
 		time.AfterFunc(60*time.Millisecond, func() { live.Store(false) })
+		// No line ever arrives and Idle is far away, so only the recheck
+		// goroutine can end the stream quickly.
+		start := time.Now()
 		err := read(t, writeBody(), SnapshotStreamClient[streamFrame]{
-			Idle: time.Second, Recheck: 20 * time.Millisecond, MaxLine: 1024,
+			Idle: time.Hour, Recheck: 20 * time.Millisecond, MaxLine: 1024,
 			Current: live.Load, Decode: decode,
 			OnFrame: func(streamFrame) error { return nil },
 		})
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("err = %v, want context.Canceled", err)
+		}
+		if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+			t.Fatalf("recheck cancel after %v, want well under 500ms", elapsed)
 		}
 	})
 

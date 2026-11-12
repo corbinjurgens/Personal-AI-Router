@@ -27,7 +27,8 @@ type SnapshotStreamServer[T any] struct {
 // writes the JSON literal null.
 //
 // The helper owns no change detection: callers feed Updates from their own
-// latest-value publisher.
+// latest-value publisher. A value that encodes to null (a nil slice, map or
+// pointer) is indistinguishable from a keepalive on the wire.
 func ServeSnapshotStream[T any](w http.ResponseWriter, r *http.Request, s SnapshotStreamServer[T]) {
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	controller := http.NewResponseController(w)
@@ -78,7 +79,9 @@ type SnapshotStreamClient[T any] struct {
 // cancellation, or the error.
 //
 // cancel must cancel ctx, and body must be bound to ctx (an HTTP response body
-// of a request made with ctx), so cancellation unblocks the read.
+// of a request made with ctx), so cancellation unblocks the read. When Recheck
+// is set, Current is called from a second goroutine and must be safe for
+// concurrent use.
 func ReadSnapshotStream[T any](ctx context.Context, cancel context.CancelFunc, body io.Reader, c SnapshotStreamClient[T]) error {
 	defer cancel()
 	if c.Recheck > 0 {
