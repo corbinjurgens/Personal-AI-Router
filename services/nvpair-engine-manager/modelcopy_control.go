@@ -24,6 +24,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"nvpair-shared/clustertrust"
 	"nvpair-shared/engines"
 )
 
@@ -584,7 +585,7 @@ func requireCopyDestination(c copyCapabilities) error {
 		return fmt.Errorf("destination does not support this model copy protocol")
 	}
 	if !c.Available || !c.Installed || !c.Writable {
-		if c.Reason == remoteManagementDeniedMessage {
+		if c.Reason == clustertrust.RemoteManagementDeniedMessage {
 			return &codedError{code: codeRemoteManagementDenied, message: c.Reason}
 		}
 		if c.Reason == nodePausedVeto {
@@ -814,7 +815,7 @@ func (m *Manager) runCopyCapabilities(ctx context.Context, msg *Message) {
 
 func (s *controlServer) copyAuthorization(caller string) error {
 	if !s.mesh.RemoteManagement(caller).Allowed {
-		return &codedError{code: codeRemoteManagementDenied, message: remoteManagementDeniedMessage}
+		return &codedError{code: codeRemoteManagementDenied, message: clustertrust.RemoteManagementDeniedMessage}
 	}
 	return s.exec.copyAdmission()
 }

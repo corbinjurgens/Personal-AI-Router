@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"nvpair-shared/clustertrust"
 	"nvpair-shared/nodepolicy"
 )
 
@@ -22,8 +23,8 @@ func TestStopPauseContractRefusalsHaveNoEffects(t *testing.T) {
 		message              string
 	}{
 		{name: "remote immediate forged local target", state: "paused", mode: `"immediate"`, peer: true, code: -32602, message: "Immediate pause must be requested on this node."},
-		{name: "revoked permission precedes immediate", state: "paused", mode: `"immediate"`, peer: true, denied: true, code: -32012, message: remoteManagementDeniedMessage},
-		{name: "revoked permission precedes fence", state: "paused", mode: `"immediate"`, peer: true, denied: true, fenced: true, code: -32012, message: remoteManagementDeniedMessage},
+		{name: "revoked permission precedes immediate", state: "paused", mode: `"immediate"`, peer: true, denied: true, code: -32012, message: clustertrust.RemoteManagementDeniedMessage},
+		{name: "revoked permission precedes fence", state: "paused", mode: `"immediate"`, peer: true, denied: true, fenced: true, code: -32012, message: clustertrust.RemoteManagementDeniedMessage},
 		{name: "fence precedes immediate", state: "paused", mode: `"immediate"`, peer: true, fenced: true, code: -32011, message: (&localVetoError{}).Error()},
 		{name: "draining unknown-mode pause cannot repeat", state: "paused", mode: `"configured"`, peer: true, fenced: true, code: -32011},
 		{name: "draining unknown-mode pause cannot resume", state: "available", peer: true, fenced: true, code: -32011},

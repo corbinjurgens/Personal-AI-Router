@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"nvpair-shared/clustertrust"
 	"nvpair-shared/nodepolicy"
 )
 
@@ -77,7 +78,7 @@ func TestPauseGateCoversEveryRegisteredMutationAndAllowsEveryRead(t *testing.T) 
 						t.Fatalf("handler calls = %d, want %d", calls, wantCalls)
 					}
 					if class == controlMutation && scenario.code != "" && want != http.StatusOK {
-						var body codedBody
+						var body clustertrust.CodedRefusal
 						if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 							t.Fatal(err)
 						}

@@ -19,15 +19,9 @@ import (
 
 const (
 	// codeRemoteManagementDenied refuses a paired node's management write on
-	// this device. It matches engine-manager's -32012 so a refusal keeps its
-	// meaning across the relay and back to the origin.
-	codeRemoteManagementDenied = -32012
-	// remoteManagementDeniedWire is the name engine-manager puts on the wire
-	// for the same refusal.
-	remoteManagementDeniedWire = "remote_management_denied"
-	// remoteManagementDeniedMessage is the bounded, user-facing refusal. It is
-	// deliberately free of device, policy and certificate details.
-	remoteManagementDeniedMessage = "Remote management is blocked on this device. Change permission locally on that device."
+	// this device. clustertrust owns it, so a refusal keeps its code and text
+	// across the relay and back to the origin.
+	codeRemoteManagementDenied = clustertrust.RemoteManagementDeniedRPCCode
 )
 
 // errRemoteCallerRequired refuses a peer relay notification that carries no
@@ -52,7 +46,7 @@ func (b *Broker) replyPeerRelay(source *engineManagerSource, worker *rpcWorker, 
 // remoteManagementDeniedError is the typed refusal policyErrorCode maps to -32012.
 type remoteManagementDeniedError struct{}
 
-func (*remoteManagementDeniedError) Error() string { return remoteManagementDeniedMessage }
+func (*remoteManagementDeniedError) Error() string { return clustertrust.RemoteManagementDeniedMessage }
 
 // authorizeRemoteManagement is the acceptance-time recheck. A local caller
 // (empty) is always allowed. For a paired node it reads the permission fresh

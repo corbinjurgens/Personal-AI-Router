@@ -734,7 +734,7 @@ func TestDeleteRestartRefusalRetainsHTTPCode(t *testing.T) {
 				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}, nil
 			})
 			reply := postControl(t, (&controlServer{exec: ex}).handleDelete, controlDeletePath, `{"engine":"fake","model":"tiny"}`)
-			var body codedBody
+			var body clustertrust.CodedRefusal
 			if err := json.Unmarshal(reply.Body.Bytes(), &body); err != nil || reply.Code != http.StatusConflict || body.Code != scenario.code {
 				t.Fatalf("delete restart refusal = %d %s, %v; want 409 %s", reply.Code, reply.Body.String(), err, scenario.code)
 			}
@@ -759,7 +759,7 @@ func TestRemoteCodesKeepNumericIdentity(t *testing.T) {
 			t.Run("ec conflict body", func(t *testing.T) {
 				rec := httptest.NewRecorder()
 				writeCodedError(rec, code, "target text")
-				var body codedBody
+				var body clustertrust.CodedRefusal
 				if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 					t.Fatalf("decode body: %v", err)
 				}
@@ -835,7 +835,7 @@ func TestPauseVetoIdentitySurvivesEveryErrorBoundary(t *testing.T) {
 			}
 			rec := httptest.NewRecorder()
 			writeRemoteError(rec, veto)
-			var body codedBody
+			var body clustertrust.CodedRefusal
 			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 				t.Fatal(err)
 			}

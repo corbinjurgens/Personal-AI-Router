@@ -587,7 +587,7 @@ func rmRequest(t *testing.T, client *http.Client, base, method, path, body strin
 
 func rmCodedBody(t *testing.T, data []byte) (code, message string) {
 	t.Helper()
-	var body codedBody
+	var body clustertrust.CodedRefusal
 	if err := json.Unmarshal(data, &body); err != nil {
 		t.Fatalf("decode typed error body %q: %v", data, err)
 	}
@@ -759,10 +759,10 @@ func TestRemoteManagementRouteMatrixDeniesUngrantedMutation(t *testing.T) {
 				t.Fatalf("ungranted mutation %s content type = %q, want a JSON refusal", route.path, contentType)
 			}
 			code, message := rmCodedBody(t, body)
-			if code != remoteManagementWireCode {
-				t.Fatalf("ungranted mutation %s code = %q, want %q", route.path, code, remoteManagementWireCode)
+			if code != clustertrust.RemoteManagementDeniedCode {
+				t.Fatalf("ungranted mutation %s code = %q, want %q", route.path, code, clustertrust.RemoteManagementDeniedCode)
 			}
-			if message != remoteManagementDeniedMessage {
+			if message != clustertrust.RemoteManagementDeniedMessage {
 				t.Fatalf("ungranted mutation %s message = %q, want the bounded explanation", route.path, message)
 			}
 		})
@@ -797,7 +797,7 @@ func TestRemoteManagementPermissionPrecedesHydration(t *testing.T) {
 					t.Fatalf("denial content type = %q, want application/json", contentType)
 				}
 				code, message := rmCodedBody(t, body)
-				if code != remoteManagementWireCode || message != remoteManagementDeniedMessage {
+				if code != clustertrust.RemoteManagementDeniedCode || message != clustertrust.RemoteManagementDeniedMessage {
 					t.Fatalf("recovery denial = (%q, %q), want typed remote-management refusal", code, message)
 				}
 				if got := rpcCode(remoteStatusError("recovery test", status, body)); got != codeRemoteManagementDenied {
@@ -1049,8 +1049,8 @@ func TestRemoteManagementForgedBodyIdentityCannotSelectGrant(t *testing.T) {
 	if status != http.StatusConflict {
 		t.Fatalf("denied caller with a forged allowed body = %d, want 409: %s", status, body)
 	}
-	if code, _ := rmCodedBody(t, body); code != remoteManagementWireCode {
-		t.Fatalf("forged-identity refusal code = %q, want %q", code, remoteManagementWireCode)
+	if code, _ := rmCodedBody(t, body); code != clustertrust.RemoteManagementDeniedCode {
+		t.Fatalf("forged-identity refusal code = %q, want %q", code, clustertrust.RemoteManagementDeniedCode)
 	}
 	if spy.count("engine-load") != 0 {
 		t.Fatal("forged identity reached the mutation handler")
@@ -1109,8 +1109,8 @@ func TestRemoteManagementRevocationBetweenRequestsHasNoStaleAllow(t *testing.T) 
 		if status != http.StatusConflict {
 			t.Fatalf("%s after revoke = %d, want 409: %s", name, status, body)
 		}
-		if code, _ := rmCodedBody(t, body); code != remoteManagementWireCode {
-			t.Fatalf("%s after revoke code = %q, want %q", name, code, remoteManagementWireCode)
+		if code, _ := rmCodedBody(t, body); code != clustertrust.RemoteManagementDeniedCode {
+			t.Fatalf("%s after revoke code = %q, want %q", name, code, clustertrust.RemoteManagementDeniedCode)
 		}
 		if spy.count("engine-install") != before {
 			t.Fatalf("%s reached the install handler after revoke", name)
@@ -1167,10 +1167,10 @@ func TestRemoteManagementPermissionStoreStates(t *testing.T) {
 				t.Fatalf("state %q = %d, want a typed 409 refusal", tc.want, rec.Code)
 			}
 			code, message := rmCodedBody(t, rec.Body.Bytes())
-			if code != remoteManagementWireCode {
-				t.Fatalf("state %q code = %q, want %q", tc.want, code, remoteManagementWireCode)
+			if code != clustertrust.RemoteManagementDeniedCode {
+				t.Fatalf("state %q code = %q, want %q", tc.want, code, clustertrust.RemoteManagementDeniedCode)
 			}
-			if message != remoteManagementDeniedMessage {
+			if message != clustertrust.RemoteManagementDeniedMessage {
 				t.Fatalf("state %q message = %q, want the bounded explanation", tc.want, message)
 			}
 			if strings.Contains(message, f.dir) || strings.Contains(message, "json") {
@@ -1272,8 +1272,8 @@ func TestRemoteManagementSelfCertHasNoMutationBypass(t *testing.T) {
 	if status != http.StatusConflict {
 		t.Fatalf("self-cert mutation = %d, want a typed 409 refusal: %s", status, body)
 	}
-	if code, _ := rmCodedBody(t, body); code != remoteManagementWireCode {
-		t.Fatalf("self-cert mutation code = %q, want %q", code, remoteManagementWireCode)
+	if code, _ := rmCodedBody(t, body); code != clustertrust.RemoteManagementDeniedCode {
+		t.Fatalf("self-cert mutation code = %q, want %q", code, clustertrust.RemoteManagementDeniedCode)
 	}
 	if spy.count("engine-load") != before {
 		t.Fatal("self-cert mutation reached the writer")
@@ -1472,7 +1472,7 @@ func TestRemoteManagementRelaysCarryTypedDenial(t *testing.T) {
 	f := rmNewFixture(t, "uuid-self", "uuid-a")
 	f.writePermissions("1", map[string]bool{"uuid-a": true})
 
-	denial := &codedError{code: codeRemoteManagementDenied, message: remoteManagementDeniedMessage}
+	denial := &codedError{code: codeRemoteManagementDenied, message: clustertrust.RemoteManagementDeniedMessage}
 	veto := &codedError{code: codeLocalVeto, message: "this node was paused on the node itself; resume it there"}
 
 	// Policy relay: the inbound route writes the typed 409 body the origin maps
@@ -1491,7 +1491,7 @@ func TestRemoteManagementRelaysCarryTypedDenial(t *testing.T) {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPost, controlPolicySetPath, strings.NewReader(`{}`))
 		policy(denial).policyHandler("set")(rec, req, "uuid-a")
-		rmAssertTypedRefusal(t, rec, remoteManagementWireCode, codeRemoteManagementDenied)
+		rmAssertTypedRefusal(t, rec, clustertrust.RemoteManagementDeniedCode, codeRemoteManagementDenied)
 
 		rec = httptest.NewRecorder()
 		req = httptest.NewRequest(http.MethodPost, controlAvailabilitySetPath, strings.NewReader(`{}`))
@@ -1503,7 +1503,7 @@ func TestRemoteManagementRelaysCarryTypedDenial(t *testing.T) {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPost, settingsPath+"apply", strings.NewReader(`{"engine":"missing"}`))
 		settingsServer(denial).settingsHandler("apply")(rec, req, "uuid-a")
-		rmAssertTypedRefusal(t, rec, remoteManagementWireCode, codeRemoteManagementDenied)
+		rmAssertTypedRefusal(t, rec, clustertrust.RemoteManagementDeniedCode, codeRemoteManagementDenied)
 
 		rec = httptest.NewRecorder()
 		req = httptest.NewRequest(http.MethodPost, settingsPath+"apply", strings.NewReader(`{"engine":"missing"}`))

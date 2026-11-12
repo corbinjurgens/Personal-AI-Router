@@ -881,7 +881,9 @@ read never authorizes a request. Broker-owned writes recheck at their locked
 acceptance point after queueing. Direct operations accept at this gate; later
 lifecycle/content lock waits are part of that accepted operation.
 
-Permission refusal is HTTP 409 with `code:"remote_management_denied"`, preserved
+Permission refusal is HTTP 409 with `{"code":"remote_management_denied","error":...}`
+(`clustertrust.WriteRemoteManagementDenied`, which owns the code, text and body
+shape shared with the cluster manager and the broker), preserved
 as JSON-RPC `-32012` by ordinary and streaming clients, before progress headers
 or side effects. It is distinct from an unpinned 403, local veto
 `-32011/local_veto` and conflict `-32010`.

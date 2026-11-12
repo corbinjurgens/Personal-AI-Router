@@ -148,7 +148,7 @@ func TestPeerNodeNameRefusesWithoutGrant(t *testing.T) {
 			}
 			body := decodePeerNameError(t, w)
 			if body.Code != "remote_management_denied" ||
-				body.Message != "Remote management is blocked on this device. Change permission locally on that device." {
+				body.Error != "Remote management is blocked on this device. Change permission locally on that device." {
 				t.Fatalf("denial body = %+v", body)
 			}
 			if after := target.selfNameView(); after.Name != before.Name || after.CustomName != nil {
@@ -206,7 +206,7 @@ func TestPeerNodeNameRejectsMalformedBodies(t *testing.T) {
 				t.Fatalf("status %d, want 400", w.Code)
 			}
 			body := decodePeerNameError(t, w)
-			if body.Code != "invalid_name" || body.Reason != tt.wantReason || body.Message == "" {
+			if body.Code != "invalid_name" || body.Reason != tt.wantReason || body.Error == "" {
 				t.Fatalf("body = %+v, want invalid_name reason %q", body, tt.wantReason)
 			}
 			if target.customSelfName() != nil {

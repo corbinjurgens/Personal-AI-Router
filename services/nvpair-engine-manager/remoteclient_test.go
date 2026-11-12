@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"nvpair-shared/clustertrust"
 )
 
 func mustRemoteSettingJSON(t *testing.T, value any) json.RawMessage {
@@ -50,7 +52,7 @@ func TestRemoteSettingLockedExactWireClassification(t *testing.T) {
 		{"local_veto", -32011},
 		{"remote_management_denied", -32012},
 	} {
-		test(c.wire, http.StatusConflict, string(mustRemoteSettingJSON(t, codedBody{Code: c.wire, Error: "inference settings are locked on the target device"})), c.code)
+		test(c.wire, http.StatusConflict, string(mustRemoteSettingJSON(t, clustertrust.CodedRefusal{Code: c.wire, Error: "inference settings are locked on the target device"})), c.code)
 	}
 }
 
@@ -239,7 +241,7 @@ func TestRemoteManagementGetPreservesTypedDenial(t *testing.T) {
 		body string
 		code int
 	}{
-		{name: "remote management denied", body: `{"error":"` + remoteManagementDeniedMessage + `","code":"remote_management_denied"}`, code: codeRemoteManagementDenied},
+		{name: "remote management denied", body: `{"error":"` + clustertrust.RemoteManagementDeniedMessage + `","code":"remote_management_denied"}`, code: codeRemoteManagementDenied},
 		{name: "local veto stays distinct", body: `{"error":"this node was paused on the node itself; resume it there","code":"local_veto"}`, code: codeLocalVeto},
 	}
 	for _, tc := range cases {
@@ -318,7 +320,7 @@ func TestRemoteManagementGetRejectsInconsistentOrUnknownBody(t *testing.T) {
 }
 
 func TestRemoteManagementTypedDenialSurvivesRegularAndStreamingClients(t *testing.T) {
-	deniedBody := `{"error":"` + remoteManagementDeniedMessage + `","code":"remote_management_denied"}`
+	deniedBody := `{"error":"` + clustertrust.RemoteManagementDeniedMessage + `","code":"remote_management_denied"}`
 
 	// Regular (non-streaming) POST: remoteStatusError keeps the typed code.
 	t.Run("regular", func(t *testing.T) {
@@ -354,7 +356,7 @@ func TestRemoteManagementTypedDenialSurvivesRegularAndStreamingClients(t *testin
 	t.Run("stream error frame", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/x-ndjson")
-			_, _ = w.Write([]byte(`{"type":"error","message":"` + remoteManagementDeniedMessage + `","code":"remote_management_denied"}` + "\n"))
+			_, _ = w.Write([]byte(`{"type":"error","message":"` + clustertrust.RemoteManagementDeniedMessage + `","code":"remote_management_denied"}` + "\n"))
 		}))
 		defer srv.Close()
 
@@ -368,8 +370,8 @@ func TestRemoteManagementTypedDenialSurvivesRegularAndStreamingClients(t *testin
 	if rpcCode(remoteStatusError("relay", http.StatusConflict, []byte(deniedBody))) != codeRemoteManagementDenied {
 		t.Fatal("remoteStatusError did not preserve the remote-management code")
 	}
-	if code, _ := codeOfWire(remoteManagementWireCode); code != codeRemoteManagementDenied {
-		t.Fatalf("wire name %q does not resolve to %d", remoteManagementWireCode, codeRemoteManagementDenied)
+	if code, _ := codeOfWire(clustertrust.RemoteManagementDeniedCode); code != codeRemoteManagementDenied {
+		t.Fatalf("wire name %q does not resolve to %d", clustertrust.RemoteManagementDeniedCode, codeRemoteManagementDenied)
 	}
 	if code, _ := codeOfWire("local_veto"); code == codeRemoteManagementDenied {
 		t.Fatal("local_veto resolves to the remote-management code")
