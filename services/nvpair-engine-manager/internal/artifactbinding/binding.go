@@ -109,14 +109,14 @@ func (a Access) CheckedOpen(ctx context.Context, e Evidence) (File, error) {
 	return f, nil
 }
 
-// PathCheckSpan bounds how far a Reader reads between rechecks of the
+// pathCheckSpan bounds how far a Reader reads between rechecks of the
 // configured path.
-const PathCheckSpan = 64 << 20
+const pathCheckSpan = 64 << 20
 
 // Reader reads the object CheckedOpen returned. Every read rechecks that
 // handle's identity, size and mtime, which needs no path lookup. Resolving the
 // configured path again (an open by path on Windows, following each link) is
-// rechecked only by a read that covers a multiple of PathCheckSpan, so a read
+// rechecked only by a read that covers a multiple of pathCheckSpan, so a read
 // at offset 0 always checks it. Per-read path resolution made 32 KiB hashing
 // on Windows about 2.6 times slower. The bytes always come from the opened
 // handle; callers recheck the path with Validate after their last read.
@@ -138,8 +138,8 @@ func (r Reader) ReadAt(p []byte, offset int64) (int, error) {
 }
 
 func coversPathCheck(offset int64, n int) bool {
-	rem := offset % PathCheckSpan
-	return offset < 0 || rem == 0 || PathCheckSpan-rem < int64(n)
+	rem := offset % pathCheckSpan
+	return offset < 0 || rem == 0 || pathCheckSpan-rem < int64(n)
 }
 
 func (a Access) Sample(ctx context.Context, e Evidence, allowEmpty bool) (*engines.ServingBinding, error) {

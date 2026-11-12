@@ -191,9 +191,9 @@ func TestCoversPathCheck(t *testing.T) {
 		{"start of file", 0, 1, true},
 		{"empty read at start", 0, 0, true},
 		{"inside first span", 1, 32 << 10, false},
-		{"ends on boundary", PathCheckSpan - 32<<10, 32 << 10, false},
-		{"crosses boundary", PathCheckSpan - 1, 2, true},
-		{"starts on boundary", 3 * PathCheckSpan, 1, true},
+		{"ends on boundary", pathCheckSpan - 32<<10, 32 << 10, false},
+		{"crosses boundary", pathCheckSpan - 1, 2, true},
+		{"starts on boundary", 3 * pathCheckSpan, 1, true},
 		{"negative offset", -1, 1, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -237,7 +237,7 @@ func TestReaderChecksHandleEveryReadAndPathAtSpans(t *testing.T) {
 		if n, err := r.ReadAt(buf, 1); err != nil || string(buf[:n]) != "ri" {
 			t.Fatalf("read inside a span: %q %v, want the opened object's bytes", buf[:n], err)
 		}
-		for _, offset := range []int64{0, PathCheckSpan - 1} {
+		for _, offset := range []int64{0, pathCheckSpan - 1} {
 			if _, err := r.ReadAt(buf, offset); err == nil || err == io.EOF {
 				t.Fatalf("read covering a path check at %d accepted a retargeted link: %v", offset, err)
 			}
