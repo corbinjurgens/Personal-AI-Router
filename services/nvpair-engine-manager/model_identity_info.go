@@ -21,8 +21,8 @@ import (
 
 const modelIdentityRefreshInterval = 10 * time.Minute
 
-// A failed resolution is not retried sooner unless the run, configuration or
-// download state changes or an explicit refresh arrives.
+// A failed resolution is not retried sooner unless the run or configuration
+// changes or a refresh arrives.
 const modelIdentityFailureRetry = time.Minute
 
 type modelIdentityInfoEntry struct {
@@ -30,7 +30,6 @@ type modelIdentityInfoEntry struct {
 	binding, run  string
 	checked       time.Time
 	configuration modelInspectionSnapshot
-	downloads     uint64 // download revision the resolution read
 	failure       string // set when resolution failed; nothing is published
 	source        *sourceSnapshot
 }
@@ -207,7 +206,7 @@ func (m *modelIdentityInfo) resolveOnce(parent context.Context, engine, model st
 	}
 	// A resolved entry also rechecks its file and preset evidence, which costs
 	// metadata calls only, so a file replaced in place is not served stale.
-	if exists && !force && run == old.run && snapshot.equal(old.configuration) && revision == old.downloads && !now.Before(old.checked) && now.Sub(old.checked) < interval &&
+	if exists && !force && run == old.run && snapshot.equal(old.configuration) && !now.Before(old.checked) && now.Sub(old.checked) < interval &&
 		(old.failure != "" || validateResolutionEvidence(ctx, old.source) == nil) {
 		return old, true
 	}
@@ -222,7 +221,7 @@ func (m *modelIdentityInfo) resolveOnce(parent context.Context, engine, model st
 			level = slog.LevelDebug
 		}
 		slog.Log(parent, level, "model identity resolution failed", "engine", engine, "model", model, "reason", reason, "duration", time.Since(start).Round(time.Millisecond), "retry_after", modelIdentityFailureRetry)
-		return modelIdentityInfoEntry{run: run, checked: now, configuration: snapshot, downloads: revision, failure: reason}, true
+		return modelIdentityInfoEntry{run: run, checked: now, configuration: snapshot, failure: reason}, true
 	}
 	access := servingFileAccess{open: e.modelInspection.open}
 	access.recognize = func(ctx context.Context, model string) (engineInventory, error) {
@@ -262,6 +261,9 @@ func (m *modelIdentityInfo) resolveOnce(parent context.Context, engine, model st
 		return old, exists
 	}
 	if validateResolutionEvidence(ctx, list.source) != nil {
+		if ctx.Err() != nil {
+			return fail("inspection budget exceeded")
+		}
 		return fail("artifact evidence changed")
 	}
 	downloads.mu.Lock()
@@ -270,7 +272,7 @@ func (m *modelIdentityInfo) resolveOnce(parent context.Context, engine, model st
 	if changed || ctx.Err() != nil {
 		return old, exists
 	}
-	return modelIdentityInfoEntry{identity: identity, binding: binding, run: run, checked: now, configuration: snapshot, downloads: revision, source: list.source}, true
+	return modelIdentityInfoEntry{identity: identity, binding: binding, run: run, checked: now, configuration: snapshot, source: list.source}, true
 }
 
 // Read exactly the selector bytes already checked by artifact resolution.

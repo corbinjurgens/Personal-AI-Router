@@ -470,8 +470,9 @@ func TestModelIdentityInfoRemembersFailures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if attempt(false, retried.Add(time.Second)) == 0 {
-		t.Fatal("download change did not retry the failed resolution")
+	// Download progress on any engine advances the shared revision.
+	if n := attempt(false, retried.Add(time.Second)); n != 0 {
+		t.Fatalf("download progress retried the failed resolution: %d preset reads", n)
 	}
 	if attempt(true, retried.Add(2*time.Second)) == 0 {
 		t.Fatal("explicit refresh did not retry the failed resolution")
@@ -586,5 +587,35 @@ func TestModelIdentityInfoNoticesFileReplacedInPlace(t *testing.T) {
 	m.reconcile(context.Background(), false, now.Add(time.Minute))
 	if after := m.snapshot()["llamacpp"]["exact-alias"].TotalBytes; after == before || after != 3<<20 {
 		t.Fatalf("replaced model kept its stale identity: before=%d after=%d", before, after)
+	}
+}
+
+func TestModelIdentityInfoReusesEntriesDuringDownloadProgress(t *testing.T) {
+	f := identityFixture(t)
+	m := f.ex.modelIdentities
+	now := time.Now()
+	m.reconcile(context.Background(), false, now)
+	if len(m.snapshot()["llamacpp"]) != 1 {
+		t.Fatal("missing initial identity")
+	}
+	modelReads := 0
+	f.ex.modelInspection.open = func(path string) (servingArtifactFile, error) {
+		if path == f.model {
+			modelReads++
+		}
+		return os.Open(path)
+	}
+	// Another engine's download reports progress between every pass.
+	for i := 1; i <= 3; i++ {
+		f.ex.downloads.mu.Lock()
+		err := f.ex.downloads.advanceLocked()
+		f.ex.downloads.mu.Unlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+		m.reconcile(context.Background(), false, now.Add(time.Duration(i)*5*time.Second))
+	}
+	if len(m.snapshot()["llamacpp"]) != 1 || modelReads != 0 {
+		t.Fatalf("download progress re-resolved a cached identity: %d model reads", modelReads)
 	}
 }

@@ -79,11 +79,11 @@ a mutation waits behind an admitted scan with its existing context. Snapshots
 perform no I/O and detach file slices. Runtime contention can retry the complete
 read within the bounded read-observation window described below. Busy reads
 after that bound retain the previous entry. A resolution failure withdraws the
-published identity and is remembered for its engine run, configuration and
-download revision; it is logged at info with its reason and duration when the
+published identity and is remembered for its engine run and configuration;
+it is logged at info with its reason and duration when the
 reason first appears, and retried after one minute. A resolved entry is reused
-for up to ten minutes while its run, configuration and download revision are
-unchanged and a metadata-only recheck of its files and preset still matches.
+for up to ten minutes while its run and configuration are unchanged and a
+metadata-only recheck of its files and preset still matches.
 A refresh invalidates every entry, failed or not. The owner requests a
 coalesced refresh, without waiting for artifact I/O, only when a full inventory
 sweep changes the stored ready inventory or its digests; peers read
