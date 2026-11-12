@@ -296,10 +296,13 @@ describe('self-only tray immediate stop', () => {
         menuItem('Halt this PC').click?.()
         await vi.advanceTimersByTimeAsync(0)
         expect(menuItem('Halt this PC').enabled).toBe(true)
+        expect(menuItem('Could not show the Halt confirmation: Error: No dialog').enabled).toBe(
+            false
+        )
         expect(supervisor.setAvailability).not.toHaveBeenCalled()
     })
 
-    it('does not send Halt when availability changes while the confirmation is open', async () => {
+    it('reports a confirmed Halt it cannot send once availability became unknown', async () => {
         let answer: ((value: { response: number }) => void) | undefined
         trayMocks.showMessageBox.mockImplementationOnce(
             () =>
@@ -315,6 +318,9 @@ describe('self-only tray immediate stop', () => {
         answer({ response: 0 })
         await vi.advanceTimersByTimeAsync(0)
         expect(supervisor.setAvailability).not.toHaveBeenCalled()
+        expect(menuItem('Halt was not sent: availability changed while confirming').enabled).toBe(
+            false
+        )
     })
 
     it('keeps configured Pause and local Resume payloads unchanged', async () => {
@@ -438,6 +444,7 @@ describe('self-only tray immediate stop', () => {
         menuItem('Resume inference on this PC (pausing)').click?.()
         expect(menuItem('Halt this PC').enabled).toBe(false)
         menuItem('Halt this PC').click?.()
+        expect(trayMocks.showMessageBox).not.toHaveBeenCalled()
         expect(supervisor.setAvailability).toHaveBeenCalledExactlyOnceWith({ state: 'available' })
         if (!finishResume) throw new Error('Missing Resume callback')
         finishResume()
@@ -452,6 +459,7 @@ describe('self-only tray immediate stop', () => {
         await vi.advanceTimersByTimeAsync(0)
         expect(menuItem('Halt this PC').enabled).toBe(false)
         menuItem('Halt this PC').click?.()
+        expect(trayMocks.showMessageBox).toHaveBeenCalledTimes(1)
         expect(supervisor.setAvailability).toHaveBeenCalledTimes(1)
         expect(menuItem('Availability request failed: Error: Stop reply lost').enabled).toBe(false)
         vi.mocked(supervisor.refreshAvailability).mockImplementationOnce(async () =>

@@ -244,12 +244,14 @@ attaches late, and converts backend responses into stable UI contracts.
   PC* item calls the broker's `node:set-availability`. Its label follows
   `policy:get` (read at hydrate time) and `node:availability-changed` pushes for
   this node. While draining, *Resume inference on this PC (pausing)* permits
-  local recovery, *Stop local models now* permits immediate escalation, and
+  local recovery, *Halt this PC* permits immediate escalation, and
   *Retry pause on this PC* retries configured Pause when no request is pending.
   Every stored
   policy reads `pause.unloadModels` and `pause.stopEngines` back as `true`: they
   are obsolete input that the broker normalizes. The tray also offers self-only
-  *Stop local models now* for immediate cancellation and shutdown. External
+  *Halt this PC* for immediate cancellation and shutdown; it asks first in a
+  native dialog with the Overview Halt's title and consequence text
+  (`src/shared/constants/availability-copy.ts`). External
   ownership or missing shutdown proof leaves Pause incomplete and fenced.
 - **Manual nodes.** The service-side `nvpair-manual-nodes` persists its own list.
   Electron's old `<userData>/configs/manual-nodes.json` is sent once as

@@ -214,6 +214,9 @@ class TrayManager {
         if (this.haltConfirmOpen || !this.availabilityRequestAllowed('paused', true)) return
         this.haltConfirmOpen = true
         this.refreshContextMenu()
+        // A menu-bar click does not activate the app on macOS; without this the
+        // parentless dialog can open behind other windows.
+        if (currentPlatform() === 'darwin') app.focus({ steal: true })
         dialog
             .showMessageBox({
                 type: 'warning',
@@ -226,20 +229,23 @@ class TrayManager {
                 detail: HALT_CONSEQUENCE
             })
             .then(
-                ({ response }) => response === 0,
+                ({ response }) => {
+                    this.haltConfirmOpen = false
+                    if (response !== 0) return
+                    if (this.availabilityRequestAllowed('paused', true)) {
+                        this.requestAvailability('paused', true)
+                        return
+                    }
+                    this.availabilityError =
+                        'Halt was not sent: availability changed while confirming'
+                },
                 (error: unknown) => {
-                    log.warn({
-                        sublevel: 'lifecycle',
-                        message: `Could not show the Halt confirmation: ${error}`
-                    })
-                    return false
+                    this.haltConfirmOpen = false
+                    this.availabilityError = `Could not show the Halt confirmation: ${error}`
+                    log.warn({ sublevel: 'lifecycle', message: this.availabilityError })
                 }
             )
-            .then(confirmed => {
-                this.haltConfirmOpen = false
-                this.refreshContextMenu()
-                if (confirmed) this.requestAvailability('paused', true)
-            })
+            .finally(() => this.refreshContextMenu())
     }
 
     private availabilityRequestAllowed(

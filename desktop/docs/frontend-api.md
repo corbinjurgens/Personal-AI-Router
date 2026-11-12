@@ -115,7 +115,7 @@ supervisor and `node:set-availability` transport. `state` is `available` or
 and drain options. Resume must omit mode. Null or unknown modes are invalid.
 
 `immediate` cancels target execution and starts shutdown without drain or
-cancel-settle waits. The self-only **Stop local models now** action uses it;
+cancel-settle waits. The self-only **Halt** action uses it;
 **Pause node** uses configured timing. An authorized peer receives `-32602`,
 `Immediate pause must be requested on this node.` The target rechecks actual
 peer authority: management denial (`-32012`) and the pause fence (`-32011`)

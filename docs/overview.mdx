@@ -51,8 +51,8 @@ node's profile editor; **Deploy to node** opens the existing deployment flow.
 ## Concepts
 
 On a node card, **Pause node** uses that node's saved active-work and drain
-settings; an authorized managing peer can request it. **Stop local models now**
-is available only on this device and cancels local execution immediately without
+settings; an authorized managing peer can request it. **Halt** is available
+only on this device, asks for confirmation, and cancels local execution immediately without
 waiting for the drain. Both retain a pause fence until Resume on the target.
 An external engine that PAIR cannot safely stop leaves Pause incomplete. The
 router remains available to send eligible requests elsewhere. Metadata and file
