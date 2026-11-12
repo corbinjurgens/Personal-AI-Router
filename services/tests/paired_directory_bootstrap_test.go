@@ -4,6 +4,7 @@
 package tests
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -400,23 +401,44 @@ func (f *pairedBootstrapFixture) bootstrap(t *testing.T) {
 	// then prove its ni/ec ports reached the ordinary scanner subscribers.
 	address := net.JoinHostPort("127.0.0.1", strconv.Itoa(f.clusterLocatorPort))
 	adapter := clustertrust.NewPeerServiceClient(f.a.mesh, clustertrust.PeerServiceClientOptions{
-		BaseConfigDir:     f.a.base,
-		PeerClientOptions: clustertrust.PeerClientOptions{Timeout: 5 * time.Second},
+		BaseConfigDir: f.a.base,
+		// No total timeout: the peer-state stream stays open after its first line.
+		PeerClientOptions: clustertrust.PeerClientOptions{ResponseHeaderTimeout: 5 * time.Second},
 		ResolveRoute: func(uuid string, service noderec.ServiceKey) (clustertrust.PeerServiceRoute, bool) {
 			f.a.mesh.Refresh()
 			incarnation, ok := f.a.mesh.PeerServiceIncarnation(uuid)
 			return clustertrust.PeerServiceRoute{Incarnation: incarnation, Address: address, Protocol: clustertrust.ReverseTLS, Generation: 1}, ok && uuid == f.b.uuid && service == noderec.ServiceCluster
 		},
 	})
-	response, err := adapter.Client(f.b.uuid, noderec.ServiceCluster).Get("https://" + address + "/v1/cluster/services")
+	streamCtx, cancelStream := context.WithCancel(context.Background())
+	request, err := http.NewRequestWithContext(streamCtx, http.MethodGet, "https://"+address+"/v1/cluster/peer-state", nil)
 	if err != nil {
-		t.Fatalf("authenticated complete service descriptor: %v", err)
+		cancelStream()
+		t.Fatal(err)
 	}
-	descriptor, decodeErr := noderec.DecodePeerServices(response.Body, f.b.uuid)
-	closeErr := response.Body.Close()
-	if decodeErr != nil || closeErr != nil || response.StatusCode != http.StatusOK {
-		t.Fatalf("authenticated descriptor status=%d decode=%v close=%v", response.StatusCode, decodeErr, closeErr)
+	response, err := adapter.Client(f.b.uuid, noderec.ServiceCluster).Do(request)
+	if err != nil {
+		cancelStream()
+		t.Fatalf("authenticated peer-state stream: %v", err)
 	}
+	// The first line is the complete current frame; then stop the stream.
+	firstLine := make(chan []byte, 1)
+	go func() {
+		line, _ := bufio.NewReaderSize(response.Body, noderec.PeerStateMaxLine+1).ReadBytes('\n')
+		firstLine <- line
+	}()
+	var line []byte
+	select {
+	case line = <-firstLine:
+	case <-time.After(20 * time.Second):
+	}
+	cancelStream()
+	response.Body.Close()
+	frame, decodeErr := noderec.DecodePeerStateFrame(line, f.b.uuid)
+	if decodeErr != nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("authenticated peer-state status=%d decode=%v", response.StatusCode, decodeErr)
+	}
+	descriptor := frame.Descriptor
 	wantServices := []noderec.PeerService{
 		{Service: noderec.ServiceCluster, Port: f.b.observers[noderec.ServiceCluster].port},
 		{Service: noderec.ServiceEngineControl, Port: f.b.ports[noderec.ServiceEngineControl]},
@@ -521,7 +543,7 @@ func TestPairedDirectoryBootstrap(t *testing.T) {
 		if f.a.observers[noderec.ServiceCluster].established(f.b.uuid) != 0 || f.b.observers[noderec.ServiceCluster].established(f.a.uuid) != 0 {
 			t.Fatal("direct bootstrap unexpectedly had an available reverse session")
 		}
-		if f.b.observers[noderec.ServiceCluster].count(f.a.uuid, http.MethodGet, "/v1/cluster/services") == 0 {
+		if f.b.observers[noderec.ServiceCluster].count(f.a.uuid, http.MethodGet, "/v1/cluster/peer-state") == 0 {
 			t.Fatal("direct bootstrap never reached authenticated descriptor handler")
 		}
 	})
