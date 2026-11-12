@@ -16,6 +16,7 @@ import type { NodeAvailabilityRequest } from '@/shared/types/node-policy'
 import type { ServiceTransport } from '@/shared/types/service-bridge'
 import { createPairApi } from '@/ui/api/pair-api'
 import { destroyTray, initTray } from '@/electron/tray'
+import { HALT_CONFIRM_TITLE, HALT_CONSEQUENCE } from '@/shared/constants/availability-copy'
 
 interface TrayMenuItem {
     label?: string
@@ -36,6 +37,7 @@ const trayMocks = vi.hoisted(() => {
     return {
         FakeTray,
         createTrayWindow: vi.fn<() => void>(),
+        showMessageBox: vi.fn<(options: object) => Promise<{ response: number }>>(),
         get menu() {
             return menu
         },
@@ -54,6 +56,7 @@ vi.mock('electron', () => {
             getAppPath: () => process.cwd(),
             whenReady: () => Promise.resolve()
         },
+        dialog: { showMessageBox: trayMocks.showMessageBox },
         Menu: { buildFromTemplate: trayMocks.buildFromTemplate },
         nativeImage: { createFromPath: () => image },
         screen: {
@@ -241,6 +244,8 @@ describe('self-only tray immediate stop', () => {
         vi.useFakeTimers()
         item = availabilityMenuItem('available')
         trayMocks.createTrayWindow.mockClear()
+        trayMocks.showMessageBox.mockReset()
+        trayMocks.showMessageBox.mockResolvedValue({ response: 0 })
         vi.spyOn(supervisor, 'getAvailabilityMenuItem').mockImplementation(() => item)
         vi.spyOn(supervisor, 'onAvailabilityChanged').mockImplementation(listener => {
             refreshMenu = listener
@@ -259,15 +264,57 @@ describe('self-only tray immediate stop', () => {
         vi.useRealTimers()
     })
 
-    it('sends the exact local immediate payload without opening a window', async () => {
+    it('confirms with the shared Halt text, then sends the exact local immediate payload without opening a window', async () => {
         expect(menuItem('Halt this PC').enabled).toBe(true)
         menuItem('Halt this PC').click?.()
+        expect(trayMocks.showMessageBox).toHaveBeenCalledExactlyOnceWith(
+            expect.objectContaining({
+                buttons: ['Halt', 'Cancel'],
+                cancelId: 1,
+                defaultId: 1,
+                title: HALT_CONFIRM_TITLE,
+                message: HALT_CONFIRM_TITLE,
+                detail: HALT_CONSEQUENCE
+            })
+        )
+        expect(menuItem('Halt this PC').enabled).toBe(false)
+        expect(supervisor.setAvailability).not.toHaveBeenCalled()
         await vi.advanceTimersByTimeAsync(0)
         expect(supervisor.setAvailability).toHaveBeenCalledExactlyOnceWith({
             state: 'paused',
             pauseMode: 'immediate'
         })
         expect(trayMocks.createTrayWindow).not.toHaveBeenCalled()
+    })
+
+    it('sends nothing when the Halt confirmation is cancelled or cannot be shown', async () => {
+        trayMocks.showMessageBox.mockResolvedValueOnce({ response: 1 })
+        menuItem('Halt this PC').click?.()
+        await vi.advanceTimersByTimeAsync(0)
+        expect(menuItem('Halt this PC').enabled).toBe(true)
+        trayMocks.showMessageBox.mockRejectedValueOnce(new Error('No dialog'))
+        menuItem('Halt this PC').click?.()
+        await vi.advanceTimersByTimeAsync(0)
+        expect(menuItem('Halt this PC').enabled).toBe(true)
+        expect(supervisor.setAvailability).not.toHaveBeenCalled()
+    })
+
+    it('does not send Halt when availability changes while the confirmation is open', async () => {
+        let answer: ((value: { response: number }) => void) | undefined
+        trayMocks.showMessageBox.mockImplementationOnce(
+            () =>
+                new Promise(resolve => {
+                    answer = resolve
+                })
+        )
+        menuItem('Halt this PC').click?.()
+        menuItem('Halt this PC').click?.()
+        expect(trayMocks.showMessageBox).toHaveBeenCalledTimes(1)
+        report(null)
+        if (!answer) throw new Error('Missing Halt confirmation')
+        answer({ response: 0 })
+        await vi.advanceTimersByTimeAsync(0)
+        expect(supervisor.setAvailability).not.toHaveBeenCalled()
     })
 
     it('keeps configured Pause and local Resume payloads unchanged', async () => {
@@ -305,9 +352,11 @@ describe('self-only tray immediate stop', () => {
         report('draining')
         expect(menuItem('Halt this PC').enabled).toBe(true)
         menuItem('Halt this PC').click?.()
+        await vi.advanceTimersByTimeAsync(0)
         expect(menuItem('Halt this PC').enabled).toBe(false)
         expect(menuItem('Resume inference on this PC (pausing)').enabled).toBe(true)
         menuItem('Halt this PC').click?.()
+        expect(trayMocks.showMessageBox).toHaveBeenCalledTimes(1)
         expect(vi.mocked(supervisor.setAvailability).mock.calls.map(call => call[0])).toEqual([
             { state: 'paused', pauseMode: 'configured' },
             { state: 'paused', pauseMode: 'immediate' }
@@ -329,6 +378,7 @@ describe('self-only tray immediate stop', () => {
             new Error('Owned engine still running')
         )
         menuItem('Halt this PC').click?.()
+        await vi.advanceTimersByTimeAsync(0)
         report('draining')
         await vi.advanceTimersByTimeAsync(0)
         expect(
@@ -359,6 +409,7 @@ describe('self-only tray immediate stop', () => {
                 })
         )
         menuItem('Halt this PC').click?.()
+        await vi.advanceTimersByTimeAsync(0)
         menuItem('Resume inference on this PC (pausing)').click?.()
         await vi.advanceTimersByTimeAsync(0)
         report('available')
@@ -396,6 +447,7 @@ describe('self-only tray immediate stop', () => {
     it('requires self readback when availability is unknown and retains the stop error', async () => {
         vi.mocked(supervisor.setAvailability).mockRejectedValueOnce(new Error('Stop reply lost'))
         menuItem('Halt this PC').click?.()
+        await vi.advanceTimersByTimeAsync(0)
         report(null)
         await vi.advanceTimersByTimeAsync(0)
         expect(menuItem('Halt this PC').enabled).toBe(false)
