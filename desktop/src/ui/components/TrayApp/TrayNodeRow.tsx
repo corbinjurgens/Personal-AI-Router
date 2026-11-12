@@ -113,8 +113,8 @@ function TrayNodeRow({ node, activeWorkloads }: { node: NodeItem; activeWorkload
             <div className="min-w-0 pb-1">
                 <Stack>
                     <Flex align="center" gap="2" className="min-w-0">
-                        <Text kind="body/bold/sm" className="uppercase truncate">
-                            {(node.name || node.ipAddress || '')?.trim().toUpperCase()}
+                        <Text kind="body/bold/sm" className="truncate">
+                            {(node.name || node.ipAddress || '')?.trim()}
                         </Text>
                         {isLocal && <LocalBadge />}
                     </Flex>

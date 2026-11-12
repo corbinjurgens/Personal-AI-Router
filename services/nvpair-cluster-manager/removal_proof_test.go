@@ -199,7 +199,7 @@ func TestRemovalProofReplayFinishesInterruptedRemoval(t *testing.T) {
 	target := newTestManagerPort(t, 15118)
 	pinTrusted(t, remover, target.identity.NodeUUID, string(target.identity.CertPEM), target.identity.CertFingerprint)
 	remover.upsertMember(&ClusterNode{
-		NodeUUID: target.identity.NodeUUID, ID: "target", ClusterID: "cluster-1",
+		NodeUUID: target.identity.NodeUUID, ClusterID: "cluster-1",
 		AdmissionEpoch: 1, State: stateMember,
 	})
 	remover.persistMembers()
@@ -217,7 +217,7 @@ func TestRemovalProofReplayFinishesInterruptedRemoval(t *testing.T) {
 	if _, ok := restarted.trust.Get(target.identity.NodeUUID); ok {
 		t.Fatal("restart did not replay proof against stale pin")
 	}
-	if _, ok := restarted.memberByNodeID(target.identity.NodeUUID); ok {
+	if _, ok := restarted.memberByUUID(target.identity.NodeUUID); ok {
 		t.Fatal("restart did not replay proof against stale member")
 	}
 	if _, ok := restarted.removalProofFor(target.identity.NodeUUID); !ok {
@@ -288,7 +288,7 @@ func TestNewerAdmissionSupersedesProofAndStaleGossip(t *testing.T) {
 	targetUUID, targetCert, targetFP, _ := makeNode(t, "target")
 	pinTrusted(t, m, targetUUID, targetCert, targetFP)
 	m.upsertMember(&ClusterNode{
-		NodeUUID: targetUUID, ID: "target", ClusterID: "cluster-1",
+		NodeUUID: targetUUID, ClusterID: "cluster-1",
 		AdmissionEpoch: 1, State: stateMember,
 	})
 	proof, err := endorser.newRemovalProof(targetUUID, 1)
@@ -303,7 +303,7 @@ func TestNewerAdmissionSupersedesProofAndStaleGossip(t *testing.T) {
 	end2 := signEndorsement(endorser.identity.Signer, endorser.identity.NodeUUID,
 		targetUUID, targetFP, "cluster-1", time.Now().UnixMilli(), 2, endorserEpoch)
 	entry2 := RosterEntry{
-		NodeUUID: targetUUID, NodeID: "target", AdmissionEpoch: 2,
+		NodeUUID: targetUUID, AdmissionEpoch: 2,
 		CertPem: targetCert, CertFingerprint: targetFP, Endorsements: []Endorsement{end2},
 	}
 	if !m.applyMembers([]RosterEntry{entry2}, "cluster-1", endorser.identity.NodeUUID) {
@@ -348,7 +348,7 @@ func TestUnboundHighEpochProofCannotPoisonReadmission(t *testing.T) {
 	end := signEndorsement(remover.identity.Signer, remover.identity.NodeUUID,
 		targetUUID, targetFP, "cluster-1", time.Now().UnixMilli(), 1, removerEpoch)
 	entry := RosterEntry{
-		NodeUUID: targetUUID, NodeID: "target", AdmissionEpoch: 1,
+		NodeUUID: targetUUID, AdmissionEpoch: 1,
 		CertPem: targetCert, CertFingerprint: targetFP, Endorsements: []Endorsement{end},
 	}
 	if !m.applyMembers([]RosterEntry{entry}, "cluster-1", remover.identity.NodeUUID) {
@@ -361,7 +361,7 @@ func TestRemovalPersistenceFailureLeavesMemberIntact(t *testing.T) {
 	peer := newTestManagerPort(t, 15116)
 	pinTrusted(t, m, peer.identity.NodeUUID, string(peer.identity.CertPEM), peer.identity.CertFingerprint)
 	m.upsertMember(&ClusterNode{
-		NodeUUID: peer.identity.NodeUUID, ID: "peer", ClusterID: "cluster-1",
+		NodeUUID: peer.identity.NodeUUID, ClusterID: "cluster-1",
 		AdmissionEpoch: 1, State: stateMember,
 	})
 	blocker := filepath.Join(t.TempDir(), "not-a-directory")
@@ -374,7 +374,7 @@ func TestRemovalPersistenceFailureLeavesMemberIntact(t *testing.T) {
 	if _, ok := m.trust.Get(peer.identity.NodeUUID); !ok {
 		t.Fatal("pin was removed despite proof persistence failure")
 	}
-	if _, ok := m.memberByNodeID(peer.identity.NodeUUID); !ok {
+	if _, ok := m.memberByUUID(peer.identity.NodeUUID); !ok {
 		t.Fatal("member was removed despite proof persistence failure")
 	}
 }

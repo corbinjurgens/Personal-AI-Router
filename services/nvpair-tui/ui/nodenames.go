@@ -60,7 +60,7 @@ func (n *nodeNamer) learnDiscovered(nodes []availableNode) {
 
 func (n *nodeNamer) learnMembers(nodes []clusterNode) {
 	for _, m := range nodes {
-		n.learn(m.NodeUUID, m.Name)
+		n.learn(m.NodeUUID, m.DisplayName)
 	}
 }
 
@@ -68,11 +68,7 @@ func (n *nodeNamer) learnMembers(nodes []clusterNode) {
 // the one UUID the operator is guaranteed to see most often.
 func (n *nodeNamer) setSelf(id clusterIdentity) {
 	n.selfUUID = id.NodeUUID
-	name := id.Name
-	if name == "" {
-		name = id.NodeID
-	}
-	n.learn(id.NodeUUID, name)
+	n.learn(id.NodeUUID, id.Name)
 }
 
 func (n *nodeNamer) learn(uuid, name string) {

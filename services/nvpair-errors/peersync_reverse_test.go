@@ -137,9 +137,9 @@ func newErrorSyncFixture(t *testing.T) *errorSyncFixture {
 		t.Fatal(err)
 	}
 	f.event = DiscoveryEvent{Type: "discovered", Node: RawNode{
-		ID: "node-b", Host: "peer.example", Port: portNumber, TXT: []string{"cluster-uuid=node-b"},
+		ID: "node-b", Host: "Peer B", Addresses: []string{"192.0.2.10"}, Port: portNumber, TXT: []string{"cluster-uuid=node-b"},
 	}}
-	f.expectedHost, f.expectedSNI = net.JoinHostPort("peer.example", port), "peer.example"
+	f.expectedHost, f.expectedSNI = net.JoinHostPort("192.0.2.10", port), ""
 	manager := func(uuid string, mesh *clustertrust.Mesh) *clustertrust.ReverseManager {
 		m, err := clustertrust.NewReverseManager(clustertrust.ReverseOptions{
 			LocalUUID: uuid, SetupTimeout: time.Second,
@@ -174,7 +174,7 @@ func newErrorSyncFixture(t *testing.T) *errorSyncFixture {
 		DirectTimeout:    100 * time.Millisecond, ProbeInterval: time.Hour,
 		DialContext: func(ctx context.Context, _, address string) (net.Conn, error) {
 			f.directCalls.Add(1)
-			if address != net.JoinHostPort("peer.example", port) {
+			if address != net.JoinHostPort("192.0.2.10", port) {
 				return nil, errors.New("unexpected direct endpoint")
 			}
 			if f.beforeDial != nil {

@@ -9,12 +9,16 @@ import { MODULAR_CLUSTER_MANAGER_PORT } from '@/shared/constants/modular-runtime
 import getErrorString from '@/shared/utils/get-error-string'
 import { useClusterInvitationsStore } from '@/ui/stores/cluster-invitations.store'
 import { useInvitablePeers } from '@/ui/hooks/useInvitablePeers'
+import { useOverviewNodes } from '@/ui/hooks/useOverviewNodes'
+import { distinguishingLabels } from '@/ui/utils/node-name-labels'
+import { offlineMemberNode } from '@/ui/utils/overview-nodes'
 import ActiveNode from './ActiveNode'
 import AvailableNode from './AvailableNode'
 import PendingInviteCard from './PendingInviteCard'
 import JoinRequestCard from './JoinRequestCard'
 import { InlineErrorBanner } from '@/ui/components/InlineErrorBanner'
 import RoutingHistory from '@/ui/components/RoutingSettings/RoutingHistory'
+import { NodeNameModal } from '@/ui/components/NodeName/NodeNameModal'
 
 export default function ClusterSettings() {
     const { connected, selfId, clusterId } = useConnectionStore()
@@ -24,9 +28,15 @@ export default function ClusterSettings() {
     const joinError = useClusterInvitationsStore(state => state.joinError)
     const selfNode = useNodesStore(state => (selfId ? (state.nodes.get(selfId) ?? null) : null))
     const [error, setError] = useState<string | null>(null)
+    const overviewNodes = useOverviewNodes()
+    const discoveredNodes = useNodesStore(state => state.nodes)
+    const selfName = useClusterInvitationsStore(state => state.selfName)
+    const selfCustomName = useClusterInvitationsStore(state => state.selfCustomName)
+    const [renaming, setRenaming] = useState(false)
+    const closeRename = useCallback(() => setRenaming(false), [])
+    const shownSelfName = selfName || selfNode?.name || ''
 
-    // `selfId` is the node UUID, so members correlate on `nodeUuid` (the
-    // hostname `m.id` is display only).
+    // `selfId` is the node UUID, so members correlate on `nodeUuid`, never a name.
     const connectedMembers = useMemo(
         () => members.filter(m => m.nodeUuid !== selfId && m.state === 'member'),
         [members, selfId]
@@ -48,6 +58,18 @@ export default function ClusterSettings() {
     const pendingMembers = useMemo(
         () => members.filter(m => m.nodeUuid !== selfId && m.state !== 'member'),
         [members, selfId]
+    )
+
+    // Every card on this page that shows a node name takes part, pending members included.
+    const labels = useMemo(
+        () =>
+            distinguishingLabels([
+                ...overviewNodes,
+                ...pendingMembers.map(
+                    member => discoveredNodes.get(member.nodeUuid) ?? offlineMemberNode(member)
+                )
+            ]),
+        [overviewNodes, pendingMembers, discoveredNodes]
     )
 
     const availableNodes = useInvitablePeers()
@@ -72,6 +94,38 @@ export default function ClusterSettings() {
             {joinError && <InlineErrorBanner severity="error" message={joinError} />}
 
             <Flex wrap="wrap" align="start" justify="start" gap="4">
+                <div className="settings-card pair-paper p-4">
+                    <Flex justify="between" align="center" gap="4">
+                        <Stack gap="1" className="min-w-0">
+                            <Text kind="body/semibold/md">This node</Text>
+                            <Text kind="body/regular/sm" className="text-subtle-color break-all">
+                                {shownSelfName || '--'}
+                                {selfCustomName === null && shownSelfName ? ' (default name)' : ''}
+                            </Text>
+                        </Stack>
+                        <Button
+                            kind="tertiary"
+                            size="small"
+                            disabled={!connected || !selfId}
+                            onClick={() => setRenaming(true)}
+                        >
+                            Rename
+                        </Button>
+                    </Flex>
+                    {selfId && renaming && (
+                        <NodeNameModal
+                            target={{
+                                kind: 'self',
+                                nodeUuid: selfId,
+                                shownName: shownSelfName,
+                                customName: selfCustomName
+                            }}
+                            open={renaming}
+                            onClose={closeRename}
+                        />
+                    )}
+                </div>
+
                 <div className="settings-card pair-paper p-4">
                     <Flex justify="between" gap="4" className="mt-1">
                         <Stack gap="1">
@@ -151,7 +205,11 @@ export default function ClusterSettings() {
                     </Text>
 
                     {connectedMembers.map(node => (
-                        <ActiveNode node={node} key={node.nodeUuid} />
+                        <ActiveNode
+                            node={node}
+                            key={node.nodeUuid}
+                            distinguishingLabel={labels.get(node.nodeUuid)}
+                        />
                     ))}
                 </Stack>
             )}
@@ -163,7 +221,11 @@ export default function ClusterSettings() {
                     </Text>
 
                     {pendingMembers.map(node => (
-                        <ActiveNode node={node} key={node.nodeUuid} />
+                        <ActiveNode
+                            node={node}
+                            key={node.nodeUuid}
+                            distinguishingLabel={labels.get(node.nodeUuid)}
+                        />
                     ))}
                 </Stack>
             )}

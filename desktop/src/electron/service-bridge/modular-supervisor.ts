@@ -61,6 +61,7 @@ import {
     parseInvite,
     parseJoinRequestsSnapshot,
     parseNodeIdentity,
+    parseNodeNameResult,
     parseRemoteManagementSnapshot
 } from './cluster-json'
 import { startNodeInfoPoller, stopNodeInfoPoller } from './node-info-poller'
@@ -1535,6 +1536,7 @@ class ModularSupervisor {
             notification.method === 'cluster:invite-failed' ||
             notification.method === 'cluster:identity-changed' ||
             notification.method === 'cluster:remote-management-changed' ||
+            notification.method === 'cluster:node-name-changed' ||
             notification.method === 'cluster:join-requests-changed' ||
             notification.method === 'nodes:changed'
         ) {
@@ -1692,6 +1694,7 @@ class ModularSupervisor {
      * - `cluster:join-requests-changed`: full service-owned request and eligibility snapshot.
      * - `cluster:remote-management-changed`: authoritative local grants or an
      *   unavailable projection that invalidates earlier authority.
+     * - `cluster:node-name-changed`: this node's name and custom name.
      * - `cluster:invite-received`: an inbound pairing arrived; prompt for the PIN.
      * - `cluster:invite-canceled`: the inviter aborted a still-pending inbound
      *   invite; drop it so the receiver's PIN prompt dismisses at once.
@@ -1710,6 +1713,17 @@ class ModularSupervisor {
                 'cluster:join-requests-changed',
                 parseJoinRequestsSnapshot(notification.params)
             )
+            return
+        }
+        if (notification.method === 'cluster:node-name-changed') {
+            try {
+                emitBridgePush(
+                    'cluster:node-name-changed',
+                    parseNodeNameResult(notification.params)
+                )
+            } catch (error) {
+                log.warn({ sublevel: 'cluster', message: `dropped node name update: ${error}` })
+            }
             return
         }
         if (notification.method === 'cluster:remote-management-changed') {

@@ -18,4 +18,10 @@ const (
 	codeUnknownInvite  = -32001 // inviteId not found or evicted
 	codeInvalidState   = -32002 // invite exists but call invalid for its state
 	codePrecondition   = -32004 // a required precondition isn't met
+	// codeRemoteManagementDenied: the target node has not granted this node
+	// remote management. Same code as engine-manager and the broker.
+	codeRemoteManagementDenied = -32012
+	// codePeerUnavailable: the target node did not answer, or answered that it
+	// no longer trusts this node.
+	codePeerUnavailable = -32000
 )

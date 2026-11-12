@@ -322,11 +322,12 @@ Important push domains include:
 discovery service names.
 
 Personal AI Router keys every node by the backend's stable per-host UUID (`AvailableNode.id` /
-`hostUuid`), not the hostname. That same UUID keys workload attribution
+`hostUuid`), never a name. That same UUID keys workload attribution
 (`originatedFrom`/`scheduledOn`), errors (`nodeId`), proxy routing (`Node.ID`),
 `/v1/node-info`, and cluster membership (`ClusterNode.nodeUuid`), and it is the
 value of `selfId` (the cluster-manager `nodeUuid`, resolved as soon as the broker
-is ready). The hostname is retained only as the display `name`. This lets one
+is ready). `AvailableNode.name` is the display name the broker decides; the
+desktop renders it unchanged. This lets one
 merge collapse the broker- and proxy-reported views of a node into a single
 entry and makes cross-domain correlation exact. `AvailableNode` also carries the
 `trusted` and `clustered` flags; Personal AI Router renders an already-`clustered` node as

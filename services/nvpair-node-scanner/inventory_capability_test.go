@@ -308,7 +308,7 @@ func TestPeerServicesBootstrapEnrichmentCarriesTheCapability(t *testing.T) {
 		t.Fatal("fixture has no current incarnation")
 	}
 	claim := noderec.PeerServicesClaim{Incarnation: incarnation, Source: "cm-first", Sequence: 1, ObservedAt: time.Now().UnixMilli(),
-		Descriptor: noderec.PeerServicesDescriptor{HostUUID: "peer", Name: "peer-name", Addresses: []string{"192.0.2.40"}}}
+		Descriptor: noderec.PeerServicesDescriptor{HostUUID: "peer", Addresses: []string{"192.0.2.40"}}}
 	// Installed directly, as in the roles bootstrap test: descriptor validation
 	// refuses the loopback address the fixture serves on.
 	f.d.dir.installPeerServices(claim, f.node)

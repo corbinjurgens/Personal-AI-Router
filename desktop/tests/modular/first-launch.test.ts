@@ -177,9 +177,9 @@ describe('first launch', () => {
     it('keeps clustered self active while discovery is empty', () => {
         const members = [
             {
-                id: 'local-node',
                 nodeUuid: 'uuid',
                 name: 'My PC',
+                displayName: 'My PC',
                 ipAddress: '192.168.1.2',
                 port: 8080,
                 clusterId: 'cluster',
@@ -188,8 +188,8 @@ describe('first launch', () => {
                 lastSeen: 1
             }
         ]
-        // Self is keyed by the node UUID (`nodeUuid`), not the hostname; the
-        // placeholder still surfaces the hostname as the display `name`.
+        // Self is keyed by the node UUID (`nodeUuid`); the placeholder surfaces
+        // the member's `displayName` as the display `name`.
         expect(buildOverviewNodes(new Map(), members, 'uuid', 'Windows')[0]).toMatchObject({
             id: 'uuid',
             name: 'My PC',

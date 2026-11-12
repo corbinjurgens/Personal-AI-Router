@@ -18,6 +18,8 @@ import type {
     JoinRequestsSnapshot,
     JoinRequestState,
     MembershipState,
+    NodeNameResult,
+    PeerNicknameResult,
     RemoteManagementCapability,
     RemoteManagementSnapshot,
     RemoteManagementState
@@ -83,10 +85,9 @@ export function parseInvite(value: JsonValue | undefined): Invite {
     const obj = objectValue(value)
     return {
         inviteId: stringValue(obj?.inviteId),
-        fromNodeId: stringValue(obj?.fromNodeId),
         fromNodeUuid: stringValue(obj?.fromNodeUuid),
         fromNodeName: stringValue(obj?.fromNodeName),
-        toNodeId: nullableString(obj?.toNodeId),
+        toNodeUuid: nullableString(obj?.toNodeUuid),
         clusterId: stringValue(obj?.clusterId),
         clusterFriendlyName: stringValue(obj?.clusterFriendlyName),
         pin: nullableString(obj?.pin),
@@ -101,10 +102,9 @@ export function parseInvite(value: JsonValue | undefined): Invite {
 export function emptyInvite(): Invite {
     return {
         inviteId: '',
-        fromNodeId: '',
         fromNodeUuid: '',
         fromNodeName: '',
-        toNodeId: null,
+        toNodeUuid: null,
         clusterId: '',
         clusterFriendlyName: '',
         pin: null,
@@ -117,10 +117,14 @@ export function emptyInvite(): Invite {
 
 function parseClusterNode(value: JsonValue | undefined): ClusterNode {
     const obj = objectValue(value)
+    const nodeUuid = stringValue(obj?.nodeUuid)
+    const name = stringValue(obj?.name)
+    const nickname = stringValue(obj?.nickname)
     return {
-        id: stringValue(obj?.id),
-        nodeUuid: stringValue(obj?.nodeUuid),
-        name: stringValue(obj?.name),
+        nodeUuid,
+        name,
+        ...(nickname ? { nickname } : {}),
+        displayName: stringValue(obj?.displayName) || name || nodeUuid,
         ipAddress: stringValue(obj?.ipAddress),
         port: numberValue(obj?.port),
         clusterId: stringValue(obj?.clusterId),
@@ -139,11 +143,39 @@ export function parseNodeIdentity(value: JsonValue | undefined): ClusterNodeIden
     const obj = objectValue(value)
     return {
         nodeUuid: stringValue(obj?.nodeUuid),
-        nodeId: stringValue(obj?.nodeId),
         name: stringValue(obj?.name),
+        customName: nullableString(obj?.customName),
         certFingerprint: stringValue(obj?.certFingerprint),
         clusterId: stringValue(obj?.clusterId)
     }
+}
+
+/** Parse a `cluster:set-node-name` result or `cluster:node-name-changed` payload. */
+export function parseNodeNameResult(value: JsonValue | undefined): NodeNameResult {
+    const obj = objectValue(value)
+    if (
+        !obj ||
+        typeof obj.nodeUuid !== 'string' ||
+        typeof obj.name !== 'string' ||
+        (obj.customName !== null && typeof obj.customName !== 'string')
+    ) {
+        throw new Error('Invalid node name response')
+    }
+    return { nodeUuid: obj.nodeUuid, name: obj.name, customName: obj.customName }
+}
+
+/** Parse a `cluster:set-peer-nickname` result. */
+export function parsePeerNicknameResult(value: JsonValue | undefined): PeerNicknameResult {
+    const obj = objectValue(value)
+    if (
+        !obj ||
+        typeof obj.nodeUuid !== 'string' ||
+        typeof obj.displayName !== 'string' ||
+        (obj.nickname !== null && typeof obj.nickname !== 'string')
+    ) {
+        throw new Error('Invalid peer nickname response')
+    }
+    return { nodeUuid: obj.nodeUuid, nickname: obj.nickname, displayName: obj.displayName }
 }
 
 function exactFields(obj: JsonObject, fields: string[]): boolean {

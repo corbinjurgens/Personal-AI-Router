@@ -138,3 +138,13 @@ export function formatDownloadStatus(status: string, current: boolean | undefine
             return 'Download status unknown'
     }
 }
+
+/**
+ * Short form of a reported service build for compact surfaces: `git:<sha>[+dirty]`
+ * becomes the first eight hex digits plus any suffix. Other values are returned
+ * unchanged, so nothing is invented for a build that is not a git revision.
+ */
+export function formatServiceBuildShort(build: string): string {
+    const match = /^git:([0-9a-f]{8})[0-9a-f]*(\+.*)?$/.exec(build)
+    return match ? `${match[1]}${match[2] ?? ''}` : build
+}

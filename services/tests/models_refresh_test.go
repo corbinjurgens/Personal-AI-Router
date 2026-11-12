@@ -75,8 +75,8 @@ func TestModelsRefreshConvergesWithoutMDNSChange(t *testing.T) {
 	const instance = "xproc-models-refresh-1"
 	// Advertise em=<port> + ip=127.0.0.1 once and never touch the record again,
 	// so the only thing that changes during the test is the /v1/models body.
-	txt := []string{"v=1", "uuid=" + instance + "-uuid", "ip=127.0.0.1", fmt.Sprintf("em=%d", emPort)}
-	zsrv, err := mdns.NewResponder(instance, namespace.Service, namespace.Domain, emPort, txt)
+	txt := []string{"v=1", "uuid=" + xprocInstanceUUID(instance), "ip=127.0.0.1", fmt.Sprintf("em=%d", emPort)}
+	zsrv, err := mdns.NewResponder(instance, instance, namespace.Service, namespace.Domain, emPort, txt)
 	if err != nil {
 		t.Fatalf("register %s: %v", instance, err)
 	}
@@ -100,7 +100,7 @@ func TestModelsRefreshConvergesWithoutMDNSChange(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	// Phase 1: the node is discovered and enriched, but with no models.
-	pollForNode(t, stdin, msgs, instance, 30*time.Second, func(n availableNode) bool {
+	pollForNode(t, stdin, msgs, xprocInstanceUUID(instance), 30*time.Second, func(n availableNode) bool {
 		return len(n.Models) == 0
 	})
 	t.Log("node discovered with an empty inventory; now serving models without an mDNS change")
@@ -119,7 +119,7 @@ func TestModelsRefreshConvergesWithoutMDNSChange(t *testing.T) {
 			"llamacpp-custom": {},
 		},
 	})
-	pollForNode(t, stdin, msgs, instance, 45*time.Second, func(n availableNode) bool {
+	pollForNode(t, stdin, msgs, xprocInstanceUUID(instance), 45*time.Second, func(n availableNode) bool {
 		return modelsMatch(n.Models) && modelsByEngineMatch(n.ModelsByEngine) &&
 			loadedByEngineMatch(n.LoadedByEngine)
 	})
@@ -139,15 +139,15 @@ func TestModelsRefreshConvergesWithoutMDNSChange(t *testing.T) {
 		},
 	})
 	emptyByEngine := map[string][]string{"llamacpp": {}, "llamacpp-custom": {}}
-	pollForNode(t, stdin, msgs, instance, 45*time.Second, func(n availableNode) bool {
+	pollForNode(t, stdin, msgs, xprocInstanceUUID(instance), 45*time.Second, func(n availableNode) bool {
 		return len(n.Models) == 0 && byEngineEqual(n.ModelsByEngine, emptyByEngine) &&
 			byEngineEqual(n.LoadedByEngine, emptyByEngine)
 	})
 }
 
-// pollForNode drives discovery:get-nodes on a cadence until the node named
-// instance appears and satisfies pred, or the timeout elapses.
-func pollForNode(t *testing.T, stdin io.Writer, msgs <-chan jsonrpc.Message, instance string, timeout time.Duration, pred func(availableNode) bool) {
+// pollForNode drives discovery:get-nodes on a cadence until the node with UUID
+// nodeID appears and satisfies pred, or the timeout elapses.
+func pollForNode(t *testing.T, stdin io.Writer, msgs <-chan jsonrpc.Message, nodeID string, timeout time.Duration, pred func(availableNode) bool) {
 	t.Helper()
 	deadline := time.After(timeout)
 	ticker := time.NewTicker(1500 * time.Millisecond)
@@ -163,7 +163,7 @@ func pollForNode(t *testing.T, stdin io.Writer, msgs <-chan jsonrpc.Message, ins
 			if msg.Method == "" && msg.ID != nil {
 				var res availableNodesResult
 				if json.Unmarshal(msg.Result, &res) == nil {
-					if n, found := findNode(res.Nodes, instance); found && pred(n) {
+					if n, found := findNode(res.Nodes, nodeID); found && pred(n) {
 						return
 					}
 				}
@@ -172,7 +172,7 @@ func pollForNode(t *testing.T, stdin io.Writer, msgs <-chan jsonrpc.Message, ins
 			id++
 			sendReq(t, stdin, id, "discovery:get-nodes")
 		case <-deadline:
-			t.Fatalf("timed out waiting for node %q to match predicate", instance)
+			t.Fatalf("timed out waiting for node %q to match predicate", nodeID)
 		}
 	}
 }

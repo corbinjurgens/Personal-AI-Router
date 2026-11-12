@@ -9,11 +9,18 @@ import type {
     Invite,
     JoinRequest,
     JoinRequestsSnapshot,
+    NodeNameResult,
+    PeerNicknameResult,
     RemoteManagementSnapshot
 } from '@/shared/types/cluster'
-import { INVALID_PARAMS_CODE, POLICY_CONFLICT_CODE } from '@/shared/constants/service-errors'
+import {
+    INVALID_PARAMS_CODE,
+    POLICY_CONFLICT_CODE,
+    REMOTE_MANAGEMENT_DENIED_CODE
+} from '@/shared/constants/service-errors'
 import { getPairTransport } from '@/ui/api/bootstrap'
 import { serviceErrorCode } from '@/ui/api/service-transport'
+import { refreshNodeManagement } from '@/ui/stores/node-configuration.store'
 import getErrorString from '@/shared/utils/get-error-string'
 import { formatJoinRequestError, isInviteStatusUnknown } from '@/ui/utils/cluster-invite-error'
 import { MODULAR_INVITE_STATUS_POLL_INTERVAL_MS } from '@/shared/constants/modular-runtime'
@@ -22,6 +29,16 @@ interface RemoteManagementChange {
     allowed: boolean
     phase: 'saving' | 'saved' | 'conflict' | 'failed' | 'unknown'
     message?: string
+}
+
+type NodeNameChange = { phase: 'saving' } | { phase: 'saved' } | { phase: 'error'; message: string }
+
+/** Outcome of the latest rename or nickname request for one peer. */
+interface PeerNameChange {
+    phase: 'saving' | 'saved' | 'error'
+    message?: string
+    /** The target refused because it has not allowed this node to manage it. */
+    denied?: boolean
 }
 
 interface ClusterInvitationsStore {
@@ -57,7 +74,29 @@ interface ClusterInvitationsStore {
     remoteManagementContext: number | null
     refreshRemoteManagement: () => Promise<void>
     setRemoteManagement: (peerUuid: string, allowed: boolean) => Promise<void>
-    initialize: (initial?: ClusterInitialSnapshot) => Promise<void>
+    /** This node's shown name (identity snapshot, then `cluster:node-name-changed`). */
+    selfName: string
+    /** This node's user-set name; `null` while the generated default is shown. */
+    selfCustomName: string | null
+    /** Outcome of the latest `setSelfName`; null when none is in progress or shown. */
+    nameChange: NodeNameChange | null
+    /** Rename this node; `null` returns to the generated default. */
+    setSelfName: (name: string | null) => Promise<void>
+    clearNameChange: () => void
+    /** Outcome of the latest peer rename or nickname request, by peer UUID. */
+    peerNameChanges: Record<string, PeerNameChange>
+    /** Rename a peer on that peer; `null` returns it to its generated default. */
+    setPeerName: (nodeUuid: string, name: string | null) => Promise<void>
+    /** Set the name only this node uses for a peer; `null` clears it. */
+    setPeerNickname: (nodeUuid: string, nickname: string | null) => Promise<void>
+    clearPeerNameChange: (nodeUuid: string) => void
+    /**
+     * Subscribe to pushes, then apply the snapshot. A snapshot still in flight is
+     * awaited after subscribing, so a push that arrives meanwhile is kept.
+     */
+    initialize: (
+        initial?: ClusterInitialSnapshot | Promise<ClusterInitialSnapshot | undefined>
+    ) => Promise<void>
     hydrate: (snapshot: ClusterInitialSnapshot) => void
     refresh: () => Promise<void>
     cleanup: () => void
@@ -266,6 +305,54 @@ let permissionRead: { generation: number; request: Promise<void> } | null = null
 // identity boundary, only a current read can establish authority again.
 let permissionPushRequiresReadback = false
 let permissionPushReadback: object | null = null
+// Counts accepted name updates, so a snapshot fetched before one cannot undo it.
+let nameRevision = 0
+
+function receiveNodeName(result: NodeNameResult): void {
+    nameRevision++
+    useClusterInvitationsStore.setState({
+        selfName: result.name,
+        selfCustomName: result.customName
+    })
+}
+
+function setPeerNameChange(nodeUuid: string, change: PeerNameChange): void {
+    useClusterInvitationsStore.setState(state => ({
+        peerNameChanges: { ...state.peerNameChanges, [nodeUuid]: change }
+    }))
+}
+
+/**
+ * Run one peer name request. The roster push (`nodes:changed`) delivers the new
+ * name, so success only records the phase; a denial is flagged so the modal can
+ * fall back to nicknames, and re-reads the peer's permission.
+ */
+async function runPeerNameChange(
+    nodeUuid: string,
+    request: () => Promise<NodeNameResult | PeerNicknameResult>
+): Promise<void> {
+    if (useClusterInvitationsStore.getState().peerNameChanges[nodeUuid]?.phase === 'saving') return
+    setPeerNameChange(nodeUuid, { phase: 'saving' })
+    try {
+        await request()
+        setPeerNameChange(nodeUuid, { phase: 'saved' })
+    } catch (error) {
+        const denied = serviceErrorCode(error) === REMOTE_MANAGEMENT_DENIED_CODE
+        setPeerNameChange(nodeUuid, { phase: 'error', message: getErrorString(error), denied })
+        // The cached permission is stale: read it back so every panel stops offering Save.
+        if (denied) refreshNodeManagement(nodeUuid)
+    }
+}
+
+/** A snapshot fetched at `revision` must not undo a name update accepted since. */
+function keepNewerName(fetched: ClusterInitialSnapshot, revision: number): ClusterInitialSnapshot {
+    if (revision === nameRevision) return fetched
+    const { selfName, selfCustomName } = useClusterInvitationsStore.getState()
+    return {
+        ...fetched,
+        identity: { ...fetched.identity, name: selfName, customName: selfCustomName }
+    }
+}
 
 function invalidatePermissions(resetRevision = false): void {
     permissionGeneration++
@@ -495,6 +582,44 @@ export const useClusterInvitationsStore = create<ClusterInvitationsStore>((set, 
     remoteManagementError: null,
     remoteManagementChanges: {},
     remoteManagementContext: null,
+    selfName: '',
+    selfCustomName: null,
+    nameChange: null,
+
+    setSelfName: async name => {
+        if (get().nameChange?.phase === 'saving') return
+        set({ nameChange: { phase: 'saving' } })
+        try {
+            receiveNodeName(await window.pairApi.cluster.setNodeName(name))
+            set({ nameChange: { phase: 'saved' } })
+        } catch (error) {
+            set({ nameChange: { phase: 'error', message: getErrorString(error) } })
+        }
+    },
+
+    clearNameChange: () => {
+        set({ nameChange: null })
+    },
+
+    peerNameChanges: {},
+
+    setPeerName: async (nodeUuid, name) => {
+        await runPeerNameChange(nodeUuid, () => window.pairApi.cluster.setPeerName(nodeUuid, name))
+    },
+
+    setPeerNickname: async (nodeUuid, nickname) => {
+        await runPeerNameChange(nodeUuid, () =>
+            window.pairApi.cluster.setPeerNickname(nodeUuid, nickname)
+        )
+    },
+
+    clearPeerNameChange: nodeUuid => {
+        useClusterInvitationsStore.setState(state => {
+            const peerNameChanges = { ...state.peerNameChanges }
+            delete peerNameChanges[nodeUuid]
+            return { peerNameChanges }
+        })
+    },
 
     hydrate: snapshot => {
         const firstBaseline = localIdentity === ''
@@ -521,6 +646,8 @@ export const useClusterInvitationsStore = create<ClusterInvitationsStore>((set, 
             return {
                 pendingInvites,
                 members: snapshot.members,
+                selfName: snapshot.identity.name,
+                selfCustomName: snapshot.identity.customName,
                 remoteManagementContext: permissionGeneration,
                 activeInviteId: retainSubmittedSelection(state.activeInviteId, state.inviteResults)
                     ? state.activeInviteId
@@ -569,6 +696,9 @@ export const useClusterInvitationsStore = create<ClusterInvitationsStore>((set, 
                     invalidatePermissions()
                     queuePermissionReadback()
                 } else receivePermissions(snapshot)
+            }),
+            window.pairApi.cluster.onNodeNameChanged(result => {
+                if (subscriptionGeneration === generation) receiveNodeName(result)
             }),
             // A fresh arrival: surface it in the modal. Main also emits the full
             // list via `cluster:pending-invites-changed`, so this only picks which
@@ -630,20 +760,29 @@ export const useClusterInvitationsStore = create<ClusterInvitationsStore>((set, 
                     void get().refresh()
                 })
             )
-        if (initial) get().hydrate(initial)
-        else {
+        if (!initial) {
             await get().refresh()
             return
         }
+        const nameRevisionAtSubscribe = nameRevision
+        const snapshot = await initial
+        if (subscriptionGeneration !== generation) return
+        if (!snapshot) {
+            await get().refresh()
+            return
+        }
+        get().hydrate(keepNewerName(snapshot, nameRevisionAtSubscribe))
         if (connected) await get().refreshRemoteManagement()
     },
 
     refresh: async () => {
         const currentGeneration = permissionGeneration
+        const currentNameRevision = nameRevision
         try {
-            const snapshot = await window.pairApi.cluster.getInitial()
+            const fetched = await window.pairApi.cluster.getInitial()
             if (currentGeneration !== permissionGeneration || !connected) return
-            get().hydrate(snapshot)
+            // A name update that landed during the fetch is newer than the snapshot.
+            get().hydrate(keepNewerName(fetched, currentNameRevision))
             await get().refreshRemoteManagement()
         } catch {
             if (currentGeneration !== permissionGeneration) return

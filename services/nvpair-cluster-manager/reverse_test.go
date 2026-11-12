@@ -402,7 +402,7 @@ func pairReverseManagers(t *testing.T, a, b *Manager) {
 	t.Helper()
 	pin := func(local, remote *Manager) {
 		pinTrusted(t, local, remote.identity.NodeUUID, string(remote.identity.CertPEM), remote.identity.CertFingerprint)
-		local.upsertMember(&ClusterNode{NodeUUID: remote.identity.NodeUUID, ID: remote.identity.NodeID, IPAddress: "127.0.0.1", Port: remote.port, ClusterID: "cluster-1", AdmissionEpoch: 1, State: stateMember})
+		local.upsertMember(&ClusterNode{NodeUUID: remote.identity.NodeUUID, IPAddress: "127.0.0.1", Port: remote.port, ClusterID: "cluster-1", AdmissionEpoch: 1, State: stateMember})
 	}
 	pin(a, b)
 	pin(b, a)
@@ -452,7 +452,7 @@ func startReverseHTTP(t *testing.T, m *Manager, blocked bool) {
 
 func connectReverseManagers(t *testing.T, a, b *Manager) {
 	t.Helper()
-	node, ok := b.memberByNodeID(a.identity.NodeUUID)
+	node, ok := b.memberByUUID(a.identity.NodeUUID)
 	if !ok {
 		t.Fatal("reachable peer missing")
 	}
@@ -623,18 +623,18 @@ func TestReversePeerRequiresCurrentAdmission(t *testing.T) {
 		})
 	}
 	test("pending member", func(a, b *Manager) {
-		node, _ := a.memberByNodeID(b.identity.NodeUUID)
+		node, _ := a.memberByUUID(b.identity.NodeUUID)
 		node.State = statePendingInbound
 		a.upsertMember(node)
 	})
 	test("missing member", func(a, b *Manager) { a.removeMemberByUUID(b.identity.NodeUUID) })
 	test("stale member epoch", func(a, b *Manager) {
-		node, _ := a.memberByNodeID(b.identity.NodeUUID)
+		node, _ := a.memberByUUID(b.identity.NodeUUID)
 		node.AdmissionEpoch++
 		a.upsertMember(node)
 	})
 	test("different member cluster", func(a, b *Manager) {
-		node, _ := a.memberByNodeID(b.identity.NodeUUID)
+		node, _ := a.memberByUUID(b.identity.NodeUUID)
 		node.ClusterID = "another"
 		a.upsertMember(node)
 	})
@@ -649,7 +649,7 @@ func TestReverseBlockedDirectionConcurrentPrivateStreaming(t *testing.T) {
 	startReverseHTTP(t, a, false)
 	startReverseHTTP(t, b, true)
 	pairReverseManagers(t, a, b)
-	node, _ := a.memberByNodeID(b.identity.NodeUUID)
+	node, _ := a.memberByUUID(b.identity.NodeUUID)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if err := a.dialReverseSession(ctx, *node); err == nil {
@@ -947,7 +947,7 @@ func TestReverseTrustChangesCloseActiveStreams(t *testing.T) {
 	}
 	test("in-memory Forget", func(t *testing.T, a, b *Manager) { a.trust.Forget(b.identity.NodeUUID) })
 	test("member readmission", func(t *testing.T, a, b *Manager) {
-		node, _ := a.memberByNodeID(b.identity.NodeUUID)
+		node, _ := a.memberByUUID(b.identity.NodeUUID)
 		node.AdmissionEpoch++
 		a.upsertMember(node)
 	})

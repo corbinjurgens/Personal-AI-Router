@@ -19,7 +19,7 @@ func TestStaleEndorserAdmissionCannotIntroduceMember(t *testing.T) {
 	endorser := newTestManagerPort(t, 15127)
 	pinTrusted(t, m, endorser.identity.NodeUUID, string(endorser.identity.CertPEM), endorser.identity.CertFingerprint)
 	if err := m.trust.Pin(&TrustedPin{
-		NodeUUID: endorser.identity.NodeUUID, NodeID: "endorser", ClusterID: "cluster-1",
+		NodeUUID: endorser.identity.NodeUUID, ClusterID: "cluster-1",
 		AdmissionEpoch: 2, CertPem: string(endorser.identity.CertPEM),
 		CertFingerprint: endorser.identity.CertFingerprint,
 	}); err != nil {
@@ -29,7 +29,7 @@ func TestStaleEndorserAdmissionCannotIntroduceMember(t *testing.T) {
 	stale := signEndorsement(endorser.identity.Signer, endorser.identity.NodeUUID,
 		targetUUID, targetFP, "cluster-1", time.Now().UnixMilli(), 1, 1)
 	entry := RosterEntry{
-		NodeUUID: targetUUID, NodeID: "target", AdmissionEpoch: 1,
+		NodeUUID: targetUUID, AdmissionEpoch: 1,
 		CertPem: targetCert, CertFingerprint: targetFP, Endorsements: []Endorsement{stale},
 	}
 	if m.applyMembers([]RosterEntry{entry}, "cluster-1", endorser.identity.NodeUUID) {
@@ -44,7 +44,7 @@ func TestLegacyTombstoneCannotEvictAdmissionAwareMember(t *testing.T) {
 	pinTrusted(t, m, remover.identity.NodeUUID, string(remover.identity.CertPEM), remover.identity.CertFingerprint)
 	pinTrusted(t, m, target.identity.NodeUUID, string(target.identity.CertPEM), target.identity.CertFingerprint)
 	m.upsertMember(&ClusterNode{
-		NodeUUID: target.identity.NodeUUID, ID: "target", ClusterID: "cluster-1",
+		NodeUUID: target.identity.NodeUUID, ClusterID: "cluster-1",
 		AdmissionEpoch: 1, State: stateMember,
 	})
 	legacy := signTombstone(remover.identity.Signer, remover.identity.NodeUUID,
@@ -62,7 +62,7 @@ func TestRemovalRevalidatesTargetAdmissionBeforeDepin(t *testing.T) {
 	containHintDials(t, target, false)
 	pinTrusted(t, m, target.identity.NodeUUID, string(target.identity.CertPEM), target.identity.CertFingerprint)
 	m.upsertMember(&ClusterNode{
-		NodeUUID: target.identity.NodeUUID, ID: "target", ClusterID: "cluster-1",
+		NodeUUID: target.identity.NodeUUID, ClusterID: "cluster-1",
 		AdmissionEpoch: 1, State: stateMember,
 	})
 	targetUUID := target.identity.NodeUUID
@@ -78,14 +78,14 @@ func TestRemovalRevalidatesTargetAdmissionBeforeDepin(t *testing.T) {
 	<-m.testRemovalPrepared
 	m.rosterMu.Lock()
 	if err := m.trust.Pin(&TrustedPin{
-		NodeUUID: target.identity.NodeUUID, NodeID: "target", ClusterID: "cluster-1",
+		NodeUUID: target.identity.NodeUUID, ClusterID: "cluster-1",
 		AdmissionEpoch: 2, CertPem: string(target.identity.CertPEM),
 		CertFingerprint: target.identity.CertFingerprint,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	m.upsertMember(&ClusterNode{
-		NodeUUID: target.identity.NodeUUID, ID: "target", ClusterID: "cluster-1",
+		NodeUUID: target.identity.NodeUUID, ClusterID: "cluster-1",
 		AdmissionEpoch: 2, State: stateMember,
 	})
 	m.rosterMu.Unlock()
@@ -112,7 +112,7 @@ func TestRemovalFinalGuardPreservesReadmissionAfterSelection(t *testing.T) {
 	}{bytes.NewReader(nil), &output})
 	pinTrusted(t, m, target.identity.NodeUUID, string(target.identity.CertPEM), target.identity.CertFingerprint)
 	m.upsertMember(&ClusterNode{
-		NodeUUID: target.identity.NodeUUID, ID: "target", ClusterID: "cluster-1",
+		NodeUUID: target.identity.NodeUUID, ClusterID: "cluster-1",
 		AdmissionEpoch: 1, State: stateMember,
 	})
 	targetUUID := target.identity.NodeUUID
@@ -140,7 +140,7 @@ func TestRemovalFinalGuardPreservesReadmissionAfterSelection(t *testing.T) {
 	}
 	m.rosterMu.Lock()
 	if err := m.trust.Pin(&TrustedPin{
-		NodeUUID: target.identity.NodeUUID, NodeID: "target", ClusterID: "cluster-1",
+		NodeUUID: target.identity.NodeUUID, ClusterID: "cluster-1",
 		AdmissionEpoch: 2, CertPem: string(target.identity.CertPEM),
 		CertFingerprint: target.identity.CertFingerprint,
 	}); err != nil {
@@ -148,7 +148,7 @@ func TestRemovalFinalGuardPreservesReadmissionAfterSelection(t *testing.T) {
 		t.Fatal(err)
 	}
 	m.upsertMember(&ClusterNode{
-		NodeUUID: target.identity.NodeUUID, ID: "target", ClusterID: "cluster-1",
+		NodeUUID: target.identity.NodeUUID, ClusterID: "cluster-1",
 		AdmissionEpoch: 2, State: stateMember,
 	})
 	m.rosterMu.Unlock()
@@ -173,7 +173,7 @@ func TestRemovalFinalGuardPreservesReadmissionAfterSelection(t *testing.T) {
 	if !ok || pin.AdmissionEpoch != 2 {
 		t.Fatalf("newer target pin was removed: %+v", pin)
 	}
-	member, ok := m.memberByNodeID(target.identity.NodeUUID)
+	member, ok := m.memberByUUID(target.identity.NodeUUID)
 	if !ok || member.AdmissionEpoch != 2 {
 		t.Fatalf("newer target membership was removed: %+v", member)
 	}
@@ -185,30 +185,30 @@ func TestTrustAndMembershipSnapshotsAreDeepCopies(t *testing.T) {
 	pinTrusted(t, m, peer.identity.NodeUUID, string(peer.identity.CertPEM), peer.identity.CertFingerprint)
 	joined := time.Now().UnixMilli()
 	m.upsertMember(&ClusterNode{
-		NodeUUID: peer.identity.NodeUUID, ID: "peer", ClusterID: "cluster-1",
+		NodeUUID: peer.identity.NodeUUID, ClusterID: "cluster-1",
 		AdmissionEpoch: 1, State: stateMember, JoinedAt: &joined,
 	})
 
 	pin, _ := m.trust.Get(peer.identity.NodeUUID)
 	pin.AdmissionEpoch = 99
-	member, _ := m.memberByNodeID(peer.identity.NodeUUID)
+	member, _ := m.memberByUUID(peer.identity.NodeUUID)
 	member.AdmissionEpoch = 99
 	*member.JoinedAt = 0
 	pinAgain, _ := m.trust.Get(peer.identity.NodeUUID)
-	memberAgain, _ := m.memberByNodeID(peer.identity.NodeUUID)
+	memberAgain, _ := m.memberByUUID(peer.identity.NodeUUID)
 	if pinAgain.AdmissionEpoch != 1 || memberAgain.AdmissionEpoch != 1 || *memberAgain.JoinedAt != joined {
 		t.Fatal("snapshot mutation escaped into internal state")
 	}
 
 	to, code := "peer", "123456"
-	inv := &Invite{InviteID: "inv-copy", ToNodeID: &to, Pin: &code, State: inviteStatePending}
+	inv := &Invite{InviteID: "inv-copy", ToNodeUUID: &to, Pin: &code, State: inviteStatePending}
 	m.putInvite(inv)
 	*inv.Pin = "mutated"
 	got, _ := m.getInvite(inv.InviteID)
-	*got.ToNodeID = "changed"
+	*got.ToNodeUUID = "changed"
 	*got.Pin = "changed"
 	again, _ := m.getInvite(inv.InviteID)
-	if *again.ToNodeID != "peer" || *again.Pin != "123456" {
+	if *again.ToNodeUUID != "peer" || *again.Pin != "123456" {
 		t.Fatal("invite snapshot mutation escaped into internal state")
 	}
 
@@ -217,11 +217,11 @@ func TestTrustAndMembershipSnapshotsAreDeepCopies(t *testing.T) {
 		t.Fatal(err)
 	}
 	m.trust.dir = blocker
-	if _, err := m.trust.UpdateIdentity(peer.identity.NodeUUID, "new-id", "new-name"); err == nil {
+	if _, err := m.trust.UpdateIdentity(peer.identity.NodeUUID, "new-name"); err == nil {
 		t.Fatal("trust identity update unexpectedly persisted")
 	}
 	unchanged, _ := m.trust.Get(peer.identity.NodeUUID)
-	if unchanged.NodeID == "new-id" || unchanged.Name == "new-name" {
+	if unchanged.Name == "new-name" {
 		t.Fatal("failed trust write mutated live identity")
 	}
 	end := m.endorsePeer(peer.identity.NodeUUID, peer.identity.CertFingerprint, 1)
@@ -242,7 +242,7 @@ func TestRestartFinishesInterruptedTeardownAndRejectsStaleRestore(t *testing.T) 
 	peer := newTestManagerPort(t, 15136)
 	pinTrusted(t, m, peer.identity.NodeUUID, string(peer.identity.CertPEM), peer.identity.CertFingerprint)
 	m.upsertMember(&ClusterNode{
-		NodeUUID: peer.identity.NodeUUID, ID: "peer", ClusterID: "cluster-1",
+		NodeUUID: peer.identity.NodeUUID, ClusterID: "cluster-1",
 		AdmissionEpoch: 1, State: stateMember,
 	})
 	if err := m.persistMembersErr(); err != nil {
@@ -274,7 +274,7 @@ func TestRemovalReplayFailsClosedOnPersistenceError(t *testing.T) {
 	target := newTestManagerPort(t, 15139)
 	pinTrusted(t, m, target.identity.NodeUUID, string(target.identity.CertPEM), target.identity.CertFingerprint)
 	m.upsertMember(&ClusterNode{
-		NodeUUID: target.identity.NodeUUID, ID: "target", ClusterID: "cluster-1",
+		NodeUUID: target.identity.NodeUUID, ClusterID: "cluster-1",
 		AdmissionEpoch: 1, State: stateMember,
 	})
 	proof, err := m.newRemovalProof(target.identity.NodeUUID, 1)

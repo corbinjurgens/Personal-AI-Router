@@ -139,7 +139,8 @@ func newPhase04NodeInfoPeers(t *testing.T) (*task2Fixture, *atomic.Int64) {
 	}
 	task1Eventually(t, "pinned reverse session", 15*time.Second, func() bool { return f.a.observers[noderec.ServiceCluster].established(f.b.uuid) > 0 })
 	f.namespace = newFixtureMDNSNamespace(t)
-	responder, err := mdns.NewResponder("phase04-ni-"+filepath.Base(f.b.base), f.namespace.Service, f.namespace.Domain, noderec.SRVPort, []string{"v=1", "uuid=" + phase04NodeInfoHost, "cluster-uuid=" + f.b.uuid, "ip=127.0.0.1", fmt.Sprintf("ni=%d", f.blockedPort)})
+	label := "phase04-ni-" + filepath.Base(f.b.base)
+	responder, err := mdns.NewResponder(label, label, f.namespace.Service, f.namespace.Domain, noderec.SRVPort, []string{"v=1", "uuid=" + phase04NodeInfoHost, "cluster-uuid=" + f.b.uuid, "ip=127.0.0.1", fmt.Sprintf("ni=%d", f.blockedPort)})
 	if err != nil {
 		t.Fatal(err)
 	}

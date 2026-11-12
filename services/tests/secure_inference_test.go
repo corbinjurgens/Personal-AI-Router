@@ -312,7 +312,7 @@ func TestSecureInferenceClusterMTLS(t *testing.T) {
 	// A founds a cluster and pairs with B (mutual pins land on disk). C founds
 	// its own cluster and never pairs with A or B — it is a foreign node.
 	cmA.call("cluster:create", map[string]any{"clusterFriendlyName": "Secure Lab"})
-	pairNodes(t, cmA, cmB, cmBPort, "node-b")
+	pairNodes(t, cmA, cmB, cmBPort)
 	cmC.call("cluster:create", map[string]any{"clusterFriendlyName": "Foreign Lab"})
 
 	// Each node's engine is a loopback httptest server. Only B needs a working

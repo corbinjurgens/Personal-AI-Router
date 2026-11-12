@@ -26,7 +26,7 @@ func pinMemberFixture(t *testing.T, m *Manager, host string) pinFixture {
 	t.Helper()
 	f := newPinFixture(t, host)
 	pinTrusted(t, m, f.uuid, f.cert, f.fp)
-	m.upsertMember(&ClusterNode{NodeUUID: f.uuid, ID: host, ClusterID: "cluster-1", State: stateMember})
+	m.upsertMember(&ClusterNode{NodeUUID: f.uuid, ClusterID: "cluster-1", State: stateMember})
 	return f
 }
 
@@ -79,10 +79,10 @@ func TestSelfRemoveTeardownSerializesRejoin(t *testing.T) {
 				m.withClusterComposition(func() {
 					m.setClusterIdentity("cluster-2", "Rejoined")
 					_ = m.trust.Pin(&TrustedPin{
-						NodeUUID: p2.uuid, NodeID: "peer-2", ClusterID: "cluster-2",
+						NodeUUID: p2.uuid, ClusterID: "cluster-2",
 						CertPem: p2.cert, CertFingerprint: p2.fp, PinnedAt: time.Now().UnixMilli(),
 					})
-					m.upsertMember(&ClusterNode{NodeUUID: p2.uuid, ID: "peer-2", ClusterID: "cluster-2", State: stateMember})
+					m.upsertMember(&ClusterNode{NodeUUID: p2.uuid, ClusterID: "cluster-2", State: stateMember})
 					m.addSelfMember()
 				})
 			},

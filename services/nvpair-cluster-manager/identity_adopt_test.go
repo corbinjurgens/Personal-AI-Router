@@ -30,7 +30,7 @@ func TestFirstMintAdoptsExistingNodeUUID(t *testing.T) {
 	if err := os.MkdirAll(clusterDir, 0o700); err != nil {
 		t.Fatalf("mkdir cluster dir: %v", err)
 	}
-	id, err := loadOrMintIdentity(clusterDir)
+	id, _, err := loadOrMintIdentity(clusterDir)
 	if err != nil {
 		t.Fatalf("loadOrMintIdentity: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestFirstMintWhenClusterManagerIsFirst(t *testing.T) {
 	if err := os.MkdirAll(clusterDir, 0o700); err != nil {
 		t.Fatalf("mkdir cluster dir: %v", err)
 	}
-	id, err := loadOrMintIdentity(clusterDir)
+	id, _, err := loadOrMintIdentity(clusterDir)
 	if err != nil {
 		t.Fatalf("loadOrMintIdentity: %v", err)
 	}

@@ -354,8 +354,9 @@ class ModularBridgeState {
     }
 
     /**
-     * The display hostname for a node key (UUID), or '' when unknown. Manual-only
-     * projections display the worker's entry ID; scanner projections display the hostname.
+     * The shown name for a node key (UUID), or '' when unknown. Manual-only
+     * projections show the worker's entry ID; scanner projections show the name
+     * the broker decided.
      */
     getNodeHostname(nodeId: string): string {
         return this.nodes.get(nodeId)?.name ?? ''
@@ -520,7 +521,7 @@ class ModularBridgeState {
             const addresses = nodeAddresses(node)
             return {
                 id: node.id,
-                // Display label: hostname, else reachable address; never the raw UUID.
+                // Display label: shown name, else reachable address; never the raw UUID.
                 name: node.name || primaryNodeAddress(node) || node.id,
                 ipAddress: primaryNodeAddress(node),
                 // Only for a genuinely multi-homed node: a one-entry list would just
@@ -2544,8 +2545,8 @@ class ModularBridgeState {
             return {
                 ...next,
                 sources: mergeSources(existing.sources, 'broker'),
-                // Broker discovery is authoritative for the display hostname and
-                // trust/cluster flags; keep the prior hostname only if a snapshot
+                // Broker discovery is authoritative for the display name and
+                // trust/cluster flags; keep the prior name only if a snapshot
                 // ever lacks one.
                 name: next.name || existing.name,
                 // The snapshot is the broker's whole list, so it replaces the
@@ -2574,7 +2575,7 @@ class ModularBridgeState {
         return {
             ...next,
             sources: mergeSources(existing.sources, source),
-            // The proxy feed carries no hostname/trust/cluster facts; keep the
+            // The proxy feed carries no name/trust/cluster facts; keep the
             // broker-reported values rather than overwriting them with the proxy
             // node's empty name and default-false flags.
             name: existing.name || next.name,

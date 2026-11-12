@@ -17,12 +17,12 @@ import (
 func TestSetMemberAddr(t *testing.T) {
 	m := newTestManager(t)
 	uuid := "11111111-1111-1111-1111-111111111111"
-	m.upsertMember(&ClusterNode{NodeUUID: uuid, ID: "n", IPAddress: "10.0.0.1", Port: 14321, State: stateMember})
+	m.upsertMember(&ClusterNode{NodeUUID: uuid, IPAddress: "10.0.0.1", Port: 14321, State: stateMember})
 
 	if !m.setMemberAddr(uuid, "192.168.1.50", 0) {
 		t.Fatal("expected a change for a new host")
 	}
-	if n, _ := m.memberByNodeID(uuid); n.IPAddress != "192.168.1.50" || n.Port != 14321 {
+	if n, _ := m.memberByUUID(uuid); n.IPAddress != "192.168.1.50" || n.Port != 14321 {
 		t.Fatalf("host-only update wrong: got %s:%d want 192.168.1.50:14321", n.IPAddress, n.Port)
 	}
 	if m.setMemberAddr(uuid, "192.168.1.50", 0) {
@@ -31,7 +31,7 @@ func TestSetMemberAddr(t *testing.T) {
 	if !m.setMemberAddr(uuid, "192.168.1.50", 14999) {
 		t.Fatal("expected a change for a new port")
 	}
-	if n, _ := m.memberByNodeID(uuid); n.Port != 14999 {
+	if n, _ := m.memberByUUID(uuid); n.Port != 14999 {
 		t.Fatalf("explicit port not applied: got %d want 14999", n.Port)
 	}
 	if m.setMemberAddr("does-not-exist", "1.2.3.4", 0) {
@@ -64,12 +64,12 @@ func TestHandleRosterLearnsSourceAddr(t *testing.T) {
 	pinTrusted(t, mB, mA.identity.NodeUUID, string(mA.identity.CertPEM), mA.identity.CertFingerprint)
 
 	// mA's record for mB points at a stale IP; mB still reaches mA fine.
-	mA.upsertMember(&ClusterNode{NodeUUID: mB.identity.NodeUUID, ID: "node-b", IPAddress: "10.9.9.9", Port: 15022, ClusterID: "cluster-1", AdmissionEpoch: 1, State: stateMember})
-	mB.upsertMember(&ClusterNode{NodeUUID: mA.identity.NodeUUID, ID: "node-a", IPAddress: "127.0.0.1", Port: 15021, ClusterID: "cluster-1", AdmissionEpoch: 1, State: stateMember})
+	mA.upsertMember(&ClusterNode{NodeUUID: mB.identity.NodeUUID, IPAddress: "10.9.9.9", Port: 15022, ClusterID: "cluster-1", AdmissionEpoch: 1, State: stateMember})
+	mB.upsertMember(&ClusterNode{NodeUUID: mA.identity.NodeUUID, IPAddress: "127.0.0.1", Port: 15021, ClusterID: "cluster-1", AdmissionEpoch: 1, State: stateMember})
 
 	mB.reconcileWith([]string{net.JoinHostPort("127.0.0.1", strconv.Itoa(15021))}, mA.identity.NodeUUID)
 
-	n, ok := mA.memberByNodeID(mB.identity.NodeUUID)
+	n, ok := mA.memberByUUID(mB.identity.NodeUUID)
 	if !ok {
 		t.Fatal("mA lost mB membership")
 	}
@@ -87,18 +87,18 @@ func TestHandleRosterLearnsSourceAddr(t *testing.T) {
 func TestRefreshMemberAddrsFromMDNS(t *testing.T) {
 	m := newTestManager(t)
 	peer := "22222222-2222-2222-2222-222222222222"
-	m.upsertMember(&ClusterNode{NodeUUID: peer, ID: "peer", IPAddress: "10.9.9.9", Port: 14321, State: stateMember})
+	m.upsertMember(&ClusterNode{NodeUUID: peer, IPAddress: "10.9.9.9", Port: 14321, State: stateMember})
 
 	// No browser configured yet: must not panic and must change nothing.
 	m.refreshMemberAddrsFromMDNS()
-	if n, _ := m.memberByNodeID(peer); n.IPAddress != "10.9.9.9" {
+	if n, _ := m.memberByUUID(peer); n.IPAddress != "10.9.9.9" {
 		t.Fatalf("addr changed without a browser: got %q", n.IPAddress)
 	}
 
 	m.browser = newBrowser()
 	m.browser.seed(peer, "192.168.1.77", 14321)
 	m.refreshMemberAddrsFromMDNS()
-	if n, _ := m.memberByNodeID(peer); n.IPAddress != "192.168.1.77" {
+	if n, _ := m.memberByUUID(peer); n.IPAddress != "192.168.1.77" {
 		t.Fatalf("mDNS refresh did not update stored addr: got %q want 192.168.1.77", n.IPAddress)
 	}
 
@@ -106,7 +106,7 @@ func TestRefreshMemberAddrsFromMDNS(t *testing.T) {
 	m.addSelfMember()
 	m.browser.seed(m.identity.NodeUUID, "5.5.5.5", 14321)
 	m.refreshMemberAddrsFromMDNS()
-	if self, _ := m.memberByNodeID(m.identity.NodeUUID); self.IPAddress != "127.0.0.1" {
+	if self, _ := m.memberByUUID(m.identity.NodeUUID); self.IPAddress != "127.0.0.1" {
 		t.Fatalf("self address must not be rewritten from mDNS: got %q", self.IPAddress)
 	}
 }

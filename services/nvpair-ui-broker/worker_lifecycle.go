@@ -56,6 +56,9 @@ func (b *Broker) spawnScanner() (supervisedHandle, error) {
 	for _, p := range b.regCache.Snapshot() {
 		go sp.pushRegister(p)
 	}
+	// Replay this node's name too; until the cluster manager reports one there
+	// is nothing to send, and convergeScannerIdentity sends it then.
+	go b.pushSelfName()
 	slog.Info("scanner started", "path", b.scannerPath, "pid", sp.cmd.Process.Pid)
 	return sp, nil
 }
@@ -644,6 +647,8 @@ func (b *Broker) spawnClusterManager() (supervisedHandle, error) {
 	// scanner spawns first and mints its own node-id before cluster-manager
 	// writes identity.json, so on a fresh host its uuid= can start out diverged.
 	go b.convergeScannerIdentity()
+	// Seed member display names for the discovery projection.
+	go b.refreshMemberNames()
 	slog.Info("cluster-manager started", "path", b.clusterMgrPath, "pid", cm.cmd.Process.Pid)
 	return cm, nil
 }

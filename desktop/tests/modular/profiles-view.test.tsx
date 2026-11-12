@@ -205,9 +205,9 @@ beforeEach(() => {
         remoteManagementContext: 1,
         members: [
             {
-                id: 'peer-host',
                 nodeUuid: 'peer',
                 name: 'Joes',
+                displayName: 'Joes',
                 ipAddress: '',
                 port: 1,
                 clusterId: 'test',

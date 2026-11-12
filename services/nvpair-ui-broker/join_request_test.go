@@ -112,7 +112,7 @@ func TestJoinRequestRelayPreservesMethodsAndPayloads(t *testing.T) {
 		})
 	}
 	test("snapshot", "cluster:get-join-requests", `{}`, joinRequestRelaySnapshot)
-	test("ask with explicit solo consent", "cluster:ask-to-join", `{"address":"192.168.42.8","port":14321,"nodeId":"selected-member","replaceSoloCluster":true}`, joinRequestRelayRecord)
+	test("ask with explicit solo consent", "cluster:ask-to-join", `{"address":"192.168.42.8","port":14321,"nodeUuid":"selected-member","replaceSoloCluster":true}`, joinRequestRelayRecord)
 	test("ask without solo replacement", "cluster:ask-to-join", `{"address":"member.example","replaceSoloCluster":false}`, joinRequestRelayRecord)
 	test("approve with local grant", "cluster:respond-to-join-request", `{"requestId":"0123456789abcdef0123456789abcdef","accept":true,"allowRemoteManagement":true}`, joinRequestRelayRecord)
 	test("approve without local grant", "cluster:respond-to-join-request", `{"requestId":"0123456789abcdef0123456789abcdef","accept":true,"allowRemoteManagement":false}`, joinRequestRelayRecord)

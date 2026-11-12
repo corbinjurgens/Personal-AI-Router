@@ -130,7 +130,12 @@ func (d *daemon) acceptPeerServices(claim noderec.PeerServicesClaim) bool {
 	// has a fresh source; the broker rejects notifications from replaced children.
 	order.sequences[claim.Source] = claim.Sequence
 	d.peerServicesOrder[hostUUID] = order
-	node := noderec.DirectoryNode{HostUUID: hostUUID, Name: claim.Descriptor.Name, IP: claim.Descriptor.Addresses[0], IPs: slices.Clone(claim.Descriptor.Addresses), ClusterUUID: hostUUID, Trusted: d.mesh.HasPin(hostUUID), Services: make(map[noderec.ServiceKey]noderec.ServiceStatus)}
+	// The descriptor carries no name; the row keeps the mDNS name= observed for
+	// this UUID, or none.
+	d.dir.mu.RLock()
+	browsedName := d.dir.browse[hostUUID].Name
+	d.dir.mu.RUnlock()
+	node := noderec.DirectoryNode{HostUUID: hostUUID, Name: browsedName, IP: claim.Descriptor.Addresses[0], IPs: slices.Clone(claim.Descriptor.Addresses), ClusterUUID: hostUUID, Trusted: d.mesh.HasPin(hostUUID), Services: make(map[noderec.ServiceKey]noderec.ServiceStatus)}
 	for _, service := range claim.Descriptor.Services {
 		node.Services[service.Service] = noderec.ServiceStatus{Port: service.Port}
 	}

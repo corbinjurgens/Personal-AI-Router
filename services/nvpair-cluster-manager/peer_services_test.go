@@ -154,7 +154,7 @@ type peerWalkFixture struct {
 func newPeerWalkFixture(t *testing.T) *peerWalkFixture {
 	t.Helper()
 	f := &peerWalkFixture{a: newReverseTestManager(t), b: newReverseTestManager(t), guard: newPeerDialGuard(t)}
-	f.descriptor = noderec.PeerServicesDescriptor{HostUUID: f.b.identity.NodeUUID, Name: "walk-peer", Addresses: []string{"192.0.2.55", "100.90.0.8"}, Services: []noderec.PeerService{{Service: noderec.ServiceNodeInfo, Port: 23456}}}
+	f.descriptor = noderec.PeerServicesDescriptor{HostUUID: f.b.identity.NodeUUID, Addresses: []string{"192.0.2.55", "100.90.0.8"}, Services: []noderec.PeerService{{Service: noderec.ServiceNodeInfo, Port: 23456}}}
 	if err := noderec.ValidatePeerServicesDescriptor(f.descriptor, f.b.identity.NodeUUID); err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +215,7 @@ func (f *peerWalkFixture) addTail(t *testing.T) {
 
 func assertWalkUnchanged(t *testing.T, f *peerWalkFixture) {
 	t.Helper()
-	member, ok := f.a.memberByNodeID(f.b.identity.NodeUUID)
+	member, ok := f.a.memberByUUID(f.b.identity.NodeUUID)
 	disk := storedHintMember(t, f.a, f.b.identity.NodeUUID)
 	pin, pinned := f.a.trust.Get(f.b.identity.NodeUUID)
 	if !ok || !pinned || member.State != stateMember || member.AdmissionEpoch != 1 || len(member.AdvertisedAddresses) != 0 || len(disk.AdvertisedAddresses) != 0 || pin.AdmissionEpoch != 1 || pin.CertFingerprint != f.b.identity.CertFingerprint {
@@ -269,7 +269,7 @@ func TestPeerServicesLearnPersistReopenTailnet(t *testing.T) {
 		t.Fatalf("reopen admission %s/%d", cid, epoch)
 	}
 	pin, pinned := reopened.trust.Get(f.b.identity.NodeUUID)
-	member, exists := reopened.memberByNodeID(f.b.identity.NodeUUID)
+	member, exists := reopened.memberByUUID(f.b.identity.NodeUUID)
 	if !pinned || pin.CertFingerprint != f.b.identity.CertFingerprint || pin.AdmissionEpoch != 1 || !exists || !slices.Equal(member.AdvertisedAddresses, f.descriptor.Addresses) {
 		t.Fatal("reopen lost learned hints or original pin/member")
 	}
@@ -566,24 +566,6 @@ func newPeerHintFixture(t *testing.T) *peerHintFixture {
 	containHintDials(t, f.remote, false)
 	f.remote.port = 25421 // Data only: these managers never start listeners.
 	pairReverseManagers(t, f.m, f.remote)
-	// Both private managers have the same real hostname. Give their member
-	// records distinct display IDs before persisting or capturing authority.
-	for _, manager := range []*Manager{f.m, f.remote} {
-		for _, display := range []struct {
-			uuid string
-			id   string
-		}{
-			{f.m.identity.NodeUUID, "hint-origin"},
-			{f.remote.identity.NodeUUID, "hint-peer"},
-		} {
-			member, ok := manager.memberByNodeID(display.uuid)
-			if !ok {
-				t.Fatalf("private hint fixture lacks member %s", display.id)
-			}
-			member.ID = display.id
-			manager.upsertMember(member)
-		}
-	}
 	f.m.setMemberAddr(f.remote.identity.NodeUUID, "192.0.2.55", f.remote.port)
 	persistPeerServicesMembers(t, f.m, f.remote)
 	f.m.mesh.Refresh()
@@ -597,7 +579,7 @@ func newPeerHintFixture(t *testing.T) *peerHintFixture {
 		t.Fatal("private hint fixture lacks current peer")
 	}
 	f.descriptor = noderec.PeerServicesDescriptor{
-		HostUUID: f.remote.identity.NodeUUID, Name: "hint-peer",
+		HostUUID: f.remote.identity.NodeUUID,
 		Addresses: []string{"192.0.2.55", "100.90.0.8"}, Services: []noderec.PeerService{},
 	}
 	if err := noderec.ValidatePeerServicesDescriptor(f.descriptor, f.peer.UUID); err != nil {
@@ -637,7 +619,7 @@ func storedHintMember(t *testing.T, m *Manager, uuid string) ClusterNode {
 
 func assertPeerHints(t *testing.T, f *peerHintFixture, want []string) {
 	t.Helper()
-	member, ok := f.m.memberByNodeID(f.peer.UUID)
+	member, ok := f.m.memberByUUID(f.peer.UUID)
 	if !ok || !slices.Equal(member.AdvertisedAddresses, want) {
 		t.Fatalf("memory hints = %+v, want %v", member, want)
 	}
@@ -679,7 +661,7 @@ func reopenPeerHints(t *testing.T, f *peerHintFixture, want []string) {
 	})
 	t.Cleanup(reopened.peerServices.CloseIdle)
 	t.Cleanup(reopened.removalPeerServices.CloseIdle)
-	member, ok := reopened.memberByNodeID(f.peer.UUID)
+	member, ok := reopened.memberByUUID(f.peer.UUID)
 	if !ok || !slices.Equal(member.AdvertisedAddresses, want) {
 		t.Fatalf("original-base reopen hints = %+v, want %v", member, want)
 	}
@@ -691,31 +673,13 @@ func reopenPeerHints(t *testing.T, f *peerHintFixture, want []string) {
 	}
 }
 
-func TestPeerHintFixtureUsesDistinctDisplayIDs(t *testing.T) {
-	f := newPeerHintFixture(t)
-	test := func(name string, manager *Manager) {
-		t.Run(name, func(t *testing.T) {
-			origin := storedHintMember(t, manager, f.m.identity.NodeUUID)
-			if origin.ID != "hint-origin" {
-				t.Fatalf("persisted origin %s display ID = %q, want hint-origin", origin.NodeUUID, origin.ID)
-			}
-			peer := storedHintMember(t, manager, f.remote.identity.NodeUUID)
-			if peer.ID != "hint-peer" {
-				t.Fatalf("persisted peer %s display ID = %q, want hint-peer", peer.NodeUUID, peer.ID)
-			}
-		})
-	}
-	test("origin manager", f.m)
-	test("remote manager", f.remote)
-}
-
 func TestMemberAdvertisedAddressesDeepCopy(t *testing.T) {
 	f := newPeerHintFixture(t)
-	member, _ := f.m.memberByNodeID(f.peer.UUID)
+	member, _ := f.m.memberByUUID(f.peer.UUID)
 	member.AdvertisedAddresses = []string{"100.90.0.8"}
 	f.m.upsertMember(member)
 	member.AdvertisedAddresses[0] = "input mutation"
-	lookup, _ := f.m.memberByNodeID(f.peer.UUID)
+	lookup, _ := f.m.memberByUUID(f.peer.UUID)
 	lookup.AdvertisedAddresses[0] = "lookup mutation"
 	for _, snapshot := range f.m.snapshotNodes() {
 		if snapshot.NodeUUID == f.peer.UUID {
@@ -733,7 +697,7 @@ func TestMemberAdvertisedAddressesCompatibility(t *testing.T) {
 	assertPeerHints(t, f, nil)
 	reopenPeerHints(t, f, nil)
 	for _, addresses := range [][]string{nil, {}} {
-		member, _ := f.m.memberByNodeID(f.peer.UUID)
+		member, _ := f.m.memberByUUID(f.peer.UUID)
 		member.AdvertisedAddresses = addresses
 		data, err := json.Marshal(member)
 		if err != nil {
@@ -807,7 +771,7 @@ func TestPeerServicesHintCommitBindsAdmission(t *testing.T) {
 				if !slices.Equal(after.AdvertisedAddresses, before.AdvertisedAddresses) || after.AdmissionEpoch != before.AdmissionEpoch {
 					t.Fatalf("stale response changed replacement disk state: before=%+v after=%+v", before, after)
 				}
-				member, _ := f.m.memberByNodeID(f.peer.UUID)
+				member, _ := f.m.memberByUUID(f.peer.UUID)
 				if !slices.Equal(member.AdvertisedAddresses, before.AdvertisedAddresses) {
 					t.Fatal("stale response changed replacement memory hints")
 				}
@@ -818,7 +782,7 @@ func TestPeerServicesHintCommitBindsAdmission(t *testing.T) {
 	test("current admission", func(*testing.T, *peerHintFixture) {}, true)
 	test("same certificate newer peer admission", func(t *testing.T, f *peerHintFixture) {
 		readmitClusterPeer(t, f.m, f.remote)
-		member, _ := f.m.memberByNodeID(f.peer.UUID)
+		member, _ := f.m.memberByUUID(f.peer.UUID)
 		member.AdvertisedAddresses = []string{"100.90.0.9"}
 		f.m.upsertMember(member)
 		if err := f.m.persistMembersErr(); err != nil {
@@ -832,14 +796,14 @@ func TestPeerServicesHintCommitBindsAdmission(t *testing.T) {
 		activateTestCluster(t, f.m, "cluster-1")
 		f.m.addSelfMember()
 		pinTrusted(t, f.m, f.peer.UUID, string(f.remote.identity.CertPEM), f.remote.identity.CertFingerprint)
-		f.m.upsertMember(&ClusterNode{NodeUUID: f.peer.UUID, ID: "replacement", ClusterID: "cluster-1", AdmissionEpoch: 1, State: stateMember, AdvertisedAddresses: []string{"100.90.0.9"}})
+		f.m.upsertMember(&ClusterNode{NodeUUID: f.peer.UUID, ClusterID: "cluster-1", AdmissionEpoch: 1, State: stateMember, AdvertisedAddresses: []string{"100.90.0.9"}})
 		if err := f.m.persistMembersErr(); err != nil {
 			t.Fatal(err)
 		}
 	}, false)
 	test("revoked pin", func(t *testing.T, f *peerHintFixture) { f.m.trust.Forget(f.peer.UUID) }, false)
 	test("pending member", func(t *testing.T, f *peerHintFixture) {
-		member, _ := f.m.memberByNodeID(f.peer.UUID)
+		member, _ := f.m.memberByUUID(f.peer.UUID)
 		member.State = statePendingOutbound
 		f.m.upsertMember(member)
 	}, false)
@@ -878,7 +842,7 @@ func TestPeerServicesHintPersistenceFailure(t *testing.T) {
 	if err := a.refreshPeerServices(context.Background(), b.identity.NodeUUID); !errors.Is(err, failure) {
 		t.Fatalf("fetch persistence error = %v, want injected failure", err)
 	}
-	member, _ := a.memberByNodeID(b.identity.NodeUUID)
+	member, _ := a.memberByUUID(b.identity.NodeUUID)
 	if len(member.AdvertisedAddresses) != 0 || len(storedHintMember(t, a, b.identity.NodeUUID).AdvertisedAddresses) != 0 {
 		t.Fatal("failed fetch retained speculative hints")
 	}
@@ -895,10 +859,10 @@ func TestPeerServicesHintsClearedWithMembership(t *testing.T) {
 			clear(t, f)
 			activateTestCluster(t, f.m, "cluster-1")
 			f.m.addSelfMember()
-			if err := f.m.trust.Pin(&TrustedPin{NodeUUID: f.peer.UUID, NodeID: f.remote.identity.NodeID, ClusterID: "cluster-1", AdmissionEpoch: 2, CertPem: string(f.remote.identity.CertPEM), CertFingerprint: f.remote.identity.CertFingerprint}); err != nil {
+			if err := f.m.trust.Pin(&TrustedPin{NodeUUID: f.peer.UUID, ClusterID: "cluster-1", AdmissionEpoch: 2, CertPem: string(f.remote.identity.CertPEM), CertFingerprint: f.remote.identity.CertFingerprint}); err != nil {
 				t.Fatal(err)
 			}
-			f.m.upsertMember(&ClusterNode{NodeUUID: f.peer.UUID, ID: "new-admission", ClusterID: "cluster-1", AdmissionEpoch: 2, State: stateMember})
+			f.m.upsertMember(&ClusterNode{NodeUUID: f.peer.UUID, ClusterID: "cluster-1", AdmissionEpoch: 2, State: stateMember})
 			if err := f.m.persistMembersErr(); err != nil {
 				t.Fatal(err)
 			}
@@ -917,7 +881,7 @@ func TestPeerServicesHintsClearedWithMembership(t *testing.T) {
 			})
 			t.Cleanup(reopened.peerServices.CloseIdle)
 			t.Cleanup(reopened.removalPeerServices.CloseIdle)
-			node, ok := reopened.memberByNodeID(f.peer.UUID)
+			node, ok := reopened.memberByUUID(f.peer.UUID)
 			if !ok || len(node.AdvertisedAddresses) != 0 {
 				t.Fatalf("reopen leaked deleted hints: %+v", node)
 			}
@@ -947,7 +911,7 @@ func TestDescriptorAddresses(t *testing.T) {
 				t.Fatalf("assembly mutated inputs: scanner=%v overlay=%v", scanner, overlay)
 			}
 			descriptor := noderec.PeerServicesDescriptor{
-				HostUUID: "descriptor-test", Name: "descriptor", Addresses: got,
+				HostUUID: "descriptor-test", Addresses: got,
 				Services: []noderec.PeerService{},
 			}
 			err := noderec.ValidatePeerServicesDescriptor(descriptor, descriptor.HostUUID)
@@ -1166,7 +1130,7 @@ func TestPeerServicesFetchBindsOriginalAdmission(t *testing.T) {
 				}
 				b.addSelfMember()
 				persistPeerServicesMembers(t, b)
-				node := &ClusterNode{NodeUUID: b.identity.NodeUUID, ID: b.identity.NodeID, IPAddress: "127.0.0.1", Port: b.port, ClusterID: "cluster-1", AdmissionEpoch: 2, State: stateMember}
+				node := &ClusterNode{NodeUUID: b.identity.NodeUUID, IPAddress: "127.0.0.1", Port: b.port, ClusterID: "cluster-1", AdmissionEpoch: 2, State: stateMember}
 				a.upsertMember(node)
 				pin, ok := a.trust.Get(b.identity.NodeUUID)
 				if !ok {
@@ -1273,7 +1237,7 @@ func TestPeerServicesBlockedDirectUsesRealReverse(t *testing.T) {
 	if reverse.Load() != 1 || claim.Descriptor.Addresses[0] != "192.168.42.8" || len(claim.Descriptor.Services) != 2 {
 		t.Fatalf("reverse calls=%d descriptor=%+v", reverse.Load(), claim.Descriptor)
 	}
-	member, ok := b.m.memberByNodeID(a.m.identity.NodeUUID)
+	member, ok := b.m.memberByUUID(a.m.identity.NodeUUID)
 	if !ok || member.IPAddress != "localhost" || member.Port != a.m.port {
 		t.Fatalf("reverse gateway poisoned member locator: %+v", member)
 	}
@@ -1297,7 +1261,7 @@ func TestPeerServicesUnavailableRoutePreservesMembership(t *testing.T) {
 	if !ok || after != before {
 		t.Fatal("route failure altered durable admission/pin")
 	}
-	member, ok := a.m.memberByNodeID(b.m.identity.NodeUUID)
+	member, ok := a.m.memberByUUID(b.m.identity.NodeUUID)
 	if !ok || member.State != stateMember {
 		t.Fatalf("route failure altered membership: %+v", member)
 	}

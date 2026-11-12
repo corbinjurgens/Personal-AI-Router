@@ -622,7 +622,7 @@ func (d *nodeDetail) modelsCmd() tea.Cmd {
 				return detailModelsMsg{err: errors.New("invalid discovery inventory"), generation: visit}
 			}
 			for _, n := range result.Nodes {
-				if n.HostUUID == node || n.ID == node {
+				if n.HostUUID == node {
 					return detailModelsMsg{models: n.modelSnapshot(), generation: visit}
 				}
 			}

@@ -71,7 +71,7 @@ func TestSelfRemoveGuardStaleVerdict(t *testing.T) {
 				// A re-pair back into the same cluster keeps clusterId but bumps
 				// the generation (fresh pin + member record) — precisely the case
 				// a clusterId-only revalidation would miss.
-				m.upsertMember(&ClusterNode{NodeUUID: "rejoined-peer", ID: "rejoined-peer", State: stateMember})
+				m.upsertMember(&ClusterNode{NodeUUID: "rejoined-peer", State: stateMember})
 			},
 			wantCluster: "cluster-1",
 		},
@@ -115,7 +115,6 @@ func TestSelfRemoveGuardStaleVerdict(t *testing.T) {
 
 			mA.upsertMember(&ClusterNode{
 				NodeUUID:       peer.identity.NodeUUID,
-				ID:             "peer",
 				IPAddress:      "127.0.0.1",
 				Port:           ln.Addr().(*net.TCPAddr).Port,
 				ClusterID:      "cluster-1",
@@ -195,7 +194,6 @@ func startPeerStub(t *testing.T, m *Manager, id string, status int, proof bool) 
 
 	m.upsertMember(&ClusterNode{
 		NodeUUID:       peer.identity.NodeUUID,
-		ID:             id,
 		IPAddress:      "127.0.0.1",
 		Port:           ln.Addr().(*net.TCPAddr).Port,
 		ClusterID:      "cluster-1",

@@ -14,7 +14,7 @@ import (
 
 func TestIdentityMintAndReload(t *testing.T) {
 	dir := t.TempDir()
-	first, err := loadOrMintIdentity(dir)
+	first, _, err := loadOrMintIdentity(dir)
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
@@ -22,7 +22,7 @@ func TestIdentityMintAndReload(t *testing.T) {
 		t.Fatal("expected a non-empty UUID and fingerprint")
 	}
 
-	second, err := loadOrMintIdentity(dir)
+	second, _, err := loadOrMintIdentity(dir)
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
@@ -36,13 +36,13 @@ func TestIdentityMintAndReload(t *testing.T) {
 
 func TestIdentityLostKeyFailsLoud(t *testing.T) {
 	dir := t.TempDir()
-	if _, err := loadOrMintIdentity(dir); err != nil {
+	if _, _, err := loadOrMintIdentity(dir); err != nil {
 		t.Fatalf("mint: %v", err)
 	}
 	if err := os.Remove(filepath.Join(dir, "node.key")); err != nil {
 		t.Fatalf("remove key: %v", err)
 	}
-	if _, err := loadOrMintIdentity(dir); err == nil {
+	if _, _, err := loadOrMintIdentity(dir); err == nil {
 		t.Fatal("expected a loud failure when identity.json exists but the key is gone")
 	}
 }
@@ -54,14 +54,13 @@ func makePin(t *testing.T) *TrustedPin {
 	if err != nil {
 		t.Fatalf("uuid: %v", err)
 	}
-	certPEM, _, err := generateLeaf(uuid, "peer-host")
+	certPEM, _, err := generateLeaf(uuid)
 	if err != nil {
 		t.Fatalf("leaf: %v", err)
 	}
 	fp, _ := certFingerprintFromPEM(certPEM)
 	return &TrustedPin{
 		NodeUUID:        uuid,
-		NodeID:          "peer-host",
 		Name:            "peer-host",
 		ClusterID:       "cluster-1",
 		CertPem:         string(certPEM),

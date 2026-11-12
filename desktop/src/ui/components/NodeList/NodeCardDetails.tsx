@@ -3,7 +3,7 @@
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button, Flex, Stack, Text } from '@nvidia/foundations-react-core'
-import { BarChartOutlined, SettingsOutlined } from '@/ui/components/icons'
+import { BarChartOutlined, EditOutlined, SettingsOutlined } from '@/ui/components/icons'
 import { DismissibleTooltip } from '@/ui/components/DismissibleTooltip/DismissibleTooltip'
 import type { NodeItem } from '@/shared/types/nodes'
 import { useMetricsStore } from '@/ui/stores/metrics.store'
@@ -16,7 +16,7 @@ import NodeLabel from './NodeLabel'
 import NodeActive from '@/ui/components/NodeActive/NodeActive'
 import { hasFirstMetrics } from '@/ui/utils/has-first-metrics'
 import type { CpuFallbackInfo, GpuInfo } from '@/ui/types/node-hardware'
-import { formatBytes } from '@/ui/utils/formatters'
+import { formatBytes, formatServiceBuildShort } from '@/ui/utils/formatters'
 import { CHART_COLORS } from '@/ui/constants/colors'
 import NodePerformance from './NodePerformance'
 import NodeChartLegend from './NodeChartLegend'
@@ -25,18 +25,29 @@ import { hasInferenceReadyGpu, isGpuInferenceReady } from '@/ui/utils/gpu-infere
 import NodeEnginesInline from './NodeEnginesInline'
 import NodeDeclaredRoles from './NodeDeclaredRoles'
 import NodeAvailabilityControls from './NodeAvailabilityControls'
+import { NodeNameModal, type NodeNameTarget } from '@/ui/components/NodeName/NodeNameModal'
+import { useClusterInvitationsStore } from '@/ui/stores/cluster-invitations.store'
 
 const MAX_CHART_SIZE = 60
 
 interface NodeCardDetailsProps {
     node: NodeItem
+    /** Hardware label telling this node apart from others with the same name. */
+    distinguishingLabel?: string
 }
 
-function NodeCardDetails({ node }: NodeCardDetailsProps) {
+function NodeCardDetails({ node, distinguishingLabel }: NodeCardDetailsProps) {
     const nodeMetrics = useMetricsStore(state => state.nodeMetrics.get(node.id))
     const isLocal = useConnectionStore(state => state.selfId === node.id)
     const [isExpanded, setIsExpanded] = useState(false)
     const focusNodeSettings = useOverviewUiStore(state => state.focusNodeSettings)
+    const selfName = useClusterInvitationsStore(state => state.selfName)
+    const selfCustomName = useClusterInvitationsStore(state => state.selfCustomName)
+    const member = useClusterInvitationsStore(state =>
+        state.members.find(value => value.nodeUuid === node.id && value.state === 'member')
+    )
+    const [renaming, setRenaming] = useState(false)
+    const closeRename = useCallback(() => setRenaming(false), [])
     // "Has a GPU" means "has an inference-ready GPU" per the backend readiness
     // list (or any GPU when the backend sends no list); see gpu-inference.ts.
     // A node with none renders the CPU + RAM fallback instead of a GPU ring.
@@ -162,6 +173,18 @@ function NodeCardDetails({ node }: NodeCardDetailsProps) {
         }
     }, [measure, scheduleResize])
 
+    // This node renames itself; another node can be renamed or nicknamed only as a cluster member.
+    const renameTarget: NodeNameTarget | null = isLocal
+        ? {
+              kind: 'self',
+              nodeUuid: node.id,
+              shownName: selfName || node.name,
+              customName: selfCustomName
+          }
+        : member
+          ? { kind: 'peer', node: member }
+          : null
+
     const expandButtons = (placement: 'left' | 'top') => (
         <>
             <DismissibleTooltip slotContent="Show performance" placement={placement}>
@@ -191,6 +214,20 @@ function NodeCardDetails({ node }: NodeCardDetailsProps) {
                     <SettingsOutlined style={{ fontSize: 14 }} />
                 </Button>
             </DismissibleTooltip>
+            {renameTarget && (
+                <DismissibleTooltip slotContent="Rename" placement={placement}>
+                    <Button
+                        kind="tertiary"
+                        color="neutral"
+                        size="tiny"
+                        className="px-2"
+                        onClick={() => setRenaming(true)}
+                        aria-label="Rename"
+                    >
+                        <EditOutlined style={{ fontSize: 14 }} />
+                    </Button>
+                </DismissibleTooltip>
+            )}
         </>
     )
 
@@ -245,6 +282,7 @@ function NodeCardDetails({ node }: NodeCardDetailsProps) {
                                 ipAddress={node.ipAddress}
                                 gpuLabels={gpuLabels}
                                 isLocal={isLocal}
+                                distinguishingLabel={distinguishingLabel}
                             />
                         </div>
                         <Flex
@@ -264,8 +302,12 @@ function NodeCardDetails({ node }: NodeCardDetailsProps) {
                             name={node.name}
                             online={node.status !== 'offline'}
                         />
-                        <Text kind="body/regular/sm" className="ml-1 text-subtle-color break-all">
-                            Reported service build: {node.serviceBuildId ?? '--'}
+                        <Text
+                            kind="body/regular/sm"
+                            className="ml-1 text-subtle-color break-all"
+                            title={node.serviceBuildId}
+                        >
+                            {`Service build: ${node.serviceBuildId ? formatServiceBuildShort(node.serviceBuildId) : '--'}`}
                             {node.status === 'offline' &&
                                 (node.serviceBuildId
                                     ? ' (cached; node offline)'
@@ -296,6 +338,9 @@ function NodeCardDetails({ node }: NodeCardDetailsProps) {
                     </div>
                 </div>
             </div>
+            {renameTarget && renaming && (
+                <NodeNameModal target={renameTarget} open={renaming} onClose={closeRename} />
+            )}
         </div>
     )
 }

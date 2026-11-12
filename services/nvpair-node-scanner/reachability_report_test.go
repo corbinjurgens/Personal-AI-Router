@@ -75,7 +75,7 @@ func TestLapsedClaimIsReportedOnceAndClearedByTheNextClaim(t *testing.T) {
 	if err := json.Unmarshal(msgs[0].Params, &report); err != nil {
 		t.Fatal(err)
 	}
-	if report.ID != peerUnreachableID || report.Severity != "warning" || report.Action != "none" || !strings.Contains(report.Message, "peer-name") {
+	if report.ID != peerUnreachableID || report.Severity != "warning" || report.Action != "none" || !strings.Contains(report.Message, `"peer"`) {
 		t.Fatalf("report = %+v", report)
 	}
 
@@ -100,7 +100,7 @@ func TestLapsedClaimIsReportedOnceAndClearedByTheNextClaim(t *testing.T) {
 // forgotten, and the revert must not take the report out with it.
 func TestLapsedClaimReportSurvivesRevertToBrowse(t *testing.T) {
 	d, claim, sent := peerServicesWithCapturedCodec(t)
-	d.onBrowse(DiscoveryEvent{Type: "discovered", Node: RawNode{ID: "browse-name", Addresses: []string{"192.0.2.90"}, TXT: []string{"uuid=peer", "cluster-uuid=peer", "cl=14444"}}})
+	d.onBrowse(DiscoveryEvent{Type: "discovered", Node: RawNode{ID: mdnsLabel("peer"), Addresses: []string{"192.0.2.90"}, TXT: []string{"uuid=peer", "cluster-uuid=peer", "name=browse-name", "cl=14444"}}})
 	if !d.acceptPeerServices(claim) {
 		t.Fatal("claim rejected")
 	}
@@ -166,7 +166,7 @@ func TestLapsedClaimOfAnUnadmittedPeerIsNotReported(t *testing.T) {
 // Unpairing a peer reported by the browse path clears it through reconcileTrust.
 func TestNodeInfoOutageIsClearedWhenThePeerIsUnpaired(t *testing.T) {
 	d, _, sent := peerServicesWithCapturedCodec(t)
-	d.onBrowse(DiscoveryEvent{Type: "discovered", Node: RawNode{ID: "browse-name", Addresses: []string{"192.0.2.90"}, TXT: []string{"uuid=peer", "cluster-uuid=peer", "cl=14444"}}})
+	d.onBrowse(DiscoveryEvent{Type: "discovered", Node: RawNode{ID: mdnsLabel("peer"), Addresses: []string{"192.0.2.90"}, TXT: []string{"uuid=peer", "cluster-uuid=peer", "name=browse-name", "cl=14444"}}})
 	node := peerServicesNode(t, d)
 	if !node.Trusted {
 		t.Fatalf("fixture peer is not trusted: %+v", node)
@@ -224,7 +224,7 @@ func TestSilentPeerIsReportedOnceAfterTheStartupGraceAndClearedByAClaim(t *testi
 func TestSilentPeerWithADirectoryEntryIsLeftToEnrichment(t *testing.T) {
 	d, _, sent := peerServicesWithCapturedCodec(t)
 	d.mesh.Refresh()
-	d.onBrowse(DiscoveryEvent{Type: "discovered", Node: RawNode{ID: "browse-name", Addresses: []string{"192.0.2.90"}, TXT: []string{"uuid=peer", "cluster-uuid=peer", "cl=14444"}}})
+	d.onBrowse(DiscoveryEvent{Type: "discovered", Node: RawNode{ID: mdnsLabel("peer"), Addresses: []string{"192.0.2.90"}, TXT: []string{"uuid=peer", "cluster-uuid=peer", "name=browse-name", "cl=14444"}}})
 	d.startedAt = time.Now().Add(-peerServicesMaxAge)
 
 	d.reconcilePeerServices()
@@ -236,7 +236,7 @@ func TestSilentPeerWithADirectoryEntryIsLeftToEnrichment(t *testing.T) {
 func TestStartupLookDoesNotReportAnEvictedPeerAgain(t *testing.T) {
 	d, _, sent := peerServicesWithCapturedCodec(t)
 	d.mesh.Refresh()
-	d.onBrowse(DiscoveryEvent{Type: "discovered", Node: RawNode{ID: "browse-name", Addresses: []string{"192.0.2.90"}, TXT: []string{"uuid=peer", "cluster-uuid=peer", "cl=14444"}}})
+	d.onBrowse(DiscoveryEvent{Type: "discovered", Node: RawNode{ID: mdnsLabel("peer"), Addresses: []string{"192.0.2.90"}, TXT: []string{"uuid=peer", "cluster-uuid=peer", "name=browse-name", "cl=14444"}}})
 	d.startedAt = time.Now().Add(-peerServicesMaxAge)
 	d.reconcilePeerServices()
 	requireErrorsFrames(t, sent())
@@ -244,7 +244,7 @@ func TestStartupLookDoesNotReportAnEvictedPeerAgain(t *testing.T) {
 	// A failing enrichment reports the peer, then it is evicted.
 	d.noteNodeInfo(peerServicesNode(t, d), "192.0.2.90:14300", false)
 	requireErrorsFrames(t, sent(), "errors:report")
-	d.onBrowse(DiscoveryEvent{Type: "removed", Node: RawNode{ID: "browse-name", Addresses: []string{"192.0.2.90"}, TXT: []string{"uuid=peer", "cluster-uuid=peer", "cl=14444"}}})
+	d.onBrowse(DiscoveryEvent{Type: "removed", Node: RawNode{ID: mdnsLabel("peer"), Addresses: []string{"192.0.2.90"}, TXT: []string{"uuid=peer", "cluster-uuid=peer", "name=browse-name", "cl=14444"}}})
 	if _, ok := d.dir.get("peer"); ok {
 		t.Fatal("peer was not evicted")
 	}

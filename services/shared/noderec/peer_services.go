@@ -10,8 +10,6 @@ import (
 	"io"
 	"net/netip"
 	"strings"
-	"unicode"
-	"unicode/utf8"
 
 	"nvpair-shared/engines"
 )
@@ -25,10 +23,10 @@ type PeerService struct {
 }
 
 // PeerServicesDescriptor is a complete initialized self snapshot served over cl.
-// It carries no membership, trust, liveness, protocol or forwarding authority.
+// It carries no membership, trust, liveness, protocol or forwarding authority,
+// and no name: a node's own name reaches its peers only on the cluster roster.
 type PeerServicesDescriptor struct {
 	HostUUID  string        `json:"hostUuid"`
-	Name      string        `json:"name"`
 	Addresses []string      `json:"addresses"`
 	Services  []PeerService `json:"services"`
 }
@@ -46,9 +44,6 @@ type PeerServicesClaim struct {
 func ValidatePeerServicesDescriptor(d PeerServicesDescriptor, expectedUUID string) error {
 	if expectedUUID == "" || len(expectedUUID) > 128 || d.HostUUID != expectedUUID || strings.ContainsAny(expectedUUID, "/\\:\x00") {
 		return errors.New("descriptor subject mismatch")
-	}
-	if len(d.Name) == 0 || len(d.Name) > 255 || !utf8.ValidString(d.Name) || strings.IndexFunc(d.Name, unicode.IsControl) >= 0 {
-		return errors.New("invalid descriptor name")
 	}
 	if len(d.Addresses) == 0 || len(d.Addresses) > MaxAdvertisedIPs {
 		return errors.New("invalid descriptor address count")

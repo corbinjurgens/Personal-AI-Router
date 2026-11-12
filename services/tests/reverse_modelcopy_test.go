@@ -255,18 +255,24 @@ func phase04CopyAuthorityDirectory(t *testing.T, node, peer *task1Node) string {
 
 // The seeded CM pin names its peer by UUID and carries no display name. The
 // first production roster exchange, about five seconds after CM startup,
-// replaces both with the sender's own hostname-derived identity. That is
-// authorized display metadata, not copy authority; settle it before the byte
-// snapshot so later equality is attributable to the copy pin alone.
-func phase04AwaitPinIdentity(t *testing.T, node, peer *task1Node, hostname string) {
+// replaces the name with the sender's own display name, which the peer's CM
+// reports as its node name. That is authorized display metadata, not copy
+// authority; settle it before the byte snapshot so later equality is
+// attributable to the copy pin alone.
+func phase04AwaitPinIdentity(t *testing.T, node, peer *task1Node) {
 	t.Helper()
 	path := filepath.Join(node.base, "cluster", "trusted", peer.uuid+".json")
-	task1Eventually(t, "CM pin identity refreshed by first roster exchange", 45*time.Second, func() bool {
+	want := decodeResult[struct {
+		Name string `json:"name"`
+	}](t, peer.cm.call(t, "cluster:get-node-id", nil)).Name
+	if want == "" {
+		t.Fatalf("peer %s reports an empty node name", peer.uuid)
+	}
+	task1Eventually(t, "CM pin name refreshed by first roster exchange", 45*time.Second, func() bool {
 		var pin struct {
-			NodeID string `json:"nodeId"`
-			Name   string `json:"name"`
+			Name string `json:"name"`
 		}
-		return json.Unmarshal(readLiveDurableFile(t, path), &pin) == nil && pin.NodeID == hostname && pin.Name == hostname
+		return json.Unmarshal(readLiveDurableFile(t, path), &pin) == nil && pin.Name == want
 	})
 }
 
@@ -454,12 +460,8 @@ func TestReverseModelCopyPhase04(t *testing.T) {
 			if filepath.Dir(filepath.Dir(pin)) == filepath.Join(destination.base, "cluster") {
 				t.Fatal("negative copy authority shares the CM directory")
 			}
-			hostname, err := os.Hostname()
-			if err != nil {
-				t.Fatal(err)
-			}
 			for _, node := range []*task1Node{destination, source} {
-				phase04AwaitPinIdentity(t, node, f.peer(node), hostname)
+				phase04AwaitPinIdentity(t, node, f.peer(node))
 			}
 			// Snapshot only current identity/admission authority, not changing
 			// membership metadata such as last-seen timestamps.

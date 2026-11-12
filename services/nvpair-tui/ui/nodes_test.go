@@ -158,7 +158,7 @@ func TestPairingCarriesLocalManagementChoice(t *testing.T) {
 				if string(params["address"]) != wantAddress {
 					t.Fatalf("address = %s", params["address"])
 				}
-				if tc.path == "discovered" && string(params["nodeId"]) != `"peer"` {
+				if tc.path == "discovered" && string(params["nodeUuid"]) != `"peer"` {
 					t.Fatal("discovered target identity lost")
 				}
 				if tc.path == "manual" && string(params["port"]) != "14322" {

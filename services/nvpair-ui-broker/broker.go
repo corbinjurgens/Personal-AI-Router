@@ -77,12 +77,12 @@ type VersionResult struct {
 type AvailableNode struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
-	// HostUUID is the node's stable per-host identity (the daemon's uuid= TXT).
-	// It is invariant across a PC rename and unique per physical machine, so it
-	// is the key clients should dedup/track nodes by; id/name stay the hostname
-	// for display. Two machines sharing a hostname are distinct by HostUUID. It
-	// is the same value the cluster surface exposes as nodeUuid.
-	// Omitted for manual nodes, which carry no UUID and are keyed by id.
+	// HostUUID is the node's stable per-host identity (the daemon's uuid= TXT),
+	// the key clients dedup and track nodes by and the same value the cluster
+	// surface exposes as nodeUuid. ID equals it for a scanner node. A manual
+	// node carries its manual id here until its node-info probe reports the
+	// real UUID. Name is the broker-decided display name (discoveryStore
+	// displayNameLocked) and is not unique.
 	HostUUID  string `json:"hostUuid,omitempty"`
 	IPAddress string `json:"ipAddress"`
 	// IPAddresses is every address this node published, in its own ranked order
@@ -258,6 +258,24 @@ type Broker struct {
 	// the current cluster-manager. No child I/O runs while this lock is held.
 	localServicesMu         sync.Mutex
 	localServicesGeneration uint64
+	// selfNameMu guards this node's UUID and name as the cluster manager last
+	// reported them (cluster:get-node-id, cluster:node-name-changed). The
+	// broker relays the name to the scanner, which advertises it as name=.
+	selfNameMu   sync.Mutex
+	selfNodeUUID string
+	selfNodeName string
+	// selfNameGen counts cluster:node-name-changed notifications. A
+	// cluster:get-node-id read is applied only if none arrived while it was in
+	// flight, so a slow read never replaces a newer name.
+	selfNameGen uint64
+	// memberNamesMu and memberNamesGen do the same for member display names:
+	// nodes:changed bumps the generation, and a nodes:get-initial read that a
+	// notification overtook is discarded.
+	memberNamesMu  sync.Mutex
+	memberNamesGen uint64
+	// selfNamePushMu serializes name pushes to the scanner; each push reads
+	// the cached name under it, so the last push always carries the latest.
+	selfNamePushMu sync.Mutex
 
 	// workersMu guards the supervised worker handles below. They are no
 	// longer assigned once in Serve and then treated as read-only: each
@@ -978,12 +996,143 @@ func (b *Broker) convergeScannerIdentity() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if _, _, err := cm.Call(ctx, "cluster:get-node-id", nil); err != nil {
+	b.selfNameMu.Lock()
+	sentAt := b.selfNameGen
+	b.selfNameMu.Unlock()
+	result, rpcErr, err := cm.Call(ctx, "cluster:get-node-id", nil)
+	if err != nil {
 		slog.Warn("scanner identity convergence skipped: cluster-manager node id unavailable", "err", err)
 		return
 	}
+	if rpcErr == nil {
+		var id nodeNameIdentity
+		if err := json.Unmarshal(result, &id); err != nil {
+			slog.Warn("cluster:get-node-id result undecodable; node name not relayed", "err", err)
+		} else {
+			b.storeSelfName(id, &sentAt)
+			b.pushSelfName()
+		}
+	}
 	if sc := b.getScanner(); sc != nil {
 		sc.reloadIdentity()
+	}
+}
+
+// nodeNameIdentity is the part of cluster:get-node-id and
+// cluster:node-name-changed the broker relays: this node's UUID and its
+// effective name.
+type nodeNameIdentity struct {
+	NodeUUID string `json:"nodeUuid"`
+	Name     string `json:"name"`
+}
+
+// recordSelfName applies a cluster:node-name-changed notification.
+func (b *Broker) recordSelfName(id nodeNameIdentity) {
+	b.storeSelfName(id, nil)
+}
+
+// storeSelfName caches this node's UUID and name as the cluster manager
+// reported them, and hands them to the discovery store, which shows this node
+// with that name. A notification (readSentAt nil) always applies and bumps the
+// generation; a cluster:get-node-id read applies only if no notification
+// arrived after it was sent.
+func (b *Broker) storeSelfName(id nodeNameIdentity, readSentAt *uint64) {
+	b.selfNameMu.Lock()
+	defer b.selfNameMu.Unlock()
+	if readSentAt == nil {
+		b.selfNameGen++
+	} else if *readSentAt != b.selfNameGen {
+		return
+	}
+	b.selfNodeUUID = id.NodeUUID
+	b.selfNodeName = id.Name
+	if b.store != nil {
+		b.store.SetSelf(id.NodeUUID, id.Name)
+	}
+}
+
+// clusterNodesPayload is the part of the nodes:get-initial result and the
+// nodes:changed params the discovery store needs: each member's UUID and the
+// display name the cluster manager decided for it.
+type clusterNodesPayload struct {
+	Nodes []struct {
+		NodeUUID    string `json:"nodeUuid"`
+		DisplayName string `json:"displayName"`
+		State       string `json:"state"`
+	} `json:"nodes"`
+}
+
+// applyMemberNames applies nodes:changed params.
+func (b *Broker) applyMemberNames(raw json.RawMessage) {
+	b.storeMemberNames(raw, nil)
+}
+
+// storeMemberNames feeds the members' display names from nodes:changed params
+// or a nodes:get-initial result into the discovery store. Pending invitees are
+// not members and keep their discovery name. A notification (readSentAt nil)
+// always applies and bumps the generation; a nodes:get-initial read applies
+// only if no notification arrived after it was sent.
+func (b *Broker) storeMemberNames(raw json.RawMessage, readSentAt *uint64) {
+	if b.store == nil {
+		return
+	}
+	b.memberNamesMu.Lock()
+	defer b.memberNamesMu.Unlock()
+	if readSentAt == nil {
+		b.memberNamesGen++
+	} else if *readSentAt != b.memberNamesGen {
+		return
+	}
+	var payload clusterNodesPayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		slog.Warn("cluster nodes payload undecodable; member names not updated", "err", err)
+		return
+	}
+	names := make(map[string]string, len(payload.Nodes))
+	for _, node := range payload.Nodes {
+		if node.State == "member" && node.NodeUUID != "" && node.DisplayName != "" {
+			names[node.NodeUUID] = node.DisplayName
+		}
+	}
+	b.store.SetMemberNames(names)
+}
+
+// refreshMemberNames reads nodes:get-initial from a freshly spawned cluster
+// manager, so member names are current before its first nodes:changed.
+func (b *Broker) refreshMemberNames() {
+	cm := b.getClusterMgr()
+	if cm == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	b.memberNamesMu.Lock()
+	sentAt := b.memberNamesGen
+	b.memberNamesMu.Unlock()
+	result, rpcErr, err := cm.Call(ctx, "nodes:get-initial", nil)
+	if err != nil || rpcErr != nil {
+		slog.Warn("member names unavailable from cluster-manager", "err", err, "rpcError", rpcErr != nil)
+		return
+	}
+	b.storeMemberNames(result, &sentAt)
+}
+
+// pushSelfName sends the cached name to the current scanner with
+// discovery:set-self-name. A name not yet reported is not sent. The scanner
+// acknowledges at once and republishes in the background, so this blocks at
+// most for one round trip; callers on a reader goroutine still run it on its
+// own goroutine.
+func (b *Broker) pushSelfName() {
+	b.selfNamePushMu.Lock()
+	defer b.selfNamePushMu.Unlock()
+	b.selfNameMu.Lock()
+	name := b.selfNodeName
+	b.selfNameMu.Unlock()
+	if name == "" {
+		return
+	}
+	if sc := b.getScanner(); sc != nil {
+		sc.setSelfName(name)
 	}
 }
 
@@ -2390,6 +2539,9 @@ func (b *Broker) forwardClusterManagerNotification(method string, params json.Ra
 	if method == "cluster:identity-changed" || method == "cluster:trust-changed" || method == "nodes:changed" {
 		b.peerSizing.signal()
 	}
+	if method == "nodes:changed" {
+		b.applyMemberNames(params)
+	}
 	if err := b.codec.Notify(method, params); err != nil {
 		slog.Warn("forward cluster-manager notification failed", "method", method, "err", err)
 	}
@@ -2416,6 +2568,17 @@ func (b *Broker) forwardClusterManagerNotification(method string, params json.Ra
 	// record moves — which a peer already advertising when we joined never does.
 	if method == "cluster:trust-changed" {
 		b.applyClusterTrustChange()
+	}
+	// This node's name changed: relay it to the scanner, which advertises it.
+	// The client already has the notification from the verbatim forward above.
+	if method == "cluster:node-name-changed" {
+		var id nodeNameIdentity
+		if err := json.Unmarshal(params, &id); err != nil {
+			slog.Warn("cluster:node-name-changed had undecodable params; not relaying", "err", err)
+		} else {
+			b.recordSelfName(id)
+			go b.pushSelfName()
+		}
 	}
 }
 

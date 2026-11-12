@@ -1433,7 +1433,7 @@ Emitted once on startup, after the scanner (and, when available, node-info and l
 
 #### `discovery:nodes-changed`
 
-**Opt-in.** Only delivered to a peer that has called `discovery:subscribe`; until then (and after `discovery:unsubscribe`) the stream is silent. Once subscribed, it's fired every time the discovery store mutates — that is, whenever the daemon reports a `discovery:node-discovered`, `discovery:node-updated`, or `discovery:node-removed` (or a manual node changes). The payload is the full current snapshot as a **bare array** of `AvailableNode` objects (same shape as the array element in `discovery:get-nodes`), sorted by `id`.
+**Opt-in.** Only delivered to a peer that has called `discovery:subscribe`; until then (and after `discovery:unsubscribe`) the stream is silent. Once subscribed, it's fired every time the discovery store mutates — that is, whenever the daemon reports a `discovery:node-discovered`, `discovery:node-updated`, or `discovery:node-removed` (or a manual node changes), and when a member display name or this node's name changes. The payload is the full current snapshot as a **bare array** of `AvailableNode` objects (same shape as the array element in `discovery:get-nodes`), sorted by `name`, then `hostUuid`.
 
 ```json
 {
@@ -1772,8 +1772,9 @@ Field-by-field:
 
 | Field | Type | Source |
 |---|---|---|
-| `id` | string | the node's mDNS instance name (its hostname) from the `_nvpair-node` record |
-| `name` | string | Currently mirrors `id`; will diverge once a node can advertise a human-readable name. |
+| `id` | string | the node UUID (equal to `hostUuid`); a node only a manual entry claims keeps its manual id |
+| `name` | string | the one name the node is shown with, decided by the broker: a cluster member's `displayName` from the cluster manager (this node's nickname for it, else its own name); else this node's own name for this node; else the validated `name=` from the node's mDNS record (a manual node's user-entered name); else `PAIR` and the first eight characters of its UUID. Not unique. |
+| `hostUuid` | string | the node's stable identity (its `uuid=` TXT); for a manual node, its manual id until its node-info probe reports the real UUID. |
 | `ipAddress` | string | the node's authoritative `ip=` (else the best-ranked advertised address); empty string when none is usable. |
 | `port` | number | the node's `ni` (node-info) port from its `_nvpair-node` TXT, typically `14318`. |
 | `lastSeen` | number | **Unix seconds**. Updated on every `discovery:node-discovered` / `discovery:node-updated` event the broker receives from the daemon; not refreshed by `discovery:get-nodes` itself (a pure read). |
@@ -2067,7 +2068,12 @@ registration/shutdown. Cluster-manager owns the listener protocol classification
 the broker supplies no user-selected TLS policy and does not infer it from
 discovery transport labels. This metadata has no desktop consumer.
 
-The cluster-manager also pushes notifications (`cluster:invite-received`, `cluster:invite-canceled`, `cluster:identity-changed`, `cluster:join-requests-changed`, `nodes:changed`, ...); the broker forwards them to the caller verbatim. Unlike `llamacpp-proxy:<event>` / `workloads:*` these are **not opt-in** — there is no `cluster:subscribe`; the events always flow.
+The cluster-manager also pushes notifications (`cluster:invite-received`, `cluster:invite-canceled`, `cluster:identity-changed`, `cluster:join-requests-changed`, `cluster:node-name-changed`, `nodes:changed`, ...); the broker forwards them to the caller verbatim. Unlike `llamacpp-proxy:<event>` / `workloads:*` these are **not opt-in** — there is no `cluster:subscribe`; the events always flow.
+
+The broker also reads two of these streams itself, for node names:
+
+- **This node's name.** After each cluster-manager spawn the broker reads `cluster:get-node-id` and caches `nodeUuid` and `name`; each `cluster:node-name-changed` updates the cache. The broker pushes the cached name to the scanner with the private `discovery:set-self-name` (before `discovery:reload-identity` at startup, on each change, and to every newly spawned scanner), and the scanner advertises it as the `name=` TXT key. Pushes are serialized and always carry the latest cached name; the scanner acknowledges at once and republishes in the background.
+- **Member display names.** After each cluster-manager spawn the broker reads `nodes:get-initial`, and on each `nodes:changed` it takes every `member` entry's `displayName` for the discovery projection (see `discovery:get-nodes`, field `name`). Pending invitees are not members and keep their discovered name.
 
 Ask-to-join uses the same generic production relay, without broker-owned
 admission logic. `cluster:get-join-requests {}` returns the complete

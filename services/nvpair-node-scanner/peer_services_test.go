@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -31,7 +32,7 @@ func newPeerServicesScanner(t *testing.T) (*daemon, noderec.PeerServicesClaim) {
 	if !ok {
 		t.Fatal("fixture has no current incarnation")
 	}
-	claim := noderec.PeerServicesClaim{Incarnation: incarnation, Source: "cm-first", Sequence: 1, ObservedAt: time.Now().UnixMilli(), Descriptor: noderec.PeerServicesDescriptor{HostUUID: "peer", Name: "peer-name", Addresses: []string{"192.0.2.40"}, Services: []noderec.PeerService{{Service: noderec.ServiceCluster, Port: 14311}}}}
+	claim := noderec.PeerServicesClaim{Incarnation: incarnation, Source: "cm-first", Sequence: 1, ObservedAt: time.Now().UnixMilli(), Descriptor: noderec.PeerServicesDescriptor{HostUUID: "peer", Addresses: []string{"192.0.2.40"}, Services: []noderec.PeerService{{Service: noderec.ServiceCluster, Port: 14311}}}}
 	return d, claim
 }
 
@@ -50,7 +51,7 @@ func TestPeerServicesBootstrapsAdmittedPeer(t *testing.T) {
 		t.Fatal("current authenticated claim rejected")
 	}
 	node := peerServicesNode(t, d)
-	if node.HostUUID != "peer" || node.ClusterUUID != "peer" || !node.Trusted || node.Name != "peer-name" || node.IP != "192.0.2.40" || node.Services[noderec.ServiceCluster].Port != 14311 {
+	if node.HostUUID != "peer" || node.ClusterUUID != "peer" || !node.Trusted || node.Name != "" || node.IP != "192.0.2.40" || node.Services[noderec.ServiceCluster].Port != 14311 {
 		t.Fatalf("bootstrap node = %+v", node)
 	}
 	if node.LastSeen != 0 {
@@ -89,7 +90,7 @@ func TestPeerServicesReconcilesBrowseClaims(t *testing.T) {
 			d, claim := newPeerServicesScanner(t)
 			d.lastActivityAt = make(map[string]time.Time)
 			d.noteActivity("peer", 0)
-			browse := DiscoveryEvent{Type: "discovered", Node: RawNode{ID: "browse-name", Addresses: []string{"192.0.2.90"}, TXT: []string{"uuid=peer", "cluster-uuid=peer", "cl=14444"}}}
+			browse := DiscoveryEvent{Type: "discovered", Node: RawNode{ID: mdnsLabel("peer"), Addresses: []string{"192.0.2.90"}, TXT: []string{"uuid=peer", "cluster-uuid=peer", "name=browse-name", "cl=14444"}}}
 			if browseFirst {
 				d.onBrowse(browse)
 			}
@@ -101,8 +102,8 @@ func TestPeerServicesReconcilesBrowseClaims(t *testing.T) {
 			}
 			browse.Type = "updated"
 			d.onBrowse(browse)
-			if node := peerServicesNode(t, d); node.Name != "peer-name" || node.Services[noderec.ServiceCluster].Port != 14311 {
-				t.Fatalf("browse overwrote authenticated snapshot: %+v", node)
+			if node := peerServicesNode(t, d); node.Name != "browse-name" || node.Services[noderec.ServiceCluster].Port != 14311 || node.IP != "192.0.2.40" {
+				t.Fatalf("browse overwrote authenticated snapshot or withheld its name: %+v", node)
 			}
 			if err := os.Remove(filepath.Join(d.clusterDir, "trusted", "peer.json")); err != nil {
 				t.Fatal(err)
@@ -126,6 +127,50 @@ func TestPeerServicesReconcilesBrowseClaims(t *testing.T) {
 	}
 	test("browse before authenticated", true)
 	test("authenticated before browse", false)
+}
+
+// The descriptor carries no name: an authenticated row takes the mDNS name=
+// observed for its UUID, and a later browse rename changes only that name and
+// emits one node update.
+func TestPeerServicesAuthenticatedRowTakesBrowseName(t *testing.T) {
+	d, claim := newPeerServicesScanner(t)
+	browse := DiscoveryEvent{Type: "discovered", Node: RawNode{ID: mdnsLabel("peer"), Addresses: []string{"192.0.2.90"}, TXT: []string{"uuid=peer", "cluster-uuid=peer", "name=first-name", "cl=14444"}}}
+	d.onBrowse(browse)
+	if !d.acceptPeerServices(claim) {
+		t.Fatal("claim rejected")
+	}
+	before := peerServicesNode(t, d)
+	if before.Name != "first-name" || before.IP != "192.0.2.40" || before.Services[noderec.ServiceCluster].Port != 14311 {
+		t.Fatalf("authenticated row = %+v, want browse name over descriptor route", before)
+	}
+	var wire bytes.Buffer
+	d.codec = NewCodec(&wire)
+	browse.Type = "updated"
+	browse.Node.TXT = []string{"uuid=peer", "cluster-uuid=peer", "name=second-name", "cl=14444"}
+	d.onBrowse(browse)
+	after := peerServicesNode(t, d)
+	if after.Name != "second-name" {
+		t.Fatalf("browse rename not applied: %+v", after)
+	}
+	after.Name = before.Name
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("browse rename changed other visible fields: before %+v after %+v", before, after)
+	}
+	frame, err := d.codec.Read()
+	if err != nil {
+		t.Fatalf("read rename notification: %v", err)
+	}
+	var event noderec.NodeEvent
+	if err := json.Unmarshal(frame.Params, &event); err != nil {
+		t.Fatal(err)
+	}
+	if frame.Method != noderec.NotifyNodeUpdated || event.Node.Name != "second-name" {
+		t.Fatalf("rename notification = %s %+v", frame.Method, event.Node)
+	}
+	d.onBrowse(browse)
+	if wire.Len() != 0 {
+		t.Fatal("unchanged browse name emitted another update")
+	}
 }
 
 func TestPeerServicesBrowseRemovalPreservesAuthenticatedSnapshot(t *testing.T) {
@@ -304,7 +349,7 @@ func peerServicesEnrichmentClaim(t *testing.T, f *scannerReverseFixture) noderec
 		t.Fatal("fixture has no current incarnation")
 	}
 	return noderec.PeerServicesClaim{Incarnation: incarnation, Source: "cm-first", Sequence: 1, ObservedAt: time.Now().UnixMilli(),
-		Descriptor: noderec.PeerServicesDescriptor{HostUUID: "peer", Name: "peer-name", Addresses: []string{"192.0.2.40"}, Services: []noderec.PeerService{
+		Descriptor: noderec.PeerServicesDescriptor{HostUUID: "peer", Addresses: []string{"192.0.2.40"}, Services: []noderec.PeerService{
 			{Service: noderec.ServiceNodeInfo, Port: f.node.Services[noderec.ServiceNodeInfo].Port},
 			{Service: noderec.ServiceEngineManager, Port: f.node.Services[noderec.ServiceEngineManager].Port},
 		}}}
@@ -605,7 +650,7 @@ func TestPeerServicesBootstrapEnrichmentCarriesPolicy(t *testing.T) {
 		t.Fatal("fixture has no current incarnation")
 	}
 	claim := noderec.PeerServicesClaim{Incarnation: incarnation, Source: "cm-first", Sequence: 1, ObservedAt: time.Now().UnixMilli(),
-		Descriptor: noderec.PeerServicesDescriptor{HostUUID: "peer", Name: "peer-name", Addresses: []string{"192.0.2.40"}}}
+		Descriptor: noderec.PeerServicesDescriptor{HostUUID: "peer", Addresses: []string{"192.0.2.40"}}}
 	// Installed directly, like the held-enrichment test: the descriptor
 	// validation refuses the loopback address the fixture serves on.
 	f.d.dir.installPeerServices(claim, f.node)

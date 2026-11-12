@@ -275,7 +275,8 @@ func (m *Manager) applyJoinRequestWireContext(ctx context.Context, source string
 		}
 		r = &joinRequestRecord{JoinRequest: JoinRequest{RequestID: wire.RequestID, Direction: "incoming", PeerAddress: source, PeerPort: m.port, State: "awaiting-approval", CreatedAt: now.UnixMilli(), ExpiresAt: now.Add(m.effectiveInviteTTL()).UnixMilli()}, source: source, clusterID: cid, admission: epoch, generation: m.clusterGen.Load(), sessionGeneration: m.sessGen.Load()}
 		if wire.Operation == "request" {
-			r.PeerNodeUUID, r.PeerName, r.PeerPort, r.requesterName = wire.Requester.NodeUUID, joinRequestName(wire.Requester.Name), *wire.Port, wire.Requester.Name
+			peerName, _ := receivedNodeName(wire.Requester.Name, wire.Requester.NodeUUID)
+			r.PeerNodeUUID, r.PeerName, r.PeerPort, r.requesterName = wire.Requester.NodeUUID, peerName, *wire.Port, wire.Requester.Name
 		}
 		m.joinRequests[wire.RequestID] = r
 	}
@@ -296,7 +297,7 @@ func (m *Manager) applyJoinRequestWireContext(ctx context.Context, source string
 				r.State = "pairing"
 				inviteID := *r.InviteID
 				peerID := r.PeerNodeUUID
-				m.putInvite(&Invite{InviteID: inviteID, FromNodeID: m.identity.NodeID, FromNodeUUID: m.identity.NodeUUID, FromNodeName: m.identity.Name, ToNodeID: &peerID, ClusterID: cid, ClusterFriendlyName: friendly, State: inviteStatePending, CreatedAt: now.UnixMilli()})
+				m.putInvite(&Invite{InviteID: inviteID, FromNodeUUID: m.identity.NodeUUID, FromNodeName: m.selfName(), ToNodeUUID: optionalString(peerID), ClusterID: cid, ClusterFriendlyName: friendly, State: inviteStatePending, CreatedAt: now.UnixMilli()})
 				target := net.JoinHostPort(source, strconv.Itoa(r.PeerPort))
 				gen, allow := r.sessionGeneration, r.allowRemoteManagement
 				go func() { m.completeInitialInvite(inviteID, []string{target}, cid, gen, allow); m.wakeJoinRequests() }()
@@ -402,7 +403,7 @@ func (m *Manager) driveJoinRequest(id string, endpoints []string) {
 			m.joinMu.Unlock()
 			return
 		}
-		deadline := r.ExpiresAt
+		deadline, requesterName := r.ExpiresAt, r.requesterName
 		m.joinMu.Unlock()
 		if m.joinTime().UnixMilli() >= deadline {
 			m.joinSnapshot()
@@ -413,7 +414,7 @@ func (m *Manager) driveJoinRequest(id string, endpoints []string) {
 		if operation == "request" {
 			p := m.port
 			wire.Port = &p
-			wire.Requester = &joinRequester{m.identity.NodeUUID, m.identity.Name}
+			wire.Requester = &joinRequester{m.identity.NodeUUID, requesterName}
 		}
 		remaining := time.Duration(deadline-m.joinTime().UnixMilli()) * time.Millisecond
 		if remaining > pairingHTTPTimeout {

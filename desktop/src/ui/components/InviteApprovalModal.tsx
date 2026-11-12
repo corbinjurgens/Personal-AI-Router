@@ -122,7 +122,7 @@ export function InviteApprovalModal() {
                                 Node paired successfully.{' '}
                                 {savedGrant &&
                                 (savedGrant.state === 'allowed' || savedGrant.state === 'denied')
-                                    ? `${shown.fromNodeName || shown.fromNodeId} ${savedGrant.allowed ? 'may manage' : 'is blocked from changing'} this device.`
+                                    ? `${shown.fromNodeName} ${savedGrant.allowed ? 'may manage' : 'is blocked from changing'} this device.`
                                     : permissionLoading
                                       ? 'Reading the saved remote-management permission for this device.'
                                       : 'The saved permission is unavailable. Check Cluster Settings on this device.'}{' '}
@@ -134,9 +134,7 @@ export function InviteApprovalModal() {
                             <Text kind="body/semibold/sm" className="min-w-15">
                                 From
                             </Text>
-                            <Text kind="body/regular/sm">
-                                {shown.fromNodeName || shown.fromNodeId}
-                            </Text>
+                            <Text kind="body/regular/sm">{shown.fromNodeName}</Text>
                         </Flex>
                         {!terminal && (
                             <Stack gap="1">

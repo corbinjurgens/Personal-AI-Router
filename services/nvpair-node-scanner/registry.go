@@ -22,7 +22,8 @@ import (
 // The node's identity (hostUuid / clusterUuid / addresses) is stamped by the
 // daemon, not by the registering workers: hostUuid comes from cluster-manager's
 // identity when present (see nodeid.Resolve), clusterUuid from the cluster trust
-// dir, addresses from the local address ranker.
+// dir, addresses from the local address ranker. The display name comes from the
+// broker (discovery:set-self-name).
 type registry struct {
 	mu       sync.Mutex
 	hostUUID string
@@ -33,6 +34,10 @@ type registry struct {
 	// direct-connect link works only for the machine on its far end.
 	ips      []string
 	services map[noderec.ServiceKey]int
+	// name is this node's display name, set by the broker from the cluster
+	// manager (discovery:set-self-name) and advertised as name=. Empty until
+	// the first set.
+	name string
 	// nodeInfoContext identifies the current local ni registration and stamped
 	// identity. Retirement cancels reads even if the same port is registered
 	// again before their response arrives. It is independent of LAN addresses.
@@ -159,6 +164,17 @@ func (r *registry) setAddresses(ips []string) bool {
 	return true
 }
 
+// setName updates the advertised display name. Reports whether it changed.
+func (r *registry) setName(name string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.name == name {
+		return false
+	}
+	r.name = name
+	return true
+}
+
 // record snapshots the current node record.
 func (r *registry) record() noderec.NodeRecord {
 	r.mu.Lock()
@@ -175,6 +191,7 @@ func (r *registry) record() noderec.NodeRecord {
 		SchemaVersion: noderec.SchemaVersion,
 		HostUUID:      r.hostUUID,
 		ClusterUUID:   r.cluUUID,
+		Name:          r.name,
 		IP:            ip,
 		IPs:           slices.Clone(r.ips),
 		Services:      svcs,

@@ -75,6 +75,7 @@ func (m *Manager) runHTTP(ctx context.Context) error {
 	trustedMux.HandleFunc(membersRemovePath, m.handleMembersRemove)
 	trustedMux.HandleFunc(rosterPath, m.handleRoster)
 	trustedMux.HandleFunc(peerServicesPath, m.handlePeerServices)
+	trustedMux.HandleFunc(peerNodeNamePath, m.handlePeerNodeName)
 	trustedMux.HandleFunc(clustertrust.ReverseUpgradePath, m.handleReverseUpgrade)
 
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", m.port))
@@ -579,13 +580,13 @@ func (m *Manager) prepareJoinerInitialComplete(inviteID string, sess *pairingSes
 	sess.invitedEmitted = true
 
 	now := time.Now().UnixMilli()
-	toID := m.identity.NodeID
+	toUUID := m.identity.NodeUUID
+	fromName, _ := receivedNodeName(pi.Name, pi.NodeUUID)
 	return &Invite{
 		InviteID:            inviteID,
-		FromNodeID:          pi.NodeID,
 		FromNodeUUID:        pi.NodeUUID,
-		FromNodeName:        pi.Name,
-		ToNodeID:            &toID,
+		FromNodeName:        fromName,
+		ToNodeUUID:          &toUUID,
 		ClusterID:           pi.ClusterID,
 		ClusterFriendlyName: pi.ClusterFriendlyName,
 		State:               inviteStatePending,
@@ -755,7 +756,7 @@ func (m *Manager) finalizePairing(inviteID string, sess *pairingSession, pi *Pai
 	}
 	sess.awaitingAck = true
 	sess.createdAt = now
-	log.Printf("pairing %s: inviter commit complete for %s (%s), awaiting joiner ack", inviteID, pi.NodeID, pi.NodeUUID)
+	log.Printf("pairing %s: inviter commit complete for %s (%s), awaiting joiner ack", inviteID, pi.Name, pi.NodeUUID)
 	return nil
 }
 
@@ -866,8 +867,7 @@ func testCommitDelay() {
 func (m *Manager) pinPeer(pi *PairingInfo, cert *x509.Certificate, endorsements []Endorsement) error {
 	return m.trust.Pin(&TrustedPin{
 		NodeUUID:        pi.NodeUUID,
-		NodeID:          pi.NodeID,
-		Name:            pi.Name,
+		Name:            m.peerNameToStore(pi.Name, pi.NodeUUID),
 		ClusterID:       pi.ClusterID,
 		AdmissionEpoch:  pi.AdmissionEpoch,
 		CertPem:         pi.Cert,
@@ -881,9 +881,8 @@ func (m *Manager) pinPeer(pi *PairingInfo, cert *x509.Certificate, endorsements 
 func (m *Manager) recordMember(pi *PairingInfo, state MembershipState, joinedAt *int64) {
 	host, port := splitAddr(pi.Addr, m.port)
 	m.upsertMember(&ClusterNode{
-		ID:             pi.NodeID,
 		NodeUUID:       pi.NodeUUID,
-		Name:           pi.Name,
+		Name:           m.peerNameToStore(pi.Name, pi.NodeUUID),
 		IPAddress:      host,
 		Port:           port,
 		ClusterID:      pi.ClusterID,

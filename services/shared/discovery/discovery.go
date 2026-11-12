@@ -657,12 +657,18 @@ func (b *Browser) browseWithDependencies(ctx context.Context, newResolver func()
 					addrs = append(addrs, ip.String())
 				}
 			}
+			// The unpacked strings carry miekg/dns zone-file escapes; decode
+			// them so TXT holds what the peer advertised.
+			txt := make([]string, len(entry.Text))
+			for i, s := range entry.Text {
+				txt[i] = mdns.UnescapeTXT(s)
+			}
 			node := Node{
 				ID:        entry.Instance,
 				Host:      entry.HostName,
 				Port:      entry.Port,
 				Addresses: addrs,
-				TXT:       entry.Text,
+				TXT:       txt,
 			}
 			seen[b.key(node)] = node
 		}

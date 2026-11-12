@@ -266,7 +266,7 @@ func TestPairingRemoteManagementReceiptStagingFailureCreatesNoAuthority(t *testi
 			if _, ok := f.target.trust.Get(f.peer.identity.NodeUUID); ok {
 				t.Fatal("staging failure created a pin")
 			}
-			if _, ok := f.target.memberByNodeID(f.peer.identity.NodeUUID); ok {
+			if _, ok := f.target.memberByUUID(f.peer.identity.NodeUUID); ok {
 				t.Fatal("staging failure created a member")
 			}
 			if got := clustertrust.Open(f.target.clusterDir).RemoteManagement(f.peer.identity.NodeUUID); got.Allowed {
@@ -487,7 +487,7 @@ func TestPairingRemoteManagementResumeOutboundReceiptPreservesLaterLocalDeny(t *
 	// Ack starts best-effort roster reconciliation. Keep that follow-up on the
 	// existing fixture endpoint rather than its synthetic transcript port.
 	m.setMemberAddr(f.joiner.identity.NodeUUID, host, port)
-	member, present := m.memberByNodeID(f.joiner.identity.NodeUUID)
+	member, present := m.memberByUUID(f.joiner.identity.NodeUUID)
 	if !present || member.IPAddress != host || member.Port != port {
 		t.Fatal("fixture did not retain a bounded loopback reconciliation route")
 	}
@@ -599,7 +599,7 @@ func TestPairingRemoteManagementGuardIsolation(t *testing.T) {
 			if _, pinned := f.target.trust.Get(f.peer.identity.NodeUUID); pinned {
 				t.Fatal("guarded pairing created a pin")
 			}
-			if _, member := f.target.memberByNodeID(f.peer.identity.NodeUUID); member {
+			if _, member := f.target.memberByUUID(f.peer.identity.NodeUUID); member {
 				t.Fatal("guarded pairing created membership")
 			}
 		})
@@ -668,7 +668,7 @@ func TestPairingRemoteManagementCleanupPreservesNewerPeerAdmission(t *testing.T)
 		t.Fatal(err)
 	}
 	pin, pinned := f.target.trust.Get(newer.NodeUUID)
-	member, present := f.target.memberByNodeID(newer.NodeUUID)
+	member, present := f.target.memberByUUID(newer.NodeUUID)
 	if !pinned || !present || pin.AdmissionEpoch != newer.AdmissionEpoch || member.AdmissionEpoch != newer.AdmissionEpoch {
 		t.Fatal("old transaction removed a newer peer admission")
 	}
@@ -885,7 +885,7 @@ func TestPairingRemoteManagementLegacyReceiptCachedRosterCannotReviveGrandfather
 	if _, pinned := m.trust.Get(p.pairing.peer.identity.NodeUUID); pinned {
 		t.Fatal("legacy authenticated rollback did not remove B's pin")
 	}
-	if _, member := m.memberByNodeID(p.pairing.peer.identity.NodeUUID); member {
+	if _, member := m.memberByUUID(p.pairing.peer.identity.NodeUUID); member {
 		t.Fatal("legacy authenticated rollback did not remove B's member")
 	}
 	if permission := clustertrust.Open(m.clusterDir).RemoteManagement(p.pairing.peer.identity.NodeUUID); permission.Allowed {
@@ -973,7 +973,7 @@ func TestPairingRemoteManagementLegacyReceiptJournalFailureRecoversOriginalRecei
 	if _, pinned := m.trust.Get(p.pairing.peer.identity.NodeUUID); pinned {
 		t.Fatal("restart retained the aborted legacy pin")
 	}
-	if _, member := m.memberByNodeID(p.pairing.peer.identity.NodeUUID); member {
+	if _, member := m.memberByUUID(p.pairing.peer.identity.NodeUUID); member {
 		t.Fatal("restart retained the aborted legacy member")
 	}
 	if _, err := os.Stat(m.remoteManagementInitializingPath()); !os.IsNotExist(err) {
@@ -1024,7 +1024,7 @@ func TestPairingRemoteManagementLegacyReceiptGuardFailurePreservesComposition(t 
 			if _, pinned := m.trust.Get(p.pairing.peer.identity.NodeUUID); !pinned {
 				t.Fatal("unconfirmed guard changed the live legacy pin")
 			}
-			if _, member := m.memberByNodeID(p.pairing.peer.identity.NodeUUID); !member {
+			if _, member := m.memberByUUID(p.pairing.peer.identity.NodeUUID); !member {
 				t.Fatal("unconfirmed guard changed legacy composition")
 			}
 			after, err := os.ReadFile(journal)
@@ -1119,7 +1119,7 @@ func TestPairingRemoteManagementLegacyReceiptAbsentGrantRequiresDurableConfirmat
 			if _, pinned := m.trust.Get(p.pairing.peer.identity.NodeUUID); pinned {
 				t.Fatal("fixture needs B's pin absent before cleanup confirmation")
 			}
-			if _, member := m.memberByNodeID(p.pairing.peer.identity.NodeUUID); member {
+			if _, member := m.memberByUUID(p.pairing.peer.identity.NodeUUID); member {
 				t.Fatal("fixture needs B's member absent before cleanup confirmation")
 			}
 			deleted, err := os.ReadFile(grantPath)
@@ -1286,7 +1286,7 @@ func TestPairingRemoteManagementLegacyReceiptPendingMigrationCompletesAfterAbort
 			if _, pinned := m.trust.Get(peer.identity.NodeUUID); pinned {
 				t.Fatal("first-upgrade abort retained the old pin")
 			}
-			if _, member := m.memberByNodeID(peer.identity.NodeUUID); member {
+			if _, member := m.memberByUUID(peer.identity.NodeUUID); member {
 				t.Fatal("first-upgrade abort retained the old member")
 			}
 			doc, marker, err := m.readRemoteManagementLocked()
@@ -1348,7 +1348,7 @@ func TestPairingRemoteManagementLegacyReceiptRollbackPreservesNewerPeerAdmission
 	p.failPairingAuthenticated(t)
 	p.replayAndRequireUnrelatedGossip(t)
 	pin, pinned := m.trust.Get(newer.NodeUUID)
-	member, present := m.memberByNodeID(newer.NodeUUID)
+	member, present := m.memberByUUID(newer.NodeUUID)
 	if !pinned || !present || pin.AdmissionEpoch != newer.AdmissionEpoch || member.AdmissionEpoch != newer.AdmissionEpoch {
 		t.Fatal("legacy abort changed the newer peer admission")
 	}
@@ -1385,7 +1385,7 @@ func TestPairingRemoteManagementLegacyReceiptRollbackPreservesNewerLocalAdmissio
 	if _, pinned := m.trust.Get(p.pairing.peer.identity.NodeUUID); !pinned {
 		t.Fatal("legacy abort removed the newer local admission's peer pin")
 	}
-	if _, member := m.memberByNodeID(p.pairing.peer.identity.NodeUUID); !member {
+	if _, member := m.memberByUUID(p.pairing.peer.identity.NodeUUID); !member {
 		t.Fatal("legacy abort removed the newer local admission's peer member")
 	}
 	if permission := clustertrust.Open(m.clusterDir).RemoteManagement(p.pairing.peer.identity.NodeUUID); !permission.Allowed || permission.Revision != "3" {
@@ -1402,7 +1402,7 @@ type pairingRosterReplayProbe struct {
 
 func permissionProbeRosterEntry(target, peer *Manager, epoch uint64) RosterEntry {
 	return RosterEntry{
-		NodeUUID: peer.identity.NodeUUID, NodeID: peer.identity.NodeID, Name: peer.identity.Name,
+		NodeUUID: peer.identity.NodeUUID, Name: peer.selfName(),
 		AdmissionEpoch: epoch, CertPem: string(peer.identity.CertPEM), CertFingerprint: peer.identity.CertFingerprint,
 		Endorsements: []Endorsement{target.endorsePeer(peer.identity.NodeUUID, peer.identity.CertFingerprint, epoch)},
 	}
@@ -1539,7 +1539,7 @@ func TestPairingRemoteManagementCachedRosterCannotReviveRolledBackGrant(t *testi
 	if _, pinned := p.pairing.target.trust.Get(p.pairing.peer.identity.NodeUUID); pinned {
 		t.Fatal("authenticated rollback did not remove B's transaction pin")
 	}
-	if _, member := p.pairing.target.memberByNodeID(p.pairing.peer.identity.NodeUUID); member {
+	if _, member := p.pairing.target.memberByUUID(p.pairing.peer.identity.NodeUUID); member {
 		t.Fatal("authenticated rollback did not remove B's transaction member")
 	}
 	if permission := clustertrust.Open(p.pairing.target.clusterDir).RemoteManagement(p.pairing.peer.identity.NodeUUID); permission.Allowed {
@@ -1636,7 +1636,7 @@ func TestPairingRemoteManagementCachedRosterPreservesNewerAdmissionGrant(t *test
 	p.failPairingAuthenticated(t)
 	p.replayAndRequireUnrelatedGossip(t)
 	pin, pinned := m.trust.Get(p.pairing.peer.identity.NodeUUID)
-	member, present := m.memberByNodeID(p.pairing.peer.identity.NodeUUID)
+	member, present := m.memberByUUID(p.pairing.peer.identity.NodeUUID)
 	if !pinned || !present || pin.AdmissionEpoch != newEpoch || member.AdmissionEpoch != newEpoch {
 		t.Fatal("old rollback or cached roster changed the newer B admission")
 	}

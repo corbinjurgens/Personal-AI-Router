@@ -397,7 +397,7 @@ func TestPAPausedAdvertisementConvergesWithoutMDNSChange(t *testing.T) {
 	t.Cleanup(func() { server.Close(); assertInteropListenerClosed(t, serverPort) })
 	pausedAdvertisementReverse(t, ctx, base, incarnation, server.Listener.Addr().String(), mesh, reverseConnects)
 	claim := noderec.PeerServicesClaim{Incarnation: incarnation, Source: "pa6-fixture", Descriptor: noderec.PeerServicesDescriptor{
-		HostUUID: "pa-peer", Name: "pa-peer", Addresses: []string{advertisedHost},
+		HostUUID: "pa-peer", Addresses: []string{advertisedHost},
 		Services: []noderec.PeerService{{Service: noderec.ServiceEngineManager, Port: ports.engineManagerHTTP}},
 	}}
 	claimJSON := mustMarshal(t, claim)

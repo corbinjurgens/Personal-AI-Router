@@ -25,7 +25,7 @@ func main() {
 	peerSync := flag.Bool("peer-sync", false, "serve the cross-node errors endpoint and push errors to peer nodes learned from the broker's discovery relay")
 	port := flag.Int("port", 14319, "HTTP port for the cross-node errors endpoint (only used with --peer-sync)")
 	clusterDir := flag.String("cluster-dir", "", "cluster config dir (node.crt/node.key + trusted/); cross-node error sync is pin-based cluster mTLS, so without a usable identity and live membership here this node serves and pushes nothing")
-	nodeID := flag.String("node-id", "", "this node's stable origin id (the broker passes its resolved per-host UUID); when unset, peer-sync resolves the shared stable UUID and local-only mode defaults to the hostname")
+	nodeID := flag.String("node-id", "", "this node's stable origin id (the broker passes its resolved per-host UUID); when unset, the shared stable UUID is resolved")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	resolveLevel := applog.RegisterFlag(nil, slog.LevelInfo)
 	flag.Parse()
@@ -52,7 +52,7 @@ func main() {
 	defer transport.Close()
 
 	codec := NewCodec(transport)
-	mgr := newStartupManager(codec, *peerSync, *nodeID, *clusterDir)
+	mgr := newStartupManager(codec, *nodeID, *clusterDir)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -88,9 +88,9 @@ func main() {
 	log.Print("shutdown complete")
 }
 
-func newStartupManager(codec *Codec, peerSync bool, nodeID, clusterDir string) *Manager {
+func newStartupManager(codec *Codec, nodeID, clusterDir string) *Manager {
 	mgr := NewManager(codec)
-	if peerSync && nodeID == "" {
+	if nodeID == "" {
 		// Match the broker's config root: clusterDir is <base>/cluster;
 		// empty selects nodeid's shared default. Resolve before NewPeerSync
 		// captures the origin, even if cluster creation will happen later.

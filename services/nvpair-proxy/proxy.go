@@ -1187,7 +1187,10 @@ func nodeCandidates(n Node) []string {
 	port := strconv.Itoa(n.Port)
 	sorted := netpick.Candidates(n.TXT, n.Addresses)
 	if len(sorted) == 0 {
-		// A non-IP entry (a .local hostname) that netpick cannot parse.
+		// A non-IP entry (a .local hostname) that netpick cannot parse. The Host
+		// fallback below serves manual nodes added through node/add, whose Host
+		// is the user's typed address; a directory node's Host is a display name
+		// and always arrives with an address, so it never reaches it.
 		hosts := n.Addresses
 		if len(hosts) == 0 {
 			if n.Host == "" {
@@ -1375,9 +1378,12 @@ func subscribedToNode(p engineProfile, n noderec.DirectoryNode) (Node, bool) {
 	// Key routing by the stable per-host UUID, not the hostname: candidate ids,
 	// scheduledOn, node selection, and the scheduler's priority list are all this
 	// value, so routing survives a PC rename and never conflates two same-named
-	// machines. Host stays the hostname (display / dial name). A relay
-	// DirectoryNode always carries a hostUuid (the scanner guarantees it at the
-	// browse boundary), so there is no name fallback here.
+	// machines. For a directory node Host is its display name and is never
+	// dialed: this function requires an address, so nodeCandidates never reaches
+	// its Host fallback here (that fallback serves manual nodes, whose Host is the
+	// user's address). A relay DirectoryNode always carries a hostUuid (the
+	// scanner guarantees it at the browse boundary), so there is no name fallback
+	// here.
 	node := Node{
 		ID:   n.HostUUID,
 		Host: n.Name,

@@ -21,10 +21,9 @@ vi.mock('@/ui/api/bootstrap', () => ({ getPairTransport: vi.fn() }))
 
 const invite: Invite = {
     inviteId: 'one',
-    fromNodeId: 'sender',
     fromNodeUuid: 'uuid',
     fromNodeName: 'Sender',
-    toNodeId: null,
+    toNodeUuid: null,
     clusterId: 'cluster',
     clusterFriendlyName: 'Home',
     pin: null,
@@ -306,9 +305,9 @@ const transport: ServiceTransport = {
 }
 
 const member: ClusterNode = {
-    id: 'peer',
     nodeUuid: 'peer-uuid',
     name: 'Peer',
+    displayName: 'Peer',
     ipAddress: '192.0.2.1',
     port: 1,
     clusterId: 'cluster',
@@ -322,7 +321,7 @@ function initial(members: ClusterNode[] = [member]): ClusterInitialSnapshot {
         info: { clusterId: 'cluster', isClustered: true, clusterFriendlyName: 'Home' },
         identity: {
             nodeUuid: 'self',
-            nodeId: 'self',
+            customName: null,
             name: 'Self',
             certFingerprint: 'fingerprint',
             clusterId: 'cluster'
@@ -387,6 +386,7 @@ beforeEach(() => {
                         permissionPush = undefined
                     }
                 },
+                onNodeNameChanged: () => () => {},
                 onInviteReceived: (callback: (invite: Invite) => void) => {
                     received = callback
                     return () => {
@@ -435,7 +435,7 @@ describe('accepted invitation outcome tracking', () => {
             info: { clusterId: null, isClustered: false, clusterFriendlyName: '' },
             identity: {
                 nodeUuid: 'self',
-                nodeId: 'self',
+                customName: null,
                 name: 'Self',
                 certFingerprint: '',
                 clusterId: ''
@@ -498,7 +498,7 @@ describe('accepted invitation outcome tracking', () => {
             info: { clusterId: null, isClustered: false, clusterFriendlyName: '' },
             identity: {
                 nodeUuid: 'self',
-                nodeId: 'self',
+                customName: null,
                 name: 'Self',
                 certFingerprint: '',
                 clusterId: ''
@@ -558,7 +558,7 @@ describe('accepted invitation outcome tracking', () => {
             info: { clusterId: null, isClustered: false, clusterFriendlyName: '' },
             identity: {
                 nodeUuid: 'self',
-                nodeId: 'self',
+                customName: null,
                 name: 'Self',
                 certFingerprint: '',
                 clusterId: ''

@@ -635,7 +635,7 @@ func (v *nodesView) sendJoin() tea.Cmd {
 		params["address"], params["port"] = host, port
 	}
 	if v.joinNodeID != "" {
-		params["nodeId"] = v.joinNodeID
+		params["nodeUuid"] = v.joinNodeID
 	}
 	return v.joinAction("cluster:ask-to-join", "", params)
 }
@@ -1581,7 +1581,7 @@ func (v *nodesView) inviteSelected() tea.Cmd {
 		return nil
 	}
 
-	params := map[string]any{"address": row.address, "nodeId": row.key, "allowRemoteManagement": v.outboundAllow}
+	params := map[string]any{"address": row.address, "nodeUuid": row.key, "allowRemoteManagement": v.outboundAllow}
 	name := row.name
 	v.invitedKey = row.key
 	v.inviteSending, v.outboundName = true, name
@@ -2276,9 +2276,6 @@ func (v *nodesView) clusterLine() string {
 		}
 	}
 	name := v.identity.Name
-	if name == "" {
-		name = v.identity.NodeID
-	}
 	// The label if one is set, the id otherwise: the id is what anything
 	// operational keys off, so it is the honest fallback rather than "unnamed".
 	label := v.clusterName

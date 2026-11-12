@@ -43,9 +43,7 @@ export default function PendingInviteCard({ invite }: { invite: Invite }) {
         <div className="settings-card node-item-card pair-paper p-4">
             <Flex align="center" justify="between" gap="2">
                 <Stack gap="1">
-                    <Text kind="body/bold/sm" className="uppercase">
-                        {invite.fromNodeName || invite.fromNodeId}
-                    </Text>
+                    <Text kind="body/bold/sm">{invite.fromNodeName}</Text>
                     <Text kind="body/regular/sm" className="text-subtle-color">
                         Invited you to {invite.clusterFriendlyName || 'their cluster'} ·{' '}
                         {receivedAt}

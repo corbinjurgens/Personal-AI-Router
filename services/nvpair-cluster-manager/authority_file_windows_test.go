@@ -89,7 +89,7 @@ func TestClusterAuthorityReadsShareDeleteAccess(t *testing.T) {
 		if err != nil {
 			t.Fatalf("create trusted directory: %v", err)
 		}
-		cert, _, err := generateLeaf("peer", "peer")
+		cert, _, err := generateLeaf("peer")
 		if err != nil {
 			t.Fatalf("generate peer certificate: %v", err)
 		}
@@ -121,14 +121,14 @@ func TestClusterAuthorityReadsShareDeleteAccess(t *testing.T) {
 	})
 	t.Run("identity and keypair", func(t *testing.T) {
 		dir := t.TempDir()
-		original, err := loadOrMintIdentity(dir)
+		original, _, err := loadOrMintIdentity(dir)
 		if err != nil {
 			t.Fatalf("mint fixture identity: %v", err)
 		}
 		for _, name := range []string{"identity.json", "node.crt", "node.key"} {
 			holdClusterAuthorityDeleteAccess(t, filepath.Join(dir, name))
 		}
-		loaded, err := loadOrMintIdentity(dir)
+		loaded, _, err := loadOrMintIdentity(dir)
 		if err != nil {
 			t.Fatalf("load identity with DELETE access held: %v", err)
 		}

@@ -116,6 +116,38 @@ func TestBrowseReceivesForFullIntervalAfterSupplementalSends(t *testing.T) {
 	}
 }
 
+// textBrowseResolver delivers one entry whose TXT strings carry miekg/dns
+// zone-file escapes, as zeroconf hands them over after unpacking.
+type textBrowseResolver struct{ text []string }
+
+func (r textBrowseResolver) Browse(ctx context.Context, _, _ string, entries chan<- *zeroconf.ServiceEntry) error {
+	entry := zeroconf.NewServiceEntry("nvpair-fixture", "_nvpair-test._tcp", "local")
+	entry.Text = r.text
+	go func() {
+		entries <- entry
+		<-ctx.Done()
+		close(entries)
+	}()
+	return nil
+}
+
+func TestBrowseUnescapesReceivedTXT(t *testing.T) {
+	b := New("_nvpair-test._tcp", "local", WithScanTimeout(50*time.Millisecond))
+	escaped := []string{`uuid=fixture`, `name=back\\slash \"q\"`, `name=\231\153\189`}
+	seen := b.browseWithDependencies(context.Background(), func() (browseResolver, error) {
+		return textBrowseResolver{text: escaped}, nil
+	}, func(_, _ string) map[string]bool { return nil }, context.WithTimeout, context.WithTimeout)
+	if len(seen) != 1 {
+		t.Fatalf("seen = %v, want one node", seen)
+	}
+	want := []string{`uuid=fixture`, `name=back\slash "q"`, "name=白"}
+	for _, node := range seen {
+		if !slices.Equal(node.TXT, want) {
+			t.Fatalf("TXT = %q, want %q", node.TXT, want)
+		}
+	}
+}
+
 type errorBrowseResolver struct{}
 
 func (errorBrowseResolver) Browse(_ context.Context, _, _ string, entries chan<- *zeroconf.ServiceEntry) error {

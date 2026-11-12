@@ -153,10 +153,10 @@ func TestDirectoryAuthenticatedClaimResistsBrowseSupersedeEviction(t *testing.T)
 
 func TestToDirectoryNode(t *testing.T) {
 	raw := RawNode{
-		ID:        "hostA",
-		Host:      "hostA.local.",
+		ID:        mdnsLabel("host-uuid"),
+		Host:      mdnsLabel("host-uuid") + ".local.",
 		Addresses: []string{"10.221.0.9", "192.168.1.10"},
-		TXT:       []string{"v=1", "uuid=host-uuid", "cluster-uuid=clu", "ip=192.168.1.10", "ni=14318", "lc=8080"},
+		TXT:       []string{"v=1", "uuid=host-uuid", "cluster-uuid=clu", "name=  Desk A ", "ip=192.168.1.10", "ni=14318", "lc=8080"},
 	}
 	n, ok := toDirectoryNode(raw, true)
 	if !ok {
@@ -165,8 +165,8 @@ func TestToDirectoryNode(t *testing.T) {
 	if n.HostUUID != "host-uuid" {
 		t.Errorf("HostUUID = %q, want host-uuid", n.HostUUID)
 	}
-	if n.Name != "hostA" {
-		t.Errorf("Name = %q, want hostA (instance)", n.Name)
+	if n.Name != "Desk A" {
+		t.Errorf("Name = %q, want the normalized name= value", n.Name)
 	}
 	if n.IP != "192.168.1.10" {
 		t.Errorf("IP = %q, want the ip= TXT value", n.IP)
@@ -179,6 +179,34 @@ func TestToDirectoryNode(t *testing.T) {
 	}
 	if n.Services[noderec.ServiceLlamaCPP].Port != 8080 {
 		t.Errorf("ol port = %d", n.Services[noderec.ServiceLlamaCPP].Port)
+	}
+}
+
+// TestToDirectoryNodeNameComesOnlyFromTXT pins the name source: the record's
+// name= value after validation, never the instance label, and empty when the
+// value is missing or invalid.
+func TestToDirectoryNodeNameComesOnlyFromTXT(t *testing.T) {
+	cases := []struct {
+		name string
+		txt  []string
+		want string
+	}{
+		{"missing name", []string{"v=1", "uuid=host-uuid"}, ""},
+		{"numeric name", []string{"v=1", "uuid=host-uuid", "name=1234"}, "1234"},
+		{"non-ascii name", []string{"v=1", "uuid=host-uuid", "name=白いPC"}, "白いPC"},
+		{"control character", []string{"v=1", "uuid=host-uuid", "name=bad\u0007name"}, ""},
+		{"blank name", []string{"v=1", "uuid=host-uuid", "name=   "}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			n, ok := toDirectoryNode(RawNode{ID: mdnsLabel("host-uuid"), Addresses: []string{"192.168.1.10"}, TXT: tc.txt}, false)
+			if !ok {
+				t.Fatal("a record with uuid= should project")
+			}
+			if n.Name != tc.want {
+				t.Fatalf("Name = %q, want %q", n.Name, tc.want)
+			}
+		})
 	}
 }
 
@@ -302,10 +330,10 @@ func TestDirectoryUpsertRemoveSnapshot(t *testing.T) {
 	a := noderec.DirectoryNode{HostUUID: "a", Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceLlamaCPP: {Port: 8080}}}
 	b := noderec.DirectoryNode{HostUUID: "b", Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceErrors: {Port: 14319}}}
 
-	if !d.upsert(a) {
+	if isNew, _ := d.upsert(a); !isNew {
 		t.Error("first upsert should be new")
 	}
-	if d.upsert(a) {
+	if isNew, _ := d.upsert(a); isNew {
 		t.Error("second upsert of same hostUuid should not be new")
 	}
 	d.upsert(b)

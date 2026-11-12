@@ -42,7 +42,7 @@ func TestPeerServicesCandidateUnionKeepsLastHint(t *testing.T) {
 	}
 	browserHosts := []string{"192.0.2.20", "192.0.2.21", "192.0.2.22", "192.0.2.23"}
 	f.a.browser.setRelay([]noderec.DirectoryNode{{HostUUID: f.b.identity.NodeUUID, Name: "walk-peer", IP: browserHosts[0], IPs: browserHosts, Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceCluster: {Port: browserPort}}}})
-	member, ok := f.a.memberByNodeID(f.b.identity.NodeUUID)
+	member, ok := f.a.memberByUUID(f.b.identity.NodeUUID)
 	if !ok {
 		t.Fatal("learned member missing")
 	}
@@ -74,7 +74,7 @@ func TestPeerServicesCandidateUnionKeepsLastHint(t *testing.T) {
 	// Same host+port from discovery wins over its persisted duplicate, without
 	// changing the order of the other persisted candidates.
 	f.a.browser.seed(f.b.identity.NodeUUID, "192.0.2.60", f.b.port)
-	member, _ = f.a.memberByNodeID(f.b.identity.NodeUUID)
+	member, _ = f.a.memberByUUID(f.b.identity.NodeUUID)
 	dedup := []string{f.lan, net.JoinHostPort("192.0.2.60", fmt.Sprint(f.b.port)), net.JoinHostPort("192.0.2.61", fmt.Sprint(f.b.port)), net.JoinHostPort("192.0.2.62", fmt.Sprint(f.b.port)), f.tail}
 	if got := f.a.resolvePeerAddrs(*member); !slices.Equal(got, dedup) {
 		t.Fatalf("dedup precedence=%v want=%v", got, dedup)
@@ -88,7 +88,7 @@ func TestResolvePeerAddrsIncludesAuthenticatedHints(t *testing.T) {
 	}
 	f.m.browser = newBrowser()
 	f.m.browser.seed(f.peer.UUID, "192.0.2.56", 25422)
-	member, _ := f.m.memberByNodeID(f.peer.UUID)
+	member, _ := f.m.memberByUUID(f.peer.UUID)
 	want := []string{"192.0.2.55:25421", "192.0.2.56:25422", "100.90.0.8:25421"}
 	if got := f.m.resolvePeerAddrs(*member); !slices.Equal(got, want) {
 		t.Fatalf("resolved addresses = %v, want %v", got, want)
@@ -119,8 +119,8 @@ func TestReconcileWithFailsOverToAnAnsweringAddress(t *testing.T) {
 
 	pinTrusted(t, mA, mB.identity.NodeUUID, string(mB.identity.CertPEM), mB.identity.CertFingerprint)
 	pinTrusted(t, mB, mA.identity.NodeUUID, string(mA.identity.CertPEM), mA.identity.CertFingerprint)
-	mA.upsertMember(&ClusterNode{NodeUUID: mB.identity.NodeUUID, ID: "node-b", IPAddress: "127.0.0.1", Port: 15032, ClusterID: "cluster-1", AdmissionEpoch: 1, State: stateMember})
-	mB.upsertMember(&ClusterNode{NodeUUID: mA.identity.NodeUUID, ID: "node-a", IPAddress: "192.0.2.1", Port: 15031, ClusterID: "cluster-1", AdmissionEpoch: 1, State: stateMember})
+	mA.upsertMember(&ClusterNode{NodeUUID: mB.identity.NodeUUID, IPAddress: "127.0.0.1", Port: 15032, ClusterID: "cluster-1", AdmissionEpoch: 1, State: stateMember})
+	mB.upsertMember(&ClusterNode{NodeUUID: mA.identity.NodeUUID, IPAddress: "192.0.2.1", Port: 15031, ClusterID: "cluster-1", AdmissionEpoch: 1, State: stateMember})
 	mB.browser = newBrowser()
 	mB.browser.setRelay([]noderec.DirectoryNode{{
 		HostUUID: mA.identity.NodeUUID,
@@ -147,7 +147,7 @@ func TestReconcileBudgetCoversTheWholeCandidateWalk(t *testing.T) {
 	pinTrusted(t, m, peerUUID, certPEM, fingerprint)
 
 	blackholed := []string{"192.0.2.1:14321", "192.0.2.2:14321", "192.0.2.3:14321", "192.0.2.4:14321"}
-	m.upsertMember(&ClusterNode{NodeUUID: peerUUID, ID: "peer", IPAddress: "192.0.2.1", Port: 14321, ClusterID: "cluster-1", AdmissionEpoch: 1, State: stateMember})
+	m.upsertMember(&ClusterNode{NodeUUID: peerUUID, IPAddress: "192.0.2.1", Port: 14321, ClusterID: "cluster-1", AdmissionEpoch: 1, State: stateMember})
 	m.browser = newBrowser()
 	m.browser.setRelay([]noderec.DirectoryNode{{
 		HostUUID: peerUUID,
@@ -189,7 +189,7 @@ func TestResolvePeerAddrsPutsTheRecordedAddressFirst(t *testing.T) {
 		Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceCluster: {Port: 14321}},
 	}})
 
-	got := m.resolvePeerAddrs(ClusterNode{NodeUUID: peer, ID: "peer", IPAddress: "10.172.55.129", Port: 14321})
+	got := m.resolvePeerAddrs(ClusterNode{NodeUUID: peer, IPAddress: "10.172.55.129", Port: 14321})
 	want := []string{"10.172.55.129:14321", "192.168.240.1:14321"}
 	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("resolvePeerAddrs = %v, want %v", got, want)
@@ -203,7 +203,7 @@ func TestResolvePeerAddrsPutsTheRecordedAddressFirst(t *testing.T) {
 func TestRefreshMemberAddrsFromMDNSKeepsAStillAdvertisedAddress(t *testing.T) {
 	m := newTestManagerPort(t, 14321)
 	peer := "44444444-4444-4444-4444-444444444444"
-	m.upsertMember(&ClusterNode{NodeUUID: peer, ID: "peer", IPAddress: "10.172.55.129", Port: 14321, State: stateMember})
+	m.upsertMember(&ClusterNode{NodeUUID: peer, IPAddress: "10.172.55.129", Port: 14321, State: stateMember})
 	m.browser = newBrowser()
 	m.browser.setRelay([]noderec.DirectoryNode{{
 		HostUUID: peer,
@@ -214,7 +214,7 @@ func TestRefreshMemberAddrsFromMDNSKeepsAStillAdvertisedAddress(t *testing.T) {
 	}})
 
 	m.refreshMemberAddrsFromMDNS()
-	if n, _ := m.memberByNodeID(peer); n.IPAddress != "10.172.55.129" {
+	if n, _ := m.memberByUUID(peer); n.IPAddress != "10.172.55.129" {
 		t.Fatalf("stored address = %q, want it kept at 10.172.55.129", n.IPAddress)
 	}
 
@@ -226,7 +226,7 @@ func TestRefreshMemberAddrsFromMDNSKeepsAStillAdvertisedAddress(t *testing.T) {
 		Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceCluster: {Port: 14321}},
 	}})
 	m.refreshMemberAddrsFromMDNS()
-	if n, _ := m.memberByNodeID(peer); n.IPAddress != "10.172.55.200" {
+	if n, _ := m.memberByUUID(peer); n.IPAddress != "10.172.55.200" {
 		t.Fatalf("stored address = %q, want the moved peer's 10.172.55.200", n.IPAddress)
 	}
 }
@@ -311,9 +311,8 @@ func publishPendingInvite(t *testing.T, m *Manager, inviteID string) {
 	cid, friendly := m.clusterIdentity()
 	m.putInvite(&Invite{
 		InviteID:            inviteID,
-		FromNodeID:          m.identity.NodeID,
 		FromNodeUUID:        m.identity.NodeUUID,
-		FromNodeName:        m.identity.Name,
+		FromNodeName:        m.selfName(),
 		ClusterID:           cid,
 		ClusterFriendlyName: friendly,
 		State:               inviteStatePending,

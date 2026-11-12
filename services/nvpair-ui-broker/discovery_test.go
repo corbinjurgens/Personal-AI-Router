@@ -476,22 +476,22 @@ func TestModelControlsBrokerAttributionWire(t *testing.T) {
 	}
 }
 
-// TestDiscoveryStoreRekeysOnRename verifies that a discovered node changing
-// hostname (same host UUID, new mDNS instance name) updates its single
-// store entry in place rather than leaving a ghost under the old name.
-func TestDiscoveryStoreRekeysOnRename(t *testing.T) {
+// TestDiscoveryStoreTracksRename verifies that a discovered node changing its
+// mDNS name= (same host UUID) updates its single store entry in place: the id
+// stays the UUID and only the shown name changes.
+func TestDiscoveryStoreTracksRename(t *testing.T) {
 	s := newDiscoveryStore()
 	const uuid = "11111111-1111-1111-1111-111111111111"
 
-	s.Upsert(EnrichedNode{ID: "old-host", HostUUID: uuid}, sourceScanner)
-	s.Upsert(EnrichedNode{ID: "new-host", HostUUID: uuid}, sourceScanner)
+	s.Upsert(EnrichedNode{ID: uuid, HostUUID: uuid, Name: "old-name"}, sourceScanner)
+	s.Upsert(EnrichedNode{ID: uuid, HostUUID: uuid, Name: "new-name"}, sourceScanner)
 
 	snap := s.Snapshot()
 	if len(snap) != 1 {
 		t.Fatalf("a rename must not duplicate the node: got %d entries, want 1", len(snap))
 	}
-	if snap[0].ID != "new-host" {
-		t.Fatalf("store did not track the new name: got id=%q want %q", snap[0].ID, "new-host")
+	if snap[0].ID != uuid || snap[0].Name != "new-name" {
+		t.Fatalf("store did not track the new name: got id=%q name=%q, want id=%q name=%q", snap[0].ID, snap[0].Name, uuid, "new-name")
 	}
 	if snap[0].HostUUID != uuid {
 		t.Fatalf("hostUuid not projected to the wire: got %q want %q", snap[0].HostUUID, uuid)
@@ -574,13 +574,13 @@ func TestDiscoveryStoreSourceOwnership(t *testing.T) {
 func TestDiscoveryStoreScannerProjectionWins(t *testing.T) {
 	const uuid = "shared-uuid"
 	s := newDiscoveryStore()
-	s.Upsert(EnrichedNode{ID: "manual-host", HostUUID: uuid, Trusted: false}, sourceManual)
-	s.Upsert(EnrichedNode{ID: "mdns-host", HostUUID: uuid, Trusted: true}, sourceScanner)
+	s.Upsert(EnrichedNode{ID: "manual-host", HostUUID: uuid, Name: "manual-host", Trusted: false}, sourceManual)
+	s.Upsert(EnrichedNode{ID: uuid, HostUUID: uuid, Name: "mdns-host", Trusted: true}, sourceScanner)
 	snap := s.Snapshot()
 	if len(snap) != 1 {
 		t.Fatalf("want one record, got %d", len(snap))
 	}
-	if snap[0].ID != "mdns-host" || !snap[0].Trusted {
+	if snap[0].ID != uuid || snap[0].Name != "mdns-host" || !snap[0].Trusted {
 		t.Fatalf("scanner projection should win when both claim: %+v", snap[0])
 	}
 	// Drop the scanner claim: the manual projection takes over.
@@ -788,7 +788,7 @@ func TestHandleNotifyNodeLostUsesHostUUID(t *testing.T) {
 	const uuid = "peer-uuid"
 	const name = "peer-friendly-name"
 	store := newDiscoveryStore()
-	store.Upsert(EnrichedNode{ID: name, HostUUID: uuid}, sourceScanner)
+	store.Upsert(EnrichedNode{ID: uuid, HostUUID: uuid, Name: name}, sourceScanner)
 
 	var gotUUID, gotName string
 	var calls int
@@ -804,6 +804,23 @@ func TestHandleNotifyNodeLostUsesHostUUID(t *testing.T) {
 	}
 	if gotName != name {
 		t.Errorf("onNodeLost name = %q, want %q", gotName, name)
+	}
+}
+
+// TestHandleNotifyNodeLostUsesShownName: the departure message names the node
+// as it was shown (here its member display name), captured before removal.
+func TestHandleNotifyNodeLostUsesShownName(t *testing.T) {
+	const uuid = "peer-uuid"
+	store := newDiscoveryStore()
+	store.Upsert(EnrichedNode{ID: uuid, HostUUID: uuid, Name: "mdns-name"}, sourceScanner)
+	store.SetMemberNames(map[string]string{uuid: "Member Name"})
+
+	var gotName string
+	sp := &scannerProcess{store: store, onNodeLost: func(_, n string) { gotName = n }}
+	sp.handleNotify(noderec.NotifyNodeRemoved, nodeRemovedFrame(t, "mdns-name", uuid))
+
+	if gotName != "Member Name" {
+		t.Fatalf("onNodeLost name = %q, want the shown member name", gotName)
 	}
 }
 

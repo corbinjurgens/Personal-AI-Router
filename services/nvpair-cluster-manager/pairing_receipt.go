@@ -63,9 +63,22 @@ func (m *Manager) loadPairingReceipts() error {
 	if err != nil {
 		return err
 	}
-	var receipts map[string]pairingReceipt
-	if err := json.Unmarshal(data, &receipts); err != nil {
+	var stored map[string]pairingReceipt
+	if err := json.Unmarshal(data, &stored); err != nil {
 		return err
+	}
+	// The publication guard names its receipt; recovery aborts that exact
+	// transaction even after the receipt's retention lapsed.
+	guardOwner, err := m.pairingGuardOwner()
+	if err != nil {
+		return err
+	}
+	now := time.Now().UnixMilli()
+	receipts := make(map[string]pairingReceipt, len(stored))
+	for id, receipt := range stored {
+		if id == guardOwner || pairingReceiptRetained(receipt, now) {
+			receipts[id] = receipt
+		}
 	}
 	if len(receipts) > maxPreInviteSessions {
 		return fmt.Errorf("too many pairing receipts")
@@ -101,12 +114,19 @@ func (m *Manager) loadPairingReceipts() error {
 	return nil
 }
 
+// A receipt outlives its expiry only while it carries an abort intent.
+// Expired receipts are dropped unread, so their stored format is never checked.
+func pairingReceiptRetained(receipt pairingReceipt, now int64) bool {
+	return receipt.Rollback || receipt.ExpiresAt > now
+}
+
 func (m *Manager) savePairingReceipt(receipt pairingReceipt) error {
 	m.receiptMu.Lock()
 	defer m.receiptMu.Unlock()
+	now := time.Now().UnixMilli()
 	next := make(map[string]pairingReceipt)
 	for id, current := range m.pairingReceipts {
-		if current.Rollback || current.ExpiresAt > time.Now().UnixMilli() {
+		if pairingReceiptRetained(current, now) {
 			next[id] = current
 		}
 	}
@@ -238,7 +258,7 @@ func (m *Manager) receiptCommitMatchesLocked(receipt pairingReceipt, pi *Pairing
 		return false
 	}
 	cid, epoch := m.currentAdmission()
-	member, memberOK := m.memberByNodeID(pi.NodeUUID)
+	member, memberOK := m.memberByUUID(pi.NodeUUID)
 	pin, pinOK := m.trust.Get(pi.NodeUUID)
 	if !m.teardownPending.Load() && cid == receipt.ClusterID && epoch == receipt.LocalEpoch &&
 		memberOK && pinOK && member.State == stateMember && member.ClusterID == cid && pin.ClusterID == cid &&
@@ -335,7 +355,7 @@ func (m *Manager) pairingRollbackMatchesAdmissionLocked(receipt pairingReceipt) 
 		if activated >= receipt.LocalEpoch && !(receipt.Rollback && receipt.AllowRemoteManagement != nil && activated == receipt.LocalEpoch && m.admissionWasRetired()) {
 			return false, nil
 		}
-		if self, ok := m.memberByNodeID(m.identity.NodeUUID); ok && self.AdmissionEpoch != 0 &&
+		if self, ok := m.memberByUUID(m.identity.NodeUUID); ok && self.AdmissionEpoch != 0 &&
 			(self.ClusterID != receipt.ClusterID || self.AdmissionEpoch != receipt.LocalEpoch) {
 			return false, nil // preserve a newer provisional local admission too
 		}
@@ -392,13 +412,13 @@ func (m *Manager) rollbackPairingPeerLocked(receipt pairingReceipt) error {
 			}
 		}
 	}
-	if member, ok := m.memberByNodeID(pi.NodeUUID); ok &&
+	if member, ok := m.memberByUUID(pi.NodeUUID); ok &&
 		member.ClusterID == receipt.ClusterID && member.AdmissionEpoch == pi.AdmissionEpoch {
 		m.removeMemberByUUID(pi.NodeUUID)
 	}
 	var provisionalSelf *ClusterNode
 	if receipt.Role == roleJoiner && rollbackErr == nil {
-		if self, ok := m.memberByNodeID(m.identity.NodeUUID); ok &&
+		if self, ok := m.memberByUUID(m.identity.NodeUUID); ok &&
 			self.ClusterID == receipt.ClusterID && self.AdmissionEpoch == receipt.LocalEpoch {
 			provisionalSelf = self
 			m.removeMemberByUUID(m.identity.NodeUUID)

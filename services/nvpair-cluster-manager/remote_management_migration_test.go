@@ -34,13 +34,12 @@ func remoteManagementAddPeer(t *testing.T, m *Manager) *Manager {
 	t.Helper()
 	peer := testManagerAt(t, t.TempDir(), 15130)
 	if err := m.trust.Pin(&TrustedPin{
-		NodeUUID: peer.identity.NodeUUID, NodeID: peer.identity.NodeID,
-		Name: peer.identity.Name, CertPem: string(peer.identity.CertPEM),
+		NodeUUID: peer.identity.NodeUUID, Name: peer.selfName(), CertPem: string(peer.identity.CertPEM),
 		CertFingerprint: peer.identity.CertFingerprint, ClusterID: "management-test", AdmissionEpoch: 1,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	m.upsertMember(&ClusterNode{NodeUUID: peer.identity.NodeUUID, ID: peer.identity.NodeID, ClusterID: "management-test", AdmissionEpoch: 1, State: stateMember})
+	m.upsertMember(&ClusterNode{NodeUUID: peer.identity.NodeUUID, ClusterID: "management-test", AdmissionEpoch: 1, State: stateMember})
 	if err := m.persistMembersErr(); err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +191,7 @@ func TestRemoteManagementMigrationRejectsReadmittedOriginalPeer(t *testing.T) {
 	if err := m.trust.Pin(pin); err != nil {
 		t.Fatal(err)
 	}
-	m.upsertMember(&ClusterNode{NodeUUID: peer.identity.NodeUUID, ID: peer.identity.NodeID, ClusterID: "management-test", AdmissionEpoch: 2, State: stateMember})
+	m.upsertMember(&ClusterNode{NodeUUID: peer.identity.NodeUUID, ClusterID: "management-test", AdmissionEpoch: 2, State: stateMember})
 	if err := m.persistMembersErr(); err != nil {
 		t.Fatal(err)
 	}
@@ -674,7 +673,7 @@ func TestRemoteManagementLeaveCreateReadmissionRetainsMarkerAndDeniesOldGrant(t 
 	if err := m.trust.Pin(pin); err != nil {
 		t.Fatal(err)
 	}
-	m.upsertMember(&ClusterNode{NodeUUID: pin.NodeUUID, ID: pin.NodeID, ClusterID: newID, AdmissionEpoch: pin.AdmissionEpoch, State: stateMember})
+	m.upsertMember(&ClusterNode{NodeUUID: pin.NodeUUID, ClusterID: newID, AdmissionEpoch: pin.AdmissionEpoch, State: stateMember})
 	if err := m.persistMembersErr(); err != nil {
 		t.Fatal(err)
 	}
@@ -810,7 +809,7 @@ func TestRemoteManagementPendingMigrationRejectsChangedCertificateWithOldMetadat
 	if !ok {
 		t.Fatal("fixture pin missing")
 	}
-	newCert, _, err := generateLeaf(pin.NodeUUID, "replacement-peer")
+	newCert, _, err := generateLeaf(pin.NodeUUID)
 	if err != nil {
 		t.Fatal(err)
 	}

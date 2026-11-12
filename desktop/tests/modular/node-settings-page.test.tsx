@@ -215,9 +215,9 @@ it('Cluster Edit node targets the stable node identity', async () => {
         root.render(
             <ActiveNode
                 node={{
-                    id: 'display-hostname',
                     nodeUuid: 'peer',
                     name: 'Peer B',
+                    displayName: 'Peer B',
                     ipAddress: '127.0.0.1',
                     port: 1,
                     clusterId: 'cluster',
@@ -300,6 +300,11 @@ it('clears pending engine row state when a mounted page focuses another node', a
 })
 
 it('keeps routing history on Cluster and node settings on the selected node page', async () => {
+    // The Cluster page computes member labels from the overview node list.
+    Object.defineProperty(window, 'windowApi', {
+        configurable: true,
+        value: { platform: 'Windows' }
+    })
     useOverviewUiStore.getState().focusNodeSettings('peer')
     await act(async () => root.render(<Settings />))
     expect(container.textContent).not.toContain('Configure several nodes')

@@ -493,8 +493,8 @@ func TestNodesFilterNarrowsWithoutLosingTheCluster(t *testing.T) {
 	v.SetSize(100, 30)
 	v.identity.ClusterID = "cluster-1"
 	v.feeds.members = []clusterNode{
-		{NodeUUID: "a", Name: "alpha", State: "member"},
-		{NodeUUID: "b", Name: "beta", State: "member"},
+		{NodeUUID: "a", Name: "alpha", DisplayName: "alpha", State: "member"},
+		{NodeUUID: "b", Name: "beta", DisplayName: "beta", State: "member"},
 	}
 	v.rebuild()
 
@@ -529,7 +529,7 @@ func TestNodesFilterRetiresPinForAHiddenPeer(t *testing.T) {
 	v.invitedKey = "b"
 	v.filter = "alpha" // hides the very node we invited
 
-	v.feeds.members = []clusterNode{{NodeUUID: "b", Name: "beta", State: "member"}}
+	v.feeds.members = []clusterNode{{NodeUUID: "b", Name: "beta", DisplayName: "beta", State: "member"}}
 	v.rebuild()
 
 	if v.invitedKey != "" {
@@ -610,7 +610,7 @@ func TestRosterReadDoesNotOverwriteANewerPush(t *testing.T) {
 	v := newNodesView(nil)
 	v.SetSize(120, 30)
 	// A read sent before the push, whose reply lands after it.
-	stale := clusterMembersMsg{nodes: []clusterNode{{NodeUUID: "gone", Name: "gone", State: "member"}}, pushes: v.membersPushes}
+	stale := clusterMembersMsg{nodes: []clusterNode{{NodeUUID: "gone", Name: "gone", DisplayName: "gone", State: "member"}}, pushes: v.membersPushes}
 
 	params := []byte(`{"nodes":[{"nodeUuid":"now","name":"now","state":"member"}]}`)
 	v.Update(NotificationMsg{Msg: &rpc.Message{Method: "nodes:changed", Params: params}})

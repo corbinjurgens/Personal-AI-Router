@@ -26,10 +26,9 @@ describe('parseInvite terminal states', () => {
     it('round-trips a rejected invite with its reason', () => {
         const invite = parseInvite({
             inviteId: 'inv-1',
-            fromNodeId: 'host-a',
             fromNodeUuid: 'uuid-a',
             fromNodeName: 'Host A',
-            toNodeId: null,
+            toNodeUuid: null,
             clusterId: 'cluster-1',
             clusterFriendlyName: 'Home',
             pin: null,

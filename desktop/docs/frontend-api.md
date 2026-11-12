@@ -268,6 +268,19 @@ for the full wire semantics and capacity ownership.
 - `abandonIfSolo()` removes a cluster created only for an unsuccessful invite.
 - `onInviteReceived(callback)` reports a freshly-arrived inbound pairing request.
 - `onPendingInvitesChanged(callback)` reports the full authoritative set of live inbound invites (re-emitted on every add or prune).
+- `setNodeName(name)` renames this node through the cluster manager; `null`
+  returns to the generated default. It resolves to `NodeNameResult`
+  `{nodeUuid, name, customName}`; an invalid name rejects with the service's
+  readable message. `onNodeNameChanged(callback)` reports every change of this
+  node's name, from any client.
+- `setPeerName(nodeUuid, name)` renames a cluster member on that member itself
+  (`null` for its generated default) and resolves to `NodeNameResult`. The
+  member enforces the remote-management grant: without it the call rejects with
+  code `-32012` and the member's message. The new name arrives through
+  `nodes:changed`.
+- `setPeerNickname(nodeUuid, nickname)` sets a name only this node uses for the
+  member (`null` clears it) and resolves to `PeerNicknameResult`
+  `{nodeUuid, nickname, displayName}`.
 
 The admission-request API is separate from `getInitial()` and its
 `ClusterInitialSnapshot`: `getJoinRequests()`, `askToJoin(params)`,
@@ -309,7 +322,7 @@ contract lives in [cluster-manager spec §7.0.1](../../services/nvpair-cluster-m
 
 - `getNodes()` returns discoverable nodes. Each `AvailableNode` carries the
   backend `id` (the stable per-host UUID that keys every domain), the display
-  `name` (hostname), the reachable `ipAddress`/`port`, and the `trusted` and
+  `name` (decided by the broker), the reachable `ipAddress`/`port`, and the `trusted` and
   `clustered` flags. A `clustered` node already belongs to some cluster and is
   rendered non-invitable.
 - `onNodesChanged(callback)` reports discovery changes.
@@ -528,6 +541,9 @@ Commands return no state. Renderer stores update from
 | `cluster:respond-to-invite` | `{ inviteId, accept:true, pin, allowRemoteManagement }` or `{ inviteId, accept:false }` | `Invite` |
 | `cluster:cancel-invite`     | `{ inviteId }`               | `Invite`                  |
 | `cluster:abandon-if-solo`   | `void`                       | `null`                    |
+| `cluster:set-node-name`     | `{ name: string \| null }`   | `NodeNameResult`          |
+| `cluster:set-peer-name`     | `{ nodeUuid, name: string \| null }` | `NodeNameResult`  |
+| `cluster:set-peer-nickname` | `{ nodeUuid, nickname: string \| null }` | `PeerNicknameResult` |
 | `engines:get-initial`       | `void`                       | `EngineInitialState`      |
 | `engines:get-settings`      | `EngineSettingsTarget`       | `EngineSettingsSnapshot`  |
 | `engines:preview-settings`  | `EngineSettingsRequest`      | `EngineSettingsPreview`   |
@@ -566,6 +582,7 @@ Commands return no state. Renderer stores update from
 | `cluster:invite-received`         | `Invite`                         |
 | `cluster:pending-invites-changed` | `Invite[]`                       |
 | `cluster:join-requests-changed` | Join-request eligibility and full snapshot |
+| `cluster:node-name-changed`       | `NodeNameResult`                 |
 | `discovery:nodes-changed`         | `AvailableNode[]`                |
 | `connection:cluster-identity`     | `ClusterIdentityPayload`         |
 | `state:request-refresh`           | `void`                           |

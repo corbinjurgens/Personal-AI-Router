@@ -311,7 +311,8 @@ func newTask2Fixture(t *testing.T, options ...task2FixtureOption) *task2Fixture 
 		args := append([]string{"--cluster-dir", filepath.Join(f.a.base, "cluster")}, fixtureMDNSScannerArgs(f.namespace)...)
 		f.scanner = startTask1Process(t, f.a.base, scannerBin, args...)
 		f.scanner.call(t, "discovery:get-nodes", nil)
-		responder, err := mdns.NewResponder("task2-"+filepath.Base(f.b.base), f.namespace.Service, f.namespace.Domain, noderec.SRVPort, []string{
+		label := "task2-" + filepath.Base(f.b.base)
+		responder, err := mdns.NewResponder(label, label, f.namespace.Service, f.namespace.Domain, noderec.SRVPort, []string{
 			"v=1", "uuid=" + f.b.uuid, "cluster-uuid=" + f.b.uuid, "ip=127.0.0.1",
 			fmt.Sprintf("ni=%d", f.blockedPort), fmt.Sprintf("em=%d", f.blockedPort), fmt.Sprintf("ec=%d", f.blockedPort),
 		})

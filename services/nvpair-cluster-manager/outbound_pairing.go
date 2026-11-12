@@ -57,7 +57,7 @@ func (m *Manager) commitJoinerPairing(sess *pairingSession, inv *Invite) (commit
 			commitErr = fmt.Errorf("peer admission %d was already removed", pi.AdmissionEpoch)
 			return
 		}
-		if self, ok := m.memberByNodeID(m.identity.NodeUUID); ok && self.AdmissionEpoch != 0 {
+		if self, ok := m.memberByUUID(m.identity.NodeUUID); ok && self.AdmissionEpoch != 0 {
 			commitErr = fmt.Errorf("another admission transaction is incomplete")
 			return
 		}
@@ -114,7 +114,7 @@ func respondPairingEnvelope(w http.ResponseWriter, env pairingEnvelope) {
 
 func (m *Manager) clearPendingPairingMember(peerUUID string) {
 	m.withClusterComposition(func() {
-		if member, ok := m.memberByNodeID(peerUUID); ok && member.State == statePendingInbound {
+		if member, ok := m.memberByUUID(peerUUID); ok && member.State == statePendingInbound {
 			m.removeMemberByUUID(peerUUID)
 		}
 	})

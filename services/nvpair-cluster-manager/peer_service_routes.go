@@ -33,7 +33,7 @@ func (m *Manager) peerServiceOptions() clustertrust.PeerServiceClientOptions {
 func (m *Manager) selectPeerServiceAddress(uuid, address string) bool {
 	m.peerRoutesMu.Lock()
 	defer m.peerRoutesMu.Unlock()
-	node, ok := m.memberByNodeID(uuid)
+	node, ok := m.memberByUUID(uuid)
 	if !ok {
 		return false
 	}
@@ -60,7 +60,7 @@ func (m *Manager) resolvePeerServiceRoute(uuid string, service noderec.ServiceKe
 	if !ok {
 		return clustertrust.PeerServiceRoute{}, false
 	}
-	node, ok := m.memberByNodeID(uuid)
+	node, ok := m.memberByUUID(uuid)
 	if !ok {
 		return clustertrust.PeerServiceRoute{}, false
 	}

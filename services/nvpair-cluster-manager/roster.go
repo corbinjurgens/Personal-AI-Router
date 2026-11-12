@@ -20,7 +20,6 @@ import (
 // transitively pin a peer it has never paired with directly (§ fan-out trust).
 type RosterEntry struct {
 	NodeUUID        string        `json:"nodeUuid"`
-	NodeID          string        `json:"nodeId"`
 	Name            string        `json:"name"`
 	Addr            string        `json:"addr"` // reachable host:port for inter-node calls
 	AdmissionEpoch  uint64        `json:"admissionEpoch,omitempty"`
@@ -69,8 +68,7 @@ func (m *Manager) buildLocalRoster() *Roster {
 	// learners get our addr from whichever node pinned us).
 	r.Members = append(r.Members, RosterEntry{
 		NodeUUID:        m.identity.NodeUUID,
-		NodeID:          m.identity.NodeID,
-		Name:            m.identity.Name,
+		Name:            m.selfName(),
 		AdmissionEpoch:  func() uint64 { _, epoch := m.currentAdmission(); return epoch }(),
 		CertPem:         string(m.identity.CertPEM),
 		CertFingerprint: m.identity.CertFingerprint,
@@ -79,14 +77,13 @@ func (m *Manager) buildLocalRoster() *Roster {
 	for _, pin := range m.trust.List() {
 		entry := RosterEntry{
 			NodeUUID:        pin.NodeUUID,
-			NodeID:          pin.NodeID,
 			Name:            pin.Name,
 			AdmissionEpoch:  pin.AdmissionEpoch,
 			CertPem:         pin.CertPem,
 			CertFingerprint: pin.CertFingerprint,
 			Endorsements:    pin.Endorsements,
 		}
-		if n, ok := m.memberByNodeID(pin.NodeUUID); ok && n.IPAddress != "" {
+		if n, ok := m.memberByUUID(pin.NodeUUID); ok && n.IPAddress != "" {
 			entry.Addr = net.JoinHostPort(n.IPAddress, strconv.Itoa(n.Port))
 		}
 		r.Members = append(r.Members, entry)
@@ -154,7 +151,7 @@ func (m *Manager) applyRemovalProofs(proofs []RemovalProof, cid string) bool {
 			}
 			continue
 		}
-		if member, ok := m.memberByNodeID(t.NodeUUID); ok && member.AdmissionEpoch != t.AdmissionEpoch {
+		if member, ok := m.memberByUUID(t.NodeUUID); ok && member.AdmissionEpoch != t.AdmissionEpoch {
 			continue
 		}
 		if _, pinned := m.trust.Get(t.NodeUUID); pinned {
@@ -311,11 +308,11 @@ func (m *Manager) pinEntry(e *RosterEntry, der []byte) error {
 	now := time.Now().UnixMilli()
 	host, port := splitAddr(e.Addr, m.port)
 	cid, _ := m.clusterIdentity()
-	previous, hadPrevious := m.memberByNodeID(e.NodeUUID)
+	previous, hadPrevious := m.memberByUUID(e.NodeUUID)
+	name := m.peerNameToStore(e.Name, e.NodeUUID)
 	m.upsertMember(&ClusterNode{
-		ID:             e.NodeID,
 		NodeUUID:       e.NodeUUID,
-		Name:           e.Name,
+		Name:           name,
 		IPAddress:      host,
 		Port:           port,
 		ClusterID:      cid,
@@ -336,8 +333,7 @@ func (m *Manager) pinEntry(e *RosterEntry, der []byte) error {
 	}
 	if err := m.trust.Pin(&TrustedPin{
 		NodeUUID:        e.NodeUUID,
-		NodeID:          e.NodeID,
-		Name:            e.Name,
+		Name:            name,
 		ClusterID:       func() string { c, _ := m.clusterIdentity(); return c }(),
 		AdmissionEpoch:  e.AdmissionEpoch,
 		CertPem:         e.CertPem,
@@ -369,14 +365,17 @@ func (m *Manager) refreshMemberAddr(e *RosterEntry) {
 	m.setMemberAddr(e.NodeUUID, host, port)
 }
 
-// refreshMemberIdentity updates a still-trusted peer's display id/name — in both
-// the member record and the persisted pin — from its own roster entry, keyed by
-// the stable nodeUuid. This tracks a peer's PC rename so the roster and UI show
-// its current name instead of the hostname frozen at pairing. Returns
-// whether anything changed.
+// refreshMemberIdentity updates a still-trusted peer's name — in both the member
+// record and the persisted pin — from its own roster entry, keyed by the stable
+// nodeUuid. This is how a peer's rename reaches this node. An invalid name
+// changes nothing. Returns whether anything changed.
 func (m *Manager) refreshMemberIdentity(e *RosterEntry) bool {
-	changed := m.updateMemberIdentity(e.NodeUUID, e.NodeID, e.Name)
-	if ok, err := m.trust.UpdateIdentity(e.NodeUUID, e.NodeID, e.Name); err != nil {
+	name, ok := receivedNodeName(e.Name, e.NodeUUID)
+	if !ok {
+		return false
+	}
+	changed := m.updateMemberIdentity(e.NodeUUID, name)
+	if ok, err := m.trust.UpdateIdentity(e.NodeUUID, name); err != nil {
 		log.Printf("roster: update pin identity for %s: %v", e.NodeUUID, err)
 	} else if ok {
 		changed = true

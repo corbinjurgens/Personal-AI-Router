@@ -40,6 +40,16 @@ type Manager struct {
 
 	identity *NodeIdentity
 	trust    *TrustStore
+
+	// Node display name state (node_name.go). nameWriteMu serializes setters
+	// across the identity.json write; nameMu guards the strings and is held
+	// only for reads and assignments. identityCreatedAt is the stored
+	// created_at, preserved when identity.json is rewritten.
+	nameWriteMu       sync.Mutex
+	nameMu            sync.RWMutex
+	customName        string
+	generatedName     string
+	identityCreatedAt int64
 	// TrustStore is the pin authority for inbound and outbound traffic. The
 	// peer-service adapter binds each request to current admission and routes.
 	mesh                 *clustertrust.Mesh
@@ -244,11 +254,10 @@ func NewManager(codec *Codec, configDir string, port int) (*Manager, error) {
 	if err := os.MkdirAll(clusterDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create cluster dir %s: %w", clusterDir, err)
 	}
-	identity, err := loadOrMintIdentity(clusterDir)
+	identity, storedIdentity, err := loadOrMintIdentity(clusterDir)
 	if err != nil {
 		return nil, fmt.Errorf("load node identity: %w", err)
 	}
-	log.Printf("node identity %s (host %s) fingerprint %s", identity.NodeUUID, identity.NodeID, identity.CertFingerprint)
 	trust, err := newTrustStore(clusterDir)
 	if err != nil {
 		return nil, fmt.Errorf("open trusted store: %w", err)
@@ -278,6 +287,8 @@ func NewManager(codec *Codec, configDir string, port int) (*Manager, error) {
 		joinWake:      make(chan struct{}, 1),
 		joinNow:       time.Now,
 	}
+	mgr.initSelfName(storedIdentity)
+	log.Printf("node identity %s name %s fingerprint %s", identity.NodeUUID, mgr.selfName(), identity.CertFingerprint)
 	mgr.peerRoutes = make(map[string]clusterPeerRoute)
 	peerOptions := mgr.peerServiceOptions()
 	mgr.removalPeerServices = clustertrust.NewPeerServiceClient(mesh, peerOptions)
@@ -329,10 +340,9 @@ func NewManager(codec *Codec, configDir string, port int) (*Manager, error) {
 			return nil, fmt.Errorf("prune unauthenticated members: %w", err)
 		}
 	}
-	// A PC rename changes os.Hostname() but not the stable nodeUuid, so the self
-	// entry restored from members.json can carry an old display name. Re-stamp it
-	// from the current identity so this node doesn't linger as a stale-named ghost
-	// in its own roster, preserving stable identity across host renames.
+	// The generated default is re-derived at each start, so the self entry
+	// restored from members.json can carry an old name. Re-stamp it from the
+	// current effective name.
 	mgr.refreshSelfMemberIdentity()
 	mgr.loadTombstones()
 	if err := mgr.loadRemovalProofs(); err != nil {
@@ -514,6 +524,14 @@ func (m *Manager) handleMessage(msg *Message) {
 		}
 	case "cluster:get-node-id":
 		m.handleGetNodeID(msg)
+	case "cluster:set-node-name":
+		m.handleSetNodeName(msg)
+	case "cluster:set-peer-name":
+		// Network-bound: answer from its own goroutine so the read loop
+		// keeps serving other requests.
+		go m.handleSetPeerName(msg)
+	case "cluster:set-peer-nickname":
+		m.handleSetPeerNickname(msg)
 	case "cluster:get-join-requests":
 		m.handleGetJoinRequests(msg)
 	case "cluster:ask-to-join":

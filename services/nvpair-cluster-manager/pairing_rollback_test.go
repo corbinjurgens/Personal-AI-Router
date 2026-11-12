@@ -40,7 +40,7 @@ func assertJoinerCompensationPending(t *testing.T, f outboundPairingFixture) {
 	if rr.Code != http.StatusOK || outcome.State != inviteStatePending || outcome.Reason != reasonRollbackPending {
 		t.Fatalf("unfinished compensation confirmation = HTTP %d %+v", rr.Code, outcome)
 	}
-	if self, exists := f.joiner.memberByNodeID(f.joiner.identity.NodeUUID); !exists || self.AdmissionEpoch != f.joinSession.localAdmissionEpoch {
+	if self, exists := f.joiner.memberByUUID(f.joiner.identity.NodeUUID); !exists || self.AdmissionEpoch != f.joinSession.localAdmissionEpoch {
 		t.Fatal("unfinished compensation lost its exact provisional admission marker")
 	}
 }
@@ -116,10 +116,10 @@ func TestJoinerCompensationPartialWritesRetryAndRecover(t *testing.T) {
 			if _, allowed := f.joiner.verifyClientPin(r); allowed {
 				t.Fatal("completed/recovered compensation accepted the old transcript as general authority")
 			}
-			if _, member := f.joiner.memberByNodeID(f.inviter.identity.NodeUUID); member {
+			if _, member := f.joiner.memberByUUID(f.inviter.identity.NodeUUID); member {
 				t.Fatal("completed join compensation retained inviter membership")
 			}
-			if _, member := f.joiner.memberByNodeID(f.joiner.identity.NodeUUID); member {
+			if _, member := f.joiner.memberByUUID(f.joiner.identity.NodeUUID); member {
 				t.Fatal("completed join compensation retained provisional self admission")
 			}
 			rr := f.confirm(t, identityCertificate(t, f.inviter), f.joinSession.localAdmissionEpoch)
@@ -165,7 +165,7 @@ func TestJoinerCompensationPreservesExactAdmissionBoundaries(t *testing.T) {
 		if err := f.joiner.rollbackPairingPeerLocked(receipt); err != nil {
 			t.Fatal(err)
 		}
-		self, present := f.joiner.memberByNodeID(f.joiner.identity.NodeUUID)
+		self, present := f.joiner.memberByUUID(f.joiner.identity.NodeUUID)
 		if !present || self.AdmissionEpoch != epoch {
 			t.Fatal("old compensation changed newer provisional local admission")
 		}
@@ -208,7 +208,7 @@ func TestJoinerCompensationPreservesExactAdmissionBoundaries(t *testing.T) {
 			t.Fatal(err)
 		}
 		pin, pinned := f.joiner.trust.Get(pi.NodeUUID)
-		member, present := f.joiner.memberByNodeID(pi.NodeUUID)
+		member, present := f.joiner.memberByUUID(pi.NodeUUID)
 		if !pinned || !present || pin.AdmissionEpoch != pi.AdmissionEpoch || member.AdmissionEpoch != pi.AdmissionEpoch {
 			t.Fatal("old join compensation removed a newer peer incarnation")
 		}
@@ -279,7 +279,7 @@ func TestJoinerCompensationWithoutWritableJournalPreservesFallback(t *testing.T)
 	if _, pinned := restarted.trust.Get(f.inviter.identity.NodeUUID); pinned {
 		t.Fatal("fallback restart restored a failed join's durable pin")
 	}
-	if _, member := restarted.memberByNodeID(restarted.identity.NodeUUID); member {
+	if _, member := restarted.memberByUUID(restarted.identity.NodeUUID); member {
 		t.Fatal("fallback restart restored a failed join's provisional admission")
 	}
 }
@@ -295,7 +295,7 @@ func TestAwaitingPairingConfirmationExpiresWithoutCompensation(t *testing.T) {
 	if _, pinned := f.inviter.trust.Get(f.joiner.identity.NodeUUID); !pinned {
 		t.Fatal("confirmation expiry compensated a committed peer without authenticated failure")
 	}
-	if _, member := f.inviter.memberByNodeID(f.joiner.identity.NodeUUID); !member {
+	if _, member := f.inviter.memberByUUID(f.joiner.identity.NodeUUID); !member {
 		t.Fatal("confirmation expiry removed committed membership")
 	}
 }
@@ -448,7 +448,7 @@ func TestPairingRollbackRetriesEitherWriteOrderBeforeTerminalFailure(t *testing.
 			if _, pinned := restarted.trust.Get(f.joiner.identity.NodeUUID); pinned {
 				t.Fatal("completed rollback restored old durable pin")
 			}
-			if _, member := restarted.memberByNodeID(f.joiner.identity.NodeUUID); member {
+			if _, member := restarted.memberByUUID(f.joiner.identity.NodeUUID); member {
 				t.Fatal("completed rollback restored old durable member")
 			}
 		})
@@ -553,7 +553,7 @@ func TestPairingRollbackWithoutWritableIntentDoesNotRepublishSuccess(t *testing.
 	if _, pinned := restarted.trust.Get(f.joiner.identity.NodeUUID); pinned {
 		t.Fatal("completed abort retained its peer pin")
 	}
-	if _, member := restarted.memberByNodeID(f.joiner.identity.NodeUUID); member {
+	if _, member := restarted.memberByUUID(f.joiner.identity.NodeUUID); member {
 		t.Fatal("completed abort retained its peer member")
 	}
 	if _, err := os.Stat(restarted.remoteManagementInitializingPath()); !os.IsNotExist(err) {
@@ -583,7 +583,7 @@ func TestPairingRollbackPreservesNewerPeerIncarnation(t *testing.T) {
 	}
 	f.inviter.expirePendingInvites(time.Now())
 	pin, ok := f.inviter.trust.Get(pi.NodeUUID)
-	member, memberOK := f.inviter.memberByNodeID(pi.NodeUUID)
+	member, memberOK := f.inviter.memberByUUID(pi.NodeUUID)
 	if !ok || !memberOK || pin.AdmissionEpoch != pi.AdmissionEpoch || member.AdmissionEpoch != pi.AdmissionEpoch {
 		t.Fatal("old exact-tuple retry removed a newer peer admission")
 	}
@@ -620,7 +620,7 @@ func TestPairingRollbackPreservesNewerLocalIncarnation(t *testing.T) {
 	if _, pinned := f.inviter.trust.Get(pi.NodeUUID); !pinned {
 		t.Fatal("old local-incarnation compensation removed the newer composition's peer pin")
 	}
-	if _, member := f.inviter.memberByNodeID(pi.NodeUUID); !member {
+	if _, member := f.inviter.memberByUUID(pi.NodeUUID); !member {
 		t.Fatal("old local-incarnation compensation removed the newer composition's peer member")
 	}
 }

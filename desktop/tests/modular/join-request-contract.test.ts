@@ -258,7 +258,12 @@ describe('join request API and bridge propagation', () => {
             expect(getModularSupervisor().callProcess).toHaveBeenCalledExactlyOnceWith(
                 'broker',
                 'cluster:ask-to-join',
-                payload,
+                {
+                    address: payload.address,
+                    port: payload.port,
+                    nodeUuid: payload.nodeId,
+                    replaceSoloCluster
+                },
                 undefined
             )
         }

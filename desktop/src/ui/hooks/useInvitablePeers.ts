@@ -24,8 +24,8 @@ export function useInvitablePeers(): AvailableNode[] {
 
     return useMemo(() => {
         // Correlate on the node UUID: `AvailableNode.id` = `ClusterNode.nodeUuid`
-        // = `selfId`. The hostname (`ClusterNode.id`) is display only and must
-        // never be used to match a discovered node against a member or self.
+        // = `selfId`. Names are display only and must never be used to match a
+        // discovered node against a member or self.
         const memberUuids = new Set(members.map(m => m.nodeUuid))
         return discoveredNodes.filter(node => !memberUuids.has(node.id) && node.id !== selfId)
     }, [discoveredNodes, members, selfId])

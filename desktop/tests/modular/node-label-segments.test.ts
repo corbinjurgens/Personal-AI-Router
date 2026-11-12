@@ -16,10 +16,10 @@ const gpuTexts = (name: string, ip: string, gpus: string[]) =>
         .map(segment => segment.text)
 
 describe('buildNodeLabelSegments', () => {
-    it('puts the name first, uppercased, followed by the address', () => {
+    it('puts the name first, as given, followed by the address', () => {
         const segments = buildNodeLabelSegments('pluto.local.tld', '172.16.24.46', [])
         expect(segments).toEqual([
-            { id: 'primary', text: 'PLUTO.LOCAL.TLD' },
+            { id: 'primary', text: 'pluto.local.tld' },
             { id: 'ip', text: '172.16.24.46' }
         ])
     })
@@ -69,6 +69,18 @@ describe('buildNodeLabelSegments', () => {
         // A blank name would otherwise render a separator with nothing after it.
         const texts = gpuTexts('mixed', '10.0.0.12', ['Tesla P100-PCIE-16GB', '', 'RTX 3060'])
         expect(texts).toEqual(['Tesla P100-PCIE-16GB', 'RTX 3060'])
+    })
+
+    it('shows identical GPU names once with a count, keeping first-seen order', () => {
+        const segments = buildNodeLabelSegments('MSI', '10.0.0.14', [
+            'NVIDIA GeForce RTX 4050 Laptop GPU',
+            'Intel(R) Iris(R) Xe Graphics',
+            'Intel(R) Iris(R) Xe Graphics'
+        ])
+        expect(segments.filter(segment => segment.id.startsWith('gpu-'))).toEqual([
+            { id: 'gpu-0', text: 'NVIDIA GeForce RTX 4050 Laptop GPU' },
+            { id: 'gpu-1', text: 'Intel(R) Iris(R) Xe Graphics ×2' }
+        ])
     })
 
     it('emits no GPU segments for a host that reports none', () => {

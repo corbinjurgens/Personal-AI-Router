@@ -444,7 +444,7 @@ func (m *Manager) removeBareRejectingPeers(clusterID string, generation uint64, 
 	}
 	changed := false
 	for _, rejected := range peers {
-		current, ok := m.memberByNodeID(rejected.NodeUUID)
+		current, ok := m.memberByUUID(rejected.NodeUUID)
 		pin, pinned := m.trust.Get(rejected.NodeUUID)
 		if !ok || !pinned || current.ClusterID != clusterID || pin.ClusterID != clusterID ||
 			current.AdmissionEpoch != rejected.AdmissionEpoch ||
@@ -527,9 +527,6 @@ func (m *Manager) refreshMemberAddrsFromMDNS() {
 			continue
 		}
 		hosts, port, ok := m.browser.Resolve(n.NodeUUID)
-		if !ok {
-			hosts, port, ok = m.browser.Resolve(n.ID)
-		}
 		if !ok || len(hosts) == 0 {
 			continue
 		}
@@ -571,9 +568,6 @@ func (m *Manager) resolvePeerAddrs(n ClusterNode) []string {
 	}
 	if m.browser != nil {
 		hosts, port, ok := m.browser.Resolve(n.NodeUUID)
-		if !ok {
-			hosts, port, ok = m.browser.Resolve(n.ID)
-		}
 		if ok {
 			for _, h := range hosts {
 				add(joinHostPort(h, port, m.port))

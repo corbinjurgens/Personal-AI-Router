@@ -463,6 +463,7 @@ func TestTXTRoundTrip(t *testing.T) {
 		SchemaVersion: "1",
 		HostUUID:      "host-abc",
 		ClusterUUID:   "clu-xyz",
+		Name:          "Desk A",
 		IP:            "10.0.0.5",
 		Services:      map[ServiceKey]int{ServiceLlamaCPP: 8081, ServiceErrors: 14319, ServiceNodeInfo: 14318, ServiceEngineManager: 14322},
 	}
@@ -491,6 +492,32 @@ func TestTXTDeterministicOrder(t *testing.T) {
 	want := []string{"v=1", "uuid=h", "ni=14318", "lc=8081", "cl=14321"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("TXT order = %v, want %v", got, want)
+	}
+}
+
+func TestParseTXTNumericNameIsNotAService(t *testing.T) {
+	r := ParseTXT([]string{"v=1", "uuid=h", "name=1234"})
+	if r.Name != "1234" {
+		t.Fatalf("Name = %q, want 1234", r.Name)
+	}
+	if len(r.Services) != 0 {
+		t.Fatalf("Services = %v, want none (name= is not a service port)", r.Services)
+	}
+}
+
+func TestTXTOrderWithName(t *testing.T) {
+	r := NodeRecord{
+		HostUUID:    "h",
+		ClusterUUID: "c",
+		IP:          "10.0.0.5",
+		Services:    map[ServiceKey]int{ServiceNodeInfo: 14318},
+	}
+	if got, want := r.TXT(), []string{"v=1", "uuid=h", "cluster-uuid=c", "ip=10.0.0.5", "ni=14318"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("TXT without name = %v, want %v", got, want)
+	}
+	r.Name = "Desk A"
+	if got, want := r.TXT(), []string{"v=1", "uuid=h", "cluster-uuid=c", "name=Desk A", "ip=10.0.0.5", "ni=14318"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("TXT with name = %v, want %v", got, want)
 	}
 }
 

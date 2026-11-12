@@ -45,12 +45,12 @@ func TestReverseUpgradeRejectsUnadmittedCertificates(t *testing.T) {
 	test("missing certificate", func(a, b *Manager, r *http.Request) { r.TLS.PeerCertificates = nil })
 	test("unpinned certificate", func(a, b *Manager, r *http.Request) { a.trust.Forget(b.identity.NodeUUID) })
 	test("pending member with exact pin", func(a, b *Manager, r *http.Request) {
-		node, _ := a.memberByNodeID(b.identity.NodeUUID)
+		node, _ := a.memberByUUID(b.identity.NodeUUID)
 		node.State = statePendingOutbound
 		a.upsertMember(node)
 	})
 	test("stale pin admission", func(a, b *Manager, r *http.Request) {
-		node, _ := a.memberByNodeID(b.identity.NodeUUID)
+		node, _ := a.memberByUUID(b.identity.NodeUUID)
 		node.AdmissionEpoch++
 		a.upsertMember(node)
 	})
@@ -98,7 +98,7 @@ func TestReverseUpgradeBindsCandidateToAuthenticatedCertificate(t *testing.T) {
 		n := runtime.Stack(stack, true)
 		blocked := false
 		for _, trace := range strings.Split(string(stack[:n]), "\n\n") {
-			if strings.Contains(trace, "memberByNodeID") && strings.Contains(trace, "handleReverseUpgrade") {
+			if strings.Contains(trace, "memberByUUID") && strings.Contains(trace, "handleReverseUpgrade") {
 				blocked = true
 				break
 			}
@@ -114,7 +114,7 @@ func TestReverseUpgradeBindsCandidateToAuthenticatedCertificate(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	newCert, _, err := generateLeaf(b.identity.NodeUUID, b.identity.NodeID)
+	newCert, _, err := generateLeaf(b.identity.NodeUUID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestReverseUpgradeBindsCandidateToAuthenticatedCertificate(t *testing.T) {
 	if err = a.trust.Remove(b.identity.NodeUUID); err != nil {
 		t.Fatal(err)
 	}
-	if err = a.trust.Pin(&TrustedPin{NodeUUID: b.identity.NodeUUID, NodeID: b.identity.NodeID, ClusterID: "cluster-1", AdmissionEpoch: 2, CertPem: string(newCert), CertFingerprint: fingerprint}); err != nil {
+	if err = a.trust.Pin(&TrustedPin{NodeUUID: b.identity.NodeUUID, ClusterID: "cluster-1", AdmissionEpoch: 2, CertPem: string(newCert), CertFingerprint: fingerprint}); err != nil {
 		t.Fatal(err)
 	}
 	node := cloneClusterNode(a.members[b.identity.NodeUUID])

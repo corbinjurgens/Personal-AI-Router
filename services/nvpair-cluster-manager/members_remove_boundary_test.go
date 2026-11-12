@@ -43,7 +43,7 @@ type removalHintFixture struct {
 func newRemovalHintFixture(t *testing.T) *removalHintFixture {
 	t.Helper()
 	f := &removalHintFixture{a: newReverseTestManager(t), b: newReverseTestManager(t)}
-	f.descriptor = noderec.PeerServicesDescriptor{HostUUID: f.b.identity.NodeUUID, Name: "removal-peer", Addresses: []string{"192.0.2.55", "100.90.0.8"}, Services: []noderec.PeerService{}}
+	f.descriptor = noderec.PeerServicesDescriptor{HostUUID: f.b.identity.NodeUUID, Addresses: []string{"192.0.2.55", "100.90.0.8"}, Services: []noderec.PeerService{}}
 	f.listener = startWalkServer(t, f.b, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case peerServicesPath:
@@ -161,7 +161,7 @@ func assertHintRemovalCommitted(t *testing.T, f *removalHintFixture, response *M
 	if !result.Removed {
 		t.Fatal("removal did not commit")
 	}
-	if _, ok := f.a.memberByNodeID(f.b.identity.NodeUUID); ok {
+	if _, ok := f.a.memberByUUID(f.b.identity.NodeUUID); ok {
 		t.Fatal("removed member/hints retained")
 	}
 	if _, ok := f.a.trust.Get(f.b.identity.NodeUUID); ok {
@@ -179,7 +179,7 @@ func assertHintRemovalCommitted(t *testing.T, f *removalHintFixture, response *M
 			t.Error(err)
 		}
 	})
-	if _, ok := reopened.memberByNodeID(f.b.identity.NodeUUID); ok {
+	if _, ok := reopened.memberByUUID(f.b.identity.NodeUUID); ok {
 		t.Fatal("original-base reopen resurrected member/hints")
 	}
 	if _, ok := reopened.trust.Get(f.b.identity.NodeUUID); ok {
@@ -217,7 +217,7 @@ func TestNodesRemoveSelectsPersistedHint(t *testing.T) {
 	})
 	t.Run("empty candidates keep best effort proof", func(t *testing.T) {
 		f := newRemovalHintFixture(t)
-		node, _ := f.a.memberByNodeID(f.b.identity.NodeUUID)
+		node, _ := f.a.memberByUUID(f.b.identity.NodeUUID)
 		node.IPAddress = ""
 		node.AdvertisedAddresses = nil
 		f.a.upsertMember(node)
@@ -280,7 +280,7 @@ func TestNodesRemoveSelectionRejectsReadmission(t *testing.T) {
 				once.Do(func() {
 					f.a.rosterMu.Lock()
 					err := mutate(f)
-					member, _ := f.a.memberByNodeID(f.b.identity.NodeUUID)
+					member, _ := f.a.memberByUUID(f.b.identity.NodeUUID)
 					pin, _ := f.a.trust.Get(f.b.identity.NodeUUID)
 					cid, epoch := f.a.currentAdmission()
 					f.a.rosterMu.Unlock()
@@ -300,7 +300,7 @@ func TestNodesRemoveSelectionRejectsReadmission(t *testing.T) {
 			if response.Error == nil || f.posts.Load() != 0 || f.reads.Load() != 1 || f.guard.attempted(f.tail) != 0 || f.guard.reverse.Load() != 0 {
 				t.Fatalf("stale selection error=%v posts=%d reads=%d tail=%d reverse=%d", response.Error, f.posts.Load(), f.reads.Load(), f.guard.attempted(f.tail), f.guard.reverse.Load())
 			}
-			current, ok := f.a.memberByNodeID(f.b.identity.NodeUUID)
+			current, ok := f.a.memberByUUID(f.b.identity.NodeUUID)
 			if !ok || current.AdmissionEpoch != want.member.AdmissionEpoch || current.IPAddress != want.member.IPAddress || !slices.Equal(current.AdvertisedAddresses, want.member.AdvertisedAddresses) {
 				t.Fatal("stale selection removed replacement member")
 			}
@@ -320,16 +320,16 @@ func TestNodesRemoveSelectionRejectsReadmission(t *testing.T) {
 		if err := f.a.trust.Remove(f.b.identity.NodeUUID); err != nil {
 			return err
 		}
-		if err := f.a.trust.Pin(&TrustedPin{NodeUUID: f.b.identity.NodeUUID, NodeID: f.b.identity.NodeID, ClusterID: "cluster-1", AdmissionEpoch: 2, CertPem: string(f.b.identity.CertPEM), CertFingerprint: f.b.identity.CertFingerprint}); err != nil {
+		if err := f.a.trust.Pin(&TrustedPin{NodeUUID: f.b.identity.NodeUUID, ClusterID: "cluster-1", AdmissionEpoch: 2, CertPem: string(f.b.identity.CertPEM), CertFingerprint: f.b.identity.CertFingerprint}); err != nil {
 			return err
 		}
-		node, _ := f.a.memberByNodeID(f.b.identity.NodeUUID)
+		node, _ := f.a.memberByUUID(f.b.identity.NodeUUID)
 		node.AdmissionEpoch = 2
 		f.a.upsertMember(node)
 		return f.a.persistMembersErr()
 	})
 	test("local teardown and rejoin", func(f *removalHintFixture) error {
-		node, _ := f.a.memberByNodeID(f.b.identity.NodeUUID)
+		node, _ := f.a.memberByUUID(f.b.identity.NodeUUID)
 		if err := f.a.teardownClusterLocalLocked(); err != nil {
 			return err
 		}
@@ -342,7 +342,7 @@ func TestNodesRemoveSelectionRejectsReadmission(t *testing.T) {
 		}
 		f.a.setClusterIdentity("cluster-1", "rejoined")
 		f.a.addSelfMember()
-		if err := f.a.trust.Pin(&TrustedPin{NodeUUID: f.b.identity.NodeUUID, NodeID: f.b.identity.NodeID, ClusterID: "cluster-1", AdmissionEpoch: 1, CertPem: string(f.b.identity.CertPEM), CertFingerprint: f.b.identity.CertFingerprint}); err != nil {
+		if err := f.a.trust.Pin(&TrustedPin{NodeUUID: f.b.identity.NodeUUID, ClusterID: "cluster-1", AdmissionEpoch: 1, CertPem: string(f.b.identity.CertPEM), CertFingerprint: f.b.identity.CertFingerprint}); err != nil {
 			return err
 		}
 		f.a.upsertMember(node)
@@ -350,7 +350,7 @@ func TestNodesRemoveSelectionRejectsReadmission(t *testing.T) {
 	})
 	test("pin revoked during selection", func(f *removalHintFixture) error { f.a.trust.Forget(f.b.identity.NodeUUID); return nil })
 	test("selected hint withdrawn", func(f *removalHintFixture) error {
-		node, _ := f.a.memberByNodeID(f.b.identity.NodeUUID)
+		node, _ := f.a.memberByUUID(f.b.identity.NodeUUID)
 		node.IPAddress = "192.0.2.99"
 		node.AdvertisedAddresses = nil
 		f.a.upsertMember(node)
@@ -369,7 +369,7 @@ func TestNodesRemoveSelectionRejectsReadmission(t *testing.T) {
 			if handoff.Load() != 1 || f.posts.Load() != 0 || f.reads.Load() != 1 || f.guard.reverse.Load() != 0 {
 				t.Fatalf("before-write handoff=%d posts=%d reads=%d reverse=%d", handoff.Load(), f.posts.Load(), f.reads.Load(), f.guard.reverse.Load())
 			}
-			if _, ok := f.a.memberByNodeID(f.b.identity.NodeUUID); !ok {
+			if _, ok := f.a.memberByUUID(f.b.identity.NodeUUID); !ok {
 				t.Fatal("before-write rejection lost replacement member")
 			}
 		})
@@ -379,7 +379,7 @@ func TestNodesRemoveSelectionRejectsReadmission(t *testing.T) {
 	})
 	beforeWrite("pin revoked before first application write", func(t *testing.T, f *removalHintFixture) { f.a.trust.Forget(f.b.identity.NodeUUID) })
 	beforeWrite("hint withdrawn before first application write", func(t *testing.T, f *removalHintFixture) {
-		node, _ := f.a.memberByNodeID(f.b.identity.NodeUUID)
+		node, _ := f.a.memberByUUID(f.b.identity.NodeUUID)
 		node.AdvertisedAddresses = nil
 		node.IPAddress = "192.0.2.99"
 		f.a.upsertMember(node)
@@ -397,7 +397,7 @@ func withdrawSelectedEndpoint(t *testing.T, f *removalHintFixture) func() {
 	f.a.peerAddrs = reach.NewChooser(reach.WithDial(func(network, address string, timeout time.Duration) (net.Conn, error) {
 		once.Do(func() {
 			f.a.rosterMu.Lock()
-			member, ok := f.a.memberByNodeID(uuid)
+			member, ok := f.a.memberByUUID(uuid)
 			if !ok {
 				f.a.rosterMu.Unlock()
 				changed <- errors.New("target disappeared before endpoint withdrawal")
@@ -549,7 +549,7 @@ func TestNodesRemoveWithdrawnEndpointKeepsPriorProof(t *testing.T) {
 	if _, ok := f.a.trust.Get(f.b.identity.NodeUUID); !ok {
 		t.Error("preservation error removed the target pin")
 	}
-	if _, ok := f.a.memberByNodeID(f.b.identity.NodeUUID); !ok {
+	if _, ok := f.a.memberByUUID(f.b.identity.NodeUUID); !ok {
 		t.Error("preservation error removed the target member")
 	}
 }
@@ -772,7 +772,7 @@ func TestNodesRemoveCommitsAfterReverseReplyIsRevoked(t *testing.T) {
 	if _, ok := remover.m.trust.Get(uuid); ok {
 		t.Fatal("local removal retained victim's pin")
 	}
-	if _, ok := remover.m.memberByNodeID(uuid); ok {
+	if _, ok := remover.m.memberByUUID(uuid); ok {
 		t.Fatal("local removal retained victim's membership")
 	}
 	proofs := remover.m.snapshotRemovalProofs()

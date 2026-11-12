@@ -51,9 +51,7 @@ export default function AvailableNode({ node }: { node: AvailableNodeType }) {
                     )}
                     <Flex align="center" justify="between" gap="2">
                         <Stack gap="1">
-                            <Text kind="body/semibold/sm">
-                                {(node.name || node.ipAddress).toUpperCase()}
-                            </Text>
+                            <Text kind="body/semibold/sm">{node.name || node.ipAddress}</Text>
                             <Text kind="body/regular/sm" className="text-subtle-color">
                                 {node.clustered
                                     ? 'In another cluster'

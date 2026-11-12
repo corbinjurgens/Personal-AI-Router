@@ -50,7 +50,7 @@ function workerEntries(nodes: JsonObject[], removed = true): void {
     mocks.call.mockImplementation(async (_process, method): Promise<JsonValue> => {
         if (method === 'nodes/list') return { nodes }
         if (method === 'node/remove') return { removed }
-        if (method === 'nodes:remove') return { nodeId: peerId, removed: true }
+        if (method === 'nodes:remove') return { nodeUuid: peerId, removed: true }
         if (method === 'cluster:leave') return { left: true }
         throw new Error(`Unexpected method: ${method}`)
     })
@@ -80,7 +80,7 @@ describe('manual discovery cleanup during cluster removal', () => {
         expect(mocks.call.mock.calls).toEqual([
             ['broker', 'nodes/list'],
             ['broker', 'node/remove', { id: 'manual:name:saved-alias' }],
-            ['broker', 'nodes:remove', { nodeId: peerId }, undefined]
+            ['broker', 'nodes:remove', { nodeUuid: peerId }, undefined]
         ])
         expect(result).toEqual({ nodeId: peerId, removed: true })
     })
@@ -105,7 +105,7 @@ describe('manual discovery cleanup during cluster removal', () => {
 
         expect(mocks.call.mock.calls).toEqual([
             ['broker', 'nodes/list'],
-            ['broker', 'nodes:remove', { nodeId: peerId }, undefined]
+            ['broker', 'nodes:remove', { nodeUuid: peerId }, undefined]
         ])
         expect(result).toEqual({
             nodeId: peerId,
@@ -121,7 +121,7 @@ describe('manual discovery cleanup during cluster removal', () => {
 
         expect(mocks.call.mock.calls).toEqual([
             ['broker', 'nodes/list'],
-            ['broker', 'nodes:remove', { nodeId: peerId }, undefined]
+            ['broker', 'nodes:remove', { nodeUuid: peerId }, undefined]
         ])
         expect(result).toEqual({ nodeId: peerId, removed: true })
     })
@@ -152,7 +152,7 @@ describe('manual discovery cleanup during cluster removal', () => {
 
         expect(mocks.call.mock.calls).toEqual([
             ['broker', 'nodes/list'],
-            ['broker', 'nodes:remove', { nodeId: peerId }, undefined]
+            ['broker', 'nodes:remove', { nodeUuid: peerId }, undefined]
         ])
         expect(result).toEqual({ nodeId: peerId, removed: true })
     })
@@ -237,13 +237,13 @@ describe('manual discovery cleanup during cluster removal', () => {
 
     it('does not report manual cleanup failure for an ordinary peer when the worker is unavailable', async () => {
         mocks.call.mockRejectedValueOnce(new Error('manual-nodes unavailable'))
-        mocks.call.mockResolvedValueOnce({ nodeId: peerId, removed: true })
+        mocks.call.mockResolvedValueOnce({ nodeUuid: peerId, removed: true })
 
         const result = await handleServiceBridgeInvoke('nodes:remove-member', { nodeId: peerId })
 
         expect(mocks.call.mock.calls).toEqual([
             ['broker', 'nodes/list'],
-            ['broker', 'nodes:remove', { nodeId: peerId }, undefined]
+            ['broker', 'nodes:remove', { nodeUuid: peerId }, undefined]
         ])
         expect(result).toEqual({ nodeId: peerId, removed: true })
     })

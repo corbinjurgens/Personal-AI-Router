@@ -83,7 +83,7 @@ func (r *relayPeerSource) set(nodes []noderec.DirectoryNode) {
 // address. ID is the stable hostUuid — peerSet.Replace keys the broadcast set by
 // PeerNode.ID, so two peers sharing a hostname must key on distinct UUIDs or
 // they'd collapse into one and one would silently miss every broadcast.
-// Host stays the hostname (display / dial fallback); the peer is
+// Host is the node's display name and is never dialed; the peer is
 // dialed by its ip=/Addresses, not its ID. cluster-uuid= is reconstructed into
 // TXT so the broadcaster's mTLS pin lookup is unchanged.
 func directoryToPeerNode(n noderec.DirectoryNode) (PeerNode, bool) {

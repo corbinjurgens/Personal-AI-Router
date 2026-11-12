@@ -21,24 +21,23 @@ import (
 // where the receiver will POST its phase:"expire" signal on timeout.
 func putPendingJoinerSession(t *testing.T, m *Manager, inviteID, fromUUID, inviterAddr string, createdAt int64) {
 	t.Helper()
-	toID := m.identity.NodeID
+	toID := m.identity.NodeUUID
 	m.putInvite(&Invite{
 		InviteID:     inviteID,
-		FromNodeID:   "inviter-node",
 		FromNodeUUID: fromUUID,
-		ToNodeID:     &toID,
+		ToNodeUUID:   &toID,
 		ClusterID:    "cluster-remote",
 		State:        inviteStatePending,
 		CreatedAt:    createdAt,
 	})
-	pi := &PairingInfo{NodeUUID: fromUUID, NodeID: "inviter-node", ClusterID: "cluster-remote"}
+	pi := &PairingInfo{NodeUUID: fromUUID, ClusterID: "cluster-remote"}
 	m.putSession(&pairingSession{
 		inviteID:    inviteID,
 		role:        roleJoiner,
 		addr:        inviterAddr,
 		peerPairing: pi,
 	})
-	m.upsertMember(&ClusterNode{NodeUUID: fromUUID, ID: "inviter-node", State: statePendingInbound})
+	m.upsertMember(&ClusterNode{NodeUUID: fromUUID, State: statePendingInbound})
 }
 
 // TestExpireInboundInviteTearsDownReceiver verifies that a pending
@@ -74,7 +73,7 @@ func TestExpireInboundInviteTearsDownReceiver(t *testing.T) {
 	if _, ok := m.getSession(inviteID); ok {
 		t.Fatal("expired inbound invite must drop its joiner EAP session")
 	}
-	if _, ok := m.memberByNodeID(inviterUUID); ok {
+	if _, ok := m.memberByUUID(inviterUUID); ok {
 		t.Fatal("expired inbound invite must drop the tentative pending-inbound member")
 	}
 }
@@ -157,11 +156,11 @@ func TestExpireInboundInviteNoSession(t *testing.T) {
 	m.setClusterIdentity("", "")
 
 	const inviteID = "inv-inbound-nosession"
-	toID := m.identity.NodeID
+	toID := m.identity.NodeUUID
 	m.putInvite(&Invite{
 		InviteID:     inviteID,
 		FromNodeUUID: "inviter-uuid",
-		ToNodeID:     &toID,
+		ToNodeUUID:   &toID,
 		State:        inviteStatePending,
 		CreatedAt:    time.Now().Add(-time.Hour).UnixMilli(),
 	})
@@ -221,7 +220,7 @@ func TestExpireInboundSkipsInFlightAccept(t *testing.T) {
 	if _, ok := m.getSession(inviteID); !ok {
 		t.Fatal("in-flight accept must keep its joiner session")
 	}
-	if _, ok := m.memberByNodeID(inviterUUID); !ok {
+	if _, ok := m.memberByUUID(inviterUUID); !ok {
 		t.Fatal("in-flight accept must keep its tentative pending-inbound member")
 	}
 

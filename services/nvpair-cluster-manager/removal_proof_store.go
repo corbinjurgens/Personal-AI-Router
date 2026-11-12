@@ -278,7 +278,7 @@ func (m *Manager) replayRemovalProofs() error {
 			}
 			changed = true
 		}
-		if n, ok := m.memberByNodeID(t.NodeUUID); ok && n.AdmissionEpoch == t.AdmissionEpoch {
+		if n, ok := m.memberByUUID(t.NodeUUID); ok && n.AdmissionEpoch == t.AdmissionEpoch {
 			if m.removeMemberByUUID(t.NodeUUID) {
 				changed = true
 			}

@@ -83,7 +83,7 @@ func newWorkloadReverseFixture(t *testing.T, wrap func(http.Handler) http.Handle
 	f.endpoint = server.Listener.Addr().String()
 	// The advertised listener is unreachable; only the named reverse stream
 	// can reach the peer's actual TLS endpoint.
-	f.node = PeerNode{ID: "peer-host", Host: "127.0.0.1", Port: 1,
+	f.node = PeerNode{ID: "peer-host", Host: "Peer Host", Addresses: []string{"127.0.0.1"}, Port: 1,
 		TXT: []string{clustertrust.ClusterUUIDTXTKey + "=uuid-peer"}}
 	f.expectedHost.Store("127.0.0.1:1")
 	f.m.peers.Replace([]PeerNode{f.node})
@@ -180,7 +180,7 @@ func (f *workloadReverseFixture) discover(t *testing.T, nodes ...noderec.Directo
 
 func (f *workloadReverseFixture) directoryNode() noderec.DirectoryNode {
 	return noderec.DirectoryNode{
-		HostUUID: f.node.ID, IP: f.node.Host, ClusterUUID: "uuid-peer",
+		HostUUID: f.node.ID, IP: f.node.Addresses[0], ClusterUUID: "uuid-peer",
 		Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceWorkload: {Port: f.node.Port}},
 	}
 }

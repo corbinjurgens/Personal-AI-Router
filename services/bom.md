@@ -75,8 +75,8 @@ As of the mDNS dedup, `grandcat/zeroconf`, `miekg/dns`, and `golang.org/x/net` a
 | `golang.org/x/crypto` | v0.29.0 | gguf-parser-go | BSD-3-Clause | [LICENSE](https://cs.opensource.google/go/x/crypto/+/v0.29.0:LICENSE) |
 | `golang.org/x/exp` | v0.0.0-20241108190413-2d47ceb2692f | gguf-parser-go | BSD-3-Clause | [LICENSE](https://cs.opensource.google/go/x/exp/+/2d47ceb2692f:LICENSE) |
 | `golang.org/x/mod` | v0.12.0 / v0.17.0 / v0.31.0 | zeroconf (via miekg/dns) | BSD-3-Clause | [LICENSE](https://cs.opensource.google/go/x/mod/+/master:LICENSE) |
-| `golang.org/x/sync` | v0.9.0 / v0.10.0 / v0.19.0 | gguf-parser-go, zeroconf (via miekg/dns) | BSD-3-Clause | [LICENSE](https://cs.opensource.google/go/x/sync/+/master:LICENSE) |
+| `golang.org/x/sync` | v0.9.0 / v0.10.0 / v0.19.0 / v0.22.0 | gguf-parser-go, zeroconf (via miekg/dns) | BSD-3-Clause | [LICENSE](https://cs.opensource.google/go/x/sync/+/master:LICENSE) |
 | `golang.org/x/sys` | v0.47.0 | go-winio, zeroconf, ghw, charmbracelet/x/term | BSD-3-Clause | [LICENSE](https://cs.opensource.google/go/x/sys/+/master:LICENSE) |
-| `golang.org/x/text` | v0.3.8 | charmbracelet/x/ansi | BSD-3-Clause | [LICENSE](https://cs.opensource.google/go/x/text/+/master:LICENSE) |
+| `golang.org/x/text` | v0.41.0 | nvpair-shared/nodename (NFC), charmbracelet/x/ansi | BSD-3-Clause | [LICENSE](https://cs.opensource.google/go/x/text/+/master:LICENSE) |
 | `golang.org/x/tools` | v0.11.0 / v0.21.1-0.20240508 / v0.40.0 | zeroconf (via miekg/dns) | BSD-3-Clause | [LICENSE](https://cs.opensource.google/go/x/tools/+/master:LICENSE) |
 | `gopkg.in/yaml.v3` | v3.0.1 | ghw | MIT + Apache-2.0 | [LICENSE](https://github.com/go-yaml/yaml/blob/v3/LICENSE) |

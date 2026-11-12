@@ -50,9 +50,9 @@ type availabilityState struct {
 	// issued at one epoch is dropped if another change has arrived since, so a
 	// slow read cannot restore a state that has already moved on.
 	epoch int
-	// selfID and selfUUID identify this node, to filter availability-changed
-	// notifications. Both empty means unknown: availability-only pushes are accepted.
-	selfID, selfUUID string
+	// selfUUID identifies this node, to filter availability-changed
+	// notifications. Empty means unknown: availability-only pushes are accepted.
+	selfUUID string
 }
 
 type policyGetMsg struct {
@@ -172,8 +172,7 @@ func (a *availabilityState) notify(params json.RawMessage) {
 	if !decodeOrLog("node:availability-changed", params, &p) {
 		return
 	}
-	known := a.selfID != "" || a.selfUUID != ""
-	if known && p.NodeID != a.selfID && p.NodeID != a.selfUUID {
+	if a.selfUUID != "" && p.NodeID != a.selfUUID {
 		return
 	}
 	a.value = p.Availability
@@ -188,7 +187,7 @@ func (a *availabilityState) notify(params json.RawMessage) {
 func (a *availabilityState) update(msg tea.Msg) {
 	switch msg := msg.(type) {
 	case selfIdentityMsg:
-		a.selfID, a.selfUUID = msg.id.NodeID, msg.id.NodeUUID
+		a.selfUUID = msg.id.NodeUUID
 	case policyGetMsg:
 		if msg.guarded && msg.epoch != a.epoch {
 			return
@@ -222,7 +221,7 @@ func (a *availabilityState) update(msg tea.Msg) {
 				NodeID string `json:"nodeId"`
 				targetPolicy
 			}
-			if decodeOrLog(msg.Msg.Method, msg.Msg.Params, &p) && p.NodeID != "" && (p.NodeID == a.selfID || p.NodeID == a.selfUUID) {
+			if decodeOrLog(msg.Msg.Method, msg.Msg.Params, &p) && p.NodeID != "" && p.NodeID == a.selfUUID {
 				a.pausedBy = p.Policy.PausedBy
 				a.pauseMode = p.Policy.PauseMode
 			}

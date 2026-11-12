@@ -32,7 +32,6 @@ func pubFromDER(der []byte) (ed25519.PublicKey, error) {
 // certificate and display metadata for one paired peer.
 type TrustedPin struct {
 	NodeUUID        string        `json:"nodeUuid"`
-	NodeID          string        `json:"nodeId"`
 	Name            string        `json:"name"`
 	ClusterID       string        `json:"clusterId"`
 	AdmissionEpoch  uint64        `json:"admissionEpoch,omitempty"`
@@ -323,12 +322,11 @@ func (ts *TrustStore) MigrateLegacyAdmissions(clusterID string) error {
 	return nil
 }
 
-// UpdateIdentity refreshes a pinned peer's display fields (nodeId/name) without
-// touching the pinned certificate, persisting only if something changed. Empty
-// inputs are ignored so a partial roster entry can't blank a known name. This is
-// how a peer's PC rename propagates into our pin instead of leaving a stale
-// hostname behind the stable UUID. A missing pin is a no-op.
-func (ts *TrustStore) UpdateIdentity(uuid, nodeID, name string) (bool, error) {
+// UpdateIdentity refreshes a pinned peer's display name without touching the
+// pinned certificate, persisting only if it changed. An empty name is ignored
+// so a partial roster entry can't blank a known name. This is how a peer's
+// rename propagates into our pin. A missing pin is a no-op.
+func (ts *TrustStore) UpdateIdentity(uuid, name string) (bool, error) {
 	persisted := false
 	defer ts.announce(&persisted)
 	ts.mu.Lock()
@@ -337,19 +335,11 @@ func (ts *TrustStore) UpdateIdentity(uuid, nodeID, name string) (bool, error) {
 	if !ok {
 		return false, nil
 	}
-	updated := cloneTrustedPin(pin)
-	changed := false
-	if nodeID != "" && updated.NodeID != nodeID {
-		updated.NodeID = nodeID
-		changed = true
-	}
-	if name != "" && updated.Name != name {
-		updated.Name = name
-		changed = true
-	}
-	if !changed {
+	if name == "" || pin.Name == name {
 		return false, nil
 	}
+	updated := cloneTrustedPin(pin)
+	updated.Name = name
 	if err := ts.writePinLocked(updated); err != nil {
 		return false, err
 	}

@@ -3,8 +3,8 @@
 
 // Package nodeid resolves a stable, per-host node UUID that every nvpair
 // subprocess can advertise so peers can tell two hosts apart even when they
-// share a hostname (the mDNS instance name defaults to os.Hostname(), so a
-// hostname collision otherwise silently merges two machines into one node).
+// share a hostname. The mDNS instance name is nvpair-<uuid>, so it follows this
+// UUID and a hostname collision cannot merge two machines into one node.
 //
 // It reuses the nvpair-cluster-manager's persisted cryptographic identity
 // (<config>/cluster/identity.json) when present, so a host presents one UUID

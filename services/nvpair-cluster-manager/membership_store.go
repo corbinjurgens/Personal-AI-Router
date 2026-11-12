@@ -10,8 +10,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"sort"
 
+	"nvpair-shared/clustertrust"
 	"nvpair-shared/durablefile"
 )
 
@@ -32,6 +32,16 @@ func (m *Manager) peerServiceIncarnation(uuid string) (string, bool) {
 	m.membersStoreMu.Lock()
 	defer m.membersStoreMu.Unlock()
 	return m.mesh.PeerServiceIncarnation(uuid)
+}
+
+// remoteManagementFor evaluates this node's remote-management grant for a peer
+// against current admission, under the same storage exclusion as
+// peerServiceIncarnation. Callers must not hold membersStoreMu or memMu.
+func (m *Manager) remoteManagementFor(uuid string) clustertrust.RemoteManagementPermission {
+	m.membersStoreMu.Lock()
+	defer m.membersStoreMu.Unlock()
+	m.mesh.Refresh()
+	return m.mesh.RemoteManagement(uuid)
 }
 
 // persistMembers atomically writes the confirmed member roster.
@@ -58,7 +68,7 @@ func (m *Manager) persistMembersStoreLocked() error {
 		}
 	}
 	m.memMu.Unlock()
-	sort.Slice(durable, func(i, j int) bool { return durable[i].ID < durable[j].ID })
+	sortMembers(durable)
 
 	data, err := json.MarshalIndent(durable, "", "  ")
 	if err != nil {
@@ -99,7 +109,7 @@ func (m *Manager) rollbackIncompleteAdmission() error {
 	if cid, epoch := m.currentAdmission(); cid != "" || epoch != 0 {
 		return nil
 	}
-	self, ok := m.memberByNodeID(m.identity.NodeUUID)
+	self, ok := m.memberByUUID(m.identity.NodeUUID)
 	if !ok || self.ClusterID == "" || self.AdmissionEpoch == 0 {
 		return nil
 	}
@@ -224,7 +234,7 @@ func (m *Manager) pruneUnauthenticatedMembers(clusterID string, selfEpoch uint64
 	}
 	m.memMu.Unlock()
 	for uuid, pin := range pins {
-		member, ok := m.memberByNodeID(uuid)
+		member, ok := m.memberByUUID(uuid)
 		if ok && member.ClusterID == clusterID && member.AdmissionEpoch != 0 &&
 			member.AdmissionEpoch == pin.AdmissionEpoch {
 			continue

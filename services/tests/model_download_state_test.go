@@ -502,7 +502,7 @@ func newDownloadProcessFixture(t *testing.T, reverse bool) *downloadProcessFixtu
 	for _, n := range nodes {
 		for _, peer := range nodes {
 			if n != peer {
-				jointWriteJSON(t, filepath.Join(n.base, "cluster", "trusted", peer.uuid+".json"), map[string]any{"nodeUuid": peer.uuid, "nodeId": peer.uuid, "certPem": peer.cert, "clusterId": task1ClusterID, "admissionEpoch": 1})
+				jointWriteJSON(t, filepath.Join(n.base, "cluster", "trusted", peer.uuid+".json"), map[string]any{"nodeUuid": peer.uuid, "certPem": peer.cert, "clusterId": task1ClusterID, "admissionEpoch": 1})
 			}
 		}
 		n.mesh = clustertrust.Open(filepath.Join(n.base, "cluster"))

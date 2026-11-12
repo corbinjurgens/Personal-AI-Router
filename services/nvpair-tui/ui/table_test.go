@@ -168,7 +168,7 @@ func TestViewsAcceptRowsBeforeResize(t *testing.T) {
 	})
 	t.Run("nodes from cluster roster", func(t *testing.T) {
 		v := newNodesView(nil)
-		v.feeds.members = []clusterNode{{ID: "id", NodeUUID: "u", Name: "n", State: "joined", Port: 1}}
+		v.feeds.members = []clusterNode{{NodeUUID: "u", Name: "n", DisplayName: "n", State: "joined", Port: 1}}
 		v.rebuild()
 	})
 	t.Run("nodes from manual list", func(t *testing.T) {

@@ -226,8 +226,9 @@ func TestReachableSkipsIdentityWhenNothingAnswers(t *testing.T) {
 // between two calls shift the gap by a second and flip a threshold assertion.
 var testNow = time.Now().Unix()
 
-// named builds a directory entry with an explicit hostname; ghost is the common
-// case where the hostname is the one a wipe would have preserved.
+// named builds a directory entry with an explicit display name; ghost is the
+// common case where the name is one a wipe would have preserved (a generated
+// default derived from the machine).
 func named(uuid, name, ip string, ageSeconds int64) noderec.DirectoryNode {
 	return noderec.DirectoryNode{
 		HostUUID: uuid,
@@ -288,17 +289,79 @@ func TestSupersedeCandidatesKeepFreshNeighbours(t *testing.T) {
 	}
 }
 
-// TestSupersedeCandidatesRequireSameHostname keeps the nomination narrow. Two
-// machines colliding on an address almost never also collide on a hostname, so a
+// TestSupersedeCandidatesRequireSameName keeps the nomination narrow. Two
+// machines colliding on an address rarely also collide on a display name, so a
 // name mismatch means we are not looking at one machine. The wiped-AND-renamed
 // case is left to the miss-threshold path, which reaches the same proof.
-func TestSupersedeCandidatesRequireSameHostname(t *testing.T) {
+func TestSupersedeCandidatesRequireSameName(t *testing.T) {
 	d := newDirectory()
 	d.upsert(named("old-uuid", "old-name", "192.168.1.10", 3600))
 
 	candidates := d.supersedeCandidates(named("new-uuid", "new-name", "192.168.1.10", 0), "self-uuid")
 	if len(candidates) != 0 {
-		t.Fatalf("a different hostname on the address must not be nominated: %+v", candidates)
+		t.Fatalf("a different name on the address must not be nominated: %+v", candidates)
+	}
+}
+
+// TestSupersedeCandidatesIgnoreUnnamedRecords: a record without a usable name=
+// (none advertised yet, or an invalid one) shares no evidence with anything, so
+// it neither nominates nor is nominated by another unnamed record.
+func TestSupersedeCandidatesIgnoreUnnamedRecords(t *testing.T) {
+	d := newDirectory()
+	d.upsert(named("old-uuid", "", "192.168.1.10", 3600))
+
+	if candidates := d.supersedeCandidates(named("new-uuid", "", "192.168.1.10", 0), "self-uuid"); len(candidates) != 0 {
+		t.Fatalf("an unnamed arrival must nominate nothing: %+v", candidates)
+	}
+	if candidates := d.supersedeCandidates(named("other-uuid", "Desk", "192.168.1.10", 0), "self-uuid"); len(candidates) != 0 {
+		t.Fatalf("an unnamed record must not be nominated by a named arrival: %+v", candidates)
+	}
+}
+
+// TestWipedNodeWithLostCustomNameIsNotNominated: a wipe clears the user-set
+// name along with the identity, so the machine returns under its generated
+// default. Its old record carries the custom name and is therefore not
+// nominated; it is left to the miss-threshold path, which asks the same
+// identity question once the old record stops being advertised.
+func TestWipedNodeWithLostCustomNameIsNotNominated(t *testing.T) {
+	d := newDirectory()
+	d.upsert(named("old-uuid", "Studio Rig", "192.168.1.10", 3600))
+
+	candidates := d.supersedeCandidates(named("new-uuid", "no.081", "192.168.1.10", 0), "self-uuid")
+	if len(candidates) != 0 {
+		t.Fatalf("a record under the lost custom name must not be nominated: %+v", candidates)
+	}
+	if _, ok := d.get("old-uuid"); !ok {
+		t.Fatal("the old record must stay until the miss-threshold path proves it gone")
+	}
+}
+
+// TestDuplicateNamedLiveNodesSurviveSupersede: display names need not be
+// unique, so two live machines with the same custom name are nominated as each
+// other's ghosts. The identity probe must keep both: the older record still
+// answers for itself.
+func TestDuplicateNamedLiveNodesSurviveSupersede(t *testing.T) {
+	host, livePort := nodeInfoServer(t, "peer-a")
+	_, claimPort := nodeInfoServer(t, "peer-b")
+	d := newSelfTestDaemon("self-uuid", "192.168.1.1")
+	d.dir.upsert(withNodeInfo(named("peer-a", "Desk", host, 3600), livePort))
+
+	d.onBrowse(DiscoveryEvent{
+		Type: "discovered",
+		Node: RawNode{
+			ID:        mdnsLabel("peer-b"),
+			Addresses: []string{host},
+			TXT:       []string{"v=1", "uuid=peer-b", "name=Desk", "ip=" + host, fmt.Sprintf("ni=%d", claimPort)},
+		},
+	})
+
+	a, okA := d.dir.get("peer-a")
+	b, okB := d.dir.get("peer-b")
+	if !okA || !okB {
+		t.Fatalf("both same-named live nodes must survive: peer-a=%v peer-b=%v", okA, okB)
+	}
+	if a.Name != "Desk" || b.Name != "Desk" {
+		t.Fatalf("names = %q, %q, want both Desk", a.Name, b.Name)
 	}
 }
 
@@ -480,9 +543,9 @@ func TestOnBrowseEmitsSupersededRemoval(t *testing.T) {
 	d.onBrowse(DiscoveryEvent{
 		Type: "discovered",
 		Node: RawNode{
-			ID:        "wiped-host",
+			ID:        mdnsLabel("new-uuid"),
 			Addresses: []string{host},
-			TXT:       []string{"v=1", "uuid=new-uuid", "ip=" + host, fmt.Sprintf("ni=%d", port)},
+			TXT:       []string{"v=1", "uuid=new-uuid", "name=wiped-host", "ip=" + host, fmt.Sprintf("ni=%d", port)},
 		},
 	})
 

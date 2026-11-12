@@ -200,7 +200,8 @@ broker. The bridge:
 - keys every node by the backend's stable per-host UUID (`AvailableNode.hostUuid`),
   the same identity workloads (`originatedFrom`/`scheduledOn`), errors (`nodeId`),
   proxy routing (`Node.ID`), `/v1/node-info` (`hostUuid`), and cluster membership
-  (`ClusterNode.nodeUuid`) all use; the hostname is display only;
+  (`ClusterNode.nodeUuid`) all use; names are display only and come from the
+  broker (`AvailableNode.name`) and the cluster manager (`ClusterNode.displayName`);
 - preserves the backend's canonical reachable address;
 - reflects the discovery `trusted` (locally pinned peer) and `clustered` (belongs
   to some cluster) flags, and uses `clustered` to mark an already-clustered
@@ -760,7 +761,7 @@ These are current integration boundaries. Do not add compatibility shims or
 duplicate backend services around them.
 
 The last row is a display-side collapse, not a directory decision. The scanner
-treats a matching address, hostname, and `lastSeen` gap as grounds to ask the
+treats a matching address, name, and `lastSeen` gap as grounds to ask the
 machine who it is, and evicts only on a node-info identity mismatch; the bridge
 has no such proof and hides the row on the suspicion alone. It must never be
 extended into anything a consumer reads as an eviction.

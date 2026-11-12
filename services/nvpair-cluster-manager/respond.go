@@ -243,7 +243,7 @@ func (m *Manager) handleRespondToInvite(msg *Message) {
 	// Reconcile with the inviter to immediately learn the rest of the cluster
 	// (its roster reply carries every other member, endorsed for us to pin).
 	go m.reconcileAllMembers()
-	log.Printf("invite %s: joined cluster %s via %s", p.InviteID, inv.ClusterID, pi.NodeID)
+	log.Printf("invite %s: joined cluster %s via %s", p.InviteID, inv.ClusterID, pi.NodeUUID)
 }
 
 // runCompletionExchangeLocked feeds the PIN to the Peer and drives the

@@ -13,8 +13,7 @@ func TestLegacyPairingInfoMapsToFirstAdmission(t *testing.T) {
 	raw, err := json.Marshal(PairingInfo{
 		V:         1,
 		NodeUUID:  peer.identity.NodeUUID,
-		NodeID:    peer.identity.NodeID,
-		Name:      peer.identity.Name,
+		Name:      peer.selfName(),
 		ClusterID: "cluster-1",
 		Cert:      string(peer.identity.CertPEM),
 	})
@@ -44,16 +43,15 @@ func TestRestartMigratesLegacyPinnedMemberAdmission(t *testing.T) {
 	peer := newTestManagerPort(t, 15125)
 	if err := m.trust.Pin(&TrustedPin{
 		NodeUUID:        peer.identity.NodeUUID,
-		NodeID:          peer.identity.NodeID,
-		Name:            peer.identity.Name,
+		Name:            peer.selfName(),
 		CertPem:         string(peer.identity.CertPEM),
 		CertFingerprint: peer.identity.CertFingerprint,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	m.upsertMember(&ClusterNode{
-		ID: peer.identity.NodeID, NodeUUID: peer.identity.NodeUUID,
-		State: stateMember,
+		NodeUUID: peer.identity.NodeUUID,
+		State:    stateMember,
 	})
 	if err := m.persistMembersErr(); err != nil {
 		t.Fatal(err)
@@ -75,7 +73,7 @@ func TestRestartMigratesLegacyPinnedMemberAdmission(t *testing.T) {
 	if !hasLocalV2 {
 		t.Fatal("migrated pin has no local admission-bound endorsement")
 	}
-	member, ok := restarted.memberByNodeID(peer.identity.NodeUUID)
+	member, ok := restarted.memberByUUID(peer.identity.NodeUUID)
 	if !ok || member.ClusterID != "cluster-1" || member.AdmissionEpoch != legacyAdmissionEpoch {
 		t.Fatalf("migrated member = %+v", member)
 	}

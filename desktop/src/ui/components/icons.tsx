@@ -23,6 +23,7 @@ import {
     Image as LucideImage,
     MessageSquare,
     Minus,
+    Pencil,
     Search as LucideSearch,
     Settings,
     Square as LucideSquare,
@@ -64,6 +65,7 @@ export const KeyboardArrowRight = appIcon(ChevronRight)
 export const Minimize = appIcon(Minus)
 export const MoreHoriz = appIcon(Ellipsis)
 export const OpenInNew = appIcon(ExternalLink)
+export const EditOutlined = appIcon(Pencil)
 export const Public = appIcon(Globe)
 export const Search = appIcon(LucideSearch)
 export const SettingsOutlined = appIcon(Settings)

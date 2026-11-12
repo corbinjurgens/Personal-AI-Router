@@ -67,7 +67,10 @@ const (
 	KeySchema      = "v"
 	KeyHostUUID    = "uuid"
 	KeyClusterUUID = "cluster-uuid"
-	KeyIP          = "ip"
+	// KeyName carries the node's display name. It is a fixed key so a numeric
+	// name is never read as a service port.
+	KeyName = "name"
+	KeyIP   = "ip"
 	// KeyIPs carries the node's ranked address candidates, IPsSeparator-joined,
 	// with KeyIP's value first. A multi-homed node has no single address every
 	// peer can reach — a direct-connect link works only for the machine on its
@@ -128,6 +131,9 @@ type NodeRecord struct {
 	SchemaVersion string
 	HostUUID      string
 	ClusterUUID   string
+	// Name is the display name chosen by the node's cluster manager. It is not
+	// identity and is unvalidated here; consumers validate it on receipt.
+	Name string
 	// IP is the node's canonical address: the one it believes most peers can
 	// reach, and the one consumers show and try first.
 	IP string
@@ -165,6 +171,8 @@ func ParseTXT(txt []string) NodeRecord {
 			r.HostUUID = val
 		case KeyClusterUUID:
 			r.ClusterUUID = val
+		case KeyName:
+			r.Name = val
 		case KeyIP:
 			r.IP = val
 		case KeyIPs:
@@ -191,7 +199,7 @@ func ParseTXT(txt []string) NodeRecord {
 }
 
 // TXT builds the record's TXT strings in a deterministic order: schema, identity
-// (uuid, then cluster-uuid when set), ip, ips, then service ports in
+// (uuid, then cluster-uuid when set), name when set, ip, ips, then service ports in
 // serviceKeyOrder. Absent fields are omitted.
 //
 // ips is emitted only when it says something ip does not — a single-homed node
@@ -208,6 +216,9 @@ func (r NodeRecord) TXT() []string {
 	}
 	if r.ClusterUUID != "" {
 		txt = append(txt, KeyClusterUUID+"="+r.ClusterUUID)
+	}
+	if r.Name != "" {
+		txt = append(txt, KeyName+"="+r.Name)
 	}
 	if r.IP != "" {
 		txt = append(txt, KeyIP+"="+r.IP)
@@ -271,6 +282,10 @@ const (
 	// converges on the cluster principal even though the scanner spawned (and
 	// minted its own node-id) before cluster-manager wrote identity.json.
 	MethodReloadIdentity = "discovery:reload-identity"
+	// MethodSetSelfName carries this node's display name (SetSelfNameParams).
+	// The broker sends it with the name from this node's cluster manager, which
+	// owns it; the daemon advertises it as name= and shows it on its self row.
+	MethodSetSelfName = "discovery:set-self-name"
 	// MethodReloadTrust tells the daemon that this node's cluster pin set changed,
 	// so it must re-derive the trusted annotation on every directory entry. The
 	// daemon otherwise answers "do I hold a pin for this peer?" only when that
@@ -354,6 +369,11 @@ type RegisterParams struct {
 	Service ServiceKey `json:"service"`
 	Port    int        `json:"port"`
 	TXT     []string   `json:"txt,omitempty"`
+}
+
+// SetSelfNameParams carries this node's display name for MethodSetSelfName.
+type SetSelfNameParams struct {
+	Name string `json:"name"`
 }
 
 // UnregisterParams removes a previously registered service.
@@ -456,8 +476,10 @@ type ServiceStatus struct {
 type DirectoryNode struct {
 	ServiceBuildID buildinfo.ID `json:"serviceBuildId,omitempty"`
 	HostUUID       string       `json:"hostUuid"`
-	Name           string       `json:"name"` // mDNS instance name (hostname)
-	IP             string       `json:"ip"`   // canonical dialable LAN address
+	// Name is the display name (from the node's name= TXT or its cluster
+	// manager); not identity.
+	Name string `json:"name"`
+	IP   string `json:"ip"` // canonical dialable LAN address
 	// IPs is every address this node published, in its own ranked order with IP
 	// first. A multi-homed node has no single address every peer can reach — a
 	// direct-connect link is reachable only from the machine on its far end — so

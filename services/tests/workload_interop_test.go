@@ -541,7 +541,7 @@ func TestWorkloadOutOfOrderSuppressed(t *testing.T) {
 // evicts it (miss threshold + liveness probe), and the broker synthesizes the
 // terminal workloads:upsert(state=failed).
 func TestWorkloadFailedOnNodeLoss(t *testing.T) {
-	// The peer's mDNS instance name and its stable HostUUID differ on purpose:
+	// The peer's mDNS instance label and its stable HostUUID differ on purpose:
 	// workloads are stamped/keyed by HostUUID, and the node-loss sweep
 	// must match on that UUID, not the display name. Keying by name would leave
 	// a UUID-stamped workload running after the (name-distinct) node departs.
@@ -585,7 +585,7 @@ func TestWorkloadFailedOnNodeLoss(t *testing.T) {
 
 	// The peer must be in the broker's directory before its removal can
 	// trigger a sweep, so wait until discovery has folded it in.
-	pollNodeListed(t, stdin, msgs, peerNode, 1000, 30*time.Second, nil)
+	pollNodeListed(t, stdin, msgs, peerUUID, 1000, 30*time.Second, nil)
 	t.Logf("peer %q discovered", peerNode)
 
 	// A peer-origin running workload (scheduled on that same peer) POSTed to

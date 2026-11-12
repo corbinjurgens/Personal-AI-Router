@@ -291,7 +291,7 @@ discovery consumers can read it. For a paired remote read, the scanner resolves
 the current admitted peer and can carry that same plaintext HTTP request inside
 the authenticated pinned reverse session; it validates the reported host and
 cluster identities before returning the fresh sample. This does not authenticate
-the direct endpoint itself. Hostname, hardware inventory, and utilization remain
+the direct endpoint itself. Node name, hardware inventory, and utilization remain
 readable by anything on the same subnet that can reach that endpoint. Do not run
 PAIR on a network where that is unacceptable.
 
@@ -763,17 +763,19 @@ supports convergence and local success does not imply remote acknowledgement.
 
 ### Node Identity
 
-PAIR identifies every node by a stable UUID, never by its hostname.
+PAIR identifies every node by a stable UUID, never by its name.
 
-An mDNS instance name defaults to the hostname, so two machines that share one
-would silently merge into a single node. Every service therefore advertises a
-per-host UUID, and the directory is keyed by it.
+The mDNS instance label and SRV host are built from that UUID
+(`nvpair-<uuid>`), so two machines that share a name never merge into one node.
+Every service advertises the per-host UUID, and the directory is keyed by it. The
+node's display name travels separately, in the `name=` TXT key.
 
 That UUID is the correlation key across the entire system: discovery entries,
 cluster membership, workload attribution, error reports, telemetry, and proxy
-routing all resolve against it. Hostnames are display only. A machine can be
-renamed without becoming a different node, and a duplicated hostname does not
-collapse two machines into one.
+routing all resolve against it. Names are display only. The cluster manager owns
+this node's name: the user can set it, and while none is set it shows a generated
+default taken from the operating system. A node can be renamed without becoming a
+different node, and duplicate names do not collapse two machines into one.
 
 The UUID reuses the cluster manager's persisted identity when that exists, so one
 host presents the same UUID everywhere. If the cluster manager has never run, the
@@ -838,7 +840,7 @@ routing pool.
 Discovery holds record replacement to the same standard. A node can reappear with
 a new identity, for example after a reset. The old entry then looks superseded,
 and leaving both in place would list the machine twice. But a matching address
-and hostname arrive in an unauthenticated announcement that anything on the
+and name arrive in an unauthenticated announcement that anything on the
 network can send, so those signals only mark the old record as a suspect.
 Discovery confirms the node's identity before dropping that record. A stale
 duplicate therefore cannot linger, and nothing can displace a peer by claiming

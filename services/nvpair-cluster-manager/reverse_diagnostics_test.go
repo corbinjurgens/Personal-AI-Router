@@ -148,7 +148,7 @@ func TestReverseDialFailureNamesAddressAndStageOnce(t *testing.T) {
 	a, b := newReverseTestManager(t), newReverseTestManager(t)
 	b.port = closedLoopbackPort(t)
 	pairReverseManagers(t, a, b)
-	node, ok := a.memberByNodeID(b.identity.NodeUUID)
+	node, ok := a.memberByUUID(b.identity.NodeUUID)
 	if !ok {
 		t.Fatal("peer member missing")
 	}
@@ -183,9 +183,9 @@ func TestReverseDialFailureNamesTheRejectedUpgrade(t *testing.T) {
 	startReverseHTTP(t, b, false)
 	// a pins b, but b does not know a: b refuses a's client certificate.
 	pinTrusted(t, a, b.identity.NodeUUID, string(b.identity.CertPEM), b.identity.CertFingerprint)
-	a.upsertMember(&ClusterNode{NodeUUID: b.identity.NodeUUID, ID: b.identity.NodeID, IPAddress: "127.0.0.1", Port: b.port,
+	a.upsertMember(&ClusterNode{NodeUUID: b.identity.NodeUUID, IPAddress: "127.0.0.1", Port: b.port,
 		ClusterID: "cluster-1", AdmissionEpoch: 1, State: stateMember})
-	node, ok := a.memberByNodeID(b.identity.NodeUUID)
+	node, ok := a.memberByUUID(b.identity.NodeUUID)
 	if !ok {
 		t.Fatal("peer member missing")
 	}
@@ -229,7 +229,7 @@ func TestReverseSessionEstablishmentAndDuplicateAreLogged(t *testing.T) {
 
 	// A second session from the same node duplicates the first. That is
 	// resolved by the reverse manager, not reported as a failure.
-	node, _ := b.memberByNodeID(a.identity.NodeUUID)
+	node, _ := b.memberByUUID(a.identity.NodeUUID)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	before := len(records.find("reverse session failed", nil))
@@ -312,7 +312,7 @@ func TestReverseDialFailureDoesNotLogPeerResponseBytes(t *testing.T) {
 		conn.Write([]byte(payload + "\r\n"))
 	}()
 	pairReverseManagers(t, a, b)
-	node, ok := a.memberByNodeID(b.identity.NodeUUID)
+	node, ok := a.memberByUUID(b.identity.NodeUUID)
 	if !ok {
 		t.Fatal("peer member missing")
 	}

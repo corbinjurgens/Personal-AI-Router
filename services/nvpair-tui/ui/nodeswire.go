@@ -99,17 +99,18 @@ func (n availableNode) modelSnapshot() modelsResult {
 // clusterIdentity is this node's principal, from cluster:get-node-id.
 type clusterIdentity struct {
 	NodeUUID  string `json:"nodeUuid"`
-	NodeID    string `json:"nodeId"`
 	Name      string `json:"name"`
 	ClusterID string `json:"clusterId"`
 }
 
 // clusterNode mirrors nvpair-cluster-manager's ClusterNode (a member or
 // pending invitee), the element of nodes:get-initial / nodes:changed.
+// DisplayName is the name the cluster manager decided to show it with (this
+// node's nickname for it, else its own name).
 type clusterNode struct {
-	ID        string `json:"id"`
-	NodeUUID  string `json:"nodeUuid"`
-	Name      string `json:"name"`
+	NodeUUID    string `json:"nodeUuid"`
+	Name        string `json:"name"`
+	DisplayName string `json:"displayName"`
 	IPAddress string `json:"ipAddress"`
 	Port      int    `json:"port"`
 	State     string `json:"state"`
