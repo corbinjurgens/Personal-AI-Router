@@ -684,15 +684,17 @@ so existing landed-write policies still apply. This is not a power-loss proof.
 Unix replacement and parent-directory sync are unchanged. Readers still
 validate authority on fresh opens and fail closed on invalid or changing state.
 
-Reconciles fire on pair success and removal, with a ~30 s heartbeat backstop.
+Reconciles fire on pair success and removal, with a 5-minute repair pass; peers
+also reconcile when a member's peer-state stream reports a new roster hash.
 The human PIN stays the only root of trust — nothing is pinned without an
 endorsement chain leading back to a real pairing. Full model in spec §7.7.
 
 ## Private peer-service bootstrap
 
-After admission, the manager periodically reads the peer's complete current
-service descriptor from `GET /v1/cluster/services` on the existing trusted
-`cl` mux. Membership supplies only the locator. The response uses the serving
+After admission, the manager keeps one `GET /v1/cluster/peer-state` stream open
+to each peer on the existing trusted `cl` mux: a long-lived NDJSON stream of
+`{descriptor, rosterHash}` frames carrying the peer's complete current service
+descriptor, sent on connect and on change, with a `null` keepalive every 10 s. Membership supplies only the locator. The response uses the serving
 scanner's self identity/addresses and current broker service registrations;
 neither roster entries nor reverse sessions establish service presence.
 The pinned direct/reverse client retains its normal transport policy.
