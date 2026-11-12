@@ -196,10 +196,12 @@ type peerStateStream struct {
 
 // peerStateResult is what a stream goroutine reports to peerStateLoop.
 type peerStateResult struct {
-	uuid     string
-	addrs    []string
-	gotFrame bool
-	open     time.Duration
+	uuid        string
+	incarnation string
+	addrs       []string
+	gotFrame    bool
+	forbidden   bool
+	open        time.Duration
 }
 
 // signalPeerStateMembers asks peerStateLoop to re-evaluate the member set now.
@@ -226,6 +228,11 @@ func (m *Manager) peerStateLoop(ctx context.Context) {
 	backoff := newPeerBackoff()
 	active := make(map[string]peerStateStream)
 	members := make(map[string]string) // uuid -> incarnation at the last evaluation
+	// streamed records, per member, the incarnation under which its stream
+	// delivered a frame. Only such a member's later 403 requests a full pass:
+	// a member still completing pairing refuses us until it pins this node,
+	// and a pass then would prune it as a peer that dropped us.
+	streamed := make(map[string]string)
 	done := make(chan peerStateResult)
 	var work sync.WaitGroup
 	defer work.Wait()
@@ -252,10 +259,12 @@ func (m *Manager) peerStateLoop(ctx context.Context) {
 			go func() {
 				defer work.Done()
 				opened := time.Now()
-				gotFrame, _ := m.runPeerStateStream(streamCtx, uuid, incarnation)
+				gotFrame, err := m.runPeerStateStream(streamCtx, uuid, incarnation)
 				cancel()
+				result := peerStateResult{uuid: uuid, incarnation: incarnation, addrs: addrs, gotFrame: gotFrame,
+					forbidden: errors.Is(err, errPeerStateForbidden), open: time.Since(opened)}
 				select {
-				case done <- peerStateResult{uuid: uuid, addrs: addrs, gotFrame: gotFrame, open: time.Since(opened)}:
+				case done <- result:
 				case <-ctx.Done():
 				}
 			}()
@@ -276,6 +285,11 @@ func (m *Manager) peerStateLoop(ctx context.Context) {
 		for _, uuid := range peers {
 			if incarnation, ok := m.peerServiceIncarnation(uuid); ok {
 				members[uuid] = incarnation
+			}
+		}
+		for uuid := range streamed {
+			if _, ok := members[uuid]; !ok {
+				delete(streamed, uuid)
 			}
 		}
 		for uuid, stream := range active {
@@ -302,6 +316,12 @@ func (m *Manager) peerStateLoop(ctx context.Context) {
 		case result := <-done:
 			stream := active[result.uuid]
 			delete(active, result.uuid)
+			if result.gotFrame {
+				streamed[result.uuid] = result.incarnation
+			} else if result.forbidden && streamed[result.uuid] == result.incarnation {
+				delete(streamed, result.uuid)
+				m.requestReconcilePass()
+			}
 			if stream.stopped {
 				continue
 			}
@@ -320,8 +340,9 @@ func (m *Manager) peerStateLoop(ctx context.Context) {
 	}
 }
 
-// errPeerStateForbidden reports a 403 on a stream connect; it also requests
-// one full reconcile pass, which repairs a roster this peer no longer accepts.
+// errPeerStateForbidden reports a 403 on a stream connect. peerStateLoop
+// answers it with one full reconcile pass when the member had accepted this
+// node before.
 var errPeerStateForbidden = errors.New("peer-state stream refused")
 
 // runPeerStateStream opens one peer-state stream to uuid and reads it until it
@@ -389,7 +410,6 @@ func (m *Manager) runPeerStateStream(ctx context.Context, uuid, incarnation stri
 		case http.StatusForbidden:
 			response.Body.Close()
 			cancel()
-			m.requestReconcilePass()
 			return false, errPeerStateForbidden
 		case http.StatusServiceUnavailable:
 			response.Body.Close()

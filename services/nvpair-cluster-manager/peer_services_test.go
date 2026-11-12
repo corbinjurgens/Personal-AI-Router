@@ -1725,19 +1725,56 @@ func TestPeerStateKeepaliveRefreshesClaim(t *testing.T) {
 }
 
 func TestPeerStateForbiddenRequestsReconcilePass(t *testing.T) {
-	p := newPeerStateStreamPair(t, func(p *peerStateStreamPair, w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "admission required", http.StatusForbidden)
+	startLoop := func(t *testing.T, p *peerStateStreamPair) {
+		t.Helper()
+		ctx, cancel := context.WithCancel(context.Background())
+		loopDone := make(chan struct{})
+		go func() { defer close(loopDone); p.a.peerStateLoop(ctx) }()
+		t.Cleanup(func() {
+			cancel()
+			select {
+			case <-loopDone:
+			case <-time.After(5 * time.Second):
+				t.Error("peer-state loop did not stop")
+			}
+		})
+	}
+	t.Run("a member that accepted this node", func(t *testing.T) {
+		p := newPeerStateStreamPair(t, func(p *peerStateStreamPair, w http.ResponseWriter, r *http.Request) {
+			if p.requests.Load() == 1 {
+				writeLines(t, w, p.frameLine(t, testRosterHash)) // then a clean end
+				return
+			}
+			http.Error(w, "admission required", http.StatusForbidden)
+		})
+		startLoop(t, p)
+		deadline := time.Now().Add(5 * time.Second)
+		for len(p.a.reconcileRequest) == 0 && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		if len(p.a.reconcileRequest) != 1 || p.requests.Load() < 2 {
+			t.Fatalf("pending pass requests = %d after %d stream requests, want 1", len(p.a.reconcileRequest), p.requests.Load())
+		}
 	})
-	if _, err := p.run(context.Background()); !errors.Is(err, errPeerStateForbidden) {
-		t.Fatalf("forbidden stream error = %v", err)
-	}
-	if len(p.a.reconcileRequest) != 1 {
-		t.Fatalf("pending pass requests = %d, want 1", len(p.a.reconcileRequest))
-	}
-	if p.requests.Load() != 1 {
-		t.Fatalf("stream requests = %d, want 1 (no further address)", p.requests.Load())
-	}
-	if claims := p.claims.claims(t); len(claims) != 0 {
-		t.Fatalf("refused stream published claims: %+v", claims)
-	}
+	t.Run("a member that never accepted this node", func(t *testing.T) {
+		p := newPeerStateStreamPair(t, func(p *peerStateStreamPair, w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "admission required", http.StatusForbidden)
+		})
+		if _, err := p.run(context.Background()); !errors.Is(err, errPeerStateForbidden) {
+			t.Fatalf("forbidden stream error = %v", err)
+		}
+		if p.requests.Load() != 1 {
+			t.Fatalf("stream requests = %d, want 1 (no further address)", p.requests.Load())
+		}
+		// Pairing leaves a window where the joiner refuses the inviter; a pass
+		// then would prune the new member as a peer that dropped this node.
+		startLoop(t, p)
+		time.Sleep(2500 * time.Millisecond)
+		if len(p.a.reconcileRequest) != 0 || p.requests.Load() < 2 {
+			t.Fatalf("pending pass requests = %d after %d stream requests, want 0", len(p.a.reconcileRequest), p.requests.Load())
+		}
+		if claims := p.claims.claims(t); len(claims) != 0 {
+			t.Fatalf("refused stream published claims: %+v", claims)
+		}
+	})
 }
