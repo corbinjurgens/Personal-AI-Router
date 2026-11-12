@@ -257,7 +257,7 @@ func (b *Broker) retainedModelReview(ctx context.Context, p settings.Request, ca
 		var validated settings.Preview
 		if err := modelSettingsCall(ctx, found.Source.Worker, "engine:preview-launch", envelope, &validated); err != nil {
 			code := engineSettingsErrorCode(err)
-			if code == -32011 || code == -32012 {
+			if code == codeLocalVeto || code == codeRemoteManagementDenied {
 				return settings.Preview{}, modelSettingsReviewSource{}, err
 			}
 			return settings.Preview{}, modelSettingsReviewSource{}, modelSettingsConflict("frozen native or resource validation failed; explicitly Recalculate: " + err.Error())
