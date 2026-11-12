@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Badge, Button, Flex, Stack, Text } from '@nvidia/foundations-react-core'
 import { DismissibleTooltip } from '@/ui/components/DismissibleTooltip/DismissibleTooltip'
 import { HaltConfirmModal } from '@/ui/components/HaltConfirmModal'
-import { HALT_CONSEQUENCE } from '@/ui/constants/availability-copy'
+import { HALT_CONSEQUENCE } from '@/shared/constants/availability-copy'
 import type { NodeAvailabilityRequest } from '@/shared/types/node-policy'
 import {
     canResumeAvailability,

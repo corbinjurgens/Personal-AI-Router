@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import { app, BrowserWindow, Menu, nativeImage, screen, Tray } from 'electron'
+import { app, BrowserWindow, dialog, Menu, nativeImage, screen, Tray } from 'electron'
 import { join } from 'path'
 import { createTrayWindow, getTrayWindow, createOverviewWindow } from '@/electron/window'
 import { getTrayMode, setTrayMode, type TrayMode } from '@/electron/config/ui-config'
@@ -10,6 +10,7 @@ import { getModularSupervisor } from '@/electron/service-bridge/modular-supervis
 import { createStructuredLogger } from '@/shared/utils/log'
 import { currentPlatform } from '@/shared/utils/platform'
 import { APP_DISPLAY_NAME } from '@/shared/constants/app'
+import { HALT_CONFIRM_TITLE, HALT_CONSEQUENCE } from '@/shared/constants/availability-copy'
 
 const log = createStructuredLogger('tray')
 
@@ -52,6 +53,8 @@ class TrayManager {
     private availabilityReadError: string | null = null
     private availabilityReading = false
     private availabilityAction = 0
+    /** The Halt confirmation dialog is open; Halt stays disabled so dialogs do not stack. */
+    private haltConfirmOpen = false
     private popupIdleTimer: ReturnType<typeof setTimeout> | undefined
     /** A popup created by a click, waiting for its first paint before it is shown. */
     private pendingReveal: { win: BrowserWindow; timer: ReturnType<typeof setTimeout> } | undefined
@@ -146,10 +149,11 @@ class TrayManager {
             {
                 label: 'Halt this PC',
                 enabled:
+                    !this.haltConfirmOpen &&
                     pause.enabled &&
                     (this.availabilityRequest === null ||
                         (pause.retryPause === true && this.availabilityRequest === 'paused')),
-                click: () => this.requestAvailability('paused', true)
+                click: () => this.confirmHalt()
             },
             ...(pause.retryPause
                 ? [
@@ -201,21 +205,67 @@ class TrayManager {
             })
     }
 
-    /** Pause or resume inference on this PC. The label follows the broker's own notifications. */
-    private requestAvailability(request: 'available' | 'paused' | null, immediate = false): void {
-        if (request === null) return
+    /**
+     * Halt asks first, as the Overview's Halt buttons do, with the same title
+     * and consequence text. The menu is native, so the confirmation is a native
+     * dialog; the request is checked again once it is confirmed.
+     */
+    private confirmHalt(): void {
+        if (this.haltConfirmOpen || !this.availabilityRequestAllowed('paused', true)) return
+        this.haltConfirmOpen = true
+        this.refreshContextMenu()
+        // A menu-bar click does not activate the app on macOS; without this the
+        // parentless dialog can open behind other windows.
+        if (currentPlatform() === 'darwin') app.focus({ steal: true })
+        dialog
+            .showMessageBox({
+                type: 'warning',
+                buttons: ['Halt', 'Cancel'],
+                defaultId: 1,
+                cancelId: 1,
+                noLink: true,
+                title: HALT_CONFIRM_TITLE,
+                message: HALT_CONFIRM_TITLE,
+                detail: HALT_CONSEQUENCE
+            })
+            .then(
+                ({ response }) => {
+                    this.haltConfirmOpen = false
+                    if (response !== 0) return
+                    if (this.availabilityRequestAllowed('paused', true)) {
+                        this.requestAvailability('paused', true)
+                        return
+                    }
+                    this.availabilityError =
+                        'Halt was not sent: availability changed while confirming'
+                },
+                (error: unknown) => {
+                    this.haltConfirmOpen = false
+                    this.availabilityError = `Could not show the Halt confirmation: ${error}`
+                    log.warn({ sublevel: 'lifecycle', message: this.availabilityError })
+                }
+            )
+            .finally(() => this.refreshContextMenu())
+    }
+
+    private availabilityRequestAllowed(
+        request: 'available' | 'paused',
+        immediate: boolean
+    ): boolean {
         const pause = getModularSupervisor().getAvailabilityMenuItem()
-        if (!pause.enabled) return
-        if (
-            this.availabilityRequest !== null &&
-            !(
-                pause.retryPause === true &&
+        if (!pause.enabled) return false
+        return (
+            this.availabilityRequest === null ||
+            (pause.retryPause === true &&
                 ((this.availabilityRequest === 'paused' &&
                     (request === 'available' || immediate)) ||
-                    (this.availabilityRequest === 'immediate' && request === 'available'))
-            )
+                    (this.availabilityRequest === 'immediate' && request === 'available')))
         )
-            return
+    }
+
+    /** Pause or resume inference on this PC. The label follows the broker's own notifications. */
+    private requestAvailability(request: 'available' | 'paused' | null, immediate = false): void {
+        if (request === null || !this.availabilityRequestAllowed(request, immediate)) return
         this.availabilityRequest = immediate ? 'immediate' : request
         const action = ++this.availabilityAction
         this.availabilityError = null

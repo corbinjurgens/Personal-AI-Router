@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -164,9 +165,9 @@ func TestReverseDialFailureNamesAddressAndStageOnce(t *testing.T) {
 		t.Fatalf("dial error %q carries the connection's local endpoint, so repeats would differ", err)
 	}
 
-	// The connect loop retries about once a second; the same failure is logged once.
+	// Repeated attempts that fail the same way are logged once.
 	for i := 0; i < 3; i++ {
-		a.attemptReverseSession(ctx, *node)
+		_ = a.attemptReverseSession(ctx, *node)
 	}
 	failed := records.find("reverse session failed", map[string]string{"peer": b.identity.NodeUUID})
 	if len(failed) != 1 {
@@ -174,6 +175,45 @@ func TestReverseDialFailureNamesAddressAndStageOnce(t *testing.T) {
 	}
 	if failed[0]["direction"] != "outbound" || !strings.Contains(failed[0]["err"], address+" dial: ") || failed[0]["level"] != slog.LevelWarn.String() {
 		t.Fatalf("failure record = %v", failed[0])
+	}
+}
+
+func TestReverseConnectLoopBacksOffUnreachableMember(t *testing.T) {
+	a, b := newReverseTestManager(t), newReverseTestManager(t)
+	// b's only address accepts and closes every connection at once, so each
+	// reverse dial fails at the TLS handshake.
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	var accepted atomic.Int32
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			accepted.Add(1)
+			conn.Close()
+		}
+	}()
+	b.port = listener.Addr().(*net.TCPAddr).Port
+	pairReverseManagers(t, a, b)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	a.reverse.wg.Add(1)
+	go a.reverseConnectLoop(ctx)
+	time.Sleep(5 * time.Second)
+	cancel()
+	a.reverse.wg.Wait()
+
+	// Delays of 1 s, 2 s and 4 s allow 3 attempts in 5 s, plus one for jitter
+	// and tick granularity. Without backoff the loop dials about every second.
+	got := accepted.Load()
+	t.Logf("reverse dials to the unreachable member in 5 s: %d", got)
+	if got < 2 || got > 4 {
+		t.Fatalf("reverse dials in 5 s = %d, want 2 to 4", got)
 	}
 }
 
@@ -233,7 +273,7 @@ func TestReverseSessionEstablishmentAndDuplicateAreLogged(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	before := len(records.find("reverse session failed", nil))
-	b.attemptReverseSession(ctx, *node)
+	_ = b.attemptReverseSession(ctx, *node)
 	if after := len(records.find("reverse session failed", nil)); after != before {
 		t.Fatalf("a duplicate session was logged as %d failure(s)", after-before)
 	}
