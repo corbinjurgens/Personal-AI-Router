@@ -66,6 +66,7 @@ export default function HaltControl({ targetId }: { targetId: string }) {
             <HaltConfirmModal
                 open={confirmOpen}
                 onOpenChange={setConfirmOpen}
+                confirmDisabled={disabled || resume}
                 onConfirm={() => {
                     if (!resume) request()
                 }}

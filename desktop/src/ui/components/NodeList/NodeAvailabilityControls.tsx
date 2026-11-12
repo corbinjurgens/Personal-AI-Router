@@ -174,6 +174,7 @@ export function AvailabilityControls({
                 <HaltConfirmModal
                     open={haltConfirmOpen}
                     onOpenChange={setHaltConfirmOpen}
+                    confirmDisabled={!canStop}
                     onConfirm={() => {
                         if (canStop) onRequest({ state: 'paused', pauseMode: 'immediate' })
                     }}

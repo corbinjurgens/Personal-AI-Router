@@ -8,10 +8,12 @@ import { HALT_CONSEQUENCE } from '@/ui/constants/availability-copy'
 export function HaltConfirmModal({
     open,
     onOpenChange,
+    confirmDisabled,
     onConfirm
 }: {
     open: boolean
     onOpenChange: (open: boolean) => void
+    confirmDisabled: boolean
     onConfirm: () => void
 }) {
     return (
@@ -22,6 +24,7 @@ export function HaltConfirmModal({
             message={HALT_CONSEQUENCE}
             confirmLabel="Halt"
             confirmColor="danger"
+            confirmDisabled={confirmDisabled}
             onConfirm={onConfirm}
         />
     )
