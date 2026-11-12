@@ -109,6 +109,11 @@ export default function ActiveNode({
                             </Text>
                         )}
                     </Flex>
+                    {node.nickname !== undefined && (
+                        <Text kind="body/regular/sm" className="text-subtle-color">
+                            {`Nickname on this device. Its own name is ${node.name}.`}
+                        </Text>
+                    )}
                     <Text kind="body/regular/sm" className="text-subtle-color">
                         {ipAddress}
                     </Text>

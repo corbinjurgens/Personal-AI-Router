@@ -234,13 +234,13 @@ describe('reported node build row', () => {
         const markup = renderToStaticMarkup(
             <NodeCardDetails node={{ ...node, serviceBuildId: DIRTY }} />
         )
-        expect(markup).toContain('Reported service build: ')
-        expect(markup).toContain(DIRTY)
+        expect(markup).toContain('Service build: 01234567+dirty')
+        expect(markup).toContain(`title="${DIRTY}"`)
         expect(markup).toContain('(cached; node offline)')
     })
     it('shows unknown without inventing a build', () => {
         const markup = renderToStaticMarkup(<NodeCardDetails node={node} />)
-        expect(markup).toContain('Reported service build: --')
+        expect(markup).toContain('Service build: --')
     })
 })
 

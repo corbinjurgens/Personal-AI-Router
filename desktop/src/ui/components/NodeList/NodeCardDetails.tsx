@@ -16,7 +16,7 @@ import NodeLabel from './NodeLabel'
 import NodeActive from '@/ui/components/NodeActive/NodeActive'
 import { hasFirstMetrics } from '@/ui/utils/has-first-metrics'
 import type { CpuFallbackInfo, GpuInfo } from '@/ui/types/node-hardware'
-import { formatBytes } from '@/ui/utils/formatters'
+import { formatBytes, formatServiceBuildShort } from '@/ui/utils/formatters'
 import { CHART_COLORS } from '@/ui/constants/colors'
 import NodePerformance from './NodePerformance'
 import NodeChartLegend from './NodeChartLegend'
@@ -302,8 +302,12 @@ function NodeCardDetails({ node, distinguishingLabel }: NodeCardDetailsProps) {
                             name={node.name}
                             online={node.status !== 'offline'}
                         />
-                        <Text kind="body/regular/sm" className="ml-1 text-subtle-color break-all">
-                            Reported service build: {node.serviceBuildId ?? '--'}
+                        <Text
+                            kind="body/regular/sm"
+                            className="ml-1 text-subtle-color break-all"
+                            title={node.serviceBuildId}
+                        >
+                            {`Service build: ${node.serviceBuildId ? formatServiceBuildShort(node.serviceBuildId) : '--'}`}
                             {node.status === 'offline' &&
                                 (node.serviceBuildId
                                     ? ' (cached; node offline)'

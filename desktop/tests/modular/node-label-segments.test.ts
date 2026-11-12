@@ -71,6 +71,18 @@ describe('buildNodeLabelSegments', () => {
         expect(texts).toEqual(['Tesla P100-PCIE-16GB', 'RTX 3060'])
     })
 
+    it('shows identical GPU names once with a count, keeping first-seen order', () => {
+        const segments = buildNodeLabelSegments('MSI', '10.0.0.14', [
+            'NVIDIA GeForce RTX 4050 Laptop GPU',
+            'Intel(R) Iris(R) Xe Graphics',
+            'Intel(R) Iris(R) Xe Graphics'
+        ])
+        expect(segments.filter(segment => segment.id.startsWith('gpu-'))).toEqual([
+            { id: 'gpu-0', text: 'NVIDIA GeForce RTX 4050 Laptop GPU' },
+            { id: 'gpu-1', text: 'Intel(R) Iris(R) Xe Graphics ×2' }
+        ])
+    })
+
     it('emits no GPU segments for a host that reports none', () => {
         expect(gpuTexts('cpu-only', '10.0.0.13', [])).toEqual([])
     })

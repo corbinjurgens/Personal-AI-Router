@@ -118,7 +118,8 @@ export function NodeNameModal({ target, open, onClose }: NodeNameModalProps) {
         peer !== null &&
         !canSaveName &&
         (denied || (managementState !== undefined && NO_GRANT_STATES.includes(managementState)))
-    const shownName = target.kind === 'peer' ? target.node.displayName : target.shownName
+    // The peer's own name, not this device's nickname for it: Save renames the peer itself.
+    const shownName = target.kind === 'peer' ? target.node.name : target.shownName
     const hasDefaultToRestore = target.kind === 'peer' || target.customName !== null
 
     function currentOutcome() {

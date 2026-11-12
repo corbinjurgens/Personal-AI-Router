@@ -18,7 +18,8 @@ interface LabelSegment {
  * invisible — which is the failure this shape exists to prevent.
  *
  * Empty GPU names are dropped so a backend that reports a blank name cannot
- * render a stray separator with nothing after it.
+ * render a stray separator with nothing after it. Identical names are shown
+ * once with a count (`Name ×2`), keyed by the first occurrence's index.
  */
 export function buildNodeLabelSegments(
     name: string,
@@ -32,11 +33,19 @@ export function buildNodeLabelSegments(
         segments.push({ id: 'ip', text: ipAddress })
     }
 
+    const groups = new Map<string, { index: number; count: number }>()
     gpuLabels.forEach((gpuLabel, index) => {
-        if (gpuLabel) {
-            segments.push({ id: `gpu-${index}`, text: gpuLabel })
-        }
+        if (!gpuLabel) return
+        const group = groups.get(gpuLabel)
+        if (group) group.count++
+        else groups.set(gpuLabel, { index, count: 1 })
     })
+    for (const [gpuLabel, { index, count }] of groups) {
+        segments.push({
+            id: `gpu-${index}`,
+            text: count > 1 ? `${gpuLabel} ×${count}` : gpuLabel
+        })
+    }
 
     return segments
 }

@@ -3,6 +3,8 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { Badge, Button, Flex, Stack, Text } from '@nvidia/foundations-react-core'
+import { DismissibleTooltip } from '@/ui/components/DismissibleTooltip/DismissibleTooltip'
+import { HALT_CONSEQUENCE } from '@/ui/constants/availability-copy'
 import type { NodeAvailabilityRequest } from '@/shared/types/node-policy'
 import {
     canResumeAvailability,
@@ -22,6 +24,13 @@ interface ControlsProps {
     onRefresh(): void
     nodeId?: string
 }
+
+/** What Pause does; shown on the Pause button rather than repeated on every card. */
+function pauseExplanation(name: string): string {
+    return `Pause bars execution and unloads models on ${name}; routing elsewhere continues. Interrupted requests may fail and need a new client request. File transfers and metadata reads continue.`
+}
+
+const HALT_EXPLANATION = `Halt: ${HALT_CONSEQUENCE}`
 
 export function AvailabilityControls({
     name,
@@ -80,19 +89,22 @@ export function AvailabilityControls({
                     !local ||
                     value === undefined ||
                     value === 'draining') && (
-                    <Button
-                        kind="secondary"
-                        size="tiny"
-                        className="max-w-full whitespace-normal break-words"
-                        disabled={!known || busy || (!local && value !== 'available')}
-                        aria-label={`${value === 'draining' && local ? 'Retry pause' : 'Pause node'}: ${name}`}
-                        aria-busy={entry?.pending === 'paused'}
-                        onClick={() =>
-                            onRequest({ nodeId, state: 'paused', pauseMode: 'configured' })
-                        }
-                    >
-                        {value === 'draining' && local ? 'Retry pause' : 'Pause node'}
-                    </Button>
+                    <DismissibleTooltip slotContent={pauseExplanation(name)}>
+                        <Button
+                            kind="secondary"
+                            size="tiny"
+                            className="max-w-full whitespace-normal break-words"
+                            disabled={!known || busy || (!local && value !== 'available')}
+                            aria-label={`${value === 'draining' && local ? 'Retry pause' : 'Pause node'}: ${name}`}
+                            aria-description={pauseExplanation(name)}
+                            aria-busy={entry?.pending === 'paused'}
+                            onClick={() =>
+                                onRequest({ nodeId, state: 'paused', pauseMode: 'configured' })
+                            }
+                        >
+                            {value === 'draining' && local ? 'Retry pause' : 'Pause node'}
+                        </Button>
+                    </DismissibleTooltip>
                 )}
                 {resume && (
                     <Button
@@ -107,17 +119,20 @@ export function AvailabilityControls({
                     </Button>
                 )}
                 {local && (
-                    <Button
-                        kind="primary"
-                        color="brand"
-                        size="tiny"
-                        className="max-w-full whitespace-normal break-words"
-                        disabled={!canStop}
-                        aria-busy={entry?.pendingPauseMode === 'immediate'}
-                        onClick={() => onRequest({ state: 'paused', pauseMode: 'immediate' })}
-                    >
-                        Halt
-                    </Button>
+                    <DismissibleTooltip slotContent={HALT_EXPLANATION}>
+                        <Button
+                            kind="secondary"
+                            color="danger"
+                            size="tiny"
+                            className="max-w-full whitespace-normal break-words"
+                            disabled={!canStop}
+                            aria-description={HALT_EXPLANATION}
+                            aria-busy={entry?.pendingPauseMode === 'immediate'}
+                            onClick={() => onRequest({ state: 'paused', pauseMode: 'immediate' })}
+                        >
+                            Halt
+                        </Button>
+                    </DismissibleTooltip>
                 )}
                 <Button
                     kind="tertiary"
@@ -142,9 +157,6 @@ export function AvailabilityControls({
                     (value === 'draining' || value === 'paused') &&
                     'Resume on that device. '}
                 {entry?.stale && 'Readback timed out. Refresh availability manually. '}
-                Pause bars execution and unloads models on {name}; routing elsewhere continues.{' '}
-                Interrupted requests may fail and need a new client request. File transfers and
-                metadata reads continue.
             </Text>
             {entry?.error && (
                 <Text kind="body/regular/sm" role="alert" className="break-words min-w-0">
