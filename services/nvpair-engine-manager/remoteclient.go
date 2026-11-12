@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"nvpair-shared/clustertrust"
 	"nvpair-shared/modeldownload"
 	"nvpair-shared/noderec"
 )
@@ -51,9 +52,9 @@ const (
 	// on the target cancelled.
 	codeLocalVeto = -32011
 	// codeRemoteManagementDenied is a pinned peer's management operation the
-	// target's local remote-management permission refused. It is distinct from
-	// an unpinned 403 and from codeLocalVeto.
-	codeRemoteManagementDenied = -32012
+	// target's local remote-management permission refused (clustertrust owns
+	// the code, wire name and text).
+	codeRemoteManagementDenied = clustertrust.RemoteManagementDeniedRPCCode
 	// codeRemoteSettingLocked is a peer edit of target-owned inference settings.
 	codeRemoteSettingLocked = -32014
 )
@@ -62,7 +63,7 @@ const (
 var wireCodes = map[int]string{
 	codePolicyConflict:         "policy_conflict",
 	codeLocalVeto:              "local_veto",
-	codeRemoteManagementDenied: remoteManagementWireCode,
+	codeRemoteManagementDenied: clustertrust.RemoteManagementDeniedCode,
 	codeRemoteSettingLocked:    "remote_setting_locked",
 }
 
@@ -75,22 +76,14 @@ type codedError struct {
 
 func (e *codedError) Error() string { return e.message }
 
-// codedBody is the body of an ec 409 that carries a typed code.
-type codedBody struct {
-	Error string `json:"error"`
-	Code  string `json:"code"`
-}
-
-// writeCodedError refuses an ec request with a typed code: HTTP 409 and
-// {"error": message, "code": <wire name>}.
+// writeCodedError refuses an ec request with a typed code: HTTP 409 and the
+// shared clustertrust.CodedRefusal body {"code": <wire name>, "error": message}.
 func writeCodedError(w http.ResponseWriter, code int, message string) {
 	wire := wireCodes[code]
 	if code == codeOperationError {
 		wire = operationErrorWire
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusConflict)
-	_ = json.NewEncoder(w).Encode(codedBody{Error: message, Code: wire})
+	clustertrust.WriteCodedRefusal(w, http.StatusConflict, wire, message)
 }
 
 // remoteStatusError is the error for an ec response with a non-2xx status. A
@@ -100,7 +93,7 @@ func remoteStatusError(prefix string, status int, body []byte) error {
 	if status == http.StatusBadRequest && strings.HasPrefix(prefix, "remote /v1/engine-settings/") {
 		return &codedError{code: -32602, message: fmt.Sprintf("%s: HTTP %d: %s", prefix, status, strings.TrimSpace(string(body)))}
 	}
-	var coded codedBody
+	var coded clustertrust.CodedRefusal
 	if status == http.StatusConflict && json.Unmarshal(body, &coded) == nil {
 		if code, ok := codeOfWire(coded.Code); ok {
 			return &codedError{code: code, message: fmt.Sprintf("%s: HTTP %d: %s", prefix, status, coded.Error)}

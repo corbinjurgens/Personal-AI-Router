@@ -145,7 +145,7 @@ func (s *controlServer) authorize(route controlRoute, h pinnedPeerHandler) pinne
 		if !permission.Allowed {
 			// A pinned peer's refused management operation. Typed 409 and a
 			// bounded explanation; never raw filesystem state.
-			writeCodedError(w, codeRemoteManagementDenied, remoteManagementDeniedMessage)
+			clustertrust.WriteRemoteManagementDenied(w)
 			return
 		}
 		if s.exec == nil {

@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"nvpair-shared/clustertrust"
 )
 
 // setPeerNameFixture pairs a viewer and a target over real mTLS listeners.
@@ -216,7 +218,7 @@ func answerPeerRenameError(t *testing.T, status int, body string) *rpcResult {
 
 func TestSetPeerNameBoundsTargetText(t *testing.T) {
 	huge := strings.Repeat("é", 4096) // two bytes per rune
-	body, err := json.Marshal(map[string]string{"code": "invalid_name", "reason": strings.Repeat("r", 500), "message": huge})
+	body, err := json.Marshal(map[string]string{"code": "invalid_name", "reason": strings.Repeat("r", 500), "error": huge})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,8 +234,8 @@ func TestSetPeerNameBoundsTargetText(t *testing.T) {
 		}
 	})
 	t.Run("409 uses the fixed local denial text", func(t *testing.T) {
-		res := answerPeerRenameError(t, http.StatusConflict, `{"code":"remote_management_denied","message":"`+strings.Repeat("x", 10000)+`"}`)
-		if res.err.Code != codeRemoteManagementDenied || res.err.Message != remoteManagementDeniedText {
+		res := answerPeerRenameError(t, http.StatusConflict, `{"code":"remote_management_denied","error":"`+strings.Repeat("x", 10000)+`"}`)
+		if res.err.Code != codeRemoteManagementDenied || res.err.Message != clustertrust.RemoteManagementDeniedMessage {
 			t.Fatalf("denial = %d %q, want -32012 with the fixed text", res.err.Code, res.err.Message)
 		}
 	})

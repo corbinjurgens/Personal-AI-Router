@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"nvpair-shared/clustertrust"
 )
 
 // postControl drives one ec handler as a paired node's request does.
@@ -27,7 +29,7 @@ func postControl(t *testing.T, handler func(http.ResponseWriter, *http.Request),
 // requireLocalVeto fails unless rec is the typed 409 of a local veto.
 func requireLocalVeto(t *testing.T, what string, rec *httptest.ResponseRecorder) {
 	t.Helper()
-	var body codedBody
+	var body clustertrust.CodedRefusal
 	if rec.Code != http.StatusConflict || json.Unmarshal(rec.Body.Bytes(), &body) != nil || body.Code != "local_veto" || body.Error == "" {
 		t.Fatalf("%s = %d %q, want a 409 local_veto refusal", what, rec.Code, rec.Body.String())
 	}

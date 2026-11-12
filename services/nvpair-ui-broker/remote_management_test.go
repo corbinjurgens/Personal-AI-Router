@@ -132,7 +132,7 @@ func bindRemoteManagementTestSource(b *Broker) *engineManagerSource {
 func rmDeny(t *testing.T, err error) {
 	t.Helper()
 	var denied *remoteManagementDeniedError
-	if !errors.As(err, &denied) || policyErrorCode(err) != -32012 || err.Error() != remoteManagementDeniedMessage {
+	if !errors.As(err, &denied) || policyErrorCode(err) != -32012 || err.Error() != clustertrust.RemoteManagementDeniedMessage {
 		t.Fatalf("permission refusal = %v (code %d), want typed -32012", err, policyErrorCode(err))
 	}
 }
@@ -792,7 +792,7 @@ func TestRemoteManagementReplyCodes(t *testing.T) {
 		for _, p := range []policyRelayRequest{rmPolicyRequest(t, rb), {ID: "availability-code", Method: "set-availability", Caller: "pinned-peer", Params: rmJSON(t, policyParams{State: string(nodepolicy.Paused)})}} {
 			rb.b.forwardEngineNotificationFrom(rb.source, policyRelayRequestMethod, rmJSON(t, p))
 			reply := rmWaitReply(t, rb.engine, policyRelayReplyMethod, p.ID)
-			if reply.ErrorCode != -32012 || reply.Error != remoteManagementDeniedMessage {
+			if reply.ErrorCode != -32012 || reply.Error != clustertrust.RemoteManagementDeniedMessage {
 				t.Fatalf("policy denial reply = %+v", reply)
 			}
 		}
@@ -808,7 +808,7 @@ func TestRemoteManagementReplyCodes(t *testing.T) {
 			if err := json.Unmarshal(raw, &reply); err != nil {
 				t.Fatal(err)
 			}
-			if reply.ErrorCode != -32012 || reply.Error != remoteManagementDeniedMessage {
+			if reply.ErrorCode != -32012 || reply.Error != clustertrust.RemoteManagementDeniedMessage {
 				t.Fatalf("settings denial reply = %+v", reply)
 			}
 		case <-time.After(5 * time.Second):
@@ -830,7 +830,7 @@ func TestRemoteManagementOriginRelaysPreserveCode(t *testing.T) {
 						return
 					}
 					if request.IsRequest() {
-						if err := codec.RespondError(request.ID, -32012, remoteManagementDeniedMessage); err != nil {
+						if err := codec.RespondError(request.ID, -32012, clustertrust.RemoteManagementDeniedMessage); err != nil {
 							t.Error(err)
 						}
 						return
@@ -839,7 +839,7 @@ func TestRemoteManagementOriginRelaysPreserveCode(t *testing.T) {
 			}()
 			b.handleMessage(clientRequest(1, method, map[string]any{"nodeId": "peer", "engine": "llamacpp", "requestId": "origin"}))
 			response := out.waitFrame(t, method+" origin denial", isResponse(1))
-			if response.Error == nil || response.Error.Code != -32012 || response.Error.Message != remoteManagementDeniedMessage {
+			if response.Error == nil || response.Error.Code != -32012 || response.Error.Message != clustertrust.RemoteManagementDeniedMessage {
 				t.Fatalf("origin %s = %+v", method, response)
 			}
 		})

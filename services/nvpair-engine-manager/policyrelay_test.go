@@ -663,7 +663,7 @@ func TestPolicyRoutesAnswerTypedCodesAsConflictBodies(t *testing.T) {
 			if len(fields) != 2 || fields["code"] == nil || fields["error"] == nil {
 				t.Fatalf("typed refusal fields = %v, want code/error only", fields)
 			}
-			var body codedBody
+			var body clustertrust.CodedRefusal
 			if err := json.Unmarshal(mustRemoteSettingJSON(t, fields), &body); err != nil {
 				t.Fatal(err)
 			}

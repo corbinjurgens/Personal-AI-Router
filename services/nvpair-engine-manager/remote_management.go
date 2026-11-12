@@ -32,12 +32,6 @@ const (
 	remoteManagementGetMethod = "engine:remote-management-get"
 
 	remoteManagementVersion = 1
-	// remoteManagementWireCode is the ec 409 body/stream wire name for
-	// codeRemoteManagementDenied.
-	remoteManagementWireCode = "remote_management_denied"
-	// remoteManagementDeniedMessage is the bounded explanation a refused peer
-	// receives. It never carries filesystem or storage detail.
-	remoteManagementDeniedMessage = "Remote management is blocked on this device. Change permission locally on that device."
 
 	remoteManagementStateAllowed     = "allowed"
 	remoteManagementStateDenied      = "denied"

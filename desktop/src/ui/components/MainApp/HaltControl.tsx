@@ -3,8 +3,7 @@
 
 import { useEffect, useState } from 'react'
 import { Button, Stack, Text } from '@nvidia/foundations-react-core'
-import { HALT_CONSEQUENCE } from '@/ui/constants/availability-copy'
-import { ConfirmModal } from '@/ui/components/ConfirmModal'
+import { HaltConfirmModal } from '@/ui/components/HaltConfirmModal'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import {
     useNodeConfigurationStore,
@@ -64,13 +63,10 @@ export default function HaltControl({ targetId }: { targetId: string }) {
                     {entry.readError}
                 </Text>
             )}
-            <ConfirmModal
+            <HaltConfirmModal
                 open={confirmOpen}
                 onOpenChange={setConfirmOpen}
-                title="Halt this PC?"
-                message={HALT_CONSEQUENCE}
-                confirmLabel="Halt"
-                confirmColor="danger"
+                confirmDisabled={disabled || resume}
                 onConfirm={() => {
                     if (!resume) request()
                 }}

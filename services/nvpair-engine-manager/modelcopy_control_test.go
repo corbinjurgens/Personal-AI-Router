@@ -588,7 +588,7 @@ func TestModelCopyControlVerifiedRetryPrecedesSourceLookup(t *testing.T) {
 	t.Run("verified retry and changed identity", func(t *testing.T) {
 		m, store, src, p := setup(t)
 		if _, err := m.copyFromPeer(context.Background(), p, func() error {
-			return &codedError{code: codeRemoteManagementDenied, message: remoteManagementDeniedMessage}
+			return &codedError{code: codeRemoteManagementDenied, message: clustertrust.RemoteManagementDeniedMessage}
 		}, nil); rpcCode(err) != codeRemoteManagementDenied {
 			t.Fatalf("receipt bypassed destination authorization: %v", err)
 		}
@@ -754,7 +754,7 @@ func TestModelCopyControlPermissionAndSourceAuthority(t *testing.T) {
 			if len(f.destination.activeCopies()) != 1 {
 				t.Error("authorization did not hold reservation")
 			}
-			return &codedError{code: codeRemoteManagementDenied, message: remoteManagementDeniedMessage}
+			return &codedError{code: codeRemoteManagementDenied, message: clustertrust.RemoteManagementDeniedMessage}
 		}, nil)
 		if rpcCode(err) != codeRemoteManagementDenied || calls != 1 || f.reads.Load() != 0 || len(f.destination.activeCopies()) != 0 {
 			t.Fatalf("fresh authorization=%v calls=%d reads=%d", err, calls, f.reads.Load())
@@ -947,7 +947,7 @@ func TestModelCopyControlStreamErrorStatesStayDistinct(t *testing.T) {
 	test("typed acknowledgement uncertainty", copyUnknown(io.ErrUnexpectedEOF), "unknown", -32000)
 	test("uncertain transport cancellation is not explicit cancel", copyUnknown(context.Canceled), "unknown", -32000)
 	test("definite error text cannot create uncertainty", errors.New("unknown model binding"), "error", -32000)
-	test("definite permission refusal keeps its code", &codedError{code: codeRemoteManagementDenied, message: remoteManagementDeniedMessage}, "error", codeRemoteManagementDenied)
+	test("definite permission refusal keeps its code", &codedError{code: codeRemoteManagementDenied, message: clustertrust.RemoteManagementDeniedMessage}, "error", codeRemoteManagementDenied)
 	test("explicit cancellation stays cancelled", context.Canceled, "cancelled", -32000)
 }
 

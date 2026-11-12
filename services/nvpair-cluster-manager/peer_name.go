@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"unicode/utf8"
 
+	"nvpair-shared/clustertrust"
 	"nvpair-shared/httpcon"
 	"nvpair-shared/nodename"
 )
@@ -21,20 +22,25 @@ import (
 // allowed) may use it; this node stays the only writer of its own name.
 const peerNodeNamePath = "/v1/cluster/node-name"
 
-// Peer error bodies for peerNodeNamePath. The denial code and message match
-// engine-manager's remote-management refusal so clients show one text.
+// Peer error text for peerNodeNamePath. The 409 denial comes from
+// clustertrust.WriteRemoteManagementDenied.
 const (
-	peerNameInvalidCode        = "invalid_name"
-	remoteManagementDeniedWire = "remote_management_denied"
-	remoteManagementDeniedText = "Remote management is blocked on this device. Change permission locally on that device."
-	peerNameUnavailableText    = "the device is offline or does not trust this node"
+	peerNameInvalidCode     = "invalid_name"
+	peerNameUnavailableText = "the device is offline or does not trust this node"
 )
 
-// peerNodeNameError is the JSON body of a 400 or 409 answer.
+// peerNodeNameError is the JSON body of a 400 answer: the shared coded-refusal
+// shape plus the validator's reason.
 type peerNodeNameError struct {
-	Code    string `json:"code"`
-	Reason  string `json:"reason,omitempty"`
-	Message string `json:"message"`
+	clustertrust.CodedRefusal
+	Reason string `json:"reason,omitempty"`
+}
+
+func invalidPeerName(reason, message string) peerNodeNameError {
+	return peerNodeNameError{
+		CodedRefusal: clustertrust.CodedRefusal{Code: peerNameInvalidCode, Error: message},
+		Reason:       reason,
+	}
 }
 
 func writePeerJSON(w http.ResponseWriter, status int, body any) {
@@ -82,19 +88,19 @@ func (m *Manager) handlePeerNodeName(w http.ResponseWriter, r *http.Request) {
 	}
 	custom, ok := decodePeerNodeNameBody(body)
 	if !ok {
-		writePeerJSON(w, http.StatusBadRequest, peerNodeNameError{Code: peerNameInvalidCode, Message: "body must be exactly {\"name\": string or null}"})
+		writePeerJSON(w, http.StatusBadRequest, invalidPeerName("", "body must be exactly {\"name\": string or null}"))
 		return
 	}
 	perm := m.remoteManagementFor(uuid)
 	if !perm.Allowed {
 		log.Printf("peer rename: caller %s denied (state %s, revision %s)", uuid, perm.State, perm.Revision)
-		writePeerJSON(w, http.StatusConflict, peerNodeNameError{Code: remoteManagementDeniedWire, Message: remoteManagementDeniedText})
+		clustertrust.WriteRemoteManagementDenied(w)
 		return
 	}
 	log.Printf("peer rename: caller %s allowed (revision %s)", uuid, perm.Revision)
 	view, err := m.setSelfName(custom)
 	if reason := nodename.Reason(err); reason != "" {
-		writePeerJSON(w, http.StatusBadRequest, peerNodeNameError{Code: peerNameInvalidCode, Reason: reason, Message: err.Error()})
+		writePeerJSON(w, http.StatusBadRequest, invalidPeerName(reason, err.Error()))
 		return
 	}
 	if err != nil {
@@ -188,11 +194,11 @@ func (m *Manager) answerPeerRename(msg *Message, uuid string, status int, answer
 		m.codec.Respond(msg.ID, view)
 	case http.StatusConflict:
 		// The denial text is fixed locally; the target's body is not relayed.
-		m.codec.RespondErrorData(msg.ID, codeRemoteManagementDenied, remoteManagementDeniedText, nil)
+		m.codec.RespondErrorData(msg.ID, codeRemoteManagementDenied, clustertrust.RemoteManagementDeniedMessage, nil)
 	case http.StatusBadRequest:
 		// The target's text is relayed only within fixed bounds.
 		_ = json.Unmarshal(answer, &peerErr)
-		message := truncateUTF8(peerErr.Message, peerMessageMaxBytes)
+		message := truncateUTF8(peerErr.Error, peerMessageMaxBytes)
 		if message == "" {
 			message = "the device rejected the name"
 		}

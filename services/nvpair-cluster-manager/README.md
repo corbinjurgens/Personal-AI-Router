@@ -584,10 +584,10 @@ caller's remote-management grant and answers:
 | Status | Body | Meaning |
 | --- | --- | --- |
 | `200` | `{nodeUuid, name, customName}` | renamed (or reset with `null`) through the same path as `cluster:set-node-name` |
-| `400` | `{code:"invalid_name", reason?, message}` | malformed body, or a name the validator rejects (`reason` as for `cluster:set-node-name`) |
+| `400` | `{code:"invalid_name", reason?, error}` | malformed body, or a name the validator rejects (`reason` as for `cluster:set-node-name`) |
 | `403` | text | caller not pinned |
 | `405` | text | not `PUT` |
-| `409` | `{code:"remote_management_denied", message}` | grant not `allowed`; message `Remote management is blocked on this device. Change permission locally on that device.` |
+| `409` | `{code:"remote_management_denied", error}` | grant not `allowed`; `error` is `Remote management is blocked on this device. Change permission locally on that device.` (`clustertrust.WriteRemoteManagementDenied`, the same body engine-manager's permission gate sends) |
 | `500` | text | the name could not be saved |
 
 The target reads and decodes the body before it checks the grant, so the

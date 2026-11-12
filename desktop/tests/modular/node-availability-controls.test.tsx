@@ -100,6 +100,21 @@ function button(label: string): HTMLButtonElement {
     return result
 }
 
+function haltDialogButton(label: 'Halt' | 'Cancel'): HTMLButtonElement | undefined {
+    return Array.from(document.querySelectorAll('dialog[open] button')).find(
+        (item): item is HTMLButtonElement =>
+            item instanceof HTMLButtonElement && item.textContent?.trim() === label
+    )
+}
+
+/** Clicks the card's Halt and confirms it in the shared Halt dialog. */
+async function halt(): Promise<void> {
+    await act(async () => button('Halt').click())
+    const confirm = haltDialogButton('Halt')
+    if (!confirm) throw new Error('Missing Halt confirmation')
+    await act(async () => confirm.click())
+}
+
 async function tick(ms = 2_000): Promise<void> {
     await act(async () => {
         await vi.advanceTimersByTimeAsync(ms)
@@ -126,6 +141,18 @@ beforeEach(() => {
             disconnect = vi.fn<() => void>()
         }
     )
+    Object.defineProperty(HTMLDialogElement.prototype, 'showModal', {
+        configurable: true,
+        value: function (this: HTMLDialogElement) {
+            this.open = true
+        }
+    })
+    Object.defineProperty(HTMLDialogElement.prototype, 'close', {
+        configurable: true,
+        value: function (this: HTMLDialogElement) {
+            this.open = false
+        }
+    })
     getPolicy.mockReset().mockResolvedValue(documentFor('available'))
     setAvailability.mockReset().mockResolvedValue({ availability: 'paused' })
     changes.clear()
@@ -243,10 +270,8 @@ describe('node availability presentation', () => {
                 />
             )
         )
-        await act(async () => {
-            button('Halt').click()
-            button('Resume node: This PC').click()
-        })
+        await halt()
+        await act(async () => button('Resume node: This PC').click())
         expect(onRequest.mock.calls.map(call => call[0])).toEqual([
             { state: 'paused', pauseMode: 'immediate' },
             { nodeId: undefined, state: 'available' }
@@ -378,7 +403,7 @@ describe('mounted local stop controls', () => {
         expect(stop.closest('[style*="grid-template-rows"]')).toBeNull()
         stop.focus()
         expect(document.activeElement).toBe(stop)
-        await act(async () => stop.click())
+        await halt()
         expect(setAvailability).toHaveBeenCalledExactlyOnceWith({
             nodeId: undefined,
             state: 'paused',
@@ -397,10 +422,34 @@ describe('mounted local stop controls', () => {
         expect(setAvailability).toHaveBeenCalledTimes(2)
     })
 
+    it('asks with the shared Halt confirmation and sends nothing when cancelled', async () => {
+        await act(async () =>
+            root.render(<NodeAvailabilityControls targetId="self" name="This PC" online />)
+        )
+        await act(async () => button('Halt').click())
+        expect(setAvailability).not.toHaveBeenCalled()
+        expect(document.body.textContent).toContain('Halt this PC?')
+        expect(document.body.textContent).toContain(
+            'Running requests stop now, models unload, and other nodes cannot resume it.'
+        )
+        const cancel = haltDialogButton('Cancel')
+        if (!cancel) throw new Error('Missing Halt cancel')
+        await act(async () => cancel.click())
+        expect(document.body.textContent).not.toContain('Halt this PC?')
+        expect(setAvailability).not.toHaveBeenCalled()
+
+        await halt()
+        expect(setAvailability).toHaveBeenCalledExactlyOnceWith({
+            nodeId: undefined,
+            state: 'paused',
+            pauseMode: 'immediate'
+        })
+    })
+
     it('mounts immediate stop in Settings and changes actions with the selected target', async () => {
         useNodesStore.setState({ nodes: new Map([['peer', node('peer', 'Peer')]]) })
         await act(async () => root.render(<RoutingSettings />))
-        await act(async () => button('Halt').click())
+        await halt()
         expect(setAvailability).toHaveBeenCalledExactlyOnceWith({
             nodeId: undefined,
             state: 'paused',
@@ -429,7 +478,7 @@ describe('mounted local stop controls', () => {
         )
         setAvailability.mockRejectedValueOnce(new Error('External engine remains running'))
         getPolicy.mockResolvedValue(documentFor('draining', '2', 'local'))
-        await act(async () => button('Halt').click())
+        await halt()
         expect(button('Halt').disabled).toBe(true)
         await tick()
         expect(container.textContent).toContain('External engine remains running')
@@ -438,7 +487,7 @@ describe('mounted local stop controls', () => {
         expect(button('Resume node: This PC').disabled).toBe(false)
         expect(setAvailability).toHaveBeenCalledTimes(1)
         getPolicy.mockResolvedValue(documentFor('paused', '2', 'local'))
-        await act(async () => button('Halt').click())
+        await halt()
         await tick()
         expect(useNodeConfigurationStore.getState().availability.get('self')).toMatchObject({
             current: true,
@@ -546,7 +595,7 @@ describe('availability request modes', () => {
             )
         )
         expect(button('Halt').disabled).toBe(false)
-        await act(async () => button('Halt').click())
+        await halt()
         expect(setAvailability.mock.calls.map(call => call[0])).toEqual([
             { nodeId: undefined, state: 'paused', pauseMode: 'configured' },
             { nodeId: undefined, state: 'paused', pauseMode: 'immediate' }
@@ -626,7 +675,7 @@ describe('availability request modes', () => {
         await act(async () =>
             root.render(<NodeAvailabilityControls targetId="self" name="This PC" online />)
         )
-        await act(async () => button('Halt').click())
+        await halt()
         expect(button('Resume node: This PC').disabled).toBe(false)
         getPolicy.mockResolvedValue(documentFor('available', '3'))
         await act(async () => button('Resume node: This PC').click())
