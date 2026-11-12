@@ -138,3 +138,38 @@ func TestPeerServicesDecodeRequiresCompleteBoundedDocument(t *testing.T) {
 		}
 	})
 }
+
+func TestPeerStateFrameDecodeIsStrict(t *testing.T) {
+	hash := strings.Repeat("ab", 32)
+	body, err := json.Marshal(PeerStateFrame{Descriptor: validPeerServices(), RosterHash: hash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reject := func(name, line, expected string) {
+		t.Run(name, func(t *testing.T) {
+			if _, err := DecodePeerStateFrame([]byte(line), expected); err == nil {
+				t.Fatal("invalid frame accepted")
+			}
+		})
+	}
+	reject("truncated JSON", string(body[:len(body)-1]), "peer-a")
+	reject("trailing document", string(body)+" {}", "peer-a")
+	reject("trailing junk", string(body)+" x", "peer-a")
+	reject("oversized", string(body)+strings.Repeat(" ", PeerStateMaxLine), "peer-a")
+	reject("unknown frame field", strings.Replace(string(body), `"rosterHash":`, `"generation":1,"rosterHash":`, 1), "peer-a")
+	reject("unknown descriptor field", strings.Replace(string(body), `"addresses":`, `"name":"peer host","addresses":`, 1), "peer-a")
+	reject("wrong subject", string(body), "peer-b")
+	reject("uppercase hash", strings.Replace(string(body), hash, strings.ToUpper(hash), 1), "peer-a")
+	reject("short hash", strings.Replace(string(body), hash, hash[:63], 1), "peer-a")
+	reject("missing hash", strings.Replace(string(body), `"rosterHash":"`+hash+`"`, `"rosterHash":""`, 1), "peer-a")
+	reject("null keepalive", "null", "peer-a")
+	t.Run("valid frame", func(t *testing.T) {
+		frame, err := DecodePeerStateFrame(body, "peer-a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if frame.RosterHash != hash || frame.Descriptor.HostUUID != "peer-a" || len(frame.Descriptor.Services) != 2 {
+			t.Fatalf("decoded frame = %+v", frame)
+		}
+	})
+}
