@@ -27,6 +27,16 @@ func (m *Manager) peerServiceOptions() clustertrust.PeerServiceClientOptions {
 	}
 }
 
+// peerStateClientOptions configures the peer-state stream client: the
+// ordinary peer-service options without a total timeout, which would end every
+// stream, and with a bounded wait for response headers.
+func (m *Manager) peerStateClientOptions() clustertrust.PeerServiceClientOptions {
+	opts := m.peerServiceOptions()
+	opts.Timeout = 0
+	opts.ResponseHeaderTimeout = peerStateResponseHeaderTimeout
+	return opts
+}
+
 // selectPeerServiceAddress retains the caller's existing candidate walk. Its
 // selection is valid only while the member/discovery endpoints remain current;
 // a change during dial is observed by the adapter before application writes.

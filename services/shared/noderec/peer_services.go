@@ -125,28 +125,3 @@ func ValidatePeerServicesDescriptor(d PeerServicesDescriptor, expectedUUID strin
 	}
 	return nil
 }
-
-// DecodePeerServices accepts exactly one bounded complete document, including a
-// successful EOF read. A transport error after the JSON value still rejects it.
-func DecodePeerServices(r io.Reader, expectedUUID string) (PeerServicesDescriptor, error) {
-	var d PeerServicesDescriptor
-	body, err := io.ReadAll(io.LimitReader(r, PeerServicesMaxBytes+1))
-	if err != nil {
-		return d, err
-	}
-	if len(body) > PeerServicesMaxBytes {
-		return d, errors.New("descriptor too large")
-	}
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&d); err != nil {
-		return d, err
-	}
-	if decoder.Decode(&struct{}{}) != io.EOF {
-		return d, errors.New("trailing descriptor data")
-	}
-	if err := ValidatePeerServicesDescriptor(d, expectedUUID); err != nil {
-		return PeerServicesDescriptor{}, err
-	}
-	return d, nil
-}

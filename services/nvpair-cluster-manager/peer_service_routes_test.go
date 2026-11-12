@@ -147,6 +147,10 @@ func replaceClusterPeerServices(t *testing.T, m *Manager, opts clustertrust.Peer
 	m.removalPeerServices = clustertrust.NewPeerServiceClient(m.mesh, opts)
 	t.Cleanup(m.peerServices.CloseIdle)
 	t.Cleanup(m.removalPeerServices.CloseIdle)
+	streams := opts
+	streams.Timeout = 0
+	streams.ResponseHeaderTimeout = peerStateResponseHeaderTimeout
+	m.peerStateStreams = clustertrust.NewPeerServiceClient(m.mesh, streams)
 }
 
 func TestClusterRosterDirectWorksWithoutReverseSession(t *testing.T) {

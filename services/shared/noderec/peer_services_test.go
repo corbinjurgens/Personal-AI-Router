@@ -5,9 +5,7 @@ package noderec
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"strings"
 	"testing"
 
@@ -88,55 +86,6 @@ func TestPeerServicesCompleteWithdrawal(t *testing.T) {
 	if err := ValidatePeerServicesDescriptor(d, "peer-a"); err != nil {
 		t.Fatalf("initialized withdrawal rejected: %v", err)
 	}
-}
-
-type peerServicesReadError struct{ io.Reader }
-
-func (r peerServicesReadError) Read(p []byte) (int, error) {
-	n, err := r.Reader.Read(p)
-	if err == io.EOF {
-		return n, errors.New("response truncated")
-	}
-	return n, err
-}
-
-func TestPeerServicesDecodeRequiresCompleteBoundedDocument(t *testing.T) {
-	body, err := json.Marshal(validPeerServices())
-	if err != nil {
-		t.Fatal(err)
-	}
-	test := func(name, body string) {
-		t.Run(name, func(t *testing.T) {
-			if _, err := DecodePeerServices(strings.NewReader(body), "peer-a"); err == nil {
-				t.Fatal("invalid document accepted")
-			}
-		})
-	}
-	test("truncated JSON", string(body[:len(body)-1]))
-	test("trailing document", string(body)+" {}")
-	test("trailing junk", string(body)+" x")
-	test("oversized", string(body)+strings.Repeat(" ", PeerServicesMaxBytes))
-	test("unknown protocol field", strings.Replace(string(body), `"addresses":`, `"protocol":"plain","addresses":`, 1))
-	// Names travel on the roster only; the strict decoder rejects a
-	// descriptor that still carries one.
-	test("name field", strings.Replace(string(body), `"addresses":`, `"name":"peer host","addresses":`, 1))
-	t.Run("transport error after complete JSON", func(t *testing.T) {
-		if _, err := DecodePeerServices(peerServicesReadError{strings.NewReader(string(body))}, "peer-a"); err == nil {
-			t.Fatal("incomplete transport accepted")
-		}
-	})
-	t.Run("complete valid document", func(t *testing.T) {
-		if strings.Contains(string(body), `"name"`) {
-			t.Fatalf("descriptor JSON carries a name: %s", body)
-		}
-		d, err := DecodePeerServices(strings.NewReader(string(body)), "peer-a")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if d.HostUUID != "peer-a" || len(d.Services) != 2 || d.Services[1].Service != ServiceEngineControl || d.Services[1].Port != 31421 {
-			t.Fatalf("decoded descriptor = %+v", d)
-		}
-	})
 }
 
 func TestPeerStateFrameDecodeIsStrict(t *testing.T) {

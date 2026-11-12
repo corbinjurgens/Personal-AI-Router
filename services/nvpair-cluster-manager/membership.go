@@ -398,6 +398,7 @@ func (m *Manager) emitNodesChanged() {
 		log.Printf("emit nodes:changed: %v", err)
 	}
 	m.signalPeerState()
+	m.signalPeerStateMembers()
 }
 
 // announceTrustChanged tells the rest of this node that the pin set moved. It is
@@ -418,4 +419,5 @@ func (m *Manager) announceTrustChanged() {
 		log.Printf("emit cluster:trust-changed: %v", err)
 	}
 	m.signalPeerState()
+	m.signalPeerStateMembers()
 }

@@ -142,6 +142,48 @@ func (g *peerDialGuard) attempted(logical string) int {
 	return g.logical[logical]
 }
 
+// testRosterHash is a well-formed roster hash for fixture frames.
+var testRosterHash = strings.Repeat("ab", 32)
+
+// streamPeerStateOnce runs one peer-state stream from m to uuid at its current
+// incarnation, with stream-triggered roster reconciles disabled so fixture
+// dial and handler counts stay those of the stream. Fixture servers end the
+// stream after one frame, so success is a frame followed by a clean end.
+func streamPeerStateOnce(ctx context.Context, m *Manager, uuid string) error {
+	m.reconcilePeer = func(string) {}
+	m.mesh.Refresh()
+	incarnation, ok := m.peerServiceIncarnation(uuid)
+	if !ok {
+		return errors.New("no current admission")
+	}
+	gotFrame, err := m.runPeerStateStream(ctx, uuid, incarnation)
+	if err == nil && !gotFrame {
+		return errors.New("peer-state stream ended without a frame")
+	}
+	return err
+}
+
+// cancelAfterFlush ends a served stream after its first flushed line.
+type cancelAfterFlush struct {
+	http.ResponseWriter
+	cancel context.CancelFunc
+}
+
+func (c cancelAfterFlush) Flush() {
+	c.ResponseWriter.(http.Flusher).Flush()
+	c.cancel()
+}
+
+// servePeerStateOnce serves m's real peer-state handler but ends the stream
+// after its first line, so a fixture read completes.
+func servePeerStateOnce(m *Manager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithCancel(r.Context())
+		defer cancel()
+		m.handlePeerState(cancelAfterFlush{ResponseWriter: w, cancel: cancel}, r.WithContext(ctx))
+	}
+}
+
 type peerWalkFixture struct {
 	a, b       *Manager
 	guard      *peerDialGuard
@@ -161,7 +203,11 @@ func newPeerWalkFixture(t *testing.T) *peerWalkFixture {
 	}
 	f.listener = startWalkServer(t, f.b, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.handlers.Add(1)
-		if err := json.NewEncoder(w).Encode(f.descriptor); err != nil {
+		if r.URL.Path != peerStatePath {
+			t.Errorf("unexpected walk path %s", r.URL.Path)
+		}
+		// One frame, then a clean end: the stream's first-frame outcome.
+		if err := json.NewEncoder(w).Encode(noderec.PeerStateFrame{Descriptor: f.descriptor, RosterHash: testRosterHash}); err != nil {
 			t.Error(err)
 		}
 	}))
@@ -225,7 +271,7 @@ func assertWalkUnchanged(t *testing.T, f *peerWalkFixture) {
 	assertNoPeerServicesClaim(t, f.output.Bytes())
 }
 
-func TestPeerServicesLearnPersistReopenTailnet(t *testing.T) {
+func TestPeerStateLearnPersistReopenTailnet(t *testing.T) {
 	f := newPeerWalkFixture(t)
 	f.a.mesh.Refresh()
 	incarnation, ok := f.a.mesh.PeerServiceIncarnation(f.b.identity.NodeUUID)
@@ -235,7 +281,7 @@ func TestPeerServicesLearnPersistReopenTailnet(t *testing.T) {
 	identity, fingerprint := f.a.identity.NodeUUID, f.a.identity.CertFingerprint
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if err := f.a.refreshPeerServices(ctx, f.b.identity.NodeUUID); err != nil {
+	if err := streamPeerStateOnce(ctx, f.a, f.b.identity.NodeUUID); err != nil {
 		t.Fatal(err)
 	}
 	if learned := storedHintMember(t, f.a, f.b.identity.NodeUUID); !slices.Equal(learned.AdvertisedAddresses, f.descriptor.Addresses) {
@@ -288,7 +334,7 @@ func TestPeerServicesLearnPersistReopenTailnet(t *testing.T) {
 	}{bytes.NewReader(nil), &f.output})
 	reopened.serviceRefresh.source = "reopened-process"
 	start := time.Now().UnixMilli()
-	if err := reopened.refreshPeerServices(ctx, f.b.identity.NodeUUID); err != nil {
+	if err := streamPeerStateOnce(ctx, reopened, f.b.identity.NodeUUID); err != nil {
 		t.Fatal(err)
 	}
 	message, err := NewCodec(struct {
@@ -310,7 +356,10 @@ func TestPeerServicesLearnPersistReopenTailnet(t *testing.T) {
 	}
 }
 
-func TestPeerServicesWholeAttemptFairness(t *testing.T) {
+// A stalled address must not starve the next one of connect time, and a
+// complete invalid first frame ends the walk. Streams have no total budget to
+// divide: each address gets its own connect budget and header timeout.
+func TestPeerStateWholeAttemptFairness(t *testing.T) {
 	test := func(name string, stage string) {
 		t.Run(name, func(t *testing.T) {
 			f := newPeerWalkFixture(t)
@@ -319,20 +368,8 @@ func TestPeerServicesWholeAttemptFairness(t *testing.T) {
 			bad := startWalkServer(t, f.b, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				close(entered)
 				defer close(exited)
-				if stage == "body" || stage == "EOF" {
-					w.Header().Set("Content-Length", "100")
-					w.WriteHeader(http.StatusOK)
-					if _, err := w.Write([]byte("{")); err != nil {
-						t.Error(err)
-						return
-					}
-					w.(http.Flusher).Flush()
-					if stage == "EOF" {
-						return
-					}
-				}
 				if stage == "invalid" {
-					if _, err := w.Write([]byte(`{"unexpected":true}`)); err != nil {
+					if _, err := w.Write([]byte(`{"unexpected":true}` + "\n")); err != nil {
 						t.Error(err)
 					}
 					return
@@ -340,6 +377,14 @@ func TestPeerServicesWholeAttemptFairness(t *testing.T) {
 				<-r.Context().Done()
 			}))
 			f.guard.allow(t, f.lan, bad)
+			opts := f.a.peerServiceOptions()
+			opts.DirectTimeout = 500 * time.Millisecond
+			opts.DialContext = f.guard.dial
+			opts.DialReverse = func(context.Context, string, string, noderec.ServiceKey) (net.Conn, error) {
+				return nil, errors.New("fixture reverse unavailable")
+			}
+			opts.ResponseHeaderTimeout = 300 * time.Millisecond
+			f.a.peerStateStreams = clustertrust.NewPeerServiceClient(f.a.mesh, opts)
 			if stage == "setup" {
 				f.guard.setup[f.lan] = func(ctx context.Context) error { close(entered); defer close(exited); <-ctx.Done(); return ctx.Err() }
 			}
@@ -353,9 +398,9 @@ func TestPeerServicesWholeAttemptFairness(t *testing.T) {
 				close(later)
 				return ctx.Err()
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			err := f.a.refreshPeerServices(ctx, f.b.identity.NodeUUID)
+			err := streamPeerStateOnce(ctx, f.a, f.b.identity.NodeUUID)
 			select {
 			case <-entered:
 			default:
@@ -368,10 +413,10 @@ func TestPeerServicesWholeAttemptFairness(t *testing.T) {
 			}
 			if stage == "invalid" {
 				if err == nil {
-					t.Fatal("complete invalid descriptor accepted")
+					t.Fatal("complete invalid frame accepted")
 				}
 				if f.guard.attempted(f.tail) != 0 {
-					t.Fatal("complete invalid descriptor advanced")
+					t.Fatal("complete invalid frame advanced")
 				}
 				assertWalkUnchanged(t, f)
 				return
@@ -385,18 +430,19 @@ func TestPeerServicesWholeAttemptFairness(t *testing.T) {
 				t.Fatal("later candidate did not receive an attempt")
 			}
 			if remaining <= 0 || ctx.Err() != nil || f.handlers.Load() != 1 {
-				t.Fatalf("later request lacked parent time: remaining=%s parent=%v handlers=%d", remaining, ctx.Err(), f.handlers.Load())
+				t.Fatalf("later request lacked connect time: remaining=%s parent=%v handlers=%d", remaining, ctx.Err(), f.handlers.Load())
 			}
 		})
 	}
 	test("blocking setup", "setup")
 	test("stalled headers", "headers")
-	test("incomplete body waits for cancellation", "body")
-	test("incomplete body EOF", "EOF")
-	test("complete invalid descriptor is terminal", "invalid")
+	test("complete invalid frame is terminal", "invalid")
 }
 
-func TestPeerServicesStaleReverseDoesNotStarveHint(t *testing.T) {
+func TestPeerStateStaleReverseDoesNotStarveHint(t *testing.T) {
+	previous := peerStateConnectTimeout
+	peerStateConnectTimeout = 400 * time.Millisecond
+	t.Cleanup(func() { peerStateConnectTimeout = previous })
 	f := newPeerWalkFixture(t)
 	f.addTail(t)
 	f.guard.setup[f.lan] = func(context.Context) error { return errors.New("synthetic direct unavailable") }
@@ -409,7 +455,7 @@ func TestPeerServicesStaleReverseDoesNotStarveHint(t *testing.T) {
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
 	defer cancel()
-	if err := f.a.refreshPeerServices(ctx, f.b.identity.NodeUUID); err != nil {
+	if err := streamPeerStateOnce(ctx, f.a, f.b.identity.NodeUUID); err != nil {
 		t.Fatalf("stale reverse starved authenticated hint: %v", err)
 	}
 	select {
@@ -427,7 +473,7 @@ func TestPeerServicesStaleReverseDoesNotStarveHint(t *testing.T) {
 	}
 }
 
-func TestPeerServicesCancelledWalkPreservesMembership(t *testing.T) {
+func TestPeerStateCancelledWalkPreservesMembership(t *testing.T) {
 	t.Run("parent cancelled during held chooser", func(t *testing.T) {
 		f := newPeerWalkFixture(t)
 		f.addTail(t)
@@ -442,7 +488,7 @@ func TestPeerServicesCancelledWalkPreservesMembership(t *testing.T) {
 		}))
 		ctx, cancel := context.WithCancel(context.Background())
 		done, joined := make(chan error, 1), make(chan struct{})
-		go func() { defer close(joined); done <- f.a.refreshPeerServices(ctx, f.b.identity.NodeUUID) }()
+		go func() { defer close(joined); done <- streamPeerStateOnce(ctx, f.a, f.b.identity.NodeUUID) }()
 		defer func() {
 			cancel()
 			unblock()
@@ -491,7 +537,7 @@ func TestPeerServicesCancelledWalkPreservesMembership(t *testing.T) {
 		f.guard.setup[f.lan] = func(ctx context.Context) error { close(entered); <-ctx.Done(); return ctx.Err() }
 		done := make(chan error, 1)
 		joined := make(chan struct{})
-		go func() { defer close(joined); done <- f.a.refreshPeerServices(ctx, f.b.identity.NodeUUID) }()
+		go func() { defer close(joined); done <- streamPeerStateOnce(ctx, f.a, f.b.identity.NodeUUID) }()
 		defer func() {
 			cancel()
 			select {
@@ -525,7 +571,7 @@ func TestPeerServicesCancelledWalkPreservesMembership(t *testing.T) {
 		f.guard.targets = make(map[string]string)
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
-		if err := f.a.refreshPeerServices(ctx, f.b.identity.NodeUUID); err == nil {
+		if err := streamPeerStateOnce(ctx, f.a, f.b.identity.NodeUUID); err == nil {
 			t.Fatal("unavailable walk succeeded")
 		}
 		if f.guard.attempted(f.lan) == 0 || f.guard.attempted(f.tail) == 0 || f.guard.physical.Load() != 0 || f.handlers.Load() != 0 {
@@ -714,7 +760,7 @@ func TestMemberAdvertisedAddressesCompatibility(t *testing.T) {
 	}
 }
 
-func TestPeerServicesHintCommitBindsAdmission(t *testing.T) {
+func TestPeerStateHintCommitBindsAdmission(t *testing.T) {
 	test := func(name string, mutate func(*testing.T, *peerHintFixture), wantSuccess bool) {
 		t.Run(name, func(t *testing.T) {
 			f := newPeerHintFixture(t)
@@ -810,7 +856,7 @@ func TestPeerServicesHintCommitBindsAdmission(t *testing.T) {
 	}, false)
 }
 
-func TestPeerServicesHintPersistenceFailure(t *testing.T) {
+func TestPeerStateHintPersistenceFailure(t *testing.T) {
 	a, b := newReverseTestManager(t), newReverseTestManager(t)
 	guard := containHintDials(t, a, true)
 	containHintDials(t, b, false)
@@ -818,7 +864,8 @@ func TestPeerServicesHintPersistenceFailure(t *testing.T) {
 	t.Cleanup(a.removalPeerServices.CloseIdle)
 	setDescriptorSelf(t, b)
 	setReverseServices(t, b, 1)
-	server := httptest.NewUnstartedServer(http.HandlerFunc(b.handlePeerServices))
+	b.rebuildPeerState()
+	server := httptest.NewUnstartedServer(servePeerStateOnce(b))
 	owned := &ownedPeerListener{Listener: server.Listener}
 	server.Listener = owned
 	server.TLS = b.buildServerTLSConfig()
@@ -840,7 +887,7 @@ func TestPeerServicesHintPersistenceFailure(t *testing.T) {
 		}
 		return createHintTemp(dir, base, mode)
 	}})
-	if err := a.refreshPeerServices(context.Background(), b.identity.NodeUUID); !errors.Is(err, failure) {
+	if err := streamPeerStateOnce(context.Background(), a, b.identity.NodeUUID); !errors.Is(err, failure) {
 		t.Fatalf("fetch persistence error = %v, want injected failure", err)
 	}
 	member, _ := a.memberByUUID(b.identity.NodeUUID)
@@ -1009,61 +1056,7 @@ func TestPeerServicesRequiresSelfIdentityAndInitializedRegistry(t *testing.T) {
 	}
 }
 
-func TestPeerServicesEndpointRequiresCurrentAdmission(t *testing.T) {
-	a, b := newReverseTestManager(t), newReverseTestManager(t)
-	pairReverseManagers(t, a, b)
-	persistPeerServicesMembers(t, a, b)
-	setDescriptorSelf(t, b)
-	setReverseServices(t, b, 1, noderec.RegisterParams{Service: noderec.ServiceNodeInfo, Port: 23441})
-	cert, err := x509.ParseCertificate(a.identity.Cert.Certificate[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	request := func() *http.Request {
-		r := httptest.NewRequest(http.MethodGet, peerServicesPath, nil)
-		r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}}
-		return r
-	}
-	w := httptest.NewRecorder()
-	b.handlePeerServices(w, request())
-	if w.Code != http.StatusOK {
-		t.Fatalf("current peer status=%d body=%s", w.Code, w.Body)
-	}
-	d, err := noderec.DecodePeerServices(w.Body, b.identity.NodeUUID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if d.Services[0].Port != 23441 {
-		t.Fatalf("services=%+v", d.Services)
-	}
-	b.removeMemberByUUID(a.identity.NodeUUID)
-	persistPeerServicesMembers(t, b)
-	w = httptest.NewRecorder()
-	b.handlePeerServices(w, request())
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("removed admitted member status=%d", w.Code)
-	}
-}
-
-func TestPeerServicesEndpointRejectsBodyAndQuery(t *testing.T) {
-	m := newReverseTestManager(t)
-	test := func(name, method, url string, body io.Reader, want int) {
-		t.Run(name, func(t *testing.T) {
-			r := httptest.NewRequest(method, url, body)
-			w := httptest.NewRecorder()
-			m.handlePeerServices(w, r)
-			if w.Code != want {
-				t.Fatalf("status=%d want=%d", w.Code, want)
-			}
-		})
-	}
-	test("post", http.MethodPost, peerServicesPath, nil, http.StatusMethodNotAllowed)
-	test("body", http.MethodGet, peerServicesPath, bytes.NewBufferString("{}"), http.StatusBadRequest)
-	test("query", http.MethodGet, peerServicesPath+"?peer=other", nil, http.StatusBadRequest)
-	test("unpaired", http.MethodGet, peerServicesPath, nil, http.StatusForbidden)
-}
-
-func TestPeerServicesFetchBindsOriginalAdmission(t *testing.T) {
+func TestPeerStateFetchBindsOriginalAdmission(t *testing.T) {
 	test := func(name string, retire bool) {
 		t.Run(name, func(t *testing.T) {
 			a, b := newReverseTestManager(t), newReverseTestManager(t)
@@ -1071,6 +1064,7 @@ func TestPeerServicesFetchBindsOriginalAdmission(t *testing.T) {
 			containHintDials(t, b, false)
 			setDescriptorSelf(t, b)
 			setReverseServices(t, b, 1, noderec.RegisterParams{Service: noderec.ServiceNodeInfo, Port: 24441})
+			b.rebuildPeerState()
 			held := make(chan struct{})
 			release, releaseHeld := context.WithCancel(context.Background())
 			server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1082,7 +1076,7 @@ func TestPeerServicesFetchBindsOriginalAdmission(t *testing.T) {
 						return
 					}
 				}
-				b.handlePeerServices(w, r)
+				servePeerStateOnce(b)(w, r)
 			}))
 			server.TLS = b.buildServerTLSConfig()
 			owned := &ownedPeerListener{Listener: server.Listener}
@@ -1106,7 +1100,7 @@ func TestPeerServicesFetchBindsOriginalAdmission(t *testing.T) {
 			}{bytes.NewReader(nil), &published})
 			a.serviceRefresh.source = "test-process"
 			result := make(chan error, 1)
-			go func() { result <- a.refreshPeerServices(context.Background(), b.identity.NodeUUID) }()
+			go func() { result <- streamPeerStateOnce(context.Background(), a, b.identity.NodeUUID) }()
 			if retire {
 				select {
 				case <-held:
@@ -1200,18 +1194,19 @@ func TestPeerServicesFetchBindsOriginalAdmission(t *testing.T) {
 	test("same certificate readmission rejects held response", true)
 }
 
-func TestPeerServicesBlockedDirectUsesRealReverse(t *testing.T) {
+func TestPeerStateBlockedDirectUsesRealReverse(t *testing.T) {
 	a, b := newClusterPeerFixture(t, false), newClusterPeerFixture(t, true)
 	pairClusterFixtures(t, a, b)
 	persistPeerServicesMembers(t, a.m, b.m)
 	setDescriptorSelf(t, b.m)
-	inner := httptest.NewUnstartedServer(http.HandlerFunc(b.m.handlePeerServices))
+	inner := httptest.NewUnstartedServer(servePeerStateOnce(b.m))
 	inner.Listener = reverseForwardListener{Listener: inner.Listener, manager: b.m}
 	inner.Config.ConnContext = b.m.reverseConnContext
 	inner.TLS = b.m.buildServerTLSConfig()
 	inner.StartTLS()
 	defer inner.Close()
 	setReverseServices(t, b.m, 2, noderec.RegisterParams{Service: noderec.ServiceCluster, Port: inner.Listener.Addr().(*net.TCPAddr).Port}, noderec.RegisterParams{Service: noderec.ServiceNodeInfo, Port: 26441})
+	b.m.rebuildPeerState()
 	startPrivateReverse(t, a.m)
 	connectReverseManagers(t, a.m, b.m)
 	reverse := countClusterReverseDials(t, a)
@@ -1221,7 +1216,7 @@ func TestPeerServicesBlockedDirectUsesRealReverse(t *testing.T) {
 		io.Writer
 	}{bytes.NewReader(nil), &published})
 	a.m.serviceRefresh.source = "reverse-process"
-	if err := a.m.refreshPeerServices(context.Background(), b.m.identity.NodeUUID); err != nil {
+	if err := streamPeerStateOnce(context.Background(), a.m, b.m.identity.NodeUUID); err != nil {
 		t.Fatal(err)
 	}
 	msg, err := NewCodec(struct {
@@ -1244,7 +1239,7 @@ func TestPeerServicesBlockedDirectUsesRealReverse(t *testing.T) {
 	}
 }
 
-func TestPeerServicesUnavailableRoutePreservesMembership(t *testing.T) {
+func TestPeerStateUnavailableRoutePreservesMembership(t *testing.T) {
 	a, b := newClusterPeerFixture(t, false), newClusterPeerFixture(t, true)
 	pairClusterFixtures(t, a, b)
 	persistPeerServicesMembers(t, a.m, b.m)
@@ -1254,7 +1249,7 @@ func TestPeerServicesUnavailableRoutePreservesMembership(t *testing.T) {
 	if !ok {
 		t.Fatal("missing initial authority")
 	}
-	if err := a.m.refreshPeerServices(context.Background(), b.m.identity.NodeUUID); err == nil {
+	if err := streamPeerStateOnce(context.Background(), a.m, b.m.identity.NodeUUID); err == nil {
 		t.Fatal("unavailable direct/reverse route succeeded")
 	}
 	a.m.mesh.Refresh()
@@ -1453,5 +1448,296 @@ func TestPeerStateStreamEndsOnAdmissionChange(t *testing.T) {
 	case <-stream.done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("stream outlived the peer's admission")
+	}
+}
+
+// claimRecorder is a concurrency-safe codec sink that decodes the
+// peer-services claims a subscriber published.
+type claimRecorder struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (c *claimRecorder) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.buf.Write(p)
+}
+
+func (c *claimRecorder) claims(t *testing.T) []noderec.PeerServicesClaim {
+	t.Helper()
+	c.mu.Lock()
+	data := slices.Clone(c.buf.Bytes())
+	c.mu.Unlock()
+	var claims []noderec.PeerServicesClaim
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	for {
+		var message Message
+		if err := decoder.Decode(&message); err == io.EOF {
+			return claims
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		if message.Method != peerServicesEvent {
+			continue
+		}
+		var claim noderec.PeerServicesClaim
+		if err := json.Unmarshal(message.Params, &claim); err != nil {
+			t.Fatal(err)
+		}
+		claims = append(claims, claim)
+	}
+}
+
+type peerStateStreamPair struct {
+	a, b     *Manager
+	claims   *claimRecorder
+	requests atomic.Int32
+}
+
+// newPeerStateStreamPair pairs a and b over a pinned loopback TLS server that
+// runs handler (b's real stream handler when nil). a's claims are recorded and
+// its stream-triggered reconciles are disabled.
+func newPeerStateStreamPair(t *testing.T, handler func(*peerStateStreamPair, http.ResponseWriter, *http.Request)) *peerStateStreamPair {
+	t.Helper()
+	p := &peerStateStreamPair{a: newReverseTestManager(t), b: newReverseTestManager(t), claims: &claimRecorder{}}
+	guard := containHintDials(t, p.a, true)
+	containHintDials(t, p.b, false)
+	setDescriptorSelf(t, p.b)
+	setReverseServices(t, p.b, 1, noderec.RegisterParams{Service: noderec.ServiceNodeInfo, Port: 27441})
+	p.b.rebuildPeerState()
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p.requests.Add(1)
+		if handler == nil {
+			p.b.handlePeerState(w, r)
+			return
+		}
+		handler(p, w, r)
+	}))
+	owned := &ownedPeerListener{Listener: server.Listener}
+	server.Listener = owned
+	server.TLS = p.b.buildServerTLSConfig()
+	server.StartTLS()
+	t.Cleanup(server.Close)
+	p.b.port = server.Listener.Addr().(*net.TCPAddr).Port
+	guard.allow(t, server.Listener.Addr().String(), owned)
+	pairReverseManagers(t, p.a, p.b)
+	persistPeerServicesMembers(t, p.a, p.b)
+	p.a.codec = NewCodec(struct {
+		io.Reader
+		io.Writer
+	}{bytes.NewReader(nil), p.claims})
+	p.a.serviceRefresh.source = "stream-process"
+	p.a.reconcilePeer = func(string) {}
+	return p
+}
+
+// writeLines writes each line of a crafted stream and flushes it.
+func writeLines(t *testing.T, w http.ResponseWriter, lines ...string) {
+	t.Helper()
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	for _, line := range lines {
+		if _, err := io.WriteString(w, line+"\n"); err != nil {
+			t.Error(err)
+			return
+		}
+		w.(http.Flusher).Flush()
+	}
+}
+
+func (p *peerStateStreamPair) frameLine(t *testing.T, hash string) string {
+	t.Helper()
+	descriptor, err := p.b.selfServicesDescriptor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	line, err := json.Marshal(noderec.PeerStateFrame{Descriptor: descriptor, RosterHash: hash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(line)
+}
+
+func (p *peerStateStreamPair) run(ctx context.Context) (bool, error) {
+	p.a.mesh.Refresh()
+	incarnation, ok := p.a.peerServiceIncarnation(p.b.identity.NodeUUID)
+	if !ok {
+		return false, errors.New("no current admission")
+	}
+	return p.a.runPeerStateStream(ctx, p.b.identity.NodeUUID, incarnation)
+}
+
+func TestPeerStateStreamOutlivesClientTimeout(t *testing.T) {
+	if pairingHTTPTimeout >= 12*time.Second {
+		t.Fatalf("pairingHTTPTimeout %s no longer below the observed window", pairingHTTPTimeout)
+	}
+	shortenPeerStateKeepalive(t, time.Second)
+	p := newPeerStateStreamPair(t, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type result struct {
+		gotFrame bool
+		err      error
+	}
+	done := make(chan result, 1)
+	go func() {
+		gotFrame, err := p.run(ctx)
+		done <- result{gotFrame, err}
+	}()
+	select {
+	case r := <-done:
+		t.Fatalf("stream ended within 12 s: gotFrame=%v err=%v", r.gotFrame, r.err)
+	case <-time.After(12 * time.Second):
+	}
+	// One frame claim, then one claim per keepalive.
+	if claims := p.claims.claims(t); len(claims) < 10 {
+		t.Fatalf("claims over 12 s = %d, want a frame plus keepalives", len(claims))
+	}
+	cancel()
+	select {
+	case r := <-done:
+		if !r.gotFrame || !errors.Is(r.err, context.Canceled) {
+			t.Fatalf("cancelled stream gotFrame=%v err=%v", r.gotFrame, r.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled stream did not end")
+	}
+	if p.requests.Load() != 1 {
+		t.Fatalf("stream requests = %d, want 1", p.requests.Load())
+	}
+}
+
+func TestPeerStateOneStreamPerMember(t *testing.T) {
+	p := newPeerStateStreamPair(t, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	loopDone := make(chan struct{})
+	go func() { defer close(loopDone); p.a.peerStateLoop(ctx) }()
+	defer func() {
+		cancel()
+		select {
+		case <-loopDone:
+		case <-time.After(5 * time.Second):
+			t.Error("peer-state loop did not stop")
+		}
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for p.requests.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	// Several due ticks and a members signal must not open a second stream.
+	p.a.signalPeerStateMembers()
+	time.Sleep(3 * time.Second)
+	if got := p.requests.Load(); got != 1 {
+		t.Fatalf("stream requests = %d, want exactly 1", got)
+	}
+	if claims := p.claims.claims(t); len(claims) == 0 || claims[0].Source == "" || claims[0].Source == "stream-process" {
+		t.Fatalf("loop claims = %+v, want claims with the loop's own source", claims)
+	}
+}
+
+func TestPeerStateRosterHashChangeTriggersReconcile(t *testing.T) {
+	hashA, hashB, hashC := strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64)
+	waitCalls := func(t *testing.T, calls *atomic.Int32, want int32) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for calls.Load() < want && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		time.Sleep(100 * time.Millisecond) // no extra call follows
+		if got := calls.Load(); got != want {
+			t.Fatalf("reconciles = %d, want %d", got, want)
+		}
+	}
+	t.Run("first frame and each changed hash", func(t *testing.T) {
+		var lines []string
+		p := newPeerStateStreamPair(t, func(p *peerStateStreamPair, w http.ResponseWriter, r *http.Request) {
+			writeLines(t, w, lines...)
+		})
+		lines = []string{p.frameLine(t, hashA), p.frameLine(t, hashB), p.frameLine(t, hashB), "null"}
+		var calls atomic.Int32
+		p.a.reconcilePeer = func(uuid string) {
+			if uuid != p.b.identity.NodeUUID {
+				t.Errorf("reconcile with %s", uuid)
+			}
+			calls.Add(1)
+		}
+		if gotFrame, err := p.run(context.Background()); !gotFrame || err != nil {
+			t.Fatalf("stream gotFrame=%v err=%v", gotFrame, err)
+		}
+		waitCalls(t, &calls, 2)
+	})
+	t.Run("requests during an in-flight reconcile run once more", func(t *testing.T) {
+		var lines []string
+		p := newPeerStateStreamPair(t, func(p *peerStateStreamPair, w http.ResponseWriter, r *http.Request) {
+			writeLines(t, w, lines...)
+		})
+		lines = []string{p.frameLine(t, hashA), p.frameLine(t, hashB), p.frameLine(t, hashC)}
+		var calls atomic.Int32
+		entered, release := make(chan struct{}, 4), make(chan struct{})
+		p.a.reconcilePeer = func(string) {
+			calls.Add(1)
+			entered <- struct{}{}
+			<-release
+		}
+		if gotFrame, err := p.run(context.Background()); !gotFrame || err != nil {
+			t.Fatalf("stream gotFrame=%v err=%v", gotFrame, err)
+		}
+		<-entered
+		if got := calls.Load(); got != 1 {
+			t.Fatalf("reconciles while the first is in flight = %d, want 1", got)
+		}
+		close(release)
+		waitCalls(t, &calls, 2)
+	})
+}
+
+func TestPeerStateKeepaliveRefreshesClaim(t *testing.T) {
+	t.Run("keepalive after a frame", func(t *testing.T) {
+		p := newPeerStateStreamPair(t, func(p *peerStateStreamPair, w http.ResponseWriter, r *http.Request) {
+			writeLines(t, w, p.frameLine(t, testRosterHash))
+			time.Sleep(10 * time.Millisecond)
+			writeLines(t, w, "null")
+		})
+		if gotFrame, err := p.run(context.Background()); !gotFrame || err != nil {
+			t.Fatalf("stream gotFrame=%v err=%v", gotFrame, err)
+		}
+		claims := p.claims.claims(t)
+		if len(claims) != 2 {
+			t.Fatalf("claims = %+v, want frame and keepalive claims", claims)
+		}
+		first, keepalive := claims[0], claims[1]
+		if keepalive.Sequence <= first.Sequence || keepalive.ObservedAt <= first.ObservedAt || keepalive.Source == "" ||
+			keepalive.Incarnation != first.Incarnation || !slices.Equal(keepalive.Descriptor.Services, first.Descriptor.Services) {
+			t.Fatalf("keepalive claim %+v after %+v", keepalive, first)
+		}
+	})
+	t.Run("no claim before the first frame", func(t *testing.T) {
+		p := newPeerStateStreamPair(t, func(p *peerStateStreamPair, w http.ResponseWriter, r *http.Request) {
+			writeLines(t, w, "null", "null")
+		})
+		if gotFrame, err := p.run(context.Background()); gotFrame || err != nil {
+			t.Fatalf("keepalive-only stream gotFrame=%v err=%v", gotFrame, err)
+		}
+		if claims := p.claims.claims(t); len(claims) != 0 {
+			t.Fatalf("claims before any frame: %+v", claims)
+		}
+	})
+}
+
+func TestPeerStateForbiddenRequestsReconcilePass(t *testing.T) {
+	p := newPeerStateStreamPair(t, func(p *peerStateStreamPair, w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "admission required", http.StatusForbidden)
+	})
+	if _, err := p.run(context.Background()); !errors.Is(err, errPeerStateForbidden) {
+		t.Fatalf("forbidden stream error = %v", err)
+	}
+	if len(p.a.reconcileRequest) != 1 {
+		t.Fatalf("pending pass requests = %d, want 1", len(p.a.reconcileRequest))
+	}
+	if p.requests.Load() != 1 {
+		t.Fatalf("stream requests = %d, want 1 (no further address)", p.requests.Load())
+	}
+	if claims := p.claims.claims(t); len(claims) != 0 {
+		t.Fatalf("refused stream published claims: %+v", claims)
 	}
 }
