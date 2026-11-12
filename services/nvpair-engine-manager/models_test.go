@@ -192,20 +192,20 @@ func TestModelsResultCarriesIdentities(t *testing.T) {
 	})
 }
 
-func TestModelsSweepRequestsIdentityRefreshForFullInventory(t *testing.T) {
-	for _, test := range []struct {
-		name          string
-		fullInventory bool
-		wantRefreshes int
-	}{
-		{name: "full inventory", fullInventory: true, wantRefreshes: 1},
-		{name: "loaded poll", fullInventory: false, wantRefreshes: 0},
-	} {
-		t.Run(test.name, func(t *testing.T) {
+func TestModelsSweepRequestsIdentityRefreshOnInventoryChange(t *testing.T) {
+	for _, fullInventory := range []bool{true, false} {
+		t.Run(fmt.Sprintf("full inventory %t", fullInventory), func(t *testing.T) {
 			ex := modelDownloadInventoryExecutor(t)
-			ex.modelsSweep(context.Background(), test.fullInventory)
-			if got := len(ex.modelIdentities.poke); got != test.wantRefreshes {
-				t.Fatalf("identity refresh requests = %d, want %d", got, test.wantRefreshes)
+			ex.modelsSweep(context.Background(), fullInventory)
+			if got := len(ex.modelIdentities.poke); got != 1 {
+				t.Fatalf("first inventory requested %d identity refreshes, want 1", got)
+			}
+			<-ex.modelIdentities.poke
+			// Peers read /v1/models every few seconds; an unchanged sweep must
+			// not invalidate resolved identities.
+			ex.modelsSweep(context.Background(), true)
+			if got := len(ex.modelIdentities.poke); got != 0 {
+				t.Fatalf("unchanged inventory requested %d identity refreshes, want 0", got)
 			}
 		})
 	}

@@ -1381,11 +1381,11 @@ func (e *Executor) previewModelLoadChangeOnce(ctx context.Context, st *engineSta
 		return fail(err)
 	}
 	profileKey := modelLoadChangeProfileKey(p.ModelChange)
-	if !e.modelInspection.active.CompareAndSwap(false, true) {
+	if !e.modelInspection.claim() {
 		*retry = true
 		return fail(modelLoadError("", "busy", "Another model metadata preview or inspection is active."))
 	}
-	defer e.modelInspection.active.Store(false)
+	defer e.modelInspection.release()
 	release, recheck, err := e.modelLoadContentRead(p.Engine)
 	if err != nil {
 		return fail(err)

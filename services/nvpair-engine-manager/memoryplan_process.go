@@ -39,13 +39,13 @@ func reapMemoryPlanStartFailure(ctx context.Context, wait func() error) error {
 // runMemoryPlanCommand is private to the inspection owner. It admits at most
 // one query per executor and shares inspection's existing non-queuing gate.
 func (e *Executor) runMemoryPlanCommand(ctx context.Context, command memoryPlanCommand, request []byte) (json.RawMessage, error) {
-	if !e.modelInspection.active.CompareAndSwap(false, true) {
+	if !e.modelInspection.claim() {
 		return nil, errors.New("memory plan busy")
 	}
 	releaseAdmission := true
 	defer func() {
 		if releaseAdmission {
-			e.modelInspection.active.Store(false)
+			e.modelInspection.release()
 		}
 	}()
 	if len(request) > memoryPlanRequestLimit || !json.Valid(request) {

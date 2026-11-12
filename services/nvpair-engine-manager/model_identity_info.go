@@ -21,21 +21,29 @@ import (
 
 const modelIdentityRefreshInterval = 10 * time.Minute
 
+// A failed resolution is not retried sooner unless the run, configuration or
+// download state changes or an explicit refresh arrives.
+const modelIdentityFailureRetry = time.Minute
+
 type modelIdentityInfoEntry struct {
 	identity      engines.ModelIdentity
 	binding, run  string
 	checked       time.Time
 	configuration modelInspectionSnapshot
+	downloads     uint64 // download revision the resolution read
+	failure       string // set when resolution failed; nothing is published
+	source        *sourceSnapshot
 }
 
-// The run goroutine owns entries. snapshot only copies the published values;
-// refresh coalesces requests and never waits for file I/O.
+// The run goroutine owns entries and pass. snapshot only copies the published
+// values; refresh coalesces requests and never waits for file I/O.
 type modelIdentityInfo struct {
 	executor *Executor
 	poke     chan struct{}
 	mu       sync.Mutex
 	values   map[string]map[string]engines.ModelIdentity
 	entries  map[string]map[string]modelIdentityInfoEntry
+	pass     context.CancelFunc
 }
 
 func newModelIdentityInfo(e *Executor) *modelIdentityInfo {
@@ -66,23 +74,31 @@ func (m *modelIdentityInfo) refresh() {
 func (m *modelIdentityInfo) run(ctx context.Context) {
 	ticker := time.NewTicker(defaultLoadedPollSeconds * time.Second)
 	defer ticker.Stop()
+	force := false
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		m.reconcile(ctx, false, time.Now())
+		// A refresh that a requested read interrupted stays pending.
+		force = !m.reconcile(ctx, force, time.Now()) && force
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 		case <-m.poke:
-			m.reconcile(ctx, true, time.Now())
+			force = true
 		}
 	}
 }
 
-func (m *modelIdentityInfo) reconcile(ctx context.Context, force bool, now time.Time) {
+// reconcile reports whether the pass finished without yielding to a request.
+func (m *modelIdentityInfo) reconcile(ctx context.Context, force bool, now time.Time) bool {
 	e := m.executor
+	// A requested inspection or preview cancels the pass through the shared
+	// gate; models the pass has not finished keep their previous entries.
+	pass, cancel := context.WithCancel(ctx)
+	m.pass = cancel
+	defer func() { cancel(); m.pass = nil }()
 	e.inventoryMu.Lock()
 	inventory := make(map[string][]string, len(e.inventory))
 	for engine, models := range e.inventory {
@@ -92,7 +108,7 @@ func (m *modelIdentityInfo) reconcile(ctx context.Context, force bool, now time.
 	next := map[string]map[string]modelIdentityInfoEntry{}
 	for engine, models := range inventory {
 		if ctx.Err() != nil {
-			return
+			return false
 		}
 		manifest, ok := e.reg.Get(engine)
 		if !ok || manifest.FamilyOrDefault() != engines.NameLlamaCPP {
@@ -101,12 +117,12 @@ func (m *modelIdentityInfo) reconcile(ctx context.Context, force bool, now time.
 		next[engine] = map[string]modelIdentityInfoEntry{}
 		for _, model := range models {
 			previous, exists := m.entries[engine][model]
-			entry, keep := m.resolve(ctx, engine, model, previous, exists, force, now)
+			entry, keep := m.resolve(pass, engine, model, previous, exists, force, now)
 			if keep {
 				next[engine][model] = entry
 			}
 			if ctx.Err() != nil {
-				return
+				return false
 			}
 		}
 	}
@@ -115,12 +131,15 @@ func (m *modelIdentityInfo) reconcile(ctx context.Context, force bool, now time.
 	for engine, entries := range next {
 		values[engine] = map[string]engines.ModelIdentity{}
 		for model, entry := range entries {
-			values[engine][model] = entry.identity
+			if entry.failure == "" {
+				values[engine][model] = entry.identity
+			}
 		}
 	}
 	m.mu.Lock()
 	m.values = values
 	m.mu.Unlock()
+	return pass.Err() == nil
 }
 
 func (m *modelIdentityInfo) resolve(parent context.Context, engine, model string, old modelIdentityInfoEntry, exists, force bool, now time.Time) (modelIdentityInfoEntry, bool) {
@@ -139,11 +158,12 @@ func (m *modelIdentityInfo) resolve(parent context.Context, engine, model string
 
 func (m *modelIdentityInfo) resolveOnce(parent context.Context, engine, model string, old modelIdentityInfoEntry, exists, force bool, now time.Time, retry *bool) (modelIdentityInfoEntry, bool) {
 	e := m.executor
-	if !e.modelInspection.active.CompareAndSwap(false, true) {
+	if !e.modelInspection.claimBackground(m.pass) {
 		*retry = true
 		return old, exists
 	}
-	defer e.modelInspection.active.Store(false)
+	defer e.modelInspection.release()
+	start := time.Now()
 	ctx, cancel := context.WithTimeout(parent, modelInspectionBudget)
 	defer cancel()
 	if e.downloads == nil {
@@ -181,8 +201,28 @@ func (m *modelIdentityInfo) resolveOnce(parent context.Context, engine, model st
 	if err != nil {
 		return modelIdentityInfoEntry{}, false
 	}
-	if exists && !force && run == old.run && snapshot.equal(old.configuration) && !now.Before(old.checked) && now.Sub(old.checked) < modelIdentityRefreshInterval {
+	interval := modelIdentityRefreshInterval
+	if old.failure != "" {
+		interval = modelIdentityFailureRetry
+	}
+	// A resolved entry also rechecks its file and preset evidence, which costs
+	// metadata calls only, so a file replaced in place is not served stale.
+	if exists && !force && run == old.run && snapshot.equal(old.configuration) && revision == old.downloads && !now.Before(old.checked) && now.Sub(old.checked) < interval &&
+		(old.failure != "" || validateResolutionEvidence(ctx, old.source) == nil) {
 		return old, true
+	}
+	// Remember a failure for this run and configuration so that the next pass
+	// does not repeat it while the gate is wanted elsewhere.
+	fail := func(reason string) (modelIdentityInfoEntry, bool) {
+		if errors.Is(parent.Err(), context.Canceled) {
+			return old, exists // Yielded or stopped; not a resolution failure.
+		}
+		level := slog.LevelInfo
+		if old.failure == reason {
+			level = slog.LevelDebug
+		}
+		slog.Log(parent, level, "model identity resolution failed", "engine", engine, "model", model, "reason", reason, "duration", time.Since(start).Round(time.Millisecond), "retry_after", modelIdentityFailureRetry)
+		return modelIdentityInfoEntry{run: run, checked: now, configuration: snapshot, downloads: revision, failure: reason}, true
 	}
 	access := servingFileAccess{open: e.modelInspection.open}
 	access.recognize = func(ctx context.Context, model string) (engineInventory, error) {
@@ -195,19 +235,25 @@ func (m *modelIdentityInfo) resolveOnce(parent context.Context, engine, model st
 	list, _, err := resolveLlamaArtifacts(ctx, snapshot.state, snapshot.command, snapshot.store, model, access)
 	if err != nil {
 		var field *ServingFieldError
-		if errors.As(err, &field) {
-			slog.Debug("model identity artifacts unavailable", "reason", field.Reason)
+		switch {
+		case errors.As(err, &field):
+			return fail(field.Reason)
+		case ctx.Err() != nil:
+			return fail("inspection budget exceeded")
 		}
-		return modelIdentityInfoEntry{}, false
+		return fail("artifacts unavailable")
 	}
 	binding := exportBinding(list, nil)
 	identity := old.identity
 	perSlot := modelIdentityConfiguredContext(snapshot, model, list)
-	if !exists || binding != old.binding || run != old.run || !snapshot.equal(old.configuration) || perSlot != old.identity.ConfiguredContextTokens {
+	if !exists || old.failure != "" || binding != old.binding || run != old.run || !snapshot.equal(old.configuration) || perSlot != old.identity.ConfiguredContextTokens {
 		var valid bool
 		identity, valid = e.modelIdentityFromArtifactsContext(ctx, engine, model, list, perSlot, access)
+		if !valid && ctx.Err() != nil {
+			return fail("inspection budget exceeded")
+		}
 		if !valid {
-			return modelIdentityInfoEntry{}, false
+			return fail("identity metadata invalid")
 		}
 	}
 	current, err := inspectionSnapshot(st, engine)
@@ -216,7 +262,7 @@ func (m *modelIdentityInfo) resolveOnce(parent context.Context, engine, model st
 		return old, exists
 	}
 	if validateResolutionEvidence(ctx, list.source) != nil {
-		return modelIdentityInfoEntry{}, false
+		return fail("artifact evidence changed")
 	}
 	downloads.mu.Lock()
 	changed := e.downloads != downloads || downloads.source != source || downloads.revision != revision || downloads.blockedLocked(key) || downloads.writers[engine]
@@ -224,7 +270,7 @@ func (m *modelIdentityInfo) resolveOnce(parent context.Context, engine, model st
 	if changed || ctx.Err() != nil {
 		return old, exists
 	}
-	return modelIdentityInfoEntry{identity, binding, run, now, snapshot}, true
+	return modelIdentityInfoEntry{identity: identity, binding: binding, run: run, checked: now, configuration: snapshot, downloads: revision, source: list.source}, true
 }
 
 // Read exactly the selector bytes already checked by artifact resolution.
