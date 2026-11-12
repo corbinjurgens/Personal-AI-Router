@@ -638,15 +638,21 @@ func (m *Manager) reverseConnectLoop(ctx context.Context) {
 				backoff.reset(node.NodeUUID)
 				continue
 			}
-			addrs := m.resolvePeerAddrs(node)
-			if !backoff.due(node.NodeUUID, addrs, time.Now()) {
-				continue
-			}
 			workersMu.Lock()
 			running := workers[node.NodeUUID]
 			workers[node.NodeUUID] = true
 			workersMu.Unlock()
 			if running {
+				continue
+			}
+			// Check backoff only while holding the worker slot: a worker
+			// records its failure before releasing the slot, so this never
+			// reads the entry a just-finished attempt is about to replace.
+			addrs := m.resolvePeerAddrs(node)
+			if !backoff.due(node.NodeUUID, addrs, time.Now()) {
+				workersMu.Lock()
+				delete(workers, node.NodeUUID)
+				workersMu.Unlock()
 				continue
 			}
 			select {
