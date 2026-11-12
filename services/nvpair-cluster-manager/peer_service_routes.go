@@ -27,11 +27,10 @@ func (m *Manager) peerServiceOptions() clustertrust.PeerServiceClientOptions {
 	}
 }
 
-// peerStateClientOptions configures the peer-state stream client: the
-// ordinary peer-service options without a total timeout, which would end every
-// stream, and with a bounded wait for response headers.
-func (m *Manager) peerStateClientOptions() clustertrust.PeerServiceClientOptions {
-	opts := m.peerServiceOptions()
+// peerStateStreamOptions turns peer-service client options into those of the
+// peer-state stream client: no total timeout, which would end every stream,
+// and a bounded wait for response headers.
+func peerStateStreamOptions(opts clustertrust.PeerServiceClientOptions) clustertrust.PeerServiceClientOptions {
 	opts.Timeout = 0
 	opts.ResponseHeaderTimeout = peerStateResponseHeaderTimeout
 	return opts

@@ -44,8 +44,9 @@ const peerStateResponseHeaderTimeout = 8 * time.Second
 // so a stalled address cannot starve the next. A var so tests can shorten it.
 var peerStateConnectTimeout = 8 * time.Second
 
-// peerStateMinHealthy is how long a stream must stay open, after delivering a
-// frame, for its end to reset the peer's reconnect backoff.
+// peerStateMinHealthy is how long a stream that delivered a frame must have
+// run, counted from the start of its connect, for its end to reset the peer's
+// reconnect backoff.
 const peerStateMinHealthy = 5 * time.Second
 
 // peerStateEvaluateEvery re-evaluates the member set without a signal;

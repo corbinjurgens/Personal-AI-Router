@@ -1649,12 +1649,23 @@ func TestPeerStateRosterHashChangeTriggersReconcile(t *testing.T) {
 		}
 	}
 	t.Run("first frame and each changed hash", func(t *testing.T) {
-		var lines []string
-		p := newPeerStateStreamPair(t, func(p *peerStateStreamPair, w http.ResponseWriter, r *http.Request) {
-			writeLines(t, w, lines...)
-		})
-		lines = []string{p.frameLine(t, hashA), p.frameLine(t, hashB), p.frameLine(t, hashB), "null"}
 		var calls atomic.Int32
+		// Each frame is sent only after the previous one's reconcile ran, so a
+		// repeated hash cannot hide behind an in-flight reconcile.
+		settle := func(want int32) {
+			deadline := time.Now().Add(2 * time.Second)
+			for calls.Load() < want && time.Now().Before(deadline) {
+				time.Sleep(5 * time.Millisecond)
+			}
+		}
+		p := newPeerStateStreamPair(t, func(p *peerStateStreamPair, w http.ResponseWriter, r *http.Request) {
+			writeLines(t, w, p.frameLine(t, hashA))
+			settle(1)
+			writeLines(t, w, p.frameLine(t, hashB))
+			settle(2)
+			writeLines(t, w, p.frameLine(t, hashB), "null")
+			time.Sleep(100 * time.Millisecond)
+		})
 		p.a.reconcilePeer = func(uuid string) {
 			if uuid != p.b.identity.NodeUUID {
 				t.Errorf("reconcile with %s", uuid)

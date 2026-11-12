@@ -486,8 +486,7 @@ func (m *Manager) removeBareRejectingPeers(clusterID string, generation uint64, 
 // to a new IP (sleep/wake, DHCP) re-converges without a dedicated discovery
 // callback. An initial full pass shortly after startup converges a node that
 // just (re)started or woke at a new address. requestReconcilePass asks for an
-// extra network pass, run only when the last one is requestedPassMinInterval
-// old.
+// extra network pass, run once the last one is requestedPassMinInterval old.
 func (m *Manager) reconcileLoop(ctx context.Context) {
 	maintain := time.NewTicker(maintainEvery)
 	defer maintain.Stop()
@@ -496,6 +495,7 @@ func (m *Manager) reconcileLoop(ctx context.Context) {
 	initial := time.NewTimer(initialReconcileDelay)
 	defer initial.Stop()
 	var lastPass time.Time
+	var deferred <-chan time.Time // a throttled request, due at lastPass + interval
 	pass := func() {
 		lastPass = time.Now()
 		m.reconcilePass()
@@ -511,6 +511,15 @@ func (m *Manager) reconcileLoop(ctx context.Context) {
 		case <-maintain.C:
 			m.maintainPass()
 		case <-m.reconcileRequest:
+			now := time.Now()
+			if shouldRunRequestedPass(lastPass, now) {
+				pass()
+			} else if deferred == nil {
+				deferred = time.After(lastPass.Add(requestedPassMinInterval).Sub(now))
+			}
+		case <-deferred:
+			// A pass that ran since the request already satisfied it.
+			deferred = nil
 			if shouldRunRequestedPass(lastPass, time.Now()) {
 				pass()
 			}

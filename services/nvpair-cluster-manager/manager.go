@@ -304,7 +304,7 @@ func NewManager(codec *Codec, configDir string, port int) (*Manager, error) {
 	mgr.removalPeerServices = clustertrust.NewPeerServiceClient(mesh, peerOptions)
 	peerOptions.ReuseConnections = true
 	mgr.peerServices = clustertrust.NewPeerServiceClient(mesh, peerOptions)
-	mgr.peerStateStreams = clustertrust.NewPeerServiceClient(mesh, mgr.peerStateClientOptions())
+	mgr.peerStateStreams = clustertrust.NewPeerServiceClient(mesh, peerStateStreamOptions(mgr.peerServiceOptions()))
 	mgr.reconcilePeer = mgr.reconcileMember
 	// Announce every pin-set mutation. This node's other workers cache answers
 	// derived from the trusted/ directory — above all "may work be routed to this
