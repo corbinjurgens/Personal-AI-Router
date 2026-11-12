@@ -1185,7 +1185,10 @@ outside the configured store. Filesystem permissions still apply. Directory
 hard links are unsupported.
 
 The listing freezes the ordered logical file set and its selector, directory
-and opened-object evidence. Reads recheck that evidence; a replaced or retargeted
+and opened-object evidence. Reads come from a checked open handle: every read
+rechecks that handle's identity, size and modification time, and the configured
+path is resolved again at open, by any read that covers a 64 MiB boundary
+(always the first read) and after the last read. A replaced or retargeted
 source requires a fresh listing. A linked directory does not authorize later
 unlisted descendants. Peer file requests use only engine, model, logical
 name and issued ID. For llama.cpp, peer inspection exposes path-free facts for

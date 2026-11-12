@@ -180,3 +180,79 @@ func TestSampleFinalRecheckAndCancellation(t *testing.T) {
 	test("final original evidence recheck", false)
 	test("cancel after read", true)
 }
+
+func TestCoversPathCheck(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		offset int64
+		n      int
+		want   bool
+	}{
+		{"start of file", 0, 1, true},
+		{"empty read at start", 0, 0, true},
+		{"inside first span", 1, 32 << 10, false},
+		{"ends on boundary", PathCheckSpan - 32<<10, 32 << 10, false},
+		{"crosses boundary", PathCheckSpan - 1, 2, true},
+		{"starts on boundary", 3 * PathCheckSpan, 1, true},
+		{"negative offset", -1, 1, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := coversPathCheck(tc.offset, tc.n); got != tc.want {
+				t.Fatalf("coversPathCheck(%d, %d) = %t, want %t", tc.offset, tc.n, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestReaderChecksHandleEveryReadAndPathAtSpans(t *testing.T) {
+	dir := t.TempDir()
+	original, other, link := filepath.Join(dir, "original"), filepath.Join(dir, "other"), filepath.Join(dir, "link")
+	for p, data := range map[string]string{original: "original", other: "replacement"} {
+		if err := os.WriteFile(p, []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(original, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	e, err := Capture(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := (Access{}).CheckedOpen(context.Background(), e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	r := Reader{context.Background(), f, e}
+
+	t.Run("retargeted link", func(t *testing.T) {
+		if err := os.Remove(link); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(other, link); err != nil {
+			t.Fatal(err)
+		}
+		buf := make([]byte, 2)
+		if n, err := r.ReadAt(buf, 1); err != nil || string(buf[:n]) != "ri" {
+			t.Fatalf("read inside a span: %q %v, want the opened object's bytes", buf[:n], err)
+		}
+		for _, offset := range []int64{0, PathCheckSpan - 1} {
+			if _, err := r.ReadAt(buf, offset); err == nil || err == io.EOF {
+				t.Fatalf("read covering a path check at %d accepted a retargeted link: %v", offset, err)
+			}
+		}
+		if Validate(e) == nil {
+			t.Fatal("final path recheck accepted a retargeted link")
+		}
+	})
+
+	t.Run("opened object modified", func(t *testing.T) {
+		if err := os.WriteFile(original, []byte("original, now longer"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.ReadAt(make([]byte, 2), 1); err == nil || err == io.EOF {
+			t.Fatalf("read inside a span accepted a modified object: %v", err)
+		}
+	})
+}

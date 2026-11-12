@@ -1780,7 +1780,9 @@ Requirements:
   GET and HEAD, including Range, require that ID and exact engine, model and
   listed logical name (`400` for malformed paths, `404` for unlisted names).
   Rechecks retain the old selection and use a checked opened handle through
-  `http.ServeContent`. Missing, stale, evicted or restarted issued state
+  `http.ServeContent`. Each read rechecks the handle's identity, size and
+  mtime; the configured path is rechecked at open, at each 64 MiB boundary and
+  after the response, where a change is logged. Missing, stale, evicted or restarted issued state
   requires relisting; unchanged content can receive the same ID. Native IDs
   are transfer tokens, not durable native receipts or native result fields.
 - **Custom llama.cpp identity.** Before interpreting an ID as an HF locator,
