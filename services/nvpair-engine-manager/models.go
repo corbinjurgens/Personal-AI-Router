@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -403,7 +405,7 @@ func (e *Executor) modelsSweep(ctx context.Context, fullInventory bool) ModelsRe
 			freshDigests[engineNames[i]] = digests[i]
 		}
 	}
-	e.storeInventory(fresh, freshDigests, sweep)
+	inventoryChanged := e.storeInventory(fresh, freshDigests, sweep)
 	var memoryEntries []performancewire.MemoryEvidenceEntry
 	for i, name := range engineNames {
 		if !loadedOK[i] {
@@ -431,7 +433,9 @@ func (e *Executor) modelsSweep(ctx context.Context, fullInventory bool) ModelsRe
 		}
 	}
 	res = e.currentModelsResult(res)
-	if fullInventory && e.modelIdentities != nil {
+	// Peers read /v1/models every few seconds; only a changed inventory
+	// invalidates resolved identities ahead of their interval.
+	if inventoryChanged && e.modelIdentities != nil {
 		e.modelIdentities.refresh()
 	}
 	return res
@@ -745,7 +749,9 @@ func validModelIdentifiers(models []string) []string {
 // so a restarted engine is always queried afresh rather than served stale. The
 // installed lists and content digests are both replaced only when no sweep that
 // began later has stored its own: an older listing never replaces a newer one.
-func (e *Executor) storeInventory(fresh map[string][]string, digests map[string]observedDigests, sweep uint64) {
+// storeInventory reports whether the stored ready inventory or its digests
+// changed.
+func (e *Executor) storeInventory(fresh map[string][]string, digests map[string]observedDigests, sweep uint64) bool {
 	_, naming := e.inventoryModelNaming()
 	e.inventoryMu.Lock()
 	defer e.inventoryMu.Unlock()
@@ -761,12 +767,13 @@ func (e *Executor) storeInventory(fresh map[string][]string, digests map[string]
 		}
 	}
 	if sweep <= e.digestSweep {
-		return
+		return false
 	}
 	if e.downloads != nil {
 		e.downloads.mu.Lock()
 		defer e.downloads.mu.Unlock()
 	}
+	previous, previousDigests := e.inventory, maps.Clone(e.inventoryDigests)
 	for name, models := range fresh {
 		fresh[name] = e.readyModelNamesLocked(name, models, naming[name])
 	}
@@ -793,4 +800,7 @@ func (e *Executor) storeInventory(fresh map[string][]string, digests map[string]
 		observed.models = ready
 		e.inventoryDigests[name] = observed
 	}
+	return !maps.EqualFunc(previous, e.inventory, slices.Equal[[]string]) || !maps.EqualFunc(previousDigests, e.inventoryDigests, func(a, b observedDigests) bool {
+		return a.runID == b.runID && maps.Equal(a.models, b.models)
+	})
 }

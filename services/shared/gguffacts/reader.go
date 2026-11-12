@@ -32,6 +32,27 @@ type decoder struct {
 	size, off uint64
 	order     binary.ByteOrder
 	names     map[string]struct{} // Tensor names in the current role's shard set.
+	// Read-ahead: pending holds the bytes from off that the last read into buf
+	// fetched ahead. floor is an offset every valid header still reaches: the
+	// smallest encoding of the checked value and the declared items not yet
+	// decoded. reserve is that minimum for the items after the current one.
+	buf, pending   []byte
+	floor, reserve uint64
+}
+
+// readAhead caps one physical read. Each read can be a system call that costs
+// microseconds, and a large vocabulary is hundreds of thousands of values.
+const readAhead = 64 << 10
+
+// atLeast records that a valid header holds n more bytes after off, plus the
+// reserve for the items after the current one.
+func (d *decoder) atLeast(n uint64) {
+	if n > d.size || d.reserve > d.size-n || d.off > d.size-n-d.reserve {
+		return // A truncated file fails require before reading past its size.
+	}
+	if floor := d.off + n + d.reserve; floor > d.floor {
+		d.floor = floor
+	}
 }
 
 func (d *decoder) charge(n uint64) error {
@@ -76,17 +97,45 @@ func (d *decoder) read(p []byte) error {
 	if start > math.MaxInt64 {
 		return ErrInvalid
 	}
-	n, err := d.r.ReadAt(p, int64(start))
+	n := copy(p, d.pending)
+	d.pending = d.pending[n:]
+	if n == len(p) {
+		return d.ctx.Err()
+	}
+	// Fill from the first unread byte: the request, extended to the floor.
+	at, want := start+uint64(n), uint64(len(p)-n)
+	if d.floor > at && d.floor-at > want {
+		want = min(d.floor-at, max(want, readAhead))
+	}
+	// Bytes read ahead are scanned later; stay within the scanned ceiling.
+	if left := d.lim.scanned - d.usage.ScannedHeaderBytes; want-uint64(len(p)-n) > left {
+		want = uint64(len(p)-n) + left
+	}
+	if uint64(cap(d.buf)) < want {
+		d.buf = make([]byte, max(want, readAhead))
+	}
+	need := len(p) - n
+	got, err := d.r.ReadAt(d.buf[:want], int64(at))
+	if got < need && want > uint64(need) && d.ctx.Err() == nil {
+		// Only the request is required; retry it alone.
+		got, err = d.r.ReadAt(d.buf[:need], int64(at))
+		want = uint64(need)
+	}
 	if e := d.ctx.Err(); e != nil {
 		return e
 	}
-	if n != len(p) {
+	if got < need {
 		if err != nil {
 			return err
 		}
 		return io.ErrUnexpectedEOF
 	}
-	return err
+	if got == int(want) && err != nil {
+		return err
+	}
+	copy(p[n:], d.buf[:need])
+	d.pending = d.buf[need:got]
+	return nil
 }
 
 func (d *decoder) number(n int) (uint64, error) {
@@ -131,6 +180,7 @@ func (d *decoder) textValue(max uint64, keep bool, digest bool, optional bool) (
 	if err := d.require(n); err != nil {
 		return "", sum, err
 	}
+	d.atLeast(n)
 	if keep {
 		// Account for both the staging byte slice and the resulting string.
 		if err := d.charge(n*2 + 32); err != nil {
@@ -263,6 +313,7 @@ func decode(ctx context.Context, artifacts []Artifact, lim limits) (Facts, error
 			d.names = make(map[string]struct{})
 		}
 		d.r, d.size, d.off = a.Reader, uint64(a.Size), 0
+		d.pending, d.floor, d.reserve = nil, 0, 0
 		s, err := d.shard(a.Role)
 		if err != nil {
 			return Facts{}, fmt.Errorf("shard %d: %w", i, err)
@@ -320,6 +371,7 @@ func (d *decoder) shard(role Role) (Shard, error) {
 	seen := make(map[string]struct{}, int(nm))
 	s.Numeric = make(map[string]Numeric)
 	for i := uint64(0); i < nm; i++ {
+		d.reserve = (nm-i-1)*14 + nt*33
 		key, _, e := d.text(d.lim.name, true, false)
 		if e != nil {
 			return s, e
@@ -350,6 +402,7 @@ func (d *decoder) shard(role Role) (Shard, error) {
 	s.Tensors = make([]Tensor, int(nt))
 	d.usage.TensorCount += nt
 	for i := range s.Tensors {
+		d.reserve = uint64(len(s.Tensors)-i-1) * 33
 		t, e := d.tensor()
 		if e != nil {
 			return s, e
@@ -440,6 +493,7 @@ func (d *decoder) metadata(s *Shard, key string, typ uint32) error {
 			return ErrInvalid
 		}
 		for i := uint64(0); i < count; i++ {
+			d.atLeast((count - i) * 8) // Each remaining string has a length.
 			if optional {
 				v, _, e := d.textValue(d.lim.name, identity != nil && !array, false, true)
 				if e != nil {
@@ -500,6 +554,7 @@ func (d *decoder) metadata(s *Shard, key string, typ uint32) error {
 	if err := d.require(bytes); err != nil {
 		return err
 	}
+	d.atLeast(bytes)
 	if !retain && key != "general.alignment" && !(key == "general.file_type" && !array && typ == 4) {
 		remaining := bytes
 		var buf [4096]byte

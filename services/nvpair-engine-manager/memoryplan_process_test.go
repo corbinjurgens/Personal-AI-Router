@@ -289,3 +289,25 @@ func TestMemoryPlanProcessStartupReapDeadline(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestMemoryPlanProcessTakesPriorityOverIdentityScan(t *testing.T) {
+	e := new(Executor)
+	// The background pass releases the slot shortly after being cancelled.
+	yielded := make(chan struct{})
+	if !e.modelInspection.claimBackground(func() {
+		select {
+		case <-yielded:
+		default:
+			close(yielded)
+			time.AfterFunc(20*time.Millisecond, e.modelInspection.release)
+		}
+	}) {
+		t.Fatal("background claim refused")
+	}
+	if _, err := e.runMemoryPlanCommand(context.Background(), memoryPlanTestCommand(t), []byte(`{"scenario":"environment"}`)); err != nil {
+		t.Fatalf("memory plan behind the identity scan: %v", err)
+	}
+	if e.modelInspection.active.Load() {
+		t.Fatal("memory plan retained the inspection slot")
+	}
+}

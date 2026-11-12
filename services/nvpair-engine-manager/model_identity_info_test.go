@@ -4,14 +4,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -143,11 +146,18 @@ func TestModelIdentityInfoCacheAndFailures(t *testing.T) {
 	if len(old.Files) != 1 {
 		t.Fatal("missing initial identity")
 	}
-	writeTestFile(t, f.preset, []byte("[exact-alias]\n"))
-	m.reconcile(context.Background(), false, now.Add(time.Minute))
-	if len(m.snapshot()["llamacpp"]) != 1 {
-		t.Fatal("cache was not retained before expiry")
+	modelReads := 0
+	f.ex.modelInspection.open = func(path string) (servingArtifactFile, error) {
+		if path == f.model {
+			modelReads++
+		}
+		return os.Open(path)
 	}
+	m.reconcile(context.Background(), false, now.Add(time.Minute))
+	if len(m.snapshot()["llamacpp"]) != 1 || modelReads != 0 {
+		t.Fatalf("unchanged cache was not reused before expiry: %d model reads", modelReads)
+	}
+	writeTestFile(t, f.preset, []byte("[exact-alias]\n"))
 	f.ex.modelInspection.active.Store(true)
 	m.reconcile(context.Background(), true, now.Add(time.Minute))
 	f.ex.modelInspection.active.Store(false)
@@ -170,6 +180,10 @@ func TestModelIdentityInfoCacheAndFailures(t *testing.T) {
 	f.ex.downloads.mu.Lock()
 	delete(f.ex.downloads.writers, "llamacpp")
 	f.ex.downloads.mu.Unlock()
+	m.reconcile(context.Background(), false, now.Add(2*time.Minute))
+	if len(m.snapshot()["llamacpp"]) != 0 {
+		t.Fatal("an edited preset left the cached identity in place before expiry")
+	}
 	m.reconcile(context.Background(), false, now.Add(10*time.Minute))
 	if len(m.snapshot()["llamacpp"]) != 0 {
 		t.Fatal("resolution error retained expired identity")
@@ -416,5 +430,192 @@ func TestModelIdentityInfoRefreshAndLifetime(t *testing.T) {
 	}
 	if len(m.snapshot()) != 0 {
 		t.Fatal("cancelled owner performed work")
+	}
+}
+
+func TestModelIdentityInfoRemembersFailures(t *testing.T) {
+	f := identityFixture(t)
+	m := f.ex.modelIdentities
+	writeTestFile(t, f.preset, []byte("[exact-alias]\n"))
+	reads := 0
+	f.ex.modelInspection.open = func(path string) (servingArtifactFile, error) {
+		if path == f.preset {
+			reads++
+		}
+		return os.Open(path)
+	}
+	attempt := func(force bool, at time.Time) int {
+		t.Helper()
+		before := reads
+		m.reconcile(context.Background(), force, at)
+		if len(m.snapshot()["llamacpp"]) != 0 {
+			t.Fatal("failed resolution published an identity")
+		}
+		return reads - before
+	}
+	now := time.Now()
+	if attempt(false, now) == 0 {
+		t.Fatal("first resolution did not read the preset")
+	}
+	if n := attempt(false, now.Add(30*time.Second)); n != 0 {
+		t.Fatalf("failed resolution repeated within the retry interval: %d preset reads", n)
+	}
+	retried := now.Add(modelIdentityFailureRetry)
+	if attempt(false, retried) == 0 {
+		t.Fatal("failed resolution was not retried after the interval")
+	}
+	f.ex.downloads.mu.Lock()
+	err := f.ex.downloads.advanceLocked()
+	f.ex.downloads.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Download progress on any engine advances the shared revision.
+	if n := attempt(false, retried.Add(time.Second)); n != 0 {
+		t.Fatalf("download progress retried the failed resolution: %d preset reads", n)
+	}
+	if attempt(true, retried.Add(2*time.Second)) == 0 {
+		t.Fatal("explicit refresh did not retry the failed resolution")
+	}
+	writeTestFile(t, f.preset, []byte("[exact-alias]\nmodel = main.gguf\n"))
+	m.reconcile(context.Background(), false, retried.Add(2*modelIdentityFailureRetry))
+	if len(m.snapshot()["llamacpp"]) != 1 {
+		t.Fatal("repaired model was not resolved after the retry interval")
+	}
+}
+
+// starveInspection runs the identity owner continuously, refreshing it as
+// often as it can, against background reads that are slow and always fail.
+func starveInspection(t *testing.T, f inspectionFixture) {
+	t.Helper()
+	f.ex.modelInspection.open = func(path string) (servingArtifactFile, error) {
+		file, err := os.Open(path)
+		if err != nil || !identityBackgroundCaller() {
+			return file, err
+		}
+		return slowFailingFile{file}, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); f.ex.modelIdentities.run(ctx) }()
+	go func() {
+		defer wg.Done()
+		for ctx.Err() == nil {
+			f.ex.modelIdentities.refresh()
+			time.Sleep(time.Millisecond)
+		}
+	}()
+	t.Cleanup(func() { cancel(); wg.Wait() })
+	deadline := time.Now().Add(5 * time.Second)
+	for !f.ex.modelInspection.active.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("identity owner never took the inspection gate")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// The seam cannot see its caller's context; the stack names the background owner.
+func identityBackgroundCaller() bool {
+	buf := make([]byte, 64<<10)
+	return bytes.Contains(buf[:runtime.Stack(buf, false)], []byte("(*modelIdentityInfo).resolveOnce"))
+}
+
+type slowFailingFile struct{ *os.File }
+
+func (f slowFailingFile) ReadAt([]byte, int64) (int, error) {
+	time.Sleep(100 * time.Millisecond)
+	return 0, errors.New("slow artifact read failed")
+}
+
+func TestModelIdentityInfoYieldsToRequestedInspection(t *testing.T) {
+	f := identityFixture(t)
+	starveInspection(t, f)
+	for i := 0; i < 3; i++ {
+		if result := inspectFixture(t, f); result.Status != "resolved" {
+			t.Fatalf("inspection %d behind the identity owner: %s %s", i, result.Status, result.Reason)
+		}
+	}
+}
+
+func TestModelIdentityInfoYieldsToRequestedPreview(t *testing.T) {
+	f := newAppliedKeyFixture(t)
+	f.ex.inventoryMu.Lock()
+	f.ex.inventory = map[string][]string{"llamacpp": {f.request.ModelID}}
+	f.ex.inventoryMu.Unlock()
+	request := nativeOptionsPreviewRequest(t, f, nil)
+	request.ModelChange.Load.Set.Context = &modelconfig.Context{Mode: "fixed", Tokens: 4096}
+	ctx := context.WithValue(context.Background(), modelAutoOperationKey{}, modelAutoOperation{Memory: modelTargetMemoryOwner{target: modelBufferTestTargetMemory()}})
+	starveInspection(t, f)
+	for i := 0; i < 3; i++ {
+		result, err := f.ex.previewModelLoadChange(ctx, f.st, request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Errors) != 0 {
+			t.Fatalf("preview %d behind the identity owner: %v", i, result.Errors)
+		}
+	}
+}
+
+func TestModelIdentityInfoRefreshFollowsInventoryChanges(t *testing.T) {
+	f := identityFixture(t)
+	store := func(models ...string) bool {
+		t.Helper()
+		return f.ex.storeInventory(map[string][]string{"llamacpp": models}, map[string]observedDigests{"llamacpp": modelInventoryObservation(t, f.ex, "llamacpp")}, f.ex.sweeps.Add(1))
+	}
+	if !store("exact-alias", "other") {
+		t.Fatal("an added model was not reported as an inventory change")
+	}
+	// A peer reading /v1/models repeats the same sweep result.
+	if store("exact-alias", "other") {
+		t.Fatal("an unchanged inventory was reported as a change")
+	}
+	if !store("exact-alias") {
+		t.Fatal("a removed model was not reported as an inventory change")
+	}
+}
+
+func TestModelIdentityInfoNoticesFileReplacedInPlace(t *testing.T) {
+	f := identityFixture(t)
+	m := f.ex.modelIdentities
+	now := time.Now()
+	m.reconcile(context.Background(), false, now)
+	before := m.snapshot()["llamacpp"]["exact-alias"].TotalBytes
+	writeInspectionGGUF(t, f.model, "llama", 0.25, 3<<20)
+	m.reconcile(context.Background(), false, now.Add(time.Minute))
+	if after := m.snapshot()["llamacpp"]["exact-alias"].TotalBytes; after == before || after != 3<<20 {
+		t.Fatalf("replaced model kept its stale identity: before=%d after=%d", before, after)
+	}
+}
+
+func TestModelIdentityInfoReusesEntriesDuringDownloadProgress(t *testing.T) {
+	f := identityFixture(t)
+	m := f.ex.modelIdentities
+	now := time.Now()
+	m.reconcile(context.Background(), false, now)
+	if len(m.snapshot()["llamacpp"]) != 1 {
+		t.Fatal("missing initial identity")
+	}
+	modelReads := 0
+	f.ex.modelInspection.open = func(path string) (servingArtifactFile, error) {
+		if path == f.model {
+			modelReads++
+		}
+		return os.Open(path)
+	}
+	// Another engine's download reports progress between every pass.
+	for i := 1; i <= 3; i++ {
+		f.ex.downloads.mu.Lock()
+		err := f.ex.downloads.advanceLocked()
+		f.ex.downloads.mu.Unlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+		m.reconcile(context.Background(), false, now.Add(time.Duration(i)*5*time.Second))
+	}
+	if len(m.snapshot()["llamacpp"]) != 1 || modelReads != 0 {
+		t.Fatalf("download progress re-resolved a cached identity: %d model reads", modelReads)
 	}
 }

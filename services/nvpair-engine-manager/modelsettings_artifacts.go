@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -150,6 +151,53 @@ type modelInspectionState struct {
 	open      func(string) (servingArtifactFile, error)
 	now       func() time.Time
 	lastUsage servingReadUsage
+	// yield cancels the background identity pass while it holds active.
+	// wanted is when a requested read last found the gate held, as monotonic
+	// time since modelInspectionEpoch plus one; zero means none.
+	yieldMu sync.Mutex
+	yield   context.CancelFunc
+	wanted  atomic.Int64
+}
+
+var modelInspectionEpoch = time.Now()
+
+// claim takes the gate for a requested inspection or preview. A background
+// identity pass that holds it is cancelled and stands back for the bounded
+// read window, so the caller's retry takes the gate next.
+func (s *modelInspectionState) claim() bool {
+	if s.active.CompareAndSwap(false, true) {
+		s.wanted.Store(0)
+		return true
+	}
+	s.wanted.Store(int64(time.Since(modelInspectionEpoch)) + 1)
+	s.yieldMu.Lock()
+	yield := s.yield
+	s.yieldMu.Unlock()
+	if yield != nil {
+		yield()
+	}
+	return false
+}
+
+// claimBackground takes the gate for the identity pass that yield cancels.
+func (s *modelInspectionState) claimBackground(yield context.CancelFunc) bool {
+	if wanted := s.wanted.Load(); wanted != 0 && time.Since(modelInspectionEpoch)-time.Duration(wanted-1) < modelReadContentionBudget {
+		return false
+	}
+	if !s.active.CompareAndSwap(false, true) {
+		return false
+	}
+	s.yieldMu.Lock()
+	s.yield = yield
+	s.yieldMu.Unlock()
+	return true
+}
+
+func (s *modelInspectionState) release() {
+	s.yieldMu.Lock()
+	s.yield = nil
+	s.yieldMu.Unlock()
+	s.active.Store(false)
 }
 
 func (s *modelInspectionState) clock() time.Time {
@@ -519,11 +567,11 @@ func (e *Executor) inspectModelArtifactsOnce(ctx context.Context, p modelconfig.
 	if p.Engine != "llamacpp" {
 		return unavailable("unavailable", "Local GGUF inspection is supported for llama.cpp only.")
 	}
-	if !e.modelInspection.active.CompareAndSwap(false, true) {
+	if !e.modelInspection.claim() {
 		*retry = true
 		return unavailable("busy", "Another model facts inspection is active.")
 	}
-	defer e.modelInspection.active.Store(false)
+	defer e.modelInspection.release()
 	ctx, cancel := context.WithTimeout(ctx, modelInspectionBudget)
 	defer cancel()
 	usage := servingReadUsage{}

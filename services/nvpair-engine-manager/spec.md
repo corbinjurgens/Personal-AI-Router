@@ -78,10 +78,26 @@ tries the engine's content semaphore without waiting, yielding to reserved mutat
 a mutation waits behind an admitted scan with its existing context. Snapshots
 perform no I/O and detach file slices. Runtime contention can retry the complete
 read within the bounded read-observation window described below. Busy reads
-after that bound retain the previous entry; resolution failures
-remove it. Explicit refresh, changed run/configuration and a ten-minute interval
-invalidate resolution. Each full inventory sweep requests a coalesced refresh
-without waiting for artifact I/O.
+after that bound retain the previous entry. A resolution failure withdraws the
+published identity and is remembered for its engine run and configuration;
+it is logged at info with its reason and duration when the
+reason first appears, and retried after one minute. A resolved entry is reused
+for up to ten minutes while its run and configuration are unchanged and a
+metadata-only recheck of its files and preset still matches.
+A refresh invalidates every entry, failed or not. The owner requests a
+coalesced refresh, without waiting for artifact I/O, only when a full inventory
+sweep changes the stored ready inventory or its digests; peers read
+`/v1/models` every few seconds, and repeating an unchanged sweep does not
+re-resolve.
+
+The scan shares the inspection slot with requested inspection, model-load
+Preview and memory-plan queries, which take priority. A requested read that
+finds the slot held by the scan cancels the scan's current pass and takes the
+slot within its bounded read-observation retry. Until a request takes the slot,
+and for at most one second after it last found the slot held, the scan claims
+no slot. Models the cancelled pass had not resolved keep their previous
+entries; the next pass starts at the next five-second tick or refresh, and a
+cancelled refresh stays pending for it.
 
 `engine:models`, `GET /v1/models` and `engine:models-changed` carry optional
 `modelIdentities: { <engine>: { <model>: ModelIdentity } }`, using the shared
