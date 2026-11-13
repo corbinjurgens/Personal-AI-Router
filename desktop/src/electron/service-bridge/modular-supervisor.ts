@@ -253,17 +253,6 @@ const AVAILABILITY_CALL_TIMEOUT_MS = 10 * 60 * 1000
 const DISCOVERY_MODEL_RETRY_MIN_MS = 1_000
 const DISCOVERY_MODEL_RETRY_MAX_MS = 30_000
 
-/**
- * Cadence for re-polling clustered peers' authoritative engine status via
- * `engine:remote-get-installed`. The mDNS proxy presence is real-time but only
- * ever says up/down; a peer's installed/not-installed/port + a stopped engine's
- * configured port are only knowable from its `ec` surface, which is on-request
- * only (no cross-cluster push yet). We
- * poll on a light interval (plus on membership change and after each remote op)
- * so a peer's engine state converges without a proactive backend signal.
- */
-const REMOTE_STATUS_POLL_MS = 20_000
-
 /** Per-engine local-node → proxy bridge state (see reconcileLocalNodeBridge). */
 interface LocalEngineBridge {
     running: boolean
@@ -363,8 +352,6 @@ class ModularSupervisor {
     // the backend keys peers by hostUuid, and it is the same key
     // discovery/`engine:remote-*` use, never the hostname.
     private clusterPeerIds = new Set<string>()
-    // Light interval that re-polls clusterPeerIds' authoritative engine status.
-    private remoteStatusTimer: ReturnType<typeof setInterval> | null = null
     // Debounced follow-up poll when discovery:nodes-changed lands — the ec peer
     // directory in engine-manager is fed from that relay and may not be ready for
     // the first broker-ready sweep.
@@ -609,10 +596,6 @@ class ModularSupervisor {
         if (this.remoteStatusDebounceTimer) {
             clearTimeout(this.remoteStatusDebounceTimer)
             this.remoteStatusDebounceTimer = null
-        }
-        if (this.remoteStatusTimer) {
-            clearInterval(this.remoteStatusTimer)
-            this.remoteStatusTimer = null
         }
         if (this.pendingInviteSweepTimer) {
             clearInterval(this.pendingInviteSweepTimer)
@@ -1176,7 +1159,6 @@ class ModularSupervisor {
         if (generation !== this.brokerSessionGeneration) return
         await this.refreshAllRemoteEngineStatus()
         if (generation !== this.brokerSessionGeneration) return
-        this.startRemoteStatusPolling()
         for (const engine of PROXY_ENGINES) {
             await this.hydrateProxyNodes(engine)
             if (generation !== this.brokerSessionGeneration) return
@@ -1287,26 +1269,15 @@ class ModularSupervisor {
     }
 
     /**
-     * Begin polling clustered peers' authoritative engine status. Idempotent:
-     * a re-ready (broker restart) clears any prior timer first. Also runs one
-     * immediate sweep so a peer's state converges without waiting a full period.
-     */
-    private startRemoteStatusPolling(): void {
-        if (this.remoteStatusTimer) clearInterval(this.remoteStatusTimer)
-        this.remoteStatusTimer = setInterval(() => {
-            void this.refreshAllRemoteEngineStatus()
-        }, REMOTE_STATUS_POLL_MS)
-        void this.refreshAllRemoteEngineStatus()
-    }
-
-    /**
-     * Poll one clustered peer's authoritative engine status
-     * (`engine:remote-get-installed`, mTLS `ec`) and feed the real
-     * installed/running/port into the bridge state. A failure is expected and
-     * non-fatal for an unclustered / unpinned / unreachable peer.
+     * Read one clustered peer's authoritative engine status
+     * (`engine:remote-get-installed`, which engine-manager answers from that
+     * peer's live engine-status stream) and feed the real installed/running/port
+     * into the bridge state. Changes between reads arrive as
+     * `engine:remote-installed-changed`. A failure is expected and non-fatal
+     * for an unclustered / unpinned / unreachable peer.
      *
      * Cached facts are deliberately **kept** on failure. They are the only source
-     * that can tell a peer's `not-installed` from `stopped`, and a transient poll
+     * that can tell a peer's `not-installed` from `stopped`, and a transient read
      * failure is not evidence that either changed — discarding them would flip a
      * correct "Install" back into an installed-but-off toggle. Node reachability
      * is already surfaced separately, so a stale snapshot is presented as a
@@ -1326,7 +1297,7 @@ class ModularSupervisor {
             const engines = objectValue(result)?.engines
             log.info({
                 sublevel: 'engine-manager',
-                message: `remote engine status polled for ${nodeId}`,
+                message: `remote engine status read for ${nodeId}`,
                 data: { engines: Array.isArray(engines) ? engines : [] }
             })
         } catch (err) {
@@ -1337,7 +1308,7 @@ class ModularSupervisor {
         }
     }
 
-    /** Poll every pinned cluster peer's authoritative engine status. */
+    /** Read every pinned cluster peer's authoritative engine status. */
     private async refreshAllRemoteEngineStatus(): Promise<void> {
         if (!this.brokerReady) return
         const selfId = getModularBridgeState().getSelfId()
@@ -1509,7 +1480,8 @@ class ModularSupervisor {
 
         // Engine control plane: the broker relays nvpair-engine-manager's opt-in
         // engine:* events verbatim (engine:ready / state-changed / models-changed /
-        // install-progress / pull-progress / remote-progress).
+        // install-progress / pull-progress / remote-progress /
+        // remote-installed-changed).
         if (notification.method.startsWith('engine:')) {
             this.handleEngineManagerNotification(notification)
             return
@@ -1986,6 +1958,23 @@ class ModularSupervisor {
                 typeof params.nodeId === 'string'
             )
                 emitBridgePush('engines:settings-disconnected', { nodeId: params.nodeId })
+            return
+        }
+        if (notification.method === 'engine:remote-installed-changed') {
+            const params = notification.params
+            if (
+                params &&
+                typeof params === 'object' &&
+                !Array.isArray(params) &&
+                typeof params.nodeId === 'string' &&
+                Array.isArray(params.engines)
+            ) {
+                const selfId = getModularBridgeState().getSelfId()
+                if (this.brokerReady && params.nodeId !== selfId)
+                    getModularBridgeState().applyRemoteEngineFacts(params.nodeId, {
+                        engines: params.engines
+                    })
+            }
             return
         }
         if (notification.method === 'engine:ready') {
