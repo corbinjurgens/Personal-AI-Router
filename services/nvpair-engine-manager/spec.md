@@ -1790,7 +1790,11 @@ Requirements:
   copy-receipt candidates. Typed bindings can select artifacts without
   `Runtime.Serving` or a running engine. Disagreeing candidates are ambiguous.
   Export checks the selected effective configuration, artifact bindings and
-  applicable full hash assertions, followed by a snapshot recheck. It does not
+  applicable full hash assertions, followed by a snapshot recheck. Captured
+  source evidence holds the absolute, cleaned path, and rechecks match a
+  configured preset, model or executable path to it by that form, so a
+  spelling such as forward slashes on Windows selects the same evidence; the
+  evidence's object identity, size and mtime are still revalidated. It does not
   recompile or approve the whole launch. Full launch and apply retain their
   separate review checks. Undeclared
   presets use the same parser and effective launch-option precedence, resolving

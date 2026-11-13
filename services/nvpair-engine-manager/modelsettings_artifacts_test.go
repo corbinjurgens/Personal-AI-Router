@@ -320,6 +320,65 @@ func TestInspectModelReportsResolverReason(t *testing.T) {
 	}
 }
 
+// White's override configuration names its preset and model with forward
+// slashes, while captured evidence holds the absolute, cleaned path. The
+// recheck must match the evidence by that path and still notice a replacement.
+func TestInspectModelAcceptsNonCanonicalPresetSpelling(t *testing.T) {
+	spelled := func(path string) string {
+		return filepath.ToSlash(filepath.Dir(path)) + "/./" + filepath.Base(path)
+	}
+	newFixture := func(t *testing.T) inspectionFixture {
+		t.Helper()
+		f := newInspectionFixture(t, 2<<20)
+		writeTestFile(t, f.preset, []byte("[exact-alias]\nmodel = "+spelled(f.model)+"\n"))
+		f.st.plat.Runtime.Args = []string{"--models-preset", spelled(f.preset)}
+		return f
+	}
+	t.Run("inspection resolves", func(t *testing.T) {
+		f := newFixture(t)
+		result := inspectFixture(t, f)
+		if result.Status != "resolved" || result.Facts == nil || len(result.Artifacts) != 1 {
+			t.Fatalf("inspection = %+v", result)
+		}
+	})
+	t.Run("recheck still detects a replaced preset", func(t *testing.T) {
+		f := newFixture(t)
+		st, store, err := f.ex.modelStoreFor("llamacpp")
+		if err != nil {
+			t.Fatal(err)
+		}
+		snapshot, command, err := copyLaunchSnapshot(st)
+		if err != nil {
+			t.Fatal(err)
+		}
+		list, _, err := resolveLlamaArtifacts(context.Background(), snapshot, command, store, f.request.ModelID, servingFileAccess{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := resolveLlamaArtifactsExpected(context.Background(), snapshot, command, store, f.request.ModelID, servingFileAccess{}, list); err != nil {
+			t.Fatalf("unchanged recheck: %v", err)
+		}
+		data, err := os.ReadFile(f.preset)
+		if err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(f.preset)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(f.preset, f.preset+"-old"); err != nil {
+			t.Fatal(err)
+		}
+		writeTestFile(t, f.preset, data)
+		if err := os.Chtimes(f.preset, info.ModTime(), info.ModTime()); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := resolveLlamaArtifactsExpected(context.Background(), snapshot, command, store, f.request.ModelID, servingFileAccess{}, list); err == nil {
+			t.Fatal("recheck accepted a replaced preset")
+		}
+	})
+}
+
 func TestModelSettingsArtifactsExactAliasOffAndNoApproval(t *testing.T) {
 	f := newInspectionFixture(t, 2<<20)
 	// Inspection must not compile the other declaration or require its files,

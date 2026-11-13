@@ -543,12 +543,12 @@ func (r llamaResolutionEvidence) file(path string) (sourceEvidence, error) {
 		return captureSource(path, false)
 	}
 	for _, selector := range r.expected.selectors {
-		if selector.file.configured == path {
+		if configuredAs(selector.file.configured, path) {
 			return selector.file, validateSource(selector.file)
 		}
 	}
 	for _, file := range r.expected.artifacts {
-		if file.configured == path && file.info != nil {
+		if configuredAs(file.configured, path) && file.info != nil {
 			e := sourceEvidence{configured: file.configured, target: file.abs, info: file.info, size: file.Size, mtime: file.info.ModTime().UnixNano()}
 			return e, validateSource(e)
 		}
@@ -568,7 +568,7 @@ func (r llamaResolutionEvidence) selector(ctx context.Context, path string, acce
 	if r.expected != nil {
 		found := false
 		for _, old := range r.expected.selectors {
-			if old.file.configured == path {
+			if old.file.configured == e.configured {
 				found = old.binding != nil && *old.binding == *binding && bytes.Equal(old.bytes, data)
 				break
 			}
@@ -593,7 +593,7 @@ func (r llamaResolutionEvidence) artifact(ctx context.Context, path string, acce
 	if r.expected != nil {
 		found := false
 		for _, old := range r.expected.artifacts {
-			if old.configured == path && old.sample == binding.SampleSHA256 {
+			if old.configured == e.configured && old.sample == binding.SampleSHA256 {
 				found = true
 				break
 			}

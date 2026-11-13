@@ -427,14 +427,14 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 		}
 	}
 	if expected != nil {
-		if expected.build.configured != command.Bin || validateSource(expected.build) != nil {
+		if !configuredAs(expected.build.configured, command.Bin) || validateSource(expected.build) != nil {
 			return nil, modelLoadError("", "nativeBuildId", "Prepared executable changed before compilation.")
 		}
 		if err := expected.checkRecognition(ctx, rt.modelLoadOwner); err != nil {
 			return nil, modelLoadError("", "artifacts", "Prepared native recognition changed before compilation.")
 		}
 		access, err = expected.checkedAccess(ctx, access)
-		if err != nil || expected.build.configured != command.Bin {
+		if err != nil || !configuredAs(expected.build.configured, command.Bin) {
 			return nil, modelLoadError("", "artifacts", "Prepared inputs changed before compilation.")
 		}
 	}
@@ -2004,7 +2004,7 @@ func (e *Executor) previewTypedLlamaConversionExpected(ctx context.Context, st *
 			return refuse("", "artifacts", "Prepared native recognition changed before conversion.")
 		}
 		access, err = expected.checkedAccess(ctx, access)
-		if err != nil || expected.build.configured != command.Bin {
+		if err != nil || !configuredAs(expected.build.configured, command.Bin) {
 			return refuse("", "conversion", "Prepared external inputs changed before conversion.")
 		}
 	}
@@ -2023,7 +2023,7 @@ func (e *Executor) previewTypedLlamaConversionExpected(ctx context.Context, st *
 	}
 	var sourceFile sourceEvidence
 	if expected != nil {
-		if len(expected.selectors) != 1 || expected.selectors[0].configured != source {
+		if len(expected.selectors) != 1 || !configuredAs(expected.selectors[0].configured, source) {
 			return refuse("", "models-preset", "Prepared external preset selection changed.")
 		}
 		sourceFile = expected.selectors[0]
