@@ -2149,7 +2149,11 @@ unacknowledged one. One five-second timer retries the latest unacknowledged
 window, including pre-bind loss. Unchanged replay keeps the same generation.
 History has no proxy subscription RPC or history `Peer.Call` waiter and never
 uses a history-only active-write
-timeout to kill the shared parent transport. Failed gate acquisition retries;
+timeout to kill the shared parent transport. Gate acquisition never waits; a
+cycle that finds the gate busy is retried by the same timer after 250 ms
+instead of at the next five-second tick, so ordinary output on the same
+cadence (the broker's per-engine `node/set-local-backend` reconcile) cannot
+hold the window off indefinitely;
 an actual write retains its backing until its borrower completes.
 
 None of these private methods reaches local clients, peers, managers or the

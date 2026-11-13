@@ -25,6 +25,11 @@ const (
 	routingHistoryControlBytes = 131072
 	routingHistoryBytes        = 2*routingHistoryWindowBytes + routingHistoryCellBytes + 2*jsonrpc.HistoryRecordFrameBytes + jsonrpc.HistoryRecordBytes + routingHistoryControlBytes
 	routingHistoryReconcile    = 5 * time.Second
+	// A cycle that found the write gate busy retries this soon instead of at
+	// the next reconcile tick. Ordinary output on the same five-second cadence
+	// (the broker's per-engine node/set-local-backend reconcile) would
+	// otherwise meet every retry and hold the window off indefinitely.
+	routingHistoryBusyRetry = 250 * time.Millisecond
 )
 
 // A cell is fixed-width packed native scalar/tag/UTF-8 data, with no strings,
@@ -79,7 +84,7 @@ type proxyRoutingHistory struct {
 	generationLength     int
 	dirty, ready, active bool
 	acknowledged, failed bool
-	started              bool
+	started, busy        bool // busy: the last cycle lost gate acquisition; the copier owns the early retry.
 	wake, writeWake      chan struct{}
 }
 
@@ -235,6 +240,13 @@ func (h *proxyRoutingHistory) run() {
 			return
 		case <-h.wake:
 			h.reconcile(false)
+			h.mu.Lock()
+			busy := h.busy
+			h.busy = false
+			h.mu.Unlock()
+			if busy {
+				timer.Reset(routingHistoryBusyRetry)
+			}
 		case <-timer.C:
 			h.reconcile(true)
 			timer.Reset(routingHistoryReconcile)
@@ -428,12 +440,14 @@ func (h *proxyRoutingHistory) writeCycleStep(cursor *int) bool {
 	*cursor = -1
 	h.mu.Lock()
 	h.active = false
-	if err != nil && !errors.Is(err, jsonrpc.ErrHistoryBusy) {
+	if errors.Is(err, jsonrpc.ErrHistoryBusy) {
+		h.busy = true
+	} else if err != nil {
 		h.failed = true
 	}
-	dirty := h.dirty
+	wake := h.dirty || h.busy
 	h.mu.Unlock()
-	if dirty {
+	if wake {
 		routingHistoryWake(h.wake)
 	}
 	return false
