@@ -1316,7 +1316,8 @@ func (f *downloadProcessFixture) terminalConvergence(t *testing.T, models downlo
 func (f *downloadProcessFixture) authenticatedControlRead(t *testing.T) {
 	t.Helper()
 	before := f.controlCount(http.MethodGet, "/v1/engines")
-	reply := f.controller.call(t, "engine:remote-get-installed", map[string]string{"node": f.targetNode.uuid})
+	// Served from the target's engine-status stream once it has reconnected.
+	reply := f.controller.callEventually(t, "engine:remote-get-installed", map[string]string{"node": f.targetNode.uuid})
 	var inventory struct {
 		Engines []struct {
 			Engine  string `json:"engine"`
@@ -1331,8 +1332,8 @@ func (f *downloadProcessFixture) authenticatedControlRead(t *testing.T) {
 			found = true
 		}
 	}
-	if !found || f.controlCount(http.MethodGet, "/v1/engines") != before+1 {
-		t.Fatalf("replacement route did not deliver an authenticated target read: %+v", inventory)
+	if !found || f.controlCount(http.MethodGet, "/v1/engines") != before || f.controlCount(http.MethodGet, "/v1/engines/events") == 0 {
+		t.Fatalf("replacement route did not deliver the authenticated target stream: %+v", inventory)
 	}
 }
 

@@ -680,7 +680,7 @@ func TestRemoteManagementReverseRevocationBoundary(t *testing.T) {
 	a := f.engines[f.a.uuid]
 	// Inventory reconciles the fixture-owned HTTP engine's presence before an
 	// action can use it; no real executable or installed engine is adopted.
-	a.call(t, "engine:remote-get-installed", map[string]string{"node": f.b.uuid})
+	a.callEventually(t, "engine:remote-get-installed", map[string]string{"node": f.b.uuid})
 	managementSet(t, f.b.cm, f.a.uuid, false)
 	response := task2Response(t, a, a.send(t, "engine:remote-management-get", map[string]string{"nodeId": f.b.uuid}, true))
 	if response.Error != nil {
