@@ -369,7 +369,7 @@ func managedDetectionExecutable(t *testing.T, st *engineState) string {
 	st.plat.Runtime.Bin = bin
 	st.modelsDir = filepath.Join(t.TempDir(), "models")
 	st.plat.Uninstall = &Uninstall{Remove: []string{st.installDir}}
-	if err := writeInstallMarker(st.installDir, "fake"); err != nil {
+	if err := writeInstallMarker(st.installDir, installMarker{Engine: "fake"}); err != nil {
 		t.Fatal(err)
 	}
 	return bin
@@ -428,7 +428,7 @@ func TestConfiguredDetectionUninstallRefusesExternalExecutable(t *testing.T) {
 	ex, st := configuredDetectionExecutor(t)
 	removeDetectionFile(t, filepath.Join(st.installDir, "config.json"))
 	st.plat.Uninstall = &Uninstall{Remove: []string{st.installDir}}
-	if err := writeInstallMarker(st.installDir, "fake"); err != nil {
+	if err := writeInstallMarker(st.installDir, installMarker{Engine: "fake"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := ex.Uninstall(context.Background(), "fake"); err == nil || !strings.Contains(err.Error(), "outside NVPAIR") {

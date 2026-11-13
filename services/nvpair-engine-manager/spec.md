@@ -1967,7 +1967,37 @@ destination grants, Pause and recovery/admission retain their existing owners.
   install PAIR made from one the user made themselves, which an engine whose
   vendor script chooses its own destination cannot be told apart any other way,
   and it gates both `engine:uninstall` for such an engine and
-  `engine:uninstall-managed`. No database.
+  `engine:uninstall-managed`. It also records `recipe`, a SHA-256 of the pinned
+  install block (fetch or artifacts with their checksums, and `run`) that
+  produced the files, and, for a llama.cpp-family engine, `build`, the native
+  build identity of the installed payload when it was readable. No database.
+
+  **Pinned-build refresh.** `engine:install` and startup restoration
+  (`engine:restore-installed`) refresh a managed install whose marker `recipe`
+  differs from the current manifest's pinned install block. Only PAIR's own
+  pinned installs qualify: the detected executable must be inside
+  `engine-bin/<engine>`, the marker must exist, the block must be checksum-pinned
+  (never `script`), and `models_dir` must not lie inside the install directory.
+  A user-selected or override build outside the managed directory is never
+  touched. The new build is downloaded and unpacked into the sibling
+  `engine-bin/.<engine>.staging` and must pass detection there; its marker is
+  written there. Startup restoration stages before taking the engine's operation
+  lock, so settings reads are not held up by the download; `engine:install`
+  stages under it. The engine is then stopped through the same presence check
+  and stop path as `engine:uninstall`, the installed directory is renamed to
+  `engine-bin/.<engine>.previous`, and the staged directory takes its place
+  (renames retry briefly). If detection fails in place, or the new build fails
+  to start, the old directory is restored and started. The previous directory is
+  removed after the new build starts; a start skipped by a pause or veto leaves
+  detection as the only check. A refresh interrupted between the two renames is
+  repaired before the next detection by renaming the previous directory back;
+  `engine:uninstall` removes both siblings so a leftover cannot bring an
+  uninstalled engine back. Progress ends with `done` after a refresh, or
+  `failed` when it is abandoned; a failed refresh keeps the installed build,
+  which starts as before, and reports the warning
+  `engine-manager:install-refresh-failed:<engine>`. A marker written before
+  `recipe` existed counts as stale, so the first startup after this change
+  re-downloads the pinned build once.
 
 ## 11. Assumptions
 - The orchestrator owns the stdio/IPC pipe and is the only peer; on parent exit (stdin EOF) the service shuts down cleanly — no reconnect or buffering.

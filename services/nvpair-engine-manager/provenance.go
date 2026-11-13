@@ -5,10 +5,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
+
+	"nvpair-shared/durablefile"
 )
 
 // installMarkerName records that this service, rather than the user, performed
@@ -28,6 +31,13 @@ const installMarkerName = "installed-by-pair.json"
 type installMarker struct {
 	Engine      string `json:"engine"`
 	InstalledAt string `json:"installed_at"`
+	// Recipe is installRecipeID of the pinned install block that produced the
+	// files. A different recipe in the current manifest marks the managed
+	// install stale; an empty one (a script install) is never refreshed.
+	Recipe string `json:"recipe,omitempty"`
+	// Build is the native build identity of the installed llama.cpp payload,
+	// from the same owner that identifies a running build, when it was readable.
+	Build string `json:"build,omitempty"`
 }
 
 // uninstallManagedTimeout bounds the whole --uninstall-managed pass: the
@@ -47,7 +57,7 @@ func installMarkerPath(installDir string) string {
 // writeInstallMarker claims an install. Called only after an install this
 // service actually performed and detected — never on the adoption paths, which
 // return before any install work happens.
-func writeInstallMarker(installDir, engine string) error {
+func writeInstallMarker(installDir string, marker installMarker) error {
 	path := installMarkerPath(installDir)
 	if path == "" {
 		return nil
@@ -55,10 +65,25 @@ func writeInstallMarker(installDir, engine string) error {
 	if err := os.MkdirAll(installDir, 0o755); err != nil {
 		return err
 	}
-	return writeJSONAtomic(path, installMarker{
-		Engine:      engine,
-		InstalledAt: time.Now().UTC().Format(time.RFC3339),
-	})
+	marker.InstalledAt = time.Now().UTC().Format(time.RFC3339)
+	return writeJSONAtomic(path, marker)
+}
+
+// readInstallMarker returns the claim in installDir, if one is readable.
+func readInstallMarker(installDir string) (installMarker, bool) {
+	path := installMarkerPath(installDir)
+	if path == "" {
+		return installMarker{}, false
+	}
+	data, err := durablefile.ReadFile(path)
+	if err != nil {
+		return installMarker{}, false
+	}
+	var marker installMarker
+	if json.Unmarshal(data, &marker) != nil {
+		return installMarker{}, false
+	}
+	return marker, true
 }
 
 // clearInstallMarker drops the claim after an uninstall. An engine whose

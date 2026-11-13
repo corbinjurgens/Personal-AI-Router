@@ -278,13 +278,33 @@ func (e *Executor) restoreInstalled(ctx context.Context, engine string) error {
 	if err := prepareStrataState(ctx, st); err != nil {
 		return err
 	}
+	// A PAIR upgrade may have moved this engine's pin. Download and stage the
+	// new build before taking opMu, so settings reads that need opMu are not
+	// held up by the download. A failed refresh keeps the installed build,
+	// which starts as before.
+	staged := false
+	if installed, _ := e.Detect(engine); installed && e.managedInstallStale(st) {
+		staged = e.stageManagedRefresh(ctx, st, engine)
+	}
 	st.opMu.Lock()
 	defer st.opMu.Unlock()
+	e.recoverInterruptedRefresh(engine, st)
 	installed, err := e.Detect(engine)
 	if err != nil || !installed {
 		return err
 	}
-	err = e.doStart(ctx, st, engine, startOpts{ReclaimOwned: true})
+	var finish refreshFinish
+	if staged && e.managedInstallStale(st) {
+		finish = e.swapManagedRefresh(ctx, st, engine)
+	} else if staged {
+		staging, _ := e.refreshDirs(engine)
+		_ = os.RemoveAll(staging)
+	}
+	start := func() error { return e.doStart(ctx, st, engine, startOpts{ReclaimOwned: true}) }
+	err = start()
+	if finish != nil {
+		err = finish(err, start)
+	}
 	st.mu.Lock()
 	st.restoreApprovalRefused = isStaleApproval(err)
 	st.mu.Unlock()

@@ -21,6 +21,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -162,6 +163,23 @@ func main() {
 			}
 			data, err := json.Marshal(os.Args[3:])
 			if err != nil || os.WriteFile(os.Args[2], data, 0o600) != nil {
+				os.Exit(1)
+			}
+			return
+		case "installbuild": // install this executable plus a build label into a directory
+			if len(os.Args) < 4 {
+				os.Exit(2)
+			}
+			self, err := os.Executable()
+			if err != nil {
+				os.Exit(1)
+			}
+			image, err := os.ReadFile(self)
+			if err != nil || os.WriteFile(filepath.Join(os.Args[2], filepath.Base(self)), image, 0o755) != nil {
+				os.Exit(1)
+			}
+			label, err := os.ReadFile(os.Args[3])
+			if err != nil || os.WriteFile(filepath.Join(os.Args[2], "build.txt"), label, 0o644) != nil {
 				os.Exit(1)
 			}
 			return

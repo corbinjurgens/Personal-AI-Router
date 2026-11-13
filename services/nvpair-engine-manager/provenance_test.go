@@ -17,7 +17,7 @@ func TestInstallMarkerRoundTrip(t *testing.T) {
 	if installedByPAIR(installDir) {
 		t.Fatal("an install directory that does not exist cannot be ours")
 	}
-	if err := writeInstallMarker(installDir, "llamacpp"); err != nil {
+	if err := writeInstallMarker(installDir, installMarker{Engine: "llamacpp"}); err != nil {
 		t.Fatalf("writeInstallMarker: %v", err)
 	}
 	if !installedByPAIR(installDir) {
@@ -103,7 +103,7 @@ func TestUninstallManagedRemovesOnlyWhatPAIRInstalled(t *testing.T) {
 	}
 
 	installDir := filepath.Join(ex.baseDir, "vendor")
-	if err := writeInstallMarker(installDir, "vendor"); err != nil {
+	if err := writeInstallMarker(installDir, installMarker{Engine: "vendor"}); err != nil {
 		t.Fatal(err)
 	}
 	results = ex.UninstallManaged(context.Background())
@@ -137,7 +137,7 @@ func TestUninstallManagedKeepsTheMarkerWhenRemovalFails(t *testing.T) {
 	// No remove targets, so the engine is still detected afterwards.
 	ex := managedExecutor(t, baseDir, vendorEngineManifest(vendorRoot, filepath.Join(vendorRoot, "models"), nil))
 	installDir := filepath.Join(ex.baseDir, "vendor")
-	if err := writeInstallMarker(installDir, "vendor"); err != nil {
+	if err := writeInstallMarker(installDir, installMarker{Engine: "vendor"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -200,7 +200,7 @@ func TestUninstallManagedCarriesOnPastAPartialRemoval(t *testing.T) {
 	ex := NewExecutor(reg, NewReporter(nil), func(string, any) {}, baseDir)
 	ex.detectTimeout = 100 * time.Millisecond
 	for _, engine := range []string{stuck.Engine, clean.Engine} {
-		if err := writeInstallMarker(filepath.Join(ex.baseDir, engine), engine); err != nil {
+		if err := writeInstallMarker(filepath.Join(ex.baseDir, engine), installMarker{Engine: engine}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -260,7 +260,7 @@ func TestUninstallClearsTheMarkerWhenAlreadyGone(t *testing.T) {
 	vendorRoot := filepath.Join(baseDir, "vendor") // nothing laid down, so detection fails
 	ex := managedExecutor(t, baseDir, vendorEngineManifest(vendorRoot, filepath.Join(vendorRoot, "models"), []string{filepath.Join(vendorRoot, "bin")}))
 	installDir := filepath.Join(ex.baseDir, "vendor")
-	if err := writeInstallMarker(installDir, "vendor"); err != nil {
+	if err := writeInstallMarker(installDir, installMarker{Engine: "vendor"}); err != nil {
 		t.Fatal(err)
 	}
 
