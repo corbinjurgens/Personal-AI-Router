@@ -85,6 +85,22 @@ Field notes:
 - All dynamic fields and the `cpu` / `memory` objects use `omitempty`: a value the service couldn't read is dropped from the JSON entirely rather than reported as a misleading literal zero. A genuinely idle CPU renders the same as "unknown" — that ambiguity is intentional and benign.
 - `vram_bytes` is reported through DXGI on Windows, `nvidia-smi` on Linux, and IORegistry on macOS. On a unified-memory NVIDIA GPU such as DGX Spark, Linux uses total physical system memory for `vram_bytes` and the independently sampled system-memory usage for `vram_used_bytes`. On Apple Silicon, `vram_bytes` is total physical unified memory and `vram_used_bytes` is the GPU driver's mapped allocation (`Alloc system memory`), not whole-system RAM usage or the momentarily active subset.
 
+### Telemetry stream: `GET /v1/node-info/events`
+
+An NDJSON stream (`application/x-ndjson`, `Cache-Control: no-store`) of node-info frames, served on the same listeners as `GET /v1/node-info`.
+
+- **Access:** the same rule as `GET /v1/node-info`. Without `--cluster-dir`, as under the broker, any caller is served over plain HTTP. In the cluster-gated mode, while this node is a member, only pinned cluster peers (or this node itself) are admitted and others get `403`. The rule is rechecked before every frame, keepalives included, so a removed pin or a membership change ends an open stream at its next line.
+- **Caps:** at most 64 streams in total and 8 from one non-loopback remote address; beyond either the request gets `503 too many node-info streams`. Loopback callers (reverse-session streams relayed by the local cluster manager) count only against the total.
+- **Frames:** each frame is exactly a `GET /v1/node-info` body, so both decode the same way; ages (`msSince`, memory-observation `ageMs`) are as of the frame's build time. The first frame is the current sample, sent on connect. A sample is evaluated once per second and a new frame is sent when, compared with the last frame:
+  - a static field differs: `serviceBuildId`, `hostUuid`, `clusterUuid` (absent, empty and a value are three states), CPU name or cores, memory total, the GPU list (length, and each GPU's name, physical ID and VRAM total), or the memory observation's run ID or ordered domain IDs;
+  - `telemetryValid` differs, or a memory-observation fact's `valid` flag differs;
+  - any GPU's `utilization_percent` moves by 5 points or more, or `cpu.utilization_percent` by 10 points or more;
+  - any GPU's `vram_used_bytes`, or `memory.used_bytes`, moves by at least max(64 MiB, 1 % of that GPU's `vram_bytes` or of `memory.total_bytes`);
+  - the `cpu` or `memory` object appears or disappears.
+- **Keepalive:** a `null` line every 2 s means "the current sample is still within the thresholds of the last frame". A consumer can treat the last frame as current as of each keepalive.
+- **Consumers:** the stream is meant for the node-scanner's reads of paired peers; manual nodes and unpaired callers keep using `GET /v1/node-info`.
+- **Shutdown:** an open stream holds node-info's graceful shutdown for its full 3 s timeout. This is accepted; there is no stream-specific shutdown path.
+
 ## Discovery
 
 The service no longer advertises itself over mDNS. Its parent (the broker) registers the `ni` port with the `nvpair-node-scanner` discovery daemon, which carries it on this node's single `_nvpair-node` record; a peer's daemon then fetches `/v1/node-info` over plain HTTP to enrich the node. Transport is derived from the shared per-service policy (`nvpair-shared/noderec`): node-info is served plain on the broker path. The standalone BYO-TLS / `--cluster-dir` mTLS serving above is retained for running node-info on its own, but is unused under the broker.
