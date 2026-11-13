@@ -572,7 +572,7 @@ describe('routing history schema parity', () => {
         const packed = bank.at(0).slice()
         expect(packed.byteLength).toBe(packed.buffer.byteLength)
         expect(packed.byteLength + 4096).toBeLessThanOrEqual(135168)
-        expect(bank.capacity).toEqual({ windowBytes: 16777216, controlBytes: 2176 })
+        expect(bank.capacity).toEqual({ windowBytes: 16777216, controlBytes: 3200 })
         expect(
             bank.consume(0, row => {
                 expect(row).toEqual(value)
@@ -976,5 +976,47 @@ describe('routing history raw projection', () => {
             expect(value.seq).toBe(3)
             return undefined
         })
+    })
+})
+
+describe('routing history bank storage', () => {
+    // clear and copyFrom touch only the bytes each cell has held. Read the
+    // private window directly: no public read shows bytes past a record's length.
+    const windowOf = (bank: RoutingHistoryBank): Uint8Array => bank['data']
+    const firstDifference = (a: Uint8Array, b: Uint8Array): number => {
+        if (a.byteLength !== b.byteLength) return 0
+        for (let i = 0; i < a.byteLength; i++) if (a[i] !== b[i]) return i
+        return -1
+    }
+    const version = (seq: number, model: string): Uint8Array => {
+        const record: RoutingHistoryRecord = JSON.parse(JSON.stringify(corpus.cases[0].record))
+        record.seq = seq
+        record.requested.model = model
+        return encoded(record)
+    }
+
+    it('copies and clears the bytes a shorter replacement left behind', () => {
+        const source = new RoutingHistoryBank(),
+            destination = new RoutingHistoryBank()
+        expect(source.apply(version(3, 'm'.repeat(48)))).toBe(true)
+        expect(source.apply(version(4, 'm'))).toBe(true)
+        expect(destination.apply(version(3, 'd'.repeat(64)))).toBe(true)
+
+        destination.copyFrom(source)
+        expect(firstDifference(windowOf(destination), windowOf(source))).toBe(-1)
+        expect(
+            destination.consume(0, row => {
+                expect(row.seq).toBe(4)
+                expect(row.requested.model).toBe('m')
+                return undefined
+            })
+        ).toBe(true)
+
+        const empty = new Uint8Array(windowOf(source).byteLength)
+        source.clear()
+        destination.clear()
+        expect(firstDifference(windowOf(source), empty)).toBe(-1)
+        expect(firstDifference(windowOf(destination), empty)).toBe(-1)
+        expect([source.size, destination.size]).toEqual([0, 0])
     })
 })

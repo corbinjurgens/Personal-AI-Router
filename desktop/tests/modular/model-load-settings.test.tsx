@@ -197,6 +197,7 @@ beforeEach(() => {
     root = createRoot(container)
 })
 afterEach(async () => {
+    vi.useRealTimers()
     await act(async () => root.unmount())
     container.remove()
     vi.unstubAllGlobals()
@@ -808,6 +809,10 @@ describe('load editor and target impact', () => {
         ).toEqual({ set: {}, clear: ['slots'] })
     })
     it('keeps Apply disabled after actual not-ready refusal, even with supported controls', async () => {
+        // An edit schedules a 250 ms background estimate that also calls review.
+        // Hold timers so only the explicit Preview click reaches it, however long
+        // the run takes between the edit and the click.
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
         await render()
         await input('Slots', '2')
         await click('Preview model changes')

@@ -38,8 +38,9 @@ func redirectConfigDir(t *testing.T) {
 //
 // A bind probe cannot be held open and handed over, so the port is genuinely
 // free when checked and may not be by the time a facade binds it. Callers that
-// can tolerate a retry should use one — see enableOnFreePort in
-// twofacade_test.go — because this helper cannot close that window.
+// can tolerate a retry should use one — see setPortOnFreePort below and
+// enableOnFreePort in twofacade_test.go — because this helper cannot close
+// that window.
 func freeTCPPort(t *testing.T) int {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
@@ -48,6 +49,37 @@ func freeTCPPort(t *testing.T) int {
 	}
 	defer l.Close()
 	return l.Addr().(*net.TCPAddr).Port
+}
+
+// listenFreePort binds the listener a facade starts on, on an ephemeral port,
+// and returns it with that port. Binding first and reading the port back leaves
+// no window for another program to take it, which freeTCPPort cannot avoid.
+func listenFreePort(t *testing.T, host string) (net.Listener, int) {
+	t.Helper()
+	ln, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
+	if err != nil {
+		t.Fatalf("listen on a free port: %v", err)
+	}
+	return ln, ln.Addr().(*net.TCPAddr).Port
+}
+
+// setPortOnFreePort moves f to a freshly probed port and returns the port with
+// setPort's result. setPort binds by number, so the probed port can be taken
+// before that bind; a bind failure is retried on another port, like
+// enableOnFreePort does for enable. Any other result is returned as is.
+func setPortOnFreePort(t *testing.T, f *facade) (int, error) {
+	t.Helper()
+	var lastErr error
+	for attempt := 0; attempt < 8; attempt++ {
+		port := freeTCPPort(t)
+		err := f.setPort(port)
+		if err == nil || !strings.HasPrefix(err.Error(), "failed to bind port") {
+			return port, err
+		}
+		lastErr = err
+	}
+	t.Fatalf("set-port: every probed port was taken before the bind: %v", lastErr)
+	return 0, nil
 }
 
 // Each engine persists to its own file, so one engine's saved port can never
@@ -86,14 +118,10 @@ func TestSetPortPersistenceBoundary(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			redirectConfigDir(t)
 			tc := anyCase(t)
-			portA := freeTCPPort(t)
+			ln, portA := listenFreePort(t, "127.0.0.1")
 			writer := &recordingWriter{}
 			p := newTestProxy(tc.profile, NewCodec(writer), NewDiscovery(), portA)
 			f := p.soleFacade()
-			ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", portA))
-			if err != nil {
-				t.Fatalf("listen on old port: %v", err)
-			}
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			f.serveHTTP(ctx, ln)
@@ -108,8 +136,7 @@ func TestSetPortPersistenceBoundary(t *testing.T) {
 			} else {
 				f.portFiles.Replace = func(string, string) error { boundaryCalls++; return injected }
 			}
-			portB := freeTCPPort(t)
-			err = f.setPort(portB)
+			portB, err := setPortOnFreePort(t, f)
 			if !errors.Is(err, injected) || errors.Is(err, durablefile.ErrReplaced) != replaced || boundaryCalls != 1 {
 				t.Fatalf("setPort error=%v, boundary calls=%d; want injected failure with replaced=%v", err, boundaryCalls, replaced)
 			}
@@ -187,20 +214,16 @@ func TestSetPortRebinds(t *testing.T) {
 		codec := NewCodec(buf)
 		disc := NewDiscovery()
 
-		portA := freeTCPPort(t)
+		lnA, portA := listenFreePort(t, "")
 		proxy := newTestProxy(tc.profile, codec, disc, portA)
 
-		lnA, err := net.Listen("tcp", fmt.Sprintf(":%d", portA))
-		if err != nil {
-			t.Fatalf("listen on port A: %v", err)
-		}
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		proxy.soleFacade().serveHTTP(ctx, lnA)
 		defer proxy.shutdown(context.Background())
 
-		portB := freeTCPPort(t)
-		if err := proxy.soleFacade().setPort(portB); err != nil {
+		portB, err := setPortOnFreePort(t, proxy.soleFacade())
+		if err != nil {
 			t.Fatalf("setPort: %v", err)
 		}
 
@@ -233,12 +256,8 @@ func TestSetPortRebinds(t *testing.T) {
 func TestSetPortPersistenceFailurePreservesListener(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, tc engineCase) {
 		redirectConfigDir(t)
-		portA := freeTCPPort(t)
+		ln, portA := listenFreePort(t, "")
 		proxy := newTestProxy(tc.profile, NewCodec(&bytes.Buffer{}), NewDiscovery(), portA)
-		ln, err := net.Listen("tcp", fmt.Sprintf(":%d", portA))
-		if err != nil {
-			t.Fatal(err)
-		}
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		proxy.soleFacade().serveHTTP(ctx, ln)
@@ -250,8 +269,8 @@ func TestSetPortPersistenceFailurePreservesListener(t *testing.T) {
 		if err := os.MkdirAll(path, 0700); err != nil {
 			t.Fatal(err)
 		}
-		portB := freeTCPPort(t)
-		if err := proxy.soleFacade().setPort(portB); err == nil {
+		portB, err := setPortOnFreePort(t, proxy.soleFacade())
+		if err == nil {
 			t.Fatal("persistence failure reported success")
 		}
 		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", portA), time.Second)

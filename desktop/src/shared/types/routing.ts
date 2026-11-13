@@ -1169,6 +1169,10 @@ export function routingHistoryRecords(
 export class RoutingHistoryBank {
     private readonly data = new Uint8Array(256 * cellBytes)
     private readonly lengths = new Uint32Array(256)
+    // Bytes each cell has held since the last clear. Everything past a cell's
+    // extent is zero, so clear and copyFrom touch only those bytes and still
+    // leave exactly what filling or copying the whole window would.
+    private readonly extents = new Uint32Array(256)
     private readonly order = new Uint16Array(256)
     private readonly incoming = new Uint8Array(headerBytes)
     private readonly floor = new Uint8Array(headerBytes)
@@ -1177,7 +1181,10 @@ export class RoutingHistoryBank {
 
     clear(): void {
         if (outputLoan) throw new Error('history-busy')
-        this.data.fill(0)
+        for (let slot = 0; slot < 256; slot++)
+            if (this.extents[slot])
+                this.data.fill(0, slot * cellBytes, slot * cellBytes + this.extents[slot])
+        this.extents.fill(0)
         this.lengths.fill(0)
         this.count = 0
         this.hasFloor = false
@@ -1191,6 +1198,7 @@ export class RoutingHistoryBank {
             windowBytes: this.data.byteLength,
             controlBytes:
                 this.lengths.byteLength +
+                this.extents.byteLength +
                 this.order.byteLength +
                 this.incoming.byteLength +
                 this.floor.byteLength
@@ -1198,7 +1206,12 @@ export class RoutingHistoryBank {
     }
     copyFrom(source: RoutingHistoryBank): void {
         if (outputLoan) throw new Error('history-busy')
-        this.data.set(source.data)
+        for (let slot = 0; slot < 256; slot++) {
+            const start = slot * cellBytes,
+                end = start + Math.max(this.extents[slot], source.extents[slot])
+            if (end > start) this.data.set(source.data.subarray(start, end), start)
+        }
+        this.extents.set(source.extents)
         this.lengths.set(source.lengths)
         this.order.set(source.order)
         this.floor.set(source.floor)
@@ -1294,6 +1307,7 @@ export class RoutingHistoryBank {
         this.header(slot).set(this.incoming)
         this.data.set(scratch.subarray(0, packedPosition), slot * cellBytes + headerBytes)
         this.lengths[slot] = packedPosition
+        this.extents[slot] = Math.max(this.extents[slot], headerBytes + packedPosition)
         // Bounded insertion sort of scalar slot indices.
         for (let i = 1; i < this.count; i++) {
             const entry = this.order[i]

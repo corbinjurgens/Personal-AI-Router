@@ -492,8 +492,10 @@ func (m *Manager) runDiagnosticOperation(op *modelDiagnosticOperation, cleanupOn
 			e.mutationAdmission.Lock()
 			op.failedPhase = op.status.Phase
 			op.outcome, op.reason = "failed", diagnosticFailureReason(err)
+			// A cancelled run's later reads fail on its ended context, and some
+			// of them report that as an identity refusal; cancellation decides.
 			if errors.Is(err, context.Canceled) || errors.Is(context.Cause(op.ctx), context.Canceled) {
-				op.outcome = "cancelled"
+				op.outcome, op.reason = "cancelled", "cancelled"
 			}
 			e.mutationAdmission.Unlock()
 		}
