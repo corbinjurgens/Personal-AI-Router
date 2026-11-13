@@ -978,10 +978,11 @@ link-local and scoped addresses. Complete parsing, clean EOF and exact self
 identity are required before publishing anything. The serving endpoint requires
 current mutual admission and the exact pinned requester certificate.
 
-Refreshes retry every two seconds, with at most four network reads and one
-fetch/publish per peer in flight; each refresh has an eight-second overall budget.
-The original shared Mesh incarnation (both certificates and admission epochs)
-is captured before the read and checked again after the complete response.
+Each member has at most one peer-state stream open; a stream that fails or
+ends is reopened with the member's reconnect backoff (1 s doubling to 30 s,
+with jitter). The original shared Mesh incarnation (both certificates and
+admission epochs) is captured before the stream opens and checked again
+before each frame's descriptor is committed.
 The manager emits private `cluster:peer-services` metadata with that original
 token, a process source identity, receiver-owned sequence and observation time.
 The broker binds delivery to its current manager child and relays only through
@@ -1032,12 +1033,15 @@ confirmation or concurrent bounded TCP probes, selecting by published rank;
 `confirmedFirst` moves that result ahead of the remaining descriptor attempts.
 TCP acceptance alone supplies no certificate, admission or service authority.
 
-Each descriptor attempt receives an equal share of the remaining parent time
-among remaining endpoints. Its child context covers direct/reverse setup, TLS,
-headers, complete body and EOF. Transport or child-deadline failure closes and
-cancels the attempt, forgets the stale chooser result and advances while the
-parent remains live. Complete invalid descriptors fail without learning or
-publication. Parent cancellation ends the walk, including an in-flight chooser
+Each stream attempt walks the endpoints in that order. An eight-second
+watchdog per endpoint (a cancel timer, not a context deadline, so an opened
+reverse stream is not cut) covers direct/reverse setup, TLS and response
+headers. A transport failure, watchdog expiry or unexpected status cancels the
+attempt, forgets the stale chooser result and advances to the next endpoint;
+403, 503 and an opened stream end the walk. Once open, a stream has no total
+deadline and ends after 25 seconds without a line. Each line is decoded
+strictly; an invalid frame ends the stream without learning or publication.
+Parent cancellation ends the walk, including an in-flight chooser
 confirmation wait. An abandoned confirmation installs neither a settled result
 nor a negative cooldown; the chooser retains its published-address fallback.
 Its timeout-only `DialFunc` cannot cancel an already-running OS connect:

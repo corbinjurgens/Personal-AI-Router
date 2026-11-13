@@ -720,9 +720,10 @@ project their existing fields. The HTTP descriptor remains a separate strict
 After restart, the resolver combines the recorded member endpoint, Browser
 endpoints with their own port, and bounded persisted hints with the member
 port, preserving order and deduplicating endpoints without prefix truncation.
-TCP chooser confirmation precedes authentication. A descriptor refresh keeps
-an eight-second parent budget and divides remaining time across complete
-remaining attempts, including TLS/setup, headers, body and EOF. Cancellation
+TCP chooser confirmation precedes authentication. A peer-state stream attempt
+gives each endpoint an eight-second watchdog for TLS/setup and response
+headers; an open stream has no total deadline and ends after 25 seconds
+without a line, and each line is decoded strictly. Cancellation
 interrupts the chooser wait without caching an abandoned result or negative
 cooldown. Timeout-only probes already running may finish later and close their
 connections; OS connects are not promised immediate cancellation.
@@ -734,9 +735,9 @@ snapshot. Losing authenticated authority clears only that claim, retaining an
 independent browse record when present. Normal discovery events update every
 existing subscriber and all public reads use that same directory.
 
-Refreshes serialize per peer, retry with bounded concurrency and time, and
-reconstruct state after worker restart. Successful observations expire after
-30 seconds without refresh; route failure cannot renew them or remove durable
+Each peer has one long-lived stream, reopened with exponential backoff, and
+state is reconstructed after worker restart. Every frame and 10-second
+keepalive renews the observation; it expires after 30 seconds without one; route failure cannot renew them or remove durable
 membership. Leave, removal and same-certificate re-pair invalidate old work.
 Descriptor metadata does not establish liveness, trust or membership, and cannot
 select protocol, filesystem state or a tunnel's local target. Remote loopback,
