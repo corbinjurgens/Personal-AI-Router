@@ -309,7 +309,7 @@ func modelIdentityConfiguredContext(snapshot modelInspectionSnapshot, model stri
 	}
 	if preset != "" && list.source != nil {
 		for _, selector := range list.source.selectors {
-			if selector.file.configured != preset {
+			if !configuredAs(selector.file.configured, preset) {
 				continue
 			}
 			sections, err := readLlamaArtifactPreset(selector.bytes)

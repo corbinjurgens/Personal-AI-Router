@@ -592,7 +592,7 @@ func deriveStrataServingExpected(ctx context.Context, command launchCommand, rt 
 		} else {
 			var ok bool
 			file, ok = expected.artifacts[path]
-			if !ok || file.configured != path {
+			if !ok || !configuredAs(file.configured, path) {
 				return nil, servingError("Missing prepared Strata artifact evidence.")
 			}
 			err = validateSource(file)
@@ -619,7 +619,7 @@ func deriveStrataServingExpected(ctx context.Context, command launchCommand, rt 
 				}
 			} else {
 				file, ok = expected.artifacts[path]
-				if !ok || file.configured != path || validateSource(file) != nil {
+				if !ok || !configuredAs(file.configured, path) || validateSource(file) != nil {
 					return sourceEvidence{}, servingError("Missing prepared Strata selector evidence.")
 				}
 			}
@@ -638,7 +638,7 @@ func deriveStrataServingExpected(ctx context.Context, command launchCommand, rt 
 		return file, nil
 	}
 	file, err := selector(source)
-	if err != nil || (expected != nil && expected.source.configured != source) {
+	if err != nil || (expected != nil && !configuredAs(expected.source.configured, source)) {
 		return nil, servingError("Missing declared Strata config evidence.")
 	}
 	evidence.source = file

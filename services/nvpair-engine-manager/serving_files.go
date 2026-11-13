@@ -98,6 +98,14 @@ func captureSource(path string, directory bool) (sourceEvidence, error) {
 		directory: true, size: info.Size(), mtime: info.ModTime().UnixNano()}, nil
 }
 
+// configuredAs reports whether captured evidence, whose configured path is
+// absolute and cleaned, was captured for this configured spelling. Windows
+// configurations may name a file with forward slashes.
+func configuredAs(configured, path string) bool {
+	path, err := filepath.Abs(path)
+	return err == nil && configured == path
+}
+
 func sameSource(a, b os.FileInfo, directory bool) bool {
 	return artifactbinding.Same(a, b, directory)
 }

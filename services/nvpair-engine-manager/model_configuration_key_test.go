@@ -840,3 +840,27 @@ func TestModelConfigurationKeyMissingTopologyDoesNotChangePool(t *testing.T) {
 		})
 	}
 }
+
+// A configuration may spell the executable and preset with forward slashes or
+// redundant segments (White's override). Conversion, typed compilation and the
+// applied configuration key match captured evidence by the absolute path.
+func TestModelConfigurationKeyAcceptsNonCanonicalExecutableSpelling(t *testing.T) {
+	spelled := func(path string) string {
+		return filepath.ToSlash(filepath.Dir(path)) + "/./" + filepath.Base(path)
+	}
+	f := newAppliedKeyFixture(t, func(f inspectionFixture) {
+		f.st.plat.Runtime.Bin = spelled(f.st.plat.Runtime.Bin)
+		f.st.binPath = f.st.plat.Runtime.Bin
+		f.st.plat.Runtime.Args = []string{"--models-preset", spelled(f.preset)}
+	})
+	if !strings.Contains(f.st.plat.Runtime.Bin, "/./") {
+		t.Fatalf("fixture lost the non-canonical executable spelling: %q", f.st.plat.Runtime.Bin)
+	}
+	f.ex.modelEstimates.run = func(context.Context, modelEstimateInput) modelconfig.Estimate {
+		return modelconfig.Estimate{Status: "unknown"}
+	}
+	result := inspectAppliedKeyFixture(t, f)
+	if result.Status != "resolved" || result.ConfigurationKey == "" || result.ConfigurationKeyReason != "" {
+		t.Fatalf("inspection = status %q reason %q keyReason %q key %q", result.Status, result.Reason, result.ConfigurationKeyReason, result.ConfigurationKey)
+	}
+}

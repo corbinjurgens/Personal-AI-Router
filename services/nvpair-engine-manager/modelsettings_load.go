@@ -427,14 +427,14 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 		}
 	}
 	if expected != nil {
-		if expected.build.configured != command.Bin || validateSource(expected.build) != nil {
+		if !configuredAs(expected.build.configured, command.Bin) || validateSource(expected.build) != nil {
 			return nil, modelLoadError("", "nativeBuildId", "Prepared executable changed before compilation.")
 		}
 		if err := expected.checkRecognition(ctx, rt.modelLoadOwner); err != nil {
 			return nil, modelLoadError("", "artifacts", "Prepared native recognition changed before compilation.")
 		}
 		access, err = expected.checkedAccess(ctx, access)
-		if err != nil || expected.build.configured != command.Bin {
+		if err != nil || !configuredAs(expected.build.configured, command.Bin) {
 			return nil, modelLoadError("", "artifacts", "Prepared inputs changed before compilation.")
 		}
 	}
@@ -483,7 +483,7 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 	}
 	nativeSource := ""
 	reviewedSource := func(command launchCommand) (string, error) {
-		if command.Bin != buildEvidence.configured || validateSource(buildEvidence) != nil {
+		if !configuredAs(buildEvidence.configured, command.Bin) || validateSource(buildEvidence) != nil {
 			return "", modelLoadError("", "nativeBuildId", "Native executable changed during compilation.")
 		}
 		source, current, err := modelReviewedNativeSourceExpected(ctx, st, command, access, buildEvidence, libraries)
@@ -1937,7 +1937,7 @@ func (e *Executor) validateTypedLlamaConversion(ctx context.Context, st *engineS
 		if load.Resolved == nil || !strings.HasPrefix(load.Resolved.ResolverRevision, "auto/") {
 			continue
 		}
-		if convertedCommand.Bin != conversion.inputs.build.configured || validateSource(conversion.inputs.build) != nil {
+		if !configuredAs(conversion.inputs.build.configured, convertedCommand.Bin) || validateSource(conversion.inputs.build) != nil {
 			return nil, modelLoadError(load.ProfileKey, "nativeBuildId", "Native executable changed during conversion.")
 		}
 		current, libraries, err := modelReviewedNativeSourceExpected(ctx, st, convertedCommand, servingFileAccess{}, conversion.inputs.build, conversion.inputs.libraries)
@@ -2004,7 +2004,7 @@ func (e *Executor) previewTypedLlamaConversionExpected(ctx context.Context, st *
 			return refuse("", "artifacts", "Prepared native recognition changed before conversion.")
 		}
 		access, err = expected.checkedAccess(ctx, access)
-		if err != nil || expected.build.configured != command.Bin {
+		if err != nil || !configuredAs(expected.build.configured, command.Bin) {
 			return refuse("", "conversion", "Prepared external inputs changed before conversion.")
 		}
 	}
@@ -2023,7 +2023,7 @@ func (e *Executor) previewTypedLlamaConversionExpected(ctx context.Context, st *
 	}
 	var sourceFile sourceEvidence
 	if expected != nil {
-		if len(expected.selectors) != 1 || expected.selectors[0].configured != source {
+		if len(expected.selectors) != 1 || !configuredAs(expected.selectors[0].configured, source) {
 			return refuse("", "models-preset", "Prepared external preset selection changed.")
 		}
 		sourceFile = expected.selectors[0]
