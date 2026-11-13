@@ -23,6 +23,13 @@ import (
 
 const settingsPath = "/v1/engine-settings/"
 
+// settingsStreamKeepalive is the idle keepalive on a peer settings stream. A
+// var so tests can shorten it; production never changes it.
+var settingsStreamKeepalive = 10 * time.Second
+
+// settingsStreamIdle drops a subscription after this long without a line.
+const settingsStreamIdle = 25 * time.Second
+
 func (s *controlServer) settingsRoutes() []controlRoute {
 	return []controlRoute{
 		{settingsPath + "set-stated-memory", http.MethodPost, controlMutation, "settings-set-stated-memory", s.settingsProfileHandler("set-stated-memory")},
@@ -241,7 +248,7 @@ func (s *controlServer) streamSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	defer closeSub()
 	clustertrust.ServeSnapshotStream(w, r, clustertrust.SnapshotStreamServer[[]settings.Snapshot]{
-		Keepalive:    time.Second,
+		Keepalive:    settingsStreamKeepalive,
 		WriteTimeout: 5 * time.Second,
 		Authorize: func() bool {
 			s.mesh.Refresh()
@@ -393,8 +400,7 @@ func (m *Manager) consumeSettingsStream(parent context.Context, peer ecPeer) {
 			live.VerifyPeerCertificate([][]byte{response.TLS.PeerCertificates[0].Raw}, nil) == nil
 	}
 	_ = clustertrust.ReadSnapshotStream(ctx, cancel, response.Body, clustertrust.SnapshotStreamClient[[]settings.Snapshot]{
-		Idle:    15 * time.Second,
-		Recheck: time.Second,
+		Idle:    settingsStreamIdle,
 		MaxLine: 256 * 1024,
 		Current: current,
 		Decode: func(b []byte) ([]settings.Snapshot, error) {
