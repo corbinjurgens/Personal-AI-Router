@@ -32,30 +32,79 @@ const modelsStreamPath = "/v1/models/events"
 var errInvalidModelsFrame = errors.New("models stream frame is not a valid inventory document")
 
 // runModelsStream keeps one models stream to hostUUID open until ctx ends.
-// Each ended attempt takes the failed-fetch path once, so a peer whose stream
-// is down loses download freshness as a failed fetch did. A supervisor cancel
-// skips it: the node is no longer a stream peer and the 15 s refresh owns it.
-func (d *daemon) runModelsStream(ctx context.Context, hostUUID string, _ uint64) {
+// Each ended attempt takes the failed-fetch path once, guarded like a fetch by
+// the node's address, em port and route generation at the attempt's start: a
+// peer whose stream is down loses download freshness as a failed fetch did,
+// while a stream ended by a route change leaves that to the next attempt. A
+// supervisor cancel skips it: the node is no longer a stream peer and the 15 s
+// refresh owns it.
+func (d *daemon) runModelsStream(ctx context.Context, hostUUID string, id uint64) {
+	var guardIP string
+	var emPort int
+	var generation uint64
+	var guarded bool
 	runPeerStream(ctx, func(ctx context.Context) bool {
+		generation = d.dir.routeGeneration(hostUUID)
+		node, found := d.dir.get(hostUUID)
+		em, advertised := node.Services[noderec.ServiceEngineManager]
+		guardIP, emPort, guarded = node.IP, em.Port, found && advertised
 		return d.streamPeerOnce(hostUUID, noderec.ServiceEngineManager, func(client *http.Client, current func() bool, node noderec.DirectoryNode, host string, port int) (bool, bool) {
-			return d.readModelsStream(ctx, client, current, hostUUID, node.IP, host, port)
+			return d.readModelsStream(ctx, client, current, hostUUID, node.IP, host, port, id)
 		})
 	}, func() {
-		if ctx.Err() != nil {
-			return
-		}
-		generation := d.dir.routeGeneration(hostUUID)
-		node, found := d.dir.get(hostUUID)
-		if em, ok := node.Services[noderec.ServiceEngineManager]; found && ok {
-			d.markModelsUnavailable(hostUUID, node.IP, em.Port, generation)
+		d.dropModelsLive(hostUUID, id)
+		if guarded && ctx.Err() == nil {
+			d.markModelsUnavailable(hostUUID, guardIP, emPort, generation)
 		}
 	})
+}
+
+// modelsStreamLive reports whether hostUUID's models stream has applied a
+// frame and is still open.
+func (d *daemon) modelsStreamLive(hostUUID string) bool {
+	s := &d.nodeInfoStreams
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, live := s.modelsLive[hostUUID]
+	return live
+}
+
+// activeModelsStream reports whether id is hostUUID's supervised models stream.
+func (d *daemon) activeModelsStream(hostUUID string, id uint64) bool {
+	s := &d.nodeInfoStreams
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.models[hostUUID].id == id
+}
+
+// markModelsLive records that stream id applied a frame, while it is still
+// hostUUID's supervised models stream.
+func (d *daemon) markModelsLive(hostUUID string, id uint64) {
+	s := &d.nodeInfoStreams
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.models[hostUUID].id != id {
+		return
+	}
+	if s.modelsLive == nil {
+		s.modelsLive = make(map[string]uint64)
+	}
+	s.modelsLive[hostUUID] = id
+}
+
+func (d *daemon) dropModelsLive(hostUUID string, id uint64) {
+	s := &d.nodeInfoStreams
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.modelsLive[hostUUID] == id {
+		delete(s.modelsLive, hostUUID)
+	}
 }
 
 // readModelsStream connects to one address and reads its models stream. Each
 // frame takes the successful-fetch path. guardIP is the node's canonical
 // address, the stale-result guard.
-func (d *daemon) readModelsStream(ctx context.Context, client *http.Client, current func() bool, hostUUID, guardIP, host string, port int) (healthy, tryNext bool) {
+func (d *daemon) readModelsStream(ctx context.Context, client *http.Client, current func() bool, hostUUID, guardIP, host string, port int, id uint64) (healthy, tryNext bool) {
 	streamCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	url := "https://" + net.JoinHostPort(host, strconv.Itoa(port)) + modelsStreamPath
@@ -81,7 +130,15 @@ func (d *daemon) readModelsStream(ctx context.Context, client *http.Client, curr
 			return inventory, nil
 		},
 		OnFrame: func(inventory modelInventory) error {
+			// A superseded stream's last frame must not overwrite its
+			// replacement's.
+			if !d.activeModelsStream(hostUUID, id) {
+				return context.Canceled
+			}
 			d.applyModelsInventory(hostUUID, guardIP, port, d.dir.routeGeneration(hostUUID), inventory)
+			// Live only once the frame is cached, so browse enrichment that
+			// defers to the stream finds its inventory.
+			d.markModelsLive(hostUUID, id)
 			gotFrame = true
 			return nil
 		},

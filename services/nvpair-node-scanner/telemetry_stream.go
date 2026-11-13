@@ -56,6 +56,9 @@ type nodeInfoStreamState struct {
 	active map[string]nodeInfoStreamHandle
 	models map[string]nodeInfoStreamHandle
 	live   map[string]liveNodeInfo
+	// modelsLive maps a host to the id of its models stream once that stream
+	// has applied a frame, until it ends.
+	modelsLive map[string]uint64
 }
 
 type nodeInfoStreamHandle struct {

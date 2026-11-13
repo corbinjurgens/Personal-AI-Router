@@ -111,9 +111,15 @@ Concretely, the daemon:
   fetch's decode and apply path, so `discovery:node-updated` is emitted only
   when the inventory changed. When a stream ends, the node takes the
   failed-fetch path once: the last inventory is kept and download freshness is
-  withdrawn. The 15 s sweep below skips stream peers; this node's own list
-  (over loopback) and every other node keep it, and browse enrichment on an
-  mDNS record change still fetches `/v1/models` once.
+  withdrawn, unless the node's route moved since the attempt began (for
+  example its own frame carried a new download source), in which case the
+  next attempt decides. The 15 s sweep below skips stream peers; this node's
+  own list (over loopback) and every other node keep it. While a stream peer's
+  models stream is live (it applied a frame and has not ended), browse
+  enrichment on an mDNS record change applies the stream's last frame instead
+  of fetching `/v1/models`, because the stream sends only changes and nothing
+  would correct a failed or older fetch. A superseded stream's frames are
+  dropped.
 - **Annotates trust:** with `--cluster-dir`, a browsed peer whose `cluster-uuid=` this node holds a pin for is marked `trusted` (via `nvpair-shared/clustertrust`). The annotation is re-derived on `discovery:reload-trust`, which the broker sends when `nvpair-cluster-manager` reports a pin-set change, as well as when a peer's mDNS record changes. Both triggers are needed: a peer that was already advertising when this node joined never moves its record again, so the browse path alone would leave it annotated from before this node's own pins existed. A change emits one `discovery:node-updated`; a reload that finds nothing to change is silent.
 - **Advertises live membership:** the same reload re-derives this node's own `cluster-uuid=` from the cluster dir and re-advertises when it differs from what is being published, so joining or leaving a cluster takes effect without a restart.
 - **Anti-flap:** a node has to be absent from every scan for the browser's full miss threshold (twelve scans at 5s, a full minute) before it is evicted, and from ~15s in it is TCP-probed on its advertised service ports on *every* scan — any answer resets the counter and recovers it outright. So neither a momentary multicast gap nor a sustained one drops a healthy node, and eviction rests on a run of ~10 consecutive failures rather than one dial on the deadline. The window is sized deliberately: a node saturated by its own inference load starves its control plane, so it stops answering mDNS *and* stops accepting probe connections for as long as the load runs, while still serving requests. Two signals can also vouch for a node without any probe — a node-info enrichment in the last 10s, and inference response bytes from it in the last 60s (`discovery:node-activity`, relayed by the broker from whichever proxy saw the bytes). The second is the only liveness evidence that gets stronger the busier a node is.

@@ -53,6 +53,26 @@ func (d *daemon) enrichModelsCandidates(node *noderec.DirectoryNode, hosts []str
 		node.DownloadState, node.DownloadStateCurrent = observation.snapshot, observation.current
 		return
 	}
+	if d.modelsStreamLive(node.HostUUID) {
+		// The peer's live models stream owns its inventory and sends only
+		// changes, so a fetch here could replace a newer frame or withdraw
+		// freshness with nothing to correct it. Apply the stream's last frame.
+		d.infoMu.Lock()
+		_, had := d.lastModels[node.HostUUID]
+		cached := modelInventory{
+			models:              d.lastModels[node.HostUUID],
+			byEngine:            d.lastModelsByEngine[node.HostUUID],
+			identities:          d.lastModelIdentities[node.HostUUID],
+			loadedByEngine:      d.lastLoadedByEngine[node.HostUUID],
+			policy:              d.lastPolicy[node.HostUUID],
+			downloadObservation: d.lastDownloads[node.HostUUID].clone(),
+		}
+		d.infoMu.Unlock()
+		if had {
+			cached.applyTo(node)
+		}
+		return
+	}
 	var generation uint64
 	if d.dir != nil {
 		generation = d.dir.routeGeneration(node.HostUUID)

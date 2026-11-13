@@ -167,10 +167,15 @@ func (f *modelsStreamFixture) supervise(t *testing.T) {
 
 func (f *modelsStreamFixture) nextUpdate(t *testing.T) noderec.DirectoryNode {
 	t.Helper()
+	return f.nextUpdateWithin(t, 3*time.Second)
+}
+
+func (f *modelsStreamFixture) nextUpdateWithin(t *testing.T, within time.Duration) noderec.DirectoryNode {
+	t.Helper()
 	select {
 	case node := <-f.updates:
 		return node
-	case <-time.After(3 * time.Second):
+	case <-time.After(within):
 		t.Fatal("no discovery:node-updated emitted")
 		return noderec.DirectoryNode{}
 	}
@@ -285,5 +290,88 @@ func TestRefreshModelsOnceSkipsStreamPeers(t *testing.T) {
 	f.d.refreshModelsOnce()
 	if got := f.fetches.Load(); got != 1 {
 		t.Fatalf("non-stream peer fetches = %d, want 1", got)
+	}
+}
+
+// TestModelsStreamOwnsBrowseEnrichment: while a models stream is live, browse
+// enrichment applies the stream's last frame instead of fetching, so a browse
+// event can neither replace a newer frame nor withdraw freshness that no later
+// frame would restore.
+func TestModelsStreamOwnsBrowseEnrichment(t *testing.T) {
+	first := map[string]any{"models": []string{"a"}, "downloadState": scannerDownloadSnapshot("3")}
+	f := newModelsStreamFixture(t, first)
+	f.supervise(t)
+	f.nextUpdate(t)
+	deadline := time.Now().Add(3 * time.Second)
+	for !f.d.modelsStreamLive("peer") {
+		if time.Now().After(deadline) {
+			t.Fatal("models stream never became live after its first frame")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	browsed := f.node
+	browsed.Models, browsed.DownloadState, browsed.DownloadStateCurrent = nil, nil, nil
+	f.d.enrichModelsCandidates(&browsed, browsed.CandidateIPs())
+	if got := f.fetches.Load(); got != 0 {
+		t.Fatalf("browse enrichment fetched /v1/models %d times from a live stream peer", got)
+	}
+	if want := []string{"a"}; !reflect.DeepEqual(browsed.Models, want) {
+		t.Fatalf("browse enrichment Models = %v, want the stream's %v", browsed.Models, want)
+	}
+	if browsed.DownloadStateCurrent == nil || !*browsed.DownloadStateCurrent {
+		t.Fatalf("browse enrichment withdrew download freshness: current=%v", browsed.DownloadStateCurrent)
+	}
+
+	// Once the stream ends, browse enrichment fetches again.
+	f.setStatus(http.StatusServiceUnavailable)
+	f.end <- struct{}{}
+	f.nextUpdate(t)
+	if f.d.modelsStreamLive("peer") {
+		t.Fatal("an ended models stream still counts as live")
+	}
+	f.d.enrichModelsCandidates(&browsed, browsed.CandidateIPs())
+	if got := f.fetches.Load(); got != 1 {
+		t.Fatalf("browse enrichment fetches after the stream ended = %d, want 1", got)
+	}
+}
+
+// TestModelsStreamEndAfterRouteChangeDefersStale: a stream that ended after the
+// node's route generation moved (for example when its own frame carried a new
+// download source) does not withdraw freshness; the next attempt, begun on the
+// new route, does when it fails.
+func TestModelsStreamEndAfterRouteChangeDefersStale(t *testing.T) {
+	first := map[string]any{"models": []string{"a"}, "downloadState": scannerDownloadSnapshot("3")}
+	f := newModelsStreamFixture(t, first)
+	f.supervise(t)
+	f.nextUpdate(t)
+
+	f.d.dir.mu.Lock()
+	f.d.dir.generations["peer"]++
+	f.d.dir.mu.Unlock()
+	f.setStatus(http.StatusServiceUnavailable)
+	f.end <- struct{}{}
+	f.noUpdate(t, 500*time.Millisecond)
+
+	node := f.nextUpdateWithin(t, 10*time.Second) // the refused retry, after the first backoff
+	if node.DownloadStateCurrent == nil || *node.DownloadStateCurrent {
+		t.Fatalf("failed retry on the new route did not withdraw freshness: current=%v", node.DownloadStateCurrent)
+	}
+}
+
+func TestModelsStreamDropsSupersededFrames(t *testing.T) {
+	d := &daemon{}
+	d.nodeInfoStreams.models = map[string]nodeInfoStreamHandle{"peer": {id: 2}}
+	if d.activeModelsStream("peer", 1) {
+		t.Fatal("a superseded models stream counts as active")
+	}
+	d.markModelsLive("peer", 1)
+	if d.modelsStreamLive("peer") {
+		t.Fatal("a superseded models stream marked the host live")
+	}
+	d.markModelsLive("peer", 2)
+	d.dropModelsLive("peer", 1)
+	if !d.modelsStreamLive("peer") {
+		t.Fatal("a superseded stream's end dropped its replacement's liveness")
 	}
 }

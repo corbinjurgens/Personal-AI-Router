@@ -25,12 +25,13 @@ import (
 // peer's loaded-model watcher (1 s here) detects it and emits
 // engine:models-changed, which triggers the publisher's 250 ms rebuild.
 //
-// Browse enrichment is unchanged by the stream: an mDNS "updated" event for
-// the peer (on this host they follow interface address changes) still fetches
-// GET /v1/models once. So the test does not count fetches over a quiet window;
-// a change is attributed to the stream only when no fetch reached the peer
-// while it propagated, and is retried otherwise. That the 15 s refresh skips
-// stream peers is covered by the scanner's TestRefreshModelsOnceSkipsStreamPeers.
+// Browse enrichment can still fetch GET /v1/models when an mDNS "updated"
+// event (on this host they follow interface address changes) arrives before
+// the stream is live or while it reconnects. So the test does not count
+// fetches over a quiet window; a change is attributed to the stream only when
+// no fetch reached the peer while it propagated, and is retried otherwise.
+// That the 15 s refresh skips stream peers, and that browse enrichment defers
+// to a live stream, are covered by the scanner's unit tests.
 func TestPairedModelsStreamReplacesRefresh(t *testing.T) {
 	f := newTask2Fixture(t, task2WithLoadedPoll(1))
 	em := f.b.observers[noderec.ServiceEngineManager]
