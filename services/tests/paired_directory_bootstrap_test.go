@@ -634,7 +634,10 @@ func TestPairedDirectoryBootstrap(t *testing.T) {
 			f.mu.Unlock()
 			outer.interrupt(f.b.uuid, false)
 			opposite.interrupt(f.a.uuid, false)
-			task1Eventually(t, "restored reverse route without process restart", 15*time.Second, func() bool { return outer.established(f.b.uuid) > previous })
+			// The outage leaves the reverse dial's backoff at its 30 s cap
+			// (jitter up to 1.2x), and no evidence can reset it while both
+			// routes are blocked, so the next dial can be ~36 s out.
+			task1Eventually(t, "restored reverse route without process restart", 40*time.Second, func() bool { return outer.established(f.b.uuid) > previous })
 			// The restored reverse session resets the peer-state stream's
 			// reconnect backoff, so recovery does not wait out the 30 s cap.
 			task1Eventually(t, "authenticated bootstrap recovers after claim expiry", 20*time.Second, func() bool { return f.hasPeer(t) })
