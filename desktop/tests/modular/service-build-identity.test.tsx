@@ -96,7 +96,9 @@ function baseline(serviceBuildId?: JsonValue) {
         policy: {
             revision: '7',
             roles: [{ name: 'medium', profiles: ['model-a'] }],
-            profiles: [{ key: 'model-a', displayName: 'Model A', engine: 'llamacpp', model: 'model-a' }]
+            profiles: [
+                { key: 'model-a', displayName: 'Model A', engine: 'llamacpp', model: 'model-a' }
+            ]
         },
         trusted: true,
         clustered: true,
@@ -145,7 +147,9 @@ describe('node build projection', () => {
         expect(state.getAvailableNodes()[0].policy).toEqual({
             revision: '7',
             roles: [{ name: 'medium', profiles: ['model-a'] }],
-            profiles: [{ key: 'model-a', displayName: 'Model A', engine: 'llamacpp', model: 'model-a' }]
+            profiles: [
+                { key: 'model-a', displayName: 'Model A', engine: 'llamacpp', model: 'model-a' }
+            ]
         })
         const parsed = brokerNodesValue({ nodes: [{ ...baseline(), serviceBuildId: [] }] })[0]
         expect(parsed.models).toEqual(['model-a'])
@@ -372,6 +376,15 @@ describe('About running service build', () => {
         expect(runningRow()).toBe(`Running service build${SHA1}`)
         expect(container.textContent).toContain('Servicesv1.2.3')
         expect(container.textContent).toContain('nvpair-servicev4.5.6')
+    })
+    it('shows unknown for a bundled binary without a manifest version', async () => {
+        getVersions.mockResolvedValue({
+            ...bundled,
+            binaries: [{ name: 'nvpair-service', version: '' }]
+        })
+        await render()
+        expect(container.textContent).toContain('nvpair-service--')
+        expect(container.textContent).not.toContain('nvpair-servicev')
     })
     it('shows unknown on absent metadata and IPC errors', async () => {
         getVersions.mockResolvedValue(bundled)
