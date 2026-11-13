@@ -370,6 +370,10 @@ func newTask1Observer(t *testing.T, target *task1Node, service noderec.ServiceKe
 			if response.Request.URL.Path == "/v1/cluster/peer-state" {
 				return nil
 			}
+			// The error snapshot is a live stream, not a finite reply.
+			if response.Request.URL.Path == "/v1/errors/events" {
+				return nil
+			}
 			if response.StatusCode == http.StatusSwitchingProtocols {
 				o.mu.Lock()
 				o.readyUpgrades[peer]++
@@ -684,7 +688,7 @@ func TestReversePeerControlTask1(t *testing.T) {
 		waitTCP(t, net.JoinHostPort("127.0.0.1", strconv.Itoa(blockedPort)), time.Second)
 		client := &http.Client{Timeout: time.Second, Transport: &http.Transport{TLSClientConfig: cfg}}
 		defer client.CloseIdleConnections()
-		for _, path := range []string{task1RosterPath, "/v1/workloads/events", "/v1/errors"} {
+		for _, path := range []string{task1RosterPath, "/v1/workloads/events", "/v1/errors/events"} {
 			response, err := client.Post("https://127.0.0.1:"+strconv.Itoa(blockedPort)+path, "application/json", strings.NewReader("{}"))
 			if response != nil {
 				response.Body.Close()
@@ -821,7 +825,8 @@ func TestReversePeerControlTask1(t *testing.T) {
 		t.Logf("workload_reconnect requests=%d running_mutations=1 completed_mutations=1", bWorkload.count(a.uuid, http.MethodPost, "/v1/workloads/events")-before)
 	})
 
-	t.Run("two way errors and explicit snapshot recovery", func(t *testing.T) {
+	t.Run("two way error streams and snapshot recovery after a reverse outage", func(t *testing.T) {
+		const streamPath = "/v1/errors/events"
 		a.errors.send(t, noderec.NotifyNodes, noderec.GetNodesResult{Nodes: []noderec.DirectoryNode{task1Directory(b, blockedPort)}}, false)
 		b.errors.send(t, noderec.NotifyNodes, noderec.GetNodesResult{Nodes: []noderec.DirectoryNode{task1Directory(a, blockedPort)}}, false)
 		aError := errorswire.ServiceError{ID: "a-error", NodeID: a.uuid, Message: "fixture a", Timestamp: 1000, Severity: "error"}
@@ -837,91 +842,61 @@ func TestReversePeerControlTask1(t *testing.T) {
 		task1Eventually(t, "both error origins", 10*time.Second, func() bool {
 			return reflect.DeepEqual(task1Errors(t, a.errors), want) && reflect.DeepEqual(task1Errors(t, b.errors), want)
 		})
-		cut := make(chan struct{})
-		var once sync.Once
-		bErrors.mu.Lock()
-		bErrors.afterReply = func(peer, path string) {
-			if path == "/v1/errors" {
-				once.Do(func() { aCluster.interrupt(b.uuid, true); close(cut) })
-			}
+		// B's direct endpoints are blocked, so A reads B's stream over B's
+		// reverse session; B reads A's stream directly.
+		streams := bErrors.count(a.uuid, http.MethodGet, streamPath)
+		if streams == 0 {
+			t.Fatal("A converged on B's errors without a stream of B")
 		}
-		bErrors.mu.Unlock()
-		aError.Timestamp = 2000
-		aError.Message = "accepted before disconnect"
-		a.errors.call(t, "errors:report", aError)
-		select {
-		case <-cut:
-		case <-time.After(10 * time.Second):
-			t.Fatal("error snapshot did not reach disconnect boundary")
+		if got := bErrors.count(a.uuid, http.MethodPost, "/v1/errors"); got != 0 {
+			t.Fatalf("A pushed %d snapshots to B, want 0", got)
 		}
-		want = []errorswire.ServiceError{aError, bError}
-		task1Eventually(t, "accepted snapshot remains", 5*time.Second, func() bool { return reflect.DeepEqual(task1Errors(t, b.errors), want) })
-		before := bErrors.count(a.uuid, http.MethodPost, "/v1/errors")
-		a.errors.call(t, "errors:clear", errorswire.ClearParams{ID: aError.ID})
-		bError.Timestamp = 2000
-		bError.Message = "opposite direction during reverse outage"
-		b.errors.call(t, "errors:report", bError)
-		want = []errorswire.ServiceError{aError, bError}
-		task1Eventually(t, "opposite direction error during outage", 5*time.Second, func() bool { return reflect.DeepEqual(task1Errors(t, a.errors), []errorswire.ServiceError{bError}) })
-		// This exceeds the production push timeout: the clear cannot be delivered
-		// while B's outbound session is rejected and its direct er is inaccessible.
-		time.Sleep(4 * time.Second)
-		if got := task1Errors(t, b.errors); !reflect.DeepEqual(got, want) {
-			t.Fatalf("disconnected receiver changed without a delivered snapshot: %+v", got)
-		}
-		if got := bErrors.count(a.uuid, http.MethodPost, "/v1/errors"); got != before {
-			t.Fatalf("disconnected snapshot dispatched %d extra requests", got-before)
-		}
-		bErrors.mu.Lock()
-		bErrors.afterReply = nil
-		bErrors.mu.Unlock()
 		upgrades := aCluster.established(b.uuid)
+		aCluster.interrupt(b.uuid, true)
+		bError.Timestamp = 2000
+		bError.Message = "changed during reverse outage"
+		b.errors.call(t, "errors:report", bError)
+		// The opposite direction keeps its direct stream through the outage.
+		a.errors.call(t, "errors:clear", errorswire.ClearParams{ID: aError.ID})
+		task1Eventually(t, "opposite direction clear during outage", 5*time.Second, func() bool {
+			return reflect.DeepEqual(task1Errors(t, b.errors), []errorswire.ServiceError{bError})
+		})
+		// A keeps B's last delivered entries while its stream is down, and no
+		// stream reaches B until the reverse session returns.
+		time.Sleep(3 * time.Second)
+		stale := []errorswire.ServiceError{{ID: "b-error", NodeID: b.uuid, Message: "fixture b", Timestamp: 1000, Severity: "warning"}}
+		if got := task1Errors(t, a.errors); !reflect.DeepEqual(got, stale) {
+			t.Fatalf("A without a stream to B = %+v, want B's last delivered entries %+v", got, stale)
+		}
+		if got := bErrors.count(a.uuid, http.MethodGet, streamPath); got != streams {
+			t.Fatalf("A opened %d streams of B during the outage, want none", got-streams)
+		}
 		aCluster.mu.Lock()
 		aCluster.blockUpgrade = false
 		aCluster.mu.Unlock()
 		task1Eventually(t, "errors reverse reconnect", 10*time.Second, func() bool { return aCluster.established(b.uuid) > upgrades })
-		if got := bErrors.count(a.uuid, http.MethodPost, "/v1/errors"); got != before {
-			t.Fatalf("lost snapshot replayed on reconnect: requests=%d want=%d", got, before)
-		}
-		// A new local report is the public explicit full-snapshot trigger. It
-		// must evict the cleared A error while preserving B's local origin.
-		replacement := errorswire.ServiceError{ID: "a-replacement", NodeID: a.uuid, Message: "explicit next snapshot", Timestamp: 3000}
-		a.errors.call(t, "errors:report", replacement)
-		want = []errorswire.ServiceError{replacement, bError}
-		task1Eventually(t, "explicit full snapshot convergence", 10*time.Second, func() bool {
-			return reflect.DeepEqual(task1Errors(t, a.errors), want) && reflect.DeepEqual(task1Errors(t, b.errors), want)
+		// The reconnected stream starts with B's full snapshot, which repairs
+		// the change A missed; nothing resends it on a timer.
+		want = []errorswire.ServiceError{bError}
+		task1Eventually(t, "full snapshot on reconnect", 45*time.Second, func() bool {
+			return reflect.DeepEqual(task1Errors(t, a.errors), want)
 		})
-		if got := bErrors.count(a.uuid, http.MethodPost, "/v1/errors"); got != before+1 {
-			t.Fatalf("explicit snapshot requests=%d want=%d", got, before+1)
+		recovered := bErrors.count(a.uuid, http.MethodGet, streamPath)
+		if recovered <= streams {
+			t.Fatalf("A's streams of B after reconnect = %d, want more than %d", recovered, streams)
 		}
-		if got := task1ErrorUpdates(t, b.errors, want); got != 1 {
+		if got := task1ErrorUpdates(t, a.errors, want); got != 1 {
 			t.Fatalf("recovered snapshot mutations=%d want=1", got)
 		}
-		duplicateReply := make(chan struct{})
-		var duplicateOnce sync.Once
-		bErrors.mu.Lock()
-		bErrors.afterReply = func(peer, path string) {
-			if peer == a.uuid && path == "/v1/errors" {
-				duplicateOnce.Do(func() { close(duplicateReply) })
-			}
+		// An unchanged peer produces no further mutation and no reconnect.
+		time.Sleep(2 * time.Second)
+		if got := task1ErrorUpdates(t, a.errors, want); got != 1 {
+			t.Fatalf("unchanged stream emitted %d meaningful mutations, want 1", got)
 		}
-		bErrors.mu.Unlock()
-		a.errors.call(t, "errors:report", replacement)
-		select {
-		case <-duplicateReply:
-		case <-time.After(10 * time.Second):
-			t.Fatal("duplicate snapshot did not complete")
+		if got := bErrors.count(a.uuid, http.MethodGet, streamPath); got != recovered {
+			t.Fatalf("A reconnected %d times to an unchanged B, want 0", got-recovered)
 		}
-		if got := task1Errors(t, b.errors); !reflect.DeepEqual(got, want) {
-			t.Fatalf("duplicate snapshot altered state: %+v", got)
-		}
-		if got := task1ErrorUpdates(t, b.errors, want); got != 1 {
-			t.Fatalf("duplicate snapshot emitted %d meaningful mutations, want 1", got)
-		}
-		bErrors.mu.Lock()
-		bErrors.afterReply = nil
-		bErrors.mu.Unlock()
-		t.Log("error_snapshot accepted_before_disconnect=true automatic_replay=0 explicit_recovery=1 duplicate_mutations=0 entries=2")
+		t.Log("error_stream outage_kept_entries=true reconnect_full_snapshot=true opposite_direction_direct=true duplicate_mutations=0")
 	})
 
 	t.Run("reverse removal loses reply without replay and stays durable", func(t *testing.T) {

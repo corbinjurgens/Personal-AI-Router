@@ -202,7 +202,7 @@ func startDataPlaneWorkers(t *testing.T, clusterDir string) (string, string) {
 	errorsAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(errorsPort))
 	waitTCP(t, workloadAddr, 10*time.Second)
 	waitTCP(t, errorsAddr, 10*time.Second)
-	return workloadAddr + "/v1/workloads/events", errorsAddr + "/v1/errors"
+	return workloadAddr + "/v1/workloads/events", errorsAddr + "/v1/errors/events"
 }
 
 // waitTCP blocks until addr accepts a TCP connection. Every "this request must be
@@ -260,9 +260,9 @@ const dataPlaneErrorsEnvelope = `{"nodeId":"intruder-node","errors":[{"id":"intr
 // plaintext workload events from any host on the network and relayed them into its
 // catalog as though a peer had sent them.
 func TestDataPlaneRefusesNonMemberWhenUnclustered(t *testing.T) {
-	workloadEventsURL, errorsSyncURL := startDataPlaneWorkers(t, t.TempDir())
+	workloadEventsURL, errorsStreamURL := startDataPlaneWorkers(t, t.TempDir())
 	assertPlaintextRefused(t, workloadEventsURL, dataPlaneWorkloadFrame)
-	assertPlaintextRefused(t, errorsSyncURL, dataPlaneErrorsEnvelope)
+	assertPlaintextRefused(t, errorsStreamURL, dataPlaneErrorsEnvelope)
 }
 
 // TestModelInventoryRefusesLANPlaintext: a node's model inventory is cluster data.
@@ -342,12 +342,14 @@ func TestDataPlaneRefusesNonMemberWhenClustered(t *testing.T) {
 	}
 	stranger := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{TLSClientConfig: strangerCfg}}
 	t.Cleanup(stranger.CloseIdleConnections)
-	workloadEventsURL, errorsSyncURL := startDataPlaneWorkers(t, fx.nodeDir)
+	workloadEventsURL, errorsStreamURL := startDataPlaneWorkers(t, fx.nodeDir)
 	assertPlaintextRefused(t, workloadEventsURL, dataPlaneWorkloadFrame)
 	assertForbidden(t, stranger, "https://"+workloadEventsURL, dataPlaneWorkloadFrame)
 
-	assertPlaintextRefused(t, errorsSyncURL, dataPlaneErrorsEnvelope)
-	assertForbidden(t, stranger, "https://"+errorsSyncURL, dataPlaneErrorsEnvelope)
+	// The pin gate runs before the method check, so the stranger's request is
+	// refused with 403 rather than 405.
+	assertPlaintextRefused(t, errorsStreamURL, dataPlaneErrorsEnvelope)
+	assertForbidden(t, stranger, "https://"+errorsStreamURL, dataPlaneErrorsEnvelope)
 
 	// Control: the node's real pinned peer IS served, so the assertions above are
 	// rejecting the caller rather than a broken listener. It carries a distinct
@@ -356,8 +358,32 @@ func TestDataPlaneRefusesNonMemberWhenClustered(t *testing.T) {
 	// injected workload is absent from the catalog.
 	peer := fx.clientAsPeer(t)
 	postUntil(t, peer, "https://"+workloadEventsURL, dataPlanePeerFrame, http.StatusOK, 15*time.Second)
-	const peerErrors = `{"nodeId":"data-plane-peer","errors":[{"id":"peer:err","nodeId":"data-plane-peer","severity":"error","message":"pinned peer"}]}`
-	postUntil(t, peer, "https://"+errorsSyncURL, peerErrors, http.StatusNoContent, 15*time.Second)
+	streamOpensUntil(t, peer, "https://"+errorsStreamURL, 15*time.Second)
+}
+
+// streamOpensUntil retries until a GET of the stream at url answers 200,
+// absorbing the listener's asynchronous bind, then closes the stream.
+func streamOpensUntil(t *testing.T, client *http.Client, url string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last string
+	for {
+		resp, err := client.Get(url)
+		if err == nil {
+			code := resp.StatusCode
+			resp.Body.Close()
+			if code == http.StatusOK {
+				return
+			}
+			last = fmt.Sprintf("HTTP %d", code)
+		} else {
+			last = err.Error()
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for the stream at %s to open (last: %s)", url, last)
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
 }
 
 // assertForbidden requires a request that completes a handshake to be turned away
