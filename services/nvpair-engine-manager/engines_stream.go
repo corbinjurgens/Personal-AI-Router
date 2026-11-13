@@ -105,6 +105,10 @@ func (s *controlServer) handleEngineEvents(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if s.exec.enginesEvents == nil {
+		http.Error(w, "engine status unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	ch, closeSub, ok := s.exec.enginesEvents.hub.Subscribe()
 	if !ok {
 		http.Error(w, "too many engine status subscriptions", http.StatusServiceUnavailable)

@@ -714,17 +714,18 @@ func TestRemoteManagementRouteMatrixDeniesUngrantedMutation(t *testing.T) {
 	ts := rmTLSServer(t, f.mesh, s.mux())
 	denied := f.client("uuid-b")
 	readStatuses := map[string]int{
-		controlEnginesPath:          http.StatusOK,
-		controlModelFilesPath:       http.StatusBadRequest,
-		controlModelFilePath:        http.StatusBadRequest,
-		controlRemoteManagementPath: http.StatusOK,
-		controlCopyCapabilitiesPath: http.StatusBadRequest,
-		settingsPath + "get":        http.StatusServiceUnavailable,
-		settingsPath + "inspect":    http.StatusServiceUnavailable,
-		settingsPath + "preview":    http.StatusServiceUnavailable,
-		settingsPath + "events":     http.StatusServiceUnavailable,
-		controlPolicyGetPath:        http.StatusServiceUnavailable,
-		diagnosticPath + "status":   http.StatusServiceUnavailable,
+		controlEnginesPath:             http.StatusOK,
+		controlEnginesPath + "/events": http.StatusServiceUnavailable,
+		controlModelFilesPath:          http.StatusBadRequest,
+		controlModelFilePath:           http.StatusBadRequest,
+		controlRemoteManagementPath:    http.StatusOK,
+		controlCopyCapabilitiesPath:    http.StatusBadRequest,
+		settingsPath + "get":           http.StatusServiceUnavailable,
+		settingsPath + "inspect":       http.StatusServiceUnavailable,
+		settingsPath + "preview":       http.StatusServiceUnavailable,
+		settingsPath + "events":        http.StatusServiceUnavailable,
+		controlPolicyGetPath:           http.StatusServiceUnavailable,
+		diagnosticPath + "status":      http.StatusServiceUnavailable,
 	}
 
 	// The assertions follow the independent classification spec, never the
