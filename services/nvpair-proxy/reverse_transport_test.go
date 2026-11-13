@@ -1228,3 +1228,60 @@ func TestProxyReverseHybridPeerSlotRecomputesSentBudgets(t *testing.T) {
 	test("direct", true)
 	test("reverse", false)
 }
+
+// An interim 1xx answer is not the response. Clients that send
+// Expect: 100-continue by default (.NET Framework) make Go's engine-side
+// server, and llama.cpp's, answer 100 Continue before the final status.
+// The peer hop must frame only that final response, once.
+func TestProxyReverseInterimContinueIsNotTheResponse(t *testing.T) {
+	const plain = `{"choices":[{"index":0,"finish_reason":"stop"}]}`
+	const stream = "data: {\"choices\":[{\"index\":0,\"finish_reason\":\"stop\"}]}\n\n"
+	test := func(name, request, media, payload string, clientExpect, engineInterim bool) {
+		t.Run(name, func(t *testing.T) {
+			var sawExpect atomic.Bool
+			f := newProxyReverseFixture(t, "llamacpp", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				sawExpect.Store(r.Header.Get("Expect") != "")
+				if engineInterim {
+					w.WriteHeader(http.StatusContinue)
+				}
+				if _, err := io.ReadAll(r.Body); err != nil {
+					t.Error(err)
+					return
+				}
+				w.Header().Set("Content-Type", media)
+				if _, err := io.WriteString(w, payload); err != nil {
+					t.Error(err)
+				}
+			}))
+			fx := reverseContinuityOrigin(t, f)
+			req := proxyReverseRequest(t, http.MethodPost, fx.origin.URL+"/v1/chat/completions", strings.NewReader(request))
+			req.Header.Set("Content-Type", "application/json")
+			if clientExpect {
+				req.Header.Set("Expect", "100-continue")
+			}
+			resp, err := fx.origin.Client().Do(req)
+			if err != nil {
+				t.Fatalf("request origin: %v", err)
+			}
+			data, readErr := io.ReadAll(resp.Body)
+			if err := resp.Body.Close(); err != nil {
+				t.Fatalf("close response: %v", err)
+			}
+			waitChan(t, fx.returned, "origin handler return")
+			if readErr != nil || resp.StatusCode != http.StatusOK || string(data) != payload {
+				t.Fatalf("status/body/read = %d/%q/%v, want 200/%q", resp.StatusCode, data, readErr, payload)
+			}
+			if resp.Header.Get(peerStreamFramingHeader) != "" || resp.Trailer.Get(peerStreamFramingHeader) != "" {
+				t.Fatal("internal peer framing metadata reached the client")
+			}
+			fx.terminal(t, "completed", "")
+			if sawExpect.Load() {
+				t.Fatal("Expect was forwarded to the engine; the proxy answers it itself")
+			}
+		})
+	}
+	test("client expect plain", `{"model":"fixture-model"}`, "application/json", plain, true, false)
+	test("client expect stream", `{"model":"fixture-model","stream":true}`, "text/event-stream", stream, true, false)
+	test("engine interim plain", `{"model":"fixture-model"}`, "application/json", plain, false, true)
+	test("engine interim stream", `{"model":"fixture-model","stream":true}`, "text/event-stream", stream, false, true)
+}

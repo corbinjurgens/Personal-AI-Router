@@ -94,7 +94,20 @@ func responseSinkFrom(ctx context.Context) *responseSink {
 func (s *responseSink) Header() http.Header         { return s.w.Header() }
 func (s *responseSink) Unwrap() http.ResponseWriter { return s.w }
 
+// interimStatus reports a 1xx that ReverseProxy relays with WriteHeader before
+// the final response. net/http sends it as informational and the final status
+// still follows, so a writer must not record it as the response status.
+func interimStatus(code int) bool {
+	return code >= http.StatusContinue && code < http.StatusOK && code != http.StatusSwitchingProtocols
+}
+
 func (s *responseSink) WriteHeader(code int) {
+	if interimStatus(code) {
+		// Recording it would drop the final status and its framing-header
+		// cleanup.
+		s.w.WriteHeader(code)
+		return
+	}
 	s.mu.Lock()
 	if s.status != 0 {
 		s.mu.Unlock()

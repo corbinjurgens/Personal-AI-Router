@@ -55,7 +55,9 @@ type statusCapture struct {
 func (sc *statusCapture) Unwrap() http.ResponseWriter { return sc.ResponseWriter }
 
 func (sc *statusCapture) WriteHeader(code int) {
-	sc.status = code
+	if !interimStatus(code) {
+		sc.status = code
+	}
 	sc.ResponseWriter.WriteHeader(code)
 }
 

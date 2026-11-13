@@ -441,6 +441,10 @@ authorize fallback after it. A normalized peer response ends with the internal
 `v1;interrupted;<reason>`. The origin validates and strips it, so a synthetic
 `[DONE]` from a destination cannot make an interrupted peer workload completed.
 Missing or invalid disposition is a peer interruption, not completion.
+Only the final response is framed: a hop that replays a buffered inference
+body answers `Expect: 100-continue` itself and does not forward it, and an
+engine's interim 1xx is relayed as informational without becoming the
+recorded response status (see spec.md).
 
 Before commitment, a paused local attempt can be excluded and retried on an
 eligible destination within the existing budgets. A peer destination is terminal
