@@ -397,25 +397,35 @@ func (p *performanceRelay) handleSummary(w http.ResponseWriter, r *http.Request,
 		http.Error(w, "invalid performance elapsed time", http.StatusBadRequest)
 		return
 	}
+	code, message := p.applySummary(func(epoch string) (string, string, bool) { return p.peerIdentity(r, epoch) }, raw, int64(elapsed))
+	if code != http.StatusOK {
+		http.Error(w, message, code)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// applySummary applies one peer summary. authority resolves the sender's
+// principal and admission identity for the summary's admission epoch; it is
+// called once after decoding and again for every validity recheck. elapsedMs
+// is the sender's age of the sample. It returns an HTTP-style status code and
+// message so handleSummary can answer unchanged.
+func (p *performanceRelay) applySummary(authority func(epoch string) (principal, identity string, ok bool), raw json.RawMessage, elapsedMs int64) (int, string) {
 	summary, err := performancewire.DecodeSummary(raw)
 	if err != nil {
-		http.Error(w, "invalid performance summary", http.StatusBadRequest)
-		return
+		return http.StatusBadRequest, "invalid performance summary"
 	}
 	raw, err = performancewire.EncodeSummary(summary)
 	if err != nil {
-		http.Error(w, "invalid performance summary", http.StatusBadRequest)
-		return
+		return http.StatusBadRequest, "invalid performance summary"
 	}
-	principal, identity, ok := p.peerIdentity(r, summary.AdmissionIncarnation)
+	principal, identity, ok := authority(summary.AdmissionIncarnation)
 	if !ok || principal != summary.MeasuringHost {
-		http.Error(w, "performance admission mismatch", http.StatusForbidden)
-		return
+		return http.StatusForbidden, "performance admission mismatch"
 	}
 	state := p.receipt(principal)
 	if state == nil {
-		http.Error(w, "performance capacity reached", http.StatusServiceUnavailable)
-		return
+		return http.StatusServiceUnavailable, "performance capacity reached"
 	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
@@ -423,16 +433,14 @@ func (p *performanceRelay) handleSummary(w http.ResponseWriter, r *http.Request,
 	tracked := p.received[principal] == state
 	p.mu.Unlock()
 	if !tracked {
-		http.Error(w, "performance admission retired", http.StatusServiceUnavailable)
-		return
+		return http.StatusServiceUnavailable, "performance admission retired"
 	}
 	valid := func() bool {
-		currentPrincipal, currentIdentity, ok := p.peerIdentity(r, summary.AdmissionIncarnation)
+		currentPrincipal, currentIdentity, ok := authority(summary.AdmissionIncarnation)
 		return ok && currentPrincipal == principal && currentIdentity == identity
 	}
 	if !valid() {
-		http.Error(w, "performance admission changed", http.StatusForbidden)
-		return
+		return http.StatusForbidden, "performance admission changed"
 	}
 	if state.identity != identity {
 		// A receiver-local admission/certificate change retires the payload,
@@ -444,56 +452,49 @@ func (p *performanceRelay) handleSummary(w http.ResponseWriter, r *http.Request,
 		state.payload, state.status, state.retired = nil, "", false
 	}
 	if summary.Revision < state.revision {
-		w.WriteHeader(http.StatusOK)
-		return
+		return http.StatusOK, ""
 	}
 	digest := sha256.Sum256(raw)
 	if summary.Revision == state.revision && state.digest != digest {
-		http.Error(w, "revision changed contents", http.StatusBadRequest)
-		return
+		return http.StatusBadRequest, "revision changed contents"
 	}
 	now := p.now()
 	if summary.Revision > state.revision {
 		if !valid() {
-			http.Error(w, "performance admission changed", http.StatusForbidden)
-			return
+			return http.StatusForbidden, "performance admission changed"
 		}
-		if err := p.notify(methodPerformanceReceived, performanceReceived{summary, identity, int64(elapsed)}); err != nil {
-			http.Error(w, "broker unavailable", http.StatusInternalServerError)
-			return
+		if err := p.notify(methodPerformanceReceived, performanceReceived{summary, identity, elapsedMs}); err != nil {
+			return http.StatusInternalServerError, "broker unavailable"
 		}
 		if !valid() {
 			// A completed pipe write cannot be retracted. Explicitly retire its
 			// identity so the broker can discard that just-emitted replacement.
 			state.revision, state.digest, state.firstSeen, state.lastSeen = summary.Revision, digest, now, now
-			state.initialElapsedMs = int64(elapsed)
+			state.initialElapsedMs = elapsedMs
 			_ = p.status(principal, state, now, "unknown")
 			state.payload = nil
-			http.Error(w, "performance admission changed", http.StatusForbidden)
-			return
+			return http.StatusForbidden, "performance admission changed"
 		}
 		state.revision, state.digest, state.payload, state.firstSeen = summary.Revision, digest, bytes.Clone(raw), now
-		state.initialElapsedMs = int64(elapsed)
+		state.initialElapsedMs = elapsedMs
 	}
 	// A verified retry cannot make samples younger. Sender elapsed time also
 	// covers time queued before this receiver's first successful delivery.
 	currentElapsed := state.initialElapsedMs + now.Sub(state.firstSeen).Milliseconds()
-	if int64(elapsed) > currentElapsed {
-		state.initialElapsedMs += int64(elapsed) - currentElapsed
+	if elapsedMs > currentElapsed {
+		state.initialElapsedMs += elapsedMs - currentElapsed
 	}
 	state.retired = false
 	state.lastSeen = now
 	if err := p.status(principal, state, now, "fresh"); err != nil {
-		http.Error(w, "broker unavailable", http.StatusInternalServerError)
-		return
+		return http.StatusInternalServerError, "broker unavailable"
 	}
 	if !valid() {
 		_ = p.status(principal, state, p.now(), "unknown")
 		state.payload = nil
-		http.Error(w, "performance admission changed", http.StatusForbidden)
-		return
+		return http.StatusForbidden, "performance admission changed"
 	}
-	w.WriteHeader(http.StatusOK)
+	return http.StatusOK, ""
 }
 
 func (p *performanceRelay) sweep() {
