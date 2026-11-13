@@ -316,6 +316,13 @@ func (d *daemon) refreshNodeTelemetryCandidates(ctx context.Context, hostUUID st
 	if !ok {
 		return false
 	}
+	return d.applyTelemetrySample(hostUUID, generation, buildTargetCurrent, verifiedSelf, niPort, sample)
+}
+
+// applyTelemetrySample applies one node-info sample for hostUUID that was
+// read from the directory generation captured before the read, and emits its
+// telemetry. It returns false when the sample was not applied.
+func (d *daemon) applyTelemetrySample(hostUUID string, generation uint64, buildTargetCurrent, verifiedSelf bool, niPort int, sample telemetrySample) bool {
 	info, startedAt := sample.info, sample.startedAt
 	memoryCurrent := false
 	if buildTargetCurrent {
