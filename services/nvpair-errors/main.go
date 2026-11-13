@@ -22,9 +22,9 @@ import (
 
 func main() {
 	ipcPath := flag.String("ipc", "", "IPC endpoint: Unix domain socket path or Windows named pipe (default: stdin/stdout)")
-	peerSync := flag.Bool("peer-sync", false, "serve the cross-node errors endpoint and push errors to peer nodes learned from the broker's discovery relay")
+	peerSync := flag.Bool("peer-sync", false, "serve the cross-node errors stream and subscribe to peer nodes learned from the broker's discovery relay")
 	port := flag.Int("port", 14319, "HTTP port for the cross-node errors endpoint (only used with --peer-sync)")
-	clusterDir := flag.String("cluster-dir", "", "cluster config dir (node.crt/node.key + trusted/); cross-node error sync is pin-based cluster mTLS, so without a usable identity and live membership here this node serves and pushes nothing")
+	clusterDir := flag.String("cluster-dir", "", "cluster config dir (node.crt/node.key + trusted/); cross-node error sync is pin-based cluster mTLS, so without a usable identity and live membership here this node serves and subscribes to nothing")
 	nodeID := flag.String("node-id", "", "this node's stable origin id (the broker passes its resolved per-host UUID); when unset, the shared stable UUID is resolved")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	resolveLevel := applog.RegisterFlag(nil, slog.LevelInfo)
@@ -72,8 +72,8 @@ func main() {
 	// stdio-only local datastore with no network surface (and the
 	// integration tests that spawn the bare binary keep working). With
 	// it, the same Manager additionally learns peer nvpair-errors
-	// instances from the broker's discovery relay, serves an HTTPS
-	// ingest endpoint, and pushes its local-origin errors to peers.
+	// instances from the broker's discovery relay, streams its local-origin
+	// errors to them over HTTPS, and subscribes to theirs.
 	if *peerSync {
 		// Gate cross-node mTLS on live cluster membership, not keypair presence: a
 		// left/removed node keeps its keypair by design. The mesh is a live view of
@@ -139,12 +139,12 @@ func startPeerSync(ctx context.Context, mgr *Manager, port int, mesh *clustertru
 
 	go peers.Run(ctx, events)
 	// Follow this node into and out of a cluster. Both the ingress gate and the
-	// push transport read live membership, so the watch only has to notice the
-	// change and re-push: the peer set was filtered under the old personality, so
-	// a fresh full snapshot is what repairs a divergence the outage created.
+	// stream transport read live membership, so the watch only has to notice the
+	// change and restart the streams: each opens under the new authority and
+	// starts with the full snapshot, which repairs a divergence the change made.
 	go mesh.Watch(ctx, func(clustered bool) {
 		slog.Info("error sync switched personality", "clustered", clustered, "clusterUuid", mesh.NodeUUID())
-		peers.TriggerPush()
+		peers.Resubscribe()
 	})
 
 	if mesh.Clustered() {

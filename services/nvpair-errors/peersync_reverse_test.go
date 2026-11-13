@@ -4,15 +4,12 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/http/httptrace"
 	"os"
 	"path/filepath"
 	"slices"
@@ -27,8 +24,12 @@ import (
 	"nvpair-shared/reach"
 )
 
+// errorSyncFixture has node-a (subscriber, PeerSync) stream node-b's (peer)
+// errors, directly or over a reverse session.
 type errorSyncFixture struct {
-	sender, receiver *Manager
+	subscriber, peer *Manager
+	subscriberRW     *captureRW
+	peerPub          *errorsPublisher
 	ps               *PeerSync
 	server           *httptest.Server
 	local, remote    *clustertrust.ReverseManager
@@ -36,19 +37,15 @@ type errorSyncFixture struct {
 	expectedHost     string
 	expectedSNI      string
 	blocked          atomic.Bool
-	dropReply        atomic.Bool
 	directCalls      atomic.Int32
 	reverseCalls     atomic.Int32
-	accepted         atomic.Int32
-	failWrites       atomic.Bool
+	streams          atomic.Int32 // stream responses that passed the pin gate
 	beforeDial       func()
-	beforeIngest     func(*http.Request) bool
 	onConnect        func(*errorSyncConn)
 }
 
 type errorSyncConn struct {
 	net.Conn
-	fail      *atomic.Bool
 	closed    chan struct{}
 	closeOnce sync.Once
 }
@@ -60,70 +57,77 @@ func (c *errorSyncConn) Close() error {
 }
 
 func (f *errorSyncFixture) trackConnection(conn net.Conn) *errorSyncConn {
-	c := &errorSyncConn{Conn: conn, fail: &f.failWrites, closed: make(chan struct{})}
+	c := &errorSyncConn{Conn: conn, closed: make(chan struct{})}
 	if f.onConnect != nil {
 		f.onConnect(c)
 	}
 	return c
 }
 
-func (c *errorSyncConn) Write(data []byte) (int, error) {
-	if c.fail.Load() {
-		return 0, errors.New("injected stale snapshot connection")
-	}
-	return c.Conn.Write(data)
+// streamStatusWriter reports the first status a handler writes.
+type streamStatusWriter struct {
+	http.ResponseWriter
+	once   sync.Once
+	status func(int)
+}
+
+func (w *streamStatusWriter) note(code int) { w.once.Do(func() { w.status(code) }) }
+
+func (w *streamStatusWriter) WriteHeader(code int) {
+	w.note(code)
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *streamStatusWriter) Write(data []byte) (int, error) {
+	w.note(http.StatusOK)
+	return w.ResponseWriter.Write(data)
+}
+
+func (w *streamStatusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// setErrorsStreamRetry sets the first reconnect delay for one test.
+func setErrorsStreamRetry(t *testing.T, d time.Duration) {
+	t.Helper()
+	previous := errorsStreamRetryMin
+	errorsStreamRetryMin = d
+	t.Cleanup(func() { errorsStreamRetryMin = previous })
 }
 
 func newErrorSyncFixture(t *testing.T) *errorSyncFixture {
 	t.Helper()
+	return newErrorSyncFixtureRetry(t, 20*time.Millisecond)
+}
+
+// newErrorSyncFixtureRetry sets the first reconnect delay before any stream
+// starts; its restore runs after the streams have stopped.
+func newErrorSyncFixtureRetry(t *testing.T, retry time.Duration) *errorSyncFixture {
+	t.Helper()
+	shortenErrorsStreamKeepalive(t, 50*time.Millisecond)
+	setErrorsStreamRetry(t, retry)
 	aCert, aKey := genLeaf(t, "node-a")
 	bCert, bKey := genLeaf(t, "node-b")
 	dirA := setupNode(t, aCert, aKey, map[string][]byte{"node-b": bCert})
 	dirB := setupNode(t, bCert, bKey, map[string][]byte{"node-a": aCert})
 	aMesh, bMesh := clustertrust.Open(dirA), clustertrust.Open(dirB)
-	f := &errorSyncFixture{sender: managerForNode("node-a"), receiver: managerForNode("node-b")}
-	f.ps = NewPeerSync(f.sender, aMesh, dirA)
-	mux := newErrorsMux(f.receiver, bMesh, newErrorsPublisher())
+	f := &errorSyncFixture{subscriberRW: newCaptureRW(), peer: managerForNode("node-b"), peerPub: newErrorsPublisher()}
+	f.subscriber = NewManager(NewCodec(f.subscriberRW))
+	f.subscriber.localNodeID = "node-a"
+	f.peerPub.publish(f.peer)
+	f.peer.SetOnLocalChange(f.publishPeer)
+	f.ps = NewPeerSync(f.subscriber, aMesh, dirA)
+	mux := newErrorsMux(f.peer, bMesh, f.peerPub)
 	f.server = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/v1/errors" || r.Header.Get("Content-Type") != "application/json" {
-			t.Errorf("snapshot request: method=%s path=%s content-type=%s", r.Method, r.URL.Path, r.Header.Get("Content-Type"))
-		}
-		if r.Header.Get("Idempotency-Key") != "" || r.Header.Get("X-Idempotency-Key") != "" {
-			t.Error("snapshot unexpectedly carries an idempotency key")
+		if r.Method != http.MethodGet || r.URL.Path != errorsStreamPath {
+			t.Errorf("stream request: method=%s path=%s", r.Method, r.URL.Path)
 		}
 		if r.Host != f.expectedHost || r.TLS == nil || r.TLS.ServerName != f.expectedSNI {
-			t.Errorf("snapshot authority: Host=%q TLS=%+v", r.Host, r.TLS)
+			t.Errorf("stream authority: Host=%q TLS=%+v", r.Host, r.TLS)
 		}
-		if f.beforeIngest != nil && !f.beforeIngest(r) {
-			return
-		}
-		// Reconcile through the real ingest/pin gate before optionally losing its
-		// reply. A received request and a successful reconciliation are distinct.
-		recorder := httptest.NewRecorder()
-		mux.ServeHTTP(recorder, r)
-		if recorder.Code == http.StatusNoContent {
-			f.accepted.Add(1)
-		}
-		if f.dropReply.Swap(false) {
-			hijacker, ok := w.(http.Hijacker)
-			if !ok {
-				t.Error("HTTP/1 fixture cannot hijack reply")
-				return
+		mux.ServeHTTP(&streamStatusWriter{ResponseWriter: w, status: func(code int) {
+			if code == http.StatusOK {
+				f.streams.Add(1)
 			}
-			conn, _, err := hijacker.Hijack()
-			if err != nil {
-				t.Errorf("lose reply: %v", err)
-				return
-			}
-			if err := conn.Close(); err != nil {
-				t.Errorf("close lost reply: %v", err)
-			}
-			return
-		}
-		w.WriteHeader(recorder.Code)
-		if _, err := w.Write(recorder.Body.Bytes()); err != nil {
-			t.Errorf("write snapshot reply: %v", err)
-		}
+		}}, r)
 	}))
 	f.server.TLS = bMesh.ServerTLSConfig()
 	f.server.StartTLS()
@@ -168,10 +172,8 @@ func newErrorSyncFixture(t *testing.T) *errorSyncFixture {
 	}
 	f.local, f.remote = manager("node-a", aMesh), manager("node-b", bMesh)
 	f.ps.clients = clustertrust.NewPeerServiceClient(aMesh, clustertrust.PeerServiceClientOptions{
-		PeerClientOptions: clustertrust.PeerClientOptions{Timeout: pushTimeout},
-		BaseConfigDir:     filepath.Dir(dirA), ResolveRoute: f.ps.resolveRoute,
-		ReuseConnections: true,
-		DirectTimeout:    100 * time.Millisecond, ProbeInterval: time.Hour,
+		BaseConfigDir: filepath.Dir(dirA), ResolveRoute: f.ps.resolveRoute,
+		DirectTimeout: 100 * time.Millisecond, ProbeInterval: time.Hour,
 		DialContext: func(ctx context.Context, _, address string) (net.Conn, error) {
 			f.directCalls.Add(1)
 			if address != net.JoinHostPort("192.0.2.10", port) {
@@ -201,7 +203,9 @@ func newErrorSyncFixture(t *testing.T) *errorSyncFixture {
 			return f.trackConnection(conn), nil
 		},
 	})
-	t.Cleanup(f.ps.clients.CloseIdle)
+	// Registered last, so streams end before the reverse sessions and the
+	// server close (cleanups run in reverse order).
+	t.Cleanup(f.ps.stopStreams)
 	return f
 }
 
@@ -217,12 +221,36 @@ func (f *errorSyncFixture) connect(t *testing.T, id string) {
 	}
 }
 
+// publishPeer publishes the peer's current local-origin snapshot, as its
+// onLocalChange hook does.
+func (f *errorSyncFixture) publishPeer() { f.peerPub.publish(f.peer) }
+
 func assertErrorSnapshot(t *testing.T, mgr *Manager, want []ServiceError) {
 	t.Helper()
 	if got := mgr.snapshot(); !slices.Equal(got, want) {
 		t.Fatalf("snapshot = %+v, want %+v", got, want)
 	}
 }
+
+// waitFor polls cond for up to 5 s.
+func waitFor(t *testing.T, description string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", description)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func waitErrorSnapshot(t *testing.T, mgr *Manager, want []ServiceError) {
+	t.Helper()
+	waitFor(t, "converged snapshot", func() bool { return slices.Equal(mgr.snapshot(), want) })
+}
+
+// settle gives a stream that should do nothing time to misbehave.
+func settle() { time.Sleep(300 * time.Millisecond) }
 
 func changeErrorSyncRecord(t *testing.T, path, field string, value any) {
 	t.Helper()
@@ -246,37 +274,28 @@ func TestErrorsSnapshotDirectAndReverse(t *testing.T) {
 			f := newErrorSyncFixture(t)
 			f.blocked.Store(blocked)
 			f.connect(t, "11111111111111111111111111111111")
-			f.sender.upsert(localErr("a:one", "node-a", 1000))
-			f.sender.upsert(localErr("a:two", "node-a", 1000))
-			f.sender.ReconcilePeer("node-c", []ServiceError{localErr("foreign", "node-c", 1000)})
-			f.receiver.upsert(localErr("b:keep", "node-b", 1000))
-			f.receiver.ReconcilePeer("node-a", []ServiceError{localErr("stale", "node-a", 1000)})
-			f.receiver.ReconcilePeer("node-c", []ServiceError{localErr("c:keep", "node-c", 1000)})
+			f.peer.upsert(localErr("b:one", "node-b", 1000))
+			f.peer.upsert(localErr("b:two", "node-b", 1000))
+			f.peer.ReconcilePeer("node-c", []ServiceError{localErr("foreign", "node-c", 1000)})
+			f.publishPeer()
+			f.subscriber.upsert(localErr("a:keep", "node-a", 1000))
+			f.subscriber.ReconcilePeer("node-b", []ServiceError{localErr("stale", "node-b", 1000)})
+			f.subscriber.ReconcilePeer("node-c", []ServiceError{localErr("c:keep", "node-c", 1000)})
 			f.ps.handleEvent(context.Background(), f.event)
-			assertErrorSnapshot(t, f.receiver, []ServiceError{
-				localErr("a:one", "node-a", 1000), localErr("a:two", "node-a", 1000),
-				localErr("b:keep", "node-b", 1000), localErr("c:keep", "node-c", 1000),
+			waitErrorSnapshot(t, f.subscriber, []ServiceError{
+				localErr("a:keep", "node-a", 1000), localErr("b:one", "node-b", 1000),
+				localErr("b:two", "node-b", 1000), localErr("c:keep", "node-c", 1000),
 			})
-			if !f.sender.clearByID("a:one") {
-				t.Fatal("clear local error did not change sender")
+			if !f.peer.clearByID("b:one") {
+				t.Fatal("clear local error did not change peer")
 			}
-			// Exercise the same full-snapshot owner called by the heartbeat.
-			var reused atomic.Int32
-			trace := &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) {
-				if info.Reused {
-					reused.Add(1)
-				}
-			}}
-			f.ps.pushAll(httptrace.WithClientTrace(context.Background(), trace))
-			f.ps.pushAll(httptrace.WithClientTrace(context.Background(), trace))
-			assertErrorSnapshot(t, f.receiver, []ServiceError{
-				localErr("a:two", "node-a", 1000), localErr("b:keep", "node-b", 1000), localErr("c:keep", "node-c", 1000),
+			f.publishPeer()
+			waitErrorSnapshot(t, f.subscriber, []ServiceError{
+				localErr("a:keep", "node-a", 1000), localErr("b:two", "node-b", 1000), localErr("c:keep", "node-c", 1000),
 			})
-			if got := f.accepted.Load(); got != 3 {
-				t.Fatalf("accepted snapshots = %d, want 3", got)
-			}
-			if got := reused.Load(); got != 2 {
-				t.Fatalf("reused heartbeat connections = %d, want 2", got)
+			// The change arrived on the open stream, not on a new connection.
+			if got := f.streams.Load(); got != 1 {
+				t.Fatalf("streams = %d, want 1", got)
 			}
 			wantDirect, wantReverse := int32(1), int32(0)
 			if blocked {
@@ -291,60 +310,20 @@ func TestErrorsSnapshotDirectAndReverse(t *testing.T) {
 	test("blocked inbound uses reverse", true)
 }
 
-func TestErrorsSnapshotLostReplyDoesNotReplay(t *testing.T) {
-	test := func(name string, blocked bool) {
-		t.Run(name, func(t *testing.T) {
-			f := newErrorSyncFixture(t)
-			f.blocked.Store(blocked)
-			f.connect(t, "11111111111111111111111111111111")
-			f.dropReply.Store(true)
-			f.sender.upsert(localErr("a:one", "node-a", 1000))
-			f.ps.handleEvent(context.Background(), f.event)
-			assertErrorSnapshot(t, f.receiver, []ServiceError{localErr("a:one", "node-a", 1000)})
-			if got := f.accepted.Load(); got != 1 {
-				t.Fatalf("lost reply reconciled %d times, want exactly 1", got)
-			}
-			wantReverse := int32(0)
-			if blocked {
-				wantReverse = 1
-			}
-			if got := f.reverseCalls.Load(); got != wantReverse {
-				t.Fatalf("reverse dials after lost reply = %d, want %d (no fallback after dispatch)", got, wantReverse)
-			}
-			f.local.Revoke("node-b")
-			f.remote.Revoke("node-a")
-			f.blocked.Store(true)
-			f.ps.pushAll(context.Background())
-			if got := f.accepted.Load(); got != 1 {
-				t.Fatalf("disconnected session reconciled %d snapshots, want 1", got)
-			}
-			f.connect(t, "22222222222222222222222222222222")
-			// Reconnect itself does not push; a later explicit heartbeat converges.
-			if got := f.accepted.Load(); got != 1 {
-				t.Fatalf("reconnect replayed snapshot: accepted=%d", got)
-			}
-			f.ps.pushAll(context.Background())
-			assertErrorSnapshot(t, f.receiver, []ServiceError{localErr("a:one", "node-a", 1000)})
-			if got := f.accepted.Load(); got != 2 {
-				t.Fatalf("reconnect heartbeat accepted=%d, want 2", got)
-			}
-		})
-	}
-	test("direct reply lost after reconcile", false)
-	test("reverse reply lost after reconcile", true)
-}
-
 func TestErrorsSnapshotUnavailableFailsClosed(t *testing.T) {
 	test := func(name string, wantDirect, wantReverse int32, prepare func(*testing.T, *errorSyncFixture)) {
 		t.Run(name, func(t *testing.T) {
-			f := newErrorSyncFixture(t)
+			// One attempt only, so the dial counts are exact.
+			f := newErrorSyncFixtureRetry(t, time.Hour)
 			f.blocked.Store(true)
-			f.sender.upsert(localErr("a:one", "node-a", 1000))
+			f.peer.upsert(localErr("b:one", "node-b", 1000))
+			f.publishPeer()
 			prepare(t, f)
 			f.ps.handleEvent(context.Background(), f.event)
-			assertErrorSnapshot(t, f.receiver, nil)
-			if got := f.accepted.Load(); got != 0 {
-				t.Fatalf("unavailable peer accepted %d snapshots, want 0", got)
+			settle()
+			assertErrorSnapshot(t, f.subscriber, nil)
+			if got := f.streams.Load(); got != 0 {
+				t.Fatalf("unavailable peer served %d streams, want 0", got)
 			}
 			if direct, reverse := f.directCalls.Load(), f.reverseCalls.Load(); direct != wantDirect || reverse != wantReverse {
 				t.Fatalf("unavailable dial counts: direct=%d reverse=%d, want %d/%d", direct, reverse, wantDirect, wantReverse)
@@ -388,14 +367,18 @@ func TestErrorsSnapshotUnavailableFailsClosed(t *testing.T) {
 func TestErrorsSnapshotAuthorityChangesDuringSetup(t *testing.T) {
 	test := func(name string, change func(*testing.T, *errorSyncFixture)) {
 		t.Run(name, func(t *testing.T) {
-			f := newErrorSyncFixture(t)
+			// One attempt only: a later attempt under the changed authority is a
+			// new, correctly authorized stream.
+			f := newErrorSyncFixtureRetry(t, time.Hour)
 			f.connect(t, "11111111111111111111111111111111")
 			f.beforeDial = func() { change(t, f) }
-			f.sender.upsert(localErr("a:one", "node-a", 1000))
+			f.peer.upsert(localErr("b:one", "node-b", 1000))
+			f.publishPeer()
 			f.ps.handleEvent(context.Background(), f.event)
-			assertErrorSnapshot(t, f.receiver, nil)
-			if accepted, reverse := f.accepted.Load(), f.reverseCalls.Load(); accepted != 0 || reverse != 0 {
-				t.Fatalf("changed authority dispatched snapshot: accepted=%d reverse=%d, want 0/0", accepted, reverse)
+			settle()
+			assertErrorSnapshot(t, f.subscriber, nil)
+			if streams, reverse := f.streams.Load(), f.reverseCalls.Load(); streams != 0 || reverse != 0 {
+				t.Fatalf("changed authority opened a stream: streams=%d reverse=%d, want 0/0", streams, reverse)
 			}
 		})
 	}
@@ -421,54 +404,16 @@ func TestErrorsSnapshotCancellationBeforeDispatch(t *testing.T) {
 	f.connect(t, "11111111111111111111111111111111")
 	ctx, cancel := context.WithCancel(context.Background())
 	f.beforeDial = cancel
-	f.sender.upsert(localErr("a:one", "node-a", 1000))
+	f.peer.upsert(localErr("b:one", "node-b", 1000))
+	f.publishPeer()
 	f.ps.handleEvent(ctx, f.event)
-	assertErrorSnapshot(t, f.receiver, nil)
+	settle()
+	assertErrorSnapshot(t, f.subscriber, nil)
 	if got := f.reverseCalls.Load(); got != 0 {
 		t.Fatalf("canceled setup attempted %d reverse dials, want 0", got)
 	}
-}
-
-func TestErrorsSnapshotCancellationAfterDispatch(t *testing.T) {
-	f := newErrorSyncFixture(t)
-	f.blocked.Store(true)
-	f.connect(t, "11111111111111111111111111111111")
-	received, canceled := make(chan struct{}), make(chan struct{})
-	f.beforeIngest = func(r *http.Request) bool {
-		if _, err := io.Copy(io.Discard, r.Body); err != nil {
-			t.Errorf("read dispatched snapshot: %v", err)
-			return false
-		}
-		close(received)
-		select {
-		case <-r.Context().Done():
-		case <-time.After(5 * time.Second):
-			t.Error("receiver context survived caller cancellation")
-		}
-		close(canceled)
-		return false
-	}
-	f.sender.upsert(localErr("a:one", "node-a", 1000))
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan struct{})
-	go func() { defer close(done); f.ps.handleEvent(ctx, f.event) }()
-	select {
-	case <-received:
-	case <-time.After(2 * time.Second):
-		t.Fatal("reverse snapshot was not dispatched")
-	}
-	cancel()
-	for _, signal := range []<-chan struct{}{done, canceled} {
-		select {
-		case <-signal:
-		case <-time.After(2 * time.Second):
-			t.Fatal("caller cancellation did not end request/receiver")
-		}
-	}
-	assertErrorSnapshot(t, f.receiver, nil)
-	if got := f.reverseCalls.Load(); got != 1 {
-		t.Fatalf("canceled request used %d reverse streams, want 1", got)
+	if got := f.directCalls.Load(); got != 1 {
+		t.Fatalf("canceled stream retried: direct dials = %d, want 1", got)
 	}
 }
 
@@ -481,26 +426,25 @@ func TestErrorsSnapshotAddressRecovery(t *testing.T) {
 	f.expectedSNI = ""
 	// Use the production constructor and direct dialer, proving the selected
 	// endpoint is what request authorization accepts.
-	f.ps = NewPeerSync(f.sender, f.ps.mesh, f.ps.clusterDir)
-	t.Cleanup(f.ps.clients.CloseIdle)
+	f.ps = NewPeerSync(f.subscriber, f.ps.mesh, f.ps.clusterDir)
+	t.Cleanup(f.ps.stopStreams)
 	f.ps.addrs = reach.NewChooser(reach.WithDial(func(_, address string, _ time.Duration) (net.Conn, error) {
 		if address != f.expectedHost {
 			return nil, errors.New("address blocked")
 		}
 		return net.Dial("tcp", f.server.Listener.Addr().String())
 	}))
-	f.sender.upsert(localErr("a:one", "node-a", 1000))
+	f.peer.upsert(localErr("b:one", "node-b", 1000))
+	f.publishPeer()
 	f.ps.handleEvent(context.Background(), f.event)
-	assertErrorSnapshot(t, f.receiver, []ServiceError{localErr("a:one", "node-a", 1000)})
+	waitErrorSnapshot(t, f.subscriber, []ServiceError{localErr("b:one", "node-b", 1000)})
 	route, ok := f.ps.resolveRoute("node-b", noderec.ServiceErrors)
 	if !ok || route.Address != f.expectedHost {
 		t.Fatalf("resolved route = %+v, admitted=%t, want chosen loopback endpoint", route, ok)
 	}
-	var reused atomic.Bool
-	trace := &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) { reused.Store(info.Reused) }}
-	f.ps.pushAll(httptrace.WithClientTrace(context.Background(), trace))
-	if !reused.Load() || f.accepted.Load() != 2 {
-		t.Fatalf("production heartbeat: reused=%t accepted=%d, want true/2", reused.Load(), f.accepted.Load())
+	settle()
+	if got := f.streams.Load(); got != 1 {
+		t.Fatalf("streams = %d, want 1 (the selected address kept its stream)", got)
 	}
 }
 
@@ -508,29 +452,32 @@ func TestErrorsSnapshotDuplicatePrincipalFailsClosed(t *testing.T) {
 	test := func(name string, resolve func(*testing.T, *errorSyncFixture, DiscoveryEvent)) {
 		t.Run(name, func(t *testing.T) {
 			f := newErrorSyncFixture(t)
-			f.sender.upsert(localErr("a:one", "node-a", 1000))
+			f.peer.upsert(localErr("b:one", "node-b", 1000))
+			f.publishPeer()
 			f.ps.handleEvent(context.Background(), f.event)
+			waitErrorSnapshot(t, f.subscriber, []ServiceError{localErr("b:one", "node-b", 1000)})
 			duplicate := f.event
 			duplicate.Node.ID = "node-b-alias"
 			f.ps.handleEvent(context.Background(), duplicate)
 			// Both advertisements are present, even if only the first endpoint has
-			// been selected. Repeated resolution must never pick a map entry.
+			// been selected. Repeated resolution must never pick a map entry, and
+			// the open stream ends at its next line.
 			for range 20 {
 				if route, ok := f.ps.resolveRoute("node-b", noderec.ServiceErrors); ok || route != (clustertrust.PeerServiceRoute{}) {
 					t.Fatalf("ambiguous principal resolved: %+v admitted=%t", route, ok)
 				}
 			}
-			f.ps.pushAll(context.Background())
-			if accepted, direct, reverse := f.accepted.Load(), f.directCalls.Load(), f.reverseCalls.Load(); accepted != 1 || direct != 1 || reverse != 0 {
-				t.Fatalf("ambiguous snapshot dispatched: accepted=%d direct=%d reverse=%d, want 1/1/0", accepted, direct, reverse)
+			settle()
+			if streams, direct, reverse := f.streams.Load(), f.directCalls.Load(), f.reverseCalls.Load(); streams != 1 || direct != 1 || reverse != 0 {
+				t.Fatalf("ambiguous principal streamed: streams=%d direct=%d reverse=%d, want 1/1/0", streams, direct, reverse)
 			}
 			resolve(t, f, duplicate)
-			f.ps.pushAll(context.Background())
+			waitFor(t, "a stream for the resolved principal", func() bool { return f.streams.Load() == 2 })
 			route, ok := f.ps.resolveRoute("node-b", noderec.ServiceErrors)
-			if !ok || route.Address != f.expectedHost || f.accepted.Load() != 2 {
-				t.Fatalf("resolved duplicate: route=%+v admitted=%t accepted=%d, want current endpoint and 2 snapshots", route, ok, f.accepted.Load())
+			if !ok || route.Address != f.expectedHost {
+				t.Fatalf("resolved duplicate: route=%+v admitted=%t, want current endpoint", route, ok)
 			}
-			assertErrorSnapshot(t, f.receiver, []ServiceError{localErr("a:one", "node-a", 1000)})
+			waitErrorSnapshot(t, f.subscriber, []ServiceError{localErr("b:one", "node-b", 1000)})
 		})
 	}
 	test("remove original advertisement", func(t *testing.T, f *errorSyncFixture, duplicate DiscoveryEvent) {
@@ -553,213 +500,7 @@ func TestErrorsSnapshotDuplicatePrincipalFailsClosed(t *testing.T) {
 	})
 }
 
-func TestErrorsSnapshotStalePooledConnectionDoesNotReplay(t *testing.T) {
-	test := func(name string, blocked bool) {
-		t.Run(name, func(t *testing.T) {
-			f := newErrorSyncFixture(t)
-			f.blocked.Store(blocked)
-			f.connect(t, "11111111111111111111111111111111")
-			f.sender.upsert(localErr("a:one", "node-a", 1000))
-			f.ps.handleEvent(context.Background(), f.event)
-			f.sender.upsert(localErr("a:two", "node-a", 1000))
-			f.failWrites.Store(true)
-			var reused atomic.Bool
-			trace := &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) { reused.Store(info.Reused) }}
-			f.ps.pushAll(httptrace.WithClientTrace(context.Background(), trace))
-			wantReverse := int32(0)
-			if blocked {
-				wantReverse = 1
-			}
-			if !reused.Load() || f.accepted.Load() != 1 || f.directCalls.Load() != 1 || f.reverseCalls.Load() != wantReverse {
-				t.Fatalf("stale snapshot: reused=%t accepted=%d direct=%d reverse=%d, want true/1/1/%d", reused.Load(), f.accepted.Load(), f.directCalls.Load(), f.reverseCalls.Load(), wantReverse)
-			}
-			assertErrorSnapshot(t, f.receiver, []ServiceError{localErr("a:one", "node-a", 1000)})
-			f.failWrites.Store(false)
-			f.ps.pushAll(context.Background())
-			assertErrorSnapshot(t, f.receiver, []ServiceError{localErr("a:one", "node-a", 1000), localErr("a:two", "node-a", 1000)})
-			if f.accepted.Load() != 2 || f.reverseCalls.Load() != wantReverse+1 {
-				t.Fatalf("later heartbeat: accepted=%d reverse=%d, want 2/%d", f.accepted.Load(), f.reverseCalls.Load(), wantReverse+1)
-			}
-		})
-	}
-	test("direct", false)
-	test("reverse", true)
-}
-
-func TestErrorsSnapshotPooledReplyLossDoesNotReplay(t *testing.T) {
-	test := func(name string, blocked bool) {
-		t.Run(name, func(t *testing.T) {
-			f := newErrorSyncFixture(t)
-			f.blocked.Store(blocked)
-			f.connect(t, "11111111111111111111111111111111")
-			f.sender.upsert(localErr("a:one", "node-a", 1000))
-			f.ps.handleEvent(context.Background(), f.event)
-			f.sender.upsert(localErr("a:two", "node-a", 1000))
-			f.dropReply.Store(true)
-			var reused atomic.Bool
-			trace := &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) { reused.Store(info.Reused) }}
-			f.ps.pushAll(httptrace.WithClientTrace(context.Background(), trace))
-			wantReverse := int32(0)
-			if blocked {
-				wantReverse = 1
-			}
-			if !reused.Load() || f.accepted.Load() != 2 || f.directCalls.Load() != 1 || f.reverseCalls.Load() != wantReverse {
-				t.Fatalf("lost pooled reply: reused=%t accepted=%d direct=%d reverse=%d, want true/2/1/%d", reused.Load(), f.accepted.Load(), f.directCalls.Load(), f.reverseCalls.Load(), wantReverse)
-			}
-			assertErrorSnapshot(t, f.receiver, []ServiceError{localErr("a:one", "node-a", 1000), localErr("a:two", "node-a", 1000)})
-			f.ps.pushAll(context.Background())
-			if f.accepted.Load() != 3 || f.reverseCalls.Load() != wantReverse+1 {
-				t.Fatalf("later heartbeat after reply loss: accepted=%d reverse=%d, want 3/%d", f.accepted.Load(), f.reverseCalls.Load(), wantReverse+1)
-			}
-		})
-	}
-	test("direct", false)
-	test("reverse", true)
-}
-
-func TestErrorsSnapshotPooledAuthorityChangesBeforeDispatch(t *testing.T) {
-	test := func(name string, blocked bool, change func(*testing.T, *errorSyncFixture)) {
-		t.Run(name, func(t *testing.T) {
-			f := newErrorSyncFixture(t)
-			f.blocked.Store(blocked)
-			f.connect(t, "11111111111111111111111111111111")
-			f.sender.upsert(localErr("a:one", "node-a", 1000))
-			f.ps.handleEvent(context.Background(), f.event)
-			f.sender.upsert(localErr("a:two", "node-a", 1000))
-			var reused atomic.Bool
-			trace := &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) {
-				reused.Store(info.Reused)
-				change(t, f)
-			}}
-			f.ps.pushAll(httptrace.WithClientTrace(context.Background(), trace))
-			wantReverse := int32(0)
-			if blocked {
-				wantReverse = 1
-			}
-			if !reused.Load() || f.accepted.Load() != 1 || f.directCalls.Load() != 1 || f.reverseCalls.Load() != wantReverse {
-				t.Fatalf("authority changed at pooled dispatch: reused=%t accepted=%d direct=%d reverse=%d, want true/1/1/%d", reused.Load(), f.accepted.Load(), f.directCalls.Load(), f.reverseCalls.Load(), wantReverse)
-			}
-			assertErrorSnapshot(t, f.receiver, []ServiceError{localErr("a:one", "node-a", 1000)})
-		})
-	}
-	localReadmission := func(t *testing.T, f *errorSyncFixture) {
-		path := filepath.Join(f.ps.clusterDir, "admission.json")
-		changeErrorSyncRecord(t, path, "counter", 2)
-		changeErrorSyncRecord(t, path, "activated", 2)
-		changeErrorSyncRecord(t, path, "epoch", 2)
-	}
-	peerReadmission := func(t *testing.T, f *errorSyncFixture) {
-		changeErrorSyncRecord(t, filepath.Join(f.ps.clusterDir, "trusted", "node-b.json"), "admissionEpoch", 2)
-	}
-	revokePin := func(t *testing.T, f *errorSyncFixture) {
-		if err := os.Remove(filepath.Join(f.ps.clusterDir, "trusted", "node-b.json")); err != nil {
-			t.Error(err)
-		}
-	}
-	rotatePin := func(t *testing.T, f *errorSyncFixture) {
-		cert, _ := genLeaf(t, "node-b")
-		changeErrorSyncRecord(t, filepath.Join(f.ps.clusterDir, "trusted", "node-b.json"), "certPem", string(cert))
-	}
-	replaceEndpoint := func(t *testing.T, f *errorSyncFixture) {
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-		event := f.event
-		event.Type = "updated"
-		f.ps.handleEvent(ctx, event)
-	}
-	duplicatePrincipal := func(t *testing.T, f *errorSyncFixture) {
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-		event := f.event
-		event.Node.ID = "node-b-alias"
-		f.ps.handleEvent(ctx, event)
-	}
-	test("direct local readmission", false, localReadmission)
-	test("reverse local readmission", true, localReadmission)
-	test("direct peer readmission", false, peerReadmission)
-	test("reverse peer readmission", true, peerReadmission)
-	test("direct pin revocation", false, revokePin)
-	test("reverse pin revocation", true, revokePin)
-	test("direct pin rotation", false, rotatePin)
-	test("reverse pin rotation", true, rotatePin)
-	test("direct endpoint generation", false, replaceEndpoint)
-	test("reverse endpoint generation", true, replaceEndpoint)
-	test("direct duplicate principal", false, duplicatePrincipal)
-	test("reverse duplicate principal", true, duplicatePrincipal)
-}
-
-func TestErrorsSnapshotPooledCancellation(t *testing.T) {
-	test := func(name string, blocked bool) {
-		t.Run(name, func(t *testing.T) {
-			f := newErrorSyncFixture(t)
-			f.blocked.Store(blocked)
-			f.connect(t, "11111111111111111111111111111111")
-			var pause atomic.Bool
-			received, canceled := make(chan struct{}), make(chan struct{})
-			f.beforeIngest = func(r *http.Request) bool {
-				if !pause.Load() {
-					return true
-				}
-				if _, err := io.Copy(io.Discard, r.Body); err != nil {
-					t.Errorf("read canceled snapshot: %v", err)
-					return false
-				}
-				close(received)
-				select {
-				case <-r.Context().Done():
-				case <-time.After(5 * time.Second):
-					t.Error("pooled receiver survived cancellation")
-				}
-				close(canceled)
-				return false
-			}
-			f.sender.upsert(localErr("a:one", "node-a", 1000))
-			f.ps.handleEvent(context.Background(), f.event)
-			f.sender.upsert(localErr("a:two", "node-a", 1000))
-			pause.Store(true)
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			var reused atomic.Bool
-			trace := &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) { reused.Store(info.Reused) }}
-			done := make(chan struct{})
-			go func() {
-				defer close(done)
-				f.ps.pushAll(httptrace.WithClientTrace(ctx, trace))
-			}()
-			select {
-			case <-received:
-			case <-time.After(2 * time.Second):
-				t.Fatal("pooled snapshot was not dispatched")
-			}
-			cancel()
-			for _, signal := range []<-chan struct{}{done, canceled} {
-				select {
-				case <-signal:
-				case <-time.After(2 * time.Second):
-					t.Fatal("pooled caller or receiver survived cancellation")
-				}
-			}
-			wantReverse := int32(0)
-			if blocked {
-				wantReverse = 1
-			}
-			if !reused.Load() || f.accepted.Load() != 1 || f.directCalls.Load() != 1 || f.reverseCalls.Load() != wantReverse {
-				t.Fatalf("canceled pooled snapshot: reused=%t accepted=%d direct=%d reverse=%d, want true/1/1/%d", reused.Load(), f.accepted.Load(), f.directCalls.Load(), f.reverseCalls.Load(), wantReverse)
-			}
-			assertErrorSnapshot(t, f.receiver, []ServiceError{localErr("a:one", "node-a", 1000)})
-			pause.Store(false)
-			f.ps.pushAll(context.Background())
-			assertErrorSnapshot(t, f.receiver, []ServiceError{localErr("a:one", "node-a", 1000), localErr("a:two", "node-a", 1000)})
-			if f.accepted.Load() != 2 {
-				t.Fatalf("later heartbeat after cancellation accepted=%d, want 2", f.accepted.Load())
-			}
-		})
-	}
-	test("direct", false)
-	test("reverse", true)
-}
-
-func TestPeerSyncRunExitClosesIdleConnections(t *testing.T) {
+func TestPeerSyncRunExitEndsStreams(t *testing.T) {
 	test := func(name string, blocked, cancelRun bool) {
 		t.Run(name, func(t *testing.T) {
 			f := newErrorSyncFixture(t)
@@ -767,24 +508,7 @@ func TestPeerSyncRunExitClosesIdleConnections(t *testing.T) {
 			f.connect(t, "11111111111111111111111111111111")
 			connections := make(chan *errorSyncConn, 4)
 			f.onConnect = func(conn *errorSyncConn) { connections <- conn }
-			wait := func(signal <-chan struct{}, description string) {
-				t.Helper()
-				select {
-				case <-signal:
-				case <-time.After(time.Second):
-					t.Fatalf("timed out waiting for %s", description)
-				}
-			}
-			reused := make(chan struct{}, 1)
-			fresh := make(chan struct{}, 2)
-			trace := &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) {
-				if info.Reused {
-					reused <- struct{}{}
-				} else {
-					fresh <- struct{}{}
-				}
-			}}
-			ctx, cancel := context.WithCancel(httptrace.WithClientTrace(context.Background(), trace))
+			ctx, cancel := context.WithCancel(context.Background())
 			events := make(chan DiscoveryEvent)
 			done := make(chan struct{})
 			go func() {
@@ -793,87 +517,43 @@ func TestPeerSyncRunExitClosesIdleConnections(t *testing.T) {
 			}()
 			t.Cleanup(func() {
 				cancel()
-				wait(done, "Run cleanup")
+				<-done
 			})
-			// An ignored self event is a barrier: Run receives it only after the
-			// preceding synchronous push has drained and closed its response.
-			barrier := func() {
-				t.Helper()
-				select {
-				case events <- DiscoveryEvent{Node: RawNode{ID: "node-a"}}:
-				case <-time.After(time.Second):
-					t.Fatal("Run did not finish its snapshot push")
-				}
-			}
-			f.sender.upsert(localErr("a:one", "node-a", 1000))
+			f.peer.upsert(localErr("b:one", "node-b", 1000))
+			f.publishPeer()
 			select {
 			case events <- f.event:
 			case <-time.After(time.Second):
 				t.Fatal("Run did not receive discovery")
 			}
-			wait(fresh, "cold-start snapshot dispatch")
-			barrier()
-			activeConn := <-connections
-			body, err := f.ps.snapshotBody()
-			if err != nil {
-				t.Fatalf("encode independent snapshot: %v", err)
-			}
-			req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://"+f.expectedHost+"/v1/errors", bytes.NewReader(body))
-			if err != nil {
-				t.Fatalf("create independent snapshot: %v", err)
-			}
-			req.Header.Set("Content-Type", "application/json")
-			response, err := f.ps.clients.Client("node-b", noderec.ServiceErrors).Do(req)
-			if err != nil {
-				t.Fatalf("expose independent response: %v", err)
-			}
-			defer response.Body.Close()
-			if response.StatusCode != http.StatusNoContent {
-				t.Fatalf("independent response status = %d, want 204", response.StatusCode)
-			}
-			// Keep that response exposed while Run warms and reuses another
-			// connection. The held body belongs to an independent caller context.
-			f.ps.TriggerPush()
-			wait(fresh, "second snapshot connection dispatch")
-			barrier()
-			idleConn := <-connections
-			f.ps.TriggerPush()
-			wait(reused, "idle snapshot connection reuse")
-			barrier()
-			for _, conn := range []*errorSyncConn{activeConn, idleConn} {
-				select {
-				case <-conn.closed:
-					t.Fatal("snapshot connection closed before Run exit")
-				default:
-				}
+			waitErrorSnapshot(t, f.subscriber, []ServiceError{localErr("b:one", "node-b", 1000)})
+			var conn *errorSyncConn
+			select {
+			case conn = <-connections:
+			case <-time.After(time.Second):
+				t.Fatal("no stream connection")
 			}
 			if cancelRun {
 				cancel()
 			} else {
 				close(events)
 			}
-			wait(done, "Run exit")
-			wait(idleConn.closed, "prompt idle connection closure")
-			select {
-			case <-activeConn.closed:
-				t.Fatal("Run cleanup interrupted the independent exposed response")
-			default:
+			for _, signal := range []<-chan struct{}{done, conn.closed} {
+				select {
+				case <-signal:
+				case <-time.After(2 * time.Second):
+					t.Fatal("Run exit left the stream open")
+				}
 			}
-			if data, err := io.ReadAll(response.Body); err != nil || len(data) != 0 {
-				t.Fatalf("independent response body = %q, error = %v, want empty successful body", data, err)
-			}
-			if err := response.Body.Close(); err != nil {
-				t.Fatalf("close independent response: %v", err)
-			}
-			wait(activeConn.closed, "retired active connection closure after body release")
-			wantDirect, wantReverse := int32(2), int32(0)
+			wantDirect, wantReverse := int32(1), int32(0)
 			if blocked {
-				wantDirect, wantReverse = 1, 2
+				wantDirect, wantReverse = 1, 1
 			}
-			if f.accepted.Load() != 4 || f.directCalls.Load() != wantDirect || f.reverseCalls.Load() != wantReverse {
-				t.Fatalf("Run cleanup: accepted=%d direct=%d reverse=%d, want 4/%d/%d", f.accepted.Load(), f.directCalls.Load(), f.reverseCalls.Load(), wantDirect, wantReverse)
+			if f.streams.Load() != 1 || f.directCalls.Load() != wantDirect || f.reverseCalls.Load() != wantReverse {
+				t.Fatalf("Run exit: streams=%d direct=%d reverse=%d, want 1/%d/%d", f.streams.Load(), f.directCalls.Load(), f.reverseCalls.Load(), wantDirect, wantReverse)
 			}
-			assertErrorSnapshot(t, f.receiver, []ServiceError{localErr("a:one", "node-a", 1000)})
+			// Entries stay when a stream ends; only discovery removal evicts.
+			assertErrorSnapshot(t, f.subscriber, []ServiceError{localErr("b:one", "node-b", 1000)})
 		})
 	}
 	test("direct context cancellation", false, true)
@@ -882,14 +562,16 @@ func TestPeerSyncRunExitClosesIdleConnections(t *testing.T) {
 	test("reverse event channel closure", true, false)
 }
 
-func TestErrorsSnapshotReadmissionRetiresPooledConnection(t *testing.T) {
+func TestErrorsSnapshotReadmissionRestartsStream(t *testing.T) {
 	test := func(name string, blocked bool) {
 		t.Run(name, func(t *testing.T) {
 			f := newErrorSyncFixture(t)
 			f.blocked.Store(blocked)
 			f.connect(t, "11111111111111111111111111111111")
-			f.sender.upsert(localErr("a:one", "node-a", 1000))
+			f.peer.upsert(localErr("b:one", "node-b", 1000))
+			f.publishPeer()
 			f.ps.handleEvent(context.Background(), f.event)
+			waitErrorSnapshot(t, f.subscriber, []ServiceError{localErr("b:one", "node-b", 1000)})
 			before, ok := f.ps.resolveRoute("node-b", noderec.ServiceErrors)
 			if !ok {
 				t.Fatal("initial route unavailable")
@@ -904,15 +586,15 @@ func TestErrorsSnapshotReadmissionRetiresPooledConnection(t *testing.T) {
 			if !ok || !admitted || after.Incarnation != incarnation || after.Incarnation == before.Incarnation || after.Generation != before.Generation || after.Address != before.Address {
 				t.Fatalf("readmission route: before=%+v after=%+v shared=%q admitted=%t/%t", before, after, incarnation, ok, admitted)
 			}
-			var reused atomic.Bool
-			trace := &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) { reused.Store(info.Reused) }}
-			f.ps.pushAll(httptrace.WithClientTrace(context.Background(), trace))
+			// The old stream ends at its next line and a new one opens on a
+			// fresh connection under the new incarnation.
+			waitFor(t, "a stream under the new incarnation", func() bool { return f.streams.Load() == 2 })
 			wantReverse := int32(0)
 			if blocked {
 				wantReverse = 2
 			}
-			if reused.Load() || f.accepted.Load() != 2 || f.directCalls.Load() != 2 || f.reverseCalls.Load() != wantReverse {
-				t.Fatalf("readmission heartbeat: reused=%t accepted=%d direct=%d reverse=%d, want false/2/2/%d", reused.Load(), f.accepted.Load(), f.directCalls.Load(), f.reverseCalls.Load(), wantReverse)
+			if f.directCalls.Load() != 2 || f.reverseCalls.Load() != wantReverse {
+				t.Fatalf("readmission: direct=%d reverse=%d, want 2/%d", f.directCalls.Load(), f.reverseCalls.Load(), wantReverse)
 			}
 		})
 	}

@@ -134,6 +134,7 @@ func TestErrorsStreamSendsSnapshotThenChanges(t *testing.T) {
 }
 
 func TestErrorsStreamRequiresPinnedCallerIdentity(t *testing.T) {
+	shortenErrorsStreamKeepalive(t, 50*time.Millisecond)
 	selfCert, selfKey := genLeaf(t, "uuid-self")
 	peerCert, peerKey := genLeaf(t, "uuid-peer")
 	impostorCert, impostorKey := genLeaf(t, "uuid-peer")
@@ -177,7 +178,6 @@ func TestErrorsStreamRequiresPinnedCallerIdentity(t *testing.T) {
 	}
 
 	t.Run("removing the caller's pin ends an open stream", func(t *testing.T) {
-		shortenErrorsStreamKeepalive(t, 50*time.Millisecond)
 		resp, lines := openErrorsStream(t, meshClient(t, callerMesh(peerCert, peerKey), "uuid-self"), srv.URL)
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("status = %d, want 200", resp.StatusCode)
