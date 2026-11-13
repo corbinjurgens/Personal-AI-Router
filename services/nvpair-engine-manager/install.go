@@ -22,15 +22,17 @@ import (
 // Install obtains the engine in user mode: download (checksum-verified)
 // then run the declared command. No-op if already detected.
 func (e *Executor) Install(ctx context.Context, engine string) (err error) {
+	st, err := e.state(engine)
+	if err != nil {
+		return err
+	}
+	st.refreshMu.Lock()
+	defer st.refreshMu.Unlock()
 	done, err := e.admitMutation(engine)
 	if err != nil {
 		return err
 	}
 	defer done()
-	st, err := e.state(engine)
-	if err != nil {
-		return err
-	}
 	st.opMu.Lock()
 	defer st.opMu.Unlock()
 	var finishRefresh refreshFinish
@@ -52,7 +54,7 @@ func (e *Executor) Install(ctx context.Context, engine string) (err error) {
 			st.mu.Unlock()
 		}
 	}()
-	e.recoverInterruptedRefresh(engine, st)
+	e.prepareManagedRefresh(engine, st)
 	if ok, _ := e.Detect(engine); ok {
 		e.reporter.clear(installFailedID(engine))
 		if e.managedInstallStale(st) {
@@ -191,15 +193,18 @@ func (e *Executor) runPinnedInstall(ctx context.Context, engine string, inst *In
 // the engine first. No-op only when its executable is absent, independently
 // of whether all mandatory installation files are still present.
 func (e *Executor) Uninstall(ctx context.Context, engine string) (err error) {
+	st, err := e.state(engine)
+	if err != nil {
+		return err
+	}
+	// Uninstall removes refresh leftovers, so it waits for a refresh in flight.
+	st.refreshMu.Lock()
+	defer st.refreshMu.Unlock()
 	done, err := e.admitMutation(engine)
 	if err != nil {
 		return err
 	}
 	defer done()
-	st, err := e.state(engine)
-	if err != nil {
-		return err
-	}
 	st.opMu.Lock()
 	defer st.opMu.Unlock()
 	defer func() {

@@ -1981,18 +1981,29 @@ destination grants, Pause and recovery/admission retain their existing owners.
   A user-selected or override build outside the managed directory is never
   touched. The new build is downloaded and unpacked into the sibling
   `engine-bin/.<engine>.staging` and must pass detection there; its marker is
-  written there. Startup restoration stages before taking the engine's operation
-  lock, so settings reads are not held up by the download; `engine:install`
-  stages under it. The engine is then stopped through the same presence check
-  and stop path as `engine:uninstall`, the installed directory is renamed to
+  written there. Each engine has one refresh lock, taken before mutation
+  admission and the operation lock by startup restoration, `engine:install`
+  and `engine:uninstall`, so refreshes of one engine never overlap and share
+  the staging directory safely. Startup restoration stages before mutation
+  admission and the operation lock, so diagnostics and settings reads are not
+  held up by the download; `engine:install` stages under them. The engine is
+  then stopped through the same presence check and stop path as
+  `engine:uninstall`, the installed directory is renamed to
   `engine-bin/.<engine>.previous`, and the staged directory takes its place
   (renames retry briefly). If detection fails in place, or the new build fails
-  to start, the old directory is restored and started. The previous directory is
-  removed after the new build starts; a start skipped by a pause or veto leaves
-  detection as the only check. A refresh interrupted between the two renames is
-  repaired before the next detection by renaming the previous directory back;
-  `engine:uninstall` removes both siblings so a leftover cannot bring an
-  uninstalled engine back. Progress ends with `done` after a refresh, or
+  to start, the old directory is restored and started; without a previous
+  directory, or when restoring it fails, the new build stays in place, so the
+  managed directory is never left empty. The previous directory is removed
+  after the new build starts. A start that is vetoed (pause), cancelled,
+  skipped, or refused because a saved llama.cpp approval is stale keeps the new
+  build: approvals bind the native build, so a pin move makes them stale, and
+  the existing reviewed apply re-approves them (V44). Under the refresh lock,
+  restoration, install and uninstall first repair leftovers: a missing managed
+  directory with a previous sibling is a refresh interrupted between its two
+  renames and is renamed back; any staging or previous sibling beside an
+  existing managed directory is removed, as `engine:uninstall` also does, so a
+  leftover cannot bring an uninstalled engine back. Progress ends with `done`
+  after a refresh, or
   `failed` when it is abandoned; a failed refresh keeps the installed build,
   which starts as before, and reports the warning
   `engine-manager:install-refresh-failed:<engine>`. A marker written before

@@ -95,25 +95,31 @@ func (e *Executor) managedInstallStale(st *engineState) bool {
 	return ok && marker.Recipe != recipe
 }
 
-// recoverInterruptedRefresh puts the previous managed directory back when a
-// refresh stopped between its two renames. Uninstall removes both refresh
-// siblings, so a leftover cannot resurrect an uninstalled engine.
-func (e *Executor) recoverInterruptedRefresh(engine string, st *engineState) {
+// prepareManagedRefresh repairs what an interrupted refresh left behind. The
+// caller holds st.refreshMu, so no refresh is in flight. When the managed
+// directory is missing but the previous sibling exists, a refresh stopped
+// between its two renames, and the previous build is put back. Any remaining
+// staging or previous sibling beside an existing managed directory is a
+// leftover and is removed. Uninstall removes both siblings too, so a leftover
+// cannot resurrect an uninstalled engine.
+func (e *Executor) prepareManagedRefresh(engine string, st *engineState) {
 	if e.baseDir == "" {
 		return
 	}
 	_, previous := e.refreshDirs(engine)
-	if _, err := os.Stat(st.installDir); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(st.installDir); errors.Is(err, os.ErrNotExist) {
+		if _, err := os.Stat(previous); err != nil {
+			return
+		}
+		if err := renameRetrying(previous, st.installDir); err != nil {
+			slog.Error("could not restore the managed install after an interrupted refresh", "engine", engine, "err", err)
+			return
+		}
+		slog.Warn("restored the managed install after an interrupted refresh", "engine", engine)
+	} else if err != nil {
 		return
 	}
-	if _, err := os.Stat(previous); err != nil {
-		return
-	}
-	if err := renameRetrying(previous, st.installDir); err != nil {
-		slog.Error("could not restore the managed install after an interrupted refresh", "engine", engine, "err", err)
-		return
-	}
-	slog.Warn("restored the managed install after an interrupted refresh", "engine", engine)
+	e.clearRefreshDirs(engine, st)
 }
 
 // clearRefreshDirs removes refresh leftovers after an uninstall.
@@ -200,15 +206,22 @@ func (e *Executor) swapManagedRefresh(ctx context.Context, st *engineState, engi
 	err := e.swapStagedBuild(ctx, st, engine)
 	_, _ = e.Detect(engine)
 	if err != nil {
-		_ = os.RemoveAll(staging)
+		// Staging may hold the only copy when a rollback could not put the
+		// old build back; it is removed only beside an existing install.
+		if _, statErr := os.Stat(st.installDir); statErr == nil {
+			_ = os.RemoveAll(staging)
+		}
 		e.reportRefreshFailed(st, engine, err)
 		return nil
 	}
 	return func(startErr error, start func() error) error {
 		var veto *localVetoError
-		if startErr == nil || errors.As(startErr, &veto) || ctx.Err() != nil || start == nil {
+		if startErr == nil || errors.As(startErr, &veto) || isStaleApproval(startErr) || ctx.Err() != nil || start == nil {
 			// A vetoed, cancelled or skipped start says nothing about the new
-			// build; detection is then its only check.
+			// build; detection is then its only check. A stale-approval refusal
+			// is the expected result of a pin move for an approved
+			// configuration: the new build stays, and the existing reviewed
+			// apply re-approves it (V44).
 			if err := removeTreePreserving(previous, st.modelsDir); err != nil {
 				slog.Warn("previous managed build could not be removed; the next refresh retries", "engine", engine, "err", err)
 			}
@@ -269,8 +282,13 @@ func (e *Executor) swapStagedBuild(ctx context.Context, st *engineState, engine 
 
 // restorePreviousBuild puts the previous build back after the new one failed
 // in place. The new build returns to staging and is removed.
+// It never leaves the managed directory empty: without a previous build the
+// new one stays, and a failed restore moves the new build back into place.
 func (e *Executor) restorePreviousBuild(st *engineState, engine string) error {
 	staging, previous := e.refreshDirs(engine)
+	if info, err := os.Stat(previous); err != nil || !info.IsDir() {
+		return fmt.Errorf("the old build is missing (%v); the new build stays in place", err)
+	}
 	if err := e.doStop(st, engine); err != nil {
 		return fmt.Errorf("stopping the new build failed: %w", err)
 	}
@@ -281,7 +299,11 @@ func (e *Executor) restorePreviousBuild(st *engineState, engine string) error {
 		return fmt.Errorf("moving the new build out failed: %w", err)
 	}
 	if err := renameRetrying(previous, st.installDir); err != nil {
-		return fmt.Errorf("restoring the old build failed: %w", err)
+		if backErr := renameRetrying(staging, st.installDir); backErr != nil {
+			return fmt.Errorf("restoring the old build failed: %w; moving the new build back also failed and it remains in %s: %v", err, staging, backErr)
+		}
+		_, _ = e.Detect(engine)
+		return fmt.Errorf("restoring the old build failed: %w; the new build stays in place", err)
 	}
 	_ = os.RemoveAll(staging)
 	_, _ = e.Detect(engine)
