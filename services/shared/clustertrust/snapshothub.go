@@ -15,8 +15,10 @@ import "sync"
 // unpublished zero value can encode as null, which subscribers read as a
 // keepalive. Change detection belongs to the publisher.
 type SnapshotHub[T any] struct {
-	Limit int       // maximum concurrent readers; 0 means 64
-	Clone func(T) T // optional; when set, each reader receives its own copy
+	Limit int // maximum concurrent readers; 0 (or less) means 64
+	// Clone is optional; when set, each reader receives its own copy. It runs
+	// while the hub's lock is held, so it must not call back into the hub.
+	Clone func(T) T
 
 	mu      sync.Mutex
 	latest  T
@@ -67,7 +69,7 @@ func (h *SnapshotHub[T]) Subscribe() (<-chan T, func(), bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	limit := h.Limit
-	if limit == 0 {
+	if limit <= 0 {
 		limit = 64
 	}
 	if len(h.readers) >= limit {

@@ -461,7 +461,7 @@ func TestSettingsStreamKeepaliveCadence(t *testing.T) {
 	}
 	transport := &http.Transport{TLSClientConfig: config}
 	defer transport.CloseIdleConnections()
-	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+settingsPath+"events", nil)
 	if err != nil {
@@ -475,6 +475,9 @@ func TestSettingsStreamKeepaliveCadence(t *testing.T) {
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", res.StatusCode)
 	}
+	// Count from the response headers, so the handshake does not eat the window.
+	window := time.AfterFunc(400*time.Millisecond, cancel)
+	defer window.Stop()
 	keepalives := 0
 	scan := bufio.NewScanner(res.Body)
 	for scan.Scan() {
