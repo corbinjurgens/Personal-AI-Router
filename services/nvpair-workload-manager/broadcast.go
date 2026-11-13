@@ -196,10 +196,6 @@ func (b *Broadcaster) deliver(ctx context.Context, t target, frame []byte) {
 }
 
 func (b *Broadcaster) post(ctx context.Context, client *http.Client, url string, frame []byte) error {
-	return b.postWithHeaders(ctx, client, url, frame, nil)
-}
-
-func (b *Broadcaster) postWithHeaders(ctx context.Context, client *http.Client, url string, frame []byte, headers http.Header) error {
 	reqCtx, cancel := context.WithTimeout(ctx, perPeerTimeout)
 	defer cancel()
 
@@ -208,11 +204,6 @@ func (b *Broadcaster) postWithHeaders(ctx context.Context, client *http.Client, 
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	for name, values := range headers {
-		for _, value := range values {
-			req.Header.Add(name, value)
-		}
-	}
 
 	resp, err := client.Do(req)
 	if err != nil {
