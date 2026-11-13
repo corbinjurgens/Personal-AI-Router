@@ -635,9 +635,9 @@ func TestPairedDirectoryBootstrap(t *testing.T) {
 			outer.interrupt(f.b.uuid, false)
 			opposite.interrupt(f.a.uuid, false)
 			task1Eventually(t, "restored reverse route without process restart", 15*time.Second, func() bool { return outer.established(f.b.uuid) > previous })
-			// The outage leaves the peer-state stream's reconnect backoff near
-			// its 30 s cap (jitter up to 1.2x), so the next attempt can be ~36 s out.
-			task1Eventually(t, "authenticated bootstrap recovers after claim expiry", 45*time.Second, func() bool { return f.hasPeer(t) })
+			// The restored reverse session resets the peer-state stream's
+			// reconnect backoff, so recovery does not wait out the 30 s cap.
+			task1Eventually(t, "authenticated bootstrap recovers after claim expiry", 20*time.Second, func() bool { return f.hasPeer(t) })
 			f.assertReads(t)
 		})
 		assertAuthority := func(name string, replace func(*testing.T, string)) {
