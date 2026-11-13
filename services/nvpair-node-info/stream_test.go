@@ -68,6 +68,7 @@ func TestNodeInfoChanged(t *testing.T) {
 		{"age only", nil, func(r *NodeInfoResponse) { r.MSSince = 900 }, false},
 		{"age reaches the stale bound", nil, func(r *NodeInfoResponse) { r.MSSince = 5000 }, true},
 		{"stale age grows", func(r *NodeInfoResponse) { r.MSSince = 6000 }, func(r *NodeInfoResponse) { r.MSSince = 7000 }, true},
+		{"stale age recovers", func(r *NodeInfoResponse) { r.MSSince = 6000 }, func(r *NodeInfoResponse) { r.MSSince = 200 }, true},
 		{"stale age while telemetry invalid", func(r *NodeInfoResponse) { r.TelemetryValid, r.MSSince = false, 6000 }, func(r *NodeInfoResponse) { r.MSSince = 7000 }, false},
 		{"GPU utilization +4", nil, func(r *NodeInfoResponse) { r.GPUs[0].UtilizationPercent += 4 }, false},
 		{"GPU utilization +5", nil, func(r *NodeInfoResponse) { r.GPUs[0].UtilizationPercent += 5 }, true},

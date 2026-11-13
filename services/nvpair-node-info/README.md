@@ -97,7 +97,7 @@ An NDJSON stream (`application/x-ndjson`, `Cache-Control: no-store`) of node-inf
   - any GPU's `utilization_percent` moves by 5 points or more, or `cpu.utilization_percent` by 10 points or more;
   - any GPU's `vram_used_bytes`, or `memory.used_bytes`, moves by at least max(64 MiB, 1 % of that GPU's `vram_bytes` or of `memory.total_bytes`);
   - the `cpu` or `memory` object appears or disappears;
-  - the GPU sample is at least 5 s old (`msSince`) while `telemetryValid` is true, and `msSince` differs. A stalled collector keeps its last values, so during a stall a frame goes out every second and consumers see the age grow past their freshness limits.
+  - the GPU sample is at least 5 s old (`msSince`) while `telemetryValid` is true, and `msSince` differs. A stalled collector keeps its last values, so during a stall a frame goes out every second and consumers see the age grow past their freshness limits. When the sample becomes younger than 5 s again, that also sends a frame, so consumers see the recovery.
 - **Keepalive:** a `null` line every 2 s means "the current sample is still within the thresholds of the last frame". A consumer can treat the last frame as current as of each keepalive.
 - **Consumers:** the stream is meant for the node-scanner's reads of paired peers; manual nodes and unpaired callers keep using `GET /v1/node-info`.
 - **Shutdown:** an open stream holds node-info's graceful shutdown for its full 3 s timeout. This is accepted; there is no stream-specific shutdown path.

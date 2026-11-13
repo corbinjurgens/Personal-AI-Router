@@ -68,6 +68,7 @@ type scannerReverseFixture struct {
 	direct            atomic.Bool
 	reverse           atomic.Bool
 	infoCalls         atomic.Int32
+	streamCalls       atomic.Int32
 	modelCalls        atomic.Int32
 	directInfo        atomic.Int32
 	directModels      atomic.Int32
@@ -185,7 +186,52 @@ func newScannerReverseFixture(t *testing.T) *scannerReverseFixture {
 	f.d.modelsHTTP = &http.Client{Timeout: modelsFetchTimeout}
 	f.node = noderec.DirectoryNode{HostUUID: "peer", ClusterUUID: "peer", IP: "localhost", Trusted: true,
 		Services: make(map[noderec.ServiceKey]noderec.ServiceStatus)}
+	nodeInfoBody := func() (NodeInfoResponse, bool) {
+		reportedHost, ok := f.reportedHost.Load().(string)
+		if !ok {
+			t.Error("invalid fixture host identity")
+			return NodeInfoResponse{}, false
+		}
+		cluster, gpuName := f.reportedPrincipal.Load(), "reverse GPU"
+		if reportedHost != "peer" {
+			gpuName = "stranger GPU"
+		}
+		if f.responseEnding.Load() == scannerIncompleteFraming {
+			empty := ""
+			cluster, gpuName = &empty, "uncommitted GPU"
+		}
+		return NodeInfoResponse{HostUUID: reportedHost, ClusterUUID: cluster, GPUs: []GPUInfo{{Name: gpuName, UtilizationPercent: 73}}, CPU: &CPUInfo{Name: "peer CPU", Cores: 8, UtilizationPercent: 42}, Memory: &MemoryInfo{TotalBytes: 8192, UsedBytes: 2048}, TelemetryValid: true, MSSince: 100}, true
+	}
 	info := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == nodeInfoStreamPath {
+			f.streamCalls.Add(1)
+			if r.Host != net.JoinHostPort(f.node.IP, strconv.Itoa(f.node.Services[noderec.ServiceNodeInfo].Port)) {
+				t.Errorf("unexpected node-info stream host=%s", r.Host)
+			}
+			if f.interrupt.Load() {
+				// A partial first line, then the connection ends.
+				_, _ = io.WriteString(w, "{\"hostUuid\":")
+				return
+			}
+			body, ok := nodeInfoBody()
+			if !ok || json.NewEncoder(w).Encode(body) != nil {
+				return
+			}
+			w.(http.Flusher).Flush()
+			ticker := time.NewTicker(50 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-r.Context().Done():
+					return
+				case <-ticker.C:
+					if _, err := io.WriteString(w, "null\n"); err != nil {
+						return
+					}
+					w.(http.Flusher).Flush()
+				}
+			}
+		}
 		if r.Method != http.MethodGet || r.URL.Path != "/v1/node-info" {
 			http.NotFound(w, r)
 			return
@@ -211,20 +257,11 @@ func newScannerReverseFixture(t *testing.T) *scannerReverseFixture {
 			}
 			return
 		}
-		reportedHost, ok := f.reportedHost.Load().(string)
+		body, ok := nodeInfoBody()
 		if !ok {
-			t.Error("invalid fixture host identity")
 			return
 		}
-		cluster, gpuName := f.reportedPrincipal.Load(), "reverse GPU"
-		if reportedHost != "peer" {
-			gpuName = "stranger GPU"
-		}
-		if f.responseEnding.Load() == scannerIncompleteFraming {
-			empty := ""
-			cluster, gpuName = &empty, "uncommitted GPU"
-		}
-		writeScannerFixtureResponse(t, w, NodeInfoResponse{HostUUID: reportedHost, ClusterUUID: cluster, GPUs: []GPUInfo{{Name: gpuName, UtilizationPercent: 73}}, CPU: &CPUInfo{Name: "peer CPU", Cores: 8, UtilizationPercent: 42}, Memory: &MemoryInfo{TotalBytes: 8192, UsedBytes: 2048}, TelemetryValid: true, MSSince: 100}, f.responseEnding.Load())
+		writeScannerFixtureResponse(t, w, body, f.responseEnding.Load())
 	}))
 	models := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/v1/models" {

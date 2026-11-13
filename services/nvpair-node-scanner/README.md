@@ -72,17 +72,40 @@ Concretely, the daemon:
   Independently observed inference activity survives a source change; final
   removal clears it only when neither claim remains.
 - **Enriches** each discovered node: GPU/CPU/memory inventory from its `ni` (node-info) port over plain HTTP, and the model list from its `em` (engine-manager) port (`GET /v1/models`) over cluster mTLS — a peer's model inventory is cluster data, so it is fetched only when this node holds a pin for the principal that peer advertises, while this node's own list is read over loopback in plaintext — the flat union, the per-engine breakdown (`modelsByEngine`), and the per-engine set of models loaded in memory (`loadedByEngine`), all carried onto the node's directory entry so remote cards can show loaded state. The same document carries the node's policy advertisement (`policy`: declared roles, policy revision, pause origin), which becomes the entry's `policy`; a peer known only from its authenticated peer-services claim is enriched through the same fetch. A node whose answer has no `policy` declares nothing. The policy's strict admission capability (`strictAdmission`) only affects hybrid eligibility, so a malformed one is dropped while the advertisement and model list are kept, and a case-variant `strictAdmission` key drops the advertisement but keeps the model list. Each enrichment has a last-good cache so a transient fetch miss doesn't blank the node's card. Node-info enrichment can optionally be moved onto HTTPS (see the TLS flags below) — off by default and gated only on operator flags, never inferred per-node.
-- **Samples scheduling telemetry** from healthy nodes every two seconds with
-  stable per-node jitter. Consecutive remote failures back off to 4, 8, 16, then
-  30 seconds and reset on success; local loopback sampling stays at the healthy
-  cadence. It emits only host UUID, maximum GPU utilization, validity, and
-  source-reported sample age; it does not mutate the public directory for each
-  telemetry sample.
+- **Samples scheduling telemetry** from self and unpinned nodes every two
+  seconds with stable per-node jitter. Consecutive remote failures back off to
+  4, 8, 16, then 30 seconds and reset on success; local loopback sampling stays
+  at the healthy cadence. It emits only host UUID, maximum GPU utilization,
+  validity, and source-reported sample age; it does not mutate the public
+  directory for each telemetry sample.
+- **Streams pinned peers' node-info** instead of polling it. A stream peer is a
+  directory node other than self that advertises `ni`, has a cluster principal,
+  and whose principal this node holds a pin for. On every telemetry tick the
+  scanner starts one `GET /v1/node-info/events` stream per stream peer (at most
+  64) and cancels streams of nodes that stopped being stream peers. The stream
+  uses the same pinned direct/reverse plain route and admission as paired
+  `ni` reads, with no total timeout and without the per-origin read gate;
+  connect and headers are bounded by a 10 s cancel timer and the stream drops
+  after 6 s without a line. Node-info sends the full body on connect and on
+  threshold changes, and `null` every 2 s while the sample stays within
+  thresholds. A frame goes through the polled sample's path (host check,
+  service build, memory observation, telemetry) and its reported `clusterUuid`
+  is applied at once. A keepalive re-emits the last frame's maximum GPU
+  utilization as a fresh sample (`msSince` 0, no memory fields), so the
+  scheduler still gets a sample every 2 s. That understates the age by up to
+  5 s at the start of a collector stall, within the scheduler's 10 s rule:
+  once a valid GPU sample is 5 s old node-info publishes a frame on every
+  `msSince` change, re-emissions keep ageing from that frame, and the frame
+  node-info sends when the sample is fresh again ends the ageing.
+  Every line rechecks that the route captured at connect is current and that
+  the node is still a stream peer. A reconnect waits 2 s after a stream that
+  delivered a frame and stayed open 5 s, and otherwise 4 s doubling to 30 s
+  over consecutive failures.
 - **Annotates trust:** with `--cluster-dir`, a browsed peer whose `cluster-uuid=` this node holds a pin for is marked `trusted` (via `nvpair-shared/clustertrust`). The annotation is re-derived on `discovery:reload-trust`, which the broker sends when `nvpair-cluster-manager` reports a pin-set change, as well as when a peer's mDNS record changes. Both triggers are needed: a peer that was already advertising when this node joined never moves its record again, so the browse path alone would leave it annotated from before this node's own pins existed. A change emits one `discovery:node-updated`; a reload that finds nothing to change is silent.
 - **Advertises live membership:** the same reload re-derives this node's own `cluster-uuid=` from the cluster dir and re-advertises when it differs from what is being published, so joining or leaving a cluster takes effect without a restart.
 - **Anti-flap:** a node has to be absent from every scan for the browser's full miss threshold (twelve scans at 5s, a full minute) before it is evicted, and from ~15s in it is TCP-probed on its advertised service ports on *every* scan — any answer resets the counter and recovers it outright. So neither a momentary multicast gap nor a sustained one drops a healthy node, and eviction rests on a run of ~10 consecutive failures rather than one dial on the deadline. The window is sized deliberately: a node saturated by its own inference load starves its control plane, so it stops answering mDNS *and* stops accepting probe connections for as long as the load runs, while still serving requests. Two signals can also vouch for a node without any probe — a node-info enrichment in the last 10s, and inference response bytes from it in the last 60s (`discovery:node-activity`, relayed by the broker from whichever proxy saw the bytes). The second is the only liveness evidence that gets stronger the busier a node is.
 - **A scan that loses everything is treated as our own fault:** when more than one node is known and a scan returns *none* of them, no node is penalized for it — for up to six consecutive scans (~30s), after which they count normally. Independent machines do not leave the network in the same five-second window, but a process too starved to drain its multicast socket within `scanTimeout` hears silence from all of them at once; without this, one saturated machine dropped its entire cluster, idle peers included, in a single reconcile. The suppression needs two or more known nodes to engage: losing a lone peer looks the same whether it left or we stopped listening, so that case falls through to the ordinary threshold.
-- **Converges without mDNS:** a 15s sweep re-reads each peer over HTTP and folds any change into the directory, independent of browse events. It covers facts that change without moving the mDNS record (a model pull/delete, a late engine start) and facts that did move it but whose announcement was never received. The second case is why a peer's cluster membership is re-read from its `ni` port (`clusterUuid` on `/v1/node-info`, which under the broker is served plain — so it answers whether or not the two nodes share a cluster; a node-info run standalone with `--cluster-dir` gates the endpoint while clustered and will not answer a non-pinned peer, which the sweep treats as no answer): membership otherwise arrives solely as the `cluster-uuid=` TXT key, read once per record change, and the anti-flap probe above deliberately keeps a still-reachable peer's entry alive — so a missed re-advertisement would leave a departed peer's principal in place for the life of the process, suppressing the invite that would bring it back. Membership is refreshed before models on each tick, since the model fetch is pinned mTLS keyed on that principal. Only a peer's explicit report is acted on: a failed fetch, or a peer too old to report the field, leaves the annotation untouched rather than inferring "unclustered" from silence.
+- **Converges without mDNS:** a 15s sweep re-reads each peer over HTTP and folds any change into the directory, independent of browse events. It covers facts that change without moving the mDNS record (a model pull/delete, a late engine start) and facts that did move it but whose announcement was never received. The second case is why a peer's cluster membership is re-read from its `ni` port (`clusterUuid` on `/v1/node-info`, which under the broker is served plain — so it answers whether or not the two nodes share a cluster; a node-info run standalone with `--cluster-dir` gates the endpoint while clustered and will not answer a non-pinned peer, which the sweep treats as no answer): membership otherwise arrives solely as the `cluster-uuid=` TXT key, read once per record change, and the anti-flap probe above deliberately keeps a still-reachable peer's entry alive — so a missed re-advertisement would leave a departed peer's principal in place for the life of the process, suppressing the invite that would bring it back. Membership is refreshed before models on each tick, since the model fetch is pinned mTLS keyed on that principal. Peers with a live node-info stream are skipped: the stream reports a `clusterUuid` change as a frame at once. Only a peer's explicit report is acted on: a failed fetch, or a peer too old to report the field, leaves the annotation untouched rather than inferring "unclustered" from silence.
 
 ### Policy advertisement refresh
 
@@ -214,7 +237,7 @@ peer HTTP still requires independently owned fixture endpoints.
 | `discovery:unregister` | `{service}` | `{ok:true}` — drop a local service |
 | `discovery:update-txt` | `{service, port, txt?}` | `{ok:true}` — same as register with a new TXT |
 | `discovery:get-nodes` | `{service?}` | `{nodes:[DirectoryNode]}` — the directory, optionally filtered to nodes advertising one service |
-| `discovery:get-node-info` | `{hostUuid}` | Fresh full node-info sample for this scanner's registered self or an admitted peer: `GPUs` (including optional `physicalId`), optional `cpu`/`memory`/`memoryObservation`, `serviceBuildId`, `telemetryValid`, `msSince`, `hostUuid`, and nullable `clusterUuid` |
+| `discovery:get-node-info` | `{hostUuid}` | Full node-info sample for this scanner's registered self or an admitted peer (a pinned peer's from its live node-info stream): `GPUs` (including optional `physicalId`), optional `cpu`/`memory`/`memoryObservation`, `serviceBuildId`, `telemetryValid`, `msSince`, `hostUuid`, and nullable `clusterUuid` |
 | `discovery:reload-identity` | — | `{ok:true}` — re-resolve and re-advertise this node's identity |
 | `discovery:set-self-name` | `{name}` | `{ok:true}` — advertise `name` as this node's `name=` and on its self entry; a name `nodename.Normalize` refuses is rejected with `-32602` |
 | `discovery:reload-trust` | — | `{ok:true}` — re-derive `trusted` on every directory entry from the current pin set |
@@ -245,8 +268,16 @@ also rejected. Address changes and unrelated service updates do not retire the
 loopback authority. Directory or mDNS entries, including entries advertising a
 loopback address, cannot establish self authority.
 
-For a remote host the scanner resolves its current directory endpoint and
-admitted cluster principal. It uses the
+For a stream peer (a pinned peer, see "Streams pinned peers' node-info"
+above) the scanner answers from the latest frame of its node-info stream, with
+`msSince` aged as for keepalive re-emissions (time since the last line, or a
+stale frame's age plus the time since it), and only while a line arrived
+within 6 s and the route the stream was opened on is still current at answer
+time. Otherwise the answer is unavailable; there is no peer request for a
+stream peer and nothing stale is returned after revocation or a route outage.
+
+For any other remote host the scanner resolves its current directory endpoint
+and admitted cluster principal. It uses the
 shared pinned peer/service adapter for `ni`, preferring direct plain HTTP and
 using plain HTTP inside the authenticated reverse session when direct fails.
 This bodyless GET may retry once over reverse when direct TCP connects but
@@ -255,7 +286,7 @@ contain one JSON value with a clean body end, match the requested host UUID,
 and match the directory principal if `clusterUuid` is non-null. Authority is
 checked again before success.
 
-Both reads have a 1500 ms backend budget covering queue wait, address
+The local and remote reads have a 1500 ms backend budget covering queue wait, address
 attempts and HTTP/body work. Neither returns the last-good enrichment cache
 or compact scheduling telemetry. Full GPU rows, including observed physical
 aliases, and the memory observation pass through without reconstruction.

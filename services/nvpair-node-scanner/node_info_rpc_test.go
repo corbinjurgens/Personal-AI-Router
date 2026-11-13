@@ -50,95 +50,6 @@ func callNodeInfoRPC(t *testing.T, client *jsonrpc.Peer, params string) (json.Ra
 	return result, rpcErr
 }
 
-func TestNodeInfoRPCFreshFullSampleThroughReverseRetry(t *testing.T) {
-	f := newScannerReverseFixture(t)
-	// The cache deliberately disagrees with the live sample.
-	f.d.lastInfo["peer"] = NodeInfoResponse{HostUUID: "peer", GPUs: []GPUInfo{{Name: "stale GPU"}}, MSSince: 99000}
-	client := nodeInfoRPCTestClient(t, f.d)
-	result, rpcErr := callNodeInfoRPC(t, client, `{"hostUuid":"peer"}`)
-	if rpcErr != nil {
-		t.Fatalf("fresh getter rejected: %+v", rpcErr)
-	}
-	var got NodeInfoResponse
-	if err := json.Unmarshal(result, &got); err != nil {
-		t.Fatal(err)
-	}
-	cluster := "peer"
-	want := NodeInfoResponse{HostUUID: "peer", ClusterUUID: &cluster,
-		GPUs:   []GPUInfo{{Name: "reverse GPU", UtilizationPercent: 73}},
-		CPU:    &CPUInfo{Name: "peer CPU", Cores: 8, UtilizationPercent: 42},
-		Memory: &MemoryInfo{TotalBytes: 8192, UsedBytes: 2048}, TelemetryValid: true, MSSince: 100}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("full sample = %+v, want %+v", got, want)
-	}
-	if f.directInfo.Load() != 1 || f.reverseInfo.Load() != 1 || f.infoCalls.Load() != 1 {
-		t.Fatalf("attempts direct/reverse/handler = %d/%d/%d, want 1/1/1", f.directInfo.Load(), f.reverseInfo.Load(), f.infoCalls.Load())
-	}
-	if f.d.lastInfo["peer"].GPUs[0].Name != "stale GPU" {
-		t.Fatal("read-only getter changed enrichment cache")
-	}
-}
-
-func TestNodeInfoRPCDirectUsesPairedAuthority(t *testing.T) {
-	f := newScannerReverseFixture(t)
-	f.direct.Store(true)
-	f.reverse.Store(false)
-	client := nodeInfoRPCTestClient(t, f.d)
-	_, rpcErr := callNodeInfoRPC(t, client, `{"hostUuid":"peer"}`)
-	if rpcErr != nil || f.directInfo.Load() != 1 || f.reverseInfo.Load() != 0 || f.infoCalls.Load() != 1 {
-		t.Fatalf("paired direct read: error=%+v direct/reverse/handler=%d/%d/%d", rpcErr, f.directInfo.Load(), f.reverseInfo.Load(), f.infoCalls.Load())
-	}
-}
-
-func TestNodeInfoRPCResolvesHostSeparatelyFromPrincipal(t *testing.T) {
-	f := newScannerReverseFixture(t)
-	f.d.dir.remove("peer")
-	node := f.node
-	node.HostUUID = "physical-host"
-	f.d.dir.upsert(node)
-	f.reportedHost.Store("physical-host")
-	client := nodeInfoRPCTestClient(t, f.d)
-	result, rpcErr := callNodeInfoRPC(t, client, `{"hostUuid":"physical-host"}`)
-	var got NodeInfoResponse
-	if err := json.Unmarshal(result, &got); err != nil {
-		t.Fatalf("decode result, RPC error=%+v: %v", rpcErr, err)
-	}
-	if rpcErr != nil || got.HostUUID != "physical-host" || got.ClusterUUID == nil || *got.ClusterUUID != "peer" || f.reverseInfo.Load() != 1 {
-		t.Fatalf("host/principal resolution: sample=%+v error=%+v reverse=%d", got, rpcErr, f.reverseInfo.Load())
-	}
-}
-
-func TestNodeInfoRPCRejectsConflictingPrincipal(t *testing.T) {
-	for _, principal := range []string{"other-principal", ""} {
-		t.Run("reported principal "+principal, func(t *testing.T) {
-			f := newScannerReverseFixture(t)
-			f.reportedPrincipal.Store(&principal)
-			client := nodeInfoRPCTestClient(t, f.d)
-			result, rpcErr := callNodeInfoRPC(t, client, `{"hostUuid":"peer"}`)
-			if rpcErr == nil || rpcErr.Code != -32000 || len(result) != 0 || f.infoCalls.Load() != 1 {
-				t.Fatalf("conflicting principal accepted: result=%s error=%+v calls=%d", result, rpcErr, f.infoCalls.Load())
-			}
-		})
-	}
-}
-
-func TestNodeInfoRPCAcceptsLegacyNullablePrincipal(t *testing.T) {
-	f := newScannerReverseFixture(t)
-	f.reportedPrincipal.Store(nil)
-	client := nodeInfoRPCTestClient(t, f.d)
-	result, rpcErr := callNodeInfoRPC(t, client, `{"hostUuid":"peer"}`)
-	if rpcErr != nil {
-		t.Fatalf("legacy principal rejected: %+v", rpcErr)
-	}
-	var got NodeInfoResponse
-	if err := json.Unmarshal(result, &got); err != nil {
-		t.Fatal(err)
-	}
-	if got.HostUUID != "peer" || got.ClusterUUID != nil || f.infoCalls.Load() != 1 {
-		t.Fatalf("legacy principal sample=%+v calls=%d", got, f.infoCalls.Load())
-	}
-}
-
 func TestNodeInfoRPCRejectsInvalidParams(t *testing.T) {
 	d := newSelfTestDaemon("self", "127.0.0.1")
 	client := nodeInfoRPCTestClient(t, d)
@@ -187,59 +98,174 @@ func TestNodeInfoRPCRejectsMissingAuthorityWithoutDirectFallback(t *testing.T) {
 	})
 }
 
-func TestNodeInfoRPCRejectsWrongIdentityAndIncompleteBody(t *testing.T) {
+// startFixtureStreams runs the scanner's node-info stream supervisor against
+// the fixture until the test ends.
+func startFixtureStreams(t *testing.T, f *scannerReverseFixture) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	var workers sync.WaitGroup
+	t.Cleanup(func() { cancel(); workers.Wait() })
+	f.d.superviseNodeInfoStreams(ctx, f.d.selfHostUUID(), &workers)
+}
+
+// waitNodeInfoRPC polls discovery:get-node-info until it answers, as a caller
+// right after startup waits for the stream's first frame.
+func waitNodeInfoRPC(t *testing.T, client *jsonrpc.Peer, host string) NodeInfoResponse {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		result, rpcErr := callNodeInfoRPC(t, client, `{"hostUuid":"`+host+`"}`)
+		if rpcErr == nil {
+			var got NodeInfoResponse
+			if err := json.Unmarshal(result, &got); err != nil {
+				t.Fatal(err)
+			}
+			return got
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("node-info for %s never became available: %+v", host, rpcErr)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func requireNodeInfoUnavailable(t *testing.T, client *jsonrpc.Peer, host string) {
+	t.Helper()
+	result, rpcErr := callNodeInfoRPC(t, client, `{"hostUuid":"`+host+`"}`)
+	if rpcErr == nil || rpcErr.Code != -32000 || len(result) != 0 {
+		t.Fatalf("node-info for %s: result=%s error=%+v, want unavailable", host, result, rpcErr)
+	}
+}
+
+func TestNodeInfoRPCStreamPeerAnswersFromStreamThroughReverseRetry(t *testing.T) {
+	f := newScannerReverseFixture(t)
+	// The enrichment cache deliberately disagrees with the stream.
+	f.d.lastInfo["peer"] = NodeInfoResponse{HostUUID: "peer", GPUs: []GPUInfo{{Name: "stale GPU"}}, MSSince: 99000}
+	client := nodeInfoRPCTestClient(t, f.d)
+	startFixtureStreams(t, f)
+	got := waitNodeInfoRPC(t, client, "peer")
+	cluster := "peer"
+	want := NodeInfoResponse{HostUUID: "peer", ClusterUUID: &cluster,
+		GPUs:   []GPUInfo{{Name: "reverse GPU", UtilizationPercent: 73}},
+		CPU:    &CPUInfo{Name: "peer CPU", Cores: 8, UtilizationPercent: 42},
+		Memory: &MemoryInfo{TotalBytes: 8192, UsedBytes: 2048}, TelemetryValid: true}
+	if got.MSSince < 0 || got.MSSince > 1000 {
+		t.Fatalf("live frame age = %d ms", got.MSSince)
+	}
+	got.MSSince = 0
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("full sample = %+v, want %+v", got, want)
+	}
+	if f.directInfo.Load() != 1 || f.reverseInfo.Load() != 1 || f.streamCalls.Load() != 1 || f.infoCalls.Load() != 0 {
+		t.Fatalf("attempts direct/reverse/stream/plain = %d/%d/%d/%d, want 1/1/1/0", f.directInfo.Load(), f.reverseInfo.Load(), f.streamCalls.Load(), f.infoCalls.Load())
+	}
+	for range 3 {
+		waitNodeInfoRPC(t, client, "peer")
+	}
+	if f.streamCalls.Load() != 1 || f.infoCalls.Load() != 0 {
+		t.Fatalf("repeated answers reached the peer: stream=%d plain=%d", f.streamCalls.Load(), f.infoCalls.Load())
+	}
+	if f.d.lastInfo["peer"].GPUs[0].Name != "stale GPU" {
+		t.Fatal("read-only getter changed enrichment cache")
+	}
+}
+
+func TestNodeInfoRPCStreamPeerDirectUsesPairedAuthority(t *testing.T) {
+	f := newScannerReverseFixture(t)
+	f.direct.Store(true)
+	f.reverse.Store(false)
+	client := nodeInfoRPCTestClient(t, f.d)
+	startFixtureStreams(t, f)
+	waitNodeInfoRPC(t, client, "peer")
+	if f.directInfo.Load() != 1 || f.reverseInfo.Load() != 0 || f.streamCalls.Load() != 1 || f.infoCalls.Load() != 0 {
+		t.Fatalf("paired direct stream: direct/reverse/stream/plain=%d/%d/%d/%d", f.directInfo.Load(), f.reverseInfo.Load(), f.streamCalls.Load(), f.infoCalls.Load())
+	}
+}
+
+func TestNodeInfoRPCResolvesHostSeparatelyFromPrincipal(t *testing.T) {
+	f := newScannerReverseFixture(t)
+	f.d.dir.remove("peer")
+	node := f.node
+	node.HostUUID = "physical-host"
+	f.d.dir.upsert(node)
+	f.reportedHost.Store("physical-host")
+	client := nodeInfoRPCTestClient(t, f.d)
+	startFixtureStreams(t, f)
+	got := waitNodeInfoRPC(t, client, "physical-host")
+	if got.HostUUID != "physical-host" || got.ClusterUUID == nil || *got.ClusterUUID != "peer" || f.reverseInfo.Load() != 1 {
+		t.Fatalf("host/principal resolution: sample=%+v reverse=%d", got, f.reverseInfo.Load())
+	}
+}
+
+func TestNodeInfoRPCRejectsConflictingPrincipal(t *testing.T) {
+	for _, principal := range []string{"other-principal", ""} {
+		t.Run("reported principal "+principal, func(t *testing.T) {
+			f := newScannerReverseFixture(t)
+			f.reportedPrincipal.Store(&principal)
+			client := nodeInfoRPCTestClient(t, f.d)
+			startFixtureStreams(t, f)
+			// The frame's principal is applied to the directory, after which the
+			// node is no longer a paired stream peer.
+			deadline := time.Now().Add(5 * time.Second)
+			for mustClusterUUID(t, f.d, "peer") != principal {
+				if time.Now().After(deadline) {
+					t.Fatal("stream frame's principal was not applied")
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			requireNodeInfoUnavailable(t, client, "peer")
+			if f.infoCalls.Load() != 0 {
+				t.Fatalf("conflicting principal caused %d plain reads", f.infoCalls.Load())
+			}
+		})
+	}
+}
+
+func TestNodeInfoRPCAcceptsLegacyNullablePrincipal(t *testing.T) {
+	f := newScannerReverseFixture(t)
+	f.reportedPrincipal.Store(nil)
+	client := nodeInfoRPCTestClient(t, f.d)
+	startFixtureStreams(t, f)
+	got := waitNodeInfoRPC(t, client, "peer")
+	if got.HostUUID != "peer" || got.ClusterUUID != nil || f.streamCalls.Load() != 1 {
+		t.Fatalf("legacy principal sample=%+v streams=%d", got, f.streamCalls.Load())
+	}
+}
+
+func TestNodeInfoRPCRejectsWrongIdentityAndInterruptedStream(t *testing.T) {
 	test := func(name string, configure func(*scannerReverseFixture)) {
 		t.Run(name, func(t *testing.T) {
 			f := newScannerReverseFixture(t)
 			configure(f)
 			client := nodeInfoRPCTestClient(t, f.d)
-			result, rpcErr := callNodeInfoRPC(t, client, `{"hostUuid":"peer"}`)
-			if rpcErr == nil || rpcErr.Code != -32000 || len(result) != 0 || f.infoCalls.Load() != 1 {
-				t.Fatalf("invalid response: result=%s error=%+v calls=%d", result, rpcErr, f.infoCalls.Load())
+			startFixtureStreams(t, f)
+			deadline := time.Now().Add(3 * time.Second)
+			for f.streamCalls.Load() == 0 && time.Now().Before(deadline) {
+				time.Sleep(10 * time.Millisecond)
+			}
+			time.Sleep(100 * time.Millisecond)
+			requireNodeInfoUnavailable(t, client, "peer")
+			if f.streamCalls.Load() != 1 || f.infoCalls.Load() != 0 {
+				t.Fatalf("stream/plain = %d/%d, want 1/0", f.streamCalls.Load(), f.infoCalls.Load())
 			}
 		})
 	}
 	test("wrong host", func(f *scannerReverseFixture) { f.reportedHost.Store("stranger") })
-	test("complete JSON in truncated HTTP body", func(f *scannerReverseFixture) { f.responseEnding.Store(scannerIncompleteFraming) })
-	test("additional JSON value", func(f *scannerReverseFixture) { f.responseEnding.Store(scannerAdditionalJSON) })
-	test("interrupted body is not replayed", func(f *scannerReverseFixture) { f.interrupt.Store(true) })
+	test("interrupted stream is not replayed", func(f *scannerReverseFixture) { f.interrupt.Store(true) })
 }
 
-func TestNodeInfoRPCRejectsAuthorityLossDuringRead(t *testing.T) {
+func TestNodeInfoRPCRejectsAuthorityLossWhileStreaming(t *testing.T) {
 	test := func(name string, change func(*testing.T, *scannerReverseFixture)) {
 		t.Run(name, func(t *testing.T) {
 			f := newScannerReverseFixture(t)
-			entered, release := make(chan struct{}), make(chan struct{})
-			var once sync.Once
-			releaseReply := func() { once.Do(func() { close(release) }) }
-			t.Cleanup(releaseReply)
-			f.beforeReply = func(noderec.ServiceKey) { close(entered); <-release }
 			client := nodeInfoRPCTestClient(t, f.d)
-			type response struct {
-				rpcErr *jsonrpc.RPCError
-				err    error
-			}
-			done := make(chan response, 1)
-			go func() {
-				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-				defer cancel()
-				_, rpcErr, err := client.Call(ctx, "discovery:get-node-info", json.RawMessage(`{"hostUuid":"peer"}`))
-				done <- response{rpcErr, err}
-			}()
-			select {
-			case <-entered:
-			case <-time.After(time.Second):
-				t.Fatal("fetch did not reach handler")
-			}
+			startFixtureStreams(t, f)
+			waitNodeInfoRPC(t, client, "peer")
 			change(t, f)
-			releaseReply()
-			select {
-			case got := <-done:
-				if got.err != nil || got.rpcErr == nil || got.rpcErr.Code != -32000 {
-					t.Fatalf("authority loss response: %+v", got)
-				}
-			case <-time.After(2 * time.Second):
-				t.Fatal("authority loss did not finish")
+			// Refused at answer time, before the stream notices on its next line.
+			requireNodeInfoUnavailable(t, client, "peer")
+			if f.infoCalls.Load() != 0 {
+				t.Fatalf("authority loss caused %d plain reads", f.infoCalls.Load())
 			}
 		})
 	}
@@ -260,90 +286,119 @@ func TestNodeInfoRPCRejectsAuthorityLossDuringRead(t *testing.T) {
 func TestNodeInfoRPCSessionOutageAndRecoveryNeverReturnsCache(t *testing.T) {
 	f := newScannerReverseFixture(t)
 	client := nodeInfoRPCTestClient(t, f.d)
-	if _, rpcErr := callNodeInfoRPC(t, client, `{"hostUuid":"peer"}`); rpcErr != nil {
-		t.Fatalf("initial sample: %+v", rpcErr)
-	}
+	startFixtureStreams(t, f)
+	waitNodeInfoRPC(t, client, "peer")
 	f.d.lastInfo["peer"] = NodeInfoResponse{HostUUID: "peer", TelemetryValid: true}
 	f.reverse.Store(false)
-	f.d.closePeerClients()
-	result, rpcErr := callNodeInfoRPC(t, client, `{"hostUuid":"peer"}`)
-	if rpcErr == nil || rpcErr.Code != -32000 || len(result) != 0 {
-		t.Fatalf("session outage returned success/cache: %s %+v", result, rpcErr)
+	f.mu.Lock()
+	for _, conn := range f.connections {
+		conn.Close()
+	}
+	f.mu.Unlock()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		result, rpcErr := callNodeInfoRPC(t, client, `{"hostUuid":"peer"}`)
+		if rpcErr != nil {
+			if rpcErr.Code != -32000 || len(result) != 0 {
+				t.Fatalf("session outage: %s %+v", result, rpcErr)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("session outage kept answering")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 	node, found := f.d.dir.get("peer")
 	if !found || node.ClusterUUID != "peer" || !node.Trusted {
 		t.Fatalf("session outage changed membership: %+v", node)
 	}
 	f.reverse.Store(true)
-	if _, rpcErr := callNodeInfoRPC(t, client, `{"hostUuid":"peer"}`); rpcErr != nil {
-		t.Fatalf("recovered sample: %+v", rpcErr)
-	}
-	if f.infoCalls.Load() != 2 {
-		t.Fatalf("successful fresh handler calls = %d, want 2", f.infoCalls.Load())
+	waitNodeInfoRPC(t, client, "peer")
+	if f.streamCalls.Load() != 2 || f.infoCalls.Load() != 0 {
+		t.Fatalf("stream/plain handler calls = %d/%d, want 2/0", f.streamCalls.Load(), f.infoCalls.Load())
 	}
 }
 
-func TestNodeInfoRPCDeadlineAndNonblockingReadPump(t *testing.T) {
+func TestNodeInfoRPCStreamAnswerNeedsNoNetworkOrOriginGate(t *testing.T) {
 	f := newScannerReverseFixture(t)
-	entered, release := make(chan struct{}), make(chan struct{})
-	var once sync.Once
-	f.beforeReply = func(noderec.ServiceKey) { once.Do(func() { close(entered) }); <-release }
-	t.Cleanup(func() { close(release) })
 	client := nodeInfoRPCTestClient(t, f.d)
-	type response struct {
-		rpcErr *jsonrpc.RPCError
-		err    error
-	}
-	done := make(chan response, 1)
-	started := time.Now()
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		_, rpcErr, err := client.Call(ctx, "discovery:get-node-info", json.RawMessage(`{"hostUuid":"peer"}`))
-		done <- response{rpcErr, err}
-	}()
-	select {
-	case <-entered:
-	case <-time.After(time.Second):
-		t.Fatal("fetch did not start")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
-	defer cancel()
-	result, rpcErr, err := client.Call(ctx, "discovery:get-nodes", nil)
-	if err != nil || rpcErr != nil {
-		t.Fatalf("scanner read pump blocked: %v %+v", err, rpcErr)
-	}
-	var nodes noderec.GetNodesResult
-	if err := json.Unmarshal(result, &nodes); err != nil || len(nodes.Nodes) != 1 || nodes.Nodes[0].HostUUID != "peer" {
-		t.Fatalf("concurrent directory response = %s: %v", result, err)
-	}
-	select {
-	case got := <-done:
-		elapsed := time.Since(started)
-		if got.err != nil || got.rpcErr == nil || got.rpcErr.Code != -32000 || elapsed < time.Second || elapsed > 2500*time.Millisecond {
-			t.Fatalf("bounded read: response=%+v elapsed=%s", got, elapsed)
-		}
-	case <-time.After(2500 * time.Millisecond):
-		t.Fatal("backend exceeded bounded read deadline")
-	}
-}
-
-func TestNodeInfoRPCDeadlineIncludesOriginQueue(t *testing.T) {
-	f := newScannerReverseFixture(t)
+	startFixtureStreams(t, f)
+	waitNodeInfoRPC(t, client, "peer")
 	origin := "http://" + net.JoinHostPort("localhost", strconv.Itoa(f.node.Services[noderec.ServiceNodeInfo].Port))
 	release, acquired := f.d.nodeInfoOrigins.acquire(context.Background(), origin)
 	if !acquired {
-		t.Fatal("could not hold the origin gate")
+		t.Fatal("stream held the origin gate")
 	}
 	defer release()
-	client := nodeInfoRPCTestClient(t, f.d)
 	started := time.Now()
-	result, rpcErr := callNodeInfoRPC(t, client, `{"hostUuid":"peer"}`)
-	elapsed := time.Since(started)
-	if rpcErr == nil || rpcErr.Code != -32000 || len(result) != 0 || elapsed < time.Second || elapsed > 2500*time.Millisecond {
-		t.Fatalf("queue deadline: result=%s error=%+v elapsed=%s", result, rpcErr, elapsed)
+	if _, rpcErr := callNodeInfoRPC(t, client, `{"hostUuid":"peer"}`); rpcErr != nil {
+		t.Fatalf("stream answer behind a held origin gate: %+v", rpcErr)
 	}
-	if f.directInfo.Load() != 0 || f.reverseInfo.Load() != 0 || f.infoCalls.Load() != 0 {
-		t.Fatalf("queued request reached network: %d/%d/%d", f.directInfo.Load(), f.reverseInfo.Load(), f.infoCalls.Load())
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("stream answer took %s", elapsed)
+	}
+	if f.infoCalls.Load() != 0 || f.streamCalls.Load() != 1 {
+		t.Fatalf("stream answer reached the network: plain=%d stream=%d", f.infoCalls.Load(), f.streamCalls.Load())
+	}
+}
+
+// liveFrameFixture installs a cached frame for the fixture peer without a
+// stream, so the answer-time rules can be checked directly.
+func liveFrameFixture(f *scannerReverseFixture, lineAt time.Time, current func() bool) {
+	cluster := "peer"
+	s := &f.d.nodeInfoStreams
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.live == nil {
+		s.live = make(map[string]liveNodeInfo)
+	}
+	s.live["peer"] = liveNodeInfo{streamID: 1, info: NodeInfoResponse{HostUUID: "peer", ClusterUUID: &cluster, TelemetryValid: true, MSSince: 40,
+		GPUs: []GPUInfo{{Name: "cached GPU", UtilizationPercent: 12}}}, frameAt: lineAt, lineAt: lineAt, current: current}
+}
+
+func TestNodeInfoRPCLiveFrameRules(t *testing.T) {
+	t.Run("live frame", func(t *testing.T) {
+		f := newScannerReverseFixture(t)
+		liveFrameFixture(f, time.Now().Add(-time.Second), func() bool { return true })
+		client := nodeInfoRPCTestClient(t, f.d)
+		got := waitNodeInfoRPC(t, client, "peer")
+		if got.GPUs[0].Name != "cached GPU" || got.MSSince < 1000 || got.MSSince > 2000 {
+			t.Fatalf("live frame answer = %+v", got)
+		}
+		if f.infoCalls.Load() != 0 || f.streamCalls.Load() != 0 || f.directDials.Load() != 0 || f.reverseInfo.Load() != 0 {
+			t.Fatal("live frame answer reached the network")
+		}
+	})
+	t.Run("stale frame", func(t *testing.T) {
+		f := newScannerReverseFixture(t)
+		liveFrameFixture(f, time.Now().Add(-nodeInfoStreamIdle-time.Second), func() bool { return true })
+		requireNodeInfoUnavailable(t, nodeInfoRPCTestClient(t, f.d), "peer")
+		if f.infoCalls.Load() != 0 || f.directDials.Load() != 0 || f.reverseInfo.Load() != 0 {
+			t.Fatal("stale frame fell back to a peer read")
+		}
+	})
+	t.Run("route no longer current", func(t *testing.T) {
+		f := newScannerReverseFixture(t)
+		liveFrameFixture(f, time.Now(), func() bool { return false })
+		requireNodeInfoUnavailable(t, nodeInfoRPCTestClient(t, f.d), "peer")
+		if f.infoCalls.Load() != 0 || f.directDials.Load() != 0 || f.reverseInfo.Load() != 0 {
+			t.Fatal("withdrawn route fell back to a peer read")
+		}
+	})
+}
+
+func TestClusterIdentitySweepSkipsLiveStreams(t *testing.T) {
+	f := newScannerReverseFixture(t)
+	f.direct.Store(true)
+	liveFrameFixture(f, time.Now(), func() bool { return true })
+	f.d.refreshClusterIdentityOnce()
+	if f.infoCalls.Load() != 0 {
+		t.Fatalf("identity sweep read a peer with a live stream %d times", f.infoCalls.Load())
+	}
+	liveFrameFixture(f, time.Now().Add(-nodeInfoStreamIdle-time.Second), func() bool { return true })
+	f.d.refreshClusterIdentityOnce()
+	if f.infoCalls.Load() != 1 {
+		t.Fatalf("identity sweep reads for a stream peer whose stream is down = %d, want 1", f.infoCalls.Load())
 	}
 }

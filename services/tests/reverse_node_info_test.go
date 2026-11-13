@@ -78,10 +78,11 @@ func newPhase04NodeInfoPeers(t *testing.T) (*task2Fixture, *atomic.Int64) {
 					t.Error(err)
 				}
 				// On this advertised loopback address, scanner background reads
-				// use its ordinary keep-alive HTTP client. The admitted getter's
-				// PeerServiceClient uses a fresh Connection: close request. Count
-				// only that exact bodyless ni request, never unrelated traffic.
-				if request.Method == http.MethodGet && request.URL.Path == "/v1/node-info" && request.URL.RawQuery == "" && request.ContentLength == 0 && request.Close {
+				// use its ordinary keep-alive HTTP client. The admitted node-info
+				// stream's PeerServiceClient uses a fresh Connection: close request.
+				// Count only that exact bodyless stream request, never unrelated
+				// traffic.
+				if request.Method == http.MethodGet && request.URL.Path == "/v1/node-info/events" && request.URL.RawQuery == "" && request.ContentLength == 0 && request.Close {
 					resets.Add(1)
 				}
 			}()
@@ -175,44 +176,73 @@ const phase04NodeInfoHost = "phase04-ni-physical-host"
 
 // This acceptance uses the production service socket, broker and scanner. The
 // Phase 03 fixture supplies real admitted cluster managers and a pinned reverse
-// session; only the remote hardware sample is deterministic test data.
+// session; only the remote hardware sample is deterministic test data. The
+// restricted peer is a paired stream peer, so discovery:get-node-info answers
+// from its node-info stream, which reaches it only over the reverse session.
 func TestReverseNodeInfoPhase04(t *testing.T) {
 	f, resets := newPhase04NodeInfoPeers(t)
 	var mu sync.Mutex
 	host, principal := phase04NodeInfoHost, f.b.uuid
 	utilization := uint32(73)
 	stall := false
-	requests := 0
-	entered := make(chan struct{}, 32)
-	info := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/v1/node-info" {
-			t.Errorf("node-info request: %s %s", r.Method, r.URL.Path)
-			http.Error(w, "unexpected node-info request", http.StatusBadRequest)
-			return
-		}
-		mu.Lock()
-		requests++
-		wait := stall
-		sample := phase04NodeInfoSample{
+	plainRequests, streams, frames := 0, 0, 0
+	sample := func() phase04NodeInfoSample {
+		value := phase04NodeInfoSample{
 			GPUs:           []noderec.GPUInfo{{Name: "restricted GPU", VramBytes: 8192, VramUsedBytes: 2048, UtilizationPercent: utilization}},
 			CPU:            &noderec.CPUInfo{Name: "restricted CPU", Cores: 8, UtilizationPercent: 42},
 			Memory:         &noderec.MemoryInfo{TotalBytes: 16384, UsedBytes: 4096},
 			TelemetryValid: true, MSSince: 100, HostUUID: host,
 		}
 		p := principal
-		sample.ClusterUUID = &p
-		mu.Unlock()
-		if wait {
-			select {
-			case entered <- struct{}{}:
-			default:
+		value.ClusterUUID = &p
+		return value
+	}
+	info := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/node-info":
+			mu.Lock()
+			plainRequests++
+			value := sample()
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(value); err != nil {
+				t.Errorf("node-info response: %v", err)
 			}
-			<-r.Context().Done()
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(sample); err != nil {
-			t.Errorf("node-info response: %v", err)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/node-info/events":
+			// A frame at once and on every sample change, a null keepalive every
+			// 100 ms otherwise, and nothing at all while stalled.
+			mu.Lock()
+			streams++
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			w.(http.Flusher).Flush()
+			ticker := time.NewTicker(100 * time.Millisecond)
+			defer ticker.Stop()
+			var sent *phase04NodeInfoSample
+			for {
+				mu.Lock()
+				stalled, value := stall, sample()
+				var line any
+				if !stalled && (sent == nil || !reflect.DeepEqual(*sent, value)) {
+					line, sent = value, &value
+					frames++
+				}
+				mu.Unlock()
+				if !stalled {
+					if err := json.NewEncoder(w).Encode(line); err != nil {
+						return
+					}
+					w.(http.Flusher).Flush()
+				}
+				select {
+				case <-r.Context().Done():
+					return
+				case <-ticker.C:
+				}
+			}
+		default:
+			t.Errorf("node-info request: %s %s", r.Method, r.URL.Path)
+			http.Error(w, "unexpected node-info request", http.StatusBadRequest)
 		}
 	}))
 	t.Cleanup(info.Close)
@@ -228,6 +258,11 @@ func TestReverseNodeInfoPhase04(t *testing.T) {
 		{Service: noderec.ServiceCluster, Port: f.b.observers[noderec.ServiceCluster].port},
 		{Service: noderec.ServiceNodeInfo, Port: port},
 	}})
+	counters := func() (int, int, int) {
+		mu.Lock()
+		defer mu.Unlock()
+		return plainRequests, streams, frames
+	}
 
 	local := newServiceFixture(t)
 	local.clusterDir = filepath.Join(f.a.base, "cluster")
@@ -248,29 +283,61 @@ func TestReverseNodeInfoPhase04(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertSample := func(t *testing.T, response *jsonrpc.Message, wantUtilization uint32) {
+	// decodeSample returns the answered sample, its age checked and cleared so
+	// the remaining fields compare exactly.
+	decodeSample := func(t *testing.T, response *jsonrpc.Message) phase04NodeInfoSample {
 		t.Helper()
 		if response.Error != nil {
 			t.Fatalf("node-info RPC: %+v", response.Error)
 		}
 		var got phase04NodeInfoSample
 		task2Decode(t, response.Result, &got)
+		if got.MSSince < 0 || got.MSSince > 1000 {
+			t.Fatalf("live frame age = %d ms", got.MSSince)
+		}
+		got.MSSince = 0
+		return got
+	}
+	wantSample := func(wantUtilization uint32) phase04NodeInfoSample {
 		wantPrincipal := f.b.uuid
-		want := phase04NodeInfoSample{
+		return phase04NodeInfoSample{
 			GPUs:           []noderec.GPUInfo{{Name: "restricted GPU", VramBytes: 8192, VramUsedBytes: 2048, UtilizationPercent: wantUtilization}},
 			CPU:            &noderec.CPUInfo{Name: "restricted CPU", Cores: 8, UtilizationPercent: 42},
 			Memory:         &noderec.MemoryInfo{TotalBytes: 16384, UsedBytes: 4096},
-			TelemetryValid: true, MSSince: 100, HostUUID: phase04NodeInfoHost, ClusterUUID: &wantPrincipal,
+			TelemetryValid: true, HostUUID: phase04NodeInfoHost, ClusterUUID: &wantPrincipal,
 		}
-		if !reflect.DeepEqual(got, want) {
-			t.Fatalf("fresh full sample = %+v, want %+v", got, want)
+	}
+	assertSample := func(t *testing.T, response *jsonrpc.Message, wantUtilization uint32) {
+		t.Helper()
+		if got, want := decodeSample(t, response), wantSample(wantUtilization); !reflect.DeepEqual(got, want) {
+			t.Fatalf("streamed full sample = %+v, want %+v", got, want)
 		}
+	}
+	isUnavailable := func(response *jsonrpc.Message) bool {
+		return response.Error != nil && response.Error.Code == -32000 && response.Error.Message == "node information unavailable" && len(response.Result) == 0
 	}
 	assertUnavailable := func(t *testing.T, response *jsonrpc.Message) {
 		t.Helper()
-		if response.Error == nil || response.Error.Code != -32000 || response.Error.Message != "node information unavailable" || len(response.Result) != 0 {
+		if !isUnavailable(response) {
 			t.Fatalf("unavailable must reject without a stale result: %+v", response)
 		}
+	}
+	// eventuallySample waits until the stream delivers wantUtilization.
+	eventuallySample := func(t *testing.T, name string, within time.Duration, wantUtilization uint32) {
+		t.Helper()
+		task1Eventually(t, name, within, func() bool {
+			response := call(t, client, params)
+			if response.Error != nil {
+				assertUnavailable(t, response)
+				return false
+			}
+			got, want := decodeSample(t, response), wantSample(wantUtilization)
+			return reflect.DeepEqual(got, want)
+		})
+	}
+	eventuallyUnavailable := func(t *testing.T, name string, within time.Duration) {
+		t.Helper()
+		task1Eventually(t, name, within, func() bool { return isUnavailable(call(t, client, params)) })
 	}
 	task1Eventually(t, "broker scanner discovers restricted identity", 35*time.Second, func() bool {
 		nextID++
@@ -289,19 +356,14 @@ func TestReverseNodeInfoPhase04(t *testing.T) {
 		return false
 	})
 
-	t.Run("direct first-data reset falls back to fresh pinned reverse sample", func(t *testing.T) {
-		beforeGetter := resets.Load()
-		if beforeGetter != 0 {
-			t.Fatalf("unexpected admitted getter before first service RPC: %d", beforeGetter)
+	t.Run("direct first-data reset falls back to a pinned reverse stream", func(t *testing.T) {
+		eventuallySample(t, "first streamed sample", 15*time.Second, 73)
+		if resets.Load() < 1 {
+			t.Fatal("stream never attempted the restricted direct route")
 		}
-		assertSample(t, call(t, client, params), 73)
-		afterGetter := resets.Load()
-		if afterGetter-beforeGetter != 1 {
-			t.Fatalf("first service getter direct GET reset delta = %d, want 1 (before=%d after=%d)", afterGetter-beforeGetter, beforeGetter, afterGetter)
-		}
-		t.Logf("first service getter direct GET reset delta=%d before any standalone probe", afterGetter-beforeGetter)
+		afterStream := resets.Load()
 		direct := &http.Client{Timeout: time.Second}
-		response, err := direct.Get("http://127.0.0.1:" + strconv.Itoa(f.blockedPort) + "/v1/node-info")
+		response, err := direct.Get("http://127.0.0.1:" + strconv.Itoa(f.blockedPort) + "/v1/node-info/events")
 		if response != nil {
 			if closeErr := response.Body.Close(); closeErr != nil {
 				t.Error(closeErr)
@@ -310,19 +372,17 @@ func TestReverseNodeInfoPhase04(t *testing.T) {
 		if err == nil {
 			t.Fatal("restricted direct endpoint unexpectedly answered")
 		}
-		if resets.Load() != afterGetter {
-			t.Fatal("standalone ordinary HTTP probe contaminated the admitted getter reset counter")
+		if resets.Load() != afterStream {
+			t.Fatal("standalone ordinary HTTP probe contaminated the admitted stream reset counter")
 		}
+		plainBefore, streamsBefore, framesBefore := counters()
 		mu.Lock()
 		utilization = 81
-		before := requests
 		mu.Unlock()
-		assertSample(t, call(t, client, params), 81)
-		mu.Lock()
-		after := requests
-		mu.Unlock()
-		if after <= before {
-			t.Fatal("getter reused enrichment instead of fetching a new sample")
+		eventuallySample(t, "changed sample through the stream", 5*time.Second, 81)
+		plainAfter, streamsAfter, framesAfter := counters()
+		if framesAfter <= framesBefore || streamsAfter != streamsBefore || plainAfter != plainBefore {
+			t.Fatalf("changed sample: frames %d->%d streams %d->%d plain %d->%d, want a new frame on the same stream and no plain read", framesBefore, framesAfter, streamsBefore, streamsAfter, plainBefore, plainAfter)
 		}
 	})
 
@@ -359,65 +419,48 @@ func TestReverseNodeInfoPhase04(t *testing.T) {
 		}
 	})
 
-	t.Run("host and principal mismatches reject without a cached result", func(t *testing.T) {
+	t.Run("host mismatch rejects without a cached result", func(t *testing.T) {
 		mu.Lock()
 		host = "other-host"
 		mu.Unlock()
-		assertUnavailable(t, call(t, client, params))
+		eventuallyUnavailable(t, "frame naming another host ends the stream", 3*time.Second)
 		mu.Lock()
 		host = phase04NodeInfoHost
-		principal = "other-principal"
 		mu.Unlock()
-		assertUnavailable(t, call(t, client, params))
-		mu.Lock()
-		principal = f.b.uuid
-		mu.Unlock()
-		assertSample(t, call(t, client, params), 81)
+		eventuallySample(t, "stream reconnects after the host is restored", 15*time.Second, 81)
 	})
 
-	t.Run("backend timeout bounds a stalled sample and preserves subsequent calls", func(t *testing.T) {
+	t.Run("stalled stream stops answering within the idle bound without blocking calls", func(t *testing.T) {
 		mu.Lock()
 		stall = true
 		mu.Unlock()
 		start := time.Now()
-		if err := client.request("950", "discovery:get-node-info", params); err != nil {
-			t.Fatal(err)
-		}
-		select {
-		case <-entered:
-		case <-time.After(time.Second):
-			t.Fatal("stalled RPC did not reach reverse handler")
-		}
 		if err := second.request("950", "discovery:get-node-info", json.RawMessage(`{"hostUuid":"missing-host"}`)); err != nil {
 			t.Fatal(err)
 		}
 		missing, err := second.response("950", 500*time.Millisecond)
 		if err != nil {
-			t.Fatalf("concurrent RPC blocked behind slow node-info: %v", err)
+			t.Fatalf("concurrent RPC blocked behind a stalled stream: %v", err)
 		}
 		assertUnavailable(t, missing)
-		response, err := client.response("950", 3*time.Second)
-		if err != nil {
-			t.Fatal(err)
-		}
-		assertUnavailable(t, response)
+		eventuallyUnavailable(t, "stalled stream drops its frame", 10*time.Second)
 		elapsed := time.Since(start)
-		if elapsed < time.Second || elapsed > 2500*time.Millisecond {
-			t.Fatalf("backend deadline elapsed %s, want 1s..2.5s", elapsed)
+		if elapsed > 8*time.Second {
+			t.Fatalf("stalled stream answered for %s, want at most the 6 s idle bound plus polling", elapsed)
 		}
-		t.Logf("stalled reverse getter returned unavailable after %s", elapsed)
+		t.Logf("stalled stream stopped answering after %s", elapsed)
 		mu.Lock()
 		stall = false
 		mu.Unlock()
-		assertSample(t, call(t, client, params), 81)
+		eventuallySample(t, "stream recovers after the stall", 20*time.Second, 81)
 	})
 
-	t.Run("lost session rejects while membership stays and a fresh session repairs the cached client", func(t *testing.T) {
+	t.Run("lost session rejects while membership stays and a fresh session repairs the stream", func(t *testing.T) {
 		observer := f.a.observers[noderec.ServiceCluster]
 		previous := observer.established(f.b.uuid)
 		observer.interrupt(f.b.uuid, true)
 		t.Cleanup(func() { observer.interrupt(f.b.uuid, false) })
-		assertUnavailable(t, call(t, client, params))
+		eventuallyUnavailable(t, "lost session ends the stream", 10*time.Second)
 		for _, node := range []*task1Node{f.a, f.b} {
 			peer := f.a
 			if node == f.a {
@@ -442,42 +485,49 @@ func TestReverseNodeInfoPhase04(t *testing.T) {
 		mu.Unlock()
 		observer.interrupt(f.b.uuid, false)
 		task1Eventually(t, "new authenticated reverse session", 15*time.Second, func() bool { return observer.established(f.b.uuid) > previous })
-		assertSample(t, call(t, client, params), 92)
+		eventuallySample(t, "stream over the new session", 40*time.Second, 92)
 	})
 
 	testAuthority := func(name, path string) {
 		t.Run(name, func(t *testing.T) {
+			eventuallySample(t, "streamed sample before revocation", 40*time.Second, 92)
 			original := readLiveDurableFile(t, path)
 			t.Cleanup(func() {
 				if err := os.WriteFile(path, original, 0o600); err != nil {
 					t.Error(err)
 				}
 			})
+			plainBefore, streamsBefore, _ := counters()
 			removeAuthorityFile(t, path)
-			mu.Lock()
-			before := requests
-			mu.Unlock()
+			// Refused at answer time, before the stream notices on its next line.
 			assertUnavailable(t, call(t, client, params))
-			mu.Lock()
-			after := requests
-			mu.Unlock()
-			if after != before {
-				t.Fatalf("revoked authority dispatched node-info: before=%d after=%d", before, after)
+			plainAfter, streamsAfter, _ := counters()
+			if plainAfter != plainBefore || streamsAfter != streamsBefore {
+				t.Fatalf("revoked authority dispatched node-info: plain %d->%d streams %d->%d", plainBefore, plainAfter, streamsBefore, streamsAfter)
 			}
 			if err := os.WriteFile(path, original, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			task1Eventually(t, "fresh sample after restored authority", 15*time.Second, func() bool {
-				response := call(t, client, params)
-				if response.Error != nil {
-					assertUnavailable(t, response)
-					return false
-				}
-				assertSample(t, response, 92)
-				return true
-			})
+			eventuallySample(t, "fresh stream after restored authority", 20*time.Second, 92)
 		})
 	}
 	testAuthority("removed peer pin rejects before target dispatch", filepath.Join(f.a.base, "cluster", "trusted", f.b.uuid+".json"))
 	testAuthority("removed local admission rejects before target dispatch", filepath.Join(f.a.base, "cluster", "admission.json"))
+	// Last: a frame reporting another principal is applied to the directory at
+	// once, so the peer stops being a paired stream peer, and only a new
+	// announcement (mDNS or peer services) restores it, which this fixture
+	// does not make.
+	t.Run("principal mismatch rejects without a cached result", func(t *testing.T) {
+		eventuallySample(t, "streamed sample before the principal changes", 40*time.Second, 92)
+		mu.Lock()
+		principal = "other-principal"
+		mu.Unlock()
+		eventuallyUnavailable(t, "frame reporting another principal", 3*time.Second)
+		plainBefore, _, _ := counters()
+		assertUnavailable(t, call(t, client, params))
+		if plainAfter, _, _ := counters(); plainAfter != plainBefore {
+			t.Fatalf("principal mismatch caused plain reads: %d->%d", plainBefore, plainAfter)
+		}
+	})
+
 }

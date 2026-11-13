@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -87,14 +88,19 @@ func (l *pairedBootstrapListener) Accept() (net.Conn, error) {
 }
 
 type pairedBootstrapFixture struct {
-	local              *serviceFixture
-	client             *serviceRPCClient
-	a, b               *task1Node
-	self               noderec.DirectoryNode
-	listeners          []*pairedBootstrapListener
-	mu                 sync.Mutex
-	counts             map[string]int
-	sample             uint32
+	local     *serviceFixture
+	client    *serviceRPCClient
+	a, b      *task1Node
+	self      noderec.DirectoryNode
+	listeners []*pairedBootstrapListener
+	mu        sync.Mutex
+	counts    map[string]int
+	sample    uint32
+	// streamed records each sample value written as a node-info stream frame.
+	streamed map[uint32]bool
+	// nodeInfoUpstream, when set, serves the target's node-info routes in place
+	// of the fixture handler (a real nvpair-node-info behind a counting proxy).
+	nodeInfoUpstream   atomic.Pointer[httputil.ReverseProxy]
 	id                 int
 	wantPolicy         nodepolicy.Policy
 	wantSettings       settings.Snapshot
@@ -104,7 +110,7 @@ type pairedBootstrapFixture struct {
 
 func newPairedBootstrapFixture(t *testing.T, blocked bool) *pairedBootstrapFixture {
 	t.Helper()
-	f := &pairedBootstrapFixture{counts: map[string]int{}, sample: 61, id: 1100}
+	f := &pairedBootstrapFixture{counts: map[string]int{}, sample: 61, streamed: map[uint32]bool{}, id: 1100}
 	f.local = newServiceFixture(t)
 	for _, uuid := range []string{"bootstrap-receiver", "bootstrap-serving"} {
 		base := shortClusterTempDir(t)
@@ -286,12 +292,23 @@ func (f *pairedBootstrapFixture) serve(t *testing.T, service noderec.ServiceKey,
 	f.listeners = append(f.listeners, listener)
 	f.b.ports[service] = ln.Addr().(*net.TCPAddr).Port
 	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if proxy := f.nodeInfoUpstream.Load(); proxy != nil && service == noderec.ServiceNodeInfo {
+			f.mu.Lock()
+			f.counts["upstream "+r.Method+" "+r.URL.Path]++
+			f.mu.Unlock()
+			proxy.ServeHTTP(w, r)
+			return
+		}
 		if protected {
 			f.b.mesh.Refresh()
 			if peer, ok := f.b.mesh.VerifyClientPin(r); !ok || peer != f.a.uuid {
 				http.Error(w, "not the admitted caller", http.StatusForbidden)
 				return
 			}
+		}
+		if r.Method+" "+r.URL.Path == "GET /v1/node-info/events" {
+			f.serveNodeInfoStream(t, w, r)
+			return
 		}
 		if r.Method+" "+r.URL.Path == "GET /v1/engines/events" {
 			// The engine-status stream: the current list, then keepalives
@@ -324,8 +341,7 @@ func (f *pairedBootstrapFixture) serve(t *testing.T, service noderec.ServiceKey,
 		var value any
 		switch r.Method + " " + r.URL.Path {
 		case "GET /v1/node-info":
-			principal := f.b.uuid
-			value = phase04NodeInfoSample{HostUUID: f.b.uuid, ClusterUUID: &principal, TelemetryValid: true, MSSince: 100, CPU: &noderec.CPUInfo{Name: "bootstrap CPU", Cores: 7}, GPUs: []noderec.GPUInfo{{Name: "bootstrap GPU", UtilizationPercent: f.sample}}}
+			value = f.nodeInfoSample(f.sample)
 		case "GET /v1/engines":
 			value = map[string]any{"engines": []map[string]any{{"engine": "llamacpp", "installed": true, "running": true, "port": 45679}}}
 		case "POST /v1/node-policy/get":
@@ -372,6 +388,44 @@ func (f *pairedBootstrapFixture) serve(t *testing.T, service noderec.ServiceKey,
 			t.Error("target listener remains after cleanup")
 		}
 	})
+}
+
+func (f *pairedBootstrapFixture) nodeInfoSample(sample uint32) phase04NodeInfoSample {
+	principal := f.b.uuid
+	return phase04NodeInfoSample{HostUUID: f.b.uuid, ClusterUUID: &principal, TelemetryValid: true, MSSince: 100, CPU: &noderec.CPUInfo{Name: "bootstrap CPU", Cores: 7}, GPUs: []noderec.GPUInfo{{Name: "bootstrap GPU", UtilizationPercent: sample}}}
+}
+
+// serveNodeInfoStream is the target's GET /v1/node-info/events: the current
+// sample at once and whenever f.sample changes, and a null keepalive every
+// 100 ms otherwise. It holds f.mu only per write, never for the stream.
+func (f *pairedBootstrapFixture) serveNodeInfoStream(t *testing.T, w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	f.counts["GET /v1/node-info/events"]++
+	f.mu.Unlock()
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	first, sent := true, uint32(0)
+	for {
+		f.mu.Lock()
+		sample := f.sample
+		var value any
+		if first || sample != sent {
+			value = f.nodeInfoSample(sample)
+			f.streamed[sample] = true
+		}
+		f.mu.Unlock()
+		first, sent = false, sample
+		if err := json.NewEncoder(w).Encode(value); err != nil {
+			return
+		}
+		w.(http.Flusher).Flush()
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 func (f *pairedBootstrapFixture) call(t *testing.T, method string, params any) *jsonrpc.Message {
@@ -518,14 +572,39 @@ func (f *pairedBootstrapFixture) assertReads(t *testing.T) {
 			}
 		})
 	}
-	test("fresh node information", "discovery:get-node-info", "GET /v1/node-info", map[string]string{"hostUuid": f.b.uuid}, func(t *testing.T, raw json.RawMessage) {
-		var got phase04NodeInfoSample
-		task2Decode(t, raw, &got)
+	// A paired peer's node information is served from its node-info stream: a
+	// changed sample must arrive as a stream frame, never as a fresh plain read.
+	t.Run("fresh node information", func(t *testing.T) {
+		// Right after startup or recovery the stream may not be open yet, and
+		// until it is the peer is still polled; wait for a streamed answer first.
+		task1Eventually(t, "node information from the node-info stream", 10*time.Second, func() bool {
+			return f.call(t, "discovery:get-node-info", map[string]string{"hostUuid": f.b.uuid}).Error == nil
+		})
+		plainBefore := f.count("GET /v1/node-info")
 		f.mu.Lock()
+		f.sample++
 		wantSample := f.sample
 		f.mu.Unlock()
-		if got.HostUUID != f.b.uuid || got.ClusterUUID == nil || *got.ClusterUUID != f.b.uuid || got.CPU == nil || got.CPU.Cores != 7 || len(got.GPUs) != 1 || got.GPUs[0].UtilizationPercent != wantSample {
-			t.Fatalf("fresh node sample differs: %+v", got)
+		task1Eventually(t, "changed sample through the node-info stream", 10*time.Second, func() bool {
+			response := f.call(t, "discovery:get-node-info", map[string]string{"hostUuid": f.b.uuid})
+			if response.Error != nil {
+				return false
+			}
+			var got phase04NodeInfoSample
+			task2Decode(t, response.Result, &got)
+			if got.HostUUID != f.b.uuid || got.ClusterUUID == nil || *got.ClusterUUID != f.b.uuid || got.CPU == nil || got.CPU.Cores != 7 || len(got.GPUs) != 1 {
+				t.Fatalf("node sample differs: %+v", got)
+			}
+			return got.GPUs[0].UtilizationPercent == wantSample
+		})
+		f.mu.Lock()
+		streamed := f.streamed[wantSample]
+		f.mu.Unlock()
+		if !streamed {
+			t.Fatal("changed sample was not served by the node-info stream")
+		}
+		if after := f.count("GET /v1/node-info"); after != plainBefore {
+			t.Fatalf("stream peer node information caused plain reads: before=%d after=%d", plainBefore, after)
 		}
 	})
 	t.Run("engine inventory from the stream", func(t *testing.T) {
@@ -695,6 +774,7 @@ func TestPairedDirectoryBootstrap(t *testing.T) {
 					method, path string
 					params       any
 				}{
+					{"discovery:get-node-info", "GET /v1/node-info", map[string]string{"hostUuid": f.b.uuid}},
 					{"engine:remote-get-installed", "GET /v1/engines/events", map[string]string{"node": f.b.uuid}},
 					{"policy:get", "POST /v1/node-policy/get", map[string]string{"nodeId": f.b.uuid}},
 					{"engine:get-settings", "POST /v1/engine-settings/get", map[string]string{"nodeId": f.b.uuid, "engine": "llamacpp"}},

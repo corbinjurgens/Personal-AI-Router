@@ -395,6 +395,10 @@ func newTask1Observer(t *testing.T, target *task1Node, service noderec.ServiceKe
 			if response.Request.URL.Path == "/v1/engines/events" {
 				return nil
 			}
+			// Node-info telemetry is a live stream, not a finite reply.
+			if response.Request.URL.Path == "/v1/node-info/events" {
+				return nil
+			}
 			if response.StatusCode == http.StatusSwitchingProtocols {
 				o.mu.Lock()
 				o.readyUpgrades[peer]++
