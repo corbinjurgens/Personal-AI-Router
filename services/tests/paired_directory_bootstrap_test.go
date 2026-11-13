@@ -722,9 +722,16 @@ func TestPairedDirectoryBootstrap(t *testing.T) {
 			})
 			start := time.Now()
 			dispatches := f.count("GET /v1/engines/events")
-			response := f.call(t, "engine:remote-get-installed", map[string]string{"node": f.b.uuid})
-			if response.Error == nil || len(response.Result) != 0 {
-				t.Fatalf("unavailable routes returned success: %+v", response)
+			// The read answers from the live engine-status stream, which ends
+			// when its transport closes; a read racing that teardown may still
+			// see the last list, so wait for the stream's end within the bound.
+			var response *jsonrpc.Message
+			task1Eventually(t, "unavailable routes fail engine:remote-get-installed", 7*time.Second, func() bool {
+				response = f.call(t, "engine:remote-get-installed", map[string]string{"node": f.b.uuid})
+				return response.Error != nil
+			})
+			if len(response.Result) != 0 {
+				t.Fatalf("unavailable routes returned a result with the error: %+v", response)
 			}
 			if elapsed := time.Since(start); elapsed > 7*time.Second {
 				t.Fatalf("both-route failure exceeded bound: %s", elapsed)
