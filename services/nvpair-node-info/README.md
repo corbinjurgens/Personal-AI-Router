@@ -89,14 +89,15 @@ Field notes:
 
 An NDJSON stream (`application/x-ndjson`, `Cache-Control: no-store`) of node-info frames, served on the same listeners as `GET /v1/node-info`.
 
-- **Access:** the same rule as `GET /v1/node-info`. Without `--cluster-dir`, as under the broker, any caller is served over plain HTTP. In the cluster-gated mode, while this node is a member, only pinned cluster peers (or this node itself) are admitted and others get `403`. The rule is rechecked before every frame, keepalives included, so a removed pin or a membership change ends an open stream at its next line.
+- **Access:** the same rule as `GET /v1/node-info`. Without `--cluster-dir`, as under the broker, any caller is served over plain HTTP. In the cluster-gated mode, while this node is a member, only pinned cluster peers (or this node itself) are admitted and others get `403`. The rule is rechecked before every frame, keepalives included, so a removed pin, or this node joining a cluster, ends an unpinned stream at its next line. When this node leaves its cluster, open streams continue, as the plain inventory is then served to anyone.
 - **Caps:** at most 64 streams in total and 8 from one non-loopback remote address; beyond either the request gets `503 too many node-info streams`. Loopback callers (reverse-session streams relayed by the local cluster manager) count only against the total.
 - **Frames:** each frame is exactly a `GET /v1/node-info` body, so both decode the same way; ages (`msSince`, memory-observation `ageMs`) are as of the frame's build time. The first frame is the current sample, sent on connect. A sample is evaluated once per second and a new frame is sent when, compared with the last frame:
   - a static field differs: `serviceBuildId`, `hostUuid`, `clusterUuid` (absent, empty and a value are three states), CPU name or cores, memory total, the GPU list (length, and each GPU's name, physical ID and VRAM total), or the memory observation's run ID or ordered domain IDs;
   - `telemetryValid` differs, or a memory-observation fact's `valid` flag differs;
   - any GPU's `utilization_percent` moves by 5 points or more, or `cpu.utilization_percent` by 10 points or more;
   - any GPU's `vram_used_bytes`, or `memory.used_bytes`, moves by at least max(64 MiB, 1 % of that GPU's `vram_bytes` or of `memory.total_bytes`);
-  - the `cpu` or `memory` object appears or disappears.
+  - the `cpu` or `memory` object appears or disappears;
+  - the GPU sample is at least 5 s old (`msSince`) while `telemetryValid` is true, and `msSince` differs. A stalled collector keeps its last values, so during a stall a frame goes out every second and consumers see the age grow past their freshness limits.
 - **Keepalive:** a `null` line every 2 s means "the current sample is still within the thresholds of the last frame". A consumer can treat the last frame as current as of each keepalive.
 - **Consumers:** the stream is meant for the node-scanner's reads of paired peers; manual nodes and unpaired callers keep using `GET /v1/node-info`.
 - **Shutdown:** an open stream holds node-info's graceful shutdown for its full 3 s timeout. This is accepted; there is no stream-specific shutdown path.

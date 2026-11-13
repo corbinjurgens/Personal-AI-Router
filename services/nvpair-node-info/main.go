@@ -453,8 +453,7 @@ func main() {
 	body := func() []byte {
 		return buildResponse(gpus, cpu, memTotal, collector.Snapshot(), hostUUID, clusterPrincipal())
 	}
-	// The stream's hub admits at most 64 streams in total (its default Limit).
-	pub := &nodeInfoPublisher{body: body}
+	pub := &nodeInfoPublisher{hub: clustertrust.SnapshotHub[json.RawMessage]{Limit: nodeInfoStreamsTotal}, body: body}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/node-info", nodeInfoHandler(mesh, body))

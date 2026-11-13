@@ -22,7 +22,13 @@ var nodeInfoStreamKeepalive = 2 * time.Second // a null line: still within thres
 const (
 	nodeInfoStreamWriteTimeout = 5 * time.Second
 	nodeInfoPublishEvery       = time.Second
+	nodeInfoStreamsTotal       = 64
 	nodeInfoStreamsPerAddress  = 8 // per non-loopback remote address
+
+	// staleGPUSampleAge: once the GPU sample is this old (a stalled collector
+	// keeps the last values), every change of msSince publishes, so consumers
+	// see the age pass the scheduler's 10 s freshness rule.
+	staleGPUSampleAge = 5 * time.Second
 
 	gpuUtilizationStep = 5  // percentage points
 	cpuUtilizationStep = 10 // percentage points
@@ -36,6 +42,7 @@ func nodeInfoChanged(published, candidate NodeInfoResponse) bool {
 	if published.ServiceBuildID != candidate.ServiceBuildID ||
 		published.HostUUID != candidate.HostUUID ||
 		published.TelemetryValid != candidate.TelemetryValid ||
+		(candidate.TelemetryValid && candidate.MSSince >= staleGPUSampleAge.Milliseconds() && candidate.MSSince != published.MSSince) ||
 		!sameOptionalString(published.ClusterUUID, candidate.ClusterUUID) ||
 		memoryObservationChanged(published.MemoryObservation, candidate.MemoryObservation) {
 		return true
