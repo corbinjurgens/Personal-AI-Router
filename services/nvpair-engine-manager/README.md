@@ -761,8 +761,10 @@ recheck before each frame, 25-second subscriber idle). Its frames are the
 `GET /v1/engines` body, `{engines:[EngineStatus]}`. While at least one stream
 is open, the list is rebuilt every 10 seconds and 250 ms after a local
 `engine:state-changed`, and a frame is sent only when its encoded bytes change.
-A new stream gets the last published list at once and triggers a rebuild, so
-a list that changed while no stream was open is corrected about 250 ms later.
+A new stream gets the last published list at once, if one was published, and
+triggers a rebuild about 250 ms later. That rebuild corrects a list that changed
+while no stream was open. Straight after start-up nothing has been published,
+so the first stream receives no list until that first rebuild.
 With no stream open the publisher does no status work. The rebuild waits up to
 one second for an engine's operation lock; an engine whose lock stays held
 longer (a long install or start) contributes its in-memory status instead of a

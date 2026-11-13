@@ -98,9 +98,10 @@ func (p *enginesPublisher) rebuild() {
 }
 
 // subscribe adds a stream reader and asks run for a rebuild. The reader gets
-// the last published list at once; after a period with no readers that list
-// may be old, and the rebuild (about enginesRebuildDelay later) sends the
-// current one if it differs. The rebuild is left to run rather than done here
+// the last published list at once, if any; after a period with no readers that
+// list may be old, and the rebuild (about enginesRebuildDelay later) sends the
+// current one if it differs. Straight after start-up nothing is published, so
+// the first reader waits for that rebuild. The rebuild is left to run rather than done here
 // because it can wait up to the bounded read budget per busy engine (see
 // publishedStatuses), and the stream must open without waiting for it.
 func (p *enginesPublisher) subscribe() (<-chan json.RawMessage, func(), bool) {
@@ -143,7 +144,8 @@ func (p *enginesPublisher) run(ctx context.Context, list func() []EngineStatus) 
 }
 
 // handleEngineEvents streams the engine status list to a pinned peer: the
-// current list at once, again on change, and a null keepalive otherwise.
+// last published list at once (after start-up, once the first rebuild
+// publishes), again on change, and a null keepalive otherwise.
 func (s *controlServer) handleEngineEvents(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", "GET")
