@@ -9,12 +9,17 @@ import (
 	"errors"
 	"io"
 	"net/netip"
+	"regexp"
 	"strings"
 
 	"nvpair-shared/engines"
 )
 
 const PeerServicesMaxBytes = 8192
+
+// PeerStateMaxLine bounds one peer-state stream line: a descriptor plus the
+// frame's roster hash and field names.
+const PeerStateMaxLine = PeerServicesMaxBytes + 128
 
 // PeerService describes presence and port only. Transport remains local policy.
 type PeerService struct {
@@ -39,6 +44,44 @@ type PeerServicesClaim struct {
 	Sequence    uint64                 `json:"sequence"`
 	Source      string                 `json:"source"`
 	ObservedAt  int64                  `json:"observedAt"`
+}
+
+// PeerStateFrame is one non-keepalive line of a cluster manager's peer-state
+// stream: the node's current descriptor and the hash of its canonical roster.
+type PeerStateFrame struct {
+	Descriptor PeerServicesDescriptor `json:"descriptor"`
+	RosterHash string                 `json:"rosterHash"`
+}
+
+var rosterHashPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// DecodePeerStateFrame accepts exactly one bounded frame per line, rejecting
+// unknown fields, trailing data, a descriptor for another subject and a roster
+// hash that is not 64 lowercase hex characters. Callers handle the null
+// keepalive before decoding; a null line is an error here.
+func DecodePeerStateFrame(line []byte, expectedUUID string) (PeerStateFrame, error) {
+	var frame PeerStateFrame
+	if len(line) > PeerStateMaxLine {
+		return frame, errors.New("peer-state frame too large")
+	}
+	if bytes.Equal(bytes.TrimSpace(line), []byte("null")) {
+		return frame, errors.New("peer-state keepalive is not a frame")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(line))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&frame); err != nil {
+		return PeerStateFrame{}, err
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		return PeerStateFrame{}, errors.New("trailing peer-state data")
+	}
+	if err := ValidatePeerServicesDescriptor(frame.Descriptor, expectedUUID); err != nil {
+		return PeerStateFrame{}, err
+	}
+	if !rosterHashPattern.MatchString(frame.RosterHash) {
+		return PeerStateFrame{}, errors.New("invalid peer-state roster hash")
+	}
+	return frame, nil
 }
 
 func ValidatePeerServicesDescriptor(d PeerServicesDescriptor, expectedUUID string) error {
@@ -81,29 +124,4 @@ func ValidatePeerServicesDescriptor(d PeerServicesDescriptor, expectedUUID strin
 		seen[service.Service] = true
 	}
 	return nil
-}
-
-// DecodePeerServices accepts exactly one bounded complete document, including a
-// successful EOF read. A transport error after the JSON value still rejects it.
-func DecodePeerServices(r io.Reader, expectedUUID string) (PeerServicesDescriptor, error) {
-	var d PeerServicesDescriptor
-	body, err := io.ReadAll(io.LimitReader(r, PeerServicesMaxBytes+1))
-	if err != nil {
-		return d, err
-	}
-	if len(body) > PeerServicesMaxBytes {
-		return d, errors.New("descriptor too large")
-	}
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&d); err != nil {
-		return d, err
-	}
-	if decoder.Decode(&struct{}{}) != io.EOF {
-		return d, errors.New("trailing descriptor data")
-	}
-	if err := ValidatePeerServicesDescriptor(d, expectedUUID); err != nil {
-		return PeerServicesDescriptor{}, err
-	}
-	return d, nil
 }

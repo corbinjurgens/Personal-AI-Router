@@ -17,11 +17,21 @@ import (
 	"nvpair-shared/noderec"
 )
 
-// reconcileEvery is the heartbeat cadence for catch-up roster reconciles — the
-// backstop that converges nodes which were offline during a pair/removal.
-// Membership churns far less than this; convergence on the happy path comes from
-// the immediate post-pair / post-removal pushes, not the heartbeat.
-const reconcileEvery = 30 * time.Second
+// reconcileEvery is the cadence of the network roster pass, a repair backstop
+// that converges nodes which were offline during a pair/removal. Convergence on
+// the happy path comes from the immediate post-pair / post-removal kicks and
+// from peer-state streams reporting a changed roster hash, not from this pass.
+const reconcileEvery = 5 * time.Minute
+
+// maintainEvery is the cadence of local maintenance: tombstone GC, pin refresh,
+// dropping unpinned clients and refreshing member addresses from discovery. It
+// makes no network call, so stored addresses converge as fast as before the
+// network pass slowed to a repair backstop.
+const maintainEvery = 30 * time.Second
+
+// requestedPassMinInterval bounds requested network passes (a peer-state
+// stream refused with 403) to one per interval.
+const requestedPassMinInterval = 30 * time.Second
 
 // initialReconcileDelay is how long after startup the first reconcile pass
 // runs. Short enough to converge a just-restarted or just-woken node quickly,
@@ -48,6 +58,7 @@ func (m *Manager) handleRoster(w http.ResponseWriter, r *http.Request) {
 		m.rejectRosterReconcile(w, r)
 		return
 	}
+	m.notePeerReachable(senderUUID)
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
 	if err != nil {
 		http.Error(w, "read body", http.StatusBadRequest)
@@ -300,6 +311,7 @@ func (m *Manager) reconcileOnce(ctx context.Context, client *http.Client, body [
 		log.Printf("roster: reconcile with %s (%s): status %d", addr, peerUUID, resp.StatusCode)
 		return reconcileUnreachable, false, true
 	}
+	m.notePeerReachable(peerUUID)
 	var remote Roster
 	if err := json.Unmarshal(rb, &remote); err != nil {
 		log.Printf("roster: decode reconcile response from %s: %v", peerUUID, err)
@@ -470,40 +482,88 @@ func (m *Manager) removeBareRejectingPeers(clusterID string, generation uint64, 
 	}
 }
 
-// reconcileLoop runs the periodic catch-up reconcile and tombstone GC until the
-// context is cancelled. Each pass first refreshes member addresses from the
-// mDNS browse map, so a member that moved to a new IP (sleep/wake, DHCP)
-// re-converges within a heartbeat without a dedicated discovery callback. An
-// initial pass shortly after startup converges a node that just (re)started or
-// woke at a new address without waiting a full heartbeat.
+// reconcileLoop runs local maintenance every maintainEvery and the network
+// repair pass every reconcileEvery until the context is cancelled. Maintenance
+// refreshes member addresses from the mDNS browse map, so a member that moved
+// to a new IP (sleep/wake, DHCP) re-converges without a dedicated discovery
+// callback. An initial full pass shortly after startup converges a node that
+// just (re)started or woke at a new address. requestReconcilePass asks for an
+// extra network pass, run once the last one is requestedPassMinInterval old.
 func (m *Manager) reconcileLoop(ctx context.Context) {
-	ticker := time.NewTicker(reconcileEvery)
-	defer ticker.Stop()
+	maintain := time.NewTicker(maintainEvery)
+	defer maintain.Stop()
+	repair := time.NewTicker(reconcileEvery)
+	defer repair.Stop()
 	initial := time.NewTimer(initialReconcileDelay)
 	defer initial.Stop()
+	var lastPass time.Time
+	var deferred <-chan time.Time // a throttled request, due at lastPass + interval
+	pass := func() {
+		lastPass = time.Now()
+		m.reconcilePass()
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-initial.C:
-			m.reconcilePass()
-		case <-ticker.C:
-			m.reconcilePass()
+			pass()
+		case <-repair.C:
+			pass()
+		case <-maintain.C:
+			m.maintainPass()
+		case <-m.reconcileRequest:
+			now := time.Now()
+			if shouldRunRequestedPass(lastPass, now) {
+				pass()
+			} else if deferred == nil {
+				deferred = time.After(lastPass.Add(requestedPassMinInterval).Sub(now))
+			}
+		case <-deferred:
+			// A pass that ran since the request already satisfied it.
+			deferred = nil
+			if shouldRunRequestedPass(lastPass, time.Now()) {
+				pass()
+			}
 		}
 	}
 }
 
-// reconcilePass GCs expired tombstones, refreshes member addresses from the
-// discovery resolver, and pushes a roster reconcile to every confirmed peer.
-func (m *Manager) reconcilePass() {
+// shouldRunRequestedPass reports whether a requested network pass may run at
+// now, given the time of the last network pass.
+func shouldRunRequestedPass(lastPass, now time.Time) bool {
+	return now.Sub(lastPass) >= requestedPassMinInterval
+}
+
+// requestReconcilePass asks reconcileLoop for one network pass without
+// blocking; requests made while one is pending coalesce.
+func (m *Manager) requestReconcilePass() {
+	select {
+	case m.reconcileRequest <- struct{}{}:
+	default:
+	}
+}
+
+// maintainPass GCs expired tombstones and, when clustered, refreshes pins,
+// drops unpinned clients and refreshes member addresses from the discovery
+// resolver. It makes no network call. It reports whether the node is clustered.
+func (m *Manager) maintainPass() bool {
 	m.gcTombstones()
 	if cid, _ := m.clusterIdentity(); cid == "" {
-		return
+		return false
 	}
 	m.mesh.Refresh()
 	m.clients.DropUnpinned()
 	m.refreshMemberAddrsFromMDNS()
-	m.reconcilePeersAndMaybeSelfRemove()
+	return true
+}
+
+// reconcilePass runs maintainPass, then pushes a roster reconcile to every
+// confirmed peer.
+func (m *Manager) reconcilePass() {
+	if m.maintainPass() {
+		m.reconcilePeersAndMaybeSelfRemove()
+	}
 }
 
 // refreshMemberAddrsFromMDNS updates each confirmed peer's stored reachable

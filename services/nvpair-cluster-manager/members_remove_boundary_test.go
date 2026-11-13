@@ -46,9 +46,9 @@ func newRemovalHintFixture(t *testing.T) *removalHintFixture {
 	f.descriptor = noderec.PeerServicesDescriptor{HostUUID: f.b.identity.NodeUUID, Addresses: []string{"192.0.2.55", "100.90.0.8"}, Services: []noderec.PeerService{}}
 	f.listener = startWalkServer(t, f.b, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case peerServicesPath:
+		case peerStatePath:
 			f.reads.Add(1)
-			if err := json.NewEncoder(w).Encode(f.descriptor); err != nil {
+			if err := json.NewEncoder(w).Encode(noderec.PeerStateFrame{Descriptor: f.descriptor, RosterHash: testRosterHash}); err != nil {
 				t.Error(err)
 			}
 		case membersRemovePath:
@@ -105,7 +105,7 @@ func newRemovalHintFixture(t *testing.T) *removalHintFixture {
 	learn.allow(t, f.lan, f.listener)
 	replaceClusterPeerServices(t, f.a, f.a.peerServiceOptions(), learn)
 	replaceClusterPeerServices(t, f.b, f.b.peerServiceOptions(), newPeerDialGuard(t))
-	if err := f.a.refreshPeerServices(context.Background(), f.b.identity.NodeUUID); err != nil {
+	if err := streamPeerStateOnce(context.Background(), f.a, f.b.identity.NodeUUID); err != nil {
 		t.Fatal(err)
 	}
 	if !slices.Equal(storedHintMember(t, f.a, f.b.identity.NodeUUID).AdvertisedAddresses, f.descriptor.Addresses) {

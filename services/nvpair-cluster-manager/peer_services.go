@@ -4,11 +4,9 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -22,16 +20,51 @@ import (
 	"nvpair-shared/noderec"
 )
 
-const peerServicesPath = "/v1/cluster/services"
 const peerServicesEvent = "cluster:peer-services"
-const peerServicesRefreshEvery = 2 * time.Second
+
+// peerStatePath serves this node's peer-state stream to paired members.
+const peerStatePath = "/v1/cluster/peer-state"
+
+// peerStateKeepalive is the interval between null keepalive lines on a served
+// peer-state stream. A var so tests can shorten it.
+var peerStateKeepalive = 10 * time.Second
+
+// peerStateWriteTimeout bounds each frame write on a served stream.
+const peerStateWriteTimeout = 5 * time.Second
+
+// peerStateIdle drops a subscribed stream after this long without a line.
+const peerStateIdle = 25 * time.Second
+
+// peerStateResponseHeaderTimeout bounds the wait for a stream's response
+// headers. The stream client has no total timeout: http.Client.Timeout covers
+// the body and would end every stream.
+const peerStateResponseHeaderTimeout = 8 * time.Second
+
+// peerStateConnectTimeout bounds one address's connect and response headers,
+// so a stalled address cannot starve the next. A var so tests can shorten it.
+var peerStateConnectTimeout = 8 * time.Second
+
+// peerStateMinHealthy is how long a stream that delivered a frame must have
+// run, counted from the start of its connect, for its end to reset the peer's
+// reconnect backoff.
+const peerStateMinHealthy = 5 * time.Second
+
+// peerStateEvaluateEvery re-evaluates the member set without a signal;
+// peerStateDueEvery checks reconnect backoff from in-memory state only.
+const (
+	peerStateEvaluateEvery = 10 * time.Second
+	peerStateDueEvery      = time.Second
+)
 
 type peerServicesState struct {
 	mu       sync.Mutex
 	self     noderec.DirectoryNode
 	source   string
 	sequence uint64
-	inflight map[string]bool
+	// reconcileInflight and reconcileDirty coalesce stream-requested roster
+	// reconciles per peer (requestPeerReconcile).
+	reconcileInflight map[string]bool
+	reconcileDirty    map[string]bool
 }
 
 func (m *Manager) setSelfServicesIdentity(nodes []noderec.DirectoryNode) {
@@ -45,6 +78,7 @@ func (m *Manager) setSelfServicesIdentity(nodes []noderec.DirectoryNode) {
 	m.serviceRefresh.mu.Lock()
 	m.serviceRefresh.self = self
 	m.serviceRefresh.mu.Unlock()
+	m.signalPeerState()
 }
 
 func descriptorAddresses(scanner, overlay []string) []string {
@@ -102,7 +136,10 @@ func (m *Manager) selfServicesDescriptor() (noderec.PeerServicesDescriptor, erro
 	return d, noderec.ValidatePeerServicesDescriptor(d, m.identity.NodeUUID)
 }
 
-func (m *Manager) handlePeerServices(w http.ResponseWriter, r *http.Request) {
+// handlePeerState serves this node's peer-state stream: the latest frame at
+// once, every published change, and a null keepalive every peerStateKeepalive.
+// Pin, admission and publisher availability are rechecked before every line.
+func (m *Manager) handlePeerState(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -121,8 +158,8 @@ func (m *Manager) handlePeerServices(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "admission required", http.StatusForbidden)
 		return
 	}
-	d, err := m.selfServicesDescriptor()
-	if err != nil {
+	m.notePeerReachable(uuid)
+	if !m.peerState.available() {
 		http.Error(w, "self services unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -131,28 +168,153 @@ func (m *Manager) handlePeerServices(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "admission changed", http.StatusForbidden)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
+	updates, unsubscribe, ok := m.peerState.subscribe()
+	if !ok {
+		http.Error(w, "too many peer-state streams", http.StatusServiceUnavailable)
+		return
+	}
+	defer unsubscribe()
 	w.Header().Set("Cache-Control", "no-store")
-	_ = json.NewEncoder(w).Encode(d)
+	clustertrust.ServeSnapshotStream(w, r, clustertrust.SnapshotStreamServer[noderec.PeerStateFrame]{
+		Keepalive:    peerStateKeepalive,
+		WriteTimeout: peerStateWriteTimeout,
+		Updates:      updates,
+		Authorize: func() bool {
+			if pinned, ok := m.verifyClientPin(r); !ok || pinned != uuid {
+				return false
+			}
+			current, ok := m.reversePeer(uuid)
+			return ok && current == peer && m.peerState.available()
+		},
+	})
 }
 
-// There is at most one complete fetch/publish per peer, and four network reads
-// globally. Remote process generations are deliberately not used for ordering.
-func (m *Manager) peerServicesLoop(ctx context.Context) {
+// peerStateStream is one subscription owned by peerStateLoop.
+type peerStateStream struct {
+	cancel      context.CancelFunc
+	incarnation string
+	stopped     bool // cancelled by the supervisor; its end leaves backoff alone
+}
+
+// peerStateResult is what a stream goroutine reports to peerStateLoop.
+type peerStateResult struct {
+	uuid        string
+	incarnation string
+	addrs       []string
+	gotFrame    bool
+	forbidden   bool
+	open        time.Duration
+}
+
+// peerReachableSet holds members just shown reachable, until peerStateLoop
+// takes them.
+type peerReachableSet struct {
+	mu    sync.Mutex
+	uuids map[string]bool
+}
+
+// notePeerReachable records evidence that uuid is reachable again (a reverse
+// session, an authenticated inbound request, or an accepted roster exchange).
+// peerStateLoop then resets that member's reconnect backoff and redials it at
+// once, so the 30 s cap applies only while a member stays unreachable.
+func (m *Manager) notePeerReachable(uuid string) {
+	m.peerReachable.mu.Lock()
+	if m.peerReachable.uuids == nil {
+		m.peerReachable.uuids = make(map[string]bool)
+	}
+	m.peerReachable.uuids[uuid] = true
+	m.peerReachable.mu.Unlock()
+	select {
+	case m.peerReachableWake <- struct{}{}:
+	default:
+	}
+}
+
+func (m *Manager) takeReachablePeers() []string {
+	m.peerReachable.mu.Lock()
+	defer m.peerReachable.mu.Unlock()
+	uuids := make([]string, 0, len(m.peerReachable.uuids))
+	for uuid := range m.peerReachable.uuids {
+		uuids = append(uuids, uuid)
+	}
+	clear(m.peerReachable.uuids)
+	return uuids
+}
+
+// newPeerStateBackoff builds peerStateLoop's reconnect backoff. A var so tests
+// can start from a long delay.
+var newPeerStateBackoff = newPeerBackoff
+
+// signalPeerStateMembers asks peerStateLoop to re-evaluate the member set now.
+func (m *Manager) signalPeerStateMembers() {
+	select {
+	case m.peerStateMembers <- struct{}{}:
+	default:
+	}
+}
+
+// peerStateLoop keeps one peer-state subscription open to every other
+// current member. It owns the active set and the reconnect backoff; stream
+// goroutines only report their result. Remote process generations are never
+// used for ordering.
+func (m *Manager) peerStateLoop(ctx context.Context) {
 	var source [16]byte
 	if _, err := rand.Read(source[:]); err != nil {
 		return
 	}
 	m.serviceRefresh.mu.Lock()
 	m.serviceRefresh.source = hex.EncodeToString(source[:])
-	m.serviceRefresh.inflight = make(map[string]bool)
 	m.serviceRefresh.mu.Unlock()
-	slots := make(chan struct{}, 4)
+
+	backoff := newPeerStateBackoff()
+	active := make(map[string]peerStateStream)
+	members := make(map[string]string) // uuid -> incarnation at the last evaluation
+	// streamed records, per member, the incarnation under which its stream
+	// delivered a frame. Only such a member's later 403 requests a full pass:
+	// a member still completing pairing refuses us until it pins this node,
+	// and a pass then would prune it as a peer that dropped us.
+	streamed := make(map[string]string)
+	done := make(chan peerStateResult)
 	var work sync.WaitGroup
 	defer work.Wait()
-	ticker := time.NewTicker(peerServicesRefreshEvery)
-	defer ticker.Stop()
-	for {
+
+	start := func() {
+		now := time.Now()
+		keep := make(map[string]bool, len(members))
+		for uuid, incarnation := range members {
+			keep[uuid] = true
+			if _, running := active[uuid]; running {
+				continue
+			}
+			member, ok := m.memberByUUID(uuid)
+			if !ok {
+				continue
+			}
+			addrs := m.resolvePeerAddrs(*member)
+			if !backoff.due(uuid, addrs, now) {
+				continue
+			}
+			streamCtx, cancel := context.WithCancel(ctx)
+			active[uuid] = peerStateStream{cancel: cancel, incarnation: incarnation}
+			work.Add(1)
+			go func() {
+				defer work.Done()
+				opened := time.Now()
+				gotFrame, err := m.runPeerStateStream(streamCtx, uuid, incarnation)
+				cancel()
+				result := peerStateResult{uuid: uuid, incarnation: incarnation, addrs: addrs, gotFrame: gotFrame,
+					forbidden: errors.Is(err, errPeerStateForbidden), open: time.Since(opened)}
+				select {
+				case done <- result:
+				case <-ctx.Done():
+				}
+			}()
+		}
+		backoff.retain(keep)
+	}
+	evaluate := func() {
+		m.mesh.Refresh()
+		clear(members)
 		m.memMu.Lock()
 		var peers []string
 		for uuid, member := range m.members {
@@ -161,138 +323,252 @@ func (m *Manager) peerServicesLoop(ctx context.Context) {
 			}
 		}
 		m.memMu.Unlock()
-		sort.Strings(peers)
 		for _, uuid := range peers {
-			m.serviceRefresh.mu.Lock()
-			busy := m.serviceRefresh.inflight[uuid]
-			if !busy {
-				m.serviceRefresh.inflight[uuid] = true
-			}
-			m.serviceRefresh.mu.Unlock()
-			if busy {
-				continue
-			}
-			select {
-			case slots <- struct{}{}:
-				work.Add(1)
-				go func(uuid string) {
-					defer work.Done()
-					defer func() {
-						<-slots
-						m.serviceRefresh.mu.Lock()
-						delete(m.serviceRefresh.inflight, uuid)
-						m.serviceRefresh.mu.Unlock()
-					}()
-					_ = m.refreshPeerServices(ctx, uuid)
-				}(uuid)
-			case <-ctx.Done():
-				m.serviceRefresh.mu.Lock()
-				delete(m.serviceRefresh.inflight, uuid)
-				m.serviceRefresh.mu.Unlock()
-				return
+			if incarnation, ok := m.peerServiceIncarnation(uuid); ok {
+				members[uuid] = incarnation
 			}
 		}
+		for uuid := range streamed {
+			if _, ok := members[uuid]; !ok {
+				delete(streamed, uuid)
+			}
+		}
+		for uuid, stream := range active {
+			if incarnation, ok := members[uuid]; !ok || incarnation != stream.incarnation {
+				if !stream.stopped {
+					stream.cancel()
+					stream.stopped = true
+					active[uuid] = stream
+				}
+			}
+		}
+		start()
+	}
+
+	evaluateTicker := time.NewTicker(peerStateEvaluateEvery)
+	defer evaluateTicker.Stop()
+	dueTicker := time.NewTicker(peerStateDueEvery)
+	defer dueTicker.Stop()
+	evaluate()
+	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case result := <-done:
+			stream := active[result.uuid]
+			delete(active, result.uuid)
+			if result.gotFrame {
+				streamed[result.uuid] = result.incarnation
+			} else if result.forbidden && streamed[result.uuid] == result.incarnation {
+				delete(streamed, result.uuid)
+				m.requestReconcilePass()
+			}
+			if stream.stopped {
+				continue
+			}
+			if result.gotFrame && result.open >= peerStateMinHealthy {
+				backoff.reset(result.uuid)
+			} else {
+				backoff.failed(result.uuid, result.addrs, time.Now())
+			}
+		case <-evaluateTicker.C:
+			evaluate()
+		case <-m.peerStateMembers:
+			evaluate()
+		case <-dueTicker.C:
+			start()
+		case <-m.peerReachableWake:
+			for _, uuid := range m.takeReachablePeers() {
+				backoff.reset(uuid)
+			}
+			start()
 		}
 	}
 }
 
-func (m *Manager) refreshPeerServices(ctx context.Context, uuid string) error {
-	m.mesh.Refresh()
-	incarnation, ok := m.peerServiceIncarnation(uuid)
-	if !ok {
-		return errors.New("no current admission")
-	}
+// errPeerStateForbidden reports a 403 on a stream connect. peerStateLoop
+// answers it with one full reconcile pass when the member had accepted this
+// node before.
+var errPeerStateForbidden = errors.New("peer-state stream refused")
+
+// runPeerStateStream opens one peer-state stream to uuid and reads it until it
+// ends. It walks the member's addresses, confirmed first: a transport error or
+// an unexpected status forgets the chosen address and tries the next, while
+// 403, 503 and any opened stream end the walk. gotFrame reports whether the
+// stream delivered at least one frame. The request context carries no
+// deadline; the adapter's response-header timeout and the idle watchdog bound
+// the stream instead.
+func (m *Manager) runPeerStateStream(ctx context.Context, uuid, incarnation string) (gotFrame bool, err error) {
 	peer, ok := m.reversePeer(uuid)
 	if !ok {
-		return errors.New("no current member")
+		return false, errors.New("no current member")
 	}
 	member, ok := m.memberByUUID(uuid)
 	if !ok {
-		return errors.New("member unavailable")
+		return false, errors.New("member unavailable")
+	}
+	if current, ok := m.peerServiceIncarnation(uuid); !ok || current != incarnation {
+		return false, errors.New("admission changed")
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
 	}
 	addresses := m.resolvePeerAddrs(*member)
-	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
-	defer cancel()
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	addresses = confirmedFirst(addresses, m.peerAddrs.ChooseWithin(ctx, uuid, addresses))
-	deadline, _ := ctx.Deadline()
-	for index, address := range addresses {
+	choose, cancelChoose := context.WithTimeout(ctx, 8*time.Second)
+	addresses = confirmedFirst(addresses, m.peerAddrs.ChooseWithin(choose, uuid, addresses))
+	cancelChoose()
+	for _, address := range addresses {
 		if err := ctx.Err(); err != nil {
-			return err
+			return false, err
 		}
 		if !m.selectPeerServiceAddress(uuid, address) {
 			continue
 		}
-		client, err := m.peerClient(uuid)
+		client, err := m.peerServiceClient(uuid, m.peerStateStreams)
 		if err != nil {
-			return err
+			return false, err
 		}
-		// Divide the remaining parent time among ALL remaining endpoints. This
-		// context owns setup, reverse fallback, headers, complete body and EOF.
-		budget := time.Until(deadline) / time.Duration(len(addresses)-index)
-		attempt, attemptCancel := context.WithTimeout(ctx, budget)
-		req, err := http.NewRequestWithContext(attempt, http.MethodGet, "https://"+address+peerServicesPath, nil)
+		streamCtx, cancel := context.WithCancel(ctx)
+		req, err := http.NewRequestWithContext(streamCtx, http.MethodGet, "https://"+address+peerStatePath, nil)
 		if err != nil {
-			attemptCancel()
-			return err
+			cancel()
+			return false, err
 		}
+		// A cancel timer rather than a context deadline: DialReverse copies a
+		// deadline onto the yamux stream, which would end an opened stream.
+		// It bounds setup, including a stale reverse dial, and headers.
+		watchdog := time.AfterFunc(peerStateConnectTimeout, cancel)
 		response, err := client.Do(req)
-		var descriptor noderec.PeerServicesDescriptor
-		retry := true
-		if err == nil {
-			if response.StatusCode != http.StatusOK {
-				err = errors.New("peer services HTTP refusal")
-			} else {
-				// Read the real stream through EOF under the same attempt budget.
-				// Keeping transport errors separate from validation means a complete
-				// invalid document stays terminal rather than masquerading as failover.
-				var payload []byte
-				payload, err = io.ReadAll(io.LimitReader(response.Body, noderec.PeerServicesMaxBytes+1))
-				if err == nil {
-					descriptor, err = noderec.DecodePeerServices(bytes.NewReader(payload), uuid)
-					retry = errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
-				}
-			}
-		}
-		if response != nil {
-			if closeErr := response.Body.Close(); err == nil && closeErr != nil {
-				err = closeErr
-				retry = true
-			}
-		}
-		attemptErr := attempt.Err()
-		attemptCancel()
-		if parentErr := ctx.Err(); parentErr != nil {
-			return parentErr
-		}
-		if attemptErr != nil {
-			err = attemptErr
-			retry = true
+		if !watchdog.Stop() && err == nil {
+			response.Body.Close()
+			err = errors.New("peer-state connect timed out")
 		}
 		if err != nil {
-			if !retry {
-				return err
+			cancel()
+			if parentErr := ctx.Err(); parentErr != nil {
+				return false, parentErr
 			}
 			m.peerAddrs.Forget(uuid)
 			continue
 		}
-		if err := m.commitPeerServiceHints(descriptor, incarnation, peer); err != nil {
-			return err
+		switch response.StatusCode {
+		case http.StatusOK:
+		case http.StatusForbidden:
+			response.Body.Close()
+			cancel()
+			return false, errPeerStateForbidden
+		case http.StatusServiceUnavailable:
+			response.Body.Close()
+			cancel()
+			return false, errors.New("peer-state not ready")
+		default:
+			response.Body.Close()
+			cancel()
+			m.peerAddrs.Forget(uuid)
+			continue
 		}
-		m.serviceRefresh.mu.Lock()
-		m.serviceRefresh.sequence++
-		claim := noderec.PeerServicesClaim{Descriptor: descriptor, Incarnation: incarnation, Sequence: m.serviceRefresh.sequence, Source: m.serviceRefresh.source, ObservedAt: time.Now().UnixMilli()}
-		err = m.codec.Notify(peerServicesEvent, claim)
-		m.serviceRefresh.mu.Unlock()
-		return err
+		gotFrame, err := m.readPeerStateStream(streamCtx, cancel, response.Body, uuid, incarnation, peer)
+		response.Body.Close()
+		return gotFrame, err
 	}
-	return errors.New("peer services unavailable")
+	return false, errors.New("peer state unavailable")
+}
+
+// readPeerStateStream commits every frame's descriptor, re-emits the
+// peer-services claim on every line (keepalives included, once a frame has
+// arrived), and requests a roster reconcile on the first frame and whenever the
+// roster hash changes.
+func (m *Manager) readPeerStateStream(ctx context.Context, cancel context.CancelFunc, body io.Reader, uuid, incarnation string, peer clustertrust.ReversePeer) (bool, error) {
+	var descriptor noderec.PeerServicesDescriptor
+	var rosterHash string
+	gotFrame := false
+	err := clustertrust.ReadSnapshotStream(ctx, cancel, body, clustertrust.SnapshotStreamClient[noderec.PeerStateFrame]{
+		Idle:    peerStateIdle,
+		MaxLine: noderec.PeerStateMaxLine,
+		Current: func() bool {
+			current, ok := m.peerServiceIncarnation(uuid)
+			if !ok || current != incarnation {
+				return false
+			}
+			currentPeer, ok := m.reversePeer(uuid)
+			return ok && currentPeer == peer
+		},
+		Decode: func(line []byte) (noderec.PeerStateFrame, error) {
+			return noderec.DecodePeerStateFrame(line, uuid)
+		},
+		OnFrame: func(frame noderec.PeerStateFrame) error {
+			if err := m.commitPeerServiceHints(frame.Descriptor, incarnation, peer); err != nil {
+				return err
+			}
+			descriptor = frame.Descriptor
+			if err := m.emitPeerServicesClaim(descriptor, incarnation); err != nil {
+				return err
+			}
+			if !gotFrame || frame.RosterHash != rosterHash {
+				rosterHash = frame.RosterHash
+				m.requestPeerReconcile(uuid)
+			}
+			gotFrame = true
+			return nil
+		},
+		OnKeepalive: func() {
+			if gotFrame {
+				_ = m.emitPeerServicesClaim(descriptor, incarnation)
+			}
+		},
+	})
+	return gotFrame, err
+}
+
+// emitPeerServicesClaim publishes descriptor as a fresh cluster:peer-services
+// claim with the next receiver-owned sequence.
+func (m *Manager) emitPeerServicesClaim(descriptor noderec.PeerServicesDescriptor, incarnation string) error {
+	m.serviceRefresh.mu.Lock()
+	defer m.serviceRefresh.mu.Unlock()
+	m.serviceRefresh.sequence++
+	claim := noderec.PeerServicesClaim{Descriptor: descriptor, Incarnation: incarnation, Sequence: m.serviceRefresh.sequence, Source: m.serviceRefresh.source, ObservedAt: time.Now().UnixMilli()}
+	return m.codec.Notify(peerServicesEvent, claim)
+}
+
+// reconcileMember runs one roster exchange with uuid at its current addresses.
+func (m *Manager) reconcileMember(uuid string) {
+	if member, ok := m.memberByUUID(uuid); ok {
+		m.reconcileWith(m.resolvePeerAddrs(*member), uuid)
+	}
+}
+
+// requestPeerReconcile runs one roster reconcile (m.reconcilePeer) with uuid, coalescing: a
+// request while one is in flight makes it run exactly once more afterwards.
+// The reconcile itself runs without serviceRefresh.mu.
+func (m *Manager) requestPeerReconcile(uuid string) {
+	m.serviceRefresh.mu.Lock()
+	if m.serviceRefresh.reconcileInflight[uuid] {
+		if m.serviceRefresh.reconcileDirty == nil {
+			m.serviceRefresh.reconcileDirty = make(map[string]bool)
+		}
+		m.serviceRefresh.reconcileDirty[uuid] = true
+		m.serviceRefresh.mu.Unlock()
+		return
+	}
+	if m.serviceRefresh.reconcileInflight == nil {
+		m.serviceRefresh.reconcileInflight = make(map[string]bool)
+	}
+	m.serviceRefresh.reconcileInflight[uuid] = true
+	m.serviceRefresh.mu.Unlock()
+	go func() {
+		for {
+			m.reconcilePeer(uuid)
+			m.serviceRefresh.mu.Lock()
+			if m.serviceRefresh.reconcileDirty[uuid] {
+				delete(m.serviceRefresh.reconcileDirty, uuid)
+				m.serviceRefresh.mu.Unlock()
+				continue
+			}
+			delete(m.serviceRefresh.reconcileInflight, uuid)
+			m.serviceRefresh.mu.Unlock()
+			return
+		}
+	}()
 }
 
 // commitPeerServiceHints consumes a fully validated descriptor. Identity and

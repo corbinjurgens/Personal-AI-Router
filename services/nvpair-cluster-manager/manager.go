@@ -56,9 +56,17 @@ type Manager struct {
 	clients              *clustertrust.PeerClientPool
 	peerServices         *clustertrust.PeerServiceClient
 	removalPeerServices  *clustertrust.PeerServiceClient
+	peerStateStreams     *clustertrust.PeerServiceClient // no total timeout; streams only
 	peerRoutesMu         sync.Mutex
 	peerRoutes           map[string]clusterPeerRoute
 	serviceRefresh       peerServicesState
+	reconcileRequest     chan struct{} // requestReconcilePass -> reconcileLoop
+	peerState            peerStatePublisher
+	peerStateSignal      chan struct{} // signalPeerState -> peerStatePublishLoop
+	peerStateMembers     chan struct{} // signalPeerStateMembers -> peerStateLoop
+	peerReachable        peerReachableSet
+	peerReachableWake    chan struct{}     // notePeerReachable -> peerStateLoop
+	reconcilePeer        func(uuid string) // requestPeerReconcile's exchange (reconcileMember); tests replace it
 	reverse              *reverseState
 	localServicesAllowed bool
 	controlTransport     io.Closer
@@ -286,6 +294,11 @@ func NewManager(codec *Codec, configDir string, port int) (*Manager, error) {
 		joinHandlers:  make(chan struct{}, 8),
 		joinWake:      make(chan struct{}, 1),
 		joinNow:       time.Now,
+
+		reconcileRequest:  make(chan struct{}, 1),
+		peerStateSignal:   make(chan struct{}, 1),
+		peerStateMembers:  make(chan struct{}, 1),
+		peerReachableWake: make(chan struct{}, 1),
 	}
 	mgr.initSelfName(storedIdentity)
 	log.Printf("node identity %s name %s fingerprint %s", identity.NodeUUID, mgr.selfName(), identity.CertFingerprint)
@@ -294,6 +307,8 @@ func NewManager(codec *Codec, configDir string, port int) (*Manager, error) {
 	mgr.removalPeerServices = clustertrust.NewPeerServiceClient(mesh, peerOptions)
 	peerOptions.ReuseConnections = true
 	mgr.peerServices = clustertrust.NewPeerServiceClient(mesh, peerOptions)
+	mgr.peerStateStreams = clustertrust.NewPeerServiceClient(mesh, peerStateStreamOptions(mgr.peerServiceOptions()))
+	mgr.reconcilePeer = mgr.reconcileMember
 	// Announce every pin-set mutation. This node's other workers cache answers
 	// derived from the trusted/ directory — above all "may work be routed to this
 	// peer?" — and this process is the only writer, so without this they can only
@@ -418,7 +433,7 @@ func (m *Manager) Run(ctx context.Context) error {
 	m.startResolver()
 	m.reverse.wg.Add(1)
 	go m.reverseConnectLoop(ctx)
-	go m.peerServicesLoop(ctx)
+	go m.peerStateLoop(ctx)
 
 	// Subscribe to the broker's discovery relay for cl peer targets. They arrive
 	// as discovery:nodes snapshots (handled in handleMessage), each replacing the
@@ -430,6 +445,7 @@ func (m *Manager) Run(ctx context.Context) error {
 	}
 
 	go m.reconcileLoop(ctx)
+	go m.peerStatePublishLoop(ctx)
 	go m.inviteExpiryLoop(ctx)
 	go m.joinRequestsLoop(ctx)
 	go m.resumeOutboundPairings()

@@ -74,7 +74,7 @@ func (m *Manager) runHTTP(ctx context.Context) error {
 	trustedMux.HandleFunc(pairingPath, m.handlePairing)
 	trustedMux.HandleFunc(membersRemovePath, m.handleMembersRemove)
 	trustedMux.HandleFunc(rosterPath, m.handleRoster)
-	trustedMux.HandleFunc(peerServicesPath, m.handlePeerServices)
+	trustedMux.HandleFunc(peerStatePath, m.handlePeerState)
 	trustedMux.HandleFunc(peerNodeNamePath, m.handlePeerNodeName)
 	trustedMux.HandleFunc(clustertrust.ReverseUpgradePath, m.handleReverseUpgrade)
 

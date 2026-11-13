@@ -4,7 +4,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -15,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"nvpair-shared/clustertrust"
 	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/modelconfig"
@@ -240,39 +240,16 @@ func (s *controlServer) streamSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer closeSub()
-	w.Header().Set("Content-Type", "application/x-ndjson")
-	controller := http.NewResponseController(w)
-	send := func(value any) bool {
-		_ = controller.SetWriteDeadline(time.Now().Add(5 * time.Second))
-		if json.NewEncoder(w).Encode(value) != nil {
-			return false
-		}
-		return controller.Flush() == nil
-	}
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-r.Context().Done():
-			return
-		case snapshot := <-ch:
+	clustertrust.ServeSnapshotStream(w, r, clustertrust.SnapshotStreamServer[[]settings.Snapshot]{
+		Keepalive:    time.Second,
+		WriteTimeout: 5 * time.Second,
+		Authorize: func() bool {
 			s.mesh.Refresh()
-			if _, ok := s.mesh.VerifyClientPin(r); !ok {
-				return
-			}
-			if !send(snapshot) {
-				return
-			}
-		case <-ticker.C:
-			s.mesh.Refresh()
-			if _, ok := s.mesh.VerifyClientPin(r); !ok {
-				return
-			}
-			if !send(nil) {
-				return
-			}
-		}
-	}
+			_, ok := s.mesh.VerifyClientPin(r)
+			return ok
+		},
+		Updates: ch,
+	})
 }
 
 func (m *Manager) remoteSettings(ctx context.Context, msg *Message) {
@@ -415,34 +392,18 @@ func (m *Manager) consumeSettingsStream(parent context.Context, peer ecPeer) {
 			response.TLS != nil && len(response.TLS.PeerCertificates) != 0 &&
 			live.VerifyPeerCertificate([][]byte{response.TLS.PeerCertificates[0].Raw}, nil) == nil
 	}
-	go func() {
-		ticker := time.NewTicker(time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if !current() {
-					cancel()
-					return
-				}
-			}
-		}
-	}()
-	watchdog := time.AfterFunc(15*time.Second, cancel)
-	defer watchdog.Stop()
-	scanner := bufio.NewScanner(response.Body)
-	scanner.Buffer(make([]byte, 4096), 256*1024)
-	for scanner.Scan() {
-		if !current() {
-			return
-		}
-		watchdog.Reset(15 * time.Second)
-		var snapshots []settings.Snapshot
-		if json.Unmarshal(scanner.Bytes(), &snapshots) != nil {
-			return
-		}
-		m.notifyPeerSettings(peer.nodeID, snapshots)
-	}
+	_ = clustertrust.ReadSnapshotStream(ctx, cancel, response.Body, clustertrust.SnapshotStreamClient[[]settings.Snapshot]{
+		Idle:    15 * time.Second,
+		Recheck: time.Second,
+		MaxLine: 256 * 1024,
+		Current: current,
+		Decode: func(b []byte) ([]settings.Snapshot, error) {
+			var v []settings.Snapshot
+			return v, json.Unmarshal(b, &v)
+		},
+		OnFrame: func(s []settings.Snapshot) error {
+			m.notifyPeerSettings(peer.nodeID, s)
+			return nil
+		},
+	})
 }
