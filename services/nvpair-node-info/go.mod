@@ -7,7 +7,7 @@ toolchain go1.27.4
 require (
 	github.com/jaypipes/ghw v0.24.0
 	github.com/shirou/gopsutil/v4 v4.26.7
-	golang.org/x/sys v0.47.0
+	golang.org/x/sys v0.49.0
 	howett.net/plist v1.0.2-0.20250314012144-ee69052608d9
 	nvpair-shared v0.0.0-00010101000000-000000000000
 )
