@@ -370,6 +370,10 @@ func newTask1Observer(t *testing.T, target *task1Node, service noderec.ServiceKe
 			if response.Request.URL.Path == "/v1/cluster/peer-state" {
 				return nil
 			}
+			// Workload performance summaries are a live stream too.
+			if response.Request.URL.Path == "/v1/workloads/performance/events" {
+				return nil
+			}
 			if response.StatusCode == http.StatusSwitchingProtocols {
 				o.mu.Lock()
 				o.readyUpgrades[peer]++
