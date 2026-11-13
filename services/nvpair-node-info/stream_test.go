@@ -5,10 +5,20 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"strconv"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"nvpair-shared/clustertrust"
 	"nvpair-shared/noderec"
 )
 
@@ -146,4 +156,306 @@ func TestNodeInfoChangedReplay(t *testing.T) {
 		t.Fatalf("published %d frames for %d samples, want fewer frames than samples", frames, samples)
 	}
 	t.Logf("%d frames for %d samples", frames, samples)
+}
+
+// streamPublisher starts a publisher whose body reports one GPU at the given
+// utilization, with a 50 ms keepalive, both undone at cleanup.
+func streamPublisher(t *testing.T, utilization *atomic.Uint32) *nodeInfoPublisher {
+	t.Helper()
+	keepalive := nodeInfoStreamKeepalive
+	nodeInfoStreamKeepalive = 50 * time.Millisecond
+	t.Cleanup(func() { nodeInfoStreamKeepalive = keepalive })
+	pub := &nodeInfoPublisher{body: func() []byte {
+		body, err := json.Marshal(NodeInfoResponse{
+			GPUs:           []GPUInfo{{Name: "GPU", VramBytes: 16 << 30, UtilizationPercent: utilization.Load()}},
+			TelemetryValid: true,
+			HostUUID:       "stream-host",
+		})
+		if err != nil {
+			t.Errorf("marshal body: %v", err)
+		}
+		return body
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		pub.run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	return pub
+}
+
+// streamLines reads NDJSON lines from body into a channel that closes at EOF.
+func streamLines(body io.Reader) <-chan string {
+	lines := make(chan string, 64)
+	go func() {
+		defer close(lines)
+		scanner := bufio.NewScanner(body)
+		scanner.Buffer(make([]byte, 0, 64<<10), 1<<20)
+		for scanner.Scan() {
+			lines <- scanner.Text()
+		}
+	}()
+	return lines
+}
+
+// nextFrame returns the next non-null line, failing after timeout or at EOF.
+func nextFrame(t *testing.T, lines <-chan string, timeout time.Duration) NodeInfoResponse {
+	t.Helper()
+	deadline := time.After(timeout)
+	for {
+		select {
+		case line, open := <-lines:
+			if !open {
+				t.Fatal("stream ended before a frame arrived")
+			}
+			if line == "null" {
+				continue
+			}
+			var frame NodeInfoResponse
+			if err := json.Unmarshal([]byte(line), &frame); err != nil {
+				t.Fatalf("decode frame %q: %v", line, err)
+			}
+			return frame
+		case <-deadline:
+			t.Fatalf("no frame within %s", timeout)
+		}
+	}
+}
+
+// signalWriter is a ResponseWriter for direct handler calls whose stream must
+// stay open: it reports the first write and keeps the status code.
+type signalWriter struct {
+	header http.Header
+	status atomic.Int32
+	wrote  chan struct{}
+	once   sync.Once
+}
+
+func newSignalWriter() *signalWriter {
+	return &signalWriter{header: make(http.Header), wrote: make(chan struct{})}
+}
+
+func (w *signalWriter) Header() http.Header { return w.header }
+func (w *signalWriter) WriteHeader(code int) {
+	w.status.CompareAndSwap(0, int32(code))
+}
+func (w *signalWriter) Write(p []byte) (int, error) {
+	w.WriteHeader(http.StatusOK)
+	w.once.Do(func() { close(w.wrote) })
+	return len(p), nil
+}
+func (w *signalWriter) Flush() {}
+
+func TestNodeInfoStream(t *testing.T) {
+	t.Run("unclustered stream sends a frame then only threshold changes", func(t *testing.T) {
+		var utilization atomic.Uint32
+		utilization.Store(40)
+		pub := streamPublisher(t, &utilization)
+		mux := http.NewServeMux()
+		mux.HandleFunc("/v1/node-info/events", nodeInfoStreamHandler(clustertrust.Open(""), pub))
+		srv := httptest.NewServer(mux)
+		t.Cleanup(srv.Close)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/v1/node-info/events", nil)
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("subscribe: %v", err)
+		}
+		t.Cleanup(func() { resp.Body.Close() })
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+		if got := resp.Header.Get("Cache-Control"); got != "no-store" {
+			t.Errorf("Cache-Control = %q, want no-store", got)
+		}
+		lines := streamLines(resp.Body)
+		first := nextFrame(t, lines, 3*time.Second)
+		if first.HostUUID != "stream-host" || len(first.GPUs) != 1 || first.GPUs[0].UtilizationPercent != 40 {
+			t.Fatalf("first frame = %+v, want stream-host at 40 %%", first)
+		}
+
+		// Within the threshold: only keepalives across more than one publish tick.
+		utilization.Store(42)
+		quiet := time.After(nodeInfoPublishEvery + 500*time.Millisecond)
+		nulls := 0
+	within:
+		for {
+			select {
+			case line, open := <-lines:
+				if !open {
+					t.Fatal("stream ended during the quiet window")
+				}
+				if line != "null" {
+					t.Fatalf("got frame %q for a 2-point change, want only null keepalives", line)
+				}
+				nulls++
+			case <-quiet:
+				break within
+			}
+		}
+		if nulls == 0 {
+			t.Fatal("no keepalive arrived during the quiet window")
+		}
+
+		utilization.Store(52)
+		if frame := nextFrame(t, lines, 3*time.Second); frame.GPUs[0].UtilizationPercent != 52 {
+			t.Fatalf("second frame utilization = %d, want 52", frame.GPUs[0].UtilizationPercent)
+		}
+	})
+
+	t.Run("per-address cap refuses the ninth stream from one LAN address", func(t *testing.T) {
+		var utilization atomic.Uint32
+		pub := streamPublisher(t, &utilization)
+		handler := nodeInfoStreamHandler(clustertrust.Open(""), pub)
+		ctx, cancel := context.WithCancel(context.Background())
+		var wg sync.WaitGroup
+		t.Cleanup(func() {
+			cancel()
+			wg.Wait()
+		})
+		open := func(remoteAddr string) *signalWriter {
+			t.Helper()
+			req := httptest.NewRequest(http.MethodGet, "/v1/node-info/events", nil).WithContext(ctx)
+			req.RemoteAddr = remoteAddr
+			w := newSignalWriter()
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				handler(w, req)
+			}()
+			select {
+			case <-w.wrote:
+			case <-time.After(3 * time.Second):
+				t.Fatalf("stream from %s wrote nothing", remoteAddr)
+			}
+			return w
+		}
+		for i := range nodeInfoStreamsPerAddress {
+			if w := open("192.0.2.10:" + strconv.Itoa(1000+i)); w.status.Load() != http.StatusOK {
+				t.Fatalf("stream %d status = %d, want 200", i+1, w.status.Load())
+			}
+		}
+		if w := open("192.0.2.10:9999"); w.status.Load() != http.StatusServiceUnavailable {
+			t.Fatalf("ninth stream status = %d, want 503", w.status.Load())
+		}
+		if w := open("192.0.2.11:1"); w.status.Load() != http.StatusOK {
+			t.Fatalf("other address status = %d, want 200", w.status.Load())
+		}
+		for i := range nodeInfoStreamsPerAddress + 1 {
+			if w := open("127.0.0.1:" + strconv.Itoa(1000+i)); w.status.Load() != http.StatusOK {
+				t.Fatalf("loopback stream %d status = %d, want 200", i+1, w.status.Load())
+			}
+		}
+	})
+
+	t.Run("total cap refuses streams beyond the hub limit", func(t *testing.T) {
+		var utilization atomic.Uint32
+		pub := streamPublisher(t, &utilization)
+		pub.hub.Limit = 1
+		_, cancelReader, ok := pub.hub.Subscribe()
+		if !ok {
+			t.Fatal("first hub reader refused")
+		}
+		t.Cleanup(cancelReader)
+		rec := httptest.NewRecorder()
+		nodeInfoStreamHandler(clustertrust.Open(""), pub)(rec, httptest.NewRequest(http.MethodGet, "/v1/node-info/events", nil))
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("status = %d, want 503", rec.Code)
+		}
+	})
+
+	t.Run("non-GET is refused", func(t *testing.T) {
+		var utilization atomic.Uint32
+		pub := streamPublisher(t, &utilization)
+		rec := httptest.NewRecorder()
+		nodeInfoStreamHandler(clustertrust.Open(""), pub)(rec, httptest.NewRequest(http.MethodPost, "/v1/node-info/events", nil))
+		if rec.Code != http.StatusMethodNotAllowed || rec.Header().Get("Allow") != http.MethodGet {
+			t.Fatalf("status = %d Allow = %q, want 405 GET", rec.Code, rec.Header().Get("Allow"))
+		}
+	})
+
+	t.Run("cluster-gated stream admits pinned peers and ends when the pin goes", func(t *testing.T) {
+		aCert, aKey := genLeaf(t, "uuid-a")
+		bCert, bKey := genLeaf(t, "uuid-b")
+		cCert, cKey := genLeaf(t, "uuid-c")
+		dCert, _ := genLeaf(t, "uuid-d")
+		// A pins B and D, so removing B's pin leaves A clustered. C pins A,
+		// but A does not pin C.
+		dirA := setupNode(t, aCert, aKey, map[string][]byte{"uuid-b": bCert, "uuid-d": dCert})
+		meshA := clustertrust.Open(dirA)
+		meshB := clustertrust.Open(setupNode(t, bCert, bKey, map[string][]byte{"uuid-a": aCert}))
+		meshC := clustertrust.Open(setupNode(t, cCert, cKey, map[string][]byte{"uuid-a": aCert}))
+
+		var utilization atomic.Uint32
+		pub := streamPublisher(t, &utilization)
+		handler := nodeInfoStreamHandler(meshA, pub)
+		mux := http.NewServeMux()
+		mux.HandleFunc("/v1/node-info/events", handler)
+		srv := httptest.NewUnstartedServer(mux)
+		srv.TLS = meshA.ServerTLSConfig()
+		srv.StartTLS()
+		t.Cleanup(srv.Close)
+
+		subscribe := func(m *clustertrust.Mesh) *http.Response {
+			t.Helper()
+			cfg, ok := m.ClientTLSConfig("uuid-a")
+			if !ok {
+				t.Fatal("no client config for uuid-a")
+			}
+			client := &http.Client{Transport: &http.Transport{TLSClientConfig: cfg}}
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/v1/node-info/events", nil)
+			if err != nil {
+				t.Fatalf("new request: %v", err)
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatalf("subscribe: %v", err)
+			}
+			t.Cleanup(func() { resp.Body.Close() })
+			return resp
+		}
+
+		if resp := subscribe(meshC); resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("unpinned client status = %d, want 403", resp.StatusCode)
+		}
+		plain := httptest.NewRecorder()
+		handler(plain, httptest.NewRequest(http.MethodGet, "/v1/node-info/events", nil))
+		if plain.Code != http.StatusForbidden {
+			t.Fatalf("plain-HTTP client status = %d, want 403", plain.Code)
+		}
+
+		resp := subscribe(meshB)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("pinned client status = %d, want 200", resp.StatusCode)
+		}
+		lines := streamLines(resp.Body)
+		nextFrame(t, lines, 3*time.Second)
+
+		if err := os.Remove(filepath.Join(dirA, "trusted", "uuid-b.json")); err != nil {
+			t.Fatalf("remove pin: %v", err)
+		}
+		deadline := time.After(time.Second)
+		for {
+			select {
+			case _, open := <-lines:
+				if !open {
+					return
+				}
+			case <-deadline:
+				t.Fatal("stream still open 1 s after its pin was removed")
+			}
+		}
+	})
 }

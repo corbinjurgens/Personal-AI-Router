@@ -305,12 +305,9 @@ func mergeGPUInventory(static, recovered []GPUInfo) []GPUInfo {
 // startup.
 func nodeInfoHandler(mesh *clustertrust.Mesh, body func() []byte) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		mesh.Refresh()
-		if mesh.Clustered() {
-			if _, ok := mesh.VerifyClientPin(r); !ok {
-				http.Error(w, "forbidden: not a pinned cluster peer", http.StatusForbidden)
-				return
-			}
+		if !nodeInfoAdmitted(mesh, r) {
+			http.Error(w, "forbidden: not a pinned cluster peer", http.StatusForbidden)
+			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(body())
@@ -453,10 +450,15 @@ func main() {
 		return &principal
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/node-info", nodeInfoHandler(mesh, func() []byte {
+	body := func() []byte {
 		return buildResponse(gpus, cpu, memTotal, collector.Snapshot(), hostUUID, clusterPrincipal())
-	}))
+	}
+	// The stream's hub admits at most 64 streams in total (its default Limit).
+	pub := &nodeInfoPublisher{body: body}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/node-info", nodeInfoHandler(mesh, body))
+	mux.HandleFunc("/v1/node-info/events", nodeInfoStreamHandler(mesh, pub))
 
 	// Listener layout (set up below depending on flags). Exactly one of the two
 	// blocks that own *port runs:
@@ -562,6 +564,9 @@ func main() {
 	// stamp is carried by the daemon for the whole node.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Until the first sample is published, a stream subscriber waits for it.
+	go pub.run(ctx)
 
 	// Keep membership converging on its own when cluster-gated. Every other gate
 	// here is refreshed by the request handler, but the TLS personality is chosen

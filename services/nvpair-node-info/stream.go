@@ -4,8 +4,14 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
+	"net"
+	"net/http"
+	"sync"
 	"time"
 
+	"nvpair-shared/clustertrust"
 	"nvpair-shared/noderec"
 )
 
@@ -108,4 +114,121 @@ func distance(a, b uint64) uint64 {
 		return a - b
 	}
 	return b - a
+}
+
+// nodeInfoPublisher turns the once-per-second local samples into the frames
+// of GET /v1/node-info/events: a frame is published only when nodeInfoChanged
+// says the sample moved beyond the thresholds of the last published frame.
+type nodeInfoPublisher struct {
+	hub  clustertrust.SnapshotHub[json.RawMessage]
+	body func() []byte
+}
+
+// run publishes the first sample at once, then every nodeInfoPublishEvery
+// publishes when nodeInfoChanged(last published, candidate) is true. It
+// returns when ctx ends.
+func (p *nodeInfoPublisher) run(ctx context.Context) {
+	ticker := time.NewTicker(nodeInfoPublishEvery)
+	defer ticker.Stop()
+	var last NodeInfoResponse
+	published := false
+	for {
+		body := p.body()
+		var candidate NodeInfoResponse
+		if json.Unmarshal(body, &candidate) == nil && (!published || nodeInfoChanged(last, candidate)) {
+			p.hub.Publish(json.RawMessage(body))
+			last, published = candidate, true
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// nodeInfoAdmitted is the access rule of both node-info routes. While this
+// node is a cluster member the caller must present a pinned cluster cert (or
+// this node's own leaf); otherwise every caller is served. Refresh picks up a
+// membership change or a peer paired after startup.
+func nodeInfoAdmitted(mesh *clustertrust.Mesh, r *http.Request) bool {
+	mesh.Refresh()
+	if !mesh.Clustered() {
+		return true
+	}
+	_, ok := mesh.VerifyClientPin(r)
+	return ok
+}
+
+// addressStreams counts open streams per non-loopback remote address, so one
+// LAN host cannot take every slot of a route that is unauthenticated in
+// production. Loopback callers (reverse-session streams relayed by the local
+// cluster manager) count only against the hub's total.
+type addressStreams struct {
+	mu   sync.Mutex
+	open map[string]int
+}
+
+// acquire reserves a slot for remoteAddr; release must be called when the
+// stream ends. ok is false when the address already holds
+// nodeInfoStreamsPerAddress streams.
+func (a *addressStreams) acquire(remoteAddr string) (release func(), ok bool) {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return func() {}, true
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.open[host] >= nodeInfoStreamsPerAddress {
+		return nil, false
+	}
+	a.open[host]++
+	return func() {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		if a.open[host]--; a.open[host] == 0 {
+			delete(a.open, host)
+		}
+	}, true
+}
+
+// nodeInfoStreamHandler serves GET /v1/node-info/events: an NDJSON stream of
+// GET /v1/node-info bodies, sent at once and on every threshold change, with a
+// null keepalive every nodeInfoStreamKeepalive. The access rule is rechecked
+// before every frame.
+func nodeInfoStreamHandler(mesh *clustertrust.Mesh, pub *nodeInfoPublisher) http.HandlerFunc {
+	perAddress := &addressStreams{open: make(map[string]int)}
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !nodeInfoAdmitted(mesh, r) {
+			http.Error(w, "forbidden: not a pinned cluster peer", http.StatusForbidden)
+			return
+		}
+		release, ok := perAddress.acquire(r.RemoteAddr)
+		if !ok {
+			http.Error(w, "too many node-info streams", http.StatusServiceUnavailable)
+			return
+		}
+		defer release()
+		updates, cancel, ok := pub.hub.Subscribe()
+		if !ok {
+			http.Error(w, "too many node-info streams", http.StatusServiceUnavailable)
+			return
+		}
+		defer cancel()
+		w.Header().Set("Cache-Control", "no-store")
+		clustertrust.ServeSnapshotStream(w, r, clustertrust.SnapshotStreamServer[json.RawMessage]{
+			Keepalive:    nodeInfoStreamKeepalive,
+			WriteTimeout: nodeInfoStreamWriteTimeout,
+			Authorize:    func() bool { return nodeInfoAdmitted(mesh, r) },
+			Updates:      updates,
+		})
+	}
 }
