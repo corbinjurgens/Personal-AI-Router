@@ -8,8 +8,11 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
+	"time"
 
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/errors"
@@ -155,9 +158,9 @@ func TestEvictNodeRemovesPeerEntries(t *testing.T) {
 	}
 }
 
-// TestHTTPIngestReconciles: the POST /v1/errors handler decodes a
-// SyncEnvelope and merges it, returning 204.
-func TestHTTPIngestReconciles(t *testing.T) {
+// TestHTTPPostIsNotAllowed: peers no longer push snapshots, so POST
+// /v1/errors answers 405 and changes nothing.
+func TestHTTPPostIsNotAllowed(t *testing.T) {
 	m := managerForNode("node-a")
 	srv, client := servePinnedErrorsMux(t, m)
 
@@ -171,31 +174,10 @@ func TestHTTPIngestReconciles(t *testing.T) {
 		t.Fatalf("POST: %v", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("POST status = %d, want 204", resp.StatusCode)
+	if resp.StatusCode != http.StatusMethodNotAllowed || resp.Header.Get("Allow") != "GET" {
+		t.Fatalf("POST status = %d Allow = %q, want 405 GET", resp.StatusCode, resp.Header.Get("Allow"))
 	}
-
-	got := m.snapshot()
-	if len(got) != 1 || got[0].ID != "b:one" || got[0].NodeID != "uuid-peer" {
-		t.Fatalf("after ingest, snapshot = %+v, want single uuid-peer entry", got)
-	}
-}
-
-// TestHTTPIngestRejectsMissingNodeID: an envelope without a nodeId is a
-// 400, not a silent accept.
-func TestHTTPIngestRejectsMissingNodeID(t *testing.T) {
-	m := managerForNode("node-a")
-	srv, client := servePinnedErrorsMux(t, m)
-
-	body, _ := json.Marshal(errors.SyncEnvelope{Errors: []ServiceError{localErr("x", "node-b", 1)}})
-	resp, err := client.Post(srv.URL+"/v1/errors", "application/json", bytes.NewReader(body))
-	if err != nil {
-		t.Fatalf("POST: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("POST status = %d, want 400", resp.StatusCode)
-	}
+	assertErrorSnapshot(t, m, nil)
 }
 
 // TestHTTPServeLocalReturnsLocalSnapshot: GET /v1/errors returns this
@@ -305,4 +287,207 @@ func TestUnclusteredNodeKeepsNoPeers(t *testing.T) {
 	if len(ps.peers) != 0 {
 		t.Fatalf("unclustered node retained %d peer(s), want 0", len(ps.peers))
 	}
+}
+
+// errorsUpdates drains rw's notifications and counts errors:update frames.
+func errorsUpdates(t *testing.T, rw *captureRW) int {
+	t.Helper()
+	count := 0
+	for {
+		select {
+		case frame := <-rw.notifications:
+			var msg Message
+			if err := json.Unmarshal(frame, &msg); err != nil {
+				t.Fatalf("decode notification: %v", err)
+			}
+			if msg.Method == "errors:update" {
+				count++
+			}
+		default:
+			return count
+		}
+	}
+}
+
+// TestPeerSyncStreams covers the subscriber: streams follow discovery, apply
+// every change on the open stream, and need no timer to converge.
+func TestPeerSyncStreams(t *testing.T) {
+	bOne, bTwo := localErr("b:one", "node-b", 1000), localErr("b:two", "node-b", 2000)
+
+	t.Run("a discovered pinned peer's errors appear in the merged view", func(t *testing.T) {
+		f := newErrorSyncFixture(t)
+		f.subscriber.upsert(localErr("a:keep", "node-a", 1000))
+		f.peer.handleReport(nil, mustJSON(t, bOne))
+		f.ps.handleEvent(context.Background(), f.event)
+		waitErrorSnapshot(t, f.subscriber, []ServiceError{localErr("a:keep", "node-a", 1000), bOne})
+	})
+
+	t.Run("a later change on the peer arrives on the open stream", func(t *testing.T) {
+		// No reconnect can happen within the test, so the change can only
+		// arrive as a frame on the first stream.
+		f := newErrorSyncFixtureRetry(t, time.Hour)
+		f.peer.handleReport(nil, mustJSON(t, bOne))
+		f.ps.handleEvent(context.Background(), f.event)
+		waitErrorSnapshot(t, f.subscriber, []ServiceError{bOne})
+		f.peer.handleReport(nil, mustJSON(t, bTwo))
+		waitErrorSnapshot(t, f.subscriber, []ServiceError{bOne, bTwo})
+		if got := f.streams.Load(); got != 1 {
+			t.Fatalf("streams = %d, want 1", got)
+		}
+	})
+
+	t.Run("an unchanged peer causes no errors:update after the first", func(t *testing.T) {
+		f := newErrorSyncFixture(t)
+		f.peer.handleReport(nil, mustJSON(t, bOne))
+		f.ps.handleEvent(context.Background(), f.event)
+		waitErrorSnapshot(t, f.subscriber, []ServiceError{bOne})
+		if got := errorsUpdates(t, f.subscriberRW); got != 1 {
+			t.Fatalf("errors:update on first frame = %d, want 1", got)
+		}
+		// Several 50 ms keepalives pass, and an identical snapshot is
+		// republished, without a change to the merged view.
+		f.publishPeer()
+		settle()
+		if got := errorsUpdates(t, f.subscriberRW); got != 0 {
+			t.Fatalf("unchanged peer caused %d errors:update notifications, want 0", got)
+		}
+	})
+
+	t.Run("a removed peer is evicted and its stream ends", func(t *testing.T) {
+		f := newErrorSyncFixture(t)
+		connections := make(chan *errorSyncConn, 4)
+		f.onConnect = func(conn *errorSyncConn) { connections <- conn }
+		f.subscriber.upsert(localErr("a:keep", "node-a", 1000))
+		f.peer.handleReport(nil, mustJSON(t, bOne))
+		f.ps.handleEvent(context.Background(), f.event)
+		waitErrorSnapshot(t, f.subscriber, []ServiceError{localErr("a:keep", "node-a", 1000), bOne})
+		conn := <-connections
+		removed := f.event
+		removed.Type = "removed"
+		f.ps.handleEvent(context.Background(), removed)
+		assertErrorSnapshot(t, f.subscriber, []ServiceError{localErr("a:keep", "node-a", 1000)})
+		select {
+		case <-conn.closed:
+		case <-time.After(2 * time.Second):
+			t.Fatal("removed peer's stream stayed open")
+		}
+		settle()
+		if got := f.streams.Load(); got != 1 {
+			t.Fatalf("streams = %d, want 1 (no reconnect after removal)", got)
+		}
+		assertErrorSnapshot(t, f.subscriber, []ServiceError{localErr("a:keep", "node-a", 1000)})
+	})
+
+	t.Run("an unpinned peer is never contacted", func(t *testing.T) {
+		f := newErrorSyncFixture(t)
+		f.peer.handleReport(nil, mustJSON(t, bOne))
+		event := f.event
+		event.Node.TXT = []string{"cluster-uuid=unknown"}
+		f.ps.handleEvent(context.Background(), event)
+		settle()
+		if direct, reverse, streams := f.directCalls.Load(), f.reverseCalls.Load(), f.streams.Load(); direct != 0 || reverse != 0 || streams != 0 {
+			t.Fatalf("unpinned peer contacted: direct=%d reverse=%d streams=%d", direct, reverse, streams)
+		}
+		assertErrorSnapshot(t, f.subscriber, nil)
+	})
+
+	t.Run("a frame naming another node ends the stream and changes nothing", func(t *testing.T) {
+		f := newErrorSyncFixtureRetry(t, time.Hour)
+		connections := make(chan *errorSyncConn, 4)
+		f.onConnect = func(conn *errorSyncConn) { connections <- conn }
+		f.subscriber.ReconcilePeer("node-x", []ServiceError{localErr("x:keep", "node-x", 1000)})
+		f.peer.localNodeID = "node-x"
+		f.peer.handleReport(nil, mustJSON(t, localErr("x:injected", "node-x", 2000)))
+		f.ps.handleEvent(context.Background(), f.event)
+		select {
+		case conn := <-connections:
+			select {
+			case <-conn.closed:
+			case <-time.After(2 * time.Second):
+				t.Fatal("stream with a foreign frame stayed open")
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("no stream connection")
+		}
+		if got := f.streams.Load(); got != 1 {
+			t.Fatalf("streams = %d, want 1", got)
+		}
+		assertErrorSnapshot(t, f.subscriber, []ServiceError{localErr("x:keep", "node-x", 1000)})
+	})
+
+	t.Run("after the peer's connections drop the subscriber reconnects and converges", func(t *testing.T) {
+		f := newErrorSyncFixture(t)
+		f.peer.handleReport(nil, mustJSON(t, bOne))
+		f.ps.handleEvent(context.Background(), f.event)
+		waitErrorSnapshot(t, f.subscriber, []ServiceError{bOne})
+		f.server.CloseClientConnections()
+		f.peer.handleReport(nil, mustJSON(t, bTwo))
+		waitErrorSnapshot(t, f.subscriber, []ServiceError{bOne, bTwo})
+		waitFor(t, "a second stream", func() bool { return f.streams.Load() == 2 })
+	})
+
+	t.Run("Resubscribe subscribes to a peer discovered before its pin", func(t *testing.T) {
+		f := newErrorSyncFixture(t)
+		pinPath := filepath.Join(f.ps.clusterDir, "trusted", "node-b.json")
+		pin, err := os.ReadFile(pinPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(pinPath); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		events := make(chan DiscoveryEvent)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			f.ps.Run(ctx, events)
+		}()
+		t.Cleanup(func() {
+			cancel()
+			<-done
+		})
+		f.peer.handleReport(nil, mustJSON(t, bOne))
+		events <- f.event
+		settle()
+		if got := f.streams.Load(); got != 0 {
+			t.Fatalf("unpinned peer streamed %d times", got)
+		}
+		// The pin arrives (as when this node joins the cluster) while discovery
+		// has nothing new to report about the peer.
+		if err := os.WriteFile(pinPath, pin, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		f.ps.Resubscribe()
+		waitErrorSnapshot(t, f.subscriber, []ServiceError{bOne})
+	})
+
+	t.Run("Resubscribe restarts the open streams", func(t *testing.T) {
+		f := newErrorSyncFixture(t)
+		connections := make(chan *errorSyncConn, 4)
+		f.onConnect = func(conn *errorSyncConn) { connections <- conn }
+		ctx, cancel := context.WithCancel(context.Background())
+		events := make(chan DiscoveryEvent)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			f.ps.Run(ctx, events)
+		}()
+		t.Cleanup(func() {
+			cancel()
+			<-done
+		})
+		f.peer.handleReport(nil, mustJSON(t, bOne))
+		events <- f.event
+		waitErrorSnapshot(t, f.subscriber, []ServiceError{bOne})
+		first := <-connections
+		f.ps.Resubscribe()
+		select {
+		case <-first.closed:
+		case <-time.After(2 * time.Second):
+			t.Fatal("Resubscribe left the first stream open")
+		}
+		waitFor(t, "a restarted stream", func() bool { return f.streams.Load() == 2 })
+		assertErrorSnapshot(t, f.subscriber, []ServiceError{bOne})
+	})
 }
