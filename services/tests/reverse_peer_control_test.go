@@ -213,6 +213,19 @@ func (p *task1Process) call(t *testing.T, method string, params any) jsonrpc.Mes
 	return response
 }
 
+// callEventually repeats a request until it succeeds within 10 s. A read
+// answered from a peer's stream (engine:remote-get-installed) succeeds once that
+// stream has delivered its first frame, which can trail the peer's startup.
+func (p *task1Process) callEventually(t *testing.T, method string, params any) jsonrpc.Message {
+	t.Helper()
+	var response jsonrpc.Message
+	task1Eventually(t, method+" succeeds", 10*time.Second, func() bool {
+		response = p.callResponse(t, method, params)
+		return response.Error == nil
+	})
+	return response
+}
+
 func (p *task1Process) callResponse(t *testing.T, method string, params any) jsonrpc.Message {
 	t.Helper()
 	id := p.send(t, method, params, true)
@@ -376,6 +389,10 @@ func newTask1Observer(t *testing.T, target *task1Node, service noderec.ServiceKe
 			}
 			// Workload performance summaries are a live stream too.
 			if response.Request.URL.Path == "/v1/workloads/performance/events" {
+				return nil
+			}
+			// Engine status is a live stream, not a finite reply.
+			if response.Request.URL.Path == "/v1/engines/events" {
 				return nil
 			}
 			if response.StatusCode == http.StatusSwitchingProtocols {

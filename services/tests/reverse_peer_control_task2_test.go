@@ -462,12 +462,13 @@ func TestReversePeerControlTask2WithoutScannerReadsAuthenticatedTarget(t *testin
 	if wantPort <= 0 {
 		t.Fatalf("target-local fixture engine missing/running=false: %+v", local)
 	}
-	task2Decode(t, f.engines[f.a.uuid].call(t, "engine:remote-get-installed", map[string]string{"node": f.b.uuid}).Result, &remote)
+	task2Decode(t, f.engines[f.a.uuid].callEventually(t, "engine:remote-get-installed", map[string]string{"node": f.b.uuid}).Result, &remote)
 	if !reflect.DeepEqual(remote, local) {
 		t.Fatalf("authenticated target inventory = %+v, want target-local %+v", remote, local)
 	}
-	if count := f.b.observers[noderec.ServiceEngineControl].count(f.a.uuid, http.MethodGet, "/v1/engines"); count != 1 {
-		t.Fatalf("authenticated target inventory reads = %d, want 1", count)
+	observer := f.b.observers[noderec.ServiceEngineControl]
+	if streams, fetches := observer.count(f.a.uuid, http.MethodGet, "/v1/engines/events"), observer.count(f.a.uuid, http.MethodGet, "/v1/engines"); streams == 0 || fetches != 0 {
+		t.Fatalf("authenticated target inventory streams/fetches = %d/%d, want >0/0", streams, fetches)
 	}
 }
 
@@ -485,7 +486,7 @@ func TestReversePeerControlTask2(t *testing.T) {
 	snapshot := settings.Snapshot{NodeID: f.b.uuid, Engine: "llamacpp", Revision: 7, AppliedRevision: 7, Sequence: 1, Epoch: "task2-epoch", Settings: settings.Config{ServerPort: 45678}, Editable: true, Phase: "applied"}
 	assertEngines := func(t *testing.T, source *task1Process, target string) {
 		t.Helper()
-		response := source.call(t, "engine:remote-get-installed", map[string]string{"node": target})
+		response := source.callEventually(t, "engine:remote-get-installed", map[string]string{"node": target})
 		var result struct {
 			Engines []struct {
 				Engine  string `json:"engine"`
@@ -503,8 +504,8 @@ func TestReversePeerControlTask2(t *testing.T) {
 	}
 	t.Run("constructor routes control and scanner through private gateway", func(t *testing.T) {
 		assertEngines(t, a, f.b.uuid)
-		if ec.count(f.a.uuid, http.MethodGet, "/v1/engines") != 1 {
-			t.Fatal("control did not reach the authenticated target once")
+		if ec.count(f.a.uuid, http.MethodGet, "/v1/engines/events") == 0 || ec.count(f.a.uuid, http.MethodGet, "/v1/engines") != 0 {
+			t.Fatal("control was not served from the authenticated target's stream")
 		}
 		task1Eventually(t, "restricted ec entry, real node info and model inventory", 35*time.Second, func() bool {
 			node := f.restricted(t)
@@ -535,8 +536,8 @@ func TestReversePeerControlTask2(t *testing.T) {
 	t.Run("direct opposite direction remains usable without reverse", func(t *testing.T) {
 		outer.interrupt(f.b.uuid, true)
 		assertEngines(t, b, f.a.uuid)
-		if f.a.observers[noderec.ServiceEngineControl].count(f.b.uuid, http.MethodGet, "/v1/engines") != 1 {
-			t.Fatal("direct opposite-direction control did not dispatch once")
+		if f.a.observers[noderec.ServiceEngineControl].count(f.b.uuid, http.MethodGet, "/v1/engines/events") == 0 {
+			t.Fatal("direct opposite-direction control has no engine-status stream")
 		}
 		outer.interrupt(f.b.uuid, false)
 		task1Eventually(t, "outer session restored", 15*time.Second, func() bool { return outer.established(f.b.uuid) >= 3 })
@@ -594,9 +595,15 @@ func TestReversePeerControlTask2(t *testing.T) {
 			}
 		})
 		before := ec.count(f.a.uuid, http.MethodGet, "/v1/engines")
-		response := task2Response(t, a, a.send(t, "engine:remote-get-installed", map[string]string{"node": f.b.uuid}, true))
-		if response.Error == nil || ec.count(f.a.uuid, http.MethodGet, "/v1/engines") != before {
-			t.Fatal("invalid target pin dispatched/succeeded")
+		// The target rechecks the caller's pin before every stream frame, so
+		// it ends the open engine-status stream at its next keepalive (10 s);
+		// the source's cached answer goes with it.
+		task1Eventually(t, "revoked target pin ends the engine-status stream", 15*time.Second, func() bool {
+			response := task2Response(t, a, a.send(t, "engine:remote-get-installed", map[string]string{"node": f.b.uuid}, true))
+			return response.Error != nil
+		})
+		if ec.count(f.a.uuid, http.MethodGet, "/v1/engines") != before {
+			t.Fatal("invalid target pin dispatched")
 		}
 		snapshot.Sequence = 2
 		b.send(t, "engine:settings-projection", []settings.Snapshot{snapshot}, false)

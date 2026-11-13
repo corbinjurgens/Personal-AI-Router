@@ -293,6 +293,32 @@ func (f *pairedBootstrapFixture) serve(t *testing.T, service noderec.ServiceKey,
 				return
 			}
 		}
+		if r.Method+" "+r.URL.Path == "GET /v1/engines/events" {
+			// The engine-status stream: the current list, then keepalives
+			// until the subscriber leaves. Explicit reads answer from it.
+			f.mu.Lock()
+			f.counts["GET /v1/engines/events"]++
+			f.mu.Unlock()
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			flusher, _ := w.(http.Flusher)
+			line := map[string]any{"engines": []map[string]any{{"engine": "llamacpp", "installed": true, "running": true, "port": 45679}}}
+			ticker := time.NewTicker(100 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				if json.NewEncoder(w).Encode(line) != nil {
+					return
+				}
+				if flusher != nil {
+					flusher.Flush()
+				}
+				line = nil
+				select {
+				case <-r.Context().Done():
+					return
+				case <-ticker.C:
+				}
+			}
+		}
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		var value any
@@ -502,7 +528,16 @@ func (f *pairedBootstrapFixture) assertReads(t *testing.T) {
 			t.Fatalf("fresh node sample differs: %+v", got)
 		}
 	})
-	test("engine inventory", "engine:remote-get-installed", "GET /v1/engines", map[string]string{"node": f.b.uuid}, func(t *testing.T, raw json.RawMessage) {
+	t.Run("engine inventory from the stream", func(t *testing.T) {
+		fetches := f.count("GET /v1/engines")
+		var response *jsonrpc.Message
+		// The engine-status subscription starts with the peer; reads answer
+		// from it once its first frame has arrived.
+		task1Eventually(t, "engine inventory served from the stream", 10*time.Second, func() bool {
+			response = f.call(t, "engine:remote-get-installed", map[string]string{"node": f.b.uuid})
+			return response.Error == nil
+		})
+		raw := response.Result
 		var got struct {
 			Engines []struct {
 				Engine    string `json:"engine"`
@@ -513,7 +548,10 @@ func (f *pairedBootstrapFixture) assertReads(t *testing.T) {
 		}
 		task2Decode(t, raw, &got)
 		if len(got.Engines) != 1 || got.Engines[0].Engine != "llamacpp" || !got.Engines[0].Installed || !got.Engines[0].Running || got.Engines[0].Port != 45679 {
-			t.Fatalf("fresh intended engine inventory differs: %+v", got)
+			t.Fatalf("streamed engine inventory differs: %+v", got)
+		}
+		if f.count("GET /v1/engines/events") == 0 || f.count("GET /v1/engines") != fetches {
+			t.Fatalf("engine inventory not served from the stream: streams=%d fetches %d->%d", f.count("GET /v1/engines/events"), fetches, f.count("GET /v1/engines"))
 		}
 	})
 	test("node policy", "policy:get", "POST /v1/node-policy/get", map[string]string{"nodeId": f.b.uuid}, func(t *testing.T, raw json.RawMessage) {
@@ -604,7 +642,7 @@ func TestPairedDirectoryBootstrap(t *testing.T) {
 				opposite.interrupt(f.a.uuid, false)
 			})
 			start := time.Now()
-			dispatches := f.count("GET /v1/engines")
+			dispatches := f.count("GET /v1/engines/events")
 			response := f.call(t, "engine:remote-get-installed", map[string]string{"node": f.b.uuid})
 			if response.Error == nil || len(response.Result) != 0 {
 				t.Fatalf("unavailable routes returned success: %+v", response)
@@ -612,7 +650,7 @@ func TestPairedDirectoryBootstrap(t *testing.T) {
 			if elapsed := time.Since(start); elapsed > 7*time.Second {
 				t.Fatalf("both-route failure exceeded bound: %s", elapsed)
 			}
-			if after := f.count("GET /v1/engines"); after != dispatches {
+			if after := f.count("GET /v1/engines/events"); after != dispatches {
 				t.Fatalf("both-route outage reached target handler: before=%d after=%d", dispatches, after)
 			}
 			task1Eventually(t, "unrefreshed authenticated claim expires during outage", 40*time.Second, func() bool { return !f.hasPeer(t) })
@@ -657,7 +695,7 @@ func TestPairedDirectoryBootstrap(t *testing.T) {
 					method, path string
 					params       any
 				}{
-					{"engine:remote-get-installed", "GET /v1/engines", map[string]string{"node": f.b.uuid}},
+					{"engine:remote-get-installed", "GET /v1/engines/events", map[string]string{"node": f.b.uuid}},
 					{"policy:get", "POST /v1/node-policy/get", map[string]string{"nodeId": f.b.uuid}},
 					{"engine:get-settings", "POST /v1/engine-settings/get", map[string]string{"nodeId": f.b.uuid, "engine": "llamacpp"}},
 				} {

@@ -140,6 +140,7 @@
 | `engine:models-changed` | notification (we consume) | ✅ yes |
 | `engine:pull-progress` | notification (we consume) | ✅ yes |
 | `engine:ready` | notification (we consume) | ✅ yes |
+| `engine:remote-installed-changed` | notification (we consume) | ✅ yes |
 | `engine:remote-progress` | notification (we consume) | ✅ yes |
 | `engine:settings-changed` | notification (we consume) | ✅ yes |
 | `engine:settings-disconnected` | notification (we consume) | ✅ yes |

@@ -155,7 +155,7 @@ func TestE2EInstalledEnginesRestoreAcrossShutdownRPC(t *testing.T) {
 
 	second := startE2EManager(t, cfg, home)
 	notify(t, second.stdin, restoreInstalledMethod, nil)
-	waitNotify(t, second.frames, "engine:state-changed", 20*time.Second)
+	waitRunning(t, second.frames, "fake", 20*time.Second)
 	send(t, second.stdin, 1, "engine:status", map[string]any{"engine": "fake"})
 	if r := waitResult(t, second.frames, "1", 5*time.Second); !strings.Contains(string(r), `"running":true`) {
 		t.Fatalf("installed engine was not restored: %s", r)
@@ -175,7 +175,7 @@ func TestE2EInstalledEnginesRestoreAcrossShutdownRPC(t *testing.T) {
 
 	third := startE2EManager(t, cfg, home)
 	notify(t, third.stdin, restoreInstalledMethod, nil)
-	waitNotify(t, third.frames, "engine:state-changed", 20*time.Second)
+	waitRunning(t, third.frames, "fake", 20*time.Second)
 	send(t, third.stdin, 1, "engine:status", map[string]any{"engine": "fake"})
 	if r := waitResult(t, third.frames, "1", 5*time.Second); !strings.Contains(string(r), `"running":true`) {
 		t.Fatalf("historical Off prevented installed engine restore: %s", r)
@@ -273,7 +273,7 @@ func testE2ERestoreReclaimsOwnedOrphan(t *testing.T, portZero bool) {
 
 	second := startE2EManager(t, cfg, home)
 	notify(t, second.stdin, restoreInstalledMethod, nil)
-	waitNotify(t, second.frames, "engine:state-changed", 20*time.Second)
+	waitRunning(t, second.frames, "fake", 20*time.Second)
 	send(t, second.stdin, 2, "engine:status", map[string]any{"engine": "fake"})
 	var restored EngineStatus
 	if err := json.Unmarshal(waitResult(t, second.frames, "2", 5*time.Second), &restored); err != nil || !restored.Running || restored.Port != port {
@@ -736,6 +736,24 @@ func waitNotify(t *testing.T, frames <-chan frame, method string, timeout time.D
 			}
 		case <-deadline:
 			t.Fatalf("timed out waiting for notification %q", method)
+		}
+	}
+}
+
+// waitRunning waits for engine:state-changed reporting engine running. The
+// engine-status publisher's startup rebuild can report presence first.
+func waitRunning(t *testing.T, frames <-chan frame, engine string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.After(timeout)
+	for {
+		select {
+		case f := <-frames:
+			var status EngineStatus
+			if f.Method == "engine:state-changed" && json.Unmarshal(f.Params, &status) == nil && status.Engine == engine && status.Running {
+				return
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for %s to report running", engine)
 		}
 	}
 }
