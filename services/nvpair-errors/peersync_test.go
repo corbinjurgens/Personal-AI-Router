@@ -16,6 +16,7 @@ import (
 
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/errors"
+	"nvpair-shared/noderec"
 )
 
 // managerForNode builds a manager with a fixed local node id and no
@@ -459,6 +460,55 @@ func TestPeerSyncStreams(t *testing.T) {
 			t.Fatal(err)
 		}
 		f.ps.Resubscribe()
+		waitErrorSnapshot(t, f.subscriber, []ServiceError{bOne})
+	})
+
+	t.Run("a peer paired while clustered is subscribed when the relay reports its trust", func(t *testing.T) {
+		f := newErrorSyncFixture(t)
+		pinPath := filepath.Join(f.ps.clusterDir, "trusted", "node-b.json")
+		pin, err := os.ReadFile(pinPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(pinPath); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		events := make(chan DiscoveryEvent, 4)
+		f.subscriber.ctx = ctx
+		f.subscriber.SetRelayEvents(events)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			f.ps.Run(ctx, events)
+		}()
+		t.Cleanup(func() {
+			cancel()
+			<-done
+		})
+		// The broker relay's directory record for node-b. Only the scanner's
+		// trusted annotation changes when this node pairs with it.
+		record := noderec.DirectoryNode{
+			HostUUID: "node-b", Name: "Peer B", IP: "192.0.2.10", ClusterUUID: "node-b",
+			Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceErrors: {Port: f.event.Node.Port}},
+		}
+		relay := func(trusted bool) {
+			record.Trusted = trusted
+			f.subscriber.handleMessage(notificationMessage(noderec.NotifyNodes, noderec.GetNodesResult{Nodes: []noderec.DirectoryNode{record}}))
+		}
+		f.peer.handleReport(nil, mustJSON(t, bOne))
+		relay(false)
+		settle()
+		if got := f.streams.Load(); got != 0 {
+			t.Fatalf("unpinned peer streamed %d times", got)
+		}
+		// Pairing writes the pin; cluster:trust-changed makes the scanner
+		// re-annotate the record, which the relay pushes as a new snapshot.
+		// Membership does not flip, so no Resubscribe runs.
+		if err := os.WriteFile(pinPath, pin, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		relay(true)
 		waitErrorSnapshot(t, f.subscriber, []ServiceError{bOne})
 	})
 
