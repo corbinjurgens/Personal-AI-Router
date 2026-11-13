@@ -84,7 +84,7 @@ type proxyRoutingHistory struct {
 	generationLength     int
 	dirty, ready, active bool
 	acknowledged, failed bool
-	started, busy        bool // busy: the last cycle lost gate acquisition; the copier owns the early retry.
+	started, busy        bool // busy: the last completed cycle lost gate acquisition; the copier owns the early retry.
 	wake, writeWake      chan struct{}
 }
 
@@ -140,14 +140,15 @@ const (
 	// and active writer phases, rather than hiding a waiter list in a margin.
 	routingHistoryWaitControlBytes = (3 + 2 + 1) * routingHistoryWaiterBytes
 	// Worker launch; timer.Stop defer; writer close(done) defer; reconcile's
-	// unlock, retry, reader-clear and scratch-clear captures (code + captures).
-	routingHistoryWorkerCaptureBytes = 24 + 16 + 16 + 16 + 24 + 16 + 16
+	// unlock, retry, reader-clear and scratch-clear captures (code + captures);
+	// the copier's busy-retry flag.
+	routingHistoryWorkerCaptureBytes = 24 + 16 + 16 + 16 + 24 + 16 + 16 + unsafe.Sizeof(false)
 	// shared writeOwnedContext: mutex/flags, interrupt closure, callback,
 	// finish closure, return-error defer and gate-release defer. Also fund
 	// the named error box and context.AfterFunc's stop/once inner captures.
 	routingHistoryWriteCaptureBytes = unsafe.Sizeof(sync.Mutex{}) + 2 + 40 + 24 + 56 + 48 + 16 + 16 + 24 + 16
 	// Canonical cycle step: caller's cursor, receiver/cursor pointers, method
-	// header, slot, returned error, dirty and loop-result flags. No stored queue
+	// header, slot, returned error, wake and loop-result flags. No stored queue
 	// or additional record/frame backing is introduced by stepping the writer.
 	routingHistoryCycleStepBytes = unsafe.Sizeof(int(0)) + 2*unsafe.Sizeof(uintptr(0)) + unsafe.Sizeof("") +
 		unsafe.Sizeof(int(0)) + unsafe.Sizeof(error(nil)) + 2*unsafe.Sizeof(false)
@@ -240,11 +241,13 @@ func (h *proxyRoutingHistory) run() {
 			return
 		case <-h.wake:
 			h.reconcile(false)
+			// A cycle this turn already started (dirty supersession) owns
+			// the retry instead; it updates busy when it completes.
 			h.mu.Lock()
-			busy := h.busy
+			retry := h.busy && !h.active
 			h.busy = false
 			h.mu.Unlock()
-			if busy {
+			if retry {
 				timer.Reset(routingHistoryBusyRetry)
 			}
 		case <-timer.C:
@@ -440,9 +443,8 @@ func (h *proxyRoutingHistory) writeCycleStep(cursor *int) bool {
 	*cursor = -1
 	h.mu.Lock()
 	h.active = false
-	if errors.Is(err, jsonrpc.ErrHistoryBusy) {
-		h.busy = true
-	} else if err != nil {
+	h.busy = errors.Is(err, jsonrpc.ErrHistoryBusy)
+	if err != nil && !h.busy {
 		h.failed = true
 	}
 	wake := h.dirty || h.busy

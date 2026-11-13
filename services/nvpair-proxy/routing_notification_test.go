@@ -884,8 +884,8 @@ func TestParentNotificationHistoryGateDoesNotWaitOrFailParent(t *testing.T) {
 // The broker reconciles each engine's local destination on a five-second
 // ticker, as the history copier does. Its node/set-local-backend replies once
 // met every reconcile-tick retry of a large window, so history stopped at the
-// last window that fitted between them. A lost gate retries well before the
-// next tick, so a periodic ordinary writer cannot phase-lock the window out.
+// last window that fitted between them. This pins the early retry: a cycle
+// that lost the gate is retried well before the next reconcile tick.
 func TestRoutingHistoryBusyGateRetriesBeforeNextTick(t *testing.T) {
 	w := newHistoryBoundaryWriter(1)
 	_, cancel, codec := historyOwnedCodec(t, w)
