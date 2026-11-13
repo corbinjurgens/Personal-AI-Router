@@ -740,8 +740,8 @@ func waitNotify(t *testing.T, frames <-chan frame, method string, timeout time.D
 	}
 }
 
-// waitRunning waits for engine:state-changed reporting engine running. The
-// engine-status publisher's startup rebuild can report presence first.
+// waitRunning waits for engine:state-changed reporting engine running; an
+// earlier state change (presence) may arrive first.
 func waitRunning(t *testing.T, frames <-chan frame, engine string, timeout time.Duration) {
 	t.Helper()
 	deadline := time.After(timeout)

@@ -90,16 +90,20 @@ func (p *enginesPublisher) rebuild() {
 	p.hub.Publish(json.RawMessage(raw))
 }
 
-// subscribe adds a stream reader. The list is rebuilt first, so the reader's
-// first frame is current even after a period with no readers.
+// subscribe adds a stream reader and asks run for a rebuild. The reader gets
+// the last published list at once; after a period with no readers that list
+// may be old, and the rebuild (enginesRebuildDelay later) sends the current
+// one if it differs. The rebuild is left to run rather than done here because
+// refreshing status waits for any engine operation in progress (an install or
+// a start), and the stream must open without waiting for it.
 func (p *enginesPublisher) subscribe() (<-chan json.RawMessage, func(), bool) {
 	p.readers.Add(1)
-	p.rebuild()
 	ch, cancel, ok := p.hub.Subscribe()
 	if !ok {
 		p.readers.Add(-1)
 		return nil, func() {}, false
 	}
+	p.poke()
 	return ch, func() { cancel(); p.readers.Add(-1) }, true
 }
 

@@ -81,22 +81,31 @@ func TestEnginesPublisherRebuildsOnlyWithReaders(t *testing.T) {
 		t.Fatalf("status refreshed %d times with no reader, want 0", n)
 	}
 
-	// A reader's first frame is the current list, rebuilt on subscribe.
-	list.set(EngineStatus{Engine: "llamacpp", Installed: true, Running: true})
+	// running waits for a frame and reports its llamacpp running state.
+	running := func(ch <-chan json.RawMessage) bool {
+		t.Helper()
+		select {
+		case raw := <-ch:
+			var frame struct {
+				Engines []EngineStatus `json:"engines"`
+			}
+			if err := json.Unmarshal(raw, &frame); err != nil || len(frame.Engines) != 1 {
+				t.Fatalf("frame = %s (%v)", raw, err)
+			}
+			return frame.Engines[0].Running
+		case <-time.After(2 * time.Second):
+			t.Fatal("no frame within 2 s")
+			return false
+		}
+	}
+
+	// The first reader triggers a rebuild and gets the list.
 	ch, closeSub, ok := p.subscribe()
 	if !ok {
 		t.Fatal("subscribe refused")
 	}
-	select {
-	case raw := <-ch:
-		var frame struct {
-			Engines []EngineStatus `json:"engines"`
-		}
-		if err := json.Unmarshal(raw, &frame); err != nil || len(frame.Engines) != 1 || !frame.Engines[0].Running {
-			t.Fatalf("first frame = %s (%v)", raw, err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("subscriber got no first frame")
+	if running(ch) {
+		t.Fatal("first frame reports running")
 	}
 
 	// After the last reader leaves, pokes no longer refresh status.
@@ -106,6 +115,21 @@ func TestEnginesPublisherRebuildsOnlyWithReaders(t *testing.T) {
 	time.Sleep(enginesRebuildDelay + 200*time.Millisecond)
 	if n := calls.Load(); n != before {
 		t.Fatalf("status refreshed after the last reader left: %d -> %d", before, n)
+	}
+
+	// A change made while no reader was open reaches the next reader: the
+	// stored list first, then the current one from the rebuild it triggers.
+	list.set(EngineStatus{Engine: "llamacpp", Installed: true, Running: true})
+	ch, closeSub, ok = p.subscribe()
+	if !ok {
+		t.Fatal("second subscribe refused")
+	}
+	defer closeSub()
+	if running(ch) {
+		t.Fatal("stored frame should be the list from before the idle period")
+	}
+	if !running(ch) {
+		t.Fatal("rebuild after subscribe did not send the current list")
 	}
 }
 
