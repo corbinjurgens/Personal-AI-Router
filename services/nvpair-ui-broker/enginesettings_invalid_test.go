@@ -8,7 +8,9 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -288,5 +290,38 @@ func TestInvalidModelEntryReservesPolicyForOtherEnginesModelChanges(t *testing.T
 	change := h.request(t, false)
 	if _, err := h.b.previewEngineSettings(context.Background(), change, ""); policyErrorCode(err) != codeSettingsRecordInvalid {
 		t.Fatalf("model change beside an unfinished invalid entry = %v, want the reset refusal", err)
+	}
+}
+
+// Audit finding 5: an invalid entry whose key is not an engine name has no
+// settings row, yet it may fence policy saves on every engine. The refusal
+// names the key, and the reset accepts it.
+func TestInvalidEntryWithNonEngineKeyIsReportedAndResettable(t *testing.T) {
+	h := newModelSettingsHarness(t)
+	if _, err := h.b.getEngineSettings(context.Background(), settings.Request{Engine: "llamacpp"}, ""); err != nil {
+		t.Fatal(err)
+	}
+	const key = "not an engine/../x"
+	entries := readSettingsJournal(t, h)
+	entries[key] = json.RawMessage(`{"model":{"stage":"accepted"}}`)
+	writeSettingsJournal(t, h, entries)
+	h.restartJournal(t)
+
+	err := idlePolicyEdit(t, h, 17)
+	if policyErrorCode(err) != codeSettingsRecordInvalid || !strings.Contains(err.Error(), strconv.Quote(key)) {
+		t.Fatalf("policy save beside a non-engine invalid entry = %v, want the reset refusal naming the key", err)
+	}
+	result, err := h.b.resetSettingsRecord(resetSettingsRecordParams{Engine: key})
+	if err != nil {
+		t.Fatalf("reset of a non-engine key: %v", err)
+	}
+	if base := filepath.Base(result.Backup); strings.ContainsAny(base, " /\\") || !strings.Contains(base, ".key-") {
+		t.Fatalf("backup file name %q does not keep the key out of the path", base)
+	}
+	if _, exists := readSettingsJournal(t, h)[key]; exists {
+		t.Fatal("reset left the entry in the journal")
+	}
+	if err := idlePolicyEdit(t, h, 17); err != nil {
+		t.Fatalf("policy save after reset: %v", err)
 	}
 }

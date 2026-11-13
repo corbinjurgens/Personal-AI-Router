@@ -5,6 +5,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -115,7 +117,9 @@ type resetSettingsRecordResult struct {
 
 func (b *Broker) handleResetSettingsRecord(msg *Message) {
 	var p resetSettingsRecordParams
-	if err := json.Unmarshal(msg.Params, &p); err != nil || !engines.ValidRoutingID(p.Engine) {
+	// Any key the journal holds as an invalid entry can be reset, including
+	// one that is not a valid engine name; the lookup is the authority.
+	if err := json.Unmarshal(msg.Params, &p); err != nil || p.Engine == "" || len(p.Engine) > 256 {
 		_ = b.codec.RespondError(msg.ID, -32602, "invalid reset settings record request")
 		return
 	}
@@ -164,7 +168,13 @@ func (b *Broker) resetSettingsRecordLocked(engine string) (resetSettingsRecordRe
 		return resetSettingsRecordResult{}, false, err
 	}
 	stamp := time.Now().UTC().Format("20060102T150405.000000000Z")
-	backup := strings.TrimSuffix(path, filepath.Ext(path)) + "." + engine + "." + stamp + ".invalid.json"
+	name := engine
+	if !engines.ValidRoutingID(engine) {
+		// Keep an arbitrary journal key out of the file name.
+		sum := sha256.Sum256([]byte(engine))
+		name = "key-" + hex.EncodeToString(sum[:8])
+	}
+	backup := strings.TrimSuffix(path, filepath.Ext(path)) + "." + name + "." + stamp + ".invalid.json"
 	data, err := json.Marshal(struct {
 		Engine string          `json:"engine"`
 		Cause  string          `json:"cause"`

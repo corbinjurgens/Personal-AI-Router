@@ -270,9 +270,12 @@ advertisement, and blocks diagnostics and installed-engine restoration at
 startup.
 
 `engine:reset-settings-record {engine, nodeId?}` is local-only; another node's
-`nodeId` is refused. It requires an invalid entry for `engine` (otherwise
+`nodeId` is refused. `engine` is the journal key, which need not be a valid
+engine name (an entry left by a removed engine, or a corrupted key); every
+refusal names that key. It requires an invalid entry under that key (otherwise
 `-32602`), writes `{engine, cause, resetAt, entry}` to
 `engine-settings-operations.<engine>.<UTC stamp>.invalid.json` beside the journal
+(a key that is not a valid engine name is written as `key-<hash prefix>`)
 through the durable file replacement helper, removes the entry and saves the
 journal. A failed backup or journal save keeps the entry. Success returns
 `{engine, backup}`, releases the entry's drain and, when nothing else holds model
