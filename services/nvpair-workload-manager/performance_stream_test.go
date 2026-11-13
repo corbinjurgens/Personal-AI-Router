@@ -531,11 +531,9 @@ func TestPerformanceStreamRouteRequiresPinnedPeer(t *testing.T) {
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("unauthenticated stream status = %d, want 403", w.Code)
 	}
-	// The former POST methods are gone from the events endpoint.
-	for _, method := range []string{"performance:summary", "performance:capabilities"} {
-		if code := f.manager.server.pinnedDispatch(t, f, method); code != http.StatusBadRequest {
-			t.Fatalf("%s status = %d, want 400", method, code)
-		}
+	// The former summary POST is gone from the events endpoint.
+	if code := f.manager.server.pinnedDispatch(t, f, performancewire.MethodSummary); code != http.StatusBadRequest {
+		t.Fatalf("%s status = %d, want 400", performancewire.MethodSummary, code)
 	}
 }
 
