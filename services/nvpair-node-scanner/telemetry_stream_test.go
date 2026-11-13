@@ -130,7 +130,7 @@ func (f *streamPeerFixture) supervise(t *testing.T) (context.Context, *sync.Wait
 	ctx, cancel := context.WithCancel(context.Background())
 	var workers sync.WaitGroup
 	t.Cleanup(func() { cancel(); workers.Wait() })
-	f.d.superviseNodeInfoStreams(ctx, f.d.selfHostUUID(), &workers)
+	f.d.supervisePeerStreams(ctx, f.d.selfHostUUID(), &workers)
 	return ctx, &workers
 }
 
@@ -288,7 +288,7 @@ func TestNodeInfoStreamEndsWhenPeerLeavesDirectory(t *testing.T) {
 	ctx, workers := f.supervise(t)
 	f.nextTelemetry(t)
 	f.d.dir.remove("peer")
-	f.d.superviseNodeInfoStreams(ctx, f.d.selfHostUUID(), workers)
+	f.d.supervisePeerStreams(ctx, f.d.selfHostUUID(), workers)
 	f.waitEnded(t)
 }
 

@@ -167,13 +167,7 @@ func (d *daemon) fetchPeerModels(hostUUID, ip string, port int, clusterUUID stri
 }
 
 func (d *daemon) fetchModelsForPeer(hostUUID, ip string, port int, clusterUUID string, discovering bool) (modelInventory, bool) {
-	d.infoMu.Lock()
-	baseline := d.lastDownloads[hostUUID]
-	var sourceBaseline string
-	if baseline.snapshot != nil {
-		sourceBaseline = baseline.snapshot.SourceID
-	}
-	d.infoMu.Unlock()
+	sourceBaseline := d.downloadSourceBaseline(hostUUID)
 	client, scheme, current, ok := d.modelsClient(hostUUID, ip, port, clusterUUID, discovering)
 	if !ok {
 		slog.Debug("model enrichment skipped: peer is not a pinned cluster member",
@@ -194,6 +188,28 @@ func (d *daemon) fetchModelsForPeer(hostUUID, ip string, port int, clusterUUID s
 	if err != nil || len(raw) > modelsResponseBytes {
 		return modelInventory{}, false
 	}
+	inventory, ok := decodeModelsInventory(raw, ip, sourceBaseline)
+	if !ok || !current() {
+		return modelInventory{}, false
+	}
+	return inventory, true
+}
+
+// downloadSourceBaseline is the download source of hostUUID's last accepted
+// inventory, the baseline a read beginning now is accepted against.
+func (d *daemon) downloadSourceBaseline(hostUUID string) string {
+	d.infoMu.Lock()
+	defer d.infoMu.Unlock()
+	if baseline := d.lastDownloads[hostUUID]; baseline.snapshot != nil {
+		return baseline.snapshot.SourceID
+	}
+	return ""
+}
+
+// decodeModelsInventory turns one /v1/models document (a fetched body or a
+// models stream frame) into a modelInventory read against sourceBaseline. ok is
+// false when the document fails; ip is only logged.
+func decodeModelsInventory(raw []byte, ip, sourceBaseline string) (modelInventory, bool) {
 	var body struct {
 		Models          []json.RawMessage            `json:"models"`
 		ModelsByEngine  map[string][]json.RawMessage `json:"modelsByEngine"`
@@ -237,9 +253,6 @@ func (d *daemon) fetchModelsForPeer(hostUUID, ip string, port int, clusterUUID s
 	}
 	if rejected != "" {
 		slog.Debug("model enrichment: ignoring part of a policy advertisement", "ip", ip, "rejected", rejected)
-	}
-	if !current() {
-		return modelInventory{}, false
 	}
 	var observation downloadObservation
 	if invalidDownload || len(body.DownloadState) > 0 && !bytes.Equal(bytes.TrimSpace(body.DownloadState), []byte("null")) {
@@ -470,12 +483,16 @@ func (d *daemon) modelsClient(hostUUID, ip string, port int, clusterUUID string,
 // the loop reads the next tick makes overlapping sweeps impossible, and each
 // per-node goroutine uses modelsHTTP's own timeout, so one slow peer never
 // consumes another's budget.
+//
+// Stream peers are skipped: their inventory arrives on their models stream
+// (models_stream.go). Self and every other node keep the fetch.
 func (d *daemon) refreshModelsOnce() {
 	sem := make(chan struct{}, modelsRefreshConcurrency)
 	var wg sync.WaitGroup
+	self := d.selfHostUUID()
 	for _, n := range d.dir.snapshot(noderec.ServiceEngineManager) {
 		em, ok := n.Services[noderec.ServiceEngineManager]
-		if !ok || n.IP == "" {
+		if !ok || n.IP == "" || d.isStreamPeer(n, self) {
 			continue
 		}
 		wg.Add(1)
@@ -528,6 +545,20 @@ func (d *daemon) refreshNodeModelsCandidates(hostUUID, guardIP string, hosts []s
 	}
 	key := hostKey{hostUUID: hostUUID, service: noderec.ServiceEngineManager}
 	_, inventory, fetched := askRemembered(&d.enrichHosts, key, hosts, ask)
+	if !fetched {
+		return d.markModelsUnavailable(hostUUID, guardIP, emPort, generation)
+	}
+	return d.applyModelsInventory(hostUUID, guardIP, emPort, generation, inventory)
+}
+
+// applyModelsInventory applies one successful inventory read (a fetch or a
+// models stream frame) begun at route generation, under the removed or
+// re-addressed guard (directory.applyModels). On a change it refreshes the
+// enrichment caches (so a later browse-driven fallback can't revert the
+// directory to a stale value) and emits exactly one discovery:node-updated
+// carrying the full node. A read from an authenticated peer whose peer-services
+// claim is no longer current counts as failed. Returns whether it emitted.
+func (d *daemon) applyModelsInventory(hostUUID, guardIP string, emPort int, generation uint64, inventory modelInventory) bool {
 	d.peerServicesMu.Lock()
 	defer d.peerServicesMu.Unlock()
 	if d.dir.routeGeneration(hostUUID) != generation {
@@ -539,23 +570,8 @@ func (d *daemon) refreshNodeModelsCandidates(hostUUID, guardIP string, hosts []s
 		d.dir.mu.RUnlock()
 		incarnation, admitted := d.mesh.PeerServiceIncarnation(hostUUID)
 		if !admitted || incarnation != claim.Incarnation || !peerServicesFresh(claim, time.Now()) {
-			fetched = false
+			return d.markModelsUnavailableLocked(hostUUID, guardIP, emPort)
 		}
-	}
-	if !fetched {
-		node, changed, valid := d.dir.markDownloadsStale(hostUUID, guardIP, emPort)
-		if !valid {
-			return false
-		}
-		d.infoMu.Lock()
-		if observation, ok := d.lastDownloads[hostUUID]; ok {
-			d.lastDownloads[hostUUID] = observation.stale()
-		}
-		d.infoMu.Unlock()
-		if changed {
-			d.emit(noderec.NotifyNodeUpdated, node)
-		}
-		return changed
 	}
 	// Refresh the enrichment cache BEFORE touching the directory: the caches
 	// (infoMu) and the directory (dir.mu) are guarded by different locks, so if
@@ -576,6 +592,37 @@ func (d *daemon) refreshNodeModelsCandidates(hostUUID, guardIP string, hosts []s
 	if !valid {
 		return false
 	}
+	if changed {
+		d.emit(noderec.NotifyNodeUpdated, node)
+	}
+	return changed
+}
+
+// markModelsUnavailable is the failed-read path (a failed fetch or an ended
+// models stream) for a read begun at route generation: it retains the last
+// successful inventory and operation details, but withdraws download freshness
+// and emits that change once. Returns whether it emitted.
+func (d *daemon) markModelsUnavailable(hostUUID, guardIP string, emPort int, generation uint64) bool {
+	d.peerServicesMu.Lock()
+	defer d.peerServicesMu.Unlock()
+	if d.dir.routeGeneration(hostUUID) != generation {
+		return false
+	}
+	return d.markModelsUnavailableLocked(hostUUID, guardIP, emPort)
+}
+
+// markModelsUnavailableLocked is markModelsUnavailable without the generation
+// check. Caller holds peerServicesMu.
+func (d *daemon) markModelsUnavailableLocked(hostUUID, guardIP string, emPort int) bool {
+	node, changed, valid := d.dir.markDownloadsStale(hostUUID, guardIP, emPort)
+	if !valid {
+		return false
+	}
+	d.infoMu.Lock()
+	if observation, ok := d.lastDownloads[hostUUID]; ok {
+		d.lastDownloads[hostUUID] = observation.stale()
+	}
+	d.infoMu.Unlock()
 	if changed {
 		d.emit(noderec.NotifyNodeUpdated, node)
 	}
