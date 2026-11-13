@@ -85,6 +85,8 @@ export const goLicenseFileHashes: Readonly<Record<string, string>> = {
         'ad1e64b82c04fb2ee6bfe521bff01266971ffaa70500024d4ac767c6033aafb9',
     'github.com/tklauser/go-sysconf@v0.3.16':
         '136e44761b4eb4d4972d687167473250be792d07a7a14832d0295bde05840f85',
+    'github.com/tklauser/numcpus@v0.11.0':
+        '283ea6cc2997a1a70da0049e09adf9317bb60ca1b51279b65196b83a69e1996b',
     'github.com/xo/terminfo@v0.0.0-20220910002029-abceb7e1c41e':
         '33ff72a8e9e36a4754ecda3f7b7eae0f29d20581d61adb293e12289705876388',
     'github.com/yusufpapurcu/wmi@v1.2.4':

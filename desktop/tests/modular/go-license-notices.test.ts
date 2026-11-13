@@ -45,7 +45,7 @@ describe('Go notice license sources', () => {
         const dir = await moduleFixture()
         const text = await clipboardGrant()
         await writeFile(join(dir, 'LICENSE'), text)
-        const entries = await collectGoModuleEntries('/virtual/services', ['fixture'])
+        const entries = await collectGoModuleEntries(['/virtual/services/fixture'])
         expect(entries).toEqual([
             {
                 name: 'github.com/atotto/clipboard',
@@ -72,14 +72,14 @@ describe('Go notice license sources', () => {
     it('rejects the independent review truncated-grant specimen', async () => {
         const dir = await moduleFixture()
         await writeFile(join(dir, 'LICENSE'), 'MIT License\nCopyright fixture\n')
-        await expect(collectGoModuleEntries('/virtual/services', ['fixture'])).rejects.toThrow(
+        await expect(collectGoModuleEntries(['/virtual/services/fixture'])).rejects.toThrow(
             'Missing, incomplete or unreviewed version-bound Go license'
         )
     })
 
     it('rejects missing license text instead of emitting a placeholder', async () => {
         await moduleFixture()
-        await expect(collectGoModuleEntries('/virtual/services', ['fixture'])).rejects.toThrow(
+        await expect(collectGoModuleEntries(['/virtual/services/fixture'])).rejects.toThrow(
             'Missing, incomplete or unreviewed version-bound Go license'
         )
     })
@@ -87,7 +87,7 @@ describe('Go notice license sources', () => {
     it('rejects a changed grant at the same version', async () => {
         const dir = await moduleFixture()
         await writeFile(join(dir, 'LICENSE'), `${await clipboardGrant()}\nchanged`)
-        await expect(collectGoModuleEntries('/virtual/services', ['fixture'])).rejects.toThrow(
+        await expect(collectGoModuleEntries(['/virtual/services/fixture'])).rejects.toThrow(
             'Missing, incomplete or unreviewed version-bound Go license'
         )
     })
@@ -103,10 +103,10 @@ describe('Go notice license sources', () => {
         expect(boundary).toBeGreaterThan(0)
         await writeFile(join(dir, 'LICENSE'), text.slice(0, boundary).trim())
         await writeFile(join(dir, 'NOTICE'), text.slice(boundary).trim())
-        const entries = await collectGoModuleEntries('/virtual/services', ['fixture'])
+        const entries = await collectGoModuleEntries(['/virtual/services/fixture'])
         expect(entries[0].licenseText).toBe(text)
         await rm(join(dir, 'NOTICE'))
-        await expect(collectGoModuleEntries('/virtual/services', ['fixture'])).rejects.toThrow(
+        await expect(collectGoModuleEntries(['/virtual/services/fixture'])).rejects.toThrow(
             'Missing, incomplete or unreviewed version-bound Go license'
         )
     })
@@ -114,7 +114,7 @@ describe('Go notice license sources', () => {
     it('does not reuse a license fingerprint after an upgrade', async () => {
         const dir = await moduleFixture('github.com/atotto/clipboard', 'v99.0.0')
         await writeFile(join(dir, 'LICENSE'), await clipboardGrant())
-        await expect(collectGoModuleEntries('/virtual/services', ['fixture'])).rejects.toThrow(
+        await expect(collectGoModuleEntries(['/virtual/services/fixture'])).rejects.toThrow(
             'Missing, incomplete or unreviewed version-bound Go license'
         )
     })
@@ -122,7 +122,7 @@ describe('Go notice license sources', () => {
     it('uses the declared MIT standard text when the exact module version has no LICENSE', async () => {
         await moduleFixture('github.com/mattn/go-localereader', 'v0.0.1')
         const supplement = licenseSupplements['github.com/mattn/go-localereader@v0.0.1']
-        const entries = await collectGoModuleEntries('/virtual/services', ['fixture'])
+        const entries = await collectGoModuleEntries(['/virtual/services/fixture'])
         expect(entries).toEqual([
             {
                 name: 'github.com/mattn/go-localereader',
