@@ -360,6 +360,34 @@ describe('node availability presentation', () => {
         }
     )
 
+    it('labels a local Halt as Halted and offers Resume instead of a second Halt', async () => {
+        await act(async () =>
+            root.render(
+                <AvailabilityControls
+                    name="This PC"
+                    local
+                    enabled
+                    entry={{
+                        current: true,
+                        value: 'paused',
+                        pausedBy: 'local',
+                        pauseMode: 'immediate',
+                        reading: false,
+                        stale: false
+                    }}
+                    onRequest={() => {}}
+                    onRefresh={() => {}}
+                />
+            )
+        )
+        expect(container.textContent).toContain('Halted from this device')
+        expect(container.textContent).not.toContain('Paused')
+        expect(button('Resume node: This PC').disabled).toBe(false)
+        expect([...container.querySelectorAll('button')].map(b => b.textContent)).not.toContain(
+            'Halt'
+        )
+    })
+
     it.each(['peer', undefined] satisfies Array<'peer' | undefined>)(
         'keeps immediate pause with %s provenance conservative',
         async pausedBy => {

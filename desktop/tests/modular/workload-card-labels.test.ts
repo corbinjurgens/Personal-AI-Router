@@ -3,7 +3,7 @@
 
 import { describe, expect, it } from 'vitest'
 import { GPU_COLOR_PALETTE, WORKLOAD_COLOR_MAP } from '@/ui/constants/colors'
-import { workloadNodeLabel } from '@/ui/utils/workload-labels'
+import { workloadErrorText, workloadNodeLabel } from '@/ui/utils/workload-labels'
 
 const STARTED_AT = 1_700_000_000_000
 
@@ -36,6 +36,24 @@ describe('workloadNodeLabel', () => {
 
     it('says Ran on for a job that was cancelled after it started', () => {
         expect(workloadNodeLabel({ state: 'cancelled', startedAt: STARTED_AT })).toBe('Ran on')
+    })
+})
+
+describe('workloadErrorText', () => {
+    const names = new Map([['ea140c4e-a3de-4af1-a391-850dbcb940ce', 'Joes']])
+
+    it('names a known node instead of its ID', () => {
+        expect(
+            workloadErrorText(
+                'stream interrupted after output began on EA140C4E-a3de-4af1-a391-850dbcb940ce: upstream response copy aborted',
+                id => names.get(id)
+            )
+        ).toBe('stream interrupted after output began on Joes: upstream response copy aborted')
+    })
+
+    it('keeps an unknown node ID', () => {
+        const error = 'failed on 0785723e-eefb-40a8-9be1-85b865045e02'
+        expect(workloadErrorText(error, id => names.get(id))).toBe(error)
     })
 })
 

@@ -2075,7 +2075,7 @@ describe('routing settings editor', () => {
                     pauseMode: 'immediate'
                 })
             )
-            expect(container.textContent).toContain('Paused')
+            expect(container.textContent).toContain('Halted from this device')
             expect(useNodeConfigurationStore.getState().availability.get(SELF)?.pauseMode).toBe(
                 'immediate'
             )
