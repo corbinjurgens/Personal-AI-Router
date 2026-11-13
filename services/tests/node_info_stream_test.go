@@ -4,11 +4,11 @@
 package tests
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
 	"os"
@@ -19,7 +19,7 @@ import (
 	"time"
 
 	"nvpair-shared/clustertrust"
-	"nvpair-shared/mdns"
+	"nvpair-shared/netpick"
 	"nvpair-shared/noderec"
 )
 
@@ -27,14 +27,29 @@ import (
 // its real node-info behind a counting proxy, and its real scanner.
 type nodeInfoStreamNode struct {
 	uuid, base, cert string
-	// namespace is the private mDNS namespace this node's scanner browses;
-	// only the peer advertises in it, so the scanner never polls itself
-	// through the counting proxy.
-	namespace noderec.MDNSNamespace
-	scanner   *task1Process
-	proxyPort int
-	mu        sync.Mutex
-	counts    map[string]int
+	// peerIncarnation is the peer's admission incarnation in this node's
+	// cluster directory; the peer-services claims fed to this node's scanner
+	// carry it.
+	peerIncarnation string
+	scanner         *task1Process
+	proxyPort       int
+	mu              sync.Mutex
+	counts          map[string]int
+}
+
+// claimPeerServices feeds the scanner one authenticated peer-services claim for
+// peer, as the broker relays cluster-manager's: the peer's node-info is the
+// counting proxy at address.
+func (n *nodeInfoStreamNode) claimPeerServices(peer *nodeInfoStreamNode, address string, sequence uint64) error {
+	claim := noderec.PeerServicesClaim{
+		Descriptor: noderec.PeerServicesDescriptor{
+			HostUUID:  peer.uuid,
+			Addresses: []string{address},
+			Services:  []noderec.PeerService{{Service: noderec.ServiceNodeInfo, Port: peer.proxyPort}},
+		},
+		Incarnation: n.peerIncarnation, Sequence: sequence, Source: "ni-stream-fixture", ObservedAt: time.Now().UnixMilli(),
+	}
+	return n.scanner.write(map[string]any{"jsonrpc": "2.0", "method": "discovery:peer-services", "params": claim})
 }
 
 func (n *nodeInfoStreamNode) count(path string) int {
@@ -70,19 +85,31 @@ func (n *nodeInfoStreamNode) peerTelemetry(t *testing.T, hostUUID string) int {
 
 // TestPairedNodeInfoStreamReplacesTelemetryPull runs two paired nodes, each
 // with the real nvpair-node-info behind a counting proxy and the real
-// nvpair-node-scanner. Each scanner discovers the other node in its own private
-// mDNS namespace and holds one GET /v1/node-info/events stream to it instead of
-// pulling GET /v1/node-info every two seconds. In both directions, over a 10 s
-// window:
+// nvpair-node-scanner. Each scanner learns the other node from authenticated
+// peer-services claims, as a paired node does from its cluster-manager, and
+// holds one GET /v1/node-info/events stream to it instead of pulling
+// GET /v1/node-info every two seconds. In both directions, over a 10 s window:
 //   - the scanner sends its broker discovery:node-telemetry for the peer at
 //     least every 3 s. The scanner's stdout is the link its broker reads, so
 //     the notifications counted there are the ones the broker receives;
 //   - the peer's node-info serves the stream and no plain read;
 //   - discovery:get-node-info for the peer answers from the live frame within
 //     100 ms.
+//
+// Claims rather than mDNS: a claim's address list is fixed, while a fixture
+// mDNS record gains whichever interface address answered each browse. On a
+// host with several interfaces that tail changes between browses, every change
+// is a route change, and the stream is rightly reopened. A current claim
+// overrides browse data, so a paired production peer does not see it.
 func TestPairedNodeInfoStreamReplacesTelemetryPull(t *testing.T) {
-	a := &nodeInfoStreamNode{uuid: "ni-stream-a", namespace: newFixtureMDNSNamespace(t), counts: map[string]int{}}
-	b := &nodeInfoStreamNode{uuid: "ni-stream-b", namespace: newFixtureMDNSNamespace(t), counts: map[string]int{}}
+	// A claim needs a non-loopback address; this host's own LAN address
+	// reaches the counting proxies bound to it.
+	lanIP := netpick.BestLocalIP(netpick.Evidence{})
+	if lanIP == "" {
+		t.Skip("no non-loopback IPv4 address available; a peer-services claim needs one")
+	}
+	a := &nodeInfoStreamNode{uuid: "ni-stream-a", counts: map[string]int{}}
+	b := &nodeInfoStreamNode{uuid: "ni-stream-b", counts: map[string]int{}}
 	nodes := []*nodeInfoStreamNode{a, b}
 	peerOf := func(n *nodeInfoStreamNode) *nodeInfoStreamNode {
 		if n == a {
@@ -111,9 +138,11 @@ func TestPairedNodeInfoStreamReplacesTelemetryPull(t *testing.T) {
 			members = append(members, task1Member{ID: member.uuid, NodeUUID: member.uuid, Name: member.uuid, IPAddress: "127.0.0.1", Port: memberPorts[member.uuid], ClusterID: task1ClusterID, AdmissionEpoch: 1, State: "member"})
 		}
 		task1WriteJSON(t, filepath.Join(dir, "members.json"), members)
-		if _, admitted := clustertrust.Open(dir).PeerServiceIncarnation(peer.uuid); !admitted {
+		incarnation, admitted := clustertrust.Open(dir).PeerServiceIncarnation(peer.uuid)
+		if !admitted {
 			t.Fatalf("%s does not admit %s", n.uuid, peer.uuid)
 		}
+		n.peerIncarnation = incarnation
 	}
 	for _, n := range nodes {
 		port := freePort(t)
@@ -126,41 +155,48 @@ func TestPairedNodeInfoStreamReplacesTelemetryPull(t *testing.T) {
 		}
 		proxy := httputil.NewSingleHostReverseProxy(upstream)
 		proxy.FlushInterval = -1
-		server := newFixtureHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		listener, err := allocateFixtureListener(net.Listen, net.JoinHostPort(lanIP, "0"))
+		if err != nil {
+			t.Fatalf("allocate %s node-info proxy listener: %v", n.uuid, err)
+		}
+		server := &httptest.Server{Listener: listener, Config: &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			n.mu.Lock()
 			n.counts[r.Method+" "+r.URL.Path]++
 			n.mu.Unlock()
 			proxy.ServeHTTP(w, r)
-		}))
+		})}}
+		server.Start()
 		t.Cleanup(server.Close)
 		n.proxyPort = server.Listener.Addr().(*net.TCPAddr).Port
 	}
 	for _, n := range nodes {
-		args := append([]string{"--cluster-dir", filepath.Join(n.base, "cluster")}, fixtureMDNSScannerArgs(n.namespace)...)
-		n.scanner = startTask1Process(t, n.base, scannerBin, args...)
+		n.scanner = startTask1Process(t, n.base, scannerBin, "--cluster-dir", filepath.Join(n.base, "cluster"))
 		n.scanner.call(t, "discovery:get-nodes", nil)
-		label := "ni-stream-" + filepath.Base(n.base)
-		advertised := peerOf(n).namespace
-		responder, err := mdns.NewResponder(label, label, advertised.Service, advertised.Domain, noderec.SRVPort, []string{
-			"v=1", "uuid=" + n.uuid, "cluster-uuid=" + n.uuid, "ip=127.0.0.1", fmt.Sprintf("ni=%d", n.proxyPort),
-		})
-		if err != nil {
+		// A claim lapses after 30 s; renew it well inside that, as
+		// cluster-manager does, with the same route so nothing reopens.
+		peer := peerOf(n)
+		if err := n.claimPeerServices(peer, lanIP, 1); err != nil {
 			t.Fatal(err)
 		}
-		ctx, cancel := context.WithCancel(context.Background())
-		advertiseDone := make(chan error, 1)
-		go func() { advertiseDone <- responder.Run(ctx) }()
-		t.Cleanup(func() {
-			cancel()
-			select {
-			case err := <-advertiseDone:
-				if err != nil {
-					t.Error(err)
+		stop := make(chan struct{})
+		renewed := make(chan struct{})
+		go func() {
+			defer close(renewed)
+			ticker := time.NewTicker(5 * time.Second)
+			defer ticker.Stop()
+			for sequence := uint64(2); ; sequence++ {
+				select {
+				case <-stop:
+					return
+				case <-ticker.C:
 				}
-			case <-time.After(5 * time.Second):
-				t.Error("fixture advertiser did not stop")
+				if err := n.claimPeerServices(peer, lanIP, sequence); err != nil {
+					t.Errorf("renew %s claim for %s: %v", n.uuid, peer.uuid, err)
+					return
+				}
 			}
-		})
+		}()
+		t.Cleanup(func() { close(stop); <-renewed })
 	}
 
 	getNodeInfo := func(n *nodeInfoStreamNode) (phase04NodeInfoSample, time.Duration, error) {
