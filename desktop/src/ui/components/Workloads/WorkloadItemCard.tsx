@@ -9,6 +9,7 @@ import { workloadCancelRequest, workloadExecutionNodeId } from '@/shared/utils/w
 import { useErrorsStore } from '@/ui/stores/errors.store'
 import { useNodesStore } from '@/ui/stores/nodes.store'
 import { useClusterInvitationsStore } from '@/ui/stores/cluster-invitations.store'
+import { shownNodeName } from '@/ui/utils/node-name-labels'
 import { WORKLOAD_COLOR_MAP } from '@/ui/constants/colors'
 import { modelPrimaryLabel } from '@/ui/utils/model-identity-label'
 import { useEngineModelsStore } from '@/ui/stores/engine-models.store'
@@ -102,16 +103,6 @@ function WorkloadCancelActions({ workload }: { workload: Workload }) {
                 Cancel and run on another device
             </Button>
         </Flex>
-    )
-}
-
-function shownNodeName(
-    nodes: ReturnType<typeof useNodesStore.getState>['nodes'],
-    members: ReturnType<typeof useClusterInvitationsStore.getState>['members'],
-    nodeId: string
-): string | undefined {
-    return (
-        nodes.get(nodeId)?.name || members.find(member => member.nodeUuid === nodeId)?.displayName
     )
 }
 

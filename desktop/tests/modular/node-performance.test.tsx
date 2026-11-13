@@ -9,6 +9,8 @@ import type {
 } from '@/shared/types/performance'
 import NodePerformance from '@/ui/components/NodeList/NodePerformance'
 import { useMetricsStore } from '@/ui/stores/metrics.store'
+import { useNodesStore } from '@/ui/stores/nodes.store'
+import { useClusterInvitationsStore } from '@/ui/stores/cluster-invitations.store'
 
 vi.mock('@/ui/stores/metrics.store', async importOriginal => {
     const actual = await importOriginal<typeof import('@/ui/stores/metrics.store')>()
@@ -18,6 +20,32 @@ vi.mock('@/ui/stores/metrics.store', async importOriginal => {
             <T,>(selector: (state: ReturnType<typeof useMetricsStore.getState>) => T): T =>
                 selector(actual.useMetricsStore.getState()),
             actual.useMetricsStore
+        )
+    }
+})
+
+// Server rendering reads a store's initial state; read the live state instead.
+vi.mock('@/ui/stores/nodes.store', async importOriginal => {
+    const actual = await importOriginal<typeof import('@/ui/stores/nodes.store')>()
+    return {
+        ...actual,
+        useNodesStore: Object.assign(
+            <T,>(selector: (state: ReturnType<typeof useNodesStore.getState>) => T): T =>
+                selector(actual.useNodesStore.getState()),
+            actual.useNodesStore
+        )
+    }
+})
+
+vi.mock('@/ui/stores/cluster-invitations.store', async importOriginal => {
+    const actual = await importOriginal<typeof import('@/ui/stores/cluster-invitations.store')>()
+    return {
+        ...actual,
+        useClusterInvitationsStore: Object.assign(
+            <T,>(
+                selector: (state: ReturnType<typeof useClusterInvitationsStore.getState>) => T
+            ): T => selector(actual.useClusterInvitationsStore.getState()),
+            actual.useClusterInvitationsStore
         )
     }
 })
@@ -104,6 +132,8 @@ beforeEach(() => {
 
 afterEach(() => {
     useMetricsStore.getState().clearAll()
+    useNodesStore.setState({ nodes: new Map() })
+    useClusterInvitationsStore.setState({ members: [] })
 })
 
 function render(performanceData?: NodePerformanceData): void {
@@ -132,12 +162,43 @@ function cells(label: string): string[] {
 }
 
 describe('measured run performance', () => {
+    it('names measuring and source hosts and shows ages as time ago', () => {
+        useNodesStore.setState({
+            nodes: new Map([['source-one', { ...node, id: 'source-one', name: 'MSI' }]])
+        })
+        useClusterInvitationsStore.setState({
+            members: [
+                {
+                    nodeUuid: 'source-two',
+                    name: 'Joes',
+                    displayName: 'Joes',
+                    ipAddress: '',
+                    port: 0,
+                    clusterId: 'cluster-one',
+                    state: 'member',
+                    joinedAt: 1,
+                    lastSeen: null
+                }
+            ]
+        })
+        const offline = entry()
+        offline.key.host = 'source-two'
+        offline.oldestAgeMs = 90_000
+        const data = performance([entry(), offline])
+        data.lastSeenAgeMs = 26_638
+        render(data)
+        expect(text()).toContain('Measuring host: MSI · Last seen: 26 seconds ago')
+        expect(text()).toContain('Source host: MSI · Profile: fp-one')
+        expect(text()).toContain('Source host: Joes · Profile: fp-one')
+        expect(text()).toContain('Newest sample: just now · Oldest sample: 1 minute ago')
+    })
+
     it('shows an explicit unknown empty state without hardware history', () => {
         render()
         expect(markup).toContain('aria-label="Measured run performance"')
         expect(text()).toContain('Measured runs · Unknown')
         expect(text()).toContain('No measured runs reported for this node.')
-        expect(text()).toContain('Last seen age: -- ms')
+        expect(text()).toContain('Last seen: --')
         expect(text()).toContain('No metrics yet')
         expect(text()).toContain('Test GPU')
         expect(text()).toContain('-- / 1 KB')
@@ -294,9 +355,9 @@ describe('measured run performance', () => {
         expect(text()).toContain('Engine: llamacpp-custom · Model: model-one')
         expect(text()).toContain('Source host: source-one · Profile: fp-one')
         expect(text()).toContain('Family: llamacpp · Quantization: Q4_K_M · Context tokens: 8192')
-        expect(text()).toContain('Last seen age: 100 ms')
+        expect(text()).toContain('Last seen: just now')
         expect(text()).toContain(
-            'Newest sample age: 1234 ms · Oldest sample age: 4567 ms · Clock uncertain'
+            'Newest sample: just now · Oldest sample: just now · Clock uncertain'
         )
         expect(text()).toContain(
             'Samples: 8 · Completed: 6 · Failed: 1 · Cancelled: 1 · Protocol incomplete: 3'

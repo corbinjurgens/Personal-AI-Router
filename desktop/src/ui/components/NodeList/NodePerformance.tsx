@@ -13,12 +13,20 @@ import type {
 } from '@/shared/types/performance'
 import { useMetricsStore } from '@/ui/stores/metrics.store'
 import { getGpuColor, getVramColor } from '@/ui/utils/colors'
-import { formatBytes } from '@/ui/utils/formatters'
+import { formatBytes, formatRelativeTime } from '@/ui/utils/formatters'
+import { useNodesStore } from '@/ui/stores/nodes.store'
+import { useClusterInvitationsStore } from '@/ui/stores/cluster-invitations.store'
+import { shownNodeName } from '@/ui/utils/node-name-labels'
 import { CHART_COLORS } from '@/ui/constants/colors'
 import { buildPerformanceHardwareInfo } from '@/ui/utils/performance-hardware-info'
 
 function measurement(value: number | null | undefined): string {
     return value == null ? '--' : Number.isInteger(value) ? String(value) : value.toFixed(2)
+}
+
+/** A reported age in milliseconds, shown as how long ago it was. */
+function ago(ageMs: number | null | undefined): string {
+    return ageMs == null ? '--' : formatRelativeTime(Date.now() - ageMs)
 }
 
 function latencyRow(
@@ -38,7 +46,13 @@ function latencyRow(
     }
 }
 
-function MeasuredProfile({ entry }: { entry: PerformanceEntry }) {
+function MeasuredProfile({
+    entry,
+    hostName
+}: {
+    entry: PerformanceEntry
+    hostName: (nodeId: string) => string
+}) {
     const decode = entry.engineDecode ?? entry.decode
     return (
         <Stack gap="density-md" className="min-w-0 border-t border-base pt-3">
@@ -46,7 +60,7 @@ function MeasuredProfile({ entry }: { entry: PerformanceEntry }) {
                 Engine: {entry.key.engine} · Model: {entry.key.model}
             </Text>
             <Text kind="body/regular/sm" className="[overflow-wrap:anywhere]">
-                Source host: {entry.key.host} · Profile: {entry.key.fingerprint}
+                Source host: {hostName(entry.key.host)} · Profile: {entry.key.fingerprint}
             </Text>
             <Text kind="body/regular/sm" className="[overflow-wrap:anywhere]">
                 Family: {entry.profile.engineFamily || '--'} · Quantization:{' '}
@@ -54,8 +68,7 @@ function MeasuredProfile({ entry }: { entry: PerformanceEntry }) {
                 {measurement(entry.profile.contextTokens)}
             </Text>
             <Text kind="body/regular/sm">
-                Newest sample age: {measurement(entry.newestAgeMs)} ms · Oldest sample age:{' '}
-                {measurement(entry.oldestAgeMs)} ms
+                Newest sample: {ago(entry.newestAgeMs)} · Oldest sample: {ago(entry.oldestAgeMs)}
                 {entry.clockUncertain ? ' · Clock uncertain' : ''}
             </Text>
             <Text kind="body/regular/sm">
@@ -118,13 +131,17 @@ function MeasuredRuns({ performance }: { performance: NodePerformanceData | unde
               ? 'Stale'
               : 'Unknown'
     const entries = performance?.summary?.entries ?? []
+    const nodes = useNodesStore(state => state.nodes)
+    const members = useClusterInvitationsStore(state => state.members)
+    const hostName = (nodeId: string) => shownNodeName(nodes, members, nodeId) || nodeId
 
     return (
         <Stack gap="density-md" className="w-full min-w-0" aria-label="Measured run performance">
             <Text kind="body/semibold/sm">Measured runs · {status}</Text>
             <Text kind="body/regular/sm" className="text-subtle-color [overflow-wrap:anywhere]">
-                Measuring host: {performance?.measuringHost || '--'} · Last seen age:{' '}
-                {measurement(performance?.lastSeenAgeMs)} ms
+                Measuring host:{' '}
+                {performance?.measuringHost ? hostName(performance.measuringHost) : '--'} · Last
+                seen: {ago(performance?.lastSeenAgeMs)}
             </Text>
             {entries.length === 0 ? (
                 <Text kind="body/regular/sm" className="text-subtle-color">
@@ -140,6 +157,7 @@ function MeasuredRuns({ performance }: { performance: NodePerformanceData | unde
                             entry.key.fingerprint
                         ])}
                         entry={entry}
+                        hostName={hostName}
                     />
                 ))
             )}

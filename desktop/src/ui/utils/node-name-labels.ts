@@ -1,7 +1,22 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+import type { ClusterNode } from '@/shared/types/cluster'
 import type { NodeItem } from '@/shared/types/nodes'
+
+/**
+ * A node UUID's shown name: the discovered node's, else the cluster member's,
+ * which keeps a name for a node that is offline and so missing from discovery.
+ */
+export function shownNodeName(
+    nodes: ReadonlyMap<string, NodeItem>,
+    members: readonly ClusterNode[],
+    nodeId: string
+): string | undefined {
+    return (
+        nodes.get(nodeId)?.name || members.find(member => member.nodeUuid === nodeId)?.displayName
+    )
+}
 
 function shortId(id: string): string {
     return id.slice(0, 8)
