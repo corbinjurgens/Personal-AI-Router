@@ -382,6 +382,7 @@
 | `engine:models-changed` | request (we call) | ✅ yes |
 | `engine:pull-progress` | request (we call) | ✅ yes |
 | `engine:ready` | request (we call) | ✅ yes |
+| `engine:remote-installed-changed` | request (we call) | ✅ yes |
 | `engine:remote-progress` | request (we call) | ✅ yes |
 | `engine:settings-changed` | request (we call) | ✅ yes |
 | `engine:settings-disconnected` | request (we call) | ✅ yes |
