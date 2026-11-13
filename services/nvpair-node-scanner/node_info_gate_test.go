@@ -349,3 +349,60 @@ func TestScannerDiscoveringPeerRouteRemainsTransient(t *testing.T) {
 		t.Fatal("transient route survived admission replacement")
 	}
 }
+
+func TestPeerStreamClientHasNoTimeoutAndRetiresWithRoute(t *testing.T) {
+	t.Run("generation change", func(t *testing.T) {
+		d, claim := newPeerServicesScanner(t)
+		if !d.acceptPeerServices(claim) {
+			t.Fatal("initial authenticated snapshot rejected")
+		}
+		client, current, closeClient, ok := d.peerStreamClient("peer", "peer", "192.0.2.40", 14311, noderec.ServiceCluster)
+		if !ok {
+			t.Fatal("stream client unavailable for an admitted directory route")
+		}
+		defer closeClient()
+		if client.Timeout != 0 {
+			t.Fatalf("stream client total timeout = %s, want none", client.Timeout)
+		}
+		if !current() {
+			t.Fatal("fresh stream route is not current")
+		}
+		if d.hasPeerClient("peer") {
+			t.Fatal("stream client was cached with the request clients")
+		}
+		claim.Sequence++
+		claim.Descriptor.Services = []noderec.PeerService{}
+		if !d.acceptPeerServices(claim) {
+			t.Fatal("service withdrawal rejected")
+		}
+		if current() {
+			t.Fatal("stream route stayed current after the directory generation changed")
+		}
+	})
+	t.Run("incarnation change", func(t *testing.T) {
+		d, claim := newPeerServicesScanner(t)
+		if !d.acceptPeerServices(claim) {
+			t.Fatal("initial authenticated snapshot rejected")
+		}
+		_, current, closeClient, ok := d.peerStreamClient("peer", "peer", "192.0.2.40", 14311, noderec.ServiceCluster)
+		if !ok || !current() {
+			t.Fatal("initial stream route unavailable")
+		}
+		defer closeClient()
+		writeScannerAdmissionPin(t, d.clusterDir, "peer", "cluster", 2)
+		d.mesh.Refresh()
+		if current() {
+			t.Fatal("stream route stayed current after readmission changed the incarnation")
+		}
+	})
+	t.Run("not directory backed", func(t *testing.T) {
+		d, claim := newPeerServicesScanner(t)
+		if !d.acceptPeerServices(claim) {
+			t.Fatal("initial authenticated snapshot rejected")
+		}
+		d.dir.remove("peer")
+		if _, _, _, ok := d.peerStreamClient("peer", "peer", "192.0.2.40", 14311, noderec.ServiceCluster); ok {
+			t.Fatal("stream client admitted a node outside the directory")
+		}
+	})
+}
