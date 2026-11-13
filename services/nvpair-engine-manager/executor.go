@@ -165,10 +165,13 @@ type Executor struct {
 	residentParent      func(context.Context, nodepolicy.DispatchResidentParams) error
 	residents           residentOperations
 	residentGeneration  atomic.Uint64
-	reg                 *Registry
-	reporter            *Reporter
-	emit                func(method string, params any)
-	client              *http.Client
+	// modelsEvents publishes the model inventory to pinned peers' streams
+	// (models_stream.go).
+	modelsEvents *modelsPublisher
+	reg          *Registry
+	reporter     *Reporter
+	emit         func(method string, params any)
+	client       *http.Client
 	// budgetClients holds one engine client per operation response budget a
 	// manifest declares (OperationBinding.ResponseTimeoutS), created on first
 	// use and reused so its connections are too. Guarded by budgetMu.
@@ -269,6 +272,7 @@ func NewExecutor(reg *Registry, reporter *Reporter, emit func(string, any), base
 		pullCleanupTimeout:  5 * time.Second,
 		loadedPollInterval:  defaultLoadedPollSeconds * time.Second,
 		loadedPoke:          make(chan struct{}, 1),
+		modelsEvents:        newModelsPublisher(),
 		engines:             make(map[string]*engineState),
 		stopOnly:            make(map[string]*engineState),
 	}
