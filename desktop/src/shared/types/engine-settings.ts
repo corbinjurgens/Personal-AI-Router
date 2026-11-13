@@ -86,6 +86,13 @@ export interface EngineSettingsTarget {
     engine: EngineManagerName
 }
 
+/** The broker's answer to resetting an invalid saved settings record. */
+export interface EngineSettingsRecordReset {
+    engine: EngineManagerName
+    /** File on the device that keeps the discarded record. */
+    backup: string
+}
+
 export interface EngineSettingsRequest extends EngineSettingsTarget {
     /** Existing engine counter, restricted to nonnegative safe JSON integers. */
     expectedRevision: number

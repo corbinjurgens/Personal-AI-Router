@@ -191,10 +191,13 @@ type Broker struct {
 	// Nil until complete, side-effect-free owner evidence can be supplied.
 	buildApplyOwners buildApplyOwners
 	// Only live install continuations are retained, under engineConfigMu.
-	engineSettingsLoaded   bool
-	engineSettingsError    error
-	engineSettingsEpoch    string
-	engineSettings         map[string]*engineSettingsRecord
+	engineSettingsLoaded bool
+	engineSettingsError  error
+	engineSettingsEpoch  string
+	engineSettings       map[string]*engineSettingsRecord
+	// Journal entries that failed to decode or validate, kept as read so
+	// every save preserves them until the owner resets that engine.
+	engineSettingsInvalid  map[string]invalidEngineSettings
 	engineSettingsReplacer durablefile.Replacer
 	// Assigned under engineConfigMu; awaited and closed without that mutex.
 	settingsPublicationTail <-chan struct{}

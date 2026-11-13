@@ -696,7 +696,7 @@ func (b *Broker) readCachedBuildApplyOwners(ctx context.Context) (buildApplyOwne
 	if !buildApplyReadLock(ctx, &b.engineConfigMu) {
 		return buildApplyOwnerRead{}, false
 	}
-	settingsKnown := b.engineSettingsLoaded && b.engineSettingsError == nil && b.engineSettingsEpoch != ""
+	settingsKnown := b.engineSettingsLoaded && b.engineSettingsError == nil && b.engineSettingsEpoch != "" && len(b.engineSettingsInvalid) == 0
 	records := make(map[string]*engineSettingsRecord, len(b.engineSettings))
 	capture.settingsRecords = make(map[string]bool, len(b.engineSettings))
 	semanticSettings := map[string]settings.Config{}

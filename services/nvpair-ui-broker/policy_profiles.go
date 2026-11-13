@@ -108,6 +108,15 @@ func (b *Broker) prepareProfileLoadsLocked(ctx context.Context, raw json.RawMess
 		if !engines.ValidRoutingID(engine) {
 			return nil, nil, &invalidParamsError{fmt.Errorf("unknown engine %q", engine)}
 		}
+		// Profiles on an engine whose saved settings are invalid have no load
+		// authority. Saving them unchanged is allowed; changing them is refused.
+		// Profiles on other engines are unaffected.
+		if err := b.engineSettingsEntryErrorLocked(engine); err != nil {
+			if !profilesUnchangedForEngine(fields, stored, engine) {
+				return nil, nil, err
+			}
+			continue
+		}
 		if record := b.engineSettings[engine]; record != nil {
 			if record.Snapshot.Engine != engine || record.Snapshot.Revision == 0 {
 				return nil, nil, fmt.Errorf("profile engine %q snapshot authority is invalid", engine)
@@ -169,6 +178,47 @@ func (b *Broker) prepareProfileLoadsLocked(ctx context.Context, raw json.RawMess
 		return nil, nil, err
 	}
 	return loads, current, nil
+}
+
+// profilesUnchangedForEngine reports whether a policy document leaves the
+// stored profiles on one engine as they are: same keys, models, display names
+// and context.
+func profilesUnchangedForEngine(fields map[string]json.RawMessage, stored nodepolicy.Policy, engine string) bool {
+	type selector struct {
+		Key           string `json:"key"`
+		Engine        string `json:"engine"`
+		Model         string `json:"model"`
+		DisplayName   string `json:"displayName"`
+		ContextTokens int    `json:"contextTokens"`
+	}
+	project := func(profiles []selector) []selector {
+		out := []selector{}
+		for _, profile := range profiles {
+			if profile.Engine == engine {
+				out = append(out, profile)
+			}
+		}
+		slices.SortFunc(out, func(a, b selector) int { return strings.Compare(a.Key, b.Key) })
+		return out
+	}
+	var before []selector
+	for _, profile := range stored.Profiles {
+		before = append(before, selector{profile.Key, profile.Engine, profile.Model, profile.DisplayName, profile.ContextTokens})
+	}
+	// A document without a profiles field saves no profiles.
+	var after []selector
+	for field, value := range fields {
+		if strings.EqualFold(field, "profiles") && json.Unmarshal(value, &after) != nil {
+			return false
+		}
+	}
+	// Clients may omit the managed context; omitted means unchanged.
+	return slices.EqualFunc(project(after), project(before), func(a, b selector) bool {
+		if a.ContextTokens == 0 {
+			a.ContextTokens = b.ContextTokens
+		}
+		return a == b
+	})
 }
 
 // normalizeRawPolicyProfiles runs before Parse or MergePeerSet validates the

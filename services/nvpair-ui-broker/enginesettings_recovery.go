@@ -64,7 +64,7 @@ func (b *Broker) explicitEngineSettings(engine string) (settings.Config, bool) {
 }
 
 func (b *Broker) explicitEngineSettingsLocked(engine string) (settings.Config, bool) {
-	if err := b.loadEngineSettingsLocked(); err != nil {
+	if err := b.loadEngineSettingsLocked(); err != nil || b.engineSettingsEntryErrorLocked(engine) != nil {
 		return settings.Config{}, false
 	}
 	if record := b.engineSettings[engine]; record != nil && record.Explicit {
@@ -76,6 +76,9 @@ func (b *Broker) explicitEngineSettingsLocked(engine string) (settings.Config, b
 func (b *Broker) prepareExplicitEngineSettings(engine string) bool {
 	b.engineConfigMu.Lock()
 	loadErr := b.loadEngineSettingsLocked()
+	if loadErr == nil {
+		loadErr = b.engineSettingsEntryErrorLocked(engine)
+	}
 	b.engineConfigMu.Unlock()
 	if loadErr != nil {
 		return true
@@ -229,6 +232,12 @@ func (b *Broker) recoverEngineSettings() bool {
 		if b.modelSettingsPendingLocked(engine) {
 			return false
 		}
+	}
+	// An invalid entry that may hold model work is pending work of unknown
+	// state; resetting it runs the restoration this skips.
+	if err := b.invalidModelSettingsLocked(); err != nil {
+		slog.Error("installed-engine restoration blocked by an invalid settings journal entry", "err", err)
+		return false
 	}
 	return true
 }

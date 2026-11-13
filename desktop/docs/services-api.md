@@ -457,6 +457,7 @@
 | `engine:load-model` | request (we call) | ✅ yes |
 | `engine:models-changed` | request (we call) | ✅ yes |
 | `engine:preview-settings` | request (we call) | ✅ yes |
+| `engine:reset-settings-record` | request (we call) | ✅ yes |
 | `engine:set-port` | request (we call) | ⚠️ not called |
 | `engine:set-stated-memory` | request (we call) | ✅ yes |
 | `engine:status` | request (we call) | ✅ yes |

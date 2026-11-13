@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -101,35 +102,32 @@ func (b *Broker) loadEngineSettingsLocked() error {
 		b.engineSettings = make(map[string]*engineSettingsRecord)
 		return nil
 	}
-	var records map[string]*engineSettingsRecord
+	var entries map[string]json.RawMessage
 	if err == nil {
-		err = json.Unmarshal(data, &records)
+		err = json.Unmarshal(data, &entries)
 	}
-	if err != nil || records == nil {
+	if err != nil || entries == nil {
 		b.engineSettingsError = fmt.Errorf("settings operation journal could not be read; existing settings were preserved")
 		return b.engineSettingsError
 	}
+	// A bad entry blocks only its own engine. Its content stays in the journal;
+	// an unfinished model operation it may hold keeps the node-wide fences.
+	records := make(map[string]*engineSettingsRecord, len(entries))
+	invalid := make(map[string]invalidEngineSettings)
+	for engine, raw := range entries {
+		record, err := decodeStoredEngineSettings(raw)
+		if err != nil {
+			prior := previous[engine]
+			model := storedModelOperationPresent(raw) || prior != nil && prior.Model != nil && prior.Model.Stage != "completed"
+			invalid[engine] = invalidEngineSettings{Raw: raw, Cause: err.Error(), Model: model}
+			slog.Error("settings journal entry is invalid; settings for this engine are blocked until it is reset", "engine", engine, "model", model, "err", err)
+			continue
+		}
+		records[engine] = record
+	}
 	b.engineSettings = records
-	// An invalid replacement cannot erase a model reservation already known
-	// in this process. The error blocks writes; this does not merge stores.
-	defer func() {
-		if b.engineSettingsError != nil {
-			for engine, record := range previous {
-				if record != nil && record.Model != nil && record.Model.Stage != "completed" {
-					b.engineSettings[engine] = record
-				}
-			}
-		}
-	}()
+	b.engineSettingsInvalid = invalid
 	for _, record := range b.engineSettings {
-		if record == nil {
-			b.engineSettingsError = fmt.Errorf("invalid settings journal")
-			return b.engineSettingsError
-		}
-		if err := validateStoredModelSettings(record); err != nil {
-			b.engineSettingsError = fmt.Errorf("invalid model settings journal: %w", err)
-			return b.engineSettingsError
-		}
 		record.Snapshot.NodeID = b.nodeID
 		record.Snapshot.Epoch = b.engineSettingsEpoch
 		record.Snapshot.Sequence = 0
@@ -174,11 +172,31 @@ func (b *Broker) saveEngineSettingsLocked() error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	data, err := json.Marshal(b.engineSettings)
+	data, err := b.engineSettingsDocumentLocked()
 	if err != nil {
 		return err
 	}
 	return b.engineSettingsReplacer.WriteFile(path, data, 0o600)
+}
+
+// engineSettingsDocumentLocked is the complete journal: every valid record
+// plus every invalid entry with the content it was read with.
+func (b *Broker) engineSettingsDocumentLocked() ([]byte, error) {
+	if len(b.engineSettingsInvalid) == 0 {
+		return json.Marshal(b.engineSettings)
+	}
+	document := make(map[string]json.RawMessage, len(b.engineSettings)+len(b.engineSettingsInvalid))
+	for engine, record := range b.engineSettings {
+		data, err := json.Marshal(record)
+		if err != nil {
+			return nil, err
+		}
+		document[engine] = data
+	}
+	for engine, entry := range b.engineSettingsInvalid {
+		document[engine] = entry.Raw
+	}
+	return json.Marshal(document)
 }
 
 func (b *Broker) settingsWorkerCall(ctx context.Context, method string, params any, target any) error {
@@ -249,12 +267,17 @@ func (b *Broker) settingsSnapshotLocked(ctx context.Context, engine string) (set
 // Build initialization, migration and drift readback on a private record.
 // Apply must finish worker IO before it can atomically authorize and save.
 func (b *Broker) prepareSettingsSnapshotLocked(ctx context.Context, engine string) (*engineSettingsRecord, bool, error) {
+	if err := b.loadEngineSettingsLocked(); err != nil {
+		return nil, false, err
+	}
+	// Before the support check, so an entry left by an engine that is no
+	// longer fronted still reports the reset route.
+	if err := b.engineSettingsEntryErrorLocked(engine); err != nil {
+		return nil, false, err
+	}
 	profile, ok := b.frontedEngineProfile(engine)
 	if !ok {
 		return nil, false, fmt.Errorf("this engine does not support settings")
-	}
-	if err := b.loadEngineSettingsLocked(); err != nil {
-		return nil, false, err
 	}
 	var launch settings.LaunchState
 	if err := b.settingsWorkerCall(ctx, "engine:get-launch", map[string]string{"engine": engine}, &launch); err != nil {
@@ -755,6 +778,9 @@ func (b *Broker) applyEngineSettings(ctx context.Context, p settings.Request, ca
 		return settingsReceipt{}, fmt.Errorf("a request identifier is required")
 	}
 	if err := b.loadEngineSettingsLocked(); err != nil {
+		return settingsReceipt{}, err
+	}
+	if err := b.engineSettingsEntryErrorLocked(p.Engine); err != nil {
 		return settingsReceipt{}, err
 	}
 	if b.modelSettingsPendingLocked(p.Engine) {

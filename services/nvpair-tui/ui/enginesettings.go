@@ -73,10 +73,42 @@ const (
 	resolutionLaunch = "launch"
 )
 
-// engineSettingsMsg carries a fetched snapshot.
+// engineSettingsMsg carries a fetched snapshot. engine names the engine a
+// failed read was for.
 type engineSettingsMsg struct {
 	snapshot enginesettings.Snapshot
+	engine   string
 	err      error
+}
+
+// settingsRecordInvalidCode is the broker's refusal for an engine whose saved
+// settings record is invalid; engine:reset-settings-record recovers it.
+const settingsRecordInvalidCode = -32016
+
+// settingsRecordResetMsg is the outcome of discarding an invalid saved
+// settings record. backup names the file that keeps the discarded entry.
+type settingsRecordResetMsg struct {
+	engine string
+	backup string
+	err    error
+}
+
+// resetSettingsRecordCmd discards this machine's invalid saved settings record
+// for one engine. The broker backs it up first and changes no native settings.
+func resetSettingsRecordCmd(client *rpc.Client, engine string) tea.Cmd {
+	return call(client, "engine:reset-settings-record", map[string]string{"engine": engine},
+		func(msg *rpc.Message, err error) tea.Msg {
+			if err != nil {
+				return settingsRecordResetMsg{engine: engine, err: err}
+			}
+			var result struct {
+				Backup string `json:"backup"`
+			}
+			if derr := decodeParams(msg.Result, &result); derr != nil {
+				return settingsRecordResetMsg{engine: engine, err: derr}
+			}
+			return settingsRecordResetMsg{engine: engine, backup: result.Backup}
+		})
 }
 
 // enginePreviewMsg carries a validated draft, still uncommitted.
@@ -103,11 +135,11 @@ func getEngineSettingsCmd(client *rpc.Client, nodeID, engine string) tea.Cmd {
 		enginesettings.Request{NodeID: nodeID, Engine: engine},
 		func(msg *rpc.Message, err error) tea.Msg {
 			if err != nil {
-				return engineSettingsMsg{err: err}
+				return engineSettingsMsg{engine: engine, err: err}
 			}
 			var snap enginesettings.Snapshot
 			if derr := decodeParams(msg.Result, &snap); derr != nil {
-				return engineSettingsMsg{err: derr}
+				return engineSettingsMsg{engine: engine, err: derr}
 			}
 			return engineSettingsMsg{snapshot: snap}
 		})

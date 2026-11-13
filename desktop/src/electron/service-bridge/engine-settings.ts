@@ -6,6 +6,7 @@ import type {
     EngineSettingsSnapshot,
     EngineSettingsPreview,
     EngineSettingsReceipt,
+    EngineSettingsRecordReset,
     EngineSettingsTarget
 } from '@/shared/types/engine-settings'
 import type { EngineServingConfig, EngineServingReadback } from '@/shared/types/engine-settings'
@@ -2405,6 +2406,15 @@ export function parseEngineSettingsPreview(value: JsonValue | undefined): Engine
               }
             : {})
     }
+}
+export function parseEngineSettingsRecordReset(
+    value: JsonValue | undefined
+): EngineSettingsRecordReset {
+    payload(value)
+    const row = object(value)
+    const engine = row.engine
+    if (!isSettingsEngine(engine)) throw new Error('Invalid settings record reset response.')
+    return { engine, backup: boundedText(row.backup, 4096, true) }
 }
 export function parseEngineSettingsReceipt(value: JsonValue | undefined): EngineSettingsReceipt {
     payload(value)

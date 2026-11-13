@@ -261,6 +261,8 @@ func (b *Broker) handleMessage(msg *Message) {
 		go b.handleStatedMemory(msg)
 	case "engine:get-settings", "engine:preview-settings", "engine:apply-settings":
 		go b.handleEngineSettings(msg)
+	case "engine:reset-settings-record":
+		go b.handleResetSettingsRecord(msg)
 	case "ping":
 		if err := b.codec.Respond(msg.ID, PingResult{
 			Pong:     true,

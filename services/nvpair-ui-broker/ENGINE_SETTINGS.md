@@ -243,13 +243,44 @@ Pause of either origin always wins over completion and recovery. This recoverabl
 sequence makes no ACID, qualification or native-hardware acceptance claim.
 
 An unreadable ordinary settings journal retains the existing installed-engine
-restoration and proxy-policy replay behavior, with its error reported. A
-recognizable unresolved or invalid model subrecord, or unresolved model reservation
-already known in memory, still blocks that restoration/replay on a load error.
-Valid completed model history does not turn an ordinary journal error into a new
-reservation. Fully unrecognizable
+restoration and proxy-policy replay behavior, with its error reported. An unresolved
+model reservation already known in memory still blocks that restoration/replay on a
+load error. Valid completed model history does not turn an ordinary journal error
+into a new reservation. Fully unrecognizable
 bytes cannot establish whether model work once existed; this fundamental ambiguity
 is reported as unknown, rather than asserted to be a model-free journal.
+
+A journal that parses as an object but holds an entry that does not decode or
+fails stored model validation blocks only that entry's engine. The broker keeps
+the entry's content (re-encoded as compact JSON) and writes it back on every
+journal save; other engines load and save normally. Get, preview, apply, model
+changes and fresh supersession for that engine are refused with
+`codeSettingsRecordInvalid` (`-32016`) and a message naming the engine and cause.
+A policy save may keep that engine's stored profiles unchanged (same keys, models,
+display names and context; an omitted context counts as unchanged) but is refused
+with the same code if it adds, removes or changes them. Any invalid entry makes
+build-apply settings evidence incomplete.
+
+An entry whose `model` subrecord does not read as `stage: "completed"`, or any
+entry the broker cannot read far enough to tell, may hold unfinished model work.
+Until it is reset it counts as pending model work for the node-wide fences: it
+holds the policy reservation (ordinary policy saves and model changes on every
+engine are refused with the same code), drains its engine and withdraws its
+advertisement, and blocks diagnostics and installed-engine restoration at
+startup.
+
+`engine:reset-settings-record {engine, nodeId?}` is local-only; another node's
+`nodeId` is refused. It requires an invalid entry for `engine` (otherwise
+`-32602`), writes `{engine, cause, resetAt, entry}` to
+`engine-settings-operations.<engine>.<UTC stamp>.invalid.json` beside the journal
+through the durable file replacement helper, removes the entry and saves the
+journal. A failed backup or journal save keeps the entry. Success returns
+`{engine, backup}`, releases the entry's drain and, when nothing else holds model
+work and facade startup has finished, runs the installed-engine restoration that
+startup skipped. Native engine
+configuration and node policy are not changed; the next settings read starts a
+fresh record from the engine's current native configuration. The desktop settings
+section and the terminal interface offer this reset only for this device.
 
 The broker owns combined settings operations for built-in and fronted descriptor engines.
 Each node owns its own configuration. `nodeId` selects a discovered,
@@ -405,7 +436,8 @@ Acceptance is written and synced before component changes. Interrupted applying
 records replay before enabled-engine restoration. Explicit settings override
 automatic facade defaults on later startup. Unreadable journal data is preserved
 and suppresses automatic component rewrites. Unreadable data blocks automatic
-recovery. The journal retains up to 256 terminal receipts
+recovery; an invalid entry blocks it for its own engine only, as described in the
+model configuration contract. The journal retains up to 256 terminal receipts
 per engine; evicted retries must still pass the original expected revision.
 
 ## Paired transport

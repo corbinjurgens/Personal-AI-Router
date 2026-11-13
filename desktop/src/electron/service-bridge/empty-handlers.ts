@@ -24,6 +24,7 @@ import {
     parseEngineSettings,
     parseEngineSettingsPreview,
     parseEngineSettingsReceipt,
+    parseEngineSettingsRecordReset,
     parseInspectModel
 } from './engine-settings'
 import {
@@ -994,6 +995,18 @@ const EMPTY_SERVICE_BRIDGE_HANDLERS: BridgeHandlerMap = {
                 MODULAR_ENGINE_LIFECYCLE_CALL_TIMEOUT_MS
             )
         ),
+    'engines:reset-settings-record': async payload => {
+        if (!payload) throw new Error('Missing settings record target')
+        const result = parseEngineSettingsRecordReset(
+            await getModularSupervisor().callProcess('broker', 'engine:reset-settings-record', {
+                nodeId: payload.nodeId,
+                engine: payload.engine
+            })
+        )
+        if (result.engine !== payload.engine)
+            throw new Error('Settings record reset target identity mismatch.')
+        return result
+    },
     'engine:command': payload => handleEngineCommand(payload),
     'engine:search-hub': payload =>
         payload ? getEngineHubModels(payload.engineType, payload.query) : { models: [] },

@@ -23,6 +23,7 @@ import type { InspectModelResult, ModelChange } from '@/shared/types/model-confi
 import { useNodeConfigurationStore } from '@/ui/stores/node-configuration.store'
 import { EngineSettingsSection } from '@/ui/components/BackendRow/EngineSettingsSection'
 import { useConnectionStore } from '@/ui/stores/connection.store'
+import { ServiceCallError } from '@/ui/api/service-transport'
 import { redactSensitiveLogText } from '@/electron/redact-log'
 import { useEngineStatusStore } from '@/ui/stores/engine-status.store'
 import { getModularBridgeState } from '@/electron/service-bridge/modular-state'
@@ -1306,5 +1307,37 @@ describe('launch text redaction', () => {
         expect(redactSensitiveLogText('plain text with no json at all')).toBe(
             'plain text with no json at all'
         )
+    })
+})
+
+describe('invalid saved settings record', () => {
+    const local = { nodeId: 'local-reset', engine: 'llamacpp' } as const
+
+    it('offers a reset only for the invalid-record refusal, then reads afresh', async () => {
+        const get = vi
+            .fn()
+            .mockRejectedValueOnce(new ServiceCallError('saved settings are invalid', -32016))
+            .mockRejectedValueOnce(new ServiceCallError('engine manager unavailable', -32000))
+            .mockResolvedValue({ ...baseline, ...local })
+        const reset = vi.fn().mockResolvedValue({ engine: 'llamacpp', backup: 'backup.json' })
+        Object.defineProperty(window, 'pairApi', {
+            configurable: true,
+            value: { engines: { getSettings: get, resetSettingsRecord: reset } }
+        })
+        useEngineSettingsStore.setState({ entries: {}, modelDrafts: {} })
+        const entry = () => useEngineSettingsStore.getState().entries[engineSettingsKey(local)]
+
+        await useEngineSettingsStore.getState().reload(local)
+        expect(entry().recordInvalid).toBe(true)
+        await useEngineSettingsStore.getState().reload(local)
+        expect(entry().recordInvalid).toBe(false)
+
+        await expect(useEngineSettingsStore.getState().resetRecord(local)).resolves.toBe(
+            'backup.json'
+        )
+        expect(reset).toHaveBeenCalledExactlyOnceWith(local)
+        expect(entry().recordInvalid).toBeUndefined()
+        expect(entry().unavailable).toBeUndefined()
+        expect(entry().snapshot?.engine).toBe('llamacpp')
     })
 })
