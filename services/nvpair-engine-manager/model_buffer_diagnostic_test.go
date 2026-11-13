@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func modelBufferDiagnosticLogs(t *testing.T) *bytes.Buffer {
@@ -100,6 +101,51 @@ func TestModelBufferCaptureCreationDiagnostics(t *testing.T) {
 	})
 	test("device environment", "device-environment", "unsupported native injection/MIG/MPS environment", func(_ *testing.T, _ *modelBufferTestFixture, _ **llamaServingLaunch, c *launchCommand) {
 		c.Env = map[string]string{"LD_PRELOAD": "private-value"}
+	})
+}
+
+// Creation can be the manager's first full hash of the native build. A CUDA
+// build directory of about 880 MB took seconds, so a fixed 200 ms budget left every run
+// started by a fresh manager without a source identity, and so without samples.
+func TestModelBufferCaptureCreationSourceBudget(t *testing.T) {
+	t.Run("slow native hash still binds the source", func(t *testing.T) {
+		f := newModelBufferTestFixture(t)
+		logs := modelBufferDiagnosticLogs(t)
+		nativeBuildHashes.gate <- struct{}{} // another hash in progress
+		released := make(chan struct{})
+		go func() {
+			time.Sleep(500 * time.Millisecond)
+			<-nativeBuildHashes.gate
+			close(released)
+		}()
+		t.Cleanup(func() { <-released })
+		command := f.load.st.plat.Runtime.servingCommand
+		c := f.load.ex.newModelBufferCapture(f.load.st, "fake", f.capture.prepared, nil, command, context.Background())
+		if c == nil {
+			t.Fatal("capture unavailable")
+		}
+		defer c.retire()
+		if c.sourceID == "" || c.sourceID != f.capture.sourceID || c.buildID != f.capture.buildID {
+			t.Fatalf("source %q build %q, want %q and %q", c.sourceID, c.buildID, f.capture.sourceID, f.capture.buildID)
+		}
+		if logs.Len() != 0 {
+			t.Fatalf("unexpected warning: %s", logs.String())
+		}
+	})
+	t.Run("cancelled start still ends the check", func(t *testing.T) {
+		f := newModelBufferTestFixture(t)
+		logs := modelBufferDiagnosticLogs(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		command := f.load.st.plat.Runtime.servingCommand
+		c := f.load.ex.newModelBufferCapture(f.load.st, "fake", f.capture.prepared, nil, command, ctx)
+		if c != nil {
+			defer c.retire()
+			if c.sourceID != "" {
+				t.Fatal("cancelled start bound a source identity")
+			}
+		}
+		assertModelBufferDiagnostic(t, logs, "runtime-snapshot")
 	})
 }
 

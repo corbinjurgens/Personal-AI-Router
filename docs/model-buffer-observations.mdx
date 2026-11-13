@@ -184,6 +184,21 @@ Pipe completion drains before retirement. This identity is independent of
 serving declarations; an ordinary typed load does not need a ServingConfig.
 Missing observations never weaken serving qualification or latch serving drift.
 
+Before spawn, the capture binds the launch's reviewed native source and build
+identity. That check can be the manager's first full hash of the native build,
+because a launch from a serving declaration compiles without hashing it. It
+therefore runs under the start operation's context with its own bound, not a
+sweep's short bound; once it succeeds, later checks reuse the in-memory hash
+memo. A failed check is not retried within the run, which then records no
+samples until the next start binds again. A serving-declaration launch keeps no
+capture at all; a typed-load launch keeps one without a source identity, whose
+sweeps record `source-unavailable` or `source-changed`. Without matching history,
+Inspect reports `unsupported-build` for that run. A launch with neither typed
+loads nor a serving declaration (for example an operator `--models-preset`, the
+generated source preset or a plain model argument) has no prepared launch or
+frozen estimate inputs. It creates no capture and logs
+`capture-create reason=unprepared` once per start, which is expected.
+
 The existing model sweep supplies public loaded state. Existing non-loading
 props reads are shared; any additional bounded props read is for an already
 positively loaded owned model, with `autoload=false`, the identity-probe header
@@ -201,6 +216,7 @@ Fixed implementation ceilings are:
 | Encoded sample / history file | 64 KiB / 4 MiB |
 | Conservatively charged retained history | 16 MiB |
 | Active child captures / total charged pending capture memory | 64 / 4 MiB |
+| Pre-spawn source and build check | 10 seconds, within the start operation |
 | Input frame / report rows | 64 KiB / 256 |
 | Option entries / diagnostic reason codes | 64 / 16 |
 | Ordinary identifiers and labels | 256 UTF-8 bytes, within closed vocabularies |

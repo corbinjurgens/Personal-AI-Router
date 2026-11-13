@@ -31,6 +31,13 @@ import (
 const modelBufferCaptureBytes = 4 << 20
 const modelBufferChildCharge = 768 << 10
 
+// modelBufferSourceBudget bounds the source and build check made before spawn.
+// It may be the manager's first full hash of the native build: a launch from a
+// serving declaration compiles without one, and an empty source identity
+// leaves the whole run without samples. Later sweeps reuse the in-memory hash
+// memo within their own short budget.
+const modelBufferSourceBudget = 10 * time.Second
+
 // Preserve the existing serving decoder's behavior. Observation evidence has
 // its own exact, duplicate-free allowlist; unrelated props never enter it.
 func modelBufferReadProps(data []byte) modelBufferProps {
@@ -250,7 +257,11 @@ func (e *Executor) newModelBufferCapture(st *engineState, engine string, prepare
 		}
 	}()
 	// File-only verification, never native enumeration or helper execution.
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	parent := context.Background()
+	if len(contexts) > 0 {
+		parent = contexts[0]
+	}
+	ctx, cancel := context.WithTimeout(parent, modelBufferSourceBudget)
 	command, constrainErr := modelConstrainCommand(command, prepared.ModelLoads)
 	var diagnostic modelBufferSourceDiagnostic
 	source, err := modelReviewedNativeSource(ctx, st, command, &diagnostic)
