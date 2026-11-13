@@ -49,8 +49,10 @@ runs:
           shell: bash
           run: echo 'GOTOOLCHAIN=local' >> "$GITHUB_ENV"
 
-        # Must be >= the highest `go` directive across services/*/go.mod, which
-        # GOTOOLCHAIN=local would otherwise refuse to satisfy.
+        # Must equal the `toolchain` directive in every go.mod. GOTOOLCHAIN=local
+        # ignores that directive, so this pin is what keeps CI on the same
+        # patched release the build machines download; build:modular-binaries
+        # fails when they differ.
         #
         # cache-dependency-path is required, not an optimization. setup-go
         # caches by default and looks for the dependency file at the repository
@@ -64,7 +66,7 @@ runs:
         - if: inputs.go == 'true'
           uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
           with:
-              go-version: '1.26.7'
+              go-version: '1.27.4'
               cache-dependency-path: |
                   services/**/go.sum
                   scripts/**/go.sum

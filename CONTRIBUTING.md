@@ -70,8 +70,9 @@ git clone https://github.com/NVIDIA/Personal-AI-Router.git
 cd Personal-AI-Router
 ```
 
-Development requires Node.js 25.5.0 or newer, npm, Go 1.25 or newer, `jq`, and
-Git. Refer to [Building PAIR](docs/building.mdx).
+Development requires Node.js 25.5.0 or newer, npm, Go 1.21 or newer (the `go`
+command downloads the toolchain that `go.mod` pins), `jq`, and Git. Refer to
+[Building PAIR](docs/building.mdx).
 
 On Linux, the repository-root `Makefile` wraps the commands below:
 

@@ -186,15 +186,32 @@ function readVersions(repo: string): ParsedVersions {
     return { services, components: stringRecord(parsed['components']) }
 }
 
-function ensureGoToolchain(): void {
-    const res = spawnSync('go', ['version'], { encoding: 'utf8' })
+// The go.mod `toolchain` line is only a floor: a newer installed Go, or
+// GOTOOLCHAIN=local, builds with something else. Shipped binaries must come
+// from exactly the pinned release, so refuse any other.
+function ensureGoToolchain(repo: string): void {
+    const sharedDir = path.join(repo, 'shared')
+    const pinned = /^toolchain\s+(go\S+)\s*$/m.exec(
+        readFileSync(path.join(sharedDir, 'go.mod'), 'utf8')
+    )?.[1]
+    if (!pinned) throw new Error(`No toolchain directive in ${path.join(sharedDir, 'go.mod')}`)
+    const res = spawnSync('go', ['env', 'GOVERSION'], { cwd: sharedDir, encoding: 'utf8' })
     if (res.status !== 0) {
         throw new Error(
-            'Go toolchain not found on PATH.\n' +
-                'Install Go 1.25+ from https://go.dev/dl/ and reopen your terminal so PATH updates.'
+            'Go toolchain not found on PATH, or it could not fetch the pinned toolchain.\n' +
+                'Install Go 1.21+ from https://go.dev/dl/ and reopen your terminal so PATH updates.\n' +
+                `The go command then downloads the toolchain that services/*/go.mod pins (${pinned}).\n` +
+                res.stderr.trim()
         )
     }
-    console.log(`[modular-build] ${res.stdout.trim()}`)
+    const effective = res.stdout.trim()
+    if (effective !== pinned) {
+        throw new Error(
+            `Go ${effective} would build the services, but go.mod pins ${pinned}.\n` +
+                `Run the build with GOTOOLCHAIN=${pinned}, or change the toolchain lines in every go.mod.`
+        )
+    }
+    console.log(`[modular-build] Go toolchain ${effective}`)
 }
 
 /**
@@ -518,7 +535,7 @@ function main(): void {
     const options = readOptions()
     const repo = servicesDir()
 
-    ensureGoToolchain()
+    ensureGoToolchain(repo)
 
     const versions = readVersions(repo)
     warnUnbuiltComponents(versions)

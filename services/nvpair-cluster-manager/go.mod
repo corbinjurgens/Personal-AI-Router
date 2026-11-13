@@ -1,6 +1,8 @@
 module nvpair-cluster-manager
 
-go 1.25.0
+go 1.26.0
+
+toolchain go1.27.4
 
 require (
 	eapnoob v0.0.0-00010101000000-000000000000

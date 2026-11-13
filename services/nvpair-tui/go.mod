@@ -1,6 +1,8 @@
 module nvpair-tui
 
-go 1.25.0
+go 1.26.0
+
+toolchain go1.27.4
 
 require (
 	github.com/charmbracelet/bubbles v1.0.0

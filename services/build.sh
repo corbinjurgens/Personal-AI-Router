@@ -38,7 +38,7 @@ check_tool() {
         exit 1
     fi
 }
-check_tool go "Install Go 1.25+ from https://go.dev/dl/"
+check_tool go "Install Go 1.21+ from https://go.dev/dl/; it downloads the toolchain go.mod pins."
 check_tool jq "Install jq: 'sudo apt install -y jq' on Linux, 'brew install jq' on macOS."
 
 if [[ ! -f "$VERSIONS_FILE" ]]; then

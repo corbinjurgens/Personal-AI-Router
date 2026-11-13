@@ -106,7 +106,12 @@ source it covers. See [Testing](#testing).
 
 ## Requirements
 
-- [Go](https://go.dev/dl/) 1.25 or newer.
+- [Go](https://go.dev/dl/) 1.21 or newer. Every module's `go.mod` names the
+  toolchain that builds PAIR (`toolchain go1.27.4`). Under the default
+  `GOTOOLCHAIN=auto`, an older installed Go downloads that release and builds
+  with it; a newer one builds with itself. The desktop package build refuses any
+  toolchain other than the pinned one, so set `GOTOOLCHAIN=go1.27.4` there when
+  your installed Go is newer or your environment sets `GOTOOLCHAIN=local`.
 - [`jq`](https://jqlang.org/) on `PATH` — the build scripts use it to parse `versions.json`. Install via `winget install jqlang.jq` / `choco install jq` / `scoop install jq` on Windows, `sudo apt install jq` on Debian/Ubuntu, `sudo dnf install jq` on Fedora/RHEL, or `brew install jq` on macOS.
 - No C toolchain, GUI, or webkit dependencies. Every module is pure Go (`cgo` is not used).
 
