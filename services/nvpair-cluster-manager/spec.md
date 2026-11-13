@@ -946,7 +946,11 @@ changed frame, and a `null` keepalive every 10 s. One manager-level publisher
 rebuilds the frame 250 ms after a change signal and every 10 s and publishes it
 only when it changed. Pin, admission and availability are rechecked before every
 line; the subscriber drops a stream after 25 s without a line and reconnects
-with per-member exponential backoff (1 s doubling to 30 s, with jitter). The trusted mux serves only its own descriptor: canonical local UUID,
+with per-member exponential backoff (1 s doubling to 30 s, with jitter). Evidence
+that the member is reachable again (a reverse session in either direction, an
+authenticated inbound peer-state or roster request from it, or an accepted
+roster exchange with it) resets that backoff and redials at once, so the cap
+applies only while the member stays unreachable. The trusted mux serves only its own descriptor: canonical local UUID,
 display name and ranked addresses from the scanner's registry-owned self row,
 with a complete service/port snapshot from current broker registrations.
 An uninitialized registry or missing self row returns unavailable. An initialized

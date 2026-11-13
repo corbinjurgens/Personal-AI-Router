@@ -158,6 +158,7 @@ func (m *Manager) handlePeerState(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "admission required", http.StatusForbidden)
 		return
 	}
+	m.notePeerReachable(uuid)
 	if !m.peerState.available() {
 		http.Error(w, "self services unavailable", http.StatusServiceUnavailable)
 		return
@@ -205,6 +206,45 @@ type peerStateResult struct {
 	open        time.Duration
 }
 
+// peerReachableSet holds members just shown reachable, until peerStateLoop
+// takes them.
+type peerReachableSet struct {
+	mu    sync.Mutex
+	uuids map[string]bool
+}
+
+// notePeerReachable records evidence that uuid is reachable again (a reverse
+// session, an authenticated inbound request, or an accepted roster exchange).
+// peerStateLoop then resets that member's reconnect backoff and redials it at
+// once, so the 30 s cap applies only while a member stays unreachable.
+func (m *Manager) notePeerReachable(uuid string) {
+	m.peerReachable.mu.Lock()
+	if m.peerReachable.uuids == nil {
+		m.peerReachable.uuids = make(map[string]bool)
+	}
+	m.peerReachable.uuids[uuid] = true
+	m.peerReachable.mu.Unlock()
+	select {
+	case m.peerReachableWake <- struct{}{}:
+	default:
+	}
+}
+
+func (m *Manager) takeReachablePeers() []string {
+	m.peerReachable.mu.Lock()
+	defer m.peerReachable.mu.Unlock()
+	uuids := make([]string, 0, len(m.peerReachable.uuids))
+	for uuid := range m.peerReachable.uuids {
+		uuids = append(uuids, uuid)
+	}
+	clear(m.peerReachable.uuids)
+	return uuids
+}
+
+// newPeerStateBackoff builds peerStateLoop's reconnect backoff. A var so tests
+// can start from a long delay.
+var newPeerStateBackoff = newPeerBackoff
+
 // signalPeerStateMembers asks peerStateLoop to re-evaluate the member set now.
 func (m *Manager) signalPeerStateMembers() {
 	select {
@@ -226,7 +266,7 @@ func (m *Manager) peerStateLoop(ctx context.Context) {
 	m.serviceRefresh.source = hex.EncodeToString(source[:])
 	m.serviceRefresh.mu.Unlock()
 
-	backoff := newPeerBackoff()
+	backoff := newPeerStateBackoff()
 	active := make(map[string]peerStateStream)
 	members := make(map[string]string) // uuid -> incarnation at the last evaluation
 	// streamed records, per member, the incarnation under which its stream
@@ -336,6 +376,11 @@ func (m *Manager) peerStateLoop(ctx context.Context) {
 		case <-m.peerStateMembers:
 			evaluate()
 		case <-dueTicker.C:
+			start()
+		case <-m.peerReachableWake:
+			for _, uuid := range m.takeReachablePeers() {
+				backoff.reset(uuid)
+			}
 			start()
 		}
 	}

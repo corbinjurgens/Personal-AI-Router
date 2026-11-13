@@ -1789,3 +1789,68 @@ func TestPeerStateForbiddenRequestsReconcilePass(t *testing.T) {
 		}
 	})
 }
+
+func TestPeerStateReachableEvidenceResetsBackoff(t *testing.T) {
+	// Start where a long outage leaves the backoff: the next retry 30 s out.
+	previous := newPeerStateBackoff
+	newPeerStateBackoff = func() *peerBackoff {
+		b := newPeerBackoff()
+		b.initial, b.jitter = 30*time.Second, func() float64 { return 1 }
+		return b
+	}
+	t.Cleanup(func() { newPeerStateBackoff = previous })
+	var reachable atomic.Bool
+	p := newPeerStateStreamPair(t, func(p *peerStateStreamPair, w http.ResponseWriter, r *http.Request) {
+		if !reachable.Load() {
+			http.Error(w, "self services unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		p.b.handlePeerState(w, r)
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	loopDone := make(chan struct{})
+	go func() { defer close(loopDone); p.a.peerStateLoop(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-loopDone:
+		case <-time.After(5 * time.Second):
+			t.Error("peer-state loop did not stop")
+		}
+	})
+	waitRequests := func(want int32, within time.Duration) bool {
+		deadline := time.Now().Add(within)
+		for p.requests.Load() < want && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		return p.requests.Load() >= want
+	}
+	if !waitRequests(1, 5*time.Second) {
+		t.Fatal("first stream attempt missing")
+	}
+	reachable.Store(true)
+	// Without evidence the unreachable member stays backed off.
+	time.Sleep(2500 * time.Millisecond)
+	if got := p.requests.Load(); got != 1 {
+		t.Fatalf("stream requests without reachability evidence = %d, want 1", got)
+	}
+	// Evidence through a production path: the member opens its own
+	// authenticated peer-state request to this node.
+	cert, err := x509.ParseCertificate(p.b.identity.Cert.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	inbound := httptest.NewRequest(http.MethodGet, peerStatePath, nil)
+	inbound.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}}
+	p.a.handlePeerState(httptest.NewRecorder(), inbound) // a has no descriptor: 503 at once
+	if !waitRequests(2, 3*time.Second) {
+		t.Fatalf("stream did not redial within 3 s of reachability evidence (requests=%d)", p.requests.Load())
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for len(p.claims.claims(t)) == 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if len(p.claims.claims(t)) == 0 {
+		t.Fatal("redialed stream delivered no frame")
+	}
+}

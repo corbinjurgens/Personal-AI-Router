@@ -496,6 +496,7 @@ func (m *Manager) handleReverseUpgrade(w http.ResponseWriter, r *http.Request) {
 	case err == nil:
 		m.clearReverseFailure("inbound", uuid)
 		slog.Info("reverse session established", "peer", uuid, "direction", "inbound", "remote", r.RemoteAddr)
+		m.notePeerReachable(uuid)
 	case errors.Is(err, clustertrust.ErrReverseDuplicate):
 		m.clearReverseFailure("inbound", uuid)
 	default:
@@ -561,6 +562,7 @@ func (m *Manager) dialReverseSession(ctx context.Context, node ClusterNode) erro
 				err = m.reverse.manager.Register(peer, &reverseBufferedConn{tlsConn, io.MultiReader(bytes.NewReader(remaining), tlsConn)}, m.identity.NodeUUID, hex.EncodeToString(id[:]))
 				if err == nil {
 					slog.Info("reverse session established", "peer", peer.UUID, "direction", "outbound", "addr", addr)
+					m.notePeerReachable(peer.UUID)
 				}
 				return err
 			}

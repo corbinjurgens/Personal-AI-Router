@@ -62,8 +62,10 @@ type Manager struct {
 	serviceRefresh       peerServicesState
 	reconcileRequest     chan struct{} // requestReconcilePass -> reconcileLoop
 	peerState            peerStatePublisher
-	peerStateSignal      chan struct{}     // signalPeerState -> peerStatePublishLoop
-	peerStateMembers     chan struct{}     // signalPeerStateMembers -> peerStateLoop
+	peerStateSignal      chan struct{} // signalPeerState -> peerStatePublishLoop
+	peerStateMembers     chan struct{} // signalPeerStateMembers -> peerStateLoop
+	peerReachable        peerReachableSet
+	peerReachableWake    chan struct{}     // notePeerReachable -> peerStateLoop
 	reconcilePeer        func(uuid string) // requestPeerReconcile's exchange (reconcileMember); tests replace it
 	reverse              *reverseState
 	localServicesAllowed bool
@@ -293,9 +295,10 @@ func NewManager(codec *Codec, configDir string, port int) (*Manager, error) {
 		joinWake:      make(chan struct{}, 1),
 		joinNow:       time.Now,
 
-		reconcileRequest: make(chan struct{}, 1),
-		peerStateSignal:  make(chan struct{}, 1),
-		peerStateMembers: make(chan struct{}, 1),
+		reconcileRequest:  make(chan struct{}, 1),
+		peerStateSignal:   make(chan struct{}, 1),
+		peerStateMembers:  make(chan struct{}, 1),
+		peerReachableWake: make(chan struct{}, 1),
 	}
 	mgr.initSelfName(storedIdentity)
 	log.Printf("node identity %s name %s fingerprint %s", identity.NodeUUID, mgr.selfName(), identity.CertFingerprint)

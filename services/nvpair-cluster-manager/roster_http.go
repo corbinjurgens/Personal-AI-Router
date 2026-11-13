@@ -58,6 +58,7 @@ func (m *Manager) handleRoster(w http.ResponseWriter, r *http.Request) {
 		m.rejectRosterReconcile(w, r)
 		return
 	}
+	m.notePeerReachable(senderUUID)
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
 	if err != nil {
 		http.Error(w, "read body", http.StatusBadRequest)
@@ -310,6 +311,7 @@ func (m *Manager) reconcileOnce(ctx context.Context, client *http.Client, body [
 		log.Printf("roster: reconcile with %s (%s): status %d", addr, peerUUID, resp.StatusCode)
 		return reconcileUnreachable, false, true
 	}
+	m.notePeerReachable(peerUUID)
 	var remote Roster
 	if err := json.Unmarshal(rb, &remote); err != nil {
 		log.Printf("roster: decode reconcile response from %s: %v", peerUUID, err)
