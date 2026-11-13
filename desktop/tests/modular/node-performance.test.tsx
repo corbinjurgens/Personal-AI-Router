@@ -326,7 +326,7 @@ describe('measured run performance', () => {
         { status: 'fresh', label: 'Fresh' },
         { status: 'stale', label: 'Stale' },
         { status: 'unknown', label: 'Unknown' },
-        { status: 'missing', label: 'Unknown' }
+        { status: 'missing', label: 'None reported' }
     ]
 
     it.each(statuses)(

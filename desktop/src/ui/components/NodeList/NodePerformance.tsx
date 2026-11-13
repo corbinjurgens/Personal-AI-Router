@@ -129,7 +129,10 @@ function MeasuredRuns({ performance }: { performance: NodePerformanceData | unde
             ? 'Fresh'
             : performance?.status === 'stale'
               ? 'Stale'
-              : 'Unknown'
+              : // The node reported, but has no measured history yet.
+                performance?.status === 'missing'
+                ? 'None reported'
+                : 'Unknown'
     const entries = performance?.summary?.entries ?? []
     const nodes = useNodesStore(state => state.nodes)
     const members = useClusterInvitationsStore(state => state.members)
