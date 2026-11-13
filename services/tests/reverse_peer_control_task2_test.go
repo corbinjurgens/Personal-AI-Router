@@ -45,6 +45,9 @@ type task2Fixture struct {
 	listeners   []int
 	skipScanner bool
 	namespace   noderec.MDNSNamespace
+	// loadedPoll is the engine managers' --loaded-poll-interval in seconds;
+	// 0 (the default) disables the loaded-model watcher.
+	loadedPoll int
 }
 
 type task2FixtureOption func(*task2Fixture)
@@ -53,6 +56,14 @@ type task2FixtureOption func(*task2Fixture)
 // without browsing or advertising on the host's multicast network.
 func task2WithoutScanner(f *task2Fixture) {
 	f.skipScanner = true
+}
+
+// task2WithLoadedPoll runs the engine managers' loaded-model watcher every
+// seconds, so a residency change emits engine:models-changed.
+func task2WithLoadedPoll(seconds int) task2FixtureOption {
+	return func(f *task2Fixture) {
+		f.loadedPoll = seconds
+	}
 }
 
 func (f *task2Fixture) stopScanner() {
@@ -243,7 +254,7 @@ func newTask2Fixture(t *testing.T, options ...task2FixtureOption) *task2Fixture 
 			members = append(members, task1Member{ID: peer.uuid, NodeUUID: peer.uuid, Name: peer.uuid, IPAddress: "127.0.0.1", Port: f.directory(peer).Services[noderec.ServiceCluster].Port, ClusterID: task1ClusterID, AdmissionEpoch: 1, State: "member"})
 		}
 		task1WriteJSON(t, filepath.Join(n.base, "cluster", "members.json"), members)
-		f.engines[n.uuid] = startTask1Process(t, n.base, engineMgrBin, "--cluster-dir", filepath.Join(n.base, "cluster"), "--control-port", strconv.Itoa(n.ports[noderec.ServiceEngineControl]), "--http-port", strconv.Itoa(n.ports[noderec.ServiceEngineManager]), "--loaded-poll-interval", "0")
+		f.engines[n.uuid] = startTask1Process(t, n.base, engineMgrBin, "--cluster-dir", filepath.Join(n.base, "cluster"), "--control-port", strconv.Itoa(n.ports[noderec.ServiceEngineControl]), "--http-port", strconv.Itoa(n.ports[noderec.ServiceEngineManager]), "--loaded-poll-interval", strconv.Itoa(f.loadedPoll))
 		// Standalone managers have no broker to publish policy. Supply its
 		// actual notification shape after recovery so granted mutations reach
 		// their handlers rather than the unknown-projection gate.
@@ -514,7 +525,9 @@ func TestReversePeerControlTask2(t *testing.T) {
 		f.mu.Lock()
 		infoCalls := f.infoCalls
 		f.mu.Unlock()
-		if infoCalls == 0 || f.b.observers[noderec.ServiceEngineManager].count(f.a.uuid, http.MethodGet, "/v1/models") == 0 {
+		em := f.b.observers[noderec.ServiceEngineManager]
+		// A pinned peer streams its inventory; either route reaches the handler.
+		if infoCalls == 0 || em.count(f.a.uuid, http.MethodGet, "/v1/models")+em.count(f.a.uuid, http.MethodGet, "/v1/models/events") == 0 {
 			t.Fatal("scanner did not reach both production inventory handlers")
 		}
 		// Use the scanner's actual discovered ec entry for subsequent controls.

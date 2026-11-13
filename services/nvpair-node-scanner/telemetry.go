@@ -176,7 +176,7 @@ func (d *daemon) runTelemetryLoop(ctx context.Context, interval time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			d.superviseNodeInfoStreams(ctx, d.selfHostUUID(), &workers)
+			d.supervisePeerStreams(ctx, d.selfHostUUID(), &workers)
 			d.dispatchTelemetry(ctx, time.Now(), sem, &workers)
 		}
 	}

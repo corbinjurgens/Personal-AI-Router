@@ -49,18 +49,14 @@ const modelsPath = "/v1/models"
 //     the same listener with no rebind.
 func serveHTTP(ctx context.Context, port int, exec *Executor, mesh *clustertrust.Mesh) {
 	addr := net.JoinHostPort("0.0.0.0", strconv.Itoa(port))
-	models := modelsHandler(exec)
-
-	plainMux := http.NewServeMux()
-	plainMux.Handle(modelsPath, loopbackOnly(models))
-	tlsMux := http.NewServeMux()
-	tlsMux.Handle(modelsPath, requirePinnedPeer(mesh, models))
+	plainMux, tlsMux := emMuxes(exec, mesh)
 
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		slog.Warn("engine-manager HTTP endpoint disabled (bind failed)", "addr", addr, "err", err)
 		return
 	}
+	go exec.modelsEvents.run(ctx, exec.ModelsResult)
 	split := splitlisten.New(ln)
 	plainSrv := &http.Server{Handler: plainMux, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: clustertrust.PeerListenerIdleTimeout}
 	tlsSrv := &http.Server{Handler: tlsMux, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: clustertrust.PeerListenerIdleTimeout}
@@ -77,6 +73,19 @@ func serveHTTP(ctx context.Context, port int, exec *Executor, mesh *clustertrust
 		"clustered", mesh.Clustered())
 	go serveOrWarn(tlsSrv, tls.NewListener(split.TLS(), mesh.ServerTLSConfig()))
 	serveOrWarn(plainSrv, split.Plain())
+}
+
+// emMuxes builds the em surface's two personalities: the plain mux serves
+// /v1/models to loopback callers only; the TLS mux serves /v1/models and the
+// /v1/models/events stream to pinned peers only.
+func emMuxes(exec *Executor, mesh *clustertrust.Mesh) (plainMux, tlsMux *http.ServeMux) {
+	models := modelsHandler(exec)
+	plainMux = http.NewServeMux()
+	plainMux.Handle(modelsPath, loopbackOnly(models))
+	tlsMux = http.NewServeMux()
+	tlsMux.Handle(modelsPath, requirePinnedPeer(mesh, models))
+	tlsMux.Handle(modelsEventsPath, requirePinnedPeer(mesh, modelsStreamHandler(mesh, exec.modelsEvents)))
+	return plainMux, tlsMux
 }
 
 // serveOrWarn runs srv on l, treating a normal shutdown (and the sub-listener

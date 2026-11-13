@@ -128,6 +128,9 @@ func (e *Executor) watchLoaded(ctx context.Context) {
 		for _, name := range changed {
 			e.notify(modelsChangedMethod, modelsChangedParams{Engine: name, Models: res})
 		}
+		if len(changed) > 0 {
+			e.modelsEvents.signal()
+		}
 	}
 }
 
@@ -213,13 +216,20 @@ func changedMemoryEngines(previous, current *performancewire.MemoryEvidence) []s
 	return names
 }
 
+// memoryStatusEntry returns entry without the freshness fields that change on
+// every build (elapsed ages and the query generation), leaving its status.
+func memoryStatusEntry(entry performancewire.MemoryEvidenceEntry) performancewire.MemoryEvidenceEntry {
+	entry.Freshness.SampleAgeMs = nil
+	entry.Freshness.QualificationAgeMs = nil
+	entry.Freshness.Generation = nil
+	return entry
+}
+
 func memoryStatusByEngine(evidence *performancewire.MemoryEvidence) map[string][]byte {
 	byEngine := make(map[string][]performancewire.MemoryEvidenceEntry)
 	if evidence != nil {
 		for _, entry := range evidence.Entries {
-			entry.Freshness.SampleAgeMs = nil
-			entry.Freshness.QualificationAgeMs = nil
-			entry.Freshness.Generation = nil
+			entry = memoryStatusEntry(entry)
 			byEngine[entry.Engine] = append(byEngine[entry.Engine], entry)
 		}
 	}

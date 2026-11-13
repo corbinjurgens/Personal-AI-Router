@@ -105,7 +105,7 @@ func startFixtureStreams(t *testing.T, f *scannerReverseFixture) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var workers sync.WaitGroup
 	t.Cleanup(func() { cancel(); workers.Wait() })
-	f.d.superviseNodeInfoStreams(ctx, f.d.selfHostUUID(), &workers)
+	f.d.supervisePeerStreams(ctx, f.d.selfHostUUID(), &workers)
 }
 
 // waitNodeInfoRPC polls discovery:get-node-info until it answers, as a caller

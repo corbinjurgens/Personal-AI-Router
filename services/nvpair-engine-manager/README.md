@@ -634,7 +634,8 @@ as false; it is never derived from `pausedBy` or `pausedLocally`. The
 broker sends it after every persisted policy or availability change and on
 every `engine:ready`. engine-manager keeps the last one in memory only and
 serves `policy` on `engine:models` and `GET /v1/models`, so paired peers learn
-this node's roles from the pinned inventory fetch they already make. It is
+this node's roles from the pinned inventory they already receive (the
+`GET /v1/models/events` stream). It is
 never put in mDNS TXT or in the peer-services descriptor. `pausedLocally` remains
 provenance. `managementBlocked` fences all peer mutations and local activation,
 and either-origin pause cancels accepted starts, loads and crash relaunch.
@@ -858,6 +859,29 @@ model loads, or already names a preset through `--models-preset` or
 scanned only at start, so a model added later appears after a restart. Peer
 copy, model settings inspection and serving presets cover only an engine's own
 store, not source models. Adding sources by hand is not supported yet.
+
+## Model inventory stream
+
+The em surface's mTLS personality also serves `GET /v1/models/events` to
+pinned peers; the plaintext loopback personality does not (404 there). Access
+is the `GET /v1/models` rule: `requirePinnedPeer` admits the request, and the
+pin is re-verified (after a membership refresh) before every line, so a peer
+unpaired mid-stream loses it at the next line.
+
+The response is NDJSON. The first line is the current `GET /v1/models` document
+(`ModelsResult`); later lines repeat the full document whenever it changes, and
+a `null` keepalive is written every 10 s otherwise (5 s write deadline per
+line). The publisher rebuilds the document at start, every 15 s (policy pushes
+and download progress have no single change signal) and 250 ms after each
+`engine:models-changed` emission, coalescing bursts. It publishes only when the
+document differs from the last published one after each memory-evidence entry's
+`freshness.sampleAgeMs`, `freshness.qualificationAgeMs` and
+`freshness.observationGeneration` are cleared, the comparison the loaded-model
+watcher uses for `engine:models-changed`; the published line is the full,
+un-normalized document. Subscribers drop a stream after 25 s without a line. At
+most 64 streams are open at once; a further request gets `503 too many model
+streams`. A peer's scanner subscribes once instead of fetching `/v1/models`
+every 15 s; this node's own scanner keeps the loopback fetch.
 
 ## Remote engine management
 
@@ -1414,7 +1438,8 @@ caller is authorized against a per-peer pin, a non-member is refused with a `403
 and while this node belongs to no cluster it presents no leaf so no handshake
 completes:
 
-- **`--http-port`** — the model-list surface (`em`, `GET /v1/models`; the broker
+- **`--http-port`** — the model-list surface (`em`, `GET /v1/models` and the
+  `GET /v1/models/events` stream; the broker
   passes `:14322`). A node's model inventory is cluster data, so LAN callers must
   be pinned peers. This port additionally serves **plaintext on loopback only**,
   which is how this node's own scanner enriches its own card — including when the
