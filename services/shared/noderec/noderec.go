@@ -38,6 +38,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"nvpair-shared/buildinfo"
@@ -738,6 +739,14 @@ func (c MemoryRequestContext) Validate() error {
 	}
 	return nil
 }
+
+// NodeInfoStaleSampleAge is the node-info stream's stall threshold. Once a
+// valid GPU sample is this old (a stalled collector keeps its last values),
+// node-info publishes a frame on every msSince change, and again when the
+// sample falls back under it; so a keepalive after a frame at or over it no
+// longer means the sample is fresh. node-info publishes by it and the
+// node-scanner ages stream frames by it.
+const NodeInfoStaleSampleAge = 5 * time.Second
 
 // NodeTelemetry is a fresh GPU-utilization observation for one node. The
 // scanner emits it independently of directory changes so scheduling telemetry

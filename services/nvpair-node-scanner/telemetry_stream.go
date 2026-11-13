@@ -41,10 +41,6 @@ const (
 	// peerStreamHealthy is how long a stream that delivered a frame must stay
 	// open for its reconnect backoff to reset.
 	peerStreamHealthy = 5 * time.Second
-	// nodeInfoStaleSampleAge mirrors node-info's staleGPUSampleAge: once a
-	// valid GPU sample is this old, node-info publishes a frame on every msSince
-	// change, so a null line then no longer means "fresh".
-	nodeInfoStaleSampleAge = 5 * time.Second
 )
 
 // nodeInfoStreamState holds the supervised streams of every kind (node-info in
@@ -83,7 +79,7 @@ type liveNodeInfo struct {
 // line, a keepalive included, confirms a sample within thresholds and younger
 // than the stale bound, so the age counts from that line.
 func (e liveNodeInfo) age(now time.Time) int64 {
-	if e.info.TelemetryValid && e.info.MSSince >= nodeInfoStaleSampleAge.Milliseconds() {
+	if e.info.TelemetryValid && e.info.MSSince >= noderec.NodeInfoStaleSampleAge.Milliseconds() {
 		return addTelemetryAge(e.info.MSSince, now.Sub(e.frameAt).Milliseconds())
 	}
 	return addTelemetryAge(0, now.Sub(e.lineAt).Milliseconds())
