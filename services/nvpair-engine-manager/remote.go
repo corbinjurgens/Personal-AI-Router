@@ -67,6 +67,12 @@ func (m *Manager) runRemote(ctx context.Context, msg *Message) {
 		m.codec.RespondError(msg.ID, -32000, "node "+p.Node+" is not a discovered ec peer")
 		return
 	}
+	if msg.Method == "engine:remote-get-installed" {
+		// Answered from the peer's live engine-status stream, never a fetch.
+		res, err := m.remoteEngines.answer(peer.nodeID)
+		m.respondOrErr(msg, res, err)
+		return
+	}
 	client, err := m.remoteClient(ctx, peer)
 	if err != nil {
 		m.codec.RespondError(msg.ID, -32000, err.Error())
@@ -74,10 +80,6 @@ func (m *Manager) runRemote(ctx context.Context, msg *Message) {
 	}
 
 	switch msg.Method {
-	case "engine:remote-get-installed":
-		res, err := client.getEngines(ctx)
-		m.respondOrErr(msg, res, err)
-
 	case "engine:remote-install":
 		if p.Engine == "" {
 			m.codec.RespondError(msg.ID, -32602, "engine is required")

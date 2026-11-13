@@ -222,8 +222,8 @@ func TestPeerSettingsWatchExcludesSelf(t *testing.T) {
 	}
 	cancel()
 	remoteAwaitClosed(t, closed)
-	if mutations.Load() != 0 || f.reverseCalls.Load() != 1 {
-		t.Fatalf("settings operations/streams = %d/%d, want 0/1", mutations.Load(), f.reverseCalls.Load())
+	if mutations.Load() != 0 || f.settingsStreams.Load() != 1 || f.reverseCalls.Load() < 1 {
+		t.Fatalf("settings operations/streams/reverse = %d/%d/%d, want 0/1/>=1", mutations.Load(), f.settingsStreams.Load(), f.reverseCalls.Load())
 	}
 }
 

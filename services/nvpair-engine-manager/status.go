@@ -460,6 +460,7 @@ func (e *Executor) emitState(engine string) {
 	e.publishMu.Lock()
 	e.notify("engine:state-changed", e.snapshot(engine, st))
 	e.publishMu.Unlock()
+	e.enginesEvents.poke()
 	// A start, stop or adoption may have changed the engine's run identity;
 	// the watcher's next sweep reports it (model_identity.go).
 	e.pokeLoaded()

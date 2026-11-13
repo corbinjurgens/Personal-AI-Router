@@ -103,6 +103,9 @@ type Manager struct {
 	mesh             *clustertrust.Mesh // cluster identity + pins for dialing peers' ec surfaces
 	controlHTTP      *clustertrust.PeerServiceClient
 	controlReadyHTTP *clustertrust.PeerServiceClient
+	// remoteEngines caches each peer's streamed engine status list
+	// (engines_stream.go).
+	remoteEngines remoteEngineCache
 	// catalog answers engine:catalog: the models an engine can download, as
 	// opposed to the ones it already holds.
 	catalog *catalogService
@@ -185,6 +188,7 @@ func (m *Manager) Run(ctx context.Context) error {
 	// when the read loop exits below.
 	go m.exec.watchLoaded(ctx)
 	go m.exec.modelIdentities.run(ctx)
+	go m.exec.enginesEvents.run(ctx, m.exec.GetInstalled)
 	go m.watchPeerSettings(ctx)
 	startupRecoveryDone := make(chan struct{})
 	go func() {

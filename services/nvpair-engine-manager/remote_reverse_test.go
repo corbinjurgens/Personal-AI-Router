@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -27,6 +28,30 @@ import (
 	"nvpair-shared/noderec"
 )
 
+// fetchEnginesForTest is a plain GET /v1/engines over the control client with
+// the former production read cap. The reverse-route probes use it as a
+// generic read; production reads peer engine status from the stream.
+func fetchEnginesForTest(ctx context.Context, c *remoteClient) (json.RawMessage, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+controlEnginesPath, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.controlClient(false).Do(req)
+	if err != nil {
+		c.forgetAddress()
+		return nil, err
+	}
+	defer resp.Body.Close()
+	data, err := readRemoteResponse(resp.Body, 8<<20)
+	if err != nil {
+		return nil, fmt.Errorf("remote engines: read response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("remote engines: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+	}
+	return json.RawMessage(data), nil
+}
+
 // The fixture supplies authenticated outer-session ownership at Register's
 // seam. Real yamux streams forward to the existing pinned inner TLS handler.
 // Cross-process acceptance separately covers outer mTLS and private dial IPC.
@@ -36,9 +61,13 @@ type remoteReverseFixture struct {
 	server                    *httptest.Server
 	directHealthy             atomic.Bool
 	directCalls, reverseCalls atomic.Int32
-	local, remote             *clustertrust.ReverseManager
-	outer                     net.Conn
-	node                      noderec.DirectoryNode
+	// settingsStreams counts settings stream requests that reached the peer
+	// (remoteEventFixture only); the watcher also opens an engine-status
+	// stream, so reverse dials alone no longer count settings streams.
+	settingsStreams *atomic.Int32
+	local, remote   *clustertrust.ReverseManager
+	outer           net.Conn
+	node            noderec.DirectoryNode
 }
 
 func newRemoteReverseFixture(t *testing.T, handler func(*clustertrust.Mesh) http.Handler) *remoteReverseFixture {
@@ -180,7 +209,7 @@ func TestRemoteControlPrefersDirectAndClosesEachConnection(t *testing.T) {
 	ctx := remoteFixtureContext(t)
 	client := f.client(t, ctx)
 	for range 3 {
-		raw, err := client.getEngines(ctx)
+		raw, err := fetchEnginesForTest(ctx, client)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -269,7 +298,7 @@ func TestRemoteReverseReadsAndEveryControlRoute(t *testing.T) {
 	})
 	ctx := remoteFixtureContext(t)
 	client := f.client(t, ctx)
-	if _, err := client.getEngines(ctx); err != nil {
+	if _, err := fetchEnginesForTest(ctx, client); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{controlLoadPath, controlUnloadPath, controlDeletePath} {
@@ -672,7 +701,9 @@ func TestRemotePolicyResponseBoundaries(t *testing.T) {
 }
 
 func TestRemoteInventoryResponseBoundaries(t *testing.T) {
-	testRemoteResponseBoundaries(t, 8<<20, func(ctx context.Context, c *remoteClient) (json.RawMessage, error) { return c.getEngines(ctx) })
+	testRemoteResponseBoundaries(t, 8<<20, func(ctx context.Context, c *remoteClient) (json.RawMessage, error) {
+		return fetchEnginesForTest(ctx, c)
+	})
 }
 
 func remoteEventFixture(t *testing.T) (*remoteReverseFixture, <-chan settings.Snapshot, <-chan struct{}, *atomic.Int32) {
@@ -688,9 +719,13 @@ func remoteEventFixture(t *testing.T) (*remoteReverseFixture, <-chan settings.Sn
 	}
 	exec.settingsHub.Publish([]settings.Snapshot{{Engine: "llamacpp", Revision: 7, Epoch: "epoch-peer", Sequence: 9}})
 	closed := make(chan struct{}, 8)
+	settingsStreams := &atomic.Int32{}
 	f := newRemoteReverseFixture(t, func(mesh *clustertrust.Mesh) http.Handler {
 		handler := (&controlServer{exec: exec, mesh: mesh}).mux()
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == settingsPath+"events" {
+				settingsStreams.Add(1)
+			}
 			handler.ServeHTTP(w, r)
 			if r.URL.Path == settingsPath+"events" {
 				select {
@@ -700,6 +735,7 @@ func remoteEventFixture(t *testing.T) (*remoteReverseFixture, <-chan settings.Sn
 			}
 		})
 	})
+	f.settingsStreams = settingsStreams
 	emitted := make(chan settings.Snapshot, 8)
 	f.m.exec.emit = func(method string, value any) {
 		if method != "engine:settings-changed" {
@@ -765,8 +801,8 @@ func TestRemoteSettingsEventsReconnectThroughExistingOwner(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("subscription owner did not stop")
 	}
-	if mutations.Load() != 0 || f.reverseCalls.Load() != 2 {
-		t.Fatalf("settings operations/reverse streams = %d/%d, want 0/2", mutations.Load(), f.reverseCalls.Load())
+	if mutations.Load() != 0 || f.settingsStreams.Load() != 2 || f.reverseCalls.Load() < 2 {
+		t.Fatalf("settings operations/streams/reverse = %d/%d/%d, want 0/2/>=2", mutations.Load(), f.settingsStreams.Load(), f.reverseCalls.Load())
 	}
 }
 

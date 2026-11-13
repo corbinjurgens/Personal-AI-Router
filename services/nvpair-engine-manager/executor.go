@@ -149,11 +149,14 @@ type Executor struct {
 	ownerAdmissionGeneration uint64
 	ownerAdmissionHeld       uint64
 	settingsHub              settings.Hub
-	diagnosticParent         func(context.Context, string, string, json.RawMessage) (json.RawMessage, error)
-	admittedLoadParent       func(context.Context, string, string) (json.RawMessage, error)
-	settingsParent           func(context.Context, string, settings.Request, string) (json.RawMessage, error)
-	inspectParent            func(context.Context, modelconfig.InspectRequest, string) (json.RawMessage, error)
-	memoryProfilesParent     func(context.Context, settings.Relay) (json.RawMessage, error)
+	// enginesEvents publishes the engine status list to peer streams
+	// (engines_stream.go).
+	enginesEvents        *enginesPublisher
+	diagnosticParent     func(context.Context, string, string, json.RawMessage) (json.RawMessage, error)
+	admittedLoadParent   func(context.Context, string, string) (json.RawMessage, error)
+	settingsParent       func(context.Context, string, settings.Request, string) (json.RawMessage, error)
+	inspectParent        func(context.Context, modelconfig.InspectRequest, string) (json.RawMessage, error)
+	memoryProfilesParent func(context.Context, settings.Relay) (json.RawMessage, error)
 	// policyParent relays a paired node's node-policy call to the broker
 	// (policyrelay.go). nil until a Manager wires it.
 	policyParent func(ctx context.Context, method string, params json.RawMessage, caller string) (json.RawMessage, error)
@@ -260,6 +263,7 @@ func NewExecutor(reg *Registry, reporter *Reporter, emit func(string, any), base
 		emit:                emit,
 		client:              newEngineHTTPClient(engineResponseHeaderTimeout),
 		progress:            newProgressHub(),
+		enginesEvents:       newEnginesPublisher(),
 		baseDir:             baseDir,
 		desired:             newDesiredStateStore(baseDir),
 		detectTimeout:       30 * time.Second,

@@ -600,6 +600,7 @@ func rmCodedBody(t *testing.T, data []byte) (code, message string) {
 func rmExpectedClasses() map[string]controlClass {
 	return map[string]controlClass{
 		controlEnginesPath:                   controlRead,
+		controlEnginesPath + "/events":       controlRead,
 		controlModelFilesPath:                controlRead,
 		controlModelFilePath:                 controlRead,
 		controlRemoteManagementPath:          controlRead,
