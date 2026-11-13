@@ -175,6 +175,9 @@ type daemon struct {
 	// Local results always finish successfully so loopback stays on the healthy
 	// cadence.
 	telemetryRetries telemetryRetryGate
+	// nodeInfoStreams holds the node-info stream of each stream peer and its
+	// latest frame (telemetry_stream.go).
+	nodeInfoStreams nodeInfoStreamState
 
 	// observedMu guards observed, this host's own addresses that remote peers
 	// have actually connected to. nvpair-node-info sees those connections and the
@@ -1673,10 +1676,17 @@ func (d *daemon) refreshNodeClusterIdentityCandidates(hostUUID string, hosts []s
 	// callers converge on one address per peer rather than each finding it again.
 	key := hostKey{hostUUID: hostUUID, service: noderec.ServiceNodeInfo}
 	_, info, _ := askRemembered(&d.enrichHosts, key, hosts, ask)
-	if info.ClusterUUID == nil {
+	return d.applyReportedClusterIdentity(hostUUID, info.ClusterUUID)
+}
+
+// applyReportedClusterIdentity folds a peer's own report of its cluster
+// principal into the directory, emitting one discovery:node-updated when it
+// moved. An absent report (nil) leaves the annotation alone.
+func (d *daemon) applyReportedClusterIdentity(hostUUID string, clusterUUID *string) bool {
+	if clusterUUID == nil {
 		return false
 	}
-	node, changed := d.dir.applyClusterIdentity(hostUUID, info.ClusterUUID, d.mesh.HasPin)
+	node, changed := d.dir.applyClusterIdentity(hostUUID, clusterUUID, d.mesh.HasPin)
 	if !changed {
 		return false
 	}

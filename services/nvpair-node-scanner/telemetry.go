@@ -176,6 +176,7 @@ func (d *daemon) runTelemetryLoop(ctx context.Context, interval time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			d.superviseNodeInfoStreams(ctx, d.selfHostUUID(), &workers)
 			d.dispatchTelemetry(ctx, time.Now(), sem, &workers)
 		}
 	}
@@ -206,7 +207,7 @@ func (d *daemon) dispatchTelemetry(
 	}
 	for _, n := range d.dir.snapshot(noderec.ServiceNodeInfo) {
 		ni, ok := n.Services[noderec.ServiceNodeInfo]
-		if !ok {
+		if !ok || d.isStreamPeer(n, self) {
 			continue
 		}
 		hosts := append([]string(nil), n.CandidateIPs()...)
@@ -242,6 +243,25 @@ func (d *daemon) dispatchTelemetry(
 }
 
 const maxTelemetryAge = int64(1<<63 - 1)
+
+// addTelemetryAge advances a reported sample age by elapsed milliseconds,
+// treating negative values as zero and saturating at maxTelemetryAge.
+func addTelemetryAge(age, elapsed int64) int64 {
+	age, elapsed = max(age, 0), max(elapsed, 0)
+	if elapsed > maxTelemetryAge-age {
+		return maxTelemetryAge
+	}
+	return age + elapsed
+}
+
+// maxGPUUtilization is the scheduler's single utilization figure for a node.
+func maxGPUUtilization(gpus []GPUInfo) uint32 {
+	var utilization uint32
+	for i := range gpus {
+		utilization = max(utilization, gpus[i].UtilizationPercent)
+	}
+	return utilization
+}
 
 // refreshNodeTelemetry emits one node's current GPU utilization. Failed fetches
 // stay silent so downstream freshness expiry handles temporary unreachability.
@@ -357,23 +377,9 @@ func (d *daemon) applyTelemetrySample(hostUUID string, generation uint64, buildT
 
 	age := int64(0)
 	if info.TelemetryValid {
-		age = info.MSSince
-		if age < 0 {
-			age = 0
-		}
-		elapsed := time.Since(startedAt).Milliseconds()
-		if elapsed > maxTelemetryAge-age {
-			age = maxTelemetryAge
-		} else {
-			age += elapsed
-		}
+		age = addTelemetryAge(info.MSSince, time.Since(startedAt).Milliseconds())
 	}
-	var utilization uint32
-	for i := range info.GPUs {
-		if info.GPUs[i].UtilizationPercent > utilization {
-			utilization = info.GPUs[i].UtilizationPercent
-		}
-	}
+	utilization := maxGPUUtilization(info.GPUs)
 	hop := noderec.NewMemoryHop(strconv.Itoa(os.Getpid()), telemetryClock)
 	if d.dir != nil {
 		d.peerServicesMu.Lock()
