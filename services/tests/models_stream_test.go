@@ -28,10 +28,10 @@ import (
 // Browse enrichment can still fetch GET /v1/models when an mDNS "updated"
 // event (on this host they follow interface address changes) arrives before
 // the stream is live or while it reconnects. So the test does not count
-// fetches over a quiet window; a change is attributed to the stream only when
-// no fetch reached the peer while it propagated, and is retried otherwise.
-// That the 15 s refresh skips stream peers, and that browse enrichment defers
-// to a live stream, are covered by the scanner's unit tests.
+// fetches until the stream is live; a change is attributed to the stream only
+// when no fetch reached the peer while it propagated, and is retried
+// otherwise. Then a 16 s window, longer than the old refresh, must see no
+// fetch unless a stream reconnect explains it.
 func TestPairedModelsStreamReplacesRefresh(t *testing.T) {
 	f := newTask2Fixture(t, task2WithLoadedPoll(1))
 	em := f.b.observers[noderec.ServiceEngineManager]
@@ -48,7 +48,6 @@ func TestPairedModelsStreamReplacesRefresh(t *testing.T) {
 	task1Eventually(t, "the scanner's models stream to the peer", 10*time.Second, func() bool {
 		return streamCount() > 0
 	})
-	streams := streamCount()
 
 	attributed := false
 	for attempt := 1; attempt <= 3 && !attributed; attempt++ {
@@ -72,7 +71,16 @@ func TestPairedModelsStreamReplacesRefresh(t *testing.T) {
 	if !attributed {
 		t.Fatal("every residency change coincided with a GET /v1/models; the stream's delivery could not be isolated")
 	}
-	if after := streamCount(); after != streams {
-		t.Fatalf("models stream reconnected while idle: %d -> %d", streams, after)
+	// A quiet window longer than the old 15 s refresh: neither the refresh nor
+	// browse enrichment fetches a peer whose stream is live.
+	// A route change (an mDNS address update on this host) ends the stream,
+	// and browse enrichment may fetch while it reconnects; only a fetch with
+	// no reconnect to explain it fails.
+	fetches, streams := fetchCount(), streamCount()
+	time.Sleep(16 * time.Second)
+	fetched, reconnected := fetchCount()-fetches, streamCount()-streams
+	t.Logf("quiet window: GET /v1/models %d, stream reconnects %d", fetched, reconnected)
+	if fetched > 0 && reconnected == 0 {
+		t.Fatalf("live stream peer was fetched %d times over 16 s", fetched)
 	}
 }
