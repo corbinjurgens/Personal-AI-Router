@@ -100,13 +100,15 @@ func TestPairedNodeInfoStreamReplacesTelemetryPull(t *testing.T) {
 		task1WriteJSON(t, filepath.Join(dir, "identity.json"), map[string]any{"node_uuid": n.uuid, "created_at": 1})
 		task1WriteJSON(t, filepath.Join(dir, "admission.json"), map[string]any{"counter": 1, "activated": 1, "clusterId": task1ClusterID, "epoch": 1})
 	}
+	// No cluster manager runs, but admission needs a member entry with a port.
+	memberPorts := map[string]int{a.uuid: temporaryClusterPort(t), b.uuid: temporaryClusterPort(t)}
 	for _, n := range nodes {
 		peer := peerOf(n)
 		dir := filepath.Join(n.base, "cluster")
 		task1WriteJSON(t, filepath.Join(dir, "trusted", peer.uuid+".json"), map[string]any{"nodeUuid": peer.uuid, "nodeId": peer.uuid, "certPem": peer.cert, "clusterId": task1ClusterID, "admissionEpoch": 1})
 		var members []task1Member
 		for _, member := range nodes {
-			members = append(members, task1Member{ID: member.uuid, NodeUUID: member.uuid, Name: member.uuid, IPAddress: "127.0.0.1", Port: temporaryClusterPort(t), ClusterID: task1ClusterID, AdmissionEpoch: 1, State: "member"})
+			members = append(members, task1Member{ID: member.uuid, NodeUUID: member.uuid, Name: member.uuid, IPAddress: "127.0.0.1", Port: memberPorts[member.uuid], ClusterID: task1ClusterID, AdmissionEpoch: 1, State: "member"})
 		}
 		task1WriteJSON(t, filepath.Join(dir, "members.json"), members)
 		if _, admitted := clustertrust.Open(dir).PeerServiceIncarnation(peer.uuid); !admitted {
