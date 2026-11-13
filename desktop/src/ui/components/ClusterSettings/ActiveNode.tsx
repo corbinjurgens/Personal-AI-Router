@@ -74,6 +74,10 @@ export default function ActiveNode({
     // roster IP for a member discovery has not seen (offline / not yet found).
     const discoveredIp = useNodesStore(state => state.nodes.get(node.nodeUuid)?.ipAddress)
     const ipAddress = discoveredIp ?? node.ipAddress
+    // A member discovery does not see is offline, as the Overview row shows it.
+    const offline = useNodesStore(
+        state => node.state === 'member' && !state.nodes.has(node.nodeUuid)
+    )
 
     // Every node key is the stable UUID (`nodeUuid`) — the nodes-store key, the
     // engine-settings focus id, and the removal target. Names are display only.
@@ -106,6 +110,11 @@ export default function ActiveNode({
                         {distinguishingLabel && (
                             <Text kind="body/regular/sm" className="text-subtle-color">
                                 ({distinguishingLabel})
+                            </Text>
+                        )}
+                        {offline && (
+                            <Text kind="body/regular/sm" className="text-subtle-color">
+                                (Offline)
                             </Text>
                         )}
                     </Flex>

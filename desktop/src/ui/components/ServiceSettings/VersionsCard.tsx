@@ -120,7 +120,8 @@ export default function VersionsCard() {
                                 <VersionRow
                                     key={binary.name}
                                     label={binary.name}
-                                    value={binary.version}
+                                    value={binary.version || '--'}
+                                    semantic={!!binary.version}
                                 />
                             ))}
                         </Stack>
