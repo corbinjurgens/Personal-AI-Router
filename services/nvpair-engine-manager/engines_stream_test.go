@@ -148,9 +148,10 @@ func TestEnginesStreamEmitStateSignalsPublisher(t *testing.T) {
 	}
 }
 
-// TestPublishedStatusesSkipsBusyEngine: an engine whose operation lock is held
-// (a long install) contributes its in-memory snapshot, and the other engines
-// are still refreshed, so the publisher never waits on the operation.
+// TestPublishedStatusesSkipsBusyEngine: an engine whose operation lock stays
+// held (a long install) contributes its in-memory snapshot and the other
+// engines are still refreshed; a lock released within the read budget is
+// waited for.
 func TestPublishedStatusesSkipsBusyEngine(t *testing.T) {
 	key := runtime.GOOS + "/" + runtime.GOARCH
 	dir := t.TempDir()
@@ -200,6 +201,23 @@ func TestPublishedStatusesSkipsBusyEngine(t *testing.T) {
 	}
 	if got := byName["idle"]; !got.Installed {
 		t.Errorf("idle engine = %+v, want a refreshed status that detected its binary", got)
+	}
+
+	// A lock released within the read budget (a short status refresh) is
+	// waited for, so the engine is refreshed rather than snapshotted mid-way.
+	go func() { listed <- exec.publishedStatuses() }()
+	time.Sleep(100 * time.Millisecond)
+	busy.opMu.Unlock()
+	select {
+	case statuses = <-listed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("publishedStatuses did not return after the lock was released")
+	}
+	busy.opMu.Lock() // for the deferred Unlock
+	for _, status := range statuses {
+		if status.Engine == "busy" && !status.Installed {
+			t.Errorf("busy engine after a short hold = %+v, want a refreshed status", status)
+		}
 	}
 }
 

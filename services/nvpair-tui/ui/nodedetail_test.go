@@ -999,8 +999,8 @@ func TestRemoteDetailPollsEngines(t *testing.T) {
 
 // TestRemoteDetailAppliesEnginePushes: a peer's engine-status push replaces
 // the list and clears the stale note a read left during a reconnect gap; a
-// read sent before the push cannot overwrite it; another node's push is
-// ignored.
+// read sent before the push cannot overwrite it; another node's push, or one
+// for a node that is no longer a member, is ignored.
 func TestRemoteDetailAppliesEnginePushes(t *testing.T) {
 	d := remoteDetail()
 	d.node.membership = membershipMember
@@ -1034,6 +1034,12 @@ func TestRemoteDetailAppliesEnginePushes(t *testing.T) {
 	local.update(push("peer", `[]`))
 	if local.enginesPushes != 0 {
 		t.Error("local detail applied a peer's engine push")
+	}
+
+	d.node.membership = membershipNone
+	d.update(push("peer", `[]`))
+	if len(d.engines) != 1 {
+		t.Errorf("a push for a node that is no longer a member was applied: %+v", d.engines)
 	}
 }
 

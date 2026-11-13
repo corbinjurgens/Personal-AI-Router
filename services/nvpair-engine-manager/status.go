@@ -133,14 +133,16 @@ func (e *Executor) GetInstalled() []EngineStatus {
 	})
 }
 
-// publishedStatuses is GetInstalled for the peer engine-status publisher. An
-// engine whose operation lock is held (an install, start or stop in progress)
-// contributes its in-memory snapshot instead of a refresh, so one long
-// operation cannot hold back the whole list. The operation's own state changes
-// still reach the snapshot and poke the publisher.
+// publishedStatuses is GetInstalled for the peer engine-status publisher. It
+// waits for an engine's operation lock only within the bounded read budget, so
+// a short status refresh finishes and is not published half-way (Detect clears
+// installed before reconcile restores it). An engine whose lock stays held (a
+// long install or start) contributes its in-memory snapshot instead, so one
+// long operation cannot hold back the whole list; the operation's own state
+// changes still reach the snapshot and poke the publisher.
 func (e *Executor) publishedStatuses() []EngineStatus {
 	return e.listStatuses(func(name string, st *engineState) EngineStatus {
-		if !st.opMu.TryLock() {
+		if !modelReadLock(context.Background(), &st.opMu) {
 			return e.snapshot(name, st)
 		}
 		defer st.opMu.Unlock()
