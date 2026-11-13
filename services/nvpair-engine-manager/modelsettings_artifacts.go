@@ -483,6 +483,7 @@ func decodeInspectionFacts(ctx context.Context, list modelFileList, access servi
 		}
 	}()
 	artifacts := make([]gguffacts.Artifact, 0, len(list.Files))
+	evidence := make([]sourceEvidence, 0, len(list.Files))
 	for _, f := range list.Files {
 		if err := ctx.Err(); err != nil {
 			return gguffacts.Facts{}, err
@@ -502,17 +503,19 @@ func decodeInspectionFacts(ctx context.Context, list modelFileList, access servi
 		} else if f.Role == "companion" {
 			role = gguffacts.RoleCompanion
 		}
-		evidence := sourceEvidence{configured: f.configured, target: f.abs, info: f.info, size: f.info.Size(), mtime: f.info.ModTime().UnixNano()}
-		reader := servingContextReaderAt{ctx: ctx, reader: file, expected: evidence}
+		evidence = append(evidence, sourceEvidence{configured: f.configured, target: f.abs, info: f.info, size: f.info.Size(), mtime: f.info.ModTime().UnixNano()})
+		reader := servingContextReaderAt{ctx: ctx, reader: file, expected: evidence[len(evidence)-1]}
 		artifacts = append(artifacts, gguffacts.Artifact{Role: role, Reader: inspectionHeaderReader{ctx, reader, access.usage}, Size: f.Size})
 	}
 	facts, err := gguffacts.Decode(ctx, artifacts)
 	if err != nil {
 		return gguffacts.Facts{}, err
 	}
+	// The reader rechecks the path only at span boundaries; recheck it after
+	// the last read, as the other checked readers do.
 	for i, file := range files {
 		info, err := file.Stat()
-		if err != nil || !sameCopyFile(list.Files[i].info, info) {
+		if err != nil || !sameCopyFile(list.Files[i].info, info) || validateSource(evidence[i]) != nil {
 			return gguffacts.Facts{}, errModelInspectionChanged
 		}
 	}

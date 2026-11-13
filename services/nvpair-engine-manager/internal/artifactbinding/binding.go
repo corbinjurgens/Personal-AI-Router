@@ -109,6 +109,17 @@ func (a Access) CheckedOpen(ctx context.Context, e Evidence) (File, error) {
 	return f, nil
 }
 
+// pathCheckSpan bounds how far a Reader reads between rechecks of the
+// configured path.
+const pathCheckSpan = 64 << 20
+
+// Reader reads the object CheckedOpen returned. Every read rechecks that
+// handle's identity, size and mtime, which needs no path lookup. Resolving the
+// configured path again (an open by path on Windows, following each link) is
+// rechecked only by a read that covers a multiple of pathCheckSpan, so a read
+// at offset 0 always checks it. Per-read path resolution made 32 KiB hashing
+// on Windows about 2.6 times slower. The bytes always come from the opened
+// handle; callers recheck the path with Validate after their last read.
 type Reader struct {
 	Context  context.Context
 	File     File
@@ -120,10 +131,15 @@ func (r Reader) ReadAt(p []byte, offset int64) (int, error) {
 		return 0, err
 	}
 	opened, err := r.File.Stat()
-	if err != nil || !Same(r.Expected.Info, opened, false) || Validate(r.Expected) != nil {
+	if err != nil || !Same(r.Expected.Info, opened, false) || (coversPathCheck(offset, len(p)) && Validate(r.Expected) != nil) {
 		return 0, fmt.Errorf("serving source changed before reading")
 	}
 	return r.File.ReadAt(p, offset)
+}
+
+func coversPathCheck(offset int64, n int) bool {
+	rem := offset % pathCheckSpan
+	return offset < 0 || rem == 0 || pathCheckSpan-rem < int64(n)
 }
 
 func (a Access) Sample(ctx context.Context, e Evidence, allowEmpty bool) (*engines.ServingBinding, error) {

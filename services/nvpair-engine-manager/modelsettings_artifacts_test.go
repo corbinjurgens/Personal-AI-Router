@@ -1561,3 +1561,72 @@ func TestModelSettingsFactsPublicReplyBudgetIncludesDescriptors(t *testing.T) {
 		t.Fatalf("oversized complete reply: fits=%v err=%v", fits, err)
 	}
 }
+
+// retargetingFile retargets a link after its first read, inside the reader's
+// first path-check span, so only a recheck after the last read can see it.
+type retargetingFile struct {
+	servingArtifactFile
+	retarget func()
+}
+
+func (f *retargetingFile) ReadAt(p []byte, offset int64) (int, error) {
+	n, err := f.servingArtifactFile.ReadAt(p, offset)
+	if f.retarget != nil {
+		f.retarget()
+		f.retarget = nil
+	}
+	return n, err
+}
+
+func TestDecodeInspectionFactsRechecksPathAfterLastRead(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		retarget bool
+	}{
+		{"unchanged link decodes", false},
+		{"link retargeted during decode", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			original, replacement, link := filepath.Join(dir, "original.gguf"), filepath.Join(dir, "replacement.gguf"), filepath.Join(dir, "model.gguf")
+			writeInspectionGGUF(t, original, "llama", 0.25, 4096)
+			writeInspectionGGUF(t, replacement, "llama", 0.25, 4096)
+			if err := os.Symlink(original, link); err != nil {
+				t.Skipf("symlink unavailable: %v", err)
+			}
+			e, err := captureSource(link, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			list := modelFileList{Files: []modelFile{{Role: "model", Path: "model/model.gguf", Size: e.size, abs: e.target, configured: e.configured, info: e.info}}}
+			access := servingFileAccess{open: func(path string) (servingArtifactFile, error) {
+				f, err := os.Open(path)
+				if err != nil {
+					return nil, err
+				}
+				wrapped := &retargetingFile{servingArtifactFile: f}
+				if tc.retarget {
+					wrapped.retarget = func() {
+						if err := os.Remove(link); err != nil {
+							t.Error(err)
+						}
+						if err := os.Symlink(replacement, link); err != nil {
+							t.Error(err)
+						}
+					}
+				}
+				return wrapped, nil
+			}}
+			facts, err := decodeInspectionFacts(context.Background(), list, access)
+			if tc.retarget {
+				if !errors.Is(err, errModelInspectionChanged) {
+					t.Fatalf("retargeted link accepted: facts=%+v err=%v", facts, err)
+				}
+				return
+			}
+			if err != nil || len(facts.Shards) != 1 || facts.Shards[0].Architecture != "llama" {
+				t.Fatalf("unchanged link refused: facts=%+v err=%v", facts, err)
+			}
+		})
+	}
+}
