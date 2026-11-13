@@ -44,8 +44,9 @@ func (d *daemon) handleNodeInfoRPC(msg *Message) {
 }
 
 // getPeerNodeInfo reads a fresh full sample from this scanner's registered self
-// over loopback, or from directory and admitted peer authority. It never
-// consults the enrichment cache or grants local authority to a directory claim.
+// over loopback, answers a stream peer from its live node-info stream, or reads
+// other peers through directory and admitted peer authority. It never consults
+// the enrichment cache or grants local authority to a directory claim.
 func (d *daemon) getPeerNodeInfo(ctx context.Context, hostUUID string) (NodeInfoResponse, bool) {
 	if d.reg != nil && hostUUID != "" && hostUUID == d.reg.record().HostUUID {
 		return d.getSelfNodeInfo(ctx, hostUUID)
@@ -57,6 +58,9 @@ func (d *daemon) getPeerNodeInfo(ctx context.Context, hostUUID string) (NodeInfo
 	endpoint, registered := node.Services[noderec.ServiceNodeInfo]
 	if !found || node.HostUUID != hostUUID || node.ClusterUUID == "" || !registered || endpoint.Port <= 0 || endpoint.Port > 65535 {
 		return NodeInfoResponse{}, false
+	}
+	if d.isStreamPeer(node, d.selfHostUUID()) {
+		return d.streamPeerNodeInfo(node, time.Now())
 	}
 	for _, host := range node.CandidateIPs() {
 		client, current, admitted := d.peerServiceClient(hostUUID, node.ClusterUUID, host, endpoint.Port, noderec.ServiceNodeInfo, false)
@@ -92,5 +96,21 @@ func (d *daemon) getSelfNodeInfo(ctx context.Context, hostUUID string) (NodeInfo
 	if !ok || info.HostUUID != authority.hostUUID || info.ClusterUUID == nil || *info.ClusterUUID != authority.clusterUUID || !current() {
 		return NodeInfoResponse{}, false
 	}
+	return info, true
+}
+
+// streamPeerNodeInfo answers from the stream's latest frame while the stream is
+// live and the route it was opened on is still current. There is no fallback
+// read: after revocation or a route outage the answer is unavailable.
+func (d *daemon) streamPeerNodeInfo(node noderec.DirectoryNode, now time.Time) (NodeInfoResponse, bool) {
+	entry, live := d.liveNodeInfo(node.HostUUID, now)
+	if !live || !entry.current() {
+		return NodeInfoResponse{}, false
+	}
+	info := entry.info
+	if info.ClusterUUID != nil && *info.ClusterUUID != node.ClusterUUID {
+		return NodeInfoResponse{}, false
+	}
+	info.MSSince = entry.age(now)
 	return info, true
 }

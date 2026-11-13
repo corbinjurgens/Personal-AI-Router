@@ -1616,9 +1616,14 @@ func (d *daemon) refreshClusterIdentityOnce() {
 	d.mesh.Refresh()
 	sem := make(chan struct{}, modelsRefreshConcurrency)
 	var wg sync.WaitGroup
+	now := time.Now()
 	for _, n := range d.dir.snapshot(noderec.ServiceNodeInfo) {
 		ni, ok := n.Services[noderec.ServiceNodeInfo]
 		if !ok || n.IP == "" || n.HostUUID == self {
+			continue
+		}
+		// A live node-info stream reports a clusterUuid change as a frame at once.
+		if _, live := d.liveNodeInfo(n.HostUUID, now); live {
 			continue
 		}
 		wg.Add(1)

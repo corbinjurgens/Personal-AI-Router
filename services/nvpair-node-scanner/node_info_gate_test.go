@@ -207,7 +207,7 @@ func TestScannerPeerRouteRejectsHeldResponseAfterDirectoryChange(t *testing.T) {
 			}
 			// Every scenario with a current original tuple must allow a fresh read.
 			if wantFresh {
-				if _, ok := f.d.getPeerNodeInfo(context.Background(), "peer"); !ok {
+				if _, ok := f.d.fetchPeerNodeInfoWithin(context.Background(), "peer", "peer", "localhost", port); !ok {
 					t.Fatal("fresh request could not use the current endpoint")
 				}
 			}
@@ -258,7 +258,7 @@ func TestScannerPeerRouteGenerationResetsCachedClientHealth(t *testing.T) {
 	if !ok {
 		t.Fatal("initial route unavailable")
 	}
-	if _, ok := f.d.getPeerNodeInfo(context.Background(), "peer"); !ok {
+	if _, ok := f.d.fetchPeerNodeInfoWithin(context.Background(), "peer", "peer", "localhost", port); !ok {
 		t.Fatal("initial reverse request failed")
 	}
 	incarnation, admitted := f.d.mesh.PeerServiceIncarnation("peer")
@@ -278,7 +278,7 @@ func TestScannerPeerRouteGenerationResetsCachedClientHealth(t *testing.T) {
 	node := f.node
 	node.Name = "renamed peer"
 	f.d.dir.upsert(node)
-	if _, ok := f.d.getPeerNodeInfo(context.Background(), "peer"); !ok {
+	if _, ok := f.d.fetchPeerNodeInfoWithin(context.Background(), "peer", "peer", "localhost", port); !ok {
 		t.Fatal("unchanged route request failed")
 	}
 	if got := f.directInfo.Load(); got != 1 {
@@ -304,7 +304,7 @@ func TestScannerPeerRouteGenerationResetsCachedClientHealth(t *testing.T) {
 	if oldCurrent() || f.directInfo.Load() != 1 || f.reverseInfo.Load() != 2 {
 		t.Fatalf("old route retained authority or dispatched: direct=%d reverse=%d, want 1/2", f.directInfo.Load(), f.reverseInfo.Load())
 	}
-	if _, ok := f.d.getPeerNodeInfo(context.Background(), "peer"); !ok {
+	if _, ok := f.d.fetchPeerNodeInfoWithin(context.Background(), "peer", "peer", "localhost", port); !ok {
 		t.Fatal("fresh generation request failed")
 	}
 	f.d.peerMu.Lock()
