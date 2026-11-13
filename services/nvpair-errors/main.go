@@ -117,7 +117,11 @@ func newStartupManager(codec *Codec, nodeID, clusterDir string) *Manager {
 // never receives" would be worse than a clear crash the supervisor logs.
 func startPeerSync(ctx context.Context, mgr *Manager, port int, mesh *clustertrust.Mesh, clusterDir string) {
 	peers := NewPeerSync(mgr, mesh, clusterDir)
-	mgr.SetOnLocalChange(peers.TriggerPush)
+	// Streams send the latest local-origin snapshot on connect, so publish one
+	// before the server starts, then again after every local change.
+	pub := newErrorsPublisher()
+	pub.publish(mgr)
+	mgr.SetOnLocalChange(func() { pub.publish(mgr) })
 
 	// Peers come solely from the broker's discovery relay. The Manager reconciles
 	// the relay's discovery:nodes snapshot (the full filtered er set) into peer
@@ -128,7 +132,7 @@ func startPeerSync(ctx context.Context, mgr *Manager, port int, mesh *clustertru
 	mgr.SetRelayEvents(events)
 
 	go func() {
-		if err := runHTTPServer(ctx, port, mgr, mesh); err != nil {
+		if err := runHTTPServer(ctx, port, mgr, mesh, pub); err != nil {
 			log.Fatalf("errors HTTP server failed: %v", err)
 		}
 	}()

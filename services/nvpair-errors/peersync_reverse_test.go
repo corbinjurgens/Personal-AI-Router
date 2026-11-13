@@ -83,7 +83,7 @@ func newErrorSyncFixture(t *testing.T) *errorSyncFixture {
 	aMesh, bMesh := clustertrust.Open(dirA), clustertrust.Open(dirB)
 	f := &errorSyncFixture{sender: managerForNode("node-a"), receiver: managerForNode("node-b")}
 	f.ps = NewPeerSync(f.sender, aMesh, dirA)
-	mux := newErrorsMux(f.receiver, bMesh)
+	mux := newErrorsMux(f.receiver, bMesh, newErrorsPublisher())
 	f.server = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/errors" || r.Header.Get("Content-Type") != "application/json" {
 			t.Errorf("snapshot request: method=%s path=%s content-type=%s", r.Method, r.URL.Path, r.Header.Get("Content-Type"))

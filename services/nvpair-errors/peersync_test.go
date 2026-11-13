@@ -155,9 +155,9 @@ func TestEvictNodeRemovesPeerEntries(t *testing.T) {
 	}
 }
 
-// TestHTTPIngestReconciles: the POST /v1/errors handler decodes a
-// SyncEnvelope and merges it, returning 204.
-func TestHTTPIngestReconciles(t *testing.T) {
+// TestHTTPPostIsNotAllowed: peers no longer push snapshots, so POST
+// /v1/errors answers 405 and changes nothing.
+func TestHTTPPostIsNotAllowed(t *testing.T) {
 	m := managerForNode("node-a")
 	srv, client := servePinnedErrorsMux(t, m)
 
@@ -171,31 +171,10 @@ func TestHTTPIngestReconciles(t *testing.T) {
 		t.Fatalf("POST: %v", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("POST status = %d, want 204", resp.StatusCode)
+	if resp.StatusCode != http.StatusMethodNotAllowed || resp.Header.Get("Allow") != "GET" {
+		t.Fatalf("POST status = %d Allow = %q, want 405 GET", resp.StatusCode, resp.Header.Get("Allow"))
 	}
-
-	got := m.snapshot()
-	if len(got) != 1 || got[0].ID != "b:one" || got[0].NodeID != "uuid-peer" {
-		t.Fatalf("after ingest, snapshot = %+v, want single uuid-peer entry", got)
-	}
-}
-
-// TestHTTPIngestRejectsMissingNodeID: an envelope without a nodeId is a
-// 400, not a silent accept.
-func TestHTTPIngestRejectsMissingNodeID(t *testing.T) {
-	m := managerForNode("node-a")
-	srv, client := servePinnedErrorsMux(t, m)
-
-	body, _ := json.Marshal(errors.SyncEnvelope{Errors: []ServiceError{localErr("x", "node-b", 1)}})
-	resp, err := client.Post(srv.URL+"/v1/errors", "application/json", bytes.NewReader(body))
-	if err != nil {
-		t.Fatalf("POST: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("POST status = %d, want 400", resp.StatusCode)
-	}
+	assertErrorSnapshot(t, m, nil)
 }
 
 // TestHTTPServeLocalReturnsLocalSnapshot: GET /v1/errors returns this
