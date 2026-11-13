@@ -881,6 +881,57 @@ func TestParentNotificationHistoryGateDoesNotWaitOrFailParent(t *testing.T) {
 	historyCheckCycle(t, messages[1:], []uint64{1}, "1")
 }
 
+// The broker reconciles each engine's local destination on a five-second
+// ticker, as the history copier does. Its node/set-local-backend replies once
+// met every reconcile-tick retry of a large window, so history stopped at the
+// last window that fitted between them. This pins the early retry: a cycle
+// that lost the gate is retried well before the next reconcile tick.
+func TestRoutingHistoryBusyGateRetriesBeforeNextTick(t *testing.T) {
+	w := newHistoryBoundaryWriter(1)
+	_, cancel, codec := historyOwnedCodec(t, w)
+	p := newBoundProxy(codec)
+	id := json.RawMessage(`1`)
+	ordinary := make(chan error, 1)
+	go func() { ordinary <- codec.Respond(&id, struct{}{}) }()
+	lifetimeReceive(t, w.entered)
+	nativeRegistered(t, p, time.UnixMilli(1000))
+	h := p.newRoutingHistory()
+	done := make(chan struct{})
+	go func() { h.run(); close(done) }()
+	t.Cleanup(func() {
+		cancel()
+		w.unblock()
+		lifetimeReceive(t, done)
+	})
+	// The first cycle meets the ordinary writer's gate and ends without a frame.
+	waitForCond(t, 5*time.Second, "first history cycle to lose the gate", func() bool {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		return h.generationLength != 0 && !h.active
+	})
+	if frames, _ := w.snapshot(); len(frames) != 0 {
+		t.Fatal("history wrote while the ordinary writer held the gate")
+	}
+	released := time.Now()
+	w.unblock()
+	if err := lifetimeReceive(t, ordinary); err != nil {
+		t.Fatal(err)
+	}
+	waitForCond(t, routingHistoryReconcile, "the busy window to be retried", func() bool {
+		frames, _ := w.snapshot()
+		return len(frames) == 4 // ordinary response, begin, one record, end
+	})
+	if elapsed := time.Since(released); elapsed >= routingHistoryReconcile/2 {
+		t.Fatalf("busy window waited %v for the reconcile tick instead of an early retry", elapsed)
+	}
+	frames, _ := w.snapshot()
+	messages := historyDecodeFrames(t, frames)
+	if messages[0].ID == nil || !bytes.Equal(*messages[0].ID, id) {
+		t.Fatal("ordinary response was displaced")
+	}
+	historyCheckCycle(t, messages[1:], []uint64{1}, "1")
+}
+
 func TestRoutingHistoryReconciliationSingleWorker(t *testing.T) {
 	w := newHistoryBoundaryWriter(1)
 	root, cancel, codec := historyOwnedCodec(t, w)
