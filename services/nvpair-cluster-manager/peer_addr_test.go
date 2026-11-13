@@ -29,7 +29,7 @@ func TestPeerServicesCandidateUnionKeepsLastHint(t *testing.T) {
 	f.descriptor.Addresses = []string{"192.0.2.60", "192.0.2.61", "192.0.2.62", "100.90.0.8"}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if err := f.a.refreshPeerServices(ctx, f.b.identity.NodeUUID); err != nil {
+	if err := streamPeerStateOnce(ctx, f.a, f.b.identity.NodeUUID); err != nil {
 		t.Fatal(err)
 	}
 	if stored := storedHintMember(t, f.a, f.b.identity.NodeUUID); !slices.Equal(stored.AdvertisedAddresses, f.descriptor.Addresses) {
@@ -65,7 +65,7 @@ func TestPeerServicesCandidateUnionKeepsLastHint(t *testing.T) {
 	guard.allow(t, f.tail, f.listener)
 	f.install(t, f.a, guard, nil)
 	f.output.Reset()
-	if err := f.a.refreshPeerServices(ctx, f.b.identity.NodeUUID); err != nil {
+	if err := streamPeerStateOnce(ctx, f.a, f.b.identity.NodeUUID); err != nil {
 		t.Fatalf("last persisted candidate omitted: %v", err)
 	}
 	if guard.attempted(f.tail) == 0 || guard.physical.Load() == 0 || guard.reverse.Load() != 0 || f.handlers.Load() != 2 {

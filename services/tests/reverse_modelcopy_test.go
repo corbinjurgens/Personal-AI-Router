@@ -278,6 +278,9 @@ func phase04AwaitPinIdentity(t *testing.T, node, peer *task1Node) {
 
 // Await a real production CM roster request and its completed reply while the
 // copy authority is invalid. No sender or roster is synthesized by the test.
+// Loopback fixtures never build a valid peer-state descriptor, so no stream
+// frame triggers an exchange here; the next one is the CM's periodic repair
+// pass (reconcileEvery, 5 minutes after the initial pass).
 func phase04AwaitRosterExchange(t *testing.T, destination, source *task1Node) {
 	t.Helper()
 	observer := destination.observers[noderec.ServiceCluster]
@@ -300,7 +303,7 @@ func phase04AwaitRosterExchange(t *testing.T, destination, source *task1Node) {
 	}()
 	select {
 	case <-replied:
-	case <-time.After(45 * time.Second): // CM reconciles every 30 seconds.
+	case <-time.After(6 * time.Minute): // CM repairs every 5 minutes.
 		t.Fatal("production CM roster exchange did not complete during invalid copy authority")
 	}
 }

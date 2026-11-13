@@ -155,10 +155,7 @@ func TestPolicyRelayJoint(t *testing.T) {
 			if tc.code == -32010 {
 				// A revision conflict is a typed refusal the origin maps back
 				// to its code.
-				wantBody = string(mustMarshal(t, struct {
-					Error string `json:"error"`
-					Code  string `json:"code"`
-				}{tc.text, "policy_conflict"})) + "\n"
+				wantBody = string(mustMarshal(t, clustertrust.CodedRefusal{Code: "policy_conflict", Error: tc.text})) + "\n"
 			}
 			if string(body) != wantBody {
 				t.Fatal("HTTP rejection text differs from the independently specified error")

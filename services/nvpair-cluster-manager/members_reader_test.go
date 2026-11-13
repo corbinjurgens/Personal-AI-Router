@@ -97,8 +97,8 @@ func TestPeerServicesRefreshWaitsForMemberReplacement(t *testing.T) {
 	f := newPeerHintFixture(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // Stop after authority capture, before any chooser or HTTP dial.
-	assertMemberReaderSerialized(t, f.m, "refreshPeerServices", func() error {
-		if err := f.m.refreshPeerServices(ctx, f.peer.UUID); !errors.Is(err, context.Canceled) {
+	assertMemberReaderSerialized(t, f.m, "runPeerStateStream", func() error {
+		if _, err := f.m.runPeerStateStream(ctx, f.peer.UUID, f.incarnation); !errors.Is(err, context.Canceled) {
 			return fmt.Errorf("refresh error = %v, want context cancellation after admission", err)
 		}
 		return nil

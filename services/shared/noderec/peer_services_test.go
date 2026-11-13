@@ -5,9 +5,7 @@ package noderec
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"strings"
 	"testing"
 
@@ -90,51 +88,37 @@ func TestPeerServicesCompleteWithdrawal(t *testing.T) {
 	}
 }
 
-type peerServicesReadError struct{ io.Reader }
-
-func (r peerServicesReadError) Read(p []byte) (int, error) {
-	n, err := r.Reader.Read(p)
-	if err == io.EOF {
-		return n, errors.New("response truncated")
-	}
-	return n, err
-}
-
-func TestPeerServicesDecodeRequiresCompleteBoundedDocument(t *testing.T) {
-	body, err := json.Marshal(validPeerServices())
+func TestPeerStateFrameDecodeIsStrict(t *testing.T) {
+	hash := strings.Repeat("ab", 32)
+	body, err := json.Marshal(PeerStateFrame{Descriptor: validPeerServices(), RosterHash: hash})
 	if err != nil {
 		t.Fatal(err)
 	}
-	test := func(name, body string) {
+	reject := func(name, line, expected string) {
 		t.Run(name, func(t *testing.T) {
-			if _, err := DecodePeerServices(strings.NewReader(body), "peer-a"); err == nil {
-				t.Fatal("invalid document accepted")
+			if _, err := DecodePeerStateFrame([]byte(line), expected); err == nil {
+				t.Fatal("invalid frame accepted")
 			}
 		})
 	}
-	test("truncated JSON", string(body[:len(body)-1]))
-	test("trailing document", string(body)+" {}")
-	test("trailing junk", string(body)+" x")
-	test("oversized", string(body)+strings.Repeat(" ", PeerServicesMaxBytes))
-	test("unknown protocol field", strings.Replace(string(body), `"addresses":`, `"protocol":"plain","addresses":`, 1))
-	// Names travel on the roster only; the strict decoder rejects a
-	// descriptor that still carries one.
-	test("name field", strings.Replace(string(body), `"addresses":`, `"name":"peer host","addresses":`, 1))
-	t.Run("transport error after complete JSON", func(t *testing.T) {
-		if _, err := DecodePeerServices(peerServicesReadError{strings.NewReader(string(body))}, "peer-a"); err == nil {
-			t.Fatal("incomplete transport accepted")
-		}
-	})
-	t.Run("complete valid document", func(t *testing.T) {
-		if strings.Contains(string(body), `"name"`) {
-			t.Fatalf("descriptor JSON carries a name: %s", body)
-		}
-		d, err := DecodePeerServices(strings.NewReader(string(body)), "peer-a")
+	reject("truncated JSON", string(body[:len(body)-1]), "peer-a")
+	reject("trailing document", string(body)+" {}", "peer-a")
+	reject("trailing junk", string(body)+" x", "peer-a")
+	reject("oversized", string(body)+strings.Repeat(" ", PeerStateMaxLine), "peer-a")
+	reject("unknown frame field", strings.Replace(string(body), `"rosterHash":`, `"generation":1,"rosterHash":`, 1), "peer-a")
+	reject("unknown descriptor field", strings.Replace(string(body), `"addresses":`, `"name":"peer host","addresses":`, 1), "peer-a")
+	reject("wrong subject", string(body), "peer-b")
+	reject("uppercase hash", strings.Replace(string(body), hash, strings.ToUpper(hash), 1), "peer-a")
+	reject("short hash", strings.Replace(string(body), hash, hash[:63], 1), "peer-a")
+	reject("missing hash", strings.Replace(string(body), `"rosterHash":"`+hash+`"`, `"rosterHash":""`, 1), "peer-a")
+	reject("null keepalive", "null", "peer-a")
+	t.Run("valid frame", func(t *testing.T) {
+		frame, err := DecodePeerStateFrame(body, "peer-a")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if d.HostUUID != "peer-a" || len(d.Services) != 2 || d.Services[1].Service != ServiceEngineControl || d.Services[1].Port != 31421 {
-			t.Fatalf("decoded descriptor = %+v", d)
+		if frame.RosterHash != hash || frame.Descriptor.HostUUID != "peer-a" || len(frame.Descriptor.Services) != 2 {
+			t.Fatalf("decoded frame = %+v", frame)
 		}
 	})
 }
