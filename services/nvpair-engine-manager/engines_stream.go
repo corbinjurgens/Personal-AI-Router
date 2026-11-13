@@ -174,6 +174,12 @@ func (m *Manager) consumeEnginesStream(parent context.Context, peer ecPeer) {
 	if cache.peers == nil {
 		cache.peers = make(map[string]*remoteEnginesEntry)
 	}
+	if cache.peers[peer.nodeID] != nil {
+		// A replacement stream for this peer is already live; this one was
+		// superseded while it was opening.
+		cache.mu.Unlock()
+		return
+	}
 	cache.peers[peer.nodeID] = entry
 	cache.mu.Unlock()
 	defer func() {

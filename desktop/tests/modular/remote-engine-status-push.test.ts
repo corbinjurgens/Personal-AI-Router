@@ -65,6 +65,7 @@ interface PushHarness {
     handleNotification: (notification: JsonRpcNotification) => void
     onBrokerReady: () => Promise<void>
     callProcess: (name: string, method: string, params?: unknown) => Promise<unknown>
+    refreshRemoteEngineStatus: (nodeId: string) => Promise<void>
 }
 
 const supervisor = getModularSupervisor() as unknown as PushHarness
@@ -112,6 +113,24 @@ describe('remote engine status push', () => {
         notify({ nodeId: PEER, engines: [] })
 
         expect(mocks.applyRemoteEngineFacts).not.toHaveBeenCalled()
+    })
+
+    it('drops a read that started before a newer push', async () => {
+        let answer: (value: unknown) => void = () => {}
+        supervisor.callProcess = (_name: string, method: string) => {
+            mocks.calls.push(method)
+            return new Promise(resolve => {
+                answer = resolve
+            })
+        }
+        const read = supervisor.refreshRemoteEngineStatus(PEER)
+        const pushed = [{ engine: 'llamacpp', installed: true, running: true, healthy: true }]
+        notify({ nodeId: PEER, engines: pushed })
+        answer({ engines: [{ engine: 'llamacpp', installed: true, running: false }] })
+        await read
+
+        expect(mocks.applyRemoteEngineFacts).toHaveBeenCalledTimes(1)
+        expect(mocks.applyRemoteEngineFacts).toHaveBeenCalledWith(PEER, { engines: pushed })
     })
 
     it('reads remote engine status on broker ready but never on a timer', async () => {

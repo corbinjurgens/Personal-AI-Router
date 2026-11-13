@@ -352,6 +352,9 @@ class ModularSupervisor {
     // the backend keys peers by hostUuid, and it is the same key
     // discovery/`engine:remote-*` use, never the hostname.
     private clusterPeerIds = new Set<string>()
+    // Count of engine:remote-installed-changed pushes applied per node. A read
+    // that started before a push must not overwrite the newer pushed list.
+    private remoteEnginePushes = new Map<string, number>()
     // Debounced follow-up poll when discovery:nodes-changed lands — the ec peer
     // directory in engine-manager is fed from that relay and may not be ready for
     // the first broker-ready sweep.
@@ -1288,11 +1291,13 @@ class ModularSupervisor {
         const generation = this.brokerSessionGeneration
         const selfId = getModularBridgeState().getSelfId()
         if (selfId && nodeId === selfId) return
+        const pushes = this.remoteEnginePushes.get(nodeId) ?? 0
         try {
             const result = await this.callProcess('broker', 'engine:remote-get-installed', {
                 node: nodeId
             })
             if (generation !== this.brokerSessionGeneration) return
+            if ((this.remoteEnginePushes.get(nodeId) ?? 0) !== pushes) return
             getModularBridgeState().applyRemoteEngineFacts(nodeId, result)
             const engines = objectValue(result)?.engines
             log.info({
@@ -1970,10 +1975,15 @@ class ModularSupervisor {
                 Array.isArray(params.engines)
             ) {
                 const selfId = getModularBridgeState().getSelfId()
-                if (this.brokerReady && params.nodeId !== selfId)
+                if (this.brokerReady && params.nodeId !== selfId) {
+                    this.remoteEnginePushes.set(
+                        params.nodeId,
+                        (this.remoteEnginePushes.get(params.nodeId) ?? 0) + 1
+                    )
                     getModularBridgeState().applyRemoteEngineFacts(params.nodeId, {
                         engines: params.engines
                     })
+                }
             }
             return
         }
