@@ -13,6 +13,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -297,6 +298,9 @@ func TestNotifyPeerSettingsForwardsEverySupportedEngine(t *testing.T) {
 }
 
 func TestSettingsPairedMutationPushObserversAndRevocation(t *testing.T) {
+	// Revocation ends an open stream at the next frame's authority check; a
+	// short keepalive keeps that frame within the test bound.
+	shortenSettingsKeepalive(t, 50*time.Millisecond)
 	a, certA := settingsMesh(t, "a")
 	b, certB := settingsMesh(t, "b")
 	c, certC := settingsMesh(t, "c")
@@ -412,12 +416,78 @@ func TestSettingsPairedMutationPushObserversAndRevocation(t *testing.T) {
 	go func() { _, err := io.Copy(io.Discard, resC.Body); ended <- err }()
 	select {
 	case <-ended:
-	case <-time.After(3 * time.Second):
-		t.Fatal("revoked peer stream did not close")
+	case <-time.After(time.Second):
+		t.Fatal("revoked peer stream did not close within 1s")
 	}
 	// A reconnected remaining peer atomically receives the latest full state.
 	_, again := open(clientB)
 	read(again, 2)
+}
+
+func shortenSettingsKeepalive(t *testing.T, d time.Duration) {
+	t.Helper()
+	previous := settingsStreamKeepalive
+	settingsStreamKeepalive = d
+	t.Cleanup(func() { settingsStreamKeepalive = previous })
+}
+
+func TestSettingsStreamDefaults(t *testing.T) {
+	if settingsStreamKeepalive != 10*time.Second {
+		t.Errorf("settingsStreamKeepalive = %v, want 10s", settingsStreamKeepalive)
+	}
+	if settingsStreamIdle != 25*time.Second {
+		t.Errorf("settingsStreamIdle = %v, want 25s", settingsStreamIdle)
+	}
+}
+
+func TestSettingsStreamKeepaliveCadence(t *testing.T) {
+	shortenSettingsKeepalive(t, 50*time.Millisecond)
+	a, certA := settingsMesh(t, "a")
+	b, certB := settingsMesh(t, "b")
+	settingsPin(t, a, "b", certB)
+	settingsPin(t, b, "a", certA)
+	mesh := clustertrust.Open(a)
+	exec := settingsExecutor(t, false)
+	exec.settingsParent = func(context.Context, string, settings.Request, string) (json.RawMessage, error) {
+		return nil, errors.New("keepalive stream must not invoke settings operations")
+	}
+	server := httptest.NewUnstartedServer((&controlServer{exec: exec, mesh: mesh}).mux())
+	server.TLS = mesh.ServerTLSConfig()
+	server.StartTLS()
+	defer server.Close()
+	config, ok := clustertrust.Open(b).ClientTLSConfig("a")
+	if !ok {
+		t.Fatal("pin unavailable")
+	}
+	transport := &http.Transport{TLSClientConfig: config}
+	defer transport.CloseIdleConnections()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+settingsPath+"events", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := (&http.Client{Transport: transport}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", res.StatusCode)
+	}
+	// Count from the response headers, so the handshake does not eat the window.
+	window := time.AfterFunc(400*time.Millisecond, cancel)
+	defer window.Stop()
+	keepalives := 0
+	scan := bufio.NewScanner(res.Body)
+	for scan.Scan() {
+		if string(scan.Bytes()) == "null" {
+			keepalives++
+		}
+	}
+	if keepalives < 3 {
+		t.Fatalf("keepalives within 400ms = %d, want at least 3", keepalives)
+	}
 }
 
 // Ordinary environment options pass through for pinned peers. Only changes

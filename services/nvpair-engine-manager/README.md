@@ -736,6 +736,13 @@ directory retains self for model-copy identity resolution; mesh self-trust is
 not permission to start a peer subscription. Failed peer streams retry after
 three seconds.
 
+`GET /v1/engine-settings/events` is an NDJSON snapshot stream served through
+`clustertrust.ServeSnapshotStream`. It sends a `null` keepalive every 10
+seconds and rechecks pin authority before each frame, keepalives included, so
+a revoked pin ends an open stream within one keepalive. Subscribers drop a
+stream after 25 seconds without a line and reconnect through
+`watchPeerSettings`.
+
 Preset conversion preserves native sampler defaults, reasoning budget and output
 limits as extra options. Native `flash-attn = auto` becomes inherited policy;
 f16 and q8_0 cache precision remain explicit. Native-fit `gpu-layers = auto`

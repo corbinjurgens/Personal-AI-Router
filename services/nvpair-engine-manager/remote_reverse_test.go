@@ -677,6 +677,9 @@ func TestRemoteInventoryResponseBoundaries(t *testing.T) {
 
 func remoteEventFixture(t *testing.T) (*remoteReverseFixture, <-chan settings.Snapshot, <-chan struct{}, *atomic.Int32) {
 	t.Helper()
+	// The consumer rechecks authority before each line, so a short server
+	// keepalive retires a changed route within the test bounds.
+	shortenSettingsKeepalive(t, 50*time.Millisecond)
 	exec := settingsExecutor(t, false)
 	mutations := &atomic.Int32{}
 	exec.settingsParent = func(context.Context, string, settings.Request, string) (json.RawMessage, error) {
