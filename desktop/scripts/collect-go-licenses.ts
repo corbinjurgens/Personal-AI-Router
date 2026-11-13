@@ -89,10 +89,11 @@ async function listModulesForTarget(
                 GOOS: goos,
                 GOARCH: goarch,
                 CGO_ENABLED: '0',
+                // No module or toolchain downloads. The go.mod toolchain still
+                // applies, read from the module cache, where checksum
+                // verification needs GOSUMDB left at its default.
                 GOPROXY: 'off',
-                GONOPROXY: 'none',
-                GOSUMDB: 'off',
-                GOTOOLCHAIN: 'local'
+                GONOPROXY: 'none'
             },
             maxBuffer: 32 * 1024 * 1024
         })

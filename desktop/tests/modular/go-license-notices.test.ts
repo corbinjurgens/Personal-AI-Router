@@ -64,9 +64,7 @@ describe('Go notice license sources', () => {
             expect(args[0]).toBe('list')
             expect(options.env).toMatchObject({
                 GOPROXY: 'off',
-                GONOPROXY: 'none',
-                GOSUMDB: 'off',
-                GOTOOLCHAIN: 'local'
+                GONOPROXY: 'none'
             })
         }
     })

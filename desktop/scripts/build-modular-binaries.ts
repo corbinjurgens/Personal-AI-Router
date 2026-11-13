@@ -191,7 +191,8 @@ function ensureGoToolchain(): void {
     if (res.status !== 0) {
         throw new Error(
             'Go toolchain not found on PATH.\n' +
-                'Install Go 1.25+ from https://go.dev/dl/ and reopen your terminal so PATH updates.'
+                'Install Go 1.21+ from https://go.dev/dl/ and reopen your terminal so PATH updates.\n' +
+                'The go command then downloads the toolchain that services/*/go.mod pins.'
         )
     }
     console.log(`[modular-build] ${res.stdout.trim()}`)

@@ -1,6 +1,8 @@
 module nvpair-node-settings
 
-go 1.25.0
+go 1.26.0
+
+toolchain go1.27.4
 
 require nvpair-shared v0.0.0-00010101000000-000000000000
 

@@ -17,7 +17,7 @@ NODE_MODULES := $(DESKTOP)/node_modules
 GO_MODULES := $(patsubst %/go.mod,%,$(wildcard $(SERVICES)/*/go.mod))
 
 # Minimums documented in docs/building.mdx.
-MIN_GO := 1.25
+MIN_GO := 1.21
 MIN_NODE := 25.5.0
 
 .PHONY: help dev tools deps-go deps-node build build-binaries build-desktop \

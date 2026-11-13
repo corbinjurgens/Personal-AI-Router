@@ -9,7 +9,9 @@ Run `npm run licenses` from `desktop/` to regenerate the repository's
 `THIRD_PARTY_NOTICES.md`. The packaged application ships that file. Generation
 reads installed npm packages and cached Go modules; Go dependency and toolchain
 downloads are disabled. Install dependencies and populate the Go module cache
-before generation. No license URL is fetched during generation or packaging.
+before generation, including the toolchain that `go.mod` pins: building the
+services once with the default `GOTOOLCHAIN=auto` fetches it. No license URL is
+fetched during generation or packaging.
 
 Go module grants must match the exact module version and complete text digest
 in `go-license-file-hashes.ts`. Missing, truncated, changed or unreviewed module
