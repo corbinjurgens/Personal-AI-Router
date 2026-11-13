@@ -51,7 +51,8 @@ runs:
 
         # Must equal the `toolchain` directive in every go.mod. GOTOOLCHAIN=local
         # ignores that directive, so this pin is what keeps CI on the same
-        # patched release the build machines download.
+        # patched release the build machines download; build:modular-binaries
+        # fails when they differ.
         #
         # cache-dependency-path is required, not an optimization. setup-go
         # caches by default and looks for the dependency file at the repository
