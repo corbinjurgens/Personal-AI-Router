@@ -23,6 +23,9 @@ const (
 	methodPerformanceStatus   = "performance:status"
 	performanceStaleAfter     = 90 * time.Second
 	performancePeerLimit      = 128
+	// performanceOlderRevision is applySummary's message for an older revision
+	// it ignored (status 200); reachability is not refreshed for it.
+	performanceOlderRevision = "older revision ignored"
 )
 
 type performanceReceived struct {
@@ -261,7 +264,7 @@ func (p *performanceRelay) applySummary(authority func(epoch string) (principal,
 		state.payload, state.status, state.retired = nil, "", false
 	}
 	if summary.Revision < state.revision {
-		return http.StatusOK, ""
+		return http.StatusOK, performanceOlderRevision
 	}
 	digest := sha256.Sum256(raw)
 	if summary.Revision == state.revision && state.digest != digest {
@@ -308,9 +311,9 @@ func (p *performanceRelay) applySummary(authority func(epoch string) (principal,
 
 // refreshReceipt is a stream keepalive from host after an accepted frame. It
 // refreshes lastSeen and re-asserts "fresh" to the broker at most every
-// performanceStatusRefresh, while the receipt is live, authority still holds
-// for its admission, and its sample is within retention (the sender withholds
-// it past retention, so a keepalive cannot keep it fresh beyond that).
+// performanceStatusRefresh, while the receipt is live and authority still
+// holds for its admission. A sender whose summary becomes withheld (admission
+// change, retention) ends the stream, so keepalives stop refreshing it.
 func (p *performanceRelay) refreshReceipt(host string, authority func(epoch string) (principal, identity string, ok bool)) {
 	p.mu.Lock()
 	state := p.received[host]
@@ -327,9 +330,6 @@ func (p *performanceRelay) refreshReceipt(host string, authority func(epoch stri
 		return
 	}
 	now := p.now()
-	if state.initialElapsedMs+now.Sub(state.firstSeen).Milliseconds() > performancewire.RetentionMs {
-		return
-	}
 	state.lastSeen = now
 	if state.status == "fresh" && now.Sub(state.statusAt) < performanceStatusRefresh {
 		return

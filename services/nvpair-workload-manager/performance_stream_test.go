@@ -189,12 +189,21 @@ func performanceStreamOpen(t *testing.T, done <-chan struct{}, within time.Durat
 // performanceLines serves the given NDJSON lines once, then keepalives until
 // the request ends.
 func performanceLines(lines ...string) http.Handler {
+	return performanceLinesThen(true, lines...)
+}
+
+// performanceLinesThen serves lines, then keepalives until the request ends
+// when keep is set, or ends the response at once otherwise.
+func performanceLinesThen(keep bool, lines ...string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/x-ndjson")
 		for _, line := range lines {
 			_, _ = w.Write([]byte(line + "\n"))
 		}
 		http.NewResponseController(w).Flush()
+		if !keep {
+			return
+		}
 		ticker := time.NewTicker(20 * time.Millisecond)
 		defer ticker.Stop()
 		for {
@@ -279,46 +288,99 @@ func TestPerformanceStreamFirstFrameCarriesCurrentElapsed(t *testing.T) {
 	}
 }
 
-func TestPerformanceStreamWithholdsWithoutClosing(t *testing.T) {
-	t.Run("sender admission changed", func(t *testing.T) {
-		shortKeepalive(t)
-		f := newPerformanceFixture(t)
-		peer := newPerformancePeer(t, f)
-		peer.publish(t, performanceSummary("uuid-peer", 1))
+func TestPerformanceStreamWithheldBeforeAnyFrameStaysOpen(t *testing.T) {
+	shortKeepalive(t)
+	f := newPerformanceFixture(t)
+	peer := newPerformancePeer(t, f)
+	peer.publish(t, performanceSummary("uuid-peer", 1))
+	performanceWrite(t, filepath.Join(f.peerDir, "admission.json"), []byte(`{"clusterId":"test-cluster","epoch":2,"counter":2,"activated":2}`))
+	performanceStreamServe(t, f, peer.handler())
+	done, _ := performanceSubscribe(t, f)
+	performanceStreamOpen(t, done, 200*time.Millisecond)
+	if len(f.messages()) != 0 || len(f.manager.performance.received) != 0 {
+		t.Fatal("withheld summary reached the receiver")
+	}
+}
+
+// Once a stream has delivered a frame, withholding ends it, so keepalives can
+// no longer keep the receiver's copy fresh and the 90 s stale rule applies.
+func TestPerformanceStreamWithheldAfterFrameEndsStream(t *testing.T) {
+	test := func(name string, withhold func(*testing.T, *performanceFixture, *performancePeer)) {
+		t.Run(name, func(t *testing.T) {
+			shortKeepalive(t)
+			f := newPerformanceFixture(t)
+			peer := newPerformancePeer(t, f)
+			peer.publish(t, performanceSummary("uuid-peer", 1))
+			performanceStreamServe(t, f, peer.handler())
+			done, _ := performanceSubscribe(t, f)
+			performanceEventually(t, "summary", func() bool { return len(f.summaries(t)) == 1 })
+			withhold(t, f, peer)
+			performanceStreamEnded(t, done)
+			if len(f.summaries(t)) != 1 {
+				t.Fatal("withheld publication was sent again")
+			}
+			f.advance(performanceStaleAfter)
+			f.manager.performance.sweep()
+			statuses := f.statuses(t)
+			if last := statuses[len(statuses)-1]; last.Status != "stale" {
+				t.Fatalf("statuses = %+v, want stale after withholding", statuses)
+			}
+		})
+	}
+	// Only the sender's admission changes; the receiver's view of it lags.
+	test("sender admission changed", func(t *testing.T, f *performanceFixture, _ *performancePeer) {
 		performanceWrite(t, filepath.Join(f.peerDir, "admission.json"), []byte(`{"clusterId":"test-cluster","epoch":2,"counter":2,"activated":2}`))
-		performanceStreamServe(t, f, peer.handler())
-		done, _ := performanceSubscribe(t, f)
-		performanceStreamOpen(t, done, 200*time.Millisecond)
-		if len(f.messages()) != 0 || len(f.manager.performance.received) != 0 {
-			t.Fatal("withheld summary reached the receiver")
-		}
 	})
-	t.Run("past retention", func(t *testing.T) {
-		shortKeepalive(t)
-		f := newPerformanceFixture(t)
-		peer := newPerformancePeer(t, f)
-		peer.publish(t, performanceSummary("uuid-peer", 1))
-		performanceStreamServe(t, f, peer.handler())
-		done, _ := performanceSubscribe(t, f)
-		performanceEventually(t, "summary", func() bool { return len(f.summaries(t)) == 1 })
+	test("past retention", func(t *testing.T, f *performanceFixture, peer *performancePeer) {
 		retention := time.Duration(performancewire.RetentionMs)*time.Millisecond + time.Millisecond
 		peer.advance(retention)
-		// A republication past retention is withheld: no frame, stream open.
-		peer.publish(t, performanceSummary("uuid-peer", 1))
 		f.advance(retention)
-		performanceStreamOpen(t, done, 200*time.Millisecond)
-		if len(f.summaries(t)) != 1 {
-			t.Fatal("expired publication was sent again")
-		}
-		// Keepalives cannot keep a sample fresh past retention.
-		f.advance(performanceStaleAfter)
-		time.Sleep(100 * time.Millisecond)
-		f.manager.performance.sweep()
-		statuses := f.statuses(t)
-		if last := statuses[len(statuses)-1]; last.Status != "stale" {
-			t.Fatalf("statuses = %+v, want stale after retention", statuses)
-		}
 	})
+}
+
+// A frame with an older revision than the receipt holds is ignored, and the
+// keepalives after it do not refresh that newer receipt.
+func TestPerformanceStreamOlderRevisionDoesNotRefresh(t *testing.T) {
+	f := newPerformanceFixture(t)
+	if code := f.post(t, performanceSummary("uuid-peer", 5)); code != http.StatusOK {
+		t.Fatalf("initial status = %d", code)
+	}
+	performanceStreamServe(t, f, performanceLines(performanceLine(t, performanceSummary("uuid-peer", 1), 0)))
+	done, _ := performanceSubscribe(t, f)
+	performanceStreamOpen(t, done, 100*time.Millisecond)
+	f.advance(performanceStatusRefresh)
+	time.Sleep(100 * time.Millisecond)
+	if n := len(f.statuses(t)); n != 1 {
+		t.Fatalf("statuses = %d, want only the initial fresh status", n)
+	}
+	f.advance(performanceStaleAfter)
+	time.Sleep(100 * time.Millisecond)
+	f.manager.performance.sweep()
+	statuses := f.statuses(t)
+	if len(statuses) != 2 || statuses[1].Status != "stale" {
+		t.Fatalf("statuses = %+v, want stale behind an older-revision stream", statuses)
+	}
+}
+
+// consumeStream reports a healthy stream only when it delivered lines and did
+// not end on a refused or oversized frame, so refusals keep backing off.
+func TestPerformanceStreamHealthDrivesBackoff(t *testing.T) {
+	test := func(name string, want bool, lines ...string) {
+		t.Run(name, func(t *testing.T) {
+			f := newPerformanceFixture(t)
+			performanceStreamServe(t, f, performanceLinesThen(false, lines...))
+			performanceAddPeer(f.manager)
+			if got := f.manager.performance.consumeStream(context.Background(), "uuid-peer"); got != want {
+				t.Fatalf("healthy = %v, want %v", got, want)
+			}
+		})
+	}
+	test("accepted then closed", true, performanceLine(t, performanceSummary("uuid-peer", 1), 0), "null")
+	test("keepalive only", true, "null")
+	test("refused frame", false, performanceLine(t, performanceSummary("uuid-third-party", 1), 0))
+	test("malformed frame", false, `{"summary":{},"elapsedMs":-1}`)
+	test("over line limit", false, `{"summary":"`+strings.Repeat("x", performanceStreamMaxLine)+`","elapsedMs":0}`)
+	test("no line", false)
 }
 
 func TestPerformanceStreamKeepaliveRefreshesFreshness(t *testing.T) {
@@ -541,6 +603,10 @@ func TestPerformanceSubscriptionsFollowAdmittedTargets(t *testing.T) {
 	if len(active) != 0 {
 		t.Fatal("revoked peer kept its subscription")
 	}
+	// The cancelled keepStream returns from its backoff wait at once; give it
+	// time to stop reading the cluster directory before TempDir cleanup.
+	cancel()
+	time.Sleep(100 * time.Millisecond)
 }
 
 func TestPerformanceStreamDefaults(t *testing.T) {

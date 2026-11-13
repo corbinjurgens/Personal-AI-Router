@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"nvpair-shared/clustertrust"
@@ -98,7 +99,11 @@ func (s *Server) handlePerformanceStream(w http.ResponseWriter, r *http.Request)
 
 // serveStream writes a frame for each hub token, the latest at once, built
 // from snapshotForSend at that moment so elapsedMs is current. A withheld
-// summary writes nothing and keeps the stream open; keepalives continue.
+// summary writes nothing. Before any frame was sent the stream stays open with
+// keepalives. Once one was sent, the stream ends at the first line (frame or
+// keepalive) while the summary is withheld: the subscriber's keepalives would
+// otherwise keep that summary fresh, so ending the stream lets the receiver's
+// 90 s stale rule apply, as withholding the former heartbeat did.
 func (p *performanceRelay) serveStream(w http.ResponseWriter, r *http.Request, authorize func() bool) {
 	tokens, unsubscribe, ok := p.hub.Subscribe()
 	if !ok {
@@ -108,6 +113,7 @@ func (p *performanceRelay) serveStream(w http.ResponseWriter, r *http.Request, a
 	defer unsubscribe()
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
+	var sent atomic.Bool
 	frames := make(chan performanceFrame)
 	go func() {
 		for {
@@ -122,11 +128,22 @@ func (p *performanceRelay) serveStream(w http.ResponseWriter, r *http.Request, a
 			}
 			select {
 			case frames <- performanceFrame{Summary: raw, ElapsedMs: elapsed}:
+				sent.Store(true)
 			case <-ctx.Done():
 				return
 			}
 		}
 	}()
+	current := func() bool {
+		if !authorize() {
+			return false
+		}
+		if !sent.Load() {
+			return true
+		}
+		raw, _ := p.snapshotForSend()
+		return raw != nil
+	}
 	// Send the response headers now: with nothing published (or a withheld
 	// summary) the first line is a keepalive, which would otherwise arrive only
 	// as the subscriber's connect bound expires.
@@ -138,7 +155,7 @@ func (p *performanceRelay) serveStream(w http.ResponseWriter, r *http.Request, a
 	clustertrust.ServeSnapshotStream(w, r, clustertrust.SnapshotStreamServer[performanceFrame]{
 		Keepalive:    performanceStreamKeepalive,
 		WriteTimeout: performanceStreamWriteTimeout,
-		Authorize:    authorize,
+		Authorize:    current,
 		Updates:      frames,
 	})
 }
@@ -204,7 +221,8 @@ func (p *performanceRelay) syncStreams(ctx context.Context, active map[string]co
 }
 
 // keepStream reads uuid's stream until ctx ends, reconnecting after 1 s,
-// doubling to performanceStreamBackoffMax while attempts deliver no line.
+// doubling to performanceStreamBackoffMax while attempts fail or end on a
+// refused frame.
 func (p *performanceRelay) keepStream(ctx context.Context, uuid string) {
 	backoff := time.Second
 	for ctx.Err() == nil {
@@ -221,7 +239,8 @@ func (p *performanceRelay) keepStream(ctx context.Context, uuid string) {
 }
 
 // consumeStream opens and reads one performance stream from uuid and reports
-// whether any line arrived. The stream is bound to the peer's admission
+// whether it was healthy: at least one line arrived and it did not end on a
+// refused or undecodable frame. The stream is bound to the peer's admission
 // identity and route generation at connect: either changing ends it.
 func (p *performanceRelay) consumeStream(parent context.Context, uuid string) bool {
 	ctx, cancel := context.WithCancel(parent)
@@ -264,12 +283,14 @@ func (p *performanceRelay) consumeStream(parent context.Context, uuid string) bo
 		OnFrame: func(frame performanceFrame) error {
 			received = true
 			code, message := p.applySummary(authority, frame.Summary, frame.ElapsedMs)
-			accepted = code == http.StatusOK
-			if !accepted {
+			if code != http.StatusOK {
 				// The reconnect starts with the full summary again, which is
 				// also the retry for a broker write failure or full receiver.
 				return fmt.Errorf("summary refused: %d %s", code, message)
 			}
+			// An ignored older revision leaves the receipt on a newer one
+			// from an earlier stream; keepalives must not refresh that.
+			accepted = message != performanceOlderRevision
 			return nil
 		},
 		OnKeepalive: func() {
@@ -281,6 +302,7 @@ func (p *performanceRelay) consumeStream(parent context.Context, uuid string) bo
 	})
 	if err != nil && !errors.Is(err, context.Canceled) {
 		slog.Debug("performance stream ended", "nodeId", uuid, "err", err)
+		return false
 	}
 	return received
 }
