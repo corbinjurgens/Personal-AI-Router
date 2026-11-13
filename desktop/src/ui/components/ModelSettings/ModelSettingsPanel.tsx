@@ -397,7 +397,7 @@ export default function ModelSettingsPanel({
                                         )
                                         .map(item => ({
                                             value: item.key,
-                                            children: `${item.displayName} (${item.key}) · Context ${settingsEntries[engineSettingsKey({ nodeId: targetId, engine: 'llamacpp' })]?.snapshot?.settings.modelLoads?.find(load => load.profileKey === item.key)?.resolved?.perSlotContext ?? 'Unknown'}`
+                                            children: `${item.displayName} (${item.key}) · Context ${settingsEntries[engineSettingsKey({ nodeId: targetId, engine: 'llamacpp' })]?.snapshot?.settings.modelLoads?.find(load => load.profileKey === item.key)?.resolved?.perSlotContext ?? item.contextTokens ?? 'Unknown'}`
                                         }))}
                                     onValueChange={value => {
                                         const found = profiles.value.find(

@@ -462,7 +462,8 @@ describe('composed model settings', () => {
                         key: 'second-profile',
                         displayName: 'Second profile',
                         engine: 'llamacpp',
-                        model: 'owner/second:Q8_0'
+                        model: 'owner/second:Q8_0',
+                        contextTokens: 65536
                     }
                 ]
             })
@@ -475,8 +476,16 @@ describe('composed model settings', () => {
         const trigger = label && document.getElementById(label.htmlFor)
         if (!(trigger instanceof HTMLButtonElement)) throw new Error('Missing profile selector')
         await act(async () => trigger.click())
-        const option = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]')).find(
-            item => item.textContent?.trim() === 'Second profile (second-profile) · Context Unknown'
+        const options = Array.from(
+            document.querySelectorAll<HTMLElement>('[role="option"]')
+        ).filter(item => item.textContent?.includes(' · Context '))
+        // Without a stored load, the label falls back to the policy profile's declared context.
+        expect(options.map(item => item.textContent?.trim())).toEqual([
+            'llama-profile (llama-profile) · Context Unknown',
+            'Second profile (second-profile) · Context 65536'
+        ])
+        const option = options.find(
+            item => item.textContent?.trim() === 'Second profile (second-profile) · Context 65536'
         )
         if (!option) throw new Error('Missing second profile option')
         await act(async () => option.click())

@@ -18,6 +18,8 @@ interface ModelSettingsProfile extends NodeModelReference {
     options: JsonMap
     mode: 'defaults' | 'enforced'
     localOnly: boolean
+    /** The context the policy profile says this node serves the model with. */
+    contextTokens?: number
 }
 
 /** Mirror nodepolicy.ValidateProfileKey, including its broad colon reservation. */
@@ -246,7 +248,12 @@ export function parseModelSettings(text: string): Result<ModelSettingsProfile[]>
             key: profile.key,
             options: object(profile.requestOptions) ? profile.requestOptions : {},
             mode: profile.requestOptionsMode === 'enforced' ? 'enforced' : 'defaults',
-            localOnly: profile.localOnly === true
+            localOnly: profile.localOnly === true,
+            ...(typeof profile.contextTokens === 'number' &&
+            Number.isSafeInteger(profile.contextTokens) &&
+            profile.contextTokens > 0
+                ? { contextTokens: profile.contextTokens }
+                : {})
         })
     }
     return { ok: true, value: profiles }
