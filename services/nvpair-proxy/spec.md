@@ -957,6 +957,20 @@ cannot supply trusted disposition: ingress removes their values and publishes
 its own after body close at EOF. The trailer supplies no engine-termination or
 strict-admission release evidence.
 
+**Interim responses and `Expect`.** Only the final response is framed, once.
+Every hop buffers the request body before dispatch, so net/http answers a
+client's `Expect: 100-continue` itself on that first body read, and the
+replayed outbound request drops `Expect` (`setReplayBody`): neither the peer
+nor the engine is asked for an interim answer. A 1xx an engine still sends,
+which `httputil.ReverseProxy` relays with `WriteHeader`, passes through the
+response sink and status capture as informational: it never becomes the
+recorded status, and the final status still removes the framing header before
+net/http could repeat it as a trailer value; otherwise the origin would receive
+two values and reject the response as missing or malformed disposition.
+ReverseProxy clears the response header map after relaying a 1xx, so headers
+set before proxying (the routing listener's CORS headers) are lost when an
+engine sends an unsolicited 1xx; no supported engine does.
+
 Origin and destination dispatch explicitly set `Accept-Encoding: identity` on
 the supported inference routes, even when the client requests compression.
 The explicit value prevents Go's transport from negotiating gzip itself. A

@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"unsafe"
@@ -53,6 +54,35 @@ func TestResponseSink(t *testing.T) {
 		owner.close()
 		if root.used != 0 || root.live != 0 || sink.bootstrap != nil {
 			t.Fatalf("sink cleanup retained storage: used=%d live=%d borrower=%v", root.used, root.live, sink.bootstrap != nil)
+		}
+	})
+
+	t.Run("interim status is relayed but not recorded", func(t *testing.T) {
+		w := &responseSinkWriter{header: make(http.Header)}
+		sink := newResponseSink(w, nil)
+		sink.WriteHeader(http.StatusContinue)
+		w.header.Set(peerStreamFramingHeader, "v1")
+		sink.WriteHeader(http.StatusOK)
+		if got := sink.result().Status; got != http.StatusOK {
+			t.Fatalf("recorded status = %d, want final 200", got)
+		}
+		if !slices.Equal(w.statuses, []int{http.StatusContinue, http.StatusOK}) {
+			t.Fatalf("relayed statuses = %v, want interim then final", w.statuses)
+		}
+		if w.header.Get(peerStreamFramingHeader) != "" {
+			t.Fatal("framing header survived the final status, so net/http would repeat it as a trailer value")
+		}
+	})
+
+	t.Run("status capture records only the final status", func(t *testing.T) {
+		sc := &statusCapture{ResponseWriter: httptest.NewRecorder()}
+		sc.WriteHeader(http.StatusEarlyHints)
+		if sc.status != 0 {
+			t.Fatalf("captured interim status %d", sc.status)
+		}
+		sc.WriteHeader(http.StatusSwitchingProtocols)
+		if sc.status != http.StatusSwitchingProtocols {
+			t.Fatalf("captured status = %d, want final 101", sc.status)
 		}
 	})
 

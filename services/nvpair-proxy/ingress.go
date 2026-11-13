@@ -579,8 +579,12 @@ func setPeerStreamFraming(resp *http.Response, s originStreamRequest) {
 }
 
 // setReplayBody installs a buffered body on an outbound request, keeping its
-// length consistent with what will actually be sent.
+// length consistent with what will actually be sent. The body was already
+// received, so this hop has met any Expect: 100-continue itself: net/http
+// sends the client 100 Continue on the first body read. Forwarding the
+// expectation would only make the engine or peer answer an interim 1xx.
 func setReplayBody(r *http.Request, body []byte) {
+	r.Header.Del("Expect")
 	if body == nil {
 		r.Body = http.NoBody
 		r.ContentLength = 0
