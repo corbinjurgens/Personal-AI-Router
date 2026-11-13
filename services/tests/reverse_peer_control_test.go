@@ -374,6 +374,10 @@ func newTask1Observer(t *testing.T, target *task1Node, service noderec.ServiceKe
 			if response.Request.URL.Path == "/v1/node-info/events" {
 				return nil
 			}
+			// The model inventory is a live stream, not a finite reply.
+			if response.Request.URL.Path == "/v1/models/events" {
+				return nil
+			}
 			if response.StatusCode == http.StatusSwitchingProtocols {
 				o.mu.Lock()
 				o.readyUpgrades[peer]++
