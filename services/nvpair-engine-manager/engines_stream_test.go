@@ -117,18 +117,16 @@ func TestEnginesPublisherRebuildsOnlyWithReaders(t *testing.T) {
 		t.Fatalf("status refreshed after the last reader left: %d -> %d", before, n)
 	}
 
-	// A change made while no reader was open reaches the next reader: the
-	// stored list first, then the current one from the rebuild it triggers.
+	// A change made while no reader was open reaches the next reader through
+	// the rebuild it triggers. The stored list from before the idle period may
+	// come first, unless the rebuild replaced it before the reader took it.
 	list.set(EngineStatus{Engine: "llamacpp", Installed: true, Running: true})
 	ch, closeSub, ok = p.subscribe()
 	if !ok {
 		t.Fatal("second subscribe refused")
 	}
 	defer closeSub()
-	if running(ch) {
-		t.Fatal("stored frame should be the list from before the idle period")
-	}
-	if !running(ch) {
+	if !running(ch) && !running(ch) {
 		t.Fatal("rebuild after subscribe did not send the current list")
 	}
 }
