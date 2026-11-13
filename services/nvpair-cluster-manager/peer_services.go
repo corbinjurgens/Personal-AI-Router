@@ -158,7 +158,6 @@ func (m *Manager) handlePeerState(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "admission required", http.StatusForbidden)
 		return
 	}
-	m.notePeerReachable(uuid)
 	if !m.peerState.available() {
 		http.Error(w, "self services unavailable", http.StatusServiceUnavailable)
 		return
@@ -174,6 +173,9 @@ func (m *Manager) handlePeerState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer unsubscribe()
+	// Only an accepted stream is reachability evidence: counting a 503 would
+	// let two not-yet-ready members reset and wake each other's backoff.
+	m.notePeerReachable(uuid)
 	w.Header().Set("Cache-Control", "no-store")
 	clustertrust.ServeSnapshotStream(w, r, clustertrust.SnapshotStreamServer[noderec.PeerStateFrame]{
 		Keepalive:    peerStateKeepalive,
@@ -214,9 +216,10 @@ type peerReachableSet struct {
 }
 
 // notePeerReachable records evidence that uuid is reachable again (a reverse
-// session, an authenticated inbound request, or an accepted roster exchange).
-// peerStateLoop then resets that member's reconnect backoff and redials it at
-// once, so the 30 s cap applies only while a member stays unreachable.
+// session, an accepted inbound peer-state stream, or an accepted roster
+// exchange). peerStateLoop then resets that member's reconnect backoff and
+// redials it at once, so the 30 s cap applies only while a member stays
+// unreachable.
 func (m *Manager) notePeerReachable(uuid string) {
 	m.peerReachable.mu.Lock()
 	if m.peerReachable.uuids == nil {

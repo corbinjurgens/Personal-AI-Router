@@ -1840,9 +1840,30 @@ func TestPeerStateReachableEvidenceResetsBackoff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	inbound := httptest.NewRequest(http.MethodGet, peerStatePath, nil)
-	inbound.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}}
-	p.a.handlePeerState(httptest.NewRecorder(), inbound) // a has no descriptor: 503 at once
+	inbound := func(ctx context.Context) *http.Request {
+		r := httptest.NewRequestWithContext(ctx, http.MethodGet, peerStatePath, nil)
+		r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}}
+		return r
+	}
+	// A refused request is not evidence: a has no descriptor yet, so it
+	// answers 503, and two not-ready members must not wake each other.
+	refused := httptest.NewRecorder()
+	p.a.handlePeerState(refused, inbound(context.Background()))
+	if refused.Code != http.StatusServiceUnavailable {
+		t.Fatalf("not-ready inbound status=%d, want 503", refused.Code)
+	}
+	time.Sleep(1500 * time.Millisecond)
+	if got := p.requests.Load(); got != 1 {
+		t.Fatalf("stream requests after a refused inbound request = %d, want 1", got)
+	}
+	// An accepted inbound stream is evidence.
+	setDescriptorSelf(t, p.a)
+	setReverseServices(t, p.a, 1, noderec.RegisterParams{Service: noderec.ServiceNodeInfo, Port: 23442})
+	p.a.rebuildPeerState()
+	serveCtx, stopServe := context.WithCancel(context.Background())
+	served := make(chan struct{})
+	go func() { defer close(served); p.a.handlePeerState(httptest.NewRecorder(), inbound(serveCtx)) }()
+	t.Cleanup(func() { stopServe(); <-served })
 	if !waitRequests(2, 3*time.Second) {
 		t.Fatalf("stream did not redial within 3 s of reachability evidence (requests=%d)", p.requests.Load())
 	}
