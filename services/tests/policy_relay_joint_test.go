@@ -441,9 +441,11 @@ func newPolicyJointFixture(t *testing.T, options ...policyJointFixtureOption) *p
 	jointCopyExecutable(t, self, f.scanner)
 	// Hold all reservations together so the three normal listener ports are
 	// distinct; release them immediately before launching the owned processes.
+	// Child processes bind these by number, so they come from the subprocess
+	// allocator rather than from a loopback :0 listener.
 	var reservations []net.Listener
 	for range 3 {
-		listener := jointListener(t)
+		listener := listenFixtureServicePort(t)
 		reservations = append(reservations, listener)
 		f.ports = append(f.ports, listener.Addr().(*net.TCPAddr).Port)
 	}
