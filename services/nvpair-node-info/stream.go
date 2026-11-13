@@ -27,7 +27,8 @@ const (
 
 	// staleGPUSampleAge: once the GPU sample is this old (a stalled collector
 	// keeps the last values), every change of msSince publishes, so consumers
-	// see the age pass the scheduler's 10 s freshness rule.
+	// see the age pass the scheduler's 10 s freshness rule. Falling back under
+	// it publishes too, so consumers that age a stale frame see the recovery.
 	staleGPUSampleAge = 5 * time.Second
 
 	gpuUtilizationStep = 5  // percentage points
@@ -43,6 +44,7 @@ func nodeInfoChanged(published, candidate NodeInfoResponse) bool {
 		published.HostUUID != candidate.HostUUID ||
 		published.TelemetryValid != candidate.TelemetryValid ||
 		(candidate.TelemetryValid && candidate.MSSince >= staleGPUSampleAge.Milliseconds() && candidate.MSSince != published.MSSince) ||
+		(candidate.TelemetryValid && published.MSSince >= staleGPUSampleAge.Milliseconds() && candidate.MSSince < staleGPUSampleAge.Milliseconds()) ||
 		!sameOptionalString(published.ClusterUUID, candidate.ClusterUUID) ||
 		memoryObservationChanged(published.MemoryObservation, candidate.MemoryObservation) {
 		return true

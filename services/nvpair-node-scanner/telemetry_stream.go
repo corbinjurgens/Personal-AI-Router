@@ -89,13 +89,12 @@ func (e liveNodeInfo) liveAt(now time.Time) bool {
 }
 
 // isStreamPeer reports whether node's telemetry arrives by stream: a pinned
-// cluster peer other than self that advertises node-info. The opt-in TLS
-// node-info client keeps its pull, because the stream is plain like every
-// paired node-info read.
+// cluster peer other than self that advertises node-info. The stream is plain,
+// like every paired node-info read.
 func (d *daemon) isStreamPeer(node noderec.DirectoryNode, self string) bool {
 	_, advertised := node.Services[noderec.ServiceNodeInfo]
 	return advertised && node.HostUUID != self && node.ClusterUUID != "" &&
-		d.tlsHTTP == nil && d.mesh != nil && d.mesh.HasPin(node.ClusterUUID)
+		d.mesh != nil && d.mesh.HasPin(node.ClusterUUID)
 }
 
 func (d *daemon) selfHostUUID() string {
@@ -285,10 +284,14 @@ func (d *daemon) applyNodeInfoFrame(hostUUID string, port int, id uint64, info N
 
 	s := &d.nodeInfoStreams
 	s.mu.Lock()
-	if s.live == nil {
-		s.live = make(map[string]liveNodeInfo)
+	// A cancelled stream finishing its last frame must not replace the frame
+	// of the stream that superseded it.
+	if s.active[hostUUID].id == id {
+		if s.live == nil {
+			s.live = make(map[string]liveNodeInfo)
+		}
+		s.live[hostUUID] = liveNodeInfo{streamID: id, info: info, frameAt: now, lineAt: now, current: current}
 	}
-	s.live[hostUUID] = liveNodeInfo{streamID: id, info: info, frameAt: now, lineAt: now, current: current}
 	s.mu.Unlock()
 
 	d.applyReportedClusterIdentity(hostUUID, info.ClusterUUID)

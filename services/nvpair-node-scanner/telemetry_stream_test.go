@@ -221,6 +221,37 @@ func TestNodeInfoStreamKeepaliveAgesStaleSample(t *testing.T) {
 	}
 }
 
+func TestNodeInfoStreamFreshFrameEndsStaleAgeing(t *testing.T) {
+	f := newStreamPeerFixture(t)
+	stale := streamFixtureFrame("peer")
+	stale.MSSince = 6000
+	f.first.Store(&stale)
+	f.supervise(t)
+	f.nextTelemetry(t)
+	fresh := streamFixtureFrame("peer")
+	fresh.MSSince = 200
+	line, err := json.Marshal(fresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.lines <- string(line)
+	if got, _ := f.nextTelemetry(t); got.MSSince < 200 || got.MSSince > 1000 {
+		t.Fatalf("recovered frame age = %d", got.MSSince)
+	}
+	f.lines <- "null"
+	if got, _ := f.nextTelemetry(t); got.MSSince != 0 {
+		t.Fatalf("keepalive after a recovered frame reported age %d, want 0", got.MSSince)
+	}
+}
+
+func TestNodeInfoStreamSupersededFrameIsNotCached(t *testing.T) {
+	f := newStreamPeerFixture(t)
+	f.d.applyNodeInfoFrame("peer", f.port, 7, streamFixtureFrame("peer"), func() bool { return true })
+	if _, ok := f.d.nodeInfoStreams.live["peer"]; ok {
+		t.Fatal("a frame from a stream that is no longer active was cached")
+	}
+}
+
 func TestNodeInfoStreamIdleEndsStream(t *testing.T) {
 	shortenNodeInfoStreamIdle(t, 300*time.Millisecond)
 	f := newStreamPeerFixture(t)
@@ -281,10 +312,9 @@ func TestNodeInfoStreamLeavesOtherNodesOnPull(t *testing.T) {
 		if f.pulls.Load() != 1 {
 			t.Fatalf("unpinned clustered node pulls = %d, want 1", f.pulls.Load())
 		}
-		ctx, workers := f.supervise(t)
-		f.d.superviseNodeInfoStreams(ctx, f.d.selfHostUUID(), workers)
-		if f.streams.Load() != 0 {
-			t.Fatal("unpinned node was streamed")
+		f.supervise(t)
+		if active := len(f.d.nodeInfoStreams.active); active != 0 {
+			t.Fatalf("unpinned node was streamed: %d active streams", active)
 		}
 	})
 	t.Run("self over loopback", func(t *testing.T) {
@@ -299,8 +329,8 @@ func TestNodeInfoStreamLeavesOtherNodesOnPull(t *testing.T) {
 			t.Fatalf("self pulls = %d, want 1", f.pulls.Load())
 		}
 		f.supervise(t)
-		if f.streams.Load() != 0 {
-			t.Fatal("self was streamed")
+		if active := len(f.d.nodeInfoStreams.active); active != 0 {
+			t.Fatalf("self was streamed: %d active streams", active)
 		}
 	})
 }

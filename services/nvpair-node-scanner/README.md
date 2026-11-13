@@ -92,11 +92,15 @@ Concretely, the daemon:
   service build, memory observation, telemetry) and its reported `clusterUuid`
   is applied at once. A keepalive re-emits the last frame's maximum GPU
   utilization as a fresh sample (`msSince` 0, no memory fields), so the
-  scheduler still gets a sample every 2 s; after a frame whose valid GPU sample
-  was already 5 s old, re-emissions keep ageing from that frame instead.
+  scheduler still gets a sample every 2 s. That understates the age by up to
+  5 s at the start of a collector stall, within the scheduler's 10 s rule:
+  once a valid GPU sample is 5 s old node-info publishes a frame on every
+  `msSince` change, re-emissions keep ageing from that frame, and the frame
+  node-info sends when the sample is fresh again ends the ageing.
   Every line rechecks that the route captured at connect is current and that
-  the node is still a stream peer. Reconnects wait 2 s doubling to 30 s,
-  resetting after a stream that delivered a frame and stayed open 5 s.
+  the node is still a stream peer. A reconnect waits 2 s after a stream that
+  delivered a frame and stayed open 5 s, and otherwise 4 s doubling to 30 s
+  over consecutive failures.
 - **Annotates trust:** with `--cluster-dir`, a browsed peer whose `cluster-uuid=` this node holds a pin for is marked `trusted` (via `nvpair-shared/clustertrust`). The annotation is re-derived on `discovery:reload-trust`, which the broker sends when `nvpair-cluster-manager` reports a pin-set change, as well as when a peer's mDNS record changes. Both triggers are needed: a peer that was already advertising when this node joined never moves its record again, so the browse path alone would leave it annotated from before this node's own pins existed. A change emits one `discovery:node-updated`; a reload that finds nothing to change is silent.
 - **Advertises live membership:** the same reload re-derives this node's own `cluster-uuid=` from the cluster dir and re-advertises when it differs from what is being published, so joining or leaving a cluster takes effect without a restart.
 - **Anti-flap:** a node has to be absent from every scan for the browser's full miss threshold (twelve scans at 5s, a full minute) before it is evicted, and from ~15s in it is TCP-probed on its advertised service ports on *every* scan — any answer resets the counter and recovers it outright. So neither a momentary multicast gap nor a sustained one drops a healthy node, and eviction rests on a run of ~10 consecutive failures rather than one dial on the deadline. The window is sized deliberately: a node saturated by its own inference load starves its control plane, so it stops answering mDNS *and* stops accepting probe connections for as long as the load runs, while still serving requests. Two signals can also vouch for a node without any probe — a node-info enrichment in the last 10s, and inference response bytes from it in the last 60s (`discovery:node-activity`, relayed by the broker from whichever proxy saw the bytes). The second is the only liveness evidence that gets stronger the busier a node is.
