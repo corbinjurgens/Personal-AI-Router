@@ -9,8 +9,8 @@ require (
 	github.com/grandcat/zeroconf v1.0.0
 	github.com/miekg/dns v1.1.55
 	github.com/shirou/gopsutil/v4 v4.26.7
-	golang.org/x/net v0.58.0
-	golang.org/x/sys v0.47.0
+	golang.org/x/net v0.62.0
+	golang.org/x/sys v0.49.0
 	nvpair-shared v0.0.0-00010101000000-000000000000
 	nvpair-tui v0.0.0-00010101000000-000000000000
 )
@@ -29,7 +29,7 @@ require (
 	github.com/tklauser/go-sysconf v0.3.16 // indirect
 	github.com/tklauser/numcpus v0.11.0 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
-	golang.org/x/mod v0.38.0 // indirect
-	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/tools v0.48.0 // indirect
+	golang.org/x/mod v0.41.0 // indirect
+	golang.org/x/sync v0.24.0 // indirect
+	golang.org/x/tools v0.51.0 // indirect
 )

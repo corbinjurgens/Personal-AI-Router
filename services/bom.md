@@ -36,8 +36,8 @@ As of the mDNS dedup, `grandcat/zeroconf`, `miekg/dns`, and `golang.org/x/net` a
 | `github.com/jaypipes/ghw` | v0.24.0 | nvpair-node-info | Apache-2.0 | [COPYING](https://github.com/jaypipes/ghw/blob/main/COPYING) |
 | `github.com/miekg/dns` | v1.1.55 / v1.1.72 | nvpair-proxy, nvpair-node-scanner, nvpair-errors, nvpair-cluster-manager | BSD-3-Clause | [LICENSE](https://github.com/miekg/dns/blob/master/LICENSE) |
 | `github.com/shirou/gopsutil/v4` | v4.26.7 | nvpair-node-info (macOS), nvpair-service | BSD-3-Clause | [LICENSE](https://github.com/shirou/gopsutil/blob/master/LICENSE) |
-| `golang.org/x/net` | v0.58.0 | nvpair-proxy, nvpair-node-scanner, nvpair-errors, nvpair-cluster-manager | BSD-3-Clause | [LICENSE](https://cs.opensource.google/go/x/net/+/master:LICENSE) |
-| `golang.org/x/sys` | v0.47.0 | nvpair-node-info, nvpair-cluster-manager, nvpair-engine-manager, nvpair-service | BSD-3-Clause | [LICENSE](https://cs.opensource.google/go/x/sys/+/master:LICENSE) |
+| `golang.org/x/net` | v0.62.0 | nvpair-proxy, nvpair-node-scanner, nvpair-errors, nvpair-cluster-manager | BSD-3-Clause | [LICENSE](https://cs.opensource.google/go/x/net/+/master:LICENSE) |
+| `golang.org/x/sys` | v0.49.0 / v0.50.0 | nvpair-node-info, nvpair-cluster-manager, nvpair-engine-manager, nvpair-service | BSD-3-Clause | [LICENSE](https://cs.opensource.google/go/x/sys/+/master:LICENSE) |
 | `howett.net/plist` | v1.0.2-0.20250314 | nvpair-node-info | BSD-2-Clause | [LICENSE](https://github.com/DHowett/go-plist/blob/main/LICENSE) |
 
 ## Transitive (Indirect) Dependencies
@@ -74,11 +74,11 @@ As of the mDNS dedup, `grandcat/zeroconf`, `miekg/dns`, and `golang.org/x/net` a
 | `github.com/xo/terminfo` | v0.0.0-20220910002029 | colorprofile | MIT | [LICENSE](https://github.com/xo/terminfo/blob/master/LICENSE) |
 | `github.com/yusufpapurcu/wmi` | v1.2.4 | ghw | MIT | [LICENSE](https://github.com/yusufpapurcu/wmi/blob/master/LICENSE) |
 | `github.com/smallnest/ringbuffer` | v0.0.0-20241116012123-461381446e3d | gguf-parser-go | MIT | [LICENSE](https://github.com/smallnest/ringbuffer/blob/461381446e3d/LICENSE) |
-| `golang.org/x/crypto` | v0.56.0 | gguf-parser-go | BSD-3-Clause | [LICENSE](https://cs.opensource.google/go/x/crypto/+/v0.56.0:LICENSE) |
+| `golang.org/x/crypto` | v0.59.0 | gguf-parser-go | BSD-3-Clause | [LICENSE](https://cs.opensource.google/go/x/crypto/+/v0.59.0:LICENSE) |
 | `golang.org/x/exp` | v0.0.0-20241108190413-2d47ceb2692f | gguf-parser-go | BSD-3-Clause | [LICENSE](https://cs.opensource.google/go/x/exp/+/2d47ceb2692f:LICENSE) |
 | `golang.org/x/mod` | v0.12.0 / v0.17.0 / v0.31.0 | zeroconf (via miekg/dns) | BSD-3-Clause | [LICENSE](https://cs.opensource.google/go/x/mod/+/master:LICENSE) |
-| `golang.org/x/sync` | v0.9.0 / v0.10.0 / v0.19.0 / v0.22.0 | gguf-parser-go, zeroconf (via miekg/dns) | BSD-3-Clause | [LICENSE](https://cs.opensource.google/go/x/sync/+/master:LICENSE) |
-| `golang.org/x/sys` | v0.47.0 | go-winio, zeroconf, ghw, charmbracelet/x/term | BSD-3-Clause | [LICENSE](https://cs.opensource.google/go/x/sys/+/master:LICENSE) |
-| `golang.org/x/text` | v0.41.0 | nvpair-shared/nodename (NFC), charmbracelet/x/ansi | BSD-3-Clause | [LICENSE](https://cs.opensource.google/go/x/text/+/master:LICENSE) |
+| `golang.org/x/sync` | v0.24.0 | gguf-parser-go, zeroconf (via miekg/dns) | BSD-3-Clause | [LICENSE](https://cs.opensource.google/go/x/sync/+/master:LICENSE) |
+| `golang.org/x/sys` | v0.49.0 / v0.50.0 | go-winio, zeroconf, ghw, charmbracelet/x/term | BSD-3-Clause | [LICENSE](https://cs.opensource.google/go/x/sys/+/master:LICENSE) |
+| `golang.org/x/text` | v0.43.0 | nvpair-shared/nodename (NFC), charmbracelet/x/ansi | BSD-3-Clause | [LICENSE](https://cs.opensource.google/go/x/text/+/master:LICENSE) |
 | `golang.org/x/tools` | v0.11.0 / v0.21.1-0.20240508 / v0.40.0 | zeroconf (via miekg/dns) | BSD-3-Clause | [LICENSE](https://cs.opensource.google/go/x/tools/+/master:LICENSE) |
 | `gopkg.in/yaml.v3` | v3.0.1 | ghw | MIT + Apache-2.0 | [LICENSE](https://github.com/go-yaml/yaml/blob/v3/LICENSE) |

@@ -207,12 +207,13 @@ binaries across the Windows, Linux, and macOS targets. First-party modules
 | `github.com/tklauser/go-sysconf` | v0.3.16 | BSD-3-Clause |
 | `github.com/xo/terminfo` | v0.0.0-20220910002029-abceb7e1c41e | MIT |
 | `github.com/yusufpapurcu/wmi` | v1.2.4 | MIT |
-| `golang.org/x/crypto` | v0.56.0 | BSD-3-Clause |
+| `golang.org/x/crypto` | v0.59.0 | BSD-3-Clause |
 | `golang.org/x/exp` | v0.0.0-20241108190413-2d47ceb2692f | BSD-3-Clause |
-| `golang.org/x/net` | v0.58.0 | BSD-3-Clause |
-| `golang.org/x/sync` | v0.22.0 | BSD-3-Clause |
-| `golang.org/x/sys` | v0.47.0 | BSD-3-Clause |
-| `golang.org/x/text` | v0.41.0 | BSD-3-Clause |
+| `golang.org/x/net` | v0.62.0 | BSD-3-Clause |
+| `golang.org/x/sync` | v0.24.0 | BSD-3-Clause |
+| `golang.org/x/sys` | v0.49.0 | BSD-3-Clause |
+| `golang.org/x/sys` | v0.50.0 | BSD-3-Clause |
+| `golang.org/x/text` | v0.43.0 | BSD-3-Clause |
 | `gopd` | 1.2.0 | MIT |
 | `gopkg.in/yaml.v3` | v3.0.1 | Apache-2.0 |
 | `graceful-fs` | 4.2.11 | ISC |
@@ -8652,7 +8653,7 @@ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-### golang.org/x/crypto v0.56.0
+### golang.org/x/crypto v0.59.0
 
 License: BSD-3-Clause
 
@@ -8724,7 +8725,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-### golang.org/x/net v0.58.0
+### golang.org/x/net v0.62.0
 
 License: BSD-3-Clause
 
@@ -8760,7 +8761,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-### golang.org/x/sync v0.22.0
+### golang.org/x/sync v0.24.0
 
 License: BSD-3-Clause
 
@@ -8796,7 +8797,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-### golang.org/x/sys v0.47.0
+### golang.org/x/sys v0.49.0
 
 License: BSD-3-Clause
 
@@ -8832,7 +8833,43 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-### golang.org/x/text v0.41.0
+### golang.org/x/sys v0.50.0
+
+License: BSD-3-Clause
+
+Repository: https://golang.org/x/sys
+
+```text
+Copyright 2009 The Go Authors.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+   * Redistributions of source code must retain the above copyright
+notice, this list of conditions and the following disclaimer.
+   * Redistributions in binary form must reproduce the above
+copyright notice, this list of conditions and the following disclaimer
+in the documentation and/or other materials provided with the
+distribution.
+   * Neither the name of Google LLC nor the names of its
+contributors may be used to endorse or promote products derived from
+this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+### golang.org/x/text v0.43.0
 
 License: BSD-3-Clause
 

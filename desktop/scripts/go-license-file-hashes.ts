@@ -13,12 +13,12 @@ export const goLicenseFileHashes: Readonly<Record<string, string>> = {
         '283ea6cc2997a1a70da0049e09adf9317bb60ca1b51279b65196b83a69e1996b',
     'github.com/smallnest/ringbuffer@v0.0.0-20241116012123-461381446e3d':
         'da686686dff4164a151d3b04e42b805549e1b0f144f9edda21c828ffecf8fca5',
-    'golang.org/x/crypto@v0.56.0':
+    'golang.org/x/crypto@v0.59.0':
         '22975ebe413674bc619428a26e53412013dccffa69e2f27100dbd8d946fde287',
     'golang.org/x/exp@v0.0.0-20241108190413-2d47ceb2692f':
         '22975ebe413674bc619428a26e53412013dccffa69e2f27100dbd8d946fde287',
     'golang.org/x/sync@v0.9.0': '22975ebe413674bc619428a26e53412013dccffa69e2f27100dbd8d946fde287',
-    'golang.org/x/sync@v0.22.0': '22975ebe413674bc619428a26e53412013dccffa69e2f27100dbd8d946fde287',
+    'golang.org/x/sync@v0.24.0': '22975ebe413674bc619428a26e53412013dccffa69e2f27100dbd8d946fde287',
     'github.com/atotto/clipboard@v0.1.4':
         '0e1f61fe679ee07057fae3afcfab85b7dc9892fd705e9d2e8708230bf4db7b58',
     'github.com/aymanbagabas/go-osc52/v2@v2.0.1':
@@ -89,10 +89,11 @@ export const goLicenseFileHashes: Readonly<Record<string, string>> = {
         '33ff72a8e9e36a4754ecda3f7b7eae0f29d20581d61adb293e12289705876388',
     'github.com/yusufpapurcu/wmi@v1.2.4':
         '896640fcf6e86d56f0f98fd9b71a25dcc1dfad09ce004f3e4bd057124fd60626',
-    'golang.org/x/net@v0.58.0': '22975ebe413674bc619428a26e53412013dccffa69e2f27100dbd8d946fde287',
-    'golang.org/x/sys@v0.47.0': '22975ebe413674bc619428a26e53412013dccffa69e2f27100dbd8d946fde287',
+    'golang.org/x/net@v0.62.0': '22975ebe413674bc619428a26e53412013dccffa69e2f27100dbd8d946fde287',
+    'golang.org/x/sys@v0.49.0': '22975ebe413674bc619428a26e53412013dccffa69e2f27100dbd8d946fde287',
+    'golang.org/x/sys@v0.50.0': '22975ebe413674bc619428a26e53412013dccffa69e2f27100dbd8d946fde287',
     'golang.org/x/text@v0.3.8': '4214d8afcc3620b7fb7aa9c7695e8f659a90011a830caf0e0c72a385d7d3b2a5',
-    'golang.org/x/text@v0.41.0': '22975ebe413674bc619428a26e53412013dccffa69e2f27100dbd8d946fde287',
+    'golang.org/x/text@v0.43.0': '22975ebe413674bc619428a26e53412013dccffa69e2f27100dbd8d946fde287',
     'gopkg.in/yaml.v3@v3.0.1': 'e3b412e52aa52015a205d54eec9f02d78e190d1205e60199ebe57cc29d1c1406',
     'howett.net/plist@v1.0.2-0.20250314012144-ee69052608d9':
         'e6f37b61dbdc2edd85ef16ae7acaedf9f04a929e1fd891de80eb9938994f1c15'

@@ -91,13 +91,12 @@ func managementGrantFixture(t *testing.T, clusterDir, targetUUID, peerUUID strin
 			t.Fatal("fixture identity metadata disagrees with its certificate")
 		}
 	}
-	listener := jointListener(t)
-	port := listener.Addr().(*net.TCPAddr).Port
-	if err := listener.Close(); err != nil {
-		t.Fatal(err)
-	}
+	// Nothing dials this writer's inter-node listener, so it binds port 0
+	// itself. A port chosen here and released before the child binds it can
+	// be taken in between; on Darwin a loopback :0 port can also fail a later
+	// wildcard bind outright.
 	base := filepath.Dir(clusterDir)
-	cm := startTask1Process(t, base, clusterMgrBin, "--config-dir", base, "--port", strconv.Itoa(port))
+	cm := startTask1Process(t, base, clusterMgrBin, "--config-dir", base, "--port", "0")
 	defer cm.stop()
 	identity := decodeResult[cmNodeID](t, cm.call(t, "cluster:get-node-id", nil))
 	if identity.NodeUUID != targetUUID {

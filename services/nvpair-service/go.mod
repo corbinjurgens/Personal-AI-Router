@@ -6,7 +6,7 @@ toolchain go1.27.4
 
 require (
 	github.com/shirou/gopsutil/v4 v4.26.7
-	golang.org/x/sys v0.47.0
+	golang.org/x/sys v0.49.0
 	nvpair-shared v0.0.0-00010101000000-000000000000
 )
 
