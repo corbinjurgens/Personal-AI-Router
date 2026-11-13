@@ -320,6 +320,10 @@ func TestErrorsSnapshotUnavailableFailsClosed(t *testing.T) {
 			f.publishPeer()
 			prepare(t, f)
 			f.ps.handleEvent(context.Background(), f.event)
+			// Wait for the attempt's dials, then give it time to do more.
+			waitFor(t, "the stream attempt", func() bool {
+				return f.directCalls.Load() >= wantDirect && f.reverseCalls.Load() >= wantReverse
+			})
 			settle()
 			assertErrorSnapshot(t, f.subscriber, nil)
 			if got := f.streams.Load(); got != 0 {
@@ -375,8 +379,13 @@ func TestErrorsSnapshotAuthorityChangesDuringSetup(t *testing.T) {
 			f.peer.upsert(localErr("b:one", "node-b", 1000))
 			f.publishPeer()
 			f.ps.handleEvent(context.Background(), f.event)
+			// The authority changes inside the attempt's direct dial.
+			waitFor(t, "the stream attempt", func() bool { return f.directCalls.Load() == 1 })
 			settle()
 			assertErrorSnapshot(t, f.subscriber, nil)
+			if direct := f.directCalls.Load(); direct != 1 {
+				t.Fatalf("direct dials = %d, want 1", direct)
+			}
 			if streams, reverse := f.streams.Load(), f.reverseCalls.Load(); streams != 0 || reverse != 0 {
 				t.Fatalf("changed authority opened a stream: streams=%d reverse=%d, want 0/0", streams, reverse)
 			}
@@ -407,6 +416,7 @@ func TestErrorsSnapshotCancellationBeforeDispatch(t *testing.T) {
 	f.peer.upsert(localErr("b:one", "node-b", 1000))
 	f.publishPeer()
 	f.ps.handleEvent(ctx, f.event)
+	waitFor(t, "the stream attempt", func() bool { return f.directCalls.Load() == 1 })
 	settle()
 	assertErrorSnapshot(t, f.subscriber, nil)
 	if got := f.reverseCalls.Load(); got != 0 {

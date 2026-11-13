@@ -350,6 +350,12 @@ func TestDataPlaneRefusesNonMemberWhenClustered(t *testing.T) {
 	// refused with 403 rather than 405.
 	assertPlaintextRefused(t, errorsStreamURL, dataPlaneErrorsEnvelope)
 	assertForbidden(t, stranger, "https://"+errorsStreamURL, dataPlaneErrorsEnvelope)
+	if resp, err := stranger.Get("https://" + errorsStreamURL); err == nil {
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("unpinned cluster peer opened the errors stream with HTTP %d, want 403", resp.StatusCode)
+		}
+	}
 
 	// Control: the node's real pinned peer IS served, so the assertions above are
 	// rejecting the caller rather than a broken listener. It carries a distinct

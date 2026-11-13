@@ -8,6 +8,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 	"time"
@@ -422,6 +424,42 @@ func TestPeerSyncStreams(t *testing.T) {
 		f.peer.handleReport(nil, mustJSON(t, bTwo))
 		waitErrorSnapshot(t, f.subscriber, []ServiceError{bOne, bTwo})
 		waitFor(t, "a second stream", func() bool { return f.streams.Load() == 2 })
+	})
+
+	t.Run("Resubscribe subscribes to a peer discovered before its pin", func(t *testing.T) {
+		f := newErrorSyncFixture(t)
+		pinPath := filepath.Join(f.ps.clusterDir, "trusted", "node-b.json")
+		pin, err := os.ReadFile(pinPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(pinPath); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		events := make(chan DiscoveryEvent)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			f.ps.Run(ctx, events)
+		}()
+		t.Cleanup(func() {
+			cancel()
+			<-done
+		})
+		f.peer.handleReport(nil, mustJSON(t, bOne))
+		events <- f.event
+		settle()
+		if got := f.streams.Load(); got != 0 {
+			t.Fatalf("unpinned peer streamed %d times", got)
+		}
+		// The pin arrives (as when this node joins the cluster) while discovery
+		// has nothing new to report about the peer.
+		if err := os.WriteFile(pinPath, pin, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		f.ps.Resubscribe()
+		waitErrorSnapshot(t, f.subscriber, []ServiceError{bOne})
 	})
 
 	t.Run("Resubscribe restarts the open streams", func(t *testing.T) {

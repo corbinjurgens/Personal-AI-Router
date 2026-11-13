@@ -90,6 +90,11 @@ type PeerSync struct {
 	// reconnect does not re-confirm an address that is already working.
 	addrs *reach.Chooser
 
+	// discovered is every non-self node discovery last reported, pinned or
+	// not, so a membership change can gate them again. Only the goroutine
+	// calling handleEvent and restartStreams (Run) uses it.
+	discovered map[string]RawNode
+
 	mu         sync.RWMutex
 	peers      map[string]peerTarget // nodeId -> stream destination
 	generation uint64
@@ -107,6 +112,7 @@ func NewPeerSync(mgr *Manager, mesh *clustertrust.Mesh, clusterDir string) *Peer
 		mesh:        mesh,
 		clusterDir:  clusterDir,
 		addrs:       reach.NewChooser(),
+		discovered:  make(map[string]RawNode),
 		peers:       make(map[string]peerTarget),
 		resubscribe: make(chan struct{}, 1),
 	}
@@ -153,8 +159,9 @@ func (ps *PeerSync) resolveRoute(uuid string, service noderec.ServiceKey) (clust
 	}, true
 }
 
-// Resubscribe restarts every peer stream. Called when this node joins or leaves
-// a cluster, because the authority every stream was opened under changed.
+// Resubscribe gates every discovered peer again and restarts every admitted
+// peer's stream. Called when this node joins or leaves a cluster, because the
+// authority every stream was opened under changed.
 // Non-blocking: a pending restart covers this one.
 func (ps *PeerSync) Resubscribe() {
 	select {
@@ -193,38 +200,11 @@ func (ps *PeerSync) handleEvent(ctx context.Context, ev DiscoveryEvent) {
 
 	switch ev.Type {
 	case "discovered", "updated":
-		uuid := clustertrust.ClusterUUIDFromTXT(ev.Node.TXT)
-		// Cluster gate: only sync with a peer this node holds a pin for (a paired
-		// cluster member). An unpinned or unknown peer is dropped — we could
-		// neither verify it nor build a client for it. Refresh first so a cluster
-		// joined, or a peer paired, after startup is recognized without a restart.
-		//
-		// Unconditional, like the ingress gate: HasPin is false for every peer
-		// while this node belongs to no cluster, so an unclustered node keeps an
-		// empty peer set and subscribes to nothing rather than falling back to
-		// plaintext.
-		ps.mesh.Refresh()
-		if !ps.mesh.HasPin(uuid) {
-			ps.dropPeer(ev.Node.ID)
-			slog.Debug("errors peer is not a pinned cluster member; not syncing",
-				"nodeId", ev.Node.ID, "uuid", uuid)
-			return
-		}
-		candidates := peerHostPorts(ev.Node)
-		if len(candidates) == 0 {
-			ps.dropPeer(ev.Node.ID)
-			slog.Warn("peer has no reachable address", "nodeId", ev.Node.ID)
-			return
-		}
-		ps.mu.Lock()
-		defer ps.mu.Unlock()
-		if current, ok := ps.peers[ev.Node.ID]; ok && current.uuid == uuid && slices.Equal(current.candidates, candidates) {
-			return
-		}
-		slog.Info("errors peer discovered", "nodeId", ev.Node.ID, "addresses", candidates, "event", ev.Type)
-		ps.startStreamLocked(ctx, ev.Node.ID, peerTarget{candidates: candidates, uuid: uuid})
+		ps.discovered[ev.Node.ID] = ev.Node
+		ps.applyPeer(ctx, ev.Node, false)
 
 	case "removed":
+		delete(ps.discovered, ev.Node.ID)
 		ps.dropPeer(ev.Node.ID)
 		slog.Info("errors peer removed", "nodeId", ev.Node.ID)
 		// The departed node's errors are no longer current; drop them
@@ -232,6 +212,41 @@ func (ps *PeerSync) handleEvent(ctx context.Context, ev DiscoveryEvent) {
 		// haunting everyone's list.
 		ps.mgr.EvictNode(ev.Node.ID)
 	}
+}
+
+// applyPeer gates one discovered node and starts, keeps or drops its stream.
+// restart replaces a running stream even when nothing about the node changed.
+func (ps *PeerSync) applyPeer(ctx context.Context, node RawNode, restart bool) {
+	uuid := clustertrust.ClusterUUIDFromTXT(node.TXT)
+	// Cluster gate: only sync with a peer this node holds a pin for (a paired
+	// cluster member). An unpinned or unknown peer is dropped — we could
+	// neither verify it nor build a client for it. Refresh first so a cluster
+	// joined, or a peer paired, after startup is recognized without a restart.
+	//
+	// Unconditional, like the ingress gate: HasPin is false for every peer
+	// while this node belongs to no cluster, so an unclustered node keeps an
+	// empty peer set and subscribes to nothing rather than falling back to
+	// plaintext.
+	ps.mesh.Refresh()
+	if !ps.mesh.HasPin(uuid) {
+		ps.dropPeer(node.ID)
+		slog.Debug("errors peer is not a pinned cluster member; not syncing",
+			"nodeId", node.ID, "uuid", uuid)
+		return
+	}
+	candidates := peerHostPorts(node)
+	if len(candidates) == 0 {
+		ps.dropPeer(node.ID)
+		slog.Warn("peer has no reachable address", "nodeId", node.ID)
+		return
+	}
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if current, ok := ps.peers[node.ID]; ok && !restart && current.uuid == uuid && slices.Equal(current.candidates, candidates) {
+		return
+	}
+	slog.Info("errors peer stream starting", "nodeId", node.ID, "addresses", candidates, "restart", restart)
+	ps.startStreamLocked(ctx, node.ID, peerTarget{candidates: candidates, uuid: uuid})
 }
 
 // dropPeer cancels nodeID's stream and forgets the peer. Its entries stay.
@@ -244,14 +259,15 @@ func (ps *PeerSync) dropPeer(nodeID string) {
 	}
 }
 
-// restartStreams replaces every peer's stream with a new one.
+// restartStreams gates every discovered node again under the current cluster
+// authority and gives each admitted one a new stream. A node discovered before
+// this node held its pin (for example, before joining the cluster) is picked
+// up here, because discovery sends nothing new for an unchanged record.
 func (ps *PeerSync) restartStreams(ctx context.Context) {
-	ps.mu.Lock()
-	defer ps.mu.Unlock()
-	for nodeID, target := range ps.peers {
-		ps.startStreamLocked(ctx, nodeID, target)
+	for _, node := range ps.discovered {
+		ps.applyPeer(ctx, node, true)
 	}
-	slog.Info("errors peer streams restarted", "peers", len(ps.peers))
+	slog.Info("errors peer streams restarted", "discovered", len(ps.discovered))
 }
 
 // startStreamLocked stores target for nodeID under a new generation and starts
@@ -311,6 +327,12 @@ func (ps *PeerSync) streamOnce(ctx context.Context, nodeID string, stream uint64
 	target, ok := ps.peers[nodeID]
 	ps.mu.RUnlock()
 	if !ok || target.stream != stream {
+		return false
+	}
+	// Refuse an unadmitted peer before probing its addresses.
+	ps.mesh.Refresh()
+	if _, admitted := ps.mesh.PeerServiceIncarnation(target.uuid); !admitted {
+		slog.Debug("errors stream: peer not admitted", "nodeId", nodeID)
 		return false
 	}
 	// Confirm the address before spending a connect on it.
@@ -386,6 +408,14 @@ func (ps *PeerSync) streamOnce(ctx context.Context, nodeID string, stream uint64
 			// A peer may only report its own origin: the pinned principal.
 			if env.NodeID != target.uuid {
 				return fmt.Errorf("frame nodeId %q does not match pinned peer %q", env.NodeID, target.uuid)
+			}
+			// A superseded stream must not apply its last frame over the
+			// newer stream's; holding mu keeps a replacement from starting
+			// between the check and the reconcile.
+			ps.mu.RLock()
+			defer ps.mu.RUnlock()
+			if owner, ok := ps.peers[nodeID]; !ok || owner.stream != stream || streamCtx.Err() != nil {
+				return context.Canceled
 			}
 			ps.mgr.ReconcilePeer(env.NodeID, env.Errors)
 			delivered = true

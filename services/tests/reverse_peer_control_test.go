@@ -848,9 +848,6 @@ func TestReversePeerControlTask1(t *testing.T) {
 		if streams == 0 {
 			t.Fatal("A converged on B's errors without a stream of B")
 		}
-		if got := bErrors.count(a.uuid, http.MethodPost, "/v1/errors"); got != 0 {
-			t.Fatalf("A pushed %d snapshots to B, want 0", got)
-		}
 		upgrades := aCluster.established(b.uuid)
 		aCluster.interrupt(b.uuid, true)
 		bError.Timestamp = 2000

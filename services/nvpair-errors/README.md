@@ -276,7 +276,11 @@ restart.
   admission, certificate or endpoint changes, or when the connection
   drops. It reconnects after 1 s, doubling to 30 s with 20 % jitter,
   and the delay resets after a stream that delivered a frame. When this
-  node joins or leaves a cluster, every stream restarts.
+  node joins or leaves a cluster, every discovered peer is checked
+  against the pins again and every admitted peer's stream restarts, so
+  peers discovered before the join are picked up. A peer paired while
+  this node is already a member is picked up at its next discovery
+  change.
 - A peer's entries stay when its stream ends, as they always did when
   updates stopped; only discovery removal evicts them. Every reconnect
   starts with the peer's full snapshot, so a change missed while a
