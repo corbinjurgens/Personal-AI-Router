@@ -1877,3 +1877,30 @@ describe('unified settings bridge', () => {
         ).rejects.toThrow()
     })
 })
+
+describe('settings record reset bridge', () => {
+    beforeEach(() => mocks.supervisor.callProcess.mockReset())
+
+    it('relays the reset to the broker and checks the answered engine', async () => {
+        mocks.supervisor.callProcess.mockResolvedValue({
+            engine: 'llamacpp',
+            backup: 'C:/data/engine-settings-operations.llamacpp.invalid.json'
+        })
+        const target = { nodeId: 'local-node', engine: 'llamacpp' } as const
+        await expect(
+            handleServiceBridgeInvoke('engines:reset-settings-record', target)
+        ).resolves.toEqual({
+            engine: 'llamacpp',
+            backup: 'C:/data/engine-settings-operations.llamacpp.invalid.json'
+        })
+        expect(mocks.supervisor.callProcess).toHaveBeenLastCalledWith(
+            'broker',
+            'engine:reset-settings-record',
+            target
+        )
+        mocks.supervisor.callProcess.mockResolvedValue({ engine: 'llamacpp', backup: '' })
+        await expect(
+            handleServiceBridgeInvoke('engines:reset-settings-record', target)
+        ).rejects.toThrow()
+    })
+})

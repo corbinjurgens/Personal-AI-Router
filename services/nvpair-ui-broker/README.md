@@ -376,7 +376,10 @@ get/set/push consumers preserve the bounded reason through their strict bridge.
 The [engine settings protocol](ENGINE_SETTINGS.md) documents local/paired
 launch and port editing, revision checks, serialized application and recovery.
 Built-in and fronted descriptor engines share the broker's settings owner,
-journal and snapshot publication. Settings validation and automatic facade
+journal and snapshot publication. A journal entry that fails to decode or
+validate blocks only its own engine (`-32016`) and its content is preserved; the
+local-only `engine:reset-settings-record {engine}` backs it up beside the
+journal and discards it. Settings validation and automatic facade
 fallback reserve descriptor siblings' saved and live proxy ports.
 Broker startup restores explicit journal ports for both engine kinds. A saved
 explicit facade port takes precedence over the proxy's port file, and a bind

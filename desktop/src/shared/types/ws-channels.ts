@@ -41,7 +41,8 @@ import type {
     EngineSettingsRequest,
     EngineSettingsSnapshot,
     EngineSettingsPreview,
-    EngineSettingsReceipt
+    EngineSettingsReceipt,
+    EngineSettingsRecordReset
 } from '@/shared/types/engine-settings'
 import type {
     InspectModelRequest,
@@ -196,6 +197,10 @@ export interface WsInvokeChannelMap {
     }
     'engines:preview-settings': { request: EngineSettingsRequest; response: EngineSettingsPreview }
     'engines:apply-settings': { request: EngineSettingsRequest; response: EngineSettingsReceipt }
+    'engines:reset-settings-record': {
+        request: EngineSettingsTarget
+        response: EngineSettingsRecordReset
+    }
     'engine:command': { request: EngineCommandPayload; response: null }
     'engine:copy-model': { request: ModelCopyRequest; response: ModelCopyResponse }
     'engine:cancel-model-copy': { request: { opId: string }; response: { cancelled: boolean } }

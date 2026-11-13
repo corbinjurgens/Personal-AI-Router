@@ -67,6 +67,9 @@ func (b *Broker) reconcileAdvertiseEngine(profile engineProxyProfile, client *ht
 	if b.loadEngineSettingsLocked() != nil && b.knownModelSettingsFenceLocked() {
 		return
 	}
+	if entry, ok := b.engineSettingsInvalid[profile.Name]; ok && entry.Model {
+		return
+	}
 	if b.modelSettingsPendingLocked(profile.Name) || b.advertisementWithdrawnLocked(profile.Name) {
 		return
 	}

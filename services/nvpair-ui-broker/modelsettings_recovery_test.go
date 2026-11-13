@@ -299,6 +299,7 @@ func (h *modelSettingsHarness) restartJournal(t *testing.T) {
 	h.b.engineConfigMu.Lock()
 	h.b.engineSettingsLoaded = false
 	h.b.engineSettings = nil
+	h.b.engineSettingsInvalid = nil
 	h.b.engineSettingsError = nil
 	h.b.engineConfigMu.Unlock()
 	r := h.b.nodePolicyRuntime()
@@ -1020,8 +1021,20 @@ func TestModelSettingsRecoveryInvalidJournalRetainsKnownModelFence(t *testing.T)
 				h.b.engineSettingsLoaded = false
 				h.b.engineConfigMu.Unlock()
 			}
-			if h.b.replayPolicyToProxy(t.Context(), h.pp) {
+			// An unreadable journal still blocks replay. A recognizable invalid
+			// entry is contained: replay proceeds with its engine drained.
+			replayed := h.b.replayPolicyToProxy(t.Context(), h.pp)
+			if !recognizable && replayed {
 				t.Fatal("known model journal error enabled proxy replay")
+			}
+			if recognizable {
+				r := h.b.nodePolicyRuntime()
+				r.mu.Lock()
+				drained := r.drains["llamacpp"]
+				r.mu.Unlock()
+				if !replayed || !drained {
+					t.Fatalf("invalid model entry replay=%v drained=%v, want contained replay with its engine drained", replayed, drained)
+				}
 			}
 			worker := h.b.getEngineMgr()
 			h.b.restoreInstalledEngines(worker)
@@ -1033,7 +1046,10 @@ func TestModelSettingsRecoveryInvalidJournalRetainsKnownModelFence(t *testing.T)
 					t.Fatal("known unresolved model allowed global restoration")
 				}
 			}
-			if h.calls() != 0 || h.b.engineSettingsError == nil {
+			h.b.engineConfigMu.Lock()
+			reported := h.b.engineSettingsError != nil || h.b.engineSettingsEntryErrorLocked("llamacpp") != nil
+			h.b.engineConfigMu.Unlock()
+			if h.calls() != 0 || !reported {
 				t.Fatal("known model journal error was hidden or produced effects")
 			}
 		})
@@ -1075,7 +1091,12 @@ func TestModelSettingsRecoveryCompletedHistoryDoesNotBlockOrdinaryJournalError(t
 			found = true
 		}
 	}
-	if !found || h.b.engineSettingsError == nil || h.calls() != 0 {
+	// The null row is an invalid entry without model work: it blocks only its
+	// own engine and leaves restoration to proceed.
+	h.b.engineConfigMu.Lock()
+	rowErr := h.b.engineSettingsEntryErrorLocked("llamacpp-custom")
+	h.b.engineConfigMu.Unlock()
+	if !found || rowErr == nil || h.calls() != 0 {
 		t.Fatal("completed model history changed ordinary journal-error restoration")
 	}
 }

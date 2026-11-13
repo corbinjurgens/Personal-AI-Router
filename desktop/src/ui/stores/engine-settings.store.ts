@@ -32,7 +32,8 @@ import {
     LOCAL_VETO_CODE,
     POLICY_CONFLICT_CODE,
     REMOTE_MANAGEMENT_DENIED_CODE,
-    REMOTE_SETTING_LOCKED_CODE
+    REMOTE_SETTING_LOCKED_CODE,
+    SETTINGS_RECORD_INVALID_CODE
 } from '@/shared/constants/service-errors'
 
 export const engineSettingsKey = (target: { nodeId: string; engine: string }): string =>
@@ -41,6 +42,8 @@ export const engineSettingsKey = (target: { nodeId: string; engine: string }): s
 interface SettingsEntry {
     snapshot?: EngineSettingsSnapshot
     unavailable?: string
+    /** The device refused because its saved record is invalid; it can reset it. */
+    recordInvalid?: boolean
     arrival: number
 }
 interface SettingsStore {
@@ -56,6 +59,8 @@ interface SettingsStore {
     disconnect: (nodeId?: string) => void
     reload: (target: EngineSettingsTarget) => Promise<void>
     apply: (request: EngineSettingsRequest) => Promise<void>
+    /** Discard an invalid saved record on its own device, then read settings afresh. */
+    resetRecord: (target: EngineSettingsTarget) => Promise<string>
     modelDrafts: Record<string, ModelDraft>
     editModel: (key: string, change: ModelChange) => void
     discardModel: (key: string) => void
@@ -1333,7 +1338,11 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
             set(state => ({
                 entries: {
                     ...state.entries,
-                    [key]: { ...state.entries[key], unavailable: undefined }
+                    [key]: {
+                        ...state.entries[key],
+                        unavailable: undefined,
+                        recordInvalid: undefined
+                    }
                 }
             }))
         } catch (error) {
@@ -1344,11 +1353,17 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
                     [key]: {
                         ...state.entries[key],
                         arrival,
-                        unavailable: `Settings unavailable: ${getErrorString(error)}`
+                        unavailable: `Settings unavailable: ${getErrorString(error)}`,
+                        recordInvalid: serviceErrorCode(error) === SETTINGS_RECORD_INVALID_CODE
                     }
                 }
             }))
         }
+    },
+    resetRecord: async target => {
+        const result = await window.pairApi.engines.resetSettingsRecord(target)
+        await get().reload(target)
+        return result.backup
     },
     apply: async request => {
         try {

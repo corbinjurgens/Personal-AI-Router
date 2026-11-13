@@ -23,7 +23,8 @@ import type {
     EngineSettingsRequest,
     EngineSettingsSnapshot,
     EngineSettingsPreview,
-    EngineSettingsReceipt
+    EngineSettingsReceipt,
+    EngineSettingsRecordReset
 } from '@/shared/types/engine-settings'
 import type {
     InspectModelRequest,
@@ -65,6 +66,11 @@ export interface IEngineApi {
      * rebind, and restart outlive the call.
      */
     applySettings(request: EngineSettingsRequest): Promise<EngineSettingsReceipt>
+    /**
+     * Discard this device's invalid saved settings record for one engine. The
+     * device keeps a backup and changes no native settings.
+     */
+    resetSettingsRecord(target: EngineSettingsTarget): Promise<EngineSettingsRecordReset>
     /** A settings snapshot changed on some node — the only source of applied state. */
     onSettingsChanged(callback: (snapshot: EngineSettingsSnapshot) => void): () => void
     /** A node's settings authority became unreachable; its cached snapshot is stale. */
@@ -140,6 +146,7 @@ export function createEngineApi(transport: ServiceTransport): IEngineApi {
                 refreshNodeManagement(request.nodeId)
                 return result
             }),
+        resetSettingsRecord: target => transport.invoke('engines:reset-settings-record', target),
         onSettingsChanged: cb => transport.subscribePush('engines:settings-changed', cb),
         onSettingsDisconnected: cb => transport.subscribePush('engines:settings-disconnected', cb),
         getInitialState: () => transport.invoke('engines:get-initial'),

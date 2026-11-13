@@ -893,6 +893,7 @@ func policyErrorCode(err error) int {
 	var denied *remoteManagementDeniedError
 	var locked *nodepolicy.RemoteSettingLockedError
 	var maintenance *buildApplyBusyError
+	var invalidSettings *invalidEngineSettingsError
 	switch {
 	case errors.As(err, &worker) && worker.code != 0:
 		return worker.code
@@ -908,6 +909,8 @@ func policyErrorCode(err error) int {
 		return codeLocalVeto
 	case errors.As(err, &denied):
 		return codeRemoteManagementDenied
+	case errors.As(err, &invalidSettings):
+		return codeSettingsRecordInvalid
 	}
 	return -32000
 }

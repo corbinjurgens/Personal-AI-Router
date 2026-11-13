@@ -214,6 +214,9 @@ func (b *Broker) withDiagnosticGate(ctx context.Context, accept func(uint64, str
 	if err := b.loadEngineSettingsLocked(); err != nil {
 		return err
 	}
+	if err := b.invalidModelSettingsLocked(); err != nil {
+		return err
+	}
 	if b.buildApplyMaintenance.active != nil || len(b.buildApplyMaintenance.settings) != 0 || len(b.activeSettings) != 0 {
 		return diagnosticError("node maintenance is active")
 	}

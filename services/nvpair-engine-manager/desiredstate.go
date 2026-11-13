@@ -260,8 +260,28 @@ func (e *Executor) RestoreInstalled(ctx context.Context) error {
 }
 
 func (e *Executor) restoreInstalled(ctx context.Context, engine string) error {
+	st, err := e.state(engine)
+	if err != nil {
+		return err
+	}
+	// A PAIR upgrade may have moved this engine's pin. refreshMu serializes
+	// every refresh of this engine; the download and staging run before
+	// mutation admission and opMu, so diagnostics and settings reads are not
+	// held up by it. A failed refresh keeps the installed build, which starts
+	// as before.
+	st.refreshMu.Lock()
+	defer st.refreshMu.Unlock()
+	e.prepareManagedRefresh(engine, st)
+	staged := false
+	if installed, _ := e.Detect(engine); installed && e.managedInstallStale(st) {
+		staged = e.stageManagedRefresh(ctx, st, engine)
+	}
+	staging, _ := e.refreshDirs(engine)
 	done, err := e.admitMutation(engine)
 	if err != nil {
+		if staged {
+			_ = os.RemoveAll(staging)
+		}
 		// Global mutation admission also fences automatic restore.
 		var busy *mutationBusyError
 		if errors.As(err, &busy) {
@@ -270,21 +290,33 @@ func (e *Executor) restoreInstalled(ctx context.Context, engine string) error {
 		return err
 	}
 	defer done()
-	st, err := e.state(engine)
-	if err != nil {
-		return err
-	}
 	// RestoreInstalled passes the manager's lifetime context through to hashing.
 	if err := prepareStrataState(ctx, st); err != nil {
+		if staged {
+			_ = os.RemoveAll(staging)
+		}
 		return err
 	}
 	st.opMu.Lock()
 	defer st.opMu.Unlock()
 	installed, err := e.Detect(engine)
 	if err != nil || !installed {
+		if staged {
+			_ = os.RemoveAll(staging)
+		}
 		return err
 	}
-	err = e.doStart(ctx, st, engine, startOpts{ReclaimOwned: true})
+	var finish refreshFinish
+	if staged && e.managedInstallStale(st) {
+		finish = e.swapManagedRefresh(ctx, st, engine)
+	} else if staged {
+		_ = os.RemoveAll(staging)
+	}
+	start := func() error { return e.doStart(ctx, st, engine, startOpts{ReclaimOwned: true}) }
+	err = start()
+	if finish != nil {
+		err = finish(err, start)
+	}
 	st.mu.Lock()
 	st.restoreApprovalRefused = isStaleApproval(err)
 	st.mu.Unlock()

@@ -102,6 +102,8 @@ export function EngineSettingsSection({
     })
     const [errorDialog, setErrorDialog] = useState('')
     const [confirmation, setConfirmation] = useState<EngineSettingsRequest>()
+    const [resetConfirm, setResetConfirm] = useState(false)
+    const [resetMessage, setResetMessage] = useState('')
     const [checking, setChecking] = useState(false)
     const generation = useRef(0)
     // Response correlation, not loading state: which of this editor's requests
@@ -167,6 +169,15 @@ export function EngineSettingsSection({
         generation.current++
         if (field === 'serverPort') serverPortEdited.current = true
         setDraft(current => ({ ...current, [field]: value }))
+    }
+    async function resetRecord(): Promise<void> {
+        setResetMessage('')
+        try {
+            const backup = await useEngineSettingsStore.getState().resetRecord(target)
+            setResetMessage(`Saved settings were reset. The old record is kept in ${backup}.`)
+        } catch (error) {
+            setResetMessage(`Reset failed: ${getErrorString(error)}`)
+        }
     }
     function reportError(message: string): void {
         generation.current++
@@ -332,6 +343,22 @@ export function EngineSettingsSection({
                                 'Waiting for this device’s settings. Older devices require an update to support editing.'}
                         </Text>
                     )}
+                {entry?.recordInvalid && isLocalNode && connected && (
+                    <Flex gap="3" align="center">
+                        <Text kind="body/regular/sm">
+                            Reset the saved settings record to recover. PAIR keeps a backup of it
+                            and does not change the engine&rsquo;s configuration.
+                        </Text>
+                        <Button kind="secondary" size="small" onClick={() => setResetConfirm(true)}>
+                            Reset saved settings
+                        </Button>
+                    </Flex>
+                )}
+                {resetMessage && (
+                    <Text kind="body/regular/sm" role="status">
+                        {resetMessage}
+                    </Text>
+                )}
                 {mismatchReason && (
                     <Text kind="body/regular/sm" role="status">
                         {mismatchReason}
@@ -468,6 +495,14 @@ export function EngineSettingsSection({
                     </ModalContent>
                 </ModalDialog>
             </ModalRoot>
+            <ConfirmModal
+                open={resetConfirm}
+                onOpenChange={setResetConfirm}
+                title="Reset saved settings?"
+                confirmLabel="Reset saved settings"
+                message="PAIR discards this engine's unreadable saved settings record and keeps a backup file of it. The engine keeps its current configuration; review its settings afterwards. Continue?"
+                onConfirm={() => void resetRecord()}
+            />
             <ConfirmModal
                 open={!!confirmation}
                 onOpenChange={open => {

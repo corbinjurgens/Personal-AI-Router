@@ -242,7 +242,7 @@ func (b *Broker) knownModelSettingsFenceLocked() bool {
 			return true
 		}
 	}
-	return false
+	return b.invalidModelSettingsLocked() != nil
 }
 
 func markModelAcceptanceUncertain(record *engineSettingsRecord) {
@@ -263,6 +263,9 @@ func (b *Broker) modelPolicyReservationLocked() error {
 			return err
 		}
 		return nil
+	}
+	if err := b.invalidModelSettingsLocked(); err != nil {
+		return err
 	}
 	for _, record := range b.engineSettings {
 		if record.Model != nil && record.Model.Stage != "completed" {
@@ -291,6 +294,12 @@ func (b *Broker) reconstructModelSettingsLocked() {
 		}
 		if record.Model != nil {
 			record.Snapshot.CoupledStage = record.Model.Stage
+		}
+	}
+	// Whether an invalid entry's model work is native is unknown; drain it.
+	for engine, entry := range b.engineSettingsInvalid {
+		if entry.Model {
+			r.drains[engine] = true
 		}
 	}
 }
@@ -888,6 +897,9 @@ func (b *Broker) modelSettingsBaselineLocked(p settings.Request, caller string, 
 	if err := b.loadEngineSettingsLocked(); err != nil {
 		return fail(err)
 	}
+	if err := b.engineSettingsEntryErrorLocked(p.Engine); err != nil {
+		return fail(err)
+	}
 	if launch.Engine != p.Engine || !launch.Editable {
 		return fail(modelSettingsConflict("engine is not editable"))
 	}
@@ -928,6 +940,10 @@ func (b *Broker) modelSettingsBaselineLocked(p settings.Request, caller string, 
 		if engine != p.Engine && b.modelSettingsPendingLocked(engine) {
 			return fail(modelSettingsConflict("policy is reserved by " + pending.Snapshot.RequestID))
 		}
+	}
+	// An invalid entry that may hold model work reserves the policy too.
+	if err := b.invalidModelSettingsLocked(); err != nil {
+		return fail(err)
 	}
 	if p.ExpectedRevision != record.Snapshot.Revision {
 		return fail(modelSettingsConflict("settings revision changed; reload and preview again"))
@@ -1017,6 +1033,9 @@ func (b *Broker) applyModelSettings(ctx context.Context, input settings.Request,
 	}
 	if err == nil {
 		err = b.loadEngineSettingsLocked()
+	}
+	if err == nil {
+		err = b.engineSettingsEntryErrorLocked(p.Engine)
 	}
 	if err == nil {
 		if record := b.engineSettings[p.Engine]; record != nil {
@@ -1130,20 +1149,23 @@ func (b *Broker) applyModelSettings(ctx context.Context, input settings.Request,
 	b.engineSettings[p.Engine] = record
 	if err := b.saveEngineSettingsLocked(); err != nil {
 		if errors.Is(err, durablefile.ErrReplaced) {
-			acceptedHash := modelSettingsHash(b.engineSettings)
+			accepted, pathErr := b.engineSettingsDocumentLocked()
+			acceptedHash := modelSettingsHash(json.RawMessage(accepted))
 			// Update only the exact replacement that just landed. If this
 			// second write also fails, loading "accepted" remains non-replayable.
 			markModelAcceptanceUncertain(record)
-			path, pathErr := b.engineSettingsPath()
+			var path string
+			if pathErr == nil {
+				path, pathErr = b.engineSettingsPath()
+			}
 			var data []byte
 			if pathErr == nil {
 				data, pathErr = os.ReadFile(path)
 			}
-			var landed map[string]*engineSettingsRecord
-			if pathErr == nil {
-				pathErr = json.Unmarshal(data, &landed)
+			if pathErr == nil && !json.Valid(data) {
+				pathErr = fmt.Errorf("landed journal is not JSON")
 			}
-			if pathErr == nil && modelSettingsHash(landed) != acceptedHash {
+			if pathErr == nil && modelSettingsHash(json.RawMessage(data)) != acceptedHash {
 				pathErr = fmt.Errorf("acceptance readback differs from the landed journal")
 			}
 			if pathErr != nil {

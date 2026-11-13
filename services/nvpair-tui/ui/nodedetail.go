@@ -994,6 +994,16 @@ func (d *nodeDetail) update(msg tea.Msg) (tea.Cmd, bool) {
 	case engineSettingsMsg:
 		if msg.err != nil {
 			d.settingsWanted = nil
+			var refusal *rpc.RPCError
+			if errors.As(msg.err, &refusal) && refusal.Code == settingsRecordInvalidCode && d.nodeArg() == "" && msg.engine != "" {
+				// Only this machine can discard its own record; a peer's
+				// refusal is reported as it stands.
+				engine := msg.engine
+				return d.arm(fmt.Sprintf("%s - discard the saved record (a backup is kept; engine settings are unchanged)?", refusal.Message), func() tea.Cmd {
+					d.status.busy("resetting %s saved settings...", d.engineLabel(engine))
+					return d.own(resetSettingsRecordCmd(d.client, engine))
+				}), true
+			}
 			d.status.error("read engine settings failed: %s", commandFailure(msg.err))
 			return nil, true
 		}
@@ -1016,6 +1026,15 @@ func (d *nodeDetail) update(msg tea.Msg) (tea.Cmd, bool) {
 
 	case enginePreviewMsg:
 		return d.applySettingsPreview(msg), true
+
+	case settingsRecordResetMsg:
+		if msg.err != nil {
+			d.status.error("reset %s saved settings failed: %s", d.engineLabel(msg.engine), commandFailure(msg.err))
+			return nil, true
+		}
+		delete(d.settings, msg.engine)
+		d.status.ok("%s saved settings reset; the old record is kept in %s", d.engineLabel(msg.engine), msg.backup)
+		return nil, true
 
 	case engineSettingsAppliedMsg:
 		if errors.Is(msg.err, context.DeadlineExceeded) {

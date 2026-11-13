@@ -22,20 +22,29 @@ import (
 // Install obtains the engine in user mode: download (checksum-verified)
 // then run the declared command. No-op if already detected.
 func (e *Executor) Install(ctx context.Context, engine string) (err error) {
+	st, err := e.state(engine)
+	if err != nil {
+		return err
+	}
+	st.refreshMu.Lock()
+	defer st.refreshMu.Unlock()
 	done, err := e.admitMutation(engine)
 	if err != nil {
 		return err
 	}
 	defer done()
-	st, err := e.state(engine)
-	if err != nil {
-		return err
-	}
 	st.opMu.Lock()
 	defer st.opMu.Unlock()
+	var finishRefresh refreshFinish
 	defer func() {
 		if err == nil && e.activationVeto(engine) == nil {
-			err = e.doStart(ctx, st, engine, startOpts{})
+			start := func() error { return e.doStart(ctx, st, engine, startOpts{}) }
+			err = start()
+			if finishRefresh != nil {
+				err = finishRefresh(err, start)
+			}
+		} else if err == nil && finishRefresh != nil {
+			_ = finishRefresh(nil, nil)
 		}
 	}()
 	defer func() {
@@ -45,8 +54,17 @@ func (e *Executor) Install(ctx context.Context, engine string) (err error) {
 			st.mu.Unlock()
 		}
 	}()
+	e.prepareManagedRefresh(engine, st)
 	if ok, _ := e.Detect(engine); ok {
 		e.reporter.clear(installFailedID(engine))
+		if e.managedInstallStale(st) {
+			// The refresh reports its own terminal progress. A failed refresh
+			// keeps the old build, which then starts as before.
+			if e.stageManagedRefresh(ctx, st, engine) {
+				finishRefresh = e.swapManagedRefresh(ctx, st, engine)
+			}
+			return nil
+		}
 		e.emitInstallProgress(engine, "already-installed", 100)
 		return nil
 	}
@@ -89,9 +107,8 @@ func (e *Executor) Install(ctx context.Context, engine string) (err error) {
 		return fmt.Errorf("create install dir: %w", err)
 	}
 
-	vars := map[string]string{"install_dir": st.installDir}
-
 	if len(inst.Script) > 0 {
+		vars := map[string]string{"install_dir": st.installDir}
 		// Escape hatch: vendor-script install with no checksum. Logged
 		// loudly so the weaker guarantee is never silent.
 		slog.Warn("running UNPINNED script install (no checksum verification)", "engine", engine)
@@ -109,46 +126,9 @@ func (e *Executor) Install(ctx context.Context, engine string) (err error) {
 			e.reportInstallFailed(engine, werr)
 			return werr
 		}
-	} else {
-		if inst.Fetch != nil {
-			e.emitInstallProgress(engine, "downloading", 0)
-			dp, err := e.download(ctx, engine, inst.Fetch)
-			if err != nil {
-				e.reportInstallFailed(engine, err)
-				return err
-			}
-			defer os.Remove(dp)
-			vars["download"] = dp
-			e.emitInstallProgress(engine, "verified", 0)
-		}
-		if len(inst.Artifacts) > 0 {
-			paths, artifactVars, err := e.downloadInstallArtifacts(ctx, engine, inst.Artifacts)
-			defer removeDownloadedFiles(paths)
-			if err != nil {
-				e.reportInstallFailed(engine, err)
-				return err
-			}
-			for name, downloadPath := range artifactVars {
-				vars[name] = downloadPath
-			}
-			e.emitInstallProgress(engine, "verified", 50)
-		}
-		if len(inst.Run) > 0 {
-			e.emitInstallProgress(engine, "installing", 0)
-			args, err := resolveArgs(inst.Run, vars)
-			if err != nil {
-				e.reportInstallFailed(engine, err)
-				return err
-			}
-			for i := range args {
-				args[i] = expandPath(args[i])
-			}
-			if err := e.runCommandWithEnv(ctx, args, installCommandEnv(vars, inst.Artifacts)); err != nil {
-				werr := fmt.Errorf("install command failed: %w", err)
-				e.reportInstallFailed(engine, werr)
-				return werr
-			}
-		}
+	} else if err := e.runPinnedInstall(ctx, engine, inst, st.installDir); err != nil {
+		e.reportInstallFailed(engine, err)
+		return err
 	}
 
 	if !e.waitDetect(engine, true, e.detectTimeout) {
@@ -158,7 +138,7 @@ func (e *Executor) Install(ctx context.Context, engine string) (err error) {
 	}
 	// Claim the install now that it is real and detected. A failure to record it
 	// only costs the ability to uninstall later, so it must not fail the install.
-	if err := writeInstallMarker(st.installDir, engine); err != nil {
+	if err := writeInstallMarker(st.installDir, e.installMarkerFor(ctx, st, engine)); err != nil {
 		slog.Warn("could not record that PAIR installed this engine; uninstall will decline it", "engine", engine, "err", err)
 	}
 	e.reporter.clear(installFailedID(engine))
@@ -167,19 +147,64 @@ func (e *Executor) Install(ctx context.Context, engine string) (err error) {
 	return nil
 }
 
+// runPinnedInstall downloads an install block's checksum-pinned files and runs
+// its command into dir. Install uses the engine's install directory; a refresh
+// of a stale managed install uses a staging sibling.
+func (e *Executor) runPinnedInstall(ctx context.Context, engine string, inst *Install, dir string) error {
+	vars := map[string]string{"install_dir": dir}
+	if inst.Fetch != nil {
+		e.emitInstallProgress(engine, "downloading", 0)
+		dp, err := e.download(ctx, engine, inst.Fetch)
+		if err != nil {
+			return err
+		}
+		defer os.Remove(dp)
+		vars["download"] = dp
+		e.emitInstallProgress(engine, "verified", 0)
+	}
+	if len(inst.Artifacts) > 0 {
+		paths, artifactVars, err := e.downloadInstallArtifacts(ctx, engine, inst.Artifacts)
+		defer removeDownloadedFiles(paths)
+		if err != nil {
+			return err
+		}
+		for name, downloadPath := range artifactVars {
+			vars[name] = downloadPath
+		}
+		e.emitInstallProgress(engine, "verified", 50)
+	}
+	if len(inst.Run) > 0 {
+		e.emitInstallProgress(engine, "installing", 0)
+		args, err := resolveArgs(inst.Run, vars)
+		if err != nil {
+			return err
+		}
+		for i := range args {
+			args[i] = expandPath(args[i])
+		}
+		if err := e.runCommandWithEnv(ctx, args, installCommandEnv(vars, inst.Artifacts)); err != nil {
+			return fmt.Errorf("install command failed: %w", err)
+		}
+	}
+	return nil
+}
+
 // Uninstall runs the manifest's uninstall command (user-mode), stopping
 // the engine first. No-op only when its executable is absent, independently
 // of whether all mandatory installation files are still present.
 func (e *Executor) Uninstall(ctx context.Context, engine string) (err error) {
+	st, err := e.state(engine)
+	if err != nil {
+		return err
+	}
+	// Uninstall removes refresh leftovers, so it waits for a refresh in flight.
+	st.refreshMu.Lock()
+	defer st.refreshMu.Unlock()
 	done, err := e.admitMutation(engine)
 	if err != nil {
 		return err
 	}
 	defer done()
-	st, err := e.state(engine)
-	if err != nil {
-		return err
-	}
 	st.opMu.Lock()
 	defer st.opMu.Unlock()
 	defer func() {
@@ -300,6 +325,7 @@ func (e *Executor) Uninstall(ctx context.Context, engine string) (err error) {
 	st.binPath = ""
 	st.mu.Unlock()
 	clearInstallMarker(st.installDir)
+	e.clearRefreshDirs(engine, st)
 	e.reporter.clear(uninstallFailedID(engine))
 	e.emitState(engine)
 	return nil

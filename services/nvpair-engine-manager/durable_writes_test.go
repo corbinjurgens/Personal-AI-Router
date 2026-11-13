@@ -220,7 +220,7 @@ func TestDurableInstallMarkerAdoptsUncertainReplacement(t *testing.T) {
 	useEngineFileReplacer(t, durablefile.Replacer{
 		SyncDir: func(string) error { return errors.New("injected directory sync failure") },
 	})
-	if err := writeInstallMarker(dir, "test"); err != nil {
+	if err := writeInstallMarker(dir, installMarker{Engine: "test"}); err != nil {
 		t.Fatal(err)
 	}
 	if !installedByPAIR(dir) {

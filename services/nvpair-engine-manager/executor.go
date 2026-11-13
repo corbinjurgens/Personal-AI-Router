@@ -72,6 +72,10 @@ type engineState struct {
 	// st.mu is released around probes, and the background health loop
 	// never takes opMu.
 	opMu sync.Mutex
+	// refreshMu serializes managed-install refreshes, including their staging
+	// download, with install and uninstall. Lock order: refreshMu ->
+	// mutationAdmission -> opMu.
+	refreshMu sync.Mutex
 	// contentMu serializes content mutations (delete / pull / copy into the
 	// engine's model store) and passive identity scans for this engine. Scans
 	// try without waiting; mutations wait with their context. Separate from opMu,

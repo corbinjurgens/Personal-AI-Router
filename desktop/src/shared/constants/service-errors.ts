@@ -19,6 +19,11 @@ export const REMOTE_MANAGEMENT_DENIED_CODE = -32012
 export const REMOTE_SETTING_LOCKED_CODE = -32014
 /** A build apply and a model-settings operation cannot hold maintenance together. */
 export const BUILD_APPLY_MAINTENANCE_BUSY_CODE = -32015
+/**
+ * The engine's saved settings record is invalid. Settings for that engine are
+ * refused until the device itself resets the record (`engines:reset-settings-record`).
+ */
+export const SETTINGS_RECORD_INVALID_CODE = -32016
 
 /**
  * The explanation for a paired node's action refused with LOCAL_VETO_CODE.
