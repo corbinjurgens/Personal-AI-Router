@@ -2507,7 +2507,7 @@ func TestModelDownloadStateTransferJoinProcess(t *testing.T) {
 		receiptPath := filepath.Join(controllerCopyAliasDir(f.stores[f.target.uuid], model.manifest.Model), "copy.json")
 		receipt := readLiveDurableFile(t, receiptPath)
 		store := strataContractArtifacts(t, f.stores[f.target.uuid])
-		sourceRequests := len(f.files[f.source.uuid].requests())
+		sourceRequests := f.files[f.source.uuid].modelRequests()
 		destinationRequests := len(f.files[f.target.uuid].requests())
 		mutations := downloadTransferMutations(manager)
 		request := f.request(model.manifest.Model, model.manifest.ExportID)
@@ -2531,7 +2531,7 @@ func TestModelDownloadStateTransferJoinProcess(t *testing.T) {
 			} `json:"result"`
 		}
 		task2Decode(t, response.Result, &result)
-		if result.Result.FilesSkipped != len(model.manifest.Files) || result.Result.BytesCopied != 0 || len(f.files[f.source.uuid].requests()) != sourceRequests {
+		if result.Result.FilesSkipped != len(model.manifest.Files) || result.Result.BytesCopied != 0 || f.files[f.source.uuid].modelRequests() != sourceRequests {
 			t.Fatalf("identity-bound COPY retry did not revalidate its existing receipt locally: %+v", result)
 		}
 		after := downloadTransferModels(t, manager)

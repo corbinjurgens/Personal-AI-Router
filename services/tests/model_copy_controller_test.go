@@ -302,6 +302,23 @@ func (o *controllerCopyObserver) requests() []controllerCopySeen {
 	return append([]controllerCopySeen(nil), o.seen...)
 }
 
+// modelRequests counts requests to the node's model surface (/v1/models/...).
+// Assertions that a copy left a node alone use it instead of the raw count:
+// every engine manager also keeps an /v1/engine-settings/events subscription to
+// each admitted peer, opened on its own peer-watch tick and redialled 3 s after
+// a drop, so the raw count changes without any model operation.
+func (o *controllerCopyObserver) modelRequests() int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	n := 0
+	for _, seen := range o.seen {
+		if strings.HasPrefix(seen.path, "/v1/models/") {
+			n++
+		}
+	}
+	return n
+}
+
 type controllerCopyFixture struct {
 	controller, source, target    *task1Node
 	broker, sourceEM, targetEM    *task1Process
@@ -1025,10 +1042,10 @@ func TestModelCopyControllerProcess(t *testing.T) {
 	t.Run("authenticated reverse source", func(t *testing.T) {
 		f.directoryToManagers(t, true)
 		m := f.seed(t, "reverse-custom", 9)
-		before := len(f.files[f.source.uuid].requests())
+		before := f.files[f.source.uuid].modelRequests()
 		id := f.broker.send(t, "engine:copy-model", f.request(m.manifest.Model, ""), true)
 		f.assertCopied(t, m, task2Response(t, f.broker, id))
-		if len(f.files[f.source.uuid].requests()) <= before {
+		if f.files[f.source.uuid].modelRequests() <= before {
 			t.Fatal("reverse copy never reached source")
 		}
 		f.idle(t)
@@ -1164,13 +1181,13 @@ func TestModelCopyControllerProcess(t *testing.T) {
 		managementSet(t, f.target.cm, f.controller.uuid, false)
 		f.cloneTargetAuthority(t)
 		defer func() { managementSet(t, f.target.cm, f.controller.uuid, true); f.cloneTargetAuthority(t) }()
-		before := len(f.files[f.source.uuid].requests())
+		before := f.files[f.source.uuid].modelRequests()
 		id := f.broker.send(t, "engine:copy-model", f.request(m.manifest.Model, ""), true)
 		response := task2Response(t, f.broker, id)
 		if response.Error == nil || response.Error.Code != -32012 {
 			t.Fatalf("target grant refusal=%+v", response.Error)
 		}
-		if len(f.files[f.source.uuid].requests()) != before {
+		if f.files[f.source.uuid].modelRequests() != before {
 			t.Fatal("denied destination read source")
 		}
 		f.assertNoReceipt(t, m)
@@ -1186,12 +1203,12 @@ func TestModelCopyControllerProcess(t *testing.T) {
 			}
 		}()
 		removeAuthorityFile(t, pin)
-		before := len(f.files[f.source.uuid].requests())
+		before := f.files[f.source.uuid].modelRequests()
 		id := f.broker.send(t, "engine:copy-model", f.request(m.manifest.Model, ""), true)
 		if response := task2Response(t, f.broker, id); response.Error == nil || !strings.Contains(response.Error.Message, "not a pinned cluster peer") {
 			t.Fatalf("missing source authority=%+v", response.Error)
 		}
-		if len(f.files[f.source.uuid].requests()) != before {
+		if f.files[f.source.uuid].modelRequests() != before {
 			t.Fatal("controller trust substituted for missing target/source pin")
 		}
 		f.assertNoReceipt(t, m)
@@ -1310,10 +1327,10 @@ func TestModelCopyControllerProcess(t *testing.T) {
 		observer.fault = nil
 		observer.mu.Unlock()
 		// Explicit retry rehashes the committed receipt, without fetching bytes.
-		sourceRequests := len(f.files[f.source.uuid].requests())
+		sourceRequests := f.files[f.source.uuid].modelRequests()
 		id = f.broker.send(t, "engine:copy-model", f.request(m.manifest.Model, m.manifest.ExportID), true)
 		f.assertCopied(t, m, task2Response(t, f.broker, id))
-		if len(f.files[f.source.uuid].requests()) != sourceRequests {
+		if f.files[f.source.uuid].modelRequests() != sourceRequests {
 			t.Fatal("verified identity-bound retry contacted source")
 		}
 		f.idle(t)

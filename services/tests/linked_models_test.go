@@ -245,11 +245,11 @@ func TestLinkedModelsProcess(t *testing.T) {
 		f.assertCopied(t, completed, controllerCopyResponse(t, f.broker, id))
 		f.idle(t)
 		f.sourceEM.stop()
-		before := len(f.files[f.source.uuid].requests())
+		before := f.files[f.source.uuid].modelRequests()
 		request := f.request(completed.manifest.Model, completed.manifest.ExportID)
 		id = f.broker.send(t, "engine:copy-model", request, true)
 		f.assertCopiedArtifacts(t, completed, controllerCopyResponse(t, f.broker, id))
-		if len(f.files[f.source.uuid].requests()) != before {
+		if f.files[f.source.uuid].modelRequests() != before {
 			t.Fatal("offline completed receipt contacted source")
 		}
 		f.sourceEM = linkedStartManager(t, f, f.source, filepath.Join(f.source.base, "cluster"), nil)
@@ -470,7 +470,7 @@ func TestLinkedModelsProcess(t *testing.T) {
 		}
 		receiptPath := filepath.Join(controllerCopyAliasDir(f.stores[f.target.uuid], model.manifest.Model), "copy.json")
 		receipt := readLiveDurableFile(t, receiptPath)
-		requests := len(f.files[f.source.uuid].requests())
+		requests := f.files[f.source.uuid].modelRequests()
 		mutations := downloadTransferMutations(manager)
 		request = f.request(model.manifest.Model, model.manifest.ExportID)
 		id = f.broker.send(t, "engine:copy-model", request, true)
@@ -483,8 +483,8 @@ func TestLinkedModelsProcess(t *testing.T) {
 			} `json:"result"`
 		}
 		task2Decode(t, response.Result, &result)
-		if result.Result.FilesSkipped != len(model.manifest.Files) || result.Result.BytesCopied != 0 || len(f.files[f.source.uuid].requests()) != requests || downloadTransferMutations(manager) != mutations {
-			t.Fatalf("receipt retry did not remain local: %+v requests %d -> %d mutations %d -> %d", result, requests, len(f.files[f.source.uuid].requests()), mutations, downloadTransferMutations(manager))
+		if result.Result.FilesSkipped != len(model.manifest.Files) || result.Result.BytesCopied != 0 || f.files[f.source.uuid].modelRequests() != requests || downloadTransferMutations(manager) != mutations {
+			t.Fatalf("receipt retry did not remain local: %+v requests %d -> %d mutations %d -> %d", result, requests, f.files[f.source.uuid].modelRequests(), mutations, downloadTransferMutations(manager))
 		}
 		after := downloadTransferModels(t, manager)
 		if !after.DownloadState.Equal(*before.DownloadState) || slices.Contains(after.ByEngine["llamacpp"], model.manifest.Model) || !bytes.Equal(journal, readLiveDurableFile(t, journalPath)) || !bytes.Equal(receipt, readLiveDurableFile(t, receiptPath)) {
