@@ -9,10 +9,10 @@ import type { JsonRpcNotification } from '@/electron/service-bridge/json-rpc-cli
 const PEER = 'uuid-remote-peer'
 const SELF = 'uuid-self'
 
-const mocks = vi.hoisted(() => ({
-    applyRemoteEngineFacts: vi.fn(),
-    calls: [] as string[]
-}))
+const mocks = vi.hoisted(() => {
+    const calls: string[] = []
+    return { applyRemoteEngineFacts: vi.fn(), calls }
+})
 
 vi.mock('electron', () => ({
     app: { isPackaged: false, getAppPath: () => process.cwd() },
@@ -60,18 +60,12 @@ vi.mock('@/electron/service-bridge/workload-projection', () => ({
 
 import { getModularSupervisor } from '@/electron/service-bridge/modular-supervisor'
 
-interface PushHarness {
-    brokerReady: boolean
-    handleNotification: (notification: JsonRpcNotification) => void
-    onBrokerReady: () => Promise<void>
-    callProcess: (name: string, method: string, params?: unknown) => Promise<unknown>
-    refreshRemoteEngineStatus: (nodeId: string) => Promise<void>
-}
-
-const supervisor = getModularSupervisor() as unknown as PushHarness
+// The supervisor's notification handler, broker-ready flag and broker-ready
+// pass are private; element access reaches them with their declared types.
+const supervisor = getModularSupervisor()
 
 function notify(params: JsonRpcNotification['params']): void {
-    supervisor.handleNotification({
+    supervisor['handleNotification']({
         source: 'broker',
         method: 'engine:remote-installed-changed',
         params
@@ -83,15 +77,16 @@ describe('remote engine status push', () => {
         vi.useFakeTimers()
         mocks.applyRemoteEngineFacts.mockReset()
         mocks.calls.length = 0
-        supervisor.brokerReady = true
-        supervisor.callProcess = async (_name: string, method: string) => {
+        supervisor['brokerReady'] = true
+        vi.spyOn(supervisor, 'callProcess').mockImplementation(async (_name, method) => {
             mocks.calls.push(method)
             if (method === 'engine:remote-get-installed') return { engines: [] }
             throw new Error('not served in this test')
-        }
+        })
     })
 
     afterEach(() => {
+        vi.restoreAllMocks()
         vi.useRealTimers()
     })
 
@@ -109,20 +104,20 @@ describe('remote engine status push', () => {
         notify({ nodeId: PEER, engines: { engine: 'llamacpp' } })
         notify([PEER, []])
         notify({ nodeId: SELF, engines: [] })
-        supervisor.brokerReady = false
+        supervisor['brokerReady'] = false
         notify({ nodeId: PEER, engines: [] })
 
         expect(mocks.applyRemoteEngineFacts).not.toHaveBeenCalled()
     })
 
     it('drops a read that started before a newer push', async () => {
-        let answer: (value: unknown) => void = () => {}
-        supervisor.callProcess = (_name: string, method: string) => {
+        let answer: (value: Awaited<ReturnType<typeof supervisor.callProcess>>) => void = () => {}
+        vi.spyOn(supervisor, 'callProcess').mockImplementation((_name, method) => {
             mocks.calls.push(method)
             return new Promise(resolve => {
                 answer = resolve
             })
-        }
+        })
         const read = supervisor.refreshRemoteEngineStatus(PEER)
         const pushed = [{ engine: 'llamacpp', installed: true, running: true, healthy: true }]
         notify({ nodeId: PEER, engines: pushed })
@@ -141,7 +136,7 @@ describe('remote engine status push', () => {
             getTemp: () => os.tmpdir(),
             getResourcesPath: () => userData
         })
-        await supervisor.onBrokerReady()
+        await supervisor['onBrokerReady']()
         const readyReads = mocks.calls.filter(m => m === 'engine:remote-get-installed').length
         expect(readyReads).toBeGreaterThan(0)
 
