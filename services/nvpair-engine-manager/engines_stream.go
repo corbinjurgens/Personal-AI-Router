@@ -26,6 +26,13 @@ import (
 // A var so tests can shorten it; production never changes it.
 var enginesStreamKeepalive = 10 * time.Second
 
+// enginesStreamRecheck is how often a subscriber checks between lines that its
+// stream's route, admission and pinned identity are still current. A stale
+// stream's cache is refused at once; ending the stream within this interval,
+// not at its next line, lets keepPeerStream reopen it on the new route after
+// its pause. A var so tests can shorten it.
+var enginesStreamRecheck = 2 * time.Second
+
 const (
 	// enginesStreamIdle drops a subscription after this long without a line,
 	// and bounds how old a cached peer list may be when it is served.
@@ -238,6 +245,7 @@ func (m *Manager) consumeEnginesStream(parent context.Context, peer ecPeer) {
 	}
 	_ = clustertrust.ReadSnapshotStream(ctx, cancel, response.Body, clustertrust.SnapshotStreamClient[json.RawMessage]{
 		Idle:        enginesStreamIdle,
+		Recheck:     enginesStreamRecheck,
 		MaxLine:     enginesStreamMaxLine,
 		Current:     current,
 		OnKeepalive: touch,

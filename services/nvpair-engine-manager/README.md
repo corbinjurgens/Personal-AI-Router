@@ -683,8 +683,11 @@ whenever it differs from the last one received, including the first frame
 after each (re)connect. engine-manager subscribes to every admitted peer's
 `GET /v1/engines/events` alongside its settings stream (same supervisor, same
 three-second retry) and keeps the latest list per peer only while that stream
-is live; the entry is dropped when the stream ends. The broker forwards it with
-the other `engine:` notifications.
+is live; the entry is dropped when the stream ends. The engine-status
+subscriber rechecks the stream's route, admission and pinned identity every
+2 s between lines, so after a directory change moves the peer's endpoint the
+stream ends within 2 s and reopens on the new route after the retry pause. The broker forwards
+`engine:remote-installed-changed` with the other `engine:` notifications.
 
 `engine:install`, `engine:uninstall`,
 `engine:set-port`, and `engine:action` run in their own goroutine on the

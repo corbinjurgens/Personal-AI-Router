@@ -19,6 +19,7 @@ import (
 
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/clustertrusttest"
+	"nvpair-shared/noderec"
 )
 
 func shortenEnginesKeepalive(t *testing.T, d time.Duration) {
@@ -57,10 +58,10 @@ func newEnginesTestExecutor(t *testing.T, list *enginesList) *Executor {
 }
 
 func TestEnginesStreamDefaults(t *testing.T) {
-	if enginesStreamKeepalive != 10*time.Second || enginesStreamIdle != 25*time.Second ||
+	if enginesStreamKeepalive != 10*time.Second || enginesStreamIdle != 25*time.Second || enginesStreamRecheck != 2*time.Second ||
 		enginesRebuildEvery != 10*time.Second || enginesRebuildDelay != 250*time.Millisecond {
-		t.Fatalf("keepalive/idle/rebuild/delay = %v/%v/%v/%v, want 10s/25s/10s/250ms",
-			enginesStreamKeepalive, enginesStreamIdle, enginesRebuildEvery, enginesRebuildDelay)
+		t.Fatalf("keepalive/idle/recheck/rebuild/delay = %v/%v/%v/%v/%v, want 10s/25s/2s/10s/250ms",
+			enginesStreamKeepalive, enginesStreamIdle, enginesStreamRecheck, enginesRebuildEvery, enginesRebuildDelay)
 	}
 }
 
@@ -494,5 +495,62 @@ func TestEnginesStreamPeerCacheAndNotification(t *testing.T) {
 	}
 	if fetches.Load() != 0 {
 		t.Fatalf("GET /v1/engines = %d, want 0", fetches.Load())
+	}
+}
+
+func TestEnginesStreamEndsSoonAfterRouteChange(t *testing.T) {
+	// No line arrives after the first frame: only the recheck can end it.
+	shortenEnginesKeepalive(t, time.Hour)
+	previous := enginesStreamRecheck
+	enginesStreamRecheck = 50 * time.Millisecond
+	t.Cleanup(func() { enginesStreamRecheck = previous })
+	list := &enginesList{}
+	list.set(EngineStatus{Engine: "llamacpp", DisplayName: "llama.cpp", Installed: true})
+	exec := newEnginesTestExecutor(t, list)
+	f := newRemoteReverseFixture(t, func(mesh *clustertrust.Mesh) http.Handler {
+		return (&controlServer{exec: exec, mesh: mesh}).mux()
+	})
+	out := &syncBuffer{}
+	f.m.codec = NewCodec(out)
+	framed := make(chan struct{}, 1)
+	f.m.exec.emit = func(method string, _ any) {
+		if method == "engine:remote-installed-changed" {
+			select {
+			case framed <- struct{}{}:
+			default:
+			}
+		}
+	}
+	peer, ok := f.m.peers.lookup("host-peer")
+	if !ok {
+		t.Fatal("missing peer")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); f.m.consumeEnginesStream(ctx, peer) }()
+	t.Cleanup(func() { cancel(); <-done })
+	select {
+	case <-framed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first engine status frame did not arrive")
+	}
+
+	// Discovery moves the peer's ec endpoint; the stream's route is stale.
+	moved := f.node
+	moved.Services = map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceEngineControl: {Port: f.node.Services[noderec.ServiceEngineControl].Port + 1}}
+	f.m.peers.set([]noderec.DirectoryNode{moved})
+	if _, msg := remoteGetInstalled(t, f.m, out, 1); msg != errRemoteEnginesUnavailable.Error() {
+		t.Fatalf("after route change: error %q, want unavailable", msg)
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("engine status consumer outlived its route by more than the recheck")
+	}
+	f.m.remoteEngines.mu.Lock()
+	remaining := len(f.m.remoteEngines.peers)
+	f.m.remoteEngines.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("cache entries after stream end = %d, want 0", remaining)
 	}
 }
