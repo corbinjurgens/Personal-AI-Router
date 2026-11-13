@@ -16,6 +16,7 @@ import (
 	"errors"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"nvpair-shared/clustertrust"
@@ -42,10 +43,17 @@ const (
 var errRemoteEnginesUnavailable = errors.New("remote engines: engine status stream is not connected")
 
 // enginesPublisher rebuilds the local {"engines":[...]} body and publishes it
-// when its bytes change.
+// when its bytes change. It rebuilds only while a stream is subscribed: a
+// rebuild refreshes every engine's status, which probes the engine's port, so
+// a node no peer streams from does no periodic status work.
 type enginesPublisher struct {
-	hub    clustertrust.SnapshotHub[json.RawMessage]
-	signal chan struct{}
+	hub     clustertrust.SnapshotHub[json.RawMessage]
+	signal  chan struct{}
+	readers atomic.Int64
+
+	mu   sync.Mutex // serializes rebuilds; guards list and last
+	list func() []EngineStatus
+	last []byte
 }
 
 func newEnginesPublisher() *enginesPublisher {
@@ -63,19 +71,45 @@ func (p *enginesPublisher) poke() {
 	}
 }
 
-// run rebuilds at start, every enginesRebuildEvery and after each poke until
-// ctx ends.
-func (p *enginesPublisher) run(ctx context.Context, list func() []EngineStatus) {
-	var last []byte
-	rebuild := func() {
-		raw, err := json.Marshal(map[string]any{"engines": list()})
-		if err != nil || bytes.Equal(raw, last) {
-			return
-		}
-		last = raw
-		p.hub.Publish(json.RawMessage(raw))
+// rebuild publishes the current list when its bytes changed. It does nothing
+// before run supplies the list or while no stream is subscribed.
+func (p *enginesPublisher) rebuild() {
+	if p.readers.Load() == 0 {
+		return
 	}
-	rebuild()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.list == nil {
+		return
+	}
+	raw, err := json.Marshal(map[string]any{"engines": p.list()})
+	if err != nil || bytes.Equal(raw, p.last) {
+		return
+	}
+	p.last = raw
+	p.hub.Publish(json.RawMessage(raw))
+}
+
+// subscribe adds a stream reader. The list is rebuilt first, so the reader's
+// first frame is current even after a period with no readers.
+func (p *enginesPublisher) subscribe() (<-chan json.RawMessage, func(), bool) {
+	p.readers.Add(1)
+	p.rebuild()
+	ch, cancel, ok := p.hub.Subscribe()
+	if !ok {
+		p.readers.Add(-1)
+		return nil, func() {}, false
+	}
+	return ch, func() { cancel(); p.readers.Add(-1) }, true
+}
+
+// run rebuilds at start, every enginesRebuildEvery and after each poke until
+// ctx ends, each only while a stream is subscribed.
+func (p *enginesPublisher) run(ctx context.Context, list func() []EngineStatus) {
+	p.mu.Lock()
+	p.list = list
+	p.mu.Unlock()
+	p.rebuild()
 	ticker := time.NewTicker(enginesRebuildEvery)
 	defer ticker.Stop()
 	for {
@@ -83,7 +117,7 @@ func (p *enginesPublisher) run(ctx context.Context, list func() []EngineStatus) 
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			rebuild()
+			p.rebuild()
 		case <-p.signal:
 			timer := time.NewTimer(enginesRebuildDelay)
 			select {
@@ -92,7 +126,7 @@ func (p *enginesPublisher) run(ctx context.Context, list func() []EngineStatus) 
 				return
 			case <-timer.C:
 			}
-			rebuild()
+			p.rebuild()
 		}
 	}
 }
@@ -109,7 +143,7 @@ func (s *controlServer) handleEngineEvents(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "engine status unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	ch, closeSub, ok := s.exec.enginesEvents.hub.Subscribe()
+	ch, closeSub, ok := s.exec.enginesEvents.subscribe()
 	if !ok {
 		http.Error(w, "too many engine status subscriptions", http.StatusServiceUnavailable)
 		return

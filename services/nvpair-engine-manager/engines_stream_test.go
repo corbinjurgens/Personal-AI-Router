@@ -61,6 +61,54 @@ func TestEnginesStreamDefaults(t *testing.T) {
 	}
 }
 
+func TestEnginesPublisherRebuildsOnlyWithReaders(t *testing.T) {
+	var calls atomic.Int64
+	list := &enginesList{}
+	list.set(EngineStatus{Engine: "llamacpp", Installed: true})
+	p := newEnginesPublisher()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		p.run(ctx, func() []EngineStatus { calls.Add(1); return list.get() })
+	}()
+	t.Cleanup(func() { cancel(); <-done })
+
+	// No reader: neither the start rebuild nor a poke refreshes engine status.
+	p.poke()
+	time.Sleep(enginesRebuildDelay + 200*time.Millisecond)
+	if n := calls.Load(); n != 0 {
+		t.Fatalf("status refreshed %d times with no reader, want 0", n)
+	}
+
+	// A reader's first frame is the current list, rebuilt on subscribe.
+	list.set(EngineStatus{Engine: "llamacpp", Installed: true, Running: true})
+	ch, closeSub, ok := p.subscribe()
+	if !ok {
+		t.Fatal("subscribe refused")
+	}
+	select {
+	case raw := <-ch:
+		var frame struct {
+			Engines []EngineStatus `json:"engines"`
+		}
+		if err := json.Unmarshal(raw, &frame); err != nil || len(frame.Engines) != 1 || !frame.Engines[0].Running {
+			t.Fatalf("first frame = %s (%v)", raw, err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("subscriber got no first frame")
+	}
+
+	// After the last reader leaves, pokes no longer refresh status.
+	closeSub()
+	before := calls.Load()
+	p.poke()
+	time.Sleep(enginesRebuildDelay + 200*time.Millisecond)
+	if n := calls.Load(); n != before {
+		t.Fatalf("status refreshed after the last reader left: %d -> %d", before, n)
+	}
+}
+
 func TestEnginesStreamEmitStateSignalsPublisher(t *testing.T) {
 	exec := settingsExecutor(t, false)
 	select {

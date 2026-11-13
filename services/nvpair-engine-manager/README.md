@@ -755,9 +755,11 @@ stream after 25 seconds without a line and reconnect through
 
 `GET /v1/engines/events` follows the same rules (10-second keepalive, pin
 recheck before each frame, 25-second subscriber idle). Its frames are the
-`GET /v1/engines` body, `{engines:[EngineStatus]}`. The list is rebuilt at
-start, every 10 seconds and 250 ms after a local `engine:state-changed`, and a
-frame is sent only when its encoded bytes change.
+`GET /v1/engines` body, `{engines:[EngineStatus]}`. While at least one stream
+is open, the list is rebuilt every 10 seconds and 250 ms after a local
+`engine:state-changed`, and a frame is sent only when its encoded bytes change.
+A new stream rebuilds the list before its first frame. With no stream open the
+list is not rebuilt, so a node no peer streams from does not probe its engines.
 
 Preset conversion preserves native sampler defaults, reasoning budget and output
 limits as extra options. Native `flash-attn = auto` becomes inherited policy;
