@@ -161,7 +161,11 @@ type nodeDetail struct {
 	// enginesStale marks the engine list as last-known rather than current,
 	// because the most recent read of it failed. Held as state rather than
 	// announced, since the read repeats on a timer.
-	enginesStale               bool
+	enginesStale bool
+	// enginesPushes counts engine:remote-installed-changed lists applied. A
+	// read sent before a push can be answered after it with an older list, so
+	// its reply is dropped.
+	enginesPushes              int
 	policy                     targetPolicy
 	policyFresh                bool
 	policyRoute                int
@@ -221,6 +225,8 @@ type detailModelRow struct {
 type detailEnginesMsg struct {
 	engines []engineStatus
 	err     error
+	// pushes is enginesPushes when the read was sent.
+	pushes int
 }
 
 type detailModelsMsg struct {
@@ -365,8 +371,7 @@ func (d *nodeDetail) Init() tea.Cmd {
 }
 
 // remoteEngineRefresh is how often an open remote detail re-reads the peer's
-// engines. Slower than the telemetry poll because each read crosses the cluster
-// to another machine, and engine lifecycle changes in seconds, not milliseconds.
+// engines to notice a stream that stopped; changes themselves are pushed.
 const remoteEngineRefresh = 5 * time.Second
 
 // detailEnginesTickMsg re-reads a remote node's engines. gen scopes it to one
@@ -445,15 +450,16 @@ func (d *nodeDetail) enginesCmd() tea.Cmd {
 		method = "engine:remote-get-installed"
 		params["node"] = d.node.key
 	}
+	pushes := d.enginesPushes
 	return d.own(call(d.client, method, params, func(msg *rpc.Message, err error) tea.Msg {
 		if err != nil {
-			return detailEnginesMsg{err: err}
+			return detailEnginesMsg{err: err, pushes: pushes}
 		}
 		var r struct {
 			Engines []engineStatus `json:"engines"`
 		}
 		decodeOrLog(method, msg.Result, &r)
-		return detailEnginesMsg{engines: r.Engines}
+		return detailEnginesMsg{engines: r.Engines, pushes: pushes}
 	}))
 }
 
@@ -945,6 +951,9 @@ func (d *nodeDetail) update(msg tea.Msg) (tea.Cmd, bool) {
 		return nil, true
 
 	case detailEnginesMsg:
+		if msg.pushes != d.enginesPushes {
+			return nil, true
+		}
 		if msg.err != nil {
 			// Said once, not once every five seconds. A peer that has gone away
 			// fails this poll on every tick, and re-firing the toast pinned a
@@ -1115,12 +1124,10 @@ func (d *nodeDetail) update(msg tea.Msg) (tea.Cmd, bool) {
 		return telemetryTickCmd(d.node.key, d.telemetryGen), true
 
 	case detailEnginesTickMsg:
-		// A peer's engine state has no push: engine:state-changed carries a
-		// local snapshot with no node on it, so it cannot be attributed to
-		// another machine and is correctly ignored below. Polling is the only
-		// way an open remote detail reflects an engine starting or stopping
-		// over there; without it the screen showed whatever was true when it
-		// was opened, including right after an action taken from this screen.
+		// A peer's engine changes arrive as engine:remote-installed-changed
+		// (engine:state-changed is local only). The read here is a local
+		// cache read that fails while the peer's stream is down, which is
+		// what marks the list stale when the peer stops answering.
 		if msg.gen != d.telemetryGen || !d.remote() {
 			return nil, true
 		}
@@ -1199,6 +1206,24 @@ func (d *nodeDetail) handleNotification(msg *rpc.Message) tea.Cmd {
 			cmds = append(cmds, d.startPerformance())
 		}
 		return tea.Batch(cmds...)
+
+	case "engine:remote-installed-changed":
+		// The peer's engine list from its engine-status stream, sent on every
+		// change and whenever the stream (re)connects, so it also ends the
+		// stale note a read made during a reconnect gap.
+		var p struct {
+			NodeID  string         `json:"nodeId"`
+			Engines []engineStatus `json:"engines"`
+		}
+		if !decodeOrLog(msg.Method, msg.Params, &p) || !d.remote() || p.NodeID != d.node.key || !d.enginesQueryable() {
+			return nil
+		}
+		d.enginesPushes++
+		d.enginesStale = false
+		d.engines = p.Engines
+		d.refreshEngines()
+		d.sizeEngineTable()
+		return nil
 
 	case "engine:state-changed":
 		var e engineStatus

@@ -977,10 +977,8 @@ func TestLocalDetailIgnoresDiscoveryModels(t *testing.T) {
 	}
 }
 
-// TestRemoteDetailPollsEngines checks a peer's engine state is re-read on a
-// tick. engine:state-changed carries a local snapshot with no node on it, so it
-// cannot be attributed to a peer — polling is the only way an open remote
-// screen notices an engine starting or stopping over there.
+// TestRemoteDetailPollsEngines checks a peer's engine list is re-read on a
+// tick, which is how the screen notices the peer's stream has stopped.
 func TestRemoteDetailPollsEngines(t *testing.T) {
 	d := remoteDetail()
 	if cmd, _ := d.update(detailEnginesTickMsg{gen: d.telemetryGen}); cmd == nil {
@@ -996,6 +994,46 @@ func TestRemoteDetailPollsEngines(t *testing.T) {
 	local := localDetail()
 	if cmd, _ := local.update(detailEnginesTickMsg{gen: local.telemetryGen}); cmd != nil {
 		t.Error("local detail polls engines despite receiving engine:state-changed")
+	}
+}
+
+// TestRemoteDetailAppliesEnginePushes: a peer's engine-status push replaces
+// the list and clears the stale note a read left during a reconnect gap; a
+// read sent before the push cannot overwrite it; another node's push is
+// ignored.
+func TestRemoteDetailAppliesEnginePushes(t *testing.T) {
+	d := remoteDetail()
+	d.node.membership = membershipMember
+	push := func(node, engines string) NotificationMsg {
+		return NotificationMsg{Msg: &rpc.Message{Method: "engine:remote-installed-changed",
+			Params: json.RawMessage(`{"nodeId":"` + node + `","engines":` + engines + `}`)}}
+	}
+
+	d.update(detailEnginesMsg{err: errors.New("remote engines: engine status stream is not connected")})
+	if !d.enginesStale {
+		t.Fatal("a failed read did not mark the engine list stale")
+	}
+	sentBefore := d.enginesPushes
+	d.update(push("peer", `[{"engine":"llamacpp","installed":true,"running":true}]`))
+	if d.enginesStale || len(d.engines) != 1 || !d.engines[0].Running {
+		t.Fatalf("push not applied: stale=%v engines=%+v", d.enginesStale, d.engines)
+	}
+
+	d.update(detailEnginesMsg{engines: []engineStatus{{Engine: "llamacpp"}}, pushes: sentBefore})
+	d.update(detailEnginesMsg{err: errors.New("late failure"), pushes: sentBefore})
+	if d.enginesStale || len(d.engines) != 1 || !d.engines[0].Running {
+		t.Errorf("a read sent before the push replaced it: stale=%v engines=%+v", d.enginesStale, d.engines)
+	}
+
+	d.update(push("other", `[]`))
+	if len(d.engines) != 1 {
+		t.Errorf("another node's push replaced this node's engines: %+v", d.engines)
+	}
+
+	local := localDetail()
+	local.update(push("peer", `[]`))
+	if local.enginesPushes != 0 {
+		t.Error("local detail applied a peer's engine push")
 	}
 }
 
