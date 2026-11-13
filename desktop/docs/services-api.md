@@ -83,9 +83,7 @@
 - ⚠️ nvpair-ui-broker → engine:set-port
 - ⚠️ nvpair-ui-broker → engine:unsubscribe
 - ⚠️ nvpair-ui-broker → workloads:unsubscribe
-- ⚠️ nvpair-workload-manager → performance:capabilities
 - ⚠️ nvpair-workload-manager → performance:publish
-- ⚠️ nvpair-workload-manager → performance:summary
 
 ### Backend binaries not listed in `modular-binaries.ts`
 - none ✅
@@ -519,9 +517,7 @@
 | `workloads:remove` | notification (we consume) | ✅ yes |
 | `workloads:upsert` | notification (we consume) | ✅ yes |
 | `discovery:nodes` | request (we call) | ✅ yes |
-| `performance:capabilities` | request (we call) | ⚠️ not called |
 | `performance:publish` | request (we call) | ⚠️ not called |
-| `performance:summary` | request (we call) | ⚠️ not called |
 
 **Dynamic / unresolved notify sites (verify by hand — `npm run service-contracts` prints the line numbers):**
 - `method (var)  (performance.go)`

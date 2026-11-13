@@ -62,13 +62,9 @@ func NewBroadcaster(peers *peerSet, mesh *clustertrust.Mesh, clusterDir string) 
 		mesh:  mesh,
 		addrs: reach.NewChooser(),
 	}
-	base := ""
-	if clusterDir != "" {
-		base = filepath.Dir(clusterDir)
-	}
 	b.clients = clustertrust.NewPeerServiceClient(mesh, clustertrust.PeerServiceClientOptions{
 		PeerClientOptions: clustertrust.PeerClientOptions{Timeout: perPeerTimeout},
-		BaseConfigDir:     base,
+		BaseConfigDir:     peerConfigBase(clusterDir),
 		ResolveRoute:      b.resolveRoute,
 		// Only post uses this client: nonempty, known-length event/cancel
 		// POSTs whose receiver owns deduplication. The adapter never replays.
@@ -84,6 +80,15 @@ func NewBroadcaster(peers *peerSet, mesh *clustertrust.Mesh, clusterDir string) 
 	}
 	peers.mu.Unlock()
 	return b
+}
+
+// peerConfigBase is the configuration directory peer service clients use for
+// reverse sessions: the parent of the cluster directory, or "" without one.
+func peerConfigBase(clusterDir string) string {
+	if clusterDir == "" {
+		return ""
+	}
+	return filepath.Dir(clusterDir)
 }
 
 // resolveRoute combines shared admission authority with the current discovery

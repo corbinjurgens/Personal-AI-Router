@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"nvpair-shared/clustertrust"
-	"nvpair-shared/performancewire"
 )
 
 // eventsPath is the single inter-node endpoint (spec §7.2).
@@ -44,7 +43,8 @@ func newInterNodeServer(h http.Handler) *http.Server {
 
 // Server is the inter-node HTTP listener. Peers POST JSON-RPC notifications
 // here; each validated, deduplicated event is translated and emitted to the
-// local broker on stdout.
+// local broker on stdout. Pinned peers also read this node's performance
+// summary from performanceStreamPath.
 type Server struct {
 	port  int
 	dedup *dedupIndex
@@ -92,6 +92,7 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc(eventsPath, s.handleEvents)
+	mux.HandleFunc(performanceStreamPath, s.handlePerformanceStream)
 
 	base, err := net.Listen("tcp", ":"+strconv.Itoa(s.port))
 	if err != nil {
@@ -120,17 +121,23 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 }
 
-func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
-	// Cluster gate: the event must arrive over cluster mTLS from a peer this node
-	// currently pins. Refresh first so a membership change or a peer paired since
-	// the last request is reflected without a restart.
-	//
-	// Unconditional by design. VerifyClientPin is already false for a node that
-	// belongs to no cluster, so an unclustered node rejects every event — it does
-	// not fall back to accepting them in the clear. Wrapping this in a membership
-	// test is what made an unclustered node an open ingest endpoint (§7.2).
+// pinnedPeer is the cluster gate for every inter-node route: the request must
+// arrive over cluster mTLS from a peer this node currently pins. Refresh first
+// so a membership change or a peer paired since the last request is reflected
+// without a restart.
+//
+// Unconditional by design. VerifyClientPin is already false for a node that
+// belongs to no cluster, so an unclustered node rejects every event — it does
+// not fall back to accepting them in the clear. Wrapping this in a membership
+// test is what made an unclustered node an open ingest endpoint (§7.2).
+func (s *Server) pinnedPeer(r *http.Request) bool {
 	s.mesh.Refresh()
-	if _, ok := s.mesh.VerifyClientPin(r); !ok {
+	_, ok := s.mesh.VerifyClientPin(r)
+	return ok
+}
+
+func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
+	if !s.pinnedPeer(r) {
 		http.Error(w, "forbidden: not a pinned cluster peer", http.StatusForbidden)
 		return
 	}
@@ -163,18 +170,6 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch {
-	case msg.Method == performancewire.MethodSummary:
-		if s.performance == nil {
-			http.Error(w, "broker unavailable", http.StatusInternalServerError)
-			return
-		}
-		s.performance.handleSummary(w, r, msg.Params)
-	case msg.Method == methodPerformanceCapabilities:
-		if s.performance == nil {
-			http.Error(w, "broker unavailable", http.StatusInternalServerError)
-			return
-		}
-		s.performance.capabilities(w, r, msg.Params)
 	case isLifecycleMethod(msg.Method):
 		s.handleLifecycle(w, &msg)
 	case msg.Method == MethodRemove:

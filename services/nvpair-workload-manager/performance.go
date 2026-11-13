@@ -5,34 +5,27 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
-	"log/slog"
 	"net/http"
 	"strconv"
 	"sync"
 	"time"
 
 	"nvpair-shared/clustertrust"
-	"nvpair-shared/noderec"
 	"nvpair-shared/performancewire"
 )
 
 const (
-	methodPerformancePublish      = "performance:publish"
-	methodPerformanceReceived     = "performance:received"
-	methodPerformanceStatus       = "performance:status"
-	methodPerformanceCapabilities = "performance:capabilities"
-	performanceHeartbeat          = 30 * time.Second
-	performanceStaleAfter         = 90 * time.Second
-	performancePeerLimit          = 128
-	performanceSendWorkers        = 4
-	performanceProbeAttempts      = 3
-	performanceElapsedHeader      = "X-PAIR-Performance-Elapsed-Ms"
+	methodPerformancePublish  = "performance:publish"
+	methodPerformanceReceived = "performance:received"
+	methodPerformanceStatus   = "performance:status"
+	performanceStaleAfter     = 90 * time.Second
+	performancePeerLimit      = 128
+	// performanceOlderRevision is applySummary's message for an older revision
+	// it ignored (status 200); reachability is not refreshed for it.
+	performanceOlderRevision = "older revision ignored"
 )
 
 type performanceReceived struct {
@@ -42,7 +35,7 @@ type performanceReceived struct {
 }
 
 // sampleElapsedMs includes the sender's publication offset and advances on the
-// receiver's monotonic clock, even when heartbeats refresh lastSeenAgeMs.
+// receiver's monotonic clock, even when stream keepalives refresh lastSeenAgeMs.
 type performanceStatus struct {
 	MeasuringHost        string `json:"measuringHost"`
 	AdmissionIncarnation string `json:"admissionIncarnation"`
@@ -64,39 +57,37 @@ type performanceReceipt struct {
 	initialElapsedMs int64
 	lastSeen         time.Time
 	status           string
+	statusAt         time.Time // when status was last emitted to the broker
 	retired          bool
 }
 
-type performanceSupport struct {
-	identity    string
-	generation  uint64
-	attempts    int
-	supported   bool
-	unsupported bool
-	warned      bool
-}
-
-// performanceRelay has one latest outbound replacement and one wake token.
-// Its sender and connection pool are separate from the lifecycle FIFO. Only
-// short snapshot/map updates hold mu; no HTTP or broker writes hold it.
+// performanceRelay holds the latest local summary, served to pinned peers on
+// the performance stream (performance_stream.go), and one receipt per peer
+// whose stream this node reads. hub carries the local revision as a change
+// token; each stream builds its frame from snapshotForSend at write time. wake
+// asks the subscription loop to re-evaluate its peer targets. Only short
+// snapshot/map updates hold mu; no HTTP or broker writes hold it.
 type performanceRelay struct {
 	self           string
 	mesh           *clustertrust.Mesh
 	emit           func(string, any) error
 	now            func() time.Time
-	broadcaster    *Broadcaster
+	broadcaster    *Broadcaster                    // peer targets and routes
+	streams        *clustertrust.PeerServiceClient // subscriber connections; no total timeout
+	hub            clustertrust.SnapshotHub[int64]
 	mu             sync.Mutex
 	latest         []byte
 	latestIdentity string
 	latestAt       time.Time
 	wake           chan struct{}
 	received       map[string]*performanceReceipt
-	support        map[string]performanceSupport // sender-loop owned
 }
 
 func newPerformanceRelay(self string, mesh *clustertrust.Mesh, emit func(string, any) error) *performanceRelay {
-	return &performanceRelay{self: self, mesh: mesh, emit: emit, now: time.Now,
-		wake: make(chan struct{}, 1), received: make(map[string]*performanceReceipt), support: make(map[string]performanceSupport)}
+	p := &performanceRelay{self: self, mesh: mesh, emit: emit, now: time.Now,
+		wake: make(chan struct{}, 1), received: make(map[string]*performanceReceipt)}
+	p.hub.Limit = performancePeerLimit
+	return p
 }
 
 func canonicalPerformanceEpoch(text string) (uint64, bool) {
@@ -129,6 +120,16 @@ func (p *performanceRelay) publish(raw json.RawMessage) error {
 	if !ok {
 		return errors.New("summary is not from the current local admission")
 	}
+	if err := p.record(raw, summary.Revision, identity); err != nil {
+		return err
+	}
+	p.hub.Publish(summary.Revision)
+	return nil
+}
+
+// record stores an accepted local summary. A republished identical revision
+// keeps its publication time, so its sample age keeps advancing.
+func (p *performanceRelay) record(raw []byte, revision int64, identity string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	sameRevision := false
@@ -137,19 +138,18 @@ func (p *performanceRelay) publish(raw json.RawMessage) error {
 		if err != nil {
 			return err
 		}
-		if summary.Revision < old.Revision {
+		if revision < old.Revision {
 			return errors.New("stale local summary revision")
 		}
-		if summary.Revision == old.Revision && !bytes.Equal(raw, p.latest) {
+		if revision == old.Revision && !bytes.Equal(raw, p.latest) {
 			return errors.New("local summary changed without a new revision")
 		}
-		sameRevision = summary.Revision == old.Revision
+		sameRevision = revision == old.Revision
 	}
 	if !sameRevision {
 		p.latestAt = p.now()
 	}
 	p.latest, p.latestIdentity = bytes.Clone(raw), identity
-	p.signal()
 	return nil
 }
 
@@ -160,44 +160,9 @@ func (p *performanceRelay) signal() {
 	}
 }
 
-func (p *performanceRelay) run(ctx context.Context) {
-	ticker := time.NewTicker(performanceHeartbeat)
-	defer ticker.Stop()
-	p.runTicks(ctx, ticker.C)
-}
-
-func (p *performanceRelay) runTicks(ctx context.Context, ticks <-chan time.Time) {
-	// The timer never waits for a network round. Heartbeats coalesce with
-	// publish/discovery wakes, and freshness still advances during blocked I/O.
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-p.wake:
-				p.sendRound(ctx)
-			}
-		}
-	}()
-	defer func() { <-done }()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticks:
-			p.sweep()
-			p.signal()
-		}
-	}
-}
-
-func (p *performanceRelay) snapshot() []byte {
-	raw, _ := p.snapshotForSend()
-	return raw
-}
-
+// snapshotForSend returns the latest local summary and its age in
+// milliseconds, or nil while it must be withheld: the local admission changed
+// or the publication is past retention.
 func (p *performanceRelay) snapshotForSend() ([]byte, int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -219,140 +184,6 @@ func (p *performanceRelay) snapshotForSend() ([]byte, int64) {
 		return nil, 0
 	}
 	return bytes.Clone(p.latest), elapsed
-}
-
-func (p *performanceRelay) sendRound(ctx context.Context) {
-	if p.broadcaster == nil {
-		return
-	}
-	if p.snapshot() == nil {
-		return
-	}
-	targets := p.broadcaster.peers.targets()
-	jobs := make(chan target)
-	var wg sync.WaitGroup
-	var supportMu sync.Mutex
-	next := make(map[string]performanceSupport)
-	for range performanceSendWorkers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for t := range jobs {
-				// Fail closed on legacy aliases, never trusting a relay mapping to
-				// assert that somebody else's host UUID belongs to this principal.
-				if t.id != t.uuid {
-					continue
-				}
-				state := p.support[t.uuid]
-				_, generation, routeOK := p.broadcaster.peers.targetUUID(t.uuid)
-				identity, ok := p.broadcaster.mesh.PeerServiceIncarnation(t.uuid)
-				if ok && routeOK {
-					if state.identity != identity || state.generation != generation {
-						state = performanceSupport{identity: identity, generation: generation}
-					}
-					state = p.sendPeer(ctx, t, state)
-				}
-				// Missing authority/route withholds traffic, not the known budget.
-				// Only a positively observed identity/route change resets it.
-				supportMu.Lock()
-				next[t.uuid] = state
-				supportMu.Unlock()
-			}
-		}()
-	}
-	for _, t := range targets {
-		select {
-		case jobs <- t:
-		case <-ctx.Done():
-		}
-	}
-	close(jobs)
-	wg.Wait()
-	p.support = next
-}
-
-func (p *performanceRelay) sendPeer(ctx context.Context, t target, state performanceSupport) performanceSupport {
-	if state.unsupported || (!state.supported && state.attempts >= performanceProbeAttempts) {
-		return state
-	}
-	b := p.broadcaster
-	current := func() bool {
-		b.mesh.Refresh()
-		identity, ok := b.mesh.PeerServiceIncarnation(t.uuid)
-		_, generation, routeOK := b.peers.targetUUID(t.uuid)
-		return ok && routeOK && identity == state.identity && generation == state.generation
-	}
-	if !current() {
-		return state
-	}
-	url := "https://" + b.addrs.Prefer(t.id, t.candidates) + eventsPath
-	client := b.clients.Client(t.uuid, noderec.ServiceWorkload)
-	if !state.supported {
-		state.attempts++
-		probe := []byte(`{"jsonrpc":"2.0","method":"performance:capabilities","params":{}}`)
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(probe))
-		if err != nil {
-			return state
-		}
-		req.Header.Set("Content-Type", "application/json")
-		resp, err := client.Do(req)
-		if err != nil {
-			return state
-		}
-		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1025))
-		_ = resp.Body.Close()
-		if !current() {
-			return state
-		}
-		if resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusNotImplemented {
-			state.unsupported = true
-			return state
-		}
-		var capability struct {
-			Version *int `json:"version"`
-		}
-		decoder := json.NewDecoder(bytes.NewReader(body))
-		decoder.DisallowUnknownFields()
-		if readErr != nil || len(body) > 1024 || resp.StatusCode != http.StatusOK || decoder.Decode(&capability) != nil || decoder.Decode(&struct{}{}) != io.EOF || capability.Version == nil {
-			return state
-		}
-		if *capability.Version != performancewire.SchemaVersion {
-			if !state.warned {
-				state.warned = true
-				slog.Warn("peer performance schema version mismatch",
-					"nodeId", t.uuid, "routeGeneration", state.generation,
-					"expectedVersion", performancewire.SchemaVersion, "receivedVersion", *capability.Version,
-					"consequence", "performance summaries not exchanged until both nodes run the same build")
-			}
-			return state
-		}
-		state.supported = true
-	}
-	// Revalidate the queued local admission and peer authority just before
-	// dispatch. A changed admission withholds pending bytes until broker republishes.
-	raw, elapsed := p.snapshotForSend()
-	if raw == nil || !current() {
-		return state
-	}
-	frame, err := json.Marshal(Message{JSONRPC: "2.0", Method: performancewire.MethodSummary, Params: raw})
-	if err != nil {
-		return state
-	}
-	headers := http.Header{performanceElapsedHeader: []string{strconv.FormatInt(elapsed, 10)}}
-	_ = b.postWithHeaders(ctx, client, url, frame, headers) // one attempt; next heartbeat sends latest
-	if !current() {
-		return state
-	}
-	return state
-}
-
-func (p *performanceRelay) peerIdentity(r *http.Request, epochText string) (string, string, bool) {
-	p.mesh.Refresh()
-	principal, pinned := p.mesh.VerifyClientPin(r)
-	identity, admitted := p.mesh.PeerServiceIncarnation(principal)
-	epoch, canonical := canonicalPerformanceEpoch(epochText)
-	current, ok := p.mesh.PeerAdmissionEpoch(principal)
-	return principal, identity, pinned && admitted && canonical && ok && current == epoch
 }
 
 func (p *performanceRelay) receipt(host string) *performanceReceipt {
@@ -381,41 +212,32 @@ func (p *performanceRelay) status(host string, state *performanceReceipt, now ti
 		AdmissionIncarnation: state.epoch, AdmissionIdentity: state.identity, Status: status,
 		Revision: state.revision, SampleElapsedMs: state.initialElapsedMs + now.Sub(state.firstSeen).Milliseconds(), LastSeenAgeMs: now.Sub(state.lastSeen).Milliseconds()})
 	if err == nil {
-		state.status = status
+		state.status, state.statusAt = status, now
 	}
 	return err
 }
 
-func (p *performanceRelay) handleSummary(w http.ResponseWriter, r *http.Request, raw json.RawMessage) {
-	values := r.Header.Values(performanceElapsedHeader)
-	if len(values) != 1 {
-		http.Error(w, "invalid performance elapsed time", http.StatusBadRequest)
-		return
-	}
-	elapsed, err := strconv.ParseUint(values[0], 10, 64)
-	if err != nil || strconv.FormatUint(elapsed, 10) != values[0] || elapsed > uint64(performancewire.RetentionMs) {
-		http.Error(w, "invalid performance elapsed time", http.StatusBadRequest)
-		return
-	}
+// applySummary applies one peer summary. authority resolves the sender's
+// principal and admission identity for the summary's admission epoch; it is
+// called once after decoding and again for every validity recheck. elapsedMs
+// is the sender's age of the sample. It returns an HTTP-style status code and
+// message; the stream subscriber ends the stream on anything but 200.
+func (p *performanceRelay) applySummary(authority func(epoch string) (principal, identity string, ok bool), raw json.RawMessage, elapsedMs int64) (int, string) {
 	summary, err := performancewire.DecodeSummary(raw)
 	if err != nil {
-		http.Error(w, "invalid performance summary", http.StatusBadRequest)
-		return
+		return http.StatusBadRequest, "invalid performance summary"
 	}
 	raw, err = performancewire.EncodeSummary(summary)
 	if err != nil {
-		http.Error(w, "invalid performance summary", http.StatusBadRequest)
-		return
+		return http.StatusBadRequest, "invalid performance summary"
 	}
-	principal, identity, ok := p.peerIdentity(r, summary.AdmissionIncarnation)
+	principal, identity, ok := authority(summary.AdmissionIncarnation)
 	if !ok || principal != summary.MeasuringHost {
-		http.Error(w, "performance admission mismatch", http.StatusForbidden)
-		return
+		return http.StatusForbidden, "performance admission mismatch"
 	}
 	state := p.receipt(principal)
 	if state == nil {
-		http.Error(w, "performance capacity reached", http.StatusServiceUnavailable)
-		return
+		return http.StatusServiceUnavailable, "performance capacity reached"
 	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
@@ -423,16 +245,14 @@ func (p *performanceRelay) handleSummary(w http.ResponseWriter, r *http.Request,
 	tracked := p.received[principal] == state
 	p.mu.Unlock()
 	if !tracked {
-		http.Error(w, "performance admission retired", http.StatusServiceUnavailable)
-		return
+		return http.StatusServiceUnavailable, "performance admission retired"
 	}
 	valid := func() bool {
-		currentPrincipal, currentIdentity, ok := p.peerIdentity(r, summary.AdmissionIncarnation)
+		currentPrincipal, currentIdentity, ok := authority(summary.AdmissionIncarnation)
 		return ok && currentPrincipal == principal && currentIdentity == identity
 	}
 	if !valid() {
-		http.Error(w, "performance admission changed", http.StatusForbidden)
-		return
+		return http.StatusForbidden, "performance admission changed"
 	}
 	if state.identity != identity {
 		// A receiver-local admission/certificate change retires the payload,
@@ -444,56 +264,77 @@ func (p *performanceRelay) handleSummary(w http.ResponseWriter, r *http.Request,
 		state.payload, state.status, state.retired = nil, "", false
 	}
 	if summary.Revision < state.revision {
-		w.WriteHeader(http.StatusOK)
-		return
+		return http.StatusOK, performanceOlderRevision
 	}
 	digest := sha256.Sum256(raw)
 	if summary.Revision == state.revision && state.digest != digest {
-		http.Error(w, "revision changed contents", http.StatusBadRequest)
-		return
+		return http.StatusBadRequest, "revision changed contents"
 	}
 	now := p.now()
 	if summary.Revision > state.revision {
 		if !valid() {
-			http.Error(w, "performance admission changed", http.StatusForbidden)
-			return
+			return http.StatusForbidden, "performance admission changed"
 		}
-		if err := p.notify(methodPerformanceReceived, performanceReceived{summary, identity, int64(elapsed)}); err != nil {
-			http.Error(w, "broker unavailable", http.StatusInternalServerError)
-			return
+		if err := p.notify(methodPerformanceReceived, performanceReceived{summary, identity, elapsedMs}); err != nil {
+			return http.StatusInternalServerError, "broker unavailable"
 		}
 		if !valid() {
 			// A completed pipe write cannot be retracted. Explicitly retire its
 			// identity so the broker can discard that just-emitted replacement.
 			state.revision, state.digest, state.firstSeen, state.lastSeen = summary.Revision, digest, now, now
-			state.initialElapsedMs = int64(elapsed)
+			state.initialElapsedMs = elapsedMs
 			_ = p.status(principal, state, now, "unknown")
 			state.payload = nil
-			http.Error(w, "performance admission changed", http.StatusForbidden)
-			return
+			return http.StatusForbidden, "performance admission changed"
 		}
 		state.revision, state.digest, state.payload, state.firstSeen = summary.Revision, digest, bytes.Clone(raw), now
-		state.initialElapsedMs = int64(elapsed)
+		state.initialElapsedMs = elapsedMs
 	}
 	// A verified retry cannot make samples younger. Sender elapsed time also
 	// covers time queued before this receiver's first successful delivery.
 	currentElapsed := state.initialElapsedMs + now.Sub(state.firstSeen).Milliseconds()
-	if int64(elapsed) > currentElapsed {
-		state.initialElapsedMs += int64(elapsed) - currentElapsed
+	if elapsedMs > currentElapsed {
+		state.initialElapsedMs += elapsedMs - currentElapsed
 	}
 	state.retired = false
 	state.lastSeen = now
 	if err := p.status(principal, state, now, "fresh"); err != nil {
-		http.Error(w, "broker unavailable", http.StatusInternalServerError)
-		return
+		return http.StatusInternalServerError, "broker unavailable"
 	}
 	if !valid() {
 		_ = p.status(principal, state, p.now(), "unknown")
 		state.payload = nil
-		http.Error(w, "performance admission changed", http.StatusForbidden)
+		return http.StatusForbidden, "performance admission changed"
+	}
+	return http.StatusOK, ""
+}
+
+// refreshReceipt is a stream keepalive from host after an accepted frame. It
+// refreshes lastSeen and re-asserts "fresh" to the broker at most every
+// performanceStatusRefresh, while the receipt is live and authority still
+// holds for its admission. A sender whose summary becomes withheld (admission
+// change, retention) ends the stream, so keepalives stop refreshing it.
+func (p *performanceRelay) refreshReceipt(host string, authority func(epoch string) (principal, identity string, ok bool)) {
+	p.mu.Lock()
+	state := p.received[host]
+	p.mu.Unlock()
+	if state == nil {
 		return
 	}
-	w.WriteHeader(http.StatusOK)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.revision == 0 || state.retired || state.payload == nil {
+		return
+	}
+	if principal, identity, ok := authority(state.epoch); !ok || principal != host || identity != state.identity {
+		return
+	}
+	now := p.now()
+	state.lastSeen = now
+	if state.status == "fresh" && now.Sub(state.statusAt) < performanceStatusRefresh {
+		return
+	}
+	_ = p.status(host, state, now, "fresh")
 }
 
 func (p *performanceRelay) sweep() {
@@ -530,32 +371,4 @@ func (m *Manager) handleLocalPerformance(msg *Message) {
 			_ = m.codec.Respond(msg.ID, nil)
 		}
 	}
-}
-
-func (p *performanceRelay) capabilities(w http.ResponseWriter, r *http.Request, raw json.RawMessage) {
-	// Capability discovery is authenticated application traffic, not a discovery
-	// descriptor extension. The hash brackets the reply just as it brackets data.
-	p.mesh.Refresh()
-	principal, pinned := p.mesh.VerifyClientPin(r)
-	identity, admitted := p.mesh.PeerServiceIncarnation(principal)
-	if !pinned || !admitted {
-		http.Error(w, "performance admission required", http.StatusForbidden)
-		return
-	}
-	var empty struct{}
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	if dec.Decode(&empty) != nil || dec.Decode(&struct{}{}) != io.EOF || string(bytes.TrimSpace(raw)) == "null" {
-		http.Error(w, "invalid performance capability request", http.StatusBadRequest)
-		return
-	}
-	p.mesh.Refresh()
-	current, ok := p.mesh.PeerServiceIncarnation(principal)
-	_, pinned = p.mesh.VerifyClientPin(r)
-	if !ok || !pinned || current != identity {
-		http.Error(w, "performance admission changed", http.StatusForbidden)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_, _ = fmt.Fprintf(w, `{"version":%d}`, performancewire.SchemaVersion)
 }
