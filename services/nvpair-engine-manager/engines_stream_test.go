@@ -9,6 +9,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -142,6 +145,61 @@ func TestEnginesStreamEmitStateSignalsPublisher(t *testing.T) {
 	case <-exec.enginesEvents.signal:
 	default:
 		t.Fatal("engine:state-changed did not signal the engine status publisher")
+	}
+}
+
+// TestPublishedStatusesSkipsBusyEngine: an engine whose operation lock is held
+// (a long install) contributes its in-memory snapshot, and the other engines
+// are still refreshed, so the publisher never waits on the operation.
+func TestPublishedStatusesSkipsBusyEngine(t *testing.T) {
+	key := runtime.GOOS + "/" + runtime.GOARCH
+	dir := t.TempDir()
+	manifest := func(name string) *Manifest {
+		return &Manifest{
+			Engine: name, DisplayName: name, ManifestVersion: 1,
+			Platforms: map[string]Platform{key: {
+				Detect:  []string{filepath.Join(dir, name+exeExt())},
+				Runtime: Runtime{Bin: filepath.Join(dir, name+exeExt())},
+			}},
+		}
+	}
+	reg := NewRegistry()
+	reg.engines["busy"] = manifest("busy")
+	reg.engines["idle"] = manifest("idle")
+	exec := NewExecutor(reg, NewReporter(nil), func(string, any) {}, t.TempDir())
+	busy, err := exec.state("busy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	busy.opMu.Lock()
+	defer busy.opMu.Unlock()
+	busy.mu.Lock()
+	busy.running = true // set by the operation holding opMu
+	busy.mu.Unlock()
+	// Both binaries appear on disk; only the idle engine's refresh may see it.
+	for _, name := range []string{"busy", "idle"} {
+		if err := os.WriteFile(filepath.Join(dir, name+exeExt()), nil, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	listed := make(chan []EngineStatus, 1)
+	go func() { listed <- exec.publishedStatuses() }()
+	var statuses []EngineStatus
+	select {
+	case statuses = <-listed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("publishedStatuses waited on a held operation lock")
+	}
+	byName := map[string]EngineStatus{}
+	for _, status := range statuses {
+		byName[status.Engine] = status
+	}
+	if got := byName["busy"]; !got.Running || got.Installed {
+		t.Errorf("busy engine = %+v, want its in-memory snapshot (running, not re-detected)", got)
+	}
+	if got := byName["idle"]; !got.Installed {
+		t.Errorf("idle engine = %+v, want a refreshed status that detected its binary", got)
 	}
 }
 

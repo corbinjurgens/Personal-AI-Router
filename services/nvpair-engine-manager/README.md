@@ -759,9 +759,12 @@ recheck before each frame, 25-second subscriber idle). Its frames are the
 is open, the list is rebuilt every 10 seconds and 250 ms after a local
 `engine:state-changed`, and a frame is sent only when its encoded bytes change.
 A new stream gets the last published list at once and triggers a rebuild, so
-a list that changed while no stream was open is corrected about 250 ms later,
-or once an engine install or start in progress finishes. With no stream open
-the publisher does no status work.
+a list that changed while no stream was open is corrected about 250 ms later.
+With no stream open the publisher does no status work. The rebuild waits up to
+one second for an engine's operation lock; an engine whose lock stays held
+longer (a long install or start) contributes its in-memory status instead of a
+fresh detection, so a long operation delays neither the other engines' changes
+nor its own state changes.
 
 Preset conversion preserves native sampler defaults, reasoning budget and output
 limits as extra options. Native `flash-attn = auto` becomes inherited policy;

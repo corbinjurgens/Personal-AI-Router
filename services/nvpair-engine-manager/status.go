@@ -127,6 +127,31 @@ func (e *Executor) StatusAtPort(engine string, probePort int) (EngineStatus, err
 
 // GetInstalled lists every known engine with its current status.
 func (e *Executor) GetInstalled() []EngineStatus {
+	return e.listStatuses(func(name string, st *engineState) EngineStatus {
+		status, _ := e.refreshStatus(name, st, 0)
+		return status
+	})
+}
+
+// publishedStatuses is GetInstalled for the peer engine-status publisher. An
+// engine whose operation lock is held (an install, start or stop in progress)
+// contributes its in-memory snapshot instead of a refresh, so one long
+// operation cannot hold back the whole list. The operation's own state changes
+// still reach the snapshot and poke the publisher.
+func (e *Executor) publishedStatuses() []EngineStatus {
+	return e.listStatuses(func(name string, st *engineState) EngineStatus {
+		if !st.opMu.TryLock() {
+			return e.snapshot(name, st)
+		}
+		defer st.opMu.Unlock()
+		status, _ := e.refreshStatusLocked(name, st, 0)
+		return status
+	})
+}
+
+// listStatuses lists every known engine, using status for each engine with a
+// host-platform block.
+func (e *Executor) listStatuses(status func(string, *engineState) EngineStatus) []EngineStatus {
 	var out []EngineStatus
 	for _, name := range e.reg.Names() {
 		st, err := e.state(name)
@@ -142,8 +167,7 @@ func (e *Executor) GetInstalled() []EngineStatus {
 			}
 			continue
 		}
-		status, _ := e.refreshStatus(name, st, 0)
-		out = append(out, status)
+		out = append(out, status(name, st))
 	}
 	return out
 }
@@ -154,6 +178,11 @@ func (e *Executor) GetInstalled() []EngineStatus {
 func (e *Executor) refreshStatus(engine string, st *engineState, probePort int) (EngineStatus, error) {
 	st.opMu.Lock()
 	defer st.opMu.Unlock()
+	return e.refreshStatusLocked(engine, st, probePort)
+}
+
+// refreshStatusLocked is refreshStatus for a caller holding st.opMu.
+func (e *Executor) refreshStatusLocked(engine string, st *engineState, probePort int) (EngineStatus, error) {
 	before := e.snapshot(engine, st)
 	pathInstalled, _ := e.Detect(engine)
 	st.mu.Lock()

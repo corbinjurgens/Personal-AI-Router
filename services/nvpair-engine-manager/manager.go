@@ -188,7 +188,7 @@ func (m *Manager) Run(ctx context.Context) error {
 	// when the read loop exits below.
 	go m.exec.watchLoaded(ctx)
 	go m.exec.modelIdentities.run(ctx)
-	go m.exec.enginesEvents.run(ctx, m.exec.GetInstalled)
+	go m.exec.enginesEvents.run(ctx, m.exec.publishedStatuses)
 	go m.watchPeerSettings(ctx)
 	startupRecoveryDone := make(chan struct{})
 	go func() {
