@@ -5,9 +5,10 @@
  * Collects license information for the Go modules linked into the shipped
  * service binaries.
  *
- * The installer bundles all twelve Go executables from `../services` as
- * `extraResources`, so their dependencies are redistributed and need attribution
- * in the notice file that ships inside the application.
+ * The installer bundles the Go executables built by `build-modular-binaries.ts`
+ * as `extraResources`, so their dependencies are redistributed and need
+ * attribution in the notice file that ships inside the application. The caller
+ * passes the module directories of exactly that set.
  *
  * Module sets are build-tag dependent — `github.com/Microsoft/go-winio` only
  * appears for `GOOS=windows` — so every release target is enumerated and the
@@ -144,13 +145,11 @@ function repositoryUrl(modulePath: string): string {
 }
 
 export async function collectGoModuleEntries(
-    servicesDir: string,
-    componentNames: readonly string[]
+    componentDirs: readonly string[]
 ): Promise<LicenseEntry[]> {
     const byKey = new Map<string, GoModule>()
 
-    for (const component of componentNames) {
-        const componentDir = join(servicesDir, component)
+    for (const componentDir of componentDirs) {
         for (const { goos, goarch } of GO_TARGETS) {
             for (const module of await listModulesForTarget(componentDir, goos, goarch)) {
                 if (!isThirdParty(module)) continue

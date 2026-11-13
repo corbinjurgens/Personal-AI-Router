@@ -7,8 +7,8 @@
  *   - every runtime (production) npm dependency + all their transitives
  *   - the Electron runtime itself (declared as a devDependency, but shipped
  *     with the packaged app, so legally it has to appear in the report)
- *   - the Go modules linked into the twelve service binaries, which the
- *     installer ships from `../services` as extraResources
+ *   - the Go modules linked into the service binaries and the Inference Demo
+ *     dispatcher, which the installer ships as extraResources
  *
  * Dev-only tooling (vite, tsx, typescript, prettier, knip, etc.) is deliberately
  * excluded — it is not redistributed and does not need attribution.
@@ -24,6 +24,8 @@ import { readFile, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import pkg from '../package.json' with { type: 'json' }
+import { INFERENCE_DISPATCHER_BASE_NAME } from '@/shared/constants/inference-dispatcher'
+import { modularShippedBinaryBaseNames } from '@/shared/constants/modular-binaries'
 import { collectGoModuleEntries, type LicenseEntry } from './collect-go-licenses'
 import { npmLicenseText } from './npm-license-text'
 
@@ -33,7 +35,6 @@ const servicesDir = resolve(repoRoot, '..', 'services')
 
 const NOTICE_PATH = resolve(repoRoot, '..', 'THIRD_PARTY_NOTICES.md')
 const ELECTRON_DIR = join(repoRoot, 'node_modules/electron')
-const SERVICE_VERSIONS_PATH = join(servicesDir, 'versions.json')
 
 type Entry = LicenseEntry
 
@@ -173,14 +174,17 @@ function renderMarkdown(entries: Entry[]): string {
     return `${parts.join('\n').trimEnd()}\n`
 }
 
-async function serviceComponentNames(): Promise<string[]> {
-    const raw = await readFile(SERVICE_VERSIONS_PATH, 'utf8')
-    const parsed: { components?: Record<string, string> } = JSON.parse(raw)
-    const components = parsed.components
-    if (components === undefined || Object.keys(components).length === 0) {
-        throw new Error(`No components listed in ${SERVICE_VERSIONS_PATH}`)
-    }
-    return Object.keys(components)
+/**
+ * Module directories of every Go binary the build ships: the services inventory
+ * `build-modular-binaries.ts` builds from, plus the Inference Demo dispatcher,
+ * whose module sits beside the services tree. `versions.json` is not the list:
+ * release automation owns it and it omits `nvpair-service`.
+ */
+function shippedGoModuleDirs(): string[] {
+    return [
+        ...modularShippedBinaryBaseNames().map(name => join(servicesDir, name)),
+        resolve(servicesDir, '..', 'scripts', INFERENCE_DISPATCHER_BASE_NAME)
+    ]
 }
 
 async function main(): Promise<void> {
@@ -194,7 +198,7 @@ async function main(): Promise<void> {
     // Validate npm sources before invoking Go collection or writing any output.
     const npmEntries = await mergeEntries(prod, [])
     const electronEntry = await buildElectronEntry()
-    const goEntries = await collectGoModuleEntries(servicesDir, await serviceComponentNames())
+    const goEntries = await collectGoModuleEntries(shippedGoModuleDirs())
     const entries = await mergeEntries({}, [...npmEntries, electronEntry, ...goEntries])
 
     await writeFile(NOTICE_PATH, renderMarkdown(entries))
