@@ -322,7 +322,8 @@ func TestInspectModelReportsResolverReason(t *testing.T) {
 
 // White's override configuration names its preset and model with forward
 // slashes, while captured evidence holds the absolute, cleaned path. The
-// recheck must match the evidence by that path and still notice a replacement.
+// recheck must match the evidence by that path. The replacement case guards
+// that the identity revalidation beside the lookup still refuses a swap.
 func TestInspectModelAcceptsNonCanonicalPresetSpelling(t *testing.T) {
 	spelled := func(path string) string {
 		return filepath.ToSlash(filepath.Dir(path)) + "/./" + filepath.Base(path)

@@ -146,7 +146,7 @@ func modelReviewedNativeRuntimeSource(ctx context.Context, runtime modelDeviceRu
 }
 
 func modelReviewedNativeSourceExpected(ctx context.Context, st *engineState, command launchCommand, access servingFileAccess, executable sourceEvidence, expected map[string]sourceEvidence) (string, map[string]sourceEvidence, error) {
-	if command.Bin != executable.configured || validateSource(executable) != nil {
+	if !configuredAs(executable.configured, command.Bin) || validateSource(executable) != nil {
 		return "", nil, servingError("Native executable changed.")
 	}
 	runtime, libraries, err := nativeBuildSnapshotExpected(ctx, executable, access, expected)
@@ -207,7 +207,7 @@ func modelReviewedNativeRuntimeSourceExpected(ctx context.Context, runtime model
 		runtime = selected
 		expected = &executable
 	}
-	if expected == nil || command.Bin != expected.configured || validateSource(*expected) != nil {
+	if expected == nil || !configuredAs(expected.configured, command.Bin) || validateSource(*expected) != nil {
 		err := servingError("Native executable changed.")
 		fail("executable-binding", err)
 		return "", err
@@ -1128,8 +1128,7 @@ func compileLlamaServingExpected(ctx context.Context, command launchCommand, rt 
 		sourceFile, err = captureSource(source, false)
 	} else {
 		sourceFile = expected.source
-		configured, absErr := filepath.Abs(source)
-		if absErr != nil || sourceFile.configured != configured {
+		if !configuredAs(sourceFile.configured, source) {
 			return nil, servingError("Native preset changed.")
 		}
 	}

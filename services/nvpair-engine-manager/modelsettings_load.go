@@ -483,7 +483,7 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 	}
 	nativeSource := ""
 	reviewedSource := func(command launchCommand) (string, error) {
-		if command.Bin != buildEvidence.configured || validateSource(buildEvidence) != nil {
+		if !configuredAs(buildEvidence.configured, command.Bin) || validateSource(buildEvidence) != nil {
 			return "", modelLoadError("", "nativeBuildId", "Native executable changed during compilation.")
 		}
 		source, current, err := modelReviewedNativeSourceExpected(ctx, st, command, access, buildEvidence, libraries)
@@ -1937,7 +1937,7 @@ func (e *Executor) validateTypedLlamaConversion(ctx context.Context, st *engineS
 		if load.Resolved == nil || !strings.HasPrefix(load.Resolved.ResolverRevision, "auto/") {
 			continue
 		}
-		if convertedCommand.Bin != conversion.inputs.build.configured || validateSource(conversion.inputs.build) != nil {
+		if !configuredAs(conversion.inputs.build.configured, convertedCommand.Bin) || validateSource(conversion.inputs.build) != nil {
 			return nil, modelLoadError(load.ProfileKey, "nativeBuildId", "Native executable changed during conversion.")
 		}
 		current, libraries, err := modelReviewedNativeSourceExpected(ctx, st, convertedCommand, servingFileAccess{}, conversion.inputs.build, conversion.inputs.libraries)

@@ -1441,6 +1441,11 @@ extensibility story for an open-source product.
   conflicting output must not. Resolve macOS filesystem aliases for image
   comparison, while canonical install containment rejects symlinks
   to external executables. Refusal must preserve external listeners and files.
+  Captured source evidence holds the absolute, cleaned path. Export,
+  inspection, typed compilation and conversion rechecks match a configured
+  preset, model or executable path to it in that form, so a spelling such as
+  forward slashes on Windows selects the same evidence; its object identity,
+  size and mtime are still revalidated.
   Configured paths remain literal; only Linux process-image metadata may remove
   one trailing ` (deleted)`, and an existing literal suffixed file takes
   precedence over that interpretation.
@@ -1790,11 +1795,7 @@ Requirements:
   copy-receipt candidates. Typed bindings can select artifacts without
   `Runtime.Serving` or a running engine. Disagreeing candidates are ambiguous.
   Export checks the selected effective configuration, artifact bindings and
-  applicable full hash assertions, followed by a snapshot recheck. Captured
-  source evidence holds the absolute, cleaned path, and rechecks match a
-  configured preset, model or executable path to it by that form, so a
-  spelling such as forward slashes on Windows selects the same evidence; the
-  evidence's object identity, size and mtime are still revalidated. It does not
+  applicable full hash assertions, followed by a snapshot recheck. It does not
   recompile or approve the whole launch. Full launch and apply retain their
   separate review checks. Undeclared
   presets use the same parser and effective launch-option precedence, resolving
