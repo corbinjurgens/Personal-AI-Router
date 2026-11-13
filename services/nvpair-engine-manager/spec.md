@@ -400,6 +400,10 @@ ordinary typed loads need no `ServingConfig`. Inspect projects retained history
 without another props/model-list request or history write. Missing, unsupported,
 stale, ambiguous and incomplete observations remain Unknown/partial. Recovered
 history cannot restore currentness.
+Capture binds the reviewed native source and build before spawn, under the start
+context and a 10-second bound, because it can be the first full native hash; a
+failed bind leaves that run without samples until the next start. Launches
+without typed loads or a serving declaration create no capture (`unprepared`).
 
 The b12020 mapping carries recognized self-reported pin assurance only, not
 proof of an undisclosed clean build. Rows retain reported decimal MiB, precision,
