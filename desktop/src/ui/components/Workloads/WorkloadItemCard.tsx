@@ -8,11 +8,16 @@ import getErrorString from '@/shared/utils/get-error-string'
 import { workloadCancelRequest, workloadExecutionNodeId } from '@/shared/utils/workloads'
 import { useErrorsStore } from '@/ui/stores/errors.store'
 import { useNodesStore } from '@/ui/stores/nodes.store'
+import { useClusterInvitationsStore } from '@/ui/stores/cluster-invitations.store'
 import { WORKLOAD_COLOR_MAP } from '@/ui/constants/colors'
 import { modelPrimaryLabel } from '@/ui/utils/model-identity-label'
 import { useEngineModelsStore } from '@/ui/stores/engine-models.store'
 import { getWorkloadColorBar } from '@/ui/utils/colors'
-import { workloadModelLabel, workloadNodeLabel } from '@/ui/utils/workload-labels'
+import {
+    workloadErrorText,
+    workloadModelLabel,
+    workloadNodeLabel
+} from '@/ui/utils/workload-labels'
 import EngineIcon from '@/ui/components/EngineIcon'
 import { consumeRoutingRow, useRoutingStore } from '@/ui/stores/routing.store'
 import { workloadRoutingSummary } from '@/ui/utils/routing-labels'
@@ -100,6 +105,16 @@ function WorkloadCancelActions({ workload }: { workload: Workload }) {
     )
 }
 
+function shownNodeName(
+    nodes: ReturnType<typeof useNodesStore.getState>['nodes'],
+    members: ReturnType<typeof useClusterInvitationsStore.getState>['members'],
+    nodeId: string
+): string | undefined {
+    return (
+        nodes.get(nodeId)?.name || members.find(member => member.nodeUuid === nodeId)?.displayName
+    )
+}
+
 function WorkloadItemCard({ workload }: { workload: Workload }) {
     const identity = useEngineModelsStore(state => {
         const nodeId = workloadExecutionNodeId(workload)
@@ -123,19 +138,27 @@ function WorkloadItemCard({ workload }: { workload: Workload }) {
         }
         return summary
     }, [routingRevision, routingConnected, workload])
-    // Subscribe to only this workload's execution node name. Selecting the whole
-    // nodes array re-rendered every job card on any node/metrics update.
+    // Cluster members keep a name for a node that is offline and so missing
+    // from the nodes store; the array changes only when membership does.
+    const members = useClusterInvitationsStore(state => state.members)
+    // Subscribe to only this workload's node names. Selecting the whole nodes
+    // array re-rendered every job card on any node/metrics update.
     const executionNodeText = useNodesStore(state => {
         const executionNodeId = workloadExecutionNodeId(workload)
         if (!executionNodeId) return ''
-        return state.nodes.get(executionNodeId)?.name ?? ''
+        return shownNodeName(state.nodes, members, executionNodeId) ?? ''
     })
     // Same narrow selector for the origin node (where the request entered the
     // cluster) so the card can show "Requested from <node>".
     const requestedFromNodeText = useNodesStore(state => {
         if (!workload.originatedFrom) return ''
-        return state.nodes.get(workload.originatedFrom)?.name ?? ''
+        return shownNodeName(state.nodes, members, workload.originatedFrom) ?? ''
     })
+    const errorText = useNodesStore(state =>
+        workload.error
+            ? workloadErrorText(workload.error, id => shownNodeName(state.nodes, members, id))
+            : ''
+    )
     const barColor = useMemo(() => getWorkloadColorBar(workload.state), [workload.state])
 
     const subtext = useMemo(() => {
@@ -261,12 +284,13 @@ function WorkloadItemCard({ workload }: { workload: Workload }) {
                         {routing.text}
                     </Text>
                 )}
-                {!routing && workload.error && workload.state === 'failed' && (
+                {!routing && errorText && workload.state === 'failed' && (
                     <Text
                         kind="body/regular/sm"
+                        className="min-w-0 [overflow-wrap:anywhere]"
                         style={{ color: 'var(--text-color-feedback-danger)' }}
                     >
-                        {workload.error}
+                        {errorText}
                     </Text>
                 )}
             </Stack>

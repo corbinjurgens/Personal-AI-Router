@@ -17,6 +17,19 @@ export function workloadNodeLabel(workload: Pick<Workload, 'state' | 'startedAt'
  * The model a job card shows. A request that named a tier or alias shows what
  * it asked for and what it got, e.g. `weak → qwen3:4b`.
  */
+const NODE_ID = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi
+
+/**
+ * A job's error with each node ID it names replaced by that node's shown name,
+ * e.g. `stream interrupted after output began on Joes`. Unknown IDs stay as they are.
+ */
+export function workloadErrorText(
+    error: string,
+    nodeName: (nodeId: string) => string | undefined
+): string {
+    return error.replace(NODE_ID, id => nodeName(id.toLowerCase()) || id)
+}
+
 export function workloadModelLabel(
     workload: Pick<Workload, 'model' | 'requestedModel'>,
     displayModel: string

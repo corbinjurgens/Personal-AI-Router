@@ -56,21 +56,25 @@ export function AvailabilityControls({
             (entry.pending === 'paused' &&
                 entry.pendingPauseMode === 'configured' &&
                 value === 'draining'))
+    const halting = value !== 'available' && entry?.pauseMode === 'immediate'
+    const stopped = halting ? 'Halted' : 'Paused'
     const origin =
         value === 'available'
             ? ''
             : entry?.pausedBy === 'local'
-              ? 'Paused from this device'
+              ? `${stopped} ${local ? 'from this device' : 'on that node'}`
               : entry?.pausedBy === 'peer'
-                ? 'Paused by a managing peer'
-                : 'Pause origin unknown'
+                ? `${stopped} by a managing peer`
+                : `${stopped}; origin unknown`
     const label =
         value === 'available'
             ? 'Available'
             : value === 'draining'
-              ? 'Pausing'
+              ? halting
+                  ? 'Halting'
+                  : 'Pausing'
               : value === 'paused'
-                ? 'Paused'
+                ? stopped
                 : 'Availability unknown'
     return (
         <Stack gap="2" className="min-w-0 w-full" aria-label={`Availability for ${name}`}>
@@ -120,7 +124,7 @@ export function AvailabilityControls({
                         Resume
                     </Button>
                 )}
-                {local && (
+                {local && !halting && (
                     <DismissibleTooltip slotContent={HALT_EXPLANATION}>
                         <Button
                             kind="secondary"
@@ -152,7 +156,6 @@ export function AvailabilityControls({
                 className="text-subtle-color break-words min-w-0"
             >
                 {value && value !== 'available' && `${origin}. `}
-                {halted && value !== 'available' && 'Halted on that node. '}
                 {!local &&
                     !resume &&
                     !halted &&
