@@ -283,7 +283,9 @@ restart.
   relay reports its changed `trusted` annotation: the cluster-manager's
   `cluster:trust-changed` makes the scanner re-derive it after the pin
   is written, so its stream starts (or stops) without a membership
-  change. An unpaired peer keeps its entries until discovery removes it.
+  change. A joiner that does not yet advertise its cluster principal
+  is picked up when it starts to, which changes its record. An unpaired
+  peer keeps its entries until discovery removes it.
 - A peer's entries stay when its stream ends, as they always did when
   updates stopped; only discovery removal evicts them. Every reconnect
   starts with the peer's full snapshot, so a change missed while a

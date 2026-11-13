@@ -75,9 +75,15 @@ func LoadIdentity(clusterDir string) (*Identity, error) {
 // these on pairing; consumers Reload() to pick up newly-paired (or removed)
 // peers without a restart.
 type Trust struct {
-	dir  string
-	mu   sync.RWMutex
-	ders map[string][]byte
+	dir string
+	// reload serializes Reload from directory read to publish, so a reload
+	// that started later always publishes later. Without it, a slow reload
+	// that listed trusted/ before a pin landed could overwrite a newer set
+	// that holds the pin, and a consumer that gated a peer once on a
+	// trust-changed signal would drop it with nothing to re-gate it.
+	reload sync.Mutex
+	mu     sync.RWMutex
+	ders   map[string][]byte
 }
 
 // newTrust opens clusterDir/trusted. The pins are read by the owning Mesh's
@@ -103,6 +109,8 @@ func newTrust(clusterDir string) *Trust {
 // Teardown is unaffected: a successful read that no longer lists a pin removes
 // it immediately, which is how a removal is meant to propagate.
 func (t *Trust) Reload() {
+	t.reload.Lock()
+	defer t.reload.Unlock()
 	entries, err := os.ReadDir(t.dir)
 	if err != nil && !os.IsNotExist(err) {
 		return

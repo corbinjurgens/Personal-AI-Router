@@ -16,7 +16,6 @@ import (
 
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/errors"
-	"nvpair-shared/noderec"
 )
 
 // managerForNode builds a manager with a fixed local node id and no
@@ -473,29 +472,7 @@ func TestPeerSyncStreams(t *testing.T) {
 		if err := os.Remove(pinPath); err != nil {
 			t.Fatal(err)
 		}
-		ctx, cancel := context.WithCancel(context.Background())
-		events := make(chan DiscoveryEvent, 4)
-		f.subscriber.ctx = ctx
-		f.subscriber.SetRelayEvents(events)
-		done := make(chan struct{})
-		go func() {
-			defer close(done)
-			f.ps.Run(ctx, events)
-		}()
-		t.Cleanup(func() {
-			cancel()
-			<-done
-		})
-		// The broker relay's directory record for node-b. Only the scanner's
-		// trusted annotation changes when this node pairs with it.
-		record := noderec.DirectoryNode{
-			HostUUID: "node-b", Name: "Peer B", IP: "192.0.2.10", ClusterUUID: "node-b",
-			Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceErrors: {Port: f.event.Node.Port}},
-		}
-		relay := func(trusted bool) {
-			record.Trusted = trusted
-			f.subscriber.handleMessage(notificationMessage(noderec.NotifyNodes, noderec.GetNodesResult{Nodes: []noderec.DirectoryNode{record}}))
-		}
+		relay := f.runRelay(t)
 		f.peer.handleReport(nil, mustJSON(t, bOne))
 		relay(false)
 		settle()
@@ -510,6 +487,37 @@ func TestPeerSyncStreams(t *testing.T) {
 		}
 		relay(true)
 		waitErrorSnapshot(t, f.subscriber, []ServiceError{bOne})
+	})
+
+	t.Run("a peer unpaired while clustered has its stream stopped and keeps its entries", func(t *testing.T) {
+		f := newErrorSyncFixture(t)
+		connections := make(chan *errorSyncConn, 4)
+		f.onConnect = func(conn *errorSyncConn) { connections <- conn }
+		relay := f.runRelay(t)
+		f.peer.handleReport(nil, mustJSON(t, bOne))
+		relay(true)
+		waitErrorSnapshot(t, f.subscriber, []ServiceError{bOne})
+		conn := <-connections
+		if err := os.Remove(filepath.Join(f.ps.clusterDir, "trusted", "node-b.json")); err != nil {
+			t.Fatal(err)
+		}
+		relay(false)
+		select {
+		case <-conn.closed:
+		case <-time.After(2 * time.Second):
+			t.Fatal("unpaired peer's stream stayed open")
+		}
+		settle()
+		f.ps.mu.RLock()
+		_, kept := f.ps.peers["node-b"]
+		f.ps.mu.RUnlock()
+		if kept {
+			t.Fatal("unpaired peer is still a stream target")
+		}
+		if got := f.streams.Load(); got != 1 {
+			t.Fatalf("streams = %d, want 1 (no reconnect after unpairing)", got)
+		}
+		assertErrorSnapshot(t, f.subscriber, []ServiceError{bOne})
 	})
 
 	t.Run("Resubscribe restarts the open streams", func(t *testing.T) {

@@ -67,7 +67,7 @@ type Manager struct {
 	// relayPeers is the last er-peer set projected from the relay snapshot, keyed
 	// by nodeId. applyDiscovery diffs each incoming snapshot against it to emit
 	// only the discovered/updated/removed events PeerSync needs (its downstream is
-	// event-driven), avoiding a stream restart for unchanged peers. Only ever
+	// event-driven), so an unchanged peer costs no pin re-read. Only ever
 	// touched on the single read-loop goroutine, so it needs no lock.
 	relayPeers map[string]relayPeer
 
