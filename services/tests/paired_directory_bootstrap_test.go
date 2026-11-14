@@ -392,7 +392,7 @@ func (f *pairedBootstrapFixture) serve(t *testing.T, service noderec.ServiceKey,
 
 func (f *pairedBootstrapFixture) nodeInfoSample(sample uint32) phase04NodeInfoSample {
 	principal := f.b.uuid
-	return phase04NodeInfoSample{HostUUID: f.b.uuid, ClusterUUID: &principal, TelemetryValid: true, MSSince: 100, CPU: &noderec.CPUInfo{Name: "bootstrap CPU", Cores: 7}, GPUs: []noderec.GPUInfo{{Name: "bootstrap GPU", UtilizationPercent: sample}}}
+	return phase04NodeInfoSample{HostUUID: f.b.uuid, ClusterUUID: &principal, TelemetryValid: true, MSSince: 100, CPU: &noderec.CPUInfo{Name: "bootstrap CPU", Cores: 7}, GPUs: []noderec.GPUInfo{{Name: "bootstrap GPU", UtilizationPercent: &sample}}}
 }
 
 // serveNodeInfoStream is the target's GET /v1/node-info/events: the current
@@ -595,7 +595,7 @@ func (f *pairedBootstrapFixture) assertReads(t *testing.T) {
 			if got.HostUUID != f.b.uuid || got.ClusterUUID == nil || *got.ClusterUUID != f.b.uuid || got.CPU == nil || got.CPU.Cores != 7 || len(got.GPUs) != 1 {
 				t.Fatalf("node sample differs: %+v", got)
 			}
-			return got.GPUs[0].UtilizationPercent == wantSample
+			return got.GPUs[0].UtilizationPercent != nil && *got.GPUs[0].UtilizationPercent == wantSample
 		})
 		f.mu.Lock()
 		streamed := f.streamed[wantSample]

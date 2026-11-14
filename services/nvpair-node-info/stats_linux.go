@@ -288,23 +288,23 @@ func parseProcStat(s string) cpuTimes {
 }
 
 // cpuUtilization derives a 0..100 busy percentage from two cumulative samples.
-// Returns 0 when either sample is invalid, the counters went backwards (a
-// counter reset), or no jiffies elapsed between samples — all of which read as
-// "idle/unknown", matching the omitempty convention used downstream.
-func cpuUtilization(prev, cur cpuTimes) uint32 {
+// Returns nil when either sample is invalid, the counters went backwards (a
+// counter reset), or no jiffies elapsed between samples — none of which is a
+// reading. A fully idle interval returns a non-nil 0.
+func cpuUtilization(prev, cur cpuTimes) *uint32 {
 	if !prev.valid || !cur.valid {
-		return 0
+		return nil
 	}
 	if cur.total < prev.total || cur.idle < prev.idle {
-		return 0
+		return nil
 	}
 	totalDelta := cur.total - prev.total
 	idleDelta := cur.idle - prev.idle
 	if totalDelta == 0 || idleDelta > totalDelta {
-		return 0
+		return nil
 	}
-	busy := float64(totalDelta-idleDelta) * 100 / float64(totalDelta)
-	return uint32(math.Round(busy))
+	busy := uint32(math.Round(float64(totalDelta-idleDelta) * 100 / float64(totalDelta)))
+	return &busy
 }
 
 // readMemoryUsed returns physical-memory bytes in use, or false on failure.
@@ -363,7 +363,7 @@ func parseMeminfoUsed(s string) (uint64, bool) {
 // clamped to 100. The returned sample count includes a parsed 0 % reading but
 // excludes [N/A] and malformed utilization, so callers do not mistake
 // memory-only rows for fresh utilization. Rows with a missing uuid are skipped.
-// A memory.used value of [N/A] remains zero here; buildResponse supplies
+// A memory.used value of [N/A] remains nil here; buildResponse supplies
 // system-memory usage for GPUs that static detection identified as
 // unified-memory adapters.
 func parseNvidiaDynamic(out string) (map[string]gpuStat, int) {
@@ -404,11 +404,13 @@ func parseNvidiaDynamic(out string) (map[string]gpuStat, int) {
 			if pct > 100 {
 				pct = 100
 			}
-			stat.UtilizationPct = uint32(pct)
+			utilization := uint32(pct)
+			stat.UtilizationPct = &utilization
 			utilizationSamples++
 		}
 		if mib, err := strconv.ParseUint(fields[2], 10, 64); err == nil {
-			stat.VRAMUsed = mib * 1024 * 1024
+			used := mib * 1024 * 1024
+			stat.VRAMUsed = &used
 		}
 		res[uuid] = stat
 	}

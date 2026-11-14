@@ -106,55 +106,55 @@ func TestCPUUtilization(t *testing.T) {
 		name string
 		prev cpuTimes
 		cur  cpuTimes
-		want uint32
+		want *uint32
 	}{
 		{
 			name: "50 percent busy",
 			prev: cpuTimes{idle: 100, total: 200, valid: true},
 			cur:  cpuTimes{idle: 200, total: 400, valid: true},
-			want: 50,
+			want: ptr(uint32(50)),
 		},
 		{
 			name: "fully busy",
 			prev: cpuTimes{idle: 100, total: 200, valid: true},
 			cur:  cpuTimes{idle: 100, total: 300, valid: true},
-			want: 100,
+			want: ptr(uint32(100)),
 		},
 		{
 			name: "fully idle",
 			prev: cpuTimes{idle: 100, total: 200, valid: true},
 			cur:  cpuTimes{idle: 200, total: 300, valid: true},
-			want: 0,
+			want: ptr(uint32(0)),
 		},
 		{
 			name: "rounds half up",
 			prev: cpuTimes{idle: 0, total: 0, valid: true},
 			cur:  cpuTimes{idle: 425, total: 1000, valid: true}, // 57.5% busy
-			want: 58,
+			want: ptr(uint32(58)),
 		},
 		{
-			name: "invalid prev -> 0",
+			name: "invalid prev -> no reading",
 			prev: cpuTimes{},
 			cur:  cpuTimes{idle: 1, total: 2, valid: true},
-			want: 0,
+			want: nil,
 		},
 		{
-			name: "counter reset (total went backwards) -> 0",
+			name: "counter reset (total went backwards) -> no reading",
 			prev: cpuTimes{idle: 100, total: 500, valid: true},
 			cur:  cpuTimes{idle: 50, total: 200, valid: true},
-			want: 0,
+			want: nil,
 		},
 		{
-			name: "no elapsed jiffies -> 0",
+			name: "no elapsed jiffies -> no reading",
 			prev: cpuTimes{idle: 100, total: 200, valid: true},
 			cur:  cpuTimes{idle: 100, total: 200, valid: true},
-			want: 0,
+			want: nil,
 		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := cpuUtilization(c.prev, c.cur); got != c.want {
-				t.Fatalf("cpuUtilization() = %d, want %d", got, c.want)
+			if got := cpuUtilization(c.prev, c.cur); !reflect.DeepEqual(got, c.want) {
+				t.Fatalf("cpuUtilization() = %v, want %v", got, c.want)
 			}
 		})
 	}
@@ -320,11 +320,11 @@ func TestParseNvidiaDynamic(t *testing.T) {
 			in: "GPU-aaa, 37, 8192\n" +
 				"GPU-bbb, 150, 1024\n" + // util clamped to 100
 				", 50, 2048\n" + // skipped: empty uuid
-				"GPU-ccc, bad, alsobad\n", // kept, both zero
+				"GPU-ccc, bad, alsobad\n", // kept, both absent
 			want: map[string]gpuStat{
-				"GPU-aaa": {UtilizationPct: 37, VRAMUsed: 8192 * 1024 * 1024},
-				"GPU-bbb": {UtilizationPct: 100, VRAMUsed: 1024 * 1024 * 1024},
-				"GPU-ccc": {UtilizationPct: 0, VRAMUsed: 0},
+				"GPU-aaa": {UtilizationPct: ptr(uint32(37)), VRAMUsed: ptr(uint64(8192 * 1024 * 1024))},
+				"GPU-bbb": {UtilizationPct: ptr(uint32(100)), VRAMUsed: ptr(uint64(1024 * 1024 * 1024))},
+				"GPU-ccc": {},
 			},
 			wantSamples: 2,
 		},
@@ -332,7 +332,7 @@ func TestParseNvidiaDynamic(t *testing.T) {
 			name: "unified memory [N/A] leaves memory for response assembly",
 			in:   "GPU-spark, 42, [N/A]\n",
 			want: map[string]gpuStat{
-				"GPU-spark": {UtilizationPct: 42},
+				"GPU-spark": {UtilizationPct: ptr(uint32(42))},
 			},
 			wantSamples: 1,
 		},
@@ -342,7 +342,7 @@ func TestParseNvidiaDynamic(t *testing.T) {
 				"GPU-memory, N/A, 2048\n",
 			want: map[string]gpuStat{
 				"GPU-spark":  {},
-				"GPU-memory": {VRAMUsed: 2048 * 1024 * 1024},
+				"GPU-memory": {VRAMUsed: ptr(uint64(2048 * 1024 * 1024))},
 			},
 			wantSamples: 0,
 		},
@@ -351,8 +351,8 @@ func TestParseNvidiaDynamic(t *testing.T) {
 			in: "GPU-idle, 0, [N/A]\n" +
 				"GPU-unknown, [N/A], 1024\n",
 			want: map[string]gpuStat{
-				"GPU-idle":    {UtilizationPct: 0},
-				"GPU-unknown": {VRAMUsed: 1024 * 1024 * 1024},
+				"GPU-idle":    {UtilizationPct: ptr(uint32(0))},
+				"GPU-unknown": {VRAMUsed: ptr(uint64(1024 * 1024 * 1024))},
 			},
 			wantSamples: 1,
 		},

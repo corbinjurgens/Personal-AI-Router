@@ -200,7 +200,7 @@ func newScannerReverseFixture(t *testing.T) *scannerReverseFixture {
 			empty := ""
 			cluster, gpuName = &empty, "uncommitted GPU"
 		}
-		return NodeInfoResponse{HostUUID: reportedHost, ClusterUUID: cluster, GPUs: []GPUInfo{{Name: gpuName, UtilizationPercent: 73}}, CPU: &CPUInfo{Name: "peer CPU", Cores: 8, UtilizationPercent: 42}, Memory: &MemoryInfo{TotalBytes: 8192, UsedBytes: 2048}, TelemetryValid: true, MSSince: 100}, true
+		return NodeInfoResponse{HostUUID: reportedHost, ClusterUUID: cluster, GPUs: []GPUInfo{{Name: gpuName, UtilizationPercent: ptr(uint32(73))}}, CPU: &CPUInfo{Name: "peer CPU", Cores: 8, UtilizationPercent: ptr(uint32(42))}, Memory: &MemoryInfo{TotalBytes: 8192, UsedBytes: 2048}, TelemetryValid: true, MSSince: 100}, true
 	}
 	info := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && r.URL.Path == nodeInfoStreamPath {

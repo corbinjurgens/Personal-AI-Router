@@ -8,6 +8,7 @@ package main
 import (
 	"context"
 	"errors"
+	"reflect"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -21,18 +22,18 @@ func TestDarwinCPUUtilization(t *testing.T) {
 		name string
 		prev darwinCPUTimes
 		cur  darwinCPUTimes
-		want uint32
+		want *uint32
 	}{
-		{"busy delta", valid(40, 100), valid(60, 200), 80},
-		{"idle delta", valid(40, 100), valid(140, 200), 0},
-		{"invalid baseline", darwinCPUTimes{}, valid(60, 200), 0},
-		{"counter reset", valid(40, 100), valid(20, 50), 0},
-		{"no elapsed ticks", valid(40, 100), valid(40, 100), 0},
+		{"busy delta", valid(40, 100), valid(60, 200), ptr(uint32(80))},
+		{"idle delta", valid(40, 100), valid(140, 200), ptr(uint32(0))},
+		{"invalid baseline", darwinCPUTimes{}, valid(60, 200), nil},
+		{"counter reset", valid(40, 100), valid(20, 50), nil},
+		{"no elapsed ticks", valid(40, 100), valid(40, 100), nil},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := darwinCPUUtilization(c.prev, c.cur); got != c.want {
-				t.Fatalf("darwinCPUUtilization() = %d, want %d", got, c.want)
+			if got := darwinCPUUtilization(c.prev, c.cur); !reflect.DeepEqual(got, c.want) {
+				t.Fatalf("darwinCPUUtilization() = %v, want %v", got, c.want)
 			}
 		})
 	}
@@ -68,7 +69,7 @@ func TestDarwinCollectorPublishesAndStops(t *testing.T) {
 		return darwinGPUReading{
 			inventory: []GPUInfo{{Name: "Apple M3 Max", statsKey: "ioreg:2a"}},
 			stats: map[string]gpuStat{
-				"ioreg:2a": {VRAMUsed: 8 << 30, UtilizationPct: 42},
+				"ioreg:2a": {VRAMUsed: ptr(uint64(8 << 30)), UtilizationPct: ptr(uint32(42))},
 			},
 			utilizationSamples: 1,
 		}, nil
@@ -76,19 +77,19 @@ func TestDarwinCollectorPublishesAndStops(t *testing.T) {
 
 	c := newDarwinStatsCollector(readCPU, readMemory, readGPU, 2*time.Millisecond)
 	deadline := time.Now().Add(250 * time.Millisecond)
-	for (c.Snapshot().CPUUtilPct != 80 ||
-		c.Snapshot().GPU["ioreg:2a"].UtilizationPct != 42) &&
+	for (!hasValue(c.Snapshot().CPUUtilPct, 80) ||
+		!hasValue(c.Snapshot().GPU["ioreg:2a"].UtilizationPct, 42)) &&
 		time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
 	snap := c.Snapshot()
-	if snap.CPUUtilPct != 80 {
-		t.Fatalf("CPUUtilPct = %d, want 80", snap.CPUUtilPct)
+	if !hasValue(snap.CPUUtilPct, 80) {
+		t.Fatalf("CPUUtilPct = %v, want 80", snap.CPUUtilPct)
 	}
 	if snap.MemUsedBytes < 2<<30 {
 		t.Fatalf("MemUsedBytes = %d, want a refreshed sample", snap.MemUsedBytes)
 	}
-	if snap.GPU["ioreg:2a"].UtilizationPct != 42 {
+	if !hasValue(snap.GPU["ioreg:2a"].UtilizationPct, 42) {
 		t.Fatalf("GPU snapshot = %+v", snap.GPU)
 	}
 	if len(snap.GPUInventory) != 1 || snap.GPUInventory[0].Name != "Apple M3 Max" {
@@ -110,7 +111,7 @@ func TestDarwinCollectorKeepsMemoryOnCPUFailure(t *testing.T) {
 		},
 	}
 	snap := c.decodeSystemSnapshot()
-	if snap.CPUUtilPct != 0 || snap.MemUsedBytes != 8<<30 {
+	if snap.CPUUtilPct != nil || snap.MemUsedBytes != 8<<30 {
 		t.Fatalf("unexpected partial snapshot: %+v", snap)
 	}
 }
@@ -131,7 +132,7 @@ func TestDarwinCollectorRetriesGPUAfterFailure(t *testing.T) {
 			}
 			return darwinGPUReading{
 				inventory:          []GPUInfo{{Name: "Apple M3 Max", statsKey: "ioreg:2a"}},
-				stats:              map[string]gpuStat{"ioreg:2a": {UtilizationPct: 77}},
+				stats:              map[string]gpuStat{"ioreg:2a": {UtilizationPct: ptr(uint32(77))}},
 				utilizationSamples: 1,
 			}, nil
 		},
@@ -143,8 +144,8 @@ func TestDarwinCollectorRetriesGPUAfterFailure(t *testing.T) {
 		t.Fatalf("failed GPU read published %+v", got)
 	}
 	c.collectGPU(context.Background())
-	if got := c.Snapshot().GPU["ioreg:2a"].UtilizationPct; got != 77 {
-		t.Fatalf("retry utilization = %d, want 77", got)
+	if got := c.Snapshot().GPU["ioreg:2a"].UtilizationPct; !hasValue(got, 77) {
+		t.Fatalf("retry utilization = %v, want 77", got)
 	}
 }
 
@@ -152,16 +153,16 @@ func TestDarwinCollectorRequiresUtilizationSample(t *testing.T) {
 	readings := []darwinGPUReading{
 		{
 			inventory: []GPUInfo{{Name: "Apple M3 Max", statsKey: "ioreg:2a"}},
-			stats:     map[string]gpuStat{"ioreg:2a": {VRAMUsed: 2 << 30}},
+			stats:     map[string]gpuStat{"ioreg:2a": {VRAMUsed: ptr(uint64(2 << 30))}},
 		},
 		{
 			inventory:          []GPUInfo{{Name: "Apple M3 Max", statsKey: "ioreg:2a"}},
-			stats:              map[string]gpuStat{"ioreg:2a": {VRAMUsed: 3 << 30, UtilizationPct: 0}},
+			stats:              map[string]gpuStat{"ioreg:2a": {VRAMUsed: ptr(uint64(3 << 30)), UtilizationPct: ptr(uint32(0))}},
 			utilizationSamples: 1,
 		},
 		{
 			inventory: []GPUInfo{{Name: "Apple M3 Max", statsKey: "ioreg:2a"}},
-			stats:     map[string]gpuStat{"ioreg:2a": {VRAMUsed: 4 << 30}},
+			stats:     map[string]gpuStat{"ioreg:2a": {VRAMUsed: ptr(uint64(4 << 30))}},
 		},
 	}
 	call := 0
@@ -176,20 +177,20 @@ func TestDarwinCollectorRequiresUtilizationSample(t *testing.T) {
 
 	c.collectGPU(context.Background())
 	partial := c.Snapshot()
-	if partial.GPU["ioreg:2a"].VRAMUsed != 2<<30 || !partial.GPUSampledAt.IsZero() {
+	if !hasValue(partial.GPU["ioreg:2a"].VRAMUsed, 2<<30) || !partial.GPUSampledAt.IsZero() {
 		t.Fatalf("pre-utilization reading = %+v, want display data without sample time", partial)
 	}
 
 	c.collectGPU(context.Background())
 	idle := c.Snapshot()
-	if idle.GPU["ioreg:2a"].VRAMUsed != 3<<30 || idle.GPU["ioreg:2a"].UtilizationPct != 0 ||
+	if !hasValue(idle.GPU["ioreg:2a"].VRAMUsed, 3<<30) || !hasValue(idle.GPU["ioreg:2a"].UtilizationPct, 0) ||
 		idle.GPUSampledAt.IsZero() {
 		t.Fatalf("valid idle reading = %+v, want fresh 0%% utilization", idle)
 	}
 
 	c.collectGPU(context.Background())
 	retained := c.Snapshot()
-	if retained.GPU["ioreg:2a"].VRAMUsed != 3<<30 ||
+	if !hasValue(retained.GPU["ioreg:2a"].VRAMUsed, 3<<30) ||
 		!retained.GPUSampledAt.Equal(idle.GPUSampledAt) {
 		t.Fatalf("missing utilization replaced last valid reading: got %+v want %+v", retained, idle)
 	}
@@ -215,11 +216,11 @@ func TestDarwinCollectorPublishesSystemStatsWhileGPUBlocks(t *testing.T) {
 	<-started
 
 	deadline := time.Now().Add(250 * time.Millisecond)
-	for c.Snapshot().CPUUtilPct != 80 && time.Now().Before(deadline) {
+	for !hasValue(c.Snapshot().CPUUtilPct, 80) && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
-	if got := c.Snapshot().CPUUtilPct; got != 80 {
-		t.Fatalf("CPUUtilPct = %d while GPU reader blocked, want 80", got)
+	if got := c.Snapshot().CPUUtilPct; !hasValue(got, 80) {
+		t.Fatalf("CPUUtilPct = %v while GPU reader blocked, want 80", got)
 	}
 
 	stopped := make(chan struct{})
@@ -243,14 +244,14 @@ func TestDynamicGPUReadingFromIORegistry(t *testing.T) {
 	if !apple.Shared || apple.Memory != nil {
 		t.Fatalf("AGX did not alias system pool: %+v", apple)
 	}
-	if apple.VRAMUsed != 8<<30 || apple.UtilizationPct != 100 {
+	if !hasValue(apple.VRAMUsed, 8<<30) || !hasValue(apple.UtilizationPct, 100) {
 		t.Fatalf("unexpected Apple stats: %+v", apple)
 	}
 	discrete := reading.stats["ioreg:63"]
 	if discrete.Memory == nil || discrete.Memory.ID != "ioreg:63" || discrete.Memory.Free.Bytes != "6442450944" || !discrete.Memory.Free.Valid {
 		t.Fatalf("discrete physical memory: %+v", discrete.Memory)
 	}
-	if discrete.VRAMUsed != 2<<30 || discrete.UtilizationPct != 25 {
+	if !hasValue(discrete.VRAMUsed, 2<<30) || !hasValue(discrete.UtilizationPct, 25) {
 		t.Fatalf("unexpected discrete stats: %+v", discrete)
 	}
 	if reading.inventory[0].VramBytes != 36<<30 {

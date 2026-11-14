@@ -188,8 +188,8 @@ func TestReverseNodeInfoPhase04(t *testing.T) {
 	plainRequests, streams, frames := 0, 0, 0
 	sample := func() phase04NodeInfoSample {
 		value := phase04NodeInfoSample{
-			GPUs:           []noderec.GPUInfo{{Name: "restricted GPU", VramBytes: 8192, VramUsedBytes: 2048, UtilizationPercent: utilization}},
-			CPU:            &noderec.CPUInfo{Name: "restricted CPU", Cores: 8, UtilizationPercent: 42},
+			GPUs:           []noderec.GPUInfo{{Name: "restricted GPU", VramBytes: 8192, VramUsedBytes: ptr(uint64(2048)), UtilizationPercent: ptr(utilization)}},
+			CPU:            &noderec.CPUInfo{Name: "restricted CPU", Cores: 8, UtilizationPercent: ptr(uint32(42))},
 			Memory:         &noderec.MemoryInfo{TotalBytes: 16384, UsedBytes: 4096},
 			TelemetryValid: true, MSSince: 100, HostUUID: host,
 		}
@@ -301,8 +301,8 @@ func TestReverseNodeInfoPhase04(t *testing.T) {
 	wantSample := func(wantUtilization uint32) phase04NodeInfoSample {
 		wantPrincipal := f.b.uuid
 		return phase04NodeInfoSample{
-			GPUs:           []noderec.GPUInfo{{Name: "restricted GPU", VramBytes: 8192, VramUsedBytes: 2048, UtilizationPercent: wantUtilization}},
-			CPU:            &noderec.CPUInfo{Name: "restricted CPU", Cores: 8, UtilizationPercent: 42},
+			GPUs:           []noderec.GPUInfo{{Name: "restricted GPU", VramBytes: 8192, VramUsedBytes: ptr(uint64(2048)), UtilizationPercent: ptr(wantUtilization)}},
+			CPU:            &noderec.CPUInfo{Name: "restricted CPU", Cores: 8, UtilizationPercent: ptr(uint32(42))},
 			Memory:         &noderec.MemoryInfo{TotalBytes: 16384, UsedBytes: 4096},
 			TelemetryValid: true, HostUUID: phase04NodeInfoHost, ClusterUUID: &wantPrincipal,
 		}
@@ -531,3 +531,6 @@ func TestReverseNodeInfoPhase04(t *testing.T) {
 	})
 
 }
+
+// ptr returns a pointer to v for optional fixture fields.
+func ptr[T any](v T) *T { return &v }

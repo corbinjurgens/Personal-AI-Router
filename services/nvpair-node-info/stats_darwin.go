@@ -234,16 +234,19 @@ func readDarwinCPUTimes() darwinCPUTimes {
 	return darwinCPUTimes{idle: t.Idle, total: total, valid: true}
 }
 
-func darwinCPUUtilization(prev, cur darwinCPUTimes) uint32 {
+// darwinCPUUtilization returns nil when the two samples give no reading and a
+// non-nil busy percentage otherwise, including 0 for an idle interval.
+func darwinCPUUtilization(prev, cur darwinCPUTimes) *uint32 {
 	if !prev.valid || !cur.valid || cur.total < prev.total || cur.idle < prev.idle {
-		return 0
+		return nil
 	}
 	totalDelta := cur.total - prev.total
 	idleDelta := cur.idle - prev.idle
 	if totalDelta <= 0 || idleDelta > totalDelta {
-		return 0
+		return nil
 	}
-	return uint32(math.Round((totalDelta - idleDelta) * 100 / totalDelta))
+	busy := uint32(math.Round((totalDelta - idleDelta) * 100 / totalDelta))
+	return &busy
 }
 
 func readDarwinMemoryUsed() (uint64, bool) {
@@ -282,7 +285,7 @@ func dynamicGPUReadingFromIORegistry(data []byte, systemMemory uint64) (darwinGP
 			VramBytes: record.vramTotal,
 			statsKey:  record.statsKey,
 		})
-		if record.utilizationValid {
+		if record.utilizationPct != nil {
 			reading.utilizationSamples++
 		}
 		reading.stats[record.statsKey] = gpuStat{

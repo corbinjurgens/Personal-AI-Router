@@ -51,11 +51,13 @@ const (
 	probeFailThreshold = 3
 )
 
+// GPUInfo mirrors one nvpair-node-info GPU entry. VramUsedBytes and
+// UtilizationPercent: absent means no reading; 0 is a reading.
 type GPUInfo struct {
-	Name               string `json:"name"`
-	VramBytes          uint64 `json:"vram_bytes,omitempty"`
-	VramUsedBytes      uint64 `json:"vram_used_bytes,omitempty"`
-	UtilizationPercent uint32 `json:"utilization_percent,omitempty"`
+	Name               string  `json:"name"`
+	VramBytes          uint64  `json:"vram_bytes,omitempty"`
+	VramUsedBytes      *uint64 `json:"vram_used_bytes,omitempty"`
+	UtilizationPercent *uint32 `json:"utilization_percent,omitempty"`
 }
 
 // CPUInfo and MemoryInfo mirror the top-level objects nvpair-node-info
@@ -63,10 +65,11 @@ type GPUInfo struct {
 // responding to nvpair-node-info probes don't
 // falsely surface as having an unknown CPU + zero memory — the whole
 // object stays absent until we see one in a real response.
+// UtilizationPercent: absent means no reading; 0 is a reading.
 type CPUInfo struct {
-	Name               string `json:"name,omitempty"`
-	Cores              uint32 `json:"cores,omitempty"`
-	UtilizationPercent uint32 `json:"utilization_percent,omitempty"`
+	Name               string  `json:"name,omitempty"`
+	Cores              uint32  `json:"cores,omitempty"`
+	UtilizationPercent *uint32 `json:"utilization_percent,omitempty"`
 }
 
 type MemoryInfo struct {
@@ -780,20 +783,29 @@ func gpusEqual(a, b []GPUInfo) bool {
 	for i := range a {
 		if a[i].Name != b[i].Name ||
 			a[i].VramBytes != b[i].VramBytes ||
-			a[i].VramUsedBytes != b[i].VramUsedBytes ||
-			a[i].UtilizationPercent != b[i].UtilizationPercent {
+			!optionalEqual(a[i].VramUsedBytes, b[i].VramUsedBytes) ||
+			!optionalEqual(a[i].UtilizationPercent, b[i].UtilizationPercent) {
 			return false
 		}
 	}
 	return true
 }
 
+// optionalEqual compares optional readings by presence, then by value.
+func optionalEqual[T comparable](a, b *T) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
 // cpuEqual and memoryEqual are nil-aware equality helpers for the new
 // pointer-optional fields. Both sides being nil is equal (the node
 // doesn't report that subsystem); exactly one being nil is a real
 // change (the node started or stopped reporting it, e.g. an OS-level
-// upgrade of nvpair-node-info); both non-nil compares the underlying
-// struct by value. This mirrors what gpusEqual does for
+// upgrade of nvpair-node-info); both non-nil compares the fields by
+// value, the optional utilization by presence and value. This mirrors
+// what gpusEqual does for
 // their respective fields — any change, including a utilization tick
 // moving from 41% to 42%, fires a node/updated event so downstream
 // consumers can refresh their view.
@@ -804,7 +816,7 @@ func cpuEqual(a, b *CPUInfo) bool {
 	if a == nil || b == nil {
 		return false
 	}
-	return *a == *b
+	return a.Name == b.Name && a.Cores == b.Cores && optionalEqual(a.UtilizationPercent, b.UtilizationPercent)
 }
 
 func memoryEqual(a, b *MemoryInfo) bool {

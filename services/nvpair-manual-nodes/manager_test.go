@@ -236,10 +236,10 @@ func sampleInfo() NodeInfoResponse {
 		GPUs: []GPUInfo{{
 			Name:               "RTX 6000",
 			VramBytes:          48 << 30,
-			VramUsedBytes:      12 << 30,
-			UtilizationPercent: 42,
+			VramUsedBytes:      ptr(uint64(12 << 30)),
+			UtilizationPercent: ptr(uint32(42)),
 		}},
-		CPU:            &CPUInfo{Name: "Threadripper", Cores: 64, UtilizationPercent: 7},
+		CPU:            &CPUInfo{Name: "Threadripper", Cores: 64, UtilizationPercent: ptr(uint32(7))},
 		Memory:         &MemoryInfo{TotalBytes: 128 << 30, UsedBytes: 32 << 30},
 		TelemetryValid: true,
 		MSSince:        137,
@@ -676,6 +676,12 @@ func TestCPUAndMemoryNilAwareEquality(t *testing.T) {
 	if cpuEqual(&CPUInfo{Name: "cpu", Cores: 8}, &CPUInfo{Name: "cpu", Cores: 16}) {
 		t.Fatal("different CPU values compared equal")
 	}
+	if !cpuEqual(&CPUInfo{Name: "cpu", UtilizationPercent: ptr(uint32(0))}, &CPUInfo{Name: "cpu", UtilizationPercent: ptr(uint32(0))}) {
+		t.Fatal("equal CPU utilization readings differed")
+	}
+	if cpuEqual(&CPUInfo{Name: "cpu"}, &CPUInfo{Name: "cpu", UtilizationPercent: ptr(uint32(0))}) {
+		t.Fatal("absent and sampled 0 CPU utilization compared equal")
+	}
 	if !memoryEqual(&MemoryInfo{TotalBytes: 10, UsedBytes: 5}, &MemoryInfo{TotalBytes: 10, UsedBytes: 5}) {
 		t.Fatal("equal memory values differed")
 	}
@@ -802,3 +808,27 @@ func writePipeRequest(t *testing.T, conn net.Conn, id int, method string, params
 		t.Fatalf("write request: %v", err)
 	}
 }
+
+// TestGPUsEqualComparesOptionalReadings checks that a GPU reading changing
+// between absent and a sampled 0 counts as a change.
+func TestGPUsEqualComparesOptionalReadings(t *testing.T) {
+	test := func(name string, a, b GPUInfo, want bool) {
+		t.Run(name, func(t *testing.T) {
+			if got := gpusEqual([]GPUInfo{a}, []GPUInfo{b}); got != want {
+				t.Errorf("gpusEqual = %v, want %v", got, want)
+			}
+		})
+	}
+	test("both absent", GPUInfo{Name: "GPU"}, GPUInfo{Name: "GPU"}, true)
+	test("both zero",
+		GPUInfo{Name: "GPU", VramUsedBytes: ptr(uint64(0)), UtilizationPercent: ptr(uint32(0))},
+		GPUInfo{Name: "GPU", VramUsedBytes: ptr(uint64(0)), UtilizationPercent: ptr(uint32(0))}, true)
+	test("utilization absent to zero", GPUInfo{Name: "GPU"}, GPUInfo{Name: "GPU", UtilizationPercent: ptr(uint32(0))}, false)
+	test("VRAM used absent to zero", GPUInfo{Name: "GPU"}, GPUInfo{Name: "GPU", VramUsedBytes: ptr(uint64(0))}, false)
+	test("utilization value change",
+		GPUInfo{Name: "GPU", UtilizationPercent: ptr(uint32(0))},
+		GPUInfo{Name: "GPU", UtilizationPercent: ptr(uint32(3))}, false)
+}
+
+// ptr returns a pointer to v for optional fixture fields.
+func ptr[T any](v T) *T { return &v }

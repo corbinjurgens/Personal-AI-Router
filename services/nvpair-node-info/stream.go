@@ -52,7 +52,9 @@ func nodeInfoChanged(published, candidate NodeInfoResponse) bool {
 	}
 	if published.CPU != nil {
 		if published.CPU.Name != candidate.CPU.Name || published.CPU.Cores != candidate.CPU.Cores ||
-			distance(uint64(published.CPU.UtilizationPercent), uint64(candidate.CPU.UtilizationPercent)) >= cpuUtilizationStep {
+			optionalMoved(published.CPU.UtilizationPercent, candidate.CPU.UtilizationPercent, func(a, b uint64) bool {
+				return distance(a, b) >= cpuUtilizationStep
+			}) {
 			return true
 		}
 	}
@@ -71,8 +73,12 @@ func nodeInfoChanged(published, candidate NodeInfoResponse) bool {
 	for i := range published.GPUs {
 		a, b := published.GPUs[i], candidate.GPUs[i]
 		if a.Name != b.Name || a.PhysicalID != b.PhysicalID || a.VramBytes != b.VramBytes ||
-			distance(uint64(a.UtilizationPercent), uint64(b.UtilizationPercent)) >= gpuUtilizationStep ||
-			memoryMoved(a.VramUsedBytes, b.VramUsedBytes, b.VramBytes) {
+			optionalMoved(a.UtilizationPercent, b.UtilizationPercent, func(x, y uint64) bool {
+				return distance(x, y) >= gpuUtilizationStep
+			}) ||
+			optionalMoved(a.VramUsedBytes, b.VramUsedBytes, func(x, y uint64) bool {
+				return memoryMoved(x, y, b.VramBytes)
+			}) {
 			return true
 		}
 	}
@@ -85,6 +91,16 @@ func sameOptionalString(a, b *string) bool {
 		return a == nil && b == nil
 	}
 	return *a == *b
+}
+
+// optionalMoved compares two optional readings. Absent means no reading, so a
+// change of presence always publishes; two present values publish when moved
+// reports a step at least as large as the field's threshold.
+func optionalMoved[T uint32 | uint64](published, candidate *T, moved func(a, b uint64) bool) bool {
+	if published == nil || candidate == nil {
+		return (published == nil) != (candidate == nil)
+	}
+	return moved(uint64(*published), uint64(*candidate))
 }
 
 // memoryObservationChanged compares the observation's static parts (run ID and

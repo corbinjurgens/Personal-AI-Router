@@ -274,7 +274,11 @@ func (t nodeTelemetry) summaryAt(now time.Time) []string {
 		if name == "" {
 			name = "CPU"
 		}
-		detail := fmt.Sprintf("  %-28s %3d%%", truncate(name, 28), t.CPU.UtilizationPercent)
+		util := "  --%"
+		if t.CPU.UtilizationPercent != nil {
+			util = fmt.Sprintf("%3d%%", *t.CPU.UtilizationPercent)
+		}
+		detail := fmt.Sprintf("  %-28s %s", truncate(name, 28), util)
 		if t.CPU.Cores > 0 {
 			detail += fmt.Sprintf("  %d cores", t.CPU.Cores)
 		}
@@ -287,22 +291,23 @@ func (t nodeTelemetry) summaryAt(now time.Time) []string {
 	return lines
 }
 
-// gpuLine renders one GPU. Utilization is omitted when the node reports its
-// dynamic sample as unusable, rather than printing a zero that reads as idle.
+// gpuLine renders one GPU. Utilization and VRAM used are omitted when the node
+// reports its dynamic sample as unusable or has no reading for the field,
+// rather than printing a zero that reads as idle.
 func gpuLine(g noderec.GPUInfo, valid bool) string {
 	name := g.Name
 	if name == "" {
 		name = "GPU"
 	}
 	util := "  --%"
-	if valid {
-		util = fmt.Sprintf("%3d%%", g.UtilizationPercent)
+	if valid && g.UtilizationPercent != nil {
+		util = fmt.Sprintf("%3d%%", *g.UtilizationPercent)
 	}
 	line := fmt.Sprintf("%-28s %s", truncate(name, 28), util)
 	if g.VramBytes > 0 {
 		used := "--"
-		if valid {
-			used = humanBytes(g.VramUsedBytes)
+		if valid && g.VramUsedBytes != nil {
+			used = humanBytes(*g.VramUsedBytes)
 		}
 		line += fmt.Sprintf("  %s / %s", used, humanBytes(g.VramBytes))
 	}

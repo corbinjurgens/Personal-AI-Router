@@ -47,24 +47,22 @@ func TestParseIORegistryGPUs(t *testing.T) {
 	if apple.statsKey != "ioreg:2a" || apple.name != "Apple M3 Max" {
 		t.Fatalf("unexpected Apple identity: %+v", apple)
 	}
-	if apple.vramTotal != systemMemory || apple.vramUsed != 8<<30 {
+	if apple.vramTotal != systemMemory || apple.vramUsed == nil || *apple.vramUsed != 8<<30 {
 		t.Fatalf("unexpected Apple memory: %+v", apple)
 	}
-	if apple.utilizationPct != 100 || !apple.utilizationValid {
-		t.Fatalf("Apple utilization = %d valid:%v, want 100/true",
-			apple.utilizationPct, apple.utilizationValid)
+	if apple.utilizationPct == nil || *apple.utilizationPct != 100 {
+		t.Fatalf("Apple utilization = %v, want 100", apple.utilizationPct)
 	}
 
 	discrete := records[1]
 	if discrete.statsKey != "ioreg:63" || discrete.name != "AMD Radeon Pro" {
 		t.Fatalf("unexpected discrete identity: %+v", discrete)
 	}
-	if discrete.vramTotal != 8<<30 || discrete.vramUsed != 2<<30 {
+	if discrete.vramTotal != 8<<30 || discrete.vramUsed == nil || *discrete.vramUsed != 2<<30 {
 		t.Fatalf("unexpected discrete memory: %+v", discrete)
 	}
-	if discrete.utilizationPct != 25 || !discrete.utilizationValid {
-		t.Fatalf("discrete utilization = %d valid:%v, want 25/true",
-			discrete.utilizationPct, discrete.utilizationValid)
+	if discrete.utilizationPct == nil || *discrete.utilizationPct != 25 {
+		t.Fatalf("discrete utilization = %v, want 25", discrete.utilizationPct)
 	}
 }
 
@@ -87,9 +85,10 @@ func TestParseIORegistryGPUsRecursesAndOmitsMissingMetrics(t *testing.T) {
 	if got.name != "IntelAccelerator" || got.statsKey != "ioreg:7" {
 		t.Fatalf("unexpected fallback identity: %+v", got)
 	}
-	if got.vramTotal != 0 || got.vramUsed != 0 || got.utilizationPct != 0 ||
-		got.utilizationValid {
-		t.Fatalf("missing metrics should remain zero: %+v", got)
+	// Without a memory or utilization key there is no reading, so both stay
+	// absent rather than reading as 0.
+	if got.vramTotal != 0 || got.vramUsed != nil || got.utilizationPct != nil {
+		t.Fatalf("missing metrics should remain absent: %+v", got)
 	}
 }
 
@@ -131,18 +130,18 @@ func TestParseIORegistryGPUsPreservesDedicatedCounterPresence(t *testing.T) {
 	if len(records) != 3 {
 		t.Fatalf("got %d records, want 3", len(records))
 	}
-	if records[0].vramTotal != 0 || records[0].vramUsed != 1<<30 {
+	if records[0].vramTotal != 0 || records[0].vramUsed == nil || *records[0].vramUsed != 1<<30 {
 		t.Fatalf("free-only counters inferred false capacity: %+v", records[0])
 	}
-	if records[0].utilizationValid {
-		t.Fatalf("missing utilization reported valid: %+v", records[0])
+	if records[0].utilizationPct != nil {
+		t.Fatalf("missing utilization reported a reading: %+v", records[0])
 	}
-	if records[1].vramTotal != 8<<30 || records[1].vramUsed != 0 ||
-		records[1].utilizationPct != 0 || !records[1].utilizationValid {
+	if records[1].vramTotal != 8<<30 || records[1].vramUsed == nil || *records[1].vramUsed != 0 ||
+		records[1].utilizationPct == nil || *records[1].utilizationPct != 0 {
 		t.Fatalf("explicit zero used counter was not preserved: %+v", records[1])
 	}
-	if records[2].vramTotal != 8<<30 || records[2].vramUsed != 3<<30 ||
-		records[2].utilizationPct != 67 || !records[2].utilizationValid {
+	if records[2].vramTotal != 8<<30 || records[2].vramUsed == nil || *records[2].vramUsed != 3<<30 ||
+		records[2].utilizationPct == nil || *records[2].utilizationPct != 67 {
 		t.Fatalf("alias counters were not normalized: %+v", records[2])
 	}
 }

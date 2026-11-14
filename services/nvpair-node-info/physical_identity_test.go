@@ -98,7 +98,7 @@ func TestBuildResponsePhysicalIDsOmitUnprovenAssociations(t *testing.T) {
 		{
 			name:   "utilization alone does not establish a pool",
 			static: []GPUInfo{{Name: "GPU", VramBytes: 100, statsKey: alias}},
-			stats:  map[string]gpuStat{alias: {UtilizationPct: 70}},
+			stats:  map[string]gpuStat{alias: {UtilizationPct: ptr(uint32(70))}},
 		},
 		{
 			name:   "unknown topology",

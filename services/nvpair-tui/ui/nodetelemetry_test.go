@@ -24,7 +24,7 @@ func TestMemoryTelemetryFieldsPreserveHardwareProjection(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"GPUs":[{"name":"GPU","utilization_percent":55}],"telemetryValid":true,"msSince":1,"memoryObservation":{"runId":"fixture","domains":[{"id":"ram","kind":"system","total":{"valid":false,"ageMs":0,"reason":"unavailable"},"free":{"bytes":"0","source":"fixture","sampledAt":"2026-10-28T00:00:00Z","ageMs":0,"valid":true}}]}}`), &value); err != nil {
 		t.Fatal(err)
 	}
-	if !value.TelemetryValid || value.MSSince != 1 || len(value.GPUs) != 1 || value.GPUs[0].UtilizationPercent != 55 {
+	if !value.TelemetryValid || value.MSSince != 1 || len(value.GPUs) != 1 || value.GPUs[0].UtilizationPercent == nil || *value.GPUs[0].UtilizationPercent != 55 {
 		t.Fatalf("hardware projection changed: %+v", value)
 	}
 }
@@ -207,8 +207,8 @@ func TestPollTelemetryDecodesResponse(t *testing.T) {
 	if len(msg.telemetry.GPUs) != 1 {
 		t.Fatalf("decoded %d GPUs, want 1 — check the \"GPUs\" JSON key", len(msg.telemetry.GPUs))
 	}
-	if got := msg.telemetry.GPUs[0].UtilizationPercent; got != 42 {
-		t.Errorf("GPU utilization = %d, want 42", got)
+	if got := msg.telemetry.GPUs[0].UtilizationPercent; got == nil || *got != 42 {
+		t.Errorf("GPU utilization = %v, want 42", got)
 	}
 	if msg.telemetry.CPU == nil || msg.telemetry.CPU.Cores != 8 {
 		t.Error("CPU block did not decode")
@@ -310,7 +310,7 @@ func TestTelemetryTriesTheAddressThatAnswered(t *testing.T) {
 // not print 0%, which would read as an idle GPU.
 func TestTelemetrySummaryOmitsUtilizationWhenStale(t *testing.T) {
 	tel := nodeTelemetry{
-		GPUs:           []noderec.GPUInfo{{Name: "GPU", VramBytes: 1 << 30, UtilizationPercent: 0}},
+		GPUs:           []noderec.GPUInfo{{Name: "GPU", VramBytes: 1 << 30, UtilizationPercent: ptr(uint32(0))}},
 		TelemetryValid: false,
 	}
 	line := strings.Join(tel.summary(), "\n")
@@ -323,17 +323,35 @@ func TestTelemetrySummaryOmitsUtilizationWhenStale(t *testing.T) {
 
 	tel.TelemetryValid = true
 	tel.receivedAt = time.Now()
-	tel.GPUs[0].UtilizationPercent = 55
+	tel.GPUs[0].UtilizationPercent = ptr(uint32(55))
 	if got := strings.Join(tel.summary(), "\n"); !strings.Contains(got, "55%") {
 		t.Errorf("valid sample did not render utilization: %q", got)
 	}
+}
+
+// TestGPULineSeparatesIdleFromUnread checks that a sampled 0 prints as 0%
+// and 0 B while a field without a reading prints as unknown.
+func TestGPULineSeparatesIdleFromUnread(t *testing.T) {
+	test := func(name string, gpu noderec.GPUInfo, want string) {
+		t.Run(name, func(t *testing.T) {
+			if got := gpuLine(gpu, true); got != want {
+				t.Errorf("gpuLine = %q, want %q", got, want)
+			}
+		})
+	}
+	test("idle reading",
+		noderec.GPUInfo{Name: "GPU", VramBytes: 1 << 30, VramUsedBytes: ptr(uint64(0)), UtilizationPercent: ptr(uint32(0))},
+		"GPU"+strings.Repeat(" ", 28)+"0%  0 B / 1.0 GiB")
+	test("no reading",
+		noderec.GPUInfo{Name: "GPU", VramBytes: 1 << 30},
+		"GPU"+strings.Repeat(" ", 28)+"--%  -- / 1.0 GiB")
 }
 
 func TestTelemetryLastGoodSampleAgesWithoutAnotherPoll(t *testing.T) {
 	now := time.Unix(100, 0)
 	tel := nodeTelemetry{
 		GPUs: []noderec.GPUInfo{{Name: "GPU", VramBytes: 1 << 30,
-			VramUsedBytes: 1 << 29, UtilizationPercent: 55}},
+			VramUsedBytes: ptr(uint64(1 << 29)), UtilizationPercent: ptr(uint32(55))}},
 		TelemetryValid: true,
 		MSSince:        9000,
 		receivedAt:     now,
@@ -409,7 +427,7 @@ func TestDetailHardwareUnavailableWhenPollFails(t *testing.T) {
 
 	d.telemetryOK = true
 	d.telemetry = nodeTelemetry{
-		GPUs:           []noderec.GPUInfo{{Name: "Test GPU", VramBytes: 1 << 30, UtilizationPercent: 7}},
+		GPUs:           []noderec.GPUInfo{{Name: "Test GPU", VramBytes: 1 << 30, UtilizationPercent: ptr(uint32(7))}},
 		TelemetryValid: true,
 	}
 	if got := d.hardwareBlock(); !strings.Contains(got, "Test GPU") {
@@ -442,3 +460,6 @@ func splitTestServer(t *testing.T, raw string) (string, int) {
 	}
 	return u.Hostname(), port
 }
+
+// ptr returns a pointer to v for optional fixture fields.
+func ptr[T any](v T) *T { return &v }

@@ -254,11 +254,14 @@ func addTelemetryAge(age, elapsed int64) int64 {
 	return age + elapsed
 }
 
-// maxGPUUtilization is the scheduler's single utilization figure for a node.
+// maxGPUUtilization is the scheduler's single utilization figure for a node:
+// the maximum over GPUs with a reading, 0 when none has one.
 func maxGPUUtilization(gpus []GPUInfo) uint32 {
 	var utilization uint32
 	for i := range gpus {
-		utilization = max(utilization, gpus[i].UtilizationPercent)
+		if gpus[i].UtilizationPercent != nil {
+			utilization = max(utilization, *gpus[i].UtilizationPercent)
+		}
 	}
 	return utilization
 }
