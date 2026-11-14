@@ -1530,9 +1530,33 @@ func recheckLlamaServing(launch launchCommand, rt Runtime, prepared *llamaServin
 
 var llamaVerbosityFlags = []string{"-v", "--verbose", "--log-verbose", "-lv", "--verbosity", "--log-verbosity"}
 
+var llamaReportedBuildNumber = regexp.MustCompile(`^b([0-9]{1,9})-`)
+
+// llamaTraceVerbosity reports whether common verbosity 4 is trace for a build
+// the router itself reported. llama.cpp b9151 ("logs : reduce", 67b2b7f2f)
+// added trace as level 4 and moved debug, which logs every request and
+// response body, to 5. Earlier router builds print the buffer reports at the
+// default level 3. An unknown build gets false.
+func llamaTraceVerbosity(reportedBuild string) bool {
+	match := llamaReportedBuildNumber.FindStringSubmatch(reportedBuild)
+	if match == nil {
+		return false
+	}
+	number, err := strconv.Atoi(match[1])
+	return err == nil && number >= 9151
+}
+
+// The router reports its build only after it starts, so the launch uses the
+// build a retained buffer sample recorded for this exact native content.
+func (e *Executor) llamaTraceVerbosityKnown(ctx context.Context, st *engineState) bool {
+	build, err := nativeBuildID(ctx, st)
+	return err == nil && llamaTraceVerbosity(e.modelBuffers.store.reportedBuild(build))
+}
+
 // The pre-spawn compiler has already validated these exact finite loads and
 // their visibility. Replay the reviewed bytes, never discover another adapter.
-func llamaSnapshotCommand(command launchCommand, snapshot string, finite ...[]modelconfig.ModelLoad) launchCommand {
+// trace raises the children's verbosity to 4; see llamaTraceVerbosity.
+func llamaSnapshotCommand(command launchCommand, snapshot string, trace bool, finite ...[]modelconfig.ModelLoad) launchCommand {
 	args := []string{}
 	verbosity := false
 	for key := range command.Env {
@@ -1557,13 +1581,13 @@ func llamaSnapshotCommand(command launchCommand, snapshot string, finite ...[]mo
 	if len(finite) > 0 && len(finite[0]) > 0 {
 		args = append(args, "--models-max", "0")
 	}
-	// The buffer capture reads the children's allocation messages. libllama
-	// INFO maps to common verbosity 4 (trace) while the default threshold is 3,
-	// so a default child prints no buffer line (common/log.cpp
+	// The buffer capture reads the children's allocation messages. From b9151
+	// libllama INFO maps to common verbosity 4 (trace) while the default
+	// threshold is 3, so a default child prints no buffer line (common/log.cpp
 	// common_log_get_verbosity at 0ec4027a2 and b11985). The router overlays
 	// its own options on every child preset. An explicit operator verbosity
 	// is kept.
-	if !verbosity {
+	if trace && !verbosity {
 		args = append(args, "--log-verbosity", "4")
 	}
 	command.Args = append(args, "--models-preset", snapshot)

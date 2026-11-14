@@ -180,6 +180,11 @@ func runModelBufferFixture() error {
 	}
 	allocations := func(name string, model *modelBufferFixtureModel, initial bool) {
 		line("[%5d] srv   load_model: loading model 'private-fixture-path'", model.port)
+		if trace {
+			// The trace metadata dump cuts each value at 37 bytes, splitting a
+			// multibyte token (b11985, LFM2.5 tokenizer.ggml.tokens).
+			line("[%5d] llama_model_loader: - kv  33: tokenizer.ggml.tokens arr[str,128000]  = [\"\xc4\x8a\xc4\x8a\xc4\x8a\xc4\x8a\xc4\x8a\xc4\x8a\xc4\x8a\xc4\x8a\xc4\x8a\xc4\x8a\xc4\x8a\xc4\x8a\xc4\x8a\xc4\x8a\xc4\x8a\xc4\x8a\xc4\x8a\xc4\x8a\xc4...", model.port)
+		}
 		for _, message := range []string{
 			"load_tensors: CPU model buffer size = 1.00 MiB", "load_tensors: CPU model buffer size = 1.00 MiB",
 			"llama_kv_cache: CPU KV buffer size = 0.00 MiB", "llama_kv_cache: CPU KV buffer size = 0.25 MiB",
@@ -764,6 +769,22 @@ func (f *modelBufferProcessFixture) control(t *testing.T, model, op string) {
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("private synthetic operation %s: HTTP %d", op, response.StatusCode)
 	}
+}
+
+// learnBuild runs a new install's first load. The manager knows no router build
+// yet, so the children keep the default verbosity and the sample has no rows,
+// but it records the build the router reports. The next router launch raises
+// the children to trace.
+func (f *modelBufferProcessFixture) learnBuild(t *testing.T) {
+	t.Helper()
+	f.control(t, "medium-model", "initial")
+	task1Eventually(t, "first load records the router build", 90*time.Second, func() bool {
+		value := f.inspect(t, "medium-model").LoadObservation
+		return value != nil && value.Current && value.Persistence == "saved" && value.Reason == "unrecognized-build-output" && len(value.Rows) == 0 && value.ReportedBuild == "b12020-0ec4027a2"
+	})
+	f.rpcOK(t, "node:set-availability", map[string]string{"state": "paused", "pauseMode": "immediate"})
+	task1Eventually(t, "synthetic router stopped by Pause", 30*time.Second, func() bool { return !f.snapshot(t).Running })
+	f.resume(t)
 }
 
 func (f *modelBufferProcessFixture) inspect(t *testing.T, model string) modelconfig.InspectResult {

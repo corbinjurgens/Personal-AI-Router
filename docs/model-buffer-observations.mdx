@@ -125,19 +125,37 @@ with its terminator through its own text-mode stdout, so the parent pipe
 carries CR CR LF. The capture removes that one remaining CR from the forwarded
 child message before matching.
 
-Every allocation message is a libllama INFO message, which the native logger
-assigns verbosity 4 (trace) while its default threshold is 3, so a child at the
-default verbosity prints none of them
+Every allocation message is a libllama INFO message. From llama.cpp b9151
+([`67b2b7f2f`](https://github.com/ggml-org/llama.cpp/commit/67b2b7f2f), "logs :
+reduce") the native logger assigns it verbosity 4 (trace) while its default
+threshold is 3, so a child at the default verbosity prints none of them
 ([`common_log_get_verbosity`](https://github.com/ggml-org/llama.cpp/blob/0ec4027a2a0183de87c007069adddc06e665f7de/common/log.cpp)).
-The manager therefore appends `--log-verbosity 4` to a prepared router launch,
-and the router passes its own options to every child, unless the launch already
-declares `-v`, a `--log-verbosity` spelling or `LLAMA_ARG_LOG_VERBOSITY`. An
-explicit lower verbosity leaves each sample `partial` with
-`unrecognized-build-output` and no rows. Trace adds operational lines (model
-metadata, request method and path, slot and cache sizes) to the engine log; it
-does not log prompt or response text. A router started with an operator
-`--api-key` logs that key's last four characters at trace; PAIR passes no
-llama.cpp API key itself.
+Earlier router builds (from b7352) print them at the default level, and their
+level 4 is debug, which logs every request and response body.
+
+The manager therefore appends `--log-verbosity 4` to a prepared router launch
+only when a retained buffer sample for the same native build content recorded a
+router-reported build of b9151 or newer. The router passes its own options to
+every child. The router reports its build only after it starts, so the first
+launch of a build the manager has not seen gets no flag: its sample is saved
+`partial` with `unrecognized-build-output` and no rows, records the build, and
+the next router launch adds the flag. A launch that already declares `-v`, a
+`--log-verbosity` spelling or `LLAMA_ARG_LOG_VERBOSITY` keeps that verbosity;
+an explicit lower verbosity leaves each sample without rows. A model's extra
+options cannot set the verbosity, because the router's own option overrides
+every model section.
+
+At b11985, trace adds these lines to the engine log (observed on one model):
+the full model metadata dump (model name, license, tokenizer fragments and the
+first 37 bytes of the chat template), device free memory, llama.cpp's built-in
+chat-template example, the sampler settings of each request, and per-request
+prompt-cache listings with token counts. It logs no prompt or response text;
+request and response bodies are level 5 there. The metadata dump cuts each
+value at 37 bytes and can split a character, so the capture ignores a complete
+line that is not valid UTF-8, and the engine log omits it as before. The engine
+Logs view holds 2000 lines, so at trace it keeps about a quarter as many past
+requests. A router started with an operator `--api-key` logs that key's last
+four characters at trace; PAIR passes no llama.cpp API key itself.
 
 Parent spawn is anchored to `srv load:` and its exact model-name/port message.
 Parent exit is anchored to **`srv run:`**, emitted by `server_monitor::run`.

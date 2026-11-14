@@ -451,6 +451,25 @@ func modelBufferCPUWeightInterval(o modelconfig.BufferObservation, hostPool stri
 	return low, high, found && stored.LowerBytes == strconv.FormatUint(low, 10) && stored.UpperBytes == strconv.FormatUint(high, 10)
 }
 
+// reportedBuild is the build that the router itself reported (props
+// build_info) in the newest retained sample for this exact native content, or
+// "" when no retained sample has one.
+func (s *modelBufferStore) reportedBuild(buildID string) string {
+	if s == nil || buildID == "" {
+		return ""
+	}
+	view := s.view.Load()
+	if view == nil || view.unavailable {
+		return ""
+	}
+	for i := len(view.samples) - 1; i >= 0; i-- {
+		if o := view.samples[i].Observation; o.BuildID == buildID && o.ReportedBuild != "" {
+			return o.ReportedBuild
+		}
+	}
+	return ""
+}
+
 func (s *modelBufferStore) newest(model, buildID string) modelconfig.BufferObservation {
 	view := s.view.Load()
 	if view == nil || view.unavailable {

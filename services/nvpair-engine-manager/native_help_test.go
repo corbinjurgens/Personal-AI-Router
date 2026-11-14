@@ -181,7 +181,7 @@ func TestNativeOptionsLaunchWarningsCoverDefaultsAndEverySection(t *testing.T) {
 	preset := []byte("[*]\nfit = off\nkv-unified = false\n[first]\nmodel = one.gguf\nctx-size = 4096\n[second]\nmodel = two.gguf\ncache-ram = 512\nspec-type = draft-mtp\n")
 	options := []modelconfig.NativeOption{{Name: "spec-type", Kind: "choice", Choices: []string{"none", "draft-mtp"}}}
 	command := launchCommand{Args: []string{"--cors-origins=*", "--spec-type=draft-mtp"}}
-	got, err := unreportedNativeLaunchOptions(options, command, preset, nil)
+	got, err := unreportedNativeLaunchOptions(options, command, preset, nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +189,7 @@ func TestNativeOptionsLaunchWarningsCoverDefaultsAndEverySection(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("launch warnings = %v, want %v", got, want)
 	}
-	if got, err := unreportedNativeLaunchOptions(nil, command, preset, nil); err != nil || got != nil {
+	if got, err := unreportedNativeLaunchOptions(nil, command, preset, nil, true); err != nil || got != nil {
 		t.Fatalf("unknown help emitted warnings = %v, err=%v", got, err)
 	}
 }
@@ -242,7 +242,7 @@ func TestNativeHelpPaddedAliasHints(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("padded alias hints = %#v, want %#v", got, want)
 	}
-	warnings, err := unreportedNativeLaunchOptions(got, launchCommand{Args: []string{"--device=CPU", "--split-mode=layer", "--tensor-split=1,1", "--main-gpu=0"}}, nil, nil)
+	warnings, err := unreportedNativeLaunchOptions(got, launchCommand{Args: []string{"--device=CPU", "--split-mode=layer", "--tensor-split=1,1", "--main-gpu=0"}}, nil, nil, false)
 	if err != nil || len(warnings) != 0 {
 		t.Fatalf("reported padded aliases produced warnings = %v, err=%v", warnings, err)
 	}

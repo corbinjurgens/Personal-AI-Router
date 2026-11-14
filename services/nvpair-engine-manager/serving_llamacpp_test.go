@@ -101,7 +101,7 @@ func TestLlamaServingReviewedUUIDReachesActualChild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	child := llamaSnapshotCommand(constrained, "unused-private-snapshot", loads)
+	child := llamaSnapshotCommand(constrained, "unused-private-snapshot", false, loads)
 	if _, ok := command.Env["CUDA_VISIBLE_DEVICES"]; ok {
 		t.Fatal("command constraint mutated its parent")
 	}
@@ -2987,18 +2987,25 @@ func TestLlamaServingReplacementWinsBeforeLoadAdmission(t *testing.T) {
 }
 
 // The buffer capture needs the children's libllama INFO messages, which a
-// default child suppresses (TestModelBufferCapturedB11985Output).
+// default child of a b9151 or newer build suppresses
+// (TestModelBufferCapturedB11985Output).
 func TestLlamaSnapshotCommandRaisesChildLogVerbosity(t *testing.T) {
 	t.Run("default verbosity is raised to trace", func(t *testing.T) {
-		got := llamaSnapshotCommand(launchCommand{Args: []string{"--threads", "6"}}, "snapshot.ini")
+		got := llamaSnapshotCommand(launchCommand{Args: []string{"--threads", "6"}}, "snapshot.ini", true)
 		want := []string{"--threads", "6", "--log-verbosity", "4", "--models-preset", "snapshot.ini"}
 		if !slices.Equal(got.Args, want) {
 			t.Fatalf("snapshot args = %q, want %q", got.Args, want)
 		}
 	})
+	t.Run("build without trace keeps the default", func(t *testing.T) {
+		got := llamaSnapshotCommand(launchCommand{Args: []string{"--threads", "6"}}, "snapshot.ini", false)
+		if want := []string{"--threads", "6", "--models-preset", "snapshot.ini"}; !slices.Equal(got.Args, want) {
+			t.Fatalf("snapshot args = %q, want %q", got.Args, want)
+		}
+	})
 	explicit := func(name string, command launchCommand) {
 		t.Run(name, func(t *testing.T) {
-			got := llamaSnapshotCommand(command, "snapshot.ini")
+			got := llamaSnapshotCommand(command, "snapshot.ini", true)
 			if want := append(slices.Clone(command.Args), "--models-preset", "snapshot.ini"); !slices.Equal(got.Args, want) {
 				t.Fatalf("snapshot args = %q, want %q", got.Args, want)
 			}
@@ -3013,8 +3020,8 @@ func TestLlamaSnapshotCommandRaisesChildLogVerbosity(t *testing.T) {
 func TestLlamaSnapshotCommandKeepsUnrelatedArgumentValues(t *testing.T) {
 	// A value that happens to look like key=value for a short flag (here -c)
 	// belongs to the preceding argument and must not be split.
-	got := llamaSnapshotCommand(launchCommand{Args: []string{"--log-file", "c=trace.log"}}, "snapshot.ini")
-	want := []string{"--log-file", "c=trace.log", "--log-verbosity", "4", "--models-preset", "snapshot.ini"}
+	got := llamaSnapshotCommand(launchCommand{Args: []string{"--log-file", "c=trace.log"}}, "snapshot.ini", false)
+	want := []string{"--log-file", "c=trace.log", "--models-preset", "snapshot.ini"}
 	if !slices.Equal(got.Args, want) {
 		t.Fatalf("snapshot args = %q, want %q", got.Args, want)
 	}

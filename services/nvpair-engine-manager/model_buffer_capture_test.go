@@ -20,6 +20,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"nvpair-shared/durablefile"
 	"nvpair-shared/modelconfig"
@@ -264,69 +265,50 @@ func TestModelBufferRecognizesWindowsForwardedLines(t *testing.T) {
 	}
 }
 
-// Lines captured from White's managed llama.cpp b11985-6f4cc4d72 router on
-// 2026-11-14 (Windows, raw pipes), with the model name, port and model path
-// replaced. Router lines end CR LF; forwarded child lines end CR CR LF.
-const modelBufferB11985Spawn = "0.07.678.157 I srv          load: spawning server instance with name=medium-model on port 31001\r\n"
-
-var modelBufferB11985DefaultVerbosity = []string{
-	"0.00.086.884 I srv  llama_server: initializing ...",
-	"0.00.086.901 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)",
-	"0.00.090.089 I srv    load_model: loading model 'private-fixture-path'",
-	"0.01.299.710 I cmn          init: llama threadpool init, n_threads = 6",
-	"0.01.736.927 I srv    load_model: initializing, n_slots = 1, n_ctx_slot = 8192, kv_unified = 'false'",
-	"0.01.742.412 I srv  server_run_i: model loaded",
-}
-
-var modelBufferB11985Verbosity4 = []string{
-	"0.00.085.665 I cmn  common_param: common_params_print_info: verbosity = 4 (adjust with the `-lv N` CLI arg)",
-	"0.00.160.248 I srv    load_model: loading model 'private-fixture-path'",
-	"0.00.369.108 I load_tensors: loading model tensors, this can take a while... (load_mode = mmap)",
-	"0.01.015.680 I load_tensors: offloaded 4/41 layers to GPU",
-	"0.01.015.684 I load_tensors:   CPU_Mapped model buffer size =   171.88 MiB",
-	"0.01.015.685 I load_tensors:   CPU_Mapped model buffer size =  6917.50 MiB",
-	"0.01.015.686 I load_tensors:        CUDA0 model buffer size =   744.62 MiB",
-	"0.01.317.003 I llama_context: constructing llama_context",
-	"0.01.317.013 I llama_context: n_ctx                 = 8192",
-	"0.01.317.448 I llama_context:  CUDA_Host  output buffer size =     0.49 MiB",
-	"0.01.336.133 I llama_kv_cache:        CPU KV buffer size =   144.00 MiB",
-	"0.01.337.220 I llama_kv_cache:      CUDA0 KV buffer size =    16.00 MiB",
-	"0.01.337.228 I llama_kv_cache: size =  160.00 MiB (  8192 cells,  10 layers,  1/1 seqs), K (f16):   80.00 MiB, V (f16):   80.00 MiB",
-	"0.01.337.292 I llama_memory_recurrent:        CPU RS buffer size =     0.44 MiB",
-	"0.01.337.642 I llama_memory_recurrent:      CUDA0 RS buffer size =     0.03 MiB",
-	"0.01.337.649 I llama_memory_recurrent: size =    0.47 MiB (     1 cells,  40 layers,  1 seqs  0 rs_seq), R (f32):    0.47 MiB, S (f32):    0.00 MiB, P (f32):    0.00 MiB",
-	"0.01.337.669 I sched_reserve: reserving ...",
-	"0.01.339.701 I resolve_fused_ops: Flash Attention enabled",
-	"0.01.352.613 I sched_reserve:      CUDA0 compute buffer size =   156.75 MiB",
-	"0.01.352.616 I sched_reserve:  CUDA_Host compute buffer size =    28.02 MiB",
-	"0.01.352.621 I sched_reserve: graph (pp bs=512, tg bs=1): nodes = 2177 / 2177, splits = 467 / 20, input objects = 4 / 4, input tensors = 10 / 10",
-	"0.01.352.622 I sched_reserve: reserve took 14.95 ms, sched copies = 1",
-	"0.01.878.250 I srv    load_model: initializing, n_slots = 1, n_ctx_slot = 8192, kv_unified = 'false'",
-	"0.01.886.560 I srv  server_run_i: model loaded",
-}
-
-// b11985 maps libllama INFO, which carries every buffer report, to verbosity
-// 4. The default child prints none; llamaSnapshotCommand raises the router's
-// verbosity so the children print them.
+// The testdata/model-buffer files are one load each on White's managed
+// llama.cpp b11985-6f4cc4d72 router on 2026-11-14 (Windows, raw pipes), byte for
+// byte except the model name, ports and paths. Router lines (stderr) end CR LF;
+// forwarded child lines (stdout) end CR CR LF. b11985 maps libllama INFO, which
+// carries every buffer report, to verbosity 4: the default child prints none,
+// and at verbosity 4 the metadata dump cuts a token list mid-character, so one
+// complete line is not valid UTF-8.
 func TestModelBufferCapturedB11985Output(t *testing.T) {
-	test := func(name string, child []string, check func(*testing.T, modelconfig.BufferObservation)) {
+	test := func(name, capture string, check func(*testing.T, modelconfig.BufferObservation)) {
 		t.Run(name, func(t *testing.T) {
 			f := newModelBufferTestFixture(t)
-			scanObservedLines(strings.NewReader(modelBufferB11985Spawn), "stderr", nil, f.capture.observe)
-			var stdout strings.Builder
-			for _, message := range child {
-				fmt.Fprintf(&stdout, "[%5d] %s\r\r\n", 31001, message)
+			for _, stream := range []string{"stderr", "stdout"} {
+				raw, err := os.ReadFile(filepath.Join("testdata", "model-buffer", capture+"-"+stream+".txt"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				// The engine log gets every complete line except one that is
+				// not valid UTF-8.
+				logged := 0
+				scanObservedLines(strings.NewReader(string(raw)), stream, func(_, line string) {
+					logged++
+					if !utf8.ValidString(line) {
+						t.Errorf("engine log received invalid UTF-8: %q", line)
+					}
+				}, f.capture.observe)
+				valid := 0
+				for _, line := range strings.SplitAfter(string(raw), "\n") {
+					if line != "" && utf8.ValidString(line) {
+						valid++
+					}
+				}
+				if logged != valid {
+					t.Errorf("%s: engine log got %d lines, want %d", stream, logged, valid)
+				}
 			}
-			scanObservedLines(strings.NewReader(stdout.String()), "stdout", nil, f.capture.observe)
 			check(t, f.confirm(t, "medium-model", 1, "b11985-6f4cc4d72"))
 		})
 	}
-	test("default verbosity prints no buffer report", modelBufferB11985DefaultVerbosity, func(t *testing.T, o modelconfig.BufferObservation) {
+	test("default verbosity prints no buffer report", "b11985-default-verbosity", func(t *testing.T, o modelconfig.BufferObservation) {
 		if o.Status != "partial" || o.Reason != "unrecognized-build-output" || len(o.Rows) != 0 {
 			t.Fatalf("default-verbosity output: %+v", o)
 		}
 	})
-	test("verbosity 4 reports every buffer", modelBufferB11985Verbosity4, func(t *testing.T, o modelconfig.BufferObservation) {
+	test("verbosity 4 reports every buffer", "b11985-verbosity4", func(t *testing.T, o modelconfig.BufferObservation) {
 		var got []string
 		for _, row := range o.Rows {
 			got = append(got, row.Component+" "+row.Label+" "+row.ReportedMiB)
@@ -339,6 +321,33 @@ func TestModelBufferCapturedB11985Output(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+}
+
+// Verbosity 4 is trace only from b9151; earlier router builds log request and
+// response bodies there. The launch knows the build only from a retained
+// sample the router reported for the same native content.
+func TestModelBufferReportedBuildGatesChildTrace(t *testing.T) {
+	for build, want := range map[string]bool{"b11985-6f4cc4d72": true, "b9151-67b2b7f2f": true, "b9150-abcdef0": false, "b7352-f32ca51bf": false, "": false, "b12020": false, "unknown": false} {
+		if got := llamaTraceVerbosity(build); got != want {
+			t.Errorf("llamaTraceVerbosity(%q) = %v, want %v", build, got, want)
+		}
+	}
+	for _, tc := range []struct {
+		build string
+		want  bool
+	}{{"b11985-6f4cc4d72", true}, {"b9150-abcdef0", false}} {
+		t.Run(tc.build, func(t *testing.T) {
+			f := newModelBufferTestFixture(t)
+			if f.load.ex.llamaTraceVerbosityKnown(context.Background(), f.load.st) {
+				t.Fatal("trace before any sample recorded the build")
+			}
+			f.initial("medium-model", 31001)
+			f.confirm(t, "medium-model", 1, tc.build)
+			if got := f.load.ex.llamaTraceVerbosityKnown(context.Background(), f.load.st); got != tc.want {
+				t.Fatalf("trace after a %s sample = %v, want %v", tc.build, got, tc.want)
+			}
+		})
+	}
 }
 
 func TestModelBufferRecognizesAnotherBuild(t *testing.T) {
