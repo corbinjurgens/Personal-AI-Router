@@ -203,7 +203,13 @@ export function workloadRoutingSummary(
         return null
     const attempt = record.attempts.find(value => value.index === association.attemptIndex)
     if (!attempt || attempt.destination.kind !== 'local') return null
-    if (!association.attached) {
+    const ended =
+        !record.recoverable &&
+        (record.state === 'completed' || record.state === 'failed' || record.state === 'cancelled')
+    const handedToApi = record.attempts.some(
+        next => next.index > attempt.index && next.destination.kind !== 'local'
+    )
+    if (!association.attached && (handedToApi || !ended)) {
         const outcome =
             attempt.outcome === 'interrupted'
                 ? record.attempts.some(next => next.continuationOf === attempt.index)
@@ -216,15 +222,5 @@ export function workloadRoutingSummary(
             error: attempt.outcome === 'failed' || attempt.outcome === 'rejected'
         }
     }
-    const error =
-        !record.recoverable &&
-        (attempt.outcome === 'failed' ||
-            attempt.outcome === 'rejected' ||
-            (attempt.outcome === 'interrupted' && record.state === 'failed'))
-    return {
-        text: error
-            ? `Routing failed: ${routingDisplayReason(record, attempt.reason) || routingAttemptOutcome(record, attempt)}`
-            : routingSummary(record),
-        error
-    }
+    return { text: routingSummary(record), error: !record.recoverable && record.state === 'failed' }
 }

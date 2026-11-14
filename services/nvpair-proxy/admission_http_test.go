@@ -867,6 +867,64 @@ func TestHandleHTTP_SoleBusyPeerWaitsWithoutSpendingDispatches(t *testing.T) {
 	}
 }
 
+// A peer's refusal is recorded under the reason the peer reports, so the routing
+// history does not call a busy node an engine error.
+func TestHandleHTTP_PeerRefusalAttemptReason(t *testing.T) {
+	test := func(name string, status int, header string, want string) {
+		t.Run(name, func(t *testing.T) {
+			setForTest(t, &retryBackoff, []time.Duration{time.Millisecond})
+			tc := anyCase(t)
+			var hits atomic.Int32
+			secondArrived := make(chan struct{})
+			release := make(chan struct{})
+			peer := httptest.NewServer(fixtureRequestHandler(http.MethodPost, tc.inferencePath, func(w http.ResponseWriter, r *http.Request) {
+				if hits.Add(1) == 1 {
+					w.Header().Set(nodepolicy.AdmissionHeader, header)
+					w.WriteHeader(status)
+					return
+				}
+				// The first refusal is final history by now; hold the request live
+				// so the test can read its record before the registry drops it.
+				close(secondArrived)
+				<-release
+				w.WriteHeader(http.StatusOK)
+				if _, err := io.WriteString(w, `{"done":true}`); err != nil {
+					t.Errorf("write peer response: %v", err)
+				}
+			}))
+			defer peer.Close()
+			disc := NewDiscovery()
+			disc.AddManual(nodeForModel(t, "peer", peer.URL, tc.advertisedModel))
+			p := testProxy(tc.profile, disc, tc.profile.FacadePort)
+			p.admission.setPolicy(httpAdmissionFixturePolicy(tc))
+			ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+			defer cancel()
+			rec := httptest.NewRecorder()
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				p.soleFacade().handleHTTP(rec, tc.inferenceRequest().WithContext(ctx))
+			}()
+			select {
+			case <-secondArrived:
+			case <-ctx.Done():
+				t.Fatal("peer never received the retry")
+			}
+			h := p.newRoutingHistory()
+			historyTestScan(t, h)
+			got := historyTestRecord(t, h, 1)
+			close(release)
+			<-done
+			if len(got.Attempts) < 2 || got.Attempts[0].Reason != want {
+				t.Fatalf("first attempt after peer status %d with %q header: attempts %+v; want first attempt reason %q", status, header, got.Attempts, want)
+			}
+		})
+	}
+	test("busy admission refusal", http.StatusServiceUnavailable, "busy", "admission-busy")
+	test("busy header without admission status", http.StatusBadGateway, "busy", "upstream-status")
+	test("management denied marker", http.StatusServiceUnavailable, "management-denied", "upstream-status")
+}
+
 func TestHandleHTTP_SolePeerOtherRefusalsSpendDispatches(t *testing.T) {
 	test := func(name string, status int, reason nodepolicy.RejectReason) {
 		t.Run(name, func(t *testing.T) {

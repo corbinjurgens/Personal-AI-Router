@@ -421,8 +421,8 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 		return
 	}
 	if decision.reject != "" {
-		slog.Debug("cluster ingress admission rejected",
-			"peer", peer, "path", r.URL.Path, "model", model, "reason", decision.reject)
+		slog.Info("cluster ingress admission rejected",
+			"model", model, "peer", peer, "reason", decision.reject)
 		writeAdmissionRejection(w, decision.reject)
 		return
 	}
