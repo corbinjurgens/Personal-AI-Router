@@ -203,7 +203,18 @@ export function workloadRoutingSummary(
         return null
     const attempt = record.attempts.find(value => value.index === association.attemptIndex)
     if (!attempt || attempt.destination.kind !== 'local') return null
-    if (!association.attached) {
+    const ended =
+        !record.recoverable &&
+        (record.state === 'completed' || record.state === 'failed' || record.state === 'cancelled')
+    const handedToApi = record.attempts.some(
+        next => next.index > attempt.index && next.destination.kind !== 'local'
+    )
+    if (!association.attached && handedToApi && ended && record.state === 'completed') {
+        if (record.served?.kind === 'local') return { text: routingSummary(record), error: false }
+        const count = record.droppedAttempts + record.attempts.length
+        return { text: `Routing: ${count} attempts, served by an API deployment`, error: false }
+    }
+    if (!association.attached && (handedToApi || record.recoverable)) {
         const outcome =
             attempt.outcome === 'interrupted'
                 ? record.attempts.some(next => next.continuationOf === attempt.index)
@@ -213,18 +224,11 @@ export function workloadRoutingSummary(
         const reason = attempt.reason === 'stream-interrupted' ? '' : routingReason(attempt.reason)
         return {
             text: `Routing: local attempt ${attempt.index + 1}, ${outcome}${reason ? `: ${reason}` : ''}`,
-            error: attempt.outcome === 'failed' || attempt.outcome === 'rejected'
+            error:
+                ended &&
+                record.state === 'failed' &&
+                (attempt.outcome === 'failed' || attempt.outcome === 'rejected')
         }
     }
-    const error =
-        !record.recoverable &&
-        (attempt.outcome === 'failed' ||
-            attempt.outcome === 'rejected' ||
-            (attempt.outcome === 'interrupted' && record.state === 'failed'))
-    return {
-        text: error
-            ? `Routing failed: ${routingDisplayReason(record, attempt.reason) || routingAttemptOutcome(record, attempt)}`
-            : routingSummary(record),
-        error
-    }
+    return { text: routingSummary(record), error: !record.recoverable && record.state === 'failed' }
 }

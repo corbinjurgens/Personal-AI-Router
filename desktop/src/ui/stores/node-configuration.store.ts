@@ -983,8 +983,14 @@ export function watchNodeManagement(targetId: string, nodeId: string | undefined
         stopped = true
         target.consumers--
         if (target.consumers === 0 && managementTargets.get(targetId) === target) {
-            useNodeConfigurationStore.getState().disconnectManagement(targetId)
             managementTargets.delete(targetId)
+            // An unwatched card has no reachability verdict; "unreachable" is for a lost transport.
+            const { management } = useNodeConfigurationStore.getState()
+            if (management.has(targetId)) {
+                const remaining = new Map(management)
+                remaining.delete(targetId)
+                useNodeConfigurationStore.setState({ management: remaining })
+            }
         }
         if (![...managementTargets.values()].some(watched => watched.consumers > 0)) {
             managementUnsubs.forEach(stop => stop())

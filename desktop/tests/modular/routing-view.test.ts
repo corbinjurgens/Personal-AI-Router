@@ -130,20 +130,111 @@ describe('routing presentation labels', () => {
         expect(workloadRoutingSummary(record, workload)).toBeNull()
     })
 
-    it('keeps detached local summaries independent of later API liveness and destination', () => {
+    it('summarizes the final outcome of an ended request for a detached association', () => {
         const record = fixture()
         const workload = workloadFor(record)
         if (!record.workload) throw new Error('missing association')
         record.workload.attached = false
         record.workload.attemptIndex = 0
-        const before = workloadRoutingSummary(record, workload)
+        expect(workloadRoutingSummary(record, workload)).toEqual({
+            text: 'Routing: 2 attempts, served on synthetic-node / llamacpp',
+            error: false
+        })
+    })
+
+    it('keeps a rejected first attempt out of an attached request that is still routing', () => {
+        const record = fixture()
+        const workload = workloadFor(record)
+        if (!record.workload) throw new Error('missing association')
+        record.workload.attached = true
+        record.workload.attemptIndex = 0
+        record.state = 'routing'
+        record.endedAt = null
+        record.served = null
+        record.attempts = record.attempts.slice(0, 1)
+        expect(workloadRoutingSummary(record, workload)).toEqual({
+            text: 'Routing: attempt 1',
+            error: false
+        })
+    })
+
+    it('keeps an API-handed attempt neutral while routing and red only when the request fails', () => {
+        const record = fixture()
+        const workload = workloadFor(record)
+        if (!record.workload) throw new Error('missing association')
+        record.workload.attached = false
+        record.workload.attemptIndex = 0
+        const api = fixture(1).attempts[0]
+        record.attempts = [record.attempts[0], { ...api, index: 1, outcome: 'pending' }]
+        record.state = 'routing'
+        record.endedAt = null
+        record.served = null
+        expect(workloadRoutingSummary(record, workload)).toEqual({
+            text: 'Routing: local attempt 1, Rejected: Node busy',
+            error: false
+        })
+        record.attempts[1] = { ...api, index: 1, outcome: 'failed', reason: 'account-ceiling' }
+        record.state = 'failed'
+        record.reason = 'account-ceiling'
+        record.endedAt = record.createdAt + 2000
+        expect(workloadRoutingSummary(record, workload)).toEqual({
+            text: 'Routing: local attempt 1, Rejected: Node busy',
+            error: true
+        })
+    })
+
+    it('says a request completed on an API deployment was served there, without account details', () => {
+        const record = fixture()
+        const workload = workloadFor(record)
+        if (!record.workload) throw new Error('missing association')
+        record.workload.attached = false
+        record.workload.attemptIndex = 0
+        const api = fixture(1).attempts[0]
+        record.attempts = [record.attempts[0], { ...api, index: 1, outcome: 'committed' }]
+        record.served = api.destination
+        expect(workloadRoutingSummary(record, workload)).toEqual({
+            text: 'Routing: 2 attempts, served by an API deployment',
+            error: false
+        })
+    })
+
+    it('summarizes a request a local node served after a failed API attempt', () => {
+        const record = fixture()
+        const workload = workloadFor(record)
+        if (!record.workload) throw new Error('missing association')
+        record.workload.attached = false
+        record.workload.attemptIndex = 0
+        const api = fixture(1).attempts[0]
+        const [rejected, served] = record.attempts
+        record.attempts = [
+            rejected,
+            { ...api, index: 1, outcome: 'failed', reason: 'account-ceiling' },
+            { ...served, index: 2 }
+        ]
+        expect(workloadRoutingSummary(record, workload)).toEqual({
+            text: 'Routing: 3 attempts, served on synthetic-node / llamacpp',
+            error: false
+        })
+    })
+
+    it('shows no rejected attempt between detach and the end of a local request', () => {
+        const record = fixture()
+        const workload = workloadFor(record)
+        if (!record.workload) throw new Error('missing association')
+        // emitTerminal detaches the workload before the record reports its end.
+        record.workload.attached = false
+        record.workload.attemptIndex = 0
         record.state = 'streaming'
-        record.recoverable = true
-        record.attempts.push(fixture(1).attempts[0])
-        record.served = fixture(1).attempts[0].destination
-        expect(workloadRoutingSummary(record, workload)).toEqual(before)
-        expect(before?.text).not.toContain('account')
-        expect(before?.error).toBe(true)
+        record.endedAt = null
+        expect(workloadRoutingSummary(record, workload)).toEqual({
+            text: 'Streaming',
+            error: false
+        })
+        record.state = 'routing'
+        expect(workloadRoutingSummary(record, workload)).toEqual({
+            text: 'Routing: attempt 2',
+            error: false
+        })
     })
 })
 
@@ -385,7 +476,7 @@ describe('bounded history presentation and lifecycle', () => {
         expect(pinned).not.toContain(' ms')
     })
 
-    it('shows only exact local attempt failures on workload cards without reflecting the workload error', async () => {
+    it('shows the served summary on a detached workload card without reflecting the workload error', async () => {
         const record = fixture()
         if (!record.workload) throw new Error('missing association')
         record.workload.attached = false
@@ -393,7 +484,10 @@ describe('bounded history presentation and lifecycle', () => {
         const workload = workloadFor(record)
         await initial([record])
         await act(async () => root.render(createElement(WorkloadItemCard, { workload })))
-        expect(container.textContent).toContain('Routing: local attempt 1, Rejected: Node busy')
+        expect(container.textContent).toContain(
+            'Routing: 2 attempts, served on synthetic-node / llamacpp'
+        )
+        expect(container.querySelector('.workload-card-failed')).toBeNull()
         expect(container.textContent).not.toContain('untrusted-workload-error')
     })
 
@@ -410,6 +504,15 @@ describe('bounded history presentation and lifecycle', () => {
         const workload = workloadFor(record)
         bank.apply(new TextEncoder().encode(JSON.stringify(record)))
         const paused = workloadRoutingSummary(record, workload)
+        // An account failure can only win through a later API attempt.
+        record.attempts.push({
+            ...fixture(1).attempts[0],
+            index: 1,
+            startedAt: record.createdAt + 1000,
+            endedAt: record.createdAt + 1500,
+            outcome: 'failed',
+            reason: 'account-ceiling'
+        })
         record.state = 'failed'
         record.recoverable = false
         record.reason = 'account-ceiling'

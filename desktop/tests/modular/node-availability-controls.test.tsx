@@ -22,12 +22,17 @@ import {
     useNodeConfigurationStore,
     watchNodeAvailability
 } from '@/ui/stores/node-configuration.store'
+import { getPairTransport } from '@/ui/api/bootstrap'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import { useDiscoveredNodesStore } from '@/ui/stores/discovered-nodes.store'
 import { useNodesStore } from '@/ui/stores/nodes.store'
 import NodeCardDetails from '@/ui/components/NodeList/NodeCardDetails'
 import RoutingSettings from '@/ui/components/RoutingSettings/RoutingSettings'
 
+vi.mock('@/ui/api/bootstrap', async importOriginal => ({
+    ...(await importOriginal<typeof import('@/ui/api/bootstrap')>()),
+    getPairTransport: vi.fn<typeof getPairTransport>()
+}))
 vi.mock('@/ui/components/NodeList/NodeEnginesInline', () => ({ default: () => null }))
 vi.mock('@/ui/components/NodeList/NodeEngineSettings', () => ({ default: () => null }))
 vi.mock('@/ui/components/NodeList/NodeDeclaredRoles', () => ({ default: () => null }))
@@ -43,6 +48,7 @@ const stops: Array<() => void> = []
 let root: Root
 let container: HTMLDivElement
 let cleanup: () => void
+let disconnectTransport: () => void
 
 function documentFor(
     availability: NodePolicyDocument['availability'],
@@ -161,10 +167,14 @@ beforeEach(() => {
         invoke: vi.fn<ServiceTransport['invoke']>(),
         subscribePush: vi.fn<ServiceTransport['subscribePush']>(() => () => {}),
         onConnect: vi.fn<ServiceTransport['onConnect']>(() => () => {}),
-        onDisconnect: vi.fn<ServiceTransport['onDisconnect']>(() => () => {}),
+        onDisconnect: vi.fn<ServiceTransport['onDisconnect']>(callback => {
+            disconnectTransport = callback
+            return () => {}
+        }),
         onAuthFailure: vi.fn<ServiceTransport['onAuthFailure']>(() => () => {}),
         destroy: vi.fn<ServiceTransport['destroy']>()
     }
+    vi.mocked(getPairTransport).mockReturnValue(transport)
     const api = createPairApi(transport)
     api.nodePolicy.get = getPolicy
     api.nodePolicy.setAvailability = setAvailability
@@ -216,6 +226,43 @@ describe('node availability presentation', () => {
         expect(container.textContent).not.toContain('Halt')
         expect(container.textContent).toContain('routing elsewhere continues')
         expect(container.textContent).toContain('new client request')
+    })
+
+    it('drops the management verdict when an off-screen card stops watching, not on transport loss', async () => {
+        let observe: (entries: Array<{ isIntersecting: boolean }>) => void = () => {}
+        vi.stubGlobal(
+            'IntersectionObserver',
+            class {
+                constructor(callback: typeof observe) {
+                    observe = callback
+                }
+                observe = vi.fn<() => void>()
+                disconnect = vi.fn<() => void>()
+            }
+        )
+        const setVisible = async (isIntersecting: boolean) => {
+            await act(async () => observe([{ isIntersecting }]))
+            await tick()
+        }
+        await act(async () =>
+            root.render(
+                <NodeAvailabilityControls targetId="peer" nodeId="peer" name="Peer" online />
+            )
+        )
+        await tick()
+        expect(useNodeConfigurationStore.getState().management.get('peer')?.state).toBe('allowed')
+
+        await setVisible(false)
+        expect(useNodeConfigurationStore.getState().management.has('peer')).toBe(false)
+        expect(container.textContent).not.toContain('Device disconnected or unreachable')
+
+        await setVisible(true)
+        expect(useNodeConfigurationStore.getState().management.get('peer')?.state).toBe('allowed')
+        await act(async () => disconnectTransport())
+        expect(useNodeConfigurationStore.getState().management.get('peer')?.state).toBe(
+            'unreachable'
+        )
+        expect(container.textContent).toContain('Device disconnected or unreachable')
     })
 
     it.each([
