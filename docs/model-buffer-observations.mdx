@@ -139,7 +139,9 @@ router-reported build of b9151 or newer. The router passes its own options to
 every child. The router reports its build only after it starts, so the first
 launch of a build the manager has not seen gets no flag: its sample is saved
 `partial` with `unrecognized-build-output` and no rows, records the build, and
-the next router launch adds the flag. A launch that already declares `-v`, a
+the next router launch adds the flag. The gate trusts the build number alone:
+a llama.cpp fork that branched before b9151 but reports a higher number would
+still treat level 4 as debug. A launch that already declares `-v`, a
 `--log-verbosity` spelling or `LLAMA_ARG_LOG_VERBOSITY` keeps that verbosity;
 an explicit lower verbosity leaves each sample without rows. A model's extra
 options cannot set the verbosity, because the router's own option overrides

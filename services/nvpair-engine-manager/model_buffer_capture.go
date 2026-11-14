@@ -548,9 +548,10 @@ func (c *modelBufferCapture) observe(frame managedOutputFrame) {
 		return
 	}
 	// An invalid-utf8 frame is complete and in sequence, so framing still
-	// holds. Every line the capture recognizes is ASCII, so it is not one of
-	// them: llama.cpp's trace-level metadata dump cuts values at a byte count
-	// and can split a character.
+	// holds. The lines the capture recognizes carry only llama.cpp's ASCII
+	// text and PAIR-supplied model names and paths, which are valid UTF-8, so
+	// it is not one of them: llama.cpp's trace-level metadata dump cuts values
+	// at a byte count and can split a character.
 	undecodable := frame.Failure == "invalid-utf8"
 	invalid := frame.Sequence == 0 || frame.Sequence != c.sequence[i]+1 || (frame.Failure != "" && !undecodable)
 	if invalid {

@@ -271,7 +271,8 @@ func TestModelBufferRecognizesWindowsForwardedLines(t *testing.T) {
 // forwarded child lines (stdout) end CR CR LF. b11985 maps libllama INFO, which
 // carries every buffer report, to verbosity 4: the default child prints none,
 // and at verbosity 4 the metadata dump cuts a token list mid-character, so one
-// complete line is not valid UTF-8.
+// complete line is not valid UTF-8. In the verbosity-4 load the child got the
+// flag from a preset section; the router itself reports verbosity 3.
 func TestModelBufferCapturedB11985Output(t *testing.T) {
 	test := func(name, capture string, check func(*testing.T, modelconfig.BufferObservation)) {
 		t.Run(name, func(t *testing.T) {
