@@ -254,7 +254,8 @@ func TestPeerHostPorts(t *testing.T) {
 		// addresses tie and the tie is broken deterministically rather than by
 		// the order the browse happened to resolve them in.
 		{"private ranges tie", RawNode{Addresses: []string{"10.221.0.9", "192.168.1.5"}, Port: 14319}, []string{"10.221.0.9:14319", "192.168.1.5:14319"}},
-		{"ip= TXT leads without dropping others", RawNode{Addresses: []string{"10.221.0.9"}, TXT: []string{"ip=192.168.1.5"}, Port: 14319}, []string{"192.168.1.5:14319", "10.221.0.9:14319"}},
+		{"published ip= is the whole list", RawNode{Addresses: []string{"10.221.0.9"}, TXT: []string{"ip=192.168.1.5"}, Port: 14319}, []string{"192.168.1.5:14319"}},
+		{"published ips= keeps its order", RawNode{Addresses: []string{"10.221.0.9"}, TXT: []string{"ip=192.168.1.5", "ips=192.168.1.5,10.0.0.7"}, Port: 14319}, []string{"192.168.1.5:14319", "10.0.0.7:14319"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -1177,8 +1177,7 @@ func nodeURL(n Node) *url.URL {
 // nodeCandidates returns the ordered, de-duplicated host:port targets for a node.
 //
 // Order comes from the node itself: netpick.Candidates keeps the node's published
-// ranking, which it derived from evidence no observer has, and appends anything
-// else it advertised. Re-sorting here by address class is what previously put a
+// ranking, which it derived from evidence no observer has. Re-sorting here by address class is what previously put a
 // two-host direct-connect link ahead of a peer's real LAN address.
 //
 // Any local-interface address is rewritten to loopback and floated to the

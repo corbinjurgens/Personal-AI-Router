@@ -25,6 +25,7 @@ import (
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/mdns"
+	"nvpair-shared/netpick"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 )
@@ -322,9 +323,17 @@ func newTask2Fixture(t *testing.T, options ...task2FixtureOption) *task2Fixture 
 		args := append([]string{"--cluster-dir", filepath.Join(f.a.base, "cluster")}, fixtureMDNSScannerArgs(f.namespace)...)
 		f.scanner = startTask1Process(t, f.a.base, scannerBin, args...)
 		f.scanner.call(t, "discovery:get-nodes", nil)
+		// The scanner dials a loopback address in plaintext and a LAN address
+		// through the admitted peer transport, which falls back to the reverse
+		// session. The blocked listener is loopback-only, so this host's LAN
+		// address refuses the direct dial and the reverse route serves it.
+		lanIP := netpick.BestLocalIP(netpick.Evidence{})
+		if lanIP == "" {
+			t.Skip("no non-loopback IPv4 address available; the scanner's reverse route needs one")
+		}
 		label := "task2-" + filepath.Base(f.b.base)
 		responder, err := mdns.NewResponder(label, label, f.namespace.Service, f.namespace.Domain, noderec.SRVPort, []string{
-			"v=1", "uuid=" + f.b.uuid, "cluster-uuid=" + f.b.uuid, "ip=127.0.0.1",
+			"v=1", "uuid=" + f.b.uuid, "cluster-uuid=" + f.b.uuid, "ip=" + lanIP,
 			fmt.Sprintf("ni=%d", f.blockedPort), fmt.Sprintf("em=%d", f.blockedPort), fmt.Sprintf("ec=%d", f.blockedPort),
 		})
 		if err != nil {

@@ -427,8 +427,8 @@ func (ps *PeerSync) streamOnce(ctx context.Context, nodeID string, stream uint64
 }
 
 // peerHostPorts builds every "host:port" worth subscribing to for a discovered
-// node, in the peer's own ranked order — its ip=/ips= list first, then anything
-// else discovery resolved for it. The node's Host is a display name and is never
+// node, in the peer's own ranked order — its ip=/ips= list, or what discovery
+// resolved for a node that published neither. The node's Host is a display name and is never
 // dialed, so a node with no address has nowhere to be reached and gets an empty slice.
 //
 // Every address, because which of them this host can reach is not something the

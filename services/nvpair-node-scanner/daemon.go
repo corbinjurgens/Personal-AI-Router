@@ -979,8 +979,8 @@ func (d *daemon) publishSelfLocked() {
 // watchAddress re-derives the advertised ip= whenever the host's network changes
 // (interface or address add/remove — VPN/dock toggles, DHCP re-lease, sleep/wake
 // re-IP). Without it the ip= would be frozen at daemon startup and could point at
-// an address the node no longer holds; since consumers prefer ip= over the live A
-// records, a stale value would misroute them. netmon debounces, so a reload per
+// an address the node no longer holds; since consumers dial ip=/ips= and not the
+// live A records, a stale value would misroute them. netmon debounces, so a reload per
 // change is cheap. Best-effort: if the monitor can't start, ip= stays static
 // (the responder's A records still refresh on their own netmon watch).
 func (d *daemon) watchAddress(ctx context.Context) {
