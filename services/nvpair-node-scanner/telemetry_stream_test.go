@@ -48,7 +48,7 @@ func (eofReader) Read([]byte) (int, error) { return 0, io.EOF }
 func streamFixtureFrame(host string) NodeInfoResponse {
 	cluster := host
 	return NodeInfoResponse{HostUUID: host, ClusterUUID: &cluster, TelemetryValid: true, MSSince: 100,
-		GPUs: []GPUInfo{{Name: "GPU 0", UtilizationPercent: 40}, {Name: "GPU 1", UtilizationPercent: 70}}}
+		GPUs: []GPUInfo{{Name: "GPU 0", UtilizationPercent: ptr(uint32(40))}, {Name: "GPU 1", UtilizationPercent: ptr(uint32(70))}}}
 }
 
 func newStreamPeerFixture(t *testing.T) *streamPeerFixture {

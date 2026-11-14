@@ -354,7 +354,7 @@ func TestReplayTelemetryToSchedulerIncludesCurrentAge(t *testing.T) {
 func TestManualTelemetryReprojectsSurvivingAliasAtOriginalAge(t *testing.T) {
 	b := newManualTestBroker()
 	first := manualStatus("first", "10.0.0.1", "node-a")
-	first.GPUs = []GPUInfo{{UtilizationPercent: 25}}
+	first.GPUs = []GPUInfo{{UtilizationPercent: ptr(uint32(25))}}
 	first.TelemetryValid = true
 	first.MSSince = 100
 	b.upsertManualNode(first)
@@ -366,7 +366,7 @@ func TestManualTelemetryReprojectsSurvivingAliasAtOriginalAge(t *testing.T) {
 	b.manualMu.Unlock()
 
 	second := manualStatus("second", "10.0.0.2", "node-a")
-	second.GPUs = []GPUInfo{{UtilizationPercent: 80}}
+	second.GPUs = []GPUInfo{{UtilizationPercent: ptr(uint32(80))}}
 	second.TelemetryValid = true
 	b.upsertManualNode(second)
 	b.removeManualNode("second")
@@ -384,3 +384,6 @@ func TestManualTelemetryReprojectsSurvivingAliasAtOriginalAge(t *testing.T) {
 		t.Fatalf("final manual alias left telemetry cached: %+v", snapshot)
 	}
 }
+
+// ptr returns a pointer to v for optional fixture fields.
+func ptr[T any](v T) *T { return &v }

@@ -114,10 +114,10 @@ func TestNodeInfoRPCPairedDetailWithoutDirectAddress(t *testing.T) {
 		t.Fatalf("decoded identity/GPU sample = %+v", tel)
 	}
 	gpu := tel.GPUs[0]
-	if gpu.Name != "Peer GPU" || gpu.VramBytes != 8589934592 || gpu.VramUsedBytes != 1073741824 || gpu.UtilizationPercent != 73 {
+	if gpu.Name != "Peer GPU" || gpu.VramBytes != 8589934592 || gpu.VramUsedBytes == nil || *gpu.VramUsedBytes != 1073741824 || gpu.UtilizationPercent == nil || *gpu.UtilizationPercent != 73 {
 		t.Fatalf("GPU = %+v", gpu)
 	}
-	if tel.CPU == nil || tel.CPU.Name != "Peer CPU" || tel.CPU.Cores != 8 || tel.CPU.UtilizationPercent != 42 {
+	if tel.CPU == nil || tel.CPU.Name != "Peer CPU" || tel.CPU.Cores != 8 || tel.CPU.UtilizationPercent == nil || *tel.CPU.UtilizationPercent != 42 {
 		t.Fatalf("CPU = %+v", tel.CPU)
 	}
 	if tel.Memory == nil || tel.Memory.TotalBytes != 34359738368 || tel.Memory.UsedBytes != 8589934592 {
@@ -792,7 +792,7 @@ func TestNodeInfoRPCManualTLSRetainsWorkerTelemetry(t *testing.T) {
 	d := newNodeDetail(nil, nodeRow{
 		key: "physical-host", membership: membershipMember, nodeInfoTLS: true,
 		probedTelemetry: &nodeTelemetry{TelemetryValid: false,
-			GPUs: []noderec.GPUInfo{{Name: "Worker GPU", UtilizationPercent: 99}}},
+			GPUs: []noderec.GPUInfo{{Name: "Worker GPU", UtilizationPercent: ptr(uint32(99))}}},
 	})
 	d.SetSize(100, 30)
 	if cmd := d.telemetryCmd(); cmd != nil || d.telemetryRunning {

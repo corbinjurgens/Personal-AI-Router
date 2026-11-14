@@ -106,3 +106,43 @@ func TestKeepPhysicalAdapter(t *testing.T) {
 		})
 	}
 }
+
+// TestD3DKMTStructSizes pins the D3DKMT argument structs to the C ABI sizes on
+// the 64-bit Windows targets (amd64 and arm64).
+func TestD3DKMTStructSizes(t *testing.T) {
+	if got := unsafe.Sizeof(d3dkmtOpenAdapterFromLuid{}); got != 12 {
+		t.Errorf("d3dkmtOpenAdapterFromLuid size = %d, want 12", got)
+	}
+	if got := unsafe.Sizeof(d3dkmtQueryAdapterInfo{}); got != 24 {
+		t.Errorf("d3dkmtQueryAdapterInfo size = %d, want 24", got)
+	}
+}
+
+func TestKeepRenderAdapter(t *testing.T) {
+	cases := []struct {
+		name        string
+		adapterType uint32
+		want        bool
+	}{
+		{"Parsec indirect display 0x342", 0x342, false},
+		{"Intel UHD 630 0x232b", 0x232b, true},
+		{"NVIDIA hybrid discrete 0x313", 0x313, true},
+		{"compute-only render 0x801", 0x801, true},
+		{"display only 0x2", 0x2, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := keepRenderAdapter(tc.adapterType); got != tc.want {
+				t.Errorf("keepRenderAdapter(%#x) = %v, want %v", tc.adapterType, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestQueryAdapterTypeUnknownLUID relies on LUID 0 never naming an adapter, as
+// the DirectX registry gate does.
+func TestQueryAdapterTypeUnknownLUID(t *testing.T) {
+	if adapterType, ok := queryAdapterType(0, 0); ok {
+		t.Errorf("queryAdapterType(0, 0) = (%#x, true), want ok == false", adapterType)
+	}
+}

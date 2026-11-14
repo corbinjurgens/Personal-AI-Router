@@ -422,18 +422,20 @@ type ReadyParams struct {
 // clients share one shape.
 // PhysicalID is an observed device alias in the node-info response's dedicated
 // or shared memory pool. Absence means the association is unknown.
+// VramUsedBytes and UtilizationPercent: absent means no reading; 0 is a reading.
 type GPUInfo struct {
-	Name               string `json:"name"`
-	PhysicalID         string `json:"physicalId,omitempty"`
-	VramBytes          uint64 `json:"vram_bytes,omitempty"`
-	VramUsedBytes      uint64 `json:"vram_used_bytes,omitempty"`
-	UtilizationPercent uint32 `json:"utilization_percent,omitempty"`
+	Name               string  `json:"name"`
+	PhysicalID         string  `json:"physicalId,omitempty"`
+	VramBytes          uint64  `json:"vram_bytes,omitempty"`
+	VramUsedBytes      *uint64 `json:"vram_used_bytes,omitempty"`
+	UtilizationPercent *uint32 `json:"utilization_percent,omitempty"`
 }
 
+// CPUInfo.UtilizationPercent: absent means no reading; 0 is a reading.
 type CPUInfo struct {
-	Name               string `json:"name,omitempty"`
-	Cores              uint32 `json:"cores,omitempty"`
-	UtilizationPercent uint32 `json:"utilization_percent,omitempty"`
+	Name               string  `json:"name,omitempty"`
+	Cores              uint32  `json:"cores,omitempty"`
+	UtilizationPercent *uint32 `json:"utilization_percent,omitempty"`
 }
 
 type MemoryInfo struct {

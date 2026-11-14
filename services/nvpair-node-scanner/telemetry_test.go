@@ -207,8 +207,9 @@ func TestMemoryTelemetryFetchAgeAndRetiredDirectory(t *testing.T) {
 func TestRefreshNodeTelemetryEmitsFreshnessAndUtilization(t *testing.T) {
 	response := NodeInfoResponse{
 		GPUs: []GPUInfo{
-			{Name: "GPU 0", UtilizationPercent: 0},
-			{Name: "GPU 1", UtilizationPercent: 84},
+			{Name: "GPU 0", UtilizationPercent: ptr(uint32(0))},
+			{Name: "GPU 1", UtilizationPercent: ptr(uint32(84))},
+			{Name: "GPU 2"},
 		},
 		TelemetryValid: true,
 		MSSince:        137,
@@ -295,7 +296,7 @@ func TestRefreshTelemetryFailsOverToAnAnsweringAddress(t *testing.T) {
 		if err := json.NewEncoder(w).Encode(NodeInfoResponse{
 			HostUUID:       "node-a",
 			TelemetryValid: true,
-			GPUs:           []GPUInfo{{Name: "GPU 0", UtilizationPercent: 61}},
+			GPUs:           []GPUInfo{{Name: "GPU 0", UtilizationPercent: ptr(uint32(61))}},
 		}); err != nil {
 			t.Errorf("encode node-info: %v", err)
 		}
@@ -973,3 +974,6 @@ func TestTelemetryLoopBoundsConcurrentWorkAcrossTicks(t *testing.T) {
 		t.Fatalf("maximum concurrent telemetry work = %d, want %d", got, telemetryRefreshConcurrency)
 	}
 }
+
+// ptr returns a pointer to v for optional fixture fields.
+func ptr[T any](v T) *T { return &v }

@@ -146,8 +146,8 @@ func TestNodeInfoRPCStreamPeerAnswersFromStreamThroughReverseRetry(t *testing.T)
 	got := waitNodeInfoRPC(t, client, "peer")
 	cluster := "peer"
 	want := NodeInfoResponse{HostUUID: "peer", ClusterUUID: &cluster,
-		GPUs:   []GPUInfo{{Name: "reverse GPU", UtilizationPercent: 73}},
-		CPU:    &CPUInfo{Name: "peer CPU", Cores: 8, UtilizationPercent: 42},
+		GPUs:   []GPUInfo{{Name: "reverse GPU", UtilizationPercent: ptr(uint32(73))}},
+		CPU:    &CPUInfo{Name: "peer CPU", Cores: 8, UtilizationPercent: ptr(uint32(42))},
 		Memory: &MemoryInfo{TotalBytes: 8192, UsedBytes: 2048}, TelemetryValid: true}
 	if got.MSSince < 0 || got.MSSince > 1000 {
 		t.Fatalf("live frame age = %d ms", got.MSSince)
@@ -354,7 +354,7 @@ func liveFrameFixture(f *scannerReverseFixture, lineAt time.Time, current func()
 		s.live = make(map[string]liveNodeInfo)
 	}
 	s.live["peer"] = liveNodeInfo{streamID: 1, info: NodeInfoResponse{HostUUID: "peer", ClusterUUID: &cluster, TelemetryValid: true, MSSince: 40,
-		GPUs: []GPUInfo{{Name: "cached GPU", UtilizationPercent: 12}}}, frameAt: lineAt, lineAt: lineAt, current: current}
+		GPUs: []GPUInfo{{Name: "cached GPU", UtilizationPercent: ptr(uint32(12))}}}, frameAt: lineAt, lineAt: lineAt, current: current}
 }
 
 func TestNodeInfoRPCLiveFrameRules(t *testing.T) {

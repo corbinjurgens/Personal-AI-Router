@@ -42,10 +42,10 @@ func baseNodeInfo() NodeInfoResponse {
 			Name:               "GPU",
 			PhysicalID:         "pci:1",
 			VramBytes:          16 << 30,
-			VramUsedBytes:      4 << 30,
-			UtilizationPercent: 40,
+			VramUsedBytes:      ptr(uint64(4 << 30)),
+			UtilizationPercent: ptr(uint32(40)),
 		}},
-		CPU:            &CPUInfo{Name: "CPU", Cores: 8, UtilizationPercent: 30},
+		CPU:            &CPUInfo{Name: "CPU", Cores: 8, UtilizationPercent: ptr(uint32(30))},
 		Memory:         &MemoryInfo{TotalBytes: 4 << 30, UsedBytes: 2 << 30},
 		TelemetryValid: true,
 		MSSince:        100,
@@ -57,7 +57,13 @@ func baseNodeInfo() NodeInfoResponse {
 func TestNodeInfoChanged(t *testing.T) {
 	empty, other := "", "cluster-b"
 	memory32GiB := func(r *NodeInfoResponse) { r.Memory.TotalBytes = 32 << 30 }
-	vram4GiB := func(r *NodeInfoResponse) { r.GPUs[0].VramBytes, r.GPUs[0].VramUsedBytes = 4<<30, 1<<30 }
+	vram4GiB := func(r *NodeInfoResponse) { r.GPUs[0].VramBytes, r.GPUs[0].VramUsedBytes = 4<<30, ptr(uint64(1<<30)) }
+	idle := func(r *NodeInfoResponse) {
+		r.GPUs[0].UtilizationPercent, r.GPUs[0].VramUsedBytes, r.CPU.UtilizationPercent = ptr(uint32(0)), ptr(uint64(0)), ptr(uint32(0))
+	}
+	unread := func(r *NodeInfoResponse) {
+		r.GPUs[0].UtilizationPercent, r.GPUs[0].VramUsedBytes, r.CPU.UtilizationPercent = nil, nil, nil
+	}
 	cases := []struct {
 		name   string
 		setup  func(*NodeInfoResponse) // applied to both samples
@@ -70,22 +76,29 @@ func TestNodeInfoChanged(t *testing.T) {
 		{"stale age grows", func(r *NodeInfoResponse) { r.MSSince = 6000 }, func(r *NodeInfoResponse) { r.MSSince = 7000 }, true},
 		{"stale age recovers", func(r *NodeInfoResponse) { r.MSSince = 6000 }, func(r *NodeInfoResponse) { r.MSSince = 200 }, true},
 		{"stale age while telemetry invalid", func(r *NodeInfoResponse) { r.TelemetryValid, r.MSSince = false, 6000 }, func(r *NodeInfoResponse) { r.MSSince = 7000 }, false},
-		{"GPU utilization +4", nil, func(r *NodeInfoResponse) { r.GPUs[0].UtilizationPercent += 4 }, false},
-		{"GPU utilization +5", nil, func(r *NodeInfoResponse) { r.GPUs[0].UtilizationPercent += 5 }, true},
-		{"GPU utilization -5", nil, func(r *NodeInfoResponse) { r.GPUs[0].UtilizationPercent -= 5 }, true},
-		{"CPU utilization +9", nil, func(r *NodeInfoResponse) { r.CPU.UtilizationPercent += 9 }, false},
-		{"CPU utilization +10", nil, func(r *NodeInfoResponse) { r.CPU.UtilizationPercent += 10 }, true},
-		{"CPU utilization -10", nil, func(r *NodeInfoResponse) { r.CPU.UtilizationPercent -= 10 }, true},
+		{"GPU utilization +4", nil, func(r *NodeInfoResponse) { *r.GPUs[0].UtilizationPercent += 4 }, false},
+		{"GPU utilization +5", nil, func(r *NodeInfoResponse) { *r.GPUs[0].UtilizationPercent += 5 }, true},
+		{"GPU utilization -5", nil, func(r *NodeInfoResponse) { *r.GPUs[0].UtilizationPercent -= 5 }, true},
+		{"CPU utilization +9", nil, func(r *NodeInfoResponse) { *r.CPU.UtilizationPercent += 9 }, false},
+		{"CPU utilization +10", nil, func(r *NodeInfoResponse) { *r.CPU.UtilizationPercent += 10 }, true},
+		{"CPU utilization -10", nil, func(r *NodeInfoResponse) { *r.CPU.UtilizationPercent -= 10 }, true},
+		{"GPU utilization absent to 0", unread, func(r *NodeInfoResponse) { r.GPUs[0].UtilizationPercent = ptr(uint32(0)) }, true},
+		{"GPU utilization 0 to absent", idle, func(r *NodeInfoResponse) { r.GPUs[0].UtilizationPercent = nil }, true},
+		{"GPU utilization 0 to 3", idle, func(r *NodeInfoResponse) { *r.GPUs[0].UtilizationPercent = 3 }, false},
+		{"VRAM used absent to 0", unread, func(r *NodeInfoResponse) { r.GPUs[0].VramUsedBytes = ptr(uint64(0)) }, true},
+		{"VRAM used 0 to 63 MiB", idle, func(r *NodeInfoResponse) { *r.GPUs[0].VramUsedBytes = 63 * mib }, false},
+		{"CPU utilization absent to 0", unread, func(r *NodeInfoResponse) { r.CPU.UtilizationPercent = ptr(uint32(0)) }, true},
+		{"CPU utilization 0 to 9", idle, func(r *NodeInfoResponse) { *r.CPU.UtilizationPercent = 9 }, false},
 		{"memory +63 MiB on 4 GiB", nil, func(r *NodeInfoResponse) { r.Memory.UsedBytes += 63 * mib }, false},
 		{"memory +64 MiB on 4 GiB", nil, func(r *NodeInfoResponse) { r.Memory.UsedBytes += 64 * mib }, true},
 		{"memory -64 MiB on 4 GiB", nil, func(r *NodeInfoResponse) { r.Memory.UsedBytes -= 64 * mib }, true},
 		{"memory +300 MiB on 32 GiB", memory32GiB, func(r *NodeInfoResponse) { r.Memory.UsedBytes += 300 * mib }, false},
 		{"memory +330 MiB on 32 GiB", memory32GiB, func(r *NodeInfoResponse) { r.Memory.UsedBytes += 330 * mib }, true},
-		{"VRAM +63 MiB on 4 GiB", vram4GiB, func(r *NodeInfoResponse) { r.GPUs[0].VramUsedBytes += 63 * mib }, false},
-		{"VRAM +64 MiB on 4 GiB", vram4GiB, func(r *NodeInfoResponse) { r.GPUs[0].VramUsedBytes += 64 * mib }, true},
-		{"VRAM +160 MiB on 16 GiB", nil, func(r *NodeInfoResponse) { r.GPUs[0].VramUsedBytes += 160 * mib }, false},
-		{"VRAM +164 MiB on 16 GiB", nil, func(r *NodeInfoResponse) { r.GPUs[0].VramUsedBytes += 164 * mib }, true},
-		{"VRAM -164 MiB on 16 GiB", nil, func(r *NodeInfoResponse) { r.GPUs[0].VramUsedBytes -= 164 * mib }, true},
+		{"VRAM +63 MiB on 4 GiB", vram4GiB, func(r *NodeInfoResponse) { *r.GPUs[0].VramUsedBytes += 63 * mib }, false},
+		{"VRAM +64 MiB on 4 GiB", vram4GiB, func(r *NodeInfoResponse) { *r.GPUs[0].VramUsedBytes += 64 * mib }, true},
+		{"VRAM +160 MiB on 16 GiB", nil, func(r *NodeInfoResponse) { *r.GPUs[0].VramUsedBytes += 160 * mib }, false},
+		{"VRAM +164 MiB on 16 GiB", nil, func(r *NodeInfoResponse) { *r.GPUs[0].VramUsedBytes += 164 * mib }, true},
+		{"VRAM -164 MiB on 16 GiB", nil, func(r *NodeInfoResponse) { *r.GPUs[0].VramUsedBytes -= 164 * mib }, true},
 		{"telemetryValid flip", nil, func(r *NodeInfoResponse) { r.TelemetryValid = false }, true},
 		{"clusterUuid value to absent", nil, func(r *NodeInfoResponse) { r.ClusterUUID = nil }, true},
 		{"clusterUuid value to empty", nil, func(r *NodeInfoResponse) { r.ClusterUUID = &empty }, true},
@@ -171,7 +184,7 @@ func streamPublisher(t *testing.T, utilization *atomic.Uint32) *nodeInfoPublishe
 	t.Cleanup(func() { nodeInfoStreamKeepalive = keepalive })
 	pub := &nodeInfoPublisher{body: func() []byte {
 		body, err := json.Marshal(NodeInfoResponse{
-			GPUs:           []GPUInfo{{Name: "GPU", VramBytes: 16 << 30, UtilizationPercent: utilization.Load()}},
+			GPUs:           []GPUInfo{{Name: "GPU", VramBytes: 16 << 30, UtilizationPercent: ptr(utilization.Load())}},
 			TelemetryValid: true,
 			HostUUID:       "stream-host",
 		})
@@ -284,7 +297,7 @@ func TestNodeInfoStream(t *testing.T) {
 		}
 		lines := streamLines(resp.Body)
 		first := nextFrame(t, lines, 3*time.Second)
-		if first.HostUUID != "stream-host" || len(first.GPUs) != 1 || first.GPUs[0].UtilizationPercent != 40 {
+		if first.HostUUID != "stream-host" || len(first.GPUs) != 1 || first.GPUs[0].UtilizationPercent == nil || *first.GPUs[0].UtilizationPercent != 40 {
 			t.Fatalf("first frame = %+v, want stream-host at 40 %%", first)
 		}
 
@@ -312,8 +325,8 @@ func TestNodeInfoStream(t *testing.T) {
 		}
 
 		utilization.Store(52)
-		if frame := nextFrame(t, lines, 3*time.Second); frame.GPUs[0].UtilizationPercent != 52 {
-			t.Fatalf("second frame utilization = %d, want 52", frame.GPUs[0].UtilizationPercent)
+		if frame := nextFrame(t, lines, 3*time.Second); frame.GPUs[0].UtilizationPercent == nil || *frame.GPUs[0].UtilizationPercent != 52 {
+			t.Fatalf("second frame utilization = %v, want 52", frame.GPUs[0].UtilizationPercent)
 		}
 	})
 
