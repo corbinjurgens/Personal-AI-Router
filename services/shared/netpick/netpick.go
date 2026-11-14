@@ -173,7 +173,8 @@ func IPsFromTXT(txt []string) []string {
 
 // Candidates returns every address worth trying to reach a node, best first and
 // deduplicated: the node's canonical "ip=", then the rest of its own "ips="
-// order, then anything else it advertised that those two did not mention.
+// order. Only a record that publishes neither key falls back to the resolved
+// address set, in RankRemote order.
 //
 // The node's published order is preserved rather than re-sorted. A node ranks its
 // own addresses from evidence only it can see — which of its interfaces carry
@@ -181,9 +182,13 @@ func IPsFromTXT(txt []string) []string {
 // actually connected to — and an observer re-sorting that list by address class
 // would discard exactly the information that makes it correct.
 //
-// Advertised addresses the node did not rank are appended in RankRemote order:
-// they are a fallback for a node whose published list is stale or truncated, not
-// a competing opinion, so they never displace a ranked entry.
+// A record that publishes its addresses is authoritative about them, so the
+// resolved set is not mixed in. A responder answers with the A records of the
+// interface the query arrived on, and the browse keeps the first answer, so on a
+// node reachable over several links the resolved set changes from one browse to
+// the next. Appending it made every consumer comparing address lists (route
+// generations, control-route selection, proxy endpoints) see a new route on each
+// such change.
 //
 // The result is capped at noderec.MaxAdvertisedIPs. Nothing here comes from a
 // source this process controls — the TXT keys and the resolved address set both
@@ -203,6 +208,9 @@ func Candidates(txt []string, addrs []string) []string {
 	add(IPFromTXT(txt))
 	for _, a := range IPsFromTXT(txt) {
 		add(a)
+	}
+	if len(out) > 0 {
+		return out
 	}
 	for _, a := range RankRemote(addrs) {
 		add(a)

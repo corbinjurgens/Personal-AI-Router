@@ -675,6 +675,12 @@ machine can be reachable on one interface and not another, so a peer works
 through the candidates instead of giving up on the first, and remembers the one
 that answered.
 
+The published list is the whole candidate set. The addresses an mDNS answer
+resolves to are used only for a record that publishes neither key: a node answers
+with the address of the interface the query arrived on, so on a node reachable
+over several links they change from one browse to the next, and mixing them in
+would present each browse as a new route.
+
 One consolidated record instead of one for each service is a deliberate
 constraint. mDNS TXT records are small, so per-service records would not hold the
 payload. Bulky facts like the model list are fetched over HTTP afterwards instead
