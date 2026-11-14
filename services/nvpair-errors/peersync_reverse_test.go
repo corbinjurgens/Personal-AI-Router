@@ -430,8 +430,8 @@ func TestErrorsSnapshotCancellationBeforeDispatch(t *testing.T) {
 func TestErrorsSnapshotAddressRecovery(t *testing.T) {
 	f := newErrorSyncFixture(t)
 	f.event.Node.Host = ""
-	f.event.Node.TXT = []string{"cluster-uuid=node-b", "ip=192.0.2.1"}
-	f.event.Node.Addresses = []string{"127.0.0.1"}
+	f.event.Node.TXT = []string{"cluster-uuid=node-b", "ip=192.0.2.1", "ips=192.0.2.1,127.0.0.1"}
+	f.event.Node.Addresses = []string{"192.0.2.1"}
 	f.expectedHost = net.JoinHostPort("127.0.0.1", strconv.Itoa(f.event.Node.Port))
 	f.expectedSNI = ""
 	// Use the production constructor and direct dialer, proving the selected

@@ -112,7 +112,7 @@ func scoreIP(ip net.IP) int {
 //
 // With the RFC1918 blocks scored equally, most of a peer's addresses now tie and
 // resolve by string order. That is intentional: this ranking is a last resort for
-// a peer that published no "ips=" list, and a guess dressed up as a preference is
+// a peer that published neither "ip=" nor "ips=", and a guess dressed up as a preference is
 // worse than an arbitrary but stable order that a connection attempt corrects.
 func RankRemote(addrs []string) []string {
 	type scored struct {
