@@ -116,6 +116,9 @@ type modelBufferFrozen struct {
 	captureBudget                                         bool
 	topologyID, hostPoolID, devicePoolID, deviceBindingID string
 	hostValidUntil, deviceValidUntil                      time.Time
+	// Consecutive sweeps on which the router reported this model loaded but
+	// the capture had no child for it.
+	missingChild int
 }
 
 type modelBufferChild struct {
@@ -130,6 +133,11 @@ type modelBufferChild struct {
 	sample                             modelconfig.BufferObservation
 	checkpoint                         *modelBufferCheckpoint
 	startedAt                          time.Time
+	// Consecutive confirmed sweeps on which the router reported this child
+	// loaded but it had not produced a sample.
+	unrecognized int
+	// Set by a props mismatch, which reports its own diagnostic.
+	unsupported bool
 	// Physical enumeration belongs to this exact child generation and launch
 	// environment. It is private realization evidence, never a buffer sample.
 	devices []modelNativeDevice
@@ -160,7 +168,8 @@ type modelBufferCapture struct {
 	wallHigh                                      int64
 	clockUncertain                                bool
 	budgetOmitted                                 bool
-	unsupportedLogged                             bool // guarded by mu; one warning per capture
+	warned                                        map[string]bool // guarded by mu; one warning per stage and reason
+	sourceFailures                                int             // guarded by mu; consecutive failed sweep source checks
 	environment                                   []string
 }
 
@@ -170,7 +179,43 @@ type modelBufferSourceDiagnostic struct {
 }
 
 func (d modelBufferSourceDiagnostic) warn() {
-	slog.Warn("model buffer capture unavailable", "stage", d.stage, "reason", modelBufferDiagnosticError(d.err))
+	reason := "unknown"
+	if d.err != nil {
+		reason = modelBufferDiagnosticError(d.err)
+	}
+	stage := d.stage
+	if stage == "" {
+		stage = "runtime-snapshot"
+	}
+	slog.Warn("model buffer capture unavailable", "stage", stage, "reason", reason)
+}
+
+// Every step that drops a sample reports why, once per capture, stage and
+// reason, so a run without samples leaves a diagnostic. Called with c.mu held.
+func (c *modelBufferCapture) warnOnceLocked(stage, reason string, attributes ...any) {
+	key := stage + "\x00" + reason
+	if c.warned[key] {
+		return
+	}
+	if c.warned == nil {
+		c.warned = map[string]bool{}
+	}
+	c.warned[key] = true
+	attributes = append([]any{"stage", stage}, attributes...)
+	if reason != "" {
+		attributes = append(attributes, "reason", reason)
+	}
+	slog.Warn("model buffer capture unavailable", attributes...)
+}
+
+// A child the router reports loaded on a confirmed sweep still has no sample.
+// One sweep of grace covers the ready marker racing the public loaded status
+// and one-off read failures.
+func (c *modelBufferCapture) unrecognizedLocked(child *modelBufferChild, stage, reason string) {
+	child.unrecognized++
+	if child.unrecognized >= 2 {
+		c.warnOnceLocked(stage, reason)
+	}
 }
 
 // These errors come only from file/source validation, never native output.
@@ -287,6 +332,7 @@ func (e *Executor) newModelBufferCapture(st *engineState, engine string, prepare
 		c.owner.mu.Lock()
 		if charge > modelBufferCaptureBytes-c.owner.bytes {
 			c.owner.mu.Unlock()
+			slog.Warn("model buffer capture unavailable", "stage", "capture-create", "reason", "budget")
 			return nil
 		}
 		c.owner.bytes += charge
@@ -609,7 +655,11 @@ func (c *modelBufferCapture) observe(frame managedOutputFrame) {
 		child.sample.Current = false
 		return
 	}
-	message, ok := modelBufferMessage(match[2])
+	// On Windows the child's text-mode stderr ends each line with CR LF. The
+	// router reads raw bytes and forwards the line with its terminator; its own
+	// text-mode stdout expands that LF to CR LF. The frame reader removes only
+	// the final CR LF, so the child's CR remains here.
+	message, ok := modelBufferMessage(strings.TrimSuffix(match[2], "\r"))
 	if !ok {
 		child.poisoned = true
 		return
@@ -713,7 +763,8 @@ func (e *Executor) observeModelBuffers(ctx context.Context, st *engineState, c *
 	}
 	command, constrainErr := modelConstrainCommand(command, c.prepared.ModelLoads)
 	sourceCtx, cancelSource := context.WithTimeout(ctx, 200*time.Millisecond)
-	source, err := modelReviewedNativeSource(sourceCtx, st, command)
+	var diagnostic modelBufferSourceDiagnostic
+	source, err := modelReviewedNativeSource(sourceCtx, st, command, &diagnostic)
 	cancelSource()
 	bindingsCurrent := modelBufferBindingsCurrent(ctx, modelBufferPreparedLoads(c.prepared))
 	st.mu.Lock()
@@ -738,6 +789,7 @@ func (e *Executor) observeModelBuffers(ctx context.Context, st *engineState, c *
 	}
 	if c.clockUncertain || !stillCurrent || !bindingsCurrent || err != nil || constrainErr != nil || source == "" || source != c.sourceID || !known || !llamaLoadedSemantics(raw, loaded) || ctx.Err() != nil {
 		if stillCurrent && !c.clockUncertain && ctx.Err() == nil {
+			c.sourceFailures++
 			reason := "source-unavailable"
 			if source != "" && source != c.sourceID {
 				reason = "source-changed"
@@ -745,9 +797,21 @@ func (e *Executor) observeModelBuffers(ctx context.Context, st *engineState, c *
 			for _, child := range c.children {
 				child.sample = modelconfig.BufferObservation{Status: "unknown", Reason: reason}
 			}
+			// One sweep of grace: a single slow check is retried next sweep.
+			if c.sourceFailures >= 2 {
+				attributes := []any{"bindings_current", bindingsCurrent}
+				switch {
+				case constrainErr != nil:
+					attributes = append(attributes, "source_stage", "constrain-command", "error", modelBufferDiagnosticError(constrainErr))
+				case diagnostic.err != nil:
+					attributes = append(attributes, "source_stage", diagnostic.stage, "error", modelBufferDiagnosticError(diagnostic.err))
+				}
+				c.warnOnceLocked("sweep-source", reason, attributes...)
+			}
 		}
 		return
 	}
+	c.sourceFailures = 0
 	c.confirmedAt = time.Now()
 	for port, child := range c.children {
 		f := c.frozen[child.model]
@@ -756,29 +820,48 @@ func (e *Executor) observeModelBuffers(ctx context.Context, st *engineState, c *
 		if f == nil {
 			continue
 		}
+		if !slices.Contains(loaded, child.model) || child.sleeping {
+			child.unrecognized = 0
+			continue
+		}
 		p, ok := props[child.model]
-		if !ok || !slices.Contains(loaded, child.model) || child.sleeping || child.poisoned || !child.loading || child.phase == "initial" && !child.ready {
+		switch {
+		case !ok:
+			c.unrecognizedLocked(child, "props", "unavailable")
+			continue
+		case child.poisoned:
+			// A props mismatch reports its own stage; a child poisoned after
+			// it recorded a sample did not lose that sample.
+			if !child.unsupported && child.checkpoint == nil {
+				c.unrecognizedLocked(child, "load-output", "invalid-output")
+			}
+			continue
+		case !child.loading:
+			c.unrecognizedLocked(child, "load-output", "no-loading-marker")
+			continue
+		case child.phase == "initial" && !child.ready:
+			c.unrecognizedLocked(child, "load-output", "no-ready-marker")
 			continue
 		}
 		if p.Build == "" || p.Build != p.RouterBuild || p.Context != int64(f.context) || p.Slots != int64(f.slots) {
-			if !c.unsupportedLogged {
-				c.unsupportedLogged = true
-				switch {
-				case p.Build == "" || p.Build != p.RouterBuild:
-					slog.Warn("model buffer capture unavailable", "stage", "router-build", "build", modelBufferDiagnosticBuild(p.Build), "router_build", modelBufferDiagnosticBuild(p.RouterBuild))
-				case p.Context != int64(f.context):
-					slog.Warn("model buffer capture unavailable", "stage", "context", "context", p.Context, "frozen_context", f.context)
-				case p.Slots != int64(f.slots):
-					slog.Warn("model buffer capture unavailable", "stage", "slots", "slots", p.Slots, "frozen_slots", f.slots)
-				}
+			switch {
+			case p.Build == "" || p.Build != p.RouterBuild:
+				c.warnOnceLocked("router-build", "", "build", modelBufferDiagnosticBuild(p.Build), "router_build", modelBufferDiagnosticBuild(p.RouterBuild))
+			case p.Context != int64(f.context):
+				c.warnOnceLocked("context", "", "context", p.Context, "frozen_context", f.context)
+			case p.Slots != int64(f.slots):
+				c.warnOnceLocked("slots", "", "slots", p.Slots, "frozen_slots", f.slots)
 			}
 			child.sample = modelconfig.BufferObservation{Status: "unknown", Reason: "unsupported-build"}
 			child.poisoned = true
+			child.unsupported = true
 			continue
 		}
 		if len(child.parser.rows) > 0 && (child.parser.inReserve || !child.parser.reserveComplete) {
+			c.unrecognizedLocked(child, "load-output", "incomplete-reserve")
 			continue
 		}
+		child.unrecognized = 0
 		if child.sample.SampleID != "" {
 			child.sample.Current = child.sample.Status != "unknown"
 			if child.sample.Persistence == "failed" || child.checkpoint != nil && child.checkpoint.omitted.Load() {
@@ -924,6 +1007,9 @@ func (o *modelBufferOwner) work(e *Executor, done chan struct{}) {
 			status = o.store.publish(job.sample)
 		}
 		c.mu.Lock()
+		if status == "failed" || status == "history-unavailable" {
+			c.warnOnceLocked("publish", status)
+		}
 		child := c.children[job.port]
 		if child != nil && child.sample.SampleID == job.sample.Observation.SampleID {
 			current := child.sample.Current && !c.retired && job.sample.Observation.Status != "unknown"
@@ -1199,6 +1285,9 @@ func (e *Executor) observeModelBufferSweep(ctx context.Context, st *engineState,
 		}
 	}
 	changed := c.boundary != boundary[0]
+	if !changed && known && llamaLoadedSemantics(raw, loaded) {
+		c.missingChildrenLocked(loaded)
+	}
 	c.mu.Unlock()
 	if changed || !interested {
 		e.clearModelBufferCurrent(c, sweep)
@@ -1228,6 +1317,36 @@ func (e *Executor) observeModelBufferSweep(ctx context.Context, st *engineState,
 		}
 	}
 	e.observeModelBuffers(ctx, st, c, sweep, loaded, known, raw, shared, boundary...)
+}
+
+// A loaded model the capture follows but has no child for cannot record a
+// sample: its spawn line was not recognized, its port was already taken, or
+// the capture budget refused it. Called with c.mu held.
+func (c *modelBufferCapture) missingChildrenLocked(loaded []string) {
+	followed := map[string]bool{}
+	for _, child := range c.children {
+		followed[child.model] = true
+	}
+	for model, f := range c.frozen {
+		if !slices.Contains(loaded, model) || followed[model] {
+			f.missingChild = 0
+			continue
+		}
+		if f.missingChild++; f.missingChild < 2 {
+			continue
+		}
+		if f.captureBudget {
+			c.warnOnceLocked("child", "capture-budget")
+		} else {
+			c.warnOnceLocked("child", "no-child")
+		}
+	}
+	// Loads left out of the frozen set at creation for lack of budget.
+	if c.budgetOmitted && slices.ContainsFunc(modelBufferPreparedLoads(c.prepared), func(load modelconfig.ModelLoad) bool {
+		return c.frozen[load.ProfileKey] == nil && slices.Contains(loaded, load.ProfileKey) && !modelLoadUnpriced(load.Requested) && (load.Resolved == nil || !modelLoadUnpriced(load.Resolved.Options))
+	}) {
+		c.warnOnceLocked("child", "capture-budget")
+	}
 }
 
 func (e *Executor) clearModelBufferCurrent(c *modelBufferCapture, sweep uint64) {

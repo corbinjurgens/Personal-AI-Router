@@ -208,12 +208,17 @@ func (f *modelBufferTestFixture) initial(model string, port int) {
 	f.line("stderr", fmt.Sprintf("srv         load: spawning server instance with name=%s on port %d", model, port))
 	f.allocations(port, true)
 }
+
+var modelBufferTestLoadOutput = []string{"srv   load_model: loading model '/private/not-retained.gguf'", "load_tensors: CPU model buffer size = 1.00 MiB", "llama_kv_cache: CPU KV buffer size = 0.25 MiB", "sched_reserve: reserving ...", "sched_reserve: CPU compute buffer size = 0.50 MiB", "sched_reserve: reserve took 1.00 ms, sched copies = 1"}
+
+const modelBufferTestReady = "srv         server_run_i: model loaded"
+
 func (f *modelBufferTestFixture) allocations(port int, ready bool) {
-	for _, message := range []string{"srv   load_model: loading model '/private/not-retained.gguf'", "load_tensors: CPU model buffer size = 1.00 MiB", "llama_kv_cache: CPU KV buffer size = 0.25 MiB", "sched_reserve: reserving ...", "sched_reserve: CPU compute buffer size = 0.50 MiB", "sched_reserve: reserve took 1.00 ms, sched copies = 1"} {
+	for _, message := range modelBufferTestLoadOutput {
 		f.line("stdout", fmt.Sprintf("[%5d] %s", port, message))
 	}
 	if ready {
-		f.line("stdout", fmt.Sprintf("[%5d] srv         server_run_i: model loaded", port))
+		f.line("stdout", fmt.Sprintf("[%5d] %s", port, modelBufferTestReady))
 	}
 }
 func (f *modelBufferTestFixture) confirm(t *testing.T, model string, sweep uint64, reportedBuild ...string) modelconfig.BufferObservation {
@@ -240,6 +245,23 @@ func (f *modelBufferTestFixture) confirm(t *testing.T, model string, sweep uint6
 		}
 	}
 	return f.load.ex.projectModelBufferObservation(f.load.st, "fake", model, frozen.artifacts)
+}
+
+// A Windows child's text-mode stderr ends lines with CRLF. The router reads it
+// raw and forwards the line, CR included, through its own text-mode stdout, so
+// the parent pipe carries CR CR LF and the frame reader removes only CR LF.
+func TestModelBufferRecognizesWindowsForwardedLines(t *testing.T) {
+	f := newModelBufferTestFixture(t)
+	scanObservedLines(strings.NewReader("srv         load: spawning server instance with name=medium-model on port 31001\r\n"), "stderr", nil, f.capture.observe)
+	var stdout strings.Builder
+	for _, message := range append(slices.Clone(modelBufferTestLoadOutput), modelBufferTestReady) {
+		fmt.Fprintf(&stdout, "[%5d] %s\r\r\n", 31001, message)
+	}
+	scanObservedLines(strings.NewReader(stdout.String()), "stdout", nil, f.capture.observe)
+	o := f.confirm(t, "medium-model", 1)
+	if !o.Current || o.Persistence != "saved" || len(o.Rows) != 3 || o.BuildAssurance != "recognized-output" {
+		t.Fatalf("CRLF-forwarded child output lost its sample: %+v", o)
+	}
 }
 
 func TestModelBufferRecognizesAnotherBuild(t *testing.T) {

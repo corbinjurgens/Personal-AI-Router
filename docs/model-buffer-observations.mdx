@@ -119,7 +119,11 @@ canonical int64 timestamp, and one of info/warn/error/debug/cont/none. The
 timestamp prefix has digits followed by two, three and three digits in
 dot-separated groups. Other escapes and extra JSONL members are unsupported.
 The router's child envelope is `[%5d] ` with an exact padded port. Matching a
-JSONL envelope never changes `sourceKind=log-scraped`.
+JSONL envelope never changes `sourceKind=log-scraped`. On Windows the child's
+text-mode stderr ends each line with CR LF, and the router forwards the line
+with its terminator through its own text-mode stdout, so the parent pipe
+carries CR CR LF. The capture removes that one remaining CR from the forwarded
+child message before matching.
 
 Parent spawn is anchored to `srv load:` and its exact model-name/port message.
 Parent exit is anchored to **`srv run:`**, emitted by `server_monitor::run`.
@@ -198,6 +202,17 @@ loads nor a serving declaration (for example an operator `--models-preset`, the
 generated source preset or a plain model argument) has no prepared launch or
 frozen estimate inputs. It creates no capture and logs
 `capture-create reason=unprepared` once per start, which is expected.
+
+Every later step that drops a sample also logs `model buffer capture
+unavailable`, once per capture, stage and reason. Stages: `child` (a loaded
+model has no child: `no-child` or `capture-budget`), `props` (`unavailable`),
+`load-output` (`no-loading-marker`, `no-ready-marker`, `incomplete-reserve`,
+`invalid-output`), `sweep-source` (`source-unavailable` or `source-changed`,
+with the failed check's stage), the props comparisons `router-build`, `context`
+and `slots`, and `publish` (`failed` or `history-unavailable`). The `child`,
+`props`, `load-output` and `sweep-source` warnings wait for a second
+consecutive sweep with the same condition, which covers the ready marker
+racing the router's loaded status and a single slow source check.
 
 The existing model sweep supplies public loaded state. Existing non-loading
 props reads are shared; any additional bounded props read is for an already
