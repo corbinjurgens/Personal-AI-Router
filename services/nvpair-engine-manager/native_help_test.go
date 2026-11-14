@@ -185,7 +185,7 @@ func TestNativeOptionsLaunchWarningsCoverDefaultsAndEverySection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"cache-ram", "cors-origins", "ctx-size", "fit", "kv-unified", "model", "models-preset"}
+	want := []string{"cache-ram", "cors-origins", "ctx-size", "fit", "kv-unified", "log-verbosity", "model", "models-preset"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("launch warnings = %v, want %v", got, want)
 	}

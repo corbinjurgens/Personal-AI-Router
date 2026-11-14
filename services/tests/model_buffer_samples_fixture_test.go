@@ -162,7 +162,22 @@ func runModelBufferFixture() error {
 	diagnostic := modelDiagnosticFixtureRuntime{faults: os.Getenv(modelDiagnosticFixtureEnv)}
 	// All pinned frames use one stream, so this fixture establishes real pump
 	// order. Native source: tools/server/server-models.cpp at the full pin.
-	line := func(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) }
+	// Windows terminators as captured from b11985: router lines end CR LF,
+	// forwarded child lines CR CR LF.
+	line := func(format string, args ...any) {
+		end := "\r\n"
+		if strings.HasPrefix(format, "[%5d] ") {
+			end = "\r\r\n"
+		}
+		fmt.Fprintf(os.Stderr, format+end, args...)
+	}
+	// A child prints libllama INFO, and so every buffer report, only at
+	// verbosity 4 or above; the router passes its own verbosity to children.
+	trace := false
+	if i := slices.Index(os.Args, "--log-verbosity"); i > 0 && i+1 < len(os.Args) {
+		level, err := strconv.Atoi(os.Args[i+1])
+		trace = err == nil && level >= 4
+	}
 	allocations := func(name string, model *modelBufferFixtureModel, initial bool) {
 		line("[%5d] srv   load_model: loading model 'private-fixture-path'", model.port)
 		for _, message := range []string{
@@ -172,7 +187,9 @@ func runModelBufferFixture() error {
 			"sched_reserve: reserving ...", "sched_reserve: CPU compute buffer size = 1.00 MiB", "sched_reserve: reserve took 1.00 ms, sched copies = 1",
 			"sched_reserve: reserving ...", "sched_reserve: CPU compute buffer size = 0.50 MiB", "sched_reserve: reserve took 1.00 ms, sched copies = 1",
 		} {
-			line("[%5d] %s", model.port, message)
+			if trace || !strings.Contains(message, "buffer size") {
+				line("[%5d] %s", model.port, message)
+			}
 		}
 		if initial {
 			line("[%5d] srv         server_run_i: model loaded", model.port)

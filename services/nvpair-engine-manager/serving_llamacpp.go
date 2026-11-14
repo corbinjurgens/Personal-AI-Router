@@ -1528,13 +1528,20 @@ func recheckLlamaServing(launch launchCommand, rt Runtime, prepared *llamaServin
 	return nil
 }
 
+var llamaVerbosityFlags = []string{"-v", "--verbose", "--log-verbose", "-lv", "--verbosity", "--log-verbosity"}
+
 // The pre-spawn compiler has already validated these exact finite loads and
 // their visibility. Replay the reviewed bytes, never discover another adapter.
 func llamaSnapshotCommand(command launchCommand, snapshot string, finite ...[]modelconfig.ModelLoad) launchCommand {
 	args := []string{}
+	verbosity := false
+	for key := range command.Env {
+		verbosity = verbosity || environmentKey(key) == environmentKey("LLAMA_ARG_LOG_VERBOSITY")
+	}
 	for i := 0; i < len(command.Args); i++ {
 		name, value, attached := strings.Cut(command.Args[i], "=")
 		name = llamaLongOption(name)
+		verbosity = verbosity || slices.Contains(llamaVerbosityFlags, name)
 		if name == "--models-preset" || (len(finite) > 0 && len(finite[0]) > 0 && name == "--models-max") {
 			if !attached {
 				i++
@@ -1549,6 +1556,15 @@ func llamaSnapshotCommand(command launchCommand, snapshot string, finite ...[]mo
 	}
 	if len(finite) > 0 && len(finite[0]) > 0 {
 		args = append(args, "--models-max", "0")
+	}
+	// The buffer capture reads the children's allocation messages. libllama
+	// INFO maps to common verbosity 4 (trace) while the default threshold is 3,
+	// so a default child prints no buffer line (common/log.cpp
+	// common_log_get_verbosity at 0ec4027a2 and b11985). The router overlays
+	// its own options on every child preset. An explicit operator verbosity
+	// is kept.
+	if !verbosity {
+		args = append(args, "--log-verbosity", "4")
 	}
 	command.Args = append(args, "--models-preset", snapshot)
 	command.Env = maps.Clone(command.Env)

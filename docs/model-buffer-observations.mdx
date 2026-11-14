@@ -125,6 +125,20 @@ with its terminator through its own text-mode stdout, so the parent pipe
 carries CR CR LF. The capture removes that one remaining CR from the forwarded
 child message before matching.
 
+Every allocation message is a libllama INFO message, which the native logger
+assigns verbosity 4 (trace) while its default threshold is 3, so a child at the
+default verbosity prints none of them
+([`common_log_get_verbosity`](https://github.com/ggml-org/llama.cpp/blob/0ec4027a2a0183de87c007069adddc06e665f7de/common/log.cpp)).
+The manager therefore appends `--log-verbosity 4` to a prepared router launch,
+and the router passes its own options to every child, unless the launch already
+declares `-v`, a `--log-verbosity` spelling or `LLAMA_ARG_LOG_VERBOSITY`. An
+explicit lower verbosity leaves each sample `partial` with
+`unrecognized-build-output` and no rows. Trace adds operational lines (model
+metadata, request method and path, slot and cache sizes) to the engine log; it
+does not log prompt or response text. A router started with an operator
+`--api-key` logs that key's last four characters at trace; PAIR passes no
+llama.cpp API key itself.
+
 Parent spawn is anchored to `srv load:` and its exact model-name/port message.
 Parent exit is anchored to **`srv run:`**, emitted by `server_monitor::run`.
 There is no operator-envelope compatibility fallback. Prefixed loading,

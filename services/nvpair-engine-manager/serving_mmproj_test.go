@@ -48,7 +48,7 @@ func TestLlamaProjectorDisableLaunch(t *testing.T) {
 				}
 			}
 			child := llamaSnapshotCommand(command, "snapshot.ini")
-			if !slices.Equal(child.Args, append(slices.Clone(args), "--models-preset", "snapshot.ini")) {
+			if !slices.Equal(child.Args, append(slices.Clone(args), "--log-verbosity", "4", "--models-preset", "snapshot.ini")) {
 				t.Fatalf("native arguments changed: %v", child.Args)
 			}
 			if envName != "" {
