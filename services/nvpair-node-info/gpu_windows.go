@@ -46,6 +46,12 @@ const (
 	// Driver. We skip those: they're not a physical GPU and reporting them
 	// would mislead the UI into thinking the node has a usable accelerator.
 	dxgiAdapterFlagSoftware = 0x2
+
+	// KMTQAITYPE_ADAPTERTYPE: D3DKMTQueryAdapterInfo type whose private data
+	// is one uint32 of D3DKMT_ADAPTERTYPE bitfields.
+	kmtqaitypeAdapterType = 15
+	// D3DKMT_ADAPTERTYPE.RenderSupported (bit 0): the adapter has a render engine.
+	kmtAdapterTypeRenderSupported = 0x1
 )
 
 // dxgiAdapterDesc1 mirrors the C DXGI_ADAPTER_DESC1 layout. SIZE_T members
@@ -72,7 +78,34 @@ type dxgiAdapterDesc1 struct {
 var (
 	modDXGI                = windows.NewLazySystemDLL("dxgi.dll")
 	procCreateDXGIFactory1 = modDXGI.NewProc("CreateDXGIFactory1")
+
+	modGDI32                      = windows.NewLazySystemDLL("gdi32.dll")
+	procD3DKMTOpenAdapterFromLuid = modGDI32.NewProc("D3DKMTOpenAdapterFromLuid")
+	procD3DKMTQueryAdapterInfo    = modGDI32.NewProc("D3DKMTQueryAdapterInfo")
+	procD3DKMTCloseAdapter        = modGDI32.NewProc("D3DKMTCloseAdapter")
 )
+
+// d3dkmtOpenAdapterFromLuid mirrors D3DKMT_OPENADAPTERFROMLUID (12 bytes).
+type d3dkmtOpenAdapterFromLuid struct {
+	AdapterLuidLow  uint32
+	AdapterLuidHigh int32
+	Adapter         uint32
+}
+
+// d3dkmtQueryAdapterInfo mirrors D3DKMT_QUERYADAPTERINFO. On the 64-bit
+// Windows targets the private data pointer sits at offset 8 and the struct is
+// 24 bytes, which Go's natural alignment reproduces.
+type d3dkmtQueryAdapterInfo struct {
+	Adapter               uint32
+	Type                  uint32
+	PrivateDriverData     unsafe.Pointer
+	PrivateDriverDataSize uint32
+}
+
+// d3dkmtCloseAdapter mirrors D3DKMT_CLOSEADAPTER.
+type d3dkmtCloseAdapter struct {
+	Adapter uint32
+}
 
 // COM vtable indices. Each interface inherits all methods from its parents,
 // so the index is the cumulative count from IUnknown downward.
@@ -208,6 +241,47 @@ func keepPhysicalAdapter(luid uint64, physical map[uint64]struct{}) bool {
 	return ok
 }
 
+// queryAdapterType returns the D3DKMT_ADAPTERTYPE bitfield of the adapter with
+// the given LUID. ok is false when the gdi32 entry points are missing or the
+// kernel refuses the open or the query, so callers can keep the adapter.
+func queryAdapterType(low uint32, high int32) (uint32, bool) {
+	for _, proc := range []*windows.LazyProc{
+		procD3DKMTOpenAdapterFromLuid, procD3DKMTQueryAdapterInfo, procD3DKMTCloseAdapter,
+	} {
+		if proc.Find() != nil {
+			return 0, false
+		}
+	}
+
+	open := d3dkmtOpenAdapterFromLuid{AdapterLuidLow: low, AdapterLuidHigh: high}
+	status, _, _ := procD3DKMTOpenAdapterFromLuid.Call(uintptr(unsafe.Pointer(&open)))
+	if status != 0 {
+		return 0, false
+	}
+	defer func() {
+		closeArgs := d3dkmtCloseAdapter{Adapter: open.Adapter}
+		procD3DKMTCloseAdapter.Call(uintptr(unsafe.Pointer(&closeArgs)))
+	}()
+
+	var adapterType uint32
+	query := d3dkmtQueryAdapterInfo{
+		Adapter:               open.Adapter,
+		Type:                  kmtqaitypeAdapterType,
+		PrivateDriverData:     unsafe.Pointer(&adapterType),
+		PrivateDriverDataSize: uint32(unsafe.Sizeof(adapterType)),
+	}
+	status, _, _ = procD3DKMTQueryAdapterInfo.Call(uintptr(unsafe.Pointer(&query)))
+	return adapterType, status == 0
+}
+
+// keepRenderAdapter reports whether the kernel adapter type has a render
+// engine. Indirect display (IddCx) adapters such as the Parsec Virtual Display
+// Adapter report none, yet DXGI can show them under the render GPU's
+// description, so neither the name denylist nor the registry gate removes them.
+func keepRenderAdapter(adapterType uint32) bool {
+	return adapterType&kmtAdapterTypeRenderSupported != 0
+}
+
 func detectGPUs() []GPUInfo {
 	var factory unsafe.Pointer
 	hr, _, _ := procCreateDXGIFactory1.Call(
@@ -264,6 +338,15 @@ func detectGPUs() []GPUInfo {
 		if !keepPhysicalAdapter(luid, physical) {
 			slog.Debug("skipping DXGI adapter absent from DirectX registry",
 				"name", name, "luid", fmt.Sprintf("0x%016x", luid))
+			continue
+		}
+		if adapterType, ok := queryAdapterType(desc.AdapterLuidLow, desc.AdapterLuidHigh); !ok {
+			slog.Debug("D3DKMT adapter type unavailable; keeping adapter",
+				"name", name, "luid", fmt.Sprintf("0x%016x", luid))
+		} else if !keepRenderAdapter(adapterType) {
+			slog.Debug("skipping DXGI adapter without render support",
+				"name", name, "luid", fmt.Sprintf("0x%016x", luid),
+				"adapterType", fmt.Sprintf("0x%x", adapterType))
 			continue
 		}
 
