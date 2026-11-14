@@ -67,9 +67,9 @@ type Manager struct {
 	// relayPeers is the last er-peer set projected from the relay snapshot, keyed
 	// by nodeId. applyDiscovery diffs each incoming snapshot against it to emit
 	// only the discovered/updated/removed events PeerSync needs (its downstream is
-	// event-driven), avoiding a cold-start re-push for unchanged peers. Only ever
+	// event-driven), so an unchanged peer costs no pin re-read. Only ever
 	// touched on the single read-loop goroutine, so it needs no lock.
-	relayPeers map[string]RawNode
+	relayPeers map[string]relayPeer
 
 	// localNodeID is this node's origin id. It must match the value the broker
 	// stamps on outbound reports (the stable per-host UUID it resolves and passes
@@ -103,7 +103,7 @@ func NewManager(codec *Codec) *Manager {
 		codec:       codec,
 		localNodeID: "",
 		errors:      make(map[errKey]ServiceError),
-		relayPeers:  make(map[string]RawNode),
+		relayPeers:  make(map[string]relayPeer),
 	}
 }
 
@@ -453,14 +453,30 @@ func (m *Manager) handleMessage(msg *Message) {
 	}
 }
 
+// relayPeer is one er peer as the last relay snapshot reported it: the projected
+// node plus the scanner's trusted annotation (whether this node holds its pin).
+// PeerSync gates on the pin itself; trusted is kept only so that a pairing or
+// revocation, which changes nothing else about the record, still reaches it.
+type relayPeer struct {
+	node    RawNode
+	trusted bool
+}
+
 // applyDiscovery reconciles the er-peer set against a discovery:nodes snapshot
 // pushed down by the broker relay, emitting only the DiscoveryEvents that bring
 // PeerSync in line: a newly-present peer -> "discovered", a peer whose dialable
-// details changed -> "updated", a peer that dropped out -> "removed". PeerSync's
-// downstream is event-driven (a "discovered"/"updated" triggers a cold-start push
-// and "removed" evicts), so re-emitting unchanged peers on every snapshot would
-// storm pushes; the snapshot is diffed against the last one to avoid that. The
-// snapshot is authoritative, so any prior drift is self-corrected.
+// details or trusted annotation changed -> "updated", a peer that dropped out ->
+// "removed". PeerSync's downstream is event-driven (a "discovered"/"updated"
+// gates the peer again and starts or drops its stream, "removed" evicts), so the
+// snapshot is diffed against the last one rather than re-emitting every peer.
+// The snapshot is authoritative, so any prior drift is self-corrected.
+//
+// The trusted annotation is how a pin-set change reaches this service: the
+// cluster-manager announces cluster:trust-changed after the pin is durable, the
+// broker has the scanner re-derive every record's annotation, and the relay
+// pushes the changed record here. Without it, a peer paired while this node is
+// already a member (no membership flip, so no Resubscribe) would wait for an
+// unrelated change to its record.
 func (m *Manager) applyDiscovery(msg *Message) {
 	if m.relayEvents == nil {
 		return
@@ -470,21 +486,21 @@ func (m *Manager) applyDiscovery(msg *Message) {
 		slog.Debug("invalid discovery:nodes snapshot", "err", err)
 		return
 	}
-	next := make(map[string]RawNode, len(res.Nodes))
+	next := make(map[string]relayPeer, len(res.Nodes))
 	for _, n := range res.Nodes {
 		peer, ok := directoryToPeer(n)
 		if !ok {
 			continue
 		}
-		next[peer.ID] = peer
+		next[peer.ID] = relayPeer{node: peer, trusted: n.Trusted}
 	}
 	for id, peer := range next {
 		prev, had := m.relayPeers[id]
 		switch {
 		case !had:
-			m.emitRelayEvent(DiscoveryEvent{Type: "discovered", Node: peer})
-		case !rawNodeEqual(prev, peer):
-			m.emitRelayEvent(DiscoveryEvent{Type: "updated", Node: peer})
+			m.emitRelayEvent(DiscoveryEvent{Type: "discovered", Node: peer.node})
+		case prev.trusted != peer.trusted || !rawNodeEqual(prev.node, peer.node):
+			m.emitRelayEvent(DiscoveryEvent{Type: "updated", Node: peer.node})
 		}
 	}
 	for id := range m.relayPeers {

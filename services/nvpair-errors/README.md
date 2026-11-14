@@ -278,9 +278,14 @@ restart.
   and the delay resets after a stream that delivered a frame. When this
   node joins or leaves a cluster, every discovered peer is checked
   against the pins again and every admitted peer's stream restarts, so
-  peers discovered before the join are picked up. A peer paired while
-  this node is already a member is picked up at its next discovery
-  change.
+  peers discovered before the join are picked up. A peer paired, or
+  unpaired, while this node is already a member is gated again when the
+  relay reports its changed `trusted` annotation: the cluster-manager's
+  `cluster:trust-changed` makes the scanner re-derive it after the pin
+  is written, so its stream starts (or stops) without a membership
+  change. A joiner that does not yet advertise its cluster principal
+  is picked up when it starts to, which changes its record. An unpaired
+  peer keeps its entries until discovery removes it.
 - A peer's entries stay when its stream ends, as they always did when
   updates stopped; only discovery removal evicts them. Every reconnect
   starts with the peer's full snapshot, so a change missed while a

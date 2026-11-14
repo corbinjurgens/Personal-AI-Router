@@ -225,6 +225,35 @@ func (f *errorSyncFixture) connect(t *testing.T, id string) {
 // onLocalChange hook does.
 func (f *errorSyncFixture) publishPeer() { f.peerPub.publish(f.peer) }
 
+// runRelay runs PeerSync on the subscriber's relay events and returns a
+// function that delivers the broker relay's discovery:nodes snapshot for
+// node-b with the given trusted annotation. The events channel is unbuffered,
+// so each call returns only after PeerSync has taken any event it produced.
+func (f *errorSyncFixture) runRelay(t *testing.T) func(trusted bool) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	events := make(chan DiscoveryEvent)
+	f.subscriber.ctx = ctx
+	f.subscriber.SetRelayEvents(events)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f.ps.Run(ctx, events)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	record := noderec.DirectoryNode{
+		HostUUID: "node-b", Name: "Peer B", IP: "192.0.2.10", ClusterUUID: "node-b",
+		Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceErrors: {Port: f.event.Node.Port}},
+	}
+	return func(trusted bool) {
+		record.Trusted = trusted
+		f.subscriber.handleMessage(notificationMessage(noderec.NotifyNodes, noderec.GetNodesResult{Nodes: []noderec.DirectoryNode{record}}))
+	}
+}
+
 func assertErrorSnapshot(t *testing.T, mgr *Manager, want []ServiceError) {
 	t.Helper()
 	if got := mgr.snapshot(); !slices.Equal(got, want) {

@@ -752,12 +752,12 @@ func (f *facade) resolveRouteCandidates(model string, inference bool) []candidat
 			// A pinned cluster peer: reach it only over mTLS to its promoted
 			// proxy (the ol port now advertises the proxy, not the engine).
 			// The pin is read from the live mesh refreshed above, not from the
-			// relayed n.Trusted: that flag is the scanner's answer from whenever
-			// it last saw this peer's mDNS record, so a peer discovered before
-			// this node's pins were written stays false until its record next
-			// changes. It is also strictly weaker than what we hold here — the
-			// dial itself is gated on ClientTLSConfig finding the same pin — so
-			// the relayed value can only ever disagree by being stale.
+			// relayed n.Trusted: that flag is the scanner's re-derivation after
+			// a cluster:trust-changed announcement, so it reaches the relay
+			// some hops after the pin lands. It is also strictly weaker than
+			// what we hold here — the dial itself is gated on ClientTLSConfig
+			// finding the same pin — so the relayed value can only ever
+			// disagree by being stale.
 			u.Scheme = "https"
 			peerUUID = n.ClusterUUID
 		case f.discovery.IsManual(n.ID):

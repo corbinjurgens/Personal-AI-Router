@@ -462,6 +462,64 @@ func TestPeerSyncStreams(t *testing.T) {
 		waitErrorSnapshot(t, f.subscriber, []ServiceError{bOne})
 	})
 
+	t.Run("a peer paired while clustered is subscribed when the relay reports its trust", func(t *testing.T) {
+		f := newErrorSyncFixture(t)
+		pinPath := filepath.Join(f.ps.clusterDir, "trusted", "node-b.json")
+		pin, err := os.ReadFile(pinPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(pinPath); err != nil {
+			t.Fatal(err)
+		}
+		relay := f.runRelay(t)
+		f.peer.handleReport(nil, mustJSON(t, bOne))
+		relay(false)
+		settle()
+		if got := f.streams.Load(); got != 0 {
+			t.Fatalf("unpinned peer streamed %d times", got)
+		}
+		// Pairing writes the pin; cluster:trust-changed makes the scanner
+		// re-annotate the record, which the relay pushes as a new snapshot.
+		// Membership does not flip, so no Resubscribe runs.
+		if err := os.WriteFile(pinPath, pin, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		relay(true)
+		waitErrorSnapshot(t, f.subscriber, []ServiceError{bOne})
+	})
+
+	t.Run("a peer unpaired while clustered has its stream stopped and keeps its entries", func(t *testing.T) {
+		f := newErrorSyncFixture(t)
+		connections := make(chan *errorSyncConn, 4)
+		f.onConnect = func(conn *errorSyncConn) { connections <- conn }
+		relay := f.runRelay(t)
+		f.peer.handleReport(nil, mustJSON(t, bOne))
+		relay(true)
+		waitErrorSnapshot(t, f.subscriber, []ServiceError{bOne})
+		conn := <-connections
+		if err := os.Remove(filepath.Join(f.ps.clusterDir, "trusted", "node-b.json")); err != nil {
+			t.Fatal(err)
+		}
+		relay(false)
+		select {
+		case <-conn.closed:
+		case <-time.After(2 * time.Second):
+			t.Fatal("unpaired peer's stream stayed open")
+		}
+		settle()
+		f.ps.mu.RLock()
+		_, kept := f.ps.peers["node-b"]
+		f.ps.mu.RUnlock()
+		if kept {
+			t.Fatal("unpaired peer is still a stream target")
+		}
+		if got := f.streams.Load(); got != 1 {
+			t.Fatalf("streams = %d, want 1 (no reconnect after unpairing)", got)
+		}
+		assertErrorSnapshot(t, f.subscriber, []ServiceError{bOne})
+	})
+
 	t.Run("Resubscribe restarts the open streams", func(t *testing.T) {
 		f := newErrorSyncFixture(t)
 		connections := make(chan *errorSyncConn, 4)
