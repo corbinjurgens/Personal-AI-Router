@@ -926,6 +926,14 @@ describe('permission controls', () => {
         }
     )
 
+    it('marks a member that discovery does not see as offline', async () => {
+        await initializeMembership()
+        await act(async () => root.render(<ActiveNode node={member} />))
+        expect(container.textContent).not.toContain('(Offline)')
+        await act(async () => useNodesStore.setState({ nodes: new Map() }))
+        expect(container.textContent).toContain('(Offline)')
+    })
+
     it('saves only the UUID grant on this device with its authoritative CAS revision', async () => {
         await initializeMembership()
         let finish: ((snapshot: RemoteManagementSnapshot) => void) | undefined
