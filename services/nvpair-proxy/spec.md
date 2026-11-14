@@ -2253,9 +2253,12 @@ A peer's `503` that carries a recognized `X-PAIR-Admission` reason records that
 admission reason on the attempt, as the node's own admission does. Every other
 non-2xx status, including a `502` that carries the header and the
 `management-denied` marker, records `upstream-status`. The desktop card shows the
-request's routing summary. It shows the associated attempt's own historical
-outcome instead only for a detached association whose attempt an API attempt
-followed, or whose record has not ended.
+request's routing summary. A detached association whose attempt an API attempt
+followed shows that attempt's own historical outcome until the request ends; a
+request that then completes on an API deployment shows only that it was served
+by an API deployment, without account details. Any other detached association
+shows its attempt's outcome only while the record is recoverable. The card is
+styled as failed only for a request that ended in `failed`.
 
 History is memory-only. Proxy death can lose unsent facts and incomplete
 windows; the broker discards incomplete staging, preserves previously accepted
