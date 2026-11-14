@@ -1,0 +1,10 @@
+[31001] 0.00.086.884 I srv  llama_server: initializing ...
+[31001] 0.00.086.901 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)
+[31001] 0.00.087.214 W srv  server_setup: security: no API key is set and CORS allows all origins (see https://github.com/ggml-org/llama.cpp/pull/25655)
+[31001] 0.00.090.089 I srv    load_model: loading model 'C:\models\LFM2.5-24B-A2B-UD-Q2_K_XL.gguf'
+[31001] 0.01.299.710 I cmn          init: llama threadpool init, n_threads = 6
+[31001] 0.01.736.927 I srv    load_model: initializing, n_slots = 1, n_ctx_slot = 8192, kv_unified = 'false'
+[31001] 0.01.742.390 W srv          init: chat template supports preserving reasoning, it is enabled by default (may use more tokens, disable via --no-reasoning-preserve)
+[31001] 0.01.742.412 I srv  server_run_i: model loaded
+[31001] 0.01.742.416 I srv  server_on_li: listening on http://127.0.0.1:31001
+[31001] 0.01.742.630 I srv   operator (): child server monitoring thread started, waiting for EOF on stdin...

@@ -97,7 +97,9 @@ func validateModelExtraOptions(model string, extras map[string]string) error {
 		return err
 	}
 	for _, key := range sortedKeys(extras) {
-		if key == "version" || key == "sleep-idle-seconds" {
+		// The router's own verbosity (llamaSnapshotCommand) overrides every
+		// child preset, so a per-model one would be shown but never apply.
+		if key == "version" || key == "sleep-idle-seconds" || slices.Contains(llamaVerbosityFlags, "--"+key) || slices.Contains(llamaVerbosityFlags, "-"+key) {
 			return modelLoadError(model, "extraOptions", "PAIR owns "+key+".")
 		}
 		if canonical := llamaPresetOptionKey(key); canonical != "" && canonical != key {

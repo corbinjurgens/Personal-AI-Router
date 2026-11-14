@@ -47,7 +47,7 @@ func TestLlamaProjectorDisableLaunch(t *testing.T) {
 					t.Fatalf("environment projector selection=%q, want %q", nativeEnv["mmproj-auto"], want)
 				}
 			}
-			child := llamaSnapshotCommand(command, "snapshot.ini")
+			child := llamaSnapshotCommand(command, "snapshot.ini", false)
 			if !slices.Equal(child.Args, append(slices.Clone(args), "--models-preset", "snapshot.ini")) {
 				t.Fatalf("native arguments changed: %v", child.Args)
 			}

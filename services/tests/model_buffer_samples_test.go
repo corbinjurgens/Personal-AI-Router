@@ -60,6 +60,7 @@ func TestModelBufferSamplesProcess(t *testing.T) {
 		f := newModelBufferProcessFixture(t)
 		f.rpcOK(t, "engine:install", map[string]any{"engine": "llamacpp"})
 		f.resume(t)
+		f.learnBuild(t)
 		before, policy := f.snapshot(t), f.policy(t)
 		f.control(t, "medium-model", "initial")
 		first := f.observed(t, "medium-model", "initial")
@@ -133,14 +134,14 @@ func TestModelBufferSamplesProcess(t *testing.T) {
 			value := f.inspect(t, "medium-model").LoadObservation
 			return value != nil && !value.Current
 		})
-		identity := f.engineIdentity(t, 1)
+		identity := f.engineIdentity(t, 2)
 		f.rpcOK(t, "node:set-availability", map[string]string{"state": "paused", "pauseMode": "immediate"})
 		f.assertProcessStopped(t, identity)
 		data, err := os.ReadFile(f.effects)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if string(data) != "start\n" {
+		if string(data) != "start\nstart\n" {
 			t.Fatalf("unexpected native/helper/inference operation: %s", data)
 		}
 	})
@@ -155,6 +156,7 @@ func TestModelBufferSamplesProcess(t *testing.T) {
 		})
 		f.rpcOK(t, "engine:install", map[string]any{"engine": "llamacpp"})
 		f.resume(t)
+		f.learnBuild(t)
 		f.control(t, "medium-model", "initial")
 		value := f.observed(t, "medium-model", "initial")
 		if len(value.Artifacts) != 2 || value.Artifacts[1].Role != "draft" {
@@ -183,6 +185,7 @@ func TestModelBufferSamplesProcessRestart(t *testing.T) {
 	f := newModelBufferProcessFixture(t)
 	f.rpcOK(t, "engine:install", map[string]any{"engine": "llamacpp"})
 	f.resume(t)
+	f.learnBuild(t)
 	f.control(t, "medium-model", "initial")
 	first := f.observed(t, "medium-model", "initial")
 	f.rpcOK(t, "node:set-availability", map[string]string{"state": "paused", "pauseMode": "immediate"})
@@ -231,6 +234,7 @@ func TestModelBufferSamplesProcessPerBuildOutput(t *testing.T) {
 		f := newModelBufferProcessFixture(t)
 		f.rpcOK(t, "engine:install", map[string]any{"engine": "llamacpp"})
 		f.resume(t)
+		f.learnBuild(t)
 		f.control(t, "medium-model", "other-build")
 		f.control(t, "medium-model", "initial")
 		value := f.observed(t, "medium-model", "initial")
@@ -281,6 +285,7 @@ func TestModelBufferSamplesProcessNoNativeFromInspection(t *testing.T) {
 	// port so any projection-added native network query is directly observable.
 	f.rpcOK(t, "engine:install", map[string]any{"engine": "llamacpp"})
 	f.resume(t)
+	f.learnBuild(t)
 	f.control(t, "medium-model", "initial")
 	first := f.observed(t, "medium-model", "initial")
 	f.rpcOK(t, "node:set-availability", map[string]string{"state": "paused", "pauseMode": "immediate"})

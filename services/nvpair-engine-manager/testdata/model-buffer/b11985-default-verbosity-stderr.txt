@@ -1,0 +1,43 @@
+0.00.086.765 I srv  llama_server: initializing ...
+0.00.086.781 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)
+0.00.086.784 I srv  server_run_r: starting server in router mode. models will be automatically loaded on-demand
+0.00.211.458 I srv   operator (): Available models (2):
+0.00.211.463 I srv   operator ():   [    preset] medium-model
+0.00.211.463 I srv   operator ():   [     cache] unsloth/LFM2.5-24B-A2B-GGUF:Q2_K_XL
+0.00.211.562 W srv  server_setup: security: no API key is set and CORS allows all origins (see https://github.com/ggml-org/llama.cpp/pull/25655)
+0.00.211.569 W srv  server_setup: security: router mode enabled - do not expose to untrusted environments
+0.00.214.952 I srv  server_on_li: listening on http://127.0.0.1:18181
+0.07.678.157 I srv          load: spawning server instance with name=medium-model on port 31001
+0.07.678.188 I srv          load: spawning server instance with args:
+0.07.678.188 I srv          load:   C:\llama.cpp\llama-server.exe
+0.07.678.188 I srv          load:   --host
+0.07.678.189 I srv          load:   127.0.0.1
+0.07.678.189 I srv          load:   --log-colors
+0.07.678.189 I srv          load:   off
+0.07.678.189 I srv          load:   --port
+0.07.678.189 I srv          load:   31001
+0.07.678.190 I srv          load:   --sleep-idle-seconds
+0.07.678.190 I srv          load:   600
+0.07.678.190 I srv          load:   --alias
+0.07.678.190 I srv          load:   medium-model
+0.07.678.191 I srv          load:   --ctx-size
+0.07.678.191 I srv          load:   8192
+0.07.678.191 I srv          load:   --cache-ram
+0.07.678.191 I srv          load:   512
+0.07.678.191 I srv          load:   --device
+0.07.678.192 I srv          load:   CUDA0
+0.07.678.192 I srv          load:   --fit
+0.07.678.192 I srv          load:   off
+0.07.678.192 I srv          load:   --no-kv-unified
+0.07.678.192 I srv          load:   --model
+0.07.678.193 I srv          load:   C:\models\LFM2.5-24B-A2B-UD-Q2_K_XL.gguf
+0.07.678.193 I srv          load:   --n-predict
+0.07.678.194 I srv          load:   2048
+0.07.678.194 I srv          load:   --n-gpu-layers
+0.07.678.195 I srv          load:   4
+0.07.678.195 I srv          load:   --parallel
+0.07.678.195 I srv          load:   1
+0.07.678.196 I srv          load:   --threads
+0.07.678.196 I srv          load:   6
+0.07.678.196 I srv          load:   --threads-batch
+0.07.678.196 I srv          load:   8
