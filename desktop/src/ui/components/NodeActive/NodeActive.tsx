@@ -42,6 +42,7 @@ export default function NodeActive({ show, color }: { show: boolean; color: stri
     return (
         <div
             className={`ring-outer-container transition-opacity duration-300`}
+            data-active={show}
             style={{ opacity: show ? 1 : 0 }}
         >
             <div className="ring-inner-container">
