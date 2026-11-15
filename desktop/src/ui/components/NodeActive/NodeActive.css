@@ -217,3 +217,10 @@
         ring-pulse-5 1.4s ease-in-out infinite;
     animation-delay: -1s, 0s;
 }
+
+/* Hidden rings must not animate: opacity 0 alone keeps the compositor producing
+   frames for every node on the Overview. Keep this rule last so it outranks the
+   per-ring animation shorthands above. */
+.ring-outer-container[data-active='false'] .ring-item {
+    animation-play-state: paused;
+}
