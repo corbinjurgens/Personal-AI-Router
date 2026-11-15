@@ -263,3 +263,136 @@ func TestModelBufferDiagnosticRedaction(t *testing.T) {
 		t.Fatalf("unsafe build = %q", got)
 	}
 }
+
+// Every sweep step that drops a sample for a loaded child reports why, once
+// per capture, instead of leaving the run silently without samples.
+func TestModelBufferSampleDropDiagnostics(t *testing.T) {
+	loaded := json.RawMessage(`{"data":[{"id":"medium-model","status":{"value":"loaded"}}]}`)
+	sweeps := func(f *modelBufferTestFixture, from, to uint64, props map[string]modelBufferProps) {
+		for sweep := from; sweep <= to; sweep++ {
+			f.load.ex.observeModelBuffers(context.Background(), f.load.st, f.capture, sweep, []string{"medium-model"}, true, loaded, props)
+		}
+	}
+	matching := func(f *modelBufferTestFixture) map[string]modelBufferProps {
+		frozen := f.capture.frozen["medium-model"]
+		return map[string]modelBufferProps{"medium-model": {Build: "b12020-0ec4027a2", RouterBuild: "b12020-0ec4027a2", Context: int64(frozen.context), Slots: int64(frozen.slots)}}
+	}
+	spawn := func(f *modelBufferTestFixture) {
+		f.line("stderr", "srv         load: spawning server instance with name=medium-model on port 31001")
+	}
+	output := func(name, reason string, emit func(*modelBufferTestFixture)) {
+		t.Run(name, func(t *testing.T) {
+			f := newModelBufferTestFixture(t)
+			logs := modelBufferDiagnosticLogs(t)
+			spawn(f)
+			emit(f)
+			sweeps(f, 1, 1, matching(f))
+			if logs.Len() != 0 {
+				t.Fatalf("warned before the ready-marker grace sweep: %s", logs.String())
+			}
+			sweeps(f, 2, 3, matching(f))
+			record := assertModelBufferDiagnostic(t, logs, "load-output")
+			if record["reason"] != reason {
+				t.Fatalf("reason = %v, want %q", record["reason"], reason)
+			}
+			if f.capture.children[31001].sample.SampleID != "" {
+				t.Fatal("unrecognized output produced a sample")
+			}
+		})
+	}
+	output("no loading marker", "no-loading-marker", func(*modelBufferTestFixture) {})
+	output("no ready marker", "no-ready-marker", func(f *modelBufferTestFixture) { f.allocations(31001, false) })
+	output("incomplete reserve", "incomplete-reserve", func(f *modelBufferTestFixture) {
+		for _, message := range modelBufferTestLoadOutput[:len(modelBufferTestLoadOutput)-1] {
+			f.line("stdout", fmt.Sprintf("[%5d] %s", 31001, message))
+		}
+		f.line("stdout", fmt.Sprintf("[%5d] %s", 31001, modelBufferTestReady))
+	})
+	output("invalid output", "invalid-output", func(f *modelBufferTestFixture) {
+		f.allocations(31001, true)
+		f.line("stderr", fmt.Sprintf("[%5d] %s", 31001, "srv  log: cross-stream line"))
+	})
+
+	t.Run("loaded model without a child", func(t *testing.T) {
+		f := newModelBufferTestFixture(t)
+		logs := modelBufferDiagnosticLogs(t)
+		f.line("stderr", "srv         load: spawning server instance with name=unknown-model on port 31001")
+		for sweep := uint64(1); sweep <= 3; sweep++ {
+			f.load.ex.observeModelBufferSweep(context.Background(), f.load.st, f.capture, sweep, []string{"medium-model"}, true, loaded, map[string]modelBufferProps{})
+			if sweep == 1 && logs.Len() != 0 {
+				t.Fatalf("warned before the grace sweep: %s", logs.String())
+			}
+		}
+		if record := assertModelBufferDiagnostic(t, logs, "child"); record["reason"] != "no-child" {
+			t.Fatalf("reason = %v", record["reason"])
+		}
+	})
+
+	t.Run("one slow source check is retried silently", func(t *testing.T) {
+		f := newModelBufferTestFixture(t)
+		logs := modelBufferDiagnosticLogs(t)
+		f.initial("medium-model", 31001)
+		artifact := f.capture.prepared.ModelLoads[0].Resolved.Artifacts[0].Path
+		info, err := os.Stat(artifact)
+		if err != nil {
+			t.Fatal(err)
+		}
+		later := time.Now().Add(time.Hour)
+		if err := os.Chtimes(artifact, later, later); err != nil {
+			t.Fatal(err)
+		}
+		sweeps(f, 1, 1, matching(f))
+		if err := os.Chtimes(artifact, info.ModTime(), info.ModTime()); err != nil {
+			t.Fatal(err)
+		}
+		sweeps(f, 2, 2, matching(f))
+		if logs.Len() != 0 {
+			t.Fatalf("one failed sweep warned: %s", logs.String())
+		}
+		if f.capture.children[31001].sample.SampleID == "" {
+			t.Fatal("recovered sweep recorded no sample")
+		}
+	})
+
+	t.Run("props unavailable", func(t *testing.T) {
+		f := newModelBufferTestFixture(t)
+		logs := modelBufferDiagnosticLogs(t)
+		f.initial("medium-model", 31001)
+		sweeps(f, 1, 2, map[string]modelBufferProps{})
+		if record := assertModelBufferDiagnostic(t, logs, "props"); record["reason"] != "unavailable" {
+			t.Fatalf("reason = %v", record["reason"])
+		}
+	})
+
+	t.Run("sweep source check", func(t *testing.T) {
+		f := newModelBufferTestFixture(t)
+		logs := modelBufferDiagnosticLogs(t)
+		f.initial("medium-model", 31001)
+		artifact := f.capture.prepared.ModelLoads[0].Resolved.Artifacts[0].Path
+		later := time.Now().Add(time.Hour)
+		if err := os.Chtimes(artifact, later, later); err != nil {
+			t.Fatal(err)
+		}
+		sweeps(f, 1, 2, matching(f))
+		record := assertModelBufferDiagnostic(t, logs, "sweep-source")
+		if record["reason"] != "source-unavailable" || record["bindings_current"] != false {
+			t.Fatalf("unexpected warning: %+v", record)
+		}
+		if strings.Contains(logs.String(), filepath.Dir(artifact)) {
+			t.Fatal("warning leaked a filesystem path")
+		}
+	})
+
+	t.Run("history unavailable", func(t *testing.T) {
+		f := newModelBufferTestFixture(t)
+		f.load.ex.modelBuffers.store.mu.Lock()
+		f.load.ex.modelBuffers.store.writeDisabled = true
+		f.load.ex.modelBuffers.store.mu.Unlock()
+		logs := modelBufferDiagnosticLogs(t)
+		f.initial("medium-model", 31001)
+		f.confirm(t, "medium-model", 1)
+		if record := assertModelBufferDiagnostic(t, logs, "publish"); record["reason"] != "history-unavailable" {
+			t.Fatalf("reason = %v", record["reason"])
+		}
+	})
+}

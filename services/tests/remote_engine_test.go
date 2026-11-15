@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -28,6 +29,7 @@ import (
 	"testing"
 	"time"
 
+	"nvpair-shared/clustertrust"
 	"nvpair-shared/jsonrpc"
 )
 
@@ -158,11 +160,20 @@ func TestRemoteEngineGetInstalled(t *testing.T) {
 		`"services":{"ec":{"port":%d}},"lastSeen":0}]}}`, uuidB, portB)
 	writeRawFrame(t, aStdin, snapshot)
 
-	// Fire the remote read and await the response.
-	writeRawFrame(t, aStdin, `{"jsonrpc":"2.0","id":1,"method":"engine:remote-get-installed","params":{"node":"nodeB"}}`)
-	resp := waitForResponse(t, aMsgs, 15*time.Second)
-	if resp.Error != nil {
-		t.Fatalf("remote-get-installed errored: %+v", resp.Error)
+	// A answers from B's engine-status stream, which it opens on its next
+	// peer sweep; repeat the read until that stream has delivered its list.
+	var resp jsonrpc.Message
+	deadline := time.Now().Add(15 * time.Second)
+	for id := 1; ; id++ {
+		writeRawFrame(t, aStdin, fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"engine:remote-get-installed","params":{"node":"nodeB"}}`, id))
+		resp = waitForResponseID(t, aMsgs, id, 15*time.Second)
+		if resp.Error == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("remote-get-installed errored: %+v", resp.Error)
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 	var res struct {
 		Engines []struct {
@@ -179,8 +190,9 @@ func TestRemoteEngineGetInstalled(t *testing.T) {
 }
 
 // TestRemoteEngineRejectsUntrusted verifies the ec pin gate: node A can dial B
-// (it pins B's server cert) but B does NOT pin A, so the request is refused with
-// a 403 that surfaces as a JSON-RPC error rather than an engine list.
+// (it pins B's server cert) but B does NOT pin A, so B refuses A's engine-status
+// stream with a 403 and the read surfaces as a JSON-RPC error rather than an
+// engine list.
 func TestRemoteEngineRejectsUntrusted(t *testing.T) {
 	dirA, dirB := t.TempDir(), t.TempDir()
 	const uuidA, uuidB = "untrusted-a", "server-b"
@@ -203,6 +215,22 @@ func TestRemoteEngineRejectsUntrusted(t *testing.T) {
 		`{"hostUuid":"nodeB","name":"nodeB","ip":"127.0.0.1","clusterUuid":%q,"trusted":true,`+
 		`"services":{"ec":{"port":%d}},"lastSeen":0}]}}`, uuidB, portB)
 	writeRawFrame(t, aStdin, snapshot)
+	// B's pin gate refuses A's engine-status stream with a real 403.
+	cfg, ok := clustertrust.Open(dirA).ClientTLSConfig(uuidB)
+	if !ok {
+		t.Fatal("A lacks its pin of B")
+	}
+	client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{TLSClientConfig: cfg, DisableKeepAlives: true}}
+	defer client.CloseIdleConnections()
+	probe, err := client.Get(fmt.Sprintf("https://127.0.0.1:%d/v1/engines/events", portB))
+	if err != nil {
+		t.Fatalf("stream probe: %v", err)
+	}
+	_ = probe.Body.Close()
+	if probe.StatusCode != http.StatusForbidden {
+		t.Fatalf("unpinned engine-status stream status=%d, want 403", probe.StatusCode)
+	}
+	// With no stream, A has no engine list to answer from.
 	writeRawFrame(t, aStdin, `{"jsonrpc":"2.0","id":1,"method":"engine:remote-get-installed","params":{"node":"nodeB"}}`)
 
 	resp := waitForResponse(t, aMsgs, 15*time.Second)

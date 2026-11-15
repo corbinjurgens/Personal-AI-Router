@@ -1252,8 +1252,8 @@ func TestPerformanceObservationDestinationAndAuthenticatedReplacement(t *testing
 			summary := observationSummary(t, sample, 1)
 			destination.workloads.call(t, "performance:publish", summary)
 			var received []performancewire.Summary
-			// A transient authority/read or HTTP failure defers the retained
-			// replacement to the manager's 30-second heartbeat. Allow that retry.
+			// A transient authority/read or HTTP failure ends the performance
+			// stream; its reconnect (backoff up to 30 s) re-sends the summary.
 			task1Eventually(t, "authenticated replacement", 45*time.Second, func() bool {
 				received = observationReceived(t, origin.workloads, destination.uuid)
 				return len(received) > 0
@@ -1281,12 +1281,14 @@ func TestPerformanceObservationDestinationAndAuthenticatedReplacement(t *testing
 	}
 }
 
-func TestPerformanceObservationOldCapabilityDoesNotAffectInference(t *testing.T) {
+// A peer whose performance stream refuses every subscription leaves local
+// inference and sample collection unaffected.
+func TestPerformanceObservationRefusedStreamDoesNotAffectInference(t *testing.T) {
 	nodes, blockedPort := newTask1Nodes(t)
 	a, c := nodes[0], nodes[2]
-	const readinessID = "old-capability-readiness"
+	const readinessID = "refused-stream-readiness"
 	var mu sync.Mutex
-	probes, summaries := 0, 0
+	streams := 0
 	lifecycleReady := false
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -1296,6 +1298,13 @@ func TestPerformanceObservationOldCapabilityDoesNotAffectInference(t *testing.T)
 		principal, pinned := c.mesh.VerifyClientPin(r)
 		if !pinned || principal != a.uuid {
 			http.Error(w, "fixture requires authenticated peer", http.StatusForbidden)
+			return
+		}
+		if r.URL.Path == "/v1/workloads/performance/events" {
+			mu.Lock()
+			streams++
+			mu.Unlock()
+			http.Error(w, "performance stream refused", http.StatusServiceUnavailable)
 			return
 		}
 		var frame jsonrpc.Message
@@ -1315,28 +1324,17 @@ func TestPerformanceObservationOldCapabilityDoesNotAffectInference(t *testing.T)
 				} `json:"workloadInfo"`
 			}
 			if err := json.Unmarshal(frame.Params, &params); err != nil {
-				t.Errorf("decode old telemetry readiness workload: %v", err)
+				t.Errorf("decode refused-stream readiness workload: %v", err)
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
 			info := params.WorkloadInfo
 			if info.ID != readinessID || info.OriginatedFrom != a.uuid || info.Engine != "llamacpp" || info.Model != "task1-model" || info.RunID != "task1-run" || info.State != "running" || info.Seq != 1 || info.CreatedAt != 1000 {
-				t.Errorf("old telemetry readiness workload=%+v", info)
+				t.Errorf("refused-stream readiness workload=%+v", info)
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
 			lifecycleReady = true
-		}
-		if frame.Method == "performance:capabilities" {
-			probes++
-			w.Header().Set("Content-Type", "application/json")
-			if _, err := io.WriteString(w, `{"version":1}`); err != nil {
-				t.Error(err)
-			}
-			return
-		}
-		if frame.Method == "performance:summary" {
-			summaries++
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})}
@@ -1356,7 +1354,7 @@ func TestPerformanceObservationOldCapabilityDoesNotAffectInference(t *testing.T)
 	// Discovery and admission metadata do not fence the asynchronous target
 	// refresh or prove that its authenticated HTTP service route is usable.
 	a.workloads.send(t, "workload:started", task1Workload(a.uuid, readinessID, "running", 1), false)
-	task1Eventually(t, "old telemetry authenticated workload route", 15*time.Second, func() bool {
+	task1Eventually(t, "refused-stream authenticated workload route", 15*time.Second, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
 		return lifecycleReady
@@ -1371,18 +1369,12 @@ func TestPerformanceObservationOldCapabilityDoesNotAffectInference(t *testing.T)
 	observationRead(t, observationRequest(t, p, context.Background(), true, false))
 	sample := observationWaitSamples(t, p.rpc, 1)[0]
 	a.workloads.call(t, "performance:publish", observationSummary(t, sample, 1))
-	task1Eventually(t, "old telemetry capability response", 15*time.Second, func() bool { mu.Lock(); defer mu.Unlock(); return probes > 0 })
-	a.workloads.call(t, "performance:publish", observationSummary(t, sample, 2))
-	task1Eventually(t, "second old telemetry capability response", 15*time.Second, func() bool { mu.Lock(); defer mu.Unlock(); return probes > 1 })
+	// The subscriber retries a refused stream after its 1 s, then 2 s backoff.
+	task1Eventually(t, "refused performance stream retried", 15*time.Second, func() bool { mu.Lock(); defer mu.Unlock(); return streams > 1 })
 	resp := observationRequest(t, p, context.Background(), true, false)
 	observationRead(t, resp)
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("capability rejection changed inference status=%d", resp.StatusCode)
+		t.Fatalf("refused performance stream changed inference status=%d", resp.StatusCode)
 	}
 	observationWaitSamples(t, p.rpc, 2)
-	mu.Lock()
-	defer mu.Unlock()
-	if summaries != 0 {
-		t.Fatalf("old capability accepted %d summaries", summaries)
-	}
 }

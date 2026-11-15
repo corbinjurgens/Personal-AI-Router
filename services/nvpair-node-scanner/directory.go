@@ -43,8 +43,8 @@ func toDirectoryNode(raw RawNode, trusted bool) (noderec.DirectoryNode, bool) {
 			"instance", raw.ID, "addrs", raw.Addresses)
 		return noderec.DirectoryNode{}, false
 	}
-	// netpick.Candidates unions the record's own ip= / ips= with whatever the
-	// browse resolved, preserving the node's order and appending the rest.
+	// netpick.Candidates keeps the record's own ip= / ips= order; the browse's
+	// resolved addresses count only for a record that publishes neither.
 	ips := netpick.Candidates(raw.TXT, raw.Addresses)
 	var ip string
 	if len(ips) > 0 {

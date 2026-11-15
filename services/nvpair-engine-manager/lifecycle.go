@@ -453,6 +453,7 @@ func (e *Executor) bringUpProcessWithCleanup(ctx, cleanupCtx context.Context, st
 	var prepared *llamaServingLaunch
 	var bufferInputs map[string]modelEstimateInput
 	var releaseSnapshot func()
+	var trace bool
 	originalLaunch := launch
 	digest := launchDigest(launch)
 	baseDigest := digest
@@ -493,7 +494,8 @@ func (e *Executor) bringUpProcessWithCleanup(ctx, cleanupCtx context.Context, st
 			return fmt.Errorf("NE source recheck: %w", err)
 		}
 		digest = servingLaunchDigest(originalLaunch, prepared.Digest)
-		launch = preparedSnapshotCommand(st, launch, snapshot)
+		trace = e.llamaTraceVerbosityKnown(ctx, st)
+		launch = preparedSnapshotCommand(st, launch, snapshot, trace)
 		if prepared.Credential != "" {
 			// Added after every source check, which rejects any STRATA_* name
 			// a manifest or the inherited environment supplies.
@@ -567,6 +569,10 @@ func (e *Executor) bringUpProcessWithCleanup(ctx, cleanupCtx context.Context, st
 	var observeOutput func(managedOutputFrame)
 	if capture != nil {
 		observeOutput = capture.observe
+	} else if trace {
+		// The frame reader keeps a trace line that is not valid UTF-8 (a cut
+		// metadata value) out of the engine log, as it does with a capture.
+		observeOutput = func(managedOutputFrame) {}
 	}
 	var workingSetLimitBytes uint64
 	if rt.WorkingSetLimitMiB != nil {

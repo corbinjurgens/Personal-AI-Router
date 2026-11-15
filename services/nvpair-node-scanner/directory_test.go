@@ -5,6 +5,7 @@ package main
 
 import (
 	"reflect"
+	"slices"
 	"testing"
 
 	"nvpair-shared/engines"
@@ -307,9 +308,10 @@ func TestToDirectoryNodePreservesPublishedOrder(t *testing.T) {
 	}
 }
 
-// TestToDirectoryNodeUnionsUnpublishedAddresses: an address the browse resolved
-// but the node did not rank is kept as a fallback, appended rather than promoted.
-func TestToDirectoryNodeUnionsUnpublishedAddresses(t *testing.T) {
+// TestToDirectoryNodeKeepsOnlyPublishedAddresses: the address the browse
+// resolved depends on which interface answered, so a node that published its
+// addresses projects exactly those.
+func TestToDirectoryNodeKeepsOnlyPublishedAddresses(t *testing.T) {
 	raw := RawNode{
 		ID:        "hostC",
 		Addresses: []string{"10.0.9.9"},
@@ -319,8 +321,7 @@ func TestToDirectoryNodeUnionsUnpublishedAddresses(t *testing.T) {
 	if !ok {
 		t.Fatal("a record with uuid= should project")
 	}
-	want := []string{"10.0.0.5", "10.0.9.9"}
-	if len(n.IPs) != len(want) || n.IPs[0] != want[0] || n.IPs[1] != want[1] {
+	if want := []string{"10.0.0.5"}; !slices.Equal(n.IPs, want) {
 		t.Errorf("candidates = %v, want %v", n.IPs, want)
 	}
 }

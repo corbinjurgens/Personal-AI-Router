@@ -3337,7 +3337,7 @@ func TestModelSettingsLoadAutoPersistedManagerRestartKeepsUUID(t *testing.T) {
 	if !modelconfig.EqualLoads(prepared.ModelLoads, frozen.Settings.ModelLoads) || owner.calls != 0 {
 		t.Fatal("restart changed reviewed finite settings")
 	}
-	child := preparedSnapshotCommand(st, command, "private-test-snapshot")
+	child := preparedSnapshotCommand(st, command, "private-test-snapshot", false)
 	if child.Env["CUDA_VISIBLE_DEVICES"] != autoTestDeviceBinding().DeviceID {
 		t.Fatal("persisted child lost reviewed full UUID")
 	}

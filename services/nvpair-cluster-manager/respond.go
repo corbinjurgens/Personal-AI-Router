@@ -137,10 +137,12 @@ func (m *Manager) handleRespondToInvite(msg *Message) {
 	// pending invite instead of running the Completion Exchange.
 	if cid, _ := m.clusterIdentity(); cid != "" {
 		log.Printf("invite %s: accept rejected, node is already clustered (%s)", p.InviteID, cid)
-		m.finishInvite(p.InviteID, inviteStateRejected)
+		// Remove the provisional member before publishing the terminal state,
+		// so a reader that sees "rejected" already sees the member gone.
 		if sess.peerPairing != nil {
 			m.removeMemberByUUID(sess.peerPairing.NodeUUID)
 		}
+		m.finishInvite(p.InviteID, inviteStateRejected)
 		m.deleteSession(p.InviteID)
 		sess.mu.Unlock()
 		m.emitNodesChanged()
@@ -196,10 +198,12 @@ func (m *Manager) handleRespondToInvite(msg *Message) {
 		// after the session is dropped. Local teardown is authoritative even if
 		// the notify fails — the inviter's invite TTL is the remaining backstop.
 		inviterAddr := sess.legacyNotifyAddress()
-		m.finishInviteReason(p.InviteID, inviteStateFailed, reason)
+		// Remove the provisional member before publishing the terminal state,
+		// so a reader that sees "failed" already sees the member gone.
 		if sess.peerPairing != nil {
 			m.removeMemberByUUID(sess.peerPairing.NodeUUID)
 		}
+		m.finishInviteReason(p.InviteID, inviteStateFailed, reason)
 		m.deleteSession(p.InviteID)
 		sess.mu.Unlock()
 		m.emitNodesChanged()

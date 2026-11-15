@@ -1070,7 +1070,7 @@ func recheckPreparedServingAccess(st *engineState, launch launchCommand, rt Runt
 	return nil
 }
 
-func preparedSnapshotCommand(st *engineState, command launchCommand, snapshot string) launchCommand {
+func preparedSnapshotCommand(st *engineState, command launchCommand, snapshot string, trace bool) launchCommand {
 	if strataServingRuntime(st, st.plat.Runtime.Serving) {
 		command.Args = append([]string(nil), command.Args...)
 		for i := 1; i+1 < len(command.Args); i++ {
@@ -1081,5 +1081,5 @@ func preparedSnapshotCommand(st *engineState, command launchCommand, snapshot st
 		}
 		return command
 	}
-	return llamaSnapshotCommand(command, snapshot, st.plat.Runtime.ModelLoads)
+	return llamaSnapshotCommand(command, snapshot, trace, st.plat.Runtime.ModelLoads)
 }

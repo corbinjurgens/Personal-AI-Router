@@ -25,6 +25,7 @@ import (
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/mdns"
+	"nvpair-shared/netpick"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 )
@@ -45,6 +46,9 @@ type task2Fixture struct {
 	listeners   []int
 	skipScanner bool
 	namespace   noderec.MDNSNamespace
+	// loadedPoll is the engine managers' --loaded-poll-interval in seconds;
+	// 0 (the default) disables the loaded-model watcher.
+	loadedPoll int
 }
 
 type task2FixtureOption func(*task2Fixture)
@@ -53,6 +57,14 @@ type task2FixtureOption func(*task2Fixture)
 // without browsing or advertising on the host's multicast network.
 func task2WithoutScanner(f *task2Fixture) {
 	f.skipScanner = true
+}
+
+// task2WithLoadedPoll runs the engine managers' loaded-model watcher every
+// seconds, so a residency change emits engine:models-changed.
+func task2WithLoadedPoll(seconds int) task2FixtureOption {
+	return func(f *task2Fixture) {
+		f.loadedPoll = seconds
+	}
 }
 
 func (f *task2Fixture) stopScanner() {
@@ -243,7 +255,7 @@ func newTask2Fixture(t *testing.T, options ...task2FixtureOption) *task2Fixture 
 			members = append(members, task1Member{ID: peer.uuid, NodeUUID: peer.uuid, Name: peer.uuid, IPAddress: "127.0.0.1", Port: f.directory(peer).Services[noderec.ServiceCluster].Port, ClusterID: task1ClusterID, AdmissionEpoch: 1, State: "member"})
 		}
 		task1WriteJSON(t, filepath.Join(n.base, "cluster", "members.json"), members)
-		f.engines[n.uuid] = startTask1Process(t, n.base, engineMgrBin, "--cluster-dir", filepath.Join(n.base, "cluster"), "--control-port", strconv.Itoa(n.ports[noderec.ServiceEngineControl]), "--http-port", strconv.Itoa(n.ports[noderec.ServiceEngineManager]), "--loaded-poll-interval", "0")
+		f.engines[n.uuid] = startTask1Process(t, n.base, engineMgrBin, "--cluster-dir", filepath.Join(n.base, "cluster"), "--control-port", strconv.Itoa(n.ports[noderec.ServiceEngineControl]), "--http-port", strconv.Itoa(n.ports[noderec.ServiceEngineManager]), "--loaded-poll-interval", strconv.Itoa(f.loadedPoll))
 		// Standalone managers have no broker to publish policy. Supply its
 		// actual notification shape after recovery so granted mutations reach
 		// their handlers rather than the unknown-projection gate.
@@ -311,9 +323,17 @@ func newTask2Fixture(t *testing.T, options ...task2FixtureOption) *task2Fixture 
 		args := append([]string{"--cluster-dir", filepath.Join(f.a.base, "cluster")}, fixtureMDNSScannerArgs(f.namespace)...)
 		f.scanner = startTask1Process(t, f.a.base, scannerBin, args...)
 		f.scanner.call(t, "discovery:get-nodes", nil)
+		// The scanner dials a loopback address in plaintext and a LAN address
+		// through the admitted peer transport, which falls back to the reverse
+		// session. The blocked listener is loopback-only, so this host's LAN
+		// address refuses the direct dial and the reverse route serves it.
+		lanIP := netpick.BestLocalIP(netpick.Evidence{})
+		if lanIP == "" {
+			t.Skip("no non-loopback IPv4 address available; the scanner's reverse route needs one")
+		}
 		label := "task2-" + filepath.Base(f.b.base)
 		responder, err := mdns.NewResponder(label, label, f.namespace.Service, f.namespace.Domain, noderec.SRVPort, []string{
-			"v=1", "uuid=" + f.b.uuid, "cluster-uuid=" + f.b.uuid, "ip=127.0.0.1",
+			"v=1", "uuid=" + f.b.uuid, "cluster-uuid=" + f.b.uuid, "ip=" + lanIP,
 			fmt.Sprintf("ni=%d", f.blockedPort), fmt.Sprintf("em=%d", f.blockedPort), fmt.Sprintf("ec=%d", f.blockedPort),
 		})
 		if err != nil {
@@ -462,12 +482,13 @@ func TestReversePeerControlTask2WithoutScannerReadsAuthenticatedTarget(t *testin
 	if wantPort <= 0 {
 		t.Fatalf("target-local fixture engine missing/running=false: %+v", local)
 	}
-	task2Decode(t, f.engines[f.a.uuid].call(t, "engine:remote-get-installed", map[string]string{"node": f.b.uuid}).Result, &remote)
+	task2Decode(t, f.engines[f.a.uuid].callEventually(t, "engine:remote-get-installed", map[string]string{"node": f.b.uuid}).Result, &remote)
 	if !reflect.DeepEqual(remote, local) {
 		t.Fatalf("authenticated target inventory = %+v, want target-local %+v", remote, local)
 	}
-	if count := f.b.observers[noderec.ServiceEngineControl].count(f.a.uuid, http.MethodGet, "/v1/engines"); count != 1 {
-		t.Fatalf("authenticated target inventory reads = %d, want 1", count)
+	observer := f.b.observers[noderec.ServiceEngineControl]
+	if streams, fetches := observer.count(f.a.uuid, http.MethodGet, "/v1/engines/events"), observer.count(f.a.uuid, http.MethodGet, "/v1/engines"); streams == 0 || fetches != 0 {
+		t.Fatalf("authenticated target inventory streams/fetches = %d/%d, want >0/0", streams, fetches)
 	}
 }
 
@@ -485,7 +506,7 @@ func TestReversePeerControlTask2(t *testing.T) {
 	snapshot := settings.Snapshot{NodeID: f.b.uuid, Engine: "llamacpp", Revision: 7, AppliedRevision: 7, Sequence: 1, Epoch: "task2-epoch", Settings: settings.Config{ServerPort: 45678}, Editable: true, Phase: "applied"}
 	assertEngines := func(t *testing.T, source *task1Process, target string) {
 		t.Helper()
-		response := source.call(t, "engine:remote-get-installed", map[string]string{"node": target})
+		response := source.callEventually(t, "engine:remote-get-installed", map[string]string{"node": target})
 		var result struct {
 			Engines []struct {
 				Engine  string `json:"engine"`
@@ -503,8 +524,8 @@ func TestReversePeerControlTask2(t *testing.T) {
 	}
 	t.Run("constructor routes control and scanner through private gateway", func(t *testing.T) {
 		assertEngines(t, a, f.b.uuid)
-		if ec.count(f.a.uuid, http.MethodGet, "/v1/engines") != 1 {
-			t.Fatal("control did not reach the authenticated target once")
+		if ec.count(f.a.uuid, http.MethodGet, "/v1/engines/events") == 0 || ec.count(f.a.uuid, http.MethodGet, "/v1/engines") != 0 {
+			t.Fatal("control was not served from the authenticated target's stream")
 		}
 		task1Eventually(t, "restricted ec entry, real node info and model inventory", 35*time.Second, func() bool {
 			node := f.restricted(t)
@@ -513,7 +534,9 @@ func TestReversePeerControlTask2(t *testing.T) {
 		f.mu.Lock()
 		infoCalls := f.infoCalls
 		f.mu.Unlock()
-		if infoCalls == 0 || f.b.observers[noderec.ServiceEngineManager].count(f.a.uuid, http.MethodGet, "/v1/models") == 0 {
+		em := f.b.observers[noderec.ServiceEngineManager]
+		// A pinned peer streams its inventory; either route reaches the handler.
+		if infoCalls == 0 || em.count(f.a.uuid, http.MethodGet, "/v1/models")+em.count(f.a.uuid, http.MethodGet, "/v1/models/events") == 0 {
 			t.Fatal("scanner did not reach both production inventory handlers")
 		}
 		// Use the scanner's actual discovered ec entry for subsequent controls.
@@ -535,8 +558,8 @@ func TestReversePeerControlTask2(t *testing.T) {
 	t.Run("direct opposite direction remains usable without reverse", func(t *testing.T) {
 		outer.interrupt(f.b.uuid, true)
 		assertEngines(t, b, f.a.uuid)
-		if f.a.observers[noderec.ServiceEngineControl].count(f.b.uuid, http.MethodGet, "/v1/engines") != 1 {
-			t.Fatal("direct opposite-direction control did not dispatch once")
+		if f.a.observers[noderec.ServiceEngineControl].count(f.b.uuid, http.MethodGet, "/v1/engines/events") == 0 {
+			t.Fatal("direct opposite-direction control has no engine-status stream")
 		}
 		outer.interrupt(f.b.uuid, false)
 		task1Eventually(t, "outer session restored", 15*time.Second, func() bool { return outer.established(f.b.uuid) >= 3 })
@@ -594,9 +617,15 @@ func TestReversePeerControlTask2(t *testing.T) {
 			}
 		})
 		before := ec.count(f.a.uuid, http.MethodGet, "/v1/engines")
-		response := task2Response(t, a, a.send(t, "engine:remote-get-installed", map[string]string{"node": f.b.uuid}, true))
-		if response.Error == nil || ec.count(f.a.uuid, http.MethodGet, "/v1/engines") != before {
-			t.Fatal("invalid target pin dispatched/succeeded")
+		// The target rechecks the caller's pin before every stream frame, so
+		// it ends the open engine-status stream at its next keepalive (10 s);
+		// the source's cached answer goes with it.
+		task1Eventually(t, "revoked target pin ends the engine-status stream", 15*time.Second, func() bool {
+			response := task2Response(t, a, a.send(t, "engine:remote-get-installed", map[string]string{"node": f.b.uuid}, true))
+			return response.Error != nil
+		})
+		if ec.count(f.a.uuid, http.MethodGet, "/v1/engines") != before {
+			t.Fatal("invalid target pin dispatched")
 		}
 		snapshot.Sequence = 2
 		b.send(t, "engine:settings-projection", []settings.Snapshot{snapshot}, false)

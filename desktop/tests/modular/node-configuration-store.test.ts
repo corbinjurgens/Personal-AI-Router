@@ -998,7 +998,8 @@ describe('shared target management capability', () => {
         second()
         expect(connects.size).toBe(0)
         expect(disconnects.size).toBe(0)
-        expect(store().management.get('peer')?.state).toBe('unreachable')
+        // An unwatched target holds no verdict; it never claims the device is unreachable.
+        expect(store().management.has('peer')).toBe(false)
     })
 
     it.each(['denied', 'unreviewed', 'unavailable', 'unsupported'])(
@@ -1091,7 +1092,7 @@ describe('shared target management capability', () => {
         stop()
         old.resolve(capability('allowed'))
         await pending
-        expect(store().management.get('closed')?.state).toBe('unreachable')
+        expect(store().management.has('closed')).toBe(false)
     })
 
     it('a read after definite refusal refreshes capability without keeping an old allow', async () => {

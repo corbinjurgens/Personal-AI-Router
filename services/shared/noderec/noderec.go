@@ -38,6 +38,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"nvpair-shared/buildinfo"
@@ -421,18 +422,20 @@ type ReadyParams struct {
 // clients share one shape.
 // PhysicalID is an observed device alias in the node-info response's dedicated
 // or shared memory pool. Absence means the association is unknown.
+// VramUsedBytes and UtilizationPercent: absent means no reading; 0 is a reading.
 type GPUInfo struct {
-	Name               string `json:"name"`
-	PhysicalID         string `json:"physicalId,omitempty"`
-	VramBytes          uint64 `json:"vram_bytes,omitempty"`
-	VramUsedBytes      uint64 `json:"vram_used_bytes,omitempty"`
-	UtilizationPercent uint32 `json:"utilization_percent,omitempty"`
+	Name               string  `json:"name"`
+	PhysicalID         string  `json:"physicalId,omitempty"`
+	VramBytes          uint64  `json:"vram_bytes,omitempty"`
+	VramUsedBytes      *uint64 `json:"vram_used_bytes,omitempty"`
+	UtilizationPercent *uint32 `json:"utilization_percent,omitempty"`
 }
 
+// CPUInfo.UtilizationPercent: absent means no reading; 0 is a reading.
 type CPUInfo struct {
-	Name               string `json:"name,omitempty"`
-	Cores              uint32 `json:"cores,omitempty"`
-	UtilizationPercent uint32 `json:"utilization_percent,omitempty"`
+	Name               string  `json:"name,omitempty"`
+	Cores              uint32  `json:"cores,omitempty"`
+	UtilizationPercent *uint32 `json:"utilization_percent,omitempty"`
 }
 
 type MemoryInfo struct {
@@ -738,6 +741,14 @@ func (c MemoryRequestContext) Validate() error {
 	}
 	return nil
 }
+
+// NodeInfoStaleSampleAge is the node-info stream's stall threshold. Once a
+// valid GPU sample is this old (a stalled collector keeps its last values),
+// node-info publishes a frame on every msSince change, and again when the
+// sample falls back under it; so a keepalive after a frame at or over it no
+// longer means the sample is fresh. node-info publishes by it and the
+// node-scanner ages stream frames by it.
+const NodeInfoStaleSampleAge = 5 * time.Second
 
 // NodeTelemetry is a fresh GPU-utilization observation for one node. The
 // scanner emits it independently of directory changes so scheduling telemetry

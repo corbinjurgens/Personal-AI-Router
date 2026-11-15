@@ -16,20 +16,19 @@ import (
 )
 
 // gpuStat is the per-adapter dynamic state the service layers on top of the
-// static detectGPUs() output. Both fields are zero when the underlying OS
-// counter is unavailable; upstream code maps zeros back to "omit from JSON"
-// via the omitempty tags on GPUInfo, so clients see a missing field rather
-// than a misleading literal zero. The residual ambiguity for UtilizationPct
-// (0 could mean "GPU is actually idle" or "we couldn't read") is benign
-// because the two cases are visually identical to a user.
+// static detectGPUs() output. VRAMUsed and UtilizationPct are nil when the
+// underlying OS counter gave no reading, and non-nil for a sampled value,
+// including 0 for an idle adapter or one with no dedicated memory in use.
+// The omitempty tags on GPUInfo drop only the nil case from JSON, so clients
+// can tell "no reading" from a sampled zero.
 type gpuStat struct {
 	memoryUsedValid bool
 	memoryUsed      uint64
 	Memory          *noderec.MemoryDomain
 	MemoryBoot      uint64
 	Shared          bool
-	VRAMUsed        uint64
-	UtilizationPct  uint32
+	VRAMUsed        *uint64
+	UtilizationPct  *uint32
 }
 
 func responseMemory(snap statsSnapshot) *noderec.MemoryObservation {
@@ -68,9 +67,10 @@ func responseMemory(snap statsSnapshot) *noderec.MemoryObservation {
 //
 // Unsupported collectors publish a zero-valued snapshot — GPU is a nil map
 // (omitempty semantics for downstream lookups come from the per-GPU omitempty
-// tags, not from an empty-map check here), CPUUtilPct is 0, MemUsedBytes is 0.
+// tags, not from an empty-map check here), CPUUtilPct is nil, MemUsedBytes is 0.
 // buildResponse treats each subsystem's zero-value as "unknown" and drops the
-// corresponding field per the normal omitempty rules.
+// corresponding field per the normal omitempty rules. CPUUtilPct is nil when
+// there is no reading and non-nil for a sampled value, including 0.
 type statsSnapshot struct {
 	Memory       *noderec.MemoryObservation
 	MemoryBoot   uint64
@@ -81,7 +81,7 @@ type statsSnapshot struct {
 	// collected. Failed collection attempts retain the previous timestamp so
 	// consumers can distinguish stale telemetry from freshly sampled data.
 	GPUSampledAt time.Time
-	CPUUtilPct   uint32
+	CPUUtilPct   *uint32
 	MemUsedBytes uint64
 }
 
@@ -234,6 +234,19 @@ func parseEngineInstance(s string) (luidKey, engtype string, ok bool) {
 		return "", "", false
 	}
 	return luidKey, engtype, true
+}
+
+// fillIdleUtilization records 0 for every adapter in adapters that has no
+// entry in util. PDH lists "GPU Engine" instances only for processes that
+// use an engine, so after a successful counter read an adapter without any
+// instance is idle rather than unread. Callers apply it only when the read
+// succeeded; a failed read leaves the adapters without a utilization value.
+func fillIdleUtilization(util map[string]uint32, adapters []GPUInfo) {
+	for _, adapter := range adapters {
+		if _, ok := util[adapter.statsKey]; !ok {
+			util[adapter.statsKey] = 0
+		}
+	}
 }
 
 // aggregateUtilization implements Task Manager's "overall GPU %" calc:

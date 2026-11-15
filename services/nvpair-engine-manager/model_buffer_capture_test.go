@@ -20,6 +20,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"nvpair-shared/durablefile"
 	"nvpair-shared/modelconfig"
@@ -208,12 +209,17 @@ func (f *modelBufferTestFixture) initial(model string, port int) {
 	f.line("stderr", fmt.Sprintf("srv         load: spawning server instance with name=%s on port %d", model, port))
 	f.allocations(port, true)
 }
+
+var modelBufferTestLoadOutput = []string{"srv   load_model: loading model '/private/not-retained.gguf'", "load_tensors: CPU model buffer size = 1.00 MiB", "llama_kv_cache: CPU KV buffer size = 0.25 MiB", "sched_reserve: reserving ...", "sched_reserve: CPU compute buffer size = 0.50 MiB", "sched_reserve: reserve took 1.00 ms, sched copies = 1"}
+
+const modelBufferTestReady = "srv         server_run_i: model loaded"
+
 func (f *modelBufferTestFixture) allocations(port int, ready bool) {
-	for _, message := range []string{"srv   load_model: loading model '/private/not-retained.gguf'", "load_tensors: CPU model buffer size = 1.00 MiB", "llama_kv_cache: CPU KV buffer size = 0.25 MiB", "sched_reserve: reserving ...", "sched_reserve: CPU compute buffer size = 0.50 MiB", "sched_reserve: reserve took 1.00 ms, sched copies = 1"} {
+	for _, message := range modelBufferTestLoadOutput {
 		f.line("stdout", fmt.Sprintf("[%5d] %s", port, message))
 	}
 	if ready {
-		f.line("stdout", fmt.Sprintf("[%5d] srv         server_run_i: model loaded", port))
+		f.line("stdout", fmt.Sprintf("[%5d] %s", port, modelBufferTestReady))
 	}
 }
 func (f *modelBufferTestFixture) confirm(t *testing.T, model string, sweep uint64, reportedBuild ...string) modelconfig.BufferObservation {
@@ -240,6 +246,109 @@ func (f *modelBufferTestFixture) confirm(t *testing.T, model string, sweep uint6
 		}
 	}
 	return f.load.ex.projectModelBufferObservation(f.load.st, "fake", model, frozen.artifacts)
+}
+
+// A Windows child's text-mode stderr ends lines with CRLF. The router reads it
+// raw and forwards the line, CR included, through its own text-mode stdout, so
+// the parent pipe carries CR CR LF and the frame reader removes only CR LF.
+func TestModelBufferRecognizesWindowsForwardedLines(t *testing.T) {
+	f := newModelBufferTestFixture(t)
+	scanObservedLines(strings.NewReader("srv         load: spawning server instance with name=medium-model on port 31001\r\n"), "stderr", nil, f.capture.observe)
+	var stdout strings.Builder
+	for _, message := range append(slices.Clone(modelBufferTestLoadOutput), modelBufferTestReady) {
+		fmt.Fprintf(&stdout, "[%5d] %s\r\r\n", 31001, message)
+	}
+	scanObservedLines(strings.NewReader(stdout.String()), "stdout", nil, f.capture.observe)
+	o := f.confirm(t, "medium-model", 1)
+	if !o.Current || o.Persistence != "saved" || len(o.Rows) != 3 || o.BuildAssurance != "recognized-output" {
+		t.Fatalf("CRLF-forwarded child output lost its sample: %+v", o)
+	}
+}
+
+// The testdata/model-buffer files are one load each on White's managed
+// llama.cpp b11985-6f4cc4d72 router on 2026-11-14 (Windows, raw pipes), byte for
+// byte except the model name, ports and paths. Router lines (stderr) end CR LF;
+// forwarded child lines (stdout) end CR CR LF. b11985 maps libllama INFO, which
+// carries every buffer report, to verbosity 4: the default child prints none,
+// and at verbosity 4 the metadata dump cuts a token list mid-character, so one
+// complete line is not valid UTF-8. In the verbosity-4 load the child got the
+// flag from a preset section; the router itself reports verbosity 3.
+func TestModelBufferCapturedB11985Output(t *testing.T) {
+	test := func(name, capture string, check func(*testing.T, modelconfig.BufferObservation)) {
+		t.Run(name, func(t *testing.T) {
+			f := newModelBufferTestFixture(t)
+			for _, stream := range []string{"stderr", "stdout"} {
+				raw, err := os.ReadFile(filepath.Join("testdata", "model-buffer", capture+"-"+stream+".txt"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				// The engine log gets every complete line except one that is
+				// not valid UTF-8.
+				logged := 0
+				scanObservedLines(strings.NewReader(string(raw)), stream, func(_, line string) {
+					logged++
+					if !utf8.ValidString(line) {
+						t.Errorf("engine log received invalid UTF-8: %q", line)
+					}
+				}, f.capture.observe)
+				valid := 0
+				for _, line := range strings.SplitAfter(string(raw), "\n") {
+					if line != "" && utf8.ValidString(line) {
+						valid++
+					}
+				}
+				if logged != valid {
+					t.Errorf("%s: engine log got %d lines, want %d", stream, logged, valid)
+				}
+			}
+			check(t, f.confirm(t, "medium-model", 1, "b11985-6f4cc4d72"))
+		})
+	}
+	test("default verbosity prints no buffer report", "b11985-default-verbosity", func(t *testing.T, o modelconfig.BufferObservation) {
+		if o.Status != "partial" || o.Reason != "unrecognized-build-output" || len(o.Rows) != 0 {
+			t.Fatalf("default-verbosity output: %+v", o)
+		}
+	})
+	test("verbosity 4 reports every buffer", "b11985-verbosity4", func(t *testing.T, o modelconfig.BufferObservation) {
+		var got []string
+		for _, row := range o.Rows {
+			got = append(got, row.Component+" "+row.Label+" "+row.ReportedMiB)
+		}
+		want := []string{"model CPU_Mapped 171.88", "model CPU_Mapped 6917.50", "model CUDA0 744.62", "output CUDA_Host 0.49", "kv CPU 144.00", "kv CUDA0 16.00", "recurrent CPU 0.44", "recurrent CUDA0 0.03", "compute CUDA0 156.75", "compute CUDA_Host 28.02"}
+		if !o.Current || o.BuildAssurance != "recognized-output" || !slices.Equal(got, want) {
+			t.Fatalf("rows = %q, want %q; observation %+v", got, want, o)
+		}
+		if err := o.Validate(); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+// Verbosity 4 is trace only from b9151; earlier router builds log request and
+// response bodies there. The launch knows the build only from a retained
+// sample the router reported for the same native content.
+func TestModelBufferReportedBuildGatesChildTrace(t *testing.T) {
+	for build, want := range map[string]bool{"b11985-6f4cc4d72": true, "b9151-67b2b7f2f": true, "b9150-abcdef0": false, "b7352-f32ca51bf": false, "": false, "b12020": false, "unknown": false} {
+		if got := llamaTraceVerbosity(build); got != want {
+			t.Errorf("llamaTraceVerbosity(%q) = %v, want %v", build, got, want)
+		}
+	}
+	for _, tc := range []struct {
+		build string
+		want  bool
+	}{{"b11985-6f4cc4d72", true}, {"b9150-abcdef0", false}} {
+		t.Run(tc.build, func(t *testing.T) {
+			f := newModelBufferTestFixture(t)
+			if f.load.ex.llamaTraceVerbosityKnown(context.Background(), f.load.st) {
+				t.Fatal("trace before any sample recorded the build")
+			}
+			f.initial("medium-model", 31001)
+			f.confirm(t, "medium-model", 1, tc.build)
+			if got := f.load.ex.llamaTraceVerbosityKnown(context.Background(), f.load.st); got != tc.want {
+				t.Fatalf("trace after a %s sample = %v, want %v", tc.build, got, tc.want)
+			}
+		})
+	}
 }
 
 func TestModelBufferRecognizesAnotherBuild(t *testing.T) {

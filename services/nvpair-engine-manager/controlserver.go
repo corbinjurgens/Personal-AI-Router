@@ -195,6 +195,7 @@ func (s *controlServer) mux() *http.ServeMux {
 func (s *controlServer) routes() []controlRoute {
 	routes := []controlRoute{
 		{controlEnginesPath, http.MethodGet, controlRead, "engine-inventory", ignoreCaller(s.handleEngines)},
+		{controlEnginesPath + "/events", http.MethodGet, controlRead, "engine-inventory", ignoreCaller(s.handleEngineEvents)},
 		{controlInstallPath, http.MethodPost, controlMutation, "engine-install", ignoreCaller(s.handleInstall)},
 		{controlPullPath, http.MethodPost, controlMutation, "engine-pull", ignoreCaller(s.handlePull)},
 		{controlLoadPath, http.MethodPost, controlMutation, "engine-load", ignoreCaller(s.handleLoad)},

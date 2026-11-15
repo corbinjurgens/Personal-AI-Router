@@ -171,3 +171,31 @@ it('preserves observation age through broker and proxy discovery merges', () => 
     expect(current().gpuUtilization[0].timestamp).toBe(15000)
     expect(history().gpuUtilization[0].data).toEqual([{ timestamp: 15000, value: 40 }])
 })
+
+it('renders an idle GPU as a current 0% reading', () => {
+    const idle = response({
+        GPUs: [{ name: 'GPU', vram_bytes: 1024, vram_used_bytes: 0, utilization_percent: 0 }]
+    })
+    state.mergeNodeInfoResponse(id, response())
+    vi.setSystemTime(25000)
+    state.mergeNodeInfoResponse(id, idle)
+    vi.setSystemTime(36000)
+    state.mergeNodeInfoResponse(id, idle)
+    expect(getMetricReading(history().gpuUtilization[0].data)).toMatchObject({
+        status: 'current',
+        value: 0
+    })
+    expect(history().gpuVramUsage[0].data.at(-1)).toMatchObject({ timestamp: 36000, value: 0 })
+})
+
+it('keeps an absent GPU utilisation unknown', () => {
+    state.mergeNodeInfoResponse(id, response())
+    vi.setSystemTime(31000)
+    const absent = response({ GPUs: [{ name: 'GPU', vram_bytes: 1024 }] })
+    state.mergeNodeInfoResponse(id, absent)
+    expect(history().gpuUtilization[0].data).toEqual([{ timestamp: 20000, value: 40 }])
+    expect(getMetricReading(history().gpuUtilization[0].data)).toEqual({
+        status: 'stale',
+        label: 'Stale'
+    })
+})

@@ -631,7 +631,7 @@ func (e *Executor) inspectModelArtifactsOnce(ctx context.Context, p modelconfig.
 	if selected, _ := ctx.Value(nativeHelpInspectionKey{}).(string); selected != "" {
 		if build, err := nativeBuildID(ctx, snapshot.state); err == nil && build == selected {
 			result.NativeOptions = nativeHelpResults.lookup(build)
-			result.UnreportedLaunchOptions, err = unreportedNativeLaunchOptions(result.NativeOptions, snapshot.command, nil, nil)
+			result.UnreportedLaunchOptions, err = unreportedNativeLaunchOptions(result.NativeOptions, snapshot.command, nil, nil, false)
 			if err != nil {
 				return modelconfig.InspectResult{}, err
 			}
@@ -776,7 +776,7 @@ func (e *Executor) inspectModelArtifactsOnce(ctx context.Context, p modelconfig.
 		var compiled map[string]modelEstimateInput
 		prepared, compileErr := compileTypedLlamaInputs(ctx, snapshot.state, snapshot.command, snapshot.state.plat.Runtime, false, &compiled)
 		if compileErr == nil && prepared != nil {
-			result.UnreportedLaunchOptions, err = unreportedNativeLaunchOptions(result.NativeOptions, snapshot.command, prepared.Snapshot, prepared.ModelLoads)
+			result.UnreportedLaunchOptions, err = unreportedNativeLaunchOptions(result.NativeOptions, snapshot.command, prepared.Snapshot, prepared.ModelLoads, e.llamaTraceVerbosityKnown(ctx, snapshot.state))
 			if err != nil {
 				return modelconfig.InspectResult{}, err
 			}

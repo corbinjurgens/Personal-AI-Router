@@ -27,7 +27,7 @@ func TestStaticGPUsFromIORegistry(t *testing.T) {
 		apple.statsKey != "ioreg:2a" {
 		t.Fatalf("unexpected Apple GPU: %+v", apple)
 	}
-	if apple.VramUsedBytes != 0 || apple.UtilizationPercent != 0 {
+	if apple.VramUsedBytes != nil || apple.UtilizationPercent != nil {
 		t.Fatalf("static detection published dynamic fields: %+v", apple)
 	}
 

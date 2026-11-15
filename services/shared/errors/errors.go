@@ -59,14 +59,15 @@ type ClearParams struct {
 	ClearedBy string `json:"clearedBy,omitempty"`
 }
 
-// SyncEnvelope is the body of the cross-node push: POST /v1/errors.
+// SyncEnvelope is one frame of the cross-node error stream
+// (GET /v1/errors/events) and the body of GET /v1/errors.
 // It carries the FULL set of a single node's local-origin errors so
 // the receiver can reconcile authoritatively for that NodeID — upsert
 // every entry present and evict any previously-stored entry for the
 // same NodeID that is absent from Errors. That replace-by-origin
-// semantics is what makes the push idempotent and self-healing: a
-// dropped packet, a cleared error, or a late-joining peer all converge
-// on the next push without a separate clear or initial-sync channel.
+// semantics is what makes each frame idempotent and self-healing: a
+// cleared error, a reconnect, or a late-joining peer all converge on
+// the next frame without a separate clear or initial-sync channel.
 //
 // NodeID is the origin node id (the sender). It is the authority for
 // which stored entries the receiver may reconcile; the receiver stamps

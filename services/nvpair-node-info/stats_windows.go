@@ -331,7 +331,7 @@ func (c *statsCollector) decodeSnapshot() *statsSnapshot {
 			slog.Debug("PdhCollectQueryData failed",
 				"status", fmt.Sprintf("0x%08x", uint32(r)))
 		} else {
-			gpu, valid := c.decodeGPU()
+			gpu, valid := c.decodeGPU(adapters)
 			currentGPU = gpu
 			sampledAt := time.Time{}
 			if valid {
@@ -358,7 +358,10 @@ func (c *statsCollector) decodeSnapshot() *statsSnapshot {
 	return snap
 }
 
-func (c *statsCollector) decodeGPU() (map[string]gpuStat, bool) {
+// decodeGPU reads the VRAM and engine counters into per-adapter stats.
+// adapters are the current DXGI adapters; after a successful engine read,
+// those without an engine instance are idle and receive utilization 0.
+func (c *statsCollector) decodeGPU(adapters []GPUInfo) (map[string]gpuStat, bool) {
 	out := make(map[string]gpuStat)
 	if c.hasVRAM {
 		for name, v := range readCounterLarge(c.vramCounter) {
@@ -373,7 +376,8 @@ func (c *statsCollector) decodeGPU() (map[string]gpuStat, bool) {
 				continue
 			}
 			s := out[lname]
-			s.VRAMUsed = uint64(v)
+			used := uint64(v)
+			s.VRAMUsed = &used
 			s.memoryUsedValid = true
 			s.memoryUsed = uint64(v)
 			out[lname] = s
@@ -381,11 +385,15 @@ func (c *statsCollector) decodeGPU() (map[string]gpuStat, bool) {
 	}
 	utilizationSamples := 0
 	if c.hasEngine {
-		util := aggregateUtilization(readCounterDouble(c.engineCounter))
+		items, ok := readCounterDouble(c.engineCounter)
+		util := aggregateUtilization(items)
+		if ok {
+			fillIdleUtilization(util, adapters)
+		}
 		utilizationSamples = len(util)
 		for luid, pct := range util {
 			s := out[luid]
-			s.UtilizationPct = pct
+			s.UtilizationPct = &pct
 			out[luid] = s
 		}
 	}
@@ -396,12 +404,12 @@ func (c *statsCollector) decodeGPU() (map[string]gpuStat, bool) {
 // counter. Uses PdhGetFormattedCounterValue (scalar) rather than the
 // array API because there's exactly one instance (_Total) — the array
 // API would still work but adds an allocation and two syscalls for no
-// gain. Returns 0 when the counter is disabled or the reading is in
-// an error state; 0 propagates through buildResponse as an absent
-// utilization_percent field via omitempty.
-func (c *statsCollector) decodeCPU() uint32 {
+// gain. Returns nil when the counter is disabled or the reading is in
+// an error state; nil propagates through buildResponse as an absent
+// utilization_percent field via omitempty, while a sampled 0 stays present.
+func (c *statsCollector) decodeCPU() *uint32 {
 	if !c.hasCPU {
-		return 0
+		return nil
 	}
 	var v pdhFmtCounterValue
 	r, _, _ := procPdhGetFormattedCounterValue.Call(
@@ -413,19 +421,20 @@ func (c *statsCollector) decodeCPU() uint32 {
 	if r != 0 {
 		slog.Debug("PdhGetFormattedCounterValue (CPU) failed",
 			"status", fmt.Sprintf("0x%08x", uint32(r)))
-		return 0
+		return nil
 	}
 	if v.CStatus != pdhCStatusValidData {
-		return 0
+		return nil
 	}
 	pct := math.Float64frombits(v.Value)
 	if math.IsNaN(pct) || pct < 0 {
-		return 0
+		return nil
 	}
 	if pct > 100 {
 		pct = 100
 	}
-	return uint32(math.Round(pct))
+	rounded := uint32(math.Round(pct))
+	return &rounded
 }
 
 // readMemoryUsed returns physical-memory bytes in use (total - available)
@@ -477,11 +486,12 @@ func readCounterLarge(counter uintptr) map[string]int64 {
 // readCounterDouble is the float64 twin of readCounterLarge. The 8-byte
 // union slot is reinterpreted via math.Float64frombits so we don't need
 // a parallel pdhFmtCounterValueDouble struct type — one PDH_FMT_COUNTERVALUE
-// shape, two reader flavors.
-func readCounterDouble(counter uintptr) map[string]float64 {
+// shape, two reader flavors. The second return is false when the read
+// failed, and true for a successful read even when it listed no instances.
+func readCounterDouble(counter uintptr) (map[string]float64, bool) {
 	items, ok := fetchCounterArray(counter, pdhFmtDouble)
 	if !ok {
-		return nil
+		return nil, false
 	}
 	out := make(map[string]float64, len(items))
 	for i := range items {
@@ -491,7 +501,7 @@ func readCounterDouble(counter uintptr) map[string]float64 {
 		}
 		out[windows.UTF16PtrToString(it.Name)] = math.Float64frombits(it.Value.Value)
 	}
-	return out
+	return out, true
 }
 
 // fetchCounterArray runs the two-call PdhGetFormattedCounterArrayW dance
@@ -540,7 +550,7 @@ func fetchCounterArray(counter uintptr, formatFlag uint32) ([]pdhFmtCounterValue
 // Snapshot returns the latest published statsSnapshot. Safe to call
 // concurrently from many HTTP request goroutines — the snapshot value
 // is immutable post-publish. Returns a zero-value snapshot (empty GPU
-// map, zero CPUUtilPct, zero MemUsedBytes) before the first tick
+// map, nil CPUUtilPct, zero MemUsedBytes) before the first tick
 // completes, so callers don't need nil checks.
 func (c *statsCollector) Snapshot() statsSnapshot {
 	p := c.latest.Load()

@@ -58,10 +58,20 @@ func TestInstalledEngineRestoresAfterResumeWithoutIntent(t *testing.T) {
 }
 
 func TestTypedRouterCapacityIsManagerOwnedUnlimited(t *testing.T) {
-	command := llamaSnapshotCommand(launchCommand{Args: []string{"--models-max", "2"}}, "preset.ini", []modelconfig.ModelLoad{{ProfileKey: "profile"}})
+	command := llamaSnapshotCommand(launchCommand{Args: []string{"--models-max", "2"}}, "preset.ini", false, []modelconfig.ModelLoad{{ProfileKey: "profile"}})
 	i := slices.Index(command.Args, "--models-max")
 	if i < 0 || i+1 >= len(command.Args) || command.Args[i+1] != "0" {
 		t.Fatalf("args=%v", command.Args)
+	}
+}
+
+// The router's --log-verbosity overrides every child preset section.
+func TestNativeVerbosityOptionIsPairOwned(t *testing.T) {
+	for _, key := range []string{"log-verbosity", "verbosity", "lv", "verbose", "log-verbose", "v"} {
+		err := validateModelExtraOptions("profile", map[string]string{key: "2"})
+		if err == nil || !strings.Contains(err.Error(), "PAIR owns "+key+".") {
+			t.Errorf("%s: error=%v", key, err)
+		}
 	}
 }
 

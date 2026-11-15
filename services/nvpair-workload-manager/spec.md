@@ -116,8 +116,6 @@ All traffic is JSON-RPC 2.0. The local interface uses `stdin`/`stdout` (or a nam
 | `workloads:remove` | Broker → WM; broadcast | Peer → WM; → `workloads:remove` | After validated remote `workloads:remove` |
 | `workloads:cancel` | Broker → WM; sent to the origin (or every peer) | Peer → WM; → `workloads:cancel` | After validated, deduplicated remote `workloads:cancel` |
 | `performance:publish` | Broker → WM; full own `Summary` in params | — | — |
-| `performance:capabilities` | — | Authenticated support probe; params `{}` | — |
-| `performance:summary` | — | Authenticated measuring host's full `Summary` | — |
 | `performance:received` | — | — | Accepted higher-revision replacement, with admission identity |
 | `performance:status` | — | — | Receiver-owned freshness or admission retirement |
 
@@ -206,6 +204,7 @@ Example notification:
 - A node broadcasts each local `workload:*` and `workloads:remove` to all discovered peers.
 - Body: JSON-RPC 2.0 notification — `workload:*` with `params.workloadInfo`, `workloads:remove` with `params.workloadId` (and optional `params.originatedFrom`), or `workloads:cancel` with `params.originatedFrom`, `params.engine`, `params.runId`, `params.workloadId`, `params.cancelId` and optional `params.regenerate`.
 - Responses: `200 OK` (written to the local Broker or already deduplicated); `400 Bad Request` (malformed / unknown `method`); `403 Forbidden` (client cert absent or untrusted); `500 Internal Server Error` (Broker write failed, so the sender may retry). A successful write does not acknowledge that the Broker applied the event.
+- Performance summaries do not use this endpoint: they travel on `GET /v1/workloads/performance/events` (see **Stream** below).
 - Idempotency: lifecycle by `(originatedFrom, engine, runId, Workload.id, state, scheduledOn, seq)`; removal by `(nodeId, workloadId)`; cancel by `(originatedFrom, engine, runId, workloadId, cancelId)`. Record a key after a successful Broker write, and serialize concurrent requests for the same key through that write. Tagged lifecycle re-sync frames bypass dedup so they can re-assert state.
 
 Example request (`POST /v1/workloads/events`):
@@ -267,51 +266,49 @@ The own-summary slot is scoped to the broker's persisted host/epoch revision;
 same-epoch certificate replacement may preserve it because every actual send is
 fenced by the current shared Mesh admission identity.
 
-Each summary POST requires exactly one `X-PAIR-Performance-Elapsed-Ms` header.
-Its value is canonical nonnegative decimal milliseconds on the sender's
-monotonic clock since receipt of that revision's broker publication; zero is
-valid. Identical same-revision publications must not reset the anchor. A new
-revision starts a new anchor. Do not send once elapsed time exceeds
-`performancewire.RetentionMs` (seven days). Reject a missing or duplicate
-header, signs, leading zeroes, whitespace, alternate number formats, negative
-values and values above retention with `400`. Accept the exact retention
-boundary. This transport metadata does not change the summary wire schema or
-its source ages.
-The existing mTLS channel authenticates this header; no extra signature or
-synchronized node clocks are required because an offset only makes data older.
+**Stream:** `GET /v1/workloads/performance/events` on the workload service's
+mTLS server serves pinned peers an NDJSON snapshot stream through
+`clustertrust.ServeSnapshotStream`, behind the events endpoint's pin gate,
+which is rechecked before every line (`403` before the stream, end of stream
+after). A `clustertrust.SnapshotHub[int64]` carries the local revision as a
+change token. On connect and on every accepted `performance:publish`, the stream
+writes `{"summary": Summary, "elapsedMs": int64}` built at that moment from the
+latest summary, so `elapsedMs` is current: canonical nonnegative milliseconds on
+the sender's monotonic clock since receipt of that revision's broker
+publication. Identical same-revision publications must not reset the anchor; a
+new revision starts a new anchor. A summary whose local admission changed, or
+whose elapsed time exceeds `performancewire.RetentionMs` (seven days), is
+withheld: no frame is written. A stream that has sent no frame stays open; one
+that has sent a frame ends at its next line (frame or keepalive) while the
+summary is withheld, so the receiver's stale rule applies instead of
+keepalives refreshing the earlier frame. A `null` keepalive is
+written every 10 seconds with a 5-second write timeout; it asserts nothing about
+the summary. Response headers are flushed at once so a subscriber's connect
+bound does not wait for the first keepalive. At most 128 streams are served.
 
-**Sender:** one latest full snapshot and one pending wake token coalesce all
-intermediate publications. Discovery of a new workload peer wakes a backfill;
-the 30-second timer wakes a heartbeat. A dedicated sender round covers all
-current admitted targets, with four concurrent requests and one summary attempt
-per peer. Each summary POST snapshots the newest value after any capability probe, just before
-constructing the request. Later publications cannot change an already dispatched
-request. Network delays may coalesce/delay subsequent performance rounds; the
-timer and receiver freshness sweeps continue independently. This path uses a
-separate `PeerServiceClient` pool on the same `ServiceWorkload`, peer routes,
-direct/reverse policy, port and events endpoint. Discovery changes and Mesh
-changes retire both pools. It never enqueues into, acquires locks from, or
-consumes connection slots from the lifecycle FIFO or direct cancel path.
-
-**Support exchange:** before the first summary per route generation and opaque
-Mesh admission identity, send `performance:capabilities` with params `{}` over
-the authenticated events endpoint. The response is `200` with exactly
-`{"version":2}` (bounded to 1024 bytes, strict JSON and no trailing data).
-Version 1 summaries and capability replies are rejected; all machines deploy
-the coordinated telemetry version together, with no dual protocol. The manager
-preserves `engineDecode` reported-rate aggregates without recomputing them from
-visible output counts.
-`400` or `501` caches unsupported until the route/admission changes. All other
-failures, invalid replies and unsupported schema versions consume a probe
-budget of three, at most one probe per round; exhausted peers receive no more
-probes until that identity changes. There is no warning/retry backlog. No
-descriptor or mDNS capability fields are added. An unsupported peer has no
-accepted summary and therefore remains unknown at the broker.
-Retain negotiation state only for the current peer set. The receiver's
-128-record bound does not cap outbound targets or negotiation coverage.
-Temporary authority lookup failure withholds traffic while preserving the last
-known negotiation result and attempt budget. Reset only upon a positively
-observed admission identity or route generation change; prune departed targets.
+**Subscriber:** one stream per current target whose host ID equals its cluster
+principal and that has a current `Mesh.PeerServiceIncarnation`, at most 128,
+re-evaluated on discovery and Mesh changes and on the 30-second sweep. Streams
+use a dedicated `PeerServiceClient` (no total timeout, no connection reuse) on
+`ServiceWorkload` with the broadcaster's routes; connect and response headers
+are bounded to 10 seconds by a cancel, and `ReadSnapshotStream` drops a stream
+idle for 25 seconds. Reconnects back off from 1 second, doubling to 30 seconds.
+A stream records the peer's admission identity and route generation at connect
+and ends when either changes. Frames must have exactly `summary` and
+`elapsedMs`, an integer `elapsedMs` in 0..`RetentionMs`, and no trailing data.
+Each frame goes through the same receipt logic as before (`applySummary`) with
+the stream's authority: principal = the peer UUID, identity = its admission
+identity at connect, valid only while that identity and route generation hold
+and the summary's canonical epoch equals `Mesh.PeerAdmissionEpoch(uuid)`. Any
+refused frame (invalid, unauthorized, capacity, broker write failure) ends the
+stream; the reconnect re-sends the full summary. Only a stream that delivered
+a line and did not end on a refused or undecodable frame resets the backoff.
+Streams share the peer set and address chooser with the lifecycle sender but
+never enqueue into, acquire locks from, or consume connection slots from the
+lifecycle FIFO or direct cancel path. The former `performance:summary` POST and its capability
+probe are gone; all machines deploy the same build, with no version probe.
+The manager preserves `engineDecode` reported-rate aggregates without
+recomputing them from visible output counts.
 
 **Inbound authority and limits:** the certificate must still match its pin, the
 peer must have a current durable admission, `measuringHost` must equal the
@@ -319,14 +316,14 @@ authenticated principal, and the canonical wire epoch must match
 `Mesh.PeerAdmissionEpoch(principal)`. Host equality relies on the existing
 authenticated `peer_services` descriptor contract, not on the broker relay's
 legacy host-to-principal mapping. Forwarded summaries and unequal legacy host
-aliases fail closed; the sender also skips those aliases. Capture and compare
+aliases fail closed; no subscription is opened for those aliases. Capture and compare
 `Mesh.PeerServiceIncarnation(principal)` before processing and around broker
 emission, repeating pin checks. No cluster files are read by this component.
 `performancewire.DecodeSummary` enforces the 128 KiB params cap, field validation,
-unknown-field rejection and trailing-data rejection. Read the outer frame with
-a 1 MiB cap plus overflow byte, rejecting overflow instead of silently
-truncating. Invalid data returns `400`, unauthorized data `403`, receiver state
-capacity exhaustion `503`, and broker write failure `500`.
+unknown-field rejection and trailing-data rejection. A stream line is capped at
+128 KiB plus 1 KiB. `applySummary` classifies invalid data as `400`,
+unauthorized data `403`, receiver state capacity exhaustion `503` and broker
+write failure `500`; the subscriber ends the stream on any of them.
 
 **Broker notifications:** a higher revision emits `performance:received` with
 exact params `{summary: Summary, admissionIdentity: string, sampleElapsedMs: int64}`.
@@ -340,8 +337,8 @@ Then emit `performance:status` with exactly:
 
 The opaque `admissionIdentity` is a receiver-local comparison token, not the
 sender's decimal epoch. The broker must revalidate it through Mesh before
-consuming a notification. If authority changes during a pipe write, return
-`403`, emit `unknown` for the just-emitted identity, and retain no accepted
+consuming a notification. If authority changes during a pipe write, refuse the
+frame, emit `unknown` for the just-emitted identity, and retain no accepted
 payload for that identity. A completed pipe write cannot be retracted. A failed
 replacement write leaves its revision retryable. A replacement already written
 successfully is not emitted again merely because its following status failed.
@@ -349,7 +346,7 @@ Accepted summaries and freshness statuses are never rebroadcast.
 
 **Revisions, freshness and bounds:** lower revisions return `200` without
 refreshing reachability. Equal revisions must have identical canonical content;
-an identical heartbeat emits status only, never another aggregate replacement.
+an identical frame emits status only, never another aggregate replacement.
 Only a newly authoritatively accepted sender epoch resets its revision floor.
 Receiver-local readmission or certificate changes retire payloads while keeping
 the current sender epoch's revision floor and digest, including across pin loss.
@@ -358,12 +355,16 @@ current or retired peer records; new hosts receive `503` at capacity rather than
 evicting revision floors. State is discarded at process exit. There is no durable
 performance cache here.
 
-Track time with receiver-monotonic timestamps. An accepted heartbeat refreshes
-reachability and `lastSeenAgeMs`; at 90 seconds of silence a 30-second sweep emits
-`stale` at its first tick at or after the boundary. The timer is independent of
-network fan-out. `sampleElapsedMs` begins with the sender's elapsed header and
-advances with receiver-monotonic time from this revision's original accepted
-receipt, including across equal-revision heartbeats and receiver-local
+Track time with receiver-monotonic timestamps. An accepted frame refreshes
+reachability and `lastSeenAgeMs`. After a stream's frame was accepted, each
+keepalive on it refreshes `lastSeen` while the receipt is live, the stream's
+authority holds for the receipt's epoch, and emits `fresh` at most every 30
+seconds. A frame whose older revision was ignored does not count as accepted. At 90 seconds without either, a 30-second
+sweep emits `stale` at its first tick at or after the boundary; that is, 90
+seconds after the stream drops. The sweep is independent of network reads.
+`sampleElapsedMs` begins with the frame's `elapsedMs` and advances with
+receiver-monotonic time from this revision's original accepted receipt,
+including across equal-revision frames and receiver-local
 authority changes. A duplicate with greater elapsed time raises the offset;
 one with less elapsed time never makes samples younger. Carry this metadata in
 both broker notifications. Add it to the source sample ages when

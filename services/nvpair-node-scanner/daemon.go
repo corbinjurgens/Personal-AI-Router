@@ -175,6 +175,9 @@ type daemon struct {
 	// Local results always finish successfully so loopback stays on the healthy
 	// cadence.
 	telemetryRetries telemetryRetryGate
+	// nodeInfoStreams holds the node-info stream of each stream peer and its
+	// latest frame (telemetry_stream.go).
+	nodeInfoStreams nodeInfoStreamState
 
 	// observedMu guards observed, this host's own addresses that remote peers
 	// have actually connected to. nvpair-node-info sees those connections and the
@@ -976,8 +979,8 @@ func (d *daemon) publishSelfLocked() {
 // watchAddress re-derives the advertised ip= whenever the host's network changes
 // (interface or address add/remove — VPN/dock toggles, DHCP re-lease, sleep/wake
 // re-IP). Without it the ip= would be frozen at daemon startup and could point at
-// an address the node no longer holds; since consumers prefer ip= over the live A
-// records, a stale value would misroute them. netmon debounces, so a reload per
+// an address the node no longer holds; since consumers dial ip=/ips= and not the
+// live A records, a stale value would misroute them. netmon debounces, so a reload per
 // change is cheap. Best-effort: if the monitor can't start, ip= stays static
 // (the responder's A records still refresh on their own netmon watch).
 func (d *daemon) watchAddress(ctx context.Context) {
@@ -1613,9 +1616,14 @@ func (d *daemon) refreshClusterIdentityOnce() {
 	d.mesh.Refresh()
 	sem := make(chan struct{}, modelsRefreshConcurrency)
 	var wg sync.WaitGroup
+	now := time.Now()
 	for _, n := range d.dir.snapshot(noderec.ServiceNodeInfo) {
 		ni, ok := n.Services[noderec.ServiceNodeInfo]
 		if !ok || n.IP == "" || n.HostUUID == self {
+			continue
+		}
+		// A live node-info stream reports a clusterUuid change as a frame at once.
+		if _, live := d.liveNodeInfo(n.HostUUID, now); live {
 			continue
 		}
 		wg.Add(1)
@@ -1673,10 +1681,17 @@ func (d *daemon) refreshNodeClusterIdentityCandidates(hostUUID string, hosts []s
 	// callers converge on one address per peer rather than each finding it again.
 	key := hostKey{hostUUID: hostUUID, service: noderec.ServiceNodeInfo}
 	_, info, _ := askRemembered(&d.enrichHosts, key, hosts, ask)
-	if info.ClusterUUID == nil {
+	return d.applyReportedClusterIdentity(hostUUID, info.ClusterUUID)
+}
+
+// applyReportedClusterIdentity folds a peer's own report of its cluster
+// principal into the directory, emitting one discovery:node-updated when it
+// moved. An absent report (nil) leaves the annotation alone.
+func (d *daemon) applyReportedClusterIdentity(hostUUID string, clusterUUID *string) bool {
+	if clusterUUID == nil {
 		return false
 	}
-	node, changed := d.dir.applyClusterIdentity(hostUUID, info.ClusterUUID, d.mesh.HasPin)
+	node, changed := d.dir.applyClusterIdentity(hostUUID, clusterUUID, d.mesh.HasPin)
 	if !changed {
 		return false
 	}

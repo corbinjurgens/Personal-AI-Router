@@ -64,6 +64,8 @@ Emitted when a manually added node has been probed and its initial status determ
 
 Each node is probed for node-info hardware inventory, telemetry and host identity. Manual entries do not supply engine health or model inventory.
 
+The `gpus` entries and the `cpu` object carry node-info's fields unchanged. GPU `vram_used_bytes` and `utilization_percent` and `cpu.utilization_percent` are absent when there is no reading; 0 is a reading.
+
 ### `node/updated`
 
 Emitted when a periodic probe detects a change (node-info going up/down,

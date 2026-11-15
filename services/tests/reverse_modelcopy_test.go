@@ -134,7 +134,9 @@ func newPhase04FileObserver(t *testing.T, target, caller *task1Node) *phase04Fil
 		if r.URL.Path == "/v1/models/files" {
 			o.listed++
 		}
-		if r.URL.Path == "/v1/engines" {
+		// A control read that always dispatches to the target; engine
+		// inventory is served from the engine-status stream instead.
+		if r.URL.Path == "/v1/remote-management" {
 			o.controls++
 		}
 		if r.URL.Path == "/v1/models/file" {
@@ -354,22 +356,14 @@ func TestReverseModelCopyPhase04(t *testing.T) {
 			observer.mu.Lock()
 			controlsBefore := observer.controls
 			observer.mu.Unlock()
-			control := manager.call(t, "engine:remote-get-installed", map[string]string{"node": source.uuid})
-			var installed struct {
-				Engines []struct {
-					Engine    string `json:"engine"`
-					Installed bool   `json:"installed"`
-				} `json:"engines"`
+			control := manager.call(t, "engine:remote-management-get", map[string]string{"nodeId": source.uuid})
+			var permission struct {
+				Version int    `json:"version"`
+				State   string `json:"state"`
 			}
-			task2Decode(t, control.Result, &installed)
-			found := false
-			for _, engine := range installed.Engines {
-				if engine.Engine == "llamacpp" && engine.Installed {
-					found = true
-				}
-			}
-			if !found {
-				t.Fatalf("concurrent control result=%+v", installed)
+			task2Decode(t, control.Result, &permission)
+			if permission.Version != 1 || permission.State == "" {
+				t.Fatalf("concurrent control result=%s", control.Result)
 			}
 			observer.mu.Lock()
 			controlsAfter := observer.controls

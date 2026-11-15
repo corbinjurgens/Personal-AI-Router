@@ -2566,9 +2566,12 @@ func (b *Broker) forwardClusterManagerNotification(method string, params json.Ra
 		b.applyClusterIdentityChange()
 	}
 	// A pairing or removal changed the pin set. The cluster-scoped workers read
-	// their gates live and need nothing, but the node-scanner caches a per-peer
-	// trusted annotation it can only otherwise refresh when that peer's mDNS
-	// record moves — which a peer already advertising when we joined never does.
+	// their gates live, but the node-scanner caches a per-peer trusted
+	// annotation it can only otherwise refresh when that peer's mDNS record
+	// moves — which a peer already advertising when we joined never does. The
+	// re-derived annotation also reaches relay subscribers: nvpair-errors
+	// re-gates a peer when its trusted value flips, which is how a peer paired
+	// while this node is already a member gets error sync.
 	if method == "cluster:trust-changed" {
 		b.applyClusterTrustChange()
 	}

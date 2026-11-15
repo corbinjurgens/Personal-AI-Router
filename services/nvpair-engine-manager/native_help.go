@@ -205,7 +205,7 @@ func validateNativeExtraOptions(model string, extra map[string]string, options [
 
 // Compare the actual launch declarations and every generated section, including
 // defaults and siblings. Help spelling supplies warnings, never allocation data.
-func unreportedNativeLaunchOptions(options []modelconfig.NativeOption, command launchCommand, preset []byte, loads []modelconfig.ModelLoad) ([]string, error) {
+func unreportedNativeLaunchOptions(options []modelconfig.NativeOption, command launchCommand, preset []byte, loads []modelconfig.ModelLoad, trace bool) ([]string, error) {
 	if options == nil {
 		return nil, nil
 	}
@@ -219,7 +219,7 @@ func unreportedNativeLaunchOptions(options []modelconfig.NativeOption, command l
 		}
 	}
 	if len(preset) != 0 {
-		command = llamaSnapshotCommand(command, "", loads)
+		command = llamaSnapshotCommand(command, "", trace, loads)
 	}
 	for _, arg := range command.Args {
 		if strings.HasPrefix(arg, "--") {

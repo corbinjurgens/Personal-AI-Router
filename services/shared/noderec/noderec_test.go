@@ -295,6 +295,61 @@ func TestModelControlsDirectoryAttributionWire(t *testing.T) {
 	}
 }
 
+// TestNodeInfoReadingsKeepSampledZeros pins the presence encoding of the
+// node-info dynamic readings: a sampled 0 decodes as a present 0 and an
+// absent field decodes as no reading.
+func TestNodeInfoReadingsKeepSampledZeros(t *testing.T) {
+	t.Run("sampled zero stays present", func(t *testing.T) {
+		var gpu GPUInfo
+		if err := json.Unmarshal([]byte(`{"name":"GPU","vram_bytes":1024,"vram_used_bytes":0,"utilization_percent":0}`), &gpu); err != nil {
+			t.Fatalf("decode GPU: %v", err)
+		}
+		if gpu.VramUsedBytes == nil || *gpu.VramUsedBytes != 0 {
+			t.Errorf("VramUsedBytes = %v, want present 0", gpu.VramUsedBytes)
+		}
+		if gpu.UtilizationPercent == nil || *gpu.UtilizationPercent != 0 {
+			t.Errorf("GPU UtilizationPercent = %v, want present 0", gpu.UtilizationPercent)
+		}
+		var cpu CPUInfo
+		if err := json.Unmarshal([]byte(`{"name":"CPU","utilization_percent":0}`), &cpu); err != nil {
+			t.Fatalf("decode CPU: %v", err)
+		}
+		if cpu.UtilizationPercent == nil || *cpu.UtilizationPercent != 0 {
+			t.Errorf("CPU UtilizationPercent = %v, want present 0", cpu.UtilizationPercent)
+		}
+
+		body, err := json.Marshal(gpu)
+		if err != nil {
+			t.Fatalf("encode GPU: %v", err)
+		}
+		var raw map[string]any
+		if err := json.Unmarshal(body, &raw); err != nil {
+			t.Fatalf("decode encoded GPU: %v", err)
+		}
+		for _, key := range []string{"vram_used_bytes", "utilization_percent"} {
+			if got, present := raw[key]; !present || got != float64(0) {
+				t.Errorf("re-encoded %s = %v (present %v), want present 0", key, got, present)
+			}
+		}
+	})
+	t.Run("absent field is no reading", func(t *testing.T) {
+		var gpu GPUInfo
+		if err := json.Unmarshal([]byte(`{"name":"GPU","vram_bytes":1024}`), &gpu); err != nil {
+			t.Fatalf("decode GPU: %v", err)
+		}
+		if gpu.VramUsedBytes != nil || gpu.UtilizationPercent != nil {
+			t.Errorf("GPU readings = %v/%v, want absent", gpu.VramUsedBytes, gpu.UtilizationPercent)
+		}
+		var cpu CPUInfo
+		if err := json.Unmarshal([]byte(`{"name":"CPU"}`), &cpu); err != nil {
+			t.Fatalf("decode CPU: %v", err)
+		}
+		if cpu.UtilizationPercent != nil {
+			t.Errorf("CPU UtilizationPercent = %d, want absent", *cpu.UtilizationPercent)
+		}
+	})
+}
+
 func TestDirectoryOptionalServiceBuild(t *testing.T) {
 	clean := "git:" + strings.Repeat("a", 40)
 	dirty := "git:" + strings.Repeat("b", 64) + "+dirty"

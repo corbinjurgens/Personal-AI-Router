@@ -233,29 +233,6 @@ func readRemoteResponse(body io.Reader, limit int64) ([]byte, error) {
 	return data, nil
 }
 
-// getEngines fetches the peer's engine status list (GET /v1/engines), returning
-// the raw {"engines":[...]} object.
-func (c *remoteClient) getEngines(ctx context.Context) (json.RawMessage, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+controlEnginesPath, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := c.controlClient(false).Do(req)
-	if err != nil {
-		c.forgetAddress()
-		return nil, err
-	}
-	defer resp.Body.Close()
-	data, err := readRemoteResponse(resp.Body, 8<<20)
-	if err != nil {
-		return nil, fmt.Errorf("remote engines: read response: %w", err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("remote engines: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
-	}
-	return json.RawMessage(data), nil
-}
-
 // getRemoteManagement reads the target's effective remote-management permission
 // for this node (GET /v1/remote-management). It is a caller-only read: the
 // target answers for the authenticated certificate, never for a peer selector.

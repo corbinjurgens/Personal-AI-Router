@@ -23,6 +23,13 @@ import (
 
 const settingsPath = "/v1/engine-settings/"
 
+// settingsStreamKeepalive is the idle keepalive on a peer settings stream. A
+// var so tests can shorten it; production never changes it.
+var settingsStreamKeepalive = 10 * time.Second
+
+// settingsStreamIdle drops a subscription after this long without a line.
+const settingsStreamIdle = 25 * time.Second
+
 func (s *controlServer) settingsRoutes() []controlRoute {
 	return []controlRoute{
 		{settingsPath + "set-stated-memory", http.MethodPost, controlMutation, "settings-set-stated-memory", s.settingsProfileHandler("set-stated-memory")},
@@ -241,7 +248,7 @@ func (s *controlServer) streamSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	defer closeSub()
 	clustertrust.ServeSnapshotStream(w, r, clustertrust.SnapshotStreamServer[[]settings.Snapshot]{
-		Keepalive:    time.Second,
+		Keepalive:    settingsStreamKeepalive,
 		WriteTimeout: 5 * time.Second,
 		Authorize: func() bool {
 			s.mesh.Refresh()
@@ -282,8 +289,8 @@ func (m *Manager) remoteSettings(ctx context.Context, msg *Message) {
 	m.respondOrErr(msg, result, err)
 }
 
-// Settings are pushed directly by each authority. Discovery polling here only
-// manages connection lifetimes; configuration itself is never polled from peers.
+// Settings and engine status are pushed directly by each authority. Discovery
+// polling here only manages connection lifetimes; neither is polled from peers.
 func (m *Manager) watchPeerSettings(ctx context.Context) {
 	active := map[string]context.CancelFunc{}
 	defer func() {
@@ -326,21 +333,10 @@ func (m *Manager) watchPeerSettings(ctx context.Context) {
 				}
 				streamCtx, cancel := context.WithCancel(ctx)
 				active[node] = cancel
-				go func(node string) {
-					for streamCtx.Err() == nil {
-						current, exists := m.peers.lookup(node)
-						if !exists {
-							return
-						}
-						m.consumeSettingsStream(streamCtx, current)
-						m.exec.notify("engine:settings-disconnected", map[string]string{"nodeId": node})
-						select {
-						case <-streamCtx.Done():
-							return
-						case <-time.After(3 * time.Second):
-						}
-					}
-				}(node)
+				go m.keepPeerStream(streamCtx, node, m.consumeSettingsStream, func() {
+					m.exec.notify("engine:settings-disconnected", map[string]string{"nodeId": node})
+				})
+				go m.keepPeerStream(streamCtx, node, m.consumeEnginesStream, func() {})
 			}
 		}
 	}
@@ -356,30 +352,49 @@ func (m *Manager) notifyPeerSettings(nodeID string, snapshots []settings.Snapsho
 	}
 }
 
-func (m *Manager) consumeSettingsStream(parent context.Context, peer ecPeer) {
-	ctx, cancel := context.WithCancel(parent)
-	defer cancel()
+// keepPeerStream runs consume for node until ctx ends or the node leaves the
+// directory, calling ended after each stream and pausing 3 s before the next.
+func (m *Manager) keepPeerStream(ctx context.Context, node string, consume func(context.Context, ecPeer), ended func()) {
+	for ctx.Err() == nil {
+		current, exists := m.peers.lookup(node)
+		if !exists {
+			return
+		}
+		consume(ctx, current)
+		ended()
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(3 * time.Second):
+		}
+	}
+}
+
+// openPeerStream opens a read-only snapshot stream on a peer's ec surface. It
+// returns the 200 response and the stream's current check, which turns false
+// when the peer's route, admission or pinned identity changes.
+func (m *Manager) openPeerStream(ctx context.Context, peer ecPeer, path string) (*http.Response, func() bool, bool) {
 	client, err := m.remoteClient(ctx, peer)
 	if err != nil {
-		return
+		return nil, nil, false
 	}
 	route, ok := m.resolveControlRoute(peer.clusterUUID, noderec.ServiceEngineControl)
 	config, pinned := m.mesh.ClientTLSConfig(peer.clusterUUID)
 	if !ok || !pinned || len(config.Certificates) == 0 {
-		return
+		return nil, nil, false
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, client.base+settingsPath+"events", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, client.base+path, nil)
 	if err != nil {
-		return
+		return nil, nil, false
 	}
 	response, err := client.controlClient(false).Do(req)
 	if err != nil {
 		client.forgetAddress()
-		return
+		return nil, nil, false
 	}
-	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return
+		response.Body.Close()
+		return nil, nil, false
 	}
 	// The transport checks admission before dispatch. This subscription owner
 	// also retires an active body when either identity or the endpoint changes;
@@ -392,9 +407,19 @@ func (m *Manager) consumeSettingsStream(parent context.Context, peer ecPeer) {
 			response.TLS != nil && len(response.TLS.PeerCertificates) != 0 &&
 			live.VerifyPeerCertificate([][]byte{response.TLS.PeerCertificates[0].Raw}, nil) == nil
 	}
+	return response, current, true
+}
+
+func (m *Manager) consumeSettingsStream(parent context.Context, peer ecPeer) {
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
+	response, current, ok := m.openPeerStream(ctx, peer, settingsPath+"events")
+	if !ok {
+		return
+	}
+	defer response.Body.Close()
 	_ = clustertrust.ReadSnapshotStream(ctx, cancel, response.Body, clustertrust.SnapshotStreamClient[[]settings.Snapshot]{
-		Idle:    15 * time.Second,
-		Recheck: time.Second,
+		Idle:    settingsStreamIdle,
 		MaxLine: 256 * 1024,
 		Current: current,
 		Decode: func(b []byte) ([]settings.Snapshot, error) {

@@ -59,13 +59,22 @@ func TestPeerSyncStartupIdentity(t *testing.T) {
 			if got := mgr.LocalNodeID(); got != want {
 				t.Fatalf("startup node ID = %q, want persisted UUID %q", got, want)
 			}
-			// Construct the push owner before reports, as startup does. It must
-			// capture the same UUID used to select local-origin entries.
+			// Construct the peer-sync owner and the stream publisher before
+			// reports, as startup does. Both must use the same UUID that selects
+			// local-origin entries.
 			peers := NewPeerSync(mgr, clustertrust.Open(clusterDir), clusterDir)
-			t.Cleanup(peers.clients.CloseIdle)
+			if peers.localNodeID != want {
+				t.Fatalf("peer sync node ID = %q, want %q", peers.localNodeID, want)
+			}
+			pub := newErrorsPublisher()
+			mgr.SetOnLocalChange(func() { pub.publish(mgr) })
 			mgr.handleReport(nil, mustJSON(t, localErr("startup", want, 1000)))
 			assertErrorSnapshot(t, mgr, []ServiceError{localErr("startup", want, 1000)})
-			body, err := peers.snapshotBody()
+			frame, published := pub.hub.Latest()
+			if !published {
+				t.Fatal("local report published no stream frame")
+			}
+			body, err := json.Marshal(frame)
 			if err != nil {
 				t.Fatalf("encode outbound snapshot: %v", err)
 			}

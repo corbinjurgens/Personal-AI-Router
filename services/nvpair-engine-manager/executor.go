@@ -149,11 +149,14 @@ type Executor struct {
 	ownerAdmissionGeneration uint64
 	ownerAdmissionHeld       uint64
 	settingsHub              settings.Hub
-	diagnosticParent         func(context.Context, string, string, json.RawMessage) (json.RawMessage, error)
-	admittedLoadParent       func(context.Context, string, string) (json.RawMessage, error)
-	settingsParent           func(context.Context, string, settings.Request, string) (json.RawMessage, error)
-	inspectParent            func(context.Context, modelconfig.InspectRequest, string) (json.RawMessage, error)
-	memoryProfilesParent     func(context.Context, settings.Relay) (json.RawMessage, error)
+	// enginesEvents publishes the engine status list to peer streams
+	// (engines_stream.go).
+	enginesEvents        *enginesPublisher
+	diagnosticParent     func(context.Context, string, string, json.RawMessage) (json.RawMessage, error)
+	admittedLoadParent   func(context.Context, string, string) (json.RawMessage, error)
+	settingsParent       func(context.Context, string, settings.Request, string) (json.RawMessage, error)
+	inspectParent        func(context.Context, modelconfig.InspectRequest, string) (json.RawMessage, error)
+	memoryProfilesParent func(context.Context, settings.Relay) (json.RawMessage, error)
 	// policyParent relays a paired node's node-policy call to the broker
 	// (policyrelay.go). nil until a Manager wires it.
 	policyParent func(ctx context.Context, method string, params json.RawMessage, caller string) (json.RawMessage, error)
@@ -165,10 +168,13 @@ type Executor struct {
 	residentParent      func(context.Context, nodepolicy.DispatchResidentParams) error
 	residents           residentOperations
 	residentGeneration  atomic.Uint64
-	reg                 *Registry
-	reporter            *Reporter
-	emit                func(method string, params any)
-	client              *http.Client
+	// modelsEvents publishes the model inventory to pinned peers' streams
+	// (models_stream.go).
+	modelsEvents *modelsPublisher
+	reg          *Registry
+	reporter     *Reporter
+	emit         func(method string, params any)
+	client       *http.Client
 	// budgetClients holds one engine client per operation response budget a
 	// manifest declares (OperationBinding.ResponseTimeoutS), created on first
 	// use and reused so its connections are too. Guarded by budgetMu.
@@ -260,6 +266,7 @@ func NewExecutor(reg *Registry, reporter *Reporter, emit func(string, any), base
 		emit:                emit,
 		client:              newEngineHTTPClient(engineResponseHeaderTimeout),
 		progress:            newProgressHub(),
+		enginesEvents:       newEnginesPublisher(),
 		baseDir:             baseDir,
 		desired:             newDesiredStateStore(baseDir),
 		detectTimeout:       30 * time.Second,
@@ -269,6 +276,7 @@ func NewExecutor(reg *Registry, reporter *Reporter, emit func(string, any), base
 		pullCleanupTimeout:  5 * time.Second,
 		loadedPollInterval:  defaultLoadedPollSeconds * time.Second,
 		loadedPoke:          make(chan struct{}, 1),
+		modelsEvents:        newModelsPublisher(),
 		engines:             make(map[string]*engineState),
 		stopOnly:            make(map[string]*engineState),
 	}

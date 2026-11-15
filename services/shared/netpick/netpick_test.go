@@ -177,21 +177,23 @@ func TestCandidates_PreservesPublishedOrder(t *testing.T) {
 	}
 }
 
-func TestCandidates_AppendsUnrankedAdvertisedAddresses(t *testing.T) {
-	// An address the node did not rank is a fallback, not a competing opinion:
-	// it is appended, never promoted above a ranked entry.
-	got := Candidates(
-		[]string{"ip=10.0.0.5", "ips=10.0.0.5,172.20.0.5"},
-		[]string{"192.168.9.9", "10.0.0.5"},
-	)
-	want := []string{"10.0.0.5", "172.20.0.5", "192.168.9.9"}
-	if len(got) != len(want) {
-		t.Fatalf("Candidates = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("Candidates = %v, want %v", got, want)
+func TestCandidates_PublishedAddressesIgnoreAnsweringInterface(t *testing.T) {
+	// A responder answers with the A record of the interface the query arrived
+	// on, so successive browses of one node resolve different addresses. A node
+	// that published its addresses must yield the same candidates either way.
+	txt := []string{"ip=10.0.0.5", "ips=10.0.0.5,172.20.0.5"}
+	want := []string{"10.0.0.5", "172.20.0.5"}
+	for _, resolved := range [][]string{{"10.0.0.5"}, {"192.168.9.9"}, {"100.91.0.1", "10.0.0.5"}} {
+		if got := Candidates(txt, resolved); !slices.Equal(got, want) {
+			t.Errorf("Candidates(%v, %v) = %v, want %v", txt, resolved, got, want)
 		}
+	}
+}
+
+func TestCandidates_UnpublishedRecordUsesResolvedAddresses(t *testing.T) {
+	got := Candidates([]string{"uuid=abc"}, []string{"192.168.9.9", "10.0.0.5"})
+	if want := RankRemote([]string{"192.168.9.9", "10.0.0.5"}); !slices.Equal(got, want) {
+		t.Fatalf("Candidates = %v, want %v", got, want)
 	}
 }
 

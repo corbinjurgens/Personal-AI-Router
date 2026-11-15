@@ -1885,8 +1885,17 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 			// decision point and, on commit, the time-to-first-byte boundary.
 			ModifyResponse: func(resp *http.Response) error {
 				att.observeStatus(resp.StatusCode)
+				failureReason := factUpstreamStatus
+				if resp.StatusCode == http.StatusServiceUnavailable {
+					// A peer's own admission refusal carries its reason; any
+					// other non-2xx (including the management-denied marker) is
+					// an upstream status.
+					if admission := admissionFactReason(nodepolicy.RejectReason(resp.Header.Get(nodepolicy.AdmissionHeader))); admission != factUnknown {
+						failureReason = admission
+					}
+				}
 				if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-					att.observeAttempt(routingAttemptResult{factRejected, factUpstreamStatus, resp.StatusCode, true})
+					att.observeAttempt(routingAttemptResult{factRejected, failureReason, resp.StatusCode, true})
 				}
 				metadata := resp.Header.Values(peerStreamFramingHeader)
 				resp.Header.Del(peerStreamFramingHeader)
@@ -1899,7 +1908,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 					return retrySignal{}
 				}
 				if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-					ctl.observeIngress(routingIngressResult{factFailed, factUpstreamStatus, resp.StatusCode})
+					ctl.observeIngress(routingIngressResult{factFailed, failureReason, resp.StatusCode})
 				}
 				if cand.peerUUID != "" && streamRequest.protocol != streamProtocolUnknown && resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
 					var err error

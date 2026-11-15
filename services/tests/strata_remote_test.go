@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"reflect"
 	"testing"
+	"time"
 
+	"nvpair-shared/jsonrpc"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 )
@@ -83,7 +85,13 @@ func TestStrataContractRemoteUnsupported(t *testing.T) {
 	var inventory struct {
 		Engines []strataContractStatus `json:"engines"`
 	}
-	a.Manager.strataContractOK(t, "engine:remote-get-installed", map[string]string{"node": nodeB}, &inventory)
+	// The read answers from B's engine-status stream once A has opened it.
+	var message jsonrpc.Message
+	task1Eventually(t, "peer engine inventory from the stream", 10*time.Second, func() bool {
+		message = a.Manager.strataContractCall(t, "engine:remote-get-installed", map[string]string{"node": nodeB})
+		return message.Error == nil
+	})
+	strataContractDecode(t, message.Result, &inventory)
 	var strata []strataContractStatus
 	for _, status := range inventory.Engines {
 		if status.Engine == "strata" {

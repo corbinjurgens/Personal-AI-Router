@@ -143,7 +143,13 @@ func NewManager(codec *Codec, port int, selfUUID, clusterDir string) *Manager {
 	m.server = NewServer(port, dedup, mesh, m.emitUpsert, m.emitRemove)
 	m.server.emitCancel = m.emitCancel
 	m.performance = newPerformanceRelay(selfUUID, mesh, codec.Notify)
-	m.performance.broadcaster = NewBroadcaster(peers, mesh, clusterDir)
+	m.performance.broadcaster = m.broadcaster
+	// Streams have no total timeout and no connection reuse; consumeStream
+	// bounds the connect and ReadSnapshotStream the idle time.
+	m.performance.streams = clustertrust.NewPeerServiceClient(mesh, clustertrust.PeerServiceClientOptions{
+		BaseConfigDir: peerConfigBase(clusterDir),
+		ResolveRoute:  m.broadcaster.resolveRoute,
+	})
 	m.server.performance = m.performance
 	return m
 }
@@ -157,7 +163,6 @@ func (m *Manager) Run(ctx context.Context) error {
 	m.cancel = cancel
 	defer cancel()
 	defer m.broadcaster.clients.CloseIdle()
-	defer m.performance.broadcaster.clients.CloseIdle()
 
 	if err := m.codec.Notify("ready", ReadyParams{Version: Version}); err != nil {
 		return fmt.Errorf("failed to send ready notification: %w", err)
@@ -191,7 +196,6 @@ func (m *Manager) Run(ctx context.Context) error {
 	// them while we were unclustered would otherwise wait for the next heartbeat.
 	go m.mesh.Watch(ctx, func(clustered bool) {
 		m.broadcaster.clients.CloseIdle()
-		m.performance.broadcaster.clients.CloseIdle()
 		m.performance.signal()
 		slog.Info("inter-node interface switched personality",
 			"clustered", clustered, "peers", m.peers.count())
@@ -259,9 +263,10 @@ func (m *Manager) refreshPeers(ctx context.Context) {
 	// peers dedup, so nodes that already have these ignore the re-push.
 	if len(added) > 0 {
 		m.pushActiveSnapshot()
-		if m.performance != nil {
-			m.performance.signal()
-		}
+	}
+	// Performance subscriptions follow every peer-set change.
+	if (len(added) > 0 || len(removed) > 0) && m.performance != nil {
+		m.performance.signal()
 	}
 }
 

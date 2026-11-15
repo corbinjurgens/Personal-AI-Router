@@ -590,7 +590,7 @@ Requests (caller → service):
 | `engine:errors` | — | `{ errors: [ServiceError] }` |
 | `engine:catalog` | `{ engine, platform?, arch?, query? }` | `{ models: [{ id, name, author, url, size?, downloads, likes, updatedAt, tags, family?, parameterSize?, appleOnly? }], source, platform?, arch?, fetchedAt?, searchable?, query? }` — the models an engine can **download**, as opposed to `engine:models`, which reports what is already installed. Each engine family has one curated source, selected by the manifest's `family`; only llama.cpp has one (a fork with `family: "llamacpp"` gets it), and the client spellings `llama-cpp` and `llama.cpp` are accepted. It is fetched live from Hugging Face and cached for six hours, with concurrent callers coalesced onto one request, a failed attempt — with or without a list to fall back on — followed by a backoff before the next. llama.cpp downloads any GGUF repo as `repo:quantization`; its browse list is the GGUF repos of `ggml-org`, `bartowski`, and `unsloth`, keeping only open, text-generating repos that ship a `Q4_K_M` file, each offered as `repo:Q4_K_M`. It is the one `searchable` source: a `query` searches all of Hugging Face under the same rules, each query cached on its own (the 20 most recently used are kept), and the reply echoes it. A query longer than 100 characters is refused rather than shortened, since a shortened one searches for something the operator did not type. `platform` and `arch` are the GOOS and GOARCH the models will be **installed on**, which is not always this host — a client driving a peer should name that peer. Omitting both means this host; naming a platform without an arch leaves the arch unknown rather than borrowing this host's. The llama.cpp list is not machine-locked, so nothing is filtered for the target, and `appleOnly` is never set; the reply echoes the `platform` and `arch` it was asked for. `name` is pull-ready: it can be handed to `pull_model` verbatim. An engine with no curated source is an error, not an empty list. The reply is a single JSON-RPC frame, so every hop on its path must allow `jsonrpc.WorkerFrameBytes`. |
 | `engine:models` | — | `{ models: [string], modelsByEngine: { <engine>: [string] }, loadedByEngine: { <engine>: [string] }, modelIdentities?: { <engine>: { <model>: ModelIdentity } } }` — the flat de-duplicated union of every running engine's models, the per-engine breakdown keyed by engine name, and the per-engine set of models currently **loaded in memory** (all normalized from each engine's `list_models` / `loaded_models` action `result` spec). `modelsByEngine` carries a key for every running engine whose inventory was successfully queried, including an empty list = "running, no models available"; a missing key means not running / not queryable / invalid response. `loadedByEngine` uses the same known-empty distinction for residency and also omits engines with no loaded endpoint. `modelIdentities` is optional display metadata for llama.cpp-family models present in the readiness-masked `modelsByEngine`; each `ModelIdentity` follows `shared/engines.ModelIdentity` and grants no admission or residency authority. `policy` is this node's policy advertisement (`{ revision, roles, pausedBy? }`) as the broker last pushed it with `engine:node-projection`, omitted until the first push. The `/v1/models` HTTP surface returns the same shape. |
-| `engine:remote-get-installed` | `{ node }` | `{ engines: [EngineStatus] }` fetched from the remote node over `ec` mTLS |
+| `engine:remote-get-installed` | `{ node }` | `{ engines: [EngineStatus] }` answered from the peer's engine-status stream; no request reaches the peer. Errors while that stream is not live (no line within 25 s) or its route, admission or pinned identity changed. A peer that revokes this node ends the stream at its next keepalive, so a cached answer can outlive that revocation by up to 10 s |
 | `engine:remote-install` | `{ node, engine }` | `{ opId, status: EngineStatus }` after the remote install (live progress via `engine:remote-progress`) |
 | `engine:remote-pull-model` | `{ node, engine, model?, params? }` | `{ opId, result }` after the remote pull (live progress via `engine:remote-progress`) |
 | `engine:remote-copy-model` | `{ node, engine, model }` | `{ opId, result: { engine, model, files, filesSkipped, bytesTotal, bytesCopied } }` after copying the model from `node`'s engine store into this node's (live progress via `engine:remote-progress` with `op:"copy"`). See "Model copy between nodes" below |
@@ -634,7 +634,8 @@ as false; it is never derived from `pausedBy` or `pausedLocally`. The
 broker sends it after every persisted policy or availability change and on
 every `engine:ready`. engine-manager keeps the last one in memory only and
 serves `policy` on `engine:models` and `GET /v1/models`, so paired peers learn
-this node's roles from the pinned inventory fetch they already make. It is
+this node's roles from the pinned inventory they already receive (the
+`GET /v1/models/events` stream). It is
 never put in mDNS TXT or in the peer-services descriptor. `pausedLocally` remains
 provenance. `managementBlocked` fences all peer mutations and local activation,
 and either-origin pause cancels accepted starts, loads and crash relaunch.
@@ -675,6 +676,18 @@ relay), dials that peer's `ec` surface over pin-based cluster mTLS, and — for
 progress frame up as `engine:remote-progress`, and settles the request with the
 terminal result. They fail if this node isn't clustered or the target isn't a
 pinned cluster peer. See "Remote engine management" below.
+
+Notification (service → caller): `engine:remote-installed-changed
+{nodeId, engines: [EngineStatus]}` carries a paired peer's engine status list
+whenever it differs from the last one received, including the first frame
+after each (re)connect. engine-manager subscribes to every admitted peer's
+`GET /v1/engines/events` alongside its settings stream (same supervisor, same
+three-second retry) and keeps the latest list per peer only while that stream
+is live; the entry is dropped when the stream ends. The engine-status
+subscriber rechecks the stream's route, admission and pinned identity every
+2 s between lines, so after a directory change moves the peer's endpoint the
+stream ends within 2 s and reopens on the new route after the retry pause. The broker forwards
+`engine:remote-installed-changed` with the other `engine:` notifications.
 
 `engine:install`, `engine:uninstall`,
 `engine:set-port`, and `engine:action` run in their own goroutine on the
@@ -735,6 +748,28 @@ principal even when discovery gives it a different host UUID. The discovery
 directory retains self for model-copy identity resolution; mesh self-trust is
 not permission to start a peer subscription. Failed peer streams retry after
 three seconds.
+
+`GET /v1/engine-settings/events` is an NDJSON snapshot stream served through
+`clustertrust.ServeSnapshotStream`. It sends a `null` keepalive every 10
+seconds and rechecks pin authority before each frame, keepalives included, so
+a revoked pin ends an open stream within one keepalive. Subscribers drop a
+stream after 25 seconds without a line and reconnect through
+`watchPeerSettings`.
+
+`GET /v1/engines/events` follows the same rules (10-second keepalive, pin
+recheck before each frame, 25-second subscriber idle). Its frames are the
+`GET /v1/engines` body, `{engines:[EngineStatus]}`. While at least one stream
+is open, the list is rebuilt every 10 seconds and 250 ms after a local
+`engine:state-changed`, and a frame is sent only when its encoded bytes change.
+A new stream gets the last published list at once, if one was published, and
+triggers a rebuild about 250 ms later. That rebuild corrects a list that changed
+while no stream was open. Straight after start-up nothing has been published,
+so the first stream receives no list until that first rebuild.
+With no stream open the publisher does no status work. The rebuild waits up to
+one second for an engine's operation lock; an engine whose lock stays held
+longer (a long install or start) contributes its in-memory status instead of a
+fresh detection, so a long operation delays neither the other engines' changes
+nor its own state changes.
 
 Preset conversion preserves native sampler defaults, reasoning budget and output
 limits as extra options. Native `flash-attn = auto` becomes inherited policy;
@@ -837,6 +872,29 @@ scanned only at start, so a model added later appears after a restart. Peer
 copy, model settings inspection and serving presets cover only an engine's own
 store, not source models. Adding sources by hand is not supported yet.
 
+## Model inventory stream
+
+The em surface's mTLS personality also serves `GET /v1/models/events` to
+pinned peers; the plaintext loopback personality does not (404 there). Access
+is the `GET /v1/models` rule: `requirePinnedPeer` admits the request, and the
+pin is re-verified (after a membership refresh) before every line, so a peer
+unpaired mid-stream loses it at the next line.
+
+The response is NDJSON. The first line is the current `GET /v1/models` document
+(`ModelsResult`); later lines repeat the full document whenever it changes, and
+a `null` keepalive is written every 10 s otherwise (5 s write deadline per
+line). The publisher rebuilds the document at start, every 15 s (policy pushes
+and download progress have no single change signal) and 250 ms after each
+`engine:models-changed` emission, coalescing bursts. It publishes only when the
+document differs from the last published one after each memory-evidence entry's
+`freshness.sampleAgeMs`, `freshness.qualificationAgeMs` and
+`freshness.observationGeneration` are cleared, the comparison the loaded-model
+watcher uses for `engine:models-changed`; the published line is the full,
+un-normalized document. Subscribers drop a stream after 25 s without a line. At
+most 64 streams are open at once; a further request gets `503 too many model
+streams`. A peer's scanner subscribes once instead of fetching `/v1/models`
+every 15 s; this node's own scanner keeps the loopback fetch.
+
 ## Remote engine management
 
 When the parent passes `--control-port`, engine-manager serves the **`ec`
@@ -917,6 +975,7 @@ Endpoints (all under `/v1`):
 | Route | Shape | Purpose |
 |---|---|---|
 | `GET /v1/engines` | JSON | remote `engine:get-installed` |
+| `GET /v1/engines/events` | NDJSON stream | the `GET /v1/engines` body on connect and on change, `null` keepalive every 10 s |
 | `GET /v1/remote-management` | JSON | caller-only effective permission, no grant list or setter |
 | `POST /v1/engines/install` | NDJSON stream | remote install (+ optional start) with live progress |
 | `POST /v1/models/pull` | NDJSON stream | remote model pull with live progress |
@@ -1391,7 +1450,8 @@ caller is authorized against a per-peer pin, a non-member is refused with a `403
 and while this node belongs to no cluster it presents no leaf so no handshake
 completes:
 
-- **`--http-port`** — the model-list surface (`em`, `GET /v1/models`; the broker
+- **`--http-port`** — the model-list surface (`em`, `GET /v1/models` and the
+  `GET /v1/models/events` stream; the broker
   passes `:14322`). A node's model inventory is cluster data, so LAN callers must
   be pinned peers. This port additionally serves **plaintext on loopback only**,
   which is how this node's own scanner enriches its own card — including when the

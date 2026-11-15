@@ -200,8 +200,11 @@ func (m *Manager) handleOutboundCompletion(w http.ResponseWriter, env *pairingEn
 		if out.Err != nil && (out.Err.Code == eapnoob.ErrHMACVerificationFailed || out.Err.Code == eapnoob.ErrUnrecognizedOOBMsgID) {
 			reason = reasonIncorrectPIN
 		}
-		m.finishInviteReason(env.InviteID, inviteStateFailed, reason)
+		// Clear the provisional member before publishing the terminal state:
+		// respond-to-invite answers as soon as it reads a non-pending invite, so
+		// a reader that sees "failed" must already see the member gone.
 		m.clearPendingPairingMember(inv.FromNodeUUID)
+		m.finishInviteReason(env.InviteID, inviteStateFailed, reason)
 		m.emitNodesChanged()
 	}
 	if out.Done && out.Success {

@@ -31,12 +31,14 @@ import (
 // Captured from this process, independently of the service and broker versions.
 var serviceBuildID = buildinfo.Current()
 
+// GPUInfo is one adapter's readout. VramUsedBytes and UtilizationPercent are
+// absent when there is no reading; 0 is a reading.
 type GPUInfo struct {
-	Name               string `json:"name"`
-	PhysicalID         string `json:"physicalId,omitempty"`
-	VramBytes          uint64 `json:"vram_bytes,omitempty"`
-	VramUsedBytes      uint64 `json:"vram_used_bytes,omitempty"`
-	UtilizationPercent uint32 `json:"utilization_percent,omitempty"`
+	Name               string  `json:"name"`
+	PhysicalID         string  `json:"physicalId,omitempty"`
+	VramBytes          uint64  `json:"vram_bytes,omitempty"`
+	VramUsedBytes      *uint64 `json:"vram_used_bytes,omitempty"`
+	UtilizationPercent *uint32 `json:"utilization_percent,omitempty"`
 
 	// statsKey is the opaque per-adapter identifier used to join this
 	// static GPUInfo against statsCollector.Snapshot() results. Its
@@ -58,14 +60,12 @@ type GPUInfo struct {
 // at startup from ghw; UtilizationPercent is refreshed every collector tick
 // from PDH on Windows, /proc/stat on Linux, or Mach through gopsutil on macOS.
 // Every field is omitempty so a value we couldn't read drops from JSON rather
-// than appearing as a misleading literal zero — the one exception is
-// UtilizationPercent on a CPU that really is idle, which renders the same as
-// "unknown". That ambiguity is benign because it's visually identical to the
-// user either way.
+// than appearing as a misleading literal zero. UtilizationPercent is a pointer
+// so an idle CPU's sampled 0 stays present; it is absent only without a reading.
 type CPUInfo struct {
-	Name               string `json:"name,omitempty"`
-	Cores              uint32 `json:"cores,omitempty"`
-	UtilizationPercent uint32 `json:"utilization_percent,omitempty"`
+	Name               string  `json:"name,omitempty"`
+	Cores              uint32  `json:"cores,omitempty"`
+	UtilizationPercent *uint32 `json:"utilization_percent,omitempty"`
 }
 
 // MemoryInfo is the node-level physical-RAM readout. TotalBytes is reported by
@@ -169,8 +169,8 @@ func handleClusterIdentity(msg applog.StdinMessage, identity *clusterIdentity) {
 //
 // GPUs whose statsKey doesn't appear in snap.GPU (host with no dynamic GPU
 // source, counter absent, or a just-plugged-in adapter the collector hasn't
-// seen yet) keep their zero-valued dynamic fields, which the omitempty tags
-// drop from JSON. GPUs explicitly marked usesSystemMemoryUsage are the
+// seen yet) keep nil dynamic fields, which the omitempty tags drop from JSON.
+// GPUs explicitly marked usesSystemMemoryUsage are the
 // exception: their VRAM-used value is the independently sampled system-memory
 // usage, so it remains available even when dynamic nvidia-smi collection is not.
 //
@@ -193,8 +193,9 @@ func buildResponseAt(gpus []GPUInfo, cpuStatic *CPUInfo, memTotal uint64, snap s
 		if physicalIDs[gpu.statsKey] {
 			gpu.PhysicalID = gpu.statsKey
 		}
-		if gpu.usesSystemMemoryUsage {
-			gpu.VramUsedBytes = snap.MemUsedBytes
+		if gpu.usesSystemMemoryUsage && snap.MemUsedBytes > 0 {
+			used := snap.MemUsedBytes
+			gpu.VramUsedBytes = &used
 		}
 		if s, ok := snap.GPU[gpu.statsKey]; ok {
 			if !gpu.usesSystemMemoryUsage {
@@ -305,12 +306,9 @@ func mergeGPUInventory(static, recovered []GPUInfo) []GPUInfo {
 // startup.
 func nodeInfoHandler(mesh *clustertrust.Mesh, body func() []byte) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		mesh.Refresh()
-		if mesh.Clustered() {
-			if _, ok := mesh.VerifyClientPin(r); !ok {
-				http.Error(w, "forbidden: not a pinned cluster peer", http.StatusForbidden)
-				return
-			}
+		if !nodeInfoAdmitted(mesh, r) {
+			http.Error(w, "forbidden: not a pinned cluster peer", http.StatusForbidden)
+			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(body())
@@ -453,10 +451,14 @@ func main() {
 		return &principal
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/node-info", nodeInfoHandler(mesh, func() []byte {
+	body := func() []byte {
 		return buildResponse(gpus, cpu, memTotal, collector.Snapshot(), hostUUID, clusterPrincipal())
-	}))
+	}
+	pub := &nodeInfoPublisher{hub: clustertrust.SnapshotHub[json.RawMessage]{Limit: nodeInfoStreamsTotal}, body: body}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/node-info", nodeInfoHandler(mesh, body))
+	mux.HandleFunc("/v1/node-info/events", nodeInfoStreamHandler(mesh, pub))
 
 	// Listener layout (set up below depending on flags). Exactly one of the two
 	// blocks that own *port runs:
@@ -562,6 +564,9 @@ func main() {
 	// stamp is carried by the daemon for the whole node.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Until the first sample is published, a stream subscriber waits for it.
+	go pub.run(ctx)
 
 	// Keep membership converging on its own when cluster-gated. Every other gate
 	// here is refreshed by the request handler, but the TLS personality is chosen

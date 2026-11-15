@@ -1765,6 +1765,9 @@ admission owner.
 A rejection is `503` with `X-PAIR-Admission: <reason>`, `Retry-After`, and a
 JSON body naming the reason.
 
+A rejection on the cluster ingress is logged at info level with the model, peer
+and reason, and never with the path or request content.
+
 **The router's wait header.** Each inference attempt carries
 `X-PAIR-Admission-Wait`: `0` while the round has other candidates, so a busy
 node hands the request straight back, and `admission.queueTimeoutSeconds` for
@@ -2245,6 +2248,17 @@ remain historical and never authorize cancellation or imply later API liveness.
 If prefix trimming removes the associated attempt, wire `attached` becomes
 false and no associated card summary may be inferred. Matching only workload ID
 or substituting a different attempt's engine is invalid.
+
+A peer's `503` that carries a recognized `X-PAIR-Admission` reason records that
+admission reason on the attempt, as the node's own admission does. Every other
+non-2xx status, including a `502` that carries the header and the
+`management-denied` marker, records `upstream-status`. The desktop card shows the
+request's routing summary. A detached association whose attempt an API attempt
+followed shows that attempt's own historical outcome until the request ends; a
+request that then completes on an API deployment shows only that it was served
+by an API deployment, without account details. Any other detached association
+shows its attempt's outcome only while the record is recoverable. The card is
+styled as failed only for a request that ended in `failed`.
 
 History is memory-only. Proxy death can lose unsent facts and incomplete
 windows; the broker discards incomplete staging, preserves previously accepted

@@ -16,7 +16,7 @@ import (
 type ioRegistryPerformance struct {
 	DeviceUtilization   *uint64 `plist:"Device Utilization %"`
 	GPUActivity         *uint64 `plist:"GPU Activity(%)"`
-	AllocSystemMemory   uint64  `plist:"Alloc system memory"`
+	AllocSystemMemory   *uint64 `plist:"Alloc system memory"`
 	InUseSystemMemory   uint64  `plist:"In use system memory"`
 	VRAMUsedBytes       *uint64 `plist:"vramUsedBytes"`
 	InUseVidMemoryBytes *uint64 `plist:"inUseVidMemoryBytes"`
@@ -58,14 +58,15 @@ func (e *ioRegistryEntry) UnmarshalPlist(unmarshal func(interface{}) error) erro
 }
 
 type darwinGPURecord struct {
-	shared           bool
-	memory           *noderec.MemoryDomain
-	statsKey         string
-	name             string
-	vramTotal        uint64
-	vramUsed         uint64
-	utilizationPct   uint32
-	utilizationValid bool
+	shared    bool
+	memory    *noderec.MemoryDomain
+	statsKey  string
+	name      string
+	vramTotal uint64
+	// vramUsed and utilizationPct are nil when ioreg gave no reading; 0 is
+	// a reading.
+	vramUsed       *uint64
+	utilizationPct *uint32
 }
 
 func parseIORegistryGPUs(data []byte, systemMemory uint64) ([]darwinGPURecord, error) {
@@ -136,27 +137,22 @@ func normalizeIORegistryGPU(entry ioRegistryEntry, name string, systemMemory uin
 		if dedicatedUsed == nil {
 			dedicatedUsed = entry.Performance.InUseVidMemoryBytes
 		}
+		record.vramUsed = entry.Performance.AllocSystemMemory
 		if dedicatedUsed != nil {
-			record.vramUsed = *dedicatedUsed
-		} else {
-			record.vramUsed = entry.Performance.AllocSystemMemory
+			record.vramUsed = dedicatedUsed
 		}
 		if record.vramTotal == 0 && dedicatedUsed != nil &&
 			entry.Performance.VRAMFreeBytes != nil {
 			record.vramTotal = *dedicatedUsed + *entry.Performance.VRAMFreeBytes
 		}
 	}
-	var utilization uint64
-	if entry.Performance.DeviceUtilization != nil {
-		utilization = *entry.Performance.DeviceUtilization
-		record.utilizationValid = true
-	} else if entry.Performance.GPUActivity != nil {
-		utilization = *entry.Performance.GPUActivity
-		record.utilizationValid = true
+	utilization := entry.Performance.DeviceUtilization
+	if utilization == nil {
+		utilization = entry.Performance.GPUActivity
 	}
-	if utilization > 100 {
-		utilization = 100
+	if utilization != nil {
+		pct := uint32(min(*utilization, 100))
+		record.utilizationPct = &pct
 	}
-	record.utilizationPct = uint32(utilization)
 	return record
 }

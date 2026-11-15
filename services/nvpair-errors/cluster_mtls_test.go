@@ -4,27 +4,22 @@
 package main
 
 import (
-	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/json"
 	"encoding/pem"
-	"fmt"
-	"io"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
 	"nvpair-shared/clustertrust"
-	"nvpair-shared/errors"
 )
 
 // genLeaf mints an Ed25519 self-signed leaf carrying uuid in CN + urn:nvpair:node
@@ -106,10 +101,11 @@ func setupNode(t *testing.T, certPEM, keyPEM []byte, pins map[string][]byte) str
 	return dir
 }
 
-// servePinnedErrorsMux starts mgr's /v1/errors surface behind cluster mTLS and
-// returns a client that dials it as a pinned peer, plus the server's own mesh.
-// The surface is mTLS unconditionally, so there is no plaintext way to reach the
-// handlers — every handler test goes through here.
+// servePinnedErrorsMux starts mgr's errors surface behind cluster mTLS, wired to
+// a publisher as startPeerSync wires it, and returns a client that dials it as a
+// pinned peer. The surface is mTLS unconditionally, so there is no plaintext way
+// to reach the handlers — every handler test goes through here. The client has
+// no total timeout so it can hold a stream open.
 func servePinnedErrorsMux(t *testing.T, mgr *Manager) (*httptest.Server, *http.Client) {
 	t.Helper()
 	selfCert, selfKey := genLeaf(t, "uuid-self")
@@ -117,23 +113,33 @@ func servePinnedErrorsMux(t *testing.T, mgr *Manager) (*httptest.Server, *http.C
 	selfMesh := clustertrust.Open(setupNode(t, selfCert, selfKey, map[string][]byte{"uuid-peer": peerCert}))
 	peerMesh := clustertrust.Open(setupNode(t, peerCert, peerKey, map[string][]byte{"uuid-self": selfCert}))
 
-	srv := httptest.NewUnstartedServer(newErrorsMux(mgr, selfMesh))
+	pub := newErrorsPublisher()
+	pub.publish(mgr)
+	mgr.SetOnLocalChange(func() { pub.publish(mgr) })
+	srv := httptest.NewUnstartedServer(newErrorsMux(mgr, selfMesh, pub))
 	srv.TLS = selfMesh.ServerTLSConfig()
 	srv.StartTLS()
 	t.Cleanup(srv.Close)
-
-	cfg, ok := peerMesh.ClientTLSConfig("uuid-self")
-	if !ok {
-		t.Fatal("the pinned peer must be able to build a client for self")
-	}
-	return srv, &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{TLSClientConfig: cfg}}
+	return srv, meshClient(t, peerMesh, "uuid-self")
 }
 
-// TestErrorsPeerSync_MTLSGate is the end-to-end evidence: error peer
-// sync over mTLS authenticates and gates to pinned cluster members. A pinned
-// member is accepted; a node that can complete the TLS handshake but is not
-// pinned by the receiver is rejected at the pin gate; and pushing to a peer we
-// hold no pin for can't even build a client.
+// meshClient dials peerUUID with mesh's pinned client configuration.
+func meshClient(t *testing.T, mesh *clustertrust.Mesh, peerUUID string) *http.Client {
+	t.Helper()
+	cfg, ok := mesh.ClientTLSConfig(peerUUID)
+	if !ok {
+		t.Fatalf("no pin for %s", peerUUID)
+	}
+	transport := &http.Transport{TLSClientConfig: cfg, ResponseHeaderTimeout: 5 * time.Second}
+	t.Cleanup(transport.CloseIdleConnections)
+	return &http.Client{Transport: transport}
+}
+
+// TestErrorsPeerSync_MTLSGate is the end-to-end evidence: the error stream over
+// mTLS authenticates and gates to pinned cluster members. A pinned member is
+// accepted; a node that can complete the TLS handshake but is not pinned by the
+// receiver is rejected at the pin gate; and subscribing to a peer we hold no pin
+// for can't even build a client.
 func TestErrorsPeerSync_MTLSGate(t *testing.T) {
 	aCert, aKey := genLeaf(t, "uuid-a")
 	bCert, bKey := genLeaf(t, "uuid-b")
@@ -150,39 +156,39 @@ func TestErrorsPeerSync_MTLSGate(t *testing.T) {
 		t.Fatal("a populated cluster dir must read as clustered")
 	}
 
-	// A serves its errors ingest over mTLS.
-	mgrA := NewManager(NewCodec(struct {
-		io.Reader
-		io.Writer
-	}{strings.NewReader(""), io.Discard}))
-	srv := httptest.NewUnstartedServer(newErrorsMux(mgrA, mtlsA))
+	// A serves its errors stream over mTLS.
+	mgrA := managerForNode("uuid-a")
+	pub := newErrorsPublisher()
+	pub.publish(mgrA)
+	srv := httptest.NewUnstartedServer(newErrorsMux(mgrA, mtlsA, pub))
 	srv.TLS = mtlsA.ServerTLSConfig()
 	srv.StartTLS()
 	defer srv.Close()
 
-	body, _ := json.Marshal(errors.SyncEnvelope{NodeID: "uuid-b"})
-	push := func(m *clustertrust.Mesh, peerUUID string) (int, error) {
-		cfg, ok := m.ClientTLSConfig(peerUUID)
-		if !ok {
-			return 0, fmt.Errorf("no pin for peer %s", peerUUID)
-		}
-		client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{TLSClientConfig: cfg}}
-		resp, err := client.Post(srv.URL+"/v1/errors", "application/json", bytes.NewReader(body))
+	subscribe := func(m *clustertrust.Mesh) int {
+		t.Helper()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/v1/errors/events", nil)
 		if err != nil {
-			return 0, err
+			t.Fatal(err)
+		}
+		resp, err := meshClient(t, m, "uuid-a").Do(req)
+		if err != nil {
+			t.Fatalf("subscribe: %v", err)
 		}
 		defer resp.Body.Close()
-		return resp.StatusCode, nil
+		return resp.StatusCode
 	}
 
-	// Pinned member B -> A: accepted (204).
-	if code, err := push(mtlsB, "uuid-a"); err != nil || code != http.StatusNoContent {
-		t.Fatalf("pinned member push: code=%d err=%v, want 204", code, err)
+	// Pinned member B -> A: accepted.
+	if code := subscribe(mtlsB); code != http.StatusOK {
+		t.Fatalf("pinned member stream: code=%d, want 200", code)
 	}
 
 	// C completes the handshake (it pins A) but A doesn't pin C -> 403 at the gate.
-	if code, err := push(mtlsC, "uuid-a"); err != nil || code != http.StatusForbidden {
-		t.Fatalf("non-member push: code=%d err=%v, want 403", code, err)
+	if code := subscribe(mtlsC); code != http.StatusForbidden {
+		t.Fatalf("non-member stream: code=%d, want 403", code)
 	}
 
 	// Client-side gate: B holds no pin for an unknown peer, so the DER lookup
@@ -190,37 +196,4 @@ func TestErrorsPeerSync_MTLSGate(t *testing.T) {
 	if mtlsB.HasPin("uuid-unknown") {
 		t.Fatal("an unpinned peer must not resolve a pin (cluster gate)")
 	}
-}
-
-func TestIngestRequiresPinnedCallerIdentity(t *testing.T) {
-	mgr := managerForNode("uuid-self")
-	keep := localErr("keep", "uuid-other", 1000)
-	mgr.ReconcilePeer("uuid-other", []ServiceError{keep})
-	srv, client := servePinnedErrorsMux(t, mgr)
-	post := func(env errors.SyncEnvelope) int {
-		t.Helper()
-		body, err := json.Marshal(env)
-		if err != nil {
-			t.Fatalf("marshal snapshot: %v", err)
-		}
-		resp, err := client.Post(srv.URL+"/v1/errors", "application/json", bytes.NewReader(body))
-		if err != nil {
-			t.Fatalf("post snapshot: %v", err)
-		}
-		defer resp.Body.Close()
-		return resp.StatusCode
-	}
-	if got := post(errors.SyncEnvelope{NodeID: "uuid-other", Errors: []ServiceError{localErr("injected", "uuid-other", 2000)}}); got != http.StatusForbidden {
-		t.Errorf("mismatched identity status = %d, want 403", got)
-	}
-	assertErrorSnapshot(t, mgr, []ServiceError{keep})
-	if got := post(errors.SyncEnvelope{NodeID: "uuid-other"}); got != http.StatusForbidden {
-		t.Errorf("mismatched empty snapshot status = %d, want 403", got)
-	}
-	assertErrorSnapshot(t, mgr, []ServiceError{keep})
-	peer := localErr("peer", "uuid-peer", 1000)
-	if got := post(errors.SyncEnvelope{NodeID: "uuid-peer", Errors: []ServiceError{peer}}); got != http.StatusNoContent {
-		t.Fatalf("matched identity status = %d, want 204", got)
-	}
-	assertErrorSnapshot(t, mgr, []ServiceError{keep, peer})
 }
