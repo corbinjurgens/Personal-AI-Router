@@ -1,21 +1,28 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+import type { ModelIdentity } from '@/shared/types/engines'
 import type { ModelLoad } from '@/shared/types/model-config'
 import type { AdvertisedProfile, NodeRoles } from '@/shared/types/node-roles'
 
-/** Call with the profile's own node roles, never a cluster-wide role list. */
+/**
+ * Call with the profile's own node roles, never a cluster-wide role list.
+ * `identity` is the served model's identity; its configured context is the
+ * last fallback when the node's engine settings are not readable here.
+ */
 export function profileSummary(
     profile: AdvertisedProfile,
     nodeName: string,
     roles: NodeRoles,
-    load?: ModelLoad
+    load?: ModelLoad,
+    identity?: ModelIdentity
 ) {
     const requested = load?.requested
     const context =
         load?.resolved?.perSlotContext ??
         (requested?.context?.mode === 'fixed' ? requested.context.tokens : undefined) ??
-        profile.contextTokens
+        profile.contextTokens ??
+        identity?.configuredContextTokens
     const gpu =
         requested?.fit === 'on'
             ? 'Native fit'
