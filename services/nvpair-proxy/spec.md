@@ -699,6 +699,9 @@ concrete model request is answered with the local `502`
 a `model` member with `502` `{"error":"no active node selected or available"}`,
 and a tier request with `404` `no eligible model for tier <tier>` (§12.3). None
 carries `X-PAIR-Admission` or `Retry-After`, and no engine is contacted.
+When this node declares the requested profile key on the entry engine but its
+`ServedModels` omits that profile's model, the concrete `502` body also carries
+`"reason":"not-served"`.
 
 The hint changes neither a node's advertised inventory nor its declared roles,
 so the combined model list and the tier aliases keep their declared contents

@@ -387,6 +387,14 @@ func (f *facade) concreteModelAdvertised(model string) bool {
 	return false
 }
 
+// selfProfileNotServed reports a key this node declares on f's engine whose
+// model its Served list omits.
+func (f *facade) selfProfileNotServed(model string) bool {
+	pol := f.host.admission.currentPolicy()
+	pr, ok := pol.ProfileByKey(model)
+	return ok && pr.Engine == f.profile.Name && !modelServed(pol.ServedModels, pr.Engine, pr.Model, f.host.normalizeEngineModel)
+}
+
 // of returns the declaration of a candidate's node, empty when it declares
 // nothing.
 func (d declaredRoles) of(c candidate) map[string][]nodepolicy.AdvertisedProfile {

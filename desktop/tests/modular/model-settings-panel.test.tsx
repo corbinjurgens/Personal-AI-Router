@@ -354,6 +354,23 @@ describe('composed model settings', () => {
         expect(setPolicy).not.toHaveBeenCalled()
     })
 
+    it('defaults a new profile to Served Include on a node with an explicit Served list', async () => {
+        getPolicy.mockResolvedValue(saved({ servedModels: [] }))
+        await render(rowPanel())
+        await act(async () => button('New profile', panel()).click())
+        await type('Profile key', 'served-profile')
+        await act(async () => button('Create profile', panel()).click())
+        const key = modelSettingsKey({ nodeId: 'self', engine: 'llamacpp' }, 'served-profile')
+        expect(useEngineSettingsStore.getState().modelDrafts[key]?.change?.policy).toEqual({
+            served: true,
+            displayName: identity.model,
+            icon: ''
+        })
+        const served = panel().querySelector('[aria-label="served"]')
+        expect(served?.textContent).toContain('Include')
+        expect(setPolicy).not.toHaveBeenCalled()
+    })
+
     it('blocks a reserved profile key while accepting coder-local', async () => {
         await render(rowPanel())
         await act(async () => button('New profile', panel()).click())

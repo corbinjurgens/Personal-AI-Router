@@ -16,7 +16,7 @@ import {
     useEngineSettingsStore
 } from '@/ui/stores/engine-settings.store'
 import { InlineErrorBanner } from '@/ui/components/InlineErrorBanner'
-import { portableLoadPatch } from '@/shared/utils/node-policy-model-copy'
+import { modelRoutingState, portableLoadPatch } from '@/shared/utils/node-policy-model-copy'
 
 export default function ModelProfileControls({
     text,
@@ -87,6 +87,14 @@ export default function ModelProfileControls({
         !!draft?.change?.remove
     const stageMetadata = () => {
         if (blocked || !target || !keyValid || duplicate || !nameValid) return
+        // A node with an explicit Served list refuses a profile whose model it omits, so a new
+        // profile starts as Include there; the review below can still change it before saving.
+        const served =
+            newProfile &&
+            draft?.change?.policy?.served === undefined &&
+            modelRoutingState(savedText ?? '', identity).served !== 'unrestricted'
+                ? { served: true }
+                : {}
         useEngineSettingsStore.getState().editModel(key, {
             ...draft?.change,
             modelId: identity.model,
@@ -96,7 +104,7 @@ export default function ModelProfileControls({
             ...(newProfile && !draft?.change?.load
                 ? { load: portableLoadPatch({}, ['context']) }
                 : {}),
-            policy: { ...draft?.change?.policy, displayName, icon }
+            policy: { ...draft?.change?.policy, ...served, displayName, icon }
         })
         onReview()
     }

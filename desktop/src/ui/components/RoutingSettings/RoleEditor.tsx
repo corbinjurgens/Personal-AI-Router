@@ -15,6 +15,7 @@ import {
 import { useShallow } from 'zustand/react/shallow'
 import type { NodePolicySnapshot } from '@/shared/types/node-policy'
 import { roleNameError, sameNodeRoles } from '@/shared/utils/node-roles'
+import { modelRoutingState } from '@/shared/utils/node-policy-model-copy'
 import { ConfirmModal } from '@/ui/components/ConfirmModal'
 import { InlineErrorBanner } from '@/ui/components/InlineErrorBanner'
 import { ModelIdentityTags } from '@/ui/components/ModelIdentity/ModelIdentityTags'
@@ -340,9 +341,23 @@ export default function RoleEditor({ targetId, nodeId, onSaved }: RoleEditorProp
                     {role.profiles.map((key, index) => {
                         const profile = profiles.find(profile => profile.key === key)
                         const label = profile?.displayName ?? key
+                        // An explicit Served list without this profile's model refuses the role member.
+                        const unserved =
+                            profile !== undefined &&
+                            modelRoutingState(baseline.policy, { ...profile, profileKey: key }).served ===
+                                'excluded'
                         return (
                             <Flex key={key} align="center" gap="2" wrap="wrap" aria-label={label}>
                                 <Text title={label}>{label}</Text>
+                                {unserved && (
+                                    <Badge
+                                        color="gray"
+                                        kind="solid"
+                                        title="This node's Served list does not include this profile's model, so the role cannot route to it."
+                                    >
+                                        Not served
+                                    </Badge>
+                                )}
                                 <ModelIdentityTags
                                     identity={
                                         profile?.modelIdentity ??

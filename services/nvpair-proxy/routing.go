@@ -921,9 +921,17 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 		slog.Warn("proxy request rejected",
 			"id", reqID, "method", r.Method, "path", r.URL.Path,
 			"remote", r.RemoteAddr, "reason", rejectionError)
-		if status == http.StatusNotFound {
+		switch {
+		case status == http.StatusNotFound:
 			writeProxyError(w, status, []string{"no profile or role named ", model}, nil, false)
-		} else {
+		case tier == "" && f.selfProfileNotServed(model):
+			// This node declares the key but its Served list omits the
+			// profile's model; say so instead of the generic refusal.
+			writeInferenceErrorFields(w, status,
+				inferenceErrorField{"error", []string{"no available node advertises the requested model"}},
+				inferenceErrorField{"reason", []string{string(rejectNotServed)}},
+			)
+		default:
 			http.Error(w, rejectionBody, status)
 		}
 		_ = f.notify("proxy/request", RequestEvent{
