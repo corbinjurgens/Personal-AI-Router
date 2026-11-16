@@ -228,6 +228,8 @@ Extra options accept canonical raw preset keys and literal values, with at most
 up to 1024 UTF-8 bytes. Control characters and preset comment or substitution
 characters are refused. Use typed fields for typed controls; PAIR-owned artifact
 and router controls and unsupported allocation controls are refused by name.
+The exceptions `spec-draft-n-max` and `ctx-checkpoints` are accepted as unpriced
+extras: the estimate stays unknown and Auto never selects the load.
 Supported table options retain native value checks. Unknown fork options remain
 unknown in estimates, even when priced components would fit, and all extras
 participate in configuration identity.

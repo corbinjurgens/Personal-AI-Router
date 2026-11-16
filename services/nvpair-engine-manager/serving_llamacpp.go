@@ -459,7 +459,7 @@ var llamaServingOptions = []llamaServingOption{
 	{key: "fit-target", flags: []string{"--fit-target", "-fitt"}, env: "LLAMA_ARG_FIT_TARGET", unsupported: true},
 	{key: "fit-ctx", flags: []string{"--fit-ctx", "-fitc"}, env: "LLAMA_ARG_FIT_CTX", unsupported: true},
 	{key: "cache-reuse", flags: []string{"--cache-reuse"}, env: "LLAMA_ARG_CACHE_REUSE", unsupported: true},
-	{key: "ctx-checkpoints", flags: []string{"--ctx-checkpoints", "--swa-checkpoints", "-ctxcp"}, env: "LLAMA_ARG_CTX_CHECKPOINTS", unsupported: true},
+	{key: "ctx-checkpoints", flags: []string{"--ctx-checkpoints", "--swa-checkpoints", "-ctxcp"}, env: "LLAMA_ARG_CTX_CHECKPOINTS", unsupported: true, unpricedExtra: true},
 	{key: "checkpoint-min-step", flags: []string{"--checkpoint-min-step", "-cms"}, env: "LLAMA_ARG_CHECKPOINT_MIN_SPACING_NT", unsupported: true},
 	{key: "prompt-cache", flags: []string{"--prompt-cache"}, unsupported: true},
 	{key: "prompt-cache-all", flags: []string{"--prompt-cache-all"}, unsupported: true},
