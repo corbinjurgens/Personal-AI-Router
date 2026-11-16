@@ -2345,6 +2345,10 @@ count: the next request retries it.
 Typed llama.cpp presets force `sleep-idle-seconds = -1`; PAIR owns per-model idle
 release. The typed idle field is removed and extra options cannot override it.
 Conversion drops native sleep values and includes the changed value in its diff.
+The `models.*` diff lines review the external router-wide values (environment,
+`[*]` and command line) with an empty after value, since typed snapshots have no
+router section; the broker carries a positive router-wide
+`sleep-idle-seconds` into node idle release when the node has none.
 Typed router launches force `--models-max 0`; PAIR admission owns every load's
 capacity. External presets keep their own positive native capacity until converted.
 Resident checks accept native capacity zero as unlimited.

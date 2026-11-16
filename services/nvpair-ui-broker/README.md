@@ -130,6 +130,11 @@ their display name, icon, request options, qualification and other user fields;
 only accepted identities and resolved per-slot contexts are derived. Conversion
 preserves role declarations and membership order, including empty roles. An
 explicit membership patch still changes only the selected profile's membership.
+Typed loads disable native idle sleep, so when the native review reports a
+positive router-wide `models.*.sleep-idle-seconds` and the node's
+`idle.unloadAfterMinutes` is 0 (Never), the same publication sets it to that
+value rounded up to whole minutes. A positive node idle value is kept. The
+preview's `policy` diff shows the change beside the native -1 line.
 The broker initially captures conversion publication scope only when the native
 baseline has no typed loads and accepted loads carry external-conversion
 provenance, including a source-bound Auto selection. Multiple loads alone,
@@ -138,7 +143,8 @@ Recovery uses the journal's explicit conversion scope and accepted preview,
 including each converted identity, rather than metadata from revalidation.
 An unfinished conversion also retains its explicit profile publication scope
 through fresh local supersession. Unchanged siblings keep their accepted artifact
-identities and allocation facts, while the selected profile uses the fresh review.
+identities and allocation facts, while the selected profile uses the fresh review;
+the accepted router idle sleep also stays authoritative.
 The replacement journal retains that scope for restart recovery, even when native
 readback already contains typed loads. Completed conversions grant no such scope
 to later ordinary edits. Fresh worker validation and native/policy revision fences

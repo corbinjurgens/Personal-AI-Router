@@ -599,6 +599,46 @@ func TestModelLoadConversionPreviewIncludesEveryProfileIdentity(t *testing.T) {
 	assertNoSettingsOverride(t, f.ex)
 }
 
+// The broker carries a positive router-wide native idle sleep into node idle
+// release, so conversion reviews the external [*] value it replaces. Typed
+// snapshots have no router section; each model's section shows the fixed -1.
+func TestModelLoadConversionPreviewShowsRouterIdleSleep(t *testing.T) {
+	for _, tc := range []struct {
+		name, router, model string
+		want                bool
+	}{
+		{name: "router idle sleep", router: "sleep-idle-seconds = 600\n", model: "600", want: true},
+		{name: "no router idle sleep", router: "", model: "-1", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newModelLoadFixture(t)
+			writeTestFile(t, f.source, []byte("[*]\nfit = off\nload-on-startup = false\n"+tc.router+"[weak-model]\nmodel = weak.gguf\nctx-size = 4096\nparallel = 1\ngpu-layers = 0\n[medium-model]\nmodel = medium.gguf\nctx-size = 16384\nparallel = 2\ngpu-layers = 0\n"))
+			preview := previewModelLoadFixture(t, f, "weak-model", modelconfig.LoadPatch{Set: modelconfig.RequestedLoad{Context: &modelconfig.Context{Mode: "fixed", Tokens: 6144}}})
+			diffs := map[string][2]any{}
+			for _, diff := range preview.Diff {
+				var before, after any
+				if err := json.Unmarshal(diff.Before, &before); err != nil {
+					t.Fatal(err)
+				}
+				if err := json.Unmarshal(diff.After, &after); err != nil {
+					t.Fatal(err)
+				}
+				diffs[diff.Field] = [2]any{before, after}
+			}
+			router, exists := diffs["models.*.sleep-idle-seconds"]
+			if exists != tc.want || (tc.want && router != [2]any{"600", nil}) {
+				t.Fatalf("router idle sleep diff = %v (present %v), want 600 -> removed router section: %v", router, exists, tc.want)
+			}
+			for _, model := range []string{"weak-model", "medium-model"} {
+				if got := diffs["models."+model+".sleep-idle-seconds"]; got != [2]any{tc.model, "-1"} {
+					t.Fatalf("%s idle sleep diff = %v, want %s -> -1", model, got, tc.model)
+				}
+			}
+			assertNoSettingsOverride(t, f.ex)
+		})
+	}
+}
+
 func TestTypedLlamaNativeFit(t *testing.T) {
 	f := newAppliedKeyFixture(t)
 	rt := f.st.plat.Runtime

@@ -2061,7 +2061,14 @@ func (e *Executor) previewTypedLlamaConversionExpected(ctx context.Context, st *
 	converted := rt
 	converted.ModelLoads = nil
 	converted.modelLoadOwner = e
-	before := map[string]map[string]string{}
+	// The router-wide section reviews the external values it replaces, such as
+	// a positive native idle sleep that the broker carries into node policy.
+	router := maps.Clone(env)
+	maps.Copy(router, sections["*"])
+	maps.Copy(router, cli)
+	delete(router, "models-preset")
+	delete(router, "models-max")
+	before := map[string]map[string]string{"*": router}
 	for _, model := range sortedKeys(sections) {
 		if model == "*" {
 			continue
