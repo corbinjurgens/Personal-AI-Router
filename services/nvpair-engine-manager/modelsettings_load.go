@@ -1508,6 +1508,10 @@ func (e *Executor) previewModelLoadChangeOnce(ctx context.Context, st *engineSta
 		result.Identities[load.ProfileKey] = identity
 	}
 	current, err := inspectionSnapshot(st, p.Engine)
+	if errors.Is(err, errModelInspectionBusy) {
+		*retry = true
+		return fail(err)
+	}
 	if err != nil || !snapshot.equal(current) {
 		*retry = true
 		return fail(modelLoadError("", "baseline", "Engine settings changed during preview."))
