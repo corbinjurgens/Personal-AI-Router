@@ -844,9 +844,12 @@ native preset under its install base (`model-sources/<engine>.ini`, written
 atomically) and appends `--models-preset` with that path after launch
 validation. Models with invalid identifiers or preset-unsafe paths are left
 out; with none left the file is removed and nothing is appended. Sources are
-rescanned only at start. Peer copy, model settings inspection, serving presets
-and typed loads do not cover source models. See the README's Model sources
-section for the folder layouts.
+rescanned only at start. Linked files (`engine:link-model`, kept in
+`linked-models.json` under the install base, IDs `local/<stem>`) join the same
+list. The artifact resolver binds source and linked models in place for
+inspection and typed loads (model files only; projectors stay with the
+no-profile preset). Peer copy does not cover source models. See the README's
+Model sources section for the folder layouts and link rules.
 
 ## Finite llama serving launch
 
@@ -1535,6 +1538,9 @@ Requests (caller → service):
 | `engine:errors` | — | `{ errors: [ServiceError] }` |
 | `engine:catalog` | `{ engine, platform?, arch?, query? }` | `{ models: [CatalogModel], source, platform?, arch?, fetchedAt?, searchable?, query? }` — the models an engine can **download**. One curated source per engine family, selected by the manifest's `family`; only llama.cpp has one: the GGUF repos of `ggml-org`, `bartowski`, and `unsloth`, fetched live from Hugging Face and cached, offered as `repo:Q4_K_M`. It is `searchable`: a `query` searches all of Hugging Face for GGUF repos, each query cached on its own, and is echoed back; a query over 100 characters is an error rather than being shortened. `platform` and `arch` are the GOOS and GOARCH the models will be installed on; omitting both means this host, and naming a platform without an arch leaves the arch unknown rather than borrowing this host's. The llama.cpp list is not machine-locked, so nothing is filtered for the target and `appleOnly` is never set. An engine with no curated source is an error, not an empty list. The reply is a single JSON-RPC frame — every hop on its path must allow `jsonrpc.WorkerFrameBytes`. |
 | `engine:catalog-files` | `{ engine, repo }` | `{ repo, revision, files: [CatalogQuantFile], fetchedAt }` — the quantizations of one open Hugging Face GGUF repository, each `name` pull-ready as `repo:QUANT`, shards summed into one entry. `repo` may be `owner/name`, `owner/name:TAG` or a `huggingface.co`/`hf.co` link; anything else is -32602 without a fetch. Private, gated and missing repositories are errors. Cached per repository like a catalogue query. llama.cpp family only. |
+| `engine:source-models` | `{ nodeId, engine }` | `{ models: [{ id, source, name, sizeBytes, shards, hasProjector }], error? }` — path-free list of folder-source and linked models for this node or, through `GET /v1/models/sources`, a peer. |
+| `engine:link-model` | `{ engine, path }` | `{ id }` — links one local GGUF file as `local/<stem>`; local only. |
+| `engine:unlink-model` | `{ engine, id }` | `{}` — forgets a link, refused while a typed load names it; local only. |
 | `engine:remote-get-installed` | `{ node }` | `{ engines: [EngineStatus] }` from the peer's live `GET /v1/engines/events` stream (no peer request); an error while that stream is not live or no longer current |
 | `engine:remote-install` | `{ node, engine }` | `{ opId, status }` after the remote install |
 | `engine:remote-pull-model` | `{ node, engine, model?, params? }` | `{ opId, result }` after the remote pull |

@@ -815,6 +815,29 @@ func resolveLlamaArtifactsSelection(ctx context.Context, snapshot *engineState, 
 		}
 		candidates = append(candidates, list)
 	}
+	if access.sources != nil && isSourceModelID(model) {
+		for _, source := range access.sources(ctx) {
+			if source.id != model || source.format != sourceFormatGGUF {
+				continue
+			}
+			// Typed loads map only model and draft files, so a source's
+			// projector is offered by the no-profile preset alone.
+			list := modelFileList{Engine: store.engine, Model: model, Layout: llamaArtifactsLayout}
+			for _, path := range sourceModelShards(source) {
+				if !artifactPathSafe(path) {
+					return modelFileList{}, false, errNoArtifactBinding
+				}
+				current, info, bindErr := evidence.artifact(ctx, path, access)
+				if bindErr != nil {
+					return modelFileList{}, false, servingError("Source model file is missing or unstable.")
+				}
+				list.Files = append(list.Files, modelFile{Role: "model", Path: "model/" + filepath.Base(path), Size: info.Size(), abs: current.ResolvedTarget, configured: current.SourcePath, sample: current.SampleSHA256, info: info})
+			}
+			candidates = append(candidates, list)
+			candidates[len(candidates)-1].binding = exportBinding(list, struct{ Source string }{model})
+			break
+		}
+	}
 	if len(candidates) > 0 {
 		for _, candidate := range candidates[1:] {
 			if len(candidate.Files) != len(candidates[0].Files) {

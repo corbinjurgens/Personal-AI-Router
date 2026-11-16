@@ -35,6 +35,9 @@ type servingFileAccess struct {
 	usage     *servingReadUsage
 	scan      *modelArtifactScan
 	recognize func(context.Context, string) (engineInventory, error)
+	// sources lists the models served from outside the store (model sources
+	// and linked files), consulted only for a source model ID. Nil offers none.
+	sources func(context.Context) []sourceModel
 }
 
 type servingDirectory interface {

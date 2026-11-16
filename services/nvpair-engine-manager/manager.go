@@ -404,6 +404,15 @@ func (m *Manager) handleMessage(ctx context.Context, msg *Message) {
 	case "engine:catalog-files":
 		go m.runCatalogFiles(ctx, msg)
 
+	case "engine:source-models":
+		go m.runSourceModels(ctx, msg)
+
+	case "engine:link-model":
+		go m.runLinkModel(msg)
+
+	case "engine:unlink-model":
+		go m.runUnlinkModel(ctx, msg)
+
 	case "engine:install", "engine:uninstall":
 		go m.runOp(ctx, msg)
 

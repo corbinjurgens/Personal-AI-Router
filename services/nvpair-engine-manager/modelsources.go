@@ -11,9 +11,10 @@ package main
 //
 // Sources are engine-neutral: each model found carries its file format, and an
 // engine family that loads that format offers it. llama.cpp offers GGUF source
-// models through a generated native preset (llamaSourcePreset). Peer copy,
-// model settings inspection and serving presets cover only an engine's own
-// store, not source models.
+// models through a generated native preset (llamaSourcePreset) while a node has
+// no profiles, and the artifact resolver binds them for typed loads, so a
+// profile serves them in place. Linked files (modelsources_linked.go) join the
+// same list. Peer copy covers only an engine's own store, not source models.
 
 import (
 	"bytes"
@@ -191,6 +192,19 @@ func scanOllamaSource(ctx context.Context, source modelSource) []sourceModel {
 	return models
 }
 
+var ollamaBlobName = regexp.MustCompile(`^sha256-[0-9a-f]{64}$`)
+
+// ggufArtifactPath reports a path an artifact binding may name as a GGUF file:
+// a .gguf file, or an Ollama content-addressed blob, which carries no
+// extension. Either is still checked for the GGUF magic where it is read.
+func ggufArtifactPath(file string) bool {
+	if strings.HasSuffix(file, ".gguf") {
+		return true
+	}
+	dir, base := filepath.Split(file)
+	return ollamaBlobName.MatchString(base) && filepath.Base(filepath.Clean(dir)) == "blobs"
+}
+
 var ggufFirstShard = regexp.MustCompile(`(?i)-00001-of-[0-9]{5}$`)
 
 // scanGGUFTreeSource offers each GGUF model file as "<source>/<path>", its path
@@ -305,13 +319,13 @@ const sourcePresetUnsafe = "#;$%{}\r\n\x00"
 // is nothing to offer, or when the engine's own preset already decides its
 // models: a serving preset, typed loads, or a --models-preset launch option.
 func (e *Executor) llamaSourcePreset(ctx context.Context, st *engineState, engine string, rt Runtime, launch launchCommand) string {
-	if len(e.modelSources) == 0 || st.manifest.FamilyOrDefault() != "llamacpp" || rt.Serving != nil || len(rt.ModelLoads) != 0 || launchNamesModelsPreset(launch) {
+	if st.manifest.FamilyOrDefault() != "llamacpp" || rt.Serving != nil || len(rt.ModelLoads) != 0 || launchNamesModelsPreset(launch) {
 		return ""
 	}
 	var text strings.Builder
 	text.WriteString("# Written by PAIR at each start: models found in this node's model sources.\n")
 	offered := 0
-	for _, model := range scanModelSources(ctx, e.modelSources) {
+	for _, model := range e.sourceModelsFor(ctx, engine) {
 		if model.format != sourceFormatGGUF || validateLlamaModelID(model.id) != nil ||
 			strings.ContainsAny(model.path+model.mmproj, sourcePresetUnsafe) {
 			continue
