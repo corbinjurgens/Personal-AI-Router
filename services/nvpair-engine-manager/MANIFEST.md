@@ -130,7 +130,9 @@ These identify source, not the installed build. Unsupported means no typed edito
 values, even when the native parser or existing Advanced launch accepts a value.
 Typed loads accept a bounded `extraOptions` map of canonical preset keys and
 literal values. Typed keys must use their typed fields, manager/router and
-artifact keys remain PAIR-owned, and unsupported allocation controls are refused.
+artifact keys remain PAIR-owned, and unsupported allocation controls are refused,
+except `spec-draft-n-max` and `ctx-checkpoints`, which are accepted as unpriced
+extras: the estimate stays unknown and Auto never selects the load.
 Supported table keys retain their value validation; fork keys remain unpriced.
 GPU-selection extras make the load unpriced and cannot coexist with reviewed
 Auto placement. The `options` descriptor publishes their `nonPortableKeys` for
@@ -256,7 +258,7 @@ claim.
 | `fit-target` | `--fit-target`, `-fitt`; env `LLAMA_ARG_FIT_TARGET` | Native fit memory target | Model load | Comma-separated MiB margins; requires fit on | Native default | B supported | No | fit-target = explicit margins | Unpriced native placement |
 | `fit-ctx` | `--fit-ctx`, `-fitc`; env `LLAMA_ARG_FIT_CTX` | Native fit context target | Model load | 0..16777216; requires fit on | Native default | B supported | Yes | fit-ctx = minimum context | Realized context comes from native readback |
 | `cache-reuse` | `--cache-reuse`; env `LLAMA_ARG_CACHE_REUSE` | Prompt cache reuse | Model load | No typed values accepted | Inherited native/model behavior, uninspected | D unsupported | No typed copy | None: typed override refused | Native semantics identity; unknown allocation/work cost |
-| `ctx-checkpoints` | `--ctx-checkpoints`, `--swa-checkpoints`, `-ctxcp`; env `LLAMA_ARG_CTX_CHECKPOINTS` | Context checkpoints | Model load | No typed values accepted | Inherited native/model behavior, uninspected | D unsupported | No typed copy | None: typed override refused | Native semantics identity; unknown allocation/work cost |
+| `ctx-checkpoints` | `--ctx-checkpoints`, `--swa-checkpoints`, `-ctxcp`; env `LLAMA_ARG_CTX_CHECKPOINTS` | Context checkpoints | Model load | No typed values; accepted as an unpriced `extraOptions` entry | Inherited native/model behavior, uninspected | D unsupported, unpriced extra | No typed copy | Extra option copied literally; typed override refused | Native semantics identity; unknown allocation/work cost keeps the estimate unknown |
 | `checkpoint-min-step` | `--checkpoint-min-step`, `-cms`; env `LLAMA_ARG_CHECKPOINT_MIN_SPACING_NT` | Minimum checkpoint spacing | Model load | No typed values accepted | Inherited native/model behavior, uninspected | D unsupported | No typed copy | None: typed override refused | Native semantics identity; unknown allocation/work cost |
 | `prompt-cache` | `--prompt-cache`; env None | Prompt cache file | Model load | No typed values accepted | Inherited native/model behavior, uninspected | D unsupported | No typed copy | None: typed override refused | Native semantics identity; unknown allocation/work cost |
 | `prompt-cache-all` | `--prompt-cache-all`; env None | Cache all prompts | Model load | No typed values accepted | Inherited native/model behavior, uninspected | D unsupported | No typed copy | None: typed override refused | Native semantics identity; unknown allocation/work cost |

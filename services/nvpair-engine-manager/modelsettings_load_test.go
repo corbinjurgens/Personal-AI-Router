@@ -1122,7 +1122,7 @@ func TestTypedLlamaNativeFitReparseScope(t *testing.T) {
 	}
 	for _, tc := range []struct{ name, data string }{
 		{"wrong section", "[other]\nfit = on\n"},
-		{"unvalidated key", "[model]\nfit = on\nctx-checkpoints = 2\n"},
+		{"unvalidated key", "[model]\nfit = on\ncheckpoint-min-step = 2\n"},
 		{"duplicate alias", "[model]\nfit = on\nfit = off\n"},
 		{"inline comment", "[model]\nfit = on # comment\n"},
 		{"substitution", "[model]\nfit-target = ${MARGIN}\n"},
