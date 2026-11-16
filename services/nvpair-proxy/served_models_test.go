@@ -24,13 +24,14 @@ func assertServedModelRejection(t *testing.T, path string, w *httptest.ResponseR
 		return
 	}
 	var body struct {
-		Error string `json:"error"`
+		Error  string `json:"error"`
+		Reason string `json:"reason"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode routing rejection: %v", err)
 	}
-	if w.Code != http.StatusBadGateway || body.Error != "no available node advertises the requested model" {
-		t.Fatalf("routing rejection status/error = %d/%q", w.Code, body.Error)
+	if w.Code != http.StatusBadGateway || body.Error != "no available node advertises the requested model" || body.Reason != string(rejectNotServed) {
+		t.Fatalf("routing rejection status/error/reason = %d/%q/%q", w.Code, body.Error, body.Reason)
 	}
 }
 

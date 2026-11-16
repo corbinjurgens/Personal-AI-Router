@@ -721,15 +721,16 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 		return kept
 	}
 	candidates := resolve()
-	// round carries a tier request's body to the expected-completion chooser,
-	// which sizes each candidate's destination-effective body from it.
+	// round carries a role or exact-key request's body to the
+	// expected-completion chooser, which sizes each candidate's
+	// destination-effective body from it.
 	var tierInputs *tierRound
-	if tier != "" {
+	if model != "" {
 		tierInputs = &tierRound{body: bodyBytes, route: r.URL.Path, hybrid: policy.hybrid}
 	}
-	// observeSelection records a committed tier round's decision for the
-	// request's history; a later fresh round replaces it. The chosen candidate
-	// leads the reordered round.
+	// observeSelection records a committed round's decision for the request's
+	// history; a later fresh round replaces it. The chosen candidate leads the
+	// reordered round.
 	observeSelection := func(chosen []candidate, decision tierDecision) {
 		if tierInputs != nil && len(chosen) > 0 {
 			ctl.observeSelection(selectionDescriptor(decision, chosen[0], f.profile.Name))
@@ -921,9 +922,17 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 		slog.Warn("proxy request rejected",
 			"id", reqID, "method", r.Method, "path", r.URL.Path,
 			"remote", r.RemoteAddr, "reason", rejectionError)
-		if status == http.StatusNotFound {
+		switch {
+		case status == http.StatusNotFound:
 			writeProxyError(w, status, []string{"no profile or role named ", model}, nil, false)
-		} else {
+		case tier == "" && f.selfProfileNotServed(model):
+			// This node declares the key but its Served list omits the
+			// profile's model; say so instead of the generic refusal.
+			writeInferenceErrorFields(w, status,
+				inferenceErrorField{"error", []string{"no available node advertises the requested model"}},
+				inferenceErrorField{"reason", []string{string(rejectNotServed)}},
+			)
+		default:
 			http.Error(w, rejectionBody, status)
 		}
 		_ = f.notify("proxy/request", RequestEvent{

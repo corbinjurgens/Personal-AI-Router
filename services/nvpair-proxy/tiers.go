@@ -387,6 +387,14 @@ func (f *facade) concreteModelAdvertised(model string) bool {
 	return false
 }
 
+// selfProfileNotServed reports a key this node declares on f's engine whose
+// model its Served list omits.
+func (f *facade) selfProfileNotServed(model string) bool {
+	pol := f.host.admission.currentPolicy()
+	pr, ok := pol.ProfileByKey(model)
+	return ok && pr.Engine == f.profile.Name && !modelServed(pol.ServedModels, pr.Engine, pr.Model, f.host.normalizeEngineModel)
+}
+
 // of returns the declaration of a candidate's node, empty when it declares
 // nothing.
 func (d declaredRoles) of(c candidate) map[string][]nodepolicy.AdvertisedProfile {
@@ -567,7 +575,14 @@ func (f *facade) resolveTierCandidates(tier string, needs requestNeeds, crossEng
 			add(c, c.model, rank)
 		}
 	}
-	anyLoaded := pol.TierPolicy.PreferLoaded == "any"
+	orderTierClasses(out, pol.TierPolicy.PreferLoaded == "any")
+	return out
+}
+
+// orderTierClasses sorts candidates into reservation classes: tier rank, then
+// warm before cold, or warmth first when anyLoaded. The sort is stable, so
+// owner order survives within a class.
+func orderTierClasses(out []candidate, anyLoaded bool) {
 	sort.SliceStable(out, func(i, j int) bool {
 		a, b := out[i], out[j]
 		if anyLoaded && a.warm != b.warm {
@@ -581,7 +596,6 @@ func (f *facade) resolveTierCandidates(tier string, needs requestNeeds, crossEng
 		}
 		return false
 	})
-	return out
 }
 
 // hybridCandidate is a local candidate eligible for a hybrid request: its

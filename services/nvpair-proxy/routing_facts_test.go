@@ -1495,14 +1495,16 @@ func TestRoutingSelectionTierRequestsReachNativeFacts(t *testing.T) {
 			t.Fatalf("selection %+v (%q %q %q)", d, node, engine, model)
 		}
 	})
-	t.Run("a concrete model request has no selection", func(t *testing.T) {
+	t.Run("an exact key request records the decision that chose its destination", func(t *testing.T) {
 		pol := nodepolicy.Default()
-		fx := newTierFixture(t, tc, pol, map[string][]string{"a": {"mid/7b"}}, nil)
-		if rec := fx.do(t, "/v1/chat/completions", `{"model":"mid/7b"}`); rec.Code != http.StatusOK {
-			t.Fatalf("status %d", rec.Code)
+		fx := newTierFixture(t, tc, pol, map[string][]string{"a": {"mid/7b"}, "b": {"mid/7b"}}, map[string][]string{"b": {"mid/7b"}})
+		if rec := fx.do(t, "/v1/chat/completions", `{"model":"mid/7b"}`); rec.Code != http.StatusOK || fx.servedBy(t) != "b" {
+			t.Fatalf("status %d served by %q, want the warm owner b", rec.Code, fx.servedBy(t))
 		}
-		if nativeOnlySource(t, fx.p).selection.present {
-			t.Fatal("a concrete request recorded a tier selection")
+		d := nativeOnlySource(t, fx.p).selection
+		node, engine, model := selectionCandidateText(&d.winner)
+		if !d.present || routingSelectionDecisions[d.decision] != tierDecisionBaseline || !d.warm || d.rank != 0 || node != "b" || engine != tc.profile.Name || model != "mid/7b" {
+			t.Fatalf("selection %+v (%q %q %q)", d, node, engine, model)
 		}
 	})
 }

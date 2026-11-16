@@ -1833,6 +1833,46 @@ describe('declared roles on the node card', () => {
             expect(container.textContent).not.toContain('other/node')
         })
 
+        it('marks a role member whose model the explicit Served list omits', async () => {
+            vi.stubGlobal('CSS', { supports: () => true })
+            const profile = (key: string) => ({
+                key,
+                displayName: key,
+                engine: 'llamacpp',
+                model: `${key}-native`
+            })
+            useNodeConfigurationStore.getState().adopt(
+                PEER,
+                snapshot('5', {
+                    roles: [{ name: 'strong', profiles: ['served', 'unserved'] }],
+                    profiles: [profile('served'), profile('unserved')],
+                    servedModels: [{ engine: 'llamacpp', model: 'served-native' }]
+                })
+            )
+            await act(async () =>
+                root.render(
+                    createElement(RoleEditor, { targetId: PEER, nodeId: PEER, onSaved: vi.fn() })
+                )
+            )
+            const row = (label: string) => container.querySelector(`[aria-label="${label}"]`)
+            expect(row('unserved')?.textContent).toContain('Not served')
+            expect(row('served')?.textContent).not.toContain('Not served')
+
+            useNodeConfigurationStore.getState().adopt(
+                PEER,
+                snapshot('6', {
+                    roles: [{ name: 'strong', profiles: ['unserved'] }],
+                    profiles: [profile('unserved')]
+                })
+            )
+            await act(async () =>
+                root.render(
+                    createElement(RoleEditor, { targetId: PEER, nodeId: PEER, onSaved: vi.fn() })
+                )
+            )
+            expect(container.textContent).not.toContain('Not served')
+        })
+
         it('shows nothing for a node that declares no role', async () => {
             discovered(null)
             await act(async () => root.render(createElement(NodeDeclaredRoles, { nodeId: PEER })))

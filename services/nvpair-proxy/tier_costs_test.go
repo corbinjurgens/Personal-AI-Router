@@ -546,6 +546,75 @@ func TestTierCostColdClassUsesMeasuredLoadAndClassesNeverMix(t *testing.T) {
 	})
 }
 
+// An exact profile key with several owners routes through the same
+// expected-completion chooser as a role; a single owner keeps its placement.
+func TestTierCostExactKeyUsesSharedChooser(t *testing.T) {
+	load := func(fx *scoreFixture, ids ...string) {
+		for _, n := range fx.f.discovery.Nodes() {
+			if slices.Contains(ids, n.ID) {
+				n.Loaded = []string{"gemma", "medium"}
+				fx.f.discovery.AddManual(n)
+			}
+		}
+	}
+	t.Run("warm owner beats a faster cold owner the scheduler ranks first", func(t *testing.T) {
+		fx := newScoreFixture(t, "cold", "warm")
+		load(fx, "warm")
+		fx.sizeAll(t, nil, "")
+		fx.measure(t, map[string][2]float64{"cold": {5000, 500}, "warm": {10, 1}}, map[string]int64{"cold": 1})
+		cands := fx.f.resolveConcreteCandidates("medium", scoreRoute)
+		if len(cands) != 2 || cands[0].id != "warm" || !cands[0].warm || cands[0].key != "medium" || cands[1].warm {
+			t.Fatalf("exact-key classes %+v", cands)
+		}
+		if index, _ := fx.p.candidateChoiceLocked(cands[1:], ""); cands[1:][index].id != "cold" {
+			t.Fatal("fixture: the cold owner must win the scheduler-only choice")
+		}
+		winner, held, decision := fx.choose(t, scoreBody(t, 400, 64), cands, nil)
+		defer fx.release(held)
+		if winner != "warm" || !held.held || decision.Decision != tierDecisionMeasured || !decision.Warm || decision.ClassSize != 1 ||
+			decision.Winner == nil || decision.Winner.NodeID != "warm" || decision.Winner.Key != "medium" || decision.Winner.Total <= 0 {
+			t.Fatalf("winner %s held %+v decision %+v", winner, held, decision)
+		}
+	})
+	t.Run("equal warmth is decided by cost", func(t *testing.T) {
+		fx := newScoreFixture(t, "slow", "fast")
+		load(fx, "slow", "fast")
+		fx.sizeAll(t, nil, "")
+		fx.measure(t, map[string][2]float64{"slow": {10, 1}, "fast": {5000, 500}}, nil)
+		cands := fx.f.resolveConcreteCandidates("medium", scoreRoute)
+		winner, held, decision := fx.choose(t, scoreBody(t, 400, 64), cands, nil)
+		defer fx.release(held)
+		if winner != "fast" || decision.Decision != tierDecisionMeasured || decision.ClassSize != 2 || decision.RunnerUp == nil || decision.RunnerUp.NodeID != "slow" {
+			t.Fatalf("winner %s decision %+v", winner, decision)
+		}
+	})
+	t.Run("an eligible cold pin still leads and decides", func(t *testing.T) {
+		fx := newScoreFixture(t, "cold", "warm")
+		load(fx, "warm")
+		fx.sizeAll(t, nil, "")
+		fx.measure(t, map[string][2]float64{"cold": {10, 1}, "warm": {5000, 500}}, nil)
+		fx.f.SetSelected("cold")
+		cands := fx.f.resolveConcreteCandidates("medium", scoreRoute)
+		winner, held, decision := fx.choose(t, scoreBody(t, 400, 64), cands, nil)
+		defer fx.release(held)
+		if cands[0].id != "cold" || winner != "cold" || held.held || decision.Decision != tierDecisionPinned {
+			t.Fatalf("candidates %+v winner %s held %+v decision %+v", cands, winner, held, decision)
+		}
+	})
+	t.Run("a single owner keeps its placement and reservation", func(t *testing.T) {
+		fx := newScoreFixture(t, "only")
+		fx.sizeAll(t, nil, "")
+		fx.measure(t, map[string][2]float64{"only": {100, 10}}, nil)
+		cands := fx.f.resolveConcreteCandidates("medium", scoreRoute)
+		index, reserve := fx.p.candidateChoiceLocked(cands, "")
+		winner, held, _ := fx.choose(t, scoreBody(t, 400, 64), cands, nil)
+		defer fx.release(held)
+		if len(cands) != 1 || winner != cands[index].id || held.held != reserve || held.nodeID != "only" {
+			t.Fatalf("winner %s held %+v, want %s reserved=%v", winner, held, cands[index].id, reserve)
+		}
+	})
+}
+
 func TestTierCostImputesUnknownPhaseFromSlowestMeasured(t *testing.T) {
 	fx := newScoreFixture(t, "a", "b", "c")
 	fx.sizeAll(t, nil, "")
