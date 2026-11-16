@@ -14,6 +14,7 @@ import (
 	"os"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -506,6 +507,12 @@ func modelConversionReview(previous *modelSettingsOperation, change modelconfig.
 		if review.Identities == nil {
 			review.Identities = map[string]engines.ModelIdentity{}
 		}
+		// Native state may already be typed; the accepted review keeps the
+		// converted router's idle sleep for the unfinished policy publication.
+		review.Diff = slices.DeleteFunc(review.Diff, func(diff modelconfig.FieldDiff) bool { return diff.Field == conversionIdleField })
+		if i := slices.IndexFunc(previous.Review.Diff, func(diff modelconfig.FieldDiff) bool { return diff.Field == conversionIdleField }); i >= 0 {
+			review.Diff = append(review.Diff, previous.Review.Diff[i])
+		}
 		for _, key := range previous.ConversionProfiles {
 			if key == modelChangeKey(change) && change.Remove {
 				continue
@@ -568,8 +575,34 @@ func (b *Broker) mergeModelPolicyFromNative(stored nodepolicy.Policy, engine str
 			ref := nodepolicy.ModelRef{Engine: engine, Model: key}
 			policy.Profiles = append(policy.Profiles, nodepolicy.Profile{Key: key, DisplayName: modelProfileDisplayName(ref), Engine: engine, Model: key})
 		}
+		// Typed loads disable native idle sleep. Keep the converted router's
+		// positive idle timer as PAIR's idle release when the node has none.
+		if minutes := conversionIdleMinutes(review); minutes > 0 && policy.Idle.UnloadAfterMinutes == 0 {
+			policy.Idle.UnloadAfterMinutes = minutes
+		}
 	}
 	return b.mergeModelPolicy(policy, engine, change, caller, review, typedRemoval)
+}
+
+// conversionIdleField is the native review's router-wide idle sleep line.
+const conversionIdleField = "models.*.sleep-idle-seconds"
+
+// conversionIdleMinutes reads the converted preset's router-wide idle sleep
+// from the accepted native review, rounded up to whole minutes; zero if none.
+func conversionIdleMinutes(review settings.Preview) int {
+	i := slices.IndexFunc(review.Diff, func(diff modelconfig.FieldDiff) bool { return diff.Field == conversionIdleField })
+	if i < 0 {
+		return 0
+	}
+	var value string
+	if err := json.Unmarshal(review.Diff[i].Before, &value); err != nil {
+		return 0
+	}
+	seconds, err := strconv.ParseInt(value, 10, 32)
+	if err != nil || seconds <= 0 {
+		return 0
+	}
+	return int((seconds + 59) / 60)
 }
 
 // Review and replay use this accepted preview, never current telemetry

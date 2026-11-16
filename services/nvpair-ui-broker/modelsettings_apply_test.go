@@ -1122,6 +1122,102 @@ func TestModelSettingsConversionScopeIncludesAutoSelectedLoad(t *testing.T) {
 	}
 }
 
+// Conversion fixes native idle sleep to -1. The same apply carries a positive
+// router-wide idle sleep into node idle release only when the node has none.
+func TestModelSettingsApplyConversionCarriesRouterIdleSleep(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		routerSleep json.RawMessage
+		nodeMinutes int
+		wantMinutes int
+	}{
+		{name: "router idle sleep with node idle never", routerSleep: json.RawMessage(`"600"`), nodeMinutes: 0, wantMinutes: 10},
+		{name: "partial minute rounds up", routerSleep: json.RawMessage(`"601"`), nodeMinutes: 0, wantMinutes: 11},
+		{name: "node idle already positive", routerSleep: json.RawMessage(`"600"`), nodeMinutes: 7, wantMinutes: 7},
+		{name: "no router idle sleep", routerSleep: nil, nodeMinutes: 0, wantMinutes: 0},
+		{name: "router idle sleep disabled", routerSleep: json.RawMessage(`"-1"`), nodeMinutes: 0, wantMinutes: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newModelSettingsHarness(t)
+			before := modelSettingsPresetPolicy(t, h)
+			before.Idle.UnloadAfterMinutes = tc.nodeMinutes
+			r := h.b.nodePolicyRuntime()
+			r.mu.Lock()
+			r.current = before
+			r.mu.Unlock()
+			preset := modelSettingsPresetAnswer(h)
+			h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+				result, failure := preset(method, raw)
+				if method != "engine:preview-launch" || failure != "" || tc.routerSleep == nil {
+					return result, failure
+				}
+				preview, ok := result.(settings.Preview)
+				if !ok {
+					return nil, "fixture expected conversion preview"
+				}
+				preview.Diff = append(preview.Diff, modelconfig.FieldDiff{Field: conversionIdleField, Before: tc.routerSleep, After: json.RawMessage(`"-1"`)})
+				return preview, ""
+			})
+			p := h.request(t, false)
+			p.ModelChange.ProfileKey = "edited"
+			preview, err := h.b.previewEngineSettings(context.Background(), p, "")
+			if err != nil || len(preview.Errors) != 0 {
+				t.Fatalf("conversion preview = %+v, %v", preview, err)
+			}
+			policyDiff := slices.IndexFunc(preview.Diff, func(diff modelconfig.FieldDiff) bool { return diff.Field == "policy" })
+			if policyDiff < 0 {
+				t.Fatal("conversion preview has no policy diff")
+			}
+			var reviewed nodepolicy.PeerPolicy
+			if err := json.Unmarshal(preview.Diff[policyDiff].After, &reviewed); err != nil {
+				t.Fatal(err)
+			}
+			if reviewed.Idle.UnloadAfterMinutes != tc.wantMinutes {
+				t.Fatalf("previewed idle = %d minutes, want %d", reviewed.Idle.UnloadAfterMinutes, tc.wantMinutes)
+			}
+			p.ModelChange.PreviewDigest = preview.PreviewDigest
+			receipt, err := h.b.applyEngineSettings(context.Background(), p, "")
+			if err != nil || receipt.Phase != "succeeded" || h.calls() != 1 {
+				t.Fatalf("conversion apply = %+v, %v; configure calls = %d", receipt, err, h.calls())
+			}
+			before.Idle.UnloadAfterMinutes = tc.wantMinutes
+			assertModelSettingsConvertedPolicy(t, h, before)
+		})
+	}
+}
+
+// An unfinished conversion's repair review may see an already typed native
+// router. The accepted review's idle sleep stays authoritative for policy.
+func TestModelSettingsConversionRepairKeepsAcceptedIdleSleep(t *testing.T) {
+	h := newModelSettingsHarness(t)
+	modelSettingsPresetPolicy(t, h)
+	p := h.request(t, false)
+	p.ModelChange.ProfileKey = "edited"
+	raw, err := json.Marshal(settings.WorkerRequest[settings.Request]{Request: p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, failure := modelSettingsPresetAnswer(h)("engine:preview-launch", raw)
+	if failure != "" {
+		t.Fatal(failure)
+	}
+	accepted, ok := result.(settings.Preview)
+	if !ok {
+		t.Fatal("fixture expected conversion preview")
+	}
+	fresh := accepted.Clone()
+	accepted.Diff = append(accepted.Diff, modelconfig.FieldDiff{Field: conversionIdleField, Before: json.RawMessage(`"600"`), After: json.RawMessage(`"-1"`)})
+	fresh.Diff = append(fresh.Diff, modelconfig.FieldDiff{Field: conversionIdleField, Before: json.RawMessage(`"-1"`), After: json.RawMessage(`"-1"`)})
+	previous := &modelSettingsOperation{Stage: "native-persisted", Review: accepted, ConversionProfiles: []string{"edited", "sibling"}}
+	review, scope, err := modelConversionReview(previous, *p.ModelChange, fresh, fresh.Settings)
+	if err != nil || !reflect.DeepEqual(scope, []string{"edited", "sibling"}) {
+		t.Fatalf("repair conversion scope = %v, %v", scope, err)
+	}
+	if got := conversionIdleMinutes(review); got != 10 {
+		t.Fatalf("repair idle = %d minutes, want the accepted 10", got)
+	}
+}
+
 func TestModelSettingsApplyConversionMissingSiblingIdentityRefusesBeforeEffects(t *testing.T) {
 	h := newModelSettingsHarness(t)
 	before := modelSettingsPresetPolicy(t, h)
