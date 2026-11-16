@@ -20,6 +20,11 @@ const SOURCE_LABELS: Record<SourceModel['source'], string> = {
     local: 'Linked file'
 }
 
+/** The store name for a copied source model: its ID without the source, "/" and "@" as "-". */
+function storeName(id: string): string {
+    return id.replace(/^(ollama|lmstudio)\//, '').replace(/[/@]/g, '-')
+}
+
 /** Whether a source model matches the Models tab filter text. */
 function sourceModelMatches(model: SourceModel, nodeName: string, needle: string): boolean {
     return [model.id, model.name, nodeName, SOURCE_LABELS[model.source]].some(text =>
@@ -41,7 +46,10 @@ export function SourceModelsSection({
     const selfId = useConnectionStore(state => state.selfId)
     const [configure, setConfigure] = useState<{ node: NodeItem; id: string } | null>(null)
     const [unlinking, setUnlinking] = useState<SourceModel | null>(null)
-    const [unlinkError, setUnlinkError] = useState('')
+    const [actionError, setActionError] = useState('')
+    const [copying, setCopying] = useState<SourceModel | null>(null)
+    const [busyCopy, setBusyCopy] = useState('')
+    const [copied, setCopied] = useState('')
 
     const cards = nodes.flatMap(node => {
         const entry = entries.get(node.id)
@@ -55,14 +63,33 @@ export function SourceModelsSection({
     if (cards.length === 0 && !configure) return null
 
     const unlink = async (model: SourceModel) => {
-        setUnlinkError('')
+        setActionError('')
         try {
             await window.pairApi.engines.unlinkModel(SOURCE_MODELS_ENGINE, model.id)
         } catch (err) {
-            setUnlinkError(getErrorString(err))
+            setActionError(getErrorString(err))
         }
         if (selfId) await refresh(selfId)
     }
+
+    const copyIntoStore = async (model: SourceModel) => {
+        setActionError('')
+        setCopied('')
+        setBusyCopy(model.id)
+        try {
+            const res = await window.pairApi.engines.importModel(
+                SOURCE_MODELS_ENGINE,
+                { sourceId: model.id },
+                storeName(model.id)
+            )
+            setCopied(res.id)
+        } catch (err) {
+            setActionError(getErrorString(err))
+        } finally {
+            setBusyCopy('')
+        }
+    }
+    const self = nodes.find(node => node.id === selfId)
 
     return (
         <Stack gap="3">
@@ -73,8 +100,23 @@ export function SourceModelsSection({
                     where they are.
                 </Text>
             </Stack>
-            {unlinkError && (
-                <InlineErrorBanner message={unlinkError} onClose={() => setUnlinkError('')} />
+            {copied && self && (
+                <InlineErrorBanner
+                    severity="info"
+                    message={`Copied into PAIR's model folder as ${copied}.`}
+                    onClose={() => setCopied('')}
+                >
+                    <Button
+                        size="small"
+                        kind="secondary"
+                        onClick={() => setConfigure({ node: self, id: copied })}
+                    >
+                        Create profile
+                    </Button>
+                </InlineErrorBanner>
+            )}
+            {actionError && (
+                <InlineErrorBanner message={actionError} onClose={() => setActionError('')} />
             )}
             {cards.map(({ node, models, error }) => (
                 <section
@@ -125,6 +167,17 @@ export function SourceModelsSection({
                                     >
                                         Create profile
                                     </Button>
+                                    {model.source !== 'local' && node.id === selfId && (
+                                        <Button
+                                            size="small"
+                                            kind="tertiary"
+                                            disabled={busyCopy !== ''}
+                                            aria-label={`Copy ${model.name} into store`}
+                                            onClick={() => setCopying(model)}
+                                        >
+                                            {busyCopy === model.id ? 'Copying…' : 'Copy into store'}
+                                        </Button>
+                                    )}
                                     {model.source === 'local' && node.id === selfId && (
                                         <Button
                                             size="small"
@@ -152,6 +205,18 @@ export function SourceModelsSection({
                     onOpenChange={open => {
                         if (!open) setConfigure(null)
                     }}
+                />
+            )}
+            {copying && (
+                <ConfirmModal
+                    open
+                    onOpenChange={open => {
+                        if (!open) setCopying(null)
+                    }}
+                    title="Copy into PAIR's model folder"
+                    message={`PAIR copies ${copying.name} (${formatBytes(copying.sizeBytes, 1)}) into its own model folder. The original stays where it is.`}
+                    confirmLabel="Copy"
+                    onConfirm={() => void copyIntoStore(copying)}
                 />
             )}
             {unlinking && (

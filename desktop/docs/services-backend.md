@@ -542,6 +542,10 @@ which the engine manager answers locally or from the peer's read route.
 name local paths. The Models tab's "Outside the model store" section reads the
 listing on open and after a link change; profiles name these models by their
 source ID and the engine manager resolves the file in place.
+`engine:import-model` copies a file picked on this PC (through the native
+`models:choose-file` picker in the main process) or a listed source model into
+the store; the call settles when the copy finishes, so the bridge allows it six
+hours and the dialog shows an indeterminate progress bar.
 
 ## Pairing and security
 

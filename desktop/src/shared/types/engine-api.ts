@@ -84,6 +84,17 @@ export interface SourceModelsResponse {
     error?: string
 }
 
+/** What `engine:import-model` copies: a picked file or a listed source model. */
+export type ImportModelSource = { path: string } | { sourceId: string }
+
+/** Response for the `engine:import-model` channel. */
+export interface ImportModelResponse {
+    id: string
+    layout: string
+    exportId: string
+    durability: 'confirmed' | 'uncertain'
+}
+
 /** Response for the `engine:catalog-files` channel. */
 export interface EngineCatalogFilesResponse {
     /** The normalised `owner/name` the listing is for. */

@@ -100,6 +100,7 @@ multi-engine, Windows and assembled-source acceptance remain pending.
 | Model catalog search       | Backend-owned                   | `engine:catalog` serves the cached llama.cpp catalog and searches Hugging Face for it         |
 | Repository quantizations   | Backend-owned                   | `engine:catalog-files` parses a pasted repo or link and lists its GGUF quantizations          |
 | Models outside the store   | Backend-owned                   | `engine:source-models` lists folder and linked models; `engine:link-model`/`unlink-model` local |
+| Add model from file        | Backend-owned                   | `engine:import-model` copies a local file or source model into the store; Electron only picks the path |
 
 ## Role editing and API availability
 

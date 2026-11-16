@@ -13,13 +13,18 @@ import type {
 import type { ServiceError } from '@/shared/types/errors'
 import { parseModelCopyCancel, parseModelCopyCapabilities } from './model-copy'
 import {
+    MODEL_IMPORT_CALL_TIMEOUT_MS,
     MODULAR_CLUSTER_MANAGER_PORT,
     MODULAR_ENGINE_LIFECYCLE_CALL_TIMEOUT_MS
 } from '@/shared/constants/modular-runtime'
 import getErrorString from '@/shared/utils/get-error-string'
 import { engineManagerName } from '@/shared/utils/engines'
 import { getEngineCatalogFiles, getEngineHubModels } from '@/electron/service-bridge/model-catalog'
-import { parseLinkedModel, parseSourceModels } from '@/electron/service-bridge/source-models'
+import {
+    parseImportedModel,
+    parseLinkedModel,
+    parseSourceModels
+} from '@/electron/service-bridge/source-models'
 import { getModularSupervisor } from './modular-supervisor'
 import {
     parseEngineSettings,
@@ -1031,6 +1036,17 @@ const EMPTY_SERVICE_BRIDGE_HANDLERS: BridgeHandlerMap = {
                 engine: payload.engine,
                 path: payload.path
             })
+        )
+    },
+    'engine:import-model': async payload => {
+        if (!payload) throw new Error('Missing model to import')
+        return parseImportedModel(
+            await getModularSupervisor().callProcess(
+                'broker',
+                'engine:import-model',
+                { engine: payload.engine, id: payload.id, ...payload.source },
+                MODEL_IMPORT_CALL_TIMEOUT_MS
+            )
         )
     },
     'engine:unlink-model': async payload => {

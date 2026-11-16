@@ -15,6 +15,10 @@ import { ModelGroup } from './ModelGroup'
 import { ModelDeleteConfirmation } from './ModelDeleteConfirmation'
 import { ModelDownloadDialog } from './ModelDownloadDialog'
 import { SourceModelsSection } from './SourceModelsSection'
+import { AddModelFileDialog } from './AddModelFileDialog'
+import ModelSettingsPanel from '@/ui/components/ModelSettings/ModelSettingsPanel'
+import { useConnectionStore } from '@/ui/stores/connection.store'
+import { SOURCE_MODELS_ENGINE } from '@/ui/stores/source-models.store'
 import { useSourceModelsStore } from '@/ui/stores/source-models.store'
 import type { EngineType } from '@/shared/types/engines'
 
@@ -76,6 +80,9 @@ export function ModelsView() {
         destination?: string
     } | null>(null)
     const [downloading, setDownloading] = useState(false)
+    const [addingFile, setAddingFile] = useState(false)
+    const [profileFor, setProfileFor] = useState<string | null>(null)
+    const selfId = useConnectionStore(state => state.selfId)
     const openCopy = (location: ClusterModelLocation) =>
         setCopy({
             engineType: location.engineType,
@@ -107,6 +114,9 @@ export function ModelsView() {
                             />
                         </Flex>
                     )}
+                    <Button kind="secondary" onClick={() => setAddingFile(true)}>
+                        Add from file
+                    </Button>
                     <Button kind="primary" color="brand" onClick={() => setDownloading(true)}>
                         Download model
                     </Button>
@@ -209,6 +219,21 @@ export function ModelsView() {
                             model: source.model.name,
                             destination
                         })
+                    }}
+                />
+            )}
+            {addingFile && (
+                <AddModelFileDialog onOpenChange={setAddingFile} onCreateProfile={setProfileFor} />
+            )}
+            {profileFor && selfId && (
+                <ModelSettingsPanel
+                    key={profileFor}
+                    targetId={selfId}
+                    nodeName={nodeNames.get(selfId) ?? 'This PC'}
+                    identity={{ engine: SOURCE_MODELS_ENGINE, model: profileFor }}
+                    open
+                    onOpenChange={open => {
+                        if (!open) setProfileFor(null)
                     }}
                 />
             )}

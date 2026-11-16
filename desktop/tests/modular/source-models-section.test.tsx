@@ -20,6 +20,7 @@ vi.mock('@/ui/components/ModelSettings/ModelSettingsPanel', () => ({
 }))
 
 const unlinkModel = vi.fn<IEngineApi['unlinkModel']>()
+const importModel = vi.fn<IEngineApi['importModel']>()
 const sourceModels = vi.fn<IEngineApi['sourceModels']>()
 let root: Root
 let container: HTMLDivElement
@@ -76,6 +77,13 @@ beforeEach(() => {
     unlinkModel.mockReset().mockResolvedValue(null)
     sourceModels.mockReset().mockResolvedValue({ models: [] })
     api.engines.unlinkModel = unlinkModel
+    importModel.mockReset().mockResolvedValue({
+        id: 'pub-repo-Model',
+        layout: 'llama-artifacts-v1',
+        exportId: 'e',
+        durability: 'confirmed'
+    })
+    api.engines.importModel = importModel
     api.engines.sourceModels = sourceModels
     Object.defineProperty(window, 'pairApi', { configurable: true, value: api })
     useConnectionStore.setState({ selfId: 'msi', connected: true })
@@ -186,5 +194,41 @@ describe('Outside the model store', () => {
         expect(
             container.querySelector('section[aria-label="MSI outside the model store"]')
         ).toBeNull()
+    })
+
+    it('copies a local source-folder model into the store after confirmation', async () => {
+        const entries = new Map(useSourceModelsStore.getState().entries)
+        entries.set('msi', {
+            loading: false,
+            error: '',
+            models: [
+                {
+                    id: 'lmstudio/pub/repo/Model',
+                    source: 'lmstudio',
+                    name: 'pub/repo/Model',
+                    sizeBytes: 2048,
+                    shards: 1,
+                    hasProjector: false
+                }
+            ]
+        })
+        useSourceModelsStore.setState({ entries })
+        await act(async () => root.render(<SourceModelsSection nodes={nodes} needle="" />))
+        expect(() => button('Copy tiny@latest into store')).toThrow()
+        await act(async () => button('Copy pub/repo/Model into store').click())
+        expect(document.body.textContent).toContain('The original stays where it is.')
+        const confirm = Array.from(document.querySelectorAll('dialog button')).find(
+            row => row.textContent?.trim() === 'Copy'
+        )
+        if (!(confirm instanceof HTMLButtonElement)) throw new Error('Missing confirm button')
+        await act(async () => confirm.click())
+        expect(importModel).toHaveBeenCalledWith(
+            'llamacpp',
+            { sourceId: 'lmstudio/pub/repo/Model' },
+            'pub-repo-Model'
+        )
+        expect(container.textContent).toContain(
+            "Copied into PAIR's model folder as pub-repo-Model."
+        )
     })
 })

@@ -175,6 +175,7 @@
 | `engine:errors` | request (we call) | ⚠️ not called |
 | `engine:get-installed` | request (we call) | ✅ yes |
 | `engine:get-launch` | request (we call) | ⚠️ not called |
+| `engine:import-model` | request (we call) | ✅ yes |
 | `engine:inspect-model` | request (we call) | ✅ yes |
 | `engine:install` | request (we call) | ✅ yes |
 | `engine:link-model` | request (we call) | ✅ yes |

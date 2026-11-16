@@ -10,6 +10,7 @@ import { registerBootstrapIpc } from '@/electron/ipc/bootstrap.ipc'
 import { registerServiceBridgeIpc } from '@/electron/ipc/service-bridge.ipc'
 import { registerInferenceDemoIpc } from '@/electron/ipc/inference-demo.ipc'
 import { registerBuildApplyIpc } from '@/electron/ipc/build-apply.ipc'
+import { registerModelsIpc } from '@/electron/ipc/models.ipc'
 
 export function registerAllIpc(): void {
     registerBuildApplyIpc()
@@ -21,4 +22,5 @@ export function registerAllIpc(): void {
     registerBootstrapIpc()
     registerServiceBridgeIpc()
     registerInferenceDemoIpc()
+    registerModelsIpc()
 }

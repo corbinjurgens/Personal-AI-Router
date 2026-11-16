@@ -28,6 +28,8 @@ import type {
     EngineHubSearchResponse,
     EngineCatalogFilesResponse,
     SourceModelsResponse,
+    ImportModelResponse,
+    ImportModelSource,
     EngineInitialState,
     EngineStatePatch
 } from '@/shared/types/engine-api'
@@ -225,6 +227,10 @@ export interface WsInvokeChannelMap {
     }
     'engine:link-model': { request: { engine: string; path: string }; response: { id: string } }
     'engine:unlink-model': { request: { engine: string; id: string }; response: null }
+    'engine:import-model': {
+        request: { engine: string; source: ImportModelSource; id: string }
+        response: ImportModelResponse
+    }
 
     // Errors
     'errors:get-initial': { request: void; response: ServiceError[] }

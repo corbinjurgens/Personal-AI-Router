@@ -1,7 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import type { SourceModel, SourceModelsResponse } from '@/shared/types/engine-api'
+import type {
+    ImportModelResponse,
+    SourceModel,
+    SourceModelsResponse
+} from '@/shared/types/engine-api'
 import type { JsonObject, JsonValue } from '@/electron/service-bridge/json-rpc-client'
 
 function isObject(v: JsonValue | undefined): v is JsonObject {
@@ -40,4 +44,22 @@ export function parseLinkedModel(value: JsonValue | undefined): { id: string } {
     if (!isObject(value) || typeof value.id !== 'string' || !value.id)
         throw new Error('Linked model reply was malformed.')
     return { id: value.id }
+}
+
+/** The engine manager's `engine:import-model` reply. */
+export function parseImportedModel(value: JsonValue | undefined): ImportModelResponse {
+    if (
+        !isObject(value) ||
+        typeof value.id !== 'string' ||
+        typeof value.layout !== 'string' ||
+        typeof value.exportId !== 'string' ||
+        (value.durability !== 'confirmed' && value.durability !== 'uncertain')
+    )
+        throw new Error('Import reply was malformed.')
+    return {
+        id: value.id,
+        layout: value.layout,
+        exportId: value.exportId,
+        durability: value.durability
+    }
 }

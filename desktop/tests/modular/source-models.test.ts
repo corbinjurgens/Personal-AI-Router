@@ -2,7 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, expect, it, vi } from 'vitest'
-import { parseLinkedModel, parseSourceModels } from '@/electron/service-bridge/source-models'
+import {
+    parseImportedModel,
+    parseLinkedModel,
+    parseSourceModels
+} from '@/electron/service-bridge/source-models'
 import type { ServiceTransport } from '@/shared/types/service-bridge'
 import { createPairApi } from '@/ui/api/pair-api'
 
@@ -57,6 +61,22 @@ describe('source model relay', () => {
         expect(() => parseSourceModels({ rows: [] })).toThrow('malformed')
         expect(() => parseLinkedModel({})).toThrow('malformed')
         expect(parseLinkedModel({ id: 'local/Model' })).toEqual({ id: 'local/Model' })
+        expect(() => parseImportedModel({ id: 'Model', layout: 'x', exportId: 'y' })).toThrow(
+            'malformed'
+        )
+        expect(
+            parseImportedModel({
+                id: 'Model',
+                layout: 'llama-artifacts-v1',
+                exportId: 'e',
+                durability: 'confirmed'
+            })
+        ).toEqual({
+            id: 'Model',
+            layout: 'llama-artifacts-v1',
+            exportId: 'e',
+            durability: 'confirmed'
+        })
     })
 
     it('names the node for listings and only the engine for local link changes', async () => {
@@ -74,10 +94,19 @@ describe('source model relay', () => {
         await api.engines.sourceModels('joes', 'llamacpp')
         await api.engines.linkModel('llamacpp', 'C:\\models\\Model.gguf')
         await api.engines.unlinkModel('llamacpp', 'local/Model')
+        await api.engines.importModel('llamacpp', { sourceId: 'ollama/tiny@latest' }, 'tiny-latest')
         expect(invoke.mock.calls).toEqual([
             ['engine:source-models', { nodeId: 'joes', engine: 'llamacpp' }],
             ['engine:link-model', { engine: 'llamacpp', path: 'C:\\models\\Model.gguf' }],
-            ['engine:unlink-model', { engine: 'llamacpp', id: 'local/Model' }]
+            ['engine:unlink-model', { engine: 'llamacpp', id: 'local/Model' }],
+            [
+                'engine:import-model',
+                {
+                    engine: 'llamacpp',
+                    source: { sourceId: 'ollama/tiny@latest' },
+                    id: 'tiny-latest'
+                }
+            ]
         ])
     })
 })

@@ -13,6 +13,8 @@ import type {
     EngineHubSearchResponse,
     EngineCatalogFilesResponse,
     SourceModelsResponse,
+    ImportModelResponse,
+    ImportModelSource,
     EngineInitialState,
     EngineStatePatch,
     EngineCommandPayload
@@ -115,6 +117,8 @@ export interface IEngineApi {
     linkModel(engine: string, path: string): Promise<{ id: string }>
     /** Forget a linked file on this PC; the file is not deleted. */
     unlinkModel(engine: string, id: string): Promise<null>
+    /** Copy a file or source model on this PC into the store as `id`; settles when done. */
+    importModel(engine: string, source: ImportModelSource, id: string): Promise<ImportModelResponse>
 
     /** The local engine-manager's descriptor set changed (full replacement). */
     onDescriptorsChanged(callback: (descriptors: EngineDescriptor[]) => void): () => void
@@ -208,6 +212,8 @@ export function createEngineApi(transport: ServiceTransport): IEngineApi {
             transport.invoke('engine:source-models', { nodeId, engine }),
         linkModel: (engine, path) => transport.invoke('engine:link-model', { engine, path }),
         unlinkModel: (engine, id) => transport.invoke('engine:unlink-model', { engine, id }),
+        importModel: (engine, source, id) =>
+            transport.invoke('engine:import-model', { engine, source, id }),
 
         onDescriptorsChanged: cb => transport.subscribePush('engines:descriptors-changed', cb),
         onStateChanged: cb => transport.subscribePush('engines:state-changed', cb),
