@@ -413,6 +413,9 @@ func (m *Manager) handleMessage(ctx context.Context, msg *Message) {
 	case "engine:unlink-model":
 		go m.runUnlinkModel(ctx, msg)
 
+	case "engine:import-model":
+		go m.runImportModel(ctx, msg)
+
 	case "engine:install", "engine:uninstall":
 		go m.runOp(ctx, msg)
 

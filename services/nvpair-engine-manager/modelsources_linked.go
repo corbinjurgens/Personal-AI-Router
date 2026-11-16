@@ -95,15 +95,16 @@ func (e *Executor) saveLinkedEntries(entries []linkedModel) error {
 	return nil
 }
 
-// linkModel records file as a model engine can serve in place and returns its
-// ID, "local/<file stem>". Linking a path already linked returns its ID.
-func (e *Executor) linkModel(engine, file string) (string, error) {
+// checkLinkableFile returns the cleaned path of a GGUF model file PAIR may serve
+// in place or import: an absolute .gguf path to a regular file with the GGUF
+// magic that is not a projector, helper or later shard, and whose path a
+// preset line can carry.
+func checkLinkableFile(file string) (string, error) {
 	if len(file) > maxLinkedPath || !filepath.IsAbs(file) {
 		return "", modelSettingsParamsError(errors.New("Choose a file by its full path."))
 	}
 	file = filepath.Clean(file)
-	base := filepath.Base(file)
-	lower := strings.ToLower(base)
+	lower := strings.ToLower(filepath.Base(file))
 	if !strings.HasSuffix(lower, ".gguf") {
 		return "", modelSettingsParamsError(errors.New("Only GGUF model files (.gguf) can be added."))
 	}
@@ -122,6 +123,17 @@ func (e *Executor) linkModel(engine, file string) (string, error) {
 	if !isGGUFFile(file) {
 		return "", modelSettingsParamsError(errors.New("The file is not a GGUF model."))
 	}
+	return file, nil
+}
+
+// linkModel records file as a model engine can serve in place and returns its
+// ID, "local/<file stem>". Linking a path already linked returns its ID.
+func (e *Executor) linkModel(engine, file string) (string, error) {
+	file, err := checkLinkableFile(file)
+	if err != nil {
+		return "", err
+	}
+	base := filepath.Base(file)
 	stem := ggufFirstShard.ReplaceAllString(base[:len(base)-len(".gguf")], "")
 
 	e.linked.mu.Lock()

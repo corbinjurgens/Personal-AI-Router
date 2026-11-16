@@ -2034,8 +2034,8 @@ verbatim and their responses relayed straight back. These include
 `engine:get-installed`, `engine:describe`, `engine:status`, `engine:install`,
 `engine:uninstall`, `engine:action`, `engine:logs`, `engine:errors`,
 `engine:models`, `engine:catalog`, `engine:catalog-files`,
-`engine:source-models`, `engine:link-model`, `engine:unlink-model` and
-`engine:unload-model`. Engine start, stop
+`engine:source-models`, `engine:link-model`, `engine:unlink-model`,
+`engine:import-model` and `engine:unload-model`. Engine start, stop
 and restart methods and peer start/stop routes are removed. The internal-method
 guard refuses client calls to `engine:wake` and `engine:sleep`, including
 component-addressed calls; peers cannot invoke them either. The internal

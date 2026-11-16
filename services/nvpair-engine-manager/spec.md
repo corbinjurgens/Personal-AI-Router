@@ -1541,6 +1541,7 @@ Requests (caller → service):
 | `engine:source-models` | `{ nodeId, engine }` | `{ models: [{ id, source, name, sizeBytes, shards, hasProjector }], error? }` — path-free list of folder-source and linked models for this node or, through `GET /v1/models/sources`, a peer. |
 | `engine:link-model` | `{ engine, path }` | `{ id }` — links one local GGUF file as `local/<stem>`; local only. |
 | `engine:unlink-model` | `{ engine, id }` | `{}` — forgets a link, refused while a typed load names it; local only. |
+| `engine:import-model` | `{ engine, path?, sourceId?, id }` | `{ id, layout, exportId, durability }` — copies a local GGUF file or a source-folder model into a custom-artifact bundle `id` through the peer-copy driver with a local source (model shards only); local only, no progress events. |
 | `engine:remote-get-installed` | `{ node }` | `{ engines: [EngineStatus] }` from the peer's live `GET /v1/engines/events` stream (no peer request); an error while that stream is not live or no longer current |
 | `engine:remote-install` | `{ node, engine }` | `{ opId, status }` after the remote install |
 | `engine:remote-pull-model` | `{ node, engine, model?, params? }` | `{ opId, result }` after the remote pull |
