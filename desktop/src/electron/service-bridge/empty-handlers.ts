@@ -19,6 +19,7 @@ import {
 import getErrorString from '@/shared/utils/get-error-string'
 import { engineManagerName } from '@/shared/utils/engines'
 import { getEngineCatalogFiles, getEngineHubModels } from '@/electron/service-bridge/model-catalog'
+import { parseLinkedModel, parseSourceModels } from '@/electron/service-bridge/source-models'
 import { getModularSupervisor } from './modular-supervisor'
 import {
     parseEngineSettings,
@@ -1013,6 +1014,32 @@ const EMPTY_SERVICE_BRIDGE_HANDLERS: BridgeHandlerMap = {
     'engine:catalog-files': payload => {
         if (!payload) throw new Error('Missing repository')
         return getEngineCatalogFiles(payload.engineType, payload.repo)
+    },
+    'engine:source-models': async payload => {
+        if (!payload) throw new Error('Missing source model target')
+        return parseSourceModels(
+            await getModularSupervisor().callProcess('broker', 'engine:source-models', {
+                nodeId: payload.nodeId,
+                engine: payload.engine
+            })
+        )
+    },
+    'engine:link-model': async payload => {
+        if (!payload) throw new Error('Missing model file')
+        return parseLinkedModel(
+            await getModularSupervisor().callProcess('broker', 'engine:link-model', {
+                engine: payload.engine,
+                path: payload.path
+            })
+        )
+    },
+    'engine:unlink-model': async payload => {
+        if (!payload) throw new Error('Missing linked model')
+        await getModularSupervisor().callProcess('broker', 'engine:unlink-model', {
+            engine: payload.engine,
+            id: payload.id
+        })
+        return null
     },
 
     'errors:get-initial': () => handleErrorsGetInitial(),

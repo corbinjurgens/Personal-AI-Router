@@ -535,6 +535,14 @@ model hub's query through, and the engine manager searches Hugging Face with it.
 link; the engine manager parses the text and reads Hugging Face, and Electron
 relays the reply and its errors unchanged.
 
+Models a node serves from outside its store (Ollama and LM Studio folders, and
+GGUF files linked by hand) are listed by `engine:source-models { nodeId, engine }`,
+which the engine manager answers locally or from the peer's read route.
+`engine:link-model` and `engine:unlink-model` act only on this PC, since they
+name local paths. The Models tab's "Outside the model store" section reads the
+listing on open and after a link change; profiles name these models by their
+source ID and the engine manager resolves the file in place.
+
 ## Pairing and security
 
 `nvpair-cluster-manager` owns node identity, PIN pairing, trusted certificates,

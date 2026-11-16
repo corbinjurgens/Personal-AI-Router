@@ -65,6 +65,25 @@ export interface EngineCatalogFile {
     shards: number
 }
 
+/** A model an engine serves in place from outside its store. */
+export interface SourceModel {
+    id: string
+    /** `local` is a file linked by hand. */
+    source: 'ollama' | 'lmstudio' | 'local'
+    /** Ollama's name@tag, LM Studio's relative path, or a linked file's name. */
+    name: string
+    sizeBytes: number
+    shards: number
+    hasProjector: boolean
+}
+
+/** Response for the `engine:source-models` channel. */
+export interface SourceModelsResponse {
+    models: SourceModel[]
+    /** A linked-file list the node could not read; folder models still list. */
+    error?: string
+}
+
 /** Response for the `engine:catalog-files` channel. */
 export interface EngineCatalogFilesResponse {
     /** The normalised `owner/name` the listing is for. */

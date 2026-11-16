@@ -12,6 +12,7 @@ import type { WsInvokeRequest, WsInvokeResponse } from '@/shared/types/ws-channe
 import type {
     EngineHubSearchResponse,
     EngineCatalogFilesResponse,
+    SourceModelsResponse,
     EngineInitialState,
     EngineStatePatch,
     EngineCommandPayload
@@ -108,6 +109,12 @@ export interface IEngineApi {
     searchHub(engineType: EngineType, query?: string): Promise<EngineHubSearchResponse>
     /** List the quantizations of a pasted Hugging Face repository or link. */
     catalogFiles(engineType: EngineType, repo: string): Promise<EngineCatalogFilesResponse>
+    /** Models a node serves in place from Ollama, LM Studio or linked files. */
+    sourceModels(nodeId: string, engine: string): Promise<SourceModelsResponse>
+    /** Link a GGUF file on this PC so the engine serves it where it is. */
+    linkModel(engine: string, path: string): Promise<{ id: string }>
+    /** Forget a linked file on this PC; the file is not deleted. */
+    unlinkModel(engine: string, id: string): Promise<null>
 
     /** The local engine-manager's descriptor set changed (full replacement). */
     onDescriptorsChanged(callback: (descriptors: EngineDescriptor[]) => void): () => void
@@ -197,6 +204,10 @@ export function createEngineApi(transport: ServiceTransport): IEngineApi {
             ),
         catalogFiles: (engineType, repo) =>
             transport.invoke('engine:catalog-files', { engineType, repo }),
+        sourceModels: (nodeId, engine) =>
+            transport.invoke('engine:source-models', { nodeId, engine }),
+        linkModel: (engine, path) => transport.invoke('engine:link-model', { engine, path }),
+        unlinkModel: (engine, id) => transport.invoke('engine:unlink-model', { engine, id }),
 
         onDescriptorsChanged: cb => transport.subscribePush('engines:descriptors-changed', cb),
         onStateChanged: cb => transport.subscribePush('engines:state-changed', cb),

@@ -99,6 +99,7 @@ multi-engine, Windows and assembled-source acceptance remain pending.
 | Settings                   | Partial                         | Cluster identity plus per-engine ports and engine arguments, local and remote; inert backend settings are not surfaced                            |
 | Model catalog search       | Backend-owned                   | `engine:catalog` serves the cached llama.cpp catalog and searches Hugging Face for it         |
 | Repository quantizations   | Backend-owned                   | `engine:catalog-files` parses a pasted repo or link and lists its GGUF quantizations          |
+| Models outside the store   | Backend-owned                   | `engine:source-models` lists folder and linked models; `engine:link-model`/`unlink-model` local |
 
 ## Role editing and API availability
 

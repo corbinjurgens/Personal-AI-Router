@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Button, Flex, ProgressBar, Stack, Text, TextInput } from '@nvidia/foundations-react-core'
 import { useEngineModelsStore } from '@/ui/stores/engine-models.store'
 import { useEngineProgressStore } from '@/ui/stores/engine-progress.store'
@@ -14,6 +14,8 @@ import { Search } from '@/ui/components/icons'
 import { ModelGroup } from './ModelGroup'
 import { ModelDeleteConfirmation } from './ModelDeleteConfirmation'
 import { ModelDownloadDialog } from './ModelDownloadDialog'
+import { SourceModelsSection } from './SourceModelsSection'
+import { useSourceModelsStore } from '@/ui/stores/source-models.store'
 import type { EngineType } from '@/shared/types/engines'
 
 function plural(count: number, one: string, many = `${one}s`): string {
@@ -33,6 +35,12 @@ export function ModelsView() {
         [inventory, nodeNames]
     )
     const [query, setQuery] = useState('')
+    const refreshSources = useSourceModelsStore(state => state.refreshAll)
+    // Sources are not pushed: read them when the tab opens or the node set changes.
+    const nodeKey = nodes.map(node => node.id).join(' ')
+    useEffect(() => {
+        void refreshSources(nodeKey ? nodeKey.split(' ') : [])
+    }, [nodeKey, refreshSources])
     const needle = query.trim().toLowerCase()
     const visible = needle
         ? groups.filter(group =>
@@ -173,6 +181,7 @@ export function ModelsView() {
                     />
                 ))
             )}
+            <SourceModelsSection nodes={nodes} needle={needle} />
             {copy && (
                 <ModelCopyModal
                     key={`${copy.engineType}:${copy.source}:${copy.model}:${copy.opId ?? ''}:${copy.destination ?? ''}`}

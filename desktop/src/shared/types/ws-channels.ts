@@ -27,6 +27,7 @@ import type {
     EngineCommandPayload,
     EngineHubSearchResponse,
     EngineCatalogFilesResponse,
+    SourceModelsResponse,
     EngineInitialState,
     EngineStatePatch
 } from '@/shared/types/engine-api'
@@ -218,6 +219,12 @@ export interface WsInvokeChannelMap {
         request: { engineType: EngineType; repo: string }
         response: EngineCatalogFilesResponse
     }
+    'engine:source-models': {
+        request: { nodeId: string; engine: string }
+        response: SourceModelsResponse
+    }
+    'engine:link-model': { request: { engine: string; path: string }; response: { id: string } }
+    'engine:unlink-model': { request: { engine: string; id: string }; response: null }
 
     // Errors
     'errors:get-initial': { request: void; response: ServiceError[] }
