@@ -401,6 +401,9 @@ func (m *Manager) handleMessage(ctx context.Context, msg *Message) {
 	case "engine:catalog":
 		go m.runCatalog(ctx, msg)
 
+	case "engine:catalog-files":
+		go m.runCatalogFiles(ctx, msg)
+
 	case "engine:install", "engine:uninstall":
 		go m.runOp(ctx, msg)
 
@@ -518,6 +521,29 @@ func (m *Manager) runModels(ctx context.Context, msg *Message) {
 		result.Identities = nil
 	}
 	m.codec.Respond(msg.ID, result)
+}
+
+// runCatalogFiles answers engine:catalog-files, off the request goroutine for
+// the same reason as runCatalog.
+func (m *Manager) runCatalogFiles(ctx context.Context, msg *Message) {
+	var p catalogFilesParams
+	if !m.parse(msg, &p) {
+		return
+	}
+	if p.Engine == "" {
+		m.codec.RespondError(msg.ID, -32602, "engine is required")
+		return
+	}
+	res, err := m.catalog.CatalogFiles(ctx, p.Engine, p.Repo)
+	if errors.Is(err, errCatalogRepoInput) {
+		m.codec.RespondError(msg.ID, -32602, err.Error())
+		return
+	}
+	if err != nil {
+		m.codec.RespondError(msg.ID, -32603, err.Error())
+		return
+	}
+	m.codec.Respond(msg.ID, res)
 }
 
 // runCatalog answers engine:catalog. It is off the request goroutine because the

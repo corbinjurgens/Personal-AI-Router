@@ -539,7 +539,7 @@ func TestModelControlsCatalogCacheReturnBoundaries(t *testing.T) {
 		{"failure backoff", time.Now().Add(-2 * catalogCacheTTL), time.Now()},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cache := &listingCache{models: rows, fetched: tc.fetched, failed: tc.failed, fetch: func(context.Context) ([]CatalogModel, error) {
+			cache := &listingCache[[]CatalogModel]{clean: validCatalogModels, value: rows, fetched: tc.fetched, failed: tc.failed, fetch: func(context.Context) ([]CatalogModel, error) {
 				t.Error("cache hit attempted a fetch")
 				return nil, errors.New("unexpected fetch")
 			}}
@@ -560,7 +560,7 @@ func TestModelControlsCatalogFilteredRefreshReplacesLastGood(t *testing.T) {
 	for _, source := range []string{"llamacpp", "search"} {
 		t.Run(source, func(t *testing.T) {
 			var calls int
-			cache := &listingCache{label: source, models: []CatalogModel{{ID: "old", Name: "old"}}, fetched: time.Now().Add(-2 * catalogCacheTTL)}
+			cache := &listingCache[[]CatalogModel]{clean: validCatalogModels, label: source, value: []CatalogModel{{ID: "old", Name: "old"}}, fetched: time.Now().Add(-2 * catalogCacheTTL)}
 			cache.fetch = func(context.Context) ([]CatalogModel, error) {
 				calls++
 				switch source {
@@ -584,7 +584,7 @@ func TestModelControlsCatalogFilteredRefreshReplacesLastGood(t *testing.T) {
 }
 
 func TestModelControlsCatalogFailureStillKeepsUsableCache(t *testing.T) {
-	cache := &listingCache{label: "fake", models: []CatalogModel{{ID: "sibling", Name: "sibling"}, {ID: "bad\nname", Name: "bad\nname"}}, fetched: time.Now().Add(-2 * catalogCacheTTL), fetch: func(context.Context) ([]CatalogModel, error) { return nil, errors.New("fixture fetch failure") }}
+	cache := &listingCache[[]CatalogModel]{clean: validCatalogModels, label: "fake", value: []CatalogModel{{ID: "sibling", Name: "sibling"}, {ID: "bad\nname", Name: "bad\nname"}}, fetched: time.Now().Add(-2 * catalogCacheTTL), fetch: func(context.Context) ([]CatalogModel, error) { return nil, errors.New("fixture fetch failure") }}
 	got, _, err := cache.get(context.Background())
 	if err != nil || !reflect.DeepEqual(got, []CatalogModel{{ID: "sibling", Name: "sibling"}}) || cache.failed.IsZero() {
 		t.Fatalf("failed refresh changed stale-cache contract: %+v, %v", got, err)
@@ -609,7 +609,7 @@ func TestModelControlsCatalogCoalescedRefreshIsKnownEmpty(t *testing.T) {
 	defer cancel()
 	started, release := make(chan struct{}), make(chan struct{})
 	var calls atomic.Int32
-	cache := &listingCache{label: "fake", models: []CatalogModel{{ID: "old", Name: "old"}}, fetched: time.Now().Add(-2 * catalogCacheTTL)}
+	cache := &listingCache[[]CatalogModel]{clean: validCatalogModels, label: "fake", value: []CatalogModel{{ID: "old", Name: "old"}}, fetched: time.Now().Add(-2 * catalogCacheTTL)}
 	cache.fetch = func(ctx context.Context) ([]CatalogModel, error) {
 		if calls.Add(1) == 1 {
 			close(started)
@@ -1446,7 +1446,7 @@ func TestModelControlsCatalogCompleteBodyBeforeCacheReplacement(t *testing.T) {
 			previous := []CatalogModel{{ID: "owner/previous", Name: "owner/previous"}}
 			previousAt := time.Now().Add(-2 * catalogCacheTTL)
 			search := catalog.llamaCPPSearch("query")
-			search.models, search.fetched = previous, previousAt
+			search.value, search.fetched = previous, previousAt
 			got, at, err := search.get(context.Background())
 			if err != nil {
 				t.Fatalf("refresh with last-good cache: %v", err)

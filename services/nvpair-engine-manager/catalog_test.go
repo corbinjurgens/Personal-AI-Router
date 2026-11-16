@@ -620,8 +620,8 @@ func TestLlamaCPPSearchesAreBounded(t *testing.T) {
 	for i := range llamaCPPSearchCacheLimit {
 		c.llamaCPPSearch(fmt.Sprint("query ", i))
 	}
-	if len(c.llamaSearches) != llamaCPPSearchCacheLimit {
-		t.Errorf("%d searches kept, want at most %d", len(c.llamaSearches), llamaCPPSearchCacheLimit)
+	if len(c.llamaSearches.entries) != llamaCPPSearchCacheLimit {
+		t.Errorf("%d searches kept, want at most %d", len(c.llamaSearches.entries), llamaCPPSearchCacheLimit)
 	}
 	if c.llamaCPPSearch("first") == first {
 		t.Error("the least recently used search was not evicted")
