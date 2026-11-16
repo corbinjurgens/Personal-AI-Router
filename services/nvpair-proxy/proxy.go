@@ -640,9 +640,21 @@ func (f *facade) resolveCandidates(model string) []candidate {
 }
 
 // Concrete names stay on their entry engine. Role routing owns cross-engine
-// candidates separately through the declared profiles.
+// candidates separately through the declared profiles. An exact profile key
+// otherwise routes as a one-rank role: its owners carry the key for routing
+// evidence and form warm-then-cold classes, and the expected-completion
+// chooser picks within the leading one. An eligible node/select pin still
+// leads, so its class is the one chosen within and the pin decides.
 func (f *facade) resolveConcreteCandidates(model, _ string) []candidate {
-	return f.resolveCandidates(model)
+	out := f.resolveCandidates(model)
+	for i := range out {
+		out[i].key = model
+	}
+	orderTierClasses(out, false)
+	if id := f.SelectedID(); id != "" {
+		sort.SliceStable(out, func(i, j int) bool { return out[i].id == id && out[j].id != id })
+	}
+	return out
 }
 
 // resolvePassthroughCandidates keeps paused peers visible to inventory and control.
@@ -885,13 +897,13 @@ var errCandidatePreparationStale = stderrors.New("candidate preparation policy c
 // Selection has no effect until preparation succeeds. Both checks use the
 // original ranking owner; no placement/admission lock covers a storage wait.
 //
-// A prepared tier round (round non-nil) chooses through tierChoiceLocked. Its
-// facts are materialized at the top of each attempt, before any chooser lock,
-// and both the choice before preparation and the recheck after it require
-// them current: a changed feed, sizing snapshot, pin, policy or sizing expiry
-// rebuilds them, and a discovery change re-resolves the class. The probe
-// counter advances only at the final commit. The concrete path keeps
-// candidateChoiceLocked.
+// Every choice goes through tierChoiceLocked. A prepared round (round
+// non-nil: a role or an exact profile key) materializes its facts at the top
+// of each attempt, before any chooser lock, and both the choice before
+// preparation and the recheck after it require them current: a changed feed,
+// sizing snapshot, pin, policy or sizing expiry rebuilds them, and a discovery
+// change re-resolves the class. The probe counter advances only at the final
+// commit. Without a round there are no facts, so the choice is the baseline.
 func (p *Proxy) reserveCandidatePrepared(ctx context.Context, f *facade, candidates []candidate, model string, prepare candidatePreparation, expected *uint64, round *tierRound) ([]candidate, reservation, tierDecision, error) {
 	if len(candidates) == 0 {
 		return candidates, reservation{}, tierDecision{}, nil
@@ -907,11 +919,7 @@ func (p *Proxy) reserveCandidatePrepared(ctx context.Context, f *facade, candida
 		// choose runs under selectedMu and priorityMu; ok is false when the
 		// tier facts no longer describe the sources.
 		choose := func() (int, bool, tierDecision, bool) {
-			if round == nil {
-				index, reserve := p.candidateChoiceLocked(candidates, f.selectedID)
-				return index, reserve, tierDecision{}, true
-			}
-			if !p.tierFactsCurrentLocked(facts, f.selectedID, true) {
+			if round != nil && !p.tierFactsCurrentLocked(facts, f.selectedID, true) {
 				return 0, false, tierDecision{}, false
 			}
 			index, reserve, decision := p.tierChoiceLocked(f, candidates, facts, f.selectedID)

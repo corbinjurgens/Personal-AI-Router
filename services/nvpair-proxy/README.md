@@ -517,7 +517,9 @@ keeps today's result, and a class with no measured rate or with any member of
 unknown size keeps today's least-loaded choice. Every 16th automatic choice
 probes an idle unmeasured candidate. Tier rank and warmth still lead, so a warm
 slow node is never compared with a cold fast one; the destination keeps its own
-preparation and admission authority. See [spec.md](spec.md) §12.3.
+preparation and admission authority. An exact profile key with several owners
+uses the same chooser: its owners form warm-then-cold classes as a one-rank
+role. See [spec.md](spec.md) §12.3.
 
 - **Eligibility**: Before routing model-bearing inference, the proxy keeps only
   nodes declaring the exact requested profile key for this engine. Self uses
@@ -530,8 +532,8 @@ preparation and admission authority. See [spec.md](spec.md) §12.3.
 - **Priority (scheduler-driven)**: The Job Scheduler ranks the cluster
   least-loaded-first by pending workload plus smoothed GPU pressure and, via
   `nvpair-ui-broker`, pushes the ordered node list with those per-node counts to
-  this proxy with `node/set-priority`. Auto routing sends the request to the
-  listed node carrying the least estimated load. See
+  this proxy with `node/set-priority`. That ranking orders owners and is the
+  chooser's baseline; model-bearing requests choose as described above. See
   [`nvpair-job-scheduler`](../nvpair-job-scheduler/README.md).
 - **Manual**: `node/select` pins traffic to a specific node. A manual pin
   **overrides the priority list only when that node is eligible** for the

@@ -601,9 +601,14 @@ For a model-bearing inference request:
    `502` without contacting an engine.
 2. Order eligible owners: explicit `node/select` pin, then the ready class
    before dormant self candidates, then scheduler priority and deterministic
-   default ordering within a class.
-3. Reserve the least estimated-loaded scheduler-listed candidate and move it to
-   the front (§6).
+   default ordering within a class. A model-bearing request then orders its
+   owners warm before cold, keeping that order within each warmth, so an exact
+   profile key forms the same classes as a one-rank role (§12.3). An eligible
+   pin still leads.
+3. Choose within the leading warmth class with the role chooser (§12.3,
+   Expected completion), take its reservation (§6) and move the winner to the
+   front. A key with one owner keeps that owner. The decision is recorded as the
+   history `selection`, as for role rounds.
 4. Forward, failing over through the remaining candidates on a retryable status
    or transport error. An upstream model `404` counts as retryable, because
    positive inventory can be stale.
@@ -1925,6 +1930,8 @@ built-in, default or protected names and no cluster role store.
   re-resolves the class. Only the final commit takes the reservation and
   advances the probe counter. Ties keep class order. A warm slow node is never
   compared with a cold fast one, because they are in different classes.
+  An exact profile key with several owners uses this same chooser over its
+  warm-then-cold classes (§5, step 3).
   The latest committed round's decision is recorded once per request as the
   history `selection` (§12.5.2): a fixed native descriptor that a later fresh
   round's commit replaces.

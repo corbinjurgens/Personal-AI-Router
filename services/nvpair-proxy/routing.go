@@ -721,15 +721,16 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 		return kept
 	}
 	candidates := resolve()
-	// round carries a tier request's body to the expected-completion chooser,
-	// which sizes each candidate's destination-effective body from it.
+	// round carries a role or exact-key request's body to the
+	// expected-completion chooser, which sizes each candidate's
+	// destination-effective body from it.
 	var tierInputs *tierRound
-	if tier != "" {
+	if model != "" {
 		tierInputs = &tierRound{body: bodyBytes, route: r.URL.Path, hybrid: policy.hybrid}
 	}
-	// observeSelection records a committed tier round's decision for the
-	// request's history; a later fresh round replaces it. The chosen candidate
-	// leads the reordered round.
+	// observeSelection records a committed round's decision for the request's
+	// history; a later fresh round replaces it. The chosen candidate leads the
+	// reordered round.
 	observeSelection := func(chosen []candidate, decision tierDecision) {
 		if tierInputs != nil && len(chosen) > 0 {
 			ctl.observeSelection(selectionDescriptor(decision, chosen[0], f.profile.Name))
