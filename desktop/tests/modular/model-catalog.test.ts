@@ -13,7 +13,11 @@ vi.mock('@/electron/service-bridge/modular-supervisor', () => ({
     getModularSupervisor: () => mocks.supervisor
 }))
 
-import { getEngineHubModels, warmEngineHubs } from '@/electron/service-bridge/model-catalog'
+import {
+    getEngineCatalogFiles,
+    getEngineHubModels,
+    warmEngineHubs
+} from '@/electron/service-bridge/model-catalog'
 import { MODULAR_CATALOG_CALL_TIMEOUT_MS } from '@/shared/constants/modular-runtime'
 
 describe('model catalog relay', () => {
@@ -131,6 +135,60 @@ describe('model catalog relay', () => {
             'engine:catalog',
             { engine: 'llamacpp' },
             MODULAR_CATALOG_CALL_TIMEOUT_MS
+        )
+    })
+})
+
+describe('repository file listing relay', () => {
+    beforeEach(() => {
+        vi.clearAllMocks()
+    })
+
+    it('passes the pasted text through and parses the files', async () => {
+        mocks.supervisor.callProcess.mockResolvedValue({
+            repo: 'owner/Model-GGUF',
+            revision: 'a'.repeat(40),
+            files: [
+                {
+                    quantization: 'Q4_K_M',
+                    name: 'owner/Model-GGUF:Q4_K_M',
+                    sizeBytes: 400,
+                    shards: 1
+                },
+                { quantization: 'Q8_0', name: 'owner/Model-GGUF:Q8_0', sizeBytes: 800, shards: 2 },
+                { quantization: '', name: 'dropped' }
+            ],
+            fetchedAt: '2026-11-17T00:00:00Z'
+        })
+        const res = await getEngineCatalogFiles('llama-cpp', 'https://hf.co/owner/Model-GGUF')
+        expect(mocks.supervisor.callProcess).toHaveBeenCalledWith(
+            'broker',
+            'engine:catalog-files',
+            { engine: 'llamacpp', repo: 'https://hf.co/owner/Model-GGUF' },
+            MODULAR_CATALOG_CALL_TIMEOUT_MS
+        )
+        expect(res).toEqual({
+            repo: 'owner/Model-GGUF',
+            revision: 'a'.repeat(40),
+            files: [
+                {
+                    quantization: 'Q4_K_M',
+                    name: 'owner/Model-GGUF:Q4_K_M',
+                    sizeBytes: 400,
+                    shards: 1
+                },
+                { quantization: 'Q8_0', name: 'owner/Model-GGUF:Q8_0', sizeBytes: 800, shards: 2 }
+            ]
+        })
+    })
+
+    // The dialog shows the backend's reason, so it must not be swallowed.
+    it('rethrows a backend error', async () => {
+        mocks.supervisor.callProcess.mockRejectedValue(
+            new Error('This repository is private or gated; PAIR downloads only open repositories.')
+        )
+        await expect(getEngineCatalogFiles('llama-cpp', 'owner/Gated')).rejects.toThrow(
+            'private or gated'
         )
     })
 })

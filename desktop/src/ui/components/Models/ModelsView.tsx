@@ -13,6 +13,7 @@ import { ModelCopyModal } from '@/ui/components/ModelManager/ModelCopyModal'
 import { Search } from '@/ui/components/icons'
 import { ModelGroup } from './ModelGroup'
 import { ModelDeleteConfirmation } from './ModelDeleteConfirmation'
+import { ModelDownloadDialog } from './ModelDownloadDialog'
 import type { EngineType } from '@/shared/types/engines'
 
 function plural(count: number, one: string, many = `${one}s`): string {
@@ -64,7 +65,9 @@ export function ModelsView() {
         source: string
         model: string
         opId?: string
+        destination?: string
     } | null>(null)
+    const [downloading, setDownloading] = useState(false)
     const openCopy = (location: ClusterModelLocation) =>
         setCopy({
             engineType: location.engineType,
@@ -83,18 +86,23 @@ export function ModelsView() {
                             : `${plural(groups.length, 'model')} · ${plural(copies, 'copy', 'copies')} on ${plural(holders, 'node')}`}
                     </Text>
                 </Stack>
-                {groups.length > 0 && (
-                    <Flex align="center" gap="2" className="w-72 max-w-full">
-                        <Search className="shrink-0 text-subtle-color" />
-                        <TextInput
-                            placeholder="Filter by model, quantization or node"
-                            aria-label="Filter models"
-                            value={query}
-                            onValueChange={setQuery}
-                            className="flex-1 min-w-0"
-                        />
-                    </Flex>
-                )}
+                <Flex align="center" gap="3" wrap="wrap" className="max-w-full">
+                    {groups.length > 0 && (
+                        <Flex align="center" gap="2" className="w-72 max-w-full">
+                            <Search className="shrink-0 text-subtle-color" />
+                            <TextInput
+                                placeholder="Filter by model, quantization or node"
+                                aria-label="Filter models"
+                                value={query}
+                                onValueChange={setQuery}
+                                className="flex-1 min-w-0"
+                            />
+                        </Flex>
+                    )}
+                    <Button kind="primary" color="brand" onClick={() => setDownloading(true)}>
+                        Download model
+                    </Button>
+                </Flex>
             </Flex>
 
             {transfers.length > 0 && (
@@ -167,7 +175,7 @@ export function ModelsView() {
             )}
             {copy && (
                 <ModelCopyModal
-                    key={`${copy.engineType}:${copy.source}:${copy.model}:${copy.opId ?? ''}`}
+                    key={`${copy.engineType}:${copy.source}:${copy.model}:${copy.opId ?? ''}:${copy.destination ?? ''}`}
                     open
                     onOpenChange={open => {
                         if (!open) setCopy(null)
@@ -176,6 +184,23 @@ export function ModelsView() {
                     initialSource={copy.source}
                     initialModel={copy.model}
                     initialOpId={copy.opId}
+                    fixedDestination={copy.destination}
+                />
+            )}
+            {downloading && (
+                <ModelDownloadDialog
+                    open
+                    onOpenChange={setDownloading}
+                    nodes={nodes}
+                    onCopy={(source, destination) => {
+                        setDownloading(false)
+                        setCopy({
+                            engineType: source.engineType,
+                            source: source.nodeId,
+                            model: source.model.name,
+                            destination
+                        })
+                    }}
                 />
             )}
             <ModelDeleteConfirmation deletion={deletion} />

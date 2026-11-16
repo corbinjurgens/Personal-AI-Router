@@ -26,6 +26,7 @@
 import type {
     EngineCommandPayload,
     EngineHubSearchResponse,
+    EngineCatalogFilesResponse,
     EngineInitialState,
     EngineStatePatch
 } from '@/shared/types/engine-api'
@@ -212,6 +213,10 @@ export interface WsInvokeChannelMap {
     'engine:search-hub': {
         request: { engineType: EngineType; query?: string }
         response: EngineHubSearchResponse
+    }
+    'engine:catalog-files': {
+        request: { engineType: EngineType; repo: string }
+        response: EngineCatalogFilesResponse
     }
 
     // Errors

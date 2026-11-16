@@ -57,6 +57,22 @@ export interface EngineHubSearchResponse {
     models: EngineHubModel[]
 }
 
+/** One quantization of a Hugging Face repository; `name` is pull-ready. */
+export interface EngineCatalogFile {
+    quantization: string
+    name: string
+    sizeBytes: number
+    shards: number
+}
+
+/** Response for the `engine:catalog-files` channel. */
+export interface EngineCatalogFilesResponse {
+    /** The normalised `owner/name` the listing is for. */
+    repo: string
+    revision: string
+    files: EngineCatalogFile[]
+}
+
 /** Engine command discriminator. */
 export type EngineCommandType =
     | 'install'

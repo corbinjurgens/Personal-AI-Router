@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { Badge, Button, Flex, Stack, Tag, Text } from '@nvidia/foundations-react-core'
-import type {
-    ClusterModelGroup,
-    ClusterModelLocation,
-    ClusterModelVariant
+import {
+    clusterVariantSize,
+    type ClusterModelGroup,
+    type ClusterModelLocation
 } from '@/ui/utils/group-cluster-models'
 import { LocalBadge } from '@/ui/components/LocalBadge'
 import { useConnectionStore } from '@/ui/stores/connection.store'
@@ -118,12 +118,6 @@ function ModelLocation({
     )
 }
 
-function variantSize(variant: ClusterModelVariant): number | undefined {
-    const model = variant.locations[0].model
-    const bytes = model.identity?.totalBytes ?? model.size
-    return bytes > 0 ? bytes : undefined
-}
-
 /** Splits `owner/name` so the model name leads and the publisher sits beneath it. */
 function splitRepository(name: string): { title: string; owner?: string } {
     const slash = name.indexOf('/')
@@ -166,7 +160,7 @@ export function ModelGroup({
             </Flex>
             <Stack gap="2" className="mt-3">
                 {group.variants.map(variant => {
-                    const size = variantSize(variant)
+                    const size = clusterVariantSize(variant)
                     return (
                         <div key={variant.key} className="rounded-md bg-[#ffffff08] px-3 py-2">
                             <Flex align="center" gap="2" wrap="wrap" className="pb-1">

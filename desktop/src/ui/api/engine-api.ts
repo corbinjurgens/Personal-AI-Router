@@ -11,6 +11,7 @@ import type { ServiceTransport } from '@/shared/types/service-bridge'
 import type { WsInvokeRequest, WsInvokeResponse } from '@/shared/types/ws-channels'
 import type {
     EngineHubSearchResponse,
+    EngineCatalogFilesResponse,
     EngineInitialState,
     EngineStatePatch,
     EngineCommandPayload
@@ -105,6 +106,8 @@ export interface IEngineApi {
     setModelExpiry(engineType: EngineType, nodeId: string, model: string, expiry: string): void
     /** Load an engine catalog or explicitly search its upstream registry. */
     searchHub(engineType: EngineType, query?: string): Promise<EngineHubSearchResponse>
+    /** List the quantizations of a pasted Hugging Face repository or link. */
+    catalogFiles(engineType: EngineType, repo: string): Promise<EngineCatalogFilesResponse>
 
     /** The local engine-manager's descriptor set changed (full replacement). */
     onDescriptorsChanged(callback: (descriptors: EngineDescriptor[]) => void): () => void
@@ -192,6 +195,8 @@ export function createEngineApi(transport: ServiceTransport): IEngineApi {
                 'engine:search-hub',
                 query === undefined ? { engineType } : { engineType, query }
             ),
+        catalogFiles: (engineType, repo) =>
+            transport.invoke('engine:catalog-files', { engineType, repo }),
 
         onDescriptorsChanged: cb => transport.subscribePush('engines:descriptors-changed', cb),
         onStateChanged: cb => transport.subscribePush('engines:state-changed', cb),

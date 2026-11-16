@@ -72,3 +72,10 @@ export function groupClusterModels(inventory: Iterable<EngineModels>): ClusterMo
     }
     return Array.from(groups.values()).sort((a, b) => a.name.localeCompare(b.name))
 }
+
+/** The variant's download size in bytes, from its first location, if known. */
+export function clusterVariantSize(variant: ClusterModelVariant): number | undefined {
+    const model = variant.locations[0].model
+    const bytes = model.identity?.totalBytes ?? model.size
+    return bytes > 0 ? bytes : undefined
+}

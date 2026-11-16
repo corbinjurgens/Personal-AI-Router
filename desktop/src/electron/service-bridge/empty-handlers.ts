@@ -18,7 +18,7 @@ import {
 } from '@/shared/constants/modular-runtime'
 import getErrorString from '@/shared/utils/get-error-string'
 import { engineManagerName } from '@/shared/utils/engines'
-import { getEngineHubModels } from '@/electron/service-bridge/model-catalog'
+import { getEngineCatalogFiles, getEngineHubModels } from '@/electron/service-bridge/model-catalog'
 import { getModularSupervisor } from './modular-supervisor'
 import {
     parseEngineSettings,
@@ -1010,6 +1010,10 @@ const EMPTY_SERVICE_BRIDGE_HANDLERS: BridgeHandlerMap = {
     'engine:command': payload => handleEngineCommand(payload),
     'engine:search-hub': payload =>
         payload ? getEngineHubModels(payload.engineType, payload.query) : { models: [] },
+    'engine:catalog-files': payload => {
+        if (!payload) throw new Error('Missing repository')
+        return getEngineCatalogFiles(payload.engineType, payload.repo)
+    },
 
     'errors:get-initial': () => handleErrorsGetInitial(),
     'errors:clear': payload => (payload ? handleErrorsClear(payload) : null),

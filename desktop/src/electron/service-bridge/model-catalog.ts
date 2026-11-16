@@ -2,7 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { EngineType } from '@/shared/types/engines'
-import type { EngineHubModel, EngineHubSearchResponse } from '@/shared/types/engine-api'
+import type {
+    EngineCatalogFile,
+    EngineCatalogFilesResponse,
+    EngineHubModel,
+    EngineHubSearchResponse
+} from '@/shared/types/engine-api'
 import { getModularSupervisor } from '@/electron/service-bridge/modular-supervisor'
 import type { JsonObject, JsonValue } from '@/electron/service-bridge/json-rpc-client'
 import { createStructuredLogger } from '@/shared/utils/log'
@@ -109,6 +114,44 @@ export async function getEngineHubModels(
         })
         return { models: [] }
     }
+}
+
+function toCatalogFile(raw: JsonValue): EngineCatalogFile | null {
+    if (!isObject(raw)) return null
+    const name = readStr(raw, 'name')
+    const quantization = readStr(raw, 'quantization')
+    if (!name || !quantization) return null
+    return {
+        quantization,
+        name,
+        sizeBytes: readNum(raw, 'sizeBytes'),
+        shards: Math.max(1, readNum(raw, 'shards'))
+    }
+}
+
+/**
+ * List the quantizations of one Hugging Face repository from the backend's
+ * `engine:catalog-files`. The backend parses the pasted name or link; errors are
+ * rethrown so the dialog can show why a repository cannot be offered.
+ */
+export async function getEngineCatalogFiles(
+    engineType: EngineType,
+    repo: string
+): Promise<EngineCatalogFilesResponse> {
+    const result = await getModularSupervisor().callProcess(
+        'broker',
+        'engine:catalog-files',
+        { engine: engineManagerName(engineType), repo },
+        MODULAR_CATALOG_CALL_TIMEOUT_MS
+    )
+    if (!isObject(result)) throw new Error('Repository file listing was malformed.')
+    const rows = Array.isArray(result.files) ? result.files : []
+    const files = rows.map(toCatalogFile).filter((f): f is EngineCatalogFile => f !== null)
+    log.verbose({
+        sublevel: 'catalog',
+        message: `${engineType} repository listing: ${files.length} files`
+    })
+    return { repo: readStr(result, 'repo'), revision: readStr(result, 'revision'), files }
 }
 
 /**

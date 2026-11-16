@@ -154,6 +154,7 @@
 | `engine:active-model-copies` | request (we call) | ✅ yes |
 | `engine:cancel-model-copy` | request (we call) | ✅ yes |
 | `engine:catalog` | request (we call) | ✅ yes |
+| `engine:catalog-files` | request (we call) | ✅ yes |
 | `engine:clear-stated-memory` | request (we call) | ✅ yes |
 | `engine:configure-launch` | request (we call) | ⚠️ not called |
 | `engine:configured-ports` | request (we call) | ⚠️ not called |

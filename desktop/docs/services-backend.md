@@ -531,6 +531,9 @@ operating system and CPU a model will install on; Electron relays the call and
 maps rows for the renderer, which then sends pull-ready model IDs back through
 the engine manager. llama.cpp's source is also searchable: the relay passes the
 model hub's query through, and the engine manager searches Hugging Face with it.
+`engine:catalog-files` lists every quantization of one pasted repository or
+link; the engine manager parses the text and reads Hugging Face, and Electron
+relays the reply and its errors unchanged.
 
 ## Pairing and security
 
