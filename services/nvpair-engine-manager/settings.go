@@ -104,8 +104,25 @@ func launchForState(st *engineState, port int) (launchCommand, error) {
 	return resolveProcessLaunch(rt, bin, vars)
 }
 
+// launchStateInputs holds what a settings read takes under opMu. Its snapshot
+// is detached from the live state, so resolve can run the typed compile after
+// opMu is released without blocking lifecycle operations or previews.
+type launchStateInputs struct {
+	result   settings.LaunchState
+	snapshot *engineState
+	drift    string
+	observed []engines.ServingObservation
+}
+
+// launchStateLocked is the settings read for callers that already hold opMu.
 func (e *Executor) launchStateLocked(engine string, st *engineState) settings.LaunchState {
+	return e.launchStateInputsLocked(engine, st).resolve(e)
+}
+
+func (e *Executor) launchStateInputsLocked(engine string, st *engineState) launchStateInputs {
+	inputs := launchStateInputs{snapshot: snapshotLlamaState(st)}
 	st.mu.Lock()
+	defer st.mu.Unlock()
 	result := settings.LaunchState{Engine: engine, ServerPort: st.plat.Runtime.Port, EffectivePort: st.port, Running: st.running, Adopted: st.adopted, Format: launchTextFormat}
 	if limit := st.plat.Runtime.WorkingSetLimitMiB; limit != nil {
 		value := *limit
@@ -124,13 +141,19 @@ func (e *Executor) launchStateLocked(engine string, st *engineState) settings.La
 	result.Serving = st.plat.Runtime.Serving.Clone()
 	result.ModelLoads = modelconfig.CloneLoads(st.plat.Runtime.ModelLoads)
 	result.ServingReadback = servingDeclarationReadback(result.Serving)
-	drift := st.plat.Runtime.servingDrift
-	st.mu.Unlock()
+	inputs.result, inputs.drift = result, st.plat.Runtime.servingDrift
+	if result.Running && !result.Adopted {
+		inputs.observed = e.servingObservationsLocked(st)
+	}
+	return inputs
+}
+
+// resolve reads only the detached snapshot; callers need not hold opMu.
+func (in launchStateInputs) resolve(e *Executor) settings.LaunchState {
+	result, st := in.result, in.snapshot
 	command, err := launchForState(st, result.ServerPort)
 	if err == nil {
-		st.mu.Lock()
 		rt := st.plat.Runtime
-		st.mu.Unlock()
 		rt.modelLoadOwner = e
 		if preparedServingRuntime(st, rt) {
 			if llamaServingRuntime(st, rt) {
@@ -140,11 +163,9 @@ func (e *Executor) launchStateLocked(engine string, st *engineState) settings.La
 			if servingErr == nil {
 				result.ServingReadback = preparedServingReadback(st, prepared)
 				if result.Running && !result.Adopted && rt.servingLaunch != nil {
-					if drift == "" && rt.servingLaunch.Digest == prepared.Digest {
+					if in.drift == "" && rt.servingLaunch.Digest == prepared.Digest {
 						result.ServingReadback.LaunchValidated = servingEnvelopes(rt.servingLaunch)
-						st.mu.Lock()
-						result.ServingReadback.Observed = e.servingObservationsLocked(st)
-						st.mu.Unlock()
+						result.ServingReadback.Observed = slices.Clone(in.observed)
 						if len(result.ServingReadback.Observed) > 0 {
 							result.ServingReadback.Status = "observed"
 							result.ServingReadback.Reason = "Loaded models match validated context and slots; memory bounds remain operator declarations."
@@ -177,6 +198,9 @@ func (e *Executor) launchStateLocked(engine string, st *engineState) settings.La
 	return result
 }
 
+// LaunchSettings snapshots its inputs under opMu and compiles outside it, so
+// concurrent reads neither serialize on one another nor make a preview's
+// nonblocking configuration check report busy.
 func (e *Executor) LaunchSettings(engine string, contexts ...context.Context) (settings.LaunchState, error) {
 	st, err := e.state(engine)
 	if err != nil {
@@ -186,8 +210,9 @@ func (e *Executor) LaunchSettings(engine string, contexts ...context.Context) (s
 	defer cancel()
 	preparationErr := prepareStrataState(ctx, st)
 	st.opMu.Lock()
-	defer st.opMu.Unlock()
-	result := e.launchStateLocked(engine, st)
+	inputs := e.launchStateInputsLocked(engine, st)
+	st.opMu.Unlock()
+	result := inputs.resolve(e)
 	if preparationErr != nil {
 		result.ServingReadback = &engines.ServingReadback{Status: "mismatch", Reason: preparationErr.Error()}
 	}
@@ -253,13 +278,17 @@ func (e *Executor) RejectRemoteCORSChange(request settings.Request) error {
 		return nil
 	}
 	st.opMu.Lock()
-	defer st.opMu.Unlock()
-	return e.rejectRemoteCORSChangeLocked(st, request)
+	inputs := e.launchStateInputsLocked(request.Engine, st)
+	st.opMu.Unlock()
+	return rejectCORSChange(inputs.resolve(e).LaunchText, inputs.snapshot.plat.Runtime.EditableLaunch, request)
 }
 
 func (e *Executor) rejectRemoteCORSChangeLocked(st *engineState, request settings.Request) error {
-	policy := st.plat.Runtime.EditableLaunch
-	current, err := launchCORSAssignments(e.launchStateLocked(request.Engine, st).LaunchText, policy)
+	return rejectCORSChange(e.launchStateLocked(request.Engine, st).LaunchText, st.plat.Runtime.EditableLaunch, request)
+}
+
+func rejectCORSChange(launchText string, policy *EditableLaunch, request settings.Request) error {
+	current, err := launchCORSAssignments(launchText, policy)
 	if err != nil {
 		return err
 	}

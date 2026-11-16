@@ -612,6 +612,16 @@ func (e *Executor) inspectModelArtifactsOnce(ctx context.Context, p modelconfig.
 	if err != nil {
 		return unavailable("unavailable", "Exact local model source is unavailable.")
 	}
+	// A busy configuration lock at a later check is contention, not a change.
+	configurationMoved := func(current modelInspectionSnapshot, err error) string {
+		if errors.Is(err, errModelInspectionBusy) {
+			return "Engine configuration is being changed."
+		}
+		if err != nil || !snapshot.equal(current) {
+			return "Engine configuration changed during inspection."
+		}
+		return ""
+	}
 	var selected *modelconfig.ModelLoad
 	if p.ProfileKey != "" {
 		for i := range snapshot.state.plat.Runtime.ModelLoads {
@@ -688,9 +698,9 @@ func (e *Executor) inspectModelArtifactsOnce(ctx context.Context, p modelconfig.
 	}
 	// Cache hits repeat resolution, binding samples and all owner checks too.
 	current, err := inspectionSnapshot(st, p.Engine)
-	if err != nil || !snapshot.equal(current) {
+	if reason := configurationMoved(current, err); reason != "" {
 		*retry = true
-		return unavailable("busy", "Engine configuration changed during inspection.")
+		return unavailable("busy", reason)
 	}
 	if list.source.inventory != nil {
 		original := access.recognize
@@ -722,9 +732,9 @@ func (e *Executor) inspectModelArtifactsOnce(ctx context.Context, p modelconfig.
 	}
 	// Finish with a nonblocking configuration check after the last file I/O.
 	current, err = inspectionSnapshot(st, p.Engine)
-	if err != nil || !snapshot.equal(current) {
+	if reason := configurationMoved(current, err); reason != "" {
 		*retry = true
-		return unavailable("busy", "Engine configuration changed during inspection.")
+		return unavailable("busy", reason)
 	}
 	downloads.mu.Lock()
 	changed := e.downloads != downloads || e.reg != registry || downloads.source != source || downloads.revision != revision || downloads.blockedLocked(key) || downloads.writers[p.Engine]
@@ -815,14 +825,14 @@ func (e *Executor) inspectModelArtifactsOnce(ctx context.Context, p modelconfig.
 			}
 		}
 		current, err := inspectionSnapshot(st, p.Engine)
-		if err != nil || !snapshot.equal(current) {
+		if reason := configurationMoved(current, err); reason != "" {
 			*retry = true
 			if semantic != nil {
 				*semantic = ""
 			}
 			result.ConfigurationKey, result.ConfigurationKeyReason, result.ConfigurationPools = "", "artifacts-unavailable", nil
 			result.ExecutionKey = ""
-			return unavailable("busy", "Engine configuration changed during inspection.")
+			return unavailable("busy", reason)
 		}
 	}
 	for _, output := range advisory {

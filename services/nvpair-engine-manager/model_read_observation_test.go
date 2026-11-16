@@ -8,11 +8,14 @@ import (
 	"errors"
 	"os"
 	"reflect"
+	"runtime"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/modelconfig"
 )
 
@@ -347,5 +350,183 @@ func TestModelReadDiagnosticIdentityRecheckPastBoundKeepsBusy(t *testing.T) {
 	var coded *codedError
 	if !modelReadWithinBound(time.Since(started)) || result.Status != "busy" || result.ConfigurationKey != "" || result.ExecutionKey != "" || !errors.As(err, &coded) || coded.code != -32010 || errors.Is(err, errModelDiagnosticIdentity) || diagnosticFailureReason(err) == "identity-changed" {
 		t.Fatalf("past-bound busy inspection was misreported as changed identity or missed its bound: elapsed=%s result=%+v err=%v", time.Since(started), result, err)
+	}
+}
+
+// previewAttemptWithMidpoint runs one preview attempt and calls midpoint while
+// the attempt holds its content lease, after its first configuration snapshot
+// and before its final nonblocking check.
+func previewAttemptWithMidpoint(t *testing.T, f inspectionFixture, midpoint func()) (settings.Preview, bool) {
+	t.Helper()
+	request := nativeOptionsPreviewRequest(t, f, nil)
+	request.ModelChange.Load.Set.Context = &modelconfig.Context{Mode: "fixed", Tokens: 4096}
+	memory := modelTargetMemoryOwner{target: modelBufferTestTargetMemory()}
+	var once sync.Once
+	ctx := context.WithValue(context.Background(), modelAutoOperationKey{}, modelAutoOperation{Memory: diagnosticInspectionMemoryFunc(func(ctx context.Context) (*modelEstimateMemory, error) {
+		once.Do(midpoint)
+		return memory.ModelAutoMemory(ctx)
+	})})
+	_, known := f.ex.nativeOptions(ctx, f.st)
+	ctx = context.WithValue(ctx, nativeHelpDiscoveryKey{}, known)
+	ctx, cancel := context.WithTimeout(ctx, modelInspectionBudget)
+	defer cancel()
+	retry := false
+	var pending *modelEstimateInput
+	result, err := f.ex.previewModelLoadChangeOnce(ctx, f.st, request, &retry, &pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result, retry
+}
+
+// A lifecycle owner holding opMu at the preview's final check is contention,
+// not a settings change: the attempt retries and reports busy.
+func TestModelReadPreviewFinalCheckBusyReportsBusy(t *testing.T) {
+	f := newAppliedKeyFixture(t)
+	locked := false
+	result, retry := previewAttemptWithMidpoint(t, f, func() {
+		f.st.opMu.Lock()
+		locked = true
+	})
+	if locked {
+		f.st.opMu.Unlock()
+	}
+	if !locked || !retry {
+		t.Fatalf("busy final check did not request a retry: locked=%t retry=%t", locked, retry)
+	}
+	if _, changed := result.Errors["modelLoads.baseline"]; changed || result.Errors["modelLoads"] != errModelInspectionBusy.Error() {
+		t.Fatalf("busy final check was not reported as busy: %v", result.Errors)
+	}
+}
+
+// A real revision change during the preview still reports changed.
+func TestModelReadPreviewFinalCheckRevisionChangeReportsChanged(t *testing.T) {
+	f := newAppliedKeyFixture(t)
+	result, retry := previewAttemptWithMidpoint(t, f, func() {
+		f.st.mu.Lock()
+		f.st.gen++
+		f.st.mu.Unlock()
+	})
+	if !retry || result.Errors["modelLoads.baseline"] != modelLoadError("", "baseline", "Engine settings changed during preview.").Error() {
+		t.Fatalf("revision change was not reported as changed: retry=%t errors=%v", retry, result.Errors)
+	}
+	if _, busy := result.Errors["modelLoads"]; busy {
+		t.Fatalf("revision change was reported as busy: %v", result.Errors)
+	}
+}
+
+// A settings read holds opMu only for its snapshot. Its typed compile runs
+// while another owner holds opMu and yields the same state as a locked read.
+func TestLaunchSettingsCompilesOutsideOpMu(t *testing.T) {
+	f := newAppliedKeyFixture(t)
+	f.st.opMu.Lock()
+	want := f.ex.launchStateLocked(f.request.Engine, f.st)
+	inputs := f.ex.launchStateInputsLocked(f.request.Engine, f.st)
+	done := make(chan settings.LaunchState, 1)
+	go func() { done <- inputs.resolve(f.ex) }()
+	var got settings.LaunchState
+	select {
+	case got = <-done:
+	case <-time.After(30 * time.Second):
+		f.st.opMu.Unlock()
+		t.Fatal("settings read compile waited for opMu")
+	}
+	f.st.opMu.Unlock()
+	if got.ServingReadback == nil || got.ServingReadback.Status == "mismatch" || got.Reason != "" {
+		t.Fatalf("settings read did not compile the typed launch: %+v", got)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("detached settings read differs from the locked read:\n got=%+v\nwant=%+v", got, want)
+	}
+}
+
+// Continuous settings reads, as from a GUI review and a second client, must
+// not make a concurrent typed preview fail its nonblocking final check.
+func TestModelReadPreviewSucceedsDuringSettingsReads(t *testing.T) {
+	f := newAppliedKeyFixture(t)
+	request := nativeOptionsPreviewRequest(t, f, nil)
+	request.ModelChange.Load.Set.Context = &modelconfig.Context{Mode: "fixed", Tokens: 4096}
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	var reads atomic.Int64
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				if _, err := f.ex.LaunchSettings(f.request.Engine); err != nil {
+					t.Error(err)
+					return
+				}
+				reads.Add(1)
+			}
+		}()
+	}
+	for reads.Load() == 0 {
+		runtime.Gosched()
+	}
+	result, err := f.ex.previewModelLoadChange(keyTestMemoryContext(), f.st, request)
+	close(stop)
+	wg.Wait()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Errors) != 0 || result.Conflict != nil || len(result.Settings.ModelLoads) == 0 {
+		t.Fatalf("preview failed while settings reads ran: %v", result.Errors)
+	}
+}
+
+// inspectAttemptWithMidpoint runs one inspection attempt and calls midpoint at
+// its first model file open, after the first configuration snapshot and before
+// the later nonblocking checks.
+func inspectAttemptWithMidpoint(t *testing.T, f inspectionFixture, midpoint func()) (modelconfig.InspectResult, bool) {
+	t.Helper()
+	var once sync.Once
+	f.ex.modelInspection.open = func(path string) (servingArtifactFile, error) {
+		if path == f.model {
+			once.Do(midpoint)
+		}
+		return os.Open(path)
+	}
+	retry := false
+	result, err := f.ex.inspectModelArtifactsOnce(keyTestMemoryContext(), f.request, &retry, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result, retry
+}
+
+// A lifecycle owner holding opMu at the inspection's later check is
+// contention, not a configuration change: the attempt retries and reports busy.
+func TestModelReadInspectionLaterCheckBusyReportsBusy(t *testing.T) {
+	f := newAppliedKeyFixture(t)
+	locked := false
+	result, retry := inspectAttemptWithMidpoint(t, f, func() {
+		f.st.opMu.Lock()
+		locked = true
+	})
+	if locked {
+		f.st.opMu.Unlock()
+	}
+	if !locked || !retry || result.Status != "busy" || result.Reason != "Engine configuration is being changed." || result.ConfigurationKey != "" {
+		t.Fatalf("busy later check was not reported as busy: locked=%t retry=%t status=%q reason=%q", locked, retry, result.Status, result.Reason)
+	}
+}
+
+// A real revision change during the inspection still reports changed.
+func TestModelReadInspectionLaterCheckRevisionChangeReportsChanged(t *testing.T) {
+	f := newAppliedKeyFixture(t)
+	result, retry := inspectAttemptWithMidpoint(t, f, func() {
+		f.st.mu.Lock()
+		f.st.gen++
+		f.st.mu.Unlock()
+	})
+	if !retry || result.Status != "busy" || result.Reason != "Engine configuration changed during inspection." || result.ConfigurationKey != "" {
+		t.Fatalf("revision change was not reported as changed: retry=%t status=%q reason=%q", retry, result.Status, result.Reason)
 	}
 }
