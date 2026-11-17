@@ -134,7 +134,7 @@ describe('Add model from file', () => {
         )
         expect(name?.value).toBe('Mine')
         await act(async () => button('Add').click())
-        expect(importModel).toHaveBeenCalledWith('llamacpp', { path: picked }, 'Mine')
+        expect(importModel).toHaveBeenCalledWith('llama-cpp', { path: picked }, 'Mine')
         expect(document.body.textContent).toContain('Added as Mine')
         await act(async () => button('Create profile').click())
         expect(onCreateProfile).toHaveBeenCalledWith('Mine')
@@ -147,9 +147,9 @@ describe('Add model from file', () => {
         await chooseMode('link')
         expect(document.querySelector('input[aria-label="Model name in PAIR"]')).toBeNull()
         await act(async () => button('Add').click())
-        expect(linkModel).toHaveBeenCalledWith('llamacpp', picked)
+        expect(linkModel).toHaveBeenCalledWith('llama-cpp', picked)
         expect(document.body.textContent).toContain('Added as local/Mine')
-        expect(sourceModels).toHaveBeenCalledWith('msi', 'llamacpp')
+        expect(sourceModels).toHaveBeenCalledWith('msi', 'llama-cpp')
     })
 
     it('keeps the dialog open with the reason when an import fails', async () => {

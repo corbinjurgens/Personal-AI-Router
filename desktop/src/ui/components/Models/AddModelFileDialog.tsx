@@ -18,7 +18,7 @@ import {
 import { DialogHeader } from '@/ui/components/DialogHeader'
 import { InlineErrorBanner } from '@/ui/components/InlineErrorBanner'
 import { useConnectionStore } from '@/ui/stores/connection.store'
-import { SOURCE_MODELS_ENGINE, useSourceModelsStore } from '@/ui/stores/source-models.store'
+import { SOURCE_MODELS_ENGINE_TYPE, useSourceModelsStore } from '@/ui/stores/source-models.store'
 import getErrorString from '@/shared/utils/get-error-string'
 
 type Mode = 'copy' | 'link'
@@ -86,14 +86,14 @@ export function AddModelFileDialog({
                 mode === 'copy'
                     ? (
                           await window.pairApi.engines.importModel(
-                              SOURCE_MODELS_ENGINE,
+                              SOURCE_MODELS_ENGINE_TYPE,
                               { path },
                               name.trim()
                           )
                       ).id
-                    : (await window.pairApi.engines.linkModel(SOURCE_MODELS_ENGINE, path)).id
+                    : (await window.pairApi.engines.linkModel(SOURCE_MODELS_ENGINE_TYPE, path)).id
             setAdded(id)
-            if (mode === 'link' && selfId) void refreshSources(selfId)
+            if (selfId) void refreshSources(selfId)
         } catch (err) {
             setError(getErrorString(err))
         } finally {

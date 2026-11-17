@@ -10,14 +10,23 @@ import { InlineErrorBanner } from '@/ui/components/InlineErrorBanner'
 import { LocalBadge } from '@/ui/components/LocalBadge'
 import ModelSettingsPanel from '@/ui/components/ModelSettings/ModelSettingsPanel'
 import { useConnectionStore } from '@/ui/stores/connection.store'
-import { SOURCE_MODELS_ENGINE, useSourceModelsStore } from '@/ui/stores/source-models.store'
+import { SOURCE_MODELS_ENGINE_TYPE, useSourceModelsStore } from '@/ui/stores/source-models.store'
 import { formatBytes } from '@/ui/utils/formatters'
+import { engineManagerName } from '@/shared/utils/engines'
 import getErrorString from '@/shared/utils/get-error-string'
 
 const SOURCE_LABELS: Record<SourceModel['source'], string> = {
     ollama: 'Ollama',
     lmstudio: 'LM Studio',
-    local: 'Linked file'
+    local: 'Linked file',
+    copy: 'Copied file'
+}
+
+const BADGE_COLORS: Record<SourceModel['source'], 'blue' | 'green' | 'gray'> = {
+    ollama: 'gray',
+    lmstudio: 'gray',
+    local: 'blue',
+    copy: 'green'
 }
 
 /** The store name for a copied source model: its ID without the source, "/" and "@" as "-". */
@@ -32,7 +41,10 @@ function sourceModelMatches(model: SourceModel, nodeName: string, needle: string
     )
 }
 
-/** Models each node serves in place from Ollama, LM Studio or linked files. */
+/**
+ * Models each node serves in place from Ollama, LM Studio or linked files, and
+ * the copied files in its model folder that native inventory does not list.
+ */
 export function SourceModelsSection({
     nodes,
     needle
@@ -43,6 +55,7 @@ export function SourceModelsSection({
 }) {
     const entries = useSourceModelsStore(state => state.entries)
     const refresh = useSourceModelsStore(state => state.refresh)
+    const forget = useSourceModelsStore(state => state.forget)
     const selfId = useConnectionStore(state => state.selfId)
     const [configure, setConfigure] = useState<{ node: NodeItem; id: string } | null>(null)
     const [unlinking, setUnlinking] = useState<SourceModel | null>(null)
@@ -50,6 +63,7 @@ export function SourceModelsSection({
     const [copying, setCopying] = useState<SourceModel | null>(null)
     const [busyCopy, setBusyCopy] = useState('')
     const [copied, setCopied] = useState('')
+    const [deleting, setDeleting] = useState<{ node: NodeItem; model: SourceModel } | null>(null)
 
     const cards = nodes.flatMap(node => {
         const entry = entries.get(node.id)
@@ -65,7 +79,7 @@ export function SourceModelsSection({
     const unlink = async (model: SourceModel) => {
         setActionError('')
         try {
-            await window.pairApi.engines.unlinkModel(SOURCE_MODELS_ENGINE, model.id)
+            await window.pairApi.engines.unlinkModel(SOURCE_MODELS_ENGINE_TYPE, model.id)
         } catch (err) {
             setActionError(getErrorString(err))
         }
@@ -78,26 +92,33 @@ export function SourceModelsSection({
         setBusyCopy(model.id)
         try {
             const res = await window.pairApi.engines.importModel(
-                SOURCE_MODELS_ENGINE,
+                SOURCE_MODELS_ENGINE_TYPE,
                 { sourceId: model.id },
                 storeName(model.id)
             )
             setCopied(res.id)
+            if (selfId) void refresh(selfId)
         } catch (err) {
             setActionError(getErrorString(err))
         } finally {
             setBusyCopy('')
         }
     }
+
+    // The engine command reports a refused or failed delete as an app error.
+    const deleteCopy = (node: NodeItem, model: SourceModel) => {
+        window.pairApi.engines.deleteModel(SOURCE_MODELS_ENGINE_TYPE, node.id, model.id)
+        forget(node.id, model.id)
+    }
     const self = nodes.find(node => node.id === selfId)
 
     return (
         <Stack gap="3">
             <Stack gap="1">
-                <Text kind="body/semibold/md">Outside the model store</Text>
+                <Text kind="body/semibold/md">Added files and other folders</Text>
                 <Text kind="body/regular/sm" className="text-subtle-color">
-                    Models in Ollama or LM Studio folders, and files you linked. PAIR serves them
-                    where they are.
+                    Files you copied into PAIR&apos;s model folder, models in Ollama or LM Studio
+                    folders, and files you linked. PAIR serves the last two where they are.
                 </Text>
             </Stack>
             {copied && self && (
@@ -122,7 +143,7 @@ export function SourceModelsSection({
                 <section
                     key={node.id}
                     className="pair-paper p-4"
-                    aria-label={`${node.name} outside the model store`}
+                    aria-label={`${node.name} added files and other folders`}
                 >
                     <Stack gap="2">
                         <Flex align="center" gap="2">
@@ -143,7 +164,7 @@ export function SourceModelsSection({
                                 className="py-2 border-t border-[#ffffff0f] first:border-t-0"
                             >
                                 <Flex gap="2" align="center" className="min-w-0">
-                                    <Badge color={model.source === 'local' ? 'blue' : 'gray'}>
+                                    <Badge color={BADGE_COLORS[model.source]}>
                                         {SOURCE_LABELS[model.source]}
                                     </Badge>
                                     <Text
@@ -167,17 +188,20 @@ export function SourceModelsSection({
                                     >
                                         Create profile
                                     </Button>
-                                    {model.source !== 'local' && node.id === selfId && (
-                                        <Button
-                                            size="small"
-                                            kind="tertiary"
-                                            disabled={busyCopy !== ''}
-                                            aria-label={`Copy ${model.name} into store`}
-                                            onClick={() => setCopying(model)}
-                                        >
-                                            {busyCopy === model.id ? 'Copying…' : 'Copy into store'}
-                                        </Button>
-                                    )}
+                                    {(model.source === 'ollama' || model.source === 'lmstudio') &&
+                                        node.id === selfId && (
+                                            <Button
+                                                size="small"
+                                                kind="tertiary"
+                                                disabled={busyCopy !== ''}
+                                                aria-label={`Copy ${model.name} into store`}
+                                                onClick={() => setCopying(model)}
+                                            >
+                                                {busyCopy === model.id
+                                                    ? 'Copying…'
+                                                    : 'Copy into store'}
+                                            </Button>
+                                        )}
                                     {model.source === 'local' && node.id === selfId && (
                                         <Button
                                             size="small"
@@ -186,6 +210,16 @@ export function SourceModelsSection({
                                             onClick={() => setUnlinking(model)}
                                         >
                                             Unlink
+                                        </Button>
+                                    )}
+                                    {model.source === 'copy' && (
+                                        <Button
+                                            size="small"
+                                            kind="tertiary"
+                                            aria-label={`Delete ${model.name}`}
+                                            onClick={() => setDeleting({ node, model })}
+                                        >
+                                            Delete
                                         </Button>
                                     )}
                                 </Flex>
@@ -200,7 +234,10 @@ export function SourceModelsSection({
                     targetId={configure.node.id}
                     nodeId={configure.node.id === selfId ? undefined : configure.node.id}
                     nodeName={configure.node.name}
-                    identity={{ engine: SOURCE_MODELS_ENGINE, model: configure.id }}
+                    identity={{
+                        engine: engineManagerName(SOURCE_MODELS_ENGINE_TYPE),
+                        model: configure.id
+                    }}
                     open
                     onOpenChange={open => {
                         if (!open) setConfigure(null)
@@ -217,6 +254,19 @@ export function SourceModelsSection({
                     message={`PAIR copies ${copying.name} (${formatBytes(copying.sizeBytes, 1)}) into its own model folder. The original stays where it is.`}
                     confirmLabel="Copy"
                     onConfirm={() => void copyIntoStore(copying)}
+                />
+            )}
+            {deleting && (
+                <ConfirmModal
+                    open
+                    onOpenChange={open => {
+                        if (!open) setDeleting(null)
+                    }}
+                    title="Delete copied file"
+                    message={`Delete ${deleting.model.name} (${formatBytes(deleting.model.sizeBytes, 1)}) from PAIR's model folder on ${deleting.node.name}? A model a profile uses cannot be deleted; remove those profiles first.`}
+                    confirmLabel="Delete"
+                    confirmColor="danger"
+                    onConfirm={() => deleteCopy(deleting.node, deleting.model)}
                 />
             )}
             {unlinking && (

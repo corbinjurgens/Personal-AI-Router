@@ -4,9 +4,10 @@
 package main
 
 // modelsources_rpc.go answers the methods that list, link and unlink models
-// served from outside the store. The listing is path-free and readable by any
-// pinned peer; linking and unlinking name local paths, so they act only on the
-// node that receives them.
+// served from outside the store. The listing also names the store's
+// custom-artifact bundles, which native inventory does not list. It is
+// path-free and readable by any pinned peer; linking and unlinking name local
+// paths, so they act only on the node that receives them.
 
 import (
 	"context"
@@ -17,18 +18,26 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"nvpair-shared/engines"
 )
 
-const controlSourceModelsPath = "/v1/models/sources"
+const (
+	controlSourceModelsPath = "/v1/models/sources"
+	// copySourceName marks a listed custom-artifact bundle in the store.
+	copySourceName = "copy"
+)
 
 // sourceModelInfo is one outside-the-store model as clients see it: no host
 // paths, only what identifies and sizes it.
 type sourceModelInfo struct {
 	ID string `json:"id"`
-	// Source is "ollama", "lmstudio" or "local" (a linked file).
+	// Source is "ollama", "lmstudio", "local" (a linked file) or "copy" (a
+	// bundle in the engine's store: a file copied in with engine:import-model
+	// or a custom model copied from a peer).
 	Source string `json:"source"`
 	// Name is what the source calls the model: Ollama's name@tag, LM Studio's
-	// relative path, or a linked file's base name.
+	// relative path, a linked file's base name, or a bundle's model ID.
 	Name         string `json:"name"`
 	SizeBytes    int64  `json:"sizeBytes"`
 	Shards       int    `json:"shards"`
@@ -36,7 +45,8 @@ type sourceModelInfo struct {
 }
 
 // sourceModelsResult is the engine:source-models reply. Error reports a linked
-// list that could not be read; the folder sources are still listed.
+// list that could not be read, in text without host paths since peers read
+// it; the other sources are still listed.
 type sourceModelsResult struct {
 	Models []sourceModelInfo `json:"models"`
 	Error  string            `json:"error,omitempty"`
@@ -65,6 +75,18 @@ func (e *Executor) sourceModelsList(ctx context.Context, engine string) sourceMo
 			info.Shards++
 		}
 		res.Models = append(res.Models, info)
+	}
+	if _, store, err := e.modelStoreFor(engine); err == nil && store.adapter == engines.NameLlamaCPP {
+		for _, bundle := range copyBundles(ctx, store) {
+			info := sourceModelInfo{ID: bundle.List.Model, Source: copySourceName, Name: bundle.List.Model}
+			for _, f := range bundle.List.Files {
+				if f.Role == "model" {
+					info.SizeBytes += f.Size
+					info.Shards++
+				}
+			}
+			res.Models = append(res.Models, info)
+		}
 	}
 	return res
 }
@@ -136,6 +158,15 @@ func (m *Manager) runUnlinkModel(ctx context.Context, msg *Message) {
 }
 
 func (e *Executor) unlinkUnused(ctx context.Context, engine, id string) error {
+	if err := e.refuseProfileUse(ctx, engine, id); err != nil {
+		return err
+	}
+	return e.unlinkModel(engine, id)
+}
+
+// refuseProfileUse refuses removing model id while a stored profile of engine
+// names it.
+func (e *Executor) refuseProfileUse(ctx context.Context, engine, id string) error {
 	st, err := e.state(engine)
 	if err != nil {
 		return err
@@ -153,7 +184,7 @@ func (e *Executor) unlinkUnused(ctx context.Context, engine, id string) error {
 	if len(users) > 0 {
 		return modelSettingsParamsError(fmt.Errorf("%s is used by profile(s) %s; remove or change those profiles first.", id, strings.Join(users, ", ")))
 	}
-	return e.unlinkModel(engine, id)
+	return nil
 }
 
 func (s *controlServer) handleSourceModels(w http.ResponseWriter, r *http.Request) {

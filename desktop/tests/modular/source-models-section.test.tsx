@@ -20,6 +20,7 @@ vi.mock('@/ui/components/ModelSettings/ModelSettingsPanel', () => ({
 }))
 
 const unlinkModel = vi.fn<IEngineApi['unlinkModel']>()
+const deleteModel = vi.fn<IEngineApi['deleteModel']>()
 const importModel = vi.fn<IEngineApi['importModel']>()
 const sourceModels = vi.fn<IEngineApi['sourceModels']>()
 let root: Root
@@ -77,6 +78,8 @@ beforeEach(() => {
     unlinkModel.mockReset().mockResolvedValue(null)
     sourceModels.mockReset().mockResolvedValue({ models: [] })
     api.engines.unlinkModel = unlinkModel
+    deleteModel.mockReset()
+    api.engines.deleteModel = deleteModel
     importModel.mockReset().mockResolvedValue({
         id: 'pub-repo-Model',
         layout: 'llama-artifacts-v1',
@@ -127,6 +130,14 @@ beforeEach(() => {
                             sizeBytes: 1,
                             shards: 2,
                             hasProjector: false
+                        },
+                        {
+                            id: 'Copied-Q4',
+                            source: 'copy',
+                            name: 'Copied-Q4',
+                            sizeBytes: 8192,
+                            shards: 1,
+                            hasProjector: false
                         }
                     ]
                 }
@@ -146,12 +157,12 @@ afterEach(async () => {
     useSourceModelsStore.setState({ entries: new Map() })
 })
 
-describe('Outside the model store', () => {
+describe('Added files and other folders', () => {
     it('lists each node with its source rows and unlinks only local linked files', async () => {
         await act(async () => root.render(<SourceModelsSection nodes={nodes} needle="" />))
-        expect(container.textContent).toContain('Outside the model store')
+        expect(container.textContent).toContain('Added files and other folders')
         expect(
-            container.querySelector('section[aria-label="MSI outside the model store"]')
+            container.querySelector('section[aria-label="MSI added files and other folders"]')
         ).not.toBeNull()
         expect(container.textContent).toContain('Ollama')
         expect(container.textContent).toContain('Linked file')
@@ -182,9 +193,9 @@ describe('Outside the model store', () => {
         )
         if (!(confirm instanceof HTMLButtonElement)) throw new Error('Missing confirm button')
         await act(async () => confirm.click())
-        expect(unlinkModel).toHaveBeenCalledWith('llamacpp', 'local/Mine')
+        expect(unlinkModel).toHaveBeenCalledWith('llama-cpp', 'local/Mine')
         expect(document.body.textContent).toContain('used by profile(s) chat')
-        expect(sourceModels).toHaveBeenCalledWith('msi', 'llamacpp')
+        expect(sourceModels).toHaveBeenCalledWith('msi', 'llama-cpp')
     })
 
     it('filters rows by the Models tab filter', async () => {
@@ -192,7 +203,7 @@ describe('Outside the model store', () => {
         expect(container.textContent).toContain('tiny@latest')
         expect(container.textContent).not.toContain('Mine.gguf')
         expect(
-            container.querySelector('section[aria-label="MSI outside the model store"]')
+            container.querySelector('section[aria-label="MSI added files and other folders"]')
         ).toBeNull()
     })
 
@@ -223,12 +234,36 @@ describe('Outside the model store', () => {
         if (!(confirm instanceof HTMLButtonElement)) throw new Error('Missing confirm button')
         await act(async () => confirm.click())
         expect(importModel).toHaveBeenCalledWith(
-            'llamacpp',
+            'llama-cpp',
             { sourceId: 'lmstudio/pub/repo/Model' },
             'pub-repo-Model'
         )
         expect(container.textContent).toContain(
             "Copied into PAIR's model folder as pub-repo-Model."
         )
+    })
+
+    it('offers Create profile and Delete for a copied file, not Copy or Unlink', async () => {
+        await act(async () => root.render(<SourceModelsSection nodes={nodes} needle="" />))
+        expect(container.textContent).toContain('Copied file')
+        expect(() => button('Copy Copied-Q4 into store')).toThrow()
+        expect(() => button('Unlink Copied-Q4')).toThrow()
+        await act(async () => button('Create profile for Copied-Q4').click())
+        const panel = document.querySelector('[data-panel-model]')
+        expect(panel?.getAttribute('data-panel-model')).toBe('Copied-Q4')
+        expect(panel?.getAttribute('data-panel-target')).toBe('joes')
+    })
+
+    it('deletes a copied file on its node after confirmation', async () => {
+        await act(async () => root.render(<SourceModelsSection nodes={nodes} needle="" />))
+        await act(async () => button('Delete Copied-Q4').click())
+        expect(document.body.textContent).toContain("from PAIR's model folder on Joes")
+        const confirm = Array.from(document.querySelectorAll('dialog button')).find(
+            row => row.textContent?.trim() === 'Delete'
+        )
+        if (!(confirm instanceof HTMLButtonElement)) throw new Error('Missing confirm button')
+        await act(async () => confirm.click())
+        expect(deleteModel).toHaveBeenCalledWith('llama-cpp', 'joes', 'Copied-Q4')
+        expect(container.textContent).not.toContain('Copied-Q4')
     })
 })

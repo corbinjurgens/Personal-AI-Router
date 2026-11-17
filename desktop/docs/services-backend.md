@@ -536,12 +536,16 @@ link; the engine manager parses the text and reads Hugging Face, and Electron
 relays the reply and its errors unchanged.
 
 Models a node serves from outside its store (Ollama and LM Studio folders, and
-GGUF files linked by hand) are listed by `engine:source-models { nodeId, engine }`,
-which the engine manager answers locally or from the peer's read route.
-`engine:link-model` and `engine:unlink-model` act only on this PC, since they
-name local paths. The Models tab's "Outside the model store" section reads the
-listing on open and after a link change; profiles name these models by their
-source ID and the engine manager resolves the file in place.
+GGUF files linked by hand), and the copied bundles in its store that native
+inventory does not list, are listed by `engine:source-models { nodeId, engineType }`,
+which the engine manager answers locally or from the peer's read route. The
+renderer sends engine types on these channels and the bridge maps them with
+`engineManagerName`. `engine:link-model` and `engine:unlink-model` act only on
+this PC, since they name local paths. The Models tab's "Added files and other
+folders" section reads the listing on open and after a link, unlink or copy;
+profiles name these models by their ID and the engine manager resolves the file
+in place or in the bundle. A copied file's Delete sends the ordinary
+`deleteModel` engine command, which the engine manager applies to the bundle.
 `engine:import-model` copies a file picked on this PC (through the native
 `models:choose-file` picker in the main process) or a listed source model into
 the store; the call settles when the copy finishes, so the bridge allows it six

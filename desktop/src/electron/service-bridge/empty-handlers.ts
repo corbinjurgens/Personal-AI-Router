@@ -1025,7 +1025,7 @@ const EMPTY_SERVICE_BRIDGE_HANDLERS: BridgeHandlerMap = {
         return parseSourceModels(
             await getModularSupervisor().callProcess('broker', 'engine:source-models', {
                 nodeId: payload.nodeId,
-                engine: payload.engine
+                engine: engineManagerName(payload.engineType)
             })
         )
     },
@@ -1033,7 +1033,7 @@ const EMPTY_SERVICE_BRIDGE_HANDLERS: BridgeHandlerMap = {
         if (!payload) throw new Error('Missing model file')
         return parseLinkedModel(
             await getModularSupervisor().callProcess('broker', 'engine:link-model', {
-                engine: payload.engine,
+                engine: engineManagerName(payload.engineType),
                 path: payload.path
             })
         )
@@ -1044,7 +1044,11 @@ const EMPTY_SERVICE_BRIDGE_HANDLERS: BridgeHandlerMap = {
             await getModularSupervisor().callProcess(
                 'broker',
                 'engine:import-model',
-                { engine: payload.engine, id: payload.id, ...payload.source },
+                {
+                    engine: engineManagerName(payload.engineType),
+                    id: payload.id,
+                    ...payload.source
+                },
                 MODEL_IMPORT_CALL_TIMEOUT_MS
             )
         )
@@ -1052,7 +1056,7 @@ const EMPTY_SERVICE_BRIDGE_HANDLERS: BridgeHandlerMap = {
     'engine:unlink-model': async payload => {
         if (!payload) throw new Error('Missing linked model')
         await getModularSupervisor().callProcess('broker', 'engine:unlink-model', {
-            engine: payload.engine,
+            engine: engineManagerName(payload.engineType),
             id: payload.id
         })
         return null

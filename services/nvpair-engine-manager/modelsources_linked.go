@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -49,8 +50,9 @@ func (e *Executor) linkedModelsPath() string {
 }
 
 // linkedEntries loads the store if needed. A malformed file is reported rather
-// than replaced, so a hand edit gone wrong never loses every link. The caller
-// holds e.linked.mu.
+// than replaced, so a hand edit gone wrong never loses every link. The error
+// text reaches pinned peers through the source listing, so it names no host
+// path; the local log keeps the read error. The caller holds e.linked.mu.
 func (e *Executor) linkedEntries() ([]linkedModel, error) {
 	if e.linked.loaded {
 		return e.linked.entries, nil
@@ -61,7 +63,8 @@ func (e *Executor) linkedEntries() ([]linkedModel, error) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("read linked models: %w", err)
+		slog.Warn("linked model list is unreadable", "err", err)
+		return nil, fmt.Errorf("%s could not be read", linkedModelsFile)
 	}
 	var file struct {
 		Version int           `json:"version"`
@@ -98,7 +101,8 @@ func (e *Executor) saveLinkedEntries(entries []linkedModel) error {
 // checkLinkableFile returns the cleaned path of a GGUF model file PAIR may serve
 // in place or import: an absolute .gguf path to a regular file with the GGUF
 // magic that is not a projector, helper or later shard, and whose path a
-// preset line can carry.
+// preset line can carry. The suffix must be lower-case: the artifact resolver,
+// split detection and bundle export recognise only ".gguf".
 func checkLinkableFile(file string) (string, error) {
 	if len(file) > maxLinkedPath || !filepath.IsAbs(file) {
 		return "", modelSettingsParamsError(errors.New("Choose a file by its full path."))
@@ -107,6 +111,9 @@ func checkLinkableFile(file string) (string, error) {
 	lower := strings.ToLower(filepath.Base(file))
 	if !strings.HasSuffix(lower, ".gguf") {
 		return "", modelSettingsParamsError(errors.New("Only GGUF model files (.gguf) can be added."))
+	}
+	if !strings.HasSuffix(file, ".gguf") {
+		return "", modelSettingsParamsError(errors.New("Rename the file so it ends in lower-case .gguf; PAIR cannot serve a .GGUF file."))
 	}
 	if !ggufIsModel(lower) {
 		return "", modelSettingsParamsError(errors.New("This file is a projector or helper file, not a model."))

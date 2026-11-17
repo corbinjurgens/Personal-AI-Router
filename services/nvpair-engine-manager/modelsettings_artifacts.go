@@ -443,7 +443,7 @@ func resolvedLoadArtifacts(ctx context.Context, store engineModelStore, model st
 		if err := validateSource(evidence); err != nil {
 			return modelFileList{}, err
 		}
-		list.Files = append(list.Files, modelFile{Role: artifact.Role, Path: artifact.Role + "/" + filepath.Base(artifact.Path), Size: binding.SizeBytes, abs: binding.ResolvedTarget, configured: binding.SourcePath, sample: binding.SampleSHA256, info: evidence.info})
+		list.Files = append(list.Files, modelFile{Role: artifact.Role, Path: artifact.Role + "/" + bundleFileName(artifact.Path, model), Size: binding.SizeBytes, abs: binding.ResolvedTarget, configured: binding.SourcePath, sample: binding.SampleSHA256, info: evidence.info})
 	}
 	if err := validateResolvedArtifacts(list); err != nil {
 		return modelFileList{}, err

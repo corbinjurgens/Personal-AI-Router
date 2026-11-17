@@ -29,6 +29,7 @@ describe('source model relay', () => {
                         name: 'Big-00001-of-00002.gguf',
                         shards: 2
                     },
+                    { id: 'Mine', source: 'copy', name: 'Mine', sizeBytes: 5, shards: 1 },
                     { id: 'x', source: 'elsewhere' },
                     { source: 'ollama' }
                 ],
@@ -50,6 +51,14 @@ describe('source model relay', () => {
                     name: 'Big-00001-of-00002.gguf',
                     sizeBytes: 0,
                     shards: 2,
+                    hasProjector: false
+                },
+                {
+                    id: 'Mine',
+                    source: 'copy',
+                    name: 'Mine',
+                    sizeBytes: 5,
+                    shards: 1,
                     hasProjector: false
                 }
             ],
@@ -79,7 +88,7 @@ describe('source model relay', () => {
         })
     })
 
-    it('names the node for listings and only the engine for local link changes', async () => {
+    it('names the node for listings and only the engine type for local link changes', async () => {
         const invoke = vi.fn<ServiceTransport['invoke']>(() => Promise.resolve(null))
         const transport: ServiceTransport = {
             connected: true,
@@ -91,18 +100,22 @@ describe('source model relay', () => {
             destroy: () => {}
         }
         const api = createPairApi(transport)
-        await api.engines.sourceModels('joes', 'llamacpp')
-        await api.engines.linkModel('llamacpp', 'C:\\models\\Model.gguf')
-        await api.engines.unlinkModel('llamacpp', 'local/Model')
-        await api.engines.importModel('llamacpp', { sourceId: 'ollama/tiny@latest' }, 'tiny-latest')
+        await api.engines.sourceModels('joes', 'llama-cpp')
+        await api.engines.linkModel('llama-cpp', 'C:\\models\\Model.gguf')
+        await api.engines.unlinkModel('llama-cpp', 'local/Model')
+        await api.engines.importModel(
+            'llama-cpp',
+            { sourceId: 'ollama/tiny@latest' },
+            'tiny-latest'
+        )
         expect(invoke.mock.calls).toEqual([
-            ['engine:source-models', { nodeId: 'joes', engine: 'llamacpp' }],
-            ['engine:link-model', { engine: 'llamacpp', path: 'C:\\models\\Model.gguf' }],
-            ['engine:unlink-model', { engine: 'llamacpp', id: 'local/Model' }],
+            ['engine:source-models', { nodeId: 'joes', engineType: 'llama-cpp' }],
+            ['engine:link-model', { engineType: 'llama-cpp', path: 'C:\\models\\Model.gguf' }],
+            ['engine:unlink-model', { engineType: 'llama-cpp', id: 'local/Model' }],
             [
                 'engine:import-model',
                 {
-                    engine: 'llamacpp',
+                    engineType: 'llama-cpp',
                     source: { sourceId: 'ollama/tiny@latest' },
                     id: 'tiny-latest'
                 }

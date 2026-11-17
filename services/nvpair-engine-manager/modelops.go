@@ -263,7 +263,12 @@ func (e *Executor) ModelUnload(ctx context.Context, engine, model string) (json.
 }
 
 // ModelDelete removes a downloaded model from disk when the engine offers it.
+// A custom-artifact bundle (an imported file or a custom peer copy), which the
+// engine itself does not know, is removed by engine-manager instead.
 func (e *Executor) ModelDelete(ctx context.Context, engine, model string) (json.RawMessage, error) {
+	if handled, err := e.deleteCopyBundle(ctx, engine, model); handled {
+		return nil, err
+	}
 	return e.modelOperation(ctx, engine, engines.OperationDelete, model)
 }
 

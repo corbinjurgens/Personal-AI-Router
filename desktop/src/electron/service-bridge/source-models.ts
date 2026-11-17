@@ -13,7 +13,7 @@ function isObject(v: JsonValue | undefined): v is JsonObject {
 }
 
 function isSource(v: JsonValue | undefined): v is SourceModel['source'] {
-    return v === 'ollama' || v === 'lmstudio' || v === 'local'
+    return v === 'ollama' || v === 'lmstudio' || v === 'local' || v === 'copy'
 }
 
 function toSourceModel(raw: JsonValue): SourceModel | null {

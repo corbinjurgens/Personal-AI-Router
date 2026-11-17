@@ -147,6 +147,21 @@ func TestScanModelSources(t *testing.T) {
 	})
 }
 
+// The resolver accepts only a lower-case .gguf, so a source folder does not
+// offer a .GGUF file it could never serve.
+func TestScanModelSourcesSkipsUpperCaseSuffix(t *testing.T) {
+	root := t.TempDir()
+	writeSourceGGUF(t, filepath.Join(root, "pub", "repo", "Lower.gguf"))
+	writeSourceGGUF(t, filepath.Join(root, "pub", "repo", "Upper.GGUF"))
+	var ids []string
+	for _, model := range scanModelSources(context.Background(), []modelSource{{name: "lmstudio", layout: sourceLayoutGGUFTree, root: root}}) {
+		ids = append(ids, model.id)
+	}
+	if len(ids) != 1 || ids[0] != "lmstudio/pub/repo/Lower" {
+		t.Fatalf("source models = %v", ids)
+	}
+}
+
 func TestLlamaSourcePreset(t *testing.T) {
 	llama := &engineState{manifest: &Manifest{Engine: "llamacpp", Family: "llamacpp"}}
 	sourceRoot := func(t *testing.T) string {

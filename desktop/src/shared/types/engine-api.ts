@@ -65,12 +65,18 @@ export interface EngineCatalogFile {
     shards: number
 }
 
-/** A model an engine serves in place from outside its store. */
+/**
+ * A model an engine serves in place from outside its store, or a bundle in
+ * its store that native inventory does not list.
+ */
 export interface SourceModel {
     id: string
-    /** `local` is a file linked by hand. */
-    source: 'ollama' | 'lmstudio' | 'local'
-    /** Ollama's name@tag, LM Studio's relative path, or a linked file's name. */
+    /**
+     * `local` is a file linked by hand; `copy` is a bundle in PAIR's model
+     * folder (a file added by copy, or a custom model copied from a peer).
+     */
+    source: 'ollama' | 'lmstudio' | 'local' | 'copy'
+    /** Ollama's name@tag, LM Studio's relative path, a linked file's name, or a copy's ID. */
     name: string
     sizeBytes: number
     shards: number

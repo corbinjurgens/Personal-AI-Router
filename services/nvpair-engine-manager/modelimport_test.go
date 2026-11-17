@@ -7,10 +7,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"nvpair-shared/modelconfig"
 )
 
 func importTestExecutor(t *testing.T) (*Executor, engineModelStore) {
@@ -134,6 +138,11 @@ func TestImportModelRefusals(t *testing.T) {
 		"unknown source": {Engine: "llamacpp", SourceID: "lmstudio/missing", ID: "Mine"},
 		"bad name":       {Engine: "llamacpp", Path: file, ID: "Mine;rm"},
 		"not a model":    {Engine: "llamacpp", Path: filepath.Join(t.TempDir(), "x.gguf"), ID: "Mine"},
+		"repo name":      {Engine: "llamacpp", Path: file, ID: "owner/repo"},
+		"repo and tag":   {Engine: "llamacpp", Path: file, ID: "owner/repo:Q4_K_M"},
+		"linked prefix":  {Engine: "llamacpp", Path: file, ID: "local/Mine"},
+		"ollama prefix":  {Engine: "llamacpp", Path: file, ID: "ollama/mine@latest"},
+		"studio prefix":  {Engine: "llamacpp", Path: file, ID: "lmstudio/pub/repo/Mine"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := ex.importModel(context.Background(), p); err == nil {
@@ -157,4 +166,63 @@ func TestImportModelRefusals(t *testing.T) {
 			}
 		}
 	})
+}
+
+// An imported bundle appears in the source listing as a store copy, so the
+// Models tab can show it, and engine:delete-model removes it once no profile
+// uses it. An unfinished copy, with no receipt, is not listed.
+func TestCopyBundlesAreListedAndDeletable(t *testing.T) {
+	plentyOfDisk(t)
+	ex, store := importTestExecutor(t)
+	file := filepath.Join(t.TempDir(), "Mine-00001-of-00002.gguf")
+	writeSourceGGUF(t, file)
+	writeSourceGGUF(t, filepath.Join(filepath.Dir(file), "Mine-00002-of-00002.gguf"))
+	res, err := ex.importModel(context.Background(), importParams{Engine: "llamacpp", Path: file, ID: "Mine"})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	unfinished := filepath.Join(copyAliasDir(store.root, "Other"), res.ExportID, "model", "Other.gguf.part")
+	writeSourceFile(t, unfinished, []byte("partial"))
+
+	listing := ex.sourceModelsList(context.Background(), "llamacpp")
+	var rows []sourceModelInfo
+	for _, row := range listing.Models {
+		if row.Source == copySourceName {
+			rows = append(rows, row)
+		}
+	}
+	if len(rows) != 1 || rows[0].ID != "Mine" || rows[0].Name != "Mine" || rows[0].Shards != 2 || rows[0].SizeBytes <= 0 || rows[0].HasProjector {
+		t.Fatalf("copy rows = %+v", rows)
+	}
+	data, err := json.Marshal(listing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), filepath.ToSlash(store.root)) || strings.Contains(string(data), strings.ReplaceAll(store.root, `\`, `\\`)) {
+		t.Fatalf("listing leaks a host path: %s", data)
+	}
+
+	st, err := ex.state("llamacpp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.plat.Runtime.ModelLoads = []modelconfig.ModelLoad{{ProfileKey: "chat", ModelID: "Mine"}}
+	if _, err := ex.ModelDelete(context.Background(), "llamacpp", "Mine"); err == nil || !strings.Contains(err.Error(), "used by profile(s) chat") {
+		t.Fatalf("delete while a profile uses it = %v", err)
+	}
+	if _, err := readCopyReceipt(store, "Mine"); err != nil {
+		t.Fatalf("refused delete removed the receipt: %v", err)
+	}
+	st.plat.Runtime.ModelLoads = nil
+	if _, err := ex.ModelDelete(context.Background(), "llamacpp", "Mine"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, err := os.Stat(copyAliasDir(store.root, "Mine")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("bundle directory remains: %v", err)
+	}
+	for _, row := range ex.sourceModelsList(context.Background(), "llamacpp").Models {
+		if row.Source == copySourceName {
+			t.Fatalf("deleted bundle still listed: %+v", row)
+		}
+	}
 }

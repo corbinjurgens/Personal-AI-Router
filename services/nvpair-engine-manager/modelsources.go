@@ -14,7 +14,8 @@ package main
 // models through a generated native preset (llamaSourcePreset) while a node has
 // no profiles, and the artifact resolver binds them for typed loads, so a
 // profile serves them in place. Linked files (modelsources_linked.go) join the
-// same list. Peer copy covers only an engine's own store, not source models.
+// same list. Peer copy exports a source model only through a profile's typed
+// load, as a custom bundle (see resolvedLoadArtifacts).
 
 import (
 	"bytes"
@@ -215,10 +216,13 @@ func scanGGUFTreeSource(ctx context.Context, source modelSource) []sourceModel {
 	type folder struct{ models, projectors []string }
 	folders := map[string]*folder{}
 	walkSourceFiles(ctx, source.root, sourceTreeDepth, func(file string, rel []string) {
-		base := strings.ToLower(rel[len(rel)-1])
-		if !strings.HasSuffix(base, ".gguf") {
+		// Only a lower-case suffix: the artifact resolver and split detection
+		// recognise no other spelling, so a .GGUF file could be listed but
+		// never served.
+		if !strings.HasSuffix(rel[len(rel)-1], ".gguf") {
 			return
 		}
+		base := strings.ToLower(rel[len(rel)-1])
 		dir := path.Join(rel[:len(rel)-1]...)
 		f := folders[dir]
 		if f == nil {

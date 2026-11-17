@@ -98,25 +98,22 @@ func (e *Executor) importModel(ctx context.Context, p importParams) (importResul
 	if err := validateLlamaModelID(p.ID); err != nil || strings.ContainsAny(p.ID, sourcePresetUnsafe) {
 		return importResult{}, modelSettingsParamsError(errors.New("Choose a model name of letters, digits and - _ . / @ only."))
 	}
+	// The resolver would also bind a source model or a Hugging Face download
+	// by these names, and refuse the pair as ambiguous.
+	if _, _, err := splitLlamaModel(p.ID); err == nil || isSourceModelID(p.ID) {
+		return importResult{}, modelSettingsParamsError(errors.New("Choose a name that is not owner/repo (a Hugging Face name) and does not start with ollama/, lmstudio/ or local/."))
+	}
 	hosts, err := e.importFiles(ctx, p)
 	if err != nil {
 		return importResult{}, err
 	}
 	src := &localModelSource{list: modelFileList{Engine: p.Engine, Model: p.ID, Layout: llamaArtifactsLayout}, hosts: map[string]string{}}
-	for i, host := range hosts {
-		name := filepath.Base(host)
-		if !strings.HasSuffix(strings.ToLower(name), ".gguf") {
-			// An Ollama blob has no extension; the bundle names it after the model.
-			name = strings.NewReplacer("/", "-", "@", "-", ":", "-").Replace(p.ID) + ".gguf"
-			if len(hosts) > 1 {
-				name = fmt.Sprintf("%s-%05d.gguf", strings.TrimSuffix(name, ".gguf"), i+1)
-			}
-		}
+	for _, host := range hosts {
 		file, err := hashLocalFile(ctx, host)
 		if err != nil {
 			return importResult{}, fmt.Errorf("read %s: %w", filepath.Base(host), err)
 		}
-		file.Role, file.Path = "model", "model/"+name
+		file.Role, file.Path = "model", "model/"+bundleFileName(host, p.ID)
 		src.list.Files = append(src.list.Files, file)
 		src.hosts[file.Path] = host
 	}

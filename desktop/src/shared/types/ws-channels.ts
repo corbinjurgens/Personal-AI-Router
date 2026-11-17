@@ -222,13 +222,16 @@ export interface WsInvokeChannelMap {
         response: EngineCatalogFilesResponse
     }
     'engine:source-models': {
-        request: { nodeId: string; engine: string }
+        request: { nodeId: string; engineType: EngineType }
         response: SourceModelsResponse
     }
-    'engine:link-model': { request: { engine: string; path: string }; response: { id: string } }
-    'engine:unlink-model': { request: { engine: string; id: string }; response: null }
+    'engine:link-model': {
+        request: { engineType: EngineType; path: string }
+        response: { id: string }
+    }
+    'engine:unlink-model': { request: { engineType: EngineType; id: string }; response: null }
     'engine:import-model': {
-        request: { engine: string; source: ImportModelSource; id: string }
+        request: { engineType: EngineType; source: ImportModelSource; id: string }
         response: ImportModelResponse
     }
 

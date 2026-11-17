@@ -16,7 +16,9 @@ import (
 
 func linkedTestExecutor(t *testing.T) *Executor {
 	t.Helper()
-	return &Executor{baseDir: t.TempDir()}
+	ex := copyTestExecutor(t, "llamacpp", t.TempDir(), false)
+	ex.baseDir = t.TempDir()
+	return ex
 }
 
 func TestLinkedModelRefusals(t *testing.T) {
@@ -33,18 +35,21 @@ func TestLinkedModelRefusals(t *testing.T) {
 	writeSourceGGUF(t, second)
 	odd := filepath.Join(t.TempDir(), "models #1", "Model.gguf")
 	writeSourceGGUF(t, odd)
+	upper := filepath.Join(t.TempDir(), "Upper.GGUF")
+	writeSourceGGUF(t, upper)
 
 	ex := linkedTestExecutor(t)
 	for name, path := range map[string]string{
-		"relative path":    "Model-Q4_K_M.gguf",
-		"missing file":     filepath.Join(dir, "missing.gguf"),
-		"not gguf":         text,
-		"bad magic":        fake,
-		"projector":        projector,
-		"later shard":      second,
-		"preset character": odd,
-		"directory":        dir + string(filepath.Separator) + "sub.gguf",
-		"overlong":         filepath.Join(dir, strings.Repeat("m", maxLinkedPath)+".gguf"),
+		"relative path":     "Model-Q4_K_M.gguf",
+		"missing file":      filepath.Join(dir, "missing.gguf"),
+		"not gguf":          text,
+		"bad magic":         fake,
+		"projector":         projector,
+		"later shard":       second,
+		"preset character":  odd,
+		"upper-case suffix": upper,
+		"directory":         dir + string(filepath.Separator) + "sub.gguf",
+		"overlong":          filepath.Join(dir, strings.Repeat("m", maxLinkedPath)+".gguf"),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if id, err := ex.linkModel("llamacpp", path); err == nil {
@@ -116,6 +121,24 @@ func TestLinkedModelMalformedListIsReportedNotReplaced(t *testing.T) {
 	data, err := os.ReadFile(ex.linkedModelsPath())
 	if err != nil || string(data) != "{not json" {
 		t.Fatalf("malformed list was replaced: %q, %v", data, err)
+	}
+}
+
+// Peers read the listing's error, so an unreadable list is reported without
+// the host path the read error carries.
+func TestLinkedModelUnreadableListNamesNoPath(t *testing.T) {
+	ex := linkedTestExecutor(t)
+	if err := os.MkdirAll(ex.linkedModelsPath(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	res := ex.sourceModelsList(context.Background(), "llamacpp")
+	if res.Error == "" {
+		t.Fatal("listing hid the unreadable list")
+	}
+	for _, dir := range []string{ex.baseDir, filepath.ToSlash(ex.baseDir)} {
+		if strings.Contains(res.Error, dir) {
+			t.Fatalf("listing error names a host path: %q", res.Error)
+		}
 	}
 }
 

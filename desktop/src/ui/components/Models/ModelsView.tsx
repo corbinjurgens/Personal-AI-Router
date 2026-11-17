@@ -18,8 +18,8 @@ import { SourceModelsSection } from './SourceModelsSection'
 import { AddModelFileDialog } from './AddModelFileDialog'
 import ModelSettingsPanel from '@/ui/components/ModelSettings/ModelSettingsPanel'
 import { useConnectionStore } from '@/ui/stores/connection.store'
-import { SOURCE_MODELS_ENGINE } from '@/ui/stores/source-models.store'
-import { useSourceModelsStore } from '@/ui/stores/source-models.store'
+import { SOURCE_MODELS_ENGINE_TYPE, useSourceModelsStore } from '@/ui/stores/source-models.store'
+import { engineManagerName } from '@/shared/utils/engines'
 import type { EngineType } from '@/shared/types/engines'
 
 function plural(count: number, one: string, many = `${one}s`): string {
@@ -230,7 +230,10 @@ export function ModelsView() {
                     key={profileFor}
                     targetId={selfId}
                     nodeName={nodeNames.get(selfId) ?? 'This PC'}
-                    identity={{ engine: SOURCE_MODELS_ENGINE, model: profileFor }}
+                    identity={{
+                        engine: engineManagerName(SOURCE_MODELS_ENGINE_TYPE),
+                        model: profileFor
+                    }}
                     open
                     onOpenChange={open => {
                         if (!open) setProfileFor(null)
