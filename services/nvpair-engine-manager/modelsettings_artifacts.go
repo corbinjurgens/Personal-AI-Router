@@ -370,7 +370,7 @@ func validateResolvedArtifacts(list modelFileList) error {
 			return errNoArtifactBinding
 		}
 		previous = role
-		if !validModelRelPath(f.Path) || !artifactPathSafe(f.configured) || !strings.HasSuffix(f.configured, ".gguf") || !artifactPathSafe(f.abs) || f.info == nil || !f.info.Mode().IsRegular() || f.Size <= 0 {
+		if !validModelRelPath(f.Path) || !artifactPathSafe(f.configured) || !ggufArtifactPath(f.configured) || !artifactPathSafe(f.abs) || f.info == nil || !f.info.Mode().IsRegular() || f.Size <= 0 {
 			return errNoArtifactBinding
 		}
 		key := copyPathKey(f.abs)
@@ -422,7 +422,7 @@ func resolvedLoadArtifacts(ctx context.Context, store engineModelStore, model st
 	}
 	list := modelFileList{Engine: store.engine, Model: model, Layout: llamaArtifactsLayout}
 	for _, artifact := range load.Resolved.Artifacts {
-		if !artifactPathSafe(artifact.Path) || !strings.HasSuffix(artifact.Path, ".gguf") || !artifactPathSafe(artifact.ResolvedTarget) {
+		if !artifactPathSafe(artifact.Path) || !ggufArtifactPath(artifact.Path) || !artifactPathSafe(artifact.ResolvedTarget) {
 			return modelFileList{}, errNoArtifactBinding
 		}
 		// Serialized bindings authorize these exact metadata before any sample.
@@ -443,7 +443,7 @@ func resolvedLoadArtifacts(ctx context.Context, store engineModelStore, model st
 		if err := validateSource(evidence); err != nil {
 			return modelFileList{}, err
 		}
-		list.Files = append(list.Files, modelFile{Role: artifact.Role, Path: artifact.Role + "/" + filepath.Base(artifact.Path), Size: binding.SizeBytes, abs: binding.ResolvedTarget, configured: binding.SourcePath, sample: binding.SampleSHA256, info: evidence.info})
+		list.Files = append(list.Files, modelFile{Role: artifact.Role, Path: artifact.Role + "/" + bundleFileName(artifact.Path, model), Size: binding.SizeBytes, abs: binding.ResolvedTarget, configured: binding.SourcePath, sample: binding.SampleSHA256, info: evidence.info})
 	}
 	if err := validateResolvedArtifacts(list); err != nil {
 		return modelFileList{}, err
@@ -661,6 +661,7 @@ func (e *Executor) inspectModelArtifactsOnce(ctx context.Context, p modelconfig.
 		}
 		return observation, nil
 	}
+	access.sources = e.sourceModelsHook(snapshot.store.engine)
 	list, _, err := resolveLlamaArtifacts(ctx, snapshot.state, snapshot.command, snapshot.store, p.ModelID, access)
 	if err != nil {
 		var field *ServingFieldError

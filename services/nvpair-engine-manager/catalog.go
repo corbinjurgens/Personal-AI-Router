@@ -242,13 +242,13 @@ type catalogService struct {
 	// not know, selects by the requested name.
 	familyOf func(engine string) (string, bool)
 
-	llamaCPP *listingCache
+	llamaCPP *listingCache[[]CatalogModel]
 
-	// searchMu guards the llama.cpp searches, kept by lowercased query with
-	// searchOrder from least to most recently used.
+	// searchMu guards the llama.cpp searches, kept by lowercased query, and the
+	// per-repository file listings, kept by lowercased repository.
 	searchMu      sync.Mutex
-	llamaSearches map[string]*listingCache
-	searchOrder   []string
+	llamaSearches listingLRU[[]CatalogModel]
+	repoFiles     listingLRU[CatalogFilesResult]
 	// Immutable public revision statements share the catalogue's HTTP owner,
 	// capacity, expiry and failure backoff. They never contain model bytes.
 	publisherRevisions map[string]*publisherRevisionCache
@@ -264,12 +264,15 @@ type catalogService struct {
 // list is fresh, keeps the previous list through a failed refresh, retries a
 // failing upstream on a backoff rather than on every call, and gives any number
 // of concurrent callers one request between them.
-type listingCache struct {
+type listingCache[T any] struct {
 	// label names the catalogue in errors and logs.
-	label   string
-	fetch   func(context.Context) ([]CatalogModel, error)
+	label string
+	fetch func(context.Context) (T, error)
+	// clean re-checks a value as it is stored and again as it is served; nil
+	// serves it unchanged.
+	clean   func(T) T
 	mu      sync.Mutex
-	models  []CatalogModel
+	value   T
 	fetched time.Time
 	// failed is when the last fetch failed, so a dead upstream is retried on a
 	// backoff rather than on every call.
@@ -290,10 +293,11 @@ func newCatalogService() *catalogService {
 	// cannot substitute another origin, even if that origin also uses HTTPS.
 	c := &catalogService{
 		client:        newEngineHTTPClient(catalogHTTPTimeout),
-		llamaSearches: map[string]*listingCache{},
+		llamaSearches: listingLRU[[]CatalogModel]{limit: llamaCPPSearchCacheLimit},
+		repoFiles:     listingLRU[CatalogFilesResult]{limit: llamaCPPSearchCacheLimit},
 	}
 	c.client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	c.llamaCPP = &listingCache{label: "llama.cpp catalog", fetch: c.fetchLlamaCPP}
+	c.llamaCPP = &listingCache[[]CatalogModel]{label: "llama.cpp catalog", fetch: c.fetchLlamaCPP, clean: validCatalogModels}
 	return c
 }
 
@@ -403,7 +407,8 @@ func normalizeCatalogEngine(engine string) string {
 // get serves the cached list, refreshing it when stale. A refresh that fails
 // keeps the previous list: a stale catalogue is far more useful than an empty
 // one.
-func (l *listingCache) get(ctx context.Context) ([]CatalogModel, time.Time, error) {
+func (l *listingCache[T]) get(ctx context.Context) (T, time.Time, error) {
+	var zero T
 	l.mu.Lock()
 	// Serve the cache when it is fresh, and also when a recent attempt failed:
 	// re-fetching on every call against a dead upstream just made each caller
@@ -412,9 +417,9 @@ func (l *listingCache) get(ctx context.Context) ([]CatalogModel, time.Time, erro
 	fresh := haveList && time.Since(l.fetched) < catalogCacheTTL
 	backingOff := !l.failed.IsZero() && time.Since(l.failed) < catalogRetryAfterFailure
 	if fresh || (haveList && backingOff) {
-		models, at := l.models, l.fetched
+		value, at := l.value, l.fetched
 		l.mu.Unlock()
-		return validCatalogModels(models), at, nil
+		return l.tidy(value), at, nil
 	}
 	// The backoff holds with nothing cached too. That is the likelier case for
 	// it — a machine that has never reached Hugging Face — and without it every
@@ -422,7 +427,7 @@ func (l *listingCache) get(ctx context.Context) ([]CatalogModel, time.Time, erro
 	if backingOff {
 		retry := catalogRetryAfterFailure - time.Since(l.failed)
 		l.mu.Unlock()
-		return nil, time.Time{}, fmt.Errorf("%s unavailable; retrying in %s",
+		return zero, time.Time{}, fmt.Errorf("%s unavailable; retrying in %s",
 			l.label, retry.Round(time.Second))
 	}
 	// Coalesce concurrent callers onto one request.
@@ -432,30 +437,30 @@ func (l *listingCache) get(ctx context.Context) ([]CatalogModel, time.Time, erro
 		select {
 		case <-wait:
 		case <-ctx.Done():
-			return nil, time.Time{}, ctx.Err()
+			return zero, time.Time{}, ctx.Err()
 		}
 		l.mu.Lock()
-		models, at := l.models, l.fetched
+		value, at := l.value, l.fetched
 		l.mu.Unlock()
 		if at.IsZero() {
-			return nil, time.Time{}, fmt.Errorf("%s unavailable", l.label)
+			return zero, time.Time{}, fmt.Errorf("%s unavailable", l.label)
 		}
-		return validCatalogModels(models), at, nil
+		return l.tidy(value), at, nil
 	}
 	done := make(chan struct{})
 	l.inflight = done
 	l.mu.Unlock()
 
-	models, err := l.fetch(ctx)
-	models = validCatalogModels(models)
+	value, err := l.fetch(ctx)
+	value = l.tidy(value)
 
 	l.mu.Lock()
 	if err == nil {
-		l.models, l.fetched, l.failed = models, time.Now(), time.Time{}
+		l.value, l.fetched, l.failed = value, time.Now(), time.Time{}
 	} else {
 		l.failed = time.Now()
 	}
-	served, at := l.models, l.fetched
+	served, at := l.value, l.fetched
 	l.inflight = nil
 	// Closed while still holding the lock, so clearing inflight and releasing
 	// the waiters is atomic with respect to new arrivals. Closing after the
@@ -465,13 +470,53 @@ func (l *listingCache) get(ctx context.Context) ([]CatalogModel, time.Time, erro
 	l.mu.Unlock()
 
 	if at.IsZero() {
-		return nil, time.Time{}, err
+		return zero, time.Time{}, err
 	}
 	if err != nil {
 		slog.Warn("model catalog refresh failed; serving the previous list",
-			"catalog", l.label, "models", len(served), "err", err)
+			"catalog", l.label, "err", err)
 	}
-	return validCatalogModels(served), at, nil
+	return l.tidy(served), at, nil
+}
+
+func (l *listingCache[T]) tidy(value T) T {
+	if l.clean == nil {
+		return value
+	}
+	return l.clean(value)
+}
+
+// listingLRU keeps listing caches by key, evicting the least recently used
+// beyond limit. The catalogService's searchMu guards it.
+type listingLRU[T any] struct {
+	limit   int
+	entries map[string]*listingCache[T]
+	order   []string
+}
+
+// entry returns the cache for key, creating it with create on first use, and
+// marks it most recently used.
+func (l *listingLRU[T]) entry(key string, create func() *listingCache[T]) *listingCache[T] {
+	if l.entries == nil {
+		l.entries = map[string]*listingCache[T]{}
+	}
+	cache, ok := l.entries[key]
+	if !ok {
+		cache = create()
+		l.entries[key] = cache
+	}
+	for i, k := range l.order {
+		if k == key {
+			l.order = append(l.order[:i], l.order[i+1:]...)
+			break
+		}
+	}
+	l.order = append(l.order, key)
+	for len(l.order) > l.limit {
+		delete(l.entries, l.order[0])
+		l.order = l.order[1:]
+	}
+	return cache
 }
 
 // llamaCPPCatalog serves the browse list, or the results of a query.
@@ -484,14 +529,13 @@ func (c *catalogService) llamaCPPCatalog(ctx context.Context, query string) ([]C
 
 // llamaCPPSearch is the cache for one query, created on first use. Queries
 // differing only in case share one.
-func (c *catalogService) llamaCPPSearch(query string) *listingCache {
-	key := strings.ToLower(query)
+func (c *catalogService) llamaCPPSearch(query string) *listingCache[[]CatalogModel] {
 	c.searchMu.Lock()
 	defer c.searchMu.Unlock()
-	search, ok := c.llamaSearches[key]
-	if !ok {
-		search = &listingCache{
+	return c.llamaSearches.entry(strings.ToLower(query), func() *listingCache[[]CatalogModel] {
+		return &listingCache[[]CatalogModel]{
 			label: "llama.cpp search",
+			clean: validCatalogModels,
 			fetch: func(ctx context.Context) ([]CatalogModel, error) {
 				rows, err := c.fetchHF(ctx, llamaCPPListing("search", query))
 				if err != nil {
@@ -500,20 +544,7 @@ func (c *catalogService) llamaCPPSearch(query string) *listingCache {
 				return normalizeLlamaCPPRows(rows), nil
 			},
 		}
-		c.llamaSearches[key] = search
-	}
-	for i, k := range c.searchOrder {
-		if k == key {
-			c.searchOrder = append(c.searchOrder[:i], c.searchOrder[i+1:]...)
-			break
-		}
-	}
-	c.searchOrder = append(c.searchOrder, key)
-	for len(c.searchOrder) > llamaCPPSearchCacheLimit {
-		delete(c.llamaSearches, c.searchOrder[0])
-		c.searchOrder = c.searchOrder[1:]
-	}
-	return search
+	})
 }
 
 // fetchLlamaCPP reads every approved publisher's GGUF repos. Any publisher
@@ -603,7 +634,7 @@ func (c *catalogService) fetchHFBody(ctx context.Context, endpoint string) ([]by
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("model catalog returned %s", resp.Status)
+		return nil, hfStatusError{code: resp.StatusCode, status: resp.Status}
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxCatalogBody+1))
@@ -615,6 +646,15 @@ func (c *catalogService) fetchHFBody(ctx context.Context, endpoint string) ([]by
 	}
 	return body, nil
 }
+
+// hfStatusError is a non-200 provider reply, kept typed so a caller can tell a
+// missing repository from an outage.
+type hfStatusError struct {
+	code   int
+	status string
+}
+
+func (e hfStatusError) Error() string { return "model catalog returned " + e.status }
 
 // The shapes a llama.cpp download depends on.
 var (

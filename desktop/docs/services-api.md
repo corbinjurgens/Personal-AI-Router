@@ -154,6 +154,7 @@
 | `engine:active-model-copies` | request (we call) | ✅ yes |
 | `engine:cancel-model-copy` | request (we call) | ✅ yes |
 | `engine:catalog` | request (we call) | ✅ yes |
+| `engine:catalog-files` | request (we call) | ✅ yes |
 | `engine:clear-stated-memory` | request (we call) | ✅ yes |
 | `engine:configure-launch` | request (we call) | ⚠️ not called |
 | `engine:configured-ports` | request (we call) | ⚠️ not called |
@@ -174,8 +175,10 @@
 | `engine:errors` | request (we call) | ⚠️ not called |
 | `engine:get-installed` | request (we call) | ✅ yes |
 | `engine:get-launch` | request (we call) | ⚠️ not called |
+| `engine:import-model` | request (we call) | ✅ yes |
 | `engine:inspect-model` | request (we call) | ✅ yes |
 | `engine:install` | request (we call) | ✅ yes |
+| `engine:link-model` | request (we call) | ✅ yes |
 | `engine:load-model` | request (we call) | ✅ yes |
 | `engine:logs` | request (we call) | ⚠️ not called |
 | `engine:model-copy-capabilities` | request (we call) | ✅ yes |
@@ -206,9 +209,11 @@
 | `engine:set-port` | request (we call) | ⚠️ not called |
 | `engine:set-stated-memory` | request (we call) | ✅ yes |
 | `engine:sleep` | request (we call) | ⚠️ not called |
+| `engine:source-models` | request (we call) | ✅ yes |
 | `engine:status` | request (we call) | ✅ yes |
 | `engine:uninstall` | request (we call) | ✅ yes |
 | `engine:uninstall-managed` | request (we call) | ✅ yes |
+| `engine:unlink-model` | request (we call) | ✅ yes |
 | `engine:unload-model` | request (we call) | ✅ yes |
 | `engine:wake` | request (we call) | ⚠️ not called |
 | `error` | request (we call) | ✅ yes |

@@ -532,6 +532,7 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 	resolver := &engineState{manifest: st.manifest, plat: &plat, modelsDir: st.modelsDir}
 	access.scan = &modelArtifactScan{}
 	access.recognize = typedLlamaRecognition(rt.modelLoadOwner, store)
+	access.sources = rt.modelLoadOwner.sourceModelsHook(store.engine)
 	// Auto constrains device launch inputs later. Revalidate artifact selection
 	// against the original resolver command, whose selection controls are fixed.
 	resolutionCommand := command
@@ -1858,6 +1859,7 @@ func (e *Executor) validateTypedLlamaConversion(ctx context.Context, st *engineS
 		store := typedLlamaStore(baseline, command)
 		access.scan = &modelArtifactScan{}
 		access.recognize = typedLlamaRecognition(e, store)
+		access.sources = e.sourceModelsHook(store.engine)
 		list, _, err := resolveLlamaArtifacts(ctx, baseline, command, store, removal.ModelID, access)
 		if err != nil {
 			return nil, modelLoadError(modelLoadChangeProfileKey(removal), "conversion", "Reviewed removed artifacts are unavailable or changed.")
@@ -2062,6 +2064,7 @@ func (e *Executor) previewTypedLlamaConversionExpected(ctx context.Context, st *
 	store := typedLlamaStore(st, command)
 	access.scan = &modelArtifactScan{}
 	access.recognize = typedLlamaRecognition(e, store)
+	access.sources = e.sourceModelsHook(store.engine)
 	converted := rt
 	converted.ModelLoads = nil
 	converted.modelLoadOwner = e

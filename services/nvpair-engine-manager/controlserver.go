@@ -206,6 +206,7 @@ func (s *controlServer) routes() []controlRoute {
 		{controlRemoteManagementPath, http.MethodGet, controlRead, remoteManagementReadFamily, s.handleRemoteManagement},
 		{controlCopyPath, http.MethodPost, controlMutation, "model-copy", s.handleCopy},
 		{controlCopyCapabilitiesPath, http.MethodGet, controlRead, "model-copy-capabilities", s.handleCopyCapabilities},
+		{controlSourceModelsPath, http.MethodGet, controlRead, "source-models", ignoreCaller(s.handleSourceModels)},
 	}
 	routes = append(routes, s.settingsRoutes()...)
 	routes = append(routes, s.diagnosticRoutes()...)

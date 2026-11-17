@@ -46,6 +46,15 @@ describe('profile card summary', () => {
         ).toBe('CPU')
     })
 
+    it('falls back to the served model identity for context', () => {
+        expect(
+            profileSummary(profile, 'MSI', [], undefined, {
+                strength: 'declared',
+                configuredContextTokens: 8192
+            }).context
+        ).toBe('8192')
+    })
+
     it('shows Unknown for summary fields absent from policy and inspection', () => {
         expect(profileSummary(profile, 'MSI', [])).toEqual({
             context: 'Unknown',

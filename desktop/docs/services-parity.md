@@ -98,6 +98,9 @@ multi-engine, Windows and assembled-source acceptance remain pending.
 | Cluster transport security | Backend-owned                   | Node-to-node transport security, including the proxies' cluster-mTLS inference ingress, is entirely backend; Personal AI Router implements none |
 | Settings                   | Partial                         | Cluster identity plus per-engine ports and engine arguments, local and remote; inert backend settings are not surfaced                            |
 | Model catalog search       | Backend-owned                   | `engine:catalog` serves the cached llama.cpp catalog and searches Hugging Face for it         |
+| Repository quantizations   | Backend-owned                   | `engine:catalog-files` parses a pasted repo or link and lists its GGUF quantizations          |
+| Models outside the store   | Backend-owned                   | `engine:source-models` lists folder, linked and copied-bundle models; `engine:link-model`/`unlink-model` local; a bundle is deleted through `engine:delete-model` |
+| Add model from file        | Backend-owned                   | `engine:import-model` copies a local file or source model into the store; Electron only picks the path |
 
 ## Role editing and API availability
 
@@ -568,7 +571,9 @@ The model catalogue is owned by the backend: `engine:catalog` on
 `nvpair-engine-manager` serves the llama.cpp
 list, and searches Hugging Face for llama.cpp, and both the desktop app and
 the terminal interface browse it. Electron only relays the call and maps rows
-for the renderer.
+for the renderer. `engine:catalog-files` likewise owns parsing a pasted
+repository or link and listing its quantizations for the Models tab's Download
+dialog.
 
 ## Errors
 

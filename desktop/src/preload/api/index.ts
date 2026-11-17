@@ -35,6 +35,8 @@ export interface IWindowApi {
     update: IUpdateApi
     /** Node-local Inference Demo: synthetic load sent through PAIR's proxies. */
     inferenceDemo: IInferenceDemoApi
+    /** Native picker for one GGUF model file on this PC; null when cancelled. */
+    chooseModelFile(): Promise<string | null>
     /** Whether first-run onboarding still needs to be completed or explicitly dismissed. */
     isFirstRun(): Promise<boolean>
     /** Persist that first-run onboarding completed or was explicitly dismissed. */
@@ -58,6 +60,7 @@ export const windowApi: IWindowApi = {
     service: serviceApi,
     update: updateApi,
     inferenceDemo: inferenceDemoApi,
+    chooseModelFile: () => invokeAndUnwrap<string | null>(ipcRenderer.invoke('models:choose-file')),
     isFirstRun: () => invokeAndUnwrap<boolean>(ipcRenderer.invoke('settings:is-first-run')),
     completeFirstRun: () =>
         invokeAndUnwrap<void>(ipcRenderer.invoke('settings:complete-first-run')),

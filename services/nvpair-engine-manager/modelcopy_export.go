@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -384,6 +385,16 @@ func artifactExportID(list modelFileList) (string, error) {
 	}
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:]), nil
+}
+
+// bundleFileName is the name a model file carries in a custom bundle: its own
+// .gguf name, or, for an Ollama blob, which has no extension, one made from the
+// model ID. Ollama models are never split, so the name is unique in its role.
+func bundleFileName(file, model string) string {
+	if name := filepath.Base(file); strings.HasSuffix(name, ".gguf") {
+		return name
+	}
+	return strings.NewReplacer("/", "-", "@", "-", ":", "-").Replace(model) + ".gguf"
 }
 
 // llamaConsumedPaths is the shared compiler/export path-selection owner. The
@@ -815,6 +826,29 @@ func resolveLlamaArtifactsSelection(ctx context.Context, snapshot *engineState, 
 		}
 		candidates = append(candidates, list)
 	}
+	if access.sources != nil && isSourceModelID(model) {
+		for _, source := range access.sources(ctx) {
+			if source.id != model || source.format != sourceFormatGGUF {
+				continue
+			}
+			// Typed loads map only model and draft files, so a source's
+			// projector is offered by the no-profile preset alone.
+			list := modelFileList{Engine: store.engine, Model: model, Layout: llamaArtifactsLayout}
+			for _, path := range sourceModelShards(source) {
+				if !artifactPathSafe(path) {
+					return modelFileList{}, false, errNoArtifactBinding
+				}
+				current, info, bindErr := evidence.artifact(ctx, path, access)
+				if bindErr != nil {
+					return modelFileList{}, false, servingError("Source model file is missing or unstable.")
+				}
+				list.Files = append(list.Files, modelFile{Role: "model", Path: "model/" + bundleFileName(path, model), Size: info.Size(), abs: current.ResolvedTarget, configured: current.SourcePath, sample: current.SampleSHA256, info: info})
+			}
+			candidates = append(candidates, list)
+			candidates[len(candidates)-1].binding = exportBinding(list, struct{ Source string }{model})
+			break
+		}
+	}
 	if len(candidates) > 0 {
 		for _, candidate := range candidates[1:] {
 			if len(candidate.Files) != len(candidates[0].Files) {
@@ -953,6 +987,84 @@ func readCopyReceiptBound(ctx context.Context, store engineModelStore, model str
 		return copyReceipt{}, fmt.Errorf("invalid copy receipt identity")
 	}
 	return receipt, nil
+}
+
+// copyBundles lists the custom-artifact bundles in a llama.cpp store, by
+// model ID. They hold models copied from a peer or imported from a file;
+// native presets and inventory do not list them, and only a receipt names
+// them. Each receipt is read back by its model ID, which also checks that it
+// sits in that ID's alias directory. Directories without a valid receipt, such
+// as a copy that never finished, are skipped.
+func copyBundles(ctx context.Context, store engineModelStore) []copyReceipt {
+	entries, err := os.ReadDir(filepath.Join(store.root, ".pair-copies"))
+	if err != nil {
+		return nil
+	}
+	var bundles []copyReceipt
+	for _, entry := range entries {
+		if ctx.Err() != nil {
+			return bundles
+		}
+		if !entry.IsDir() {
+			continue
+		}
+		data, err := readSmallFile(filepath.Join(store.root, ".pair-copies", entry.Name(), "copy.json"), maxCopyManifest)
+		if err != nil {
+			continue
+		}
+		var envelope struct {
+			Manifest struct {
+				Model string `json:"model"`
+			} `json:"manifest"`
+		}
+		if json.Unmarshal(data, &envelope) != nil || filepath.Base(copyAliasDir(store.root, envelope.Manifest.Model)) != entry.Name() {
+			continue
+		}
+		receipt, err := readCopyReceiptWithAccess(ctx, store, envelope.Manifest.Model, servingFileAccess{scan: &modelArtifactScan{}})
+		if err != nil {
+			continue
+		}
+		bundles = append(bundles, receipt)
+	}
+	slices.SortFunc(bundles, func(a, b copyReceipt) int { return strings.Compare(a.List.Model, b.List.Model) })
+	return bundles
+}
+
+// deleteCopyBundle removes model's custom-artifact bundle under the copy
+// writer lock, receipt first so an interrupted delete leaves no model the
+// resolver would bind. It reports false, with nothing removed, when model has
+// no bundle in this engine's store; the caller then uses the engine's own
+// delete. A bundle a profile uses is refused.
+func (e *Executor) deleteCopyBundle(ctx context.Context, engine, model string) (bool, error) {
+	_, store, err := e.modelStoreFor(engine)
+	if err != nil || store.adapter != engines.NameLlamaCPP {
+		return false, nil
+	}
+	unlock, err := copyDestLocks.lock(ctx, store.root+"\x00"+model)
+	if err != nil {
+		return true, err
+	}
+	defer unlock()
+	if _, err := readCopyReceipt(store, model); errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	} else if err != nil {
+		return true, err
+	}
+	if err := e.refuseProfileUse(ctx, engine, model); err != nil {
+		return true, err
+	}
+	// Peers can ask for this delete, so errors name no host path; the local
+	// log keeps the detail.
+	aliasDir := copyAliasDir(store.root, model)
+	if err := os.Remove(filepath.Join(aliasDir, "copy.json")); err != nil {
+		slog.Warn("copied model receipt not removed", "engine", engine, "model", model, "err", err)
+		return true, fmt.Errorf("%s could not be deleted", model)
+	}
+	if err := os.RemoveAll(aliasDir); err != nil {
+		slog.Warn("copied model files not fully removed", "engine", engine, "model", model, "err", err)
+		return true, fmt.Errorf("%s was deleted, but some of its files could not be removed", model)
+	}
+	return true, nil
 }
 
 // A retry may prove completion without a reachable source. Reading the receipt

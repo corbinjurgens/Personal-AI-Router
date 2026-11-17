@@ -11,6 +11,10 @@ import type { ServiceTransport } from '@/shared/types/service-bridge'
 import type { WsInvokeRequest, WsInvokeResponse } from '@/shared/types/ws-channels'
 import type {
     EngineHubSearchResponse,
+    EngineCatalogFilesResponse,
+    SourceModelsResponse,
+    ImportModelResponse,
+    ImportModelSource,
     EngineInitialState,
     EngineStatePatch,
     EngineCommandPayload
@@ -105,6 +109,20 @@ export interface IEngineApi {
     setModelExpiry(engineType: EngineType, nodeId: string, model: string, expiry: string): void
     /** Load an engine catalog or explicitly search its upstream registry. */
     searchHub(engineType: EngineType, query?: string): Promise<EngineHubSearchResponse>
+    /** List the quantizations of a pasted Hugging Face repository or link. */
+    catalogFiles(engineType: EngineType, repo: string): Promise<EngineCatalogFilesResponse>
+    /** Models a node serves in place from Ollama, LM Studio or linked files, and its copies. */
+    sourceModels(nodeId: string, engineType: EngineType): Promise<SourceModelsResponse>
+    /** Link a GGUF file on this PC so the engine serves it where it is. */
+    linkModel(engineType: EngineType, path: string): Promise<{ id: string }>
+    /** Forget a linked file on this PC; the file is not deleted. */
+    unlinkModel(engineType: EngineType, id: string): Promise<null>
+    /** Copy a file or source model on this PC into the store as `id`; settles when done. */
+    importModel(
+        engineType: EngineType,
+        source: ImportModelSource,
+        id: string
+    ): Promise<ImportModelResponse>
 
     /** The local engine-manager's descriptor set changed (full replacement). */
     onDescriptorsChanged(callback: (descriptors: EngineDescriptor[]) => void): () => void
@@ -192,6 +210,16 @@ export function createEngineApi(transport: ServiceTransport): IEngineApi {
                 'engine:search-hub',
                 query === undefined ? { engineType } : { engineType, query }
             ),
+        catalogFiles: (engineType, repo) =>
+            transport.invoke('engine:catalog-files', { engineType, repo }),
+        sourceModels: (nodeId, engineType) =>
+            transport.invoke('engine:source-models', { nodeId, engineType }),
+        linkModel: (engineType, path) =>
+            transport.invoke('engine:link-model', { engineType, path }),
+        unlinkModel: (engineType, id) =>
+            transport.invoke('engine:unlink-model', { engineType, id }),
+        importModel: (engineType, source, id) =>
+            transport.invoke('engine:import-model', { engineType, source, id }),
 
         onDescriptorsChanged: cb => transport.subscribePush('engines:descriptors-changed', cb),
         onStateChanged: cb => transport.subscribePush('engines:state-changed', cb),

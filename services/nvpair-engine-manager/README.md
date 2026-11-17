@@ -589,6 +589,11 @@ Requests (caller → service):
 | `engine:logs` | `{ engine }` | `{ lines: [LogLine] }` |
 | `engine:errors` | — | `{ errors: [ServiceError] }` |
 | `engine:catalog` | `{ engine, platform?, arch?, query? }` | `{ models: [{ id, name, author, url, size?, downloads, likes, updatedAt, tags, family?, parameterSize?, appleOnly? }], source, platform?, arch?, fetchedAt?, searchable?, query? }` — the models an engine can **download**, as opposed to `engine:models`, which reports what is already installed. Each engine family has one curated source, selected by the manifest's `family`; only llama.cpp has one (a fork with `family: "llamacpp"` gets it), and the client spellings `llama-cpp` and `llama.cpp` are accepted. It is fetched live from Hugging Face and cached for six hours, with concurrent callers coalesced onto one request, a failed attempt — with or without a list to fall back on — followed by a backoff before the next. llama.cpp downloads any GGUF repo as `repo:quantization`; its browse list is the GGUF repos of `ggml-org`, `bartowski`, and `unsloth`, keeping only open, text-generating repos that ship a `Q4_K_M` file, each offered as `repo:Q4_K_M`. It is the one `searchable` source: a `query` searches all of Hugging Face under the same rules, each query cached on its own (the 20 most recently used are kept), and the reply echoes it. A query longer than 100 characters is refused rather than shortened, since a shortened one searches for something the operator did not type. `platform` and `arch` are the GOOS and GOARCH the models will be **installed on**, which is not always this host — a client driving a peer should name that peer. Omitting both means this host; naming a platform without an arch leaves the arch unknown rather than borrowing this host's. The llama.cpp list is not machine-locked, so nothing is filtered for the target, and `appleOnly` is never set; the reply echoes the `platform` and `arch` it was asked for. `name` is pull-ready: it can be handed to `pull_model` verbatim. An engine with no curated source is an error, not an empty list. The reply is a single JSON-RPC frame, so every hop on its path must allow `jsonrpc.WorkerFrameBytes`. |
+| `engine:catalog-files` | `{ engine, repo }` | `{ repo, revision, files: [{ quantization, name, sizeBytes, shards }], fetchedAt }` — the quantizations one open Hugging Face GGUF repository offers, for an operator who pastes a repository rather than browsing. `repo` accepts `owner/name`, `owner/name:TAG` and `huggingface.co` or `hf.co` links (input over 300 bytes, or anything that does not reduce to `owner/name`, is refused with -32602 before any fetch); the reply echoes the normalised repository in the provider's spelling and the commit it was read at. Files come from `GET /api/models/<repo>/revision/main?blobs=true`; vision projectors, importance matrices and speculative heads are left out, shards of one split model are one entry with their sizes summed, and entries are sorted smallest first. Each `name` is pull-ready (`repo:QUANT`). Private, gated and missing repositories are errors (the provider answers 401 for a missing one). Listings are cached per repository for six hours (20 kept), with the catalogue's coalescing and failure backoff. llama.cpp family only. |
+| `engine:source-models` | `{ nodeId, engine }` | `{ models: [{ id, source, name, sizeBytes, shards, hasProjector }], error? }` — the models `engine` can serve from outside its store on `nodeId`: Ollama and LM Studio folder models and linked files (`source` is `ollama`, `lmstudio` or `local`), then the llama.cpp store's custom-artifact bundles (`source` `copy`: models added with `engine:import-model` or custom models copied from a peer), which native inventory does not list. `name` is Ollama's `name@tag`, LM Studio's relative path, a linked file's base name, or a bundle's model ID; no host path is returned. `sizeBytes` sums the shards found (for a bundle, its receipt's model files). For this node it answers locally; for a peer it reads the peer's `GET /v1/models/sources?engine=` read route. `error` reports, in fixed text without a host path, a linked-model list that could not be read, with the other sources still listed. Source models and bundles stay out of `engine:models`. |
+| `engine:link-model` | `{ engine, path }` | `{ id }` — links one GGUF file on this node so `engine` serves it in place as `local/<stem>`; see [Linked files](#linked-files) for the rules. Local only: no peer route. Refusals are -32602 with a reason. |
+| `engine:unlink-model` | `{ engine, id }` | `{}` — forgets a linked file on this node; the file is untouched. Refused (-32602) while a typed load names the ID: `<id> is used by profile(s) <keys>; remove or change those profiles first.` Local only. |
+| `engine:import-model` | `{ engine, path?, sourceId?, id }` | `{ id, layout, exportId, durability }` — copies a GGUF model on this node into the engine's own store as a custom-artifact bundle named `id`: exactly one of `path` (checked like `engine:link-model`) or `sourceId` (a model `engine:source-models` lists). `id` may not be `owner/repo[:TAG]` (a Hugging Face name) or start with `ollama/`, `lmstudio/` or `local/`, since the resolver would also bind another candidate by that name. Split models bring the shards found beside the first; projectors are not imported, since custom bundles carry model and draft files only; an Ollama blob is named after `id` (`/`, `@` and `:` as `-`) with `.gguf` in the bundle. The copy is the peer-copy driver with a local file source: the same free-space check, locks, full SHA-256 verification and `.pair-copies` receipt, so a profile on `id` resolves to the bundle. A repeat with the same files is a no-op; other files under an `id` that already has a receipt are a copy conflict. Returns when the copy finishes, with no progress notifications. Local only. The source file is only read. |
 | `engine:models` | — | `{ models: [string], modelsByEngine: { <engine>: [string] }, loadedByEngine: { <engine>: [string] }, modelIdentities?: { <engine>: { <model>: ModelIdentity } } }` — the flat de-duplicated union of every running engine's models, the per-engine breakdown keyed by engine name, and the per-engine set of models currently **loaded in memory** (all normalized from each engine's `list_models` / `loaded_models` action `result` spec). `modelsByEngine` carries a key for every running engine whose inventory was successfully queried, including an empty list = "running, no models available"; a missing key means not running / not queryable / invalid response. `loadedByEngine` uses the same known-empty distinction for residency and also omits engines with no loaded endpoint. `modelIdentities` is optional display metadata for llama.cpp-family models present in the readiness-masked `modelsByEngine`; each `ModelIdentity` follows `shared/engines.ModelIdentity` and grants no admission or residency authority. `policy` is this node's policy advertisement (`{ revision, roles, pausedBy? }`) as the broker last pushed it with `engine:node-projection`, omitted until the first push. The `/v1/models` HTTP surface returns the same shape. |
 | `engine:remote-get-installed` | `{ node }` | `{ engines: [EngineStatus] }` answered from the peer's engine-status stream; no request reaches the peer. Errors while that stream is not live (no line within 25 s) or its route, admission or pinned identity changed. A peer that revokes this node ends the stream at its next keepalive, so a cached answer can outlive that revocation by up to 10 s |
 | `engine:remote-install` | `{ node, engine }` | `{ opId, status: EngineStatus }` after the remote install (live progress via `engine:remote-progress`) |
@@ -602,7 +607,7 @@ Requests (caller → service):
 | `engine:sleep` | `{ engine }` | Broker-internal `EngineStatus`: stops for availability, allowing a later wake or restore |
 | `engine:load-model` | `{ engine, model }` | the engine's raw response — loads one model through the manifest's `load` binding, the same one the remote load uses |
 | `engine:unload-model` | `{ engine, model }` | the engine's raw response — unloads one model through the manifest's `unload` binding, the same one the remote unload uses |
-| `engine:delete-model` | `{ engine, model }` | the engine's raw response — deletes one model through the manifest's `delete` binding, the same one the remote delete uses. A binding whose action declares `restart_after` restarts a running server before replying |
+| `engine:delete-model` | `{ engine, model }` | the engine's raw response — deletes one model through the manifest's `delete` binding, the same one the remote delete uses. A binding whose action declares `restart_after` restarts a running server before replying. When `model` is a llama.cpp custom-artifact bundle, engine-manager removes the bundle itself (receipt first, then its alias directory, under the copy lock) and replies `null`; it is refused (-32602) while a typed load names it, and errors name no host path |
 | `engine:remote-policy-get` | `{ nodeId }` | `{ policy, availability, pausedBy?, activeRequestPolicy }` — the target broker's peer projection of its policy: no routing section, and tiers keep only their local entries. `activeRequestPolicy` is `{ revision, proxyRunId }` when the target's live proxy run has acknowledged exactly that revision, else `null`; it is relayed opaquely |
 | `engine:remote-policy-set` | `{ nodeId, policy, expectedPersistedRevision }` | `{ policy }` — the peer projection after the target broker merges the change into its stored policy; the revision is forwarded unchanged and compared by the broker |
 | `engine:remote-availability-set` | `{ nodeId, state, pauseMode? }` | the target broker's `{ availability, pausedBy? }` result (configured pause waits for the target's drain, on the readiness-sized response budget); immediate is refused by the target |
@@ -846,7 +851,7 @@ sources are:
 
 An Ollama model is its manifest's model layer, with the projector layer as its
 multimodal projector; a model with an adapter layer is skipped. In LM Studio
-folders, GGUF files nested up to four folders deep are models, split models
+folders, GGUF files (lower-case `.gguf`) nested up to four folders deep are models, split models
 count once by their first shard, and files whose name contains `mmproj` are
 projectors. A folder's only projector pairs with every model in it. Files that
 are not GGUF are skipped. When two folders produce the same ID, the one listed
@@ -868,9 +873,38 @@ added.
 The preset is skipped when the launch declares `runtime.serving`, carries typed
 model loads, or already names a preset through `--models-preset` or
 `LLAMA_ARG_MODELS_PRESET`; those launches own their model list. Sources are
-scanned only at start, so a model added later appears after a restart. Peer
-copy, model settings inspection and serving presets cover only an engine's own
-store, not source models. Adding sources by hand is not supported yet.
+scanned only at start, so a model added later appears after a restart.
+
+### Linked files
+
+A GGUF file anywhere on disk can be linked by hand with `engine:link-model`.
+Links are kept per engine in `linked-models.json` under the engine install base
+(`{"version":1,"entries":[{engine, id, path, mmproj?}]}`, written durably). The
+ID is `local/<file stem>` without `.gguf` or a first-shard suffix, numbered
+`-2`, `-3` and so on when the stem is taken. A link names one file: an absolute
+`.gguf` path (lower-case suffix; a `.GGUF` file is refused, since the resolver
+recognises only `.gguf`) to a regular file with the GGUF magic that is neither a projector
+or other helper file nor a later shard of a split model, and whose path a
+preset line can carry. A split model is linked by its first shard and its
+other shards are found beside it. A folder's only projector is recorded with
+the link. Linking the same path again returns its ID. `engine:unlink-model`
+forgets a link, refused while a typed load on the node names it; neither
+method writes, moves or deletes the file. A malformed `linked-models.json` is
+reported by the listing and refused by linking, never replaced. Links whose
+file is gone are not offered, and an ID a folder source already holds keeps
+the folder's model.
+
+### Profiles on source models
+
+The artifact resolver offers every source model and linked file, for an ID
+starting `ollama/`, `lmstudio/` or `local/`, as one more candidate that must
+agree with any other. Model settings inspection, preview, apply and the
+identity reader bind its files in place, so a profile serves the file where it
+is. Typed loads map model and draft files only, so a source's projector is
+offered by the no-profile preset and not by a profile. Ollama blobs carry no
+`.gguf` extension; a `blobs/sha256-<hex>` path is accepted as a GGUF artifact
+and still checked for the GGUF magic where it is read. Peer copy covers only
+an engine's own store, not source models.
 
 ## Model inventory stream
 
@@ -980,6 +1014,7 @@ Endpoints (all under `/v1`):
 | `POST /v1/engines/install` | NDJSON stream | remote install (+ optional start) with live progress |
 | `POST /v1/models/pull` | NDJSON stream | remote model pull with live progress |
 | `GET /v1/models/files?engine=&model=` | NDJSON stream | the model's files with size and sha256, for a peer copying it |
+| `GET /v1/models/sources?engine=` | JSON | the `engine:source-models` reply for this node: path-free folder, linked and bundle models; a read route open to any pinned peer |
 | `GET /v1/models/file?engine=&model=&path=` | file bytes | one listed file, with HTTP Range support |
 | `POST /v1/node-policy/get` | JSON | the target broker's peer projection of its policy, as for `engine:remote-policy-get` |
 | `POST /v1/node-policy/set` | JSON `{ policy, expectedPersistedRevision }` | the peer projection after the target broker merges the change; the revision is forwarded unchanged |
@@ -1352,7 +1387,7 @@ receipt qualification are retained separately from inventory.
 | Engine | Store | What is copied | How the engine sees it |
 |---|---|---|---|
 | llama.cpp | `LLAMA_CACHE` (the manifest sets `{models_dir}`, `~/.llamacpp`) | For `owner/repo:TAG`, the snapshot GGUF matching `TAG` with all its splits, plus the multimodal projector beside it, chosen as llama.cpp chooses them | Files go under the destination's existing snapshot for the repo, or the source's revision with `refs/main` written last. The first split goes last. A running router is asked to rescan (`GET /models?reload=1`) |
-| llama.cpp custom artifacts | `.pair-copies/<SHA256 of exact model ID>/<exportId>/` inside the destination's own store | Exact configured model and draft GGUF shards | Only the versioned alias-level `copy.json` receipt marks a completed bundle; native presets and inventory are not changed |
+| llama.cpp custom artifacts | `.pair-copies/<SHA256 of exact model ID>/<exportId>/` inside the destination's own store | Exact configured model and draft GGUF shards | Only the versioned alias-level `copy.json` receipt marks a completed bundle; native presets and inventory are not changed. `engine:source-models` lists completed bundles as `copy`, and `engine:delete-model` removes one |
 
 Limits: one copy of a given model at a time per node. An adopted llama.cpp
 instance started outside PAIR may use a different `LLAMA_CACHE` than this

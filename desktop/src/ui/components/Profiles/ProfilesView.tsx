@@ -3,7 +3,8 @@
 
 import { useEffect, useState } from 'react'
 import getErrorString from '@/shared/utils/get-error-string'
-import { Stack, Text } from '@nvidia/foundations-react-core'
+import { Flex, Stack, Text } from '@nvidia/foundations-react-core'
+import { LocalBadge } from '@/ui/components/LocalBadge'
 import { parseModelSettings } from '@/shared/utils/node-policy-model-settings'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import { useOverviewNodes } from '@/ui/hooks/useOverviewNodes'
@@ -97,15 +98,27 @@ function NodeProfiles({
             entry?.phase === 'sending')
     return (
         <Stack gap="3">
-            <Text kind="body/semibold/lg">{nodeName}</Text>
+            <Flex align="center" gap="2">
+                <Text kind="body/semibold/lg">{nodeName}</Text>
+                {local && <LocalBadge />}
+                {!unavailable && !loading && profiles.length > 0 && (
+                    <Text kind="body/regular/sm" className="text-subtle-color">
+                        {profiles.length} {profiles.length === 1 ? 'profile' : 'profiles'}
+                    </Text>
+                )}
+            </Flex>
             {unavailable ? (
-                <Text kind="body/regular/sm">Profiles unavailable: {unavailable}</Text>
+                <Text kind="body/regular/sm" className="text-subtle-color">
+                    Profiles unavailable: {unavailable}
+                </Text>
             ) : loading ? (
-                <Text kind="body/regular/sm" role="status">
+                <Text kind="body/regular/sm" className="text-subtle-color" role="status">
                     Loading profiles for {nodeName}…
                 </Text>
             ) : profiles.length === 0 ? (
-                <Text kind="body/regular/sm">No profiles configured.</Text>
+                <Text kind="body/regular/sm" className="text-subtle-color">
+                    No profiles configured.
+                </Text>
             ) : (
                 <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
                     {profiles.map(profile => (
@@ -145,8 +158,13 @@ export default function ProfilesView() {
     }, [connected])
     const targets = nodes.map(node => ({ id: node.id, name: node.name }))
     return (
-        <Stack gap="6" className="p-6">
-            <Text kind="body/semibold/lg">Profiles</Text>
+        <Stack gap="6" className="px-6 py-5 w-full max-w-300">
+            <Stack gap="1">
+                <Text kind="title/sm">Profiles</Text>
+                <Text kind="body/regular/sm" className="text-subtle-color">
+                    Saved model configurations on each node, and the roles that use them
+                </Text>
+            </Stack>
             {targets.map(node => (
                 <NodeProfiles
                     key={node.id}

@@ -301,10 +301,34 @@ describe('Models tab', () => {
     })
     it('shows declared grouped models with both node locations and an unverified note', async () => {
         await act(async () => root.render(<ModelsView />))
-        expect(container.textContent).toContain('owner/Tiel')
-        expect(container.textContent).toContain('MSI · tiel-msi')
-        expect(container.textContent).toContain('Joes · tiel-joes')
-        expect(container.textContent).toContain('Same file not verified')
+        const group = container.querySelector('section[aria-label="owner/Tiel"]')
+        expect(group?.textContent).toContain('Tiel')
+        expect(group?.textContent).toContain('On 2 nodes')
+        expect(group?.textContent).toContain('MSI')
+        expect(group?.textContent).toContain('· tiel-msi')
+        expect(group?.textContent).toContain('Joes')
+        expect(group?.textContent).toContain('· tiel-joes')
+        expect(group?.textContent).toContain('Same file not verified')
+    })
+
+    it('filters model groups by node name and explains an empty match', async () => {
+        await act(async () => root.render(<ModelsView />))
+        const filter = container.querySelector<HTMLInputElement>(
+            'input[aria-label="Filter models"]'
+        )
+        if (!filter) throw new Error('Missing model filter')
+        const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+        await act(async () => {
+            setValue?.call(filter, 'joes')
+            filter.dispatchEvent(new Event('input', { bubbles: true }))
+        })
+        expect(container.querySelector('section[aria-label="owner/Tiel"]')).not.toBeNull()
+        await act(async () => {
+            setValue?.call(filter, 'no-such-model')
+            filter.dispatchEvent(new Event('input', { bubbles: true }))
+        })
+        expect(container.querySelector('section[aria-label="owner/Tiel"]')).toBeNull()
+        expect(container.textContent).toContain('No models match “no-such-model”.')
     })
 
     it('opens the existing copy modal at the source and copies to an unverified group member', async () => {

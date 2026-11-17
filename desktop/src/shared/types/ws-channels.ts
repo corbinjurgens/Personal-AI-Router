@@ -26,6 +26,10 @@
 import type {
     EngineCommandPayload,
     EngineHubSearchResponse,
+    EngineCatalogFilesResponse,
+    SourceModelsResponse,
+    ImportModelResponse,
+    ImportModelSource,
     EngineInitialState,
     EngineStatePatch
 } from '@/shared/types/engine-api'
@@ -212,6 +216,23 @@ export interface WsInvokeChannelMap {
     'engine:search-hub': {
         request: { engineType: EngineType; query?: string }
         response: EngineHubSearchResponse
+    }
+    'engine:catalog-files': {
+        request: { engineType: EngineType; repo: string }
+        response: EngineCatalogFilesResponse
+    }
+    'engine:source-models': {
+        request: { nodeId: string; engineType: EngineType }
+        response: SourceModelsResponse
+    }
+    'engine:link-model': {
+        request: { engineType: EngineType; path: string }
+        response: { id: string }
+    }
+    'engine:unlink-model': { request: { engineType: EngineType; id: string }; response: null }
+    'engine:import-model': {
+        request: { engineType: EngineType; source: ImportModelSource; id: string }
+        response: ImportModelResponse
     }
 
     // Errors

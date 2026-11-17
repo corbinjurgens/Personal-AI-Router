@@ -189,6 +189,9 @@ type Executor struct {
 	// modelSources are the folders whose models engines offer in place
 	// (modelsources.go). main sets the built-in defaults; nil offers none.
 	modelSources []modelSource
+	// linked holds the GGUF files an operator linked by hand
+	// (modelsources_linked.go), persisted in baseDir.
+	linked linkedModelStore
 	// desired retains allocated endpoints and process cleanup evidence.
 	desired *desiredStateStore
 	// nodeProjection is the broker's last node projection, served with the

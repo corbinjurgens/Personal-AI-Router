@@ -844,9 +844,18 @@ native preset under its install base (`model-sources/<engine>.ini`, written
 atomically) and appends `--models-preset` with that path after launch
 validation. Models with invalid identifiers or preset-unsafe paths are left
 out; with none left the file is removed and nothing is appended. Sources are
-rescanned only at start. Peer copy, model settings inspection, serving presets
-and typed loads do not cover source models. See the README's Model sources
-section for the folder layouts.
+rescanned only at start. Linked files (`engine:link-model`, kept in
+`linked-models.json` under the install base, IDs `local/<stem>`) join the same
+list. The artifact resolver binds source and linked models in place for
+inspection and typed loads (model files only; projectors stay with the
+no-profile preset). Peer copy exports a source or linked model only through a
+typed load that names it on the source node: the load's model and draft files
+travel as a custom-artifact bundle (an Ollama blob named after the model ID
+with `.gguf`), and the destination keeps it under a copy receipt. A source
+model no profile uses is not exported. `engine:source-models` also lists the
+store's custom-artifact bundles as `copy`, and `engine:delete-model` removes a
+bundle no typed load names. See the README's Model sources section for the
+folder layouts and link rules.
 
 ## Finite llama serving launch
 
@@ -1534,6 +1543,11 @@ Requests (caller → service):
 | `engine:logs` | `{ engine }` | `{ lines: [LogLine] }` |
 | `engine:errors` | — | `{ errors: [ServiceError] }` |
 | `engine:catalog` | `{ engine, platform?, arch?, query? }` | `{ models: [CatalogModel], source, platform?, arch?, fetchedAt?, searchable?, query? }` — the models an engine can **download**. One curated source per engine family, selected by the manifest's `family`; only llama.cpp has one: the GGUF repos of `ggml-org`, `bartowski`, and `unsloth`, fetched live from Hugging Face and cached, offered as `repo:Q4_K_M`. It is `searchable`: a `query` searches all of Hugging Face for GGUF repos, each query cached on its own, and is echoed back; a query over 100 characters is an error rather than being shortened. `platform` and `arch` are the GOOS and GOARCH the models will be installed on; omitting both means this host, and naming a platform without an arch leaves the arch unknown rather than borrowing this host's. The llama.cpp list is not machine-locked, so nothing is filtered for the target and `appleOnly` is never set. An engine with no curated source is an error, not an empty list. The reply is a single JSON-RPC frame — every hop on its path must allow `jsonrpc.WorkerFrameBytes`. |
+| `engine:catalog-files` | `{ engine, repo }` | `{ repo, revision, files: [CatalogQuantFile], fetchedAt }` — the quantizations of one open Hugging Face GGUF repository, each `name` pull-ready as `repo:QUANT`, shards summed into one entry. `repo` may be `owner/name`, `owner/name:TAG` or a `huggingface.co`/`hf.co` link; anything else is -32602 without a fetch. Private, gated and missing repositories are errors. Cached per repository like a catalogue query. llama.cpp family only. |
+| `engine:source-models` | `{ nodeId, engine }` | `{ models: [{ id, source, name, sizeBytes, shards, hasProjector }], error? }` — path-free list of folder-source and linked models and store bundles (`source` `copy`) for this node or, through `GET /v1/models/sources`, a peer. |
+| `engine:link-model` | `{ engine, path }` | `{ id }` — links one local GGUF file as `local/<stem>`; local only. |
+| `engine:unlink-model` | `{ engine, id }` | `{}` — forgets a link, refused while a typed load names it; local only. |
+| `engine:import-model` | `{ engine, path?, sourceId?, id }` | `{ id, layout, exportId, durability }` — copies a local GGUF file or a source-folder model into a custom-artifact bundle `id` through the peer-copy driver with a local source (model shards only); local only, no progress events. |
 | `engine:remote-get-installed` | `{ node }` | `{ engines: [EngineStatus] }` from the peer's live `GET /v1/engines/events` stream (no peer request); an error while that stream is not live or no longer current |
 | `engine:remote-install` | `{ node, engine }` | `{ opId, status }` after the remote install |
 | `engine:remote-pull-model` | `{ node, engine, model?, params? }` | `{ opId, result }` after the remote pull |
@@ -1549,7 +1563,7 @@ Requests (caller → service):
 | `engine:sleep` | `{ engine }` | Broker-internal `EngineStatus`: uses internal `doStop` |
 | `engine:load-model` | `{ engine, model }` | the engine's raw response, via the manifest's `load` operation binding |
 | `engine:unload-model` | `{ engine, model }` | the engine's raw response, via the manifest's `unload` operation binding |
-| `engine:delete-model` | `{ engine, model }` | the engine's raw response, via the manifest's `delete` operation binding |
+| `engine:delete-model` | `{ engine, model }` | the engine's raw response, via the manifest's `delete` operation binding; a llama.cpp custom-artifact bundle is removed by engine-manager instead (refused while a typed load names it) |
 | `engine:remote-policy-get` | `{ nodeId }` | `{ policy, availability, pausedBy?, pauseMode? }` — the target broker's peer projection of its policy: no routing section, and tiers keep only their local entries |
 | `engine:remote-policy-set` | `{ nodeId, policy, expectedPersistedRevision }` | `{ policy }` — the peer projection after the target broker merges the change into its stored policy; the revision is forwarded unchanged and compared by the broker |
 | `engine:remote-availability-set` | `{ nodeId, state, pauseMode? }` | the target broker's `{ availability, pausedBy?, pauseMode? }` result; configured waits for drain, immediate is refused |

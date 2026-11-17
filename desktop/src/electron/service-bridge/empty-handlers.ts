@@ -13,12 +13,18 @@ import type {
 import type { ServiceError } from '@/shared/types/errors'
 import { parseModelCopyCancel, parseModelCopyCapabilities } from './model-copy'
 import {
+    MODEL_IMPORT_CALL_TIMEOUT_MS,
     MODULAR_CLUSTER_MANAGER_PORT,
     MODULAR_ENGINE_LIFECYCLE_CALL_TIMEOUT_MS
 } from '@/shared/constants/modular-runtime'
 import getErrorString from '@/shared/utils/get-error-string'
 import { engineManagerName } from '@/shared/utils/engines'
-import { getEngineHubModels } from '@/electron/service-bridge/model-catalog'
+import { getEngineCatalogFiles, getEngineHubModels } from '@/electron/service-bridge/model-catalog'
+import {
+    parseImportedModel,
+    parseLinkedModel,
+    parseSourceModels
+} from '@/electron/service-bridge/source-models'
 import { getModularSupervisor } from './modular-supervisor'
 import {
     parseEngineSettings,
@@ -1010,6 +1016,51 @@ const EMPTY_SERVICE_BRIDGE_HANDLERS: BridgeHandlerMap = {
     'engine:command': payload => handleEngineCommand(payload),
     'engine:search-hub': payload =>
         payload ? getEngineHubModels(payload.engineType, payload.query) : { models: [] },
+    'engine:catalog-files': payload => {
+        if (!payload) throw new Error('Missing repository')
+        return getEngineCatalogFiles(payload.engineType, payload.repo)
+    },
+    'engine:source-models': async payload => {
+        if (!payload) throw new Error('Missing source model target')
+        return parseSourceModels(
+            await getModularSupervisor().callProcess('broker', 'engine:source-models', {
+                nodeId: payload.nodeId,
+                engine: engineManagerName(payload.engineType)
+            })
+        )
+    },
+    'engine:link-model': async payload => {
+        if (!payload) throw new Error('Missing model file')
+        return parseLinkedModel(
+            await getModularSupervisor().callProcess('broker', 'engine:link-model', {
+                engine: engineManagerName(payload.engineType),
+                path: payload.path
+            })
+        )
+    },
+    'engine:import-model': async payload => {
+        if (!payload) throw new Error('Missing model to import')
+        return parseImportedModel(
+            await getModularSupervisor().callProcess(
+                'broker',
+                'engine:import-model',
+                {
+                    engine: engineManagerName(payload.engineType),
+                    id: payload.id,
+                    ...payload.source
+                },
+                MODEL_IMPORT_CALL_TIMEOUT_MS
+            )
+        )
+    },
+    'engine:unlink-model': async payload => {
+        if (!payload) throw new Error('Missing linked model')
+        await getModularSupervisor().callProcess('broker', 'engine:unlink-model', {
+            engine: engineManagerName(payload.engineType),
+            id: payload.id
+        })
+        return null
+    },
 
     'errors:get-initial': () => handleErrorsGetInitial(),
     'errors:clear': payload => (payload ? handleErrorsClear(payload) : null),

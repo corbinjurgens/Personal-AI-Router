@@ -223,7 +223,7 @@ func (m *modelIdentityInfo) resolveOnce(parent context.Context, engine, model st
 		slog.Log(parent, level, "model identity resolution failed", "engine", engine, "model", model, "reason", reason, "duration", time.Since(start).Round(time.Millisecond), "retry_after", modelIdentityFailureRetry)
 		return modelIdentityInfoEntry{run: run, checked: now, configuration: snapshot, failure: reason}, true
 	}
-	access := servingFileAccess{open: e.modelInspection.open}
+	access := servingFileAccess{open: e.modelInspection.open, sources: e.sourceModelsHook(snapshot.store.engine)}
 	access.recognize = func(ctx context.Context, model string) (engineInventory, error) {
 		observation, err := e.recognizeModelSource(ctx, engine, model)
 		if err == nil {

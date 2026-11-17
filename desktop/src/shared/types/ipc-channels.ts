@@ -80,6 +80,7 @@ export interface ServiceVersions {
 export type BootstrapPayload = { port: number; token: string } | null
 
 export interface IpcChannelMap {
+    'models:choose-file': { request: void; response: string | null }
     'build-apply:preview': { request: void; response: BuildApplyResult<BuildApplyPreview> }
     'build-apply:start': {
         request: Omit<BuildApplyStartRequest, 'gui'>

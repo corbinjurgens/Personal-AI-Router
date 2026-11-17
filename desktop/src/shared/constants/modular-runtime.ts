@@ -87,6 +87,10 @@ export const MODULAR_MODEL_ACTION_TIMEOUT_MS = 120_000
 // timeout, so the margin is generous.
 export const MODULAR_CATALOG_CALL_TIMEOUT_MS = 30_000
 
+// Upper bound for `engine:import-model`, which replies only when a local model
+// file has been hashed and copied into the store: minutes for a large file.
+export const MODEL_IMPORT_CALL_TIMEOUT_MS = 6 * 60 * 60 * 1000
+
 // Poll interval for `cluster:invite-status` while a pairing handshake is open.
 // Also drives the pending-invite reconciliation sweep, the backstop for a missed
 // receiver-side `cluster:invite-canceled` / `cluster:invite-expired` push.
