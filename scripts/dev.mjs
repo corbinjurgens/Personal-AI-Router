@@ -220,7 +220,7 @@ function packageApp(args) {
     requireCleanTree('after packaging')
 
     if (resultFile) writeFileSync(resultFile, `${JSON.stringify({ buildRoot: ROOT, outputs: [release] })}\n`)
-    console.log(`\nPackaged ${revision.slice(0, 8)} for ${platform}-${process.arch}: ${dirname(dirname(service))}`)
+    console.log(`\nPackaged ${revision.slice(0, 8)} for ${platform}-${process.arch}: ${dirname(dirname(dirname(service)))}`)
     console.log(`Service stamp: vcs.revision=${revision}, vcs.modified=false, built ${statSync(service).mtime.toISOString()}`)
 }
 

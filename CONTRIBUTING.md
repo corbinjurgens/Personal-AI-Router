@@ -74,15 +74,17 @@ Development requires Node.js 25.5.0 or newer, npm, Go 1.21 or newer (the `go`
 command downloads the toolchain that `go.mod` pins), `jq`, and Git. Refer to
 [Building PAIR](docs/building.mdx).
 
-On Linux, the repository-root `Makefile` wraps the commands below:
+`node scripts/dev.mjs <command>` from the repository root wraps the commands
+below on every platform (`make <target>` calls it on Linux and macOS):
 
-- `make dev` installs the Go and npm dependencies.
-- `make build` builds the service binaries and desktop bundles.
-- `make run` starts the application.
-- `make check` runs the desktop gates.
-- `make test` adds the Go suites.
+- `setup` installs the npm packages and fills the Go module cache.
+- `build` builds the service binaries and desktop bundles.
+- `start` starts the application.
+- `package` builds the unpacked app for this platform and verifies its stamp.
+- `check` runs the gates.
+- `test` adds the Go suites.
 
-Run `make` to list every target.
+Run `node scripts/dev.mjs help` to list every command.
 
 ### Desktop Application
 
@@ -162,9 +164,8 @@ node scripts/spdx-headers.mjs --fix   # insert the header where it is missing
 ```
 
 The checker needs only Node.js and Git, so it works in a fresh clone before you
-install any dependencies. On Linux and macOS, `make headers` and
-`make headers-fix` run the same two commands, and `make check` includes the
-check. Run it before you open a pull request: a maintainer will run it during
+install any dependencies. `node scripts/dev.mjs headers-fix` runs the second command, and
+`node scripts/dev.mjs check` includes the check. Run it before you open a pull request: a maintainer will run it during
 review, and a missing header will send the change back to you.
 
 `--fix` only ever inserts a header. A file that already has one is reported

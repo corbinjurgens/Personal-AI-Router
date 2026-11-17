@@ -84,33 +84,36 @@ application opens, follow [Getting started](getting-started.mdx#2-complete-first
 to install or select an engine, pair systems, prepare a model, and run a first
 inference test.
 
-## Make Targets
+## Developer Commands
 
-The `Makefile` at the repository root wraps the commands in this guide for
-developers on Linux and macOS. Run these targets from there:
+`scripts/dev.mjs` at the repository root wraps the commands in this guide. It
+runs the same way on Windows, macOS and Linux and needs only Node.js, so run it
+from the repository root in any shell:
 
 ```bash
-make          # list every target
-make dev      # check toolchain versions, fetch Go modules, install npm packages
-make build    # build the service binaries and the desktop bundles
-make run      # start the desktop application in development mode
-make check    # desktop gates: build scripts, lint, typecheck, contracts, tests
-make test     # desktop unit tests plus go test in every services module
-make clean    # remove build output; leaves installed dependencies alone
+node scripts/dev.mjs help      # list every command
+node scripts/dev.mjs setup     # check toolchain versions, install npm packages, fill the Go module cache
+node scripts/dev.mjs build     # build the service binaries and the desktop bundles
+node scripts/dev.mjs start     # start the desktop application in development mode
+node scripts/dev.mjs package   # build the unpacked app for this platform and verify its stamp
+node scripts/dev.mjs check     # gates: headers, build scripts, lint, typecheck, contracts, dead code, tests
+node scripts/dev.mjs test      # desktop unit tests plus go test in every services module
+node scripts/dev.mjs clean     # remove build output; leaves installed dependencies alone
 ```
 
-`make run` and `make build` install npm packages first whenever
-`desktop/package-lock.json` is newer than `desktop/node_modules`, so a fresh
-clone needs only `make run`.
+`package` needs a checkout without changes. It fails unless the packaged
+`nvpair-service` carries the current commit with `vcs.modified=false`, and it
+skips the platform installer. On Linux and macOS, the `Makefile` targets
+(`make dev`, `make build`, `make run`, `make package`, `make check`,
+`make test`) call the same commands.
 
-`make test` includes the Go component and cross-process suites, which start
+`test` includes the Go component and cross-process suites, which start
 real subprocesses and bind local ports.
 
-`make build-services` stages the standalone bundle described in
-[Build the Services Alone](#build-the-services-alone). Run `make` for the
-remaining single-step targets.
+`node scripts/dev.mjs services` stages the standalone bundle described in
+[Build the Services Alone](#build-the-services-alone).
 
-`make clean` removes generated build output and nothing else. It leaves
+`node scripts/dev.mjs clean` removes generated build output and nothing else. It leaves
 `desktop/node_modules` in place, along with the per-user data a run creates:
 settings, logs, cluster identity, and any engine PAIR installed. To reset that
 data as well, refer to

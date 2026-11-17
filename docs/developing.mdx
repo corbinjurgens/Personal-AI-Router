@@ -171,16 +171,17 @@ from subprocess output to a log or export must go through it.
 
 ## Checks
 
-On Linux and macOS, the `Makefile` at the repository root wraps everything, and
-it is the shortest path to a clean run:
+`scripts/dev.mjs` at the repository root runs every gate, on Windows, macOS and
+Linux alike:
 
 ```bash
-make check    # build-script verify, lint, typecheck, contracts, desktop tests
-make test     # desktop unit tests plus go test in every services module
+node scripts/dev.mjs check   # headers, build scripts, lint, typecheck, contracts, dead code, desktop tests
+node scripts/dev.mjs test    # desktop unit tests plus go test in every services module
 ```
 
-Run `make` on its own to list the targets. Run the underlying commands directly
-on Windows, or when you are iterating on a single check. From `desktop/`:
+Run `node scripts/dev.mjs help` to list the commands. On Linux and macOS,
+`make check` and `make test` call the same commands. Run the underlying commands
+directly when you are iterating on a single check. From `desktop/`:
 
 ```bash
 npm run lint
