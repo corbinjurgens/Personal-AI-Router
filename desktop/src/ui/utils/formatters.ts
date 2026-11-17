@@ -76,6 +76,13 @@ export function formatBytes(bytes: number, decimals: number = 2): string {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i]
 }
 
+/** Short count for statistics such as downloads: 1234 -> "1.2K", 3400000 -> "3.4M". */
+export function formatCompactCount(count: number): string {
+    return new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(
+        Math.max(0, count)
+    )
+}
+
 type PullProgressFields = {
     status?: string
     percent?: number

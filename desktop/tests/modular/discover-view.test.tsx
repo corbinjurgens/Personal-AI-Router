@@ -11,6 +11,8 @@ import type { ServiceTransport } from '@/shared/types/service-bridge'
 import { createPairApi } from '@/ui/api/pair-api'
 import type { IEngineApi } from '@/ui/api/engine-api'
 import { ModelsView } from '@/ui/components/Models/ModelsView'
+import DiscoverView from '@/ui/components/Discover/DiscoverView'
+import { useOverviewUiStore } from '@/ui/stores/overview-ui.store'
 import { useOverviewNodes } from '@/ui/hooks/useOverviewNodes'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import { useNodesStore } from '@/ui/stores/nodes.store'
@@ -94,18 +96,18 @@ function button(label: string): HTMLButtonElement {
     return found
 }
 
-async function openDialog(): Promise<void> {
-    await act(async () => root.render(<ModelsView />))
-    await act(async () => button('Download model').click())
+async function openPage(): Promise<void> {
+    await act(async () => root.render(<DiscoverView />))
 }
 
-async function openTab(label: string): Promise<void> {
-    // Kaizen renders each tab label twice (one copy sizes the tab).
-    const tab = Array.from(document.querySelectorAll('[role="tab"]')).find(row =>
-        row.textContent?.includes(label)
-    )
-    if (!(tab instanceof HTMLElement)) throw new Error(`Missing tab: ${label}`)
-    await act(async () => tab.click())
+function sources(): HTMLInputElement[] {
+    return Array.from(document.querySelectorAll<HTMLInputElement>('input[type="radio"]'))
+}
+
+async function openSource(label: string): Promise<void> {
+    const source = sources().find(input => input.closest('label')?.textContent?.includes(label))
+    if (!source) throw new Error(`Missing source: ${label}`)
+    await act(async () => source.click())
 }
 
 async function findFiles(text: string): Promise<void> {
@@ -215,13 +217,73 @@ afterEach(async () => {
     useEngineProgressStore.setState({ progress: new Map() })
 })
 
-describe('Download model dialog', () => {
-    it('opens from the Models tab with three sources', async () => {
-        await openDialog()
-        const tabs = Array.from(document.querySelectorAll('[role="tab"]'))
-        const labels = ['Browse', 'From a repo', 'In your cluster']
-        expect(tabs).toHaveLength(labels.length)
-        labels.forEach((label, index) => expect(tabs[index].textContent).toContain(label))
+describe('Discover page', () => {
+    it('opens from the Models tab Download model button', async () => {
+        useOverviewUiStore.setState({ activeTab: 'models' })
+        await act(async () => root.render(<ModelsView />))
+        await act(async () => button('Download model').click())
+        expect(useOverviewUiStore.getState().activeTab).toBe('discover')
+    })
+
+    it('offers three sources', async () => {
+        await openPage()
+        const labels = ['Hugging Face', 'Paste a link', 'Your cluster']
+        expect(sources()).toHaveLength(labels.length)
+        labels.forEach((label, index) =>
+            expect(sources()[index].closest('label')?.textContent).toContain(label)
+        )
+    })
+
+    it('shows catalog facts and downloads the suggested quantization of the chosen model', async () => {
+        searchHub.mockResolvedValue({
+            models: [
+                {
+                    id: 'owner/Model-27B-GGUF:Q4_K_M',
+                    name: 'owner/Model-27B-GGUF:Q4_K_M',
+                    author: 'owner',
+                    url: 'https://huggingface.co/owner/Model-27B-GGUF',
+                    downloads: 6_800_000,
+                    likes: 6100,
+                    updatedAt: '2026-11-13T00:00:00.000Z',
+                    tags: [
+                        'gguf',
+                        'license:apache-2.0',
+                        'base_model:quantized:base/Model-27B',
+                        'en'
+                    ]
+                }
+            ]
+        })
+        catalogFiles.mockResolvedValue({
+            repo: 'owner/Model-27B-GGUF',
+            revision: 'a'.repeat(40),
+            files: [
+                {
+                    quantization: 'UD-IQ1_S',
+                    name: 'owner/Model-27B-GGUF:UD-IQ1_S',
+                    sizeBytes: 100,
+                    shards: 1
+                },
+                {
+                    quantization: 'UD-Q4_K_M',
+                    name: 'owner/Model-27B-GGUF:UD-Q4_K_M',
+                    sizeBytes: 400,
+                    shards: 1
+                }
+            ]
+        })
+        await openPage()
+        expect(catalogFiles).toHaveBeenCalledWith('llama-cpp', 'owner/Model-27B-GGUF')
+        const details = document.querySelector('[aria-label="owner/Model-27B-GGUF details"]')
+        expect(details?.textContent).toContain('6.8M')
+        expect(details?.textContent).toContain('Apache 2.0')
+        expect(details?.textContent).toContain('base/Model-27B')
+        expect(details?.textContent).toContain('27B')
+        const first = details?.querySelector('[aria-label="Quantizations"] li')
+        expect(first?.textContent).toContain('UD-Q4_K_M')
+        expect(first?.textContent).toContain('Suggested')
+        await act(async () => button('Download UD-Q4_K_M').click())
+        expect(pullModel).toHaveBeenCalledWith('llama-cpp', 'msi', 'owner/Model-27B-GGUF:UD-Q4_K_M')
     })
 
     it('downloads a chosen quantization of a pasted repository to the target node', async () => {
@@ -238,8 +300,8 @@ describe('Download model dialog', () => {
                 { quantization: 'Q8_0', name: 'owner/Model-GGUF:Q8_0', sizeBytes: 800, shards: 2 }
             ]
         })
-        await openDialog()
-        await openTab('From a repo')
+        await openPage()
+        await openSource('Paste a link')
         await findFiles('https://huggingface.co/owner/Model-GGUF')
         expect(catalogFiles).toHaveBeenCalledWith(
             'llama-cpp',
@@ -255,16 +317,16 @@ describe('Download model dialog', () => {
         catalogFiles.mockRejectedValue(
             new Error('This repository is private or gated; PAIR downloads only open repositories.')
         )
-        await openDialog()
-        await openTab('From a repo')
+        await openPage()
+        await openSource('Paste a link')
         await findFiles('owner/Gated')
         expect(document.body.textContent).toContain('private or gated')
         expect(pullModel).not.toHaveBeenCalled()
     })
 
     it('offers a model held only by another node and opens its copy to the target', async () => {
-        await openDialog()
-        await openTab('In your cluster')
+        await openPage()
+        await openSource('Your cluster')
         expect(document.body.textContent).toContain('Already on MSI')
         await act(async () => button('Copy owner/Other Q8_0 here').click())
         expect(document.body.textContent).toContain('Copy model')

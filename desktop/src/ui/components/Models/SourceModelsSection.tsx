@@ -7,13 +7,14 @@ import type { SourceModel } from '@/shared/types/engine-api'
 import type { NodeItem } from '@/shared/types/nodes'
 import { ConfirmModal } from '@/ui/components/ConfirmModal'
 import { InlineErrorBanner } from '@/ui/components/InlineErrorBanner'
-import { LocalBadge } from '@/ui/components/LocalBadge'
+import { NodeChip } from '@/ui/components/Page/PagePrimitives'
 import ModelSettingsPanel from '@/ui/components/ModelSettings/ModelSettingsPanel'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import { SOURCE_MODELS_ENGINE_TYPE, useSourceModelsStore } from '@/ui/stores/source-models.store'
 import { formatBytes } from '@/ui/utils/formatters'
 import { engineManagerName } from '@/shared/utils/engines'
 import getErrorString from '@/shared/utils/get-error-string'
+import { readableServiceError } from '@/ui/utils/readable-service-error'
 
 const SOURCE_LABELS: Record<SourceModel['source'], string> = {
     ollama: 'Ollama',
@@ -114,8 +115,10 @@ export function SourceModelsSection({
 
     return (
         <Stack gap="3">
-            <Stack gap="1">
-                <Text kind="body/semibold/md">Added files and other folders</Text>
+            <Stack gap="1" className="pt-2">
+                <Text kind="title/sm" role="heading" aria-level={2}>
+                    Added files and other folders
+                </Text>
                 <Text kind="body/regular/sm" className="text-subtle-color">
                     Files you copied into PAIR&apos;s model folder, models in Ollama or LM Studio
                     folders, and files you linked. PAIR serves the last two where they are.
@@ -146,85 +149,105 @@ export function SourceModelsSection({
                     aria-label={`${node.name} added files and other folders`}
                 >
                     <Stack gap="2">
-                        <Flex align="center" gap="2">
-                            <Text kind="body/semibold/sm">{node.name}</Text>
-                            {node.id === selfId && <LocalBadge />}
+                        <Flex align="center" justify="between" gap="2">
+                            <NodeChip
+                                name={node.name}
+                                local={node.id === selfId}
+                                offline={node.status === 'offline'}
+                            />
+                            {models.length > 0 && (
+                                <Text kind="body/regular/xs" className="text-subtle-color">
+                                    {models.length} {models.length === 1 ? 'model' : 'models'}
+                                </Text>
+                            )}
                         </Flex>
                         {error && (
-                            <Text kind="body/regular/sm" className="text-subtle-color">
-                                {error}
+                            <Text
+                                kind="body/regular/sm"
+                                className="text-subtle-color"
+                                title={error}
+                            >
+                                {node.status === 'offline'
+                                    ? `${node.name} is offline, so its folders can't be read.`
+                                    : `Couldn't read ${node.name}'s folders: ${readableServiceError(error)}`}
                             </Text>
                         )}
-                        {models.map(model => (
-                            <Flex
-                                key={model.id}
-                                gap="3"
-                                align="center"
-                                justify="between"
-                                className="py-2 border-t border-[#ffffff0f] first:border-t-0"
-                            >
-                                <Flex gap="2" align="center" className="min-w-0">
-                                    <Badge color={BADGE_COLORS[model.source]}>
-                                        {SOURCE_LABELS[model.source]}
-                                    </Badge>
-                                    <Text
-                                        kind="body/regular/sm"
-                                        className="truncate"
-                                        title={model.id}
+                        {models.length > 0 && (
+                            <ul className="m-0 p-0 list-none">
+                                {models.map(model => (
+                                    <li
+                                        key={model.id}
+                                        className="flex items-center justify-between gap-3 py-2 pair-divider-top first:border-t-0"
                                     >
-                                        {model.name}
-                                    </Text>
-                                    <Text kind="body/regular/xs" className="text-subtle2 shrink-0">
-                                        {formatBytes(model.sizeBytes, 1)}
-                                        {model.shards > 1 ? ` · ${model.shards} parts` : ''}
-                                    </Text>
-                                </Flex>
-                                <Flex gap="2" className="shrink-0">
-                                    <Button
-                                        size="small"
-                                        kind="secondary"
-                                        aria-label={`Create profile for ${model.name}`}
-                                        onClick={() => setConfigure({ node, id: model.id })}
-                                    >
-                                        Create profile
-                                    </Button>
-                                    {(model.source === 'ollama' || model.source === 'lmstudio') &&
-                                        node.id === selfId && (
+                                        <Flex gap="2" align="center" className="min-w-0">
+                                            <Badge color={BADGE_COLORS[model.source]}>
+                                                {SOURCE_LABELS[model.source]}
+                                            </Badge>
+                                            <Text
+                                                kind="body/semibold/sm"
+                                                className="truncate"
+                                                title={model.id}
+                                            >
+                                                {model.name}
+                                            </Text>
+                                            <Text
+                                                kind="body/regular/xs"
+                                                className="text-subtle-color shrink-0"
+                                            >
+                                                {formatBytes(model.sizeBytes, 1)}
+                                                {model.shards > 1 ? ` · ${model.shards} parts` : ''}
+                                            </Text>
+                                        </Flex>
+                                        <Flex gap="1" className="shrink-0">
                                             <Button
                                                 size="small"
-                                                kind="tertiary"
-                                                disabled={busyCopy !== ''}
-                                                aria-label={`Copy ${model.name} into store`}
-                                                onClick={() => setCopying(model)}
+                                                kind="secondary"
+                                                aria-label={`Create profile for ${model.name}`}
+                                                onClick={() => setConfigure({ node, id: model.id })}
                                             >
-                                                {busyCopy === model.id
-                                                    ? 'Copying…'
-                                                    : 'Copy into store'}
+                                                Create profile
                                             </Button>
-                                        )}
-                                    {model.source === 'local' && node.id === selfId && (
-                                        <Button
-                                            size="small"
-                                            kind="tertiary"
-                                            aria-label={`Unlink ${model.name}`}
-                                            onClick={() => setUnlinking(model)}
-                                        >
-                                            Unlink
-                                        </Button>
-                                    )}
-                                    {model.source === 'copy' && (
-                                        <Button
-                                            size="small"
-                                            kind="tertiary"
-                                            aria-label={`Delete ${model.name}`}
-                                            onClick={() => setDeleting({ node, model })}
-                                        >
-                                            Delete
-                                        </Button>
-                                    )}
-                                </Flex>
-                            </Flex>
-                        ))}
+                                            {(model.source === 'ollama' ||
+                                                model.source === 'lmstudio') &&
+                                                node.id === selfId && (
+                                                    <Button
+                                                        size="small"
+                                                        kind="tertiary"
+                                                        disabled={busyCopy !== ''}
+                                                        aria-label={`Copy ${model.name} into store`}
+                                                        onClick={() => setCopying(model)}
+                                                    >
+                                                        {busyCopy === model.id
+                                                            ? 'Copying…'
+                                                            : 'Copy into store'}
+                                                    </Button>
+                                                )}
+                                            {model.source === 'local' && node.id === selfId && (
+                                                <Button
+                                                    size="small"
+                                                    kind="tertiary"
+                                                    aria-label={`Unlink ${model.name}`}
+                                                    onClick={() => setUnlinking(model)}
+                                                >
+                                                    Unlink
+                                                </Button>
+                                            )}
+                                            {model.source === 'copy' && (
+                                                <Button
+                                                    size="small"
+                                                    kind="tertiary"
+                                                    color="danger"
+                                                    aria-label={`Delete ${model.name}`}
+                                                    onClick={() => setDeleting({ node, model })}
+                                                >
+                                                    Delete
+                                                </Button>
+                                            )}
+                                        </Flex>
+                                    </li>
+                                ))}
+                            </ul>
+                        )}
                     </Stack>
                 </section>
             ))}

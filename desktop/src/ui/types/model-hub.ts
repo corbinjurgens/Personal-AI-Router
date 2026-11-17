@@ -18,6 +18,10 @@ export interface ModelEntry {
     updatedAt: Date
     family?: string
     parameterSize?: string
+    downloads: number
+    likes: number
+    /** Hugging Face tags (licence, base model, languages, capabilities). */
+    tags: string[]
 }
 
 /** Sort fields for the engine hub list (all sorting is client-side). */

@@ -36,7 +36,10 @@ function hubModelToEntry(m: EngineHubModel): ModelEntry {
         size: m.size,
         updatedAt: m.updatedAt ? new Date(m.updatedAt) : new Date(),
         family: m.family,
-        parameterSize: m.parameterSize
+        parameterSize: m.parameterSize,
+        downloads: m.downloads,
+        likes: m.likes,
+        tags: m.tags
     }
 }
 

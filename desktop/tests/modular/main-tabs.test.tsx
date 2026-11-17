@@ -9,7 +9,7 @@ import ContentBar from '@/ui/components/MainApp/ContentBar'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import { useOverviewUiStore } from '@/ui/stores/overview-ui.store'
 
-it('orders the cluster tabs and navigates to Models and Profiles', async () => {
+it('orders the cluster tabs and navigates to Models, Discover and Profiles', async () => {
     vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
     vi.stubGlobal(
         'ResizeObserver',
@@ -27,7 +27,7 @@ it('orders the cluster tabs and navigates to Models and Profiles', async () => {
     try {
         await act(async () => root.render(<ContentBar />))
         const tabs = Array.from(container.querySelectorAll('[role="tab"]'))
-        const labels = ['Overview', 'Models', 'Profiles', 'Settings']
+        const labels = ['Overview', 'Models', 'Discover', 'Profiles', 'Settings']
         expect(tabs).toHaveLength(labels.length)
         labels.forEach((label, index) => expect(tabs[index].textContent).toContain(label))
         for (const index of [1, 2]) {

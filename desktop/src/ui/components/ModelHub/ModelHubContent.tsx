@@ -8,14 +8,11 @@ import { ModelHubActions } from './ModelHubActions'
 import { InlineErrorBanner } from '@/ui/components/InlineErrorBanner'
 import { ModelEntry, SortState } from '@/ui/types/model-hub'
 import { ModelHubList } from './ModelHubList'
-import { mergeModelHubResults, searchEngineHub } from '@/ui/utils/model-hub-search'
 import { resolveStoredSort, writeStoredSort } from '@/ui/utils/model-hub-content-storage'
 import { isHubEntryDownloaded } from '@/ui/utils/match-downloaded-model'
 import { EngineType } from '@/shared/types/engines'
-import { engineAdapterType } from '@/shared/utils/engines'
-import { useEngineStatusStore } from '@/ui/stores/engine-status.store'
 import type { ModelItem } from '@/ui/types/engine-info'
-import getErrorString from '@/shared/utils/get-error-string'
+import { useModelHubSearch } from '@/ui/hooks/useModelHubSearch'
 
 type ModelHubContentProps = {
     engine: EngineType | null
@@ -42,84 +39,26 @@ export const ModelHubContent = ({
     downloadedModels
 }: ModelHubContentProps) => {
     const [disabledListClick, setDisabledListClick] = useState(false)
-    const [loading, setLoading] = useState(true)
-    const [allModels, setAllModels] = useState<ModelEntry[]>([])
-    const [remoteModels, setRemoteModels] = useState<ModelEntry[]>([])
-    const [query, setQuery] = useState('')
-    const [searching, setSearching] = useState(false)
     const [selectedModels, setSelectedModels] = useState<Set<string>>(new Set())
     const [sort, setSort] = useState<SortState>(() =>
         engine ? resolveStoredSort(engine, SORT_DEFAULT_STATE) : { ...SORT_DEFAULT_STATE }
     )
-    const [errors, setErrors] = useState<{ id: string; message: string }[]>([])
-    // The built-in engine whose catalogue search and model naming this engine
-    // shares: itself, or a variant's family.
-    const descriptor = useEngineStatusStore(s => (engine ? s.descriptors.get(engine) : undefined))
-    const adapterType = engine ? engineAdapterType(engine, descriptor) : null
-
-    // Per-engine raw-response cache so reopening an engine is instant and
-    // keystrokes filter locally instead of re-invoking the search IPC.
-    const cacheRef = useRef<Map<EngineType, ModelEntry[]>>(new Map())
-    // Monotonic generation guard so a stale in-flight fetch never overwrites
-    // results for the engine the user has since switched to.
-    const fetchGenRef = useRef(0)
-    const searchGenRef = useRef(0)
-    const submittedQueryRef = useRef('')
-
-    const loadModels = useCallback(async (backend: EngineType) => {
-        const cached = cacheRef.current.get(backend)
-        if (cached) {
-            setAllModels(cached)
-            setLoading(false)
-            return
-        }
-        const gen = ++fetchGenRef.current
-        setLoading(true)
-        try {
-            const result = await searchEngineHub(backend)
-            if (fetchGenRef.current !== gen) return
-            cacheRef.current.set(backend, result)
-            setAllModels(result)
-            setLoading(false)
-        } catch (error) {
-            if (fetchGenRef.current !== gen) return
-            console.warn('Model hub load error', error)
-            setErrors(prev => [
-                ...prev,
-                { id: performance.now().toString(), message: getErrorString(error) }
-            ])
-            setAllModels([])
-            setLoading(false)
-        }
-    }, [])
+    const {
+        adapterType,
+        loading,
+        models: queryFiltered,
+        query,
+        searching,
+        errors,
+        changeQuery,
+        search,
+        dismissError
+    } = useModelHubSearch(engine)
 
     useEffect(() => {
-        setRemoteModels([])
-        setSearching(false)
-        submittedQueryRef.current = ''
-        if (!engine) {
-            setAllModels([])
-            setQuery('')
-            setSort({ ...SORT_DEFAULT_STATE })
-            return
-        }
-        setQuery('')
         setSelectedModels(new Set())
-        setSort(resolveStoredSort(engine, SORT_DEFAULT_STATE))
-        void loadModels(engine)
-        return () => {
-            // Invalidate in-flight population or search for the previous engine.
-            fetchGenRef.current += 1
-            searchGenRef.current += 1
-        }
-    }, [engine, loadModels])
-
-    const queryFiltered = useMemo(() => {
-        const q = query.toLowerCase().trim()
-        if (!q) return allModels
-        const populatedMatches = allModels.filter(m => m.name.toLowerCase().includes(q))
-        return mergeModelHubResults(populatedMatches, remoteModels)
-    }, [allModels, query, remoteModels])
+        setSort(engine ? resolveStoredSort(engine, SORT_DEFAULT_STATE) : { ...SORT_DEFAULT_STATE })
+    }, [engine])
 
     const visibleModels = useMemo(() => {
         if (!engine || !downloadedModels || downloadedModels.length === 0) return queryFiltered
@@ -177,42 +116,6 @@ export const ModelHubContent = ({
         [multiple, onToggleSelectModel, handleSubmit]
     )
 
-    const handleQueryChange = useCallback((nextQuery: string) => {
-        setQuery(nextQuery)
-        if (nextQuery.trim() === submittedQueryRef.current) return
-        searchGenRef.current += 1
-        submittedQueryRef.current = ''
-        setRemoteModels([])
-        setSearching(false)
-    }, [])
-
-    const handleSearch = useCallback(
-        async (nextQuery: string) => {
-            const normalized = nextQuery.trim()
-            setQuery(nextQuery)
-            if (!engine || adapterType !== 'llama-cpp' || normalized.length === 0) return
-
-            const generation = ++searchGenRef.current
-            submittedQueryRef.current = normalized
-            setRemoteModels([])
-            setSearching(true)
-            try {
-                const result = await searchEngineHub(engine, normalized)
-                if (searchGenRef.current !== generation) return
-                setRemoteModels(result)
-            } catch (error) {
-                if (searchGenRef.current !== generation) return
-                setErrors(prev => [
-                    ...prev,
-                    { id: performance.now().toString(), message: getErrorString(error) }
-                ])
-            } finally {
-                if (searchGenRef.current === generation) setSearching(false)
-            }
-        },
-        [engine, adapterType]
-    )
-
     return (
         <Stack gap="0" className="overflow-hidden min-h-0 min-w-0 grow w-full">
             <Stack gap="4" className="overflow-hidden min-h-0 min-w-0 grow w-full">
@@ -223,9 +126,7 @@ export const ModelHubContent = ({
                                 <InlineErrorBanner
                                     key={error.id}
                                     message={error.message}
-                                    onClose={() =>
-                                        setErrors(prev => prev.filter(e => e.id !== error.id))
-                                    }
+                                    onClose={() => dismissError(error.id)}
                                 />
                             ))}
                         </Stack>
@@ -234,8 +135,8 @@ export const ModelHubContent = ({
                         onMenuOpenChange={setDisabledListClick}
                         query={query}
                         searching={searching}
-                        onQueryChange={handleQueryChange}
-                        onSearch={handleSearch}
+                        onQueryChange={changeQuery}
+                        onSearch={search}
                         sort={sort}
                         onSort={handleSortPersist}
                     />

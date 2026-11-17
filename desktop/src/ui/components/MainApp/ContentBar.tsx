@@ -17,14 +17,13 @@ interface ContentBarProps {
 const TAB_ITEMS = [
     { value: 'overview', children: 'Overview' },
     { value: 'models', children: 'Models' },
+    { value: 'discover', children: 'Discover' },
     { value: 'profiles', children: 'Profiles' },
     { value: 'settings', children: 'Settings' }
 ]
 
 function isOverviewTab(value: string): value is OverviewTab {
-    return (
-        value === 'overview' || value === 'models' || value === 'profiles' || value === 'settings'
-    )
+    return TAB_ITEMS.some(item => item.value === value)
 }
 
 function ContentBar({ setAddNodeModalOpen, setEndPointModalOpen }: ContentBarProps) {

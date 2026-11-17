@@ -572,8 +572,8 @@ The model catalogue is owned by the backend: `engine:catalog` on
 list, and searches Hugging Face for llama.cpp, and both the desktop app and
 the terminal interface browse it. Electron only relays the call and maps rows
 for the renderer. `engine:catalog-files` likewise owns parsing a pasted
-repository or link and listing its quantizations for the Models tab's Download
-dialog.
+repository or link and listing its quantizations for the Discover page,
+which also lists every quantization of a catalog model it shows.
 
 ## Errors
 

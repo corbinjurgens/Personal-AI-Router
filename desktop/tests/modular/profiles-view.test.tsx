@@ -87,6 +87,14 @@ function button(label: string, scope: ParentNode = container): HTMLButtonElement
     return found
 }
 
+/** The value shown under a profile card's specification label. */
+function spec(scope: HTMLElement, label: string): string | undefined {
+    const term = Array.from(scope.querySelectorAll('dt')).find(
+        item => item.textContent?.trim() === label
+    )
+    return term?.nextElementSibling?.textContent?.trim()
+}
+
 function card(name: string): HTMLElement {
     const edit = Array.from(container.querySelectorAll('button')).find(
         item =>
@@ -395,7 +403,7 @@ describe('Profiles tab', () => {
             }
         })
         await act(async () => root.render(<ProfilesView />))
-        expect(card('self coding').textContent).toContain('GPU: CPU')
+        expect(spec(card('self coding'), 'GPU')).toBe('CPU')
         expect(card('self coding').textContent).not.toContain('Native fit')
     })
     it('refreshes cached cards and usage on reentry while preserving an unsaved role draft', async () => {
@@ -433,7 +441,7 @@ describe('Profiles tab', () => {
 
     it('renders Native fit from the real engine settings store', async () => {
         await act(async () => root.render(<ProfilesView />))
-        expect(card('self coding').textContent).toContain('GPU: Native fit')
+        expect(spec(card('self coding'), 'GPU')).toBe('Native fit')
     })
 
     it('opens the reusable deploy controls with the clicked profile preselected', async () => {

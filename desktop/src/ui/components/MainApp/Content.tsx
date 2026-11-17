@@ -13,6 +13,7 @@ import NodeList from '@/ui/components/NodeList/NodeList'
 import Settings from '@/ui/components/Settings'
 import { ModelsView } from '@/ui/components/Models/ModelsView'
 import ProfilesView from '@/ui/components/Profiles/ProfilesView'
+import DiscoverView from '@/ui/components/Discover/DiscoverView'
 import { useJobsFilterState } from '@/ui/hooks/useJobsFilterState'
 import { useOverviewUiStore } from '@/ui/stores/overview-ui.store'
 
@@ -47,6 +48,10 @@ export default function ClusterContent({
             ) : activeTab === 'models' ? (
                 <Stack className="grow min-h-0 overflow-y-auto">
                     <ModelsView />
+                </Stack>
+            ) : activeTab === 'discover' ? (
+                <Stack className="grow min-h-0 overflow-hidden">
+                    <DiscoverView />
                 </Stack>
             ) : activeTab === 'profiles' ? (
                 <Stack className="grow min-h-0 overflow-y-auto">
