@@ -580,7 +580,11 @@ func (d *daemon) refreshNodeModelsCandidates(hostUUID, guardIP string, hosts []s
 // claim is no longer current counts as failed. Returns whether it emitted.
 func (d *daemon) applyModelsInventory(hostUUID, guardIP string, emPort int, generation uint64, inventory modelInventory) bool {
 	d.peerServicesMu.Lock()
-	defer d.peerServicesMu.Unlock()
+	var notifyErr error
+	defer func() {
+		d.peerServicesMu.Unlock()
+		logNodeNotifyError(noderec.NotifyNodeUpdated, notifyErr)
+	}()
 	if d.dir.routeGeneration(hostUUID) != generation {
 		return false
 	}
@@ -590,7 +594,9 @@ func (d *daemon) applyModelsInventory(hostUUID, guardIP string, emPort int, gene
 		d.dir.mu.RUnlock()
 		incarnation, admitted := d.mesh.PeerServiceIncarnation(hostUUID)
 		if !admitted || incarnation != claim.Incarnation || !peerServicesFresh(claim, time.Now()) {
-			return d.markModelsUnavailableLocked(hostUUID, guardIP, emPort)
+			var changed bool
+			changed, notifyErr = d.markModelsUnavailableLocked(hostUUID, guardIP, emPort)
+			return changed
 		}
 	}
 	// Refresh the enrichment cache BEFORE touching the directory: the caches
@@ -613,7 +619,7 @@ func (d *daemon) applyModelsInventory(hostUUID, guardIP string, emPort int, gene
 		return false
 	}
 	if changed {
-		d.emit(noderec.NotifyNodeUpdated, node)
+		notifyErr = d.notifyNode(noderec.NotifyNodeUpdated, node)
 	}
 	return changed
 }
@@ -624,19 +630,22 @@ func (d *daemon) applyModelsInventory(hostUUID, guardIP string, emPort int, gene
 // and emits that change once. Returns whether it emitted.
 func (d *daemon) markModelsUnavailable(hostUUID, guardIP string, emPort int, generation uint64) bool {
 	d.peerServicesMu.Lock()
-	defer d.peerServicesMu.Unlock()
 	if d.dir.routeGeneration(hostUUID) != generation {
+		d.peerServicesMu.Unlock()
 		return false
 	}
-	return d.markModelsUnavailableLocked(hostUUID, guardIP, emPort)
+	changed, err := d.markModelsUnavailableLocked(hostUUID, guardIP, emPort)
+	d.peerServicesMu.Unlock()
+	logNodeNotifyError(noderec.NotifyNodeUpdated, err)
+	return changed
 }
 
 // markModelsUnavailableLocked is markModelsUnavailable without the generation
 // check. Caller holds peerServicesMu.
-func (d *daemon) markModelsUnavailableLocked(hostUUID, guardIP string, emPort int) bool {
+func (d *daemon) markModelsUnavailableLocked(hostUUID, guardIP string, emPort int) (bool, error) {
 	node, changed, valid := d.dir.markDownloadsStale(hostUUID, guardIP, emPort)
 	if !valid {
-		return false
+		return false, nil
 	}
 	d.infoMu.Lock()
 	if observation, ok := d.lastDownloads[hostUUID]; ok {
@@ -644,7 +653,7 @@ func (d *daemon) markModelsUnavailableLocked(hostUUID, guardIP string, emPort in
 	}
 	d.infoMu.Unlock()
 	if changed {
-		d.emit(noderec.NotifyNodeUpdated, node)
+		return true, d.notifyNode(noderec.NotifyNodeUpdated, node)
 	}
-	return changed
+	return false, nil
 }

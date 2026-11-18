@@ -460,28 +460,36 @@ func (d *daemon) onBrowse(ev DiscoveryEvent) {
 	}
 	d.peerServicesMu.Lock()
 	if d.dir.authenticated(node.HostUUID) {
+		var notifyErr error
 		if ev.Type == "removed" {
 			d.dir.removeBrowse(node.HostUUID)
 		} else if _, renamed := d.dir.upsert(node); renamed {
 			if current, ok := d.dir.get(node.HostUUID); ok {
-				d.emit(noderec.NotifyNodeUpdated, current)
+				notifyErr = d.notifyNode(noderec.NotifyNodeUpdated, current)
 			}
 		}
 		d.peerServicesMu.Unlock()
+		logNodeNotifyError(noderec.NotifyNodeUpdated, notifyErr)
 		return
 	}
 	d.peerServicesMu.Unlock()
 
 	var method string
+	var clearErr, nodeErr error
+	unlockAndLog := func() {
+		d.peerServicesMu.Unlock()
+		logOutageNotifyError("errors:clear", node.HostUUID, clearErr)
+		logNodeNotifyError(method, nodeErr)
+	}
 	switch ev.Type {
 	case "removed":
 		d.peerServicesMu.Lock()
-		defer d.peerServicesMu.Unlock()
+		defer unlockAndLog()
 		removed, changed := d.dir.removeBrowse(node.HostUUID)
 		if d.dir.authenticated(node.HostUUID) {
 			return
 		}
-		d.forget(node.HostUUID)
+		clearErr = d.forgetAndClearUnreachable(node.HostUUID)
 		if !changed {
 			return
 		}
@@ -498,7 +506,7 @@ func (d *daemon) onBrowse(ev DiscoveryEvent) {
 	}
 	if ev.Type != "removed" {
 		d.peerServicesMu.Lock()
-		defer d.peerServicesMu.Unlock()
+		defer unlockAndLog()
 		// A concurrent authenticated snapshot remains authoritative even when a
 		// browse enrichment that started earlier finishes afterward.
 		if current, exists := d.dir.get(node.HostUUID); exists {
@@ -507,7 +515,7 @@ func (d *daemon) onBrowse(ev DiscoveryEvent) {
 			return
 		}
 	}
-	d.emit(method, node)
+	nodeErr = d.notifyNode(method, node)
 }
 
 // supersedingUpsert folds a browsed peer into the directory, evicting any record
@@ -537,7 +545,6 @@ func (d *daemon) supersedingUpsert(node noderec.DirectoryNode) {
 		}
 	}
 	d.peerServicesMu.Lock()
-	defer d.peerServicesMu.Unlock()
 	// Enrichment and identity probes can overlap a model refresh. Reconcile
 	// against the accepted cache before publishing the browsed node.
 	d.infoMu.Lock()
@@ -554,13 +561,23 @@ func (d *daemon) supersedingUpsert(node noderec.DirectoryNode) {
 		inventory.applyTo(&node)
 	}
 	d.infoMu.Unlock()
-	for _, old := range d.dir.upsertEvicting(node, proven) {
+	evicted := d.dir.upsertEvicting(node, proven)
+	type evictionErrors struct {
+		clear, node error
+	}
+	notifyErrors := make([]evictionErrors, len(evicted))
+	for i, old := range evicted {
+		notifyErrors[i].clear = d.forgetAndClearUnreachable(old.HostUUID)
+		notifyErrors[i].node = d.notifyNode(noderec.NotifyNodeRemoved, old)
+	}
+	d.peerServicesMu.Unlock()
+	for i, old := range evicted {
 		slog.Warn("dropping node record proven superseded by a newer identity on the same host",
 			"ip", old.IP, "droppedUuid", old.HostUUID, "droppedName", old.Name,
 			"keptUuid", node.HostUUID, "keptName", node.Name,
 			"ageSeconds", node.LastSeen-old.LastSeen)
-		d.forget(old.HostUUID)
-		d.emit(noderec.NotifyNodeRemoved, old)
+		logOutageNotifyError("errors:clear", old.HostUUID, notifyErrors[i].clear)
+		logNodeNotifyError(noderec.NotifyNodeRemoved, notifyErrors[i].node)
 	}
 }
 
@@ -1287,7 +1304,13 @@ func (d *daemon) enrichInfoCandidates(node *noderec.DirectoryNode, hosts []strin
 	key := hostKey{hostUUID: node.HostUUID, service: noderec.ServiceNodeInfo}
 	selectedHost, info, _ := askRemembered(&d.enrichHosts, key, hosts, ask)
 	d.peerServicesMu.Lock()
-	defer d.peerServicesMu.Unlock()
+	var logOutage func()
+	defer func() {
+		d.peerServicesMu.Unlock()
+		if logOutage != nil {
+			logOutage()
+		}
+	}()
 	if d.dir != nil && d.dir.authenticated(node.HostUUID) {
 		return
 	}
@@ -1296,7 +1319,7 @@ func (d *daemon) enrichInfoCandidates(node *noderec.DirectoryNode, hosts []strin
 	if endpointHost == "" {
 		endpointHost = hosts[0]
 	}
-	d.noteNodeInfo(*node, net.JoinHostPort(endpointHost, strconv.Itoa(ni.Port)), selectedHost != "")
+	logOutage = d.notifyNodeInfoOutage(*node, net.JoinHostPort(endpointHost, strconv.Itoa(ni.Port)), selectedHost != "")
 	if selectedHost != "" {
 		d.infoMu.Lock()
 		if d.lastInfo == nil {
@@ -1351,6 +1374,11 @@ func (d *daemon) enrichInfoCandidates(node *noderec.DirectoryNode, hosts []strin
 // reverse-session path (reconcilePeerServices) or, once the record ages out,
 // through the proxies' upstream-unreachable error.
 func (d *daemon) noteNodeInfo(node noderec.DirectoryNode, endpoint string, ok bool) {
+	d.notifyNodeInfoOutage(node, endpoint, ok)()
+}
+
+// notifyNodeInfoOutage updates and publishes outage state, then returns its diagnostics.
+func (d *daemon) notifyNodeInfoOutage(node noderec.DirectoryNode, endpoint string, ok bool) func() {
 	hostUUID := node.HostUUID
 	host, _, _ := net.SplitHostPort(endpoint)
 	reportable := !ok && node.Trusted && !isLoopbackHost(host)
@@ -1367,19 +1395,24 @@ func (d *daemon) noteNodeInfo(node noderec.DirectoryNode, endpoint string, ok bo
 	}
 	d.infoMu.Unlock()
 
-	switch {
-	case !ok && !was:
-		slog.Warn("node-info is not answering; this node's inventory will not update",
-			"hostUuid", hostUUID, "endpoint", endpoint)
-	case ok && was:
-		slog.Info("node-info is answering again", "hostUuid", hostUUID, "endpoint", endpoint)
-	}
-
+	method := "errors:clear"
+	var err error
 	if reportable {
-		d.reportUnreachable(hostUUID, fmt.Sprintf("Paired node %q is not answering on its node-info endpoint (%s); its inventory is not updating and it may be unreachable from this machine",
+		method = "errors:report"
+		err = d.notifyUnreachable(hostUUID, fmt.Sprintf("Paired node %q is not answering on its node-info endpoint (%s); its inventory is not updating and it may be unreachable from this machine",
 			nodeLabel(node), endpoint))
 	} else {
-		d.clearUnreachable(hostUUID)
+		err = d.notifyClearUnreachable(hostUUID)
+	}
+	return func() {
+		switch {
+		case !ok && !was:
+			slog.Warn("node-info is not answering; this node's inventory will not update",
+				"hostUuid", hostUUID, "endpoint", endpoint)
+		case ok && was:
+			slog.Info("node-info is answering again", "hostUuid", hostUUID, "endpoint", endpoint)
+		}
+		logOutageNotifyError(method, hostUUID, err)
 	}
 }
 

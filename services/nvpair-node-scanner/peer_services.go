@@ -111,7 +111,14 @@ func (d *daemon) acceptPeerServices(claim noderec.PeerServicesClaim) bool {
 		return false
 	}
 	d.peerServicesMu.Lock()
-	defer d.peerServicesMu.Unlock()
+	var routeErr, nodeErr, clearErr error
+	method := noderec.NotifyNodeUpdated
+	defer func() {
+		d.peerServicesMu.Unlock()
+		logOutageNotifyError("errors:clear", hostUUID, routeErr)
+		logNodeNotifyError(method, nodeErr)
+		logOutageNotifyError("errors:clear", hostUUID, clearErr)
+	}()
 	incarnation, admitted = d.mesh.PeerServiceIncarnation(hostUUID)
 	if !admitted || incarnation != claim.Incarnation || !peerServicesFresh(claim, time.Now()) {
 		return false
@@ -156,18 +163,17 @@ func (d *daemon) acceptPeerServices(claim noderec.PeerServicesClaim) bool {
 	isNew, routeChanged := d.dir.installPeerServices(claim, node)
 	node, _ = d.dir.get(hostUUID)
 	if routeChanged {
-		logOutageNotifyError("errors:clear", hostUUID, d.invalidatePeerServicesRoute(hostUUID))
+		routeErr = d.invalidatePeerServicesRoute(hostUUID)
 	}
-	method := noderec.NotifyNodeUpdated
 	if isNew {
 		method = noderec.NotifyNodeDiscovered
 	}
 	if isNew || routeChanged || previousNode.Name != node.Name || previousNode.Trusted != node.Trusted {
-		d.emit(method, node)
+		nodeErr = d.notifyNode(method, node)
 	}
 	// A claim is proof the peer reaches us again, whatever the lapse that put it
 	// in the errors view.
-	d.clearUnreachable(hostUUID)
+	clearErr = d.notifyClearUnreachable(hostUUID)
 	d.infoMu.Lock()
 	_, hadNodeInfo := d.lastInfoAt[hostUUID]
 	d.infoMu.Unlock()
@@ -214,7 +220,11 @@ func (d *daemon) enrichPeerServices(claim noderec.PeerServicesClaim, node nodere
 		_, inventory, modelsFetched = askRemembered(&memory, hostKey{hostUUID: node.HostUUID, service: noderec.ServiceEngineManager}, node.CandidateIPs(), ask)
 	}
 	d.peerServicesMu.Lock()
-	defer d.peerServicesMu.Unlock()
+	var nodeErr error
+	defer func() {
+		d.peerServicesMu.Unlock()
+		logNodeNotifyError(noderec.NotifyNodeUpdated, nodeErr)
+	}()
 	incarnation, admitted := d.mesh.PeerServiceIncarnation(node.HostUUID)
 	d.dir.mu.Lock()
 	current, exists := d.dir.peerServices[node.HostUUID]
@@ -254,7 +264,7 @@ func (d *daemon) enrichPeerServices(claim noderec.PeerServicesClaim, node nodere
 	d.dir.nodes[node.HostUUID] = cloneDownloadNode(node)
 	d.dir.mu.Unlock()
 	if infoFetched || modelsAccepted || !previousDownload.equal(nodeDownloadObservation(node)) {
-		d.emit(noderec.NotifyNodeUpdated, node)
+		nodeErr = d.notifyNode(noderec.NotifyNodeUpdated, node)
 	}
 }
 

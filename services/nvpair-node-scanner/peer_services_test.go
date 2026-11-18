@@ -291,6 +291,44 @@ func TestPeerServicesExpiryRemovesOnlyAuthenticatedClaim(t *testing.T) {
 	}
 }
 
+func TestPeerServicesReplacementLogsAfterUnlock(t *testing.T) {
+	d, claim := newPeerServicesScanner(t)
+	d.dir.installPeerServices(claim, noderec.DirectoryNode{
+		HostUUID: "peer", ClusterUUID: "peer", IP: claim.Descriptor.Addresses[0],
+	})
+	d.setUnreachableReported("peer", true)
+	// Keep the logger probe synchronous by marking enrichment as in flight.
+	d.peerServicesEnriching = map[string]bool{"peer": true}
+	d.codec = NewCodec(closedFrameWriter{})
+	logger := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(logger) })
+	var messages []string
+	slog.SetDefault(slog.New(frameLogLockCheck{
+		Handler: logger.Handler(),
+		check: func(r slog.Record) {
+			messages = append(messages, r.Message)
+			if !d.peerServicesMu.TryLock() {
+				t.Errorf("%q logged while holding peerServicesMu", r.Message)
+				return
+			}
+			d.peerServicesMu.Unlock()
+		},
+	}))
+
+	claim.Sequence++
+	claim.Descriptor.Addresses = []string{"192.0.2.41"}
+	if !d.acceptPeerServices(claim) {
+		t.Fatal("replacement claim rejected")
+	}
+	if got := peerServicesNode(t, d).IP; got != claim.Descriptor.Addresses[0] {
+		t.Errorf("replacement address = %q, want %q", got, claim.Descriptor.Addresses[0])
+	}
+	want := []string{"failed to send errors:clear", "failed to emit node event"}
+	if !slices.Equal(messages, want) {
+		t.Errorf("notification diagnostics = %q, want %q", messages, want)
+	}
+}
+
 func TestPeerServicesRetirementLogsAfterUnlock(t *testing.T) {
 	d, claim := newPeerServicesScanner(t)
 	claim.ObservedAt = time.Now().Add(-peerServicesMaxAge).UnixMilli()
