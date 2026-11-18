@@ -918,16 +918,9 @@ func TestReturnChecksNextCandidateAfterVerificationFailure(t *testing.T) {
 	candidates := []string{returnLAN, secondLAN, returnVPN}
 	f := newFakeNet(returnVPN)
 	var checked []string
-	var deadline time.Time
 	c := NewChooser(WithDial(f.dial), WithVerify(func(ctx context.Context, _, address string) error {
-		got, ok := ctx.Deadline()
-		if !ok {
+		if _, ok := ctx.Deadline(); !ok {
 			t.Error("verification lacks a deadline")
-		}
-		if len(checked) == 0 {
-			deadline = got
-		} else if !deadline.Equal(got) {
-			t.Errorf("verification deadline changed from %v to %v", deadline, got)
 		}
 		checked = append(checked, address)
 		if address == returnLAN {
@@ -954,6 +947,54 @@ func TestReturnChecksNextCandidateAfterVerificationFailure(t *testing.T) {
 	if !c.now().Before(c.suspect["peer"][returnLAN]) {
 		t.Error("failed candidate was not marked suspect")
 	}
+}
+
+func TestReturnChecksNextCandidateAfterVerificationTimeout(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const secondLAN = "192.168.0.222:443"
+		candidates := []string{returnLAN, secondLAN, returnVPN}
+		f := newFakeNet(returnVPN)
+		var verified []string
+		var deadlines []time.Time
+		c := NewChooser(WithDial(f.dial), WithVerify(func(ctx context.Context, _, address string) error {
+			deadline, ok := ctx.Deadline()
+			if !ok {
+				t.Error("verification lacks a deadline")
+				return errors.New("missing deadline")
+			}
+			verified = append(verified, address)
+			deadlines = append(deadlines, deadline)
+			if address == returnLAN {
+				<-ctx.Done()
+				return ctx.Err()
+			}
+			return nil
+		}))
+		if got := choose(c, "peer", candidates); got != returnVPN {
+			t.Fatalf("initial choice = %q, want %q", got, returnVPN)
+		}
+		f.mu.Lock()
+		f.accept[returnLAN], f.accept[secondLAN] = true, true
+		f.mu.Unlock()
+
+		start := time.Now()
+		if got := c.Prefer("peer", candidates); got != returnVPN {
+			t.Fatalf("triggering choice = %q, want %q", got, returnVPN)
+		}
+		time.Sleep(5 * time.Second)
+		synctest.Wait()
+
+		if got := c.PreferCached("peer", candidates); got != secondLAN {
+			t.Errorf("choice after one return check = %q, want %q", got, secondLAN)
+		}
+		if !slices.Equal(verified, candidates[:2]) {
+			t.Fatalf("verified addresses = %v, want %v", verified, candidates[:2])
+		}
+		wantDeadlines := []time.Time{start.Add(2500 * time.Millisecond), start.Add(5 * time.Second)}
+		if !slices.Equal(deadlines, wantDeadlines) {
+			t.Errorf("verification deadlines = %v, want %v", deadlines, wantDeadlines)
+		}
+	})
 }
 
 func TestReturnRequiresVerifierAndBetterClass(t *testing.T) {

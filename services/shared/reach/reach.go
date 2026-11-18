@@ -587,17 +587,25 @@ func (c *Chooser) checkReturn(ctx context.Context, key, old string, candidates [
 	deadline, _ := ctx.Deadline()
 	var winner string
 	var failed []string
-	for _, candidate := range candidates {
-		remaining := time.Until(deadline)
-		if ctx.Err() != nil || remaining <= 0 {
+	for i, candidate := range candidates {
+		now := time.Now()
+		budget := deadline.Sub(now) / time.Duration(len(candidates)-i)
+		if ctx.Err() != nil || budget <= 0 {
 			break
 		}
+		// Bound TCP and pinned verification together so a stalled TLS
+		// handshake leaves time for the remaining candidates.
+		candidateCtx, cancel := context.WithDeadline(ctx, now.Add(budget))
 		// Keep the reservation through the finite TCP probe too, including
 		// when cancellation arrives while the probe is waiting at the socket.
-		if !accepts(c.dial, candidate, min(c.timeout, remaining)) || ctx.Err() != nil {
+		if !accepts(c.dial, candidate, min(c.timeout, budget)) || candidateCtx.Err() != nil {
+			cancel()
 			continue
 		}
-		if err := c.verify(ctx, key, candidate); err != nil {
+		err := c.verify(candidateCtx, key, candidate)
+		verified := err == nil && candidateCtx.Err() == nil
+		cancel()
+		if !verified {
 			failed = append(failed, candidate)
 			continue
 		}
