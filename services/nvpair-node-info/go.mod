@@ -5,6 +5,7 @@ go 1.26.0
 toolchain go1.27.4
 
 require (
+	github.com/ebitengine/purego v0.10.2
 	github.com/jaypipes/ghw v0.24.0
 	github.com/shirou/gopsutil/v4 v4.26.7
 	golang.org/x/sys v0.49.0
@@ -16,7 +17,6 @@ replace nvpair-shared => ../shared
 
 require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
-	github.com/ebitengine/purego v0.10.2 // indirect
 	github.com/go-ole/go-ole v1.2.6 // indirect
 	github.com/hashicorp/yamux v0.1.2 // indirect
 	github.com/jaypipes/pcidb v1.1.1 // indirect

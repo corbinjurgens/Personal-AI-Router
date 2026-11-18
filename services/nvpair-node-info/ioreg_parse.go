@@ -70,11 +70,22 @@ type darwinGPURecord struct {
 }
 
 func parseIORegistryGPUs(data []byte, systemMemory uint64) ([]darwinGPURecord, error) {
+	roots, err := decodeIORegistryEntries(data)
+	if err != nil {
+		return nil, err
+	}
+	return gpuRecordsFromEntries(roots, systemMemory)
+}
+
+func decodeIORegistryEntries(data []byte) ([]ioRegistryEntry, error) {
 	var roots []ioRegistryEntry
 	if _, err := plist.Unmarshal(data, &roots); err != nil {
 		return nil, fmt.Errorf("decode ioreg plist: %w", err)
 	}
+	return roots, nil
+}
 
+func gpuRecordsFromEntries(roots []ioRegistryEntry, systemMemory uint64) ([]darwinGPURecord, error) {
 	records := make([]darwinGPURecord, 0, len(roots))
 	for _, root := range roots {
 		appendIORegistryGPUs(root, systemMemory, &records)
