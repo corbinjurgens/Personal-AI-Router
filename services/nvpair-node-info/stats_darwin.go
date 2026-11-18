@@ -259,7 +259,12 @@ func readDarwinMemoryUsed() (uint64, bool) {
 }
 
 func readDarwinGPUStats(ctx context.Context) (darwinGPUReading, error) {
-	data, err := readDarwinIORegistryContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return darwinGPUReading{}, err
+	}
+	// Local IOKit calls have no cancellation or hard time bound. Only this
+	// GPU collector goroutine waits; serving retains the last published sample.
+	entries, err := readIOAcceleratorEntries()
 	if err != nil {
 		return darwinGPUReading{}, err
 	}
@@ -267,7 +272,7 @@ func readDarwinGPUStats(ctx context.Context) (darwinGPUReading, error) {
 	if memory, memoryErr := mem.VirtualMemory(); memoryErr == nil {
 		systemMemory = memory.Total
 	}
-	return dynamicGPUReadingFromIORegistry(data, systemMemory)
+	return dynamicGPUReadingFromEntries(entries, systemMemory)
 }
 
 func dynamicGPUReadingFromIORegistry(data []byte, systemMemory uint64) (darwinGPUReading, error) {

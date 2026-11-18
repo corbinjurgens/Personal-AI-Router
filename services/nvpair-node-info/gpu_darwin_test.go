@@ -5,12 +5,7 @@
 
 package main
 
-import (
-	"context"
-	"errors"
-	"testing"
-	"time"
-)
+import "testing"
 
 func TestStaticGPUsFromIORegistry(t *testing.T) {
 	const systemMemory = uint64(36 << 30)
@@ -38,12 +33,8 @@ func TestStaticGPUsFromIORegistry(t *testing.T) {
 	}
 }
 
-func TestReadDarwinIORegistryTimeout(t *testing.T) {
-	_, err := readDarwinIORegistryWithRunner(context.Background(), time.Millisecond, func(ctx context.Context) ([]byte, error) {
-		<-ctx.Done()
-		return nil, ctx.Err()
-	})
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("error = %v, want context deadline exceeded", err)
+func TestStaticGPUsFromIORegistryRejectsMalformedPlist(t *testing.T) {
+	if _, err := staticGPUsFromIORegistry([]byte("invalid plist"), 36<<30); err == nil {
+		t.Fatal("malformed plist accepted")
 	}
 }
