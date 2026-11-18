@@ -57,6 +57,17 @@ const (
 	scorePrivate     = 100
 )
 
+// Class returns the address-class score netpick ranks by, for a "host" or
+// "host:port" string. Higher is a better class for peers to dial; it says
+// nothing about reachability. An unparseable address scores lowest.
+func Class(address string) int {
+	host := address
+	if split, _, err := net.SplitHostPort(address); err == nil {
+		host = split
+	}
+	return scoreIP(net.ParseIP(host))
+}
+
 // dockerDefaultBridge reports whether ip is in 172.17/16, Docker's default bridge
 // subnet. It is the one private address that is not a host's own: every Docker
 // host has 172.17.0.1, so it identifies no machine and must never be published as
