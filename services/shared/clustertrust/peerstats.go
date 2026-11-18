@@ -200,15 +200,19 @@ func (s *PeerStats) take() (peerStatDeltas, peerStatGauges) {
 	for key, n := range s.deltas {
 		if n != 0 {
 			deltas = append(deltas, peerStatDelta{key, n})
-			s.deltas[key] = 0
 		}
 	}
+	clear(s.deltas)
 	if len(deltas) == 0 {
 		return nil, nil
 	}
 	gauges := make(peerStatGauges, 0, len(s.gauges))
 	for key, n := range s.gauges {
 		gauges = append(gauges, peerStatGauge{key, n})
+		if n == 0 {
+			// Emit the final zero once, in the interval with the last close.
+			delete(s.gauges, key)
+		}
 	}
 	return deltas, gauges
 }

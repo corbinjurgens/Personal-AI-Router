@@ -206,6 +206,44 @@ func TestPeerStatsLogDeltasAndIdle(t *testing.T) {
 	})
 }
 
+func TestPeerStatsEvictsDepartedPeersAfterFinalZero(t *testing.T) {
+	s := NewPeerStats()
+	s.SessionUp("staying")
+	s.StreamOpened("departing", "node-info")
+	_, gauges := s.take()
+	if len(gauges) != 2 {
+		t.Fatalf("initial gauges = %+v, want both live peers", gauges)
+	}
+
+	s.StreamEnded("departing", "node-info", "eof")
+	deltas, gauges := s.take()
+	assertPeerStat(t, deltas, peerStatKey{Peer: "departing", Counter: "streams_ended", Kind: "node-info", Reason: "eof"}, 1)
+	zero, found := false, false
+	for _, g := range gauges {
+		if g.Peer == "departing" {
+			found, zero = true, g.Live == 0
+		}
+	}
+	if !found || !zero {
+		t.Errorf("departure gauges = %+v, want departing peer's final zero", gauges)
+	}
+
+	s.StreamOpened("new", "node-info")
+	deltas, gauges = s.take()
+	assertPeerStat(t, deltas, peerStatKey{Peer: "new", Counter: "streams_opened", Kind: "node-info"}, 1)
+	if len(s.deltas) != 0 {
+		t.Errorf("retained %d consumed delta keys", len(s.deltas))
+	}
+	if len(s.gauges) != 2 || len(gauges) != 2 {
+		t.Errorf("current/emitted gauges = %+v/%+v, want only staying and new peers", s.gauges, gauges)
+	}
+	for _, g := range gauges {
+		if g.Peer == "departing" || g.Live != 1 {
+			t.Errorf("later interval emitted stale gauge %+v", g)
+		}
+	}
+}
+
 func TestPeerStatsBoundsLabels(t *testing.T) {
 	s := NewPeerStats()
 	s.DialAttempt("peer", "http://invalid")
