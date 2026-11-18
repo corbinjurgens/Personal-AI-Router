@@ -247,7 +247,7 @@ func (m *Manager) consumeEnginesStream(parent context.Context, peer ecPeer) {
 		entry.lineAt = time.Now()
 		cache.mu.Unlock()
 	}
-	_ = clustertrust.ReadSnapshotStream(ctx, cancel, response.Body, clustertrust.SnapshotStreamClient[json.RawMessage]{
+	_, _ = clustertrust.ReadSnapshotStream(ctx, cancel, response.Body, clustertrust.SnapshotStreamClient[json.RawMessage]{
 		Idle:        enginesStreamIdle,
 		Recheck:     enginesStreamRecheck,
 		MaxLine:     enginesStreamMaxLine,

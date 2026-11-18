@@ -418,7 +418,7 @@ func (m *Manager) consumeSettingsStream(parent context.Context, peer ecPeer) {
 		return
 	}
 	defer response.Body.Close()
-	_ = clustertrust.ReadSnapshotStream(ctx, cancel, response.Body, clustertrust.SnapshotStreamClient[[]settings.Snapshot]{
+	_, _ = clustertrust.ReadSnapshotStream(ctx, cancel, response.Body, clustertrust.SnapshotStreamClient[[]settings.Snapshot]{
 		Idle:    settingsStreamIdle,
 		MaxLine: 256 * 1024,
 		Current: current,

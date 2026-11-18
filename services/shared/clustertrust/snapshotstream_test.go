@@ -273,7 +273,7 @@ func TestReadSnapshotStream(t *testing.T) {
 		t.Helper()
 		ctx, cancel, response := openStream(t, handler)
 		result := make(chan error, 1)
-		go func() { result <- ReadSnapshotStream(ctx, cancel, response.Body, c) }()
+		go func() { _, err := ReadSnapshotStream(ctx, cancel, response.Body, c); result <- err }()
 		select {
 		case err := <-result:
 			if ctx.Err() == nil {
@@ -458,4 +458,107 @@ func TestReadSnapshotStream(t *testing.T) {
 			t.Fatalf("err = %v, want the Decode error", err)
 		}
 	})
+}
+
+func TestSnapshotStreamOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		name                string
+		body                string
+		current             bool
+		decodeErr, frameErr error
+		cancelled           bool
+		want                StreamEnd
+	}{
+		{name: "EOF", body: `{"n":1}` + "\n", current: true, want: StreamEndEOF},
+		{name: "decode", body: "bad\n", current: true, decodeErr: errors.New("decode"), want: StreamEndDecode},
+		{name: "refused", body: "{}\n", current: true, frameErr: errors.New("refused"), want: StreamEndRefused},
+		{name: "authority", body: "{}\n", want: StreamEndAuthority},
+		{name: "cancelled", body: "{}\n", current: true, cancelled: true, want: StreamEndCancelled},
+		{name: "error", body: strings.Repeat("x", 8192), current: true, want: StreamEndError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			if tc.cancelled {
+				cancel()
+			}
+			out, _ := ReadSnapshotStream(ctx, cancel, strings.NewReader(tc.body), SnapshotStreamClient[streamFrame]{
+				Idle: time.Second, MaxLine: 4096, Current: func() bool { return tc.current },
+				Decode:  func([]byte) (streamFrame, error) { return streamFrame{}, tc.decodeErr },
+				OnFrame: func(streamFrame) error { return tc.frameErr },
+			})
+			if out.End != tc.want || out.Healthy != 0 {
+				t.Fatalf("outcome = %+v, want %s with zero duration", out, tc.want)
+			}
+		})
+	}
+}
+
+func TestSnapshotStreamHealthyExcludesTrailingSilence(t *testing.T) {
+	ctx, cancel, response := openStream(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprintln(w, "{}")
+		_ = http.NewResponseController(w).Flush()
+		time.Sleep(10 * time.Millisecond)
+		_, _ = fmt.Fprintln(w, "null")
+		_ = http.NewResponseController(w).Flush()
+		<-r.Context().Done()
+	})
+	out, err := ReadSnapshotStream(ctx, cancel, response.Body, SnapshotStreamClient[streamFrame]{
+		Idle: 25 * time.Millisecond, MaxLine: 4096, Current: func() bool { return true },
+		Decode: func([]byte) (streamFrame, error) { return streamFrame{}, nil }, OnFrame: func(streamFrame) error { return nil },
+	})
+	if !errors.Is(err, context.Canceled) || out.End != StreamEndIdle {
+		t.Fatalf("outcome/error = %+v / %v", out, err)
+	}
+	if out.Healthy < 5*time.Millisecond || out.Healthy >= 25*time.Millisecond {
+		t.Fatalf("healthy = %v, want about 10ms", out.Healthy)
+	}
+}
+
+func TestSnapshotStreamBufferedLineAfterIdle(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	frames := 0
+	out, _ := ReadSnapshotStream(ctx, cancel, strings.NewReader("{}\n{}\n"), SnapshotStreamClient[streamFrame]{
+		Idle: 10 * time.Millisecond, MaxLine: 4096, Current: func() bool { return true },
+		Decode:  func([]byte) (streamFrame, error) { return streamFrame{}, nil },
+		OnFrame: func(streamFrame) error { frames++; <-ctx.Done(); return nil },
+	})
+	if out.End != StreamEndIdle || frames != 1 {
+		t.Fatalf("outcome/frames = %+v / %d", out, frames)
+	}
+}
+
+func TestSnapshotStreamAuthorityRecheckOutcome(t *testing.T) {
+	ctx, cancel, response := openStream(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = http.NewResponseController(w).Flush()
+		<-r.Context().Done()
+	})
+	out, _ := ReadSnapshotStream(ctx, cancel, response.Body, SnapshotStreamClient[streamFrame]{
+		Idle: time.Second, Recheck: time.Millisecond, MaxLine: 4096, Current: func() bool { return false },
+	})
+	if out.End != StreamEndAuthority || out.Healthy != 0 {
+		t.Fatalf("outcome = %+v", out)
+	}
+}
+
+func TestSnapshotStreamErrorEndSurvivesCallerCancellation(t *testing.T) {
+	for _, end := range []StreamEnd{StreamEndDecode, StreamEndRefused} {
+		t.Run(string(end), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			bad := errors.New("frame error")
+			out, err := ReadSnapshotStream(ctx, cancel, strings.NewReader("{}\n"), SnapshotStreamClient[streamFrame]{
+				Idle: time.Second, MaxLine: 4096, Current: func() bool { return true },
+				Decode: func([]byte) (streamFrame, error) {
+					if end == StreamEndDecode {
+						cancel()
+						return streamFrame{}, bad
+					}
+					return streamFrame{}, nil
+				},
+				OnFrame: func(streamFrame) error { cancel(); return bad },
+			})
+			if out.End != end || !errors.Is(err, bad) {
+				t.Fatalf("outcome/error = %+v / %v", out, err)
+			}
+		})
+	}
 }

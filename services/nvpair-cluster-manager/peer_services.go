@@ -485,7 +485,7 @@ func (m *Manager) readPeerStateStream(ctx context.Context, cancel context.Cancel
 	var descriptor noderec.PeerServicesDescriptor
 	var rosterHash string
 	gotFrame := false
-	err := clustertrust.ReadSnapshotStream(ctx, cancel, body, clustertrust.SnapshotStreamClient[noderec.PeerStateFrame]{
+	_, err := clustertrust.ReadSnapshotStream(ctx, cancel, body, clustertrust.SnapshotStreamClient[noderec.PeerStateFrame]{
 		Idle:    peerStateIdle,
 		MaxLine: noderec.PeerStateMaxLine,
 		Current: func() bool {

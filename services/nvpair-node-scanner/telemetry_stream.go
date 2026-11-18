@@ -286,7 +286,7 @@ func (d *daemon) readNodeInfoStream(ctx context.Context, client *http.Client, cu
 	defer resp.Body.Close()
 	opened := time.Now()
 	gotFrame := false
-	err := clustertrust.ReadSnapshotStream(streamCtx, cancel, resp.Body, clustertrust.SnapshotStreamClient[NodeInfoResponse]{
+	_, err := clustertrust.ReadSnapshotStream(streamCtx, cancel, resp.Body, clustertrust.SnapshotStreamClient[NodeInfoResponse]{
 		Idle:    nodeInfoStreamIdle,
 		MaxLine: nodeInfoStreamMaxLine,
 		Current: func() bool {

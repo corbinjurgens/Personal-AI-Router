@@ -391,7 +391,7 @@ func (ps *PeerSync) streamOnce(ctx context.Context, nodeID string, stream uint64
 	}
 	slog.Debug("errors stream connected", "nodeId", nodeID, "url", url)
 	delivered := false
-	err = clustertrust.ReadSnapshotStream(streamCtx, cancel, resp.Body, clustertrust.SnapshotStreamClient[errors.SyncEnvelope]{
+	_, err = clustertrust.ReadSnapshotStream(streamCtx, cancel, resp.Body, clustertrust.SnapshotStreamClient[errors.SyncEnvelope]{
 		Idle:    errorsStreamIdle,
 		MaxLine: jsonrpc.DefaultFrameBytes,
 		// The route carries admission, both certificates and the endpoint, so

@@ -275,7 +275,7 @@ func (p *performanceRelay) consumeStream(parent context.Context, uuid string) bo
 	}
 	authority := p.streamAuthority(uuid, identity, current)
 	received, accepted := false, false
-	err = clustertrust.ReadSnapshotStream(ctx, cancel, resp.Body, clustertrust.SnapshotStreamClient[performanceFrame]{
+	_, err = clustertrust.ReadSnapshotStream(ctx, cancel, resp.Body, clustertrust.SnapshotStreamClient[performanceFrame]{
 		Idle:    performanceStreamIdle,
 		MaxLine: performanceStreamMaxLine,
 		Current: current,

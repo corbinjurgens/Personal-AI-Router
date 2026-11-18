@@ -115,7 +115,7 @@ func (d *daemon) readModelsStream(ctx context.Context, client *http.Client, curr
 	defer resp.Body.Close()
 	opened := time.Now()
 	gotFrame := false
-	err := clustertrust.ReadSnapshotStream(streamCtx, cancel, resp.Body, clustertrust.SnapshotStreamClient[modelInventory]{
+	_, err := clustertrust.ReadSnapshotStream(streamCtx, cancel, resp.Body, clustertrust.SnapshotStreamClient[modelInventory]{
 		Idle:    modelsStreamIdle,
 		MaxLine: modelsResponseBytes,
 		Current: func() bool {
